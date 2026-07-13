@@ -10,6 +10,7 @@
 #include "duckdb/planner/filter/table_filter_function_helpers.hpp"
 
 #include "duckdb/common/operator/cast_operators.hpp"
+#include "duckdb/common/types/hash.hpp"
 #include "duckdb/common/vector/flat_vector.hpp"
 #include "duckdb/common/operator/subtract.hpp"
 #include "duckdb/common/vector_operations/vector_operations.hpp"
@@ -27,6 +28,7 @@ static constexpr idx_t MIN_NUM_BITS = 512;
 static constexpr idx_t LOG_SECTOR_SIZE = 6; // a sector is 64 bits, log2(64) = 6
 
 void BloomFilter::Initialize(ClientContext &context_p, idx_t number_of_rows) {
+	D_ASSERT(!initialized);
 	BufferManager &buffer_manager = BufferManager::GetBufferManager(context_p);
 
 	const idx_t min_bits = MaxValue(MIN_NUM_BITS, number_of_rows * MIN_NUM_BITS_PER_KEY);
@@ -39,11 +41,14 @@ void BloomFilter::Initialize(ClientContext &context_p, idx_t number_of_rows) {
 	std::fill_n(bf, num_sectors, 0);
 
 	initialized = true;
+	finalized = false;
 }
 
 void BloomFilter::Merge(const BloomFilter &other) {
 	D_ASSERT(initialized);
 	D_ASSERT(other.initialized);
+	D_ASSERT(!finalized);
+	D_ASSERT(!other.finalized);
 	D_ASSERT(num_sectors == other.num_sectors);
 	D_ASSERT(bitmask == other.bitmask);
 	for (idx_t i = 0; i < num_sectors; i++) {
@@ -51,11 +56,17 @@ void BloomFilter::Merge(const BloomFilter &other) {
 	}
 }
 
+void BloomFilter::Finalize() {
+	D_ASSERT(initialized);
+	finalized = true;
+}
+
 void BloomFilter::Reset() {
 	buf_.Reset();
 	num_sectors = 0;
 	bitmask = 0;
 	initialized = false;
+	finalized = false;
 	bf = nullptr;
 }
 
@@ -74,21 +85,12 @@ void BloomFilter::InsertHashes(const Vector &hashes_v) const {
 
 inline void BloomFilter::InsertOne(const hash_t hash) const {
 	D_ASSERT(initialized);
+	D_ASSERT(!finalized);
 	const uint64_t bf_offset = hash & bitmask;
 	const uint64_t mask = BloomFilter::GetMask(hash);
 	atomic<uint64_t> &slot = *reinterpret_cast<atomic<uint64_t> *>(&bf[bf_offset]);
 
 	slot.fetch_or(mask, std::memory_order_relaxed);
-}
-
-bool BloomFilter::LookupOne(const hash_t hash) const {
-	D_ASSERT(initialized);
-	const uint64_t bf_offset = hash & bitmask;
-	const uint64_t mask = BloomFilter::GetMask(hash);
-	atomic<uint64_t> &slot = *reinterpret_cast<atomic<uint64_t> *>(&bf[bf_offset]);
-	auto bf_entry = slot.load(std::memory_order_relaxed);
-
-	return (bf_entry & mask) == mask;
 }
 
 BloomFilterFunctionData::BloomFilterFunctionData(optional_ptr<BloomFilter> filter_p, bool filters_null_values_p,
@@ -112,13 +114,74 @@ bool BloomFilterFunctionData::Equals(const FunctionData &other_p) const {
 static idx_t SelectBloomFilter(Vector &input, const BloomFilterFunctionData &func_data, SelectionVector &result_sel,
                                idx_t count) {
 	D_ASSERT(func_data.filter);
+	UnifiedVectorFormat input_data;
+	input.ToUnifiedFormat(input_data);
+
+	auto select_typed = [&](auto typed_data) {
+		using T = typename std::remove_cv<typename std::remove_pointer<decltype(typed_data)>::type>::type;
+		idx_t result_count = 0;
+		if (input_data.validity.CannotHaveNull()) {
+			for (idx_t i = 0; i < count; i++) {
+				const auto input_idx = input_data.sel->get_index(i);
+				if (func_data.filter->LookupOne(Hash<T>(typed_data[input_idx]))) {
+					result_sel.set_index(result_count++, i);
+				}
+			}
+			return result_count;
+		}
+		for (idx_t i = 0; i < count; i++) {
+			const auto input_idx = input_data.sel->get_index(i);
+			if (!input_data.validity.RowIsValidUnsafe(input_idx)) {
+				if (!func_data.filters_null_values) {
+					result_sel.set_index(result_count++, i);
+				}
+				continue;
+			}
+			if (func_data.filter->LookupOne(Hash<T>(typed_data[input_idx]))) {
+				result_sel.set_index(result_count++, i);
+			}
+		}
+		return result_count;
+	};
+
+	switch (input.GetType().InternalType()) {
+	case PhysicalType::BOOL:
+	case PhysicalType::INT8:
+		return select_typed(UnifiedVectorFormat::GetData<int8_t>(input_data));
+	case PhysicalType::INT16:
+		return select_typed(UnifiedVectorFormat::GetData<int16_t>(input_data));
+	case PhysicalType::INT32:
+		return select_typed(UnifiedVectorFormat::GetData<int32_t>(input_data));
+	case PhysicalType::INT64:
+		return select_typed(UnifiedVectorFormat::GetData<int64_t>(input_data));
+	case PhysicalType::UINT8:
+		return select_typed(UnifiedVectorFormat::GetData<uint8_t>(input_data));
+	case PhysicalType::UINT16:
+		return select_typed(UnifiedVectorFormat::GetData<uint16_t>(input_data));
+	case PhysicalType::UINT32:
+		return select_typed(UnifiedVectorFormat::GetData<uint32_t>(input_data));
+	case PhysicalType::UINT64:
+		return select_typed(UnifiedVectorFormat::GetData<uint64_t>(input_data));
+	case PhysicalType::INT128:
+		return select_typed(UnifiedVectorFormat::GetData<hugeint_t>(input_data));
+	case PhysicalType::UINT128:
+		return select_typed(UnifiedVectorFormat::GetData<uhugeint_t>(input_data));
+	case PhysicalType::FLOAT:
+		return select_typed(UnifiedVectorFormat::GetData<float>(input_data));
+	case PhysicalType::DOUBLE:
+		return select_typed(UnifiedVectorFormat::GetData<double>(input_data));
+	case PhysicalType::INTERVAL:
+		return select_typed(UnifiedVectorFormat::GetData<interval_t>(input_data));
+	case PhysicalType::VARCHAR:
+		return select_typed(UnifiedVectorFormat::GetData<string_t>(input_data));
+	default:
+		break;
+	}
+
 	Vector hashes(LogicalType::HASH, count);
 	VectorOperations::Hash(input, hashes, count);
 	hashes.Flatten();
 	const auto hash_data = FlatVector::GetData<hash_t>(hashes);
-
-	UnifiedVectorFormat input_data;
-	input.ToUnifiedFormat(input_data);
 
 	idx_t result_count = 0;
 	if (input_data.validity.CannotHaveNull()) {

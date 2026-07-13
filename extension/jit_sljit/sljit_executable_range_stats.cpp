@@ -287,7 +287,7 @@ static void SljitSpecializeIntegerBinaryPayloadRange(SljitNativeRegionExpression
 void SljitSpecializeAggregatePayloadRanges(SljitNativeAggregateUpdatePlan &aggregate_update,
                                            const vector<Value> &input_min_values,
                                            const vector<Value> &input_max_values) {
-	if (!aggregate_update.use_primitive_payloads) {
+	if (!aggregate_update.UsesPrimitivePayloads()) {
 		return;
 	}
 	for (auto &payload : aggregate_update.payloads) {

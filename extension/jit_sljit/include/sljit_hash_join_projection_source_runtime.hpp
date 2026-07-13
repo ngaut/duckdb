@@ -397,6 +397,19 @@ static bool SljitTryBuildSelectedHashJoinOutputColumns(const ExecutionHashJoinPr
 				continue;
 			}
 			if (binding.layout_kind == ExecutionHashJoinProbeLayoutKind::REGULAR_HASH_TABLE) {
+				if (selected.exact_source_filter_matches_are_proven &&
+				    rhs_idx < binding.exact_rhs_output_probe_input_indices.size()) {
+					const auto input_col = binding.exact_rhs_output_probe_input_indices[rhs_idx];
+					if (input_col == DConstants::INVALID_INDEX || input_col >= source_chunk.ColumnCount()) {
+						return false;
+					}
+					if (all_probe_rows_selected) {
+						result.data[output_col].Reference(source_chunk.data[input_col]);
+					} else {
+						result.data[output_col].Slice(source_chunk.data[input_col], selected.MatchSelection(), count);
+					}
+					continue;
+				}
 				if (!allow_regular_rhs_gather) {
 					return false;
 				}

@@ -24,7 +24,7 @@ bool TryPartiallyFuseNativeProjectionIntoPerfectHashAggregateUpdate(const vector
 		return false;
 	}
 	auto &sink = aggregate_update.aggregate_update.sink_info;
-	if (SljitAggregateUpdateAlreadyHasFusedProjectionPayloads(aggregate_update.aggregate_update)) {
+	if (!aggregate_update.aggregate_update.CanInitializePrimitivePayloads()) {
 		return false;
 	}
 	if (!SljitAggregateUpdateUsesGeneratedPerfectHashLookup(sink) || sink.aggregates.empty() || sink.groups.empty()) {
@@ -78,10 +78,9 @@ bool TryPartiallyFuseNativeProjectionIntoPerfectHashAggregateUpdate(const vector
 	if (!use_perfect_hash_group_lookup && !SljitGroupedStateAddressPayloadsSupported(sink, payloads)) {
 		return false;
 	}
-	const bool primitive_payload_transition = !aggregate_update.aggregate_update.use_primitive_payloads;
 	const bool fused_payload_projection = SljitPrimitiveAggregatePayloadsContainNonReference(payloads, sink);
 	const bool shrank_projection = rewritten_projections.size() < projection.projections.size();
-	if (!primitive_payload_transition && !fused_payload_projection && !shrank_projection) {
+	if (!fused_payload_projection && !shrank_projection) {
 		return false;
 	}
 
@@ -89,7 +88,7 @@ bool TryPartiallyFuseNativeProjectionIntoPerfectHashAggregateUpdate(const vector
 	projection.output_types = std::move(rewritten_types);
 	aggregate_update.aggregate_update.input_types = projection.output_types;
 	aggregate_update.aggregate_update.payloads = std::move(payloads);
-	aggregate_update.aggregate_update.use_primitive_payloads = true;
+	aggregate_update.aggregate_update.InitializeProjectionComposedPrimitivePayloads();
 	aggregate_update.aggregate_update.use_grouped_state_addresses = true;
 	aggregate_update.aggregate_update.use_perfect_hash_group_lookup = use_perfect_hash_group_lookup;
 	if (render_diagnostics) {
@@ -115,7 +114,7 @@ bool TryPartiallyFuseNativeProjectionIntoRegularHashAggregateUpdate(const vector
 		return false;
 	}
 	auto &sink = aggregate_update.aggregate_update.sink_info;
-	if (SljitAggregateUpdateAlreadyHasFusedProjectionPayloads(aggregate_update.aggregate_update)) {
+	if (!aggregate_update.aggregate_update.CanInitializePrimitivePayloads()) {
 		return false;
 	}
 	if (sink.kind != ExecutionRegionSinkKind::HASH_AGGREGATE_UPDATE || sink.aggregates.empty() || sink.groups.empty() ||
@@ -198,7 +197,7 @@ bool TryPartiallyFuseNativeProjectionIntoRegularHashAggregateUpdate(const vector
 	projection.output_types = std::move(rewritten_types);
 	aggregate_update.aggregate_update.input_types = projection.output_types;
 	aggregate_update.aggregate_update.payloads = std::move(payloads);
-	aggregate_update.aggregate_update.use_primitive_payloads = true;
+	aggregate_update.aggregate_update.InitializeProjectionComposedPrimitivePayloads();
 	aggregate_update.aggregate_update.use_grouped_state_addresses = true;
 	aggregate_update.aggregate_update.use_perfect_hash_group_lookup = false;
 	if (render_diagnostics) {

@@ -724,6 +724,34 @@ TEST_CASE("JIT CBO charges grouped aggregate fusion against parallel vectorized 
 	REQUIRE(profile.stateful_protocol_penalty == 0);
 	REQUIRE(profile.selection_reason == "admitted_admission_class:generated|generated_stage_benefit");
 	REQUIRE(profile.selected_accelerated_runner);
+
+	PhysicalRunnerCostInput join_grouped_replacement_shape;
+	join_grouped_replacement_shape.estimated_cardinality = 20000000;
+	join_grouped_replacement_shape.source_contract_input_cardinality = 20000000;
+	join_grouped_replacement_shape.expression_cost = 43;
+	join_grouped_replacement_shape.generated_stage_count = 3;
+	join_grouped_replacement_shape.generated_backend_stage_count = 2;
+	join_grouped_replacement_shape.generated_grouped_aggregate_stage_count = 1;
+	join_grouped_replacement_shape.native_join_stage_count = 1;
+	join_grouped_replacement_shape.native_grouped_state_address_lookup_count = 1;
+	join_grouped_replacement_shape.full_pipeline = true;
+	join_grouped_replacement_shape.generated_work_class = PhysicalRunnerGeneratedWorkClass::COMPUTE;
+	join_grouped_replacement_shape.has_accelerated_work = true;
+
+	profile = DuckDBCostModel::SelectPhysicalRunner(join_grouped_replacement_shape, parameters);
+	REQUIRE(profile.admission_class == "generated_native_fusion");
+	REQUIRE(profile.generated_backend_stage_work > 0);
+	REQUIRE(profile.native_operator_work > 0);
+	REQUIRE(profile.saved_work_per_batch > 0);
+	REQUIRE(profile.selected_accelerated_runner);
+
+	join_grouped_replacement_shape.native_join_stage_count = 0;
+	profile = DuckDBCostModel::SelectPhysicalRunner(join_grouped_replacement_shape, parameters);
+	REQUIRE(profile.generated_expression_work == 0);
+	REQUIRE(profile.generated_backend_stage_work == 0);
+	REQUIRE(profile.saved_work_per_batch <= 0);
+	REQUIRE(profile.selection_reason == "rejected_no_costed_acceleration");
+	REQUIRE_FALSE(profile.selected_accelerated_runner);
 	parameters.vectorized_parallelism = 12;
 
 	PhysicalRunnerCostInput low_generated_compute_shape;

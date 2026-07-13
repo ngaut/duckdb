@@ -94,7 +94,7 @@ static bool SljitTryBuildUngroupedAggregateRequiredProjectionOutputs(
 	auto &aggregate_update = aggregate_op.aggregate_update;
 	auto &sink_info = aggregate_update.plan.sink_info;
 	if (sink_info.kind != ExecutionRegionSinkKind::UNGROUPED_AGGREGATE_UPDATE || !sink_info.groups.empty() ||
-	    !aggregate_update.plan.use_primitive_payloads || aggregate_update.plan.use_grouped_state_addresses ||
+	    !aggregate_update.plan.UsesPrimitivePayloads() || aggregate_update.plan.use_grouped_state_addresses ||
 	    aggregate_update.plan.use_perfect_hash_group_lookup ||
 	    aggregate_update.payloads.size() != sink_info.aggregates.size()) {
 		return false;

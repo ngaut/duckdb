@@ -213,6 +213,12 @@ struct SljitAggregateGroupReservePlan {
 	}
 };
 
+enum class SljitAggregatePayloadBindingState : uint8_t {
+	UNBOUND,
+	DIRECT,
+	PROJECTION_COMPOSED,
+};
+
 struct SljitNativeAggregateUpdatePlan {
 	ExecutionRegionSinkInfo sink_info;
 	vector<LogicalType> input_types;
@@ -221,10 +227,37 @@ struct SljitNativeAggregateUpdatePlan {
 	idx_t estimated_input_count = 0;
 	idx_t distinct_key_cardinality_upper_bound = 0;
 	SljitAggregateGroupReservePlan group_reserve;
-	bool use_primitive_payloads = false;
+	SljitAggregatePayloadBindingState payload_binding_state = SljitAggregatePayloadBindingState::UNBOUND;
 	bool use_grouped_state_addresses = false;
 	bool use_perfect_hash_group_lookup = false;
 	string ir;
+
+	bool UsesPrimitivePayloads() const {
+		return payload_binding_state != SljitAggregatePayloadBindingState::UNBOUND;
+	}
+
+	bool CanInitializePrimitivePayloads() const {
+		return payload_binding_state == SljitAggregatePayloadBindingState::UNBOUND;
+	}
+
+	bool PayloadsWereComposedThroughProjection() const {
+		return payload_binding_state == SljitAggregatePayloadBindingState::PROJECTION_COMPOSED;
+	}
+
+	void InitializeDirectPrimitivePayloads() {
+		D_ASSERT(CanInitializePrimitivePayloads());
+		payload_binding_state = SljitAggregatePayloadBindingState::DIRECT;
+	}
+
+	void InitializeProjectionComposedPrimitivePayloads() {
+		D_ASSERT(CanInitializePrimitivePayloads());
+		payload_binding_state = SljitAggregatePayloadBindingState::PROJECTION_COMPOSED;
+	}
+
+	void MarkPrimitivePayloadsProjectionComposed() {
+		D_ASSERT(UsesPrimitivePayloads());
+		payload_binding_state = SljitAggregatePayloadBindingState::PROJECTION_COMPOSED;
+	}
 };
 
 struct SljitNativeRegionOpPlan {

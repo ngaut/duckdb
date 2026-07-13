@@ -1534,6 +1534,25 @@ static DUCKDB_BITPACKING_FORCE_INLINE bool BitpackingPrefixRangeMatch(uint64_t l
 	return bit & in_range;
 }
 
+template <class T, bool EXACT>
+struct BitpackingPrefixRangeMatcher {
+	BitpackingPrefixRangeMatcher(uint64_t lookup_min_p, uint64_t lookup_span_p, idx_t lookup_shift_p,
+	                             const uint64_t *lookup_bitmap_p)
+	    : lookup_min(lookup_min_p), lookup_span(lookup_span_p), lookup_shift(lookup_shift_p),
+	      lookup_bitmap(lookup_bitmap_p) {
+	}
+
+	DUCKDB_BITPACKING_FORCE_INLINE bool operator()(const T &value) const {
+		return BitpackingPrefixRangeMatch<EXACT>(lookup_min, lookup_span, lookup_shift, lookup_bitmap,
+		                                         BitpackingPrefixComparable<T>::Convert(value));
+	}
+
+	uint64_t lookup_min;
+	uint64_t lookup_span;
+	idx_t lookup_shift;
+	const uint64_t *lookup_bitmap;
+};
+
 template <class T, class MATCHER, class T_U = typename MakeUnsigned<T>::type>
 static idx_t BitpackingLookupFilterConstantDelta(const BitpackingScanState<T> &scan_state, MATCHER &matches,
                                                  T *result_data, SelectionVector &result_sel, idx_t result_count,
@@ -1654,19 +1673,31 @@ static bool TryBitpackingLookupFilter(ColumnSegment &segment, ColumnScanState &s
 			}
 
 			idx_t i = 0;
-			for (; i + 4 <= to_scan; i += 4) {
+			for (; i + 8 <= to_scan; i += 8) {
 				const auto row0 = scanned + i;
 				const auto row1 = row0 + 1;
 				const auto row2 = row0 + 2;
 				const auto row3 = row0 + 3;
+				const auto row4 = row0 + 4;
+				const auto row5 = row0 + 5;
+				const auto row6 = row0 + 6;
+				const auto row7 = row0 + 7;
 				const auto value0 = decompression_ptr[i];
 				const auto value1 = decompression_ptr[i + 1];
 				const auto value2 = decompression_ptr[i + 2];
 				const auto value3 = decompression_ptr[i + 3];
+				const auto value4 = decompression_ptr[i + 4];
+				const auto value5 = decompression_ptr[i + 5];
+				const auto value6 = decompression_ptr[i + 6];
+				const auto value7 = decompression_ptr[i + 7];
 				const auto match0 = matches(value0);
 				const auto match1 = matches(value1);
 				const auto match2 = matches(value2);
 				const auto match3 = matches(value3);
+				const auto match4 = matches(value4);
+				const auto match5 = matches(value5);
+				const auto match6 = matches(value6);
+				const auto match7 = matches(value7);
 				if (match0) {
 					result_data[row0] = value0;
 					result_sel.set_index(result_count++, row0);
@@ -1682,6 +1713,22 @@ static bool TryBitpackingLookupFilter(ColumnSegment &segment, ColumnScanState &s
 				if (match3) {
 					result_data[row3] = value3;
 					result_sel.set_index(result_count++, row3);
+				}
+				if (match4) {
+					result_data[row4] = value4;
+					result_sel.set_index(result_count++, row4);
+				}
+				if (match5) {
+					result_data[row5] = value5;
+					result_sel.set_index(result_count++, row5);
+				}
+				if (match6) {
+					result_data[row6] = value6;
+					result_sel.set_index(result_count++, row6);
+				}
+				if (match7) {
+					result_data[row7] = value7;
+					result_sel.set_index(result_count++, row7);
 				}
 			}
 			for (; i < to_scan; i++) {
@@ -1839,16 +1886,10 @@ static bool TryBitpackingPrefixRangeFilter(ColumnSegment &segment, ColumnScanSta
 		covers_filter = PrefixRangeFilterCoversResidual(filter, filter_state, result.GetType(), prefix_data, lookup);
 	}
 	if (lookup.shift == 0) {
-		auto matches = [&](const T &value) {
-			return BitpackingPrefixRangeMatch<true>(lookup.min, lookup.span, lookup.shift, lookup.bitmap,
-			                                        BitpackingPrefixComparable<T>::Convert(value));
-		};
+		BitpackingPrefixRangeMatcher<T, true> matches(lookup.min, lookup.span, lookup.shift, lookup.bitmap);
 		return TryBitpackingLookupFilter<T>(segment, state, vector_count, result, sel, sel_count, matches);
 	}
-	auto matches = [&](const T &value) {
-		return BitpackingPrefixRangeMatch<false>(lookup.min, lookup.span, lookup.shift, lookup.bitmap,
-		                                         BitpackingPrefixComparable<T>::Convert(value));
-	};
+	BitpackingPrefixRangeMatcher<T, false> matches(lookup.min, lookup.span, lookup.shift, lookup.bitmap);
 	return TryBitpackingLookupFilter<T>(segment, state, vector_count, result, sel, sel_count, matches);
 }
 
@@ -1859,6 +1900,56 @@ static T BitpackingPerfectHashJoinBound(uint64_t bits) {
 	T result;
 	memcpy(&result, &unsigned_value, sizeof(T));
 	return result;
+}
+
+template <class T, bool BUILD_DENSE, bool HAS_RESIDUAL_RANGES>
+struct BitpackingPerfectHashJoinMatcher {
+	BitpackingPerfectHashJoinMatcher(T build_min_p, T build_max_p, const validity_t *build_validity_p,
+	                                 const vector<FastInternalFilterOperation> &operations_p, idx_t operation_count_p)
+	    : build_min(build_min_p), build_max(build_max_p), build_validity(build_validity_p), operations(operations_p),
+	      operation_count(operation_count_p) {
+	}
+
+	DUCKDB_BITPACKING_FORCE_INLINE bool operator()(const T &value) const {
+		if (value < build_min || value > build_max) {
+			return false;
+		}
+		if constexpr (!BUILD_DENSE) {
+			const auto build_idx = UnsafeNumericCast<idx_t>(value - build_min);
+			if (!(build_validity[build_idx / ValidityMask::BITS_PER_VALUE] &
+			      (validity_t(1) << (build_idx % ValidityMask::BITS_PER_VALUE)))) {
+				return false;
+			}
+		}
+		if constexpr (HAS_RESIDUAL_RANGES) {
+			for (idx_t operation_idx = 1; operation_idx < operation_count; operation_idx++) {
+				auto &operation = operations[operation_idx];
+				if (operation.range_empty || (operation.range_has_lower && value < operation.range_lower) ||
+				    (operation.range_has_upper && value > operation.range_upper)) {
+					return false;
+				}
+			}
+		}
+		return true;
+	}
+
+	T build_min;
+	T build_max;
+	const validity_t *build_validity;
+	const vector<FastInternalFilterOperation> &operations;
+	idx_t operation_count;
+};
+
+template <class T, bool BUILD_DENSE, bool HAS_RESIDUAL_RANGES>
+static bool TryBitpackingPerfectHashJoinFilterWithLayout(ColumnSegment &segment, ColumnScanState &state,
+                                                         idx_t vector_count, Vector &result, SelectionVector &sel,
+                                                         idx_t &sel_count, T build_min, T build_max,
+                                                         const ExecutionPerfectHashJoinTableLayout &layout,
+                                                         const vector<FastInternalFilterOperation> &operations,
+                                                         idx_t fused_operation_count) {
+	BitpackingPerfectHashJoinMatcher<T, BUILD_DENSE, HAS_RESIDUAL_RANGES> matches(
+	    build_min, build_max, layout.build_validity, operations, fused_operation_count);
+	return TryBitpackingLookupFilter<T>(segment, state, vector_count, result, sel, sel_count, matches);
 }
 
 template <class T>
@@ -1892,25 +1983,24 @@ static bool TryBitpackingPerfectHashJoinFilter(ColumnSegment &segment, ColumnSca
 	       operations[fused_operation_count].type == FastInternalFilterOperationType::SIGNED_NUMERIC_RANGE) {
 		fused_operation_count++;
 	}
-	auto matches = [&](const T &value) {
-		if (value < build_min || value > build_max) {
-			return false;
-		}
-		const auto build_idx = UnsafeNumericCast<idx_t>(value - build_min);
-		if (!layout.is_build_dense && !(layout.build_validity[build_idx / ValidityMask::BITS_PER_VALUE] &
-		                                (validity_t(1) << (build_idx % ValidityMask::BITS_PER_VALUE)))) {
-			return false;
-		}
-		for (idx_t operation_idx = 1; operation_idx < fused_operation_count; operation_idx++) {
-			auto &operation = operations[operation_idx];
-			if (operation.range_empty || (operation.range_has_lower && value < operation.range_lower) ||
-			    (operation.range_has_upper && value > operation.range_upper)) {
-				return false;
-			}
-		}
-		return true;
-	};
-	if (!TryBitpackingLookupFilter<T>(segment, state, vector_count, result, sel, sel_count, matches)) {
+	const auto has_residual_ranges = fused_operation_count > 1;
+	bool filtered;
+	if (layout.is_build_dense) {
+		filtered = has_residual_ranges ? TryBitpackingPerfectHashJoinFilterWithLayout<T, true, true>(
+		                                     segment, state, vector_count, result, sel, sel_count, build_min, build_max,
+		                                     layout, operations, fused_operation_count)
+		                               : TryBitpackingPerfectHashJoinFilterWithLayout<T, true, false>(
+		                                     segment, state, vector_count, result, sel, sel_count, build_min, build_max,
+		                                     layout, operations, fused_operation_count);
+	} else {
+		filtered = has_residual_ranges ? TryBitpackingPerfectHashJoinFilterWithLayout<T, false, true>(
+		                                     segment, state, vector_count, result, sel, sel_count, build_min, build_max,
+		                                     layout, operations, fused_operation_count)
+		                               : TryBitpackingPerfectHashJoinFilterWithLayout<T, false, false>(
+		                                     segment, state, vector_count, result, sel, sel_count, build_min, build_max,
+		                                     layout, operations, fused_operation_count);
+	}
+	if (!filtered) {
 		return false;
 	}
 	if (sel_count > 0 && fused_operation_count < operations.size()) {

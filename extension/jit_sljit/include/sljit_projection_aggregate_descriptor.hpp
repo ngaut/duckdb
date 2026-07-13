@@ -102,7 +102,8 @@ static bool SljitTryBuildProjectionAggregateRequiredOutputs(const SljitExecutabl
 	}
 	auto &aggregate_update = aggregate_op.aggregate_update;
 	auto &sink_info = aggregate_update.plan.sink_info;
-	if ((sink_info.kind != ExecutionRegionSinkKind::HASH_AGGREGATE_UPDATE &&
+	if ((sink_info.kind != ExecutionRegionSinkKind::UNGROUPED_AGGREGATE_UPDATE &&
+	     sink_info.kind != ExecutionRegionSinkKind::HASH_AGGREGATE_UPDATE &&
 	     sink_info.kind != ExecutionRegionSinkKind::PERFECT_HASH_AGGREGATE_UPDATE) ||
 	    projection_op.projections.size() != projection_op.output_types.size()) {
 		return false;
@@ -326,12 +327,12 @@ static bool SljitTryBuildMappedSelectedJoinAggregateInputDescriptor(vector<Sljit
 	    binding.output_mode != ExecutionHashJoinProbeOutputMode::MATCHED_PROBE_AND_BUILD) {
 		return descriptor.Block("hash_join_shape");
 	}
-	if (!SljitTryBuildSelectedJoinIdentityProjection(binding, ops[aggregate_idx], descriptor)) {
-		return false;
-	}
 	if (output_projection_idx == DConstants::INVALID_INDEX || output_projection_idx >= ops.size() ||
 	    ops[output_projection_idx].kind != SljitNativeRegionOpKind::PROJECTION) {
 		return descriptor.Block("producer_projection");
+	}
+	if (!SljitTryBuildSelectedJoinIdentityProjection(binding, ops[aggregate_idx], descriptor)) {
+		return false;
 	}
 	auto producer_projection_op = optional_ptr<SljitExecutableRegionOp>(&ops[output_projection_idx]);
 	return SljitTryBuildPreparedProjectionAggregateDescriptorFromProjection(

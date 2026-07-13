@@ -75,7 +75,9 @@ SljitRegionNodePlan PlanSljitHashJoinProbeOperatorNode(const ExecutionRegionNode
 			    key.reason.empty() ? "hash join probe native lowering requires supported reference keys" : key.reason);
 		}
 		if (key.input_index >= input_types.size()) {
-			return SljitRegionBoundaryNode("hash join probe native lowering key input index is outside operator input");
+			return SljitRegionBoundaryNode("hash join probe native lowering key input index " +
+			                               std::to_string(key.input_index) + " is outside operator input count " +
+			                               std::to_string(input_types.size()));
 		}
 		SljitNativeHashJoinKeyKind key_kind;
 		if (!SljitTryGetHashJoinKeyKind(key.type, key_kind)) {

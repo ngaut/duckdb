@@ -56,8 +56,8 @@ public:
 			auto output_view = SljitRuntimeBatchViewFromHashJoinSelection(
 			    join_input, scratch.FilterSelection(hash_join_idx), scratch.HashJoinBuildSelection(hash_join_idx),
 			    scratch.HashJoinRowPointers(hash_join_idx), output.size(), hash_join_idx,
-			    state.source_key0_int64_to_int32_matches_are_proven, output_column_map,
-			    primitive.output_projection_idx);
+			    state.source_key0_int64_to_int32_matches_are_proven, state.exact_source_filter_matches_are_proven,
+			    output_column_map, primitive.output_projection_idx);
 			return execute_next_step(output_view);
 		};
 		auto handle_defer = [&](string &deferred_reason) {

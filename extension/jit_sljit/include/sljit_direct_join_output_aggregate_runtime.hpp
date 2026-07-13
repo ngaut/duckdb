@@ -28,7 +28,7 @@ static bool SljitTryExecuteDirectJoinOutputPerfectHashAggregateUpdate(
 	auto &plan = aggregate_update.plan;
 	auto &sink_info = plan.sink_info;
 	if (!aggregate_update.fused_payload_update.Function() || !aggregate_update.fused_payload_update_owns_group_lookup ||
-	    !plan.use_primitive_payloads || !plan.use_perfect_hash_group_lookup ||
+	    !plan.UsesPrimitivePayloads() || !plan.use_perfect_hash_group_lookup ||
 	    sink_info.kind != ExecutionRegionSinkKind::PERFECT_HASH_AGGREGATE_UPDATE ||
 	    sink_info.aggregates.size() != aggregate_update.payloads.size()) {
 		return false;
@@ -149,7 +149,8 @@ static bool SljitTryExecuteDirectJoinOutputAggregate(
     SljitPostJoinProjectionStrategy &post_join_projection, DataChunk &join_input,
     const SelectionVector &match_selection, const SelectionVector &build_selection, Vector &row_pointers,
     DataChunk &join_output, optional_ptr<bool> deferred_grouped_finish,
-    bool source_key0_int64_to_int32_unchecked = false, optional_ptr<const vector<idx_t>> output_column_map = nullptr,
+    bool source_key0_int64_to_int32_unchecked = false, bool exact_source_filter_matches_are_proven = false,
+    optional_ptr<const vector<idx_t>> output_column_map = nullptr,
     idx_t output_projection_idx = DConstants::INVALID_INDEX) {
 	if (!strategy_ptr || strategy_ptr->disabled) {
 		return false;
@@ -195,7 +196,8 @@ static bool SljitTryExecuteDirectJoinOutputAggregate(
 	               aggregate_input)) {
 	} else {
 		string materialize_failure;
-		if (SljitTryMaterializeHashJoinProjectionAggregateInputsToChunk(
+		if (!exact_source_filter_matches_are_proven &&
+		    SljitTryMaterializeHashJoinProjectionAggregateInputsToChunk(
 		        runtime, scratch, post_join_projection.hash_join_idx, aggregate_projection_idx, descriptor.Projection(),
 		        join_input, match_selection, build_selection, row_pointers, descriptor.input_sources,
 		        join_output.size(), aggregate_input, optional_ptr<string>(&materialize_failure))) {
@@ -203,7 +205,8 @@ static bool SljitTryExecuteDirectJoinOutputAggregate(
 		           !SljitTryDirectMaterializeHashJoinProjectionSourcesToBatch(
 		               runtime, ops, scratch, post_join_projection.hash_join_idx, aggregate_projection_idx,
 		               descriptor.Projection(), join_input, match_selection, row_pointers, join_output, aggregate_input,
-		               optional_ptr<const vector<idx_t>>(&descriptor.output_to_projection))) {
+		               optional_ptr<const vector<idx_t>>(&descriptor.output_to_projection), nullptr, nullptr,
+		               exact_source_filter_matches_are_proven)) {
 			SljitRecordDirectJoinOutputAggregateProjectionUnsupported(runtime, ops, post_join_projection, "materialize",
 			                                                          join_output.size());
 			strategy.last_failure =

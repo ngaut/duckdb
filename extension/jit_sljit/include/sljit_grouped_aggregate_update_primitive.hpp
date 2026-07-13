@@ -54,7 +54,7 @@ static bool SljitCanBindGroupedAggregateUpdatePrimitive(const vector<SljitExecut
 static bool SljitGroupedAggregateUpdateCanUseCountStarPreaggregation(const SljitExecutableRegionOp &op) {
 	if (op.kind != SljitNativeRegionOpKind::AGGREGATE_UPDATE ||
 	    op.aggregate_update.plan.sink_info.kind != ExecutionRegionSinkKind::HASH_AGGREGATE_UPDATE ||
-	    !op.aggregate_update.plan.use_primitive_payloads || !op.aggregate_update.plan.use_grouped_state_addresses) {
+	    !op.aggregate_update.plan.UsesPrimitivePayloads() || !op.aggregate_update.plan.use_grouped_state_addresses) {
 		return false;
 	}
 	auto &sink_info = op.aggregate_update.plan.sink_info;
@@ -71,7 +71,7 @@ static bool SljitGroupedAggregateUpdateCanUseCountStarPreaggregation(const Sljit
 static bool SljitGroupedAggregateUpdateCanUseDirectPrimitivePayloadUpdate(const SljitExecutableRegionOp &op) {
 	if (op.kind != SljitNativeRegionOpKind::AGGREGATE_UPDATE ||
 	    op.aggregate_update.plan.sink_info.kind != ExecutionRegionSinkKind::HASH_AGGREGATE_UPDATE ||
-	    !op.aggregate_update.plan.use_primitive_payloads) {
+	    !op.aggregate_update.plan.UsesPrimitivePayloads()) {
 		return false;
 	}
 	auto &sink_info = op.aggregate_update.plan.sink_info;

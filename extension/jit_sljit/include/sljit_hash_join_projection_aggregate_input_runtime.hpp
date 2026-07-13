@@ -267,18 +267,17 @@ static bool SljitTryMaterializeHashJoinProjectionAggregateInputsToChunk(
 
 	result.SetChildCardinality(current_size + count);
 	if (referenced_direct_input) {
-			RecordSljitRegionStageRuntime(runtime, projection_idx, projection_op.kind,
-			                              "projection_aggregate_reference_payload_view", stage_start);
-			RecordSljitRegionRuntimePath(runtime, projection_op.kind, "projection_aggregate.reference_payload_view",
-			                             count);
+		RecordSljitRegionStageRuntime(runtime, projection_idx, projection_op.kind,
+		                              "projection_aggregate_reference_payload_view", stage_start);
+		RecordSljitRegionRuntimePath(runtime, projection_op.kind, "projection_aggregate.reference_payload_view", count);
 	}
 	if (materialized_reference) {
-		RecordSljitRegionStageRuntime(runtime, projection_idx, projection_op.kind,
-		                              "post_join_reference_projection", stage_start);
+		RecordSljitRegionStageRuntime(runtime, projection_idx, projection_op.kind, "post_join_reference_projection",
+		                              stage_start);
 	}
 	if (materialized_computed) {
-		RecordSljitRegionStageRuntime(runtime, projection_idx, projection_op.kind,
-		                              "post_join_computed_projection", stage_start);
+		RecordSljitRegionStageRuntime(runtime, projection_idx, projection_op.kind, "post_join_computed_projection",
+		                              stage_start);
 	}
 	return true;
 }

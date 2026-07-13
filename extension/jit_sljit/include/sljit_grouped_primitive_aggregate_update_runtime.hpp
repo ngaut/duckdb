@@ -46,7 +46,7 @@ static void SljitBindGroupedPrimitiveAggregateUpdate(ExecutionOperatorRuntime &n
 		return;
 	}
 	auto &sink_info = op.aggregate_update.plan.sink_info;
-	if (!SljitGroupedPrimitiveAggregateSinkKind(sink_info.kind) || !op.aggregate_update.plan.use_primitive_payloads) {
+	if (!SljitGroupedPrimitiveAggregateSinkKind(sink_info.kind) || !op.aggregate_update.plan.UsesPrimitivePayloads()) {
 		throw InternalException("SLJIT grouped primitive aggregate update received a non-grouped aggregate");
 	}
 	auto &binding = SljitBindNativeSink(native_runtime, scratch, op_idx, input, sink_info,

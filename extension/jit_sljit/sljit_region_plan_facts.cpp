@@ -67,7 +67,7 @@ static bool SljitNativeRegionOpGeneratesMachineCode(const SljitNativeRegionOpPla
 	case SljitNativeRegionOpKind::DELIM_JOIN_SINK:
 		return false;
 	case SljitNativeRegionOpKind::AGGREGATE_UPDATE:
-		return op.aggregate_update.use_primitive_payloads;
+		return op.aggregate_update.UsesPrimitivePayloads();
 	default:
 		return false;
 	}
@@ -113,7 +113,7 @@ static string SljitNativeRegionOpBoundaryBlocker(const SljitNativeRegionOpPlan &
 		return string();
 	}
 	if (op.kind == SljitNativeRegionOpKind::AGGREGATE_UPDATE) {
-		if (op.aggregate_update.use_primitive_payloads) {
+		if (op.aggregate_update.UsesPrimitivePayloads()) {
 			return string();
 		}
 		if (SljitNativeRegionOpIsNativeSink(op)) {
@@ -229,12 +229,17 @@ static bool SljitRegionPlanHasDirectSourceHashBuild(const vector<SljitNativeRegi
 }
 
 static bool SljitRegionPlanHasExactFilterProbeHashBuild(const vector<SljitNativeRegionOpPlan> &ops) {
-	if (ops.size() != 2 || ops[0].kind != SljitNativeRegionOpKind::HASH_JOIN_PROBE ||
-	    ops[1].kind != SljitNativeRegionOpKind::HASH_JOIN_BUILD) {
+	if (ops.size() < 2 || ops.size() > 3 || ops[0].kind != SljitNativeRegionOpKind::HASH_JOIN_PROBE ||
+	    ops.back().kind != SljitNativeRegionOpKind::HASH_JOIN_BUILD) {
+		return false;
+	}
+	if (ops.size() == 3 && (ops[1].kind != SljitNativeRegionOpKind::PROJECTION ||
+	                        SljitNativeRegionExpressionsGenerateCode(ops[1].projections))) {
 		return false;
 	}
 	auto &probe = ops[0].hash_join_probe;
-	return probe.perfect_hash_probe && probe.exact_source_filter_identity && !probe.residual_predicate &&
+	return probe.exact_source_filter_identity && probe.keys.size() == 1 && probe.equality_key_count == 1 &&
+	       !probe.residual_predicate && !probe.mark_build_match &&
 	       probe.output_mode == ExecutionHashJoinProbeOutputMode::MATCHED_PROBE_AND_BUILD;
 }
 
@@ -375,7 +380,7 @@ void AddSljitNativeRegionCapabilityFacts(ExecutionRegionLoweringPlan &lowering_p
 				lowering_plan.AddBackendPayloadTypeCapability(payload.return_type);
 			}
 			lowering_plan.AddBackendAggregateUpdateCapability(
-			    aggregate_update.sink_info.aggregate_contract.kind, aggregate_update.use_primitive_payloads,
+			    aggregate_update.sink_info.aggregate_contract.kind, aggregate_update.UsesPrimitivePayloads(),
 			    aggregate_update.use_grouped_state_addresses, aggregate_update.use_perfect_hash_group_lookup);
 			auto &aggregate_contract = aggregate_update.sink_info.aggregate_contract;
 			if (SljitAggregateSinkCanUseDistinctKeySink(aggregate_update.sink_info) &&

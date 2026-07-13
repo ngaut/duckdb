@@ -156,7 +156,7 @@ static bool SljitTryBuildProjectionPerfectHashAggregateDescriptor(
 	auto &sink_info = aggregate_update.plan.sink_info;
 	auto &projection_op = descriptor.Projection();
 	if (sink_info.kind != ExecutionRegionSinkKind::PERFECT_HASH_AGGREGATE_UPDATE || sink_info.groups.empty() ||
-	    !aggregate_update.plan.use_primitive_payloads || !aggregate_update.plan.use_perfect_hash_group_lookup ||
+	    !aggregate_update.plan.UsesPrimitivePayloads() || !aggregate_update.plan.use_perfect_hash_group_lookup ||
 	    !aggregate_update.fused_payload_update_owns_group_lookup || !aggregate_update.fused_payload_update.Function() ||
 	    aggregate_update.payloads.size() != sink_info.aggregates.size() ||
 	    projection_op.projections.size() != projection_op.output_types.size()) {

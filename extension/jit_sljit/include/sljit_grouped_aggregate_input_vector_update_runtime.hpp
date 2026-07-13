@@ -358,7 +358,7 @@ static bool SljitTryExecuteNativeInputVectorGroupedAggregateUpdate(
 	    "aggregate-update-runtime-binding-failed", "SLJIT aggregate update sink");
 	if (!binding.ready || !binding.aggregate_update.ready || !binding.aggregate_update.primitive.ready ||
 	    !binding.aggregate_update.grouped_state.ready || !binding.aggregate_update.grouped_state.state ||
-	    !op.aggregate_update.plan.use_primitive_payloads) {
+	    !op.aggregate_update.plan.UsesPrimitivePayloads()) {
 		if (failure_reason) {
 			*failure_reason = "binding";
 		}

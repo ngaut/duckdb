@@ -126,6 +126,36 @@ static ExecutionOperatorBindResult SljitExecuteRegularHashJoinProbe(
 	auto &layout = probe.table_layout;
 	const auto table_layout_kind = SljitValidateRegularHashJoinProbeExecutionLayout(plan, probe);
 	state.source_key0_int64_to_int32_matches_are_proven = false;
+	state.exact_source_filter_matches_are_proven = false;
+	if (plan.exact_source_filter_identity) {
+		runtime.RecordJitRuntimePath("hash_join_probe.regular_probe.exact_source_filter_candidate");
+	}
+	const bool exact_source_filter =
+	    plan.exact_source_filter_identity &&
+	    plan.exact_source_filter_identity == probe.table_layout.runtime_filter_identity &&
+	    probe.table_layout.exact_filter_build_keys_unique && plan.keys.size() == 1 && plan.equality_key_count == 1 &&
+	    !plan.residual_predicate && !plan.mark_build_match &&
+	    probe.exact_rhs_output_probe_input_indices.size() == probe.rhs_output_column_count &&
+	    std::all_of(probe.exact_rhs_output_probe_input_indices.begin(),
+	                probe.exact_rhs_output_probe_input_indices.end(),
+	                [](idx_t input_idx) { return input_idx != DConstants::INVALID_INDEX; }) &&
+	    (plan.output_mode == ExecutionHashJoinProbeOutputMode::MATCHED_PROBE_AND_BUILD ||
+	     plan.output_mode == ExecutionHashJoinProbeOutputMode::MATCHED_PROBE_ONLY) &&
+	    SljitHashJoinProbeProducesSelectedView(output_contract);
+	if (exact_source_filter) {
+		for (idx_t row_idx = 0; row_idx < input.size(); row_idx++) {
+			match_selection.set_index(row_idx, row_idx);
+		}
+		state.input_offset = input.size();
+		state.resume_row_pointer = nullptr;
+		state.finished = true;
+		state.exact_source_filter_matches_are_proven = true;
+		output.SetChildCardinality(input.size());
+		runtime.RecordJitRuntimePath("hash_join_probe.regular_probe.exact_source_filter", input.size());
+		RecordSljitRegionRuntimeProof(runtime, op.kind, ExecutionRegionJitRuntimeProof::GENERATED_BACKEND_WORK,
+		                              "exact_source_filter", input.size());
+		return ExecutionOperatorBindResult::READY;
+	}
 	const bool rhs_keys_all_valid =
 	    !layout.can_have_null || layout.null_keys_are_filtered || (probe.hash_table && !probe.hash_table->has_null);
 

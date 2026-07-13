@@ -187,7 +187,7 @@ static bool SljitExecuteSelectedHashJoinGeneratedFilterPrimitive(
 	    selected.Input(), scratch.FilterSelection(selected.hash_join_idx),
 	    scratch.HashJoinBuildSelection(selected.hash_join_idx), scratch.HashJoinRowPointers(selected.hash_join_idx),
 	    selected_count, selected.hash_join_idx, selected.source_key0_int64_to_int32_matches_are_proven,
-	    selected.output_column_map, selected.output_projection_idx);
+	    selected.exact_source_filter_matches_are_proven, selected.output_column_map, selected.output_projection_idx);
 	return true;
 }
 

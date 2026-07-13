@@ -52,6 +52,8 @@ struct ExecutionHashJoinTableLayout {
 	const ht_entry_t *entries = nullptr;
 	const data_ptr_t *aux_next_ptrs = nullptr;
 	const BloomFilter *bloom_filter = nullptr;
+	bool exact_filter_build_keys_unique = false;
+	shared_ptr<ExecutionRuntimeFilterIdentity> runtime_filter_identity;
 	string blocker;
 };
 

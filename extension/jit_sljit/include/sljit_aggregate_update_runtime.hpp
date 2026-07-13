@@ -73,7 +73,7 @@ static SinkResultType SljitExecuteNativePipelineAggregateUpdate(
 	if (count == DConstants::INVALID_INDEX) {
 		count = input.size();
 	}
-	if (op.aggregate_update.plan.use_primitive_payloads) {
+	if (op.aggregate_update.plan.UsesPrimitivePayloads()) {
 		return SljitExecutePrimitiveAggregateUpdate(runtime, native_runtime, scratch, op_idx, op, input, execute_sel,
 		                                            count, defer_grouped_finish, deferred_grouped_finish);
 	}

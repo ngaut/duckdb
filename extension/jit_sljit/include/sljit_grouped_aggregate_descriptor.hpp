@@ -311,7 +311,7 @@ static bool SljitTryBuildProjectionRowPointerAggregateDescriptor(
 	auto &sink_info = aggregate_update.plan.sink_info;
 	auto &projection_op = descriptor.Projection();
 	if (sink_info.kind != ExecutionRegionSinkKind::HASH_AGGREGATE_UPDATE || sink_info.groups.empty() ||
-	    !aggregate_update.plan.use_primitive_payloads || !aggregate_update.plan.use_grouped_state_addresses ||
+	    !aggregate_update.plan.UsesPrimitivePayloads() || !aggregate_update.plan.use_grouped_state_addresses ||
 	    aggregate_update.plan.use_perfect_hash_group_lookup ||
 	    aggregate_update.fused_payload_update_owns_group_lookup ||
 	    aggregate_update.payloads.size() != sink_info.aggregates.size()) {

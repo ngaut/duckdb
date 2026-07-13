@@ -107,7 +107,7 @@ static bool TryBuildFusedTypedAggregatePayloads(
 static bool TryBuildUngroupedFusedTypedExpressionAggregateUpdate(const SljitNativeAggregateUpdatePlan &op,
                                                                  SljitExecutableAggregateUpdate &executable,
                                                                  string &error, const vector<bool> &input_not_null) {
-	if (!op.use_primitive_payloads || op.use_grouped_state_addresses ||
+	if (!op.UsesPrimitivePayloads() || op.use_grouped_state_addresses ||
 	    op.sink_info.kind != ExecutionRegionSinkKind::UNGROUPED_AGGREGATE_UPDATE ||
 	    op.payloads.size() != op.sink_info.aggregates.size()) {
 		return true;
@@ -139,7 +139,7 @@ static bool TryBuildUngroupedFusedTypedExpressionAggregateUpdate(const SljitNati
 static bool TryBuildPerfectHashGroupedFusedTypedExpressionAggregateUpdate(
     const SljitNativeAggregateUpdatePlan &op, SljitExecutableAggregateUpdate &executable, string &error,
     const vector<bool> &input_not_null, const vector<Value> &input_min_values, const vector<Value> &input_max_values) {
-	if (!op.use_primitive_payloads || !op.use_perfect_hash_group_lookup || op.payloads.empty() ||
+	if (!op.UsesPrimitivePayloads() || !op.use_perfect_hash_group_lookup || op.payloads.empty() ||
 	    op.payloads.size() != op.sink_info.aggregates.size()) {
 		return true;
 	}
@@ -174,7 +174,7 @@ static bool TryBuildPerfectHashGroupedFusedTypedExpressionAggregateUpdate(
 static bool TryBuildGroupedFusedTypedExpressionAggregateUpdate(const SljitNativeAggregateUpdatePlan &op,
                                                                SljitExecutableAggregateUpdate &executable,
                                                                string &error, const vector<bool> &input_not_null) {
-	if (!op.use_primitive_payloads || !op.use_grouped_state_addresses || op.use_perfect_hash_group_lookup ||
+	if (!op.UsesPrimitivePayloads() || !op.use_grouped_state_addresses || op.use_perfect_hash_group_lookup ||
 	    op.payloads.empty() || op.payloads.size() != op.sink_info.aggregates.size()) {
 		return true;
 	}
@@ -259,7 +259,7 @@ void SljitBuildExecutableAggregateUpdateMetadata(const SljitNativeAggregateUpdat
 	executable.plan.estimated_input_count = op.estimated_input_count;
 	executable.plan.distinct_key_cardinality_upper_bound = op.distinct_key_cardinality_upper_bound;
 	executable.plan.group_reserve = op.group_reserve;
-	executable.plan.use_primitive_payloads = op.use_primitive_payloads;
+	executable.plan.payload_binding_state = op.payload_binding_state;
 	executable.plan.use_grouped_state_addresses = op.use_grouped_state_addresses;
 	executable.plan.use_perfect_hash_group_lookup = op.use_perfect_hash_group_lookup;
 	executable.plan.group_expressions.reserve(op.group_expressions.size());
@@ -267,7 +267,7 @@ void SljitBuildExecutableAggregateUpdateMetadata(const SljitNativeAggregateUpdat
 		executable.plan.group_expressions.push_back(group_expression.Copy(true, false));
 	}
 	PopulateSljitExecutableAggregateGroupSourceFacts(op, executable, input_not_null);
-	if (op.use_primitive_payloads) {
+	if (op.UsesPrimitivePayloads()) {
 		if (op.payloads.size() != op.sink_info.aggregates.size()) {
 			throw InternalException("SLJIT aggregate payload descriptor count mismatch");
 		}
@@ -289,7 +289,7 @@ void SljitBuildExecutableAggregateUpdateMetadata(const SljitNativeAggregateUpdat
 }
 
 static bool SljitAggregateUpdateRequiresTypedGroupedBackend(const SljitNativeAggregateUpdatePlan &op) {
-	if (!op.use_primitive_payloads || !op.use_grouped_state_addresses) {
+	if (!op.UsesPrimitivePayloads() || !op.use_grouped_state_addresses) {
 		return false;
 	}
 	for (auto &payload : op.payloads) {
@@ -310,7 +310,7 @@ bool SljitBuildExecutableAggregateUpdatePayloadCode(const SljitNativeAggregateUp
                                                     const vector<bool> &input_not_null,
                                                     const vector<Value> &input_min_values,
                                                     const vector<Value> &input_max_values) {
-	if (op.use_primitive_payloads && !op.use_grouped_state_addresses && !op.payloads.empty()) {
+	if (op.UsesPrimitivePayloads() && !op.use_grouped_state_addresses && !op.payloads.empty()) {
 		SljitNativeAggregateUpdateFunction fused_function = nullptr;
 		string fused_error;
 		auto fused_code = BuildSljitNativeUngroupedFusedPrimitiveAggregateUpdate(op.payloads, op.sink_info.aggregates,
@@ -349,7 +349,7 @@ bool SljitBuildExecutableAggregateUpdatePayloadCode(const SljitNativeAggregateUp
 		error = "SLJIT grouped typed aggregate update has no generated typed payload backend";
 		return false;
 	}
-	if (op.use_primitive_payloads && op.use_perfect_hash_group_lookup && !op.payloads.empty()) {
+	if (op.UsesPrimitivePayloads() && op.use_perfect_hash_group_lookup && !op.payloads.empty()) {
 		SljitNativeAggregateUpdateFunction fused_function = nullptr;
 		string fused_error;
 		auto fused_code = BuildSljitNativePerfectHashGroupedFusedPrimitiveAggregateUpdate(
@@ -367,7 +367,7 @@ bool SljitBuildExecutableAggregateUpdatePayloadCode(const SljitNativeAggregateUp
 			return false;
 		}
 	}
-	if (op.use_primitive_payloads && op.use_grouped_state_addresses && !op.payloads.empty()) {
+	if (op.UsesPrimitivePayloads() && op.use_grouped_state_addresses && !op.payloads.empty()) {
 		SljitNativeAggregateUpdateFunction fused_function = nullptr;
 		string fused_error;
 		auto fused_code = BuildSljitNativeGroupedFusedPrimitiveAggregateUpdate(
@@ -390,7 +390,7 @@ void SljitSelectExecutableAggregateDirectUpdatePlan(SljitExecutableAggregateUpda
 	auto &direct_update = executable.grouped_direct_update;
 	direct_update.Clear();
 	auto &plan = executable.plan;
-	if (plan.sink_info.kind != ExecutionRegionSinkKind::HASH_AGGREGATE_UPDATE || !plan.use_primitive_payloads ||
+	if (plan.sink_info.kind != ExecutionRegionSinkKind::HASH_AGGREGATE_UPDATE || !plan.UsesPrimitivePayloads() ||
 	    !plan.use_grouped_state_addresses || plan.use_perfect_hash_group_lookup ||
 	    executable.fused_payload_update_owns_group_lookup) {
 		return;

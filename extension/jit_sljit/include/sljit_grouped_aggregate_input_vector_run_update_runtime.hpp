@@ -37,7 +37,7 @@ static bool SljitCanApplyRunPreaggregatedInputVectorAggregateUpdate(
     const vector<const ExecutionPrimitiveAggregateUpdateLane *> &payload_lanes,
     ExecutionGroupedAggregateStateAddressBinding &grouped_state) {
 	if (run_count == 0 || op.aggregate_update.plan.sink_info.kind != ExecutionRegionSinkKind::HASH_AGGREGATE_UPDATE ||
-	    !op.aggregate_update.plan.use_primitive_payloads || !op.aggregate_update.plan.use_grouped_state_addresses ||
+	    !op.aggregate_update.plan.UsesPrimitivePayloads() || !op.aggregate_update.plan.use_grouped_state_addresses ||
 	    !grouped_state.ready || !grouped_state.state) {
 		return false;
 	}

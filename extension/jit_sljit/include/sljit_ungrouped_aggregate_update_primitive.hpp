@@ -37,7 +37,7 @@ static bool SljitCanBindUngroupedAggregateUpdatePrimitive(const vector<SljitExec
 	return aggregate_idx < ops.size() && ops[aggregate_idx].kind == SljitNativeRegionOpKind::AGGREGATE_UPDATE &&
 	       ops[aggregate_idx].aggregate_update.plan.sink_info.kind ==
 	           ExecutionRegionSinkKind::UNGROUPED_AGGREGATE_UPDATE &&
-	       ops[aggregate_idx].aggregate_update.plan.use_primitive_payloads &&
+	       ops[aggregate_idx].aggregate_update.plan.UsesPrimitivePayloads() &&
 	       !SljitAggregateSinkHasDistinctState(ops[aggregate_idx].aggregate_update.plan.sink_info);
 }
 
@@ -110,7 +110,7 @@ static void SljitBindUngroupedPrimitiveAggregateUpdate(ExecutionOperatorRuntime 
 	}
 	auto &sink_info = op.aggregate_update.plan.sink_info;
 	if (sink_info.kind != ExecutionRegionSinkKind::UNGROUPED_AGGREGATE_UPDATE ||
-	    !op.aggregate_update.plan.use_primitive_payloads || op.aggregate_update.plan.use_grouped_state_addresses) {
+	    !op.aggregate_update.plan.UsesPrimitivePayloads() || op.aggregate_update.plan.use_grouped_state_addresses) {
 		throw InternalException("SLJIT ungrouped primitive aggregate update received a non-ungrouped aggregate");
 	}
 	auto &binding = SljitBindNativeSink(native_runtime, scratch, op_idx, input, sink_info,

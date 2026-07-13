@@ -348,21 +348,21 @@ static idx_t EstimateExecutionRegionDistinctSubsetRows(idx_t input_cardinality, 
 	return MaxValue<idx_t>(static_cast<idx_t>(scaled), 1);
 }
 
-static void AddExecutionRegionExactPerfectHashFilterProofs(const Expression &expr, const LogicalType &source_type,
-                                                           idx_t source_input_index,
-                                                           vector<ExecutionRegionExactFilterProof> &proofs) {
+static void AddExecutionRegionExactMembershipFilterProofs(const Expression &expr, const LogicalType &source_type,
+                                                          idx_t source_input_index,
+                                                          vector<ExecutionRegionExactFilterProof> &proofs) {
 	auto unwrapped = TryUnwrapExecutionRegionOptionalFilterExpression(expr);
 	if (!unwrapped) {
 		return;
 	}
 	if (unwrapped.get() != &expr) {
-		AddExecutionRegionExactPerfectHashFilterProofs(*unwrapped, source_type, source_input_index, proofs);
+		AddExecutionRegionExactMembershipFilterProofs(*unwrapped, source_type, source_input_index, proofs);
 		return;
 	}
 	if (expr.GetExpressionClass() == ExpressionClass::BOUND_CONJUNCTION &&
 	    expr.GetExpressionType() == ExpressionType::CONJUNCTION_AND) {
 		for (auto &child : expr.Cast<BoundConjunctionExpression>().GetChildren()) {
-			AddExecutionRegionExactPerfectHashFilterProofs(*child, source_type, source_input_index, proofs);
+			AddExecutionRegionExactMembershipFilterProofs(*child, source_type, source_input_index, proofs);
 		}
 		return;
 	}
@@ -370,21 +370,36 @@ static void AddExecutionRegionExactPerfectHashFilterProofs(const Expression &exp
 		return;
 	}
 	auto &function = expr.Cast<BoundFunctionExpression>();
-	if (function.Function().GetName() != PerfectHashJoinScalarFun::NAME || !function.BindInfo() ||
-	    function.GetChildren().size() != 1) {
+	if (!function.BindInfo() || function.GetChildren().size() != 1) {
 		return;
 	}
-	auto &data = function.BindInfo()->Cast<PerfectHashJoinFunctionData>();
-	if (!data.executor) {
+	shared_ptr<ExecutionRuntimeFilterIdentity> identity;
+	LogicalType filter_key_type;
+	if (function.Function().GetName() == PerfectHashJoinScalarFun::NAME) {
+		auto &data = function.BindInfo()->Cast<PerfectHashJoinFunctionData>();
+		if (!data.executor) {
+			return;
+		}
+		identity = data.executor->GetRuntimeFilterIdentity();
+		filter_key_type = data.executor->GetKeyType();
+	} else if (function.Function().GetName() == PrefixRangeScalarFun::NAME) {
+		auto &data = function.BindInfo()->Cast<PrefixRangeFunctionData>();
+		PrefixRangeLookupData lookup;
+		if (!data.filter || !data.runtime_filter_identity || !TypeIsInteger(data.key_type.InternalType()) ||
+		    !data.filter->GetSignedLookupData(lookup) || lookup.shift != 0) {
+			return;
+		}
+		identity = data.runtime_filter_identity;
+		filter_key_type = data.key_type;
+	} else {
 		return;
 	}
 	auto &input = *function.GetChildren()[0];
 	const bool direct_reference = input.GetExpressionClass() == ExpressionClass::BOUND_REF &&
-	                              input.GetReturnType() == source_type && data.executor->GetKeyType() == source_type;
+	                              input.GetReturnType() == source_type && filter_key_type == source_type;
 	bool checked_integral_cast = false;
-	if (input.GetExpressionClass() == ExpressionClass::BOUND_CAST &&
-	    input.GetReturnType() == data.executor->GetKeyType() && TypeIsInteger(source_type.InternalType()) &&
-	    TypeIsInteger(input.GetReturnType().InternalType())) {
+	if (input.GetExpressionClass() == ExpressionClass::BOUND_CAST && input.GetReturnType() == filter_key_type &&
+	    TypeIsInteger(source_type.InternalType()) && TypeIsInteger(input.GetReturnType().InternalType())) {
 		auto &cast = input.Cast<BoundCastExpression>();
 		checked_integral_cast = cast.Child().GetExpressionClass() == ExpressionClass::BOUND_REF &&
 		                        cast.Child().GetReturnType() == source_type;
@@ -392,7 +407,6 @@ static void AddExecutionRegionExactPerfectHashFilterProofs(const Expression &exp
 	if (!direct_reference && !checked_integral_cast) {
 		return;
 	}
-	auto &identity = data.executor->GetRuntimeFilterIdentity();
 	for (auto &proof : proofs) {
 		if (proof.source_input_index == source_input_index && proof.identity == identity) {
 			return;
@@ -422,9 +436,9 @@ static void ApplyExecutionRegionFinalizedDynamicFilterEstimate(const PhysicalTab
 		}
 		auto &expr_filter =
 		    ExpressionFilter::GetExpressionFilter(filter_entry.Filter(), "execution-region dynamic filter estimate");
-		AddExecutionRegionExactPerfectHashFilterProofs(*expr_filter.expr,
-		                                               contract.source_contract_input_types[filter_idx], filter_idx,
-		                                               descriptor.source.exact_filter_proofs);
+		AddExecutionRegionExactMembershipFilterProofs(*expr_filter.expr,
+		                                              contract.source_contract_input_types[filter_idx], filter_idx,
+		                                              descriptor.source.exact_filter_proofs);
 		auto stats = TryGetExecutionRegionScanColumnStatistics(scan, context, scan.column_ids[filter_idx]);
 		if (!stats) {
 			continue;

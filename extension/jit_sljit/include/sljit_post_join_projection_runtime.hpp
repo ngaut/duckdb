@@ -130,7 +130,8 @@ static bool SljitTryBuildPostJoinProjectionDescriptor(vector<SljitExecutableRegi
 static bool SljitTryDirectMaterializeJoinProjectionChainToBatch(
     ExecutionRegionRuntime &runtime, vector<SljitExecutableRegionOp> &ops, SljitRegionExecutionScratch &scratch,
     SljitPostJoinProjectionStrategy &strategy, DataChunk *join_input, const SelectionVector *match_selection,
-    Vector *row_pointers, DataChunk &join_output, DataChunk &batch) {
+    Vector *row_pointers, DataChunk &join_output, DataChunk &batch,
+    bool exact_source_filter_matches_are_proven = false) {
 	auto hash_join_idx = strategy.hash_join_idx;
 	if (join_output.size() == 0) {
 		return false;
@@ -147,7 +148,8 @@ static bool SljitTryDirectMaterializeJoinProjectionChainToBatch(
 	if (join_input && match_selection && row_pointers) {
 		if (SljitTryDirectMaterializeHashJoinProjectionSourcesToBatch(
 		        runtime, ops, scratch, hash_join_idx, descriptor.projection_idx, projection_op, *join_input,
-		        *match_selection, *row_pointers, join_output, batch, output_map)) {
+		        *match_selection, *row_pointers, join_output, batch, output_map, nullptr, nullptr,
+		        exact_source_filter_matches_are_proven)) {
 			return true;
 		}
 		SljitRecordDirectProjectionChainUnsupported(runtime, ops, strategy.trace_projection_idx, "probe_materialize",

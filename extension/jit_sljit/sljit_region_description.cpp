@@ -260,8 +260,11 @@ string DescribeNativeRegion(const SljitNativeRegionPlan &region, const string &m
 			if (!op.aggregate_update.ir.empty()) {
 				result += ";diagnostics=" + op.aggregate_update.ir;
 			}
-			if (op.aggregate_update.use_primitive_payloads) {
+			if (op.aggregate_update.UsesPrimitivePayloads()) {
 				result += ";payload_update=generated-primitive";
+				result += op.aggregate_update.PayloadsWereComposedThroughProjection()
+				              ? ";payload_binding=projection-composed"
+				              : ";payload_binding=direct";
 				result += ";primitive_payloads=" + DescribeNativeRegionExpressionList(op.aggregate_update.payloads);
 				if (op.aggregate_update.use_perfect_hash_group_lookup) {
 					result += ";grouped_state_lookup=generated-perfect-hash";

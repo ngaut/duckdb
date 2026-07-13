@@ -92,8 +92,7 @@ static bool SljitTryBuildProjectedInputGroupSource(const SljitExecutableRegionOp
 }
 
 static bool SljitTryResolveProjectedInputPayloadSource(const SljitExecutableRegionOp &projection_op,
-                                                       idx_t projection_idx, idx_t &source_idx,
-                                                       bool &source_not_null) {
+                                                       idx_t projection_idx, idx_t &source_idx, bool &source_not_null) {
 	if (projection_idx >= projection_op.projections.size() || projection_idx >= projection_op.output_types.size()) {
 		return false;
 	}
@@ -140,7 +139,7 @@ static bool SljitTryBuildProjectedInputGroupedAggregateDescriptor(
 	auto &aggregate_update = aggregate_op.aggregate_update;
 	auto &sink_info = aggregate_update.plan.sink_info;
 	if (sink_info.kind != ExecutionRegionSinkKind::HASH_AGGREGATE_UPDATE || sink_info.groups.empty() ||
-	    !aggregate_update.plan.use_primitive_payloads || !aggregate_update.plan.use_grouped_state_addresses ||
+	    !aggregate_update.plan.UsesPrimitivePayloads() || !aggregate_update.plan.use_grouped_state_addresses ||
 	    aggregate_update.plan.use_perfect_hash_group_lookup ||
 	    aggregate_update.fused_payload_update_owns_group_lookup ||
 	    aggregate_update.payloads.size() != sink_info.aggregates.size()) {

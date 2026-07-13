@@ -294,7 +294,7 @@ static bool SljitTryExecuteNativeRowPointerGroupedAggregateUpdate(
 	auto &binding = SljitBindRecordedNativeSink(
 	    runtime, native_runtime, scratch, op_idx, op.kind, payload_input, op.aggregate_update.plan.sink_info,
 	    "aggregate-update-runtime-binding-failed", "SLJIT aggregate update sink");
-	if (!binding.ready || !binding.aggregate_update.ready || !op.aggregate_update.plan.use_primitive_payloads) {
+	if (!binding.ready || !binding.aggregate_update.ready || !op.aggregate_update.plan.UsesPrimitivePayloads()) {
 		record_unsupported("sink_binding");
 		return false;
 	}

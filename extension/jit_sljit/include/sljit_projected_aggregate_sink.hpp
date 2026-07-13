@@ -25,7 +25,7 @@ static bool SljitExecuteProjectedAggregateBatch(ExecutionRegionRuntime &runtime,
 	}
 	SinkResultType sink_result;
 	if (SljitGroupedPrimitiveAggregateSinkKind(aggregate_op.aggregate_update.plan.sink_info.kind)) {
-		if (!aggregate_op.aggregate_update.plan.use_primitive_payloads) {
+		if (!aggregate_op.aggregate_update.plan.UsesPrimitivePayloads()) {
 			throw InternalException("SLJIT projected grouped aggregate recipe requires a bound grouped backend");
 		}
 		auto &bound_grouped_update = scratch.AggregateBoundGroupedUpdate(aggregate_idx);
@@ -35,7 +35,7 @@ static bool SljitExecuteProjectedAggregateBatch(ExecutionRegionRuntime &runtime,
 		                                                               nullptr, input.size(), true,
 		                                                               optional_ptr<bool>(&deferred_grouped_finish));
 	} else {
-		if (!aggregate_op.aggregate_update.plan.use_primitive_payloads) {
+		if (!aggregate_op.aggregate_update.plan.UsesPrimitivePayloads()) {
 			throw InternalException("SLJIT projected aggregate recipe requires a primitive aggregate backend");
 		}
 		sink_result =

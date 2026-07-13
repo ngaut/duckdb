@@ -27,6 +27,7 @@ struct SljitRuntimeHashJoinSelection {
 	idx_t hash_join_idx = DConstants::INVALID_INDEX;
 	idx_t output_projection_idx = DConstants::INVALID_INDEX;
 	bool source_key0_int64_to_int32_matches_are_proven = false;
+	bool exact_source_filter_matches_are_proven = false;
 
 	DataChunk &Input() const {
 		if (!chunk) {
@@ -72,6 +73,7 @@ struct SljitRuntimeBatchView {
 	idx_t hash_join_output_projection_idx = DConstants::INVALID_INDEX;
 	SljitRuntimeBatchOwnership ownership = SljitRuntimeBatchOwnership::MATERIALIZED_CHUNK;
 	bool source_key0_int64_to_int32_matches_are_proven = false;
+	bool exact_source_filter_matches_are_proven = false;
 
 	bool HasChunk() const {
 		return chunk != nullptr;
@@ -98,8 +100,8 @@ struct SljitRuntimeBatchView {
 		selected.count = count;
 		selected.hash_join_idx = hash_join_idx;
 		selected.output_projection_idx = hash_join_output_projection_idx;
-		selected.source_key0_int64_to_int32_matches_are_proven =
-		    source_key0_int64_to_int32_matches_are_proven;
+		selected.source_key0_int64_to_int32_matches_are_proven = source_key0_int64_to_int32_matches_are_proven;
+		selected.exact_source_filter_matches_are_proven = exact_source_filter_matches_are_proven;
 		return true;
 	}
 
@@ -140,7 +142,7 @@ static SljitRuntimeBatchView SljitRuntimeBatchViewFromChunk(DataChunk &chunk, co
 static SljitRuntimeBatchView SljitRuntimeBatchViewFromHashJoinSelection(
     DataChunk &join_input, const SelectionVector &match_selection, const SelectionVector &build_selection,
     Vector &row_pointers, idx_t selected_count, idx_t hash_join_idx, bool source_key0_int64_to_int32_matches_are_proven,
-    const vector<idx_t> *hash_join_output_column_map = nullptr,
+    bool exact_source_filter_matches_are_proven, const vector<idx_t> *hash_join_output_column_map = nullptr,
     idx_t hash_join_output_projection_idx = DConstants::INVALID_INDEX) {
 	SljitRuntimeBatchView view;
 	view.chunk = &join_input;
@@ -153,6 +155,7 @@ static SljitRuntimeBatchView SljitRuntimeBatchViewFromHashJoinSelection(
 	view.hash_join_output_projection_idx = hash_join_output_projection_idx;
 	view.ownership = SljitRuntimeBatchOwnership::SELECTED_REFERENCE;
 	view.source_key0_int64_to_int32_matches_are_proven = source_key0_int64_to_int32_matches_are_proven;
+	view.exact_source_filter_matches_are_proven = exact_source_filter_matches_are_proven;
 	return view;
 }
 

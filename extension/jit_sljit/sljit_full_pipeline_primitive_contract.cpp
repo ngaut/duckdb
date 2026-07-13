@@ -186,7 +186,8 @@ bool SljitFullPipelineHasExactFilterProbeHashBuild(const vector<SljitExecutableR
 		return false;
 	}
 	auto &probe = ops[probe_idx].hash_join_probe.plan;
-	return probe.perfect_hash_probe && probe.exact_source_filter_identity && !probe.residual_predicate &&
+	return probe.exact_source_filter_identity && probe.keys.size() == 1 && probe.equality_key_count == 1 &&
+	       !probe.residual_predicate && !probe.mark_build_match &&
 	       probe.output_mode == ExecutionHashJoinProbeOutputMode::MATCHED_PROBE_AND_BUILD;
 }
 
@@ -195,7 +196,7 @@ bool SljitNativeTailCanConsumeTail(const vector<SljitExecutableRegionOp> &ops, i
 		return false;
 	}
 	auto &tail = ops[tail_start_idx];
-	if (tail.kind == SljitNativeRegionOpKind::AGGREGATE_UPDATE && tail.aggregate_update.plan.use_primitive_payloads) {
+	if (tail.kind == SljitNativeRegionOpKind::AGGREGATE_UPDATE && tail.aggregate_update.plan.UsesPrimitivePayloads()) {
 		return false;
 	}
 	return true;

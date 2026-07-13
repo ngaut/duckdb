@@ -38,7 +38,7 @@ static bool TryBuildCountStarGroupedAggregateUpdateDescriptor(
     ExecutionSinkBinding &binding, SljitCountStarGroupedAggregateUpdateDescriptor &descriptor) {
 	descriptor = SljitCountStarGroupedAggregateUpdateDescriptor();
 	if (op.aggregate_update.plan.sink_info.kind != ExecutionRegionSinkKind::HASH_AGGREGATE_UPDATE ||
-	    !op.aggregate_update.plan.use_primitive_payloads || !op.aggregate_update.plan.use_grouped_state_addresses) {
+	    !op.aggregate_update.plan.UsesPrimitivePayloads() || !op.aggregate_update.plan.use_grouped_state_addresses) {
 		return false;
 	}
 	auto &sink_info = op.aggregate_update.plan.sink_info;

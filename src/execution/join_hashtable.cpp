@@ -51,7 +51,8 @@ JoinHashTable::JoinHashTable(ClientContext &context_p, const PhysicalOperator &o
     : context(context_p), op(op_p), buffer_manager(BufferManager::GetBufferManager(context)), conditions(conditions_p),
       build_types(std::move(btypes)), output_columns(output_columns_p), entry_size(0), tuple_size(0),
       vfound(Value::BOOLEAN(false), count_t(STANDARD_VECTOR_SIZE)), join_type(type_p), finalized(false),
-      has_null(false), residual_predicate(predicate_ptr), radix_bits(initial_radix_bits) {
+      has_null(false), residual_predicate(predicate_ptr), radix_bits(initial_radix_bits),
+      runtime_filter_identity(make_shared_ptr<ExecutionRuntimeFilterIdentity>()) {
 	// store residual predicate information
 	residual_info = std::move(residual_p);
 	lhs_output_in_probe = output_in_probe;
@@ -295,12 +296,11 @@ static idx_t ProbeForPointersSelectedInternal(JoinHashTable::ProbeState &state, 
 //! Gets a pointer to the entry in the HT for each of the hashes_v using linear probing. Will update the key_match_sel
 //! vector and the count argument to the number and position of the matches
 template <bool USE_SALTS>
-static void GetRowPointersFromDenseHashesInternal(DataChunk &keys, TupleDataChunkState &key_state,
-                                                  JoinHashTable::ProbeState &state,
-                                                  optional_ptr<const SelectionVector> row_sel, idx_t &count,
-                                                  JoinHashTable &ht, unsafe_optional_ptr<ht_entry_t> entries,
-                                                  Vector &pointers_result_v, SelectionVector &match_sel,
-                                                  bool has_row_sel) {
+static void
+GetRowPointersFromDenseHashesInternal(DataChunk &keys, TupleDataChunkState &key_state, JoinHashTable::ProbeState &state,
+                                      optional_ptr<const SelectionVector> row_sel, idx_t &count, JoinHashTable &ht,
+                                      unsafe_optional_ptr<ht_entry_t> entries, Vector &pointers_result_v,
+                                      SelectionVector &match_sel, bool has_row_sel) {
 	// the number of keys that match for all iterations of the following loop
 	idx_t match_count = 0;
 
@@ -521,6 +521,12 @@ bool JoinHashTable::GetExecutionHashJoinTableLayout(ExecutionHashJoinTableLayout
 	layout.entries = hash_map.get() ? reinterpret_cast<const ht_entry_t *>(hash_map.get()) : nullptr;
 	layout.aux_next_ptrs = aux_next_ptrs_data;
 	layout.bloom_filter = bloom_filter.IsInitialized() ? &bloom_filter : nullptr;
+	PrefixRangeLookupData prefix_lookup;
+	if (prefix_range_filter && TypeIsInteger(prefix_range_filter_key_type.InternalType()) &&
+	    prefix_range_filter->GetSignedLookupData(prefix_lookup) && prefix_lookup.shift == 0) {
+		layout.exact_filter_build_keys_unique = prefix_range_filter->DistinctCountUpperBound() == Count();
+		layout.runtime_filter_identity = runtime_filter_identity;
+	}
 
 	layout.null_keys_are_filtered = true;
 	for (idx_t condition_idx = 0; condition_idx < null_values_are_equal.size(); condition_idx++) {
@@ -568,11 +574,11 @@ void JoinHashTable::GetRowPointersWithDenseHashes(DataChunk &keys, TupleDataChun
                                                   idx_t &count, Vector &pointers_result_v, SelectionVector &match_sel) {
 	auto entries = GetEntries();
 	if (UseSalt()) {
-		GetRowPointersFromDenseHashesFlatInternal<true>(keys, key_state, state, count, *this, entries, pointers_result_v,
-		                                                match_sel);
+		GetRowPointersFromDenseHashesFlatInternal<true>(keys, key_state, state, count, *this, entries,
+		                                                pointers_result_v, match_sel);
 	} else {
-		GetRowPointersFromDenseHashesFlatInternal<false>(keys, key_state, state, count, *this, entries, pointers_result_v,
-		                                                 match_sel);
+		GetRowPointersFromDenseHashesFlatInternal<false>(keys, key_state, state, count, *this, entries,
+		                                                 pointers_result_v, match_sel);
 	}
 }
 
@@ -1143,6 +1149,14 @@ void JoinHashTable::EnsureBloomFilterForProbe() {
 		Hash(keys, sel, count, hashes);
 		bloom_filter.InsertHashes(hashes);
 	} while (iterator.Next());
+	bloom_filter.Finalize();
+}
+
+void JoinHashTable::MarkFinalized() {
+	if (bloom_filter.IsInitialized()) {
+		bloom_filter.Finalize();
+	}
+	finalized = true;
 }
 
 void JoinHashTable::InitializePointerTable(idx_t entry_idx_from, idx_t entry_idx_to) {
@@ -1492,10 +1506,10 @@ private:
 };
 
 template <class K0, class K1, class CONSUMER>
-static idx_t ProbeInt64PairNoChainLoop(const UnifiedVectorFormat &key0_format,
-                                       const UnifiedVectorFormat &key1_format, const ht_entry_t *__restrict entries,
-                                       const idx_t bitmask, const idx_t key0_offset, const idx_t key1_offset,
-                                       const bool use_salt, const idx_t count, CONSUMER &consumer) {
+static idx_t ProbeInt64PairNoChainLoop(const UnifiedVectorFormat &key0_format, const UnifiedVectorFormat &key1_format,
+                                       const ht_entry_t *__restrict entries, const idx_t bitmask,
+                                       const idx_t key0_offset, const idx_t key1_offset, const bool use_salt,
+                                       const idx_t count, CONSUMER &consumer) {
 	const auto *__restrict key0_data = UnifiedVectorFormat::GetData<K0>(key0_format);
 	const auto *__restrict key1_data = UnifiedVectorFormat::GetData<K1>(key1_format);
 	const auto &key0_sel = *key0_format.sel;
@@ -1536,8 +1550,7 @@ bool JoinHashTable::TryProbeInt64PairNoChain(ScanStructure &scan_structure, Data
 		return false;
 	}
 	for (idx_t key_idx = 0; key_idx < 2; key_idx++) {
-		if (!IsInt64PairProbeType(equality_types[key_idx]) ||
-		    !IsInt64PairProbeType(keys.data[key_idx].GetType()) ||
+		if (!IsInt64PairProbeType(equality_types[key_idx]) || !IsInt64PairProbeType(keys.data[key_idx].GetType()) ||
 		    equality_predicates[key_idx] != ExpressionType::COMPARE_EQUAL || null_values_are_equal[key_idx]) {
 			return false;
 		}
@@ -1556,23 +1569,23 @@ bool JoinHashTable::TryProbeInt64PairNoChain(ScanStructure &scan_structure, Data
 	idx_t match_count;
 	if (key0_physical_type == PhysicalType::INT64) {
 		if (key1_physical_type == PhysicalType::INT64) {
-			match_count = ProbeInt64PairNoChainLoop<int64_t, int64_t>(
-			    key0_format, key1_format, entries, bitmask, key0_offset, key1_offset, use_salt, scan_structure.count,
-			    consumer);
+			match_count =
+			    ProbeInt64PairNoChainLoop<int64_t, int64_t>(key0_format, key1_format, entries, bitmask, key0_offset,
+			                                                key1_offset, use_salt, scan_structure.count, consumer);
 		} else {
-			match_count = ProbeInt64PairNoChainLoop<int64_t, uint64_t>(
-			    key0_format, key1_format, entries, bitmask, key0_offset, key1_offset, use_salt, scan_structure.count,
-			    consumer);
+			match_count =
+			    ProbeInt64PairNoChainLoop<int64_t, uint64_t>(key0_format, key1_format, entries, bitmask, key0_offset,
+			                                                 key1_offset, use_salt, scan_structure.count, consumer);
 		}
 	} else {
 		if (key1_physical_type == PhysicalType::INT64) {
-			match_count = ProbeInt64PairNoChainLoop<uint64_t, int64_t>(
-			    key0_format, key1_format, entries, bitmask, key0_offset, key1_offset, use_salt, scan_structure.count,
-			    consumer);
+			match_count =
+			    ProbeInt64PairNoChainLoop<uint64_t, int64_t>(key0_format, key1_format, entries, bitmask, key0_offset,
+			                                                 key1_offset, use_salt, scan_structure.count, consumer);
 		} else {
-			match_count = ProbeInt64PairNoChainLoop<uint64_t, uint64_t>(
-			    key0_format, key1_format, entries, bitmask, key0_offset, key1_offset, use_salt, scan_structure.count,
-			    consumer);
+			match_count =
+			    ProbeInt64PairNoChainLoop<uint64_t, uint64_t>(key0_format, key1_format, entries, bitmask, key0_offset,
+			                                                  key1_offset, use_salt, scan_structure.count, consumer);
 		}
 	}
 	scan_structure.count = match_count;

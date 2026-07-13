@@ -128,6 +128,17 @@ preaggregated count binding, and payload-lane scratch lookup all consume the
 descriptor vector. Planner aggregate records stop at capability and native-sink
 binding; runtime cannot reconstruct primitive kind or state ABI from them.
 
+Aggregate payload binding has explicit monotonic ownership. A native aggregate
+starts `UNBOUND`, where DuckDB sink payload indexes are the only source of
+meaning. Direct primitive binding moves it to `DIRECT`; incorporating any
+projection moves it to `PROJECTION_COMPOSED`. In either bound state, the native
+payload expressions are authoritative and later passes may only compose those
+expressions through another projection. They may never rebuild payloads from
+the original sink indexes. Initializers require `UNBOUND`, composition requires
+a bound state, and successful composition always publishes
+`PROJECTION_COMPOSED`. No pass infers ownership from expression shape: a fused
+projection can legitimately simplify to a list containing only references.
+
 Grouped runtime strategies bind descriptors to DuckDB's live primitive lanes
 through `SljitGroupedReductionLaneBinding`. That binding owns the single check
 for aggregate identity, primitive kind, payload type, state size, grouped state
@@ -200,6 +211,13 @@ batch under an earlier batch's partition identity. This is an explicit source
 primitive rule, not a hidden scan-filter route. A native tail receives a
 materialized, unselected view. No view may outlive its chunk, scratch storage,
 selection vectors, row pointers, or hash-table contract.
+
+Source lowering computes the complete post-source layout before publishing
+native source operators into the region. Output types, nullability, statistics,
+and exact-filter identities are propagated through generated filters and source
+projection repair while those plans are still owned by the lowering cursor;
+only then are the plans moved into the immutable region. Downstream operators
+must never derive their input contract from a moved-from source plan.
 
 Selected-view join terminals are the complementary case: `SourceFetch` streams
 each sparse chunk without copying wide pre-join rows, and the terminal coalesces
@@ -354,17 +372,21 @@ map needed by downstream projection or aggregate consumers. Full join-output
 materialization is an explicit requirement of a consumer, not the default
 representation of a selected probe.
 
-Exact perfect-hash runtime filters and their owning join table share a
-query-local identity. Storage applies an exact PHJ conjunct as a mandatory
-prefilter, including checked integral input conversion, even when another
-conjunct still requires the generic expression executor. The source contract
-may carry that identity through filters and reference-only projections;
-computed projections, joins, and native boundaries invalidate it. When the
-downstream perfect-hash probe binds the same identity, the backend derives the
-match and build dictionary selections directly from the already-validated key
-and skips the duplicate NULL, range, and membership probe. Identity mismatch
-always uses the normal generated probe. This is an execution proof, not a
-cardinality estimate or a TPC-H-specific rule.
+Exact membership runtime filters and their owning join table share a query-local
+identity. Storage applies exact perfect-hash and shift-zero numeric prefix-range
+conjuncts as mandatory prefilters, including checked integral input conversion,
+even when another conjunct still requires the generic expression executor. The
+source contract may carry that identity through filters and reference-only
+projections; computed projections, joins, and native boundaries invalidate it.
+When a downstream perfect-hash probe binds the same identity, the backend
+derives match and build dictionary selections directly from the validated key.
+A regular probe may also disappear when the prefix bitmap is exact, the build
+keys are proven unique, there is one equality condition and no residual or
+marking work, and every requested RHS value is that equality key. Such RHS
+outputs alias the probe-key vector; non-key payloads and duplicate builds keep
+the normal row-pointer probe and gather. Identity mismatch always uses the
+normal generated probe. This is an execution proof, not a cardinality estimate
+or a benchmark-specific rule.
 
 The proof consumer distinguishes representation identity from checked
 conversion. A same-type key uses the exact-membership proof directly; a wider
@@ -396,7 +418,18 @@ into the shared bitmap-lookup decompression loop. Full compression groups still
 decompress directly into the result vector; partial groups use the scan scratch
 buffer. The codec then resumes the canonical plan at the first unfused
 operation. This preserves one operation order and one fallback boundary while
-avoiding a decode-copy-filter pipeline for sparse exact joins.
+avoiding a decode-copy-filter pipeline for sparse exact joins. Dense versus
+sparse perfect tables and presence versus absence of residual ranges are chosen
+once before the loop, so invariant layout branches do not remain in each value
+match.
+
+Bloom filters have an explicit build/finalize/read lifecycle. Parallel build
+uses atomic bit insertion; hash-table publication finalizes the filter before
+probe readers can observe it, after which lookup is a plain immutable read.
+Fixed-width, string, and interval scan inputs hash and test the Bloom filter in
+one unified-vector pass. Nested values retain the canonical vector-hash
+fallback. This removes the temporary hash vector and second selection pass
+without creating a second Bloom implementation.
 
 An exact-filter perfect-hash probe followed by `HashJoinBuildSink` is also an
 executable primitive sequence when every operation is backend-owned but no

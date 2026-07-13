@@ -148,7 +148,8 @@ bool TryFuseNativeProjectionIntoPrimitiveAggregateUpdate(const vector<LogicalTyp
                                                          SljitNativeRegionOpPlan &aggregate_update,
                                                          bool render_diagnostics) {
 	if (projection.kind != SljitNativeRegionOpKind::PROJECTION ||
-	    aggregate_update.kind != SljitNativeRegionOpKind::AGGREGATE_UPDATE) {
+	    aggregate_update.kind != SljitNativeRegionOpKind::AGGREGATE_UPDATE ||
+	    !aggregate_update.aggregate_update.CanInitializePrimitivePayloads()) {
 		return false;
 	}
 	auto &sink = aggregate_update.aggregate_update.sink_info;
@@ -181,7 +182,7 @@ bool TryFuseNativeProjectionIntoPrimitiveAggregateUpdate(const vector<LogicalTyp
 
 	aggregate_update.aggregate_update.input_types = input_types;
 	aggregate_update.aggregate_update.payloads = std::move(payloads);
-	aggregate_update.aggregate_update.use_primitive_payloads = true;
+	aggregate_update.aggregate_update.InitializeProjectionComposedPrimitivePayloads();
 	if (render_diagnostics) {
 		AppendSljitAggregateUpdateDiagnostic(aggregate_update.aggregate_update, "payload_update=generated-primitive");
 	}
@@ -197,7 +198,7 @@ bool TryFuseNativeProjectionIntoPerfectHashAggregateUpdate(const vector<LogicalT
 	    aggregate_update.kind != SljitNativeRegionOpKind::AGGREGATE_UPDATE) {
 		return false;
 	}
-	if (aggregate_update.aggregate_update.use_primitive_payloads) {
+	if (!aggregate_update.aggregate_update.CanInitializePrimitivePayloads()) {
 		return false;
 	}
 	auto &sink = aggregate_update.aggregate_update.sink_info;
@@ -256,7 +257,7 @@ bool TryFuseNativeProjectionIntoPerfectHashAggregateUpdate(const vector<LogicalT
 	aggregate_update.aggregate_update.input_types = input_types;
 	aggregate_update.aggregate_update.payloads = std::move(payloads);
 	aggregate_update.aggregate_update.group_expressions = std::move(group_expressions);
-	aggregate_update.aggregate_update.use_primitive_payloads = true;
+	aggregate_update.aggregate_update.InitializeProjectionComposedPrimitivePayloads();
 	aggregate_update.aggregate_update.use_grouped_state_addresses = true;
 	aggregate_update.aggregate_update.use_perfect_hash_group_lookup = true;
 	aggregate_update.output_types = input_types;
@@ -277,7 +278,7 @@ bool TryComposePrimitiveAggregatePayloadsThroughProjection(const vector<LogicalT
                                                            bool render_diagnostics) {
 	if (projection.kind != SljitNativeRegionOpKind::PROJECTION ||
 	    aggregate_update.kind != SljitNativeRegionOpKind::AGGREGATE_UPDATE ||
-	    !aggregate_update.aggregate_update.use_primitive_payloads) {
+	    !aggregate_update.aggregate_update.UsesPrimitivePayloads()) {
 		return false;
 	}
 	auto &sink = aggregate_update.aggregate_update.sink_info;
@@ -349,6 +350,7 @@ bool TryComposePrimitiveAggregatePayloadsThroughProjection(const vector<LogicalT
 		aggregate_update.aggregate_update.input_types = input_types;
 		aggregate_update.aggregate_update.payloads = std::move(payloads);
 		aggregate_update.aggregate_update.group_expressions = std::move(group_expressions);
+		aggregate_update.aggregate_update.MarkPrimitivePayloadsProjectionComposed();
 		if (render_diagnostics) {
 			AppendSljitAggregateUpdateDiagnostic(aggregate_update.aggregate_update,
 			                                     "perfect_hash_payload_projection_composed=true");
@@ -385,6 +387,7 @@ bool TryComposePrimitiveAggregatePayloadsThroughProjection(const vector<LogicalT
 	aggregate_update.output_types = input_types;
 	aggregate_update.aggregate_update.input_types = input_types;
 	aggregate_update.aggregate_update.payloads = std::move(payloads);
+	aggregate_update.aggregate_update.MarkPrimitivePayloadsProjectionComposed();
 	if (render_diagnostics) {
 		AppendSljitAggregateUpdateDiagnostic(aggregate_update.aggregate_update,
 		                                     "primitive_payload_projection_composed=true");

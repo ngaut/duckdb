@@ -21,7 +21,7 @@ static SinkResultType SljitExecuteNativeUngroupedAggregateUpdateWithPayloads(
     vector<SljitExecutableRegionExpression> &payloads, const char *stage_name, const char *runtime_path) {
 	auto &sink_info = op.aggregate_update.plan.sink_info;
 	if (sink_info.kind != ExecutionRegionSinkKind::UNGROUPED_AGGREGATE_UPDATE ||
-	    !op.aggregate_update.plan.use_primitive_payloads || op.aggregate_update.plan.use_grouped_state_addresses) {
+	    !op.aggregate_update.plan.UsesPrimitivePayloads() || op.aggregate_update.plan.use_grouped_state_addresses) {
 		throw InternalException("SLJIT ungrouped aggregate direct update received a non-ungrouped aggregate");
 	}
 	auto &binding =

@@ -475,6 +475,7 @@ private:
 	unique_ptr<PrefixRangeFilter> prefix_range_filter;
 	LogicalType prefix_range_filter_key_type;
 	bool should_build_prefix_range_filter = false;
+	shared_ptr<ExecutionRuntimeFilterIdentity> runtime_filter_identity;
 
 	//! Copying not allowed
 	JoinHashTable(const JoinHashTable &) = delete;
@@ -559,6 +560,7 @@ public:
 	void PrepareBuildBloomFilter(idx_t estimated_row_count);
 	void PrepareBloomFilterForFinalize();
 	void EnsureBloomFilterForProbe();
+	void MarkFinalized();
 
 	BloomFilter &GetBloomFilter() {
 		return bloom_filter;
@@ -579,6 +581,9 @@ public:
 
 	const LogicalType &GetPrefixRangeFilterKeyType() const {
 		return prefix_range_filter_key_type;
+	}
+	const shared_ptr<ExecutionRuntimeFilterIdentity> &GetRuntimeFilterIdentity() const {
+		return runtime_filter_identity;
 	}
 
 	bool ShouldBuildPrefixRangeFilter() const {

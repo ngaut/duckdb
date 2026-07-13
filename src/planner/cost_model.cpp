@@ -94,21 +94,22 @@ static bool PhysicalRunnerHasEstimatedGroupedReduction(const PhysicalRunnerCostI
 	       input.grouped_aggregate_estimated_cardinality <= input.source_contract_input_cardinality / 2;
 }
 
-static bool PhysicalRunnerLargeLowWorkGroupedLookup(const PhysicalRunnerCostInput &input,
-                                                    const PhysicalRunnerCostParameters &parameters) {
-	const auto has_amortization_proof = parameters.vectorized_parallelism > 1
-	                                        ? PhysicalRunnerHasEstimatedGroupedReduction(input)
-	                                        : PhysicalRunnerHasGeneratedGroupedLookupReplacementProof(input);
-	return input.native_grouped_state_address_lookup_count > 0 &&
-	       input.source_contract_input_cardinality >= LARGE_NATIVE_GROUPED_LOOKUP_INPUT_ROWS &&
-	       input.expression_cost < MIN_NATIVE_GROUPED_LOOKUP_EXPRESSION_COST && !has_amortization_proof;
-}
-
 static bool PhysicalRunnerHasGeneratedJoinGroupedFusionProof(const PhysicalRunnerCostInput &input) {
 	return input.native_hash_join_build_sink_count == 0 && input.native_join_stage_count > 0 &&
 	       input.native_grouped_state_address_lookup_count > 0 && input.generated_backend_stage_count >= 2 &&
 	       input.generated_grouped_aggregate_stage_count >= input.native_grouped_state_address_lookup_count &&
 	       input.generated_stage_count > input.native_grouped_state_address_lookup_count * 2;
+}
+
+static bool PhysicalRunnerLargeLowWorkGroupedLookup(const PhysicalRunnerCostInput &input,
+                                                    const PhysicalRunnerCostParameters &parameters) {
+	const auto has_amortization_proof =
+	    (parameters.vectorized_parallelism > 1 ? PhysicalRunnerHasEstimatedGroupedReduction(input)
+	                                           : PhysicalRunnerHasGeneratedGroupedLookupReplacementProof(input)) ||
+	    PhysicalRunnerHasGeneratedJoinGroupedFusionProof(input);
+	return input.native_grouped_state_address_lookup_count > 0 &&
+	       input.source_contract_input_cardinality >= LARGE_NATIVE_GROUPED_LOOKUP_INPUT_ROWS &&
+	       input.expression_cost < MIN_NATIVE_GROUPED_LOOKUP_EXPRESSION_COST && !has_amortization_proof;
 }
 
 static bool PhysicalRunnerCanAmortizeNativeGroupedStateAddressLookup(const PhysicalRunnerCostInput &input,

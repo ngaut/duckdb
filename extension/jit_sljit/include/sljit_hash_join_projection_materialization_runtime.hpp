@@ -147,8 +147,8 @@ static bool SljitTryMaterializeHashJoinReferenceProjectionsToBatch(
 	}
 
 	if (materialized_any) {
-		RecordSljitRegionStageRuntime(runtime, projection_idx, projection_op.kind,
-		                              "post_join_reference_projection", stage_start);
+		RecordSljitRegionStageRuntime(runtime, projection_idx, projection_op.kind, "post_join_reference_projection",
+		                              stage_start);
 	}
 	return materialized_any;
 }
@@ -214,8 +214,8 @@ static bool SljitTryMaterializeHashJoinComputedProjectionsToBatch(
 	}
 
 	if (materialized_any) {
-		RecordSljitRegionStageRuntime(runtime, projection_idx, projection_op.kind,
-		                              "post_join_computed_projection", stage_start);
+		RecordSljitRegionStageRuntime(runtime, projection_idx, projection_op.kind, "post_join_computed_projection",
+		                              stage_start);
 	}
 	return materialized_any;
 }
@@ -225,7 +225,8 @@ static bool SljitTryDirectMaterializeHashJoinProjectionSourcesToBatch(
     idx_t hash_join_idx, idx_t projection_idx, SljitExecutableRegionOp &projection_op, DataChunk &join_input,
     const SelectionVector &match_selection, Vector &row_pointers, DataChunk &join_source, DataChunk &batch,
     optional_ptr<const vector<idx_t>> output_to_projection = nullptr, optional_ptr<Vector> projected_hashes = nullptr,
-    optional_ptr<const vector<uint8_t>> extra_skip_projection = nullptr) {
+    optional_ptr<const vector<uint8_t>> extra_skip_projection = nullptr,
+    bool exact_source_filter_matches_are_proven = false) {
 	if (join_source.size() == 0 || hash_join_idx >= ops.size() || !scratch.HasOperatorBinding(hash_join_idx)) {
 		return false;
 	}
@@ -236,12 +237,16 @@ static bool SljitTryDirectMaterializeHashJoinProjectionSourcesToBatch(
 		}
 		direct_reference_skip = *extra_skip_projection;
 	}
-	const bool direct_references_materialized = SljitTryMaterializeHashJoinReferenceProjectionsToBatch(
-	    runtime, scratch, hash_join_idx, projection_idx, projection_op, join_input, match_selection, row_pointers,
-	    batch, output_to_projection, join_source.size(), direct_reference_skip);
-	const bool direct_computed_materialized = SljitTryMaterializeHashJoinComputedProjectionsToBatch(
-	    runtime, scratch, hash_join_idx, projection_idx, projection_op, join_input, match_selection, row_pointers,
-	    batch, output_to_projection, join_source.size(), direct_reference_skip);
+	const bool direct_references_materialized =
+	    !exact_source_filter_matches_are_proven &&
+	    SljitTryMaterializeHashJoinReferenceProjectionsToBatch(
+	        runtime, scratch, hash_join_idx, projection_idx, projection_op, join_input, match_selection, row_pointers,
+	        batch, output_to_projection, join_source.size(), direct_reference_skip);
+	const bool direct_computed_materialized =
+	    !exact_source_filter_matches_are_proven &&
+	    SljitTryMaterializeHashJoinComputedProjectionsToBatch(
+	        runtime, scratch, hash_join_idx, projection_idx, projection_op, join_input, match_selection, row_pointers,
+	        batch, output_to_projection, join_source.size(), direct_reference_skip);
 	const bool direct_projection_materialized = direct_references_materialized || direct_computed_materialized;
 	auto direct_projection_skip_ptr = SljitProjectionSkipHasAny(direct_reference_skip)
 	                                      ? optional_ptr<const vector<uint8_t>>(&direct_reference_skip)
@@ -272,7 +277,8 @@ static bool SljitTryDirectMaterializeHashJoinProjectionSourcesToBatch(
 	    [&](optional_ptr<ExecutionOperatorStageRecorder> recorder) {
 		    return ExecutionMaterializeHashJoinProbeProjectionSources(
 		        binding, join_input, row_pointers, match_selection, join_source.size(), referenced_columns, join_source,
-		        recorder, optional_ptr<const SelectionVector>(&scratch.HashJoinBuildSelection(hash_join_idx)));
+		        recorder, optional_ptr<const SelectionVector>(&scratch.HashJoinBuildSelection(hash_join_idx)),
+		        exact_source_filter_matches_are_proven);
 	    });
 	if (!materialized) {
 		return false;

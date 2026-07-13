@@ -26,6 +26,7 @@ class ExpressionFilter;
 class PerfectHashJoinExecutor;
 class PrefixRangeFilter;
 struct DynamicFilterData;
+struct ExecutionRuntimeFilterIdentity;
 
 struct SelectivityOptionalFilterState final : public TableFilterState {
 	enum class FilterStatus { ACTIVE, PAUSED_DUE_TO_HIGH_SELECTIVITY };
@@ -107,8 +108,15 @@ public:
 	void InsertHashes(const Vector &hashes_v) const;
 
 	void InsertOne(hash_t hash) const;
-	DUCKDB_API bool LookupOne(hash_t hash) const;
+	inline bool LookupOne(hash_t hash) const {
+		D_ASSERT(initialized);
+		D_ASSERT(finalized);
+		const auto bf_offset = hash & bitmask;
+		const auto mask = BloomFilter::GetMask(hash);
+		return (bf[bf_offset] & mask) == mask;
+	}
 	void Merge(const BloomFilter &other);
+	void Finalize();
 	void Reset();
 
 	static inline uint64_t GetMask(hash_t hash) {
@@ -138,6 +146,7 @@ private:
 	uint64_t bitmask; // num_sectors - 1 -> used to get the sector offset
 
 	bool initialized = false;
+	bool finalized = false;
 	AllocatedData buf_;
 	uint64_t *bf;
 };
@@ -218,13 +227,15 @@ public:
 //! FunctionData for prefix range internal function
 struct PrefixRangeFunctionData : public FunctionData {
 	PrefixRangeFunctionData(optional_ptr<PrefixRangeFilter> filter_p, const string &key_column_name_p,
-	                        const LogicalType &key_type_p, float selectivity_threshold_p, idx_t n_vectors_to_check_p);
+	                        const LogicalType &key_type_p, float selectivity_threshold_p, idx_t n_vectors_to_check_p,
+	                        shared_ptr<ExecutionRuntimeFilterIdentity> runtime_filter_identity_p = nullptr);
 
 	optional_ptr<PrefixRangeFilter> filter;
 	string key_column_name;
 	LogicalType key_type;
 	float selectivity_threshold;
 	idx_t n_vectors_to_check;
+	shared_ptr<ExecutionRuntimeFilterIdentity> runtime_filter_identity;
 
 	unique_ptr<FunctionData> Copy() const override;
 	bool Equals(const FunctionData &other) const override;

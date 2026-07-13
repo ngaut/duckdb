@@ -254,8 +254,7 @@ struct SljitRegionLoweringCursor {
 
 	void ApplyExactFilterProof(SljitRegionNodePlan &node_plan) const {
 		for (auto &op : node_plan.native_ops) {
-			if (op.kind != SljitNativeRegionOpKind::HASH_JOIN_PROBE || !op.hash_join_probe.perfect_hash_probe ||
-			    op.hash_join_probe.keys.size() != 1) {
+			if (op.kind != SljitNativeRegionOpKind::HASH_JOIN_PROBE || op.hash_join_probe.keys.size() != 1) {
 				continue;
 			}
 			auto source_index = op.hash_join_probe.keys[0].key_input_index;
@@ -282,7 +281,7 @@ struct SljitRegionLoweringCursor {
 		                               ? node.output_types
 		                               : node_plan.source_contract.source_output_types;
 		current_exact_filter_identities.assign(source_output_types.size(), nullptr);
-		if (node.source && node_plan.native_ops.empty()) {
+		if (node.source) {
 			auto &contract = node.source->table_scan_contract;
 			for (auto &proof : node.source->exact_filter_proofs) {
 				if (!proof.identity) {
@@ -307,12 +306,14 @@ struct SljitRegionLoweringCursor {
 		if (source_not_null.size() != source_output_types.size()) {
 			source_not_null.assign(source_output_types.size(), false);
 		}
-		AppendIfFusing(node_plan);
-		current_types = SljitRegionNodeHasNativeOps(node_plan) ? SljitRegionNodeLastNativeOp(node_plan).output_types
-		                                                       : std::move(source_output_types);
 		for (auto &op : node_plan.native_ops) {
 			SljitUpdateExecutableCurrentNotNull(op, source_not_null);
+			UpdateExactFilterProofs(op);
 		}
+		auto output_types = SljitRegionNodeHasNativeOps(node_plan) ? SljitRegionNodeLastNativeOp(node_plan).output_types
+		                                                           : std::move(source_output_types);
+		AppendIfFusing(node_plan);
+		current_types = std::move(output_types);
 		current_not_null = std::move(source_not_null);
 	}
 

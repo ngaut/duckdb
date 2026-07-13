@@ -208,7 +208,7 @@ static SljitNativeRegionOpPlan CopySljitNativeRegionOp(const SljitNativeRegionOp
 	result.aggregate_update.distinct_key_cardinality_upper_bound =
 	    input.aggregate_update.distinct_key_cardinality_upper_bound;
 	result.aggregate_update.group_reserve = input.aggregate_update.group_reserve;
-	result.aggregate_update.use_primitive_payloads = input.aggregate_update.use_primitive_payloads;
+	result.aggregate_update.payload_binding_state = input.aggregate_update.payload_binding_state;
 	result.aggregate_update.use_grouped_state_addresses = input.aggregate_update.use_grouped_state_addresses;
 	result.aggregate_update.use_perfect_hash_group_lookup = input.aggregate_update.use_perfect_hash_group_lookup;
 	result.aggregate_update.ir = input.aggregate_update.ir;

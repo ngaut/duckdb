@@ -23,7 +23,7 @@ SljitCanExecuteGroupedPrimitiveAggregateUpdateShape(SljitExecutableRegionOp &op,
 	auto &aggregate_update = op.aggregate_update;
 	auto &plan = aggregate_update.plan;
 	auto &sink_info = plan.sink_info;
-	if (execute_sel != nullptr || count != input.size() || !plan.use_primitive_payloads ||
+	if (execute_sel != nullptr || count != input.size() || !plan.UsesPrimitivePayloads() ||
 	    !plan.use_grouped_state_addresses || plan.use_perfect_hash_group_lookup ||
 	    aggregate_update.fused_payload_update_owns_group_lookup ||
 	    sink_info.kind != ExecutionRegionSinkKind::HASH_AGGREGATE_UPDATE ||
@@ -100,7 +100,7 @@ static bool SljitCanExecuteDirectGroupedStateAddressPayloadUpdate(
 	auto &plan = aggregate_update.plan;
 	auto &sink_info = plan.sink_info;
 	if (scratch.DirectNewAggregateUpdateDisabled(op_idx) || execute_sel != nullptr || count != input.size() ||
-	    !plan.use_primitive_payloads || !plan.use_grouped_state_addresses || plan.use_perfect_hash_group_lookup ||
+	    !plan.UsesPrimitivePayloads() || !plan.use_grouped_state_addresses || plan.use_perfect_hash_group_lookup ||
 	    aggregate_update.fused_payload_update_owns_group_lookup || !aggregate_update.fused_payload_update.Function() ||
 	    sink_info.kind != ExecutionRegionSinkKind::HASH_AGGREGATE_UPDATE ||
 	    sink_info.aggregates.size() != aggregate_update.payloads.size() ||
@@ -148,7 +148,7 @@ SljitCanPreaggregateInputVectorFusedPrimitivePayloads(SljitExecutableRegionOp &o
 	auto &sink_info = aggregate_update.plan.sink_info;
 	if (!aggregate_update.fused_payload_update.Function() || aggregate_update.fused_payload_update_owns_group_lookup ||
 	    sink_info.kind != ExecutionRegionSinkKind::HASH_AGGREGATE_UPDATE ||
-	    !aggregate_update.plan.use_primitive_payloads || !aggregate_update.plan.use_grouped_state_addresses ||
+	    !aggregate_update.plan.UsesPrimitivePayloads() || !aggregate_update.plan.use_grouped_state_addresses ||
 	    aggregate_update.plan.use_perfect_hash_group_lookup ||
 	    sink_info.aggregates.size() != aggregate_update.payloads.size() ||
 	    sink_info.aggregates.size() != aggregate_update.payload_descriptors.size() ||
@@ -212,7 +212,7 @@ static bool SljitCanExecuteDirectRowPointerPreaggregatedPrimitiveUpdate(
 	auto &plan = aggregate_update.plan;
 	auto &sink_info = plan.sink_info;
 	if (scratch.DirectNewAggregateUpdateDisabled(op_idx) || count != payload_input.size() || count < 2 ||
-	    row_pointers.GetVectorType() != VectorType::FLAT_VECTOR || !plan.use_primitive_payloads ||
+	    row_pointers.GetVectorType() != VectorType::FLAT_VECTOR || !plan.UsesPrimitivePayloads() ||
 	    !plan.use_grouped_state_addresses || plan.use_perfect_hash_group_lookup ||
 	    aggregate_update.fused_payload_update_owns_group_lookup ||
 	    sink_info.kind != ExecutionRegionSinkKind::HASH_AGGREGATE_UPDATE ||
@@ -274,7 +274,7 @@ static bool SljitCanResolveDirectNewGroupedStateAddresses(SljitRegionExecutionSc
 	auto &plan = aggregate_update.plan;
 	auto &sink_info = plan.sink_info;
 	return !scratch.DirectNewAggregateUpdateDisabled(op_idx) && execute_sel == nullptr && count == input.size() &&
-	       plan.use_primitive_payloads && plan.use_grouped_state_addresses && !plan.use_perfect_hash_group_lookup &&
+	       plan.UsesPrimitivePayloads() && plan.use_grouped_state_addresses && !plan.use_perfect_hash_group_lookup &&
 	       !aggregate_update.fused_payload_update_owns_group_lookup &&
 	       sink_info.kind == ExecutionRegionSinkKind::HASH_AGGREGATE_UPDATE && !sink_info.groups.empty();
 }

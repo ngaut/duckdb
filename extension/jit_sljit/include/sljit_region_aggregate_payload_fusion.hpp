@@ -179,12 +179,6 @@ static bool SljitPrimitiveAggregatePayloadsContainNonReference(const vector<Slji
 	return false;
 }
 
-static bool
-SljitAggregateUpdateAlreadyHasFusedProjectionPayloads(const SljitNativeAggregateUpdatePlan &aggregate_update) {
-	return aggregate_update.use_primitive_payloads &&
-	       SljitPrimitiveAggregatePayloadsContainNonReference(aggregate_update.payloads, aggregate_update.sink_info);
-}
-
 static void AppendSljitAggregateUpdateDiagnostic(SljitNativeAggregateUpdatePlan &aggregate_update,
                                                  const string &diagnostic) {
 	if (!aggregate_update.ir.empty()) {

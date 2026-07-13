@@ -584,19 +584,22 @@ bool PrefixRangeFilter::SupportedType(const LogicalType &type) {
 
 PrefixRangeFunctionData::PrefixRangeFunctionData(optional_ptr<PrefixRangeFilter> filter_p,
                                                  const string &key_column_name_p, const LogicalType &key_type_p,
-                                                 float selectivity_threshold_p, idx_t n_vectors_to_check_p)
+                                                 float selectivity_threshold_p, idx_t n_vectors_to_check_p,
+                                                 shared_ptr<ExecutionRuntimeFilterIdentity> runtime_filter_identity_p)
     : filter(filter_p), key_column_name(key_column_name_p), key_type(key_type_p),
-      selectivity_threshold(selectivity_threshold_p), n_vectors_to_check(n_vectors_to_check_p) {
+      selectivity_threshold(selectivity_threshold_p), n_vectors_to_check(n_vectors_to_check_p),
+      runtime_filter_identity(std::move(runtime_filter_identity_p)) {
 }
 
 unique_ptr<FunctionData> PrefixRangeFunctionData::Copy() const {
 	return make_uniq<PrefixRangeFunctionData>(filter, key_column_name, key_type, selectivity_threshold,
-	                                          n_vectors_to_check);
+	                                          n_vectors_to_check, runtime_filter_identity);
 }
 
 bool PrefixRangeFunctionData::Equals(const FunctionData &other_p) const {
 	auto &other = other_p.Cast<PrefixRangeFunctionData>();
-	return filter.get() == other.filter.get() && key_column_name == other.key_column_name && key_type == other.key_type;
+	return filter.get() == other.filter.get() && key_column_name == other.key_column_name &&
+	       key_type == other.key_type && runtime_filter_identity == other.runtime_filter_identity;
 }
 
 static idx_t SelectPrefixRange(Vector &input, const PrefixRangeFunctionData &func_data, SelectionVector &result_sel,

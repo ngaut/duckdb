@@ -85,16 +85,18 @@ private:
 			throw InternalException("SLJIT hash join build sink could not bind required input columns");
 		}
 		join_output.Reset();
-		if (SljitTryMaterializeHashJoinRequiredSources(
-		        runtime, scratch, hash_join_idx, hash_join_op, join_input, selected.MatchSelection(),
-		        selected.BuildSelection(), selected.RowPointers(), selected.count, required_columns, join_output)) {
+		if (SljitTryMaterializeHashJoinRequiredSources(runtime, scratch, hash_join_idx, hash_join_op, join_input,
+		                                               selected.MatchSelection(), selected.BuildSelection(),
+		                                               selected.RowPointers(), selected.count, required_columns,
+		                                               join_output, selected.exact_source_filter_matches_are_proven)) {
 			RecordSljitRegionRuntimePath(runtime, sink_op.kind, "selected_required_sources", join_output.size());
 			sink_input = &join_output;
 			return true;
 		}
 		if (!SljitMaterializeSelectionOnlyHashJoinProbeOutput(runtime, scratch, hash_join_idx, hash_join_op, join_input,
 		                                                      selected.MatchSelection(), selected.BuildSelection(),
-		                                                      selected.RowPointers(), selected.count, join_output)) {
+		                                                      selected.RowPointers(), selected.count, join_output,
+		                                                      selected.exact_source_filter_matches_are_proven)) {
 			throw InternalException("SLJIT hash join build sink could not materialize selected hash join input");
 		}
 		RecordSljitRegionRuntimePath(runtime, sink_op.kind, "selected_full_output", join_output.size());
@@ -115,10 +117,10 @@ private:
 		                                                 projection_op.output_types.size(), required_columns)) {
 			throw InternalException("SLJIT hash join build sink could not bind projected required columns");
 		}
-		if (SljitTryMaterializeHashJoinRequiredProjectionViews(runtime, scratch, selected.hash_join_idx, projection_idx,
-		                                                       projection_op, join_input, selected.MatchSelection(),
-		                                                       selected.BuildSelection(), selected.RowPointers(),
-		                                                       selected.count, required_columns, projected)) {
+		if (SljitTryMaterializeHashJoinRequiredProjectionViews(
+		        runtime, scratch, selected.hash_join_idx, projection_idx, projection_op, join_input,
+		        selected.MatchSelection(), selected.BuildSelection(), selected.RowPointers(), selected.count,
+		        required_columns, projected, selected.exact_source_filter_matches_are_proven)) {
 			RecordSljitRegionRuntimePath(runtime, hash_join_op.kind, "projected_hash_build_views", projected.size());
 			sink_input = &projected;
 			return true;
@@ -126,13 +128,15 @@ private:
 		join_output.Reset();
 		if (!SljitMaterializeSelectionOnlyHashJoinProbeOutput(
 		        runtime, scratch, selected.hash_join_idx, hash_join_op, join_input, selected.MatchSelection(),
-		        selected.BuildSelection(), selected.RowPointers(), selected.count, join_output)) {
+		        selected.BuildSelection(), selected.RowPointers(), selected.count, join_output,
+		        selected.exact_source_filter_matches_are_proven)) {
 			throw InternalException("SLJIT hash join build sink could not materialize selected hash join input");
 		}
 		projected.Reset();
 		if (SljitTryMaterializeHashJoinRequiredProjectionOutputs(
 		        runtime, ops, scratch, selected.hash_join_idx, projection_idx, projection_op, join_input,
-		        selected.MatchSelection(), selected.RowPointers(), join_output, projected, required_columns)) {
+		        selected.MatchSelection(), selected.RowPointers(), join_output, projected, required_columns,
+		        selected.exact_source_filter_matches_are_proven)) {
 			RecordSljitRegionRuntimePath(runtime, hash_join_op.kind, "projected_hash_build_outputs", projected.size());
 			sink_input = &projected;
 			return true;

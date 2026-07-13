@@ -24,7 +24,7 @@ static bool SljitFullPipelineLastOpIsProjectionAggregateUpdate(const vector<Slji
 		return true;
 	}
 	return kind == ExecutionRegionSinkKind::UNGROUPED_AGGREGATE_UPDATE &&
-	       ops.back().aggregate_update.plan.use_primitive_payloads;
+	       ops.back().aggregate_update.plan.UsesPrimitivePayloads();
 }
 
 bool SljitFullPipelineHashJoinProbeIsMatchedProbeAndBuild(const vector<SljitExecutableRegionOp> &ops, idx_t op_idx) {
@@ -35,7 +35,7 @@ bool SljitFullPipelineHashJoinProbeIsMatchedProbeAndBuild(const vector<SljitExec
 static bool SljitFullPipelineOpIsUngroupedPrimitiveAggregateUpdate(const SljitExecutableRegionOp &op) {
 	return op.kind == SljitNativeRegionOpKind::AGGREGATE_UPDATE &&
 	       op.aggregate_update.plan.sink_info.kind == ExecutionRegionSinkKind::UNGROUPED_AGGREGATE_UPDATE &&
-	       op.aggregate_update.plan.use_primitive_payloads;
+	       op.aggregate_update.plan.UsesPrimitivePayloads();
 }
 
 SljitFullPipelineScheduleFacts SljitAnalyzeFullPipelineScheduleFacts(const vector<SljitExecutableRegionOp> &ops) {
@@ -176,7 +176,7 @@ bool SljitTryAnalyzeSourceFilterAggregate(const vector<SljitExecutableRegionOp> 
 	facts = SljitSourceFilterAggregateFacts();
 	if (ops.size() != 2 || !SljitFullPipelineOpIsAt(ops, 0, SljitNativeRegionOpKind::FILTER) ||
 	    !SljitFullPipelineOpIsAt(ops, 1, SljitNativeRegionOpKind::AGGREGATE_UPDATE) ||
-	    !ops[1].aggregate_update.plan.use_primitive_payloads) {
+	    !ops[1].aggregate_update.plan.UsesPrimitivePayloads()) {
 		return false;
 	}
 	facts.filter_idx = 0;
@@ -196,7 +196,7 @@ bool SljitTryAnalyzeJoinFilterAggregate(const vector<SljitExecutableRegionOp> &o
 	if (!SljitFullPipelineOpIsAt(ops, hash_join_idx, SljitNativeRegionOpKind::HASH_JOIN_PROBE) ||
 	    !SljitFullPipelineOpIsAt(ops, filter_idx, SljitNativeRegionOpKind::FILTER) ||
 	    !SljitFullPipelineOpIsAt(ops, aggregate_idx, SljitNativeRegionOpKind::AGGREGATE_UPDATE) ||
-	    !ops[aggregate_idx].aggregate_update.plan.use_primitive_payloads) {
+	    !ops[aggregate_idx].aggregate_update.plan.UsesPrimitivePayloads()) {
 		return false;
 	}
 	for (idx_t op_idx = 0; op_idx < hash_join_idx; op_idx++) {

@@ -16,7 +16,7 @@ static bool SljitAggregateUpdateHasDedicatedCompiledBackend(const SljitExecutabl
 	if (op.kind != SljitNativeRegionOpKind::AGGREGATE_UPDATE) {
 		return false;
 	}
-	return op.aggregate_update.plan.use_primitive_payloads;
+	return op.aggregate_update.plan.UsesPrimitivePayloads();
 }
 
 struct SljitPostJoinProjectionAggregatePrimitive {

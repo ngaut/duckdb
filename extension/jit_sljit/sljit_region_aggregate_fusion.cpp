@@ -20,7 +20,7 @@ static bool TryUsePrimitiveReferenceAggregateUpdate(const vector<LogicalType> &i
                                                     SljitNativeRegionOpPlan &aggregate_update,
                                                     bool render_diagnostics) {
 	if (aggregate_update.kind != SljitNativeRegionOpKind::AGGREGATE_UPDATE ||
-	    aggregate_update.aggregate_update.use_primitive_payloads) {
+	    !aggregate_update.aggregate_update.CanInitializePrimitivePayloads()) {
 		return false;
 	}
 	auto &sink = aggregate_update.aggregate_update.sink_info;
@@ -49,7 +49,7 @@ static bool TryUsePrimitiveReferenceAggregateUpdate(const vector<LogicalType> &i
 
 	aggregate_update.aggregate_update.input_types = input_types;
 	aggregate_update.aggregate_update.payloads = std::move(payloads);
-	aggregate_update.aggregate_update.use_primitive_payloads = true;
+	aggregate_update.aggregate_update.InitializeDirectPrimitivePayloads();
 	aggregate_update.aggregate_update.use_grouped_state_addresses = grouped_state;
 	aggregate_update.aggregate_update.use_perfect_hash_group_lookup = perfect_hash_group_lookup;
 	if (render_diagnostics) {

@@ -86,7 +86,7 @@ bool SljitTryBuildFilteredAggregateUpdate(SljitExecutableRegionOp &filter_op, Sl
 		return true;
 	}
 	auto &aggregate_update = aggregate_op.aggregate_update;
-	if (aggregate_update.filtered_update.IsExecutable() || !aggregate_update.plan.use_primitive_payloads ||
+	if (aggregate_update.filtered_update.IsExecutable() || !aggregate_update.plan.UsesPrimitivePayloads() ||
 	    aggregate_update.payloads.empty() ||
 	    aggregate_update.payloads.size() != aggregate_update.plan.sink_info.aggregates.size()) {
 		return true;
