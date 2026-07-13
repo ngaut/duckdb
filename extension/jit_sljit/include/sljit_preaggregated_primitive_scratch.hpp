@@ -67,7 +67,167 @@ struct SljitPreaggregatedPrimitiveAggregateScratch {
 			}
 		}
 	}
+
+	bool PrepareFixed(const vector<const ExecutionPrimitiveAggregateUpdateLane *> &lanes, idx_t capacity) {
+		Prepare(lanes, capacity);
+		group_row_counts.resize(capacity);
+		for (auto &payload : payloads) {
+			switch (payload.kind) {
+			case AggregatePrimitiveUpdateKind::COUNT_STAR:
+			case AggregatePrimitiveUpdateKind::COUNT:
+			case AggregatePrimitiveUpdateKind::SUM_INT64:
+				payload.int64_values.resize(capacity);
+				break;
+			case AggregatePrimitiveUpdateKind::SUM_HUGEINT:
+				payload.hugeint_values.resize(capacity);
+				break;
+			default:
+				return false;
+			}
+			if (payload.kind == AggregatePrimitiveUpdateKind::SUM_INT64 ||
+			    payload.kind == AggregatePrimitiveUpdateKind::SUM_HUGEINT) {
+				payload.value_is_set.resize(capacity);
+			}
+		}
+		return true;
+	}
+
+	bool HasFixedCapacity(const vector<const ExecutionPrimitiveAggregateUpdateLane *> &lanes, idx_t capacity) const {
+		if (payloads.size() != lanes.size() || group_row_counts.size() != capacity) {
+			return false;
+		}
+		for (idx_t payload_idx = 0; payload_idx < lanes.size(); payload_idx++) {
+			auto lane = lanes[payload_idx];
+			auto &payload = payloads[payload_idx];
+			if (!lane || payload.kind != lane->kind) {
+				return false;
+			}
+			switch (payload.kind) {
+			case AggregatePrimitiveUpdateKind::COUNT_STAR:
+			case AggregatePrimitiveUpdateKind::COUNT:
+				if (payload.int64_values.size() != capacity) {
+					return false;
+				}
+				break;
+			case AggregatePrimitiveUpdateKind::SUM_INT64:
+				if (payload.int64_values.size() != capacity || payload.value_is_set.size() != capacity) {
+					return false;
+				}
+				break;
+			case AggregatePrimitiveUpdateKind::SUM_HUGEINT:
+				if (payload.hugeint_values.size() != capacity || payload.value_is_set.size() != capacity) {
+					return false;
+				}
+				break;
+			default:
+				return false;
+			}
+		}
+		return true;
+	}
 };
+
+static bool
+ResetFixedPreaggregatedPrimitiveScratchGroup(SljitPreaggregatedPrimitiveAggregateScratch &scratch,
+                                             const vector<const ExecutionPrimitiveAggregateUpdateLane *> &lanes,
+                                             idx_t group_idx) {
+	if (scratch.payloads.size() != lanes.size() || group_idx >= scratch.group_row_counts.size()) {
+		return false;
+	}
+	scratch.group_row_counts[group_idx] = 0;
+	for (idx_t payload_idx = 0; payload_idx < lanes.size(); payload_idx++) {
+		auto lane = lanes[payload_idx];
+		auto &payload = scratch.payloads[payload_idx];
+		if (!lane || payload.kind != lane->kind) {
+			return false;
+		}
+		switch (payload.kind) {
+		case AggregatePrimitiveUpdateKind::COUNT_STAR:
+		case AggregatePrimitiveUpdateKind::COUNT:
+		case AggregatePrimitiveUpdateKind::SUM_INT64:
+			if (group_idx >= payload.int64_values.size()) {
+				return false;
+			}
+			payload.int64_values[group_idx] = 0;
+			break;
+		case AggregatePrimitiveUpdateKind::SUM_HUGEINT:
+			if (group_idx >= payload.hugeint_values.size()) {
+				return false;
+			}
+			payload.hugeint_values[group_idx] = 0;
+			break;
+		default:
+			return false;
+		}
+		if (payload.kind == AggregatePrimitiveUpdateKind::SUM_INT64 ||
+		    payload.kind == AggregatePrimitiveUpdateKind::SUM_HUGEINT) {
+			if (group_idx >= payload.value_is_set.size()) {
+				return false;
+			}
+			payload.value_is_set[group_idx] = 0;
+		}
+	}
+	return true;
+}
+
+static bool CanSlicePreaggregatedPrimitiveScratch(const SljitPreaggregatedPrimitiveAggregateScratch &source,
+                                                  const vector<const ExecutionPrimitiveAggregateUpdateLane *> &lanes,
+                                                  idx_t offset, idx_t count);
+
+static bool CopyPreaggregatedPrimitiveScratchRangeToFixed(
+    const SljitPreaggregatedPrimitiveAggregateScratch &source,
+    const vector<const ExecutionPrimitiveAggregateUpdateLane *> &lanes, idx_t source_offset, idx_t count,
+    SljitPreaggregatedPrimitiveAggregateScratch &target, idx_t target_offset) {
+	if (!CanSlicePreaggregatedPrimitiveScratch(source, lanes, source_offset, count) ||
+	    target.payloads.size() != lanes.size() || target.group_row_counts.size() < target_offset + count) {
+		return false;
+	}
+	const auto source_begin = UnsafeNumericCast<int64_t>(source_offset);
+	const auto source_end = UnsafeNumericCast<int64_t>(source_offset + count);
+	const auto target_begin = UnsafeNumericCast<int64_t>(target_offset);
+	std::copy(source.group_row_counts.begin() + source_begin, source.group_row_counts.begin() + source_end,
+	          target.group_row_counts.begin() + target_begin);
+	for (idx_t payload_idx = 0; payload_idx < lanes.size(); payload_idx++) {
+		auto &source_payload = source.payloads[payload_idx];
+		auto &target_payload = target.payloads[payload_idx];
+		if (!lanes[payload_idx] || source_payload.kind != lanes[payload_idx]->kind ||
+		    target_payload.kind != source_payload.kind) {
+			return false;
+		}
+		switch (source_payload.kind) {
+		case AggregatePrimitiveUpdateKind::COUNT_STAR:
+		case AggregatePrimitiveUpdateKind::COUNT:
+		case AggregatePrimitiveUpdateKind::SUM_INT64:
+			if (target_payload.int64_values.size() < target_offset + count) {
+				return false;
+			}
+			std::copy(source_payload.int64_values.begin() + source_begin,
+			          source_payload.int64_values.begin() + source_end,
+			          target_payload.int64_values.begin() + target_begin);
+			break;
+		case AggregatePrimitiveUpdateKind::SUM_HUGEINT:
+			if (target_payload.hugeint_values.size() < target_offset + count) {
+				return false;
+			}
+			std::copy(source_payload.hugeint_values.begin() + source_begin,
+			          source_payload.hugeint_values.begin() + source_end,
+			          target_payload.hugeint_values.begin() + target_begin);
+			break;
+		default:
+			return false;
+		}
+		if (source_payload.kind == AggregatePrimitiveUpdateKind::SUM_INT64 ||
+		    source_payload.kind == AggregatePrimitiveUpdateKind::SUM_HUGEINT) {
+			if (target_payload.value_is_set.size() < target_offset + count) {
+				return false;
+			}
+			std::copy(source_payload.value_is_set.begin() + source_begin,
+			          source_payload.value_is_set.begin() + source_end,
+			          target_payload.value_is_set.begin() + target_begin);
+		}
+	}
+	return true;
+}
 
 static bool CanSlicePreaggregatedPrimitiveScratch(const SljitPreaggregatedPrimitiveAggregateScratch &source,
                                                   const vector<const ExecutionPrimitiveAggregateUpdateLane *> &lanes,

@@ -386,6 +386,72 @@ bool SljitBuildExecutableAggregateUpdatePayloadCode(const SljitNativeAggregateUp
 	return SljitBuildExecutableAggregateUpdateFallbackPayloadCode(op, executable, error);
 }
 
+static vector<PhysicalType> SljitPrimitiveRunGroupSourceTypes(PhysicalType target_type) {
+	vector<PhysicalType> result {target_type};
+	switch (target_type) {
+	case PhysicalType::INT8:
+		result.push_back(PhysicalType::INT32);
+		break;
+	case PhysicalType::INT16:
+	case PhysicalType::INT32:
+		result.push_back(PhysicalType::INT64);
+		break;
+	default:
+		break;
+	}
+	return result;
+}
+
+bool SljitBuildExecutablePrimitiveRunUpdateCode(const SljitNativeAggregateUpdatePlan &op,
+                                                SljitExecutableAggregateUpdate &executable, string &error) {
+	auto &sink = op.sink_info;
+	if (sink.kind != ExecutionRegionSinkKind::HASH_AGGREGATE_UPDATE || !op.UsesPrimitivePayloads() ||
+	    !op.use_grouped_state_addresses || op.use_perfect_hash_group_lookup || sink.groups.size() != 1 ||
+	    sink.aggregates.size() != 1 || executable.payload_descriptors.size() != 1) {
+		return true;
+	}
+	auto group_type = sink.groups[0].type.InternalType();
+	auto &descriptor = executable.payload_descriptors[0];
+	auto primitive_kind = descriptor.primitive_kind;
+	PhysicalType payload_type = PhysicalType::INVALID;
+	switch (primitive_kind) {
+	case AggregatePrimitiveUpdateKind::COUNT_STAR:
+	case AggregatePrimitiveUpdateKind::COUNT:
+		break;
+	case AggregatePrimitiveUpdateKind::SUM_INT64:
+	case AggregatePrimitiveUpdateKind::SUM_HUGEINT:
+		payload_type = descriptor.input_type;
+		break;
+	default:
+		return true;
+	}
+	for (auto group_source_type : SljitPrimitiveRunGroupSourceTypes(group_type)) {
+		SljitNativePrimitiveRunFunction function = nullptr;
+		string build_error;
+		auto code = BuildSljitNativePrimitiveRunUpdate(group_source_type, group_type, payload_type, primitive_kind,
+		                                               function, build_error);
+		auto compiled = SljitCompiledFunction<SljitNativePrimitiveRunFunction>::TryCreate(std::move(code), function);
+		if (!compiled.IsExecutable()) {
+			if (build_error.rfind("unsupported", 0) == 0) {
+				continue;
+			}
+			error = build_error.empty() ? "SLJIT primitive run update code generation failed" : build_error;
+			return false;
+		}
+		SljitExecutablePrimitiveRunSpecialization specialization;
+		specialization.group_source_type = group_source_type;
+		specialization.compiled = std::move(compiled);
+		executable.primitive_run_update.flat_specializations.push_back(std::move(specialization));
+	}
+	if (!executable.primitive_run_update.IsExecutable()) {
+		return true;
+	}
+	executable.primitive_run_update.group_type = group_type;
+	executable.primitive_run_update.payload_type = payload_type;
+	executable.primitive_run_update.primitive_kind = primitive_kind;
+	return true;
+}
+
 void SljitSelectExecutableAggregateDirectUpdatePlan(SljitExecutableAggregateUpdate &executable) {
 	auto &direct_update = executable.grouped_direct_update;
 	direct_update.Clear();

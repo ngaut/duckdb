@@ -13,8 +13,11 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from tpch_common import TPCHConfigurationError
 from run_tpch_regression_gate import (
     apply_baseline_state_contract,
+    candidate_qualifies_for_direct_promotion,
+    merge_rechecked_csv_artifact,
     promotion_recheck_repeats,
     selected_auto_queries,
+    triage_recheck_repeats,
 )
 
 
@@ -128,6 +131,83 @@ class TestPromotionRepeats(unittest.TestCase):
         self.assertEqual(
             promotion_recheck_repeats(SimpleNamespace(repeats=5, promotion_repeats=7)),
             7,
+        )
+
+    def test_triage_reuses_candidate_sample_count_at_or_above_ten(self) -> None:
+        self.assertEqual(
+            triage_recheck_repeats(
+                SimpleNamespace(repeats=10, triage_repeats=None)
+            ),
+            10,
+        )
+
+    def promotion_args(self, repeats: int) -> SimpleNamespace:
+        return SimpleNamespace(
+            repeats=repeats,
+            promotion_repeats=10,
+            timing_mode="production",
+            event_log_size=0,
+            trace_decisions=False,
+            trace_runtime=False,
+        )
+
+    def test_reuses_passing_ten_repeat_production_candidate(self) -> None:
+        self.assertTrue(
+            candidate_qualifies_for_direct_promotion(self.promotion_args(10), True)
+        )
+
+    def test_five_repeat_candidate_still_requires_promotion_run(self) -> None:
+        self.assertFalse(
+            candidate_qualifies_for_direct_promotion(self.promotion_args(5), True)
+        )
+
+    def test_failed_candidate_comparison_is_never_promoted_directly(self) -> None:
+        self.assertFalse(
+            candidate_qualifies_for_direct_promotion(self.promotion_args(10), False)
+        )
+
+
+class TestPromotionArtifactMerge(unittest.TestCase):
+    def write_rows(self, path: Path, rows: list[dict[str, str]]) -> None:
+        with path.open("w", newline="", encoding="utf-8") as handle:
+            writer = csv.DictWriter(handle, fieldnames=("query", "policy", "median_s"))
+            writer.writeheader()
+            writer.writerows(rows)
+
+    def test_replaces_only_focused_query_rows(self) -> None:
+        temporary_directory = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary_directory.cleanup)
+        root = Path(temporary_directory.name)
+        candidate = root / "candidate.csv"
+        focused = root / "focused.csv"
+        merged = root / "merged.csv"
+        self.write_rows(
+            candidate,
+            [
+                {"query": "18", "policy": "auto", "median_s": "0.76"},
+                {"query": "20", "policy": "off", "median_s": "0.61"},
+                {"query": "20", "policy": "auto", "median_s": "0.53"},
+            ],
+        )
+        self.write_rows(
+            focused,
+            [
+                {"query": "20", "policy": "off", "median_s": "0.62"},
+                {"query": "20", "policy": "auto", "median_s": "0.52"},
+            ],
+        )
+
+        merge_rechecked_csv_artifact(candidate, focused, merged, ["20"])
+
+        with merged.open(newline="", encoding="utf-8") as handle:
+            rows = list(csv.DictReader(handle))
+        self.assertEqual(
+            rows,
+            [
+                {"query": "18", "policy": "auto", "median_s": "0.76"},
+                {"query": "20", "policy": "off", "median_s": "0.62"},
+                {"query": "20", "policy": "auto", "median_s": "0.52"},
+            ],
         )
 
 

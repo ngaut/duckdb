@@ -165,6 +165,10 @@ unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativeGroupedCountStar(SljitNati
                                                                        string &error);
 unique_ptr<ExecutionRegionCodeHandle>
 BuildSljitNativeGroupedCountReference(SljitNativeAggregateUpdateFunction &function, string &error);
+unique_ptr<ExecutionRegionCodeHandle>
+BuildSljitNativePrimitiveRunUpdate(PhysicalType group_source_type, PhysicalType group_type, PhysicalType payload_type,
+                                   AggregatePrimitiveUpdateKind primitive_kind,
+                                   SljitNativePrimitiveRunFunction &function, string &error);
 unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativeUngroupedSumInt64IntegerBinaryConstant(
     SljitNativeIntegerKind kind, SljitNativeIntegerBinaryOp op, bool constant_on_left,
     SljitNativeAggregateUpdateFunction &function, string &error, bool check_arithmetic_overflow = true,

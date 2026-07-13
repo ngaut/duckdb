@@ -495,11 +495,7 @@ def triage_failed_comparison(
     print(f"[triage] focused failed queries: {' '.join(failed_queries)}", flush=True)
 
     recheck_dir = out_dir / "focused_recheck"
-    recheck_repeats = (
-        args.triage_repeats
-        if args.triage_repeats is not None
-        else max(args.repeats, DEFAULT_HIGH_SAMPLE_REPEATS)
-    )
+    recheck_repeats = triage_recheck_repeats(args)
     run_command(
         benchmark_command(
             args,
@@ -576,45 +572,82 @@ def triage_failed_comparison(
     return False
 
 
+def triage_recheck_repeats(args: argparse.Namespace) -> int:
+    if args.triage_repeats is not None:
+        return args.triage_repeats
+    return max(args.repeats, DEFAULT_HIGH_SAMPLE_REPEATS)
+
+
 def promotion_recheck_repeats(args: argparse.Namespace) -> int:
     if args.promotion_repeats is not None:
         return args.promotion_repeats
     return max(args.repeats, DEFAULT_HIGH_SAMPLE_REPEATS)
 
 
+def candidate_qualifies_for_direct_promotion(
+    args: argparse.Namespace, comparison_passed: bool
+) -> bool:
+    return (
+        comparison_passed
+        and args.timing_mode == "production"
+        and args.event_log_size == 0
+        and not args.trace_decisions
+        and not args.trace_runtime
+        and args.repeats == promotion_recheck_repeats(args)
+    )
+
+
 def build_promoted_baseline(
-    args: argparse.Namespace, baseline: Path, out_dir: Path
+    args: argparse.Namespace,
+    baseline: Path,
+    out_dir: Path,
+    reuse_candidate: bool = False,
+    rechecked_queries: list[str] | None = None,
 ) -> tuple[Path, int]:
-    promoted_dir = out_dir / "promotion_recheck"
     repeats = promotion_recheck_repeats(args)
-    run_command(
-        benchmark_command(
-            args,
-            promoted_dir,
-            queries=args.queries,
-            repeats=repeats,
-            timing_mode="production",
-            event_log_size=0,
-            trace_decisions=False,
-            trace_runtime=False,
-            reuse_database=True,
-        ),
-        "baseline promotion high-sample benchmark",
-    )
-    require_artifact_dir(promoted_dir, "baseline promotion high-sample artifact")
-    run_command(
-        verify_command(args, promoted_dir, queries=args.queries, repeats=repeats),
-        "baseline promotion high-sample artifact verification",
-    )
-    comparison_report = promoted_dir / "baseline_comparison_failures.csv"
-    comparison_result = run_command(
-        compare_command(args, baseline, promoted_dir, failure_report=comparison_report),
-        "baseline promotion high-sample comparison",
-        check=False,
-    )
+    promoted_dir = out_dir if reuse_candidate else out_dir / "promotion_recheck"
+    comparison_result = 0
+    if not reuse_candidate:
+        run_command(
+            benchmark_command(
+                args,
+                promoted_dir,
+                queries=args.queries,
+                repeats=repeats,
+                timing_mode="production",
+                event_log_size=0,
+                trace_decisions=False,
+                trace_runtime=False,
+                reuse_database=True,
+            ),
+            "baseline promotion high-sample benchmark",
+        )
+        require_artifact_dir(promoted_dir, "baseline promotion high-sample artifact")
+        run_command(
+            verify_command(args, promoted_dir, queries=args.queries, repeats=repeats),
+            "baseline promotion high-sample artifact verification",
+        )
+        comparison_report = promoted_dir / "baseline_comparison_failures.csv"
+        comparison_result = run_command(
+            compare_command(args, baseline, promoted_dir, failure_report=comparison_report),
+            "baseline promotion high-sample comparison",
+            check=False,
+        )
     accepted_dir = promoted_dir
-    focused_queries = []
-    if comparison_result != 0:
+    focused_queries = list(rechecked_queries or [])
+    if reuse_candidate and focused_queries:
+        focused_dir = out_dir / "focused_recheck"
+        accepted_dir = merge_promoted_baseline_artifact(
+            promoted_dir, focused_dir, focused_queries
+        )
+        accepted_report = accepted_dir / "baseline_comparison_failures.csv"
+        run_command(
+            compare_command(
+                args, baseline, accepted_dir, failure_report=accepted_report
+            ),
+            "accepted baseline full comparison",
+        )
+    elif comparison_result != 0:
         focused_queries = comparison_failure_queries(comparison_report, args.queries)
         focused_dir = promoted_dir / "focused_recheck"
         run_command(
@@ -912,8 +945,10 @@ def main() -> int:
         "baseline comparison",
         check=False,
     )
+    triage_cleared = False
+    triage_queries = []
     if comparison_result != 0:
-        triage_cleared = False
+        triage_queries = comparison_failure_queries(comparison_report, args.queries)
         if args.triage_failures:
             triage_cleared = triage_failed_comparison(
                 args, baseline, out_dir, comparison_report
@@ -929,8 +964,19 @@ def main() -> int:
                 )
             )
     if args.promote_baseline:
+        promotion_comparison_passed = comparison_result == 0 or (
+            triage_cleared
+            and triage_recheck_repeats(args) == promotion_recheck_repeats(args)
+        )
+        reuse_candidate = candidate_qualifies_for_direct_promotion(
+            args, promotion_comparison_passed
+        )
         promoted_baseline, promoted_repeats = build_promoted_baseline(
-            args, baseline, out_dir
+            args,
+            baseline,
+            out_dir,
+            reuse_candidate=reuse_candidate,
+            rechecked_queries=triage_queries if reuse_candidate else None,
         )
         write_baseline_state(
             args, promoted_baseline, "promote-baseline", repeats=promoted_repeats

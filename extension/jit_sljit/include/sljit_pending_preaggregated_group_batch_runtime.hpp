@@ -21,6 +21,10 @@ namespace duckdb {
 
 enum class SljitPendingRunStrategy : uint8_t { UNDECIDED, BUFFERED, STREAMING };
 
+// Keep one compact group unpublished between source invocations. If an input run crosses a
+// vector boundary, its next delta merges into this carry before any hash-table append.
+static constexpr idx_t SLJIT_PENDING_PREAGGREGATED_GROUP_CAPACITY = STANDARD_VECTOR_SIZE - 1;
+
 struct SljitPendingPreaggregatedPrimitiveGroupBatch {
 	idx_t Count() const {
 		return count;
@@ -40,9 +44,19 @@ struct SljitPendingPreaggregatedPrimitiveGroupBatch {
 
 	void Reset() {
 		groups.Reset();
-		scratch.Prepare(lanes, STANDARD_VECTOR_SIZE);
 		represented_row_count = 0;
 		count = 0;
+	}
+
+	bool EnsureFixedScratch(const vector<const ExecutionPrimitiveAggregateUpdateLane *> &new_lanes) {
+		if (lanes == new_lanes && scratch.HasFixedCapacity(lanes, SLJIT_PENDING_PREAGGREGATED_GROUP_CAPACITY)) {
+			return true;
+		}
+		if (HasPending()) {
+			return false;
+		}
+		lanes = new_lanes;
+		return scratch.PrepareFixed(lanes, SLJIT_PENDING_PREAGGREGATED_GROUP_CAPACITY);
 	}
 
 	void ResetDenseSingleLane() {
@@ -133,10 +147,6 @@ static constexpr idx_t SLJIT_PENDING_DENSE_SINGLE_LANE_BYTES_PER_GROUP = sizeof(
 static constexpr idx_t SLJIT_PENDING_DENSE_SINGLE_LANE_MAX_RANGE =
     SLJIT_PENDING_DENSE_SINGLE_LANE_MEMORY_BUDGET / SLJIT_PENDING_DENSE_SINGLE_LANE_BYTES_PER_GROUP;
 static constexpr idx_t SLJIT_PENDING_DENSE_SINGLE_LANE_MIN_COMPRESSION = 2;
-// Keep one compact group unpublished between source invocations. If an input run crosses a
-// vector boundary, its next delta merges into this carry before any hash-table append.
-static constexpr idx_t SLJIT_PENDING_PREAGGREGATED_GROUP_CAPACITY = STANDARD_VECTOR_SIZE - 1;
-
 template <class TARGET_TYPE>
 static bool SljitPendingDenseSingleLaneKey(TARGET_TYPE value, idx_t &key) {
 	if constexpr (std::is_same<TARGET_TYPE, bool>::value) {
@@ -380,14 +390,16 @@ SljitAppendPreaggregatedPrimitiveGroupRange(ExecutionRegionRuntime &runtime, Slj
 	}
 	if (!pending.groups.Initialized()) {
 		pending.groups.EnsureFromChunk(runtime.GetAllocator(), groups);
-		pending.lanes = payload_lanes;
-		pending.scratch.Prepare(payload_lanes, STANDARD_VECTOR_SIZE);
+	}
+	if (!pending.EnsureFixedScratch(payload_lanes)) {
+		return false;
 	}
 	if (pending.groups.chunk.ColumnCount() != groups.ColumnCount() || pending.lanes.size() != payload_lanes.size()) {
 		return false;
 	}
 	if (!CanSlicePreaggregatedPrimitiveScratch(source_scratch, payload_lanes, offset, count) ||
-	    pending.scratch.payloads.size() != payload_lanes.size()) {
+	    pending.scratch.payloads.size() != payload_lanes.size() ||
+	    pending.Count() + count > SLJIT_PENDING_PREAGGREGATED_GROUP_CAPACITY) {
 		return false;
 	}
 	for (idx_t payload_idx = 0; payload_idx < payload_lanes.size(); payload_idx++) {
@@ -402,15 +414,17 @@ SljitAppendPreaggregatedPrimitiveGroupRange(ExecutionRegionRuntime &runtime, Slj
 		group_slice.Slice(groups, offset, offset + count);
 		source_groups = &group_slice;
 	}
+	const auto target_offset = pending.Count();
+	if (!CopyPreaggregatedPrimitiveScratchRangeToFixed(source_scratch, payload_lanes, offset, count, pending.scratch,
+	                                                   target_offset)) {
+		return false;
+	}
 	auto append_start = SljitRegionStageStart(runtime);
 	if (!SljitTryFastAppendFixedAllValid(pending.groups.chunk, *source_groups)) {
 		pending.groups.chunk.Append(*source_groups);
 	}
 	pending.count += count;
 	RecordSljitRegionStageRuntime(runtime, op_idx, op.kind, "pending_preaggregated_group_append", append_start);
-	if (!AppendPreaggregatedPrimitiveScratch(source_scratch, payload_lanes, offset, count, pending.scratch)) {
-		return false;
-	}
 	pending.represented_row_count += represented_row_count;
 	return true;
 }
@@ -536,7 +550,7 @@ static bool SljitFlushPendingPreaggregatedPrimitiveGroups(ExecutionRegionRuntime
 		return true;
 	}
 	pending.groups.chunk.SetChildCardinality(pending.Count());
-	if (pending.Count() != pending.scratch.group_row_counts.size()) {
+	if (pending.Count() > pending.scratch.group_row_counts.size()) {
 		return false;
 	}
 	SljitUpdateProvenUniqueAppendContract(runtime, op, pending, pending.groups.chunk, grouped_state);
@@ -564,9 +578,8 @@ static bool SljitBufferPreaggregatedPrimitiveGroups(
 	    !CanSlicePreaggregatedPrimitiveScratch(source_scratch, payload_lanes, 0, groups.size())) {
 		return false;
 	}
-	if (pending.Empty()) {
-		pending.lanes = payload_lanes;
-		pending.scratch.Prepare(payload_lanes, STANDARD_VECTOR_SIZE);
+	if (!pending.EnsureFixedScratch(payload_lanes)) {
+		return false;
 	}
 	idx_t offset = 0;
 	if (!pending.Empty() &&

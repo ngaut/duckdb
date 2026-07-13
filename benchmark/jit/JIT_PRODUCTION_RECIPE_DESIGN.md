@@ -623,6 +623,20 @@ once per group. A bounded sample selects streaming only when it predicts at
 least 3x run compression; lower-density streams retain the bulk-copy route.
 This is a typed runtime-density decision, not a workload or query rule.
 
+For one flat, all-valid fixed-width key and one primitive `COUNT_STAR`, `COUNT`,
+`SUM_INT64`, or `SUM_HUGEINT` lane, the streaming representation is generated
+machine code. Its backend-owned ABI carries source pointers, a resumable input
+offset, fixed output pointers, output count, and capacity. The kernel merges a
+source-boundary carry, emits complete runs directly into operator-lifetime
+scratch, stops before overwriting a full output batch, and resumes after the
+ordinary pending owner flushes it. Exact keys and the three proven narrowing
+casts use separate generated specializations selected from the live source
+descriptor; generated-plan assumptions never guess which projection source the
+runtime elides. Nulls, selections, unproven casts, multiple lanes, and unsupported
+types take the existing buffered or scalar streaming route before any state is
+published. Runtime proof distinguishes generated stage work from backend work,
+and trace-only miss reasons add no production-mode string construction.
+
 The selected run representation belongs to the aggregate runtime for the whole
 input stream. It is decided once and never changes at a source-vector boundary:
 a later unique-key vector is still consumed by a previously selected streaming
@@ -994,12 +1008,16 @@ threads. Its checked-in floors are 1.25x and 1.20x. Disabling only partial
 predicate SIMD raises the one-thread JIT median from 0.0505s to 0.0565s, proving
 that the gain belongs to the split execution mechanism rather than unrelated
 JIT work. The complete ten-repeat TPC-H promotions move Q12 from 1.133x to
-1.302x at SF1 and from 1.126x to 1.258x at SF10; focused SF10 proof reaches
-1.280x.
+1.326x at SF1 and from 1.126x to 1.321x at SF10.
+The generated sorted-run kernel moves the generic six-million-row workload from
+0.100052s to 0.059546s at one thread (1.680x) and from 0.029953s to 0.021019s at
+four threads (1.425x). Its checked-in floors are 1.60x and 1.35x. The same
+generic mechanism moves accepted TPC-H Q18 to 1.480x at SF1 and 1.671x at SF10
+in complete ten-repeat production matrices.
 
-Current accepted full-matrix generic evidence is stored in
-`benchmark/jit/tmp/partial_predicate_full_generic_t1_20260713` and
-`benchmark/jit/tmp/partial_predicate_full_generic_t4_20260713`. Both production
+Current full-matrix generic evidence is stored in
+`benchmark/jit/tmp/generated_run_full_generic_t1_candidate5_20260713` and
+`benchmark/jit/tmp/generated_run_full_generic_t4_candidate5_20260713`. Both production
 gates pass with zero correctness differences or compile errors across range
 arithmetic, filters, CASE, multi-aggregate, persistent scans, nullable
 expressions, grouped aggregation, DISTINCT, numeric joins, and string joins.
@@ -1011,9 +1029,9 @@ These artifacts are workload-class evidence; they do not authorize
 workload-specific capability checks.
 
 The current generic matrix covers 23 workload classes. Compiled one-thread
-speedups range from 1.125x to 3.754x and compiled four-thread speedups range
-from 1.008x to 3.743x. The low-cardinality string-search control remains
-vectorized at 0.991x and 0.954x respectively, inside its independent 5%
+speedups range from 1.131x to 3.763x and compiled four-thread speedups range
+from 1.058x to 3.761x. The low-cardinality string-search control remains
+vectorized at 0.990x and 0.965x respectively, inside its independent 5%
 raw-runtime ceiling. Current accepted TPC-H SF1 and SF10 promotion artifacts
 are documented in `benchmark/tpch/jit/JIT_BROAD_QUERY_PLAN.md`; both require a
 complete 22-query, 10-repeat production matrix plus correctness and traced
@@ -1030,6 +1048,11 @@ runtime-proof passes before the state file moves.
   sparse payload shapes use batch-local dense preaggregation when profitable,
   consecutive-run preaggregation when proven, or exact per-row grouped-state
   updates.
+- Generated pending-run aggregation currently accepts exact keys and proven
+  signed narrowing casts. Integral-compression transforms and exact direct-scan
+  aggregates that bypass the projected/pending owner still use the ordinary
+  per-vector compactor; extending the generated ABI to those source contracts is
+  the next generic grouped-run boundary.
 - Native source/sink protocols remain native unless an explicit execution
   contract makes them safe to compose.
 - Native-only execution is a valid result of capability analysis, not a failed

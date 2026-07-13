@@ -1227,11 +1227,69 @@ TEST_CASE("JIT sorted grouped sums buffer compact runs across input batches", "[
 		    return StringUtil::Contains(runtime_paths,
 		                                "aggregate_update.pending_preaggregated_grouped_update_flush=32768") &&
 		           StringUtil::Contains(runtime_paths,
+		                                "aggregate_update.generated_pending_primitive_group_runs=32768") &&
+		           StringUtil::Contains(runtime_paths,
 		                                "aggregate_update.pending_preaggregated_group_boundary_merge=") &&
 		           StringUtil::Contains(runtime_paths, "aggregate_update.proven_unique_append.enabled=1") &&
 		           !StringUtil::Contains(runtime_paths, "proven_unique_append.final_combine_required");
 	    },
 	    [](const ExecutionRegionEvent &event) { RequireGeneratedAggregateUpdateRuntimeOwnership(event); });
+}
+
+TEST_CASE("JIT generated grouped runs support signed sums and primitive aggregates", "[api][jit]") {
+	DuckDB db;
+	Connection con(db);
+	auto &manager = ExecutionRegionManager::Get(*con.context);
+
+	ConfigureSljitForCoverage(con, false, true, true, 10000);
+	REQUIRE_NO_FAIL(con.Query("PRAGMA threads=1"));
+	REQUIRE_NO_FAIL(con.Query("SET perfect_ht_threshold=0"));
+	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_signed_grouped_runs AS "
+	                          "SELECT ((i // 4) * 3)::BIGINT AS group_id, "
+	                          "       ((i % 17)::INTEGER - 8) AS value "
+	                          "FROM range(32768) tbl(i)"));
+
+	auto require_generated_runs = [&](const string &name, const string &aggregate) {
+		const auto query = "SELECT group_id, " + aggregate +
+		                   " AS aggregate_value "
+		                   "FROM jit_signed_grouped_runs GROUP BY group_id";
+		REQUIRE_NO_FAIL(con.Query("SET jit_policy='off'"));
+		REQUIRE_NO_FAIL(con.Query("CREATE OR REPLACE TEMP TABLE " + name + "_reference AS " + query));
+
+		ConfigureSljitForCoverageSettings(con, false, true, true, 10000);
+		REQUIRE_NO_FAIL(con.Query("SET jit_cbo_generated_stage_benefit=1"));
+		ClearJitTrace(manager, true);
+		REQUIRE_NO_FAIL(con.Query("CREATE OR REPLACE TEMP TABLE " + name + "_output AS " + query));
+		auto difference = con.Query("SELECT count(*) FROM ("
+		                            "  (SELECT * FROM " +
+		                            name + "_output EXCEPT ALL SELECT * FROM " + name +
+		                            "_reference) UNION ALL "
+		                            "  (SELECT * FROM " +
+		                            name + "_reference EXCEPT ALL SELECT * FROM " + name +
+		                            "_output)"
+		                            ") differences");
+		REQUIRE_NO_FAIL(*difference);
+		REQUIRE(difference->GetValue(0, 0).ToString() == "0");
+		string observed_runtime_paths;
+		for (auto &event : manager.GetEvents()) {
+			if (EventPhase(event) == "runtime") {
+				observed_runtime_paths += EventJitRuntimePathCounts(event) + "\n";
+			}
+		}
+		INFO(name + " runtime paths:\n" + observed_runtime_paths);
+
+		RequireJitEvent(
+		    manager,
+		    [](const ExecutionRegionEvent &event) {
+			    return EventPhase(event) == "runtime" && event.backend_name == "sljit" &&
+			           StringUtil::Contains(EventJitRuntimePathCounts(event),
+			                                "aggregate_update.generated_pending_primitive_group_runs=32768");
+		    },
+		    [](const ExecutionRegionEvent &event) { RequireGeneratedAggregateUpdateRuntimeOwnership(event); });
+	};
+
+	require_generated_runs("jit_signed_grouped_sum", "sum(value)");
+	require_generated_runs("jit_signed_grouped_count", "count(*)");
 }
 
 TEST_CASE("JIT large projected grouped sums admit cross-batch run preaggregation", "[api][jit]") {
@@ -1282,6 +1340,7 @@ TEST_CASE("JIT large projected grouped sums admit cross-batch run preaggregation
 		    return StringUtil::Contains(runtime_paths, "aggregate_update.grouped_direct_projected_input=") &&
 		           StringUtil::Contains(runtime_paths,
 		                                "aggregate_update.direct_input_vector_pending_preaggregated_grouped_update=") &&
+		           StringUtil::Contains(runtime_paths, "aggregate_update.generated_pending_primitive_group_runs=") &&
 		           StringUtil::Contains(runtime_paths, "aggregate_update.proven_unique_append.enabled=1") &&
 		           StringUtil::Contains(runtime_paths, "aggregate_update.pending_preaggregated_grouped_update_flush=");
 	    },
@@ -1340,6 +1399,8 @@ TEST_CASE("JIT sorted grouped sums keep one run strategy across changing batch d
 		    return StringUtil::Contains(
 		               runtime_paths,
 		               "aggregate_update.direct_input_vector_pending_preaggregated_grouped_update=8192") &&
+		           StringUtil::Contains(runtime_paths,
+		                                "aggregate_update.generated_pending_primitive_group_runs=8192") &&
 		           StringUtil::Contains(runtime_paths,
 		                                "aggregate_update.pending_preaggregated_grouped_update_flush=8192") &&
 		           StringUtil::Contains(runtime_paths, "aggregate_update.proven_unique_append.enabled=1") &&

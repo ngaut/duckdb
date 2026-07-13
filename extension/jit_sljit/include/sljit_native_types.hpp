@@ -332,6 +332,22 @@ struct SljitNativeVectorInput {
 	std::exception_ptr error;
 };
 
+// Fixed-storage streaming ABI for generated consecutive-group run aggregation. The caller owns all buffers and may
+// resume after flushing output by preserving input_offset and resetting output_count.
+struct SljitNativePrimitiveRunInput {
+	const_data_ptr_t group_data = nullptr;
+	const_data_ptr_t payload_data = nullptr;
+	data_ptr_t output_group_data = nullptr;
+	int64_t *output_int64_values = nullptr;
+	hugeint_t *output_hugeint_values = nullptr;
+	uint8_t *output_value_is_set = nullptr;
+	idx_t *output_row_counts = nullptr;
+	idx_t input_count = 0;
+	idx_t input_offset = 0;
+	idx_t output_count = 0;
+	idx_t output_capacity = 0;
+};
+
 struct SljitNativePredicateInput {
 	const_data_ptr_t *source_data = nullptr;
 	const sel_t **source_sel = nullptr;

@@ -27,6 +27,7 @@ set(JIT_SLJIT_EXTENSION_FILES
     sljit_aggregate_primitive_codegen.cpp
     sljit_aggregate_reference_binary_codegen.cpp
     sljit_aggregate_reference_codegen.cpp
+    sljit_aggregate_run_codegen.cpp
     sljit_aggregate_source_hoist_codegen.cpp
     sljit_aggregate_typed_payload_codegen.cpp
     sljit_aggregate_ungrouped_codegen.cpp

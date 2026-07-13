@@ -57,7 +57,7 @@ configured thread counts. The mixed-predicate gate requires at least 1.25x at
 one thread and 1.20x at four threads. The column-comparison gate requires at
 least 1.25x at both one and four threads. Dense multi-aggregate grouping
 requires at least 1.80x at one thread and 1.60x at four threads; sorted-run
-grouping requires 1.20x and 1.05x respectively. Join workloads without a proven
+grouping requires 1.60x and 1.35x respectively. Join workloads without a proven
 compiled route have a bounded auto-policy slowdown and may remain vectorized.
 Short production failures receive an automatic focused high-sample recheck
 before the gate decides.
@@ -83,6 +83,12 @@ two-way conjunction carries 1.31x and 1.25x floors; the three-way variant adds
 1.25x and 1.20x floors. The neighboring non-null grouped workload has 1.16x and
 1.13x thread-specific floors. The mixed-predicate promotion proves 1.338x at
 one thread and 1.286x at four threads.
+Generated sorted-run aggregation proves 1.680x at one thread and 1.425x at four
+threads over ten alternating production repetitions; its checked-in floors are
+1.60x and 1.35x. The backend kernel streams flat, all-valid fixed-width group
+keys and one primitive aggregate lane into fixed-capacity pending storage, while
+unsupported selections, nulls, casts, and lane shapes retain the vectorized
+fallback.
 Hybrid SIMD admission uses one shared scalar-operation cost contract: fully
 packed select/count/sum kernels retain simple comparisons, while scalar-terminal
 hybrids require enough predicate work to amortize mask dispatch. AND hybrids

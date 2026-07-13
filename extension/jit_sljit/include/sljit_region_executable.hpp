@@ -178,6 +178,39 @@ struct SljitGroupedAggregateDirectUpdatePlan {
 	}
 };
 
+struct SljitExecutablePrimitiveRunSpecialization {
+	PhysicalType group_source_type = PhysicalType::INVALID;
+	SljitCompiledFunction<SljitNativePrimitiveRunFunction> compiled;
+};
+
+struct SljitExecutablePrimitiveRunUpdate {
+	PhysicalType group_type = PhysicalType::INVALID;
+	PhysicalType payload_type = PhysicalType::INVALID;
+	AggregatePrimitiveUpdateKind primitive_kind = AggregatePrimitiveUpdateKind::NONE;
+	vector<SljitExecutablePrimitiveRunSpecialization> flat_specializations;
+
+	SljitNativePrimitiveRunFunction Function(PhysicalType group_source_type) const {
+		for (auto &specialization : flat_specializations) {
+			if (specialization.group_source_type == group_source_type) {
+				return specialization.compiled.Function();
+			}
+		}
+		return nullptr;
+	}
+
+	bool IsExecutable() const {
+		return !flat_specializations.empty();
+	}
+
+	idx_t CodeSize() const {
+		idx_t result = 0;
+		for (auto &specialization : flat_specializations) {
+			result += specialization.compiled.CodeSize();
+		}
+		return result;
+	}
+};
+
 struct SljitExecutableAggregateUpdate {
 	SljitNativeAggregateUpdatePlan plan;
 	vector<SljitExecutableRegionExpression> payloads;
@@ -186,6 +219,7 @@ struct SljitExecutableAggregateUpdate {
 	SljitExecutableFilteredAggregateUpdate filtered_update;
 	ExecutionDenseGroupDomain dense_group_domain;
 	SljitGroupedAggregateDirectUpdatePlan grouped_direct_update;
+	SljitExecutablePrimitiveRunUpdate primitive_run_update;
 	SljitCompiledFunction<SljitNativeAggregateUpdateFunction> fused_payload_update;
 	bool fused_payload_update_owns_group_lookup = false;
 	vector<SljitCompiledFunction<SljitNativeAggregateUpdateFunction>> payload_updates;
@@ -196,6 +230,7 @@ struct SljitExecutableAggregateUpdate {
 			result += payload.CodeSize();
 		}
 		result += filtered_update.CodeSize();
+		result += primitive_run_update.CodeSize();
 		result += fused_payload_update.CodeSize();
 		for (auto &payload_update : payload_updates) {
 			result += payload_update.CodeSize();

@@ -328,7 +328,7 @@ GENERIC_WORKLOADS = (
             ") grouped"
         ),
         "minimum_auto_speedup": 0.0,
-        "minimum_auto_speedup_by_threads": {1: 1.20, 4: 1.05},
+        "minimum_auto_speedup_by_threads": {1: 1.60, 4: 1.35},
         "max_auto_slowdown": 1.05,
         "requires_compiled_auto": True,
     },

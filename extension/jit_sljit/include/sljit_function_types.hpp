@@ -16,6 +16,7 @@ namespace duckdb {
 
 using SljitNativeVectorFunction = void(SLJIT_FUNC *)(SljitNativeVectorInput *);
 using SljitNativeAggregateUpdateFunction = void(SLJIT_FUNC *)(SljitNativeVectorInput *);
+using SljitNativePrimitiveRunFunction = void(SLJIT_FUNC *)(SljitNativePrimitiveRunInput *);
 using SljitNativePredicateFunction = void(SLJIT_FUNC *)(SljitNativePredicateInput *);
 using SljitNativeRegularHashJoinProbeFunction = void(SLJIT_FUNC *)(SljitNativeRegularHashJoinProbeInput *);
 using SljitNativePerfectHashJoinProbeFunction = void(SLJIT_FUNC *)(SljitNativePerfectHashJoinProbeInput *);

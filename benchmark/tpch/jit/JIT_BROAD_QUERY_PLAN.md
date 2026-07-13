@@ -44,86 +44,94 @@ The active architecture work is generic grouped and join execution:
 - generic benchmark fixtures are materialized once per read-only setup identity
   and reused across alternating samples, eliminating repeated table rebuilds and
   measuring stable persisted storage.
+- profitable fixed-width grouped runs execute in a resumable backend-generated
+  kernel over operator-lifetime fixed storage; exact and proven narrowing key
+  specializations share one runtime ABI and all unsupported shapes fall back
+  before publishing pending state;
+- a complete untraced 10-repeat candidate is itself promotion-qualified. If a
+  focused 10-repeat noise recheck clears a comparison, the gate merges those
+  query rows and revalidates the complete artifact instead of rerunning the
+  unchanged 22-query matrix.
 
 ## Accepted SF1 evidence
 
 Configuration: TPC-H SF1, one thread, production timing, tracing disabled, and
 result verification enabled. The accepted ten-repeat comparison receipt is
-`benchmark/tpch/jit/tmp/partial_predicate_full_sf1_promotion_20260713/promotion_recheck`.
+`benchmark/tpch/jit/tmp/generated_run_full_sf1_promotion_20260713`.
 Candidate gates use five repeats and focused triage or promotion uses ten; no
 higher repetition count is scheduled.
 
 | Query | Non-JIT (s) | JIT (s) | Speedup |
 | ---: | ---: | ---: | ---: |
-| Q1 | 0.071 | 0.057 | 1.249x |
-| Q2 | 0.010 | 0.011 | 0.921x |
-| Q3 | 0.060 | 0.059 | 1.014x |
-| Q4 | 0.043 | 0.040 | 1.095x |
-| Q5 | 0.052 | 0.048 | 1.077x |
-| Q6 | 0.039 | 0.019 | 2.022x |
-| Q7 | 0.059 | 0.055 | 1.074x |
-| Q8 | 0.042 | 0.040 | 1.058x |
-| Q9 | 0.147 | 0.119 | 1.236x |
-| Q10 | 0.062 | 0.054 | 1.162x |
-| Q11 | 0.011 | 0.012 | 0.967x |
-| Q12 | 0.070 | 0.053 | 1.302x |
-| Q13 | 0.143 | 0.095 | 1.508x |
-| Q14 | 0.050 | 0.048 | 1.036x |
-| Q15 | 0.037 | 0.028 | 1.311x |
-| Q16 | 0.031 | 0.028 | 1.073x |
-| Q17 | 0.030 | 0.030 | 1.003x |
-| Q18 | 0.102 | 0.086 | 1.177x |
-| Q19 | 0.031 | 0.030 | 1.042x |
-| Q20 | 0.064 | 0.059 | 1.087x |
-| Q21 | 0.113 | 0.102 | 1.110x |
-| Q22 | 0.023 | 0.021 | 1.091x |
+| Q1 | 0.072 | 0.057 | 1.271x |
+| Q2 | 0.010 | 0.011 | 0.932x |
+| Q3 | 0.061 | 0.061 | 0.995x |
+| Q4 | 0.044 | 0.040 | 1.100x |
+| Q5 | 0.052 | 0.049 | 1.061x |
+| Q6 | 0.040 | 0.020 | 2.070x |
+| Q7 | 0.059 | 0.056 | 1.064x |
+| Q8 | 0.041 | 0.039 | 1.057x |
+| Q9 | 0.146 | 0.119 | 1.222x |
+| Q10 | 0.064 | 0.054 | 1.187x |
+| Q11 | 0.012 | 0.012 | 0.954x |
+| Q12 | 0.071 | 0.054 | 1.326x |
+| Q13 | 0.142 | 0.092 | 1.539x |
+| Q14 | 0.051 | 0.048 | 1.054x |
+| Q15 | 0.038 | 0.028 | 1.326x |
+| Q16 | 0.031 | 0.029 | 1.088x |
+| Q17 | 0.030 | 0.029 | 1.020x |
+| Q18 | 0.103 | 0.069 | 1.480x |
+| Q19 | 0.031 | 0.029 | 1.071x |
+| Q20 | 0.065 | 0.061 | 1.068x |
+| Q21 | 0.114 | 0.101 | 1.120x |
+| Q22 | 0.022 | 0.020 | 1.112x |
 
 All results are correct. Auto compiles 20 queries and deliberately keeps Q2
 and Q11 vectorized because their stateful work is below the generic startup
-floor. Summed medians improve from 1.289s to 1.093s (1.179x); the per-query
-geometric-mean speedup is 1.147x. There are 18 material wins. Q3's raw JIT
-runtime improves versus the previous receipt, but its faster non-JIT sample
-moves the normalized ratio below the material-win threshold; this is not a JIT
-runtime regression. Q12 improves from 1.133x to 1.302x.
+floor. Summed medians improve from 1.300s to 1.080s (1.204x), the per-query
+geometric-mean speedup is 1.167x, and the gate reports 19 material wins. Q18
+improves from 1.177x to 1.480x; Q12 also advances from 1.302x to 1.326x.
 
 ## Accepted SF10 evidence
 
 Configuration: TPC-H SF10, one thread, production timing, tracing disabled, and
 result verification enabled. The accepted ten-repeat comparison receipt is
-`benchmark/tpch/jit/tmp/partial_predicate_full_sf10_promotion_20260713/promotion_recheck`.
+`benchmark/tpch/jit/tmp/generated_run_full_sf10_promotion_20260713/accepted_baseline`.
 Candidate gates use five repeats and focused triage or promotion uses ten; no
 higher repetition count is scheduled.
 
 | Query | Non-JIT (s) | JIT (s) | Speedup |
 | ---: | ---: | ---: | ---: |
-| Q1 | 0.650 | 0.505 | 1.287x |
-| Q2 | 0.060 | 0.055 | 1.103x |
-| Q3 | 0.614 | 0.564 | 1.088x |
-| Q4 | 0.478 | 0.443 | 1.078x |
-| Q5 | 0.542 | 0.492 | 1.101x |
-| Q6 | 0.380 | 0.179 | 2.119x |
-| Q7 | 0.552 | 0.514 | 1.074x |
-| Q8 | 0.385 | 0.332 | 1.160x |
-| Q9 | 1.654 | 1.254 | 1.319x |
-| Q10 | 0.952 | 0.805 | 1.184x |
-| Q11 | 0.069 | 0.066 | 1.049x |
-| Q12 | 0.620 | 0.493 | 1.258x |
-| Q13 | 1.604 | 1.037 | 1.548x |
-| Q14 | 0.391 | 0.357 | 1.095x |
-| Q15 | 0.332 | 0.232 | 1.430x |
-| Q16 | 0.177 | 0.152 | 1.166x |
-| Q17 | 0.267 | 0.249 | 1.073x |
-| Q18 | 1.274 | 0.922 | 1.382x |
-| Q19 | 0.291 | 0.264 | 1.104x |
-| Q20 | 0.597 | 0.517 | 1.154x |
-| Q21 | 1.350 | 1.222 | 1.105x |
-| Q22 | 0.182 | 0.143 | 1.273x |
+| Q1 | 0.652 | 0.502 | 1.297x |
+| Q2 | 0.060 | 0.055 | 1.104x |
+| Q3 | 0.611 | 0.559 | 1.093x |
+| Q4 | 0.475 | 0.435 | 1.091x |
+| Q5 | 0.541 | 0.497 | 1.089x |
+| Q6 | 0.386 | 0.180 | 2.142x |
+| Q7 | 0.552 | 0.514 | 1.076x |
+| Q8 | 0.387 | 0.332 | 1.166x |
+| Q9 | 1.636 | 1.242 | 1.317x |
+| Q10 | 0.944 | 0.809 | 1.167x |
+| Q11 | 0.069 | 0.066 | 1.050x |
+| Q12 | 0.635 | 0.481 | 1.321x |
+| Q13 | 1.605 | 1.030 | 1.558x |
+| Q14 | 0.395 | 0.360 | 1.098x |
+| Q15 | 0.337 | 0.232 | 1.456x |
+| Q16 | 0.173 | 0.148 | 1.172x |
+| Q17 | 0.270 | 0.250 | 1.081x |
+| Q18 | 1.282 | 0.767 | 1.671x |
+| Q19 | 0.294 | 0.265 | 1.109x |
+| Q20 | 0.617 | 0.525 | 1.175x |
+| Q21 | 1.358 | 1.238 | 1.096x |
+| Q22 | 0.184 | 0.145 | 1.273x |
 
 All results are correct and all 22 queries execute compiled regions with traced
-runtime ownership. Summed medians improve from 13.421s to 10.796s (1.243x), the
-per-query geometric-mean speedup is 1.217x, and all 22 queries are material JIT
-wins. Q12 improves from 1.126x to 1.258x in the complete promotion artifact;
-its focused ten-repeat proof reached 1.280x. Q11 lowers its widening decimal
+runtime ownership. Summed medians improve from 13.464s to 10.631s (1.266x), the
+per-query geometric-mean speedup is 1.234x, and all 22 queries are material JIT
+wins. Q18 improves from 1.382x to 1.671x and Q12 from 1.258x to 1.321x. Q20's
+full-matrix raw timing was rechecked independently at ten repeats; the focused
+comparison passed and its rows were merged before the complete accepted
+artifact was revalidated. Q11 lowers its widening decimal
 product and exact INT128 sum to native machine code; the same recipe is rejected
 at SF1 because there are not enough batches to amortize stateful startup.
 
