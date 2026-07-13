@@ -226,6 +226,7 @@ unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativeConstantOrNull(const vecto
                                                                      string &error);
 unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativePredicate(const SljitNativePredicate &predicate,
                                                                 bool generate_result,
-                                                                SljitNativePredicateFunction &function, string &error);
+                                                                SljitNativePredicateFunction &function, string &error,
+                                                                const ExecutionExpressionIR *typed_root = nullptr);
 
 } // namespace duckdb

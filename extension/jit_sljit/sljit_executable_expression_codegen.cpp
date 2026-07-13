@@ -339,7 +339,8 @@ bool SljitCompilePreparedExecutableRegionExpression(SljitExecutableRegionExpress
 	case SljitNativeRegionExpressionKind::PREDICATE:
 		if (require_boolean) {
 			return build_predicate_select([&](SljitNativePredicateFunction &function) {
-				return BuildSljitNativePredicate(*semantic.predicate, false, function, error);
+				return BuildSljitNativePredicate(*semantic.predicate, false, function, error,
+				                                 semantic.expression_tree.get());
 			});
 		}
 		return build_predicate([&](SljitNativePredicateFunction &function) {

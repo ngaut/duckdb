@@ -1177,19 +1177,23 @@ void EmitSljitTypedExpressionTreeSimdHybridFilterLoop(struct sljit_compiler *com
 	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_MEM1(SLJIT_SP), mask_offset + 16, SLJIT_R3, 0);
 	auto mixed_loop = sljit_emit_label(compiler);
 	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_R3, 0, SLJIT_MEM1(SLJIT_SP), mask_offset + 16);
-	sljit_emit_op2(compiler, SLJIT_AND, SLJIT_R2, 0, SLJIT_R3, 0, SLJIT_IMM, 1);
-	auto lane_false = sljit_emit_cmp(compiler, SLJIT_EQUAL, SLJIT_R2, 0, SLJIT_IMM, 0);
+	// Visit only set lanes. The old shift-and-test loop dispatched once per lane,
+	// including rejected lanes; CTZ plus x & (x - 1) makes mixed-group work
+	// proportional to the number of prefix matches.
+	sljit_emit_op1(compiler, SLJIT_CTZ32, SLJIT_R2, 0, SLJIT_R3, 0);
+	sljit_emit_op2(compiler, SLJIT_AND, SLJIT_R0, 0, SLJIT_S1, 0, SLJIT_IMM, -NumericCast<sljit_sw>(plan.lanes));
+	sljit_emit_op2(compiler, SLJIT_ADD, SLJIT_S1, 0, SLJIT_R0, 0, SLJIT_R2, 0);
 	emit_matching_row();
-	sljit_set_label(lane_false, sljit_emit_label(compiler));
 	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_R3, 0, SLJIT_MEM1(SLJIT_SP), mask_offset + 16);
-	sljit_emit_op2(compiler, SLJIT_LSHR, SLJIT_R3, 0, SLJIT_R3, 0, SLJIT_IMM, 1);
+	sljit_emit_op2(compiler, SLJIT_SUB, SLJIT_R2, 0, SLJIT_R3, 0, SLJIT_IMM, 1);
+	sljit_emit_op2(compiler, SLJIT_AND, SLJIT_R3, 0, SLJIT_R3, 0, SLJIT_R2, 0);
 	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_MEM1(SLJIT_SP), mask_offset + 16, SLJIT_R3, 0);
-	sljit_emit_op2(compiler, SLJIT_ADD, SLJIT_S1, 0, SLJIT_S1, 0, SLJIT_IMM, 1);
-	// The packed group starts aligned, so low index bits terminate the compact
-	// lane loop without carrying a separate end pointer through memory.
-	sljit_emit_op2(compiler, SLJIT_AND, SLJIT_R0, 0, SLJIT_S1, 0, SLJIT_IMM, plan.lanes - 1);
-	auto repeat_mixed = sljit_emit_cmp(compiler, SLJIT_NOT_EQUAL, SLJIT_R0, 0, SLJIT_IMM, 0);
+	auto repeat_mixed = sljit_emit_cmp(compiler, SLJIT_NOT_EQUAL, SLJIT_R3, 0, SLJIT_IMM, 0);
 	sljit_set_label(repeat_mixed, mixed_loop);
+	// S1 names the final matching lane. Recover the aligned group base and move
+	// to the next packed group without carrying another live register in callbacks.
+	sljit_emit_op2(compiler, SLJIT_AND, SLJIT_R0, 0, SLJIT_S1, 0, SLJIT_IMM, -NumericCast<sljit_sw>(plan.lanes));
+	sljit_emit_op2(compiler, SLJIT_ADD, SLJIT_S1, 0, SLJIT_R0, 0, SLJIT_IMM, plan.lanes);
 	auto mixed_done = sljit_emit_jump(compiler, SLJIT_JUMP);
 	auto advance_done = sljit_emit_label(compiler);
 	sljit_set_label(group_done, advance_done);

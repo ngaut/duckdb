@@ -78,6 +78,7 @@ set(JIT_SLJIT_EXTENSION_FILES
     sljit_native_scalar_utility_codegen.cpp
     sljit_native_plan.cpp
     sljit_native_predicate_plan.cpp
+    sljit_native_predicate_simd_plan.cpp
     sljit_native_predicate_structural_plan.cpp
     sljit_native_predicate_sources.cpp
     sljit_native_predicate_select_helpers.cpp

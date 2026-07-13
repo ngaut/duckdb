@@ -635,6 +635,40 @@ TEST_CASE("JIT orders generated source filters by generic predicate cost", "[api
 	    });
 }
 
+TEST_CASE("JIT partially vectorizes mixed generated source predicates", "[api][jit]") {
+	DuckDB db;
+	Connection con(db);
+	auto &manager = ExecutionRegionManager::Get(*con.context);
+
+	// The row count exercises the scalar tail. The nullable string remains in the
+	// scalar residual while the preceding DATE/BIGINT conjunction forms the SIMD
+	// prefix; jit_verify compares the generated selection with DuckDB's executor.
+	ConfigureSljitForCoverage(con, true, true, false, 10000);
+	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_partial_simd_source_filter AS "
+	                          "SELECT i::BIGINT AS i, "
+	                          "CASE WHEN i % 13 = 0 THEN NULL "
+	                          "     WHEN i % 11 = 0 THEN 'MAIL' ELSE 'AIR' END AS s, "
+	                          "(DATE '1994-01-01' + ((i % 2000)::INTEGER)) AS d "
+	                          "FROM range(10003) tbl(i)"));
+
+	ClearJitTrace(manager, true);
+	auto result = con.Query("SELECT count(*), sum(i) FROM jit_partial_simd_source_filter "
+	                        "WHERE d < DATE '1995-01-01' AND i > 10 AND s IN ('MAIL', 'SHIP')");
+	REQUIRE_NO_FAIL(*result);
+	REQUIRE(result->GetValue(0, 0).GetValue<int64_t>() == 151);
+	REQUIRE(result->GetValue(1, 0).GetValue<int64_t>() == 627858);
+
+	RequireJitEvent(
+	    manager,
+	    [](const ExecutionRegionEvent &event) {
+		    return IsCompiledSljitRegionEvent(event) && event.candidate_traits.source_filter_count == 3;
+	    },
+	    [](const ExecutionRegionEvent &event) {
+		    RequireGeneratedSourceFilterContract(event);
+		    RequireGeneratedMachineCodeRegion(event);
+	    });
+}
+
 TEST_CASE("JIT owns large complex scan filters through source input layout", "[api][jit]") {
 	DuckDB db;
 	Connection con(db);

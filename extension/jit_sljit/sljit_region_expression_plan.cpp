@@ -48,6 +48,9 @@ bool TryReadNativeRegionExpression(const ExecutionExpressionIR &root, bool requi
 	}
 
 	if (TryReadNativeRegionPredicateExpression(root, expr)) {
+		if (expr.kind == SljitNativeRegionExpressionKind::PREDICATE) {
+			AttachSljitNativeExpressionTree(root, expr);
+		}
 		return true;
 	}
 

@@ -96,6 +96,30 @@ GENERIC_WORKLOADS = (
         "requires_compiled_auto": True,
     },
     {
+        "name": "scan_mixed_numeric_string_filter",
+        "setup_sql": (
+            "CREATE OR REPLACE TABLE __jit_generic_mixed_filter("
+            "id BIGINT NOT NULL, event_date DATE NOT NULL, amount INTEGER NOT NULL, status VARCHAR); "
+            "INSERT INTO __jit_generic_mixed_filter "
+            "SELECT i, DATE '2024-01-01' + CAST(i % 730 AS INTEGER), CAST(i % 1000 AS INTEGER), "
+            "CASE WHEN i % 29 = 0 THEN NULL WHEN i % 7 = 0 THEN 'ACTIVE' "
+            "WHEN i % 11 = 0 THEN 'PENDING' ELSE 'ARCHIVED' END "
+            "FROM range(8000000) tbl(i);"
+        ),
+        "sql": (
+            "SELECT sum(id * 31 + amount) AS value FROM __jit_generic_mixed_filter "
+            "WHERE event_date >= DATE '2024-04-01' AND event_date < DATE '2024-10-01' "
+            "AND amount >= 200 AND status IN ('ACTIVE', 'PENDING')"
+        ),
+        # Production promotion: 1.338x at T1 and 1.286x at T4. Preserve the
+        # demonstrated gain with thread-specific margins instead of a flaky
+        # machine-wide absolute timing threshold.
+        "minimum_auto_speedup": 1.15,
+        "minimum_auto_speedup_by_threads": {1: 1.25, 4: 1.20},
+        "max_auto_slowdown": 1.05,
+        "requires_compiled_auto": True,
+    },
+    {
         "name": "scan_like_fragments",
         "setup_sql": (
             "CREATE OR REPLACE TABLE __jit_generic_like_fragments(id BIGINT NOT NULL, comment VARCHAR NOT NULL); "

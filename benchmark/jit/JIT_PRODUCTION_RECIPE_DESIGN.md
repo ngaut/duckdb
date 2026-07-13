@@ -311,6 +311,17 @@ per batch.
 - Typed-expression source IDs are adapter-local. Every generated selector reads
   the adapter's source arrays; a runtime specialization may touch the input
   chunk only after explicitly mapping those local IDs back to input columns.
+- A specialized native predicate may retain the original backend-neutral typed
+  IR as an auxiliary semantic view. Executable binding remaps that tree through
+  the predicate's canonical source list into the same dense source coordinates
+  as scalar predicate lowering. Missing or stale references are construction
+  errors; codegen cannot infer a second input ABI.
+- Partial predicate SIMD is an ordered split, not arbitrary conjunct
+  extraction. Only the longest leading SIMD-supported prefix of a top-level AND
+  may execute as a packed mask. A non-empty specialized residual owns all later
+  children, preserving SQL evaluation order and short-circuit semantics. A
+  fully supported root uses the ordinary packed selector, and an unsupported
+  first child keeps the complete specialized scalar predicate.
 - A SIMD-eligible boolean root uses packed evaluation when result extraction is
   profitable. On ARM64, a single integer or DATE comparison uses an eight-row
   unrolled branchless scalar selector: NEON has no cheap integer movemask. Each
@@ -335,6 +346,14 @@ per batch.
   consumers that require concrete indices materialize that identity once at
   the C++ boundary. The generated mixed-mask path backfills a deferred identity
   prefix at the first false lane.
+- The partial-predicate runtime requires a flat execution domain and flat data
+  for the packed prefix. It evaluates the prefix and residual in one pass,
+  appending final survivors directly through one hoisted output-selection
+  pointer. It never publishes an intermediate selection or mutates
+  `execute_sel`; unmet layout or validity contracts enter the complete scalar
+  predicate before any output is written. Uniform masks bypass lane extraction,
+  while mixed masks iterate only set bits with count-trailing-zero plus
+  clear-lowest-set-bit operations.
 - Consecutive generated filters compose absolute selections over the original
   producer chunk. When a source contract or prior filter publishes a selected
   batch, the next selector receives that selection as its execution domain and
@@ -950,8 +969,9 @@ grouped conjunction floors. OR remains available to fully packed kernels but
 stays scalar for scalar-terminal hybrids because matched production timing did
 not amortize its all-true check. Fully packed select, count, and sum kernels do
 not use this hybrid gate. On ARM64, uniform completed masks use a horizontal
-classifier and avoid a full movemask; mixed groups test the compact mask in an
-aligned lane loop with no separate end-index slot.
+classifier and avoid a full movemask. Mixed groups share one sparse-mask
+iterator: count-trailing-zero finds the next matching lane and
+`mask &= mask - 1` removes it, so rejected lanes do not pay callback dispatch.
 
 Generic benchmark fixtures are created once per read-only setup identity, before
 the alternating samples. Reopening the stable database for every sample proves
@@ -968,11 +988,19 @@ threads, with thread-specific floors of 1.16x and 1.13x.
 The mixed-source complementary join proves 1.290x at one thread and 1.207x at
 four threads in alternating 10-repeat promotion runs, so its checked-in floors
 are now 1.28x and 1.18x respectively.
+The mixed numeric/date plus nullable-string scan proves the generic partial
+predicate contract outside TPC-H: 1.338x at one thread and 1.286x at four
+threads. Its checked-in floors are 1.25x and 1.20x. Disabling only partial
+predicate SIMD raises the one-thread JIT median from 0.0505s to 0.0565s, proving
+that the gain belongs to the split execution mechanism rather than unrelated
+JIT work. The complete ten-repeat TPC-H promotions move Q12 from 1.133x to
+1.302x at SF1 and from 1.126x to 1.258x at SF10; focused SF10 proof reaches
+1.280x.
 
-Current accepted generic evidence is stored in
-`benchmark/jit/tmp/generic_proof_batch_pregraph_simd_t1_20260713` and
-`benchmark/jit/tmp/generic_proof_batch_pregraph_simd_t4_20260713`. Both
-production gates pass with zero correctness or compile errors across range
+Current accepted full-matrix generic evidence is stored in
+`benchmark/jit/tmp/partial_predicate_full_generic_t1_20260713` and
+`benchmark/jit/tmp/partial_predicate_full_generic_t4_20260713`. Both production
+gates pass with zero correctness differences or compile errors across range
 arithmetic, filters, CASE, multi-aggregate, persistent scans, nullable
 expressions, grouped aggregation, DISTINCT, numeric joins, and string joins.
 The branchless conjunction promotion receipts are
@@ -982,10 +1010,10 @@ The branchless conjunction promotion receipts are
 These artifacts are workload-class evidence; they do not authorize
 workload-specific capability checks.
 
-The current generic matrix covers 20 workload classes. Compiled one-thread
-speedups range from 1.148x to 3.736x and compiled four-thread speedups range
-from 1.056x to 3.709x. The low-cardinality string-search control remains
-vectorized at 1.006x and 0.960x respectively, inside its independent 5%
+The current generic matrix covers 23 workload classes. Compiled one-thread
+speedups range from 1.125x to 3.754x and compiled four-thread speedups range
+from 1.008x to 3.743x. The low-cardinality string-search control remains
+vectorized at 0.991x and 0.954x respectively, inside its independent 5%
 raw-runtime ceiling. Current accepted TPC-H SF1 and SF10 promotion artifacts
 are documented in `benchmark/tpch/jit/JIT_BROAD_QUERY_PLAN.md`; both require a
 complete 22-query, 10-repeat production matrix plus correctness and traced

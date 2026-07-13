@@ -104,6 +104,35 @@ static void SetDenseSljitPredicateSourceIndices(SljitNativePredicate &predicate,
 	}
 }
 
+static void RemapSljitAuxiliaryExpressionTreeToExecutableInputs(ExecutionExpressionIR &node,
+                                                                const vector<idx_t> &tree_source_indices,
+                                                                const vector<idx_t> &input_source_indices) {
+	if (node.kind == ExecutionExpressionIRKind::REFERENCE) {
+		if (node.ref_index >= tree_source_indices.size()) {
+			throw InternalException("SLJIT auxiliary expression-tree source index out of range");
+		}
+		auto input_source = tree_source_indices[node.ref_index];
+		auto executable_source = FindSljitInputSource(input_source_indices, input_source);
+		if (executable_source == DConstants::INVALID_INDEX) {
+			throw InternalException("SLJIT auxiliary expression-tree source is absent from native predicate inputs");
+		}
+		node.ref_index = executable_source;
+		return;
+	}
+	if (node.left) {
+		RemapSljitAuxiliaryExpressionTreeToExecutableInputs(*node.left, tree_source_indices, input_source_indices);
+	}
+	if (node.right) {
+		RemapSljitAuxiliaryExpressionTreeToExecutableInputs(*node.right, tree_source_indices, input_source_indices);
+	}
+	if (node.else_node) {
+		RemapSljitAuxiliaryExpressionTreeToExecutableInputs(*node.else_node, tree_source_indices, input_source_indices);
+	}
+	for (auto &child : node.children) {
+		RemapSljitAuxiliaryExpressionTreeToExecutableInputs(*child, tree_source_indices, input_source_indices);
+	}
+}
+
 static void RemapSljitConstantOrNullToExecutableInputs(SljitNativeConstantOrNull &constant_or_null,
                                                        vector<idx_t> &input_sources,
                                                        vector<bool> &local_source_not_null,
@@ -135,6 +164,11 @@ static void PrepareExecutableRegionExpressionInputs(SljitExecutableRegionExpress
 			vector<bool> local_source_not_null;
 			RemapSljitPredicateToExecutableInputs(*semantic.predicate, expr.input_source_indices, local_source_not_null,
 			                                      input_not_null);
+			if (semantic.expression_tree) {
+				RemapSljitAuxiliaryExpressionTreeToExecutableInputs(
+				    *semantic.expression_tree, semantic.expression_tree_source_indices, expr.input_source_indices);
+				semantic.expression_tree_source_indices = expr.input_source_indices;
+			}
 			SetDenseSljitPredicateSourceIndices(*semantic.predicate, expr.input_source_indices.size());
 			expr.input_source_not_null = local_source_not_null;
 			semantic.predicate->source_not_null = std::move(local_source_not_null);

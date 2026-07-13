@@ -99,8 +99,9 @@ void EmitSljitTypedExpressionTreeSimdSumLoop(struct sljit_compiler *compiler, co
 // Emits the hybrid packed-mask filter loop: the predicate mask for `lanes` rows is
 // computed with packed SIMD, then `emit_matching_row` is invoked once per lane to
 // emit the scalar work for a matching row (S1 holds that row's flat index; the
-// callback must preserve S1/S2/S5 and may clobber R0-R4). Used when the payloads
-// have no packed form (arbitrary aggregate payload kinds). Uniform groups advance
+// callback must preserve S1/S2/S5 and may clobber R0-R4). S3/S4/S6 are
+// callback-owned saved registers: the shared loop neither reads nor writes them.
+// Used when the payloads have no packed form (arbitrary aggregate payload kinds). Uniform groups advance
 // directly; mixed groups test a compact scalar mask without recomputing the
 // predicate, so rejected lanes do not pay scalar predicate or payload work.
 // Assumes the flat all-valid context; advances S1 to the last full lane group,

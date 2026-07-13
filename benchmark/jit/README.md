@@ -47,16 +47,18 @@ python3 benchmark/jit/generic_benchmark.py --duckdb build/reldebug/duckdb --thre
 ```
 
 The generic gate covers arithmetic, filters, CASE-heavy expressions, multiple
-aggregate lanes, filtered scans, persistent column-vs-column comparisons,
-single- and multi-source nullable persistent scans, grouped DISTINCT, dense
-computed multi-aggregate grouping, sorted-run grouping, and joins. Arithmetic, CASE,
-multi-aggregate, scan-expression, scan-filter, column-comparison, both nullable
+aggregate lanes, filtered scans, mixed numeric/date plus nullable-string
+predicates, persistent column-vs-column comparisons, single- and multi-source
+nullable persistent scans, grouped DISTINCT, dense computed multi-aggregate
+grouping, sorted-run grouping, and joins. Arithmetic, CASE, multi-aggregate,
+scan-expression, scan-filter, mixed-predicate, column-comparison, both nullable
 classes, and the proven grouped workloads require compiled speedups at their
-configured thread counts. The column-comparison gate requires at least 1.25x
-at both one and four threads. Dense multi-aggregate grouping requires at least
-1.80x at one thread and 1.60x at four threads; sorted-run grouping requires
-1.20x and 1.05x respectively. Join workloads without a proven compiled route
-have a bounded auto-policy slowdown and may remain vectorized.
+configured thread counts. The mixed-predicate gate requires at least 1.25x at
+one thread and 1.20x at four threads. The column-comparison gate requires at
+least 1.25x at both one and four threads. Dense multi-aggregate grouping
+requires at least 1.80x at one thread and 1.60x at four threads; sorted-run
+grouping requires 1.20x and 1.05x respectively. Join workloads without a proven
+compiled route have a bounded auto-policy slowdown and may remain vectorized.
 Short production failures receive an automatic focused high-sample recheck
 before the gate decides.
 
@@ -79,13 +81,17 @@ grouped multi-aggregate floors are 1.22x at one thread and 1.17x at four threads
 against independent ten-repeat proofs no lower than 1.238x and 1.195x. The
 two-way conjunction carries 1.31x and 1.25x floors; the three-way variant adds
 1.25x and 1.20x floors. The neighboring non-null grouped workload has 1.16x and
-1.13x thread-specific floors.
+1.13x thread-specific floors. The mixed-predicate promotion proves 1.338x at
+one thread and 1.286x at four threads.
 Hybrid SIMD admission uses one shared scalar-operation cost contract: fully
 packed select/count/sum kernels retain simple comparisons, while scalar-terminal
 hybrids require enough predicate work to amortize mask dispatch. AND hybrids
 evaluate their packed masks branchlessly and classify only the completed mask;
 OR remains available to fully packed kernels but stays scalar in hybrids after a
-neutral matched proof.
+neutral matched proof. Mixed masks visit only set lanes with count-trailing-zero
+iteration. Specialized predicates may use the same loop for the longest ordered
+SIMD-supported AND prefix, then execute their generic residual directly without
+an intermediate selection vector.
 
 Filtered hash-build validation covers source-filter selection composition and
 direct build ingress. Runtime tracing reports `filter.selected_input_zero_copy`

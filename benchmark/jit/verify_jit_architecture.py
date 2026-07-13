@@ -464,6 +464,88 @@ def verify_scan_filter_ownership() -> None:
 	)
 
 
+def verify_partial_predicate_simd_contract() -> None:
+    lowering = read("extension/jit_sljit/sljit_region_expression_plan.cpp")
+    if (
+        "expr.kind == SljitNativeRegionExpressionKind::PREDICATE" not in lowering
+        or "AttachSljitNativeExpressionTree(root, expr)" not in lowering
+    ):
+        raise AssertionError(
+            "specialized predicates must retain their original typed IR as an auxiliary plan"
+        )
+
+    executable_inputs = read(
+        "extension/jit_sljit/sljit_executable_expression_inputs.cpp"
+    )
+    for contract in (
+        "RemapSljitAuxiliaryExpressionTreeToExecutableInputs",
+        "semantic.expression_tree_source_indices = expr.input_source_indices",
+        "SLJIT auxiliary expression-tree source is absent from native predicate inputs",
+    ):
+        if contract not in executable_inputs:
+            raise AssertionError(
+                f"partial-predicate typed IR must share the dense executable input ABI: {contract}"
+            )
+
+    executable_codegen = read(
+        "extension/jit_sljit/sljit_executable_expression_codegen.cpp"
+    )
+    if "semantic.expression_tree.get()" not in executable_codegen:
+        raise AssertionError(
+            "native predicate selection codegen must receive the remapped typed predicate IR"
+        )
+
+    planner = read("extension/jit_sljit/sljit_native_predicate_simd_plan.cpp")
+    for contract in (
+        "root.conjunction_op != ExecutionExpressionConjunctionOp::AND",
+        "TryPlanSljitTypedExpressionTreeSimd(*root.children[prefix_count]).supported",
+        "prefix_count == 0 || prefix_count == root.children.size()",
+        "SljitTypedExpressionTreeSimdHybridFilterProfitable(simd)",
+        "TryBuildNativePredicate(*residual_ir, residual)",
+    ):
+        if contract not in planner:
+            raise AssertionError(
+                f"partial-predicate SIMD planning must preserve ordered AND semantics: {contract}"
+            )
+
+    predicate_codegen = read("extension/jit_sljit/sljit_predicate_codegen.cpp")
+    if "EmitSljitTypedExpressionTreeSimdHybridFilterLoop" not in predicate_codegen:
+        raise AssertionError(
+            "partial-predicate execution must use the shared single-pass SIMD hybrid loop"
+        )
+    for stale_two_pass_contract in (
+        "EmitSljitTypedExpressionTreeSimdCompactionLoop",
+        "original_execute_sel_offset",
+        "scalar_prefix",
+    ):
+        if stale_two_pass_contract in predicate_codegen:
+            raise AssertionError(
+                "partial-predicate execution must not mutate selections through a two-pass adapter"
+            )
+
+    simd_codegen = read(
+        "extension/jit_sljit/sljit_typed_expression_simd_codegen.cpp"
+    )
+    for contract in (
+        "sljit_emit_op1(compiler, SLJIT_CTZ32, SLJIT_R2, 0, SLJIT_R3, 0)",
+        "sljit_emit_op2(compiler, SLJIT_SUB, SLJIT_R2, 0, SLJIT_R3, 0, SLJIT_IMM, 1)",
+        "sljit_emit_op2(compiler, SLJIT_AND, SLJIT_R3, 0, SLJIT_R3, 0, SLJIT_R2, 0)",
+    ):
+        if contract not in simd_codegen:
+            raise AssertionError(
+                f"mixed SIMD masks must dispatch only set lanes through sparse bit iteration: {contract}"
+            )
+
+    hybrid_loop = simd_codegen.split(
+        "void EmitSljitTypedExpressionTreeSimdHybridFilterLoop", 1
+    )[-1]
+    for callback_register in ("SLJIT_S3", "SLJIT_S4", "SLJIT_S6"):
+        if callback_register in hybrid_loop:
+            raise AssertionError(
+                f"shared hybrid SIMD loop must preserve callback-owned saved register: {callback_register}"
+            )
+
+
 def main() -> None:
 	verify_layer_boundaries()
 	verify_no_benchmark_shaped_logic()
@@ -474,6 +556,7 @@ def main() -> None:
 	verify_grouped_reduction_lane_binding()
 	verify_compiled_artifact_ownership()
 	verify_scan_filter_ownership()
+	verify_partial_predicate_simd_contract()
 	verify_runtime_proofs_are_typed()
 	verify_production_contract_ownership()
 	print("Execution-region architecture verification passed")
