@@ -57,6 +57,16 @@ executes exact PHJ conjuncts before generic residual predicates, and a
 query-local filter/table identity lets compiled probes reuse that proof without
 repeating membership work. Runtime tracing reports
 `hash_join_probe.perfect_probe.exact_source_filter` when this contract fires.
+The generic exact-filter join preserves a 1.15x single-thread compiled speedup;
+the four-thread gate retains its separate 1.08x floor because its shorter raw
+runtime has a larger proportional noise envelope.
+
+When a production run verifies a durable performance improvement, the same
+increment must tighten the corresponding checked-in speedup floor or refresh
+the accepted comparison artifact. A performance change is incomplete while
+the regression gate still accepts the older, slower performance level.
+The selective grouped multi-aggregate floor is 1.11x at both one and four
+threads after removing unprofitable hybrid SIMD setup for simple predicates.
 
 Filtered hash-build validation covers source-filter selection composition and
 direct build ingress. Runtime tracing reports `filter.selected_input_zero_copy`

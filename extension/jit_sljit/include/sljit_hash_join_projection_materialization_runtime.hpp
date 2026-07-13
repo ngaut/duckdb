@@ -226,7 +226,7 @@ static bool SljitTryDirectMaterializeHashJoinProjectionSourcesToBatch(
     const SelectionVector &match_selection, Vector &row_pointers, DataChunk &join_source, DataChunk &batch,
     optional_ptr<const vector<idx_t>> output_to_projection = nullptr, optional_ptr<Vector> projected_hashes = nullptr,
     optional_ptr<const vector<uint8_t>> extra_skip_projection = nullptr,
-    bool exact_source_filter_matches_are_proven = false) {
+    ExecutionHashJoinProbeOutputProof output_proof = {}) {
 	if (join_source.size() == 0 || hash_join_idx >= ops.size() || !scratch.HasOperatorBinding(hash_join_idx)) {
 		return false;
 	}
@@ -238,12 +238,12 @@ static bool SljitTryDirectMaterializeHashJoinProjectionSourcesToBatch(
 		direct_reference_skip = *extra_skip_projection;
 	}
 	const bool direct_references_materialized =
-	    !exact_source_filter_matches_are_proven &&
+	    !output_proof.ExactSourceFilterMatches() &&
 	    SljitTryMaterializeHashJoinReferenceProjectionsToBatch(
 	        runtime, scratch, hash_join_idx, projection_idx, projection_op, join_input, match_selection, row_pointers,
 	        batch, output_to_projection, join_source.size(), direct_reference_skip);
 	const bool direct_computed_materialized =
-	    !exact_source_filter_matches_are_proven &&
+	    !output_proof.ExactSourceFilterMatches() &&
 	    SljitTryMaterializeHashJoinComputedProjectionsToBatch(
 	        runtime, scratch, hash_join_idx, projection_idx, projection_op, join_input, match_selection, row_pointers,
 	        batch, output_to_projection, join_source.size(), direct_reference_skip);
@@ -278,7 +278,7 @@ static bool SljitTryDirectMaterializeHashJoinProjectionSourcesToBatch(
 		    return ExecutionMaterializeHashJoinProbeProjectionSources(
 		        binding, join_input, row_pointers, match_selection, join_source.size(), referenced_columns, join_source,
 		        recorder, optional_ptr<const SelectionVector>(&scratch.HashJoinBuildSelection(hash_join_idx)),
-		        exact_source_filter_matches_are_proven);
+		        output_proof);
 	    });
 	if (!materialized) {
 		return false;

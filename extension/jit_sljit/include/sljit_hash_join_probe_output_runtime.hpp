@@ -83,7 +83,7 @@ static ExecutionOperatorBindResult SljitExecuteMarkProbeNoTrueNonMatches(Executi
 	state.input_offset = input_count;
 	state.resume_row_pointer = nullptr;
 	state.finished = true;
-	state.source_key0_int64_to_int32_matches_are_proven = false;
+	state.output_proof.Reset();
 	RecordSljitRegionRuntimePath(runtime, op.kind, "mark_nonmatch_empty_due_to_build_null");
 	RecordSljitRegionRuntimeProof(runtime, op.kind, ExecutionRegionJitRuntimeProof::NO_WORK,
 	                              "mark_nonmatch_empty_due_to_build_null");
@@ -94,8 +94,8 @@ static ExecutionOperatorBindResult SljitExecuteMarkProbeNoTrueNonMatches(Executi
 static ExecutionOperatorBindResult SljitExecuteEmptyHashJoinProbe(
     ExecutionRegionRuntime &runtime, idx_t op_idx, SljitExecutableRegionOp &op,
     const ExecutionHashJoinProbeBinding &probe, DataChunk &input, DataChunk &output, SelectionVector &match_selection,
-	Vector &row_pointers, SljitHashJoinProbeDrainState &state,
-	SljitHashJoinProbeOutputContract output_contract = SljitHashJoinProbeOutputContract::MATERIALIZED_OUTPUT) {
+    Vector &row_pointers, SljitHashJoinProbeDrainState &state,
+    SljitHashJoinProbeOutputContract output_contract = SljitHashJoinProbeOutputContract::MATERIALIZED_OUTPUT) {
 	state.finished = true;
 	RecordSljitRegionRuntimePath(runtime, op.kind, "empty_build_side");
 	RecordSljitRegionRuntimeProof(runtime, op.kind, ExecutionRegionJitRuntimeProof::NO_WORK, "empty_build_side");

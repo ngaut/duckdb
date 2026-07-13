@@ -14,6 +14,8 @@
 
 namespace duckdb {
 
+static constexpr idx_t SLJIT_PERFECT_HASH_HYBRID_SIMD_SIMPLE_COMPARISON_NODE_COUNT = 3;
+
 static bool
 SljitPerfectHashGroupExpressionsUseTypedTree(const vector<SljitNativeRegionExpressionPlan> &group_expressions) {
 	for (auto &group_expression : group_expressions) {
@@ -89,8 +91,13 @@ bool TryBuildSljitPerfectHashFusedUpdatePlan(
 	}
 	if (predicate && predicate->kind == ExecutionExpressionIRKind::BINARY &&
 	    SljitTypedExpressionTreeComparisonSupported(predicate->binary_op) && result.codegen_plan.fast_path_supported) {
-		result.predicate_simd_plan = TryPlanSljitTypedExpressionTreeSimd(*predicate);
-		if (result.predicate_simd_plan.supported) {
+		auto predicate_simd_plan = TryPlanSljitTypedExpressionTreeSimd(*predicate);
+		// Perfect-hash group lookup and arbitrary aggregate payloads remain scalar after
+		// the packed predicate mask. A bare reference-vs-constant comparison has no
+		// expression work to amortize that hybrid-loop setup; its scalar branch is cheaper.
+		if (predicate_simd_plan.supported &&
+		    predicate_simd_plan.node_count > SLJIT_PERFECT_HASH_HYBRID_SIMD_SIMPLE_COMPARISON_NODE_COUNT) {
+			result.predicate_simd_plan = std::move(predicate_simd_plan);
 			result.predicate_simd_mask_offset = (result.local_size + 15) & ~sljit_sw(15);
 			result.local_size = result.predicate_simd_mask_offset + 32;
 			auto vector_register_count = result.predicate_simd_plan.constant_count +

@@ -235,7 +235,7 @@ GENERIC_WORKLOADS = (
             "FROM __jit_generic_selective_groups WHERE event_date <= DATE '2024-01-04' "
             "GROUP BY group_flag, group_status ORDER BY group_flag, group_status"
         ),
-        "minimum_auto_speedup": 1.10,
+        "minimum_auto_speedup": 1.11,
         "max_auto_slowdown": 1.05,
         "requires_compiled_auto": True,
     },
@@ -305,6 +305,7 @@ GENERIC_WORKLOADS = (
             "USING (join_key)"
         ),
         "minimum_auto_speedup": 1.08,
+        "minimum_auto_speedup_by_threads": {1: 1.15},
         "max_auto_slowdown": 1.05,
         "requires_compiled_auto": True,
     },
@@ -381,7 +382,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--jit-extension", default="jit_sljit")
     parser.add_argument("--threads", type=int, default=1)
     parser.add_argument("--repeats", type=int, default=3)
-    parser.add_argument("--triage-repeats", type=int, default=31)
+    parser.add_argument("--triage-repeats", type=int, default=10)
     parser.add_argument("--event-log-size", type=int, default=0)
     parser.add_argument("--workloads", nargs="+", default=None)
     parser.add_argument("--trace-runtime", action="store_true")

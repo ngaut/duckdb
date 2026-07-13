@@ -1,6 +1,6 @@
 # JIT Broad-Workload Gate
 
-Last updated: 2026-07-12
+Last updated: 2026-07-13
 
 This file records the current TPC-H milestone and verification commands. The
 generic production contracts live in
@@ -26,81 +26,89 @@ The active architecture work is generic grouped and join execution:
   disposable compiled-region scratch;
 - DuckDB core CBO admits stateful recipes only when backend-neutral work facts
   cover startup and runtime ownership can prove the selected work.
+- selected hash-join output carries one backend-neutral proof object for
+  selection identity, exact RHS aliases, and safe key narrowing; filters
+  invalidate only the facts they actually change;
+- low-cardinality generated string search is rejected from physical-pipeline
+  facts before graph construction, IR lowering, or backend analysis;
+- hybrid SIMD is selected only when the packed predicate has enough work to
+  amortize mask setup before the remaining scalar grouped update.
 
 ## Accepted SF1 evidence
 
 Configuration: TPC-H SF1, one thread, production timing, tracing disabled, 31
 alternating repeats, result verification enabled. Accepted artifact:
-`benchmark/tpch/jit/tmp/sf1_baseline_refresh_20260712/promotion_recheck`.
+`benchmark/tpch/jit/tmp/sf1_proof_batch_pregraph_simd_promotion_20260713/promotion_recheck`.
 
 | Query | Non-JIT (s) | JIT (s) | Speedup |
 | ---: | ---: | ---: | ---: |
-| Q1 | 0.072 | 0.063 | 1.143x |
-| Q2 | 0.011 | 0.012 | 0.917x |
-| Q3 | 0.064 | 0.062 | 1.032x |
-| Q4 | 0.046 | 0.042 | 1.095x |
-| Q5 | 0.054 | 0.050 | 1.080x |
-| Q6 | 0.042 | 0.022 | 1.909x |
-| Q7 | 0.062 | 0.058 | 1.069x |
-| Q8 | 0.044 | 0.041 | 1.073x |
-| Q9 | 0.155 | 0.130 | 1.192x |
-| Q10 | 0.069 | 0.063 | 1.095x |
-| Q11 | 0.013 | 0.013 | 1.000x |
-| Q12 | 0.071 | 0.063 | 1.127x |
-| Q13 | 0.151 | 0.139 | 1.086x |
-| Q14 | 0.057 | 0.054 | 1.056x |
-| Q15 | 0.039 | 0.030 | 1.300x |
-| Q16 | 0.032 | 0.030 | 1.067x |
-| Q17 | 0.031 | 0.031 | 1.000x |
-| Q18 | 0.120 | 0.093 | 1.290x |
-| Q19 | 0.033 | 0.031 | 1.065x |
-| Q20 | 0.066 | 0.062 | 1.065x |
-| Q21 | 0.118 | 0.106 | 1.113x |
-| Q22 | 0.024 | 0.022 | 1.091x |
+| Q1 | 0.072 | 0.058 | 1.244x |
+| Q2 | 0.011 | 0.011 | 0.942x |
+| Q3 | 0.062 | 0.060 | 1.022x |
+| Q4 | 0.045 | 0.040 | 1.100x |
+| Q5 | 0.053 | 0.049 | 1.086x |
+| Q6 | 0.040 | 0.021 | 1.965x |
+| Q7 | 0.060 | 0.056 | 1.076x |
+| Q8 | 0.042 | 0.040 | 1.051x |
+| Q9 | 0.148 | 0.121 | 1.221x |
+| Q10 | 0.065 | 0.057 | 1.148x |
+| Q11 | 0.012 | 0.012 | 0.972x |
+| Q12 | 0.070 | 0.062 | 1.133x |
+| Q13 | 0.145 | 0.094 | 1.549x |
+| Q14 | 0.052 | 0.049 | 1.044x |
+| Q15 | 0.038 | 0.029 | 1.324x |
+| Q16 | 0.031 | 0.029 | 1.070x |
+| Q17 | 0.030 | 0.030 | 1.013x |
+| Q18 | 0.105 | 0.087 | 1.198x |
+| Q19 | 0.031 | 0.029 | 1.067x |
+| Q20 | 0.065 | 0.061 | 1.076x |
+| Q21 | 0.115 | 0.103 | 1.116x |
+| Q22 | 0.023 | 0.021 | 1.103x |
 
 All results are correct. Auto compiles 20 queries and deliberately keeps Q2
 and Q11 vectorized because their stateful work is below the generic startup
-floor. Summed medians improve from 1.374s to 1.217s (1.129x); the per-query
-geometric-mean speedup is 1.118x. The gate preserves 18 material JIT wins with
-no accepted-baseline regression.
+floor. Summed medians improve from 1.314s to 1.119s (1.175x); the per-query
+geometric-mean speedup is 1.144x. The promoted gate increases material JIT
+wins from 18 to 19 with no accepted-baseline regression.
 
 ## Accepted SF10 evidence
 
 Configuration: TPC-H SF10, one thread, production timing, tracing disabled, 31
 alternating repeats, result verification enabled. Accepted artifact:
-`benchmark/tpch/jit/tmp/sf10_baseline_refresh_20260712/promotion_recheck`.
+`benchmark/tpch/jit/tmp/sf10_proof_batch_pregraph_simd_promotion_20260713/promotion_recheck`.
 
 | Query | Non-JIT (s) | JIT (s) | Speedup |
 | ---: | ---: | ---: | ---: |
-| Q1 | 0.659 | 0.560 | 1.177x |
-| Q2 | 0.064 | 0.058 | 1.103x |
-| Q3 | 0.638 | 0.600 | 1.063x |
-| Q4 | 0.503 | 0.470 | 1.070x |
-| Q5 | 0.597 | 0.530 | 1.126x |
-| Q6 | 0.392 | 0.193 | 2.031x |
-| Q7 | 0.583 | 0.545 | 1.070x |
-| Q8 | 0.412 | 0.355 | 1.161x |
-| Q9 | 1.761 | 1.389 | 1.268x |
-| Q10 | 1.000 | 0.876 | 1.142x |
-| Q11 | 0.071 | 0.068 | 1.044x |
-| Q12 | 0.640 | 0.565 | 1.133x |
-| Q13 | 1.772 | 1.723 | 1.028x |
-| Q14 | 0.422 | 0.387 | 1.090x |
-| Q15 | 0.356 | 0.246 | 1.447x |
-| Q16 | 0.186 | 0.161 | 1.155x |
-| Q17 | 0.283 | 0.279 | 1.014x |
-| Q18 | 1.485 | 0.971 | 1.529x |
-| Q19 | 0.306 | 0.278 | 1.101x |
-| Q20 | 0.619 | 0.539 | 1.148x |
-| Q21 | 1.427 | 1.297 | 1.100x |
-| Q22 | 0.191 | 0.159 | 1.201x |
+| Q1 | 0.651 | 0.503 | 1.295x |
+| Q2 | 0.063 | 0.057 | 1.099x |
+| Q3 | 0.629 | 0.581 | 1.083x |
+| Q4 | 0.485 | 0.449 | 1.081x |
+| Q5 | 0.550 | 0.500 | 1.100x |
+| Q6 | 0.384 | 0.187 | 2.054x |
+| Q7 | 0.559 | 0.523 | 1.069x |
+| Q8 | 0.391 | 0.334 | 1.172x |
+| Q9 | 1.694 | 1.276 | 1.328x |
+| Q10 | 0.962 | 0.824 | 1.167x |
+| Q11 | 0.070 | 0.067 | 1.050x |
+| Q12 | 0.628 | 0.558 | 1.126x |
+| Q13 | 1.661 | 1.081 | 1.537x |
+| Q14 | 0.401 | 0.367 | 1.092x |
+| Q15 | 0.341 | 0.235 | 1.452x |
+| Q16 | 0.176 | 0.154 | 1.142x |
+| Q17 | 0.271 | 0.251 | 1.080x |
+| Q18 | 1.311 | 0.947 | 1.385x |
+| Q19 | 0.296 | 0.268 | 1.105x |
+| Q20 | 0.609 | 0.529 | 1.152x |
+| Q21 | 1.392 | 1.250 | 1.114x |
+| Q22 | 0.185 | 0.144 | 1.290x |
 
 All results are correct and all 22 queries execute compiled regions with traced
-runtime ownership. Summed medians improve from 14.367s to 12.249s (1.173x),
-the per-query geometric-mean speedup is 1.175x, and the gate records 21
-material JIT wins. Q11 now lowers its widening decimal product and exact
-INT128 sum to native machine code; the same recipe is rejected at SF1 because
-there are not enough batches to amortize stateful startup.
+runtime ownership. Summed medians improve from 13.710s to 11.083s (1.237x),
+the per-query geometric-mean speedup is 1.210x, and the promoted gate increases
+material JIT wins from 21 to all 22 queries. Q11 lowers its widening decimal
+product and exact INT128 sum to native machine code; the same recipe is
+rejected at SF1 because there are not enough batches to amortize stateful
+startup.
 
 ## Performance direction
 
@@ -137,7 +145,7 @@ run. Promotion is a ratchet, not permission to accept a regression:
 
 ```bash
 python3 benchmark/tpch/jit/run_tpch_regression_gate.py \
-  --promote-baseline --promotion-repeats 31 --no-build
+  --promote-baseline --promotion-repeats 10 --no-build
 ```
 
 When a selected direction is architecturally correct but misses the performance

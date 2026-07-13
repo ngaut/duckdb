@@ -486,7 +486,7 @@ DUCKDB_API void ExecutionMaterializeHashJoinProbe(const ExecutionHashJoinProbeBi
                                                   Vector &row_pointers, const SelectionVector &match_sel, idx_t count,
                                                   DataChunk &result,
                                                   optional_ptr<ExecutionOperatorStageRecorder> recorder = nullptr,
-                                                  bool exact_source_filter_matches_are_proven = false);
+                                                  ExecutionHashJoinProbeOutputProof output_proof = {});
 
 DUCKDB_API bool ExecutionTryDirectGatherHashJoinRHSFixedColumn(const ExecutionHashJoinProbeBinding &binding,
                                                                Vector &row_pointers, idx_t count, idx_t rhs_output_idx,
@@ -502,7 +502,7 @@ ExecutionMaterializeHashJoinProbeProjectionSources(const ExecutionHashJoinProbeB
                                                    const vector<uint8_t> &referenced_columns, DataChunk &result,
                                                    optional_ptr<ExecutionOperatorStageRecorder> recorder = nullptr,
                                                    optional_ptr<const SelectionVector> perfect_build_sel = nullptr,
-                                                   bool exact_source_filter_matches_are_proven = false);
+                                                   ExecutionHashJoinProbeOutputProof output_proof = {});
 
 DUCKDB_API void
 ExecutionMaterializePerfectHashJoinProbe(const ExecutionHashJoinProbeBinding &binding, DataChunk &input,

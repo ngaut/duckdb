@@ -8,6 +8,7 @@
 #include "execution_region_cost_input.hpp"
 
 #include "duckdb/execution/execution_region_ir.hpp"
+#include "duckdb/execution/execution_region_graph.hpp"
 #include "duckdb/execution/execution_region_lowering.hpp"
 #include "duckdb/execution/operator/aggregate/physical_hash_aggregate.hpp"
 #include "duckdb/execution/operator/aggregate/physical_perfecthash_aggregate.hpp"
@@ -514,9 +515,31 @@ static void AccumulateExecutionRegionPhysicalProjectionListTraits(const vector<u
 	}
 }
 
+static bool ExecutionRegionPhysicalExpressionContainsIntrinsic(const ExecutionExpressionIR &expression,
+                                                               ExecutionExpressionIntrinsicKind intrinsic) {
+	if (expression.kind == ExecutionExpressionIRKind::INTRINSIC && expression.intrinsic == intrinsic) {
+		return true;
+	}
+	if (expression.left && ExecutionRegionPhysicalExpressionContainsIntrinsic(*expression.left, intrinsic)) {
+		return true;
+	}
+	if (expression.right && ExecutionRegionPhysicalExpressionContainsIntrinsic(*expression.right, intrinsic)) {
+		return true;
+	}
+	if (expression.else_node && ExecutionRegionPhysicalExpressionContainsIntrinsic(*expression.else_node, intrinsic)) {
+		return true;
+	}
+	for (auto &child : expression.children) {
+		if (child && ExecutionRegionPhysicalExpressionContainsIntrinsic(*child, intrinsic)) {
+			return true;
+		}
+	}
+	return false;
+}
+
 static bool ExecutionRegionPhysicalTableFilterCanUseGeneratedSourceStage(const TableFilter &table_filter,
                                                                          const LogicalType &source_type,
-                                                                         idx_t filter_index) {
+                                                                         idx_t filter_index, bool &has_string_like) {
 	if (table_filter.filter_type != TableFilterType::EXPRESSION_FILTER) {
 		return false;
 	}
@@ -526,11 +549,18 @@ static bool ExecutionRegionPhysicalTableFilterCanUseGeneratedSourceStage(const T
 	if (!expression) {
 		return false;
 	}
-	return GetExecutionRegionGeneratedSourceFilterCapability(*expression, source_type).can_generate;
+	const bool can_generate = GetExecutionRegionGeneratedSourceFilterCapability(*expression, source_type).can_generate;
+	if (can_generate && expression->root &&
+	    ExecutionRegionPhysicalExpressionContainsIntrinsic(*expression->root,
+	                                                       ExecutionExpressionIntrinsicKind::STRING_LIKE)) {
+		has_string_like = true;
+	}
+	return can_generate;
 }
 
 static bool TryAccumulateExecutionRegionPhysicalScanCost(const PhysicalOperator &op,
-                                                         ExecutionRegionPhysicalPipelineCostFacts &facts) {
+                                                         ExecutionRegionPhysicalPipelineCostFacts &facts,
+                                                         ClientContext &context) {
 	if (op.type != PhysicalOperatorType::TABLE_SCAN) {
 		return true;
 	}
@@ -551,12 +581,19 @@ static bool TryAccumulateExecutionRegionPhysicalScanCost(const PhysicalOperator 
 	idx_t generated_filter_count = 0;
 	for (auto &filter : *scan.table_filters) {
 		auto filter_idx = filter.GetIndex().GetIndex();
+		bool has_string_like = false;
 		const bool can_generate = filter_idx < source_input_types.size() &&
 		                          ExecutionRegionPhysicalTableFilterCanUseGeneratedSourceStage(
-		                              filter.Filter(), source_input_types[filter_idx], filter_count);
+		                              filter.Filter(), source_input_types[filter_idx], filter_count, has_string_like);
 		if (can_generate) {
 			filter_cost += DuckDBCostModel::FilterCost(filter.Filter());
 			generated_filter_count++;
+			if (has_string_like) {
+				const auto distinct_count = GetExecutionRegionTableScanDistinctCount(op, context, filter_idx);
+				if (distinct_count > 0 && distinct_count <= EXECUTION_REGION_LOW_CARDINALITY_STRING_SEARCH_LIMIT) {
+					facts.cost_input.vectorized_execution_preferred = true;
+				}
+			}
 		}
 		filter_count++;
 	}
@@ -688,7 +725,8 @@ static void AccumulateExecutionRegionPhysicalSinkTraits(const PhysicalOperator &
 
 static bool TryAccumulateExecutionRegionPhysicalOperatorCost(const PhysicalOperator &op,
                                                              ExecutionRegionPhysicalPipelineCostFacts &facts,
-                                                             ExecutionRegionPhysicalPipelineSlot slot) {
+                                                             ExecutionRegionPhysicalPipelineSlot slot,
+                                                             ClientContext &context) {
 	auto &input = facts.cost_input;
 	auto &traits = facts.traits;
 	input.estimated_cardinality = MaxValue(input.estimated_cardinality, op.estimated_cardinality);
@@ -704,7 +742,7 @@ static bool TryAccumulateExecutionRegionPhysicalOperatorCost(const PhysicalOpera
 	}
 	switch (op.type) {
 	case PhysicalOperatorType::TABLE_SCAN:
-		return TryAccumulateExecutionRegionPhysicalScanCost(op, facts);
+		return TryAccumulateExecutionRegionPhysicalScanCost(op, facts, context);
 	case PhysicalOperatorType::FILTER: {
 		auto &filter = op.Cast<PhysicalFilter>();
 		if (!filter.expression) {
@@ -939,19 +977,20 @@ bool TryBuildExecutionRegionPipelineCostInput(Pipeline &pipeline, PhysicalRunner
 		return false;
 	}
 	ExecutionRegionPhysicalPipelineCostFacts facts;
+	auto &context = pipeline.GetClientContext();
 	facts.cost_input.input_scope = PhysicalRunnerCostInputScope::PHYSICAL_PIPELINE;
 	if (!TryAccumulateExecutionRegionPhysicalOperatorCost(*pipeline.GetSource(), facts,
-	                                                      ExecutionRegionPhysicalPipelineSlot::SOURCE)) {
+	                                                      ExecutionRegionPhysicalPipelineSlot::SOURCE, context)) {
 		return false;
 	}
 	for (auto &op : pipeline.GetIntermediateOperators()) {
 		if (!TryAccumulateExecutionRegionPhysicalOperatorCost(op.get(), facts,
-		                                                      ExecutionRegionPhysicalPipelineSlot::OPERATOR)) {
+		                                                      ExecutionRegionPhysicalPipelineSlot::OPERATOR, context)) {
 			return false;
 		}
 	}
 	if (pipeline.GetSink() && !TryAccumulateExecutionRegionPhysicalOperatorCost(
-	                              *pipeline.GetSink(), facts, ExecutionRegionPhysicalPipelineSlot::SINK)) {
+	                              *pipeline.GetSink(), facts, ExecutionRegionPhysicalPipelineSlot::SINK, context)) {
 		return false;
 	}
 	FinalizeExecutionRegionPhysicalPipelineCostInput(pipeline, facts);

@@ -9,6 +9,7 @@
 #pragma once
 
 #include "duckdb/common/common.hpp"
+#include "duckdb/execution/execution_hash_join_runtime.hpp"
 
 namespace duckdb {
 
@@ -18,8 +19,7 @@ struct SljitHashJoinProbeDrainState {
 	vector<uint8_t> found_match;
 	bool left_initialized = false;
 	bool left_unmatched_emitted = false;
-	bool source_key0_int64_to_int32_matches_are_proven = false;
-	bool exact_source_filter_matches_are_proven = false;
+	ExecutionHashJoinProbeOutputProof output_proof;
 	bool finished = false;
 };
 

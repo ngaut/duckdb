@@ -350,6 +350,68 @@ TEST_CASE("JIT exact prefix membership elides only equivalent unique hash probes
 	}
 }
 
+TEST_CASE("JIT carries exact prefix proof through selected output filters", "[api][jit]") {
+	DuckDB db;
+	Connection con(db);
+	auto &manager = ExecutionRegionManager::Get(*con.context);
+
+	ConfigureSljitForCoverage(con, false, true, true, 10000);
+	REQUIRE_NO_FAIL(con.Query("SET threads=1"));
+	REQUIRE_NO_FAIL(con.Query("SET perfect_ht_threshold=0"));
+	REQUIRE_NO_FAIL(con.Query("SET disabled_optimizers='filter_pushdown'"));
+	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_exact_selected_probe AS "
+	                          "SELECT i::BIGINT AS k, (i % 97)::BIGINT AS v FROM range(2100000) tbl(i)"));
+	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_exact_selected_unique AS "
+	                          "SELECT (i * 500)::BIGINT AS k FROM range(4096) tbl(i)"));
+
+	const string query = "SELECT count(*), sum(l.v + r.k) FROM jit_exact_selected_probe l "
+	                     "JOIN jit_exact_selected_unique r ON l.k = r.k WHERE l.v + r.k > 2000000";
+	REQUIRE_NO_FAIL(con.Query("SET jit_policy='off'"));
+	auto reference = con.Query(query);
+	REQUIRE_NO_FAIL(*reference);
+
+	REQUIRE_NO_FAIL(con.Query("SET jit_policy='auto'"));
+	ClearJitTrace(manager, true);
+	auto result = con.Query(query);
+	REQUIRE_NO_FAIL(*result);
+	REQUIRE(result->GetValue(0, 0).ToString() == reference->GetValue(0, 0).ToString());
+	REQUIRE(result->GetValue(1, 0).ToString() == reference->GetValue(1, 0).ToString());
+	RequireJitEvent(
+	    manager,
+	    [](const ExecutionRegionEvent &event) {
+		    const auto paths = EventJitRuntimePathCounts(event);
+		    const auto stages = EventGeneratedStageRuntimeBreakdown(event);
+		    return EventPhase(event) == "runtime" && EventStatus(event) == "executed" &&
+		           StringUtil::Contains(paths, "hash_join_probe.regular_probe.exact_source_filter=") &&
+		           StringUtil::Contains(stages, "filter.selected_hash_join_selection=");
+	    },
+	    [](const ExecutionRegionEvent &event) {
+		    REQUIRE(EventExecutionMode(event) == "native");
+		    REQUIRE(StringUtil::Contains(EventJitRuntimeProofCounts(event), "generated_backend_work="));
+	    });
+
+	const string all_match_query = "SELECT count(*), sum(l.v + r.k) FROM jit_exact_selected_probe l "
+	                               "JOIN jit_exact_selected_unique r ON l.k = r.k WHERE l.v + r.k >= r.k";
+	REQUIRE_NO_FAIL(con.Query("SET jit_policy='off'"));
+	auto all_match_reference = con.Query(all_match_query);
+	REQUIRE_NO_FAIL(*all_match_reference);
+	REQUIRE(all_match_reference->GetValue(0, 0).ToString() == "4096");
+
+	REQUIRE_NO_FAIL(con.Query("SET jit_policy='auto'"));
+	ClearJitTrace(manager, true);
+	auto all_match_result = con.Query(all_match_query);
+	REQUIRE_NO_FAIL(*all_match_result);
+	REQUIRE(all_match_result->GetValue(0, 0).ToString() == all_match_reference->GetValue(0, 0).ToString());
+	REQUIRE(all_match_result->GetValue(1, 0).ToString() == all_match_reference->GetValue(1, 0).ToString());
+	RequireJitEvent(manager, [](const ExecutionRegionEvent &event) {
+		const auto paths = EventJitRuntimePathCounts(event);
+		const auto stages = EventGeneratedStageRuntimeBreakdown(event);
+		return EventPhase(event) == "runtime" && EventStatus(event) == "executed" &&
+		       StringUtil::Contains(paths, "hash_join_probe.regular_probe.exact_source_filter=") &&
+		       StringUtil::Contains(stages, "filter.selected_hash_join_selection=");
+	});
+}
+
 TEST_CASE("JIT preserves source layout through generated filter projection repair", "[api][jit]") {
 	DuckDB db;
 	Connection con(db);

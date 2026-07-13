@@ -29,6 +29,7 @@ static constexpr const char *EXECUTION_REGION_BLOCKER_REGION_CONTAINS_NO_NATIVE_
     "region_contains_no_native_nodes";
 static constexpr const char *EXECUTION_REGION_BLOCKER_FUSED_REGION_CONTRACT_HAS_BOUNDARIES =
     "fused_region_contract_has_boundaries";
+static constexpr idx_t EXECUTION_REGION_LOW_CARDINALITY_STRING_SEARCH_LIMIT = 64;
 
 enum class ExecutionRegionOperatorKind : uint8_t {
 	GENERIC,

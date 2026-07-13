@@ -15,8 +15,6 @@
 namespace duckdb {
 
 static constexpr idx_t SLJIT_FLAT_NULLABLE_FAST_PATH_MIN_CARDINALITY = STANDARD_VECTOR_SIZE * 4;
-static constexpr idx_t SLJIT_STRING_SEARCH_LOW_CARDINALITY_LIMIT = 64;
-
 static bool SljitPredicateHasLowCardinalityStringLike(const SljitNativePredicate &predicate,
                                                       const vector<idx_t> &input_distinct_counts,
                                                       idx_t &distinct_count) {
@@ -25,7 +23,7 @@ static bool SljitPredicateHasLowCardinalityStringLike(const SljitNativePredicate
 			return false;
 		}
 		distinct_count = input_distinct_counts[predicate.source_index];
-		return distinct_count > 0 && distinct_count <= SLJIT_STRING_SEARCH_LOW_CARDINALITY_LIMIT;
+		return distinct_count > 0 && distinct_count <= EXECUTION_REGION_LOW_CARDINALITY_STRING_SEARCH_LIMIT;
 	}
 	if (predicate.child &&
 	    SljitPredicateHasLowCardinalityStringLike(*predicate.child, input_distinct_counts, distinct_count)) {

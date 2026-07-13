@@ -117,6 +117,13 @@ static void SljitCompactSelectedHashJoinViewInPlace(SljitRegionExecutionScratch 
 		return;
 	}
 	auto &match_selection = scratch.FilterSelection(selected.hash_join_idx);
+	if (selected.ExactSourceFilterMatches()) {
+		auto &source_match_selection = selected.MatchSelection();
+		for (idx_t row_idx = 0; row_idx < selected_count; row_idx++) {
+			match_selection.set_index(row_idx, source_match_selection.get_index(filter_selection.get_index(row_idx)));
+		}
+		return;
+	}
 	auto &build_selection = scratch.HashJoinBuildSelection(selected.hash_join_idx);
 	auto &row_pointers = scratch.HashJoinRowPointers(selected.hash_join_idx);
 	row_pointers.SetVectorType(VectorType::FLAT_VECTOR);
@@ -182,12 +189,17 @@ static bool SljitExecuteSelectedHashJoinGeneratedFilterPrimitive(
 	if (selected_count == 0) {
 		return false;
 	}
+	const bool selection_compacted = selected_count != selected.count;
 	SljitCompactSelectedHashJoinViewInPlace(scratch, selected, filter_selection, selected_count);
+	auto output_proof = selected.output_proof;
+	if (selection_compacted) {
+		output_proof.SetExplicitMatchSelection();
+	}
 	output = SljitRuntimeBatchViewFromHashJoinSelection(
 	    selected.Input(), scratch.FilterSelection(selected.hash_join_idx),
 	    scratch.HashJoinBuildSelection(selected.hash_join_idx), scratch.HashJoinRowPointers(selected.hash_join_idx),
-	    selected_count, selected.hash_join_idx, selected.source_key0_int64_to_int32_matches_are_proven,
-	    selected.exact_source_filter_matches_are_proven, selected.output_column_map, selected.output_projection_idx);
+	    selected_count, selected.hash_join_idx, output_proof, selected.output_column_map,
+	    selected.output_projection_idx);
 	return true;
 }
 

@@ -241,6 +241,23 @@ static idx_t BuildExecutionRegionDistinctCount(BaseStatistics &stats, idx_t sour
 	return MinValue(stats.GetDistinctCount(), source_cardinality);
 }
 
+idx_t GetExecutionRegionTableScanDistinctCount(const PhysicalOperator &op, ClientContext &context,
+                                               idx_t source_input_index) {
+	if (op.type != PhysicalOperatorType::TABLE_SCAN) {
+		return 0;
+	}
+	auto &scan = op.Cast<PhysicalTableScan>();
+	if (source_input_index >= scan.column_ids.size()) {
+		return 0;
+	}
+	auto stats = TryGetExecutionRegionScanColumnStatistics(scan, context, scan.column_ids[source_input_index]);
+	if (!stats) {
+		return 0;
+	}
+	auto contract = scan.GetExecutionContract();
+	return BuildExecutionRegionDistinctCount(*stats, contract.source.estimated_source_cardinality);
+}
+
 static optional_ptr<const Expression> TryUnwrapExecutionRegionOptionalFilterExpression(const Expression &expr) {
 	if (expr.GetExpressionClass() != ExpressionClass::BOUND_FUNCTION) {
 		return optional_ptr<const Expression>(expr);

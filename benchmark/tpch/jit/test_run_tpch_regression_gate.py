@@ -11,7 +11,11 @@ from types import SimpleNamespace
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from tpch_common import TPCHConfigurationError
-from run_tpch_regression_gate import apply_baseline_state_contract, selected_auto_queries
+from run_tpch_regression_gate import (
+    apply_baseline_state_contract,
+    promotion_recheck_repeats,
+    selected_auto_queries,
+)
 
 
 class TestBaselineStateContract(unittest.TestCase):
@@ -105,6 +109,26 @@ class TestRuntimeContractQuerySelection(unittest.TestCase):
         )
         with self.assertRaises(TPCHConfigurationError):
             selected_auto_queries(out_dir, ["7"])
+
+
+class TestPromotionRepeats(unittest.TestCase):
+    def test_default_is_ten_repeats(self) -> None:
+        self.assertEqual(
+            promotion_recheck_repeats(SimpleNamespace(repeats=5, promotion_repeats=None)),
+            10,
+        )
+
+    def test_default_never_reduces_candidate_sample_count(self) -> None:
+        self.assertEqual(
+            promotion_recheck_repeats(SimpleNamespace(repeats=12, promotion_repeats=None)),
+            12,
+        )
+
+    def test_explicit_repeat_count_wins(self) -> None:
+        self.assertEqual(
+            promotion_recheck_repeats(SimpleNamespace(repeats=5, promotion_repeats=7)),
+            7,
+        )
 
 
 if __name__ == "__main__":

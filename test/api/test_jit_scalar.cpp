@@ -349,6 +349,45 @@ TEST_CASE("JIT CBO preserves vectorized low-cardinality string predicates", "[ap
 	REQUIRE(found_vectorized_preference);
 }
 
+TEST_CASE("JIT CBO rejects low-cardinality string predicates before region graph construction", "[api][jit]") {
+	DuckDB db;
+	Connection con(db);
+	auto &manager = ExecutionRegionManager::Get(*con.context);
+
+	ConfigureSljit(con, "auto", false, false, false, 10000);
+	ConfigureJitDecisionTrace(con);
+	REQUIRE_NO_FAIL(con.Query("SET threads=4"));
+	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_low_cardinality_like_precheck AS "
+	                          "SELECT i, CASE WHEN i % 100 = 0 "
+	                          "THEN 'ordinary package with special shipping requests included' "
+	                          "ELSE 'ordinary shipping package comment with several common words' END AS s "
+	                          "FROM range(4000000) tbl(i)"));
+
+	REQUIRE_NO_FAIL(con.Query("SET jit_policy='off'"));
+	auto reference = con.Query("SELECT sum(i * 31) FROM jit_low_cardinality_like_precheck "
+	                           "WHERE s NOT LIKE '%special%requests%'");
+	REQUIRE_NO_FAIL(*reference);
+	REQUIRE_NO_FAIL(con.Query("SET jit_policy='auto'"));
+	ClearJitTrace(manager, true);
+	auto result = con.Query("SELECT sum(i * 31) FROM jit_low_cardinality_like_precheck "
+	                        "WHERE s NOT LIKE '%special%requests%'");
+	REQUIRE_NO_FAIL(*result);
+	REQUIRE(result->GetValue(0, 0).ToString() == reference->GetValue(0, 0).ToString());
+
+	RequireJitEvent(
+	    manager,
+	    [](const ExecutionRegionEvent &event) {
+		    return EventPhase(event) == "decision" && EventStatus(event) == "skipped" &&
+		           event.runner_cost.selection_reason == "rejected_vectorized_execution_preferred";
+	    },
+	    [](const ExecutionRegionEvent &event) {
+		    REQUIRE(StringUtil::Contains(event.reason, "before region graph"));
+		    REQUIRE(event.stage_timings.graph_build_time_us == 0);
+		    REQUIRE(event.stage_timings.ir_lowering_time_us == 0);
+		    REQUIRE(event.stage_timings.backend_analysis_time_us == 0);
+	    });
+}
+
 TEST_CASE("JIT lowers decimal CASE payloads with string prefix conditions", "[api][jit]") {
 	DuckDB db;
 	Connection con(db);

@@ -45,8 +45,7 @@ struct SljitPostJoinProjectionAggregateRuntimeState {
 		join_output.SetChildCardinality(selected.count);
 		return ExecuteSelectedJoinOutput(runtime, result, ops, scratch, selected.Input(), join_output,
 		                                 selected.MatchSelection(), selected.BuildSelection(), selected.RowPointers(),
-		                                 selected.source_key0_int64_to_int32_matches_are_proven,
-		                                 selected.exact_source_filter_matches_are_proven, selected.OutputColumnMap(),
+		                                 selected.output_proof, selected.OutputColumnMap(),
 		                                 selected.output_projection_idx);
 	}
 
@@ -54,8 +53,7 @@ struct SljitPostJoinProjectionAggregateRuntimeState {
 	                               vector<SljitExecutableRegionOp> &ops, SljitRegionExecutionScratch &scratch,
 	                               DataChunk &join_input, DataChunk &join_output,
 	                               const SelectionVector &match_selection, const SelectionVector &build_selection,
-	                               Vector &row_pointers, bool source_key0_int64_to_int32_matches_are_proven,
-	                               bool exact_source_filter_matches_are_proven,
+	                               Vector &row_pointers, ExecutionHashJoinProbeOutputProof output_proof,
 	                               optional_ptr<const vector<idx_t>> output_column_map = nullptr,
 	                               idx_t output_projection_idx = DConstants::INVALID_INDEX) {
 		if (!prepared) {
@@ -66,19 +64,18 @@ struct SljitPostJoinProjectionAggregateRuntimeState {
 		}
 		auto hash_join_idx = post_join_projection.hash_join_idx;
 		auto &hash_join_op = ops[hash_join_idx];
-		const bool source_key0_int64_to_int32_safe_for_output = source_key0_int64_to_int32_matches_are_proven;
 		auto direct_strategy = DirectAggregateStrategyPtr();
 		if (!post_join_projection.HasProjectionChain()) {
-			if (SljitTryExecuteDirectJoinOutputAggregate(
-			        runtime, ops, scratch, direct_strategy, post_join_projection, join_input, match_selection,
-			        build_selection, row_pointers, join_output, nullptr, source_key0_int64_to_int32_safe_for_output,
-			        exact_source_filter_matches_are_proven, output_column_map, output_projection_idx)) {
+			if (SljitTryExecuteDirectJoinOutputAggregate(runtime, ops, scratch, direct_strategy, post_join_projection,
+			                                             join_input, match_selection, build_selection, row_pointers,
+			                                             join_output, nullptr, output_proof, output_column_map,
+			                                             output_projection_idx)) {
 				processed_output_rows += join_output.size();
 				return false;
 			}
 			if (!SljitMaterializeSelectionOnlyHashJoinProbeOutput(
 			        runtime, scratch, hash_join_idx, hash_join_op, join_input, match_selection, build_selection,
-			        row_pointers, join_output.size(), join_output, exact_source_filter_matches_are_proven)) {
+			        row_pointers, join_output.size(), join_output, output_proof)) {
 				return false;
 			}
 			return ExecuteMaterializedAggregateBatch(runtime, result, ops, scratch, join_output);
@@ -87,27 +84,26 @@ struct SljitPostJoinProjectionAggregateRuntimeState {
 		auto aggregate_sink = MakeAggregateSink(runtime, result, ops, scratch);
 		auto &projected = scratch.TemporaryChunk(post_join_projection.final_projection_idx);
 		bool direct_projected = false;
-		if (SljitTryExecuteDirectJoinOutputAggregate(
-		        runtime, ops, scratch, direct_strategy, post_join_projection, join_input, match_selection,
-		        build_selection, row_pointers, join_output, aggregate_sink.DeferredGroupedFinishPtr(),
-		        source_key0_int64_to_int32_safe_for_output, exact_source_filter_matches_are_proven, output_column_map,
-		        output_projection_idx)) {
+		if (SljitTryExecuteDirectJoinOutputAggregate(runtime, ops, scratch, direct_strategy, post_join_projection,
+		                                             join_input, match_selection, build_selection, row_pointers,
+		                                             join_output, aggregate_sink.DeferredGroupedFinishPtr(),
+		                                             output_proof, output_column_map, output_projection_idx)) {
 			aggregate_sink.Charge(join_output.size());
 			return false;
 		}
 		if (aggregate_sink.TryAppendDirectProjectedBatch(join_output, direct_projected, [&](DataChunk &batch) {
-			    return SljitTryDirectMaterializeJoinProjectionChainToBatch(
-			        runtime, ops, scratch, post_join_projection, &join_input, &match_selection, &row_pointers,
-			        join_output, batch, exact_source_filter_matches_are_proven);
+			    return SljitTryDirectMaterializeJoinProjectionChainToBatch(runtime, ops, scratch, post_join_projection,
+			                                                               &join_input, &match_selection, &row_pointers,
+			                                                               join_output, batch, output_proof);
 		    })) {
 			return true;
 		}
 		if (direct_projected) {
 			return false;
 		}
-		if (!SljitMaterializeSelectionOnlyHashJoinProbeOutput(
-		        runtime, scratch, hash_join_idx, hash_join_op, join_input, match_selection, build_selection,
-		        row_pointers, join_output.size(), join_output, exact_source_filter_matches_are_proven)) {
+		if (!SljitMaterializeSelectionOnlyHashJoinProbeOutput(runtime, scratch, hash_join_idx, hash_join_op, join_input,
+		                                                      match_selection, build_selection, row_pointers,
+		                                                      join_output.size(), join_output, output_proof)) {
 			return false;
 		}
 		if (aggregate_sink.TryAppendDirectProjectedBatch(join_output, direct_projected, [&](DataChunk &batch) {

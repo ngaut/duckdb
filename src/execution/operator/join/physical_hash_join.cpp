@@ -2740,7 +2740,7 @@ static void MaterializeExecutionEmptyMarkJoinProbe(const ExecutionHashJoinProbeB
 void ExecutionMaterializeHashJoinProbe(const ExecutionHashJoinProbeBinding &binding, DataChunk &input,
                                        Vector &row_pointers, const SelectionVector &match_sel, idx_t count,
                                        DataChunk &result, optional_ptr<ExecutionOperatorStageRecorder> recorder,
-                                       bool exact_source_filter_matches_are_proven) {
+                                       ExecutionHashJoinProbeOutputProof output_proof) {
 	if (!binding.ready || !binding.hash_table) {
 		throw InternalException("execution native hash join probe materialization requires a bound hash join table");
 	}
@@ -2849,12 +2849,13 @@ void ExecutionMaterializeHashJoinProbe(const ExecutionHashJoinProbeBinding &bind
 	    binding.output_mode == ExecutionHashJoinProbeOutputMode::LEFT_PROBE_AND_BUILD) {
 		ExecutionOperatorStageTimer timer(recorder, "gather_build_payload");
 		const auto rhs_offset = binding.lhs_output_column_indices.size();
-		if (exact_source_filter_matches_are_proven) {
-			if (binding.exact_rhs_output_probe_input_indices.size() != binding.rhs_output_column_count) {
+		if (output_proof.ExactSourceFilterMatches()) {
+			auto &rhs_aliases = output_proof.ExactRHSOutputProbeInputIndices();
+			if (rhs_aliases.size() != binding.rhs_output_column_count) {
 				throw InternalException("execution exact hash join RHS alias count mismatch");
 			}
 			for (idx_t rhs_idx = 0; rhs_idx < binding.rhs_output_column_count; rhs_idx++) {
-				const auto input_col = binding.exact_rhs_output_probe_input_indices[rhs_idx];
+				const auto input_col = rhs_aliases[rhs_idx];
 				if (input_col == DConstants::INVALID_INDEX || input_col >= input.ColumnCount() ||
 				    input.data[input_col].GetType() != result.data[rhs_offset + rhs_idx].GetType()) {
 					throw InternalException("execution exact hash join RHS alias is invalid");
@@ -2911,7 +2912,7 @@ bool ExecutionMaterializeHashJoinProbeProjectionSources(const ExecutionHashJoinP
                                                         DataChunk &result,
                                                         optional_ptr<ExecutionOperatorStageRecorder> recorder,
                                                         optional_ptr<const SelectionVector> perfect_build_sel,
-                                                        bool exact_source_filter_matches_are_proven) {
+                                                        ExecutionHashJoinProbeOutputProof output_proof) {
 	if (!binding.ready) {
 		throw InternalException(
 		    "execution native hash join projection-source materialization requires a bound hash join table");
@@ -2974,11 +2975,12 @@ bool ExecutionMaterializeHashJoinProbeProjectionSources(const ExecutionHashJoinP
 				continue;
 			}
 			if (regular_hash_join) {
-				if (exact_source_filter_matches_are_proven) {
-					if (rhs_col_idx >= binding.exact_rhs_output_probe_input_indices.size()) {
+				if (output_proof.ExactSourceFilterMatches()) {
+					auto &rhs_aliases = output_proof.ExactRHSOutputProbeInputIndices();
+					if (rhs_col_idx >= rhs_aliases.size()) {
 						return false;
 					}
-					const auto input_col = binding.exact_rhs_output_probe_input_indices[rhs_col_idx];
+					const auto input_col = rhs_aliases[rhs_col_idx];
 					if (input_col == DConstants::INVALID_INDEX || input_col >= input.ColumnCount() ||
 					    input.data[input_col].GetType() != result.data[output_col_idx].GetType()) {
 						return false;

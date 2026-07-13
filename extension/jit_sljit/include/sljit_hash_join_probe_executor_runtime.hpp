@@ -70,7 +70,7 @@ static ExecutionOperatorBindResult SljitExecutePerfectHashJoinProbe(
 		state.input_offset = native_input.input_offset;
 		state.resume_row_pointer = nullptr;
 		state.finished = native_input.finished;
-		state.source_key0_int64_to_int32_matches_are_proven = native_input.source_key0_int64_to_int32;
+		state.output_proof.source_key0_int64_to_int32 = native_input.source_key0_int64_to_int32;
 		runtime.RecordJitRuntimePath("hash_join_probe.perfect_probe.exact_source_filter", native_input.selected_count);
 		RecordSljitRegionRuntimeProof(runtime, op.kind, ExecutionRegionJitRuntimeProof::GENERATED_BACKEND_WORK,
 		                              "exact_source_filter", native_input.selected_count);
@@ -96,7 +96,7 @@ static ExecutionOperatorBindResult SljitExecutePerfectHashJoinProbe(
 	state.input_offset = native_input.input_offset;
 	state.resume_row_pointer = nullptr;
 	state.finished = native_input.finished;
-	state.source_key0_int64_to_int32_matches_are_proven =
+	state.output_proof.source_key0_int64_to_int32 =
 	    native_input.selected_count != 0 && native_input.source_key0_int64_to_int32;
 	if (native_input.selected_count == 0) {
 		output.Reset();
@@ -125,8 +125,6 @@ static ExecutionOperatorBindResult SljitExecuteRegularHashJoinProbe(
     SljitHashJoinProbeOutputContract output_contract = SljitHashJoinProbeOutputContract::MATERIALIZED_OUTPUT) {
 	auto &layout = probe.table_layout;
 	const auto table_layout_kind = SljitValidateRegularHashJoinProbeExecutionLayout(plan, probe);
-	state.source_key0_int64_to_int32_matches_are_proven = false;
-	state.exact_source_filter_matches_are_proven = false;
 	if (plan.exact_source_filter_identity) {
 		runtime.RecordJitRuntimePath("hash_join_probe.regular_probe.exact_source_filter_candidate");
 	}
@@ -143,13 +141,10 @@ static ExecutionOperatorBindResult SljitExecuteRegularHashJoinProbe(
 	     plan.output_mode == ExecutionHashJoinProbeOutputMode::MATCHED_PROBE_ONLY) &&
 	    SljitHashJoinProbeProducesSelectedView(output_contract);
 	if (exact_source_filter) {
-		for (idx_t row_idx = 0; row_idx < input.size(); row_idx++) {
-			match_selection.set_index(row_idx, row_idx);
-		}
 		state.input_offset = input.size();
 		state.resume_row_pointer = nullptr;
 		state.finished = true;
-		state.exact_source_filter_matches_are_proven = true;
+		state.output_proof.SetExactSourceFilterMatches(probe.exact_rhs_output_probe_input_indices);
 		output.SetChildCardinality(input.size());
 		runtime.RecordJitRuntimePath("hash_join_probe.regular_probe.exact_source_filter", input.size());
 		RecordSljitRegionRuntimeProof(runtime, op.kind, ExecutionRegionJitRuntimeProof::GENERATED_BACKEND_WORK,
@@ -196,8 +191,7 @@ static ExecutionOperatorBindResult SljitExecuteRegularHashJoinProbe(
 		SljitMarkHashJoinBuildMatchesAfterResidual(plan, row_pointers, selected_count);
 		RecordSljitRegionStageRuntime(runtime, op_idx, op.kind, "mark_build_matches", mark_build_stage_start);
 	}
-	state.source_key0_int64_to_int32_matches_are_proven =
-	    selected_count != 0 && native_input.source_key0_int64_to_int32;
+	state.output_proof.source_key0_int64_to_int32 = selected_count != 0 && native_input.source_key0_int64_to_int32;
 	if (plan.output_mode == ExecutionHashJoinProbeOutputMode::MARK_BUILD_ONLY) {
 		output.Reset();
 		return ExecutionOperatorBindResult::READY;
@@ -221,8 +215,6 @@ static ExecutionOperatorBindResult SljitExecuteRegularHashJoinProbe(
 	}
 	auto materialize_stage_start = SljitRegionStageStart(runtime);
 	SljitRegionStageRecorder recorder(runtime, op_idx, op.kind, "materialize_output");
-	if (!mark_probe) {
-	}
 	ExecutionMaterializeHashJoinProbe(probe, input, row_pointers, match_selection, selected_count, output, &recorder);
 	RecordSljitRegionStageRuntime(runtime, op_idx, op.kind, "materialize_output", materialize_stage_start);
 	return ExecutionOperatorBindResult::READY;
@@ -266,6 +258,7 @@ static ExecutionOperatorBindResult SljitExecuteNativeHashJoinProbe(
 	if (probe.probe_key_input_indices.size() != plan.keys.size()) {
 		throw InternalException("SLJIT native hash join probe key binding count mismatch");
 	}
+	state.output_proof.Reset();
 	if (SljitHashJoinProbeOutputIsFilteredMarkNonMatches(output_contract)) {
 		if (!probe.hash_table) {
 			throw InternalException("SLJIT native MARK non-match probe requires a bound hash join table");
@@ -275,14 +268,12 @@ static ExecutionOperatorBindResult SljitExecuteNativeHashJoinProbe(
 		}
 	}
 	if (probe.empty_build_side) {
-		state.source_key0_int64_to_int32_matches_are_proven = false;
 		return SljitExecuteEmptyHashJoinProbe(runtime, op_idx, op, probe, input, output, match_selection, row_pointers,
 		                                      state, output_contract);
 	}
 	runtime.RecordHashJoinProbeLayout(SljitHashJoinProbeLayoutName(probe.layout_kind));
 	switch (probe.layout_kind) {
 	case ExecutionHashJoinProbeLayoutKind::PERFECT_HASH_TABLE:
-		state.source_key0_int64_to_int32_matches_are_proven = false;
 		return SljitExecutePerfectHashJoinProbe(owner, runtime, op_idx, op, plan, probe, input, output, match_selection,
 		                                        build_selection, state, source_key0_int64_to_int32_unchecked,
 		                                        output_contract);

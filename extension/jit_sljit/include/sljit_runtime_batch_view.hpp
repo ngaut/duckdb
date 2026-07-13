@@ -12,6 +12,7 @@
 #include "duckdb/common/exception.hpp"
 #include "duckdb/common/optional_ptr.hpp"
 #include "duckdb/common/types/data_chunk.hpp"
+#include "duckdb/execution/execution_hash_join_runtime.hpp"
 
 namespace duckdb {
 
@@ -26,8 +27,7 @@ struct SljitRuntimeHashJoinSelection {
 	idx_t count = 0;
 	idx_t hash_join_idx = DConstants::INVALID_INDEX;
 	idx_t output_projection_idx = DConstants::INVALID_INDEX;
-	bool source_key0_int64_to_int32_matches_are_proven = false;
-	bool exact_source_filter_matches_are_proven = false;
+	ExecutionHashJoinProbeOutputProof output_proof;
 
 	DataChunk &Input() const {
 		if (!chunk) {
@@ -60,6 +60,14 @@ struct SljitRuntimeHashJoinSelection {
 	optional_ptr<const vector<idx_t>> OutputColumnMap() const {
 		return optional_ptr<const vector<idx_t>>(output_column_map);
 	}
+
+	bool SourceKey0Int64ToInt32MatchesAreProven() const {
+		return output_proof.source_key0_int64_to_int32;
+	}
+
+	bool ExactSourceFilterMatches() const {
+		return output_proof.ExactSourceFilterMatches();
+	}
 };
 
 struct SljitRuntimeBatchView {
@@ -72,8 +80,7 @@ struct SljitRuntimeBatchView {
 	idx_t hash_join_idx = DConstants::INVALID_INDEX;
 	idx_t hash_join_output_projection_idx = DConstants::INVALID_INDEX;
 	SljitRuntimeBatchOwnership ownership = SljitRuntimeBatchOwnership::MATERIALIZED_CHUNK;
-	bool source_key0_int64_to_int32_matches_are_proven = false;
-	bool exact_source_filter_matches_are_proven = false;
+	ExecutionHashJoinProbeOutputProof hash_join_output_proof;
 
 	bool HasChunk() const {
 		return chunk != nullptr;
@@ -100,8 +107,7 @@ struct SljitRuntimeBatchView {
 		selected.count = count;
 		selected.hash_join_idx = hash_join_idx;
 		selected.output_projection_idx = hash_join_output_projection_idx;
-		selected.source_key0_int64_to_int32_matches_are_proven = source_key0_int64_to_int32_matches_are_proven;
-		selected.exact_source_filter_matches_are_proven = exact_source_filter_matches_are_proven;
+		selected.output_proof = hash_join_output_proof;
 		return true;
 	}
 
@@ -139,14 +145,20 @@ static SljitRuntimeBatchView SljitRuntimeBatchViewFromChunk(DataChunk &chunk, co
 	return view;
 }
 
+static const SelectionVector &SljitBindHashJoinMatchSelection(const ExecutionHashJoinProbeOutputProof &output_proof,
+                                                              const SelectionVector &explicit_match_selection) {
+	return output_proof.match_selection_is_identity ? *FlatVector::IncrementalSelectionVector()
+	                                                : explicit_match_selection;
+}
+
 static SljitRuntimeBatchView SljitRuntimeBatchViewFromHashJoinSelection(
     DataChunk &join_input, const SelectionVector &match_selection, const SelectionVector &build_selection,
-    Vector &row_pointers, idx_t selected_count, idx_t hash_join_idx, bool source_key0_int64_to_int32_matches_are_proven,
-    bool exact_source_filter_matches_are_proven, const vector<idx_t> *hash_join_output_column_map = nullptr,
+    Vector &row_pointers, idx_t selected_count, idx_t hash_join_idx,
+    const ExecutionHashJoinProbeOutputProof &output_proof, const vector<idx_t> *hash_join_output_column_map = nullptr,
     idx_t hash_join_output_projection_idx = DConstants::INVALID_INDEX) {
 	SljitRuntimeBatchView view;
 	view.chunk = &join_input;
-	view.selection = &match_selection;
+	view.selection = &SljitBindHashJoinMatchSelection(output_proof, match_selection);
 	view.hash_join_build_selection = &build_selection;
 	view.hash_join_row_pointers = &row_pointers;
 	view.hash_join_output_column_map = hash_join_output_column_map;
@@ -154,8 +166,7 @@ static SljitRuntimeBatchView SljitRuntimeBatchViewFromHashJoinSelection(
 	view.hash_join_idx = hash_join_idx;
 	view.hash_join_output_projection_idx = hash_join_output_projection_idx;
 	view.ownership = SljitRuntimeBatchOwnership::SELECTED_REFERENCE;
-	view.source_key0_int64_to_int32_matches_are_proven = source_key0_int64_to_int32_matches_are_proven;
-	view.exact_source_filter_matches_are_proven = exact_source_filter_matches_are_proven;
+	view.hash_join_output_proof = output_proof;
 	return view;
 }
 

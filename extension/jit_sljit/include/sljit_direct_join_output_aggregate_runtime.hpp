@@ -149,8 +149,7 @@ static bool SljitTryExecuteDirectJoinOutputAggregate(
     SljitPostJoinProjectionStrategy &post_join_projection, DataChunk &join_input,
     const SelectionVector &match_selection, const SelectionVector &build_selection, Vector &row_pointers,
     DataChunk &join_output, optional_ptr<bool> deferred_grouped_finish,
-    bool source_key0_int64_to_int32_unchecked = false, bool exact_source_filter_matches_are_proven = false,
-    optional_ptr<const vector<idx_t>> output_column_map = nullptr,
+    ExecutionHashJoinProbeOutputProof output_proof = {}, optional_ptr<const vector<idx_t>> output_column_map = nullptr,
     idx_t output_projection_idx = DConstants::INVALID_INDEX) {
 	if (!strategy_ptr || strategy_ptr->disabled) {
 		return false;
@@ -184,7 +183,7 @@ static bool SljitTryExecuteDirectJoinOutputAggregate(
 	if (has_projection_chain && descriptor.projection_idx == DConstants::INVALID_INDEX) {
 		throw InternalException("SLJIT direct row-pointer aggregate descriptor has no projection index");
 	}
-	SljitApplyJoinProjectionGroupCastProofs(descriptor.group_sources, source_key0_int64_to_int32_unchecked);
+	SljitApplyJoinProjectionGroupCastProofs(descriptor.group_sources, output_proof.source_key0_int64_to_int32);
 	const auto aggregate_projection_idx = descriptor.projection_idx == DConstants::INVALID_INDEX
 	                                          ? post_join_projection.trace_projection_idx
 	                                          : descriptor.projection_idx;
@@ -196,7 +195,7 @@ static bool SljitTryExecuteDirectJoinOutputAggregate(
 	               aggregate_input)) {
 	} else {
 		string materialize_failure;
-		if (!exact_source_filter_matches_are_proven &&
+		if (!output_proof.ExactSourceFilterMatches() &&
 		    SljitTryMaterializeHashJoinProjectionAggregateInputsToChunk(
 		        runtime, scratch, post_join_projection.hash_join_idx, aggregate_projection_idx, descriptor.Projection(),
 		        join_input, match_selection, build_selection, row_pointers, descriptor.input_sources,
@@ -206,7 +205,7 @@ static bool SljitTryExecuteDirectJoinOutputAggregate(
 		               runtime, ops, scratch, post_join_projection.hash_join_idx, aggregate_projection_idx,
 		               descriptor.Projection(), join_input, match_selection, row_pointers, join_output, aggregate_input,
 		               optional_ptr<const vector<idx_t>>(&descriptor.output_to_projection), nullptr, nullptr,
-		               exact_source_filter_matches_are_proven)) {
+		               output_proof)) {
 			SljitRecordDirectJoinOutputAggregateProjectionUnsupported(runtime, ops, post_join_projection, "materialize",
 			                                                          join_output.size());
 			strategy.last_failure =
@@ -272,7 +271,7 @@ static bool SljitTryExecuteDirectJoinOutputAggregate(
 		                                          strategy.pending_batch);
 		SljitAppendPendingInputVectorAggregateBatch(runtime, strategy.aggregate_idx, aggregate_op, strategy, scratch,
 		                                            deferred_grouped_finish, aggregate_input,
-		                                            source_key0_int64_to_int32_unchecked);
+		                                            output_proof.source_key0_int64_to_int32);
 		return true;
 	}
 
@@ -284,7 +283,7 @@ static bool SljitTryExecuteDirectJoinOutputAggregate(
 	    SljitGetDirectJoinOutputStringSetClassification(strategy, aggregate_op, aggregate_input);
 	SljitAppendPendingRowPointerAggregateBatch(runtime, strategy.aggregate_idx, aggregate_op, descriptor,
 	                                           strategy.pending_batch, scratch, deferred_grouped_finish,
-	                                           aggregate_input, row_pointers, source_key0_int64_to_int32_unchecked,
+	                                           aggregate_input, row_pointers, output_proof.source_key0_int64_to_int32,
 	                                           string_set_classification);
 	return true;
 }

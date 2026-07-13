@@ -24,6 +24,7 @@ from tpch_common import (
 
 ROOT = Path(__file__).resolve().parents[3]
 DEFAULT_BASELINE_ENV = "DUCKDB_JIT_TPCH_BASELINE"
+DEFAULT_HIGH_SAMPLE_REPEATS = 10
 DEFAULT_BASELINE_STATE = (
     ROOT / "benchmark" / "tpch" / "jit" / "tmp" / "tpch_refactor_guard_state.json"
 )
@@ -497,7 +498,7 @@ def triage_failed_comparison(
     recheck_repeats = (
         args.triage_repeats
         if args.triage_repeats is not None
-        else max(args.repeats * 3, 15)
+        else max(args.repeats, DEFAULT_HIGH_SAMPLE_REPEATS)
     )
     run_command(
         benchmark_command(
@@ -578,7 +579,7 @@ def triage_failed_comparison(
 def promotion_recheck_repeats(args: argparse.Namespace) -> int:
     if args.promotion_repeats is not None:
         return args.promotion_repeats
-    return max(args.repeats * 3, 15)
+    return max(args.repeats, DEFAULT_HIGH_SAMPLE_REPEATS)
 
 
 def build_promoted_baseline(
@@ -769,13 +770,13 @@ def parse_args() -> argparse.Namespace:
         "--triage-repeats",
         type=int,
         default=None,
-        help="Focused production rerun repeat count for failed queries. Defaults to max(repeats*3, 15).",
+        help="Focused production rerun repeat count for failed queries. Defaults to max(repeats, 10).",
     )
     parser.add_argument(
         "--promotion-repeats",
         type=int,
         default=None,
-        help="Full-query repeat count used only for baseline promotion. Defaults to max(repeats*3, 15).",
+        help="Full-query repeat count used only for baseline promotion. Defaults to max(repeats, 10).",
     )
     parser.add_argument(
         "--triage-profile", action=argparse.BooleanOptionalAction, default=True

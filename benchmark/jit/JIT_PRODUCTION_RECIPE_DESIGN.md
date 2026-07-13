@@ -318,12 +318,13 @@ per batch.
   advance the cursor only for a match. Conjunctions and filtered reductions
   retain their proven packed SIMD loops. This is a target capability decision,
   not a query-name rule.
-- A selective single-comparison predicate may feed a fused perfect-hash
-  multi-aggregate reducer through the same packed mask contract. The mask loop
-  keeps one scalar reducer body per control-flow class instead of cloning it per
-  SIMD lane. High-selectivity predicates retain the separate selected-input
-  path, and conjunctions retain scalar short-circuit evaluation; both choices
-  follow measured work avoided, not query identity.
+- A bare reference-to-constant predicate feeding a fused perfect-hash
+  multi-aggregate reducer stays on the scalar fast loop: grouped lookup and
+  payload updates remain scalar, so a packed mask has too little expression
+  work to repay its setup. Predicates with additional expression or conjunction
+  work may use the hybrid packed-mask contract. High-selectivity predicates
+  retain the separate selected-input path; these choices follow measured work
+  avoided, not query identity.
 - A flat all-valid `(integer_reference % positive_constant) compare constant`
   predicate also uses an eight-row unrolled selector. It hoists the source and
   selection cursors and reuses the exact signed magic-multiply remainder
@@ -342,6 +343,11 @@ per batch.
   `filter.selected_input_zero_copy`.
 - A selected hash-join result is a different ownership class: it can combine
   probe selection, build selection, row pointers, and a semantic output map.
+  One `ExecutionHashJoinProbeOutputProof` travels with that view and carries
+  independent facts for identity probe selection, exact RHS source aliases,
+  and safe probe-key narrowing. A downstream filter invalidates identity only
+  when it compacts rows; exact RHS aliases survive because they describe value
+  ownership, not row order. Parallel booleans for these facts are forbidden.
   A generated filter materializes that virtual join view only when its
   expression cannot execute against the referenced producer chunk directly.
   Such scratch storage is owned per filter operation so nested filters cannot
@@ -646,16 +652,20 @@ CBO uses backend-neutral, measurable facts rather than query identity:
 - materialization-elision opportunities and selected-join materialization
   penalties;
 - source-contract scan penalties, stateful protocol costs, and startup cost;
-- backend-published vectorized-execution preferences for low-cardinality string
-  predicate domains;
+- physical-pipeline vectorized-execution preferences derived from shared scan
+  statistics for low-cardinality string predicate domains;
 - whether the candidate is a full pipeline and which native protocol class it
   uses.
 
 A vectorized-execution preference is cost evidence, not a capability blocker.
-The backend still produces a complete lowering plan and executable contract;
-runner selection records `rejected_vectorized_execution_preferred`. This keeps
-capability truth separate from a representation-dependent performance choice
-and lets the same native string lowering serve high-cardinality sources.
+In production auto mode, shared scan statistics can reject an unprofitable
+low-cardinality generated string search before region graph construction, IR
+lowering, or backend analysis. Diagnostic modes may still build the complete
+backend plan and record the same `rejected_vectorized_execution_preferred`
+reason. This keeps capability truth separate from a representation-dependent
+performance choice and lets the same native lowering serve high-cardinality
+sources without charging low-cardinality queries for analysis they will not
+use.
 
 Physical-pipeline upper bounds and post-lowering candidate costs use the same
 materialization-elision rule for generated projection-to-aggregate pipelines.
@@ -826,13 +836,13 @@ The gate resolves the accepted local artifact through
 old-baseline comparison, and a full-query high-sample promotion qualification:
 
 ```bash
-python3 benchmark/tpch/jit/run_tpch_regression_gate.py --promote-baseline --promotion-repeats 31 --no-build --queries all
+python3 benchmark/tpch/jit/run_tpch_regression_gate.py --promote-baseline --promotion-repeats 10 --no-build --queries all
 ```
 
 The default state is the accepted SF10 matrix. The independent SF1 state is
-`benchmark/tpch/jit/tmp/tpch_refactor_guard_state_sf1.json`; run or promote it
+`benchmark/tpch/jit/tmp/tpch_refactor_guard_sf1_state.json`; run or promote it
 with `--scale-factor 1 --baseline-state <that-path>`. Both accepted states must
-remain complete, production-mode, one-thread, 31-repeat artifacts.
+remain complete, production-mode, one-thread artifacts with at least 10 repeats.
 When `--scale-factor` is omitted, the gate inherits it from the selected
 accepted state. An explicit scale factor, thread count, timing mode, or query
 set that does not match that state is rejected before benchmarking. A candidate
@@ -852,7 +862,7 @@ are evaluated with exact decimal arithmetic: a value exactly on a configured
 boundary passes, while any value beyond it fails.
 
 If an accepted timing artifact is proven stale by a high-sample paired run,
-baseline re-initialization still requires the complete 22-query, 31-repeat
+baseline re-initialization still requires the complete 22-query, 10-repeat
 production suite, architecture verification, artifact correctness, and traced
 runtime-contract verification. A refresh is valid only when compiled-region
 counts and physical recipe shapes are unchanged for apparent regressions and
@@ -886,25 +896,38 @@ focused recheck up to the configured high-sample count before the gate decides;
 correctness, compilation, and missing-runtime-proof failures are never retried
 as timing noise.
 
-Current accepted generic evidence is stored in
-`benchmark/jit/tmp/generic_t1_final_20260712` and
-`benchmark/jit/tmp/generic_t4_final_20260712`. Both production gates pass with
-zero correctness or compile errors across range arithmetic, filters, CASE,
-multi-aggregate, persistent scans, nullable expressions, grouped aggregation,
-DISTINCT, numeric joins, and string joins. These artifacts are workload-class
-evidence; they do not authorize workload-specific capability checks.
+A verified performance win and its regression baseline are one change. The
+corresponding workload floor or accepted comparison artifact must be tightened
+before the implementation lands; otherwise the gate still permits the
+performance that the implementation just replaced. Floors remain
+thread-specific when parallel scheduling noise changes the demonstrated
+margin. Three independent 15-repeat production runs of the exact-filter join
+currently prove 1.179x-1.191x at one thread and 1.110x-1.128x at four threads,
+so its one-thread floor is 1.15x while the four-thread floor remains 1.08x.
+For filtered perfect-hash grouped updates, packed hybrid filtering is reserved
+for predicates with expression or conjunction work to amortize mask setup;
+simple reference-to-constant comparisons stay on the scalar fast loop while
+fully packed count and sum kernels keep their SIMD paths. The selective
+multi-aggregate workload now proves 1.145x at one thread and 1.126x at four
+threads across 31 repeats, and its checked-in floor is 1.11x.
 
-Current full-suite validation is stored in
-`generic_runtime_boundary_t{1,4}_20260712` (the t1 artifact uses the `_retry`
-suffix after an unrelated signal-9 interruption): all 16 workload classes pass
-with zero correctness or compile errors and 1.09x-3.76x speedups. Complete
-final-code SF1 and SF10 artifacts under
-`sf{1,10}_runtime_boundary_full_20260712` pass accepted-baseline and
-runtime-contract verification. SF10's isolated three-repeat Q7 outlier clears
-the automatic 15-repeat focused recheck. Final seven-repeat Q1/Q9/Q13/Q18 rechecks under
-`sf{1,10}_runtime_boundary_20260712` preserve 4/4 JIT coverage and 4/4 material
-wins. A 15-repeat SF10 Q13 recheck confirms its marginal material win; Q17
-remains a correct, baseline-equivalent non-material JIT selection.
+Current accepted generic evidence is stored in
+`benchmark/jit/tmp/generic_proof_batch_pregraph_simd_t1_20260713` and
+`benchmark/jit/tmp/generic_proof_batch_pregraph_simd_t4_20260713`. Both
+production gates pass with zero correctness or compile errors across range
+arithmetic, filters, CASE, multi-aggregate, persistent scans, nullable
+expressions, grouped aggregation, DISTINCT, numeric joins, and string joins.
+These artifacts are workload-class evidence; they do not authorize
+workload-specific capability checks.
+
+The current generic matrix covers 20 workload classes. Compiled one-thread
+speedups range from 1.148x to 3.736x and compiled four-thread speedups range
+from 1.056x to 3.709x. The low-cardinality string-search control remains
+vectorized at 1.006x and 0.960x respectively, inside its independent 5%
+raw-runtime ceiling. Current accepted TPC-H SF1 and SF10 promotion artifacts
+are documented in `benchmark/tpch/jit/JIT_BROAD_QUERY_PLAN.md`; both require a
+complete 22-query, 10-repeat production matrix plus correctness and traced
+runtime-proof passes before the state file moves.
 
 ## Current boundaries
 

@@ -8,6 +8,7 @@
 #pragma once
 
 #include "duckdb/common/common.hpp"
+#include "duckdb/common/optional_ptr.hpp"
 #include "duckdb/common/types.hpp"
 #include "duckdb/common/types/vector.hpp"
 #include "duckdb/common/vector.hpp"
@@ -85,6 +86,36 @@ struct ExecutionHashJoinRHSFixedColumnSource {
 	idx_t layout_offset = DConstants::INVALID_INDEX;
 	bool all_valid = false;
 	string blocker;
+};
+
+struct ExecutionHashJoinProbeOutputProof {
+	bool source_key0_int64_to_int32 = false;
+	bool match_selection_is_identity = false;
+	optional_ptr<const vector<idx_t>> exact_rhs_output_probe_input_indices;
+
+	void Reset() {
+		source_key0_int64_to_int32 = false;
+		match_selection_is_identity = false;
+		exact_rhs_output_probe_input_indices = nullptr;
+	}
+
+	void SetExactSourceFilterMatches(const vector<idx_t> &rhs_output_probe_input_indices) {
+		match_selection_is_identity = true;
+		exact_rhs_output_probe_input_indices = optional_ptr<const vector<idx_t>>(&rhs_output_probe_input_indices);
+	}
+
+	void SetExplicitMatchSelection() {
+		match_selection_is_identity = false;
+	}
+
+	bool ExactSourceFilterMatches() const {
+		return exact_rhs_output_probe_input_indices != nullptr;
+	}
+
+	const vector<idx_t> &ExactRHSOutputProbeInputIndices() const {
+		D_ASSERT(ExactSourceFilterMatches());
+		return *exact_rhs_output_probe_input_indices;
+	}
 };
 
 DUCKDB_API bool ExecutionGetHashJoinTableLayout(const JoinHashTable &hash_table, ExecutionHashJoinTableLayout &layout);

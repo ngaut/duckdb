@@ -397,9 +397,12 @@ static bool SljitTryBuildSelectedHashJoinOutputColumns(const ExecutionHashJoinPr
 				continue;
 			}
 			if (binding.layout_kind == ExecutionHashJoinProbeLayoutKind::REGULAR_HASH_TABLE) {
-				if (selected.exact_source_filter_matches_are_proven &&
-				    rhs_idx < binding.exact_rhs_output_probe_input_indices.size()) {
-					const auto input_col = binding.exact_rhs_output_probe_input_indices[rhs_idx];
+				if (selected.ExactSourceFilterMatches()) {
+					auto &rhs_output_probe_input_indices = selected.output_proof.ExactRHSOutputProbeInputIndices();
+					if (rhs_idx >= rhs_output_probe_input_indices.size()) {
+						return false;
+					}
+					const auto input_col = rhs_output_probe_input_indices[rhs_idx];
 					if (input_col == DConstants::INVALID_INDEX || input_col >= source_chunk.ColumnCount()) {
 						return false;
 					}
