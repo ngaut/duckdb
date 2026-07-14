@@ -4,6 +4,7 @@
 #include "duckdb/common/projection_index.hpp"
 #include "duckdb/common/radix_partitioning.hpp"
 #include "duckdb/common/types.hpp"
+#include "duckdb/common/types/hugeint.hpp"
 #include "duckdb/common/types/value_map.hpp"
 #include "duckdb/common/uhugeint.hpp"
 #include "duckdb/common/types/uhugeint.hpp"
@@ -380,17 +381,27 @@ static bool CanUsePerfectHashJoin(const PhysicalHashJoin &op, PerfectHashJoinExe
 
 struct PerfectHashJoinBuildBounds {
 	LogicalType key_type;
+	PhysicalType key_physical_type = PhysicalType::INVALID;
 	bool initialized = false;
 	bool has_value = false;
 	int64_t min = 0;
 	int64_t max = 0;
+	hugeint_t min_128;
+	hugeint_t max_128;
+	uhugeint_t min_u128;
+	uhugeint_t max_u128;
 
 	void Initialize(const LogicalType &type) {
 		key_type = type;
+		key_physical_type = type.InternalType();
 		initialized = true;
 		has_value = false;
 		min = 0;
 		max = 0;
+		min_128 = hugeint_t();
+		max_128 = hugeint_t();
+		min_u128 = uhugeint_t();
+		max_u128 = uhugeint_t();
 	}
 
 	void Update(int64_t value) {
@@ -404,22 +415,76 @@ struct PerfectHashJoinBuildBounds {
 		max = MaxValue(max, value);
 	}
 
+	void Update(hugeint_t value) {
+		if (!has_value) {
+			min_128 = value;
+			max_128 = value;
+			has_value = true;
+			return;
+		}
+		if (Hugeint::LessThan(value, min_128)) {
+			min_128 = value;
+		}
+		if (Hugeint::GreaterThan(value, max_128)) {
+			max_128 = value;
+		}
+	}
+
+	void Update(uhugeint_t value) {
+		if (!has_value) {
+			min_u128 = value;
+			max_u128 = value;
+			has_value = true;
+			return;
+		}
+		if (Uhugeint::LessThan(value, min_u128)) {
+			min_u128 = value;
+		}
+		if (Uhugeint::GreaterThan(value, max_u128)) {
+			max_u128 = value;
+		}
+	}
+
 	void Combine(const PerfectHashJoinBuildBounds &other) {
 		if (!other.has_value) {
 			return;
 		}
 		D_ASSERT(initialized && other.initialized);
-		Update(other.min);
-		Update(other.max);
+		switch (key_physical_type) {
+		case PhysicalType::INT128:
+			Update(other.min_128);
+			Update(other.max_128);
+			break;
+		case PhysicalType::UINT128:
+			Update(other.min_u128);
+			Update(other.max_u128);
+			break;
+		default:
+			Update(other.min);
+			Update(other.max);
+			break;
+		}
 	}
 
 	Value Min() const {
 		D_ASSERT(initialized && has_value);
+		if (key_physical_type == PhysicalType::INT128) {
+			return Value::HUGEINT(min_128);
+		}
+		if (key_physical_type == PhysicalType::UINT128) {
+			return Value::UHUGEINT(min_u128);
+		}
 		return Value::Numeric(key_type, min);
 	}
 
 	Value Max() const {
 		D_ASSERT(initialized && has_value);
+		if (key_physical_type == PhysicalType::INT128) {
+			return Value::HUGEINT(max_128);
+		}
+		if (key_physical_type == PhysicalType::UINT128) {
+			return Value::UHUGEINT(max_u128);
+		}
 		return Value::Numeric(key_type, max);
 	}
 };
@@ -434,6 +499,8 @@ static bool CanCollectPerfectHashJoinBuildBounds(const PhysicalHashJoin &op) {
 	case PhysicalType::INT16:
 	case PhysicalType::INT32:
 	case PhysicalType::INT64:
+	case PhysicalType::INT128:
+	case PhysicalType::UINT128:
 		break;
 	default:
 		return false;
@@ -461,7 +528,7 @@ static void UpdatePerfectHashJoinBuildBounds(UnifiedVectorFormat &format, idx_t 
 		if (!all_valid && !format.validity.RowIsValid(source_idx)) {
 			continue;
 		}
-		bounds.Update(NumericCast<int64_t>(data[source_idx]));
+		bounds.Update(data[source_idx]);
 	}
 }
 
@@ -483,6 +550,12 @@ static void UpdatePerfectHashJoinBuildBounds(Vector &keys, idx_t count, PerfectH
 		break;
 	case PhysicalType::INT64:
 		UpdatePerfectHashJoinBuildBounds<int64_t>(format, count, bounds);
+		break;
+	case PhysicalType::INT128:
+		UpdatePerfectHashJoinBuildBounds<hugeint_t>(format, count, bounds);
+		break;
+	case PhysicalType::UINT128:
+		UpdatePerfectHashJoinBuildBounds<uhugeint_t>(format, count, bounds);
 		break;
 	default:
 		throw InternalException("perfect hash join build bounds received unsupported key type");

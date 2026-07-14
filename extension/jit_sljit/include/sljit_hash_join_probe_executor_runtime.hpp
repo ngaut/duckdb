@@ -47,6 +47,10 @@ static void SljitPopulateExactPerfectHashJoinSelections(const SljitNativeHashJoi
 		return SljitPopulateExactPerfectHashJoinSelections<uint32_t>(input, emit_match_selection, emit_build_selection);
 	case SljitNativeHashJoinKeyKind::UINT64:
 		return SljitPopulateExactPerfectHashJoinSelections<uint64_t>(input, emit_match_selection, emit_build_selection);
+	case SljitNativeHashJoinKeyKind::INT128:
+		return SljitPopulateWidePerfectHashJoinSelections(input, emit_match_selection, emit_build_selection, false);
+	case SljitNativeHashJoinKeyKind::UINT128:
+		return SljitPopulateWidePerfectHashJoinSelections(input, emit_match_selection, emit_build_selection, true);
 	default:
 		throw InternalException("exact perfect hash join filter proof has an unsupported key width");
 	}

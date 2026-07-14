@@ -4,6 +4,7 @@
 #include "sljit_hash_join_probe_codegen_validation.hpp"
 #include "sljit_hash_join_probe_key_codegen.hpp"
 #include "sljit_hash_join_probe_perfect_input_codegen.hpp"
+#include "sljit_hash_join_runtime.hpp"
 
 #include "sljitLir.h"
 
@@ -105,6 +106,20 @@ BuildSljitPerfectHashJoinProbe(const SljitNativeHashJoinProbePlan &plan,
 	if (!compiler) {
 		error = "failed to create SLJIT compiler";
 		return nullptr;
+	}
+	if (SljitHashJoinKeyKindIs128(key.key_kind)) {
+		// Wide perfect-hash keys keep their full 128-bit bounds in the runtime ABI. Delegate the
+		// selection loop through the generated entry point instead of truncating either word.
+		sljit_emit_enter(compiler, 0, SLJIT_ARGS1V(P), 4, 1, 0);
+		sljit_emit_op1(compiler, SLJIT_MOV_P, SLJIT_R0, 0, SLJIT_S0, 0);
+		sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_R1, 0, SLJIT_IMM, config.emit_match_selection ? 1 : 0);
+		sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_R2, 0, SLJIT_IMM, config.emit_build_selection ? 1 : 0);
+		sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_R3, 0, SLJIT_IMM,
+		               key.key_kind == SljitNativeHashJoinKeyKind::UINT128 ? 1 : 0);
+		sljit_emit_icall(compiler, SLJIT_CALL, SLJIT_ARGS4V(P, W, W, W), SLJIT_IMM,
+		                 SLJIT_FUNC_ADDR(SljitPopulateWidePerfectHashJoinSelections));
+		sljit_emit_return_void(compiler);
+		return FinishSljitCode(compiler, function, error);
 	}
 
 	const auto signed_compare = SljitHashJoinKeyKindIsSigned(key.key_kind);

@@ -86,8 +86,16 @@ string DescribeExecutionPerfectHashJoinTableLayout(const ExecutionPerfectHashJoi
 	result += ",is_build_dense=" + ExecutionHashJoinBool(layout.is_build_dense);
 	result += ",build_range=" + std::to_string(layout.build_range);
 	result += ",build_capacity=" + std::to_string(layout.build_capacity);
-	result += ",build_min=" + std::to_string(layout.build_min);
-	result += ",build_max=" + std::to_string(layout.build_max);
+	if (layout.key_physical_type == PhysicalType::INT128) {
+		result += ",build_min=" + Hugeint::ToString(layout.build_min_128);
+		result += ",build_max=" + Hugeint::ToString(layout.build_max_128);
+	} else if (layout.key_physical_type == PhysicalType::UINT128) {
+		result += ",build_min=" + Uhugeint::ToString(layout.build_min_u128);
+		result += ",build_max=" + Uhugeint::ToString(layout.build_max_u128);
+	} else {
+		result += ",build_min=" + std::to_string(layout.build_min);
+		result += ",build_max=" + std::to_string(layout.build_max);
+	}
 	result += ",build_validity=" + ExecutionHashJoinBool(layout.build_validity != nullptr);
 	result += ",rhs_output_columns=" + std::to_string(layout.rhs_output_column_count);
 	result += ",rhs_output_types=" + ExecutionHashJoinTypeList(layout.rhs_output_types);

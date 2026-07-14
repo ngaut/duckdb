@@ -82,11 +82,8 @@ bool PerfectHashJoinExecutor::CanDoPerfectHashJoin(const PhysicalHashJoin &op, c
 	    !TypeIsInteger(key_type.InternalType())) {
 		return false;
 	}
-	// The perfect-hash execution layout stores its bounds in one machine word. Keep the physical operator's
-	// eligibility contract aligned with that layout; wide integral keys use the regular hash table instead.
-	if (key_type.InternalType() == PhysicalType::INT128 || key_type.InternalType() == PhysicalType::UINT128) {
-		return false;
-	}
+	// Physical perfect hashing supports the complete integral key domain. The execution layout carries the
+	// corresponding full-width bounds so native backends can preserve the same contract without truncation.
 	if (perfect_join_statistics.is_build_small) {
 		return true; // Already true based on static statistics
 	}
@@ -106,6 +103,28 @@ bool PerfectHashJoinExecutor::CanDoPerfectHashJoin(const PhysicalHashJoin &op, c
 	// And when the build range is smaller than the threshold
 	perfect_join_statistics.build_min = min;
 	perfect_join_statistics.build_max = max;
+	static constexpr idx_t DEFAULT_MAX_BUILD_SIZE = 1048576;
+	static constexpr idx_t EXTENDED_MAX_BUILD_SIZE = 2097152;
+	if (key_type.InternalType() == PhysicalType::UINT128) {
+		const auto min_value = perfect_join_statistics.build_min.GetValueUnsafe<uhugeint_t>();
+		const auto max_value = perfect_join_statistics.build_max.GetValueUnsafe<uhugeint_t>();
+		if (Uhugeint::LessThan(max_value, min_value)) {
+			return false;
+		}
+		auto build_range = max_value;
+		if (!Uhugeint::TrySubtractInPlace(build_range, min_value) ||
+		    build_range > Uhugeint::Convert(EXTENDED_MAX_BUILD_SIZE)) {
+			return false;
+		}
+		perfect_join_statistics.build_range = NumericCast<idx_t>(build_range);
+		if (ht.Count() > perfect_join_statistics.build_range + 1 ||
+		    (perfect_join_statistics.build_range > DEFAULT_MAX_BUILD_SIZE &&
+		     ht.Count() < (perfect_join_statistics.build_range + 2) / 2)) {
+			return false;
+		}
+		perfect_join_statistics.is_build_small = true;
+		return true;
+	}
 	hugeint_t min_value, max_value;
 	if (!ExtractNumericValue(perfect_join_statistics.build_min, min_value) ||
 	    !ExtractNumericValue(perfect_join_statistics.build_max, max_value)) {
@@ -123,8 +142,6 @@ bool PerfectHashJoinExecutor::CanDoPerfectHashJoin(const PhysicalHashJoin &op, c
 	// Keep the established one-million-key range for regular joins, and allow a
 	// dense extended range when direct lookup removes enough hash-probe work to
 	// justify the additional RHS dictionary materialization.
-	static constexpr idx_t DEFAULT_MAX_BUILD_SIZE = 1048576;
-	static constexpr idx_t EXTENDED_MAX_BUILD_SIZE = 2097152;
 	if (build_range > Hugeint::Convert(EXTENDED_MAX_BUILD_SIZE)) {
 		return false;
 	}
@@ -207,8 +224,16 @@ bool PerfectHashJoinExecutor::GetExecutionPerfectHashJoinTableLayout(
 		layout.blocker = "perfect-hash-join-native-layout-missing-bounds";
 		return false;
 	}
-	if (!PerfectHashJoinValueBits(perfect_join_statistics.build_min, layout.key_physical_type, layout.build_min) ||
-	    !PerfectHashJoinValueBits(perfect_join_statistics.build_max, layout.key_physical_type, layout.build_max)) {
+	if (layout.key_physical_type == PhysicalType::INT128) {
+		layout.build_min_128 = perfect_join_statistics.build_min.GetValueUnsafe<hugeint_t>();
+		layout.build_max_128 = perfect_join_statistics.build_max.GetValueUnsafe<hugeint_t>();
+	} else if (layout.key_physical_type == PhysicalType::UINT128) {
+		layout.build_min_u128 = perfect_join_statistics.build_min.GetValueUnsafe<uhugeint_t>();
+		layout.build_max_u128 = perfect_join_statistics.build_max.GetValueUnsafe<uhugeint_t>();
+	} else if (!PerfectHashJoinValueBits(perfect_join_statistics.build_min, layout.key_physical_type,
+	                                     layout.build_min) ||
+	           !PerfectHashJoinValueBits(perfect_join_statistics.build_max, layout.key_physical_type,
+	                                     layout.build_max)) {
 		layout.blocker = "perfect-hash-join-native-layout-unsupported-key-width";
 		return false;
 	}

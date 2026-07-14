@@ -10,6 +10,7 @@
 #include "duckdb/common/common.hpp"
 #include "duckdb/common/optional_ptr.hpp"
 #include "duckdb/common/types.hpp"
+#include "duckdb/common/types/hugeint.hpp"
 #include "duckdb/common/types/vector.hpp"
 #include "duckdb/common/vector.hpp"
 #include "duckdb/execution/ht_entry.hpp"
@@ -68,6 +69,11 @@ struct ExecutionPerfectHashJoinTableLayout {
 	idx_t build_unique_count = 0;
 	uint64_t build_min = 0;
 	uint64_t build_max = 0;
+	//! Wide integral bounds are kept as full values; the legacy words above are the <=64-bit ABI.
+	hugeint_t build_min_128;
+	hugeint_t build_max_128;
+	uhugeint_t build_min_u128;
+	uhugeint_t build_max_u128;
 	const validity_t *build_validity = nullptr;
 	shared_ptr<ExecutionRuntimeFilterIdentity> runtime_filter_identity;
 	idx_t rhs_output_column_count = 0;

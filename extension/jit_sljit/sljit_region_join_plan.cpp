@@ -117,9 +117,6 @@ SljitRegionNodePlan PlanSljitHashJoinProbeOperatorNode(const ExecutionRegionNode
 			return SljitRegionBoundaryNode("perfect hash join probe native lowering requires one equality key");
 		}
 		auto perfect_key_kind = native_op.hash_join_probe.keys[0].key_kind;
-		if (SljitHashJoinKeyKindIs128(perfect_key_kind)) {
-			return SljitRegionBoundaryNode("perfect hash join probe native lowering does not support 128-bit keys");
-		}
 		if (native_op.hash_join_probe.output_mode != ExecutionHashJoinProbeOutputMode::MATCHED_PROBE_AND_BUILD &&
 		    native_op.hash_join_probe.output_mode != ExecutionHashJoinProbeOutputMode::MATCHED_PROBE_ONLY) {
 			return SljitRegionBoundaryNode("perfect hash join probe native lowering requires inner output mode");

@@ -66,6 +66,9 @@ struct SljitPreparedPerfectHashJoinProbeInput {
 
 const_data_ptr_t NativeHashJoinKeySourceData(UnifiedVectorFormat &format, SljitNativeHashJoinKeyKind kind);
 
+void SljitPopulateWidePerfectHashJoinSelections(SljitNativePerfectHashJoinProbeInput &input, bool emit_match_selection,
+                                                bool emit_build_selection, bool unsigned_key);
+
 SljitHashJoinProbeLayoutKind SljitHashJoinTableLayoutKind(const ExecutionHashJoinTableLayout &layout);
 bool SljitHashJoinCanUseAllValidChainInput(const SljitNativeRegularHashJoinProbeInput &input);
 const char *SljitHashJoinProbeLayoutName(ExecutionHashJoinProbeLayoutKind kind);

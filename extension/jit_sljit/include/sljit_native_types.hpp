@@ -413,6 +413,10 @@ struct SljitNativePerfectHashJoinProbeInput {
 	idx_t count = 0;
 	sel_t *match_sel = nullptr;
 	sel_t *build_sel = nullptr;
+	hugeint_t perfect_min_128;
+	hugeint_t perfect_max_128;
+	uhugeint_t perfect_min_u128;
+	uhugeint_t perfect_max_u128;
 	uint64_t perfect_min = 0;
 	uint64_t perfect_max = 0;
 	const validity_t *perfect_validity = nullptr;

@@ -1061,6 +1061,8 @@ static string BuildExecutionContractPerfectHashJoinProbeShapeBlocker(const Execu
 	case PhysicalType::UINT16:
 	case PhysicalType::UINT32:
 	case PhysicalType::UINT64:
+	case PhysicalType::INT128:
+	case PhysicalType::UINT128:
 		break;
 	default:
 		return "perfect-hash-join-native-key-type";

@@ -3331,3 +3331,55 @@ TEST_CASE("SLJIT regular hash join preserves wide integral probe sources", "[api
 		    REQUIRE(EventJitRuntimeDelegationCounts(event).empty());
 	    });
 }
+
+TEST_CASE("SLJIT perfect hash join preserves signed and unsigned wide keys", "[api][jit]") {
+	DuckDB db;
+	Connection con(db);
+	auto &manager = ExecutionRegionManager::Get(*con.context);
+
+	ConfigureSljitForCoverage(con, false, true, true, 10000);
+	REQUIRE_NO_FAIL(con.Query("SET threads=1"));
+	REQUIRE_NO_FAIL(con.Query("SET perfect_ht_threshold=10"));
+	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_wide_perfect_signed_probe AS "
+	                          "SELECT (i - 4096)::HUGEINT AS k, i::BIGINT AS v "
+	                          "FROM range(8192) tbl(i)"));
+	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_wide_perfect_signed_build AS "
+	                          "SELECT (i - 4096)::HUGEINT AS k, (i * 3)::BIGINT AS w "
+	                          "FROM range(8192) tbl(i)"));
+	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_wide_perfect_unsigned_probe AS "
+	                          "SELECT (18446744073709547520::UHUGEINT + i::UHUGEINT) AS k, i::BIGINT AS v "
+	                          "FROM range(8192) tbl(i)"));
+	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_wide_perfect_unsigned_build AS "
+	                          "SELECT (18446744073709547520::UHUGEINT + i::UHUGEINT) AS k, "
+	                          "       (i * 3)::BIGINT AS w FROM range(8192) tbl(i)"));
+
+	auto verify_wide_join = [&](const string &probe_table, const string &build_table) {
+		const auto query = "SELECT count(*), sum(p.v + b.w) FROM " + probe_table + " p JOIN " + build_table +
+		                   " b ON p.k=b.k WHERE p.v>=10";
+		REQUIRE_NO_FAIL(con.Query("SET jit_policy='off'"));
+		auto reference = con.Query(query);
+		REQUIRE_NO_FAIL(*reference);
+
+		REQUIRE_NO_FAIL(con.Query("SET jit_policy='auto'"));
+		ClearJitTrace(manager, true);
+		auto result = con.Query(query);
+		REQUIRE_NO_FAIL(*result);
+		REQUIRE(result->GetValue(0, 0).ToString() == reference->GetValue(0, 0).ToString());
+		REQUIRE(result->GetValue(1, 0).ToString() == reference->GetValue(1, 0).ToString());
+
+		bool found_wide_perfect_probe = false;
+		for (auto &event : manager.GetEvents()) {
+			if (EventPhase(event) != "runtime" || EventStatus(event) != "executed" ||
+			    EventExecutionMode(event) != "native" ||
+			    event.jit_runtime.hash_join_probe_layout != "perfect_hash_table") {
+				continue;
+			}
+			found_wide_perfect_probe = true;
+			REQUIRE(EventJitRuntimeDelegationCounts(event).empty());
+		}
+		REQUIRE(found_wide_perfect_probe);
+	};
+
+	verify_wide_join("jit_wide_perfect_signed_probe", "jit_wide_perfect_signed_build");
+	verify_wide_join("jit_wide_perfect_unsigned_probe", "jit_wide_perfect_unsigned_build");
+}

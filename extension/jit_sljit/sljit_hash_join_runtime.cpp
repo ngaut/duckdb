@@ -35,6 +35,96 @@ const_data_ptr_t NativeHashJoinKeySourceData(UnifiedVectorFormat &format, SljitN
 	return dispatch.data;
 }
 
+template <class T>
+static inline bool SljitWidePerfectHashOffset(const T &value, const T &min_value, const T &max_value, idx_t &offset) {
+	const bool below_min =
+	    value.upper < min_value.upper || (value.upper == min_value.upper && value.lower < min_value.lower);
+	if (below_min) {
+		return false;
+	}
+	const bool above_max =
+	    value.upper > max_value.upper || (value.upper == max_value.upper && value.lower > max_value.lower);
+	if (above_max) {
+		return false;
+	}
+
+	// Perfect-hash construction bounds the range to an idx_t-sized dense table. The
+	// low-word subtraction is therefore the complete offset; the borrow is folded
+	// into the high word to keep the calculation defined across a word boundary.
+	const auto borrow = value.lower < min_value.lower ? 1U : 0U;
+	const auto upper_delta = static_cast<uint64_t>(value.upper) - static_cast<uint64_t>(min_value.upper) - borrow;
+	if (upper_delta != 0) {
+		return false;
+	}
+	offset = NumericCast<idx_t>(value.lower - min_value.lower);
+	return true;
+}
+
+template <class T, bool EMIT_MATCH_SELECTION, bool EMIT_BUILD_SELECTION>
+static void SljitPopulateWidePerfectHashJoinSelectionsTyped(SljitNativePerfectHashJoinProbeInput &input) {
+	const auto source = reinterpret_cast<const T *>(input.source_data);
+	const auto min_value = [&]() {
+		if constexpr (std::is_same<T, hugeint_t>::value) {
+			return input.perfect_min_128;
+		} else {
+			return input.perfect_min_u128;
+		}
+	}();
+	const auto max_value = [&]() {
+		if constexpr (std::is_same<T, hugeint_t>::value) {
+			return input.perfect_max_128;
+		} else {
+			return input.perfect_max_u128;
+		}
+	}();
+	const auto source_selection = input.source_sel;
+	const auto source_validity = input.source_validity;
+	idx_t selected_count = 0;
+	for (idx_t row_idx = 0; row_idx < input.count; row_idx++) {
+		const auto source_idx = source_selection ? source_selection[row_idx] : NumericCast<sel_t>(row_idx);
+		if (source_validity && !ValidityMask::RowIsValid(source_validity[source_idx >> 6], source_idx & 63)) {
+			continue;
+		}
+		idx_t build_idx;
+		if (!SljitWidePerfectHashOffset(source[source_idx], min_value, max_value, build_idx)) {
+			continue;
+		}
+		if constexpr (EMIT_MATCH_SELECTION) {
+			input.match_sel[selected_count] = NumericCast<sel_t>(row_idx);
+		}
+		if constexpr (EMIT_BUILD_SELECTION) {
+			input.build_sel[selected_count] = NumericCast<sel_t>(build_idx);
+		}
+		selected_count++;
+	}
+	input.selected_count = selected_count;
+	input.input_offset = input.count;
+	input.finished = true;
+}
+
+void SljitPopulateWidePerfectHashJoinSelections(SljitNativePerfectHashJoinProbeInput &input, bool emit_match_selection,
+                                                bool emit_build_selection, bool unsigned_key) {
+	auto dispatch = [&](auto type_tag) {
+		using T = decltype(type_tag);
+		if (emit_match_selection) {
+			if (emit_build_selection) {
+				SljitPopulateWidePerfectHashJoinSelectionsTyped<T, true, true>(input);
+			} else {
+				SljitPopulateWidePerfectHashJoinSelectionsTyped<T, true, false>(input);
+			}
+		} else if (emit_build_selection) {
+			SljitPopulateWidePerfectHashJoinSelectionsTyped<T, false, true>(input);
+		} else {
+			SljitPopulateWidePerfectHashJoinSelectionsTyped<T, false, false>(input);
+		}
+	};
+	if (unsigned_key) {
+		dispatch(uhugeint_t());
+	} else {
+		dispatch(hugeint_t());
+	}
+}
+
 SljitHashJoinProbeLayoutKind SljitHashJoinTableLayoutKind(const ExecutionHashJoinTableLayout &layout) {
 	return SljitHashJoinProbeLayoutKindFromFlags(layout.use_salt, layout.chains_longer_than_one,
 	                                             layout.dictionary_emission);
@@ -119,6 +209,10 @@ void SljitPreparePerfectHashJoinProbeInput(const SljitNativeHashJoinProbeKeyPlan
 	native_input.selected_count = 0;
 	native_input.input_offset = state.input_offset;
 	native_input.finished = false;
+	native_input.perfect_min_128 = layout.build_min_128;
+	native_input.perfect_max_128 = layout.build_max_128;
+	native_input.perfect_min_u128 = layout.build_min_u128;
+	native_input.perfect_max_u128 = layout.build_max_u128;
 }
 
 bool SljitCanDerivePerfectHashBuildSelectionFromIdentity(const SljitNativeHashJoinProbeKeyPlan &key,

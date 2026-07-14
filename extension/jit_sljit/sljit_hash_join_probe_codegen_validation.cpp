@@ -51,10 +51,6 @@ bool SljitValidatePerfectHashJoinProbePlan(const SljitNativeHashJoinProbePlan &p
 		error = "SLJIT perfect hash join probe requires an equality key";
 		return false;
 	}
-	if (key.key_kind == SljitNativeHashJoinKeyKind::INT128 || key.key_kind == SljitNativeHashJoinKeyKind::UINT128) {
-		error = "SLJIT perfect hash join probe does not support 128-bit keys";
-		return false;
-	}
 	if (plan.output_mode != ExecutionHashJoinProbeOutputMode::MATCHED_PROBE_AND_BUILD &&
 	    plan.output_mode != ExecutionHashJoinProbeOutputMode::MATCHED_PROBE_ONLY) {
 		error = "SLJIT perfect hash join probe requires an inner output mode";
