@@ -160,8 +160,7 @@ bool ExecutionRegionCandidateUsesScanFilters(const ExecutionRegionCandidate &can
 		const bool highly_selective_aggregate = aggregate_sink && storage_compatible_filters &&
 		                                        candidate.estimated_cardinality > 0 &&
 		                                        candidate.estimated_cardinality * 16 < source_cardinality;
-		const bool grouped_aggregate = sink_kind == ExecutionRegionSinkKind::HASH_AGGREGATE_UPDATE;
-		if (!moderate_single_filter_aggregate && !highly_selective_aggregate && !grouped_aggregate) {
+		if (!moderate_single_filter_aggregate && !highly_selective_aggregate) {
 			return false;
 		}
 	}

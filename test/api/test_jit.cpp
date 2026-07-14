@@ -877,7 +877,7 @@ TEST_CASE("JIT production CBO uses modulo domains for filtered reductions", "[ap
 	    });
 }
 
-TEST_CASE("JIT scan-filtered grouped aggregate uses direct grouped primitive recipe", "[api][jit]") {
+TEST_CASE("JIT selected scan-filtered grouped aggregate uses direct grouped primitive recipe", "[api][jit]") {
 	DuckDB db;
 	Connection con(db);
 	auto &manager = ExecutionRegionManager::Get(*con.context);
@@ -891,13 +891,14 @@ TEST_CASE("JIT scan-filtered grouped aggregate uses direct grouped primitive rec
 	                          "SELECT i::BIGINT AS id, "
 	                          "       CAST(i % 1024 AS INTEGER) AS group_id, "
 	                          "       CAST((i % 100) AS DOUBLE) + 0.25 AS x, "
-	                          "       CAST(((i * 3) % 200) AS DOUBLE) + 0.5 AS y "
+	                          "       CAST(((i * 3) % 200) AS DOUBLE) + 0.5 AS y, "
+	                          "       CASE WHEN i % 7 = 0 THEN 'OTHER' ELSE 'EUROPE' END AS region "
 	                          "FROM range(100000) tbl(i)"));
 
 	const string query = "SELECT group_id, "
 	                     "       sum((x * 1.5) + (y / 4.0)) AS payload_sum "
 	                     "FROM jit_scan_filtered_grouped_aggregate "
-	                     "WHERE id % 7 <> 0 "
+	                     "WHERE region LIKE 'EUROPE%' "
 	                     "GROUP BY group_id "
 	                     "ORDER BY group_id";
 	REQUIRE_NO_FAIL(con.Query("SET jit_policy='off'"));
@@ -921,7 +922,7 @@ TEST_CASE("JIT scan-filtered grouped aggregate uses direct grouped primitive rec
 	for (auto &event : manager.GetEvents()) {
 		if (!IsCompiledSljitRegionEvent(event) ||
 		    event.candidate_traits.sink_kind != ExecutionRegionSinkKind::HASH_AGGREGATE_UPDATE ||
-		    !event.candidate_uses_scan_filters) {
+		    !event.selected_uses_scan_filters) {
 			continue;
 		}
 		scan_filtered_kernel_ids.push_back(event.kernel_id);
@@ -931,6 +932,59 @@ TEST_CASE("JIT scan-filtered grouped aggregate uses direct grouped primitive rec
 	}
 	REQUIRE(!scan_filtered_kernel_ids.empty());
 	RequireMaterializationElisionRuntimeProof(manager, scan_filtered_kernel_ids);
+}
+
+TEST_CASE("JIT keeps generated-safe grouped aggregate filters in generated source", "[api][jit]") {
+	DuckDB db;
+	Connection con(db);
+	auto &manager = ExecutionRegionManager::Get(*con.context);
+
+	ConfigureSljitForCoverage(con, false, true, true, 10000);
+	REQUIRE_NO_FAIL(con.Query("SET jit_cbo_generated_stage_benefit=1048576"));
+	REQUIRE_NO_FAIL(con.Query("SET jit_cbo_materialization_elision_benefit=1048576"));
+	REQUIRE_NO_FAIL(con.Query("SET jit_cbo_native_operator_stage_benefit=1048576"));
+	REQUIRE_NO_FAIL(con.Query("SET perfect_ht_threshold=0"));
+	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_generated_grouped_source_filter AS "
+	                          "SELECT i::BIGINT AS id, "
+	                          "       CAST(i % 1024 AS INTEGER) AS group_id, "
+	                          "       CAST((i % 100) AS DOUBLE) + 0.25 AS x, "
+	                          "       CAST(((i * 3) % 200) AS DOUBLE) + 0.5 AS y "
+	                          "FROM range(100000) tbl(i)"));
+
+	const string query = "SELECT group_id, "
+	                     "       sum((x * 1.5) + (y / 4.0)) AS payload_sum "
+	                     "FROM jit_generated_grouped_source_filter "
+	                     "WHERE id % 7 <> 0 "
+	                     "GROUP BY group_id "
+	                     "ORDER BY group_id";
+	REQUIRE_NO_FAIL(con.Query("SET jit_policy='off'"));
+	auto reference = con.Query(query);
+	REQUIRE_NO_FAIL(*reference);
+
+	REQUIRE_NO_FAIL(con.Query("SET jit_policy='auto'"));
+	ClearJitTrace(manager, true);
+	auto result = con.Query(query);
+	REQUIRE_NO_FAIL(*result);
+	REQUIRE(result->RowCount() == reference->RowCount());
+	REQUIRE(result->ColumnCount() == reference->ColumnCount());
+	for (idx_t row_idx = 0; row_idx < result->RowCount(); row_idx++) {
+		for (idx_t col_idx = 0; col_idx < result->ColumnCount(); col_idx++) {
+			REQUIRE(result->GetValue(col_idx, row_idx).ToString() == reference->GetValue(col_idx, row_idx).ToString());
+		}
+	}
+
+	bool found_generated_grouped_filter = false;
+	for (auto &event : manager.GetEvents()) {
+		if (!IsCompiledSljitRegionEvent(event) ||
+		    event.candidate_traits.sink_kind != ExecutionRegionSinkKind::HASH_AGGREGATE_UPDATE) {
+			continue;
+		}
+		found_generated_grouped_filter = true;
+		REQUIRE_FALSE(event.selected_uses_scan_filters);
+		REQUIRE(StringUtil::Contains(event.reason, "source-strategy=generated-source-filter"));
+		RequireGeneratedSourceFilterContract(event);
+	}
+	REQUIRE(found_generated_grouped_filter);
 }
 
 TEST_CASE("JIT materialization-elision runtime proves projected aggregate ownership", "[api][jit]") {
