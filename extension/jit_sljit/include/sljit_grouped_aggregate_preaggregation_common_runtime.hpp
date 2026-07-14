@@ -145,6 +145,77 @@ SljitTryBindGeneratedPrimitiveRunSource(ExecutionRegionRuntime &runtime, SljitEx
 	return true;
 }
 
+static bool SljitTryBindGeneratedFusedAffinePrimitiveRunSource(
+    ExecutionRegionRuntime &runtime, SljitExecutableRegionOp &op, DataChunk &input,
+    SljitPreaggregatedInputVectorGroupKeySource &group_source, const vector<idx_t> &payload_source_indices,
+    const vector<const ExecutionPrimitiveAggregateUpdateLane *> &payload_lanes, idx_t count,
+    SljitPreaggregatedPrimitivePayloadSource &payload_source, SljitNativePrimitiveRunInput &native_input,
+    SljitNativePrimitiveRunFunction &function, const char *&blocker) {
+	blocker = nullptr;
+	function = nullptr;
+	auto &primitive_run_update = op.aggregate_update.primitive_run_update;
+	auto &affine_run_update = op.aggregate_update.fused_affine_run_update;
+	if (!affine_run_update.Ready() || affine_run_update.primitive_kind != AggregatePrimitiveUpdateKind::SUM_INT64) {
+		blocker = "code";
+		return false;
+	}
+	if (count == 0 || count > STANDARD_VECTOR_SIZE || payload_lanes.size() != affine_run_update.lanes.size() ||
+	    affine_run_update.source_position >= payload_source_indices.size() || !group_source.source) {
+		blocker = "shape";
+		return false;
+	}
+	auto &source = *group_source.source;
+	const bool exact_group_type = source.cast_kind == ExecutionRowPointerGroupKeyCastKind::NONE &&
+	                              source.source_physical_type == source.target_physical_type;
+	const bool proven_narrowing_group_cast =
+	    ExecutionGroupKeyCastIsNarrowingIntegral(source.cast_kind) && source.unchecked_integral_cast;
+	const bool integral_compression = source.cast_kind == ExecutionRowPointerGroupKeyCastKind::INTEGRAL_COMPRESS;
+	if ((!exact_group_type && !proven_narrowing_group_cast && !integral_compression) ||
+	    source.target_physical_type != primitive_run_update.group_type) {
+		blocker = "group_cast";
+		return false;
+	}
+	if (group_source.format.sel->IsSet()) {
+		blocker = "group_selection";
+		return false;
+	}
+	if (!SljitPreaggregatedInputVectorGroupRowsAllValid(group_source)) {
+		blocker = "group_null";
+		return false;
+	}
+	const auto payload_source_idx = payload_source_indices[affine_run_update.source_position];
+	if (!PrepareSljitPreaggregatedPrimitivePayloadSource(input, payload_lanes[0], payload_source_idx, true,
+	                                                     payload_source) ||
+	    payload_source.type != affine_run_update.source_type) {
+		blocker = "payload_source";
+		return false;
+	}
+	if (payload_source.format.sel->IsSet()) {
+		blocker = "payload_selection";
+		return false;
+	}
+	for (auto lane : payload_lanes) {
+		if (!lane || lane->kind != AggregatePrimitiveUpdateKind::SUM_INT64) {
+			blocker = "specialization";
+			return false;
+		}
+	}
+	function = SljitEnsureExecutableFusedAffineRunUpdate(runtime, primitive_run_update, affine_run_update,
+	                                                     source.source_physical_type, source.cast_kind,
+	                                                     !payload_source.rows_all_valid);
+	if (!function) {
+		blocker = "specialization";
+		return false;
+	}
+	native_input = SljitNativePrimitiveRunInput();
+	native_input.group_data = group_source.format.data;
+	native_input.payload_data = payload_source.format.data;
+	native_input.payload_validity = payload_source.rows_all_valid ? nullptr : payload_source.format.validity.GetData();
+	native_input.group_cast_constant = source.cast_constant;
+	native_input.input_count = count;
+	return true;
+}
+
 template <class TARGET_TYPE>
 static bool
 SljitBindGeneratedPrimitiveRunOutput(DataChunk &groups, SljitPreaggregatedPrimitiveAggregateScratch &scratch,
@@ -200,6 +271,34 @@ SljitBindGeneratedPrimitiveRunOutput(DataChunk &groups, SljitPreaggregatedPrimit
 		native_input.output_value_is_set = lane_inputs[0].output_value_is_set;
 	}
 	native_input.lane_inputs = lane_inputs.data();
+	native_input.output_count = output_count;
+	native_input.output_capacity = output_capacity;
+	return true;
+}
+
+template <class TARGET_TYPE>
+static bool SljitBindGeneratedFusedAffinePrimitiveRunOutput(DataChunk &groups,
+                                                            SljitPreaggregatedPrimitiveAggregateScratch &scratch,
+                                                            idx_t output_count, idx_t output_capacity,
+                                                            SljitNativePrimitiveRunInput &native_input) {
+	if (groups.ColumnCount() != 1 || output_count > output_capacity ||
+	    scratch.payload_layout != SljitPreaggregatedPrimitivePayloadLayout::SHARED_AFFINE ||
+	    scratch.group_row_counts.size() != output_capacity ||
+	    scratch.generated_shared_int64_deltas.size() != output_capacity ||
+	    scratch.shared_hugeint_values.size() != output_capacity ||
+	    scratch.shared_valid_counts.size() != output_capacity) {
+		return false;
+	}
+	auto &group_vector = groups.data[0];
+	group_vector.SetVectorType(VectorType::FLAT_VECTOR);
+	if (FlatVector::GetCapacity(group_vector) < output_capacity) {
+		return false;
+	}
+	native_input.output_group_data =
+	    reinterpret_cast<data_ptr_t>(FlatVector::GetDataMutable<TARGET_TYPE>(group_vector));
+	native_input.output_shared_int64_values = scratch.generated_shared_int64_deltas.data();
+	native_input.output_shared_valid_counts = scratch.shared_valid_counts.data();
+	native_input.output_row_counts = scratch.group_row_counts.data();
 	native_input.output_count = output_count;
 	native_input.output_capacity = output_capacity;
 	return true;

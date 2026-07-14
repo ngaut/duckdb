@@ -19,9 +19,6 @@
 namespace duckdb {
 
 constexpr idx_t SLJIT_LOCAL_PERFECT_HASH_MAX_GROUPS = 16;
-constexpr idx_t SLJIT_EAGER_ZERO_SPARSE_LOCAL_MAX_GROUPS = 64;
-constexpr idx_t SLJIT_SPARSE_LOCAL_PERFECT_HASH_MAX_GROUPS = 1024;
-constexpr sljit_sw SLJIT_SPARSE_LOCAL_PERFECT_HASH_MAX_BYTES = 32 * 1024;
 constexpr idx_t SLJIT_DEFERRED_PERFECT_HASH_FLAG_MAX_GROUPS = 1024;
 constexpr sljit_sw SLJIT_STRING_T_SHIFT = 4;
 
@@ -45,28 +42,24 @@ constexpr bool SLJIT_HAS_PERFECT_HASH_GROUP_DATA_REGS = false;
 constexpr sljit_s32 SLJIT_PERFECT_HASH_GROUP_DATA_SAVED_REG_COUNT = SLJIT_PERFECT_HASH_SAVED_REG_COUNT;
 #endif
 
-struct SljitLocalPerfectHashAggregateLane {
+struct SljitDensePerfectHashAggregateReductionLane {
 	sljit_sw lower_offset = -1;
 	sljit_sw upper_offset = -1;
 	sljit_sw saw_offset = -1;
 	sljit_sw count_offset = -1;
 	bool value_always_seen = false;
-	bool local_lower_never_overflows = false;
+	bool batch_lower_never_overflows = false;
 };
 
-struct SljitLocalPerfectHashAggregatePlan {
-	bool enabled = false;
-	bool sparse = false;
-	bool sparse_eager_zero = false;
-	bool group_seen_is_byte = false;
+struct SljitDensePerfectHashAggregateReductionPlan {
 	idx_t group_count = 0;
 	idx_t count_seen_lane = DConstants::INVALID_INDEX;
 	sljit_sw group_seen_offset = -1;
-	sljit_sw active_groups_offset = -1;
-	sljit_sw active_count_offset = -1;
-	sljit_sw group_payload_offset = -1;
-	sljit_sw group_payload_stride = 0;
-	vector<SljitLocalPerfectHashAggregateLane> lanes;
+	vector<SljitDensePerfectHashAggregateReductionLane> lanes;
+
+	bool Ready() const {
+		return group_count > 0;
+	}
 };
 
 struct SljitDeferredPerfectHashFlagPlan {
@@ -121,47 +114,39 @@ sljit_s32 SljitPerfectHashSourceDataPointerReg(idx_t hoist_idx, bool include_fas
 vector<bool> BuildSljitAggregatePayloadNotNull(const vector<SljitNativeRegionExpressionPlan> &payloads,
                                                const vector<ExecutionRegionAggregateInput> &aggregates,
                                                const vector<bool> &source_not_null);
-bool TryBuildSljitLocalPerfectHashAggregatePlan(const vector<ExecutionRegionAggregateInput> &aggregates,
-                                                const ExecutionRegionAggregateContract &contract,
-                                                const vector<bool> &payloads_not_null, sljit_sw &local_size,
-                                                SljitLocalPerfectHashAggregatePlan &result);
+bool TryBuildSljitDensePerfectHashAggregateReductionPlan(const vector<ExecutionRegionAggregateInput> &aggregates,
+                                                         const ExecutionRegionAggregateContract &contract,
+                                                         const vector<bool> &payloads_not_null,
+                                                         const vector<bool> &batch_lower_never_overflows,
+                                                         sljit_sw &local_size,
+                                                         SljitDensePerfectHashAggregateReductionPlan &result);
 bool TryBuildSljitDeferredPerfectHashFlagPlan(const vector<ExecutionRegionAggregateInput> &aggregates,
                                               const ExecutionRegionAggregateContract &contract, sljit_sw &local_size,
                                               SljitDeferredPerfectHashFlagPlan &result);
-void AnnotateSljitLocalPerfectHashAggregatePlan(SljitLocalPerfectHashAggregatePlan &plan,
-                                                const vector<SljitNativeRegionExpressionPlan> &payloads,
-                                                const vector<ExecutionRegionAggregateInput> &aggregates,
-                                                const vector<Value> &source_min_values,
-                                                const vector<Value> &source_max_values);
-bool SljitSparseLocalUsesCountSeen(const SljitLocalPerfectHashAggregatePlan &plan);
-void EmitZeroSljitLocalPerfectHashAggregateArrays(struct sljit_compiler *compiler,
-                                                  const SljitLocalPerfectHashAggregatePlan &plan);
+vector<bool> BuildSljitDensePerfectHashLowerNeverOverflows(const vector<SljitNativeRegionExpressionPlan> &payloads,
+                                                           const vector<ExecutionRegionAggregateInput> &aggregates,
+                                                           const vector<Value> &source_min_values,
+                                                           const vector<Value> &source_max_values);
+void EmitZeroSljitDensePerfectHashAggregateReduction(struct sljit_compiler *compiler,
+                                                     const SljitDensePerfectHashAggregateReductionPlan &plan);
 void EmitZeroSljitDeferredPerfectHashFlagArray(struct sljit_compiler *compiler,
                                                const SljitDeferredPerfectHashFlagPlan &plan);
-void EmitMarkSljitLocalPerfectHashGroupSeen(struct sljit_compiler *compiler,
-                                            const SljitLocalPerfectHashAggregatePlan &plan, sljit_s32 group_index_reg,
-                                            sljit_s32 group_pointer_reg, bool mark_payloads_seen = false,
-                                            bool increment_count_seen = true);
+void EmitMarkSljitDensePerfectHashGroupSeen(struct sljit_compiler *compiler,
+                                            const SljitDensePerfectHashAggregateReductionPlan &plan,
+                                            sljit_s32 group_index_reg);
 void EmitMarkSljitDeferredPerfectHashGroupSeen(struct sljit_compiler *compiler,
                                                const SljitDeferredPerfectHashFlagPlan &plan, sljit_s32 group_index_reg);
-void EmitSljitLocalPerfectHashIncrementCount(struct sljit_compiler *compiler,
-                                             const SljitLocalPerfectHashAggregateLane &lane, sljit_s32 group_index_reg);
-void EmitSljitLocalPerfectHashAccumulate(struct sljit_compiler *compiler,
-                                         const SljitLocalPerfectHashAggregateLane &lane,
+void EmitSljitDensePerfectHashIncrementCount(struct sljit_compiler *compiler,
+                                             const SljitDensePerfectHashAggregateReductionLane &lane,
+                                             sljit_s32 group_index_reg);
+void EmitSljitDensePerfectHashAccumulate(struct sljit_compiler *compiler,
+                                         const SljitDensePerfectHashAggregateReductionLane &lane,
                                          AggregatePrimitiveUpdateKind kind, sljit_s32 group_index_reg,
                                          sljit_s32 value_reg);
-void EmitSljitSparseLocalPerfectHashIncrementCount(struct sljit_compiler *compiler,
-                                                   const SljitLocalPerfectHashAggregateLane &lane,
-                                                   sljit_s32 group_pointer_reg);
-void EmitSljitSparseLocalPerfectHashAccumulate(struct sljit_compiler *compiler,
-                                               const SljitLocalPerfectHashAggregateLane &lane,
-                                               AggregatePrimitiveUpdateKind kind, sljit_s32 group_pointer_reg,
-                                               sljit_s32 value_reg, bool store_saw = true);
-void EmitSljitLocalPerfectHashCommit(struct sljit_compiler *compiler,
-                                     const SljitLocalPerfectHashAggregatePlan &local_plan,
-                                     const vector<SljitAggregatePayloadDescriptor> &payload_descriptors,
-                                     const ExecutionRegionAggregateContract &contract,
-                                     bool local_payloads_known_seen = false);
+void EmitSljitDensePerfectHashAggregateReductionCommit(
+    struct sljit_compiler *compiler, const SljitDensePerfectHashAggregateReductionPlan &reduction_plan,
+    const vector<SljitAggregatePayloadDescriptor> &payload_descriptors,
+    const ExecutionRegionAggregateContract &contract);
 void EmitSljitDeferredPerfectHashFlagsCommit(struct sljit_compiler *compiler,
                                              const SljitDeferredPerfectHashFlagPlan &deferred_plan,
                                              const vector<SljitAggregatePayloadDescriptor> &payload_descriptors,

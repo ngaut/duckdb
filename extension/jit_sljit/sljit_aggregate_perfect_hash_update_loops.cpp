@@ -73,19 +73,18 @@ static void EmitSljitPerfectHashFastSourceDataHoists(struct sljit_compiler *comp
 
 static SljitPerfectHashGroupLookupOptions
 SljitPerfectHashDirectGroupLookupOptions(const SljitPerfectHashFusedUpdateEmitContext &context,
-	                                         bool mark_local_payloads_seen, bool use_fast_group_data_array_base);
+                                         bool use_fast_group_data_array_base);
 static SljitPerfectHashPayloadUpdateOptions SljitPerfectHashPayloadUpdateOptionsForLoop(
     bool fast_path, bool all_valid, bool no_source_selection,
     const vector<SljitTypedExpressionTreeDataPointerHoist> *payload_data_hoists);
 
 static SljitPerfectHashGroupLookupOptions
 SljitPerfectHashDirectGroupLookupOptions(const SljitPerfectHashFusedUpdateEmitContext &context,
-	                                         bool mark_local_payloads_seen, bool use_fast_group_data_array_base) {
+                                         bool use_fast_group_data_array_base) {
 	SljitPerfectHashGroupLookupOptions result;
-	result.materialize_state_pointer = !context.local_aggregate_plan.enabled;
+	result.materialize_state_pointer = !context.dense_reduction_plan.Ready();
 	result.defer_flags = context.deferred_flag_plan.enabled;
 	result.direct_group_index = true;
-	result.mark_local_payloads_seen = mark_local_payloads_seen;
 	result.use_fast_group_data_array_base = use_fast_group_data_array_base;
 	return result;
 }
@@ -93,9 +92,8 @@ SljitPerfectHashDirectGroupLookupOptions(const SljitPerfectHashFusedUpdateEmitCo
 static SljitPerfectHashGroupLookupOptions
 SljitPerfectHashSelectedGroupLookupOptions(const SljitPerfectHashFusedUpdateEmitContext &context) {
 	SljitPerfectHashGroupLookupOptions result;
-	result.materialize_state_pointer = !context.local_aggregate_plan.enabled;
+	result.materialize_state_pointer = !context.dense_reduction_plan.Ready();
 	result.defer_flags = context.deferred_flag_plan.enabled;
-	result.mark_local_payloads_seen = context.local_aggregate_plan.sparse;
 	return result;
 }
 
@@ -115,7 +113,6 @@ EmitSljitPerfectHashFlatFastLoop(const SljitPerfectHashFusedUpdateEmitContext &c
                                  const SljitPerfectHashFusedUpdatePlan &update_plan,
                                  const vector<SljitTypedExpressionTreeDataPointerHoist> *fast_data_hoists) {
 	auto compiler = context.compiler;
-	auto &local_plan = update_plan.local_aggregate_plan;
 	if (update_plan.predicate_simd_plan.supported) {
 		EmitSljitTypedExpressionTreeSimdHybridFilterLoop(
 		    compiler, *context.predicate, update_plan.predicate_simd_plan, update_plan.predicate_simd_mask_offset,
@@ -124,8 +121,8 @@ EmitSljitPerfectHashFlatFastLoop(const SljitPerfectHashFusedUpdateEmitContext &c
 			    if (update_plan.hoist_fast_group_data_array_base) {
 				    EmitSljitPerfectHashFastGroupDataArrayBase(compiler);
 			    }
-			    auto lookup = SljitPerfectHashDirectGroupLookupOptions(context, local_plan.sparse,
-			                                                           update_plan.hoist_fast_group_data_array_base);
+			    auto lookup =
+			        SljitPerfectHashDirectGroupLookupOptions(context, update_plan.hoist_fast_group_data_array_base);
 			    lookup.expression_fast_path = true;
 			    lookup.expression_all_valid = true;
 			    lookup.expression_data_hoists = fast_data_hoists;
@@ -141,8 +138,7 @@ EmitSljitPerfectHashFlatFastLoop(const SljitPerfectHashFusedUpdateEmitContext &c
 	if (update_plan.hoist_fast_group_data_array_base) {
 		EmitSljitPerfectHashFastGroupDataArrayBase(compiler);
 	}
-	auto lookup = SljitPerfectHashDirectGroupLookupOptions(context, local_plan.sparse,
-	                                                       update_plan.hoist_fast_group_data_array_base);
+	auto lookup = SljitPerfectHashDirectGroupLookupOptions(context, update_plan.hoist_fast_group_data_array_base);
 	lookup.expression_fast_path = true;
 	lookup.expression_all_valid = true;
 	lookup.expression_data_hoists = fast_data_hoists;
@@ -157,12 +153,11 @@ EmitSljitPerfectHashFlatFastLoop(const SljitPerfectHashFusedUpdateEmitContext &c
 void EmitSljitPerfectHashFusedUpdateLoops(const SljitPerfectHashFusedUpdateEmitContext &context,
                                           const SljitPerfectHashFusedUpdatePlan &update_plan) {
 	auto compiler = context.compiler;
-	auto &local_plan = update_plan.local_aggregate_plan;
 	const auto data_hoists = update_plan.hoist_source_data_pointers ? &update_plan.source_data_hoists : nullptr;
 	const auto fast_data_hoists =
 	    update_plan.hoist_fast_source_data_pointers ? &update_plan.fast_source_data_hoists : data_hoists;
 	const bool can_use_common_selected_group_data_base_reg =
-	    update_plan.dedicated_state_register || update_plan.local_aggregate_plan.sparse;
+	    update_plan.dedicated_state_register || update_plan.dense_reduction_plan.Ready();
 
 	struct sljit_jump *fast_done = nullptr;
 	struct sljit_jump *logical_fast_done = nullptr;
@@ -191,7 +186,7 @@ void EmitSljitPerfectHashFusedUpdateLoops(const SljitPerfectHashFusedUpdateEmitC
 		loop_options.all_valid = true;
 		loop_options.no_source_selection = true;
 		loop_options.predicate_data_hoists = fast_data_hoists;
-		loop_options.group_lookup = SljitPerfectHashDirectGroupLookupOptions(context, local_plan.sparse, false);
+		loop_options.group_lookup = SljitPerfectHashDirectGroupLookupOptions(context, false);
 		loop_options.payload_update = SljitPerfectHashPayloadUpdateOptionsForLoop(false, true, true, fast_data_hoists);
 		logical_fast_done = EmitSljitPerfectHashUpdateLoop(context, loop_options);
 
@@ -246,7 +241,7 @@ void EmitSljitPerfectHashFusedUpdateLoops(const SljitPerfectHashFusedUpdateEmitC
 
 	SljitPerfectHashUpdateLoopOptions loop_options;
 	loop_options.group_lookup.check_group_validity = true;
-	loop_options.group_lookup.materialize_state_pointer = !local_plan.enabled;
+	loop_options.group_lookup.materialize_state_pointer = !update_plan.dense_reduction_plan.Ready();
 	loop_options.payload_update = SljitPerfectHashPayloadUpdateOptionsForLoop(false, false, false, data_hoists);
 	auto done = EmitSljitPerfectHashUpdateLoop(context, loop_options);
 

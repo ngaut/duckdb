@@ -428,11 +428,11 @@ GENERIC_WORKLOADS = (
             "FROM __jit_generic_sorted_runs GROUP BY group_id"
             ") grouped"
         ),
-        # Wide heterogeneous reductions exercise bounded code generation. They
-        # must retain generic JIT admission without paying for an unbounded
-        # fully-unrolled run kernel.
+        # Wide affine reductions share one source run and expand directly into
+        # final aggregate states. Code size stays bounded independently of the
+        # number of output lanes.
         "minimum_auto_speedup": 0.0,
-        "minimum_auto_speedup_by_threads": {1: 1.15, 4: 1.20},
+        "minimum_auto_speedup_by_threads": {1: 2.25, 4: 1.90},
         "max_auto_slowdown": 1.05,
         "requires_compiled_auto": True,
     },
@@ -789,9 +789,7 @@ def verification_failures(
             auto_runs = [run for run in runs if run["workload"] == name and run["policy"] == "auto"]
             for required_path in workload.get("required_runtime_paths", ()):
                 missing_repeats = [
-                    str(run["repeat"])
-                    for run in auto_runs
-                    if required_path not in run["jit_runtime_path_counts"]
+                    str(run["repeat"]) for run in auto_runs if required_path not in run["jit_runtime_path_counts"]
                 ]
                 if missing_repeats:
                     failures.append(

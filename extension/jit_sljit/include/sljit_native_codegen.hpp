@@ -171,6 +171,8 @@ bool SljitPrimitiveRunGroupCastSupported(PhysicalType source_type, PhysicalType 
                                          ExecutionRowPointerGroupKeyCastKind cast_kind);
 bool SljitPrimitiveRunPayloadSupported(PhysicalType payload_type, AggregatePrimitiveUpdateKind primitive_kind,
                                        bool payload_nullable);
+bool SljitPrimitiveRunMultiUpdateSupported(const vector<PhysicalType> &payload_types,
+                                           const vector<AggregatePrimitiveUpdateKind> &primitive_kinds);
 unique_ptr<ExecutionRegionCodeHandle>
 BuildSljitNativePrimitiveRunUpdate(PhysicalType group_source_type, PhysicalType group_type,
                                    ExecutionRowPointerGroupKeyCastKind group_cast_kind, PhysicalType payload_type,
@@ -180,6 +182,11 @@ unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativePrimitiveRunMultiUpdate(
     PhysicalType group_source_type, PhysicalType group_type, ExecutionRowPointerGroupKeyCastKind group_cast_kind,
     const vector<PhysicalType> &payload_types, const vector<AggregatePrimitiveUpdateKind> &primitive_kinds,
     SljitNativePrimitiveRunFunction &function, string &error);
+unique_ptr<ExecutionRegionCodeHandle>
+BuildSljitNativePrimitiveRunAffineInt64Update(PhysicalType group_source_type, PhysicalType group_type,
+                                              ExecutionRowPointerGroupKeyCastKind group_cast_kind,
+                                              PhysicalType payload_type, idx_t lane_count, bool payload_nullable,
+                                              SljitNativePrimitiveRunFunction &function, string &error);
 unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativeUngroupedSumInt64IntegerBinaryConstant(
     SljitNativeIntegerKind kind, SljitNativeIntegerBinaryOp op, bool constant_on_left,
     SljitNativeAggregateUpdateFunction &function, string &error, bool check_arithmetic_overflow = true,

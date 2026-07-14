@@ -24,7 +24,7 @@ struct SljitPerfectHashFusedUpdateEmitContext {
 	const vector<SljitPerfectHashGroupPlan> &group_plans;
 	const ExecutionRegionAggregateContract &contract;
 	const SljitFusedTypedAggregateCodegenPlan &codegen_plan;
-	const SljitLocalPerfectHashAggregatePlan &local_aggregate_plan;
+	const SljitDensePerfectHashAggregateReductionPlan &dense_reduction_plan;
 	const SljitDeferredPerfectHashFlagPlan &deferred_flag_plan;
 	vector<SljitExpressionTreeOverflowJumps> &overflows;
 	vector<sljit_jump *> &group_out_of_range;
@@ -46,10 +46,7 @@ struct SljitPerfectHashGroupLookupOptions {
 	bool expression_fast_path = false;
 	bool expression_all_valid = false;
 	bool expression_no_source_selection = false;
-	bool mark_local_payloads_seen = false;
 	bool use_fast_group_data_array_base = false;
-	bool mark_local_group = true;
-	bool increment_count_seen = true;
 	bool group_selection_all_present = false;
 	sljit_s32 group_sel_array_base_reg = 0;
 	sljit_s32 group_data_array_base_reg_override = 0;
@@ -66,7 +63,7 @@ struct SljitPerfectHashPayloadUpdateOptions {
 struct SljitPerfectHashFusedUpdatePlan {
 	vector<SljitPerfectHashGroupPlan> group_plans;
 	SljitFusedTypedAggregateCodegenPlan codegen_plan;
-	SljitLocalPerfectHashAggregatePlan local_aggregate_plan;
+	SljitDensePerfectHashAggregateReductionPlan dense_reduction_plan;
 	SljitDeferredPerfectHashFlagPlan deferred_flag_plan;
 	SljitTypedExpressionTreeSimdPlan predicate_simd_plan;
 	vector<SljitTypedExpressionTreeDataPointerHoist> source_data_hoists;

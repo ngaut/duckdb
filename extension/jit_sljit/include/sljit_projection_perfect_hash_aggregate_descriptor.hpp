@@ -190,10 +190,10 @@ static bool SljitTryBuildProjectionPerfectHashAggregateDescriptor(
 		payload_source_indices.push_back(aggregate.payload_index);
 		return true;
 	};
-	bool uses_fused_payload_update;
+	SljitAggregatePayloadSourceLayout payload_source_layout;
 	if (!SljitTryBuildAggregatePayloadSourceIndices(
-	        aggregate_update, sink_info.aggregates, uses_fused_payload_update, "payload_contract",
-	        mark_count_star_payload, mark_fused_payload_source, check_direct_payload, mark_direct_payload,
+	        aggregate_update, sink_info.aggregates, payload_source_layout, "payload_contract", mark_count_star_payload,
+	        mark_fused_payload_source, check_direct_payload, mark_direct_payload,
 	        [&](const char *blocker) { return descriptor.Block(blocker); })) {
 		return false;
 	}
@@ -236,6 +236,7 @@ static bool SljitTryBuildProjectionPerfectHashAggregateDescriptor(
 		descriptor.group_sources.push_back(std::move(group_source));
 	}
 	descriptor.payload_source_indices = std::move(payload_source_indices);
+	descriptor.payload_source_layout = payload_source_layout;
 	if (descriptor.input_sources.empty()) {
 		return descriptor.Block("input_sources");
 	}

@@ -199,7 +199,8 @@ struct SljitRowPointerGroupedAggregateUpdateDecision {
 static SljitRowPointerGroupedAggregateUpdateDecision SljitPlanRowPointerGroupedAggregateUpdate(
     SljitRegionExecutionScratch &scratch, idx_t op_idx, SljitExecutableRegionOp &op, DataChunk &payload_input,
     Vector &row_pointers, idx_t count, const vector<ExecutionRowPointerGroupKeySource> &group_sources,
-    const vector<idx_t> &payload_source_indices, const vector<SljitGroupedReductionLaneBinding> &reduction_lanes) {
+    const vector<idx_t> &payload_source_indices, SljitAggregatePayloadSourceLayout payload_source_layout,
+    const vector<SljitGroupedReductionLaneBinding> &reduction_lanes) {
 	SljitRowPointerGroupedAggregateUpdateDecision decision;
 	const bool can_execute_direct_grouped_state_address_payload_update =
 	    SljitCanExecuteDirectGroupedStateAddressPayloadUpdate(scratch, op_idx, op, payload_input, reduction_lanes,
@@ -210,11 +211,12 @@ static SljitRowPointerGroupedAggregateUpdateDecision SljitPlanRowPointerGroupedA
 
 	if (!decision.prefer_sparse_row_pointer_target_update && !scratch.RowPointerPreaggregateDisabled(op_idx) &&
 	    SljitCanExecuteDirectRowPointerPreaggregatedPrimitiveUpdate(
-	        scratch, op_idx, op, payload_input, row_pointers, group_sources, payload_source_indices, reduction_lanes,
-	        count, decision.uses_generated_payload_preaggregation)) {
+	        scratch, op_idx, op, payload_input, row_pointers, group_sources, payload_source_indices,
+	        payload_source_layout, reduction_lanes, count, decision.uses_generated_payload_preaggregation)) {
 		decision.try_preaggregated_primitive_groups = true;
 	}
-	decision.try_count_one_targets = SljitCanAttemptRowPointerCountOneTargetLookup(group_sources);
+	decision.try_count_one_targets = payload_source_layout == SljitAggregatePayloadSourceLayout::DIRECT_PER_LANE &&
+	                                 SljitCanAttemptRowPointerCountOneTargetLookup(group_sources);
 	decision.try_input_vector_groups = SljitGroupSourcesCanMaterializeFromInputVectors(payload_input, group_sources);
 	decision.use_target_payload_update = can_execute_direct_grouped_state_address_payload_update;
 	return decision;
@@ -224,18 +226,21 @@ static bool SljitTryExecuteRowPointerGroupedTargetPayloadUpdate(
     ExecutionRegionRuntime &runtime, SljitRegionExecutionScratch &scratch, idx_t op_idx, SljitExecutableRegionOp &op,
     DataChunk &payload_input, Vector &row_pointers, idx_t count,
     const vector<ExecutionRowPointerGroupKeySource> &group_sources, const vector<idx_t> &payload_source_indices,
+    SljitAggregatePayloadSourceLayout payload_source_layout,
     const vector<const ExecutionPrimitiveAggregateUpdateLane *> &payload_lanes,
     ExecutionGroupedAggregateStateAddressBinding &grouped_state, SljitAggregatePayloadAdapterScratch &payload_scratch,
     bool finish) {
-	if (TryExecuteDirectRowPointerPreclassifiedStringSetComplementarySumUpdate(
-	        runtime, scratch, op_idx, op, payload_input, row_pointers, count, group_sources, payload_source_indices,
-	        payload_lanes, grouped_state, finish)) {
-		return true;
-	}
-	if (TryExecuteDirectRowPointerStringSetComplementarySumUpdate(
-	        runtime, scratch, op_idx, op, payload_input, row_pointers, count, group_sources, payload_source_indices,
-	        payload_lanes, grouped_state, finish)) {
-		return true;
+	if (payload_source_layout == SljitAggregatePayloadSourceLayout::FUSED_COMBINED) {
+		if (TryExecuteDirectRowPointerPreclassifiedStringSetComplementarySumUpdate(
+		        runtime, scratch, op_idx, op, payload_input, row_pointers, count, group_sources, payload_source_indices,
+		        payload_lanes, grouped_state, finish)) {
+			return true;
+		}
+		if (TryExecuteDirectRowPointerStringSetComplementarySumUpdate(
+		        runtime, scratch, op_idx, op, payload_input, row_pointers, count, group_sources, payload_source_indices,
+		        payload_lanes, grouped_state, finish)) {
+			return true;
+		}
 	}
 	return TryExecuteDirectRowPointerGroupedTargetPayloadUpdate(
 	    runtime, scratch, op_idx, op, payload_input, row_pointers, count, group_sources, payload_source_indices,
@@ -270,8 +275,8 @@ static bool SljitTryExecuteNativeRowPointerGroupedAggregateUpdate(
     ExecutionRegionRuntime &runtime, ExecutionOperatorRuntime &native_runtime, SljitRegionExecutionScratch &scratch,
     idx_t op_idx, SljitExecutableRegionOp &op, DataChunk &payload_input, Vector &row_pointers,
     const vector<ExecutionRowPointerGroupKeySource> &group_sources, const vector<idx_t> &payload_source_indices,
-    bool defer_grouped_finish, optional_ptr<bool> deferred_grouped_finish,
-    bool source_key0_int64_to_int32_unchecked = false) {
+    SljitAggregatePayloadSourceLayout payload_source_layout, bool defer_grouped_finish,
+    optional_ptr<bool> deferred_grouped_finish, bool source_key0_int64_to_int32_unchecked = false) {
 	auto record_unsupported = [&](const char *reason) {
 		auto path = string("row_pointer_grouped_lookup_update_unsupported.") + reason;
 		RecordSljitRegionRuntimePath(runtime, op.kind, path.c_str());
@@ -324,9 +329,9 @@ static bool SljitTryExecuteNativeRowPointerGroupedAggregateUpdate(
 	auto &payload_scratch = scratch.AggregatePayloadScratch(op_idx);
 	const bool finish = !defer_grouped_finish;
 	SljitTryReserveGroupedAggregateGroups(runtime, op_idx, op, grouped_state);
-	auto decision =
-	    SljitPlanRowPointerGroupedAggregateUpdate(scratch, op_idx, op, payload_input, row_pointers, count,
-	                                              proven_group_sources, payload_source_indices, reduction_lanes);
+	auto decision = SljitPlanRowPointerGroupedAggregateUpdate(scratch, op_idx, op, payload_input, row_pointers, count,
+	                                                          proven_group_sources, payload_source_indices,
+	                                                          payload_source_layout, reduction_lanes);
 	if (decision.prefer_sparse_row_pointer_target_update) {
 		RecordSljitRegionRuntimePath(runtime, op.kind, "direct_row_pointer_sparse_target_update_preferred", count);
 	}
@@ -349,21 +354,23 @@ static bool SljitTryExecuteNativeRowPointerGroupedAggregateUpdate(
 	if (decision.try_input_vector_groups &&
 	    SljitTryExecuteInputVectorGroupedAggregateUpdate(
 	        runtime, scratch, op_idx, op, payload_input, proven_group_sources, payload_source_indices, nullptr,
-	        payload_lanes, grouped_state, payload_scratch, finish, source_key0_int64_to_int32_unchecked)) {
+	        payload_source_layout, payload_lanes, grouped_state, payload_scratch, finish,
+	        source_key0_int64_to_int32_unchecked)) {
 		MarkDeferredGroupedFinish(defer_grouped_finish, deferred_grouped_finish);
 		return true;
 	}
 	if (decision.use_target_payload_update) {
 		if (SljitTryExecuteRowPointerGroupedTargetPayloadUpdate(
 		        runtime, scratch, op_idx, op, payload_input, row_pointers, count, proven_group_sources,
-		        payload_source_indices, payload_lanes, grouped_state, payload_scratch, finish)) {
+		        payload_source_indices, payload_source_layout, payload_lanes, grouped_state, payload_scratch, finish)) {
 			MarkDeferredGroupedFinish(defer_grouped_finish, deferred_grouped_finish);
 			return true;
 		}
 		record_unsupported("grouped_lookup_update");
 		return false;
 	}
-	if (SljitTryExecuteRowPointerGroupedSplitPayloadUpdate(runtime, scratch, op_idx, op, payload_input, row_pointers,
+	if (payload_source_layout == SljitAggregatePayloadSourceLayout::DIRECT_PER_LANE &&
+	    SljitTryExecuteRowPointerGroupedSplitPayloadUpdate(runtime, scratch, op_idx, op, payload_input, row_pointers,
 	                                                       count, proven_group_sources, payload_source_indices,
 	                                                       payload_lanes, grouped_state, finish)) {
 		MarkDeferredGroupedFinish(defer_grouped_finish, deferred_grouped_finish);

@@ -170,9 +170,9 @@ grouped-state per-payload update. Every later chunk dispatches through that
 family instead of rediscovering the combination from mutable flags. Direct-new,
 append-new, state-address, and preaggregation admission consume the cached lane
 bindings instead of rebuilding lane validity. Perfect-hash commit and
-deferred-flag emitters consume payload descriptors directly. Local perfect-hash
-scratch offsets remain strategy-local storage and are not mistaken for DuckDB
-aggregate-state ABI.
+deferred-flag emitters consume payload descriptors directly. Dense perfect-hash
+batch-reduction scratch offsets remain strategy-local storage and are not
+mistaken for DuckDB aggregate-state ABI.
 
 ## Compiled artifact ownership
 
@@ -644,6 +644,17 @@ resolves native grouped state addresses and uses generated payload updates.
 Perfect-hash grouping owns its generated group lookup when the domain contract
 is valid.
 
+Perfect-hash state layout and update strategy are separate decisions. A dense
+batch reducer is admitted only for a genuinely tiny domain (at most 16 slots),
+where it replaces DuckDB-state traffic with compact batch-local accumulation
+and one commit per seen group. A sparse scratch table is not a reduction proof:
+cache residency, packed rows, and narrower accumulator words do not justify
+adding per-row scratch updates plus a final commit. Sparse domains therefore
+use direct generated state updates with deferred group flags unless an
+independent run or batch strategy proves that it reduces update cardinality.
+That strategy boundary is workload-neutral and never depends on query, table,
+or column identity.
+
 Widening decimal multiplication has an exact fixed-width recipe. It accepts two
 signed INT8/INT16/INT32/INT64 references cast to an INT128-backed decimal,
 lowers signed 64-by-64 multiplication to SLJIT's two-word result, and publishes
@@ -787,9 +798,11 @@ source the runtime elides.
 
 The tuned single-lane path keeps separate all-valid and nullable kernels. A
 multi-lane executable instead owns one compile-time primitive-lane descriptor
-list and one runtime lane-input array. Code generation unrolls the primitive
-updates only while the lane list fits the eight-lane instruction-cache budget;
-wider lists keep the exact generic preaggregation loop. Each runtime lane
+list and one runtime lane-input array. Code generation unrolls supported
+primitive updates while the lane list fits the eight-lane instruction-cache
+budget. Wider homogeneous lists use one bounded generated loop; wider
+heterogeneous lists and 32-bit targets keep the exact generic preaggregation
+loop. Each runtime lane
 supplies its payload, validity, and output pointers. A null validity pointer
 means the current rows are all valid; a real mask is checked in generated code,
 so nullable `SUM` and `COUNT` preserve SQL semantics without a
@@ -1231,12 +1244,20 @@ The nullable multi-lane receipts are
 `benchmark/jit/tmp/grouped_nullable_sorted_runs_multilane_t1_promotion10_20260713`
 and
 `benchmark/jit/tmp/grouped_nullable_sorted_runs_multilane_t4_promotion10_20260713`.
-The 16-lane bounded-codegen receipts are
-`benchmark/jit/tmp/grouped_wide_sorted_runs_t1_promotion10_20260713` and
-`benchmark/jit/tmp/grouped_wide_sorted_runs_t4_promotion10_20260713`. They prove
-1.223x and 1.311x, with checked-in floors of 1.15x and 1.20x. Primitive-run
-kernels unroll no more than eight lanes; wider reductions keep the generic
-preaggregation loop and still benefit from the compiled surrounding region.
+The 16-lane shared-affine receipts are
+`benchmark/jit/tmp/grouped_wide_affine_compact_scratch_t1_promotion10_20260715`
+and
+`benchmark/jit/tmp/grouped_wide_affine_compact_scratch_t4_promotion10_20260715`.
+They prove 2.400x and 2.031x, with checked-in floors of 2.25x and 1.90x. The
+generated run kernel keeps one widened shared base sum and valid count per
+compact group.
+Generated code publishes vector-bounded machine-word deltas; the runtime widens
+them immediately so a pending group can span any number of vectors safely. The
+final state-address update uses checked machine-word affine arithmetic for the
+common case and widens only on overflow, avoiding both per-row expression replay
+and an intermediate groups-by-lanes materialization. Code size stays bounded
+independently of lane count, and payload-source layouts explicitly distinguish
+direct per-lane coordinates from fused combined-source coordinates.
 Eligible run kernels are generated only after the runtime sample proves useful
 ordering, and only the observed key-cast/nullability specialization is published.
 Pipeline-local payload-source descriptors retain their allocation across chunk
@@ -1286,11 +1307,12 @@ runtime-proof passes before the state file moves.
 - Generated pending-run aggregation currently accepts one fixed-width key, one
   or more primitive lanes, exact keys, proven signed narrowing casts, integral
   compression, and nullable payloads from both projected and materialized
-  direct inputs. Generated reducers unroll up to eight lanes on 64-bit SLJIT
-  targets; wider lists and 32-bit targets retain the buffered, scalar, or exact
-  vectorized route. Multi-key, selected, and non-flat inputs remain explicit
-  boundaries. Source-fusing general multi-input affine group expressions is the
-  next generic grouped-run boundary.
+  direct inputs. Generated reducers unroll up to eight supported lanes on
+  64-bit SLJIT targets; wider homogeneous lists use one bounded looped kernel.
+  Heterogeneous wider lists and 32-bit targets retain the buffered, scalar, or
+  exact vectorized route. Multi-key, selected, and non-flat inputs remain
+  explicit boundaries. Source-fusing general multi-input affine group
+  expressions is the next generic grouped-run boundary.
 - Native source/sink protocols remain native unless an explicit execution
   contract makes them safe to compose.
 - Native-only execution is a valid result of capability analysis, not a failed

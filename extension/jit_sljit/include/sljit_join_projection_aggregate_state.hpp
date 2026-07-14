@@ -8,8 +8,8 @@
 
 #pragma once
 
+#include "sljit_aggregate_payload_source_indices.hpp"
 #include "sljit_runtime_batch_state.hpp"
-#include "sljit_region_executable.hpp"
 
 #include "duckdb/execution/execution_operator_runtime.hpp"
 
@@ -36,6 +36,7 @@ struct SljitJoinProjectionAggregateDescriptor {
 	vector<LogicalType> input_types;
 	vector<ExecutionRowPointerGroupKeySource> group_sources;
 	vector<idx_t> payload_source_indices;
+	SljitAggregatePayloadSourceLayout payload_source_layout = SljitAggregatePayloadSourceLayout::DIRECT_PER_LANE;
 	vector<SljitExecutableRegionExpression> remapped_payloads;
 	vector<idx_t> producer_output_column_map;
 	bool has_producer_output_column_map = false;
@@ -79,6 +80,7 @@ struct SljitJoinProjectionAggregateDescriptor {
 		input_types.clear();
 		group_sources.clear();
 		payload_source_indices.clear();
+		payload_source_layout = SljitAggregatePayloadSourceLayout::DIRECT_PER_LANE;
 		remapped_payloads.clear();
 	}
 

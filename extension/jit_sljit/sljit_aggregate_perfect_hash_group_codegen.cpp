@@ -38,7 +38,13 @@ vector<SljitTypedExpressionTreeDataPointerHoist>
 BuildSljitPerfectHashSourceDataPointerHoists(const vector<SljitNativeRegionExpressionPlan> &payloads, idx_t max_hoists,
                                              bool include_fast_validity_reg) {
 	auto regs = BuildSljitPerfectHashSourceDataPointerRegs(max_hoists, include_fast_validity_reg);
-	return BuildSljitAggregateSourceDataPointerHoists(payloads, regs, 2);
+	// Payload data pointers are invariant for the complete generated row loop.
+	// A source referenced by one payload is therefore still reused once per row;
+	// requiring two payload-tree references leaves saved registers idle while the
+	// hot loop reloads vector metadata. The perfect-hash planner decides whether
+	// source or group invariants own S8/S9, so every source selected by that layout
+	// belongs in a register.
+	return BuildSljitAggregateSourceDataPointerHoists(payloads, regs, 1);
 }
 
 vector<SljitTypedExpressionTreeDataPointerHoist>
@@ -142,8 +148,8 @@ static void EmitLoadFusedAggregateGroupMiniStringCompressData(struct sljit_compi
                                                               sljit_s32 index_reg, sljit_s32 target_reg,
                                                               bool use_hoisted_group_data, sljit_s32 group_data_reg,
                                                               bool may_be_empty, bool use_precomputed_string_offset,
-	                                                          sljit_s32 group_data_array_base_reg,
-	                                                          bool fuse_nonempty_string_compress_bias) {
+                                                              sljit_s32 group_data_array_base_reg,
+                                                              bool fuse_nonempty_string_compress_bias) {
 	static constexpr sljit_sw STRING_LENGTH_OFFSET = 0;
 	static constexpr sljit_sw STRING_INLINE_PREFIX_OFFSET = sizeof(uint32_t);
 	static constexpr sljit_sw STRING_POINTER_OFFSET = sizeof(uint32_t) + string_t::PREFIX_BYTES;
@@ -242,10 +248,9 @@ void EmitLoadFusedAggregateGroupData(struct sljit_compiler *compiler, idx_t grou
 		return;
 	}
 	if (group.expression_kind == SljitNativeRegionExpressionKind::STRING_COMPRESS) {
-		EmitLoadFusedAggregateGroupMiniStringCompressData(compiler, group_idx, index_reg, target_reg,
-		                                                  use_hoisted_group_data, group_data_reg, group.minimum == 0,
-		                                                  use_precomputed_string_offset, group_data_array_base_reg,
-		                                                  fuse_nonempty_string_compress_bias);
+		EmitLoadFusedAggregateGroupMiniStringCompressData(
+		    compiler, group_idx, index_reg, target_reg, use_hoisted_group_data, group_data_reg, group.minimum == 0,
+		    use_precomputed_string_offset, group_data_array_base_reg, fuse_nonempty_string_compress_bias);
 		return;
 	}
 	EmitLoadFusedAggregateGroupIntegerData(compiler, group_idx, group.integer_kind, index_reg, target_reg,

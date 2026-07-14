@@ -18,6 +18,18 @@
 
 namespace duckdb {
 
+static SljitPreaggregatedPrimitiveUpdateState SljitMakeGroupedPreaggregatedPrimitiveUpdateState(
+    SljitExecutableRegionOp &op, const vector<const ExecutionPrimitiveAggregateUpdateLane *> &payload_lanes,
+    const SljitPreaggregatedPrimitiveAggregateScratch &preaggregate_scratch,
+    idx_t capture_row_idx = DConstants::INVALID_INDEX) {
+	optional_ptr<const SljitExecutableFusedAffineRunUpdate> affine_update;
+	if (preaggregate_scratch.payload_layout == SljitPreaggregatedPrimitivePayloadLayout::SHARED_AFFINE) {
+		affine_update = &op.aggregate_update.fused_affine_run_update;
+	}
+	return SljitMakePreaggregatedPrimitiveUpdateState(payload_lanes, preaggregate_scratch, affine_update,
+	                                                  capture_row_idx);
+}
+
 static bool SljitCanApplyPreaggregatedGroupedPrimitiveAggregateUpdate(
     SljitExecutableRegionOp &op, DataChunk &compact_groups,
     SljitPreaggregatedPrimitiveAggregateScratch &preaggregate_scratch,
@@ -67,7 +79,7 @@ static bool TryExecutePreaggregatedGroupedPrimitiveCarryoverOnlyUpdate(
 	if (!SljitPreaggregatedGroupContinuationMatches(continuation, compact_groups, 0)) {
 		return false;
 	}
-	auto update_state = SljitMakePreaggregatedPrimitiveUpdateState(payload_lanes, preaggregate_scratch.payloads);
+	auto update_state = SljitMakeGroupedPreaggregatedPrimitiveUpdateState(op, payload_lanes, preaggregate_scratch);
 	uintptr_t address = continuation.state_address;
 	auto stage_start = SljitRegionStageStart(runtime);
 	ExecuteSljitPreaggregatedPrimitiveAddressUpdate(&address, nullptr, compact_groups.size(),
@@ -98,8 +110,8 @@ static bool TryExecutePreaggregatedGroupedPrimitiveAggregateUpdate(
 	}
 	auto &sink_info = op.aggregate_update.plan.sink_info;
 
-	auto update_state = SljitMakePreaggregatedPrimitiveUpdateState(payload_lanes, preaggregate_scratch.payloads,
-	                                                               compact_groups.size() - 1);
+	auto update_state = SljitMakeGroupedPreaggregatedPrimitiveUpdateState(op, payload_lanes, preaggregate_scratch,
+	                                                                      compact_groups.size() - 1);
 	optional_ptr<const ExecutionDenseGroupDomain> dense_domain;
 	if (op.aggregate_update.dense_group_domain.ready) {
 		dense_domain = &op.aggregate_update.dense_group_domain;
@@ -218,8 +230,8 @@ static bool TryExecutePreaggregatedGroupedPrimitiveAppendSuffixWithPrefixUpdate(
 	                                        preaggregate_scratch_slice)) {
 		return false;
 	}
-	auto suffix_update_state = SljitMakePreaggregatedPrimitiveUpdateState(
-	    payload_lanes, preaggregate_scratch_slice.payloads, suffix_count - 1);
+	auto suffix_update_state = SljitMakeGroupedPreaggregatedPrimitiveUpdateState(
+	    op, payload_lanes, preaggregate_scratch_slice, suffix_count - 1);
 	auto suffix_stage_start = SljitRegionStageStart(runtime);
 	optional_ptr<const ExecutionDenseGroupDomain> dense_domain;
 	if (op.aggregate_update.dense_group_domain.ready) {
@@ -245,7 +257,7 @@ static bool TryExecutePreaggregatedGroupedPrimitiveAppendSuffixWithPrefixUpdate(
 		throw InternalException("Validated SLJIT preaggregated prefix scratch slice failed");
 	}
 	auto prefix_update_state =
-	    SljitMakePreaggregatedPrimitiveUpdateState(payload_lanes, preaggregate_scratch_slice.payloads);
+	    SljitMakeGroupedPreaggregatedPrimitiveUpdateState(op, payload_lanes, preaggregate_scratch_slice);
 	auto prefix_stage_start = SljitRegionStageStart(runtime);
 	uintptr_t prefix_address = continuation.state_address;
 	ExecuteSljitPreaggregatedPrimitiveAddressUpdate(&prefix_address, nullptr, prefix_count,

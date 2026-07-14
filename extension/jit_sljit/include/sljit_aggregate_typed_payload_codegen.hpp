@@ -15,6 +15,26 @@
 
 namespace duckdb {
 
+enum class SljitAggregateExpressionIndexMode : uint8_t { FLAT, LOGICAL, SELECTED };
+
+struct SljitSharedBinaryPayloadLane {
+	bool matched = false;
+	bool use_base_directly = false;
+	bool base_on_left = true;
+	const ExecutionExpressionIR *root = nullptr;
+	const ExecutionExpressionIR *other_value = nullptr;
+};
+
+struct SljitSharedBinaryPayloadPlan {
+	const ExecutionExpressionIR *base = nullptr;
+	vector<SljitSharedBinaryPayloadLane> lanes;
+	idx_t saved_node_count = 0;
+
+	bool Enabled() const {
+		return base != nullptr;
+	}
+};
+
 struct SljitFusedTypedAggregateCodegenPlan {
 	vector<SljitTypedExpressionTreePlan> payloads;
 	vector<SljitAggregatePayloadDescriptor> payload_descriptors;
@@ -25,24 +45,26 @@ struct SljitFusedTypedAggregateCodegenPlan {
 	idx_t shared_lane = 0;
 	const ExecutionExpressionIR *conditional_predicate = nullptr;
 	const ExecutionExpressionIR *shared_value = nullptr;
-	bool binary_shared_payload = false;
-	idx_t binary_base_lane = 0;
-	idx_t binary_dependent_lane = 0;
-	bool binary_base_on_left = true;
-	const ExecutionExpressionIR *binary_root = nullptr;
-	const ExecutionExpressionIR *binary_other_value = nullptr;
+	SljitSharedBinaryPayloadPlan shared_binary;
 };
 
+bool SljitExpressionIRStructurallyEqual(const ExecutionExpressionIR &left, const ExecutionExpressionIR &right);
+void TryBuildSljitSharedBinaryPayloadPlan(const vector<SljitNativeRegionExpressionPlan> &payloads,
+                                          const vector<SljitAggregatePayloadDescriptor> &descriptors,
+                                          SljitSharedBinaryPayloadPlan &result);
 bool BuildSljitFusedTypedAggregateCodegenPlan(const vector<SljitNativeRegionExpressionPlan> &payloads,
                                               const vector<ExecutionRegionAggregateInput> &aggregates,
                                               SljitFusedTypedAggregateCodegenPlan &codegen_plan,
                                               bool force_typed_path = false);
-void EmitSljitStoreBinarySharedPayloadValue(struct sljit_compiler *compiler, sljit_s32 value_reg,
-                                            sljit_s32 shared_value_reg, sljit_sw shared_value_offset);
-void EmitSljitBinarySharedPayloadValueReg(
-    struct sljit_compiler *compiler, const SljitFusedTypedAggregateCodegenPlan &codegen_plan,
-    sljit_s32 shared_value_reg, sljit_sw shared_value_offset, bool fast_path, bool no_source_selection,
-    vector<SljitExpressionTreeOverflowJumps> &overflows,
-    const vector<SljitTypedExpressionTreeDataPointerHoist> *data_hoists = nullptr);
+void EmitSljitSharedBinaryPayloadBase(struct sljit_compiler *compiler, const SljitSharedBinaryPayloadPlan &plan,
+                                      sljit_s32 shared_value_reg, sljit_sw shared_value_offset,
+                                      SljitAggregateExpressionIndexMode index_mode,
+                                      vector<SljitExpressionTreeOverflowJumps> &overflows,
+                                      const vector<SljitTypedExpressionTreeDataPointerHoist> *data_hoists = nullptr);
+void EmitSljitSharedBinaryPayloadLane(struct sljit_compiler *compiler, const SljitSharedBinaryPayloadLane &lane,
+                                      sljit_s32 shared_value_reg, sljit_sw shared_value_offset,
+                                      SljitAggregateExpressionIndexMode index_mode,
+                                      vector<SljitExpressionTreeOverflowJumps> &overflows,
+                                      const vector<SljitTypedExpressionTreeDataPointerHoist> *data_hoists = nullptr);
 
 } // namespace duckdb

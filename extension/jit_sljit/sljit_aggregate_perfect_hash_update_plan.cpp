@@ -84,7 +84,7 @@ bool TryBuildSljitPerfectHashFusedUpdatePlan(
 	result.group_index_offset = result.state_pointer_offset + NumericCast<sljit_sw>(sizeof(uintptr_t));
 	result.binary_shared_value_offset = result.group_index_offset + NumericCast<sljit_sw>(sizeof(sljit_sw));
 	result.local_size = result.binary_shared_value_offset;
-	if (result.codegen_plan.binary_shared_payload) {
+	if (result.codegen_plan.shared_binary.Enabled()) {
 		result.local_size += NumericCast<sljit_sw>(sizeof(sljit_sw));
 	}
 	if (predicate && result.codegen_plan.fast_path_supported) {
@@ -108,17 +108,18 @@ bool TryBuildSljitPerfectHashFusedUpdatePlan(
 		}
 	}
 	auto payloads_not_null = BuildSljitAggregatePayloadNotNull(payloads, aggregates, source_not_null);
-	TryBuildSljitLocalPerfectHashAggregatePlan(aggregates, contract, payloads_not_null, result.local_size,
-	                                           result.local_aggregate_plan);
-	AnnotateSljitLocalPerfectHashAggregatePlan(result.local_aggregate_plan, payloads, aggregates, source_min_values,
-	                                           source_max_values);
+	auto batch_lower_never_overflows =
+	    BuildSljitDensePerfectHashLowerNeverOverflows(payloads, aggregates, source_min_values, source_max_values);
+	TryBuildSljitDensePerfectHashAggregateReductionPlan(aggregates, contract, payloads_not_null,
+	                                                    batch_lower_never_overflows, result.local_size,
+	                                                    result.dense_reduction_plan);
 	result.source_data_hoists = BuildSljitPerfectHashSourceDataPointerHoists(payloads);
 	result.hoist_source_data_pointers = SLJIT_HAS_PERFECT_HASH_GROUP_DATA_REGS &&
 	                                    result.source_data_hoists.size() >= result.group_plans.size() &&
 	                                    !result.source_data_hoists.empty();
 	const bool group_data_pointer_hoist_candidate =
 	    !result.hoist_source_data_pointers && SLJIT_HAS_PERFECT_HASH_GROUP_DATA_REGS && result.group_plans.size() <= 2;
-	if (!result.local_aggregate_plan.enabled) {
+	if (!result.dense_reduction_plan.Ready()) {
 		TryBuildSljitDeferredPerfectHashFlagPlan(aggregates, contract, result.local_size, result.deferred_flag_plan);
 	}
 	result.fast_source_data_hoists =
@@ -136,22 +137,21 @@ bool TryBuildSljitPerfectHashFusedUpdatePlan(
 	                                         (!result.hoist_source_data_pointers ||
 	                                          result.fast_source_data_hoists.size() > result.source_data_hoists.size());
 	result.dedicated_state_register =
-	    SLJIT_HAS_DEDICATED_PERFECT_HASH_STATE_REG && !result.local_aggregate_plan.enabled;
-	result.dedicated_group_index_register = SLJIT_HAS_DEDICATED_PERFECT_HASH_STATE_REG &&
-	                                        result.local_aggregate_plan.enabled && !result.local_aggregate_plan.sparse;
+	    SLJIT_HAS_DEDICATED_PERFECT_HASH_STATE_REG && !result.dense_reduction_plan.Ready();
+	result.dedicated_group_index_register =
+	    SLJIT_HAS_DEDICATED_PERFECT_HASH_STATE_REG && result.dense_reduction_plan.Ready();
 	// In each flat fast-path row, S7 starts as a transient group-data-array base
 	// and becomes the direct perfect-hash state pointer only after every group
 	// key has consumed it. This removes repeated input-struct loads without
 	// borrowing registers owned by the typed SIMD expression emitter.
 	result.hoist_fast_group_data_array_base =
 	    result.hoist_source_data_pointers && result.codegen_plan.fast_path_supported &&
-	    (result.local_aggregate_plan.sparse || result.dedicated_state_register) &&
+	    (result.dense_reduction_plan.Ready() || result.dedicated_state_register) &&
 	    SljitCanPrecomputePerfectHashStringGroupOffset(result.group_plans);
 	result.state_pointer_reg = result.dedicated_state_register ? SLJIT_PERFECT_HASH_STATE_REG : SLJIT_S4;
 	result.group_index_reg = result.dedicated_group_index_register ? SLJIT_PERFECT_HASH_GROUP_INDEX_REG : SLJIT_S4;
-	result.saved_register_count = (result.dedicated_state_register || result.local_aggregate_plan.sparse)
-	                                  ? SLJIT_PERFECT_HASH_SAVED_REG_COUNT
-	                                  : NumericCast<sljit_s32>(7);
+	result.saved_register_count =
+	    result.dedicated_state_register ? SLJIT_PERFECT_HASH_SAVED_REG_COUNT : NumericCast<sljit_s32>(7);
 	if (result.dedicated_group_index_register) {
 		result.saved_register_count = SLJIT_PERFECT_HASH_SAVED_REG_COUNT;
 	}

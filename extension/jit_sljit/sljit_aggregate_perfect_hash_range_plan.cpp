@@ -66,9 +66,8 @@ static bool SljitPayloadRangeLocalSumLowerNeverOverflows(const SljitNativeRegion
 		}
 		break;
 	case SljitNativeRegionExpressionKind::TYPED_EXPRESSION_TREE:
-		if (!payload.expression_tree ||
-		    !SljitExecutableExpressionTreeRange(*payload.expression_tree, source_min_values, source_max_values,
-		                                        range)) {
+		if (!payload.expression_tree || !SljitExecutableExpressionTreeRange(*payload.expression_tree, source_min_values,
+		                                                                    source_max_values, range)) {
 			return false;
 		}
 		break;
@@ -101,25 +100,21 @@ static bool SljitLocalSumLowerNeverOverflows(const LogicalType &type) {
 	return max_abs <= NumericLimits<int64_t>::Maximum() / NumericCast<int64_t>(STANDARD_VECTOR_SIZE);
 }
 
-void AnnotateSljitLocalPerfectHashAggregatePlan(SljitLocalPerfectHashAggregatePlan &plan,
-                                                const vector<SljitNativeRegionExpressionPlan> &payloads,
-                                                const vector<ExecutionRegionAggregateInput> &aggregates,
-                                                const vector<Value> &source_min_values,
-                                                const vector<Value> &source_max_values) {
-	if (!plan.enabled) {
-		return;
-	}
-	for (idx_t payload_idx = 0;
-	     payload_idx < payloads.size() && payload_idx < aggregates.size() && payload_idx < plan.lanes.size();
-	     payload_idx++) {
+vector<bool> BuildSljitDensePerfectHashLowerNeverOverflows(const vector<SljitNativeRegionExpressionPlan> &payloads,
+                                                           const vector<ExecutionRegionAggregateInput> &aggregates,
+                                                           const vector<Value> &source_min_values,
+                                                           const vector<Value> &source_max_values) {
+	vector<bool> result(payloads.size(), false);
+	for (idx_t payload_idx = 0; payload_idx < payloads.size() && payload_idx < aggregates.size(); payload_idx++) {
 		auto &aggregate = aggregates[payload_idx];
 		if (aggregate.primitive_update_kind != AggregatePrimitiveUpdateKind::SUM_HUGEINT) {
 			continue;
 		}
-		plan.lanes[payload_idx].local_lower_never_overflows =
+		result[payload_idx] =
 		    SljitLocalSumLowerNeverOverflows(payloads[payload_idx].return_type) ||
 		    SljitPayloadRangeLocalSumLowerNeverOverflows(payloads[payload_idx], source_min_values, source_max_values);
 	}
+	return result;
 }
 
 } // namespace duckdb

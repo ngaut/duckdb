@@ -72,8 +72,9 @@ static void SljitFlushPendingRowPointerAggregateBatch(ExecutionRegionRuntime &ru
 	SljitApplyRowPointerGroupBatchCastProofs(batch.row_pointers, batch_group_sources, pending_count);
 	if (!SljitTryExecuteNativeRowPointerGroupedAggregateUpdate(
 	        runtime, runtime.ExecutionOperators(), *batch.scratch, aggregate_idx, aggregate_op, payload_input,
-	        batch.row_pointers, batch_group_sources, descriptor.payload_source_indices, true,
-	        batch.deferred_grouped_finish, source_key0_int64_to_int32_unchecked)) {
+	        batch.row_pointers, batch_group_sources, descriptor.payload_source_indices,
+	        descriptor.payload_source_layout, true, batch.deferred_grouped_finish,
+	        source_key0_int64_to_int32_unchecked)) {
 		throw InternalException("SLJIT batched direct row-pointer aggregate update failed");
 	}
 	RecordSljitRegionMaterializationElisionPath(runtime, aggregate_op.kind,
@@ -108,8 +109,9 @@ static void SljitFlushPendingInputVectorAggregateBatch(ExecutionRegionRuntime &r
 	strategy.pending_preaggregated_deferred_grouped_finish = batch.deferred_grouped_finish;
 	if (!SljitTryExecuteNativeInputVectorGroupedAggregateUpdate(
 	        runtime, runtime.ExecutionOperators(), scratch, aggregate_idx, aggregate_op, aggregate_input,
-	        batch_group_sources, strategy.descriptor.payload_source_indices, true, batch.deferred_grouped_finish,
-	        batch.source_key0_int64_to_int32_unchecked, dense_domain_ptr, optional_ptr<string>(&input_vector_failure),
+	        batch_group_sources, strategy.descriptor.payload_source_indices, strategy.descriptor.payload_source_layout,
+	        true, batch.deferred_grouped_finish, batch.source_key0_int64_to_int32_unchecked, dense_domain_ptr,
+	        optional_ptr<string>(&input_vector_failure),
 	        optional_ptr<SljitPendingPreaggregatedPrimitiveGroupBatch>(strategy.pending_preaggregated_groups.get()))) {
 		throw InternalException("SLJIT batched direct input-vector aggregate update failed: %s",
 		                        input_vector_failure.empty() ? "unknown" : input_vector_failure.c_str());

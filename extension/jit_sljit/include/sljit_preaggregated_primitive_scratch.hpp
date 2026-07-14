@@ -23,6 +23,8 @@ struct SljitPreaggregatedPrimitivePayloadDeltas {
 	vector<uint8_t> value_is_set;
 };
 
+enum class SljitPreaggregatedPrimitivePayloadLayout : uint8_t { PER_LANE, SHARED_AFFINE };
+
 struct SljitPreaggregatedPrimitiveAggregateScratch {
 	vector<SljitPreaggregatedPrimitivePayloadDeltas> payloads;
 	vector<data_t> fused_state_storage;
@@ -30,9 +32,17 @@ struct SljitPreaggregatedPrimitiveAggregateScratch {
 	vector<UnifiedVectorFormat> input_group_formats;
 	vector<sel_t> group_rows;
 	vector<idx_t> group_row_counts;
+	// Generated kernels accumulate at most one vector of narrow signed values in
+	// these machine-word deltas. The durable shared sum is hugeint so a group can
+	// remain pending across arbitrarily many vectors without overflowing an
+	// intermediate representation.
+	vector<int64_t> generated_shared_int64_deltas;
+	vector<hugeint_t> shared_hugeint_values;
+	vector<idx_t> shared_valid_counts;
 	idx_t fused_state_stride = 0;
+	SljitPreaggregatedPrimitivePayloadLayout payload_layout = SljitPreaggregatedPrimitivePayloadLayout::PER_LANE;
 
-	void Prepare(const vector<const ExecutionPrimitiveAggregateUpdateLane *> &lanes, idx_t capacity) {
+	void PrepareCommon(const vector<const ExecutionPrimitiveAggregateUpdateLane *> &lanes, idx_t capacity) {
 		payloads.resize(lanes.size());
 		fused_state_storage.clear();
 		fused_row_state_addresses.clear();
@@ -41,11 +51,24 @@ struct SljitPreaggregatedPrimitiveAggregateScratch {
 		group_rows.reserve(capacity);
 		group_row_counts.clear();
 		group_row_counts.reserve(capacity);
+		generated_shared_int64_deltas.clear();
+		generated_shared_int64_deltas.reserve(capacity);
+		shared_hugeint_values.clear();
+		shared_hugeint_values.reserve(capacity);
+		shared_valid_counts.clear();
+		shared_valid_counts.reserve(capacity);
 		fused_state_stride = 0;
+		payload_layout = SljitPreaggregatedPrimitivePayloadLayout::PER_LANE;
+		for (idx_t payload_idx = 0; payload_idx < lanes.size(); payload_idx++) {
+			auto lane = lanes[payload_idx];
+			payloads[payload_idx].kind = lane ? lane->kind : AggregatePrimitiveUpdateKind::NONE;
+		}
+	}
+
+	void Prepare(const vector<const ExecutionPrimitiveAggregateUpdateLane *> &lanes, idx_t capacity) {
+		PrepareCommon(lanes, capacity);
 		for (idx_t payload_idx = 0; payload_idx < lanes.size(); payload_idx++) {
 			auto &payload = payloads[payload_idx];
-			auto lane = lanes[payload_idx];
-			payload.kind = lane ? lane->kind : AggregatePrimitiveUpdateKind::NONE;
 			payload.int64_values.clear();
 			payload.hugeint_values.clear();
 			payload.value_is_set.clear();
@@ -66,6 +89,16 @@ struct SljitPreaggregatedPrimitiveAggregateScratch {
 				payload.value_is_set.reserve(capacity);
 			}
 		}
+	}
+
+	void PrepareSharedAffine(const vector<const ExecutionPrimitiveAggregateUpdateLane *> &lanes, idx_t capacity) {
+		PrepareCommon(lanes, capacity);
+		for (auto &payload : payloads) {
+			payload.int64_values = vector<int64_t>();
+			payload.hugeint_values = vector<hugeint_t>();
+			payload.value_is_set = vector<uint8_t>();
+		}
+		payload_layout = SljitPreaggregatedPrimitivePayloadLayout::SHARED_AFFINE;
 	}
 
 	bool PrepareFixed(const vector<const ExecutionPrimitiveAggregateUpdateLane *> &lanes, idx_t capacity) {
@@ -89,6 +122,15 @@ struct SljitPreaggregatedPrimitiveAggregateScratch {
 				payload.value_is_set.resize(capacity);
 			}
 		}
+		return true;
+	}
+
+	bool PrepareFixedSharedAffine(const vector<const ExecutionPrimitiveAggregateUpdateLane *> &lanes, idx_t capacity) {
+		PrepareSharedAffine(lanes, capacity);
+		group_row_counts.resize(capacity);
+		generated_shared_int64_deltas.resize(capacity);
+		shared_hugeint_values.resize(capacity);
+		shared_valid_counts.resize(capacity);
 		return true;
 	}
 
@@ -120,6 +162,22 @@ struct SljitPreaggregatedPrimitiveAggregateScratch {
 				}
 				break;
 			default:
+				return false;
+			}
+		}
+		return true;
+	}
+
+	bool HasFixedSharedAffineCapacity(const vector<const ExecutionPrimitiveAggregateUpdateLane *> &lanes,
+	                                  idx_t capacity) const {
+		if (payload_layout != SljitPreaggregatedPrimitivePayloadLayout::SHARED_AFFINE ||
+		    payloads.size() != lanes.size() || group_row_counts.size() != capacity ||
+		    generated_shared_int64_deltas.size() != capacity || shared_hugeint_values.size() != capacity ||
+		    shared_valid_counts.size() != capacity) {
+			return false;
+		}
+		for (idx_t lane_idx = 0; lane_idx < lanes.size(); lane_idx++) {
+			if (!lanes[lane_idx] || payloads[lane_idx].kind != lanes[lane_idx]->kind) {
 				return false;
 			}
 		}
@@ -187,6 +245,22 @@ static bool CopyPreaggregatedPrimitiveScratchRangeToFixed(
 	const auto target_begin = UnsafeNumericCast<int64_t>(target_offset);
 	std::copy(source.group_row_counts.begin() + source_begin, source.group_row_counts.begin() + source_end,
 	          target.group_row_counts.begin() + target_begin);
+	if (source.payload_layout == SljitPreaggregatedPrimitivePayloadLayout::SHARED_AFFINE) {
+		if (target.payload_layout != SljitPreaggregatedPrimitivePayloadLayout::SHARED_AFFINE ||
+		    target.shared_hugeint_values.size() < target_offset + count ||
+		    target.shared_valid_counts.size() < target_offset + count) {
+			return false;
+		}
+		std::copy(source.shared_hugeint_values.begin() + source_begin,
+		          source.shared_hugeint_values.begin() + source_end,
+		          target.shared_hugeint_values.begin() + target_begin);
+		std::copy(source.shared_valid_counts.begin() + source_begin, source.shared_valid_counts.begin() + source_end,
+		          target.shared_valid_counts.begin() + target_begin);
+		return true;
+	}
+	if (target.payload_layout != SljitPreaggregatedPrimitivePayloadLayout::PER_LANE) {
+		return false;
+	}
 	for (idx_t payload_idx = 0; payload_idx < lanes.size(); payload_idx++) {
 		auto &source_payload = source.payloads[payload_idx];
 		auto &target_payload = target.payloads[payload_idx];
@@ -237,6 +311,22 @@ static bool CanSlicePreaggregatedPrimitiveScratch(const SljitPreaggregatedPrimit
 	}
 	if (!source.group_rows.empty() && source.group_rows.size() < offset + count) {
 		return false;
+	}
+	if (source.payload_layout == SljitPreaggregatedPrimitivePayloadLayout::SHARED_AFFINE) {
+		if (source.shared_hugeint_values.size() < offset + count ||
+		    source.shared_valid_counts.size() < offset + count) {
+			return false;
+		}
+		for (idx_t payload_idx = 0; payload_idx < source.payloads.size(); payload_idx++) {
+			auto lane = lanes[payload_idx];
+			if (!lane ||
+			    (lane->kind != AggregatePrimitiveUpdateKind::SUM_INT64 &&
+			     lane->kind != AggregatePrimitiveUpdateKind::SUM_HUGEINT) ||
+			    source.payloads[payload_idx].kind != lane->kind) {
+				return false;
+			}
+		}
+		return true;
 	}
 	for (idx_t payload_idx = 0; payload_idx < source.payloads.size(); payload_idx++) {
 		auto &source_payload = source.payloads[payload_idx];
@@ -355,9 +445,23 @@ static bool SlicePreaggregatedPrimitiveScratch(const SljitPreaggregatedPrimitive
 	if (!CanSlicePreaggregatedPrimitiveScratch(source, lanes, offset, count)) {
 		return false;
 	}
-	target.Prepare(lanes, count);
+	if (source.payload_layout == SljitPreaggregatedPrimitivePayloadLayout::SHARED_AFFINE) {
+		target.PrepareSharedAffine(lanes, count);
+	} else {
+		target.Prepare(lanes, count);
+	}
 	if (!AppendPreaggregatedPrimitiveScratchRows(source, offset, count, target, false)) {
 		return false;
+	}
+	if (source.payload_layout == SljitPreaggregatedPrimitivePayloadLayout::SHARED_AFFINE) {
+		const auto begin = UnsafeNumericCast<int64_t>(offset);
+		const auto end = UnsafeNumericCast<int64_t>(offset + count);
+		target.shared_hugeint_values.insert(target.shared_hugeint_values.end(),
+		                                    source.shared_hugeint_values.begin() + begin,
+		                                    source.shared_hugeint_values.begin() + end);
+		target.shared_valid_counts.insert(target.shared_valid_counts.end(), source.shared_valid_counts.begin() + begin,
+		                                  source.shared_valid_counts.begin() + end);
+		return true;
 	}
 	for (idx_t payload_idx = 0; payload_idx < source.payloads.size(); payload_idx++) {
 		if (!AppendPreaggregatedPrimitivePayloadRange(source.payloads[payload_idx], offset, count,
@@ -379,12 +483,17 @@ static bool AppendPreaggregatedPrimitiveScratch(const SljitPreaggregatedPrimitiv
 		return false;
 	}
 	if (target.payloads.empty()) {
-		target.Prepare(lanes, STANDARD_VECTOR_SIZE);
+		if (source.payload_layout == SljitPreaggregatedPrimitivePayloadLayout::SHARED_AFFINE) {
+			target.PrepareSharedAffine(lanes, STANDARD_VECTOR_SIZE);
+		} else {
+			target.Prepare(lanes, STANDARD_VECTOR_SIZE);
+		}
 	}
-	if (target.payloads.size() != lanes.size()) {
+	if (target.payloads.size() != lanes.size() || target.payload_layout != source.payload_layout) {
 		return false;
 	}
-	if (!PreaggregatedPrimitivePayloadsCanAppendRange(source, target)) {
+	if (source.payload_layout == SljitPreaggregatedPrimitivePayloadLayout::PER_LANE &&
+	    !PreaggregatedPrimitivePayloadsCanAppendRange(source, target)) {
 		return false;
 	}
 	// group_rows are positions in one input chunk. They have no stable meaning after
@@ -394,6 +503,14 @@ static bool AppendPreaggregatedPrimitiveScratch(const SljitPreaggregatedPrimitiv
 	const auto end = UnsafeNumericCast<int64_t>(offset + count);
 	target.group_row_counts.insert(target.group_row_counts.end(), source.group_row_counts.begin() + begin,
 	                               source.group_row_counts.begin() + end);
+	if (source.payload_layout == SljitPreaggregatedPrimitivePayloadLayout::SHARED_AFFINE) {
+		target.shared_hugeint_values.insert(target.shared_hugeint_values.end(),
+		                                    source.shared_hugeint_values.begin() + begin,
+		                                    source.shared_hugeint_values.begin() + end);
+		target.shared_valid_counts.insert(target.shared_valid_counts.end(), source.shared_valid_counts.begin() + begin,
+		                                  source.shared_valid_counts.begin() + end);
+		return true;
+	}
 	for (idx_t payload_idx = 0; payload_idx < source.payloads.size(); payload_idx++) {
 		if (!AppendPreaggregatedPrimitivePayloadRange(source.payloads[payload_idx], offset, count,
 		                                              target.payloads[payload_idx])) {
@@ -411,6 +528,18 @@ static bool MergePreaggregatedPrimitiveScratchGroup(const SljitPreaggregatedPrim
 	if (!CanSlicePreaggregatedPrimitiveScratch(source, lanes, source_idx, 1) ||
 	    target.payloads.size() != lanes.size() || target.group_row_counts.size() <= target_idx) {
 		return false;
+	}
+	if (source.payload_layout != target.payload_layout) {
+		return false;
+	}
+	if (source.payload_layout == SljitPreaggregatedPrimitivePayloadLayout::SHARED_AFFINE) {
+		if (target.shared_hugeint_values.size() <= target_idx || target.shared_valid_counts.size() <= target_idx) {
+			return false;
+		}
+		target.group_row_counts[target_idx] += source.group_row_counts[source_idx];
+		target.shared_hugeint_values[target_idx] += source.shared_hugeint_values[source_idx];
+		target.shared_valid_counts[target_idx] += source.shared_valid_counts[source_idx];
+		return true;
 	}
 	for (idx_t payload_idx = 0; payload_idx < source.payloads.size(); payload_idx++) {
 		auto &source_payload = source.payloads[payload_idx];

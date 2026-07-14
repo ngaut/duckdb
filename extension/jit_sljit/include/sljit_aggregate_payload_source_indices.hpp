@@ -12,14 +12,17 @@
 
 namespace duckdb {
 
+enum class SljitAggregatePayloadSourceLayout : uint8_t { DIRECT_PER_LANE, FUSED_COMBINED };
+
 template <class HANDLE_COUNT_STAR, class HANDLE_FUSED_SOURCE, class CHECK_DIRECT_PAYLOAD, class HANDLE_DIRECT_PAYLOAD,
           class SET_BLOCKER>
 static bool SljitTryBuildAggregatePayloadSourceIndices(
     const SljitExecutableAggregateUpdate &aggregate_update, const vector<ExecutionRegionAggregateInput> &aggregates,
-    bool &uses_fused_update, const char *payload_reference_blocker, HANDLE_COUNT_STAR &&handle_count_star,
-    HANDLE_FUSED_SOURCE &&handle_fused_source, CHECK_DIRECT_PAYLOAD &&check_direct_payload,
-    HANDLE_DIRECT_PAYLOAD &&handle_direct_payload, SET_BLOCKER &&set_blocker) {
-	uses_fused_update = false;
+    SljitAggregatePayloadSourceLayout &source_layout, const char *payload_reference_blocker,
+    HANDLE_COUNT_STAR &&handle_count_star, HANDLE_FUSED_SOURCE &&handle_fused_source,
+    CHECK_DIRECT_PAYLOAD &&check_direct_payload, HANDLE_DIRECT_PAYLOAD &&handle_direct_payload,
+    SET_BLOCKER &&set_blocker) {
+	source_layout = SljitAggregatePayloadSourceLayout::DIRECT_PER_LANE;
 	vector<idx_t> fused_payload_sources;
 	if (SljitFusedAggregatePayloadsUseTypedExpressionTrees(aggregate_update.payloads,
 	                                                       aggregate_update.payload_descriptors) &&
@@ -30,7 +33,7 @@ static bool SljitTryBuildAggregatePayloadSourceIndices(
 				return false;
 			}
 		}
-		uses_fused_update = true;
+		source_layout = SljitAggregatePayloadSourceLayout::FUSED_COMBINED;
 		return true;
 	}
 

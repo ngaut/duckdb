@@ -41,7 +41,7 @@ static bool BuildSljitFusedTypedAggregatePayloadPlan(const SljitNativeRegionExpr
 	return SljitAggregateTypedPayloadPlanSupported(payload_plan, descriptor);
 }
 
-static bool SljitExpressionIRStructurallyEqual(const ExecutionExpressionIR &left, const ExecutionExpressionIR &right) {
+bool SljitExpressionIRStructurallyEqual(const ExecutionExpressionIR &left, const ExecutionExpressionIR &right) {
 	return DescribeExecutionExpressionIR(left) == DescribeExecutionExpressionIR(right);
 }
 
@@ -92,59 +92,106 @@ static bool TryBuildSljitConditionalSharedAggregatePlan(const vector<SljitNative
 	return false;
 }
 
-static bool TryBuildSljitBinarySharedAggregatePlan(const vector<SljitNativeRegionExpressionPlan> &payloads,
-                                                   SljitFusedTypedAggregateCodegenPlan &codegen_plan) {
-	if (payloads.size() != codegen_plan.payload_descriptors.size() || payloads.size() < 2) {
-		return false;
+static bool SljitPayloadReferenceMatchesSharedBase(const SljitNativeRegionExpressionPlan &payload,
+                                                   const ExecutionExpressionIR &base) {
+	return payload.kind == SljitNativeRegionExpressionKind::REFERENCE &&
+	       base.kind == ExecutionExpressionIRKind::REFERENCE && payload.source_index == base.ref_index &&
+	       payload.return_type == base.return_type;
+}
+
+static void TryBuildSljitSharedBinaryPayloadPlanForBase(const vector<SljitNativeRegionExpressionPlan> &payloads,
+                                                        const vector<SljitAggregatePayloadDescriptor> &descriptors,
+                                                        const ExecutionExpressionIR &base,
+                                                        SljitSharedBinaryPayloadPlan &result) {
+	auto base_plan = BuildSljitTypedExpressionTreePlan(base, false);
+	if (!base_plan.supported || !base_plan.fast_path.fast_path_supported) {
+		return;
 	}
-	for (idx_t base_lane = 0; base_lane < payloads.size(); base_lane++) {
-		if (codegen_plan.payload_descriptors[base_lane].primitive_kind == AggregatePrimitiveUpdateKind::COUNT_STAR ||
-		    payloads[base_lane].kind != SljitNativeRegionExpressionKind::TYPED_EXPRESSION_TREE ||
-		    !payloads[base_lane].expression_tree) {
+	SljitSharedBinaryPayloadPlan candidate;
+	candidate.base = &base;
+	candidate.lanes.resize(payloads.size());
+	idx_t matched_count = 0;
+	for (idx_t payload_idx = 0; payload_idx < payloads.size(); payload_idx++) {
+		if (descriptors[payload_idx].primitive_kind == AggregatePrimitiveUpdateKind::COUNT_STAR) {
 			continue;
 		}
-		auto &base = *payloads[base_lane].expression_tree;
-		for (idx_t dependent_lane = base_lane + 1; dependent_lane < payloads.size(); dependent_lane++) {
-			if (codegen_plan.payload_descriptors[dependent_lane].primitive_kind ==
-			        AggregatePrimitiveUpdateKind::COUNT_STAR ||
-			    payloads[dependent_lane].kind != SljitNativeRegionExpressionKind::TYPED_EXPRESSION_TREE ||
-			    !payloads[dependent_lane].expression_tree) {
-				continue;
-			}
-			auto &dependent = *payloads[dependent_lane].expression_tree;
-			if (dependent.kind != ExecutionExpressionIRKind::BINARY || dependent.arithmetic_overflow_check ||
-			    !dependent.left || !dependent.right ||
-			    SljitTypedExpressionTreeComparisonSupported(dependent.binary_op)) {
-				continue;
-			}
-			SljitNativeIntegerBinaryOp native_op;
-			if (!TryGetSljitExpressionTreeBinaryOp(dependent.binary_op, native_op)) {
-				continue;
-			}
-			bool base_on_left = true;
-			const ExecutionExpressionIR *other_value = nullptr;
-			if (SljitExpressionIRStructurallyEqual(base, *dependent.left)) {
-				other_value = dependent.right.get();
-			} else if (SljitExpressionIRStructurallyEqual(base, *dependent.right)) {
-				base_on_left = false;
-				other_value = dependent.left.get();
-			} else {
-				continue;
-			}
-			auto other_plan = BuildSljitTypedExpressionTreePlan(*other_value, false);
-			if (!other_plan.supported || !other_plan.result_is_int64 || !other_plan.fast_path.fast_path_supported) {
-				continue;
-			}
-			codegen_plan.binary_shared_payload = true;
-			codegen_plan.binary_base_lane = base_lane;
-			codegen_plan.binary_dependent_lane = dependent_lane;
-			codegen_plan.binary_base_on_left = base_on_left;
-			codegen_plan.binary_root = &dependent;
-			codegen_plan.binary_other_value = other_value;
-			return true;
+		auto &payload = payloads[payload_idx];
+		auto &lane = candidate.lanes[payload_idx];
+		if (SljitPayloadReferenceMatchesSharedBase(payload, base)) {
+			lane.matched = true;
+			lane.use_base_directly = true;
+			matched_count++;
+			continue;
+		}
+		if (payload.kind != SljitNativeRegionExpressionKind::TYPED_EXPRESSION_TREE || !payload.expression_tree) {
+			continue;
+		}
+		auto &root = *payload.expression_tree;
+		if (SljitExpressionIRStructurallyEqual(root, base)) {
+			lane.matched = true;
+			lane.use_base_directly = true;
+			matched_count++;
+			continue;
+		}
+		if (root.kind != ExecutionExpressionIRKind::BINARY || root.arithmetic_overflow_check || !root.left ||
+		    !root.right || SljitTypedExpressionTreeComparisonSupported(root.binary_op)) {
+			continue;
+		}
+		SljitNativeIntegerBinaryOp native_op;
+		if (!TryGetSljitExpressionTreeBinaryOp(root.binary_op, native_op)) {
+			continue;
+		}
+		if (SljitExpressionIRStructurallyEqual(base, *root.left)) {
+			lane.base_on_left = true;
+			lane.other_value = root.right.get();
+		} else if (SljitExpressionIRStructurallyEqual(base, *root.right)) {
+			lane.base_on_left = false;
+			lane.other_value = root.left.get();
+		} else {
+			continue;
+		}
+		auto other_plan = BuildSljitTypedExpressionTreePlan(*lane.other_value, false);
+		auto binary_kind = SljitTypedExpressionTreeIntegerKind(root);
+		if (!other_plan.supported || !other_plan.fast_path.fast_path_supported ||
+		    base_plan.result_kind != binary_kind || other_plan.result_kind != binary_kind) {
+			lane.other_value = nullptr;
+			continue;
+		}
+		lane.matched = true;
+		lane.root = &root;
+		matched_count++;
+	}
+	if (matched_count < 2) {
+		return;
+	}
+	candidate.saved_node_count = base_plan.node_count * (matched_count - 1);
+	if (!result.Enabled() || candidate.saved_node_count > result.saved_node_count) {
+		result = std::move(candidate);
+	}
+}
+
+void TryBuildSljitSharedBinaryPayloadPlan(const vector<SljitNativeRegionExpressionPlan> &payloads,
+                                          const vector<SljitAggregatePayloadDescriptor> &descriptors,
+                                          SljitSharedBinaryPayloadPlan &result) {
+	result = SljitSharedBinaryPayloadPlan();
+	if (payloads.size() != descriptors.size() || payloads.size() < 2) {
+		return;
+	}
+	for (idx_t payload_idx = 0; payload_idx < payloads.size(); payload_idx++) {
+		if (descriptors[payload_idx].primitive_kind == AggregatePrimitiveUpdateKind::COUNT_STAR) {
+			continue;
+		}
+		auto &payload = payloads[payload_idx];
+		if (payload.kind != SljitNativeRegionExpressionKind::TYPED_EXPRESSION_TREE || !payload.expression_tree) {
+			continue;
+		}
+		auto &root = *payload.expression_tree;
+		TryBuildSljitSharedBinaryPayloadPlanForBase(payloads, descriptors, root, result);
+		if (root.kind == ExecutionExpressionIRKind::BINARY && root.left && root.right) {
+			TryBuildSljitSharedBinaryPayloadPlanForBase(payloads, descriptors, *root.left, result);
+			TryBuildSljitSharedBinaryPayloadPlanForBase(payloads, descriptors, *root.right, result);
 		}
 	}
-	return false;
 }
 
 bool BuildSljitFusedTypedAggregateCodegenPlan(const vector<SljitNativeRegionExpressionPlan> &payloads,
@@ -177,53 +224,75 @@ bool BuildSljitFusedTypedAggregateCodegenPlan(const vector<SljitNativeRegionExpr
 	if (has_typed_payload) {
 		TryBuildSljitConditionalSharedAggregatePlan(payloads, codegen_plan);
 		if (!codegen_plan.conditional_shared_payload) {
-			TryBuildSljitBinarySharedAggregatePlan(payloads, codegen_plan);
+			TryBuildSljitSharedBinaryPayloadPlan(payloads, codegen_plan.payload_descriptors,
+			                                     codegen_plan.shared_binary);
 		}
 	}
 	return has_typed_payload || force_typed_path;
 }
 
-void EmitSljitStoreBinarySharedPayloadValue(struct sljit_compiler *compiler, sljit_s32 value_reg,
-                                            sljit_s32 shared_value_reg, sljit_sw shared_value_offset) {
-	if (shared_value_reg != 0) {
-		sljit_emit_op1(compiler, SLJIT_MOV, shared_value_reg, 0, value_reg, 0);
+static void EmitSljitSharedPayloadExpression(struct sljit_compiler *compiler, const ExecutionExpressionIR &expression,
+                                             SljitAggregateExpressionIndexMode index_mode,
+                                             vector<SljitExpressionTreeOverflowJumps> &overflows,
+                                             const vector<SljitTypedExpressionTreeDataPointerHoist> *data_hoists) {
+	idx_t spill_index = 0;
+	switch (index_mode) {
+	case SljitAggregateExpressionIndexMode::FLAT:
+		EmitSljitTypedExpressionTreeFastValueReg(compiler, expression, spill_index, overflows, data_hoists);
+		return;
+	case SljitAggregateExpressionIndexMode::LOGICAL:
+		EmitSljitTypedExpressionTreeLogicalFastValueReg(compiler, expression, spill_index, overflows, data_hoists);
+		return;
+	case SljitAggregateExpressionIndexMode::SELECTED:
+		EmitSljitTypedExpressionTreeSelectedFastValueReg(compiler, expression, spill_index, overflows, data_hoists);
 		return;
 	}
-	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_MEM1(SLJIT_SP), shared_value_offset, value_reg, 0);
+	throw InternalException("Unsupported SLJIT shared aggregate expression index mode");
 }
 
-void EmitSljitBinarySharedPayloadValueReg(struct sljit_compiler *compiler,
-                                          const SljitFusedTypedAggregateCodegenPlan &codegen_plan,
-                                          sljit_s32 shared_value_reg, sljit_sw shared_value_offset, bool fast_path,
-                                          bool no_source_selection,
-                                          vector<SljitExpressionTreeOverflowJumps> &overflows,
-                                          const vector<SljitTypedExpressionTreeDataPointerHoist> *data_hoists) {
-	D_ASSERT(codegen_plan.binary_shared_payload);
-	D_ASSERT(codegen_plan.binary_root);
-	D_ASSERT(codegen_plan.binary_other_value);
-	idx_t spill_index = 0;
-	if (fast_path) {
-		EmitSljitTypedExpressionTreeFastValueReg(compiler, *codegen_plan.binary_other_value, spill_index, overflows,
-		                                         data_hoists);
-	} else if (no_source_selection) {
-		EmitSljitTypedExpressionTreeLogicalFastValueReg(compiler, *codegen_plan.binary_other_value, spill_index,
-		                                                overflows, data_hoists);
-	} else {
-		EmitSljitTypedExpressionTreeSelectedFastValueReg(compiler, *codegen_plan.binary_other_value, spill_index,
-		                                                 overflows, data_hoists);
+void EmitSljitSharedBinaryPayloadBase(struct sljit_compiler *compiler, const SljitSharedBinaryPayloadPlan &plan,
+                                      sljit_s32 shared_value_reg, sljit_sw shared_value_offset,
+                                      SljitAggregateExpressionIndexMode index_mode,
+                                      vector<SljitExpressionTreeOverflowJumps> &overflows,
+                                      const vector<SljitTypedExpressionTreeDataPointerHoist> *data_hoists) {
+	D_ASSERT(plan.Enabled());
+	EmitSljitSharedPayloadExpression(compiler, *plan.base, index_mode, overflows, data_hoists);
+	if (shared_value_reg != 0) {
+		sljit_emit_op1(compiler, SLJIT_MOV, shared_value_reg, 0, SLJIT_R2, 0);
+		return;
 	}
+	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_MEM1(SLJIT_SP), shared_value_offset, SLJIT_R2, 0);
+}
+
+void EmitSljitSharedBinaryPayloadLane(struct sljit_compiler *compiler, const SljitSharedBinaryPayloadLane &lane,
+                                      sljit_s32 shared_value_reg, sljit_sw shared_value_offset,
+                                      SljitAggregateExpressionIndexMode index_mode,
+                                      vector<SljitExpressionTreeOverflowJumps> &overflows,
+                                      const vector<SljitTypedExpressionTreeDataPointerHoist> *data_hoists) {
+	D_ASSERT(lane.matched);
+	if (lane.use_base_directly) {
+		if (shared_value_reg != 0) {
+			sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_R2, 0, shared_value_reg, 0);
+		} else {
+			sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_R2, 0, SLJIT_MEM1(SLJIT_SP), shared_value_offset);
+		}
+		return;
+	}
+	D_ASSERT(lane.root);
+	D_ASSERT(lane.other_value);
+	EmitSljitSharedPayloadExpression(compiler, *lane.other_value, index_mode, overflows, data_hoists);
 	if (shared_value_reg != 0) {
 		sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_R4, 0, shared_value_reg, 0);
 	} else {
 		sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_R4, 0, SLJIT_MEM1(SLJIT_SP), shared_value_offset);
 	}
 	SljitNativeIntegerBinaryOp native_op;
-	if (!TryGetSljitExpressionTreeBinaryOp(codegen_plan.binary_root->binary_op, native_op)) {
+	if (!TryGetSljitExpressionTreeBinaryOp(lane.root->binary_op, native_op)) {
 		throw InternalException("Unsupported SLJIT shared aggregate binary operator");
 	}
-	auto binary_kind = SljitTypedExpressionTreeIntegerKind(*codegen_plan.binary_root);
+	auto binary_kind = SljitTypedExpressionTreeIntegerKind(*lane.root);
 	auto binary_op = NativeIntegerBinaryOp(binary_kind, native_op);
-	if (codegen_plan.binary_base_on_left) {
+	if (lane.base_on_left) {
 		sljit_emit_op2(compiler, binary_op, SLJIT_R2, 0, SLJIT_R4, 0, SLJIT_R2, 0);
 	} else {
 		sljit_emit_op2(compiler, binary_op, SLJIT_R2, 0, SLJIT_R2, 0, SLJIT_R4, 0);

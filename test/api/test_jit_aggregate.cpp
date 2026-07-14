@@ -1,5 +1,6 @@
 #include "test_jit_helpers.hpp"
 
+#include "sljit_aggregate_preaggregated_update_runtime.hpp"
 #include "sljit_codegen_capabilities.hpp"
 
 #include "duckdb/execution/aggregate_hashtable.hpp"
@@ -44,6 +45,73 @@ TEST_CASE("Primitive aggregate fresh-state initialization has an endian-independ
 	for (idx_t tail_idx = 1; tail_idx < sizeof(uint64_t); tail_idx++) {
 		REQUIRE(state[lane.state_is_set_offset + tail_idx] == 0);
 	}
+}
+
+TEST_CASE("JIT shared affine grouped deltas do not overflow before cancellation", "[api][jit]") {
+	ExecutionPrimitiveAggregateUpdateLane left_lane;
+	left_lane.ready = true;
+	left_lane.kind = AggregatePrimitiveUpdateKind::SUM_INT64;
+	left_lane.state_size = sizeof(int64_t) + sizeof(uint64_t);
+	left_lane.state_value_offset = 0;
+	left_lane.state_is_set_offset = sizeof(int64_t);
+
+	auto right_lane = left_lane;
+	right_lane.state_offset = left_lane.state_size;
+	vector<const ExecutionPrimitiveAggregateUpdateLane *> lanes {&left_lane, &right_lane};
+	SljitPreaggregatedPrimitiveAggregateScratch scratch;
+	scratch.PrepareSharedAffine(lanes, 1);
+	for (auto &payload : scratch.payloads) {
+		REQUIRE(payload.int64_values.capacity() == 0);
+		REQUIRE(payload.hugeint_values.capacity() == 0);
+		REQUIRE(payload.value_is_set.capacity() == 0);
+	}
+	const idx_t valid_count = 4294967299ULL;
+	const auto source_value = NumericLimits<int32_t>::Maximum();
+	scratch.shared_hugeint_values.push_back(hugeint_t(NumericCast<int64_t>(valid_count)) * hugeint_t(source_value));
+	scratch.shared_valid_counts.push_back(valid_count);
+
+	SljitExecutableFusedAffineRunUpdate affine;
+	affine.source_position = 0;
+	affine.source_type = PhysicalType::INT32;
+	affine.primitive_kind = AggregatePrimitiveUpdateKind::SUM_INT64;
+	affine.lanes.push_back({1, -source_value});
+	affine.lanes.push_back({-1, source_value});
+	auto update_state = SljitMakePreaggregatedPrimitiveUpdateState(lanes, scratch, &affine);
+
+	std::array<uint8_t, 2 * (sizeof(int64_t) + sizeof(uint64_t))> state;
+	state.fill(0xa5);
+	const uintptr_t addresses[] = {reinterpret_cast<uintptr_t>(state.data())};
+	ExecuteSljitPreaggregatedPrimitiveAddressUpdate(
+	    addresses, nullptr, 1, ExecutionGroupedAggregateStateAddressUpdateMode::INITIALIZE_AND_UPDATE, &update_state);
+	REQUIRE(Load<int64_t>(state.data()) == 0);
+	REQUIRE(Load<bool>(state.data() + left_lane.state_is_set_offset));
+	REQUIRE(Load<int64_t>(state.data() + right_lane.state_offset) == 0);
+	REQUIRE(Load<bool>(state.data() + right_lane.state_offset + right_lane.state_is_set_offset));
+}
+
+TEST_CASE("JIT shared affine scratch slices hugeint lanes without per-lane storage", "[api][jit]") {
+	ExecutionPrimitiveAggregateUpdateLane lane;
+	lane.kind = AggregatePrimitiveUpdateKind::SUM_HUGEINT;
+	vector<const ExecutionPrimitiveAggregateUpdateLane *> lanes {&lane};
+
+	SljitPreaggregatedPrimitiveAggregateScratch source;
+	source.PrepareSharedAffine(lanes, 2);
+	source.group_row_counts.push_back(3);
+	source.group_row_counts.push_back(5);
+	source.shared_hugeint_values.emplace_back(11);
+	source.shared_hugeint_values.emplace_back(17);
+	source.shared_valid_counts.push_back(2);
+	source.shared_valid_counts.push_back(4);
+
+	SljitPreaggregatedPrimitiveAggregateScratch target;
+	REQUIRE(SlicePreaggregatedPrimitiveScratch(source, lanes, 1, 1, target));
+	REQUIRE(target.payload_layout == SljitPreaggregatedPrimitivePayloadLayout::SHARED_AFFINE);
+	REQUIRE(target.payloads.size() == 1);
+	REQUIRE(target.payloads[0].hugeint_values.capacity() == 0);
+	REQUIRE(target.payloads[0].value_is_set.capacity() == 0);
+	REQUIRE(target.group_row_counts == vector<idx_t> {5});
+	REQUIRE(target.shared_hugeint_values == vector<hugeint_t> {hugeint_t(17)});
+	REQUIRE(target.shared_valid_counts == vector<idx_t> {4});
 }
 
 TEST_CASE("JIT ungrouped aggregate sinks use native state-update contracts", "[api][jit]") {
@@ -1358,7 +1426,7 @@ TEST_CASE("JIT unordered grouped input does not generate unused run kernels", "[
 	REQUIRE(lazy_codegen_code_size == 0);
 }
 
-TEST_CASE("JIT grouped run codegen has an exact eight-lane instruction budget", "[api][jit]") {
+TEST_CASE("JIT grouped run codegen bounds wide homogeneous lane code size", "[api][jit]") {
 	DuckDB db;
 	Connection con(db);
 	auto &manager = ExecutionRegionManager::Get(*con.context);
@@ -1366,25 +1434,27 @@ TEST_CASE("JIT grouped run codegen has an exact eight-lane instruction budget", 
 	ConfigureSljitForCoverage(con, false, true, true, 10000);
 	REQUIRE_NO_FAIL(con.Query("PRAGMA threads=1"));
 	REQUIRE_NO_FAIL(con.Query("SET perfect_ht_threshold=0"));
-	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_grouped_run_lane_budget AS "
-	                          "SELECT (i // 4)::BIGINT AS group_id, "
-	                          "(i % 97)::INTEGER AS value_0, ((i + 1) % 97)::INTEGER AS value_1, "
-	                          "((i + 2) % 97)::INTEGER AS value_2, ((i + 3) % 97)::INTEGER AS value_3, "
-	                          "((i + 4) % 97)::INTEGER AS value_4, ((i + 5) % 97)::INTEGER AS value_5, "
-	                          "((i + 6) % 97)::INTEGER AS value_6, ((i + 7) % 97)::INTEGER AS value_7, "
-	                          "((i + 8) % 97)::INTEGER AS value_8 "
-	                          "FROM range(32768) tbl(i)"));
+	string columns = "(i // 4)::BIGINT AS group_id";
+	for (idx_t lane_idx = 0; lane_idx < 16; lane_idx++) {
+		columns += ", ((i + " + to_string(lane_idx) + ") % 97)::INTEGER AS value_" + to_string(lane_idx);
+	}
+	REQUIRE_NO_FAIL(
+	    con.Query("CREATE TABLE jit_grouped_run_lane_budget AS SELECT " + columns + " FROM range(32768) tbl(i)"));
 
-	auto verify_lane_count = [&](idx_t lane_count, bool expect_generated) {
+	auto verify_lane_count = [&](idx_t lane_count, bool heterogeneous, bool expect_generated) {
 		string aggregates;
 		for (idx_t lane_idx = 0; lane_idx < lane_count; lane_idx++) {
 			if (lane_idx > 0) {
 				aggregates += ", ";
 			}
-			aggregates += "sum(value_" + to_string(lane_idx) + ") AS lane_" + to_string(lane_idx);
+			if (heterogeneous && lane_idx == 0) {
+				aggregates += "count(*) AS lane_0";
+			} else {
+				aggregates += "sum(value_" + to_string(lane_idx) + ") AS lane_" + to_string(lane_idx);
+			}
 		}
 		const auto query = "SELECT group_id, " + aggregates + " FROM jit_grouped_run_lane_budget GROUP BY group_id";
-		const auto prefix = "jit_grouped_run_" + to_string(lane_count) + "_lane";
+		const auto prefix = "jit_grouped_run_" + to_string(lane_count) + (heterogeneous ? "_mixed_lane" : "_lane");
 		REQUIRE_NO_FAIL(con.Query("SET jit_policy='off'"));
 		REQUIRE_NO_FAIL(con.Query("CREATE OR REPLACE TEMP TABLE " + prefix + "_reference AS " + query));
 
@@ -1430,10 +1500,105 @@ TEST_CASE("JIT grouped run codegen has an exact eight-lane instruction budget", 
 			REQUIRE(code_miss);
 			REQUIRE(lazy_codegen_code_size == 0);
 		}
+		return lazy_codegen_code_size;
 	};
 
-	verify_lane_count(8, true);
-	verify_lane_count(9, false);
+	const auto unrolled_code_size = verify_lane_count(8, false, true);
+	const auto looped_nine_lane_code_size = verify_lane_count(9, false, true);
+	const auto looped_sixteen_lane_code_size = verify_lane_count(16, false, true);
+	verify_lane_count(9, true, false);
+	if (SljitPrimitiveRunCodegenSupported()) {
+		REQUIRE(looped_nine_lane_code_size == looped_sixteen_lane_code_size);
+		REQUIRE(looped_sixteen_lane_code_size < unrolled_code_size);
+	}
+}
+
+TEST_CASE("JIT grouped typed payloads preserve wide shared-source expressions", "[api][jit]") {
+	DuckDB db;
+	Connection con(db);
+	auto &manager = ExecutionRegionManager::Get(*con.context);
+
+	ConfigureSljitForCoverage(con, false, true, true, 10000);
+	REQUIRE_NO_FAIL(con.Query("PRAGMA threads=1"));
+	REQUIRE_NO_FAIL(con.Query("SET perfect_ht_threshold=0"));
+	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_grouped_shared_source_payload AS "
+	                          "SELECT (i // 3)::BIGINT AS group_id, "
+	                          "CASE WHEN (i // 3) % 13 = 0 OR i % 11 = 0 THEN NULL "
+	                          "ELSE (i % 97)::INTEGER END AS value "
+	                          "FROM range(32771) tbl(i)"));
+
+	string aggregates;
+	for (idx_t lane_idx = 0; lane_idx < 16; lane_idx++) {
+		if (lane_idx > 0) {
+			aggregates += ", ";
+		}
+		string expression;
+		switch (lane_idx % 5) {
+		case 0:
+			expression = "value";
+			break;
+		case 1:
+			expression = "value + " + to_string(lane_idx);
+			break;
+		case 2:
+			expression = "value - " + to_string(lane_idx);
+			break;
+		case 3:
+			expression = to_string(lane_idx) + " - value";
+			break;
+		default:
+			expression = "value * " + to_string((lane_idx % 3) + 2);
+			break;
+		}
+		aggregates += "sum(" + expression + ") AS lane_" + to_string(lane_idx);
+	}
+	const auto query = "SELECT group_id, " + aggregates + " FROM jit_grouped_shared_source_payload GROUP BY group_id";
+	REQUIRE_NO_FAIL(con.Query("SET jit_policy='off'"));
+	REQUIRE_NO_FAIL(con.Query("CREATE TEMP TABLE jit_grouped_shared_source_reference AS " + query));
+
+	ConfigureSljitForCoverageSettings(con, false, true, true, 10000);
+	ClearJitTrace(manager, true);
+	REQUIRE_NO_FAIL(con.Query("CREATE TEMP TABLE jit_grouped_shared_source_output AS " + query));
+	auto difference = con.Query("SELECT count(*) FROM ("
+	                            "  (SELECT * FROM jit_grouped_shared_source_output EXCEPT ALL "
+	                            "   SELECT * FROM jit_grouped_shared_source_reference) UNION ALL "
+	                            "  (SELECT * FROM jit_grouped_shared_source_reference EXCEPT ALL "
+	                            "   SELECT * FROM jit_grouped_shared_source_output)"
+	                            ") differences");
+	REQUIRE_NO_FAIL(*difference);
+	REQUIRE(difference->GetValue(0, 0).ToString() == "0");
+
+	RequireJitEvent(
+	    manager,
+	    [](const ExecutionRegionEvent &event) {
+		    return IsCompiledSljitRegionEvent(event) && event.has_candidate &&
+		           event.candidate_traits.sink_kind == ExecutionRegionSinkKind::HASH_AGGREGATE_UPDATE;
+	    },
+	    [](const ExecutionRegionEvent &event) { RequireGeneratedMachineCodeRegion(event); });
+	bool generated_affine_runs = false;
+	bool generated_affine_miss = false;
+	idx_t lazy_codegen_code_size = 0;
+	string observed_runtime_paths;
+	for (auto &event : manager.GetEvents()) {
+		if (EventPhase(event) != "runtime" || event.backend_name != "sljit") {
+			continue;
+		}
+		const auto runtime_paths = EventJitRuntimePathCounts(event);
+		observed_runtime_paths += runtime_paths + "\n";
+		generated_affine_runs =
+		    generated_affine_runs ||
+		    StringUtil::Contains(runtime_paths,
+		                         "aggregate_update.generated_pending_fused_affine_primitive_group_runs=");
+		generated_affine_miss =
+		    generated_affine_miss ||
+		    StringUtil::Contains(runtime_paths,
+		                         "aggregate_update.generated_pending_fused_affine_primitive_group_runs_miss.");
+		lazy_codegen_code_size += event.jit_runtime.lazy_codegen.code_size;
+	}
+	INFO("wide shared-source runtime paths:\n" + observed_runtime_paths);
+	REQUIRE(generated_affine_runs);
+	REQUIRE_FALSE(generated_affine_miss);
+	REQUIRE(lazy_codegen_code_size > 0);
 }
 
 TEST_CASE("JIT parallel sorted grouped sums reconcile only overlapping dense runs", "[api][jit]") {
@@ -2061,6 +2226,78 @@ TEST_CASE("JIT regular hash aggregate fuses typed expression payloads for existi
 		    REQUIRE_FALSE(StringUtil::Contains(EventGeneratedStageCountBreakdown(event),
 		                                       "aggregate_update.resolve_grouped_state_addresses="));
 	    });
+}
+
+TEST_CASE("JIT fused join payloads materialize group keys after descriptor lookup misses", "[api][jit]") {
+	DuckDB db;
+	Connection con(db);
+	auto &manager = ExecutionRegionManager::Get(*con.context);
+
+	ConfigureSljit(con, "off");
+	REQUIRE_NO_FAIL(con.Query("PRAGMA threads=1"));
+	REQUIRE_NO_FAIL(con.Query("SET perfect_ht_threshold=0"));
+	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_group_lookup_fact AS "
+	                          "SELECT i::BIGINT AS row_id, (i % 17)::INTEGER AS region_id, "
+	                          "       CAST(100 + (i % 1000) AS DECIMAL(15,2)) AS price, "
+	                          "       CAST(i % 10 AS DECIMAL(15,2)) AS discount "
+	                          "FROM range(65536) tbl(i)"));
+	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_group_lookup_bridge AS "
+	                          "SELECT i::BIGINT AS row_id, (i % 17)::INTEGER AS region_id "
+	                          "FROM range(65536) tbl(i)"));
+	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_group_lookup_region AS "
+	                          "SELECT i::INTEGER AS region_id, 'region-' || i::VARCHAR AS region_name "
+	                          "FROM range(17) tbl(i)"));
+
+	const string query = "SELECT region_name, sum(price * (1.00::DECIMAL(15,2) - discount)) AS revenue "
+	                     "FROM jit_group_lookup_fact f "
+	                     "JOIN jit_group_lookup_bridge b ON f.row_id = b.row_id AND f.region_id = b.region_id "
+	                     "JOIN jit_group_lookup_region r ON b.region_id = r.region_id "
+	                     "GROUP BY region_name";
+	REQUIRE_NO_FAIL(con.Query("CREATE TEMP TABLE jit_group_lookup_reference AS " + query));
+
+	ConfigureSljitForCoverageSettings(con, false, true, true, 10000);
+	ClearJitTrace(manager, true);
+	REQUIRE_NO_FAIL(con.Query("CREATE TEMP TABLE jit_group_lookup_output AS " + query));
+	auto difference = con.Query("SELECT count(*) FROM ("
+	                            "  (SELECT * FROM jit_group_lookup_output EXCEPT ALL "
+	                            "   SELECT * FROM jit_group_lookup_reference) UNION ALL "
+	                            "  (SELECT * FROM jit_group_lookup_reference EXCEPT ALL "
+	                            "   SELECT * FROM jit_group_lookup_output)"
+	                            ") differences");
+	REQUIRE_NO_FAIL(*difference);
+	REQUIRE(difference->GetValue(0, 0).ToString() == "0");
+	RequireJitEvent(
+	    manager,
+	    [](const ExecutionRegionEvent &event) {
+		    return IsCompiledSljitRegionEvent(event) && event.has_candidate &&
+		           event.candidate_traits.sink_kind == ExecutionRegionSinkKind::HASH_AGGREGATE_UPDATE &&
+		           StringUtil::Contains(event.ir, "primitive_payloads=native:typed-expression-tree");
+	    },
+	    [](const ExecutionRegionEvent &event) { RequireGeneratedMachineCodeRegion(event); });
+
+	string observed_runtime_paths;
+	string observed_generated_stages;
+	bool descriptor_lookup_miss = false;
+	bool materialized_group_update = false;
+	for (auto &event : manager.GetEvents()) {
+		if (EventPhase(event) != "runtime" || event.backend_name != "sljit") {
+			continue;
+		}
+		const auto runtime_paths = EventJitRuntimePathCounts(event);
+		const auto generated_stages = EventGeneratedStageCountBreakdown(event);
+		observed_runtime_paths += runtime_paths + "\n";
+		observed_generated_stages += generated_stages + "\n";
+		descriptor_lookup_miss =
+		    descriptor_lookup_miss ||
+		    StringUtil::Contains(runtime_paths, "aggregate_update.direct_input_vector_group_payload_update_miss=");
+		materialized_group_update =
+		    materialized_group_update ||
+		    StringUtil::Contains(generated_stages, "aggregate_update.direct_projected_group_payload_update=");
+	}
+	INFO("fused join payload runtime paths:\n" + observed_runtime_paths);
+	INFO("fused join payload generated stages:\n" + observed_generated_stages);
+	REQUIRE(descriptor_lookup_miss);
+	REQUIRE(materialized_group_update);
 }
 
 TEST_CASE("JIT grouped aggregate consumes rewritten payloads through generated update", "[api][jit]") {

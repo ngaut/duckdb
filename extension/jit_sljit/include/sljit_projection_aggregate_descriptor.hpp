@@ -132,9 +132,9 @@ static bool SljitTryBuildProjectionAggregateRequiredOutputs(const SljitExecutabl
 		return SljitTryMarkProjectionAggregateRequiredOutput(projection_op, aggregate.payload_index,
 		                                                     required_projection_outputs);
 	};
-	bool uses_fused_payload_update;
+	SljitAggregatePayloadSourceLayout payload_source_layout;
 	return SljitTryBuildAggregatePayloadSourceIndices(
-	    aggregate_update, sink_info.aggregates, uses_fused_payload_update, "payload_contract", mark_count_star_payload,
+	    aggregate_update, sink_info.aggregates, payload_source_layout, "payload_contract", mark_count_star_payload,
 	    mark_payload_source, check_direct_payload, mark_direct_payload, [](const char *) { return false; });
 }
 

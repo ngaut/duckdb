@@ -355,6 +355,8 @@ struct SljitNativePrimitiveRunInput {
 	int64_t *output_int64_values = nullptr;
 	hugeint_t *output_hugeint_values = nullptr;
 	uint8_t *output_value_is_set = nullptr;
+	int64_t *output_shared_int64_values = nullptr;
+	idx_t *output_shared_valid_counts = nullptr;
 	idx_t *output_row_counts = nullptr;
 	idx_t input_count = 0;
 	idx_t input_offset = 0;

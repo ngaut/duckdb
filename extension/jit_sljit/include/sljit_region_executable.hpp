@@ -202,6 +202,8 @@ struct SljitExecutablePrimitiveRunSpecialization {
 	SljitLazyCompiledFunction<SljitNativePrimitiveRunFunction> compiled;
 	SljitLazyCompiledFunction<SljitNativePrimitiveRunFunction> nullable_compiled;
 	SljitLazyCompiledFunction<SljitNativePrimitiveRunFunction> multi_lane_compiled;
+	SljitLazyCompiledFunction<SljitNativePrimitiveRunFunction> affine_int64_compiled;
+	SljitLazyCompiledFunction<SljitNativePrimitiveRunFunction> affine_int64_nullable_compiled;
 };
 
 struct SljitExecutablePrimitiveRunUpdate {
@@ -230,9 +232,34 @@ struct SljitExecutablePrimitiveRunUpdate {
 		idx_t result = 0;
 		for (auto &specialization : flat_specializations) {
 			result += specialization.compiled.CodeSize() + specialization.nullable_compiled.CodeSize() +
-			          specialization.multi_lane_compiled.CodeSize();
+			          specialization.multi_lane_compiled.CodeSize() + specialization.affine_int64_compiled.CodeSize() +
+			          specialization.affine_int64_nullable_compiled.CodeSize();
 		}
 		return result;
+	}
+};
+
+struct SljitFusedAffineRunLane {
+	int64_t scale = 1;
+	int64_t offset = 0;
+};
+
+struct SljitExecutableFusedAffineRunUpdate {
+	idx_t source_position = DConstants::INVALID_INDEX;
+	PhysicalType source_type = PhysicalType::INVALID;
+	AggregatePrimitiveUpdateKind primitive_kind = AggregatePrimitiveUpdateKind::NONE;
+	vector<SljitFusedAffineRunLane> lanes;
+
+	bool Ready() const {
+		return source_position != DConstants::INVALID_INDEX && source_type != PhysicalType::INVALID &&
+		       primitive_kind != AggregatePrimitiveUpdateKind::NONE && lanes.size() >= 2;
+	}
+
+	void Clear() {
+		source_position = DConstants::INVALID_INDEX;
+		source_type = PhysicalType::INVALID;
+		primitive_kind = AggregatePrimitiveUpdateKind::NONE;
+		lanes.clear();
 	}
 };
 
@@ -245,6 +272,7 @@ struct SljitExecutableAggregateUpdate {
 	ExecutionDenseGroupDomain dense_group_domain;
 	SljitGroupedAggregateDirectUpdatePlan grouped_direct_update;
 	SljitExecutablePrimitiveRunUpdate primitive_run_update;
+	SljitExecutableFusedAffineRunUpdate fused_affine_run_update;
 	SljitCompiledFunction<SljitNativeAggregateUpdateFunction> fused_payload_update;
 	bool fused_payload_update_owns_group_lookup = false;
 	vector<SljitCompiledFunction<SljitNativeAggregateUpdateFunction>> payload_updates;

@@ -72,16 +72,25 @@ struct SljitPendingPreaggregatedPrimitiveGroupBatch {
 		return result;
 	}
 
-	bool EnsureFixedScratch(const vector<const ExecutionPrimitiveAggregateUpdateLane *> &new_lanes) {
-		if (lanes == new_lanes && scratch.HasFixedCapacity(lanes, SLJIT_PENDING_PREAGGREGATED_GROUP_CAPACITY) &&
-		    generated_run_lane_inputs.size() == lanes.size()) {
+	bool EnsureFixedScratch(
+	    const vector<const ExecutionPrimitiveAggregateUpdateLane *> &new_lanes,
+	    SljitPreaggregatedPrimitivePayloadLayout payload_layout = SljitPreaggregatedPrimitivePayloadLayout::PER_LANE) {
+		const bool fixed_capacity =
+		    payload_layout == SljitPreaggregatedPrimitivePayloadLayout::SHARED_AFFINE
+		        ? scratch.HasFixedSharedAffineCapacity(lanes, SLJIT_PENDING_PREAGGREGATED_GROUP_CAPACITY)
+		        : scratch.payload_layout == SljitPreaggregatedPrimitivePayloadLayout::PER_LANE &&
+		              scratch.HasFixedCapacity(lanes, SLJIT_PENDING_PREAGGREGATED_GROUP_CAPACITY);
+		if (lanes == new_lanes && fixed_capacity && generated_run_lane_inputs.size() == lanes.size()) {
 			return true;
 		}
 		if (HasPending()) {
 			return false;
 		}
 		lanes = new_lanes;
-		if (!scratch.PrepareFixed(lanes, SLJIT_PENDING_PREAGGREGATED_GROUP_CAPACITY)) {
+		const bool prepared = payload_layout == SljitPreaggregatedPrimitivePayloadLayout::SHARED_AFFINE
+		                          ? scratch.PrepareFixedSharedAffine(lanes, SLJIT_PENDING_PREAGGREGATED_GROUP_CAPACITY)
+		                          : scratch.PrepareFixed(lanes, SLJIT_PENDING_PREAGGREGATED_GROUP_CAPACITY);
+		if (!prepared) {
 			return false;
 		}
 		generated_run_lane_inputs.resize(lanes.size());
@@ -429,7 +438,7 @@ SljitAppendPreaggregatedPrimitiveGroupRange(ExecutionRegionRuntime &runtime, Slj
 	if (!pending.groups.Initialized()) {
 		pending.groups.EnsureFromChunk(runtime.GetAllocator(), groups);
 	}
-	if (!pending.EnsureFixedScratch(payload_lanes)) {
+	if (!pending.EnsureFixedScratch(payload_lanes, source_scratch.payload_layout)) {
 		return false;
 	}
 	if (pending.groups.chunk.ColumnCount() != groups.ColumnCount() || pending.lanes.size() != payload_lanes.size()) {
@@ -617,7 +626,7 @@ static bool SljitBufferPreaggregatedPrimitiveGroups(
 	    !CanSlicePreaggregatedPrimitiveScratch(source_scratch, payload_lanes, 0, groups.size())) {
 		return false;
 	}
-	if (!pending.EnsureFixedScratch(payload_lanes)) {
+	if (!pending.EnsureFixedScratch(payload_lanes, source_scratch.payload_layout)) {
 		return false;
 	}
 	pending.InvalidateGeneratedAppendProof();

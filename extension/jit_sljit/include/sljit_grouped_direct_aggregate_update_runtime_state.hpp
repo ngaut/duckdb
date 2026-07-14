@@ -364,8 +364,9 @@ private:
 		string failure_reason;
 		if (!SljitTryExecuteNativeInputVectorGroupedAggregateUpdate(
 		        runtime, native_runtime, scratch, primitive.aggregate_idx, aggregate_op, source_input, group_sources,
-		        projected_direct_update->payload_source_indices, true, optional_ptr<bool>(&deferred_grouped_finish),
-		        false, dense_domain, optional_ptr<string>(&failure_reason),
+		        projected_direct_update->payload_source_indices, projected_direct_update->payload_source_layout, true,
+		        optional_ptr<bool>(&deferred_grouped_finish), false, dense_domain,
+		        optional_ptr<string>(&failure_reason),
 		        optional_ptr<SljitPendingPreaggregatedPrimitiveGroupBatch>(&direct_preaggregated_batch),
 		        optional_ptr<const vector<bool>>(&projected_direct_update->payload_source_not_null))) {
 			auto unsupported = string("projected_source_input_grouped_update_unsupported.") +

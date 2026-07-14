@@ -20,6 +20,7 @@ struct SljitProjectedInputGroupedAggregateDescriptor {
 	vector<idx_t> payload_projection_indices;
 	vector<idx_t> payload_source_indices;
 	vector<bool> payload_source_not_null;
+	SljitAggregatePayloadSourceLayout payload_source_layout = SljitAggregatePayloadSourceLayout::DIRECT_PER_LANE;
 	vector<LogicalType> input_types;
 
 	bool Ready() const {
@@ -203,10 +204,10 @@ static bool SljitTryBuildProjectedInputGroupedAggregateDescriptor(
 		payload_source_not_null.push_back(source_not_null);
 		return true;
 	};
-	bool uses_fused_payload_update;
+	SljitAggregatePayloadSourceLayout payload_source_layout;
 	if (!SljitTryBuildAggregatePayloadSourceIndices(
-	        aggregate_update, sink_info.aggregates, uses_fused_payload_update, "payload_projection",
-	        add_count_star_payload, add_fused_payload_source, check_direct_payload, add_direct_payload_source,
+	        aggregate_update, sink_info.aggregates, payload_source_layout, "payload_projection", add_count_star_payload,
+	        add_fused_payload_source, check_direct_payload, add_direct_payload_source,
 	        [&](const char *reason) { return block(reason); })) {
 		return false;
 	}
@@ -219,6 +220,7 @@ static bool SljitTryBuildProjectedInputGroupedAggregateDescriptor(
 		descriptor->payload_projection_indices = std::move(payload_projection_indices);
 		descriptor->payload_source_indices = std::move(payload_source_indices);
 		descriptor->payload_source_not_null = std::move(payload_source_not_null);
+		descriptor->payload_source_layout = payload_source_layout;
 		descriptor->input_types = descriptor->projection.input_types;
 	}
 	return true;

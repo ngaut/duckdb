@@ -31,7 +31,7 @@ BuildSljitNativePerfectHashGroupedFusedTypedExpressionAggregateUpdateInternal(
 
 	const auto &group_plans = update_plan.group_plans;
 	const auto &codegen_plan = update_plan.codegen_plan;
-	const auto &local_aggregate_plan = update_plan.local_aggregate_plan;
+	const auto &dense_reduction_plan = update_plan.dense_reduction_plan;
 	const auto &deferred_flag_plan = update_plan.deferred_flag_plan;
 	const auto &source_data_hoists = update_plan.source_data_hoists;
 	const auto perfect_hash_group_count = update_plan.perfect_hash_group_count;
@@ -50,7 +50,7 @@ BuildSljitNativePerfectHashGroupedFusedTypedExpressionAggregateUpdateInternal(
 	vector<SljitExpressionTreeOverflowJumps> overflows;
 	vector<sljit_jump *> group_out_of_range;
 	sljit_emit_enter(compiler, 0, SLJIT_ARGS1V(P), scratch_register_count, saved_register_count, local_size);
-	EmitZeroSljitLocalPerfectHashAggregateArrays(compiler, local_aggregate_plan);
+	EmitZeroSljitDensePerfectHashAggregateReduction(compiler, dense_reduction_plan);
 	EmitZeroSljitDeferredPerfectHashFlagArray(compiler, deferred_flag_plan);
 	EmitInitSljitNativeVectorLoop(compiler);
 	EmitInitSljitNativeVectorSourceArrays(compiler);
@@ -76,7 +76,7 @@ BuildSljitNativePerfectHashGroupedFusedTypedExpressionAggregateUpdateInternal(
 	    group_plans,
 	    contract,
 	    codegen_plan,
-	    local_aggregate_plan,
+	    dense_reduction_plan,
 	    deferred_flag_plan,
 	    overflows,
 	    group_out_of_range,
@@ -90,7 +90,8 @@ BuildSljitNativePerfectHashGroupedFusedTypedExpressionAggregateUpdateInternal(
 	    group_index_reg,
 	};
 	EmitSljitPerfectHashFusedUpdateLoops(emit_context, update_plan);
-	EmitSljitLocalPerfectHashCommit(compiler, local_aggregate_plan, codegen_plan.payload_descriptors, contract, false);
+	EmitSljitDensePerfectHashAggregateReductionCommit(compiler, dense_reduction_plan, codegen_plan.payload_descriptors,
+	                                                  contract);
 	EmitSljitDeferredPerfectHashFlagsCommit(compiler, deferred_flag_plan, codegen_plan.payload_descriptors, contract);
 	sljit_emit_return_void(compiler);
 

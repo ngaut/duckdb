@@ -258,7 +258,7 @@ static bool TryExecuteRunPreaggregatedInputVectorAppendNewUpdate(
 static bool TryExecuteRunPreaggregatedInputVectorGroupedTargetPayloadUpdate(
     ExecutionRegionRuntime &runtime, SljitRegionExecutionScratch &scratch, idx_t op_idx, SljitExecutableRegionOp &op,
     DataChunk &payload_input, const vector<ExecutionRowPointerGroupKeySource> &group_sources,
-    const vector<idx_t> &payload_source_indices,
+    const vector<idx_t> &payload_source_indices, SljitAggregatePayloadSourceLayout payload_source_layout,
     const vector<const ExecutionPrimitiveAggregateUpdateLane *> &payload_lanes,
     const vector<SljitGroupedReductionLaneBinding> &reduction_lanes,
     ExecutionGroupedAggregateStateAddressBinding &grouped_state, SljitAggregatePayloadAdapterScratch &payload_scratch,
@@ -268,10 +268,10 @@ static bool TryExecuteRunPreaggregatedInputVectorGroupedTargetPayloadUpdate(
 	idx_t run_count = 0;
 	bool fused_run_payloads = false;
 	auto preaggregate_stage_start = SljitRegionStageStart(runtime);
-	if (!TryPreaggregateInputVectorPrimitiveGroupRunsBest(op, payload_input, group_sources, payload_source_indices,
-	                                                      payload_lanes, reduction_lanes, preaggregate_scratch,
-	                                                      payload_scratch, optional_ptr<DataChunk>(&run_group_keys),
-	                                                      run_count, fused_run_payloads)) {
+	if (!TryPreaggregateInputVectorPrimitiveGroupRunsBest(
+	        op, payload_input, group_sources, payload_source_indices, payload_source_layout, payload_lanes,
+	        reduction_lanes, preaggregate_scratch, payload_scratch, optional_ptr<DataChunk>(&run_group_keys), run_count,
+	        fused_run_payloads)) {
 		return false;
 	}
 	RecordSljitRegionStageRuntime(runtime, op_idx, op.kind,

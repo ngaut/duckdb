@@ -9,6 +9,7 @@
 #pragma once
 
 #include "sljit_aggregate_fused_payload_sources.hpp"
+#include "sljit_aggregate_payload_source_indices.hpp"
 #include "sljit_aggregate_primitive_preaggregation_runtime.hpp"
 #include "sljit_grouped_reduction_lane.hpp"
 #include "sljit_grouped_aggregate_state_runtime.hpp"
@@ -205,8 +206,9 @@ static bool SljitCanPreaggregateRowPointerGroupSources(DataChunk &payload_input,
 static bool SljitCanExecuteDirectRowPointerPreaggregatedPrimitiveUpdate(
     SljitRegionExecutionScratch &scratch, idx_t op_idx, SljitExecutableRegionOp &op, DataChunk &payload_input,
     Vector &row_pointers, const vector<ExecutionRowPointerGroupKeySource> &group_sources,
-    const vector<idx_t> &payload_source_indices, const vector<SljitGroupedReductionLaneBinding> &reduction_lanes,
-    idx_t count, bool &uses_generated_payload_preaggregation) {
+    const vector<idx_t> &payload_source_indices, SljitAggregatePayloadSourceLayout payload_source_layout,
+    const vector<SljitGroupedReductionLaneBinding> &reduction_lanes, idx_t count,
+    bool &uses_generated_payload_preaggregation) {
 	uses_generated_payload_preaggregation = false;
 	auto &aggregate_update = op.aggregate_update;
 	auto &plan = aggregate_update.plan;
@@ -223,15 +225,18 @@ static bool SljitCanExecuteDirectRowPointerPreaggregatedPrimitiveUpdate(
 	    !SljitCanPreaggregateRowPointerGroupSources(payload_input, group_sources)) {
 		return false;
 	}
-	auto fused_override_status =
-	    SljitGetFusedTypedPayloadSourceOverrideStatus(aggregate_update, payload_input, payload_source_indices);
-	if (fused_override_status == SljitFusedTypedPayloadSourceOverrideStatus::INVALID) {
-		return false;
+	if (payload_source_layout == SljitAggregatePayloadSourceLayout::FUSED_COMBINED) {
+		if (SljitGetFusedTypedPayloadSourceOverrideStatus(aggregate_update, payload_input, payload_source_indices) !=
+		    SljitFusedTypedPayloadSourceOverrideStatus::READY) {
+			return false;
+		}
+		uses_generated_payload_preaggregation = true;
 	}
-	uses_generated_payload_preaggregation = fused_override_status == SljitFusedTypedPayloadSourceOverrideStatus::READY;
 	const bool payload_sources_match_aggregates =
-	    !uses_generated_payload_preaggregation && sink_info.aggregates.size() == payload_source_indices.size();
-	if (!payload_sources_match_aggregates && !uses_generated_payload_preaggregation) {
+	    payload_source_layout == SljitAggregatePayloadSourceLayout::DIRECT_PER_LANE &&
+	    sink_info.aggregates.size() == payload_source_indices.size();
+	if (payload_source_layout == SljitAggregatePayloadSourceLayout::DIRECT_PER_LANE &&
+	    !payload_sources_match_aggregates) {
 		return false;
 	}
 	for (idx_t payload_idx = 0; payload_idx < sink_info.aggregates.size(); payload_idx++) {

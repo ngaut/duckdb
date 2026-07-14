@@ -94,7 +94,7 @@ void EmitSljitPerfectHashGroupLookup(const SljitPerfectHashFusedUpdateEmitContex
                                      const SljitPerfectHashGroupLookupOptions &options) {
 	auto compiler = context.compiler;
 	auto &group_plans = context.group_plans;
-	auto &local_aggregate_plan = context.local_aggregate_plan;
+	auto &dense_reduction_plan = context.dense_reduction_plan;
 	auto &deferred_flag_plan = context.deferred_flag_plan;
 	bool group_index_initialized = false;
 	const auto group_index_mode =
@@ -144,10 +144,9 @@ void EmitSljitPerfectHashGroupLookup(const SljitPerfectHashFusedUpdateEmitContex
 			const auto group_data_array_base_reg = options.use_fast_group_data_array_base
 			                                           ? SLJIT_PERFECT_HASH_STATE_REG
 			                                           : options.group_data_array_base_reg_override;
-			EmitLoadFusedAggregateGroupData(compiler, group_idx, group, SLJIT_R1, SLJIT_R2,
-			                                context.hoist_group_data_pointers, group_data_reg,
-			                                use_precomputed_string_offset, group_data_array_base_reg,
-			                                fuse_nonempty_string_compress_bias);
+			EmitLoadFusedAggregateGroupData(
+			    compiler, group_idx, group, SLJIT_R1, SLJIT_R2, context.hoist_group_data_pointers, group_data_reg,
+			    use_precomputed_string_offset, group_data_array_base_reg, fuse_nonempty_string_compress_bias);
 		}
 		const auto group_offset = (fuse_nonempty_string_compress_bias ? 2 : 1) - group.minimum;
 		if (group_offset != 0) {
@@ -174,19 +173,12 @@ void EmitSljitPerfectHashGroupLookup(const SljitPerfectHashFusedUpdateEmitContex
 	context.group_out_of_range.push_back(sljit_emit_cmp(compiler, SLJIT_GREATER_EQUAL, SLJIT_S4, 0, SLJIT_IMM,
 	                                                    NumericCast<sljit_sw>(context.perfect_hash_group_count)));
 	if (!options.materialize_state_pointer) {
-		if (!options.mark_local_group) {
-			return;
+		if (context.group_index_reg == SLJIT_S4) {
+			sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_MEM1(SLJIT_SP), context.group_index_offset, SLJIT_S4, 0);
+		} else {
+			sljit_emit_op1(compiler, SLJIT_MOV, context.group_index_reg, 0, SLJIT_S4, 0);
 		}
-		if (!local_aggregate_plan.sparse) {
-			if (context.group_index_reg == SLJIT_S4) {
-				sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_MEM1(SLJIT_SP), context.group_index_offset, SLJIT_S4, 0);
-			} else {
-				sljit_emit_op1(compiler, SLJIT_MOV, context.group_index_reg, 0, SLJIT_S4, 0);
-			}
-		}
-		EmitMarkSljitLocalPerfectHashGroupSeen(compiler, local_aggregate_plan, context.group_index_reg,
-		                                       SLJIT_PERFECT_HASH_STATE_REG, options.mark_local_payloads_seen,
-		                                       options.increment_count_seen);
+		EmitMarkSljitDensePerfectHashGroupSeen(compiler, dense_reduction_plan, context.group_index_reg);
 		return;
 	}
 	if (options.defer_flags) {
@@ -208,35 +200,42 @@ void EmitSljitPerfectHashPayloadUpdates(const SljitPerfectHashFusedUpdateEmitCon
 	auto &contract = context.contract;
 	auto &codegen_plan = context.codegen_plan;
 	auto &descriptors = codegen_plan.payload_descriptors;
-	auto &local_aggregate_plan = context.local_aggregate_plan;
+	auto &dense_reduction_plan = context.dense_reduction_plan;
 	auto &deferred_flag_plan = context.deferred_flag_plan;
 	// Direct perfect-hash lookup leaves S4 dead after producing the state in S7.
 	// Flat and logical typed expressions never use saved registers, so keep the
 	// shared binary intermediate in S4 for those paths. Selected expressions own
 	// S4 for their selection array and retain the stack spill.
-	const bool use_binary_shared_value_register =
-	    codegen_plan.binary_shared_payload && options.all_valid && context.dedicated_state_register &&
-	    (options.fast_path || options.no_source_selection);
+	const bool use_binary_shared_value_register = codegen_plan.shared_binary.Enabled() && options.all_valid &&
+	                                              context.dedicated_state_register &&
+	                                              (options.fast_path || options.no_source_selection);
 	const auto binary_shared_value_reg = use_binary_shared_value_register ? SLJIT_S4 : 0;
+	const auto shared_index_mode = options.fast_path
+	                                   ? SljitAggregateExpressionIndexMode::FLAT
+	                                   : (options.no_source_selection ? SljitAggregateExpressionIndexMode::LOGICAL
+	                                                                  : SljitAggregateExpressionIndexMode::SELECTED);
+	if (codegen_plan.shared_binary.Enabled() && options.all_valid) {
+		// Group lookup borrows S4 to assemble the perfect-hash index. The selected
+		// expression emitter owns S4 as the source-selection-array base, so restore
+		// that loop invariant before entering the shared payload contract.
+		if (shared_index_mode == SljitAggregateExpressionIndexMode::SELECTED) {
+			sljit_emit_op1(compiler, SLJIT_MOV_P, SLJIT_S4, 0, SLJIT_MEM1(SLJIT_S0),
+			               offsetof(SljitNativeVectorInput, source_sel_array));
+		}
+		EmitSljitSharedBinaryPayloadBase(compiler, codegen_plan.shared_binary, binary_shared_value_reg,
+		                                 context.binary_shared_value_offset, shared_index_mode, context.overflows,
+		                                 options.payload_data_hoists);
+	}
 	for (idx_t payload_idx = 0; payload_idx < payloads.size(); payload_idx++) {
 		auto &descriptor = descriptors[payload_idx];
 		const auto state_offset = contract.grouped_state_offsets[descriptor.aggregate_index];
 		if (descriptor.primitive_kind == AggregatePrimitiveUpdateKind::COUNT_STAR) {
-			if (local_aggregate_plan.enabled) {
-				if (local_aggregate_plan.sparse && payload_idx == local_aggregate_plan.count_seen_lane) {
-					continue;
+			if (dense_reduction_plan.Ready()) {
+				if (context.group_index_reg == SLJIT_S4) {
+					sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_S4, 0, SLJIT_MEM1(SLJIT_SP), context.group_index_offset);
 				}
-				if (local_aggregate_plan.sparse) {
-					EmitSljitSparseLocalPerfectHashIncrementCount(compiler, local_aggregate_plan.lanes[payload_idx],
-					                                              SLJIT_PERFECT_HASH_STATE_REG);
-				} else {
-					if (context.group_index_reg == SLJIT_S4) {
-						sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_S4, 0, SLJIT_MEM1(SLJIT_SP),
-						               context.group_index_offset);
-					}
-					EmitSljitLocalPerfectHashIncrementCount(compiler, local_aggregate_plan.lanes[payload_idx],
-					                                        context.group_index_reg);
-				}
+				EmitSljitDensePerfectHashIncrementCount(compiler, dense_reduction_plan.lanes[payload_idx],
+				                                        context.group_index_reg);
 				continue;
 			}
 			EmitSljitPerfectHashPayloadStatePointer(context);
@@ -251,12 +250,11 @@ void EmitSljitPerfectHashPayloadUpdates(const SljitPerfectHashFusedUpdateEmitCon
 		}
 
 		sljit_jump *payload_invalid = nullptr;
-		if (codegen_plan.binary_shared_payload && options.all_valid &&
-		    payload_idx == codegen_plan.binary_dependent_lane) {
-			EmitSljitBinarySharedPayloadValueReg(compiler, codegen_plan, binary_shared_value_reg,
-			                                     context.binary_shared_value_offset, options.fast_path,
-			                                     options.no_source_selection, context.overflows,
-			                                     options.payload_data_hoists);
+		if (codegen_plan.shared_binary.Enabled() && options.all_valid &&
+		    codegen_plan.shared_binary.lanes[payload_idx].matched) {
+			EmitSljitSharedBinaryPayloadLane(compiler, codegen_plan.shared_binary.lanes[payload_idx],
+			                                 binary_shared_value_reg, context.binary_shared_value_offset,
+			                                 shared_index_mode, context.overflows, options.payload_data_hoists);
 		} else if (payloads[payload_idx].kind == SljitNativeRegionExpressionKind::REFERENCE) {
 			payload_invalid = EmitLoadFusedTypedAggregateReferenceValue(
 			    compiler, payloads[payload_idx], !options.fast_path && !options.no_source_selection, !options.all_valid,
@@ -266,22 +264,12 @@ void EmitSljitPerfectHashPayloadUpdates(const SljitPerfectHashFusedUpdateEmitCon
 			    context, *payloads[payload_idx].expression_tree, options.fast_path, options.all_valid,
 			    options.no_source_selection, options.payload_data_hoists);
 		}
-		if (codegen_plan.binary_shared_payload && options.all_valid && payload_idx == codegen_plan.binary_base_lane) {
-			EmitSljitStoreBinarySharedPayloadValue(compiler, SLJIT_R2, binary_shared_value_reg,
-			                                       context.binary_shared_value_offset);
-		}
-		if (local_aggregate_plan.enabled) {
-			if (local_aggregate_plan.sparse) {
-				EmitSljitSparseLocalPerfectHashAccumulate(compiler, local_aggregate_plan.lanes[payload_idx],
-				                                          descriptor.primitive_kind, SLJIT_PERFECT_HASH_STATE_REG,
-				                                          SLJIT_R2, !options.all_valid);
-			} else {
-				if (context.group_index_reg == SLJIT_S4) {
-					sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_S4, 0, SLJIT_MEM1(SLJIT_SP), context.group_index_offset);
-				}
-				EmitSljitLocalPerfectHashAccumulate(compiler, local_aggregate_plan.lanes[payload_idx],
-				                                    descriptor.primitive_kind, context.group_index_reg, SLJIT_R2);
+		if (dense_reduction_plan.Ready()) {
+			if (context.group_index_reg == SLJIT_S4) {
+				sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_S4, 0, SLJIT_MEM1(SLJIT_SP), context.group_index_offset);
 			}
+			EmitSljitDensePerfectHashAccumulate(compiler, dense_reduction_plan.lanes[payload_idx],
+			                                    descriptor.primitive_kind, context.group_index_reg, SLJIT_R2);
 			EmitSljitPerfectHashPayloadInvalidContinuation(compiler, payload_invalid);
 			continue;
 		}

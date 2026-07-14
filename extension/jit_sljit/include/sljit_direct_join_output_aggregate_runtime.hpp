@@ -126,12 +126,12 @@ static bool SljitDirectJoinOutputAggregatePayloadSourcesValid(const SljitJoinPro
 	    sink_info.kind != ExecutionRegionSinkKind::PERFECT_HASH_AGGREGATE_UPDATE) {
 		return true;
 	}
-	auto fused_override_status = SljitGetFusedTypedPayloadSourceOverrideStatus(aggregate_update, aggregate_input,
-	                                                                           descriptor.payload_source_indices);
-	if (fused_override_status == SljitFusedTypedPayloadSourceOverrideStatus::READY) {
-		return true;
-	}
-	if (fused_override_status == SljitFusedTypedPayloadSourceOverrideStatus::INVALID) {
+	if (descriptor.payload_source_layout == SljitAggregatePayloadSourceLayout::FUSED_COMBINED) {
+		if (SljitGetFusedTypedPayloadSourceOverrideStatus(aggregate_update, aggregate_input,
+		                                                  descriptor.payload_source_indices) ==
+		    SljitFusedTypedPayloadSourceOverrideStatus::READY) {
+			return true;
+		}
 		if (failure_reason) {
 			*failure_reason = "fused_payload_sources";
 		}

@@ -363,20 +363,22 @@ static bool SljitTryBuildProjectionRowPointerAggregateDescriptor(
 		descriptor.payload_source_indices.push_back(input_idx);
 		return true;
 	};
-	bool uses_fused_payload_update;
+	SljitAggregatePayloadSourceLayout payload_source_layout;
 	auto check_direct_payload = [&](const ExecutionRegionAggregateInput &, idx_t) {
 		return true;
 	};
 	if (!SljitTryBuildAggregatePayloadSourceIndices(
-	        aggregate_update, sink_info.aggregates, uses_fused_payload_update, "payload_contract",
-	        add_count_star_payload, add_fused_payload_source, check_direct_payload, add_direct_payload_source,
+	        aggregate_update, sink_info.aggregates, payload_source_layout, "payload_contract", add_count_star_payload,
+	        add_fused_payload_source, check_direct_payload, add_direct_payload_source,
 	        [&](const char *blocker) { return descriptor.Block(blocker); })) {
 		return false;
 	}
-	D_ASSERT(!uses_fused_payload_update || !descriptor.payload_source_indices.empty());
+	D_ASSERT(payload_source_layout != SljitAggregatePayloadSourceLayout::FUSED_COMBINED ||
+	         !descriptor.payload_source_indices.empty());
 	if (descriptor.payload_source_indices.empty()) {
 		return descriptor.Block("payload_sources");
 	}
+	descriptor.payload_source_layout = payload_source_layout;
 	descriptor.MarkReady();
 	return true;
 }

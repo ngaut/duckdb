@@ -2,6 +2,7 @@
 
 #include "sljit_aggregate_fused_codegen.hpp"
 #include "sljit_aggregate_primitive_codegen.hpp"
+#include "sljit_aggregate_typed_payload_codegen.hpp"
 #include "sljit_codegen_internal.hpp"
 #include "sljit_codegen_util.hpp"
 #include "sljit_typed_expression_plan.hpp"
@@ -13,6 +14,7 @@ namespace duckdb {
 struct SljitGroupedFusedTypedAggregateCodegenPlan {
 	vector<SljitTypedExpressionTreePlan> payloads;
 	vector<SljitAggregatePayloadDescriptor> payload_descriptors;
+	SljitSharedBinaryPayloadPlan shared_binary;
 	idx_t tree_node_count = 0;
 	bool has_typed_payload = false;
 	bool fast_path_supported = false;
@@ -61,6 +63,9 @@ static bool BuildSljitGroupedFusedTypedAggregateCodegenPlan(const vector<SljitNa
 		codegen_plan.fast_path_supported =
 		    codegen_plan.fast_path_supported && codegen_plan.payloads[payload_idx].fast_path.fast_path_supported;
 	}
+	if (codegen_plan.fast_path_supported) {
+		TryBuildSljitSharedBinaryPayloadPlan(payloads, codegen_plan.payload_descriptors, codegen_plan.shared_binary);
+	}
 	return codegen_plan.has_typed_payload;
 }
 
@@ -81,7 +86,9 @@ unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativeGroupedFusedTypedExpressio
 
 	const auto state_ptr_offset = NumericCast<sljit_sw>(codegen_plan.tree_node_count * sizeof(sljit_sw) * 3);
 	const auto logical_index_offset = state_ptr_offset + NumericCast<sljit_sw>(sizeof(sljit_sw));
-	const auto local_size = logical_index_offset + NumericCast<sljit_sw>(sizeof(sljit_sw));
+	const auto shared_value_offset = logical_index_offset + NumericCast<sljit_sw>(sizeof(sljit_sw));
+	const auto local_size =
+	    shared_value_offset + (codegen_plan.shared_binary.Enabled() ? NumericCast<sljit_sw>(sizeof(sljit_sw)) : 0);
 	vector<SljitExpressionTreeOverflowJumps> overflows;
 	sljit_emit_enter(compiler, 0, SLJIT_ARGS1V(P), 5, 7, local_size);
 	EmitInitSljitNativeVectorLoop(compiler);
@@ -98,6 +105,10 @@ unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativeGroupedFusedTypedExpressio
 		use_generic_loop = sljit_emit_cmp(compiler, SLJIT_EQUAL, SLJIT_R0, 0, SLJIT_IMM, 0);
 
 		auto emit_flat_fast_payloads = [&]() {
+			if (codegen_plan.shared_binary.Enabled()) {
+				EmitSljitSharedBinaryPayloadBase(compiler, codegen_plan.shared_binary, 0, shared_value_offset,
+				                                 SljitAggregateExpressionIndexMode::FLAT, overflows);
+			}
 			for (idx_t payload_idx = 0; payload_idx < payloads.size(); payload_idx++) {
 				auto &descriptor = codegen_plan.payload_descriptors[payload_idx];
 				const auto state_offset = contract.grouped_state_offsets[descriptor.aggregate_index];
@@ -108,7 +119,11 @@ unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativeGroupedFusedTypedExpressio
 				}
 
 				auto &payload = payloads[payload_idx];
-				if (payload.kind == SljitNativeRegionExpressionKind::REFERENCE) {
+				if (codegen_plan.shared_binary.Enabled() && codegen_plan.shared_binary.lanes[payload_idx].matched) {
+					EmitSljitSharedBinaryPayloadLane(compiler, codegen_plan.shared_binary.lanes[payload_idx], 0,
+					                                 shared_value_offset, SljitAggregateExpressionIndexMode::FLAT,
+					                                 overflows);
+				} else if (payload.kind == SljitNativeRegionExpressionKind::REFERENCE) {
 					EmitLoadFusedTypedAggregateReferenceValue(compiler, payload, false, false, SLJIT_S1);
 				} else {
 					idx_t payload_spill_index = 0;
@@ -154,6 +169,10 @@ unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativeGroupedFusedTypedExpressio
 		sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_S1, 0, SLJIT_IMM, 0);
 
 		auto emit_selected_fast_payloads = [&]() {
+			if (codegen_plan.shared_binary.Enabled()) {
+				EmitSljitSharedBinaryPayloadBase(compiler, codegen_plan.shared_binary, 0, shared_value_offset,
+				                                 SljitAggregateExpressionIndexMode::SELECTED, overflows);
+			}
 			for (idx_t payload_idx = 0; payload_idx < payloads.size(); payload_idx++) {
 				auto &descriptor = codegen_plan.payload_descriptors[payload_idx];
 				const auto state_offset = contract.grouped_state_offsets[descriptor.aggregate_index];
@@ -166,7 +185,11 @@ unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativeGroupedFusedTypedExpressio
 				}
 
 				auto &payload = payloads[payload_idx];
-				if (payload.kind == SljitNativeRegionExpressionKind::REFERENCE) {
+				if (codegen_plan.shared_binary.Enabled() && codegen_plan.shared_binary.lanes[payload_idx].matched) {
+					EmitSljitSharedBinaryPayloadLane(compiler, codegen_plan.shared_binary.lanes[payload_idx], 0,
+					                                 shared_value_offset, SljitAggregateExpressionIndexMode::SELECTED,
+					                                 overflows);
+				} else if (payload.kind == SljitNativeRegionExpressionKind::REFERENCE) {
 					EmitLoadFusedTypedAggregateReferenceValue(compiler, payload, true, false, SLJIT_S3);
 				} else {
 					idx_t payload_spill_index = 0;

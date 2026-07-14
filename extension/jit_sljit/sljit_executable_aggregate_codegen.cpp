@@ -398,10 +398,6 @@ struct SljitPrimitiveRunGroupCodegenSpecialization {
 	ExecutionRowPointerGroupKeyCastKind cast_kind;
 };
 
-// Multi-lane kernels are deliberately unrolled. Bound them to one small instruction-cache budget; wider aggregate
-// lists keep using the generic preaggregation loop until they have a looped generated lowering.
-static constexpr idx_t SLJIT_PRIMITIVE_RUN_MAX_UNROLLED_LANES = 8;
-
 static vector<SljitPrimitiveRunGroupCodegenSpecialization>
 SljitPrimitiveRunGroupSpecializations(PhysicalType target_type) {
 	vector<SljitPrimitiveRunGroupCodegenSpecialization> result {
@@ -433,13 +429,161 @@ SljitPrimitiveRunGroupSpecializations(PhysicalType target_type) {
 	return result;
 }
 
+static bool SljitAffineRunSignedIntegerType(PhysicalType type) {
+	switch (type) {
+	case PhysicalType::INT8:
+	case PhysicalType::INT16:
+	case PhysicalType::INT32:
+	case PhysicalType::INT64:
+		return true;
+	default:
+		return false;
+	}
+}
+
+static bool SljitTryGetAffineRunConstant(const ExecutionExpressionIR &node, int64_t &value) {
+	if (node.kind != ExecutionExpressionIRKind::CONSTANT || node.constant.IsNull()) {
+		return false;
+	}
+	switch (node.physical_type) {
+	case PhysicalType::INT8:
+		value = node.constant.GetValueUnsafe<int8_t>();
+		return true;
+	case PhysicalType::INT16:
+		value = node.constant.GetValueUnsafe<int16_t>();
+		return true;
+	case PhysicalType::INT32:
+		value = node.constant.GetValueUnsafe<int32_t>();
+		return true;
+	case PhysicalType::INT64:
+		value = node.constant.GetValueUnsafe<int64_t>();
+		return true;
+	default:
+		return false;
+	}
+}
+
+static bool SljitTryGetAffineRunLane(const SljitNativeRegionExpressionPlan &payload, idx_t &source_position,
+                                     PhysicalType &source_type, SljitFusedAffineRunLane &lane) {
+	lane = SljitFusedAffineRunLane();
+	if (payload.kind == SljitNativeRegionExpressionKind::REFERENCE) {
+		source_position = payload.source_index;
+		source_type = payload.return_type.InternalType();
+		return SljitAffineRunSignedIntegerType(source_type);
+	}
+	if (payload.kind != SljitNativeRegionExpressionKind::TYPED_EXPRESSION_TREE || !payload.expression_tree) {
+		return false;
+	}
+	auto &root = *payload.expression_tree;
+	if (root.kind == ExecutionExpressionIRKind::REFERENCE) {
+		source_position = root.ref_index;
+		source_type = root.physical_type;
+		return SljitAffineRunSignedIntegerType(source_type);
+	}
+	if (root.kind != ExecutionExpressionIRKind::BINARY || root.arithmetic_overflow_check || !root.left || !root.right ||
+	    !SljitAffineRunSignedIntegerType(root.physical_type)) {
+		return false;
+	}
+	const ExecutionExpressionIR *reference = nullptr;
+	const ExecutionExpressionIR *constant = nullptr;
+	bool reference_on_left = false;
+	if (root.left->kind == ExecutionExpressionIRKind::REFERENCE &&
+	    root.right->kind == ExecutionExpressionIRKind::CONSTANT) {
+		reference = root.left.get();
+		constant = root.right.get();
+		reference_on_left = true;
+	} else if (root.right->kind == ExecutionExpressionIRKind::REFERENCE &&
+	           root.left->kind == ExecutionExpressionIRKind::CONSTANT) {
+		reference = root.right.get();
+		constant = root.left.get();
+	} else {
+		return false;
+	}
+	int64_t constant_value;
+	if (reference->physical_type != root.physical_type || constant->physical_type != root.physical_type ||
+	    !SljitTryGetAffineRunConstant(*constant, constant_value)) {
+		return false;
+	}
+	source_position = reference->ref_index;
+	source_type = reference->physical_type;
+	switch (root.binary_op) {
+	case ExecutionExpressionBinaryOp::ADD:
+		lane.offset = constant_value;
+		return true;
+	case ExecutionExpressionBinaryOp::SUBTRACT:
+		if (reference_on_left) {
+			if (constant_value == NumericLimits<int64_t>::Minimum()) {
+				return false;
+			}
+			lane.offset = -constant_value;
+		} else {
+			lane.scale = -1;
+			lane.offset = constant_value;
+		}
+		return true;
+	case ExecutionExpressionBinaryOp::MULTIPLY:
+		lane.scale = constant_value;
+		return true;
+	default:
+		return false;
+	}
+}
+
+static void SljitPlanExecutableFusedAffineRunUpdate(SljitExecutableAggregateUpdate &executable) {
+	auto &run_update = executable.fused_affine_run_update;
+	run_update.Clear();
+	if (!executable.fused_payload_update.Function() ||
+	    !SljitFusedAggregatePayloadsUseTypedExpressionTrees(executable.payloads, executable.payload_descriptors) ||
+	    executable.payloads.size() < 2 || executable.payloads.size() != executable.payload_descriptors.size()) {
+		return;
+	}
+	idx_t common_source_position = DConstants::INVALID_INDEX;
+	PhysicalType common_source_type = PhysicalType::INVALID;
+	AggregatePrimitiveUpdateKind common_primitive_kind = AggregatePrimitiveUpdateKind::NONE;
+	vector<SljitFusedAffineRunLane> lanes;
+	lanes.reserve(executable.payloads.size());
+	for (idx_t payload_idx = 0; payload_idx < executable.payloads.size(); payload_idx++) {
+		auto primitive_kind = executable.payload_descriptors[payload_idx].primitive_kind;
+		if (primitive_kind != AggregatePrimitiveUpdateKind::SUM_INT64 &&
+		    primitive_kind != AggregatePrimitiveUpdateKind::SUM_HUGEINT) {
+			return;
+		}
+		idx_t source_position;
+		PhysicalType source_type;
+		SljitFusedAffineRunLane lane;
+		if (!SljitTryGetAffineRunLane(executable.payloads[payload_idx].plan, source_position, source_type, lane)) {
+			return;
+		}
+		if (payload_idx == 0) {
+			common_source_position = source_position;
+			common_source_type = source_type;
+			common_primitive_kind = primitive_kind;
+		} else if (source_position != common_source_position || source_type != common_source_type ||
+		           primitive_kind != common_primitive_kind) {
+			return;
+		}
+		lanes.push_back(lane);
+	}
+	if (common_source_position == DConstants::INVALID_INDEX) {
+		return;
+	}
+	if (common_primitive_kind == AggregatePrimitiveUpdateKind::SUM_INT64 && common_source_type == PhysicalType::INT64) {
+		return;
+	}
+	run_update.source_position = common_source_position;
+	run_update.source_type = common_source_type;
+	run_update.primitive_kind = common_primitive_kind;
+	run_update.lanes = std::move(lanes);
+}
+
 void SljitPlanExecutablePrimitiveRunUpdate(const SljitNativeAggregateUpdatePlan &op,
                                            SljitExecutableAggregateUpdate &executable) {
+	SljitPlanExecutableFusedAffineRunUpdate(executable);
 	auto &sink = op.sink_info;
 	if (sink.kind != ExecutionRegionSinkKind::HASH_AGGREGATE_UPDATE || !op.UsesPrimitivePayloads() ||
 	    !op.use_grouped_state_addresses || op.use_perfect_hash_group_lookup || sink.groups.size() != 1 ||
 	    sink.aggregates.empty() || sink.aggregates.size() != executable.payload_descriptors.size() ||
-	    sink.aggregates.size() > SLJIT_PRIMITIVE_RUN_MAX_UNROLLED_LANES || !SljitPrimitiveRunCodegenSupported()) {
+	    !SljitPrimitiveRunCodegenSupported()) {
 		return;
 	}
 	auto group_type = sink.groups[0].type.InternalType();
@@ -468,6 +612,9 @@ void SljitPlanExecutablePrimitiveRunUpdate(const SljitNativeAggregateUpdatePlan 
 		}
 		payload_types.push_back(payload_type);
 		primitive_kinds.push_back(primitive_kind);
+	}
+	if (primitive_kinds.size() > 1 && !SljitPrimitiveRunMultiUpdateSupported(payload_types, primitive_kinds)) {
+		return;
 	}
 	for (auto group_specialization : SljitPrimitiveRunGroupSpecializations(group_type)) {
 		if (!SljitPrimitiveRunGroupCastSupported(group_specialization.source_type, group_type,
@@ -529,6 +676,59 @@ SljitEnsureExecutablePrimitiveRunUpdate(ExecutionRegionRuntime &runtime, SljitEx
 		runtime.RecordLazyCodegen(metrics);
 		return SljitCompiledFunction<SljitNativePrimitiveRunFunction>(std::move(code), function);
 	});
+}
+
+SljitNativePrimitiveRunFunction SljitEnsureExecutableFusedAffineRunUpdate(
+    ExecutionRegionRuntime &runtime, SljitExecutablePrimitiveRunUpdate &primitive_run_update,
+    const SljitExecutableFusedAffineRunUpdate &affine_run_update, PhysicalType group_source_type,
+    ExecutionRowPointerGroupKeyCastKind group_cast_kind, bool payload_nullable) {
+#if SLJIT_NUMBER_OF_SAVED_REGISTERS < 8 || (SLJIT_NUMBER_OF_REGISTERS - SLJIT_NUMBER_OF_SAVED_REGISTERS) < 7
+	return nullptr;
+#else
+	if (!affine_run_update.Ready() || affine_run_update.primitive_kind != AggregatePrimitiveUpdateKind::SUM_INT64 ||
+	    affine_run_update.source_type == PhysicalType::INT64 || !primitive_run_update.HasDeferredCodegen() ||
+	    primitive_run_update.payload_types.size() != affine_run_update.lanes.size() ||
+	    primitive_run_update.primitive_kinds.size() != affine_run_update.lanes.size()) {
+		return nullptr;
+	}
+	for (idx_t lane_idx = 0; lane_idx < affine_run_update.lanes.size(); lane_idx++) {
+		if (primitive_run_update.payload_types[lane_idx] != affine_run_update.source_type ||
+		    primitive_run_update.primitive_kinds[lane_idx] != AggregatePrimitiveUpdateKind::SUM_INT64) {
+			return nullptr;
+		}
+	}
+	auto specialization = primitive_run_update.Specialization(group_source_type, group_cast_kind);
+	if (!specialization) {
+		return nullptr;
+	}
+	auto &artifact =
+	    payload_nullable ? specialization->affine_int64_nullable_compiled : specialization->affine_int64_compiled;
+	return artifact.Ensure([&]() {
+		SljitNativePrimitiveRunFunction function = nullptr;
+		string error;
+		ExecutionRegionCompileTimings timings;
+		auto codegen_start = std::chrono::steady_clock::now();
+		unique_ptr<ExecutionRegionCodeHandle> code;
+		{
+			SljitCodegenTimingScope codegen_timing_scope(&timings);
+			code = BuildSljitNativePrimitiveRunAffineInt64Update(
+			    group_source_type, primitive_run_update.group_type, group_cast_kind, affine_run_update.source_type,
+			    affine_run_update.lanes.size(), payload_nullable, function, error);
+		}
+		if (!code || !function) {
+			throw InternalException("SLJIT affine primitive run update lazy code generation failed: %s",
+			                        error.empty() ? "unknown error" : error);
+		}
+		ExecutionRegionLazyCodegenMetrics metrics;
+		metrics.codegen_time_us =
+		    std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - codegen_start)
+		        .count();
+		metrics.machine_codegen_time_us = timings.machine_codegen_time_us;
+		metrics.code_size = code->CodeSize();
+		runtime.RecordLazyCodegen(metrics);
+		return SljitCompiledFunction<SljitNativePrimitiveRunFunction>(std::move(code), function);
+	});
+#endif
 }
 
 void SljitSelectExecutableAggregateDirectUpdatePlan(SljitExecutableAggregateUpdate &executable) {
