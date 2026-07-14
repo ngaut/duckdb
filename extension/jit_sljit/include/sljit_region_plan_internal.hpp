@@ -54,7 +54,10 @@ struct SljitSourceContractPlan {
 };
 
 struct SljitSourceStrategyContext {
-	bool prefer_duckdb_scan_filters = false;
+	//! The CBO candidate already selected storage-owned scan filters for this source.
+	bool candidate_uses_scan_filters = false;
+	//! Hash-build sources retain their specialized storage-filter safety rule.
+	bool prefer_direct_build_scan_filters = false;
 	bool supports_generated_mixed_filter = false;
 };
 

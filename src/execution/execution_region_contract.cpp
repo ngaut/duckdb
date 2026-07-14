@@ -94,11 +94,7 @@ static bool ExecutionRegionSourceFiltersCanUseGeneratedOutput(const ExecutionReg
 
 bool ExecutionRegionCandidateUsesScanFilters(const ExecutionRegionCandidate &candidate,
                                              const ExecutionRegionNode &node) {
-	if (candidate.uses_scan_filters) {
-		return true;
-	}
-	auto source_execution = GetExecutionRegionCandidateSourceExecution(candidate, node);
-	if (source_execution != ExecutionRegionSourceExecutionKind::SOURCE_CONTRACT || !node.source ||
+	if (!candidate.contract.OwnsSource() || !node.source ||
 	    !node.source->table_scan_contract.present) {
 		return false;
 	}
@@ -109,7 +105,17 @@ bool ExecutionRegionCandidateUsesScanFilters(const ExecutionRegionCandidate &can
 		return false;
 	}
 	if (ExecutionRegionSourceFiltersCanUseGeneratedOutput(node)) {
-		return false;
+		const auto source_cardinality = MaxValue(node.source->table_scan_contract.estimated_source_cardinality,
+		                                         candidate.traits.source_contract_input_cardinality);
+		const bool large_single_filter_aggregate =
+		    source_cardinality >= STANDARD_VECTOR_SIZE * 256 && candidate.traits.source_filter_count == 1 &&
+		    candidate.traits.sink_kind == ExecutionRegionSinkKind::UNGROUPED_AGGREGATE_UPDATE;
+		const bool highly_selective = candidate.estimated_cardinality > 0 &&
+		                              candidate.estimated_cardinality * 16 < source_cardinality;
+		const bool grouped_aggregate = candidate.traits.sink_kind == ExecutionRegionSinkKind::HASH_AGGREGATE_UPDATE;
+		if (!large_single_filter_aggregate && !highly_selective && !grouped_aggregate) {
+			return false;
+		}
 	}
 	return node.source->table_scan_contract.filter_pushdown;
 }

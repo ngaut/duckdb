@@ -34,6 +34,71 @@ static bool ExecutionRegionExpressionReferencesOnlyLocalSourceFilterInput(const 
 	return true;
 }
 
+static bool ExecutionRegionConstantIsSafeIntegralDivisor(const ExecutionExpressionIR &expression) {
+	if (expression.kind != ExecutionExpressionIRKind::BINARY ||
+	    (expression.binary_op != ExecutionExpressionBinaryOp::MODULO &&
+	     expression.binary_op != ExecutionExpressionBinaryOp::INTEGER_DIVIDE) ||
+	    !expression.right || expression.right->kind != ExecutionExpressionIRKind::CONSTANT ||
+	    expression.right->constant.IsNull()) {
+		return false;
+	}
+
+	// Division and modulo carry a conservative arithmetic-exception annotation. A
+	// non-zero divisor is sufficient for unsigned inputs; signed inputs additionally
+	// exclude -1 because MIN / -1 can overflow. This is an execution-contract proof,
+	// not a backend capability claim: the backend still lowers the admitted IR itself.
+	switch (expression.right->return_type.InternalType()) {
+	case PhysicalType::INT8: {
+		auto divisor = expression.right->constant.GetValueUnsafe<int8_t>();
+		return divisor != 0 && divisor != -1;
+	}
+	case PhysicalType::INT16: {
+		auto divisor = expression.right->constant.GetValueUnsafe<int16_t>();
+		return divisor != 0 && divisor != -1;
+	}
+	case PhysicalType::INT32: {
+		auto divisor = expression.right->constant.GetValueUnsafe<int32_t>();
+		return divisor != 0 && divisor != -1;
+	}
+	case PhysicalType::INT64: {
+		auto divisor = expression.right->constant.GetValueUnsafe<int64_t>();
+		return divisor != 0 && divisor != -1;
+	}
+	case PhysicalType::UINT8:
+		return expression.right->constant.GetValueUnsafe<uint8_t>() != 0;
+	case PhysicalType::UINT16:
+		return expression.right->constant.GetValueUnsafe<uint16_t>() != 0;
+	case PhysicalType::UINT32:
+		return expression.right->constant.GetValueUnsafe<uint32_t>() != 0;
+	case PhysicalType::UINT64:
+		return expression.right->constant.GetValueUnsafe<uint64_t>() != 0;
+	default:
+		return false;
+	}
+}
+
+static bool ExecutionRegionExpressionIsExceptionFree(const ExecutionExpressionIR &expression) {
+	if (expression.exception_behavior != ExecutionExpressionExceptionKind::NONE &&
+	    !ExecutionRegionConstantIsSafeIntegralDivisor(expression)) {
+		return false;
+	}
+	if (expression.left && !ExecutionRegionExpressionIsExceptionFree(*expression.left)) {
+		return false;
+	}
+	if (expression.right && !ExecutionRegionExpressionIsExceptionFree(*expression.right)) {
+		return false;
+	}
+	if (expression.else_node && !ExecutionRegionExpressionIsExceptionFree(*expression.else_node)) {
+		return false;
+	}
+	for (auto &child : expression.children) {
+		if (child && !ExecutionRegionExpressionIsExceptionFree(*child)) {
+			return false;
+		}
+	}
+	return true;
+}
+
 static bool ExecutionRegionTypeCanUseGeneratedSourceStage(const LogicalType &type) {
 	switch (type.InternalType()) {
 	case PhysicalType::BOOL:
@@ -63,12 +128,12 @@ GetExecutionRegionGeneratedSourceFilterCapability(const ExecutionExpressionFragm
 		result.blocker = "source filter expression lowering unavailable";
 		return result;
 	}
-	if (expression.traits.has_arithmetic_binary) {
-		result.blocker = "source filter expression contains unsupported arithmetic";
-		return result;
-	}
 	if (!ExecutionRegionExpressionReferencesOnlyLocalSourceFilterInput(*expression.root)) {
 		result.blocker = "source filter expression references non-local input";
+		return result;
+	}
+	if (!ExecutionRegionExpressionIsExceptionFree(*expression.root)) {
+		result.blocker = "source filter expression can raise an exception";
 		return result;
 	}
 	if (!ExecutionRegionTypeCanUseGeneratedSourceStage(source_type)) {
@@ -877,9 +942,6 @@ BuildExecutionRegionCandidateSummary(const ExecutionRegionIR &region_ir, idx_t c
 	candidate.output_types = GetExecutionRegionCandidateOutputTypes(region_ir, candidate);
 	candidate.shape = DescribeExecutionRegionCandidateShape(region_ir, candidate);
 	candidate.pipeline_shape = DescribeExecutionRegionPipelineShape(region_ir, first_node, node_count);
-	if (candidate.first_node < region_ir.nodes.size()) {
-		candidate.uses_scan_filters = ExecutionRegionCandidateUsesScanFilters(candidate, region_ir.nodes[first_node]);
-	}
 	candidate.contract = BuildExecutionRegionContract(region_ir, candidate, mode);
 
 	auto describe_span = [&]() {
@@ -909,6 +971,13 @@ BuildExecutionRegionCandidateSummary(const ExecutionRegionIR &region_ir, idx_t c
 		return summary;
 	}
 	candidate.traits = BuildExecutionRegionCandidateTraits(region_ir, candidate, candidate.stage_plan, mode);
+	if (candidate.first_node < region_ir.nodes.size()) {
+		candidate.uses_scan_filters = ExecutionRegionCandidateUsesScanFilters(candidate, region_ir.nodes[first_node]);
+		if (candidate.uses_scan_filters) {
+			candidate.stage_plan = BuildExecutionRegionStagePlan(region_ir, candidate, mode);
+			candidate.traits = BuildExecutionRegionCandidateTraits(region_ir, candidate, candidate.stage_plan, mode);
+		}
+	}
 	candidate.signature = BuildExecutionRegionSignature(region_ir, candidate);
 	candidate.context_has_missing_operator_contract =
 	    ExecutionRegionCandidateContextHasMissingOperatorContract(region_ir, candidate);

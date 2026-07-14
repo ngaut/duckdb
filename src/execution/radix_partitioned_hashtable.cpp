@@ -851,6 +851,9 @@ public:
 	bool registered;
 	//! Sink capacity for this thread
 	idx_t local_sink_capacity;
+	//! Avoid checking the full allocation footprint for every small vector while still enforcing the budget during large
+	//! accelerated batches.
+	idx_t next_memory_check_count;
 
 	//! Data that is abandoned ends up here (only if we're doing external aggregation)
 	unique_ptr<PartitionedTupleData> abandoned_data;
@@ -859,7 +862,7 @@ public:
 RadixHTLocalSinkState::RadixHTLocalSinkState(ClientContext &, const RadixPartitionedHashTable &radix_ht)
     : existing_group_addresses(LogicalType::POINTER), adapted(false), direct_append_attempted_rows(0),
       direct_append_new_rows(0), direct_append_adapted(false), registered(false),
-      local_sink_capacity(DConstants::INVALID_INDEX) {
+      local_sink_capacity(DConstants::INVALID_INDEX), next_memory_check_count(0) {
 	// If there are no groups we create a fake group so everything has the same group
 	group_chunk.InitializeEmpty(radix_ht.group_types);
 	if (radix_ht.grouping_set.empty()) {
@@ -872,6 +875,7 @@ void RadixHTLocalSinkState::ResetForReuse(const RadixPartitionedHashTable &radix
 	direct_append_attempted_rows = 0;
 	direct_append_new_rows = 0;
 	direct_append_adapted = false;
+	next_memory_check_count = 0;
 	if (radix_ht.grouping_set.empty()) {
 		group_chunk.data[0].Reference(Value::TINYINT(42), count_t(STANDARD_VECTOR_SIZE));
 	}
@@ -1082,6 +1086,13 @@ void MaybeRepartition(ClientContext &context, RadixHTGlobalSinkState &gstate, Ra
 	ht.Repartition(row_location_remap);
 }
 
+static bool RadixHTMemoryLimitExceeded(RadixHTGlobalSinkState &gstate, GroupedAggregateHashTable &ht) {
+	const auto aggregate_allocator_size = ht.GetAggregateAllocator()->AllocationSize();
+	const auto total_size =
+	    aggregate_allocator_size + ht.GetPartitionedData().SizeInBytes() + ht.Capacity() * sizeof(ht_entry_t);
+	return total_size > gstate.GetThreadLimit();
+}
+
 static GroupedAggregateHashTable &PrepareRadixHTSinkState(ExecutionContext &context,
                                                           const RadixPartitionedHashTable &radix_ht,
                                                           OperatorSinkInput &input) {
@@ -1147,7 +1158,13 @@ static void FinishRadixHTSinkState(ClientContext &context, RadixHTGlobalSinkStat
 	// Decide whether we should adapt our strategy to the data
 	MaybeAdaptRadixHTSinkState(gstate, lstate, row_location_remap);
 
-	if (ht.Count() + STANDARD_VECTOR_SIZE < GroupedAggregateHashTable::ResizeThreshold(lstate.local_sink_capacity)) {
+	const auto resize_threshold = GroupedAggregateHashTable::ResizeThreshold(lstate.local_sink_capacity);
+	const bool memory_check_due = ht.Count() >= lstate.next_memory_check_count;
+	if (memory_check_due) {
+		lstate.next_memory_check_count = ht.Count() + STANDARD_VECTOR_SIZE * 32;
+	}
+	const bool memory_limit_exceeded = memory_check_due && RadixHTMemoryLimitExceeded(gstate, ht);
+	if (!memory_limit_exceeded && ht.Count() + STANDARD_VECTOR_SIZE < resize_threshold) {
 		return; // We can fit another chunk
 	}
 

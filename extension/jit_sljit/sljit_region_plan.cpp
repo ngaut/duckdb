@@ -397,7 +397,8 @@ ExecutionRegionLoweringPlan BuildSljitRegionPlan(const ExecutionRegionIR &region
 		if (node.kind == ExecutionRegionNodeKind::SOURCE) {
 			auto executable_source = SljitCanExecuteSourceNode(node, contract);
 			SljitSourceStrategyContext source_strategy;
-			source_strategy.prefer_duckdb_scan_filters =
+			source_strategy.candidate_uses_scan_filters = candidate.uses_scan_filters;
+			source_strategy.prefer_direct_build_scan_filters =
 			    candidate.traits.sink_kind == ExecutionRegionSinkKind::HASH_JOIN_BUILD;
 			source_strategy.supports_generated_mixed_filter =
 			    candidate.traits.sink_kind == ExecutionRegionSinkKind::HASH_AGGREGATE_UPDATE ||

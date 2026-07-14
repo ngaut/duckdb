@@ -572,6 +572,9 @@ void JoinHashTable::GetRowPointers(DataChunk &keys, TupleDataChunkState &key_sta
 
 void JoinHashTable::GetRowPointersWithDenseHashes(DataChunk &keys, TupleDataChunkState &key_state, ProbeState &state,
                                                   idx_t &count, Vector &pointers_result_v, SelectionVector &match_sel) {
+	// Dense probing writes hashes by row index. Hashing a constant vector preserves its vector type, so establish
+	// the flat-vector invariant once at the dense probe boundary instead of requiring every hash producer to do so.
+	state.hashes_dense_v.Flatten();
 	auto entries = GetEntries();
 	if (UseSalt()) {
 		GetRowPointersFromDenseHashesFlatInternal<true>(keys, key_state, state, count, *this, entries,
