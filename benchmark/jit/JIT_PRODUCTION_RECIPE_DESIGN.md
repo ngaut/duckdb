@@ -1,6 +1,6 @@
 # JIT Production Recipe Architecture
 
-Last updated: 2026-07-13
+Last updated: 2026-07-14
 
 This is the active architecture contract for DuckDB execution-region JIT. It
 defines ownership, admission, runtime-view, and accounting rules. It is not a
@@ -60,10 +60,27 @@ admission boundary:
 3. bind a sequence with `SourceFetch` first and a terminal primitive last;
 4. validate operator indices and the complete sequence before execution.
 
+Every top-level fused family uses one non-throwing binder for admission and
+recipe construction: source-filter aggregate, join-filter aggregate, source
+hash-build sink, hash-join append sink, and hash-join build sink. Each binder
+validates the complete shape first, builds into local sequence state, and
+publishes the recipe only after successful construction. This prevents a
+failed candidate from leaving partial state and prevents capability checks
+from drifting away from the primitive sequence that they admit.
+
 Invalid sequences are construction errors. The executor must not rediscover a
 route, silently replace a broken primitive, or credit work that was not bound.
 `uses_extended_source_fetch_budget` is a source scheduling/coalescing fact; it
 does not mean that execution delegated to native code.
+
+The join-filter-aggregate recipe has one grammar, independent of workload
+names: `SourceFetch -> Projection* -> HashJoinProbeSelection ->
+GeneratedFilter -> Projection* -> PostJoinProjectionAggregateUpdate`. Either
+projection run may be empty. Binding emits one immutable
+`SljitHashJoinDirectAggregateConsumerContract` when the probe and its optional
+generated filter feed the final post-join aggregate directly. Execution uses
+that contract only for the matching probe step; all other successor shapes
+remain on the materialized route and are never probed speculatively.
 
 The terminal primitive is one of the following:
 
@@ -256,6 +273,21 @@ request and lowering plan publish the same mode, and `PhysicalTableScan` derives
 the dynamic-only filter set from the finalized dynamic-filter state. Static
 filters are never silently evaluated twice or silently dropped.
 
+Static-filter admission is an execution-contract proof, not a backend-shaped
+arithmetic blacklist. A generated filter must reference only its retained scan
+input, use a supported physical source type, and be unable to raise a runtime
+exception. The contract discharges integral modulo and integer-division only
+when a constant divisor rules out zero (and signed `-1`, which can overflow at
+the minimum value). The backend then independently lowers the admitted IR; if
+it cannot lower it, DuckDB retains scan ownership. This admits normal safe
+predicates such as `x % 7 = 3` without allowing potentially throwing arithmetic
+to bypass DuckDB semantics.
+
+The generic four-thread scan-filter promotion measures 2.016x over ten
+alternating pairs (51.823 ms off versus 25.712 ms auto). Its 1.85x
+thread-specific regression floor protects the generated-source ownership win;
+the global 1.08x floor remains for thread counts not yet independently promoted.
+
 SLJIT chooses between `ALL` and `DYNAMIC_ONLY` from workload-independent source
 facts and the complete candidate shape. Generated mixed string filtering
 requires a downstream grouped-aggregate contract that consumes the repaired
@@ -400,6 +432,89 @@ publishes match selection, build selection, row pointers, and any output-column
 map needed by downstream projection or aggregate consumers. Full join-output
 materialization is an explicit requirement of a consumer, not the default
 representation of a selected probe.
+
+A terminal that can consume input rows in order may request an identity-preferred
+selected view. Perfect-hash probing then writes only the required build selection
+while every row matches; it does not write a match selection that the consumer
+would immediately replace with the incremental identity vector. If any row
+misses, the probe reruns its compact-selection kernel before publishing a result,
+so no consumer can observe partial identity state. The exact-filter and generated
+perfect-hash engines share this contract. Runtime receipts distinguish the elided
+all-match path from the compact retry.
+
+An all-valid perfect-hash RHS predicate is a separate terminal contract. Its
+two complementary lanes partition every represented row, so their totals are
+also the group row count; the terminal therefore does not write a redundant
+per-row represented-count lane. A nullable RHS uses the ordinary accumulator,
+where neither lane may account for a NULL predicate. The contract is selected
+from the bound dictionary validity, never from a workload or value assumption,
+and emits an explicit all-valid receipt.
+
+Dictionary-backed RHS predicates that require exact string comparison have an
+executable-owned immutable classifier. Every pipeline task using a
+`SljitExecutableHashJoinProbe` has the same direct-terminal predicate descriptor,
+so their direct-row volume is combined for one dictionary. After that volume
+covers the larger of 64 vectors and the dictionary cardinality, one task builds
+`{dictionary owner, all-valid fact, classification bytes}` while holding the
+cache mutex. The artifact is published through DuckDB's atomic shared pointer;
+each consumer retains that owner atomically before reading any byte. A different
+dictionary starts a new observation epoch. Fixed-width values and two inline
+string constants do not take this route: their direct packed comparison is
+already cheaper than a full dictionary pass plus another indirection. There is
+no mutable shared classification after publication, and nullable slots retain
+their explicit NULL classification rather than using the all-valid terminal.
+
+After an all-valid terminal has established one or two runtime group keys, it
+may accumulate the current vector's complementary totals in scalar batch
+counters and merge each known group once. An unseen key commits the pending
+totals before immediately resuming the general accumulator, so the compact
+path cannot lose rows across a domain transition. This is an observed group
+domain rule; it neither names nor assumes any query, table, or key value.
+For an inlined `VARCHAR` source compressed to one of the canonical unsigned
+key widths, that observed domain is also a transactional direct-input rule:
+the terminal compares canonical `string_t` storage against the known compressed
+keys (the `{length, prefix}` word first and the tail only when required) while
+accumulating only vector-local per-group totals. It commits those totals after
+the entire vector validates, not a transformed wide key or a row-local staging
+buffer. A NULL, long string, or unseen value exits before mutation and retains
+the generic selected-key transform. Other physical types never instantiate this
+path.
+
+A compatible `PostJoinProjectionAggregateUpdate` may consume regular no-chain
+inner-probe matches directly. The generic consumer receives the probe-row index
+and matching build-row pointer, then uses the bound group and payload
+descriptors to update the existing pipeline-local accumulator. It is admitted
+only for the same typed key, layout, output, residual, and aggregate contracts
+as the ordinary selected-view route. Unsupported shapes continue through that
+route before a match is published; direct consumption is never a second join
+implementation.
+
+When a direct group transform can fail, its execution-local terminal proves the
+entire bounded vector before updating the accumulator. Each converter declares
+whether its transformed key is staged with that proof; this is a property of
+the conversion work, not its destination width. The lossless string and
+arithmetic compressors stage their transformed keys once, avoiding a second
+conversion during consumption. Both routes preserve all-or-nothing fallback.
+
+Two-constant string membership is a shared runtime primitive across direct
+perfect-hash probes, regular probes, and post-join projections. It loads the
+DuckDB string header once, then performs the existing full comparison for each
+header-compatible constant. Prefix or length collisions therefore retain exact
+equality semantics without repeating the common header load.
+
+Complementary aggregate accumulation writes exactly one payload lane for each
+valid predicate result and neither lane for a null predicate. This preserves
+the SQL null contract while avoiding a zero-valued read-modify-write on the
+opposite lane in every direct-probe consumer.
+
+The filter in that recipe may move before the probe only when its complete
+source map resolves to probe-input columns with identical types. The runtime
+caches one remapped generated predicate per pipeline-local terminal state,
+selects the probe input zero-copy, and then probes only survivors. Any RHS
+reference, missing map, type mismatch, or failed generated-filter binding keeps
+the ordinary post-join filter path. This is a semantic source-ownership proof,
+not a predicate heuristic, and the runtime reports either direct-consumer
+execution or its explicit miss reason.
 
 Exact membership runtime filters and their owning join table share a query-local
 identity. Storage applies exact perfect-hash and shift-zero numeric prefix-range
@@ -953,6 +1068,9 @@ Production timing comes from the shell's monotonic microsecond wall clock and
 is emitted with six decimal places. Millisecond-rounded timing is too coarse for
 the short generic contracts: a one-millisecond median shift can fabricate or
 erase a material speedup without any execution change.
+Each generic repetition executes both policies once and reverses their order on
+the next repetition. This preserves the independent raw-median threshold while
+preventing page-cache or frequency warmup from always favoring the second policy.
 
 Run the TPC-H regression gate for runtime, planner, backend, or performance
 changes:
@@ -984,11 +1102,11 @@ query sets cannot update the accepted state unless the caller explicitly opts
 into the local-only partial-baseline escape hatch. Promotion never points at
 the low-sample candidate. It reruns the complete requested query set without
 decision/runtime tracing and compares that high-sample artifact with the
-previous baseline. A failed late query may be rerun independently at the same
-high sample count to remove sustained-run thermal/order bias. Its row is used
-only if the focused comparison passes, and the resulting complete artifact is
-compared again in full. The state update is atomic and happens only after every
-gate passes. Runtime, speedup, preserved-win, and component-ratio thresholds
+previous baseline. An operator may explicitly request a focused ten-repeat
+rerun for a failed late query to remove sustained-run thermal/order bias. Its
+row is used only if the focused comparison passes, and the resulting complete
+artifact is compared again in full. The state update is atomic and happens only
+after every gate passes. Runtime, speedup, preserved-win, and component-ratio thresholds
 are evaluated with exact decimal arithmetic: a value exactly on a configured
 boundary passes, while any value beyond it fails.
 
@@ -1022,8 +1140,8 @@ workload classes instead of optimizing TPC-H query names.
 Generic performance and runtime proof are separate modes. Production runs have
 runtime tracing disabled and enforce speedup/slowdown thresholds. Traced runs
 enforce correctness, compilation, and executed-region proof but never make a
-performance decision. A production failure on a short workload triggers a
-focused recheck up to the configured high-sample count before the gate decides;
+performance decision. A production failure is reported from its candidate
+sample. A focused ten-repeat recheck is an explicit operator action;
 correctness, compilation, and missing-runtime-proof failures are never retried
 as timing noise.
 
@@ -1034,8 +1152,9 @@ performance that the implementation just replaced. Floors remain
 thread-specific when parallel scheduling noise changes the demonstrated
 margin. Retained exact-filter evidence proves 1.179x-1.191x at one thread and
 1.110x-1.128x at four threads, so its floors remain 1.15x and 1.08x. Current
-candidate gates use five alternating repetitions and promotion or focused
-triage uses ten; no routine gate schedules a larger sample.
+candidate gates use five order-alternating policy pairs and an explicitly
+requested promotion or focused triage uses ten; no routine gate schedules a
+larger sample.
 
 Filtered perfect-hash and ungrouped scalar-terminal hybrids consume one SIMD
 profitability contract based on scalar predicate operations. A lone comparison
@@ -1066,10 +1185,23 @@ floors of 1.25x and 1.20x. The ten-run SF10 Q6 proof restores 2.044x and passes
 the strict comparison against the prior 2.054x accepted baseline. The non-null
 grouped workload proves 1.167x-1.176x at one thread and 1.143x at four
 threads, with thread-specific floors of 1.16x and 1.13x.
-The mixed-source complementary join proves 1.336x at one thread and 1.230x at
-four threads in alternating 10-repeat promotion runs after the runtime-adaptive hot-group
-accumulator and proven BIGINT-to-INTEGER no-chain probe. Its checked-in floors
-are now 1.30x and 1.20x respectively.
+The mixed-source complementary join promotion receipts prove 1.332x at one
+thread and 1.250x at four threads in alternating 10-repeat runs. The direct
+perfect-hash terminal combines a pipeline-local group accumulator with an
+executable-owned RHS predicate classifier. Direct volume is combined across
+pipeline tasks until it covers the dictionary, then one task publishes an
+immutable dictionary-owning byte classifier through DuckDB's atomic shared
+pointer for exact unpacked strings. Compact fixed-width strings retain their
+direct packed comparison; the same applies when both constants are inline.
+Every task retains the published owner before byte lookup; the mutex is absent
+from the post-publication path. For direct output with an incremental source,
+the build-side dictionary index derives as normalized key minus hash minimum.
+Its all-valid one/two-key terminal accumulates incremental inline groups at
+their ordinal and commits only after the entire vector proves the compact
+domain; any NULL, long string, or unseen key leaves state untouched for the
+general transform path. Its checked-in floors are 1.31x and 1.24x respectively.
+The T4 promotion artifact is
+`benchmark/jit/tmp/contiguous_build_index_t4_promotion10_20260714`.
 The mixed numeric/date plus nullable-string scan proves the generic partial
 predicate contract outside TPC-H: 1.338x at one thread and 1.286x at four
 threads. Its checked-in floors are 1.25x and 1.20x. Disabling only partial
@@ -1113,7 +1245,7 @@ can represent every 64-bit key, payload, and state operation and the target has
 the required register file; unsupported targets use the exact generic route
 until a paired-register lowering is implemented.
 The complementary-join receipts are
-`benchmark/jit/tmp/string_complementary_fast_probe_t1_promotion10_20260713` and
+`benchmark/jit/tmp/dense_perfect_hash_predicate_cache_promotion10_20260714` and
 `benchmark/jit/tmp/string_complementary_fast_probe_t4_promotion10_20260713`.
 
 Current full-matrix generic evidence is stored in

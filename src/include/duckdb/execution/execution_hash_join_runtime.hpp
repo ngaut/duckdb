@@ -91,21 +91,27 @@ struct ExecutionHashJoinRHSFixedColumnSource {
 struct ExecutionHashJoinProbeOutputProof {
 	bool source_key0_int64_to_int32 = false;
 	bool match_selection_is_identity = false;
+	//! A perfect-hash probe matched the complete input, so the consumer can
+	//! derive its build row as the normalized key minus the table minimum.
+	bool perfect_build_selection_is_key_offset = false;
 	optional_ptr<const vector<idx_t>> exact_rhs_output_probe_input_indices;
 
 	void Reset() {
 		source_key0_int64_to_int32 = false;
 		match_selection_is_identity = false;
+		perfect_build_selection_is_key_offset = false;
 		exact_rhs_output_probe_input_indices = nullptr;
 	}
 
 	void SetExactSourceFilterMatches(const vector<idx_t> &rhs_output_probe_input_indices) {
 		match_selection_is_identity = true;
+		perfect_build_selection_is_key_offset = false;
 		exact_rhs_output_probe_input_indices = optional_ptr<const vector<idx_t>>(&rhs_output_probe_input_indices);
 	}
 
 	void SetExplicitMatchSelection() {
 		match_selection_is_identity = false;
+		perfect_build_selection_is_key_offset = false;
 	}
 
 	bool ExactSourceFilterMatches() const {

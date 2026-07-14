@@ -86,6 +86,14 @@ struct SljitHashJoinProbeCodegenConfig {
 	}
 };
 
+//! Controls which transient selections a perfect-hash probe materializes. The
+//! fully elided form is only valid when its caller can derive the build index
+//! from a proof-backed identity probe input.
+struct SljitPerfectHashJoinProbeCodegenConfig {
+	bool emit_match_selection = true;
+	bool emit_build_selection = true;
+};
+
 unique_ptr<ExecutionRegionCodeHandle>
 BuildSljitRegularHashJoinProbe(const SljitNativeHashJoinProbePlan &plan,
                                SljitNativeRegularHashJoinProbeFunction &function, string &error,
@@ -93,8 +101,9 @@ BuildSljitRegularHashJoinProbe(const SljitNativeHashJoinProbePlan &plan,
 unique_ptr<ExecutionRegionCodeHandle> BuildSljitNestedLoopJoinProbe(const SljitNativeNestedLoopJoinProbePlan &plan,
                                                                     SljitNativeNestedLoopJoinProbeFunction &function,
                                                                     string &error);
-unique_ptr<ExecutionRegionCodeHandle> BuildSljitPerfectHashJoinProbe(const SljitNativeHashJoinProbePlan &plan,
-                                                                     SljitNativePerfectHashJoinProbeFunction &function,
-                                                                     string &error);
+unique_ptr<ExecutionRegionCodeHandle>
+BuildSljitPerfectHashJoinProbe(const SljitNativeHashJoinProbePlan &plan,
+                               SljitNativePerfectHashJoinProbeFunction &function, string &error,
+                               const SljitPerfectHashJoinProbeCodegenConfig &config = {});
 
 } // namespace duckdb

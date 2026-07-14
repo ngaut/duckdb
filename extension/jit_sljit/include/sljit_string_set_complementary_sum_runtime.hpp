@@ -185,8 +185,8 @@ static void SljitExecuteStringSetComplementarySumSpan(const ExecutionGroupedAggr
 		const auto predicate_idx = predicate_sel->get_index(row_idx);
 		if (predicate_validity.RowIsValid(predicate_idx)) {
 			auto predicate = predicate_data[predicate_idx];
-			matches = SljitStringEqualsConstant(predicate, state.constants[0], state.signatures[0]) ||
-			          SljitStringEqualsConstant(predicate, state.constants[1], state.signatures[1]);
+			matches = SljitStringEqualsEitherConstant(predicate, state.constants[0], state.signatures[0],
+			                                          state.constants[1], state.signatures[1]);
 		}
 		SljitApplyStringSetComplementarySumLane(state_address, *state.matching_lane, matches);
 		SljitApplyStringSetComplementarySumLane(state_address, *state.non_matching_lane,

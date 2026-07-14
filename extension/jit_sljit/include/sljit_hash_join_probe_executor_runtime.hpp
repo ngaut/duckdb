@@ -22,28 +22,31 @@
 namespace duckdb {
 
 static void SljitPopulateExactPerfectHashJoinSelections(const SljitNativeHashJoinProbeKeyPlan &key,
-                                                        SljitNativePerfectHashJoinProbeInput &input) {
+                                                        SljitNativePerfectHashJoinProbeInput &input,
+                                                        bool emit_match_selection = true,
+                                                        bool emit_build_selection = true) {
 	if (input.source_key0_int64_to_int32) {
-		SljitPopulateExactPerfectHashJoinSelections<int32_t, int64_t>(input);
+		SljitPopulateExactPerfectHashJoinSelections<int32_t, int64_t>(input, emit_match_selection,
+		                                                              emit_build_selection);
 		return;
 	}
 	switch (key.key_kind) {
 	case SljitNativeHashJoinKeyKind::INT8:
-		return SljitPopulateExactPerfectHashJoinSelections<int8_t>(input);
+		return SljitPopulateExactPerfectHashJoinSelections<int8_t>(input, emit_match_selection, emit_build_selection);
 	case SljitNativeHashJoinKeyKind::INT16:
-		return SljitPopulateExactPerfectHashJoinSelections<int16_t>(input);
+		return SljitPopulateExactPerfectHashJoinSelections<int16_t>(input, emit_match_selection, emit_build_selection);
 	case SljitNativeHashJoinKeyKind::INT32:
-		return SljitPopulateExactPerfectHashJoinSelections<int32_t>(input);
+		return SljitPopulateExactPerfectHashJoinSelections<int32_t>(input, emit_match_selection, emit_build_selection);
 	case SljitNativeHashJoinKeyKind::INT64:
-		return SljitPopulateExactPerfectHashJoinSelections<int64_t>(input);
+		return SljitPopulateExactPerfectHashJoinSelections<int64_t>(input, emit_match_selection, emit_build_selection);
 	case SljitNativeHashJoinKeyKind::UINT8:
-		return SljitPopulateExactPerfectHashJoinSelections<uint8_t>(input);
+		return SljitPopulateExactPerfectHashJoinSelections<uint8_t>(input, emit_match_selection, emit_build_selection);
 	case SljitNativeHashJoinKeyKind::UINT16:
-		return SljitPopulateExactPerfectHashJoinSelections<uint16_t>(input);
+		return SljitPopulateExactPerfectHashJoinSelections<uint16_t>(input, emit_match_selection, emit_build_selection);
 	case SljitNativeHashJoinKeyKind::UINT32:
-		return SljitPopulateExactPerfectHashJoinSelections<uint32_t>(input);
+		return SljitPopulateExactPerfectHashJoinSelections<uint32_t>(input, emit_match_selection, emit_build_selection);
 	case SljitNativeHashJoinKeyKind::UINT64:
-		return SljitPopulateExactPerfectHashJoinSelections<uint64_t>(input);
+		return SljitPopulateExactPerfectHashJoinSelections<uint64_t>(input, emit_match_selection, emit_build_selection);
 	default:
 		throw InternalException("exact perfect hash join filter proof has an unsupported key width");
 	}
@@ -56,6 +59,7 @@ static ExecutionOperatorBindResult SljitExecutePerfectHashJoinProbe(
     DataChunk &output, SelectionVector &match_selection, SelectionVector &build_selection,
     SljitHashJoinProbeDrainState &state, bool source_key0_int64_to_int32_unchecked = false,
     SljitHashJoinProbeOutputContract output_contract = SljitHashJoinProbeOutputContract::MATERIALIZED_OUTPUT) {
+	state.output_proof.perfect_build_selection_is_key_offset = false;
 	if (plan.exact_source_filter_identity) {
 		runtime.RecordJitRuntimePath("hash_join_probe.perfect_probe.exact_source_filter_candidate");
 	}
@@ -66,11 +70,31 @@ static ExecutionOperatorBindResult SljitExecutePerfectHashJoinProbe(
 		SljitPreparePerfectHashJoinProbeInput(key, probe.perfect_layout, input, match_selection, build_selection, state,
 		                                      source_key0_int64_to_int32_unchecked, prepared_input);
 		auto &native_input = prepared_input.native_input;
-		SljitPopulateExactPerfectHashJoinSelections(key, native_input);
+		const bool prefer_identity_selection = SljitHashJoinProbePrefersIdentitySelection(output_contract);
+		const bool direct_consumer_output =
+		    SljitHashJoinProbePrefersDirectConsumerOutput(output_contract) &&
+		    SljitCanDerivePerfectHashBuildSelectionFromIdentity(key, probe.perfect_layout, input);
+		const auto initial_input_offset = native_input.input_offset;
+		SljitPopulateExactPerfectHashJoinSelections(key, native_input, !prefer_identity_selection,
+		                                            !direct_consumer_output);
+		if (prefer_identity_selection && native_input.selected_count != input.size()) {
+			native_input.input_offset = initial_input_offset;
+			native_input.selected_count = 0;
+			native_input.finished = false;
+			SljitPopulateExactPerfectHashJoinSelections(key, native_input);
+			runtime.RecordJitRuntimePath("hash_join_probe.perfect_probe.identity_selection_retry", input.size());
+		} else if (prefer_identity_selection) {
+			runtime.RecordJitRuntimePath("hash_join_probe.perfect_probe.identity_selection_elided", input.size());
+			if (direct_consumer_output) {
+				state.output_proof.perfect_build_selection_is_key_offset = true;
+				runtime.RecordJitRuntimePath("hash_join_probe.perfect_probe.build_selection_elided", input.size());
+			}
+		}
 		state.input_offset = native_input.input_offset;
 		state.resume_row_pointer = nullptr;
 		state.finished = native_input.finished;
 		state.output_proof.source_key0_int64_to_int32 = native_input.source_key0_int64_to_int32;
+		state.output_proof.match_selection_is_identity = native_input.selected_count == input.size();
 		runtime.RecordJitRuntimePath("hash_join_probe.perfect_probe.exact_source_filter", native_input.selected_count);
 		RecordSljitRegionRuntimeProof(runtime, op.kind, ExecutionRegionJitRuntimeProof::GENERATED_BACKEND_WORK,
 		                              "exact_source_filter", native_input.selected_count);
@@ -82,15 +106,45 @@ static ExecutionOperatorBindResult SljitExecutePerfectHashJoinProbe(
 		                                         native_input.selected_count, output, nullptr);
 		return ExecutionOperatorBindResult::READY;
 	}
-	auto function = owner.EnsurePerfectHashJoinProbeCode(runtime, op.hash_join_probe);
 	auto &key = SljitValidatePerfectHashJoinProbeExecutionLayout(plan, probe, input);
+	const bool prefer_identity_selection = SljitHashJoinProbePrefersIdentitySelection(output_contract);
+	const bool direct_consumer_output =
+	    SljitHashJoinProbePrefersDirectConsumerOutput(output_contract) &&
+	    SljitCanDerivePerfectHashBuildSelectionFromIdentity(key, probe.perfect_layout, input);
+	auto function = owner.EnsurePerfectHashJoinProbeCode(runtime, op.hash_join_probe, prefer_identity_selection,
+	                                                     direct_consumer_output);
 	SljitPreparedPerfectHashJoinProbeInput prepared_input;
 	SljitPreparePerfectHashJoinProbeInput(key, probe.perfect_layout, input, match_selection, build_selection, state,
 	                                      source_key0_int64_to_int32_unchecked, prepared_input);
 	auto &native_input = prepared_input.native_input;
+	const auto initial_input_offset = native_input.input_offset;
 
 	auto generated_stage_start = SljitRegionStageStart(runtime);
 	SljitExecuteNativeFunction(function, native_input);
+	if (native_input.error) {
+		std::rethrow_exception(native_input.error);
+	}
+	if (prefer_identity_selection && native_input.selected_count != input.size()) {
+		// The identity kernel intentionally does not materialize match indices.
+		// A miss makes that compact representation necessary, so rerun the same
+		// probe with the normal kernel. The first pass has no externally visible
+		// state and its compact build selection is overwritten by this retry.
+		native_input.input_offset = initial_input_offset;
+		native_input.selected_count = 0;
+		native_input.finished = false;
+		auto compact_function = owner.EnsurePerfectHashJoinProbeCode(runtime, op.hash_join_probe, false);
+		SljitExecuteNativeFunction(compact_function, native_input);
+		if (native_input.error) {
+			std::rethrow_exception(native_input.error);
+		}
+		runtime.RecordJitRuntimePath("hash_join_probe.perfect_probe.identity_selection_retry", input.size());
+	} else if (prefer_identity_selection) {
+		runtime.RecordJitRuntimePath("hash_join_probe.perfect_probe.identity_selection_elided", input.size());
+		if (direct_consumer_output) {
+			state.output_proof.perfect_build_selection_is_key_offset = true;
+			runtime.RecordJitRuntimePath("hash_join_probe.perfect_probe.build_selection_elided", input.size());
+		}
+	}
 	RecordSljitRegionStageRuntimePath(runtime, op_idx, op.kind, SljitGeneratedPerfectHashJoinProbeStage(),
 	                                  generated_stage_start);
 	state.input_offset = native_input.input_offset;
@@ -98,6 +152,7 @@ static ExecutionOperatorBindResult SljitExecutePerfectHashJoinProbe(
 	state.finished = native_input.finished;
 	state.output_proof.source_key0_int64_to_int32 =
 	    native_input.selected_count != 0 && native_input.source_key0_int64_to_int32;
+	state.output_proof.match_selection_is_identity = native_input.selected_count == input.size();
 	if (native_input.selected_count == 0) {
 		output.Reset();
 		return ExecutionOperatorBindResult::READY;

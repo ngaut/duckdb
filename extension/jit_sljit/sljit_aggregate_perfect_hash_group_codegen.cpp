@@ -142,7 +142,8 @@ static void EmitLoadFusedAggregateGroupMiniStringCompressData(struct sljit_compi
                                                               sljit_s32 index_reg, sljit_s32 target_reg,
                                                               bool use_hoisted_group_data, sljit_s32 group_data_reg,
                                                               bool may_be_empty, bool use_precomputed_string_offset,
-                                                              sljit_s32 group_data_array_base_reg) {
+	                                                          sljit_s32 group_data_array_base_reg,
+	                                                          bool fuse_nonempty_string_compress_bias) {
 	static constexpr sljit_sw STRING_LENGTH_OFFSET = 0;
 	static constexpr sljit_sw STRING_INLINE_PREFIX_OFFSET = sizeof(uint32_t);
 	static constexpr sljit_sw STRING_POINTER_OFFSET = sizeof(uint32_t) + string_t::PREFIX_BYTES;
@@ -168,7 +169,9 @@ static void EmitLoadFusedAggregateGroupMiniStringCompressData(struct sljit_compi
 		if (!may_be_empty) {
 			// UTINYINT string compression only appears for one-byte strings here; nonzero minima rule out empty keys.
 			sljit_emit_op1(compiler, SLJIT_MOV_U8, target_reg, 0, SLJIT_MEM1(SLJIT_R0), STRING_INLINE_PREFIX_OFFSET);
-			sljit_emit_op2(compiler, SLJIT_ADD, target_reg, 0, target_reg, 0, SLJIT_IMM, 1);
+			if (!fuse_nonempty_string_compress_bias) {
+				sljit_emit_op2(compiler, SLJIT_ADD, target_reg, 0, target_reg, 0, SLJIT_IMM, 1);
+			}
 			return;
 		}
 		sljit_emit_op1(compiler, SLJIT_MOV_U32, SLJIT_R3, 0, SLJIT_MEM1(SLJIT_R0), STRING_LENGTH_OFFSET);
@@ -229,7 +232,8 @@ static void EmitLoadFusedAggregateGroupTransformedIntegerData(struct sljit_compi
 void EmitLoadFusedAggregateGroupData(struct sljit_compiler *compiler, idx_t group_idx,
                                      const SljitPerfectHashGroupPlan &group, sljit_s32 index_reg, sljit_s32 target_reg,
                                      bool use_hoisted_group_data, sljit_s32 group_data_reg,
-                                     bool use_precomputed_string_offset, sljit_s32 group_data_array_base_reg) {
+                                     bool use_precomputed_string_offset, sljit_s32 group_data_array_base_reg,
+                                     bool fuse_nonempty_string_compress_bias) {
 	if (group.expression_kind == SljitNativeRegionExpressionKind::INTEGRAL_COMPRESS ||
 	    group.expression_kind == SljitNativeRegionExpressionKind::INTEGER_CAST) {
 		EmitLoadFusedAggregateGroupTransformedIntegerData(compiler, group_idx, group, index_reg, target_reg,
@@ -240,7 +244,8 @@ void EmitLoadFusedAggregateGroupData(struct sljit_compiler *compiler, idx_t grou
 	if (group.expression_kind == SljitNativeRegionExpressionKind::STRING_COMPRESS) {
 		EmitLoadFusedAggregateGroupMiniStringCompressData(compiler, group_idx, index_reg, target_reg,
 		                                                  use_hoisted_group_data, group_data_reg, group.minimum == 0,
-		                                                  use_precomputed_string_offset, group_data_array_base_reg);
+		                                                  use_precomputed_string_offset, group_data_array_base_reg,
+		                                                  fuse_nonempty_string_compress_bias);
 		return;
 	}
 	EmitLoadFusedAggregateGroupIntegerData(compiler, group_idx, group.integer_kind, index_reg, target_reg,

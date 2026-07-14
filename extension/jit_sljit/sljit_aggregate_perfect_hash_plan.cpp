@@ -92,10 +92,9 @@ static sljit_sw AllocateSljitLocalPerfectHashByteArray(sljit_sw &local_size, idx
 	return result;
 }
 
-bool TryBuildSljitLocalPerfectHashAggregatePlan(const vector<ExecutionRegionAggregateInput> &aggregates,
-                                                const ExecutionRegionAggregateContract &contract,
-                                                const vector<bool> &payloads_not_null, sljit_sw &local_size,
-                                                SljitLocalPerfectHashAggregatePlan &result) {
+static bool TryBuildSljitLocalPerfectHashAggregatePlanCandidate(
+    const vector<ExecutionRegionAggregateInput> &aggregates, const ExecutionRegionAggregateContract &contract,
+    const vector<bool> &payloads_not_null, sljit_sw &local_size, SljitLocalPerfectHashAggregatePlan &result) {
 	if (contract.perfect_required_bits_total >= 8 * sizeof(idx_t)) {
 		return false;
 	}
@@ -201,6 +200,29 @@ bool TryBuildSljitLocalPerfectHashAggregatePlan(const vector<ExecutionRegionAggr
 			return false;
 		}
 	}
+	return true;
+}
+
+bool TryBuildSljitLocalPerfectHashAggregatePlan(const vector<ExecutionRegionAggregateInput> &aggregates,
+                                                const ExecutionRegionAggregateContract &contract,
+                                                const vector<bool> &payloads_not_null, sljit_sw &local_size,
+                                                SljitLocalPerfectHashAggregatePlan &result) {
+	// Sparse perfect-hash domains can arise from compact physical encodings whose
+	// values are not dense (for example, one-byte string prefixes). The local
+	// reducer is profitable only while its complete state remains cache-resident;
+	// otherwise the direct perfect-hash state path avoids an extra sparse table
+	// and its per-row bookkeeping.
+	auto candidate_local_size = local_size;
+	SljitLocalPerfectHashAggregatePlan candidate;
+	if (!TryBuildSljitLocalPerfectHashAggregatePlanCandidate(aggregates, contract, payloads_not_null,
+	                                                         candidate_local_size, candidate)) {
+		return false;
+	}
+	if (candidate.sparse && candidate_local_size - local_size > SLJIT_SPARSE_LOCAL_PERFECT_HASH_MAX_BYTES) {
+		return false;
+	}
+	local_size = candidate_local_size;
+	result = std::move(candidate);
 	return true;
 }
 

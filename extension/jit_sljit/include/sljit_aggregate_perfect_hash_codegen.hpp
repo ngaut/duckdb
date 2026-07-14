@@ -21,6 +21,7 @@ namespace duckdb {
 constexpr idx_t SLJIT_LOCAL_PERFECT_HASH_MAX_GROUPS = 16;
 constexpr idx_t SLJIT_EAGER_ZERO_SPARSE_LOCAL_MAX_GROUPS = 64;
 constexpr idx_t SLJIT_SPARSE_LOCAL_PERFECT_HASH_MAX_GROUPS = 1024;
+constexpr sljit_sw SLJIT_SPARSE_LOCAL_PERFECT_HASH_MAX_BYTES = 32 * 1024;
 constexpr idx_t SLJIT_DEFERRED_PERFECT_HASH_FLAG_MAX_GROUPS = 1024;
 constexpr sljit_sw SLJIT_STRING_T_SHIFT = 4;
 
@@ -112,7 +113,8 @@ void EmitLoadFusedAggregateGroupData(struct sljit_compiler *compiler, idx_t grou
                                      const SljitPerfectHashGroupPlan &group, sljit_s32 index_reg, sljit_s32 target_reg,
                                      bool use_hoisted_group_data, sljit_s32 group_data_reg,
                                      bool use_precomputed_string_offset = false,
-                                     sljit_s32 group_data_array_base_reg = 0);
+                                     sljit_s32 group_data_array_base_reg = 0,
+                                     bool fuse_nonempty_string_compress_bias = false);
 sljit_s32 SljitPerfectHashGroupDataPointerReg(idx_t group_idx);
 sljit_s32 SljitPerfectHashSourceDataPointerReg(idx_t hoist_idx, bool include_fast_validity_reg);
 

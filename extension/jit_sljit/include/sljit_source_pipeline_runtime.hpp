@@ -101,7 +101,11 @@ private:
 				return terminal_runtime.Execute(runtime, result, ops, scratch, terminal_step, selected_output,
 				                                have_more_output, processed_batches);
 			};
-			return hash_join_selection.Execute(hash_join_step, input, execute_hash_join_probe, execute_terminal);
+			auto try_execute_direct_consumer = [](const auto &, const auto &, auto &, auto &) {
+				return SljitHashJoinAggregateConsumerResult {};
+			};
+			return hash_join_selection.Execute(hash_join_step, input, execute_hash_join_probe, execute_terminal,
+			                                   nullptr, try_execute_direct_consumer);
 		};
 		auto execute_source_chunk = [&](DataChunk &source_chunk, bool have_more_output) {
 			return source_fetch.Execute(source_chunk, have_more_output, execute_source_batch);
@@ -211,7 +215,20 @@ private:
 		auto execute_next_step = [&](const SljitRuntimeBatchView &output) {
 			return ExecuteStep(next_step_idx, output, true);
 		};
-		return hash_join_selection.Execute(step, input, execute_hash_join_probe, execute_next_step);
+		const auto direct_consumer_contract = recipe.direct_aggregate_consumer.probe_step_idx == step_idx
+		                                         ? optional_ptr<const SljitHashJoinDirectAggregateConsumerContract>(
+		                                               &recipe.direct_aggregate_consumer)
+		                                         : nullptr;
+		auto try_execute_direct_consumer = [&](const SljitHashJoinDirectAggregateConsumerContract &contract,
+		                                       const SljitHashJoinProbeSelectionPrimitive &probe_primitive,
+		                                       DataChunk &join_input, auto &probe_executor) {
+			D_ASSERT(contract.probe_step_idx == step_idx);
+			D_ASSERT(contract.terminal_step_idx + 1 == recipe.primitive_sequence.Count());
+			return terminal_runtime.TryExecuteHashJoinProbeConsumer(runtime, ops, scratch, contract, probe_primitive,
+			                                                        join_input, probe_executor);
+		};
+		return hash_join_selection.Execute(step, input, execute_hash_join_probe, execute_next_step,
+		                                   direct_consumer_contract, try_execute_direct_consumer);
 	}
 
 	bool ExecuteMarkProbeFilterBoundary(idx_t step_idx, const SljitFullPipelinePrimitiveStep &step,

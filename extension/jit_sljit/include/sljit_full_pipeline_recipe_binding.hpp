@@ -39,29 +39,25 @@ public:
 
 	SljitFullPipelineRecipe MakeSourceUngroupedAggregateRecipe(const SljitSourceUngroupedAggregateFacts &facts) const;
 
-	bool CanMakeSourceFilterAggregateRecipe(const SljitSourceFilterAggregateFacts &facts) const;
+	bool TryMakeSourceFilterAggregateRecipe(const SljitSourceFilterAggregateFacts &facts,
+	                                        SljitFullPipelineRecipe &recipe) const;
 
-	SljitFullPipelineRecipe MakeSourceFilterAggregateRecipe(const SljitSourceFilterAggregateFacts &facts) const;
-
-	bool CanMakeJoinFilterAggregateRecipe(const SljitJoinFilterAggregateFacts &facts) const;
-
-	SljitFullPipelineRecipe MakeJoinFilterAggregateRecipe(const SljitJoinFilterAggregateFacts &facts) const;
+	bool TryMakeJoinFilterAggregateRecipe(const SljitJoinFilterAggregateFacts &facts,
+	                                      SljitFullPipelineRecipe &recipe) const;
 
 	SljitFullPipelineRecipe
 	MakeGeneratedFilterProjectionNativeTailRecipe(const SljitGeneratedFilterProjectionNativeTailFacts &facts) const;
-	bool CanMakeSourceHashJoinBuildSinkRecipe(const SljitSourceHashJoinBuildSinkFacts &facts) const;
-	SljitFullPipelineRecipe MakeSourceHashJoinBuildSinkRecipe(const SljitSourceHashJoinBuildSinkFacts &facts) const;
+	bool TryMakeSourceHashJoinBuildSinkRecipe(const SljitSourceHashJoinBuildSinkFacts &facts,
+	                                          SljitFullPipelineRecipe &recipe) const;
 
 	SljitFullPipelineRecipe MakeHashJoinDelimJoinSinkRecipe(idx_t first_hash_join_idx, idx_t final_hash_join_idx,
 	                                                        idx_t sink_idx) const;
 
-	bool CanMakeHashJoinAppendSinkRecipe(const SljitHashJoinAppendSinkFacts &facts) const;
+	bool TryMakeHashJoinAppendSinkRecipe(const SljitHashJoinAppendSinkFacts &facts,
+	                                     SljitFullPipelineRecipe &recipe) const;
 
-	SljitFullPipelineRecipe MakeHashJoinAppendSinkRecipe(const SljitHashJoinAppendSinkFacts &facts) const;
-
-	bool CanMakeHashJoinBuildSinkRecipe(const SljitHashJoinBuildSinkFacts &facts) const;
-
-	SljitFullPipelineRecipe MakeHashJoinBuildSinkRecipe(const SljitHashJoinBuildSinkFacts &facts) const;
+	bool TryMakeHashJoinBuildSinkRecipe(const SljitHashJoinBuildSinkFacts &facts,
+	                                    SljitFullPipelineRecipe &recipe) const;
 
 	SljitFullPipelineRecipe
 	MakeJoinDirectProjectionAggregateRecipe(const SljitFullPipelineProjectionAggregateShape &shape,

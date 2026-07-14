@@ -36,6 +36,9 @@ public:
 		if (recipe_plan.has_recipe) {
 			return TryExecutePrimitiveSequenceBatched();
 		}
+		if (!recipe_plan.native_only_runtime_path.empty()) {
+			runtime.RecordJitRuntimePath(recipe_plan.native_only_runtime_path.c_str());
+		}
 		return TryExecuteNativeOnly();
 	}
 

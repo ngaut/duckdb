@@ -55,6 +55,9 @@ public:
 	}
 
 	SljitRegionExecutionScratch scratch;
+	// Mutable terminal strategies and staged fallible group transforms stay below
+	// this execution-local boundary. Immutable perfect-hash predicate classifiers
+	// belong to their executable probe and are retained atomically by each task.
 	SljitFullPipelineTerminalRuntimeState terminal;
 };
 
@@ -132,12 +135,18 @@ public:
 	}
 
 	SljitNativePerfectHashJoinProbeFunction EnsurePerfectHashJoinProbeCode(ExecutionRegionRuntime &runtime,
-	                                                                       SljitExecutableHashJoinProbe &probe) {
-		return EnsureLazyHashJoinProbeCode(runtime, probe.perfect.compiled,
-		                                   "SLJIT native perfect hash join probe lazy code generation failed",
-		                                   [&](SljitNativePerfectHashJoinProbeFunction &function, string &error) {
-			                                   return BuildSljitPerfectHashJoinProbe(probe.plan, function, error);
-		                                   });
+	                                                                       SljitExecutableHashJoinProbe &probe,
+	                                                                       bool prefer_identity_selection,
+	                                                                       bool direct_consumer = false) {
+		SljitPerfectHashJoinProbeCodegenConfig config;
+		config.emit_match_selection = !prefer_identity_selection;
+		config.emit_build_selection = !direct_consumer;
+		return EnsureLazyHashJoinProbeCode(
+		    runtime, probe.perfect.SelectionKernel(prefer_identity_selection, direct_consumer),
+		    "SLJIT native perfect hash join probe lazy code generation failed",
+		    [&](SljitNativePerfectHashJoinProbeFunction &function, string &error) {
+			    return BuildSljitPerfectHashJoinProbe(probe.plan, function, error, config);
+		    });
 	}
 
 	SljitNativeRegularHashJoinProbeFunction EnsureRegularHashJoinProbeCode(

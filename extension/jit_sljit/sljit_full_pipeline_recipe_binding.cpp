@@ -12,6 +12,7 @@
 
 #include "sljit_full_pipeline_primitive_contract.hpp"
 #include "sljit_projection_aggregate_recipe_binding.hpp"
+#include "sljit_region_plan_internal.hpp"
 
 #include <utility>
 
@@ -27,7 +28,12 @@ SljitFullPipelineRecipeBinding::SljitFullPipelineRecipeBinding(const vector<Slji
 }
 
 SljitFullPipelineRecipePlan SljitFullPipelineRecipeBinding::MakeNativeOnlyPlan() const {
-	return SljitMakeFullPipelineNativeOnlyPlan();
+	string runtime_path = "full_pipeline.recipe.native_only";
+	for (auto &op : ops) {
+		runtime_path += ".";
+		runtime_path += SljitNativeRegionOpKindName(op.kind);
+	}
+	return SljitMakeFullPipelineNativeOnlyPlan(std::move(runtime_path));
 }
 
 SljitFullPipelineRecipePlan
@@ -75,51 +81,52 @@ SljitFullPipelineRecipe SljitFullPipelineRecipeBinding::MakeSourceUngroupedAggre
 	return MakePrimitiveSequence(std::move(sequence));
 }
 
-bool SljitFullPipelineRecipeBinding::CanMakeSourceFilterAggregateRecipe(
-    const SljitSourceFilterAggregateFacts &facts) const {
+bool SljitFullPipelineRecipeBinding::TryMakeSourceFilterAggregateRecipe(
+    const SljitSourceFilterAggregateFacts &facts, SljitFullPipelineRecipe &recipe) const {
 	if (!SljitCanBindGeneratedFilterPrimitive(ops, facts.filter_idx)) {
 		return false;
 	}
-	if (SljitCanBindFilteredUngroupedAggregateUpdatePrimitive(ops, facts.filter_idx, facts.aggregate_idx) ||
-	    SljitCanBindUngroupedAggregateUpdatePrimitive(ops, facts.aggregate_idx) ||
-	    SljitCanBindFilteredGroupedAggregateUpdatePrimitive(ops, facts.filter_idx, facts.aggregate_idx)) {
-		return true;
-	}
-	return SljitGroupedAggregateUpdateHasDedicatedBackend(ops, facts.aggregate_idx);
-}
 
-SljitFullPipelineRecipe
-SljitFullPipelineRecipeBinding::MakeSourceFilterAggregateRecipe(const SljitSourceFilterAggregateFacts &facts) const {
+	const auto can_bind_filtered_ungrouped =
+	    SljitCanBindFilteredUngroupedAggregateUpdatePrimitive(ops, facts.filter_idx, facts.aggregate_idx);
+	const auto can_bind_ungrouped = SljitCanBindUngroupedAggregateUpdatePrimitive(ops, facts.aggregate_idx);
+	const auto can_bind_filtered_grouped =
+	    SljitCanBindFilteredGroupedAggregateUpdatePrimitive(ops, facts.filter_idx, facts.aggregate_idx);
+	const auto has_dedicated_grouped_backend = SljitGroupedAggregateUpdateHasDedicatedBackend(ops, facts.aggregate_idx);
+	if (!can_bind_filtered_ungrouped && !can_bind_ungrouped && !can_bind_filtered_grouped &&
+	    !has_dedicated_grouped_backend) {
+		return false;
+	}
+
 	auto sequence = MakeSourceSequence();
-	if (SljitCanBindFilteredUngroupedAggregateUpdatePrimitive(ops, facts.filter_idx, facts.aggregate_idx)) {
+	if (can_bind_filtered_ungrouped) {
 		auto aggregate_update =
 		    SljitBindFilteredUngroupedAggregateUpdatePrimitive(ops, facts.filter_idx, facts.aggregate_idx);
 		sequence.Add(SljitFullPipelinePrimitiveStep::UngroupedAggregateUpdate(aggregate_update));
-		return MakePrimitiveSequence(std::move(sequence));
-	}
-	if (SljitCanBindFilteredGroupedAggregateUpdatePrimitive(ops, facts.filter_idx, facts.aggregate_idx)) {
+	} else if (can_bind_filtered_grouped) {
 		auto aggregate_update =
 		    SljitBindFilteredGroupedAggregateUpdatePrimitive(ops, facts.filter_idx, facts.aggregate_idx);
 		sequence.Add(SljitFullPipelinePrimitiveStep::GroupedAggregateUpdate(aggregate_update));
-		return MakePrimitiveSequence(std::move(sequence));
+	} else {
+		auto generated_filter = SljitBindGeneratedFilterPrimitive(ops, facts.filter_idx);
+		sequence.Add(SljitFullPipelinePrimitiveStep::GeneratedFilter(generated_filter));
+		if (can_bind_ungrouped) {
+			auto aggregate_update = SljitBindUngroupedAggregateUpdatePrimitive(ops, facts.aggregate_idx);
+			sequence.Add(SljitFullPipelinePrimitiveStep::UngroupedAggregateUpdate(aggregate_update));
+		} else if (has_dedicated_grouped_backend) {
+			auto aggregate_update = SljitBindGroupedAggregateUpdatePrimitive(ops, facts.aggregate_idx);
+			sequence.Add(SljitFullPipelinePrimitiveStep::GroupedAggregateUpdate(aggregate_update));
+		} else {
+			D_ASSERT(false);
+			return false;
+		}
 	}
-	auto generated_filter = SljitBindGeneratedFilterPrimitive(ops, facts.filter_idx);
-	sequence.Add(SljitFullPipelinePrimitiveStep::GeneratedFilter(generated_filter));
-	if (SljitCanBindUngroupedAggregateUpdatePrimitive(ops, facts.aggregate_idx)) {
-		auto aggregate_update = SljitBindUngroupedAggregateUpdatePrimitive(ops, facts.aggregate_idx);
-		sequence.Add(SljitFullPipelinePrimitiveStep::UngroupedAggregateUpdate(aggregate_update));
-		return MakePrimitiveSequence(std::move(sequence));
-	}
-	if (SljitGroupedAggregateUpdateHasDedicatedBackend(ops, facts.aggregate_idx)) {
-		auto aggregate_update = SljitBindGroupedAggregateUpdatePrimitive(ops, facts.aggregate_idx);
-		sequence.Add(SljitFullPipelinePrimitiveStep::GroupedAggregateUpdate(aggregate_update));
-		return MakePrimitiveSequence(std::move(sequence));
-	}
-	throw InternalException("SLJIT source filter aggregate recipe has no dedicated aggregate backend");
+	recipe = MakePrimitiveSequence(std::move(sequence));
+	return true;
 }
 
-bool SljitFullPipelineRecipeBinding::CanMakeJoinFilterAggregateRecipe(
-    const SljitJoinFilterAggregateFacts &facts) const {
+bool SljitFullPipelineRecipeBinding::TryMakeJoinFilterAggregateRecipe(const SljitJoinFilterAggregateFacts &facts,
+                                                                       SljitFullPipelineRecipe &recipe) const {
 	if (facts.HasProjectionPrefix() &&
 	    !SljitCanBindProjectionChainPrimitive(ops, facts.first_projection_idx, facts.final_projection_idx)) {
 		return false;
@@ -128,15 +135,18 @@ bool SljitFullPipelineRecipeBinding::CanMakeJoinFilterAggregateRecipe(
 	    !SljitCanBindGeneratedFilterPrimitive(ops, facts.filter_idx)) {
 		return false;
 	}
+	if (!SljitCanBindPostJoinProjectionPrimitive(ops, facts.hash_join_idx, facts.first_post_join_projection_idx,
+	                                             facts.final_post_join_projection_idx)) {
+		return false;
+	}
 	SljitPostJoinProjectionAggregatePrimitive post_join_aggregate;
 	post_join_aggregate.post_join_projection = SljitBindPostJoinProjectionPrimitive(
-	    ops, facts.hash_join_idx, DConstants::INVALID_INDEX, DConstants::INVALID_INDEX);
+	    ops, facts.hash_join_idx, facts.first_post_join_projection_idx, facts.final_post_join_projection_idx);
 	post_join_aggregate.aggregate_idx = facts.aggregate_idx;
-	return SljitCanBindPostJoinProjectionAggregatePrimitive(ops, post_join_aggregate);
-}
+	if (!SljitCanBindPostJoinProjectionAggregatePrimitive(ops, post_join_aggregate)) {
+		return false;
+	}
 
-SljitFullPipelineRecipe
-SljitFullPipelineRecipeBinding::MakeJoinFilterAggregateRecipe(const SljitJoinFilterAggregateFacts &facts) const {
 	auto sequence = MakeSourceSequence();
 	if (facts.HasProjectionPrefix()) {
 		AddProjectionChainStep(sequence, facts.first_projection_idx, facts.final_projection_idx);
@@ -144,15 +154,9 @@ SljitFullPipelineRecipeBinding::MakeJoinFilterAggregateRecipe(const SljitJoinFil
 	sequence.Add(MakeHashJoinProbeSelectionStep(facts.hash_join_idx));
 	auto generated_filter = SljitBindGeneratedFilterPrimitive(ops, facts.filter_idx);
 	sequence.Add(SljitFullPipelinePrimitiveStep::GeneratedFilter(generated_filter));
-	SljitPostJoinProjectionAggregatePrimitive post_join_aggregate;
-	post_join_aggregate.post_join_projection = SljitBindPostJoinProjectionPrimitive(
-	    ops, facts.hash_join_idx, DConstants::INVALID_INDEX, DConstants::INVALID_INDEX);
-	post_join_aggregate.aggregate_idx = facts.aggregate_idx;
-	if (!SljitCanBindPostJoinProjectionAggregatePrimitive(ops, post_join_aggregate)) {
-		throw InternalException("SLJIT join filter aggregate recipe has no post-join aggregate backend");
-	}
 	sequence.Add(SljitFullPipelinePrimitiveStep::PostJoinProjectionAggregateUpdate(post_join_aggregate));
-	return MakePrimitiveSequence(std::move(sequence));
+	recipe = MakePrimitiveSequence(std::move(sequence));
+	return true;
 }
 
 SljitFullPipelineRecipe SljitFullPipelineRecipeBinding::MakeGeneratedFilterProjectionNativeTailRecipe(
@@ -164,8 +168,8 @@ SljitFullPipelineRecipe SljitFullPipelineRecipeBinding::MakeGeneratedFilterProje
 	return MakeNativeTailRecipe(std::move(sequence), facts.tail_start_idx);
 }
 
-bool SljitFullPipelineRecipeBinding::CanMakeSourceHashJoinBuildSinkRecipe(
-    const SljitSourceHashJoinBuildSinkFacts &facts) const {
+bool SljitFullPipelineRecipeBinding::TryMakeSourceHashJoinBuildSinkRecipe(
+    const SljitSourceHashJoinBuildSinkFacts &facts, SljitFullPipelineRecipe &recipe) const {
 	if (facts.sink_idx + 1 != ops.size() || !SljitCanBindHashJoinBuildSinkPrimitive(ops, facts.sink_idx)) {
 		return false;
 	}
@@ -182,11 +186,7 @@ bool SljitFullPipelineRecipeBinding::CanMakeSourceHashJoinBuildSinkRecipe(
 			return false;
 		}
 	}
-	return true;
-}
 
-SljitFullPipelineRecipe SljitFullPipelineRecipeBinding::MakeSourceHashJoinBuildSinkRecipe(
-    const SljitSourceHashJoinBuildSinkFacts &facts) const {
 	auto sequence = MakeSourceSequence();
 	for (idx_t op_idx = 0; op_idx < facts.sink_idx; op_idx++) {
 		if (ops[op_idx].kind == SljitNativeRegionOpKind::FILTER) {
@@ -195,13 +195,15 @@ SljitFullPipelineRecipe SljitFullPipelineRecipeBinding::MakeSourceHashJoinBuildS
 		} else if (ops[op_idx].kind == SljitNativeRegionOpKind::PROJECTION) {
 			AddProjectionChainStep(sequence, op_idx);
 		} else {
-			throw InternalException("SLJIT source hash-build recipe contains an invalid prefix operator");
+			D_ASSERT(false);
+			return false;
 		}
 	}
 	auto sink = SljitBindHashJoinBuildSinkPrimitive(ops, facts.sink_idx);
 	sink.direct_source_ingress = true;
 	sequence.Add(SljitFullPipelinePrimitiveStep::HashJoinBuildSink(sink));
-	return MakePrimitiveSequence(std::move(sequence));
+	recipe = MakePrimitiveSequence(std::move(sequence));
+	return true;
 }
 
 SljitFullPipelineRecipe SljitFullPipelineRecipeBinding::MakeHashJoinDelimJoinSinkRecipe(idx_t first_hash_join_idx,
@@ -220,7 +222,8 @@ SljitFullPipelineRecipe SljitFullPipelineRecipeBinding::MakeHashJoinDelimJoinSin
 	return MakePrimitiveSequence(std::move(sequence));
 }
 
-bool SljitFullPipelineRecipeBinding::CanMakeHashJoinAppendSinkRecipe(const SljitHashJoinAppendSinkFacts &facts) const {
+bool SljitFullPipelineRecipeBinding::TryMakeHashJoinAppendSinkRecipe(const SljitHashJoinAppendSinkFacts &facts,
+                                                                      SljitFullPipelineRecipe &recipe) const {
 	if (facts.first_hash_join_idx > facts.final_hash_join_idx ||
 	    !SljitCanBindHashJoinProbeSelectionPrimitive(ops, facts.final_hash_join_idx) ||
 	    !SljitCanBindSelectedHashJoinAppendSinkPrimitive(ops, facts.final_hash_join_idx, facts.sink_idx)) {
@@ -231,11 +234,7 @@ bool SljitFullPipelineRecipeBinding::CanMakeHashJoinAppendSinkRecipe(const Sljit
 			return false;
 		}
 	}
-	return true;
-}
 
-SljitFullPipelineRecipe
-SljitFullPipelineRecipeBinding::MakeHashJoinAppendSinkRecipe(const SljitHashJoinAppendSinkFacts &facts) const {
 	auto sequence = MakeSourceSequence();
 	for (idx_t hash_join_idx = facts.first_hash_join_idx; hash_join_idx < facts.final_hash_join_idx; hash_join_idx++) {
 		sequence.Add(MakeHashJoinProbeMaterializeStep(hash_join_idx));
@@ -243,10 +242,12 @@ SljitFullPipelineRecipeBinding::MakeHashJoinAppendSinkRecipe(const SljitHashJoin
 	sequence.Add(MakeHashJoinProbeSelectionStep(facts.final_hash_join_idx));
 	auto sink = SljitBindSelectedHashJoinAppendSinkPrimitive(ops, facts.final_hash_join_idx, facts.sink_idx);
 	sequence.Add(SljitFullPipelinePrimitiveStep::AppendSink(sink));
-	return MakePrimitiveSequence(std::move(sequence));
+	recipe = MakePrimitiveSequence(std::move(sequence));
+	return true;
 }
 
-bool SljitFullPipelineRecipeBinding::CanMakeHashJoinBuildSinkRecipe(const SljitHashJoinBuildSinkFacts &facts) const {
+bool SljitFullPipelineRecipeBinding::TryMakeHashJoinBuildSinkRecipe(const SljitHashJoinBuildSinkFacts &facts,
+                                                                     SljitFullPipelineRecipe &recipe) const {
 	if (facts.HasPreProjection() && !SljitCanBindProjectionChainPrimitive(ops, facts.pre_projection_idx)) {
 		return false;
 	}
@@ -264,11 +265,7 @@ bool SljitFullPipelineRecipeBinding::CanMakeHashJoinBuildSinkRecipe(const SljitH
 			return false;
 		}
 	}
-	return true;
-}
 
-SljitFullPipelineRecipe
-SljitFullPipelineRecipeBinding::MakeHashJoinBuildSinkRecipe(const SljitHashJoinBuildSinkFacts &facts) const {
 	auto sequence = MakeSourceSequence();
 	if (facts.HasPreProjection()) {
 		AddProjectionChainStep(sequence, facts.pre_projection_idx);
@@ -284,7 +281,8 @@ SljitFullPipelineRecipeBinding::MakeHashJoinBuildSinkRecipe(const SljitHashJoinB
 	sequence.Add(MakeHashJoinProbeSelectionStep(facts.final_hash_join_idx));
 	auto sink = SljitBindHashJoinBuildSinkPrimitive(ops, facts.sink_idx, facts.projection_idx);
 	sequence.Add(SljitFullPipelinePrimitiveStep::HashJoinBuildSink(sink));
-	return MakePrimitiveSequence(std::move(sequence));
+	recipe = MakePrimitiveSequence(std::move(sequence));
+	return true;
 }
 
 SljitFullPipelineRecipe SljitFullPipelineRecipeBinding::MakeJoinDirectProjectionAggregateRecipe(

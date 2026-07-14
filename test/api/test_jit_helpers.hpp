@@ -205,6 +205,11 @@ static bool HasHashJoinProbeRuntimePath(const ExecutionRegionEvent &event) {
 	return HasGeneratedHashJoinProbeStage(event) && HasJitRuntimePathPrefix(event, "hash_join_probe.");
 }
 
+static bool HasDirectHashJoinProbeAggregateConsumerRuntimePath(const ExecutionRegionEvent &event) {
+	return HasHashJoinProbeRuntimePath(event) &&
+	       StringUtil::Contains(EventJitRuntimePathCounts(event), "direct_aggregate_consumer=");
+}
+
 static void RequireHashProbeAggregateUpdateRuntimeOwnership(const ExecutionRegionEvent &event) {
 	REQUIRE(HasHashJoinProbeRuntimePath(event));
 	REQUIRE(HasJitAggregateUpdatePath(event));

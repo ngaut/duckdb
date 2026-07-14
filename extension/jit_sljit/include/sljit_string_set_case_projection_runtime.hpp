@@ -92,15 +92,37 @@ static SljitStringConstantSignature SljitPrepareStringConstantSignature(const st
 	return result;
 }
 
-static bool SljitStringEqualsConstant(const string_t &value, const string &constant,
-                                      const SljitStringConstantSignature &signature) {
-	if (Load<uint64_t>(const_data_ptr_cast(&value)) != signature.header) {
-		return false;
-	}
+static bool SljitStringEqualsConstantWithHeader(const string_t &value, const string &constant,
+                                                const SljitStringConstantSignature &signature) {
 	if (signature.inlined) {
 		return Load<uint64_t>(const_data_ptr_cast(&value) + sizeof(uint64_t)) == signature.inline_tail;
 	}
 	return memcmp(value.GetData(), constant.data(), constant.size()) == 0;
+}
+
+static bool SljitStringEqualsConstant(const string_t &value, const string &constant,
+                                      const SljitStringConstantSignature &signature) {
+	return Load<uint64_t>(const_data_ptr_cast(&value)) == signature.header &&
+	       SljitStringEqualsConstantWithHeader(value, constant, signature);
+}
+
+//! Two-value membership is the common direct-aggregate predicate. Load the
+//! string layout header once, then retain the ordinary full comparison for
+//! each compatible signature so prefix collisions preserve equality semantics.
+static bool SljitStringEqualsEitherConstant(const string_t &value, const string &first_constant,
+                                            const SljitStringConstantSignature &first_signature,
+                                            const string &second_constant,
+                                            const SljitStringConstantSignature &second_signature) {
+	const auto header = Load<uint64_t>(const_data_ptr_cast(&value));
+	const bool matches_first_header = header == first_signature.header;
+	const bool matches_second_header = header == second_signature.header;
+	if (!matches_first_header && !matches_second_header) {
+		return false;
+	}
+	if (matches_first_header && SljitStringEqualsConstantWithHeader(value, first_constant, first_signature)) {
+		return true;
+	}
+	return matches_second_header && SljitStringEqualsConstantWithHeader(value, second_constant, second_signature);
 }
 
 static bool SljitTryFastProjectStringSetCaseGroupedPayload(const SljitStringSetCaseGroupedPayloadProjection &descriptor,
@@ -139,8 +161,8 @@ static bool SljitTryFastProjectStringSetCaseGroupedPayload(const SljitStringSetC
 		bool low = false;
 		if (predicate_validity.RowIsValid(source_idx)) {
 			auto predicate = predicate_data[source_idx];
-			high = SljitStringEqualsConstant(predicate, descriptor.constants[0], signatures[0]) ||
-			       SljitStringEqualsConstant(predicate, descriptor.constants[1], signatures[1]);
+			high = SljitStringEqualsEitherConstant(predicate, descriptor.constants[0], signatures[0],
+			                                       descriptor.constants[1], signatures[1]);
 			low = !high;
 		}
 		high_data[row_idx] = high ? 1 : 0;

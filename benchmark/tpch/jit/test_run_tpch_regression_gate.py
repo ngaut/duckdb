@@ -7,6 +7,7 @@ import json
 import sys
 import tempfile
 import unittest
+from unittest import mock
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -16,6 +17,7 @@ from run_tpch_regression_gate import (
     apply_baseline_state_contract,
     candidate_qualifies_for_direct_promotion,
     merge_rechecked_csv_artifact,
+    parse_args,
     promotion_recheck_repeats,
     selected_auto_queries,
     triage_recheck_repeats,
@@ -148,6 +150,10 @@ class TestRuntimeContractQuerySelection(unittest.TestCase):
 
 
 class TestPromotionRepeats(unittest.TestCase):
+    def test_triage_is_opt_in(self) -> None:
+        with mock.patch.object(sys, "argv", ["run_tpch_regression_gate.py"]):
+            self.assertFalse(parse_args().triage_failures)
+
     def test_default_is_ten_repeats(self) -> None:
         self.assertEqual(
             promotion_recheck_repeats(SimpleNamespace(repeats=5, promotion_repeats=None)),

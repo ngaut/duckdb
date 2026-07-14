@@ -64,9 +64,9 @@ public:
 			    state.grouped_aggregate_update.Prepare(runtime, ops, scratch, terminal_step.grouped_aggregate_update);
 			break;
 		case SljitFullPipelinePrimitiveKind::POST_JOIN_PROJECTION_AGGREGATE_UPDATE:
-			prepared = state.post_join_projection_aggregate.Prepare(
-			    runtime, ops, terminal_step.post_join_projection_aggregate, source_distinct_counts, source_min_values,
-			    source_max_values);
+			prepared = state.post_join_projection_aggregate.Prepare(ops, terminal_step.post_join_projection_aggregate,
+			                                                        source_distinct_counts, source_min_values,
+			                                                        source_max_values);
 			break;
 		case SljitFullPipelinePrimitiveKind::HASH_JOIN_BUILD_SINK:
 			prepared = true;
@@ -120,6 +120,18 @@ public:
 		default:
 			throw InternalException("SLJIT primitive sequence contains an unsupported terminal primitive");
 		}
+	}
+
+	template <class EXECUTE_HASH_JOIN_PROBE>
+	SljitHashJoinAggregateConsumerResult TryExecuteHashJoinProbeConsumer(
+	    ExecutionRegionRuntime &runtime, vector<SljitExecutableRegionOp> &ops, SljitRegionExecutionScratch &scratch,
+	    const SljitHashJoinDirectAggregateConsumerContract &contract,
+	    const SljitHashJoinProbeSelectionPrimitive &probe_primitive, DataChunk &join_input,
+	    EXECUTE_HASH_JOIN_PROBE &execute_hash_join_probe) {
+		D_ASSERT(contract.IsBound());
+		return state.post_join_projection_aggregate.TryExecuteHashJoinProbeConsumer(
+		    runtime, ops, scratch, probe_primitive, join_input, execute_hash_join_probe,
+		    contract.probe_input_filter_idx);
 	}
 
 	bool Flush(ExecutionRegionRuntime &runtime, ExecutionRegionResult &result, vector<SljitExecutableRegionOp> &ops,

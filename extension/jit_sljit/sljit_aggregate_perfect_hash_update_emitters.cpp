@@ -5,6 +5,7 @@
 #include "sljit_codegen_util.hpp"
 
 #include "duckdb/common/types/cast_helpers.hpp"
+#include "duckdb/common/types/string_type.hpp"
 
 #include "sljitLir.h"
 
@@ -112,6 +113,12 @@ void EmitSljitPerfectHashGroupLookup(const SljitPerfectHashFusedUpdateEmitContex
 	}
 	for (idx_t group_idx = 0; group_idx < group_plans.size(); group_idx++) {
 		auto &group = group_plans[group_idx];
+		// A nonempty one-byte string compresses to `prefix + 1`. Combine that
+		// unit bias with the later perfect-hash minimum adjustment, but retain
+		// the general lowering when string prefixes are disabled.
+		const bool fuse_nonempty_string_compress_bias =
+		    group.expression_kind == SljitNativeRegionExpressionKind::STRING_COMPRESS && group.minimum != 0 &&
+		    string_t::PREFIX_LENGTH > 0;
 		sljit_jump *group_is_null = nullptr;
 		if (group.expression_kind == SljitNativeRegionExpressionKind::TYPED_EXPRESSION_TREE) {
 			if (!group.expression_tree) {
@@ -139,9 +146,10 @@ void EmitSljitPerfectHashGroupLookup(const SljitPerfectHashFusedUpdateEmitContex
 			                                           : options.group_data_array_base_reg_override;
 			EmitLoadFusedAggregateGroupData(compiler, group_idx, group, SLJIT_R1, SLJIT_R2,
 			                                context.hoist_group_data_pointers, group_data_reg,
-			                                use_precomputed_string_offset, group_data_array_base_reg);
+			                                use_precomputed_string_offset, group_data_array_base_reg,
+			                                fuse_nonempty_string_compress_bias);
 		}
-		const auto group_offset = 1 - group.minimum;
+		const auto group_offset = (fuse_nonempty_string_compress_bias ? 2 : 1) - group.minimum;
 		if (group_offset != 0) {
 			sljit_emit_op2(compiler, SLJIT_ADD, SLJIT_R2, 0, SLJIT_R2, 0, SLJIT_IMM,
 			               NumericCast<sljit_sw>(group_offset));
@@ -202,6 +210,14 @@ void EmitSljitPerfectHashPayloadUpdates(const SljitPerfectHashFusedUpdateEmitCon
 	auto &descriptors = codegen_plan.payload_descriptors;
 	auto &local_aggregate_plan = context.local_aggregate_plan;
 	auto &deferred_flag_plan = context.deferred_flag_plan;
+	// Direct perfect-hash lookup leaves S4 dead after producing the state in S7.
+	// Flat and logical typed expressions never use saved registers, so keep the
+	// shared binary intermediate in S4 for those paths. Selected expressions own
+	// S4 for their selection array and retain the stack spill.
+	const bool use_binary_shared_value_register =
+	    codegen_plan.binary_shared_payload && options.all_valid && context.dedicated_state_register &&
+	    (options.fast_path || options.no_source_selection);
+	const auto binary_shared_value_reg = use_binary_shared_value_register ? SLJIT_S4 : 0;
 	for (idx_t payload_idx = 0; payload_idx < payloads.size(); payload_idx++) {
 		auto &descriptor = descriptors[payload_idx];
 		const auto state_offset = contract.grouped_state_offsets[descriptor.aggregate_index];
@@ -237,8 +253,9 @@ void EmitSljitPerfectHashPayloadUpdates(const SljitPerfectHashFusedUpdateEmitCon
 		sljit_jump *payload_invalid = nullptr;
 		if (codegen_plan.binary_shared_payload && options.all_valid &&
 		    payload_idx == codegen_plan.binary_dependent_lane) {
-			EmitSljitBinarySharedPayloadValueReg(compiler, codegen_plan, context.binary_shared_value_offset,
-			                                     options.fast_path, options.no_source_selection, context.overflows,
+			EmitSljitBinarySharedPayloadValueReg(compiler, codegen_plan, binary_shared_value_reg,
+			                                     context.binary_shared_value_offset, options.fast_path,
+			                                     options.no_source_selection, context.overflows,
 			                                     options.payload_data_hoists);
 		} else if (payloads[payload_idx].kind == SljitNativeRegionExpressionKind::REFERENCE) {
 			payload_invalid = EmitLoadFusedTypedAggregateReferenceValue(
@@ -250,7 +267,8 @@ void EmitSljitPerfectHashPayloadUpdates(const SljitPerfectHashFusedUpdateEmitCon
 			    options.no_source_selection, options.payload_data_hoists);
 		}
 		if (codegen_plan.binary_shared_payload && options.all_valid && payload_idx == codegen_plan.binary_base_lane) {
-			sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_MEM1(SLJIT_SP), context.binary_shared_value_offset, SLJIT_R2, 0);
+			EmitSljitStoreBinarySharedPayloadValue(compiler, SLJIT_R2, binary_shared_value_reg,
+			                                       context.binary_shared_value_offset);
 		}
 		if (local_aggregate_plan.enabled) {
 			if (local_aggregate_plan.sparse) {

@@ -1,6 +1,49 @@
 #include "test_jit_helpers.hpp"
+#include "sljit_full_pipeline_recipe_binding.hpp"
 
 using namespace duckdb;
+
+TEST_CASE("JIT recipe binders preserve the output recipe on admission failure", "[api][jit]") {
+	vector<SljitExecutableRegionOp> ops;
+	vector<LogicalType> source_output_types;
+	vector<Value> source_min_values;
+	vector<Value> source_max_values;
+	SljitFullPipelineRecipeBinding binding(ops, source_output_types, source_min_values, source_max_values, false);
+
+	SljitFullPipelineRecipe recipe;
+	recipe.direct_aggregate_consumer.probe_step_idx = 17;
+	recipe.direct_aggregate_consumer.terminal_step_idx = 23;
+	recipe.direct_aggregate_consumer.probe_input_filter_idx = 29;
+	recipe.uses_extended_source_fetch_budget = true;
+
+	auto require_unchanged = [&]() {
+		REQUIRE(recipe.primitive_sequence.Count() == 0);
+		REQUIRE(recipe.direct_aggregate_consumer.probe_step_idx == 17);
+		REQUIRE(recipe.direct_aggregate_consumer.terminal_step_idx == 23);
+		REQUIRE(recipe.direct_aggregate_consumer.probe_input_filter_idx == 29);
+		REQUIRE(recipe.uses_extended_source_fetch_budget);
+	};
+
+	SljitSourceFilterAggregateFacts source_filter_aggregate;
+	REQUIRE_FALSE(binding.TryMakeSourceFilterAggregateRecipe(source_filter_aggregate, recipe));
+	require_unchanged();
+
+	SljitJoinFilterAggregateFacts join_filter_aggregate;
+	REQUIRE_FALSE(binding.TryMakeJoinFilterAggregateRecipe(join_filter_aggregate, recipe));
+	require_unchanged();
+
+	SljitSourceHashJoinBuildSinkFacts source_hash_join_build;
+	REQUIRE_FALSE(binding.TryMakeSourceHashJoinBuildSinkRecipe(source_hash_join_build, recipe));
+	require_unchanged();
+
+	SljitHashJoinAppendSinkFacts hash_join_append;
+	REQUIRE_FALSE(binding.TryMakeHashJoinAppendSinkRecipe(hash_join_append, recipe));
+	require_unchanged();
+
+	SljitHashJoinBuildSinkFacts hash_join_build;
+	REQUIRE_FALSE(binding.TryMakeHashJoinBuildSinkRecipe(hash_join_build, recipe));
+	require_unchanged();
+}
 
 TEST_CASE("JIT table-function sources use the generic source contract", "[api][jit]") {
 	DuckDB db;

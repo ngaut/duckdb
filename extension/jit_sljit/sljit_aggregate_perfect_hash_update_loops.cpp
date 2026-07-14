@@ -73,14 +73,14 @@ static void EmitSljitPerfectHashFastSourceDataHoists(struct sljit_compiler *comp
 
 static SljitPerfectHashGroupLookupOptions
 SljitPerfectHashDirectGroupLookupOptions(const SljitPerfectHashFusedUpdateEmitContext &context,
-                                         bool mark_local_payloads_seen, bool use_fast_group_data_array_base);
+	                                         bool mark_local_payloads_seen, bool use_fast_group_data_array_base);
 static SljitPerfectHashPayloadUpdateOptions SljitPerfectHashPayloadUpdateOptionsForLoop(
     bool fast_path, bool all_valid, bool no_source_selection,
     const vector<SljitTypedExpressionTreeDataPointerHoist> *payload_data_hoists);
 
 static SljitPerfectHashGroupLookupOptions
 SljitPerfectHashDirectGroupLookupOptions(const SljitPerfectHashFusedUpdateEmitContext &context,
-                                         bool mark_local_payloads_seen, bool use_fast_group_data_array_base) {
+	                                         bool mark_local_payloads_seen, bool use_fast_group_data_array_base) {
 	SljitPerfectHashGroupLookupOptions result;
 	result.materialize_state_pointer = !context.local_aggregate_plan.enabled;
 	result.defer_flags = context.deferred_flag_plan.enabled;
@@ -121,14 +121,14 @@ EmitSljitPerfectHashFlatFastLoop(const SljitPerfectHashFusedUpdateEmitContext &c
 		    compiler, *context.predicate, update_plan.predicate_simd_plan, update_plan.predicate_simd_mask_offset,
 		    [&]() {
 			    EmitLoadFusedAggregateExecuteIndex(compiler, true);
+			    if (update_plan.hoist_fast_group_data_array_base) {
+				    EmitSljitPerfectHashFastGroupDataArrayBase(compiler);
+			    }
 			    auto lookup = SljitPerfectHashDirectGroupLookupOptions(context, local_plan.sparse,
 			                                                           update_plan.hoist_fast_group_data_array_base);
 			    lookup.expression_fast_path = true;
 			    lookup.expression_all_valid = true;
 			    lookup.expression_data_hoists = fast_data_hoists;
-			    if (update_plan.hoist_fast_group_data_array_base) {
-				    EmitSljitPerfectHashFastGroupDataArrayBase(compiler);
-			    }
 			    EmitSljitPerfectHashGroupLookup(context, lookup);
 			    EmitSljitPerfectHashPayloadUpdates(
 			        context, SljitPerfectHashPayloadUpdateOptionsForLoop(true, true, false, fast_data_hoists));

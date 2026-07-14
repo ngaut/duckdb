@@ -542,6 +542,76 @@ TEST_CASE("JIT owns retained full-layout table scan filters as generated source 
 	RequireNativeSljitIr(manager, "filter(");
 }
 
+TEST_CASE("JIT owns proven-safe modulo table scan filters as generated source filters", "[api][jit]") {
+	DuckDB db;
+	Connection con(db);
+	auto &manager = ExecutionRegionManager::Get(*con.context);
+
+	ConfigureSljitForCoverage(con, false, true, true, 10000);
+	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_generated_arithmetic_source_filter AS "
+	                          "SELECT i::BIGINT AS i FROM range(100003) tbl(i)"));
+
+	const string query = "SELECT sum(i) FROM jit_generated_arithmetic_source_filter WHERE i % 7 = 3";
+	REQUIRE_NO_FAIL(con.Query("SET jit_policy='off'"));
+	auto expected = con.Query(query);
+	REQUIRE_NO_FAIL(*expected);
+	REQUIRE_NO_FAIL(con.Query("SET jit_policy='auto'"));
+	ClearJitTrace(manager, true);
+	auto actual = con.Query(query);
+	REQUIRE_NO_FAIL(*actual);
+	REQUIRE(actual->GetValue(0, 0) == expected->GetValue(0, 0));
+
+	RequireJitEvent(
+	    manager,
+	    [](const ExecutionRegionEvent &event) {
+		    return IsCompiledSljitRegionEvent(event) && event.candidate_traits.source_filter_count > 0 &&
+		           event.candidate_traits.sink_kind == ExecutionRegionSinkKind::UNGROUPED_AGGREGATE_UPDATE;
+	    },
+	    [](const ExecutionRegionEvent &event) {
+		    RequireGeneratedSourceFilterContract(event);
+		    RequireGeneratedMachineCodeRegion(event);
+		    REQUIRE(StringUtil::Contains(event.ir, "native:typed-expression-tree"));
+	    });
+	RequireJitEvent(manager, [](const ExecutionRegionEvent &event) {
+		return IsSljitRegionEvent(event) && EventPhase(event) == "runtime" && EventStatus(event) == "executed" &&
+		       !event.selected_uses_scan_filters && event.source_contract_output_rows > 0 &&
+		       HasJitAggregateUpdatePath(event);
+	});
+}
+
+TEST_CASE("JIT keeps unproven modulo divisors in DuckDB scan filters", "[api][jit]") {
+	DuckDB db;
+	Connection con(db);
+	auto &manager = ExecutionRegionManager::Get(*con.context);
+
+	ConfigureSljitForCoverage(con, false, true, true, 10000);
+	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_unproven_modulo_source_filter AS "
+	                          "SELECT i::BIGINT AS i FROM range(10003) tbl(i)"));
+
+	const string query = "SELECT sum(i) FROM jit_unproven_modulo_source_filter WHERE i % 0 = 3";
+	REQUIRE_NO_FAIL(con.Query("SET jit_policy='off'"));
+	auto expected = con.Query(query);
+	REQUIRE_NO_FAIL(*expected);
+	REQUIRE(expected->GetValue(0, 0).IsNull());
+	REQUIRE_NO_FAIL(con.Query("SET jit_policy='auto'"));
+	ClearJitTrace(manager, true);
+	auto actual = con.Query(query);
+	REQUIRE_NO_FAIL(*actual);
+	REQUIRE(actual->GetValue(0, 0).IsNull());
+
+	RequireJitEvent(
+	    manager,
+	    [](const ExecutionRegionEvent &event) {
+		    return IsCompiledSljitRegionEvent(event) && event.candidate_traits.source_filter_count > 0 &&
+		           event.candidate_traits.sink_kind == ExecutionRegionSinkKind::UNGROUPED_AGGREGATE_UPDATE;
+	    },
+	    [](const ExecutionRegionEvent &event) { RequireDuckDBScanFilteredSourceContract(event); });
+	RequireJitEvent(manager, [](const ExecutionRegionEvent &event) {
+		return IsSljitRegionEvent(event) && EventPhase(event) == "runtime" && EventStatus(event) == "executed" &&
+		       event.selected_uses_scan_filters;
+	});
+}
+
 TEST_CASE("JIT owns pruned table scan filters through source input layout", "[api][jit]") {
 	DuckDB db;
 	Connection con(db);

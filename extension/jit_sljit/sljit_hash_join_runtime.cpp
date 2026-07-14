@@ -121,6 +121,26 @@ void SljitPreparePerfectHashJoinProbeInput(const SljitNativeHashJoinProbeKeyPlan
 	native_input.finished = false;
 }
 
+bool SljitCanDerivePerfectHashBuildSelectionFromIdentity(const SljitNativeHashJoinProbeKeyPlan &key,
+                                                         const ExecutionPerfectHashJoinTableLayout &layout,
+                                                         DataChunk &input) {
+	if (key.key_input_index >= input.ColumnCount()) {
+		return false;
+	}
+	const auto source_type = input.data[key.key_input_index].GetType().InternalType();
+	if (source_type != PhysicalType::INT64) {
+		return false;
+	}
+	// Keep this ABI at one normalized source width. Adding a template family for
+	// every physical key width duplicates the complete direct aggregate consumer
+	// graph, while the existing selection path remains the correct generic route
+	// for those widths.
+	if (key.key_kind == SljitNativeHashJoinKeyKind::INT64 && layout.key_physical_type == PhysicalType::INT64) {
+		return true;
+	}
+	return key.key_kind == SljitNativeHashJoinKeyKind::INT32 && layout.key_physical_type == PhysicalType::INT32;
+}
+
 SljitHashJoinProbeLayoutKind
 SljitValidateRegularHashJoinProbeExecutionLayout(const SljitNativeHashJoinProbePlan &plan,
                                                  const ExecutionHashJoinProbeBinding &probe) {

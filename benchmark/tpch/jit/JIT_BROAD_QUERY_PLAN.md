@@ -74,8 +74,8 @@ The active architecture work is generic grouped and join execution:
 Configuration: TPC-H SF1, one thread, production timing, tracing disabled, and
 result verification enabled. The accepted ten-repeat comparison receipt is
 `benchmark/tpch/jit/tmp/nullable_codegen_full_sf1_promotion10_20260713`.
-Candidate gates use five repeats and focused triage or promotion uses ten; no
-higher repetition count is scheduled.
+Candidate gates use five repeats. A focused ten-repeat triage or promotion is
+an explicit follow-up command; no failed candidate schedules it automatically.
 
 | Query | Non-JIT (s) | JIT (s) | Speedup |
 | ---: | ---: | ---: | ---: |
@@ -113,8 +113,8 @@ geometric-mean speedup is 1.166x, and the gate reports 18 material wins. Q12 is
 Configuration: TPC-H SF10, one thread, production timing, tracing disabled, and
 result verification enabled. The accepted ten-repeat comparison receipt is
 `benchmark/tpch/jit/tmp/nullable_codegen_full_sf10_promotion10_20260713`.
-Candidate gates use five repeats and focused triage or promotion uses ten; no
-higher repetition count is scheduled.
+Candidate gates use five repeats. A focused ten-repeat triage or promotion is
+an explicit follow-up command; no failed candidate schedules it automatically.
 
 | Query | Non-JIT (s) | JIT (s) | Speedup |
 | ---: | ---: | ---: | ---: |

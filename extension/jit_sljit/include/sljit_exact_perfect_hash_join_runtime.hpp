@@ -23,7 +23,9 @@ static TARGET SljitExactPerfectHashJoinMinimum(uint64_t bits) {
 }
 
 template <class TARGET, class SOURCE = TARGET>
-static void SljitPopulateExactPerfectHashJoinSelections(SljitNativePerfectHashJoinProbeInput &input) {
+static void SljitPopulateExactPerfectHashJoinSelections(SljitNativePerfectHashJoinProbeInput &input,
+                                                        bool emit_match_selection = true,
+                                                        bool emit_build_selection = true) {
 	const auto source = reinterpret_cast<const SOURCE *>(input.source_data);
 	const auto min_value = SljitExactPerfectHashJoinMinimum<TARGET>(input.perfect_min);
 	const auto max_value = SljitExactPerfectHashJoinMinimum<TARGET>(input.perfect_max);
@@ -41,8 +43,12 @@ static void SljitPopulateExactPerfectHashJoinSelections(SljitNativePerfectHashJo
 				continue;
 			}
 		}
-		input.match_sel[selected_count] = UnsafeNumericCast<sel_t>(row_idx);
-		input.build_sel[selected_count] = UnsafeNumericCast<sel_t>(value - min_value);
+		if (emit_match_selection) {
+			input.match_sel[selected_count] = UnsafeNumericCast<sel_t>(row_idx);
+		}
+		if (emit_build_selection) {
+			input.build_sel[selected_count] = UnsafeNumericCast<sel_t>(value - min_value);
+		}
 		selected_count++;
 	}
 	input.selected_count = selected_count;

@@ -75,30 +75,23 @@ private:
 
 	bool TryBuildSourceFilterAggregateRecipe(SljitFullPipelineRecipe &recipe) const {
 		SljitSourceFilterAggregateFacts facts;
-		if (!SljitTryAnalyzeSourceFilterAggregate(ops, facts) || !binding.CanMakeSourceFilterAggregateRecipe(facts)) {
-			return false;
-		}
-		recipe = binding.MakeSourceFilterAggregateRecipe(facts);
-		return true;
+		return SljitTryAnalyzeSourceFilterAggregate(ops, facts) &&
+		       binding.TryMakeSourceFilterAggregateRecipe(facts, recipe);
 	}
 
 	bool TryBuildJoinFilterAggregateRecipe(SljitFullPipelineRecipe &recipe) const {
 		SljitJoinFilterAggregateFacts facts;
-		if (!SljitTryAnalyzeJoinFilterAggregate(ops, facts) || !binding.CanMakeJoinFilterAggregateRecipe(facts)) {
+		if (!SljitTryAnalyzeJoinFilterAggregate(ops, facts) ||
+		    !binding.TryMakeJoinFilterAggregateRecipe(facts, recipe)) {
 			return false;
 		}
-		recipe = binding.MakeJoinFilterAggregateRecipe(facts);
 		return true;
 	}
 
 	bool TryBuildSourceHashJoinBuildSinkRecipe(SljitFullPipelineRecipe &recipe) const {
 		SljitSourceHashJoinBuildSinkFacts facts;
-		if (!SljitTryAnalyzeSourceHashJoinBuildSink(ops, facts) ||
-		    !binding.CanMakeSourceHashJoinBuildSinkRecipe(facts)) {
-			return false;
-		}
-		recipe = binding.MakeSourceHashJoinBuildSinkRecipe(facts);
-		return true;
+		return SljitTryAnalyzeSourceHashJoinBuildSink(ops, facts) &&
+		       binding.TryMakeSourceHashJoinBuildSinkRecipe(facts, recipe);
 	}
 
 	bool TryBuildHashJoinDelimJoinSinkRecipe(SljitFullPipelineRecipe &recipe) const {
@@ -111,20 +104,14 @@ private:
 
 	bool TryBuildHashJoinAppendSinkRecipe(SljitFullPipelineRecipe &recipe) const {
 		SljitHashJoinAppendSinkFacts facts;
-		if (!SljitTryAnalyzeHashJoinAppendSink(ops, facts) || !binding.CanMakeHashJoinAppendSinkRecipe(facts)) {
-			return false;
-		}
-		recipe = binding.MakeHashJoinAppendSinkRecipe(facts);
-		return true;
+		return SljitTryAnalyzeHashJoinAppendSink(ops, facts) &&
+		       binding.TryMakeHashJoinAppendSinkRecipe(facts, recipe);
 	}
 
 	bool TryBuildHashJoinBuildSinkRecipe(SljitFullPipelineRecipe &recipe) const {
 		SljitHashJoinBuildSinkFacts facts;
-		if (!SljitTryAnalyzeHashJoinBuildSink(ops, facts) || !binding.CanMakeHashJoinBuildSinkRecipe(facts)) {
-			return false;
-		}
-		recipe = binding.MakeHashJoinBuildSinkRecipe(facts);
-		return true;
+		return SljitTryAnalyzeHashJoinBuildSink(ops, facts) &&
+		       binding.TryMakeHashJoinBuildSinkRecipe(facts, recipe);
 	}
 
 	bool TryBuildProjectionAggregateRecipe(SljitFullPipelineRecipe &recipe) const {

@@ -16,65 +16,17 @@
 
 namespace duckdb {
 
-static bool SljitTryResolveComplementarySumRHSField(const ExecutionHashJoinProbeBinding &binding,
-                                                    SljitJoinProjectionAggregateDescriptor &descriptor,
-                                                    const SljitStringSetComplementarySumDescriptor &classification,
-                                                    SljitComplementarySumRHSField &field, string &blocker) {
-	if (classification.predicate_source_idx >= descriptor.input_sources.size()) {
-		blocker = "source_bounds_" + to_string(classification.predicate_source_idx) + "_" +
-		          to_string(descriptor.input_sources.size());
-		return false;
-	}
-	auto &input_source = descriptor.input_sources[classification.predicate_source_idx];
-	if (input_source.kind != SljitJoinProjectionAggregateInputKind::PROJECTION_OUTPUT ||
-	    input_source.projection_idx >= descriptor.Projection().projections.size()) {
-		blocker = "source_kind_" + to_string(static_cast<int>(input_source.kind)) + "_projection_" +
-		          to_string(input_source.projection_idx) + "_count_" +
-		          to_string(descriptor.Projection().projections.size());
-		return false;
-	}
-	SljitExecutableRegionExpression predicate_projection;
-	idx_t join_output_source_idx;
-	if (!SljitTryBuildSingleSourceProjectionExpression(descriptor.Projection().projections[input_source.projection_idx],
-	                                                   predicate_projection, join_output_source_idx)) {
-		blocker =
-		    "projection_kind_" +
-		    to_string(static_cast<int>(descriptor.Projection().projections[input_source.projection_idx].plan.kind));
-		return false;
-	}
-	const auto lhs_column_count = binding.lhs_output_column_indices.size();
-	if (join_output_source_idx < lhs_column_count) {
-		blocker = "lhs_source_" + to_string(join_output_source_idx) + "_lhs_count_" + to_string(lhs_column_count);
-		return false;
-	}
-	if (!ExecutionGetHashJoinRHSFixedColumnSource(binding, join_output_source_idx - lhs_column_count, field.source)) {
-		blocker = "rhs_source_" + to_string(join_output_source_idx - lhs_column_count);
-		return false;
-	}
-	if (field.source.layout_offset == DConstants::INVALID_INDEX) {
-		blocker = "rhs_layout";
-		return false;
-	}
-	if (SljitProjectionIsSingleSourceReferenceLike(predicate_projection.plan)) {
-		if (field.source.type.id() != LogicalTypeId::VARCHAR || field.source.physical_type != PhysicalType::VARCHAR) {
-			blocker = "rhs_reference_type_" + field.source.type.ToString();
-			return false;
-		}
-		return true;
-	}
-	if (predicate_projection.plan.kind != SljitNativeRegionExpressionKind::STRING_DECOMPRESS ||
-	    predicate_projection.plan.source_index != 0 ||
-	    predicate_projection.plan.return_type.id() != LogicalTypeId::VARCHAR) {
-		blocker = "projection_kind_" + to_string(static_cast<int>(predicate_projection.plan.kind));
-		return false;
-	}
-	field.compressed_size = predicate_projection.plan.string_decompress_source_size;
+static bool
+SljitTryInitializeCompressedComplementarySumRHSField(PhysicalType source_physical_type, idx_t compressed_size,
+                                                     const SljitStringSetComplementarySumDescriptor &classification,
+                                                     SljitComplementarySumRHSField &field, string &blocker) {
+	field.compressed_size = compressed_size;
 	if ((field.compressed_size != sizeof(uint8_t) && field.compressed_size != sizeof(uint16_t) &&
 	     field.compressed_size != sizeof(uint32_t) && field.compressed_size != sizeof(uint64_t) &&
 	     field.compressed_size != sizeof(uhugeint_t)) ||
-	    GetTypeIdSize(field.source.physical_type) != field.compressed_size) {
+	    GetTypeIdSize(source_physical_type) != field.compressed_size) {
 		blocker = "compressed_size_" + to_string(field.compressed_size) + "_physical_" +
-		          to_string(static_cast<int>(field.source.physical_type));
+		          to_string(static_cast<int>(source_physical_type));
 		return false;
 	}
 	for (idx_t constant_idx = 0; constant_idx < classification.constants.size(); constant_idx++) {
@@ -133,6 +85,126 @@ static bool SljitTryResolveComplementarySumRHSField(const ExecutionHashJoinProbe
 	return true;
 }
 
+static bool SljitTryResolveComplementarySumRHSField(const ExecutionHashJoinProbeBinding &binding,
+                                                    SljitJoinProjectionAggregateDescriptor &descriptor,
+                                                    const SljitStringSetComplementarySumDescriptor &classification,
+                                                    SljitComplementarySumRHSField &field, string &blocker) {
+	if (classification.predicate_source_idx >= descriptor.input_sources.size()) {
+		blocker = "source_bounds_" + to_string(classification.predicate_source_idx) + "_" +
+		          to_string(descriptor.input_sources.size());
+		return false;
+	}
+	auto &input_source = descriptor.input_sources[classification.predicate_source_idx];
+	if (input_source.kind != SljitJoinProjectionAggregateInputKind::PROJECTION_OUTPUT ||
+	    input_source.projection_idx >= descriptor.Projection().projections.size()) {
+		blocker = "source_kind_" + to_string(static_cast<int>(input_source.kind)) + "_projection_" +
+		          to_string(input_source.projection_idx) + "_count_" +
+		          to_string(descriptor.Projection().projections.size());
+		return false;
+	}
+	SljitExecutableRegionExpression predicate_projection;
+	idx_t join_output_source_idx;
+	if (!SljitTryBuildSingleSourceProjectionExpression(descriptor.Projection().projections[input_source.projection_idx],
+	                                                   predicate_projection, join_output_source_idx)) {
+		blocker =
+		    "projection_kind_" +
+		    to_string(static_cast<int>(descriptor.Projection().projections[input_source.projection_idx].plan.kind));
+		return false;
+	}
+	const auto lhs_column_count = binding.lhs_output_column_indices.size();
+	if (join_output_source_idx < lhs_column_count) {
+		blocker = "lhs_source_" + to_string(join_output_source_idx) + "_lhs_count_" + to_string(lhs_column_count);
+		return false;
+	}
+	if (!ExecutionGetHashJoinRHSFixedColumnSource(binding, join_output_source_idx - lhs_column_count, field.source)) {
+		blocker = "rhs_source_" + to_string(join_output_source_idx - lhs_column_count);
+		return false;
+	}
+	if (field.source.layout_offset == DConstants::INVALID_INDEX) {
+		blocker = "rhs_layout";
+		return false;
+	}
+	if (SljitProjectionIsSingleSourceReferenceLike(predicate_projection.plan)) {
+		if (field.source.type.id() != LogicalTypeId::VARCHAR || field.source.physical_type != PhysicalType::VARCHAR) {
+			blocker = "rhs_reference_type_" + field.source.type.ToString();
+			return false;
+		}
+		return true;
+	}
+	if (predicate_projection.plan.kind != SljitNativeRegionExpressionKind::STRING_DECOMPRESS ||
+	    predicate_projection.plan.source_index != 0 ||
+	    predicate_projection.plan.return_type.id() != LogicalTypeId::VARCHAR) {
+		blocker = "projection_kind_" + to_string(static_cast<int>(predicate_projection.plan.kind));
+		return false;
+	}
+	return SljitTryInitializeCompressedComplementarySumRHSField(field.source.physical_type,
+	                                                            predicate_projection.plan.string_decompress_source_size,
+	                                                            classification, field, blocker);
+}
+
+static bool SljitTryResolveComplementarySumPerfectHashRHSOutput(
+    const ExecutionHashJoinProbeBinding &binding, SljitJoinProjectionAggregateDescriptor &descriptor,
+    const SljitStringSetComplementarySumDescriptor &classification, SljitComplementarySumRHSField &field,
+    idx_t &rhs_output_idx, string &blocker) {
+	if (classification.predicate_source_idx >= descriptor.input_sources.size()) {
+		blocker = "source_bounds_" + to_string(classification.predicate_source_idx) + "_" +
+		          to_string(descriptor.input_sources.size());
+		return false;
+	}
+	auto &input_source = descriptor.input_sources[classification.predicate_source_idx];
+	if (input_source.kind != SljitJoinProjectionAggregateInputKind::PROJECTION_OUTPUT ||
+	    input_source.projection_idx >= descriptor.Projection().projections.size()) {
+		blocker = "source_kind_" + to_string(static_cast<int>(input_source.kind)) + "_projection_" +
+		          to_string(input_source.projection_idx) + "_count_" +
+		          to_string(descriptor.Projection().projections.size());
+		return false;
+	}
+	SljitExecutableRegionExpression predicate_projection;
+	idx_t join_output_source_idx;
+	if (!SljitTryBuildSingleSourceProjectionExpression(descriptor.Projection().projections[input_source.projection_idx],
+	                                                   predicate_projection, join_output_source_idx) ||
+	    predicate_projection.plan.return_type.id() != LogicalTypeId::VARCHAR) {
+		blocker = "projection";
+		return false;
+	}
+	const auto lhs_column_count = binding.lhs_output_column_indices.size();
+	if (join_output_source_idx < lhs_column_count) {
+		blocker = "lhs_source_" + to_string(join_output_source_idx) + "_lhs_count_" + to_string(lhs_column_count);
+		return false;
+	}
+	rhs_output_idx = join_output_source_idx - lhs_column_count;
+	if (rhs_output_idx >= binding.perfect_layout.rhs_output_types.size()) {
+		blocker = "rhs_type_bounds_" + to_string(rhs_output_idx) + "_" +
+		          to_string(binding.perfect_layout.rhs_output_types.size());
+		return false;
+	}
+	if (rhs_output_idx >= binding.perfect_layout.rhs_dictionary_buffers.size()) {
+		blocker = "rhs_dictionary_bounds_" + to_string(rhs_output_idx) + "_" +
+		          to_string(binding.perfect_layout.rhs_dictionary_buffers.size());
+		return false;
+	}
+	if (!binding.perfect_layout.rhs_dictionary_buffers[rhs_output_idx]) {
+		blocker = "rhs_dictionary_missing_" + to_string(rhs_output_idx);
+		return false;
+	}
+	auto &rhs_type = binding.perfect_layout.rhs_output_types[rhs_output_idx];
+	if (SljitProjectionIsSingleSourceReferenceLike(predicate_projection.plan)) {
+		if (rhs_type.id() != LogicalTypeId::VARCHAR || rhs_type.InternalType() != PhysicalType::VARCHAR) {
+			blocker = "rhs_reference_type_" + rhs_type.ToString();
+			return false;
+		}
+		return true;
+	}
+	if (predicate_projection.plan.kind != SljitNativeRegionExpressionKind::STRING_DECOMPRESS ||
+	    predicate_projection.plan.source_index != 0) {
+		blocker = "projection_kind_" + to_string(static_cast<int>(predicate_projection.plan.kind));
+		return false;
+	}
+	return SljitTryInitializeCompressedComplementarySumRHSField(rhs_type.InternalType(),
+	                                                            predicate_projection.plan.string_decompress_source_size,
+	                                                            classification, field, blocker);
+}
+
 static bool SljitTryBuildJoinInputRowPointerComplementarySumPlan(const ExecutionHashJoinProbeBinding &binding,
                                                                  SljitExecutableRegionOp &aggregate_op,
                                                                  SljitJoinProjectionAggregateDescriptor &descriptor,
@@ -143,7 +215,9 @@ static bool SljitTryBuildJoinInputRowPointerComplementarySumPlan(const Execution
 	auto block = [&](const string &reason) {
 		return plan.build_state.Block(reason.c_str());
 	};
-	if (!binding.ready || binding.layout_kind != ExecutionHashJoinProbeLayoutKind::REGULAR_HASH_TABLE ||
+	if (!binding.ready ||
+	    (binding.layout_kind != ExecutionHashJoinProbeLayoutKind::REGULAR_HASH_TABLE &&
+	     binding.layout_kind != ExecutionHashJoinProbeLayoutKind::PERFECT_HASH_TABLE) ||
 	    binding.output_mode != ExecutionHashJoinProbeOutputMode::MATCHED_PROBE_AND_BUILD) {
 		return block("join_binding");
 	}
@@ -155,9 +229,21 @@ static bool SljitTryBuildJoinInputRowPointerComplementarySumPlan(const Execution
 		return block("classification");
 	}
 	string predicate_source_blocker;
-	if (!SljitTryResolveComplementarySumRHSField(binding, descriptor, plan.classification, plan.predicate_field,
-	                                             predicate_source_blocker)) {
-		return block("predicate_rhs_field_" + predicate_source_blocker);
+	if (binding.layout_kind == ExecutionHashJoinProbeLayoutKind::REGULAR_HASH_TABLE) {
+		plan.predicate_storage = SljitComplementarySumPredicateStorage::REGULAR_ROW_POINTER;
+		if (!SljitTryResolveComplementarySumRHSField(binding, descriptor, plan.classification, plan.predicate_field,
+		                                             predicate_source_blocker)) {
+			return block("predicate_rhs_field_" + predicate_source_blocker);
+		}
+	} else if (binding.layout_kind == ExecutionHashJoinProbeLayoutKind::PERFECT_HASH_TABLE) {
+		plan.predicate_storage = SljitComplementarySumPredicateStorage::PERFECT_HASH_DICTIONARY;
+		if (!SljitTryResolveComplementarySumPerfectHashRHSOutput(binding, descriptor, plan.classification,
+		                                                         plan.predicate_field, plan.perfect_hash_rhs_output_idx,
+		                                                         predicate_source_blocker)) {
+			return block("predicate_rhs_dictionary_" + predicate_source_blocker);
+		}
+	} else {
+		return block("predicate_storage");
 	}
 	auto &group_source = descriptor.group_sources[0];
 	if (group_source.source_kind != ExecutionRowPointerGroupKeySourceKind::INPUT_VECTOR ||
@@ -211,8 +297,8 @@ static bool SljitComplementarySumRHSFieldMatches(data_ptr_t row_pointer, const S
 		throw InternalException("SLJIT complementary sum has an unsupported compressed field width");
 	}
 	auto predicate = Load<string_t>(source);
-	return SljitStringEqualsConstant(predicate, classification.constants[0], classification.signatures[0]) ||
-	       SljitStringEqualsConstant(predicate, classification.constants[1], classification.signatures[1]);
+	return SljitStringEqualsEitherConstant(predicate, classification.constants[0], classification.signatures[0],
+	                                       classification.constants[1], classification.signatures[1]);
 }
 
 struct SljitGenericComplementarySumRHSMatcher {
@@ -595,12 +681,18 @@ static bool SljitTryAccumulateMaterializedJoinInputRowPointerComplementarySums(
 	return SljitDispatchPreaggregatedInputVectorGroupTargetType(groups.GetType().InternalType(), dispatch);
 }
 
-static bool SljitTryExecuteJoinInputRowPointerComplementarySumUpdate(
+struct SljitPreparedJoinInputComplementarySumUpdate {
+	ExecutionRowPointerGroupKeySource group_source;
+	optional_ptr<ExecutionSinkBinding> sink_binding;
+	optional_ptr<const vector<const ExecutionPrimitiveAggregateUpdateLane *>> payload_lanes;
+	bool pipeline_accumulator_enabled = false;
+};
+
+static bool SljitTryPrepareJoinInputComplementarySumUpdate(
     ExecutionRegionRuntime &runtime, ExecutionOperatorRuntime &native_runtime, SljitRegionExecutionScratch &scratch,
     idx_t hash_join_idx, SljitExecutableRegionOp &aggregate_op, SljitDirectJoinOutputAggregateStrategy &strategy,
-    DataChunk &join_input, const SelectionVector &match_selection, Vector &row_pointers, idx_t count,
-    optional_ptr<bool> deferred_grouped_finish, bool source_key0_int64_to_int32_unchecked,
-    optional_ptr<string> failure_reason = nullptr) {
+    DataChunk &join_input, idx_t count, optional_ptr<bool> deferred_grouped_finish,
+    SljitPreparedJoinInputComplementarySumUpdate &prepared, optional_ptr<string> failure_reason = nullptr) {
 	auto block = [&](const char *reason) {
 		strategy.join_input_complementary_sum_plan.build_state.Block(reason);
 		if (failure_reason) {
@@ -608,15 +700,15 @@ static bool SljitTryExecuteJoinInputRowPointerComplementarySumUpdate(
 		}
 		return false;
 	};
-	auto &descriptor = strategy.descriptor;
 	if (count == 0) {
 		return false;
 	}
-	if (!scratch.HasOperatorBinding(hash_join_idx) || row_pointers.GetVectorType() != VectorType::FLAT_VECTOR) {
+	if (!scratch.HasOperatorBinding(hash_join_idx)) {
 		return block("runtime_shape");
 	}
 	auto &binding = scratch.OperatorBinding(hash_join_idx).hash_join_probe;
 	auto &plan = strategy.join_input_complementary_sum_plan;
+	auto &descriptor = strategy.descriptor;
 	if (!SljitTryBuildJoinInputRowPointerComplementarySumPlan(binding, aggregate_op, descriptor, plan)) {
 		if (failure_reason) {
 			*failure_reason = plan.build_state.blocker;
@@ -627,12 +719,74 @@ static bool SljitTryExecuteJoinInputRowPointerComplementarySumUpdate(
 	    join_input.data[plan.join_input_group_column_idx].GetType() != plan.join_input_group_type) {
 		return block("group_input");
 	}
-	auto group_source = descriptor.group_sources[0];
-	const bool direct_selected_group_transform = group_source.cast_kind != ExecutionRowPointerGroupKeyCastKind::NONE;
+	prepared.group_source = descriptor.group_sources[0];
 	descriptor.EnsureInput(runtime.GetAllocator());
 	auto &aggregate_input = descriptor.input.chunk;
 	aggregate_input.Reset();
 	aggregate_input.SetChildCardinality(count);
+	auto &sink_binding = SljitBindRecordedNativeSink(
+	    runtime, native_runtime, scratch, strategy.aggregate_idx, aggregate_op.kind, aggregate_input,
+	    aggregate_op.aggregate_update.plan.sink_info, "aggregate-update-runtime-binding-failed",
+	    "SLJIT join-input complementary aggregate update");
+	if (!sink_binding.ready || !sink_binding.aggregate_update.ready || !sink_binding.aggregate_update.primitive.ready ||
+	    !sink_binding.aggregate_update.grouped_state.ready || !sink_binding.aggregate_update.grouped_state.state) {
+		return block("sink_binding");
+	}
+	auto &payload_lanes =
+	    scratch.AggregatePayloadLanes(strategy.aggregate_idx, aggregate_op.aggregate_update.payload_descriptors,
+	                                  sink_binding.aggregate_update.primitive);
+	SljitStringSetComplementarySumUpdateState update_state;
+	if (!SljitTryBindStringSetComplementarySumLanes(aggregate_op, payload_lanes, plan.classification, update_state)) {
+		return block("payload_lanes");
+	}
+	SljitFlushPendingRowPointerAggregateBatch(runtime, strategy.aggregate_idx, aggregate_op, descriptor,
+	                                          strategy.pending_batch);
+	prepared.sink_binding = &sink_binding;
+	prepared.payload_lanes = &payload_lanes;
+	prepared.pipeline_accumulator_enabled = SljitJoinInputComplementarySumAccumulatorEnabled(strategy, plan);
+	if (prepared.pipeline_accumulator_enabled) {
+		strategy.join_input_complementary_sum_scratch = &scratch;
+		strategy.join_input_complementary_sum_deferred_grouped_finish = deferred_grouped_finish;
+	}
+	return true;
+}
+
+static bool SljitTryExecuteJoinInputRowPointerComplementarySumUpdate(
+    ExecutionRegionRuntime &runtime, ExecutionOperatorRuntime &native_runtime, SljitRegionExecutionScratch &scratch,
+    idx_t hash_join_idx, SljitExecutableRegionOp &aggregate_op, SljitDirectJoinOutputAggregateStrategy &strategy,
+    DataChunk &join_input, const SelectionVector &match_selection, Vector &row_pointers, idx_t count,
+    optional_ptr<bool> deferred_grouped_finish, bool source_key0_int64_to_int32_unchecked,
+    optional_ptr<string> failure_reason = nullptr) {
+	if (count == 0) {
+		return false;
+	}
+	if (row_pointers.GetVectorType() != VectorType::FLAT_VECTOR) {
+		if (failure_reason) {
+			*failure_reason = "runtime_shape";
+		}
+		return false;
+	}
+	SljitPreparedJoinInputComplementarySumUpdate prepared;
+	if (!SljitTryPrepareJoinInputComplementarySumUpdate(runtime, native_runtime, scratch, hash_join_idx, aggregate_op,
+	                                                    strategy, join_input, count, deferred_grouped_finish, prepared,
+	                                                    failure_reason)) {
+		return false;
+	}
+	auto &descriptor = strategy.descriptor;
+	auto &plan = strategy.join_input_complementary_sum_plan;
+	auto block = [&](const char *reason) {
+		plan.build_state.Block(reason);
+		if (failure_reason) {
+			*failure_reason = reason;
+		}
+		return false;
+	};
+	if (plan.predicate_storage != SljitComplementarySumPredicateStorage::REGULAR_ROW_POINTER) {
+		return block("predicate_storage");
+	}
+	auto group_source = prepared.group_source;
+	const bool direct_selected_group_transform = group_source.cast_kind != ExecutionRowPointerGroupKeyCastKind::NONE;
+	auto &aggregate_input = descriptor.input.chunk;
 	DataChunk *materialized_groups = nullptr;
 	if (!direct_selected_group_transform) {
 		aggregate_input.data[plan.group_input_vector_idx].Slice(join_input.data[plan.join_input_group_column_idx],
@@ -648,27 +802,9 @@ static bool SljitTryExecuteJoinInputRowPointerComplementarySumUpdate(
 		}
 		materialized_groups->SetChildCardinality(count);
 	}
-
-	auto &sink_binding = SljitBindRecordedNativeSink(
-	    runtime, native_runtime, scratch, strategy.aggregate_idx, aggregate_op.kind, aggregate_input,
-	    aggregate_op.aggregate_update.plan.sink_info, "aggregate-update-runtime-binding-failed",
-	    "SLJIT join-input row-pointer complementary aggregate update");
-	if (!sink_binding.ready || !sink_binding.aggregate_update.ready || !sink_binding.aggregate_update.primitive.ready ||
-	    !sink_binding.aggregate_update.grouped_state.ready || !sink_binding.aggregate_update.grouped_state.state) {
-		return block("sink_binding");
-	}
-	auto &payload_lanes =
-	    scratch.AggregatePayloadLanes(strategy.aggregate_idx, aggregate_op.aggregate_update.payload_descriptors,
-	                                  sink_binding.aggregate_update.primitive);
-	SljitStringSetComplementarySumUpdateState update_state;
-	if (!SljitTryBindStringSetComplementarySumLanes(aggregate_op, payload_lanes, plan.classification, update_state)) {
-		return block("payload_lanes");
-	}
-	SljitFlushPendingRowPointerAggregateBatch(runtime, strategy.aggregate_idx, aggregate_op, descriptor,
-	                                          strategy.pending_batch);
-	if (SljitJoinInputComplementarySumAccumulatorEnabled(strategy, plan)) {
-		strategy.join_input_complementary_sum_scratch = &scratch;
-		strategy.join_input_complementary_sum_deferred_grouped_finish = deferred_grouped_finish;
+	auto &sink_binding = *prepared.sink_binding;
+	auto &payload_lanes = *prepared.payload_lanes;
+	if (prepared.pipeline_accumulator_enabled) {
 		auto flush_accumulator = [&]() {
 			return SljitFlushJoinInputComplementarySumAccumulator(runtime, aggregate_op, strategy);
 		};

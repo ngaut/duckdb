@@ -1128,6 +1128,240 @@ TEST_CASE("JIT perfect hash join grouped aggregate composes cast-chain input-vec
 	    });
 }
 
+TEST_CASE("JIT perfect hash probe directly consumes complementary string aggregates", "[api][jit]") {
+	DuckDB db;
+	Connection con(db);
+	auto &manager = ExecutionRegionManager::Get(*con.context);
+
+	ConfigureSljitForCoverage(con, false, true, true, 10000);
+	REQUIRE_NO_FAIL(con.Query("SET threads=4"));
+	REQUIRE_NO_FAIL(con.Query("SET perfect_ht_threshold=10"));
+	REQUIRE_NO_FAIL(con.Query("SET disabled_optimizers='join_order,build_side_probe_side,partial_aggregate_pushdown'"));
+	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_perfect_complementary_orders AS "
+	                          "SELECT i::BIGINT AS orderkey, "
+	                          "       CASE i % 5 WHEN 0 THEN '1-URGA-PRIORITY-LONG' "
+	                          "       WHEN 1 THEN '1-URGB-PRIORITY-LONG' "
+	                          "       WHEN 2 THEN '1-URGC-PRIORITY-LONG' "
+	                          "       ELSE '2-OTHER-PRIORITY-LONG' END AS orderpriority "
+	                          "FROM range(65536) tbl(i)"));
+	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_perfect_complementary_shipments AS "
+	                          "SELECT (i % 65536)::BIGINT AS orderkey, "
+	                          "       CASE i % 3 WHEN 0 THEN 'MAIL' WHEN 1 THEN 'SHIP' ELSE 'RAIL' END AS shipmode "
+	                          "FROM range(262144) tbl(i)"));
+
+	const string query = "SELECT shipment.shipmode, "
+	                     "       sum(CASE WHEN orders.orderpriority = '1-URGA-PRIORITY-LONG' "
+	                     "                     OR orders.orderpriority = '1-URGB-PRIORITY-LONG' "
+	                     "                THEN 1 ELSE 0 END) AS high_priority_count, "
+	                     "       sum(CASE WHEN orders.orderpriority <> '1-URGA-PRIORITY-LONG' "
+	                     "                     AND orders.orderpriority <> '1-URGB-PRIORITY-LONG' "
+	                     "                THEN 1 ELSE 0 END) AS low_priority_count "
+	                     "FROM jit_perfect_complementary_shipments shipment "
+	                     "JOIN jit_perfect_complementary_orders orders USING (orderkey) "
+	                     "WHERE shipment.shipmode IN ('MAIL', 'SHIP') "
+	                     "GROUP BY shipment.shipmode ORDER BY shipment.shipmode";
+	REQUIRE_NO_FAIL(con.Query("SET jit_policy='off'"));
+	auto reference = con.Query(query);
+	REQUIRE_NO_FAIL(*reference);
+	REQUIRE(reference->RowCount() == 2);
+
+	REQUIRE_NO_FAIL(con.Query("SET jit_policy='auto'"));
+	ClearJitTrace(manager, true);
+	auto result = con.Query(query);
+	REQUIRE_NO_FAIL(*result);
+	REQUIRE(result->RowCount() == reference->RowCount());
+	REQUIRE(result->ColumnCount() == reference->ColumnCount());
+	for (idx_t row_idx = 0; row_idx < result->RowCount(); row_idx++) {
+		for (idx_t col_idx = 0; col_idx < result->ColumnCount(); col_idx++) {
+			REQUIRE(result->GetValue(col_idx, row_idx).ToString() == reference->GetValue(col_idx, row_idx).ToString());
+		}
+	}
+
+	RequireJitEvent(
+	    manager,
+	    [](const ExecutionRegionEvent &event) {
+		    return EventPhase(event) == "runtime" && EventStatus(event) == "executed" &&
+		           EventExecutionMode(event) == "native" &&
+		           event.jit_runtime.hash_join_probe_layout == "perfect_hash_table" &&
+		           HasDirectHashJoinProbeAggregateConsumerRuntimePath(event) &&
+		           StringUtil::Contains(
+		               EventJitRuntimePathCounts(event),
+		               "hash_join_probe.perfect_probe.direct_aggregate_consumer.shared_predicate_cache=");
+	    },
+	    [](const ExecutionRegionEvent &event) {
+		    const auto paths = EventJitRuntimePathCounts(event);
+		    INFO(paths);
+		    REQUIRE(StringUtil::Contains(paths, "hash_join_probe.perfect_probe.direct_aggregate_consumer="));
+		    REQUIRE(StringUtil::Contains(
+		        paths, "hash_join_probe.perfect_probe.direct_aggregate_consumer.shared_predicate_cache="));
+		    REQUIRE(
+		        StringUtil::Contains(paths, "hash_join_probe.perfect_probe.direct_aggregate_consumer.all_valid_rhs="));
+		    REQUIRE(StringUtil::Contains(
+		        paths, "hash_join_probe.perfect_probe.direct_aggregate_consumer.one_or_two_known_groups="));
+		    REQUIRE(StringUtil::Contains(paths, "hash_join_probe.perfect_probe.identity_selection_elided="));
+		    REQUIRE(StringUtil::Contains(paths, "hash_join_probe.perfect_probe.build_selection_elided="));
+		    REQUIRE(StringUtil::Contains(
+		        paths, "hash_join_probe.perfect_probe.direct_aggregate_consumer.derived_build_index="));
+		    REQUIRE(StringUtil::Contains(paths,
+		                                 "aggregate_update.join_input_perfect_hash_probe_consumer_complementary_sum="));
+		    RequireHashProbeAggregateUpdateRuntimeOwnership(event);
+	    });
+
+	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_perfect_complementary_compact_orders AS "
+	                          "SELECT i::BIGINT AS orderkey, "
+	                          "       CASE i % 5 WHEN 0 THEN '1-URGA' WHEN 1 THEN '1-URGB' "
+	                          "       WHEN 2 THEN '1-URGC' ELSE '2-OTHER' END AS orderpriority "
+	                          "FROM range(65536) tbl(i)"));
+	const string compact_query = "SELECT shipment.shipmode, "
+	                             "       sum(CASE WHEN orders.orderpriority = '1-URGA' "
+	                             "                     OR orders.orderpriority = '1-URGB' "
+	                             "                THEN 1 ELSE 0 END) AS high_priority_count, "
+	                             "       sum(CASE WHEN orders.orderpriority <> '1-URGA' "
+	                             "                     AND orders.orderpriority <> '1-URGB' "
+	                             "                THEN 1 ELSE 0 END) AS low_priority_count "
+	                             "FROM jit_perfect_complementary_shipments shipment "
+	                             "JOIN jit_perfect_complementary_compact_orders orders USING (orderkey) "
+	                             "WHERE shipment.shipmode IN ('MAIL', 'SHIP') "
+	                             "GROUP BY shipment.shipmode ORDER BY shipment.shipmode";
+	REQUIRE_NO_FAIL(con.Query("SET jit_policy='off'"));
+	auto compact_reference = con.Query(compact_query);
+	REQUIRE_NO_FAIL(*compact_reference);
+
+	REQUIRE_NO_FAIL(con.Query("SET jit_policy='auto'"));
+	ClearJitTrace(manager, true);
+	auto compact_result = con.Query(compact_query);
+	REQUIRE_NO_FAIL(*compact_result);
+	REQUIRE(compact_result->RowCount() == compact_reference->RowCount());
+	REQUIRE(compact_result->ColumnCount() == compact_reference->ColumnCount());
+	for (idx_t row_idx = 0; row_idx < compact_result->RowCount(); row_idx++) {
+		for (idx_t col_idx = 0; col_idx < compact_result->ColumnCount(); col_idx++) {
+			REQUIRE(compact_result->GetValue(col_idx, row_idx).ToString() ==
+			        compact_reference->GetValue(col_idx, row_idx).ToString());
+		}
+	}
+	RequireJitEvent(
+	    manager,
+	    [](const ExecutionRegionEvent &event) {
+		    return EventPhase(event) == "runtime" && EventStatus(event) == "executed" &&
+		           EventExecutionMode(event) == "native" &&
+		           event.jit_runtime.hash_join_probe_layout == "perfect_hash_table" &&
+		           HasDirectHashJoinProbeAggregateConsumerRuntimePath(event) &&
+		           StringUtil::Contains(
+		               EventJitRuntimePathCounts(event),
+		               "hash_join_probe.perfect_probe.direct_aggregate_consumer.shared_predicate_cache=");
+	    },
+	    [](const ExecutionRegionEvent &event) {
+		    const auto paths = EventJitRuntimePathCounts(event);
+		    INFO(paths);
+		    REQUIRE(StringUtil::Contains(
+		        paths, "hash_join_probe.perfect_probe.direct_aggregate_consumer.shared_predicate_cache="));
+		    REQUIRE(
+		        StringUtil::Contains(paths, "hash_join_probe.perfect_probe.direct_aggregate_consumer.all_valid_rhs="));
+		    REQUIRE(StringUtil::Contains(
+		        paths, "hash_join_probe.perfect_probe.direct_aggregate_consumer.inline_string_known_groups="));
+		    REQUIRE(StringUtil::Contains(
+		        paths, "hash_join_probe.perfect_probe.direct_aggregate_consumer.one_or_two_known_groups="));
+		    RequireHashProbeAggregateUpdateRuntimeOwnership(event);
+	    });
+
+	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_perfect_complementary_tail_shipments AS "
+	                          "SELECT (i % 65536)::BIGINT AS orderkey, "
+	                          "       CASE i % 3 WHEN 0 THEN 'MAIL-A001' WHEN 1 THEN 'MAIL-B001' "
+	                          "       ELSE 'RAIL-C001' END AS shipmode "
+	                          "FROM range(262144) tbl(i)"));
+	string tail_query = compact_query;
+	const string shipments_name = "jit_perfect_complementary_shipments";
+	const auto shipments_pos = tail_query.find(shipments_name);
+	REQUIRE(shipments_pos != string::npos);
+	tail_query.replace(shipments_pos, shipments_name.size(), "jit_perfect_complementary_tail_shipments");
+	const string compact_filter = "shipment.shipmode IN ('MAIL', 'SHIP')";
+	const auto compact_filter_pos = tail_query.find(compact_filter);
+	REQUIRE(compact_filter_pos != string::npos);
+	tail_query.replace(compact_filter_pos, compact_filter.size(), "shipment.shipmode IN ('MAIL-A001', 'MAIL-B001')");
+	REQUIRE_NO_FAIL(con.Query("SET jit_policy='off'"));
+	auto tail_reference = con.Query(tail_query);
+	REQUIRE_NO_FAIL(*tail_reference);
+
+	REQUIRE_NO_FAIL(con.Query("SET jit_policy='auto'"));
+	ClearJitTrace(manager, true);
+	auto tail_result = con.Query(tail_query);
+	REQUIRE_NO_FAIL(*tail_result);
+	REQUIRE(tail_result->RowCount() == tail_reference->RowCount());
+	REQUIRE(tail_result->ColumnCount() == tail_reference->ColumnCount());
+	for (idx_t row_idx = 0; row_idx < tail_result->RowCount(); row_idx++) {
+		for (idx_t col_idx = 0; col_idx < tail_result->ColumnCount(); col_idx++) {
+			REQUIRE(tail_result->GetValue(col_idx, row_idx).ToString() ==
+			        tail_reference->GetValue(col_idx, row_idx).ToString());
+		}
+	}
+	RequireJitEvent(
+	    manager,
+	    [](const ExecutionRegionEvent &event) {
+		    return EventPhase(event) == "runtime" && EventStatus(event) == "executed" &&
+		           EventExecutionMode(event) == "native" &&
+		           event.jit_runtime.hash_join_probe_layout == "perfect_hash_table" &&
+		           HasDirectHashJoinProbeAggregateConsumerRuntimePath(event) &&
+		           StringUtil::Contains(
+		               EventJitRuntimePathCounts(event),
+		               "hash_join_probe.perfect_probe.direct_aggregate_consumer.shared_predicate_cache=");
+	    },
+	    [](const ExecutionRegionEvent &event) {
+		    const auto paths = EventJitRuntimePathCounts(event);
+		    INFO(paths);
+		    REQUIRE(StringUtil::Contains(
+		        paths, "hash_join_probe.perfect_probe.direct_aggregate_consumer.inline_string_known_groups="));
+		    REQUIRE(StringUtil::Contains(
+		        paths, "hash_join_probe.perfect_probe.direct_aggregate_consumer.shared_predicate_cache="));
+		    RequireHashProbeAggregateUpdateRuntimeOwnership(event);
+	    });
+
+	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_perfect_complementary_nullable_orders AS "
+	                          "SELECT orderkey, CASE WHEN orderkey % 7 = 0 THEN NULL ELSE orderpriority END "
+	                          "AS orderpriority FROM jit_perfect_complementary_orders"));
+	string nullable_query = query;
+	const string orders_name = "jit_perfect_complementary_orders";
+	const auto orders_pos = nullable_query.find(orders_name);
+	REQUIRE(orders_pos != string::npos);
+	nullable_query.replace(orders_pos, orders_name.size(), "jit_perfect_complementary_nullable_orders");
+	REQUIRE_NO_FAIL(con.Query("SET jit_policy='off'"));
+	auto nullable_reference = con.Query(nullable_query);
+	REQUIRE_NO_FAIL(*nullable_reference);
+
+	REQUIRE_NO_FAIL(con.Query("SET jit_policy='auto'"));
+	ClearJitTrace(manager, true);
+	auto nullable_result = con.Query(nullable_query);
+	REQUIRE_NO_FAIL(*nullable_result);
+	REQUIRE(nullable_result->RowCount() == nullable_reference->RowCount());
+	REQUIRE(nullable_result->ColumnCount() == nullable_reference->ColumnCount());
+	for (idx_t row_idx = 0; row_idx < nullable_result->RowCount(); row_idx++) {
+		for (idx_t col_idx = 0; col_idx < nullable_result->ColumnCount(); col_idx++) {
+			REQUIRE(nullable_result->GetValue(col_idx, row_idx).ToString() ==
+			        nullable_reference->GetValue(col_idx, row_idx).ToString());
+		}
+	}
+	RequireJitEvent(
+	    manager,
+	    [](const ExecutionRegionEvent &event) {
+		    return EventPhase(event) == "runtime" && EventStatus(event) == "executed" &&
+		           EventExecutionMode(event) == "native" &&
+		           event.jit_runtime.hash_join_probe_layout == "perfect_hash_table" &&
+		           HasDirectHashJoinProbeAggregateConsumerRuntimePath(event) &&
+		           StringUtil::Contains(
+		               EventJitRuntimePathCounts(event),
+		               "hash_join_probe.perfect_probe.direct_aggregate_consumer.shared_predicate_cache=");
+	    },
+	    [](const ExecutionRegionEvent &event) {
+		    const auto paths = EventJitRuntimePathCounts(event);
+		    INFO(paths);
+		    REQUIRE(StringUtil::Contains(paths, "hash_join_probe.perfect_probe.direct_aggregate_consumer="));
+		    REQUIRE(StringUtil::Contains(
+		        paths, "hash_join_probe.perfect_probe.direct_aggregate_consumer.shared_predicate_cache="));
+		    REQUIRE(
+		        !StringUtil::Contains(paths, "hash_join_probe.perfect_probe.direct_aggregate_consumer.all_valid_rhs="));
+		    RequireHashProbeAggregateUpdateRuntimeOwnership(event);
+	    });
+}
+
 TEST_CASE("JIT hash join grouped aggregate proves probe-key casts from matched build keys", "[api][jit]") {
 	DuckDB db;
 	Connection con(db);
@@ -1580,7 +1814,7 @@ TEST_CASE("JIT row-pointer grouped aggregate preaggregates mixed input-vector de
 	    });
 }
 
-TEST_CASE("JIT accumulates selected transformed groups with build-side complementary sums", "[api][jit]") {
+TEST_CASE("JIT fuses selected transformed groups into the hash probe consumer", "[api][jit]") {
 	DuckDB db;
 	Connection con(db);
 	auto &manager = ExecutionRegionManager::Get(*con.context);
@@ -1588,8 +1822,8 @@ TEST_CASE("JIT accumulates selected transformed groups with build-side complemen
 	ConfigureSljitForCoverage(con, false, true, true, 10000);
 	REQUIRE_NO_FAIL(con.Query("PRAGMA threads=1"));
 	REQUIRE_NO_FAIL(con.Query("SET perfect_ht_threshold=0"));
-	REQUIRE_NO_FAIL(con.Query("SET disabled_optimizers='join_order,build_side_probe_side,partial_aggregate_pushdown,"
-	                          "compressed_materialization'"));
+	REQUIRE_NO_FAIL(con.Query("SET disabled_optimizers='filter_pushdown,join_order,build_side_probe_side,"
+	                          "partial_aggregate_pushdown,compressed_materialization'"));
 	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_string_set_preagg_orders AS "
 	                          "SELECT (i * 100003)::BIGINT AS orderkey, "
 	                          "       CASE WHEN i % 5 = 0 THEN '1-URGENT' "
@@ -1609,12 +1843,13 @@ TEST_CASE("JIT accumulates selected transformed groups with build-side complemen
 	    "           AS low_priority_count "
 	    "FROM jit_string_set_preagg_lineitem l "
 	    "JOIN jit_string_set_preagg_orders o ON o.orderkey = l.line_orderkey "
+	    "WHERE l.shipmode_id = 0 "
 	    "GROUP BY CAST(l.shipmode_id AS TINYINT) "
 	    "ORDER BY shipmode_id";
 	REQUIRE_NO_FAIL(con.Query("SET jit_policy='off'"));
 	auto reference = con.Query(query);
 	REQUIRE_NO_FAIL(*reference);
-	REQUIRE(reference->RowCount() == 2);
+	REQUIRE(reference->RowCount() == 1);
 
 	REQUIRE_NO_FAIL(con.Query("SET jit_policy='auto'"));
 	ClearJitTrace(manager, true);
@@ -1631,18 +1866,20 @@ TEST_CASE("JIT accumulates selected transformed groups with build-side complemen
 	RequireJitEvent(
 	    manager,
 	    [](const ExecutionRegionEvent &event) {
+		    const auto paths = EventJitRuntimePathCounts(event);
 		    return EventPhase(event) == "runtime" && EventStatus(event) == "executed" &&
 		           EventExecutionMode(event) == "native" && HasJitAggregateUpdatePath(event) &&
-		           HasHashJoinProbeRuntimePath(event);
+		           StringUtil::Contains(paths, "hash_join_probe.regular_probe.all_valid.selected.single_key.no_chain."
+		                                       "direct_aggregate_consumer=");
 	    },
 	    [](const ExecutionRegionEvent &event) {
 		    const auto paths = EventJitRuntimePathCounts(event);
 		    INFO(paths);
 		    REQUIRE(event.jit_runtime.hash_join_probe_layout == "regular_hash_table");
-		    REQUIRE(StringUtil::Contains(
-		        paths, "aggregate_update.join_input_pipeline_complementary_sum.selected_group_transform="));
+		    REQUIRE(StringUtil::Contains(paths, "aggregate_update.join_input_probe_consumer_complementary_sum="));
 		    REQUIRE(StringUtil::Contains(paths,
 		                                 "aggregate_update.join_input_pipeline_complementary_sum_accumulator_flush="));
+		    REQUIRE(StringUtil::Contains(EventGeneratedStageRuntimeBreakdown(event), "filter.probe_input_selection"));
 		    RequireHashProbeAggregateUpdateRuntimeOwnership(event);
 		    REQUIRE(HasGeneratedAggregateUpdateStage(event));
 	    });
@@ -1705,15 +1942,13 @@ TEST_CASE("JIT adaptively hashes wide compressed complementary groups", "[api][j
 	RequireJitEvent(
 	    manager,
 	    [](const ExecutionRegionEvent &event) {
-		    const auto paths = EventJitRuntimePathCounts(event);
 		    return EventPhase(event) == "runtime" && EventStatus(event) == "executed" &&
-		           EventExecutionMode(event) == "native" &&
-		           StringUtil::Contains(
-		               paths, "aggregate_update.join_input_pipeline_complementary_sum.selected_group_transform=");
+		           EventExecutionMode(event) == "native" && HasDirectHashJoinProbeAggregateConsumerRuntimePath(event);
 	    },
 	    [](const ExecutionRegionEvent &event) {
 		    const auto paths = EventJitRuntimePathCounts(event);
 		    INFO(paths);
+		    REQUIRE(StringUtil::Contains(paths, "aggregate_update.join_input_probe_consumer_complementary_sum="));
 		    REQUIRE(StringUtil::Contains(paths,
 		                                 "aggregate_update.join_input_pipeline_complementary_sum_accumulator_flush="));
 		    REQUIRE_FALSE(StringUtil::Contains(paths, "complementary_sum_group_input_source"));
@@ -1771,17 +2006,15 @@ TEST_CASE("JIT preaggregates probe groups with compressed build-side complementa
 	RequireJitEvent(
 	    manager,
 	    [](const ExecutionRegionEvent &event) {
-		    const auto paths = EventJitRuntimePathCounts(event);
 		    return EventPhase(event) == "runtime" && EventStatus(event) == "executed" &&
-		           EventExecutionMode(event) == "native" &&
-		           StringUtil::Contains(
-		               paths, "aggregate_update.join_input_row_pointer_preaggregated_complementary_sum_update=");
+		           EventExecutionMode(event) == "native" && HasDirectHashJoinProbeAggregateConsumerRuntimePath(event);
 	    },
 	    [](const ExecutionRegionEvent &event) {
 		    const auto paths = EventJitRuntimePathCounts(event);
 		    REQUIRE(event.jit_runtime.hash_join_probe_layout == "regular_hash_table");
-		    REQUIRE(StringUtil::Contains(paths,
-		                                 "aggregate_update.join_input_pipeline_complementary_sum.typed_group_view="));
+		    REQUIRE(StringUtil::Contains(paths, "aggregate_update.join_input_probe_consumer_complementary_sum="));
+		    REQUIRE(StringUtil::Contains(
+		        paths, "aggregate_update.join_input_row_pointer_preaggregated_complementary_sum_update="));
 		    REQUIRE(StringUtil::Contains(paths,
 		                                 "aggregate_update.join_input_pipeline_complementary_sum_accumulator_flush="));
 		    REQUIRE(StringUtil::Contains(paths, "aggregate_update.pending_preaggregated_grouped_update_flush="));
@@ -1859,7 +2092,7 @@ TEST_CASE("JIT probes selected BIGINT keys through proven INTEGER narrowing", "[
 		    return EventPhase(event) == "runtime" && EventStatus(event) == "executed" &&
 		           EventExecutionMode(event) == "native" &&
 		           StringUtil::Contains(paths, "hash_join_probe.regular_probe.all_valid.selected.single_key.unchecked_"
-		                                       "int64_to_int32.no_chain=");
+		                                       "int64_to_int32.no_chain.direct_aggregate_consumer=");
 	    },
 	    [](const ExecutionRegionEvent &event) {
 		    REQUIRE(event.jit_runtime.hash_join_probe_layout == "regular_hash_table");

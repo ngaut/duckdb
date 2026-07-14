@@ -12,6 +12,7 @@
 #include "sljit_compiled_function.hpp"
 #include "sljit_function_types.hpp"
 #include "sljit_hash_join_probe_specialization.hpp"
+#include "sljit_perfect_hash_predicate_classification.hpp"
 
 #include "sljit_region_plan.hpp"
 
@@ -68,13 +69,30 @@ private:
 };
 
 struct SljitExecutablePerfectHashJoinProbeCode {
-	SljitLazyCompiledFunction<SljitNativePerfectHashJoinProbeFunction> compiled;
+	SljitLazyCompiledFunction<SljitNativePerfectHashJoinProbeFunction> compact_selection;
+	SljitLazyCompiledFunction<SljitNativePerfectHashJoinProbeFunction> identity_preferred_selection;
+	SljitLazyCompiledFunction<SljitNativePerfectHashJoinProbeFunction> identity_direct_consumer;
+
+	SljitLazyCompiledFunction<SljitNativePerfectHashJoinProbeFunction> &SelectionKernel(bool prefer_identity_selection,
+	                                                                                    bool direct_consumer) {
+		D_ASSERT(!direct_consumer || prefer_identity_selection);
+		if (direct_consumer) {
+			return identity_direct_consumer;
+		}
+		return prefer_identity_selection ? identity_preferred_selection : compact_selection;
+	}
+
+	idx_t CodeSize() const {
+		return compact_selection.CodeSize() + identity_preferred_selection.CodeSize() +
+		       identity_direct_consumer.CodeSize();
+	}
 };
 
 struct SljitExecutableHashJoinProbe {
 	SljitNativeHashJoinProbePlan plan;
 	SljitExecutableRegularHashJoinProbeCode regular;
 	SljitExecutablePerfectHashJoinProbeCode perfect;
+	SljitSharedPerfectHashPredicateClassificationCache shared_predicate_classification;
 	SljitExecutableRegionExpression residual_filter;
 
 	bool ValidateDeferredCodegen(string &error) const;
@@ -83,7 +101,7 @@ struct SljitExecutableHashJoinProbe {
 
 	idx_t CodeSize() const {
 		idx_t result = regular.CodeSize();
-		result += perfect.compiled.CodeSize();
+		result += perfect.CodeSize();
 		result += residual_filter.CodeSize();
 		return result;
 	}

@@ -116,15 +116,22 @@ bool PerfectHashJoinExecutor::CanDoPerfectHashJoin(const PhysicalHashJoin &op, c
 		return false;
 	}
 
-	// The max size our build must have to run the perfect HJ
-	static constexpr idx_t MAX_BUILD_SIZE = 1048576;
-	if (build_range > Hugeint::Convert(MAX_BUILD_SIZE)) {
+	// Keep the established one-million-key range for regular joins, and allow a
+	// dense extended range when direct lookup removes enough hash-probe work to
+	// justify the additional RHS dictionary materialization.
+	static constexpr idx_t DEFAULT_MAX_BUILD_SIZE = 1048576;
+	static constexpr idx_t EXTENDED_MAX_BUILD_SIZE = 2097152;
+	if (build_range > Hugeint::Convert(EXTENDED_MAX_BUILD_SIZE)) {
 		return false;
 	}
 	perfect_join_statistics.build_range = NumericCast<idx_t>(build_range);
 
 	// If count is larger than range (duplicates), we bail out
 	if (ht.Count() > perfect_join_statistics.build_range + 1) {
+		return false;
+	}
+	if (perfect_join_statistics.build_range > DEFAULT_MAX_BUILD_SIZE &&
+	    ht.Count() < (perfect_join_statistics.build_range + 2) / 2) {
 		return false;
 	}
 

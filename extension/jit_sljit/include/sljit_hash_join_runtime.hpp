@@ -80,6 +80,9 @@ void SljitPreparePerfectHashJoinProbeInput(const SljitNativeHashJoinProbeKeyPlan
                                            SelectionVector &match_selection, SelectionVector &build_selection,
                                            SljitHashJoinProbeDrainState &state, bool allow_unchecked_int64_to_int32,
                                            SljitPreparedPerfectHashJoinProbeInput &result);
+bool SljitCanDerivePerfectHashBuildSelectionFromIdentity(const SljitNativeHashJoinProbeKeyPlan &key,
+                                                         const ExecutionPerfectHashJoinTableLayout &layout,
+                                                         DataChunk &input);
 SljitHashJoinProbeLayoutKind
 SljitValidateRegularHashJoinProbeExecutionLayout(const SljitNativeHashJoinProbePlan &plan,
                                                  const ExecutionHashJoinProbeBinding &probe);

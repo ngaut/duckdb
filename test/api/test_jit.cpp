@@ -813,7 +813,6 @@ TEST_CASE("JIT backend owns scan-filtered aggregate terminals through DuckDB sca
 	REQUIRE_NO_FAIL(*result);
 	REQUIRE(result->GetValue(0, 0).ToString() == reference->GetValue(0, 0).ToString());
 	REQUIRE(result->GetValue(1, 0).ToString() == reference->GetValue(1, 0).ToString());
-
 	vector<idx_t> scan_filtered_kernel_ids;
 	for (auto &event : manager.GetEvents()) {
 		if (!IsCompiledSljitRegionEvent(event) ||
@@ -3352,6 +3351,49 @@ TEST_CASE("JIT exact perfect-hash filter proofs preserve checked cast domains", 
 	REQUIRE(build_selection[0] == 0);
 	REQUIRE(build_selection[1] == 2);
 	REQUIRE(build_selection[2] == 4);
+
+	// A selected-view identity probe owns only build selections. A direct
+	// consumer with a proven key-offset ABI can elide both temporary selections.
+	// A later compact retry must reconstruct the same matched rows when an input
+	// misses.
+	input.selected_count = 0;
+	input.input_offset = 0;
+	input.finished = false;
+	match_selection[0] = 99;
+	match_selection[1] = 99;
+	match_selection[2] = 99;
+	SljitPopulateExactPerfectHashJoinSelections<int32_t, int64_t>(input, false);
+	REQUIRE(input.selected_count == 3);
+	REQUIRE(match_selection[0] == 99);
+	REQUIRE(match_selection[1] == 99);
+	REQUIRE(match_selection[2] == 99);
+	REQUIRE(build_selection[0] == 0);
+	REQUIRE(build_selection[1] == 2);
+	REQUIRE(build_selection[2] == 4);
+
+	input.selected_count = 0;
+	input.input_offset = 0;
+	input.finished = false;
+	build_selection[0] = 88;
+	build_selection[1] = 88;
+	build_selection[2] = 88;
+	SljitPopulateExactPerfectHashJoinSelections<int32_t, int64_t>(input, false, false);
+	REQUIRE(input.selected_count == 3);
+	REQUIRE(match_selection[0] == 99);
+	REQUIRE(match_selection[1] == 99);
+	REQUIRE(match_selection[2] == 99);
+	REQUIRE(build_selection[0] == 88);
+	REQUIRE(build_selection[1] == 88);
+	REQUIRE(build_selection[2] == 88);
+
+	input.selected_count = 0;
+	input.input_offset = 0;
+	input.finished = false;
+	SljitPopulateExactPerfectHashJoinSelections<int32_t, int64_t>(input);
+	REQUIRE(input.selected_count == 3);
+	REQUIRE(match_selection[0] == 1);
+	REQUIRE(match_selection[1] == 2);
+	REQUIRE(match_selection[2] == 4);
 }
 
 TEST_CASE("JIT exact dynamic filters compose with bitpacked storage scans", "[api][jit]") {

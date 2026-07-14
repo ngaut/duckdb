@@ -11,6 +11,7 @@
 #include "sljit_join_projection_aggregate_state.hpp"
 #include "sljit_string_set_complementary_sum_runtime.hpp"
 
+#include "duckdb/common/vector/dictionary_vector.hpp"
 #include "duckdb/common/vector/flat_vector.hpp"
 
 namespace duckdb {
@@ -25,10 +26,15 @@ struct SljitComplementarySumRHSField {
 	    compressed_constants {};
 };
 
+enum class SljitComplementarySumPredicateStorage : uint8_t { REGULAR_ROW_POINTER, PERFECT_HASH_DICTIONARY };
+
 struct SljitJoinInputRowPointerComplementarySumPlan {
 	SljitDeferredBuildState build_state;
 	SljitStringSetComplementarySumDescriptor classification;
+	SljitComplementarySumPredicateStorage predicate_storage =
+	    SljitComplementarySumPredicateStorage::REGULAR_ROW_POINTER;
 	SljitComplementarySumRHSField predicate_field;
+	idx_t perfect_hash_rhs_output_idx = DConstants::INVALID_INDEX;
 	idx_t group_input_vector_idx = DConstants::INVALID_INDEX;
 	idx_t join_input_group_column_idx = DConstants::INVALID_INDEX;
 	LogicalType join_input_group_type;
@@ -38,14 +44,16 @@ struct SljitJoinInputRowPointerComplementarySumPlan {
 };
 
 struct SljitJoinInputRowPointerComplementarySumAccumulator {
-	explicit SljitJoinInputRowPointerComplementarySumAccumulator(PhysicalType physical_type_p)
-	    : physical_type(physical_type_p) {
+	explicit SljitJoinInputRowPointerComplementarySumAccumulator(PhysicalType physical_type_p,
+	                                                             bool predicate_all_valid_p = false)
+	    : physical_type(physical_type_p), predicate_all_valid(predicate_all_valid_p) {
 	}
 	virtual ~SljitJoinInputRowPointerComplementarySumAccumulator() = default;
 	virtual bool Empty() const = 0;
 	virtual void Reset() = 0;
 
 	PhysicalType physical_type;
+	bool predicate_all_valid;
 };
 
 struct SljitPendingRowPointerAggregateBatch {

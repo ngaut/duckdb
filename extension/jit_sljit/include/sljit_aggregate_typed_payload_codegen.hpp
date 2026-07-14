@@ -37,9 +37,11 @@ bool BuildSljitFusedTypedAggregateCodegenPlan(const vector<SljitNativeRegionExpr
                                               const vector<ExecutionRegionAggregateInput> &aggregates,
                                               SljitFusedTypedAggregateCodegenPlan &codegen_plan,
                                               bool force_typed_path = false);
+void EmitSljitStoreBinarySharedPayloadValue(struct sljit_compiler *compiler, sljit_s32 value_reg,
+                                            sljit_s32 shared_value_reg, sljit_sw shared_value_offset);
 void EmitSljitBinarySharedPayloadValueReg(
     struct sljit_compiler *compiler, const SljitFusedTypedAggregateCodegenPlan &codegen_plan,
-    sljit_sw shared_value_offset, bool fast_path, bool no_source_selection,
+    sljit_s32 shared_value_reg, sljit_sw shared_value_offset, bool fast_path, bool no_source_selection,
     vector<SljitExpressionTreeOverflowJumps> &overflows,
     const vector<SljitTypedExpressionTreeDataPointerHoist> *data_hoists = nullptr);
 

@@ -70,10 +70,16 @@ struct SljitJoinFilterAggregateFacts {
 	idx_t final_projection_idx = DConstants::INVALID_INDEX;
 	idx_t hash_join_idx = DConstants::INVALID_INDEX;
 	idx_t filter_idx = DConstants::INVALID_INDEX;
+	idx_t first_post_join_projection_idx = DConstants::INVALID_INDEX;
+	idx_t final_post_join_projection_idx = DConstants::INVALID_INDEX;
 	idx_t aggregate_idx = DConstants::INVALID_INDEX;
 
 	bool HasProjectionPrefix() const {
 		return first_projection_idx != DConstants::INVALID_INDEX;
+	}
+
+	bool HasPostJoinProjection() const {
+		return first_post_join_projection_idx != DConstants::INVALID_INDEX;
 	}
 };
 

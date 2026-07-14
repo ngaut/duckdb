@@ -93,9 +93,10 @@ static struct sljit_jump *EmitJumpIfHoistedPerfectHashJoinSourceNull(struct slji
 }
 #endif
 
-unique_ptr<ExecutionRegionCodeHandle> BuildSljitPerfectHashJoinProbe(const SljitNativeHashJoinProbePlan &plan,
-                                                                     SljitNativePerfectHashJoinProbeFunction &function,
-                                                                     string &error) {
+unique_ptr<ExecutionRegionCodeHandle>
+BuildSljitPerfectHashJoinProbe(const SljitNativeHashJoinProbePlan &plan,
+                               SljitNativePerfectHashJoinProbeFunction &function, string &error,
+                               const SljitPerfectHashJoinProbeCodegenConfig &config) {
 	if (!SljitValidatePerfectHashJoinProbePlan(plan, error)) {
 		return nullptr;
 	}
@@ -143,8 +144,7 @@ unique_ptr<ExecutionRegionCodeHandle> BuildSljitPerfectHashJoinProbe(const Sljit
 
 #if defined(SLJIT_NUMBER_OF_SAVED_REGISTERS) && SLJIT_NUMBER_OF_SAVED_REGISTERS >= 10
 	EmitLoadHoistedPerfectHashJoinSourceIndex(compiler, SLJIT_S5, SLJIT_R1);
-	auto source_is_null =
-	    EmitJumpIfHoistedPerfectHashJoinSourceNull(compiler, SLJIT_S6, SLJIT_R1, SLJIT_R2, SLJIT_R4);
+	auto source_is_null = EmitJumpIfHoistedPerfectHashJoinSourceNull(compiler, SLJIT_S6, SLJIT_R1, SLJIT_R2, SLJIT_R4);
 #else
 	EmitLoadPerfectHashJoinSourceIndex(compiler, SLJIT_R1, SLJIT_R0);
 	auto source_is_null = EmitJumpIfPerfectHashJoinSourceNull(compiler, SLJIT_R1, SLJIT_R2, SLJIT_R4);
@@ -192,12 +192,16 @@ unique_ptr<ExecutionRegionCodeHandle> BuildSljitPerfectHashJoinProbe(const Sljit
 	auto value_missing = sljit_emit_jump(compiler, SLJIT_EQUAL);
 	sljit_set_label(all_valid, sljit_emit_label(compiler));
 
-	sljit_emit_op1(compiler, SLJIT_MOV_P, SLJIT_R2, 0, SLJIT_MEM1(SLJIT_S0),
-	               offsetof(SljitNativePerfectHashJoinProbeInput, build_sel));
-	sljit_emit_op1(compiler, SLJIT_MOV_U32, SLJIT_MEM2(SLJIT_R2, SLJIT_S3), 2, SLJIT_R0, 0);
-	sljit_emit_op1(compiler, SLJIT_MOV_P, SLJIT_R2, 0, SLJIT_MEM1(SLJIT_S0),
-	               offsetof(SljitNativePerfectHashJoinProbeInput, match_sel));
-	sljit_emit_op1(compiler, SLJIT_MOV_U32, SLJIT_MEM2(SLJIT_R2, SLJIT_S3), 2, SLJIT_S1, 0);
+	if (config.emit_build_selection) {
+		sljit_emit_op1(compiler, SLJIT_MOV_P, SLJIT_R2, 0, SLJIT_MEM1(SLJIT_S0),
+		               offsetof(SljitNativePerfectHashJoinProbeInput, build_sel));
+		sljit_emit_op1(compiler, SLJIT_MOV_U32, SLJIT_MEM2(SLJIT_R2, SLJIT_S3), 2, SLJIT_R0, 0);
+	}
+	if (config.emit_match_selection) {
+		sljit_emit_op1(compiler, SLJIT_MOV_P, SLJIT_R2, 0, SLJIT_MEM1(SLJIT_S0),
+		               offsetof(SljitNativePerfectHashJoinProbeInput, match_sel));
+		sljit_emit_op1(compiler, SLJIT_MOV_U32, SLJIT_MEM2(SLJIT_R2, SLJIT_S3), 2, SLJIT_S1, 0);
+	}
 	sljit_emit_op2(compiler, SLJIT_ADD, SLJIT_S3, 0, SLJIT_S3, 0, SLJIT_IMM, 1);
 
 	auto skip_row = sljit_emit_label(compiler);

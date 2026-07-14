@@ -17,6 +17,7 @@
 #include "duckdb/common/vector/unified_vector_format.hpp"
 #include "duckdb/function/scalar/string_common.hpp"
 
+#include <array>
 #include <cstring>
 #include <type_traits>
 #include <utility>
@@ -26,6 +27,7 @@ namespace duckdb {
 template <class T>
 struct SljitSelectedInputGroupIdentity {
 	static constexpr bool CAN_FAIL = false;
+	static constexpr bool STAGE_TRANSFORMED_KEYS = false;
 
 	bool operator()(const T &source, T &target) const {
 		target = source;
@@ -39,6 +41,7 @@ struct SljitSelectedInputGroupIdentity {
 template <class SRC, class DST>
 struct SljitSelectedInputGroupNarrowingCast {
 	static constexpr bool CAN_FAIL = false;
+	static constexpr bool STAGE_TRANSFORMED_KEYS = false;
 
 	bool unchecked;
 
@@ -60,6 +63,7 @@ struct SljitSelectedInputGroupNarrowingCast {
 template <class SRC, class DST>
 struct SljitSelectedInputGroupIntegralCompress {
 	static constexpr bool CAN_FAIL = true;
+	static constexpr bool STAGE_TRANSFORMED_KEYS = true;
 
 	int64_t minimum;
 
@@ -87,6 +91,7 @@ private:
 template <class DST>
 struct SljitSelectedInputGroupDateYearCompress {
 	static constexpr bool CAN_FAIL = false;
+	static constexpr bool STAGE_TRANSFORMED_KEYS = false;
 
 	int64_t minimum;
 
@@ -128,9 +133,111 @@ inline uhugeint_t SljitCompressSelectedStringGroup<uhugeint_t>(const string_t &s
 #endif
 }
 
+//! Only the unsigned physical types used by the string-compression transform
+//! can be reconstructed into the canonical inlined string_t representation.
+//! Keep the admission as a type trait: generic target dispatch instantiates
+//! every physical width, while this specialization has a precise ABI contract.
+template <class T>
+struct SljitInlineStringStorageSignatureSupported : std::false_type {};
+
+template <>
+struct SljitInlineStringStorageSignatureSupported<uint16_t> : std::true_type {};
+
+template <>
+struct SljitInlineStringStorageSignatureSupported<uint32_t> : std::true_type {};
+
+template <>
+struct SljitInlineStringStorageSignatureSupported<uint64_t> : std::true_type {};
+
+template <>
+struct SljitInlineStringStorageSignatureSupported<uhugeint_t> : std::true_type {};
+
+struct SljitInlineStringStorageSignature {
+	uint64_t header;
+	uint64_t tail;
+	bool requires_tail;
+
+	bool MatchesInlined(const string_t &value, uint64_t value_header) const {
+		D_ASSERT(value.IsInlined());
+		return value_header == header &&
+		       (!requires_tail || Load<uint64_t>(const_data_ptr_cast(&value) + sizeof(uint64_t)) == tail);
+	}
+
+	bool Matches(const string_t &value) const {
+		if (!value.IsInlined()) {
+			return false;
+		}
+		return MatchesInlined(value, Load<uint64_t>(const_data_ptr_cast(&value)));
+	}
+};
+
+//! Classify a small established string group domain after one canonical string
+//! header load. The tail comparison stays attached to the candidate signature:
+//! a matching four-byte prefix is not sufficient to establish equality.
+static bool SljitTryClassifyOneOrTwoInlineStringStorageSignatures(
+    const string_t &value, bool value_is_valid, const std::array<bool, 2> &known_group_validity,
+    const std::array<SljitInlineStringStorageSignature, 2> &known_group_signatures, idx_t group_count,
+    idx_t &group_idx) {
+	D_ASSERT(group_count > 0 && group_count <= 2);
+	if (!value_is_valid) {
+		if (!known_group_validity[0]) {
+			group_idx = 0;
+			return true;
+		}
+		if (group_count == 2 && !known_group_validity[1]) {
+			group_idx = 1;
+			return true;
+		}
+		return false;
+	}
+	if (!value.IsInlined()) {
+		return false;
+	}
+	const auto value_header = Load<uint64_t>(const_data_ptr_cast(&value));
+	if (known_group_validity[0] && known_group_signatures[0].MatchesInlined(value, value_header)) {
+		group_idx = 0;
+		return true;
+	}
+	if (group_count == 2 && known_group_validity[1] && known_group_signatures[1].MatchesInlined(value, value_header)) {
+		group_idx = 1;
+		return true;
+	}
+	return false;
+}
+
+//! Reconstruct the canonical inlined string_t storage from a compressed key.
+//! This lets a known small group domain compare an input string directly
+//! against its already-compressed group keys without recompressing every row.
+template <class T>
+static bool SljitTryInlineStringStorageSignature(T compressed, SljitInlineStringStorageSignature &signature) {
+	static_assert(SljitInlineStringStorageSignatureSupported<T>::value,
+	              "only unsigned string-compression targets have an inline storage signature");
+	auto le_compressed = BSwapIfBE(compressed);
+	auto compressed_data = const_data_ptr_cast(&le_compressed);
+	const auto length = compressed_data[0];
+	if (length > string_t::INLINE_LENGTH) {
+		return false;
+	}
+	string_t value(UnsafeNumericCast<uint32_t>(length));
+	auto value_data = data_ptr_cast(value.GetPrefixWriteable());
+	if constexpr (sizeof(T) <= string_t::INLINE_LENGTH) {
+		StringCompressionReverseMemCpy<sizeof(T)>(value_data, compressed_data);
+		memset(value_data + sizeof(T) - 1, 0, string_t::INLINE_LENGTH - sizeof(T) + 1);
+	} else {
+		static constexpr auto REMAINDER = sizeof(T) - string_t::INLINE_LENGTH;
+		StringCompressionReverseMemCpy<string_t::INLINE_LENGTH>(value_data, compressed_data + REMAINDER);
+	}
+	D_ASSERT(value.IsInlined());
+	signature.header = Load<uint64_t>(const_data_ptr_cast(&value));
+	signature.tail = Load<uint64_t>(const_data_ptr_cast(&value) + sizeof(uint64_t));
+	signature.requires_tail = length > string_t::PREFIX_LENGTH;
+	return true;
+}
+
 template <class DST>
 struct SljitSelectedInputGroupStringCompress {
 	static constexpr bool CAN_FAIL = true;
+	static constexpr bool STAGE_TRANSFORMED_KEYS = true;
 
 	bool CanConvert(const string_t &source) const {
 		if constexpr (std::is_same<DST, uint8_t>::value) {
@@ -210,8 +317,11 @@ static bool SljitWithSelectedInputVectorGroupKey(Vector &input, const SelectionV
 		}
 		return true;
 	};
+	// A fallible transform must prove every selected value before it mutates a
+	// local accumulator. The converter owns whether a staged key repays its
+	// transform work; destination width alone does not determine that tradeoff.
 	return consumer(load, preflight, preflighted_load, prepare, std::integral_constant < bool,
-	                CONVERT::CAN_FAIL && (sizeof(DST) > sizeof(uint64_t)) > {});
+	                CONVERT::CAN_FAIL &&CONVERT::STAGE_TRANSFORMED_KEYS > {});
 }
 
 template <class SRC, class DST, class CONSUMER>

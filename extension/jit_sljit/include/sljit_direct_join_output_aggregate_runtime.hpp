@@ -22,6 +22,39 @@
 
 namespace duckdb {
 
+static bool SljitTryPrepareDirectJoinOutputAggregateDescriptor(
+    ExecutionRegionRuntime &runtime, vector<SljitExecutableRegionOp> &ops, SljitRegionExecutionScratch &scratch,
+    optional_ptr<SljitDirectJoinOutputAggregateStrategy> strategy_ptr,
+    SljitPostJoinProjectionStrategy &post_join_projection, idx_t row_count,
+    optional_ptr<const vector<idx_t>> output_column_map = nullptr,
+    idx_t output_projection_idx = DConstants::INVALID_INDEX) {
+	if (!strategy_ptr || strategy_ptr->disabled) {
+		return false;
+	}
+	auto &strategy = *strategy_ptr;
+	if (strategy.aggregate_idx >= ops.size()) {
+		throw InternalException("SLJIT direct join-output aggregate index is out of range");
+	}
+	const bool has_projection_chain = post_join_projection.HasProjectionChain();
+	const bool descriptor_ready =
+	    has_projection_chain
+	        ? SljitTryBuildPostJoinProjectionAggregateDescriptor(ops, scratch, post_join_projection,
+	                                                             strategy.aggregate_idx, strategy.descriptor,
+	                                                             output_column_map, output_projection_idx)
+	        : SljitTryBuildSelectedJoinAggregateInputDescriptor(ops, scratch, post_join_projection.hash_join_idx,
+	                                                            strategy.aggregate_idx, strategy.descriptor,
+	                                                            output_column_map, output_projection_idx);
+	if (descriptor_ready) {
+		strategy.descriptor.EnsureInput(runtime.GetAllocator());
+		return true;
+	}
+	SljitRecordDirectJoinOutputAggregateProjectionUnsupported(runtime, ops, post_join_projection,
+	                                                          strategy.descriptor.Blocker(), row_count);
+	strategy.last_failure = strategy.descriptor.Blocker();
+	strategy.disabled = true;
+	return false;
+}
+
 static bool SljitTryExecuteDirectJoinOutputPerfectHashAggregateUpdate(
     ExecutionRegionRuntime &runtime, ExecutionOperatorRuntime &native_runtime, SljitRegionExecutionScratch &scratch,
     idx_t op_idx, SljitExecutableRegionOp &op, DataChunk &aggregate_input, optional_ptr<string> failure_reason) {
@@ -158,26 +191,12 @@ static bool SljitTryExecuteDirectJoinOutputAggregate(
 	auto &strategy = *strategy_ptr;
 	auto &descriptor = strategy.descriptor;
 	strategy.last_failure.clear();
-	if (strategy.aggregate_idx >= ops.size()) {
-		throw InternalException("SLJIT direct join-output aggregate index is out of range");
-	}
 	const bool has_projection_chain = post_join_projection.HasProjectionChain();
-	const bool descriptor_ready =
-	    has_projection_chain
-	        ? SljitTryBuildPostJoinProjectionAggregateDescriptor(ops, scratch, post_join_projection,
-	                                                             strategy.aggregate_idx, descriptor, output_column_map,
-	                                                             output_projection_idx)
-	        : SljitTryBuildSelectedJoinAggregateInputDescriptor(ops, scratch, post_join_projection.hash_join_idx,
-	                                                            strategy.aggregate_idx, descriptor, output_column_map,
-	                                                            output_projection_idx);
-	if (!descriptor_ready) {
-		SljitRecordDirectJoinOutputAggregateProjectionUnsupported(runtime, ops, post_join_projection,
-		                                                          descriptor.Blocker(), join_output.size());
-		strategy.last_failure = descriptor.Blocker();
-		strategy.disabled = true;
+	if (!SljitTryPrepareDirectJoinOutputAggregateDescriptor(runtime, ops, scratch, strategy_ptr, post_join_projection,
+	                                                        join_output.size(), output_column_map,
+	                                                        output_projection_idx)) {
 		return false;
 	}
-	descriptor.EnsureInput(runtime.GetAllocator());
 	auto &aggregate_input = descriptor.input.chunk;
 	aggregate_input.Reset();
 	auto &aggregate_op = ops[strategy.aggregate_idx];

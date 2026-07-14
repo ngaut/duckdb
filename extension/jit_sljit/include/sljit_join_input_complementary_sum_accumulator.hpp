@@ -22,25 +22,66 @@ static constexpr idx_t SLJIT_JOIN_INPUT_COMPLEMENTARY_ACCUMULATOR_ADMISSION_GROU
     SLJIT_JOIN_INPUT_COMPLEMENTARY_ACCUMULATOR_MAX_GROUPS / 2;
 static constexpr idx_t SLJIT_JOIN_INPUT_COMPLEMENTARY_ACCUMULATOR_HOT_GROUPS = 8;
 
-template <class T>
+template <class T, bool PREDICATE_ALL_VALID = false>
 struct SljitTypedJoinInputComplementarySumAccumulator final
     : public SljitJoinInputRowPointerComplementarySumAccumulator {
 	SljitTypedJoinInputComplementarySumAccumulator()
-	    : SljitJoinInputRowPointerComplementarySumAccumulator(GetTypeId<T>()) {
+	    : SljitJoinInputRowPointerComplementarySumAccumulator(GetTypeId<T>(), PREDICATE_ALL_VALID) {
 	}
 
 	bool Accumulate(bool group_is_valid, const T &key, bool predicate_is_valid, bool predicate_matches) {
+		if constexpr (PREDICATE_ALL_VALID) {
+			D_ASSERT(predicate_is_valid);
+			return AccumulateAllValid(group_is_valid, key, predicate_matches);
+		}
 		idx_t group_idx;
 		bool created;
 		if (!groups.FindOrCreate(group_is_valid, key, group_idx, created)) {
 			return false;
 		}
 		represented_rows[group_idx]++;
-		if (predicate_is_valid) {
-			matching_counts[group_idx] += predicate_matches ? 1 : 0;
-			non_matching_counts[group_idx] += predicate_matches ? 0 : 1;
+		if (!predicate_is_valid) {
+			return true;
 		}
+		// Each valid predicate contributes to exactly one complementary lane. A
+		// pointer select keeps that choice branchless while avoiding a second
+		// read-modify-write that only adds zero to the opposite lane.
+		auto *counts = predicate_matches ? matching_counts.data() : non_matching_counts.data();
+		counts[group_idx]++;
 		return true;
+	}
+
+	bool AccumulateAllValid(bool group_is_valid, const T &key, bool predicate_matches) {
+		idx_t group_idx;
+		bool created;
+		if (!groups.FindOrCreate(group_is_valid, key, group_idx, created)) {
+			return false;
+		}
+		// The all-valid predicate contract makes the represented row count the
+		// sum of the two complementary lanes. Do not maintain a second per-row
+		// counter solely for telemetry and later preaggregation accounting.
+		auto *counts = predicate_matches ? matching_counts.data() : non_matching_counts.data();
+		counts[group_idx]++;
+		return true;
+	}
+
+	bool HasOneOrTwoGroups() const {
+		return groups.Count() > 0 && groups.Count() <= 2;
+	}
+
+	bool MatchesKnownGroup(idx_t group_idx, bool group_is_valid, const T &key) const {
+		D_ASSERT(group_idx < groups.Count());
+		return groups.IsValid(group_idx) == group_is_valid &&
+		       (!group_is_valid || SljitLocalGroupKeyOperations<T>::Equals(groups.Key(group_idx), key));
+	}
+
+	void AddAllValidKnownGroup(idx_t group_idx, int64_t matching_delta, int64_t non_matching_delta) {
+		D_ASSERT(PREDICATE_ALL_VALID);
+		D_ASSERT(group_idx < groups.Count());
+		D_ASSERT(matching_delta >= 0);
+		D_ASSERT(non_matching_delta >= 0);
+		matching_counts[group_idx] += matching_delta;
+		non_matching_counts[group_idx] += non_matching_delta;
 	}
 
 	bool Empty() const override {
@@ -54,9 +95,16 @@ struct SljitTypedJoinInputComplementarySumAccumulator final
 	idx_t RepresentedRows() const {
 		idx_t result = 0;
 		for (idx_t group_idx = 0; group_idx < groups.Count(); group_idx++) {
-			result += represented_rows[group_idx];
+			result += RepresentedRows(group_idx);
 		}
 		return result;
+	}
+
+	idx_t RepresentedRows(idx_t group_idx) const {
+		if constexpr (PREDICATE_ALL_VALID) {
+			return UnsafeNumericCast<idx_t>(matching_counts[group_idx] + non_matching_counts[group_idx]);
+		}
+		return represented_rows[group_idx];
 	}
 
 	void Reset() override {
@@ -95,23 +143,23 @@ static bool SljitJoinInputComplementarySumAccumulatorEnabled(SljitDirectJoinOutp
 	return plan.pipeline_accumulator_enabled;
 }
 
-template <class T>
-static SljitTypedJoinInputComplementarySumAccumulator<T> &
+template <class T, bool PREDICATE_ALL_VALID = false>
+static SljitTypedJoinInputComplementarySumAccumulator<T, PREDICATE_ALL_VALID> &
 SljitGetJoinInputComplementarySumAccumulator(SljitDirectJoinOutputAggregateStrategy &strategy) {
 	if (!strategy.join_input_complementary_sum_accumulator) {
 		strategy.join_input_complementary_sum_accumulator =
-		    make_uniq<SljitTypedJoinInputComplementarySumAccumulator<T>>();
+		    make_uniq<SljitTypedJoinInputComplementarySumAccumulator<T, PREDICATE_ALL_VALID>>();
 	}
 	auto &accumulator = *strategy.join_input_complementary_sum_accumulator;
-	if (accumulator.physical_type != GetTypeId<T>()) {
-		throw InternalException("SLJIT join-input complementary accumulator type changed within one pipeline");
+	if (accumulator.physical_type != GetTypeId<T>() || accumulator.predicate_all_valid != PREDICATE_ALL_VALID) {
+		throw InternalException("SLJIT join-input complementary accumulator contract changed within one pipeline");
 	}
-	return static_cast<SljitTypedJoinInputComplementarySumAccumulator<T> &>(accumulator);
+	return static_cast<SljitTypedJoinInputComplementarySumAccumulator<T, PREDICATE_ALL_VALID> &>(accumulator);
 }
 
-template <class T>
+template <class T, bool PREDICATE_ALL_VALID>
 static bool SljitMaterializeJoinInputComplementarySumAccumulator(
-    SljitTypedJoinInputComplementarySumAccumulator<T> &accumulator,
+    SljitTypedJoinInputComplementarySumAccumulator<T, PREDICATE_ALL_VALID> &accumulator,
     const SljitStringSetComplementarySumDescriptor &classification,
     const vector<const ExecutionPrimitiveAggregateUpdateLane *> &payload_lanes, DataChunk &compact_groups,
     SljitPreaggregatedPrimitiveAggregateScratch &preaggregate_scratch, idx_t &represented_row_count) {
@@ -135,7 +183,7 @@ static bool SljitMaterializeJoinInputComplementarySumAccumulator(
 
 	preaggregate_scratch.Prepare(payload_lanes, group_count);
 	for (idx_t group_idx = 0; group_idx < group_count; group_idx++) {
-		preaggregate_scratch.group_row_counts.push_back(accumulator.represented_rows[group_idx]);
+		preaggregate_scratch.group_row_counts.push_back(accumulator.RepresentedRows(group_idx));
 	}
 	for (idx_t payload_idx = 0; payload_idx < preaggregate_scratch.payloads.size(); payload_idx++) {
 		auto &payload = preaggregate_scratch.payloads[payload_idx];
@@ -160,7 +208,7 @@ static bool SljitMaterializeJoinInputComplementarySumAccumulator(
 	return true;
 }
 
-template <class T>
+template <class T, bool PREDICATE_ALL_VALID>
 static bool SljitTryMaterializeTypedJoinInputComplementarySumAccumulator(
     SljitDirectJoinOutputAggregateStrategy &strategy, const SljitStringSetComplementarySumDescriptor &classification,
     const vector<const ExecutionPrimitiveAggregateUpdateLane *> &payload_lanes, DataChunk &compact_groups,
@@ -169,9 +217,12 @@ static bool SljitTryMaterializeTypedJoinInputComplementarySumAccumulator(
 	if (base.physical_type != GetTypeId<T>()) {
 		return false;
 	}
+	if (base.predicate_all_valid != PREDICATE_ALL_VALID) {
+		return false;
+	}
 	return SljitMaterializeJoinInputComplementarySumAccumulator(
-	    static_cast<SljitTypedJoinInputComplementarySumAccumulator<T> &>(base), classification, payload_lanes,
-	    compact_groups, preaggregate_scratch, represented_row_count);
+	    static_cast<SljitTypedJoinInputComplementarySumAccumulator<T, PREDICATE_ALL_VALID> &>(base), classification,
+	    payload_lanes, compact_groups, preaggregate_scratch, represented_row_count);
 }
 
 struct SljitJoinInputComplementaryAccumulatorMaterializeDispatch {
@@ -184,7 +235,11 @@ struct SljitJoinInputComplementaryAccumulatorMaterializeDispatch {
 
 	template <class T>
 	bool Execute() {
-		return SljitTryMaterializeTypedJoinInputComplementarySumAccumulator<T>(
+		if (strategy.join_input_complementary_sum_accumulator->predicate_all_valid) {
+			return SljitTryMaterializeTypedJoinInputComplementarySumAccumulator<T, true>(
+			    strategy, classification, payload_lanes, compact_groups, preaggregate_scratch, represented_row_count);
+		}
+		return SljitTryMaterializeTypedJoinInputComplementarySumAccumulator<T, false>(
 		    strategy, classification, payload_lanes, compact_groups, preaggregate_scratch, represented_row_count);
 	}
 };

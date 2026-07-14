@@ -309,4 +309,37 @@ static bool TryExecuteAllValidSingleKeyProbe(const SljitNativeHashJoinProbePlan 
 	return SljitDispatchHashJoinSingleKeyReader(plan, input, dispatch);
 }
 
+template <class KEY_READER, bool SELECTED, class CONSUMER>
+static void ExecuteAllValidSingleKeyNoChainProbeWithConsumer(const SljitNativeHashJoinProbePlan &plan,
+                                                             SljitNativeRegularHashJoinProbeInput &input,
+                                                             CONSUMER &consumer) {
+	SljitHashJoinSingleKeyMatcher<KEY_READER> matcher(plan, input);
+	ExecuteAllValidHashJoinNoChainProbeForInput<SELECTED>(input, matcher, consumer);
+}
+
+template <bool SELECTED, class CONSUMER>
+struct SljitAllValidSingleKeyNoChainConsumerDispatch {
+	const SljitNativeHashJoinProbePlan &plan;
+	SljitNativeRegularHashJoinProbeInput &input;
+	CONSUMER &consumer;
+
+	template <class KEY_READER>
+	void Execute() {
+		ExecuteAllValidSingleKeyNoChainProbeWithConsumer<KEY_READER, SELECTED>(plan, input, consumer);
+	}
+};
+
+template <bool SELECTED, class CONSUMER>
+static bool TryExecuteAllValidSingleKeyNoChainProbeWithConsumer(const SljitNativeHashJoinProbePlan &plan,
+                                                                SljitNativeRegularHashJoinProbeInput &input,
+                                                                CONSUMER &consumer) {
+	if (!SljitHashJoinCanUseSingleKeyProbe(plan) || plan.mark_build_match ||
+	    plan.output_mode != ExecutionHashJoinProbeOutputMode::MATCHED_PROBE_AND_BUILD || input.input_offset != 0 ||
+	    !SljitHashJoinCanUseAllValidNoChainProbe(plan, input, SELECTED)) {
+		return false;
+	}
+	SljitAllValidSingleKeyNoChainConsumerDispatch<SELECTED, CONSUMER> dispatch {plan, input, consumer};
+	return SljitDispatchHashJoinSingleKeyReader(plan, input, dispatch);
+}
+
 } // namespace duckdb

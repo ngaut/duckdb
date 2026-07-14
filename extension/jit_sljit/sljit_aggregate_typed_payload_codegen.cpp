@@ -183,9 +183,19 @@ bool BuildSljitFusedTypedAggregateCodegenPlan(const vector<SljitNativeRegionExpr
 	return has_typed_payload || force_typed_path;
 }
 
+void EmitSljitStoreBinarySharedPayloadValue(struct sljit_compiler *compiler, sljit_s32 value_reg,
+                                            sljit_s32 shared_value_reg, sljit_sw shared_value_offset) {
+	if (shared_value_reg != 0) {
+		sljit_emit_op1(compiler, SLJIT_MOV, shared_value_reg, 0, value_reg, 0);
+		return;
+	}
+	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_MEM1(SLJIT_SP), shared_value_offset, value_reg, 0);
+}
+
 void EmitSljitBinarySharedPayloadValueReg(struct sljit_compiler *compiler,
                                           const SljitFusedTypedAggregateCodegenPlan &codegen_plan,
-                                          sljit_sw shared_value_offset, bool fast_path, bool no_source_selection,
+                                          sljit_s32 shared_value_reg, sljit_sw shared_value_offset, bool fast_path,
+                                          bool no_source_selection,
                                           vector<SljitExpressionTreeOverflowJumps> &overflows,
                                           const vector<SljitTypedExpressionTreeDataPointerHoist> *data_hoists) {
 	D_ASSERT(codegen_plan.binary_shared_payload);
@@ -202,7 +212,11 @@ void EmitSljitBinarySharedPayloadValueReg(struct sljit_compiler *compiler,
 		EmitSljitTypedExpressionTreeSelectedFastValueReg(compiler, *codegen_plan.binary_other_value, spill_index,
 		                                                 overflows, data_hoists);
 	}
-	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_R4, 0, SLJIT_MEM1(SLJIT_SP), shared_value_offset);
+	if (shared_value_reg != 0) {
+		sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_R4, 0, shared_value_reg, 0);
+	} else {
+		sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_R4, 0, SLJIT_MEM1(SLJIT_SP), shared_value_offset);
+	}
 	SljitNativeIntegerBinaryOp native_op;
 	if (!TryGetSljitExpressionTreeBinaryOp(codegen_plan.binary_root->binary_op, native_op)) {
 		throw InternalException("Unsupported SLJIT shared aggregate binary operator");

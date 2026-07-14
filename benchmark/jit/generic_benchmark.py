@@ -120,7 +120,12 @@ GENERIC_WORKLOADS = (
         "name": "scan_filter",
         "setup_sql": "CREATE OR REPLACE TABLE __jit_generic_input AS SELECT i FROM range(40000000) tbl(i);",
         "sql": "SELECT sum(i * 31 + (i % 97)) AS value FROM __jit_generic_input WHERE i % 7 = 3",
+        # Ten alternating T4 production pairs prove 2.016x after the source
+        # contract takes ownership of this proven-safe modulo predicate. Keep
+        # margin for storage-scan variance while preventing a return to the
+        # old vectorized-filter boundary.
         "minimum_auto_speedup": 1.08,
+        "minimum_auto_speedup_by_threads": {4: 1.85},
         "max_auto_slowdown": 1.05,
         "requires_compiled_auto": True,
     },
@@ -180,7 +185,10 @@ GENERIC_WORKLOADS = (
             "SELECT i, CASE WHEN i % 100 = 0 "
             "THEN 'ordinary package with special shipping requests included' "
             "ELSE 'ordinary shipping package comment with several common words' END "
-            "FROM range(4000000) tbl(i);"
+            # This intentionally remains a DuckDB vectorized/dictionary filter.
+            # Keep the policy-overhead sample long enough that its fixed CBO
+            # decision cost is below the five-percent slowdown budget.
+            "FROM range(16000000) tbl(i);"
         ),
         "sql": (
             "SELECT sum(id * 31) AS value FROM __jit_generic_low_cardinality_like "
@@ -495,12 +503,23 @@ GENERIC_WORKLOADS = (
             "WHERE shipment.ship_mode IN ('MAIL', 'SHIP') "
             "GROUP BY shipment.ship_mode ORDER BY shipment.ship_mode"
         ),
-        # Production promotion after the unchecked narrowing probe loop and
-        # pipeline hot-group accumulator: 1.336x at T1 and 1.230x at T4.
-        "minimum_auto_speedup": 1.20,
-        "minimum_auto_speedup_by_threads": {1: 1.30, 4: 1.20},
+        # Promotion receipts: 1.332x at T1 and 1.250x at T4. Fixed-width RHS
+        # values bind their immutable packed storage once; an external-string
+        # classifier remains reserved for equality that cannot use that layout.
+        # With direct perfect-hash output, an incremental source derives the
+        # build index as key-minus-minimum, while all-valid incremental inline
+        # groups accumulate at their ordinal without rebinding selections.
+        "minimum_auto_speedup": 1.21,
+        "minimum_auto_speedup_by_threads": {1: 1.31, 4: 1.24},
         "max_auto_slowdown": 1.05,
         "requires_compiled_auto": True,
+        # This is a physical storage contract, not a query-specific shortcut:
+        # wide values are compared as their immutable packed representation.
+        "required_runtime_paths": (
+            "hash_join_probe.perfect_probe.direct_aggregate_consumer.compressed_uhugeint_predicate=",
+            "hash_join_probe.perfect_probe.direct_aggregate_consumer.inline_string_identity_known_groups=",
+            "hash_join_probe.perfect_probe.direct_aggregate_consumer.derived_build_index.contiguous_source=",
+        ),
     },
     {
         "name": "join_string_complementary_medium_groups",
@@ -565,8 +584,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--backend", default="sljit")
     parser.add_argument("--jit-extension", default="jit_sljit")
     parser.add_argument("--threads", type=int, default=1)
-    parser.add_argument("--repeats", type=int, default=5)
-    parser.add_argument("--triage-repeats", type=int, default=10)
+    parser.add_argument(
+        "--repeats",
+        type=int,
+        choices=(5, 10),
+        default=5,
+        help="order-alternating production pairs: 5 for a candidate, 10 for an explicit promotion",
+    )
     parser.add_argument("--event-log-size", type=int, default=0)
     parser.add_argument("--workloads", nargs="+", default=None)
     parser.add_argument("--trace-runtime", action="store_true")
@@ -595,6 +619,15 @@ def make_args(args: argparse.Namespace) -> SimpleNamespace:
 
 def median_us(values: list[int]) -> int:
     return int(round(statistics.median(values))) if values else 0
+
+
+def policy_order(repeat: int) -> tuple[str, str]:
+    if repeat <= 0:
+        raise ValueError("repeat must be positive")
+    # Each pair observes the same database state transition, but reversing the
+    # first policy on alternating repeats prevents cache and frequency warmup
+    # from consistently favoring JIT as the second query.
+    return ("off", "auto") if repeat % 2 else ("auto", "off")
 
 
 def prepare_workload(
@@ -725,47 +758,53 @@ def summarize(rows: list[dict], workloads: tuple[dict, ...], threads: int, trace
 
 def verification_failures(
     summary: list[dict],
+    runs: list[dict],
     workloads: tuple[dict, ...],
     threads: int,
     trace_runtime: bool,
-) -> tuple[list[str], set[str], set[str]]:
+) -> list[str]:
     by_workload = {(row["workload"], row["policy"]): row for row in summary}
     failures = []
-    performance_failures = set()
-    structural_failures = set()
     for workload in workloads:
         name = workload["name"]
         off = by_workload[(name, "off")]
         auto = by_workload[(name, "auto")]
         if int(off["correctness_diff"]) != 0 or int(auto["correctness_diff"]) != 0:
             failures.append(f"{name}: correctness mismatch")
-            structural_failures.add(name)
         if int(auto["compile_errors"]) != 0:
             failures.append(f"{name}: JIT compile errors")
-            structural_failures.add(name)
         if not trace_runtime:
             speedup = float(auto["speedup_vs_off_median"])
             minimum_speedup = minimum_auto_speedup(workload, threads)
             if speedup < minimum_speedup:
                 failures.append(f"{name}: auto speedup {speedup:.3f} below required {minimum_speedup:.3f}")
-                performance_failures.add(name)
             max_slowdown = float(workload.get("max_auto_slowdown", 1.05))
             if speedup > 0 and speedup < 1.0 / max_slowdown:
                 failures.append(f"{name}: auto slowdown {1.0 / speedup:.3f} exceeds {max_slowdown:.3f}")
-                performance_failures.add(name)
         if workload.get("requires_compiled_auto") and int(auto["compiled_regions"]) == 0:
             failures.append(f"{name}: auto did not compile a region")
-            structural_failures.add(name)
         if trace_runtime and workload.get("requires_compiled_auto") and int(auto["runtime_events"]) == 0:
             failures.append(f"{name}: traced auto run did not execute a compiled region")
-            structural_failures.add(name)
-    return failures, performance_failures, structural_failures
+        if trace_runtime:
+            auto_runs = [run for run in runs if run["workload"] == name and run["policy"] == "auto"]
+            for required_path in workload.get("required_runtime_paths", ()):
+                missing_repeats = [
+                    str(run["repeat"])
+                    for run in auto_runs
+                    if required_path not in run["jit_runtime_path_counts"]
+                ]
+                if missing_repeats:
+                    failures.append(
+                        f"{name}: required runtime path {required_path!r} missing from auto repeats "
+                        + ", ".join(missing_repeats)
+                    )
+    return failures
 
 
 def main() -> int:
     args = parse_args()
-    if args.repeats <= 0 or args.triage_repeats <= 0 or args.threads <= 0:
-        raise ValueError("--repeats, --triage-repeats, and --threads must be positive")
+    if args.threads <= 0:
+        raise ValueError("--threads must be positive")
     if not args.duckdb.exists():
         raise FileNotFoundError(args.duckdb)
     out_dir = make_output_dir(args.out_dir, "generic_benchmark")
@@ -798,7 +837,7 @@ def main() -> int:
             )
             prepared_setups[setup_id] = setup_sql
             for repeat in range(1, args.repeats + 1):
-                for policy in ("off", "auto"):
+                for policy in policy_order(repeat):
                     rows.append(
                         run_workload(
                             runtime_args,
@@ -813,36 +852,7 @@ def main() -> int:
         summary = summarize(rows, workloads, args.threads, args.trace_runtime)
         write_csv(out_dir / "runs.csv", RUN_FIELDS, rows)
         write_csv(out_dir / "summary.csv", SUMMARY_FIELDS, summary)
-        failures, performance_failures, structural_failures = verification_failures(
-            summary, workloads, args.threads, args.trace_runtime
-        )
-        if (
-            not args.trace_runtime
-            and performance_failures
-            and not structural_failures
-            and args.triage_repeats > args.repeats
-        ):
-            print("generic JIT focused performance recheck: " + ", ".join(sorted(performance_failures)))
-            for name in sorted(performance_failures):
-                workload = known_workloads[name]
-                expected_table = f"__jit_generic_expected_{name}"
-                for repeat in range(args.repeats + 1, args.triage_repeats + 1):
-                    for policy in ("off", "auto"):
-                        rows.append(
-                            run_workload(
-                                runtime_args,
-                                db_path,
-                                out_dir,
-                                workload,
-                                policy,
-                                repeat,
-                                expected_table,
-                            )
-                        )
-            summary = summarize(rows, workloads, args.threads, args.trace_runtime)
-            write_csv(out_dir / "runs.csv", RUN_FIELDS, rows)
-            write_csv(out_dir / "summary.csv", SUMMARY_FIELDS, summary)
-            failures, _, _ = verification_failures(summary, workloads, args.threads, args.trace_runtime)
+        failures = verification_failures(summary, rows, workloads, args.threads, args.trace_runtime)
         if failures:
             gate = "runtime proof" if args.trace_runtime else "performance"
             raise RuntimeError(f"generic JIT {gate} gate failed: " + "; ".join(failures))

@@ -30,7 +30,9 @@ JIT unit ratchet, then publishes the verified Git tree hash. When HEAD matches
 that receipt, pre-push reuses the result and adds only the generic and TPC-H
 production gates required by performance-sensitive branch changes. A missing
 or stale receipt makes pre-push run the complete guard. Candidate timing gates
-use five alternating repetitions; focused triage and promotion use ten.
+use five order-alternating policy pairs (the leading policy reverses every
+repeat); a ten-repeat promotion is an explicit follow-up command, never an
+automatic failed-candidate rerun.
 
 TPC-H benchmark and comparison gate:
 
@@ -66,8 +68,20 @@ the four-thread query shares a two-million-group state scan with JIT-off, so its
 parallel floor protects the generated sink win without claiming that shared
 downstream work. Join workloads without a proven
 compiled route have a bounded auto-policy slowdown and may remain vectorized.
-Short production failures receive an automatic focused high-sample recheck
-before the gate decides.
+The generic runner never adds repetitions after a candidate failure. Run the
+same command with `--repeats 10` only when deliberately promoting a result.
+
+Generated scan-filter ownership is semantic and workload-independent. It moves
+only exception-free static predicates over the retained source layout into the
+region; a constant integral modulo or integer division is safe when its divisor
+cannot be zero (or signed `-1`). If the backend cannot lower an admitted
+predicate, the normal DuckDB scan filter remains in charge—no filter is
+duplicated or silently dropped.
+
+The four-thread scan-filter promotion proves 2.016x over ten alternating pairs
+(51.823 ms JIT-off versus 25.712 ms JIT-auto). Its 1.85x thread-specific floor
+preserves generated ownership of the safe modulo filter while leaving room for
+storage-scan variance.
 
 Join-heavy validation also covers exact perfect-hash dynamic filters. Storage
 executes exact PHJ conjuncts before generic residual predicates, and a
@@ -77,6 +91,19 @@ repeating membership work. Runtime tracing reports
 The generic exact-filter join preserves a 1.15x single-thread compiled speedup;
 the four-thread gate retains its separate 1.08x floor because its shorter raw
 runtime has a larger proportional noise envelope.
+
+Direct selected-view terminals may request identity-preferred perfect-hash
+output. All-match batches omit disposable match-selection stores; a batch with a
+miss reruns the compact-selection kernel before it is published. Trace receipts
+name the elided path or the retry, so the fast path never hides selection
+semantics.
+
+When the bound RHS predicate vector is all-valid, complementary aggregate lanes
+also account for each group row. The terminal omits its redundant represented-row
+counter; nullable vectors retain the general accumulator and cannot use that
+receipt.
+For an observed one- or two-key group domain, the all-valid terminal merges
+vector-local totals once per known group and commits before any new-key fallback.
 
 When a production run verifies a durable performance improvement, the same
 increment must tighten the corresponding checked-in speedup floor or refresh
@@ -90,11 +117,23 @@ two-way conjunction carries 1.31x and 1.25x floors; the three-way variant adds
 1.25x and 1.20x floors. The neighboring non-null grouped workload has 1.16x and
 1.13x thread-specific floors. The mixed-predicate promotion proves 1.338x at
 one thread and 1.286x at four threads.
-The mixed-source complementary string join proves 1.336x at one thread and
-1.230x at four threads. Its 1.30x and 1.20x floors protect a runtime-adaptive
-pipeline-local direct tier that keeps the first eight observed groups direct
-and switches permanently to hashing on the ninth, one-pass compressed RHS classification, and a
-range-proven BIGINT-to-INTEGER selected no-chain probe.
+The mixed-source complementary string join promotion receipts prove 1.332x at
+one thread and 1.250x at four threads. Its 1.31x and 1.24x floors protect the
+generic direct terminal: a runtime-adaptive pipeline-local group accumulator,
+a range-proven BIGINT-to-INTEGER selected no-chain probe, and an executable-owned
+perfect-hash RHS predicate classifier. Once all local tasks collectively cover a
+dictionary with direct probe rows, one task builds an immutable artifact for an
+external-string predicate. It owns the dictionary buffer, its all-valid fact,
+and one classification byte per slot. Fixed-width values and two inline string
+constants retain their direct packed comparison because another dictionary pass
+cannot repay its extra indirection. Publication and every reader use DuckDB's
+atomic shared pointer, so no task can observe a callable classification without
+its owner; post-publication lookups are byte loads with no mutex acquisition.
+For direct perfect-hash output with an incremental source, the build index is
+the normalized key minus the hash minimum. An all-valid terminal directly
+accumulates an incremental inline group at its ordinal, committing only after
+the full vector proves the known one- or two-key domain. Any NULL, long string,
+or unseen key leaves state untouched and uses the general transform path.
 Generated sorted-run aggregation proves 3.222x at one thread and 1.902x at four
 threads over ten alternating production repetitions; its checked-in floors are
 3.00x and 1.75x. The same pending owner consumes materialized arithmetic group

@@ -135,13 +135,18 @@ bool TryBuildSljitPerfectHashFusedUpdatePlan(
 	result.hoist_fast_source_data_pointers = !result.fast_source_data_hoists.empty() &&
 	                                         (!result.hoist_source_data_pointers ||
 	                                          result.fast_source_data_hoists.size() > result.source_data_hoists.size());
-	result.hoist_fast_group_data_array_base =
-	    result.hoist_source_data_pointers && result.codegen_plan.fast_path_supported &&
-	    result.local_aggregate_plan.sparse && SljitCanPrecomputePerfectHashStringGroupOffset(result.group_plans);
 	result.dedicated_state_register =
 	    SLJIT_HAS_DEDICATED_PERFECT_HASH_STATE_REG && !result.local_aggregate_plan.enabled;
 	result.dedicated_group_index_register = SLJIT_HAS_DEDICATED_PERFECT_HASH_STATE_REG &&
 	                                        result.local_aggregate_plan.enabled && !result.local_aggregate_plan.sparse;
+	// In each flat fast-path row, S7 starts as a transient group-data-array base
+	// and becomes the direct perfect-hash state pointer only after every group
+	// key has consumed it. This removes repeated input-struct loads without
+	// borrowing registers owned by the typed SIMD expression emitter.
+	result.hoist_fast_group_data_array_base =
+	    result.hoist_source_data_pointers && result.codegen_plan.fast_path_supported &&
+	    (result.local_aggregate_plan.sparse || result.dedicated_state_register) &&
+	    SljitCanPrecomputePerfectHashStringGroupOffset(result.group_plans);
 	result.state_pointer_reg = result.dedicated_state_register ? SLJIT_PERFECT_HASH_STATE_REG : SLJIT_S4;
 	result.group_index_reg = result.dedicated_group_index_register ? SLJIT_PERFECT_HASH_GROUP_INDEX_REG : SLJIT_S4;
 	result.saved_register_count = (result.dedicated_state_register || result.local_aggregate_plan.sparse)

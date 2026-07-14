@@ -337,11 +337,17 @@ def tpch_gate_command(
         *args.tpch_queries,
         "--repeats",
         str(args.tpch_repeats),
-        "--triage-repeats",
-        str(args.tpch_triage_repeats),
-        "--triage-profile-repeats",
-        str(args.tpch_triage_profile_repeats),
     ]
+    if args.tpch_triage_failures:
+        command.extend(
+            [
+                "--triage-failures",
+                "--triage-repeats",
+                str(args.tpch_triage_repeats),
+                "--triage-profile-repeats",
+                str(args.tpch_triage_profile_repeats),
+            ]
+        )
     if args.tpch_out_dir is not None:
         command.extend(["--out-dir", str(args.tpch_out_dir)])
     if args.tpch_baseline is not None:
@@ -723,6 +729,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--tpch-out-dir", type=Path, default=None)
     parser.add_argument("--tpch-queries", nargs="+", default=["all"])
     parser.add_argument("--tpch-repeats", type=int, default=5)
+    parser.add_argument("--tpch-triage-failures", action="store_true")
     parser.add_argument("--tpch-triage-repeats", type=int, default=10)
     parser.add_argument("--tpch-triage-profile-repeats", type=int, default=3)
     parser.add_argument("--tpch-db", type=Path, default=None)

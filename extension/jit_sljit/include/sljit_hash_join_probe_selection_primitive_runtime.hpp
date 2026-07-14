@@ -8,8 +8,9 @@
 
 #pragma once
 
-#include "sljit_full_pipeline_primitive_sequence.hpp"
+#include "sljit_full_pipeline_recipe_state.hpp"
 #include "sljit_full_pipeline_runtime.hpp"
+#include "sljit_hash_join_consumer_result.hpp"
 #include "sljit_hash_join_probe_drain_runtime.hpp"
 #include "sljit_region_runtime_state.hpp"
 #include "sljit_runtime_batch_view.hpp"
@@ -27,9 +28,11 @@ public:
 	      selected_hash_join_inputs(selected_hash_join_inputs_p) {
 	}
 
-	template <class EXECUTE_HASH_JOIN_PROBE, class EXECUTE_NEXT_STEP>
+	template <class EXECUTE_HASH_JOIN_PROBE, class EXECUTE_NEXT_STEP, class TRY_EXECUTE_DIRECT_CONSUMER>
 	bool Execute(const SljitFullPipelinePrimitiveStep &step, const SljitRuntimeBatchView &input,
-	             EXECUTE_HASH_JOIN_PROBE &execute_hash_join_probe, EXECUTE_NEXT_STEP &&execute_next_step) {
+	             EXECUTE_HASH_JOIN_PROBE &execute_hash_join_probe, EXECUTE_NEXT_STEP &&execute_next_step,
+	             optional_ptr<const SljitHashJoinDirectAggregateConsumerContract> direct_consumer_contract,
+	             TRY_EXECUTE_DIRECT_CONSUMER &&try_execute_direct_consumer) {
 		string deferred_reason;
 		DataChunk *join_input_ptr = nullptr;
 		if (input.HasHashJoinSelection()) {
@@ -50,6 +53,21 @@ public:
 		auto &primitive = step.hash_join_probe_selection;
 		const auto hash_join_idx = primitive.hash_join_idx;
 		auto &hash_join_op = ops[hash_join_idx];
+		if (direct_consumer_contract) {
+			runtime.RecordJitRuntimePath("hash_join_probe.direct_aggregate_consumer_candidate");
+			auto direct_result = try_execute_direct_consumer(*direct_consumer_contract, primitive, join_input,
+			                                                 execute_hash_join_probe);
+			if (direct_result.blocker && direct_consumer_blocker != direct_result.blocker) {
+				direct_consumer_blocker = direct_result.blocker;
+				runtime.RecordJitRuntimePath(direct_result.blocker);
+			}
+			if (direct_result.status == SljitHashJoinAggregateConsumerStatus::DEFERRED) {
+				return SljitDeferFullPipelineResult(runtime, direct_result.deferred_reason, result);
+			}
+			if (direct_result.status == SljitHashJoinAggregateConsumerStatus::EXECUTED) {
+				return false;
+			}
+		}
 		auto &join_output = scratch.TemporaryChunk(hash_join_idx);
 		const auto output_column_map = primitive.HasOutputColumnMap() ? &primitive.output_column_map : nullptr;
 		auto handle_output = [&](DataChunk &output, SljitHashJoinProbeDrainState &state) {
@@ -75,6 +93,7 @@ private:
 	vector<SljitExecutableRegionOp> &ops;
 	SljitRegionExecutionScratch &scratch;
 	SljitSelectedHashJoinInputRuntime &selected_hash_join_inputs;
+	const char *direct_consumer_blocker = nullptr;
 };
 
 } // namespace duckdb

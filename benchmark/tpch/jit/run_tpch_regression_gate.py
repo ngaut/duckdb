@@ -764,7 +764,12 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--max-runtime-component-ratio", type=float, default=1.10)
     parser.add_argument("--max-runtime-component-us", type=int, default=200)
-    parser.add_argument("--triage-failures", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument(
+        "--triage-failures",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Explicitly rerun failed queries at the configured high sample count before failing the gate.",
+    )
     parser.add_argument(
         "--triage-repeats",
         type=int,

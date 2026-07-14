@@ -10,6 +10,7 @@
 
 #include "sljit_direct_join_output_aggregate_runtime.hpp"
 #include "sljit_full_pipeline_runtime.hpp"
+#include "sljit_hash_join_probe_aggregate_consumer_runtime.hpp"
 #include "sljit_hash_join_probe_runtime.hpp"
 #include "sljit_hash_join_projection_runtime.hpp"
 #include "sljit_post_join_projection_runtime.hpp"
@@ -24,8 +25,7 @@ struct SljitPostJoinProjectionAggregateRuntimeState {
 		processed_output_rows = 0;
 	}
 
-	bool Prepare(ExecutionRegionRuntime &, vector<SljitExecutableRegionOp> &ops,
-	             const SljitPostJoinProjectionAggregatePrimitive &primitive,
+	bool Prepare(vector<SljitExecutableRegionOp> &ops, const SljitPostJoinProjectionAggregatePrimitive &primitive,
 	             const vector<idx_t> &source_distinct_counts, const vector<Value> &source_min_values,
 	             const vector<Value> &source_max_values) {
 		if (!SljitCanBindPostJoinProjectionAggregatePrimitive(ops, primitive)) {
@@ -36,6 +36,41 @@ struct SljitPostJoinProjectionAggregateRuntimeState {
 		    primitive.aggregate_idx, source_distinct_counts, source_min_values, source_max_values);
 		prepared = true;
 		return true;
+	}
+
+	template <class EXECUTE_HASH_JOIN_PROBE>
+	SljitHashJoinAggregateConsumerResult TryExecuteHashJoinProbeConsumer(
+	    ExecutionRegionRuntime &runtime, vector<SljitExecutableRegionOp> &ops, SljitRegionExecutionScratch &scratch,
+	    const SljitHashJoinProbeSelectionPrimitive &probe_primitive, DataChunk &join_input,
+	    EXECUTE_HASH_JOIN_PROBE &execute_hash_join_probe, idx_t probe_input_filter_idx = DConstants::INVALID_INDEX) {
+		SljitHashJoinAggregateConsumerResult result;
+		if (!prepared) {
+			result.blocker = "hash_join_probe.direct_aggregate_consumer_miss.terminal_not_prepared";
+			return result;
+		}
+		if (probe_primitive.hash_join_idx != post_join_projection.hash_join_idx) {
+			result.blocker = "hash_join_probe.direct_aggregate_consumer_miss.hash_join_mismatch";
+			return result;
+		}
+		auto strategy_ptr = DirectAggregateStrategyPtr();
+		if (!strategy_ptr || strategy_ptr->disabled) {
+			result.blocker = "hash_join_probe.direct_aggregate_consumer_miss.aggregate_strategy";
+			return result;
+		}
+		strategy_ptr->last_failure.clear();
+		const auto output_column_map = probe_primitive.HasOutputColumnMap()
+		                                   ? optional_ptr<const vector<idx_t>>(&probe_primitive.output_column_map)
+		                                   : optional_ptr<const vector<idx_t>>(nullptr);
+		auto &hash_join_op = ops[probe_primitive.hash_join_idx];
+		result = SljitTryExecuteHashJoinComplementarySumAggregateConsumer(
+		    runtime, runtime.ExecutionOperators(), ops, scratch, probe_primitive, hash_join_op, *strategy_ptr,
+		    join_input, post_join_projection, output_column_map, probe_primitive.output_projection_idx,
+		    optional_ptr<bool>(&deferred_grouped_finish), probe_input_filter_idx, probe_input_filter_cache,
+		    execute_hash_join_probe);
+		if (result.status == SljitHashJoinAggregateConsumerStatus::EXECUTED) {
+			processed_output_rows += result.matched_count;
+		}
+		return result;
 	}
 
 	bool Execute(ExecutionRegionRuntime &runtime, ExecutionRegionResult &result, vector<SljitExecutableRegionOp> &ops,
@@ -189,6 +224,7 @@ private:
 	SljitDataChunkBatch projected_batch;
 	SljitPostJoinProjectionStrategy post_join_projection;
 	unique_ptr<SljitDirectJoinOutputAggregateStrategy> direct_join_output_aggregate_strategy;
+	SljitHashJoinProbeInputFilterCache probe_input_filter_cache;
 };
 
 } // namespace duckdb

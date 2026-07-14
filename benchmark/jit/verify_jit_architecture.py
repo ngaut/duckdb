@@ -447,6 +447,309 @@ def verify_production_contract_ownership() -> None:
     )
 
 
+def verify_benchmark_repetition_budget() -> None:
+    generic_benchmark = read("benchmark/jit/generic_benchmark.py")
+    if "choices=(5, 10)" not in generic_benchmark:
+        raise AssertionError("generic benchmark candidates must use the explicit five-or-ten repetition budget")
+    if "def policy_order(repeat: int)" not in generic_benchmark or "for policy in policy_order(repeat):" not in generic_benchmark:
+        raise AssertionError("generic benchmark pairs must alternate the leading policy")
+    if "triage-repeats" in generic_benchmark:
+        raise AssertionError("generic benchmark candidates must not silently escalate into triage repetitions")
+    if "return failures" not in generic_benchmark:
+        raise AssertionError("generic benchmark must fail from the original candidate sample without a retry path")
+
+    tpch_gate = read("benchmark/tpch/jit/run_tpch_regression_gate.py")
+    if '"--triage-failures"' not in tpch_gate or "default=False" not in tpch_gate:
+        raise AssertionError("TPC-H focused triage must be opt-in")
+    refactor_guard = read("benchmark/jit/run_jit_refactor_guard.py")
+    if "if args.tpch_triage_failures:" not in refactor_guard:
+        raise AssertionError("refactor guard must pass TPC-H triage only when explicitly requested")
+
+
+def verify_bound_direct_join_terminal_contract() -> None:
+    recipe_state = read("extension/jit_sljit/include/sljit_full_pipeline_recipe_state.hpp")
+    for required in (
+        "struct SljitHashJoinDirectAggregateConsumerContract",
+        "idx_t probe_step_idx = DConstants::INVALID_INDEX",
+        "idx_t terminal_step_idx = DConstants::INVALID_INDEX",
+        "idx_t probe_input_filter_idx = DConstants::INVALID_INDEX",
+        "SljitBindHashJoinDirectAggregateConsumerContract",
+        "recipe.direct_aggregate_consumer =",
+    ):
+        if required not in recipe_state:
+            raise AssertionError(f"recipe binding is missing the immutable direct-terminal contract: {required}")
+
+    selection_runtime = read("extension/jit_sljit/include/sljit_hash_join_probe_selection_primitive_runtime.hpp")
+    for required in (
+        "optional_ptr<const SljitHashJoinDirectAggregateConsumerContract> direct_consumer_contract",
+        "if (direct_consumer_contract)",
+        '"hash_join_probe.direct_aggregate_consumer_candidate"',
+    ):
+        if required not in selection_runtime:
+            raise AssertionError(f"hash-join selection must consume the bound direct-terminal contract: {required}")
+
+    source_runtime = read("extension/jit_sljit/include/sljit_source_pipeline_runtime.hpp")
+    for required in (
+        "recipe.direct_aggregate_consumer.probe_step_idx == step_idx",
+        "direct_consumer_contract, try_execute_direct_consumer",
+        "TryExecuteHashJoinProbeConsumer(runtime, ops, scratch, contract",
+    ):
+        if required not in source_runtime:
+            raise AssertionError(f"source execution is missing bound direct-terminal dispatch: {required}")
+    for stale in (
+        "filter_then_terminal",
+        "direct_consumer_nonterminal_recorded",
+        "direct_aggregate_consumer_miss.non_terminal_successor",
+    ):
+        if stale in source_runtime:
+            raise AssertionError(f"source execution must not probe runtime successor shape: {stale}")
+
+    terminal_runtime = read("extension/jit_sljit/include/sljit_full_pipeline_terminal_runtime.hpp")
+    if "const SljitHashJoinDirectAggregateConsumerContract &contract" not in terminal_runtime:
+        raise AssertionError("terminal execution must receive the bound direct-terminal contract")
+    if "direct_aggregate_consumer_miss.terminal_kind" in terminal_runtime:
+        raise AssertionError("terminal execution must not rediscover terminal kind at runtime")
+
+    recipe_binding_header = read("extension/jit_sljit/include/sljit_full_pipeline_recipe_binding.hpp")
+    recipe_binding_cpp = read("extension/jit_sljit/sljit_full_pipeline_recipe_binding.cpp")
+    recipe_builder = read("extension/jit_sljit/sljit_full_pipeline_recipe.cpp")
+    recipe_families = (
+        "SourceFilterAggregate",
+        "JoinFilterAggregate",
+        "SourceHashJoinBuildSink",
+        "HashJoinAppendSink",
+        "HashJoinBuildSink",
+    )
+    for family in recipe_families:
+        if f"TryMake{family}Recipe" not in recipe_binding_header:
+            raise AssertionError(f"{family} recipe admission and construction must have one shared binder")
+        if re.search(rf"\b(?:CanMake|Make){family}Recipe\b", recipe_binding_header + recipe_binding_cpp):
+            raise AssertionError(f"{family} recipe shape must not be admitted and reconstructed through duplicate APIs")
+        if f"binding.TryMake{family}Recipe(facts, recipe)" not in recipe_builder:
+            raise AssertionError(f"recipe builder must consume the shared {family} binder")
+
+
+def verify_perfect_hash_predicate_cache_ownership() -> None:
+    classifier = read("extension/jit_sljit/include/sljit_perfect_hash_predicate_classification.hpp")
+    for contract in (
+        "class SljitSharedPerfectHashPredicateClassificationCache",
+        "buffer_ptr<DictionaryEntry> dictionary",
+        "shared_ptr<const SljitPerfectHashPredicateClassificationArtifact> published",
+        "struct SljitPerfectHashPredicateClassificationObservation",
+        "bool started_dictionary_epoch = false",
+        "bool activation_pending = false",
+        "idx_t observed_probe_rows = 0",
+        "MaxValue<idx_t>(STANDARD_VECTOR_SIZE * 64, dictionary->data.size())",
+        "result.classifications.size() != dictionary->data.size()",
+        "state->published.atomic_load(std::memory_order_acquire)",
+        "state->published.atomic_store(published)",
+    ):
+        if contract not in classifier:
+            raise AssertionError(f"perfect-hash classifier is missing shared immutable ownership: {contract}")
+    if re.search(r"state->published(?!\.atomic_load|\.atomic_store)", classifier):
+        raise AssertionError("perfect-hash classifier must not read or publish its owner non-atomically")
+
+    state = read("extension/jit_sljit/include/sljit_direct_join_output_aggregate_state.hpp")
+    if "SljitPerfectHashPredicateClassificationCache" in state or "local_classifications" in state:
+        raise AssertionError("direct aggregate state must not retain the replaced local classifier")
+
+    executable = read("extension/jit_sljit/include/sljit_region_executable.hpp")
+    if "SljitSharedPerfectHashPredicateClassificationCache shared_predicate_classification" not in executable:
+        raise AssertionError("the executable perfect-hash probe must own the shared immutable classifier")
+
+    local_state = read("extension/jit_sljit/sljit_region_runtime.cpp")
+    for contract in (
+        "class SljitNativeRegionLocalState : public ExecutionRegionLocalState",
+        "SljitFullPipelineTerminalRuntimeState terminal",
+        "return make_uniq<SljitNativeRegionLocalState>(allocator, ops)",
+    ):
+        if contract not in local_state:
+            raise AssertionError("local state must retain only mutable terminal execution state")
+    if "shared_predicate_classification" in local_state:
+        raise AssertionError("shared predicate classification must not be stored in pipeline-local state")
+
+    consumer = read("extension/jit_sljit/include/sljit_hash_join_probe_aggregate_consumer_runtime.hpp")
+    if "shared_predicate_classification.Observe(predicate_dictionary_entry, count" not in consumer:
+        raise AssertionError("perfect-hash probe must feed its executable classifier after the activation threshold")
+    if "SljitPerfectHashPredicateNeedsDictionaryClassification" not in consumer:
+        raise AssertionError("perfect-hash classifier admission must model predicate comparison cost")
+    for contract in (
+        "return field.compressed_size == 0;",
+        "a byte classification replaces every remaining",
+        "Compressed fields are already narrower than the classifier value.",
+    ):
+        if contract not in consumer:
+            raise AssertionError(f"perfect-hash classifier admission is missing: {contract}")
+    if "UsesLocalCache" in consumer or "BindExecutionMode" in consumer or "PARALLEL_RAW" in consumer:
+        raise AssertionError("perfect-hash probe must not retain a thread-count cache policy")
+    for contract in (
+        "SljitSharedPerfectHashDictionaryComplementarySumRHSMatcher",
+        "direct_aggregate_consumer.shared_predicate_cache",
+        "shared_predicate_classifier_dictionary_epoch",
+        "shared_predicate_classifier_observing",
+    ):
+        if contract not in consumer:
+            raise AssertionError(f"perfect-hash probe must consume the published classifier: {contract}")
+    if "SljitLocalPerfectHashDictionaryComplementarySumRHSMatcher" in consumer:
+        raise AssertionError("perfect-hash probe must not retain its replaced local classifier")
+
+    test = read("test/api/test_jit_join.cpp")
+    for contract in (
+        "direct_aggregate_consumer.shared_predicate_cache=",
+        "!StringUtil::Contains(paths, \"hash_join_probe.perfect_probe.direct_aggregate_consumer.all_valid_rhs=\")",
+        "jit_perfect_complementary_compact_orders",
+        "REQUIRE(StringUtil::Contains(",
+    ):
+        if contract not in test:
+            raise AssertionError(f"direct perfect-hash tests must prove shared nullable classification: {contract}")
+
+    string_membership = read("extension/jit_sljit/include/sljit_string_set_case_projection_runtime.hpp")
+    if "SljitStringEqualsEitherConstant" not in string_membership:
+        raise AssertionError("two-constant string membership must share its string layout header load")
+    if "return SljitStringEqualsEitherConstant(predicate, classification.constants[0]" not in consumer:
+        raise AssertionError("direct perfect-hash predicate classification must use single-header membership")
+    for contract in (
+        "SljitPerfectHashAllValidCompressedRHSMatcher",
+        "SljitPerfectHashAllValidByteRHSMatcher",
+        "SljitPerfectHashAllValidUhugeintRHSMatcher",
+        "compressed_byte_predicate",
+        "compressed_uhugeint_predicate",
+        "const STORAGE *data",
+        "STORAGE first",
+        "STORAGE second",
+    ):
+        if contract not in consumer:
+            raise AssertionError("compressed perfect-hash predicates must bind immutable storage once")
+
+    generic_benchmark = read("benchmark/jit/generic_benchmark.py")
+    for contract in (
+        '"required_runtime_paths"',
+        "compressed_uhugeint_predicate=",
+        "inline_string_identity_known_groups=",
+        "derived_build_index.contiguous_source=",
+        "required runtime path",
+    ):
+        if contract not in generic_benchmark:
+            raise AssertionError("generic packed-string coverage must require its runtime receipt")
+
+    group_loader = read("extension/jit_sljit/include/sljit_selected_input_vector_group_key.hpp")
+    if (
+        "staged fallible group transforms" not in local_state
+        or "CONVERT::STAGE_TRANSFORMED_KEYS" not in group_loader
+    ):
+        raise AssertionError("fallible direct group transforms must declare whether checked keys are staged")
+
+
+def verify_perfect_hash_identity_selected_view() -> None:
+    contract = read("extension/jit_sljit/include/sljit_hash_join_probe_execution_contract.hpp")
+    for required in (
+        "IDENTITY_PREFERRED_SELECTED_VIEW",
+        "IDENTITY_PREFERRED_DIRECT_CONSUMER",
+        "SljitHashJoinProbePrefersIdentitySelection",
+        "SljitHashJoinProbePrefersDirectConsumerOutput",
+        "SljitHashJoinProbeProducesSelectedView",
+    ):
+        if required not in contract:
+            raise AssertionError("perfect-hash identity selection must be an explicit selected-view contract")
+
+    generated_probe = read("extension/jit_sljit/sljit_hash_join_probe_perfect_codegen.cpp")
+    for required in (
+        "SljitPerfectHashJoinProbeCodegenConfig",
+        "config.emit_match_selection",
+        "config.emit_build_selection",
+    ):
+        if required not in generated_probe:
+            raise AssertionError("generated perfect-hash probe must make transient selections contract-owned")
+
+    exact_probe = read("extension/jit_sljit/include/sljit_exact_perfect_hash_join_runtime.hpp")
+    for required in (
+        "bool emit_match_selection = true",
+        "bool emit_build_selection = true",
+        "if (emit_match_selection)",
+        "if (emit_build_selection)",
+    ):
+        if required not in exact_probe:
+            raise AssertionError("exact perfect-hash probe must share the direct-consumer selection contract")
+
+    executor = read("extension/jit_sljit/include/sljit_hash_join_probe_executor_runtime.hpp")
+    for required in (
+        "identity_selection_elided",
+        "build_selection_elided",
+        "identity_selection_retry",
+        "native_input.selected_count != input.size()",
+        "SljitCanDerivePerfectHashBuildSelectionFromIdentity",
+        "!direct_consumer_output",
+    ):
+        if required not in executor:
+            raise AssertionError("perfect-hash identity selection must retry compact output on a miss")
+
+    consumer = read("extension/jit_sljit/include/sljit_hash_join_probe_aggregate_consumer_runtime.hpp")
+    for required in (
+        "SljitHashJoinProbeOutputContract::IDENTITY_PREFERRED_DIRECT_CONSUMER",
+        "SljitWithPerfectHashIdentityBuildIndex",
+        "SljitPerfectHashContiguousIdentityBuildIndex",
+        "perfect_build_selection_is_key_offset",
+        "derived_build_index.contiguous_source",
+    ):
+        if required not in consumer:
+            raise AssertionError("direct perfect-hash terminal must use the proof-backed build-index contract")
+
+    exact_test = read("test/api/test_jit.cpp")
+    if "SljitPopulateExactPerfectHashJoinSelections<int32_t, int64_t>(input, false)" not in exact_test:
+        raise AssertionError("exact perfect-hash selection must cover compact fallback reconstruction")
+    direct_test = read("test/api/test_jit_join.cpp")
+    for required in (
+        "hash_join_probe.perfect_probe.identity_selection_elided=",
+        "hash_join_probe.perfect_probe.build_selection_elided=",
+    ):
+        if required not in direct_test:
+            raise AssertionError("direct perfect-hash terminal must cover the identity build-index receipt")
+
+
+def verify_perfect_hash_all_valid_complementary_accumulator() -> None:
+    accumulator = read("extension/jit_sljit/include/sljit_join_input_complementary_sum_accumulator.hpp")
+    for required in (
+        "template <class T, bool PREDICATE_ALL_VALID = false>",
+        "bool AccumulateAllValid",
+        "bool HasOneOrTwoGroups() const",
+        "void AddAllValidKnownGroup",
+        "sum of the two complementary lanes",
+        "accumulator.predicate_all_valid != PREDICATE_ALL_VALID",
+    ):
+        if required not in accumulator:
+            raise AssertionError("all-valid complementary accumulator must own its reduced accounting contract")
+
+    consumer = read("extension/jit_sljit/include/sljit_hash_join_probe_aggregate_consumer_runtime.hpp")
+    for required in (
+        "bool AllValid() const",
+        "bool MatchAllValid(sel_t build_idx)",
+        "SljitExecutePerfectHashComplementarySumProbeConsumer<true>",
+        "SljitTryExecutePerfectHashInlineStringKnownGroupConsumer",
+        "SljitInlineStringStorageSignatureSupported<GROUP_TYPE>::value",
+        "direct_aggregate_consumer.all_valid_rhs",
+        "direct_aggregate_consumer.inline_string_known_groups",
+        "direct_aggregate_consumer.inline_string_identity_known_groups",
+        "direct_aggregate_consumer.one_or_two_known_groups",
+        "ConsumeOneOrTwoKnownGroups",
+    ):
+        if required not in consumer:
+            raise AssertionError("perfect-hash consumer must dispatch all-valid predicates without nullable accounting")
+
+    state = read("extension/jit_sljit/include/sljit_direct_join_output_aggregate_state.hpp")
+    if "bool predicate_all_valid" not in state:
+        raise AssertionError("complementary accumulator state must retain its validity contract")
+
+    direct_test = read("test/api/test_jit_join.cpp")
+    if "jit_perfect_complementary_nullable_orders" not in direct_test:
+        raise AssertionError("direct perfect-hash complementary aggregation must retain nullable RHS coverage")
+    if "direct_aggregate_consumer.all_valid_rhs=" not in direct_test:
+        raise AssertionError("all-valid complementary aggregation must have a runtime receipt")
+    if "direct_aggregate_consumer.one_or_two_known_groups=" not in direct_test:
+        raise AssertionError("compact complementary group accumulation must have a runtime receipt")
+    if "direct_aggregate_consumer.inline_string_known_groups=" not in direct_test:
+        raise AssertionError("inline string known-group accumulation must have a runtime receipt")
+
+
 def verify_runtime_proofs_are_typed() -> None:
     common_header = read("src/include/duckdb/execution/execution_region_common.hpp")
     if "enum class ExecutionRegionJitRuntimeProof" not in common_header:
@@ -538,6 +841,17 @@ def verify_scan_filter_ownership() -> None:
     scan = read("src/execution/operator/scan/physical_table_scan.cpp")
     if "UsesDynamicScanFiltersOnly()" not in scan or "GetFinalTableFilters(op, nullptr)" not in scan:
         raise AssertionError("table scan must derive dynamic-only filters from finalized runtime-filter state")
+    source_ir = read("src/execution/execution_region_ir.cpp")
+    for contract in (
+        "ExecutionRegionConstantIsSafeIntegralDivisor",
+        "ExecutionRegionExpressionIsExceptionFree",
+        "expression.binary_op != ExecutionExpressionBinaryOp::MODULO",
+        "expression.binary_op != ExecutionExpressionBinaryOp::INTEGER_DIVIDE",
+    ):
+        if contract not in source_ir:
+            raise AssertionError(f"generated source-filter admission is missing exception proof: {contract}")
+    if "source filter expression contains unsupported arithmetic" in source_ir:
+        raise AssertionError("generated source-filter admission must not reject all arithmetic without exception proof")
     executable = read("extension/jit_sljit/include/sljit_region_executable.hpp")
     if "SljitCompiledFunction" not in executable or "SljitLazyCompiledFunction" not in executable:
         raise AssertionError("SLJIT executable regions must own code and callables through typed artifacts")
@@ -640,6 +954,11 @@ def main() -> None:
     verify_partial_predicate_simd_contract()
     verify_runtime_proofs_are_typed()
     verify_production_contract_ownership()
+    verify_benchmark_repetition_budget()
+    verify_bound_direct_join_terminal_contract()
+    verify_perfect_hash_predicate_cache_ownership()
+    verify_perfect_hash_identity_selected_view()
+    verify_perfect_hash_all_valid_complementary_accumulator()
     print("Execution-region architecture verification passed")
 
 

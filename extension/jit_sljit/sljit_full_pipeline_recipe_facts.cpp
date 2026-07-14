@@ -191,7 +191,17 @@ bool SljitTryAnalyzeJoinFilterAggregate(const vector<SljitExecutableRegionOp> &o
 		return false;
 	}
 	const auto aggregate_idx = ops.size() - 1;
-	const auto filter_idx = aggregate_idx - 1;
+	idx_t filter_idx = aggregate_idx - 1;
+	while (filter_idx > 0 && SljitFullPipelineOpIsAt(ops, filter_idx, SljitNativeRegionOpKind::PROJECTION)) {
+		facts.first_post_join_projection_idx = filter_idx;
+		filter_idx--;
+	}
+	if (facts.HasPostJoinProjection()) {
+		facts.final_post_join_projection_idx = aggregate_idx - 1;
+	}
+	if (filter_idx == 0) {
+		return false;
+	}
 	const auto hash_join_idx = filter_idx - 1;
 	if (!SljitFullPipelineOpIsAt(ops, hash_join_idx, SljitNativeRegionOpKind::HASH_JOIN_PROBE) ||
 	    !SljitFullPipelineOpIsAt(ops, filter_idx, SljitNativeRegionOpKind::FILTER) ||
