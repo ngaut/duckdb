@@ -175,7 +175,7 @@ BuildSljitWidePerfectHashJoinProbe(struct sljit_compiler *compiler, bool unsigne
 	auto done = sljit_emit_cmp(compiler, SLJIT_GREATER_EQUAL, SLJIT_S1, 0, SLJIT_S2, 0);
 	EmitLoadHoistedPerfectHashJoinSourceIndex(compiler, SLJIT_S5, SLJIT_R2);
 	auto source_is_null = EmitJumpIfHoistedPerfectHashJoinSourceNull(compiler, SLJIT_S6, SLJIT_R2, SLJIT_R3,
-	                                                                  SLJIT_R4);
+	                                                                  SLJIT_R1);
 	EmitLoadWidePerfectHashJoinKey(compiler, SLJIT_S4, SLJIT_R2, SLJIT_R0, SLJIT_R1, SLJIT_R3);
 	vector<struct sljit_jump *> range_failures;
 	EmitWidePerfectHashJoinRangeChecks(compiler, unsigned_key, SLJIT_R0, SLJIT_R1, SLJIT_S7, SLJIT_S8, SLJIT_S9,

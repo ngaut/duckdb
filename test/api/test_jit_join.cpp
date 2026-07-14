@@ -3341,13 +3341,16 @@ TEST_CASE("SLJIT perfect hash join preserves signed and unsigned wide keys", "[a
 	REQUIRE_NO_FAIL(con.Query("SET threads=1"));
 	REQUIRE_NO_FAIL(con.Query("SET perfect_ht_threshold=10"));
 	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_wide_perfect_signed_probe AS "
-	                          "SELECT (i - 4096)::HUGEINT AS k, i::BIGINT AS v "
+	                          "SELECT CASE WHEN i % 101 = 0 THEN NULL::HUGEINT ELSE (i - 4096)::HUGEINT END AS k, "
+	                          "       i::BIGINT AS v "
 	                          "FROM range(8192) tbl(i)"));
 	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_wide_perfect_signed_build AS "
 	                          "SELECT (i - 4096)::HUGEINT AS k, (i * 3)::BIGINT AS w "
 	                          "FROM range(8192) tbl(i)"));
 	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_wide_perfect_unsigned_probe AS "
-	                          "SELECT (18446744073709547520::UHUGEINT + i::UHUGEINT) AS k, i::BIGINT AS v "
+	                          "SELECT CASE WHEN i % 101 = 0 THEN NULL::UHUGEINT "
+	                          "       ELSE (18446744073709547520::UHUGEINT + i::UHUGEINT) END AS k, "
+	                          "       i::BIGINT AS v "
 	                          "FROM range(8192) tbl(i)"));
 	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_wide_perfect_unsigned_build AS "
 	                          "SELECT (18446744073709547520::UHUGEINT + i::UHUGEINT) AS k, "
