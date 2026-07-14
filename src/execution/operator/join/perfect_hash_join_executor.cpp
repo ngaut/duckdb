@@ -75,16 +75,20 @@ bool PerfectHashJoinExecutor::CanDoPerfectHashJoin(const PhysicalHashJoin &op, c
 		return false;
 	}
 
-	if (perfect_join_statistics.is_build_small) {
-		return true; // Already true based on static statistics
-	}
-
 	// We only do this optimization for inner joins with one integer equality condition
 	const auto key_type = op.conditions[0].GetLHS().GetReturnType();
 	if (op.join_type != JoinType::INNER || op.conditions.size() != 1 ||
 	    op.conditions[0].GetComparisonType() != ExpressionType::COMPARE_EQUAL ||
 	    !TypeIsInteger(key_type.InternalType())) {
 		return false;
+	}
+	// The perfect-hash execution layout stores its bounds in one machine word. Keep the physical operator's
+	// eligibility contract aligned with that layout; wide integral keys use the regular hash table instead.
+	if (key_type.InternalType() == PhysicalType::INT128 || key_type.InternalType() == PhysicalType::UINT128) {
+		return false;
+	}
+	if (perfect_join_statistics.is_build_small) {
+		return true; // Already true based on static statistics
 	}
 
 	// We bail out if there are nested types on the RHS

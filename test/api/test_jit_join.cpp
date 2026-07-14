@@ -3292,3 +3292,42 @@ TEST_CASE("JIT hash join chain probe preserves bloom-filtered sparse misses", "[
 		    REQUIRE(EventJitRuntimeDelegationCounts(event).empty());
 	    });
 }
+
+TEST_CASE("SLJIT regular hash join preserves wide integral probe sources", "[api][jit]") {
+	DuckDB db;
+	Connection con(db);
+	auto &manager = ExecutionRegionManager::Get(*con.context);
+
+	ConfigureSljitForCoverage(con, false, true, true, 10000);
+	REQUIRE_NO_FAIL(con.Query("SET threads=1"));
+	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_wide_probe AS "
+	                          "SELECT CAST(i AS DECIMAL(38,4)) AS k, i::BIGINT AS v "
+	                          "FROM range(8192) tbl(i)"));
+	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_wide_build AS "
+	                          "SELECT CAST(i AS DECIMAL(38,4)) AS k, (i * 3)::BIGINT AS w "
+	                          "FROM range(8192) tbl(i)"));
+
+	const string query = "SELECT count(*), sum(p.v + b.w) FROM jit_wide_probe p "
+	                     "JOIN jit_wide_build b ON p.k = b.k WHERE p.v >= 10";
+	REQUIRE_NO_FAIL(con.Query("SET jit_policy='off'"));
+	auto reference = con.Query(query);
+	REQUIRE_NO_FAIL(*reference);
+
+	REQUIRE_NO_FAIL(con.Query("SET jit_policy='auto'"));
+	ClearJitTrace(manager, true);
+	auto result = con.Query(query);
+	REQUIRE_NO_FAIL(*result);
+	REQUIRE(result->GetValue(0, 0).ToString() == reference->GetValue(0, 0).ToString());
+	REQUIRE(result->GetValue(1, 0).ToString() == reference->GetValue(1, 0).ToString());
+
+	RequireJitEvent(
+	    manager,
+	    [](const ExecutionRegionEvent &event) {
+		    return EventPhase(event) == "runtime" && EventStatus(event) == "executed" &&
+		           EventExecutionMode(event) == "native" && HasGeneratedHashJoinProbeStage(event);
+	    },
+	    [](const ExecutionRegionEvent &event) {
+		    REQUIRE(event.jit_runtime.hash_join_probe_layout == "regular_hash_table");
+		    REQUIRE(EventJitRuntimeDelegationCounts(event).empty());
+	    });
+}

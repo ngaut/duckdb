@@ -126,7 +126,9 @@ static inline void EmitHashJoinKeyHashFromSourceData(struct sljit_compiler *comp
 	EmitLoadHashJoinKeyWord(compiler, hash_reg, source_data, source_index, offsetof(hugeint_t, lower), scratch);
 	EmitDuckDBMurmurHash64(compiler, hash_reg, scratch, multiplier_reg);
 	EmitLoadHashJoinKeyWord(compiler, scratch, source_data, source_index, offsetof(hugeint_t, upper), scratch);
-	EmitDuckDBMurmurHash64(compiler, scratch, source_data, multiplier_reg);
+	// Keep the hoisted source pointer live across rows. Using it as the hash scratch register corrupts the
+	// saved source-data register and turns the next probe into an invalid load.
+	EmitDuckDBMurmurHash64(compiler, scratch, SLJIT_TMP_R0, multiplier_reg);
 	sljit_emit_op2(compiler, SLJIT_XOR, hash_reg, 0, hash_reg, 0, scratch, 0);
 }
 
