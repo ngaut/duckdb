@@ -2,6 +2,11 @@
 
 namespace duckdb {
 
+// Storage filtering avoids materializing a generated selection for moderate aggregate inputs. For very large inputs,
+// keep the filter in the generated SIMD loop so the scan and reduction remain one hot path.
+static constexpr idx_t EXECUTION_REGION_STORAGE_FILTER_MIN_BATCHES = 256;
+static constexpr idx_t EXECUTION_REGION_STORAGE_FILTER_MAX_BATCHES = 4096;
+
 static string ExecutionRegionContractBool(bool value) {
 	return value ? "true" : "false";
 }
@@ -92,10 +97,45 @@ static bool ExecutionRegionSourceFiltersCanUseGeneratedOutput(const ExecutionReg
 	return true;
 }
 
+static bool ExecutionRegionExpressionHasStorageSensitiveStringMatch(const ExecutionExpressionIR &expression) {
+	if (expression.kind == ExecutionExpressionIRKind::INTRINSIC &&
+	    (expression.intrinsic == ExecutionExpressionIntrinsicKind::STRING_CONTAINS ||
+	     expression.intrinsic == ExecutionExpressionIntrinsicKind::STRING_LIKE)) {
+		return true;
+	}
+	if (expression.left && ExecutionRegionExpressionHasStorageSensitiveStringMatch(*expression.left)) {
+		return true;
+	}
+	if (expression.right && ExecutionRegionExpressionHasStorageSensitiveStringMatch(*expression.right)) {
+		return true;
+	}
+	if (expression.else_node && ExecutionRegionExpressionHasStorageSensitiveStringMatch(*expression.else_node)) {
+		return true;
+	}
+	for (auto &child : expression.children) {
+		if (child && ExecutionRegionExpressionHasStorageSensitiveStringMatch(*child)) {
+			return true;
+		}
+	}
+	return false;
+}
+
+static bool ExecutionRegionSourceFiltersAreStorageCompatible(const ExecutionRegionNode &node) {
+	if (!node.source) {
+		return false;
+	}
+	for (auto &filter : node.source->filters) {
+		if (!filter.expression || !filter.expression->root ||
+		    ExecutionRegionExpressionHasStorageSensitiveStringMatch(*filter.expression->root)) {
+			return false;
+		}
+	}
+	return true;
+}
+
 bool ExecutionRegionCandidateUsesScanFilters(const ExecutionRegionCandidate &candidate,
                                              const ExecutionRegionNode &node) {
-	if (!candidate.contract.OwnsSource() || !node.source ||
-	    !node.source->table_scan_contract.present) {
+	if (!candidate.contract.OwnsSource() || !node.source || !node.source->table_scan_contract.present) {
 		return false;
 	}
 	if (node.source->table_scan_contract.dynamic_filters) {
@@ -107,13 +147,21 @@ bool ExecutionRegionCandidateUsesScanFilters(const ExecutionRegionCandidate &can
 	if (ExecutionRegionSourceFiltersCanUseGeneratedOutput(node)) {
 		const auto source_cardinality = MaxValue(node.source->table_scan_contract.estimated_source_cardinality,
 		                                         candidate.traits.source_contract_input_cardinality);
-		const bool large_single_filter_aggregate =
-		    source_cardinality >= STANDARD_VECTOR_SIZE * 256 && candidate.traits.source_filter_count == 1 &&
-		    candidate.traits.sink_kind == ExecutionRegionSinkKind::UNGROUPED_AGGREGATE_UPDATE;
-		const bool highly_selective = candidate.estimated_cardinality > 0 &&
-		                              candidate.estimated_cardinality * 16 < source_cardinality;
-		const bool grouped_aggregate = candidate.traits.sink_kind == ExecutionRegionSinkKind::HASH_AGGREGATE_UPDATE;
-		if (!large_single_filter_aggregate && !highly_selective && !grouped_aggregate) {
+		const auto sink_kind = candidate.traits.sink_kind;
+		const bool aggregate_sink = sink_kind == ExecutionRegionSinkKind::UNGROUPED_AGGREGATE_UPDATE ||
+		                            sink_kind == ExecutionRegionSinkKind::HASH_AGGREGATE_UPDATE;
+		const bool moderate_source =
+		    source_cardinality >= STANDARD_VECTOR_SIZE * EXECUTION_REGION_STORAGE_FILTER_MIN_BATCHES &&
+		    source_cardinality <= STANDARD_VECTOR_SIZE * EXECUTION_REGION_STORAGE_FILTER_MAX_BATCHES;
+		const bool storage_compatible_filters = ExecutionRegionSourceFiltersAreStorageCompatible(node);
+		const bool moderate_single_filter_aggregate = aggregate_sink && storage_compatible_filters && moderate_source &&
+		                                              candidate.traits.source_filter_count == 1 &&
+		                                              sink_kind == ExecutionRegionSinkKind::UNGROUPED_AGGREGATE_UPDATE;
+		const bool highly_selective_aggregate = aggregate_sink && storage_compatible_filters &&
+		                                        candidate.estimated_cardinality > 0 &&
+		                                        candidate.estimated_cardinality * 16 < source_cardinality;
+		const bool grouped_aggregate = sink_kind == ExecutionRegionSinkKind::HASH_AGGREGATE_UPDATE;
+		if (!moderate_single_filter_aggregate && !highly_selective_aggregate && !grouped_aggregate) {
 			return false;
 		}
 	}
