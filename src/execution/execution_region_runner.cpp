@@ -163,8 +163,10 @@ PipelineExecuteResult ExecuteExecutionRunner(ExecutionRunnerKind kind, Execution
 
 class CompiledRegionRuntime : public ExecutionRegionRuntime, public ExecutionOperatorRuntime {
 public:
-	CompiledRegionRuntime(ExecutionRegionPipelineAdapter &pipeline_p, idx_t max_chunks_p, bool trace_runtime_p)
-	    : pipeline(pipeline_p), max_chunks(max_chunks_p), trace_runtime(trace_runtime_p) {
+	CompiledRegionRuntime(ExecutionRegionPipelineAdapter &pipeline_p, ExecutionRegionKernel &kernel_p,
+	                      ExecutionRegionLocalState &local_state_p, idx_t max_chunks_p, bool trace_runtime_p)
+	    : pipeline(pipeline_p), kernel(kernel_p), local_state(local_state_p), max_chunks(max_chunks_p),
+	      trace_runtime(trace_runtime_p) {
 	}
 
 	idx_t MaxChunks() const override {
@@ -177,6 +179,10 @@ public:
 
 	Allocator &GetAllocator() override {
 		return pipeline.GetAllocator();
+	}
+
+	ExecutionRegionLocalState &LocalState() override {
+		return local_state;
 	}
 
 	bool PreserveSourceChunkBoundaries() const override {
@@ -243,6 +249,7 @@ public:
 	}
 
 	void RecordLazyCodegen(const ExecutionRegionLazyCodegenMetrics &metrics) override {
+		kernel.AddTraceCodeSize(metrics.code_size);
 		if (!trace_runtime) {
 			return;
 		}
@@ -312,8 +319,9 @@ public:
 
 	SinkResultType RecordSinkResult(DataChunk &chunk, SinkResultType sink_result) override {
 		if (sink_result == SinkResultType::BLOCKED) {
-			pipeline.RecordBlockedSinkChunk(chunk);
-			RecordSinkAccounting(chunk.size(), sink_result);
+			const auto input_rows = chunk.size();
+			pipeline.TakeBlockedSinkChunk(chunk);
+			RecordSinkAccounting(input_rows, sink_result);
 			return sink_result;
 		}
 		return RecordSinkResult(chunk.size(), sink_result);
@@ -400,6 +408,8 @@ private:
 
 private:
 	ExecutionRegionPipelineAdapter &pipeline;
+	ExecutionRegionKernel &kernel;
+	ExecutionRegionLocalState &local_state;
 	idx_t max_chunks;
 	bool trace_runtime;
 	idx_t source_contract_output_rows = 0;
@@ -450,7 +460,8 @@ CompiledVectorizedRunStatus CompiledVectorizedRunner::ExecuteCompiledRegion(Exec
 			trace_start = std::chrono::steady_clock::now();
 			trace_started = true;
 		}
-		CompiledRegionRuntime runtime(pipeline, max_chunks, trace_runtime);
+		auto &local_state = pipeline.GetOrCreateLocalState(*kernel);
+		CompiledRegionRuntime runtime(pipeline, *kernel, local_state, max_chunks, trace_runtime);
 		ExecutionRegionResult compiled_result = ExecutionRegionResult::NOT_FINISHED;
 		auto compiled_executed = kernel->TryExecuteFullPipeline(runtime, compiled_result);
 		if (!compiled_executed) {

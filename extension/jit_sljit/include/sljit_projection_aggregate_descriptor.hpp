@@ -239,7 +239,7 @@ static bool SljitBuildKeyDomainFitsSignedTarget(PhysicalType source_type, Physic
 static void SljitApplyJoinProjectionGroupCastProofs(vector<ExecutionRowPointerGroupKeySource> &group_sources,
                                                     bool source_key0_range_fits_int32) {
 	for (auto &source : group_sources) {
-		if (!SljitGroupKeyNarrowingIntegralCast(source.cast_kind)) {
+		if (!ExecutionGroupKeyCastIsNarrowingIntegral(source.cast_kind)) {
 			source.unchecked_integral_cast = false;
 			continue;
 		}

@@ -374,7 +374,7 @@ static bool TryPreaggregateInputVectorPrimitiveGroupRunsFastTemplated(
 	}
 	SljitPreaggregatedPrimitivePayloadSources payload_sources;
 	if (!payload_sources.Prepare(input, payload_source_indices, payload_lanes) ||
-	    !SljitPreaggregatedPayloadSourcesReplayable(payload_sources, payload_lanes)) {
+	    !SljitPrimitiveAggregateLanesReplayable(payload_lanes)) {
 		return false;
 	}
 	SljitSingleLaneRunPreaggregationKeyDispatch dispatch {input,   payload_sources, payload_lanes,

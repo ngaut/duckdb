@@ -32,12 +32,13 @@ public:
 	    ExecutionRegionRuntime &runtime_p, ExecutionRegionResult &result_p, vector<SljitExecutableRegionOp> &ops_p,
 	    const SljitFullPipelineRecipe &recipe_p, EXECUTE_NATIVE_FULL_PIPELINE_FROM &execute_native_full_pipeline_from_p,
 	    EXECUTE_HASH_JOIN_PROBE &execute_hash_join_probe_p, const vector<idx_t> &source_distinct_counts_p,
-	    const vector<Value> &source_min_values_p, const vector<Value> &source_max_values_p)
+	    const vector<Value> &source_min_values_p, const vector<Value> &source_max_values_p,
+	    SljitRegionExecutionScratch &scratch_p, SljitFullPipelineTerminalRuntimeState &terminal_state_p)
 	    : runtime(runtime_p), result(result_p), ops(ops_p), recipe(recipe_p),
 	      execute_hash_join_probe(execute_hash_join_probe_p),
 	      terminal_runtime(execute_native_full_pipeline_from_p, source_distinct_counts_p, source_min_values_p,
-	                       source_max_values_p),
-	      scratch(runtime.GetAllocator(), ops), selected_hash_join_inputs(runtime, ops, scratch),
+	                       source_max_values_p, terminal_state_p),
+	      scratch(scratch_p), selected_hash_join_inputs(runtime, ops, scratch),
 	      source_fetch(runtime, result, recipe.primitive_sequence), generated_filter(runtime, ops, scratch),
 	      hash_join_materialize(runtime, result, ops, scratch),
 	      hash_join_selection(runtime, result, ops, scratch, selected_hash_join_inputs),
@@ -74,15 +75,15 @@ public:
 		    execute_source_chunk,
 		    [&]() {
 			    return SljitStopFullPipelineAfterFlush(result, ExecutionRegionResult::NOT_FINISHED,
-			                                           [&]() { return FlushRuntimeState(true); });
+			                                           [&]() { return FlushRuntimeState(true, false); });
 		    },
 		    [&]() {
 			    return SljitStopFullPipelineAfterFlush(result, ExecutionRegionResult::INTERRUPTED,
-			                                           [&]() { return FlushRuntimeState(true); });
+			                                           [&]() { return FlushRuntimeState(true, true); });
 		    },
 		    [&]() {
 			    return SljitStopFullPipelineAfterFlush(result, ExecutionRegionResult::FINISHED,
-			                                           [&]() { return FlushRuntimeState(false); });
+			                                           [&]() { return FlushRuntimeState(false, true); });
 		    });
 	}
 
@@ -105,20 +106,21 @@ private:
 		auto execute_source_chunk = [&](DataChunk &source_chunk, bool have_more_output) {
 			return source_fetch.Execute(source_chunk, have_more_output, execute_source_batch);
 		};
-		auto stop_after_flush = [&](ExecutionRegionResult stop_result, bool have_more_output) {
+		auto stop_after_flush = [&](ExecutionRegionResult stop_result, bool have_more_output, bool flush_terminal) {
 			if (source_fetch.Flush(have_more_output, execute_source_batch)) {
 				return true;
 			}
-			if (terminal_runtime.Flush(runtime, result, ops, scratch, terminal_step, processed_batches)) {
+			if (flush_terminal &&
+			    terminal_runtime.Flush(runtime, result, ops, scratch, terminal_step, processed_batches)) {
 				return true;
 			}
 			return SljitStopFullPipeline(result, stop_result);
 		};
 		return SljitRunFullPipelineSourceContractLoop(
 		    runtime, fetched_chunks, [&]() { return fetched_chunks >= max_chunks; }, execute_source_chunk,
-		    [&]() { return stop_after_flush(ExecutionRegionResult::NOT_FINISHED, true); },
-		    [&]() { return stop_after_flush(ExecutionRegionResult::INTERRUPTED, true); },
-		    [&]() { return stop_after_flush(ExecutionRegionResult::FINISHED, false); });
+		    [&]() { return stop_after_flush(ExecutionRegionResult::NOT_FINISHED, true, false); },
+		    [&]() { return stop_after_flush(ExecutionRegionResult::INTERRUPTED, true, true); },
+		    [&]() { return stop_after_flush(ExecutionRegionResult::FINISHED, false, true); });
 	}
 
 	bool PrimitiveSequenceIsExecutable() const {
@@ -242,22 +244,25 @@ private:
 		}
 	}
 
-	bool FlushRuntimeState(bool source_contract_have_more_output) {
+	bool FlushRuntimeState(bool source_contract_have_more_output, bool flush_terminal) {
 		auto execute_next_step = [&](const SljitRuntimeBatchView &input, bool source_have_more_output) {
 			return ExecuteStep(1, input, source_have_more_output);
 		};
 		if (source_fetch.Flush(source_contract_have_more_output, execute_next_step)) {
 			return true;
 		}
-		return FlushPendingBatch();
+		return FlushPendingBatch(flush_terminal);
 	}
 
-	bool FlushPendingBatch() {
+	bool FlushPendingBatch(bool flush_terminal) {
 		for (idx_t step_idx = 1; step_idx + 1 < recipe.primitive_sequence.Count(); step_idx++) {
 			auto &step = recipe.primitive_sequence.Step(step_idx);
 			if (FlushMaterializingStep(step_idx, step)) {
 				return true;
 			}
+		}
+		if (!flush_terminal) {
+			return false;
 		}
 		auto &terminal_step = TerminalStep();
 		return terminal_runtime.Flush(runtime, result, ops, scratch, terminal_step, processed_batches);
@@ -285,7 +290,7 @@ private:
 	const SljitFullPipelineRecipe &recipe;
 	EXECUTE_HASH_JOIN_PROBE &execute_hash_join_probe;
 	SljitFullPipelineTerminalRuntime<EXECUTE_NATIVE_FULL_PIPELINE_FROM> terminal_runtime;
-	SljitRegionExecutionScratch scratch;
+	SljitRegionExecutionScratch &scratch;
 	SljitSelectedHashJoinInputRuntime selected_hash_join_inputs;
 	SljitSourceFetchPrimitiveRuntime source_fetch;
 	SljitGeneratedFilterPrimitiveRuntime generated_filter;
@@ -301,11 +306,12 @@ static bool SljitTryExecuteFullPipelinePrimitiveSequenceBatched(
     ExecutionRegionRuntime &runtime, ExecutionRegionResult &result, vector<SljitExecutableRegionOp> &ops,
     const SljitFullPipelineRecipe &recipe, EXECUTE_NATIVE_FULL_PIPELINE_FROM &&execute_native_full_pipeline_from,
     EXECUTE_HASH_JOIN_PROBE &&execute_hash_join_probe, const vector<idx_t> &source_distinct_counts,
-    const vector<Value> &source_min_values, const vector<Value> &source_max_values) {
+    const vector<Value> &source_min_values, const vector<Value> &source_max_values,
+    SljitRegionExecutionScratch &scratch, SljitFullPipelineTerminalRuntimeState &terminal_state) {
 	auto executor =
 	    SljitFullPipelinePrimitiveSequenceBatchExecutor<EXECUTE_NATIVE_FULL_PIPELINE_FROM, EXECUTE_HASH_JOIN_PROBE>(
 	        runtime, result, ops, recipe, execute_native_full_pipeline_from, execute_hash_join_probe,
-	        source_distinct_counts, source_min_values, source_max_values);
+	        source_distinct_counts, source_min_values, source_max_values, scratch, terminal_state);
 	return executor.Execute();
 }
 

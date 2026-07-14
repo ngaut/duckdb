@@ -48,6 +48,16 @@ static SljitLazyCodegenTiming TimeSljitLazyCodegen(BUILD build) {
 	return result;
 }
 
+class SljitNativeRegionLocalState : public ExecutionRegionLocalState {
+public:
+	SljitNativeRegionLocalState(Allocator &allocator, const vector<SljitExecutableRegionOp> &ops)
+	    : scratch(allocator, ops) {
+	}
+
+	SljitRegionExecutionScratch scratch;
+	SljitFullPipelineTerminalRuntimeState terminal;
+};
+
 class SljitNativeRegionKernel : public ExecutionRegionKernel {
 public:
 	SljitNativeRegionKernel(string backend_name_p, vector<SljitExecutableRegionOp> ops_p, bool uses_scan_filters_p,
@@ -87,6 +97,10 @@ public:
 		                                                      full_pipeline_recipe_plan.recipe.primitive_sequence));
 	}
 
+	unique_ptr<ExecutionRegionLocalState> CreateLocalState(Allocator &allocator) const override {
+		return make_uniq<SljitNativeRegionLocalState>(allocator, ops);
+	}
+
 	bool CanExecuteFullPipeline() const override {
 		return ExecutionRegionABIIsFullPipeline(abi);
 	}
@@ -98,7 +112,6 @@ public:
 		metrics.machine_codegen_time_us = timing.machine_codegen_time_us;
 		metrics.code_size = code_size;
 		runtime.RecordLazyCodegen(metrics);
-		AddTraceCodeSize(code_size);
 	}
 
 	template <class FUNCTION, class BUILD>
@@ -167,8 +180,10 @@ public:
 		if (!ExecutionRegionABIIsFullPipeline(abi)) {
 			throw InternalException("SLJIT full pipeline kernel entered without full-pipeline ABI");
 		}
+		auto &local_state = runtime.LocalState().Cast<SljitNativeRegionLocalState>();
 		return SljitTryExecuteFullPipelineRecipe(*this, runtime, result, ops, source_distinct_counts, source_min_values,
-		                                         source_max_values, full_pipeline_recipe_plan);
+		                                         source_max_values, full_pipeline_recipe_plan, local_state.scratch,
+		                                         local_state.terminal);
 	}
 
 private:

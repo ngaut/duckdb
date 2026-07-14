@@ -23,8 +23,12 @@ bool SljitBuildExecutableAggregateUpdatePayloadCode(const SljitNativeAggregateUp
                                                     const vector<bool> &input_not_null,
                                                     const vector<Value> &input_min_values,
                                                     const vector<Value> &input_max_values);
-bool SljitBuildExecutablePrimitiveRunUpdateCode(const SljitNativeAggregateUpdatePlan &op,
-                                                SljitExecutableAggregateUpdate &executable, string &error);
+void SljitPlanExecutablePrimitiveRunUpdate(const SljitNativeAggregateUpdatePlan &op,
+                                           SljitExecutableAggregateUpdate &executable);
+SljitNativePrimitiveRunFunction
+SljitEnsureExecutablePrimitiveRunUpdate(ExecutionRegionRuntime &runtime, SljitExecutablePrimitiveRunUpdate &run_update,
+                                        PhysicalType group_source_type,
+                                        ExecutionRowPointerGroupKeyCastKind group_cast_kind, bool payload_nullable);
 void SljitSelectExecutableAggregateDirectUpdatePlan(SljitExecutableAggregateUpdate &executable);
 bool SljitBuildExecutableAggregateUpdateFallbackPayloadCode(const SljitNativeAggregateUpdatePlan &op,
                                                             SljitExecutableAggregateUpdate &executable, string &error);

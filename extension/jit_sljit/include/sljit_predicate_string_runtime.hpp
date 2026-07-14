@@ -40,6 +40,8 @@ struct SljitNativeStringConstantList {
 
 sljit_sw SLJIT_FUNC SljitNativeStringLikePercentOnly(const char *sdata, idx_t slen,
                                                      const SljitNativeStringConstant *pattern);
+sljit_sw SLJIT_FUNC SljitNativeStringLikeTwoUnanchoredFragments(const char *sdata, idx_t slen,
+                                                                const SljitNativeStringConstant *pattern);
 sljit_sw SLJIT_FUNC SljitNativeStringInListConstant(const char *sdata, idx_t slen,
                                                     const SljitNativeStringConstantList *list);
 

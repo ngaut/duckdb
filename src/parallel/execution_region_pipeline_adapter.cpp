@@ -52,6 +52,17 @@ optional_ptr<ExecutionRegionKernel> ExecutionRegionPipelineAdapter::GetExecutabl
 	return plan->GetExecutableFullPipelineKernel();
 }
 
+ExecutionRegionLocalState &ExecutionRegionPipelineAdapter::GetOrCreateLocalState(ExecutionRegionKernel &kernel) {
+	if (executor.execution_region_local_state_kernel.get() != &kernel) {
+		executor.execution_region_local_state = kernel.CreateLocalState(GetAllocator());
+		if (!executor.execution_region_local_state) {
+			throw InternalException("execution region kernel returned no pipeline-local state");
+		}
+		executor.execution_region_local_state_kernel = &kernel;
+	}
+	return *executor.execution_region_local_state;
+}
+
 bool ExecutionRegionPipelineAdapter::IsAtCleanSourceToSinkBoundary() const {
 	return executor.in_process_operators.empty() && !executor.remaining_sink_chunk && !executor.next_batch_blocked &&
 	       !executor.started_flushing && !executor.done_flushing && !executor.exhausted_source &&
@@ -117,9 +128,10 @@ bool ExecutionRegionPipelineAdapter::BindSink(DataChunk &input, const ExecutionR
 	return sink->BindExecutionSink(executor.context, input, sink_input, sink_info, binding);
 }
 
-void ExecutionRegionPipelineAdapter::RecordBlockedSinkChunk(DataChunk &chunk) {
+void ExecutionRegionPipelineAdapter::TakeBlockedSinkChunk(DataChunk &chunk) {
 	executor.final_chunk.Reset();
 	chunk.Copy(executor.final_chunk);
+	chunk.Reset();
 	executor.remaining_sink_chunk = true;
 }
 

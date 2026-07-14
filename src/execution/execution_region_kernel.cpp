@@ -2,6 +2,9 @@
 
 namespace duckdb {
 
+ExecutionRegionLocalState::~ExecutionRegionLocalState() {
+}
+
 ExecutionRegionCodeHandle::~ExecutionRegionCodeHandle() {
 }
 
@@ -18,6 +21,10 @@ idx_t ExecutionRegionKernel::CodeSize() const {
 
 bool ExecutionRegionKernel::HasExecutableBody() const {
 	return CodeSize() > 0;
+}
+
+unique_ptr<ExecutionRegionLocalState> ExecutionRegionKernel::CreateLocalState(Allocator &) const {
+	return make_uniq<ExecutionRegionLocalState>();
 }
 
 void ExecutionRegionKernel::SetTraceInfo(idx_t trace_id_p, ExecutionRegionExecutionMode execution_mode_p,

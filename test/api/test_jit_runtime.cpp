@@ -222,6 +222,59 @@ TEST_CASE("JIT full pipeline uses explicit append sink contract", "[api][jit]") 
 	REQUIRE(found_runtime_result_collector);
 }
 
+TEST_CASE("JIT blocked append sink transfers retry ownership to the core executor", "[api][jit]") {
+	DuckDB db;
+	Connection con(db);
+	auto &manager = ExecutionRegionManager::Get(*con.context);
+
+	LoadSljit(con);
+	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_blocked_append_sink AS "
+	                          "SELECT i::BIGINT AS i FROM range(160000) tbl(i)"));
+	ConfigureSljitForCoverageSettings(con, true, true, true);
+	REQUIRE_NO_FAIL(con.Query("SET streaming_buffer_size='16KB'"));
+
+	ClearJitTrace(manager);
+	auto result = con.SendQuery("SELECT i * 3 + 7 AS v FROM jit_blocked_append_sink");
+	REQUIRE_NO_FAIL(*result);
+	REQUIRE(result->type == QueryResultType::STREAM_RESULT);
+
+	vector<bool> seen(160000, false);
+	idx_t row_count = 0;
+	while (true) {
+		auto chunk = result->Fetch();
+		if (!chunk) {
+			break;
+		}
+		for (idx_t row_idx = 0; row_idx < chunk->size(); row_idx++) {
+			const auto value = chunk->GetValue(0, row_idx).GetValue<int64_t>();
+			REQUIRE(value >= 7);
+			REQUIRE((value - 7) % 3 == 0);
+			const auto input_row = NumericCast<idx_t>((value - 7) / 3);
+			REQUIRE(input_row < seen.size());
+			CAPTURE(row_count, input_row, value);
+			REQUIRE_FALSE(seen[input_row]);
+			seen[input_row] = true;
+			row_count++;
+		}
+	}
+	REQUIRE_NO_FAIL(*result);
+	REQUIRE(row_count == seen.size());
+	for (auto present : seen) {
+		REQUIRE(present);
+	}
+
+	bool found_interrupted_native_sink = false;
+	for (auto &event : manager.GetEvents()) {
+		if (IsSljitRegionEvent(event) && EventPhase(event) == "runtime" && EventStatus(event) == "executed" &&
+		    EventExecutionMode(event) == "native" && event.runtime_result == "interrupted" &&
+		    StringUtil::Contains(event.reason, "full pipeline kernel executed")) {
+			found_interrupted_native_sink = true;
+			REQUIRE(event.output_rows > 0);
+		}
+	}
+	REQUIRE(found_interrupted_native_sink);
+}
+
 TEST_CASE("JIT full pipeline uses append sink contract for CTE materialization", "[api][jit]") {
 	DuckDB db;
 	Connection con(db);

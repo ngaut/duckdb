@@ -22,7 +22,7 @@ struct SljitGroupedAggregateUpdateRuntimeState {
 	             SljitRegionExecutionScratch &scratch, const SljitGroupedAggregateUpdatePrimitive &primitive) {
 		if (primitive.strategy == SljitGroupedAggregateUpdateStrategyKind::DIRECT_PRIMITIVE_PAYLOAD_UPDATE ||
 		    primitive.strategy == SljitGroupedAggregateUpdateStrategyKind::FILTERED_PRIMITIVE_PAYLOAD_UPDATE) {
-			return direct_payload_update.Prepare(primitive);
+			return direct_payload_update.Prepare(ops, primitive);
 		}
 		if (primitive.strategy == SljitGroupedAggregateUpdateStrategyKind::DISTINCT_KEY_SINK) {
 			return distinct_key_sink.Prepare(primitive);

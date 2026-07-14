@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import csv
+import json
 import sys
 import tempfile
 import unittest
@@ -18,6 +19,8 @@ from run_tpch_regression_gate import (
     promotion_recheck_repeats,
     selected_auto_queries,
     triage_recheck_repeats,
+    validate_baseline_write_configuration,
+    write_baseline_state,
 )
 
 
@@ -47,6 +50,36 @@ class TestBaselineStateContract(unittest.TestCase):
     def test_rejects_candidate_scale_factor_mismatch(self) -> None:
         with self.assertRaisesRegex(TPCHConfigurationError, "does not match accepted baseline"):
             apply_baseline_state_contract(self.args(1.0), self.state())
+
+    def test_baseline_state_records_production_jit_configuration(self) -> None:
+        temporary_directory = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary_directory.cleanup)
+        root = Path(temporary_directory.name)
+        args = SimpleNamespace(
+            allow_partial_baseline=True,
+            baseline_state=root / "state.json",
+            queries=["01"],
+            scale_factor=1.0,
+            threads=1,
+            repeats=10,
+            timing_mode="production",
+            event_log_size=0,
+            trace_decisions=False,
+            trace_runtime=False,
+            jit_verify=False,
+            jit_cbo_setting=[],
+            duckdb=root / "duckdb",
+        )
+
+        write_baseline_state(args, root / "artifact", "test")
+
+        with args.baseline_state.open(encoding="utf-8") as handle:
+            state = json.load(handle)
+        self.assertEqual(state["event_log_size"], 0)
+        self.assertFalse(state["trace_decisions"])
+        self.assertFalse(state["trace_runtime"])
+        self.assertFalse(state["jit_verify"])
+        self.assertEqual(state["jit_cbo_settings"], [])
 
 
 class TestRuntimeContractQuerySelection(unittest.TestCase):
@@ -135,9 +168,7 @@ class TestPromotionRepeats(unittest.TestCase):
 
     def test_triage_reuses_candidate_sample_count_at_or_above_ten(self) -> None:
         self.assertEqual(
-            triage_recheck_repeats(
-                SimpleNamespace(repeats=10, triage_repeats=None)
-            ),
+            triage_recheck_repeats(SimpleNamespace(repeats=10, triage_repeats=None)),
             10,
         )
 
@@ -149,22 +180,35 @@ class TestPromotionRepeats(unittest.TestCase):
             event_log_size=0,
             trace_decisions=False,
             trace_runtime=False,
+            jit_verify=False,
+            jit_cbo_setting=[],
         )
 
     def test_reuses_passing_ten_repeat_production_candidate(self) -> None:
-        self.assertTrue(
-            candidate_qualifies_for_direct_promotion(self.promotion_args(10), True)
-        )
+        self.assertTrue(candidate_qualifies_for_direct_promotion(self.promotion_args(10), True))
 
     def test_five_repeat_candidate_still_requires_promotion_run(self) -> None:
-        self.assertFalse(
-            candidate_qualifies_for_direct_promotion(self.promotion_args(5), True)
-        )
+        self.assertFalse(candidate_qualifies_for_direct_promotion(self.promotion_args(5), True))
 
     def test_failed_candidate_comparison_is_never_promoted_directly(self) -> None:
-        self.assertFalse(
-            candidate_qualifies_for_direct_promotion(self.promotion_args(10), False)
+        self.assertFalse(candidate_qualifies_for_direct_promotion(self.promotion_args(10), False))
+
+    def test_non_production_options_never_qualify_for_promotion(self) -> None:
+        overrides = (
+            ("timing_mode", "profile"),
+            ("event_log_size", 10000),
+            ("trace_decisions", True),
+            ("trace_runtime", True),
+            ("jit_verify", True),
+            ("jit_cbo_setting", ["jit_cbo_generated_stage_benefit=1"]),
         )
+        for field, value in overrides:
+            with self.subTest(field=field):
+                args = self.promotion_args(10)
+                setattr(args, field, value)
+                self.assertFalse(candidate_qualifies_for_direct_promotion(args, True))
+                with self.assertRaises(TPCHConfigurationError):
+                    validate_baseline_write_configuration(args)
 
 
 class TestPromotionArtifactMerge(unittest.TestCase):
@@ -207,6 +251,34 @@ class TestPromotionArtifactMerge(unittest.TestCase):
                 {"query": "18", "policy": "auto", "median_s": "0.76"},
                 {"query": "20", "policy": "off", "median_s": "0.62"},
                 {"query": "20", "policy": "auto", "median_s": "0.52"},
+            ],
+        )
+
+    def test_keeps_counter_rows_created_only_during_focused_recheck(self) -> None:
+        temporary_directory = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary_directory.cleanup)
+        root = Path(temporary_directory.name)
+        candidate = root / "candidate.csv"
+        focused = root / "focused.csv"
+        merged = root / "merged.csv"
+        self.write_rows(
+            candidate,
+            [{"query": "18", "policy": "auto", "median_s": "existing-counter"}],
+        )
+        self.write_rows(
+            focused,
+            [{"query": "20", "policy": "auto", "median_s": "new-counter"}],
+        )
+
+        merge_rechecked_csv_artifact(candidate, focused, merged, ["20"], require_query_rows=False)
+
+        with merged.open(newline="", encoding="utf-8") as handle:
+            rows = list(csv.DictReader(handle))
+        self.assertEqual(
+            rows,
+            [
+                {"query": "18", "policy": "auto", "median_s": "existing-counter"},
+                {"query": "20", "policy": "auto", "median_s": "new-counter"},
             ],
         )
 

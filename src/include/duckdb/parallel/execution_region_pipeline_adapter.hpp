@@ -34,6 +34,7 @@ public:
 	PipelineExecuteResult ExecuteVectorizedPipeline(idx_t max_chunks);
 	bool HasSourceAndSink() const;
 	optional_ptr<ExecutionRegionKernel> GetExecutableFullPipelineKernel() const;
+	ExecutionRegionLocalState &GetOrCreateLocalState(ExecutionRegionKernel &kernel);
 	bool IsAtCleanSourceToSinkBoundary() const;
 
 	SourceResultType FetchSourceContract(DataChunk *&result, ExecutionRegionSourceContractMetrics *metrics = nullptr);
@@ -42,7 +43,8 @@ public:
 	                                         const ExecutionRegionOperatorInfo &operator_info,
 	                                         ExecutionOperatorBinding &binding);
 	bool BindSink(DataChunk &input, const ExecutionRegionSinkInfo &sink_info, ExecutionSinkBinding &binding);
-	void RecordBlockedSinkChunk(DataChunk &chunk);
+	//! Transfers a blocked sink input into the core continuation and empties the backend-owned chunk.
+	void TakeBlockedSinkChunk(DataChunk &chunk);
 	void FinishProcessing();
 	bool TryMarkRuntimeOnce(ExecutionRegionRuntimeOnceFlag flag, idx_t index);
 	PipelineExecuteResult FlushAndFinalizeAfterCompiledFinish(idx_t max_chunks, string &runtime_reason);

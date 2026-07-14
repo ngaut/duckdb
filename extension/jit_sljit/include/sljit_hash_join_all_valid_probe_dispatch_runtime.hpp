@@ -60,9 +60,8 @@ static bool TryExecuteAllValidUint64PairNoChainProbeFastest(const SljitNativeHas
 		auto source_idx = SELECTED ? key_sel[row_idx] : UnsafeNumericCast<sel_t>(row_idx);
 		auto key0 = key0_data[source_idx];
 		auto key1 = key1_data[source_idx];
-		auto ht_offset =
-		    UnsafeNumericCast<idx_t>(SljitHashJoinCombineHashScalar(Hash<uint64_t>(key0), Hash<uint64_t>(key1)) &
-		                             bitmask);
+		auto ht_offset = UnsafeNumericCast<idx_t>(
+		    SljitHashJoinCombineHashScalar(Hash<uint64_t>(key0), Hash<uint64_t>(key1)) & bitmask);
 		while (true) {
 			const auto next_row_idx = row_idx + 1;
 			const bool has_next = next_row_idx < count;
@@ -119,6 +118,120 @@ static bool SljitHashJoinHasUint64SingleEqualityNotEqualPredicate(const SljitNat
 	return SljitHashJoinHasAllValidEqualityKey(key) && !predicate.equality_key && !predicate.null_equal &&
 	       predicate.comparison_type == ExecutionRegionComparisonType::NOT_EQUAL &&
 	       SljitHashJoinHasUint64CompatibleKey(key) && SljitHashJoinHasUint64CompatibleKey(predicate);
+}
+
+template <bool SELECTED, bool USE_SALT, bool HAS_BLOOM>
+static void ExecuteAllValidUncheckedInt64ToInt32SingleKeyNoChainProbe(const SljitNativeHashJoinProbePlan &plan,
+                                                                      SljitNativeRegularHashJoinProbeInput &input) {
+	const auto count = input.count;
+	if (count > input.output_capacity) {
+		throw InternalException("SLJIT no-chain hash join probe input exceeds output capacity");
+	}
+
+	const auto key_data = reinterpret_cast<const int64_t *__restrict>(input.source_data[0]);
+	const sel_t *__restrict key_sel = nullptr;
+	if constexpr (SELECTED) {
+		key_sel = input.source_sel[0];
+	}
+	const auto entries = reinterpret_cast<const ht_entry_t *__restrict>(input.entries);
+	const auto bitmask = input.bitmask;
+	const auto key_offset = plan.keys[0].key_layout_offset;
+	data_ptr_t *__restrict row_pointers = input.row_pointers;
+	sel_t *__restrict match_sel = input.match_sel;
+	auto selected_count = input.selected_count;
+
+	auto row_idx = input.input_offset;
+	if (row_idx < count) {
+		auto source_idx = SELECTED ? key_sel[row_idx] : UnsafeNumericCast<sel_t>(row_idx);
+		auto key = UnsafeNumericCast<int32_t>(key_data[source_idx]);
+		auto hash = Hash<int32_t>(key);
+		auto ht_offset = UnsafeNumericCast<idx_t>(hash & bitmask);
+
+		while (true) {
+			const auto next_row_idx = row_idx + 1;
+			const bool has_next = next_row_idx < count;
+			int32_t next_key = 0;
+			hash_t next_hash = 0;
+			idx_t next_ht_offset = 0;
+			if (has_next) {
+				const auto next_source_idx = SELECTED ? key_sel[next_row_idx] : UnsafeNumericCast<sel_t>(next_row_idx);
+				next_key = UnsafeNumericCast<int32_t>(key_data[next_source_idx]);
+				next_hash = Hash<int32_t>(next_key);
+				next_ht_offset = UnsafeNumericCast<idx_t>(next_hash & bitmask);
+				SljitPrefetchHashJoinEntry(entries, next_ht_offset);
+			}
+
+			if (SljitBloomFilterMayContainTemplated<HAS_BLOOM>(input, hash)) {
+				hash_t salt = 0;
+				if constexpr (USE_SALT) {
+					salt = hash & ht_entry_t::SALT_MASK;
+				}
+				while (true) {
+					const auto entry_value = entries[ht_offset].GetValue();
+					if (!entry_value) {
+						break;
+					}
+					if constexpr (USE_SALT) {
+						if ((entry_value & ht_entry_t::SALT_MASK) != salt) {
+							ht_offset = UnsafeNumericCast<idx_t>((ht_offset + 1) & bitmask);
+							continue;
+						}
+					}
+					auto row_location = SljitHashJoinEntryPointer(entry_value);
+					if (SljitHashJoinKeysEqual<int32_t>(row_location, key_offset, key)) {
+						row_pointers[selected_count] = row_location;
+						match_sel[selected_count] = UnsafeNumericCast<sel_t>(row_idx);
+						selected_count++;
+						break;
+					}
+					ht_offset = UnsafeNumericCast<idx_t>((ht_offset + 1) & bitmask);
+				}
+			}
+			if (!has_next) {
+				break;
+			}
+			row_idx = next_row_idx;
+			key = next_key;
+			hash = next_hash;
+			ht_offset = next_ht_offset;
+		}
+	}
+
+	input.selected_count = selected_count;
+	input.input_offset = count;
+	input.resume_row_pointer = nullptr;
+	input.finished = true;
+}
+
+template <bool SELECTED, bool USE_SALT>
+static void ExecuteAllValidUncheckedInt64ToInt32SingleKeyNoChainProbe(const SljitNativeHashJoinProbePlan &plan,
+                                                                      SljitNativeRegularHashJoinProbeInput &input) {
+	if (input.bloom_filter_bits) {
+		return ExecuteAllValidUncheckedInt64ToInt32SingleKeyNoChainProbe<SELECTED, USE_SALT, true>(plan, input);
+	}
+	return ExecuteAllValidUncheckedInt64ToInt32SingleKeyNoChainProbe<SELECTED, USE_SALT, false>(plan, input);
+}
+
+template <bool SELECTED>
+static bool TryExecuteAllValidUncheckedInt64ToInt32SingleKeyNoChainProbe(const SljitNativeHashJoinProbePlan &plan,
+                                                                         SljitNativeRegularHashJoinProbeInput &input) {
+	if (!input.source_key0_int64_to_int32 || !input.source_key0_int64_to_int32_unchecked || plan.keys.size() != 1 ||
+	    plan.keys[0].key_kind != SljitNativeHashJoinKeyKind::INT32 ||
+	    !SljitHashJoinHasAllValidEqualityKey(plan.keys[0]) || plan.mark_build_match || plan.residual_predicate ||
+	    plan.output_mode != ExecutionHashJoinProbeOutputMode::MATCHED_PROBE_AND_BUILD ||
+	    !SljitHashJoinCanUseAllValidNoChainProbe(plan, input, SELECTED)) {
+		return false;
+	}
+	switch (input.layout_kind) {
+	case SljitHashJoinProbeLayoutKind::NO_CHAIN:
+		ExecuteAllValidUncheckedInt64ToInt32SingleKeyNoChainProbe<SELECTED, false>(plan, input);
+		return true;
+	case SljitHashJoinProbeLayoutKind::NO_CHAIN_SALT:
+		ExecuteAllValidUncheckedInt64ToInt32SingleKeyNoChainProbe<SELECTED, true>(plan, input);
+		return true;
+	default:
+		return false;
+	}
 }
 
 template <bool SELECTED, bool CHAIN>

@@ -13,7 +13,25 @@
 
 namespace duckdb {
 
+class Allocator;
 class ExecutionRegionRuntime;
+
+class DUCKDB_API ExecutionRegionLocalState {
+public:
+	virtual ~ExecutionRegionLocalState();
+
+	template <class TARGET>
+	TARGET &Cast() {
+		DynamicCastCheck<TARGET>(this);
+		return reinterpret_cast<TARGET &>(*this);
+	}
+
+	template <class TARGET>
+	const TARGET &Cast() const {
+		DynamicCastCheck<TARGET>(this);
+		return reinterpret_cast<const TARGET &>(*this);
+	}
+};
 
 class DUCKDB_API ExecutionRegionCodeHandle {
 public:
@@ -29,6 +47,7 @@ public:
 	virtual const string &BackendName() const = 0;
 	virtual idx_t CodeSize() const;
 	virtual bool HasExecutableBody() const;
+	virtual unique_ptr<ExecutionRegionLocalState> CreateLocalState(Allocator &allocator) const;
 	void SetTraceInfo(idx_t trace_id, ExecutionRegionExecutionMode execution_mode, string compile_reason,
 	                  int64_t compile_time_us, idx_t code_size);
 	void AddTraceCodeSize(idx_t code_size);

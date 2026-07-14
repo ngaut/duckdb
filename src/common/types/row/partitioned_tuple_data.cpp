@@ -153,10 +153,9 @@ bool PartitionedTupleData::TryAppendUnifiedFixedWidthSinglePartition(Partitioned
 		}
 		sources[col_idx] = {format.data, format.sel, GetTypeIdSize(physical_type), layout_offsets[col_idx]};
 	}
-
 	if (state.compute_reverse_partition_sel) {
 		for (sel_t i = 0; i < actual_append_count; i++) {
-			state.reverse_partition_sel[append_sel.get_index_unsafe(i)] = i;
+			state.reverse_partition_sel[append_sel.get_index(i)] = i;
 		}
 	}
 
@@ -169,7 +168,7 @@ bool PartitionedTupleData::TryAppendUnifiedFixedWidthSinglePartition(Partitioned
 	const auto validity_bytes =
 	    layout.CanHaveNull() ? TupleDataLayout::ValidityBytes::SizeInBytes(layout.ColumnCount()) : 0;
 	for (idx_t row_idx = 0; row_idx < actual_append_count; row_idx++) {
-		const auto input_idx = append_sel.get_index_unsafe(row_idx);
+		const auto input_idx = append_sel.get_index(row_idx);
 		auto row_location = row_locations[row_idx];
 		if (validity_bytes != 0) {
 			FastMemset(row_location, 0xff, validity_bytes);

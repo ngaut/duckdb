@@ -287,7 +287,8 @@ struct RadixPrimitiveGroupUpdateState {
 	const vector<RadixPrimitiveAggregatePayload> *payloads = nullptr;
 };
 
-static void RadixUpdatePrimitiveGroup(data_ptr_t state_address, idx_t row_idx, void *state_p) {
+static void RadixUpdatePrimitiveGroup(data_ptr_t state_address, idx_t row_idx, void *state_p,
+                                      bool initialize_states = false) {
 	auto &state = *reinterpret_cast<RadixPrimitiveGroupUpdateState *>(state_p);
 	if (!state.lanes || !state.payloads || state.lanes->size() != state.payloads->size()) {
 		throw InternalException("Primitive aggregate grouped update state is incomplete");
@@ -300,18 +301,30 @@ static void RadixUpdatePrimitiveGroup(data_ptr_t state_address, idx_t row_idx, v
 		auto value_ptr = state_base + lane->state_value_offset;
 		switch (lane->kind) {
 		case AggregatePrimitiveUpdateKind::COUNT_STAR: {
-			auto count = reinterpret_cast<int64_t *>(value_ptr);
-			(*count)++;
+			if (initialize_states) {
+				ExecutionInitializeFreshPrimitiveAggregateState(state_base, *lane, int64_t(1));
+			} else {
+				auto count = reinterpret_cast<int64_t *>(value_ptr);
+				(*count)++;
+			}
 			break;
 		}
 		case AggregatePrimitiveUpdateKind::COUNT: {
-			auto count = reinterpret_cast<int64_t *>(value_ptr);
-			(*count)++;
+			if (initialize_states) {
+				ExecutionInitializeFreshPrimitiveAggregateState(state_base, *lane, int64_t(1));
+			} else {
+				auto count = reinterpret_cast<int64_t *>(value_ptr);
+				(*count)++;
+			}
 			break;
 		}
 		case AggregatePrimitiveUpdateKind::SUM_INT64: {
 			int64_t value;
 			RadixLoadPrimitiveInteger(payloads[aggregate_idx].data, payloads[aggregate_idx].type, row_idx, value);
+			if (initialize_states) {
+				ExecutionInitializeFreshPrimitiveAggregateState(state_base, *lane, value);
+				break;
+			}
 			auto sum = reinterpret_cast<int64_t *>(value_ptr);
 			*sum += value;
 			auto state_is_set = reinterpret_cast<bool *>(state_base + lane->state_is_set_offset);
@@ -321,6 +334,10 @@ static void RadixUpdatePrimitiveGroup(data_ptr_t state_address, idx_t row_idx, v
 		case AggregatePrimitiveUpdateKind::SUM_HUGEINT: {
 			int64_t value;
 			RadixLoadPrimitiveInteger(payloads[aggregate_idx].data, payloads[aggregate_idx].type, row_idx, value);
+			if (initialize_states) {
+				ExecutionInitializeFreshPrimitiveAggregateState(state_base, *lane, hugeint_t(value));
+				break;
+			}
 			auto sum = reinterpret_cast<hugeint_t *>(value_ptr);
 			RadixAccumulateHugeintInt64(*sum, value);
 			auto state_is_set = reinterpret_cast<bool *>(state_base + lane->state_is_set_offset);
@@ -330,6 +347,10 @@ static void RadixUpdatePrimitiveGroup(data_ptr_t state_address, idx_t row_idx, v
 		case AggregatePrimitiveUpdateKind::SUM_DOUBLE: {
 			double value;
 			RadixLoadPrimitiveDouble(payloads[aggregate_idx].data, payloads[aggregate_idx].type, row_idx, value);
+			if (initialize_states) {
+				ExecutionInitializeFreshPrimitiveAggregateState(state_base, *lane, value);
+				break;
+			}
 			auto sum = reinterpret_cast<double *>(value_ptr);
 			*sum += value;
 			auto state_is_set = reinterpret_cast<bool *>(state_base + lane->state_is_set_offset);
@@ -381,14 +402,15 @@ static void RadixUpdatePrimitiveGroupTargetBatch(const ExecutionGroupedAggregate
 }
 
 static void RadixUpdatePrimitiveGroupAddresses(const uintptr_t *state_addresses, const sel_t *address_sel, idx_t count,
-                                               void *state_p) {
+                                               ExecutionGroupedAggregateStateAddressUpdateMode mode, void *state_p) {
 	if (!state_addresses) {
 		throw InternalException("Primitive aggregate grouped update is missing state addresses");
 	}
 	for (idx_t row_idx = 0; row_idx < count; row_idx++) {
 		const auto address_idx = address_sel ? address_sel[row_idx] : row_idx;
 		auto state_address = reinterpret_cast<data_ptr_t>(state_addresses[address_idx]);
-		RadixUpdatePrimitiveGroup(state_address, row_idx, state_p);
+		RadixUpdatePrimitiveGroup(state_address, row_idx, state_p,
+		                          mode == ExecutionGroupedAggregateStateAddressUpdateMode::INITIALIZE_AND_UPDATE);
 	}
 }
 
@@ -531,6 +553,23 @@ public:
 	static constexpr idx_t REPARTITION_RADIX_BITS = 2;
 };
 
+enum class RadixHTFinalizeStrategy : uint8_t { EMPTY, SINGLE_HT, DISJOINT_PROVEN_RANGES, REHASH };
+
+static const char *RadixHTFinalizeStrategyStage(RadixHTFinalizeStrategy strategy) {
+	switch (strategy) {
+	case RadixHTFinalizeStrategy::EMPTY:
+		return "source_contract.hash_aggregate_state_scan.finalize.empty";
+	case RadixHTFinalizeStrategy::SINGLE_HT:
+		return "source_contract.hash_aggregate_state_scan.finalize.single_ht";
+	case RadixHTFinalizeStrategy::DISJOINT_PROVEN_RANGES:
+		return "source_contract.hash_aggregate_state_scan.finalize.disjoint_proven_ranges";
+	case RadixHTFinalizeStrategy::REHASH:
+		return "source_contract.hash_aggregate_state_scan.finalize.rehash";
+	default:
+		throw InternalException("Unknown radix aggregate finalize strategy");
+	}
+}
+
 class RadixHTGlobalSinkState : public GlobalSinkState {
 public:
 	RadixHTGlobalSinkState(ClientContext &context, const RadixPartitionedHashTable &radix_ht);
@@ -552,6 +591,8 @@ public:
 
 	//! Whether we've called Finalize
 	bool finalized;
+	RadixHTFinalizeStrategy finalize_strategy;
+	atomic<bool> finalize_strategy_recorded;
 	//! Whether we are doing an external aggregation
 	atomic<bool> external;
 	//! Threads that have called Sink
@@ -568,8 +609,9 @@ public:
 	atomic<bool> any_abandoned;
 	//! If any local HT appended without duplicate lookup, final combination is required even for one thread
 	atomic<bool> requires_final_combine;
-	//! Exact monotonic local ranges. Disjoint ranges are already globally unique and need no finalize rehash.
-	bool all_local_ranges_proven_unique;
+	//! Local HTs contributing bounded key-interval proofs. Every active local HT must contribute one.
+	idx_t proven_unique_local_count;
+	//! Conservative key intervals. Disjoint intervals are globally unique and need no finalize rehash.
 	vector<GroupedAggregateProvenUniqueRange> proven_unique_ranges;
 
 	//! The radix HT
@@ -600,11 +642,12 @@ public:
 
 RadixHTGlobalSinkState::RadixHTGlobalSinkState(ClientContext &context_p, const RadixPartitionedHashTable &radix_ht_p)
     : context(context_p), temporary_memory_state(TemporaryMemoryManager::Get(context).Register(context)),
-      finalized(false), external(false), active_threads(0),
+      finalized(false), finalize_strategy(RadixHTFinalizeStrategy::EMPTY), finalize_strategy_recorded(false),
+      external(false), active_threads(0),
       number_of_threads(NumericCast<idx_t>(TaskScheduler::GetScheduler(context).NumberOfThreads())),
       memory_limit(BufferManager::GetBufferManager(context).GetOperatorMemoryLimit()),
       block_alloc_size(BufferManager::GetBufferManager(context).GetBlockAllocSize()), any_combined(false),
-      any_abandoned(false), requires_final_combine(false), all_local_ranges_proven_unique(true), radix_ht(radix_ht_p),
+      any_abandoned(false), requires_final_combine(false), proven_unique_local_count(0), radix_ht(radix_ht_p),
       config(*this), stored_allocators_size(0), finalize_done(0),
       scan_pin_properties(TupleDataPinProperties::DESTROY_AFTER_DONE), count_before_combining(0),
       max_partition_size(0) {
@@ -864,12 +907,14 @@ void RadixPartitionedHashTable::ResetGlobalSinkState(ClientContext &context, Glo
 	gstate.temporary_memory_state->SetMinimumReservation(gstate.minimum_reservation);
 	gstate.temporary_memory_state->SetRemainingSizeAndUpdateReservation(context, gstate.minimum_reservation);
 	gstate.finalized = false;
+	gstate.finalize_strategy = RadixHTFinalizeStrategy::EMPTY;
+	gstate.finalize_strategy_recorded = false;
 	gstate.external = false;
 	gstate.active_threads = 0;
 	gstate.any_combined = false;
 	gstate.any_abandoned = false;
 	gstate.requires_final_combine = false;
-	gstate.all_local_ranges_proven_unique = true;
+	gstate.proven_unique_local_count = 0;
 	gstate.proven_unique_ranges.clear();
 	gstate.config.Reset();
 	gstate.uncombined_data.reset();
@@ -1686,10 +1731,11 @@ bool RadixPartitionedHashTable::TryAppendNewGroupKeysWithStateAddresses(
 }
 
 bool RadixPartitionedHashTable::TryEnableProvenUniqueAppend(ExecutionContext &context, OperatorSinkInput &input,
-                                                            DataChunk &groups) const {
+                                                            DataChunk &groups,
+                                                            ExecutionGroupedAggregateAppendProof append_proof) const {
 	auto &lstate = input.local_state.Cast<RadixHTLocalSinkState>();
 	auto &ht = PrepareRadixHTSinkState(context, *this, input);
-	if (!ht.TryContinueProvenUniqueAppend(groups)) {
+	if (!ht.TryContinueProvenUniqueAppend(groups, append_proof)) {
 		return false;
 	}
 	lstate.direct_append_adapted = true;
@@ -1765,8 +1811,7 @@ void RadixPartitionedHashTable::Combine(ExecutionContext &context, GlobalSinkSta
 	if (ht.LookupsSkippedRequireFinalCombine()) {
 		gstate.requires_final_combine = true;
 	}
-	GroupedAggregateProvenUniqueRange proven_unique_range;
-	const auto has_proven_unique_range = ht.GetProvenUniqueAppendRange(proven_unique_range);
+	const auto proven_unique_ranges = ht.GetProvenUniqueAppendRanges();
 	auto lstate_data = ht.AcquirePartitionedData(row_location_remap);
 	if (lstate.abandoned_data) {
 		D_ASSERT(gstate.external);
@@ -1782,10 +1827,10 @@ void RadixPartitionedHashTable::Combine(ExecutionContext &context, GlobalSinkSta
 
 	const annotated_lock_guard<annotated_mutex> guard {gstate.lock};
 	D_ASSERT(!gstate.finalized);
-	if (has_proven_unique_range) {
-		gstate.proven_unique_ranges.push_back(proven_unique_range);
-	} else {
-		gstate.all_local_ranges_proven_unique = false;
+	if (proven_unique_ranges) {
+		gstate.proven_unique_ranges.insert(gstate.proven_unique_ranges.end(), proven_unique_ranges->begin(),
+		                                   proven_unique_ranges->end());
+		gstate.proven_unique_local_count++;
 	}
 	if (gstate.uncombined_data) {
 		gstate.uncombined_data->Combine(*lstate.abandoned_data);
@@ -1870,11 +1915,16 @@ void RadixPartitionedHashTable::Finalize(ClientContext &context, GlobalSinkState
 		// capacity (which would have caused Abandon() to be called, creating duplicates).
 		const auto single_ht =
 		    !gstate.external && gstate.active_threads == 1 && !gstate.any_abandoned && !gstate.requires_final_combine;
-		const auto disjoint_proven_ranges = !gstate.external && !gstate.any_abandoned &&
-		                                    !gstate.requires_final_combine && gstate.all_local_ranges_proven_unique &&
-		                                    gstate.proven_unique_ranges.size() == gstate.active_threads.load() &&
+		// Abandon() only clears a local HT's lookup table; the bounded monotonic-stream proof spans every
+		// abandoned segment. Globally disjoint covering intervals therefore remain duplicate-free even when
+		// the local pointer tables overflowed. Unproven abandonment still falls through to final combine.
+		const auto disjoint_proven_ranges = !gstate.external && !gstate.requires_final_combine &&
+		                                    gstate.proven_unique_local_count == gstate.active_threads.load() &&
 		                                    RadixHTProvenUniqueRangesDisjoint(gstate.proven_unique_ranges);
 		const auto already_combined = single_ht || disjoint_proven_ranges;
+		gstate.finalize_strategy = single_ht                ? RadixHTFinalizeStrategy::SINGLE_HT
+		                           : disjoint_proven_ranges ? RadixHTFinalizeStrategy::DISJOINT_PROVEN_RANGES
+		                                                    : RadixHTFinalizeStrategy::REHASH;
 
 		auto &uncombined_partition_data = uncombined_data.GetPartitions();
 		const auto n_partitions = uncombined_partition_data.size();
@@ -1895,6 +1945,7 @@ void RadixPartitionedHashTable::Finalize(ClientContext &context, GlobalSinkState
 		}
 	} else {
 		gstate.count_before_combining = 0;
+		gstate.finalize_strategy = RadixHTFinalizeStrategy::EMPTY;
 	}
 
 	// Minimum of combining one partition at a time
@@ -2222,6 +2273,10 @@ SourceResultType RadixPartitionedHashTable::GetData(ExecutionContext &context, D
                                                     GlobalSinkState &sink_p, OperatorSourceInput &input) const {
 	auto &sink = sink_p.Cast<RadixHTGlobalSinkState>();
 	D_ASSERT(sink.finalized);
+	if (input.stage_recorder && !sink.finalize_strategy_recorded.exchange(true)) {
+		input.stage_recorder->RecordStageRuntime(
+		    ExecutionRegionStageId(RadixHTFinalizeStrategyStage(sink.finalize_strategy)), 0);
+	}
 
 	auto &gstate = input.global_state.Cast<RadixHTGlobalSourceState>();
 	auto &lstate = input.local_state.Cast<RadixHTLocalSourceState>();

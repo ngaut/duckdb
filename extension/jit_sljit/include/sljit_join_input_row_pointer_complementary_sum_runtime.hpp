@@ -215,6 +215,45 @@ static bool SljitComplementarySumRHSFieldMatches(data_ptr_t row_pointer, const S
 	       SljitStringEqualsConstant(predicate, classification.constants[1], classification.signatures[1]);
 }
 
+struct SljitGenericComplementarySumRHSMatcher {
+	bool Match(data_ptr_t row_pointer, bool &valid) const {
+		valid = SljitHashJoinRHSFixedColumnSourceIsValid(row_pointer, field.source);
+		return valid && SljitComplementarySumRHSFieldMatches(row_pointer, field, classification);
+	}
+
+	const SljitComplementarySumRHSField &field;
+	const SljitStringSetComplementarySumDescriptor &classification;
+};
+
+struct SljitAllValidUhugeintComplementarySumRHSMatcher {
+	bool Match(data_ptr_t row_pointer, bool &valid) const {
+		valid = row_pointer != nullptr;
+		if (!valid) {
+			return false;
+		}
+		const auto value = Load<uhugeint_t>(row_pointer + layout_offset);
+		return value == constant0 || value == constant1;
+	}
+
+	idx_t layout_offset;
+	uhugeint_t constant0;
+	uhugeint_t constant1;
+};
+
+template <class CONSUMER>
+static bool SljitWithComplementarySumRHSMatcher(const SljitComplementarySumRHSField &field,
+                                                const SljitStringSetComplementarySumDescriptor &classification,
+                                                CONSUMER &&consumer) {
+	if (field.source.all_valid && field.compressed_size == sizeof(uhugeint_t)) {
+		SljitAllValidUhugeintComplementarySumRHSMatcher matcher {
+		    field.source.layout_offset, Load<uhugeint_t>(field.compressed_constants[0].data()),
+		    Load<uhugeint_t>(field.compressed_constants[1].data())};
+		return consumer(matcher);
+	}
+	SljitGenericComplementarySumRHSMatcher matcher {field, classification};
+	return consumer(matcher);
+}
+
 template <class GROUP_TYPE, class LOAD_GROUP>
 static bool SljitTryPreaggregateJoinInputRowPointerComplementarySums(
     LOAD_GROUP &&load_group, Vector &row_pointers, idx_t count, const SljitComplementarySumRHSField &predicate_field,
@@ -238,32 +277,38 @@ static bool SljitTryPreaggregateJoinInputRowPointerComplementarySums(
 	std::array<int64_t, GROUP_LIMIT> non_matching_counts {};
 	std::array<idx_t, GROUP_LIMIT> represented_rows {};
 
-	for (idx_t row_idx = 0; row_idx < count; row_idx++) {
-		GROUP_TYPE key {};
-		bool group_is_valid;
-		if (!load_group(row_idx, key, group_is_valid)) {
-			return false;
-		}
-		idx_t group_idx;
-		bool created;
-		if (!group_index.FindOrCreate(group_is_valid, key, group_idx, created)) {
-			return false;
-		}
-		if (created) {
-			compact_group_data[group_idx] = key;
-		}
+	auto accumulate_rows = [&](auto &predicate_matcher) {
+		for (idx_t row_idx = 0; row_idx < count; row_idx++) {
+			GROUP_TYPE key {};
+			bool group_is_valid;
+			if (!load_group(row_idx, key, group_is_valid)) {
+				return false;
+			}
+			idx_t group_idx;
+			bool created;
+			if (!group_index.FindOrCreate(group_is_valid, key, group_idx, created)) {
+				return false;
+			}
+			if (created) {
+				compact_group_data[group_idx] = key;
+			}
 
-		represented_rows[group_idx]++;
-		auto row_pointer = row_pointer_data[row_idx];
-		if (!SljitHashJoinRHSFixedColumnSourceIsValid(row_pointer, predicate_field.source)) {
-			continue;
+			represented_rows[group_idx]++;
+			bool predicate_is_valid;
+			const bool matches = predicate_matcher.Match(row_pointer_data[row_idx], predicate_is_valid);
+			if (!predicate_is_valid) {
+				continue;
+			}
+			if (matches) {
+				matching_counts[group_idx]++;
+			} else {
+				non_matching_counts[group_idx]++;
+			}
 		}
-		const bool matches = SljitComplementarySumRHSFieldMatches(row_pointer, predicate_field, classification);
-		if (matches) {
-			matching_counts[group_idx]++;
-		} else {
-			non_matching_counts[group_idx]++;
-		}
+		return true;
+	};
+	if (!SljitWithComplementarySumRHSMatcher(predicate_field, classification, accumulate_rows)) {
+		return false;
 	}
 	compact_count = group_index.Count();
 
@@ -312,7 +357,7 @@ static bool SljitTryPreaggregateSelectedJoinInputRowPointerComplementarySums(
     const vector<const ExecutionPrimitiveAggregateUpdateLane *> &payload_lanes, DataChunk &compact_groups,
     SljitPreaggregatedPrimitiveAggregateScratch &preaggregate_scratch, idx_t &compact_count,
     bool source_key0_int64_to_int32_unchecked) {
-	auto consume = [&](auto &&load_group, auto &&, auto &&) {
+	auto consume = [&](auto &&load_group, auto &&, auto &&, auto &&, auto) {
 		return SljitTryPreaggregateJoinInputRowPointerComplementarySums<GROUP_TYPE>(
 		    std::forward<decltype(load_group)>(load_group), row_pointers, count, predicate_field, classification,
 		    payload_lanes, compact_groups, preaggregate_scratch, compact_count);
@@ -425,27 +470,28 @@ SljitAccumulateJoinInputRowPointerComplementarySums(SljitDirectJoinOutputAggrega
 	if (!preflight(count)) {
 		return false;
 	}
-	for (idx_t row_idx = 0; row_idx < count; row_idx++) {
-		GROUP_TYPE key {};
-		bool group_is_valid;
-		if (!load_group(row_idx, key, group_is_valid)) {
-			throw InternalException("SLJIT selected group transform failed after successful preflight");
+	auto accumulate_rows = [&](auto &predicate_matcher) {
+		for (idx_t row_idx = 0; row_idx < count; row_idx++) {
+			GROUP_TYPE key {};
+			bool group_is_valid;
+			if (!load_group(row_idx, key, group_is_valid)) {
+				throw InternalException("SLJIT selected group transform failed after successful preflight");
+			}
+			bool predicate_is_valid;
+			const bool predicate_matches = predicate_matcher.Match(row_pointer_data[row_idx], predicate_is_valid);
+			if (accumulator.Accumulate(group_is_valid, key, predicate_is_valid, predicate_matches)) {
+				continue;
+			}
+			if (!flush_accumulator()) {
+				throw InternalException("SLJIT join-input complementary accumulator overflow flush failed");
+			}
+			if (!accumulator.Accumulate(group_is_valid, key, predicate_is_valid, predicate_matches)) {
+				throw InternalException("SLJIT join-input complementary accumulator remained full after flush");
+			}
 		}
-		auto row_pointer = row_pointer_data[row_idx];
-		const bool predicate_is_valid = SljitHashJoinRHSFixedColumnSourceIsValid(row_pointer, predicate_field.source);
-		const bool predicate_matches =
-		    predicate_is_valid && SljitComplementarySumRHSFieldMatches(row_pointer, predicate_field, classification);
-		if (accumulator.Accumulate(group_is_valid, key, predicate_is_valid, predicate_matches)) {
-			continue;
-		}
-		if (!flush_accumulator()) {
-			throw InternalException("SLJIT join-input complementary accumulator overflow flush failed");
-		}
-		if (!accumulator.Accumulate(group_is_valid, key, predicate_is_valid, predicate_matches)) {
-			throw InternalException("SLJIT join-input complementary accumulator remained full after flush");
-		}
-	}
-	return true;
+		return true;
+	};
+	return SljitWithComplementarySumRHSMatcher(predicate_field, classification, accumulate_rows);
 }
 
 template <class FLUSH_ACCUMULATOR>
@@ -463,7 +509,26 @@ struct SljitSelectedJoinInputComplementaryAccumulatorDispatch {
 
 	template <class GROUP_TYPE>
 	bool Execute() {
-		auto consume = [&](auto &&, auto &&preflight, auto &&preflighted_load_group) {
+		auto consume = [&](auto &&, auto &&preflight, auto &&preflighted_load_group, auto &&prepare,
+		                   auto stage_prepared_keys) {
+			if constexpr (decltype(stage_prepared_keys)::value) {
+				auto &accumulator = SljitGetJoinInputComplementarySumAccumulator<GROUP_TYPE>(strategy);
+				if (!prepare(count, accumulator.prepared_group_keys.data(),
+				             accumulator.prepared_group_validity.data())) {
+					return false;
+				}
+				auto prepared_load_group = [&](idx_t row_idx, GROUP_TYPE &key, bool &valid) {
+					key = accumulator.prepared_group_keys[row_idx];
+					valid = accumulator.prepared_group_validity[row_idx] != 0;
+					return true;
+				};
+				auto prepared = [](idx_t) {
+					return true;
+				};
+				return SljitAccumulateJoinInputRowPointerComplementarySums<GROUP_TYPE>(
+				    strategy, prepared_load_group, row_pointers, count, predicate_field, classification, prepared,
+				    flush_accumulator);
+			}
 			return SljitAccumulateJoinInputRowPointerComplementarySums<GROUP_TYPE>(
 			    strategy, std::forward<decltype(preflighted_load_group)>(preflighted_load_group), row_pointers, count,
 			    predicate_field, classification, std::forward<decltype(preflight)>(preflight), flush_accumulator);

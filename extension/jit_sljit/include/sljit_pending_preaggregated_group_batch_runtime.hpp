@@ -46,17 +46,46 @@ struct SljitPendingPreaggregatedPrimitiveGroupBatch {
 		groups.Reset();
 		represented_row_count = 0;
 		count = 0;
+		InvalidateGeneratedAppendProof();
+	}
+
+	void BeginGeneratedAppendProof() {
+		if (!Empty()) {
+			return;
+		}
+		generated_append_proof_available = true;
+		generated_groups_strictly_increasing = true;
+	}
+
+	void UpdateGeneratedAppendProof(bool groups_strictly_increasing) {
+		generated_groups_strictly_increasing = generated_append_proof_available && groups_strictly_increasing;
+	}
+
+	void InvalidateGeneratedAppendProof() {
+		generated_append_proof_available = false;
+		generated_groups_strictly_increasing = false;
+	}
+
+	ExecutionGroupedAggregateAppendProof GeneratedAppendProof() const {
+		ExecutionGroupedAggregateAppendProof result;
+		result.groups_strictly_increasing = generated_append_proof_available && generated_groups_strictly_increasing;
+		return result;
 	}
 
 	bool EnsureFixedScratch(const vector<const ExecutionPrimitiveAggregateUpdateLane *> &new_lanes) {
-		if (lanes == new_lanes && scratch.HasFixedCapacity(lanes, SLJIT_PENDING_PREAGGREGATED_GROUP_CAPACITY)) {
+		if (lanes == new_lanes && scratch.HasFixedCapacity(lanes, SLJIT_PENDING_PREAGGREGATED_GROUP_CAPACITY) &&
+		    generated_run_lane_inputs.size() == lanes.size()) {
 			return true;
 		}
 		if (HasPending()) {
 			return false;
 		}
 		lanes = new_lanes;
-		return scratch.PrepareFixed(lanes, SLJIT_PENDING_PREAGGREGATED_GROUP_CAPACITY);
+		if (!scratch.PrepareFixed(lanes, SLJIT_PENDING_PREAGGREGATED_GROUP_CAPACITY)) {
+			return false;
+		}
+		generated_run_lane_inputs.resize(lanes.size());
+		return true;
 	}
 
 	void ResetDenseSingleLane() {
@@ -88,7 +117,10 @@ struct SljitPendingPreaggregatedPrimitiveGroupBatch {
 
 	SljitDataChunkBatch groups;
 	SljitPreaggregatedPrimitiveAggregateScratch scratch;
+	// Descriptors are rebound per chunk, but their storage belongs to the pipeline-local pending state.
+	SljitPreaggregatedPrimitivePayloadSources payload_sources;
 	vector<const ExecutionPrimitiveAggregateUpdateLane *> lanes;
+	vector<SljitNativePrimitiveRunLaneInput> generated_run_lane_inputs;
 	idx_t represented_row_count = 0;
 	idx_t count = 0;
 
@@ -108,6 +140,8 @@ struct SljitPendingPreaggregatedPrimitiveGroupBatch {
 	bool proven_unique_append_active = false;
 	bool proven_unique_append_failed = false;
 	SljitPendingRunStrategy run_strategy = SljitPendingRunStrategy::UNDECIDED;
+	bool generated_append_proof_available = false;
+	bool generated_groups_strictly_increasing = false;
 };
 
 static void SljitUpdateProvenUniqueAppendContract(ExecutionRegionRuntime &runtime, SljitExecutableRegionOp &op,
@@ -117,7 +151,8 @@ static void SljitUpdateProvenUniqueAppendContract(ExecutionRegionRuntime &runtim
 	if (pending.proven_unique_append_failed) {
 		return;
 	}
-	if (!grouped_state.state->TryEnableProvenUniqueAppend(groups)) {
+	const auto append_proof = pending.GeneratedAppendProof();
+	if (!grouped_state.state->TryEnableProvenUniqueAppend(groups, append_proof)) {
 		if (pending.proven_unique_append_active) {
 			RecordSljitRegionRuntimePath(runtime, op.kind, "proven_unique_append.final_combine_required");
 		}
@@ -127,6 +162,9 @@ static void SljitUpdateProvenUniqueAppendContract(ExecutionRegionRuntime &runtim
 	}
 	if (!pending.proven_unique_append_active) {
 		RecordSljitRegionRuntimePath(runtime, op.kind, "proven_unique_append.enabled");
+	}
+	if (append_proof.groups_strictly_increasing) {
+		RecordSljitRegionRuntimePath(runtime, op.kind, "proven_unique_append.producer_order_proof", groups.size());
 	}
 	pending.proven_unique_append_active = true;
 }
@@ -407,6 +445,7 @@ SljitAppendPreaggregatedPrimitiveGroupRange(ExecutionRegionRuntime &runtime, Slj
 			return false;
 		}
 	}
+	pending.InvalidateGeneratedAppendProof();
 	DataChunk *source_groups = &groups;
 	auto &group_slice = scratch.AggregatePreaggregatedGroupSlice(op_idx);
 	if (offset != 0 || count != groups.size()) {
@@ -581,6 +620,7 @@ static bool SljitBufferPreaggregatedPrimitiveGroups(
 	if (!pending.EnsureFixedScratch(payload_lanes)) {
 		return false;
 	}
+	pending.InvalidateGeneratedAppendProof();
 	idx_t offset = 0;
 	if (!pending.Empty() &&
 	    SljitPreaggregatedPrimitiveSingleGroupKeysMatch(pending.groups.chunk, pending.Count() - 1, groups, 0)) {

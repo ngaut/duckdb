@@ -8,9 +8,11 @@
 
 #pragma once
 
+#include "sljit_codegen_capabilities.hpp"
 #include "sljit_function_types.hpp"
 #include "sljit_region_plan.hpp"
 
+#include "duckdb/execution/execution_aggregate_runtime.hpp"
 #include "duckdb/execution/execution_region_kernel.hpp"
 
 namespace duckdb {
@@ -165,10 +167,19 @@ unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativeGroupedCountStar(SljitNati
                                                                        string &error);
 unique_ptr<ExecutionRegionCodeHandle>
 BuildSljitNativeGroupedCountReference(SljitNativeAggregateUpdateFunction &function, string &error);
+bool SljitPrimitiveRunGroupCastSupported(PhysicalType source_type, PhysicalType target_type,
+                                         ExecutionRowPointerGroupKeyCastKind cast_kind);
+bool SljitPrimitiveRunPayloadSupported(PhysicalType payload_type, AggregatePrimitiveUpdateKind primitive_kind,
+                                       bool payload_nullable);
 unique_ptr<ExecutionRegionCodeHandle>
-BuildSljitNativePrimitiveRunUpdate(PhysicalType group_source_type, PhysicalType group_type, PhysicalType payload_type,
-                                   AggregatePrimitiveUpdateKind primitive_kind,
+BuildSljitNativePrimitiveRunUpdate(PhysicalType group_source_type, PhysicalType group_type,
+                                   ExecutionRowPointerGroupKeyCastKind group_cast_kind, PhysicalType payload_type,
+                                   AggregatePrimitiveUpdateKind primitive_kind, bool payload_nullable,
                                    SljitNativePrimitiveRunFunction &function, string &error);
+unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativePrimitiveRunMultiUpdate(
+    PhysicalType group_source_type, PhysicalType group_type, ExecutionRowPointerGroupKeyCastKind group_cast_kind,
+    const vector<PhysicalType> &payload_types, const vector<AggregatePrimitiveUpdateKind> &primitive_kinds,
+    SljitNativePrimitiveRunFunction &function, string &error);
 unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativeUngroupedSumInt64IntegerBinaryConstant(
     SljitNativeIntegerKind kind, SljitNativeIntegerBinaryOp op, bool constant_on_left,
     SljitNativeAggregateUpdateFunction &function, string &error, bool check_arithmetic_overflow = true,

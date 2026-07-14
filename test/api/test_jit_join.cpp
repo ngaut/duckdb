@@ -1648,6 +1648,80 @@ TEST_CASE("JIT accumulates selected transformed groups with build-side complemen
 	    });
 }
 
+TEST_CASE("JIT adaptively hashes wide compressed complementary groups", "[api][jit]") {
+	DuckDB db;
+	Connection con(db);
+	auto &manager = ExecutionRegionManager::Get(*con.context);
+
+	ConfigureSljitForCoverage(con, false, true, true, 10000);
+	REQUIRE_NO_FAIL(con.Query("PRAGMA threads=1"));
+	REQUIRE_NO_FAIL(con.Query("SET perfect_ht_threshold=0"));
+	REQUIRE_NO_FAIL(con.Query("SET disabled_optimizers='join_order,build_side_probe_side,partial_aggregate_pushdown'"));
+	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_wide_complementary_orders AS "
+	                          "SELECT (i * 100003)::BIGINT AS orderkey, "
+	                          "       CASE WHEN i % 5 = 0 THEN '1-URGENT' "
+	                          "            WHEN i % 5 = 1 THEN '2-HIGH' "
+	                          "            ELSE '3-MEDIUM' END AS orderpriority "
+	                          "FROM range(2048) tbl(i)"));
+	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_wide_complementary_shipments AS "
+	                          "SELECT ((i % 2048) * 100003)::BIGINT AS orderkey, "
+	                          "       CASE i % 9 "
+	                          "       WHEN 0 THEN 'a12345678' "
+	                          "       WHEN 1 THEN 'b123456789' "
+	                          "       WHEN 2 THEN 'c1234567890' "
+	                          "       WHEN 3 THEN 'd12345678901' "
+	                          "       WHEN 4 THEN 'e123456789012' "
+	                          "       WHEN 5 THEN 'f1234567890123' "
+	                          "       WHEN 6 THEN 'g12345678901234' "
+	                          "       WHEN 7 THEN 'hABCDEFGHIJKLMN' "
+	                          "       ELSE 'i98765432109876' END AS route_group "
+	                          "FROM range(32768) tbl(i)"));
+
+	const string query = "SELECT shipment.route_group, "
+	                     "       sum(CASE WHEN orders.orderpriority = '1-URGENT' OR orders.orderpriority = '2-HIGH' "
+	                     "                THEN 1 ELSE 0 END) AS high_priority_count, "
+	                     "       sum(CASE WHEN orders.orderpriority <> '1-URGENT' AND orders.orderpriority <> '2-HIGH' "
+	                     "                THEN 1 ELSE 0 END) AS low_priority_count "
+	                     "FROM jit_wide_complementary_shipments shipment "
+	                     "JOIN jit_wide_complementary_orders orders USING (orderkey) "
+	                     "GROUP BY shipment.route_group ORDER BY shipment.route_group";
+	REQUIRE_NO_FAIL(con.Query("SET jit_policy='off'"));
+	auto reference = con.Query(query);
+	REQUIRE_NO_FAIL(*reference);
+	REQUIRE(reference->RowCount() == 9);
+
+	REQUIRE_NO_FAIL(con.Query("SET jit_policy='auto'"));
+	ClearJitTrace(manager, true);
+	auto result = con.Query(query);
+	REQUIRE_NO_FAIL(*result);
+	REQUIRE(result->RowCount() == reference->RowCount());
+	REQUIRE(result->ColumnCount() == reference->ColumnCount());
+	for (idx_t row_idx = 0; row_idx < result->RowCount(); row_idx++) {
+		for (idx_t col_idx = 0; col_idx < result->ColumnCount(); col_idx++) {
+			REQUIRE(result->GetValue(col_idx, row_idx).ToString() == reference->GetValue(col_idx, row_idx).ToString());
+		}
+	}
+
+	RequireJitEvent(
+	    manager,
+	    [](const ExecutionRegionEvent &event) {
+		    const auto paths = EventJitRuntimePathCounts(event);
+		    return EventPhase(event) == "runtime" && EventStatus(event) == "executed" &&
+		           EventExecutionMode(event) == "native" &&
+		           StringUtil::Contains(
+		               paths, "aggregate_update.join_input_pipeline_complementary_sum.selected_group_transform=");
+	    },
+	    [](const ExecutionRegionEvent &event) {
+		    const auto paths = EventJitRuntimePathCounts(event);
+		    INFO(paths);
+		    REQUIRE(StringUtil::Contains(paths,
+		                                 "aggregate_update.join_input_pipeline_complementary_sum_accumulator_flush="));
+		    REQUIRE_FALSE(StringUtil::Contains(paths, "complementary_sum_group_input_source"));
+		    RequireHashProbeAggregateUpdateRuntimeOwnership(event);
+		    REQUIRE(HasGeneratedAggregateUpdateStage(event));
+	    });
+}
+
 TEST_CASE("JIT preaggregates probe groups with compressed build-side complementary sums", "[api][jit]") {
 	DuckDB db;
 	Connection con(db);
@@ -1714,6 +1788,147 @@ TEST_CASE("JIT preaggregates probe groups with compressed build-side complementa
 		    RequireHashProbeAggregateUpdateRuntimeOwnership(event);
 		    REQUIRE(HasGeneratedAggregateUpdateStage(event));
 	    });
+}
+
+TEST_CASE("JIT probes selected BIGINT keys through proven INTEGER narrowing", "[api][jit]") {
+	DuckDB db;
+	Connection con(db);
+	auto &manager = ExecutionRegionManager::Get(*con.context);
+
+	ConfigureSljitForCoverage(con, false, true, true, 10000);
+	REQUIRE_NO_FAIL(con.Query("PRAGMA threads=1"));
+	REQUIRE_NO_FAIL(con.Query("SET perfect_ht_threshold=0"));
+	auto db_path = TestCreatePath("jit_unchecked_narrowing_probe.db");
+	TestDeleteFile(db_path);
+	TestDeleteFile(db_path + ".wal");
+	REQUIRE_NO_FAIL(con.Query("ATTACH " + SQLString(db_path) + " AS narrowing (ROW_GROUP_SIZE 2048)"));
+	REQUIRE_NO_FAIL(con.Query("CREATE TABLE narrowing.jit_narrowing_build AS "
+	                          "SELECT (i * 5)::BIGINT AS orderkey, "
+	                          "CASE i % 5 WHEN 0 THEN '1-URGENT' WHEN 1 THEN '2-HIGH' "
+	                          "WHEN 2 THEN '3-MEDIUM' ELSE '4-NOT SPECIFIED' END AS priority "
+	                          "FROM range(1048576) tbl(i)"));
+	REQUIRE_NO_FAIL(con.Query("CREATE TABLE narrowing.jit_narrowing_probe AS "
+	                          "SELECT ((i % 1048576) * 5)::BIGINT AS orderkey, "
+	                          "CASE i % 3 WHEN 0 THEN 'MAIL' WHEN 1 THEN 'SHIP' ELSE 'RAIL' END AS ship_mode "
+	                          "FROM range(2097152) tbl(i) "
+	                          "UNION ALL SELECT 3::BIGINT, 'MAIL'"));
+	auto in_range_non_match = con.Query("SELECT count(*) FROM narrowing.jit_narrowing_probe WHERE orderkey=3");
+	REQUIRE_NO_FAIL(*in_range_non_match);
+	REQUIRE(in_range_non_match->GetValue(0, 0).ToString() == "1");
+	REQUIRE_NO_FAIL(con.Query("CHECKPOINT narrowing"));
+	REQUIRE_NO_FAIL(con.Query("DETACH narrowing"));
+	REQUIRE_NO_FAIL(con.Query("ATTACH " + SQLString(db_path) + " AS narrowing"));
+
+	const string query = "SELECT probe.ship_mode, "
+	                     "sum(CASE WHEN build.priority = '1-URGENT' OR build.priority = '2-HIGH' "
+	                     "THEN 1 ELSE 0 END), "
+	                     "sum(CASE WHEN build.priority <> '1-URGENT' AND build.priority <> '2-HIGH' "
+	                     "THEN 1 ELSE 0 END) "
+	                     "FROM narrowing.jit_narrowing_probe probe "
+	                     "JOIN narrowing.jit_narrowing_build build USING (orderkey) "
+	                     "WHERE probe.ship_mode IN ('MAIL', 'SHIP') "
+	                     "GROUP BY probe.ship_mode ORDER BY probe.ship_mode";
+	REQUIRE_NO_FAIL(con.Query("SET jit_policy='off'"));
+	auto reference = con.Query(query);
+	REQUIRE_NO_FAIL(*reference);
+
+	REQUIRE_NO_FAIL(con.Query("SET jit_policy='auto'"));
+	ClearJitTrace(manager, true);
+	auto result = con.Query(query);
+	REQUIRE_NO_FAIL(*result);
+	REQUIRE(result->RowCount() == reference->RowCount());
+	REQUIRE(result->ColumnCount() == reference->ColumnCount());
+	for (idx_t row_idx = 0; row_idx < result->RowCount(); row_idx++) {
+		for (idx_t col_idx = 0; col_idx < result->ColumnCount(); col_idx++) {
+			REQUIRE(result->GetValue(col_idx, row_idx) == reference->GetValue(col_idx, row_idx));
+		}
+	}
+	string observed_runtime_paths;
+	for (auto &event : manager.GetEvents()) {
+		if (EventPhase(event) != "runtime") {
+			continue;
+		}
+		observed_runtime_paths += event.reason + "\n" + EventJitRuntimePathCounts(event) + "\n";
+	}
+	INFO(observed_runtime_paths);
+
+	RequireJitEvent(
+	    manager,
+	    [](const ExecutionRegionEvent &event) {
+		    const auto paths = EventJitRuntimePathCounts(event);
+		    return EventPhase(event) == "runtime" && EventStatus(event) == "executed" &&
+		           EventExecutionMode(event) == "native" &&
+		           StringUtil::Contains(paths, "hash_join_probe.regular_probe.all_valid.selected.single_key.unchecked_"
+		                                       "int64_to_int32.no_chain=");
+	    },
+	    [](const ExecutionRegionEvent &event) {
+		    REQUIRE(event.jit_runtime.hash_join_probe_layout == "regular_hash_table");
+		    RequireHashProbeAggregateUpdateRuntimeOwnership(event);
+		    REQUIRE(HasGeneratedAggregateUpdateStage(event));
+	    });
+
+	const string flat_query =
+	    "SELECT count(*), "
+	    "sum(CASE WHEN build.priority = '1-URGENT' OR build.priority = '2-HIGH' THEN 1 ELSE 0 END) "
+	    "FROM narrowing.jit_narrowing_probe probe "
+	    "JOIN narrowing.jit_narrowing_build build USING (orderkey)";
+	REQUIRE_NO_FAIL(con.Query("SET jit_policy='off'"));
+	auto flat_reference = con.Query(flat_query);
+	REQUIRE_NO_FAIL(*flat_reference);
+	ConfigureSljitForCoverageSettings(con, false, true, true, 10000);
+	ClearJitTrace(manager, true);
+	auto flat_result = con.Query(flat_query);
+	REQUIRE_NO_FAIL(*flat_result);
+	REQUIRE(flat_result->GetValue(0, 0) == flat_reference->GetValue(0, 0));
+	REQUIRE(flat_result->GetValue(1, 0) == flat_reference->GetValue(1, 0));
+	RequireJitEvent(
+	    manager,
+	    [](const ExecutionRegionEvent &event) {
+		    return EventPhase(event) == "runtime" && EventStatus(event) == "executed" &&
+		           EventExecutionMode(event) == "native" &&
+		           StringUtil::Contains(EventJitRuntimePathCounts(event),
+		                                "hash_join_probe.regular_probe.all_valid.flat.single_key.unchecked_int64_to_"
+		                                "int32.no_chain=");
+	    },
+	    [](const ExecutionRegionEvent &event) {
+		    REQUIRE(event.jit_runtime.hash_join_probe_layout == "regular_hash_table");
+		    RequireHashProbeAggregateUpdateRuntimeOwnership(event);
+	    });
+
+	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_narrowing_range_build(k BIGINT NOT NULL)"));
+	REQUIRE_NO_FAIL(con.Query("INSERT INTO jit_narrowing_range_build VALUES "
+	                          "(-2147483648), (0), (2147483647)"));
+	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_narrowing_range_probe(k BIGINT NOT NULL)"));
+	REQUIRE_NO_FAIL(con.Query("INSERT INTO jit_narrowing_range_probe VALUES "
+	                          "(-2147483649), (-2147483648), (0), (2147483648)"));
+	const string range_query = "SELECT count(*) FROM jit_narrowing_range_probe probe "
+	                           "JOIN jit_narrowing_range_build build USING (k)";
+	REQUIRE_NO_FAIL(con.Query("SET jit_policy='off'"));
+	auto range_reference = con.Query(range_query);
+	REQUIRE_NO_FAIL(*range_reference);
+	REQUIRE(range_reference->GetValue(0, 0).ToString() == "2");
+	ConfigureSljitForCoverageSettings(con, false, true, true, 10000);
+	ClearJitTrace(manager, true);
+	auto range_result = con.Query(range_query);
+	REQUIRE_NO_FAIL(*range_result);
+	REQUIRE(range_result->GetValue(0, 0) == range_reference->GetValue(0, 0));
+	bool found_native_regular_probe = false;
+	bool found_unchecked_narrowing = false;
+	for (auto &event : manager.GetEvents()) {
+		if (EventPhase(event) != "runtime" || event.backend_name != "sljit") {
+			continue;
+		}
+		found_native_regular_probe =
+		    found_native_regular_probe || event.jit_runtime.hash_join_probe_layout == "regular_hash_table";
+		found_unchecked_narrowing = found_unchecked_narrowing ||
+		                            StringUtil::Contains(EventJitRuntimePathCounts(event), "unchecked_int64_to_int32");
+	}
+	REQUIRE(found_native_regular_probe);
+	REQUIRE_FALSE(found_unchecked_narrowing);
+
+	REQUIRE_NO_FAIL(con.Query("DETACH narrowing"));
+	TestDeleteFile(db_path);
+	TestDeleteFile(db_path + ".wal");
 }
 
 TEST_CASE("JIT join grouped aggregate direct-projects variable-width RHS keys", "[api][jit]") {

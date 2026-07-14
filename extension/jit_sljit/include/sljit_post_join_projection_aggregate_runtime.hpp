@@ -20,6 +20,10 @@
 namespace duckdb {
 
 struct SljitPostJoinProjectionAggregateRuntimeState {
+	void BeginInvocation() {
+		processed_output_rows = 0;
+	}
+
 	bool Prepare(ExecutionRegionRuntime &, vector<SljitExecutableRegionOp> &ops,
 	             const SljitPostJoinProjectionAggregatePrimitive &primitive,
 	             const vector<idx_t> &source_distinct_counts, const vector<Value> &source_min_values,

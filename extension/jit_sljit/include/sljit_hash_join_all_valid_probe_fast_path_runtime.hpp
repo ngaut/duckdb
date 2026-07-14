@@ -40,7 +40,7 @@ struct SljitAllValidHashJoinMarkSelectionProbeFastPath {
 const char *SljitGeneratedAllValidRegularHashJoinProbeStage(bool selected);
 const char *SljitGeneratedAllValidRegularHashJoinProbeStage(bool selected,
                                                             SljitHashJoinMarkSelectionMode mark_selection_mode);
-const std::array<SljitAllValidHashJoinProbeFastPath, 5> &SljitAllValidHashJoinProbeFastPaths(bool selected);
+const std::array<SljitAllValidHashJoinProbeFastPath, 6> &SljitAllValidHashJoinProbeFastPaths(bool selected);
 const char *SljitAllValidHashJoinProbeFastPathStage(const SljitAllValidHashJoinProbeFastPath &fast_path, bool selected);
 const std::array<SljitAllValidHashJoinMarkSelectionProbeFastPath, 6> &
 SljitAllValidHashJoinMarkSelectionProbeFastPaths(bool selected);

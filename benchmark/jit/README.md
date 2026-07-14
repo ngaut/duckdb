@@ -50,14 +50,21 @@ The generic gate covers arithmetic, filters, CASE-heavy expressions, multiple
 aggregate lanes, filtered scans, mixed numeric/date plus nullable-string
 predicates, persistent column-vs-column comparisons, single- and multi-source
 nullable persistent scans, grouped DISTINCT, dense computed multi-aggregate
-grouping, sorted-run grouping, and joins. Arithmetic, CASE, multi-aggregate,
-scan-expression, scan-filter, mixed-predicate, column-comparison, both nullable
+grouping, projected, materialized, nullable multi-lane, and bounded wide-lane
+sorted-run grouping, sparse monotonic grouping, and joins. Arithmetic,
+CASE, multi-aggregate, scan-expression, scan-filter, mixed-predicate,
+column-comparison, both nullable
 classes, and the proven grouped workloads require compiled speedups at their
 configured thread counts. The mixed-predicate gate requires at least 1.25x at
 one thread and 1.20x at four threads. The column-comparison gate requires at
 least 1.25x at both one and four threads. Dense multi-aggregate grouping
-requires at least 1.80x at one thread and 1.60x at four threads; sorted-run
-grouping requires 1.60x and 1.35x respectively. Join workloads without a proven
+requires at least 1.80x at one thread and 1.60x at four threads; projected
+sorted-run grouping requires 3.00x and 1.75x respectively, while materialized
+arithmetic grouping requires 2.25x and 1.45x. Nullable multi-lane sorted runs
+require 1.70x and 1.45x. Sparse monotonic grouping requires 2.35x and 1.08x;
+the four-thread query shares a two-million-group state scan with JIT-off, so its
+parallel floor protects the generated sink win without claiming that shared
+downstream work. Join workloads without a proven
 compiled route have a bounded auto-policy slowdown and may remain vectorized.
 Short production failures receive an automatic focused high-sample recheck
 before the gate decides.
@@ -83,12 +90,47 @@ two-way conjunction carries 1.31x and 1.25x floors; the three-way variant adds
 1.25x and 1.20x floors. The neighboring non-null grouped workload has 1.16x and
 1.13x thread-specific floors. The mixed-predicate promotion proves 1.338x at
 one thread and 1.286x at four threads.
-Generated sorted-run aggregation proves 1.680x at one thread and 1.425x at four
+The mixed-source complementary string join proves 1.336x at one thread and
+1.230x at four threads. Its 1.30x and 1.20x floors protect a runtime-adaptive
+pipeline-local direct tier that keeps the first eight observed groups direct
+and switches permanently to hashing on the ninth, one-pass compressed RHS classification, and a
+range-proven BIGINT-to-INTEGER selected no-chain probe.
+Generated sorted-run aggregation proves 3.222x at one thread and 1.902x at four
 threads over ten alternating production repetitions; its checked-in floors are
-1.60x and 1.35x. The backend kernel streams flat, all-valid fixed-width group
-keys and one primitive aggregate lane into fixed-capacity pending storage, while
-unsupported selections, nulls, casts, and lane shapes retain the vectorized
-fallback.
+3.00x and 1.75x. The same pending owner consumes materialized arithmetic group
+keys at 2.437x and 1.609x, with floors of 2.25x and 1.45x. Pipeline-local state
+keeps an unpublished boundary group across scheduler fairness yields. Parallel
+radix finalization compares conservative key intervals. Exact intervals coalesce
+into a covering hull when the summary budget is reached, so storage pressure
+cannot invalidate local monotonic uniqueness. Disjoint summaries skip rehash
+while shared boundary keys still reconcile normally. The backend
+kernel accepts exact keys, proven signed narrowing casts, and integral
+compression through one generated ABI. Single-lane all-valid and nullable
+kernels retain their tuned representations. Multi-lane kernels compile one
+primitive descriptor list and bind a cached runtime lane array, so nullable
+`SUM`, nullable `COUNT`, and `COUNT(*)` execute together without a nullability
+specialization matrix. The nullable multi-lane workload proves 1.785x and
+1.505x over ten production repetitions; its floors are 1.70x and 1.45x.
+The sparse-key variant crosses the exact interval budget and proves that the
+bounded conservative hull remains useful: ten production repetitions measure
+2.600x at one thread and 1.134x at four threads, protected by 2.35x and 1.08x
+floors.
+Generated run reducers deliberately unroll at most eight aggregate lanes. They
+are generated lazily only after runtime ordering economics accepts the stream,
+and publish only the observed key-cast and nullability specialization. A
+16-lane sorted-run workload therefore exercises the bounded generic route while
+the rest of the region remains compiled; ten-repeat production medians prove
+1.223x at one thread and 1.311x at four threads, protected by 1.15x and 1.20x
+floors. Payload-source descriptor storage is pipeline-local and rebound without
+per-chunk allocation. Generated run lowering requires a 64-bit SLJIT machine
+word and the required register file; unsupported targets retain the exact
+generic reducer until paired-register lowering exists.
+Selections, non-flat inputs, unproven casts, and unsupported primitive types
+retain the exact fallback.
+Selected one-key regular hash probes use the compressed INTEGER table directly
+from a BIGINT source only when source statistics prove the narrowing and the
+runtime proves a no-chain matched-output layout. The loop remains generic over
+table identity and retains Bloom, salt, and selection semantics.
 Hybrid SIMD admission uses one shared scalar-operation cost contract: fully
 packed select/count/sum kernels retain simple comparisons, while scalar-terminal
 hybrids require enough predicate work to amortize mask dispatch. AND hybrids

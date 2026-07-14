@@ -24,6 +24,8 @@
 namespace duckdb {
 class Executor;
 class ExecutionRegionPipelineAdapter;
+class ExecutionRegionKernel;
+class ExecutionRegionLocalState;
 struct ExecutionRegionSourceContractMetrics;
 
 //! The Pipeline class represents an execution pipeline
@@ -98,6 +100,8 @@ private:
 	//! Scratch chunk used when compiled source-contract execution fetches a source chunk before generated prefix code.
 	DataChunk execution_source_input_chunk;
 	std::array<vector<bool>, EXECUTION_REGION_RUNTIME_ONCE_FLAG_COUNT> execution_region_runtime_once_flags;
+	unique_ptr<ExecutionRegionLocalState> execution_region_local_state;
+	optional_ptr<const ExecutionRegionKernel> execution_region_local_state_kernel;
 
 	//! The operators that are not yet finished executing and have data remaining
 	//! If the stack of in_process_operators is empty, we fetch from the source instead

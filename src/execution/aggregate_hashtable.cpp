@@ -362,9 +362,8 @@ GroupedAggregateHashTable::GroupedAggregateHashTable(ClientContext &context_p, A
       radix_bits(radix_bits), count(0), capacity(0), sink_count(0), skip_lookups(false), enable_hll(false),
       aggregate_allocator(make_shared_ptr<ArenaAllocator>(allocator)), state(*aggregate_allocator),
       skip_lookups_require_final_combine(false), proven_unique_append_key_type(PhysicalType::INVALID),
-      proven_unique_append_has_last_key(false), proven_unique_append_first_signed_key(0),
-      proven_unique_append_last_signed_key(0), proven_unique_append_first_unsigned_key(0),
-      proven_unique_append_last_unsigned_key(0) {
+      proven_unique_append_has_last_key(false), proven_unique_append_last_signed_key(0),
+      proven_unique_append_last_unsigned_key(0), proven_unique_append_ranges_coalesced(false) {
 	clustered_state.all_clustered = AllAggregatesClustered(aggregate_objects_p);
 	clustered_state.n_clustered = CountAggregatesClustered(aggregate_objects_p);
 	if (clustered_state.n_clustered > 1) {
@@ -623,71 +622,183 @@ void GroupedAggregateHashTable::RequireFinalCombine() {
 	}
 }
 
+static constexpr idx_t MAX_PROVEN_UNIQUE_APPEND_INTERVALS = STANDARD_VECTOR_SIZE;
+
 template <class KEY_TYPE>
-static bool AggregateGroupsContinueIncreasing(DataChunk &groups, bool has_last_key, int64_t last_signed_key,
-                                              uint64_t last_unsigned_key, KEY_TYPE &first_key, KEY_TYPE &last_key) {
-	if (groups.ColumnCount() != 1 || groups.size() == 0) {
-		return false;
+static void AggregateAppendProvenUniqueRange(vector<GroupedAggregateProvenUniqueRange> &ranges, PhysicalType key_type,
+                                             KEY_TYPE first_key, KEY_TYPE last_key) {
+	GroupedAggregateProvenUniqueRange range;
+	range.key_type = key_type;
+	if constexpr (std::is_signed<KEY_TYPE>::value) {
+		range.first_signed_key = static_cast<int64_t>(first_key);
+		range.last_signed_key = static_cast<int64_t>(last_key);
+	} else {
+		range.first_unsigned_key = static_cast<uint64_t>(first_key);
+		range.last_unsigned_key = static_cast<uint64_t>(last_key);
 	}
-	UnifiedVectorFormat format;
-	groups.data[0].ToUnifiedFormat(format);
-	auto data = UnifiedVectorFormat::GetData<KEY_TYPE>(format);
-	auto sel = format.sel;
-	const bool can_have_null = format.validity.CanHaveNull();
-	bool has_previous = false;
-	KEY_TYPE previous {};
-	for (idx_t row_idx = 0; row_idx < groups.size(); row_idx++) {
-		const auto source_idx = sel->get_index(row_idx);
-		if (can_have_null && !format.validity.RowIsValid(source_idx)) {
-			return false;
-		}
-		const auto key = data[source_idx];
-		if (!has_previous) {
-			first_key = key;
-		}
-		if (has_previous && key <= previous) {
-			return false;
-		}
-		if (!has_previous && has_last_key) {
-			const auto prior = std::is_signed<KEY_TYPE>::value ? static_cast<KEY_TYPE>(last_signed_key)
-			                                                   : static_cast<KEY_TYPE>(last_unsigned_key);
-			if (key <= prior) {
-				return false;
-			}
-		}
-		previous = key;
-		has_previous = true;
-	}
-	last_key = previous;
-	return true;
+	ranges.push_back(range);
 }
 
 template <class KEY_TYPE>
-static bool AggregateTryContinueProvenUniqueAppendTyped(DataChunk &groups, bool &has_last_key, int64_t &last_signed_key,
-                                                        uint64_t &last_unsigned_key, int64_t &first_signed_key,
-                                                        uint64_t &first_unsigned_key) {
-	KEY_TYPE first_key;
-	KEY_TYPE last_key;
-	if (!AggregateGroupsContinueIncreasing(groups, has_last_key, last_signed_key, last_unsigned_key, first_key,
-	                                       last_key)) {
+static void AggregateExtendProvenUniqueRange(GroupedAggregateProvenUniqueRange &range, KEY_TYPE key) {
+	if constexpr (std::is_signed<KEY_TYPE>::value) {
+		range.last_signed_key = static_cast<int64_t>(key);
+	} else {
+		range.last_unsigned_key = static_cast<uint64_t>(key);
+	}
+}
+
+template <class KEY_TYPE>
+static void AggregateRecordProvenUniqueRange(vector<GroupedAggregateProvenUniqueRange> &ranges, PhysicalType key_type,
+                                             KEY_TYPE first_key, KEY_TYPE last_key, bool has_previous,
+                                             KEY_TYPE previous, bool &ranges_coalesced) {
+	if (ranges_coalesced) {
+		D_ASSERT(ranges.size() == 1);
+		AggregateExtendProvenUniqueRange(ranges.front(), last_key);
+		return;
+	}
+	const auto adjacent = has_previous && previous != NumericLimits<KEY_TYPE>::Maximum() &&
+	                      first_key == static_cast<KEY_TYPE>(previous + 1);
+	if (adjacent) {
+		D_ASSERT(!ranges.empty());
+		AggregateExtendProvenUniqueRange(ranges.back(), last_key);
+		return;
+	}
+	if (ranges.size() >= MAX_PROVEN_UNIQUE_APPEND_INTERVALS) {
+		D_ASSERT(!ranges.empty());
+		AggregateExtendProvenUniqueRange(ranges.front(), last_key);
+		ranges.resize(1);
+		ranges_coalesced = true;
+		return;
+	}
+	AggregateAppendProvenUniqueRange(ranges, key_type, first_key, last_key);
+}
+
+template <class KEY_TYPE>
+static bool AggregateTryContinueProvenUniqueDenseAppendTyped(DataChunk &groups, PhysicalType key_type,
+                                                             bool &has_last_key, int64_t &last_signed_key,
+                                                             uint64_t &last_unsigned_key,
+                                                             vector<GroupedAggregateProvenUniqueRange> &ranges,
+                                                             bool &ranges_coalesced) {
+	if (groups.ColumnCount() != 1 || groups.size() == 0) {
 		return false;
 	}
-	if constexpr (std::is_signed<KEY_TYPE>::value) {
-		if (!has_last_key) {
-			first_signed_key = static_cast<int64_t>(first_key);
+	auto &group = groups.data[0];
+	if (group.GetVectorType() != VectorType::FLAT_VECTOR || !FlatVector::Validity(group).CheckAllValid(groups.size())) {
+		return false;
+	}
+	using UNSIGNED_KEY_TYPE = typename std::make_unsigned<KEY_TYPE>::type;
+	if constexpr (sizeof(UNSIGNED_KEY_TYPE) < sizeof(idx_t)) {
+		if (groups.size() - 1 > NumericLimits<UNSIGNED_KEY_TYPE>::Maximum()) {
+			return false;
 		}
+	}
+	const auto data = FlatVector::GetData<KEY_TYPE>(group);
+	const auto first_key = data[0];
+	const auto last_key = data[groups.size() - 1];
+	if (groups.size() > 1 && last_key <= first_key) {
+		return false;
+	}
+	const auto previous_stream_key = std::is_signed<KEY_TYPE>::value ? static_cast<KEY_TYPE>(last_signed_key)
+	                                                                 : static_cast<KEY_TYPE>(last_unsigned_key);
+	if (has_last_key && first_key <= previous_stream_key) {
+		return false;
+	}
+	const auto observed_span = static_cast<UNSIGNED_KEY_TYPE>(last_key) - static_cast<UNSIGNED_KEY_TYPE>(first_key);
+	if (observed_span != static_cast<UNSIGNED_KEY_TYPE>(groups.size() - 1)) {
+		return false;
+	}
+	AggregateRecordProvenUniqueRange(ranges, key_type, first_key, last_key, has_last_key, previous_stream_key,
+	                                 ranges_coalesced);
+	if constexpr (std::is_signed<KEY_TYPE>::value) {
 		last_signed_key = static_cast<int64_t>(last_key);
 	} else {
-		if (!has_last_key) {
-			first_unsigned_key = static_cast<uint64_t>(first_key);
-		}
 		last_unsigned_key = static_cast<uint64_t>(last_key);
 	}
 	has_last_key = true;
 	return true;
 }
 
-bool GroupedAggregateHashTable::TryContinueProvenUniqueAppend(DataChunk &groups) {
+template <class KEY_TYPE>
+static bool AggregateTryContinueProvenUniqueAppendTyped(DataChunk &groups, PhysicalType key_type, bool &has_last_key,
+                                                        int64_t &last_signed_key, uint64_t &last_unsigned_key,
+                                                        vector<GroupedAggregateProvenUniqueRange> &ranges,
+                                                        bool &ranges_coalesced,
+                                                        ExecutionGroupedAggregateAppendProof append_proof) {
+	if (groups.ColumnCount() != 1 || groups.size() == 0) {
+		return false;
+	}
+	if (append_proof.groups_strictly_increasing &&
+	    AggregateTryContinueProvenUniqueDenseAppendTyped<KEY_TYPE>(groups, key_type, has_last_key, last_signed_key,
+	                                                               last_unsigned_key, ranges, ranges_coalesced)) {
+		return true;
+	}
+	UnifiedVectorFormat format;
+	groups.data[0].ToUnifiedFormat(format);
+	auto data = UnifiedVectorFormat::GetData<KEY_TYPE>(format);
+	auto sel = format.sel;
+	const bool can_have_null = format.validity.CanHaveNull();
+	const auto previous_stream_key = std::is_signed<KEY_TYPE>::value ? static_cast<KEY_TYPE>(last_signed_key)
+	                                                                 : static_cast<KEY_TYPE>(last_unsigned_key);
+	bool has_chunk_key = false;
+	KEY_TYPE first_key {};
+	KEY_TYPE last_key {};
+	for (idx_t row_idx = 0; row_idx < groups.size(); row_idx++) {
+		const auto source_idx = sel->get_index(row_idx);
+		if (can_have_null && !format.validity.RowIsValid(source_idx)) {
+			return false;
+		}
+		const auto key = data[source_idx];
+		if (!has_chunk_key) {
+			if (has_last_key && key <= previous_stream_key) {
+				return false;
+			}
+			first_key = key;
+		} else if (key <= last_key) {
+			return false;
+		}
+		last_key = key;
+		has_chunk_key = true;
+	}
+
+	using UNSIGNED_KEY_TYPE = typename std::make_unsigned<KEY_TYPE>::type;
+	const auto observed_span = static_cast<UNSIGNED_KEY_TYPE>(last_key) - static_cast<UNSIGNED_KEY_TYPE>(first_key);
+	const auto dense = observed_span == static_cast<UNSIGNED_KEY_TYPE>(groups.size() - 1);
+	if (dense) {
+		AggregateRecordProvenUniqueRange(ranges, key_type, first_key, last_key, has_last_key, previous_stream_key,
+		                                 ranges_coalesced);
+	} else {
+		KEY_TYPE run_first = first_key;
+		KEY_TYPE run_last = first_key;
+		bool has_previous_range = has_last_key;
+		KEY_TYPE previous_range_key = previous_stream_key;
+		for (idx_t row_idx = 1; row_idx < groups.size(); row_idx++) {
+			const auto key = data[sel->get_index(row_idx)];
+			const auto adjacent =
+			    run_last != NumericLimits<KEY_TYPE>::Maximum() && key == static_cast<KEY_TYPE>(run_last + 1);
+			if (!adjacent) {
+				AggregateRecordProvenUniqueRange(ranges, key_type, run_first, run_last, has_previous_range,
+				                                 previous_range_key, ranges_coalesced);
+				has_previous_range = true;
+				previous_range_key = run_last;
+				run_first = key;
+			}
+			run_last = key;
+		}
+		AggregateRecordProvenUniqueRange(ranges, key_type, run_first, run_last, has_previous_range, previous_range_key,
+		                                 ranges_coalesced);
+	}
+	if constexpr (std::is_signed<KEY_TYPE>::value) {
+		last_signed_key = static_cast<int64_t>(last_key);
+	} else {
+		last_unsigned_key = static_cast<uint64_t>(last_key);
+	}
+	has_last_key = true;
+	return true;
+}
+
+bool GroupedAggregateHashTable::TryContinueProvenUniqueAppend(DataChunk &groups,
+                                                              ExecutionGroupedAggregateAppendProof append_proof) {
 	if (skip_lookups_require_final_combine || (sink_count != 0 && !skip_lookups) || groups.ColumnCount() != 1) {
 		return false;
 	}
@@ -701,51 +812,51 @@ bool GroupedAggregateHashTable::TryContinueProvenUniqueAppend(DataChunk &groups)
 	switch (key_type) {
 	case PhysicalType::INT8:
 		continued = AggregateTryContinueProvenUniqueAppendTyped<int8_t>(
-		    groups, proven_unique_append_has_last_key, proven_unique_append_last_signed_key,
-		    proven_unique_append_last_unsigned_key, proven_unique_append_first_signed_key,
-		    proven_unique_append_first_unsigned_key);
+		    groups, key_type, proven_unique_append_has_last_key, proven_unique_append_last_signed_key,
+		    proven_unique_append_last_unsigned_key, proven_unique_append_ranges, proven_unique_append_ranges_coalesced,
+		    append_proof);
 		break;
 	case PhysicalType::INT16:
 		continued = AggregateTryContinueProvenUniqueAppendTyped<int16_t>(
-		    groups, proven_unique_append_has_last_key, proven_unique_append_last_signed_key,
-		    proven_unique_append_last_unsigned_key, proven_unique_append_first_signed_key,
-		    proven_unique_append_first_unsigned_key);
+		    groups, key_type, proven_unique_append_has_last_key, proven_unique_append_last_signed_key,
+		    proven_unique_append_last_unsigned_key, proven_unique_append_ranges, proven_unique_append_ranges_coalesced,
+		    append_proof);
 		break;
 	case PhysicalType::INT32:
 		continued = AggregateTryContinueProvenUniqueAppendTyped<int32_t>(
-		    groups, proven_unique_append_has_last_key, proven_unique_append_last_signed_key,
-		    proven_unique_append_last_unsigned_key, proven_unique_append_first_signed_key,
-		    proven_unique_append_first_unsigned_key);
+		    groups, key_type, proven_unique_append_has_last_key, proven_unique_append_last_signed_key,
+		    proven_unique_append_last_unsigned_key, proven_unique_append_ranges, proven_unique_append_ranges_coalesced,
+		    append_proof);
 		break;
 	case PhysicalType::INT64:
 		continued = AggregateTryContinueProvenUniqueAppendTyped<int64_t>(
-		    groups, proven_unique_append_has_last_key, proven_unique_append_last_signed_key,
-		    proven_unique_append_last_unsigned_key, proven_unique_append_first_signed_key,
-		    proven_unique_append_first_unsigned_key);
+		    groups, key_type, proven_unique_append_has_last_key, proven_unique_append_last_signed_key,
+		    proven_unique_append_last_unsigned_key, proven_unique_append_ranges, proven_unique_append_ranges_coalesced,
+		    append_proof);
 		break;
 	case PhysicalType::UINT8:
 		continued = AggregateTryContinueProvenUniqueAppendTyped<uint8_t>(
-		    groups, proven_unique_append_has_last_key, proven_unique_append_last_signed_key,
-		    proven_unique_append_last_unsigned_key, proven_unique_append_first_signed_key,
-		    proven_unique_append_first_unsigned_key);
+		    groups, key_type, proven_unique_append_has_last_key, proven_unique_append_last_signed_key,
+		    proven_unique_append_last_unsigned_key, proven_unique_append_ranges, proven_unique_append_ranges_coalesced,
+		    append_proof);
 		break;
 	case PhysicalType::UINT16:
 		continued = AggregateTryContinueProvenUniqueAppendTyped<uint16_t>(
-		    groups, proven_unique_append_has_last_key, proven_unique_append_last_signed_key,
-		    proven_unique_append_last_unsigned_key, proven_unique_append_first_signed_key,
-		    proven_unique_append_first_unsigned_key);
+		    groups, key_type, proven_unique_append_has_last_key, proven_unique_append_last_signed_key,
+		    proven_unique_append_last_unsigned_key, proven_unique_append_ranges, proven_unique_append_ranges_coalesced,
+		    append_proof);
 		break;
 	case PhysicalType::UINT32:
 		continued = AggregateTryContinueProvenUniqueAppendTyped<uint32_t>(
-		    groups, proven_unique_append_has_last_key, proven_unique_append_last_signed_key,
-		    proven_unique_append_last_unsigned_key, proven_unique_append_first_signed_key,
-		    proven_unique_append_first_unsigned_key);
+		    groups, key_type, proven_unique_append_has_last_key, proven_unique_append_last_signed_key,
+		    proven_unique_append_last_unsigned_key, proven_unique_append_ranges, proven_unique_append_ranges_coalesced,
+		    append_proof);
 		break;
 	case PhysicalType::UINT64:
 		continued = AggregateTryContinueProvenUniqueAppendTyped<uint64_t>(
-		    groups, proven_unique_append_has_last_key, proven_unique_append_last_signed_key,
-		    proven_unique_append_last_unsigned_key, proven_unique_append_first_signed_key,
-		    proven_unique_append_first_unsigned_key);
+		    groups, key_type, proven_unique_append_has_last_key, proven_unique_append_last_signed_key,
+		    proven_unique_append_last_unsigned_key, proven_unique_append_ranges, proven_unique_append_ranges_coalesced,
+		    append_proof);
 		break;
 	default:
 		continued = false;
@@ -765,16 +876,13 @@ bool GroupedAggregateHashTable::LookupsSkippedRequireFinalCombine() const {
 	return skip_lookups && skip_lookups_require_final_combine;
 }
 
-bool GroupedAggregateHashTable::GetProvenUniqueAppendRange(GroupedAggregateProvenUniqueRange &range) const {
-	if (!skip_lookups || skip_lookups_require_final_combine || !proven_unique_append_has_last_key) {
-		return false;
+optional_ptr<const vector<GroupedAggregateProvenUniqueRange>>
+GroupedAggregateHashTable::GetProvenUniqueAppendRanges() const {
+	if (!skip_lookups || skip_lookups_require_final_combine || !proven_unique_append_has_last_key ||
+	    proven_unique_append_ranges.empty()) {
+		return nullptr;
 	}
-	range.key_type = proven_unique_append_key_type;
-	range.first_signed_key = proven_unique_append_first_signed_key;
-	range.last_signed_key = proven_unique_append_last_signed_key;
-	range.first_unsigned_key = proven_unique_append_first_unsigned_key;
-	range.last_unsigned_key = proven_unique_append_last_unsigned_key;
-	return true;
+	return &proven_unique_append_ranges;
 }
 
 void GroupedAggregateHashTable::EnableHLL(bool enable) {
@@ -7041,10 +7149,7 @@ bool GroupedAggregateHashTable::TryAppendNewGroupsFastInternal(
 	auto hash_start = AggregateTraceStart(recorder);
 	groups.Hash(state.hashes);
 	RecordAggregateTraceStage(recorder, "find_new.hash", hash_start);
-	auto group_format_start = AggregateTraceStart(recorder);
 	state.group_chunk.data[groups.ColumnCount()].Reference(state.hashes);
-	TupleDataCollection::ToUnifiedFormat(state.partitioned_append_state.chunk_state, state.group_chunk);
-	RecordAggregateTraceStage(recorder, "find_new.group_format", group_format_start);
 
 	const auto hashes = state.hashes.Values<hash_t>();
 	auto ht_offsets = FlatVector::GetDataMutable<uint64_t>(state.ht_offsets);
@@ -7117,25 +7222,37 @@ bool GroupedAggregateHashTable::TryAppendNewGroupsFastInternal(
 	optional_ptr<PartitionedTupleDataAppendState> append_state;
 	if (radix_bits >= UNPARTITIONED_RADIX_BITS_THRESHOLD &&
 	    chunk_size / RadixPartitioning::NumberOfPartitions(radix_bits) <= 4) {
-		TupleDataCollection::ToUnifiedFormat(state.unpartitioned_append_state.chunk_state, state.group_chunk);
 		data = unpartitioned_data.get();
 		append_state = &state.unpartitioned_append_state;
 	} else {
 		data = partitioned_data.get();
 		append_state = &state.partitioned_append_state;
 	}
-	data->AppendUnified(*append_state, state.group_chunk, *FlatVector::IncrementalSelectionVector(), chunk_size);
-	RowOperations::InitializeStates(*layout_ptr, append_state->chunk_state.row_locations,
-	                                *FlatVector::IncrementalSelectionVector(), chunk_size);
+	auto group_format_start = AggregateTraceStart(recorder);
+	TupleDataCollection::ToUnifiedFormat(append_state->chunk_state, state.group_chunk);
+	RecordAggregateTraceStage(recorder, "find_new.group_format", group_format_start);
+	const auto &append_selection = *FlatVector::IncrementalSelectionVector();
+	if (!data->TryAppendUnifiedSinglePartition(*append_state, state.group_chunk, append_selection, chunk_size)) {
+		data->AppendUnified(*append_state, state.group_chunk, append_selection, chunk_size);
+	}
+	const auto update_mode = address_update_function && !layout_ptr->HasDestructor()
+	                             ? ExecutionGroupedAggregateStateAddressUpdateMode::INITIALIZE_AND_UPDATE
+	                             : ExecutionGroupedAggregateStateAddressUpdateMode::UPDATE_INITIALIZED;
+	if (update_mode == ExecutionGroupedAggregateStateAddressUpdateMode::UPDATE_INITIALIZED) {
+		RowOperations::InitializeStates(*layout_ptr, append_state->chunk_state.row_locations, append_selection,
+		                                chunk_size);
+	}
 	const auto row_locations = FlatVector::GetData<data_ptr_t>(append_state->chunk_state.row_locations);
 	const auto &row_sel = append_state->reverse_partition_sel;
-	for (idx_t row_idx = 0; row_idx < chunk_size; row_idx++) {
-		const auto row_location = row_locations[row_sel.get_index_unsafe(row_idx)];
-		if (!append_only) {
-			entries[ht_offsets[row_idx]].SetPointer(row_location);
-		}
-		if (addresses) {
-			addresses[row_idx] = row_location;
+	if (!append_only || addresses) {
+		for (idx_t row_idx = 0; row_idx < chunk_size; row_idx++) {
+			const auto row_location = row_locations[row_sel.get_index_unsafe(row_idx)];
+			if (!append_only) {
+				entries[ht_offsets[row_idx]].SetPointer(row_location);
+			}
+			if (addresses) {
+				addresses[row_idx] = row_location;
+			}
 		}
 	}
 	if (update_dense_cache) {
@@ -7154,7 +7271,7 @@ bool GroupedAggregateHashTable::TryAppendNewGroupsFastInternal(
 	if (address_update_function) {
 		auto update_start = AggregateTraceStart(recorder);
 		const auto state_addresses = reinterpret_cast<const uintptr_t *>(row_locations);
-		address_update_function(state_addresses, row_sel.data(), chunk_size, address_update_state);
+		address_update_function(state_addresses, row_sel.data(), chunk_size, update_mode, address_update_state);
 		RecordAggregateTraceStage(recorder, "find_new.state_address_update", update_start);
 	}
 	return true;
@@ -7342,10 +7459,10 @@ void GroupedAggregateHashTable::ResetForNewIteration(idx_t initial_capacity, idx
 	skip_lookups_require_final_combine = false;
 	proven_unique_append_key_type = PhysicalType::INVALID;
 	proven_unique_append_has_last_key = false;
-	proven_unique_append_first_signed_key = 0;
 	proven_unique_append_last_signed_key = 0;
-	proven_unique_append_first_unsigned_key = 0;
 	proven_unique_append_last_unsigned_key = 0;
+	proven_unique_append_ranges.clear();
+	proven_unique_append_ranges_coalesced = false;
 	enable_hll = false;
 	hll = HyperLogLog();
 	state.compressed_group_state.dictionary_id = string();

@@ -15,6 +15,7 @@
 namespace duckdb {
 
 class Allocator;
+class ExecutionRegionLocalState;
 
 class ExecutionOperatorRuntime {
 public:
@@ -25,7 +26,10 @@ public:
 	                                                 ExecutionOperatorBinding &binding) = 0;
 	virtual bool BindSink(DataChunk &input, const ExecutionRegionSinkInfo &sink_info,
 	                      ExecutionSinkBinding &binding) = 0;
+	//! Records the sink result. BLOCKED transfers the chunk to the core continuation and leaves it empty, ensuring
+	//! that the core executor is the only owner allowed to retry those rows.
 	virtual SinkResultType RecordSinkResult(DataChunk &chunk, SinkResultType sink_result) = 0;
+	//! Records results for sinks that cannot block after entering their native state.
 	virtual SinkResultType RecordSinkResult(idx_t input_rows, SinkResultType sink_result) = 0;
 };
 
@@ -94,6 +98,7 @@ public:
 	virtual idx_t MaxChunks() const = 0;
 	virtual idx_t MaxThreads() const = 0;
 	virtual Allocator &GetAllocator() = 0;
+	virtual ExecutionRegionLocalState &LocalState() = 0;
 	//! Whether source chunks must remain separate to preserve the sink's partition protocol.
 	virtual bool PreserveSourceChunkBoundaries() const = 0;
 	virtual SourceResultType FetchSourceContract(DataChunk *&result) = 0;

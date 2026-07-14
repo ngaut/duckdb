@@ -9,12 +9,204 @@
 #pragma once
 
 #include "sljit_aggregate_preaggregation.hpp"
+#include "sljit_executable_aggregate_codegen.hpp"
 
 namespace duckdb {
 
+static constexpr idx_t SLJIT_PRIMITIVE_RUN_MIN_COMPRESSION = 3;
+
+template <class TARGET_TYPE, class LOAD_KEY>
+static bool SljitTryInputVectorHasProfitablePrimitiveRuns(idx_t count, LOAD_KEY &&load_key, bool &profitable) {
+	profitable = false;
+	if (count < 2) {
+		return true;
+	}
+	TARGET_TYPE previous_key;
+	if (!load_key(0, previous_key)) {
+		return false;
+	}
+	const auto sample_count = MinValue<idx_t>(count, 64);
+	idx_t transition_count = 0;
+	for (idx_t row_idx = 1; row_idx < sample_count; row_idx++) {
+		TARGET_TYPE key;
+		if (!load_key(row_idx, key)) {
+			return false;
+		}
+		if (!(key == previous_key)) {
+			transition_count++;
+		}
+		previous_key = key;
+	}
+	// Transitions measure the distance between run starts without charging the
+	// sample's partial leading and trailing runs as complete groups.
+	profitable = transition_count == 0 || transition_count * SLJIT_PRIMITIVE_RUN_MIN_COMPRESSION <= sample_count - 1;
+	return true;
+}
+
 static bool
-SljitPreaggregatedPayloadSourcesReplayable(SljitPreaggregatedPrimitivePayloadSources &payload_sources,
-                                           const vector<const ExecutionPrimitiveAggregateUpdateLane *> &payload_lanes) {
+SljitPreaggregatedInputVectorGroupRowsAllValid(const SljitPreaggregatedInputVectorGroupKeySource &group_source) {
+	return group_source.rows_all_valid;
+}
+
+static bool
+SljitTryBindGeneratedPrimitiveRunSource(ExecutionRegionRuntime &runtime, SljitExecutablePrimitiveRunUpdate &run_update,
+                                        SljitPreaggregatedInputVectorGroupKeySource &group_source,
+                                        SljitPreaggregatedPrimitivePayloadSources &payload_sources,
+                                        const vector<const ExecutionPrimitiveAggregateUpdateLane *> &payload_lanes,
+                                        idx_t count, vector<SljitNativePrimitiveRunLaneInput> &lane_inputs,
+                                        SljitNativePrimitiveRunInput &native_input,
+                                        SljitNativePrimitiveRunFunction &function, const char *&blocker) {
+	blocker = nullptr;
+	function = nullptr;
+	if (!run_update.HasDeferredCodegen()) {
+		blocker = "code";
+		return false;
+	}
+	if (count == 0 || count > STANDARD_VECTOR_SIZE || payload_lanes.empty() ||
+	    payload_lanes.size() != run_update.primitive_kinds.size() ||
+	    payload_lanes.size() != run_update.payload_types.size() || lane_inputs.size() != payload_lanes.size() ||
+	    !group_source.source) {
+		blocker = "shape";
+		return false;
+	}
+	auto &source = *group_source.source;
+	const bool exact_group_type = source.cast_kind == ExecutionRowPointerGroupKeyCastKind::NONE &&
+	                              source.source_physical_type == source.target_physical_type;
+	const bool proven_narrowing_group_cast =
+	    ExecutionGroupKeyCastIsNarrowingIntegral(source.cast_kind) && source.unchecked_integral_cast;
+	const bool integral_compression = source.cast_kind == ExecutionRowPointerGroupKeyCastKind::INTEGRAL_COMPRESS;
+	if (!exact_group_type && !proven_narrowing_group_cast && !integral_compression) {
+		blocker = "group_cast";
+		return false;
+	}
+	if (source.target_physical_type != run_update.group_type) {
+		blocker = "group_type";
+		return false;
+	}
+	if (group_source.format.sel->IsSet()) {
+		blocker = "group_selection";
+		return false;
+	}
+	if (!SljitPreaggregatedInputVectorGroupRowsAllValid(group_source)) {
+		blocker = "group_null";
+		return false;
+	}
+	native_input = SljitNativePrimitiveRunInput();
+	for (idx_t lane_idx = 0; lane_idx < payload_lanes.size(); lane_idx++) {
+		auto lane = payload_lanes[lane_idx];
+		if (!lane || lane->kind != run_update.primitive_kinds[lane_idx]) {
+			blocker = "specialization";
+			return false;
+		}
+		auto &lane_input = lane_inputs[lane_idx];
+		lane_input = SljitNativePrimitiveRunLaneInput();
+		PhysicalType payload_type = PhysicalType::INVALID;
+		if (lane->kind != AggregatePrimitiveUpdateKind::COUNT_STAR) {
+			auto payload_source = payload_sources.GetSource(lane_idx);
+			if (!payload_source) {
+				blocker = "payload_source";
+				return false;
+			}
+			if (payload_source->format.sel->IsSet()) {
+				blocker = "payload_selection";
+				return false;
+			}
+			lane_input.payload_validity =
+			    payload_source->rows_all_valid ? nullptr : payload_source->format.validity.GetData();
+			if (lane->kind == AggregatePrimitiveUpdateKind::SUM_INT64 ||
+			    lane->kind == AggregatePrimitiveUpdateKind::SUM_HUGEINT) {
+				payload_type = payload_source->type;
+				lane_input.payload_data = payload_source->format.data;
+			} else if (lane->kind != AggregatePrimitiveUpdateKind::COUNT) {
+				blocker = "payload_kind";
+				return false;
+			}
+		}
+		if (run_update.payload_types[lane_idx] != payload_type) {
+			blocker = "specialization";
+			return false;
+		}
+	}
+	const bool single_lane_nullable = lane_inputs.size() == 1 && lane_inputs[0].payload_validity != nullptr;
+	function = SljitEnsureExecutablePrimitiveRunUpdate(runtime, run_update, source.source_physical_type,
+	                                                   source.cast_kind, single_lane_nullable);
+	if (!function) {
+		blocker = "specialization";
+		return false;
+	}
+	native_input.group_data = group_source.format.data;
+	native_input.lane_inputs = lane_inputs.data();
+	if (lane_inputs.size() == 1) {
+		native_input.payload_data = lane_inputs[0].payload_data;
+		native_input.payload_validity = lane_inputs[0].payload_validity;
+	}
+	native_input.group_cast_constant = source.cast_constant;
+	native_input.input_count = count;
+	return true;
+}
+
+template <class TARGET_TYPE>
+static bool
+SljitBindGeneratedPrimitiveRunOutput(DataChunk &groups, SljitPreaggregatedPrimitiveAggregateScratch &scratch,
+                                     const vector<const ExecutionPrimitiveAggregateUpdateLane *> &payload_lanes,
+                                     vector<SljitNativePrimitiveRunLaneInput> &lane_inputs, idx_t output_count,
+                                     idx_t output_capacity, SljitNativePrimitiveRunInput &native_input) {
+	if (groups.ColumnCount() != 1 || output_count > output_capacity || payload_lanes.empty() ||
+	    scratch.payloads.size() != payload_lanes.size() || lane_inputs.size() != payload_lanes.size() ||
+	    !scratch.HasFixedCapacity(payload_lanes, output_capacity)) {
+		return false;
+	}
+	auto &group_vector = groups.data[0];
+	group_vector.SetVectorType(VectorType::FLAT_VECTOR);
+	if (FlatVector::GetCapacity(group_vector) < output_capacity) {
+		return false;
+	}
+	native_input.output_group_data =
+	    reinterpret_cast<data_ptr_t>(FlatVector::GetDataMutable<TARGET_TYPE>(group_vector));
+	native_input.output_int64_values = nullptr;
+	native_input.output_hugeint_values = nullptr;
+	native_input.output_value_is_set = nullptr;
+	native_input.output_row_counts = scratch.group_row_counts.data();
+	for (idx_t lane_idx = 0; lane_idx < payload_lanes.size(); lane_idx++) {
+		auto lane = payload_lanes[lane_idx];
+		if (!lane || scratch.payloads[lane_idx].kind != lane->kind) {
+			return false;
+		}
+		auto &lane_input = lane_inputs[lane_idx];
+		lane_input.output_int64_values = nullptr;
+		lane_input.output_hugeint_values = nullptr;
+		lane_input.output_value_is_set = nullptr;
+		auto &payload = scratch.payloads[lane_idx];
+		switch (lane->kind) {
+		case AggregatePrimitiveUpdateKind::COUNT_STAR:
+		case AggregatePrimitiveUpdateKind::COUNT:
+		case AggregatePrimitiveUpdateKind::SUM_INT64:
+			lane_input.output_int64_values = payload.int64_values.data();
+			break;
+		case AggregatePrimitiveUpdateKind::SUM_HUGEINT:
+			lane_input.output_hugeint_values = payload.hugeint_values.data();
+			break;
+		default:
+			return false;
+		}
+		if (lane->kind == AggregatePrimitiveUpdateKind::SUM_INT64 ||
+		    lane->kind == AggregatePrimitiveUpdateKind::SUM_HUGEINT) {
+			lane_input.output_value_is_set = payload.value_is_set.data();
+		}
+	}
+	if (lane_inputs.size() == 1) {
+		native_input.output_int64_values = lane_inputs[0].output_int64_values;
+		native_input.output_hugeint_values = lane_inputs[0].output_hugeint_values;
+		native_input.output_value_is_set = lane_inputs[0].output_value_is_set;
+	}
+	native_input.lane_inputs = lane_inputs.data();
+	native_input.output_count = output_count;
+	native_input.output_capacity = output_capacity;
+	return true;
+}
+
+static bool
+SljitPrimitiveAggregateLanesReplayable(const vector<const ExecutionPrimitiveAggregateUpdateLane *> &payload_lanes) {
 	for (idx_t payload_idx = 0; payload_idx < payload_lanes.size(); payload_idx++) {
 		auto lane = payload_lanes[payload_idx];
 		if (!lane) {
@@ -23,12 +215,8 @@ SljitPreaggregatedPayloadSourcesReplayable(SljitPreaggregatedPrimitivePayloadSou
 		switch (lane->kind) {
 		case AggregatePrimitiveUpdateKind::COUNT_STAR:
 		case AggregatePrimitiveUpdateKind::COUNT:
-			break;
 		case AggregatePrimitiveUpdateKind::SUM_INT64:
 		case AggregatePrimitiveUpdateKind::SUM_HUGEINT:
-			if (payload_sources.SourceCanHaveNull(payload_idx)) {
-				return false;
-			}
 			break;
 		default:
 			return false;
@@ -37,11 +225,9 @@ SljitPreaggregatedPayloadSourcesReplayable(SljitPreaggregatedPrimitivePayloadSou
 	return true;
 }
 
-static bool SljitPreaggregatedInputVectorGroupKeyReplayable(SljitPreaggregatedInputVectorGroupKeySource &group_source) {
+static bool
+SljitPreaggregatedInputVectorGroupKeyCastReplayable(SljitPreaggregatedInputVectorGroupKeySource &group_source) {
 	auto &source = *group_source.source;
-	if (!source.all_valid && group_source.format.validity.CanHaveNull()) {
-		return false;
-	}
 	switch (source.cast_kind) {
 	case ExecutionRowPointerGroupKeyCastKind::NONE:
 		return source.source_physical_type == source.target_physical_type;
@@ -49,9 +235,17 @@ static bool SljitPreaggregatedInputVectorGroupKeyReplayable(SljitPreaggregatedIn
 	case ExecutionRowPointerGroupKeyCastKind::INT64_TO_INT16:
 	case ExecutionRowPointerGroupKeyCastKind::INT32_TO_INT8:
 		return source.unchecked_integral_cast;
+	case ExecutionRowPointerGroupKeyCastKind::INTEGRAL_COMPRESS:
+		return SljitPreaggregationIntegralCompressionSourceType(source.source_physical_type) &&
+		       SljitPreaggregationCompressedUnsignedTargetType(source.target_physical_type);
 	default:
 		return false;
 	}
+}
+
+static bool SljitPreaggregatedInputVectorGroupKeyReplayable(SljitPreaggregatedInputVectorGroupKeySource &group_source) {
+	return SljitPreaggregatedInputVectorGroupRowsAllValid(group_source) &&
+	       SljitPreaggregatedInputVectorGroupKeyCastReplayable(group_source);
 }
 
 template <class PAYLOAD_DISPATCH>

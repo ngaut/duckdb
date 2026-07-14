@@ -180,32 +180,39 @@ struct SljitGroupedAggregateDirectUpdatePlan {
 
 struct SljitExecutablePrimitiveRunSpecialization {
 	PhysicalType group_source_type = PhysicalType::INVALID;
-	SljitCompiledFunction<SljitNativePrimitiveRunFunction> compiled;
+	ExecutionRowPointerGroupKeyCastKind group_cast_kind = ExecutionRowPointerGroupKeyCastKind::NONE;
+	SljitLazyCompiledFunction<SljitNativePrimitiveRunFunction> compiled;
+	SljitLazyCompiledFunction<SljitNativePrimitiveRunFunction> nullable_compiled;
+	SljitLazyCompiledFunction<SljitNativePrimitiveRunFunction> multi_lane_compiled;
 };
 
 struct SljitExecutablePrimitiveRunUpdate {
 	PhysicalType group_type = PhysicalType::INVALID;
-	PhysicalType payload_type = PhysicalType::INVALID;
-	AggregatePrimitiveUpdateKind primitive_kind = AggregatePrimitiveUpdateKind::NONE;
+	vector<PhysicalType> payload_types;
+	vector<AggregatePrimitiveUpdateKind> primitive_kinds;
 	vector<SljitExecutablePrimitiveRunSpecialization> flat_specializations;
 
-	SljitNativePrimitiveRunFunction Function(PhysicalType group_source_type) const {
+	optional_ptr<SljitExecutablePrimitiveRunSpecialization>
+	Specialization(PhysicalType group_source_type, ExecutionRowPointerGroupKeyCastKind group_cast_kind) {
 		for (auto &specialization : flat_specializations) {
-			if (specialization.group_source_type == group_source_type) {
-				return specialization.compiled.Function();
+			if (specialization.group_source_type == group_source_type &&
+			    specialization.group_cast_kind == group_cast_kind) {
+				return specialization;
 			}
 		}
 		return nullptr;
 	}
 
-	bool IsExecutable() const {
-		return !flat_specializations.empty();
+	bool HasDeferredCodegen() const {
+		return !primitive_kinds.empty() && primitive_kinds.size() == payload_types.size() &&
+		       !flat_specializations.empty();
 	}
 
 	idx_t CodeSize() const {
 		idx_t result = 0;
 		for (auto &specialization : flat_specializations) {
-			result += specialization.compiled.CodeSize();
+			result += specialization.compiled.CodeSize() + specialization.nullable_compiled.CodeSize() +
+			          specialization.multi_lane_compiled.CodeSize();
 		}
 		return result;
 	}
@@ -316,7 +323,11 @@ struct SljitExecutableRegionOp {
 		if (CodeSize() > 0) {
 			return true;
 		}
-		return kind == SljitNativeRegionOpKind::HASH_JOIN_PROBE && hash_join_probe.HasDeferredCodegen();
+		if (kind == SljitNativeRegionOpKind::HASH_JOIN_PROBE) {
+			return hash_join_probe.HasDeferredCodegen();
+		}
+		return kind == SljitNativeRegionOpKind::AGGREGATE_UPDATE &&
+		       aggregate_update.primitive_run_update.HasDeferredCodegen();
 	}
 };
 

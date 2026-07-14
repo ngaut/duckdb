@@ -24,6 +24,12 @@ struct ExecutionDenseGroupDomain {
 	idx_t distinct_count = 0;
 };
 
+// Semantic evidence produced while materializing grouped keys. Backends may
+// provide this proof, but the aggregate runtime owns its validation and use.
+struct ExecutionGroupedAggregateAppendProof {
+	bool groups_strictly_increasing = false;
+};
+
 enum class ExecutionRowPointerGroupKeyCastKind : uint8_t {
 	NONE,
 	INT64_TO_INT32,
@@ -34,6 +40,17 @@ enum class ExecutionRowPointerGroupKeyCastKind : uint8_t {
 	STRING_COMPRESS,
 	STRING_SUBSTRING
 };
+
+static inline bool ExecutionGroupKeyCastIsNarrowingIntegral(ExecutionRowPointerGroupKeyCastKind cast_kind) {
+	switch (cast_kind) {
+	case ExecutionRowPointerGroupKeyCastKind::INT64_TO_INT32:
+	case ExecutionRowPointerGroupKeyCastKind::INT64_TO_INT16:
+	case ExecutionRowPointerGroupKeyCastKind::INT32_TO_INT8:
+		return true;
+	default:
+		return false;
+	}
+}
 
 enum class ExecutionRowPointerGroupKeySourceKind : uint8_t { ROW_POINTER_FIELD, INPUT_VECTOR };
 
@@ -127,8 +144,13 @@ struct ExecutionGroupedAggregateStateTargetBatch {
 	}
 };
 
-typedef void (*ExecutionGroupedAggregateStateAddressUpdateFunction)(const uintptr_t *addresses,
-                                                                    const sel_t *address_sel, idx_t count, void *state);
+enum class ExecutionGroupedAggregateStateAddressUpdateMode : uint8_t { UPDATE_INITIALIZED, INITIALIZE_AND_UPDATE };
+
+// The fresh-state mode is issued only for trivially destructible aggregate layouts. The callback must fully
+// initialize every aggregate state before applying its update.
+typedef void (*ExecutionGroupedAggregateStateAddressUpdateFunction)(
+    const uintptr_t *addresses, const sel_t *address_sel, idx_t count,
+    ExecutionGroupedAggregateStateAddressUpdateMode mode, void *state);
 typedef void (*ExecutionGroupedAggregateStateSelectedAddressUpdateFunction)(const uintptr_t *addresses,
                                                                             const sel_t *address_sel,
                                                                             const sel_t *execute_sel, idx_t count,

@@ -20,6 +20,19 @@ static bool SljitGroupKeyCompressedUnsignedTargetType(PhysicalType type) {
 	case PhysicalType::UINT16:
 	case PhysicalType::UINT32:
 	case PhysicalType::UINT64:
+	case PhysicalType::UINT128:
+		return true;
+	default:
+		return false;
+	}
+}
+
+static bool SljitGroupKeyIntegralCompressionSourceType(PhysicalType type) {
+	switch (type) {
+	case PhysicalType::INT8:
+	case PhysicalType::INT16:
+	case PhysicalType::INT32:
+	case PhysicalType::INT64:
 		return true;
 	default:
 		return false;
@@ -231,17 +244,6 @@ static bool SljitInputVectorGroupSourceUsesProjection(const ExecutionRowPointerG
 	}
 }
 
-static bool SljitGroupKeyNarrowingIntegralCast(ExecutionRowPointerGroupKeyCastKind cast_kind) {
-	switch (cast_kind) {
-	case ExecutionRowPointerGroupKeyCastKind::INT64_TO_INT32:
-	case ExecutionRowPointerGroupKeyCastKind::INT64_TO_INT16:
-	case ExecutionRowPointerGroupKeyCastKind::INT32_TO_INT8:
-		return true;
-	default:
-		return false;
-	}
-}
-
 template <class CAST_DISPATCH>
 static bool SljitDispatchGroupKeyNarrowingIntegralCast(const ExecutionRowPointerGroupKeySource &source,
                                                        CAST_DISPATCH &dispatch) {
@@ -279,6 +281,9 @@ static bool SljitInputVectorGroupKeySourceSupportsMaterialization(const Executio
 		return source.source_physical_type == PhysicalType::INT64 && source.target_physical_type == PhysicalType::INT16;
 	case ExecutionRowPointerGroupKeyCastKind::INT32_TO_INT8:
 		return source.source_physical_type == PhysicalType::INT32 && source.target_physical_type == PhysicalType::INT8;
+	case ExecutionRowPointerGroupKeyCastKind::INTEGRAL_COMPRESS:
+		return SljitGroupKeyIntegralCompressionSourceType(source.source_physical_type) &&
+		       SljitGroupKeyCompressedUnsignedTargetType(source.target_physical_type);
 	case ExecutionRowPointerGroupKeyCastKind::DATE_YEAR_COMPRESS:
 		return source.source_physical_type == PhysicalType::INT32 && source.source_type.id() == LogicalTypeId::DATE &&
 		       source.target_physical_type == PhysicalType::UINT8;

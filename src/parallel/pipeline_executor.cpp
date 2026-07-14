@@ -93,6 +93,8 @@ void PipelineExecutor::Reset() {
 	for (auto &flags : execution_region_runtime_once_flags) {
 		flags.clear();
 	}
+	execution_region_local_state.reset();
+	execution_region_local_state_kernel = nullptr;
 	while (!in_process_operators.empty()) {
 		in_process_operators.pop();
 	}
@@ -324,7 +326,18 @@ PipelineExecuteResult PipelineExecutor::ExecuteVectorizedPipeline(idx_t max_chun
 			// The pipeline was interrupted by the Sink. We should retry sinking the final chunk.
 			result = ExecutePushInternal(final_chunk, chunk_budget);
 			D_ASSERT(result != OperatorResultType::HAVE_MORE_OUTPUT);
+			if (result == OperatorResultType::BLOCKED) {
+				return PipelineExecuteResult::INTERRUPTED;
+			}
 			remaining_sink_chunk = false;
+			if (result == OperatorResultType::FINISHED) {
+				exhausted_pipeline = true;
+				return PushFinalize();
+			}
+			// Yield after the core-owned retry. A compiled source contract and the
+			// vectorized source can own different cursors; crossing into a source
+			// fetch here would restart or skip input after a compiled sink block.
+			return PipelineExecuteResult::NOT_FINISHED;
 		} else if (!in_process_operators.empty() && !started_flushing) {
 			// Operator(s) in the pipeline have returned `HAVE_MORE_OUTPUT` in the last Execute call
 			// the operators have to be called with the same input chunk to produce the rest of the output

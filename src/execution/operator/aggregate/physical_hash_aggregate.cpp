@@ -618,12 +618,14 @@ public:
 		    dense_domain);
 	}
 
-	bool TryEnableProvenUniqueAppend(DataChunk &groups) override {
+	bool TryEnableProvenUniqueAppend(DataChunk &groups,
+	                                 ExecutionGroupedAggregateAppendProof append_proof = {}) override {
 		if (!CanUseSingleGroupingState()) {
 			return false;
 		}
 		auto single_grouping = GetSingleGroupingSinkState();
-		return single_grouping.grouping.table_data.TryEnableProvenUniqueAppend(context, single_grouping.input, groups);
+		return single_grouping.grouping.table_data.TryEnableProvenUniqueAppend(context, single_grouping.input, groups,
+		                                                                       append_proof);
 	}
 
 	void RequireAppendFinalCombine() override {

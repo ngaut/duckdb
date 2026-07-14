@@ -345,7 +345,7 @@ static bool SljitTryMaterializeInputVectorGroupSource(DataChunk &payload_input,
 		return false;
 	}
 	auto &input = payload_input.data[source.input_vector_index];
-	if (SljitGroupKeyNarrowingIntegralCast(source.cast_kind)) {
+	if (ExecutionGroupKeyCastIsNarrowingIntegral(source.cast_kind)) {
 		const auto unchecked = source.unchecked_integral_cast ||
 		                       (source.cast_kind == ExecutionRowPointerGroupKeyCastKind::INT64_TO_INT32 &&
 		                        source_key0_int64_to_int32_unchecked && source.hash_join_condition_idx == 0);

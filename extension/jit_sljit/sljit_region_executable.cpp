@@ -116,9 +116,7 @@ static bool BuildExecutableRegionOp(const SljitNativeRegionOpPlan &op, SljitExec
 		                                                    input_not_null, input_min_values, input_max_values)) {
 			return false;
 		}
-		if (!SljitBuildExecutablePrimitiveRunUpdateCode(op.aggregate_update, executable.aggregate_update, error)) {
-			return false;
-		}
+		SljitPlanExecutablePrimitiveRunUpdate(op.aggregate_update, executable.aggregate_update);
 		SljitSelectExecutableAggregateDirectUpdatePlan(executable.aggregate_update);
 		return true;
 	case SljitNativeRegionOpKind::PROJECTION:

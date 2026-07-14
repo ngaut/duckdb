@@ -1122,7 +1122,8 @@ class MetalExecutionRegionBackend : public ExecutionRegionBackend {
 } // namespace
 
 void RegisterMetalExecutionRegionBackend(ExtensionLoader &loader) {
-    RegisterExecutionRegionBackend(loader.GetDatabaseInstance(), make_uniq<MetalExecutionRegionBackend>());
+    RegisterExecutionRegionBackend(loader.GetDatabaseInstance(), make_uniq<MetalExecutionRegionBackend>(),
+                                   EXECUTION_REGION_BACKEND_ABI_VERSION);
 }
 
 } // namespace duckdb

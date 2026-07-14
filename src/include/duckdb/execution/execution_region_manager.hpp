@@ -21,7 +21,7 @@ class ExecutionRegionManager {
 public:
 	explicit ExecutionRegionManager(DatabaseInstance &db);
 
-	DUCKDB_API void RegisterBackend(unique_ptr<ExecutionRegionBackend> backend);
+	DUCKDB_API void RegisterBackend(unique_ptr<ExecutionRegionBackend> backend, uint64_t backend_abi_version);
 	DUCKDB_API vector<ExecutionRegionBackendInfo> GetBackends(ClientContext *context = nullptr) const;
 	DUCKDB_API bool HasAvailableBackendForRunner(ClientContext &context, ExecutionRunnerKind runner_kind) const;
 	DUCKDB_API optional_ptr<ExecutionRegionBackend>

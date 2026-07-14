@@ -11,7 +11,13 @@ namespace duckdb {
 ExecutionRegionManager::ExecutionRegionManager(DatabaseInstance &db) : db(db) {
 }
 
-void ExecutionRegionManager::RegisterBackend(unique_ptr<ExecutionRegionBackend> backend) {
+void ExecutionRegionManager::RegisterBackend(unique_ptr<ExecutionRegionBackend> backend, uint64_t backend_abi_version) {
+	if (backend_abi_version != EXECUTION_REGION_BACKEND_ABI_VERSION) {
+		throw InvalidInputException("Execution region backend ABI version mismatch: backend uses %llu, DuckDB requires "
+		                            "%llu; rebuild the backend against this DuckDB version",
+		                            static_cast<unsigned long long>(backend_abi_version),
+		                            static_cast<unsigned long long>(EXECUTION_REGION_BACKEND_ABI_VERSION));
+	}
 	if (!backend) {
 		throw InvalidInputException("Cannot register a NULL execution region backend");
 	}
@@ -28,8 +34,9 @@ void ExecutionRegionManager::RegisterBackend(unique_ptr<ExecutionRegionBackend> 
 	backends.push_back(std::move(backend));
 }
 
-void RegisterExecutionRegionBackend(DatabaseInstance &db, unique_ptr<ExecutionRegionBackend> backend) {
-	ExecutionRegionManager::Get(db).RegisterBackend(std::move(backend));
+void RegisterExecutionRegionBackend(DatabaseInstance &db, unique_ptr<ExecutionRegionBackend> backend,
+                                    uint64_t backend_abi_version) {
+	ExecutionRegionManager::Get(db).RegisterBackend(std::move(backend), backend_abi_version);
 }
 
 static bool ExecutionRegionBackendMatchesRunner(const ExecutionRegionBackend &backend,

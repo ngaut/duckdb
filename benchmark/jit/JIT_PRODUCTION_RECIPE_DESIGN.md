@@ -175,9 +175,13 @@ Regular hash-join code uses one specialization cache keyed by input validity,
 selection, layout, bloom use, and MARK-selection mode. Named variant fields,
 parallel specialization arrays, and independent publication objects are
 forbidden. Perfect-hash probes use the same lazy artifact contract. Expression,
-aggregate, nested-loop, and fused-projection code use the eager artifact
-contract, so code size, callable lifetime, and borrowed/remapped ownership
-cannot drift apart.
+general aggregate, nested-loop, and fused-projection code use the eager artifact
+contract. Primitive grouped-run specializations are lazy: runtime ordering
+economics runs first, then the first accepted batch atomically publishes only
+the key-cast, lane-count, and nullability specialization it executes. Core
+runtime accounting records every lazily published backend artifact. Code size,
+callable lifetime, and borrowed/remapped ownership therefore cannot drift apart,
+and unordered input does not carry dead run-reducer code.
 
 ## Runtime batch ownership
 
@@ -572,9 +576,27 @@ data work. A source domain of at most 64 groups admits a pipeline-lifetime exact
 accumulator with physical capacity for 128 groups. If stale statistics exceed
 that capacity, the accumulator flushes through the ordinary pending
 preaggregation owner and retries the current row, preserving exact semantics.
+The accumulator index keeps the first eight distinct groups observed at runtime
+in a bounded direct tier. Observation of a ninth distinct group transitions the
+same index permanently to hashing, so domains of 9-64 groups do not pay eight
+unsuccessful linear comparisons per later row. Both routes use the same
+fixed-capacity index and operator-lifetime state. The common
+all-valid 16-byte compressed RHS representation has one fused matcher variant.
+Every other width or nullable layout uses the generic matcher, deliberately
+bounding specialization instead of generating a width-by-nullability template
+matrix.
 Fallible selected-key transforms are preflighted before pipeline state changes,
 so native fallback cannot duplicate a partial batch. Admission depends only on
 typed expressions, source coordinates, row-layout facts, and primitive lanes.
+
+A regular no-chain hash probe with one selected equality key may read a BIGINT
+source directly against an INTEGER hash-table layout when persisted source
+statistics prove that every input fits the narrowed domain. One loop composes
+selection, unchecked proven narrowing, hashing, optional Bloom and salt checks,
+entry prefetch, and row-pointer publication. A missing range proof, a different
+key/layout contract, residual predicates, or chained output retains the generic
+probe. The recipe is keyed only by typed plan and runtime layout facts; it does
+not identify a benchmark, relation, or column.
 
 Dense grouped preaggregation has two generic scopes:
 
@@ -594,9 +616,12 @@ Dense grouped preaggregation has two generic scopes:
 Pipeline accumulation is transactional per input batch: key rejection rolls
 back that batch before another route can run. The fallback grouped primitive
 keeps lookup and random state updates as separate phases to preserve CPU
-memory-level parallelism. Both direct projected pipelines and direct
-join-output aggregate strategies own the same pending accumulator and flush it
-at their explicit strategy boundary.
+memory-level parallelism. Direct projected, direct materialized, and direct
+join-output aggregate strategies use the same pending accumulator and flush it
+at their explicit strategy boundary. A materialized terminal binds its exact
+group sources and payload source indexes once from the aggregate's canonical
+input schema and typed payload descriptors; chunk execution never reconstructs
+payload metadata from planner aggregate records.
 
 Dense grouped lookup keeps one address array. An empty slot is zero, a real
 group is an aligned row pointer, and an in-batch pending group is encoded with
@@ -615,6 +640,17 @@ carries only the suffix. Arbitrary compact producers may retain non-adjacent
 duplicate keys; those batches use the normal exact grouped-state update and do
 not publish a proven-unique append contract.
 
+Semantic terminal state is pipeline-local, not compiled-call-local. DuckDB core
+owns `ExecutionRegionLocalState` beside the pipeline executor and asks the
+selected backend kernel to construct its derived state. SLJIT keeps generated
+execution scratch and the full-pipeline terminal owner there, so scheduler
+fairness yields reuse the unpublished boundary group. `NOT_FINISHED` flushes
+only ephemeral source/intermediate materializers. `BLOCKED` or `INTERRUPTED`
+flushes the terminal before vectorized fallback, and `FINISHED` performs the
+final terminal flush. Reset or kernel replacement destroys the complete local
+state. This lifecycle is backend-neutral and applies to every stateful compiled
+terminal, not only grouped aggregation.
+
 Consecutive fixed-width group keys have two pending representations. The
 buffered representation compacts each source vector and bulk-copies its groups
 and payload deltas into pending storage. The streaming representation loads the
@@ -623,17 +659,33 @@ once per group. A bounded sample selects streaming only when it predicts at
 least 3x run compression; lower-density streams retain the bulk-copy route.
 This is a typed runtime-density decision, not a workload or query rule.
 
-For one flat, all-valid fixed-width key and one primitive `COUNT_STAR`, `COUNT`,
-`SUM_INT64`, or `SUM_HUGEINT` lane, the streaming representation is generated
-machine code. Its backend-owned ABI carries source pointers, a resumable input
-offset, fixed output pointers, output count, and capacity. The kernel merges a
-source-boundary carry, emits complete runs directly into operator-lifetime
-scratch, stops before overwriting a full output batch, and resumes after the
-ordinary pending owner flushes it. Exact keys and the three proven narrowing
-casts use separate generated specializations selected from the live source
-descriptor; generated-plan assumptions never guess which projection source the
-runtime elides. Nulls, selections, unproven casts, multiple lanes, and unsupported
-types take the existing buffered or scalar streaming route before any state is
+For one flat fixed-width key and primitive `COUNT_STAR`, `COUNT`, `SUM_INT64`,
+or `SUM_HUGEINT` lanes, the streaming representation is generated machine code.
+Its backend-owned ABI carries source pointers, a resumable input offset, fixed
+output pointers, output count, and capacity. The kernel merges a source-boundary
+carry, emits complete runs directly into operator-lifetime scratch, stops before
+overwriting a full output batch, and resumes after the ordinary pending owner
+flushes it. Exact keys, the three proven narrowing casts, and
+integral-compression transforms use generated specializations selected from the
+live source descriptor; generated-plan assumptions never guess which projection
+source the runtime elides.
+
+The tuned single-lane path keeps separate all-valid and nullable kernels. A
+multi-lane executable instead owns one compile-time primitive-lane descriptor
+list and one runtime lane-input array. Code generation unrolls the primitive
+updates only while the lane list fits the eight-lane instruction-cache budget;
+wider lists keep the exact generic preaggregation loop. Each runtime lane
+supplies its payload, validity, and output pointers. A null validity pointer
+means the current rows are all valid; a real mask is checked in generated code,
+so nullable `SUM` and `COUNT` preserve SQL semantics without a
+nullability-combination specialization matrix. Every lane shares one
+represented-row-count vector, while values and `SUM` is-set bits remain
+lane-local. The lane-input array and payload-source descriptor vector are cached
+beside fixed pending scratch and rebound without per-chunk allocation. Generated
+run lowering requires a 64-bit SLJIT machine word; 32-bit targets retain the
+same exact generic reducer until all 64-bit operations have paired-register
+lowering. Selections, unproven casts, unsupported primitive types, and non-flat
+inputs take the existing buffered or scalar streaming route before any state is
 published. Runtime proof distinguishes generated stage work from backend work,
 and trace-only miss reasons add no production-mode string construction.
 
@@ -646,6 +698,11 @@ admission therefore completes source, payload, and pending-layout validation
 before publishing the decision.
 
 Direct append reports exact new-group success to DuckDB's radix adaptivity.
+Fresh trivially destructible primitive states may combine initialization and
+their first update in the state-address callback. Canonical `SUM` layouts clear
+the complete flag-and-padding tail, then store the `bool` at its semantic byte;
+they never encode `is_set` by storing a native-endian integer word. Layouts with
+destructors or noncanonical offsets retain DuckDB's ordinary initializer.
 After 131,072 attempted compact groups, more than 95% proven-new groups switch
 the local table to append-only mode. This statistical route always marks the
 table for final duplicate reconciliation; it never relies on the single-table
@@ -655,17 +712,27 @@ row threshold and ownership.
 Sorted compact-key streams can establish a stronger contract. The grouped hash
 table, rather than a JIT backend, owns a monotonic proof for one all-valid,
 fixed-width integer key. Every compact batch must be strictly increasing and
-its first key must be greater than the preceding batch's last key. Once proven,
-the local table can append without duplicate lookups. The proof spans backend
-invocations and applies equally to serial and parallel local tables; parallel
-tables reconcile cross-thread overlap during normal radix finalization. When
-every local proof remains intact and the exact local key ranges are disjoint,
-the radix owner marks the already-aggregated partitions ready to scan without
-rehashing them during finalize.
+its first key must be greater than the preceding batch's last key. The observed
+set is represented as bounded integral intervals: adjacent keys extend one
+exact run and gaps create another until the one-vector interval budget is full.
+At that boundary the local summary coalesces to one conservative first/last
+hull and continues extending it. Coalescing can reject a globally disjoint
+layout through a false overlap, but it cannot invent disjointness or invalidate
+local monotonic uniqueness; proof memory therefore remains independent of input
+cardinality without forcing a rehash solely because the stream is fragmented.
 
-Any null, type change, key repetition or regression, unsupported route, or
-fallback permanently requires final combination for that local table. A
-single-table finalize shortcut is legal only while the proof remains intact.
+Once proven, the local table can append without duplicate lookups. The bounded
+interval summary spans backend invocations and local pointer-table `Abandon()`
+boundaries.
+This matters under parallel scans, where scheduler ownership is cyclic and one
+worker's broad first/last envelope overlaps other workers even though its exact
+intervals do not. Radix finalization collects every local interval summary,
+sorts the intervals by key, and skips rehash only when every active local table
+contributed an intact proof and no intervals overlap. A shared boundary key is
+an overlap and keeps normal reconciliation. External aggregation, any null,
+type change, local key repetition or regression, unsupported route, or fallback
+requires final combination. Ordinary single-table finalization retains its
+independent no-abandonment rule.
 
 `DISTINCT_KEY_SINK` is backend-owned key ingestion through a DuckDB hash-table
 contract. Lowering reports `distinct_key_fast_insert` only when the complete
@@ -999,25 +1066,59 @@ floors of 1.25x and 1.20x. The ten-run SF10 Q6 proof restores 2.044x and passes
 the strict comparison against the prior 2.054x accepted baseline. The non-null
 grouped workload proves 1.167x-1.176x at one thread and 1.143x at four
 threads, with thread-specific floors of 1.16x and 1.13x.
-The mixed-source complementary join proves 1.290x at one thread and 1.207x at
-four threads in alternating 10-repeat promotion runs, so its checked-in floors
-are now 1.28x and 1.18x respectively.
+The mixed-source complementary join proves 1.336x at one thread and 1.230x at
+four threads in alternating 10-repeat promotion runs after the runtime-adaptive hot-group
+accumulator and proven BIGINT-to-INTEGER no-chain probe. Its checked-in floors
+are now 1.30x and 1.20x respectively.
 The mixed numeric/date plus nullable-string scan proves the generic partial
 predicate contract outside TPC-H: 1.338x at one thread and 1.286x at four
 threads. Its checked-in floors are 1.25x and 1.20x. Disabling only partial
 predicate SIMD raises the one-thread JIT median from 0.0505s to 0.0565s, proving
 that the gain belongs to the split execution mechanism rather than unrelated
-JIT work. The complete ten-repeat TPC-H promotions move Q12 from 1.133x to
-1.326x at SF1 and from 1.126x to 1.321x at SF10.
-The generated sorted-run kernel moves the generic six-million-row workload from
-0.100052s to 0.059546s at one thread (1.680x) and from 0.029953s to 0.021019s at
-four threads (1.425x). Its checked-in floors are 1.60x and 1.35x. The same
-generic mechanism moves accepted TPC-H Q18 to 1.480x at SF1 and 1.671x at SF10
-in complete ten-repeat production matrices.
+JIT work. The current complete ten-repeat TPC-H promotions preserve Q12 at
+1.334x at SF1 and 1.288x at SF10.
+Pipeline-local carry and exact parallel dense-run proofs move the generic
+six-million-row projected workload from 0.118126s to 0.036658s at one thread
+(3.222x) and from 0.030526s to 0.016050s at four threads (1.902x). Its checked-in
+floors are now 3.00x and 1.75x. The materialized arithmetic-key variant moves
+from 0.118844s to 0.048766s (2.437x) and from 0.031131s to 0.019352s (1.609x),
+with floors of 2.25x and 1.45x. These are independent ten-repeat production
+promotions with tracing disabled and zero correctness differences or compile
+errors. The same generic generated-run mechanism keeps accepted TPC-H Q18 at
+1.455x at SF1 and 1.660x at SF10 in complete ten-repeat production matrices.
+The nullable multi-lane variant fuses `SUM(nullable)` and `COUNT(nullable)` in
+one generated run kernel. Its prior scalar replay spent 0.156s in local
+preaggregation and made JIT 1.55x slower. Generated execution lowers that stage
+to 0.039s in the traced receipt and proves 1.785x at one thread and 1.505x at
+four threads over ten production repetitions. The checked-in floors are 1.70x
+and 1.45x. No workload identity participates in lane binding or code generation.
+The focused receipts are
+`benchmark/jit/tmp/pipeline_local_dense_runs_t1_promotion10_20260713` and
+`benchmark/jit/tmp/pipeline_local_dense_runs_t4_promotion10_20260713`.
+The nullable multi-lane receipts are
+`benchmark/jit/tmp/grouped_nullable_sorted_runs_multilane_t1_promotion10_20260713`
+and
+`benchmark/jit/tmp/grouped_nullable_sorted_runs_multilane_t4_promotion10_20260713`.
+The 16-lane bounded-codegen receipts are
+`benchmark/jit/tmp/grouped_wide_sorted_runs_t1_promotion10_20260713` and
+`benchmark/jit/tmp/grouped_wide_sorted_runs_t4_promotion10_20260713`. They prove
+1.223x and 1.311x, with checked-in floors of 1.15x and 1.20x. Primitive-run
+kernels unroll no more than eight lanes; wider reductions keep the generic
+preaggregation loop and still benefit from the compiled surrounding region.
+Eligible run kernels are generated only after the runtime sample proves useful
+ordering, and only the observed key-cast/nullability specialization is published.
+Pipeline-local payload-source descriptors retain their allocation across chunk
+rebindings. Generated run lowering is admitted only when the SLJIT machine word
+can represent every 64-bit key, payload, and state operation and the target has
+the required register file; unsupported targets use the exact generic route
+until a paired-register lowering is implemented.
+The complementary-join receipts are
+`benchmark/jit/tmp/string_complementary_fast_probe_t1_promotion10_20260713` and
+`benchmark/jit/tmp/string_complementary_fast_probe_t4_promotion10_20260713`.
 
 Current full-matrix generic evidence is stored in
-`benchmark/jit/tmp/generated_run_full_generic_t1_candidate5_20260713` and
-`benchmark/jit/tmp/generated_run_full_generic_t4_candidate5_20260713`. Both production
+`benchmark/jit/tmp/full_generic_review_root_fixes_t1_candidate5_20260713` and
+`benchmark/jit/tmp/full_generic_review_root_fixes_t4_candidate5_20260713`. Both production
 gates pass with zero correctness differences or compile errors across range
 arithmetic, filters, CASE, multi-aggregate, persistent scans, nullable
 expressions, grouped aggregation, DISTINCT, numeric joins, and string joins.
@@ -1028,10 +1129,12 @@ The branchless conjunction promotion receipts are
 These artifacts are workload-class evidence; they do not authorize
 workload-specific capability checks.
 
-The current generic matrix covers 23 workload classes. Compiled one-thread
-speedups range from 1.131x to 3.763x and compiled four-thread speedups range
-from 1.058x to 3.761x. The low-cardinality string-search control remains
-vectorized at 0.990x and 0.965x respectively, inside its independent 5%
+The current generic matrix is defined by the workload list in
+`benchmark/jit/generic_benchmark.py`; documentation does not maintain a second
+hard-coded workload count. Compiled one-thread
+speedups range from 1.118x to 3.771x and compiled four-thread speedups range
+from 1.060x to 3.728x. The low-cardinality string-search control remains
+vectorized at 0.994x and 0.971x respectively, inside its independent 5%
 raw-runtime ceiling. Current accepted TPC-H SF1 and SF10 promotion artifacts
 are documented in `benchmark/tpch/jit/JIT_BROAD_QUERY_PLAN.md`; both require a
 complete 22-query, 10-repeat production matrix plus correctness and traced
@@ -1048,11 +1151,14 @@ runtime-proof passes before the state file moves.
   sparse payload shapes use batch-local dense preaggregation when profitable,
   consecutive-run preaggregation when proven, or exact per-row grouped-state
   updates.
-- Generated pending-run aggregation currently accepts exact keys and proven
-  signed narrowing casts. Integral-compression transforms and exact direct-scan
-  aggregates that bypass the projected/pending owner still use the ordinary
-  per-vector compactor; extending the generated ABI to those source contracts is
-  the next generic grouped-run boundary.
+- Generated pending-run aggregation currently accepts one fixed-width key, one
+  or more primitive lanes, exact keys, proven signed narrowing casts, integral
+  compression, and nullable payloads from both projected and materialized
+  direct inputs. Generated reducers unroll up to eight lanes on 64-bit SLJIT
+  targets; wider lists and 32-bit targets retain the buffered, scalar, or exact
+  vectorized route. Multi-key, selected, and non-flat inputs remain explicit
+  boundaries. Source-fusing general multi-input affine group expressions is the
+  next generic grouped-run boundary.
 - Native source/sink protocols remain native unless an explicit execution
   contract makes them safe to compose.
 - Native-only execution is a valid result of capability analysis, not a failed

@@ -132,7 +132,8 @@ public:
 	    const ExecutionRegionSinkInfo &sink_info, ExecutionGroupedAggregateStateAddressUpdateFunction update_function,
 	    void *update_state, optional_ptr<ExecutionOperatorStageRecorder> recorder = nullptr, bool finish = true,
 	    optional_ptr<const ExecutionDenseGroupDomain> dense_domain = nullptr) const;
-	bool TryEnableProvenUniqueAppend(ExecutionContext &context, OperatorSinkInput &input, DataChunk &groups) const;
+	bool TryEnableProvenUniqueAppend(ExecutionContext &context, OperatorSinkInput &input, DataChunk &groups,
+	                                 ExecutionGroupedAggregateAppendProof append_proof = {}) const;
 	void RequireAppendFinalCombine(ExecutionContext &context, OperatorSinkInput &input) const;
 	bool TryResolveNewGroupAddresses(ExecutionContext &context, DataChunk &chunk, OperatorSinkInput &input,
 	                                 const ExecutionRegionSinkInfo &sink_info, Vector &addresses_out,

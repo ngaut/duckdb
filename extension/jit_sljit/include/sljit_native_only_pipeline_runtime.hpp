@@ -16,8 +16,8 @@ namespace duckdb {
 template <class EXECUTE_NATIVE_FULL_PIPELINE>
 static bool SljitTryExecuteFullPipelineNativeOnly(ExecutionRegionRuntime &runtime, ExecutionRegionResult &result,
                                                   vector<SljitExecutableRegionOp> &ops,
-                                                  EXECUTE_NATIVE_FULL_PIPELINE &&execute_native_full_pipeline) {
-	SljitRegionExecutionScratch scratch(runtime.GetAllocator(), ops);
+                                                  EXECUTE_NATIVE_FULL_PIPELINE &&execute_native_full_pipeline,
+                                                  SljitRegionExecutionScratch &scratch) {
 	idx_t processed_chunks = 0;
 	idx_t fetched_chunks = 0;
 	const auto max_chunks = runtime.MaxChunks();

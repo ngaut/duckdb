@@ -13,6 +13,7 @@
 #include "sljit_aggregate_preaggregation_common.hpp"
 #include "sljit_dense_group_preaggregation.hpp"
 
+#include "duckdb/common/operator/subtract.hpp"
 #include "duckdb/common/types/hugeint.hpp"
 #include "duckdb/common/types/uhugeint.hpp"
 #include "duckdb/common/vector/unified_vector_format.hpp"
@@ -253,7 +254,23 @@ TryPreaggregateConsecutivePrimitiveGroups(SljitExecutableRegionOp &op, DataChunk
 struct SljitPreaggregatedInputVectorGroupKeySource {
 	const ExecutionRowPointerGroupKeySource *source = nullptr;
 	UnifiedVectorFormat format;
+	bool rows_all_valid = false;
 };
+
+template <class TARGET_TYPE, class SOURCE_TYPE>
+static bool SljitLoadIntegralCompressedPreaggregatedGroupKey(const UnifiedVectorFormat &format, idx_t source_idx,
+                                                             int64_t minimum, TARGET_TYPE &key) {
+	if constexpr (!std::is_unsigned<TARGET_TYPE>::value || !std::is_signed<SOURCE_TYPE>::value) {
+		return false;
+	} else {
+		SOURCE_TYPE typed_minimum;
+		SOURCE_TYPE compressed;
+		return TryCast::Operation<int64_t, SOURCE_TYPE>(minimum, typed_minimum, false) &&
+		       TrySubtractOperator::Operation<SOURCE_TYPE, SOURCE_TYPE, SOURCE_TYPE>(
+		           UnifiedVectorFormat::GetData<SOURCE_TYPE>(format)[source_idx], typed_minimum, compressed) &&
+		       TryCast::Operation<SOURCE_TYPE, TARGET_TYPE>(compressed, key, false);
+	}
+}
 
 static bool SljitPreparePreaggregatedInputVectorGroupKeySource(DataChunk &input,
                                                                const ExecutionRowPointerGroupKeySource &source,
@@ -267,6 +284,7 @@ static bool SljitPreparePreaggregatedInputVectorGroupKeySource(DataChunk &input,
 	}
 	prepared.source = &source;
 	input.data[source.input_vector_index].ToUnifiedFormat(prepared.format);
+	prepared.rows_all_valid = source.all_valid || SljitPreaggregatedFormatRowsAllValid(prepared.format, input.size());
 	return true;
 }
 
@@ -275,7 +293,7 @@ static bool SljitLoadPreaggregatedInputVectorGroupKey(SljitPreaggregatedInputVec
                                                       idx_t row_idx, TARGET_TYPE &key) {
 	auto &source = *prepared.source;
 	const auto source_idx = prepared.format.sel->get_index(row_idx);
-	if (!prepared.format.validity.RowIsValid(source_idx)) {
+	if (!prepared.rows_all_valid && !prepared.format.validity.RowIsValid(source_idx)) {
 		return false;
 	}
 	switch (source.cast_kind) {
@@ -315,6 +333,23 @@ static bool SljitLoadPreaggregatedInputVectorGroupKey(SljitPreaggregatedInputVec
 			return TryCast::Operation<int32_t, int8_t>(value, key, false);
 		}
 		return false;
+	case ExecutionRowPointerGroupKeyCastKind::INTEGRAL_COMPRESS:
+		switch (source.source_physical_type) {
+		case PhysicalType::INT8:
+			return SljitLoadIntegralCompressedPreaggregatedGroupKey<TARGET_TYPE, int8_t>(prepared.format, source_idx,
+			                                                                             source.cast_constant, key);
+		case PhysicalType::INT16:
+			return SljitLoadIntegralCompressedPreaggregatedGroupKey<TARGET_TYPE, int16_t>(prepared.format, source_idx,
+			                                                                              source.cast_constant, key);
+		case PhysicalType::INT32:
+			return SljitLoadIntegralCompressedPreaggregatedGroupKey<TARGET_TYPE, int32_t>(prepared.format, source_idx,
+			                                                                              source.cast_constant, key);
+		case PhysicalType::INT64:
+			return SljitLoadIntegralCompressedPreaggregatedGroupKey<TARGET_TYPE, int64_t>(prepared.format, source_idx,
+			                                                                              source.cast_constant, key);
+		default:
+			return false;
+		}
 	default:
 		return false;
 	}

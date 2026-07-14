@@ -332,11 +332,25 @@ struct SljitNativeVectorInput {
 	std::exception_ptr error;
 };
 
+struct SljitNativePrimitiveRunLaneInput {
+	const_data_ptr_t payload_data = nullptr;
+	const validity_t *payload_validity = nullptr;
+	int64_t *output_int64_values = nullptr;
+	hugeint_t *output_hugeint_values = nullptr;
+	uint8_t *output_value_is_set = nullptr;
+};
+
 // Fixed-storage streaming ABI for generated consecutive-group run aggregation. The caller owns all buffers and may
 // resume after flushing output by preserving input_offset and resetting output_count.
 struct SljitNativePrimitiveRunInput {
 	const_data_ptr_t group_data = nullptr;
+	SljitNativePrimitiveRunLaneInput *lane_inputs = nullptr;
+
+	// The tuned single-lane specialization binds these fields directly. Multi-lane
+	// kernels use lane_inputs and share only output_row_counts across lanes.
 	const_data_ptr_t payload_data = nullptr;
+	const validity_t *payload_validity = nullptr;
+	int64_t group_cast_constant = 0;
 	data_ptr_t output_group_data = nullptr;
 	int64_t *output_int64_values = nullptr;
 	hugeint_t *output_hugeint_values = nullptr;
@@ -346,6 +360,7 @@ struct SljitNativePrimitiveRunInput {
 	idx_t input_offset = 0;
 	idx_t output_count = 0;
 	idx_t output_capacity = 0;
+	uint8_t output_groups_strictly_increasing = 0;
 };
 
 struct SljitNativePredicateInput {

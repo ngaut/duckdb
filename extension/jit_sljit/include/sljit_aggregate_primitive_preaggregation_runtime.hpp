@@ -19,7 +19,23 @@ namespace duckdb {
 struct SljitPreaggregatedPrimitivePayloadSource {
 	PhysicalType type = PhysicalType::INVALID;
 	UnifiedVectorFormat format;
+	bool rows_all_valid = false;
 };
+
+static bool SljitPreaggregatedFormatRowsAllValid(const UnifiedVectorFormat &format, idx_t count) {
+	if (format.validity.CannotHaveNull()) {
+		return true;
+	}
+	if (!format.sel->IsSet()) {
+		return format.validity.CheckAllValid(count);
+	}
+	for (idx_t row_idx = 0; row_idx < count; row_idx++) {
+		if (!format.validity.RowIsValid(format.sel->get_index(row_idx))) {
+			return false;
+		}
+	}
+	return true;
+}
 
 static bool SljitPreaggregatedPrimitiveIntegerTypeSupported(PhysicalType type) {
 	switch (type) {
@@ -131,7 +147,7 @@ static bool SljitPreaggregationInputVectorGroupSourceSupported(DataChunk &payloa
 static bool SljitLoadPreaggregatedInt64Payload(SljitPreaggregatedPrimitivePayloadSource &source, idx_t row_idx,
                                                int64_t &result) {
 	auto source_idx = source.format.sel->get_index(row_idx);
-	if (source.format.validity.RowIsValid(source_idx) == false) {
+	if (!source.rows_all_valid && !source.format.validity.RowIsValid(source_idx)) {
 		return false;
 	}
 	switch (source.type) {
@@ -164,7 +180,7 @@ static bool SljitLoadPreaggregatedInt64Payload(SljitPreaggregatedPrimitivePayloa
 static bool SljitLoadPreaggregatedHugeintPayload(SljitPreaggregatedPrimitivePayloadSource &source, idx_t row_idx,
                                                  hugeint_t &result) {
 	auto source_idx = source.format.sel->get_index(row_idx);
-	if (source.format.validity.RowIsValid(source_idx) == false) {
+	if (!source.rows_all_valid && !source.format.validity.RowIsValid(source_idx)) {
 		return false;
 	}
 	if (source.type == PhysicalType::INT128) {
@@ -183,6 +199,7 @@ static bool PrepareSljitPreaggregatedPrimitivePayloadSource(DataChunk &input,
                                                             const ExecutionPrimitiveAggregateUpdateLane *lane,
                                                             idx_t source_idx, bool require_lane_payload_type,
                                                             SljitPreaggregatedPrimitivePayloadSource &source) {
+	source = SljitPreaggregatedPrimitivePayloadSource();
 	if (!lane) {
 		return false;
 	}
@@ -191,10 +208,12 @@ static bool PrepareSljitPreaggregatedPrimitivePayloadSource(DataChunk &input,
 			return false;
 		}
 		source.type = PhysicalType::INVALID;
+		source.rows_all_valid = true;
 		return true;
 	}
 	if (lane->kind == AggregatePrimitiveUpdateKind::COUNT && source_idx == DConstants::INVALID_INDEX) {
 		source.type = PhysicalType::INVALID;
+		source.rows_all_valid = true;
 		return true;
 	}
 	if (source_idx >= input.ColumnCount()) {
@@ -207,6 +226,7 @@ static bool PrepareSljitPreaggregatedPrimitivePayloadSource(DataChunk &input,
 		return false;
 	}
 	source_vector.ToUnifiedFormat(source.format);
+	source.rows_all_valid = SljitPreaggregatedFormatRowsAllValid(source.format, input.size());
 	return true;
 }
 
@@ -261,7 +281,7 @@ struct SljitPreaggregatedPrimitivePayloadSources {
 			return true;
 		}
 		auto source_idx = source.format.sel->get_index(row_idx);
-		return source.format.validity.RowIsValid(source_idx);
+		return source.rows_all_valid || source.format.validity.RowIsValid(source_idx);
 	}
 
 	bool LoadInt64(idx_t payload_idx, idx_t row_idx, int64_t &result) {
@@ -339,6 +359,9 @@ static bool SljitAccumulatePreaggregatedPrimitivePayloadGroup(
 			break;
 		}
 		case AggregatePrimitiveUpdateKind::SUM_INT64: {
+			if (!payload_sources.RowIsValid(payload_idx, row_idx)) {
+				break;
+			}
 			int64_t value;
 			if (!payload_sources.LoadInt64(payload_idx, row_idx, value)) {
 				return false;
@@ -348,6 +371,9 @@ static bool SljitAccumulatePreaggregatedPrimitivePayloadGroup(
 			break;
 		}
 		case AggregatePrimitiveUpdateKind::SUM_HUGEINT: {
+			if (!payload_sources.RowIsValid(payload_idx, row_idx)) {
+				break;
+			}
 			hugeint_t value;
 			if (!payload_sources.LoadHugeint(payload_idx, row_idx, value)) {
 				return false;

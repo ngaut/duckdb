@@ -44,10 +44,26 @@ The active architecture work is generic grouped and join execution:
 - generic benchmark fixtures are materialized once per read-only setup identity
   and reused across alternating samples, eliminating repeated table rebuilds and
   measuring stable persisted storage.
+- selected one-key regular hash probes compose a persisted range proof with the
+  runtime no-chain layout, reading BIGINT source keys directly against a
+  compressed INTEGER table. The loop preserves selection, Bloom, salt, prefetch,
+  and row-pointer semantics without relation or benchmark identity;
+- low-cardinality complementary string reductions keep a bounded eight-group
+  direct tier in their pipeline-local accumulator, retain a fixed-capacity hash
+  fallback, and use one fused all-valid 16-byte RHS matcher rather than a
+  Cartesian specialization matrix;
 - profitable fixed-width grouped runs execute in a resumable backend-generated
-  kernel over operator-lifetime fixed storage; exact and proven narrowing key
-  specializations share one runtime ABI and all unsupported shapes fall back
-  before publishing pending state;
+  kernel over one operator-lifetime pending owner shared by projected and
+  materialized direct inputs; exact, proven narrowing, and integral-compression
+  key specializations share one runtime ABI. Pipeline-local state preserves the
+  unpublished boundary group across fairness yields, while bounded exact
+  intervals coalesce to a conservative hull at capacity so parallel radix
+  finalization can still distinguish provably disjoint ownership from real
+  cross-worker duplicates without unbounded proof state. Single-lane kernels
+  retain tuned all-valid and nullable variants; a generated multi-lane kernel
+  binds one cached runtime lane array and handles nullable primitive payloads
+  without a specialization matrix. Unsupported shapes fall back before
+  publishing pending state;
 - a complete untraced 10-repeat candidate is itself promotion-qualified. If a
   focused 10-repeat noise recheck clears a comparison, the gate merges those
   query rows and revalidates the complete artifact instead of rerunning the
@@ -57,83 +73,92 @@ The active architecture work is generic grouped and join execution:
 
 Configuration: TPC-H SF1, one thread, production timing, tracing disabled, and
 result verification enabled. The accepted ten-repeat comparison receipt is
-`benchmark/tpch/jit/tmp/generated_run_full_sf1_promotion_20260713`.
+`benchmark/tpch/jit/tmp/nullable_codegen_full_sf1_promotion10_20260713`.
 Candidate gates use five repeats and focused triage or promotion uses ten; no
 higher repetition count is scheduled.
 
 | Query | Non-JIT (s) | JIT (s) | Speedup |
 | ---: | ---: | ---: | ---: |
-| Q1 | 0.072 | 0.057 | 1.271x |
-| Q2 | 0.010 | 0.011 | 0.932x |
-| Q3 | 0.061 | 0.061 | 0.995x |
-| Q4 | 0.044 | 0.040 | 1.100x |
-| Q5 | 0.052 | 0.049 | 1.061x |
-| Q6 | 0.040 | 0.020 | 2.070x |
-| Q7 | 0.059 | 0.056 | 1.064x |
-| Q8 | 0.041 | 0.039 | 1.057x |
-| Q9 | 0.146 | 0.119 | 1.222x |
-| Q10 | 0.064 | 0.054 | 1.187x |
-| Q11 | 0.012 | 0.012 | 0.954x |
-| Q12 | 0.071 | 0.054 | 1.326x |
-| Q13 | 0.142 | 0.092 | 1.539x |
-| Q14 | 0.051 | 0.048 | 1.054x |
-| Q15 | 0.038 | 0.028 | 1.326x |
-| Q16 | 0.031 | 0.029 | 1.088x |
-| Q17 | 0.030 | 0.029 | 1.020x |
-| Q18 | 0.103 | 0.069 | 1.480x |
-| Q19 | 0.031 | 0.029 | 1.071x |
-| Q20 | 0.065 | 0.061 | 1.068x |
-| Q21 | 0.114 | 0.101 | 1.120x |
-| Q22 | 0.022 | 0.020 | 1.112x |
+| Q1 | 0.071 | 0.056 | 1.269x |
+| Q2 | 0.010 | 0.011 | 0.931x |
+| Q3 | 0.060 | 0.059 | 1.019x |
+| Q4 | 0.043 | 0.040 | 1.089x |
+| Q5 | 0.051 | 0.047 | 1.083x |
+| Q6 | 0.040 | 0.019 | 2.050x |
+| Q7 | 0.059 | 0.055 | 1.073x |
+| Q8 | 0.041 | 0.039 | 1.053x |
+| Q9 | 0.145 | 0.119 | 1.223x |
+| Q10 | 0.063 | 0.054 | 1.165x |
+| Q11 | 0.012 | 0.012 | 0.976x |
+| Q12 | 0.072 | 0.054 | 1.334x |
+| Q13 | 0.142 | 0.092 | 1.551x |
+| Q14 | 0.050 | 0.048 | 1.040x |
+| Q15 | 0.037 | 0.028 | 1.329x |
+| Q16 | 0.031 | 0.029 | 1.067x |
+| Q17 | 0.030 | 0.029 | 1.016x |
+| Q18 | 0.101 | 0.070 | 1.455x |
+| Q19 | 0.031 | 0.029 | 1.069x |
+| Q20 | 0.064 | 0.059 | 1.087x |
+| Q21 | 0.113 | 0.101 | 1.116x |
+| Q22 | 0.022 | 0.020 | 1.102x |
 
 All results are correct. Auto compiles 20 queries and deliberately keeps Q2
 and Q11 vectorized because their stateful work is below the generic startup
-floor. Summed medians improve from 1.300s to 1.080s (1.204x), the per-query
-geometric-mean speedup is 1.167x, and the gate reports 19 material wins. Q18
-improves from 1.177x to 1.480x; Q12 also advances from 1.302x to 1.326x.
+floor. Summed medians improve from 1.289s to 1.070s (1.205x), the per-query
+geometric-mean speedup is 1.166x, and the gate reports 18 material wins. Q12 is
+1.334x, Q13 is 1.551x, and Q18 is 1.455x.
 
 ## Accepted SF10 evidence
 
 Configuration: TPC-H SF10, one thread, production timing, tracing disabled, and
 result verification enabled. The accepted ten-repeat comparison receipt is
-`benchmark/tpch/jit/tmp/generated_run_full_sf10_promotion_20260713/accepted_baseline`.
+`benchmark/tpch/jit/tmp/nullable_codegen_full_sf10_promotion10_20260713`.
 Candidate gates use five repeats and focused triage or promotion uses ten; no
 higher repetition count is scheduled.
 
 | Query | Non-JIT (s) | JIT (s) | Speedup |
 | ---: | ---: | ---: | ---: |
-| Q1 | 0.652 | 0.502 | 1.297x |
-| Q2 | 0.060 | 0.055 | 1.104x |
-| Q3 | 0.611 | 0.559 | 1.093x |
-| Q4 | 0.475 | 0.435 | 1.091x |
-| Q5 | 0.541 | 0.497 | 1.089x |
-| Q6 | 0.386 | 0.180 | 2.142x |
-| Q7 | 0.552 | 0.514 | 1.076x |
-| Q8 | 0.387 | 0.332 | 1.166x |
-| Q9 | 1.636 | 1.242 | 1.317x |
-| Q10 | 0.944 | 0.809 | 1.167x |
-| Q11 | 0.069 | 0.066 | 1.050x |
-| Q12 | 0.635 | 0.481 | 1.321x |
-| Q13 | 1.605 | 1.030 | 1.558x |
-| Q14 | 0.395 | 0.360 | 1.098x |
-| Q15 | 0.337 | 0.232 | 1.456x |
-| Q16 | 0.173 | 0.148 | 1.172x |
-| Q17 | 0.270 | 0.250 | 1.081x |
-| Q18 | 1.282 | 0.767 | 1.671x |
-| Q19 | 0.294 | 0.265 | 1.109x |
-| Q20 | 0.617 | 0.525 | 1.175x |
-| Q21 | 1.358 | 1.238 | 1.096x |
-| Q22 | 0.184 | 0.145 | 1.273x |
+| Q1 | 0.647 | 0.491 | 1.316x |
+| Q2 | 0.060 | 0.055 | 1.099x |
+| Q3 | 0.614 | 0.567 | 1.083x |
+| Q4 | 0.471 | 0.438 | 1.076x |
+| Q5 | 0.533 | 0.489 | 1.092x |
+| Q6 | 0.381 | 0.179 | 2.134x |
+| Q7 | 0.548 | 0.510 | 1.075x |
+| Q8 | 0.385 | 0.330 | 1.167x |
+| Q9 | 1.636 | 1.202 | 1.362x |
+| Q10 | 0.945 | 0.807 | 1.170x |
+| Q11 | 0.069 | 0.066 | 1.051x |
+| Q12 | 0.621 | 0.482 | 1.288x |
+| Q13 | 1.601 | 0.937 | 1.708x |
+| Q14 | 0.391 | 0.357 | 1.097x |
+| Q15 | 0.332 | 0.228 | 1.457x |
+| Q16 | 0.172 | 0.149 | 1.155x |
+| Q17 | 0.268 | 0.249 | 1.077x |
+| Q18 | 1.274 | 0.767 | 1.660x |
+| Q19 | 0.293 | 0.264 | 1.111x |
+| Q20 | 0.599 | 0.519 | 1.154x |
+| Q21 | 1.361 | 1.220 | 1.115x |
+| Q22 | 0.181 | 0.141 | 1.284x |
 
 All results are correct and all 22 queries execute compiled regions with traced
-runtime ownership. Summed medians improve from 13.464s to 10.631s (1.266x), the
-per-query geometric-mean speedup is 1.234x, and all 22 queries are material JIT
-wins. Q18 improves from 1.382x to 1.671x and Q12 from 1.258x to 1.321x. Q20's
-full-matrix raw timing was rechecked independently at ten repeats; the focused
-comparison passed and its rows were merged before the complete accepted
-artifact was revalidated. Q11 lowers its widening decimal
-product and exact INT128 sum to native machine code; the same recipe is rejected
-at SF1 because there are not enough batches to amortize stateful startup.
+runtime ownership. Summed medians improve from 13.382s to 10.445s (1.281x), the
+per-query geometric-mean speedup is 1.238x, and all 22 queries are material JIT
+wins. Q9 is 1.362x, Q13 is 1.708x, and Q18 is 1.660x. Q11 lowers its widening
+decimal product and exact INT128 sum to native machine code; the same recipe is
+rejected at SF1 because there are not enough batches to amortize stateful
+startup.
+
+The generic production matrix is sourced directly from
+`benchmark/jit/generic_benchmark.py`; this plan intentionally does not mirror a
+hard-coded workload count. The post-review
+five-repeat artifacts are
+`benchmark/jit/tmp/full_generic_review_root_fixes_t1_candidate5_20260713` and
+`benchmark/jit/tmp/full_generic_review_root_fixes_t4_candidate5_20260713`; both
+pass correctness and raw-runtime gates. A separate 16-lane grouped-run
+promotion proves that bounded code generation remains a win outside TPC-H:
+1.223x at one thread and 1.311x at four threads over ten repetitions, with
+1.15x and 1.20x checked-in floors.
 
 ## Performance direction
 

@@ -166,8 +166,12 @@ static void RequireExecutedMetalProjection(ExecutionRegionManager &manager, idx_
 TEST_CASE("Execution region manager registers and selects database-local backends", "[api][jit]") {
 	JitTestDatabase test;
 
-	test.manager.RegisterBackend(make_uniq<UnitTestExecutionRegionBackend>());
-	test.manager.RegisterBackend(make_uniq<UnitTestGpuExecutionRegionBackend>());
+	const auto initial_backend_count = test.manager.GetBackends(&test.context).size();
+	REQUIRE_THROWS(test.manager.RegisterBackend(make_uniq<UnitTestExecutionRegionBackend>(),
+	                                            EXECUTION_REGION_BACKEND_ABI_VERSION + 1));
+	REQUIRE(test.manager.GetBackends(&test.context).size() == initial_backend_count);
+	test.manager.RegisterBackend(make_uniq<UnitTestExecutionRegionBackend>(), EXECUTION_REGION_BACKEND_ABI_VERSION);
+	test.manager.RegisterBackend(make_uniq<UnitTestGpuExecutionRegionBackend>(), EXECUTION_REGION_BACKEND_ABI_VERSION);
 
 	bool found_backend = false;
 	bool found_gpu_backend = false;

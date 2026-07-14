@@ -37,6 +37,10 @@ static constexpr const char *SLJIT_FAST_FLAT_ALL_VALID_SINGLE_KEY_HASH_JOIN_PROB
     "regular_probe.all_valid.flat.single_key.no_chain";
 static constexpr const char *SLJIT_FAST_SELECTED_ALL_VALID_SINGLE_KEY_HASH_JOIN_PROBE_STAGE =
     "regular_probe.all_valid.selected.single_key.no_chain";
+static constexpr const char *SLJIT_FAST_FLAT_ALL_VALID_UNCHECKED_INT64_TO_INT32_SINGLE_KEY_HASH_JOIN_PROBE_STAGE =
+    "regular_probe.all_valid.flat.single_key.unchecked_int64_to_int32.no_chain";
+static constexpr const char *SLJIT_FAST_SELECTED_ALL_VALID_UNCHECKED_INT64_TO_INT32_SINGLE_KEY_HASH_JOIN_PROBE_STAGE =
+    "regular_probe.all_valid.selected.single_key.unchecked_int64_to_int32.no_chain";
 static constexpr const char *SLJIT_FAST_FLAT_ALL_VALID_SINGLE_KEY_CHAIN_HASH_JOIN_PROBE_STAGE =
     "regular_probe.all_valid.flat.single_key.chain";
 static constexpr const char *SLJIT_FAST_SELECTED_ALL_VALID_SINGLE_KEY_CHAIN_HASH_JOIN_PROBE_STAGE =
@@ -121,6 +125,13 @@ static bool ExecuteAllValidSingleKeyProbeFastPath(const SljitNativeHashJoinProbe
 	return TryExecuteAllValidSingleKeyProbe<SELECTED, false>(plan, input);
 }
 
+template <bool SELECTED>
+static bool ExecuteAllValidUncheckedInt64ToInt32SingleKeyProbeFastPath(const SljitNativeHashJoinProbePlan &plan,
+                                                                       SljitNativeRegularHashJoinProbeInput &input,
+                                                                       const SljitAllValidHashJoinProbeFacts &) {
+	return TryExecuteAllValidUncheckedInt64ToInt32SingleKeyNoChainProbe<SELECTED>(plan, input);
+}
+
 template <bool SELECTED, bool CHAIN>
 static bool ExecuteAllValidUint64PairMarkSelectionProbeFastPath(const SljitNativeHashJoinProbePlan &plan,
                                                                 SljitNativeRegularHashJoinProbeInput &input,
@@ -146,8 +157,8 @@ static bool ExecuteAllValidSingleKeyMarkSelectionProbeFastPath(const SljitNative
 }
 
 template <bool SELECTED>
-static const std::array<SljitAllValidHashJoinProbeFastPath, 5> &SljitAllValidHashJoinProbeFastPaths() {
-	static const std::array<SljitAllValidHashJoinProbeFastPath, 5> fast_paths {{
+static const std::array<SljitAllValidHashJoinProbeFastPath, 6> &SljitAllValidHashJoinProbeFastPaths() {
+	static const std::array<SljitAllValidHashJoinProbeFastPath, 6> fast_paths {{
 	    {SLJIT_FAST_FLAT_ALL_VALID_UINT64_PAIR_HASH_JOIN_PROBE_STAGE,
 	     SLJIT_FAST_SELECTED_ALL_VALID_UINT64_PAIR_HASH_JOIN_PROBE_STAGE,
 	     ExecuteAllValidUint64PairProbeFastPath<SELECTED, false>},
@@ -157,6 +168,9 @@ static const std::array<SljitAllValidHashJoinProbeFastPath, 5> &SljitAllValidHas
 	    {SLJIT_FAST_FLAT_ALL_VALID_SINGLE_KEY_NOTEQUAL_CHAIN_HASH_JOIN_PROBE_STAGE,
 	     SLJIT_FAST_SELECTED_ALL_VALID_SINGLE_KEY_NOTEQUAL_CHAIN_HASH_JOIN_PROBE_STAGE,
 	     ExecuteAllValidSingleKeyNotEqualPredicateChainProbeFastPath<SELECTED>},
+	    {SLJIT_FAST_FLAT_ALL_VALID_UNCHECKED_INT64_TO_INT32_SINGLE_KEY_HASH_JOIN_PROBE_STAGE,
+	     SLJIT_FAST_SELECTED_ALL_VALID_UNCHECKED_INT64_TO_INT32_SINGLE_KEY_HASH_JOIN_PROBE_STAGE,
+	     ExecuteAllValidUncheckedInt64ToInt32SingleKeyProbeFastPath<SELECTED>},
 	    {SLJIT_FAST_FLAT_ALL_VALID_SINGLE_KEY_HASH_JOIN_PROBE_STAGE,
 	     SLJIT_FAST_SELECTED_ALL_VALID_SINGLE_KEY_HASH_JOIN_PROBE_STAGE,
 	     ExecuteAllValidSingleKeyProbeFastPath<SELECTED, false>},
@@ -205,7 +219,7 @@ SljitAllValidHashJoinMarkSelectionProbeFastPaths() {
 	return fast_paths;
 }
 
-const std::array<SljitAllValidHashJoinProbeFastPath, 5> &SljitAllValidHashJoinProbeFastPaths(bool selected) {
+const std::array<SljitAllValidHashJoinProbeFastPath, 6> &SljitAllValidHashJoinProbeFastPaths(bool selected) {
 	return selected ? SljitAllValidHashJoinProbeFastPaths<true>() : SljitAllValidHashJoinProbeFastPaths<false>();
 }
 

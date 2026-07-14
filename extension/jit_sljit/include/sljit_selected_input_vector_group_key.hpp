@@ -17,6 +17,7 @@
 #include "duckdb/common/vector/unified_vector_format.hpp"
 #include "duckdb/function/scalar/string_common.hpp"
 
+#include <cstring>
 #include <type_traits>
 #include <utility>
 
@@ -99,6 +100,35 @@ struct SljitSelectedInputGroupDateYearCompress {
 };
 
 template <class DST>
+static DST SljitCompressSelectedStringGroup(const string_t &source) {
+	return StringCompressValue<DST>(source);
+}
+
+template <>
+inline uhugeint_t SljitCompressSelectedStringGroup<uhugeint_t>(const string_t &source) {
+#if DUCKDB_IS_BIG_ENDIAN
+	return StringCompressValue<uhugeint_t>(source);
+#else
+	const auto length = source.GetSize();
+	D_ASSERT(length < sizeof(uhugeint_t));
+	const auto data = source.GetDataUnsafe();
+	uint64_t lower = length;
+	uint64_t upper = 0;
+	if (length >= sizeof(uint64_t)) {
+		upper = BSWAP64(Load<uint64_t>(const_data_ptr_cast(data)));
+		uint64_t tail = 0;
+		std::memcpy(&tail, data + sizeof(uint64_t), length - sizeof(uint64_t));
+		lower |= BSWAP64(tail);
+	} else if (length > 0) {
+		uint64_t head = 0;
+		std::memcpy(&head, data, length);
+		upper = BSWAP64(head);
+	}
+	return uhugeint_t(upper, lower);
+#endif
+}
+
+template <class DST>
 struct SljitSelectedInputGroupStringCompress {
 	static constexpr bool CAN_FAIL = true;
 
@@ -109,10 +139,14 @@ struct SljitSelectedInputGroupStringCompress {
 		return source.GetSize() < sizeof(DST);
 	}
 	bool operator()(const string_t &source, DST &target) const {
-		return TryStringCompressValue(source, target);
+		if (!CanConvert(source)) {
+			return false;
+		}
+		target = SljitCompressSelectedStringGroup<DST>(source);
+		return true;
 	}
 	bool ConvertPreflighted(const string_t &source, DST &target) const {
-		target = StringCompressValue<DST>(source);
+		target = SljitCompressSelectedStringGroup<DST>(source);
 		return true;
 	}
 };
@@ -158,7 +192,26 @@ static bool SljitWithSelectedInputVectorGroupKey(Vector &input, const SelectionV
 		}
 		return convert.ConvertPreflighted(data[source_row], key);
 	};
-	return consumer(load, preflight, preflighted_load);
+	auto prepare = [&](idx_t count, DST *prepared_keys, uint8_t *prepared_validity) {
+		if (count > STANDARD_VECTOR_SIZE) {
+			return false;
+		}
+		for (idx_t selected_row = 0; selected_row < count; selected_row++) {
+			const auto source_row = source_index(selected_row);
+			const bool valid = format.validity.RowIsValid(source_row);
+			prepared_validity[selected_row] = valid;
+			if (!valid) {
+				prepared_keys[selected_row] = DST {};
+				continue;
+			}
+			if (!convert(data[source_row], prepared_keys[selected_row])) {
+				return false;
+			}
+		}
+		return true;
+	};
+	return consumer(load, preflight, preflighted_load, prepare, std::integral_constant < bool,
+	                CONVERT::CAN_FAIL && (sizeof(DST) > sizeof(uint64_t)) > {});
 }
 
 template <class SRC, class DST, class CONSUMER>

@@ -27,7 +27,6 @@ from benchmark_common import (  # noqa: E402
     write_csv,
 )
 
-
 # Read-only query variants share this immutable fixture through `setup_id`.
 # Preparation runs in a separate process so every timed sample reopens the same
 # checkpointed database state.
@@ -45,6 +44,36 @@ GROUPED_SELECTIVE_MULTI_AGGREGATE_SETUP_SQL = (
     "CAST(1 + i % 50 AS DECIMAL(15,2)), CAST(100 + i % 1000 AS DECIMAL(15,2)), "
     "CAST(i % 10 AS DECIMAL(15,2)), CAST(i % 8 AS DECIMAL(15,2)) "
     "FROM range(8000000) tbl(i);"
+)
+
+GROUPED_SORTED_RUNS_SETUP_SQL = (
+    "CREATE OR REPLACE TABLE __jit_generic_sorted_runs AS "
+    "SELECT ((i // 3) - 500000)::BIGINT AS group_id, "
+    "((i // 3) * 3 - 1500000)::BIGINT AS sparse_group_id, "
+    "500000::BIGINT AS group_offset, (i % 97)::INTEGER AS value, "
+    "CASE WHEN i % 11 = 0 THEN NULL ELSE (i % 97)::INTEGER END AS nullable_value "
+    "FROM range(6000000) tbl(i);"
+)
+
+GROUPED_WIDE_SORTED_RUN_LANE_COUNT = 16
+GROUPED_WIDE_SORTED_RUN_INNER_AGGREGATES = ", ".join(
+    f"sum(value + {lane_idx}) AS lane_{lane_idx}" for lane_idx in range(GROUPED_WIDE_SORTED_RUN_LANE_COUNT)
+)
+GROUPED_WIDE_SORTED_RUN_OUTER_AGGREGATES = ", ".join(
+    f"sum(lane_{lane_idx}) AS lane_{lane_idx}" for lane_idx in range(GROUPED_WIDE_SORTED_RUN_LANE_COUNT)
+)
+
+JOIN_STRING_COMPLEMENTARY_SETUP_SQL = (
+    "CREATE OR REPLACE TABLE __jit_generic_orders AS "
+    "SELECT i::BIGINT AS order_id, "
+    "CASE i % 5 WHEN 0 THEN '1-URGENT' WHEN 1 THEN '2-HIGH' "
+    "WHEN 2 THEN '3-MEDIUM' ELSE '4-NOT SPECIFIED' END AS priority "
+    "FROM range(1500000) tbl(i); "
+    "CREATE OR REPLACE TABLE __jit_generic_shipments AS "
+    "SELECT (i % 1500000)::BIGINT AS order_id, "
+    "CASE i % 3 WHEN 0 THEN 'MAIL' WHEN 1 THEN 'SHIP' ELSE 'RAIL' END AS ship_mode, "
+    "'group-' || CAST(14000042 + i % 9 AS VARCHAR) AS route_group "
+    "FROM range(6000000) tbl(i);"
 )
 
 
@@ -133,7 +162,12 @@ GENERIC_WORKLOADS = (
             "SELECT sum(id * 31) AS value FROM __jit_generic_like_fragments "
             "WHERE comment NOT LIKE '%special%requests%'"
         ),
-        "minimum_auto_speedup": 1.10,
+        # Fixed-shape lowering for generic two-fragment percent-only patterns
+        # promotes at 1.236x (T1) and 1.219x (T4). Keep enough host-noise
+        # margin while preventing the matcher from falling back to its old
+        # dynamic fragment loop.
+        "minimum_auto_speedup": 1.15,
+        "minimum_auto_speedup_by_threads": {1: 1.18, 4: 1.16},
         "max_auto_slowdown": 1.05,
         "requires_compiled_auto": True,
     },
@@ -164,10 +198,7 @@ GENERIC_WORKLOADS = (
             "(i + CASE WHEN i % 17 = 0 THEN -1 ELSE 1 END)::INTEGER AS b "
             "FROM range(30000000) tbl(i);"
         ),
-        "sql": (
-            "SELECT sum(a) AS value FROM __jit_generic_compare_input "
-            "WHERE a < b"
-        ),
+        "sql": ("SELECT sum(a) AS value FROM __jit_generic_compare_input " "WHERE a < b"),
         "minimum_auto_speedup": 1.25,
         "max_auto_slowdown": 1.05,
         "requires_compiled_auto": True,
@@ -216,8 +247,7 @@ GENERIC_WORKLOADS = (
     {
         "name": "grouped_dense_multi_aggregate",
         "setup_sql": (
-            "CREATE OR REPLACE TABLE __jit_generic_dense_multi AS "
-            "SELECT i::BIGINT AS i FROM range(20000000) tbl(i);"
+            "CREATE OR REPLACE TABLE __jit_generic_dense_multi AS " "SELECT i::BIGINT AS i FROM range(20000000) tbl(i);"
         ),
         "sql": (
             "SELECT (i % 8)::SMALLINT AS key, "
@@ -316,11 +346,8 @@ GENERIC_WORKLOADS = (
     },
     {
         "name": "grouped_sorted_runs",
-        "setup_sql": (
-            "CREATE OR REPLACE TABLE __jit_generic_sorted_runs AS "
-            "SELECT (i // 3)::BIGINT AS group_id, (i % 97)::INTEGER AS value "
-            "FROM range(6000000) tbl(i);"
-        ),
+        "setup_id": "grouped_sorted_runs_input",
+        "setup_sql": GROUPED_SORTED_RUNS_SETUP_SQL,
         "sql": (
             "SELECT sum(group_sum) AS value FROM ("
             "SELECT group_id, sum(value) AS group_sum "
@@ -328,7 +355,76 @@ GENERIC_WORKLOADS = (
             ") grouped"
         ),
         "minimum_auto_speedup": 0.0,
-        "minimum_auto_speedup_by_threads": {1: 1.60, 4: 1.35},
+        "minimum_auto_speedup_by_threads": {1: 3.00, 4: 1.75},
+        "max_auto_slowdown": 1.05,
+        "requires_compiled_auto": True,
+    },
+    {
+        "name": "grouped_materialized_sorted_runs",
+        "setup_id": "grouped_sorted_runs_input",
+        "setup_sql": GROUPED_SORTED_RUNS_SETUP_SQL,
+        "sql": (
+            "SELECT sum(group_sum) AS value FROM ("
+            "SELECT group_id + group_offset AS grouped_value, sum(value) AS group_sum "
+            "FROM __jit_generic_sorted_runs GROUP BY group_id + group_offset"
+            ") grouped"
+        ),
+        "minimum_auto_speedup": 0.0,
+        "minimum_auto_speedup_by_threads": {1: 2.25, 4: 1.45},
+        "max_auto_slowdown": 1.05,
+        "requires_compiled_auto": True,
+    },
+    {
+        "name": "grouped_sparse_sorted_runs",
+        "setup_id": "grouped_sorted_runs_input",
+        "setup_sql": GROUPED_SORTED_RUNS_SETUP_SQL,
+        "sql": (
+            "SELECT sum(group_sum) AS value FROM ("
+            "SELECT sparse_group_id, sum(value) AS group_sum "
+            "FROM __jit_generic_sorted_runs GROUP BY sparse_group_id"
+            ") grouped"
+        ),
+        # More than one interval per vector crosses the bounded uniqueness-summary
+        # budget. Coalescing remains a proof representation change, not a reason to
+        # rehash a locally monotonic stream during finalization.
+        "minimum_auto_speedup": 0.0,
+        # Ten alternating production runs prove 2.600x at T1 and 1.134x at T4.
+        # The parallel floor leaves margin for the shared two-million-row state scan.
+        "minimum_auto_speedup_by_threads": {1: 2.35, 4: 1.08},
+        "max_auto_slowdown": 1.05,
+        "requires_compiled_auto": True,
+    },
+    {
+        "name": "grouped_nullable_sorted_runs",
+        "setup_id": "grouped_sorted_runs_input",
+        "setup_sql": GROUPED_SORTED_RUNS_SETUP_SQL,
+        "sql": (
+            "SELECT sum(group_sum) AS value, sum(group_count) AS value_count FROM ("
+            "SELECT group_id, sum(nullable_value) AS group_sum, "
+            "count(nullable_value) AS group_count "
+            "FROM __jit_generic_sorted_runs GROUP BY group_id"
+            ") grouped"
+        ),
+        "minimum_auto_speedup": 0.0,
+        "minimum_auto_speedup_by_threads": {1: 1.70, 4: 1.45},
+        "max_auto_slowdown": 1.05,
+        "requires_compiled_auto": True,
+    },
+    {
+        "name": "grouped_wide_sorted_runs",
+        "setup_id": "grouped_sorted_runs_input",
+        "setup_sql": GROUPED_SORTED_RUNS_SETUP_SQL,
+        "sql": (
+            f"SELECT {GROUPED_WIDE_SORTED_RUN_OUTER_AGGREGATES} FROM ("
+            f"SELECT group_id, {GROUPED_WIDE_SORTED_RUN_INNER_AGGREGATES} "
+            "FROM __jit_generic_sorted_runs GROUP BY group_id"
+            ") grouped"
+        ),
+        # Wide heterogeneous reductions exercise bounded code generation. They
+        # must retain generic JIT admission without paying for an unbounded
+        # fully-unrolled run kernel.
+        "minimum_auto_speedup": 0.0,
+        "minimum_auto_speedup_by_threads": {1: 1.15, 4: 1.20},
         "max_auto_slowdown": 1.05,
         "requires_compiled_auto": True,
     },
@@ -386,17 +482,8 @@ GENERIC_WORKLOADS = (
     },
     {
         "name": "join_string_complementary_grouped_sum",
-        "setup_sql": (
-            "CREATE OR REPLACE TABLE __jit_generic_orders AS "
-            "SELECT i::BIGINT AS order_id, "
-            "CASE i % 5 WHEN 0 THEN '1-URGENT' WHEN 1 THEN '2-HIGH' "
-            "WHEN 2 THEN '3-MEDIUM' ELSE '4-NOT SPECIFIED' END AS priority "
-            "FROM range(1500000) tbl(i); "
-            "CREATE OR REPLACE TABLE __jit_generic_shipments AS "
-            "SELECT (i % 1500000)::BIGINT AS order_id, "
-            "CASE i % 3 WHEN 0 THEN 'MAIL' WHEN 1 THEN 'SHIP' ELSE 'RAIL' END AS ship_mode "
-            "FROM range(6000000) tbl(i);"
-        ),
+        "setup_id": "join_string_complementary_input",
+        "setup_sql": JOIN_STRING_COMPLEMENTARY_SETUP_SQL,
         "sql": (
             "SELECT shipment.ship_mode, "
             "sum(CASE WHEN orders.priority = '1-URGENT' OR orders.priority = '2-HIGH' "
@@ -408,8 +495,33 @@ GENERIC_WORKLOADS = (
             "WHERE shipment.ship_mode IN ('MAIL', 'SHIP') "
             "GROUP BY shipment.ship_mode ORDER BY shipment.ship_mode"
         ),
-        "minimum_auto_speedup": 1.18,
-        "minimum_auto_speedup_by_threads": {1: 1.28},
+        # Production promotion after the unchecked narrowing probe loop and
+        # pipeline hot-group accumulator: 1.336x at T1 and 1.230x at T4.
+        "minimum_auto_speedup": 1.20,
+        "minimum_auto_speedup_by_threads": {1: 1.30, 4: 1.20},
+        "max_auto_slowdown": 1.05,
+        "requires_compiled_auto": True,
+    },
+    {
+        "name": "join_string_complementary_medium_groups",
+        "setup_id": "join_string_complementary_input",
+        "setup_sql": JOIN_STRING_COMPLEMENTARY_SETUP_SQL,
+        "sql": (
+            "SELECT shipment.route_group, "
+            "sum(CASE WHEN orders.priority = '1-URGENT' OR orders.priority = '2-HIGH' "
+            "THEN 1 ELSE 0 END) AS high_priority_count, "
+            "sum(CASE WHEN orders.priority <> '1-URGENT' AND orders.priority <> '2-HIGH' "
+            "THEN 1 ELSE 0 END) AS low_priority_count "
+            "FROM __jit_generic_shipments shipment "
+            "JOIN __jit_generic_orders orders USING (order_id) "
+            "GROUP BY shipment.route_group ORDER BY shipment.route_group"
+        ),
+        # Nine recurring groups cross the direct-tier boundary and prove that
+        # the runtime-observed ninth key switches the exact accumulator to hash
+        # lookup even when persisted NDV statistics underestimate the domain.
+        # Wide-key staging promotes at 1.179x (T1) and 1.141x (T4).
+        "minimum_auto_speedup": 1.08,
+        "minimum_auto_speedup_by_threads": {1: 1.12, 4: 1.08},
         "max_auto_slowdown": 1.05,
         "requires_compiled_auto": True,
     },
@@ -447,12 +559,8 @@ SUMMARY_FIELDS = (
 
 def parse_args() -> argparse.Namespace:
     root = repo_root()
-    parser = argparse.ArgumentParser(
-        description="Benchmark generic DuckDB execution-region JIT workloads"
-    )
-    parser.add_argument(
-        "--duckdb", type=Path, default=root / "build" / "reldebug" / "duckdb"
-    )
+    parser = argparse.ArgumentParser(description="Benchmark generic DuckDB execution-region JIT workloads")
+    parser.add_argument("--duckdb", type=Path, default=root / "build" / "reldebug" / "duckdb")
     parser.add_argument("--out-dir", type=Path, default=None)
     parser.add_argument("--backend", default="sljit")
     parser.add_argument("--jit-extension", default="jit_sljit")
@@ -556,9 +664,7 @@ def run_workload(
         "query_time_us": attempt["query_time_us"],
         "correctness_diff": correctness["correctness_diff"],
         "jit_runtime_path_counts": ";".join(
-            str(row.get("jit_runtime_path_counts", ""))
-            for row in counters
-            if row.get("jit_runtime_path_counts")
+            str(row.get("jit_runtime_path_counts", "")) for row in counters if row.get("jit_runtime_path_counts")
         ),
         "jit_runtime_delegation_counts": ";".join(
             str(row.get("jit_runtime_delegation_counts", ""))
@@ -576,15 +682,11 @@ def run_workload(
 
 def minimum_auto_speedup(workload: dict, threads: int) -> float:
     return float(
-        workload.get("minimum_auto_speedup_by_threads", {}).get(
-            threads, workload.get("minimum_auto_speedup", 0.0)
-        )
+        workload.get("minimum_auto_speedup_by_threads", {}).get(threads, workload.get("minimum_auto_speedup", 0.0))
     )
 
 
-def summarize(
-    rows: list[dict], workloads: tuple[dict, ...], threads: int, trace_runtime: bool
-) -> list[dict]:
+def summarize(rows: list[dict], workloads: tuple[dict, ...], threads: int, trace_runtime: bool) -> list[dict]:
     grouped = collections.defaultdict(list)
     for row in rows:
         grouped[(row["workload"], row["policy"])].append(row)
@@ -609,21 +711,11 @@ def summarize(
                     "run_count": len(workload_rows),
                     "median_s": f"{timing / 1_000_000.0:.9f}",
                     "speedup_vs_off_median": f"{(float(off) / timing) if off and timing else 0.0:.6f}",
-                    "correctness_diff": sum(
-                        row_int(row, "correctness_diff") for row in workload_rows
-                    ),
-                    "compiled_regions": sum(
-                        row_int(row, "compiled_regions") for row in workload_rows
-                    ),
-                    "runtime_regions": sum(
-                        row_int(row, "runtime_regions") for row in workload_rows
-                    ),
-                    "runtime_events": sum(
-                        row_int(row, "runtime_events") for row in workload_rows
-                    ),
-                    "compile_errors": sum(
-                        row_int(row, "compile_errors") for row in workload_rows
-                    ),
+                    "correctness_diff": sum(row_int(row, "correctness_diff") for row in workload_rows),
+                    "compiled_regions": sum(row_int(row, "compiled_regions") for row in workload_rows),
+                    "runtime_regions": sum(row_int(row, "runtime_regions") for row in workload_rows),
+                    "runtime_events": sum(row_int(row, "runtime_events") for row in workload_rows),
+                    "compile_errors": sum(row_int(row, "compile_errors") for row in workload_rows),
                     "minimum_auto_speedup": minimum_auto_speedup(workload, threads),
                     "max_auto_slowdown": workload.get("max_auto_slowdown", 1.05),
                 }
@@ -655,30 +747,17 @@ def verification_failures(
             speedup = float(auto["speedup_vs_off_median"])
             minimum_speedup = minimum_auto_speedup(workload, threads)
             if speedup < minimum_speedup:
-                failures.append(
-                    f"{name}: auto speedup {speedup:.3f} below required {minimum_speedup:.3f}"
-                )
+                failures.append(f"{name}: auto speedup {speedup:.3f} below required {minimum_speedup:.3f}")
                 performance_failures.add(name)
             max_slowdown = float(workload.get("max_auto_slowdown", 1.05))
             if speedup > 0 and speedup < 1.0 / max_slowdown:
-                failures.append(
-                    f"{name}: auto slowdown {1.0 / speedup:.3f} exceeds {max_slowdown:.3f}"
-                )
+                failures.append(f"{name}: auto slowdown {1.0 / speedup:.3f} exceeds {max_slowdown:.3f}")
                 performance_failures.add(name)
-        if (
-            workload.get("requires_compiled_auto")
-            and int(auto["compiled_regions"]) == 0
-        ):
+        if workload.get("requires_compiled_auto") and int(auto["compiled_regions"]) == 0:
             failures.append(f"{name}: auto did not compile a region")
             structural_failures.add(name)
-        if (
-            trace_runtime
-            and workload.get("requires_compiled_auto")
-            and int(auto["runtime_events"]) == 0
-        ):
-            failures.append(
-                f"{name}: traced auto run did not execute a compiled region"
-            )
+        if trace_runtime and workload.get("requires_compiled_auto") and int(auto["runtime_events"]) == 0:
+            failures.append(f"{name}: traced auto run did not execute a compiled region")
             structural_failures.add(name)
     return failures, performance_failures, structural_failures
 
@@ -696,9 +775,7 @@ def main() -> int:
     prepared_setups: dict[str, str] = {}
     known_workloads = {workload["name"]: workload for workload in GENERIC_WORKLOADS}
     if args.workloads:
-        unknown_workloads = [
-            name for name in args.workloads if name not in known_workloads
-        ]
+        unknown_workloads = [name for name in args.workloads if name not in known_workloads]
         if unknown_workloads:
             raise ValueError(f"unknown workloads: {', '.join(unknown_workloads)}")
         workloads = tuple(known_workloads[name] for name in args.workloads)
@@ -710,9 +787,7 @@ def main() -> int:
             setup_id = workload.get("setup_id", workload["name"])
             setup_sql = workload.get("setup_sql", "")
             if setup_id in prepared_setups and prepared_setups[setup_id] != setup_sql:
-                raise ValueError(
-                    f"workloads sharing setup_id {setup_id!r} must use identical setup_sql"
-                )
+                raise ValueError(f"workloads sharing setup_id {setup_id!r} must use identical setup_sql")
             materialize_setup = setup_id not in prepared_setups
             prepare_workload(
                 runtime_args,
@@ -747,10 +822,7 @@ def main() -> int:
             and not structural_failures
             and args.triage_repeats > args.repeats
         ):
-            print(
-                "generic JIT focused performance recheck: "
-                + ", ".join(sorted(performance_failures))
-            )
+            print("generic JIT focused performance recheck: " + ", ".join(sorted(performance_failures)))
             for name in sorted(performance_failures):
                 workload = known_workloads[name]
                 expected_table = f"__jit_generic_expected_{name}"
@@ -770,14 +842,10 @@ def main() -> int:
             summary = summarize(rows, workloads, args.threads, args.trace_runtime)
             write_csv(out_dir / "runs.csv", RUN_FIELDS, rows)
             write_csv(out_dir / "summary.csv", SUMMARY_FIELDS, summary)
-            failures, _, _ = verification_failures(
-                summary, workloads, args.threads, args.trace_runtime
-            )
+            failures, _, _ = verification_failures(summary, workloads, args.threads, args.trace_runtime)
         if failures:
             gate = "runtime proof" if args.trace_runtime else "performance"
-            raise RuntimeError(
-                f"generic JIT {gate} gate failed: " + "; ".join(failures)
-            )
+            raise RuntimeError(f"generic JIT {gate} gate failed: " + "; ".join(failures))
         gate = "runtime proof" if args.trace_runtime else "production benchmark"
         print(f"generic JIT {gate} passed: {out_dir}")
         print(f"summary: {out_dir / 'summary.csv'}")

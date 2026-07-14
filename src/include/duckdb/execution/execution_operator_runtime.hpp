@@ -299,8 +299,10 @@ struct ExecutionGroupedAggregateStateAddressState {
 		(void)dense_domain;
 		return false;
 	}
-	virtual bool TryEnableProvenUniqueAppend(DataChunk &groups) {
+	virtual bool TryEnableProvenUniqueAppend(DataChunk &groups,
+	                                         ExecutionGroupedAggregateAppendProof append_proof = {}) {
 		(void)groups;
+		(void)append_proof;
 		return false;
 	}
 	virtual void RequireAppendFinalCombine() {
@@ -349,6 +351,43 @@ struct ExecutionPrimitiveAggregateUpdateLane {
 	idx_t *row_count = nullptr;
 	string blocker;
 };
+
+// COUNT and SUM primitive-update states use zero as their semantic initial value. Initialize the complete state
+// here so callers that receive fresh row addresses do not need a separate generic aggregate-initialize pass.
+// Canonical built-in layouts are written without a per-row memset; the fallback preserves custom padding/layouts.
+template <class VALUE_TYPE>
+static inline void ExecutionInitializeFreshPrimitiveAggregateState(data_ptr_t state_base,
+                                                                   const ExecutionPrimitiveAggregateUpdateLane &lane,
+                                                                   const VALUE_TYPE &value, bool is_set = true) {
+	D_ASSERT(sizeof(VALUE_TYPE) == AggregatePrimitiveUpdateStateValueSize(lane.kind));
+	const auto has_is_set = AggregatePrimitiveUpdateHasStateIsSet(lane.kind);
+	const auto canonical_layout = lane.state_value_offset == 0 &&
+	                              lane.state_size == sizeof(VALUE_TYPE) + (has_is_set ? sizeof(uint64_t) : 0) &&
+	                              (!has_is_set || lane.state_is_set_offset == sizeof(VALUE_TYPE));
+	if (canonical_layout) {
+		if (is_set) {
+			Store<VALUE_TYPE>(value, state_base);
+		} else {
+			Store<VALUE_TYPE>(VALUE_TYPE(), state_base);
+		}
+		if (has_is_set) {
+			// Canonical SUM state reserves one byte for the flag and seven bytes of padding. Clear the complete
+			// tail first, then write the bool at its semantic address so this layout is correct on both endiannesses.
+			Store<uint64_t>(0, state_base + lane.state_is_set_offset);
+			Store<bool>(is_set, state_base + lane.state_is_set_offset);
+		}
+		return;
+	}
+
+	memset(state_base, 0, lane.state_size);
+	if (!is_set) {
+		return;
+	}
+	Store<VALUE_TYPE>(value, state_base + lane.state_value_offset);
+	if (has_is_set) {
+		Store<bool>(true, state_base + lane.state_is_set_offset);
+	}
+}
 
 struct ExecutionPrimitiveAggregateUpdateBinding {
 	bool ready = false;

@@ -20,6 +20,7 @@ static constexpr idx_t SLJIT_JOIN_INPUT_COMPLEMENTARY_ACCUMULATOR_MAX_GROUPS =
     SLJIT_ROW_POINTER_LOCAL_PREAGGREGATION_MAX_GROUPS;
 static constexpr idx_t SLJIT_JOIN_INPUT_COMPLEMENTARY_ACCUMULATOR_ADMISSION_GROUPS =
     SLJIT_JOIN_INPUT_COMPLEMENTARY_ACCUMULATOR_MAX_GROUPS / 2;
+static constexpr idx_t SLJIT_JOIN_INPUT_COMPLEMENTARY_ACCUMULATOR_HOT_GROUPS = 8;
 
 template <class T>
 struct SljitTypedJoinInputComplementarySumAccumulator final
@@ -65,10 +66,17 @@ struct SljitTypedJoinInputComplementarySumAccumulator final
 		represented_rows = {};
 	}
 
-	SljitTypedLocalGroupIndex<T, SLJIT_JOIN_INPUT_COMPLEMENTARY_ACCUMULATOR_MAX_GROUPS, 0> groups;
+	// The index starts with a bounded direct tier and permanently switches to its
+	// already-populated hash table when the ninth distinct runtime key appears.
+	// This decision is exact even when catalog NDV statistics are approximate.
+	SljitTypedLocalGroupIndex<T, SLJIT_JOIN_INPUT_COMPLEMENTARY_ACCUMULATOR_MAX_GROUPS,
+	                          SLJIT_JOIN_INPUT_COMPLEMENTARY_ACCUMULATOR_HOT_GROUPS>
+	    groups;
 	std::array<int64_t, SLJIT_JOIN_INPUT_COMPLEMENTARY_ACCUMULATOR_MAX_GROUPS> matching_counts {};
 	std::array<int64_t, SLJIT_JOIN_INPUT_COMPLEMENTARY_ACCUMULATOR_MAX_GROUPS> non_matching_counts {};
 	std::array<idx_t, SLJIT_JOIN_INPUT_COMPLEMENTARY_ACCUMULATOR_MAX_GROUPS> represented_rows {};
+	std::array<T, STANDARD_VECTOR_SIZE> prepared_group_keys {};
+	std::array<uint8_t, STANDARD_VECTOR_SIZE> prepared_group_validity {};
 };
 
 static bool SljitJoinInputComplementarySumAccumulatorEnabled(SljitDirectJoinOutputAggregateStrategy &strategy,

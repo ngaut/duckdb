@@ -200,6 +200,27 @@ sljit_sw SLJIT_FUNC SljitNativeStringLikePercentOnly(const char *sdata, idx_t sl
 	return !pattern->like_fragments.empty() || !pattern->like_anchor_start || !pattern->like_anchor_end || slen == 0;
 }
 
+sljit_sw SLJIT_FUNC SljitNativeStringLikeTwoUnanchoredFragments(const char *sdata, idx_t slen,
+                                                                const SljitNativeStringConstant *pattern) {
+	D_ASSERT(!pattern->like_anchor_start);
+	D_ASSERT(!pattern->like_anchor_end);
+	D_ASSERT(pattern->like_fragments.size() == 2);
+
+	const auto fragments = pattern->like_fragments.data();
+	const auto pdata = pattern->value.data();
+	const auto &first = fragments[0];
+	const auto first_offset =
+	    SljitFindLikeFragment(sdata, slen, pdata + first.start, first.length, first.anchor, first.pair_anchor);
+	if (first_offset == DConstants::INVALID_INDEX) {
+		return false;
+	}
+
+	const auto second_position = first_offset + first.length;
+	const auto &second = fragments[1];
+	return SljitFindLikeFragment(sdata + second_position, slen - second_position, pdata + second.start, second.length,
+	                             second.anchor, second.pair_anchor) != DConstants::INVALID_INDEX;
+}
+
 sljit_sw SLJIT_FUNC SljitNativeStringInListConstant(const char *sdata, idx_t slen,
                                                     const SljitNativeStringConstantList *list) {
 	for (auto &constant : list->values) {

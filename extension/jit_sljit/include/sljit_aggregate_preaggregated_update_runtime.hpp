@@ -136,7 +136,8 @@ static void SljitCapturePreaggregatedPrimitiveAddress(SljitPreaggregatedPrimitiv
 
 static bool ExecuteSljitSingleLanePreaggregatedPrimitiveUpdate(const uintptr_t *addresses, const sel_t *address_sel,
                                                                const sel_t *execute_sel, idx_t count,
-                                                               SljitPreaggregatedPrimitiveUpdateState &state) {
+                                                               SljitPreaggregatedPrimitiveUpdateState &state,
+                                                               bool initialize_states) {
 	auto &lanes = *state.lanes;
 	auto &payloads = *state.payloads;
 	if (lanes.size() != 1 || payloads.size() != 1) {
@@ -158,8 +159,13 @@ static bool ExecuteSljitSingleLanePreaggregatedPrimitiveUpdate(const uintptr_t *
 			const auto address_idx = SljitSelectedGroupedStateAddressIndex(address_sel, execute_sel, idx, row_idx);
 			auto state_address = reinterpret_cast<data_ptr_t>(addresses[address_idx]);
 			SljitCapturePreaggregatedPrimitiveAddress(state, row_idx, addresses[address_idx]);
-			auto count_ptr = reinterpret_cast<int64_t *>(state_address + state_value_offset);
-			*count_ptr += values[row_idx];
+			if (initialize_states) {
+				ExecutionInitializeFreshPrimitiveAggregateState(state_address + lane->state_offset, *lane,
+				                                                values[row_idx]);
+			} else {
+				auto count_ptr = reinterpret_cast<int64_t *>(state_address + state_value_offset);
+				*count_ptr += values[row_idx];
+			}
 		}
 		return true;
 	}
@@ -171,12 +177,20 @@ static bool ExecuteSljitSingleLanePreaggregatedPrimitiveUpdate(const uintptr_t *
 			const auto row_idx = execute_sel ? execute_sel[idx] : idx;
 			D_ASSERT(row_idx < payload.int64_values.size());
 			D_ASSERT(row_idx < payload.value_is_set.size());
-			if (!value_is_set[row_idx]) {
-				continue;
-			}
 			const auto address_idx = SljitSelectedGroupedStateAddressIndex(address_sel, execute_sel, idx, row_idx);
 			auto state_address = reinterpret_cast<data_ptr_t>(addresses[address_idx]);
 			SljitCapturePreaggregatedPrimitiveAddress(state, row_idx, addresses[address_idx]);
+			auto state_base = state_address + lane->state_offset;
+			if (!value_is_set[row_idx]) {
+				if (initialize_states) {
+					ExecutionInitializeFreshPrimitiveAggregateState<int64_t>(state_base, *lane, 0, false);
+				}
+				continue;
+			}
+			if (initialize_states) {
+				ExecutionInitializeFreshPrimitiveAggregateState(state_base, *lane, values[row_idx]);
+				continue;
+			}
 			auto sum = reinterpret_cast<int64_t *>(state_address + state_value_offset);
 			*sum += values[row_idx];
 			auto state_is_set = reinterpret_cast<bool *>(state_address + state_is_set_offset);
@@ -192,12 +206,20 @@ static bool ExecuteSljitSingleLanePreaggregatedPrimitiveUpdate(const uintptr_t *
 			const auto row_idx = execute_sel ? execute_sel[idx] : idx;
 			D_ASSERT(row_idx < payload.hugeint_values.size());
 			D_ASSERT(row_idx < payload.value_is_set.size());
-			if (!value_is_set[row_idx]) {
-				continue;
-			}
 			const auto address_idx = SljitSelectedGroupedStateAddressIndex(address_sel, execute_sel, idx, row_idx);
 			auto state_address = reinterpret_cast<data_ptr_t>(addresses[address_idx]);
 			SljitCapturePreaggregatedPrimitiveAddress(state, row_idx, addresses[address_idx]);
+			auto state_base = state_address + lane->state_offset;
+			if (!value_is_set[row_idx]) {
+				if (initialize_states) {
+					ExecutionInitializeFreshPrimitiveAggregateState<hugeint_t>(state_base, *lane, hugeint_t(), false);
+				}
+				continue;
+			}
+			if (initialize_states) {
+				ExecutionInitializeFreshPrimitiveAggregateState(state_base, *lane, values[row_idx]);
+				continue;
+			}
 			auto sum = reinterpret_cast<hugeint_t *>(state_address + state_value_offset);
 			*sum += values[row_idx];
 			auto state_is_set = reinterpret_cast<bool *>(state_address + state_is_set_offset);
@@ -210,13 +232,15 @@ static bool ExecuteSljitSingleLanePreaggregatedPrimitiveUpdate(const uintptr_t *
 	}
 }
 
-static void ExecuteSljitPreaggregatedPrimitiveUpdate(const uintptr_t *addresses, const sel_t *address_sel,
-                                                     const sel_t *execute_sel, idx_t count, void *state_p) {
+static void ExecuteSljitPreaggregatedPrimitiveUpdateInternal(const uintptr_t *addresses, const sel_t *address_sel,
+                                                             const sel_t *execute_sel, idx_t count,
+                                                             bool initialize_states, void *state_p) {
 	auto &state = *reinterpret_cast<SljitPreaggregatedPrimitiveUpdateState *>(state_p);
 	if (!addresses || !state.lanes || !state.payloads || state.lanes->size() != state.payloads->size()) {
 		throw InternalException("SLJIT preaggregated primitive grouped update state is incomplete");
 	}
-	if (ExecuteSljitSingleLanePreaggregatedPrimitiveUpdate(addresses, address_sel, execute_sel, count, state)) {
+	if (ExecuteSljitSingleLanePreaggregatedPrimitiveUpdate(addresses, address_sel, execute_sel, count, state,
+	                                                       initialize_states)) {
 		return;
 	}
 	auto &lanes = *state.lanes;
@@ -239,23 +263,39 @@ static void ExecuteSljitPreaggregatedPrimitiveUpdate(const uintptr_t *addresses,
 				if (row_idx >= payload.int64_values.size()) {
 					throw InternalException("SLJIT preaggregated count-star delta is out of range");
 				}
-				auto count_ptr = reinterpret_cast<int64_t *>(value_ptr);
-				*count_ptr += payload.int64_values[row_idx];
+				if (initialize_states) {
+					ExecutionInitializeFreshPrimitiveAggregateState(state_base, *lane, payload.int64_values[row_idx]);
+				} else {
+					auto count_ptr = reinterpret_cast<int64_t *>(value_ptr);
+					*count_ptr += payload.int64_values[row_idx];
+				}
 				break;
 			}
 			case AggregatePrimitiveUpdateKind::COUNT: {
 				if (row_idx >= payload.int64_values.size()) {
 					throw InternalException("SLJIT preaggregated count delta is out of range");
 				}
-				auto count_ptr = reinterpret_cast<int64_t *>(value_ptr);
-				*count_ptr += payload.int64_values[row_idx];
+				if (initialize_states) {
+					ExecutionInitializeFreshPrimitiveAggregateState(state_base, *lane, payload.int64_values[row_idx]);
+				} else {
+					auto count_ptr = reinterpret_cast<int64_t *>(value_ptr);
+					*count_ptr += payload.int64_values[row_idx];
+				}
 				break;
 			}
 			case AggregatePrimitiveUpdateKind::SUM_INT64: {
 				if (row_idx >= payload.int64_values.size()) {
 					throw InternalException("SLJIT preaggregated int64 sum delta is out of range");
 				}
-				if (row_idx >= payload.value_is_set.size() || !payload.value_is_set[row_idx]) {
+				if (row_idx >= payload.value_is_set.size()) {
+					throw InternalException("SLJIT preaggregated int64 sum validity is out of range");
+				}
+				if (initialize_states) {
+					ExecutionInitializeFreshPrimitiveAggregateState(state_base, *lane, payload.int64_values[row_idx],
+					                                                payload.value_is_set[row_idx]);
+					break;
+				}
+				if (!payload.value_is_set[row_idx]) {
 					break;
 				}
 				auto sum = reinterpret_cast<int64_t *>(value_ptr);
@@ -268,7 +308,15 @@ static void ExecuteSljitPreaggregatedPrimitiveUpdate(const uintptr_t *addresses,
 				if (row_idx >= payload.hugeint_values.size()) {
 					throw InternalException("SLJIT preaggregated hugeint sum delta is out of range");
 				}
-				if (row_idx >= payload.value_is_set.size() || !payload.value_is_set[row_idx]) {
+				if (row_idx >= payload.value_is_set.size()) {
+					throw InternalException("SLJIT preaggregated hugeint sum validity is out of range");
+				}
+				if (initialize_states) {
+					ExecutionInitializeFreshPrimitiveAggregateState(state_base, *lane, payload.hugeint_values[row_idx],
+					                                                payload.value_is_set[row_idx]);
+					break;
+				}
+				if (!payload.value_is_set[row_idx]) {
 					break;
 				}
 				auto sum = reinterpret_cast<hugeint_t *>(value_ptr);
@@ -284,9 +332,18 @@ static void ExecuteSljitPreaggregatedPrimitiveUpdate(const uintptr_t *addresses,
 	}
 }
 
+static void ExecuteSljitPreaggregatedPrimitiveUpdate(const uintptr_t *addresses, const sel_t *address_sel,
+                                                     const sel_t *execute_sel, idx_t count, void *state_p) {
+	ExecuteSljitPreaggregatedPrimitiveUpdateInternal(addresses, address_sel, execute_sel, count, false, state_p);
+}
+
 static void ExecuteSljitPreaggregatedPrimitiveAddressUpdate(const uintptr_t *addresses, const sel_t *address_sel,
-                                                            idx_t count, void *state_p) {
-	ExecuteSljitPreaggregatedPrimitiveUpdate(addresses, address_sel, nullptr, count, state_p);
+                                                            idx_t count,
+                                                            ExecutionGroupedAggregateStateAddressUpdateMode mode,
+                                                            void *state_p) {
+	ExecuteSljitPreaggregatedPrimitiveUpdateInternal(
+	    addresses, address_sel, nullptr, count,
+	    mode == ExecutionGroupedAggregateStateAddressUpdateMode::INITIALIZE_AND_UPDATE, state_p);
 }
 
 static void ExecuteSljitPreaggregatedPrimitiveTargetSpan(const ExecutionGroupedAggregateStateTargetSpan &span,

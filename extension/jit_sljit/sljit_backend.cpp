@@ -43,7 +43,8 @@ public:
 };
 
 void RegisterSljitExecutionRegionBackend(ExtensionLoader &loader) {
-	RegisterExecutionRegionBackend(loader.GetDatabaseInstance(), make_uniq<SljitExecutionRegionBackend>());
+	RegisterExecutionRegionBackend(loader.GetDatabaseInstance(), make_uniq<SljitExecutionRegionBackend>(),
+	                               EXECUTION_REGION_BACKEND_ABI_VERSION);
 }
 
 } // namespace duckdb

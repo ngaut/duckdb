@@ -23,10 +23,13 @@ public:
 	                                   const vector<idx_t> &source_distinct_counts_p,
 	                                   const vector<Value> &source_min_values_p,
 	                                   const vector<Value> &source_max_values_p,
-	                                   const SljitFullPipelineRecipePlan &recipe_plan_p)
+	                                   const SljitFullPipelineRecipePlan &recipe_plan_p,
+	                                   SljitRegionExecutionScratch &scratch_p,
+	                                   SljitFullPipelineTerminalRuntimeState &terminal_state_p)
 	    : kernel(kernel_p), runtime(runtime_p), result(result_p), ops(ops_p),
 	      source_distinct_counts(source_distinct_counts_p), source_min_values(source_min_values_p),
-	      source_max_values(source_max_values_p), recipe_plan(recipe_plan_p) {
+	      source_max_values(source_max_values_p), recipe_plan(recipe_plan_p), scratch(scratch_p),
+	      terminal_state(terminal_state_p) {
 	}
 
 	bool TryExecute() {
@@ -51,7 +54,7 @@ private:
 
 	bool TryExecuteNativeOnly() {
 		auto execute_native_full_pipeline = NativePipelineExecutor();
-		return SljitTryExecuteFullPipelineNativeOnly(runtime, result, ops, execute_native_full_pipeline);
+		return SljitTryExecuteFullPipelineNativeOnly(runtime, result, ops, execute_native_full_pipeline, scratch);
 	}
 
 	bool TryExecutePrimitiveSequenceBatched() {
@@ -59,7 +62,7 @@ private:
 		auto execute_hash_join_probe = RecordedHashJoinProbeExecutor();
 		return SljitTryExecuteFullPipelinePrimitiveSequenceBatched(
 		    runtime, result, ops, recipe_plan.recipe, execute_native_full_pipeline_from, execute_hash_join_probe,
-		    source_distinct_counts, source_min_values, source_max_values);
+		    source_distinct_counts, source_min_values, source_max_values, scratch, terminal_state);
 	}
 
 private:
@@ -71,6 +74,8 @@ private:
 	const vector<Value> &source_min_values;
 	const vector<Value> &source_max_values;
 	const SljitFullPipelineRecipePlan &recipe_plan;
+	SljitRegionExecutionScratch &scratch;
+	SljitFullPipelineTerminalRuntimeState &terminal_state;
 };
 
 template <class KERNEL>
@@ -78,9 +83,11 @@ static bool
 SljitTryExecuteFullPipelineRecipe(KERNEL &kernel, ExecutionRegionRuntime &runtime, ExecutionRegionResult &result,
                                   vector<SljitExecutableRegionOp> &ops, const vector<idx_t> &source_distinct_counts,
                                   const vector<Value> &source_min_values, const vector<Value> &source_max_values,
-                                  const SljitFullPipelineRecipePlan &recipe_plan) {
+                                  const SljitFullPipelineRecipePlan &recipe_plan, SljitRegionExecutionScratch &scratch,
+                                  SljitFullPipelineTerminalRuntimeState &terminal_state) {
 	SljitFullPipelineRuntimeDispatcher<KERNEL> dispatcher(kernel, runtime, result, ops, source_distinct_counts,
-	                                                      source_min_values, source_max_values, recipe_plan);
+	                                                      source_min_values, source_max_values, recipe_plan, scratch,
+	                                                      terminal_state);
 	return dispatcher.TryExecute();
 }
 

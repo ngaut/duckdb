@@ -47,8 +47,11 @@ bool TryEmitSljitStringPredicateBranches(struct sljit_compiler *compiler, const 
 		sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_R0, 0, SLJIT_R4, 0);
 		sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_R1, 0, SLJIT_R2, 0);
 		sljit_emit_op1(compiler, SLJIT_MOV_P, SLJIT_R2, 0, SLJIT_IMM, CastPointerToValue(pattern));
-		sljit_emit_icall(compiler, SLJIT_CALL, SLJIT_ARGS3(W, P, W, P), SLJIT_IMM,
-		                 SLJIT_FUNC_ADDR(SljitNativeStringLikePercentOnly));
+		const auto like_function =
+		    !pattern->like_anchor_start && !pattern->like_anchor_end && pattern->like_fragments.size() == 2
+		        ? SLJIT_FUNC_ADDR(SljitNativeStringLikeTwoUnanchoredFragments)
+		        : SLJIT_FUNC_ADDR(SljitNativeStringLikePercentOnly);
+		sljit_emit_icall(compiler, SLJIT_CALL, SLJIT_ARGS3(W, P, W, P), SLJIT_IMM, like_function);
 		result.true_jumps.push_back(sljit_emit_cmp(compiler, SLJIT_NOT_EQUAL, SLJIT_RETURN_REG, 0, SLJIT_IMM, 0));
 		result.false_jumps.push_back(sljit_emit_jump(compiler, SLJIT_JUMP));
 		return true;

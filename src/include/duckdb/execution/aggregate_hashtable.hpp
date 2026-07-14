@@ -27,6 +27,8 @@ struct ExecutionOperatorStageRecorder;
 struct FlushMoveState;
 
 struct GroupedAggregateProvenUniqueRange {
+	//! A conservative interval covering observed integral keys. The bounded local summary keeps exact dense
+	//! runs until it reaches its interval budget, then coalesces them into a safe hull.
 	PhysicalType key_type = PhysicalType::INVALID;
 	int64_t first_signed_key = 0;
 	int64_t last_signed_key = 0;
@@ -181,13 +183,13 @@ public:
 	void SkipLookups(bool require_final_combine = true);
 	//! Permanently require final combination for the current append-only stream.
 	void RequireFinalCombine();
-	//! Continue a fixed-width strictly increasing compact-key stream. The proof is owned by this HT
-	//! so it survives backend/runtime invocation boundaries.
-	bool TryContinueProvenUniqueAppend(DataChunk &groups);
+	//! Continue a fixed-width strictly increasing compact-key stream. Exact dense runs are owned by
+	//! this HT so the proof survives backend/runtime invocation and local pointer-table boundaries.
+	bool TryContinueProvenUniqueAppend(DataChunk &groups, ExecutionGroupedAggregateAppendProof append_proof = {});
 	//! Whether append-only rows require final duplicate reconciliation.
 	bool LookupsSkippedRequireFinalCombine() const;
-	//! Return the exact local range when the append-only uniqueness proof is still intact.
-	bool GetProvenUniqueAppendRange(GroupedAggregateProvenUniqueRange &range) const;
+	//! Return bounded local covering intervals when the append-only uniqueness proof is still intact.
+	optional_ptr<const vector<GroupedAggregateProvenUniqueRange>> GetProvenUniqueAppendRanges() const;
 	//! Enable/disable HLL
 	void EnableHLL(bool enable);
 	//! Whether HLL is enabled
@@ -366,10 +368,10 @@ private:
 	bool skip_lookups_require_final_combine;
 	PhysicalType proven_unique_append_key_type;
 	bool proven_unique_append_has_last_key;
-	int64_t proven_unique_append_first_signed_key;
 	int64_t proven_unique_append_last_signed_key;
-	uint64_t proven_unique_append_first_unsigned_key;
 	uint64_t proven_unique_append_last_unsigned_key;
+	vector<GroupedAggregateProvenUniqueRange> proven_unique_append_ranges;
+	bool proven_unique_append_ranges_coalesced;
 
 private:
 	//! Disabled the copy constructor

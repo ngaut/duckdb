@@ -82,7 +82,9 @@ static bool TryExecuteRunPreaggregatedInputVectorCarryoverOnlyUpdate(
 	auto update_state = SljitMakePreaggregatedPrimitiveUpdateState(payload_lanes, preaggregate_scratch.payloads);
 	uintptr_t address = continuation.state_address;
 	auto stage_start = SljitRegionStageStart(runtime);
-	ExecuteSljitPreaggregatedPrimitiveAddressUpdate(&address, nullptr, run_group_keys.size(), &update_state);
+	ExecuteSljitPreaggregatedPrimitiveAddressUpdate(&address, nullptr, run_group_keys.size(),
+	                                                ExecutionGroupedAggregateStateAddressUpdateMode::UPDATE_INITIALIZED,
+	                                                &update_state);
 	grouped_state.state->RecordDirectStateAddressUpdates(represented_row_count);
 	RecordSljitRegionStageRuntimePath(runtime, op_idx, op.kind,
 	                                  "direct_input_vector_run_preaggregated_carryover_update", stage_start);
@@ -171,7 +173,9 @@ static bool TryExecuteRunPreaggregatedInputVectorAppendSuffixWithPrefixUpdate(
 	    SljitMakePreaggregatedPrimitiveUpdateState(payload_lanes, preaggregate_scratch_slice.payloads);
 	uintptr_t prefix_address = continuation.state_address;
 	auto prefix_stage_start = SljitRegionStageStart(runtime);
-	ExecuteSljitPreaggregatedPrimitiveAddressUpdate(&prefix_address, nullptr, prefix_count, &prefix_update_state);
+	ExecuteSljitPreaggregatedPrimitiveAddressUpdate(&prefix_address, nullptr, prefix_count,
+	                                                ExecutionGroupedAggregateStateAddressUpdateMode::UPDATE_INITIALIZED,
+	                                                &prefix_update_state);
 	grouped_state.state->RecordDirectStateAddressUpdates(prefix_count);
 	RecordPreaggregatedGroupedAggregateRepresentedRows(grouped_state, represented_row_count, run_group_keys.size());
 	RecordSljitRegionStageRuntimePath(
