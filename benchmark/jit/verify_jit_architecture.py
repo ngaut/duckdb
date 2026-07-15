@@ -484,6 +484,8 @@ def verify_benchmark_repetition_budget() -> None:
     refactor_guard = read("benchmark/jit/run_jit_refactor_guard.py")
     if "if args.tpch_triage_failures:" not in refactor_guard:
         raise AssertionError("refactor guard must pass TPC-H triage only when explicitly requested")
+    if 'parser.add_argument("--tpch-repeats", type=int, default=10)' not in refactor_guard:
+        raise AssertionError("pre-push SF10 comparison must balance both alternating policy orders")
 
 
 def verify_bound_direct_join_terminal_contract() -> None:

@@ -1210,10 +1210,11 @@ before the implementation lands; otherwise the gate still permits the
 performance that the implementation just replaced. Floors remain
 thread-specific when parallel scheduling noise changes the demonstrated
 margin. Retained exact-filter evidence proves 1.179x-1.191x at one thread and
-1.110x-1.128x at four threads, so its floors remain 1.15x and 1.08x. Current
-candidate gates use five order-alternating policy pairs and an explicitly
-requested promotion or focused triage uses ten; no routine gate schedules a
-larger sample.
+1.110x-1.128x at four threads, so its floors remain 1.15x and 1.08x. Generic
+candidate gates use five order-alternating policy pairs. The pre-push SF10 gate
+uses ten so each leading-policy order contributes five samples; an odd sample
+count can otherwise make process/cache order select the median. Promotions and
+focused triage also use ten, and no routine gate schedules a larger sample.
 
 Filtered perfect-hash and ungrouped scalar-terminal hybrids consume one SIMD
 profitability contract based on scalar predicate operations. A lone comparison

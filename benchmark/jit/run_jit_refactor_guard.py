@@ -12,16 +12,11 @@ import sys
 from datetime import datetime
 from pathlib import Path
 
-
 ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_UNIT_BASELINE_ENV = "DUCKDB_JIT_UNIT_BASELINE"
 DEFAULT_TPCH_BASELINE_ENV = "DUCKDB_JIT_TPCH_BASELINE"
-DEFAULT_UNIT_BASELINE_STATE = (
-    ROOT / "benchmark" / "jit" / "tmp" / "jit_refactor_guard_state.json"
-)
-DEFAULT_TPCH_BASELINE_STATE = (
-    ROOT / "benchmark" / "tpch" / "jit" / "tmp" / "tpch_refactor_guard_state.json"
-)
+DEFAULT_UNIT_BASELINE_STATE = ROOT / "benchmark" / "jit" / "tmp" / "jit_refactor_guard_state.json"
+DEFAULT_TPCH_BASELINE_STATE = ROOT / "benchmark" / "tpch" / "jit" / "tmp" / "tpch_refactor_guard_state.json"
 DEFAULT_UNIT_SPEC = "*JIT*"
 PYTHON_GUARD_FILES = (
     ROOT / "benchmark" / "jit" / "verify_jit_architecture.py",
@@ -110,9 +105,7 @@ def run_command(
     return result
 
 
-def run_git(
-    command: list[str], label: str, *, check: bool = True
-) -> subprocess.CompletedProcess:
+def run_git(command: list[str], label: str, *, check: bool = True) -> subprocess.CompletedProcess:
     result = subprocess.run(
         ["git", *command],
         cwd=ROOT,
@@ -136,10 +129,7 @@ def normalize_changed_path(path: str) -> str:
 
 
 def ignore_changed_path(path: str) -> bool:
-    return (
-        any(path.startswith(prefix) for prefix in IGNORED_CHANGE_PREFIXES)
-        or "/__pycache__/" in path
-    )
+    return any(path.startswith(prefix) for prefix in IGNORED_CHANGE_PREFIXES) or "/__pycache__/" in path
 
 
 def parse_name_status_paths(output: str) -> list[str]:
@@ -177,9 +167,7 @@ def parse_porcelain_paths(output: str) -> list[str]:
 
 def git_changed_paths(change_set: str) -> list[str]:
     if change_set == "dirty":
-        result = run_git(
-            ["status", "--porcelain", "--untracked-files=all"], "git dirty change-set"
-        )
+        result = run_git(["status", "--porcelain", "--untracked-files=all"], "git dirty change-set")
         return parse_porcelain_paths(result.stdout)
     if change_set == "staged":
         result = run_git(
@@ -239,31 +227,23 @@ def cap_level(level: str, max_level: str) -> str:
     return max_level
 
 
-def classify_auto_level(
-    changed_paths: list[str], max_level: str
-) -> tuple[str, str, list[str]]:
+def classify_auto_level(changed_paths: list[str], max_level: str) -> tuple[str, str, list[str]]:
     if not changed_paths:
         return "quick", "quick", ["no tracked or untracked changes detected"]
 
     reasons = []
     required_level = "quick"
-    performance_paths = [
-        path for path in changed_paths if is_jit_performance_path(path)
-    ]
+    performance_paths = [path for path in changed_paths if is_jit_performance_path(path)]
     unit_paths = [path for path in changed_paths if is_jit_unit_path(path)]
     if performance_paths:
         required_level = "full"
-        reasons.append(
-            "performance-sensitive JIT execution/planner/benchmark paths changed"
-        )
+        reasons.append("performance-sensitive JIT execution/planner/benchmark paths changed")
         reasons.extend(f"performance: {path}" for path in performance_paths[:12])
         if len(performance_paths) > 12:
             reasons.append(f"performance: ... {len(performance_paths) - 12} more")
     elif unit_paths:
         required_level = "unit"
-        reasons.append(
-            "JIT correctness, architecture, test, or benchmark harness paths changed"
-        )
+        reasons.append("JIT correctness, architecture, test, or benchmark harness paths changed")
         reasons.extend(f"unit: {path}" for path in unit_paths[:12])
         if len(unit_paths) > 12:
             reasons.append(f"unit: ... {len(unit_paths) - 12} more")
@@ -319,9 +299,7 @@ def unit_list_command(args: argparse.Namespace) -> list[str]:
     return [str(args.unit_binary), "--list-test-names-only", args.unit_spec]
 
 
-def tpch_gate_command(
-    args: argparse.Namespace, *, skip_build: bool, skip_architecture: bool
-) -> list[str]:
+def tpch_gate_command(args: argparse.Namespace, *, skip_build: bool, skip_architecture: bool) -> list[str]:
     command = [
         sys.executable,
         str(ROOT / "benchmark" / "tpch" / "jit" / "run_tpch_regression_gate.py"),
@@ -372,9 +350,7 @@ def tpch_gate_command(
 
 
 def load_known_tests(args: argparse.Namespace, artifact_dir: Path) -> set[str]:
-    result = run_command(
-        unit_list_command(args), "list unit tests", capture=True, check=False
-    )
+    result = run_command(unit_list_command(args), "list unit tests", capture=True, check=False)
     (artifact_dir / "unit_test_names.txt").write_text(result.stdout, encoding="utf-8")
     tests = {line.strip() for line in result.stdout.splitlines() if line.strip()}
     if not tests:
@@ -409,28 +385,18 @@ def parse_catch_failed_tests(output: str, known_tests: set[str]) -> list[str]:
     return sorted(failures)
 
 
-def run_unit_suite(
-    args: argparse.Namespace, artifact_dir: Path
-) -> tuple[int, list[str]]:
+def run_unit_suite(args: argparse.Namespace, artifact_dir: Path) -> tuple[int, list[str]]:
     require_file(args.unit_binary, "unit test binary")
     known_tests = load_known_tests(args, artifact_dir)
     if args.unit_execution == "bulk":
-        result = run_command(
-            unit_command(args), "unit ratchet", capture=True, check=False
-        )
+        result = run_command(unit_command(args), "unit ratchet", capture=True, check=False)
         output = result.stdout + result.stderr
-        (artifact_dir / "unit_output.txt").write_text(
-            output, encoding="utf-8", errors="replace"
-        )
+        (artifact_dir / "unit_output.txt").write_text(output, encoding="utf-8", errors="replace")
         failures = parse_catch_failed_tests(output, known_tests)
         if result.returncode != 0 and not failures:
-            raise GuardError(
-                "unit suite failed but no failed Catch2 test names were parsed"
-            )
+            raise GuardError("unit suite failed but no failed Catch2 test names were parsed")
         if result.returncode == 0 and failures:
-            raise GuardError(
-                f"unit suite passed but failed test names were parsed: {failures}"
-            )
+            raise GuardError(f"unit suite passed but failed test names were parsed: {failures}")
         return result.returncode, failures
 
     output_parts = []
@@ -454,9 +420,7 @@ def run_unit_suite(
         if result.returncode != 0:
             failures.append(test_name)
             print(f"[unit ratchet] failed: {test_name}", flush=True)
-    (artifact_dir / "unit_output.txt").write_text(
-        "".join(output_parts), encoding="utf-8", errors="replace"
-    )
+    (artifact_dir / "unit_output.txt").write_text("".join(output_parts), encoding="utf-8", errors="replace")
     return len(failures), sorted(failures)
 
 
@@ -547,9 +511,7 @@ def write_unit_baseline(
     path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
 
 
-def write_unit_state(
-    args: argparse.Namespace, baseline_path: Path, source: str
-) -> None:
+def write_unit_state(args: argparse.Namespace, baseline_path: Path, source: str) -> None:
     baseline = load_unit_baseline(baseline_path)
     args.unit_baseline_state.parent.mkdir(parents=True, exist_ok=True)
     state = {
@@ -560,18 +522,12 @@ def write_unit_state(
         "failed_tests": baseline["failed_tests"],
         "failed_test_count": len(baseline["failed_tests"]),
     }
-    args.unit_baseline_state.write_text(
-        json.dumps(state, indent=2) + "\n", encoding="utf-8"
-    )
+    args.unit_baseline_state.write_text(json.dumps(state, indent=2) + "\n", encoding="utf-8")
 
 
-def compare_unit_failures(
-    args: argparse.Namespace, artifact_dir: Path, failures: list[str]
-) -> None:
+def compare_unit_failures(args: argparse.Namespace, artifact_dir: Path, failures: list[str]) -> None:
     candidate_path = artifact_dir / "unit_failures.json"
-    write_unit_baseline(
-        candidate_path, args, artifact_dir, failures, source="candidate"
-    )
+    write_unit_baseline(candidate_path, args, artifact_dir, failures, source="candidate")
 
     if args.init_unit_baseline:
         write_unit_state(args, candidate_path, "init-unit-baseline")
@@ -605,9 +561,7 @@ def compare_unit_failures(
         "baseline_failed_test_count": len(baseline_failures),
         "candidate_failed_test_count": len(candidate_failures),
     }
-    (artifact_dir / "unit_failure_comparison.json").write_text(
-        json.dumps(report, indent=2) + "\n", encoding="utf-8"
-    )
+    (artifact_dir / "unit_failure_comparison.json").write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
     if new_failures:
         raise GuardError(
             "unit ratchet failed: new JIT test failures: "
@@ -661,18 +615,12 @@ def write_guard_metadata(args: argparse.Namespace, artifact_dir: Path) -> None:
         "tpch_baseline_state": str(args.tpch_baseline_state),
         "artifact_dir": str(artifact_dir.resolve()),
     }
-    (artifact_dir / "refactor_guard.json").write_text(
-        json.dumps(metadata, indent=2) + "\n", encoding="utf-8"
-    )
+    (artifact_dir / "refactor_guard.json").write_text(json.dumps(metadata, indent=2) + "\n", encoding="utf-8")
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(
-        description="Run the JIT refactor regression guard"
-    )
-    parser.add_argument(
-        "--level", choices=("auto", "quick", "unit", "tpch", "full"), default="auto"
-    )
+    parser = argparse.ArgumentParser(description="Run the JIT refactor regression guard")
+    parser.add_argument("--level", choices=("auto", "quick", "unit", "tpch", "full"), default="auto")
     parser.add_argument(
         "--change-set",
         choices=("dirty", "staged", "branch"),
@@ -692,9 +640,7 @@ def parse_args() -> argparse.Namespace:
         help="Maximum concrete level selected by --level auto. Hooks use this to make pre-commit fast.",
     )
     parser.add_argument("--out-dir", type=Path, default=None)
-    parser.add_argument(
-        "--duckdb", type=Path, default=ROOT / "build" / "reldebug" / "duckdb"
-    )
+    parser.add_argument("--duckdb", type=Path, default=ROOT / "build" / "reldebug" / "duckdb")
     parser.add_argument("--build-dir", type=Path, default=ROOT / "build" / "reldebug")
     parser.add_argument("--build-config", default="RelWithDebInfo")
     parser.add_argument("--no-build", action="store_true")
@@ -716,19 +662,15 @@ def parse_args() -> argparse.Namespace:
         help="Run matching unit tests one-by-one for complete failure-set ratcheting, or as one bulk Catch2 run.",
     )
     parser.add_argument("--unit-baseline", type=Path, default=None)
-    parser.add_argument(
-        "--unit-baseline-state", type=Path, default=DEFAULT_UNIT_BASELINE_STATE
-    )
+    parser.add_argument("--unit-baseline-state", type=Path, default=DEFAULT_UNIT_BASELINE_STATE)
     parser.add_argument("--init-unit-baseline", action="store_true")
     parser.add_argument("--promote-unit-baseline", action="store_true")
 
     parser.add_argument("--tpch-baseline", type=Path, default=None)
-    parser.add_argument(
-        "--tpch-baseline-state", type=Path, default=DEFAULT_TPCH_BASELINE_STATE
-    )
+    parser.add_argument("--tpch-baseline-state", type=Path, default=DEFAULT_TPCH_BASELINE_STATE)
     parser.add_argument("--tpch-out-dir", type=Path, default=None)
     parser.add_argument("--tpch-queries", nargs="+", default=["all"])
-    parser.add_argument("--tpch-repeats", type=int, default=5)
+    parser.add_argument("--tpch-repeats", type=int, default=10)
     parser.add_argument("--tpch-triage-failures", action="store_true")
     parser.add_argument("--tpch-triage-repeats", type=int, default=10)
     parser.add_argument("--tpch-triage-profile-repeats", type=int, default=3)
@@ -763,11 +705,9 @@ def validate_args(args: argparse.Namespace) -> Path:
     if args.level == "auto":
         changed_paths = set(git_changed_paths(args.change_set))
         changed_paths.update(normalize_changed_path(path) for path in args.changed_path)
-        args.changed_paths = sorted(
-            path for path in changed_paths if path and not ignore_changed_path(path)
-        )
-        args.auto_required_level, args.auto_selected_level, args.auto_reasons = (
-            classify_auto_level(args.changed_paths, args.auto_max_level)
+        args.changed_paths = sorted(path for path in changed_paths if path and not ignore_changed_path(path))
+        args.auto_required_level, args.auto_selected_level, args.auto_reasons = classify_auto_level(
+            args.changed_paths, args.auto_max_level
         )
         args.level = args.auto_selected_level
         print(
@@ -778,33 +718,19 @@ def validate_args(args: argparse.Namespace) -> Path:
         )
         for reason in args.auto_reasons[:16]:
             print(f"  - {reason}", flush=True)
-        if (
-            args.auto_required_level == "full"
-            and args.level == "full"
-            and args.skip_tpch
-        ):
-            raise GuardError(
-                "--skip-tpch cannot be used with performance-sensitive auto guard changes"
-            )
+        if args.auto_required_level == "full" and args.level == "full" and args.skip_tpch:
+            raise GuardError("--skip-tpch cannot be used with performance-sensitive auto guard changes")
     if args.init_unit_baseline and args.promote_unit_baseline:
-        raise GuardError(
-            "--init-unit-baseline and --promote-unit-baseline are mutually exclusive"
-        )
+        raise GuardError("--init-unit-baseline and --promote-unit-baseline are mutually exclusive")
     if args.init_tpch_baseline and args.promote_tpch_baseline:
-        raise GuardError(
-            "--init-tpch-baseline and --promote-tpch-baseline are mutually exclusive"
-        )
+        raise GuardError("--init-tpch-baseline and --promote-tpch-baseline are mutually exclusive")
     if args.tpch_repeats <= 0:
         raise GuardError("--tpch-repeats must be positive")
     if args.tpch_triage_repeats <= 0:
         raise GuardError("--tpch-triage-repeats must be positive")
     if args.tpch_triage_profile_repeats <= 0:
         raise GuardError("--tpch-triage-profile-repeats must be positive")
-    if (
-        should_run_tpch(args)
-        and not args.init_tpch_baseline
-        and not tpch_baseline_configured(args)
-    ):
+    if should_run_tpch(args) and not args.init_tpch_baseline and not tpch_baseline_configured(args):
         raise GuardError(
             "TPC-H regression gate is required but no accepted TPC-H baseline is configured; "
             "run with --init-tpch-baseline after a clean full-query artifact, pass --tpch-baseline, "

@@ -29,9 +29,10 @@ Pre-commit validates the staged tree with the build, architecture, Python, and
 JIT unit ratchet, then publishes the verified Git tree hash. When HEAD matches
 that receipt, pre-push reuses the result and adds only the generic and TPC-H
 production gates required by performance-sensitive branch changes. A missing
-or stale receipt makes pre-push run the complete guard. Candidate timing gates
-use five order-alternating policy pairs (the leading policy reverses every
-repeat); a ten-repeat promotion is an explicit follow-up command, never an
+or stale receipt makes pre-push run the complete guard. Generic candidate gates
+use five order-alternating policy pairs. The pre-push SF10 comparison uses ten,
+giving each leading-policy order five samples so process/cache order cannot
+choose the median. Focused triage remains an explicit operator action, never an
 automatic failed-candidate rerun.
 
 TPC-H benchmark and comparison gate:
