@@ -167,12 +167,12 @@ GENERIC_WORKLOADS = (
             "SELECT sum(id * 31) AS value FROM __jit_generic_like_fragments "
             "WHERE comment NOT LIKE '%special%requests%'"
         ),
-        # Fixed-shape lowering for generic two-fragment percent-only patterns
-        # promotes at 1.236x (T1) and 1.219x (T4). Keep enough host-noise
-        # margin while preventing the matcher from falling back to its old
-        # dynamic fragment loop.
-        "minimum_auto_speedup": 1.15,
-        "minimum_auto_speedup_by_threads": {1: 1.18, 4: 1.16},
+        # Filter-operator-owned batch selection for generic two-fragment percent-only
+        # patterns promote at 1.375x (T1) and 1.342x (T4) over ten production
+        # repetitions. Preserve the demonstrated batch-boundary gain while
+        # retaining host-noise margin.
+        "minimum_auto_speedup": 1.20,
+        "minimum_auto_speedup_by_threads": {1: 1.29, 4: 1.27},
         "max_auto_slowdown": 1.05,
         "requires_compiled_auto": True,
     },

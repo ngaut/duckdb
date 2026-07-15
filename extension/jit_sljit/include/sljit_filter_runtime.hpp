@@ -375,7 +375,19 @@ static idx_t SljitSelectFilter(SljitExecutableRegionOp &op, DataChunk &input, Se
 	if (count == DConstants::INVALID_INDEX) {
 		count = input.size();
 	}
-	return SljitSelectExpression(op.filter, input, filter_selection, adapter_scratch, execute_sel, count, false);
+	D_ASSERT(op.filter);
+	auto &filter = *op.filter;
+	if (filter.batch_select) {
+		const auto &batch_select = *filter.batch_select;
+		const auto local_source_index = batch_select.source_index;
+		D_ASSERT(local_source_index < filter.expression.input_source_indices.size());
+		const auto input_source_index = filter.expression.input_source_indices[local_source_index];
+		D_ASSERT(input_source_index < input.ColumnCount());
+		return SljitSelectNativeStringLikeBatch(batch_select, input.data[input_source_index], filter_selection,
+		                                        execute_sel, count);
+	}
+	return SljitSelectExpression(filter.expression, input, filter_selection, adapter_scratch, execute_sel, count,
+	                             false);
 }
 
 template <class ADAPTER_SCRATCH>

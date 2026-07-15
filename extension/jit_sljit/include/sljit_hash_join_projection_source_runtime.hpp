@@ -182,7 +182,8 @@ static bool SljitTryBuildHashJoinMappedFilter(const vector<idx_t> &source_map,
 		full_source_map.push_back(source_idx);
 	}
 
-	auto mapped_plan = filter_op.filter.plan.Copy(true, false);
+	D_ASSERT(filter_op.filter);
+	auto mapped_plan = filter_op.filter->expression.plan.Copy(true, false);
 	idx_t failed_source_index = DConstants::INVALID_INDEX;
 	if (!SljitTryRemapHashJoinProjectionPlanSources(full_source_map, mapped_plan,
 	                                                optional_ptr<idx_t>(&failed_source_index))) {
@@ -200,9 +201,8 @@ static bool SljitTryBuildHashJoinMappedFilter(const vector<idx_t> &source_map,
 	mapped_filter.kind = SljitNativeRegionOpKind::FILTER;
 	mapped_filter.input_types = source_binding.output_types;
 	mapped_filter.output_types = source_binding.output_types;
-	SljitPrepareExecutableRegionExpression(mapped_plan, mapped_filter.filter);
 	string compile_error;
-	if (!SljitCompilePreparedExecutableRegionExpression(mapped_filter.filter, true, compile_error)) {
+	if (!SljitPrepareAndCompileExecutableFilter(mapped_plan, mapped_filter, compile_error)) {
 		if (blocker) {
 			*blocker = "compile_mapped_filter_" + compile_error;
 		}

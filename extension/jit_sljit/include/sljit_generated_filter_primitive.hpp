@@ -44,7 +44,7 @@ static bool SljitGeneratedFilterExpressionHasSelector(const SljitExecutableRegio
 
 static bool SljitCanBindGeneratedFilterPrimitive(const vector<SljitExecutableRegionOp> &ops, idx_t filter_idx) {
 	return filter_idx < ops.size() && ops[filter_idx].kind == SljitNativeRegionOpKind::FILTER &&
-	       SljitGeneratedFilterExpressionHasSelector(ops[filter_idx].filter);
+	       ops[filter_idx].filter && SljitGeneratedFilterExpressionHasSelector(ops[filter_idx].filter->expression);
 }
 
 static SljitGeneratedFilterPrimitive SljitBindGeneratedFilterPrimitive(const vector<SljitExecutableRegionOp> &ops,
@@ -155,8 +155,9 @@ static bool SljitExecuteSelectedHashJoinGeneratedFilterPrimitive(
 	auto &mapped_filter = SljitBindSelectedHashJoinFilterOp(selected, *source_binding, filter_op, cache);
 
 	vector<uint8_t> referenced_columns;
-	if (!SljitTryCollectHashJoinProjectionExpressionSources(mapped_filter.filter, source_binding->output_types.size(),
-	                                                        referenced_columns)) {
+	D_ASSERT(mapped_filter.filter);
+	if (!SljitTryCollectHashJoinProjectionExpressionSources(mapped_filter.filter->expression,
+	                                                        source_binding->output_types.size(), referenced_columns)) {
 		throw InternalException("SLJIT selected hash-join filter could not collect filter sources");
 	}
 	selected_hash_join_filter_input.Ensure(runtime.GetAllocator(), source_binding->output_types);

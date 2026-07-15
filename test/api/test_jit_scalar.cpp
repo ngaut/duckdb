@@ -255,6 +255,17 @@ TEST_CASE("JIT lowers string predicates without aggregate sink dependence", "[ap
 	REQUIRE(CHECK_COLUMN(result, 0, {2}));
 	RequireNativeSljitIr(manager, "string_like");
 
+	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_sparse_not_like AS "
+	                          "SELECT i, CASE WHEN i % 100 = 0 "
+	                          "THEN 'ordinary package with special shipping requests included ' "
+	                          "ELSE 'ordinary shipping package comment with several common words ' END || "
+	                          "CAST(i AS VARCHAR) AS s FROM range(10000) tbl(i)"));
+	ClearJitTrace(manager, true);
+	result = con.Query("SELECT count(*) FROM jit_sparse_not_like WHERE s NOT LIKE '%special%requests%'");
+	REQUIRE_NO_FAIL(*result);
+	REQUIRE(result->GetValue(0, 0).GetValue<int64_t>() == 9900);
+	RequireNativeSljitIr(manager, "string_like");
+
 	REQUIRE_NO_FAIL(con.Query("SET disabled_optimizers='in_clause'"));
 	ClearJitTrace(manager, true);
 	result = con.Query("CREATE TEMP TABLE jit_string_projected_predicates AS "

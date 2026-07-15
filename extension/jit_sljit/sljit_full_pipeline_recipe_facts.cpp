@@ -415,8 +415,10 @@ static bool SljitFilterCanRunBeforePreProjection(const vector<SljitExecutableReg
 	    !SljitFullPipelineOpIsAt(ops, filter_idx, SljitNativeRegionOpKind::FILTER)) {
 		return false;
 	}
+	D_ASSERT(ops[filter_idx].filter);
 	vector<idx_t> filter_sources;
-	if (!SljitCollectExpressionSourceIndices(ops[filter_idx].filter, filter_sources) || filter_sources.empty()) {
+	if (!SljitCollectExpressionSourceIndices(ops[filter_idx].filter->expression, filter_sources) ||
+	    filter_sources.empty()) {
 		return false;
 	}
 	for (auto source_idx : filter_sources) {

@@ -10,11 +10,14 @@
 
 #include "duckdb/common/common.hpp"
 #include "duckdb/common/string.hpp"
-#include "duckdb/common/vector.hpp"
+#include "duckdb/common/types/selection_vector.hpp"
+#include "duckdb/common/types/vector.hpp"
 
 #include "sljitLir.h"
 
 namespace duckdb {
+
+struct SljitNativePredicate;
 
 struct SljitNativeStringLikeFragment {
 	idx_t start = 0;
@@ -37,6 +40,19 @@ struct SljitNativeStringConstantList {
 
 	vector<string> values;
 };
+
+struct SljitNativeStringLikeBatchPlan {
+	SljitNativeStringLikeBatchPlan(string pattern_p, idx_t source_index_p, bool negate_p);
+
+	SljitNativeStringConstant pattern;
+	idx_t source_index;
+	bool negate;
+};
+
+bool TryBuildSljitNativeStringLikeBatchPlan(const SljitNativePredicate &predicate,
+                                            unique_ptr<SljitNativeStringLikeBatchPlan> &result);
+idx_t SljitSelectNativeStringLikeBatch(const SljitNativeStringLikeBatchPlan &plan, Vector &source,
+                                       SelectionVector &result, const SelectionVector *execute_sel, idx_t count);
 
 sljit_sw SLJIT_FUNC SljitNativeStringLikePercentOnly(const char *sdata, idx_t slen,
                                                      const SljitNativeStringConstant *pattern);

@@ -22,8 +22,7 @@ static bool BuildExecutableRegionOp(const SljitNativeRegionOpPlan &op, SljitExec
 	executable.output_not_null = SljitBuildExecutableOutputNotNull(op, input_not_null);
 	switch (op.kind) {
 	case SljitNativeRegionOpKind::FILTER:
-		SljitPrepareExecutableRegionExpression(op.filter, executable.filter, &input_not_null, true);
-		return SljitCompilePreparedExecutableRegionExpression(executable.filter, true, error);
+		return SljitPrepareAndCompileExecutableFilter(op.filter, executable, error, &input_not_null, true);
 	case SljitNativeRegionOpKind::HASH_JOIN_PROBE:
 		executable.hash_join_probe.plan = op.hash_join_probe.Copy(false);
 		if (op.hash_join_probe.residual_predicate &&

@@ -117,6 +117,10 @@ two-way conjunction carries 1.31x and 1.25x floors; the three-way variant adds
 1.25x and 1.20x floors. The neighboring non-null grouped workload has 1.16x and
 1.13x thread-specific floors. The mixed-predicate promotion proves 1.338x at
 one thread and 1.286x at four threads.
+The high-cardinality two-fragment `LIKE` scan proves 1.375x at one thread and
+1.342x at four threads over ten production repetitions. Its 1.29x and 1.27x
+floors protect filter-operator-owned batch selection and sparse negated-selection
+publication instead of the former generated per-row runtime call.
 The mixed-source complementary string join promotion receipts prove 1.332x at
 one thread and 1.250x at four threads. Its 1.31x and 1.24x floors protect the
 generic direct terminal: a runtime-adaptive pipeline-local group accumulator,

@@ -391,4 +391,22 @@ bool SljitPrepareAndCompileExecutableRegionExpression(const SljitNativeRegionExp
 	return SljitCompilePreparedExecutableRegionExpression(expr, require_boolean, error);
 }
 
+bool SljitPrepareAndCompileExecutableFilter(const SljitNativeRegionExpressionPlan &plan,
+                                            SljitExecutableRegionOp &filter_op, string &error,
+                                            const vector<bool> *input_not_null, bool copy_auxiliary_expression_tree) {
+	D_ASSERT(filter_op.kind == SljitNativeRegionOpKind::FILTER);
+	auto executable_filter = make_uniq<SljitExecutableFilter>();
+	SljitPrepareExecutableRegionExpression(plan, executable_filter->expression, input_not_null,
+	                                       copy_auxiliary_expression_tree);
+	if (!SljitCompilePreparedExecutableRegionExpression(executable_filter->expression, true, error)) {
+		return false;
+	}
+	if (executable_filter->expression.plan.predicate) {
+		TryBuildSljitNativeStringLikeBatchPlan(*executable_filter->expression.plan.predicate,
+		                                       executable_filter->batch_select);
+	}
+	filter_op.filter = std::move(executable_filter);
+	return true;
+}
+
 } // namespace duckdb

@@ -85,20 +85,22 @@ bool SljitTryBuildFilteredAggregateUpdate(SljitExecutableRegionOp &filter_op, Sl
 	    aggregate_op.kind != SljitNativeRegionOpKind::AGGREGATE_UPDATE) {
 		return true;
 	}
+	D_ASSERT(filter_op.filter);
+	auto &filter = filter_op.filter->expression;
 	auto &aggregate_update = aggregate_op.aggregate_update;
 	if (aggregate_update.filtered_update.IsExecutable() || !aggregate_update.plan.UsesPrimitivePayloads() ||
 	    aggregate_update.payloads.empty() ||
 	    aggregate_update.payloads.size() != aggregate_update.plan.sink_info.aggregates.size()) {
 		return true;
 	}
-	if (!filter_op.filter.plan.expression_tree) {
+	if (!filter.plan.expression_tree) {
 		return true;
 	}
 
 	if (aggregate_update.plan.use_perfect_hash_group_lookup &&
 	    aggregate_update.plan.sink_info.kind == ExecutionRegionSinkKind::PERFECT_HASH_AGGREGATE_UPDATE) {
 		SljitExecutableFilteredAggregateUpdate filtered_update;
-		filtered_update.filter.plan = filter_op.filter.plan.Copy(true, false);
+		filtered_update.filter.plan = filter.plan.Copy(true, false);
 		filtered_update.payloads.reserve(aggregate_update.payloads.size());
 		for (auto &payload : aggregate_update.payloads) {
 			SljitExecutableRegionExpression filtered_payload;
@@ -115,9 +117,8 @@ bool SljitTryBuildFilteredAggregateUpdate(SljitExecutableRegionOp &filter_op, Sl
 		vector<bool> combined_source_not_null;
 		vector<Value> combined_source_min_values;
 		vector<Value> combined_source_max_values;
-		auto &filter_sources = filter_op.filter.input_source_indices.empty()
-		                           ? filter_op.filter.plan.expression_tree_source_indices
-		                           : filter_op.filter.input_source_indices;
+		auto &filter_sources = filter.input_source_indices.empty() ? filter.plan.expression_tree_source_indices
+		                                                           : filter.input_source_indices;
 		RemapSljitExpressionTreeToCombinedInputs(*filtered_update.filter.plan.expression_tree, filter_sources,
 		                                         combined_sources, &combined_source_not_null, &input_not_null,
 		                                         &combined_source_min_values, &combined_source_max_values,
@@ -193,7 +194,7 @@ bool SljitTryBuildFilteredAggregateUpdate(SljitExecutableRegionOp &filter_op, Sl
 	}
 
 	SljitExecutableFilteredAggregateUpdate filtered_update;
-	filtered_update.filter.plan = filter_op.filter.plan.Copy(true, false);
+	filtered_update.filter.plan = filter.plan.Copy(true, false);
 	filtered_update.payloads.reserve(aggregate_update.payloads.size());
 	for (auto &payload : aggregate_update.payloads) {
 		SljitExecutableRegionExpression filtered_payload;
@@ -206,9 +207,8 @@ bool SljitTryBuildFilteredAggregateUpdate(SljitExecutableRegionOp &filter_op, Sl
 
 	vector<idx_t> combined_sources;
 	vector<bool> combined_source_not_null;
-	auto &filter_sources = filter_op.filter.input_source_indices.empty()
-	                           ? filter_op.filter.plan.expression_tree_source_indices
-	                           : filter_op.filter.input_source_indices;
+	auto &filter_sources =
+	    filter.input_source_indices.empty() ? filter.plan.expression_tree_source_indices : filter.input_source_indices;
 	RemapSljitExpressionTreeToCombinedInputs(*filtered_update.filter.plan.expression_tree, filter_sources,
 	                                         combined_sources, &combined_source_not_null, &input_not_null);
 	for (idx_t payload_idx = 0; payload_idx < aggregate_update.payloads.size(); payload_idx++) {

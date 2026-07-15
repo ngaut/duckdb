@@ -13,6 +13,7 @@
 #include "sljit_function_types.hpp"
 #include "sljit_hash_join_probe_specialization.hpp"
 #include "sljit_perfect_hash_predicate_classification.hpp"
+#include "sljit_predicate_string_runtime.hpp"
 
 #include "sljit_region_plan.hpp"
 
@@ -37,6 +38,15 @@ struct SljitExecutableRegionExpression {
 	idx_t CodeSize() const {
 		return vector.CodeSize() + flat.CodeSize() + select.CodeSize() + predicate.CodeSize() +
 		       predicate_select.CodeSize();
+	}
+};
+
+struct SljitExecutableFilter {
+	SljitExecutableRegionExpression expression;
+	unique_ptr<SljitNativeStringLikeBatchPlan> batch_select;
+
+	idx_t CodeSize() const {
+		return expression.CodeSize();
 	}
 };
 
@@ -320,7 +330,7 @@ struct SljitExecutableRegionOp {
 	vector<LogicalType> input_types;
 	vector<LogicalType> output_types;
 	vector<bool> output_not_null;
-	SljitExecutableRegionExpression filter;
+	unique_ptr<SljitExecutableFilter> filter;
 	SljitExecutableHashJoinProbe hash_join_probe;
 	SljitExecutableHashJoinBuild hash_join_build;
 	SljitExecutableNestedLoopJoinProbe nested_loop_join_probe;
@@ -338,7 +348,8 @@ struct SljitExecutableRegionOp {
 	idx_t CodeSize() const {
 		idx_t result = 0;
 		if (kind == SljitNativeRegionOpKind::FILTER) {
-			result += filter.CodeSize();
+			D_ASSERT(filter);
+			result += filter->CodeSize();
 		}
 		if (kind == SljitNativeRegionOpKind::HASH_JOIN_PROBE) {
 			result += hash_join_probe.CodeSize();

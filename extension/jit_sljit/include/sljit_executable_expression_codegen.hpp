@@ -21,6 +21,10 @@ bool SljitCompilePreparedExecutableRegionExpression(SljitExecutableRegionExpress
 bool SljitPrepareAndCompileExecutableRegionExpression(const SljitNativeRegionExpressionPlan &plan, bool require_boolean,
                                                       SljitExecutableRegionExpression &expr, string &error,
                                                       const vector<bool> *input_not_null = nullptr);
+bool SljitPrepareAndCompileExecutableFilter(const SljitNativeRegionExpressionPlan &plan,
+                                            SljitExecutableRegionOp &filter_op, string &error,
+                                            const vector<bool> *input_not_null = nullptr,
+                                            bool copy_auxiliary_expression_tree = false);
 bool SljitTryBuildFlatFusedProjections(SljitExecutableRegionOp &op, string &error);
 
 } // namespace duckdb

@@ -8,7 +8,10 @@
 
 #include "sljit_predicate_string_runtime.hpp"
 
+#include "sljit_native_types.hpp"
+
 #include "duckdb/common/numeric_utils.hpp"
+#include "duckdb/common/vector/unified_vector_format.hpp"
 
 #include <cstring>
 #include <utility>
@@ -158,6 +161,10 @@ SljitNativeStringConstant::SljitNativeStringConstant(string value_p) : value(std
 SljitNativeStringConstantList::SljitNativeStringConstantList(vector<string> values_p) : values(std::move(values_p)) {
 }
 
+SljitNativeStringLikeBatchPlan::SljitNativeStringLikeBatchPlan(string pattern_p, idx_t source_index_p, bool negate_p)
+    : pattern(std::move(pattern_p)), source_index(source_index_p), negate(negate_p) {
+}
+
 sljit_sw SLJIT_FUNC SljitNativeStringLikePercentOnly(const char *sdata, idx_t slen,
                                                      const SljitNativeStringConstant *pattern) {
 	const auto &pattern_value = pattern->value;
@@ -200,14 +207,14 @@ sljit_sw SLJIT_FUNC SljitNativeStringLikePercentOnly(const char *sdata, idx_t sl
 	return !pattern->like_fragments.empty() || !pattern->like_anchor_start || !pattern->like_anchor_end || slen == 0;
 }
 
-sljit_sw SLJIT_FUNC SljitNativeStringLikeTwoUnanchoredFragments(const char *sdata, idx_t slen,
-                                                                const SljitNativeStringConstant *pattern) {
-	D_ASSERT(!pattern->like_anchor_start);
-	D_ASSERT(!pattern->like_anchor_end);
-	D_ASSERT(pattern->like_fragments.size() == 2);
+static inline bool SljitStringLikeTwoUnanchoredFragments(const char *sdata, idx_t slen,
+                                                         const SljitNativeStringConstant &pattern) {
+	D_ASSERT(!pattern.like_anchor_start);
+	D_ASSERT(!pattern.like_anchor_end);
+	D_ASSERT(pattern.like_fragments.size() == 2);
 
-	const auto fragments = pattern->like_fragments.data();
-	const auto pdata = pattern->value.data();
+	const auto fragments = pattern.like_fragments.data();
+	const auto pdata = pattern.value.data();
 	const auto &first = fragments[0];
 	const auto first_offset =
 	    SljitFindLikeFragment(sdata, slen, pdata + first.start, first.length, first.anchor, first.pair_anchor);
@@ -219,6 +226,147 @@ sljit_sw SLJIT_FUNC SljitNativeStringLikeTwoUnanchoredFragments(const char *sdat
 	const auto &second = fragments[1];
 	return SljitFindLikeFragment(sdata + second_position, slen - second_position, pdata + second.start, second.length,
 	                             second.anchor, second.pair_anchor) != DConstants::INVALID_INDEX;
+}
+
+sljit_sw SLJIT_FUNC SljitNativeStringLikeTwoUnanchoredFragments(const char *sdata, idx_t slen,
+                                                                const SljitNativeStringConstant *pattern) {
+	return SljitStringLikeTwoUnanchoredFragments(sdata, slen, *pattern);
+}
+
+bool TryBuildSljitNativeStringLikeBatchPlan(const SljitNativePredicate &predicate,
+                                            unique_ptr<SljitNativeStringLikeBatchPlan> &result) {
+	result.reset();
+	auto candidate = &predicate;
+	bool negate = false;
+	while (candidate->kind == SljitNativePredicateKind::NOT && candidate->child) {
+		negate = !negate;
+		candidate = candidate->child.get();
+	}
+	if (candidate->kind != SljitNativePredicateKind::STRING_LIKE_CONSTANT) {
+		return false;
+	}
+
+	auto plan = make_uniq<SljitNativeStringLikeBatchPlan>(candidate->string_constant, candidate->source_index, negate);
+	if (plan->pattern.like_anchor_start || plan->pattern.like_anchor_end || plan->pattern.like_fragments.size() != 2) {
+		return false;
+	}
+	result = std::move(plan);
+	return true;
+}
+
+template <bool HAS_EXECUTE_SELECTION, bool HAS_SOURCE_SELECTION, bool HAS_VALIDITY, bool NEGATE>
+static idx_t SljitSelectStringLikeBatchLoop(const SljitNativeStringConstant &pattern, const string_t *source_data,
+                                            const sel_t *source_sel, const ValidityMask &validity,
+                                            const sel_t *execute_sel, sel_t *result, idx_t count) {
+	if constexpr (NEGATE && !HAS_EXECUTE_SELECTION) {
+		idx_t rejected_count = 0;
+		for (idx_t row_idx = 0; row_idx < count; row_idx++) {
+			const auto logical_index = HAS_EXECUTE_SELECTION ? execute_sel[row_idx] : UnsafeNumericCast<sel_t>(row_idx);
+			const auto source_index = HAS_SOURCE_SELECTION ? source_sel[logical_index] : logical_index;
+			const auto rejected = (HAS_VALIDITY && !validity.RowIsValid(source_index)) ||
+			                      SljitStringLikeTwoUnanchoredFragments(source_data[source_index].GetData(),
+			                                                            source_data[source_index].GetSize(), pattern);
+			if (rejected) {
+				result[count - ++rejected_count] = UnsafeNumericCast<sel_t>(row_idx);
+			}
+		}
+		if (rejected_count == 0) {
+			return count;
+		}
+
+		const auto selected_count = count - rejected_count;
+		if (rejected_count <= count / 64) {
+			idx_t output_offset = 0;
+			idx_t range_start = 0;
+			auto copy_range = [&](idx_t range_end) {
+				while (range_start < range_end) {
+					result[output_offset++] = UnsafeNumericCast<sel_t>(range_start++);
+				}
+			};
+			for (idx_t rejected_idx = 0; rejected_idx < rejected_count; rejected_idx++) {
+				const auto rejected_row = result[count - rejected_idx - 1];
+				copy_range(rejected_row);
+				range_start = rejected_row + 1;
+			}
+			copy_range(count);
+			D_ASSERT(output_offset == selected_count);
+			return selected_count;
+		}
+
+		idx_t output_offset = 0;
+		idx_t rejected_idx = 0;
+		for (idx_t row_idx = 0; row_idx < count; row_idx++) {
+			if (rejected_idx < rejected_count && result[count - rejected_idx - 1] == row_idx) {
+				rejected_idx++;
+				continue;
+			}
+			result[output_offset++] = UnsafeNumericCast<sel_t>(row_idx);
+		}
+		D_ASSERT(output_offset == selected_count);
+		return selected_count;
+	}
+
+	idx_t selected_count = 0;
+	for (idx_t row_idx = 0; row_idx < count; row_idx++) {
+		const auto logical_index = HAS_EXECUTE_SELECTION ? execute_sel[row_idx] : UnsafeNumericCast<sel_t>(row_idx);
+		const auto source_index = HAS_SOURCE_SELECTION ? source_sel[logical_index] : logical_index;
+		if (HAS_VALIDITY && !validity.RowIsValid(source_index)) {
+			continue;
+		}
+		const auto &value = source_data[source_index];
+		const auto matches = SljitStringLikeTwoUnanchoredFragments(value.GetData(), value.GetSize(), pattern);
+		if (matches != NEGATE) {
+			result[selected_count++] = logical_index;
+		}
+	}
+	return selected_count;
+}
+
+template <bool HAS_EXECUTE_SELECTION, bool HAS_SOURCE_SELECTION, bool HAS_VALIDITY>
+static idx_t SljitSelectStringLikeBatchNegation(const SljitNativeStringLikeBatchPlan &plan, const string_t *source_data,
+                                                const sel_t *source_sel, const ValidityMask &validity,
+                                                const sel_t *execute_sel, sel_t *result, idx_t count) {
+	if (plan.negate) {
+		return SljitSelectStringLikeBatchLoop<HAS_EXECUTE_SELECTION, HAS_SOURCE_SELECTION, HAS_VALIDITY, true>(
+		    plan.pattern, source_data, source_sel, validity, execute_sel, result, count);
+	}
+	return SljitSelectStringLikeBatchLoop<HAS_EXECUTE_SELECTION, HAS_SOURCE_SELECTION, HAS_VALIDITY, false>(
+	    plan.pattern, source_data, source_sel, validity, execute_sel, result, count);
+}
+
+template <bool HAS_EXECUTE_SELECTION, bool HAS_SOURCE_SELECTION>
+static idx_t SljitSelectStringLikeBatchValidity(const SljitNativeStringLikeBatchPlan &plan, const string_t *source_data,
+                                                const sel_t *source_sel, const ValidityMask &validity,
+                                                const sel_t *execute_sel, sel_t *result, idx_t count) {
+	if (validity.CanHaveNull()) {
+		return SljitSelectStringLikeBatchNegation<HAS_EXECUTE_SELECTION, HAS_SOURCE_SELECTION, true>(
+		    plan, source_data, source_sel, validity, execute_sel, result, count);
+	}
+	return SljitSelectStringLikeBatchNegation<HAS_EXECUTE_SELECTION, HAS_SOURCE_SELECTION, false>(
+	    plan, source_data, source_sel, validity, execute_sel, result, count);
+}
+
+idx_t SljitSelectNativeStringLikeBatch(const SljitNativeStringLikeBatchPlan &plan, Vector &source,
+                                       SelectionVector &result, const SelectionVector *execute_sel, idx_t count) {
+	UnifiedVectorFormat source_format;
+	source.ToUnifiedFormat(source_format);
+	const auto source_data = UnifiedVectorFormat::GetData<string_t>(source_format);
+	const auto source_sel = source_format.sel ? source_format.sel->data() : nullptr;
+	const auto execute_sel_data = execute_sel ? execute_sel->data() : nullptr;
+	if (execute_sel_data) {
+		if (source_sel) {
+			return SljitSelectStringLikeBatchValidity<true, true>(plan, source_data, source_sel, source_format.validity,
+			                                                      execute_sel_data, result.data(), count);
+		}
+		return SljitSelectStringLikeBatchValidity<true, false>(plan, source_data, nullptr, source_format.validity,
+		                                                       execute_sel_data, result.data(), count);
+	}
+	if (source_sel) {
+		return SljitSelectStringLikeBatchValidity<false, true>(plan, source_data, source_sel, source_format.validity,
+		                                                       nullptr, result.data(), count);
+	}
+	return SljitSelectStringLikeBatchValidity<false, false>(plan, source_data, nullptr, source_format.validity, nullptr,
+	                                                        result.data(), count);
 }
 
 sljit_sw SLJIT_FUNC SljitNativeStringInListConstant(const char *sdata, idx_t slen,

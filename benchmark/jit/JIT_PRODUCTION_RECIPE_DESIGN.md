@@ -344,6 +344,18 @@ per batch.
   matches still use exact `memcmp`, preserving ordered-fragment semantics and
   arbitrary byte values. One-byte fragments and non-ARM64 targets retain the
   portable anchored search path.
+- A root constant `LIKE` with exactly two unanchored fragments binds an
+  immutable matcher to a kind-owned executable-filter object and selects a
+  vector in one batch call. The universal executable operator stores only the
+  filter-object pointer; projection, payload, and join-residual expressions
+  keep no batch-filter state. Generated row code remains their semantic path.
+  The hot filter path therefore avoids both a per-row generated-to-runtime call
+  and cache footprint in unrelated expression and operator state. On an
+  identity input, negated filters with sparse matches first collect rejected
+  row ordinals in the unused tail of the output selection and then publish the
+  surviving ranges. DuckDB's implicit identity selection has no backing array,
+  so those ordinals are generated directly rather than read through a null data
+  pointer.
 - Typed-expression source IDs are adapter-local. Every generated selector reads
   the adapter's source arrays; a runtime specialization may touch the input
   chunk only after explicitly mapping those local IDs back to input columns.
