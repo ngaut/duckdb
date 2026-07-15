@@ -66,6 +66,23 @@ static idx_t SljitLikeFragmentPairAnchor(const char *data, idx_t length) {
 }
 
 #if defined(__aarch64__)
+static __attribute__((noinline, cold)) idx_t SljitVerifyLikeFragmentPairCandidates(const char *sdata,
+                                                                                   const char *fragment,
+                                                                                   idx_t fragment_length,
+                                                                                   idx_t pair_anchor, idx_t position) {
+	for (idx_t lane = 0; lane < 16; lane++) {
+		auto pair_position = position + lane;
+		if (sdata[pair_position] != fragment[pair_anchor] || sdata[pair_position + 1] != fragment[pair_anchor + 1]) {
+			continue;
+		}
+		auto fragment_position = pair_position - pair_anchor;
+		if (memcmp(sdata + fragment_position, fragment, fragment_length) == 0) {
+			return fragment_position;
+		}
+	}
+	return DConstants::INVALID_INDEX;
+}
+
 static idx_t SljitFindLikeFragmentPairArm64(const char *sdata, idx_t slen, const char *fragment, idx_t fragment_length,
                                             idx_t pair_anchor) {
 	D_ASSERT(fragment_length >= 2);
@@ -80,16 +97,10 @@ static idx_t SljitFindLikeFragmentPairArm64(const char *sdata, idx_t slen, const
 		auto first_matches = vceqq_u8(vld1q_u8(reinterpret_cast<const uint8_t *>(sdata + position)), first_byte);
 		auto second_matches = vceqq_u8(vld1q_u8(reinterpret_cast<const uint8_t *>(sdata + position + 1)), second_byte);
 		if (vmaxvq_u8(vandq_u8(first_matches, second_matches)) != 0) {
-			for (idx_t lane = 0; lane < 16; lane++) {
-				auto pair_position = position + lane;
-				if (sdata[pair_position] != fragment[pair_anchor] ||
-				    sdata[pair_position + 1] != fragment[pair_anchor + 1]) {
-					continue;
-				}
-				auto fragment_position = pair_position - pair_anchor;
-				if (memcmp(sdata + fragment_position, fragment, fragment_length) == 0) {
-					return fragment_position;
-				}
+			auto fragment_position =
+			    SljitVerifyLikeFragmentPairCandidates(sdata, fragment, fragment_length, pair_anchor, position);
+			if (fragment_position != DConstants::INVALID_INDEX) {
+				return fragment_position;
 			}
 		}
 		position += 16;
@@ -259,51 +270,29 @@ static idx_t SljitSelectStringLikeBatchLoop(const SljitNativeStringConstant &pat
                                             const sel_t *source_sel, const ValidityMask &validity,
                                             const sel_t *execute_sel, sel_t *result, idx_t count) {
 	if constexpr (NEGATE && !HAS_EXECUTE_SELECTION) {
-		idx_t rejected_count = 0;
+		idx_t selected_count = 0;
+		bool selection_materialized = false;
 		for (idx_t row_idx = 0; row_idx < count; row_idx++) {
 			const auto logical_index = HAS_EXECUTE_SELECTION ? execute_sel[row_idx] : UnsafeNumericCast<sel_t>(row_idx);
 			const auto source_index = HAS_SOURCE_SELECTION ? source_sel[logical_index] : logical_index;
 			const auto rejected = (HAS_VALIDITY && !validity.RowIsValid(source_index)) ||
 			                      SljitStringLikeTwoUnanchoredFragments(source_data[source_index].GetData(),
 			                                                            source_data[source_index].GetSize(), pattern);
-			if (rejected) {
-				result[count - ++rejected_count] = UnsafeNumericCast<sel_t>(row_idx);
-			}
-		}
-		if (rejected_count == 0) {
-			return count;
-		}
-
-		const auto selected_count = count - rejected_count;
-		if (rejected_count <= count / 64) {
-			idx_t output_offset = 0;
-			idx_t range_start = 0;
-			auto copy_range = [&](idx_t range_end) {
-				while (range_start < range_end) {
-					result[output_offset++] = UnsafeNumericCast<sel_t>(range_start++);
+			if (!rejected) {
+				if (selection_materialized) {
+					result[selected_count++] = logical_index;
 				}
-			};
-			for (idx_t rejected_idx = 0; rejected_idx < rejected_count; rejected_idx++) {
-				const auto rejected_row = result[count - rejected_idx - 1];
-				copy_range(rejected_row);
-				range_start = rejected_row + 1;
-			}
-			copy_range(count);
-			D_ASSERT(output_offset == selected_count);
-			return selected_count;
-		}
-
-		idx_t output_offset = 0;
-		idx_t rejected_idx = 0;
-		for (idx_t row_idx = 0; row_idx < count; row_idx++) {
-			if (rejected_idx < rejected_count && result[count - rejected_idx - 1] == row_idx) {
-				rejected_idx++;
 				continue;
 			}
-			result[output_offset++] = UnsafeNumericCast<sel_t>(row_idx);
+			if (!selection_materialized) {
+				for (idx_t prefix_idx = 0; prefix_idx < row_idx; prefix_idx++) {
+					result[prefix_idx] = UnsafeNumericCast<sel_t>(prefix_idx);
+				}
+				selected_count = row_idx;
+				selection_materialized = true;
+			}
 		}
-		D_ASSERT(output_offset == selected_count);
-		return selected_count;
+		return selection_materialized ? selected_count : count;
 	}
 
 	idx_t selected_count = 0;

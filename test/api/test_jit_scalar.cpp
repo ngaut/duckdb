@@ -250,6 +250,10 @@ TEST_CASE("JIT lowers string predicates without aggregate sink dependence", "[ap
 	REQUIRE_NO_FAIL(*result);
 	REQUIRE(CHECK_COLUMN(result, 0, {3, 4}));
 	result = con.Query("WITH t AS MATERIALIZED (SELECT id, s FROM jit_string_pair_scan) "
+	                   "SELECT id FROM t WHERE s NOT LIKE '%ab%tail%' ORDER BY id");
+	REQUIRE_NO_FAIL(*result);
+	REQUIRE(CHECK_COLUMN(result, 0, {1, 2, 5}));
+	result = con.Query("WITH t AS MATERIALIZED (SELECT id, s FROM jit_string_pair_scan) "
 	                   "SELECT id FROM t WHERE s LIKE '%x%' ORDER BY id");
 	REQUIRE_NO_FAIL(*result);
 	REQUIRE(CHECK_COLUMN(result, 0, {2}));
@@ -264,6 +268,9 @@ TEST_CASE("JIT lowers string predicates without aggregate sink dependence", "[ap
 	result = con.Query("SELECT count(*) FROM jit_sparse_not_like WHERE s NOT LIKE '%special%requests%'");
 	REQUIRE_NO_FAIL(*result);
 	REQUIRE(result->GetValue(0, 0).GetValue<int64_t>() == 9900);
+	result = con.Query("SELECT count(*) FROM jit_sparse_not_like WHERE s NOT LIKE '%never%present%'");
+	REQUIRE_NO_FAIL(*result);
+	REQUIRE(result->GetValue(0, 0).GetValue<int64_t>() == 10000);
 	RequireNativeSljitIr(manager, "string_like");
 
 	REQUIRE_NO_FAIL(con.Query("SET disabled_optimizers='in_clause'"));

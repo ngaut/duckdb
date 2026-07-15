@@ -958,6 +958,36 @@ def verify_partial_predicate_simd_contract() -> None:
             )
 
 
+def verify_string_batch_selection_contract() -> None:
+    runtime = read("extension/jit_sljit/sljit_predicate_string_runtime.cpp")
+    for contract in (
+        "__attribute__((noinline, cold)) idx_t SljitVerifyLikeFragmentPairCandidates",
+        "SljitVerifyLikeFragmentPairCandidates(sdata, fragment, fragment_length, pair_anchor, position)",
+        "bool selection_materialized = false;",
+        "if (!selection_materialized)",
+        "return selection_materialized ? selected_count : count;",
+    ):
+        if contract not in runtime:
+            raise AssertionError(f"two-fragment LIKE batch selection is missing hot-path contract: {contract}")
+
+    batch_loop = runtime.split("static idx_t SljitSelectStringLikeBatchLoop", 1)[-1].split(
+        "static idx_t SljitSelectStringLikeBatchNegation", 1
+    )[0]
+    for stale_two_pass_contract in ("rejected_count", "copy_range", "rejected_idx"):
+        if stale_two_pass_contract in batch_loop:
+            raise AssertionError(
+                f"negated two-fragment LIKE selection must not retain duplicate-pass state: {stale_two_pass_contract}"
+            )
+
+    scalar_test = read("test/api/test_jit_scalar.cpp")
+    for required in (
+        "s NOT LIKE '%ab%tail%' ORDER BY id",
+        "s NOT LIKE '%never%present%'",
+    ):
+        if required not in scalar_test:
+            raise AssertionError(f"two-fragment LIKE batch selection is missing correctness coverage: {required}")
+
+
 def verify_hash_join_null_fact_ownership() -> None:
     hash_table = read("src/include/duckdb/execution/join_hashtable.hpp")
     for contract in (
@@ -991,6 +1021,7 @@ def main() -> None:
     verify_compiled_artifact_ownership()
     verify_scan_filter_ownership()
     verify_partial_predicate_simd_contract()
+    verify_string_batch_selection_contract()
     verify_hash_join_null_fact_ownership()
     verify_runtime_proofs_are_typed()
     verify_production_contract_ownership()

@@ -342,8 +342,10 @@ per batch.
 - On ARM64, percent-only constant `LIKE` fragments of at least two bytes use a
   16-position NEON candidate scan over the rarest adjacent byte pair. Candidate
   matches still use exact `memcmp`, preserving ordered-fragment semantics and
-  arbitrary byte values. One-byte fragments and non-ARM64 targets retain the
-  portable anchored search path.
+  arbitrary byte values. Exact candidate verification is a cold out-of-line
+  path, keeping the common no-candidate scanner compact enough to inline into
+  its batch loop without register spills. One-byte fragments and non-ARM64
+  targets retain the portable anchored search path.
 - A root constant `LIKE` with exactly two unanchored fragments binds an
   immutable matcher to a kind-owned executable-filter object and selects a
   vector in one batch call. The universal executable operator stores only the
@@ -351,11 +353,12 @@ per batch.
   keep no batch-filter state. Generated row code remains their semantic path.
   The hot filter path therefore avoids both a per-row generated-to-runtime call
   and cache footprint in unrelated expression and operator state. On an
-  identity input, negated filters with sparse matches first collect rejected
-  row ordinals in the unused tail of the output selection and then publish the
-  surviving ranges. DuckDB's implicit identity selection has no backing array,
-  so those ordinals are generated directly rather than read through a null data
-  pointer.
+  identity input, a negated filter publishes no selection until the first
+  rejected row. It materializes the accepted identity prefix once and appends
+  later survivors during the same scan. A no-rejection chunk therefore remains
+  an implicit identity selection, while every other chunk is scanned only once.
+  DuckDB's implicit identity selection has no backing array, so prefix ordinals
+  are generated directly rather than read through a null data pointer.
 - Typed-expression source IDs are adapter-local. Every generated selector reads
   the adapter's source arrays; a runtime specialization may touch the input
   chunk only after explicitly mapping those local IDs back to input columns.

@@ -167,12 +167,11 @@ GENERIC_WORKLOADS = (
             "SELECT sum(id * 31) AS value FROM __jit_generic_like_fragments "
             "WHERE comment NOT LIKE '%special%requests%'"
         ),
-        # Filter-operator-owned batch selection for generic two-fragment percent-only
-        # patterns promote at 1.375x (T1) and 1.342x (T4) over ten production
-        # repetitions. Preserve the demonstrated batch-boundary gain while
-        # retaining host-noise margin.
+        # Cold exact-candidate verification and one-pass lazy selection publication
+        # promote at 1.316x (T1) and 1.304x (T4) over ten production repetitions.
+        # Preserve the demonstrated generic filter gain with a small host-noise margin.
         "minimum_auto_speedup": 1.20,
-        "minimum_auto_speedup_by_threads": {1: 1.29, 4: 1.27},
+        "minimum_auto_speedup_by_threads": {1: 1.30, 4: 1.29},
         "max_auto_slowdown": 1.05,
         "requires_compiled_auto": True,
     },
