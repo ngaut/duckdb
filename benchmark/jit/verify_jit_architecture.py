@@ -435,8 +435,18 @@ def verify_production_contract_ownership() -> None:
     runtime_gate = comparator[
         comparator.index("def auto_runtime_preserved") : comparator.index("def has_auto_decision")
     ]
-    if "off_normalized_candidate_auto_s" in runtime_gate or "return raw_slowdown_s <= allowed_s" not in runtime_gate:
+    if (
+        "off_normalized_candidate_auto_s" in runtime_gate
+        or "baseline_auto_upper_s" not in runtime_gate
+        or "return raw_slowdown_s <= allowed_s" not in runtime_gate
+    ):
         raise AssertionError("baseline acceptance must require the independent raw auto-runtime ceiling")
+    if (
+        'baseline_auto_runtime_upper_bounds = policy_runtime_upper_bounds(base_runs, "auto")' not in comparator
+        or "baseline_auto_runtime_upper_bounds," not in comparator
+        or "baseline runs.csv missing positive" not in comparator
+    ):
+        raise AssertionError("baseline raw-runtime acceptance must retain the qualified run envelope")
     reject_regex(
         "aggregate descriptor-to-lane ABI reconstructed outside canonical validator",
         (

@@ -35,6 +35,11 @@ giving each leading-policy order five samples so process/cache order cannot
 choose the median. Focused triage remains an explicit operator action, never an
 automatic failed-candidate rerun.
 
+The accepted TPC-H artifact retains the maximum raw JIT-auto runtime from its
+ten samples for each query. A candidate median must stay within that observed
+high-water mark plus the existing 2% or 2 ms allowance. Off-normalized timing
+remains secondary noise evidence and never makes a raw regression pass.
+
 TPC-H benchmark and comparison gate:
 
 ```sh

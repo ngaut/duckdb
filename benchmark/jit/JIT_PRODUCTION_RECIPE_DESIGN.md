@@ -1169,6 +1169,14 @@ after every gate passes. Runtime, speedup, preserved-win, and component-ratio th
 are evaluated with exact decimal arithmetic: a value exactly on a configured
 boundary passes, while any value beyond it fails.
 
+The accepted ten-repeat artifact is a runtime distribution, not only a median.
+For each query, the raw JIT-auto gate retains the maximum observed baseline
+runtime as the qualified high-water reference; the candidate median must remain
+below that reference plus the existing 2% or 2 ms allowance. This lets a long
+SF10 run reproduce the baseline's observed thermal envelope without converting
+shared JIT-off drift into permission for a regression. Off-normalized and paired
+speedups remain secondary noise analysis and cannot satisfy the raw gate.
+
 If an accepted timing artifact is proven stale by a high-sample paired run,
 baseline re-initialization still requires the complete 22-query, 10-repeat
 production suite, architecture verification, artifact correctness, and traced

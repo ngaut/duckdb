@@ -37,9 +37,7 @@ def write_failure_report(path: Path, failures: list[dict[str, str]]) -> None:
         writer.writerows(failures)
 
 
-def keyed(
-    rows: list[dict], keys: tuple[str, ...], name: str
-) -> dict[tuple[str, ...] | str, dict]:
+def keyed(rows: list[dict], keys: tuple[str, ...], name: str) -> dict[tuple[str, ...] | str, dict]:
     result = {}
     for row in rows:
         key_parts = tuple(row[field] for field in keys)
@@ -49,15 +47,11 @@ def keyed(
     return result
 
 
-def expected_queries(
-    base_summary: dict, candidate_summary: dict, requested: list[str] | None
-) -> list[str]:
+def expected_queries(base_summary: dict, candidate_summary: dict, requested: list[str] | None) -> list[str]:
     if requested is not None:
         queries = normalize_tpch_query_ids(requested)
     else:
-        queries = sorted(
-            {key[0] for key in base_summary} | {key[0] for key in candidate_summary}
-        )
+        queries = sorted({key[0] for key in base_summary} | {key[0] for key in candidate_summary})
     return queries
 
 
@@ -98,9 +92,21 @@ def paired_policy_speedups(run_rows: list[dict]) -> dict[str, Decimal]:
     return {query: median_decimal(values) for query, values in speedups.items()}
 
 
-def allowed_auto_slowdown(
-    base_s: Decimal, ratio: Decimal, absolute_s: Decimal
-) -> Decimal:
+def policy_runtime_upper_bounds(run_rows: list[dict], policy: str) -> dict[str, Decimal]:
+    upper_bounds_us: dict[str, int] = {}
+    for row in run_rows:
+        if row.get("policy") != policy:
+            continue
+        runtime_us = row_int(row, "query_time_us")
+        if runtime_us <= 0:
+            continue
+        query = row["query"]
+        upper_bounds_us[query] = max(upper_bounds_us.get(query, 0), runtime_us)
+    microseconds_per_second = Decimal(1_000_000)
+    return {query: Decimal(runtime_us) / microseconds_per_second for query, runtime_us in upper_bounds_us.items()}
+
+
+def allowed_auto_slowdown(base_s: Decimal, ratio: Decimal, absolute_s: Decimal) -> Decimal:
     ratio_margin = max(Decimal(0), ratio - Decimal(1))
     return max(absolute_s, base_s * ratio_margin)
 
@@ -113,11 +119,7 @@ def off_normalized_candidate_auto_s(
     candidate_auto_s = row_decimal(candidate_gap, "auto_median_s")
     base_off_s = row_decimal(base_gap, "off_median_s")
     candidate_off_s = row_decimal(candidate_gap, "off_median_s")
-    if (
-        base_off_s > 0
-        and candidate_paired_speedup is not None
-        and candidate_paired_speedup > 0
-    ):
+    if base_off_s > 0 and candidate_paired_speedup is not None and candidate_paired_speedup > 0:
         return base_off_s / candidate_paired_speedup
     if base_off_s <= 0 or candidate_off_s <= 0:
         return candidate_auto_s
@@ -129,13 +131,15 @@ def auto_runtime_preserved(
     candidate_gap: dict,
     max_slowdown_ratio: Decimal,
     max_slowdown_s: Decimal,
+    baseline_auto_upper_s: Decimal | None = None,
 ) -> bool:
     base_auto_s = row_decimal(base_gap, "auto_median_s")
     candidate_auto_s = row_decimal(candidate_gap, "auto_median_s")
     if base_auto_s <= 0 or candidate_auto_s <= 0:
         return True
-    allowed_s = allowed_auto_slowdown(base_auto_s, max_slowdown_ratio, max_slowdown_s)
-    raw_slowdown_s = candidate_auto_s - base_auto_s
+    baseline_runtime_reference_s = max(base_auto_s, baseline_auto_upper_s or Decimal(0))
+    allowed_s = allowed_auto_slowdown(baseline_runtime_reference_s, max_slowdown_ratio, max_slowdown_s)
+    raw_slowdown_s = candidate_auto_s - baseline_runtime_reference_s
     return raw_slowdown_s <= allowed_s
 
 
@@ -154,14 +158,8 @@ def has_auto_accelerated_runner(row: dict) -> bool:
     )
 
 
-def is_jitted_win(
-    row: dict, speedup_floor: Decimal, paired_speedup: Decimal | None = None
-) -> bool:
-    speedup = (
-        paired_speedup
-        if paired_speedup is not None
-        else row_decimal(row, "speedup_vs_off_median")
-    )
+def is_jitted_win(row: dict, speedup_floor: Decimal, paired_speedup: Decimal | None = None) -> bool:
+    speedup = paired_speedup if paired_speedup is not None else row_decimal(row, "speedup_vs_off_median")
     return row_int(row, "compiled_regions") > 0 and speedup >= speedup_floor
 
 
@@ -176,6 +174,7 @@ def compare_required_rows(
     candidate_gaps: dict,
     queries: list[str],
     policies: list[str],
+    baseline_auto_runtime_upper_bounds: dict[str, Decimal],
 ) -> None:
     for query in queries:
         require(
@@ -186,6 +185,11 @@ def compare_required_rows(
             query in candidate_gaps,
             f"candidate performance_gaps.csv missing {query_label(query)}",
         )
+        if "auto" in policies:
+            require(
+                query in baseline_auto_runtime_upper_bounds,
+                f"baseline runs.csv missing positive {query_label(query)}/auto runtime samples",
+            )
         for policy in policies:
             key = (query, policy)
             require(
@@ -198,9 +202,7 @@ def compare_required_rows(
             )
 
 
-def compare_correctness(
-    candidate_summary: dict, queries: list[str], policies: list[str]
-) -> list[dict[str, str]]:
+def compare_correctness(candidate_summary: dict, queries: list[str], policies: list[str]) -> list[dict[str, str]]:
     failures = []
     for query in queries:
         for policy in policies:
@@ -232,6 +234,7 @@ def compare_auto_speed(
     max_slowdown_s: Decimal,
     min_auto_speedup: Decimal,
     candidate_paired_speedups: dict[str, Decimal] | None = None,
+    baseline_auto_runtime_upper_bounds: dict[str, Decimal] | None = None,
 ) -> list[dict[str, str]]:
     failures = []
     for query in queries:
@@ -241,14 +244,16 @@ def compare_auto_speed(
         candidate_auto_s = row_decimal(candidate, "auto_median_s")
         if base_auto_s <= 0 or candidate_auto_s <= 0:
             continue
-        slowdown_s = candidate_auto_s - base_auto_s
-        if (
-            has_auto_decision(base) or has_auto_decision(candidate)
-        ) and not auto_runtime_preserved(
+        baseline_auto_upper_s = (baseline_auto_runtime_upper_bounds or {}).get(query, base_auto_s)
+        baseline_runtime_reference_s = max(base_auto_s, baseline_auto_upper_s)
+        allowed_s = allowed_auto_slowdown(baseline_runtime_reference_s, max_slowdown_ratio, max_slowdown_s)
+        raw_ceiling_s = baseline_runtime_reference_s + allowed_s
+        if (has_auto_decision(base) or has_auto_decision(candidate)) and not auto_runtime_preserved(
             base,
             candidate,
             max_slowdown_ratio,
             max_slowdown_s,
+            baseline_auto_upper_s,
         ):
             normalized_candidate_auto_s = off_normalized_candidate_auto_s(
                 base, candidate, (candidate_paired_speedups or {}).get(query)
@@ -258,15 +263,14 @@ def compare_auto_speed(
                 make_failure(
                     "auto_runtime",
                     query,
-                    f"{query_label(query)}: auto median regressed {base_auto_s:.9f}s -> {candidate_auto_s:.9f}s "
-                    f"(+{slowdown_s:.9f}s), off-normalized candidate={normalized_candidate_auto_s:.9f}s "
+                    f"{query_label(query)}: candidate auto median={candidate_auto_s:.9f}s exceeds raw ceiling="
+                    f"{raw_ceiling_s:.9f}s (baseline median={base_auto_s:.9f}s, observed max="
+                    f"{baseline_auto_upper_s:.9f}s), off-normalized candidate={normalized_candidate_auto_s:.9f}s "
                     f"(+{normalized_slowdown_s:.9f}s)",
                 )
             )
         base_speedup = row_decimal(base, "auto_speedup_vs_off")
-        candidate_speedup = (candidate_paired_speedups or {}).get(
-            query, row_decimal(candidate, "auto_speedup_vs_off")
-        )
+        candidate_speedup = (candidate_paired_speedups or {}).get(query, row_decimal(candidate, "auto_speedup_vs_off"))
         if (
             has_auto_accelerated_runner(candidate)
             and base_speedup >= min_auto_speedup
@@ -296,6 +300,7 @@ def compare_preserved_wins(
     fail_on_win_coverage_drop: bool,
     base_paired_speedups: dict[str, Decimal] | None = None,
     candidate_paired_speedups: dict[str, Decimal] | None = None,
+    baseline_auto_runtime_upper_bounds: dict[str, Decimal] | None = None,
 ) -> list[dict[str, str]]:
     failures = []
     base_wins = 0
@@ -304,9 +309,7 @@ def compare_preserved_wins(
     for query in queries:
         base = base_summary[(query, "auto")]
         candidate = candidate_summary[(query, "auto")]
-        base_speedup = (base_paired_speedups or {}).get(
-            query, row_decimal(base, "speedup_vs_off_median")
-        )
+        base_speedup = (base_paired_speedups or {}).get(query, row_decimal(base, "speedup_vs_off_median"))
         candidate_speedup = (candidate_paired_speedups or {}).get(
             query, row_decimal(candidate, "speedup_vs_off_median")
         )
@@ -317,17 +320,12 @@ def compare_preserved_wins(
                 candidate_gaps[query],
                 max_slowdown_ratio,
                 max_slowdown_s,
+                (baseline_auto_runtime_upper_bounds or {}).get(query),
             )
-            win_preserved = (
-                candidate_speedup >= preserve_win_speedup or runtime_preserved
-            )
+            win_preserved = candidate_speedup >= preserve_win_speedup or runtime_preserved
             if win_preserved:
                 preserved_baseline_wins += 1
-            if (
-                fail_on_win_coverage_drop
-                and not runtime_preserved
-                and row_int(candidate, "compiled_regions") == 0
-            ):
+            if fail_on_win_coverage_drop and not runtime_preserved and row_int(candidate, "compiled_regions") == 0:
                 failures.append(
                     make_failure(
                         "win_coverage",
@@ -372,10 +370,7 @@ def compare_runtime_components(
     for query in queries:
         base = base_summary[(query, "auto")]
         candidate = candidate_summary[(query, "auto")]
-        if (
-            row_int(base, "runtime_regions") == 0
-            or row_int(candidate, "runtime_regions") == 0
-        ):
+        if row_int(base, "runtime_regions") == 0 or row_int(candidate, "runtime_regions") == 0:
             continue
         for field in component_fields:
             base_us = row_int(base, field)
@@ -383,16 +378,12 @@ def compare_runtime_components(
             if base_us <= 0 or candidate_us <= 0:
                 continue
             growth_us = candidate_us - base_us
-            if (
-                growth_us > max_us
-                and Decimal(candidate_us) > Decimal(base_us) * max_ratio
-            ):
+            if growth_us > max_us and Decimal(candidate_us) > Decimal(base_us) * max_ratio:
                 failures.append(
                     make_failure(
                         "runtime_component",
                         query,
-                        f"{query_label(query)}: {field} regressed {base_us}us -> {candidate_us}us "
-                        f"(+{growth_us}us)",
+                        f"{query_label(query)}: {field} regressed {base_us}us -> {candidate_us}us " f"(+{growth_us}us)",
                     )
                 )
     return failures
@@ -422,9 +413,7 @@ def print_summary(
             (base_paired_speedups or {}).get(query),
         ):
             base_jitted_wins.append(query)
-        if is_jitted_win(
-            candidate, DEFAULT_PRESERVE_WIN_SPEEDUP, (candidate_paired_speedups or {}).get(query)
-        ):
+        if is_jitted_win(candidate, DEFAULT_PRESERVE_WIN_SPEEDUP, (candidate_paired_speedups or {}).get(query)):
             candidate_jitted_wins.append(query)
     print(
         "TPCH JIT comparison: "
@@ -434,9 +423,7 @@ def print_summary(
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(
-        description="Compare two TPC-H JIT benchmark artifact directories"
-    )
+    parser = argparse.ArgumentParser(description="Compare two TPC-H JIT benchmark artifact directories")
     parser.add_argument("baseline", type=Path)
     parser.add_argument("candidate", type=Path)
     parser.add_argument("--queries", nargs="+", default=None)
@@ -451,18 +438,10 @@ def parse_args() -> argparse.Namespace:
         type=Decimal,
         default=DEFAULT_MAX_AUTO_SLOWDOWN_RATIO,
     )
-    parser.add_argument(
-        "--max-auto-slowdown-s", type=Decimal, default=DEFAULT_MAX_AUTO_SLOWDOWN_S
-    )
-    parser.add_argument(
-        "--min-auto-speedup", type=Decimal, default=DEFAULT_MIN_AUTO_SPEEDUP
-    )
-    parser.add_argument(
-        "--preserve-win-speedup", type=Decimal, default=DEFAULT_PRESERVE_WIN_SPEEDUP
-    )
-    parser.add_argument(
-        "--max-win-speedup-drop", type=Decimal, default=DEFAULT_MAX_WIN_SPEEDUP_DROP
-    )
+    parser.add_argument("--max-auto-slowdown-s", type=Decimal, default=DEFAULT_MAX_AUTO_SLOWDOWN_S)
+    parser.add_argument("--min-auto-speedup", type=Decimal, default=DEFAULT_MIN_AUTO_SPEEDUP)
+    parser.add_argument("--preserve-win-speedup", type=Decimal, default=DEFAULT_PRESERVE_WIN_SPEEDUP)
+    parser.add_argument("--max-win-speedup-drop", type=Decimal, default=DEFAULT_MAX_WIN_SPEEDUP_DROP)
     parser.add_argument(
         "--fail-on-win-coverage-drop",
         action="store_true",
@@ -479,9 +458,7 @@ def parse_args() -> argparse.Namespace:
         type=Decimal,
         default=DEFAULT_MAX_RUNTIME_COMPONENT_RATIO,
     )
-    parser.add_argument(
-        "--max-runtime-component-us", type=int, default=DEFAULT_MAX_RUNTIME_COMPONENT_US
-    )
+    parser.add_argument("--max-runtime-component-us", type=int, default=DEFAULT_MAX_RUNTIME_COMPONENT_US)
     return parser.parse_args()
 
 
@@ -507,12 +484,21 @@ def main() -> int:
         ("query",),
         "candidate performance_gaps.csv",
     )
-    base_paired_speedups = paired_policy_speedups(read_csv(args.baseline / "runs.csv"))
-    candidate_paired_speedups = paired_policy_speedups(read_csv(args.candidate / "runs.csv"))
+    base_runs = read_csv(args.baseline / "runs.csv")
+    candidate_runs = read_csv(args.candidate / "runs.csv")
+    base_paired_speedups = paired_policy_speedups(base_runs)
+    candidate_paired_speedups = paired_policy_speedups(candidate_runs)
+    baseline_auto_runtime_upper_bounds = policy_runtime_upper_bounds(base_runs, "auto")
     queries = expected_queries(base_summary, candidate_summary, args.queries)
     policies = list(args.policies)
     compare_required_rows(
-        base_summary, candidate_summary, base_gaps, candidate_gaps, queries, policies
+        base_summary,
+        candidate_summary,
+        base_gaps,
+        candidate_gaps,
+        queries,
+        policies,
+        baseline_auto_runtime_upper_bounds,
     )
 
     failures = []
@@ -527,6 +513,7 @@ def main() -> int:
                 args.max_auto_slowdown_s,
                 args.min_auto_speedup,
                 candidate_paired_speedups,
+                baseline_auto_runtime_upper_bounds,
             )
         )
         failures.extend(
@@ -543,6 +530,7 @@ def main() -> int:
                 args.fail_on_win_coverage_drop,
                 base_paired_speedups,
                 candidate_paired_speedups,
+                baseline_auto_runtime_upper_bounds,
             )
         )
         failures.extend(

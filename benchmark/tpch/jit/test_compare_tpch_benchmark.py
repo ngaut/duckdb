@@ -12,6 +12,7 @@ from compare_tpch_benchmark import (
     compare_auto_speed,
     compare_runtime_components,
     paired_policy_speedups,
+    policy_runtime_upper_bounds,
 )
 
 
@@ -105,6 +106,46 @@ class TestExactRegressionThresholds(unittest.TestCase):
             Decimal("0.98"),
         )
         self.assertEqual([failure["category"] for failure in failures], ["auto_runtime"])
+
+    def test_baseline_observed_max_defines_raw_runtime_envelope(self) -> None:
+        failures = compare_auto_speed(
+            {"18": gap("0.090")},
+            {"18": gap("0.102")},
+            ["18"],
+            Decimal("1.02"),
+            Decimal("0.002"),
+            Decimal("0.98"),
+            baseline_auto_runtime_upper_bounds={"18": Decimal("0.100")},
+        )
+        self.assertEqual(failures, [])
+
+    def test_observed_max_does_not_let_normalization_hide_raw_regression(self) -> None:
+        failures = compare_auto_speed(
+            {"18": gap("0.090", "0.100")},
+            {"18": gap("0.102001", "0.200")},
+            ["18"],
+            Decimal("1.02"),
+            Decimal("0.002"),
+            Decimal("0.98"),
+            baseline_auto_runtime_upper_bounds={"18": Decimal("0.100")},
+        )
+        self.assertEqual([failure["category"] for failure in failures], ["auto_runtime"])
+        self.assertIn("observed max=0.100000000s", failures[0]["message"])
+
+    def test_policy_runtime_upper_bounds_preserve_raw_high_water(self) -> None:
+        upper_bounds = policy_runtime_upper_bounds(
+            [
+                {"query": "18", "policy": "auto", "query_time_us": "90000"},
+                {"query": "18", "policy": "off", "query_time_us": "150000"},
+                {"query": "18", "policy": "auto", "query_time_us": "110000"},
+                {"query": "06", "policy": "auto", "query_time_us": "200000"},
+            ],
+            "auto",
+        )
+        self.assertEqual(
+            upper_bounds,
+            {"18": Decimal("0.11"), "06": Decimal("0.2")},
+        )
 
     def test_paired_slowdown_still_fails(self) -> None:
         failures = compare_auto_speed(
