@@ -655,6 +655,20 @@ independent run or batch strategy proves that it reduces update cardinality.
 That strategy boundary is workload-neutral and never depends on query, table,
 or column identity.
 
+Low-cardinality string grouping preserves dictionary-domain information at the
+perfect-hash aggregate boundary. Each operator-lifetime group cache maps a
+dictionary source index to the fully normalized perfect-hash contribution, so
+the generated row loop does not decode `string_t` and recompute the same
+compression for every selected row. A persistent DuckDB dictionary ID permits
+cross-chunk reuse. For an ephemeral dictionary, the runtime records only source
+indices that actually missed and invalidates exactly those entries before the
+next chunk; a high observed miss ratio disables the route. The generated ABI
+publishes one typed descriptor per group containing the contribution map,
+active-index storage, and active count. All groups must satisfy the descriptor
+contract, selections must remain explicit, and an external execution selection
+uses the ordinary exact path. This ownership is confined to perfect-hash
+runtime scratch; generic source preparation carries no dictionary-cache cost.
+
 Widening decimal multiplication has an exact fixed-width recipe. It accepts two
 signed INT8/INT16/INT32/INT64 references cast to an INT128-backed decimal,
 lowers signed 64-by-64 multiplication to SLJIT's two-word result, and publishes
@@ -1220,8 +1234,11 @@ predicate contract outside TPC-H: 1.338x at one thread and 1.286x at four
 threads. Its checked-in floors are 1.25x and 1.20x. Disabling only partial
 predicate SIMD raises the one-thread JIT median from 0.0505s to 0.0565s, proving
 that the gain belongs to the split execution mechanism rather than unrelated
-JIT work. The current complete ten-repeat TPC-H promotions preserve Q12 at
-1.334x at SF1 and 1.288x at SF10.
+JIT work. The current complete ten-repeat TPC-H promotions preserve Q1 at
+1.268x and Q12 at 1.283x at SF1; the accepted SF10 baseline preserves Q12 at
+1.288x. The dictionary-domain implementation is also covered outside TPC-H by
+`benchmark/jit/tmp/dictionary_descriptor_string_groups_t1_candidate5_20260715`
+and `benchmark/jit/tmp/dictionary_descriptor_string_groups_t4_candidate5_20260715`.
 Pipeline-local carry and exact parallel dense-run proofs move the generic
 six-million-row projected workload from 0.118126s to 0.036658s at one thread
 (3.222x) and from 0.030526s to 0.016050s at four threads (1.902x). Its checked-in
@@ -1230,7 +1247,7 @@ from 0.118844s to 0.048766s (2.437x) and from 0.031131s to 0.019352s (1.609x),
 with floors of 2.25x and 1.45x. These are independent ten-repeat production
 promotions with tracing disabled and zero correctness differences or compile
 errors. The same generic generated-run mechanism keeps accepted TPC-H Q18 at
-1.455x at SF1 and 1.660x at SF10 in complete ten-repeat production matrices.
+1.831x at SF1 and 1.660x at SF10 in complete ten-repeat production matrices.
 The nullable multi-lane variant fuses `SUM(nullable)` and `COUNT(nullable)` in
 one generated run kernel. Its prior scalar replay spent 0.156s in local
 preaggregation and made JIT 1.55x slower. Generated execution lowers that stage

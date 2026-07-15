@@ -15,6 +15,15 @@
 
 namespace duckdb {
 
+struct SljitPerfectHashDictionaryGroupCache {
+	string dictionary_id;
+	idx_t dictionary_size = 0;
+	vector<idx_t> contributions;
+	vector<sel_t> active_indices;
+	idx_t active_count = 0;
+	bool disabled = false;
+};
+
 struct SljitAggregatePayloadAdapterScratch {
 	void PrepareUngrouped(idx_t payload_count) {
 		payload_sources.Resize(payload_count);
@@ -45,6 +54,8 @@ struct SljitAggregatePayloadAdapterScratch {
 	void PreparePerfectHash(idx_t payload_count, idx_t group_count) {
 		PrepareGrouped(payload_count);
 		group_sources.Resize(group_count);
+		perfect_hash_dictionary_group_caches.resize(group_count);
+		perfect_hash_dictionary_groups.assign(group_count, SljitPerfectHashDictionaryGroupRuntime());
 	}
 
 	DataChunk &PrepareInputVectorGroups(Allocator &allocator,
@@ -79,6 +90,8 @@ struct SljitAggregatePayloadAdapterScratch {
 	SljitSourceVectorScratch payload_sources;
 	SljitSourceVectorScratch right_payload_sources;
 	SljitSourceVectorScratch group_sources;
+	vector<SljitPerfectHashDictionaryGroupCache> perfect_hash_dictionary_group_caches;
+	vector<SljitPerfectHashDictionaryGroupRuntime> perfect_hash_dictionary_groups;
 	unique_ptr<DataChunk> input_vector_groups;
 	vector<LogicalType> input_vector_group_types;
 	vector<int64_t *> aggregate_int64_values;

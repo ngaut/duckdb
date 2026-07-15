@@ -90,6 +90,52 @@ static void EmitSljitPerfectHashPayloadInvalidContinuation(struct sljit_compiler
 	sljit_set_label(payload_done, sljit_emit_label(compiler));
 }
 
+static void EmitSljitPerfectHashNormalizeGroupContribution(struct sljit_compiler *compiler,
+                                                           const SljitPerfectHashGroupPlan &group,
+                                                           bool fuse_nonempty_string_compress_bias) {
+	const auto group_offset = (fuse_nonempty_string_compress_bias ? 2 : 1) - group.minimum;
+	if (group_offset != 0) {
+		sljit_emit_op2(compiler, SLJIT_ADD, SLJIT_R2, 0, SLJIT_R2, 0, SLJIT_IMM, NumericCast<sljit_sw>(group_offset));
+	}
+	if (group.shift != 0) {
+		sljit_emit_op2(compiler, SLJIT_SHL, SLJIT_R2, 0, SLJIT_R2, 0, SLJIT_IMM, NumericCast<sljit_sw>(group.shift));
+	}
+}
+
+static void EmitSljitPerfectHashLoadDictionaryContributionMap(struct sljit_compiler *compiler, idx_t group_idx,
+                                                              sljit_s32 dictionary_runtime_array_base_reg) {
+	const auto runtime_offset = NumericCast<sljit_sw>(group_idx * sizeof(SljitPerfectHashDictionaryGroupRuntime));
+	if (dictionary_runtime_array_base_reg != 0) {
+		sljit_emit_op1(compiler, SLJIT_MOV_P, SLJIT_R0, 0, SLJIT_MEM1(dictionary_runtime_array_base_reg),
+		               runtime_offset + offsetof(SljitPerfectHashDictionaryGroupRuntime, contributions));
+		return;
+	}
+	sljit_emit_op1(compiler, SLJIT_MOV_P, SLJIT_R0, 0, SLJIT_MEM1(SLJIT_S0),
+	               offsetof(SljitNativeVectorInput, perfect_hash_dictionary_groups));
+	sljit_emit_op1(compiler, SLJIT_MOV_P, SLJIT_R0, 0, SLJIT_MEM1(SLJIT_R0),
+	               runtime_offset + offsetof(SljitPerfectHashDictionaryGroupRuntime, contributions));
+}
+
+static void EmitSljitPerfectHashRecordDictionaryContribution(struct sljit_compiler *compiler, idx_t group_idx,
+                                                             sljit_s32 dictionary_runtime_array_base_reg) {
+	EmitSljitPerfectHashLoadDictionaryContributionMap(compiler, group_idx, dictionary_runtime_array_base_reg);
+	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_MEM2(SLJIT_R0, SLJIT_R1), 3, SLJIT_R2, 0);
+
+	const auto runtime_offset = NumericCast<sljit_sw>(group_idx * sizeof(SljitPerfectHashDictionaryGroupRuntime));
+	sljit_emit_op1(compiler, SLJIT_MOV_P, SLJIT_R0, 0, SLJIT_MEM1(SLJIT_S0),
+	               offsetof(SljitNativeVectorInput, perfect_hash_dictionary_groups));
+	sljit_emit_op1(compiler, SLJIT_MOV_P, SLJIT_R0, 0, SLJIT_MEM1(SLJIT_R0),
+	               runtime_offset + offsetof(SljitPerfectHashDictionaryGroupRuntime, active_count));
+	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_R3, 0, SLJIT_MEM1(SLJIT_R0), 0);
+	sljit_emit_op1(compiler, SLJIT_MOV_P, SLJIT_R4, 0, SLJIT_MEM1(SLJIT_S0),
+	               offsetof(SljitNativeVectorInput, perfect_hash_dictionary_groups));
+	sljit_emit_op1(compiler, SLJIT_MOV_P, SLJIT_R4, 0, SLJIT_MEM1(SLJIT_R4),
+	               runtime_offset + offsetof(SljitPerfectHashDictionaryGroupRuntime, active_indices));
+	sljit_emit_op1(compiler, SLJIT_MOV_U32, SLJIT_MEM2(SLJIT_R4, SLJIT_R3), 2, SLJIT_R1, 0);
+	sljit_emit_op2(compiler, SLJIT_ADD, SLJIT_R3, 0, SLJIT_R3, 0, SLJIT_IMM, 1);
+	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_MEM1(SLJIT_R0), 0, SLJIT_R3, 0);
+}
+
 void EmitSljitPerfectHashGroupLookup(const SljitPerfectHashFusedUpdateEmitContext &context,
                                      const SljitPerfectHashGroupLookupOptions &options) {
 	auto compiler = context.compiler;
@@ -120,7 +166,25 @@ void EmitSljitPerfectHashGroupLookup(const SljitPerfectHashFusedUpdateEmitContex
 		    group.expression_kind == SljitNativeRegionExpressionKind::STRING_COMPRESS && group.minimum != 0 &&
 		    string_t::PREFIX_LENGTH > 0;
 		sljit_jump *group_is_null = nullptr;
-		if (group.expression_kind == SljitNativeRegionExpressionKind::TYPED_EXPRESSION_TREE) {
+		if (options.use_dictionary_group_contributions) {
+			D_ASSERT(options.group_selection_all_present);
+			D_ASSERT(group.expression_kind == SljitNativeRegionExpressionKind::STRING_COMPRESS);
+			EmitLoadFusedAggregateGroupSourceIndex(compiler, group_idx, SLJIT_R1, group_index_mode,
+			                                       options.group_sel_array_base_reg);
+			EmitSljitPerfectHashLoadDictionaryContributionMap(compiler, group_idx,
+			                                                  options.group_dictionary_runtime_array_base_reg);
+			sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_R2, 0, SLJIT_MEM2(SLJIT_R0, SLJIT_R1), 3);
+			auto contribution_ready = sljit_emit_cmp(compiler, SLJIT_NOT_EQUAL, SLJIT_R2, 0, SLJIT_IMM, -1);
+			const auto group_data_reg =
+			    context.hoist_group_data_pointers ? SljitPerfectHashGroupDataPointerReg(group_idx) : SLJIT_R0;
+			EmitLoadFusedAggregateGroupData(compiler, group_idx, group, SLJIT_R1, SLJIT_R2,
+			                                context.hoist_group_data_pointers, group_data_reg, false, 0,
+			                                fuse_nonempty_string_compress_bias);
+			EmitSljitPerfectHashNormalizeGroupContribution(compiler, group, fuse_nonempty_string_compress_bias);
+			EmitSljitPerfectHashRecordDictionaryContribution(compiler, group_idx,
+			                                                 options.group_dictionary_runtime_array_base_reg);
+			sljit_set_label(contribution_ready, sljit_emit_label(compiler));
+		} else if (group.expression_kind == SljitNativeRegionExpressionKind::TYPED_EXPRESSION_TREE) {
 			if (!group.expression_tree) {
 				throw InternalException("SLJIT perfect-hash typed group expression is missing IR");
 			}
@@ -148,14 +212,8 @@ void EmitSljitPerfectHashGroupLookup(const SljitPerfectHashFusedUpdateEmitContex
 			    compiler, group_idx, group, SLJIT_R1, SLJIT_R2, context.hoist_group_data_pointers, group_data_reg,
 			    use_precomputed_string_offset, group_data_array_base_reg, fuse_nonempty_string_compress_bias);
 		}
-		const auto group_offset = (fuse_nonempty_string_compress_bias ? 2 : 1) - group.minimum;
-		if (group_offset != 0) {
-			sljit_emit_op2(compiler, SLJIT_ADD, SLJIT_R2, 0, SLJIT_R2, 0, SLJIT_IMM,
-			               NumericCast<sljit_sw>(group_offset));
-		}
-		if (group.shift != 0) {
-			sljit_emit_op2(compiler, SLJIT_SHL, SLJIT_R2, 0, SLJIT_R2, 0, SLJIT_IMM,
-			               NumericCast<sljit_sw>(group.shift));
+		if (!options.use_dictionary_group_contributions) {
+			EmitSljitPerfectHashNormalizeGroupContribution(compiler, group, fuse_nonempty_string_compress_bias);
 		}
 		if (group_index_initialized) {
 			sljit_emit_op2(compiler, SLJIT_ADD, SLJIT_S4, 0, SLJIT_S4, 0, SLJIT_R2, 0);

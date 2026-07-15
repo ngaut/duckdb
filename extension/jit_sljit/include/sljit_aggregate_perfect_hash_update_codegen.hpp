@@ -48,8 +48,10 @@ struct SljitPerfectHashGroupLookupOptions {
 	bool expression_no_source_selection = false;
 	bool use_fast_group_data_array_base = false;
 	bool group_selection_all_present = false;
+	bool use_dictionary_group_contributions = false;
 	sljit_s32 group_sel_array_base_reg = 0;
 	sljit_s32 group_data_array_base_reg_override = 0;
+	sljit_s32 group_dictionary_runtime_array_base_reg = 0;
 	const vector<SljitTypedExpressionTreeDataPointerHoist> *expression_data_hoists = nullptr;
 };
 

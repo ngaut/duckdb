@@ -1,6 +1,6 @@
 # JIT Broad-Workload Gate
 
-Last updated: 2026-07-13
+Last updated: 2026-07-15
 
 This file records the current TPC-H milestone and verification commands. The
 generic production contracts live in
@@ -22,6 +22,10 @@ The active architecture work is generic grouped and join execution:
   or grouped-state per-payload family; chunk execution does not rediscover that
   family from flags;
 - exact INT128 reducers update both words of DuckDB's ordinary hugeint state;
+- perfect-hash string groups retain dictionary-domain identity in the aggregate
+  runtime owner; generated lookup caches normalized group contributions by
+  dictionary source index and invalidates only observed entries when the
+  dictionary has no persistent identity;
 - semantic aggregate and DISTINCT state use pipeline-local ownership, never
   disposable compiled-region scratch;
 - DuckDB core CBO admits stateful recipes only when backend-neutral work facts
@@ -73,40 +77,40 @@ The active architecture work is generic grouped and join execution:
 
 Configuration: TPC-H SF1, one thread, production timing, tracing disabled, and
 result verification enabled. The accepted ten-repeat comparison receipt is
-`benchmark/tpch/jit/tmp/nullable_codegen_full_sf1_promotion10_20260713`.
+`benchmark/tpch/jit/tmp/dictionary_group_owner_scope_full_sf1_promotion10_20260715`.
 Candidate gates use five repeats. A focused ten-repeat triage or promotion is
 an explicit follow-up command; no failed candidate schedules it automatically.
 
 | Query | Non-JIT (s) | JIT (s) | Speedup |
 | ---: | ---: | ---: | ---: |
-| Q1 | 0.071 | 0.056 | 1.269x |
-| Q2 | 0.010 | 0.011 | 0.931x |
-| Q3 | 0.060 | 0.059 | 1.019x |
-| Q4 | 0.043 | 0.040 | 1.089x |
-| Q5 | 0.051 | 0.047 | 1.083x |
-| Q6 | 0.040 | 0.019 | 2.050x |
-| Q7 | 0.059 | 0.055 | 1.073x |
-| Q8 | 0.041 | 0.039 | 1.053x |
-| Q9 | 0.145 | 0.119 | 1.223x |
-| Q10 | 0.063 | 0.054 | 1.165x |
+| Q1 | 0.070 | 0.056 | 1.268x |
+| Q2 | 0.011 | 0.011 | 0.946x |
+| Q3 | 0.061 | 0.059 | 1.029x |
+| Q4 | 0.044 | 0.040 | 1.105x |
+| Q5 | 0.052 | 0.047 | 1.094x |
+| Q6 | 0.039 | 0.020 | 1.964x |
+| Q7 | 0.059 | 0.055 | 1.062x |
+| Q8 | 0.042 | 0.040 | 1.054x |
+| Q9 | 0.146 | 0.112 | 1.306x |
+| Q10 | 0.063 | 0.055 | 1.134x |
 | Q11 | 0.012 | 0.012 | 0.976x |
-| Q12 | 0.072 | 0.054 | 1.334x |
-| Q13 | 0.142 | 0.092 | 1.551x |
-| Q14 | 0.050 | 0.048 | 1.040x |
-| Q15 | 0.037 | 0.028 | 1.329x |
-| Q16 | 0.031 | 0.029 | 1.067x |
-| Q17 | 0.030 | 0.029 | 1.016x |
-| Q18 | 0.101 | 0.070 | 1.455x |
-| Q19 | 0.031 | 0.029 | 1.069x |
-| Q20 | 0.064 | 0.059 | 1.087x |
-| Q21 | 0.113 | 0.101 | 1.116x |
-| Q22 | 0.022 | 0.020 | 1.102x |
+| Q12 | 0.069 | 0.054 | 1.283x |
+| Q13 | 0.143 | 0.092 | 1.552x |
+| Q14 | 0.051 | 0.049 | 1.053x |
+| Q15 | 0.038 | 0.028 | 1.323x |
+| Q16 | 0.031 | 0.030 | 1.039x |
+| Q17 | 0.030 | 0.030 | 1.010x |
+| Q18 | 0.101 | 0.055 | 1.831x |
+| Q19 | 0.031 | 0.029 | 1.065x |
+| Q20 | 0.064 | 0.060 | 1.076x |
+| Q21 | 0.112 | 0.101 | 1.119x |
+| Q22 | 0.023 | 0.021 | 1.088x |
 
 All results are correct. Auto compiles 20 queries and deliberately keeps Q2
 and Q11 vectorized because their stateful work is below the generic startup
-floor. Summed medians improve from 1.289s to 1.070s (1.205x), the per-query
-geometric-mean speedup is 1.166x, and the gate reports 18 material wins. Q12 is
-1.334x, Q13 is 1.551x, and Q18 is 1.455x.
+floor. Summed medians improve from 1.292s to 1.056s (1.224x), the per-query
+geometric-mean speedup is 1.176x, and the gate reports 18 material wins. Q1 is
+1.268x, Q9 is 1.306x, Q13 is 1.552x, and Q18 is 1.831x.
 
 ## Accepted SF10 evidence
 

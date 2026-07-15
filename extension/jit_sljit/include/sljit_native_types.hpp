@@ -261,12 +261,19 @@ struct SljitNativeConstantOrNull {
 	bool guard_has_null_constant = false;
 };
 
+struct SljitPerfectHashDictionaryGroupRuntime {
+	idx_t *contributions = nullptr;
+	sel_t *active_indices = nullptr;
+	idx_t *active_count = nullptr;
+};
+
 struct SljitNativeVectorInput {
 	const_data_ptr_t source_data = nullptr;
 	const_data_ptr_t right_source_data = nullptr;
 	const_data_ptr_t *source_data_array = nullptr;
 	const_data_ptr_t *right_source_data_array = nullptr;
 	const_data_ptr_t *group_data_array = nullptr;
+	SljitPerfectHashDictionaryGroupRuntime *perfect_hash_dictionary_groups = nullptr;
 	data_ptr_t *result_data_array = nullptr;
 	const_data_ptr_t floating_constants = nullptr;
 	data_ptr_t floating_stats_min = nullptr;

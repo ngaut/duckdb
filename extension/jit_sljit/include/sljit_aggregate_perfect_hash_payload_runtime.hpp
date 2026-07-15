@@ -13,6 +13,8 @@
 #include "sljit_grouped_reduction_lane.hpp"
 #include "sljit_region_runtime_state.hpp"
 
+#include "duckdb/common/vector/dictionary_vector.hpp"
+
 namespace duckdb {
 
 static bool
@@ -23,6 +25,50 @@ SljitPerfectHashGroupExpressionsUseTypedTree(const vector<SljitNativeRegionExpre
 		}
 	}
 	return false;
+}
+
+static bool SljitTryPreparePerfectHashStringDictionaryContributions(
+    idx_t count, const SljitNativeRegionExpressionPlan &group_expression, Vector &group_source,
+    const sel_t *group_selection, SljitPerfectHashDictionaryGroupCache &cache,
+    SljitPerfectHashDictionaryGroupRuntime &runtime) {
+	static constexpr idx_t MAX_DICTIONARY_SIZE = 20000;
+	if (group_expression.kind != SljitNativeRegionExpressionKind::STRING_COMPRESS ||
+	    group_expression.string_compress_target_size != sizeof(uint8_t)) {
+		return false;
+	}
+	if (group_source.GetVectorType() != VectorType::DICTIONARY_VECTOR ||
+	    DictionaryVector::Child(group_source).GetVectorType() != VectorType::FLAT_VECTOR || !group_selection) {
+		return false;
+	}
+	const auto dictionary_size = DictionaryVector::DictionarySize(group_source);
+	const auto &dictionary_id = DictionaryVector::DictionaryId(group_source);
+	if (!dictionary_size.IsValid() || dictionary_size.GetIndex() == 0 ||
+	    dictionary_size.GetIndex() > MAX_DICTIONARY_SIZE) {
+		return false;
+	}
+	const auto size = dictionary_size.GetIndex();
+	const bool identity_changed = cache.dictionary_size != size || cache.dictionary_id != dictionary_id;
+	if (identity_changed) {
+		cache.contributions.assign(size, DConstants::INVALID_INDEX);
+		cache.active_indices.resize(size);
+		cache.dictionary_id = dictionary_id;
+		cache.dictionary_size = size;
+		cache.active_count = 0;
+		cache.disabled = false;
+	} else if (dictionary_id.empty()) {
+		cache.disabled = cache.disabled || cache.active_count >= (count + 1) / 2;
+		for (idx_t active_idx = 0; active_idx < cache.active_count; active_idx++) {
+			cache.contributions[cache.active_indices[active_idx]] = DConstants::INVALID_INDEX;
+		}
+		cache.active_count = 0;
+	}
+	if (cache.disabled) {
+		return false;
+	}
+	runtime.contributions = cache.contributions.data();
+	runtime.active_indices = cache.active_indices.data();
+	runtime.active_count = &cache.active_count;
+	return true;
 }
 
 static void SljitExecuteFusedPerfectHashGroupedPrimitiveAggregatePayloadUpdate(
@@ -114,6 +160,10 @@ static void SljitExecuteFusedPerfectHashGroupedPrimitiveAggregatePayloadUpdate(
 			throw InternalException("SLJIT fused perfect-hash aggregate group expression is unsupported");
 		}
 		group_sources.FinishSource(group_idx, execute_sel, count, group_source_not_null[group_idx]);
+		SljitTryPreparePerfectHashStringDictionaryContributions(
+		    count, group_expression, input.data[group_expression.source_index],
+		    group_sources.SelectionArray()[group_idx], adapter_scratch.perfect_hash_dictionary_group_caches[group_idx],
+		    adapter_scratch.perfect_hash_dictionary_groups[group_idx]);
 	}
 
 	auto &payload_sources = adapter_scratch.payload_sources;
@@ -157,8 +207,14 @@ static void SljitExecuteFusedPerfectHashGroupedPrimitiveAggregatePayloadUpdate(
 		    SljitInputSourceKnownNotNull(payloads[payload_idx].input_source_not_null, 0));
 	}
 
-	const auto native_execute_sel =
-	    execute_sel ? execute_sel->data() : payload_sources.CanonicalizeCommonSelection(group_sources);
+	bool dictionary_group_contributions_ready = !execute_sel && !groups.empty();
+	for (auto &dictionary_group : adapter_scratch.perfect_hash_dictionary_groups) {
+		dictionary_group_contributions_ready = dictionary_group_contributions_ready && dictionary_group.contributions;
+	}
+	const auto native_execute_sel = execute_sel ? execute_sel->data()
+	                                            : (dictionary_group_contributions_ready
+	                                                   ? nullptr
+	                                                   : payload_sources.CanonicalizeCommonSelection(group_sources));
 	const auto source_common_sel =
 	    typed_payloads && !native_execute_sel ? payload_sources.CanonicalizeCommonSourceSelection() : nullptr;
 	const bool flat_no_selection = payload_sources.FlatNoSelection(native_execute_sel, source_common_sel) &&
@@ -176,6 +232,8 @@ static void SljitExecuteFusedPerfectHashGroupedPrimitiveAggregatePayloadUpdate(
 	native_input.source_validity_array =
 	    typed_payloads ? payload_sources.ValidityArray() : payload_sources.ValidityArrayOrNull();
 	native_input.group_data_array = group_sources.DataArray();
+	native_input.perfect_hash_dictionary_groups =
+	    dictionary_group_contributions_ready ? adapter_scratch.perfect_hash_dictionary_groups.data() : nullptr;
 	native_input.group_sel_array =
 	    typed_payloads ? group_sources.SelectionArray() : group_sources.SelectionArrayOrNull();
 	native_input.group_validity_array =
