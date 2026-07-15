@@ -30,6 +30,14 @@ struct SljitHashJoinProbeDrainState;
 
 enum class SljitHashJoinProbeInputKind { GENERIC, FLAT_ALL_VALID, SELECTED_ALL_VALID };
 
+template <class T>
+static T SljitPerfectHashJoinBound(uint64_t bits) {
+	static_assert(sizeof(T) <= sizeof(bits), "perfect hash join bound must fit in the runtime layout word");
+	T result;
+	memcpy(&result, &bits, sizeof(T));
+	return result;
+}
+
 static inline bool SljitHashJoinEmitsMarkSelection(SljitHashJoinMarkSelectionMode mode) {
 	return mode != SljitHashJoinMarkSelectionMode::NONE;
 }

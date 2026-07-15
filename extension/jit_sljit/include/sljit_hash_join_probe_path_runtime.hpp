@@ -132,7 +132,7 @@ static SljitPreparedRegularHashJoinProbeInput SljitPrepareRegularHashJoinProbeIn
     const SljitNativeHashJoinProbePlan &plan, const ExecutionHashJoinTableLayout &layout, DataChunk &input,
     SelectionVector &match_selection, Vector &row_pointers, SljitHashJoinProbeSourceScratch &source_scratch,
     SljitHashJoinProbeDrainState &state, SljitHashJoinProbeLayoutKind table_layout_kind,
-    bool allow_unchecked_int64_to_int32, bool rhs_keys_all_valid, bool use_bloom_filter) {
+    bool allow_unchecked_int64_to_int32, bool rhs_keys_can_have_null, bool use_bloom_filter) {
 	auto vector_setup_stage_start = SljitRegionStageStart(runtime);
 	auto source_key0_int64_to_int32 = source_scratch.Prepare(input, plan);
 	row_pointers.SetVectorType(VectorType::FLAT_VECTOR);
@@ -144,7 +144,7 @@ static SljitPreparedRegularHashJoinProbeInput SljitPrepareRegularHashJoinProbeIn
 	const bool source_selection_present = source_sel_array != nullptr;
 	const SljitRegularHashJoinProbeInputShape input_shape {
 	    source_selection_present, source_selection_present && source_scratch.HasCommonSelection(),
-	    source_validity_array != nullptr, rhs_keys_all_valid};
+	    source_validity_array != nullptr, !rhs_keys_can_have_null};
 
 	SljitPreparedRegularHashJoinProbeInput result;
 	result.input_kind = input_shape.PathKind();
@@ -159,7 +159,7 @@ static SljitPreparedRegularHashJoinProbeInput SljitPrepareRegularHashJoinProbeIn
 	native_input.bitmask = layout.bitmask;
 	native_input.pointer_mask = layout.pointer_mask;
 	native_input.layout_kind = table_layout_kind;
-	native_input.rhs_keys_have_validity = layout.can_have_null && !rhs_keys_all_valid;
+	native_input.rhs_keys_have_validity = rhs_keys_can_have_null;
 	native_input.pointer_offset = layout.pointer_offset;
 	native_input.aux_next_ptrs = layout.aux_next_ptrs;
 	native_input.bloom_filter_bits = use_bloom_filter && layout.bloom_filter ? layout.bloom_filter->Data() : nullptr;

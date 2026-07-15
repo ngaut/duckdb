@@ -36,12 +36,6 @@ static bool SljitNativeRegionExpressionsGenerateCode(const vector<SljitNativeReg
 }
 
 static bool SljitNativeHashJoinProbeGeneratesDeferredCode(const SljitNativeHashJoinProbePlan &plan) {
-	// An exact perfect-hash source filter bypasses the deferred probe kernel at runtime. It can
-	// participate in a region anchored by other generated work, but it cannot prove that the
-	// region itself has an executable machine-code body.
-	if (plan.perfect_hash_probe && plan.exact_source_filter_identity) {
-		return false;
-	}
 	string unused_error;
 	return SljitValidateHashJoinProbePlan(plan, unused_error);
 }
@@ -228,21 +222,6 @@ static bool SljitRegionPlanHasDirectSourceHashBuild(const vector<SljitNativeRegi
 	return true;
 }
 
-static bool SljitRegionPlanHasExactFilterProbeHashBuild(const vector<SljitNativeRegionOpPlan> &ops) {
-	if (ops.size() < 2 || ops.size() > 3 || ops[0].kind != SljitNativeRegionOpKind::HASH_JOIN_PROBE ||
-	    ops.back().kind != SljitNativeRegionOpKind::HASH_JOIN_BUILD) {
-		return false;
-	}
-	if (ops.size() == 3 && (ops[1].kind != SljitNativeRegionOpKind::PROJECTION ||
-	                        SljitNativeRegionExpressionsGenerateCode(ops[1].projections))) {
-		return false;
-	}
-	auto &probe = ops[0].hash_join_probe;
-	return probe.exact_source_filter_identity && probe.keys.size() == 1 && probe.equality_key_count == 1 &&
-	       !probe.residual_predicate && !probe.mark_build_match &&
-	       probe.output_mode == ExecutionHashJoinProbeOutputMode::MATCHED_PROBE_AND_BUILD;
-}
-
 static bool SljitPredicateContainsOnlyStringSets(const SljitNativePredicate &predicate) {
 	if (predicate.kind == SljitNativePredicateKind::STRING_EQUAL_CONSTANT ||
 	    (predicate.kind == SljitNativePredicateKind::STRING_IN_LIST_CONSTANT && !predicate.not_in)) {
@@ -316,9 +295,6 @@ bool SljitNativeRegionHasExecutableBodyGap(const SljitNativeRegionPlan &region, 
 	}
 	if (!generates_machine_code) {
 		if (region.uses_scan_filters && SljitRegionPlanHasDirectSourceHashBuild(region.ops)) {
-			return false;
-		}
-		if (region.uses_scan_filters && SljitRegionPlanHasExactFilterProbeHashBuild(region.ops)) {
 			return false;
 		}
 		blocker = "SLJIT native region emits no generated machine code";

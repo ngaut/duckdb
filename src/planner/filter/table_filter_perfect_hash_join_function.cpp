@@ -20,14 +20,12 @@
 namespace duckdb {
 
 PerfectHashJoinFunctionData::PerfectHashJoinFunctionData(optional_ptr<const PerfectHashJoinExecutor> executor_p,
-                                                         const string &key_column_name_p, float selectivity_threshold_p,
-                                                         idx_t n_vectors_to_check_p)
-    : executor(executor_p), key_column_name(key_column_name_p), selectivity_threshold(selectivity_threshold_p),
-      n_vectors_to_check(n_vectors_to_check_p) {
+                                                         const string &key_column_name_p)
+    : executor(executor_p), key_column_name(key_column_name_p) {
 }
 
 unique_ptr<FunctionData> PerfectHashJoinFunctionData::Copy() const {
-	return make_uniq<PerfectHashJoinFunctionData>(executor, key_column_name, selectivity_threshold, n_vectors_to_check);
+	return make_uniq<PerfectHashJoinFunctionData>(executor, key_column_name);
 }
 
 bool PerfectHashJoinFunctionData::Equals(const FunctionData &other_p) const {
@@ -43,58 +41,33 @@ static idx_t SelectPerfectHashJoin(Vector &input, const PerfectHashJoinFunctionD
 	return approved_count;
 }
 
-static unique_ptr<FunctionLocalState>
-PerfectHashJoinInitLocalState(ExpressionState &state, const BoundFunctionExpression &expr, FunctionData *bind_data) {
-	auto &data = bind_data->Cast<PerfectHashJoinFunctionData>();
-	if (!data.executor) {
-		return nullptr;
-	}
-	return InitSelectivityTrackingLocalState(data.n_vectors_to_check, data.selectivity_threshold);
-}
-
 static void PerfectHashJoinFunction(DataChunk &args, ExpressionState &state, Vector &result) {
 	auto &func_expr = state.expr.Cast<BoundFunctionExpression>();
 	auto &func_data = func_expr.BindInfo()->Cast<PerfectHashJoinFunctionData>();
-	auto local_state_ptr = ExecuteFunctionState::GetFunctionState(state);
-	auto tracking_state = local_state_ptr ? &local_state_ptr->Cast<SelectivityTrackingLocalState>() : nullptr;
 
 	if (!func_data.executor) {
 		SetAllTrue(args, result);
 		return;
 	}
 
-	ExecuteWithSelectivityTracking(args, result, tracking_state, [&] {
-		SelectionVector probe_sel(args.size());
-		auto approved_count = SelectPerfectHashJoin(args.data[0], func_data, probe_sel, args.size());
-		SelectionToBooleanResult(args.size(), probe_sel, approved_count, result);
-		return approved_count;
-	});
+	SelectionVector probe_sel(args.size());
+	auto approved_count = SelectPerfectHashJoin(args.data[0], func_data, probe_sel, args.size());
+	SelectionToBooleanResult(args.size(), probe_sel, approved_count, result);
 }
 
 static idx_t PerfectHashJoinSelect(DataChunk &args, ExpressionState &state, optional_ptr<const SelectionVector> sel,
                                    optional_ptr<SelectionVector> true_sel, optional_ptr<SelectionVector> false_sel) {
 	auto &func_expr = state.expr.Cast<BoundFunctionExpression>();
 	auto &func_data = func_expr.BindInfo()->Cast<PerfectHashJoinFunctionData>();
-	auto local_state_ptr = ExecuteFunctionState::GetFunctionState(state);
-	auto tracking_state = local_state_ptr ? &local_state_ptr->Cast<SelectivityTrackingLocalState>() : nullptr;
 
 	auto count = args.size();
 	if (!func_data.executor) {
 		return SetAllTrueSelection(count, sel, true_sel, false_sel);
 	}
-	if (tracking_state && !tracking_state->IsActive()) {
-		tracking_state->Update(0, 0);
-		return SetAllTrueSelection(count, sel, true_sel, false_sel);
-	}
-
 	SelectionVector temp_true(count);
 	auto result_true_sel = (!true_sel || (sel && true_sel.get() == sel.get())) ? &temp_true : true_sel.get();
 	auto approved_count = SelectPerfectHashJoin(args.data[0], func_data, *result_true_sel, count);
-	approved_count = TranslateSelection(count, sel, *result_true_sel, approved_count, true_sel, false_sel);
-	if (tracking_state) {
-		tracking_state->Update(approved_count, count);
-	}
-	return approved_count;
+	return TranslateSelection(count, sel, *result_true_sel, approved_count, true_sel, false_sel);
 }
 
 template <class T>
@@ -141,7 +114,6 @@ static FilterPropagateResult TemplatedPerfectHashJoinPrune(const PerfectHashJoin
 
 ScalarFunction PerfectHashJoinScalarFun::GetFunction(const LogicalType &input_type) {
 	ScalarFunction func(NAME, {input_type}, LogicalType::BOOLEAN, PerfectHashJoinFunction, TableFilterFunctions::Bind);
-	func.SetInitStateCallback(PerfectHashJoinInitLocalState);
 	func.SetSelectCallback(PerfectHashJoinSelect);
 	func.SetNullHandling(FunctionNullHandling::SPECIAL_HANDLING);
 	func.SetFilterPruneCallback(PerfectHashJoinScalarFun::FilterPrune);

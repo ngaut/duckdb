@@ -51,7 +51,7 @@ JoinHashTable::JoinHashTable(ClientContext &context_p, const PhysicalOperator &o
     : context(context_p), op(op_p), buffer_manager(BufferManager::GetBufferManager(context)), conditions(conditions_p),
       build_types(std::move(btypes)), output_columns(output_columns_p), entry_size(0), tuple_size(0),
       vfound(Value::BOOLEAN(false), count_t(STANDARD_VECTOR_SIZE)), join_type(type_p), finalized(false),
-      has_null(false), residual_predicate(predicate_ptr), radix_bits(initial_radix_bits),
+      has_filtered_null(false), residual_predicate(predicate_ptr), radix_bits(initial_radix_bits),
       runtime_filter_identity(make_shared_ptr<ExecutionRuntimeFilterIdentity>()) {
 	// store residual predicate information
 	residual_info = std::move(residual_p);
@@ -151,7 +151,7 @@ void JoinHashTable::Merge(JoinHashTable &other) {
 	if (join_type == JoinType::MARK) {
 		auto &info = correlated_mark_join_info;
 		lock_guard<mutex> mj_lock(info.mj_lock);
-		has_null = has_null || other.has_null;
+		has_filtered_null = has_filtered_null || other.has_filtered_null;
 		if (!info.correlated_types.empty()) {
 			auto &other_info = other.correlated_mark_join_info;
 			info.correlated_counts->Combine(*other_info.correlated_counts);
@@ -524,7 +524,10 @@ bool JoinHashTable::GetExecutionHashJoinTableLayout(ExecutionHashJoinTableLayout
 	PrefixRangeLookupData prefix_lookup;
 	if (prefix_range_filter && TypeIsInteger(prefix_range_filter_key_type.InternalType()) &&
 	    prefix_range_filter->GetSignedLookupData(prefix_lookup) && prefix_lookup.shift == 0) {
-		layout.exact_filter_build_keys_unique = prefix_range_filter->DistinctCountUpperBound() == Count();
+		layout.exact_membership_filter_build_keys_unique = prefix_range_filter->DistinctCountUpperBound() == Count();
+		layout.exact_membership_filter_min = prefix_lookup.min;
+		layout.exact_membership_filter_span = prefix_lookup.span;
+		layout.exact_membership_filter_bitmap = prefix_lookup.bitmap;
 		layout.runtime_filter_identity = runtime_filter_identity;
 	}
 
@@ -535,6 +538,11 @@ bool JoinHashTable::GetExecutionHashJoinTableLayout(ExecutionHashJoinTableLayout
 			break;
 		}
 	}
+	const bool correlated_mark_retains_null_keys =
+	    join_type == JoinType::MARK && !correlated_mark_join_info.correlated_types.empty();
+	layout.stored_keys_can_have_null =
+	    layout.can_have_null &&
+	    (PropagatesBuildSide(join_type) || correlated_mark_retains_null_keys || !layout.null_keys_are_filtered);
 
 	if (!layout.finalized) {
 		layout.blocker = "hash-join-native-table-not-finalized";
@@ -671,7 +679,7 @@ idx_t JoinHashTable::PrepareBuildChunk(PartitionedTupleDataAppendState &append_s
 	// prepare the keys for processing
 	idx_t added_count = PrepareKeys(keys, append_state.chunk_state.vector_data, build_selection, build_sel, true);
 	if (added_count < keys.size()) {
-		has_null = true;
+		has_filtered_null = true;
 	}
 	return added_count;
 }
@@ -1546,7 +1554,7 @@ static idx_t ProbeInt64PairNoChainLoop(const UnifiedVectorFormat &key0_format, c
 bool JoinHashTable::TryProbeInt64PairNoChain(ScanStructure &scan_structure, DataChunk &keys,
                                              TupleDataChunkState &key_state) {
 	if (join_type != JoinType::INNER || needs_chain_matcher || residual_predicate || chains_longer_than_one ||
-	    has_null || scan_structure.has_null_value_filter || scan_structure.count != keys.size()) {
+	    has_filtered_null || scan_structure.has_null_value_filter || scan_structure.count != keys.size()) {
 		return false;
 	}
 	if (equality_types.size() != 2 || keys.ColumnCount() != 2 || equality_predicates.size() != 2) {
@@ -2300,7 +2308,7 @@ void ScanStructure::ConstructMarkJoinResult(DataChunk &join_keys, DataChunk &pro
 	}
 
 	// if the right side contains NULL values, the result of any FALSE becomes NULL
-	if (ht.has_null) {
+	if (ht.has_filtered_null) {
 		for (idx_t i = 0; i < probe_data.size(); i++) {
 			if (!bool_result[i]) {
 				mask.SetInvalid(i);
@@ -2796,7 +2804,7 @@ void JoinHashTable::ResetForNewIterationSinglePartition() {
 	capacity = DConstants::INVALID_INDEX;
 	bitmask = DConstants::INVALID_INDEX;
 	finalized = false;
-	has_null = false;
+	has_filtered_null = false;
 	chains_longer_than_one = false;
 	total_probe_matches = 0;
 	load_factor = DEFAULT_LOAD_FACTOR;

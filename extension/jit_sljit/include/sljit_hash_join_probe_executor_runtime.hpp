@@ -8,7 +8,7 @@
 
 #pragma once
 
-#include "sljit_exact_perfect_hash_join_runtime.hpp"
+#include "sljit_hash_join_all_valid_probe_matcher_runtime.hpp"
 #include "sljit_hash_join_probe_execution_contract.hpp"
 #include "sljit_hash_join_probe_output_runtime.hpp"
 #include "sljit_hash_join_probe_primitive.hpp"
@@ -21,41 +21,6 @@
 
 namespace duckdb {
 
-static void SljitPopulateExactPerfectHashJoinSelections(const SljitNativeHashJoinProbeKeyPlan &key,
-                                                        SljitNativePerfectHashJoinProbeInput &input,
-                                                        bool emit_match_selection = true,
-                                                        bool emit_build_selection = true) {
-	if (input.source_key0_int64_to_int32) {
-		SljitPopulateExactPerfectHashJoinSelections<int32_t, int64_t>(input, emit_match_selection,
-		                                                              emit_build_selection);
-		return;
-	}
-	switch (key.key_kind) {
-	case SljitNativeHashJoinKeyKind::INT8:
-		return SljitPopulateExactPerfectHashJoinSelections<int8_t>(input, emit_match_selection, emit_build_selection);
-	case SljitNativeHashJoinKeyKind::INT16:
-		return SljitPopulateExactPerfectHashJoinSelections<int16_t>(input, emit_match_selection, emit_build_selection);
-	case SljitNativeHashJoinKeyKind::INT32:
-		return SljitPopulateExactPerfectHashJoinSelections<int32_t>(input, emit_match_selection, emit_build_selection);
-	case SljitNativeHashJoinKeyKind::INT64:
-		return SljitPopulateExactPerfectHashJoinSelections<int64_t>(input, emit_match_selection, emit_build_selection);
-	case SljitNativeHashJoinKeyKind::UINT8:
-		return SljitPopulateExactPerfectHashJoinSelections<uint8_t>(input, emit_match_selection, emit_build_selection);
-	case SljitNativeHashJoinKeyKind::UINT16:
-		return SljitPopulateExactPerfectHashJoinSelections<uint16_t>(input, emit_match_selection, emit_build_selection);
-	case SljitNativeHashJoinKeyKind::UINT32:
-		return SljitPopulateExactPerfectHashJoinSelections<uint32_t>(input, emit_match_selection, emit_build_selection);
-	case SljitNativeHashJoinKeyKind::UINT64:
-		return SljitPopulateExactPerfectHashJoinSelections<uint64_t>(input, emit_match_selection, emit_build_selection);
-	case SljitNativeHashJoinKeyKind::INT128:
-		return SljitPopulateWidePerfectHashJoinSelections(input, emit_match_selection, emit_build_selection, false);
-	case SljitNativeHashJoinKeyKind::UINT128:
-		return SljitPopulateWidePerfectHashJoinSelections(input, emit_match_selection, emit_build_selection, true);
-	default:
-		throw InternalException("exact perfect hash join filter proof has an unsupported key width");
-	}
-}
-
 template <class OWNER>
 static ExecutionOperatorBindResult SljitExecutePerfectHashJoinProbe(
     OWNER &owner, ExecutionRegionRuntime &runtime, idx_t op_idx, SljitExecutableRegionOp &op,
@@ -64,51 +29,11 @@ static ExecutionOperatorBindResult SljitExecutePerfectHashJoinProbe(
     SljitHashJoinProbeDrainState &state, bool source_key0_int64_to_int32_unchecked = false,
     SljitHashJoinProbeOutputContract output_contract = SljitHashJoinProbeOutputContract::MATERIALIZED_OUTPUT) {
 	state.output_proof.perfect_build_selection_is_key_offset = false;
+	const bool exact_membership_filter =
+	    plan.exact_source_filter_identity &&
+	    plan.exact_source_filter_identity == probe.perfect_layout.runtime_filter_identity;
 	if (plan.exact_source_filter_identity) {
 		runtime.RecordJitRuntimePath("hash_join_probe.perfect_probe.exact_source_filter_candidate");
-	}
-	if (plan.exact_source_filter_identity &&
-	    plan.exact_source_filter_identity == probe.perfect_layout.runtime_filter_identity) {
-		auto &key = SljitValidatePerfectHashJoinProbeExecutionLayout(plan, probe, input);
-		SljitPreparedPerfectHashJoinProbeInput prepared_input;
-		SljitPreparePerfectHashJoinProbeInput(key, probe.perfect_layout, input, match_selection, build_selection, state,
-		                                      source_key0_int64_to_int32_unchecked, prepared_input);
-		auto &native_input = prepared_input.native_input;
-		const bool prefer_identity_selection = SljitHashJoinProbePrefersIdentitySelection(output_contract);
-		const bool direct_consumer_output =
-		    SljitHashJoinProbePrefersDirectConsumerOutput(output_contract) &&
-		    SljitCanDerivePerfectHashBuildSelectionFromIdentity(key, probe.perfect_layout, input);
-		const auto initial_input_offset = native_input.input_offset;
-		SljitPopulateExactPerfectHashJoinSelections(key, native_input, !prefer_identity_selection,
-		                                            !direct_consumer_output);
-		if (prefer_identity_selection && native_input.selected_count != input.size()) {
-			native_input.input_offset = initial_input_offset;
-			native_input.selected_count = 0;
-			native_input.finished = false;
-			SljitPopulateExactPerfectHashJoinSelections(key, native_input);
-			runtime.RecordJitRuntimePath("hash_join_probe.perfect_probe.identity_selection_retry", input.size());
-		} else if (prefer_identity_selection) {
-			runtime.RecordJitRuntimePath("hash_join_probe.perfect_probe.identity_selection_elided", input.size());
-			if (direct_consumer_output) {
-				state.output_proof.perfect_build_selection_is_key_offset = true;
-				runtime.RecordJitRuntimePath("hash_join_probe.perfect_probe.build_selection_elided", input.size());
-			}
-		}
-		state.input_offset = native_input.input_offset;
-		state.resume_row_pointer = nullptr;
-		state.finished = native_input.finished;
-		state.output_proof.source_key0_int64_to_int32 = native_input.source_key0_int64_to_int32;
-		state.output_proof.match_selection_is_identity = native_input.selected_count == input.size();
-		runtime.RecordJitRuntimePath("hash_join_probe.perfect_probe.exact_source_filter", native_input.selected_count);
-		RecordSljitRegionRuntimeProof(runtime, op.kind, ExecutionRegionJitRuntimeProof::GENERATED_BACKEND_WORK,
-		                              "exact_source_filter", native_input.selected_count);
-		if (SljitHashJoinProbeProducesSelectedView(output_contract)) {
-			output.SetChildCardinality(native_input.selected_count);
-			return ExecutionOperatorBindResult::READY;
-		}
-		ExecutionMaterializePerfectHashJoinProbe(probe, input, match_selection, build_selection,
-		                                         native_input.selected_count, output, nullptr);
-		return ExecutionOperatorBindResult::READY;
 	}
 	auto &key = SljitValidatePerfectHashJoinProbeExecutionLayout(plan, probe, input);
 	const bool prefer_identity_selection = SljitHashJoinProbePrefersIdentitySelection(output_contract);
@@ -151,6 +76,11 @@ static ExecutionOperatorBindResult SljitExecutePerfectHashJoinProbe(
 	}
 	RecordSljitRegionStageRuntimePath(runtime, op_idx, op.kind, SljitGeneratedPerfectHashJoinProbeStage(),
 	                                  generated_stage_start);
+	if (exact_membership_filter) {
+		runtime.RecordJitRuntimePath("hash_join_probe.perfect_probe.exact_source_filter", native_input.selected_count);
+		RecordSljitRegionRuntimeProof(runtime, op.kind, ExecutionRegionJitRuntimeProof::GENERATED_BACKEND_WORK,
+		                              "exact_source_filter", native_input.selected_count);
+	}
 	state.input_offset = native_input.input_offset;
 	state.resume_row_pointer = nullptr;
 	state.finished = native_input.finished;
@@ -173,6 +103,37 @@ static ExecutionOperatorBindResult SljitExecutePerfectHashJoinProbe(
 	return ExecutionOperatorBindResult::READY;
 }
 
+struct SljitExactRegularHashJoinMembershipFilterDispatch {
+	const ExecutionHashJoinTableLayout &layout;
+	SljitNativeRegularHashJoinProbeInput &input;
+
+	template <class KEY_READER>
+	void Execute() {
+		using KEY_TYPE = typename KEY_READER::Key;
+		using UNSIGNED_KEY_TYPE = typename MakeUnsigned<KEY_TYPE>::type;
+		KEY_READER reader(input);
+		const auto key_sel = input.source_sel ? input.source_sel[0] : nullptr;
+		const auto key_validity = input.source_validity ? input.source_validity[0] : nullptr;
+		idx_t selected_count = 0;
+		for (idx_t row_idx = 0; row_idx < input.count; row_idx++) {
+			const auto source_idx = key_sel ? key_sel[row_idx] : UnsafeNumericCast<sel_t>(row_idx);
+			if (key_validity && !(key_validity[source_idx / ValidityMask::BITS_PER_VALUE] &
+			                      (validity_t(1) << (source_idx % ValidityMask::BITS_PER_VALUE)))) {
+				continue;
+			}
+			const auto comparable = static_cast<uint64_t>(static_cast<UNSIGNED_KEY_TYPE>(reader.Load(source_idx)));
+			const auto filter_idx = comparable - layout.exact_membership_filter_min;
+			if (filter_idx > layout.exact_membership_filter_span ||
+			    !(layout.exact_membership_filter_bitmap[filter_idx / ValidityMask::BITS_PER_VALUE] &
+			      (uint64_t(1) << (filter_idx % ValidityMask::BITS_PER_VALUE)))) {
+				continue;
+			}
+			input.match_sel[selected_count++] = UnsafeNumericCast<sel_t>(row_idx);
+		}
+		input.selected_count = selected_count;
+	}
+};
+
 template <class OWNER>
 static ExecutionOperatorBindResult SljitExecuteRegularHashJoinProbe(
     OWNER &owner, ExecutionRegionRuntime &runtime, SljitRegionExecutionScratch &scratch, idx_t op_idx,
@@ -187,11 +148,17 @@ static ExecutionOperatorBindResult SljitExecuteRegularHashJoinProbe(
 	if (plan.exact_source_filter_identity) {
 		runtime.RecordJitRuntimePath("hash_join_probe.regular_probe.exact_source_filter_candidate");
 	}
-	const bool exact_source_filter =
+	auto prepared_input = SljitPrepareRegularHashJoinProbeInput(
+	    runtime, op_idx, op.kind, plan, layout, input, match_selection, row_pointers, source_scratch, state,
+	    table_layout_kind, source_key0_int64_to_int32_unchecked, layout.stored_keys_can_have_null,
+	    probe.use_bloom_filter);
+	auto &native_input = prepared_input.native_input;
+	const bool exact_membership_filter =
 	    plan.exact_source_filter_identity &&
 	    plan.exact_source_filter_identity == probe.table_layout.runtime_filter_identity &&
-	    probe.table_layout.exact_filter_build_keys_unique && plan.keys.size() == 1 && plan.equality_key_count == 1 &&
-	    !plan.residual_predicate && !plan.mark_build_match &&
+	    probe.table_layout.exact_membership_filter_build_keys_unique &&
+	    probe.table_layout.exact_membership_filter_bitmap && plan.keys.size() == 1 && plan.equality_key_count == 1 &&
+	    !plan.residual_predicate && !plan.mark_build_match && !layout.stored_keys_can_have_null &&
 	    probe.exact_rhs_output_probe_input_indices.size() == probe.rhs_output_column_count &&
 	    std::all_of(probe.exact_rhs_output_probe_input_indices.begin(),
 	                probe.exact_rhs_output_probe_input_indices.end(),
@@ -199,24 +166,24 @@ static ExecutionOperatorBindResult SljitExecuteRegularHashJoinProbe(
 	    (plan.output_mode == ExecutionHashJoinProbeOutputMode::MATCHED_PROBE_AND_BUILD ||
 	     plan.output_mode == ExecutionHashJoinProbeOutputMode::MATCHED_PROBE_ONLY) &&
 	    SljitHashJoinProbeProducesSelectedView(output_contract);
-	if (exact_source_filter) {
+	if (exact_membership_filter) {
+		SljitExactRegularHashJoinMembershipFilterDispatch dispatch {layout, native_input};
+		if (!SljitDispatchHashJoinSingleKeyReader(plan, native_input, dispatch)) {
+			throw InternalException("SLJIT exact regular membership filter has an unsupported key type");
+		}
 		state.input_offset = input.size();
 		state.resume_row_pointer = nullptr;
 		state.finished = true;
-		state.output_proof.SetExactSourceFilterMatches(probe.exact_rhs_output_probe_input_indices);
-		output.SetChildCardinality(input.size());
-		runtime.RecordJitRuntimePath("hash_join_probe.regular_probe.exact_source_filter", input.size());
+		state.output_proof.source_key0_int64_to_int32 =
+		    native_input.selected_count != 0 && native_input.source_key0_int64_to_int32;
+		state.output_proof.SetExactSourceFilterMatches(probe.exact_rhs_output_probe_input_indices,
+		                                               native_input.selected_count == input.size());
+		output.SetChildCardinality(native_input.selected_count);
+		runtime.RecordJitRuntimePath("hash_join_probe.regular_probe.exact_source_filter", native_input.selected_count);
 		RecordSljitRegionRuntimeProof(runtime, op.kind, ExecutionRegionJitRuntimeProof::GENERATED_BACKEND_WORK,
-		                              "exact_source_filter", input.size());
+		                              "exact_source_filter", native_input.selected_count);
 		return ExecutionOperatorBindResult::READY;
 	}
-	const bool rhs_keys_all_valid =
-	    !layout.can_have_null || layout.null_keys_are_filtered || (probe.hash_table && !probe.hash_table->has_null);
-
-	auto prepared_input = SljitPrepareRegularHashJoinProbeInput(
-	    runtime, op_idx, op.kind, plan, layout, input, match_selection, row_pointers, source_scratch, state,
-	    table_layout_kind, source_key0_int64_to_int32_unchecked, rhs_keys_all_valid, probe.use_bloom_filter);
-	auto &native_input = prepared_input.native_input;
 	const auto mark_selection_mode = SljitHashJoinMarkSelectionModeForOutputContract(output_contract);
 
 	auto generated_stage_start = SljitRegionStageStart(runtime);
@@ -322,7 +289,7 @@ static ExecutionOperatorBindResult SljitExecuteNativeHashJoinProbe(
 		if (!probe.hash_table) {
 			throw InternalException("SLJIT native MARK non-match probe requires a bound hash join table");
 		}
-		if (probe.hash_table->has_null) {
+		if (probe.hash_table->has_filtered_null) {
 			return SljitExecuteMarkProbeNoTrueNonMatches(runtime, op, output, state, input.size());
 		}
 	}

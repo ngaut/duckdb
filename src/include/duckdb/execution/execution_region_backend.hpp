@@ -19,7 +19,7 @@ class DatabaseInstance;
 //! Increment this whenever any execution-region backend, plan, kernel, local-state, or runtime interface changes
 //! layout or virtual method order. The version is passed explicitly at registration so extension package versions
 //! are never used as a proxy for C++ ABI compatibility.
-static constexpr uint64_t EXECUTION_REGION_BACKEND_ABI_VERSION = 1;
+static constexpr uint64_t EXECUTION_REGION_BACKEND_ABI_VERSION = 2;
 
 struct ExecutionRegionBackendInfo {
 	string name;

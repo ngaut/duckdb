@@ -15,8 +15,6 @@
 #include "sljit_join_input_row_pointer_complementary_sum_runtime.hpp"
 #include "sljit_native_binding_runtime.hpp"
 #include "sljit_region_runtime_trace.hpp"
-#include "sljit_exact_perfect_hash_join_runtime.hpp"
-
 #include "duckdb/common/vector/dictionary_vector.hpp"
 
 namespace duckdb {
@@ -602,8 +600,8 @@ static bool SljitWithPerfectHashIdentityBuildIndex(const SljitNativeHashJoinProb
 	input.data[key.key_input_index].ToUnifiedFormat(source_format);
 	D_ASSERT(source_format.sel);
 	const auto minimum = key.key_kind == SljitNativeHashJoinKeyKind::INT32
-	                         ? NumericCast<int64_t>(SljitExactPerfectHashJoinMinimum<int32_t>(layout.build_min))
-	                         : SljitExactPerfectHashJoinMinimum<int64_t>(layout.build_min);
+	                         ? NumericCast<int64_t>(SljitPerfectHashJoinBound<int32_t>(layout.build_min))
+	                         : SljitPerfectHashJoinBound<int64_t>(layout.build_min);
 	const auto source = UnifiedVectorFormat::GetData<int64_t>(source_format);
 	if (source_format.sel == FlatVector::IncrementalSelectionVector()) {
 		SljitPerfectHashContiguousIdentityBuildIndex build_index(source, minimum);
@@ -919,7 +917,7 @@ static SljitHashJoinAggregateConsumerResult SljitTryExecuteHashJoinComplementary
 		return result;
 	}
 	SljitHashJoinProbeLayoutKind table_layout_kind = SljitHashJoinProbeLayoutKind::NO_CHAIN;
-	bool rhs_keys_all_valid = false;
+	bool rhs_keys_can_have_null = false;
 	if (regular_hash_join) {
 		auto &layout = probe.table_layout;
 		table_layout_kind = SljitValidateRegularHashJoinProbeExecutionLayout(plan, probe);
@@ -927,8 +925,7 @@ static SljitHashJoinAggregateConsumerResult SljitTryExecuteHashJoinComplementary
 			result.blocker = "hash_join_probe.direct_aggregate_consumer_miss.join_chain";
 			return result;
 		}
-		rhs_keys_all_valid =
-		    !layout.can_have_null || layout.null_keys_are_filtered || (probe.hash_table && !probe.hash_table->has_null);
+		rhs_keys_can_have_null = layout.stored_keys_can_have_null;
 	}
 	auto filter_result =
 	    SljitTryExecuteHashJoinProbeInputFilter(runtime, scratch, ops, hash_join_idx, probe_input_filter_idx, probe,
@@ -1054,7 +1051,7 @@ static SljitHashJoinAggregateConsumerResult SljitTryExecuteHashJoinComplementary
 	auto prepared_input = SljitPrepareRegularHashJoinProbeInput(
 	    runtime, hash_join_idx, hash_join_op.kind, plan, layout, probe_input, scratch.FilterSelection(hash_join_idx),
 	    scratch.HashJoinRowPointers(hash_join_idx), scratch.HashJoinSources(hash_join_idx), state, table_layout_kind,
-	    probe_primitive.source_key0_int64_to_int32_unchecked, rhs_keys_all_valid, probe.use_bloom_filter);
+	    probe_primitive.source_key0_int64_to_int32_unchecked, rhs_keys_can_have_null, probe.use_bloom_filter);
 	if (prepared_input.input_kind == SljitHashJoinProbeInputKind::GENERIC) {
 		result.blocker = "hash_join_probe.direct_aggregate_consumer_miss.generic_probe_input";
 		return result;

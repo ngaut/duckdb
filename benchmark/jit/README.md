@@ -84,9 +84,13 @@ preserves generated ownership of the safe modulo filter while leaving room for
 storage-scan variance.
 
 Join-heavy validation also covers exact perfect-hash dynamic filters. Storage
-executes exact PHJ conjuncts before generic residual predicates, and a
-query-local filter/table identity lets compiled probes reuse that proof without
-repeating membership work. Runtime tracing reports
+executes exact PHJ conjuncts before generic residual predicates while the
+adaptive wrapper remains active. A query-local filter/table identity binds the
+compiled probe to the same membership definition, but does not claim that
+storage enforced it on every batch: adaptive filtering may pause. The generated
+perfect-hash probe is the single publication boundary and always checks source
+validity, key range, and sparse build membership before emitting a match.
+Runtime tracing reports
 `hash_join_probe.perfect_probe.exact_source_filter` when this contract fires.
 The generic exact-filter join preserves a 1.15x single-thread compiled speedup;
 the four-thread gate retains its separate 1.08x floor because its shorter raw

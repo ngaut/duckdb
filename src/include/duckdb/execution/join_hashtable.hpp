@@ -364,8 +364,9 @@ public:
 	JoinType join_type;
 	//! Whether or not the HT has been finalized
 	bool finalized;
-	//! Whether or not any of the key elements contain NULL
-	bool has_null;
+	//! Whether one or more build rows were removed because a comparison rejects NULL keys.
+	//! MARK joins use this to turn an otherwise false result into UNKNOWN.
+	bool has_filtered_null;
 	//! Bitmask for getting relevant bits from the hashes to determine the position
 	uint64_t bitmask = DConstants::INVALID_INDEX;
 	//! Whether or not we error on multiple rows found per match in a SINGLE join

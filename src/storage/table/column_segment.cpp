@@ -3,6 +3,7 @@
 #include "duckdb/storage/table/column_segment.hpp"
 
 #include "duckdb/common/limits.hpp"
+#include "duckdb/common/types/hash.hpp"
 #include "duckdb/common/types/null_value.hpp"
 #include "duckdb/common/types/vector.hpp"
 #include "duckdb/common/vector/dictionary_vector.hpp"
@@ -563,7 +564,7 @@ static bool TryFastSignedNumericRangeFilter(SelectionVector &sel, Vector &input_
 	}
 }
 
-static optional_ptr<const Expression> TryGetSelectivityOptionalChild(const Expression &expr) {
+static optional_ptr<const SelectivityOptionalFilterFunctionData> TryGetSelectivityOptionalData(const Expression &expr) {
 	if (expr.GetExpressionClass() != ExpressionClass::BOUND_FUNCTION) {
 		return nullptr;
 	}
@@ -571,8 +572,7 @@ static optional_ptr<const Expression> TryGetSelectivityOptionalChild(const Expre
 	if (function_expr.Function().GetName() != SelectivityOptionalFilterScalarFun::NAME || !function_expr.BindInfo()) {
 		return nullptr;
 	}
-	auto &data = function_expr.BindInfo()->Cast<SelectivityOptionalFilterFunctionData>();
-	return data.child_filter_expr.get();
+	return &function_expr.BindInfo()->Cast<SelectivityOptionalFilterFunctionData>();
 }
 
 static optional_ptr<const PrefixRangeFunctionData> TryGetPrefixRangeFunctionData(const Expression &expr) {
@@ -584,6 +584,26 @@ static optional_ptr<const PrefixRangeFunctionData> TryGetPrefixRangeFunctionData
 		return nullptr;
 	}
 	return &function_expr.BindInfo()->Cast<PrefixRangeFunctionData>();
+}
+
+static bool InternalFilterInputMatchesTarget(const BoundFunctionExpression &function_expr,
+                                             const LogicalType &filter_key_type, const LogicalType &target_type,
+                                             bool allow_checked_integral_cast) {
+	if (function_expr.GetChildren().size() != 1) {
+		return false;
+	}
+	auto &input = *function_expr.GetChildren()[0];
+	if (input.GetExpressionClass() == ExpressionClass::BOUND_REF) {
+		return filter_key_type == target_type && input.GetReturnType() == target_type;
+	}
+	if (!allow_checked_integral_cast || input.GetExpressionClass() != ExpressionClass::BOUND_CAST ||
+	    input.GetReturnType() != filter_key_type || !TypeIsInteger(target_type.InternalType()) ||
+	    !TypeIsInteger(filter_key_type.InternalType())) {
+		return false;
+	}
+	auto &cast = input.Cast<BoundCastExpression>();
+	return cast.Child().GetExpressionClass() == ExpressionClass::BOUND_REF &&
+	       cast.Child().GetReturnType() == target_type;
 }
 
 static optional_ptr<const PerfectHashJoinFunctionData>
@@ -600,21 +620,26 @@ TryGetPerfectHashJoinFunctionData(const Expression &expr, const LogicalType &tar
 	if (!data.executor) {
 		return nullptr;
 	}
-	auto &input = *function_expr.GetChildren()[0];
-	if (input.GetExpressionClass() == ExpressionClass::BOUND_REF) {
-		return data.executor->GetKeyType() == target_type && input.GetReturnType() == target_type ? &data : nullptr;
-	}
-	if (input.GetExpressionClass() != ExpressionClass::BOUND_CAST ||
-	    input.GetReturnType() != data.executor->GetKeyType() || !TypeIsInteger(target_type.InternalType()) ||
-	    !TypeIsInteger(input.GetReturnType().InternalType())) {
+	return InternalFilterInputMatchesTarget(function_expr, data.executor->GetKeyType(), target_type, true) ? &data
+	                                                                                                       : nullptr;
+}
+
+static optional_ptr<const BloomFilterFunctionData> TryGetBloomFilterFunctionData(const Expression &expr,
+                                                                                 const LogicalType &target_type) {
+	if (expr.GetExpressionClass() != ExpressionClass::BOUND_FUNCTION) {
 		return nullptr;
 	}
-	auto &cast = input.Cast<BoundCastExpression>();
-	if (cast.Child().GetExpressionClass() != ExpressionClass::BOUND_REF ||
-	    cast.Child().GetReturnType() != target_type) {
+	auto &function_expr = expr.Cast<BoundFunctionExpression>();
+	if (function_expr.Function().GetName() != BloomFilterScalarFun::NAME || !function_expr.BindInfo()) {
 		return nullptr;
 	}
-	return &data;
+	auto &data = function_expr.BindInfo()->Cast<BloomFilterFunctionData>();
+	if (!data.filter || !data.filter->IsInitialized()) {
+		return nullptr;
+	}
+	// Bloom filters hash the post-cast key representation. Hashing the source representation directly is only
+	// equivalent when both physical types match, so cast inputs must remain on the expression-executor path.
+	return InternalFilterInputMatchesTarget(function_expr, data.key_type, target_type, false) ? &data : nullptr;
 }
 
 static bool PrefixRangeMatchesInputType(const PrefixRangeFunctionData &data, const LogicalType &target_type) {
@@ -693,52 +718,171 @@ static bool TryApplyFastPerfectHashJoinFilter(ExpressionFilterState &state, Sele
 	return true;
 }
 
-static bool BuildFastInternalFilterOperations(const Expression &expr, const LogicalType &target_type,
-                                              vector<FastInternalFilterOperation> &exact_operations,
-                                              vector<FastInternalFilterOperation> &residual_operations) {
+template <class T>
+static void ApplyFastBloomFilterTyped(ExpressionFilterState &state, SelectionVector &sel,
+                                      const UnifiedVectorFormat &vdata, const BloomFilterFunctionData &data,
+                                      idx_t &approved_tuple_count) {
+	auto input_data = UnifiedVectorFormat::GetData<T>(vdata);
+	auto &result_sel = GetFastFilterSelection(state, approved_tuple_count);
+	idx_t result_count = 0;
+	for (idx_t i = 0; i < approved_tuple_count; i++) {
+		auto row_idx = sel.get_index(i);
+		auto input_idx = vdata.sel->get_index(row_idx);
+		if (!vdata.validity.RowIsValid(input_idx)) {
+			if (!data.filters_null_values) {
+				result_sel.set_index(result_count++, row_idx);
+			}
+			continue;
+		}
+		if (data.filter->LookupOne(Hash<T>(input_data[input_idx]))) {
+			result_sel.set_index(result_count++, row_idx);
+		}
+	}
+	sel.Initialize(result_sel);
+	approved_tuple_count = result_count;
+}
+
+static void ApplyFastBloomFilter(ExpressionFilterState &state, SelectionVector &sel, const UnifiedVectorFormat &vdata,
+                                 const BloomFilterFunctionData &data, const LogicalType &target_type,
+                                 idx_t &approved_tuple_count) {
+	switch (target_type.InternalType()) {
+	case PhysicalType::BOOL:
+	case PhysicalType::INT8:
+		ApplyFastBloomFilterTyped<int8_t>(state, sel, vdata, data, approved_tuple_count);
+		break;
+	case PhysicalType::INT16:
+		ApplyFastBloomFilterTyped<int16_t>(state, sel, vdata, data, approved_tuple_count);
+		break;
+	case PhysicalType::INT32:
+		ApplyFastBloomFilterTyped<int32_t>(state, sel, vdata, data, approved_tuple_count);
+		break;
+	case PhysicalType::INT64:
+		ApplyFastBloomFilterTyped<int64_t>(state, sel, vdata, data, approved_tuple_count);
+		break;
+	case PhysicalType::UINT8:
+		ApplyFastBloomFilterTyped<uint8_t>(state, sel, vdata, data, approved_tuple_count);
+		break;
+	case PhysicalType::UINT16:
+		ApplyFastBloomFilterTyped<uint16_t>(state, sel, vdata, data, approved_tuple_count);
+		break;
+	case PhysicalType::UINT32:
+		ApplyFastBloomFilterTyped<uint32_t>(state, sel, vdata, data, approved_tuple_count);
+		break;
+	case PhysicalType::UINT64:
+		ApplyFastBloomFilterTyped<uint64_t>(state, sel, vdata, data, approved_tuple_count);
+		break;
+	case PhysicalType::INT128:
+		ApplyFastBloomFilterTyped<hugeint_t>(state, sel, vdata, data, approved_tuple_count);
+		break;
+	case PhysicalType::UINT128:
+		ApplyFastBloomFilterTyped<uhugeint_t>(state, sel, vdata, data, approved_tuple_count);
+		break;
+	case PhysicalType::FLOAT:
+		ApplyFastBloomFilterTyped<float>(state, sel, vdata, data, approved_tuple_count);
+		break;
+	case PhysicalType::DOUBLE:
+		ApplyFastBloomFilterTyped<double>(state, sel, vdata, data, approved_tuple_count);
+		break;
+	case PhysicalType::INTERVAL:
+		ApplyFastBloomFilterTyped<interval_t>(state, sel, vdata, data, approved_tuple_count);
+		break;
+	case PhysicalType::VARCHAR:
+		ApplyFastBloomFilterTyped<string_t>(state, sel, vdata, data, approved_tuple_count);
+		break;
+	default:
+		D_ASSERT(false);
+		approved_tuple_count = 0;
+		break;
+	}
+}
+
+static bool TryBuildFastInternalFilterOperation(const Expression &expr, const LogicalType &target_type,
+                                                FastInternalFilterOperation &operation, bool &exact) {
+	if (auto optional_data = TryGetSelectivityOptionalData(expr)) {
+		if (!optional_data->child_filter_expr) {
+			return false;
+		}
+		FastInternalFilterOperation child_operation {FastInternalFilterOperationType::SIGNED_NUMERIC_RANGE};
+		if (!TryBuildFastInternalFilterOperation(*optional_data->child_filter_expr, target_type, child_operation,
+		                                         exact) ||
+		    child_operation.selectivity) {
+			return false;
+		}
+		child_operation.selectivity =
+		    make_uniq<FilterSelectivityState>(optional_data->n_vectors_to_check, optional_data->selectivity_threshold);
+		operation = std::move(child_operation);
+		return true;
+	}
+
 	SignedNumericRangeFilterData range;
 	if (TryGetSignedNumericRange(expr, target_type, range)) {
-		FastInternalFilterOperation operation {FastInternalFilterOperationType::SIGNED_NUMERIC_RANGE};
+		operation = FastInternalFilterOperation {FastInternalFilterOperationType::SIGNED_NUMERIC_RANGE};
 		operation.range_empty = range.empty;
 		operation.range_has_lower = range.has_lower;
 		operation.range_has_upper = range.has_upper;
 		operation.range_lower = range.lower;
 		operation.range_upper = range.upper;
-		residual_operations.push_back(std::move(operation));
+		exact = false;
 		return true;
-	}
-	if (auto child = TryGetSelectivityOptionalChild(expr)) {
-		if (!child) {
-			return true;
-		}
-		return BuildFastInternalFilterOperations(*child, target_type, exact_operations, residual_operations);
 	}
 	if (auto prefix_data = TryGetPrefixRangeFunctionData(expr)) {
 		if (!PrefixRangeMatchesInputType(*prefix_data, target_type)) {
 			return false;
 		}
-		FastInternalFilterOperation operation {FastInternalFilterOperationType::PREFIX_RANGE};
+		operation = FastInternalFilterOperation {FastInternalFilterOperationType::PREFIX_RANGE};
 		operation.prefix_range_data = prefix_data;
-		residual_operations.push_back(std::move(operation));
+		exact = false;
 		return true;
 	}
 	if (auto perfect_data = TryGetPerfectHashJoinFunctionData(expr, target_type)) {
-		FastInternalFilterOperation operation {FastInternalFilterOperationType::PERFECT_HASH_JOIN};
+		operation = FastInternalFilterOperation {FastInternalFilterOperationType::PERFECT_HASH_JOIN};
 		operation.perfect_hash_join_data = perfect_data;
-		exact_operations.push_back(std::move(operation));
+		exact = true;
 		return true;
+	}
+	if (auto bloom_data = TryGetBloomFilterFunctionData(expr, target_type)) {
+		operation = FastInternalFilterOperation {FastInternalFilterOperationType::BLOOM_FILTER};
+		operation.bloom_filter_data = bloom_data;
+		exact = true;
+		return true;
+	}
+	return false;
+}
+
+static void ExtractFastInternalFilterOperations(const Expression &expr, const LogicalType &target_type,
+                                                vector<FastInternalFilterOperation> &exact_operations,
+                                                vector<FastInternalFilterOperation> &residual_operations,
+                                                vector<unique_ptr<Expression>> &residual_expressions) {
+	FastInternalFilterOperation operation {FastInternalFilterOperationType::SIGNED_NUMERIC_RANGE};
+	bool exact = false;
+	if (TryBuildFastInternalFilterOperation(expr, target_type, operation, exact)) {
+		(exact ? exact_operations : residual_operations).push_back(std::move(operation));
+		return;
 	}
 	if (expr.GetExpressionClass() == ExpressionClass::BOUND_CONJUNCTION &&
 	    expr.GetExpressionType() == ExpressionType::CONJUNCTION_AND) {
 		auto &conjunction = expr.Cast<BoundConjunctionExpression>();
 		for (auto &child : conjunction.GetChildren()) {
-			if (!BuildFastInternalFilterOperations(*child, target_type, exact_operations, residual_operations)) {
-				return false;
-			}
+			ExtractFastInternalFilterOperations(*child, target_type, exact_operations, residual_operations,
+			                                    residual_expressions);
 		}
-		return true;
+		return;
 	}
-	return false;
+	residual_expressions.push_back(expr.Copy());
+}
+
+static unique_ptr<Expression> BuildFastInternalFilterResidual(vector<unique_ptr<Expression>> expressions) {
+	if (expressions.empty()) {
+		return nullptr;
+	}
+	if (expressions.size() == 1) {
+		return std::move(expressions[0]);
+	}
+	auto conjunction = make_uniq<BoundConjunctionExpression>(ExpressionType::CONJUNCTION_AND);
+	for (auto &expression : expressions) {
+		conjunction->GetChildrenMutable().push_back(std::move(expression));
+	}
+	return std::move(conjunction);
 }
 
 bool ColumnSegment::PrepareInternalFilterPlan(ExpressionFilterState &state, const Expression &expr,
@@ -750,8 +894,9 @@ bool ColumnSegment::PrepareInternalFilterPlan(ExpressionFilterState &state, cons
 	state.fast_internal_filter_type = target_type.InternalType();
 	vector<FastInternalFilterOperation> exact_operations;
 	vector<FastInternalFilterOperation> residual_operations;
-	state.fast_internal_filter_supported =
-	    BuildFastInternalFilterOperations(expr, target_type, exact_operations, residual_operations);
+	vector<unique_ptr<Expression>> residual_expressions;
+	ExtractFastInternalFilterOperations(expr, target_type, exact_operations, residual_operations, residual_expressions);
+	state.fast_internal_filter_supported = !exact_operations.empty() || !residual_operations.empty();
 	if (!state.fast_internal_filter_supported) {
 		return false;
 	}
@@ -762,19 +907,32 @@ bool ColumnSegment::PrepareInternalFilterPlan(ExpressionFilterState &state, cons
 	for (auto &operation : residual_operations) {
 		state.fast_internal_filter_operations.push_back(std::move(operation));
 	}
+	state.fast_internal_filter_residual_expression = BuildFastInternalFilterResidual(std::move(residual_expressions));
+	if (state.fast_internal_filter_residual_expression) {
+		state.fast_internal_filter_residual_executor = make_uniq<ExpressionExecutor>(state.GetContext());
+		state.fast_internal_filter_residual_executor->AddExpression(*state.fast_internal_filter_residual_expression);
+	}
 	return true;
 }
 
 void ColumnSegment::ApplyInternalFilterPlan(ExpressionFilterState &state, SelectionVector &sel, Vector &input_vector,
                                             UnifiedVectorFormat &vdata, idx_t &approved_tuple_count,
-                                            idx_t first_operation) {
+                                            idx_t first_operation, idx_t skipped_operation) {
 	D_ASSERT(first_operation <= state.fast_internal_filter_operations.size());
 	for (idx_t operation_idx = first_operation; operation_idx < state.fast_internal_filter_operations.size();
 	     operation_idx++) {
+		if (operation_idx == skipped_operation) {
+			continue;
+		}
 		auto &operation = state.fast_internal_filter_operations[operation_idx];
 		if (approved_tuple_count == 0) {
 			return;
 		}
+		if (operation.selectivity && !operation.selectivity->IsActive()) {
+			operation.selectivity->Update(0, 0);
+			continue;
+		}
+		const auto input_count = approved_tuple_count;
 		switch (operation.type) {
 		case FastInternalFilterOperationType::SIGNED_NUMERIC_RANGE:
 			ApplyFastSignedNumericRangeOperation(state, sel, vdata, operation, input_vector.GetType(),
@@ -789,107 +947,31 @@ void ColumnSegment::ApplyInternalFilterPlan(ExpressionFilterState &state, Select
 			TryApplyFastPerfectHashJoinFilter(state, sel, input_vector, vdata, *operation.perfect_hash_join_data,
 			                                  approved_tuple_count);
 			break;
+		case FastInternalFilterOperationType::BLOOM_FILTER:
+			D_ASSERT(operation.bloom_filter_data);
+			ApplyFastBloomFilter(state, sel, vdata, *operation.bloom_filter_data, input_vector.GetType(),
+			                     approved_tuple_count);
+			break;
 		default:
 			D_ASSERT(false);
 		}
+		if (operation.selectivity) {
+			operation.selectivity->Update(approved_tuple_count, input_count);
+		}
 	}
 }
 
-static bool TryApplyExactPerfectHashJoinPrefilters(ExpressionFilterState &state, SelectionVector &sel,
-                                                   Vector &input_vector, UnifiedVectorFormat &vdata,
-                                                   const Expression &expr, idx_t &approved_tuple_count) {
-	if (approved_tuple_count == 0) {
-		return true;
+idx_t ColumnSegment::ApplyInternalFilterResidual(ExpressionFilterState &state, SelectionVector &sel,
+                                                 Vector &input_vector, idx_t scan_count, idx_t &approved_tuple_count) {
+	if (approved_tuple_count == 0 || !state.fast_internal_filter_residual_executor) {
+		return approved_tuple_count;
 	}
-	if (auto child = TryGetSelectivityOptionalChild(expr)) {
-		return child &&
-		       TryApplyExactPerfectHashJoinPrefilters(state, sel, input_vector, vdata, *child, approved_tuple_count);
-	}
-	if (auto perfect_data = TryGetPerfectHashJoinFunctionData(expr, input_vector.GetType())) {
-		return TryApplyFastPerfectHashJoinFilter(state, sel, input_vector, vdata, *perfect_data, approved_tuple_count);
-	}
-	if (expr.GetExpressionClass() != ExpressionClass::BOUND_CONJUNCTION ||
-	    expr.GetExpressionType() != ExpressionType::CONJUNCTION_AND) {
-		return false;
-	}
-	bool applied = false;
-	for (auto &child : expr.Cast<BoundConjunctionExpression>().GetChildren()) {
-		applied =
-		    TryApplyExactPerfectHashJoinPrefilters(state, sel, input_vector, vdata, *child, approved_tuple_count) ||
-		    applied;
-		if (approved_tuple_count == 0) {
-			break;
-		}
-	}
-	return applied;
-}
-
-struct ExactPerfectHashJoinResidual {
-	unique_ptr<Expression> expression;
-	bool removed_exact_filter = false;
-};
-
-static ExactPerfectHashJoinResidual BuildExactPerfectHashJoinResidual(const Expression &expr,
-                                                                      const LogicalType &target_type) {
-	if (TryGetPerfectHashJoinFunctionData(expr, target_type)) {
-		return {nullptr, true};
-	}
-	if (auto child = TryGetSelectivityOptionalChild(expr)) {
-		auto residual = BuildExactPerfectHashJoinResidual(*child, target_type);
-		if (residual.removed_exact_filter) {
-			return residual;
-		}
-		return {expr.Copy(), false};
-	}
-	if (expr.GetExpressionClass() != ExpressionClass::BOUND_CONJUNCTION ||
-	    expr.GetExpressionType() != ExpressionType::CONJUNCTION_AND) {
-		return {expr.Copy(), false};
-	}
-
-	vector<unique_ptr<Expression>> residual_children;
-	bool removed_exact_filter = false;
-	for (auto &child : expr.Cast<BoundConjunctionExpression>().GetChildren()) {
-		auto residual = BuildExactPerfectHashJoinResidual(*child, target_type);
-		removed_exact_filter = removed_exact_filter || residual.removed_exact_filter;
-		if (residual.expression) {
-			residual_children.push_back(std::move(residual.expression));
-		}
-	}
-	if (!removed_exact_filter) {
-		return {expr.Copy(), false};
-	}
-	if (residual_children.empty()) {
-		return {nullptr, true};
-	}
-	if (residual_children.size() == 1) {
-		return {std::move(residual_children[0]), true};
-	}
-	auto conjunction = make_uniq<BoundConjunctionExpression>(ExpressionType::CONJUNCTION_AND);
-	for (auto &child : residual_children) {
-		conjunction->GetChildrenMutable().push_back(std::move(child));
-	}
-	return {std::move(conjunction), true};
-}
-
-static bool PrepareExactPerfectHashJoinResidual(ExpressionFilterState &state, const Expression &expr,
-                                                const LogicalType &target_type) {
-	if (state.exact_prefilter_residual_initialized) {
-		return state.exact_prefilter_present;
-	}
-	state.exact_prefilter_residual_initialized = true;
-	auto residual = BuildExactPerfectHashJoinResidual(expr, target_type);
-	state.exact_prefilter_present = residual.removed_exact_filter;
-	if (!state.exact_prefilter_present || !residual.expression) {
-		return state.exact_prefilter_present;
-	}
-	state.exact_prefilter_residual_expression = std::move(residual.expression);
-	state.exact_prefilter_residual_executor = make_uniq<ExpressionExecutor>(state.GetContext());
-	state.exact_prefilter_residual_executor->AddExpression(*state.exact_prefilter_residual_expression);
-	return true;
+	return ExecuteExpressionFilterSelection(sel, input_vector, *state.fast_internal_filter_residual_executor,
+	                                        scan_count, approved_tuple_count);
 }
 
 static bool TryFastInternalFilterExpression(SelectionVector &sel, Vector &input_vector, UnifiedVectorFormat &vdata,
-                                            const TableFilter &filter, ExpressionFilterState &state,
+                                            const TableFilter &filter, ExpressionFilterState &state, idx_t scan_count,
                                             idx_t &approved_tuple_count) {
 	if (approved_tuple_count == 0 || filter.filter_type != TableFilterType::EXPRESSION_FILTER) {
 		return false;
@@ -900,6 +982,7 @@ static bool TryFastInternalFilterExpression(SelectionVector &sel, Vector &input_
 		return false;
 	}
 	ColumnSegment::ApplyInternalFilterPlan(state, sel, input_vector, vdata, approved_tuple_count);
+	ColumnSegment::ApplyInternalFilterResidual(state, sel, input_vector, scan_count, approved_tuple_count);
 	return true;
 }
 
@@ -1068,25 +1151,11 @@ idx_t ColumnSegment::FilterSelection(SelectionVector &sel, Vector &vector, Unifi
 	if (TryFastSignedNumericRangeFilter(sel, vector, vdata, filter, state, approved_tuple_count)) {
 		return approved_tuple_count;
 	}
-	if (TryFastInternalFilterExpression(sel, vector, vdata, filter, state, approved_tuple_count)) {
+	if (TryFastInternalFilterExpression(sel, vector, vdata, filter, state, scan_count, approved_tuple_count)) {
 		return approved_tuple_count;
 	}
 	if (TryFastDictionaryStringEqualityFilter(sel, vector, filter, state, approved_tuple_count)) {
 		return approved_tuple_count;
-	}
-	// Fully supported internal expressions are evaluated above exactly once. Only
-	// prefilter here when a residual expression still requires the generic executor.
-	if (filter.filter_type == TableFilterType::EXPRESSION_FILTER) {
-		auto &expression_filter = filter.Cast<ExpressionFilter>();
-		if (PrepareExactPerfectHashJoinResidual(state, *expression_filter.expr, vector.GetType())) {
-			TryApplyExactPerfectHashJoinPrefilters(state, sel, vector, vdata, *expression_filter.expr,
-			                                       approved_tuple_count);
-			if (approved_tuple_count == 0 || !state.exact_prefilter_residual_executor) {
-				return approved_tuple_count;
-			}
-			return ExecuteExpressionFilterSelection(sel, vector, *state.exact_prefilter_residual_executor, scan_count,
-			                                        approved_tuple_count);
-		}
 	}
 	D_ASSERT(state.executor);
 	return ExecuteExpressionFilterSelection(sel, vector, *state.executor, scan_count, approved_tuple_count);

@@ -451,7 +451,10 @@ def verify_benchmark_repetition_budget() -> None:
     generic_benchmark = read("benchmark/jit/generic_benchmark.py")
     if "choices=(5, 10)" not in generic_benchmark:
         raise AssertionError("generic benchmark candidates must use the explicit five-or-ten repetition budget")
-    if "def policy_order(repeat: int)" not in generic_benchmark or "for policy in policy_order(repeat):" not in generic_benchmark:
+    if (
+        "def policy_order(repeat: int)" not in generic_benchmark
+        or "for policy in policy_order(repeat):" not in generic_benchmark
+    ):
         raise AssertionError("generic benchmark pairs must alternate the leading policy")
     if "triage-repeats" in generic_benchmark:
         raise AssertionError("generic benchmark candidates must not silently escalate into triage repetitions")
@@ -633,10 +636,7 @@ def verify_perfect_hash_predicate_cache_ownership() -> None:
             raise AssertionError("generic packed-string coverage must require its runtime receipt")
 
     group_loader = read("extension/jit_sljit/include/sljit_selected_input_vector_group_key.hpp")
-    if (
-        "staged fallible group transforms" not in local_state
-        or "CONVERT::STAGE_TRANSFORMED_KEYS" not in group_loader
-    ):
+    if "staged fallible group transforms" not in local_state or "CONVERT::STAGE_TRANSFORMED_KEYS" not in group_loader:
         raise AssertionError("fallible direct group transforms must declare whether checked keys are staged")
 
 
@@ -657,19 +657,11 @@ def verify_perfect_hash_identity_selected_view() -> None:
         "SljitPerfectHashJoinProbeCodegenConfig",
         "config.emit_match_selection",
         "config.emit_build_selection",
+        "EmitLoadWidePerfectHashJoinInvariantBounds",
+        "SljitWidePerfectHashJoinBoundOffset",
     ):
         if required not in generated_probe:
             raise AssertionError("generated perfect-hash probe must make transient selections contract-owned")
-
-    exact_probe = read("extension/jit_sljit/include/sljit_exact_perfect_hash_join_runtime.hpp")
-    for required in (
-        "bool emit_match_selection = true",
-        "bool emit_build_selection = true",
-        "if (emit_match_selection)",
-        "if (emit_build_selection)",
-    ):
-        if required not in exact_probe:
-            raise AssertionError("exact perfect-hash probe must share the direct-consumer selection contract")
 
     executor = read("extension/jit_sljit/include/sljit_hash_join_probe_executor_runtime.hpp")
     for required in (
@@ -678,10 +670,13 @@ def verify_perfect_hash_identity_selected_view() -> None:
         "identity_selection_retry",
         "native_input.selected_count != input.size()",
         "SljitCanDerivePerfectHashBuildSelectionFromIdentity",
-        "!direct_consumer_output",
+        "SljitExecuteNativeFunction(function, native_input)",
+        "hash_join_probe.perfect_probe.exact_source_filter",
     ):
         if required not in executor:
             raise AssertionError("perfect-hash identity selection must retry compact output on a miss")
+    if "SljitPopulateExactPerfectHashJoinSelections" in executor:
+        raise AssertionError("exact perfect-hash probes must not duplicate the generated membership kernel")
 
     consumer = read("extension/jit_sljit/include/sljit_hash_join_probe_aggregate_consumer_runtime.hpp")
     for required in (
@@ -695,8 +690,13 @@ def verify_perfect_hash_identity_selected_view() -> None:
             raise AssertionError("direct perfect-hash terminal must use the proof-backed build-index contract")
 
     exact_test = read("test/api/test_jit.cpp")
-    if "SljitPopulateExactPerfectHashJoinSelections<int32_t, int64_t>(input, false)" not in exact_test:
-        raise AssertionError("exact perfect-hash selection must cover compact fallback reconstruction")
+    for required in (
+        "JIT Bloom dynamic filters preserve bitpacked scan semantics",
+        "hash_join_probe.perfect_probe.exact_source_filter=",
+        "const string cast_query",
+    ):
+        if required not in exact_test:
+            raise AssertionError("exact perfect-hash membership must cover sparse, nullable, and casted scans")
     direct_test = read("test/api/test_jit_join.cpp")
     for required in (
         "hash_join_probe.perfect_probe.identity_selection_elided=",

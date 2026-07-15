@@ -275,7 +275,7 @@ bool PerfectHashJoinExecutor::FullScanHashTable() {
 	}
 
 	const auto build_size = perfect_join_statistics.build_range + 1;
-	if (unique_keys == build_size && !ht.has_null) {
+	if (unique_keys == build_size && !ht.has_filtered_null) {
 		perfect_join_statistics.is_build_dense = true;
 		bitmap_build_idx.Reset(build_size); // All valid
 	}

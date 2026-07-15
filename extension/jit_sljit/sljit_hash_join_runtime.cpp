@@ -89,6 +89,11 @@ static void SljitPopulateWidePerfectHashJoinSelectionsTyped(SljitNativePerfectHa
 		if (!SljitWidePerfectHashOffset(source[source_idx], min_value, max_value, build_idx)) {
 			continue;
 		}
+		if (input.perfect_validity &&
+		    !ValidityMask::RowIsValid(input.perfect_validity[build_idx / ValidityMask::BITS_PER_VALUE],
+		                              build_idx % ValidityMask::BITS_PER_VALUE)) {
+			continue;
+		}
 		if constexpr (EMIT_MATCH_SELECTION) {
 			input.match_sel[selected_count] = NumericCast<sel_t>(row_idx);
 		}

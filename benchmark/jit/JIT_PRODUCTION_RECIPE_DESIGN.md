@@ -530,25 +530,32 @@ execution or its explicit miss reason.
 
 Exact membership runtime filters and their owning join table share a query-local
 identity. Storage applies exact perfect-hash and shift-zero numeric prefix-range
-conjuncts as mandatory prefilters, including checked integral input conversion,
-even when another conjunct still requires the generic expression executor. The
-source contract may carry that identity through filters and reference-only
-projections; computed projections, joins, and native boundaries invalidate it.
-When a downstream perfect-hash probe binds the same identity, the backend
-derives match and build dictionary selections directly from the validated key.
-A regular probe may also disappear when the prefix bitmap is exact, the build
-keys are proven unique, there is one equality condition and no residual or
-marking work, and every requested RHS value is that equality key. Such RHS
-outputs alias the probe-key vector; non-key payloads and duplicate builds keep
-the normal row-pointer probe and gather. Identity mismatch always uses the
-normal generated probe. This is an execution proof, not a cardinality estimate
-or a benchmark-specific rule.
+conjuncts before generic residual predicates while their adaptive wrapper is
+active, including checked integral input conversion. The wrapper is the sole
+selectivity-policy owner and may pause filtering for later batches. The source
+contract may carry the identity through filters and reference-only projections;
+computed projections, joins, and native boundaries invalidate it. Identity
+therefore proves that the source filter and join table describe the same
+membership set, not that storage filtered every row presented to the probe.
 
-The proof consumer distinguishes representation identity from checked
-conversion. A same-type key uses the exact-membership proof directly; a wider
-input still performs checked conversion and validates the perfect-table domain
-before deriving an offset. Proof reuse therefore removes only work already
-established by the producer.
+The generated perfect-hash probe is the single match-publication boundary. It
+always checks source validity, checked conversion where required, table bounds,
+and the sparse build bitmap before deriving match and build dictionary
+selections. There is no separate exact-filter probe loop. A regular row-pointer
+probe may disappear when the exported prefix bitmap is exact, the build keys are
+proven unique and non-null, there is one equality condition and no residual or
+marking work, and every requested RHS value is that equality key. The backend
+then executes the same bitmap membership test itself; it never trusts adaptive
+scan enforcement. Such RHS outputs alias the probe-key vector; non-key payloads,
+duplicate builds, nullable stored keys, or identity mismatch keep the normal
+generated probe and gather. This is an execution proof, not a cardinality
+estimate or a benchmark-specific rule.
+
+The membership consumer distinguishes representation identity from checked
+conversion. Same-type and wider keys both validate the table domain; wider
+inputs additionally perform checked conversion. Exact identity removes a
+row-pointer hash probe only when the backend-owned membership bitmap can replace
+it—it never removes the membership check itself.
 
 The storage-side exact-filter loop selects its input/source vector layouts once
 per batch. An identity selection is represented explicitly as absent input
@@ -561,11 +568,13 @@ Storage expression filtering analyzes an AND expression before mutating its
 selection. Fully supported internal expressions lower once per filter state to
 a typed operation list; vector execution never rediscovers function identity,
 rebuilds numeric intervals, or reallocates expression-analysis scratch.
-Mandatory exact membership operations are ordered before ranges and other
-conjuncts, making every later selector consume only surviving rows instead of
-rescanning the raw source cardinality. Mixed expressions split exact membership
-from a cached residual executor, so the generic residual never rechecks exact
-membership.
+Within an active storage-filter plan, exact membership operations are ordered
+before ranges and other conjuncts, making every later selector consume only
+surviving rows instead of rescanning the raw source cardinality. Mixed
+expressions split exact membership from a cached residual executor, so the
+generic residual never rechecks exact membership. If adaptive policy pauses the
+wrapper, the downstream join remains fully correct because its backend-owned
+probe still checks membership before publishing output.
 
 Compression codecs consume that same typed operation plan rather than parsing a
 second copy of the filter tree. Bitpacked integral scans fuse a same-width exact
@@ -587,12 +596,13 @@ one unified-vector pass. Nested values retain the canonical vector-hash
 fallback. This removes the temporary hash vector and second selection pass
 without creating a second Bloom implementation.
 
-An exact-filter perfect-hash probe followed by `HashJoinBuildSink` is also an
-executable primitive sequence when every operation is backend-owned but no
-machine-code body remains. Admission requires the exact source-filter identity,
-scan-filter ownership, a matched probe/build view, and the explicit build sink.
-Runtime must prove both exact-filter backend work and selected build ingress;
-the sequence never receives synthetic machine-code credit.
+An exact-filter perfect-hash probe followed by `HashJoinBuildSink` uses the same
+deferred generated membership kernel as every other perfect-hash probe, then
+hands its selected view to the explicit build sink. Exact source identity does
+not create a bodyless admission exception. Runtime must prove both generated
+membership work and selected build ingress; lazy code publication may leave the
+compile event's code size at zero, but the selected runner still requires the
+ordinary generated-kernel capability.
 
 A pure hash-probe chain may terminate in `AppendSink` without first publishing
 a full output chunk. The final probe remains selected, while intermediate probes

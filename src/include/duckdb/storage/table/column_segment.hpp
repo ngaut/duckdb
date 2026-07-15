@@ -76,13 +76,16 @@ public:
 	static idx_t FilterSelection(SelectionVector &sel, Vector &vector, UnifiedVectorFormat &vdata,
 	                             const TableFilter &filter, TableFilterState &filter_state, idx_t scan_count,
 	                             idx_t &approved_tuple_count);
-	//! Analyze a fully storage-owned expression filter once into its canonical operation order.
+	//! Analyze storage-owned conjuncts once into their canonical operation order and residual expression.
 	static bool PrepareInternalFilterPlan(ExpressionFilterState &state, const Expression &expr,
 	                                      const LogicalType &target_type);
-	//! Apply a prepared plan. Compression codecs can start after an operation they fused while decoding.
+	//! Apply prepared operations. Compression codecs can omit operations they already fused while decoding.
 	static void ApplyInternalFilterPlan(ExpressionFilterState &state, SelectionVector &sel, Vector &input_vector,
 	                                    UnifiedVectorFormat &vdata, idx_t &approved_tuple_count,
-	                                    idx_t first_operation = 0);
+	                                    idx_t first_operation = 0, idx_t skipped_operation = DConstants::INVALID_INDEX);
+	//! Apply the residual expression left by PrepareInternalFilterPlan.
+	static idx_t ApplyInternalFilterResidual(ExpressionFilterState &state, SelectionVector &sel, Vector &input_vector,
+	                                         idx_t scan_count, idx_t &approved_tuple_count);
 
 	//! Skip a scan forward to the row_index specified in the scan state
 	void Skip(ColumnScanState &state);

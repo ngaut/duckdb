@@ -2,6 +2,7 @@
 
 #include "duckdb/common/limits.hpp"
 #include "duckdb/common/numeric_utils.hpp"
+#include "duckdb/common/types/hash.hpp"
 #include "duckdb/common/operator/add.hpp"
 #include "duckdb/common/operator/cast_operators.hpp"
 #include "duckdb/common/operator/multiply.hpp"
@@ -1138,148 +1139,6 @@ void BitpackingSelect(ColumnSegment &segment, ColumnScanState &state, idx_t vect
 	FlatVector::SetSize(result, count_t(sel_count));
 }
 
-static optional_ptr<const Expression> TryGetBitpackingSelectivityOptionalChild(const Expression &expr) {
-	if (expr.GetExpressionClass() != ExpressionClass::BOUND_FUNCTION) {
-		return nullptr;
-	}
-	auto &function_expr = expr.Cast<BoundFunctionExpression>();
-	if (function_expr.Function().GetName() != SelectivityOptionalFilterScalarFun::NAME || !function_expr.BindInfo()) {
-		return nullptr;
-	}
-	auto &data = function_expr.BindInfo()->Cast<SelectivityOptionalFilterFunctionData>();
-	return data.child_filter_expr.get();
-}
-
-static optional_ptr<const PrefixRangeFunctionData> TryGetBitpackingPrefixRangeData(const Expression &expr) {
-	if (expr.GetExpressionClass() != ExpressionClass::BOUND_FUNCTION) {
-		return nullptr;
-	}
-	auto &function_expr = expr.Cast<BoundFunctionExpression>();
-	if (function_expr.Function().GetName() != PrefixRangeScalarFun::NAME || !function_expr.BindInfo()) {
-		return nullptr;
-	}
-	return &function_expr.BindInfo()->Cast<PrefixRangeFunctionData>();
-}
-
-struct BitpackingPrefixRangeCandidate {
-	optional_ptr<const PrefixRangeFunctionData> data;
-	bool covers_filter = false;
-};
-
-static BitpackingPrefixRangeCandidate TryFindBitpackingPrefixRangeFilter(const Expression &expr) {
-	if (auto prefix_data = TryGetBitpackingPrefixRangeData(expr)) {
-		return {prefix_data, true};
-	}
-	if (auto child = TryGetBitpackingSelectivityOptionalChild(expr)) {
-		if (!child) {
-			return {};
-		}
-		auto child_candidate = TryFindBitpackingPrefixRangeFilter(*child);
-		child_candidate.covers_filter = child_candidate.data && child_candidate.covers_filter;
-		return child_candidate;
-	}
-	if (expr.GetExpressionClass() == ExpressionClass::BOUND_CONJUNCTION &&
-	    expr.GetExpressionType() == ExpressionType::CONJUNCTION_AND) {
-		auto &conjunction = expr.Cast<BoundConjunctionExpression>();
-		for (auto &child : conjunction.GetChildren()) {
-			auto child_candidate = TryFindBitpackingPrefixRangeFilter(*child);
-			if (child_candidate.data) {
-				child_candidate.covers_filter = false;
-				return child_candidate;
-			}
-		}
-	}
-	return {};
-}
-
-static BitpackingPrefixRangeCandidate TryGetBitpackingPrefixRangeFilter(const TableFilter &filter,
-                                                                        TableFilterState &filter_state) {
-	if (filter.filter_type != TableFilterType::EXPRESSION_FILTER) {
-		return {};
-	}
-	auto &expression_filter = filter.Cast<ExpressionFilter>();
-	auto &state = filter_state.Cast<ExpressionFilterState>();
-	if (!state.fast_prefix_range_filter_initialized) {
-		state.fast_prefix_range_filter_initialized = true;
-		auto candidate = TryFindBitpackingPrefixRangeFilter(*expression_filter.expr);
-		state.fast_prefix_range_filter_supported = !!candidate.data;
-		state.fast_prefix_range_filter_covers_filter = candidate.covers_filter;
-		state.fast_prefix_range_filter_data = candidate.data.get();
-	}
-	if (!state.fast_prefix_range_filter_supported) {
-		return {};
-	}
-	return {optional_ptr<const PrefixRangeFunctionData>(state.fast_prefix_range_filter_data),
-	        state.fast_prefix_range_filter_covers_filter};
-}
-
-static bool TryGetPrefixLookupSignedInterval(const PrefixRangeLookupData &lookup, int64_t &lower, int64_t &upper) {
-	const auto max_signed = static_cast<uint64_t>(NumericLimits<int64_t>::Maximum());
-	if (!lookup.bitmap || lookup.min > max_signed || lookup.span > max_signed - lookup.min) {
-		return false;
-	}
-	lower = static_cast<int64_t>(lookup.min);
-	upper = static_cast<int64_t>(lookup.min + lookup.span);
-	return lower <= upper;
-}
-
-static bool SignedRangeContainsPrefixLookup(const SignedNumericRangeFilterData &range,
-                                            const PrefixRangeLookupData &lookup) {
-	if (range.empty) {
-		return false;
-	}
-	int64_t lookup_lower;
-	int64_t lookup_upper;
-	if (!TryGetPrefixLookupSignedInterval(lookup, lookup_lower, lookup_upper)) {
-		return false;
-	}
-	return (!range.has_lower || range.lower <= lookup_lower) && (!range.has_upper || range.upper >= lookup_upper);
-}
-
-static bool PrefixRangeExpressionCoversFilter(const Expression &expr, const LogicalType &target_type,
-                                              const PrefixRangeFunctionData &prefix_data,
-                                              const PrefixRangeLookupData &lookup) {
-	if (auto expr_prefix_data = TryGetBitpackingPrefixRangeData(expr)) {
-		return expr_prefix_data.get() == &prefix_data;
-	}
-	if (auto child = TryGetBitpackingSelectivityOptionalChild(expr)) {
-		return !child || PrefixRangeExpressionCoversFilter(*child, target_type, prefix_data, lookup);
-	}
-
-	SignedNumericRangeFilterData range;
-	if (TryGetSignedNumericRange(expr, target_type, range)) {
-		return SignedRangeContainsPrefixLookup(range, lookup);
-	}
-
-	if (expr.GetExpressionClass() == ExpressionClass::BOUND_CONJUNCTION &&
-	    expr.GetExpressionType() == ExpressionType::CONJUNCTION_AND) {
-		auto &conjunction = expr.Cast<BoundConjunctionExpression>();
-		for (auto &child : conjunction.GetChildren()) {
-			if (!PrefixRangeExpressionCoversFilter(*child, target_type, prefix_data, lookup)) {
-				return false;
-			}
-		}
-		return true;
-	}
-	return false;
-}
-
-static bool PrefixRangeFilterCoversResidual(const TableFilter &filter, TableFilterState &filter_state,
-                                            const LogicalType &target_type, const PrefixRangeFunctionData &prefix_data,
-                                            const PrefixRangeLookupData &lookup) {
-	if (filter.filter_type != TableFilterType::EXPRESSION_FILTER) {
-		return false;
-	}
-	auto &state = filter_state.Cast<ExpressionFilterState>();
-	if (!state.fast_prefix_range_residual_coverage_initialized) {
-		state.fast_prefix_range_residual_coverage_initialized = true;
-		auto &expression_filter = filter.Cast<ExpressionFilter>();
-		state.fast_prefix_range_residual_covers_filter =
-		    PrefixRangeExpressionCoversFilter(*expression_filter.expr, target_type, prefix_data, lookup);
-	}
-	return state.fast_prefix_range_residual_covers_filter;
-}
-
 template <class T>
 struct BitpackingSignedNumericComparable {
 	static constexpr bool SUPPORTED =
@@ -1861,10 +1720,45 @@ static bool TryBitpackingLookupFilter(ColumnSegment &segment, ColumnScanState &s
 }
 
 template <class T>
+static void FinishBitpackingInternalFilterPlan(ExpressionFilterState &filter_state, SelectionVector &sel,
+                                               Vector &result, idx_t vector_count, idx_t &sel_count,
+                                               idx_t first_operation = 0,
+                                               idx_t skipped_operation = DConstants::INVALID_INDEX) {
+	if (sel_count > 0 && first_operation < filter_state.fast_internal_filter_operations.size()) {
+		UnifiedVectorFormat vdata;
+		result.ToUnifiedFormat(vdata);
+		ColumnSegment::ApplyInternalFilterPlan(filter_state, sel, result, vdata, sel_count, first_operation,
+		                                       skipped_operation);
+	}
+	ColumnSegment::ApplyInternalFilterResidual(filter_state, sel, result, vector_count, sel_count);
+}
+
+template <class T>
 static bool TryBitpackingPrefixRangeFilter(ColumnSegment &segment, ColumnScanState &state, idx_t vector_count,
                                            Vector &result, SelectionVector &sel, idx_t &sel_count,
-                                           const TableFilter &filter, TableFilterState &filter_state,
-                                           const PrefixRangeFunctionData &prefix_data, bool &covers_filter) {
+                                           const TableFilter &filter, TableFilterState &filter_state) {
+	if (filter.filter_type != TableFilterType::EXPRESSION_FILTER) {
+		return false;
+	}
+	auto &expression_filter = filter.Cast<ExpressionFilter>();
+	auto &filter_state_typed = filter_state.Cast<ExpressionFilterState>();
+	if (!ColumnSegment::PrepareInternalFilterPlan(filter_state_typed, *expression_filter.expr, result.GetType())) {
+		return false;
+	}
+	auto &operations = filter_state_typed.fast_internal_filter_operations;
+	idx_t prefix_operation = DConstants::INVALID_INDEX;
+	for (idx_t operation_idx = 0; operation_idx < operations.size(); operation_idx++) {
+		if (operations[operation_idx].type == FastInternalFilterOperationType::PREFIX_RANGE) {
+			prefix_operation = operation_idx;
+			break;
+		}
+	}
+	if (prefix_operation == DConstants::INVALID_INDEX) {
+		return false;
+	}
+	auto &operation = operations[prefix_operation];
+	D_ASSERT(operation.prefix_range_data);
+	auto &prefix_data = *operation.prefix_range_data;
 	if (!prefix_data.filter || !prefix_data.filter->IsInitialized()) {
 		return false;
 	}
@@ -1877,20 +1771,37 @@ static bool TryBitpackingPrefixRangeFilter(ColumnSegment &segment, ColumnScanSta
 	if (!SelectionVectorIsOrdered(sel, sel_count)) {
 		return false;
 	}
+	if (operation.selectivity && !operation.selectivity->IsActive()) {
+		operation.selectivity->Update(0, 0);
+		BitpackingScanPartial<T>(segment, state, vector_count, result, 0);
+		FlatVector::SetSize(result, count_t(vector_count));
+		FinishBitpackingInternalFilterPlan<T>(filter_state_typed, sel, result, vector_count, sel_count, 0,
+		                                      prefix_operation);
+		return true;
+	}
 
 	PrefixRangeLookupData lookup;
 	if (!prefix_data.filter->GetSignedLookupData(lookup) || !lookup.bitmap) {
 		return false;
 	}
-	if (!covers_filter) {
-		covers_filter = PrefixRangeFilterCoversResidual(filter, filter_state, result.GetType(), prefix_data, lookup);
-	}
+	const auto primary_input_count = sel_count;
+	bool filtered;
 	if (lookup.shift == 0) {
 		BitpackingPrefixRangeMatcher<T, true> matches(lookup.min, lookup.span, lookup.shift, lookup.bitmap);
-		return TryBitpackingLookupFilter<T>(segment, state, vector_count, result, sel, sel_count, matches);
+		filtered = TryBitpackingLookupFilter<T>(segment, state, vector_count, result, sel, sel_count, matches);
+	} else {
+		BitpackingPrefixRangeMatcher<T, false> matches(lookup.min, lookup.span, lookup.shift, lookup.bitmap);
+		filtered = TryBitpackingLookupFilter<T>(segment, state, vector_count, result, sel, sel_count, matches);
 	}
-	BitpackingPrefixRangeMatcher<T, false> matches(lookup.min, lookup.span, lookup.shift, lookup.bitmap);
-	return TryBitpackingLookupFilter<T>(segment, state, vector_count, result, sel, sel_count, matches);
+	if (!filtered) {
+		return false;
+	}
+	if (operation.selectivity) {
+		operation.selectivity->Update(sel_count, primary_input_count);
+	}
+	FinishBitpackingInternalFilterPlan<T>(filter_state_typed, sel, result, vector_count, sel_count, 0,
+	                                      prefix_operation);
+	return true;
 }
 
 template <class T>
@@ -1900,6 +1811,22 @@ static T BitpackingPerfectHashJoinBound(uint64_t bits) {
 	T result;
 	memcpy(&result, &unsigned_value, sizeof(T));
 	return result;
+}
+
+template <class T>
+static bool SkipPausedBitpackingPrimaryFilter(ColumnSegment &segment, ColumnScanState &state, idx_t vector_count,
+                                              Vector &result, SelectionVector &sel, idx_t &sel_count,
+                                              ExpressionFilterState &filter_state,
+                                              vector<FastInternalFilterOperation> &operations) {
+	auto &primary = operations[0];
+	if (!primary.selectivity || primary.selectivity->IsActive()) {
+		return false;
+	}
+	primary.selectivity->Update(0, 0);
+	BitpackingScanPartial<T>(segment, state, vector_count, result, 0);
+	FlatVector::SetSize(result, count_t(vector_count));
+	FinishBitpackingInternalFilterPlan<T>(filter_state, sel, result, vector_count, sel_count, 1);
+	return true;
 }
 
 template <class T, bool BUILD_DENSE, bool HAS_RESIDUAL_RANGES>
@@ -1969,6 +1896,10 @@ static bool TryBitpackingPerfectHashJoinFilter(ColumnSegment &segment, ColumnSca
 	    !operations[0].perfect_hash_join_data || !operations[0].perfect_hash_join_data->executor) {
 		return false;
 	}
+	if (SkipPausedBitpackingPrimaryFilter<T>(segment, state, vector_count, result, sel, sel_count, filter_state_typed,
+	                                         operations)) {
+		return true;
+	}
 
 	ExecutionPerfectHashJoinTableLayout layout;
 	if (!operations[0].perfect_hash_join_data->executor->GetExecutionPerfectHashJoinTableLayout(layout) ||
@@ -1978,8 +1909,10 @@ static bool TryBitpackingPerfectHashJoinFilter(ColumnSegment &segment, ColumnSca
 	}
 	const auto build_min = BitpackingPerfectHashJoinBound<T>(layout.build_min);
 	const auto build_max = BitpackingPerfectHashJoinBound<T>(layout.build_max);
+	const auto primary_input_count = sel_count;
 	idx_t fused_operation_count = 1;
-	while (fused_operation_count < operations.size() &&
+	const bool track_primary_selectivity = static_cast<bool>(operations[0].selectivity);
+	while (!track_primary_selectivity && fused_operation_count < operations.size() &&
 	       operations[fused_operation_count].type == FastInternalFilterOperationType::SIGNED_NUMERIC_RANGE) {
 		fused_operation_count++;
 	}
@@ -2003,12 +1936,91 @@ static bool TryBitpackingPerfectHashJoinFilter(ColumnSegment &segment, ColumnSca
 	if (!filtered) {
 		return false;
 	}
-	if (sel_count > 0 && fused_operation_count < operations.size()) {
-		UnifiedVectorFormat vdata;
-		result.ToUnifiedFormat(vdata);
-		ColumnSegment::ApplyInternalFilterPlan(filter_state_typed, sel, result, vdata, sel_count,
-		                                       fused_operation_count);
+	if (operations[0].selectivity) {
+		operations[0].selectivity->Update(sel_count, primary_input_count);
 	}
+	FinishBitpackingInternalFilterPlan<T>(filter_state_typed, sel, result, vector_count, sel_count,
+	                                      fused_operation_count);
+	return true;
+}
+
+template <class T, bool HAS_RESIDUAL_RANGES>
+struct BitpackingBloomFilterMatcher {
+	BitpackingBloomFilterMatcher(const BloomFilter &filter_p, const vector<FastInternalFilterOperation> &operations_p,
+	                             idx_t operation_count_p)
+	    : filter(filter_p), operations(operations_p), operation_count(operation_count_p) {
+	}
+
+	DUCKDB_BITPACKING_FORCE_INLINE bool operator()(const T &value) const {
+		if (!filter.LookupOne(Hash<T>(value))) {
+			return false;
+		}
+		if constexpr (HAS_RESIDUAL_RANGES) {
+			for (idx_t operation_idx = 1; operation_idx < operation_count; operation_idx++) {
+				auto &operation = operations[operation_idx];
+				if (operation.range_empty || (operation.range_has_lower && value < operation.range_lower) ||
+				    (operation.range_has_upper && value > operation.range_upper)) {
+					return false;
+				}
+			}
+		}
+		return true;
+	}
+
+	const BloomFilter &filter;
+	const vector<FastInternalFilterOperation> &operations;
+	idx_t operation_count;
+};
+
+template <class T>
+static bool TryBitpackingBloomFilter(ColumnSegment &segment, ColumnScanState &state, idx_t vector_count, Vector &result,
+                                     SelectionVector &sel, idx_t &sel_count, const TableFilter &filter,
+                                     TableFilterState &filter_state) {
+	if (filter.filter_type != TableFilterType::EXPRESSION_FILTER || !std::is_integral<T>::value) {
+		return false;
+	}
+	auto &expression_filter = filter.Cast<ExpressionFilter>();
+	auto &filter_state_typed = filter_state.Cast<ExpressionFilterState>();
+	if (!ColumnSegment::PrepareInternalFilterPlan(filter_state_typed, *expression_filter.expr, result.GetType())) {
+		return false;
+	}
+	auto &operations = filter_state_typed.fast_internal_filter_operations;
+	if (operations.empty() || operations[0].type != FastInternalFilterOperationType::BLOOM_FILTER ||
+	    !operations[0].bloom_filter_data || !operations[0].bloom_filter_data->filter ||
+	    !operations[0].bloom_filter_data->filters_null_values) {
+		return false;
+	}
+	if (SkipPausedBitpackingPrimaryFilter<T>(segment, state, vector_count, result, sel, sel_count, filter_state_typed,
+	                                         operations)) {
+		return true;
+	}
+
+	const auto primary_input_count = sel_count;
+	idx_t fused_operation_count = 1;
+	const bool track_primary_selectivity = static_cast<bool>(operations[0].selectivity);
+	while (!track_primary_selectivity && fused_operation_count < operations.size() &&
+	       operations[fused_operation_count].type == FastInternalFilterOperationType::SIGNED_NUMERIC_RANGE) {
+		fused_operation_count++;
+	}
+	const auto has_residual_ranges = fused_operation_count > 1;
+	bool filtered;
+	if (has_residual_ranges) {
+		BitpackingBloomFilterMatcher<T, true> matcher(*operations[0].bloom_filter_data->filter, operations,
+		                                              fused_operation_count);
+		filtered = TryBitpackingLookupFilter<T>(segment, state, vector_count, result, sel, sel_count, matcher);
+	} else {
+		BitpackingBloomFilterMatcher<T, false> matcher(*operations[0].bloom_filter_data->filter, operations,
+		                                               fused_operation_count);
+		filtered = TryBitpackingLookupFilter<T>(segment, state, vector_count, result, sel, sel_count, matcher);
+	}
+	if (!filtered) {
+		return false;
+	}
+	if (operations[0].selectivity) {
+		operations[0].selectivity->Update(sel_count, primary_input_count);
+	}
+	FinishBitpackingInternalFilterPlan<T>(filter_state_typed, sel, result, vector_count, sel_count,
+	                                      fused_operation_count);
 	return true;
 }
 
@@ -2025,23 +2037,16 @@ void BitpackingFilter(ColumnSegment &segment, ColumnScanState &state, idx_t vect
 	                                          filter_state)) {
 		return;
 	}
+	if (TryBitpackingBloomFilter<T>(segment, state, vector_count, result, sel, sel_count, filter, filter_state)) {
+		return;
+	}
 	SignedNumericRangeFilterData signed_range;
 	if (TryGetBitpackingSignedNumericRangeFilter(filter, filter_state, result.GetType(), signed_range) &&
 	    TryBitpackingSignedNumericRangeFilter<T>(segment, state, vector_count, result, sel, sel_count, signed_range)) {
 		return;
 	}
-	auto prefix_candidate = TryGetBitpackingPrefixRangeFilter(filter, filter_state);
-	if (prefix_candidate.data) {
-		if (TryBitpackingPrefixRangeFilter<T>(segment, state, vector_count, result, sel, sel_count, filter,
-		                                      filter_state, *prefix_candidate.data, prefix_candidate.covers_filter)) {
-			if (prefix_candidate.covers_filter) {
-				return;
-			}
-			UnifiedVectorFormat vdata;
-			result.ToUnifiedFormat(vdata);
-			ColumnSegment::FilterSelection(sel, result, vdata, filter, filter_state, vector_count, sel_count);
-			return;
-		}
+	if (TryBitpackingPrefixRangeFilter<T>(segment, state, vector_count, result, sel, sel_count, filter, filter_state)) {
+		return;
 	}
 	if (ShouldUseBitpackingSelectedFilter(vector_count, sel_count) && SelectionVectorIsOrdered(sel, sel_count)) {
 		BitpackingScanSelected<T>(segment, state, vector_count, result, sel, sel_count);

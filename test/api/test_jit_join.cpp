@@ -291,10 +291,11 @@ TEST_CASE("JIT exact prefix membership elides only equivalent unique hash probes
 	REQUIRE_NO_FAIL(con.Query("SET threads=1"));
 	REQUIRE_NO_FAIL(con.Query("SET perfect_ht_threshold=0"));
 	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_exact_prefix_probe AS "
-	                          "SELECT i::BIGINT AS k, i::BIGINT AS v FROM range(2100000) tbl(i)"));
+	                          "SELECT i::BIGINT AS k, i::BIGINT AS v FROM range(-1050000, 1050000) tbl(i) "
+	                          "UNION ALL SELECT NULL::BIGINT AS k, NULL::BIGINT AS v"));
 	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_exact_prefix_unique AS "
 	                          "SELECT (i * 500)::BIGINT AS k, (i * 11)::BIGINT AS payload "
-	                          "FROM range(4096) tbl(i)"));
+	                          "FROM range(-2048, 2048) tbl(i)"));
 
 	const string equivalent_key_query = "SELECT count(*), sum(r.k) FROM jit_exact_prefix_probe l "
 	                                    "JOIN jit_exact_prefix_unique r ON l.k = r.k";
@@ -309,6 +310,13 @@ TEST_CASE("JIT exact prefix membership elides only equivalent unique hash probes
 	REQUIRE_NO_FAIL(*result);
 	REQUIRE(result->GetValue(0, 0).ToString() == reference->GetValue(0, 0).ToString());
 	REQUIRE(result->GetValue(1, 0).ToString() == reference->GetValue(1, 0).ToString());
+	string observed_runtime_paths;
+	for (auto &event : manager.GetEvents()) {
+		if (EventPhase(event) == "runtime") {
+			observed_runtime_paths += EventJitRuntimePathCounts(event) + "\n";
+		}
+	}
+	INFO(observed_runtime_paths);
 	RequireJitEvent(
 	    manager,
 	    [](const ExecutionRegionEvent &event) {
@@ -335,8 +343,8 @@ TEST_CASE("JIT exact prefix membership elides only equivalent unique hash probes
 	}
 
 	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_exact_prefix_duplicates AS "
-	                          "SELECT (i * 500)::BIGINT AS k FROM range(4096) tbl(i) "
-	                          "UNION ALL SELECT (i * 500)::BIGINT AS k FROM range(4096) tbl(i)"));
+	                          "SELECT (i * 500)::BIGINT AS k FROM range(-2048, 2048) tbl(i) "
+	                          "UNION ALL SELECT (i * 500)::BIGINT AS k FROM range(-2048, 2048) tbl(i)"));
 	ClearJitTrace(manager, true);
 	auto duplicate_result = con.Query("SELECT count(*) FROM jit_exact_prefix_probe l "
 	                                  "JOIN jit_exact_prefix_duplicates r ON l.k = r.k");

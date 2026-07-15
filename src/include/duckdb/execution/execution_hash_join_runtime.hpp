@@ -35,6 +35,9 @@ struct ExecutionHashJoinTableLayout {
 	bool can_have_null = false;
 	bool use_salt = false;
 	bool null_keys_are_filtered = false;
+	//! Whether rows retained in the physical hash table can contain a NULL condition key.
+	//! This is distinct from has_filtered_null, which records NULLs removed for MARK semantics.
+	bool stored_keys_can_have_null = false;
 	idx_t condition_count = 0;
 	vector<LogicalType> condition_types;
 	idx_t payload_column_count = 0;
@@ -54,7 +57,12 @@ struct ExecutionHashJoinTableLayout {
 	const ht_entry_t *entries = nullptr;
 	const data_ptr_t *aux_next_ptrs = nullptr;
 	const BloomFilter *bloom_filter = nullptr;
-	bool exact_filter_build_keys_unique = false;
+	//! Exact membership bitmap owned by the hash table. A backend may use this to replace a unique single-key probe,
+	//! but must execute the membership test itself; scan-side adaptive filters are not an execution proof.
+	bool exact_membership_filter_build_keys_unique = false;
+	uint64_t exact_membership_filter_min = 0;
+	uint64_t exact_membership_filter_span = 0;
+	const uint64_t *exact_membership_filter_bitmap = nullptr;
 	shared_ptr<ExecutionRuntimeFilterIdentity> runtime_filter_identity;
 	string blocker;
 };
@@ -109,8 +117,9 @@ struct ExecutionHashJoinProbeOutputProof {
 		exact_rhs_output_probe_input_indices = nullptr;
 	}
 
-	void SetExactSourceFilterMatches(const vector<idx_t> &rhs_output_probe_input_indices) {
-		match_selection_is_identity = true;
+	void SetExactSourceFilterMatches(const vector<idx_t> &rhs_output_probe_input_indices,
+	                                 bool match_selection_is_identity_p) {
+		match_selection_is_identity = match_selection_is_identity_p;
 		perfect_build_selection_is_key_offset = false;
 		exact_rhs_output_probe_input_indices = optional_ptr<const vector<idx_t>>(&rhs_output_probe_input_indices);
 	}

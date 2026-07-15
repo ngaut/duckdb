@@ -416,8 +416,7 @@ bool TryGetSignedNumericRange(const ExpressionFilter &filter, ExpressionFilterSt
 			state.fast_signed_numeric_range_upper = merged_range.upper;
 		}
 	}
-	if (!state.fast_signed_numeric_range_filter_supported ||
-	    state.fast_signed_numeric_range_type != physical_type) {
+	if (!state.fast_signed_numeric_range_filter_supported || state.fast_signed_numeric_range_type != physical_type) {
 		return false;
 	}
 	range.empty = state.fast_signed_numeric_range_filter_always_false;
@@ -469,13 +468,13 @@ void TableFilterFunctionSerialize(Serializer &serializer, const optional_ptr<Fun
 unique_ptr<FunctionData> TableFilterFunctionDeserialize(Deserializer &deserializer, BoundScalarFunction &function) {
 	auto key_type = function.GetArguments().empty() ? LogicalType::ANY : function.GetArguments()[0];
 	if (function.GetName() == BloomFilterScalarFun::NAME) {
-		return make_uniq<BloomFilterFunctionData>(nullptr, false, string(), key_type, 0.0f, idx_t(0));
+		return make_uniq<BloomFilterFunctionData>(nullptr, false, string(), key_type);
 	}
 	if (function.GetName() == PerfectHashJoinScalarFun::NAME) {
-		return make_uniq<PerfectHashJoinFunctionData>(nullptr, string(), 0.0f, idx_t(0));
+		return make_uniq<PerfectHashJoinFunctionData>(nullptr, string());
 	}
 	if (function.GetName() == PrefixRangeScalarFun::NAME) {
-		return make_uniq<PrefixRangeFunctionData>(nullptr, string(), key_type, 0.0f, idx_t(0));
+		return make_uniq<PrefixRangeFunctionData>(nullptr, string(), key_type);
 	}
 	if (function.GetName() == DynamicFilterScalarFun::NAME) {
 		return make_uniq<DynamicFilterFunctionData>(nullptr);

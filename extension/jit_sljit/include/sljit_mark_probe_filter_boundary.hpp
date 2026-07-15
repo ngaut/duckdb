@@ -89,7 +89,7 @@ static idx_t SljitSelectMarkProbeNonMatches(const ExecutionHashJoinProbeBinding 
 	if (count > input.count || count > input_chunk.size()) {
 		throw InternalException("SLJIT MARK probe non-match selection count exceeds input size");
 	}
-	if (binding.hash_table->has_null) {
+	if (binding.hash_table->has_filtered_null) {
 		return 0;
 	}
 
@@ -250,7 +250,7 @@ static bool SljitBuildMaterializedMarkProbeBoundaryMarker(const ExecutionHashJoi
 			}
 		}
 	}
-	if (binding.hash_table->has_null) {
+	if (binding.hash_table->has_filtered_null) {
 		for (idx_t row_idx = 0; row_idx < boundary.count; row_idx++) {
 			if (!bool_result[row_idx]) {
 				mask.SetInvalid(row_idx);
@@ -303,11 +303,9 @@ static bool SljitTryBuildMarkProbeFilterBoundary(const ExecutionHashJoinProbeBin
 	return true;
 }
 
-static SljitMarkProbeFilterBoundaryMarkerMode
-SljitChooseMarkProbeFilterBoundaryMarkerMode(const SljitExecutableRegionOp &hash_join_op,
-                                             const SljitExecutableRegionOp &projection_op,
-                                             SljitMarkProbeFilterMode mark_filter_mode,
-                                             bool allow_marker_omission = false) {
+static SljitMarkProbeFilterBoundaryMarkerMode SljitChooseMarkProbeFilterBoundaryMarkerMode(
+    const SljitExecutableRegionOp &hash_join_op, const SljitExecutableRegionOp &projection_op,
+    SljitMarkProbeFilterMode mark_filter_mode, bool allow_marker_omission = false) {
 	if (hash_join_op.output_types.empty()) {
 		throw InternalException("SLJIT MARK probe boundary has no marker output");
 	}

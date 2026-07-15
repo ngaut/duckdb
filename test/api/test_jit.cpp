@@ -1,5 +1,4 @@
 #include "test_jit_helpers.hpp"
-#include "sljit_exact_perfect_hash_join_runtime.hpp"
 
 using namespace duckdb;
 
@@ -3376,80 +3375,6 @@ TEST_CASE("JIT CBO uses finalized perfect-hash dynamic filter cardinality", "[ap
 	    });
 }
 
-TEST_CASE("JIT exact perfect-hash filter proofs preserve checked cast domains", "[api][jit]") {
-	int64_t source[] = {-2147483649LL, -2, 0, 2147483648LL, 2};
-	sel_t match_selection[5];
-	sel_t build_selection[5];
-	int32_t min_value = -2;
-	int32_t max_value = 2;
-	uint64_t min_bits = 0;
-	uint64_t max_bits = 0;
-	memcpy(&min_bits, &min_value, sizeof(min_value));
-	memcpy(&max_bits, &max_value, sizeof(max_value));
-
-	SljitNativePerfectHashJoinProbeInput input;
-	input.source_data = reinterpret_cast<const_data_ptr_t>(source);
-	input.count = 5;
-	input.match_sel = match_selection;
-	input.build_sel = build_selection;
-	input.perfect_min = min_bits;
-	input.perfect_max = max_bits;
-
-	SljitPopulateExactPerfectHashJoinSelections<int32_t, int64_t>(input);
-	REQUIRE(input.selected_count == 3);
-	REQUIRE(input.input_offset == 5);
-	REQUIRE(input.finished);
-	REQUIRE(match_selection[0] == 1);
-	REQUIRE(match_selection[1] == 2);
-	REQUIRE(match_selection[2] == 4);
-	REQUIRE(build_selection[0] == 0);
-	REQUIRE(build_selection[1] == 2);
-	REQUIRE(build_selection[2] == 4);
-
-	// A selected-view identity probe owns only build selections. A direct
-	// consumer with a proven key-offset ABI can elide both temporary selections.
-	// A later compact retry must reconstruct the same matched rows when an input
-	// misses.
-	input.selected_count = 0;
-	input.input_offset = 0;
-	input.finished = false;
-	match_selection[0] = 99;
-	match_selection[1] = 99;
-	match_selection[2] = 99;
-	SljitPopulateExactPerfectHashJoinSelections<int32_t, int64_t>(input, false);
-	REQUIRE(input.selected_count == 3);
-	REQUIRE(match_selection[0] == 99);
-	REQUIRE(match_selection[1] == 99);
-	REQUIRE(match_selection[2] == 99);
-	REQUIRE(build_selection[0] == 0);
-	REQUIRE(build_selection[1] == 2);
-	REQUIRE(build_selection[2] == 4);
-
-	input.selected_count = 0;
-	input.input_offset = 0;
-	input.finished = false;
-	build_selection[0] = 88;
-	build_selection[1] = 88;
-	build_selection[2] = 88;
-	SljitPopulateExactPerfectHashJoinSelections<int32_t, int64_t>(input, false, false);
-	REQUIRE(input.selected_count == 3);
-	REQUIRE(match_selection[0] == 99);
-	REQUIRE(match_selection[1] == 99);
-	REQUIRE(match_selection[2] == 99);
-	REQUIRE(build_selection[0] == 88);
-	REQUIRE(build_selection[1] == 88);
-	REQUIRE(build_selection[2] == 88);
-
-	input.selected_count = 0;
-	input.input_offset = 0;
-	input.finished = false;
-	SljitPopulateExactPerfectHashJoinSelections<int32_t, int64_t>(input);
-	REQUIRE(input.selected_count == 3);
-	REQUIRE(match_selection[0] == 1);
-	REQUIRE(match_selection[1] == 2);
-	REQUIRE(match_selection[2] == 4);
-}
-
 TEST_CASE("JIT exact dynamic filters compose with bitpacked storage scans", "[api][jit]") {
 	JitTestDatabase test;
 	auto &con = test.con;
@@ -3502,6 +3427,81 @@ TEST_CASE("JIT exact dynamic filters compose with bitpacked storage scans", "[ap
 	    [](const ExecutionRegionEvent &event) {
 		    REQUIRE(StringUtil::Contains(EventJitRuntimeProofCounts(event), "generated_backend_work="));
 	    });
+
+	REQUIRE_NO_FAIL(con.Query("DETACH packed"));
+	TestDeleteFile(db_path);
+	TestDeleteFile(db_path + ".wal");
+}
+
+TEST_CASE("JIT Bloom dynamic filters preserve bitpacked scan semantics", "[api][jit]") {
+	JitTestDatabase test;
+	auto &con = test.con;
+	auto &manager = test.manager;
+
+	ConfigureSljitForCoverage(con, false, true, true, 10000);
+	REQUIRE_NO_FAIL(con.Query("SET threads=1"));
+	REQUIRE_NO_FAIL(con.Query("SET perfect_ht_threshold=0"));
+	REQUIRE_NO_FAIL(con.Query("PRAGMA force_compression='bitpacking'"));
+	auto db_path = TestCreatePath("jit_bitpacked_bloom_dynamic_filter.db");
+	TestDeleteFile(db_path);
+	TestDeleteFile(db_path + ".wal");
+	REQUIRE_NO_FAIL(con.Query("ATTACH " + SQLString(db_path) + " AS packed (ROW_GROUP_SIZE 2048)"));
+	REQUIRE_NO_FAIL(con.Query("CREATE TABLE packed.fact_big AS "
+	                          "SELECT CASE WHEN i % 257 = 0 THEN NULL ELSE i END::BIGINT AS k "
+	                          "FROM range(700000) tbl(i)"));
+	REQUIRE_NO_FAIL(con.Query("CREATE TABLE packed.fact_int AS "
+	                          "SELECT CASE WHEN i % 257 = 0 THEN NULL ELSE i END::INTEGER AS k "
+	                          "FROM range(700000) tbl(i)"));
+	REQUIRE_NO_FAIL(con.Query("CREATE TABLE packed.dim AS "
+	                          "SELECT (i * 3)::BIGINT AS k FROM range(524289) tbl(i) "
+	                          "UNION ALL SELECT NULL::BIGINT"));
+	REQUIRE_NO_FAIL(con.Query("CHECKPOINT packed"));
+	auto storage = con.Query("SELECT count(*) FROM pragma_storage_info('packed.fact_big') "
+	                         "WHERE column_name = 'k' AND compression = 'BitPacking'");
+	REQUIRE_NO_FAIL(*storage);
+	REQUIRE(storage->GetValue(0, 0).GetValue<int64_t>() > 0);
+	storage = con.Query("SELECT count(*) FROM pragma_storage_info('packed.fact_int') "
+	                    "WHERE column_name = 'k' AND compression = 'BitPacking'");
+	REQUIRE_NO_FAIL(*storage);
+	REQUIRE(storage->GetValue(0, 0).GetValue<int64_t>() > 0);
+
+	const string exact_query = "SELECT count(*) FROM packed.fact_big f JOIN packed.dim d ON f.k = d.k";
+	const string null_equal_query =
+	    "SELECT count(*) FROM packed.fact_big f JOIN packed.dim d ON f.k IS NOT DISTINCT FROM d.k";
+	const string cast_query = "SELECT count(*) FROM packed.fact_int f JOIN packed.dim d ON f.k = d.k";
+
+	REQUIRE_NO_FAIL(con.Query("SET jit_policy='off'"));
+	auto exact_reference = con.Query(exact_query);
+	REQUIRE_NO_FAIL(*exact_reference);
+	REQUIRE(exact_reference->GetValue(0, 0).GetValue<int64_t>() == 232426);
+	auto null_equal_reference = con.Query(null_equal_query);
+	REQUIRE_NO_FAIL(*null_equal_reference);
+	REQUIRE(null_equal_reference->GetValue(0, 0).GetValue<int64_t>() == 235150);
+	auto cast_reference = con.Query(cast_query);
+	REQUIRE_NO_FAIL(*cast_reference);
+	REQUIRE(cast_reference->GetValue(0, 0).GetValue<int64_t>() == 232426);
+
+	REQUIRE_NO_FAIL(con.Query("SET jit_policy='auto'"));
+	ClearJitTrace(manager, true);
+	auto exact_result = con.Query(exact_query);
+	REQUIRE_NO_FAIL(*exact_result);
+	REQUIRE(exact_result->GetValue(0, 0) == exact_reference->GetValue(0, 0));
+	RequireJitEvent(manager, [](const ExecutionRegionEvent &event) {
+		return EventPhase(event) == "runtime" && EventStatus(event) == "executed" &&
+		       StringUtil::Contains(EventJitRuntimePathCounts(event),
+		                            "hash_join_probe.perfect_probe.exact_source_filter=");
+	});
+	ClearJitTrace(manager, true);
+	auto null_equal_result = con.Query(null_equal_query);
+	REQUIRE_NO_FAIL(*null_equal_result);
+	REQUIRE(null_equal_result->GetValue(0, 0) == null_equal_reference->GetValue(0, 0));
+	RequireJitEvent(manager, [](const ExecutionRegionEvent &event) {
+		return EventPhase(event) == "runtime" && EventStatus(event) == "executed" &&
+		       StringUtil::Contains(EventJitRuntimePathCounts(event), "hash_join_probe.regular_probe.generated=");
+	});
+	auto cast_result = con.Query(cast_query);
+	REQUIRE_NO_FAIL(*cast_result);
+	REQUIRE(cast_result->GetValue(0, 0) == cast_reference->GetValue(0, 0));
 
 	REQUIRE_NO_FAIL(con.Query("DETACH packed"));
 	TestDeleteFile(db_path);

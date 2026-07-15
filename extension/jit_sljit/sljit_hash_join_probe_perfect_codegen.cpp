@@ -94,33 +94,39 @@ static struct sljit_jump *EmitJumpIfHoistedPerfectHashJoinSourceNull(struct slji
 }
 #endif
 
-static void EmitLoadWidePerfectHashJoinBounds(struct sljit_compiler *compiler, sljit_s32 min_lower,
-                                               sljit_s32 min_upper, sljit_s32 max_lower, sljit_s32 max_upper,
-                                               bool unsigned_key) {
-	const auto min_offset = unsigned_key
-	                            ? offsetof(SljitNativePerfectHashJoinProbeInput, perfect_min_u128)
-	                            : offsetof(SljitNativePerfectHashJoinProbeInput, perfect_min_128);
-	const auto max_offset = unsigned_key
-	                            ? offsetof(SljitNativePerfectHashJoinProbeInput, perfect_max_u128)
-	                            : offsetof(SljitNativePerfectHashJoinProbeInput, perfect_max_128);
+static sljit_sw SljitWidePerfectHashJoinBoundOffset(bool unsigned_key, bool maximum, sljit_sw word_offset) {
+	if (unsigned_key) {
+		return (maximum ? offsetof(SljitNativePerfectHashJoinProbeInput, perfect_max_u128)
+		                : offsetof(SljitNativePerfectHashJoinProbeInput, perfect_min_u128)) +
+		       word_offset;
+	}
+	return (maximum ? offsetof(SljitNativePerfectHashJoinProbeInput, perfect_max_128)
+	                : offsetof(SljitNativePerfectHashJoinProbeInput, perfect_min_128)) +
+	       word_offset;
+}
+
+static void EmitLoadWidePerfectHashJoinInvariantBounds(struct sljit_compiler *compiler, sljit_s32 min_lower,
+                                                       sljit_s32 min_upper, sljit_s32 max_lower, bool unsigned_key) {
 	const auto lower_offset = NumericCast<sljit_sw>(offsetof(hugeint_t, lower));
 	const auto upper_offset = NumericCast<sljit_sw>(offsetof(hugeint_t, upper));
-	sljit_emit_op1(compiler, SLJIT_MOV, min_lower, 0, SLJIT_MEM1(SLJIT_S0), min_offset + lower_offset);
-	sljit_emit_op1(compiler, SLJIT_MOV, min_upper, 0, SLJIT_MEM1(SLJIT_S0), min_offset + upper_offset);
-	sljit_emit_op1(compiler, SLJIT_MOV, max_lower, 0, SLJIT_MEM1(SLJIT_S0), max_offset + lower_offset);
-	sljit_emit_op1(compiler, SLJIT_MOV, max_upper, 0, SLJIT_MEM1(SLJIT_S0), max_offset + upper_offset);
+	sljit_emit_op1(compiler, SLJIT_MOV, min_lower, 0, SLJIT_MEM1(SLJIT_S0),
+	               SljitWidePerfectHashJoinBoundOffset(unsigned_key, false, lower_offset));
+	sljit_emit_op1(compiler, SLJIT_MOV, min_upper, 0, SLJIT_MEM1(SLJIT_S0),
+	               SljitWidePerfectHashJoinBoundOffset(unsigned_key, false, upper_offset));
+	sljit_emit_op1(compiler, SLJIT_MOV, max_lower, 0, SLJIT_MEM1(SLJIT_S0),
+	               SljitWidePerfectHashJoinBoundOffset(unsigned_key, true, lower_offset));
 }
 
 static void EmitLoadWidePerfectHashJoinKey(struct sljit_compiler *compiler, sljit_s32 source_data,
-                                            sljit_s32 source_index, sljit_s32 lower, sljit_s32 upper,
-                                            sljit_s32 scratch) {
+                                           sljit_s32 source_index, sljit_s32 lower, sljit_s32 upper,
+                                           sljit_s32 scratch) {
 	EmitLoadHashJoinKeyWord(compiler, lower, source_data, source_index, offsetof(hugeint_t, lower), scratch);
 	EmitLoadHashJoinKeyWord(compiler, upper, source_data, source_index, offsetof(hugeint_t, upper), scratch);
 }
 
-static void EmitWidePerfectHashJoinRangeChecks(struct sljit_compiler *compiler, bool unsigned_key,
-                                               sljit_s32 key_lower, sljit_s32 key_upper, sljit_s32 min_lower,
-                                               sljit_s32 min_upper, sljit_s32 max_lower, sljit_s32 max_upper,
+static void EmitWidePerfectHashJoinRangeChecks(struct sljit_compiler *compiler, bool unsigned_key, sljit_s32 key_lower,
+                                               sljit_s32 key_upper, sljit_s32 min_lower, sljit_s32 min_upper,
+                                               sljit_s32 max_lower, sljit_s32 max_upper,
                                                vector<struct sljit_jump *> &range_failures) {
 	const auto less_than = unsigned_key ? SLJIT_LESS : SLJIT_SIG_LESS;
 	const auto greater_than = unsigned_key ? SLJIT_GREATER : SLJIT_SIG_GREATER;
@@ -154,8 +160,8 @@ static void EmitWidePerfectHashJoinRangeChecks(struct sljit_compiler *compiler, 
 
 static unique_ptr<ExecutionRegionCodeHandle>
 BuildSljitWidePerfectHashJoinProbe(struct sljit_compiler *compiler, bool unsigned_key,
-                                    const SljitPerfectHashJoinProbeCodegenConfig &config,
-                                    SljitNativePerfectHashJoinProbeFunction &function, string &error) {
+                                   const SljitPerfectHashJoinProbeCodegenConfig &config,
+                                   SljitNativePerfectHashJoinProbeFunction &function, string &error) {
 #if defined(SLJIT_NUMBER_OF_SAVED_REGISTERS) && SLJIT_NUMBER_OF_SAVED_REGISTERS >= 10
 	sljit_emit_enter(compiler, 0, SLJIT_ARGS1V(P), 5, 10, 0);
 	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_S1, 0, SLJIT_MEM1(SLJIT_S0),
@@ -169,14 +175,19 @@ BuildSljitWidePerfectHashJoinProbe(struct sljit_compiler *compiler, bool unsigne
 	               offsetof(SljitNativePerfectHashJoinProbeInput, source_sel));
 	sljit_emit_op1(compiler, SLJIT_MOV_P, SLJIT_S6, 0, SLJIT_MEM1(SLJIT_S0),
 	               offsetof(SljitNativePerfectHashJoinProbeInput, source_validity));
-	EmitLoadWidePerfectHashJoinBounds(compiler, SLJIT_S7, SLJIT_S8, SLJIT_S9, SLJIT_R4, unsigned_key);
+	EmitLoadWidePerfectHashJoinInvariantBounds(compiler, SLJIT_S7, SLJIT_S8, SLJIT_S9, unsigned_key);
 
 	auto loop = sljit_emit_label(compiler);
 	auto done = sljit_emit_cmp(compiler, SLJIT_GREATER_EQUAL, SLJIT_S1, 0, SLJIT_S2, 0);
 	EmitLoadHoistedPerfectHashJoinSourceIndex(compiler, SLJIT_S5, SLJIT_R2);
-	auto source_is_null = EmitJumpIfHoistedPerfectHashJoinSourceNull(compiler, SLJIT_S6, SLJIT_R2, SLJIT_R3,
-	                                                                  SLJIT_R1);
+	auto source_is_null = EmitJumpIfHoistedPerfectHashJoinSourceNull(compiler, SLJIT_S6, SLJIT_R2, SLJIT_R3, SLJIT_R1);
 	EmitLoadWidePerfectHashJoinKey(compiler, SLJIT_S4, SLJIT_R2, SLJIT_R0, SLJIT_R1, SLJIT_R3);
+	// The target has only three saved registers after the loop state and source
+	// metadata. Keep the fourth bound out of scratch-register lifetime: R4 is
+	// reused below for bitmap indexing and must be reloaded before each compare.
+	sljit_emit_op1(
+	    compiler, SLJIT_MOV, SLJIT_R4, 0, SLJIT_MEM1(SLJIT_S0),
+	    SljitWidePerfectHashJoinBoundOffset(unsigned_key, true, NumericCast<sljit_sw>(offsetof(hugeint_t, upper))));
 	vector<struct sljit_jump *> range_failures;
 	EmitWidePerfectHashJoinRangeChecks(compiler, unsigned_key, SLJIT_R0, SLJIT_R1, SLJIT_S7, SLJIT_S8, SLJIT_S9,
 	                                   SLJIT_R4, range_failures);

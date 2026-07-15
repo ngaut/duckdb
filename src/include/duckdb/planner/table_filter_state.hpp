@@ -16,8 +16,34 @@ namespace duckdb {
 
 struct PrefixRangeFunctionData;
 struct PerfectHashJoinFunctionData;
+struct BloomFilterFunctionData;
 
-enum class FastInternalFilterOperationType : uint8_t { SIGNED_NUMERIC_RANGE, PREFIX_RANGE, PERFECT_HASH_JOIN };
+//! Thread-local execution policy for an optional filter. The wrapper owns this policy; internal filter primitives
+//! only implement matching.
+struct FilterSelectivityState {
+	enum class Status : uint8_t { ACTIVE, PAUSED_DUE_TO_HIGH_SELECTIVITY };
+
+	FilterSelectivityState(idx_t n_vectors_to_check, float selectivity_threshold);
+
+	void Update(idx_t accepted, idx_t processed);
+	bool IsActive() const;
+	double GetSelectivity() const;
+
+	const idx_t n_vectors_to_check;
+	const float selectivity_threshold;
+	idx_t tuples_accepted;
+	idx_t tuples_processed;
+	idx_t vectors_processed;
+	Status status;
+	idx_t pause_multiplier;
+};
+
+enum class FastInternalFilterOperationType : uint8_t {
+	SIGNED_NUMERIC_RANGE,
+	PREFIX_RANGE,
+	PERFECT_HASH_JOIN,
+	BLOOM_FILTER
+};
 
 //! One analyzed operation in a fully supported internal expression filter. The
 //! expression tree is immutable for the lifetime of the state, so retaining the
@@ -32,6 +58,8 @@ struct FastInternalFilterOperation {
 	int64_t range_upper = 0;
 	optional_ptr<const PrefixRangeFunctionData> prefix_range_data;
 	optional_ptr<const PerfectHashJoinFunctionData> perfect_hash_join_data;
+	optional_ptr<const BloomFilterFunctionData> bloom_filter_data;
+	unique_ptr<FilterSelectivityState> selectivity;
 };
 
 //! Thread-local state for executing a table filter
@@ -72,15 +100,12 @@ public:
 	const void *fast_dictionary_matches_entry = nullptr;
 	idx_t fast_dictionary_matches_count = 0;
 
-	bool exact_prefilter_residual_initialized = false;
-	bool exact_prefilter_present = false;
-	unique_ptr<Expression> exact_prefilter_residual_expression;
-	unique_ptr<ExpressionExecutor> exact_prefilter_residual_executor;
-
 	bool fast_internal_filter_initialized = false;
 	bool fast_internal_filter_supported = false;
 	PhysicalType fast_internal_filter_type = PhysicalType::INVALID;
 	vector<FastInternalFilterOperation> fast_internal_filter_operations;
+	unique_ptr<Expression> fast_internal_filter_residual_expression;
+	unique_ptr<ExpressionExecutor> fast_internal_filter_residual_executor;
 
 	bool fast_signed_numeric_range_filter_initialized = false;
 	bool fast_signed_numeric_range_filter_supported = false;
@@ -90,13 +115,6 @@ public:
 	int64_t fast_signed_numeric_range_lower = 0;
 	int64_t fast_signed_numeric_range_upper = 0;
 	PhysicalType fast_signed_numeric_range_type = PhysicalType::INVALID;
-
-	bool fast_prefix_range_filter_initialized = false;
-	bool fast_prefix_range_filter_supported = false;
-	bool fast_prefix_range_filter_covers_filter = false;
-	const PrefixRangeFunctionData *fast_prefix_range_filter_data = nullptr;
-	bool fast_prefix_range_residual_coverage_initialized = false;
-	bool fast_prefix_range_residual_covers_filter = false;
 
 	bool constant_filter_null_effect_initialized = false;
 	bool constant_filter_filters_nulls = false;

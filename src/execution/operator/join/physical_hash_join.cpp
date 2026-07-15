@@ -1818,15 +1818,11 @@ void JoinFilterPushdownInfo::PushBloomFilter(ClientContext &context, const Physi
 	const auto key_type = ht.conditions[0].GetLHS().GetReturnType();
 	auto filter_input_type = GetRuntimeFilterInputType(info.columns[filter_idx], key_type);
 	ht.SetBuildBloomFilter(true);
-	float selectivity_threshold;
-	idx_t n_vectors_to_check;
-	GetThresholdAndVectorsToCheck(SelectivityOptionalFilterType::BF, selectivity_threshold, n_vectors_to_check);
 	vector<unique_ptr<Expression>> children;
 	children.push_back(CreateRuntimeFilterInputExpression(context, info.columns[filter_idx], key_type));
 	auto filter_expr = make_uniq<BoundFunctionExpression>(
 	    BoundScalarFunction(BloomFilterScalarFun::GetFunction(filter_input_type)), std::move(children),
-	    make_uniq<BloomFilterFunctionData>(ht.GetBloomFilter(), filters_null_values, key_name, key_type,
-	                                       selectivity_threshold, n_vectors_to_check));
+	    make_uniq<BloomFilterFunctionData>(ht.GetBloomFilter(), filters_null_values, key_name, key_type));
 	info.dynamic_filters->PushFilter(op, filter_col_idx,
 	                                 CreateSelectivityOptionalExpressionFilter(std::move(filter_expr),
 	                                                                           info.columns[filter_idx].storage_type,
@@ -1840,15 +1836,11 @@ void JoinFilterPushdownInfo::PushPerfectHashJoinFilter(ClientContext &context, c
 	const auto key_name = op.Cast<PhysicalHashJoin>().conditions[0].GetRHS().ToString();
 	const auto &key_type = perfect_join_executor.GetKeyType();
 	auto filter_input_type = GetRuntimeFilterInputType(info.columns[filter_idx], key_type);
-	float selectivity_threshold;
-	idx_t n_vectors_to_check;
-	GetThresholdAndVectorsToCheck(SelectivityOptionalFilterType::PHJ, selectivity_threshold, n_vectors_to_check);
 	vector<unique_ptr<Expression>> children;
 	children.push_back(CreateRuntimeFilterInputExpression(context, info.columns[filter_idx], key_type));
 	auto filter_expr = make_uniq<BoundFunctionExpression>(
 	    BoundScalarFunction(PerfectHashJoinScalarFun::GetFunction(filter_input_type)), std::move(children),
-	    make_uniq<PerfectHashJoinFunctionData>(perfect_join_executor, key_name, selectivity_threshold,
-	                                           n_vectors_to_check));
+	    make_uniq<PerfectHashJoinFunctionData>(perfect_join_executor, key_name));
 	info.dynamic_filters->PushFilter(op, filter_col_idx,
 	                                 CreateSelectivityOptionalExpressionFilter(std::move(filter_expr),
 	                                                                           info.columns[filter_idx].storage_type,
@@ -1871,15 +1863,12 @@ void JoinFilterPushdownInfo::RegisterPrefixRangeFilter(const JoinFilterPushdownF
 	}
 
 	const auto key_name = ht.conditions[0].GetRHS().ToString();
-	float selectivity_threshold;
-	idx_t n_vectors_to_check;
-	GetThresholdAndVectorsToCheck(SelectivityOptionalFilterType::PRF, selectivity_threshold, n_vectors_to_check);
 	vector<unique_ptr<Expression>> children;
 	children.push_back(CreateRuntimeFilterInputExpression(context, info.columns[filter_idx], filter_key_type));
 	auto filter_expr = make_uniq<BoundFunctionExpression>(
 	    BoundScalarFunction(PrefixRangeScalarFun::GetFunction(filter_input_type)), std::move(children),
-	    make_uniq<PrefixRangeFunctionData>(ht.GetPrefixRangeFilter(), key_name, filter_key_type, selectivity_threshold,
-	                                       n_vectors_to_check, ht.GetRuntimeFilterIdentity()));
+	    make_uniq<PrefixRangeFunctionData>(ht.GetPrefixRangeFilter(), key_name, filter_key_type,
+	                                       ht.GetRuntimeFilterIdentity()));
 	info.dynamic_filters->PushFilter(op, filter_col_idx,
 	                                 CreateSelectivityOptionalExpressionFilter(std::move(filter_expr),
 	                                                                           info.columns[filter_idx].storage_type,
@@ -2890,7 +2879,7 @@ void ExecutionMaterializeHashJoinProbe(const ExecutionHashJoinProbeBinding &bind
 				}
 			}
 		}
-		if (binding.hash_table->has_null) {
+		if (binding.hash_table->has_filtered_null) {
 			ExecutionOperatorStageTimer timer(recorder, "mark_probe_build_nulls");
 			for (idx_t i = 0; i < count; i++) {
 				if (!bool_result[i]) {
@@ -3224,7 +3213,8 @@ OperatorResultType PhysicalHashJoin::ExecuteInternal(ExecutionContext &context, 
 		}
 		// for empty result, only need output columns (no predicate evaluation)
 		state.lhs_output_data.ReferenceColumns(input, lhs_output_columns.col_idxs);
-		ConstructEmptyJoinResult(sink.hash_table->join_type, sink.hash_table->has_null, state.lhs_output_data, chunk);
+		ConstructEmptyJoinResult(sink.hash_table->join_type, sink.hash_table->has_filtered_null, state.lhs_output_data,
+		                         chunk);
 		return OperatorResultType::NEED_MORE_INPUT;
 	}
 
@@ -3714,8 +3704,8 @@ void HashJoinLocalSourceState::ExternalProbe(HashJoinGlobalSinkState &sink, Hash
 	if (sink.hash_table->Count() == 0 && !gstate.op.EmptyResultIfRHSIsEmpty()) {
 		// for empty result, only need output columns (no predicate evaluation)
 		lhs_output_data.ReferenceColumns(lhs_probe_chunk, gstate.op.lhs_output_columns.col_idxs);
-		gstate.op.ConstructEmptyJoinResult(sink.hash_table->join_type, sink.hash_table->has_null, lhs_output_data,
-		                                   chunk);
+		gstate.op.ConstructEmptyJoinResult(sink.hash_table->join_type, sink.hash_table->has_filtered_null,
+		                                   lhs_output_data, chunk);
 		empty_ht_probe_in_progress = true;
 		return;
 	}

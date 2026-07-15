@@ -28,41 +28,6 @@ class PrefixRangeFilter;
 struct DynamicFilterData;
 struct ExecutionRuntimeFilterIdentity;
 
-struct SelectivityOptionalFilterState final : public TableFilterState {
-	enum class FilterStatus { ACTIVE, PAUSED_DUE_TO_HIGH_SELECTIVITY };
-
-	struct SelectivityStats {
-		SelectivityStats(idx_t n_vectors_to_check, float selectivity_threshold);
-
-		void Update(idx_t accepted, idx_t processed);
-		bool IsActive() const;
-		double GetSelectivity() const;
-
-		//! Configuration
-		const idx_t n_vectors_to_check;
-		const float selectivity_threshold;
-
-		//! For computing selectivity stats
-		idx_t tuples_accepted;
-		idx_t tuples_processed;
-		idx_t vectors_processed;
-
-		//! Whether currently paused
-		FilterStatus status;
-
-		//! For increasing pause if filter is not selective enough
-		idx_t pause_multiplier;
-	};
-
-	unique_ptr<TableFilterState> child_state;
-	SelectivityStats stats;
-
-	explicit SelectivityOptionalFilterState(unique_ptr<TableFilterState> child_state, const idx_t n_vectors_to_check,
-	                                        const float selectivity_threshold)
-	    : child_state(std::move(child_state)), stats(n_vectors_to_check, selectivity_threshold) {
-	}
-};
-
 enum class SelectivityOptionalFilterType : uint8_t { MIN_MAX, BF, PHJ, PRF };
 
 void GetThresholdAndVectorsToCheck(SelectivityOptionalFilterType type, float &selectivity_threshold,
@@ -154,15 +119,12 @@ private:
 //! FunctionData for bloom filter internal function
 struct BloomFilterFunctionData : public FunctionData {
 	BloomFilterFunctionData(optional_ptr<BloomFilter> filter_p, bool filters_null_values_p,
-	                        const string &key_column_name_p, const LogicalType &key_type_p,
-	                        float selectivity_threshold_p, idx_t n_vectors_to_check_p);
+	                        const string &key_column_name_p, const LogicalType &key_type_p);
 
 	optional_ptr<BloomFilter> filter;
 	bool filters_null_values;
 	string key_column_name;
 	LogicalType key_type;
-	float selectivity_threshold;
-	idx_t n_vectors_to_check;
 
 	unique_ptr<FunctionData> Copy() const override;
 	bool Equals(const FunctionData &other) const override;
@@ -170,13 +132,11 @@ struct BloomFilterFunctionData : public FunctionData {
 
 //! FunctionData for perfect hash join internal function
 struct PerfectHashJoinFunctionData : public FunctionData {
-	PerfectHashJoinFunctionData(optional_ptr<const PerfectHashJoinExecutor> executor_p, const string &key_column_name_p,
-	                            float selectivity_threshold_p, idx_t n_vectors_to_check_p);
+	PerfectHashJoinFunctionData(optional_ptr<const PerfectHashJoinExecutor> executor_p,
+	                            const string &key_column_name_p);
 
 	optional_ptr<const PerfectHashJoinExecutor> executor;
 	string key_column_name;
-	float selectivity_threshold;
-	idx_t n_vectors_to_check;
 
 	unique_ptr<FunctionData> Copy() const override;
 	bool Equals(const FunctionData &other) const override;
@@ -227,14 +187,12 @@ public:
 //! FunctionData for prefix range internal function
 struct PrefixRangeFunctionData : public FunctionData {
 	PrefixRangeFunctionData(optional_ptr<PrefixRangeFilter> filter_p, const string &key_column_name_p,
-	                        const LogicalType &key_type_p, float selectivity_threshold_p, idx_t n_vectors_to_check_p,
+	                        const LogicalType &key_type_p,
 	                        shared_ptr<ExecutionRuntimeFilterIdentity> runtime_filter_identity_p = nullptr);
 
 	optional_ptr<PrefixRangeFilter> filter;
 	string key_column_name;
 	LogicalType key_type;
-	float selectivity_threshold;
-	idx_t n_vectors_to_check;
 	shared_ptr<ExecutionRuntimeFilterIdentity> runtime_filter_identity;
 
 	unique_ptr<FunctionData> Copy() const override;

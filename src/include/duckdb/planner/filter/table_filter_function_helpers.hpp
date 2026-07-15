@@ -17,30 +17,6 @@
 
 namespace duckdb {
 
-struct SelectivityTrackingLocalState : public FunctionLocalState {
-	SelectivityTrackingLocalState(idx_t n_vectors_to_check, float selectivity_threshold)
-	    : stats(n_vectors_to_check, selectivity_threshold) {
-	}
-
-	void Update(idx_t accepted, idx_t processed) {
-		stats.Update(accepted, processed);
-	}
-
-	bool IsActive() const {
-		return stats.IsActive();
-	}
-
-	SelectivityOptionalFilterState::SelectivityStats stats;
-};
-
-inline unique_ptr<FunctionLocalState> InitSelectivityTrackingLocalState(idx_t n_vectors_to_check,
-                                                                        float selectivity_threshold) {
-	if (n_vectors_to_check == 0) {
-		return nullptr;
-	}
-	return make_uniq<SelectivityTrackingLocalState>(n_vectors_to_check, selectivity_threshold);
-}
-
 inline idx_t SetAllTrueSelection(idx_t count, optional_ptr<SelectionVector> true_sel,
                                  optional_ptr<SelectionVector> false_sel) {
 	if (true_sel) {
@@ -135,20 +111,6 @@ inline void SelectionToBooleanResult(idx_t count, const SelectionVector &sel, id
 
 inline void SetAllTrue(DataChunk &args, Vector &result) {
 	SetConstantBooleanResult(result, true);
-}
-
-template <class TRACKING_STATE, class EXECUTOR>
-inline void ExecuteWithSelectivityTracking(DataChunk &args, Vector &result, TRACKING_STATE *tracking_state,
-                                           EXECUTOR &&execute) {
-	if (tracking_state && !tracking_state->IsActive()) {
-		SetAllTrue(args, result);
-		tracking_state->Update(0, 0);
-		return;
-	}
-	auto approved_count = execute();
-	if (tracking_state) {
-		tracking_state->Update(approved_count, args.size());
-	}
 }
 
 void TableFilterFunctionSerialize(Serializer &serializer, const optional_ptr<FunctionData> bind_data,
