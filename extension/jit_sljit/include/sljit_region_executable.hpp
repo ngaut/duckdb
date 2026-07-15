@@ -208,6 +208,7 @@ struct SljitGroupedAggregateDirectUpdatePlan {
 
 struct SljitExecutablePrimitiveRunSpecialization {
 	PhysicalType group_source_type = PhysicalType::INVALID;
+	PhysicalType group_output_type = PhysicalType::INVALID;
 	ExecutionRowPointerGroupKeyCastKind group_cast_kind = ExecutionRowPointerGroupKeyCastKind::NONE;
 	SljitLazyCompiledFunction<SljitNativePrimitiveRunFunction> compiled;
 	SljitLazyCompiledFunction<SljitNativePrimitiveRunFunction> nullable_compiled;
@@ -223,9 +224,11 @@ struct SljitExecutablePrimitiveRunUpdate {
 	vector<SljitExecutablePrimitiveRunSpecialization> flat_specializations;
 
 	optional_ptr<SljitExecutablePrimitiveRunSpecialization>
-	Specialization(PhysicalType group_source_type, ExecutionRowPointerGroupKeyCastKind group_cast_kind) {
+	Specialization(PhysicalType group_source_type, PhysicalType group_output_type,
+	               ExecutionRowPointerGroupKeyCastKind group_cast_kind) {
 		for (auto &specialization : flat_specializations) {
 			if (specialization.group_source_type == group_source_type &&
+			    specialization.group_output_type == group_output_type &&
 			    specialization.group_cast_kind == group_cast_kind) {
 				return specialization;
 			}
@@ -277,11 +280,38 @@ struct SljitExecutableFusedAffineRunUpdate {
 	}
 };
 
+struct SljitExecutableIntegralGroupKeyRange {
+	bool ready = false;
+	PhysicalType source_physical_type = PhysicalType::INVALID;
+	int64_t min_value = 0;
+	int64_t max_value = 0;
+
+	bool ProvesNarrowingCast(const ExecutionRowPointerGroupKeySource &source) const {
+		if (!ready || source.source_physical_type != source_physical_type) {
+			return false;
+		}
+		switch (source.cast_kind) {
+		case ExecutionRowPointerGroupKeyCastKind::INT64_TO_INT32:
+			return source_physical_type == PhysicalType::INT64 && source.target_physical_type == PhysicalType::INT32 &&
+			       min_value >= NumericLimits<int32_t>::Minimum() && max_value <= NumericLimits<int32_t>::Maximum();
+		case ExecutionRowPointerGroupKeyCastKind::INT64_TO_INT16:
+			return source_physical_type == PhysicalType::INT64 && source.target_physical_type == PhysicalType::INT16 &&
+			       min_value >= NumericLimits<int16_t>::Minimum() && max_value <= NumericLimits<int16_t>::Maximum();
+		case ExecutionRowPointerGroupKeyCastKind::INT32_TO_INT8:
+			return source_physical_type == PhysicalType::INT32 && source.target_physical_type == PhysicalType::INT8 &&
+			       min_value >= NumericLimits<int8_t>::Minimum() && max_value <= NumericLimits<int8_t>::Maximum();
+		default:
+			return false;
+		}
+	}
+};
+
 struct SljitExecutableAggregateUpdate {
 	SljitNativeAggregateUpdatePlan plan;
 	vector<SljitExecutableRegionExpression> payloads;
 	vector<SljitAggregatePayloadDescriptor> payload_descriptors;
 	vector<bool> group_source_not_null;
+	vector<SljitExecutableIntegralGroupKeyRange> integral_group_key_ranges;
 	SljitExecutableFilteredAggregateUpdate filtered_update;
 	ExecutionDenseGroupDomain dense_group_domain;
 	SljitGroupedAggregateDirectUpdatePlan grouped_direct_update;
@@ -332,6 +362,9 @@ struct SljitExecutableRegionOp {
 	SljitNativeRegionOpKind kind;
 	idx_t operator_index = DConstants::INVALID_INDEX;
 	vector<LogicalType> input_types;
+	vector<bool> input_not_null;
+	vector<Value> input_min_values;
+	vector<Value> input_max_values;
 	vector<LogicalType> output_types;
 	vector<bool> output_not_null;
 	unique_ptr<SljitExecutableFilter> filter;

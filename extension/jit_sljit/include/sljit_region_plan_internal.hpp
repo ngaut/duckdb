@@ -8,6 +8,7 @@
 
 #pragma once
 
+#include "sljit_expression_plan_tree.hpp"
 #include "sljit_projection_composition.hpp"
 #include "sljit_region_plan.hpp"
 
@@ -83,7 +84,6 @@ bool TryBuildSljitNativeTypedExpressionTreePlan(const ExecutionExpressionIR &roo
                                                 SljitNativeRegionExpressionPlan &expr);
 bool TryBuildSljitNativeAnyExpressionTreePlan(const ExecutionExpressionIR &root, SljitNativeRegionExpressionPlan &expr);
 void AttachSljitNativeExpressionTree(const ExecutionExpressionIR &root, SljitNativeRegionExpressionPlan &expr);
-unique_ptr<ExecutionExpressionIR> CopySljitExpressionPlanAsInputTree(const SljitNativeRegionExpressionPlan &expr);
 bool TryMapNativeProjectionExpressionSources(const vector<SljitNativeRegionExpressionPlan> &input_projection,
                                              SljitNativeRegionExpressionPlan &expr);
 void FuseAdjacentNativeProjections(SljitNativeRegionPlan &region, bool render_diagnostics);

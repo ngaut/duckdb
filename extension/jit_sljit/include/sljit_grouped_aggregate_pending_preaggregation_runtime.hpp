@@ -819,10 +819,11 @@ SljitTryPreparePendingPrimitiveRunInput(ExecutionRegionRuntime &runtime, SljitEx
 		blocker = "buffered_strategy";
 		return false;
 	}
+	const auto &equivalence_type = SljitGroupKeyEquivalenceType(group_sources[0]);
 	if (!pending.groups.Initialized()) {
-		pending.groups.Ensure(runtime.GetAllocator(), vector<LogicalType> {sink_info.groups[0].type});
+		pending.groups.Ensure(runtime.GetAllocator(), vector<LogicalType> {equivalence_type});
 	}
-	if (pending.groups.chunk.ColumnCount() != 1 || pending.groups.chunk.data[0].GetType() != sink_info.groups[0].type) {
+	if (pending.groups.chunk.ColumnCount() != 1 || pending.groups.chunk.data[0].GetType() != equivalence_type) {
 		blocker = "group_output";
 		return false;
 	}
@@ -1005,7 +1006,8 @@ static bool TryPreaggregateInputVectorFusedAffinePrimitiveGroupsIntoPending(
 	                                                              pending,
 	                                                              finish,
 	                                                              deferred_grouped_finish};
-	return SljitDispatchPreaggregatedInputVectorGroupTargetType(group_sources[0].target_physical_type, dispatch);
+	return SljitDispatchPreaggregatedInputVectorGroupTargetType(SljitGroupKeyEquivalencePhysicalType(group_sources[0]),
+	                                                            dispatch);
 }
 
 // A false result is an admission miss: no row from this input batch has been
@@ -1032,7 +1034,8 @@ static bool TryPreaggregateInputVectorPrimitiveGroupsIntoPending(
 	                                                   pending,
 	                                                   finish,
 	                                                   deferred_grouped_finish};
-	return SljitDispatchPreaggregatedInputVectorGroupTargetType(group_sources[0].target_physical_type, dispatch);
+	return SljitDispatchPreaggregatedInputVectorGroupTargetType(SljitGroupKeyEquivalencePhysicalType(group_sources[0]),
+	                                                            dispatch);
 }
 
 } // namespace duckdb

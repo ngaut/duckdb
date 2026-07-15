@@ -12,6 +12,7 @@
 #include "sljit_grouped_aggregate_group_key_source.hpp"
 #include "sljit_region_adapter_scratch.hpp"
 
+#include "duckdb/common/operator/add.hpp"
 #include "duckdb/common/operator/cast_operators.hpp"
 #include "duckdb/common/types/row/tuple_data_layout.hpp"
 #include "duckdb/common/vector/flat_vector.hpp"
@@ -57,6 +58,16 @@ static bool SljitInputVectorGroupBatchFitsCast(DataChunk &payload_input,
 	UnifiedVectorFormat source_format;
 	payload_input.data[source.input_vector_index].ToUnifiedFormat(source_format);
 	auto source_data = UnifiedVectorFormat::GetData<SRC>(source_format);
+	if (!source_format.sel->IsSet() &&
+	    (!source_format.validity.CanHaveNull() || source_format.validity.CheckAllValid(count))) {
+		uint8_t fits = 1;
+		for (idx_t row_idx = 0; row_idx < count; row_idx++) {
+			const auto value = source_data[row_idx];
+			fits &=
+			    static_cast<uint8_t>(value >= NumericLimits<DST>::Minimum() && value <= NumericLimits<DST>::Maximum());
+		}
+		return fits != 0;
+	}
 	for (idx_t row_idx = 0; row_idx < count; row_idx++) {
 		const auto source_idx = source_format.sel->get_index(row_idx);
 		if (source_format.validity.RowIsValid(source_idx) &&
@@ -93,6 +104,18 @@ static void SljitApplyInputVectorGroupBatchCastProofs(DataChunk &payload_input,
 			continue;
 		}
 		source.unchecked_integral_cast = SljitInputVectorGroupBatchCastFits(payload_input, source, count);
+	}
+}
+
+static void SljitApplyExecutableIntegralGroupKeyRangeProofs(const vector<SljitExecutableIntegralGroupKeyRange> &ranges,
+                                                            vector<ExecutionRowPointerGroupKeySource> &group_sources) {
+	if (ranges.size() != group_sources.size()) {
+		return;
+	}
+	for (idx_t group_idx = 0; group_idx < group_sources.size(); group_idx++) {
+		if (ranges[group_idx].ProvesNarrowingCast(group_sources[group_idx])) {
+			group_sources[group_idx].unchecked_integral_cast = true;
+		}
 	}
 }
 
@@ -332,6 +355,109 @@ static bool SljitTryMaterializeStringCompressedInputVectorGroup(Vector &input, V
 	}
 }
 
+template <class SOURCE_TYPE, class TARGET_TYPE>
+static bool SljitTryMaterializeAffineInputVectorGroupSource(DataChunk &payload_input,
+                                                            const ExecutionRowPointerGroupKeySource &source,
+                                                            Vector &target, idx_t count) {
+	SOURCE_TYPE constant;
+	if (!TryCast::Operation<int64_t, SOURCE_TYPE>(source.output_transform_constant, constant, false)) {
+		return false;
+	}
+	auto &input = payload_input.data[source.input_vector_index];
+	UnifiedVectorFormat input_format;
+	input.ToUnifiedFormat(input_format);
+	UnifiedVectorFormat guard_format;
+	const bool has_guard = source.output_transform_validity_guard_index != DConstants::INVALID_INDEX;
+	if (has_guard) {
+		if (source.output_transform_validity_guard_index >= payload_input.ColumnCount()) {
+			return false;
+		}
+		payload_input.data[source.output_transform_validity_guard_index].ToUnifiedFormat(guard_format);
+	}
+
+	target.SetVectorType(VectorType::FLAT_VECTOR);
+	auto &target_validity = FlatVector::ValidityMutable(target);
+	target_validity.Reset(count);
+	target_validity.EnsureWritable();
+	target_validity.SetAllValid(count);
+	auto input_data = UnifiedVectorFormat::GetData<SOURCE_TYPE>(input_format);
+	auto target_data = FlatVector::GetDataMutable<TARGET_TYPE>(target);
+	for (idx_t row_idx = 0; row_idx < count; row_idx++) {
+		const auto input_idx = input_format.sel->get_index(row_idx);
+		const auto guard_idx = has_guard ? guard_format.sel->get_index(row_idx) : 0;
+		if (!input_format.validity.RowIsValid(input_idx) ||
+		    (has_guard && !guard_format.validity.RowIsValid(guard_idx))) {
+			target_validity.SetInvalid(row_idx);
+			continue;
+		}
+		SOURCE_TYPE transformed;
+		if (!TryAddOperator::Operation(input_data[input_idx], constant, transformed)) {
+			throw OutOfRangeException("Overflow in SLJIT affine group-key publication");
+		}
+		if (!TryCast::Operation<SOURCE_TYPE, TARGET_TYPE>(transformed, target_data[row_idx], false)) {
+			throw OutOfRangeException("Cast overflow in SLJIT affine group-key publication");
+		}
+	}
+	FlatVector::SetSize(target, count);
+	return true;
+}
+
+template <class SOURCE_TYPE>
+struct SljitAffineInputVectorGroupTargetDispatch {
+	DataChunk &payload_input;
+	const ExecutionRowPointerGroupKeySource &source;
+	Vector &target;
+	idx_t count;
+
+	template <class TARGET_TYPE>
+	bool Execute() {
+		return SljitTryMaterializeAffineInputVectorGroupSource<SOURCE_TYPE, TARGET_TYPE>(payload_input, source, target,
+		                                                                                 count);
+	}
+};
+
+template <class DISPATCH>
+static bool SljitDispatchSignedAffineGroupPhysicalType(PhysicalType type, DISPATCH &dispatch) {
+	switch (type) {
+	case PhysicalType::INT8:
+		return dispatch.template Execute<int8_t>();
+	case PhysicalType::INT16:
+		return dispatch.template Execute<int16_t>();
+	case PhysicalType::INT32:
+		return dispatch.template Execute<int32_t>();
+	case PhysicalType::INT64:
+		return dispatch.template Execute<int64_t>();
+	default:
+		return false;
+	}
+}
+
+struct SljitAffineInputVectorGroupSourceDispatch {
+	DataChunk &payload_input;
+	const ExecutionRowPointerGroupKeySource &source;
+	Vector &target;
+	idx_t count;
+
+	template <class SOURCE_TYPE>
+	bool Execute() {
+		SljitAffineInputVectorGroupTargetDispatch<SOURCE_TYPE> dispatch {payload_input, source, target, count};
+		return SljitDispatchSignedAffineGroupPhysicalType(source.target_physical_type, dispatch);
+	}
+};
+
+static bool SljitTryMaterializeAffineInputVectorGroupSource(DataChunk &payload_input,
+                                                            const ExecutionRowPointerGroupKeySource &source,
+                                                            Vector &target, idx_t count) {
+	if (source.output_transform_kind != ExecutionGroupKeyOutputTransformKind::ADD_CONSTANT ||
+	    source.cast_kind != ExecutionRowPointerGroupKeyCastKind::NONE ||
+	    !SljitSignedAffineGroupPhysicalType(source.source_physical_type) ||
+	    !SljitSignedAffineGroupPhysicalType(source.target_physical_type)) {
+		return false;
+	}
+	SljitAffineInputVectorGroupSourceDispatch dispatch {payload_input, source, target, count};
+	return SljitDispatchSignedAffineGroupPhysicalType(source.source_physical_type, dispatch);
+}
+
 static bool SljitTryMaterializeInputVectorGroupSource(DataChunk &payload_input,
                                                       const ExecutionRowPointerGroupKeySource &source, Vector &target,
                                                       idx_t count, bool source_key0_int64_to_int32_unchecked) {
@@ -343,6 +469,9 @@ static bool SljitTryMaterializeInputVectorGroupSource(DataChunk &payload_input,
 	}
 	if (!SljitGroupSourceCanMaterializeFromInputVector(payload_input, source)) {
 		return false;
+	}
+	if (source.HasOutputTransform()) {
+		return SljitTryMaterializeAffineInputVectorGroupSource(payload_input, source, target, count);
 	}
 	auto &input = payload_input.data[source.input_vector_index];
 	if (ExecutionGroupKeyCastIsNarrowingIntegral(source.cast_kind)) {

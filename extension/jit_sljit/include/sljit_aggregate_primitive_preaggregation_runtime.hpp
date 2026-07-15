@@ -8,6 +8,7 @@
 
 #pragma once
 
+#include "sljit_native_types.hpp"
 #include "sljit_region_runtime_state.hpp"
 
 #include "duckdb/common/operator/cast_operators.hpp"
@@ -112,6 +113,13 @@ static bool SljitPreaggregationIntegralCompressionSourceType(PhysicalType type) 
 }
 
 static bool SljitPreaggregationInputVectorGroupCastSupported(const ExecutionRowPointerGroupKeySource &source) {
+	if (source.HasOutputTransform()) {
+		return source.output_transform_kind == ExecutionGroupKeyOutputTransformKind::ADD_CONSTANT &&
+		       source.cast_kind == ExecutionRowPointerGroupKeyCastKind::NONE &&
+		       SljitPreaggregationComparableInputVectorType(source.source_physical_type) &&
+		       SljitSignedAffineGroupPhysicalType(source.source_physical_type) &&
+		       SljitSignedAffineGroupPhysicalType(source.target_physical_type);
+	}
 	switch (source.cast_kind) {
 	case ExecutionRowPointerGroupKeyCastKind::NONE:
 		return source.source_physical_type == source.target_physical_type &&

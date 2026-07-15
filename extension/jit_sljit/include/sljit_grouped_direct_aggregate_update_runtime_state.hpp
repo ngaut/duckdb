@@ -35,10 +35,20 @@ public:
 		}
 		if (primitive.input_kind == SljitGroupedAggregateUpdateInputKind::PROJECTED_INPUT) {
 			projected_direct_update = primitive.projected_direct_update;
-			return projected_direct_update &&
-			       SljitProjectedInputGroupedAggregateCanUseSourceInput(*projected_direct_update);
+			if (!projected_direct_update ||
+			    !SljitProjectedInputGroupedAggregateCanUseSourceInput(*projected_direct_update)) {
+				return false;
+			}
+			if (projected_direct_update->group_sources.size() == 1) {
+				return direct_preaggregated_batch.ConfigureGroupOutputTransform(
+				    projected_direct_update->group_sources[0]);
+			}
+			return direct_preaggregated_batch.ClearGroupOutputTransform();
 		}
 		if (primitive.aggregate_idx >= ops.size()) {
+			return false;
+		}
+		if (!direct_preaggregated_batch.ClearGroupOutputTransform()) {
 			return false;
 		}
 		materialized_direct_descriptor_ready = PrepareMaterializedDirectDescriptor(ops[primitive.aggregate_idx]);
@@ -326,22 +336,11 @@ private:
 		return true;
 	}
 
-	bool ProjectedDenseDomainProvesGroupCast(SljitExecutableRegionOp &aggregate_op,
-	                                         const ExecutionRowPointerGroupKeySource &group_source) {
-		auto &domain = aggregate_op.aggregate_update.dense_group_domain;
-		if (!domain.ready || domain.physical_type != group_source.target_physical_type) {
-			return false;
-		}
-		return ExecutionGroupKeyCastIsNarrowingIntegral(group_source.cast_kind);
-	}
-
 	vector<ExecutionRowPointerGroupKeySource> &PrepareProjectedDirectGroupSources(SljitExecutableRegionOp &aggregate_op,
 	                                                                              DataChunk &source_input) {
 		projected_direct_group_sources = projected_direct_update->group_sources;
-		if (projected_direct_group_sources.size() == 1 &&
-		    ProjectedDenseDomainProvesGroupCast(aggregate_op, projected_direct_group_sources[0])) {
-			projected_direct_group_sources[0].unchecked_integral_cast = true;
-		}
+		SljitApplyExecutableIntegralGroupKeyRangeProofs(aggregate_op.aggregate_update.integral_group_key_ranges,
+		                                                projected_direct_group_sources);
 		SljitApplyInputVectorGroupBatchCastProofs(source_input, projected_direct_group_sources, source_input.size());
 		return projected_direct_group_sources;
 	}

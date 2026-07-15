@@ -2,6 +2,7 @@
 
 #include "sljit_aggregate_preaggregated_update_runtime.hpp"
 #include "sljit_codegen_capabilities.hpp"
+#include "sljit_grouped_aggregate_input_vector_groups.hpp"
 
 #include "duckdb/execution/aggregate_hashtable.hpp"
 
@@ -45,6 +46,100 @@ TEST_CASE("Primitive aggregate fresh-state initialization has an endian-independ
 	for (idx_t tail_idx = 1; tail_idx < sizeof(uint64_t); tail_idx++) {
 		REQUIRE(state[lane.state_is_set_offset + tail_idx] == 0);
 	}
+}
+
+TEST_CASE("JIT executable group ranges prove signed narrowing casts once", "[api][jit]") {
+	SljitExecutableIntegralGroupKeyRange range;
+	range.ready = true;
+	range.source_physical_type = PhysicalType::INT64;
+	range.min_value = -500000;
+	range.max_value = 4500000;
+
+	ExecutionRowPointerGroupKeySource source;
+	source.source_physical_type = PhysicalType::INT64;
+	source.target_physical_type = PhysicalType::INT32;
+	source.cast_kind = ExecutionRowPointerGroupKeyCastKind::INT64_TO_INT32;
+	vector<SljitExecutableIntegralGroupKeyRange> ranges {range};
+	vector<ExecutionRowPointerGroupKeySource> sources {source};
+	SljitApplyExecutableIntegralGroupKeyRangeProofs(ranges, sources);
+	REQUIRE(sources[0].unchecked_integral_cast);
+
+	ranges[0].min_value = int64_t(NumericLimits<int32_t>::Minimum()) - 1;
+	sources[0].unchecked_integral_cast = false;
+	SljitApplyExecutableIntegralGroupKeyRangeProofs(ranges, sources);
+	REQUIRE_FALSE(sources[0].unchecked_integral_cast);
+}
+
+TEST_CASE("JIT canonical single-lane sums initialize fresh states directly", "[api][jit]") {
+	ExecutionPrimitiveAggregateUpdateLane lane;
+	lane.ready = true;
+	lane.kind = AggregatePrimitiveUpdateKind::SUM_INT64;
+	lane.state_size = sizeof(int64_t) + sizeof(uint64_t);
+	lane.state_value_offset = 0;
+	lane.state_is_set_offset = sizeof(int64_t);
+	vector<const ExecutionPrimitiveAggregateUpdateLane *> lanes {&lane};
+	vector<SljitPreaggregatedPrimitivePayloadDeltas> payloads(1);
+	payloads[0].kind = AggregatePrimitiveUpdateKind::SUM_INT64;
+	payloads[0].int64_values = {11, 22};
+	payloads[0].value_is_set = {1, 0};
+	auto update_state = SljitMakePreaggregatedPrimitiveUpdateState(lanes, payloads, 1);
+
+	std::array<uint8_t, sizeof(int64_t) + sizeof(uint64_t)> first_state;
+	std::array<uint8_t, sizeof(int64_t) + sizeof(uint64_t)> second_state;
+	first_state.fill(0xa5);
+	second_state.fill(0xa5);
+	const uintptr_t addresses[] = {reinterpret_cast<uintptr_t>(first_state.data()),
+	                               reinterpret_cast<uintptr_t>(second_state.data())};
+	ExecuteSljitPreaggregatedPrimitiveAddressUpdate(
+	    addresses, nullptr, 2, ExecutionGroupedAggregateStateAddressUpdateMode::INITIALIZE_AND_UPDATE, &update_state);
+	REQUIRE(Load<int64_t>(first_state.data()) == 11);
+	REQUIRE(Load<bool>(first_state.data() + lane.state_is_set_offset));
+	REQUIRE(Load<int64_t>(second_state.data()) == 0);
+	REQUIRE_FALSE(Load<bool>(second_state.data() + lane.state_is_set_offset));
+	REQUIRE(update_state.captured_address == addresses[1]);
+}
+
+TEST_CASE("Grouped aggregate append callbacks expose identity address order directly", "[api][jit]") {
+	DuckDB db;
+	Connection con(db);
+	auto &allocator = Allocator::Get(*con.context);
+	GroupedAggregateHashTable ht(*con.context, allocator, {LogicalType::INTEGER},
+	                             TupleDataValidityType::CANNOT_HAVE_NULL_VALUES);
+
+	DataChunk groups;
+	groups.Initialize(allocator, {LogicalType::INTEGER});
+	const idx_t group_count = 64;
+	auto group_data = FlatVector::GetDataMutable<int32_t>(groups.data[0]);
+	for (idx_t row_idx = 0; row_idx < group_count; row_idx++) {
+		group_data[row_idx] = UnsafeNumericCast<int32_t>(row_idx);
+	}
+	FlatVector::SetSize(groups.data[0], group_count);
+	groups.SetChildCardinality(group_count);
+
+	struct AppendUpdateState {
+		bool called = false;
+		bool identity_order = false;
+		idx_t count = 0;
+	};
+	AppendUpdateState update_state;
+	auto update = [](const uintptr_t *addresses, const sel_t *address_sel, idx_t count,
+	                 ExecutionGroupedAggregateStateAddressUpdateMode mode, void *state_p) {
+		auto &state = *reinterpret_cast<AppendUpdateState *>(state_p);
+		state.called = true;
+		state.identity_order = address_sel == nullptr;
+		state.count = count;
+		REQUIRE(addresses);
+		REQUIRE(mode == ExecutionGroupedAggregateStateAddressUpdateMode::INITIALIZE_AND_UPDATE);
+		for (idx_t row_idx = 0; row_idx < count; row_idx++) {
+			REQUIRE(addresses[row_idx] != 0);
+		}
+	};
+
+	REQUIRE(ht.TryAppendNewGroupsWithStateAddressesFast(groups, update, &update_state));
+	REQUIRE(update_state.called);
+	REQUIRE(update_state.identity_order);
+	REQUIRE(update_state.count == group_count);
+	REQUIRE(ht.Count() == group_count);
 }
 
 TEST_CASE("JIT shared affine grouped deltas do not overflow before cancellation", "[api][jit]") {
@@ -1867,7 +1962,7 @@ TEST_CASE("JIT generated sparse grouped runs preserve local uniqueness across th
 	require_generated_runs("jit_signed_grouped_hugeint_multi", "sum(big_value), count(big_value), sum(value)");
 }
 
-TEST_CASE("JIT generated grouped runs consume materialized arithmetic projections", "[api][jit]") {
+TEST_CASE("JIT generated grouped runs elide invariant affine group projections", "[api][jit]") {
 	DuckDB db;
 	Connection con(db);
 	auto &manager = ExecutionRegionManager::Get(*con.context);
@@ -1875,26 +1970,26 @@ TEST_CASE("JIT generated grouped runs consume materialized arithmetic projection
 	ConfigureSljitForCoverage(con, false, true, true, 10000);
 	REQUIRE_NO_FAIL(con.Query("PRAGMA threads=1"));
 	REQUIRE_NO_FAIL(con.Query("SET perfect_ht_threshold=0"));
-	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_materialized_grouped_runs AS "
+	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_affine_grouped_runs AS "
 	                          "SELECT ((i // 4) * 3)::INTEGER AS group_id, "
 	                          "       0::INTEGER AS group_offset, "
 	                          "       ((i % 17)::INTEGER - 8) AS value "
 	                          "FROM range(32768) tbl(i)"));
 
 	const string query = "SELECT group_id + group_offset AS grouped_value, sum(value) AS value_sum "
-	                     "FROM jit_materialized_grouped_runs GROUP BY group_id + group_offset";
+	                     "FROM jit_affine_grouped_runs GROUP BY group_id + group_offset";
 	REQUIRE_NO_FAIL(con.Query("SET jit_policy='off'"));
-	REQUIRE_NO_FAIL(con.Query("CREATE TEMP TABLE jit_materialized_grouped_runs_reference AS " + query));
+	REQUIRE_NO_FAIL(con.Query("CREATE TEMP TABLE jit_affine_grouped_runs_reference AS " + query));
 
 	ConfigureSljitForCoverageSettings(con, false, true, true, 10000);
 	REQUIRE_NO_FAIL(con.Query("SET jit_cbo_generated_stage_benefit=1"));
 	ClearJitTrace(manager, true);
-	REQUIRE_NO_FAIL(con.Query("CREATE TEMP TABLE jit_materialized_grouped_runs_output AS " + query));
+	REQUIRE_NO_FAIL(con.Query("CREATE TEMP TABLE jit_affine_grouped_runs_output AS " + query));
 	auto difference = con.Query("SELECT count(*) FROM ("
-	                            "  (SELECT * FROM jit_materialized_grouped_runs_output EXCEPT ALL "
-	                            "   SELECT * FROM jit_materialized_grouped_runs_reference) UNION ALL "
-	                            "  (SELECT * FROM jit_materialized_grouped_runs_reference EXCEPT ALL "
-	                            "   SELECT * FROM jit_materialized_grouped_runs_output)"
+	                            "  (SELECT * FROM jit_affine_grouped_runs_output EXCEPT ALL "
+	                            "   SELECT * FROM jit_affine_grouped_runs_reference) UNION ALL "
+	                            "  (SELECT * FROM jit_affine_grouped_runs_reference EXCEPT ALL "
+	                            "   SELECT * FROM jit_affine_grouped_runs_output)"
 	                            ") differences");
 	REQUIRE_NO_FAIL(*difference);
 	REQUIRE(difference->GetValue(0, 0).ToString() == "0");
@@ -1902,6 +1997,13 @@ TEST_CASE("JIT generated grouped runs consume materialized arithmetic projection
 		RequirePrimitiveRunGenericFallback(manager);
 		return;
 	}
+	string observed_runtime_paths;
+	for (auto &event : manager.GetEvents()) {
+		if (EventPhase(event) == "runtime") {
+			observed_runtime_paths += EventJitRuntimePathCounts(event) + "\n";
+		}
+	}
+	INFO("affine projected group runtime paths:\n" + observed_runtime_paths);
 
 	RequireJitEvent(
 	    manager,
@@ -1910,10 +2012,67 @@ TEST_CASE("JIT generated grouped runs consume materialized arithmetic projection
 			    return false;
 		    }
 		    const auto runtime_paths = EventJitRuntimePathCounts(event);
-		    return StringUtil::Contains(runtime_paths, "aggregate_update.grouped_direct_materialized_input=32768") &&
-		           StringUtil::Contains(runtime_paths, "aggregate_update.generated_pending_primitive_group_runs=32768");
+		    return StringUtil::Contains(runtime_paths, "aggregate_update.grouped_direct_projected_input=32768") &&
+		           StringUtil::Contains(runtime_paths,
+		                                "aggregate_update.generated_pending_primitive_group_runs=32768") &&
+		           StringUtil::Contains(runtime_paths,
+		                                "aggregate_update.pending_group_output_transform.add_constant=8192") &&
+		           !StringUtil::Contains(runtime_paths, "aggregate_update.grouped_direct_materialized_input") &&
+		           !StringUtil::Contains(runtime_paths, "generated_pending_primitive_group_runs_miss");
 	    },
 	    [](const ExecutionRegionEvent &event) { RequireGeneratedAggregateUpdateRuntimeOwnership(event); });
+}
+
+TEST_CASE("JIT affine grouped projections preserve nullable invariant semantics", "[api][jit]") {
+	DuckDB db;
+	Connection con(db);
+	auto &manager = ExecutionRegionManager::Get(*con.context);
+
+	ConfigureSljitForCoverage(con, false, true, true, 10000);
+	REQUIRE_NO_FAIL(con.Query("PRAGMA threads=1"));
+	REQUIRE_NO_FAIL(con.Query("SET perfect_ht_threshold=0"));
+	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_nullable_affine_groups AS "
+	                          "SELECT ((i // 4) * 3)::INTEGER AS group_id, "
+	                          "       CASE WHEN i % 97 = 0 THEN NULL ELSE 7::INTEGER END AS group_offset, "
+	                          "       ((i % 17)::INTEGER - 8) AS value "
+	                          "FROM range(32768) tbl(i)"));
+
+	const string query = "SELECT group_id + group_offset AS grouped_value, sum(value) AS value_sum "
+	                     "FROM jit_nullable_affine_groups GROUP BY group_id + group_offset";
+	REQUIRE_NO_FAIL(con.Query("SET jit_policy='off'"));
+	REQUIRE_NO_FAIL(con.Query("CREATE TEMP TABLE jit_nullable_affine_groups_reference AS " + query));
+
+	ConfigureSljitForCoverageSettings(con, false, true, true, 10000);
+	REQUIRE_NO_FAIL(con.Query("SET jit_cbo_generated_stage_benefit=1"));
+	ClearJitTrace(manager, true);
+	REQUIRE_NO_FAIL(con.Query("CREATE TEMP TABLE jit_nullable_affine_groups_output AS " + query));
+	auto difference = con.Query("SELECT count(*) FROM ("
+	                            "  (SELECT * FROM jit_nullable_affine_groups_output EXCEPT ALL "
+	                            "   SELECT * FROM jit_nullable_affine_groups_reference) UNION ALL "
+	                            "  (SELECT * FROM jit_nullable_affine_groups_reference EXCEPT ALL "
+	                            "   SELECT * FROM jit_nullable_affine_groups_output)"
+	                            ") differences");
+	REQUIRE_NO_FAIL(*difference);
+	REQUIRE(difference->GetValue(0, 0).ToString() == "0");
+	string observed_runtime_paths;
+	for (auto &event : manager.GetEvents()) {
+		if (EventPhase(event) == "runtime") {
+			observed_runtime_paths += EventJitRuntimePathCounts(event) + "\n";
+		}
+	}
+	INFO("nullable affine group runtime paths:\n" + observed_runtime_paths);
+
+	RequireJitEvent(manager, [](const ExecutionRegionEvent &event) {
+		if (EventPhase(event) != "runtime" || event.backend_name != "sljit") {
+			return false;
+		}
+		const auto runtime_paths = EventJitRuntimePathCounts(event);
+		return StringUtil::Contains(runtime_paths, "aggregate_update.grouped_direct_projected_input=32768") &&
+		       StringUtil::Contains(runtime_paths,
+		                            "aggregate_update.pending_primitive_group_runs_miss.group_prepare=32768") &&
+		       !StringUtil::Contains(runtime_paths, "pending_group_output_transform.add_constant") &&
+		       !StringUtil::Contains(runtime_paths, "aggregate_update.grouped_direct_materialized_input");
+	});
 }
 
 TEST_CASE("JIT large projected grouped sums admit cross-batch run preaggregation", "[api][jit]") {

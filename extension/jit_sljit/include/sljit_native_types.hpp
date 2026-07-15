@@ -51,6 +51,18 @@ enum class SljitNativeHashJoinKeyKind : uint8_t {
 	UINT128
 };
 
+static inline bool SljitSignedAffineGroupPhysicalType(PhysicalType type) {
+	switch (type) {
+	case PhysicalType::INT8:
+	case PhysicalType::INT16:
+	case PhysicalType::INT32:
+	case PhysicalType::INT64:
+		return true;
+	default:
+		return false;
+	}
+}
+
 static inline bool SljitTryGetHashJoinKeyKind(PhysicalType physical_type, SljitNativeHashJoinKeyKind &kind) {
 	switch (physical_type) {
 	case PhysicalType::BOOL:

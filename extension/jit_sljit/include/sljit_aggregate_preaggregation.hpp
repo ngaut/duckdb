@@ -285,6 +285,22 @@ static bool SljitPreparePreaggregatedInputVectorGroupKeySource(DataChunk &input,
 	prepared.source = &source;
 	input.data[source.input_vector_index].ToUnifiedFormat(prepared.format);
 	prepared.rows_all_valid = source.all_valid || SljitPreaggregatedFormatRowsAllValid(prepared.format, input.size());
+	if (source.HasOutputTransform()) {
+		if (source.output_transform_kind != ExecutionGroupKeyOutputTransformKind::ADD_CONSTANT) {
+			return false;
+		}
+		const auto guard_idx = source.output_transform_validity_guard_index;
+		if (guard_idx != DConstants::INVALID_INDEX) {
+			if (guard_idx >= input.ColumnCount()) {
+				return false;
+			}
+			UnifiedVectorFormat guard_format;
+			input.data[guard_idx].ToUnifiedFormat(guard_format);
+			if (!SljitPreaggregatedFormatRowsAllValid(guard_format, input.size())) {
+				return false;
+			}
+		}
+	}
 	return true;
 }
 
@@ -298,7 +314,7 @@ static bool SljitLoadPreaggregatedInputVectorGroupKey(SljitPreaggregatedInputVec
 	}
 	switch (source.cast_kind) {
 	case ExecutionRowPointerGroupKeyCastKind::NONE:
-		if (source.source_physical_type != source.target_physical_type) {
+		if (!source.HasOutputTransform() && source.source_physical_type != source.target_physical_type) {
 			return false;
 		}
 		key = UnifiedVectorFormat::GetData<TARGET_TYPE>(prepared.format)[source_idx];
@@ -364,7 +380,7 @@ static bool SljitDispatchPreaggregatedInputVectorGroupKeyCast(SljitPreaggregated
 	auto &source = *group_source.source;
 	switch (source.cast_kind) {
 	case ExecutionRowPointerGroupKeyCastKind::NONE:
-		if (source.source_physical_type != source.target_physical_type) {
+		if (!source.HasOutputTransform() && source.source_physical_type != source.target_physical_type) {
 			return false;
 		}
 		return dispatch.template Execute<TARGET_TYPE, TARGET_TYPE, false>(group_source.format);

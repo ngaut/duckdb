@@ -113,6 +113,71 @@ static unique_ptr<ExecutionExpressionIR> MakeSljitTreeConstant(const Value &cons
 	return result;
 }
 
+static bool SljitNativeIntegerBinaryTreeOp(SljitNativeIntegerBinaryOp op, ExecutionExpressionBinaryOp &result) {
+	switch (op) {
+	case SljitNativeIntegerBinaryOp::ADD:
+		result = ExecutionExpressionBinaryOp::ADD;
+		return true;
+	case SljitNativeIntegerBinaryOp::SUBTRACT:
+		result = ExecutionExpressionBinaryOp::SUBTRACT;
+		return true;
+	case SljitNativeIntegerBinaryOp::MULTIPLY:
+		result = ExecutionExpressionBinaryOp::MULTIPLY;
+		return true;
+	}
+	return false;
+}
+
+static bool SljitNativeIntegerBinaryTreeConstant(const SljitNativeRegionExpressionPlan &expr, Value &result) {
+	switch (expr.integer_kind) {
+	case SljitNativeIntegerKind::INT8:
+		if (expr.return_type != LogicalType::TINYINT || expr.constant < NumericLimits<int8_t>::Minimum() ||
+		    expr.constant > NumericLimits<int8_t>::Maximum()) {
+			return false;
+		}
+		result = Value::TINYINT(static_cast<int8_t>(expr.constant));
+		return true;
+	case SljitNativeIntegerKind::INT32:
+		if (expr.return_type != LogicalType::INTEGER || expr.constant < NumericLimits<int32_t>::Minimum() ||
+		    expr.constant > NumericLimits<int32_t>::Maximum()) {
+			return false;
+		}
+		result = Value::INTEGER(static_cast<int32_t>(expr.constant));
+		return true;
+	case SljitNativeIntegerKind::INT64:
+		if (expr.return_type != LogicalType::BIGINT) {
+			return false;
+		}
+		result = Value::BIGINT(expr.constant);
+		return true;
+	default:
+		return false;
+	}
+}
+
+static unique_ptr<ExecutionExpressionIR> MakeSljitTreeIntegerBinary(const SljitNativeRegionExpressionPlan &expr,
+                                                                    unique_ptr<ExecutionExpressionIR> left,
+                                                                    unique_ptr<ExecutionExpressionIR> right) {
+	ExecutionExpressionBinaryOp binary_op;
+	if (!left || !right || !SljitNativeIntegerBinaryTreeOp(expr.binary_op, binary_op)) {
+		return nullptr;
+	}
+	auto result = make_uniq<ExecutionExpressionIR>();
+	result->kind = ExecutionExpressionIRKind::BINARY;
+	result->return_type = expr.return_type;
+	result->physical_type = expr.return_type.InternalType();
+	result->validity = ExecutionExpressionValidityKind::CHILDREN_NULL_PROPAGATING;
+	result->source = ExecutionExpressionSourceKind::DERIVED;
+	result->exception_behavior = expr.check_arithmetic_overflow ? ExecutionExpressionExceptionKind::ARITHMETIC
+	                                                            : ExecutionExpressionExceptionKind::NONE;
+	result->query_location = expr.query_location;
+	result->binary_op = binary_op;
+	result->arithmetic_overflow_check = expr.check_arithmetic_overflow;
+	result->left = std::move(left);
+	result->right = std::move(right);
+	return result;
+}
+
 static Value SljitSignedIntegerValue(SljitNativeSignedIntegerWidth width, int64_t value) {
 	switch (width) {
 	case SljitNativeSignedIntegerWidth::INT8:
@@ -208,11 +273,33 @@ static void ExpandSljitExpressionTreeSources(ExecutionExpressionIR &node, const 
 }
 
 unique_ptr<ExecutionExpressionIR> CopySljitExpressionPlanAsInputTree(const SljitNativeRegionExpressionPlan &expr) {
+	if (expr.expression_tree) {
+		auto result = expr.expression_tree->Copy();
+		ExpandSljitExpressionTreeSources(*result, expr.expression_tree_source_indices);
+		return result;
+	}
 	switch (expr.kind) {
 	case SljitNativeRegionExpressionKind::REFERENCE:
 		return MakeSljitTreeReference(expr.source_index, expr.return_type);
 	case SljitNativeRegionExpressionKind::CONSTANT:
 		return MakeSljitTreeConstant(expr.constant_value, expr.return_type);
+	case SljitNativeRegionExpressionKind::INTEGER_BINARY_CONSTANT: {
+		Value constant;
+		if (!SljitNativeIntegerBinaryTreeConstant(expr, constant)) {
+			return nullptr;
+		}
+		auto source = MakeSljitTreeReference(expr.source_index, expr.return_type);
+		auto constant_node = MakeSljitTreeConstant(constant, expr.return_type);
+		return expr.constant_on_left ? MakeSljitTreeIntegerBinary(expr, std::move(constant_node), std::move(source))
+		                             : MakeSljitTreeIntegerBinary(expr, std::move(source), std::move(constant_node));
+	}
+	case SljitNativeRegionExpressionKind::INTEGER_BINARY_REFERENCES:
+		if (expr.integer_kind != SljitNativeIntegerKind::INT8 && expr.integer_kind != SljitNativeIntegerKind::INT32 &&
+		    expr.integer_kind != SljitNativeIntegerKind::INT64) {
+			return nullptr;
+		}
+		return MakeSljitTreeIntegerBinary(expr, MakeSljitTreeReference(expr.source_index, expr.return_type),
+		                                  MakeSljitTreeReference(expr.right_source_index, expr.return_type));
 	case SljitNativeRegionExpressionKind::INTEGER_CAST: {
 		auto source_type = SljitSignedIntegerWidthType(expr.cast_source_width);
 		auto target_type = SljitSignedIntegerWidthType(expr.cast_target_width);
@@ -269,11 +356,6 @@ unique_ptr<ExecutionExpressionIR> CopySljitExpressionPlanAsInputTree(const Sljit
 		return result;
 	}
 	default:
-		if (expr.expression_tree) {
-			auto result = expr.expression_tree->Copy();
-			ExpandSljitExpressionTreeSources(*result, expr.expression_tree_source_indices);
-			return result;
-		}
 		return nullptr;
 	}
 }

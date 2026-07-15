@@ -70,8 +70,9 @@ SljitTryBindGeneratedPrimitiveRunSource(ExecutionRegionRuntime &runtime, SljitEx
 		return false;
 	}
 	auto &source = *group_source.source;
+	const auto group_output_type = SljitGroupKeyEquivalencePhysicalType(source);
 	const bool exact_group_type = source.cast_kind == ExecutionRowPointerGroupKeyCastKind::NONE &&
-	                              source.source_physical_type == source.target_physical_type;
+	                              source.source_physical_type == group_output_type;
 	const bool proven_narrowing_group_cast =
 	    ExecutionGroupKeyCastIsNarrowingIntegral(source.cast_kind) && source.unchecked_integral_cast;
 	const bool integral_compression = source.cast_kind == ExecutionRowPointerGroupKeyCastKind::INTEGRAL_COMPRESS;
@@ -129,7 +130,7 @@ SljitTryBindGeneratedPrimitiveRunSource(ExecutionRegionRuntime &runtime, SljitEx
 	}
 	const bool single_lane_nullable = lane_inputs.size() == 1 && lane_inputs[0].payload_validity != nullptr;
 	function = SljitEnsureExecutablePrimitiveRunUpdate(runtime, run_update, source.source_physical_type,
-	                                                   source.cast_kind, single_lane_nullable);
+	                                                   group_output_type, source.cast_kind, single_lane_nullable);
 	if (!function) {
 		blocker = "specialization";
 		return false;
@@ -165,8 +166,9 @@ static bool SljitTryBindGeneratedFusedAffinePrimitiveRunSource(
 		return false;
 	}
 	auto &source = *group_source.source;
+	const auto group_output_type = SljitGroupKeyEquivalencePhysicalType(source);
 	const bool exact_group_type = source.cast_kind == ExecutionRowPointerGroupKeyCastKind::NONE &&
-	                              source.source_physical_type == source.target_physical_type;
+	                              source.source_physical_type == group_output_type;
 	const bool proven_narrowing_group_cast =
 	    ExecutionGroupKeyCastIsNarrowingIntegral(source.cast_kind) && source.unchecked_integral_cast;
 	const bool integral_compression = source.cast_kind == ExecutionRowPointerGroupKeyCastKind::INTEGRAL_COMPRESS;
@@ -201,8 +203,8 @@ static bool SljitTryBindGeneratedFusedAffinePrimitiveRunSource(
 		}
 	}
 	function = SljitEnsureExecutableFusedAffineRunUpdate(runtime, primitive_run_update, affine_run_update,
-	                                                     source.source_physical_type, source.cast_kind,
-	                                                     !payload_source.rows_all_valid);
+	                                                     source.source_physical_type, group_output_type,
+	                                                     source.cast_kind, !payload_source.rows_all_valid);
 	if (!function) {
 		blocker = "specialization";
 		return false;
@@ -329,7 +331,7 @@ SljitPreaggregatedInputVectorGroupKeyCastReplayable(SljitPreaggregatedInputVecto
 	auto &source = *group_source.source;
 	switch (source.cast_kind) {
 	case ExecutionRowPointerGroupKeyCastKind::NONE:
-		return source.source_physical_type == source.target_physical_type;
+		return source.HasOutputTransform() || source.source_physical_type == source.target_physical_type;
 	case ExecutionRowPointerGroupKeyCastKind::INT64_TO_INT32:
 	case ExecutionRowPointerGroupKeyCastKind::INT64_TO_INT16:
 	case ExecutionRowPointerGroupKeyCastKind::INT32_TO_INT8:

@@ -91,6 +91,19 @@ static bool SljitTryExecuteInputVectorGroupedAggregateUpdate(
 		record_unsupported("shape");
 		return false;
 	}
+	bool has_group_output_transform = false;
+	for (auto &source : group_sources) {
+		has_group_output_transform = has_group_output_transform || source.HasOutputTransform();
+	}
+	if (pending_preaggregated_groups && group_sources.size() == 1 &&
+	    !pending_preaggregated_groups->ConfigureGroupOutputTransform(group_sources[0])) {
+		record_unsupported("group_output_transform");
+		return false;
+	}
+	if (has_group_output_transform && !pending_preaggregated_groups) {
+		RecordSljitRegionRuntimePath(runtime, op.kind, "group_output_transform.materialized_fallback",
+		                             payload_input.size());
+	}
 
 	const bool direct_payload_sources = payload_source_layout == SljitAggregatePayloadSourceLayout::DIRECT_PER_LANE;
 	const bool count_one_payload =
@@ -100,7 +113,8 @@ static bool SljitTryExecuteInputVectorGroupedAggregateUpdate(
 	SljitPrimitiveCountOneUpdateState count_one_update;
 	const bool count_one_update_ready = SljitTryBindPrimitiveCountOneUpdateState(
 	    op.aggregate_update.payload_descriptors, payload_lanes, count_one_payload, count_one_update);
-	if (pending_preaggregated_groups && dense_domain && dense_domain->ready && count_one_update_ready) {
+	if (!has_group_output_transform && pending_preaggregated_groups && dense_domain && dense_domain->ready &&
+	    count_one_update_ready) {
 		auto dense_pending_start = SljitRegionStageStart(runtime);
 		if (SljitTryAccumulatePendingDenseSingleLaneGroups(op, payload_input, group_sources, payload_lanes,
 		                                                   *dense_domain, *pending_preaggregated_groups)) {
@@ -152,7 +166,7 @@ static bool SljitTryExecuteInputVectorGroupedAggregateUpdate(
 	auto &preaggregated_groups = scratch.AggregatePreaggregatedGroups(op_idx);
 	auto &preaggregate_scratch = scratch.AggregatePreaggregateScratch(op_idx);
 	auto preaggregate_stage_start = SljitRegionStageStart(runtime);
-	if (pending_preaggregated_groups) {
+	if (pending_preaggregated_groups && !has_group_output_transform) {
 		idx_t preaggregated_group_count = 0;
 		bool fused_run_payloads = false;
 		if (TryPreaggregateInputVectorPrimitiveGroupRunsBest(
@@ -175,7 +189,7 @@ static bool SljitTryExecuteInputVectorGroupedAggregateUpdate(
 		}
 	}
 
-	if (!descriptor_count_one_payload && dense_domain && dense_domain->ready &&
+	if (!has_group_output_transform && !descriptor_count_one_payload && dense_domain && dense_domain->ready &&
 	    op.aggregate_update.fused_payload_update.Function()) {
 		if (pending_preaggregated_groups && pending_preaggregated_groups->HasPending() &&
 		    !SljitFlushPendingPreaggregatedPrimitiveGroups(runtime, scratch, op_idx, op, *pending_preaggregated_groups,
@@ -207,7 +221,7 @@ static bool SljitTryExecuteInputVectorGroupedAggregateUpdate(
 	}
 	preaggregate_stage_start = SljitRegionStageStart(runtime);
 	idx_t preaggregated_group_count = 0;
-	if (direct_payload_sources &&
+	if (!has_group_output_transform && direct_payload_sources &&
 	    TryPreaggregateInputVectorPrimitiveGroupRuns(
 	        op, payload_input, group_sources, payload_source_indices, payload_lanes, preaggregate_scratch,
 	        optional_ptr<DataChunk>(&preaggregated_groups), preaggregated_group_count)) {
@@ -222,7 +236,8 @@ static bool SljitTryExecuteInputVectorGroupedAggregateUpdate(
 			    runtime, op.kind, "direct_input_vector_preaggregated_grouped_update", payload_input.size());
 			return true;
 		}
-		if (TryExecutePreaggregatedGroupedPrimitiveAggregateUpdateBatches(
+		if (!has_group_output_transform &&
+		    TryExecutePreaggregatedGroupedPrimitiveAggregateUpdateBatches(
 		        runtime, scratch, op_idx, op, preaggregated_groups, preaggregate_scratch, payload_lanes, grouped_state,
 		        payload_input.size(), !finish, deferred_grouped_finish)) {
 			RecordSljitRegionMaterializationElisionPath(
@@ -241,7 +256,7 @@ static bool SljitTryExecuteInputVectorGroupedAggregateUpdate(
 	}
 
 	bool updated = false;
-	if (count_one_update_ready) {
+	if (!has_group_output_transform && count_one_update_ready) {
 		if (dense_domain && dense_domain->ready) {
 			auto fused_start = SljitRegionStageStart(runtime);
 			updated = ExecuteSljitRegionRecordedOperation(
@@ -293,12 +308,12 @@ static bool SljitTryExecuteInputVectorGroupedAggregateUpdate(
 			}
 			return false;
 		}
-	} else if (descriptor_count_one_payload) {
+	} else if (!has_group_output_transform && descriptor_count_one_payload) {
 		record_unsupported("count_one_shape");
 		return false;
 	}
 
-	if (op.aggregate_update.fused_payload_update.Function()) {
+	if (!has_group_output_transform && op.aggregate_update.fused_payload_update.Function()) {
 		if (!SljitCanExecuteDirectGroupedStateAddressPayloadUpdate(scratch, op_idx, op, payload_input, reduction_lanes,
 		                                                           nullptr, payload_input.size())) {
 			record_unsupported("state_address_payload_shape");

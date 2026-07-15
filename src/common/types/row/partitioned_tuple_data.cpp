@@ -118,6 +118,27 @@ bool PartitionedTupleData::TryAppendUnifiedSinglePartition(PartitionedTupleDataA
 	return true;
 }
 
+template <idx_t WIDTH>
+static void StoreIdentitySelectedFixedColumn(const_data_ptr_t source, data_ptr_t const *row_locations, idx_t row_offset,
+                                             idx_t count) {
+	for (idx_t row_idx = 0; row_idx < count; row_idx++) {
+		auto target = row_locations[row_idx] + row_offset;
+		if constexpr (WIDTH == 1) {
+			*target = *source;
+		} else if constexpr (WIDTH == 2) {
+			Store<uint16_t>(Load<uint16_t>(source), target);
+		} else if constexpr (WIDTH == 4) {
+			Store<uint32_t>(Load<uint32_t>(source), target);
+		} else if constexpr (WIDTH == 8) {
+			Store<uint64_t>(Load<uint64_t>(source), target);
+		} else {
+			static_assert(WIDTH == 16, "Unsupported fixed-width row-store column width");
+			FastMemcpy(target, source, WIDTH);
+		}
+		source += WIDTH;
+	}
+}
+
 bool PartitionedTupleData::TryAppendUnifiedFixedWidthSinglePartition(PartitionedTupleDataAppendState &state,
                                                                      DataChunk &input,
                                                                      const SelectionVector &append_sel,
@@ -154,8 +175,14 @@ bool PartitionedTupleData::TryAppendUnifiedFixedWidthSinglePartition(Partitioned
 		sources[col_idx] = {format.data, format.sel, GetTypeIdSize(physical_type), layout_offsets[col_idx]};
 	}
 	if (state.compute_reverse_partition_sel) {
-		for (sel_t i = 0; i < actual_append_count; i++) {
-			state.reverse_partition_sel[append_sel.get_index(i)] = i;
+		if (!append_sel.IsSet()) {
+			for (sel_t i = 0; i < actual_append_count; i++) {
+				state.reverse_partition_sel[i] = i;
+			}
+		} else {
+			for (sel_t i = 0; i < actual_append_count; i++) {
+				state.reverse_partition_sel[append_sel.get_index(i)] = i;
+			}
 		}
 	}
 
@@ -167,35 +194,70 @@ bool PartitionedTupleData::TryAppendUnifiedFixedWidthSinglePartition(Partitioned
 	const auto row_locations = FlatVector::GetData<data_ptr_t>(state.chunk_state.row_locations);
 	const auto validity_bytes =
 	    layout.CanHaveNull() ? TupleDataLayout::ValidityBytes::SizeInBytes(layout.ColumnCount()) : 0;
-	for (idx_t row_idx = 0; row_idx < actual_append_count; row_idx++) {
-		const auto input_idx = append_sel.get_index(row_idx);
-		auto row_location = row_locations[row_idx];
+	bool identity_selected = !append_sel.IsSet();
+	for (idx_t col_idx = 0; identity_selected && col_idx < input.ColumnCount(); col_idx++) {
+		identity_selected = !sources[col_idx].selection->IsSet();
+	}
+	if (identity_selected) {
 		if (validity_bytes != 0) {
-			FastMemset(row_location, 0xff, validity_bytes);
+			for (idx_t row_idx = 0; row_idx < actual_append_count; row_idx++) {
+				FastMemset(row_locations[row_idx], 0xff, validity_bytes);
+			}
 		}
 		for (idx_t col_idx = 0; col_idx < input.ColumnCount(); col_idx++) {
 			const auto &source = sources[col_idx];
-			const auto source_idx = source.selection->get_index(input_idx);
-			const auto source_location = source.data + source_idx * source.width;
-			auto target_location = row_location + source.row_offset;
 			switch (source.width) {
 			case 1:
-				*target_location = *source_location;
+				StoreIdentitySelectedFixedColumn<1>(source.data, row_locations, source.row_offset, actual_append_count);
 				break;
 			case 2:
-				Store<uint16_t>(Load<uint16_t>(source_location), target_location);
+				StoreIdentitySelectedFixedColumn<2>(source.data, row_locations, source.row_offset, actual_append_count);
 				break;
 			case 4:
-				Store<uint32_t>(Load<uint32_t>(source_location), target_location);
+				StoreIdentitySelectedFixedColumn<4>(source.data, row_locations, source.row_offset, actual_append_count);
 				break;
 			case 8:
-				Store<uint64_t>(Load<uint64_t>(source_location), target_location);
+				StoreIdentitySelectedFixedColumn<8>(source.data, row_locations, source.row_offset, actual_append_count);
 				break;
 			case 16:
-				FastMemcpy(target_location, source_location, 16);
+				StoreIdentitySelectedFixedColumn<16>(source.data, row_locations, source.row_offset,
+				                                     actual_append_count);
 				break;
 			default:
 				throw InternalException("Unsupported fixed-width row-store column width");
+			}
+		}
+	} else {
+		for (idx_t row_idx = 0; row_idx < actual_append_count; row_idx++) {
+			const auto input_idx = append_sel.get_index(row_idx);
+			auto row_location = row_locations[row_idx];
+			if (validity_bytes != 0) {
+				FastMemset(row_location, 0xff, validity_bytes);
+			}
+			for (idx_t col_idx = 0; col_idx < input.ColumnCount(); col_idx++) {
+				const auto &source = sources[col_idx];
+				const auto source_idx = source.selection->get_index(input_idx);
+				const auto source_location = source.data + source_idx * source.width;
+				auto target_location = row_location + source.row_offset;
+				switch (source.width) {
+				case 1:
+					*target_location = *source_location;
+					break;
+				case 2:
+					Store<uint16_t>(Load<uint16_t>(source_location), target_location);
+					break;
+				case 4:
+					Store<uint32_t>(Load<uint32_t>(source_location), target_location);
+					break;
+				case 8:
+					Store<uint64_t>(Load<uint64_t>(source_location), target_location);
+					break;
+				case 16:
+					FastMemcpy(target_location, source_location, 16);
+					break;
+				default:
+					throw InternalException("Unsupported fixed-width row-store column width");
+				}
 			}
 		}
 	}

@@ -420,6 +420,45 @@ def verify_production_contract_ownership() -> None:
         raise AssertionError("nullable affine kernels must retain an independent generated valid-count output")
     if "shared_hugeint_values[output_idx]" in affine_runs:
         raise AssertionError("generated affine runs must not widen every compact group during publication")
+    executable_builder = read("extension/jit_sljit/sljit_region_executable.cpp")
+    input_groups = read("extension/jit_sljit/include/sljit_grouped_aggregate_input_vector_groups.hpp")
+    grouped_runtime = read("extension/jit_sljit/include/sljit_grouped_direct_aggregate_update_runtime_state.hpp")
+    if (
+        "SljitExecutableIntegralGroupKeyRange" not in executable
+        or "integral_group_key_ranges" not in executable
+        or "SljitBuildExecutableIntegralGroupKeyRanges" not in executable_builder
+        or "SljitApplyExecutableIntegralGroupKeyRangeProofs" not in input_groups
+    ):
+        raise AssertionError("signed group-key range facts must be bound once and consumed by grouped runtimes")
+    cast_fit = input_groups[
+        input_groups.index("static bool SljitInputVectorGroupBatchFitsCast") : input_groups.index(
+            "struct SljitInputVectorGroupBatchCastFitDispatch"
+        )
+    ]
+    if (
+        "!source_format.sel->IsSet()" not in cast_fit
+        or "source_format.validity.CheckAllValid(count)" not in cast_fit
+        or not re.search(r"fits\s*&=\s*static_cast<uint8_t>", cast_fit)
+    ):
+        raise AssertionError("flat all-valid group cast checks must use the SIMD-friendly direct-data reduction")
+    if "ProjectedDenseDomainProvesGroupCast" in grouped_runtime:
+        raise AssertionError(
+            "signed group-key cast proofs must not depend on the non-negative dense-domain special case"
+        )
+    if "ExecuteSljitSingleLaneCanonicalSumInitialization" not in affine_runtime:
+        raise AssertionError("canonical single-lane SUM state initialization must bind layout outside the group loop")
+    aggregate_hashtable = read("src/execution/aggregate_hashtable.cpp")
+    if (
+        "const auto address_sel = single_partition_append ? nullptr : row_sel.data();" not in aggregate_hashtable
+        or "if (!address_sel && !execute_sel)" not in affine_runtime
+    ):
+        raise AssertionError("input-order grouped addresses must use the identity callback contract")
+    if (
+        "JIT executable group ranges prove signed narrowing casts once" not in aggregate_test
+        or "JIT canonical single-lane sums initialize fresh states directly" not in aggregate_test
+        or "Grouped aggregate append callbacks expose identity address order directly" not in aggregate_test
+    ):
+        raise AssertionError("group range and input-order fresh-state fast paths require direct correctness coverage")
 
     regression_gate = read("benchmark/tpch/jit/run_tpch_regression_gate.py")
     if not re.search(
@@ -978,9 +1017,9 @@ def verify_string_batch_selection_contract() -> None:
     for contract in (
         "__attribute__((noinline, cold)) idx_t SljitVerifyLikeFragmentPairCandidates",
         "SljitVerifyLikeFragmentPairCandidates(sdata, fragment, fragment_length, pair_anchor, position)",
-        "bool selection_materialized = false;",
-        "if (!selection_materialized)",
-        "return selection_materialized ? selected_count : count;",
+        "idx_t selected_count = 0;",
+        "result[selected_count++] = logical_index;",
+        "return selected_count;",
     ):
         if contract not in runtime:
             raise AssertionError(f"two-fragment LIKE batch selection is missing hot-path contract: {contract}")
@@ -988,11 +1027,25 @@ def verify_string_batch_selection_contract() -> None:
     batch_loop = runtime.split("static idx_t SljitSelectStringLikeBatchLoop", 1)[-1].split(
         "static idx_t SljitSelectStringLikeBatchNegation", 1
     )[0]
-    for stale_two_pass_contract in ("rejected_count", "copy_range", "rejected_idx"):
-        if stale_two_pass_contract in batch_loop:
+    for stale_selection_contract in (
+        "if constexpr (NEGATE && !HAS_EXECUTE_SELECTION)",
+        "selection_materialized",
+        "rejected_count",
+        "copy_range",
+        "rejected_idx",
+    ):
+        if stale_selection_contract in batch_loop:
             raise AssertionError(
-                f"negated two-fragment LIKE selection must not retain duplicate-pass state: {stale_two_pass_contract}"
+                f"negated two-fragment LIKE selection must use normal-form one-pass compaction: {stale_selection_contract}"
             )
+
+    filter_runtime = read("extension/jit_sljit/include/sljit_filter_runtime.hpp")
+    for contract in (
+        "if (selected_count == input.size())",
+        "output.Reference(input);",
+    ):
+        if contract not in filter_runtime:
+            raise AssertionError(f"all-match batch selection must reuse the unchanged input view: {contract}")
 
     scalar_test = read("test/api/test_jit_scalar.cpp")
     for required in (

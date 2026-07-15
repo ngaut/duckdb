@@ -644,8 +644,32 @@ void SljitPlanExecutablePrimitiveRunUpdate(const SljitNativeAggregateUpdatePlan 
 		}
 		SljitExecutablePrimitiveRunSpecialization specialization;
 		specialization.group_source_type = group_specialization.source_type;
+		specialization.group_output_type = group_type;
 		specialization.group_cast_kind = group_specialization.cast_kind;
 		executable.primitive_run_update.flat_specializations.push_back(std::move(specialization));
+	}
+	if (SljitAffineRunSignedIntegerType(group_type)) {
+		for (auto equivalence_type :
+		     {PhysicalType::INT8, PhysicalType::INT16, PhysicalType::INT32, PhysicalType::INT64}) {
+			bool already_planned = false;
+			for (auto &specialization : executable.primitive_run_update.flat_specializations) {
+				if (specialization.group_source_type == equivalence_type &&
+				    specialization.group_output_type == equivalence_type &&
+				    specialization.group_cast_kind == ExecutionRowPointerGroupKeyCastKind::NONE) {
+					already_planned = true;
+					break;
+				}
+			}
+			if (already_planned || !SljitPrimitiveRunGroupCastSupported(equivalence_type, equivalence_type,
+			                                                            ExecutionRowPointerGroupKeyCastKind::NONE)) {
+				continue;
+			}
+			SljitExecutablePrimitiveRunSpecialization specialization;
+			specialization.group_source_type = equivalence_type;
+			specialization.group_output_type = equivalence_type;
+			specialization.group_cast_kind = ExecutionRowPointerGroupKeyCastKind::NONE;
+			executable.primitive_run_update.flat_specializations.push_back(std::move(specialization));
+		}
 	}
 	if (executable.primitive_run_update.flat_specializations.empty()) {
 		return;
@@ -657,9 +681,9 @@ void SljitPlanExecutablePrimitiveRunUpdate(const SljitNativeAggregateUpdatePlan 
 
 SljitNativePrimitiveRunFunction
 SljitEnsureExecutablePrimitiveRunUpdate(ExecutionRegionRuntime &runtime, SljitExecutablePrimitiveRunUpdate &run_update,
-                                        PhysicalType group_source_type,
+                                        PhysicalType group_source_type, PhysicalType group_output_type,
                                         ExecutionRowPointerGroupKeyCastKind group_cast_kind, bool payload_nullable) {
-	auto specialization = run_update.Specialization(group_source_type, group_cast_kind);
+	auto specialization = run_update.Specialization(group_source_type, group_output_type, group_cast_kind);
 	if (!specialization || !run_update.HasDeferredCodegen()) {
 		return nullptr;
 	}
@@ -675,13 +699,13 @@ SljitEnsureExecutablePrimitiveRunUpdate(ExecutionRegionRuntime &runtime, SljitEx
 		{
 			SljitCodegenTimingScope codegen_timing_scope(&timings);
 			if (run_update.primitive_kinds.size() == 1) {
-				code = BuildSljitNativePrimitiveRunUpdate(group_source_type, run_update.group_type, group_cast_kind,
+				code = BuildSljitNativePrimitiveRunUpdate(group_source_type, group_output_type, group_cast_kind,
 				                                          run_update.payload_types[0], run_update.primitive_kinds[0],
 				                                          payload_nullable, function, error);
 			} else {
-				code = BuildSljitNativePrimitiveRunMultiUpdate(group_source_type, run_update.group_type,
-				                                               group_cast_kind, run_update.payload_types,
-				                                               run_update.primitive_kinds, function, error);
+				code = BuildSljitNativePrimitiveRunMultiUpdate(group_source_type, group_output_type, group_cast_kind,
+				                                               run_update.payload_types, run_update.primitive_kinds,
+				                                               function, error);
 			}
 		}
 		if (!code || !function) {
@@ -702,7 +726,7 @@ SljitEnsureExecutablePrimitiveRunUpdate(ExecutionRegionRuntime &runtime, SljitEx
 SljitNativePrimitiveRunFunction SljitEnsureExecutableFusedAffineRunUpdate(
     ExecutionRegionRuntime &runtime, SljitExecutablePrimitiveRunUpdate &primitive_run_update,
     const SljitExecutableFusedAffineRunUpdate &affine_run_update, PhysicalType group_source_type,
-    ExecutionRowPointerGroupKeyCastKind group_cast_kind, bool payload_nullable) {
+    PhysicalType group_output_type, ExecutionRowPointerGroupKeyCastKind group_cast_kind, bool payload_nullable) {
 #if SLJIT_NUMBER_OF_SAVED_REGISTERS < 8 || (SLJIT_NUMBER_OF_REGISTERS - SLJIT_NUMBER_OF_SAVED_REGISTERS) < 7
 	return nullptr;
 #else
@@ -718,7 +742,7 @@ SljitNativePrimitiveRunFunction SljitEnsureExecutableFusedAffineRunUpdate(
 			return nullptr;
 		}
 	}
-	auto specialization = primitive_run_update.Specialization(group_source_type, group_cast_kind);
+	auto specialization = primitive_run_update.Specialization(group_source_type, group_output_type, group_cast_kind);
 	if (!specialization) {
 		return nullptr;
 	}
@@ -733,7 +757,7 @@ SljitNativePrimitiveRunFunction SljitEnsureExecutableFusedAffineRunUpdate(
 		{
 			SljitCodegenTimingScope codegen_timing_scope(&timings);
 			code = BuildSljitNativePrimitiveRunAffineInt64Update(
-			    group_source_type, primitive_run_update.group_type, group_cast_kind, affine_run_update.source_type,
+			    group_source_type, group_output_type, group_cast_kind, affine_run_update.source_type,
 			    affine_run_update.lanes.size(), payload_nullable, function, error);
 		}
 		if (!code || !function) {

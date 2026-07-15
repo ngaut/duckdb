@@ -352,13 +352,12 @@ per batch.
   filter-object pointer; projection, payload, and join-residual expressions
   keep no batch-filter state. Generated row code remains their semantic path.
   The hot filter path therefore avoids both a per-row generated-to-runtime call
-  and cache footprint in unrelated expression and operator state. On an
-  identity input, a negated filter publishes no selection until the first
-  rejected row. It materializes the accepted identity prefix once and appends
-  later survivors during the same scan. A no-rejection chunk therefore remains
-  an implicit identity selection, while every other chunk is scanned only once.
-  DuckDB's implicit identity selection has no backing array, so prefix ordinals
-  are generated directly rather than read through a null data pointer.
+  and cache footprint in unrelated expression and operator state. Every input
+  shape uses the same one-pass survivor compaction loop; negation changes only
+  the match predicate. When every row survives, the selector returns the input
+  count and the filter operator references the input chunk directly, ignoring
+  the scratch selection. This removes the former first-rejection state and
+  prefix backfill without introducing an all-match special case.
 - Typed-expression source IDs are adapter-local. Every generated selector reads
   the adapter's source arrays; a runtime specialization may touch the input
   chunk only after explicitly mapping those local IDs back to input columns.
@@ -1228,6 +1227,34 @@ uses ten so each leading-policy order contributes five samples; an odd sample
 count can otherwise make process/cache order select the median. Promotions and
 focused triage also use ten, and no routine gate schedules a larger sample.
 
+Executable group-key statistics are semantic range facts. A signed min/max
+range that fits the runtime key representation proves the narrowing cast once
+for projected and row-pointer grouped consumers; it removes the old O(rows)
+cast-fit scan from every chunk without relying on the non-negative dense-domain
+special case. Missing or incompatible statistics retain checked materialization.
+For flat, identity-selected, all-valid inputs, that checked fallback is a
+contiguous reduction suitable for compiler SIMD instead of a selection and
+validity lookup per row. Selected and nullable inputs keep the general path.
+Canonical single-lane SUM layouts are also operator invariants: fresh grouped
+states are written directly from preaggregated values, while custom layouts use
+the generic initializer. The grouped-state producer represents input-order
+addresses with a null selection whenever the tuple append preserves order. This
+keeps identity order as the callback contract's normal form and lets every
+backend resolve address selection and continuation capture once per batch.
+
+Semantic projection composition is independent of executable projection
+codegen. Group-key analysis can therefore inspect a composed expression even
+when no row-wise kernel exists for that exact tree. A range-proven,
+order-preserving `key + invariant` or `key - invariant` uses `key` as the raw
+equivalence key. Pipeline-local preaggregation keeps that key immutable and
+applies the affine transform to a separate SQL-visible batch only at
+publication. This boundary is failure-atomic and prevents raw keys from leaking
+into DuckDB's grouped-state API. Generated run specializations distinguish
+their source and output-buffer types, so compressed SQL keys do not force
+per-row projection or disable generated run detection. A nullable invariant
+uses this route only for all-valid batches; other batches materialize the
+semantic key with normal NULL behavior.
+
 Filtered perfect-hash and ungrouped scalar-terminal hybrids consume one SIMD
 profitability contract based on scalar predicate operations. A lone comparison
 stays on the scalar fast loop because terminal work remains row-at-a-time.
@@ -1287,12 +1314,17 @@ and `benchmark/jit/tmp/dictionary_descriptor_string_groups_t4_candidate5_2026071
 Pipeline-local carry and exact parallel dense-run proofs move the generic
 six-million-row projected workload from 0.118126s to 0.036658s at one thread
 (3.222x) and from 0.030526s to 0.016050s at four threads (1.902x). Its checked-in
-floors are now 3.00x and 1.75x. The materialized arithmetic-key variant moves
-from 0.118844s to 0.048766s (2.437x) and from 0.031131s to 0.019352s (1.609x),
-with floors of 2.25x and 1.45x. These are independent ten-repeat production
-promotions with tracing disabled and zero correctness differences or compile
-errors. The same generic generated-run mechanism keeps accepted TPC-H Q18 at
-1.831x at SF1 and 1.660x at SF10 in complete ten-repeat production matrices.
+floors are now 3.10x and 1.75x. The affine arithmetic-key variant preaggregates
+the untransformed equivalence key and publishes the SQL-visible key once per
+group. Ten alternating production repetitions move it from 0.113131s to
+0.036477s (3.101x) with zero correctness differences or compile errors. Its
+one-thread floor ratchets from 2.30x to 2.75x; the independently promoted
+four-thread floor remains 1.45x. The promotion receipt is
+`benchmark/jit/tmp/grouped_affine_publication_promotion10_20260715`. The same
+identity-address increment records 3.286x projected and 2.676x sparse at one
+thread, protected by 3.10x and 2.40x floors. The same generic
+generated-run mechanism keeps accepted TPC-H Q18 at 1.831x at SF1 and 1.660x at
+SF10 in complete ten-repeat production matrices.
 The nullable multi-lane variant fuses `SUM(nullable)` and `COUNT(nullable)` in
 one generated run kernel. Its prior scalar replay spent 0.156s in local
 preaggregation and made JIT 1.55x slower. Generated execution lowers that stage
@@ -1309,8 +1341,8 @@ and
 The 16-lane shared-affine receipts are
 `benchmark/jit/tmp/grouped_wide_sorted_runs_final_floor260_promotion10_20260715`
 and
-`benchmark/jit/tmp/grouped_wide_sorted_runs_final_floor220_t4_promotion10_20260715`.
-They prove 2.660x and 2.293x, with checked-in floors of 2.60x and 2.20x. The
+`benchmark/jit/tmp/grouped_wide_floor222_t4_promotion10_20260715`.
+They prove 2.660x and 2.285x, with checked-in floors of 2.60x and 2.22x. The
 generated run kernel keeps one shared base sum and valid count per compact group.
 Vector-bounded machine-word sums remain canonical; only a value that actually
 outgrows that representation is promoted to the parallel hugeint slot, so
@@ -1319,10 +1351,16 @@ batches reuse the represented row count as their valid count, while nullable
 batches retain an independent counter and batches flush before changing that
 representation. A once-bound canonical aggregate-state layout lets arithmetic-
 progression lanes write their first value and stride directly into contiguous
-SUM states. Other lane arrangements, non-canonical states, initialized-state
-updates, and wide arithmetic keep the exact general path. This avoids per-row
-expression replay, per-lane layout checks, and an intermediate groups-by-lanes
-materialization while code size stays bounded independently of lane count.
+SUM states. The callback classifies machine-word batches once, snapshots the
+immutable lane layout, and writes through raw pointers; it no longer repeats
+vector bounds, selection, wide-value, and recipe-shape checks for every compact
+group. Other lane arrangements, non-canonical states, initialized-state updates,
+and wide arithmetic keep the exact general path. This avoids per-row expression
+replay, per-lane layout checks, and an intermediate groups-by-lanes materialization
+while code size stays bounded independently of lane count. The complete
+four-thread matrix receipt
+`benchmark/jit/tmp/generic_batch_canonical_final_t4_full5_floor222_20260715`
+proves 2.236x for this workload under cross-workload pressure.
 Payload-source layouts explicitly distinguish direct per-lane coordinates from
 fused combined-source coordinates.
 Eligible run kernels are generated only after the runtime sample proves useful

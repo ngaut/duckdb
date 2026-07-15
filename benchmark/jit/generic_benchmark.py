@@ -167,11 +167,12 @@ GENERIC_WORKLOADS = (
             "SELECT sum(id * 31) AS value FROM __jit_generic_like_fragments "
             "WHERE comment NOT LIKE '%special%requests%'"
         ),
-        # Cold exact-candidate verification and one-pass lazy selection publication
-        # promote at 1.316x (T1) and 1.304x (T4) over ten production repetitions.
-        # Preserve the demonstrated generic filter gain with a small host-noise margin.
+        # Cold exact-candidate verification, normal-form selection compaction, and
+        # 48-byte ARM64 pair scans with an overlapping vector tail promote at
+        # 1.604x (T1) and 1.556x (T4) over ten alternating repetitions. Preserve
+        # the demonstrated generic filter gain with a host-noise margin.
         "minimum_auto_speedup": 1.20,
-        "minimum_auto_speedup_by_threads": {1: 1.30, 4: 1.29},
+        "minimum_auto_speedup_by_threads": {1: 1.55, 4: 1.50},
         "max_auto_slowdown": 1.05,
         "requires_compiled_auto": True,
     },
@@ -362,12 +363,12 @@ GENERIC_WORKLOADS = (
             ") grouped"
         ),
         "minimum_auto_speedup": 0.0,
-        "minimum_auto_speedup_by_threads": {1: 3.00, 4: 1.75},
+        "minimum_auto_speedup_by_threads": {1: 3.10, 4: 1.75},
         "max_auto_slowdown": 1.05,
         "requires_compiled_auto": True,
     },
     {
-        "name": "grouped_materialized_sorted_runs",
+        "name": "grouped_affine_sorted_runs",
         "setup_id": "grouped_sorted_runs_input",
         "setup_sql": GROUPED_SORTED_RUNS_SETUP_SQL,
         "sql": (
@@ -377,7 +378,9 @@ GENERIC_WORKLOADS = (
             ") grouped"
         ),
         "minimum_auto_speedup": 0.0,
-        "minimum_auto_speedup_by_threads": {1: 2.25, 4: 1.45},
+        # Raw equivalence-key preaggregation plus publication-boundary affine
+        # transformation proves 3.101x over ten alternating T1 repetitions.
+        "minimum_auto_speedup_by_threads": {1: 2.75, 4: 1.45},
         "max_auto_slowdown": 1.05,
         "requires_compiled_auto": True,
     },
@@ -395,9 +398,10 @@ GENERIC_WORKLOADS = (
         # budget. Coalescing remains a proof representation change, not a reason to
         # rehash a locally monotonic stream during finalization.
         "minimum_auto_speedup": 0.0,
-        # Ten alternating production runs prove 2.600x at T1 and 1.134x at T4.
+        # Ten alternating production runs prove 2.676x at T1 after the identity-address
+        # materialization root fix and 1.134x at T4 in its independent promotion.
         # The parallel floor leaves margin for the shared two-million-row state scan.
-        "minimum_auto_speedup_by_threads": {1: 2.35, 4: 1.08},
+        "minimum_auto_speedup_by_threads": {1: 2.40, 4: 1.08},
         "max_auto_slowdown": 1.05,
         "requires_compiled_auto": True,
     },
@@ -428,10 +432,11 @@ GENERIC_WORKLOADS = (
             ") grouped"
         ),
         # Wide affine reductions share one source run and expand directly into
-        # final aggregate states. Code size stays bounded independently of the
-        # number of output lanes.
+        # final aggregate states. Canonical machine-word batches classify once
+        # and use a raw-pointer progression writer, while wide values retain the
+        # exact general path. Code size stays bounded independently of lane count.
         "minimum_auto_speedup": 0.0,
-        "minimum_auto_speedup_by_threads": {1: 2.60, 4: 2.20},
+        "minimum_auto_speedup_by_threads": {1: 2.60, 4: 2.22},
         "max_auto_slowdown": 1.05,
         "requires_compiled_auto": True,
     },

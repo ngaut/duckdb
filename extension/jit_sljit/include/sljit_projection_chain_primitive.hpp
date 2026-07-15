@@ -30,6 +30,11 @@ static bool SljitBuildProjectionChainComposedProjection(const vector<SljitExecut
                                                         SljitExecutableRegionOp &composed_projection,
                                                         optional_ptr<string> blocker = nullptr);
 
+static bool SljitBuildProjectionChainSemanticProjection(const vector<SljitExecutableRegionOp> &ops,
+                                                        idx_t first_projection_idx, idx_t final_projection_idx,
+                                                        SljitExecutableRegionOp &composed_projection,
+                                                        optional_ptr<string> blocker = nullptr);
+
 static bool SljitCanBindProjectionChainPrimitive(const vector<SljitExecutableRegionOp> &ops, idx_t first_projection_idx,
                                                  idx_t final_projection_idx) {
 	if (first_projection_idx >= ops.size() || final_projection_idx >= ops.size() ||
@@ -123,7 +128,7 @@ static bool SljitBuildReferenceProjectionOutputMap(const SljitExecutableRegionOp
 	return true;
 }
 
-static bool SljitBuildProjectionChainComposedProjection(const vector<SljitExecutableRegionOp> &ops,
+static bool SljitBuildProjectionChainSemanticProjection(const vector<SljitExecutableRegionOp> &ops,
                                                         idx_t first_projection_idx, idx_t final_projection_idx,
                                                         SljitExecutableRegionOp &composed_projection,
                                                         optional_ptr<string> blocker) {
@@ -157,7 +162,7 @@ static bool SljitBuildProjectionChainComposedProjection(const vector<SljitExecut
 		for (idx_t output_idx = 0; output_idx < projection_op.projections.size(); output_idx++) {
 			auto &projection = projection_op.projections[output_idx];
 			auto composed = make_uniq<SljitNativeRegionExpressionPlan>();
-			if (!TryComposeNativeProjection(current_projection, projection.plan, *composed, false)) {
+			if (!TryComposeNativeSemanticProjection(current_projection, projection.plan, *composed, false)) {
 				if (blocker) {
 					*blocker = "compose_output_" + to_string(output_idx);
 				}
@@ -180,6 +185,9 @@ static bool SljitBuildProjectionChainComposedProjection(const vector<SljitExecut
 	composed_projection.kind = SljitNativeRegionOpKind::PROJECTION;
 	composed_projection.operator_index = final_projection.operator_index;
 	composed_projection.input_types = ops[first_projection_idx].input_types;
+	composed_projection.input_not_null = ops[first_projection_idx].input_not_null;
+	composed_projection.input_min_values = ops[first_projection_idx].input_min_values;
+	composed_projection.input_max_values = ops[first_projection_idx].input_max_values;
 	composed_projection.output_types = final_projection.output_types;
 	composed_projection.output_not_null = final_projection.output_not_null;
 	composed_projection.projections.reserve(current_projection.size());
@@ -187,16 +195,30 @@ static bool SljitBuildProjectionChainComposedProjection(const vector<SljitExecut
 		auto &projection_plan = current_projection[output_idx];
 		auto projection = make_uniq<SljitExecutableRegionExpression>();
 		SljitPrepareExecutableRegionExpression(projection_plan, *projection, nullptr, true);
+		composed_projection.projections.push_back(std::move(*projection));
+	}
+	return composed_projection.projections.size() == final_projection.projections.size();
+}
+
+static bool SljitBuildProjectionChainComposedProjection(const vector<SljitExecutableRegionOp> &ops,
+                                                        idx_t first_projection_idx, idx_t final_projection_idx,
+                                                        SljitExecutableRegionOp &composed_projection,
+                                                        optional_ptr<string> blocker) {
+	if (!SljitBuildProjectionChainSemanticProjection(ops, first_projection_idx, final_projection_idx,
+	                                                 composed_projection, blocker)) {
+		return false;
+	}
+	for (idx_t output_idx = 0; output_idx < composed_projection.projections.size(); output_idx++) {
 		string compile_error;
-		if (!SljitCompilePreparedExecutableRegionExpression(*projection, false, compile_error)) {
+		if (!SljitCompilePreparedExecutableRegionExpression(composed_projection.projections[output_idx], false,
+		                                                    compile_error)) {
 			if (blocker) {
 				*blocker = "compile_output_" + to_string(output_idx);
 			}
 			return false;
 		}
-		composed_projection.projections.push_back(std::move(*projection));
 	}
-	return composed_projection.projections.size() == final_projection.projections.size();
+	return true;
 }
 
 } // namespace duckdb

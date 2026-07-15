@@ -44,9 +44,52 @@ struct SljitPendingPreaggregatedPrimitiveGroupBatch {
 
 	void Reset() {
 		groups.Reset();
+		published_groups.Reset();
 		represented_row_count = 0;
 		count = 0;
 		InvalidateGeneratedAppendProof();
+	}
+
+	bool ConfigureGroupOutputTransform(const ExecutionRowPointerGroupKeySource &source) {
+		if (!source.HasOutputTransform()) {
+			return ClearGroupOutputTransform();
+		}
+		if (source.output_transform_kind != ExecutionGroupKeyOutputTransformKind::ADD_CONSTANT ||
+		    source.cast_kind != ExecutionRowPointerGroupKeyCastKind::NONE ||
+		    !SljitSignedAffineGroupPhysicalType(source.source_physical_type) ||
+		    !SljitSignedAffineGroupPhysicalType(source.target_physical_type)) {
+			return false;
+		}
+		if (HasGroupOutputTransform()) {
+			return group_output_transform_kind == source.output_transform_kind &&
+			       group_output_transform_source_type == source.source_type &&
+			       group_output_transform_target_type == source.target_type &&
+			       group_output_transform_constant == source.output_transform_constant;
+		}
+		if (HasPending()) {
+			return false;
+		}
+		group_output_transform_kind = source.output_transform_kind;
+		group_output_transform_source_type = source.source_type;
+		group_output_transform_target_type = source.target_type;
+		group_output_transform_constant = source.output_transform_constant;
+		return true;
+	}
+
+	bool ClearGroupOutputTransform() {
+		if (HasGroupOutputTransform() && HasPending()) {
+			return false;
+		}
+		group_output_transform_kind = ExecutionGroupKeyOutputTransformKind::NONE;
+		group_output_transform_source_type = LogicalType();
+		group_output_transform_target_type = LogicalType();
+		group_output_transform_constant = 0;
+		published_groups.Reset();
+		return true;
+	}
+
+	bool HasGroupOutputTransform() const {
+		return group_output_transform_kind != ExecutionGroupKeyOutputTransformKind::NONE;
 	}
 
 	void BeginGeneratedAppendProof() {
@@ -125,6 +168,9 @@ struct SljitPendingPreaggregatedPrimitiveGroupBatch {
 	}
 
 	SljitDataChunkBatch groups;
+	// Equivalence keys stay immutable. SQL-visible transformed keys are built in
+	// this separate batch only for publication, so a failed update is retry-safe.
+	SljitDataChunkBatch published_groups;
 	SljitPreaggregatedPrimitiveAggregateScratch scratch;
 	// Descriptors are rebound per chunk, but their storage belongs to the pipeline-local pending state.
 	SljitPreaggregatedPrimitivePayloadSources payload_sources;
@@ -151,7 +197,43 @@ struct SljitPendingPreaggregatedPrimitiveGroupBatch {
 	SljitPendingRunStrategy run_strategy = SljitPendingRunStrategy::UNDECIDED;
 	bool generated_append_proof_available = false;
 	bool generated_groups_strictly_increasing = false;
+	ExecutionGroupKeyOutputTransformKind group_output_transform_kind = ExecutionGroupKeyOutputTransformKind::NONE;
+	LogicalType group_output_transform_source_type;
+	LogicalType group_output_transform_target_type;
+	int64_t group_output_transform_constant = 0;
 };
+
+static bool SljitPreparePendingPublishedGroups(ExecutionRegionRuntime &runtime,
+                                               SljitPendingPreaggregatedPrimitiveGroupBatch &pending,
+                                               DataChunk *&published_groups) {
+	published_groups = &pending.groups.chunk;
+	if (!pending.HasGroupOutputTransform()) {
+		return true;
+	}
+	if (pending.group_output_transform_kind != ExecutionGroupKeyOutputTransformKind::ADD_CONSTANT ||
+	    pending.groups.chunk.ColumnCount() != 1 ||
+	    pending.groups.chunk.data[0].GetType() != pending.group_output_transform_source_type) {
+		return false;
+	}
+	pending.published_groups.Ensure(runtime.GetAllocator(),
+	                                vector<LogicalType> {pending.group_output_transform_target_type});
+	auto &target = pending.published_groups.chunk;
+	target.Reset();
+	ExecutionRowPointerGroupKeySource source;
+	SljitInitializeInputVectorGroupKeySource(0, pending.group_output_transform_source_type,
+	                                         pending.group_output_transform_target_type, source);
+	source.ready = true;
+	source.cast_kind = ExecutionRowPointerGroupKeyCastKind::NONE;
+	source.output_transform_kind = pending.group_output_transform_kind;
+	source.output_transform_constant = pending.group_output_transform_constant;
+	if (!SljitTryMaterializeInputVectorGroupSource(pending.groups.chunk, source, target.data[0], pending.Count(),
+	                                               false)) {
+		return false;
+	}
+	target.SetChildCardinality(pending.Count());
+	published_groups = &target;
+	return true;
+}
 
 static void SljitUpdateProvenUniqueAppendContract(ExecutionRegionRuntime &runtime, SljitExecutableRegionOp &op,
                                                   SljitPendingPreaggregatedPrimitiveGroupBatch &pending,
@@ -318,8 +400,8 @@ static bool SljitTryAccumulatePendingDenseSingleLaneGroupsTemplated(
 		return false;
 	};
 	pending.dense_single_lane_blocker.clear();
-	if (input.size() == 0 || input.size() > STANDARD_VECTOR_SIZE || group_sources.size() != 1 ||
-	    payload_lanes.size() != 1 || !payload_lanes[0] || !pending.Empty()) {
+	if (pending.HasGroupOutputTransform() || input.size() == 0 || input.size() > STANDARD_VECTOR_SIZE ||
+	    group_sources.size() != 1 || payload_lanes.size() != 1 || !payload_lanes[0] || !pending.Empty()) {
 		return reject("shape");
 	}
 	auto &lane = *payload_lanes[0];
@@ -601,12 +683,19 @@ static bool SljitFlushPendingPreaggregatedPrimitiveGroups(ExecutionRegionRuntime
 	if (pending.Count() > pending.scratch.group_row_counts.size()) {
 		return false;
 	}
-	SljitUpdateProvenUniqueAppendContract(runtime, op, pending, pending.groups.chunk, grouped_state);
+	DataChunk *published_groups;
+	if (!SljitPreparePendingPublishedGroups(runtime, pending, published_groups)) {
+		return false;
+	}
+	SljitUpdateProvenUniqueAppendContract(runtime, op, pending, *published_groups, grouped_state);
 	SljitTryReserveGroupedAggregateGroups(runtime, op_idx, op, grouped_state, pending.Count());
 	if (!TryExecutePreaggregatedGroupedPrimitiveAggregateUpdateBatches(
-	        runtime, scratch, op_idx, op, pending.groups.chunk, pending.scratch, pending.lanes, grouped_state,
+	        runtime, scratch, op_idx, op, *published_groups, pending.scratch, pending.lanes, grouped_state,
 	        pending.represented_row_count, true, deferred_grouped_finish)) {
 		return false;
+	}
+	if (pending.HasGroupOutputTransform()) {
+		RecordSljitRegionRuntimePath(runtime, op.kind, "pending_group_output_transform.add_constant", pending.Count());
 	}
 	RecordSljitRegionMaterializationElisionPath(runtime, op.kind, "pending_preaggregated_grouped_update_flush",
 	                                            pending.represented_row_count);

@@ -16,4 +16,8 @@ bool TryComposeNativeProjection(const vector<SljitNativeRegionExpressionPlan> &i
                                 const SljitNativeRegionExpressionPlan &expr, SljitNativeRegionExpressionPlan &result,
                                 bool render_diagnostics);
 
+bool TryComposeNativeSemanticProjection(const vector<SljitNativeRegionExpressionPlan> &input_projection,
+                                        const SljitNativeRegionExpressionPlan &expr,
+                                        SljitNativeRegionExpressionPlan &result, bool render_diagnostics);
+
 } // namespace duckdb

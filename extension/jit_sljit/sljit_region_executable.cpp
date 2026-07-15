@@ -18,6 +18,9 @@ static bool BuildExecutableRegionOp(const SljitNativeRegionOpPlan &op, SljitExec
 	executable.kind = op.kind;
 	executable.operator_index = op.operator_index;
 	executable.input_types = op.input_types;
+	executable.input_not_null = input_not_null;
+	executable.input_min_values = input_min_values;
+	executable.input_max_values = input_max_values;
 	executable.output_types = op.output_types;
 	executable.output_not_null = SljitBuildExecutableOutputNotNull(op, input_not_null);
 	switch (op.kind) {
@@ -154,6 +157,56 @@ static void SljitTryBuildExecutableAggregateDenseGroupDomain(const SljitNativeAg
 	                                       domain);
 }
 
+static bool SljitTryReadSignedIntegralGroupKey(const Value &value, int64_t &result) {
+	if (value.IsNull()) {
+		return false;
+	}
+	switch (value.type().InternalType()) {
+	case PhysicalType::BOOL:
+		result = value.GetValueUnsafe<bool>() ? 1 : 0;
+		return true;
+	case PhysicalType::INT8:
+		result = value.GetValueUnsafe<int8_t>();
+		return true;
+	case PhysicalType::INT16:
+		result = value.GetValueUnsafe<int16_t>();
+		return true;
+	case PhysicalType::INT32:
+		result = value.GetValueUnsafe<int32_t>();
+		return true;
+	case PhysicalType::INT64:
+		result = value.GetValueUnsafe<int64_t>();
+		return true;
+	default:
+		return false;
+	}
+}
+
+static void SljitBuildExecutableIntegralGroupKeyRanges(const SljitNativeAggregateUpdatePlan &plan,
+                                                       const vector<Value> &current_min_values,
+                                                       const vector<Value> &current_max_values,
+                                                       vector<SljitExecutableIntegralGroupKeyRange> &ranges) {
+	auto &groups = plan.sink_info.groups;
+	ranges.assign(groups.size(), SljitExecutableIntegralGroupKeyRange());
+	for (idx_t group_idx = 0; group_idx < groups.size(); group_idx++) {
+		auto &group = groups[group_idx];
+		if (!group.supported_reference || group.input_index >= current_min_values.size() ||
+		    group.input_index >= current_max_values.size()) {
+			continue;
+		}
+		auto &min_value = current_min_values[group.input_index];
+		auto &max_value = current_max_values[group.input_index];
+		if (min_value.type().InternalType() != max_value.type().InternalType()) {
+			continue;
+		}
+		auto &range = ranges[group_idx];
+		range.source_physical_type = min_value.type().InternalType();
+		range.ready = SljitTryReadSignedIntegralGroupKey(min_value, range.min_value) &&
+		              SljitTryReadSignedIntegralGroupKey(max_value, range.max_value) &&
+		              range.min_value <= range.max_value;
+	}
+}
+
 static bool SljitTryMultiplyGroupReserveCount(idx_t left, idx_t right, idx_t &result) {
 	if (left == 0 || right == 0 || left > NumericLimits<idx_t>::Maximum() / right) {
 		return false;
@@ -255,6 +308,8 @@ bool BuildSljitExecutableRegion(const SljitNativeRegionPlan &region, SljitExecut
 			SljitTryBuildExecutableAggregateDenseGroupDomain(op.aggregate_update, current_distinct_counts,
 			                                                 current_min_values, current_max_values,
 			                                                 executable_op.aggregate_update.dense_group_domain);
+			SljitBuildExecutableIntegralGroupKeyRanges(op.aggregate_update, current_min_values, current_max_values,
+			                                           executable_op.aggregate_update.integral_group_key_ranges);
 			SljitTryBuildExecutableAggregateGroupReservePlan(op.aggregate_update, current_distinct_reserve_counts,
 			                                                 executable_op.aggregate_update.plan.group_reserve);
 			executable_op.aggregate_update.plan.distinct_key_cardinality_upper_bound =

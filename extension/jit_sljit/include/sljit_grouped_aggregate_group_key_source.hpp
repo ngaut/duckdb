@@ -8,6 +8,7 @@
 
 #pragma once
 
+#include "sljit_native_types.hpp"
 #include "sljit_projection_source_runtime.hpp"
 
 #include "duckdb/execution/execution_operator_runtime.hpp"
@@ -233,6 +234,9 @@ static void SljitAttachHashJoinBuildConditionType(const ExecutionHashJoinProbeBi
 }
 
 static bool SljitInputVectorGroupSourceUsesProjection(const ExecutionRowPointerGroupKeySource &source) {
+	if (source.HasOutputTransform()) {
+		return true;
+	}
 	switch (source.cast_kind) {
 	case ExecutionRowPointerGroupKeyCastKind::INTEGRAL_COMPRESS:
 	case ExecutionRowPointerGroupKeyCastKind::DATE_YEAR_COMPRESS:
@@ -242,6 +246,14 @@ static bool SljitInputVectorGroupSourceUsesProjection(const ExecutionRowPointerG
 	default:
 		return false;
 	}
+}
+
+static PhysicalType SljitGroupKeyEquivalencePhysicalType(const ExecutionRowPointerGroupKeySource &source) {
+	return source.HasOutputTransform() ? source.source_physical_type : source.target_physical_type;
+}
+
+static const LogicalType &SljitGroupKeyEquivalenceType(const ExecutionRowPointerGroupKeySource &source) {
+	return source.HasOutputTransform() ? source.source_type : source.target_type;
 }
 
 template <class CAST_DISPATCH>
@@ -271,6 +283,12 @@ static bool SljitDispatchGroupKeyNarrowingIntegralCast(const ExecutionRowPointer
 static bool SljitInputVectorGroupKeySourceSupportsMaterialization(const ExecutionRowPointerGroupKeySource &source) {
 	if (!source.ready || source.source_kind != ExecutionRowPointerGroupKeySourceKind::INPUT_VECTOR) {
 		return false;
+	}
+	if (source.HasOutputTransform()) {
+		return source.output_transform_kind == ExecutionGroupKeyOutputTransformKind::ADD_CONSTANT &&
+		       source.cast_kind == ExecutionRowPointerGroupKeyCastKind::NONE &&
+		       SljitSignedAffineGroupPhysicalType(source.source_physical_type) &&
+		       SljitSignedAffineGroupPhysicalType(source.target_physical_type);
 	}
 	switch (source.cast_kind) {
 	case ExecutionRowPointerGroupKeyCastKind::NONE:

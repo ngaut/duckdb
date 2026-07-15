@@ -25,9 +25,7 @@ class TestPolicyOrder(unittest.TestCase):
 class TestSpeedupFloors(unittest.TestCase):
     def test_complementary_string_join_t4_floor_tracks_promoted_result(self) -> None:
         workload = next(
-            workload
-            for workload in GENERIC_WORKLOADS
-            if workload["name"] == "join_string_complementary_grouped_sum"
+            workload for workload in GENERIC_WORKLOADS if workload["name"] == "join_string_complementary_grouped_sum"
         )
         self.assertEqual(minimum_auto_speedup(workload, 4), 1.24)
         self.assertEqual(
@@ -42,6 +40,26 @@ class TestSpeedupFloors(unittest.TestCase):
     def test_scan_filter_t4_floor_tracks_source_filter_promotion(self) -> None:
         workload = next(workload for workload in GENERIC_WORKLOADS if workload["name"] == "scan_filter")
         self.assertEqual(minimum_auto_speedup(workload, 4), 1.85)
+
+    def test_grouped_run_t1_floors_track_identity_address_promotion(self) -> None:
+        floors = {
+            workload["name"]: minimum_auto_speedup(workload, 1)
+            for workload in GENERIC_WORKLOADS
+            if workload["name"] in {"grouped_sorted_runs", "grouped_affine_sorted_runs", "grouped_sparse_sorted_runs"}
+        }
+        self.assertEqual(
+            floors,
+            {
+                "grouped_sorted_runs": 3.10,
+                "grouped_affine_sorted_runs": 2.75,
+                "grouped_sparse_sorted_runs": 2.40,
+            },
+        )
+
+    def test_scan_like_floors_track_normal_form_selection_promotion(self) -> None:
+        workload = next(workload for workload in GENERIC_WORKLOADS if workload["name"] == "scan_like_fragments")
+        self.assertEqual(minimum_auto_speedup(workload, 1), 1.55)
+        self.assertEqual(minimum_auto_speedup(workload, 4), 1.50)
 
 
 class TestRuntimeProofRequirements(unittest.TestCase):
@@ -64,7 +82,9 @@ class TestRuntimeProofRequirements(unittest.TestCase):
                 "runtime_events": 1,
             },
         ]
-        missing_path_runs = [{"workload": "packed_string", "policy": "auto", "repeat": 1, "jit_runtime_path_counts": ""}]
+        missing_path_runs = [
+            {"workload": "packed_string", "policy": "auto", "repeat": 1, "jit_runtime_path_counts": ""}
+        ]
         failures = verification_failures(summary, missing_path_runs, (workload,), 1, True)
         self.assertTrue(any("packed_path=" in failure for failure in failures))
 

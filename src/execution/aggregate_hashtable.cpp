@@ -2819,7 +2819,7 @@ static bool AggregateDescriptorGroupKeySourcesSupported(const vector<ExecutionRo
 	for (idx_t group_idx = 0; group_idx < group_sources.size(); group_idx++) {
 		const auto &source = group_sources[group_idx];
 		const auto target_physical_type = layout_types[group_idx].InternalType();
-		if (!source.ready || source.target_physical_type != target_physical_type ||
+		if (!source.ready || source.HasOutputTransform() || source.target_physical_type != target_physical_type ||
 		    source.target_type.InternalType() != target_physical_type ||
 		    !AggregateFastExistingMatchType(target_physical_type)) {
 			return false;
@@ -7234,8 +7234,10 @@ bool GroupedAggregateHashTable::TryAppendNewGroupsFastInternal(
 	const auto &append_selection = *FlatVector::IncrementalSelectionVector();
 	const auto fixed_width_append =
 	    data->TryAppendUnifiedFixedWidthSinglePartition(*append_state, state.group_chunk, append_selection, chunk_size);
-	if (!fixed_width_append &&
-	    !data->TryAppendUnifiedSinglePartition(*append_state, state.group_chunk, append_selection, chunk_size)) {
+	const auto single_partition_append =
+	    fixed_width_append ||
+	    data->TryAppendUnifiedSinglePartition(*append_state, state.group_chunk, append_selection, chunk_size);
+	if (!single_partition_append) {
 		data->AppendUnified(*append_state, state.group_chunk, append_selection, chunk_size);
 	}
 	const auto update_mode = address_update_function && !layout_ptr->HasDestructor()
@@ -7274,7 +7276,8 @@ bool GroupedAggregateHashTable::TryAppendNewGroupsFastInternal(
 	if (address_update_function) {
 		auto update_start = AggregateTraceStart(recorder);
 		const auto state_addresses = reinterpret_cast<const uintptr_t *>(row_locations);
-		address_update_function(state_addresses, row_sel.data(), chunk_size, update_mode, address_update_state);
+		const auto address_sel = single_partition_append ? nullptr : row_sel.data();
+		address_update_function(state_addresses, address_sel, chunk_size, update_mode, address_update_state);
 		RecordAggregateTraceStage(recorder, "find_new.state_address_update", update_start);
 	}
 	return true;

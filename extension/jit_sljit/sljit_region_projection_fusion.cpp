@@ -233,6 +233,27 @@ bool TryComposeNativeProjection(const vector<SljitNativeRegionExpressionPlan> &i
 	       TryComposeNativeProjectionThroughReferenceProjection(input_projection, expr, result, render_diagnostics);
 }
 
+bool TryComposeNativeSemanticProjection(const vector<SljitNativeRegionExpressionPlan> &input_projection,
+                                        const SljitNativeRegionExpressionPlan &expr,
+                                        SljitNativeRegionExpressionPlan &result, bool render_diagnostics) {
+	if (TryComposeNativeProjection(input_projection, expr, result, render_diagnostics)) {
+		return true;
+	}
+	auto tree = CopySljitExpressionPlanAsInputTree(expr);
+	if (!tree || !RewriteSljitExpressionTreeReferencesThroughProjection(tree, input_projection)) {
+		return false;
+	}
+	result = SljitNativeRegionExpressionPlan();
+	result.kind = SljitNativeRegionExpressionKind::TYPED_EXPRESSION_TREE;
+	result.return_type = tree->return_type;
+	AttachSljitNativeExpressionTree(*tree, result);
+	result.references_region_input = !result.expression_tree_source_indices.empty();
+	if (render_diagnostics) {
+		result.ir = "compose-semantic-expression-tree(" + expr.ir + ")";
+	}
+	return true;
+}
+
 static bool TryFuseAdjacentNativeProjection(SljitNativeRegionOpPlan &left, const SljitNativeRegionOpPlan &right,
                                             bool render_diagnostics) {
 	if (left.kind != SljitNativeRegionOpKind::PROJECTION || right.kind != SljitNativeRegionOpKind::PROJECTION) {

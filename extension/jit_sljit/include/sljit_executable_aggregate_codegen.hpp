@@ -27,12 +27,12 @@ void SljitPlanExecutablePrimitiveRunUpdate(const SljitNativeAggregateUpdatePlan 
                                            SljitExecutableAggregateUpdate &executable);
 SljitNativePrimitiveRunFunction
 SljitEnsureExecutablePrimitiveRunUpdate(ExecutionRegionRuntime &runtime, SljitExecutablePrimitiveRunUpdate &run_update,
-                                        PhysicalType group_source_type,
+                                        PhysicalType group_source_type, PhysicalType group_output_type,
                                         ExecutionRowPointerGroupKeyCastKind group_cast_kind, bool payload_nullable);
 SljitNativePrimitiveRunFunction SljitEnsureExecutableFusedAffineRunUpdate(
     ExecutionRegionRuntime &runtime, SljitExecutablePrimitiveRunUpdate &primitive_run_update,
     const SljitExecutableFusedAffineRunUpdate &affine_run_update, PhysicalType group_source_type,
-    ExecutionRowPointerGroupKeyCastKind group_cast_kind, bool payload_nullable);
+    PhysicalType group_output_type, ExecutionRowPointerGroupKeyCastKind group_cast_kind, bool payload_nullable);
 void SljitSelectExecutableAggregateDirectUpdatePlan(SljitExecutableAggregateUpdate &executable);
 bool SljitBuildExecutableAggregateUpdateFallbackPayloadCode(const SljitNativeAggregateUpdatePlan &op,
                                                             SljitExecutableAggregateUpdate &executable, string &error);

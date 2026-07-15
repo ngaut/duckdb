@@ -61,7 +61,7 @@ The generic gate covers arithmetic, filters, CASE-heavy expressions, multiple
 aggregate lanes, filtered scans, mixed numeric/date plus nullable-string
 predicates, persistent column-vs-column comparisons, single- and multi-source
 nullable persistent scans, grouped DISTINCT, dense computed multi-aggregate
-grouping, projected, materialized, nullable multi-lane, and bounded wide-lane
+grouping, projected, affine, nullable multi-lane, and bounded wide-lane
 sorted-run grouping, sparse monotonic grouping, and joins. Arithmetic,
 CASE, multi-aggregate, scan-expression, scan-filter, mixed-predicate,
 column-comparison, both nullable
@@ -70,9 +70,10 @@ configured thread counts. The mixed-predicate gate requires at least 1.25x at
 one thread and 1.20x at four threads. The column-comparison gate requires at
 least 1.25x at both one and four threads. Dense multi-aggregate grouping
 requires at least 1.80x at one thread and 1.60x at four threads; projected
-sorted-run grouping requires 3.00x and 1.75x respectively, while materialized
-arithmetic grouping requires 2.25x and 1.45x. Nullable multi-lane sorted runs
-require 1.70x and 1.45x. Sparse monotonic grouping requires 2.35x and 1.08x;
+sorted-run grouping requires 3.10x and 1.75x respectively, while affine
+arithmetic grouping requires 2.75x and 1.45x. Nullable multi-lane sorted runs
+require 1.70x and 1.45x; 16-lane shared-affine sorted runs require 2.60x and
+2.22x. Sparse monotonic grouping requires 2.40x and 1.08x;
 the four-thread query shares a two-million-group state scan with JIT-off, so its
 parallel floor protects the generated sink win without claiming that shared
 downstream work. Join workloads without a proven
@@ -118,6 +119,18 @@ receipt.
 For an observed one- or two-key group domain, the all-valid terminal merges
 vector-local totals once per known group and commits before any new-key fallback.
 
+Grouped key min/max facts belong to the executable, not to individual chunks.
+When trusted operator statistics prove a signed narrowing cast, projected and
+row-pointer grouped runtimes consume that proof directly and skip the former
+full-vector cast-fit scan. Unknown ranges keep the checked per-chunk path.
+Flat, identity-selected, all-valid fallback vectors reduce that check directly
+over contiguous data so the compiler can SIMD-vectorize it; selected or nullable
+vectors retain the general validity-aware loop.
+Canonical one-lane SUM states likewise initialize directly from preaggregated
+values; custom aggregate layouts retain the generic initializer. Input-order
+grouped-state addresses are published with a null address selection, so identity
+order does not pay a per-group selection branch in any callback backend.
+
 When a production run verifies a durable performance improvement, the same
 increment must tighten the corresponding checked-in speedup floor or refresh
 the accepted comparison artifact. A performance change is incomplete while
@@ -130,11 +143,14 @@ two-way conjunction carries 1.31x and 1.25x floors; the three-way variant adds
 1.25x and 1.20x floors. The neighboring non-null grouped workload has 1.16x and
 1.13x thread-specific floors. The mixed-predicate promotion proves 1.338x at
 one thread and 1.286x at four threads.
-The high-cardinality two-fragment `LIKE` scan proves 1.316x at one thread and
-1.304x at four threads over ten production repetitions. Its 1.30x and 1.29x
+The high-cardinality two-fragment `LIKE` scan proves 1.604x at one thread and
+1.556x at four threads over ten production repetitions. Its 1.55x and 1.50x
 floors protect filter-operator-owned batch selection, cold exact-candidate
-verification, and one-pass lazy negated-selection publication instead of the
-former generated per-row runtime call.
+verification, one-pass survivor compaction, and combined 48-byte ARM64 pair
+scans with an overlapping vector tail instead of the former generated per-row
+runtime call. An all-match batch returns the input count, so the caller reuses
+the input view and ignores the compact-selection scratch without a separate
+lazy-selection state machine.
 The mixed-source complementary string join promotion receipts prove 1.332x at
 one thread and 1.250x at four threads. Its 1.31x and 1.24x floors protect the
 generic direct terminal: a runtime-adaptive pipeline-local group accumulator,
@@ -154,8 +170,10 @@ the full vector proves the known one- or two-key domain. Any NULL, long string,
 or unseen key leaves state untouched and uses the general transform path.
 Generated sorted-run aggregation proves 3.222x at one thread and 1.902x at four
 threads over ten alternating production repetitions; its checked-in floors are
-3.00x and 1.75x. The same pending owner consumes materialized arithmetic group
-keys at 2.437x and 1.609x, with floors of 2.25x and 1.45x. Pipeline-local state
+3.10x and 1.75x. The same pending owner preaggregates raw equivalence keys for
+affine arithmetic groups and applies the invariant transform once per published
+group. The one-thread promotion proves 3.101x; the four-thread floor remains
+1.45x pending an independent promotion. Pipeline-local state
 keeps an unpublished boundary group across scheduler fairness yields. Parallel
 radix finalization compares conservative key intervals. Exact intervals coalesce
 into a covering hull when the summary budget is reached, so storage pressure
@@ -169,9 +187,10 @@ primitive descriptor list and bind a cached runtime lane array, so nullable
 specialization matrix. The nullable multi-lane workload proves 1.785x and
 1.505x over ten production repetitions; its floors are 1.70x and 1.45x.
 The sparse-key variant crosses the exact interval budget and proves that the
-bounded conservative hull remains useful: ten production repetitions measure
-2.600x at one thread and 1.134x at four threads, protected by 2.35x and 1.08x
-floors.
+bounded conservative hull remains useful. After identity address publication,
+column-wise fixed-width materialization, and one-word canonical SUM flags, ten
+production repetitions measure 2.676x at one thread; the independent
+four-thread promotion measures 1.134x. Their floors are 2.40x and 1.08x.
 Generated run reducers deliberately unroll at most eight aggregate lanes. They
 are generated lazily only after runtime ordering economics accepts the stream,
 and publish only the observed key-cast and nullability specialization. A

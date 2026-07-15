@@ -294,6 +294,8 @@ static bool SljitTryExecuteNativeRowPointerGroupedAggregateUpdate(
 		return false;
 	}
 	auto proven_group_sources = group_sources;
+	SljitApplyExecutableIntegralGroupKeyRangeProofs(op.aggregate_update.integral_group_key_ranges,
+	                                                proven_group_sources);
 	SljitApplyInputVectorGroupBatchCastProofs(payload_input, proven_group_sources, count);
 	SljitApplyRowPointerGroupBatchCastProofs(row_pointers, proven_group_sources, count);
 	auto &binding = SljitBindRecordedNativeSink(

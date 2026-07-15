@@ -41,6 +41,11 @@ enum class ExecutionRowPointerGroupKeyCastKind : uint8_t {
 	STRING_SUBSTRING
 };
 
+// Some projection expressions preserve group equivalence while changing the
+// key that SQL exposes. Backends may preaggregate on the equivalence key and
+// apply this transform exactly once before publishing groups to DuckDB.
+enum class ExecutionGroupKeyOutputTransformKind : uint8_t { NONE, ADD_CONSTANT };
+
 static inline bool ExecutionGroupKeyCastIsNarrowingIntegral(ExecutionRowPointerGroupKeyCastKind cast_kind) {
 	switch (cast_kind) {
 	case ExecutionRowPointerGroupKeyCastKind::INT64_TO_INT32:
@@ -70,10 +75,17 @@ struct ExecutionRowPointerGroupKeySource {
 	idx_t row_layout_column_count = 0;
 	ExecutionRowPointerGroupKeyCastKind cast_kind = ExecutionRowPointerGroupKeyCastKind::NONE;
 	int64_t cast_constant = 0;
+	ExecutionGroupKeyOutputTransformKind output_transform_kind = ExecutionGroupKeyOutputTransformKind::NONE;
+	int64_t output_transform_constant = 0;
+	idx_t output_transform_validity_guard_index = DConstants::INVALID_INDEX;
 	idx_t string_substring_length = 0;
 	bool unchecked_integral_cast = false;
 	bool all_valid = false;
 	string blocker;
+
+	bool HasOutputTransform() const {
+		return output_transform_kind != ExecutionGroupKeyOutputTransformKind::NONE;
+	}
 };
 
 struct ExecutionGroupedAggregateStateTargetSpan {

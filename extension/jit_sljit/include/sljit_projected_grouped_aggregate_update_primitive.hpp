@@ -93,10 +93,10 @@ static bool SljitTryBindProjectedDistinctKeySinkStrategy(SljitGroupedAggregateUp
 	return true;
 }
 
-static bool
-SljitTryBindSingleProjectionDistinctKeySinkStrategy(SljitGroupedAggregateUpdatePrimitive &primitive,
-                                                    const vector<SljitExecutableRegionOp> &ops,
-                                                    idx_t first_projection_idx, idx_t final_projection_idx) {
+static bool SljitTryBindSingleProjectionDistinctKeySinkStrategy(SljitGroupedAggregateUpdatePrimitive &primitive,
+                                                                const vector<SljitExecutableRegionOp> &ops,
+                                                                idx_t first_projection_idx,
+                                                                idx_t final_projection_idx) {
 	if (first_projection_idx != final_projection_idx || final_projection_idx >= ops.size()) {
 		return false;
 	}
@@ -151,16 +151,16 @@ static bool SljitTryBindProjectedInputGroupedAggregateUpdateStrategy(const vecto
 		return true;
 	}
 	auto semantic_projection = make_uniq<SljitExecutableRegionOp>();
-	if (!SljitBuildProjectionChainComposedProjection(ops, first_projection_idx, final_projection_idx,
-	                                                 *semantic_projection)) {
-		return false;
-	}
-	if (SljitTryBindProjectedCountStarGroupedAggregateStrategy(primitive, *semantic_projection,
-	                                                           ops[primitive.aggregate_idx])) {
-		return true;
-	}
-	if (SljitTryBindProjectedDistinctKeySinkStrategy(primitive, *semantic_projection, ops[primitive.aggregate_idx])) {
-		return true;
+	if (SljitBuildProjectionChainComposedProjection(ops, first_projection_idx, final_projection_idx,
+	                                                *semantic_projection)) {
+		if (SljitTryBindProjectedCountStarGroupedAggregateStrategy(primitive, *semantic_projection,
+		                                                           ops[primitive.aggregate_idx])) {
+			return true;
+		}
+		if (SljitTryBindProjectedDistinctKeySinkStrategy(primitive, *semantic_projection,
+		                                                 ops[primitive.aggregate_idx])) {
+			return true;
+		}
 	}
 	if (SljitAggregateSinkHasDistinctState(ops[primitive.aggregate_idx].aggregate_update.plan.sink_info)) {
 		return false;
@@ -238,8 +238,8 @@ static bool SljitCanBindGroupedAggregateUpdatePrimitive(const vector<SljitExecut
 				return false;
 			}
 			vector<LogicalType> expected_input_types;
-			if (!SljitTryBuildDistinctKeySinkInputTypes(
-			        ops[primitive.aggregate_idx].aggregate_update.plan.sink_info, expected_input_types)) {
+			if (!SljitTryBuildDistinctKeySinkInputTypes(ops[primitive.aggregate_idx].aggregate_update.plan.sink_info,
+			                                            expected_input_types)) {
 				return false;
 			}
 			if (primitive.projected_distinct_key_input_projection) {

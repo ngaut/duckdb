@@ -239,16 +239,18 @@ TEST_CASE("JIT lowers string predicates without aggregate sink dependence", "[ap
 	                          "(3, '0123456789abcdefabtail'), "
 	                          "(4, '0123456789abcdeabtail'), "
 	                          "(5, 'no-match-string-over-sixteen-bytes'), "
-	                          "(6, NULL)"));
+	                          "(6, NULL), "
+	                          "(7, repeat('x', 47) || 'ab-middle-tail'), "
+	                          "(8, repeat('x', 48) || 'ab-middle-tail')"));
 	ClearJitTrace(manager, true);
 	result = con.Query("WITH t AS MATERIALIZED (SELECT id, s FROM jit_string_pair_scan) "
 	                   "SELECT id FROM t WHERE s LIKE '%ab%' ORDER BY id");
 	REQUIRE_NO_FAIL(*result);
-	REQUIRE(CHECK_COLUMN(result, 0, {1, 2, 3, 4}));
+	REQUIRE(CHECK_COLUMN(result, 0, {1, 2, 3, 4, 7, 8}));
 	result = con.Query("WITH t AS MATERIALIZED (SELECT id, s FROM jit_string_pair_scan) "
 	                   "SELECT id FROM t WHERE s LIKE '%ab%tail%' ORDER BY id");
 	REQUIRE_NO_FAIL(*result);
-	REQUIRE(CHECK_COLUMN(result, 0, {3, 4}));
+	REQUIRE(CHECK_COLUMN(result, 0, {3, 4, 7, 8}));
 	result = con.Query("WITH t AS MATERIALIZED (SELECT id, s FROM jit_string_pair_scan) "
 	                   "SELECT id FROM t WHERE s NOT LIKE '%ab%tail%' ORDER BY id");
 	REQUIRE_NO_FAIL(*result);
