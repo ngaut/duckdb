@@ -1044,6 +1044,13 @@ amortized only when generated stage depth is more than twice the lookup count.
 A large input with less than the calibrated expression-work floor receives no
 generated-stage or materialization-elision credit: state lookup remains the
 dominant protocol even when several shallow generated stages are present.
+This guard classifies grouped work from either a remaining native lookup or a
+generated grouped-update stage. Replacing the native lookup counter with a
+generated backend stage does not turn the stateful grouped update into
+stateless expression work. The generated-only protocol has a lower calibrated
+expression floor than a remaining native lookup because its state address is
+already part of generated work; both floors are physical-runner facts rather
+than recipe or workload identities.
 Parallel lookup remains charged. Conversely, a finalized region producing at
 most two standard vectors and ending in a native aggregate receives neither
 generated-backend credit nor native aggregate-tail credit unless the aggregate
@@ -1211,7 +1218,9 @@ Generic performance and runtime proof are separate modes. Production runs have
 runtime tracing disabled and enforce speedup/slowdown thresholds. Traced runs
 enforce correctness, compilation, and executed-region proof but never make a
 performance decision. A production failure is reported from its candidate
-sample. A focused ten-repeat recheck is an explicit operator action;
+sample. Direct candidate work uses five alternating repetitions; the full
+shipping guard acquires ten up front instead of retrying a failed five-sample
+run. A focused ten-repeat recheck is an explicit operator action;
 correctness, compilation, and missing-runtime-proof failures are never retried
 as timing noise.
 
@@ -1322,7 +1331,9 @@ one-thread floor ratchets from 2.30x to 2.75x; the independently promoted
 four-thread floor remains 1.45x. The promotion receipt is
 `benchmark/jit/tmp/grouped_affine_publication_promotion10_20260715`. The same
 identity-address increment records 3.286x projected and 2.676x sparse at one
-thread, protected by 3.10x and 2.40x floors. The same generic
+thread, protected by 3.10x and 2.35x floors. A later ten-repeat qualification
+kept the sparse JIT median stable at 41.026 ms while the vectorized median
+moved to 97.928 ms, yielding 2.387x. The same generic
 generated-run mechanism keeps accepted TPC-H Q18 at 1.831x at SF1 and 1.660x at
 SF10 in complete ten-repeat production matrices.
 The nullable multi-lane variant fuses `SUM(nullable)` and `COUNT(nullable)` in

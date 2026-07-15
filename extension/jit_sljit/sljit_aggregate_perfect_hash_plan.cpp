@@ -80,6 +80,26 @@ static sljit_sw AllocateSljitLocalPerfectHashArray(sljit_sw &local_size, idx_t g
 	return result;
 }
 
+static sljit_sw AllocateSljitLocalPerfectHashReductionField(sljit_sw &row_size) {
+	auto result = row_size;
+	row_size += NumericCast<sljit_sw>(sizeof(sljit_sw));
+	return result;
+}
+
+static sljit_sw SljitLocalPerfectHashReductionRowStride(sljit_sw row_size, sljit_sw &row_shift) {
+	sljit_sw stride = 1;
+	row_shift = 0;
+	while (stride < NumericCast<sljit_sw>(sizeof(sljit_sw))) {
+		stride *= 2;
+		row_shift++;
+	}
+	while (stride < row_size) {
+		stride *= 2;
+		row_shift++;
+	}
+	return stride;
+}
+
 bool TryBuildSljitDensePerfectHashAggregateReductionPlan(const vector<ExecutionRegionAggregateInput> &aggregates,
                                                          const ExecutionRegionAggregateContract &contract,
                                                          const vector<bool> &payloads_not_null,
@@ -90,9 +110,9 @@ bool TryBuildSljitDensePerfectHashAggregateReductionPlan(const vector<ExecutionR
 		return false;
 	}
 	const idx_t group_count = idx_t(1) << contract.perfect_required_bits_total;
-	// This strategy performs one compact batch reduction followed by one commit
-	// per seen group. It is deliberately limited to genuinely dense domains;
-	// fitting a sparse scratch layout is not evidence that it reduces work.
+	// Local reduction is profitable only when its exact physical index is already
+	// a small dense domain. A low estimated result cardinality does not justify a
+	// second sparse-to-compact state protocol over cache-hot global groups.
 	if (group_count == 0 || group_count > SLJIT_LOCAL_PERFECT_HASH_MAX_GROUPS) {
 		return false;
 	}
@@ -108,9 +128,7 @@ bool TryBuildSljitDensePerfectHashAggregateReductionPlan(const vector<ExecutionR
 	if (count_star_count == 1) {
 		result.count_seen_lane = count_star_lane;
 	}
-	if (result.count_seen_lane == DConstants::INVALID_INDEX) {
-		result.group_seen_offset = AllocateSljitLocalPerfectHashArray(local_size, group_count);
-	}
+	sljit_sw row_size = 0;
 	result.lanes.resize(aggregates.size());
 	for (idx_t aggregate_idx = 0; aggregate_idx < aggregates.size(); aggregate_idx++) {
 		auto &lane = result.lanes[aggregate_idx];
@@ -119,26 +137,32 @@ bool TryBuildSljitDensePerfectHashAggregateReductionPlan(const vector<ExecutionR
 		    aggregate_idx < batch_lower_never_overflows.size() && batch_lower_never_overflows[aggregate_idx];
 		switch (aggregates[aggregate_idx].primitive_update_kind) {
 		case AggregatePrimitiveUpdateKind::COUNT_STAR:
-			lane.count_offset = AllocateSljitLocalPerfectHashArray(local_size, group_count);
+			lane.count_offset = AllocateSljitLocalPerfectHashReductionField(row_size);
 			break;
 		case AggregatePrimitiveUpdateKind::SUM_INT64:
-			lane.lower_offset = AllocateSljitLocalPerfectHashArray(local_size, group_count);
+			lane.lower_offset = AllocateSljitLocalPerfectHashReductionField(row_size);
 			if (!lane.value_always_seen) {
-				lane.saw_offset = AllocateSljitLocalPerfectHashArray(local_size, group_count);
+				lane.saw_offset = AllocateSljitLocalPerfectHashReductionField(row_size);
 			}
 			break;
 		case AggregatePrimitiveUpdateKind::SUM_HUGEINT:
-			lane.lower_offset = AllocateSljitLocalPerfectHashArray(local_size, group_count);
+			lane.lower_offset = AllocateSljitLocalPerfectHashReductionField(row_size);
 			if (!lane.batch_lower_never_overflows) {
-				lane.upper_offset = AllocateSljitLocalPerfectHashArray(local_size, group_count);
+				lane.upper_offset = AllocateSljitLocalPerfectHashReductionField(row_size);
 			}
 			if (!lane.value_always_seen) {
-				lane.saw_offset = AllocateSljitLocalPerfectHashArray(local_size, group_count);
+				lane.saw_offset = AllocateSljitLocalPerfectHashReductionField(row_size);
 			}
 			break;
 		default:
 			return false;
 		}
+	}
+	const auto state_row_stride = SljitLocalPerfectHashReductionRowStride(row_size, result.state_row_shift);
+	result.state_rows_offset = local_size;
+	local_size += NumericCast<sljit_sw>(group_count) * state_row_stride;
+	if (result.count_seen_lane == DConstants::INVALID_INDEX) {
+		result.group_seen_offset = AllocateSljitLocalPerfectHashArray(local_size, group_count);
 	}
 	return true;
 }

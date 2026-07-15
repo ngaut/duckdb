@@ -80,6 +80,8 @@ downstream work. Join workloads without a proven
 compiled route have a bounded auto-policy slowdown and may remain vectorized.
 The generic runner never adds repetitions after a candidate failure. Run the
 same command with `--repeats 10` only when deliberately promoting a result.
+The full refactor guard acquires ten repetitions up front because it is a ship
+qualification, while direct candidate runs retain the five-repetition default.
 
 Generated scan-filter ownership is semantic and workload-independent. It moves
 only exception-free static predicates over the retained source layout into the

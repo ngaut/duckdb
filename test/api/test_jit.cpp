@@ -2145,6 +2145,55 @@ TEST_CASE("JIT CBO admits a proven generated grouped lookup replacement", "[api]
 	REQUIRE(profile.selected_accelerated_runner);
 }
 
+TEST_CASE("JIT CBO rejects a large low-work generated grouped update", "[api][jit]") {
+	PhysicalRunnerCostInput input;
+	input.estimated_cardinality = 30000000;
+	input.source_contract_input_cardinality = 30000000;
+	input.expression_cost = 16;
+	input.generated_stage_count = 2;
+	input.generated_backend_stage_count = 2;
+	input.generated_grouped_aggregate_stage_count = 2;
+	input.grouped_aggregate_estimated_cardinality = 9;
+	input.full_pipeline = true;
+	input.generated_work_class = PhysicalRunnerGeneratedWorkClass::COMPUTE;
+	input.has_accelerated_work = true;
+
+	auto parameters = ZeroStartupRunnerCostParameters();
+	parameters.generated_stage_benefit = 4096;
+	parameters.vectorized_parallelism = 1;
+
+	auto profile = DuckDBCostModel::SelectPhysicalRunner(input, parameters);
+	REQUIRE(profile.generated_grouped_aggregate_stage_count == 2);
+	REQUIRE(profile.generated_expression_work == 0);
+	REQUIRE(profile.generated_stage_work == 0);
+	REQUIRE(profile.selection_reason == "rejected_no_costed_acceleration");
+	REQUIRE_FALSE(profile.selected_accelerated_runner);
+
+	input.expression_cost = 39;
+	profile = DuckDBCostModel::SelectPhysicalRunner(input, parameters);
+	REQUIRE(profile.generated_expression_work == 0);
+	REQUIRE(profile.generated_stage_work == 0);
+	REQUIRE_FALSE(profile.selected_accelerated_runner);
+
+	input.expression_cost = 40;
+	profile = DuckDBCostModel::SelectPhysicalRunner(input, parameters);
+	REQUIRE(profile.generated_expression_work > 0);
+	REQUIRE(profile.generated_stage_work > 0);
+	REQUIRE(profile.selected_accelerated_runner);
+
+	input.native_grouped_state_address_lookup_count = 1;
+	profile = DuckDBCostModel::SelectPhysicalRunner(input, parameters);
+	REQUIRE(profile.generated_expression_work == 0);
+	REQUIRE(profile.generated_stage_work == 0);
+	REQUIRE_FALSE(profile.selected_accelerated_runner);
+
+	input.expression_cost = 64;
+	profile = DuckDBCostModel::SelectPhysicalRunner(input, parameters);
+	REQUIRE(profile.generated_expression_work > 0);
+	REQUIRE(profile.generated_stage_work > 0);
+	REQUIRE(profile.selected_accelerated_runner);
+}
+
 TEST_CASE("JIT CBO prices estimated grouped reduction in parallel", "[api][jit]") {
 	PhysicalRunnerCostInput input;
 	input.estimated_cardinality = 6000000;

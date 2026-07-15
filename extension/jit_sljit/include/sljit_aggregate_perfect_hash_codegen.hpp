@@ -25,12 +25,12 @@ constexpr sljit_sw SLJIT_STRING_T_SHIFT = 4;
 #if defined(SLJIT_NUMBER_OF_SAVED_REGISTERS) && SLJIT_NUMBER_OF_SAVED_REGISTERS >= 8
 constexpr bool SLJIT_HAS_DEDICATED_PERFECT_HASH_STATE_REG = true;
 constexpr sljit_s32 SLJIT_PERFECT_HASH_STATE_REG = SLJIT_S7;
-constexpr sljit_s32 SLJIT_PERFECT_HASH_GROUP_INDEX_REG = SLJIT_S7;
+constexpr sljit_s32 SLJIT_PERFECT_HASH_REDUCTION_STATE_REG = SLJIT_S7;
 constexpr sljit_s32 SLJIT_PERFECT_HASH_SAVED_REG_COUNT = 8;
 #else
 constexpr bool SLJIT_HAS_DEDICATED_PERFECT_HASH_STATE_REG = false;
 constexpr sljit_s32 SLJIT_PERFECT_HASH_STATE_REG = SLJIT_S4;
-constexpr sljit_s32 SLJIT_PERFECT_HASH_GROUP_INDEX_REG = SLJIT_S4;
+constexpr sljit_s32 SLJIT_PERFECT_HASH_REDUCTION_STATE_REG = SLJIT_S4;
 constexpr sljit_s32 SLJIT_PERFECT_HASH_SAVED_REG_COUNT = 7;
 #endif
 
@@ -54,6 +54,8 @@ struct SljitDensePerfectHashAggregateReductionLane {
 struct SljitDensePerfectHashAggregateReductionPlan {
 	idx_t group_count = 0;
 	idx_t count_seen_lane = DConstants::INVALID_INDEX;
+	sljit_sw state_rows_offset = -1;
+	sljit_sw state_row_shift = 0;
 	sljit_sw group_seen_offset = -1;
 	vector<SljitDensePerfectHashAggregateReductionLane> lanes;
 
@@ -134,14 +136,17 @@ void EmitZeroSljitDeferredPerfectHashFlagArray(struct sljit_compiler *compiler,
 void EmitMarkSljitDensePerfectHashGroupSeen(struct sljit_compiler *compiler,
                                             const SljitDensePerfectHashAggregateReductionPlan &plan,
                                             sljit_s32 group_index_reg);
+void EmitSljitPerfectHashReductionStatePointer(struct sljit_compiler *compiler,
+                                               const SljitDensePerfectHashAggregateReductionPlan &plan,
+                                               sljit_s32 reduction_index_reg, sljit_s32 state_pointer_reg);
 void EmitMarkSljitDeferredPerfectHashGroupSeen(struct sljit_compiler *compiler,
                                                const SljitDeferredPerfectHashFlagPlan &plan, sljit_s32 group_index_reg);
 void EmitSljitDensePerfectHashIncrementCount(struct sljit_compiler *compiler,
                                              const SljitDensePerfectHashAggregateReductionLane &lane,
-                                             sljit_s32 group_index_reg);
+                                             sljit_s32 state_pointer_reg);
 void EmitSljitDensePerfectHashAccumulate(struct sljit_compiler *compiler,
                                          const SljitDensePerfectHashAggregateReductionLane &lane,
-                                         AggregatePrimitiveUpdateKind kind, sljit_s32 group_index_reg,
+                                         AggregatePrimitiveUpdateKind kind, sljit_s32 state_pointer_reg,
                                          sljit_s32 value_reg);
 void EmitSljitDensePerfectHashAggregateReductionCommit(
     struct sljit_compiler *compiler, const SljitDensePerfectHashAggregateReductionPlan &reduction_plan,

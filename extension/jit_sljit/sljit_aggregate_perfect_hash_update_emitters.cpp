@@ -231,12 +231,13 @@ void EmitSljitPerfectHashGroupLookup(const SljitPerfectHashFusedUpdateEmitContex
 	context.group_out_of_range.push_back(sljit_emit_cmp(compiler, SLJIT_GREATER_EQUAL, SLJIT_S4, 0, SLJIT_IMM,
 	                                                    NumericCast<sljit_sw>(context.perfect_hash_group_count)));
 	if (!options.materialize_state_pointer) {
-		if (context.group_index_reg == SLJIT_S4) {
-			sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_MEM1(SLJIT_SP), context.group_index_offset, SLJIT_S4, 0);
-		} else {
-			sljit_emit_op1(compiler, SLJIT_MOV, context.group_index_reg, 0, SLJIT_S4, 0);
+		EmitMarkSljitDensePerfectHashGroupSeen(compiler, dense_reduction_plan, SLJIT_S4);
+		EmitSljitPerfectHashReductionStatePointer(compiler, dense_reduction_plan, SLJIT_S4,
+		                                          context.reduction_state_reg);
+		if (context.reduction_state_reg == SLJIT_S4) {
+			sljit_emit_op1(compiler, SLJIT_MOV_P, SLJIT_MEM1(SLJIT_SP), context.state_pointer_offset,
+			               context.reduction_state_reg, 0);
 		}
-		EmitMarkSljitDensePerfectHashGroupSeen(compiler, dense_reduction_plan, context.group_index_reg);
 		return;
 	}
 	if (options.defer_flags) {
@@ -260,6 +261,7 @@ void EmitSljitPerfectHashPayloadUpdates(const SljitPerfectHashFusedUpdateEmitCon
 	auto &descriptors = codegen_plan.payload_descriptors;
 	auto &dense_reduction_plan = context.dense_reduction_plan;
 	auto &deferred_flag_plan = context.deferred_flag_plan;
+	const bool use_reduction = dense_reduction_plan.Ready();
 	// Direct perfect-hash lookup leaves S4 dead after producing the state in S7.
 	// Flat and logical typed expressions never use saved registers, so keep the
 	// shared binary intermediate in S4 for those paths. Selected expressions own
@@ -288,12 +290,13 @@ void EmitSljitPerfectHashPayloadUpdates(const SljitPerfectHashFusedUpdateEmitCon
 		auto &descriptor = descriptors[payload_idx];
 		const auto state_offset = contract.grouped_state_offsets[descriptor.aggregate_index];
 		if (descriptor.primitive_kind == AggregatePrimitiveUpdateKind::COUNT_STAR) {
-			if (dense_reduction_plan.Ready()) {
-				if (context.group_index_reg == SLJIT_S4) {
-					sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_S4, 0, SLJIT_MEM1(SLJIT_SP), context.group_index_offset);
+			if (use_reduction) {
+				if (context.reduction_state_reg == SLJIT_S4) {
+					sljit_emit_op1(compiler, SLJIT_MOV_P, SLJIT_S4, 0, SLJIT_MEM1(SLJIT_SP),
+					               context.state_pointer_offset);
 				}
 				EmitSljitDensePerfectHashIncrementCount(compiler, dense_reduction_plan.lanes[payload_idx],
-				                                        context.group_index_reg);
+				                                        context.reduction_state_reg);
 				continue;
 			}
 			EmitSljitPerfectHashPayloadStatePointer(context);
@@ -322,12 +325,12 @@ void EmitSljitPerfectHashPayloadUpdates(const SljitPerfectHashFusedUpdateEmitCon
 			    context, *payloads[payload_idx].expression_tree, options.fast_path, options.all_valid,
 			    options.no_source_selection, options.payload_data_hoists);
 		}
-		if (dense_reduction_plan.Ready()) {
-			if (context.group_index_reg == SLJIT_S4) {
-				sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_S4, 0, SLJIT_MEM1(SLJIT_SP), context.group_index_offset);
+		if (use_reduction) {
+			if (context.reduction_state_reg == SLJIT_S4) {
+				sljit_emit_op1(compiler, SLJIT_MOV_P, SLJIT_S4, 0, SLJIT_MEM1(SLJIT_SP), context.state_pointer_offset);
 			}
 			EmitSljitDensePerfectHashAccumulate(compiler, dense_reduction_plan.lanes[payload_idx],
-			                                    descriptor.primitive_kind, context.group_index_reg, SLJIT_R2);
+			                                    descriptor.primitive_kind, context.reduction_state_reg, SLJIT_R2);
 			EmitSljitPerfectHashPayloadInvalidContinuation(compiler, payload_invalid);
 			continue;
 		}

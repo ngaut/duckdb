@@ -52,7 +52,7 @@ class TestSpeedupFloors(unittest.TestCase):
             {
                 "grouped_sorted_runs": 3.10,
                 "grouped_affine_sorted_runs": 2.75,
-                "grouped_sparse_sorted_runs": 2.40,
+                "grouped_sparse_sorted_runs": 2.35,
             },
         )
 

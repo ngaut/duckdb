@@ -32,6 +32,7 @@ static constexpr int64_t UNKNOWN_OUTPUT_NATIVE_FUSION_MIN_COSTED_BATCHES = 1024;
 static constexpr idx_t UNKNOWN_OUTPUT_HASH_BUILD_HIGH_EXPANSION_FACTOR = 2;
 static constexpr idx_t LARGE_NATIVE_GROUPED_LOOKUP_INPUT_ROWS = 8 * 1024 * 1024;
 static constexpr idx_t MIN_NATIVE_GROUPED_LOOKUP_EXPRESSION_COST = 64;
+static constexpr idx_t MIN_GENERATED_GROUPED_UPDATE_EXPRESSION_COST = 40;
 static constexpr idx_t LARGE_UNKNOWN_OUTPUT_LOOKUP_SOURCE_ROWS = 4 * 1024 * 1024;
 static constexpr int64_t MIN_STATEFUL_BACKEND_COSTED_BATCHES = 32;
 
@@ -101,21 +102,24 @@ static bool PhysicalRunnerHasGeneratedJoinGroupedFusionProof(const PhysicalRunne
 	       input.generated_stage_count > input.native_grouped_state_address_lookup_count * 2;
 }
 
-static bool PhysicalRunnerLargeLowWorkGroupedLookup(const PhysicalRunnerCostInput &input,
+static bool PhysicalRunnerLargeLowWorkGroupedUpdate(const PhysicalRunnerCostInput &input,
                                                     const PhysicalRunnerCostParameters &parameters) {
 	const auto has_amortization_proof =
 	    (parameters.vectorized_parallelism > 1 ? PhysicalRunnerHasEstimatedGroupedReduction(input)
 	                                           : PhysicalRunnerHasGeneratedGroupedLookupReplacementProof(input)) ||
 	    PhysicalRunnerHasGeneratedJoinGroupedFusionProof(input);
-	return input.native_grouped_state_address_lookup_count > 0 &&
-	       input.source_contract_input_cardinality >= LARGE_NATIVE_GROUPED_LOOKUP_INPUT_ROWS &&
-	       input.expression_cost < MIN_NATIVE_GROUPED_LOOKUP_EXPRESSION_COST && !has_amortization_proof;
+	const auto has_native_grouped_lookup = input.native_grouped_state_address_lookup_count > 0;
+	const auto has_grouped_update = has_native_grouped_lookup || input.generated_grouped_aggregate_stage_count > 0;
+	const auto minimum_expression_cost = has_native_grouped_lookup ? MIN_NATIVE_GROUPED_LOOKUP_EXPRESSION_COST
+	                                                               : MIN_GENERATED_GROUPED_UPDATE_EXPRESSION_COST;
+	return has_grouped_update && input.source_contract_input_cardinality >= LARGE_NATIVE_GROUPED_LOOKUP_INPUT_ROWS &&
+	       input.expression_cost < minimum_expression_cost && !has_amortization_proof;
 }
 
 static bool PhysicalRunnerCanAmortizeNativeGroupedStateAddressLookup(const PhysicalRunnerCostInput &input,
                                                                      const PhysicalRunnerCostParameters &parameters) {
 	if (input.native_grouped_state_address_lookup_count == 0 || input.source_contract_input_cardinality == 0 ||
-	    input.generated_backend_stage_count == 0 || PhysicalRunnerLargeLowWorkGroupedLookup(input, parameters)) {
+	    input.generated_backend_stage_count == 0 || PhysicalRunnerLargeLowWorkGroupedUpdate(input, parameters)) {
 		return false;
 	}
 	if (PhysicalRunnerHasEstimatedGroupedReduction(input)) {
@@ -546,7 +550,7 @@ static bool PhysicalRunnerMaterializationElisionBenefitCanPay(const PhysicalRunn
 	if (input.source_contract_output_cardinality_unknown) {
 		return false;
 	}
-	if (PhysicalRunnerLargeLowWorkGroupedLookup(input, parameters)) {
+	if (PhysicalRunnerLargeLowWorkGroupedUpdate(input, parameters)) {
 		return false;
 	}
 	return true;
@@ -713,7 +717,7 @@ static string PhysicalRunnerAdmissionClass(const PhysicalRunnerCostInput &input,
 	if (facts.native_operator_stage_count == 0) {
 		return facts.has_generated_compute_work && input.generated_stage_count > 0 &&
 		               parameters.generated_stage_benefit > 0 &&
-		               !PhysicalRunnerLargeLowWorkGroupedLookup(input, parameters)
+		               !PhysicalRunnerLargeLowWorkGroupedUpdate(input, parameters)
 		           ? "generated"
 		           : "none";
 	}
@@ -759,7 +763,7 @@ static void PhysicalRunnerBuildAccelerationBasis(const PhysicalRunnerCostInput &
 		                                string("admission_class:") + admission.admission_class);
 	}
 	if (facts.has_generated_compute_work && input.generated_stage_count > 0 && parameters.generated_stage_benefit > 0 &&
-	    !PhysicalRunnerLargeLowWorkGroupedLookup(input, parameters)) {
+	    !PhysicalRunnerLargeLowWorkGroupedUpdate(input, parameters)) {
 		PhysicalRunnerAppendReasonToken(admission.acceleration_basis, "generated_stage_benefit");
 	}
 	if (facts.native_operator_stage_count > 0 &&
@@ -815,7 +819,7 @@ static void PhysicalRunnerComputeWorkComponents(const PhysicalRunnerCostInput &i
                                                 const PhysicalRunnerAdmission &admission,
                                                 PhysicalRunnerCostProfile &profile) {
 	const auto expression_cost = SaturatingCostCast(input.expression_cost);
-	if (facts.has_generated_compute_work && !PhysicalRunnerLargeLowWorkGroupedLookup(input, parameters)) {
+	if (facts.has_generated_compute_work && !PhysicalRunnerLargeLowWorkGroupedUpdate(input, parameters)) {
 		profile.generated_expression_work = expression_cost;
 		const auto generated_stage_benefit = SaturatingCostCast(parameters.generated_stage_benefit);
 		const auto generated_backend_stage_count = PhysicalRunnerCostedGeneratedBackendStageCount(input, parameters);

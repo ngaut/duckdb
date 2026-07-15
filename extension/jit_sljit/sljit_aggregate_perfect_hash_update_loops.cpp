@@ -34,6 +34,18 @@ static void EmitSljitPerfectHashFastGroupDictionaryRuntimeArrayBase(struct sljit
 	               offsetof(SljitNativeVectorInput, perfect_hash_dictionary_groups));
 }
 
+static void EmitSljitPerfectHashRowUpdate(const SljitPerfectHashFusedUpdateEmitContext &context,
+                                          const SljitPerfectHashGroupLookupOptions &group_lookup,
+                                          const SljitPerfectHashPayloadUpdateOptions &payload_update,
+                                          bool load_common_selected_source_index) {
+	auto compiler = context.compiler;
+	EmitSljitPerfectHashGroupLookup(context, group_lookup);
+	if (load_common_selected_source_index) {
+		EmitLoadSljitCommonSelectedSourceIndex(compiler);
+	}
+	EmitSljitPerfectHashPayloadUpdates(context, payload_update);
+}
+
 static sljit_jump *EmitSljitPerfectHashUpdateLoop(const SljitPerfectHashFusedUpdateEmitContext &context,
                                                   const SljitPerfectHashUpdateLoopOptions &options) {
 	auto compiler = context.compiler;
@@ -57,11 +69,8 @@ static sljit_jump *EmitSljitPerfectHashUpdateLoop(const SljitPerfectHashFusedUpd
 	if (options.load_fast_group_dictionary_runtime_array_base) {
 		EmitSljitPerfectHashFastGroupDictionaryRuntimeArrayBase(compiler);
 	}
-	EmitSljitPerfectHashGroupLookup(context, group_lookup);
-	if (options.load_common_selected_source_index) {
-		EmitLoadSljitCommonSelectedSourceIndex(compiler);
-	}
-	EmitSljitPerfectHashPayloadUpdates(context, options.payload_update);
+	EmitSljitPerfectHashRowUpdate(context, group_lookup, options.payload_update,
+	                              options.load_common_selected_source_index);
 	EmitSljitPerfectHashPredicateSkipLabel(compiler, predicate_skip_jumps);
 	EmitNextSljitNativeVectorLoop(compiler, loop);
 	return done;
@@ -157,9 +166,9 @@ EmitSljitPerfectHashFlatFastLoop(const SljitPerfectHashFusedUpdateEmitContext &c
 			    lookup.expression_fast_path = true;
 			    lookup.expression_all_valid = true;
 			    lookup.expression_data_hoists = fast_data_hoists;
-			    EmitSljitPerfectHashGroupLookup(context, lookup);
-			    EmitSljitPerfectHashPayloadUpdates(
-			        context, SljitPerfectHashPayloadUpdateOptionsForLoop(true, true, false, fast_data_hoists));
+			    EmitSljitPerfectHashRowUpdate(
+			        context, lookup, SljitPerfectHashPayloadUpdateOptionsForLoop(true, true, false, fast_data_hoists),
+			        false);
 		    });
 	}
 	auto fast_loop = sljit_emit_label(compiler);
@@ -173,9 +182,8 @@ EmitSljitPerfectHashFlatFastLoop(const SljitPerfectHashFusedUpdateEmitContext &c
 	lookup.expression_fast_path = true;
 	lookup.expression_all_valid = true;
 	lookup.expression_data_hoists = fast_data_hoists;
-	EmitSljitPerfectHashGroupLookup(context, lookup);
-	EmitSljitPerfectHashPayloadUpdates(
-	    context, SljitPerfectHashPayloadUpdateOptionsForLoop(true, true, false, fast_data_hoists));
+	EmitSljitPerfectHashRowUpdate(
+	    context, lookup, SljitPerfectHashPayloadUpdateOptionsForLoop(true, true, false, fast_data_hoists), false);
 	EmitSljitPerfectHashPredicateSkipLabel(compiler, predicate_skip_jumps);
 	EmitNextSljitNativeVectorLoop(compiler, fast_loop);
 	return fast_done;

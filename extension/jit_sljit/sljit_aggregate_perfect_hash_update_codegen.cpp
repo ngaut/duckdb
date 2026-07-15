@@ -43,7 +43,7 @@ BuildSljitNativePerfectHashGroupedFusedTypedExpressionAggregateUpdateInternal(
 	const auto hoist_group_data_pointers = update_plan.hoist_group_data_pointers;
 	const auto dedicated_state_register = update_plan.dedicated_state_register;
 	const auto state_pointer_reg = update_plan.state_pointer_reg;
-	const auto group_index_reg = update_plan.group_index_reg;
+	const auto reduction_state_reg = update_plan.reduction_state_reg;
 	const auto saved_register_count = update_plan.saved_register_count;
 	const auto scratch_register_count = update_plan.scratch_register_count;
 
@@ -87,7 +87,7 @@ BuildSljitNativePerfectHashGroupedFusedTypedExpressionAggregateUpdateInternal(
 	    hoist_group_data_pointers,
 	    dedicated_state_register,
 	    state_pointer_reg,
-	    group_index_reg,
+	    reduction_state_reg,
 	};
 	EmitSljitPerfectHashFusedUpdateLoops(emit_context, update_plan);
 	EmitSljitDensePerfectHashAggregateReductionCommit(compiler, dense_reduction_plan, codegen_plan.payload_descriptors,

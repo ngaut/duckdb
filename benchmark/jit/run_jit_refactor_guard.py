@@ -279,6 +279,8 @@ def generic_gate_command(args: argparse.Namespace, artifact_dir: Path) -> list[s
         str(args.duckdb),
         "--out-dir",
         str(artifact_dir / "generic_benchmark"),
+        "--repeats",
+        str(args.generic_repeats),
     ]
 
 
@@ -613,6 +615,7 @@ def write_guard_metadata(args: argparse.Namespace, artifact_dir: Path) -> None:
         "unit_execution": args.unit_execution,
         "unit_baseline_state": str(args.unit_baseline_state),
         "tpch_baseline_state": str(args.tpch_baseline_state),
+        "generic_repeats": args.generic_repeats,
         "artifact_dir": str(artifact_dir.resolve()),
     }
     (artifact_dir / "refactor_guard.json").write_text(json.dumps(metadata, indent=2) + "\n", encoding="utf-8")
@@ -648,6 +651,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--skip-py-compile", action="store_true")
     parser.add_argument("--skip-unit", action="store_true")
     parser.add_argument("--skip-tpch", action="store_true")
+    parser.add_argument("--generic-repeats", type=int, choices=(5, 10), default=10)
 
     parser.add_argument(
         "--unit-binary",
