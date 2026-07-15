@@ -112,33 +112,31 @@ static bool SljitCanExecuteDirectGroupedStateAddressPayloadUpdate(
 	                                                                aggregate_update.payload_descriptors);
 }
 
-enum class SljitFusedTypedPayloadSourceOverrideStatus : uint8_t { NONE, READY, INVALID };
+enum class SljitFusedPayloadSourceOverrideStatus : uint8_t { NONE, READY, INVALID };
 
-static SljitFusedTypedPayloadSourceOverrideStatus
-SljitGetFusedTypedPayloadSourceOverrideStatus(const SljitExecutableAggregateUpdate &aggregate_update,
-                                              const DataChunk &payload_input,
-                                              const vector<idx_t> &payload_source_indices) {
+static SljitFusedPayloadSourceOverrideStatus
+SljitGetFusedPayloadSourceOverrideStatus(const SljitExecutableAggregateUpdate &aggregate_update,
+                                         const DataChunk &payload_input, const vector<idx_t> &payload_source_indices) {
 	if (!aggregate_update.fused_payload_update.Function()) {
-		return SljitFusedTypedPayloadSourceOverrideStatus::NONE;
+		return SljitFusedPayloadSourceOverrideStatus::NONE;
 	}
-	if (!SljitFusedAggregatePayloadsUseTypedExpressionTrees(aggregate_update.payloads,
-	                                                        aggregate_update.payload_descriptors)) {
-		return SljitFusedTypedPayloadSourceOverrideStatus::NONE;
+	if (aggregate_update.payload_source_layout != SljitAggregatePayloadSourceLayout::FUSED_COMBINED) {
+		return SljitFusedPayloadSourceOverrideStatus::NONE;
 	}
-	vector<idx_t> fused_payload_sources;
-	if (!SljitTryGetFusedTypedPayloadCombinedSources(aggregate_update.payloads, aggregate_update.payload_descriptors,
-	                                                 fused_payload_sources)) {
-		return SljitFusedTypedPayloadSourceOverrideStatus::NONE;
+	if (aggregate_update.combined_payload_source_not_null.size() !=
+	    aggregate_update.combined_payload_source_indices.size()) {
+		return SljitFusedPayloadSourceOverrideStatus::INVALID;
 	}
+	auto &fused_payload_sources = aggregate_update.combined_payload_source_indices;
 	if (payload_source_indices.size() != fused_payload_sources.size()) {
-		return SljitFusedTypedPayloadSourceOverrideStatus::INVALID;
+		return SljitFusedPayloadSourceOverrideStatus::INVALID;
 	}
 	for (auto source_idx : payload_source_indices) {
 		if (source_idx >= payload_input.ColumnCount()) {
-			return SljitFusedTypedPayloadSourceOverrideStatus::INVALID;
+			return SljitFusedPayloadSourceOverrideStatus::INVALID;
 		}
 	}
-	return SljitFusedTypedPayloadSourceOverrideStatus::READY;
+	return SljitFusedPayloadSourceOverrideStatus::READY;
 }
 
 static bool
@@ -157,8 +155,8 @@ SljitCanPreaggregateInputVectorFusedPrimitivePayloads(SljitExecutableRegionOp &o
 		return false;
 	}
 	auto fused_override_status =
-	    SljitGetFusedTypedPayloadSourceOverrideStatus(aggregate_update, input, payload_source_indices);
-	if (fused_override_status != SljitFusedTypedPayloadSourceOverrideStatus::READY) {
+	    SljitGetFusedPayloadSourceOverrideStatus(aggregate_update, input, payload_source_indices);
+	if (fused_override_status != SljitFusedPayloadSourceOverrideStatus::READY) {
 		return false;
 	}
 	for (idx_t payload_idx = 0; payload_idx < sink_info.aggregates.size(); payload_idx++) {
@@ -226,8 +224,8 @@ static bool SljitCanExecuteDirectRowPointerPreaggregatedPrimitiveUpdate(
 		return false;
 	}
 	if (payload_source_layout == SljitAggregatePayloadSourceLayout::FUSED_COMBINED) {
-		if (SljitGetFusedTypedPayloadSourceOverrideStatus(aggregate_update, payload_input, payload_source_indices) !=
-		    SljitFusedTypedPayloadSourceOverrideStatus::READY) {
+		if (SljitGetFusedPayloadSourceOverrideStatus(aggregate_update, payload_input, payload_source_indices) !=
+		    SljitFusedPayloadSourceOverrideStatus::READY) {
 			return false;
 		}
 		uses_generated_payload_preaggregation = true;

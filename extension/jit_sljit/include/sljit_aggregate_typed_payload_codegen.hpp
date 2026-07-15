@@ -35,7 +35,7 @@ struct SljitSharedBinaryPayloadPlan {
 	}
 };
 
-struct SljitFusedTypedAggregateCodegenPlan {
+struct SljitFusedAggregateCodegenPlan {
 	vector<SljitTypedExpressionTreePlan> payloads;
 	vector<SljitAggregatePayloadDescriptor> payload_descriptors;
 	idx_t tree_node_count = 0;
@@ -52,10 +52,9 @@ bool SljitExpressionIRStructurallyEqual(const ExecutionExpressionIR &left, const
 void TryBuildSljitSharedBinaryPayloadPlan(const vector<SljitNativeRegionExpressionPlan> &payloads,
                                           const vector<SljitAggregatePayloadDescriptor> &descriptors,
                                           SljitSharedBinaryPayloadPlan &result);
-bool BuildSljitFusedTypedAggregateCodegenPlan(const vector<SljitNativeRegionExpressionPlan> &payloads,
-                                              const vector<ExecutionRegionAggregateInput> &aggregates,
-                                              SljitFusedTypedAggregateCodegenPlan &codegen_plan,
-                                              bool force_typed_path = false);
+bool BuildSljitFusedAggregateCodegenPlan(const vector<SljitNativeRegionExpressionPlan> &payloads,
+                                         const vector<ExecutionRegionAggregateInput> &aggregates,
+                                         SljitFusedAggregateCodegenPlan &codegen_plan);
 void EmitSljitSharedBinaryPayloadBase(struct sljit_compiler *compiler, const SljitSharedBinaryPayloadPlan &plan,
                                       sljit_s32 shared_value_reg, sljit_sw shared_value_offset,
                                       SljitAggregateExpressionIndexMode index_mode,

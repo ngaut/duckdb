@@ -969,6 +969,11 @@ void ExecutionRegionLoweringPlan::AddBackendDistinctKeyFastInsertCapability() {
 	capability_facts.backend_distinct_key_fast_insert_count++;
 }
 
+void ExecutionRegionLoweringPlan::AddBackendReferenceOnlyStringPerfectHashAggregateCapability() {
+	capability_facts.backend_reference_only_string_perfect_hash_aggregate_count++;
+	AddBackendWeakAcceleratedWorkCapability();
+}
+
 void ExecutionRegionLoweringPlan::AddBackendWeakAcceleratedWorkCapability() {
 	capability_facts.backend_weak_accelerated_work_count++;
 }
@@ -1260,6 +1265,8 @@ static void AppendExecutionRegionBackendCapabilityFacts(string &result, const Ex
 	                                     facts.backend_native_state_address_lookup_count, first_aggregate);
 
 	bool first_cost = true;
+	AppendExecutionRegionCapabilityCount(result, "backend_cost", "reference_only_string_perfect_hash_aggregate",
+	                                     facts.backend_reference_only_string_perfect_hash_aggregate_count, first_cost);
 	AppendExecutionRegionCapabilityCount(result, "backend_cost", "weak_accelerated_work",
 	                                     facts.backend_weak_accelerated_work_count, first_cost);
 	AppendExecutionRegionCapabilityCount(result, "backend_cost", "low_cardinality_string_predicate",

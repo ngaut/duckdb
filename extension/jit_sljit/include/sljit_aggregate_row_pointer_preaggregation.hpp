@@ -183,9 +183,11 @@ static bool SljitTryPreaggregateRowPointerFusedPrimitiveGroups(
 
 	SljitExecuteFusedGroupedPrimitiveAggregatePayloadUpdate(
 	    op.aggregate_update.payloads, op.aggregate_update.fused_payload_update.Function(),
-	    op.aggregate_update.plan.sink_info.aggregate_contract, op.aggregate_update.payload_descriptors, payload_lanes,
-	    reduction_lanes, payload_input, scratch.fused_row_state_addresses.data(), nullptr, nullptr, false, count,
-	    payload_scratch, optional_ptr<const vector<idx_t>>(&payload_source_indices));
+	    op.aggregate_update.plan.sink_info.aggregate_contract, op.aggregate_update.payload_descriptors,
+	    op.aggregate_update.payload_source_layout, op.aggregate_update.combined_payload_source_indices,
+	    op.aggregate_update.combined_payload_source_not_null, payload_lanes, reduction_lanes, payload_input,
+	    scratch.fused_row_state_addresses.data(), nullptr, nullptr, false, count, payload_scratch,
+	    optional_ptr<const vector<idx_t>>(&payload_source_indices));
 
 	if (!SljitExtractFusedPreaggregatedPrimitiveDeltas(scratch, payload_lanes, group_count)) {
 		failure_reason = "extract";

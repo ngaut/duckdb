@@ -23,7 +23,7 @@ struct SljitPerfectHashFusedUpdateEmitContext {
 	const vector<ExecutionRegionAggregateInput> &aggregates;
 	const vector<SljitPerfectHashGroupPlan> &group_plans;
 	const ExecutionRegionAggregateContract &contract;
-	const SljitFusedTypedAggregateCodegenPlan &codegen_plan;
+	const SljitFusedAggregateCodegenPlan &codegen_plan;
 	const SljitDensePerfectHashAggregateReductionPlan &dense_reduction_plan;
 	const SljitDeferredPerfectHashFlagPlan &deferred_flag_plan;
 	vector<SljitExpressionTreeOverflowJumps> &overflows;
@@ -64,7 +64,7 @@ struct SljitPerfectHashPayloadUpdateOptions {
 
 struct SljitPerfectHashFusedUpdatePlan {
 	vector<SljitPerfectHashGroupPlan> group_plans;
-	SljitFusedTypedAggregateCodegenPlan codegen_plan;
+	SljitFusedAggregateCodegenPlan codegen_plan;
 	SljitDensePerfectHashAggregateReductionPlan dense_reduction_plan;
 	SljitDeferredPerfectHashFlagPlan deferred_flag_plan;
 	SljitTypedExpressionTreeSimdPlan predicate_simd_plan;

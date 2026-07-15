@@ -106,8 +106,10 @@ static bool SljitTryExecuteDirectJoinOutputPerfectHashAggregateUpdate(
 	SljitExecuteFusedPerfectHashGroupedPrimitiveAggregatePayloadUpdate(
 	    aggregate_update.payloads, aggregate_update.fused_payload_update.Function(), sink_info.groups,
 	    plan.group_expressions, aggregate_update.group_source_not_null, sink_info.aggregate_contract,
-	    aggregate_update.payload_descriptors, payload_lanes, reduction_lanes, grouped_state.perfect_hash_layout,
-	    aggregate_input, nullptr, aggregate_input.size(), payload_scratch);
+	    aggregate_update.payload_descriptors, aggregate_update.payload_source_layout,
+	    aggregate_update.combined_payload_source_indices, aggregate_update.combined_payload_source_not_null,
+	    payload_lanes, reduction_lanes, grouped_state.perfect_hash_layout, aggregate_input, nullptr,
+	    aggregate_input.size(), payload_scratch);
 	RecordSljitRegionStageRuntime(runtime, op_idx, op.kind, "primitive_payload_update_fused", payload_stage_start);
 	RecordSljitRegionMaterializationElisionPath(runtime, op.kind, "join_output_perfect_hash_payload_update",
 	                                            aggregate_input.size());
@@ -127,9 +129,9 @@ static bool SljitDirectJoinOutputAggregatePayloadSourcesValid(const SljitJoinPro
 		return true;
 	}
 	if (descriptor.payload_source_layout == SljitAggregatePayloadSourceLayout::FUSED_COMBINED) {
-		if (SljitGetFusedTypedPayloadSourceOverrideStatus(aggregate_update, aggregate_input,
-		                                                  descriptor.payload_source_indices) ==
-		    SljitFusedTypedPayloadSourceOverrideStatus::READY) {
+		if (SljitGetFusedPayloadSourceOverrideStatus(aggregate_update, aggregate_input,
+		                                             descriptor.payload_source_indices) ==
+		    SljitFusedPayloadSourceOverrideStatus::READY) {
 			return true;
 		}
 		if (failure_reason) {
@@ -268,7 +270,8 @@ static bool SljitTryExecuteDirectJoinOutputAggregate(
 		}
 		SljitExecuteNativeUngroupedAggregateUpdateWithPayloads(
 		    runtime, runtime.ExecutionOperators(), scratch, strategy.aggregate_idx, aggregate_op, aggregate_input,
-		    descriptor.remapped_payloads, "join_output_ungrouped_payload_update",
+		    descriptor.remapped_payloads, descriptor.payload_source_layout, descriptor.payload_source_indices,
+		    descriptor.payload_source_not_null, "join_output_ungrouped_payload_update",
 		    "join_output_ungrouped_payload_update");
 		RecordSljitRegionMaterializationElisionPath(runtime, aggregate_op.kind, "join_output_ungrouped_update",
 		                                            aggregate_input.size());

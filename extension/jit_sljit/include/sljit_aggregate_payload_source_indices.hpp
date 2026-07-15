@@ -8,11 +8,9 @@
 
 #pragma once
 
-#include "sljit_aggregate_fused_payload_sources.hpp"
+#include "sljit_region_executable.hpp"
 
 namespace duckdb {
-
-enum class SljitAggregatePayloadSourceLayout : uint8_t { DIRECT_PER_LANE, FUSED_COMBINED };
 
 template <class HANDLE_COUNT_STAR, class HANDLE_FUSED_SOURCE, class CHECK_DIRECT_PAYLOAD, class HANDLE_DIRECT_PAYLOAD,
           class SET_BLOCKER>
@@ -23,12 +21,12 @@ static bool SljitTryBuildAggregatePayloadSourceIndices(
     CHECK_DIRECT_PAYLOAD &&check_direct_payload, HANDLE_DIRECT_PAYLOAD &&handle_direct_payload,
     SET_BLOCKER &&set_blocker) {
 	source_layout = SljitAggregatePayloadSourceLayout::DIRECT_PER_LANE;
-	vector<idx_t> fused_payload_sources;
-	if (SljitFusedAggregatePayloadsUseTypedExpressionTrees(aggregate_update.payloads,
-	                                                       aggregate_update.payload_descriptors) &&
-	    SljitTryGetFusedTypedPayloadCombinedSources(aggregate_update.payloads, aggregate_update.payload_descriptors,
-	                                                fused_payload_sources)) {
-		for (auto source_idx : fused_payload_sources) {
+	if (aggregate_update.payload_source_layout == SljitAggregatePayloadSourceLayout::FUSED_COMBINED) {
+		if (aggregate_update.combined_payload_source_not_null.size() !=
+		    aggregate_update.combined_payload_source_indices.size()) {
+			throw InternalException("SLJIT fused aggregate payload source layout is not normalized");
+		}
+		for (auto source_idx : aggregate_update.combined_payload_source_indices) {
 			if (!handle_fused_source(source_idx)) {
 				return false;
 			}

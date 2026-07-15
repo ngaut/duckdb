@@ -103,7 +103,7 @@ static void SljitRequireAggregatePayloadPrimitiveLane(const ExecutionPrimitiveAg
 	}
 }
 
-static void SljitValidateTypedAggregatePayloadPlan(const SljitNativeRegionExpressionPlan &plan,
+static void SljitValidateFusedAggregatePayloadPlan(const SljitNativeRegionExpressionPlan &plan,
                                                    const vector<idx_t> &source_indices, PhysicalType payload_type,
                                                    const char *out_of_range_message,
                                                    const char *unsupported_payload_message,
@@ -143,7 +143,7 @@ static void SljitValidateUngroupedPrimitiveLaneState(const ExecutionPrimitiveAgg
 	}
 }
 
-static void SljitPrepareTypedAggregatePayloadSources(DataChunk &input, const vector<idx_t> &source_indices,
+static void SljitPrepareFusedAggregatePayloadSources(DataChunk &input, const vector<idx_t> &source_indices,
                                                      const SelectionVector *execute_sel, idx_t count,
                                                      SljitSourceVectorScratch &payload_sources,
                                                      const char *out_of_range_message,
@@ -155,7 +155,7 @@ static void SljitPrepareTypedAggregatePayloadSources(DataChunk &input, const vec
 	}
 }
 
-static void SljitBindTypedAggregatePayloadSources(SljitNativeVectorInput &native_input,
+static void SljitBindFusedAggregatePayloadSources(SljitNativeVectorInput &native_input,
                                                   SljitSourceVectorScratch &payload_sources,
                                                   const SelectionVector *execute_sel) {
 	const auto native_execute_sel = execute_sel ? execute_sel->data() : nullptr;

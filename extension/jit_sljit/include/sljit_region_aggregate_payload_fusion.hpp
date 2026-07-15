@@ -131,7 +131,7 @@ static bool SljitGroupedStateAddressTypedPayloadsSupported(const ExecutionRegion
 		auto &aggregate = sink.aggregates[payload_idx];
 		auto &payload = payloads[payload_idx];
 		SljitAggregatePayloadDescriptor descriptor;
-		if (!SljitFusedGroupedTypedAggregatePayloadSupported(payload, aggregate, contract, &descriptor)) {
+		if (!SljitFusedGroupedAggregatePayloadSupported(payload, aggregate, contract, &descriptor)) {
 			return false;
 		}
 		if (descriptor.primitive_kind == AggregatePrimitiveUpdateKind::COUNT_STAR ||
@@ -341,14 +341,13 @@ static bool SljitPerfectHashGroupLookupSupported(
 		return true;
 	}
 
-	SljitFusedTypedAggregateCodegenPlan typed_plan;
-	if (!BuildSljitFusedTypedAggregateCodegenPlan(payloads, sink.aggregates, typed_plan,
-	                                              !primitive_group_lookup_supported)) {
+	SljitFusedAggregateCodegenPlan codegen_plan;
+	if (!BuildSljitFusedAggregateCodegenPlan(payloads, sink.aggregates, codegen_plan)) {
 		return false;
 	}
 	for (idx_t payload_idx = 0; payload_idx < payloads.size(); payload_idx++) {
-		if (!SljitFusedGroupedTypedAggregatePayloadSupported(payloads[payload_idx], sink.aggregates[payload_idx],
-		                                                     contract)) {
+		if (!SljitFusedGroupedAggregatePayloadSupported(payloads[payload_idx], sink.aggregates[payload_idx],
+		                                                contract)) {
 			return false;
 		}
 	}

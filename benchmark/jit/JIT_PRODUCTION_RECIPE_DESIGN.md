@@ -1,6 +1,6 @@
 # JIT Production Recipe Architecture
 
-Last updated: 2026-07-14
+Last updated: 2026-07-16
 
 This is the active architecture contract for DuckDB execution-region JIT. It
 defines ownership, admission, runtime-view, and accounting rules. It is not a
@@ -155,6 +155,18 @@ the original sink indexes. Initializers require `UNBOUND`, composition requires
 a bound state, and successful composition always publishes
 `PROJECTION_COMPOSED`. No pass infers ownership from expression shape: a fused
 projection can legitimately simplify to a list containing only references.
+
+Generated aggregate payloads also publish one explicit source-layout contract.
+`DIRECT_PER_LANE` means each payload descriptor names its own runtime input;
+`FUSED_COMBINED` means codegen normalized every payload and group expression
+onto one combined source vector. The executable aggregate owns that layout,
+the combined source indexes, and their nullability facts for its full lifetime.
+Runtime adapters consume the published contract; they never infer layout from
+whether an expression happens to be a reference or rebuild combined sources per
+chunk. Projection and selected-join views remap the complete contract together.
+An empty combined source vector is valid for a count-star-only kernel. This
+lets direct-reference and computed payloads share the canonical fused backend
+without making expression syntax an execution-route decision.
 
 Grouped runtime strategies bind descriptors to DuckDB's live primitive lanes
 through `SljitGroupedReductionLaneBinding`. That binding owns the single check
@@ -961,6 +973,17 @@ reason. This keeps capability truth separate from a representation-dependent
 performance choice and lets the same native lowering serve high-cardinality
 sources without charging low-cardinality queries for analysis they will not
 use.
+
+The same separation applies to aggregate backend capability. A generated
+perfect-hash reducer remains a valid backend even when its production economics
+are weak. When the region contains only reference/compression/cast glue, has a
+string-compressed perfect-hash group, and updates only reference or count-star
+payloads, SLJIT publishes a weak-backend cost fact. DuckDB core then removes
+generated-stage and materialization credit and keeps the vectorized runner
+unless independent generated work can amortize lookup. A filter, join, computed
+payload, or another real generated stage changes the measurable work facts and
+is costed normally. This boundary is operator- and expression-driven; it does
+not name a query, schema, or benchmark.
 
 Physical-pipeline upper bounds and post-lowering candidate costs use the same
 materialization-elision rule for generated projection-to-aggregate pipelines.

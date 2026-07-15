@@ -317,7 +317,7 @@ void EmitSljitPerfectHashPayloadUpdates(const SljitPerfectHashFusedUpdateEmitCon
 			                                 binary_shared_value_reg, context.binary_shared_value_offset,
 			                                 shared_index_mode, context.overflows, options.payload_data_hoists);
 		} else if (payloads[payload_idx].kind == SljitNativeRegionExpressionKind::REFERENCE) {
-			payload_invalid = EmitLoadFusedTypedAggregateReferenceValue(
+			payload_invalid = EmitLoadFusedAggregateReferenceValue(
 			    compiler, payloads[payload_idx], !options.fast_path && !options.no_source_selection, !options.all_valid,
 			    SLJIT_S3, options.payload_data_hoists);
 		} else {

@@ -26,8 +26,8 @@ static constexpr sljit_s32 SLJIT_UNGROUPED_CONDITIONAL_LOWER_REG = SLJIT_R0;
 static constexpr sljit_s32 SLJIT_UNGROUPED_CONDITIONAL_UPPER_REG = SLJIT_R0;
 #endif
 
-struct SljitUngroupedTypedAggregateUpdatePlan {
-	SljitFusedTypedAggregateCodegenPlan codegen_plan;
+struct SljitUngroupedFusedAggregateUpdatePlan {
+	SljitFusedAggregateCodegenPlan codegen_plan;
 	vector<sljit_sw> local_sum_offsets;
 	vector<sljit_sw> local_sum_upper_offsets;
 	vector<sljit_sw> saw_value_offsets;
@@ -42,8 +42,8 @@ struct SljitUngroupedTypedAggregateUpdatePlan {
 	sljit_s32 saved_register_count = 0;
 };
 
-bool TryBuildSljitUngroupedTypedAggregateUpdatePlan(const vector<SljitNativeRegionExpressionPlan> &payloads,
+bool TryBuildSljitUngroupedFusedAggregateUpdatePlan(const vector<SljitNativeRegionExpressionPlan> &payloads,
                                                     const vector<ExecutionRegionAggregateInput> &aggregates,
-                                                    SljitUngroupedTypedAggregateUpdatePlan &result, string &error);
+                                                    SljitUngroupedFusedAggregateUpdatePlan &result, string &error);
 
 } // namespace duckdb

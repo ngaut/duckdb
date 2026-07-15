@@ -19,6 +19,9 @@ struct SljitGroupedStateAddressUpdateState {
 	SljitNativeAggregateUpdateFunction function = nullptr;
 	const ExecutionRegionAggregateContract *contract = nullptr;
 	const vector<SljitAggregatePayloadDescriptor> *payload_descriptors = nullptr;
+	SljitAggregatePayloadSourceLayout payload_source_layout = SljitAggregatePayloadSourceLayout::DIRECT_PER_LANE;
+	const vector<idx_t> *combined_payload_source_indices = nullptr;
+	const vector<bool> *combined_payload_source_not_null = nullptr;
 	const vector<const ExecutionPrimitiveAggregateUpdateLane *> *lanes = nullptr;
 	const vector<SljitGroupedReductionLaneBinding> *reduction_lanes = nullptr;
 	DataChunk *input = nullptr;
@@ -40,6 +43,9 @@ SljitBuildGroupedStateAddressUpdateState(SljitExecutableRegionOp &op, DataChunk 
 	update_state.function = aggregate_update.fused_payload_update.Function();
 	update_state.contract = &aggregate_update.plan.sink_info.aggregate_contract;
 	update_state.payload_descriptors = &aggregate_update.payload_descriptors;
+	update_state.payload_source_layout = aggregate_update.payload_source_layout;
+	update_state.combined_payload_source_indices = &aggregate_update.combined_payload_source_indices;
+	update_state.combined_payload_source_not_null = &aggregate_update.combined_payload_source_not_null;
 	update_state.lanes = &payload_lanes;
 	update_state.reduction_lanes = &reduction_lanes;
 	update_state.input = &payload_input;
@@ -52,14 +58,16 @@ SljitBuildGroupedStateAddressUpdateState(SljitExecutableRegionOp &op, DataChunk 
 static void SljitExecuteGroupedSelectedStateAddressUpdate(const uintptr_t *addresses, const sel_t *address_sel,
                                                           const sel_t *execute_sel, idx_t count, void *state_p) {
 	auto &state = *reinterpret_cast<SljitGroupedStateAddressUpdateState *>(state_p);
-	if (!state.payloads || !state.function || !state.contract || !state.payload_descriptors || !state.lanes ||
+	if (!state.payloads || !state.function || !state.contract || !state.payload_descriptors ||
+	    !state.combined_payload_source_indices || !state.combined_payload_source_not_null || !state.lanes ||
 	    !state.reduction_lanes || !state.input || !state.adapter_scratch) {
 		throw InternalException("SLJIT grouped selected state-address callback is incomplete");
 	}
 	SelectionVector execute_selection(const_cast<sel_t *>(execute_sel), execute_sel ? count : 0);
 	const bool state_addresses_by_loop_index = execute_sel && !address_sel;
 	SljitExecuteFusedGroupedPrimitiveAggregatePayloadUpdate(
-	    *state.payloads, state.function, *state.contract, *state.payload_descriptors, *state.lanes,
+	    *state.payloads, state.function, *state.contract, *state.payload_descriptors, state.payload_source_layout,
+	    *state.combined_payload_source_indices, *state.combined_payload_source_not_null, *state.lanes,
 	    *state.reduction_lanes, *state.input, addresses, address_sel, execute_sel ? &execute_selection : nullptr,
 	    state_addresses_by_loop_index, count, *state.adapter_scratch, state.input_source_indices_override,
 	    state.input_source_not_null_override);

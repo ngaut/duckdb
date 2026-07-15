@@ -7,7 +7,13 @@ import unittest
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from generic_benchmark import GENERIC_WORKLOADS, minimum_auto_speedup, policy_order, verification_failures
+from generic_benchmark import (
+    GENERIC_WORKLOADS,
+    maximum_auto_median_us,
+    minimum_auto_speedup,
+    policy_order,
+    verification_failures,
+)
 
 
 class TestPolicyOrder(unittest.TestCase):
@@ -50,11 +56,56 @@ class TestSpeedupFloors(unittest.TestCase):
         self.assertEqual(
             floors,
             {
-                "grouped_sorted_runs": 3.10,
-                "grouped_affine_sorted_runs": 2.75,
+                "grouped_sorted_runs": 3.00,
+                "grouped_affine_sorted_runs": 2.65,
                 "grouped_sparse_sorted_runs": 2.35,
             },
         )
+
+    def test_grouped_run_raw_ceilings_track_generated_runtime(self) -> None:
+        ceilings = {
+            workload["name"]: maximum_auto_median_us(workload, 1)
+            for workload in GENERIC_WORKLOADS
+            if workload["name"] in {"grouped_sorted_runs", "grouped_affine_sorted_runs"}
+        }
+        self.assertEqual(ceilings, {"grouped_sorted_runs": 33500, "grouped_affine_sorted_runs": 37000})
+
+
+class TestPerformanceGates(unittest.TestCase):
+    def test_raw_auto_ceiling_is_independent_of_speedup_normalization(self) -> None:
+        workload = {
+            "name": "raw_runtime_guard",
+            "minimum_auto_speedup": 2.0,
+            "maximum_auto_median_us_by_threads": {1: 37000},
+            "max_auto_slowdown": 1.05,
+            "requires_compiled_auto": True,
+        }
+        summary = [
+            {
+                "workload": "raw_runtime_guard",
+                "policy": "off",
+                "correctness_diff": 0,
+                "median_s": 0.100,
+                "speedup_vs_off_median": 1.0,
+            },
+            {
+                "workload": "raw_runtime_guard",
+                "policy": "auto",
+                "correctness_diff": 0,
+                "median_s": 0.040,
+                "speedup_vs_off_median": 2.5,
+                "compile_errors": 0,
+                "compiled_regions": 1,
+                "runtime_events": 1,
+            },
+        ]
+        failures = verification_failures(summary, [], (workload,), 1, False)
+        self.assertTrue(any("exceeds raw ceiling" in failure for failure in failures))
+
+        summary[1]["median_s"] = 0.036
+        summary[1]["speedup_vs_off_median"] = 1.5
+        failures = verification_failures(summary, [], (workload,), 1, False)
+        self.assertTrue(any("below required" in failure for failure in failures))
 
     def test_scan_like_floors_track_normal_form_selection_promotion(self) -> None:
         workload = next(workload for workload in GENERIC_WORKLOADS if workload["name"] == "scan_like_fragments")

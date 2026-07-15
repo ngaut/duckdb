@@ -260,6 +260,72 @@ static bool SljitRegionPlanHasWeakStringSetSourceHashBuild(const vector<SljitNat
 	return has_filter;
 }
 
+static bool SljitRegionPlanExpressionIsPerfectHashReferenceGlue(const SljitNativeRegionExpressionPlan &expression) {
+	switch (expression.kind) {
+	case SljitNativeRegionExpressionKind::REFERENCE:
+	case SljitNativeRegionExpressionKind::INTEGRAL_COMPRESS:
+	case SljitNativeRegionExpressionKind::INTEGER_CAST:
+	case SljitNativeRegionExpressionKind::STRING_COMPRESS:
+		return true;
+	default:
+		return false;
+	}
+}
+
+static bool
+SljitRegionPlanExpressionsArePerfectHashReferenceGlue(const vector<SljitNativeRegionExpressionPlan> &expressions) {
+	for (auto &expression : expressions) {
+		if (!SljitRegionPlanExpressionIsPerfectHashReferenceGlue(expression)) {
+			return false;
+		}
+	}
+	return true;
+}
+
+static bool SljitRegionPlanAggregateHasOnlyReferencePayloads(const SljitNativeAggregateUpdatePlan &aggregate) {
+	auto &aggregates = aggregate.sink_info.aggregates;
+	if (aggregate.payloads.size() != aggregates.size()) {
+		return false;
+	}
+	for (idx_t payload_idx = 0; payload_idx < aggregate.payloads.size(); payload_idx++) {
+		auto &payload = aggregate.payloads[payload_idx];
+		auto &aggregate_input = aggregates[payload_idx];
+		if (aggregate_input.primitive_update_kind == AggregatePrimitiveUpdateKind::COUNT_STAR) {
+			if (payload.kind != SljitNativeRegionExpressionKind::CONSTANT) {
+				return false;
+			}
+			continue;
+		}
+		if (payload.kind != SljitNativeRegionExpressionKind::REFERENCE) {
+			return false;
+		}
+	}
+	return true;
+}
+
+static bool SljitRegionPlanHasReferenceOnlyStringPerfectHashAggregate(const vector<SljitNativeRegionOpPlan> &ops) {
+	if (ops.empty() || ops.back().kind != SljitNativeRegionOpKind::AGGREGATE_UPDATE) {
+		return false;
+	}
+	for (idx_t op_idx = 0; op_idx + 1 < ops.size(); op_idx++) {
+		auto &op = ops[op_idx];
+		if (op.kind != SljitNativeRegionOpKind::PROJECTION ||
+		    !SljitRegionPlanExpressionsArePerfectHashReferenceGlue(op.projections)) {
+			return false;
+		}
+	}
+	auto &aggregate = ops.back().aggregate_update;
+	bool has_string_group_compression = false;
+	for (auto &group_expression : aggregate.group_expressions) {
+		has_string_group_compression =
+		    has_string_group_compression || group_expression.kind == SljitNativeRegionExpressionKind::STRING_COMPRESS;
+	}
+	return aggregate.sink_info.aggregate_contract.kind == ExecutionRegionAggregateOperatorKind::PERFECT_HASH &&
+	       aggregate.use_perfect_hash_group_lookup && has_string_group_compression &&
+	       SljitRegionPlanExpressionsArePerfectHashReferenceGlue(aggregate.group_expressions) &&
+	       SljitRegionPlanAggregateHasOnlyReferencePayloads(aggregate);
+}
+
 void DisableSljitRegionFlatNullableFastPath(SljitNativeRegionPlan &region) {
 	auto set_expression = [&](SljitNativeRegionExpressionPlan &expr) {
 		expr.emit_flat_nullable_fast_path = false;
@@ -308,6 +374,9 @@ void AddSljitNativeRegionCapabilityFacts(ExecutionRegionLoweringPlan &lowering_p
 	const bool direct_source_hash_build = SljitRegionPlanHasDirectSourceHashBuild(native_region.ops);
 	if (SljitRegionPlanHasWeakStringSetSourceHashBuild(native_region.ops)) {
 		lowering_plan.AddBackendWeakAcceleratedWorkCapability();
+	}
+	if (SljitRegionPlanHasReferenceOnlyStringPerfectHashAggregate(native_region.ops)) {
+		lowering_plan.AddBackendReferenceOnlyStringPerfectHashAggregateCapability();
 	}
 	for (auto not_null : native_region.source_not_null) {
 		lowering_plan.AddBackendSourceValidityCapability(not_null);

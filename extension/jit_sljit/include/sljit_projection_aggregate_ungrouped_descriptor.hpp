@@ -105,12 +105,13 @@ static bool SljitTryBuildUngroupedAggregateRequiredProjectionOutputs(
 	}
 
 	required_projection_outputs.assign(projection_op.projections.size(), 0);
-	vector<idx_t> combined_sources;
 	if (aggregate_update.fused_payload_update.Function() &&
-	    SljitFusedAggregatePayloadsUseTypedExpressionTrees(aggregate_update.payloads,
-	                                                       aggregate_update.payload_descriptors) &&
-	    SljitTryGetFusedTypedPayloadCombinedSources(aggregate_update.payloads, aggregate_update.payload_descriptors,
-	                                                combined_sources)) {
+	    aggregate_update.payload_source_layout == SljitAggregatePayloadSourceLayout::FUSED_COMBINED) {
+		if (aggregate_update.combined_payload_source_not_null.size() !=
+		    aggregate_update.combined_payload_source_indices.size()) {
+			throw InternalException("SLJIT fused projection aggregate payload source layout is not normalized");
+		}
+		auto &combined_sources = aggregate_update.combined_payload_source_indices;
 		for (auto source_idx : combined_sources) {
 			if (!SljitTryMarkProjectionAggregateRequiredOutput(projection_op, source_idx,
 			                                                   required_projection_outputs)) {
@@ -118,7 +119,7 @@ static bool SljitTryBuildUngroupedAggregateRequiredProjectionOutputs(
 			}
 		}
 		if (fused_payload_sources) {
-			*fused_payload_sources = std::move(combined_sources);
+			*fused_payload_sources = combined_sources;
 		}
 		return true;
 	}
@@ -174,7 +175,7 @@ static bool SljitTryBuildRemappedUngroupedAggregatePayloads(
 		remapped_payloads.emplace_back();
 		SljitBuildBorrowedProjectionExpression(payload, remapped_payloads.back());
 	}
-	if (aggregate_update.fused_payload_update.Function() && !fused_payload_sources.empty()) {
+	if (aggregate_update.payload_source_layout == SljitAggregatePayloadSourceLayout::FUSED_COMBINED) {
 		vector<idx_t> compact_sources;
 		compact_sources.reserve(fused_payload_sources.size());
 		for (auto source_idx : fused_payload_sources) {
@@ -186,9 +187,7 @@ static bool SljitTryBuildRemappedUngroupedAggregatePayloads(
 		}
 		for (auto &payload : remapped_payloads) {
 			payload.input_source_indices = compact_sources;
-			if (payload.input_source_not_null.size() != compact_sources.size()) {
-				payload.input_source_not_null.assign(compact_sources.size(), false);
-			}
+			payload.input_source_not_null = aggregate_update.combined_payload_source_not_null;
 		}
 		return true;
 	}
@@ -240,6 +239,14 @@ static bool SljitTryBuildProjectionUngroupedAggregateDescriptor(
 	        aggregate_op.aggregate_update, aggregate_op.aggregate_update.plan.sink_info.aggregates, projection_to_input,
 	        fused_payload_sources, descriptor.remapped_payloads)) {
 		return descriptor.Block("ungrouped_payload_remap");
+	}
+	descriptor.payload_source_layout = aggregate_op.aggregate_update.payload_source_layout;
+	if (descriptor.payload_source_layout == SljitAggregatePayloadSourceLayout::FUSED_COMBINED) {
+		if (descriptor.remapped_payloads.empty()) {
+			return descriptor.Block("ungrouped_payload_sources");
+		}
+		descriptor.payload_source_indices = descriptor.remapped_payloads.front().input_source_indices;
+		descriptor.payload_source_not_null = descriptor.remapped_payloads.front().input_source_not_null;
 	}
 	descriptor.MarkReady();
 	return true;

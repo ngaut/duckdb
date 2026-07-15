@@ -53,12 +53,12 @@ SljitExecuteFilteredPrimitiveAggregateUpdate(SljitExecutableFilteredAggregateUpd
 	}
 
 	auto &payload_sources = adapter_scratch.payload_sources;
-	SljitPrepareTypedAggregatePayloadSources(
+	SljitPrepareFusedAggregatePayloadSources(
 	    input, filtered_update.input_source_indices, nullptr, count, payload_sources,
 	    "SLJIT filtered aggregate expression-tree source is out of range", &filtered_update.input_source_not_null);
 
 	SljitNativeVectorInput native_input;
-	SljitBindTypedAggregatePayloadSources(native_input, payload_sources, nullptr);
+	SljitBindFusedAggregatePayloadSources(native_input, payload_sources, nullptr);
 	native_input.aggregate_int64_values = aggregate_int64_values.data();
 	native_input.aggregate_hugeint_values = aggregate_hugeint_values.data();
 	native_input.aggregate_state_is_sets = aggregate_state_is_sets.data();

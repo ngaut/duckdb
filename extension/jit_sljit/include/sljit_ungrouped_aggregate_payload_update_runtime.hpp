@@ -18,7 +18,9 @@ namespace duckdb {
 static SinkResultType SljitExecuteNativeUngroupedAggregateUpdateWithPayloads(
     ExecutionRegionRuntime &runtime, ExecutionOperatorRuntime &native_runtime, SljitRegionExecutionScratch &scratch,
     idx_t op_idx, SljitExecutableRegionOp &op, DataChunk &payload_input,
-    vector<SljitExecutableRegionExpression> &payloads, const char *stage_name, const char *runtime_path) {
+    vector<SljitExecutableRegionExpression> &payloads, SljitAggregatePayloadSourceLayout payload_source_layout,
+    const vector<idx_t> &combined_payload_source_indices, const vector<bool> &combined_payload_source_not_null,
+    const char *stage_name, const char *runtime_path) {
 	auto &sink_info = op.aggregate_update.plan.sink_info;
 	if (sink_info.kind != ExecutionRegionSinkKind::UNGROUPED_AGGREGATE_UPDATE ||
 	    !op.aggregate_update.plan.UsesPrimitivePayloads() || op.aggregate_update.plan.use_grouped_state_addresses) {
@@ -46,9 +48,10 @@ static SinkResultType SljitExecuteNativeUngroupedAggregateUpdateWithPayloads(
 	auto &payload_scratch = scratch.AggregatePayloadScratch(op_idx);
 	if (op.aggregate_update.fused_payload_update.Function()) {
 		auto payload_stage_start = SljitRegionStageStart(runtime);
-		SljitExecuteFusedPrimitiveAggregatePayloadUpdate(payloads, op.aggregate_update.fused_payload_update.Function(),
-		                                                 op.aggregate_update.payload_descriptors, payload_lanes,
-		                                                 payload_input, nullptr, payload_input.size(), payload_scratch);
+		SljitExecuteFusedPrimitiveAggregatePayloadUpdate(
+		    payloads, op.aggregate_update.fused_payload_update.Function(), op.aggregate_update.payload_descriptors,
+		    payload_source_layout, combined_payload_source_indices, combined_payload_source_not_null, payload_lanes,
+		    payload_input, nullptr, payload_input.size(), payload_scratch);
 		RecordSljitRegionStageRuntime(runtime, op_idx, op.kind, stage_name, payload_stage_start);
 	} else {
 		for (idx_t payload_idx = 0; payload_idx < aggregates.size(); payload_idx++) {

@@ -20,11 +20,12 @@
 
 namespace duckdb {
 
-unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativeUngroupedFusedTypedExpressionAggregateUpdate(
-    const vector<SljitNativeRegionExpressionPlan> &payloads, const vector<ExecutionRegionAggregateInput> &aggregates,
-    SljitNativeAggregateUpdateFunction &function, string &error) {
-	SljitUngroupedTypedAggregateUpdatePlan update_plan;
-	if (!TryBuildSljitUngroupedTypedAggregateUpdatePlan(payloads, aggregates, update_plan, error)) {
+unique_ptr<ExecutionRegionCodeHandle>
+BuildSljitNativeUngroupedFusedAggregateUpdate(const vector<SljitNativeRegionExpressionPlan> &payloads,
+                                              const vector<ExecutionRegionAggregateInput> &aggregates,
+                                              SljitNativeAggregateUpdateFunction &function, string &error) {
+	SljitUngroupedFusedAggregateUpdatePlan update_plan;
+	if (!TryBuildSljitUngroupedFusedAggregateUpdatePlan(payloads, aggregates, update_plan, error)) {
 		return nullptr;
 	}
 
@@ -245,7 +246,7 @@ unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativeUngroupedFusedTypedExpress
 			vector<sljit_jump *> payload_skip_jumps;
 			if (payloads[payload_idx].kind == SljitNativeRegionExpressionKind::REFERENCE) {
 				auto source_is_null =
-				    EmitLoadFusedTypedAggregateReferenceValue(compiler, payloads[payload_idx], true, true, SLJIT_S3);
+				    EmitLoadFusedAggregateReferenceValue(compiler, payloads[payload_idx], true, true, SLJIT_S3);
 				if (source_is_null) {
 					payload_skip_jumps.push_back(source_is_null);
 				}

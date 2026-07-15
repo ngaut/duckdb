@@ -8,7 +8,6 @@
 
 #pragma once
 
-#include "sljit_aggregate_fused_payload_sources.hpp"
 #include "sljit_aggregate_payload_lane_runtime.hpp"
 #include "sljit_grouped_reduction_lane.hpp"
 #include "sljit_region_runtime_state.hpp"
@@ -16,16 +15,6 @@
 #include "duckdb/common/vector/dictionary_vector.hpp"
 
 namespace duckdb {
-
-static bool
-SljitPerfectHashGroupExpressionsUseTypedTree(const vector<SljitNativeRegionExpressionPlan> &group_expressions) {
-	for (auto &group_expression : group_expressions) {
-		if (group_expression.kind == SljitNativeRegionExpressionKind::TYPED_EXPRESSION_TREE) {
-			return true;
-		}
-	}
-	return false;
-}
 
 static bool SljitTryPreparePerfectHashStringDictionaryContributions(
     idx_t count, const SljitNativeRegionExpressionPlan &group_expression, Vector &group_source,
@@ -76,6 +65,8 @@ static void SljitExecuteFusedPerfectHashGroupedPrimitiveAggregatePayloadUpdate(
     const vector<ExecutionRegionGroupInput> &groups, const vector<SljitNativeRegionExpressionPlan> &group_expressions,
     const vector<bool> &group_source_not_null, const ExecutionRegionAggregateContract &contract,
     const vector<SljitAggregatePayloadDescriptor> &payload_descriptors,
+    SljitAggregatePayloadSourceLayout payload_source_layout, const vector<idx_t> &combined_payload_sources,
+    const vector<bool> &combined_payload_source_not_null,
     const vector<const ExecutionPrimitiveAggregateUpdateLane *> &lanes,
     const vector<SljitGroupedReductionLaneBinding> &reduction_lanes,
     const ExecutionPerfectAggregateStateAddressLayout &layout, DataChunk &input, const SelectionVector *execute_sel,
@@ -107,15 +98,13 @@ static void SljitExecuteFusedPerfectHashGroupedPrimitiveAggregatePayloadUpdate(
 		throw InternalException("SLJIT fused perfect-hash aggregate primitive lane layout mismatch");
 	}
 
-	const bool typed_payloads = SljitFusedAggregatePayloadsUseTypedExpressionTrees(payloads, payload_descriptors) ||
-	                            SljitPerfectHashGroupExpressionsUseTypedTree(group_expressions);
-	optional_ptr<const vector<idx_t>> combined_sources;
-	if (typed_payloads) {
-		combined_sources = SljitRequireFusedTypedPayloadCombinedSourceIndices(
-		    payloads, payload_descriptors, "SLJIT fused perfect-hash typed aggregate payload is missing sources",
-		    "SLJIT fused perfect-hash typed aggregate payload sources are not normalized",
-		    "SLJIT fused perfect-hash typed aggregate payload has no typed payloads");
-		adapter_scratch.PreparePerfectHash(combined_sources->size(), groups.size());
+	const bool uses_combined_payload_sources =
+	    payload_source_layout == SljitAggregatePayloadSourceLayout::FUSED_COMBINED;
+	if (uses_combined_payload_sources) {
+		if (combined_payload_source_not_null.size() != combined_payload_sources.size()) {
+			throw InternalException("SLJIT fused perfect-hash aggregate payload source facts are not normalized");
+		}
+		adapter_scratch.PreparePerfectHash(combined_payload_sources.size(), groups.size());
 	} else {
 		adapter_scratch.PreparePerfectHash(payloads.size(), groups.size());
 	}
@@ -134,7 +123,7 @@ static void SljitExecuteFusedPerfectHashGroupedPrimitiveAggregatePayloadUpdate(
 			throw InternalException("SLJIT fused perfect-hash aggregate group expression is unsupported");
 		}
 		if (group_expression.kind == SljitNativeRegionExpressionKind::TYPED_EXPRESSION_TREE) {
-			if (!typed_payloads || !group_expression.expression_tree) {
+			if (!uses_combined_payload_sources || !group_expression.expression_tree) {
 				throw InternalException("SLJIT fused perfect-hash typed aggregate group expression is unsupported");
 			}
 			continue;
@@ -167,12 +156,10 @@ static void SljitExecuteFusedPerfectHashGroupedPrimitiveAggregatePayloadUpdate(
 	}
 
 	auto &payload_sources = adapter_scratch.payload_sources;
-	if (typed_payloads) {
-		SljitPrepareTypedAggregatePayloadSources(
-		    input, *combined_sources, execute_sel, count, payload_sources,
-		    "SLJIT fused perfect-hash typed aggregate source is out of range",
-		    SljitGetFusedTypedPayloadCombinedSourceNotNull(payloads, payload_descriptors, combined_sources->size())
-		        .get());
+	if (uses_combined_payload_sources) {
+		SljitPrepareFusedAggregatePayloadSources(input, combined_payload_sources, execute_sel, count, payload_sources,
+		                                         "SLJIT fused perfect-hash aggregate source is out of range",
+		                                         &combined_payload_source_not_null);
 	}
 	for (idx_t payload_idx = 0; payload_idx < payloads.size(); payload_idx++) {
 		auto &descriptor = payload_descriptors[payload_idx];
@@ -184,11 +171,11 @@ static void SljitExecuteFusedPerfectHashGroupedPrimitiveAggregatePayloadUpdate(
 		}
 		SljitRequireAggregatePayloadPrimitiveLane(
 		    lane, "SLJIT fused perfect-hash aggregate primitive lane has unsupported state kind");
-		if (typed_payloads) {
-			SljitValidateTypedAggregatePayloadPlan(
-			    plan, *combined_sources, lane.payload_type,
-			    "SLJIT fused perfect-hash typed aggregate source is out of range",
-			    "SLJIT fused perfect-hash typed aggregate payload is unsupported",
+		if (uses_combined_payload_sources) {
+			SljitValidateFusedAggregatePayloadPlan(
+			    plan, combined_payload_sources, lane.payload_type,
+			    "SLJIT fused perfect-hash aggregate source is out of range",
+			    "SLJIT fused perfect-hash aggregate payload is unsupported",
 			    "SLJIT fused perfect-hash aggregate primitive payload type mismatch");
 		} else {
 			if (plan.kind != SljitNativeRegionExpressionKind::REFERENCE || plan.source_index >= input.ColumnCount()) {
@@ -198,7 +185,7 @@ static void SljitExecuteFusedPerfectHashGroupedPrimitiveAggregatePayloadUpdate(
 				throw InternalException("SLJIT fused perfect-hash aggregate primitive payload type mismatch");
 			}
 		}
-		if (typed_payloads) {
+		if (uses_combined_payload_sources) {
 			continue;
 		}
 		payload_sources.PrepareIntegerSource(
@@ -215,8 +202,9 @@ static void SljitExecuteFusedPerfectHashGroupedPrimitiveAggregatePayloadUpdate(
 	                                            : (dictionary_group_contributions_ready
 	                                                   ? nullptr
 	                                                   : payload_sources.CanonicalizeCommonSelection(group_sources));
-	const auto source_common_sel =
-	    typed_payloads && !native_execute_sel ? payload_sources.CanonicalizeCommonSourceSelection() : nullptr;
+	const auto source_common_sel = uses_combined_payload_sources && !native_execute_sel
+	                                   ? payload_sources.CanonicalizeCommonSourceSelection()
+	                                   : nullptr;
 	const bool flat_no_selection = payload_sources.FlatNoSelection(native_execute_sel, source_common_sel) &&
 	                               group_sources.FlatNoSelection(native_execute_sel, source_common_sel);
 	const bool all_valid = payload_sources.AllValid() && group_sources.AllValid();
@@ -227,18 +215,18 @@ static void SljitExecuteFusedPerfectHashGroupedPrimitiveAggregatePayloadUpdate(
 	native_input.execute_sel = native_execute_sel;
 	native_input.source_data_array = payload_sources.DataArray();
 	native_input.source_sel_array =
-	    typed_payloads ? payload_sources.SelectionArray() : payload_sources.SelectionArrayOrNull();
+	    uses_combined_payload_sources ? payload_sources.SelectionArray() : payload_sources.SelectionArrayOrNull();
 	native_input.source_common_sel = source_common_sel;
 	native_input.source_validity_array =
-	    typed_payloads ? payload_sources.ValidityArray() : payload_sources.ValidityArrayOrNull();
+	    uses_combined_payload_sources ? payload_sources.ValidityArray() : payload_sources.ValidityArrayOrNull();
 	native_input.group_data_array = group_sources.DataArray();
 	native_input.perfect_hash_dictionary_groups =
 	    dictionary_group_contributions_ready ? adapter_scratch.perfect_hash_dictionary_groups.data() : nullptr;
 	native_input.group_sel_array =
-	    typed_payloads ? group_sources.SelectionArray() : group_sources.SelectionArrayOrNull();
+	    uses_combined_payload_sources ? group_sources.SelectionArray() : group_sources.SelectionArrayOrNull();
 	native_input.group_validity_array =
-	    typed_payloads ? group_sources.ValidityArray() : group_sources.ValidityArrayOrNull();
-	if (typed_payloads) {
+	    uses_combined_payload_sources ? group_sources.ValidityArray() : group_sources.ValidityArrayOrNull();
+	if (uses_combined_payload_sources) {
 		native_input.expression_tree_flat_no_selection = flat_no_selection;
 		native_input.expression_tree_flat_all_valid = flat_all_valid;
 		native_input.expression_tree_all_valid = all_valid;

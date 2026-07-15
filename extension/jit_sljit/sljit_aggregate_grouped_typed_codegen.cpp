@@ -34,7 +34,7 @@ static bool BuildSljitGroupedFusedTypedAggregateCodegenPlan(const vector<SljitNa
 		auto &aggregate = aggregates[payload_idx];
 		auto &payload = payloads[payload_idx];
 		auto &descriptor = codegen_plan.payload_descriptors[payload_idx];
-		if (!SljitFusedGroupedTypedAggregatePayloadSupported(payload, aggregate, contract, &descriptor)) {
+		if (!SljitFusedGroupedAggregatePayloadSupported(payload, aggregate, contract, &descriptor)) {
 			return false;
 		}
 		if (descriptor.primitive_kind == AggregatePrimitiveUpdateKind::COUNT_STAR) {
@@ -124,7 +124,7 @@ unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativeGroupedFusedTypedExpressio
 					                                 shared_value_offset, SljitAggregateExpressionIndexMode::FLAT,
 					                                 overflows);
 				} else if (payload.kind == SljitNativeRegionExpressionKind::REFERENCE) {
-					EmitLoadFusedTypedAggregateReferenceValue(compiler, payload, false, false, SLJIT_S1);
+					EmitLoadFusedAggregateReferenceValue(compiler, payload, false, false, SLJIT_S1);
 				} else {
 					idx_t payload_spill_index = 0;
 					EmitSljitTypedExpressionTreeFastValueReg(compiler, *payload.expression_tree, payload_spill_index,
@@ -190,7 +190,7 @@ unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativeGroupedFusedTypedExpressio
 					                                 shared_value_offset, SljitAggregateExpressionIndexMode::SELECTED,
 					                                 overflows);
 				} else if (payload.kind == SljitNativeRegionExpressionKind::REFERENCE) {
-					EmitLoadFusedTypedAggregateReferenceValue(compiler, payload, true, false, SLJIT_S3);
+					EmitLoadFusedAggregateReferenceValue(compiler, payload, true, false, SLJIT_S3);
 				} else {
 					idx_t payload_spill_index = 0;
 					EmitSljitTypedExpressionTreeSelectedFastValueReg(compiler, *payload.expression_tree,
@@ -266,7 +266,7 @@ unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativeGroupedFusedTypedExpressio
 		auto &payload = payloads[payload_idx];
 		vector<sljit_jump *> payload_skip_jumps;
 		if (payload.kind == SljitNativeRegionExpressionKind::REFERENCE) {
-			auto source_is_null = EmitLoadFusedTypedAggregateReferenceValue(compiler, payload, true, true, SLJIT_S3);
+			auto source_is_null = EmitLoadFusedAggregateReferenceValue(compiler, payload, true, true, SLJIT_S3);
 			if (source_is_null) {
 				payload_skip_jumps.push_back(source_is_null);
 			}

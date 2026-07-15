@@ -169,6 +169,8 @@ struct SljitExecutableOrderSink {
 	}
 };
 
+enum class SljitAggregatePayloadSourceLayout : uint8_t { DIRECT_PER_LANE, FUSED_COMBINED };
+
 enum class SljitFilteredAggregateKernelKind : uint8_t { NONE, UNGROUPED_PAYLOAD, PERFECT_HASH_GROUPED };
 
 struct SljitExecutableFilteredAggregateUpdate {
@@ -178,6 +180,7 @@ struct SljitExecutableFilteredAggregateUpdate {
 	vector<bool> input_source_not_null;
 	SljitCompiledFunction<SljitNativeAggregateUpdateFunction> compiled;
 	SljitFilteredAggregateKernelKind kind = SljitFilteredAggregateKernelKind::NONE;
+	SljitAggregatePayloadSourceLayout payload_source_layout = SljitAggregatePayloadSourceLayout::DIRECT_PER_LANE;
 
 	bool IsExecutable() const {
 		return compiled.IsExecutable();
@@ -310,6 +313,9 @@ struct SljitExecutableAggregateUpdate {
 	SljitNativeAggregateUpdatePlan plan;
 	vector<SljitExecutableRegionExpression> payloads;
 	vector<SljitAggregatePayloadDescriptor> payload_descriptors;
+	SljitAggregatePayloadSourceLayout payload_source_layout = SljitAggregatePayloadSourceLayout::DIRECT_PER_LANE;
+	vector<idx_t> combined_payload_source_indices;
+	vector<bool> combined_payload_source_not_null;
 	vector<bool> group_source_not_null;
 	vector<SljitExecutableIntegralGroupKeyRange> integral_group_key_ranges;
 	SljitExecutableFilteredAggregateUpdate filtered_update;

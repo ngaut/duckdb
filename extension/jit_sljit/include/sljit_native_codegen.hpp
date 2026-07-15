@@ -206,9 +206,10 @@ unique_ptr<ExecutionRegionCodeHandle>
 BuildSljitNativeUngroupedFusedPrimitiveAggregateUpdate(const vector<SljitNativeRegionExpressionPlan> &payloads,
                                                        const vector<ExecutionRegionAggregateInput> &aggregates,
                                                        SljitNativeAggregateUpdateFunction &function, string &error);
-unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativeUngroupedFusedTypedExpressionAggregateUpdate(
-    const vector<SljitNativeRegionExpressionPlan> &payloads, const vector<ExecutionRegionAggregateInput> &aggregates,
-    SljitNativeAggregateUpdateFunction &function, string &error);
+unique_ptr<ExecutionRegionCodeHandle>
+BuildSljitNativeUngroupedFusedAggregateUpdate(const vector<SljitNativeRegionExpressionPlan> &payloads,
+                                              const vector<ExecutionRegionAggregateInput> &aggregates,
+                                              SljitNativeAggregateUpdateFunction &function, string &error);
 unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativeGroupedFusedPrimitiveAggregateUpdate(
     const vector<SljitNativeRegionExpressionPlan> &payloads, const vector<ExecutionRegionAggregateInput> &aggregates,
     const ExecutionRegionAggregateContract &contract, SljitNativeAggregateUpdateFunction &function, string &error);
@@ -219,13 +220,13 @@ unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativePerfectHashGroupedFusedPri
     const vector<SljitNativeRegionExpressionPlan> &payloads, const vector<ExecutionRegionAggregateInput> &aggregates,
     const vector<ExecutionRegionGroupInput> &groups, const vector<SljitNativeRegionExpressionPlan> &group_expressions,
     const ExecutionRegionAggregateContract &contract, SljitNativeAggregateUpdateFunction &function, string &error);
-unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativePerfectHashGroupedFusedTypedExpressionAggregateUpdate(
+unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativePerfectHashGroupedFusedAggregateUpdate(
     const vector<SljitNativeRegionExpressionPlan> &payloads, const vector<ExecutionRegionAggregateInput> &aggregates,
     const vector<ExecutionRegionGroupInput> &groups, const vector<SljitNativeRegionExpressionPlan> &group_expressions,
     const ExecutionRegionAggregateContract &contract, const vector<bool> &source_not_null,
     const vector<Value> &source_min_values, const vector<Value> &source_max_values,
     SljitNativeAggregateUpdateFunction &function, string &error);
-unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativeFilteredPerfectHashGroupedFusedTypedExpressionAggregateUpdate(
+unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativeFilteredPerfectHashGroupedFusedAggregateUpdate(
     const ExecutionExpressionIR &predicate, const vector<SljitNativeRegionExpressionPlan> &payloads,
     const vector<ExecutionRegionAggregateInput> &aggregates, const vector<ExecutionRegionGroupInput> &groups,
     const vector<SljitNativeRegionExpressionPlan> &group_expressions, const ExecutionRegionAggregateContract &contract,

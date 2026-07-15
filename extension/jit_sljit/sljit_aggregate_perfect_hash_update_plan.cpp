@@ -35,8 +35,8 @@ bool TryBuildSljitPerfectHashFusedUpdatePlan(
 	if (!TryBuildSljitPerfectHashGroupPlans(groups, group_expressions, contract, result.group_plans,
 	                                        typed_group_expressions) ||
 	    result.group_plans.empty() || !contract.grouped_state_layout_ready ||
-	    !BuildSljitFusedTypedAggregateCodegenPlan(payloads, aggregates, result.codegen_plan, typed_group_expressions)) {
-		error = "unsupported fused perfect-hash typed aggregate payload shape";
+	    !BuildSljitFusedAggregateCodegenPlan(payloads, aggregates, result.codegen_plan)) {
+		error = "unsupported fused perfect-hash aggregate payload shape";
 		return false;
 	}
 	for (auto &group_plan : result.group_plans) {
@@ -67,14 +67,13 @@ bool TryBuildSljitPerfectHashFusedUpdatePlan(
 		    result.codegen_plan.fast_path_supported && predicate_plan.fast_path.fast_path_supported;
 	}
 	if (contract.perfect_required_bits_total >= 8 * sizeof(idx_t)) {
-		error = "unsupported fused perfect-hash typed aggregate domain size";
+		error = "unsupported fused perfect-hash aggregate domain size";
 		return false;
 	}
 	result.perfect_hash_group_count = idx_t(1) << contract.perfect_required_bits_total;
 	for (idx_t payload_idx = 0; payload_idx < payloads.size(); payload_idx++) {
-		if (!SljitFusedGroupedTypedAggregatePayloadSupported(payloads[payload_idx], aggregates[payload_idx],
-		                                                     contract)) {
-			error = "unsupported fused perfect-hash typed aggregate payload shape";
+		if (!SljitFusedGroupedAggregatePayloadSupported(payloads[payload_idx], aggregates[payload_idx], contract)) {
+			error = "unsupported fused perfect-hash aggregate payload shape";
 			return false;
 		}
 	}

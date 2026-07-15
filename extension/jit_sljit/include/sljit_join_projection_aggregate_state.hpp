@@ -36,6 +36,7 @@ struct SljitJoinProjectionAggregateDescriptor {
 	vector<LogicalType> input_types;
 	vector<ExecutionRowPointerGroupKeySource> group_sources;
 	vector<idx_t> payload_source_indices;
+	vector<bool> payload_source_not_null;
 	SljitAggregatePayloadSourceLayout payload_source_layout = SljitAggregatePayloadSourceLayout::DIRECT_PER_LANE;
 	vector<SljitExecutableRegionExpression> remapped_payloads;
 	vector<idx_t> producer_output_column_map;
@@ -80,6 +81,7 @@ struct SljitJoinProjectionAggregateDescriptor {
 		input_types.clear();
 		group_sources.clear();
 		payload_source_indices.clear();
+		payload_source_not_null.clear();
 		payload_source_layout = SljitAggregatePayloadSourceLayout::DIRECT_PER_LANE;
 		remapped_payloads.clear();
 	}

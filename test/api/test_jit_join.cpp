@@ -974,6 +974,46 @@ TEST_CASE("JIT hash join filter ungrouped aggregate avoids final join materializ
 	    });
 }
 
+TEST_CASE("JIT multi-join ungrouped aggregate uses remapped combined payload sources", "[api][jit]") {
+	DuckDB db;
+	Connection con(db);
+	auto &manager = ExecutionRegionManager::Get(*con.context);
+
+	ConfigureSljitForCoverage(con, false, true, true, 10000);
+	REQUIRE_NO_FAIL(con.Query("SET threads=1"));
+	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_exact_payload_fact AS "
+	                          "SELECT (i % 10000)::INTEGER AS filter_key, i::BIGINT AS join_key, "
+	                          "       (i % 97)::BIGINT AS payload FROM range(400000) tbl(i)"));
+	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_exact_payload_filter AS "
+	                          "SELECT ((i * 251) % 10000)::INTEGER AS filter_key FROM range(200) tbl(i)"));
+	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_exact_payload_probe AS "
+	                          "SELECT i::BIGINT AS join_key FROM range(400000) tbl(i)"));
+
+	const string query = "SELECT sum(selected.payload) AS value FROM jit_exact_payload_probe probe "
+	                     "JOIN (SELECT fact.join_key, fact.payload "
+	                     "      FROM jit_exact_payload_fact fact "
+	                     "      JOIN jit_exact_payload_filter filter USING (filter_key)) selected "
+	                     "USING (join_key)";
+	REQUIRE_NO_FAIL(con.Query("SET jit_policy='off'"));
+	auto reference = con.Query(query);
+	REQUIRE_NO_FAIL(*reference);
+
+	REQUIRE_NO_FAIL(con.Query("SET jit_policy='auto'"));
+	ClearJitTrace(manager, true);
+	auto result = con.Query(query);
+	REQUIRE_NO_FAIL(*result);
+	REQUIRE(result->ToString() == reference->ToString());
+
+	RequireJitEvent(
+	    manager,
+	    [](const ExecutionRegionEvent &event) {
+		    return EventPhase(event) == "runtime" && EventStatus(event) == "executed" &&
+		           StringUtil::Contains(EventJitRuntimePathCounts(event),
+		                                "aggregate_update.join_output_ungrouped_payload_update=");
+	    },
+	    [](const ExecutionRegionEvent &event) { RequireHashProbeAggregateUpdateRuntimeOwnership(event); });
+}
+
 TEST_CASE("JIT perfect hash join materializes selection-only output before post-join projection", "[api][jit]") {
 	DuckDB db;
 	Connection con(db);

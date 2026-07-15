@@ -181,7 +181,10 @@ SljitExecuteBoundUngroupedPrimitiveAggregateUpdate(ExecutionRegionRuntime &runti
 		                                                                 execute_sel, count, payload_scratch)) {
 			SljitExecuteFusedPrimitiveAggregatePayloadUpdate(
 			    op.aggregate_update.payloads, op.aggregate_update.fused_payload_update.Function(),
-			    op.aggregate_update.payload_descriptors, payload_lanes, input, execute_sel, count, payload_scratch);
+			    op.aggregate_update.payload_descriptors, op.aggregate_update.payload_source_layout,
+			    op.aggregate_update.combined_payload_source_indices,
+			    op.aggregate_update.combined_payload_source_not_null, payload_lanes, input, execute_sel, count,
+			    payload_scratch);
 		}
 		if (trace_runtime) {
 			RecordSljitRegionMaterializationElisionPath(runtime, op.kind, "fused_payload_update");

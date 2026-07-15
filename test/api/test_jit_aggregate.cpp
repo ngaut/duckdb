@@ -3644,6 +3644,115 @@ TEST_CASE("JIT perfect hash aggregate generates primitive decimal sum and count 
 	REQUIRE(found_runtime);
 }
 
+TEST_CASE("JIT perfect hash direct payloads use their canonical combined source layout", "[api][jit]") {
+	DuckDB db;
+	Connection con(db);
+	auto &manager = ExecutionRegionManager::Get(*con.context);
+
+	ConfigureSljitForCoverage(con, false, true, true, 10000);
+	REQUIRE_NO_FAIL(con.Query("PRAGMA threads=1"));
+	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_perfect_hash_direct_payload_sources("
+	                          "qty_value DECIMAL(15,2) NOT NULL, group_flag VARCHAR NOT NULL, "
+	                          "discount_rate DECIMAL(15,2) NOT NULL, group_status VARCHAR NOT NULL, "
+	                          "gross_value DECIMAL(15,2) NOT NULL, tax_rate DECIMAL(15,2) NOT NULL)"));
+	REQUIRE_NO_FAIL(con.Query("INSERT INTO jit_perfect_hash_direct_payload_sources "
+	                          "SELECT CAST(1 + (i % 50) AS DECIMAL(15,2)), "
+	                          "       CASE WHEN i % 3 = 0 THEN 'A' WHEN i % 3 = 1 THEN 'N' ELSE 'R' END, "
+	                          "       CAST(i % 10 AS DECIMAL(15,2)), "
+	                          "       CASE WHEN i % 2 = 0 THEN 'F' ELSE 'O' END, "
+	                          "       CAST(100 + (i % 1000) AS DECIMAL(15,2)), "
+	                          "       CAST(i % 8 AS DECIMAL(15,2)) "
+	                          "FROM range(120000) tbl(i)"));
+
+	const string query = "SELECT group_flag, group_status, "
+	                     "       sum(qty_value), sum(gross_value), sum(discount_rate), sum(tax_rate), count(*) "
+	                     "FROM jit_perfect_hash_direct_payload_sources "
+	                     "WHERE qty_value + tax_rate > 10.00::DECIMAL(15,2) "
+	                     "GROUP BY group_flag, group_status "
+	                     "ORDER BY group_flag, group_status";
+	REQUIRE_NO_FAIL(con.Query("SET jit_policy='off'"));
+	auto reference = con.Query(query);
+	REQUIRE_NO_FAIL(*reference);
+	REQUIRE(reference->RowCount() == 6);
+
+	REQUIRE_NO_FAIL(con.Query("SET jit_policy='auto'"));
+	ClearJitTrace(manager, true);
+	auto result = con.Query(query);
+	REQUIRE_NO_FAIL(*result);
+	REQUIRE(result->ToString() == reference->ToString());
+
+	RequireJitEvent(
+	    manager,
+	    [](const ExecutionRegionEvent &event) {
+		    return IsCompiledSljitRegionEvent(event) && event.has_candidate &&
+		           event.candidate_traits.sink_kind == ExecutionRegionSinkKind::PERFECT_HASH_AGGREGATE_UPDATE &&
+		           StringUtil::Contains(event.ir, "grouped_state_lookup=generated-perfect-hash");
+	    },
+	    [](const ExecutionRegionEvent &event) {
+		    RequireGeneratedMachineCodeRegion(event);
+		    REQUIRE(StringUtil::Contains(event.ir, "primitive_payloads=native:reference"));
+		    REQUIRE(StringUtil::Contains(event.ir, "count_star"));
+	    });
+	RequireJitEvent(
+	    manager,
+	    [](const ExecutionRegionEvent &event) {
+		    return EventPhase(event) == "runtime" && event.backend_name == "sljit" &&
+		           StringUtil::Contains(EventGeneratedStageRuntimeBreakdown(event),
+		                                "aggregate_update.primitive_payload_update_fused=");
+	    },
+	    [](const ExecutionRegionEvent &event) { RequireGeneratedAggregateUpdateRuntimeOwnership(event); });
+}
+
+TEST_CASE("JIT production CBO keeps reference-only string perfect hash aggregate vectorized", "[api][jit]") {
+	DuckDB db;
+	Connection con(db);
+	auto &manager = ExecutionRegionManager::Get(*con.context);
+
+	ConfigureSljit(con, "auto");
+	ConfigureJitDecisionTrace(con);
+	REQUIRE_NO_FAIL(con.Query("PRAGMA threads=1"));
+	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_perfect_hash_reference_only AS "
+	                          "SELECT CASE WHEN i % 3 = 0 THEN 'A' WHEN i % 3 = 1 THEN 'N' ELSE 'R' END AS flag, "
+	                          "       CASE WHEN i % 2 = 0 THEN 'F' ELSE 'O' END AS status, "
+	                          "       CAST(1 + i % 50 AS DECIMAL(15,2)) AS quantity, "
+	                          "       CAST(100 + i % 1000 AS DECIMAL(15,2)) AS price, "
+	                          "       CAST(i % 10 AS DECIMAL(15,2)) AS discount, "
+	                          "       CAST(i % 8 AS DECIMAL(15,2)) AS tax "
+	                          "FROM range(300000) tbl(i)"));
+
+	const string query = "SELECT flag, status, sum(quantity), sum(price), sum(discount), sum(tax), count(*) "
+	                     "FROM jit_perfect_hash_reference_only "
+	                     "GROUP BY flag, status ORDER BY flag, status";
+	REQUIRE_NO_FAIL(con.Query("SET jit_policy='off'"));
+	auto reference = con.Query(query);
+	REQUIRE_NO_FAIL(*reference);
+
+	REQUIRE_NO_FAIL(con.Query("SET jit_policy='auto'"));
+	ClearJitTrace(manager, true);
+	auto result = con.Query(query);
+	REQUIRE_NO_FAIL(*result);
+	REQUIRE(result->ToString() == reference->ToString());
+
+	RequireJitEvent(
+	    manager,
+	    [](const ExecutionRegionEvent &event) {
+		    return IsSljitRegionEvent(event) && EventStatus(event) == "skipped" && event.has_candidate &&
+		           event.candidate_traits.sink_kind == ExecutionRegionSinkKind::PERFECT_HASH_AGGREGATE_UPDATE &&
+		           StringUtil::Contains(event.reason, "backend_cost=reference_only_string_perfect_hash_aggregate:1");
+	    },
+	    [](const ExecutionRegionEvent &event) {
+		    REQUIRE(event.selected_runner == ExecutionRunnerKind::VECTORIZED);
+		    REQUIRE_FALSE(event.runner_cost.selected_accelerated_runner);
+		    REQUIRE(event.runner_cost.generated_backend_stage_count == 0);
+		    REQUIRE(event.runner_cost.materialization_elision_count == 0);
+		    REQUIRE(event.runner_cost.selection_reason == "rejected_no_accelerated_work");
+	    });
+	for (auto &event : manager.GetEvents()) {
+		REQUIRE_FALSE((IsCompiledSljitRegionEvent(event) && event.has_candidate &&
+		               event.candidate_traits.sink_kind == ExecutionRegionSinkKind::PERFECT_HASH_AGGREGATE_UPDATE));
+	}
+}
+
 TEST_CASE("JIT perfect hash aggregate uses exact wide and double payload ABIs", "[api][jit]") {
 	DuckDB db;
 	Connection con(db);

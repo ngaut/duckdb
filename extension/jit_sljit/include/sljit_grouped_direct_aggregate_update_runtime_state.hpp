@@ -230,9 +230,12 @@ private:
 			    aggregate_op.aggregate_update.plan.group_expressions,
 			    aggregate_op.aggregate_update.group_source_not_null,
 			    aggregate_op.aggregate_update.plan.sink_info.aggregate_contract,
-			    aggregate_op.aggregate_update.payload_descriptors, *bound.payload_lanes, *bound.reduction_lanes,
-			    bound.grouped_state->perfect_hash_layout, input_chunk, nullptr, input_chunk.size(),
-			    *bound.payload_scratch);
+			    aggregate_op.aggregate_update.payload_descriptors,
+			    aggregate_op.aggregate_update.filtered_update.payload_source_layout,
+			    aggregate_op.aggregate_update.filtered_update.input_source_indices,
+			    aggregate_op.aggregate_update.filtered_update.input_source_not_null, *bound.payload_lanes,
+			    *bound.reduction_lanes, bound.grouped_state->perfect_hash_layout, input_chunk, nullptr,
+			    input_chunk.size(), *bound.payload_scratch);
 			RecordSljitRegionStageRuntime(runtime, primitive.aggregate_idx, aggregate_op.kind,
 			                              "filtered_perfect_hash_update", stage_start);
 			RecordSljitRegionMaterializationElisionPath(runtime, aggregate_op.kind, "filtered_perfect_hash_update",

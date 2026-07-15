@@ -189,10 +189,15 @@ bool TryPreaggregateDenseFusedPrimitiveGroups(
 	if (sink_info.groups.size() != 1) {
 		return false;
 	}
-	vector<idx_t> payload_source_indices;
-	if (!SljitTryGetFusedTypedPayloadCombinedSources(aggregate_update.payloads, aggregate_update.payload_descriptors,
-	                                                 payload_source_indices) ||
-	    !SljitCanPreaggregateInputVectorFusedPrimitivePayloads(op, input, payload_source_indices, reduction_lanes)) {
+	if (aggregate_update.payload_source_layout != SljitAggregatePayloadSourceLayout::FUSED_COMBINED) {
+		return false;
+	}
+	if (aggregate_update.combined_payload_source_not_null.size() !=
+	    aggregate_update.combined_payload_source_indices.size()) {
+		throw InternalException("SLJIT dense fused aggregate payload source layout is not normalized");
+	}
+	auto &payload_source_indices = aggregate_update.combined_payload_source_indices;
+	if (!SljitCanPreaggregateInputVectorFusedPrimitivePayloads(op, input, payload_source_indices, reduction_lanes)) {
 		return false;
 	}
 	std::array<sel_t, SLJIT_LOCAL_DENSE_PREAGGREGATED_GROUP_LIMIT> row_group_indices;
@@ -211,9 +216,10 @@ bool TryPreaggregateDenseFusedPrimitiveGroups(
 	}
 	SljitExecuteFusedGroupedPrimitiveAggregatePayloadUpdate(
 	    aggregate_update.payloads, aggregate_update.fused_payload_update.Function(), sink_info.aggregate_contract,
-	    aggregate_update.payload_descriptors, payload_lanes, reduction_lanes, input,
-	    scratch.fused_row_state_addresses.data(), nullptr, nullptr, false, input.size(), payload_scratch,
-	    optional_ptr<const vector<idx_t>>(&payload_source_indices));
+	    aggregate_update.payload_descriptors, aggregate_update.payload_source_layout,
+	    aggregate_update.combined_payload_source_indices, aggregate_update.combined_payload_source_not_null,
+	    payload_lanes, reduction_lanes, input, scratch.fused_row_state_addresses.data(), nullptr, nullptr, false,
+	    input.size(), payload_scratch, optional_ptr<const vector<idx_t>>(&payload_source_indices));
 	if (!SljitExtractFusedPreaggregatedPrimitiveDeltas(scratch, payload_lanes, group_count)) {
 		throw InternalException("SLJIT dense fused preaggregated primitive delta extraction failed");
 	}

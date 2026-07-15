@@ -39,12 +39,12 @@ BuildSljitUngroupedAggregateSourceDataPointerHoists(const vector<SljitNativeRegi
 	return BuildSljitAggregateSourceDataPointerHoists(payloads, regs, min_use_count);
 }
 
-bool TryBuildSljitUngroupedTypedAggregateUpdatePlan(const vector<SljitNativeRegionExpressionPlan> &payloads,
+bool TryBuildSljitUngroupedFusedAggregateUpdatePlan(const vector<SljitNativeRegionExpressionPlan> &payloads,
                                                     const vector<ExecutionRegionAggregateInput> &aggregates,
-                                                    SljitUngroupedTypedAggregateUpdatePlan &result, string &error) {
-	result = SljitUngroupedTypedAggregateUpdatePlan();
-	if (!BuildSljitFusedTypedAggregateCodegenPlan(payloads, aggregates, result.codegen_plan)) {
-		error = "unsupported fused typed aggregate payload shape";
+                                                    SljitUngroupedFusedAggregateUpdatePlan &result, string &error) {
+	result = SljitUngroupedFusedAggregateUpdatePlan();
+	if (!BuildSljitFusedAggregateCodegenPlan(payloads, aggregates, result.codegen_plan)) {
+		error = "unsupported fused aggregate payload shape";
 		return false;
 	}
 
