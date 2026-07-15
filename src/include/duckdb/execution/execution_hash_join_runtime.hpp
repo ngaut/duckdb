@@ -35,9 +35,9 @@ struct ExecutionHashJoinTableLayout {
 	bool can_have_null = false;
 	bool use_salt = false;
 	bool null_keys_are_filtered = false;
-	//! Whether rows retained in the physical hash table can contain a NULL condition key.
+	//! Whether a row retained in the physical hash table actually contains a NULL condition key.
 	//! This is distinct from has_filtered_null, which records NULLs removed for MARK semantics.
-	bool stored_keys_can_have_null = false;
+	bool stored_keys_have_null = false;
 	idx_t condition_count = 0;
 	vector<LogicalType> condition_types;
 	idx_t payload_column_count = 0;

@@ -917,7 +917,7 @@ static SljitHashJoinAggregateConsumerResult SljitTryExecuteHashJoinComplementary
 		return result;
 	}
 	SljitHashJoinProbeLayoutKind table_layout_kind = SljitHashJoinProbeLayoutKind::NO_CHAIN;
-	bool rhs_keys_can_have_null = false;
+	bool rhs_keys_have_null = false;
 	if (regular_hash_join) {
 		auto &layout = probe.table_layout;
 		table_layout_kind = SljitValidateRegularHashJoinProbeExecutionLayout(plan, probe);
@@ -925,7 +925,7 @@ static SljitHashJoinAggregateConsumerResult SljitTryExecuteHashJoinComplementary
 			result.blocker = "hash_join_probe.direct_aggregate_consumer_miss.join_chain";
 			return result;
 		}
-		rhs_keys_can_have_null = layout.stored_keys_can_have_null;
+		rhs_keys_have_null = layout.stored_keys_have_null;
 	}
 	auto filter_result =
 	    SljitTryExecuteHashJoinProbeInputFilter(runtime, scratch, ops, hash_join_idx, probe_input_filter_idx, probe,
@@ -1051,7 +1051,7 @@ static SljitHashJoinAggregateConsumerResult SljitTryExecuteHashJoinComplementary
 	auto prepared_input = SljitPrepareRegularHashJoinProbeInput(
 	    runtime, hash_join_idx, hash_join_op.kind, plan, layout, probe_input, scratch.FilterSelection(hash_join_idx),
 	    scratch.HashJoinRowPointers(hash_join_idx), scratch.HashJoinSources(hash_join_idx), state, table_layout_kind,
-	    probe_primitive.source_key0_int64_to_int32_unchecked, rhs_keys_can_have_null, probe.use_bloom_filter);
+	    probe_primitive.source_key0_int64_to_int32_unchecked, rhs_keys_have_null, probe.use_bloom_filter);
 	if (prepared_input.input_kind == SljitHashJoinProbeInputKind::GENERIC) {
 		result.blocker = "hash_join_probe.direct_aggregate_consumer_miss.generic_probe_input";
 		return result;

@@ -2311,7 +2311,33 @@ TEST_CASE("JIT mapped join casts feed dense grouped counts", "[api][jit]") {
 		                                "aggregate_update.pending_dense_single_lane_grouped_update_flush=1500000") &&
 		           !StringUtil::Contains(runtime_paths, "producer_group_output_map");
 	    },
-	    [](const ExecutionRegionEvent &event) { RequireHashProbeAggregateUpdateRuntimeOwnership(event); });
+	    [](const ExecutionRegionEvent &event) {
+		    REQUIRE(StringUtil::Contains(EventJitRuntimePathCounts(event), "hash_join_probe.regular_probe.all_valid."));
+		    RequireHashProbeAggregateUpdateRuntimeOwnership(event);
+	    });
+
+	REQUIRE_NO_FAIL(con.Query("INSERT INTO jit_mapped_dense_customer VALUES (NULL)"));
+	ClearJitTrace(manager, true);
+	REQUIRE_NO_FAIL(con.Query("CREATE TEMP TABLE jit_mapped_dense_nullable_output AS " + query));
+	auto nullable_shape = con.Query("SELECT count(*), count(customer_id), sum(order_count) "
+	                                "FROM jit_mapped_dense_nullable_output");
+	REQUIRE_NO_FAIL(*nullable_shape);
+	REQUIRE(nullable_shape->GetValue(0, 0).ToString() == "150001");
+	REQUIRE(nullable_shape->GetValue(1, 0).ToString() == "150000");
+	REQUIRE(nullable_shape->GetValue(2, 0).ToString() == "1500000");
+	RequireJitEvent(
+	    manager,
+	    [](const ExecutionRegionEvent &event) {
+		    const auto paths = EventJitRuntimePathCounts(event);
+		    return EventPhase(event) == "runtime" && EventStatus(event) == "executed" &&
+		           EventExecutionMode(event) == "native" &&
+		           StringUtil::Contains(paths, "hash_join_probe.regular_probe.generated=");
+	    },
+	    [](const ExecutionRegionEvent &event) {
+		    REQUIRE_FALSE(
+		        StringUtil::Contains(EventJitRuntimePathCounts(event), "hash_join_probe.regular_probe.all_valid."));
+		    RequireHashProbeAggregateUpdateRuntimeOwnership(event);
+	    });
 }
 
 TEST_CASE("JIT two-join grouped aggregate composes mixed VARCHAR projection chain", "[api][jit]") {

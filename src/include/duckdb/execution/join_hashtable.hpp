@@ -367,6 +367,9 @@ public:
 	//! Whether one or more build rows were removed because a comparison rejects NULL keys.
 	//! MARK joins use this to turn an otherwise false result into UNKNOWN.
 	bool has_filtered_null;
+	//! Whether one or more retained build rows actually contain a NULL condition key.
+	//! Native probes use this runtime fact to omit stored-key validity checks only when safe.
+	bool has_stored_null;
 	//! Bitmask for getting relevant bits from the hashes to determine the position
 	uint64_t bitmask = DConstants::INVALID_INDEX;
 	//! Whether or not we error on multiple rows found per match in a SINGLE join

@@ -941,6 +941,28 @@ def verify_partial_predicate_simd_contract() -> None:
             )
 
 
+def verify_hash_join_null_fact_ownership() -> None:
+    hash_table = read("src/include/duckdb/execution/join_hashtable.hpp")
+    for contract in (
+        "bool has_filtered_null;",
+        "bool has_stored_null;",
+    ):
+        if contract not in hash_table:
+            raise AssertionError(f"hash-table NULL state must retain independent runtime facts: {contract}")
+    if re.search(r"\bbool\s+has_null\s*;", hash_table):
+        raise AssertionError("hash-table NULL state must not conflate filtered and physically stored NULLs")
+
+    layout = read("src/include/duckdb/execution/execution_hash_join_runtime.hpp")
+    if "bool stored_keys_have_null = false;" not in layout:
+        raise AssertionError("backend hash-table layout must export actual retained-key NULL state")
+    if "stored_keys_can_have_null" in layout:
+        raise AssertionError("backend hash-table layout must not substitute nullable shape for observed NULL state")
+
+    probe_runtime = read("extension/jit_sljit/include/sljit_hash_join_probe_executor_runtime.hpp")
+    if "layout.stored_keys_have_null" not in probe_runtime:
+        raise AssertionError("native hash probes must specialize from actual retained-key NULL state")
+
+
 def main() -> None:
     verify_layer_boundaries()
     verify_no_benchmark_shaped_logic()
@@ -952,6 +974,7 @@ def main() -> None:
     verify_compiled_artifact_ownership()
     verify_scan_filter_ownership()
     verify_partial_predicate_simd_contract()
+    verify_hash_join_null_fact_ownership()
     verify_runtime_proofs_are_typed()
     verify_production_contract_ownership()
     verify_benchmark_repetition_budget()

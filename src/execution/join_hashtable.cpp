@@ -51,8 +51,8 @@ JoinHashTable::JoinHashTable(ClientContext &context_p, const PhysicalOperator &o
     : context(context_p), op(op_p), buffer_manager(BufferManager::GetBufferManager(context)), conditions(conditions_p),
       build_types(std::move(btypes)), output_columns(output_columns_p), entry_size(0), tuple_size(0),
       vfound(Value::BOOLEAN(false), count_t(STANDARD_VECTOR_SIZE)), join_type(type_p), finalized(false),
-      has_filtered_null(false), residual_predicate(predicate_ptr), radix_bits(initial_radix_bits),
-      runtime_filter_identity(make_shared_ptr<ExecutionRuntimeFilterIdentity>()) {
+      has_filtered_null(false), has_stored_null(false), residual_predicate(predicate_ptr),
+      radix_bits(initial_radix_bits), runtime_filter_identity(make_shared_ptr<ExecutionRuntimeFilterIdentity>()) {
 	// store residual predicate information
 	residual_info = std::move(residual_p);
 	lhs_output_in_probe = output_in_probe;
@@ -146,6 +146,7 @@ void JoinHashTable::Merge(JoinHashTable &other) {
 	{
 		lock_guard<mutex> guard(data_lock);
 		data_collection->Combine(*other.data_collection);
+		has_stored_null = has_stored_null || other.has_stored_null;
 	}
 
 	if (join_type == JoinType::MARK) {
@@ -538,11 +539,7 @@ bool JoinHashTable::GetExecutionHashJoinTableLayout(ExecutionHashJoinTableLayout
 			break;
 		}
 	}
-	const bool correlated_mark_retains_null_keys =
-	    join_type == JoinType::MARK && !correlated_mark_join_info.correlated_types.empty();
-	layout.stored_keys_can_have_null =
-	    layout.can_have_null &&
-	    (PropagatesBuildSide(join_type) || correlated_mark_retains_null_keys || !layout.null_keys_are_filtered);
+	layout.stored_keys_have_null = has_stored_null;
 
 	if (!layout.finalized) {
 		layout.blocker = "hash-join-native-table-not-finalized";
@@ -622,6 +619,31 @@ static idx_t FilterNullValues(UnifiedVectorFormat &vdata, const SelectionVector 
 	return result_count;
 }
 
+static bool RetainedBuildKeysHaveNull(const vector<TupleDataVectorFormat> &vector_data, idx_t key_count,
+                                      const SelectionVector &build_selection, idx_t build_count) {
+	for (idx_t key_idx = 0; key_idx < key_count; key_idx++) {
+		auto &key_data = vector_data[key_idx].unified;
+		if (key_data.validity.CannotHaveNull()) {
+			continue;
+		}
+		if (&build_selection == FlatVector::IncrementalSelectionVector() &&
+		    key_data.sel == FlatVector::IncrementalSelectionVector()) {
+			if (!key_data.validity.CheckAllValid(build_count)) {
+				return true;
+			}
+			continue;
+		}
+		for (idx_t selected_idx = 0; selected_idx < build_count; selected_idx++) {
+			const auto row_idx = build_selection.get_index(selected_idx);
+			const auto source_idx = key_data.sel->get_index(row_idx);
+			if (!key_data.validity.RowIsValid(source_idx)) {
+				return true;
+			}
+		}
+	}
+	return false;
+}
+
 void JoinHashTable::InitializeBuildChunk(DataChunk &source_chunk) const {
 	source_chunk.InitializeEmpty(layout_ptr->GetTypes());
 }
@@ -680,6 +702,11 @@ idx_t JoinHashTable::PrepareBuildChunk(PartitionedTupleDataAppendState &append_s
 	idx_t added_count = PrepareKeys(keys, append_state.chunk_state.vector_data, build_selection, build_sel, true);
 	if (added_count < keys.size()) {
 		has_filtered_null = true;
+	}
+	if (!has_stored_null && added_count != 0 &&
+	    RetainedBuildKeysHaveNull(append_state.chunk_state.vector_data, keys.ColumnCount(), *build_selection,
+	                              added_count)) {
+		has_stored_null = true;
 	}
 	return added_count;
 }
@@ -2805,6 +2832,7 @@ void JoinHashTable::ResetForNewIterationSinglePartition() {
 	bitmask = DConstants::INVALID_INDEX;
 	finalized = false;
 	has_filtered_null = false;
+	has_stored_null = false;
 	chains_longer_than_one = false;
 	total_probe_matches = 0;
 	load_factor = DEFAULT_LOAD_FACTOR;

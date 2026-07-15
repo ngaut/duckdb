@@ -557,6 +557,13 @@ inputs additionally perform checked conversion. Exact identity removes a
 row-pointer hash probe only when the backend-owned membership bitmap can replace
 it—it never removes the membership check itself.
 
+The hash table owns two independent NULL facts. `has_filtered_null` records
+build rows removed by ordinary equality semantics and is consumed by MARK-result
+logic. `has_stored_null` records NULL condition keys that were actually retained
+in physical hash-table rows. Native probe validity checks and all-valid
+specialization use only the latter runtime fact; a join type or nullable tuple
+layout describes possibility, not observed build contents.
+
 The storage-side exact-filter loop selects its input/source vector layouts once
 per batch. An identity selection is represented explicitly as absent input
 selection, so the dominant all-valid, same-width sparse path contains no

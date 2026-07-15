@@ -55,7 +55,7 @@ string DescribeExecutionHashJoinTableLayout(const ExecutionHashJoinTableLayout &
 	result += ",can_have_null=" + ExecutionHashJoinBool(layout.can_have_null);
 	result += ",use_salt=" + ExecutionHashJoinBool(layout.use_salt);
 	result += ",null_keys_are_filtered=" + ExecutionHashJoinBool(layout.null_keys_are_filtered);
-	result += ",stored_keys_can_have_null=" + ExecutionHashJoinBool(layout.stored_keys_can_have_null);
+	result += ",stored_keys_have_null=" + ExecutionHashJoinBool(layout.stored_keys_have_null);
 	result += ",condition_count=" + std::to_string(layout.condition_count);
 	result += ",condition_types=" + ExecutionHashJoinTypeList(layout.condition_types);
 	result += ",payload_columns=" + std::to_string(layout.payload_column_count);

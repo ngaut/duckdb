@@ -150,15 +150,14 @@ static ExecutionOperatorBindResult SljitExecuteRegularHashJoinProbe(
 	}
 	auto prepared_input = SljitPrepareRegularHashJoinProbeInput(
 	    runtime, op_idx, op.kind, plan, layout, input, match_selection, row_pointers, source_scratch, state,
-	    table_layout_kind, source_key0_int64_to_int32_unchecked, layout.stored_keys_can_have_null,
-	    probe.use_bloom_filter);
+	    table_layout_kind, source_key0_int64_to_int32_unchecked, layout.stored_keys_have_null, probe.use_bloom_filter);
 	auto &native_input = prepared_input.native_input;
 	const bool exact_membership_filter =
 	    plan.exact_source_filter_identity &&
 	    plan.exact_source_filter_identity == probe.table_layout.runtime_filter_identity &&
 	    probe.table_layout.exact_membership_filter_build_keys_unique &&
 	    probe.table_layout.exact_membership_filter_bitmap && plan.keys.size() == 1 && plan.equality_key_count == 1 &&
-	    !plan.residual_predicate && !plan.mark_build_match && !layout.stored_keys_can_have_null &&
+	    !plan.residual_predicate && !plan.mark_build_match && !layout.stored_keys_have_null &&
 	    probe.exact_rhs_output_probe_input_indices.size() == probe.rhs_output_column_count &&
 	    std::all_of(probe.exact_rhs_output_probe_input_indices.begin(),
 	                probe.exact_rhs_output_probe_input_indices.end(),
