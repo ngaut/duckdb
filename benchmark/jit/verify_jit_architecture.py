@@ -403,6 +403,23 @@ def verify_production_contract_ownership() -> None:
     aggregate_test = read("test/api/test_jit_aggregate.cpp")
     if "REQUIRE(disjoint_finalize_receipt);" not in aggregate_test:
         raise AssertionError("parallel proven-unique aggregate finalization must be covered by a runtime receipt test")
+    affine_scratch = read("extension/jit_sljit/include/sljit_preaggregated_primitive_scratch.hpp")
+    affine_runtime = read("extension/jit_sljit/include/sljit_aggregate_preaggregated_update_runtime.hpp")
+    affine_runs = read("extension/jit_sljit/include/sljit_grouped_aggregate_pending_preaggregation_runtime.hpp")
+    affine_codegen = read("extension/jit_sljit/sljit_aggregate_run_codegen.cpp")
+    if "shared_value_is_wide" not in affine_scratch or "shared_int64_values" not in affine_scratch:
+        raise AssertionError("shared affine values must promote from canonical machine words only on actual overflow")
+    if "shared_valid_counts_are_row_counts" not in affine_scratch or "valid_count_row_alias" not in affine_runs:
+        raise AssertionError("all-valid shared affine runs must reuse their represented row-count fact")
+    if (
+        "shared_affine_canonical_int64_states" not in affine_runtime
+        or "lanes_form_arithmetic_progression" not in affine_runtime
+    ):
+        raise AssertionError("shared affine state expansion must consume bound layout and lane progression facts")
+    if "if (payload_nullable)" not in affine_codegen or "output_shared_valid_counts" not in affine_codegen:
+        raise AssertionError("nullable affine kernels must retain an independent generated valid-count output")
+    if "shared_hugeint_values[output_idx]" in affine_runs:
+        raise AssertionError("generated affine runs must not widen every compact group during publication")
 
     regression_gate = read("benchmark/tpch/jit/run_tpch_regression_gate.py")
     if not re.search(

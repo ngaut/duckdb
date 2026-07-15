@@ -432,7 +432,7 @@ GENERIC_WORKLOADS = (
         # final aggregate states. Code size stays bounded independently of the
         # number of output lanes.
         "minimum_auto_speedup": 0.0,
-        "minimum_auto_speedup_by_threads": {1: 2.25, 4: 1.90},
+        "minimum_auto_speedup_by_threads": {1: 2.60, 4: 2.20},
         "max_auto_slowdown": 1.05,
         "requires_compiled_auto": True,
     },

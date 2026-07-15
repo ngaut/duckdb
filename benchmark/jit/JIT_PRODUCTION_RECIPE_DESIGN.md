@@ -1291,19 +1291,24 @@ The nullable multi-lane receipts are
 and
 `benchmark/jit/tmp/grouped_nullable_sorted_runs_multilane_t4_promotion10_20260713`.
 The 16-lane shared-affine receipts are
-`benchmark/jit/tmp/grouped_wide_affine_compact_scratch_t1_promotion10_20260715`
+`benchmark/jit/tmp/grouped_wide_sorted_runs_final_floor260_promotion10_20260715`
 and
-`benchmark/jit/tmp/grouped_wide_affine_compact_scratch_t4_promotion10_20260715`.
-They prove 2.400x and 2.031x, with checked-in floors of 2.25x and 1.90x. The
-generated run kernel keeps one widened shared base sum and valid count per
-compact group.
-Generated code publishes vector-bounded machine-word deltas; the runtime widens
-them immediately so a pending group can span any number of vectors safely. The
-final state-address update uses checked machine-word affine arithmetic for the
-common case and widens only on overflow, avoiding both per-row expression replay
-and an intermediate groups-by-lanes materialization. Code size stays bounded
-independently of lane count, and payload-source layouts explicitly distinguish
-direct per-lane coordinates from fused combined-source coordinates.
+`benchmark/jit/tmp/grouped_wide_sorted_runs_final_floor220_t4_promotion10_20260715`.
+They prove 2.660x and 2.293x, with checked-in floors of 2.60x and 2.20x. The
+generated run kernel keeps one shared base sum and valid count per compact group.
+Vector-bounded machine-word sums remain canonical; only a value that actually
+outgrows that representation is promoted to the parallel hugeint slot, so
+ordinary groups are not published through a redundant wide buffer. All-valid
+batches reuse the represented row count as their valid count, while nullable
+batches retain an independent counter and batches flush before changing that
+representation. A once-bound canonical aggregate-state layout lets arithmetic-
+progression lanes write their first value and stride directly into contiguous
+SUM states. Other lane arrangements, non-canonical states, initialized-state
+updates, and wide arithmetic keep the exact general path. This avoids per-row
+expression replay, per-lane layout checks, and an intermediate groups-by-lanes
+materialization while code size stays bounded independently of lane count.
+Payload-source layouts explicitly distinguish direct per-lane coordinates from
+fused combined-source coordinates.
 Eligible run kernels are generated only after the runtime sample proves useful
 ordering, and only the observed key-cast/nullability specialization is published.
 Pipeline-local payload-source descriptors retain their allocation across chunk

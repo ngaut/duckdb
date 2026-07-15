@@ -67,7 +67,7 @@ TEST_CASE("JIT shared affine grouped deltas do not overflow before cancellation"
 	}
 	const idx_t valid_count = 4294967299ULL;
 	const auto source_value = NumericLimits<int32_t>::Maximum();
-	scratch.shared_hugeint_values.push_back(hugeint_t(NumericCast<int64_t>(valid_count)) * hugeint_t(source_value));
+	SljitAppendSharedAffineValue(scratch, hugeint_t(NumericCast<int64_t>(valid_count)) * hugeint_t(source_value));
 	scratch.shared_valid_counts.push_back(valid_count);
 
 	SljitExecutableFusedAffineRunUpdate affine;
@@ -98,8 +98,9 @@ TEST_CASE("JIT shared affine scratch slices hugeint lanes without per-lane stora
 	source.PrepareSharedAffine(lanes, 2);
 	source.group_row_counts.push_back(3);
 	source.group_row_counts.push_back(5);
-	source.shared_hugeint_values.emplace_back(11);
-	source.shared_hugeint_values.emplace_back(17);
+	SljitAppendSharedAffineValue(source, hugeint_t(11));
+	const auto wide_value = hugeint_t(NumericLimits<int64_t>::Maximum()) + hugeint_t(17);
+	SljitAppendSharedAffineValue(source, wide_value);
 	source.shared_valid_counts.push_back(2);
 	source.shared_valid_counts.push_back(4);
 
@@ -110,8 +111,60 @@ TEST_CASE("JIT shared affine scratch slices hugeint lanes without per-lane stora
 	REQUIRE(target.payloads[0].hugeint_values.capacity() == 0);
 	REQUIRE(target.payloads[0].value_is_set.capacity() == 0);
 	REQUIRE(target.group_row_counts == vector<idx_t> {5});
-	REQUIRE(target.shared_hugeint_values == vector<hugeint_t> {hugeint_t(17)});
+	REQUIRE(target.shared_int64_values == vector<int64_t> {0});
+	REQUIRE(target.shared_hugeint_values == vector<hugeint_t> {wide_value});
+	REQUIRE(target.shared_value_is_wide == vector<uint8_t> {1});
 	REQUIRE(target.shared_valid_counts == vector<idx_t> {4});
+}
+
+TEST_CASE("JIT shared affine progressions bind canonical aggregate states once", "[api][jit]") {
+	std::array<ExecutionPrimitiveAggregateUpdateLane, 3> lane_storage;
+	vector<const ExecutionPrimitiveAggregateUpdateLane *> lanes;
+	for (idx_t lane_idx = 0; lane_idx < lane_storage.size(); lane_idx++) {
+		auto &lane = lane_storage[lane_idx];
+		lane.ready = true;
+		lane.kind = AggregatePrimitiveUpdateKind::SUM_INT64;
+		lane.state_size = sizeof(int64_t) + sizeof(uint64_t);
+		lane.state_offset = lane_idx * lane.state_size;
+		lane.state_value_offset = 0;
+		lane.state_is_set_offset = sizeof(int64_t);
+		lanes.push_back(&lane);
+	}
+
+	SljitPreaggregatedPrimitiveAggregateScratch scratch;
+	scratch.PrepareSharedAffine(lanes, 1);
+	scratch.group_row_counts.push_back(3);
+	SljitAppendSharedAffineValue(scratch, hugeint_t(6));
+	scratch.shared_valid_counts.push_back(0);
+	scratch.shared_valid_counts_are_row_counts = true;
+
+	SljitExecutableFusedAffineRunUpdate affine;
+	affine.source_position = 0;
+	affine.source_type = PhysicalType::INT32;
+	affine.primitive_kind = AggregatePrimitiveUpdateKind::SUM_INT64;
+	affine.lanes = {{1, 0}, {1, 1}, {1, 2}};
+	affine.lanes_form_arithmetic_progression = true;
+	affine.lane_step = {0, 1};
+	auto update_state = SljitMakePreaggregatedPrimitiveUpdateState(lanes, scratch, &affine);
+	REQUIRE(update_state.shared_affine_canonical_int64_states);
+	REQUIRE(update_state.shared_affine_state_stride == sizeof(int64_t) + sizeof(uint64_t));
+
+	std::array<uint8_t, 3 * (sizeof(int64_t) + sizeof(uint64_t))> states;
+	states.fill(0xa5);
+	const uintptr_t addresses[] = {reinterpret_cast<uintptr_t>(states.data())};
+	ExecuteSljitPreaggregatedPrimitiveAddressUpdate(
+	    addresses, nullptr, 1, ExecutionGroupedAggregateStateAddressUpdateMode::INITIALIZE_AND_UPDATE, &update_state);
+	for (idx_t lane_idx = 0; lane_idx < lane_storage.size(); lane_idx++) {
+		auto state = states.data() + lane_storage[lane_idx].state_offset;
+		REQUIRE(Load<int64_t>(state) == int64_t(6 + 3 * lane_idx));
+		REQUIRE(Load<bool>(state + sizeof(int64_t)));
+		for (idx_t tail_idx = 1; tail_idx < sizeof(uint64_t); tail_idx++) {
+			REQUIRE(state[sizeof(int64_t) + tail_idx] == 0);
+		}
+	}
+	REQUIRE(SljitMaterializeSharedAffineValidCounts(scratch));
+	REQUIRE_FALSE(scratch.shared_valid_counts_are_row_counts);
+	REQUIRE(scratch.shared_valid_counts == vector<idx_t> {3});
 }
 
 TEST_CASE("JIT ungrouped aggregate sinks use native state-update contracts", "[api][jit]") {

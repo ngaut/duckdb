@@ -111,12 +111,15 @@ static bool SljitExecuteBoundGeneratedPrimitiveRunsIntoPending(
 	while (native_input.input_offset < native_input.input_count) {
 		const auto input_offset_before = native_input.input_offset;
 		const auto output_count_before = native_input.output_count;
+		hugeint_t existing_affine_value;
 		if (merge_existing_affine_group) {
-			if (output_count_before == 0 ||
-			    pending.scratch.generated_shared_int64_deltas.size() < output_count_before) {
+			if (output_count_before == 0 || pending.scratch.shared_int64_values.size() < output_count_before ||
+			    pending.scratch.shared_hugeint_values.size() < output_count_before ||
+			    pending.scratch.shared_value_is_wide.size() < output_count_before) {
 				throw InternalException("SLJIT generated affine run lost its pending boundary delta slot");
 			}
-			pending.scratch.generated_shared_int64_deltas[output_count_before - 1] = 0;
+			existing_affine_value = SljitLoadSharedAffineValue(pending.scratch, output_count_before - 1);
+			pending.scratch.shared_int64_values[output_count_before - 1] = 0;
 		}
 		function(&native_input);
 		if (native_input.input_offset > native_input.input_count ||
@@ -126,16 +129,20 @@ static bool SljitExecuteBoundGeneratedPrimitiveRunsIntoPending(
 		}
 		if (shared_affine_output) {
 			if (pending.scratch.shared_hugeint_values.size() < native_input.output_count ||
-			    pending.scratch.generated_shared_int64_deltas.size() < native_input.output_count) {
+			    pending.scratch.shared_int64_values.size() < native_input.output_count ||
+			    pending.scratch.shared_value_is_wide.size() < native_input.output_count) {
 				throw InternalException("SLJIT generated affine run output is incomplete");
 			}
-			const auto first_output = merge_existing_affine_group ? output_count_before - 1 : output_count_before;
-			for (idx_t output_idx = first_output; output_idx < native_input.output_count; output_idx++) {
-				auto delta = hugeint_t(pending.scratch.generated_shared_int64_deltas[output_idx]);
-				if (merge_existing_affine_group && output_idx == first_output) {
-					pending.scratch.shared_hugeint_values[output_idx] += delta;
-				} else {
-					pending.scratch.shared_hugeint_values[output_idx] = delta;
+			std::fill(pending.scratch.shared_value_is_wide.begin() + UnsafeNumericCast<int64_t>(output_count_before),
+			          pending.scratch.shared_value_is_wide.begin() +
+			              UnsafeNumericCast<int64_t>(native_input.output_count),
+			          0);
+			if (merge_existing_affine_group) {
+				const auto boundary_idx = output_count_before - 1;
+				if (!SljitStoreSharedAffineValue(pending.scratch, boundary_idx,
+				                                 existing_affine_value +
+				                                     hugeint_t(pending.scratch.shared_int64_values[boundary_idx]))) {
+					throw InternalException("SLJIT generated affine run could not publish its boundary value");
 				}
 			}
 			merge_existing_affine_group = false;
@@ -233,6 +240,22 @@ static bool TryExecuteGeneratedFusedAffinePrimitiveRunsIntoPending(
 	                                                        payload_lanes, count, payload_source, native_input,
 	                                                        function, blocker)) {
 		return reject(blocker ? blocker : "binding");
+	}
+	const bool valid_counts_are_row_counts = native_input.payload_validity == nullptr;
+	if (!pending.Empty() && pending.scratch.shared_valid_counts_are_row_counts != valid_counts_are_row_counts) {
+		if (!SljitFlushPendingPreaggregatedPrimitiveGroups(runtime, scratch, op_idx, op, pending, grouped_state,
+		                                                   deferred_grouped_finish)) {
+			return reject("valid_count_representation");
+		}
+	}
+	pending.scratch.shared_valid_counts_are_row_counts = valid_counts_are_row_counts;
+	if (runtime.TraceRuntime()) {
+		if (valid_counts_are_row_counts) {
+			RecordSljitRegionRuntimePath(runtime, op.kind, "generated_fused_affine.valid_count_row_alias", count);
+		}
+		if (op.aggregate_update.fused_affine_run_update.lanes_form_arithmetic_progression) {
+			RecordSljitRegionRuntimePath(runtime, op.kind, "generated_fused_affine.lane_progression", count);
+		}
 	}
 	if (!SljitExecuteBoundGeneratedPrimitiveRunsIntoPending<TARGET_TYPE>(
 	        runtime, scratch, op_idx, op, group_source, payload_lanes, grouped_state, pending, count, finish,

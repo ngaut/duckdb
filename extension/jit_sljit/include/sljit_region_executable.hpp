@@ -259,6 +259,8 @@ struct SljitExecutableFusedAffineRunUpdate {
 	PhysicalType source_type = PhysicalType::INVALID;
 	AggregatePrimitiveUpdateKind primitive_kind = AggregatePrimitiveUpdateKind::NONE;
 	vector<SljitFusedAffineRunLane> lanes;
+	bool lanes_form_arithmetic_progression = false;
+	SljitFusedAffineRunLane lane_step {0, 0};
 
 	bool Ready() const {
 		return source_position != DConstants::INVALID_INDEX && source_type != PhysicalType::INVALID &&
@@ -270,6 +272,8 @@ struct SljitExecutableFusedAffineRunUpdate {
 		source_type = PhysicalType::INVALID;
 		primitive_kind = AggregatePrimitiveUpdateKind::NONE;
 		lanes.clear();
+		lanes_form_arithmetic_progression = false;
+		lane_step = {0, 0};
 	}
 };
 

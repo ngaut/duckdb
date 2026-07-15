@@ -7232,7 +7232,10 @@ bool GroupedAggregateHashTable::TryAppendNewGroupsFastInternal(
 	TupleDataCollection::ToUnifiedFormat(append_state->chunk_state, state.group_chunk);
 	RecordAggregateTraceStage(recorder, "find_new.group_format", group_format_start);
 	const auto &append_selection = *FlatVector::IncrementalSelectionVector();
-	if (!data->TryAppendUnifiedSinglePartition(*append_state, state.group_chunk, append_selection, chunk_size)) {
+	const auto fixed_width_append =
+	    data->TryAppendUnifiedFixedWidthSinglePartition(*append_state, state.group_chunk, append_selection, chunk_size);
+	if (!fixed_width_append &&
+	    !data->TryAppendUnifiedSinglePartition(*append_state, state.group_chunk, append_selection, chunk_size)) {
 		data->AppendUnified(*append_state, state.group_chunk, append_selection, chunk_size);
 	}
 	const auto update_mode = address_update_function && !layout_ptr->HasDestructor()

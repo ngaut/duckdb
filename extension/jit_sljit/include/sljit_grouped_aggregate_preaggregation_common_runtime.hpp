@@ -283,9 +283,9 @@ static bool SljitBindGeneratedFusedAffinePrimitiveRunOutput(DataChunk &groups,
                                                             SljitNativePrimitiveRunInput &native_input) {
 	if (groups.ColumnCount() != 1 || output_count > output_capacity ||
 	    scratch.payload_layout != SljitPreaggregatedPrimitivePayloadLayout::SHARED_AFFINE ||
-	    scratch.group_row_counts.size() != output_capacity ||
-	    scratch.generated_shared_int64_deltas.size() != output_capacity ||
+	    scratch.group_row_counts.size() != output_capacity || scratch.shared_int64_values.size() != output_capacity ||
 	    scratch.shared_hugeint_values.size() != output_capacity ||
+	    scratch.shared_value_is_wide.size() != output_capacity ||
 	    scratch.shared_valid_counts.size() != output_capacity) {
 		return false;
 	}
@@ -296,7 +296,7 @@ static bool SljitBindGeneratedFusedAffinePrimitiveRunOutput(DataChunk &groups,
 	}
 	native_input.output_group_data =
 	    reinterpret_cast<data_ptr_t>(FlatVector::GetDataMutable<TARGET_TYPE>(group_vector));
-	native_input.output_shared_int64_values = scratch.generated_shared_int64_deltas.data();
+	native_input.output_shared_int64_values = scratch.shared_int64_values.data();
 	native_input.output_shared_valid_counts = scratch.shared_valid_counts.data();
 	native_input.output_row_counts = scratch.group_row_counts.data();
 	native_input.output_count = output_count;

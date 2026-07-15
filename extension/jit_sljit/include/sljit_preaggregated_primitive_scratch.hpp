@@ -32,13 +32,14 @@ struct SljitPreaggregatedPrimitiveAggregateScratch {
 	vector<UnifiedVectorFormat> input_group_formats;
 	vector<sel_t> group_rows;
 	vector<idx_t> group_row_counts;
-	// Generated kernels accumulate at most one vector of narrow signed values in
-	// these machine-word deltas. The durable shared sum is hugeint so a group can
-	// remain pending across arbitrarily many vectors without overflowing an
-	// intermediate representation.
-	vector<int64_t> generated_shared_int64_deltas;
+	// Shared affine values stay in the machine-word representation produced by
+	// generated kernels. Only values that outgrow that representation are
+	// promoted into the parallel hugeint storage.
+	vector<int64_t> shared_int64_values;
 	vector<hugeint_t> shared_hugeint_values;
+	vector<uint8_t> shared_value_is_wide;
 	vector<idx_t> shared_valid_counts;
+	bool shared_valid_counts_are_row_counts = false;
 	idx_t fused_state_stride = 0;
 	SljitPreaggregatedPrimitivePayloadLayout payload_layout = SljitPreaggregatedPrimitivePayloadLayout::PER_LANE;
 
@@ -51,12 +52,15 @@ struct SljitPreaggregatedPrimitiveAggregateScratch {
 		group_rows.reserve(capacity);
 		group_row_counts.clear();
 		group_row_counts.reserve(capacity);
-		generated_shared_int64_deltas.clear();
-		generated_shared_int64_deltas.reserve(capacity);
+		shared_int64_values.clear();
+		shared_int64_values.reserve(capacity);
 		shared_hugeint_values.clear();
 		shared_hugeint_values.reserve(capacity);
+		shared_value_is_wide.clear();
+		shared_value_is_wide.reserve(capacity);
 		shared_valid_counts.clear();
 		shared_valid_counts.reserve(capacity);
+		shared_valid_counts_are_row_counts = false;
 		fused_state_stride = 0;
 		payload_layout = SljitPreaggregatedPrimitivePayloadLayout::PER_LANE;
 		for (idx_t payload_idx = 0; payload_idx < lanes.size(); payload_idx++) {
@@ -128,8 +132,9 @@ struct SljitPreaggregatedPrimitiveAggregateScratch {
 	bool PrepareFixedSharedAffine(const vector<const ExecutionPrimitiveAggregateUpdateLane *> &lanes, idx_t capacity) {
 		PrepareSharedAffine(lanes, capacity);
 		group_row_counts.resize(capacity);
-		generated_shared_int64_deltas.resize(capacity);
+		shared_int64_values.resize(capacity);
 		shared_hugeint_values.resize(capacity);
+		shared_value_is_wide.resize(capacity);
 		shared_valid_counts.resize(capacity);
 		return true;
 	}
@@ -172,8 +177,8 @@ struct SljitPreaggregatedPrimitiveAggregateScratch {
 	                                  idx_t capacity) const {
 		if (payload_layout != SljitPreaggregatedPrimitivePayloadLayout::SHARED_AFFINE ||
 		    payloads.size() != lanes.size() || group_row_counts.size() != capacity ||
-		    generated_shared_int64_deltas.size() != capacity || shared_hugeint_values.size() != capacity ||
-		    shared_valid_counts.size() != capacity) {
+		    shared_int64_values.size() != capacity || shared_hugeint_values.size() != capacity ||
+		    shared_value_is_wide.size() != capacity || shared_valid_counts.size() != capacity) {
 			return false;
 		}
 		for (idx_t lane_idx = 0; lane_idx < lanes.size(); lane_idx++) {
@@ -184,6 +189,104 @@ struct SljitPreaggregatedPrimitiveAggregateScratch {
 		return true;
 	}
 };
+
+static bool SljitTryLoadSharedAffineInt64(const hugeint_t &value, int64_t &result) {
+	if (value.upper == 0 && value.lower <= uint64_t(NumericLimits<int64_t>::Maximum())) {
+		result = UnsafeNumericCast<int64_t>(value.lower);
+		return true;
+	}
+	if (value.upper == -1 && value.lower >= uint64_t(NumericLimits<int64_t>::Minimum())) {
+		result = -static_cast<int64_t>(NumericLimits<uint64_t>::Maximum() - value.lower) - 1;
+		return true;
+	}
+	return false;
+}
+
+static bool SljitTryAddSharedAffineInt64(int64_t left, int64_t right, int64_t &result) {
+#if defined(__GNUC__) || defined(__clang__)
+	return !__builtin_add_overflow(left, right, &result);
+#else
+	return TryAddOperator::Operation(left, right, result);
+#endif
+}
+
+static hugeint_t SljitLoadSharedAffineValue(const SljitPreaggregatedPrimitiveAggregateScratch &scratch,
+                                            idx_t group_idx) {
+	D_ASSERT(group_idx < scratch.shared_int64_values.size());
+	D_ASSERT(group_idx < scratch.shared_hugeint_values.size());
+	D_ASSERT(group_idx < scratch.shared_value_is_wide.size());
+	return scratch.shared_value_is_wide[group_idx] ? scratch.shared_hugeint_values[group_idx]
+	                                               : hugeint_t(scratch.shared_int64_values[group_idx]);
+}
+
+static bool SljitStoreSharedAffineValue(SljitPreaggregatedPrimitiveAggregateScratch &scratch, idx_t group_idx,
+                                        const hugeint_t &value) {
+	if (group_idx >= scratch.shared_int64_values.size() || group_idx >= scratch.shared_hugeint_values.size() ||
+	    group_idx >= scratch.shared_value_is_wide.size()) {
+		return false;
+	}
+	int64_t int64_value;
+	if (SljitTryLoadSharedAffineInt64(value, int64_value)) {
+		scratch.shared_int64_values[group_idx] = int64_value;
+		scratch.shared_value_is_wide[group_idx] = 0;
+	} else {
+		scratch.shared_hugeint_values[group_idx] = value;
+		scratch.shared_value_is_wide[group_idx] = 1;
+	}
+	return true;
+}
+
+static bool SljitAddSharedAffineInt64(SljitPreaggregatedPrimitiveAggregateScratch &scratch, idx_t group_idx,
+                                      int64_t delta) {
+	if (group_idx >= scratch.shared_int64_values.size() || group_idx >= scratch.shared_hugeint_values.size() ||
+	    group_idx >= scratch.shared_value_is_wide.size()) {
+		return false;
+	}
+	if (scratch.shared_value_is_wide[group_idx]) {
+		scratch.shared_hugeint_values[group_idx] += hugeint_t(delta);
+		return true;
+	}
+	int64_t result;
+	if (SljitTryAddSharedAffineInt64(scratch.shared_int64_values[group_idx], delta, result)) {
+		scratch.shared_int64_values[group_idx] = result;
+		return true;
+	}
+	return SljitStoreSharedAffineValue(scratch, group_idx,
+	                                   hugeint_t(scratch.shared_int64_values[group_idx]) + hugeint_t(delta));
+}
+
+static void SljitAppendSharedAffineValue(SljitPreaggregatedPrimitiveAggregateScratch &scratch, const hugeint_t &value) {
+	int64_t int64_value;
+	if (SljitTryLoadSharedAffineInt64(value, int64_value)) {
+		scratch.shared_int64_values.push_back(int64_value);
+		scratch.shared_hugeint_values.emplace_back(0);
+		scratch.shared_value_is_wide.push_back(0);
+	} else {
+		scratch.shared_int64_values.push_back(0);
+		scratch.shared_hugeint_values.push_back(value);
+		scratch.shared_value_is_wide.push_back(1);
+	}
+}
+
+static idx_t SljitLoadSharedAffineValidCount(const SljitPreaggregatedPrimitiveAggregateScratch &scratch,
+                                             idx_t group_idx) {
+	D_ASSERT(group_idx < scratch.group_row_counts.size());
+	D_ASSERT(group_idx < scratch.shared_valid_counts.size());
+	return scratch.shared_valid_counts_are_row_counts ? scratch.group_row_counts[group_idx]
+	                                                  : scratch.shared_valid_counts[group_idx];
+}
+
+static bool SljitMaterializeSharedAffineValidCounts(SljitPreaggregatedPrimitiveAggregateScratch &scratch) {
+	if (!scratch.shared_valid_counts_are_row_counts) {
+		return true;
+	}
+	if (scratch.shared_valid_counts.size() < scratch.group_row_counts.size()) {
+		return false;
+	}
+	std::copy(scratch.group_row_counts.begin(), scratch.group_row_counts.end(), scratch.shared_valid_counts.begin());
+	scratch.shared_valid_counts_are_row_counts = false;
+	return true;
+}
 
 static bool
 ResetFixedPreaggregatedPrimitiveScratchGroup(SljitPreaggregatedPrimitiveAggregateScratch &scratch,
@@ -247,15 +350,29 @@ static bool CopyPreaggregatedPrimitiveScratchRangeToFixed(
 	          target.group_row_counts.begin() + target_begin);
 	if (source.payload_layout == SljitPreaggregatedPrimitivePayloadLayout::SHARED_AFFINE) {
 		if (target.payload_layout != SljitPreaggregatedPrimitivePayloadLayout::SHARED_AFFINE ||
+		    target.shared_int64_values.size() < target_offset + count ||
 		    target.shared_hugeint_values.size() < target_offset + count ||
+		    target.shared_value_is_wide.size() < target_offset + count ||
 		    target.shared_valid_counts.size() < target_offset + count) {
 			return false;
 		}
+		std::copy(source.shared_int64_values.begin() + source_begin, source.shared_int64_values.begin() + source_end,
+		          target.shared_int64_values.begin() + target_begin);
 		std::copy(source.shared_hugeint_values.begin() + source_begin,
 		          source.shared_hugeint_values.begin() + source_end,
 		          target.shared_hugeint_values.begin() + target_begin);
-		std::copy(source.shared_valid_counts.begin() + source_begin, source.shared_valid_counts.begin() + source_end,
-		          target.shared_valid_counts.begin() + target_begin);
+		std::copy(source.shared_value_is_wide.begin() + source_begin, source.shared_value_is_wide.begin() + source_end,
+		          target.shared_value_is_wide.begin() + target_begin);
+		if (target_offset == 0) {
+			target.shared_valid_counts_are_row_counts = source.shared_valid_counts_are_row_counts;
+		} else if (target.shared_valid_counts_are_row_counts != source.shared_valid_counts_are_row_counts &&
+		           !SljitMaterializeSharedAffineValidCounts(target)) {
+			return false;
+		}
+		for (idx_t idx = 0; idx < count; idx++) {
+			target.shared_valid_counts[target_offset + idx] =
+			    SljitLoadSharedAffineValidCount(source, source_offset + idx);
+		}
 		return true;
 	}
 	if (target.payload_layout != SljitPreaggregatedPrimitivePayloadLayout::PER_LANE) {
@@ -313,8 +430,9 @@ static bool CanSlicePreaggregatedPrimitiveScratch(const SljitPreaggregatedPrimit
 		return false;
 	}
 	if (source.payload_layout == SljitPreaggregatedPrimitivePayloadLayout::SHARED_AFFINE) {
-		if (source.shared_hugeint_values.size() < offset + count ||
-		    source.shared_valid_counts.size() < offset + count) {
+		if (source.shared_int64_values.size() < offset + count ||
+		    source.shared_hugeint_values.size() < offset + count ||
+		    source.shared_value_is_wide.size() < offset + count || source.shared_valid_counts.size() < offset + count) {
 			return false;
 		}
 		for (idx_t payload_idx = 0; payload_idx < source.payloads.size(); payload_idx++) {
@@ -456,11 +574,18 @@ static bool SlicePreaggregatedPrimitiveScratch(const SljitPreaggregatedPrimitive
 	if (source.payload_layout == SljitPreaggregatedPrimitivePayloadLayout::SHARED_AFFINE) {
 		const auto begin = UnsafeNumericCast<int64_t>(offset);
 		const auto end = UnsafeNumericCast<int64_t>(offset + count);
+		target.shared_int64_values.insert(target.shared_int64_values.end(), source.shared_int64_values.begin() + begin,
+		                                  source.shared_int64_values.begin() + end);
 		target.shared_hugeint_values.insert(target.shared_hugeint_values.end(),
 		                                    source.shared_hugeint_values.begin() + begin,
 		                                    source.shared_hugeint_values.begin() + end);
-		target.shared_valid_counts.insert(target.shared_valid_counts.end(), source.shared_valid_counts.begin() + begin,
-		                                  source.shared_valid_counts.begin() + end);
+		target.shared_value_is_wide.insert(target.shared_value_is_wide.end(),
+		                                   source.shared_value_is_wide.begin() + begin,
+		                                   source.shared_value_is_wide.begin() + end);
+		target.shared_valid_counts_are_row_counts = source.shared_valid_counts_are_row_counts;
+		for (idx_t idx = 0; idx < count; idx++) {
+			target.shared_valid_counts.push_back(SljitLoadSharedAffineValidCount(source, offset + idx));
+		}
 		return true;
 	}
 	for (idx_t payload_idx = 0; payload_idx < source.payloads.size(); payload_idx++) {
@@ -501,14 +626,29 @@ static bool AppendPreaggregatedPrimitiveScratch(const SljitPreaggregatedPrimitiv
 	// payload deltas and their represented row counts cross that boundary.
 	const auto begin = UnsafeNumericCast<int64_t>(offset);
 	const auto end = UnsafeNumericCast<int64_t>(offset + count);
+	const auto target_count = target.group_row_counts.size();
+	if (source.payload_layout == SljitPreaggregatedPrimitivePayloadLayout::SHARED_AFFINE) {
+		if (target_count == 0) {
+			target.shared_valid_counts_are_row_counts = source.shared_valid_counts_are_row_counts;
+		} else if (target.shared_valid_counts_are_row_counts != source.shared_valid_counts_are_row_counts &&
+		           !SljitMaterializeSharedAffineValidCounts(target)) {
+			return false;
+		}
+	}
 	target.group_row_counts.insert(target.group_row_counts.end(), source.group_row_counts.begin() + begin,
 	                               source.group_row_counts.begin() + end);
 	if (source.payload_layout == SljitPreaggregatedPrimitivePayloadLayout::SHARED_AFFINE) {
+		target.shared_int64_values.insert(target.shared_int64_values.end(), source.shared_int64_values.begin() + begin,
+		                                  source.shared_int64_values.begin() + end);
 		target.shared_hugeint_values.insert(target.shared_hugeint_values.end(),
 		                                    source.shared_hugeint_values.begin() + begin,
 		                                    source.shared_hugeint_values.begin() + end);
-		target.shared_valid_counts.insert(target.shared_valid_counts.end(), source.shared_valid_counts.begin() + begin,
-		                                  source.shared_valid_counts.begin() + end);
+		target.shared_value_is_wide.insert(target.shared_value_is_wide.end(),
+		                                   source.shared_value_is_wide.begin() + begin,
+		                                   source.shared_value_is_wide.begin() + end);
+		for (idx_t idx = 0; idx < count; idx++) {
+			target.shared_valid_counts.push_back(SljitLoadSharedAffineValidCount(source, offset + idx));
+		}
 		return true;
 	}
 	for (idx_t payload_idx = 0; payload_idx < source.payloads.size(); payload_idx++) {
@@ -533,12 +673,25 @@ static bool MergePreaggregatedPrimitiveScratchGroup(const SljitPreaggregatedPrim
 		return false;
 	}
 	if (source.payload_layout == SljitPreaggregatedPrimitivePayloadLayout::SHARED_AFFINE) {
-		if (target.shared_hugeint_values.size() <= target_idx || target.shared_valid_counts.size() <= target_idx) {
+		if (target.shared_int64_values.size() <= target_idx || target.shared_hugeint_values.size() <= target_idx ||
+		    target.shared_value_is_wide.size() <= target_idx || target.shared_valid_counts.size() <= target_idx) {
+			return false;
+		}
+		const auto target_valid_count = SljitLoadSharedAffineValidCount(target, target_idx);
+		const auto source_valid_count = SljitLoadSharedAffineValidCount(source, source_idx);
+		if (target.shared_valid_counts_are_row_counts != source.shared_valid_counts_are_row_counts &&
+		    !SljitMaterializeSharedAffineValidCounts(target)) {
 			return false;
 		}
 		target.group_row_counts[target_idx] += source.group_row_counts[source_idx];
-		target.shared_hugeint_values[target_idx] += source.shared_hugeint_values[source_idx];
-		target.shared_valid_counts[target_idx] += source.shared_valid_counts[source_idx];
+		if (!SljitStoreSharedAffineValue(target, target_idx,
+		                                 SljitLoadSharedAffineValue(target, target_idx) +
+		                                     SljitLoadSharedAffineValue(source, source_idx))) {
+			return false;
+		}
+		if (!target.shared_valid_counts_are_row_counts) {
+			target.shared_valid_counts[target_idx] = target_valid_count + source_valid_count;
+		}
 		return true;
 	}
 	for (idx_t payload_idx = 0; payload_idx < source.payloads.size(); payload_idx++) {

@@ -502,7 +502,7 @@ static bool TryPreaggregateInputVectorFusedAffinePrimitiveGroupRunsWithSelection
 	auto start_group = [&](idx_t group_idx) {
 		D_ASSERT(group_idx == scratch.shared_valid_counts.size());
 		scratch.group_row_counts.push_back(0);
-		scratch.shared_hugeint_values.emplace_back(0);
+		SljitAppendSharedAffineValue(scratch, hugeint_t(0));
 		scratch.shared_valid_counts.push_back(0);
 		return true;
 	};
@@ -510,13 +510,18 @@ static bool TryPreaggregateInputVectorFusedAffinePrimitiveGroupRunsWithSelection
 		if (run_update.primitive_kind == AggregatePrimitiveUpdateKind::SUM_INT64) {
 			int64_t value;
 			if (SljitLoadPreaggregatedInt64Payload(source, row_idx, value)) {
-				scratch.shared_hugeint_values[group_idx] += hugeint_t(value);
+				if (!SljitAddSharedAffineInt64(scratch, group_idx, value)) {
+					return false;
+				}
 				scratch.shared_valid_counts[group_idx]++;
 			}
 		} else {
 			hugeint_t value;
 			if (SljitLoadPreaggregatedHugeintPayload(source, row_idx, value)) {
-				scratch.shared_hugeint_values[group_idx] += value;
+				if (!SljitStoreSharedAffineValue(scratch, group_idx,
+				                                 SljitLoadSharedAffineValue(scratch, group_idx) + value)) {
+					return false;
+				}
 				scratch.shared_valid_counts[group_idx]++;
 			}
 		}

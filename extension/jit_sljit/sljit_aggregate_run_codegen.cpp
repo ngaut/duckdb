@@ -1131,7 +1131,7 @@ static sljit_jump *EmitJumpIfSljitPrimitiveRunAffinePayloadNull(struct sljit_com
 	return is_null;
 }
 
-static void EmitSljitPrimitiveRunAffineFinalize(struct sljit_compiler *compiler) {
+static void EmitSljitPrimitiveRunAffineFinalize(struct sljit_compiler *compiler, bool payload_nullable) {
 	// Keep the shared run representation compact. The append callback expands it
 	// directly into aggregate states after group addresses become available.
 	sljit_emit_op1(compiler, SLJIT_MOV_P, SLJIT_R3, 0, SLJIT_MEM1(SLJIT_S0),
@@ -1146,11 +1146,13 @@ static void EmitSljitPrimitiveRunAffineFinalize(struct sljit_compiler *compiler)
 	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_R5, 0, SLJIT_MEM2(SLJIT_R3, SLJIT_R4), 3);
 	sljit_emit_op2(compiler, SLJIT_ADD, SLJIT_R5, 0, SLJIT_R5, 0, SLJIT_S6, 0);
 	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_MEM2(SLJIT_R3, SLJIT_R4), 3, SLJIT_R5, 0);
-	sljit_emit_op1(compiler, SLJIT_MOV_P, SLJIT_R3, 0, SLJIT_MEM1(SLJIT_S0),
-	               offsetof(SljitNativePrimitiveRunInput, output_shared_valid_counts));
-	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_R5, 0, SLJIT_MEM2(SLJIT_R3, SLJIT_R4), 3);
-	sljit_emit_op2(compiler, SLJIT_ADD, SLJIT_R5, 0, SLJIT_R5, 0, SLJIT_S7, 0);
-	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_MEM2(SLJIT_R3, SLJIT_R4), 3, SLJIT_R5, 0);
+	if (payload_nullable) {
+		sljit_emit_op1(compiler, SLJIT_MOV_P, SLJIT_R3, 0, SLJIT_MEM1(SLJIT_S0),
+		               offsetof(SljitNativePrimitiveRunInput, output_shared_valid_counts));
+		sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_R5, 0, SLJIT_MEM2(SLJIT_R3, SLJIT_R4), 3);
+		sljit_emit_op2(compiler, SLJIT_ADD, SLJIT_R5, 0, SLJIT_R5, 0, SLJIT_S7, 0);
+		sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_MEM2(SLJIT_R3, SLJIT_R4), 3, SLJIT_R5, 0);
+	}
 	auto done = sljit_emit_jump(compiler, SLJIT_JUMP);
 
 	sljit_set_label(fresh_run, sljit_emit_label(compiler));
@@ -1160,9 +1162,11 @@ static void EmitSljitPrimitiveRunAffineFinalize(struct sljit_compiler *compiler)
 	sljit_emit_op1(compiler, SLJIT_MOV_P, SLJIT_R3, 0, SLJIT_MEM1(SLJIT_S0),
 	               offsetof(SljitNativePrimitiveRunInput, output_shared_int64_values));
 	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_MEM2(SLJIT_R3, SLJIT_R4), 3, SLJIT_S6, 0);
-	sljit_emit_op1(compiler, SLJIT_MOV_P, SLJIT_R3, 0, SLJIT_MEM1(SLJIT_S0),
-	               offsetof(SljitNativePrimitiveRunInput, output_shared_valid_counts));
-	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_MEM2(SLJIT_R3, SLJIT_R4), 3, SLJIT_S7, 0);
+	if (payload_nullable) {
+		sljit_emit_op1(compiler, SLJIT_MOV_P, SLJIT_R3, 0, SLJIT_MEM1(SLJIT_S0),
+		               offsetof(SljitNativePrimitiveRunInput, output_shared_valid_counts));
+		sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_MEM2(SLJIT_R3, SLJIT_R4), 3, SLJIT_S7, 0);
+	}
 	sljit_set_label(done, sljit_emit_label(compiler));
 }
 
@@ -1238,7 +1242,9 @@ BuildSljitNativePrimitiveRunAffineInt64Update(PhysicalType group_source_type, Ph
 	sljit_emit_op1(compiler, SljitPrimitiveRunPhysicalTypeLoadOp(payload_type), SLJIT_R3, 0,
 	               SLJIT_MEM2(SLJIT_S5, SLJIT_S1), SljitPrimitiveRunPhysicalTypeScale(payload_type));
 	sljit_emit_op2(compiler, SLJIT_ADD, SLJIT_S6, 0, SLJIT_S6, 0, SLJIT_R3, 0);
-	sljit_emit_op2(compiler, SLJIT_ADD, SLJIT_S7, 0, SLJIT_S7, 0, SLJIT_IMM, 1);
+	if (payload_nullable) {
+		sljit_emit_op2(compiler, SLJIT_ADD, SLJIT_S7, 0, SLJIT_S7, 0, SLJIT_IMM, 1);
+	}
 	if (payload_is_null) {
 		sljit_set_label(payload_is_null, sljit_emit_label(compiler));
 	}
@@ -1252,7 +1258,7 @@ BuildSljitNativePrimitiveRunAffineInt64Update(PhysicalType group_source_type, Ph
 	// Preserve the next raw key in S5 while finalization reuses every scratch
 	// register. The payload pointer is rebound before the next row is consumed.
 	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_S5, 0, SLJIT_R4, 0);
-	EmitSljitPrimitiveRunAffineFinalize(compiler);
+	EmitSljitPrimitiveRunAffineFinalize(compiler, payload_nullable);
 	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_R4, 0, SLJIT_S5, 0);
 	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_R5, 0, SLJIT_MEM1(SLJIT_S0),
 	               offsetof(SljitNativePrimitiveRunInput, output_capacity));
@@ -1264,7 +1270,7 @@ BuildSljitNativePrimitiveRunAffineInt64Update(PhysicalType group_source_type, Ph
 	sljit_set_label(next_row, accumulate_group);
 
 	sljit_set_label(run_done, sljit_emit_label(compiler));
-	EmitSljitPrimitiveRunAffineFinalize(compiler);
+	EmitSljitPrimitiveRunAffineFinalize(compiler, payload_nullable);
 
 	auto finish = sljit_emit_label(compiler);
 	sljit_set_label(input_done, finish);

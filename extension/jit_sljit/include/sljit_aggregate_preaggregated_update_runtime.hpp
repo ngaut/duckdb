@@ -114,9 +114,14 @@ static void ExecuteSljitPrimitiveCountOneTargetBatch(const ExecutionGroupedAggre
 struct SljitPreaggregatedPrimitiveUpdateState {
 	const vector<const ExecutionPrimitiveAggregateUpdateLane *> *lanes = nullptr;
 	const vector<SljitPreaggregatedPrimitivePayloadDeltas> *payloads = nullptr;
-	const vector<hugeint_t> *shared_affine_values = nullptr;
+	const vector<int64_t> *shared_affine_int64_values = nullptr;
+	const vector<hugeint_t> *shared_affine_hugeint_values = nullptr;
+	const vector<uint8_t> *shared_affine_value_is_wide = nullptr;
 	const vector<idx_t> *shared_valid_counts = nullptr;
 	const SljitExecutableFusedAffineRunUpdate *affine = nullptr;
+	idx_t shared_affine_state_offset = 0;
+	idx_t shared_affine_state_stride = 0;
+	bool shared_affine_canonical_int64_states = false;
 	idx_t capture_row_idx = DConstants::INVALID_INDEX;
 	uintptr_t captured_address = 0;
 };
@@ -142,9 +147,31 @@ SljitMakePreaggregatedPrimitiveUpdateState(const vector<const ExecutionPrimitive
 	    affine->Ready() &&
 	    (affine->primitive_kind == AggregatePrimitiveUpdateKind::SUM_INT64 ||
 	     affine->primitive_kind == AggregatePrimitiveUpdateKind::SUM_HUGEINT)) {
-		state.shared_affine_values = &scratch.shared_hugeint_values;
-		state.shared_valid_counts = &scratch.shared_valid_counts;
+		state.shared_affine_int64_values = &scratch.shared_int64_values;
+		state.shared_affine_hugeint_values = &scratch.shared_hugeint_values;
+		state.shared_affine_value_is_wide = &scratch.shared_value_is_wide;
+		state.shared_valid_counts =
+		    scratch.shared_valid_counts_are_row_counts ? &scratch.group_row_counts : &scratch.shared_valid_counts;
 		state.affine = affine.get();
+		if (affine->primitive_kind == AggregatePrimitiveUpdateKind::SUM_INT64 && !lanes.empty()) {
+			const auto state_stride = sizeof(int64_t) + sizeof(uint64_t);
+			const auto state_offset = lanes[0] ? lanes[0]->state_offset : 0;
+			state.shared_affine_canonical_int64_states = true;
+			for (idx_t lane_idx = 0; lane_idx < lanes.size(); lane_idx++) {
+				auto lane = lanes[lane_idx];
+				if (!lane || lane->kind != AggregatePrimitiveUpdateKind::SUM_INT64 ||
+				    lane->state_size != state_stride || lane->state_value_offset != 0 ||
+				    lane->state_is_set_offset != sizeof(int64_t) ||
+				    lane->state_offset != state_offset + lane_idx * state_stride) {
+					state.shared_affine_canonical_int64_states = false;
+					break;
+				}
+			}
+			if (state.shared_affine_canonical_int64_states) {
+				state.shared_affine_state_offset = state_offset;
+				state.shared_affine_state_stride = state_stride;
+			}
+		}
 	}
 	return state;
 }
@@ -269,18 +296,6 @@ static bool SljitTryComputeSharedAffineInt64Delta(int64_t shared_value, int64_t 
 #endif
 }
 
-static bool SljitTryLoadSharedAffineInt64(const hugeint_t &value, int64_t &result) {
-	if (value.upper == 0 && value.lower <= uint64_t(NumericLimits<int64_t>::Maximum())) {
-		result = UnsafeNumericCast<int64_t>(value.lower);
-		return true;
-	}
-	if (value.upper == -1 && value.lower >= uint64_t(NumericLimits<int64_t>::Minimum())) {
-		result = -static_cast<int64_t>(NumericLimits<uint64_t>::Maximum() - value.lower) - 1;
-		return true;
-	}
-	return false;
-}
-
 static bool SljitTryAddSharedAffineInt64Delta(int64_t left, int64_t right, int64_t &result) {
 #if defined(__GNUC__) || defined(__clang__)
 	return !__builtin_add_overflow(left, right, &result);
@@ -297,16 +312,20 @@ ExecuteSljitSharedAffinePreaggregatedPrimitiveUpdateTemplated(const uintptr_t *a
 	if (!state.affine) {
 		return false;
 	}
-	if (!state.lanes || !state.shared_affine_values || !state.shared_valid_counts ||
+	if (!state.lanes || !state.shared_affine_int64_values || !state.shared_affine_hugeint_values ||
+	    !state.shared_affine_value_is_wide || !state.shared_valid_counts ||
 	    (state.affine->primitive_kind != AggregatePrimitiveUpdateKind::SUM_INT64 &&
 	     state.affine->primitive_kind != AggregatePrimitiveUpdateKind::SUM_HUGEINT) ||
-	    state.lanes->size() != state.affine->lanes.size() || state.shared_affine_values->size() < count ||
+	    state.lanes->size() != state.affine->lanes.size() || state.shared_affine_int64_values->size() < count ||
+	    state.shared_affine_hugeint_values->size() < count || state.shared_affine_value_is_wide->size() < count ||
 	    state.shared_valid_counts->size() < count) {
 		throw InternalException("SLJIT shared affine grouped update state is incomplete");
 	}
 	auto &lanes = *state.lanes;
 	auto &affine_lanes = state.affine->lanes;
-	auto &shared_values = *state.shared_affine_values;
+	auto &shared_int64_values = *state.shared_affine_int64_values;
+	auto &shared_hugeint_values = *state.shared_affine_hugeint_values;
+	auto &shared_value_is_wide = *state.shared_affine_value_is_wide;
 	auto &valid_counts = *state.shared_valid_counts;
 	for (auto lane : lanes) {
 		if (!lane || !lane->ready || lane->kind != state.affine->primitive_kind || lane->state_size == 0) {
@@ -315,7 +334,8 @@ ExecuteSljitSharedAffinePreaggregatedPrimitiveUpdateTemplated(const uintptr_t *a
 	}
 	for (idx_t idx = 0; idx < count; idx++) {
 		const auto row_idx = execute_sel ? execute_sel[idx] : idx;
-		if (row_idx >= shared_values.size() || row_idx >= valid_counts.size()) {
+		if (row_idx >= shared_int64_values.size() || row_idx >= shared_hugeint_values.size() ||
+		    row_idx >= shared_value_is_wide.size() || row_idx >= valid_counts.size()) {
 			throw InternalException("SLJIT shared affine int64 grouped update row is out of range");
 		}
 		const auto address_idx = SljitSelectedGroupedStateAddressIndex(address_sel, execute_sel, idx, row_idx);
@@ -337,11 +357,49 @@ ExecuteSljitSharedAffinePreaggregatedPrimitiveUpdateTemplated(const uintptr_t *a
 			continue;
 		}
 		int64_t machine_word_shared_value;
-		const bool machine_word_inputs =
-		    valid_count <= NumericLimits<int64_t>::Maximum() &&
-		    SljitTryLoadSharedAffineInt64(shared_values[row_idx], machine_word_shared_value);
+		const bool wide_shared_value = shared_value_is_wide[row_idx] != 0;
+		const bool machine_word_value =
+		    !wide_shared_value ||
+		    SljitTryLoadSharedAffineInt64(shared_hugeint_values[row_idx], machine_word_shared_value);
+		if (!wide_shared_value) {
+			machine_word_shared_value = shared_int64_values[row_idx];
+		}
+		const bool machine_word_inputs = valid_count <= NumericLimits<int64_t>::Maximum() && machine_word_value;
 		const auto machine_word_valid_count =
 		    machine_word_inputs ? UnsafeNumericCast<int64_t>(valid_count) : int64_t(0);
+		if constexpr (INITIALIZE_STATES) {
+			if (machine_word_inputs && state.shared_affine_canonical_int64_states &&
+			    state.affine->lanes_form_arithmetic_progression) {
+				int64_t first_value;
+				int64_t value_step;
+				int64_t last_value;
+				int64_t value_span;
+				int64_t progression_last_value;
+				if (SljitTryComputeSharedAffineInt64Delta(machine_word_shared_value, machine_word_valid_count,
+				                                          affine_lanes.front(), first_value) &&
+				    SljitTryComputeSharedAffineInt64Delta(machine_word_shared_value, machine_word_valid_count,
+				                                          state.affine->lane_step, value_step) &&
+				    SljitTryComputeSharedAffineInt64Delta(machine_word_shared_value, machine_word_valid_count,
+				                                          affine_lanes.back(), last_value) &&
+				    TryMultiplyOperator::Operation(value_step, NumericCast<int64_t>(lanes.size() - 1), value_span) &&
+				    TryAddOperator::Operation(first_value, value_span, progression_last_value) &&
+				    progression_last_value == last_value) {
+					auto value = first_value;
+					auto state_base = state_address + state.shared_affine_state_offset;
+					for (idx_t lane_idx = 0; lane_idx < lanes.size(); lane_idx++) {
+						Store<int64_t>(value, state_base);
+						Store<uint64_t>(0, state_base + sizeof(int64_t));
+						Store<bool>(true, state_base + sizeof(int64_t));
+						state_base += state.shared_affine_state_stride;
+						if (lane_idx + 1 < lanes.size()) {
+							value += value_step;
+						}
+					}
+					D_ASSERT(value == progression_last_value);
+					continue;
+				}
+			}
+		}
 		for (idx_t lane_idx = 0; lane_idx < lanes.size(); lane_idx++) {
 			auto lane = lanes[lane_idx];
 			auto state_base = state_address + lane->state_offset;
@@ -353,8 +411,10 @@ ExecuteSljitSharedAffinePreaggregatedPrimitiveUpdateTemplated(const uintptr_t *a
 				                               machine_word_shared_value, machine_word_valid_count, affine_lane, value);
 				if constexpr (INITIALIZE_STATES) {
 					if (!machine_word_value) {
+						const auto shared_value = wide_shared_value ? shared_hugeint_values[row_idx]
+						                                            : hugeint_t(shared_int64_values[row_idx]);
 						const auto wide_value =
-						    shared_values[row_idx] * hugeint_t(affine_lane.scale) +
+						    shared_value * hugeint_t(affine_lane.scale) +
 						    hugeint_t(NumericCast<int64_t>(valid_count)) * hugeint_t(affine_lane.offset);
 						value = NumericCast<int64_t>(wide_value);
 					}
@@ -368,7 +428,9 @@ ExecuteSljitSharedAffinePreaggregatedPrimitiveUpdateTemplated(const uintptr_t *a
 						const auto wide_value =
 						    machine_word_value
 						        ? hugeint_t(value)
-						        : shared_values[row_idx] * hugeint_t(affine_lane.scale) +
+						        : (wide_shared_value ? shared_hugeint_values[row_idx]
+						                             : hugeint_t(shared_int64_values[row_idx])) *
+						                  hugeint_t(affine_lane.scale) +
 						              hugeint_t(NumericCast<int64_t>(valid_count)) * hugeint_t(affine_lane.offset);
 						*sum = NumericCast<int64_t>(hugeint_t(*sum) + wide_value);
 					}
@@ -376,8 +438,10 @@ ExecuteSljitSharedAffinePreaggregatedPrimitiveUpdateTemplated(const uintptr_t *a
 					*state_is_set = true;
 				}
 			} else {
-				const auto value = shared_values[row_idx] * hugeint_t(affine_lane.scale) +
-				                   hugeint_t(NumericCast<int64_t>(valid_count)) * hugeint_t(affine_lane.offset);
+				const auto value =
+				    (wide_shared_value ? shared_hugeint_values[row_idx] : hugeint_t(shared_int64_values[row_idx])) *
+				        hugeint_t(affine_lane.scale) +
+				    hugeint_t(NumericCast<int64_t>(valid_count)) * hugeint_t(affine_lane.offset);
 				if constexpr (INITIALIZE_STATES) {
 					ExecutionInitializeFreshPrimitiveAggregateState(state_base, *lane, value);
 				} else {

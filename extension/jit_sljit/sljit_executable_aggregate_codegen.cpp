@@ -14,6 +14,8 @@
 #include "sljit_native_codegen.hpp"
 
 #include "duckdb/common/exception.hpp"
+#include "duckdb/common/operator/add.hpp"
+#include "duckdb/common/operator/subtract.hpp"
 #include "duckdb/execution/execution_region_backend.hpp"
 #include "duckdb/execution/execution_region_runtime.hpp"
 
@@ -529,6 +531,23 @@ static bool SljitTryGetAffineRunLane(const SljitNativeRegionExpressionPlan &payl
 	}
 }
 
+static bool SljitTryPlanAffineLaneProgression(const vector<SljitFusedAffineRunLane> &lanes,
+                                              SljitFusedAffineRunLane &step) {
+	if (lanes.size() < 2 || !TrySubtractOperator::Operation(lanes[1].scale, lanes[0].scale, step.scale) ||
+	    !TrySubtractOperator::Operation(lanes[1].offset, lanes[0].offset, step.offset)) {
+		return false;
+	}
+	auto expected = lanes[0];
+	for (idx_t lane_idx = 1; lane_idx < lanes.size(); lane_idx++) {
+		if (!TryAddOperator::Operation(expected.scale, step.scale, expected.scale) ||
+		    !TryAddOperator::Operation(expected.offset, step.offset, expected.offset) ||
+		    expected.scale != lanes[lane_idx].scale || expected.offset != lanes[lane_idx].offset) {
+			return false;
+		}
+	}
+	return true;
+}
+
 static void SljitPlanExecutableFusedAffineRunUpdate(SljitExecutableAggregateUpdate &executable) {
 	auto &run_update = executable.fused_affine_run_update;
 	run_update.Clear();
@@ -574,6 +593,8 @@ static void SljitPlanExecutableFusedAffineRunUpdate(SljitExecutableAggregateUpda
 	run_update.source_type = common_source_type;
 	run_update.primitive_kind = common_primitive_kind;
 	run_update.lanes = std::move(lanes);
+	run_update.lanes_form_arithmetic_progression =
+	    SljitTryPlanAffineLaneProgression(run_update.lanes, run_update.lane_step);
 }
 
 void SljitPlanExecutablePrimitiveRunUpdate(const SljitNativeAggregateUpdatePlan &op,
