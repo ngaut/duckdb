@@ -212,6 +212,14 @@ runtime accounting records every lazily published backend artifact. Code size,
 callable lifetime, and borrowed/remapped ownership therefore cannot drift apart,
 and unordered input does not carry dead run-reducer code.
 
+Filter publication is derived from the finalized primitive recipe, not from
+operator adjacency or the existence of a candidate fused kernel. A filtered
+aggregate primitive owns its predicate only when that recipe step names the
+filter and its executable aggregate publishes the fused update. Every other
+route—including native-tail and native-only execution—must publish the
+standalone selector. Expression preparation is shared, so recipe binding can
+choose the single owner before code generation without rebuilding semantic IR.
+
 ## Runtime batch ownership
 
 All primitives communicate through `SljitRuntimeBatchView`.
@@ -732,6 +740,15 @@ active-index storage, and active count. All groups must satisfy the descriptor
 contract, selections must remain explicit, and an external execution selection
 uses the ordinary exact path. This ownership is confined to perfect-hash
 runtime scratch; generic source preparation carries no dictionary-cache cost.
+
+Flat scan vectors do not have dictionary identity, so they cannot use that
+cache. Measurements that hold predicate and aggregate lanes constant show that
+flat `string_t` group transformation, rather than predicate evaluation or
+aggregate-state lookup, is the remaining cost boundary for selective
+perfect-hash grouping. The next generic representation contract must transform
+only selected group keys into compact contributions and hand those to the
+terminal. Precompressing every source row before filtering would duplicate
+vectorized scan work and is not an acceptable substitute.
 
 Widening decimal multiplication has an exact fixed-width recipe. It accepts two
 signed INT8/INT16/INT32/INT64 references cast to an INT128-backed decimal,
@@ -1459,6 +1476,10 @@ runtime-proof passes before the state file moves.
   remain DuckDB-owned outside the proven `DISTINCT_KEY_SINK` contracts.
 - Variable-width and string expression coverage is narrower than fixed-width
   coverage.
+- Selective perfect-hash aggregation over flat string group keys still pays a
+  scalar `string_t`-to-group-contribution transform for each survivor. The
+  required next boundary is selected-batch compact group-key materialization;
+  dictionary-only caching does not address flat storage vectors.
 - Pipeline-lifetime dense accumulation currently covers only one `COUNT` or
   `COUNT_STAR` lane within the 32 MiB compact-domain budget. Other unordered
   sparse payload shapes use batch-local dense preaggregation when profitable,

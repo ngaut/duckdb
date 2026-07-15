@@ -24,6 +24,10 @@ bool SljitFullPipelineHasDirectSourceHashBuild(const SljitFullPipelinePrimitiveS
 bool SljitFullPipelineHasExactFilterProbeHashBuild(const vector<SljitExecutableRegionOp> &ops,
                                                    const SljitFullPipelinePrimitiveSequence &primitive_sequence);
 
+bool SljitFullPipelineFilterHasFusedOwner(const vector<SljitExecutableRegionOp> &ops,
+                                          const SljitFullPipelinePrimitiveSequence &primitive_sequence,
+                                          idx_t filter_idx);
+
 bool SljitNativeTailCanConsumeTail(const vector<SljitExecutableRegionOp> &ops, idx_t tail_start_idx);
 
 bool SljitFullPipelinePrimitiveSequenceIsExecutable(const vector<SljitExecutableRegionOp> &ops,

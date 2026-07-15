@@ -191,6 +191,38 @@ bool SljitFullPipelineHasExactFilterProbeHashBuild(const vector<SljitExecutableR
 	       probe.output_mode == ExecutionHashJoinProbeOutputMode::MATCHED_PROBE_AND_BUILD;
 }
 
+bool SljitFullPipelineFilterHasFusedOwner(const vector<SljitExecutableRegionOp> &ops,
+                                          const SljitFullPipelinePrimitiveSequence &primitive_sequence,
+                                          idx_t filter_idx) {
+	for (idx_t step_idx = 1; step_idx < primitive_sequence.Count(); step_idx++) {
+		auto &step = primitive_sequence.Step(step_idx);
+		idx_t aggregate_idx = DConstants::INVALID_INDEX;
+		switch (step.kind) {
+		case SljitFullPipelinePrimitiveKind::UNGROUPED_AGGREGATE_UPDATE:
+			if (step.ungrouped_aggregate_update.strategy ==
+			        SljitUngroupedAggregateUpdateStrategyKind::FILTERED_PRIMITIVE_PAYLOAD_UPDATE &&
+			    step.ungrouped_aggregate_update.filter_idx == filter_idx) {
+				aggregate_idx = step.ungrouped_aggregate_update.aggregate_idx;
+			}
+			break;
+		case SljitFullPipelinePrimitiveKind::GROUPED_AGGREGATE_UPDATE:
+			if (step.grouped_aggregate_update.strategy ==
+			        SljitGroupedAggregateUpdateStrategyKind::FILTERED_PRIMITIVE_PAYLOAD_UPDATE &&
+			    step.grouped_aggregate_update.filter_idx == filter_idx) {
+				aggregate_idx = step.grouped_aggregate_update.aggregate_idx;
+			}
+			break;
+		default:
+			break;
+		}
+		if (aggregate_idx < ops.size() && ops[aggregate_idx].kind == SljitNativeRegionOpKind::AGGREGATE_UPDATE &&
+		    ops[aggregate_idx].aggregate_update.filtered_update.IsExecutable()) {
+			return true;
+		}
+	}
+	return false;
+}
+
 bool SljitNativeTailCanConsumeTail(const vector<SljitExecutableRegionOp> &ops, idx_t tail_start_idx) {
 	if (tail_start_idx >= ops.size()) {
 		return false;

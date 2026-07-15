@@ -1174,20 +1174,20 @@ void EmitSljitTypedExpressionTreeSimdHybridFilterLoop(struct sljit_compiler *com
 	sljit_emit_simd_sign(compiler, ctx.simd_type | SLJIT_SIMD_STORE | SLJIT_32, SLJIT_VR(mask.reg), SLJIT_R3, 0);
 #endif
 	FreeSimdValue(ctx, mask);
-	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_MEM1(SLJIT_SP), mask_offset + 16, SLJIT_R3, 0);
 	auto mixed_loop = sljit_emit_label(compiler);
-	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_R3, 0, SLJIT_MEM1(SLJIT_SP), mask_offset + 16);
 	// Visit only set lanes. The old shift-and-test loop dispatched once per lane,
 	// including rejected lanes; CTZ plus x & (x - 1) makes mixed-group work
-	// proportional to the number of prefix matches.
+	// proportional to the number of prefix matches. Clear and publish the bitset
+	// before the callback: R3 is still live here, and the single reload afterward
+	// restores the remaining matches across callback-clobbered scratch registers.
 	sljit_emit_op1(compiler, SLJIT_CTZ32, SLJIT_R2, 0, SLJIT_R3, 0);
 	sljit_emit_op2(compiler, SLJIT_AND, SLJIT_R0, 0, SLJIT_S1, 0, SLJIT_IMM, -NumericCast<sljit_sw>(plan.lanes));
 	sljit_emit_op2(compiler, SLJIT_ADD, SLJIT_S1, 0, SLJIT_R0, 0, SLJIT_R2, 0);
-	emit_matching_row();
-	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_R3, 0, SLJIT_MEM1(SLJIT_SP), mask_offset + 16);
 	sljit_emit_op2(compiler, SLJIT_SUB, SLJIT_R2, 0, SLJIT_R3, 0, SLJIT_IMM, 1);
 	sljit_emit_op2(compiler, SLJIT_AND, SLJIT_R3, 0, SLJIT_R3, 0, SLJIT_R2, 0);
 	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_MEM1(SLJIT_SP), mask_offset + 16, SLJIT_R3, 0);
+	emit_matching_row();
+	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_R3, 0, SLJIT_MEM1(SLJIT_SP), mask_offset + 16);
 	auto repeat_mixed = sljit_emit_cmp(compiler, SLJIT_NOT_EQUAL, SLJIT_R3, 0, SLJIT_IMM, 0);
 	sljit_set_label(repeat_mixed, mixed_loop);
 	// S1 names the final matching lane. Recover the aligned group base and move

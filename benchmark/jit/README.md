@@ -90,6 +90,13 @@ cannot be zero (or signed `-1`). If the backend cannot lower an admitted
 predicate, the normal DuckDB scan filter remains in charge—no filter is
 duplicated or silently dropped.
 
+Filter machine-code publication follows the finalized primitive recipe. A
+filtered aggregate step may own the predicate through its fused kernel; every
+native-tail, native-only, and standalone generated-filter route must instead
+publish a selector. Operator adjacency and the existence of a candidate fused
+kernel are not ownership proofs. This keeps one recipe-authoritative owner map
+and avoids both dead selector code and missing-selector failures.
+
 The four-thread scan-filter promotion proves 2.016x over ten alternating pairs
 (51.823 ms JIT-off versus 25.712 ms JIT-auto). Its 1.85x thread-specific floor
 preserves generated ownership of the safe modulo filter while leaving room for
@@ -104,7 +111,8 @@ perfect-hash probe is the single publication boundary and always checks source
 validity, key range, and sparse build membership before emitting a match.
 Runtime tracing reports
 `hash_join_probe.perfect_probe.exact_source_filter` when this contract fires.
-The generic exact-filter join preserves a 1.15x single-thread compiled speedup;
+The generic exact-filter join proves 1.338x over ten alternating single-thread
+pairs (14.040 ms JIT-off versus 10.494 ms JIT-auto) and preserves a 1.25x floor;
 the four-thread gate retains its separate 1.08x floor because its shorter raw
 runtime has a larger proportional noise envelope.
 

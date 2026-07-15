@@ -5,6 +5,8 @@
 #include "sljit_dense_group_domain.hpp"
 #include "sljit_executable_expression_codegen.hpp"
 #include "sljit_executable_stats.hpp"
+#include "sljit_full_pipeline_primitive_contract.hpp"
+#include "sljit_full_pipeline_recipe.hpp"
 #include "sljit_join_probe_codegen.hpp"
 
 #include "duckdb/common/limits.hpp"
@@ -14,7 +16,8 @@ namespace duckdb {
 
 static bool BuildExecutableRegionOp(const SljitNativeRegionOpPlan &op, SljitExecutableRegionOp &executable,
                                     string &error, const vector<bool> &input_not_null,
-                                    const vector<Value> &input_min_values, const vector<Value> &input_max_values) {
+                                    const vector<Value> &input_min_values, const vector<Value> &input_max_values,
+                                    bool defer_filter_codegen) {
 	executable.kind = op.kind;
 	executable.operator_index = op.operator_index;
 	executable.input_types = op.input_types;
@@ -24,8 +27,10 @@ static bool BuildExecutableRegionOp(const SljitNativeRegionOpPlan &op, SljitExec
 	executable.output_types = op.output_types;
 	executable.output_not_null = SljitBuildExecutableOutputNotNull(op, input_not_null);
 	switch (op.kind) {
-	case SljitNativeRegionOpKind::FILTER:
-		return SljitPrepareAndCompileExecutableFilter(op.filter, executable, error, &input_not_null, true);
+	case SljitNativeRegionOpKind::FILTER: {
+		SljitPrepareExecutableFilter(op.filter, executable, &input_not_null, true);
+		return defer_filter_codegen || SljitCompilePreparedExecutableFilter(executable, error);
+	}
 	case SljitNativeRegionOpKind::HASH_JOIN_PROBE:
 		executable.hash_join_probe.plan = op.hash_join_probe.Copy(false);
 		if (op.hash_join_probe.residual_predicate &&
@@ -318,8 +323,11 @@ bool BuildSljitExecutableRegion(const SljitNativeRegionPlan &region, SljitExecut
 	for (idx_t op_idx = 0; op_idx < region.ops.size(); op_idx++) {
 		auto &op = region.ops[op_idx];
 		SljitExecutableRegionOp executable_op;
-		if (!BuildExecutableRegionOp(op, executable_op, error, current_not_null, current_min_values,
-		                             current_max_values)) {
+		const bool defer_filter_codegen = op.kind == SljitNativeRegionOpKind::FILTER &&
+		                                  op_idx + 2 == region.ops.size() &&
+		                                  region.ops[op_idx + 1].kind == SljitNativeRegionOpKind::AGGREGATE_UPDATE;
+		if (!BuildExecutableRegionOp(op, executable_op, error, current_not_null, current_min_values, current_max_values,
+		                             defer_filter_codegen)) {
 			return false;
 		}
 		if (op.kind == SljitNativeRegionOpKind::AGGREGATE_UPDATE) {
@@ -335,9 +343,10 @@ bool BuildSljitExecutableRegion(const SljitNativeRegionPlan &region, SljitExecut
 		}
 		executable.ops.push_back(std::move(executable_op));
 		if (SljitCanBuildFilteredAggregateUpdate(region.ops, op_idx)) {
+			auto &filter_op = executable.ops[op_idx - 1];
 			auto &aggregate_update_op = executable.ops[op_idx];
-			if (!SljitTryBuildFilteredAggregateUpdate(executable.ops[op_idx - 1], aggregate_update_op, error,
-			                                          current_not_null, current_min_values, current_max_values)) {
+			if (!SljitTryBuildFilteredAggregateUpdate(filter_op, aggregate_update_op, error, current_not_null,
+			                                          current_min_values, current_max_values)) {
 				return false;
 			}
 		}
@@ -346,6 +355,27 @@ bool BuildSljitExecutableRegion(const SljitNativeRegionPlan &region, SljitExecut
 		                                                  current_min_values, current_max_values);
 		SljitUpdateExecutableCurrentDistinctCounts(op, current_distinct_counts, current_min_values, current_max_values);
 		SljitUpdateExecutableCurrentRanges(op, current_min_values, current_max_values);
+	}
+
+	// Recipe binding is the executable ownership boundary. A fused aggregate step
+	// owns the predicate named by that step; every other recipe (including native tail) and
+	// native-only execution needs the standalone selector. Bind once with prepared
+	// filters, publish only the selectors that recipe cannot own, then let the
+	// kernel bind the now-final executable set.
+	auto recipe_plan = BuildSljitFullPipelineRecipePlan(executable.ops, executable.source_output_types,
+	                                                    executable.source_min_values, executable.source_max_values);
+	for (idx_t op_idx = 0; op_idx < executable.ops.size(); op_idx++) {
+		auto &op = executable.ops[op_idx];
+		if (op.kind != SljitNativeRegionOpKind::FILTER || !op.filter || op.filter->expression.HasSelectionKernel()) {
+			continue;
+		}
+		if (recipe_plan.has_recipe &&
+		    SljitFullPipelineFilterHasFusedOwner(executable.ops, recipe_plan.recipe.primitive_sequence, op_idx)) {
+			continue;
+		}
+		if (!SljitCompilePreparedExecutableFilter(op, error)) {
+			return false;
+		}
 	}
 	return true;
 }

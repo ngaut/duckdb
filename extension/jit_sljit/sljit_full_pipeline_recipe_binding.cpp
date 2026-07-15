@@ -81,20 +81,24 @@ SljitFullPipelineRecipe SljitFullPipelineRecipeBinding::MakeSourceUngroupedAggre
 	return MakePrimitiveSequence(std::move(sequence));
 }
 
-bool SljitFullPipelineRecipeBinding::TryMakeSourceFilterAggregateRecipe(
-    const SljitSourceFilterAggregateFacts &facts, SljitFullPipelineRecipe &recipe) const {
-	if (!SljitCanBindGeneratedFilterPrimitive(ops, facts.filter_idx)) {
-		return false;
-	}
-
+bool SljitFullPipelineRecipeBinding::TryMakeSourceFilterAggregateRecipe(const SljitSourceFilterAggregateFacts &facts,
+                                                                        SljitFullPipelineRecipe &recipe) const {
 	const auto can_bind_filtered_ungrouped =
 	    SljitCanBindFilteredUngroupedAggregateUpdatePrimitive(ops, facts.filter_idx, facts.aggregate_idx);
 	const auto can_bind_ungrouped = SljitCanBindUngroupedAggregateUpdatePrimitive(ops, facts.aggregate_idx);
 	const auto can_bind_filtered_grouped =
 	    SljitCanBindFilteredGroupedAggregateUpdatePrimitive(ops, facts.filter_idx, facts.aggregate_idx);
 	const auto has_dedicated_grouped_backend = SljitGroupedAggregateUpdateHasDedicatedBackend(ops, facts.aggregate_idx);
+	const auto can_bind_generated_filter = SljitCanBindGeneratedFilterPrimitive(ops, facts.filter_idx);
+	const auto filtered_grouped_uses_fused_kernel =
+	    facts.aggregate_idx < ops.size() &&
+	    ops[facts.aggregate_idx].kind == SljitNativeRegionOpKind::AGGREGATE_UPDATE &&
+	    ops[facts.aggregate_idx].aggregate_update.filtered_update.IsExecutable();
 	if (!can_bind_filtered_ungrouped && !can_bind_ungrouped && !can_bind_filtered_grouped &&
 	    !has_dedicated_grouped_backend) {
+		return false;
+	}
+	if (can_bind_filtered_grouped && !filtered_grouped_uses_fused_kernel && !can_bind_generated_filter) {
 		return false;
 	}
 
@@ -108,6 +112,9 @@ bool SljitFullPipelineRecipeBinding::TryMakeSourceFilterAggregateRecipe(
 		    SljitBindFilteredGroupedAggregateUpdatePrimitive(ops, facts.filter_idx, facts.aggregate_idx);
 		sequence.Add(SljitFullPipelinePrimitiveStep::GroupedAggregateUpdate(aggregate_update));
 	} else {
+		if (!can_bind_generated_filter) {
+			return false;
+		}
 		auto generated_filter = SljitBindGeneratedFilterPrimitive(ops, facts.filter_idx);
 		sequence.Add(SljitFullPipelinePrimitiveStep::GeneratedFilter(generated_filter));
 		if (can_bind_ungrouped) {
@@ -126,7 +133,7 @@ bool SljitFullPipelineRecipeBinding::TryMakeSourceFilterAggregateRecipe(
 }
 
 bool SljitFullPipelineRecipeBinding::TryMakeJoinFilterAggregateRecipe(const SljitJoinFilterAggregateFacts &facts,
-                                                                       SljitFullPipelineRecipe &recipe) const {
+                                                                      SljitFullPipelineRecipe &recipe) const {
 	if (facts.HasProjectionPrefix() &&
 	    !SljitCanBindProjectionChainPrimitive(ops, facts.first_projection_idx, facts.final_projection_idx)) {
 		return false;
@@ -223,7 +230,7 @@ SljitFullPipelineRecipe SljitFullPipelineRecipeBinding::MakeHashJoinDelimJoinSin
 }
 
 bool SljitFullPipelineRecipeBinding::TryMakeHashJoinAppendSinkRecipe(const SljitHashJoinAppendSinkFacts &facts,
-                                                                      SljitFullPipelineRecipe &recipe) const {
+                                                                     SljitFullPipelineRecipe &recipe) const {
 	if (facts.first_hash_join_idx > facts.final_hash_join_idx ||
 	    !SljitCanBindHashJoinProbeSelectionPrimitive(ops, facts.final_hash_join_idx) ||
 	    !SljitCanBindSelectedHashJoinAppendSinkPrimitive(ops, facts.final_hash_join_idx, facts.sink_idx)) {
@@ -247,7 +254,7 @@ bool SljitFullPipelineRecipeBinding::TryMakeHashJoinAppendSinkRecipe(const Sljit
 }
 
 bool SljitFullPipelineRecipeBinding::TryMakeHashJoinBuildSinkRecipe(const SljitHashJoinBuildSinkFacts &facts,
-                                                                     SljitFullPipelineRecipe &recipe) const {
+                                                                    SljitFullPipelineRecipe &recipe) const {
 	if (facts.HasPreProjection() && !SljitCanBindProjectionChainPrimitive(ops, facts.pre_projection_idx)) {
 		return false;
 	}

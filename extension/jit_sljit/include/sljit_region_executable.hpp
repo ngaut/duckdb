@@ -35,6 +35,22 @@ struct SljitExecutableRegionExpression {
 	SljitCompiledFunction<SljitNativePredicateFunction> predicate_select;
 	string overflow_message;
 
+	bool HasSelectionKernel() const {
+		switch (plan.kind) {
+		case SljitNativeRegionExpressionKind::PREDICATE:
+			return predicate_select.Function() != nullptr;
+		case SljitNativeRegionExpressionKind::INTEGER_COMPARE_CONSTANT:
+		case SljitNativeRegionExpressionKind::INTEGER_COMPARE_REFERENCES:
+		case SljitNativeRegionExpressionKind::INTEGER_IN_LIST:
+		case SljitNativeRegionExpressionKind::INTEGER_BETWEEN:
+		case SljitNativeRegionExpressionKind::NULL_CHECK:
+		case SljitNativeRegionExpressionKind::TYPED_EXPRESSION_TREE:
+			return select.Function() != nullptr;
+		default:
+			return false;
+		}
+	}
+
 	idx_t CodeSize() const {
 		return vector.CodeSize() + flat.CodeSize() + select.CodeSize() + predicate.CodeSize() +
 		       predicate_select.CodeSize();
