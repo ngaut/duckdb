@@ -62,12 +62,18 @@ struct PrefixRangeBitmapBuildState : public PrefixRangeFilter::BuildState {
 template <typename U>
 class PrefixRangeBitmap {
 public:
-	void Initialize(ClientContext &context, U min_p, U span_p) {
+	void Initialize(ClientContext &context, U min_p, U span_p, idx_t number_of_rows, bool allow_adaptive_exact_bitmap) {
 		min = min_p;
 		span = span_p;
 		shift = 0;
 
-		if (span >= CAP_BITS) {
+		const auto exact_span_budget =
+		    number_of_rows > NumericLimits<uint64_t>::Maximum() / MAX_EXACT_BITS_PER_BUILD_ROW
+		        ? NumericLimits<uint64_t>::Maximum()
+		        : static_cast<uint64_t>(number_of_rows) * MAX_EXACT_BITS_PER_BUILD_ROW;
+		const bool adaptive_exact = allow_adaptive_exact_bitmap && static_cast<uint64_t>(span) < MAX_EXACT_BITS &&
+		                            static_cast<uint64_t>(span) <= exact_span_budget;
+		if (span >= CAP_BITS && !adaptive_exact) {
 			const auto q = UnsafeNumericCast<uint64_t>(span >> MAX_PREFIX_LENGTH);
 			shift = (q <= 1) ? 0 : (64 - CountZeros<uint64_t>::Leading(q - 1));
 		}
@@ -255,6 +261,8 @@ public:
 private:
 	static constexpr idx_t MAX_PREFIX_LENGTH = 20;
 	static constexpr idx_t CAP_BITS = 1ULL << MAX_PREFIX_LENGTH;
+	static constexpr idx_t MAX_EXACT_BITS = 1ULL << 23;
+	static constexpr idx_t MAX_EXACT_BITS_PER_BUILD_ROW = 256;
 	static constexpr idx_t WORD_SHIFT = 6;
 	static constexpr idx_t WORD_MASK = 63;
 
@@ -313,7 +321,7 @@ public:
 		D_ASSERT(number_of_rows > 0);
 		const auto min = NumericConverter<T>::Convert(min_val.GetValueUnsafe<T>());
 		const auto max = NumericConverter<T>::Convert(max_val.GetValueUnsafe<T>());
-		bitmap.Initialize(context, min, max - min);
+		bitmap.Initialize(context, min, max - min, number_of_rows, true);
 	}
 
 	unique_ptr<BuildState> InitializeBuildState(ClientContext &context) const override {
@@ -396,7 +404,7 @@ public:
 		const auto min = StringPrefixConverter::Convert(min_val.GetValueUnsafe<string_t>());
 		const auto max = StringPrefixConverter::Convert(max_val.GetValueUnsafe<string_t>());
 		D_ASSERT(min <= max);
-		bitmap.Initialize(context, min, max - min);
+		bitmap.Initialize(context, min, max - min, number_of_rows, false);
 	}
 
 	unique_ptr<BuildState> InitializeBuildState(ClientContext &context) const override {

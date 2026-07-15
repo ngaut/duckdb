@@ -237,10 +237,16 @@ public:
 			// Check if delta has benefit
 			auto delta_required_bitwidth =
 			    BitpackingPrimitives::MinimumBitWidth<T, false>(static_cast<T>(min_max_delta_diff));
-			auto regular_required_bitwidth = BitpackingPrimitives::MinimumBitWidth(min_max_diff);
+			// FOR stores offsets from the minimum, so its packed values are unsigned just like DELTA_FOR offsets.
+			// Comparing a signed FOR width here adds a bit that is never written and can incorrectly select the
+			// stateful delta format when both encodings have the same physical width.
+			auto regular_required_bitwidth = BitpackingPrimitives::MinimumBitWidth<T, false>(min_max_diff);
 
 			//! `min_max_diff` is uninitialized if `can_do_for` isn't true
-			bool prefer_for = can_do_for && delta_required_bitwidth >= regular_required_bitwidth;
+			const bool force_for = mode == BitpackingMode::FOR;
+			const bool force_delta_for = mode == BitpackingMode::DELTA_FOR;
+			const bool prefer_for =
+			    force_for || (!force_delta_for && can_do_for && delta_required_bitwidth >= regular_required_bitwidth);
 
 			if (!prefer_for && mode != BitpackingMode::FOR) {
 				SubtractFrameOfReference(delta_buffer, minimum_delta);
@@ -872,6 +878,64 @@ static T BitpackingConstantDeltaValue(const BitpackingScanState<T> &scan_state, 
 	                      static_cast<T_U>(scan_state.current_frame_of_reference));
 }
 
+template <class T, class T_U = typename MakeUnsigned<T>::type>
+static T_U BitpackingPackedValue(data_ptr_t group_ptr, bitpacking_width_t width, idx_t group_offset) {
+	static_assert(sizeof(T) <= sizeof(uint64_t), "random bitpacking access requires a machine-word value");
+	D_ASSERT(width > 0);
+	D_ASSERT(width <= sizeof(T) * 8);
+	D_ASSERT(group_offset < BitpackingPrimitives::BITPACKING_ALGORITHM_GROUP_SIZE);
+
+	const auto bit_offset = group_offset * width;
+	auto word_idx = bit_offset / 32;
+	auto word_offset = bit_offset % 32;
+	idx_t bits_read = 0;
+	uint64_t value_bits = 0;
+	while (bits_read < width) {
+		const auto word = Load<uint32_t>(group_ptr + word_idx * sizeof(uint32_t));
+		const auto bits_available = 32 - word_offset;
+		const auto bits_to_read = MinValue<idx_t>(width - bits_read, bits_available);
+		const auto mask = bits_to_read == 32 ? NumericLimits<uint32_t>::Maximum() : (uint32_t(1) << bits_to_read) - 1;
+		value_bits |= static_cast<uint64_t>((word >> word_offset) & mask) << bits_read;
+		bits_read += bits_to_read;
+		word_idx++;
+		word_offset = 0;
+	}
+	return static_cast<T_U>(value_bits);
+}
+
+template <class T, class T_U = typename MakeUnsigned<T>::type>
+static T BitpackingValueFromBits(uint64_t bits) {
+	const auto unsigned_value = static_cast<T_U>(bits);
+	T result;
+	memcpy(&result, &unsigned_value, sizeof(T));
+	return result;
+}
+
+template <class WORD, class CALLBACK>
+static void BitpackingVisitSetBits(const WORD *bitmap, idx_t first_bit, idx_t last_bit, CALLBACK callback) {
+	static_assert(sizeof(WORD) * 8 == ValidityMask::BITS_PER_VALUE, "bitset word must match validity word size");
+	D_ASSERT(first_bit <= last_bit);
+	const auto first_word = first_bit / ValidityMask::BITS_PER_VALUE;
+	const auto last_word = last_bit / ValidityMask::BITS_PER_VALUE;
+	for (idx_t word_idx = first_word; word_idx <= last_word; word_idx++) {
+		auto word = bitmap[word_idx];
+		if (word_idx == first_word) {
+			word &= static_cast<WORD>(~WORD(0) << (first_bit % ValidityMask::BITS_PER_VALUE));
+		}
+		if (word_idx == last_word) {
+			const auto last_offset = last_bit % ValidityMask::BITS_PER_VALUE;
+			if (last_offset + 1 < ValidityMask::BITS_PER_VALUE) {
+				word &= static_cast<WORD>((WORD(1) << (last_offset + 1)) - 1);
+			}
+		}
+		while (word) {
+			const auto bit_offset = CountZeros<WORD>::Trailing(word);
+			callback(word_idx * ValidityMask::BITS_PER_VALUE + bit_offset);
+			word &= word - 1;
+		}
+	}
+}
+
 static bool SelectionVectorIsOrdered(const SelectionVector &sel, idx_t sel_count) {
 	if (!sel.IsSet()) {
 		return true;
@@ -1111,6 +1175,25 @@ void BitpackingSelect(ColumnSegment &segment, ColumnScanState &state, idx_t vect
 		    scan_state.current_group_ptr + scan_state.current_group_offset * scan_state.current_width / 8;
 		data_ptr_t decompression_group_start_pointer =
 		    current_position_ptr - offset_in_compression_group * scan_state.current_width / 8;
+		const auto selected_count = selected_end - selected_idx;
+		if constexpr (sizeof(T) <= sizeof(uint64_t)) {
+			if (scan_state.current_group.mode == BitpackingMode::FOR &&
+			    selected_count <= BitpackingPrimitives::BITPACKING_ALGORITHM_GROUP_SIZE / 4) {
+				using T_U = typename MakeUnsigned<T>::type;
+				for (idx_t i = selected_idx; i < selected_end; i++) {
+					const auto row_idx = sel.get_index(i);
+					const auto packed_value =
+					    BitpackingPackedValue<T, T_U>(decompression_group_start_pointer, scan_state.current_width,
+					                                  offset_in_compression_group + row_idx - scanned);
+					result_data[output_idx++] =
+					    static_cast<T>(packed_value + static_cast<T_U>(scan_state.current_frame_of_reference));
+				}
+				scan_state.current_group_offset += to_scan;
+				scanned += to_scan;
+				selected_idx = selected_end;
+				continue;
+			}
+		}
 
 		BitpackingPrimitives::UnPackBlock<T>(data_ptr_cast(scan_state.decompression_buffer),
 		                                     decompression_group_start_pointer, scan_state.current_width,
@@ -1406,6 +1489,51 @@ struct BitpackingPrefixRangeMatcher {
 		                                         BitpackingPrefixComparable<T>::Convert(value));
 	}
 
+	bool TrySelectConstantDeltaDense(const BitpackingScanState<T> &scan_state, T *result_data,
+	                                 SelectionVector &result_sel, idx_t &result_count, idx_t scanned,
+	                                 idx_t to_scan) const {
+		if constexpr (sizeof(T) > sizeof(uint64_t)) {
+			return false;
+		} else {
+			if (to_scan == 0 || scan_state.current_constant != static_cast<T>(1)) {
+				return false;
+			}
+			using T_U = typename MakeUnsigned<T>::type;
+			const auto first_value = BitpackingConstantDeltaValue<T>(scan_state, scan_state.current_group_offset);
+			const auto last_value =
+			    BitpackingConstantDeltaValue<T>(scan_state, scan_state.current_group_offset + to_scan - 1);
+			const auto filter_min = BitpackingValueFromBits<T>(lookup_min);
+			const auto filter_max = BitpackingValueFromBits<T>(lookup_min + lookup_span);
+			if (last_value < filter_min || first_value > filter_max) {
+				return true;
+			}
+
+			const auto overlap_first = MaxValue<T>(first_value, filter_min);
+			const auto overlap_last = MinValue<T>(last_value, filter_max);
+			const auto overlap_first_y = static_cast<T_U>(overlap_first) - static_cast<T_U>(filter_min);
+			const auto overlap_last_y = static_cast<T_U>(overlap_last) - static_cast<T_U>(filter_min);
+			const auto first_bucket = UnsafeNumericCast<idx_t>(overlap_first_y >> lookup_shift);
+			const auto last_bucket = UnsafeNumericCast<idx_t>(overlap_last_y >> lookup_shift);
+			BitpackingVisitSetBits(lookup_bitmap, first_bucket, last_bucket, [&](idx_t bucket) {
+				const auto bucket_first_y = static_cast<T_U>(bucket) << lookup_shift;
+				const auto bucket_last_y = static_cast<T_U>(MinValue<uint64_t>(
+				    lookup_span, static_cast<uint64_t>(bucket_first_y) + ((uint64_t(1) << lookup_shift) - 1)));
+				const auto selected_first_y = MaxValue<T_U>(bucket_first_y, overlap_first_y);
+				const auto selected_last_y = MinValue<T_U>(bucket_last_y, overlap_last_y);
+				const auto selected_first_bits = static_cast<T_U>(lookup_min) + selected_first_y;
+				const auto selected_count = UnsafeNumericCast<idx_t>(selected_last_y - selected_first_y + 1);
+				const auto first_row =
+				    scanned + UnsafeNumericCast<idx_t>(selected_first_bits - static_cast<T_U>(first_value));
+				for (idx_t selected_idx = 0; selected_idx < selected_count; selected_idx++) {
+					const auto row_idx = first_row + selected_idx;
+					result_data[row_idx] = static_cast<T>(selected_first_bits + selected_idx);
+					result_sel.set_index(result_count++, row_idx);
+				}
+			});
+			return true;
+		}
+	}
+
 	uint64_t lookup_min;
 	uint64_t lookup_span;
 	idx_t lookup_shift;
@@ -1433,6 +1561,9 @@ template <class T, class MATCHER, class T_U = typename MakeUnsigned<T>::type>
 static idx_t BitpackingLookupFilterConstantDeltaDense(const BitpackingScanState<T> &scan_state, MATCHER &matches,
                                                       T *result_data, SelectionVector &result_sel, idx_t result_count,
                                                       idx_t scanned, idx_t to_scan) {
+	if (matches.TrySelectConstantDeltaDense(scan_state, result_data, result_sel, result_count, scanned, to_scan)) {
+		return result_count;
+	}
 	const auto base_offset = scan_state.current_group_offset;
 	for (idx_t i = 0; i < to_scan; i++) {
 		const auto row_idx = scanned + i;
@@ -1805,15 +1936,6 @@ static bool TryBitpackingPrefixRangeFilter(ColumnSegment &segment, ColumnScanSta
 }
 
 template <class T>
-static T BitpackingPerfectHashJoinBound(uint64_t bits) {
-	using UNSIGNED_T = typename MakeUnsigned<T>::type;
-	const auto unsigned_value = static_cast<UNSIGNED_T>(bits);
-	T result;
-	memcpy(&result, &unsigned_value, sizeof(T));
-	return result;
-}
-
-template <class T>
 static bool SkipPausedBitpackingPrimaryFilter(ColumnSegment &segment, ColumnScanState &state, idx_t vector_count,
                                               Vector &result, SelectionVector &sel, idx_t &sel_count,
                                               ExpressionFilterState &filter_state,
@@ -1858,6 +1980,52 @@ struct BitpackingPerfectHashJoinMatcher {
 			}
 		}
 		return true;
+	}
+
+	bool TrySelectConstantDeltaDense(const BitpackingScanState<T> &scan_state, T *result_data,
+	                                 SelectionVector &result_sel, idx_t &result_count, idx_t scanned,
+	                                 idx_t to_scan) const {
+		if constexpr (sizeof(T) > sizeof(uint64_t)) {
+			return false;
+		} else {
+			if (to_scan == 0 || scan_state.current_constant != static_cast<T>(1)) {
+				return false;
+			}
+			using T_U = typename MakeUnsigned<T>::type;
+			const auto first_value = BitpackingConstantDeltaValue<T>(scan_state, scan_state.current_group_offset);
+			const auto last_value =
+			    BitpackingConstantDeltaValue<T>(scan_state, scan_state.current_group_offset + to_scan - 1);
+			if (last_value < build_min || first_value > build_max) {
+				return true;
+			}
+
+			const auto overlap_first = MaxValue<T>(first_value, build_min);
+			const auto overlap_last = MinValue<T>(last_value, build_max);
+			const auto first_build_idx =
+			    UnsafeNumericCast<idx_t>(static_cast<T_U>(overlap_first) - static_cast<T_U>(build_min));
+			const auto last_build_idx =
+			    UnsafeNumericCast<idx_t>(static_cast<T_U>(overlap_last) - static_cast<T_U>(build_min));
+			auto emit_build_idx = [&](idx_t build_idx) {
+				const auto value_bits = static_cast<T_U>(build_min) + build_idx;
+				const auto value = static_cast<T>(value_bits);
+				if constexpr (HAS_RESIDUAL_RANGES) {
+					if (!(*this)(value)) {
+						return;
+					}
+				}
+				const auto row_idx = scanned + UnsafeNumericCast<idx_t>(value_bits - static_cast<T_U>(first_value));
+				result_data[row_idx] = value;
+				result_sel.set_index(result_count++, row_idx);
+			};
+			if constexpr (BUILD_DENSE) {
+				for (idx_t build_idx = first_build_idx; build_idx <= last_build_idx; build_idx++) {
+					emit_build_idx(build_idx);
+				}
+			} else {
+				BitpackingVisitSetBits(build_validity, first_build_idx, last_build_idx, emit_build_idx);
+			}
+			return true;
+		}
 	}
 
 	T build_min;
@@ -1907,8 +2075,8 @@ static bool TryBitpackingPerfectHashJoinFilter(ColumnSegment &segment, ColumnSca
 	    (!layout.is_build_dense && !layout.build_validity)) {
 		return false;
 	}
-	const auto build_min = BitpackingPerfectHashJoinBound<T>(layout.build_min);
-	const auto build_max = BitpackingPerfectHashJoinBound<T>(layout.build_max);
+	const auto build_min = BitpackingValueFromBits<T>(layout.build_min);
+	const auto build_max = BitpackingValueFromBits<T>(layout.build_max);
 	const auto primary_input_count = sel_count;
 	idx_t fused_operation_count = 1;
 	const bool track_primary_selectivity = static_cast<bool>(operations[0].selectivity);
@@ -1965,6 +2133,11 @@ struct BitpackingBloomFilterMatcher {
 			}
 		}
 		return true;
+	}
+
+	bool TrySelectConstantDeltaDense(const BitpackingScanState<T> &, T *, SelectionVector &, idx_t &, idx_t,
+	                                 idx_t) const {
+		return false;
 	}
 
 	const BloomFilter &filter;

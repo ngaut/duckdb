@@ -527,7 +527,10 @@ GENERIC_WORKLOADS = (
             "USING (join_key)"
         ),
         "minimum_auto_speedup": 1.08,
-        "minimum_auto_speedup_by_threads": {1: 1.15},
+        # The adaptive exact prefix-range filter, unsigned AUTO codec choice,
+        # and sparse FOR selection preserve 1.338x over ten alternating T1
+        # pairs. Keep margin for scan variance while rejecting the old path.
+        "minimum_auto_speedup_by_threads": {1: 1.25},
         "max_auto_slowdown": 1.05,
         "requires_compiled_auto": True,
     },

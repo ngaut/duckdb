@@ -46,7 +46,7 @@ FROM
 	pragma_storage_info('test_bp', include_segment_info=true)
 WHERE segment_type NOT IN ('VALIDITY')
 ----
-CONSTANT: 9, DELTA_FOR: 1
+CONSTANT: 9, FOR: 1
 
 statement ok
 PRAGMA force_bitpacking_mode = 'delta_for'
@@ -79,3 +79,24 @@ FROM
 WHERE segment_type NOT IN ('VALIDITY')
 ----
 DELTA_FOR: 5
+
+# AUTO compares the physical unsigned FOR and DELTA_FOR widths. A recurring
+# non-monotonic payload needs seven bits in either representation, so the
+# random-access FOR format wins the tie.
+statement ok
+PRAGMA force_bitpacking_mode = 'auto'
+
+statement ok
+CREATE OR REPLACE TABLE test_bp AS SELECT (i % 97)::BIGINT AS a FROM range(0, 10000) tbl(i)
+
+statement ok
+CHECKPOINT
+
+query I
+SELECT
+	segment_info
+FROM
+	pragma_storage_info('test_bp', include_segment_info=true)
+WHERE segment_type NOT IN ('VALIDITY')
+----
+FOR: 5

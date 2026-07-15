@@ -32,6 +32,38 @@ JOIN build b
   ON p.k = b.k
  AND p.g >= b.g;
 
+# A numeric build domain can use a larger exact bitmap when its memory remains
+# proportional to the build cardinality. The exact PRF must reduce the probe
+# scan to the 8,192 occupied keys instead of returning neighboring prefixes.
+statement ok
+CREATE OR REPLACE TABLE adaptive_probe AS
+SELECT i::BIGINT AS k, (i % 7)::INTEGER AS g
+FROM range(0, 2100000) t(i);
+
+statement ok
+CREATE OR REPLACE TABLE adaptive_build AS
+SELECT (i * 251)::BIGINT AS k, ((i * 251) % 7)::INTEGER AS g
+FROM range(0, 8192) t(i);
+
+query II
+EXPLAIN ANALYZE
+SELECT count(*)
+FROM adaptive_probe p
+JOIN adaptive_build b
+  ON p.k = b.k
+ AND p.g >= b.g;
+----
+analyzed_plan	<REGEX>:.*IN PRF\(k\).*8,192 rows.*
+
+query I
+SELECT count(*)
+FROM adaptive_probe p
+JOIN adaptive_build b
+  ON p.k = b.k
+ AND p.g >= b.g;
+----
+8192
+
 statement ok
 CREATE OR REPLACE TABLE probe_with_null AS
 SELECT i::BIGINT AS k, (i % 7)::INTEGER AS g
@@ -366,4 +398,3 @@ ORDER BY ALL;
 -2	NULL
 5	5
 6	6
-

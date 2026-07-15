@@ -47,7 +47,7 @@ true
 query I
 SELECT segment_info FROM pragma_storage_info('bp_tbl', include_segment_info=true) WHERE segment_type NOT IN ('VALIDITY')
 ----
-CONSTANT: 9, DELTA_FOR: 1
+CONSTANT: 9, FOR: 1
 
 # Same row counts whether or not we include segment_info.
 query I
