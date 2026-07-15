@@ -130,6 +130,16 @@ struct SljitNativeRegionExpressionPlan {
 	SljitNativeRegionExpressionPlan Copy(bool copy_auxiliary_expression_tree = true, bool copy_ir = true) const;
 };
 
+//! A static single-column table filter compiled for execution inside DuckDB's
+//! canonical storage scan. The filter index is the immutable source-contract
+//! identity; the expression is normalized to a one-column input layout.
+struct SljitNativeScanFilterPlan {
+	idx_t filter_index = DConstants::INVALID_INDEX;
+	LogicalType input_type;
+	bool input_not_null = false;
+	SljitNativeRegionExpressionPlan filter;
+};
+
 struct SljitNativeHashJoinProbePlan {
 	idx_t operator_index = DConstants::INVALID_INDEX;
 	vector<SljitNativeHashJoinProbeKeyPlan> keys;
@@ -279,6 +289,7 @@ struct SljitNativeRegionOpPlan {
 
 struct SljitNativeRegionPlan {
 	vector<SljitNativeRegionOpPlan> ops;
+	vector<SljitNativeScanFilterPlan> scan_filters;
 	ExecutionRegionSourceExecutionKind source_execution = ExecutionRegionSourceExecutionKind::NONE;
 	bool uses_scan_filters = false;
 	vector<LogicalType> source_output_types;

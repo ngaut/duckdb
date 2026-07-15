@@ -50,6 +50,16 @@ struct SljitExecutableFilter {
 	}
 };
 
+struct SljitExecutableScanFilter {
+	idx_t filter_index = DConstants::INVALID_INDEX;
+	LogicalType input_type;
+	unique_ptr<SljitExecutableFilter> filter;
+
+	idx_t CodeSize() const {
+		return filter ? filter->CodeSize() : 0;
+	}
+};
+
 static inline bool SljitInputSourceKnownNotNull(const vector<bool> &input_source_not_null, idx_t source_idx) {
 	return source_idx < input_source_not_null.size() && input_source_not_null[source_idx];
 }
@@ -433,6 +443,7 @@ struct SljitExecutableRegionOp {
 
 struct SljitExecutableRegion {
 	vector<SljitExecutableRegionOp> ops;
+	vector<SljitExecutableScanFilter> scan_filters;
 	bool uses_scan_filters = false;
 	vector<LogicalType> source_output_types;
 	vector<idx_t> source_distinct_counts;
@@ -445,6 +456,9 @@ struct SljitExecutableRegion {
 		for (auto &op : ops) {
 			result += op.CodeSize();
 		}
+		for (auto &scan_filter : scan_filters) {
+			result += scan_filter.CodeSize();
+		}
 		return result;
 	}
 
@@ -454,7 +468,7 @@ struct SljitExecutableRegion {
 				return true;
 			}
 		}
-		return false;
+		return !scan_filters.empty();
 	}
 };
 

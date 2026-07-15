@@ -257,7 +257,7 @@ static bool SljitTryFastSelectFlatAllValidIntegerCompareReferences(const SljitNa
 }
 
 template <class ADAPTER_SCRATCH>
-static idx_t SljitSelectExpression(SljitExecutableRegionExpression &expression, DataChunk &input,
+static idx_t SljitSelectExpression(const SljitExecutableRegionExpression &expression, DataChunk &input,
                                    SelectionVector &filter_selection, ADAPTER_SCRATCH &adapter_scratch,
                                    const SelectionVector *execute_sel, idx_t count,
                                    bool materialize_all_true_selection = true) {
@@ -359,7 +359,7 @@ static idx_t SljitSelectExpression(SljitExecutableRegionExpression &expression, 
 }
 
 template <class ADAPTER_SCRATCH>
-static idx_t SljitSelectExpression(SljitExecutableRegionExpression &expression, DataChunk &input,
+static idx_t SljitSelectExpression(const SljitExecutableRegionExpression &expression, DataChunk &input,
                                    SelectionVector &filter_selection, ADAPTER_SCRATCH &adapter_scratch,
                                    bool materialize_all_true_selection = true) {
 	return SljitSelectExpression(expression, input, filter_selection, adapter_scratch, nullptr, input.size(),

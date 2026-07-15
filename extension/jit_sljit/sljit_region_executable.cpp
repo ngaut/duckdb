@@ -291,6 +291,24 @@ bool BuildSljitExecutableRegion(const SljitNativeRegionPlan &region, SljitExecut
 	executable.source_distinct_reserve_counts = region.source_distinct_reserve_counts;
 	executable.source_min_values = region.source_min_values;
 	executable.source_max_values = region.source_max_values;
+	executable.scan_filters.reserve(region.scan_filters.size());
+	for (auto &scan_filter : region.scan_filters) {
+		SljitExecutableRegionOp filter_op;
+		filter_op.kind = SljitNativeRegionOpKind::FILTER;
+		filter_op.input_types.push_back(scan_filter.input_type);
+		filter_op.output_types = filter_op.input_types;
+		vector<bool> input_not_null {scan_filter.input_not_null};
+		string scan_filter_error;
+		if (!SljitPrepareAndCompileExecutableFilter(scan_filter.filter, filter_op, scan_filter_error, &input_not_null,
+		                                            true)) {
+			continue;
+		}
+		SljitExecutableScanFilter executable_filter;
+		executable_filter.filter_index = scan_filter.filter_index;
+		executable_filter.input_type = scan_filter.input_type;
+		executable_filter.filter = std::move(filter_op.filter);
+		executable.scan_filters.push_back(std::move(executable_filter));
+	}
 	executable.ops.reserve(region.ops.size());
 	auto current_not_null = region.source_not_null;
 	auto current_distinct_counts = region.source_distinct_counts;

@@ -66,6 +66,7 @@ struct SljitRegionNodePlan {
 	ExecutionRegionLoweringKind kind = ExecutionRegionLoweringKind::BOUNDARY;
 	string reason;
 	vector<SljitNativeRegionOpPlan> native_ops;
+	vector<SljitNativeScanFilterPlan> scan_filters;
 	SljitSourceContractPlan source_contract;
 	ExecutionRegionSourceExecutionKind source_execution = ExecutionRegionSourceExecutionKind::NONE;
 	bool requires_source_contract = false;
@@ -115,6 +116,8 @@ void AppendSljitSourceFilterFacts(string &reason, const ExecutionRegionNode &nod
 bool TryPlanSljitGeneratedSourceFilters(const ExecutionRegionNode &node, SljitSourceContractPlan &contract_plan,
                                         vector<SljitNativeRegionOpPlan> &native_ops, string &error,
                                         bool render_diagnostics);
+void PlanSljitStorageScanFilters(const ExecutionRegionNode &node, vector<SljitNativeScanFilterPlan> &scan_filters,
+                                 bool render_diagnostics);
 SljitRegionNodePlan PlanSljitSourceNode(const ExecutionRegionNode &node, const ExecutionRegionContract &contract,
                                         ExecutionRegionSourceExecutionKind source_execution, bool render_diagnostics,
                                         const SljitSourceStrategyContext &strategy_context = {});

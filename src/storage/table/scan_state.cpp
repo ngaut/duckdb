@@ -18,10 +18,13 @@ TableScanState::~TableScanState() {
 
 void TableScanState::Initialize(vector<StorageIndex> column_ids_p, optional_ptr<ClientContext> context,
                                 optional_ptr<TableFilterSet> table_filters, optional_ptr<SampleOptions> table_sampling,
-                                TableFilterExecutionMode filter_execution_mode) {
+                                TableFilterExecutionMode filter_execution_mode,
+                                optional_ptr<const TableFilterKernelProvider> kernel_provider,
+                                optional_ptr<const vector<idx_t>> kernel_filter_indices) {
 	this->column_ids = std::move(column_ids_p);
 	if (table_filters) {
-		filters.Initialize(*context, *table_filters, column_ids, filter_execution_mode);
+		filters.Initialize(*context, *table_filters, column_ids, filter_execution_mode, kernel_provider,
+		                   kernel_filter_indices);
 	}
 	if (table_sampling) {
 		sampling_info.do_system_sample = table_sampling->method == SampleMethod::SYSTEM_SAMPLE;
@@ -49,15 +52,26 @@ ScanSamplingInfo &TableScanState::GetSamplingInfo() {
 }
 
 ScanFilter::ScanFilter(ClientContext &context, idx_t filter_index_p, ProjectionIndex index,
-                       const vector<StorageIndex> &column_ids, TableFilter &filter_p)
+                       const vector<StorageIndex> &column_ids, TableFilter &filter_p,
+                       optional_ptr<const TableFilterKernelProvider> kernel_provider, idx_t kernel_filter_index)
     : filter_index(filter_index_p), scan_column_index(index), table_column_index(column_ids[index]), filter(filter_p),
       always_true(false) {
 	filter_state = TableFilterState::Initialize(context, filter);
+	if (kernel_provider && kernel_filter_index != DConstants::INVALID_INDEX &&
+	    kernel_provider->HasTableFilterKernel(kernel_filter_index)) {
+		filter_state->Cast<ExpressionFilterState>().kernel =
+		    kernel_provider->CreateTableFilterKernelState(kernel_filter_index);
+	}
 }
 
 void ScanFilterInfo::Initialize(ClientContext &context, TableFilterSet &filters, const vector<StorageIndex> &column_ids,
-                                TableFilterExecutionMode execution_mode) {
+                                TableFilterExecutionMode execution_mode,
+                                optional_ptr<const TableFilterKernelProvider> kernel_provider,
+                                optional_ptr<const vector<idx_t>> kernel_filter_indices) {
 	D_ASSERT(filters.HasFilters());
+	if (kernel_filter_indices && kernel_filter_indices->size() != filters.FilterCount()) {
+		throw InternalException("table filter kernel mapping does not match the active filter count");
+	}
 	table_filters = &filters;
 	execute_residual_filters = execution_mode == TableFilterExecutionMode::FILTER_AND_PRUNE;
 	adaptive_filter = make_uniq<AdaptiveFilter>(filters);
@@ -73,7 +87,10 @@ void ScanFilterInfo::Initialize(ClientContext &context, TableFilterSet &filters,
 	filter_list.reserve(filters.FilterCount());
 	idx_t filter_index = 0;
 	for (auto &entry : filters) {
-		filter_list.emplace_back(context, filter_index++, entry.GetIndex(), column_ids, entry.Filter());
+		auto kernel_filter_index =
+		    kernel_filter_indices ? (*kernel_filter_indices)[filter_index] : DConstants::INVALID_INDEX;
+		filter_list.emplace_back(context, filter_index++, entry.GetIndex(), column_ids, entry.Filter(), kernel_provider,
+		                         kernel_filter_index);
 	}
 	column_has_filter.reserve(column_ids.size());
 	for (auto col_idx : ProjectionIndex::GetIndexes(column_ids.size())) {

@@ -295,6 +295,27 @@ it cannot lower it, DuckDB retains scan ownership. This admits normal safe
 predicates such as `x % 7 = 3` without allowing potentially throwing arithmetic
 to bypass DuckDB semantics.
 
+When `ALL` keeps filter ownership in the storage scan, the selected execution
+kernel may also provide compiled implementations for immutable static table
+filters. DuckDB core remains the sole owner of scan order, compression-specific
+fast paths, selection semantics, and fallback. It binds a backend kernel only
+when the finalized active filter is structurally identical to the original
+static expression; a merged or dynamic filter never inherits a callable by
+column position. Each scan thread owns its kernel state. Codec-native exact
+membership, range, and dictionary paths run first, and the compiled predicate
+is invoked only at the canonical residual boundary before the cached
+`ExpressionExecutor` fallback. An exact runtime-filter proof on the same source
+input suppresses redundant static-kernel generation because storage already
+has the stronger membership operation for that column.
+
+This residual contract does not claim compressed-domain execution. It still
+receives a DuckDB vector after the codec has decoded the values needed by the
+residual. A backend may receive credit for the rows its kernel evaluates, but
+not for the surrounding storage scan or decompression. Moving work ahead of
+materialization requires a separate codec-owned contract that exposes encoded
+layout and selection publication explicitly; it must not be disguised as a
+second post-decode filter route.
+
 The generic four-thread scan-filter promotion measures 2.016x over ten
 alternating pairs (51.823 ms off versus 25.712 ms auto). Its 1.85x
 thread-specific regression floor protects the generated-source ownership win;

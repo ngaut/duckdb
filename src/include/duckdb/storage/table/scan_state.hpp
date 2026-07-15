@@ -172,7 +172,9 @@ struct ColumnFetchState {
 
 struct ScanFilter {
 	ScanFilter(ClientContext &context, idx_t filter_index, ProjectionIndex index,
-	           const vector<StorageIndex> &column_ids, TableFilter &filter);
+	           const vector<StorageIndex> &column_ids, TableFilter &filter,
+	           optional_ptr<const TableFilterKernelProvider> kernel_provider = nullptr,
+	           idx_t kernel_filter_index = DConstants::INVALID_INDEX);
 
 	idx_t filter_index;
 	ProjectionIndex scan_column_index;
@@ -191,7 +193,9 @@ public:
 	~ScanFilterInfo();
 
 	void Initialize(ClientContext &context, TableFilterSet &filters, const vector<StorageIndex> &column_ids,
-	                TableFilterExecutionMode execution_mode = TableFilterExecutionMode::FILTER_AND_PRUNE);
+	                TableFilterExecutionMode execution_mode = TableFilterExecutionMode::FILTER_AND_PRUNE,
+	                optional_ptr<const TableFilterKernelProvider> kernel_provider = nullptr,
+	                optional_ptr<const vector<idx_t>> kernel_filter_indices = nullptr);
 
 	const vector<ScanFilter> &GetFilterList() const {
 		return filter_list;
@@ -323,7 +327,9 @@ public:
 	void Initialize(vector<StorageIndex> column_ids, optional_ptr<ClientContext> context = nullptr,
 	                optional_ptr<TableFilterSet> table_filters = nullptr,
 	                optional_ptr<SampleOptions> table_sampling = nullptr,
-	                TableFilterExecutionMode filter_execution_mode = TableFilterExecutionMode::FILTER_AND_PRUNE);
+	                TableFilterExecutionMode filter_execution_mode = TableFilterExecutionMode::FILTER_AND_PRUNE,
+	                optional_ptr<const TableFilterKernelProvider> kernel_provider = nullptr,
+	                optional_ptr<const vector<idx_t>> kernel_filter_indices = nullptr);
 
 	const vector<StorageIndex> &GetColumnIds();
 

@@ -234,6 +234,15 @@ unique_ptr<SljitNativeRegionPlan> SljitNativeRegionPlan::Copy() const {
 	result->source_min_values = source_min_values;
 	result->source_max_values = source_max_values;
 	result->source_not_null = source_not_null;
+	result->scan_filters.reserve(scan_filters.size());
+	for (auto &scan_filter : scan_filters) {
+		SljitNativeScanFilterPlan scan_filter_copy;
+		scan_filter_copy.filter_index = scan_filter.filter_index;
+		scan_filter_copy.input_type = scan_filter.input_type;
+		scan_filter_copy.input_not_null = scan_filter.input_not_null;
+		scan_filter_copy.filter = scan_filter.filter.Copy();
+		result->scan_filters.push_back(std::move(scan_filter_copy));
+	}
 	result->ops.reserve(ops.size());
 	for (auto &op : ops) {
 		result->ops.push_back(CopySljitNativeRegionOp(op));

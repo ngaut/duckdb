@@ -12,6 +12,8 @@
 
 namespace duckdb {
 
+class TableFilterKernelProvider;
+
 //! Stable query-local identity shared by a runtime filter and the operator state that owns it.
 //! Identity equality is the proof that both sides describe the same finalized membership set.
 struct ExecutionRuntimeFilterIdentity {};
@@ -313,6 +315,7 @@ struct ExecutionRegionOpenRequest {
 	ExecutionRegionSourceExecutionKind source_execution = ExecutionRegionSourceExecutionKind::NONE;
 	ExecutionRegionScanFilterMode scan_filter_mode = ExecutionRegionScanFilterMode::NONE;
 	vector<LogicalType> source_contract_input_types;
+	optional_ptr<const TableFilterKernelProvider> table_filter_kernel_provider;
 
 	bool UsesSourceContract() const {
 		return source_execution == ExecutionRegionSourceExecutionKind::SOURCE_CONTRACT;

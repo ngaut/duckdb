@@ -8,6 +8,7 @@
 #pragma once
 
 #include "duckdb/execution/execution_region_ir.hpp"
+#include "duckdb/planner/table_filter_state.hpp"
 
 #include <atomic>
 
@@ -40,7 +41,7 @@ public:
 	virtual idx_t CodeSize() const;
 };
 
-class DUCKDB_API ExecutionRegionKernel {
+class DUCKDB_API ExecutionRegionKernel : public TableFilterKernelProvider {
 public:
 	virtual ~ExecutionRegionKernel();
 

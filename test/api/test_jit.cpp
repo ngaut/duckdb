@@ -801,7 +801,7 @@ TEST_CASE("JIT backend owns scan-filtered aggregate terminals through DuckDB sca
 	                          "FROM range(100000) tbl(i)"));
 
 	const string query = "SELECT sum(x), sum((x * 1.5) + (y / 4.0)) "
-	                     "FROM jit_scan_filtered_aggregate_terminal WHERE i % 97 = 0";
+	                     "FROM jit_scan_filtered_aggregate_terminal WHERE i > 1000 AND i % 97 = 0";
 	REQUIRE_NO_FAIL(con.Query("SET jit_policy='off'"));
 	auto reference = con.Query(query);
 	REQUIRE_NO_FAIL(*reference);
@@ -826,6 +826,15 @@ TEST_CASE("JIT backend owns scan-filtered aggregate terminals through DuckDB sca
 	}
 	REQUIRE(!scan_filtered_kernel_ids.empty());
 	RequireMaterializationElisionRuntimeProof(manager, scan_filtered_kernel_ids);
+	bool found_compiled_storage_filter = false;
+	for (auto &event : manager.GetEvents()) {
+		if (EventPhase(event) == "runtime" && EventStatus(event) == "executed" &&
+		    HasJitRuntimePathPrefix(event, "source.storage_scan.compiled_filter")) {
+			found_compiled_storage_filter = true;
+			REQUIRE(HasJitRuntimeProof(event, ExecutionRegionJitRuntimeProof::GENERATED_BACKEND_WORK));
+		}
+	}
+	REQUIRE(found_compiled_storage_filter);
 }
 
 TEST_CASE("JIT production CBO uses modulo domains for filtered reductions", "[api][jit]") {

@@ -65,13 +65,13 @@ static bool RewriteSljitSourceFilterExpressionReferences(ExecutionExpressionIR &
 
 static bool TryBuildSljitGeneratedSourceFilterExpression(const ExecutionRegionSourceFilter &filter,
                                                          unique_ptr<ExecutionExpressionIR> &expression,
-                                                         string &error) {
+                                                         idx_t source_index, string &error) {
 	if (!filter.generated_source_stage_candidate || !filter.expression || !filter.expression->root) {
 		error = "source filter has no generated expression contract";
 		return false;
 	}
 	auto fragment = *filter.expression;
-	if (!RewriteSljitSourceFilterExpressionReferences(*fragment.root, filter.scan_column_index)) {
+	if (!RewriteSljitSourceFilterExpressionReferences(*fragment.root, source_index)) {
 		error = "source filter expression references are not local to the filtered scan column";
 		return false;
 	}
@@ -293,8 +293,8 @@ static idx_t SljitGeneratedSourceFilterOrderCost(const ExecutionRegionSourceFilt
 		result += SljitGeneratedSourceFilterTypeCost(contract.source_contract_input_types[filter.scan_column_index]);
 	}
 	if (filter.expression && filter.expression->root) {
-		auto selectivity =
-		    SljitEstimateSourceFilterSelectivityBasisPoints(*filter.expression->root, contract, filter.scan_column_index);
+		auto selectivity = SljitEstimateSourceFilterSelectivityBasisPoints(*filter.expression->root, contract,
+		                                                                   filter.scan_column_index);
 		result = MaxValue<idx_t>(1, result * selectivity / 10000);
 	}
 	return result;
@@ -325,7 +325,7 @@ static bool TryPlanSljitGeneratedSourceFilter(const ExecutionRegionNode &node,
 	auto ordered_filters = SljitOrderGeneratedSourceFilters(node, contract);
 	for (auto filter : ordered_filters) {
 		unique_ptr<ExecutionExpressionIR> predicate;
-		if (!TryBuildSljitGeneratedSourceFilterExpression(*filter, predicate, error)) {
+		if (!TryBuildSljitGeneratedSourceFilterExpression(*filter, predicate, filter->scan_column_index, error)) {
 			return false;
 		}
 		predicates.push_back(std::move(predicate));
@@ -374,7 +374,8 @@ static bool SljitSourceProjectionRepairRequired(const ExecutionRegionTableScanCo
 		return true;
 	}
 	for (idx_t output_idx = 0; output_idx < projection_map.size(); output_idx++) {
-		if (projection_map[output_idx] != output_idx || source_input_types[output_idx] != node_output_types[output_idx]) {
+		if (projection_map[output_idx] != output_idx ||
+		    source_input_types[output_idx] != node_output_types[output_idx]) {
 			return true;
 		}
 	}
@@ -424,7 +425,7 @@ bool TryPlanSljitGeneratedSourceFilters(const ExecutionRegionNode &node, SljitSo
 	native_ops.reserve(2);
 	SljitNativeRegionOpPlan filter_op;
 	if (!TryPlanSljitGeneratedSourceFilter(node, table_scan_contract, source_input_types, filter_op, error,
-	                                      render_diagnostics)) {
+	                                       render_diagnostics)) {
 		return false;
 	}
 	native_ops.push_back(std::move(filter_op));
@@ -438,6 +439,54 @@ bool TryPlanSljitGeneratedSourceFilters(const ExecutionRegionNode &node, SljitSo
 	contract_plan.source_contract_input_types = std::move(source_input_types);
 	contract_plan.source_output_types = contract_plan.source_contract_input_types;
 	return true;
+}
+
+void PlanSljitStorageScanFilters(const ExecutionRegionNode &node, vector<SljitNativeScanFilterPlan> &scan_filters,
+                                 bool render_diagnostics) {
+	scan_filters.clear();
+	if (!node.source || !node.source->table_scan_contract.present) {
+		return;
+	}
+	auto &contract = node.source->table_scan_contract;
+	for (auto &source_filter : node.source->filters) {
+		if (source_filter.scan_column_index >= contract.source_contract_input_types.size()) {
+			continue;
+		}
+		// The exact runtime membership operation remains storage-owned and
+		// dominates an additional compiled predicate on the same source input.
+		bool exact_filter_owns_column = false;
+		for (auto &proof : node.source->exact_filter_proofs) {
+			if (proof.source_input_index == source_filter.scan_column_index) {
+				exact_filter_owns_column = true;
+				break;
+			}
+		}
+		if (exact_filter_owns_column) {
+			continue;
+		}
+		unique_ptr<ExecutionExpressionIR> predicate;
+		string error;
+		if (!TryBuildSljitGeneratedSourceFilterExpression(source_filter, predicate, 0, error)) {
+			continue;
+		}
+		ExecutionExpressionFragment fragment;
+		fragment.expression_index = source_filter.filter_index;
+		fragment.return_type = LogicalType::BOOLEAN;
+		fragment.root = std::move(predicate);
+		if (render_diagnostics) {
+			fragment.ir = "duckdb.storage-filter typed-vector-ir;" + DescribeExecutionExpressionIR(*fragment.root);
+		}
+
+		SljitNativeScanFilterPlan scan_filter;
+		scan_filter.filter_index = source_filter.filter_index;
+		scan_filter.input_type = contract.source_contract_input_types[source_filter.scan_column_index];
+		scan_filter.input_not_null = source_filter.scan_column_index < contract.source_contract_input_not_null.size() &&
+		                             contract.source_contract_input_not_null[source_filter.scan_column_index];
+		if (!TryLowerNativeRegionExpression(fragment, true, scan_filter.filter, error, render_diagnostics)) {
+			continue;
+		}
+		scan_filters.push_back(std::move(scan_filter));
+	}
 }
 
 } // namespace duckdb

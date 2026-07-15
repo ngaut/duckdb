@@ -13,6 +13,7 @@
 #include "duckdb/main/database.hpp"
 #include "duckdb/execution/physical_table_scan_enum.hpp"
 #include "duckdb/main/settings.hpp"
+#include "duckdb/planner/filter/expression_filter.hpp"
 #include "duckdb/storage/storage_index.hpp"
 #include "duckdb/storage/table/scan_state.hpp"
 
@@ -25,6 +26,8 @@ struct TableScanExecutionSourceConfig {
 	vector<idx_t> projection_ids;
 	vector<LogicalType> source_contract_input_types;
 	optional_ptr<TableFilterSet> filters;
+	optional_ptr<const TableFilterKernelProvider> filter_kernel_provider;
+	vector<idx_t> filter_kernel_indices;
 	bool return_source_contract_input = false;
 };
 
@@ -56,6 +59,38 @@ BuildTableScanExecutionSourceConfig(const PhysicalTableScan &op, optional_ptr<Ta
 	}
 	if (result.use_source_contract && !open_request.UsesScanFilters()) {
 		result.filters = nullptr;
+	}
+	if (!result.use_source_contract || !result.filters || !open_request.table_filter_kernel_provider ||
+	    !op.table_filters) {
+		return result;
+	}
+
+	map<ProjectionIndex, idx_t> static_filter_indices;
+	idx_t static_filter_index = 0;
+	for (auto &entry : *op.table_filters) {
+		static_filter_indices.emplace(entry.GetIndex(), static_filter_index++);
+	}
+	bool has_kernel = false;
+	result.filter_kernel_indices.reserve(result.filters->FilterCount());
+	for (auto &entry : *result.filters) {
+		idx_t kernel_filter_index = DConstants::INVALID_INDEX;
+		auto static_index = static_filter_indices.find(entry.GetIndex());
+		if (static_index != static_filter_indices.end()) {
+			auto static_filter = op.table_filters->TryGetFilterByColumnIndex(entry.GetIndex());
+			if (static_filter && static_filter->filter_type == TableFilterType::EXPRESSION_FILTER &&
+			    entry.Filter().filter_type == TableFilterType::EXPRESSION_FILTER &&
+			    static_filter->Cast<ExpressionFilter>().Equals(entry.Filter().Cast<ExpressionFilter>()) &&
+			    open_request.table_filter_kernel_provider->HasTableFilterKernel(static_index->second)) {
+				kernel_filter_index = static_index->second;
+				has_kernel = true;
+			}
+		}
+		result.filter_kernel_indices.push_back(kernel_filter_index);
+	}
+	if (has_kernel) {
+		result.filter_kernel_provider = open_request.table_filter_kernel_provider;
+	} else {
+		result.filter_kernel_indices.clear();
 	}
 	return result;
 }
@@ -254,8 +289,14 @@ private:
 	void InitializeExecutionSourceContract(ExecutionContext &context, TableScanGlobalSourceState &gstate,
 	                                       const PhysicalTableScan &op) {
 		auto filters = gstate.execution_source_config.filters;
-		execution_source_contract_scan_state.Initialize(gstate.execution_source_contract.storage_ids, context.client,
-		                                                filters, op.extra_info.sample_options);
+		optional_ptr<const vector<idx_t>> filter_kernel_indices;
+		if (gstate.execution_source_config.filter_kernel_provider) {
+			filter_kernel_indices = &gstate.execution_source_config.filter_kernel_indices;
+		}
+		execution_source_contract_scan_state.Initialize(
+		    gstate.execution_source_contract.storage_ids, context.client, filters, op.extra_info.sample_options,
+		    TableFilterExecutionMode::FILTER_AND_PRUNE, gstate.execution_source_config.filter_kernel_provider,
+		    filter_kernel_indices);
 		auto rows_in_current_row_group = gstate.execution_source_contract.storage->NextParallelScan(
 		    context.client, gstate.execution_source_contract.parallel_state, execution_source_contract_scan_state);
 		if (rows_in_current_row_group > 0) {

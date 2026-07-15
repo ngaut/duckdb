@@ -3,6 +3,24 @@
 
 namespace duckdb {
 
+TableFilterKernelState::~TableFilterKernelState() {
+}
+
+TableFilterKernelProvider::~TableFilterKernelProvider() {
+}
+
+bool TableFilterKernelProvider::HasTableFilterKernels() const {
+	return false;
+}
+
+bool TableFilterKernelProvider::HasTableFilterKernel(idx_t) const {
+	return false;
+}
+
+unique_ptr<TableFilterKernelState> TableFilterKernelProvider::CreateTableFilterKernelState(idx_t) const {
+	return nullptr;
+}
+
 static void InitializeExecutor(ClientContext &context, const Expression &expression, ExpressionFilterState &state) {
 	state.executor = make_uniq<ExpressionExecutor>(context);
 	state.executor->AddExpression(expression);

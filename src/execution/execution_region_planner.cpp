@@ -625,14 +625,14 @@ unique_ptr<ExecutionRegionPlan> ExecutionRegionPlanner::Build(ClientContext &con
 			plan->operator_readiness_refresh = true;
 			if (should_record_decision_telemetry) {
 				auto decision_time_us = decision_recorder.ClaimCandidateDecisionTime(candidate_trace);
-				record_decision_event(
-				    decision_event_backend_name(ExecutionRunnerKind::COMPILED_VECTORIZED),
-				    ExecutionRegionCompileStatus::SKIPPED, ExecutionRegionExecutionMode::UNSUPPORTED,
-				    AttachExecutionRegionCandidateReason(candidate, std::move(finalized_cardinality_reason),
-				                                         should_record_detailed_telemetry),
-				    "state_scan_source_cardinality_not_ready", &lowered_region.ir, decision_time_us, &candidate,
-				    ExecutionRunnerKind::VECTORIZED, &stage_timings, ExecutionRegionSourceExecutionKind::NONE, false,
-				    nullptr);
+				record_decision_event(decision_event_backend_name(ExecutionRunnerKind::COMPILED_VECTORIZED),
+				                      ExecutionRegionCompileStatus::SKIPPED, ExecutionRegionExecutionMode::UNSUPPORTED,
+				                      AttachExecutionRegionCandidateReason(candidate,
+				                                                           std::move(finalized_cardinality_reason),
+				                                                           should_record_detailed_telemetry),
+				                      "state_scan_source_cardinality_not_ready", &lowered_region.ir, decision_time_us,
+				                      &candidate, ExecutionRunnerKind::VECTORIZED, &stage_timings,
+				                      ExecutionRegionSourceExecutionKind::NONE, false, nullptr);
 			}
 			continue;
 		}
@@ -819,6 +819,10 @@ unique_ptr<ExecutionRegionPlan> ExecutionRegionPlanner::Build(ClientContext &con
 		return KeepExecutableExecutionRegionPlan(std::move(plan));
 	}
 	Compile(context, *backend, backend_name, *plan, lowered_region, selected_regions);
+	if (auto kernel = plan->GetExecutableFullPipelineKernel(); kernel && kernel->HasTableFilterKernels()) {
+		plan->source_open_request.table_filter_kernel_provider =
+		    optional_ptr<const TableFilterKernelProvider>(kernel.get());
+	}
 	if (plan->HasExecutableFullPipeline() && !ExecutionRegionSettings::TraceVectorizedBaseline(context)) {
 		auto runner = selected_regions.empty() ? ExecutionRunnerKind::COMPILED_VECTORIZED
 		                                       : selected_regions[0].physical_runner.SelectedRunner();

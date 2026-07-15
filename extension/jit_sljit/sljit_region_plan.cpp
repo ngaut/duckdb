@@ -428,6 +428,9 @@ ExecutionRegionLoweringPlan BuildSljitRegionPlan(const ExecutionRegionIR &region
 			}
 			if (executable_source && node_plan.kind == ExecutionRegionLoweringKind::NATIVE) {
 				selected_source_contract.Merge(node_plan.source_contract);
+				for (auto &scan_filter : node_plan.scan_filters) {
+					native_region.scan_filters.push_back(std::move(scan_filter));
+				}
 				native_region.uses_scan_filters =
 				    native_region.uses_scan_filters || node_plan.source_contract.UsesScanFilters();
 				vector<bool> source_not_null;

@@ -963,9 +963,17 @@ void ColumnSegment::ApplyInternalFilterPlan(ExpressionFilterState &state, Select
 
 idx_t ColumnSegment::ApplyInternalFilterResidual(ExpressionFilterState &state, SelectionVector &sel,
                                                  Vector &input_vector, idx_t scan_count, idx_t &approved_tuple_count) {
-	if (approved_tuple_count == 0 || !state.fast_internal_filter_residual_executor) {
+	if (approved_tuple_count == 0 || !state.fast_internal_filter_residual_expression) {
 		return approved_tuple_count;
 	}
+	if (state.kernel) {
+		UnifiedVectorFormat vdata;
+		input_vector.ToUnifiedFormat(vdata);
+		if (state.kernel->TrySelect(input_vector, vdata, sel, scan_count, approved_tuple_count)) {
+			return approved_tuple_count;
+		}
+	}
+	D_ASSERT(state.fast_internal_filter_residual_executor);
 	return ExecuteExpressionFilterSelection(sel, input_vector, *state.fast_internal_filter_residual_executor,
 	                                        scan_count, approved_tuple_count);
 }
@@ -1155,6 +1163,9 @@ idx_t ColumnSegment::FilterSelection(SelectionVector &sel, Vector &vector, Unifi
 		return approved_tuple_count;
 	}
 	if (TryFastDictionaryStringEqualityFilter(sel, vector, filter, state, approved_tuple_count)) {
+		return approved_tuple_count;
+	}
+	if (state.kernel && state.kernel->TrySelect(vector, vdata, sel, scan_count, approved_tuple_count)) {
 		return approved_tuple_count;
 	}
 	D_ASSERT(state.executor);

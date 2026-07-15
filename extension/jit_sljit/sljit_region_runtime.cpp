@@ -11,8 +11,10 @@
 #include "sljit_codegen_util.hpp"
 #include "sljit_full_pipeline_dispatch_runtime.hpp"
 #include "sljit_full_pipeline_primitive_contract.hpp"
+#include "sljit_filter_runtime.hpp"
 #include "sljit_hash_join_probe_runtime.hpp"
 #include "sljit_join_probe_codegen.hpp"
+#include "sljit_region_adapter_scratch.hpp"
 #include "sljit_region_runtime_state.hpp"
 #include "sljit_region_runtime_trace.hpp"
 
@@ -61,14 +63,66 @@ public:
 	SljitFullPipelineTerminalRuntimeState terminal;
 };
 
+class SljitTableFilterKernelState : public TableFilterKernelState {
+public:
+	SljitTableFilterKernelState(const SljitExecutableScanFilter &scan_filter_p, atomic<idx_t> &executed_rows_p)
+	    : scan_filter(scan_filter_p), executed_rows(executed_rows_p), filter_selection(STANDARD_VECTOR_SIZE),
+	      alternate_selection(STANDARD_VECTOR_SIZE) {
+		input.InitializeEmpty({scan_filter.input_type});
+	}
+
+	bool TrySelect(Vector &vector, UnifiedVectorFormat &format, SelectionVector &selection, idx_t scan_count,
+	               idx_t &approved_tuple_count) override {
+		(void)format;
+		if (!scan_filter.filter || scan_count > STANDARD_VECTOR_SIZE || approved_tuple_count > scan_count) {
+			return false;
+		}
+		if (approved_tuple_count == 0) {
+			return true;
+		}
+		input.data[0].Reference(vector);
+		input.SetChildCardinality(scan_count);
+		auto input_count = approved_tuple_count;
+		const SelectionVector *execute_selection = input_count == scan_count ? nullptr : &selection;
+		auto output_selection = &filter_selection;
+		if (execute_selection && execute_selection->data() == output_selection->data()) {
+			output_selection = &alternate_selection;
+		}
+		idx_t selected_count;
+		auto &filter = *scan_filter.filter;
+		if (filter.batch_select) {
+			selected_count = SljitSelectNativeStringLikeBatch(*filter.batch_select, vector, *output_selection,
+			                                                  execute_selection, input_count);
+		} else {
+			selected_count = SljitSelectExpression(filter.expression, input, *output_selection, expression_scratch,
+			                                       execute_selection, input_count, false);
+		}
+		if (selected_count < input_count) {
+			selection.Initialize(*output_selection);
+		}
+		approved_tuple_count = selected_count;
+		executed_rows.fetch_add(input_count, std::memory_order_relaxed);
+		return true;
+	}
+
+private:
+	const SljitExecutableScanFilter &scan_filter;
+	atomic<idx_t> &executed_rows;
+	DataChunk input;
+	SelectionVector filter_selection;
+	SelectionVector alternate_selection;
+	SljitExpressionAdapterScratch expression_scratch;
+};
+
 class SljitNativeRegionKernel : public ExecutionRegionKernel {
 public:
-	SljitNativeRegionKernel(string backend_name_p, vector<SljitExecutableRegionOp> ops_p, bool uses_scan_filters_p,
+	SljitNativeRegionKernel(string backend_name_p, vector<SljitExecutableRegionOp> ops_p,
+	                        vector<SljitExecutableScanFilter> scan_filters_p, bool uses_scan_filters_p,
 	                        vector<LogicalType> source_output_types_p, vector<idx_t> source_distinct_counts_p,
 	                        vector<Value> source_min_values_p, vector<Value> source_max_values_p,
 	                        ExecutionRegionABI abi_p)
-	    : backend_name(std::move(backend_name_p)), ops(std::move(ops_p)), uses_scan_filters(uses_scan_filters_p),
-	      source_output_types(std::move(source_output_types_p)),
+	    : backend_name(std::move(backend_name_p)), ops(std::move(ops_p)), scan_filters(std::move(scan_filters_p)),
+	      uses_scan_filters(uses_scan_filters_p), source_output_types(std::move(source_output_types_p)),
 	      source_distinct_counts(std::move(source_distinct_counts_p)),
 	      source_min_values(std::move(source_min_values_p)), source_max_values(std::move(source_max_values_p)),
 	      full_pipeline_recipe_plan(
@@ -85,7 +139,32 @@ public:
 		for (auto &op : ops) {
 			result += op.CodeSize();
 		}
+		for (auto &scan_filter : scan_filters) {
+			result += scan_filter.CodeSize();
+		}
 		return result;
+	}
+
+	bool HasTableFilterKernels() const override {
+		return !scan_filters.empty();
+	}
+
+	bool HasTableFilterKernel(idx_t filter_index) const override {
+		for (auto &scan_filter : scan_filters) {
+			if (scan_filter.filter_index == filter_index) {
+				return true;
+			}
+		}
+		return false;
+	}
+
+	unique_ptr<TableFilterKernelState> CreateTableFilterKernelState(idx_t filter_index) const override {
+		for (auto &scan_filter : scan_filters) {
+			if (scan_filter.filter_index == filter_index) {
+				return make_uniq<SljitTableFilterKernelState>(scan_filter, executed_filter_rows);
+			}
+		}
+		return nullptr;
 	}
 
 	bool HasExecutableBody() const override {
@@ -190,14 +269,22 @@ public:
 			throw InternalException("SLJIT full pipeline kernel entered without full-pipeline ABI");
 		}
 		auto &local_state = runtime.LocalState().Cast<SljitNativeRegionLocalState>();
-		return SljitTryExecuteFullPipelineRecipe(*this, runtime, result, ops, source_distinct_counts, source_min_values,
-		                                         source_max_values, full_pipeline_recipe_plan, local_state.scratch,
-		                                         local_state.terminal);
+		auto executed = SljitTryExecuteFullPipelineRecipe(
+		    *this, runtime, result, ops, source_distinct_counts, source_min_values, source_max_values,
+		    full_pipeline_recipe_plan, local_state.scratch, local_state.terminal);
+		auto filter_rows = executed_filter_rows.exchange(0, std::memory_order_relaxed);
+		if (filter_rows > 0) {
+			runtime.RecordJitRuntimePath("source.storage_scan.compiled_filter", filter_rows);
+			runtime.RecordJitRuntimeProof(ExecutionRegionJitRuntimeProof::GENERATED_BACKEND_WORK, filter_rows);
+			runtime.RecordJitRuntimeProofDetail("source.storage_scan.compiled_filter", filter_rows);
+		}
+		return executed;
 	}
 
 private:
 	string backend_name;
 	vector<SljitExecutableRegionOp> ops;
+	vector<SljitExecutableScanFilter> scan_filters;
 	bool uses_scan_filters;
 	vector<LogicalType> source_output_types;
 	vector<idx_t> source_distinct_counts;
@@ -205,6 +292,7 @@ private:
 	vector<Value> source_max_values;
 	SljitFullPipelineRecipePlan full_pipeline_recipe_plan;
 	ExecutionRegionABI abi;
+	mutable atomic<idx_t> executed_filter_rows {0};
 };
 
 unique_ptr<ExecutionRegionKernel> CreateSljitNativeRegionKernel(ClientContext &context, string backend_name,
@@ -212,9 +300,9 @@ unique_ptr<ExecutionRegionKernel> CreateSljitNativeRegionKernel(ClientContext &c
                                                                 ExecutionRegionABI abi) {
 	(void)context;
 	return make_uniq<SljitNativeRegionKernel>(
-	    std::move(backend_name), std::move(region.ops), region.uses_scan_filters, std::move(region.source_output_types),
-	    std::move(region.source_distinct_counts), std::move(region.source_min_values),
-	    std::move(region.source_max_values), abi);
+	    std::move(backend_name), std::move(region.ops), std::move(region.scan_filters), region.uses_scan_filters,
+	    std::move(region.source_output_types), std::move(region.source_distinct_counts),
+	    std::move(region.source_min_values), std::move(region.source_max_values), abi);
 }
 
 } // namespace duckdb

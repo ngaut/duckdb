@@ -17,6 +17,31 @@ namespace duckdb {
 struct PrefixRangeFunctionData;
 struct PerfectHashJoinFunctionData;
 struct BloomFilterFunctionData;
+struct UnifiedVectorFormat;
+class Vector;
+
+//! Backend-neutral executable selection state for one immutable table filter.
+//! The storage scan owns invocation and selection semantics; an accelerator
+//! backend only supplies the predicate implementation.
+class DUCKDB_API TableFilterKernelState {
+public:
+	virtual ~TableFilterKernelState();
+
+	//! Returns true when the kernel executed. A false result asks the storage
+	//! scan to use its canonical ExpressionExecutor fallback.
+	virtual bool TrySelect(Vector &vector, UnifiedVectorFormat &format, SelectionVector &selection, idx_t scan_count,
+	                       idx_t &approved_tuple_count) = 0;
+};
+
+//! Query-plan-owned provider for thread-local table-filter kernels.
+class DUCKDB_API TableFilterKernelProvider {
+public:
+	virtual ~TableFilterKernelProvider();
+
+	virtual bool HasTableFilterKernels() const;
+	virtual bool HasTableFilterKernel(idx_t filter_index) const;
+	virtual unique_ptr<TableFilterKernelState> CreateTableFilterKernelState(idx_t filter_index) const;
+};
 
 //! Thread-local execution policy for an optional filter. The wrapper owns this policy; internal filter primitives
 //! only implement matching.
@@ -93,6 +118,7 @@ public:
 	}
 
 	unique_ptr<ExpressionExecutor> executor;
+	unique_ptr<TableFilterKernelState> kernel;
 	bool fast_string_equality_filter_initialized = false;
 	bool fast_string_equality_filter_supported = false;
 	vector<string> fast_string_equality_constants;
