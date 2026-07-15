@@ -1176,6 +1176,10 @@ below that reference plus the existing 2% or 2 ms allowance. This lets a long
 SF10 run reproduce the baseline's observed thermal envelope without converting
 shared JIT-off drift into permission for a regression. Off-normalized and paired
 speedups remain secondary noise analysis and cannot satisfy the raw gate.
+The full refactor guard therefore executes the historically compared TPC-H gate
+before the generic production matrix. Accepted TPC-H artifacts are qualified by
+the standalone gate; placing an unrelated sustained workload first would change
+the thermal acquisition protocol while pretending to compare the same contract.
 
 If an accepted timing artifact is proven stale by a high-sample paired run,
 baseline re-initialization still requires the complete 22-query, 10-repeat

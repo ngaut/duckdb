@@ -496,6 +496,9 @@ def verify_benchmark_repetition_budget() -> None:
         raise AssertionError("refactor guard must pass TPC-H triage only when explicitly requested")
     if 'parser.add_argument("--tpch-repeats", type=int, default=10)' not in refactor_guard:
         raise AssertionError("pre-push SF10 comparison must balance both alternating policy orders")
+    guard_main = refactor_guard[refactor_guard.index("def main() -> int:") :]
+    if guard_main.index("if should_run_tpch(args):") > guard_main.index("if should_run_generic(args):"):
+        raise AssertionError("historically compared TPC-H timing must run before the generic production heat load")
 
 
 def verify_bound_direct_join_terminal_contract() -> None:

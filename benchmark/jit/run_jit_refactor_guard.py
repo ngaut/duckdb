@@ -759,11 +759,6 @@ def main() -> int:
         compare_unit_failures(args, artifact_dir, failures)
     elif args.level == "quick":
         print("quick guard completed its configured checks")
-    if should_run_generic(args):
-        run_command(
-            generic_gate_command(args, artifact_dir),
-            "generic production performance gate",
-        )
     if should_run_tpch(args):
         run_command(
             tpch_gate_command(
@@ -772,6 +767,11 @@ def main() -> int:
                 skip_architecture=True,
             ),
             "tpch regression gate",
+        )
+    if should_run_generic(args):
+        run_command(
+            generic_gate_command(args, artifact_dir),
+            "generic production performance gate",
         )
     print(f"JIT refactor guard passed: {artifact_dir}")
     return 0

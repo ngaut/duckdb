@@ -39,6 +39,9 @@ The accepted TPC-H artifact retains the maximum raw JIT-auto runtime from its
 ten samples for each query. A candidate median must stay within that observed
 high-water mark plus the existing 2% or 2 ms allowance. Off-normalized timing
 remains secondary noise evidence and never makes a raw regression pass.
+The full refactor guard runs this historical raw-runtime comparison before the
+generic production matrix, matching standalone baseline qualification instead
+of preheating the machine with an unrelated suite.
 
 TPC-H benchmark and comparison gate:
 
