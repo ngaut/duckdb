@@ -9,8 +9,7 @@
 #pragma once
 
 #include "sljit_filter_runtime.hpp"
-#include "sljit_full_pipeline_primitive_contract.hpp"
-#include "sljit_full_pipeline_recipe.hpp"
+#include "sljit_full_pipeline_recipe_state.hpp"
 #include "sljit_full_pipeline_runtime.hpp"
 #include "sljit_full_pipeline_terminal_runtime.hpp"
 #include "sljit_generated_filter_primitive_runtime.hpp"
@@ -38,19 +37,15 @@ public:
 	      execute_hash_join_probe(execute_hash_join_probe_p),
 	      terminal_runtime(execute_native_full_pipeline_from_p, source_distinct_counts_p, source_min_values_p,
 	                       source_max_values_p, terminal_state_p),
-	      scratch(scratch_p), selected_hash_join_inputs(runtime, ops, scratch),
-	      source_fetch(runtime, result, recipe.primitive_sequence), generated_filter(runtime, ops, scratch),
-	      hash_join_materialize(runtime, result, ops, scratch),
+	      scratch(scratch_p), selected_hash_join_inputs(runtime, ops, scratch), source_fetch(runtime, result, recipe),
+	      generated_filter(runtime, ops, scratch), hash_join_materialize(runtime, result, ops, scratch),
 	      hash_join_selection(runtime, result, ops, scratch, selected_hash_join_inputs),
 	      mark_probe_filter_boundary(runtime, result, ops, scratch, selected_hash_join_inputs),
 	      projection_chain(runtime, ops, scratch) {
 	}
 
 	bool Execute() {
-		if (!PrimitiveSequenceIsExecutable()) {
-			throw InternalException("SLJIT primitive sequence executor received an invalid recipe");
-		}
-		if (SljitFullPipelineIsSelectedHashJoinSinkSequence(recipe.primitive_sequence)) {
+		if (recipe.UsesSelectedHashJoinSinkRuntime()) {
 			return ExecuteLoweredSelectedHashJoinSinkRecipe();
 		}
 		if (!terminal_runtime.Prepare(runtime, ops, scratch, TerminalStep())) {
@@ -127,12 +122,8 @@ private:
 		    [&]() { return stop_after_flush(ExecutionRegionResult::FINISHED, false, true); });
 	}
 
-	bool PrimitiveSequenceIsExecutable() const {
-		return SljitFullPipelinePrimitiveSequenceIsExecutable(ops, recipe.primitive_sequence);
-	}
-
 	const SljitFullPipelinePrimitiveStep &TerminalStep() const {
-		return SljitFullPipelinePrimitiveSequenceTerminalStep(recipe.primitive_sequence);
+		return recipe.primitive_sequence.Step(recipe.primitive_sequence.Count() - 1);
 	}
 
 	bool IsTerminalStep(idx_t step_idx) const {
@@ -215,10 +206,10 @@ private:
 		auto execute_next_step = [&](const SljitRuntimeBatchView &output) {
 			return ExecuteStep(next_step_idx, output, true);
 		};
-		const auto direct_consumer_contract = recipe.direct_aggregate_consumer.probe_step_idx == step_idx
-		                                         ? optional_ptr<const SljitHashJoinDirectAggregateConsumerContract>(
-		                                               &recipe.direct_aggregate_consumer)
-		                                         : nullptr;
+		const auto direct_consumer_contract =
+		    recipe.direct_aggregate_consumer.probe_step_idx == step_idx
+		        ? optional_ptr<const SljitHashJoinDirectAggregateConsumerContract>(&recipe.direct_aggregate_consumer)
+		        : nullptr;
 		auto try_execute_direct_consumer = [&](const SljitHashJoinDirectAggregateConsumerContract &contract,
 		                                       const SljitHashJoinProbeSelectionPrimitive &probe_primitive,
 		                                       DataChunk &join_input, auto &probe_executor) {

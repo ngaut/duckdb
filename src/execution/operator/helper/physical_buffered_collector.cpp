@@ -23,7 +23,8 @@ public:
 
 class BufferedCollectorLocalState : public LocalSinkState {};
 
-ExecutionContract PhysicalBufferedCollector::GetExecutionContract() const {
+ExecutionContract PhysicalBufferedCollector::GetExecutionContract(ExecutionRegionOperatorSlot slot,
+                                                                  bool render_diagnostics) const {
 	return BuildExecutionResultCollectorSinkContract();
 }
 

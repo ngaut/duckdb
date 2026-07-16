@@ -12,7 +12,8 @@ public:
 	string analyzed_plan;
 };
 
-ExecutionContract PhysicalExplainAnalyze::GetExecutionContract() const {
+ExecutionContract PhysicalExplainAnalyze::GetExecutionContract(ExecutionRegionOperatorSlot slot,
+                                                               bool render_diagnostics) const {
 	ExecutionContract result;
 	result.sink.kind = ExecutionRegionSinkKind::MATERIALIZATION;
 	result.sink.reason = "DuckDB explain analyze materialization sink contract";

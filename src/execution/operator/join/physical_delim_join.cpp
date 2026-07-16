@@ -43,7 +43,7 @@ static string DelimJoinNativeContractBlocker(const ExecutionContract &distinct_c
 	auto &distinct_update = distinct_contract.sink.aggregate_contract.native_state_update_contract;
 	if (distinct_update.status != ExecutionRegionStateContractStatus::READY) {
 		return distinct_update.blocker.empty() ? "delim-join-distinct-aggregate-update-contract-not-ready"
-		                                      : distinct_update.blocker;
+		                                       : distinct_update.blocker;
 	}
 	if (type != PhysicalOperatorType::RIGHT_DELIM_JOIN) {
 		return string();
@@ -62,12 +62,14 @@ static string DelimJoinNativeContractBlocker(const ExecutionContract &distinct_c
 	return string();
 }
 
-ExecutionContract PhysicalDelimJoin::GetExecutionContract() const {
+ExecutionContract PhysicalDelimJoin::GetExecutionContract(ExecutionRegionOperatorSlot slot,
+                                                          bool render_diagnostics) const {
 	ExecutionContract result;
-	auto distinct_contract = distinct.GetExecutionContract();
+	auto distinct_contract = distinct.GetExecutionContract(ExecutionRegionOperatorSlot::SINK, render_diagnostics);
 	unique_ptr<ExecutionContract> join_contract;
 	if (type == PhysicalOperatorType::RIGHT_DELIM_JOIN) {
-		join_contract = make_uniq<ExecutionContract>(join.GetExecutionContract());
+		join_contract = make_uniq<ExecutionContract>(
+		    join.GetExecutionContract(ExecutionRegionOperatorSlot::SINK, render_diagnostics));
 	}
 
 	auto join_contract_ptr =

@@ -10,6 +10,7 @@
 
 #include "duckdb/common/row_operations/row_operations.hpp"
 #include "duckdb/execution/execution_context.hpp"
+#include "duckdb/execution/execution_hash_join_runtime.hpp"
 #include "duckdb/execution/join_hashtable.hpp"
 #include "duckdb/execution/physical_operator.hpp"
 
@@ -18,8 +19,6 @@ namespace duckdb {
 class HashJoinOperatorState;
 class HashJoinGlobalSinkState;
 class PhysicalHashJoin;
-struct ExecutionPerfectHashJoinTableLayout;
-
 struct PerfectHashJoinStats {
 	Value build_min;
 	Value build_max;
@@ -41,6 +40,7 @@ public:
 	const LogicalType &GetKeyType() const;
 	bool BuildPerfectHashTable();
 	bool GetExecutionPerfectHashJoinTableLayout(ExecutionPerfectHashJoinTableLayout &layout) const;
+	optional_ptr<const ExecutionPerfectHashJoinFilterLayout> GetExecutionPerfectHashJoinFilterLayout() const;
 	const shared_ptr<ExecutionRuntimeFilterIdentity> &GetRuntimeFilterIdentity() const {
 		return runtime_filter_identity;
 	}
@@ -83,6 +83,7 @@ private:
 	bool TemplatedFillSelectionVectorBuild(const Vector &source, SelectionVector &sel_vec, SelectionVector &seq_sel_vec,
 	                                       idx_t count);
 	bool FullScanHashTable();
+	bool PublishExecutionPerfectHashJoinFilterLayout();
 
 private:
 	const PhysicalHashJoin &join;
@@ -93,6 +94,10 @@ private:
 	PerfectHashJoinStats perfect_join_statistics;
 	//! Stores the occurrences of each value in the build side
 	ValidityMask bitmap_build_idx;
+	//! Stores the non-empty words in bitmap_build_idx so sparse range scans skip empty words
+	ValidityMask bitmap_build_non_empty_words;
+	//! Immutable scan-side membership contract, published once perfect-hash finalization succeeds.
+	ExecutionPerfectHashJoinFilterLayout execution_filter_layout;
 	//! Stores the number of unique keys in the build side
 	idx_t unique_keys = 0;
 	shared_ptr<ExecutionRuntimeFilterIdentity> runtime_filter_identity;

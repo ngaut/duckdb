@@ -282,6 +282,83 @@ TEST_CASE("JIT composes exact regular-prefix probes with projected hash builds",
 	    });
 }
 
+TEST_CASE("JIT reduces regular hash matches directly from row and dictionary RHS storage", "[api][jit]") {
+	DuckDB db;
+	Connection con(db);
+	auto &manager = ExecutionRegionManager::Get(*con.context);
+
+	ConfigureSljitForCoverage(con, false, false, true, 10000, 4);
+	REQUIRE_NO_FAIL(con.Query("SET perfect_ht_threshold=0"));
+	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_direct_rhs_aggregate_fact AS "
+	                          "SELECT i::BIGINT AS filter_key, (i * 1000003)::BIGINT AS k, "
+	                          "CASE WHEN i % 7 = 0 THEN NULL "
+	                          "WHEN i % 2 = 0 THEN (9223372036854775000 - i)::BIGINT "
+	                          "ELSE (-9223372036854775000 + i)::BIGINT END AS payload "
+	                          "FROM range(400000) tbl(i)"));
+	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_direct_rhs_aggregate_row_filter AS "
+	                          "SELECT (i * 199)::BIGINT AS filter_key FROM range(500) tbl(i)"));
+	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_direct_rhs_aggregate_dictionary_filter AS "
+	                          "SELECT (i * 199)::BIGINT AS filter_key FROM range(2000) tbl(i)"));
+	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_direct_rhs_aggregate_row_probe AS "
+	                          "SELECT (i * 1000003)::BIGINT AS k FROM range(100000) tbl(i)"));
+	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_direct_rhs_aggregate_dictionary_probe AS "
+	                          "SELECT (i * 1000003)::BIGINT AS k FROM range(400000) tbl(i)"));
+
+	auto verify = [&](const string &query, const string &source_path) {
+		REQUIRE_NO_FAIL(con.Query("SET jit_policy='off'"));
+		auto reference = con.Query(query);
+		REQUIRE_NO_FAIL(*reference);
+
+		REQUIRE_NO_FAIL(con.Query("SET jit_policy='auto'"));
+		ClearJitTrace(manager, true);
+		auto result = con.Query(query);
+		REQUIRE_NO_FAIL(*result);
+		REQUIRE(result->GetValue(0, 0).ToString() == reference->GetValue(0, 0).ToString());
+
+		string observed_runtime_paths;
+		bool found_direct_consumer = false;
+		for (auto &event : manager.GetEvents()) {
+			if (EventPhase(event) != "runtime" || EventStatus(event) != "executed") {
+				continue;
+			}
+			const auto paths = EventJitRuntimePathCounts(event);
+			observed_runtime_paths += paths + "\n";
+			if (!StringUtil::Contains(paths, "hash_join_probe.regular_probe.all_valid.flat.single_key.no_chain.direct_"
+			                                 "ungrouped_aggregate_consumer=") ||
+			    !StringUtil::Contains(paths, source_path)) {
+				continue;
+			}
+			found_direct_consumer = true;
+			REQUIRE_FALSE(StringUtil::Contains(paths, "aggregate_update.join_output_ungrouped_payload_update="));
+			REQUIRE_FALSE(StringUtil::Contains(paths, "aggregate_update.join_output_ungrouped_update="));
+			REQUIRE(EventJitRuntimeDelegationCounts(event).empty());
+		}
+		INFO(observed_runtime_paths);
+		REQUIRE(found_direct_consumer);
+	};
+
+	verify("SELECT sum(selected.payload) FROM jit_direct_rhs_aggregate_row_probe probe JOIN ("
+	       "SELECT fact.k, fact.payload FROM jit_direct_rhs_aggregate_fact fact "
+	       "JOIN jit_direct_rhs_aggregate_row_filter filter USING (filter_key)) selected USING (k)",
+	       "aggregate_update.join_output_probe_consumer_ungrouped_aggregate.row_source=");
+	verify("SELECT count(selected.payload) FROM jit_direct_rhs_aggregate_row_probe probe JOIN ("
+	       "SELECT fact.k, fact.payload FROM jit_direct_rhs_aggregate_fact fact "
+	       "JOIN jit_direct_rhs_aggregate_row_filter filter USING (filter_key)) selected USING (k)",
+	       "aggregate_update.join_output_probe_consumer_ungrouped_aggregate.row_source=");
+	verify("SELECT sum(selected.payload) FROM jit_direct_rhs_aggregate_dictionary_probe probe JOIN ("
+	       "SELECT fact.k, fact.payload FROM jit_direct_rhs_aggregate_fact fact "
+	       "JOIN jit_direct_rhs_aggregate_dictionary_filter filter USING (filter_key)) selected USING (k)",
+	       "aggregate_update.join_output_probe_consumer_ungrouped_aggregate.dictionary_source=");
+	verify("SELECT count(selected.payload) FROM jit_direct_rhs_aggregate_dictionary_probe probe JOIN ("
+	       "SELECT fact.k, fact.payload FROM jit_direct_rhs_aggregate_fact fact "
+	       "JOIN jit_direct_rhs_aggregate_dictionary_filter filter USING (filter_key)) selected USING (k)",
+	       "aggregate_update.join_output_probe_consumer_ungrouped_aggregate.dictionary_source=");
+	verify("SELECT count(*) FROM jit_direct_rhs_aggregate_dictionary_probe probe JOIN ("
+	       "SELECT fact.k FROM jit_direct_rhs_aggregate_fact fact "
+	       "JOIN jit_direct_rhs_aggregate_dictionary_filter filter USING (filter_key)) selected USING (k)",
+	       "aggregate_update.join_output_probe_consumer_ungrouped_aggregate.source_none=");
+}
+
 TEST_CASE("JIT exact prefix membership elides only equivalent unique hash probes", "[api][jit]") {
 	DuckDB db;
 	Connection con(db);

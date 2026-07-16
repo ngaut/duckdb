@@ -428,6 +428,24 @@ void GroupedAggregateHashTable::InitializeUnpartitionedData() {
 	                                          TupleDataPinProperties::KEEP_EVERYTHING_PINNED);
 }
 
+GroupedAggregateHashTable::AggregateHTAppendTarget
+GroupedAggregateHashTable::PrepareAppendTarget(DataChunk &groups, idx_t group_count, bool defer_partitioning) {
+	const bool defer_radix_partitioning = defer_partitioning && radix_bits > 0;
+	if (defer_radix_partitioning && !unpartitioned_data) {
+		InitializeUnpartitionedData();
+	}
+	const bool use_unpartitioned =
+	    defer_radix_partitioning || (radix_bits >= UNPARTITIONED_RADIX_BITS_THRESHOLD &&
+	                                 group_count / RadixPartitioning::NumberOfPartitions(radix_bits) <= 4);
+	if (use_unpartitioned) {
+		D_ASSERT(unpartitioned_data);
+		TupleDataCollection::ToUnifiedFormat(state.unpartitioned_append_state.chunk_state, groups);
+		return {*unpartitioned_data, state.unpartitioned_append_state};
+	}
+	TupleDataCollection::ToUnifiedFormat(state.partitioned_append_state.chunk_state, groups);
+	return {*partitioned_data, state.partitioned_append_state};
+}
+
 const PartitionedTupleData &GroupedAggregateHashTable::GetPartitionedData() const {
 	return *partitioned_data;
 }
@@ -454,6 +472,22 @@ GroupedAggregateHashTable::AcquirePartitionedData(optional_ptr<TupleDataRowLocat
 	// Return and re-initialize
 	auto result = std::move(partitioned_data);
 	InitializePartitionedData();
+	return result;
+}
+
+unique_ptr<PartitionedTupleData> GroupedAggregateHashTable::TryAcquireProvenUniqueAppendData(
+    optional_ptr<TupleDataRowLocationRemap> row_location_remap) {
+	// A coalesced interval envelope still proves local duplicate freedom. Keep the rows unpartitioned until the global
+	// finalizer knows whether local envelopes are disjoint; only a failed global proof needs radix repartitioning.
+	if (!GetProvenUniqueAppendRanges() || !unpartitioned_data || partitioned_data->Count() != 0) {
+		return nullptr;
+	}
+	unpartitioned_data->FlushAppendState(state.unpartitioned_append_state);
+	unpartitioned_data->Unpin();
+	auto result = std::move(unpartitioned_data);
+	if (row_location_remap) {
+		row_location_remap->Flush();
+	}
 	return result;
 }
 
@@ -613,7 +647,12 @@ idx_t GroupedAggregateHashTable::GetMaterializedCount() const {
 void GroupedAggregateHashTable::SkipLookups(bool require_final_combine) {
 	skip_lookups = true;
 	skip_lookups_require_final_combine = skip_lookups_require_final_combine || require_final_combine;
+	enable_hll = false;
 	dense_single_field_target_cache.Disable();
+}
+
+bool GroupedAggregateHashTable::LookupsSkipped() const {
+	return skip_lookups;
 }
 
 void GroupedAggregateHashTable::RequireFinalCombine() {
@@ -922,6 +961,9 @@ void GroupedAggregateHashTable::Resize(idx_t size) {
 }
 
 bool GroupedAggregateHashTable::ReserveGroups(idx_t group_count) {
+	if (skip_lookups) {
+		return false;
+	}
 	if (group_count <= Count()) {
 		return false;
 	}
@@ -2678,35 +2720,20 @@ bool GroupedAggregateHashTable::TryFindOrCreateGroupsFastInternal(
 	state.group_chunk.data[groups.ColumnCount()].Reference(*group_hashes);
 
 	auto append_start = AggregateTraceStart(recorder);
-	optional_ptr<PartitionedTupleData> data;
-	optional_ptr<PartitionedTupleDataAppendState> append_state;
 	const bool defer_insert_only_partitioning = insert_only && radix_bits > 0;
-	if (defer_insert_only_partitioning && !unpartitioned_data) {
-		InitializeUnpartitionedData();
-	}
-	const idx_t unpartitioned_rows_per_partition = insert_only ? 32 : 4;
-	if (defer_insert_only_partitioning ||
-	    (radix_bits >= UNPARTITIONED_RADIX_BITS_THRESHOLD &&
-	     new_group_count / RadixPartitioning::NumberOfPartitions(radix_bits) <= unpartitioned_rows_per_partition)) {
-		data = unpartitioned_data.get();
-		append_state = &state.unpartitioned_append_state;
-	} else {
-		data = partitioned_data.get();
-		append_state = &state.partitioned_append_state;
-	}
 	auto group_format_start = AggregateTraceStart(recorder);
-	TupleDataCollection::ToUnifiedFormat(append_state->chunk_state, state.group_chunk);
+	auto target = PrepareAppendTarget(state.group_chunk, new_group_count, defer_insert_only_partitioning);
 	RecordAggregateTraceStage(recorder,
 	                          defer_insert_only_partitioning ? "find_or_create_fast.deferred_group_format"
 	                                                         : "find_or_create_fast.group_format",
 	                          group_format_start);
 	auto storage_append_start = AggregateTraceStart(recorder);
-	const auto fixed_width_append = data->TryAppendUnifiedFixedWidthSinglePartition(*append_state, state.group_chunk,
-	                                                                                state.new_groups, new_group_count);
+	const auto fixed_width_append = target.data.TryAppendUnifiedFixedWidthSinglePartition(
+	    target.state, state.group_chunk, state.new_groups, new_group_count);
 	if (!fixed_width_append) {
-		if (!data->TryAppendUnifiedSinglePartition(*append_state, state.group_chunk, state.new_groups,
-		                                           new_group_count)) {
-			data->AppendUnified(*append_state, state.group_chunk, state.new_groups, new_group_count);
+		if (!target.data.TryAppendUnifiedSinglePartition(target.state, state.group_chunk, state.new_groups,
+		                                                 new_group_count)) {
+			target.data.AppendUnified(target.state, state.group_chunk, state.new_groups, new_group_count);
 		}
 	}
 	RecordAggregateTraceStage(recorder,
@@ -2715,12 +2742,12 @@ bool GroupedAggregateHashTable::TryFindOrCreateGroupsFastInternal(
 	                          storage_append_start);
 	if (!layout_ptr->GetAggregates().empty()) {
 		auto initialize_start = AggregateTraceStart(recorder);
-		RowOperations::InitializeStates(*layout_ptr, append_state->chunk_state.row_locations,
+		RowOperations::InitializeStates(*layout_ptr, target.state.chunk_state.row_locations,
 		                                *FlatVector::IncrementalSelectionVector(), new_group_count);
 		RecordAggregateTraceStage(recorder, "find_or_create_fast.initialize_states", initialize_start);
 	}
-	const auto row_locations = FlatVector::GetData<data_ptr_t>(append_state->chunk_state.row_locations);
-	const auto &row_sel = append_state->reverse_partition_sel;
+	const auto row_locations = FlatVector::GetData<data_ptr_t>(target.state.chunk_state.row_locations);
+	const auto &row_sel = target.state.reverse_partition_sel;
 	auto publish_start = AggregateTraceStart(recorder);
 	for (idx_t new_idx = 0; new_idx < new_group_count; new_idx++) {
 		const auto row_idx = state.new_groups.get_index_unsafe(new_idx);
@@ -7218,37 +7245,27 @@ bool GroupedAggregateHashTable::TryAppendNewGroupsFastInternal(
 		addresses_out->Flatten();
 		addresses = FlatVector::GetDataMutable<data_ptr_t>(*addresses_out);
 	}
-	optional_ptr<PartitionedTupleData> data;
-	optional_ptr<PartitionedTupleDataAppendState> append_state;
-	if (radix_bits >= UNPARTITIONED_RADIX_BITS_THRESHOLD &&
-	    chunk_size / RadixPartitioning::NumberOfPartitions(radix_bits) <= 4) {
-		data = unpartitioned_data.get();
-		append_state = &state.unpartitioned_append_state;
-	} else {
-		data = partitioned_data.get();
-		append_state = &state.partitioned_append_state;
-	}
 	auto group_format_start = AggregateTraceStart(recorder);
-	TupleDataCollection::ToUnifiedFormat(append_state->chunk_state, state.group_chunk);
+	auto target = PrepareAppendTarget(state.group_chunk, chunk_size, append_only);
 	RecordAggregateTraceStage(recorder, "find_new.group_format", group_format_start);
 	const auto &append_selection = *FlatVector::IncrementalSelectionVector();
-	const auto fixed_width_append =
-	    data->TryAppendUnifiedFixedWidthSinglePartition(*append_state, state.group_chunk, append_selection, chunk_size);
+	const auto fixed_width_append = target.data.TryAppendUnifiedFixedWidthSinglePartition(
+	    target.state, state.group_chunk, append_selection, chunk_size);
 	const auto single_partition_append =
 	    fixed_width_append ||
-	    data->TryAppendUnifiedSinglePartition(*append_state, state.group_chunk, append_selection, chunk_size);
+	    target.data.TryAppendUnifiedSinglePartition(target.state, state.group_chunk, append_selection, chunk_size);
 	if (!single_partition_append) {
-		data->AppendUnified(*append_state, state.group_chunk, append_selection, chunk_size);
+		target.data.AppendUnified(target.state, state.group_chunk, append_selection, chunk_size);
 	}
 	const auto update_mode = address_update_function && !layout_ptr->HasDestructor()
 	                             ? ExecutionGroupedAggregateStateAddressUpdateMode::INITIALIZE_AND_UPDATE
 	                             : ExecutionGroupedAggregateStateAddressUpdateMode::UPDATE_INITIALIZED;
 	if (update_mode == ExecutionGroupedAggregateStateAddressUpdateMode::UPDATE_INITIALIZED) {
-		RowOperations::InitializeStates(*layout_ptr, append_state->chunk_state.row_locations, append_selection,
+		RowOperations::InitializeStates(*layout_ptr, target.state.chunk_state.row_locations, append_selection,
 		                                chunk_size);
 	}
-	const auto row_locations = FlatVector::GetData<data_ptr_t>(append_state->chunk_state.row_locations);
-	const auto &row_sel = append_state->reverse_partition_sel;
+	const auto row_locations = FlatVector::GetData<data_ptr_t>(target.state.chunk_state.row_locations);
+	const auto &row_sel = target.state.reverse_partition_sel;
 	if (!append_only || addresses) {
 		for (idx_t row_idx = 0; row_idx < chunk_size; row_idx++) {
 			const auto row_location = row_locations[row_sel.get_index_unsafe(row_idx)];

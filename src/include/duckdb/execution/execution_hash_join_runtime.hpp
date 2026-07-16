@@ -83,6 +83,9 @@ struct ExecutionPerfectHashJoinTableLayout {
 	uhugeint_t build_min_u128;
 	uhugeint_t build_max_u128;
 	const validity_t *build_validity = nullptr;
+	//! One bit per build_validity word; set when that word contains at least one build key.
+	const validity_t *build_validity_non_empty_words = nullptr;
+	idx_t build_validity_word_count = 0;
 	shared_ptr<ExecutionRuntimeFilterIdentity> runtime_filter_identity;
 	idx_t rhs_output_column_count = 0;
 	vector<LogicalType> rhs_output_types;
@@ -90,14 +93,64 @@ struct ExecutionPerfectHashJoinTableLayout {
 	string blocker;
 };
 
+//! Allocation-free membership view used by scan filters. Unlike the full table layout this contains no
+//! materialization columns, owning buffers, or diagnostic strings, so it is safe to request for every vector.
+struct ExecutionPerfectHashJoinFilterLayout {
+	bool ready = false;
+	PhysicalType key_physical_type = PhysicalType::INVALID;
+	bool is_build_dense = false;
+	idx_t build_range = 0;
+	idx_t build_capacity = 0;
+	idx_t build_unique_count = 0;
+	uint64_t build_min = 0;
+	uint64_t build_max = 0;
+	hugeint_t build_min_128;
+	hugeint_t build_max_128;
+	uhugeint_t build_min_u128;
+	uhugeint_t build_max_u128;
+	const validity_t *build_validity = nullptr;
+	const validity_t *build_validity_non_empty_words = nullptr;
+	idx_t build_validity_word_count = 0;
+};
+
+enum class ExecutionHashJoinRHSFixedColumnStorageKind : uint8_t { NONE, ROW, DICTIONARY };
+
+static inline bool ExecutionHashJoinRHSFixedColumnTypeSupported(const LogicalType &type) {
+	switch (type.InternalType()) {
+	case PhysicalType::BOOL:
+	case PhysicalType::INT8:
+	case PhysicalType::INT16:
+	case PhysicalType::INT32:
+	case PhysicalType::INT64:
+	case PhysicalType::INT128:
+	case PhysicalType::UINT8:
+	case PhysicalType::UINT16:
+	case PhysicalType::UINT32:
+	case PhysicalType::UINT64:
+	case PhysicalType::UINT128:
+	case PhysicalType::FLOAT:
+	case PhysicalType::DOUBLE:
+	case PhysicalType::INTERVAL:
+	case PhysicalType::VARCHAR:
+		return true;
+	default:
+		return false;
+	}
+}
+
 struct ExecutionHashJoinRHSFixedColumnSource {
 	bool ready = false;
 	LogicalType type;
 	PhysicalType physical_type = PhysicalType::INVALID;
+	ExecutionHashJoinRHSFixedColumnStorageKind storage_kind = ExecutionHashJoinRHSFixedColumnStorageKind::NONE;
 	idx_t rhs_output_idx = DConstants::INVALID_INDEX;
 	idx_t layout_column_idx = DConstants::INVALID_INDEX;
 	idx_t layout_column_count = 0;
 	idx_t layout_offset = DConstants::INVALID_INDEX;
+	idx_t dictionary_index_offset = DConstants::INVALID_INDEX;
+	const_data_ptr_t dictionary_data = nullptr;
+	const validity_t *dictionary_validity = nullptr;
+	idx_t dictionary_count = 0;
 	bool all_valid = false;
 	string blocker;
 };

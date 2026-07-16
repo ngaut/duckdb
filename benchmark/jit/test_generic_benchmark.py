@@ -10,6 +10,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from generic_benchmark import (
     GENERIC_WORKLOADS,
     maximum_auto_median_us,
+    median_paired_speedup,
     minimum_auto_speedup,
     policy_order,
     verification_failures,
@@ -26,6 +27,17 @@ class TestPolicyOrder(unittest.TestCase):
     def test_rejects_invalid_repeat(self) -> None:
         with self.assertRaises(ValueError):
             policy_order(0)
+
+    def test_speedup_uses_within_repeat_pairs(self) -> None:
+        off = [
+            {"repeat": 1, "query_time_us": 200},
+            {"repeat": 2, "query_time_us": 100},
+        ]
+        auto = [
+            {"repeat": 1, "query_time_us": 100},
+            {"repeat": 2, "query_time_us": 50},
+        ]
+        self.assertEqual(median_paired_speedup(off, auto), 2.0)
 
 
 class TestSpeedupFloors(unittest.TestCase):
@@ -58,7 +70,7 @@ class TestSpeedupFloors(unittest.TestCase):
             {
                 "grouped_sorted_runs": 3.00,
                 "grouped_affine_sorted_runs": 2.65,
-                "grouped_sparse_sorted_runs": 2.35,
+                "grouped_sparse_sorted_runs": 2.60,
             },
         )
 
@@ -69,6 +81,66 @@ class TestSpeedupFloors(unittest.TestCase):
             if workload["name"] in {"grouped_sorted_runs", "grouped_affine_sorted_runs"}
         }
         self.assertEqual(ceilings, {"grouped_sorted_runs": 33500, "grouped_affine_sorted_runs": 37000})
+
+    def test_selective_grouped_floors_and_raw_ceilings_track_independent_shape_promotion(self) -> None:
+        names = {
+            "grouped_selective_multi_aggregate",
+            "grouped_selective_conjunction_multi_aggregate",
+            "grouped_selective_three_way_conjunction_multi_aggregate",
+        }
+        workloads = {workload["name"]: workload for workload in GENERIC_WORKLOADS if workload["name"] in names}
+        self.assertEqual(
+            {
+                name: (minimum_auto_speedup(workload, 1), minimum_auto_speedup(workload, 4))
+                for name, workload in workloads.items()
+            },
+            {
+                "grouped_selective_multi_aggregate": (1.40, 1.30),
+                "grouped_selective_conjunction_multi_aggregate": (1.40, 1.28),
+                "grouped_selective_three_way_conjunction_multi_aggregate": (1.38, 1.23),
+            },
+        )
+        self.assertEqual(
+            {
+                name: (maximum_auto_median_us(workload, 1), maximum_auto_median_us(workload, 4))
+                for name, workload in workloads.items()
+            },
+            {
+                "grouped_selective_multi_aggregate": (56500, 18000),
+                "grouped_selective_conjunction_multi_aggregate": (55000, 17500),
+                "grouped_selective_three_way_conjunction_multi_aggregate": (52000, 17250),
+            },
+        )
+
+    def test_wide_grouped_floor_and_raw_ceiling_track_proof_owned_finalization_promotion(self) -> None:
+        workload = next(workload for workload in GENERIC_WORKLOADS if workload["name"] == "grouped_wide_sorted_runs")
+        self.assertEqual(
+            (minimum_auto_speedup(workload, 1), minimum_auto_speedup(workload, 4)),
+            (2.80, 2.75),
+        )
+        self.assertEqual(
+            (maximum_auto_median_us(workload, 1), maximum_auto_median_us(workload, 4)),
+            (175000, 65000),
+        )
+
+    def test_exact_filter_join_tracks_direct_dictionary_reduction_promotion(self) -> None:
+        workload = next(workload for workload in GENERIC_WORKLOADS if workload["name"] == "join_exact_filter_build")
+        self.assertEqual(
+            (minimum_auto_speedup(workload, 1), minimum_auto_speedup(workload, 4)),
+            (1.35, 1.09),
+        )
+        self.assertEqual(
+            (maximum_auto_median_us(workload, 1), maximum_auto_median_us(workload, 4)),
+            (10500, 5750),
+        )
+        self.assertEqual(
+            workload["required_runtime_paths"],
+            (
+                "hash_join_probe.regular_probe.all_valid.flat.single_key.no_chain."
+                "direct_ungrouped_aggregate_consumer=",
+                "aggregate_update.join_output_probe_consumer_ungrouped_aggregate.dictionary_source=",
+            ),
+        )
 
 
 class TestPerformanceGates(unittest.TestCase):
@@ -86,14 +158,14 @@ class TestPerformanceGates(unittest.TestCase):
                 "policy": "off",
                 "correctness_diff": 0,
                 "median_s": 0.100,
-                "speedup_vs_off_median": 1.0,
+                "paired_speedup_median": 1.0,
             },
             {
                 "workload": "raw_runtime_guard",
                 "policy": "auto",
                 "correctness_diff": 0,
                 "median_s": 0.040,
-                "speedup_vs_off_median": 2.5,
+                "paired_speedup_median": 2.5,
                 "compile_errors": 0,
                 "compiled_regions": 1,
                 "runtime_events": 1,
@@ -103,7 +175,7 @@ class TestPerformanceGates(unittest.TestCase):
         self.assertTrue(any("exceeds raw ceiling" in failure for failure in failures))
 
         summary[1]["median_s"] = 0.036
-        summary[1]["speedup_vs_off_median"] = 1.5
+        summary[1]["paired_speedup_median"] = 1.5
         failures = verification_failures(summary, [], (workload,), 1, False)
         self.assertTrue(any("below required" in failure for failure in failures))
 
@@ -122,12 +194,12 @@ class TestRuntimeProofRequirements(unittest.TestCase):
             "required_runtime_paths": ("packed_path=",),
         }
         summary = [
-            {"workload": "packed_string", "policy": "off", "correctness_diff": 0, "speedup_vs_off_median": 1.0},
+            {"workload": "packed_string", "policy": "off", "correctness_diff": 0, "paired_speedup_median": 1.0},
             {
                 "workload": "packed_string",
                 "policy": "auto",
                 "correctness_diff": 0,
-                "speedup_vs_off_median": 1.0,
+                "paired_speedup_median": 1.0,
                 "compile_errors": 0,
                 "compiled_regions": 1,
                 "runtime_events": 1,

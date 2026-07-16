@@ -41,6 +41,19 @@ SljitFullPipelineRecipeBinding::MakePrimitiveRecipePlan(SljitFullPipelineRecipe 
 	if (!SljitFullPipelinePrimitiveSequenceIsExecutable(ops, recipe.primitive_sequence)) {
 		throw InternalException("SLJIT recipe builder accepted an invalid full-pipeline primitive sequence");
 	}
+	recipe.runtime_kind = SljitFullPipelineIsSelectedHashJoinSinkSequence(recipe.primitive_sequence)
+	                          ? SljitFullPipelineRuntimeKind::SELECTED_HASH_JOIN_SINK
+	                          : SljitFullPipelineRuntimeKind::PRIMITIVE_SEQUENCE;
+	recipe.preserves_partitioned_source_chunks =
+	    SljitFullPipelineSourceFetchNeedsPartitionPreservingChunks(recipe.primitive_sequence);
+	recipe.has_scan_filter_executable_body =
+	    SljitFullPipelineHasDirectSourceHashBuild(recipe.primitive_sequence) ||
+	    SljitFullPipelineHasExactFilterProbeHashBuild(ops, recipe.primitive_sequence);
+	for (idx_t op_idx = 0; op_idx < ops.size(); op_idx++) {
+		if (SljitFullPipelineFilterHasFusedOwner(ops, recipe.primitive_sequence, op_idx)) {
+			recipe.fused_filter_owners.push_back(op_idx);
+		}
+	}
 	return SljitMakeFullPipelinePrimitiveRecipePlan(std::move(recipe));
 }
 
@@ -159,10 +172,13 @@ bool SljitFullPipelineRecipeBinding::TryMakeJoinFilterAggregateRecipe(const Slji
 		AddProjectionChainStep(sequence, facts.first_projection_idx, facts.final_projection_idx);
 	}
 	sequence.Add(MakeHashJoinProbeSelectionStep(facts.hash_join_idx));
+	const auto probe_step_idx = sequence.Count() - 1;
 	auto generated_filter = SljitBindGeneratedFilterPrimitive(ops, facts.filter_idx);
 	sequence.Add(SljitFullPipelinePrimitiveStep::GeneratedFilter(generated_filter));
 	sequence.Add(SljitFullPipelinePrimitiveStep::PostJoinProjectionAggregateUpdate(post_join_aggregate));
-	recipe = MakePrimitiveSequence(std::move(sequence));
+	auto direct_consumer = SljitMakeHashJoinDirectAggregateConsumerContract(
+	    probe_step_idx, sequence.Count() - 1, facts.hash_join_idx, facts.aggregate_idx, facts.filter_idx);
+	recipe = MakePrimitiveSequence(std::move(sequence), direct_consumer);
 	return true;
 }
 

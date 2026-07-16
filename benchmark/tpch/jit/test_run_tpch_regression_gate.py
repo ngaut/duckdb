@@ -17,6 +17,7 @@ from run_tpch_regression_gate import (
     apply_baseline_state_contract,
     candidate_qualifies_for_direct_promotion,
     merge_rechecked_csv_artifact,
+    load_baseline_state,
     parse_args,
     promotion_recheck_repeats,
     selected_auto_queries,
@@ -72,8 +73,12 @@ class TestBaselineStateContract(unittest.TestCase):
             jit_cbo_setting=[],
             duckdb=root / "duckdb",
         )
+        artifact = root / "artifact"
+        artifact.mkdir()
+        for filename in ("summary.csv", "runs.csv", "counters.csv", "performance_gaps.csv"):
+            (artifact / filename).write_text("query\n", encoding="utf-8")
 
-        write_baseline_state(args, root / "artifact", "test")
+        write_baseline_state(args, artifact, "test")
 
         with args.baseline_state.open(encoding="utf-8") as handle:
             state = json.load(handle)
@@ -82,6 +87,13 @@ class TestBaselineStateContract(unittest.TestCase):
         self.assertFalse(state["trace_runtime"])
         self.assertFalse(state["jit_verify"])
         self.assertEqual(state["jit_cbo_settings"], [])
+        self.assertFalse(Path(state["current_baseline"]).is_absolute())
+        accepted_baseline = load_baseline_state(args.baseline_state)
+        self.assertEqual(accepted_baseline.parent, args.baseline_state.parent.resolve())
+        self.assertEqual(
+            sorted(path.name for path in accepted_baseline.iterdir()),
+            ["counters.csv", "performance_gaps.csv", "runs.csv", "summary.csv"],
+        )
 
 
 class TestRuntimeContractQuerySelection(unittest.TestCase):

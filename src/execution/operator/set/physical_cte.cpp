@@ -100,7 +100,7 @@ SinkResultType PhysicalCTE::Sink(ExecutionContext &context, DataChunk &chunk, Op
 	return SinkResultType::NEED_MORE_INPUT;
 }
 
-ExecutionContract PhysicalCTE::GetExecutionContract() const {
+ExecutionContract PhysicalCTE::GetExecutionContract(ExecutionRegionOperatorSlot slot, bool render_diagnostics) const {
 	ExecutionContract result;
 	result.sink.kind = ExecutionRegionSinkKind::MATERIALIZATION;
 	result.sink.reason = "DuckDB materialization append sink contract";

@@ -8,7 +8,7 @@
 
 #pragma once
 
-#include "sljit_full_pipeline_primitive_contract.hpp"
+#include "sljit_full_pipeline_recipe_state.hpp"
 #include "sljit_full_pipeline_runtime.hpp"
 #include "sljit_runtime_batch_state.hpp"
 #include "sljit_runtime_batch_view.hpp"
@@ -17,8 +17,9 @@ namespace duckdb {
 
 struct SljitSourceFetchPrimitiveRuntime {
 	SljitSourceFetchPrimitiveRuntime(ExecutionRegionRuntime &runtime_p, ExecutionRegionResult &result_p,
-	                                 const SljitFullPipelinePrimitiveSequence &sequence_p)
-	    : runtime(runtime_p), result(result_p), sequence(sequence_p) {
+	                                 const SljitFullPipelineRecipe &recipe)
+	    : runtime(runtime_p), result(result_p), selected_hash_join_sink(recipe.UsesSelectedHashJoinSinkRuntime()),
+	      preserves_partitioned_source_chunks(recipe.preserves_partitioned_source_chunks) {
 	}
 
 	template <class EXECUTE_NEXT_STEP>
@@ -26,9 +27,8 @@ struct SljitSourceFetchPrimitiveRuntime {
 		if (source_chunk.size() == 0) {
 			return false;
 		}
-		if (SljitFullPipelineIsSelectedHashJoinSinkSequence(sequence) ||
-		    (runtime.PreserveSourceChunkBoundaries() &&
-		     SljitFullPipelineSourceFetchNeedsPartitionPreservingChunks(sequence)) ||
+		if (selected_hash_join_sink ||
+		    (runtime.PreserveSourceChunkBoundaries() && preserves_partitioned_source_chunks) ||
 		    !ShouldBatchSourceContractChunk(source_contract_batch.Count(), source_chunk.size())) {
 			return ExecuteSourceChunk(source_chunk, have_more_output, execute_next_step);
 		}
@@ -74,14 +74,11 @@ private:
 		if (source_chunk.size() == 0) {
 			return false;
 		}
-		if (SljitFullPipelineSourceFetchOwnsSinkAdvance(sequence)) {
-			if (runtime.TraceRuntime()) {
-				runtime.RecordJitRuntimeProof(ExecutionRegionJitRuntimeProof::FULL_PIPELINE_OWNERSHIP,
-				                              source_chunk.size());
-			}
-			if (SljitAdvanceSinkBatchBlocked(runtime, source_chunk, have_more_output)) {
-				return SljitStopFullPipeline(result, ExecutionRegionResult::INTERRUPTED);
-			}
+		if (runtime.TraceRuntime()) {
+			runtime.RecordJitRuntimeProof(ExecutionRegionJitRuntimeProof::FULL_PIPELINE_OWNERSHIP, source_chunk.size());
+		}
+		if (SljitAdvanceSinkBatchBlocked(runtime, source_chunk, have_more_output)) {
+			return SljitStopFullPipeline(result, ExecutionRegionResult::INTERRUPTED);
 		}
 		auto input_view = SljitRuntimeBatchViewFromChunk(source_chunk);
 		return execute_next_step(input_view, have_more_output);
@@ -97,7 +94,8 @@ private:
 private:
 	ExecutionRegionRuntime &runtime;
 	ExecutionRegionResult &result;
-	const SljitFullPipelinePrimitiveSequence &sequence;
+	bool selected_hash_join_sink;
+	bool preserves_partitioned_source_chunks;
 	SljitDataChunkBatch source_contract_batch;
 };
 

@@ -41,18 +41,21 @@ struct SljitPostJoinProjectionAggregateRuntimeState {
 	template <class EXECUTE_HASH_JOIN_PROBE>
 	SljitHashJoinAggregateConsumerResult TryExecuteHashJoinProbeConsumer(
 	    ExecutionRegionRuntime &runtime, vector<SljitExecutableRegionOp> &ops, SljitRegionExecutionScratch &scratch,
+	    const SljitHashJoinDirectAggregateConsumerContract &contract,
 	    const SljitHashJoinProbeSelectionPrimitive &probe_primitive, DataChunk &join_input,
 	    EXECUTE_HASH_JOIN_PROBE &execute_hash_join_probe, idx_t probe_input_filter_idx = DConstants::INVALID_INDEX) {
 		SljitHashJoinAggregateConsumerResult result;
 		if (!prepared) {
-			result.blocker = "hash_join_probe.direct_aggregate_consumer_miss.terminal_not_prepared";
-			return result;
+			throw InternalException("SLJIT bound direct aggregate terminal was not prepared");
 		}
-		if (probe_primitive.hash_join_idx != post_join_projection.hash_join_idx) {
-			result.blocker = "hash_join_probe.direct_aggregate_consumer_miss.hash_join_mismatch";
-			return result;
+		if (!contract.IsBound() || contract.hash_join_idx != probe_primitive.hash_join_idx ||
+		    contract.hash_join_idx != post_join_projection.hash_join_idx) {
+			throw InternalException("SLJIT bound direct aggregate terminal has inconsistent hash-join ownership");
 		}
 		auto strategy_ptr = DirectAggregateStrategyPtr();
+		if (strategy_ptr && strategy_ptr->aggregate_idx != contract.aggregate_idx) {
+			throw InternalException("SLJIT bound direct aggregate terminal has inconsistent aggregate ownership");
+		}
 		if (!strategy_ptr || strategy_ptr->disabled) {
 			result.blocker = "hash_join_probe.direct_aggregate_consumer_miss.aggregate_strategy";
 			return result;
@@ -62,7 +65,7 @@ struct SljitPostJoinProjectionAggregateRuntimeState {
 		                                   ? optional_ptr<const vector<idx_t>>(&probe_primitive.output_column_map)
 		                                   : optional_ptr<const vector<idx_t>>(nullptr);
 		auto &hash_join_op = ops[probe_primitive.hash_join_idx];
-		result = SljitTryExecuteHashJoinComplementarySumAggregateConsumer(
+		result = SljitTryExecuteHashJoinAggregateConsumer(
 		    runtime, runtime.ExecutionOperators(), ops, scratch, probe_primitive, hash_join_op, *strategy_ptr,
 		    join_input, post_join_projection, output_column_map, probe_primitive.output_projection_idx,
 		    optional_ptr<bool>(&deferred_grouped_finish), probe_input_filter_idx, probe_input_filter_cache,

@@ -8,6 +8,7 @@ import argparse
 import csv
 import json
 import os
+import shutil
 import subprocess
 import sys
 from datetime import datetime
@@ -24,7 +25,7 @@ from tpch_common import (
 ROOT = Path(__file__).resolve().parents[3]
 DEFAULT_BASELINE_ENV = "DUCKDB_JIT_TPCH_BASELINE"
 DEFAULT_HIGH_SAMPLE_REPEATS = 10
-DEFAULT_BASELINE_STATE = ROOT / "benchmark" / "tpch" / "jit" / "tmp" / "tpch_refactor_guard_state.json"
+DEFAULT_BASELINE_STATE = ROOT / "benchmark" / "tpch" / "jit" / "local_baselines" / "tpch_refactor_guard_state.json"
 PROMOTED_BASELINE_CSV_FILES = (
     "summary.csv",
     "runs.csv",
@@ -82,7 +83,32 @@ def load_baseline_state(path: Path) -> Path | None:
     baseline = state.get("current_baseline")
     if not baseline:
         raise TPCHConfigurationError(f"baseline state is missing current_baseline: {path}")
-    return Path(baseline).resolve()
+    baseline_path = Path(baseline)
+    if not baseline_path.is_absolute():
+        baseline_path = path.parent / baseline_path
+    return baseline_path.resolve()
+
+
+def persist_baseline_artifact(state_path: Path, artifact_dir: Path, scale_factor: float) -> Path:
+    require_artifact_dir(artifact_dir, "accepted baseline")
+    state_dir = state_path.parent.resolve()
+    artifact_dir = artifact_dir.resolve()
+    if artifact_dir.parent == state_dir:
+        return artifact_dir
+    stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    scale_label = f"{scale_factor:g}".replace(".", "_")
+    accepted_dir = state_dir / f"tpch_sf{scale_label}_{stamp}"
+    if accepted_dir.exists():
+        raise TPCHConfigurationError(f"accepted baseline destination already exists: {accepted_dir}")
+    accepted_dir.mkdir()
+    try:
+        for filename in PROMOTED_BASELINE_CSV_FILES:
+            shutil.copy2(artifact_dir / filename, accepted_dir / filename)
+    except Exception:
+        shutil.rmtree(accepted_dir)
+        raise
+    require_artifact_dir(accepted_dir, "persisted accepted baseline")
+    return accepted_dir
 
 
 def apply_baseline_state_contract(args: argparse.Namespace, state: dict) -> None:
@@ -129,8 +155,10 @@ def write_baseline_state(
             "use --allow-partial-baseline only for local focused work"
         )
     args.baseline_state.parent.mkdir(parents=True, exist_ok=True)
+    previous_baseline = load_baseline_state(args.baseline_state)
+    accepted_dir = persist_baseline_artifact(args.baseline_state, artifact_dir, args.scale_factor)
     state = {
-        "current_baseline": str(artifact_dir.resolve()),
+        "current_baseline": os.path.relpath(accepted_dir, args.baseline_state.parent.resolve()),
         "updated_at": datetime.now().isoformat(timespec="seconds"),
         "source": source,
         "queries": list(args.queries),
@@ -150,6 +178,13 @@ def write_baseline_state(
         json.dump(state, handle, indent=2)
         handle.write("\n")
     os.replace(temporary_state, args.baseline_state)
+    if (
+        previous_baseline is not None
+        and previous_baseline != accepted_dir
+        and previous_baseline.parent == args.baseline_state.parent.resolve()
+        and previous_baseline.exists()
+    ):
+        shutil.rmtree(previous_baseline)
 
 
 def read_csv_artifact(path: Path) -> tuple[list[str], list[dict[str, str]]]:

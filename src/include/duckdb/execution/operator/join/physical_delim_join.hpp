@@ -47,7 +47,7 @@ public:
 
 	InsertionOrderPreservingMap<string> ParamsToString() const override;
 
-	ExecutionContract GetExecutionContract() const override;
+	ExecutionContract GetExecutionContract(ExecutionRegionOperatorSlot slot, bool render_diagnostics) const override;
 };
 
 } // namespace duckdb

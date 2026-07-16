@@ -81,7 +81,7 @@ public:
 		return true;
 	}
 
-	ExecutionContract GetExecutionContract() const override;
+	ExecutionContract GetExecutionContract(ExecutionRegionOperatorSlot slot, bool render_diagnostics) const override;
 	InsertionOrderPreservingMap<string> ParamsToString() const override;
 
 private:

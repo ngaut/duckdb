@@ -95,6 +95,8 @@ a.out
 ~*
 *~
 tmp/
+/benchmark/jit/local_baselines/
+/benchmark/tpch/jit/local_baselines/
 
 #==============================================================================#
 # KDevelop files

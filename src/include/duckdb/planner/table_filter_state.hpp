@@ -17,6 +17,7 @@ namespace duckdb {
 struct PrefixRangeFunctionData;
 struct PerfectHashJoinFunctionData;
 struct BloomFilterFunctionData;
+struct ExecutionPerfectHashJoinFilterLayout;
 struct UnifiedVectorFormat;
 class Vector;
 
@@ -87,6 +88,15 @@ struct FastInternalFilterOperation {
 	unique_ptr<FilterSelectivityState> selectivity;
 };
 
+//! Immutable storage-scan dispatch derived from the analyzed filter operations.
+//! ExpressionFilterState has the same thread-local lifetime as the immutable
+//! table filter, so compression functions can consume this without rebinding
+//! operator-lifetime layout and fusion invariants for every vector.
+struct FastInternalFilterScanPlan {
+	idx_t primary_operation_count = 0;
+	optional_ptr<const ExecutionPerfectHashJoinFilterLayout> perfect_hash_join_layout;
+};
+
 //! Thread-local state for executing a table filter
 struct TableFilterState {
 public:
@@ -130,6 +140,7 @@ public:
 	bool fast_internal_filter_supported = false;
 	PhysicalType fast_internal_filter_type = PhysicalType::INVALID;
 	vector<FastInternalFilterOperation> fast_internal_filter_operations;
+	FastInternalFilterScanPlan fast_internal_filter_scan_plan;
 	unique_ptr<Expression> fast_internal_filter_residual_expression;
 	unique_ptr<ExpressionExecutor> fast_internal_filter_residual_executor;
 

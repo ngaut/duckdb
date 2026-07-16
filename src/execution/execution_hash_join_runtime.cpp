@@ -98,6 +98,9 @@ string DescribeExecutionPerfectHashJoinTableLayout(const ExecutionPerfectHashJoi
 		result += ",build_max=" + std::to_string(layout.build_max);
 	}
 	result += ",build_validity=" + ExecutionHashJoinBool(layout.build_validity != nullptr);
+	result +=
+	    ",build_validity_non_empty_words=" + ExecutionHashJoinBool(layout.build_validity_non_empty_words != nullptr);
+	result += ",build_validity_word_count=" + std::to_string(layout.build_validity_word_count);
 	result += ",rhs_output_columns=" + std::to_string(layout.rhs_output_column_count);
 	result += ",rhs_output_types=" + ExecutionHashJoinTypeList(layout.rhs_output_types);
 	result += ",rhs_dictionary_buffers=" + std::to_string(layout.rhs_dictionary_buffers.size());

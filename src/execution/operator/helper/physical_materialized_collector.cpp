@@ -24,7 +24,8 @@ public:
 	ColumnDataAppendState append_state;
 };
 
-ExecutionContract PhysicalMaterializedCollector::GetExecutionContract() const {
+ExecutionContract PhysicalMaterializedCollector::GetExecutionContract(ExecutionRegionOperatorSlot slot,
+                                                                      bool render_diagnostics) const {
 	return BuildExecutionResultCollectorSinkContract();
 }
 

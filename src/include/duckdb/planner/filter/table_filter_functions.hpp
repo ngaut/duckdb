@@ -26,6 +26,7 @@ class ExpressionFilter;
 class PerfectHashJoinExecutor;
 class PrefixRangeFilter;
 struct DynamicFilterData;
+struct ExecutionPerfectHashJoinFilterLayout;
 struct ExecutionRuntimeFilterIdentity;
 
 enum class SelectivityOptionalFilterType : uint8_t { MIN_MAX, BF, PHJ, PRF };
@@ -136,6 +137,7 @@ struct PerfectHashJoinFunctionData : public FunctionData {
 	                            const string &key_column_name_p);
 
 	optional_ptr<const PerfectHashJoinExecutor> executor;
+	optional_ptr<const ExecutionPerfectHashJoinFilterLayout> filter_layout;
 	string key_column_name;
 
 	unique_ptr<FunctionData> Copy() const override;

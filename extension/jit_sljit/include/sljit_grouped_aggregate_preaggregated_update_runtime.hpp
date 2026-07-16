@@ -288,13 +288,15 @@ static bool TryExecutePreaggregatedGroupedPrimitiveAggregateUpdateBatches(
     ExecutionRegionRuntime &runtime, SljitRegionExecutionScratch &scratch, idx_t op_idx, SljitExecutableRegionOp &op,
     DataChunk &compact_groups, SljitPreaggregatedPrimitiveAggregateScratch &preaggregate_scratch,
     const vector<const ExecutionPrimitiveAggregateUpdateLane *> &payload_lanes,
-    ExecutionGroupedAggregateStateAddressBinding &grouped_state, idx_t preaggregated_row_count,
+    ExecutionGroupedAggregateStateAddressBinding &grouped_state, idx_t preaggregated_row_count, bool reserve_groups,
     bool defer_grouped_finish, optional_ptr<bool> deferred_grouped_finish) {
 	if (!SljitCanApplyPreaggregatedGroupedPrimitiveAggregateUpdate(op, compact_groups, preaggregate_scratch,
 	                                                               payload_lanes, grouped_state)) {
 		return false;
 	}
-	SljitTryReserveGroupedAggregateGroups(runtime, op_idx, op, grouped_state, compact_groups.size());
+	if (reserve_groups) {
+		SljitTryReserveGroupedAggregateGroups(runtime, op_idx, op, grouped_state, compact_groups.size());
+	}
 	if (compact_groups.size() <= STANDARD_VECTOR_SIZE) {
 		return TryExecutePreaggregatedGroupedPrimitiveAggregateUpdate(
 		    runtime, scratch, op_idx, op, compact_groups, preaggregate_scratch, payload_lanes, grouped_state,
@@ -375,7 +377,7 @@ static bool TryExecutePreaggregatedDirectGroupedAggregateUpdate(
 		                              preaggregate_stage_start);
 		if (TryExecutePreaggregatedGroupedPrimitiveAggregateUpdateBatches(
 		        runtime, scratch, op_idx, op, compact_groups, preaggregate_scratch, payload_lanes, grouped_state,
-		        input.size(), defer_grouped_finish, deferred_grouped_finish)) {
+		        input.size(), true, defer_grouped_finish, deferred_grouped_finish)) {
 			return true;
 		}
 	}

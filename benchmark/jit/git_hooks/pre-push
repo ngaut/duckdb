@@ -4,7 +4,7 @@ set -eu
 ROOT="$(git rev-parse --show-toplevel)"
 cd "$ROOT"
 
-RECEIPT="$ROOT/benchmark/jit/tmp/pre_commit_verified_tree"
+RECEIPT="$ROOT/benchmark/jit/local_baselines/pre_commit_verified_tree"
 CURRENT_TREE="$(git rev-parse 'HEAD^{tree}')"
 VERIFIED_TREE=""
 if [ -f "$RECEIPT" ]; then

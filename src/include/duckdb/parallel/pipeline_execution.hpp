@@ -17,6 +17,8 @@ enum class PipelineExecuteResult {
 	FINISHED,
 	//! The pipeline is not fully executed and can be called again immediately.
 	NOT_FINISHED,
+	//! Core continuation work completed and execution must re-enter the selected runner.
+	RUNNER_HANDOFF,
 	//! The pipeline was interrupted and should not be called again until the interrupt is handled.
 	INTERRUPTED
 };

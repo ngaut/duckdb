@@ -140,11 +140,20 @@ static LogicalType BuildExecutionContractTableScanColumnType(const PhysicalTable
 	return scan.returned_types[column_id];
 }
 
+LogicalType GetExecutionRegionTableScanSourceInputType(const PhysicalTableScan &scan, idx_t source_input_idx) {
+	if (source_input_idx >= scan.column_ids.size()) {
+		throw InternalException("Source input index %llu is outside table scan column count %llu",
+		                        static_cast<unsigned long long>(source_input_idx),
+		                        static_cast<unsigned long long>(scan.column_ids.size()));
+	}
+	return BuildExecutionContractTableScanColumnType(scan, scan.column_ids[source_input_idx]);
+}
+
 static vector<LogicalType> BuildExecutionContractTableScanSourceInputTypes(const PhysicalTableScan &scan) {
 	vector<LogicalType> result;
 	result.reserve(scan.column_ids.size());
-	for (auto &column_index : scan.column_ids) {
-		result.push_back(BuildExecutionContractTableScanColumnType(scan, column_index));
+	for (idx_t source_input_idx = 0; source_input_idx < scan.column_ids.size(); source_input_idx++) {
+		result.push_back(GetExecutionRegionTableScanSourceInputType(scan, source_input_idx));
 	}
 	return result;
 }
@@ -253,7 +262,7 @@ static void MarkExecutionContractNativeStateScanContractBlocked(ExecutionRegionN
 
 static void AppendExecutionContractNativeStateScanReason(string &reason,
                                                          const ExecutionRegionNativeStateScanContract &contract) {
-	if (contract.status == ExecutionRegionStateContractStatus::NONE) {
+	if (reason.empty() || contract.status == ExecutionRegionStateContractStatus::NONE) {
 		return;
 	}
 	reason += ";native_state_scan_contract_status=";
@@ -267,7 +276,7 @@ static void AppendExecutionContractNativeStateScanReason(string &reason,
 
 static void AppendExecutionContractNativeGroupedStateReason(string &reason,
                                                             const ExecutionRegionNativeGroupedStateContract &contract) {
-	if (contract.status == ExecutionRegionStateContractStatus::NONE) {
+	if (reason.empty() || contract.status == ExecutionRegionStateContractStatus::NONE) {
 		return;
 	}
 	reason += ";native_grouped_state_contract_status=";
@@ -282,7 +291,7 @@ static void AppendExecutionContractNativeGroupedStateReason(string &reason,
 static void AppendExecutionContractNativeOperatorReason(string &reason,
                                                         const ExecutionRegionNativeOperatorContract &contract,
                                                         const string &prefix) {
-	if (contract.status == ExecutionRegionStateContractStatus::NONE) {
+	if (reason.empty() || contract.status == ExecutionRegionStateContractStatus::NONE) {
 		return;
 	}
 	reason += ";" + prefix + "_contract_status=";
@@ -296,7 +305,7 @@ static void AppendExecutionContractNativeOperatorReason(string &reason,
 
 static void AppendExecutionContractGroupedStateLayoutReason(string &reason,
                                                             const ExecutionRegionAggregateContract &contract) {
-	if (!contract.present ||
+	if (reason.empty() || !contract.present ||
 	    contract.native_grouped_state_contract.status == ExecutionRegionStateContractStatus::NONE) {
 		return;
 	}
@@ -333,6 +342,15 @@ ExecutionSourceContractCapability GetExecutionSourceContractCapability(const Phy
 	}
 	result.execution = ExecutionRegionSourceExecutionKind::SOURCE_CONTRACT;
 	return result;
+}
+
+idx_t GetExecutionRegionTableScanSourceCardinality(const PhysicalTableScan &scan) {
+	auto capability = GetExecutionSourceContractCapability(scan);
+	if (!capability.uses_storage_scan) {
+		return scan.estimated_cardinality;
+	}
+	auto &bind_data = scan.bind_data->Cast<TableScanBindData>();
+	return bind_data.table.GetStorage().GetTotalRows();
 }
 
 static string BuildExecutionContractAggregateFunctionList(const vector<unique_ptr<Expression>> &aggregates) {
@@ -1910,12 +1928,7 @@ BuildExecutionContractTableScanContract(const PhysicalTableScan &scan,
 	ExecutionRegionTableScanContract result;
 	result.present = true;
 	result.function_name = StringUtil::Lower(scan.function.name.GetIdentifierName());
-	if (capability.uses_storage_scan) {
-		auto &bind_data = scan.bind_data->Cast<TableScanBindData>();
-		result.estimated_source_cardinality = bind_data.table.GetStorage().GetTotalRows();
-	} else {
-		result.estimated_source_cardinality = scan.estimated_cardinality;
-	}
+	result.estimated_source_cardinality = GetExecutionRegionTableScanSourceCardinality(scan);
 	result.output_column_count = scan.GetTypes().size();
 	result.returned_column_count = scan.returned_types.size();
 	result.column_id_count = scan.column_ids.size();
@@ -2239,7 +2252,8 @@ static void AddExecutionContractTableScanSourceFilters(const PhysicalTableScan &
 	}
 }
 
-ExecutionContract PhysicalTableScan::GetExecutionContract() const {
+ExecutionContract PhysicalTableScan::GetExecutionContract(ExecutionRegionOperatorSlot slot,
+                                                          bool render_diagnostics) const {
 	ExecutionContract result;
 	auto capability = GetExecutionSourceContractCapability(*this);
 	auto table_scan_contract = BuildExecutionContractTableScanContract(*this, capability);
@@ -2248,8 +2262,10 @@ ExecutionContract PhysicalTableScan::GetExecutionContract() const {
 	if (result.source.execution == ExecutionRegionSourceExecutionKind::NONE) {
 		result.source.execution = ExecutionRegionSourceExecutionKind::DUCKDB_SOURCE_BOUNDARY;
 	}
-	result.source_boundary_reason =
-	    BuildExecutionContractTableScanSourceBoundaryReason(table_scan_contract, result.source.execution);
+	if (render_diagnostics) {
+		result.source_boundary_reason =
+		    BuildExecutionContractTableScanSourceBoundaryReason(table_scan_contract, result.source.execution);
+	}
 	result.source.source_contract = BuildExecutionSourceProtocolContract(result.source.kind, result.source.execution);
 	result.source.reason = result.source_boundary_reason;
 	result.source.function_name = table_scan_contract.function_name;
@@ -2268,7 +2284,8 @@ ExecutionContract PhysicalTableScan::GetExecutionContract() const {
 	return FinalizeExecutionContract(std::move(result));
 }
 
-ExecutionContract PhysicalColumnDataScan::GetExecutionContract() const {
+ExecutionContract PhysicalColumnDataScan::GetExecutionContract(ExecutionRegionOperatorSlot slot,
+                                                               bool render_diagnostics) const {
 	ExecutionContract result;
 	if (type != PhysicalOperatorType::CTE_SCAN && type != PhysicalOperatorType::COLUMN_DATA_SCAN) {
 		return FinalizeExecutionContract(std::move(result));
@@ -2279,100 +2296,137 @@ ExecutionContract PhysicalColumnDataScan::GetExecutionContract() const {
 	result.source.function_name = StringUtil::Lower(PhysicalOperatorToString(type));
 	result.source.output_column_count = GetTypes().size();
 	result.source.returned_column_count = GetTypes().size();
-	result.source_boundary_reason = "DuckDB column data source contract";
-	result.source_boundary_reason += ";operator=" + PhysicalOperatorToString(type);
-	result.source_boundary_reason += ";function=" + result.source.function_name;
-	result.source_boundary_reason += ";output_columns=" + std::to_string(result.source.output_column_count);
-	result.source_boundary_reason += ";returned_columns=" + std::to_string(result.source.returned_column_count);
+	if (render_diagnostics) {
+		result.source_boundary_reason = "DuckDB column data source contract";
+		result.source_boundary_reason += ";operator=" + PhysicalOperatorToString(type);
+		result.source_boundary_reason += ";function=" + result.source.function_name;
+		result.source_boundary_reason += ";output_columns=" + std::to_string(result.source.output_column_count);
+		result.source_boundary_reason += ";returned_columns=" + std::to_string(result.source.returned_column_count);
+	}
 	if (collection) {
 		result.source.estimated_source_cardinality = collection->Count();
 		result.source.estimated_source_cardinality_exact = true;
-		result.source_boundary_reason +=
-		    ";column_data_count=" + std::to_string(result.source.estimated_source_cardinality);
+		if (render_diagnostics) {
+			result.source_boundary_reason +=
+			    ";column_data_count=" + std::to_string(result.source.estimated_source_cardinality);
+		}
 	}
 	result.source.reason = result.source_boundary_reason;
 	return FinalizeExecutionContract(std::move(result));
 }
 
-ExecutionContract PhysicalHashJoin::GetExecutionContract() const {
+ExecutionContract PhysicalHashJoin::GetExecutionContract(ExecutionRegionOperatorSlot slot,
+                                                         bool render_diagnostics) const {
 	ExecutionContract result;
 	auto contract = BuildExecutionContractHashJoinContract(*this);
-	auto probe_keys = BuildExecutionContractHashJoinProbeKeyInputs(*this);
-	auto build_keys = BuildExecutionContractHashJoinBuildKeyInputs(*this);
-	auto state_scan_contract = BuildExecutionContractNativeStateScanContract("hash-join-native-state-scan", string());
-	if (contract.source_produces_rows) {
-		MarkExecutionContractNativeStateScanContractReady(state_scan_contract);
-	} else {
-		MarkExecutionContractNativeStateScanContractBlocked(state_scan_contract,
-		                                                    HASH_JOIN_SOURCE_NON_PRODUCING_BLOCKER);
+	switch (slot) {
+	case ExecutionRegionOperatorSlot::SOURCE: {
+		auto state_scan_contract =
+		    BuildExecutionContractNativeStateScanContract("hash-join-native-state-scan", string());
+		if (contract.source_produces_rows) {
+			MarkExecutionContractNativeStateScanContractReady(state_scan_contract);
+		} else {
+			MarkExecutionContractNativeStateScanContractBlocked(state_scan_contract,
+			                                                    HASH_JOIN_SOURCE_NON_PRODUCING_BLOCKER);
+		}
+		if (render_diagnostics) {
+			result.source_boundary_reason = BuildExecutionContractHashJoinBoundaryReason(
+			    *this, contract,
+			    contract.source_produces_rows ? "DuckDB hash join native state scan contract"
+			                                  : "DuckDB hash join state scan source does not produce rows");
+		}
+		result.source.kind = ExecutionRegionSourceKind::STATEFUL_OPERATOR;
+		result.source.execution = contract.source_produces_rows
+		                              ? ExecutionRegionSourceExecutionKind::SOURCE_CONTRACT
+		                              : ExecutionRegionSourceExecutionKind::DUCKDB_SOURCE_BOUNDARY;
+		result.source.source_contract =
+		    BuildExecutionSourceProtocolContract(result.source.kind, result.source.execution);
+		if (!contract.source_produces_rows) {
+			result.source.source_contract.blocker = HASH_JOIN_SOURCE_NON_PRODUCING_BLOCKER;
+		}
+		result.source.native_state_scan_contract = std::move(state_scan_contract);
+		AppendExecutionContractNativeStateScanReason(result.source_boundary_reason,
+		                                             result.source.native_state_scan_contract);
+		result.source.function_name = "hash_join_probe";
+		result.source.output_column_count = GetTypes().size();
+		result.source.returned_column_count = GetTypes().size();
+		result.source.reason = result.source_boundary_reason;
+		result.source.hash_join_contract = std::move(contract);
+		result.source.hash_join_keys = BuildExecutionContractHashJoinProbeKeyInputs(*this);
+		break;
 	}
-	result.source_boundary_reason = BuildExecutionContractHashJoinBoundaryReason(
-	    *this, contract,
-	    contract.source_produces_rows ? "DuckDB hash join native state scan contract"
-	                                  : "DuckDB hash join state scan source does not produce rows");
-	result.operator_info.kind = ExecutionRegionOperatorContractKind::HASH_JOIN_PROBE;
-	result.operator_info.reason = BuildExecutionContractHashJoinBoundaryReason(
-	    *this, contract, "DuckDB hash join probe operator contract boundary");
-	result.operator_info.hash_join_contract = contract;
-	result.operator_info.hash_join_keys = probe_keys;
-	result.source.kind = ExecutionRegionSourceKind::STATEFUL_OPERATOR;
-	result.source.execution = contract.source_produces_rows
-	                              ? ExecutionRegionSourceExecutionKind::SOURCE_CONTRACT
-	                              : ExecutionRegionSourceExecutionKind::DUCKDB_SOURCE_BOUNDARY;
-	result.source.source_contract = BuildExecutionSourceProtocolContract(result.source.kind, result.source.execution);
-	if (!contract.source_produces_rows) {
-		result.source.source_contract.blocker = HASH_JOIN_SOURCE_NON_PRODUCING_BLOCKER;
+	case ExecutionRegionOperatorSlot::OPERATOR:
+		result.operator_info.kind = ExecutionRegionOperatorContractKind::HASH_JOIN_PROBE;
+		if (render_diagnostics) {
+			result.operator_info.reason = BuildExecutionContractHashJoinBoundaryReason(
+			    *this, contract, "DuckDB hash join probe operator contract boundary");
+		}
+		result.operator_info.hash_join_contract = std::move(contract);
+		result.operator_info.hash_join_keys = BuildExecutionContractHashJoinProbeKeyInputs(*this);
+		break;
+	case ExecutionRegionOperatorSlot::SINK:
+		result.sink.kind = ExecutionRegionSinkKind::HASH_JOIN_BUILD;
+		if (render_diagnostics) {
+			result.sink.reason =
+			    BuildExecutionContractHashJoinBoundaryReason(*this, contract, "DuckDB hash join build sink contract");
+		}
+		result.sink.hash_join_contract = std::move(contract);
+		result.sink.hash_join_keys = BuildExecutionContractHashJoinBuildKeyInputs(*this);
+		break;
+	default:
+		break;
 	}
-	result.source.native_state_scan_contract = std::move(state_scan_contract);
-	AppendExecutionContractNativeStateScanReason(result.source_boundary_reason,
-	                                             result.source.native_state_scan_contract);
-	result.source.function_name = "hash_join_probe";
-	result.source.output_column_count = GetTypes().size();
-	result.source.returned_column_count = GetTypes().size();
-	result.source.reason = result.source_boundary_reason;
-	result.source.hash_join_contract = contract;
-	result.source.hash_join_keys = std::move(probe_keys);
-	result.sink.kind = ExecutionRegionSinkKind::HASH_JOIN_BUILD;
-	result.sink.reason =
-	    BuildExecutionContractHashJoinBoundaryReason(*this, contract, "DuckDB hash join build sink contract");
-	result.sink.hash_join_contract = std::move(contract);
-	result.sink.hash_join_keys = std::move(build_keys);
 	return FinalizeExecutionContract(std::move(result));
 }
 
-ExecutionContract PhysicalNestedLoopJoin::GetExecutionContract() const {
+ExecutionContract PhysicalNestedLoopJoin::GetExecutionContract(ExecutionRegionOperatorSlot slot,
+                                                               bool render_diagnostics) const {
 	ExecutionContract result;
 	auto contract = BuildExecutionContractNestedLoopJoinContract(*this);
-
-	result.source_boundary_reason = BuildExecutionContractNestedLoopJoinBoundaryReason(
-	    *this, contract,
-	    contract.source_produces_rows ? "DuckDB nested loop join state scan boundary"
-	                                  : "DuckDB nested loop join source does not produce rows");
-	result.operator_info.kind = ExecutionRegionOperatorContractKind::NESTED_LOOP_JOIN_PROBE;
-	result.operator_info.reason = BuildExecutionContractNestedLoopJoinBoundaryReason(
-	    *this, contract, "DuckDB nested loop join probe operator contract");
-	result.operator_info.nested_loop_join_contract = contract;
-
-	result.source.kind = ExecutionRegionSourceKind::STATEFUL_OPERATOR;
-	result.source.execution = ExecutionRegionSourceExecutionKind::DUCKDB_SOURCE_BOUNDARY;
-	result.source.source_contract = BuildExecutionSourceProtocolContract(result.source.kind, result.source.execution);
-	result.source.source_contract.blocker = contract.source_produces_rows
-	                                            ? "nested-loop-join-native-state-scan-contract-missing"
-	                                            : "nested-loop-join-source-does-not-produce-rows-for-join-type";
-	result.source.function_name = "nested_loop_join_scan";
-	result.source.output_column_count = GetTypes().size();
-	result.source.returned_column_count = GetTypes().size();
-	result.source.reason = result.source_boundary_reason;
-	result.source.nested_loop_join_contract = contract;
-
-	result.sink.kind = ExecutionRegionSinkKind::NESTED_LOOP_JOIN_BUILD;
-	result.sink.reason = BuildExecutionContractNestedLoopJoinBoundaryReason(
-	    *this, contract, "DuckDB nested loop join build sink contract");
-	result.sink.nested_loop_join_contract = std::move(contract);
+	switch (slot) {
+	case ExecutionRegionOperatorSlot::SOURCE:
+		if (render_diagnostics) {
+			result.source_boundary_reason = BuildExecutionContractNestedLoopJoinBoundaryReason(
+			    *this, contract,
+			    contract.source_produces_rows ? "DuckDB nested loop join state scan boundary"
+			                                  : "DuckDB nested loop join source does not produce rows");
+		}
+		result.source.kind = ExecutionRegionSourceKind::STATEFUL_OPERATOR;
+		result.source.execution = ExecutionRegionSourceExecutionKind::DUCKDB_SOURCE_BOUNDARY;
+		result.source.source_contract =
+		    BuildExecutionSourceProtocolContract(result.source.kind, result.source.execution);
+		result.source.source_contract.blocker = contract.source_produces_rows
+		                                            ? "nested-loop-join-native-state-scan-contract-missing"
+		                                            : "nested-loop-join-source-does-not-produce-rows-for-join-type";
+		result.source.function_name = "nested_loop_join_scan";
+		result.source.output_column_count = GetTypes().size();
+		result.source.returned_column_count = GetTypes().size();
+		result.source.reason = result.source_boundary_reason;
+		result.source.nested_loop_join_contract = std::move(contract);
+		break;
+	case ExecutionRegionOperatorSlot::OPERATOR:
+		result.operator_info.kind = ExecutionRegionOperatorContractKind::NESTED_LOOP_JOIN_PROBE;
+		if (render_diagnostics) {
+			result.operator_info.reason = BuildExecutionContractNestedLoopJoinBoundaryReason(
+			    *this, contract, "DuckDB nested loop join probe operator contract");
+		}
+		result.operator_info.nested_loop_join_contract = std::move(contract);
+		break;
+	case ExecutionRegionOperatorSlot::SINK:
+		result.sink.kind = ExecutionRegionSinkKind::NESTED_LOOP_JOIN_BUILD;
+		if (render_diagnostics) {
+			result.sink.reason = BuildExecutionContractNestedLoopJoinBoundaryReason(
+			    *this, contract, "DuckDB nested loop join build sink contract");
+		}
+		result.sink.nested_loop_join_contract = std::move(contract);
+		break;
+	default:
+		break;
+	}
 	return FinalizeExecutionContract(std::move(result));
 }
 
-ExecutionContract PhysicalOrder::GetExecutionContract() const {
+ExecutionContract PhysicalOrder::GetExecutionContract(ExecutionRegionOperatorSlot slot, bool render_diagnostics) const {
 	auto result = BuildExecutionContractSortStateContracts(
 	    type, orders, children[0].get().types, projections, GetTypes().size(), "order_by_scan",
 	    "order-by-native-state-scan", "DuckDB order by native state scan contract", is_index_sort, false, 0, 0, false);
@@ -2383,7 +2437,7 @@ ExecutionContract PhysicalOrder::GetExecutionContract() const {
 	return FinalizeExecutionContract(std::move(result));
 }
 
-ExecutionContract PhysicalTopN::GetExecutionContract() const {
+ExecutionContract PhysicalTopN::GetExecutionContract(ExecutionRegionOperatorSlot slot, bool render_diagnostics) const {
 	vector<idx_t> projections;
 	auto result = BuildExecutionContractSortStateContracts(
 	    type, orders, GetTypes(), projections, GetTypes().size(), "top_n_scan", "top-n-native-state-scan",
@@ -2399,119 +2453,146 @@ ExecutionContract PhysicalTopN::GetExecutionContract() const {
 	return FinalizeExecutionContract(std::move(result));
 }
 
-ExecutionContract PhysicalHashAggregate::GetExecutionContract() const {
+ExecutionContract PhysicalHashAggregate::GetExecutionContract(ExecutionRegionOperatorSlot slot,
+                                                              bool render_diagnostics) const {
 	ExecutionContract result;
 	auto contract = BuildExecutionContractHashAggregateContract(*this);
 	auto sink_aggregates = BuildExecutionContractHashAggregateInputs(*this);
 	auto sink_groups = BuildExecutionContractGroupInputs(*this);
 	MarkExecutionContractAggregateStateUpdateContract(contract, sink_aggregates, sink_groups);
-	auto state_scan_contract =
-	    BuildExecutionContractNativeStateScanContract("hash-aggregate-native-state-scan", string());
-	MarkExecutionContractNativeStateScanContractReady(state_scan_contract);
-	result.source_boundary_reason =
-	    BuildExecutionContractHashAggregateBoundaryReason(*this, "DuckDB hash aggregate native state scan contract");
-	result.source.kind = ExecutionRegionSourceKind::STATEFUL_OPERATOR;
-	result.source.execution = ExecutionRegionSourceExecutionKind::SOURCE_CONTRACT;
-	result.source.source_contract = BuildExecutionSourceProtocolContract(result.source.kind, result.source.execution);
-	result.source.native_state_scan_contract = std::move(state_scan_contract);
-	AppendExecutionContractNativeStateScanReason(result.source_boundary_reason,
-	                                             result.source.native_state_scan_contract);
-	AppendExecutionContractGroupedStateLayoutReason(result.source_boundary_reason, contract);
-	result.source.function_name = "hash_aggregate_scan";
-	result.source.output_column_count = GetTypes().size();
-	result.source.returned_column_count = GetTypes().size();
-	result.source.reason = result.source_boundary_reason;
-	result.source.aggregate_contract = contract;
-	result.source.aggregates = sink_aggregates;
-	result.source.groups = sink_groups;
-	ApplyExecutionContractFinalizedSourceCardinality(result, FinalizedSourceCardinality());
-	result.sink.kind = ExecutionRegionSinkKind::HASH_AGGREGATE_UPDATE;
-	result.sink.reason =
-	    BuildExecutionContractHashAggregateBoundaryReason(*this, "DuckDB hash aggregate sink update contract");
-	AppendExecutionContractNativeOperatorReason(result.sink.reason, contract.native_state_update_contract,
-	                                            "aggregate_state_update");
-	result.sink.aggregate_contract = std::move(contract);
-	result.sink.aggregates = std::move(sink_aggregates);
-	result.sink.groups = std::move(sink_groups);
+	if (slot == ExecutionRegionOperatorSlot::SOURCE) {
+		auto state_scan_contract =
+		    BuildExecutionContractNativeStateScanContract("hash-aggregate-native-state-scan", string());
+		MarkExecutionContractNativeStateScanContractReady(state_scan_contract);
+		if (render_diagnostics) {
+			result.source_boundary_reason = BuildExecutionContractHashAggregateBoundaryReason(
+			    *this, "DuckDB hash aggregate native state scan contract");
+		}
+		result.source.kind = ExecutionRegionSourceKind::STATEFUL_OPERATOR;
+		result.source.execution = ExecutionRegionSourceExecutionKind::SOURCE_CONTRACT;
+		result.source.source_contract =
+		    BuildExecutionSourceProtocolContract(result.source.kind, result.source.execution);
+		result.source.native_state_scan_contract = std::move(state_scan_contract);
+		AppendExecutionContractNativeStateScanReason(result.source_boundary_reason,
+		                                             result.source.native_state_scan_contract);
+		AppendExecutionContractGroupedStateLayoutReason(result.source_boundary_reason, contract);
+		result.source.function_name = "hash_aggregate_scan";
+		result.source.output_column_count = GetTypes().size();
+		result.source.returned_column_count = GetTypes().size();
+		result.source.reason = result.source_boundary_reason;
+		result.source.aggregate_contract = std::move(contract);
+		result.source.aggregates = std::move(sink_aggregates);
+		result.source.groups = std::move(sink_groups);
+		ApplyExecutionContractFinalizedSourceCardinality(result, FinalizedSourceCardinality());
+	} else if (slot == ExecutionRegionOperatorSlot::SINK) {
+		result.sink.kind = ExecutionRegionSinkKind::HASH_AGGREGATE_UPDATE;
+		if (render_diagnostics) {
+			result.sink.reason =
+			    BuildExecutionContractHashAggregateBoundaryReason(*this, "DuckDB hash aggregate sink update contract");
+		}
+		AppendExecutionContractNativeOperatorReason(result.sink.reason, contract.native_state_update_contract,
+		                                            "aggregate_state_update");
+		result.sink.aggregate_contract = std::move(contract);
+		result.sink.aggregates = std::move(sink_aggregates);
+		result.sink.groups = std::move(sink_groups);
+	}
 	return FinalizeExecutionContract(std::move(result));
 }
 
-ExecutionContract PhysicalPerfectHashAggregate::GetExecutionContract() const {
+ExecutionContract PhysicalPerfectHashAggregate::GetExecutionContract(ExecutionRegionOperatorSlot slot,
+                                                                     bool render_diagnostics) const {
 	ExecutionContract result;
 	auto contract = BuildExecutionContractPerfectHashAggregateContract(*this);
 	auto sink_aggregates = BuildExecutionContractPerfectHashAggregateInputs(*this);
 	auto sink_groups = BuildExecutionContractGroupInputs(*this);
 	MarkExecutionContractAggregateStateUpdateContract(contract, sink_aggregates, sink_groups);
-	auto state_scan_contract = BuildExecutionContractNativeStateScanContract("perfect-hash-aggregate-native-state-scan",
-	                                                                         "aggregate-state-scan-contract-boundary");
-	MarkExecutionContractPerfectHashAggregateStateScanContract(state_scan_contract, contract);
-	result.source_boundary_reason = BuildExecutionContractPerfectHashAggregateBoundaryReason(
-	    *this, state_scan_contract.status == ExecutionRegionStateContractStatus::READY
-	               ? "DuckDB perfect hash aggregate native state scan contract"
-	               : "DuckDB aggregate source state contract missing");
-	result.source.kind = ExecutionRegionSourceKind::STATEFUL_OPERATOR;
-	result.source.execution = state_scan_contract.status == ExecutionRegionStateContractStatus::READY
-	                              ? ExecutionRegionSourceExecutionKind::SOURCE_CONTRACT
-	                              : ExecutionRegionSourceExecutionKind::DUCKDB_SOURCE_BOUNDARY;
-	result.source.source_contract = BuildExecutionSourceProtocolContract(result.source.kind, result.source.execution);
-	result.source.native_state_scan_contract = std::move(state_scan_contract);
-	AppendExecutionContractNativeStateScanReason(result.source_boundary_reason,
-	                                             result.source.native_state_scan_contract);
-	AppendExecutionContractGroupedStateLayoutReason(result.source_boundary_reason, contract);
-	result.source.function_name = "perfect_hash_aggregate_scan";
-	result.source.output_column_count = GetTypes().size();
-	result.source.returned_column_count = GetTypes().size();
-	result.source.reason = result.source_boundary_reason;
-	result.source.aggregate_contract = contract;
-	result.source.aggregates = sink_aggregates;
-	result.source.groups = sink_groups;
-	ApplyExecutionContractFinalizedSourceCardinality(result, FinalizedSourceCardinality());
-	result.sink.kind = ExecutionRegionSinkKind::PERFECT_HASH_AGGREGATE_UPDATE;
-	result.sink.reason = BuildExecutionContractPerfectHashAggregateBoundaryReason(
-	    *this, "DuckDB perfect hash aggregate sink update contract");
-	AppendExecutionContractNativeOperatorReason(result.sink.reason, contract.native_state_update_contract,
-	                                            "aggregate_state_update");
-	result.sink.aggregate_contract = std::move(contract);
-	result.sink.aggregates = std::move(sink_aggregates);
-	result.sink.groups = std::move(sink_groups);
+	if (slot == ExecutionRegionOperatorSlot::SOURCE) {
+		auto state_scan_contract = BuildExecutionContractNativeStateScanContract(
+		    "perfect-hash-aggregate-native-state-scan", "aggregate-state-scan-contract-boundary");
+		MarkExecutionContractPerfectHashAggregateStateScanContract(state_scan_contract, contract);
+		if (render_diagnostics) {
+			result.source_boundary_reason = BuildExecutionContractPerfectHashAggregateBoundaryReason(
+			    *this, state_scan_contract.status == ExecutionRegionStateContractStatus::READY
+			               ? "DuckDB perfect hash aggregate native state scan contract"
+			               : "DuckDB aggregate source state contract missing");
+		}
+		result.source.kind = ExecutionRegionSourceKind::STATEFUL_OPERATOR;
+		result.source.execution = state_scan_contract.status == ExecutionRegionStateContractStatus::READY
+		                              ? ExecutionRegionSourceExecutionKind::SOURCE_CONTRACT
+		                              : ExecutionRegionSourceExecutionKind::DUCKDB_SOURCE_BOUNDARY;
+		result.source.source_contract =
+		    BuildExecutionSourceProtocolContract(result.source.kind, result.source.execution);
+		result.source.native_state_scan_contract = std::move(state_scan_contract);
+		AppendExecutionContractNativeStateScanReason(result.source_boundary_reason,
+		                                             result.source.native_state_scan_contract);
+		AppendExecutionContractGroupedStateLayoutReason(result.source_boundary_reason, contract);
+		result.source.function_name = "perfect_hash_aggregate_scan";
+		result.source.output_column_count = GetTypes().size();
+		result.source.returned_column_count = GetTypes().size();
+		result.source.reason = result.source_boundary_reason;
+		result.source.aggregate_contract = std::move(contract);
+		result.source.aggregates = std::move(sink_aggregates);
+		result.source.groups = std::move(sink_groups);
+		ApplyExecutionContractFinalizedSourceCardinality(result, FinalizedSourceCardinality());
+	} else if (slot == ExecutionRegionOperatorSlot::SINK) {
+		result.sink.kind = ExecutionRegionSinkKind::PERFECT_HASH_AGGREGATE_UPDATE;
+		if (render_diagnostics) {
+			result.sink.reason = BuildExecutionContractPerfectHashAggregateBoundaryReason(
+			    *this, "DuckDB perfect hash aggregate sink update contract");
+		}
+		AppendExecutionContractNativeOperatorReason(result.sink.reason, contract.native_state_update_contract,
+		                                            "aggregate_state_update");
+		result.sink.aggregate_contract = std::move(contract);
+		result.sink.aggregates = std::move(sink_aggregates);
+		result.sink.groups = std::move(sink_groups);
+	}
 	return FinalizeExecutionContract(std::move(result));
 }
 
-ExecutionContract PhysicalUngroupedAggregate::GetExecutionContract() const {
+ExecutionContract PhysicalUngroupedAggregate::GetExecutionContract(ExecutionRegionOperatorSlot slot,
+                                                                   bool render_diagnostics) const {
 	ExecutionContract result;
 	auto contract = BuildExecutionContractUngroupedAggregateContract(*this);
 	auto sink_aggregates = BuildExecutionContractUngroupedAggregateInputs(*this);
 	vector<ExecutionRegionGroupInput> sink_groups;
 	MarkExecutionContractAggregateStateUpdateContract(contract, sink_aggregates, sink_groups);
-	auto state_scan_contract = BuildExecutionContractNativeStateScanContract("ungrouped-aggregate-native-state-scan",
-	                                                                         "aggregate-state-scan-contract-boundary");
-	MarkExecutionContractUngroupedAggregateStateScanContract(state_scan_contract, contract);
-	result.source_boundary_reason = BuildExecutionContractUngroupedAggregateBoundaryReason(
-	    *this, state_scan_contract.status == ExecutionRegionStateContractStatus::READY
-	               ? "DuckDB ungrouped aggregate native state scan contract"
-	               : "DuckDB aggregate source state contract missing");
-	result.source.kind = ExecutionRegionSourceKind::STATEFUL_OPERATOR;
-	result.source.execution = state_scan_contract.status == ExecutionRegionStateContractStatus::READY
-	                              ? ExecutionRegionSourceExecutionKind::SOURCE_CONTRACT
-	                              : ExecutionRegionSourceExecutionKind::DUCKDB_SOURCE_BOUNDARY;
-	result.source.source_contract = BuildExecutionSourceProtocolContract(result.source.kind, result.source.execution);
-	result.source.native_state_scan_contract = std::move(state_scan_contract);
-	AppendExecutionContractNativeStateScanReason(result.source_boundary_reason,
-	                                             result.source.native_state_scan_contract);
-	result.source.function_name = "ungrouped_aggregate_scan";
-	result.source.output_column_count = GetTypes().size();
-	result.source.returned_column_count = GetTypes().size();
-	result.source.reason = result.source_boundary_reason;
-	result.source.aggregate_contract = contract;
-	result.source.aggregates = sink_aggregates;
-	result.sink.kind = ExecutionRegionSinkKind::UNGROUPED_AGGREGATE_UPDATE;
-	result.sink.reason = BuildExecutionContractUngroupedAggregateBoundaryReason(
-	    *this, "DuckDB ungrouped aggregate payload update contract");
-	AppendExecutionContractNativeOperatorReason(result.sink.reason, contract.native_state_update_contract,
-	                                            "aggregate_state_update");
-	result.sink.aggregate_contract = std::move(contract);
-	result.sink.aggregates = std::move(sink_aggregates);
-	result.sink.groups = std::move(sink_groups);
+	if (slot == ExecutionRegionOperatorSlot::SOURCE) {
+		auto state_scan_contract = BuildExecutionContractNativeStateScanContract(
+		    "ungrouped-aggregate-native-state-scan", "aggregate-state-scan-contract-boundary");
+		MarkExecutionContractUngroupedAggregateStateScanContract(state_scan_contract, contract);
+		if (render_diagnostics) {
+			result.source_boundary_reason = BuildExecutionContractUngroupedAggregateBoundaryReason(
+			    *this, state_scan_contract.status == ExecutionRegionStateContractStatus::READY
+			               ? "DuckDB ungrouped aggregate native state scan contract"
+			               : "DuckDB aggregate source state contract missing");
+		}
+		result.source.kind = ExecutionRegionSourceKind::STATEFUL_OPERATOR;
+		result.source.execution = state_scan_contract.status == ExecutionRegionStateContractStatus::READY
+		                              ? ExecutionRegionSourceExecutionKind::SOURCE_CONTRACT
+		                              : ExecutionRegionSourceExecutionKind::DUCKDB_SOURCE_BOUNDARY;
+		result.source.source_contract =
+		    BuildExecutionSourceProtocolContract(result.source.kind, result.source.execution);
+		result.source.native_state_scan_contract = std::move(state_scan_contract);
+		AppendExecutionContractNativeStateScanReason(result.source_boundary_reason,
+		                                             result.source.native_state_scan_contract);
+		result.source.function_name = "ungrouped_aggregate_scan";
+		result.source.output_column_count = GetTypes().size();
+		result.source.returned_column_count = GetTypes().size();
+		result.source.reason = result.source_boundary_reason;
+		result.source.aggregate_contract = std::move(contract);
+		result.source.aggregates = std::move(sink_aggregates);
+	} else if (slot == ExecutionRegionOperatorSlot::SINK) {
+		result.sink.kind = ExecutionRegionSinkKind::UNGROUPED_AGGREGATE_UPDATE;
+		if (render_diagnostics) {
+			result.sink.reason = BuildExecutionContractUngroupedAggregateBoundaryReason(
+			    *this, "DuckDB ungrouped aggregate payload update contract");
+		}
+		AppendExecutionContractNativeOperatorReason(result.sink.reason, contract.native_state_update_contract,
+		                                            "aggregate_state_update");
+		result.sink.aggregate_contract = std::move(contract);
+		result.sink.aggregates = std::move(sink_aggregates);
+		result.sink.groups = std::move(sink_groups);
+	}
 	return FinalizeExecutionContract(std::move(result));
 }
 

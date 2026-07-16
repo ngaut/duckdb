@@ -239,7 +239,7 @@ static bool SljitTryExecuteInputVectorGroupedAggregateUpdate(
 		if (!has_group_output_transform &&
 		    TryExecutePreaggregatedGroupedPrimitiveAggregateUpdateBatches(
 		        runtime, scratch, op_idx, op, preaggregated_groups, preaggregate_scratch, payload_lanes, grouped_state,
-		        payload_input.size(), !finish, deferred_grouped_finish)) {
+		        payload_input.size(), true, !finish, deferred_grouped_finish)) {
 			RecordSljitRegionMaterializationElisionPath(
 			    runtime, op.kind, "direct_input_vector_preaggregated_grouped_update", payload_input.size());
 			return true;

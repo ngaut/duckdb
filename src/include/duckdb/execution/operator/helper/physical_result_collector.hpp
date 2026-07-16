@@ -37,7 +37,8 @@ public:
 public:
 	//! The final method used to fetch the query result from this operator
 	virtual unique_ptr<QueryResult> GetResult(GlobalSinkState &state) const = 0;
-	ExecutionContract GetExecutionContract() const override = 0;
+	ExecutionContract GetExecutionContract(ExecutionRegionOperatorSlot slot,
+	                                       bool render_diagnostics) const override = 0;
 
 	bool IsSink() const override {
 		return true;

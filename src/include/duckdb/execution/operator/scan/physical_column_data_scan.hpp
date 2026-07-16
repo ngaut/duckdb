@@ -26,7 +26,7 @@ public:
 	PhysicalColumnDataScan(PhysicalPlan &physical_plan, vector<LogicalType> types, PhysicalOperatorType op_type,
 	                       idx_t estimated_cardinality, TableIndex cte_index);
 
-	ExecutionContract GetExecutionContract() const override;
+	ExecutionContract GetExecutionContract(ExecutionRegionOperatorSlot slot, bool render_diagnostics) const override;
 
 	//! (optionally owned) column data collection to scan
 	optionally_owned_ptr<ColumnDataCollection> collection;

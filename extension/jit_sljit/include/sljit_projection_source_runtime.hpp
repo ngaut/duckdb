@@ -32,6 +32,29 @@ static bool TryReadProjectionSourceReferenceIndex(const SljitNativeRegionExpress
 	return true;
 }
 
+static bool SljitTryGetExecutableReferenceInputIndex(const SljitExecutableRegionExpression &expression,
+                                                     idx_t &input_index) {
+	auto &plan = expression.plan;
+	if (plan.kind == SljitNativeRegionExpressionKind::REFERENCE) {
+		input_index = plan.source_index;
+		return true;
+	}
+	if ((plan.kind != SljitNativeRegionExpressionKind::EXPRESSION_TREE &&
+	     plan.kind != SljitNativeRegionExpressionKind::TYPED_EXPRESSION_TREE) ||
+	    !plan.expression_tree || plan.expression_tree->kind != ExecutionExpressionIRKind::REFERENCE ||
+	    plan.return_type != plan.expression_tree->return_type) {
+		return false;
+	}
+	const auto source_slot = plan.expression_tree->ref_index;
+	auto &source_indices =
+	    expression.input_source_indices.empty() ? plan.expression_tree_source_indices : expression.input_source_indices;
+	if (source_slot >= source_indices.size()) {
+		return false;
+	}
+	input_index = source_indices[source_slot];
+	return true;
+}
+
 static bool SljitAddProjectionSourceColumn(idx_t source_index, idx_t input_column_count, vector<uint8_t> &referenced) {
 	if (source_index >= input_column_count) {
 		return false;

@@ -613,6 +613,9 @@ public:
 	idx_t proven_unique_local_count;
 	//! Conservative key intervals. Disjoint intervals are globally unique and need no finalize rehash.
 	vector<GroupedAggregateProvenUniqueRange> proven_unique_ranges;
+	//! Append-only local collections retained without speculative radix repartitioning. Finalize publishes these
+	//! directly when the global range proof succeeds and repartitions them only when it fails.
+	vector<unique_ptr<PartitionedTupleData>> deferred_proven_unique_data;
 
 	//! The radix HT
 	const RadixPartitionedHashTable &radix_ht;
@@ -851,8 +854,8 @@ public:
 	bool registered;
 	//! Sink capacity for this thread
 	idx_t local_sink_capacity;
-	//! Avoid checking the full allocation footprint for every small vector while still enforcing the budget during large
-	//! accelerated batches.
+	//! Avoid checking the full allocation footprint for every small vector while still enforcing the budget during
+	//! large accelerated batches.
 	idx_t next_memory_check_count;
 
 	//! Data that is abandoned ends up here (only if we're doing external aggregation)
@@ -920,6 +923,7 @@ void RadixPartitionedHashTable::ResetGlobalSinkState(ClientContext &context, Glo
 	gstate.requires_final_combine = false;
 	gstate.proven_unique_local_count = 0;
 	gstate.proven_unique_ranges.clear();
+	gstate.deferred_proven_unique_data.clear();
 	gstate.config.Reset();
 	gstate.uncombined_data.reset();
 	gstate.stored_allocators.clear();
@@ -1164,7 +1168,9 @@ static void FinishRadixHTSinkState(ClientContext &context, RadixHTGlobalSinkStat
 		lstate.next_memory_check_count = ht.Count() + STANDARD_VECTOR_SIZE * 32;
 	}
 	const bool memory_limit_exceeded = memory_check_due && RadixHTMemoryLimitExceeded(gstate, ht);
-	if (!memory_limit_exceeded && ht.Count() + STANDARD_VECTOR_SIZE < resize_threshold) {
+	const bool pointer_capacity_exhausted =
+	    !ht.LookupsSkipped() && ht.Count() + STANDARD_VECTOR_SIZE >= resize_threshold;
+	if (!memory_limit_exceeded && !pointer_capacity_exhausted) {
 		return; // We can fit another chunk
 	}
 
@@ -1829,15 +1835,21 @@ void RadixPartitionedHashTable::Combine(ExecutionContext &context, GlobalSinkSta
 		gstate.requires_final_combine = true;
 	}
 	const auto proven_unique_ranges = ht.GetProvenUniqueAppendRanges();
-	auto lstate_data = ht.AcquirePartitionedData(row_location_remap);
-	if (lstate.abandoned_data) {
-		D_ASSERT(gstate.external);
-		D_ASSERT(lstate.abandoned_data->PartitionCount() == lstate.ht->GetPartitionedData().PartitionCount());
-		D_ASSERT(lstate.abandoned_data->PartitionCount() ==
-		         RadixPartitioning::NumberOfPartitions(gstate.config.GetRadixBits()));
-		lstate.abandoned_data->Combine(*lstate_data);
-	} else {
-		lstate.abandoned_data = std::move(lstate_data);
+	unique_ptr<PartitionedTupleData> deferred_proven_unique_data;
+	if (proven_unique_ranges && !lstate.abandoned_data) {
+		deferred_proven_unique_data = ht.TryAcquireProvenUniqueAppendData(row_location_remap);
+	}
+	if (!deferred_proven_unique_data) {
+		auto lstate_data = ht.AcquirePartitionedData(row_location_remap);
+		if (lstate.abandoned_data) {
+			D_ASSERT(gstate.external);
+			D_ASSERT(lstate.abandoned_data->PartitionCount() == lstate.ht->GetPartitionedData().PartitionCount());
+			D_ASSERT(lstate.abandoned_data->PartitionCount() ==
+			         RadixPartitioning::NumberOfPartitions(gstate.config.GetRadixBits()));
+			lstate.abandoned_data->Combine(*lstate_data);
+		} else {
+			lstate.abandoned_data = std::move(lstate_data);
+		}
 	}
 
 	auto aggregate_allocator = ht.GetAggregateAllocator();
@@ -1849,7 +1861,9 @@ void RadixPartitionedHashTable::Combine(ExecutionContext &context, GlobalSinkSta
 		                                   proven_unique_ranges->end());
 		gstate.proven_unique_local_count++;
 	}
-	if (gstate.uncombined_data) {
+	if (deferred_proven_unique_data) {
+		gstate.deferred_proven_unique_data.emplace_back(std::move(deferred_proven_unique_data));
+	} else if (gstate.uncombined_data) {
 		gstate.uncombined_data->Combine(*lstate.abandoned_data);
 	} else {
 		gstate.uncombined_data = std::move(lstate.abandoned_data);
@@ -1923,9 +1937,11 @@ void RadixPartitionedHashTable::Finalize(ClientContext &context, GlobalSinkState
 	D_ASSERT(!gstate.finalized);
 	gstate.combine_state_remap = state_remap;
 
-	if (gstate.uncombined_data) {
-		auto &uncombined_data = *gstate.uncombined_data;
-		gstate.count_before_combining = uncombined_data.Count();
+	if (gstate.uncombined_data || !gstate.deferred_proven_unique_data.empty()) {
+		gstate.count_before_combining = gstate.uncombined_data ? gstate.uncombined_data->Count() : 0;
+		for (const auto &data : gstate.deferred_proven_unique_data) {
+			gstate.count_before_combining += data->Count();
+		}
 
 		// If true there is no need to combine, it was all done by a single thread in a single HT.
 		// This is the case when only one thread contributed data and the HT never overflowed its
@@ -1943,11 +1959,21 @@ void RadixPartitionedHashTable::Finalize(ClientContext &context, GlobalSinkState
 		                           : disjoint_proven_ranges ? RadixHTFinalizeStrategy::DISJOINT_PROVEN_RANGES
 		                                                    : RadixHTFinalizeStrategy::REHASH;
 
-		auto &uncombined_partition_data = uncombined_data.GetPartitions();
-		const auto n_partitions = uncombined_partition_data.size();
-		gstate.partitions.reserve(n_partitions);
-		for (idx_t i = 0; i < n_partitions; i++) {
-			auto &partition = uncombined_partition_data[i];
+		if (!already_combined && !gstate.deferred_proven_unique_data.empty()) {
+			if (!gstate.uncombined_data) {
+				gstate.uncombined_data = make_uniq<RadixPartitionedTupleData>(
+				    BufferManager::GetBufferManager(context), GetLayoutPtr(), MemoryTag::HASH_TABLE,
+				    gstate.config.GetRadixBits(), GetLayout().ColumnCount() - 1);
+			}
+			for (auto &data : gstate.deferred_proven_unique_data) {
+				data->Repartition(context, *gstate.uncombined_data, state_remap);
+			}
+			gstate.deferred_proven_unique_data.clear();
+		}
+
+		const auto uncombined_partition_count = gstate.uncombined_data ? gstate.uncombined_data->PartitionCount() : 0;
+		gstate.partitions.reserve(uncombined_partition_count + gstate.deferred_proven_unique_data.size());
+		auto publish_partition = [&](unique_ptr<TupleDataCollection> partition) {
 			auto partition_size =
 			    partition->SizeInBytes() +
 			    GroupedAggregateHashTable::GetCapacityForCount(partition->Count()) * sizeof(ht_entry_t);
@@ -1959,7 +1985,18 @@ void RadixPartitionedHashTable::Finalize(ClientContext &context, GlobalSinkState
 				gstate.partitions.back()->progress = 1;
 				gstate.partitions.back()->state = AggregatePartitionState::READY_TO_SCAN;
 			}
+		};
+		if (gstate.uncombined_data) {
+			auto &uncombined_partition_data = gstate.uncombined_data->GetPartitions();
+			for (auto &partition : uncombined_partition_data) {
+				publish_partition(std::move(partition));
+			}
 		}
+		for (auto &data : gstate.deferred_proven_unique_data) {
+			D_ASSERT(data->PartitionCount() == 1);
+			publish_partition(data->GetUnpartitioned());
+		}
+		gstate.deferred_proven_unique_data.clear();
 	} else {
 		gstate.count_before_combining = 0;
 		gstate.finalize_strategy = RadixHTFinalizeStrategy::EMPTY;

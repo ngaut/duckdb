@@ -26,13 +26,8 @@ struct SljitSelectedHashJoinFilterCache {
 	unique_ptr<SljitExecutableRegionOp> mapped_filter;
 };
 
-static bool SljitGeneratedFilterExpressionHasSelector(const SljitExecutableRegionExpression &expression) {
-	return expression.HasSelectionKernel();
-}
-
 static bool SljitCanBindGeneratedFilterPrimitive(const vector<SljitExecutableRegionOp> &ops, idx_t filter_idx) {
-	return filter_idx < ops.size() && ops[filter_idx].kind == SljitNativeRegionOpKind::FILTER &&
-	       ops[filter_idx].filter && SljitGeneratedFilterExpressionHasSelector(ops[filter_idx].filter->expression);
+	return filter_idx < ops.size() && ops[filter_idx].kind == SljitNativeRegionOpKind::FILTER && ops[filter_idx].filter;
 }
 
 static SljitGeneratedFilterPrimitive SljitBindGeneratedFilterPrimitive(const vector<SljitExecutableRegionOp> &ops,
@@ -55,6 +50,7 @@ static bool SljitExecuteGeneratedFilterPrimitive(ExecutionRegionRuntime &runtime
 	}
 
 	auto &filter_op = ops[primitive.filter_idx];
+	D_ASSERT(filter_op.filter && filter_op.filter->expression.HasSelectionKernel());
 	auto &filter_selection = scratch.FilterSelection(primitive.filter_idx);
 	auto filter_stage_start = SljitRegionStageStart(runtime);
 	auto selected_count =

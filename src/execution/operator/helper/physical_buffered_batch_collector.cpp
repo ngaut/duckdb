@@ -25,7 +25,8 @@ public:
 BufferedBatchCollectorLocalState::BufferedBatchCollectorLocalState() {
 }
 
-ExecutionContract PhysicalBufferedBatchCollector::GetExecutionContract() const {
+ExecutionContract PhysicalBufferedBatchCollector::GetExecutionContract(ExecutionRegionOperatorSlot slot,
+                                                                       bool render_diagnostics) const {
 	return BuildExecutionResultCollectorSinkContract();
 }
 

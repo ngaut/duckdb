@@ -1915,13 +1915,6 @@ static bool CanGatherRHSColumnFlat(const LogicalType &type) {
 	}
 }
 
-static bool CanExposeRHSColumnSource(const LogicalType &type) {
-	if (CanGatherRHSColumnFlat(type)) {
-		return true;
-	}
-	return type.InternalType() == PhysicalType::VARCHAR;
-}
-
 template <class T>
 static void GatherRHSFixedColumnFromRows(Vector &row_ptrs, const SelectionVector &ptr_sel, idx_t count,
                                          idx_t layout_offset, Vector &result) {
@@ -2030,10 +2023,6 @@ bool JoinHashTable::TryGetRHSFixedColumnSource(idx_t rhs_output_idx,
 		source.blocker = "hash-join-rhs-output-index-out-of-range";
 		return false;
 	}
-	if (use_dict_emission) {
-		source.blocker = "hash-join-rhs-source-dictionary-emission";
-		return false;
-	}
 	if (!layout_ptr) {
 		source.blocker = "hash-join-rhs-source-missing-layout";
 		return false;
@@ -2046,18 +2035,39 @@ bool JoinHashTable::TryGetRHSFixedColumnSource(idx_t rhs_output_idx,
 		return false;
 	}
 	const auto &type = layout_types[output_col_idx];
-	if (!CanExposeRHSColumnSource(type)) {
+	if (!ExecutionHashJoinRHSFixedColumnTypeSupported(type)) {
 		source.blocker = "hash-join-rhs-source-unsupported-type";
 		return false;
 	}
-	source.ready = true;
 	source.type = type;
 	source.physical_type = type.InternalType();
 	source.rhs_output_idx = rhs_output_idx;
 	source.layout_column_idx = output_col_idx;
 	source.layout_column_count = layout_ptr->ColumnCount();
+	if (use_dict_emission) {
+		if (rhs_output_idx >= dict_arrays.size() || !dict_arrays[rhs_output_idx]) {
+			source.blocker = "hash-join-rhs-source-dictionary-missing";
+			return false;
+		}
+		auto &dictionary = dict_arrays[rhs_output_idx]->data;
+		if (dictionary.GetVectorType() != VectorType::FLAT_VECTOR || dictionary.GetType() != type) {
+			source.blocker = "hash-join-rhs-source-dictionary-shape";
+			return false;
+		}
+		auto &validity = FlatVector::Validity(dictionary);
+		source.storage_kind = ExecutionHashJoinRHSFixedColumnStorageKind::DICTIONARY;
+		source.dictionary_index_offset = pointer_offset;
+		source.dictionary_data = FlatVector::GetData(dictionary);
+		source.dictionary_validity = validity.CannotHaveNull() ? nullptr : validity.GetData();
+		source.dictionary_count = dictionary.size();
+		source.all_valid = validity.CannotHaveNull();
+		source.ready = true;
+		return true;
+	}
+	source.storage_kind = ExecutionHashJoinRHSFixedColumnStorageKind::ROW;
 	source.layout_offset = layout_offsets[output_col_idx];
 	source.all_valid = layout_ptr->CannotHaveNull();
+	source.ready = true;
 	return true;
 }
 

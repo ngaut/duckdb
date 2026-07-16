@@ -8,6 +8,7 @@
 
 #include "sljit_native_util.hpp"
 #include "sljit_codegen_util.hpp"
+#include "sljit_full_pipeline_recipe_state.hpp"
 #include "sljit_region_executable.hpp"
 #include "sljit_region_plan.hpp"
 #include "sljit_region_runtime.hpp"
@@ -19,7 +20,7 @@
 
 namespace duckdb {
 
-static int64_t SljitRegionElapsedMicros(std::chrono::steady_clock::time_point start) {
+static int64_t SljitCompileElapsedMicros(std::chrono::steady_clock::time_point start) {
 	auto end = std::chrono::steady_clock::now();
 	return std::chrono::duration_cast<std::chrono::microseconds>(end - start).count();
 }
@@ -67,17 +68,18 @@ ExecutionRegionCompileResult CompileSljitRegion(const string &backend_name,
 		}
 		ExecutionRegionCompileTimings timings;
 		SljitExecutableRegion executable_region;
+		SljitFullPipelineRecipePlan recipe_plan;
 		auto executable_build_start = std::chrono::steady_clock::now();
 		{
 			SljitCodegenTimingScope codegen_timing_scope(&timings);
-			if (!BuildSljitExecutableRegion(*native_region, executable_region, error)) {
-				timings.executable_build_time_us = SljitRegionElapsedMicros(executable_build_start);
+			if (!BuildSljitExecutableRegion(*native_region, executable_region, recipe_plan, error)) {
+				timings.executable_build_time_us = SljitCompileElapsedMicros(executable_build_start);
 				auto result = ExecutionRegionCompileResult::Error(std::move(error));
 				result.timings = timings;
 				return result;
 			}
 		}
-		timings.executable_build_time_us = SljitRegionElapsedMicros(executable_build_start);
+		timings.executable_build_time_us = SljitCompileElapsedMicros(executable_build_start);
 		if (executable_region.ops.empty()) {
 			throw InternalException(
 			    "SLJIT compiled region reached code generation without executable region operators");
@@ -91,9 +93,9 @@ ExecutionRegionCompileResult CompileSljitRegion(const string &backend_name,
 			reason += ";verify:region";
 		}
 		auto kernel_build_start = std::chrono::steady_clock::now();
-		auto kernel =
-		    CreateSljitNativeRegionKernel(input.context, backend_name, std::move(executable_region), contract.abi);
-		timings.kernel_build_time_us = SljitRegionElapsedMicros(kernel_build_start);
+		auto kernel = CreateSljitNativeRegionKernel(input.context, backend_name, std::move(executable_region),
+		                                            std::move(recipe_plan), contract.abi);
+		timings.kernel_build_time_us = SljitCompileElapsedMicros(kernel_build_start);
 		auto result = ExecutionRegionCompileResult::Compiled(std::move(kernel), execution_mode, std::move(reason),
 		                                                     MaybeDumpIr(input.context, std::move(ir)));
 		result.timings = timings;

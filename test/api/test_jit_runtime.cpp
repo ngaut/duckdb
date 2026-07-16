@@ -74,10 +74,9 @@ TEST_CASE("Execution region events are bounded and counters are cumulative", "[a
 
 	auto counter_count_before = TotalExecutionRegionCounterCount(manager.GetCounters());
 	ClearJitTrace(manager);
-	REQUIRE_NO_FAIL(con.Query("SELECT i + 1 AS j FROM jit_event_bound_input WHERE i > 500"));
-	REQUIRE_NO_FAIL(con.Query("SELECT i + 1 AS j FROM jit_event_bound_input WHERE i > 500"));
-	REQUIRE_NO_FAIL(con.Query("SELECT i + 1 AS j FROM jit_event_bound_input WHERE i > 500"));
-	REQUIRE_NO_FAIL(con.Query("SELECT i + 1 AS j FROM jit_event_bound_input WHERE i > 500"));
+	for (idx_t query_idx = 0; query_idx < 4; query_idx++) {
+		REQUIRE_NO_FAIL(con.Query("SELECT i + 1 AS j FROM jit_event_bound_input WHERE i > 500"));
+	}
 
 	auto events = manager.GetEvents();
 	REQUIRE(events.size() == 3);
@@ -230,7 +229,7 @@ TEST_CASE("JIT blocked append sink transfers retry ownership to the core executo
 	LoadSljit(con);
 	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_blocked_append_sink AS "
 	                          "SELECT i::BIGINT AS i FROM range(160000) tbl(i)"));
-	ConfigureSljitForCoverageSettings(con, true, true, true);
+	ConfigureSljitForCoverageSettings(con, true, true, true, 10000, 4);
 	REQUIRE_NO_FAIL(con.Query("SET streaming_buffer_size='16KB'"));
 
 	ClearJitTrace(manager);

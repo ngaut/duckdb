@@ -339,7 +339,10 @@ GENERIC_WORKLOADS = (
             "GROUP BY group_flag, group_status ORDER BY group_flag, group_status"
         ),
         "minimum_auto_speedup": 1.12,
-        "minimum_auto_speedup_by_threads": {1: 1.22, 4: 1.17},
+        # Independent ten-pair promotion after separating payload and group vector-shape facts measured 1.498x at T1
+        # and 1.381x at T4. Preserve the speedup with roughly 6% margin and raw JIT-auto runtime with 10% margin.
+        "minimum_auto_speedup_by_threads": {1: 1.40, 4: 1.30},
+        "maximum_auto_median_us_by_threads": {1: 56500, 4: 18000},
         "max_auto_slowdown": 1.05,
         "requires_compiled_auto": True,
     },
@@ -357,7 +360,8 @@ GENERIC_WORKLOADS = (
             "GROUP BY group_flag, group_status ORDER BY group_flag, group_status"
         ),
         "minimum_auto_speedup": 1.00,
-        "minimum_auto_speedup_by_threads": {1: 1.31, 4: 1.25},
+        "minimum_auto_speedup_by_threads": {1: 1.40, 4: 1.28},
+        "maximum_auto_median_us_by_threads": {1: 55000, 4: 17500},
         "max_auto_slowdown": 1.05,
         "requires_compiled_auto": True,
     },
@@ -377,7 +381,8 @@ GENERIC_WORKLOADS = (
             "GROUP BY group_flag, group_status ORDER BY group_flag, group_status"
         ),
         "minimum_auto_speedup": 1.00,
-        "minimum_auto_speedup_by_threads": {1: 1.25, 4: 1.20},
+        "minimum_auto_speedup_by_threads": {1: 1.38, 4: 1.23},
+        "maximum_auto_median_us_by_threads": {1: 52000, 4: 17250},
         "max_auto_slowdown": 1.05,
         "requires_compiled_auto": True,
     },
@@ -435,12 +440,10 @@ GENERIC_WORKLOADS = (
         # budget. Coalescing remains a proof representation change, not a reason to
         # rehash a locally monotonic stream during finalization.
         "minimum_auto_speedup": 0.0,
-        # Ten alternating production runs prove 2.676x at T1 after the identity-address
-        # materialization root fix and 1.134x at T4 in its independent promotion. A
-        # later ten-repeat qualification kept the JIT median stable at 41.026 ms while
-        # the vectorized median moved to 97.928 ms, yielding 2.387x. The floors preserve
-        # the generated path while leaving bounded acquisition margin.
-        "minimum_auto_speedup_by_threads": {1: 2.35, 4: 1.08},
+        # Direct compact-range publication and proof-owned fallback handoff measured
+        # 2.838x at T1 (39.474 ms) and 1.144x at T4 (26.604 ms) over ten alternating
+        # production pairs. Ratchet both floors while retaining scheduler margin.
+        "minimum_auto_speedup_by_threads": {1: 2.60, 4: 1.10},
         "max_auto_slowdown": 1.05,
         "requires_compiled_auto": True,
     },
@@ -473,9 +476,14 @@ GENERIC_WORKLOADS = (
         # Wide affine reductions share one source run and expand directly into
         # final aggregate states. Canonical machine-word batches classify once
         # and use a raw-pointer progression writer, while wide values retain the
-        # exact general path. Code size stays bounded independently of lane count.
+        # exact general path. Append-only ownership also removes pointer-table
+        # resize and capacity-abandon work after exact uniqueness proof. Direct
+        # proof-owned finalization measured 2.959x at T1 (174.550 ms) and 3.032x at
+        # T4 (56.804 ms) over ten alternating production pairs. Preserve the existing
+        # tight T1 raw ceiling and ratchet the speedup and T4 runtime contracts.
         "minimum_auto_speedup": 0.0,
-        "minimum_auto_speedup_by_threads": {1: 2.60, 4: 2.22},
+        "minimum_auto_speedup_by_threads": {1: 2.80, 4: 2.75},
+        "maximum_auto_median_us_by_threads": {1: 175000, 4: 65000},
         "max_auto_slowdown": 1.05,
         "requires_compiled_auto": True,
     },
@@ -526,13 +534,27 @@ GENERIC_WORKLOADS = (
             "      JOIN __jit_generic_exact_filter filter USING (filter_key)) selected "
             "USING (join_key)"
         ),
-        "minimum_auto_speedup": 1.08,
-        # The adaptive exact prefix-range filter, unsigned AUTO codec choice,
-        # and sparse FOR selection preserve 1.338x over ten alternating T1
-        # pairs. Keep margin for scan variance while rejecting the old path.
-        "minimum_auto_speedup_by_threads": {1: 1.25},
+        "minimum_auto_speedup": 1.10,
+        # The outer regular probe now reduces dictionary-backed RHS values
+        # directly into the ungrouped aggregate state: no match selection, RHS
+        # gather, projection, or payload vector is published. The finalized filter
+        # view is bound once and contains no owning materialization state.
+        # Slot-directed execution contracts avoid constructing unused source,
+        # operator, and sink descriptors during CBO and graph lowering. The
+        # once-bound scan plan removes per-vector layout and fusion rebinding.
+        # Ten-pair promotion after one-time recipe publication measured 1.398x
+        # paired at T1 (9.746 ms). Four T4 promotions measured 1.108x, 1.102x,
+        # 1.099x, and 1.104x paired while raw JIT medians improved through 5.649,
+        # 5.618, 5.553, and 5.502 ms. Protect the stable paired margin and ratchet
+        # the independent raw ceiling from 6.000 ms to 5.750 ms.
+        "minimum_auto_speedup_by_threads": {1: 1.35, 4: 1.09},
+        "maximum_auto_median_us_by_threads": {1: 10500, 4: 5750},
         "max_auto_slowdown": 1.05,
         "requires_compiled_auto": True,
+        "required_runtime_paths": (
+            "hash_join_probe.regular_probe.all_valid.flat.single_key.no_chain." "direct_ungrouped_aggregate_consumer=",
+            "aggregate_update.join_output_probe_consumer_ungrouped_aggregate.dictionary_source=",
+        ),
     },
     {
         "name": "join_string_complementary_grouped_sum",
@@ -611,7 +633,7 @@ SUMMARY_FIELDS = (
     "performance_checks",
     "run_count",
     "median_s",
-    "speedup_vs_off_median",
+    "paired_speedup_median",
     "correctness_diff",
     "compiled_regions",
     "runtime_regions",
@@ -666,6 +688,17 @@ def make_args(args: argparse.Namespace) -> SimpleNamespace:
 
 def median_us(values: list[int]) -> int:
     return int(round(statistics.median(values))) if values else 0
+
+
+def median_paired_speedup(off_rows: list[dict], auto_rows: list[dict]) -> float:
+    off_by_repeat = {row_int(row, "repeat"): row_int(row, "query_time_us") for row in off_rows}
+    auto_by_repeat = {row_int(row, "repeat"): row_int(row, "query_time_us") for row in auto_rows}
+    ratios = [
+        float(off_time) / auto_by_repeat[repeat]
+        for repeat, off_time in off_by_repeat.items()
+        if off_time > 0 and auto_by_repeat.get(repeat, 0) > 0
+    ]
+    return statistics.median(ratios) if ratios else 0.0
 
 
 def policy_order(repeat: int) -> tuple[str, str]:
@@ -782,6 +815,7 @@ def summarize(rows: list[dict], workloads: tuple[dict, ...], threads: int, trace
     result = []
     for workload in workloads:
         name = workload["name"]
+        paired_speedup = median_paired_speedup(grouped[(name, "off")], grouped[(name, "auto")])
         for policy in ("off", "auto"):
             workload_rows = grouped[(name, policy)]
             timing = median_us([row_int(row, "query_time_us") for row in workload_rows])
@@ -794,7 +828,7 @@ def summarize(rows: list[dict], workloads: tuple[dict, ...], threads: int, trace
                     "performance_checks": not trace_runtime,
                     "run_count": len(workload_rows),
                     "median_s": f"{timing / 1_000_000.0:.9f}",
-                    "speedup_vs_off_median": f"{(float(off) / timing) if off and timing else 0.0:.6f}",
+                    "paired_speedup_median": f"{paired_speedup if policy == 'auto' else 1.0:.6f}",
                     "correctness_diff": sum(row_int(row, "correctness_diff") for row in workload_rows),
                     "compiled_regions": sum(row_int(row, "compiled_regions") for row in workload_rows),
                     "runtime_regions": sum(row_int(row, "runtime_regions") for row in workload_rows),
@@ -826,7 +860,7 @@ def verification_failures(
         if int(auto["compile_errors"]) != 0:
             failures.append(f"{name}: JIT compile errors")
         if not trace_runtime:
-            speedup = float(auto["speedup_vs_off_median"])
+            speedup = float(auto["paired_speedup_median"])
             minimum_speedup = minimum_auto_speedup(workload, threads)
             if speedup < minimum_speedup:
                 failures.append(f"{name}: auto speedup {speedup:.3f} below required {minimum_speedup:.3f}")

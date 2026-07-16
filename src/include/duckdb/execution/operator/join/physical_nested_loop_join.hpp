@@ -33,7 +33,7 @@ public:
 		return true;
 	}
 
-	ExecutionContract GetExecutionContract() const override;
+	ExecutionContract GetExecutionContract(ExecutionRegionOperatorSlot slot, bool render_diagnostics) const override;
 	ExecutionOperatorReadiness
 	GetExecutionOperatorReadiness(ClientContext &context,
 	                              const ExecutionRegionOperatorInfo &operator_info) const override;

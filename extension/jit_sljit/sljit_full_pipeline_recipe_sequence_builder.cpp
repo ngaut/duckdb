@@ -27,9 +27,11 @@ bool SljitFullPipelineRecipeSequenceBuilder::CanMakeNativeTailRecipe(idx_t tail_
 	return SljitNativeTailCanConsumeTail(ops, tail_start_idx);
 }
 
-SljitFullPipelineRecipe
-SljitFullPipelineRecipeSequenceBuilder::MakePrimitiveSequence(SljitFullPipelinePrimitiveSequence sequence) const {
-	return SljitMakeFullPipelinePrimitiveRecipe(uses_extended_source_fetch_budget, std::move(sequence));
+SljitFullPipelineRecipe SljitFullPipelineRecipeSequenceBuilder::MakePrimitiveSequence(
+    SljitFullPipelinePrimitiveSequence sequence,
+    SljitHashJoinDirectAggregateConsumerContract direct_aggregate_consumer) const {
+	return SljitMakeFullPipelinePrimitiveRecipe(uses_extended_source_fetch_budget, std::move(sequence),
+	                                            direct_aggregate_consumer);
 }
 
 SljitFullPipelinePrimitiveSequence SljitFullPipelineRecipeSequenceBuilder::MakeSourceSequence() const {
@@ -38,14 +40,15 @@ SljitFullPipelinePrimitiveSequence SljitFullPipelineRecipeSequenceBuilder::MakeS
 	return sequence;
 }
 
-SljitFullPipelinePrimitiveStep SljitFullPipelineRecipeSequenceBuilder::MakeProjectionChainStep(
-    idx_t projection_idx) const {
+SljitFullPipelinePrimitiveStep
+SljitFullPipelineRecipeSequenceBuilder::MakeProjectionChainStep(idx_t projection_idx) const {
 	auto projection = SljitBindProjectionChainPrimitive(ops, projection_idx);
 	return SljitFullPipelinePrimitiveStep::ProjectionChain(projection);
 }
 
-SljitFullPipelinePrimitiveStep SljitFullPipelineRecipeSequenceBuilder::MakeProjectionChainStep(
-    idx_t first_projection_idx, idx_t final_projection_idx) const {
+SljitFullPipelinePrimitiveStep
+SljitFullPipelineRecipeSequenceBuilder::MakeProjectionChainStep(idx_t first_projection_idx,
+                                                                idx_t final_projection_idx) const {
 	auto projection = SljitBindProjectionChainPrimitive(ops, first_projection_idx, final_projection_idx);
 	return SljitFullPipelinePrimitiveStep::ProjectionChain(projection);
 }
@@ -61,8 +64,9 @@ void SljitFullPipelineRecipeSequenceBuilder::AddProjectionChainStep(SljitFullPip
 	sequence.Add(MakeProjectionChainStep(first_projection_idx, final_projection_idx));
 }
 
-SljitFullPipelineRecipe SljitFullPipelineRecipeSequenceBuilder::MakeNativeTailRecipe(
-    SljitFullPipelinePrimitiveSequence sequence, idx_t tail_start_idx) const {
+SljitFullPipelineRecipe
+SljitFullPipelineRecipeSequenceBuilder::MakeNativeTailRecipe(SljitFullPipelinePrimitiveSequence sequence,
+                                                             idx_t tail_start_idx) const {
 	if (tail_start_idx >= ops.size()) {
 		throw InternalException("SLJIT native-tail recipe has an invalid tail start operator");
 	}
@@ -73,8 +77,8 @@ SljitFullPipelineRecipe SljitFullPipelineRecipeSequenceBuilder::MakeNativeTailRe
 	return MakePrimitiveSequence(std::move(sequence));
 }
 
-SljitFullPipelinePrimitiveStep SljitFullPipelineRecipeSequenceBuilder::MakeHashJoinProbeMaterializeStep(
-    idx_t hash_join_idx) const {
+SljitFullPipelinePrimitiveStep
+SljitFullPipelineRecipeSequenceBuilder::MakeHashJoinProbeMaterializeStep(idx_t hash_join_idx) const {
 	const auto source_key0_int64_to_int32_unchecked =
 	    hash_join_idx == 0 &&
 	    SljitHashJoinSourceKey0RangeFitsInt32(ops, hash_join_idx, source_min_values, source_max_values);
@@ -83,8 +87,8 @@ SljitFullPipelinePrimitiveStep SljitFullPipelineRecipeSequenceBuilder::MakeHashJ
 	return SljitFullPipelinePrimitiveStep::HashJoinProbeMaterialize(primitive);
 }
 
-SljitFullPipelinePrimitiveStep SljitFullPipelineRecipeSequenceBuilder::MakeHashJoinProbeSelectionStep(
-    idx_t hash_join_idx) const {
+SljitFullPipelinePrimitiveStep
+SljitFullPipelineRecipeSequenceBuilder::MakeHashJoinProbeSelectionStep(idx_t hash_join_idx) const {
 	const auto source_key0_int64_to_int32_unchecked =
 	    hash_join_idx == 0 &&
 	    SljitHashJoinSourceKey0RangeFitsInt32(ops, hash_join_idx, source_min_values, source_max_values);
@@ -92,8 +96,8 @@ SljitFullPipelinePrimitiveStep SljitFullPipelineRecipeSequenceBuilder::MakeHashJ
 	return SljitFullPipelinePrimitiveStep::HashJoinProbeSelection(primitive);
 }
 
-SljitFullPipelinePrimitiveStep SljitFullPipelineRecipeSequenceBuilder::MakeHashJoinProbeProjectionInputStep(
-    idx_t hash_join_idx) const {
+SljitFullPipelinePrimitiveStep
+SljitFullPipelineRecipeSequenceBuilder::MakeHashJoinProbeProjectionInputStep(idx_t hash_join_idx) const {
 	if (SljitCanBindHashJoinProbeSelectionPrimitive(ops, hash_join_idx)) {
 		return MakeHashJoinProbeSelectionStep(hash_join_idx);
 	}

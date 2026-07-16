@@ -8,7 +8,7 @@
 
 #pragma once
 
-#include "sljit_full_pipeline_recipe.hpp"
+#include "sljit_full_pipeline_recipe_state.hpp"
 #include "sljit_hash_join_probe_drain_runtime.hpp"
 #include "sljit_native_pipeline_runtime.hpp"
 #include "sljit_source_pipeline_runtime.hpp"
@@ -33,13 +33,16 @@ public:
 	}
 
 	bool TryExecute() {
-		if (recipe_plan.has_recipe) {
+		switch (recipe_plan.Kind()) {
+		case SljitFullPipelineRecipePlanKind::PRIMITIVE_RECIPE:
 			return TryExecutePrimitiveSequenceBatched();
+		case SljitFullPipelineRecipePlanKind::NATIVE_ONLY:
+			runtime.RecordJitRuntimePath(recipe_plan.NativeOnlyRuntimePath().c_str());
+			return TryExecuteNativeOnly();
+		case SljitFullPipelineRecipePlanKind::INVALID:
+			throw InternalException("SLJIT full-pipeline runtime received an invalid recipe plan");
 		}
-		if (!recipe_plan.native_only_runtime_path.empty()) {
-			runtime.RecordJitRuntimePath(recipe_plan.native_only_runtime_path.c_str());
-		}
-		return TryExecuteNativeOnly();
+		throw InternalException("Unknown SLJIT full-pipeline recipe plan kind");
 	}
 
 private:
@@ -64,7 +67,7 @@ private:
 		auto execute_native_full_pipeline_from = NativeTailPipelineExecutor();
 		auto execute_hash_join_probe = RecordedHashJoinProbeExecutor();
 		return SljitTryExecuteFullPipelinePrimitiveSequenceBatched(
-		    runtime, result, ops, recipe_plan.recipe, execute_native_full_pipeline_from, execute_hash_join_probe,
+		    runtime, result, ops, recipe_plan.Recipe(), execute_native_full_pipeline_from, execute_hash_join_probe,
 		    source_distinct_counts, source_min_values, source_max_values, scratch, terminal_state);
 	}
 

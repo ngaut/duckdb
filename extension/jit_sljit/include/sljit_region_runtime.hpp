@@ -15,9 +15,11 @@
 namespace duckdb {
 
 class ClientContext;
+struct SljitFullPipelineRecipePlan;
 
 unique_ptr<ExecutionRegionKernel> CreateSljitNativeRegionKernel(ClientContext &context, string backend_name,
                                                                 SljitExecutableRegion &&region,
+                                                                SljitFullPipelineRecipePlan recipe_plan,
                                                                 ExecutionRegionABI abi);
 
 } // namespace duckdb

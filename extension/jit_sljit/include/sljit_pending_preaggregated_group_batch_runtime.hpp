@@ -613,7 +613,7 @@ static bool SljitFlushPendingDenseSingleLaneGroupsTemplated(ExecutionRegionRunti
 		FinishFlatPreaggregatedGroupTarget(groups, group_count);
 		if (!TryExecutePreaggregatedGroupedPrimitiveAggregateUpdateBatches(
 		        runtime, scratch, op_idx, op, groups, preaggregate_scratch, lanes, grouped_state, represented_row_count,
-		        true, deferred_grouped_finish)) {
+		        false, true, deferred_grouped_finish)) {
 			throw InternalException("Validated SLJIT pending dense single-lane grouped update failed");
 		}
 		flushed_row_count += represented_row_count;
@@ -688,10 +688,12 @@ static bool SljitFlushPendingPreaggregatedPrimitiveGroups(ExecutionRegionRuntime
 		return false;
 	}
 	SljitUpdateProvenUniqueAppendContract(runtime, op, pending, *published_groups, grouped_state);
-	SljitTryReserveGroupedAggregateGroups(runtime, op_idx, op, grouped_state, pending.Count());
+	if (!pending.proven_unique_append_active) {
+		SljitTryReserveGroupedAggregateGroups(runtime, op_idx, op, grouped_state, pending.Count());
+	}
 	if (!TryExecutePreaggregatedGroupedPrimitiveAggregateUpdateBatches(
 	        runtime, scratch, op_idx, op, *published_groups, pending.scratch, pending.lanes, grouped_state,
-	        pending.represented_row_count, true, deferred_grouped_finish)) {
+	        pending.represented_row_count, false, true, deferred_grouped_finish)) {
 		return false;
 	}
 	if (pending.HasGroupOutputTransform()) {

@@ -205,10 +205,16 @@ static void SljitExecuteFusedPerfectHashGroupedPrimitiveAggregatePayloadUpdate(
 	const auto source_common_sel = uses_combined_payload_sources && !native_execute_sel
 	                                   ? payload_sources.CanonicalizeCommonSourceSelection()
 	                                   : nullptr;
-	const bool flat_no_selection = payload_sources.FlatNoSelection(native_execute_sel, source_common_sel) &&
-	                               group_sources.FlatNoSelection(native_execute_sel, source_common_sel);
-	const bool all_valid = payload_sources.AllValid() && group_sources.AllValid();
-	const bool flat_all_valid = flat_no_selection && all_valid;
+	// Payload expressions and group keys can expose different physical vector shapes. In particular, numeric payload
+	// columns can be flat while compressed string group keys retain dictionary selections. Keep those facts
+	// independent: expression lowering only consumes payload facts, group lookup only consumes group facts, and legacy
+	// loops consume their explicit conjunction.
+	const bool payload_flat_no_selection = payload_sources.FlatNoSelection(native_execute_sel, source_common_sel);
+	const bool payload_all_valid = payload_sources.AllValid();
+	const bool payload_flat_all_valid = payload_flat_no_selection && payload_all_valid;
+	const bool group_flat_no_selection = group_sources.FlatNoSelection(native_execute_sel);
+	const bool group_all_valid = group_sources.AllValid();
+	const bool group_flat_all_valid = group_flat_no_selection && group_all_valid;
 	const auto group_selection_all_present = group_sources.AllSelectionsPresent();
 
 	SljitNativeVectorInput native_input;
@@ -227,9 +233,13 @@ static void SljitExecuteFusedPerfectHashGroupedPrimitiveAggregatePayloadUpdate(
 	native_input.group_validity_array =
 	    uses_combined_payload_sources ? group_sources.ValidityArray() : group_sources.ValidityArrayOrNull();
 	if (uses_combined_payload_sources) {
-		native_input.expression_tree_flat_no_selection = flat_no_selection;
-		native_input.expression_tree_flat_all_valid = flat_all_valid;
-		native_input.expression_tree_all_valid = all_valid;
+		native_input.expression_tree_flat_no_selection = payload_flat_no_selection;
+		native_input.expression_tree_flat_all_valid = payload_flat_all_valid;
+		native_input.expression_tree_all_valid = payload_all_valid;
+		native_input.perfect_hash_group_flat_all_valid = group_flat_all_valid;
+		native_input.perfect_hash_group_all_valid = group_all_valid;
+		native_input.perfect_hash_inputs_flat_no_selection = payload_flat_no_selection && group_flat_no_selection;
+		native_input.perfect_hash_inputs_all_valid = payload_all_valid && group_all_valid;
 		native_input.group_selection_all_present = group_selection_all_present;
 	}
 	native_input.perfect_hash_state_data = layout.data;

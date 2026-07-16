@@ -123,14 +123,15 @@ public:
 	}
 
 	template <class EXECUTE_HASH_JOIN_PROBE>
-	SljitHashJoinAggregateConsumerResult TryExecuteHashJoinProbeConsumer(
-	    ExecutionRegionRuntime &runtime, vector<SljitExecutableRegionOp> &ops, SljitRegionExecutionScratch &scratch,
-	    const SljitHashJoinDirectAggregateConsumerContract &contract,
-	    const SljitHashJoinProbeSelectionPrimitive &probe_primitive, DataChunk &join_input,
-	    EXECUTE_HASH_JOIN_PROBE &execute_hash_join_probe) {
+	SljitHashJoinAggregateConsumerResult
+	TryExecuteHashJoinProbeConsumer(ExecutionRegionRuntime &runtime, vector<SljitExecutableRegionOp> &ops,
+	                                SljitRegionExecutionScratch &scratch,
+	                                const SljitHashJoinDirectAggregateConsumerContract &contract,
+	                                const SljitHashJoinProbeSelectionPrimitive &probe_primitive, DataChunk &join_input,
+	                                EXECUTE_HASH_JOIN_PROBE &execute_hash_join_probe) {
 		D_ASSERT(contract.IsBound());
 		return state.post_join_projection_aggregate.TryExecuteHashJoinProbeConsumer(
-		    runtime, ops, scratch, probe_primitive, join_input, execute_hash_join_probe,
+		    runtime, ops, scratch, contract, probe_primitive, join_input, execute_hash_join_probe,
 		    contract.probe_input_filter_idx);
 	}
 

@@ -173,6 +173,9 @@ bool PerfectHashJoinExecutor::BuildPerfectHashTable() {
 	// and for duplicate_checking
 	bitmap_build_idx.Initialize(build_size);
 	bitmap_build_idx.SetAllInvalid(build_size);
+	const auto build_word_count = ValidityMask::EntryCount(build_size);
+	bitmap_build_non_empty_words.Initialize(build_word_count);
+	bitmap_build_non_empty_words.SetAllInvalid(build_word_count);
 
 	// Now fill columns with build data
 	return FullScanHashTable();
@@ -215,13 +218,11 @@ static bool PerfectHashJoinValueBits(const Value &value, PhysicalType physical_t
 	}
 }
 
-bool PerfectHashJoinExecutor::GetExecutionPerfectHashJoinTableLayout(
-    ExecutionPerfectHashJoinTableLayout &layout) const {
-	layout = ExecutionPerfectHashJoinTableLayout();
-	layout.key_type = GetKeyType();
-	layout.key_physical_type = layout.key_type.InternalType();
+bool PerfectHashJoinExecutor::PublishExecutionPerfectHashJoinFilterLayout() {
+	auto &layout = execution_filter_layout;
+	layout = ExecutionPerfectHashJoinFilterLayout();
+	layout.key_physical_type = GetKeyType().InternalType();
 	if (perfect_join_statistics.build_min.IsNull() || perfect_join_statistics.build_max.IsNull()) {
-		layout.blocker = "perfect-hash-join-native-layout-missing-bounds";
 		return false;
 	}
 	if (layout.key_physical_type == PhysicalType::INT128) {
@@ -234,7 +235,6 @@ bool PerfectHashJoinExecutor::GetExecutionPerfectHashJoinTableLayout(
 	                                     layout.build_min) ||
 	           !PerfectHashJoinValueBits(perfect_join_statistics.build_max, layout.key_physical_type,
 	                                     layout.build_max)) {
-		layout.blocker = "perfect-hash-join-native-layout-unsupported-key-width";
 		return false;
 	}
 	layout.is_build_dense = perfect_join_statistics.is_build_dense;
@@ -242,6 +242,43 @@ bool PerfectHashJoinExecutor::GetExecutionPerfectHashJoinTableLayout(
 	layout.build_capacity = perfect_join_statistics.build_range + 1;
 	layout.build_unique_count = unique_keys;
 	layout.build_validity = bitmap_build_idx.GetData();
+	layout.build_validity_non_empty_words = bitmap_build_non_empty_words.GetData();
+	layout.build_validity_word_count = ValidityMask::EntryCount(layout.build_capacity);
+	layout.ready = true;
+	return true;
+}
+
+optional_ptr<const ExecutionPerfectHashJoinFilterLayout>
+PerfectHashJoinExecutor::GetExecutionPerfectHashJoinFilterLayout() const {
+	if (!execution_filter_layout.ready) {
+		return nullptr;
+	}
+	return execution_filter_layout;
+}
+
+bool PerfectHashJoinExecutor::GetExecutionPerfectHashJoinTableLayout(
+    ExecutionPerfectHashJoinTableLayout &layout) const {
+	layout = ExecutionPerfectHashJoinTableLayout();
+	layout.key_type = GetKeyType();
+	auto filter_layout = GetExecutionPerfectHashJoinFilterLayout();
+	if (!filter_layout) {
+		layout.blocker = "perfect-hash-join-native-layout-not-published";
+		return false;
+	}
+	layout.key_physical_type = filter_layout->key_physical_type;
+	layout.is_build_dense = filter_layout->is_build_dense;
+	layout.build_range = filter_layout->build_range;
+	layout.build_capacity = filter_layout->build_capacity;
+	layout.build_unique_count = filter_layout->build_unique_count;
+	layout.build_min = filter_layout->build_min;
+	layout.build_max = filter_layout->build_max;
+	layout.build_min_128 = filter_layout->build_min_128;
+	layout.build_max_128 = filter_layout->build_max_128;
+	layout.build_min_u128 = filter_layout->build_min_u128;
+	layout.build_max_u128 = filter_layout->build_max_u128;
+	layout.build_validity = filter_layout->build_validity;
+	layout.build_validity_non_empty_words = filter_layout->build_validity_non_empty_words;
+	layout.build_validity_word_count = filter_layout->build_validity_word_count;
 	layout.runtime_filter_identity = runtime_filter_identity;
 	layout.rhs_output_column_count = perfect_hash_table.size();
 	layout.rhs_output_types = join.rhs_output_columns.col_types;
@@ -278,6 +315,7 @@ bool PerfectHashJoinExecutor::FullScanHashTable() {
 	if (unique_keys == build_size && !ht.has_filtered_null) {
 		perfect_join_statistics.is_build_dense = true;
 		bitmap_build_idx.Reset(build_size); // All valid
+		bitmap_build_non_empty_words.Reset(ValidityMask::EntryCount(build_size));
 	}
 	key_count = unique_keys; // do not consider keys out of the range
 
@@ -291,6 +329,10 @@ bool PerfectHashJoinExecutor::FullScanHashTable() {
 		data_collection.Gather(tuples_addresses, sel_tuples, key_count, output_col_idx, vector, sel_build, nullptr);
 		// This ensures the empty entries are set to NULL, so that the emitted dictionary vectors make sense
 		col_mask.Combine(bitmap_build_idx, build_size);
+	}
+
+	if (!PublishExecutionPerfectHashJoinFilterLayout()) {
+		return false;
 	}
 
 	return true;
@@ -344,6 +386,7 @@ bool PerfectHashJoinExecutor::TemplatedFillSelectionVectorBuild(const Vector &so
 				return false;
 			} else {
 				bitmap_build_idx.SetValidUnsafe(idx);
+				bitmap_build_non_empty_words.SetValidUnsafe(idx / ValidityMask::BITS_PER_VALUE);
 				unique_keys++;
 			}
 			seq_sel_vec.set_index(sel_idx++, i);

@@ -254,8 +254,7 @@ idx_t GetExecutionRegionTableScanDistinctCount(const PhysicalOperator &op, Clien
 	if (!stats) {
 		return 0;
 	}
-	auto contract = scan.GetExecutionContract();
-	return BuildExecutionRegionDistinctCount(*stats, contract.source.estimated_source_cardinality);
+	return BuildExecutionRegionDistinctCount(*stats, GetExecutionRegionTableScanSourceCardinality(scan));
 }
 
 static optional_ptr<const Expression> TryUnwrapExecutionRegionOptionalFilterExpression(const Expression &expr) {
@@ -565,7 +564,7 @@ static ExecutionRegionOperatorEntry BuildExecutionRegionOperatorEntry(const Phys
 	                              entry.operator_kind == ExecutionRegionOperatorKind::SCAN_SOURCE
 	                          ? op.GetName()
 	                          : ExecutionRegionOperatorKindToTraceLabel(entry.operator_kind);
-	auto descriptor = op.GetExecutionContract();
+	auto descriptor = op.GetExecutionContract(slot, render_diagnostics);
 	if (context) {
 		AddExecutionRegionTableScanColumnStats(op, descriptor, *context);
 	}

@@ -388,8 +388,25 @@ def verify_production_contract_ownership() -> None:
     pipeline_executor = read("src/parallel/pipeline_executor.cpp")
     retry = pipeline_executor[pipeline_executor.index("} else if (remaining_sink_chunk) {") :]
     retry = retry[: retry.index("} else if (!in_process_operators.empty()")]
-    if "return PipelineExecuteResult::NOT_FINISHED;" not in retry:
-        raise AssertionError("a core-owned blocked sink retry must yield before crossing source execution modes")
+    if "return PipelineExecuteResult::RUNNER_HANDOFF;" not in retry:
+        raise AssertionError("a core-owned blocked sink retry must request selected-runner re-entry")
+    unbounded_execute = pipeline_executor[
+        pipeline_executor.index("PipelineExecuteResult PipelineExecutor::Execute()") :
+    ]
+    unbounded_execute = unbounded_execute[: unbounded_execute.index("void PipelineExecutor::FinishProcessing")]
+    if (
+        "while (true)" not in unbounded_execute
+        or "Execute(NumericLimits<idx_t>::Maximum())" not in unbounded_execute
+        or "result != PipelineExecuteResult::RUNNER_HANDOFF" not in unbounded_execute
+    ):
+        raise AssertionError("unbounded pipeline execution must consume only explicit runner handoffs")
+    runtime_test = read("test/api/test_jit_runtime.cpp")
+    blocked_sink_test = runtime_test[runtime_test.index("JIT blocked append sink transfers retry ownership") :]
+    blocked_sink_test = blocked_sink_test[
+        : blocked_sink_test.index("JIT full pipeline uses append sink contract for CTE")
+    ]
+    if "ConfigureSljitForCoverageSettings(con, true, true, true, 10000, 4);" not in blocked_sink_test:
+        raise AssertionError("blocked compiled sink continuation must retain parallel streaming coverage")
     radix_aggregate = read("src/execution/radix_partitioned_hashtable.cpp")
     for finalize_contract in (
         "RadixHTFinalizeStrategy::DISJOINT_PROVEN_RANGES",
@@ -453,10 +470,85 @@ def verify_production_contract_ownership() -> None:
         or "if (!address_sel && !execute_sel)" not in affine_runtime
     ):
         raise AssertionError("input-order grouped addresses must use the identity callback contract")
+    if "if (skip_lookups) {\n\t\treturn false;\n\t}" not in aggregate_hashtable:
+        raise AssertionError("append-only grouped aggregates must not reserve an unused pointer table")
+    if "!ht.LookupsSkipped() && ht.Count() + STANDARD_VECTOR_SIZE >= resize_threshold" not in radix_aggregate:
+        raise AssertionError("append-only grouped aggregates must not abandon on unused pointer-table capacity")
+    for deferred_handoff_contract in (
+        "TryAcquireProvenUniqueAppendData",
+        "deferred_proven_unique_data",
+        "data->Repartition(context, *gstate.uncombined_data, state_remap);",
+        "publish_partition(data->GetUnpartitioned());",
+    ):
+        if deferred_handoff_contract not in aggregate_hashtable + radix_aggregate:
+            raise AssertionError(
+                "proven-unique aggregate handoff must defer radix work until global proof failure: "
+                + deferred_handoff_contract
+            )
+    deferred_acquire = aggregate_hashtable[
+        aggregate_hashtable.index(
+            "GroupedAggregateHashTable::TryAcquireProvenUniqueAppendData"
+        ) : aggregate_hashtable.index("void GroupedAggregateHashTable::Abandon")
+    ]
+    if "proven_unique_append_ranges_coalesced" in deferred_acquire:
+        raise AssertionError("coalesced local uniqueness proofs must reach the global deferred-handoff decision")
+    if "enable_hll = false;" not in aggregate_hashtable:
+        raise AssertionError("lookup-free aggregate ownership must disable obsolete HLL adaptation work")
+
+    cost_input = read("src/execution/execution_region_cost_input.cpp")
+    scan_cost = cost_input[cost_input.index("static bool TryAccumulateExecutionRegionPhysicalScanCost") :]
+    scan_cost = scan_cost[: scan_cost.index("static ExecutionRegionSourceKind")]
+    if "scan.GetExecutionContract()" in scan_cost:
+        raise AssertionError("scan cost extraction must not construct the final execution contract")
+    if "GetExecutionRegionTableScanSourceInputType(scan, filter_idx)" not in scan_cost:
+        raise AssertionError("scan cost extraction must read only the source input type it prices")
+    graph = read("src/execution/execution_region_graph.cpp")
+    distinct_count = graph[graph.index("idx_t GetExecutionRegionTableScanDistinctCount") :]
+    distinct_count = distinct_count[: distinct_count.index("static optional_ptr<const Expression>")]
+    if "scan.GetExecutionContract()" in distinct_count:
+        raise AssertionError("scan distinct-count extraction must not construct the final execution contract")
+    if "GetExecutionRegionTableScanSourceCardinality(scan)" not in distinct_count:
+        raise AssertionError("scan distinct-count extraction must consume the narrow cardinality fact")
+
+    physical_operator = read("src/include/duckdb/execution/physical_operator.hpp")
+    if "GetExecutionContract(ExecutionRegionOperatorSlot slot, bool render_diagnostics)" not in physical_operator:
+        raise AssertionError("physical operators must expose slot-directed execution contracts")
+    if "GetExecutionContract()" in physical_operator:
+        raise AssertionError("the obsolete all-slot physical execution contract API must stay deleted")
+    if "op.GetExecutionContract(slot, render_diagnostics)" not in graph:
+        raise AssertionError("region graph construction must request only the operator slot it consumes")
+    execution_contract = read("src/execution/execution_contract.cpp")
+    hash_join_contract = execution_contract[execution_contract.index("ExecutionContract PhysicalHashJoin::") :]
+    hash_join_contract = hash_join_contract[: hash_join_contract.index("ExecutionContract PhysicalNestedLoopJoin::")]
+    for owned_slot in (
+        "case ExecutionRegionOperatorSlot::SOURCE:",
+        "case ExecutionRegionOperatorSlot::OPERATOR:",
+        "case ExecutionRegionOperatorSlot::SINK:",
+    ):
+        if owned_slot not in hash_join_contract:
+            raise AssertionError(f"hash joins must construct contracts by requested ownership slot: {owned_slot}")
+    if "GetExecutionContract(ExecutionRegionOperatorSlot::SINK, false)" not in cost_input:
+        raise AssertionError("physical CBO must request sink-only contracts for aggregate state updates")
+    pending_groups = read("extension/jit_sljit/include/sljit_pending_preaggregated_group_batch_runtime.hpp")
+    proof_update = pending_groups.index("SljitUpdateProvenUniqueAppendContract(runtime, op, pending")
+    proof_execution = pending_groups.index(
+        "TryExecutePreaggregatedGroupedPrimitiveAggregateUpdateBatches(", proof_update
+    )
+    proof_window = pending_groups[proof_update:proof_execution]
+    if not re.search(
+        r"if \(!pending\.proven_unique_append_active\) \{\s*" r"SljitTryReserveGroupedAggregateGroups\(",
+        proof_window,
+    ):
+        raise AssertionError("proven-unique pending groups must not request lookup-table reservation")
+    proof_call = pending_groups[proof_execution : proof_execution + 500]
+    if not re.search(r"pending\.represented_row_count,\s*false,\s*true,", proof_call):
+        raise AssertionError("proven-unique pending execution must not re-request reservation in its batch helper")
     if (
         "JIT executable group ranges prove signed narrowing casts once" not in aggregate_test
         or "JIT canonical single-lane sums initialize fresh states directly" not in aggregate_test
         or "Grouped aggregate append callbacks expose identity address order directly" not in aggregate_test
+        or "REQUIRE(grouped_aggregate_reserve_target <= STANDARD_VECTOR_SIZE);" not in aggregate_test
+        or "REQUIRE_FALSE(grouped_aggregate_reserve_resized);" not in aggregate_test
     ):
         raise AssertionError("group range and input-order fresh-state fast paths require direct correctness coverage")
 
@@ -522,6 +614,15 @@ def verify_benchmark_repetition_budget() -> None:
         or "for policy in policy_order(repeat):" not in generic_benchmark
     ):
         raise AssertionError("generic benchmark pairs must alternate the leading policy")
+    for paired_contract in (
+        "def median_paired_speedup(",
+        '"paired_speedup_median"',
+        'speedup = float(auto["paired_speedup_median"])',
+    ):
+        if paired_contract not in generic_benchmark:
+            raise AssertionError(f"generic speedup gates must consume alternating pairs: {paired_contract}")
+    if '"speedup_vs_off_median"' in generic_benchmark:
+        raise AssertionError("generic benchmark must not label a ratio-of-medians as paired speedup")
     if "triage-repeats" in generic_benchmark:
         raise AssertionError("generic benchmark candidates must not silently escalate into triage repetitions")
     if "return failures" not in generic_benchmark:
@@ -538,6 +639,16 @@ def verify_benchmark_repetition_budget() -> None:
     guard_main = refactor_guard[refactor_guard.index("def main() -> int:") :]
     if guard_main.index("if should_run_tpch(args):") > guard_main.index("if should_run_generic(args):"):
         raise AssertionError("historically compared TPC-H timing must run before the generic production heat load")
+    for hook_path in ("benchmark/jit/git_hooks/pre-commit", "benchmark/jit/git_hooks/pre-push"):
+        hook = read(hook_path)
+        if "benchmark/jit/local_baselines/pre_commit_verified_tree" not in hook:
+            raise AssertionError(
+                f"Git-hook verification state must use the ignored local baseline directory: {hook_path}"
+            )
+        if "benchmark/jit/tmp/pre_commit_verified_tree" in hook:
+            raise AssertionError(
+                f"Git-hook verification state must not drift back to disposable candidates: {hook_path}"
+            )
 
 
 def verify_bound_direct_join_terminal_contract() -> None:
@@ -547,11 +658,52 @@ def verify_bound_direct_join_terminal_contract() -> None:
         "idx_t probe_step_idx = DConstants::INVALID_INDEX",
         "idx_t terminal_step_idx = DConstants::INVALID_INDEX",
         "idx_t probe_input_filter_idx = DConstants::INVALID_INDEX",
-        "SljitBindHashJoinDirectAggregateConsumerContract",
+        "idx_t hash_join_idx = DConstants::INVALID_INDEX",
+        "idx_t aggregate_idx = DConstants::INVALID_INDEX",
+        "SljitMakeHashJoinDirectAggregateConsumerContract",
+        "SljitValidateHashJoinDirectAggregateConsumerContract",
         "recipe.direct_aggregate_consumer =",
     ):
         if required not in recipe_state:
             raise AssertionError(f"recipe binding is missing the immutable direct-terminal contract: {required}")
+    for stale in (
+        "SljitBindHashJoinDirectAggregateConsumerContract",
+        "for (idx_t step_idx = 0; step_idx < sequence.Count(); step_idx++)",
+    ):
+        if stale in recipe_state:
+            raise AssertionError(f"recipe construction must not rediscover direct-terminal shape: {stale}")
+    for contract in (
+        "probe_step.hash_join_probe_selection.hash_join_idx != contract.hash_join_idx",
+        "terminal_step.post_join_projection_aggregate.aggregate_idx != contract.aggregate_idx",
+        "filter_step.generated_filter.filter_idx != contract.probe_input_filter_idx",
+        "contract.HasAnyBinding()",
+    ):
+        if contract not in recipe_state:
+            raise AssertionError(f"recipe publication must validate explicit direct-terminal ownership: {contract}")
+
+    for required in (
+        "enum class SljitFullPipelineRuntimeKind",
+        "enum class SljitFullPipelineRecipePlanKind",
+        "bool UsesSelectedHashJoinSinkRuntime() const",
+        "bool OwnsFusedFilter(idx_t filter_idx) const",
+        "bool HasRecipe() const",
+        "SljitFullPipelineRecipePlanKind Kind() const",
+        "const SljitFullPipelineRecipe &Recipe() const",
+    ):
+        if required not in recipe_state:
+            raise AssertionError(f"recipe publication is missing immutable runtime ownership: {required}")
+    if "bool has_recipe" in recipe_state:
+        raise AssertionError("recipe plan kind must not be encoded as an independent boolean")
+
+    for recipe_binding in (
+        "extension/jit_sljit/sljit_full_pipeline_recipe_binding.cpp",
+        "extension/jit_sljit/sljit_projection_aggregate_recipe_binding.cpp",
+    ):
+        binding = read(recipe_binding)
+        if "SljitMakeHashJoinDirectAggregateConsumerContract(" not in binding:
+            raise AssertionError(
+                f"direct-terminal recipe must bind its semantic identities explicitly: {recipe_binding}"
+            )
 
     selection_runtime = read("extension/jit_sljit/include/sljit_hash_join_probe_selection_primitive_runtime.hpp")
     for required in (
@@ -574,9 +726,25 @@ def verify_bound_direct_join_terminal_contract() -> None:
         "filter_then_terminal",
         "direct_consumer_nonterminal_recorded",
         "direct_aggregate_consumer_miss.non_terminal_successor",
+        "PrimitiveSequenceIsExecutable()",
+        "SljitFullPipelineIsSelectedHashJoinSinkSequence(recipe.primitive_sequence)",
+        '#include "sljit_full_pipeline_primitive_contract.hpp"',
     ):
         if stale in source_runtime:
             raise AssertionError(f"source execution must not probe runtime successor shape: {stale}")
+
+    source_fetch = read("extension/jit_sljit/include/sljit_source_fetch_primitive_runtime.hpp")
+    for stale in (
+        "SljitFullPipelineSourceFetchOwnsSinkAdvance",
+        "SljitFullPipelineIsSelectedHashJoinSinkSequence",
+        "SljitFullPipelineSourceFetchNeedsPartitionPreservingChunks",
+        "const SljitFullPipelinePrimitiveSequence &sequence",
+    ):
+        if stale in source_fetch:
+            raise AssertionError(f"source fetch must consume published recipe ownership instead of shape: {stale}")
+    for required in ("selected_hash_join_sink", "preserves_partitioned_source_chunks"):
+        if required not in source_fetch:
+            raise AssertionError(f"source fetch is missing published runtime ownership: {required}")
 
     terminal_runtime = read("extension/jit_sljit/include/sljit_full_pipeline_terminal_runtime.hpp")
     if "const SljitHashJoinDirectAggregateConsumerContract &contract" not in terminal_runtime:
@@ -601,6 +769,18 @@ def verify_bound_direct_join_terminal_contract() -> None:
             raise AssertionError(f"{family} recipe shape must not be admitted and reconstructed through duplicate APIs")
         if f"binding.TryMake{family}Recipe(facts, recipe)" not in recipe_builder:
             raise AssertionError(f"recipe builder must consume the shared {family} binder")
+
+    executable_builder = read("extension/jit_sljit/sljit_region_executable.cpp")
+    region_runtime = read("extension/jit_sljit/sljit_region_runtime.cpp")
+    if executable_builder.count("BuildSljitFullPipelineRecipePlan(") != 1:
+        raise AssertionError("executable binding must publish exactly one full-pipeline recipe plan")
+    if "BuildSljitFullPipelineRecipePlan(" in region_runtime:
+        raise AssertionError("runtime kernel construction must not rebuild the published recipe plan")
+    if "recipe_plan.HasRecipe() && recipe_plan.Recipe().OwnsFusedFilter(op_idx)" not in executable_builder:
+        raise AssertionError("selector codegen must consume the published fused-filter ownership set")
+    dispatcher = read("extension/jit_sljit/include/sljit_full_pipeline_dispatch_runtime.hpp")
+    if "switch (recipe_plan.Kind())" not in dispatcher or "native_only_runtime_path.empty()" in dispatcher:
+        raise AssertionError("runtime dispatch must consume the tagged recipe plan without sentinel state")
 
 
 def verify_perfect_hash_predicate_cache_ownership() -> None:
@@ -709,6 +889,65 @@ def verify_perfect_hash_predicate_cache_ownership() -> None:
     group_loader = read("extension/jit_sljit/include/sljit_selected_input_vector_group_key.hpp")
     if "staged fallible group transforms" not in local_state or "CONVERT::STAGE_TRANSFORMED_KEYS" not in group_loader:
         raise AssertionError("fallible direct group transforms must declare whether checked keys are staged")
+
+
+def verify_perfect_hash_payload_group_shape_ownership() -> None:
+    runtime = read("extension/jit_sljit/include/sljit_aggregate_perfect_hash_payload_runtime.hpp")
+    for contract in (
+        "const bool payload_flat_no_selection",
+        "const bool payload_all_valid",
+        "const bool group_flat_no_selection",
+        "const bool group_all_valid",
+        "native_input.expression_tree_flat_all_valid = payload_flat_all_valid",
+        "payload_flat_no_selection && group_flat_no_selection",
+        "payload_all_valid && group_all_valid",
+    ):
+        if contract not in runtime:
+            raise AssertionError(
+                f"perfect-hash runtime must keep payload and group vector facts independent: {contract}"
+            )
+    if re.search(
+        r"payload_sources\.FlatNoSelection\([^;]+&&\s*group_sources\.FlatNoSelection",
+        runtime,
+    ):
+        raise AssertionError("perfect-hash runtime must not publish a combined vector shape as the payload shape")
+
+    native_input = read("extension/jit_sljit/include/sljit_native_types.hpp")
+    for fact in (
+        "perfect_hash_group_flat_all_valid",
+        "perfect_hash_group_all_valid",
+        "perfect_hash_inputs_flat_no_selection",
+        "perfect_hash_inputs_all_valid",
+        "group_selection_all_present",
+    ):
+        if fact not in native_input:
+            raise AssertionError(f"generated perfect-hash dispatch is missing runtime fact: {fact}")
+
+    loops = read("extension/jit_sljit/sljit_aggregate_perfect_hash_update_loops.cpp")
+    dispatch = loops[loops.index("void EmitSljitPerfectHashFusedUpdateLoops") :]
+    for contract in (
+        "EmitSljitPerfectHashFlatPayloadDictionaryGroupLoop",
+        "EmitSljitPerfectHashFlatPayloadSelectedGroupLoop",
+        "offsetof(SljitNativeVectorInput, perfect_hash_group_flat_all_valid)",
+        "offsetof(SljitNativeVectorInput, perfect_hash_group_all_valid)",
+        "offsetof(SljitNativeVectorInput, perfect_hash_inputs_flat_no_selection)",
+        "offsetof(SljitNativeVectorInput, perfect_hash_inputs_all_valid)",
+        "offsetof(SljitNativeVectorInput, group_selection_all_present)",
+        "use_uncached_selected_group_loop",
+    ):
+        if contract not in dispatch:
+            raise AssertionError(f"generated perfect-hash dispatch is missing independent group handling: {contract}")
+    payload_gate = dispatch.index("offsetof(SljitNativeVectorInput, expression_tree_flat_all_valid)")
+    group_gate = dispatch.index("offsetof(SljitNativeVectorInput, perfect_hash_group_flat_all_valid)")
+    direct_loop = dispatch.index("EmitSljitPerfectHashFlatFastLoop")
+    dictionary_loop = dispatch.index("EmitSljitPerfectHashFlatPayloadDictionaryGroupLoop")
+    selected_loop = dispatch.index("EmitSljitPerfectHashFlatPayloadSelectedGroupLoop")
+    if not payload_gate < group_gate < direct_loop < dictionary_loop < selected_loop:
+        raise AssertionError("perfect-hash fast loops must dispatch from payload shape and then group representation")
+
+    test = read("test/api/test_jit_aggregate.cpp")
+    if "JIT perfect hash keeps payload and group vector shapes independent" not in test:
+        raise AssertionError("independent perfect-hash payload/group shape dispatch needs persisted parallel coverage")
 
 
 def verify_perfect_hash_identity_selected_view() -> None:
@@ -923,6 +1162,61 @@ def verify_scan_filter_ownership() -> None:
             raise AssertionError(f"generated source-filter admission is missing exception proof: {contract}")
     if "source filter expression contains unsupported arithmetic" in source_ir:
         raise AssertionError("generated source-filter admission must not reject all arithmetic without exception proof")
+    hash_join_runtime = read("src/include/duckdb/execution/execution_hash_join_runtime.hpp")
+    filter_layout = hash_join_runtime.split("struct ExecutionPerfectHashJoinFilterLayout", 1)[1].split("};", 1)[0]
+    for owning_type in ("LogicalType", "shared_ptr", "vector<", "buffer_ptr", "string"):
+        if owning_type in filter_layout:
+            raise AssertionError(f"per-vector perfect-hash filter layout must remain allocation-free: {owning_type}")
+    perfect_executor = read("src/execution/operator/join/perfect_hash_join_executor.cpp")
+    if "PublishExecutionPerfectHashJoinFilterLayout" not in perfect_executor:
+        raise AssertionError("full and scan-only perfect-hash layouts must share one primitive layout binder")
+    perfect_executor_header = read("src/include/duckdb/execution/operator/join/perfect_hash_join_executor.hpp")
+    if "ExecutionPerfectHashJoinFilterLayout execution_filter_layout" not in perfect_executor_header:
+        raise AssertionError("perfect-hash finalization must own one immutable scan-filter contract")
+    if "PublishExecutionPerfectHashJoinFilterLayout()" not in perfect_executor:
+        raise AssertionError("perfect-hash finalization must publish the scan-filter contract once")
+    if "attempted_filter_layout" in perfect_executor:
+        raise AssertionError("perfect-hash consumers must not reconstruct unpublished finalization state")
+    filter_binding = read("src/include/duckdb/planner/filter/table_filter_functions.hpp")
+    if "optional_ptr<const ExecutionPerfectHashJoinFilterLayout> filter_layout" not in filter_binding:
+        raise AssertionError("the published perfect-hash dynamic filter must own its immutable membership view")
+    filter_plan = read("src/storage/table/column_segment.cpp")
+    if "perfect_data->filter_layout" not in filter_plan:
+        raise AssertionError("scan-filter admission must consume the dynamic filter's finalized membership view")
+    filter_state = read("src/include/duckdb/planner/table_filter_state.hpp")
+    for contract in (
+        "struct FastInternalFilterScanPlan",
+        "idx_t primary_operation_count",
+        "optional_ptr<const ExecutionPerfectHashJoinFilterLayout> perfect_hash_join_layout",
+    ):
+        if contract not in filter_state:
+            raise AssertionError(f"thread-local scan planning must bind immutable filter invariants once: {contract}")
+    if "BuildFastInternalFilterScanPlan(state);" not in filter_plan:
+        raise AssertionError("internal filter analysis must publish its compression scan plan once")
+    bitpacking = read("src/storage/compression/bitpacking.cpp")
+    perfect_filter = bitpacking.split("static bool TryBitpackingPerfectHashJoinFilter(", 1)[1].split(
+        "template <class T, bool HAS_RESIDUAL_RANGES>", 1
+    )[0]
+    if "scan_plan.perfect_hash_join_layout" not in perfect_filter:
+        raise AssertionError("bitpacking scan filters must consume the once-bound perfect-hash membership view")
+    for repeated_invariant in (
+        "perfect_hash_join_data->filter_layout",
+        "build_validity_word_count !=",
+        "while (!track_primary_selectivity",
+    ):
+        if repeated_invariant in perfect_filter:
+            raise AssertionError(
+                f"bitpacking scan filters must not rebind immutable perfect-hash invariants: {repeated_invariant}"
+            )
+    if "GetExecutionPerfectHashJoinFilterLayout" in perfect_filter:
+        raise AssertionError("bitpacking scan filters must not rebind finalized membership state per vector")
+    if "ExecutionPerfectHashJoinTableLayout" in perfect_filter:
+        raise AssertionError("bitpacking scan filters must not copy the materialization table layout per vector")
+    bloom_filter = bitpacking.split("static bool TryBitpackingBloomFilter(", 1)[1].split(
+        "template <class T>\nvoid BitpackingFilter", 1
+    )[0]
+    if "while (!track_primary_selectivity" in bloom_filter:
+        raise AssertionError("bitpacking Bloom filters must consume the once-bound primary operation prefix")
     executable = read("extension/jit_sljit/include/sljit_region_executable.hpp")
     if "SljitCompiledFunction" not in executable or "SljitLazyCompiledFunction" not in executable:
         raise AssertionError("SLJIT executable regions must own code and callables through typed artifacts")
@@ -1078,6 +1372,124 @@ def verify_hash_join_null_fact_ownership() -> None:
         raise AssertionError("native hash probes must specialize from actual retained-key NULL state")
 
 
+def verify_regular_hash_join_direct_aggregate_storage_contract() -> None:
+    layout = read("src/include/duckdb/execution/execution_hash_join_runtime.hpp")
+    for contract in (
+        "enum class ExecutionHashJoinRHSFixedColumnStorageKind",
+        "ROW, DICTIONARY",
+        "ExecutionHashJoinRHSFixedColumnTypeSupported",
+        "idx_t dictionary_index_offset = DConstants::INVALID_INDEX",
+        "const_data_ptr_t dictionary_data = nullptr",
+        "const validity_t *dictionary_validity = nullptr",
+        "idx_t dictionary_count = 0",
+    ):
+        if contract not in layout:
+            raise AssertionError(f"fixed hash-join RHS ABI is missing physical storage contract: {contract}")
+
+    hash_table = read("src/execution/join_hashtable.cpp")
+    for contract in (
+        "source.storage_kind = ExecutionHashJoinRHSFixedColumnStorageKind::DICTIONARY",
+        "source.dictionary_index_offset = pointer_offset",
+        "source.dictionary_data = FlatVector::GetData(dictionary)",
+        "source.storage_kind = ExecutionHashJoinRHSFixedColumnStorageKind::ROW",
+        "source.layout_offset = layout_offsets[output_col_idx]",
+    ):
+        if contract not in hash_table:
+            raise AssertionError(f"hash table must expose both fixed RHS storage forms: {contract}")
+    fixed_source = hash_table.split("bool JoinHashTable::TryGetRHSFixedColumnSource", 1)[1].split(
+        "void JoinHashTable::GatherRHSColumn", 1
+    )[0]
+    if fixed_source.index("source.ready = true;") < fixed_source.index("source.dictionary_count = dictionary.size();"):
+        raise AssertionError(
+            "hash-table fixed-column sources must publish ready only after physical storage is complete"
+        )
+
+    state = read("extension/jit_sljit/include/sljit_join_projection_aggregate_state.hpp")
+    direct_descriptor = state.split("struct SljitHashJoinDirectUngroupedAggregateDescriptor", 1)[1].split("};", 1)[0]
+    for contract in (
+        "AggregatePrimitiveUpdateKind primitive_kind",
+        "idx_t rhs_output_idx",
+        "LogicalType rhs_type",
+        "PhysicalType rhs_physical_type",
+    ):
+        if contract not in direct_descriptor:
+            raise AssertionError(f"direct aggregate semantic descriptor is missing immutable identity: {contract}")
+    if "ExecutionHashJoinRHSFixedColumnSource" in direct_descriptor:
+        raise AssertionError("direct aggregate semantic descriptors must not cache mutable physical storage")
+
+    descriptor_binding = read("extension/jit_sljit/include/sljit_projection_aggregate_ungrouped_descriptor.hpp")
+    for contract in (
+        "SljitBindHashJoinDirectUngroupedAggregateDescriptor",
+        "SljitTryGetExecutableReferenceInputIndex",
+        "ExecutionHashJoinRHSFixedColumnTypeSupported",
+        "descriptor.direct_ungrouped_aggregate",
+    ):
+        if contract not in descriptor_binding:
+            raise AssertionError(f"canonical aggregate descriptor must bind the direct semantic contract: {contract}")
+
+    runtime = read("extension/jit_sljit/include/sljit_hash_join_probe_ungrouped_aggregate_consumer_runtime.hpp")
+    for contract in (
+        "SljitHashJoinDirectUngroupedAggregateProbeConsumer",
+        "strategy.descriptor.direct_ungrouped_aggregate",
+        "ExecutionGetHashJoinRHSFixedColumnSource(hash_join_binding, plan.rhs_output_idx, rhs_source)",
+        "TryExecuteAllValidSingleKeyNoChainProbeWithConsumer<SELECTED>",
+        "join_output_probe_consumer_ungrouped_aggregate.dictionary_source",
+        "join_output_probe_consumer_ungrouped_aggregate.row_source",
+    ):
+        if contract not in runtime:
+            raise AssertionError(f"direct regular-probe reduction is missing fused storage dispatch: {contract}")
+    if "SljitHashJoinMatchedRowBatchConsumer" in runtime:
+        raise AssertionError("direct ungrouped reduction must not stage matched row-pointer microbatches")
+    for stale in (
+        "SljitTryBuildHashJoinDirectUngroupedAggregatePlan",
+        "direct_ungrouped_aggregate_consumer_miss",
+        '"duckdb/execution/join_hashtable.hpp"',
+        "JoinHashTable::ValidityBytes",
+    ):
+        if stale in runtime:
+            raise AssertionError(
+                f"direct ungrouped runtime must not reconstruct recipes or depend on hash-table internals: {stale}"
+            )
+
+    rhs_runtime = read("extension/jit_sljit/include/sljit_hash_join_rhs_fixed_column_runtime.hpp")
+    for stale in ('"duckdb/execution/join_hashtable.hpp"', "JoinHashTable::ValidityBytes"):
+        if stale in rhs_runtime:
+            raise AssertionError(
+                f"fixed-column backend helpers must depend only on the exported execution ABI: {stale}"
+            )
+
+    group_sources = read("extension/jit_sljit/include/sljit_grouped_aggregate_group_key_source.hpp")
+    if "rhs_source.storage_kind != ExecutionHashJoinRHSFixedColumnStorageKind::ROW" not in group_sources:
+        raise AssertionError("row-pointer grouped sources must explicitly reject dictionary-backed RHS storage")
+
+    for row_only_runtime in (
+        "extension/jit_sljit/include/sljit_hash_join_rhs_projection_runtime.hpp",
+        "extension/jit_sljit/include/sljit_join_input_row_pointer_complementary_sum_runtime.hpp",
+    ):
+        if "ExecutionHashJoinRHSFixedColumnStorageKind::ROW" not in read(row_only_runtime):
+            raise AssertionError(f"row-layout consumers must explicitly reject dictionary storage: {row_only_runtime}")
+
+    join_test = read("test/api/test_jit_join.cpp")
+    for receipt in (
+        "JIT reduces regular hash matches directly from row and dictionary RHS storage",
+        "join_output_probe_consumer_ungrouped_aggregate.dictionary_source=",
+        "join_output_probe_consumer_ungrouped_aggregate.row_source=",
+        "join_output_probe_consumer_ungrouped_aggregate.source_none=",
+    ):
+        if receipt not in join_test:
+            raise AssertionError(f"direct regular-probe reduction is missing correctness receipt: {receipt}")
+
+    benchmark = read("benchmark/jit/generic_benchmark.py")
+    for receipt in (
+        "direct_ungrouped_aggregate_consumer=",
+        "aggregate_update.join_output_probe_consumer_ungrouped_aggregate.dictionary_source=",
+        '"minimum_auto_speedup_by_threads": {1: 1.35, 4: 1.09}',
+        '"maximum_auto_median_us_by_threads": {1: 10500, 4: 5750}',
+    ):
+        if receipt not in benchmark:
+            raise AssertionError(f"direct regular-probe performance proof is not ratcheted: {receipt}")
+
+
 def main() -> None:
     verify_layer_boundaries()
     verify_no_benchmark_shaped_logic()
@@ -1091,11 +1503,13 @@ def main() -> None:
     verify_partial_predicate_simd_contract()
     verify_string_batch_selection_contract()
     verify_hash_join_null_fact_ownership()
+    verify_regular_hash_join_direct_aggregate_storage_contract()
     verify_runtime_proofs_are_typed()
     verify_production_contract_ownership()
     verify_benchmark_repetition_budget()
     verify_bound_direct_join_terminal_contract()
     verify_perfect_hash_predicate_cache_ownership()
+    verify_perfect_hash_payload_group_shape_ownership()
     verify_perfect_hash_identity_selected_view()
     verify_perfect_hash_all_valid_complementary_accumulator()
     print("Execution-region architecture verification passed")

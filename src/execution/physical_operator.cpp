@@ -399,7 +399,8 @@ ExecutionRegionOperatorKind PhysicalOperator::GetExecutionRegionOperatorKind() c
 	}
 }
 
-ExecutionContract PhysicalOperator::GetExecutionContract() const {
+ExecutionContract PhysicalOperator::GetExecutionContract(ExecutionRegionOperatorSlot slot,
+                                                         bool render_diagnostics) const {
 	return FinalizeExecutionContract(ExecutionContract());
 }
 

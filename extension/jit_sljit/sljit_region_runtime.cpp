@@ -10,7 +10,6 @@
 
 #include "sljit_codegen_util.hpp"
 #include "sljit_full_pipeline_dispatch_runtime.hpp"
-#include "sljit_full_pipeline_primitive_contract.hpp"
 #include "sljit_filter_runtime.hpp"
 #include "sljit_hash_join_probe_runtime.hpp"
 #include "sljit_join_probe_codegen.hpp"
@@ -120,14 +119,12 @@ public:
 	                        vector<SljitExecutableScanFilter> scan_filters_p, bool uses_scan_filters_p,
 	                        vector<LogicalType> source_output_types_p, vector<idx_t> source_distinct_counts_p,
 	                        vector<Value> source_min_values_p, vector<Value> source_max_values_p,
-	                        ExecutionRegionABI abi_p)
+	                        SljitFullPipelineRecipePlan recipe_plan_p, ExecutionRegionABI abi_p)
 	    : backend_name(std::move(backend_name_p)), ops(std::move(ops_p)), scan_filters(std::move(scan_filters_p)),
 	      uses_scan_filters(uses_scan_filters_p), source_output_types(std::move(source_output_types_p)),
 	      source_distinct_counts(std::move(source_distinct_counts_p)),
 	      source_min_values(std::move(source_min_values_p)), source_max_values(std::move(source_max_values_p)),
-	      full_pipeline_recipe_plan(
-	          BuildSljitFullPipelineRecipePlan(ops, source_output_types, source_min_values, source_max_values)),
-	      abi(abi_p) {
+	      full_pipeline_recipe_plan(std::move(recipe_plan_p)), abi(abi_p) {
 	}
 
 	const string &BackendName() const override {
@@ -173,10 +170,8 @@ public:
 				return true;
 			}
 		}
-		return uses_scan_filters && full_pipeline_recipe_plan.has_recipe &&
-		       (SljitFullPipelineHasDirectSourceHashBuild(full_pipeline_recipe_plan.recipe.primitive_sequence) ||
-		        SljitFullPipelineHasExactFilterProbeHashBuild(ops,
-		                                                      full_pipeline_recipe_plan.recipe.primitive_sequence));
+		return uses_scan_filters && full_pipeline_recipe_plan.HasRecipe() &&
+		       full_pipeline_recipe_plan.Recipe().has_scan_filter_executable_body;
 	}
 
 	unique_ptr<ExecutionRegionLocalState> CreateLocalState(Allocator &allocator) const override {
@@ -297,12 +292,13 @@ private:
 
 unique_ptr<ExecutionRegionKernel> CreateSljitNativeRegionKernel(ClientContext &context, string backend_name,
                                                                 SljitExecutableRegion &&region,
+                                                                SljitFullPipelineRecipePlan recipe_plan,
                                                                 ExecutionRegionABI abi) {
 	(void)context;
 	return make_uniq<SljitNativeRegionKernel>(
 	    std::move(backend_name), std::move(region.ops), std::move(region.scan_filters), region.uses_scan_filters,
 	    std::move(region.source_output_types), std::move(region.source_distinct_counts),
-	    std::move(region.source_min_values), std::move(region.source_max_values), abi);
+	    std::move(region.source_min_values), std::move(region.source_max_values), std::move(recipe_plan), abi);
 }
 
 } // namespace duckdb

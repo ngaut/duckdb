@@ -214,6 +214,68 @@ static bool SljitTryBuildRemappedUngroupedAggregatePayloads(
 	return true;
 }
 
+static void SljitBindHashJoinDirectUngroupedAggregateDescriptor(const ExecutionHashJoinProbeBinding &binding,
+                                                                SljitExecutableRegionOp &aggregate_op,
+                                                                SljitJoinProjectionAggregateDescriptor &descriptor) {
+	auto &direct = descriptor.direct_ungrouped_aggregate;
+	direct = SljitHashJoinDirectUngroupedAggregateDescriptor();
+	auto &aggregate_update = aggregate_op.aggregate_update;
+	auto &sink_info = aggregate_update.plan.sink_info;
+	if (binding.output_mode != ExecutionHashJoinProbeOutputMode::MATCHED_PROBE_AND_BUILD ||
+	    sink_info.kind != ExecutionRegionSinkKind::UNGROUPED_AGGREGATE_UPDATE || !sink_info.groups.empty() ||
+	    !aggregate_update.plan.UsesPrimitivePayloads() || aggregate_update.plan.use_grouped_state_addresses ||
+	    sink_info.aggregates.size() != 1 || aggregate_update.payload_descriptors.size() != 1 ||
+	    descriptor.remapped_payloads.size() != 1) {
+		return;
+	}
+	auto &payload_descriptor = aggregate_update.payload_descriptors[0];
+	if (payload_descriptor.primitive_kind == AggregatePrimitiveUpdateKind::COUNT_STAR) {
+		if (!payload_descriptor.has_payload) {
+			direct.primitive_kind = AggregatePrimitiveUpdateKind::COUNT_STAR;
+		}
+		return;
+	}
+	if (payload_descriptor.primitive_kind != AggregatePrimitiveUpdateKind::COUNT &&
+	    payload_descriptor.primitive_kind != AggregatePrimitiveUpdateKind::SUM_HUGEINT) {
+		return;
+	}
+	idx_t aggregate_input_idx;
+	if (!SljitTryGetExecutableReferenceInputIndex(descriptor.remapped_payloads[0], aggregate_input_idx) ||
+	    aggregate_input_idx >= descriptor.input_sources.size()) {
+		return;
+	}
+	auto &input_source = descriptor.input_sources[aggregate_input_idx];
+	if (input_source.kind != SljitJoinProjectionAggregateInputKind::PROJECTION_OUTPUT ||
+	    input_source.projection_idx >= descriptor.Projection().projections.size()) {
+		return;
+	}
+	idx_t join_output_idx;
+	if (!SljitTryGetSingleSourceReferenceProjectionIndex(
+	        descriptor.Projection().projections[input_source.projection_idx], join_output_idx)) {
+		return;
+	}
+	const auto lhs_column_count = binding.lhs_output_column_indices.size();
+	if (join_output_idx < lhs_column_count || join_output_idx >= binding.output_types.size()) {
+		return;
+	}
+	const auto rhs_output_idx = join_output_idx - lhs_column_count;
+	if (rhs_output_idx >= binding.rhs_output_column_count) {
+		return;
+	}
+	auto &rhs_type = binding.output_types[join_output_idx];
+	const auto rhs_physical_type = rhs_type.InternalType();
+	if (input_source.type != rhs_type || payload_descriptor.input_type != rhs_physical_type ||
+	    !ExecutionHashJoinRHSFixedColumnTypeSupported(rhs_type) ||
+	    (payload_descriptor.primitive_kind == AggregatePrimitiveUpdateKind::SUM_HUGEINT &&
+	     rhs_physical_type != PhysicalType::INT64)) {
+		return;
+	}
+	direct.primitive_kind = payload_descriptor.primitive_kind;
+	direct.rhs_output_idx = rhs_output_idx;
+	direct.rhs_type = rhs_type;
+	direct.rhs_physical_type = rhs_physical_type;
+}
+
 static bool SljitTryBuildProjectionUngroupedAggregateDescriptor(
     const ExecutionHashJoinProbeBinding &binding, SljitExecutableRegionOp &aggregate_op,
     SljitJoinProjectionAggregateDescriptor &descriptor, optional_ptr<SljitExecutableRegionOp> producer_projection_op) {
@@ -248,6 +310,7 @@ static bool SljitTryBuildProjectionUngroupedAggregateDescriptor(
 		descriptor.payload_source_indices = descriptor.remapped_payloads.front().input_source_indices;
 		descriptor.payload_source_not_null = descriptor.remapped_payloads.front().input_source_not_null;
 	}
+	SljitBindHashJoinDirectUngroupedAggregateDescriptor(binding, aggregate_op, descriptor);
 	descriptor.MarkReady();
 	return true;
 }

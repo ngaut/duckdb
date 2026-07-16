@@ -24,6 +24,8 @@
 
 namespace duckdb {
 
+struct SljitFullPipelineRecipePlan;
+
 struct SljitExecutableRegionExpression {
 	SljitNativeRegionExpressionPlan plan;
 	vector<idx_t> input_source_indices;
@@ -488,6 +490,7 @@ struct SljitExecutableRegion {
 	}
 };
 
-bool BuildSljitExecutableRegion(const SljitNativeRegionPlan &region, SljitExecutableRegion &executable, string &error);
+bool BuildSljitExecutableRegion(const SljitNativeRegionPlan &region, SljitExecutableRegion &executable,
+                                SljitFullPipelineRecipePlan &recipe_plan, string &error);
 
 } // namespace duckdb

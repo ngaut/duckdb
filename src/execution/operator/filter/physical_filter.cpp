@@ -48,7 +48,8 @@ unique_ptr<OperatorState> PhysicalFilter::GetOperatorState(ExecutionContext &con
 	return make_uniq<FilterState>(context, *expression);
 }
 
-ExecutionContract PhysicalFilter::GetExecutionContract() const {
+ExecutionContract PhysicalFilter::GetExecutionContract(ExecutionRegionOperatorSlot slot,
+                                                       bool render_diagnostics) const {
 	ExecutionContract result;
 	result.transform.filter_expression = optional_ptr<const Expression>(*expression);
 	return FinalizeExecutionContract(std::move(result));

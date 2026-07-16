@@ -11,6 +11,7 @@
 #include "sljit_date_year_runtime.hpp"
 #include "sljit_direct_projection_batch_runtime.hpp"
 #include "sljit_hash_join_projection_source_runtime.hpp"
+#include "sljit_hash_join_rhs_fixed_column_runtime.hpp"
 #include "sljit_inline_string_decompress_projection_runtime.hpp"
 #include "sljit_projection_executor_runtime.hpp"
 #include "sljit_region_runtime_state.hpp"
@@ -51,25 +52,6 @@ static bool SljitTryGatherHashJoinRHSReferenceProjectionToBatch(const ExecutionH
 	return true;
 }
 
-static bool SljitHashJoinRHSFixedColumnSourceIsValid(data_ptr_t row_pointer,
-                                                     const ExecutionHashJoinRHSFixedColumnSource &source) {
-	if (!row_pointer) {
-		return false;
-	}
-	if (source.all_valid) {
-		return true;
-	}
-	if (source.layout_column_idx == DConstants::INVALID_INDEX || source.layout_column_count == 0) {
-		return false;
-	}
-	idx_t entry_idx;
-	idx_t idx_in_entry;
-	JoinHashTable::ValidityBytes::GetEntryIndex(source.layout_column_idx, entry_idx, idx_in_entry);
-	return JoinHashTable::ValidityBytes::RowIsValid(
-	    JoinHashTable::ValidityBytes(row_pointer, source.layout_column_count).GetValidityEntryUnsafe(entry_idx),
-	    idx_in_entry);
-}
-
 static bool SljitTryMaterializeHashJoinRHSDateYearProjectionToBatch(const ExecutionHashJoinProbeBinding &binding,
                                                                     const SljitNativeRegionExpressionPlan &plan,
                                                                     idx_t rhs_col_idx, Vector &row_pointers,
@@ -88,6 +70,7 @@ static bool SljitTryMaterializeHashJoinRHSDateYearProjectionToBatch(const Execut
 	ExecutionHashJoinRHSFixedColumnSource rhs_source;
 	if (!ExecutionGetHashJoinRHSFixedColumnSource(binding, rhs_col_idx, rhs_source) ||
 	    rhs_source.type.id() != LogicalTypeId::DATE || rhs_source.physical_type != PhysicalType::INT32 ||
+	    rhs_source.storage_kind != ExecutionHashJoinRHSFixedColumnStorageKind::ROW ||
 	    rhs_source.layout_offset == DConstants::INVALID_INDEX) {
 		return false;
 	}
@@ -148,7 +131,9 @@ static bool SljitTryMaterializeHashJoinRHSInlineStringDecompressProjectionToBatc
 
 	ExecutionHashJoinRHSFixedColumnSource rhs_source;
 	if (!ExecutionGetHashJoinRHSFixedColumnSource(binding, rhs_col_idx, rhs_source) ||
-	    rhs_source.physical_type != PhysicalType::UINT128 || rhs_source.layout_offset == DConstants::INVALID_INDEX) {
+	    rhs_source.physical_type != PhysicalType::UINT128 ||
+	    rhs_source.storage_kind != ExecutionHashJoinRHSFixedColumnStorageKind::ROW ||
+	    rhs_source.layout_offset == DConstants::INVALID_INDEX) {
 		return false;
 	}
 

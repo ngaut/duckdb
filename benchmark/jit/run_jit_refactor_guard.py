@@ -15,8 +15,8 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_UNIT_BASELINE_ENV = "DUCKDB_JIT_UNIT_BASELINE"
 DEFAULT_TPCH_BASELINE_ENV = "DUCKDB_JIT_TPCH_BASELINE"
-DEFAULT_UNIT_BASELINE_STATE = ROOT / "benchmark" / "jit" / "tmp" / "jit_refactor_guard_state.json"
-DEFAULT_TPCH_BASELINE_STATE = ROOT / "benchmark" / "tpch" / "jit" / "tmp" / "tpch_refactor_guard_state.json"
+DEFAULT_UNIT_BASELINE_STATE = ROOT / "benchmark" / "jit" / "local_baselines" / "jit_refactor_guard_state.json"
+DEFAULT_TPCH_BASELINE_STATE = ROOT / "benchmark" / "tpch" / "jit" / "local_baselines" / "tpch_refactor_guard_state.json"
 DEFAULT_UNIT_SPEC = "*JIT*"
 PYTHON_GUARD_FILES = (
     ROOT / "benchmark" / "jit" / "verify_jit_architecture.py",
@@ -29,7 +29,9 @@ PYTHON_GUARD_FILES = (
 )
 LEVEL_ORDER = {"quick": 0, "unit": 1, "full": 2}
 IGNORED_CHANGE_PREFIXES = (
+    "benchmark/jit/local_baselines/",
     "benchmark/jit/tmp/",
+    "benchmark/tpch/jit/local_baselines/",
     "benchmark/tpch/jit/tmp/",
     "build/",
 )
@@ -443,7 +445,10 @@ def baseline_from_state(path: Path, label: str) -> Path | None:
     current = state.get("current_baseline")
     if not current:
         raise GuardError(f"{label} baseline state is missing current_baseline: {path}")
-    return Path(current).resolve()
+    baseline_path = Path(current)
+    if not baseline_path.is_absolute():
+        baseline_path = path.parent / baseline_path
+    return baseline_path.resolve()
 
 
 def tpch_baseline_configured(args: argparse.Namespace) -> bool:
@@ -468,15 +473,17 @@ def load_unit_baseline_from_state(path: Path) -> tuple[Path, dict] | None:
     state = load_json_object(path, "unit baseline state")
     current = state.get("current_baseline")
     if current:
-        baseline_path = Path(current).resolve()
+        baseline_path = Path(current)
+        if not baseline_path.is_absolute():
+            baseline_path = path.parent / baseline_path
+        baseline_path = baseline_path.resolve()
         if baseline_path.is_file():
             return baseline_path, load_unit_baseline(baseline_path)
     if "failed_tests" in state and isinstance(state["failed_tests"], list):
         return path, state
     if current:
         raise GuardError(
-            "unit baseline artifact is missing and state has no embedded failed_tests snapshot: "
-            f"{Path(current).resolve()}"
+            "unit baseline artifact is missing and state has no embedded failed_tests snapshot: " f"{baseline_path}"
         )
     raise GuardError(f"unit baseline state is missing current_baseline: {path}")
 
@@ -516,8 +523,19 @@ def write_unit_baseline(
 def write_unit_state(args: argparse.Namespace, baseline_path: Path, source: str) -> None:
     baseline = load_unit_baseline(baseline_path)
     args.unit_baseline_state.parent.mkdir(parents=True, exist_ok=True)
+    accepted_baseline = args.unit_baseline_state.parent / "unit_failures.json"
+    temporary_baseline = accepted_baseline.with_name(f".{accepted_baseline.name}.{os.getpid()}.tmp")
+    accepted = {
+        "created_at": datetime.now().isoformat(timespec="seconds"),
+        "source": source,
+        "unit_spec": args.unit_spec,
+        "failed_tests": baseline["failed_tests"],
+        "failed_test_count": len(baseline["failed_tests"]),
+    }
+    temporary_baseline.write_text(json.dumps(accepted, indent=2) + "\n", encoding="utf-8")
+    os.replace(temporary_baseline, accepted_baseline)
     state = {
-        "current_baseline": str(baseline_path.resolve()),
+        "current_baseline": accepted_baseline.name,
         "updated_at": datetime.now().isoformat(timespec="seconds"),
         "source": source,
         "unit_spec": args.unit_spec,

@@ -25,7 +25,9 @@ public:
 protected:
 	bool CanMakeNativeTailRecipe(idx_t tail_start_idx) const;
 
-	SljitFullPipelineRecipe MakePrimitiveSequence(SljitFullPipelinePrimitiveSequence sequence) const;
+	SljitFullPipelineRecipe
+	MakePrimitiveSequence(SljitFullPipelinePrimitiveSequence sequence,
+	                      SljitHashJoinDirectAggregateConsumerContract direct_aggregate_consumer = {}) const;
 
 	SljitFullPipelinePrimitiveSequence MakeSourceSequence() const;
 

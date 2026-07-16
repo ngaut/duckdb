@@ -917,23 +917,58 @@ static void BitpackingVisitSetBits(const WORD *bitmap, idx_t first_bit, idx_t la
 	D_ASSERT(first_bit <= last_bit);
 	const auto first_word = first_bit / ValidityMask::BITS_PER_VALUE;
 	const auto last_word = last_bit / ValidityMask::BITS_PER_VALUE;
-	for (idx_t word_idx = first_word; word_idx <= last_word; word_idx++) {
-		auto word = bitmap[word_idx];
-		if (word_idx == first_word) {
-			word &= static_cast<WORD>(~WORD(0) << (first_bit % ValidityMask::BITS_PER_VALUE));
-		}
-		if (word_idx == last_word) {
-			const auto last_offset = last_bit % ValidityMask::BITS_PER_VALUE;
-			if (last_offset + 1 < ValidityMask::BITS_PER_VALUE) {
-				word &= static_cast<WORD>((WORD(1) << (last_offset + 1)) - 1);
-			}
-		}
+	const auto visit_word = [&](WORD word, idx_t word_idx) {
 		while (word) {
 			const auto bit_offset = CountZeros<WORD>::Trailing(word);
 			callback(word_idx * ValidityMask::BITS_PER_VALUE + bit_offset);
 			word &= word - 1;
 		}
+	};
+	const auto lower_mask = static_cast<WORD>(~WORD(0) << (first_bit % ValidityMask::BITS_PER_VALUE));
+	const auto last_offset = last_bit % ValidityMask::BITS_PER_VALUE;
+	const auto upper_mask = last_offset + 1 == ValidityMask::BITS_PER_VALUE
+	                            ? ~WORD(0)
+	                            : static_cast<WORD>((WORD(1) << (last_offset + 1)) - 1);
+	if (first_word == last_word) {
+		visit_word(bitmap[first_word] & lower_mask & upper_mask, first_word);
+		return;
 	}
+	visit_word(bitmap[first_word] & lower_mask, first_word);
+	for (idx_t word_idx = first_word + 1; word_idx < last_word; word_idx++) {
+		visit_word(bitmap[word_idx], word_idx);
+	}
+	visit_word(bitmap[last_word] & upper_mask, last_word);
+}
+
+template <class WORD, class CALLBACK>
+static void BitpackingVisitSummarizedSetBits(const WORD *bitmap, const WORD *non_empty_words, idx_t first_bit,
+                                             idx_t last_bit, CALLBACK callback) {
+	static_assert(sizeof(WORD) * 8 == ValidityMask::BITS_PER_VALUE, "bitset word must match validity word size");
+	D_ASSERT(first_bit <= last_bit);
+	const auto first_word = first_bit / ValidityMask::BITS_PER_VALUE;
+	const auto last_word = last_bit / ValidityMask::BITS_PER_VALUE;
+	const auto visit_word = [&](WORD word, idx_t word_idx) {
+		while (word) {
+			const auto bit_offset = CountZeros<WORD>::Trailing(word);
+			callback(word_idx * ValidityMask::BITS_PER_VALUE + bit_offset);
+			word &= word - 1;
+		}
+	};
+	const auto lower_mask = static_cast<WORD>(~WORD(0) << (first_bit % ValidityMask::BITS_PER_VALUE));
+	const auto last_offset = last_bit % ValidityMask::BITS_PER_VALUE;
+	const auto upper_mask = last_offset + 1 == ValidityMask::BITS_PER_VALUE
+	                            ? ~WORD(0)
+	                            : static_cast<WORD>((WORD(1) << (last_offset + 1)) - 1);
+	if (first_word == last_word) {
+		visit_word(bitmap[first_word] & lower_mask & upper_mask, first_word);
+		return;
+	}
+	visit_word(bitmap[first_word] & lower_mask, first_word);
+	if (first_word + 1 < last_word) {
+		BitpackingVisitSetBits(non_empty_words, first_word + 1, last_word - 1,
+		                       [&](idx_t word_idx) { visit_word(bitmap[word_idx], word_idx); });
+	}
+	visit_word(bitmap[last_word] & upper_mask, last_word);
 }
 
 static bool SelectionVectorIsOrdered(const SelectionVector &sel, idx_t sel_count) {
@@ -1954,8 +1989,10 @@ static bool SkipPausedBitpackingPrimaryFilter(ColumnSegment &segment, ColumnScan
 template <class T, bool BUILD_DENSE, bool HAS_RESIDUAL_RANGES>
 struct BitpackingPerfectHashJoinMatcher {
 	BitpackingPerfectHashJoinMatcher(T build_min_p, T build_max_p, const validity_t *build_validity_p,
+	                                 const validity_t *build_validity_non_empty_words_p,
 	                                 const vector<FastInternalFilterOperation> &operations_p, idx_t operation_count_p)
-	    : build_min(build_min_p), build_max(build_max_p), build_validity(build_validity_p), operations(operations_p),
+	    : build_min(build_min_p), build_max(build_max_p), build_validity(build_validity_p),
+	      build_validity_non_empty_words(build_validity_non_empty_words_p), operations(operations_p),
 	      operation_count(operation_count_p) {
 	}
 
@@ -2022,7 +2059,8 @@ struct BitpackingPerfectHashJoinMatcher {
 					emit_build_idx(build_idx);
 				}
 			} else {
-				BitpackingVisitSetBits(build_validity, first_build_idx, last_build_idx, emit_build_idx);
+				BitpackingVisitSummarizedSetBits(build_validity, build_validity_non_empty_words, first_build_idx,
+				                                 last_build_idx, emit_build_idx);
 			}
 			return true;
 		}
@@ -2031,6 +2069,7 @@ struct BitpackingPerfectHashJoinMatcher {
 	T build_min;
 	T build_max;
 	const validity_t *build_validity;
+	const validity_t *build_validity_non_empty_words;
 	const vector<FastInternalFilterOperation> &operations;
 	idx_t operation_count;
 };
@@ -2039,11 +2078,12 @@ template <class T, bool BUILD_DENSE, bool HAS_RESIDUAL_RANGES>
 static bool TryBitpackingPerfectHashJoinFilterWithLayout(ColumnSegment &segment, ColumnScanState &state,
                                                          idx_t vector_count, Vector &result, SelectionVector &sel,
                                                          idx_t &sel_count, T build_min, T build_max,
-                                                         const ExecutionPerfectHashJoinTableLayout &layout,
+                                                         const ExecutionPerfectHashJoinFilterLayout &layout,
                                                          const vector<FastInternalFilterOperation> &operations,
                                                          idx_t fused_operation_count) {
 	BitpackingPerfectHashJoinMatcher<T, BUILD_DENSE, HAS_RESIDUAL_RANGES> matches(
-	    build_min, build_max, layout.build_validity, operations, fused_operation_count);
+	    build_min, build_max, layout.build_validity, layout.build_validity_non_empty_words, operations,
+	    fused_operation_count);
 	return TryBitpackingLookupFilter<T>(segment, state, vector_count, result, sel, sel_count, matches);
 }
 
@@ -2060,8 +2100,8 @@ static bool TryBitpackingPerfectHashJoinFilter(ColumnSegment &segment, ColumnSca
 		return false;
 	}
 	auto &operations = filter_state_typed.fast_internal_filter_operations;
-	if (operations.empty() || operations[0].type != FastInternalFilterOperationType::PERFECT_HASH_JOIN ||
-	    !operations[0].perfect_hash_join_data || !operations[0].perfect_hash_join_data->executor) {
+	auto &scan_plan = filter_state_typed.fast_internal_filter_scan_plan;
+	if (!scan_plan.perfect_hash_join_layout) {
 		return false;
 	}
 	if (SkipPausedBitpackingPrimaryFilter<T>(segment, state, vector_count, result, sel, sel_count, filter_state_typed,
@@ -2069,37 +2109,28 @@ static bool TryBitpackingPerfectHashJoinFilter(ColumnSegment &segment, ColumnSca
 		return true;
 	}
 
-	ExecutionPerfectHashJoinTableLayout layout;
-	if (!operations[0].perfect_hash_join_data->executor->GetExecutionPerfectHashJoinTableLayout(layout) ||
-	    !layout.ready || layout.key_physical_type != result.GetType().InternalType() ||
-	    (!layout.is_build_dense && !layout.build_validity)) {
-		return false;
-	}
-	const auto build_min = BitpackingValueFromBits<T>(layout.build_min);
-	const auto build_max = BitpackingValueFromBits<T>(layout.build_max);
+	auto layout = scan_plan.perfect_hash_join_layout;
+	D_ASSERT(layout->key_physical_type == result.GetType().InternalType());
+	const auto build_min = BitpackingValueFromBits<T>(layout->build_min);
+	const auto build_max = BitpackingValueFromBits<T>(layout->build_max);
 	const auto primary_input_count = sel_count;
-	idx_t fused_operation_count = 1;
-	const bool track_primary_selectivity = static_cast<bool>(operations[0].selectivity);
-	while (!track_primary_selectivity && fused_operation_count < operations.size() &&
-	       operations[fused_operation_count].type == FastInternalFilterOperationType::SIGNED_NUMERIC_RANGE) {
-		fused_operation_count++;
-	}
+	const auto fused_operation_count = scan_plan.primary_operation_count;
 	const auto has_residual_ranges = fused_operation_count > 1;
 	bool filtered;
-	if (layout.is_build_dense) {
+	if (layout->is_build_dense) {
 		filtered = has_residual_ranges ? TryBitpackingPerfectHashJoinFilterWithLayout<T, true, true>(
 		                                     segment, state, vector_count, result, sel, sel_count, build_min, build_max,
-		                                     layout, operations, fused_operation_count)
+		                                     *layout, operations, fused_operation_count)
 		                               : TryBitpackingPerfectHashJoinFilterWithLayout<T, true, false>(
 		                                     segment, state, vector_count, result, sel, sel_count, build_min, build_max,
-		                                     layout, operations, fused_operation_count);
+		                                     *layout, operations, fused_operation_count);
 	} else {
 		filtered = has_residual_ranges ? TryBitpackingPerfectHashJoinFilterWithLayout<T, false, true>(
 		                                     segment, state, vector_count, result, sel, sel_count, build_min, build_max,
-		                                     layout, operations, fused_operation_count)
+		                                     *layout, operations, fused_operation_count)
 		                               : TryBitpackingPerfectHashJoinFilterWithLayout<T, false, false>(
 		                                     segment, state, vector_count, result, sel, sel_count, build_min, build_max,
-		                                     layout, operations, fused_operation_count);
+		                                     *layout, operations, fused_operation_count);
 	}
 	if (!filtered) {
 		return false;
@@ -2169,12 +2200,7 @@ static bool TryBitpackingBloomFilter(ColumnSegment &segment, ColumnScanState &st
 	}
 
 	const auto primary_input_count = sel_count;
-	idx_t fused_operation_count = 1;
-	const bool track_primary_selectivity = static_cast<bool>(operations[0].selectivity);
-	while (!track_primary_selectivity && fused_operation_count < operations.size() &&
-	       operations[fused_operation_count].type == FastInternalFilterOperationType::SIGNED_NUMERIC_RANGE) {
-		fused_operation_count++;
-	}
+	const auto fused_operation_count = filter_state_typed.fast_internal_filter_scan_plan.primary_operation_count;
 	const auto has_residual_ranges = fused_operation_count > 1;
 	bool filtered;
 	if (has_residual_ranges) {

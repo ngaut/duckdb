@@ -1491,6 +1491,8 @@ TEST_CASE("JIT sorted grouped sums preserve compact runs across scheduler yields
 	bool proven_unique_append_enabled = false;
 	bool producer_order_proof = false;
 	bool final_combine_required = false;
+	idx_t grouped_aggregate_reserve_target = 0;
+	bool grouped_aggregate_reserve_resized = false;
 	for (auto &event : manager.GetEvents()) {
 		if (EventPhase(event) != "runtime" || event.backend_name != "sljit" ||
 		    !StringUtil::Contains(EventJitRuntimePathCounts(event),
@@ -1500,6 +1502,9 @@ TEST_CASE("JIT sorted grouped sums preserve compact runs across scheduler yields
 		generated_runtime_count++;
 		lazy_codegen_code_size += event.jit_runtime.lazy_codegen.code_size;
 		RequireGeneratedAggregateUpdateRuntimeOwnership(event);
+		grouped_aggregate_reserve_resized =
+		    grouped_aggregate_reserve_resized ||
+		    StageNameContains(event.generated_stage_runtime, "grouped_aggregate_reserve.reserve_groups.resize");
 		for (auto &counter : event.jit_runtime.runtime_path_counts) {
 			if (counter.counter.name == "aggregate_update.generated_pending_primitive_group_runs") {
 				generated_rows += counter.count;
@@ -1511,6 +1516,8 @@ TEST_CASE("JIT sorted grouped sums preserve compact runs across scheduler yields
 				producer_order_proof = true;
 			} else if (counter.counter.name == "aggregate_update.proven_unique_append.final_combine_required") {
 				final_combine_required = true;
+			} else if (counter.counter.name == "aggregate_update.grouped_aggregate_reserve_target") {
+				grouped_aggregate_reserve_target += counter.count;
 			}
 		}
 	}
@@ -1521,6 +1528,8 @@ TEST_CASE("JIT sorted grouped sums preserve compact runs across scheduler yields
 	REQUIRE(proven_unique_append_enabled);
 	REQUIRE(producer_order_proof);
 	REQUIRE_FALSE(final_combine_required);
+	REQUIRE(grouped_aggregate_reserve_target <= STANDARD_VECTOR_SIZE);
+	REQUIRE_FALSE(grouped_aggregate_reserve_resized);
 }
 
 TEST_CASE("JIT unordered grouped input does not generate unused run kernels", "[api][jit]") {
@@ -3563,6 +3572,72 @@ TEST_CASE("JIT gates perfect-hash aggregate updates with generated source filter
 		REQUIRE_FALSE(
 		    StringUtil::Contains(EventJitRuntimePathCounts(event), "aggregate_update.filtered_perfect_hash_update="));
 	}
+}
+
+TEST_CASE("JIT perfect hash keeps payload and group vector shapes independent", "[api][jit]") {
+	DuckDB db;
+	Connection con(db);
+	auto &manager = ExecutionRegionManager::Get(*con.context);
+
+	ConfigureSljitForCoverage(con, false, true, true, 10000);
+	REQUIRE_NO_FAIL(con.Query("SET threads=4"));
+	auto db_path = TestCreatePath("jit_perfect_hash_independent_vector_shapes.db");
+	TestDeleteFile(db_path);
+	TestDeleteFile(db_path + ".wal");
+	REQUIRE_NO_FAIL(con.Query("ATTACH " + SQLString(db_path) + " AS shape_test (ROW_GROUP_SIZE 2048)"));
+	REQUIRE_NO_FAIL(con.Query("CREATE TABLE shape_test.payload AS "
+	                          "SELECT CASE i % 3 WHEN 0 THEN 'A' WHEN 1 THEN 'N' ELSE 'R' END AS group_flag, "
+	                          "       CASE i % 2 WHEN 0 THEN 'F' ELSE 'O' END AS group_status, "
+	                          "       DATE '2024-01-01' + CASE i % 12 "
+	                          "           WHEN 8 THEN 4 WHEN 9 THEN 5 WHEN 10 THEN 0 WHEN 11 THEN 1 "
+	                          "           ELSE CAST(i % 12 AS INTEGER) END AS event_date, "
+	                          "       CAST(1 + i % 50 AS DECIMAL(15,2)) AS quantity, "
+	                          "       CAST(100 + i % 1000 AS DECIMAL(15,2)) AS price, "
+	                          "       CAST(i % 10 AS DECIMAL(15,2)) AS discount, "
+	                          "       CAST(i % 8 AS DECIMAL(15,2)) AS tax "
+	                          "FROM range(240003) tbl(i)"));
+	REQUIRE_NO_FAIL(con.Query("CHECKPOINT shape_test"));
+	REQUIRE_NO_FAIL(con.Query("DETACH shape_test"));
+	REQUIRE_NO_FAIL(con.Query("ATTACH " + SQLString(db_path) + " AS shape_test"));
+
+	const string query = "SELECT group_flag, group_status, sum(quantity), sum(price), "
+	                     "       sum(price * (1.00::DECIMAL(15,2) - discount)), "
+	                     "       sum(price * (1.00::DECIMAL(15,2) - discount) * "
+	                     "           (1.00::DECIMAL(15,2) + tax)), "
+	                     "       sum(discount), count(*) "
+	                     "FROM shape_test.payload "
+	                     "WHERE event_date <= DATE '2024-01-04' "
+	                     "  AND tax <= 3.00::DECIMAL(15,2) "
+	                     "  AND quantity <= 25.00::DECIMAL(15,2) "
+	                     "GROUP BY group_flag, group_status "
+	                     "ORDER BY group_flag, group_status";
+	REQUIRE_NO_FAIL(con.Query("SET jit_policy='off'"));
+	auto reference = con.Query(query);
+	REQUIRE_NO_FAIL(*reference);
+	REQUIRE(reference->RowCount() == 6);
+
+	REQUIRE_NO_FAIL(con.Query("SET jit_policy='auto'"));
+	for (idx_t run = 0; run < 3; run++) {
+		ClearJitTrace(manager, true);
+		auto result = con.Query(query);
+		REQUIRE_NO_FAIL(*result);
+		REQUIRE(result->ToString() == reference->ToString());
+	}
+	RequireJitEvent(
+	    manager,
+	    [](const ExecutionRegionEvent &event) {
+		    return IsCompiledSljitRegionEvent(event) && event.has_candidate &&
+		           event.candidate_traits.sink_kind == ExecutionRegionSinkKind::PERFECT_HASH_AGGREGATE_UPDATE;
+	    },
+	    [](const ExecutionRegionEvent &event) {
+		    RequireGeneratedMachineCodeRegion(event);
+		    RequireGeneratedSourceFilterContract(event);
+		    REQUIRE(StringUtil::Contains(event.ir, "grouped_state_lookup=generated-perfect-hash"));
+	    });
+
+	REQUIRE_NO_FAIL(con.Query("DETACH shape_test"));
+	TestDeleteFile(db_path);
+	TestDeleteFile(db_path + ".wal");
 }
 
 TEST_CASE("JIT perfect hash aggregate generates primitive decimal sum and count star updates", "[api][jit]") {

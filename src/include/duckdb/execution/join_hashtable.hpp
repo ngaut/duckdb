@@ -271,7 +271,7 @@ public:
 	//! Emit one fixed-width RHS output column into a flat result vector when the caller immediately consumes flat data.
 	bool TryGatherRHSColumnFlat(Vector &row_ptrs, const SelectionVector &ptr_sel, const idx_t count,
 	                            idx_t rhs_output_idx, Vector &result) const;
-	//! Return a fixed-width RHS output column's row-layout source when row pointers can safely load it directly.
+	//! Return a fixed-width RHS output column source that row pointers can resolve without materializing a vector.
 	bool TryGetRHSFixedColumnSource(idx_t rhs_output_idx, ExecutionHashJoinRHSFixedColumnSource &source) const;
 	//! Follow the chain pointer; when USE_DICT_EMISSION, resolves via aux_next_ptrs
 	template <bool USE_DICT_EMISSION>

@@ -125,7 +125,8 @@ unique_ptr<LocalSinkState> PhysicalInsert::GetLocalSinkState(ExecutionContext &c
 	return make_uniq<InsertLocalState>(context.client, insert_types, bound_constraints);
 }
 
-ExecutionContract PhysicalInsert::GetExecutionContract() const {
+ExecutionContract PhysicalInsert::GetExecutionContract(ExecutionRegionOperatorSlot slot,
+                                                       bool render_diagnostics) const {
 	ExecutionContract result;
 	if (!info || return_chunk || parallel || action_type != OnConflictAction::THROW) {
 		return FinalizeExecutionContract(std::move(result));

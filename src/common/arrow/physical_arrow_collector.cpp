@@ -27,7 +27,8 @@ unique_ptr<PhysicalOperator> PhysicalArrowCollector::Create(ClientContext &conte
 	return make_uniq<PhysicalArrowBatchCollector>(physical_plan, data, batch_size);
 }
 
-ExecutionContract PhysicalArrowCollector::GetExecutionContract() const {
+ExecutionContract PhysicalArrowCollector::GetExecutionContract(ExecutionRegionOperatorSlot slot,
+                                                               bool render_diagnostics) const {
 	ExecutionContract result;
 	result.sink.kind = ExecutionRegionSinkKind::MATERIALIZATION;
 	result.sink.reason = "DuckDB Arrow result collector native sink contract missing";

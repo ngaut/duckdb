@@ -135,18 +135,8 @@ bool SljitFullPipelineTerminalPrimitiveIsExecutable(const vector<SljitExecutable
 
 } // namespace
 
-bool SljitFullPipelineSourceFetchOwnsSinkAdvance(const SljitFullPipelinePrimitiveSequence &primitive_sequence) {
-	if (primitive_sequence.Count() < 2 || !SljitFullPipelineSourcePrimitiveIsExecutable(primitive_sequence.Step(0))) {
-		throw InternalException("SLJIT source-fetch sink ownership requires an executable primitive sequence");
-	}
-	return true;
-}
-
 bool SljitFullPipelineSourceFetchNeedsPartitionPreservingChunks(
     const SljitFullPipelinePrimitiveSequence &primitive_sequence) {
-	if (!SljitFullPipelineSourceFetchOwnsSinkAdvance(primitive_sequence)) {
-		return false;
-	}
 	// A source-generated filter can turn one ordered scan partition into several sparse chunks. Those chunks must
 	// reach the sink separately so the core batch-index protocol can associate each one with its source partition.
 	return primitive_sequence.Step(1).kind == SljitFullPipelinePrimitiveKind::GENERATED_FILTER;
@@ -251,11 +241,4 @@ bool SljitFullPipelinePrimitiveSequenceIsExecutable(const vector<SljitExecutable
 	}
 	return false;
 }
-
-const SljitFullPipelinePrimitiveStep &
-SljitFullPipelinePrimitiveSequenceTerminalStep(const SljitFullPipelinePrimitiveSequence &sequence) {
-	D_ASSERT(sequence.Count() > 0);
-	return sequence.Step(sequence.Count() - 1);
-}
-
 } // namespace duckdb

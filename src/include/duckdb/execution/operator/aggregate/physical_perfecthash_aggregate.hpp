@@ -58,7 +58,7 @@ public:
 	unique_ptr<GlobalSinkState> GetGlobalSinkState(ClientContext &context) const override;
 
 	InsertionOrderPreservingMap<string> ParamsToString() const override;
-	ExecutionContract GetExecutionContract() const override;
+	ExecutionContract GetExecutionContract(ExecutionRegionOperatorSlot slot, bool render_diagnostics) const override;
 	optional_idx FinalizedSourceCardinality() const;
 
 	//! Create a perfect aggregate hash table for this node

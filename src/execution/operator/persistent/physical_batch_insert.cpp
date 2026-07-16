@@ -431,7 +431,8 @@ unique_ptr<LocalSinkState> PhysicalBatchInsert::GetLocalSinkState(ExecutionConte
 	return make_uniq<BatchInsertLocalState>(context.client, insert_types);
 }
 
-ExecutionContract PhysicalBatchInsert::GetExecutionContract() const {
+ExecutionContract PhysicalBatchInsert::GetExecutionContract(ExecutionRegionOperatorSlot slot,
+                                                            bool render_diagnostics) const {
 	ExecutionContract result;
 	result.sink.kind = ExecutionRegionSinkKind::MATERIALIZATION;
 	result.sink.reason = "DuckDB materialization append sink contract";

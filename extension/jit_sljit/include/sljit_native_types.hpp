@@ -325,6 +325,11 @@ struct SljitNativeVectorInput {
 	bool expression_tree_flat_no_selection = false;
 	bool expression_tree_flat_all_valid = false;
 	bool expression_tree_all_valid = false;
+	// Perfect-hash group representation is independent from the payload expression representation above.
+	bool perfect_hash_group_flat_all_valid = false;
+	bool perfect_hash_group_all_valid = false;
+	bool perfect_hash_inputs_flat_no_selection = false;
+	bool perfect_hash_inputs_all_valid = false;
 	bool group_selection_all_present = false;
 	int64_t *aggregate_int64_value = nullptr;
 	hugeint_t *aggregate_hugeint_value = nullptr;

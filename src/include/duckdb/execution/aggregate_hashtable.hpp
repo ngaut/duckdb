@@ -156,6 +156,10 @@ public:
 	const PartitionedTupleData &GetPartitionedData() const;
 	unique_ptr<PartitionedTupleData>
 	AcquirePartitionedData(optional_ptr<TupleDataRowLocationRemap> row_location_remap = nullptr);
+	//! Transfers append-only rows without radix repartitioning. This succeeds only while all materialized rows are in
+	//! the deferred unpartitioned collection owned by a still-valid uniqueness proof.
+	unique_ptr<PartitionedTupleData>
+	TryAcquireProvenUniqueAppendData(optional_ptr<TupleDataRowLocationRemap> row_location_remap = nullptr);
 	void Abandon(optional_ptr<TupleDataRowLocationRemap> row_location_remap = nullptr);
 	void Repartition(optional_ptr<TupleDataRowLocationRemap> row_location_remap = nullptr);
 	shared_ptr<ArenaAllocator> GetAggregateAllocator();
@@ -181,6 +185,8 @@ public:
 	//! Skips lookups from here on out. Statistical admission requires final combination; a proven-unique
 	//! stream may defer that requirement until its proof fails.
 	void SkipLookups(bool require_final_combine = true);
+	//! Whether the pointer table has stopped owning group lookup for the current stream.
+	bool LookupsSkipped() const;
 	//! Permanently require final combination for the current append-only stream.
 	void RequireFinalCombine();
 	//! Continue a fixed-width strictly increasing compact-key stream. Exact dense runs are owned by
@@ -374,6 +380,11 @@ private:
 	bool proven_unique_append_ranges_coalesced;
 
 private:
+	struct AggregateHTAppendTarget {
+		PartitionedTupleData &data;
+		PartitionedTupleDataAppendState &state;
+	};
+
 	//! Disabled the copy constructor
 	GroupedAggregateHashTable(const GroupedAggregateHashTable &) = delete;
 	//! Destroy the HT
@@ -383,6 +394,8 @@ private:
 	void InitializePartitionedData();
 	//! Initializes the PartitionedTupleData that only has 1 partition
 	void InitializeUnpartitionedData();
+	//! Selects and prepares the canonical row-storage target. Append-only ownership can defer radix partitioning.
+	AggregateHTAppendTarget PrepareAppendTarget(DataChunk &groups, idx_t group_count, bool defer_partitioning = false);
 	//! Apply bitmask to get the entry in the HT
 	inline idx_t ApplyBitMask(hash_t hash) const;
 	//! Reinserts tuples (triggered by Resize)

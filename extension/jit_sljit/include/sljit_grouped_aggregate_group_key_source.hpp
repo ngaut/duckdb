@@ -343,6 +343,9 @@ static bool SljitTryGetHashJoinLHSInputConditionIndex(const ExecutionHashJoinPro
 static bool SljitTryGetHashJoinRHSFixedColumnConditionIndex(const ExecutionHashJoinProbeBinding &binding,
                                                             const ExecutionHashJoinRHSFixedColumnSource &source,
                                                             idx_t &condition_idx) {
+	if (source.storage_kind != ExecutionHashJoinRHSFixedColumnStorageKind::ROW) {
+		return false;
+	}
 	const auto condition_count =
 	    MinValue<idx_t>(binding.table_layout.condition_count, binding.table_layout.layout_offsets.size());
 	for (idx_t key_idx = 0; key_idx < condition_count; key_idx++) {
@@ -450,6 +453,9 @@ static bool SljitTryBuildRowPointerGroupKeySource(const ExecutionHashJoinProbeBi
 		group_source.input_vector_repeats_with_row_pointer = true;
 		SljitAttachHashJoinBuildConditionType(binding, group_source, condition_idx);
 		return SljitTryFinalizeRowPointerGroupKeySource(remapped_expr.plan, group.type, group_source);
+	}
+	if (rhs_source.storage_kind != ExecutionHashJoinRHSFixedColumnStorageKind::ROW) {
+		return false;
 	}
 	SljitInitializeRowPointerGroupKeySource(rhs_source, group.type, group_source);
 	if (SljitHashJoinRHSFixedColumnIsNullFilteredConditionKey(binding, rhs_source)) {

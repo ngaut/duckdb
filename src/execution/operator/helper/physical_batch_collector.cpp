@@ -10,7 +10,8 @@ PhysicalBatchCollector::PhysicalBatchCollector(PhysicalPlan &physical_plan, Prep
     : PhysicalResultCollector(physical_plan, data) {
 }
 
-ExecutionContract PhysicalBatchCollector::GetExecutionContract() const {
+ExecutionContract PhysicalBatchCollector::GetExecutionContract(ExecutionRegionOperatorSlot slot,
+                                                               bool render_diagnostics) const {
 	return BuildExecutionResultCollectorSinkContract();
 }
 

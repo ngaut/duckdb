@@ -25,7 +25,7 @@ public:
 
 public:
 	unique_ptr<OperatorState> GetOperatorState(ExecutionContext &context) const override;
-	ExecutionContract GetExecutionContract() const override;
+	ExecutionContract GetExecutionContract(ExecutionRegionOperatorSlot slot, bool render_diagnostics) const override;
 	OperatorResultType Execute(ExecutionContext &context, DataChunk &input, DataChunk &chunk,
 	                           GlobalOperatorState &gstate, OperatorState &state) const override;
 

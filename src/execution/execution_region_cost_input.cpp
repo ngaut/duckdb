@@ -574,17 +574,16 @@ static bool TryAccumulateExecutionRegionPhysicalScanCost(const PhysicalOperator 
 	if (!scan.table_filters || !scan.table_filters->HasFilters()) {
 		return true;
 	}
-	auto contract = scan.GetExecutionContract();
-	auto &source_input_types = contract.source.table_scan_contract.source_contract_input_types;
 	idx_t filter_cost = 0;
 	idx_t filter_count = 0;
 	idx_t generated_filter_count = 0;
 	for (auto &filter : *scan.table_filters) {
 		auto filter_idx = filter.GetIndex().GetIndex();
 		bool has_string_like = false;
-		const bool can_generate = filter_idx < source_input_types.size() &&
+		const bool can_generate = filter_idx < scan.column_ids.size() &&
 		                          ExecutionRegionPhysicalTableFilterCanUseGeneratedSourceStage(
-		                              filter.Filter(), source_input_types[filter_idx], filter_count, has_string_like);
+		                              filter.Filter(), GetExecutionRegionTableScanSourceInputType(scan, filter_idx),
+		                              filter_count, has_string_like);
 		if (can_generate) {
 			filter_cost += DuckDBCostModel::FilterCost(filter.Filter());
 			generated_filter_count++;
@@ -666,7 +665,7 @@ static idx_t ExecutionRegionPhysicalSourceContractInputCardinality(const Physica
 
 static void AccumulateExecutionRegionPhysicalSourceContractCost(const PhysicalOperator &source,
                                                                 ExecutionRegionPhysicalPipelineCostFacts &facts) {
-	auto contract = source.GetExecutionContract();
+	auto contract = source.GetExecutionContract(ExecutionRegionOperatorSlot::SOURCE, false);
 	if (!ExecutionRegionPhysicalSourceUsesReadySourceContract(contract)) {
 		return;
 	}
@@ -771,7 +770,7 @@ static bool TryAccumulateExecutionRegionPhysicalOperatorCost(const PhysicalOpera
 			AddExecutionRegionNativeAggregateStage(input, false);
 			return true;
 		}
-		auto contract = op.GetExecutionContract();
+		auto contract = op.GetExecutionContract(ExecutionRegionOperatorSlot::SINK, false);
 		auto &sink = contract.sink;
 		if (!ExecutionRegionAggregateUpdateGeneratesBody(sink)) {
 			// A ready native-state-update sink without a generated body is still a
@@ -805,7 +804,7 @@ static bool TryAccumulateExecutionRegionPhysicalOperatorCost(const PhysicalOpera
 			AddExecutionRegionNativeAggregateStage(input, true);
 			return true;
 		}
-		auto contract = op.GetExecutionContract();
+		auto contract = op.GetExecutionContract(ExecutionRegionOperatorSlot::SINK, false);
 		auto &sink = contract.sink;
 		if (!ExecutionRegionAggregateUpdateGeneratesBody(sink)) {
 			// Same shape as the ungrouped case: a READY native-state-update sink is a
@@ -844,7 +843,7 @@ static bool TryAccumulateExecutionRegionPhysicalOperatorCost(const PhysicalOpera
 			AddExecutionRegionNativeAggregateStage(input, true);
 			return true;
 		}
-		auto contract = op.GetExecutionContract();
+		auto contract = op.GetExecutionContract(ExecutionRegionOperatorSlot::SINK, false);
 		auto &sink = contract.sink;
 		if (!ExecutionRegionAggregateUpdateGeneratesBody(sink)) {
 			// Same shape as the ungrouped case: a READY native-state-update sink is a
@@ -927,7 +926,7 @@ static void FinalizeExecutionRegionPhysicalPipelineCostInput(Pipeline &pipeline,
 	auto &cost_input = facts.cost_input;
 	auto source = pipeline.GetSource();
 	if (source && facts.exact_source_cardinality_bounds_pipeline) {
-		auto contract = source->GetExecutionContract();
+		auto contract = source->GetExecutionContract(ExecutionRegionOperatorSlot::SOURCE, false);
 		if (contract.source.estimated_source_cardinality_exact) {
 			cost_input.estimated_cardinality = contract.source.estimated_source_cardinality;
 		}
@@ -939,7 +938,7 @@ static void FinalizeExecutionRegionPhysicalPipelineCostInput(Pipeline &pipeline,
 	    cost_input.generated_work_class == PhysicalRunnerGeneratedWorkClass::PROJECTION_GLUE &&
 	    facts.traits.source_kind == ExecutionRegionSourceKind::STATEFUL_OPERATOR) {
 		D_ASSERT(source);
-		auto contract = source->GetExecutionContract();
+		auto contract = source->GetExecutionContract(ExecutionRegionOperatorSlot::SOURCE, false);
 		if (ExecutionRegionPhysicalSourceUsesReadySourceContract(contract)) {
 			facts.traits.source_execution = ExecutionRegionSourceExecutionKind::SOURCE_CONTRACT;
 			cost_input.native_protocol_class = ClassifyExecutionRegionNativeProtocol(facts.traits);

@@ -35,6 +35,8 @@ static string PipelineExecuteResultToString(PipelineExecuteResult result) {
 	switch (result) {
 	case PipelineExecuteResult::NOT_FINISHED:
 		return "not_finished";
+	case PipelineExecuteResult::RUNNER_HANDOFF:
+		return "runner_handoff";
 	case PipelineExecuteResult::FINISHED:
 		return "finished";
 	case PipelineExecuteResult::INTERRUPTED:
@@ -67,6 +69,8 @@ static ExecutionRegionResult PipelineExecuteResultToCompiledFullPipelineResult(P
 		return ExecutionRegionResult::FINISHED;
 	case PipelineExecuteResult::INTERRUPTED:
 		return ExecutionRegionResult::INTERRUPTED;
+	case PipelineExecuteResult::RUNNER_HANDOFF:
+		throw InternalException("Runner handoff cannot be converted to a compiled full pipeline result");
 	default:
 		throw InternalException("Unknown pipeline execution result");
 	}

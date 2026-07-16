@@ -40,7 +40,7 @@ public:
 	unique_ptr<LocalSinkState> GetLocalSinkState(ExecutionContext &context) const override;
 
 	SinkCombineResultType Combine(ExecutionContext &context, OperatorSinkCombineInput &input) const override;
-	ExecutionContract GetExecutionContract() const override;
+	ExecutionContract GetExecutionContract(ExecutionRegionOperatorSlot slot, bool render_diagnostics) const override;
 	bool BindExecutionSink(ExecutionContext &context, DataChunk &input, OperatorSinkInput &sink_input,
 	                       const ExecutionRegionSinkInfo &sink_info, ExecutionSinkBinding &binding) const override;
 

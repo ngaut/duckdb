@@ -17,8 +17,6 @@ class ClientContext;
 class PhysicalOperator;
 class Pipeline;
 
-enum class ExecutionRegionOperatorSlot : uint8_t { SOURCE, OPERATOR, SINK };
-
 struct ExecutionRegionOperatorEntry {
 	bool present = false;
 	ExecutionRegionOperatorSlot slot = ExecutionRegionOperatorSlot::OPERATOR;

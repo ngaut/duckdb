@@ -61,7 +61,7 @@ public:
 public:
 	string GetName() const override;
 	InsertionOrderPreservingMap<string> ParamsToString() const override;
-	ExecutionContract GetExecutionContract() const override;
+	ExecutionContract GetExecutionContract(ExecutionRegionOperatorSlot slot, bool render_diagnostics) const override;
 
 	bool Equals(const PhysicalOperator &other) const override;
 

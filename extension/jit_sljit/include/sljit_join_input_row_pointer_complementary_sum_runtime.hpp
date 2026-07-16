@@ -120,7 +120,8 @@ static bool SljitTryResolveComplementarySumRHSField(const ExecutionHashJoinProbe
 		blocker = "rhs_source_" + to_string(join_output_source_idx - lhs_column_count);
 		return false;
 	}
-	if (field.source.layout_offset == DConstants::INVALID_INDEX) {
+	if (field.source.storage_kind != ExecutionHashJoinRHSFixedColumnStorageKind::ROW ||
+	    field.source.layout_offset == DConstants::INVALID_INDEX) {
 		blocker = "rhs_layout";
 		return false;
 	}

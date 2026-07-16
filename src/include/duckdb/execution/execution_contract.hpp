@@ -17,6 +17,8 @@ namespace duckdb {
 class Expression;
 class PhysicalTableScan;
 
+enum class ExecutionRegionOperatorSlot : uint8_t { SOURCE, OPERATOR, SINK };
+
 struct ExecutionSourceContractCapability {
 	ExecutionRegionSourceKind kind = ExecutionRegionSourceKind::NONE;
 	ExecutionRegionSourceExecutionKind execution = ExecutionRegionSourceExecutionKind::NONE;
@@ -29,6 +31,9 @@ struct ExecutionSourceContractCapability {
 };
 
 DUCKDB_API ExecutionSourceContractCapability GetExecutionSourceContractCapability(const PhysicalTableScan &scan);
+DUCKDB_API idx_t GetExecutionRegionTableScanSourceCardinality(const PhysicalTableScan &scan);
+DUCKDB_API LogicalType GetExecutionRegionTableScanSourceInputType(const PhysicalTableScan &scan,
+                                                                  idx_t source_input_idx);
 
 struct ExecutionSourceFilterContract {
 	idx_t filter_index = 0;

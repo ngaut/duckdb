@@ -40,7 +40,8 @@ unique_ptr<OperatorState> PhysicalProjection::GetOperatorState(ExecutionContext 
 	return make_uniq<ProjectionState>(context, select_list);
 }
 
-ExecutionContract PhysicalProjection::GetExecutionContract() const {
+ExecutionContract PhysicalProjection::GetExecutionContract(ExecutionRegionOperatorSlot slot,
+                                                           bool render_diagnostics) const {
 	ExecutionContract result;
 	result.transform.projection_expressions.reserve(select_list.size());
 	for (auto &expression : select_list) {

@@ -53,8 +53,12 @@ SljitFullPipelineRecipe SljitProjectionAggregateRecipeBinding::MakeJoinDirectPro
 	} else {
 		sequence = MakeSingleJoinDirectPrefixSequence(facts, post_join_aggregate);
 	}
+	const auto probe_step_idx = sequence.Count() - 1;
+	const auto &probe = sequence.Step(probe_step_idx).hash_join_probe_selection;
 	sequence.Add(SljitFullPipelinePrimitiveStep::PostJoinProjectionAggregateUpdate(post_join_aggregate));
-	return MakePrimitiveSequence(std::move(sequence));
+	auto direct_consumer = SljitMakeHashJoinDirectAggregateConsumerContract(
+	    probe_step_idx, sequence.Count() - 1, probe.hash_join_idx, post_join_aggregate.aggregate_idx);
+	return MakePrimitiveSequence(std::move(sequence), direct_consumer);
 }
 
 SljitFullPipelineRecipe SljitProjectionAggregateRecipeBinding::MakeJoinProjectionAggregateTailRecipe(
@@ -74,15 +78,15 @@ SljitFullPipelineRecipe SljitProjectionAggregateRecipeBinding::MakeMarkFilterPro
 	return MakeProjectionAggregateRecipe(std::move(sequence), shape, true);
 }
 
-SljitFullPipelineRecipe
-SljitProjectionAggregateRecipeBinding::MakeMarkFilterNativeTailRecipe(
+SljitFullPipelineRecipe SljitProjectionAggregateRecipeBinding::MakeMarkFilterNativeTailRecipe(
     const SljitProjectionAggregatePrefixFacts &facts) const {
 	auto sequence = MakeProjectionAggregateMarkFilterPrefix(facts, true, DConstants::INVALID_INDEX);
 	return MakeNativeTailRecipe(std::move(sequence), facts.mark_filter_idx + 1);
 }
 
 bool SljitProjectionAggregateRecipeBinding::ProjectionAggregateHasDedicatedBackend(
-    const SljitFullPipelineProjectionAggregateShape &shape, bool allow_direct_projected_primitive_payload_update) const {
+    const SljitFullPipelineProjectionAggregateShape &shape,
+    bool allow_direct_projected_primitive_payload_update) const {
 	if (SljitCanBindUngroupedAggregateUpdatePrimitive(ops, shape.aggregate_idx)) {
 		return SljitCanBindProjectionChainPrimitive(ops, shape.first_projection_idx, shape.final_projection_idx);
 	}
@@ -136,7 +140,7 @@ SljitProjectionAggregateRecipeBinding::MakeSingleJoinProjectionAggregateTailPref
 	auto sequence = MakeSourceSequence();
 	if (facts.HasJoinInputProjection(0) && !facts.HasSourceFilterProjection() &&
 	    PreJoinProjectionBinding().TryAppendElidedHashJoinProbeSelection(sequence, facts.JoinInputProjectionIdx(0),
-	                                                                    hash_join_idx)) {
+	                                                                     hash_join_idx)) {
 		return sequence;
 	}
 	AddProjectionAggregateFirstJoinPrefix(sequence, facts);
@@ -247,8 +251,8 @@ SljitPostJoinProjectionAggregatePrimitive
 SljitProjectionAggregateRecipeBinding::BindPostJoinProjectionAggregatePrimitive(
     const SljitFullPipelineProjectionAggregateShape &shape, idx_t hash_join_idx) const {
 	SljitPostJoinProjectionAggregatePrimitive post_join_aggregate;
-	post_join_aggregate.post_join_projection =
-	    SljitBindPostJoinProjectionPrimitive(ops, hash_join_idx, shape.first_projection_idx, shape.final_projection_idx);
+	post_join_aggregate.post_join_projection = SljitBindPostJoinProjectionPrimitive(
+	    ops, hash_join_idx, shape.first_projection_idx, shape.final_projection_idx);
 	post_join_aggregate.aggregate_idx = shape.aggregate_idx;
 	if (!SljitCanBindPostJoinProjectionAggregatePrimitive(ops, post_join_aggregate)) {
 		throw InternalException("SLJIT post-join projection aggregate primitive cannot bind requested aggregate");
@@ -258,13 +262,14 @@ SljitProjectionAggregateRecipeBinding::BindPostJoinProjectionAggregatePrimitive(
 
 SljitProjectionGroupedAggregateRecipeMode
 SljitProjectionAggregateRecipeBinding::ChooseProjectionGroupedAggregateRecipeMode(
-    const SljitFullPipelineProjectionAggregateShape &shape, bool allow_direct_projected_primitive_payload_update) const {
+    const SljitFullPipelineProjectionAggregateShape &shape,
+    bool allow_direct_projected_primitive_payload_update) const {
 	if (!SljitGroupedAggregateUpdateHasDedicatedBackend(ops, shape.aggregate_idx)) {
 		return SljitProjectionGroupedAggregateRecipeMode::INVALID;
 	}
-	if (SljitCanBindProjectedInputGroupedAggregateUpdatePrimitive(
-	        ops, shape.first_projection_idx, shape.final_projection_idx, shape.aggregate_idx,
-	        allow_direct_projected_primitive_payload_update)) {
+	if (SljitCanBindProjectedInputGroupedAggregateUpdatePrimitive(ops, shape.first_projection_idx,
+	                                                              shape.final_projection_idx, shape.aggregate_idx,
+	                                                              allow_direct_projected_primitive_payload_update)) {
 		return SljitProjectionGroupedAggregateRecipeMode::PROJECTED_INPUT;
 	}
 	if (SljitCanBindProjectionChainPrimitive(ops, shape.first_projection_idx, shape.final_projection_idx)) {

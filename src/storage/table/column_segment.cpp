@@ -835,6 +835,10 @@ static bool TryBuildFastInternalFilterOperation(const Expression &expr, const Lo
 		return true;
 	}
 	if (auto perfect_data = TryGetPerfectHashJoinFunctionData(expr, target_type)) {
+		if (!perfect_data->filter_layout ||
+		    perfect_data->filter_layout->key_physical_type != target_type.InternalType()) {
+			return false;
+		}
 		operation = FastInternalFilterOperation {FastInternalFilterOperationType::PERFECT_HASH_JOIN};
 		operation.perfect_hash_join_data = perfect_data;
 		exact = true;
@@ -885,6 +889,36 @@ static unique_ptr<Expression> BuildFastInternalFilterResidual(vector<unique_ptr<
 	return std::move(conjunction);
 }
 
+static void BuildFastInternalFilterScanPlan(ExpressionFilterState &state) {
+	auto &operations = state.fast_internal_filter_operations;
+	if (operations.empty()) {
+		return;
+	}
+
+	auto &plan = state.fast_internal_filter_scan_plan;
+	plan.primary_operation_count = 1;
+	if (!operations[0].selectivity) {
+		while (plan.primary_operation_count < operations.size() &&
+		       operations[plan.primary_operation_count].type == FastInternalFilterOperationType::SIGNED_NUMERIC_RANGE) {
+			plan.primary_operation_count++;
+		}
+	}
+
+	if (operations[0].type != FastInternalFilterOperationType::PERFECT_HASH_JOIN ||
+	    !operations[0].perfect_hash_join_data || !operations[0].perfect_hash_join_data->filter_layout) {
+		return;
+	}
+	auto layout = operations[0].perfect_hash_join_data->filter_layout;
+	D_ASSERT(layout->ready);
+	D_ASSERT(layout->key_physical_type == state.fast_internal_filter_type);
+	if (!layout->is_build_dense &&
+	    (!layout->build_validity || !layout->build_validity_non_empty_words ||
+	     layout->build_validity_word_count != ValidityMask::EntryCount(layout->build_capacity))) {
+		return;
+	}
+	plan.perfect_hash_join_layout = layout;
+}
+
 bool ColumnSegment::PrepareInternalFilterPlan(ExpressionFilterState &state, const Expression &expr,
                                               const LogicalType &target_type) {
 	if (state.fast_internal_filter_initialized) {
@@ -907,6 +941,7 @@ bool ColumnSegment::PrepareInternalFilterPlan(ExpressionFilterState &state, cons
 	for (auto &operation : residual_operations) {
 		state.fast_internal_filter_operations.push_back(std::move(operation));
 	}
+	BuildFastInternalFilterScanPlan(state);
 	state.fast_internal_filter_residual_expression = BuildFastInternalFilterResidual(std::move(residual_expressions));
 	if (state.fast_internal_filter_residual_expression) {
 		state.fast_internal_filter_residual_executor = make_uniq<ExpressionExecutor>(state.GetContext());

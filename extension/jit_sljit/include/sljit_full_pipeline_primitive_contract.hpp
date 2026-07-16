@@ -12,8 +12,6 @@
 
 namespace duckdb {
 
-bool SljitFullPipelineSourceFetchOwnsSinkAdvance(const SljitFullPipelinePrimitiveSequence &primitive_sequence);
-
 bool SljitFullPipelineSourceFetchNeedsPartitionPreservingChunks(
     const SljitFullPipelinePrimitiveSequence &primitive_sequence);
 
@@ -32,8 +30,5 @@ bool SljitNativeTailCanConsumeTail(const vector<SljitExecutableRegionOp> &ops, i
 
 bool SljitFullPipelinePrimitiveSequenceIsExecutable(const vector<SljitExecutableRegionOp> &ops,
                                                     const SljitFullPipelinePrimitiveSequence &sequence);
-
-const SljitFullPipelinePrimitiveStep &
-SljitFullPipelinePrimitiveSequenceTerminalStep(const SljitFullPipelinePrimitiveSequence &sequence);
 
 } // namespace duckdb

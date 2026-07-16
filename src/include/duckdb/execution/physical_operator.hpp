@@ -95,7 +95,7 @@ public:
 
 	virtual void Verify();
 	virtual ExecutionRegionOperatorKind GetExecutionRegionOperatorKind() const;
-	virtual ExecutionContract GetExecutionContract() const;
+	virtual ExecutionContract GetExecutionContract(ExecutionRegionOperatorSlot slot, bool render_diagnostics) const;
 
 public:
 	// Operator interface

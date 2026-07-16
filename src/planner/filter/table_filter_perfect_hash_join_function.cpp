@@ -22,6 +22,9 @@ namespace duckdb {
 PerfectHashJoinFunctionData::PerfectHashJoinFunctionData(optional_ptr<const PerfectHashJoinExecutor> executor_p,
                                                          const string &key_column_name_p)
     : executor(executor_p), key_column_name(key_column_name_p) {
+	if (executor) {
+		filter_layout = executor->GetExecutionPerfectHashJoinFilterLayout();
+	}
 }
 
 unique_ptr<FunctionData> PerfectHashJoinFunctionData::Copy() const {
