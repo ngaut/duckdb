@@ -714,23 +714,17 @@ static void AggregateRecordProvenUniqueRange(vector<GroupedAggregateProvenUnique
 }
 
 template <class KEY_TYPE>
-static bool AggregateTryContinueProvenUniqueDenseAppendTyped(DataChunk &groups, PhysicalType key_type,
-                                                             bool &has_last_key, int64_t &last_signed_key,
-                                                             uint64_t &last_unsigned_key,
-                                                             vector<GroupedAggregateProvenUniqueRange> &ranges,
-                                                             bool &ranges_coalesced) {
+static bool AggregateTryContinueProducerProvenUniqueSummaryTyped(DataChunk &groups, PhysicalType key_type,
+                                                                 bool &has_last_key, int64_t &last_signed_key,
+                                                                 uint64_t &last_unsigned_key,
+                                                                 vector<GroupedAggregateProvenUniqueRange> &ranges,
+                                                                 bool &ranges_coalesced) {
 	if (groups.ColumnCount() != 1 || groups.size() == 0) {
 		return false;
 	}
 	auto &group = groups.data[0];
 	if (group.GetVectorType() != VectorType::FLAT_VECTOR || !FlatVector::Validity(group).CheckAllValid(groups.size())) {
 		return false;
-	}
-	using UNSIGNED_KEY_TYPE = typename std::make_unsigned<KEY_TYPE>::type;
-	if constexpr (sizeof(UNSIGNED_KEY_TYPE) < sizeof(idx_t)) {
-		if (groups.size() - 1 > NumericLimits<UNSIGNED_KEY_TYPE>::Maximum()) {
-			return false;
-		}
 	}
 	const auto data = FlatVector::GetData<KEY_TYPE>(group);
 	const auto first_key = data[0];
@@ -743,10 +737,10 @@ static bool AggregateTryContinueProvenUniqueDenseAppendTyped(DataChunk &groups, 
 	if (has_last_key && first_key <= previous_stream_key) {
 		return false;
 	}
-	const auto observed_span = static_cast<UNSIGNED_KEY_TYPE>(last_key) - static_cast<UNSIGNED_KEY_TYPE>(first_key);
-	if (observed_span != static_cast<UNSIGNED_KEY_TYPE>(groups.size() - 1)) {
-		return false;
-	}
+	// The producer proves every intermediate transition, so one conservative
+	// endpoint interval covers the batch without rescanning it. Keeping batch
+	// intervals separate until the bounded summary fills preserves scheduler
+	// gaps for global disjointness; capacity coalescing remains conservative.
 	AggregateRecordProvenUniqueRange(ranges, key_type, first_key, last_key, has_last_key, previous_stream_key,
 	                                 ranges_coalesced);
 	if constexpr (std::is_signed<KEY_TYPE>::value) {
@@ -768,8 +762,8 @@ static bool AggregateTryContinueProvenUniqueAppendTyped(DataChunk &groups, Physi
 		return false;
 	}
 	if (append_proof.groups_strictly_increasing &&
-	    AggregateTryContinueProvenUniqueDenseAppendTyped<KEY_TYPE>(groups, key_type, has_last_key, last_signed_key,
-	                                                               last_unsigned_key, ranges, ranges_coalesced)) {
+	    AggregateTryContinueProducerProvenUniqueSummaryTyped<KEY_TYPE>(groups, key_type, has_last_key, last_signed_key,
+	                                                                   last_unsigned_key, ranges, ranges_coalesced)) {
 		return true;
 	}
 	UnifiedVectorFormat format;

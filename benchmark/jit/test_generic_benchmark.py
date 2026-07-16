@@ -70,17 +70,34 @@ class TestSpeedupFloors(unittest.TestCase):
             {
                 "grouped_sorted_runs": 3.00,
                 "grouped_affine_sorted_runs": 2.65,
-                "grouped_sparse_sorted_runs": 2.60,
+                "grouped_sparse_sorted_runs": 3.10,
             },
         )
 
     def test_grouped_run_raw_ceilings_track_generated_runtime(self) -> None:
+        names = {
+            "grouped_sorted_runs",
+            "grouped_affine_sorted_runs",
+            "grouped_sparse_sorted_runs",
+        }
         ceilings = {
             workload["name"]: maximum_auto_median_us(workload, 1)
             for workload in GENERIC_WORKLOADS
-            if workload["name"] in {"grouped_sorted_runs", "grouped_affine_sorted_runs"}
+            if workload["name"] in names
         }
-        self.assertEqual(ceilings, {"grouped_sorted_runs": 33500, "grouped_affine_sorted_runs": 37000})
+        self.assertEqual(
+            ceilings,
+            {
+                "grouped_sorted_runs": 33500,
+                "grouped_affine_sorted_runs": 37000,
+                "grouped_sparse_sorted_runs": 31500,
+            },
+        )
+        sparse = next(workload for workload in GENERIC_WORKLOADS if workload["name"] == "grouped_sparse_sorted_runs")
+        self.assertEqual(
+            (minimum_auto_speedup(sparse, 4), maximum_auto_median_us(sparse, 4)),
+            (2.90, 11000),
+        )
 
     def test_selective_grouped_floors_and_raw_ceilings_track_independent_shape_promotion(self) -> None:
         names = {
@@ -116,11 +133,11 @@ class TestSpeedupFloors(unittest.TestCase):
         workload = next(workload for workload in GENERIC_WORKLOADS if workload["name"] == "grouped_wide_sorted_runs")
         self.assertEqual(
             (minimum_auto_speedup(workload, 1), minimum_auto_speedup(workload, 4)),
-            (2.80, 2.75),
+            (2.80, 3.00),
         )
         self.assertEqual(
             (maximum_auto_median_us(workload, 1), maximum_auto_median_us(workload, 4)),
-            (175000, 65000),
+            (175000, 57000),
         )
 
     def test_exact_filter_join_tracks_direct_dictionary_reduction_promotion(self) -> None:

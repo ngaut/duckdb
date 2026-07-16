@@ -440,10 +440,11 @@ GENERIC_WORKLOADS = (
         # budget. Coalescing remains a proof representation change, not a reason to
         # rehash a locally monotonic stream during finalization.
         "minimum_auto_speedup": 0.0,
-        # Direct compact-range publication and proof-owned fallback handoff measured
-        # 2.838x at T1 (39.474 ms) and 1.144x at T4 (26.604 ms) over ten alternating
-        # production pairs. Ratchet both floors while retaining scheduler margin.
-        "minimum_auto_speedup_by_threads": {1: 2.60, 4: 1.10},
+        # Producer-owned monotonic summaries measured 3.254x at T1 (28.954 ms).
+        # Progression-boundary publication then removed parallel finalize rehash,
+        # measuring 3.106x at T4 (9.550 ms). Ratchet relative and raw contracts.
+        "minimum_auto_speedup_by_threads": {1: 3.10, 4: 2.90},
+        "maximum_auto_median_us_by_threads": {1: 31500, 4: 11000},
         "max_auto_slowdown": 1.05,
         "requires_compiled_auto": True,
     },
@@ -479,11 +480,12 @@ GENERIC_WORKLOADS = (
         # exact general path. Append-only ownership also removes pointer-table
         # resize and capacity-abandon work after exact uniqueness proof. Direct
         # proof-owned finalization measured 2.959x at T1 (174.550 ms) and 3.032x at
-        # T4 (56.804 ms) over ten alternating production pairs. Preserve the existing
-        # tight T1 raw ceiling and ratchet the speedup and T4 runtime contracts.
+        # T4 (56.804 ms) over ten alternating production pairs. Progression-boundary
+        # publication then measured 3.189x at T4 (52.660 ms). Preserve the independently
+        # promoted T1 contract and ratchet the parallel raw and relative contracts.
         "minimum_auto_speedup": 0.0,
-        "minimum_auto_speedup_by_threads": {1: 2.80, 4: 2.75},
-        "maximum_auto_median_us_by_threads": {1: 175000, 4: 65000},
+        "minimum_auto_speedup_by_threads": {1: 2.80, 4: 3.00},
+        "maximum_auto_median_us_by_threads": {1: 175000, 4: 57000},
         "max_auto_slowdown": 1.05,
         "requires_compiled_auto": True,
     },

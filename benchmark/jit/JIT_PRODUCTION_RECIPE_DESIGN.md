@@ -257,6 +257,18 @@ state layouts remain explicit boundaries rather than hidden special cases.
 Pipeline-local preaggregation may retain a boundary group across scheduler
 yields. Publication is failure-atomic: raw equivalence keys and partially
 updated aggregate states must not escape through DuckDB's grouped-state API.
+Generated code owns transition proof while materializing grouped runs. Core
+validates the published flat/all-valid representation, endpoint order, and
+cross-batch boundary once. Each producer-proven batch contributes one
+conservative endpoint interval without a duplicate row scan. Batch gaps remain
+explicit until the bounded summary reaches capacity; only then are intervals
+coalesced into one conservative hull.
+
+Pending generated runs flush when a new source invocation breaks the current
+key progression. This keeps non-contiguous scheduler ownership from being
+hidden inside one output-batch envelope, while contiguous and boundary-merged
+runs retain the normal full-vector publication path.
+
 Parallel finalization can skip rehash only when conservative key summaries
 prove disjointness; overlapping boundaries reconcile through the normal path.
 

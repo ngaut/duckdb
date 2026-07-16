@@ -1767,6 +1767,7 @@ TEST_CASE("JIT parallel sorted grouped sums reconcile only overlapping dense run
 	REQUIRE_NO_FAIL(con.Query("SET perfect_ht_threshold=0"));
 	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_parallel_sorted_grouped_sum AS "
 	                          "SELECT (i // 3)::BIGINT AS disjoint_group_id, "
+	                          "       ((i // 3) * 3)::BIGINT AS sparse_disjoint_group_id, "
 	                          "       (i // 7)::BIGINT AS boundary_group_id, 1::BIGINT AS value "
 	                          "FROM range(4000000) tbl(i)"));
 
@@ -1834,6 +1835,8 @@ TEST_CASE("JIT parallel sorted grouped sums reconcile only overlapping dense run
 
 	// Every physical row-group boundary is also a logical group boundary for runs of three.
 	verify_query("disjoint_group_id", "1333334", true);
+	// Producer-proven sparse batches retain their scheduler gaps without per-key rescans.
+	verify_query("sparse_disjoint_group_id", "1333334", true);
 	// Runs of seven cross physical row-group ownership boundaries, so global reconciliation must remain exact.
 	verify_query("boundary_group_id", "571429", false);
 }
@@ -1956,6 +1959,8 @@ TEST_CASE("JIT generated sparse grouped runs preserve local uniqueness across th
 			                                "aggregate_update.generated_pending_primitive_group_runs=32768") &&
 			           StringUtil::Contains(
 			               runtime_paths, "aggregate_update.generated_primitive_group_cast.integral_compress=32768") &&
+			           StringUtil::Contains(runtime_paths,
+			                                "aggregate_update.proven_unique_append.producer_order_proof=8192") &&
 			           StringUtil::Contains(runtime_paths, "aggregate_update.proven_unique_append.enabled=1") &&
 			           !StringUtil::Contains(runtime_paths,
 			                                 "aggregate_update.proven_unique_append.final_combine_required") &&

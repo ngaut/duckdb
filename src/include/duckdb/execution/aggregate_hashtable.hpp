@@ -189,8 +189,8 @@ public:
 	bool LookupsSkipped() const;
 	//! Permanently require final combination for the current append-only stream.
 	void RequireFinalCombine();
-	//! Continue a fixed-width strictly increasing compact-key stream. Exact dense runs are owned by
-	//! this HT so the proof survives backend/runtime invocation and local pointer-table boundaries.
+	//! Continue a producer-proven fixed-width strictly increasing stream. This HT validates the published endpoints
+	//! and owns conservative key bounds so the proof survives backend/runtime and local pointer-table boundaries.
 	bool TryContinueProvenUniqueAppend(DataChunk &groups, ExecutionGroupedAggregateAppendProof append_proof = {});
 	//! Whether append-only rows require final duplicate reconciliation.
 	bool LookupsSkippedRequireFinalCombine() const;

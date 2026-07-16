@@ -465,6 +465,41 @@ def verify_production_contract_ownership() -> None:
     if "ExecuteSljitSingleLaneCanonicalSumInitialization" not in affine_runtime:
         raise AssertionError("canonical single-lane SUM state initialization must bind layout outside the group loop")
     aggregate_hashtable = read("src/execution/aggregate_hashtable.cpp")
+    producer_summary = aggregate_hashtable[
+        aggregate_hashtable.index(
+            "static bool AggregateTryContinueProducerProvenUniqueSummaryTyped"
+        ) : aggregate_hashtable.index("static bool AggregateTryContinueProvenUniqueAppendTyped")
+    ]
+    if "append_proof.groups_strictly_increasing" not in aggregate_hashtable:
+        raise AssertionError("grouped append summaries must require an explicit producer ordering proof")
+    for contract in (
+        "AggregateRecordProvenUniqueRange",
+        "one conservative",
+        "intervals separate until the bounded summary fills",
+    ):
+        if contract not in producer_summary:
+            raise AssertionError(f"producer-proven grouped summary contract is incomplete: {contract}")
+    if "ToUnifiedFormat" in producer_summary or "for (" in producer_summary:
+        raise AssertionError("producer-proven grouped summaries must not rescan generated keys")
+    generated_run_publish = affine_runs[
+        affine_runs.index("static bool SljitExecuteBoundGeneratedPrimitiveRunsIntoPending") : affine_runs.index(
+            "static bool TryExecuteGeneratedPrimitiveRunsIntoPending"
+        )
+    ]
+    for contract in (
+        "SljitPendingPreaggregatedPrimitiveContinuesTailStep",
+        "pending_preaggregated_group_progression_boundary_flush",
+    ):
+        if contract not in generated_run_publish:
+            raise AssertionError(f"generated grouped summaries must preserve scheduler gaps: {contract}")
+    if generated_run_publish.index("SljitPendingPreaggregatedPrimitiveContinuesTailStep") > generated_run_publish.index(
+        "const bool output_bound"
+    ):
+        raise AssertionError("generated grouped progression boundaries must flush before output binding")
+    if "sparse_disjoint_group_id" not in aggregate_test:
+        raise AssertionError("parallel sparse grouped finalization must retain a disjoint-range runtime receipt")
+    if "aggregate_update.proven_unique_append.producer_order_proof=8192" not in aggregate_test:
+        raise AssertionError("sparse grouped correctness must prove producer-owned monotonic publication")
     if (
         "const auto address_sel = single_partition_append ? nullptr : row_sel.data();" not in aggregate_hashtable
         or "if (!address_sel && !execute_sel)" not in affine_runtime

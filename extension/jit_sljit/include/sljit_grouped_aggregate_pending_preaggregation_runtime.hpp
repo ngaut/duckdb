@@ -24,6 +24,29 @@ static bool SljitPendingPreaggregatedPrimitiveLastGroupMatches(SljitPendingPreag
 }
 
 template <class TARGET_TYPE>
+static bool SljitPendingPreaggregatedPrimitiveContinuesTailStep(SljitPendingPreaggregatedPrimitiveGroupBatch &pending,
+                                                                TARGET_TYPE key) {
+	if (pending.Count() < 2 || !pending.GeneratedAppendProof().groups_strictly_increasing) {
+		return true;
+	}
+	auto data = FlatVector::GetData<TARGET_TYPE>(pending.groups.chunk.data[0]);
+	const auto previous_key = data[pending.Count() - 2];
+	const auto last_key = data[pending.Count() - 1];
+	if (key <= last_key) {
+		return true;
+	}
+	if constexpr (std::is_integral<TARGET_TYPE>::value && !std::is_same<TARGET_TYPE, bool>::value) {
+		using UNSIGNED_TARGET_TYPE = typename std::make_unsigned<TARGET_TYPE>::type;
+		const auto previous_step =
+		    static_cast<UNSIGNED_TARGET_TYPE>(last_key) - static_cast<UNSIGNED_TARGET_TYPE>(previous_key);
+		const auto next_step = static_cast<UNSIGNED_TARGET_TYPE>(key) - static_cast<UNSIGNED_TARGET_TYPE>(last_key);
+		return next_step == previous_step;
+	} else {
+		return true;
+	}
+}
+
+template <class TARGET_TYPE>
 static bool SljitAppendPendingPreaggregatedPrimitiveGroup(
     SljitPendingPreaggregatedPrimitiveGroupBatch &pending, TARGET_TYPE key,
     const vector<const ExecutionPrimitiveAggregateUpdateLane *> &payload_lanes, TARGET_TYPE *key_data = nullptr) {
@@ -83,6 +106,21 @@ static bool SljitExecuteBoundGeneratedPrimitiveRunsIntoPending(
     ExecutionGroupedAggregateStateAddressBinding &grouped_state, SljitPendingPreaggregatedPrimitiveGroupBatch &pending,
     idx_t count, bool finish, optional_ptr<bool> deferred_grouped_finish, SljitNativePrimitiveRunInput &native_input,
     SljitNativePrimitiveRunFunction function, const char *path_name, bool shared_affine_output) {
+	TARGET_TYPE first_key {};
+	if (!pending.Empty()) {
+		if (!SljitLoadPreaggregatedInputVectorGroupKey(group_source, 0, first_key)) {
+			throw InternalException("SLJIT generated primitive run update lost its proven first group key");
+		}
+		if (!SljitPendingPreaggregatedPrimitiveLastGroupMatches<TARGET_TYPE>(pending, first_key) &&
+		    !SljitPendingPreaggregatedPrimitiveContinuesTailStep<TARGET_TYPE>(pending, first_key)) {
+			if (!SljitFlushPendingPreaggregatedPrimitiveGroups(runtime, scratch, op_idx, op, pending, grouped_state,
+			                                                   deferred_grouped_finish)) {
+				throw InternalException(
+				    "SLJIT generated primitive run update could not preserve its progression boundary");
+			}
+			RecordSljitRegionRuntimePath(runtime, op.kind, "pending_preaggregated_group_progression_boundary_flush");
+		}
+	}
 	const bool output_bound = shared_affine_output ? SljitBindGeneratedFusedAffinePrimitiveRunOutput<TARGET_TYPE>(
 	                                                     pending.groups.chunk, pending.scratch, pending.Count(),
 	                                                     SLJIT_PENDING_PREAGGREGATED_GROUP_CAPACITY, native_input)
@@ -97,10 +135,6 @@ static bool SljitExecuteBoundGeneratedPrimitiveRunsIntoPending(
 	native_input.output_groups_strictly_increasing = pending.GeneratedAppendProof().groups_strictly_increasing ? 1 : 0;
 	bool merge_existing_affine_group = false;
 	if (!pending.Empty()) {
-		TARGET_TYPE first_key;
-		if (!SljitLoadPreaggregatedInputVectorGroupKey(group_source, 0, first_key)) {
-			throw InternalException("SLJIT generated primitive run update lost its proven first group key");
-		}
 		if (SljitPendingPreaggregatedPrimitiveLastGroupMatches<TARGET_TYPE>(pending, first_key)) {
 			RecordSljitRegionRuntimePath(runtime, op.kind, "pending_preaggregated_group_boundary_merge");
 			merge_existing_affine_group = shared_affine_output;

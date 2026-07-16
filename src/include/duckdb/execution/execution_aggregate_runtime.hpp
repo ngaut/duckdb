@@ -24,8 +24,9 @@ struct ExecutionDenseGroupDomain {
 	idx_t distinct_count = 0;
 };
 
-// Semantic evidence produced while materializing grouped keys. Backends may
-// provide this proof, but the aggregate runtime owns its validation and use.
+// Semantic evidence produced while materializing grouped keys. The producer
+// proves every transition; the aggregate runtime validates the published
+// representation and stream boundary before using conservative key bounds.
 struct ExecutionGroupedAggregateAppendProof {
 	bool groups_strictly_increasing = false;
 };
