@@ -11,6 +11,7 @@ import os
 import shutil
 import subprocess
 import sys
+import tempfile
 from datetime import datetime
 from pathlib import Path
 
@@ -41,6 +42,14 @@ def script_path(name: str) -> Path:
 def default_out_dir() -> Path:
     stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     return ROOT / "benchmark" / "tpch" / "jit" / "tmp" / f"tpch_regression_gate_{stamp}"
+
+
+def provision_gate_database(args: argparse.Namespace) -> Path | None:
+    if args.db is not None or args.use_existing_db:
+        return None
+    database_dir = Path(tempfile.mkdtemp(prefix="duckdb_jit_tpch_gate_"))
+    args.db = database_dir / "tpch.duckdb"
+    return database_dir
 
 
 def run_command(command: list[str], label: str, *, check: bool = True) -> int:
@@ -370,7 +379,7 @@ def benchmark_command(
         command.extend(["--db", str(args.db)])
     add_bool_flag(
         command,
-        args.use_existing_db or (reuse_database and args.keep_db),
+        args.use_existing_db or reuse_database,
         "--use-existing-db",
     )
     add_bool_flag(command, args.keep_db, "--keep-db")
@@ -876,9 +885,7 @@ def validate_args(args: argparse.Namespace) -> tuple[Path | None, Path]:
     return baseline, out_dir
 
 
-def main() -> int:
-    args = parse_args()
-    baseline, out_dir = validate_args(args)
+def run_gate(args: argparse.Namespace, baseline: Path | None, out_dir: Path) -> int:
     if not args.no_build:
         run_command(build_command(args), "build")
         if not args.duckdb.exists():
@@ -965,6 +972,17 @@ def main() -> int:
         print(f"accepted baseline promoted: {args.baseline_state}")
     print(f"TPC-H JIT regression gate passed: {out_dir}")
     return 0
+
+
+def main() -> int:
+    args = parse_args()
+    baseline, out_dir = validate_args(args)
+    provisioned_database_dir = provision_gate_database(args)
+    try:
+        return run_gate(args, baseline, out_dir)
+    finally:
+        if provisioned_database_dir is not None and not args.keep_db:
+            shutil.rmtree(provisioned_database_dir, ignore_errors=True)
 
 
 if __name__ == "__main__":

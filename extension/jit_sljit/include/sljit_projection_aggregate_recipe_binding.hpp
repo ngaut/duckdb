@@ -18,8 +18,6 @@ namespace duckdb {
 class SljitPreJoinProjectionRecipeBinding;
 struct SljitPostJoinProjectionAggregatePrimitive;
 
-enum class SljitProjectionGroupedAggregateRecipeMode : uint8_t { INVALID, PROJECTED_INPUT, MATERIALIZED_PROJECTION };
-
 class SljitProjectionAggregateRecipeBinding : private SljitFullPipelineRecipeSequenceBuilder {
 public:
 	SljitProjectionAggregateRecipeBinding(const vector<SljitExecutableRegionOp> &ops_p,
@@ -28,32 +26,42 @@ public:
 	                                      const vector<Value> &source_max_values_p,
 	                                      bool uses_extended_source_fetch_budget_p);
 
-	SljitFullPipelineRecipe
-	MakeMarkFilterProjectionNativeTailRecipe(const SljitMarkFilterProjectionNativeTailFacts &facts) const;
+	bool TryMakeMarkFilterProjectionNativeTailRecipe(const SljitMarkFilterProjectionNativeTailFacts &facts,
+	                                                 SljitFullPipelineRecipe &recipe) const;
 
-	SljitFullPipelineRecipe
-	MakeSourceProjectionAggregateTailRecipe(const SljitFullPipelineProjectionAggregateShape &shape) const;
+	bool TryMakeSourceProjectionAggregateTailRecipe(const SljitFullPipelineProjectionAggregateShape &shape,
+	                                                SljitFullPipelineRecipe &recipe) const;
 
-	SljitFullPipelineRecipe
-	MakeJoinDirectProjectionAggregateRecipe(const SljitFullPipelineProjectionAggregateShape &shape,
-	                                        const SljitProjectionAggregatePrefixFacts &facts) const;
+	bool TryMakeJoinDirectProjectionAggregateRecipe(const SljitFullPipelineProjectionAggregateShape &shape,
+	                                                const SljitProjectionAggregatePrefixFacts &facts,
+	                                                SljitFullPipelineRecipe &recipe) const;
 
-	SljitFullPipelineRecipe
-	MakeJoinProjectionAggregateTailRecipe(const SljitFullPipelineProjectionAggregateShape &shape,
-	                                      const SljitProjectionAggregatePrefixFacts &facts) const;
+	bool TryMakeJoinProjectionAggregateTailRecipe(const SljitFullPipelineProjectionAggregateShape &shape,
+	                                              const SljitProjectionAggregatePrefixFacts &facts,
+	                                              SljitFullPipelineRecipe &recipe) const;
 
-	SljitFullPipelineRecipe
-	MakeMarkFilterProjectionAggregateRecipe(const SljitFullPipelineProjectionAggregateShape &shape,
-	                                        const SljitProjectionAggregatePrefixFacts &facts) const;
+	bool TryMakeMarkFilterProjectionAggregateRecipe(const SljitFullPipelineProjectionAggregateShape &shape,
+	                                                const SljitProjectionAggregatePrefixFacts &facts,
+	                                                SljitFullPipelineRecipe &recipe) const;
 
-	SljitFullPipelineRecipe MakeMarkFilterNativeTailRecipe(const SljitProjectionAggregatePrefixFacts &facts) const;
-
-	bool ProjectionAggregateHasDedicatedBackend(const SljitFullPipelineProjectionAggregateShape &shape,
-	                                            bool allow_direct_projected_primitive_payload_update = false) const;
-
-	bool CanMakeProjectionAggregateTailRecipe(const SljitFullPipelineProjectionAggregateShape &shape) const;
+	bool TryMakeMarkFilterNativeTailRecipe(const SljitProjectionAggregatePrefixFacts &facts,
+	                                       SljitFullPipelineRecipe &recipe) const;
 
 private:
+	bool CanBindMarkFilterBoundary(const SljitProjectionAggregatePrefixFacts &facts) const;
+
+	bool CanBindDirectProjectionAggregate(const SljitFullPipelineProjectionAggregateShape &shape,
+	                                      const SljitProjectionAggregatePrefixFacts &facts) const;
+
+	bool CanBindProjectionAggregateTail(const SljitFullPipelineProjectionAggregateShape &shape,
+	                                    const SljitProjectionAggregatePrefixFacts &facts) const;
+
+	bool CanBindProjectionAggregateTailPrefix(const SljitProjectionAggregatePrefixFacts &facts) const;
+
+	bool CanBindHashJoinProbeProjectionInput(idx_t hash_join_idx) const;
+
+	bool CanBindJoinPrefixInputs(const SljitProjectionAggregatePrefixFacts &facts) const;
+
 	SljitFullPipelinePrimitiveSequence
 	MakeSingleJoinDirectPrefixSequence(const SljitProjectionAggregatePrefixFacts &facts,
 	                                   SljitPostJoinProjectionAggregatePrimitive &post_join_aggregate) const;
@@ -93,37 +101,28 @@ private:
 
 	SljitFullPipelinePrimitiveSequence MakeSourceHashJoinProjectionInputSequence(idx_t hash_join_idx) const;
 
-	SljitPostJoinProjectionAggregatePrimitive
-	BindPostJoinProjectionAggregatePrimitive(const SljitFullPipelineProjectionAggregateShape &shape,
-	                                         idx_t hash_join_idx) const;
-
-	SljitProjectionGroupedAggregateRecipeMode
-	ChooseProjectionGroupedAggregateRecipeMode(const SljitFullPipelineProjectionAggregateShape &shape,
-	                                           bool allow_direct_projected_primitive_payload_update = false) const;
+	bool TryBindPostJoinProjectionAggregatePrimitive(const SljitFullPipelineProjectionAggregateShape &shape,
+	                                                 idx_t hash_join_idx,
+	                                                 SljitPostJoinProjectionAggregatePrimitive &primitive) const;
 
 	SljitPreJoinProjectionRecipeBinding PreJoinProjectionBinding() const;
 
-	SljitFullPipelineRecipe
-	MakeProjectionAggregateRecipe(SljitFullPipelinePrimitiveSequence sequence,
-	                              const SljitFullPipelineProjectionAggregateShape &shape,
-	                              bool allow_direct_projected_primitive_payload_update = false) const;
+	bool TryMakeProjectionAggregateRecipe(SljitFullPipelinePrimitiveSequence sequence,
+	                                      const SljitFullPipelineProjectionAggregateShape &shape,
+	                                      bool allow_direct_projected_primitive_payload_update,
+	                                      SljitFullPipelineRecipe &recipe) const;
 
-	SljitFullPipelineRecipe
-	MakeProjectionGroupedAggregateRecipe(SljitFullPipelinePrimitiveSequence sequence,
-	                                     const SljitFullPipelineProjectionAggregateShape &shape,
-	                                     bool allow_direct_projected_primitive_payload_update = false) const;
+	bool TryMakeProjectionAggregateTailRecipe(SljitFullPipelinePrimitiveSequence sequence,
+	                                          const SljitFullPipelineProjectionAggregateShape &shape,
+	                                          SljitFullPipelineRecipe &recipe) const;
 
-	SljitFullPipelineRecipe
-	MakeProjectionAggregateTailRecipe(SljitFullPipelinePrimitiveSequence sequence,
-	                                  const SljitFullPipelineProjectionAggregateShape &shape) const;
+	bool TryMakeProjectionNativeTailRecipe(SljitFullPipelinePrimitiveSequence sequence,
+	                                       const SljitFullPipelineProjectionAggregateShape &shape,
+	                                       SljitFullPipelineRecipe &recipe) const;
 
-	SljitFullPipelineRecipe
-	MakeProjectionNativeTailRecipe(SljitFullPipelinePrimitiveSequence sequence,
-	                               const SljitFullPipelineProjectionAggregateShape &shape) const;
-
-	SljitFullPipelineRecipe MakeProjectionNativeTailRecipe(SljitFullPipelinePrimitiveSequence sequence,
-	                                                       idx_t first_projection_idx, idx_t final_projection_idx,
-	                                                       idx_t tail_start_idx) const;
+	bool TryMakeProjectionNativeTailRecipe(SljitFullPipelinePrimitiveSequence sequence, idx_t first_projection_idx,
+	                                       idx_t final_projection_idx, idx_t tail_start_idx,
+	                                       SljitFullPipelineRecipe &recipe) const;
 };
 
 } // namespace duckdb

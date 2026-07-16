@@ -14,7 +14,6 @@
 namespace duckdb {
 
 bool SljitTryBuildNativeTailRecipe(const vector<SljitExecutableRegionOp> &ops,
-                                   const SljitFullPipelineScheduleFacts &schedule_facts,
                                    const SljitFullPipelineRecipeBinding &binding, SljitFullPipelineRecipe &recipe);
 
 } // namespace duckdb

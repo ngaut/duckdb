@@ -172,27 +172,19 @@ static bool SljitTryBindProjectedInputGroupedAggregateUpdateStrategy(const vecto
 	return false;
 }
 
-static bool SljitCanBindProjectedInputGroupedAggregateUpdatePrimitive(
-    const vector<SljitExecutableRegionOp> &ops, idx_t first_projection_idx, idx_t final_projection_idx,
-    idx_t aggregate_idx, bool allow_direct_primitive_payload_update = false) {
-	if (!SljitCanBindGroupedAggregateUpdatePrimitive(ops, aggregate_idx)) {
+static bool SljitTryBindProjectedInputGroupedAggregateUpdatePrimitive(const vector<SljitExecutableRegionOp> &ops,
+                                                                      idx_t first_projection_idx,
+                                                                      idx_t final_projection_idx, idx_t aggregate_idx,
+                                                                      bool allow_direct_primitive_payload_update,
+                                                                      SljitGroupedAggregateUpdatePrimitive &primitive) {
+	SljitGroupedAggregateUpdatePrimitive candidate;
+	candidate.aggregate_idx = aggregate_idx;
+	if (!SljitTryBindProjectedInputGroupedAggregateUpdateStrategy(ops, first_projection_idx, final_projection_idx,
+	                                                              allow_direct_primitive_payload_update, candidate)) {
 		return false;
 	}
-	SljitGroupedAggregateUpdatePrimitive primitive;
-	primitive.aggregate_idx = aggregate_idx;
-	return SljitTryBindProjectedInputGroupedAggregateUpdateStrategy(ops, first_projection_idx, final_projection_idx,
-	                                                                allow_direct_primitive_payload_update, primitive);
-}
-
-static SljitGroupedAggregateUpdatePrimitive SljitBindProjectedInputGroupedAggregateUpdatePrimitive(
-    const vector<SljitExecutableRegionOp> &ops, idx_t first_projection_idx, idx_t final_projection_idx,
-    idx_t aggregate_idx, bool allow_direct_primitive_payload_update = false) {
-	auto primitive = SljitBindGroupedAggregateUpdatePrimitive(ops, aggregate_idx);
-	if (!SljitTryBindProjectedInputGroupedAggregateUpdateStrategy(ops, first_projection_idx, final_projection_idx,
-	                                                              allow_direct_primitive_payload_update, primitive)) {
-		throw InternalException("SLJIT projected grouped aggregate update primitive cannot bind requested operators");
-	}
-	return primitive;
+	primitive = std::move(candidate);
+	return true;
 }
 
 static bool SljitCanBindGroupedAggregateUpdatePrimitive(const vector<SljitExecutableRegionOp> &ops,

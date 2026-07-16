@@ -15,16 +15,71 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from tpch_common import TPCHConfigurationError
 from run_tpch_regression_gate import (
     apply_baseline_state_contract,
+    benchmark_command,
     candidate_qualifies_for_direct_promotion,
     merge_rechecked_csv_artifact,
     load_baseline_state,
     parse_args,
     promotion_recheck_repeats,
+    provision_gate_database,
     selected_auto_queries,
     triage_recheck_repeats,
     validate_baseline_write_configuration,
     write_baseline_state,
 )
+
+
+class TestGateDatabaseReuse(unittest.TestCase):
+    def args(self, root: Path) -> SimpleNamespace:
+        return SimpleNamespace(
+            db=None,
+            use_existing_db=False,
+            keep_db=False,
+            duckdb=root / "duckdb",
+            queries=["01"],
+            policies=["off", "auto"],
+            repeats=5,
+            timing_mode="production",
+            scale_factor=10.0,
+            threads=1,
+            event_log_size=0,
+            trace_decisions=False,
+            trace_runtime=False,
+            jit_verify=False,
+            jit_cbo_setting=[],
+        )
+
+    def test_provisions_one_database_for_all_gate_phases(self) -> None:
+        temporary_directory = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary_directory.cleanup)
+        root = Path(temporary_directory.name)
+        out_dir = root / "artifact"
+        out_dir.mkdir()
+        args = self.args(root)
+
+        database_dir = provision_gate_database(args)
+        self.addCleanup(lambda: database_dir.rmdir())
+        self.assertTrue(database_dir.name.startswith("duckdb_jit_tpch_gate_"))
+        self.assertEqual(args.db, database_dir / "tpch.duckdb")
+
+        candidate = benchmark_command(args, out_dir)
+        proof = benchmark_command(args, out_dir / "proof", reuse_database=True)
+        self.assertNotIn("--use-existing-db", candidate)
+        self.assertIn("--use-existing-db", proof)
+        self.assertEqual(candidate[candidate.index("--db") + 1], str(args.db))
+        self.assertEqual(proof[proof.index("--db") + 1], str(args.db))
+
+    def test_reuses_explicit_database_without_keep_flag(self) -> None:
+        temporary_directory = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary_directory.cleanup)
+        root = Path(temporary_directory.name)
+        args = self.args(root)
+        args.db = root / "tpch.duckdb"
+
+        self.assertIsNone(provision_gate_database(args))
+        proof = benchmark_command(args, root / "proof", reuse_database=True)
+        self.assertIn("--use-existing-db", proof)
+        self.assertNotIn("--keep-db", proof)
 
 
 class TestBaselineStateContract(unittest.TestCase):

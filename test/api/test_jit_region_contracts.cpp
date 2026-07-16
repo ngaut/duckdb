@@ -47,6 +47,36 @@ TEST_CASE("JIT recipe binders preserve the output recipe on admission failure", 
 	SljitHashJoinBuildSinkFacts hash_join_build;
 	REQUIRE_FALSE(binding.TryMakeHashJoinBuildSinkRecipe(hash_join_build, recipe));
 	require_unchanged();
+
+	SljitGeneratedFilterProjectionNativeTailFacts generated_filter_tail;
+	REQUIRE_FALSE(binding.TryMakeGeneratedFilterProjectionNativeTailRecipe(generated_filter_tail, recipe));
+	require_unchanged();
+
+	SljitProjectionFilterProjectionNativeTailFacts projection_filter_tail;
+	REQUIRE_FALSE(binding.TryMakeProjectionFilterProjectionNativeTailRecipe(projection_filter_tail, recipe));
+	require_unchanged();
+
+	auto &projection_aggregate = binding.ProjectionAggregateRecipes();
+	SljitMarkFilterProjectionNativeTailFacts mark_filter_tail;
+	REQUIRE_FALSE(projection_aggregate.TryMakeMarkFilterProjectionNativeTailRecipe(mark_filter_tail, recipe));
+	require_unchanged();
+
+	SljitFullPipelineProjectionAggregateShape projection_aggregate_shape;
+	REQUIRE_FALSE(projection_aggregate.TryMakeSourceProjectionAggregateTailRecipe(projection_aggregate_shape, recipe));
+	require_unchanged();
+
+	SljitProjectionAggregatePrefixFacts projection_aggregate_prefix;
+	REQUIRE_FALSE(projection_aggregate.TryMakeJoinDirectProjectionAggregateRecipe(projection_aggregate_shape,
+	                                                                              projection_aggregate_prefix, recipe));
+	require_unchanged();
+	REQUIRE_FALSE(projection_aggregate.TryMakeJoinProjectionAggregateTailRecipe(projection_aggregate_shape,
+	                                                                            projection_aggregate_prefix, recipe));
+	require_unchanged();
+	REQUIRE_FALSE(projection_aggregate.TryMakeMarkFilterProjectionAggregateRecipe(projection_aggregate_shape,
+	                                                                              projection_aggregate_prefix, recipe));
+	require_unchanged();
+	REQUIRE_FALSE(projection_aggregate.TryMakeMarkFilterNativeTailRecipe(projection_aggregate_prefix, recipe));
+	require_unchanged();
 }
 
 TEST_CASE("JIT recipe publication validates explicit direct terminal ownership", "[api][jit]") {

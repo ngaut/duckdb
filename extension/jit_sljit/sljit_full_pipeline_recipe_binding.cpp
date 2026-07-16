@@ -11,7 +11,6 @@
 #include "duckdb/common/constants.hpp"
 
 #include "sljit_full_pipeline_primitive_contract.hpp"
-#include "sljit_projection_aggregate_recipe_binding.hpp"
 #include "sljit_region_plan_internal.hpp"
 
 #include <utility>
@@ -24,7 +23,9 @@ SljitFullPipelineRecipeBinding::SljitFullPipelineRecipeBinding(const vector<Slji
                                                                const vector<Value> &source_max_values_p,
                                                                bool uses_extended_source_fetch_budget_p)
     : SljitFullPipelineRecipeSequenceBuilder(ops_p, source_output_types_p, source_min_values_p, source_max_values_p,
-                                             uses_extended_source_fetch_budget_p) {
+                                             uses_extended_source_fetch_budget_p),
+      projection_aggregate_recipes(ops_p, source_output_types_p, source_min_values_p, source_max_values_p,
+                                   uses_extended_source_fetch_budget_p) {
 }
 
 SljitFullPipelineRecipePlan SljitFullPipelineRecipeBinding::MakeNativeOnlyPlan() const {
@@ -57,12 +58,13 @@ SljitFullPipelineRecipeBinding::MakePrimitiveRecipePlan(SljitFullPipelineRecipe 
 	return SljitMakeFullPipelinePrimitiveRecipePlan(std::move(recipe));
 }
 
-bool SljitFullPipelineRecipeBinding::CanMakeNativeTailRecipe(idx_t tail_start_idx) const {
-	return SljitFullPipelineRecipeSequenceBuilder::CanMakeNativeTailRecipe(tail_start_idx);
-}
-
-SljitFullPipelineRecipe SljitFullPipelineRecipeBinding::MakeProjectionFilterProjectionNativeTailRecipe(
-    const SljitProjectionFilterProjectionNativeTailFacts &facts) const {
+bool SljitFullPipelineRecipeBinding::TryMakeProjectionFilterProjectionNativeTailRecipe(
+    const SljitProjectionFilterProjectionNativeTailFacts &facts, SljitFullPipelineRecipe &recipe) const {
+	if (!SljitCanBindGeneratedFilterPrimitive(ops, facts.filter_idx) ||
+	    !SljitCanBindProjectionChainPrimitive(ops, facts.pre_projection_idx) ||
+	    !SljitCanBindProjectionChainPrimitive(ops, facts.projection_idx)) {
+		return false;
+	}
 	auto generated_filter = SljitBindGeneratedFilterPrimitive(ops, facts.filter_idx);
 	auto sequence = MakeSourceSequence();
 	if (facts.filter_can_run_before_pre_projection) {
@@ -73,17 +75,7 @@ SljitFullPipelineRecipe SljitFullPipelineRecipeBinding::MakeProjectionFilterProj
 		sequence.Add(SljitFullPipelinePrimitiveStep::GeneratedFilter(generated_filter));
 	}
 	AddProjectionChainStep(sequence, facts.projection_idx);
-	return MakeNativeTailRecipe(std::move(sequence), facts.tail_start_idx);
-}
-
-SljitFullPipelineRecipe SljitFullPipelineRecipeBinding::MakeMarkFilterProjectionNativeTailRecipe(
-    const SljitMarkFilterProjectionNativeTailFacts &facts) const {
-	return ProjectionAggregateBinding().MakeMarkFilterProjectionNativeTailRecipe(facts);
-}
-
-SljitFullPipelineRecipe SljitFullPipelineRecipeBinding::MakeSourceProjectionAggregateTailRecipe(
-    const SljitFullPipelineProjectionAggregateShape &shape) const {
-	return ProjectionAggregateBinding().MakeSourceProjectionAggregateTailRecipe(shape);
+	return TryMakeNativeTailRecipe(std::move(sequence), facts.tail_start_idx, recipe);
 }
 
 SljitFullPipelineRecipe SljitFullPipelineRecipeBinding::MakeSourceUngroupedAggregateRecipe(
@@ -182,13 +174,17 @@ bool SljitFullPipelineRecipeBinding::TryMakeJoinFilterAggregateRecipe(const Slji
 	return true;
 }
 
-SljitFullPipelineRecipe SljitFullPipelineRecipeBinding::MakeGeneratedFilterProjectionNativeTailRecipe(
-    const SljitGeneratedFilterProjectionNativeTailFacts &facts) const {
+bool SljitFullPipelineRecipeBinding::TryMakeGeneratedFilterProjectionNativeTailRecipe(
+    const SljitGeneratedFilterProjectionNativeTailFacts &facts, SljitFullPipelineRecipe &recipe) const {
+	if (!SljitCanBindGeneratedFilterPrimitive(ops, facts.filter_idx) ||
+	    !SljitCanBindProjectionChainPrimitive(ops, facts.projection_idx)) {
+		return false;
+	}
 	auto generated_filter = SljitBindGeneratedFilterPrimitive(ops, facts.filter_idx);
 	auto sequence = MakeSourceSequence();
 	sequence.Add(SljitFullPipelinePrimitiveStep::GeneratedFilter(generated_filter));
 	AddProjectionChainStep(sequence, facts.projection_idx);
-	return MakeNativeTailRecipe(std::move(sequence), facts.tail_start_idx);
+	return TryMakeNativeTailRecipe(std::move(sequence), facts.tail_start_idx, recipe);
 }
 
 bool SljitFullPipelineRecipeBinding::TryMakeSourceHashJoinBuildSinkRecipe(
@@ -306,43 +302,6 @@ bool SljitFullPipelineRecipeBinding::TryMakeHashJoinBuildSinkRecipe(const SljitH
 	sequence.Add(SljitFullPipelinePrimitiveStep::HashJoinBuildSink(sink));
 	recipe = MakePrimitiveSequence(std::move(sequence));
 	return true;
-}
-
-SljitFullPipelineRecipe SljitFullPipelineRecipeBinding::MakeJoinDirectProjectionAggregateRecipe(
-    const SljitFullPipelineProjectionAggregateShape &shape, const SljitProjectionAggregatePrefixFacts &facts) const {
-	return ProjectionAggregateBinding().MakeJoinDirectProjectionAggregateRecipe(shape, facts);
-}
-
-SljitFullPipelineRecipe SljitFullPipelineRecipeBinding::MakeJoinProjectionAggregateTailRecipe(
-    const SljitFullPipelineProjectionAggregateShape &shape, const SljitProjectionAggregatePrefixFacts &facts) const {
-	return ProjectionAggregateBinding().MakeJoinProjectionAggregateTailRecipe(shape, facts);
-}
-
-SljitFullPipelineRecipe SljitFullPipelineRecipeBinding::MakeMarkFilterProjectionAggregateRecipe(
-    const SljitFullPipelineProjectionAggregateShape &shape, const SljitProjectionAggregatePrefixFacts &facts) const {
-	return ProjectionAggregateBinding().MakeMarkFilterProjectionAggregateRecipe(shape, facts);
-}
-
-SljitFullPipelineRecipe
-SljitFullPipelineRecipeBinding::MakeMarkFilterNativeTailRecipe(const SljitProjectionAggregatePrefixFacts &facts) const {
-	return ProjectionAggregateBinding().MakeMarkFilterNativeTailRecipe(facts);
-}
-
-bool SljitFullPipelineRecipeBinding::ProjectionAggregateHasDedicatedBackend(
-    const SljitFullPipelineProjectionAggregateShape &shape,
-    bool allow_direct_projected_primitive_payload_update) const {
-	return ProjectionAggregateBinding().ProjectionAggregateHasDedicatedBackend(
-	    shape, allow_direct_projected_primitive_payload_update);
-}
-
-bool SljitFullPipelineRecipeBinding::CanMakeProjectionAggregateTailRecipe(
-    const SljitFullPipelineProjectionAggregateShape &shape) const {
-	return ProjectionAggregateBinding().CanMakeProjectionAggregateTailRecipe(shape);
-}
-
-SljitProjectionAggregateRecipeBinding SljitFullPipelineRecipeBinding::ProjectionAggregateBinding() const {
-	return SljitProjectionAggregateRecipeBinding(ops, source_output_types, source_min_values, source_max_values,
-	                                             uses_extended_source_fetch_budget);
 }
 
 } // namespace duckdb

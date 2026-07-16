@@ -13,8 +13,7 @@
 
 namespace duckdb {
 
-bool SljitTryBuildProjectionAggregateRecipe(const vector<SljitExecutableRegionOp> &ops,
-                                            const SljitFullPipelineRecipeBinding &binding,
+bool SljitTryBuildProjectionAggregateRecipe(const SljitFullPipelineRecipeBinding &binding,
                                             SljitFullPipelineRecipe &recipe,
                                             const SljitProjectionAggregatePlanFacts &plan);
 

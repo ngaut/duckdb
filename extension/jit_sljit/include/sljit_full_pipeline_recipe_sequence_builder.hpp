@@ -23,8 +23,6 @@ public:
 	                                       bool uses_extended_source_fetch_budget_p);
 
 protected:
-	bool CanMakeNativeTailRecipe(idx_t tail_start_idx) const;
-
 	SljitFullPipelineRecipe
 	MakePrimitiveSequence(SljitFullPipelinePrimitiveSequence sequence,
 	                      SljitHashJoinDirectAggregateConsumerContract direct_aggregate_consumer = {}) const;
@@ -41,8 +39,8 @@ protected:
 	void AddProjectionChainStep(SljitFullPipelinePrimitiveSequence &sequence, idx_t first_projection_idx,
 	                            idx_t final_projection_idx) const;
 
-	SljitFullPipelineRecipe MakeNativeTailRecipe(SljitFullPipelinePrimitiveSequence sequence,
-	                                             idx_t tail_start_idx) const;
+	bool TryMakeNativeTailRecipe(SljitFullPipelinePrimitiveSequence sequence, idx_t tail_start_idx,
+	                             SljitFullPipelineRecipe &recipe) const;
 
 	SljitFullPipelinePrimitiveStep MakeHashJoinProbeMaterializeStep(idx_t hash_join_idx) const;
 

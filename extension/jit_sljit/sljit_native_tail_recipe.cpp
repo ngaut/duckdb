@@ -13,9 +13,8 @@ namespace duckdb {
 class SljitNativeTailRecipeBuilder {
 public:
 	SljitNativeTailRecipeBuilder(const vector<SljitExecutableRegionOp> &ops_p,
-	                             const SljitFullPipelineScheduleFacts &schedule_facts_p,
 	                             const SljitFullPipelineRecipeBinding &binding_p)
-	    : ops(ops_p), schedule_facts(schedule_facts_p), binding(binding_p) {
+	    : ops(ops_p), binding(binding_p) {
 	}
 
 	bool Build(SljitFullPipelineRecipe &recipe) const {
@@ -51,11 +50,7 @@ private:
 		if (!AnalyzeFacts(facts)) {
 			return false;
 		}
-		if (!binding.CanMakeNativeTailRecipe(facts.tail_start_idx)) {
-			return false;
-		}
-		recipe = MakeFactsRecipe(facts);
-		return true;
+		return TryMakeFactsRecipe(facts, recipe);
 	}
 
 	bool AnalyzeFacts(SljitMarkFilterProjectionNativeTailFacts &facts) const {
@@ -70,28 +65,29 @@ private:
 		return SljitTryAnalyzeProjectionFilterProjectionNativeTail(ops, facts);
 	}
 
-	SljitFullPipelineRecipe MakeFactsRecipe(const SljitMarkFilterProjectionNativeTailFacts &facts) const {
-		return binding.MakeMarkFilterProjectionNativeTailRecipe(facts);
+	bool TryMakeFactsRecipe(const SljitMarkFilterProjectionNativeTailFacts &facts,
+	                        SljitFullPipelineRecipe &recipe) const {
+		return binding.ProjectionAggregateRecipes().TryMakeMarkFilterProjectionNativeTailRecipe(facts, recipe);
 	}
 
-	SljitFullPipelineRecipe MakeFactsRecipe(const SljitGeneratedFilterProjectionNativeTailFacts &facts) const {
-		return binding.MakeGeneratedFilterProjectionNativeTailRecipe(facts);
+	bool TryMakeFactsRecipe(const SljitGeneratedFilterProjectionNativeTailFacts &facts,
+	                        SljitFullPipelineRecipe &recipe) const {
+		return binding.TryMakeGeneratedFilterProjectionNativeTailRecipe(facts, recipe);
 	}
 
-	SljitFullPipelineRecipe MakeFactsRecipe(const SljitProjectionFilterProjectionNativeTailFacts &facts) const {
-		return binding.MakeProjectionFilterProjectionNativeTailRecipe(facts);
+	bool TryMakeFactsRecipe(const SljitProjectionFilterProjectionNativeTailFacts &facts,
+	                        SljitFullPipelineRecipe &recipe) const {
+		return binding.TryMakeProjectionFilterProjectionNativeTailRecipe(facts, recipe);
 	}
 
 private:
 	const vector<SljitExecutableRegionOp> &ops;
-	const SljitFullPipelineScheduleFacts &schedule_facts;
 	const SljitFullPipelineRecipeBinding &binding;
 };
 
 bool SljitTryBuildNativeTailRecipe(const vector<SljitExecutableRegionOp> &ops,
-                                   const SljitFullPipelineScheduleFacts &schedule_facts,
                                    const SljitFullPipelineRecipeBinding &binding, SljitFullPipelineRecipe &recipe) {
-	return SljitNativeTailRecipeBuilder(ops, schedule_facts, binding).Build(recipe);
+	return SljitNativeTailRecipeBuilder(ops, binding).Build(recipe);
 }
 
 } // namespace duckdb

@@ -85,6 +85,13 @@ the single admission boundary:
 5. validate operator identities and sequence grammar;
 6. publish the recipe only after all checks pass.
 
+Recipe-family binders expose failure-atomic `TryMake...` operations. Shape
+analysis never calls a separate `CanMake...` path and then reconstructs the
+same descriptor during `Make...`. In particular, projected grouped aggregate
+strategy selection publishes the descriptor it selected, and the full-pipeline
+binder owns one projection-aggregate family binder instead of constructing a
+temporary binder for each question.
+
 Prepared expression capability does not change when selector machine code is
 emitted. The executable builder therefore binds the plan exactly once, emits
 selectors only for filters not owned by a fused terminal, and moves that same
@@ -339,6 +346,11 @@ An accepted TPC-H baseline requires:
 SF1 and SF10 use separate state files because scale factor is part of the
 baseline contract. State also binds thread count, timing mode, query set, and
 relevant JIT configuration.
+
+A regression-gate invocation provisions one database and reuses it for the
+untraced candidate, traced runtime proof, focused recheck, and promotion pass.
+The gate removes a privately provisioned database in a `finally` block unless
+retention was requested. Database generation is setup, not repeated proof.
 
 ## Verification
 

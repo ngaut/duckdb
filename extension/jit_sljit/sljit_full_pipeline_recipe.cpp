@@ -25,9 +25,8 @@ public:
 	SljitFullPipelineRecipeBuilder(const vector<SljitExecutableRegionOp> &ops_p,
 	                               const vector<LogicalType> &source_output_types_p,
 	                               const vector<Value> &source_min_values_p, const vector<Value> &source_max_values_p)
-	    : ops(ops_p), schedule_facts(SljitAnalyzeFullPipelineScheduleFacts(ops_p)),
-	      binding(ops_p, source_output_types_p, source_min_values_p, source_max_values_p,
-	              schedule_facts.uses_extended_source_fetch_budget) {
+	    : SljitFullPipelineRecipeBuilder(ops_p, source_output_types_p, source_min_values_p, source_max_values_p,
+	                                     SljitAnalyzeFullPipelineScheduleFacts(ops_p)) {
 	}
 
 	SljitFullPipelineRecipePlan Build() const {
@@ -104,14 +103,12 @@ private:
 
 	bool TryBuildHashJoinAppendSinkRecipe(SljitFullPipelineRecipe &recipe) const {
 		SljitHashJoinAppendSinkFacts facts;
-		return SljitTryAnalyzeHashJoinAppendSink(ops, facts) &&
-		       binding.TryMakeHashJoinAppendSinkRecipe(facts, recipe);
+		return SljitTryAnalyzeHashJoinAppendSink(ops, facts) && binding.TryMakeHashJoinAppendSinkRecipe(facts, recipe);
 	}
 
 	bool TryBuildHashJoinBuildSinkRecipe(SljitFullPipelineRecipe &recipe) const {
 		SljitHashJoinBuildSinkFacts facts;
-		return SljitTryAnalyzeHashJoinBuildSink(ops, facts) &&
-		       binding.TryMakeHashJoinBuildSinkRecipe(facts, recipe);
+		return SljitTryAnalyzeHashJoinBuildSink(ops, facts) && binding.TryMakeHashJoinBuildSinkRecipe(facts, recipe);
 	}
 
 	bool TryBuildProjectionAggregateRecipe(SljitFullPipelineRecipe &recipe) const {
@@ -119,16 +116,23 @@ private:
 		if (!SljitTryAnalyzeProjectionAggregatePlan(ops, plan)) {
 			return false;
 		}
-		return SljitTryBuildProjectionAggregateRecipe(ops, binding, recipe, plan);
+		return SljitTryBuildProjectionAggregateRecipe(binding, recipe, plan);
 	}
 
 	bool TryBuildNativeTailRecipe(SljitFullPipelineRecipe &recipe) const {
-		return SljitTryBuildNativeTailRecipe(ops, schedule_facts, binding, recipe);
+		return SljitTryBuildNativeTailRecipe(ops, binding, recipe);
 	}
 
 private:
+	SljitFullPipelineRecipeBuilder(const vector<SljitExecutableRegionOp> &ops_p,
+	                               const vector<LogicalType> &source_output_types_p,
+	                               const vector<Value> &source_min_values_p, const vector<Value> &source_max_values_p,
+	                               const SljitFullPipelineScheduleFacts &schedule_facts)
+	    : ops(ops_p), binding(ops_p, source_output_types_p, source_min_values_p, source_max_values_p,
+	                          schedule_facts.uses_extended_source_fetch_budget) {
+	}
+
 	const vector<SljitExecutableRegionOp> &ops;
-	SljitFullPipelineScheduleFacts schedule_facts;
 	SljitFullPipelineRecipeBinding binding;
 };
 

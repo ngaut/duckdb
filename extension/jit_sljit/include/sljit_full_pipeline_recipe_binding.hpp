@@ -10,10 +10,9 @@
 
 #include "sljit_full_pipeline_recipe_facts.hpp"
 #include "sljit_full_pipeline_recipe_sequence_builder.hpp"
+#include "sljit_projection_aggregate_recipe_binding.hpp"
 
 namespace duckdb {
-
-class SljitProjectionAggregateRecipeBinding;
 
 class SljitFullPipelineRecipeBinding : private SljitFullPipelineRecipeSequenceBuilder {
 public:
@@ -26,16 +25,8 @@ public:
 
 	SljitFullPipelineRecipePlan MakePrimitiveRecipePlan(SljitFullPipelineRecipe recipe) const;
 
-	bool CanMakeNativeTailRecipe(idx_t tail_start_idx) const;
-
-	SljitFullPipelineRecipe
-	MakeProjectionFilterProjectionNativeTailRecipe(const SljitProjectionFilterProjectionNativeTailFacts &facts) const;
-
-	SljitFullPipelineRecipe
-	MakeMarkFilterProjectionNativeTailRecipe(const SljitMarkFilterProjectionNativeTailFacts &facts) const;
-
-	SljitFullPipelineRecipe
-	MakeSourceProjectionAggregateTailRecipe(const SljitFullPipelineProjectionAggregateShape &shape) const;
+	bool TryMakeProjectionFilterProjectionNativeTailRecipe(const SljitProjectionFilterProjectionNativeTailFacts &facts,
+	                                                       SljitFullPipelineRecipe &recipe) const;
 
 	SljitFullPipelineRecipe MakeSourceUngroupedAggregateRecipe(const SljitSourceUngroupedAggregateFacts &facts) const;
 
@@ -45,8 +36,8 @@ public:
 	bool TryMakeJoinFilterAggregateRecipe(const SljitJoinFilterAggregateFacts &facts,
 	                                      SljitFullPipelineRecipe &recipe) const;
 
-	SljitFullPipelineRecipe
-	MakeGeneratedFilterProjectionNativeTailRecipe(const SljitGeneratedFilterProjectionNativeTailFacts &facts) const;
+	bool TryMakeGeneratedFilterProjectionNativeTailRecipe(const SljitGeneratedFilterProjectionNativeTailFacts &facts,
+	                                                      SljitFullPipelineRecipe &recipe) const;
 	bool TryMakeSourceHashJoinBuildSinkRecipe(const SljitSourceHashJoinBuildSinkFacts &facts,
 	                                          SljitFullPipelineRecipe &recipe) const;
 
@@ -59,27 +50,12 @@ public:
 	bool TryMakeHashJoinBuildSinkRecipe(const SljitHashJoinBuildSinkFacts &facts,
 	                                    SljitFullPipelineRecipe &recipe) const;
 
-	SljitFullPipelineRecipe
-	MakeJoinDirectProjectionAggregateRecipe(const SljitFullPipelineProjectionAggregateShape &shape,
-	                                        const SljitProjectionAggregatePrefixFacts &facts) const;
-
-	SljitFullPipelineRecipe
-	MakeJoinProjectionAggregateTailRecipe(const SljitFullPipelineProjectionAggregateShape &shape,
-	                                      const SljitProjectionAggregatePrefixFacts &facts) const;
-
-	SljitFullPipelineRecipe
-	MakeMarkFilterProjectionAggregateRecipe(const SljitFullPipelineProjectionAggregateShape &shape,
-	                                        const SljitProjectionAggregatePrefixFacts &facts) const;
-
-	SljitFullPipelineRecipe MakeMarkFilterNativeTailRecipe(const SljitProjectionAggregatePrefixFacts &facts) const;
-
-	bool ProjectionAggregateHasDedicatedBackend(const SljitFullPipelineProjectionAggregateShape &shape,
-	                                            bool allow_direct_projected_primitive_payload_update = false) const;
-
-	bool CanMakeProjectionAggregateTailRecipe(const SljitFullPipelineProjectionAggregateShape &shape) const;
+	const SljitProjectionAggregateRecipeBinding &ProjectionAggregateRecipes() const {
+		return projection_aggregate_recipes;
+	}
 
 private:
-	SljitProjectionAggregateRecipeBinding ProjectionAggregateBinding() const;
+	SljitProjectionAggregateRecipeBinding projection_aggregate_recipes;
 };
 
 } // namespace duckdb

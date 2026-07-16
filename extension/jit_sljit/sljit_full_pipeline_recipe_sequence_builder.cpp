@@ -23,10 +23,6 @@ SljitFullPipelineRecipeSequenceBuilder::SljitFullPipelineRecipeSequenceBuilder(
       source_max_values(source_max_values_p), uses_extended_source_fetch_budget(uses_extended_source_fetch_budget_p) {
 }
 
-bool SljitFullPipelineRecipeSequenceBuilder::CanMakeNativeTailRecipe(idx_t tail_start_idx) const {
-	return SljitNativeTailCanConsumeTail(ops, tail_start_idx);
-}
-
 SljitFullPipelineRecipe SljitFullPipelineRecipeSequenceBuilder::MakePrimitiveSequence(
     SljitFullPipelinePrimitiveSequence sequence,
     SljitHashJoinDirectAggregateConsumerContract direct_aggregate_consumer) const {
@@ -64,17 +60,15 @@ void SljitFullPipelineRecipeSequenceBuilder::AddProjectionChainStep(SljitFullPip
 	sequence.Add(MakeProjectionChainStep(first_projection_idx, final_projection_idx));
 }
 
-SljitFullPipelineRecipe
-SljitFullPipelineRecipeSequenceBuilder::MakeNativeTailRecipe(SljitFullPipelinePrimitiveSequence sequence,
-                                                             idx_t tail_start_idx) const {
-	if (tail_start_idx >= ops.size()) {
-		throw InternalException("SLJIT native-tail recipe has an invalid tail start operator");
-	}
-	if (!CanMakeNativeTailRecipe(tail_start_idx)) {
-		throw InternalException("SLJIT native-tail recipe cannot consume generated aggregate payload tail");
+bool SljitFullPipelineRecipeSequenceBuilder::TryMakeNativeTailRecipe(SljitFullPipelinePrimitiveSequence sequence,
+                                                                     idx_t tail_start_idx,
+                                                                     SljitFullPipelineRecipe &recipe) const {
+	if (tail_start_idx >= ops.size() || !SljitNativeTailCanConsumeTail(ops, tail_start_idx)) {
+		return false;
 	}
 	sequence.Add(SljitFullPipelinePrimitiveStep::NativeTailDelegation(tail_start_idx));
-	return MakePrimitiveSequence(std::move(sequence));
+	recipe = MakePrimitiveSequence(std::move(sequence));
+	return true;
 }
 
 SljitFullPipelinePrimitiveStep

@@ -666,6 +666,16 @@ def verify_benchmark_repetition_budget() -> None:
     tpch_gate = read("benchmark/tpch/jit/run_tpch_regression_gate.py")
     if '"--triage-failures"' not in tpch_gate or "default=False" not in tpch_gate:
         raise AssertionError("TPC-H focused triage must be opt-in")
+    for database_reuse_contract in (
+        "def provision_gate_database(",
+        "args.use_existing_db or reuse_database",
+        "provisioned_database_dir = provision_gate_database(args)",
+        "shutil.rmtree(provisioned_database_dir, ignore_errors=True)",
+    ):
+        if database_reuse_contract not in tpch_gate:
+            raise AssertionError(f"TPC-H gate must reuse one private database: {database_reuse_contract}")
+    if "reuse_database and args.keep_db" in tpch_gate:
+        raise AssertionError("TPC-H database reuse must not depend on retaining the database after the gate")
     refactor_guard = read("benchmark/jit/run_jit_refactor_guard.py")
     if "if args.tpch_triage_failures:" not in refactor_guard:
         raise AssertionError("refactor guard must pass TPC-H triage only when explicitly requested")
@@ -813,6 +823,73 @@ def verify_bound_direct_join_terminal_contract() -> None:
             raise AssertionError(f"{family} recipe shape must not be admitted and reconstructed through duplicate APIs")
         if f"binding.TryMake{family}Recipe(facts, recipe)" not in recipe_builder:
             raise AssertionError(f"recipe builder must consume the shared {family} binder")
+
+    sequence_binding = read("extension/jit_sljit/include/sljit_full_pipeline_recipe_sequence_builder.hpp")
+    projection_binding_header = read("extension/jit_sljit/include/sljit_projection_aggregate_recipe_binding.hpp")
+    projection_binding = read("extension/jit_sljit/sljit_projection_aggregate_recipe_binding.cpp")
+    projection_builder = read("extension/jit_sljit/sljit_projection_aggregate_recipe.cpp")
+    native_tail_header = read("extension/jit_sljit/include/sljit_native_tail_recipe.hpp")
+    native_tail_builder = read("extension/jit_sljit/sljit_native_tail_recipe.cpp")
+    projected_grouped_binding = read(
+        "extension/jit_sljit/include/sljit_projected_grouped_aggregate_update_primitive.hpp"
+    )
+    binding_surface = "\n".join(
+        (
+            recipe_binding_header,
+            recipe_binding_cpp,
+            sequence_binding,
+            projection_binding_header,
+            projection_binding,
+            projection_builder,
+            native_tail_header,
+            native_tail_builder,
+            projected_grouped_binding,
+        )
+    )
+    for stale in (
+        "CanMakeNativeTailRecipe",
+        "CanMakeProjectionAggregateTailRecipe",
+        "ProjectionAggregateHasDedicatedBackend",
+        "SljitCanBindProjectedInputGroupedAggregateUpdatePrimitive",
+        "SljitBindProjectedInputGroupedAggregateUpdatePrimitive",
+    ):
+        if re.search(rf"\b{re.escape(stale)}\b", binding_surface):
+            raise AssertionError(f"recipe families must not split admission from descriptor construction: {stale}")
+    if "ProjectionAggregateBinding()" in binding_surface:
+        raise AssertionError("the full-pipeline binder must not reconstruct a recipe-family binder per query")
+    for unified_binder in (
+        "TryMakeNativeTailRecipe",
+        "TryMakeSourceProjectionAggregateTailRecipe",
+        "TryMakeJoinDirectProjectionAggregateRecipe",
+        "TryMakeJoinProjectionAggregateTailRecipe",
+        "TryMakeMarkFilterProjectionAggregateRecipe",
+        "TryMakeMarkFilterNativeTailRecipe",
+        "SljitTryBindProjectedInputGroupedAggregateUpdatePrimitive",
+    ):
+        if unified_binder not in binding_surface:
+            raise AssertionError(f"recipe family is missing failure-atomic binding: {unified_binder}")
+    if "SljitProjectionAggregateRecipeBinding projection_aggregate_recipes" not in recipe_binding_header:
+        raise AssertionError("the full-pipeline binder must own one projection-aggregate family binder")
+    if "ProjectionAggregateRecipes().TryMakeMarkFilterProjectionNativeTailRecipe" not in native_tail_builder:
+        raise AssertionError("native-tail selection must call the owning recipe-family binder directly")
+    if "const vector<SljitExecutableRegionOp> &ops" in projection_builder:
+        raise AssertionError("projection recipe selection must not duplicate backend capability ownership")
+    if "RecipeRegistry" in projection_builder:
+        raise AssertionError("fixed projection recipe precedence must not use an indirect registry")
+    if "schedule_facts" in native_tail_header + native_tail_builder:
+        raise AssertionError("native-tail construction must not retain unused schedule-fact plumbing")
+    region_contract_test = read("test/api/test_jit_region_contracts.cpp")
+    for failure_atomic_receipt in (
+        "TryMakeGeneratedFilterProjectionNativeTailRecipe",
+        "TryMakeMarkFilterProjectionNativeTailRecipe",
+        "TryMakeSourceProjectionAggregateTailRecipe",
+        "TryMakeJoinDirectProjectionAggregateRecipe",
+        "TryMakeJoinProjectionAggregateTailRecipe",
+        "TryMakeMarkFilterProjectionAggregateRecipe",
+        "TryMakeMarkFilterNativeTailRecipe",
+    ):
+        if failure_atomic_receipt not in region_contract_test:
+            raise AssertionError(f"recipe binder lacks failure-atomic test coverage: {failure_atomic_receipt}")
 
     executable_builder = read("extension/jit_sljit/sljit_region_executable.cpp")
     region_runtime = read("extension/jit_sljit/sljit_region_runtime.cpp")
