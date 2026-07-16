@@ -634,8 +634,14 @@ def verify_benchmark_repetition_budget() -> None:
     refactor_guard = read("benchmark/jit/run_jit_refactor_guard.py")
     if "if args.tpch_triage_failures:" not in refactor_guard:
         raise AssertionError("refactor guard must pass TPC-H triage only when explicitly requested")
-    if 'parser.add_argument("--tpch-repeats", type=int, default=10)' not in refactor_guard:
-        raise AssertionError("pre-push SF10 comparison must balance both alternating policy orders")
+    for candidate_budget in (
+        'parser.add_argument("--generic-repeats", type=int, choices=(5, 10), default=5)',
+        'parser.add_argument("--tpch-repeats", type=int, choices=(5, 10), default=5)',
+    ):
+        if candidate_budget not in refactor_guard:
+            raise AssertionError(f"pre-push candidates must default to five pairs and allow ten: {candidate_budget}")
+    if 'parser.add_argument("--tpch-triage-repeats", type=int, default=10)' not in refactor_guard:
+        raise AssertionError("explicit TPC-H noise triage must retain the ten-pair qualification budget")
     guard_main = refactor_guard[refactor_guard.index("def main() -> int:") :]
     if guard_main.index("if should_run_tpch(args):") > guard_main.index("if should_run_generic(args):"):
         raise AssertionError("historically compared TPC-H timing must run before the generic production heat load")
@@ -649,6 +655,9 @@ def verify_benchmark_repetition_budget() -> None:
             raise AssertionError(
                 f"Git-hook verification state must not drift back to disposable candidates: {hook_path}"
             )
+    pre_push_hook = read("benchmark/jit/git_hooks/pre-push")
+    if "DUCKDB_JIT_TPCH_TRIAGE_FAILURES" not in pre_push_hook or "--tpch-triage-failures" not in pre_push_hook:
+        raise AssertionError("pre-push must expose explicit focused TPC-H triage without enabling it by default")
 
 
 def verify_bound_direct_join_terminal_contract() -> None:

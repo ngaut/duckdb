@@ -45,7 +45,8 @@ python3 benchmark/jit/generic_benchmark.py \
   --duckdb build/reldebug/duckdb --threads 4 --repeats 5
 ```
 
-Use ten repetitions only for deliberate promotion or ship qualification:
+Use ten repetitions only for deliberate promotion or explicit noise
+qualification:
 
 ```sh
 python3 benchmark/jit/generic_benchmark.py \
@@ -116,6 +117,17 @@ Pre-push reuses a matching receipt and adds required production performance
 gates. A missing or stale receipt causes the complete guard to run. TPC-H runs
 before the generic matrix so historical comparison is not preheated by an
 unrelated sustained workload.
+
+A normal push reports a failed five-pair candidate without retrying it. After
+reviewing that failure, explicitly request the existing ten-pair focused TPC-H
+triage on the next push with:
+
+```sh
+DUCKDB_JIT_TPCH_TRIAGE_FAILURES=1 git push
+```
+
+The focused recheck must still satisfy the independent raw JIT-auto ceiling;
+normalization remains diagnostic evidence only.
 
 ## Interpreting a result
 
