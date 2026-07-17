@@ -1061,27 +1061,35 @@ PhysicalRunnerCostProfile DuckDBCostModel::SelectPhysicalRunner(const PhysicalRu
 	compiled_profile.net_benefit =
 	    SubtractCost(compiled_profile.accelerated_runner_benefit, compiled_profile.startup_cost);
 
-	auto gpu_parameters = PhysicalRunnerGpuCostParameters(parameters);
-	auto gpu_admission = PhysicalRunnerEvaluateAdmission(input, facts, gpu_parameters);
+	// An unavailable runner kind is never evaluated: its profile stays empty instead of
+	// carrying hypothetical costs for a backend that cannot run here.
 	PhysicalRunnerCostProfile gpu_profile;
-	PhysicalRunnerInitializeProfile(input, facts, gpu_admission, gpu_profile);
-	PhysicalRunnerComputeWorkComponents(input, facts, gpu_parameters, gpu_admission, gpu_profile);
-	PhysicalRunnerBuildRuntimeProofRequirements(gpu_profile);
-	gpu_profile.accelerated_runner_benefit = MultiplyCost(gpu_profile.costed_batches, gpu_profile.saved_work_per_batch);
-	gpu_profile.gpu_transfer_cost =
-	    MultiplyCost(gpu_profile.batches, SaturatingCostCast(parameters.gpu_transfer_cost_per_batch));
-	gpu_profile.startup_cost = PhysicalRunnerStartupCost(gpu_parameters);
-	gpu_profile.required_benefit =
-	    AddCost(PhysicalRunnerRequiredBenefit(gpu_profile, gpu_parameters), gpu_profile.gpu_transfer_cost);
-	gpu_profile.net_benefit = SubtractCost(
-	    SubtractCost(gpu_profile.accelerated_runner_benefit, gpu_profile.startup_cost), gpu_profile.gpu_transfer_cost);
+	PhysicalRunnerSelectionAnalysis gpu_selection;
+	if (parameters.gpu_runner_available) {
+		auto gpu_parameters = PhysicalRunnerGpuCostParameters(parameters);
+		auto gpu_admission = PhysicalRunnerEvaluateAdmission(input, facts, gpu_parameters);
+		PhysicalRunnerInitializeProfile(input, facts, gpu_admission, gpu_profile);
+		PhysicalRunnerComputeWorkComponents(input, facts, gpu_parameters, gpu_admission, gpu_profile);
+		PhysicalRunnerBuildRuntimeProofRequirements(gpu_profile);
+		gpu_profile.accelerated_runner_benefit =
+		    MultiplyCost(gpu_profile.costed_batches, gpu_profile.saved_work_per_batch);
+		gpu_profile.gpu_transfer_cost =
+		    MultiplyCost(gpu_profile.batches, SaturatingCostCast(parameters.gpu_transfer_cost_per_batch));
+		gpu_profile.startup_cost = PhysicalRunnerStartupCost(gpu_parameters);
+		gpu_profile.required_benefit =
+		    AddCost(PhysicalRunnerRequiredBenefit(gpu_profile, gpu_parameters), gpu_profile.gpu_transfer_cost);
+		gpu_profile.net_benefit =
+		    SubtractCost(SubtractCost(gpu_profile.accelerated_runner_benefit, gpu_profile.startup_cost),
+		                 gpu_profile.gpu_transfer_cost);
+		gpu_selection = PhysicalRunnerAnalyzeSelection(input, gpu_admission, gpu_profile, true, 0);
+	} else {
+		gpu_selection.selection_reason = "rejected_runner_unavailable";
+	}
 
 	const auto compiled_parallel_per_batch_work_floor = PhysicalRunnerParallelPerBatchWorkFloor(parameters);
 	auto compiled_selection = PhysicalRunnerAnalyzeSelection(input, compiled_admission, compiled_profile,
 	                                                         parameters.compiled_vectorized_runner_available,
 	                                                         compiled_parallel_per_batch_work_floor);
-	auto gpu_selection =
-	    PhysicalRunnerAnalyzeSelection(input, gpu_admission, gpu_profile, parameters.gpu_runner_available, 0);
 	const bool compiled_selected = compiled_selection.selected;
 	const bool gpu_selected = gpu_selection.selected;
 
