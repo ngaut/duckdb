@@ -3800,6 +3800,8 @@ SLJIT_API_FUNC_ATTRIBUTE sljit_s32 sljit_emit_simd_op2(struct sljit_compiler *co
 			return SLJIT_ERR_UNSUPPORTED;
 
 		return push_inst(compiler, VSHUF_B | FRD(dst_vreg) | FRJ(src1_vreg) | FRK(src1_vreg) | FRA(src2));
+	default:
+		return SLJIT_ERR_UNSUPPORTED;
 	}
 
 	if (reg_size == 5)

@@ -4695,6 +4695,8 @@ SLJIT_API_FUNC_ATTRIBUTE sljit_s32 sljit_emit_simd_op2(struct sljit_compiler *co
 		ins = VRGATHER_VV;
 		elem_size = 0;
 		break;
+	default:
+		return SLJIT_ERR_UNSUPPORTED;
 	}
 
 	if (elem_size > 3)

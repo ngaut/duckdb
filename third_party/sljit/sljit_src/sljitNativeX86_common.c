@@ -5023,6 +5023,8 @@ SLJIT_API_FUNC_ATTRIBUTE sljit_s32 sljit_emit_simd_op2(struct sljit_compiler *co
 
 		op = PSHUFB_x_xm | EX86_PREF_66 | VEX_OP_0F38;
 		break;
+	default:
+		return SLJIT_ERR_UNSUPPORTED;
 	}
 
 	if (type & SLJIT_SIMD_TEST)

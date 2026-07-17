@@ -4393,6 +4393,8 @@ SLJIT_API_FUNC_ATTRIBUTE sljit_s32 sljit_emit_simd_op2(struct sljit_compiler *co
 	case SLJIT_SIMD_OP2_SHUFFLE:
 		ins = VTBL;
 		break;
+	default:
+		return SLJIT_ERR_UNSUPPORTED;
 	}
 
 	if (src2 & SLJIT_MEM) {
