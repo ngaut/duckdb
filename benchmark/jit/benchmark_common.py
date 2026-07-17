@@ -7,6 +7,7 @@ import json
 import re
 import subprocess
 import tempfile
+from dataclasses import dataclass
 from pathlib import Path
 
 REGION_SUMMARY_FIELDS = (
@@ -107,6 +108,26 @@ PROFILE_EVENT_FIELDS = (
 SHELL_TIMER_RE = re.compile(r"Run Time \(s\): real ([0-9]+(?:\.[0-9]+)?)")
 
 
+@dataclass(frozen=True)
+class TimedMaterializedAttemptSpec:
+    setup_sql: str
+    table_name: str
+    query_sql: str
+    artifact_path: Path
+    label: str
+    pre_sql: str = ""
+    validation_sql: str = ""
+    cleanup_sql: str = ""
+    collect_counters: bool = False
+
+
+@dataclass(frozen=True)
+class TimedMaterializedAttemptGroup:
+    label: str
+    preparation_sql: str
+    attempts: tuple[TimedMaterializedAttemptSpec, ...]
+
+
 def repo_root() -> Path:
     return Path(__file__).resolve().parents[2]
 
@@ -129,6 +150,10 @@ def sql_quote(value) -> str:
 
 def sql_bool(value: bool) -> str:
     return "true" if value else "false"
+
+
+def duckdb_shell_quote(value) -> str:
+    return '"' + str(value).replace("\\", "\\\\").replace('"', '\\"') + '"'
 
 
 def jit_cbo_setting_sql(settings: list[str]) -> list[str]:
@@ -285,7 +310,12 @@ def counter_region_summary(counter_rows: list[dict]) -> dict:
 
 
 def materialize_query(args, db_path: Path, setup_sql: str, table_name: str, query_sql: str, label: str) -> None:
-    run_duckdb(args.duckdb, db_path, f"{setup_sql}\nCREATE OR REPLACE TABLE {table_name} AS\n{query_sql};", label)
+    run_duckdb(
+        args.duckdb,
+        db_path,
+        f"{setup_sql}\nCREATE OR REPLACE TABLE {table_name} AS\n{query_sql};",
+        label,
+    )
 
 
 def profile_materialized_attempt(
@@ -352,14 +382,128 @@ def profile_materialized_attempt(
         counter_rows = read_profile_json(counters_path)
         counters_path.unlink()
 
-    return {"profile": read_profile_json(profile_path), "validation": validation_rows, "counters": counter_rows}
+    return {
+        "profile": read_profile_json(profile_path),
+        "validation": validation_rows,
+        "counters": counter_rows,
+    }
+
+
+def parse_shell_timers_us(output: str, labels: list[str]) -> list[int]:
+    matches = SHELL_TIMER_RE.findall(output)
+    if len(matches) != len(labels):
+        joined_labels = ", ".join(labels)
+        raise RuntimeError(f"expected {len(labels)} shell timers during {joined_labels}, found {len(matches)}")
+    return [int(round(float(match) * 1_000_000)) for match in matches]
 
 
 def parse_shell_timer_us(output: str, label: str) -> int:
-    matches = SHELL_TIMER_RE.findall(output)
-    if len(matches) != 1:
-        raise RuntimeError(f"expected one shell timer during {label}, found {len(matches)}")
-    return int(round(float(matches[0]) * 1_000_000))
+    return parse_shell_timers_us(output, [label])[0]
+
+
+def timed_materialized_artifact_paths(
+    attempt: TimedMaterializedAttemptSpec,
+) -> tuple[Path, Path]:
+    validation_path = attempt.artifact_path.with_name(f"{attempt.artifact_path.stem}_validation.json")
+    counters_path = attempt.artifact_path.with_name(f"{attempt.artifact_path.stem}_counters.json")
+    return validation_path, counters_path
+
+
+def prepare_timed_materialized_artifacts(attempt: TimedMaterializedAttemptSpec) -> None:
+    for path in timed_materialized_artifact_paths(attempt):
+        if path.exists():
+            path.unlink()
+
+
+def timed_materialized_statements(attempt: TimedMaterializedAttemptSpec) -> list[str]:
+    validation_path, counters_path = timed_materialized_artifact_paths(attempt)
+    statements = [attempt.setup_sql]
+    if attempt.pre_sql.strip():
+        statements.append(attempt.pre_sql)
+    statements.extend(
+        [
+            ".timer on",
+            f"CREATE OR REPLACE TABLE {attempt.table_name} AS\n{attempt.query_sql};",
+            ".timer off",
+        ]
+    )
+    if attempt.collect_counters:
+        statements.append(".mode json")
+        statements.append(f".once {sql_quote(counters_path)}")
+        statements.append("SELECT * FROM duckdb_jit_counters();")
+    if attempt.validation_sql.strip():
+        statements.append(".mode json")
+        statements.append(f".once {sql_quote(validation_path)}")
+        statements.append(attempt.validation_sql)
+    if attempt.cleanup_sql.strip():
+        statements.append(attempt.cleanup_sql)
+    return statements
+
+
+def read_timed_materialized_attempt(attempt: TimedMaterializedAttemptSpec, query_time_us: int) -> dict:
+    validation_path, counters_path = timed_materialized_artifact_paths(attempt)
+    validation_rows = []
+    if attempt.validation_sql.strip():
+        if not validation_path.exists():
+            raise RuntimeError(f"validation JSON was not written during {attempt.label}: {validation_path}")
+        validation_rows = read_profile_json(validation_path)
+        validation_path.unlink()
+
+    counter_rows = []
+    if attempt.collect_counters:
+        if not counters_path.exists():
+            raise RuntimeError(f"counter JSON was not written during {attempt.label}: {counters_path}")
+        counter_rows = read_profile_json(counters_path)
+        counters_path.unlink()
+
+    return {
+        "query_time_us": query_time_us,
+        "validation": validation_rows,
+        "counters": counter_rows,
+    }
+
+
+def timed_materialized_attempt_groups(
+    args,
+    db_path: Path,
+    groups: list[TimedMaterializedAttemptGroup],
+) -> list[dict]:
+    if not groups:
+        return []
+    empty_groups = [group.label for group in groups if not group.attempts]
+    if empty_groups:
+        raise ValueError(f"timed workload groups must contain attempts: {', '.join(empty_groups)}")
+
+    statements = []
+    all_attempts = []
+    quoted_db_path = duckdb_shell_quote(db_path.resolve())
+    for group in groups:
+        if group.preparation_sql.strip():
+            statements.append(f".open {quoted_db_path}")
+            statements.append(group.preparation_sql)
+            # Closing after preparation checkpoints the workload before any
+            # query timer starts, matching the former preparation process.
+            statements.append(".open :memory:")
+        for attempt in group.attempts:
+            prepare_timed_materialized_artifacts(attempt)
+            statements.append(f".open {quoted_db_path}")
+            statements.extend(timed_materialized_statements(attempt))
+            # Reopening the checkpointed database before every sample preserves
+            # fresh buffer-manager and connection state without another OS exec.
+            statements.append(".open :memory:")
+            all_attempts.append(attempt)
+
+    group_range = groups[0].label if len(groups) == 1 else f"{groups[0].label} through {groups[-1].label}"
+    batch_label = f"timed workload groups ({group_range})"
+    result = run_duckdb(args.duckdb, Path(":memory:"), "\n".join(statements), batch_label)
+    query_times = parse_shell_timers_us(
+        result.stdout + "\n" + result.stderr,
+        [attempt.label for attempt in all_attempts],
+    )
+    return [
+        read_timed_materialized_attempt(attempt, query_time_us)
+        for attempt, query_time_us in zip(all_attempts, query_times)
+    ]
 
 
 def timed_materialized_attempt(
@@ -376,52 +520,21 @@ def timed_materialized_attempt(
     cleanup_sql: str = "",
     collect_counters: bool = False,
 ) -> dict:
-    validation_path = artifact_path.with_name(f"{artifact_path.stem}_validation.json")
-    if validation_path.exists():
-        validation_path.unlink()
-    counters_path = artifact_path.with_name(f"{artifact_path.stem}_counters.json")
-    if counters_path.exists():
-        counters_path.unlink()
-
-    statements = [setup_sql]
-    if pre_sql.strip():
-        statements.append(pre_sql)
-    statements.extend(
-        [
-            ".timer on",
-            f"CREATE OR REPLACE TABLE {table_name} AS\n{query_sql};",
-            ".timer off",
-        ]
+    attempt = TimedMaterializedAttemptSpec(
+        setup_sql=setup_sql,
+        table_name=table_name,
+        query_sql=query_sql,
+        artifact_path=artifact_path,
+        label=label,
+        pre_sql=pre_sql,
+        validation_sql=validation_sql,
+        cleanup_sql=cleanup_sql,
+        collect_counters=collect_counters,
     )
-    if collect_counters:
-        statements.append(".mode json")
-        statements.append(f".once {sql_quote(counters_path)}")
-        statements.append("SELECT * FROM duckdb_jit_counters();")
-    if validation_sql.strip():
-        statements.append(".mode json")
-        statements.append(f".once {sql_quote(validation_path)}")
-        statements.append(validation_sql)
-    if cleanup_sql.strip():
-        statements.append(cleanup_sql)
-
-    result = run_duckdb(args.duckdb, db_path, "\n".join(statements), label)
+    prepare_timed_materialized_artifacts(attempt)
+    result = run_duckdb(args.duckdb, db_path, "\n".join(timed_materialized_statements(attempt)), label)
     query_time_us = parse_shell_timer_us(result.stdout + "\n" + result.stderr, label)
-
-    validation_rows = []
-    if validation_sql.strip():
-        if not validation_path.exists():
-            raise RuntimeError(f"validation JSON was not written during {label}: {validation_path}")
-        validation_rows = read_profile_json(validation_path)
-        validation_path.unlink()
-
-    counter_rows = []
-    if collect_counters:
-        if not counters_path.exists():
-            raise RuntimeError(f"counter JSON was not written during {label}: {counters_path}")
-        counter_rows = read_profile_json(counters_path)
-        counters_path.unlink()
-
-    return {"query_time_us": query_time_us, "validation": validation_rows, "counters": counter_rows}
+    return read_timed_materialized_attempt(attempt, query_time_us)
 
 
 def correctness_sql(baseline_table: str, result_table: str) -> str:
@@ -459,14 +572,23 @@ def verify_profile(trace_dir: Path, row: dict, *, require_regions: bool = True) 
     profile_path = trace_dir / row["profile_json"]
     require(profile_path.exists(), f"missing profile JSON: {profile_path}")
     profile = read_profile_json(profile_path)
-    require(row_float(profile.get("query") or {}, "total_time") > 0, f"{profile_path.name}: missing query timing")
+    require(
+        row_float(profile.get("query") or {}, "total_time") > 0,
+        f"{profile_path.name}: missing query timing",
+    )
     require("operator" in profile, f"{profile_path.name}: missing operator tree")
     regions = profile.get("execution_regions") or {}
     if require_regions:
         require(bool(regions), f"{profile_path.name}: missing execution_regions diagnostics")
-        require("events" in regions, f"{profile_path.name}: missing execution_regions.events")
+        require(
+            "events" in regions,
+            f"{profile_path.name}: missing execution_regions.events",
+        )
         events = regions.get("events") or []
         if events:
             missing = [name for name in PROFILE_EVENT_FIELDS if name not in events[0]]
-            require(not missing, f"{profile_path.name}: execution_regions.events missing fields {missing}")
+            require(
+                not missing,
+                f"{profile_path.name}: execution_regions.events missing fields {missing}",
+            )
     return profile

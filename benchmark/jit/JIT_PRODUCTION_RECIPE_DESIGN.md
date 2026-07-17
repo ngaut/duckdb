@@ -376,10 +376,47 @@ SF1 and SF10 use separate state files because scale factor is part of the
 baseline contract. State also binds thread count, timing mode, query set, and
 relevant JIT configuration.
 
-A regression-gate invocation provisions one database and reuses it for the
-untraced candidate, traced runtime proof, focused recheck, and promotion pass.
-The gate removes a privately provisioned database in a `finally` block unless
-retention was requested. Database generation is setup, not repeated proof.
+A regression-gate invocation clones one immutable, scale-factor-keyed template
+and reuses the private working database for the untraced candidate, traced
+runtime proof, focused recheck, and promotion pass. The default template cache
+is local and ignored, carries an explicit role/format/scale manifest, is
+atomically created under an exclusive creation lock, and is rebuilt when
+validation fails. The lock is released before measurement. Filesystem
+copy-on-write avoids a physical SF10 copy where supported; a normal copy is the
+portable fallback. Disabling the cache explicitly exercises dbgen. Database
+generation is setup, not repeated proof.
+
+The combined production guard rejects a sustained busy host before setup. The
+TPC-H gate checks again after its private database clone is ready, and generic
+measurements recheck at their own boundary. macOS security scanners have an
+independent single-core ceiling because normalized machine-wide utilization can
+hide their effect on a single-thread measurement. Admission may wait through a
+bounded transient scan, but measurement never starts on a rejected sample.
+An immediate post-measurement sample invalidates a run if load appeared after
+admission. Host-load admission is measurement hygiene only; it cannot change
+raw ceilings, speedup floors, query coverage, or runtime-proof requirements.
+
+The generic gate amortizes operating-system process launch cost across the
+complete matrix. Its one shell process interleaves each workload's preparation
+immediately before that workload's samples. Preparation and every attempt end
+by closing the database back to `:memory:`; the next attempt reopens the same
+checkpointed file. Samples therefore retain the original workload chronology
+and fresh connection and buffer-manager state while avoiding hundreds of macOS
+provenance assessments. Batching owns only process lifecycle; query timers,
+alternating policy order, counters, correctness artifacts, and regression
+contracts remain attempt-local.
+
+TPC-H production timing uses the same lifecycle contract across query groups:
+prepare that query's correctness baseline, close the database, then close and
+reopen around every alternating policy sample. Traced counter collection is a
+separate grouped shell session after timing. The primary candidate therefore
+uses one operating-system process and runtime proof uses at most two, without
+sharing database state or trace overhead across timed attempts.
+
+Pre-commit correctness and pre-push performance receipts are bound to the exact
+Git tree. A push can reuse completed production verification without measuring
+inside the `git push` process, which can itself activate macOS security work.
+Any tree change invalidates both receipts.
 
 ## Verification
 

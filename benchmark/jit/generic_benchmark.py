@@ -16,6 +16,8 @@ from types import SimpleNamespace
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from benchmark_common import (  # noqa: E402
     REGION_SUMMARY_FIELDS,
+    TimedMaterializedAttemptGroup,
+    TimedMaterializedAttemptSpec,
     counter_region_summary,
     correctness_from_rows,
     correctness_sql,
@@ -23,14 +25,14 @@ from benchmark_common import (  # noqa: E402
     make_output_dir,
     repo_root,
     row_int,
-    run_duckdb,
-    timed_materialized_attempt,
+    timed_materialized_attempt_groups,
     write_csv,
 )
 
 # Read-only query variants share this immutable fixture through `setup_id`.
-# Preparation runs in a separate process so every timed sample reopens the same
-# checkpointed database state.
+# Preparation checkpoints the fixture before measurement. The matrix shell
+# reopens that database before every sample, preserving fresh database state
+# without paying for one macOS process-security assessment per sample.
 GROUPED_SELECTIVE_MULTI_AGGREGATE_SETUP_SQL = (
     "CREATE OR REPLACE TABLE __jit_generic_selective_groups("
     "group_flag VARCHAR NOT NULL, group_status VARCHAR NOT NULL, event_date DATE NOT NULL, "
@@ -747,13 +749,12 @@ def policy_order(repeat: int) -> tuple[str, str]:
     return ("off", "auto") if repeat % 2 else ("auto", "off")
 
 
-def prepare_workload(
+def workload_preparation_sql(
     args: SimpleNamespace,
-    db_path: Path,
     workload: dict,
     expected_table: str,
     prepare_setup: bool,
-) -> None:
+) -> str:
     sql = jit_setup_sql(
         args,
         "off",
@@ -764,23 +765,17 @@ def prepare_workload(
     if prepare_setup:
         sql += workload.get("setup_sql", "")
     sql += f"\nCREATE OR REPLACE TABLE {expected_table} AS\n{workload['sql']};"
-    run_duckdb(
-        args.duckdb,
-        db_path,
-        sql,
-        f"generic workload {workload['name']} fixture preparation",
-    )
+    return sql
 
 
-def run_workload(
+def workload_attempt_spec(
     args: SimpleNamespace,
-    db_path: Path,
     out_dir: Path,
     workload: dict,
     policy: str,
     repeat: int,
     expected_table: str,
-) -> dict:
+) -> TimedMaterializedAttemptSpec:
     workload_name = workload["name"]
     result_table = f"__jit_generic_result_{workload_name}_{policy}_{repeat}"
     setup_sql = jit_setup_sql(
@@ -792,20 +787,22 @@ def run_workload(
         reset_counters=True,
     )
     artifact_path = out_dir / f"{workload_name}_{policy}_{repeat}.json"
-    attempt = timed_materialized_attempt(
-        args,
-        db_path,
-        setup_sql,
-        result_table,
-        workload["sql"],
-        artifact_path,
-        f"generic workload {workload_name} {policy} repeat {repeat}",
+    return TimedMaterializedAttemptSpec(
+        setup_sql=setup_sql,
+        table_name=result_table,
+        query_sql=workload["sql"],
+        artifact_path=artifact_path,
+        label=f"generic workload {workload_name} {policy} repeat {repeat}",
         validation_sql=correctness_sql(expected_table, result_table),
         cleanup_sql=f"DROP TABLE IF EXISTS {result_table};",
         collect_counters=True,
     )
+
+
+def workload_result_row(workload_name: str, policy: str, repeat: int, attempt: dict) -> dict:
     counters = attempt["counters"]
     region_metrics = counter_region_summary(counters)
+    result_table = f"__jit_generic_result_{workload_name}_{policy}_{repeat}"
     correctness = correctness_from_rows(attempt["validation"], result_table)
     return {
         "workload": workload_name,
@@ -828,6 +825,51 @@ def run_workload(
         ),
         **region_metrics,
     }
+
+
+def run_workload_matrix(
+    args: SimpleNamespace,
+    db_path: Path,
+    out_dir: Path,
+    workloads: tuple[dict, ...],
+    repeats: int,
+) -> list[dict]:
+    prepared_setups: dict[str, str] = {}
+    groups = []
+    jobs = []
+    for workload in workloads:
+        expected_table = f"__jit_generic_expected_{workload['name']}"
+        setup_id = workload.get("setup_id", workload["name"])
+        setup_sql = workload.get("setup_sql", "")
+        if setup_id in prepared_setups and prepared_setups[setup_id] != setup_sql:
+            raise ValueError(f"workloads sharing setup_id {setup_id!r} must use identical setup_sql")
+        materialize_setup = setup_id not in prepared_setups
+        prepared_setups[setup_id] = setup_sql
+
+        group_jobs = []
+        for repeat in range(1, repeats + 1):
+            for policy in policy_order(repeat):
+                spec = workload_attempt_spec(args, out_dir, workload, policy, repeat, expected_table)
+                group_jobs.append(spec)
+                jobs.append((workload["name"], policy, repeat, spec))
+        groups.append(
+            TimedMaterializedAttemptGroup(
+                label=f"generic workload {workload['name']}",
+                preparation_sql=workload_preparation_sql(
+                    args,
+                    workload,
+                    expected_table,
+                    prepare_setup=materialize_setup,
+                ),
+                attempts=tuple(group_jobs),
+            )
+        )
+
+    attempts = timed_materialized_attempt_groups(args, db_path, groups)
+    return [
+        workload_result_row(workload_name, policy, repeat, attempt)
+        for (workload_name, policy, repeat, _), attempt in zip(jobs, attempts)
+    ]
 
 
 def minimum_auto_speedup(workload: dict, threads: int) -> float:
@@ -950,8 +992,6 @@ def main() -> int:
     out_dir = make_output_dir(args.out_dir, "generic_benchmark")
     db_path = out_dir / "generic.duckdb"
     runtime_args = make_args(args)
-    rows = []
-    prepared_setups: dict[str, str] = {}
     known_workloads = {workload["name"]: workload for workload in GENERIC_WORKLOADS}
     if args.workloads:
         unknown_workloads = [name for name in args.workloads if name not in known_workloads]
@@ -961,34 +1001,7 @@ def main() -> int:
     else:
         workloads = GENERIC_WORKLOADS
     try:
-        for workload in workloads:
-            expected_table = f"__jit_generic_expected_{workload['name']}"
-            setup_id = workload.get("setup_id", workload["name"])
-            setup_sql = workload.get("setup_sql", "")
-            if setup_id in prepared_setups and prepared_setups[setup_id] != setup_sql:
-                raise ValueError(f"workloads sharing setup_id {setup_id!r} must use identical setup_sql")
-            materialize_setup = setup_id not in prepared_setups
-            prepare_workload(
-                runtime_args,
-                db_path,
-                workload,
-                expected_table,
-                prepare_setup=materialize_setup,
-            )
-            prepared_setups[setup_id] = setup_sql
-            for repeat in range(1, args.repeats + 1):
-                for policy in policy_order(repeat):
-                    rows.append(
-                        run_workload(
-                            runtime_args,
-                            db_path,
-                            out_dir,
-                            workload,
-                            policy,
-                            repeat,
-                            expected_table,
-                        )
-                    )
+        rows = run_workload_matrix(runtime_args, db_path, out_dir, workloads, args.repeats)
         summary = summarize(rows, workloads, args.threads, args.trace_runtime)
         write_csv(out_dir / "runs.csv", RUN_FIELDS, rows)
         write_csv(out_dir / "summary.csv", SUMMARY_FIELDS, summary)

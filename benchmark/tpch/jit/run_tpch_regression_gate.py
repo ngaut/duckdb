@@ -12,21 +12,30 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
+from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "jit"))
+from benchmark_host import HostQuiescenceError, require_host_quiescence, wait_for_host_quiescence
 from tpch_common import (
     DEFAULT_POLICIES,
     DEFAULT_QUERIES,
     TPCHConfigurationError,
+    create_tpch_database,
     normalize_tpch_query_ids,
+    validate_tpch_database,
 )
 
 ROOT = Path(__file__).resolve().parents[3]
 DEFAULT_BASELINE_ENV = "DUCKDB_JIT_TPCH_BASELINE"
 DEFAULT_HIGH_SAMPLE_REPEATS = 10
 DEFAULT_BASELINE_STATE = ROOT / "benchmark" / "tpch" / "jit" / "local_baselines" / "tpch_refactor_guard_state.json"
+DEFAULT_DATABASE_CACHE_DIR = ROOT / "benchmark" / "tpch" / "jit" / "local_baselines" / "databases"
+DATABASE_CACHE_FORMAT_VERSION = 2
+DATABASE_CACHE_ROLE = "immutable_tpch_template"
+DATABASE_CACHE_LOCK_INITIALIZATION_GRACE_S = 30.0
 PROMOTED_BASELINE_CSV_FILES = (
     "summary.csv",
     "runs.csv",
@@ -44,12 +53,215 @@ def default_out_dir() -> Path:
     return ROOT / "benchmark" / "tpch" / "jit" / "tmp" / f"tpch_regression_gate_{stamp}"
 
 
-def provision_gate_database(args: argparse.Namespace) -> Path | None:
-    if args.db is not None or args.use_existing_db:
+def database_cache_label(scale_factor: float) -> str:
+    return f"sf{scale_factor:g}".replace(".", "_")
+
+
+def database_cache_paths(args: argparse.Namespace) -> tuple[Path, Path, Path]:
+    stem = f"tpch_{database_cache_label(args.scale_factor)}"
+    return (
+        args.database_cache_dir / f"{stem}.duckdb",
+        args.database_cache_dir / f"{stem}.json",
+        args.database_cache_dir / f"{stem}.lock",
+    )
+
+
+def process_exists(pid: int) -> bool:
+    if pid <= 0:
+        return False
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+def lock_owner(lock_path: Path) -> int | None:
+    try:
+        return int(lock_path.read_text(encoding="utf-8").strip())
+    except (FileNotFoundError, OSError, ValueError):
         return None
-    database_dir = Path(tempfile.mkdtemp(prefix="duckdb_jit_tpch_gate_"))
-    args.db = database_dir / "tpch.duckdb"
-    return database_dir
+
+
+def lock_is_initializing(lock_path: Path) -> bool:
+    try:
+        age_seconds = time.time() - lock_path.stat().st_mtime
+    except FileNotFoundError:
+        return False
+    return age_seconds < DATABASE_CACHE_LOCK_INITIALIZATION_GRACE_S
+
+
+@contextmanager
+def exclusive_database_cache_lock(lock_path: Path):
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    descriptor = None
+    for _ in range(3):
+        try:
+            descriptor = os.open(lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+            try:
+                os.write(descriptor, f"{os.getpid()}\n".encode())
+            except Exception:
+                os.close(descriptor)
+                descriptor = None
+                lock_path.unlink(missing_ok=True)
+                raise
+            break
+        except FileExistsError:
+            owner = lock_owner(lock_path)
+            if owner is not None and process_exists(owner):
+                raise TPCHConfigurationError(f"TPC-H database cache is in use by pid {owner}: {lock_path}")
+            if owner is None and lock_is_initializing(lock_path):
+                raise TPCHConfigurationError(f"TPC-H database cache lock is being initialized: {lock_path}")
+            try:
+                lock_path.unlink()
+            except FileNotFoundError:
+                pass
+    if descriptor is None:
+        raise TPCHConfigurationError(f"could not acquire TPC-H database cache lock: {lock_path}")
+    try:
+        yield
+    finally:
+        os.close(descriptor)
+        try:
+            lock_path.unlink()
+        except FileNotFoundError:
+            pass
+
+
+def read_database_cache_manifest(path: Path) -> dict | None:
+    if not path.is_file():
+        return None
+    try:
+        with path.open(encoding="utf-8") as handle:
+            manifest = json.load(handle)
+    except (json.JSONDecodeError, OSError):
+        return None
+    if not isinstance(manifest, dict):
+        return None
+    return manifest
+
+
+def database_cache_manifest_matches(path: Path, scale_factor: float) -> bool:
+    manifest = read_database_cache_manifest(path)
+    if manifest is None:
+        return False
+    try:
+        manifest_scale_factor = float(manifest.get("scale_factor", -1.0))
+    except (TypeError, ValueError):
+        return False
+    return (
+        manifest.get("format_version") == DATABASE_CACHE_FORMAT_VERSION
+        and manifest.get("database_role") == DATABASE_CACHE_ROLE
+        and manifest_scale_factor == scale_factor
+    )
+
+
+def remove_database_cache_artifacts(database_path: Path, manifest_path: Path) -> None:
+    for path in (database_path, Path(f"{database_path}.wal"), manifest_path):
+        try:
+            path.unlink()
+        except FileNotFoundError:
+            pass
+
+
+def create_cached_database(args: argparse.Namespace, database_path: Path, manifest_path: Path) -> None:
+    with tempfile.TemporaryDirectory(prefix=".tpch_database_", dir=database_path.parent) as temporary_directory:
+        temporary_root = Path(temporary_directory)
+        temporary_database = temporary_root / database_path.name
+        temporary_manifest = temporary_root / manifest_path.name
+        create_tpch_database(args, temporary_database)
+        validate_tpch_database(args, temporary_database)
+        manifest = {
+            "format_version": DATABASE_CACHE_FORMAT_VERSION,
+            "database_role": DATABASE_CACHE_ROLE,
+            "scale_factor": args.scale_factor,
+            "created_at": datetime.now().isoformat(timespec="seconds"),
+        }
+        temporary_manifest.write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
+        os.replace(temporary_database, database_path)
+        os.replace(temporary_manifest, manifest_path)
+
+
+def ensure_cached_database(args: argparse.Namespace, database_path: Path, manifest_path: Path) -> None:
+    cache_is_complete = database_path.is_file() and database_cache_manifest_matches(manifest_path, args.scale_factor)
+    if cache_is_complete:
+        try:
+            validate_tpch_database(args, database_path)
+            print(f"reusing TPC-H database template: {database_path}", flush=True)
+            return
+        except RuntimeError:
+            print(f"rebuilding invalid TPC-H database template: {database_path}", flush=True)
+    remove_database_cache_artifacts(database_path, manifest_path)
+    create_cached_database(args, database_path, manifest_path)
+    print(f"created TPC-H database template: {database_path}", flush=True)
+
+
+def clone_cached_database(source: Path, target: Path) -> None:
+    clone_commands = []
+    if sys.platform == "darwin":
+        clone_commands.append(["cp", "-c", str(source), str(target)])
+    elif sys.platform.startswith("linux"):
+        clone_commands.append(["cp", "--reflink=auto", "--sparse=always", str(source), str(target)])
+
+    for command in clone_commands:
+        try:
+            result = subprocess.run(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False)
+        except FileNotFoundError:
+            continue
+        if result.returncode == 0:
+            return
+        target.unlink(missing_ok=True)
+    shutil.copy2(source, target)
+
+
+@contextmanager
+def gate_database(args: argparse.Namespace):
+    if args.db is not None:
+        if args.use_existing_db:
+            if not args.db.exists():
+                raise TPCHConfigurationError(f"database does not exist: {args.db}")
+        else:
+            if args.db.exists():
+                raise TPCHConfigurationError(f"--db already exists: {args.db}; use --use-existing-db to reuse it")
+            args.db.parent.mkdir(parents=True, exist_ok=True)
+            create_tpch_database(args, args.db)
+        validate_tpch_database(args, args.db)
+        args.use_existing_db = True
+        yield
+        return
+    if not args.database_cache:
+        database_dir = Path(tempfile.mkdtemp(prefix="duckdb_jit_tpch_gate_"))
+        args.db = database_dir / "tpch.duckdb"
+        try:
+            create_tpch_database(args, args.db)
+            validate_tpch_database(args, args.db)
+            args.use_existing_db = True
+            yield
+        finally:
+            if not args.keep_db:
+                shutil.rmtree(database_dir, ignore_errors=True)
+        return
+
+    template_path, manifest_path, lock_path = database_cache_paths(args)
+    working_directory = Path(tempfile.mkdtemp(prefix="duckdb_jit_tpch_gate_"))
+    working_database = working_directory / template_path.name
+    working_database_ready = False
+    try:
+        args.database_cache_dir.mkdir(parents=True, exist_ok=True)
+        with exclusive_database_cache_lock(lock_path):
+            ensure_cached_database(args, template_path, manifest_path)
+            clone_cached_database(template_path, working_database)
+        working_database_ready = True
+        args.db = working_database
+        args.use_existing_db = True
+        yield
+    finally:
+        if args.keep_db and working_database_ready:
+            print(f"retained TPC-H working database: {working_database}", flush=True)
+        else:
+            shutil.rmtree(working_directory, ignore_errors=True)
 
 
 def run_command(command: list[str], label: str, *, check: bool = True) -> int:
@@ -58,6 +270,12 @@ def run_command(command: list[str], label: str, *, check: bool = True) -> int:
     if check and result.returncode != 0:
         raise RuntimeError(f"{label} failed with exit code {result.returncode}")
     return result.returncode
+
+
+def run_timed_benchmark(args: argparse.Namespace, command: list[str], label: str) -> None:
+    run_command(command, label)
+    if args.host_quiescence:
+        require_host_quiescence()
 
 
 def require_artifact_dir(path: Path, label: str) -> None:
@@ -307,6 +525,7 @@ def write_gate_metadata(args: argparse.Namespace, out_dir: Path, baseline: Path 
         "trace_runtime": args.trace_runtime,
         "jit_verify": args.jit_verify,
         "jit_cbo_settings": list(args.jit_cbo_setting),
+        "host_quiescence": args.host_quiescence,
         "command": list(sys.argv),
     }
     with (out_dir / "regression_gate.json").open("w", encoding="utf-8") as handle:
@@ -524,7 +743,8 @@ def triage_failed_comparison(args: argparse.Namespace, baseline: Path, out_dir: 
 
     recheck_dir = out_dir / "focused_recheck"
     recheck_repeats = triage_recheck_repeats(args)
-    run_command(
+    run_timed_benchmark(
+        args,
         benchmark_command(
             args,
             recheck_dir,
@@ -569,7 +789,8 @@ def triage_failed_comparison(args: argparse.Namespace, baseline: Path, out_dir: 
             flush=True,
         )
         profile_dir = out_dir / "focused_profile"
-        run_command(
+        run_timed_benchmark(
+            args,
             benchmark_command(
                 args,
                 profile_dir,
@@ -650,7 +871,8 @@ def build_promoted_baseline(
     promoted_dir = out_dir if reuse_candidate else out_dir / "promotion_recheck"
     comparison_result = 0
     if not reuse_candidate:
-        run_command(
+        run_timed_benchmark(
+            args,
             benchmark_command(
                 args,
                 promoted_dir,
@@ -688,7 +910,8 @@ def build_promoted_baseline(
     elif comparison_result != 0:
         focused_queries = comparison_failure_queries(comparison_report, args.queries)
         focused_dir = promoted_dir / "focused_recheck"
-        run_command(
+        run_timed_benchmark(
+            args,
             benchmark_command(
                 args,
                 focused_dir,
@@ -791,6 +1014,19 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--db", type=Path, default=None)
     parser.add_argument("--use-existing-db", action="store_true")
     parser.add_argument("--keep-db", action="store_true")
+    parser.add_argument(
+        "--database-cache",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Reuse a validated scale-factor-keyed database across gate invocations.",
+    )
+    parser.add_argument("--database-cache-dir", type=Path, default=DEFAULT_DATABASE_CACHE_DIR)
+    parser.add_argument(
+        "--host-quiescence",
+        action=argparse.BooleanOptionalAction,
+        default=os.name != "nt",
+        help="Reject a busy host after database setup and before measurement.",
+    )
     parser.add_argument("--event-log-size", type=int, default=0)
     parser.add_argument("--trace-decisions", action="store_true")
     parser.add_argument("--trace-runtime", action="store_true")
@@ -860,6 +1096,9 @@ def validate_args(args: argparse.Namespace) -> tuple[Path | None, Path]:
     args.duckdb = args.duckdb.resolve()
     args.build_dir = args.build_dir.resolve()
     args.baseline_state = args.baseline_state.resolve()
+    args.database_cache_dir = args.database_cache_dir.resolve()
+    if args.db is not None:
+        args.db = args.db.resolve()
     args.queries = normalize_tpch_query_ids(args.queries)
     uses_baseline_state = not args.init_baseline and args.baseline is None and not os.environ.get(DEFAULT_BASELINE_ENV)
     if uses_baseline_state:
@@ -872,6 +1111,10 @@ def validate_args(args: argparse.Namespace) -> tuple[Path | None, Path]:
         raise TPCHConfigurationError("--repeats must be positive")
     if args.threads <= 0:
         raise TPCHConfigurationError("--threads must be positive")
+    if args.use_existing_db and args.db is None:
+        raise TPCHConfigurationError("--use-existing-db requires --db")
+    if args.host_quiescence and os.name == "nt":
+        raise TPCHConfigurationError("--host-quiescence is not supported on Windows; use a quiescent benchmark host")
     if args.triage_repeats is not None and args.triage_repeats <= 0:
         raise TPCHConfigurationError("--triage-repeats must be positive")
     if args.promotion_repeats is not None and args.promotion_repeats <= 0:
@@ -901,20 +1144,8 @@ def validate_args(args: argparse.Namespace) -> tuple[Path | None, Path]:
     return baseline, out_dir
 
 
-def run_gate(args: argparse.Namespace, baseline: Path | None, out_dir: Path) -> int:
-    if not args.no_build:
-        run_command(build_command(args), "build")
-        if not args.duckdb.exists():
-            raise TPCHConfigurationError(f"DuckDB binary does not exist after build: {args.duckdb}")
-    if not args.skip_architecture:
-        run_command(
-            [
-                sys.executable,
-                str(ROOT / "benchmark" / "jit" / "verify_jit_architecture.py"),
-            ],
-            "architecture",
-        )
-    run_command(benchmark_command(args, out_dir), "benchmark")
+def run_benchmark_gate(args: argparse.Namespace, baseline: Path | None, out_dir: Path) -> int:
+    run_timed_benchmark(args, benchmark_command(args, out_dir), "benchmark")
     require_artifact_dir(out_dir, "candidate")
     run_command(verify_command(args, out_dir), "artifact verification")
     if args.runtime_contract_check:
@@ -990,20 +1221,34 @@ def run_gate(args: argparse.Namespace, baseline: Path | None, out_dir: Path) -> 
     return 0
 
 
+def run_gate(args: argparse.Namespace, baseline: Path | None, out_dir: Path) -> int:
+    if not args.no_build:
+        run_command(build_command(args), "build")
+        if not args.duckdb.exists():
+            raise TPCHConfigurationError(f"DuckDB binary does not exist after build: {args.duckdb}")
+    if not args.skip_architecture:
+        run_command(
+            [
+                sys.executable,
+                str(ROOT / "benchmark" / "jit" / "verify_jit_architecture.py"),
+            ],
+            "architecture",
+        )
+    with gate_database(args):
+        if args.host_quiescence:
+            wait_for_host_quiescence()
+        return run_benchmark_gate(args, baseline, out_dir)
+
+
 def main() -> int:
     args = parse_args()
     baseline, out_dir = validate_args(args)
-    provisioned_database_dir = provision_gate_database(args)
-    try:
-        return run_gate(args, baseline, out_dir)
-    finally:
-        if provisioned_database_dir is not None and not args.keep_db:
-            shutil.rmtree(provisioned_database_dir, ignore_errors=True)
+    return run_gate(args, baseline, out_dir)
 
 
 if __name__ == "__main__":
     try:
         raise SystemExit(main())
-    except (RuntimeError, TPCHConfigurationError) as exc:
+    except (RuntimeError, TPCHConfigurationError, HostQuiescenceError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         raise SystemExit(1) from None

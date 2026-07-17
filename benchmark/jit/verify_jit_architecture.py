@@ -690,6 +690,7 @@ def verify_production_contract_ownership() -> None:
 
 def verify_benchmark_repetition_budget() -> None:
     generic_benchmark = read("benchmark/jit/generic_benchmark.py")
+    benchmark_common = read("benchmark/jit/benchmark_common.py")
     if "choices=(5, 10)" not in generic_benchmark:
         raise AssertionError("generic benchmark candidates must use the explicit five-or-ten repetition budget")
     if (
@@ -710,21 +711,100 @@ def verify_benchmark_repetition_budget() -> None:
         raise AssertionError("generic benchmark candidates must not silently escalate into triage repetitions")
     if "return failures" not in generic_benchmark:
         raise AssertionError("generic benchmark must fail from the original candidate sample without a retry path")
+    for process_amortization_contract in (
+        "class TimedMaterializedAttemptGroup:",
+        "class TimedMaterializedAttemptSpec:",
+        "def timed_materialized_attempt_groups(",
+        'statements.append(f".open {quoted_db_path}")',
+        'statements.append(".open :memory:")',
+    ):
+        if process_amortization_contract not in benchmark_common:
+            raise AssertionError(
+                f"generic benchmark batches must reopen fresh database state: {process_amortization_contract}"
+            )
+    for process_amortization_contract in (
+        "def run_workload_matrix(",
+        "timed_materialized_attempt_groups(args, db_path, groups)",
+    ):
+        if process_amortization_contract not in generic_benchmark:
+            raise AssertionError(
+                f"generic benchmark must amortize OS process launches across the matrix: {process_amortization_contract}"
+            )
+    if "timed_materialized_attempt(" in generic_benchmark:
+        raise AssertionError("generic samples must not restore one DuckDB process launch per timed attempt")
+
+    tpch_benchmark = read("benchmark/tpch/jit/tpch_benchmark.py")
+    for process_amortization_contract in (
+        "def run_production_matrix(",
+        "TimedMaterializedAttemptGroup(",
+        "timed_materialized_attempt_groups(args, db_path, groups)",
+        "def counter_attempt_spec(",
+        'if args.timing_mode == "production":',
+        "rows, counter_rows = run_production_matrix(args, db_path, out_dir, root)",
+    ):
+        if process_amortization_contract not in tpch_benchmark:
+            raise AssertionError(
+                f"TPC-H production timing must amortize OS process launches: {process_amortization_contract}"
+            )
+    production_matrix = tpch_benchmark[
+        tpch_benchmark.index("def run_production_matrix(") : tpch_benchmark.index("def run_profile_matrix(")
+    ]
+    if "timed_materialized_attempt(" in production_matrix or "run_once(" in production_matrix:
+        raise AssertionError("TPC-H production samples must not restore one DuckDB process launch per attempt")
 
     tpch_gate = read("benchmark/tpch/jit/run_tpch_regression_gate.py")
     if '"--triage-failures"' not in tpch_gate or "default=False" not in tpch_gate:
         raise AssertionError("TPC-H focused triage must be opt-in")
     for database_reuse_contract in (
-        "def provision_gate_database(",
+        "def gate_database(",
+        "with exclusive_database_cache_lock(lock_path):",
+        "ensure_cached_database(args, template_path, manifest_path)",
+        "clone_cached_database(template_path, working_database)",
+        "create_tpch_database(args, args.db)",
+        "validate_tpch_database(args, args.db)",
+        "def run_timed_benchmark(",
+        "args.use_existing_db = True",
         "args.use_existing_db or reuse_database",
-        "provisioned_database_dir = provision_gate_database(args)",
-        "shutil.rmtree(provisioned_database_dir, ignore_errors=True)",
+        "with gate_database(args):",
     ):
         if database_reuse_contract not in tpch_gate:
-            raise AssertionError(f"TPC-H gate must reuse one private database: {database_reuse_contract}")
+            raise AssertionError(
+                f"TPC-H gate must yield one ready reusable working database: {database_reuse_contract}"
+            )
     if "reuse_database and args.keep_db" in tpch_gate:
         raise AssertionError("TPC-H database reuse must not depend on retaining the database after the gate")
     refactor_guard = read("benchmark/jit/run_jit_refactor_guard.py")
+    benchmark_host = read("benchmark/jit/benchmark_host.py")
+    for host_quiescence_contract in (
+        "def require_host_quiescence(",
+        "def wait_for_host_quiescence(",
+        "HOST_QUIESCENCE_MAX_CPU_FRACTION = 0.10",
+        "MACOS_SECURITY_MAX_CPU_PERCENT = 5.0",
+        'process_name == "syspolicyd" or process_name.startswith("xprotect")',
+    ):
+        if host_quiescence_contract not in benchmark_host:
+            raise AssertionError(
+                f"shared performance host admission is incomplete: {host_quiescence_contract}"
+            )
+    if "if args.host_quiescence and (should_run_tpch(args) or should_run_generic(args)):" not in refactor_guard:
+        raise AssertionError("combined performance guard must reject a busy host before setup")
+    tpch_gate_main = tpch_gate[tpch_gate.index("def run_gate(") :]
+    database_offset = tpch_gate_main.index("with gate_database(args):")
+    quiescence_offset = tpch_gate_main.index("wait_for_host_quiescence()")
+    benchmark_offset = tpch_gate_main.index("return run_benchmark_gate(")
+    if not database_offset < quiescence_offset < benchmark_offset:
+        raise AssertionError("TPC-H host admission must run after database setup and before measurement")
+    if 'command.append("--no-host-quiescence")' not in refactor_guard:
+        raise AssertionError("combined guard must propagate explicit host-admission disablement")
+    if "result = run_command(" not in refactor_guard or "require_host_quiescence()" not in refactor_guard:
+        raise AssertionError("generic timing must retain an immediate post-measurement host check")
+    for receipt_contract in (
+        "def validate_performance_receipt_configuration(",
+        "skipped pre-commit checks require an exact-tree pre-commit receipt",
+        "def write_performance_receipt(",
+    ):
+        if receipt_contract not in refactor_guard:
+            raise AssertionError(f"performance receipt ownership is incomplete: {receipt_contract}")
     if "if args.tpch_triage_failures:" not in refactor_guard:
         raise AssertionError("refactor guard must pass TPC-H triage only when explicitly requested")
     for candidate_budget in (
@@ -736,7 +816,12 @@ def verify_benchmark_repetition_budget() -> None:
     if 'parser.add_argument("--tpch-triage-repeats", type=int, default=10)' not in refactor_guard:
         raise AssertionError("explicit TPC-H noise triage must retain the ten-pair qualification budget")
     guard_main = refactor_guard[refactor_guard.index("def main() -> int:") :]
-    if guard_main.index("if should_run_tpch(args):") > guard_main.index("if should_run_generic(args):"):
+    quiescence_offset = guard_main.index("wait_for_host_quiescence()")
+    tpch_offset = guard_main.index("if should_run_tpch(args):")
+    generic_offset = guard_main.index("if should_run_generic(args):")
+    if quiescence_offset > tpch_offset:
+        raise AssertionError("host quiescence admission must run before production performance measurement")
+    if tpch_offset > generic_offset:
         raise AssertionError("historically compared TPC-H timing must run before the generic production heat load")
     for hook_path in ("benchmark/jit/git_hooks/pre-commit", "benchmark/jit/git_hooks/pre-push"):
         hook = read(hook_path)
@@ -751,6 +836,8 @@ def verify_benchmark_repetition_budget() -> None:
     pre_push_hook = read("benchmark/jit/git_hooks/pre-push")
     if "DUCKDB_JIT_TPCH_TRIAGE_FAILURES" not in pre_push_hook or "--tpch-triage-failures" not in pre_push_hook:
         raise AssertionError("pre-push must expose explicit focused TPC-H triage without enabling it by default")
+    if "pre_push_verified_tree" not in pre_push_hook or "--performance-receipt" not in pre_push_hook:
+        raise AssertionError("pre-push must reuse only exact-tree production performance verification")
 
 
 def verify_bound_direct_join_terminal_contract() -> None:

@@ -13,10 +13,20 @@ run_guard() {
 }
 
 RECEIPT="$ROOT/benchmark/jit/local_baselines/pre_commit_verified_tree"
+PERFORMANCE_RECEIPT="$ROOT/benchmark/jit/local_baselines/pre_push_verified_tree"
 CURRENT_TREE="$(git rev-parse 'HEAD^{tree}')"
 VERIFIED_TREE=""
 if [ -f "$RECEIPT" ]; then
     VERIFIED_TREE="$(sed -n '1p' "$RECEIPT")"
+fi
+
+PERFORMANCE_VERIFIED_TREE=""
+if [ -f "$PERFORMANCE_RECEIPT" ]; then
+    PERFORMANCE_VERIFIED_TREE="$(sed -n '1p' "$PERFORMANCE_RECEIPT")"
+fi
+if [ "$PERFORMANCE_VERIFIED_TREE" = "$CURRENT_TREE" ]; then
+    echo "pre-push reusing production performance verification for tree $CURRENT_TREE"
+    exit 0
 fi
 
 if [ "$VERIFIED_TREE" = "$CURRENT_TREE" ]; then
@@ -27,8 +37,9 @@ if [ "$VERIFIED_TREE" = "$CURRENT_TREE" ]; then
         --no-build \
         --skip-architecture \
         --skip-py-compile \
-        --skip-unit
+        --skip-unit \
+        --performance-receipt "$PERFORMANCE_RECEIPT"
 fi
 
 echo "pre-push has no matching pre-commit receipt; running the complete guard"
-run_guard --level auto --change-set branch
+run_guard --level auto --change-set branch --performance-receipt "$PERFORMANCE_RECEIPT"

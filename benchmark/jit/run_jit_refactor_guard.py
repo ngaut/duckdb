@@ -12,13 +12,17 @@ import sys
 from datetime import datetime
 from pathlib import Path
 
+from benchmark_host import HostQuiescenceError, require_host_quiescence, wait_for_host_quiescence
+
 ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_UNIT_BASELINE_ENV = "DUCKDB_JIT_UNIT_BASELINE"
 DEFAULT_TPCH_BASELINE_ENV = "DUCKDB_JIT_TPCH_BASELINE"
 DEFAULT_UNIT_BASELINE_STATE = ROOT / "benchmark" / "jit" / "local_baselines" / "jit_refactor_guard_state.json"
 DEFAULT_TPCH_BASELINE_STATE = ROOT / "benchmark" / "tpch" / "jit" / "local_baselines" / "tpch_refactor_guard_state.json"
+DEFAULT_PRE_COMMIT_RECEIPT = ROOT / "benchmark" / "jit" / "local_baselines" / "pre_commit_verified_tree"
 DEFAULT_UNIT_SPEC = "[jit]"
 PYTHON_GUARD_FILES = (
+    ROOT / "benchmark" / "jit" / "benchmark_host.py",
     ROOT / "benchmark" / "jit" / "verify_jit_architecture.py",
     ROOT / "benchmark" / "jit" / "generic_benchmark.py",
     ROOT / "benchmark" / "jit" / "run_jit_refactor_guard.py",
@@ -120,6 +124,52 @@ def run_git(command: list[str], label: str, *, check: bool = True) -> subprocess
     if check and result.returncode != 0:
         raise GuardError(f"{label} failed: {result.stderr.strip()}")
     return result
+
+
+def head_tree() -> str:
+    return run_git(["rev-parse", "HEAD^{tree}"], "git HEAD tree").stdout.strip()
+
+
+def receipt_tree(path: Path) -> str:
+    if not path.is_file():
+        return ""
+    try:
+        return path.read_text(encoding="utf-8").splitlines()[0].strip()
+    except (OSError, IndexError):
+        return ""
+
+
+def validate_performance_receipt_configuration(args: argparse.Namespace) -> None:
+    if args.performance_receipt is None:
+        return
+    if args.level != "full" or args.change_set != "branch":
+        raise GuardError("--performance-receipt requires a full branch guard")
+    if args.skip_tpch or not args.host_quiescence:
+        raise GuardError("--performance-receipt requires TPC-H and host admission")
+    if args.tpch_queries != ["all"]:
+        raise GuardError("--performance-receipt requires the complete TPC-H query set")
+
+    current_tree = head_tree()
+    status = run_git(
+        ["status", "--porcelain", "--untracked-files=normal"],
+        "git performance receipt status",
+    )
+    if status.stdout.strip():
+        raise GuardError("--performance-receipt requires a clean worktree and index")
+    skipped_pre_commit_check = args.no_build or args.skip_architecture or args.skip_py_compile or args.skip_unit
+    if skipped_pre_commit_check and receipt_tree(DEFAULT_PRE_COMMIT_RECEIPT) != current_tree:
+        raise GuardError("skipped pre-commit checks require an exact-tree pre-commit receipt")
+
+
+def write_performance_receipt(args: argparse.Namespace) -> None:
+    if args.performance_receipt is None:
+        return
+    current_tree = head_tree()
+    args.performance_receipt.parent.mkdir(parents=True, exist_ok=True)
+    temporary_receipt = args.performance_receipt.with_name(f".{args.performance_receipt.name}.{os.getpid()}.tmp")
+    temporary_receipt.write_text(current_tree + "\n", encoding="utf-8")
+    os.replace(temporary_receipt, args.performance_receipt)
+    print(f"performance receipt: {args.performance_receipt}", flush=True)
 
 
 def require_file(path: Path, label: str) -> None:
@@ -349,6 +399,8 @@ def tpch_gate_command(args: argparse.Namespace, *, skip_build: bool, skip_archit
         command.append("--use-existing-db")
     if args.keep_tpch_db:
         command.append("--keep-db")
+    if not args.host_quiescence:
+        command.append("--no-host-quiescence")
     if skip_build:
         command.append("--no-build")
     if skip_architecture:
@@ -639,6 +691,7 @@ def write_guard_metadata(args: argparse.Namespace, artifact_dir: Path) -> None:
         "generic_repeats": args.generic_repeats,
         "tpch_repeats": args.tpch_repeats,
         "tpch_triage_repeats": args.tpch_triage_repeats,
+        "host_quiescence": args.host_quiescence,
         "artifact_dir": str(artifact_dir.resolve()),
     }
     (artifact_dir / "refactor_guard.json").write_text(json.dumps(metadata, indent=2) + "\n", encoding="utf-8")
@@ -666,6 +719,12 @@ def parse_args() -> argparse.Namespace:
         help="Maximum concrete level selected by --level auto. Hooks use this to make pre-commit fast.",
     )
     parser.add_argument("--out-dir", type=Path, default=None)
+    parser.add_argument(
+        "--performance-receipt",
+        type=Path,
+        default=None,
+        help="Write an exact-tree receipt after a complete production branch guard.",
+    )
     parser.add_argument("--duckdb", type=Path, default=ROOT / "build" / "reldebug" / "duckdb")
     parser.add_argument("--build-dir", type=Path, default=ROOT / "build" / "reldebug")
     parser.add_argument("--build-config", default="RelWithDebInfo")
@@ -674,6 +733,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--skip-py-compile", action="store_true")
     parser.add_argument("--skip-unit", action="store_true")
     parser.add_argument("--skip-tpch", action="store_true")
+    parser.add_argument(
+        "--host-quiescence",
+        action=argparse.BooleanOptionalAction,
+        default=os.name != "nt",
+        help="Reject a busy host before running production performance gates.",
+    )
     parser.add_argument("--generic-repeats", type=int, choices=(5, 10), default=5)
 
     parser.add_argument(
@@ -717,6 +782,8 @@ def validate_args(args: argparse.Namespace) -> Path:
     args.unit_binary = args.unit_binary.resolve()
     args.unit_baseline_state = args.unit_baseline_state.resolve()
     args.tpch_baseline_state = args.tpch_baseline_state.resolve()
+    if args.performance_receipt is not None:
+        args.performance_receipt = args.performance_receipt.resolve()
     if args.unit_baseline is not None:
         args.unit_baseline = args.unit_baseline.resolve()
     if args.tpch_baseline is not None:
@@ -763,6 +830,9 @@ def validate_args(args: argparse.Namespace) -> Path:
             "run with --init-tpch-baseline after a clean full-query artifact, pass --tpch-baseline, "
             f"or set {DEFAULT_TPCH_BASELINE_ENV}"
         )
+    if args.host_quiescence and os.name == "nt":
+        raise GuardError("--host-quiescence is not supported on Windows; use a quiescent benchmark host")
+    validate_performance_receipt_configuration(args)
     out_dir = args.out_dir.resolve() if args.out_dir else default_out_dir()
     if out_dir.exists() and any(out_dir.iterdir()):
         raise GuardError(f"--out-dir is not empty: {out_dir}")
@@ -786,6 +856,8 @@ def main() -> int:
         compare_unit_failures(args, artifact_dir, failures)
     elif args.level == "quick":
         print("quick guard completed its configured checks")
+    if args.host_quiescence and (should_run_tpch(args) or should_run_generic(args)):
+        wait_for_host_quiescence()
     if should_run_tpch(args):
         run_command(
             tpch_gate_command(
@@ -797,10 +869,19 @@ def main() -> int:
         )
     if should_run_generic(args):
         for threads in (1, 4):
-            run_command(
+            if args.host_quiescence:
+                wait_for_host_quiescence()
+            label = f"generic production performance gate T{threads}"
+            result = run_command(
                 generic_gate_command(args, artifact_dir, threads),
-                f"generic production performance gate T{threads}",
+                label,
+                check=False,
             )
+            if args.host_quiescence:
+                require_host_quiescence()
+            if result.returncode != 0:
+                raise GuardError(f"{label} failed with exit code {result.returncode}")
+    write_performance_receipt(args)
     print(f"JIT refactor guard passed: {artifact_dir}")
     return 0
 
@@ -808,6 +889,6 @@ def main() -> int:
 if __name__ == "__main__":
     try:
         raise SystemExit(main())
-    except GuardError as exc:
+    except (GuardError, HostQuiescenceError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         raise SystemExit(1) from None

@@ -4,12 +4,14 @@ from __future__ import annotations
 
 import csv
 import json
+import os
 import sys
 import tempfile
 import unittest
-from unittest import mock
+from contextlib import contextmanager
 from pathlib import Path
 from types import SimpleNamespace
+from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from tpch_common import TPCHConfigurationError
@@ -17,11 +19,15 @@ from run_tpch_regression_gate import (
     apply_baseline_state_contract,
     benchmark_command,
     candidate_qualifies_for_direct_promotion,
+    clone_cached_database,
+    database_cache_paths,
+    gate_database,
     merge_rechecked_csv_artifact,
     load_baseline_state,
     parse_args,
     promotion_recheck_repeats,
-    provision_gate_database,
+    run_gate,
+    run_timed_benchmark,
     selected_auto_queries,
     triage_recheck_repeats,
     validate_baseline_write_configuration,
@@ -35,6 +41,8 @@ class TestGateDatabaseReuse(unittest.TestCase):
             db=None,
             use_existing_db=False,
             keep_db=False,
+            database_cache=True,
+            database_cache_dir=root / "cache",
             duckdb=root / "duckdb",
             queries=["01"],
             policies=["off", "auto"],
@@ -49,7 +57,7 @@ class TestGateDatabaseReuse(unittest.TestCase):
             jit_cbo_setting=[],
         )
 
-    def test_provisions_one_database_for_all_gate_phases(self) -> None:
+    def test_reuses_one_cached_database_for_all_gate_phases(self) -> None:
         temporary_directory = tempfile.TemporaryDirectory()
         self.addCleanup(temporary_directory.cleanup)
         root = Path(temporary_directory.name)
@@ -57,17 +65,154 @@ class TestGateDatabaseReuse(unittest.TestCase):
         out_dir.mkdir()
         args = self.args(root)
 
-        database_dir = provision_gate_database(args)
-        self.addCleanup(lambda: database_dir.rmdir())
-        self.assertTrue(database_dir.name.startswith("duckdb_jit_tpch_gate_"))
-        self.assertEqual(args.db, database_dir / "tpch.duckdb")
+        def create_database(_args, database_path: Path) -> None:
+            database_path.touch()
 
-        candidate = benchmark_command(args, out_dir)
-        proof = benchmark_command(args, out_dir / "proof", reuse_database=True)
-        self.assertNotIn("--use-existing-db", candidate)
+        with (
+            mock.patch("run_tpch_regression_gate.create_tpch_database", side_effect=create_database) as create,
+            mock.patch("run_tpch_regression_gate.validate_tpch_database") as validate,
+            gate_database(args),
+        ):
+            working_database = args.db
+            database_path, manifest_path, lock_path = database_cache_paths(args)
+            self.assertNotEqual(working_database, database_path)
+            self.assertTrue(working_database.is_file())
+            self.assertTrue(database_path.is_file())
+            self.assertFalse(lock_path.exists())
+            candidate = benchmark_command(args, out_dir)
+            proof = benchmark_command(args, out_dir / "proof", reuse_database=True)
+        create.assert_called_once()
+        validate.assert_called_once()
+        self.assertTrue(database_path.is_file())
+        self.assertTrue(manifest_path.is_file())
+        self.assertFalse(lock_path.exists())
+        self.assertFalse(working_database.parent.exists())
+        self.assertIn("--use-existing-db", candidate)
         self.assertIn("--use-existing-db", proof)
-        self.assertEqual(candidate[candidate.index("--db") + 1], str(args.db))
-        self.assertEqual(proof[proof.index("--db") + 1], str(args.db))
+        self.assertEqual(candidate[candidate.index("--db") + 1], str(working_database))
+        self.assertEqual(proof[proof.index("--db") + 1], str(working_database))
+
+    def test_existing_cache_is_validated_without_regeneration(self) -> None:
+        temporary_directory = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary_directory.cleanup)
+        root = Path(temporary_directory.name)
+        args = self.args(root)
+        database_path, manifest_path, _ = database_cache_paths(args)
+        database_path.parent.mkdir(parents=True)
+        database_path.touch()
+        manifest_path.write_text(
+            json.dumps(
+                {
+                    "format_version": 2,
+                    "database_role": "immutable_tpch_template",
+                    "scale_factor": 10.0,
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+
+        with (
+            mock.patch("run_tpch_regression_gate.create_tpch_database") as create,
+            mock.patch("run_tpch_regression_gate.validate_tpch_database") as validate,
+            gate_database(args),
+        ):
+            pass
+        create.assert_not_called()
+        validate.assert_called_once_with(args, database_path)
+
+    def test_clone_falls_back_when_copy_on_write_is_unavailable(self) -> None:
+        temporary_directory = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary_directory.cleanup)
+        root = Path(temporary_directory.name)
+        source = root / "source.duckdb"
+        target = root / "target.duckdb"
+        source.write_text("template", encoding="utf-8")
+
+        with (
+            mock.patch("run_tpch_regression_gate.sys.platform", "darwin"),
+            mock.patch("run_tpch_regression_gate.subprocess.run", side_effect=FileNotFoundError),
+        ):
+            clone_cached_database(source, target)
+        self.assertEqual(target.read_text(encoding="utf-8"), "template")
+
+    def test_live_cache_lock_fails_before_database_work(self) -> None:
+        temporary_directory = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary_directory.cleanup)
+        root = Path(temporary_directory.name)
+        args = self.args(root)
+        _, _, lock_path = database_cache_paths(args)
+        lock_path.parent.mkdir(parents=True)
+        lock_path.write_text(f"{os.getpid()}\n", encoding="utf-8")
+
+        with self.assertRaisesRegex(TPCHConfigurationError, "cache is in use"):
+            with gate_database(args):
+                pass
+
+    def test_stale_cache_lock_is_recovered(self) -> None:
+        temporary_directory = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary_directory.cleanup)
+        root = Path(temporary_directory.name)
+        args = self.args(root)
+        _, _, lock_path = database_cache_paths(args)
+        lock_path.parent.mkdir(parents=True)
+        lock_path.write_text("99999999\n", encoding="utf-8")
+
+        def create_database(_args, database_path: Path) -> None:
+            database_path.touch()
+
+        with (
+            mock.patch("run_tpch_regression_gate.process_exists", return_value=False),
+            mock.patch("run_tpch_regression_gate.create_tpch_database", side_effect=create_database),
+            mock.patch("run_tpch_regression_gate.validate_tpch_database"),
+            gate_database(args),
+        ):
+            self.assertTrue(args.db.is_file())
+        self.assertFalse(lock_path.exists())
+
+    def test_invalid_manifest_rebuilds_cache(self) -> None:
+        temporary_directory = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary_directory.cleanup)
+        root = Path(temporary_directory.name)
+        args = self.args(root)
+        database_path, manifest_path, _ = database_cache_paths(args)
+        database_path.parent.mkdir(parents=True)
+        database_path.write_text("stale", encoding="utf-8")
+        manifest_path.write_text('{"format_version": 1, "scale_factor": 1}\n', encoding="utf-8")
+
+        def create_database(_args, path: Path) -> None:
+            path.write_text("fresh", encoding="utf-8")
+
+        with (
+            mock.patch("run_tpch_regression_gate.create_tpch_database", side_effect=create_database) as create,
+            mock.patch("run_tpch_regression_gate.validate_tpch_database"),
+            gate_database(args),
+        ):
+            self.assertEqual(database_path.read_text(encoding="utf-8"), "fresh")
+        create.assert_called_once()
+
+    def test_cache_can_be_disabled_for_a_private_disposable_database(self) -> None:
+        temporary_directory = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary_directory.cleanup)
+        root = Path(temporary_directory.name)
+        args = self.args(root)
+        args.database_cache = False
+
+        def create_database(_args, database_path: Path) -> None:
+            database_path.touch()
+
+        with (
+            mock.patch("run_tpch_regression_gate.create_tpch_database", side_effect=create_database) as create,
+            mock.patch("run_tpch_regression_gate.validate_tpch_database") as validate,
+            gate_database(args),
+        ):
+            database_path = args.db
+            database_dir = database_path.parent
+            self.assertTrue(database_path.is_file())
+            self.assertTrue(args.use_existing_db)
+        create.assert_called_once_with(args, database_path)
+        validate.assert_called_once_with(args, database_path)
+        self.assertFalse(database_dir.exists())
 
     def test_reuses_explicit_database_without_keep_flag(self) -> None:
         temporary_directory = tempfile.TemporaryDirectory()
@@ -76,10 +221,59 @@ class TestGateDatabaseReuse(unittest.TestCase):
         args = self.args(root)
         args.db = root / "tpch.duckdb"
 
-        self.assertIsNone(provision_gate_database(args))
-        proof = benchmark_command(args, root / "proof", reuse_database=True)
+        def create_database(_args, database_path: Path) -> None:
+            database_path.touch()
+
+        with (
+            mock.patch("run_tpch_regression_gate.create_tpch_database", side_effect=create_database) as create,
+            mock.patch("run_tpch_regression_gate.validate_tpch_database") as validate,
+            gate_database(args),
+        ):
+            proof = benchmark_command(args, root / "proof", reuse_database=True)
+        create.assert_called_once_with(args, args.db)
+        validate.assert_called_once_with(args, args.db)
         self.assertIn("--use-existing-db", proof)
         self.assertNotIn("--keep-db", proof)
+
+    def test_host_admission_runs_after_database_setup_and_before_measurement(self) -> None:
+        events = []
+        args = SimpleNamespace(no_build=True, skip_architecture=True, host_quiescence=True)
+
+        @contextmanager
+        def database_context(_args):
+            events.append("database")
+            yield
+            events.append("cleanup")
+
+        with (
+            mock.patch("run_tpch_regression_gate.gate_database", side_effect=database_context),
+            mock.patch(
+                "run_tpch_regression_gate.wait_for_host_quiescence",
+                side_effect=lambda: events.append("quiescence"),
+            ),
+            mock.patch(
+                "run_tpch_regression_gate.run_benchmark_gate",
+                side_effect=lambda *_args: events.append("benchmark") or 0,
+            ),
+        ):
+            self.assertEqual(run_gate(args, None, Path("artifact")), 0)
+        self.assertEqual(events, ["database", "quiescence", "benchmark", "cleanup"])
+
+    def test_timed_benchmark_requires_clean_post_measurement_host(self) -> None:
+        events = []
+        args = SimpleNamespace(host_quiescence=True)
+        with (
+            mock.patch(
+                "run_tpch_regression_gate.run_command",
+                side_effect=lambda *_args: events.append("benchmark"),
+            ),
+            mock.patch(
+                "run_tpch_regression_gate.require_host_quiescence",
+                side_effect=lambda: events.append("post-check"),
+            ),
+        ):
+            run_timed_benchmark(args, ["benchmark"], "benchmark")
+        self.assertEqual(events, ["benchmark", "post-check"])
 
 
 class TestBaselineStateContract(unittest.TestCase):
