@@ -262,7 +262,7 @@ bool SljitFullPipelineRecipeBinding::TryMakeHashJoinAppendSinkRecipe(const Sljit
 	}
 	sequence.Add(std::move(selection_step));
 	SljitAppendSinkPrimitive sink;
-	if (!SljitTryBindSelectedHashJoinAppendSinkPrimitive(ops, facts.final_hash_join_idx, facts.sink_idx, sink)) {
+	if (!SljitTryBindAppendSinkPrimitive(ops, facts.final_hash_join_idx, facts.sink_idx, sink)) {
 		return false;
 	}
 	sequence.Add(SljitFullPipelinePrimitiveStep::AppendSink(sink));

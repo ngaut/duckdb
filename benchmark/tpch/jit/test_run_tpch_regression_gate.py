@@ -14,6 +14,7 @@ from types import SimpleNamespace
 from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+import run_tpch_regression_gate as gate
 from tpch_common import TPCHConfigurationError
 from run_tpch_regression_gate import (
     apply_baseline_state_contract,
@@ -22,14 +23,11 @@ from run_tpch_regression_gate import (
     clone_cached_database,
     database_cache_paths,
     gate_database,
-    merge_rechecked_csv_artifact,
     load_baseline_state,
-    parse_args,
-    promotion_recheck_repeats,
+    promotion_qualification_repeats,
     run_gate,
     run_timed_benchmark,
     selected_auto_queries,
-    triage_recheck_repeats,
     validate_baseline_write_configuration,
     write_baseline_state,
 )
@@ -80,7 +78,7 @@ class TestGateDatabaseReuse(unittest.TestCase):
             self.assertTrue(database_path.is_file())
             self.assertFalse(lock_path.exists())
             candidate = benchmark_command(args, out_dir)
-            proof = benchmark_command(args, out_dir / "proof", reuse_database=True)
+            proof = benchmark_command(args, out_dir / "proof")
         create.assert_called_once()
         validate.assert_called_once()
         self.assertTrue(database_path.is_file())
@@ -229,7 +227,7 @@ class TestGateDatabaseReuse(unittest.TestCase):
             mock.patch("run_tpch_regression_gate.validate_tpch_database") as validate,
             gate_database(args),
         ):
-            proof = benchmark_command(args, root / "proof", reuse_database=True)
+            proof = benchmark_command(args, root / "proof")
         create.assert_called_once_with(args, args.db)
         validate.assert_called_once_with(args, args.db)
         self.assertIn("--use-existing-db", proof)
@@ -426,32 +424,22 @@ class TestRuntimeContractQuerySelection(unittest.TestCase):
 
 
 class TestPromotionRepeats(unittest.TestCase):
-    def test_triage_is_opt_in(self) -> None:
-        with mock.patch.object(sys, "argv", ["run_tpch_regression_gate.py"]):
-            self.assertFalse(parse_args().triage_failures)
-
     def test_default_is_ten_repeats(self) -> None:
         self.assertEqual(
-            promotion_recheck_repeats(SimpleNamespace(repeats=5, promotion_repeats=None)),
+            promotion_qualification_repeats(SimpleNamespace(repeats=5, promotion_repeats=None)),
             10,
         )
 
     def test_default_never_reduces_candidate_sample_count(self) -> None:
         self.assertEqual(
-            promotion_recheck_repeats(SimpleNamespace(repeats=12, promotion_repeats=None)),
+            promotion_qualification_repeats(SimpleNamespace(repeats=12, promotion_repeats=None)),
             12,
         )
 
     def test_explicit_repeat_count_wins(self) -> None:
         self.assertEqual(
-            promotion_recheck_repeats(SimpleNamespace(repeats=5, promotion_repeats=7)),
+            promotion_qualification_repeats(SimpleNamespace(repeats=5, promotion_repeats=7)),
             7,
-        )
-
-    def test_triage_reuses_candidate_sample_count_at_or_above_ten(self) -> None:
-        self.assertEqual(
-            triage_recheck_repeats(SimpleNamespace(repeats=10, triage_repeats=None)),
-            10,
         )
 
     def promotion_args(self, repeats: int) -> SimpleNamespace:
@@ -468,13 +456,37 @@ class TestPromotionRepeats(unittest.TestCase):
         )
 
     def test_reuses_passing_ten_repeat_production_candidate(self) -> None:
-        self.assertTrue(candidate_qualifies_for_direct_promotion(self.promotion_args(10), True))
+        self.assertTrue(candidate_qualifies_for_direct_promotion(self.promotion_args(10)))
 
     def test_five_repeat_candidate_still_requires_promotion_run(self) -> None:
-        self.assertFalse(candidate_qualifies_for_direct_promotion(self.promotion_args(5), True))
+        self.assertFalse(candidate_qualifies_for_direct_promotion(self.promotion_args(5)))
 
-    def test_failed_candidate_comparison_is_never_promoted_directly(self) -> None:
-        self.assertFalse(candidate_qualifies_for_direct_promotion(self.promotion_args(10), False))
+    def test_failed_candidate_comparison_cannot_reach_promotion(self) -> None:
+        args = SimpleNamespace(runtime_contract_check=False, init_baseline=False, promote_baseline=True)
+
+        def run_command(_command, label, **_kwargs):
+            if label == "baseline comparison":
+                raise TPCHConfigurationError("candidate failed")
+            return None
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            with (
+                mock.patch.object(gate, "run_timed_benchmark"),
+                mock.patch.object(gate, "require_artifact_dir"),
+                mock.patch.object(gate, "benchmark_command", return_value=["benchmark"]),
+                mock.patch.object(gate, "verify_command", return_value=["verify"]),
+                mock.patch.object(gate, "compare_command", return_value=["compare"]),
+                mock.patch.object(gate, "write_gate_metadata"),
+                mock.patch.object(gate, "run_command", side_effect=run_command),
+                mock.patch.object(gate, "build_promoted_baseline") as promote,
+                mock.patch.object(gate, "write_baseline_state") as publish,
+            ):
+                with self.assertRaisesRegex(TPCHConfigurationError, "candidate failed"):
+                    gate.run_benchmark_gate(args, root / "baseline", root / "candidate")
+
+        promote.assert_not_called()
+        publish.assert_not_called()
 
     def test_non_production_options_never_qualify_for_promotion(self) -> None:
         overrides = (
@@ -489,89 +501,16 @@ class TestPromotionRepeats(unittest.TestCase):
             with self.subTest(field=field):
                 args = self.promotion_args(10)
                 setattr(args, field, value)
-                self.assertFalse(candidate_qualifies_for_direct_promotion(args, True))
+                self.assertFalse(candidate_qualifies_for_direct_promotion(args))
                 with self.assertRaises(TPCHConfigurationError):
                     validate_baseline_write_configuration(args)
 
     def test_partial_policy_set_never_qualifies_for_promotion(self) -> None:
         args = self.promotion_args(10)
         args.policies = ["auto"]
-        self.assertFalse(candidate_qualifies_for_direct_promotion(args, True))
+        self.assertFalse(candidate_qualifies_for_direct_promotion(args))
         with self.assertRaisesRegex(TPCHConfigurationError, "require policies"):
             validate_baseline_write_configuration(args)
-
-
-class TestPromotionArtifactMerge(unittest.TestCase):
-    def write_rows(self, path: Path, rows: list[dict[str, str]]) -> None:
-        with path.open("w", newline="", encoding="utf-8") as handle:
-            writer = csv.DictWriter(handle, fieldnames=("query", "policy", "median_s"))
-            writer.writeheader()
-            writer.writerows(rows)
-
-    def test_replaces_only_focused_query_rows(self) -> None:
-        temporary_directory = tempfile.TemporaryDirectory()
-        self.addCleanup(temporary_directory.cleanup)
-        root = Path(temporary_directory.name)
-        candidate = root / "candidate.csv"
-        focused = root / "focused.csv"
-        merged = root / "merged.csv"
-        self.write_rows(
-            candidate,
-            [
-                {"query": "18", "policy": "auto", "median_s": "0.76"},
-                {"query": "20", "policy": "off", "median_s": "0.61"},
-                {"query": "20", "policy": "auto", "median_s": "0.53"},
-            ],
-        )
-        self.write_rows(
-            focused,
-            [
-                {"query": "20", "policy": "off", "median_s": "0.62"},
-                {"query": "20", "policy": "auto", "median_s": "0.52"},
-            ],
-        )
-
-        merge_rechecked_csv_artifact(candidate, focused, merged, ["20"])
-
-        with merged.open(newline="", encoding="utf-8") as handle:
-            rows = list(csv.DictReader(handle))
-        self.assertEqual(
-            rows,
-            [
-                {"query": "18", "policy": "auto", "median_s": "0.76"},
-                {"query": "20", "policy": "off", "median_s": "0.62"},
-                {"query": "20", "policy": "auto", "median_s": "0.52"},
-            ],
-        )
-
-    def test_keeps_counter_rows_created_only_during_focused_recheck(self) -> None:
-        temporary_directory = tempfile.TemporaryDirectory()
-        self.addCleanup(temporary_directory.cleanup)
-        root = Path(temporary_directory.name)
-        candidate = root / "candidate.csv"
-        focused = root / "focused.csv"
-        merged = root / "merged.csv"
-        self.write_rows(
-            candidate,
-            [{"query": "18", "policy": "auto", "median_s": "existing-counter"}],
-        )
-        self.write_rows(
-            focused,
-            [{"query": "20", "policy": "auto", "median_s": "new-counter"}],
-        )
-
-        merge_rechecked_csv_artifact(candidate, focused, merged, ["20"], require_query_rows=False)
-
-        with merged.open(newline="", encoding="utf-8") as handle:
-            rows = list(csv.DictReader(handle))
-        self.assertEqual(
-            rows,
-            [
-                {"query": "18", "policy": "auto", "median_s": "existing-counter"},
-                {"query": "20", "policy": "auto", "median_s": "new-counter"},
-            ],
-        )
-
 
 if __name__ == "__main__":
     unittest.main()

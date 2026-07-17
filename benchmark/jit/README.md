@@ -86,8 +86,8 @@ Production timing uses one DuckDB shell process for the complete query matrix.
 Each query baseline is prepared immediately before its samples; preparation and
 every attempt close back to `:memory:` so the next sample reopens the same
 checkpointed database with fresh connection and buffer-manager state. When
-tracing is enabled, counter collection runs in one separate post-timing shell
-session and cannot perturb the candidate timers.
+tracing is enabled, untimed counter collection runs after every candidate timer
+in the same script and cannot perturb the candidate measurements.
 
 SF10 uses the default accepted state:
 
@@ -171,16 +171,12 @@ an immediate clean post-sample; load that begins mid-run invalidates the timing
 artifact instead of being normalized away. This prevents unrelated work from
 producing misleading raw-runtime failures.
 
-A normal push reports a failed five-pair candidate without retrying it. After
-reviewing that failure, explicitly request the existing ten-pair focused TPC-H
-triage on the next push with:
+The combined guard forwards baseline configuration unchanged. The TPC-H gate
+alone resolves and validates the accepted baseline contract.
 
-```sh
-DUCKDB_JIT_TPCH_TRIAGE_FAILURES=1 git push
-```
-
-The focused recheck must still satisfy the independent raw JIT-auto ceiling;
-normalization remains diagnostic evidence only.
+A failed five-pair candidate remains failed. Diagnose it from the original
+artifact and profile the affected workload separately; neither retries nor
+normalization may change the gate verdict.
 
 ## Interpreting a result
 

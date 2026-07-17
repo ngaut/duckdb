@@ -17,20 +17,14 @@ struct SljitAppendSinkPrimitive {
 	idx_t selected_hash_join_idx = DConstants::INVALID_INDEX;
 };
 
-static bool SljitCanBindSelectedHashJoinAppendSinkPrimitive(const vector<SljitExecutableRegionOp> &ops,
-                                                            idx_t hash_join_idx, idx_t sink_idx) {
+static bool SljitTryBindAppendSinkPrimitive(const vector<SljitExecutableRegionOp> &ops, idx_t hash_join_idx,
+                                            idx_t sink_idx, SljitAppendSinkPrimitive &primitive) {
 	if (sink_idx >= ops.size() || sink_idx == 0 || sink_idx != ops.size() - 1 || hash_join_idx != sink_idx - 1 ||
 	    ops[sink_idx].kind != SljitNativeRegionOpKind::APPEND_SINK ||
 	    !SljitCanBindHashJoinProbeSelectionPrimitive(ops, hash_join_idx)) {
 		return false;
 	}
-	return ops[hash_join_idx].output_types == ops[sink_idx].append_sink.plan.input_types;
-}
-
-static bool SljitTryBindSelectedHashJoinAppendSinkPrimitive(const vector<SljitExecutableRegionOp> &ops,
-                                                            idx_t hash_join_idx, idx_t sink_idx,
-                                                            SljitAppendSinkPrimitive &primitive) {
-	if (!SljitCanBindSelectedHashJoinAppendSinkPrimitive(ops, hash_join_idx, sink_idx)) {
+	if (ops[hash_join_idx].output_types != ops[sink_idx].append_sink.plan.input_types) {
 		return false;
 	}
 	SljitAppendSinkPrimitive candidate;
@@ -38,20 +32,6 @@ static bool SljitTryBindSelectedHashJoinAppendSinkPrimitive(const vector<SljitEx
 	candidate.selected_hash_join_idx = hash_join_idx;
 	primitive = candidate;
 	return true;
-}
-
-static SljitAppendSinkPrimitive SljitBindSelectedHashJoinAppendSinkPrimitive(const vector<SljitExecutableRegionOp> &ops,
-                                                                             idx_t hash_join_idx, idx_t sink_idx) {
-	SljitAppendSinkPrimitive primitive;
-	if (!SljitTryBindSelectedHashJoinAppendSinkPrimitive(ops, hash_join_idx, sink_idx, primitive)) {
-		throw InternalException("SLJIT append sink primitive cannot bind selected hash-join input");
-	}
-	return primitive;
-}
-
-static bool SljitCanBindAppendSinkPrimitive(const vector<SljitExecutableRegionOp> &ops,
-                                            const SljitAppendSinkPrimitive &primitive) {
-	return SljitCanBindSelectedHashJoinAppendSinkPrimitive(ops, primitive.selected_hash_join_idx, primitive.sink_idx);
 }
 
 } // namespace duckdb

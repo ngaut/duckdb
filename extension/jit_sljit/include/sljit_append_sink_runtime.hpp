@@ -23,15 +23,11 @@ namespace duckdb {
 
 class SljitAppendSinkRuntimeState {
 public:
-	bool Prepare(ExecutionRegionRuntime &runtime, const vector<SljitExecutableRegionOp> &ops,
+	void Prepare(ExecutionRegionRuntime &runtime, const vector<SljitExecutableRegionOp> &ops,
 	             const SljitAppendSinkPrimitive &primitive) {
-		if (!SljitCanBindAppendSinkPrimitive(ops, primitive)) {
-			return false;
-		}
 		auto &input_types = ops[primitive.sink_idx].append_sink.plan.input_types;
 		selected_input.Ensure(runtime.GetAllocator(), input_types);
 		referenced_columns.assign(input_types.size(), 1);
-		return true;
 	}
 
 	bool Execute(ExecutionRegionRuntime &runtime, ExecutionRegionResult &result, vector<SljitExecutableRegionOp> &ops,

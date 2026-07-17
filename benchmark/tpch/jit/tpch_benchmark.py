@@ -10,9 +10,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "jit"))
 from benchmark_common import (
+    BenchmarkScript,
     REGION_SUMMARY_FIELDS,
-    TimedMaterializedAttemptGroup,
-    TimedMaterializedAttemptSpec,
     counter_region_summary,
     correctness_from_rows,
     correctness_sql,
@@ -21,12 +20,11 @@ from benchmark_common import (
     materialize_query,
     profile_materialized_attempt,
     profile_query_time_us,
+    read_profile_json,
     require_fields,
     repo_root,
     row_bool,
     row_int,
-    timed_materialized_attempt,
-    timed_materialized_attempt_groups,
     write_csv,
 )
 
@@ -66,150 +64,34 @@ def create_baseline(args: argparse.Namespace, db_path: Path, query_id: str, quer
     )
 
 
-def should_use_separate_counter_run(args: argparse.Namespace, policy: str) -> bool:
-    return (
-        policy != "off"
-        and args.timing_mode == "production"
-        and (args.event_log_size > 0 or args.trace_decisions or args.trace_runtime)
-    )
+def needs_untimed_counter_run(args: argparse.Namespace, policy: str) -> bool:
+    return policy != "off" and (args.event_log_size > 0 or args.trace_decisions or args.trace_runtime)
 
 
-def baseline_preparation_sql(args: argparse.Namespace, query_id: str, query_sql: str) -> str:
-    return (
-        jit_setup_sql(args, "off", reset_events=True, reset_counters=True)
-        + f"\nCREATE OR REPLACE TABLE __jit_benchmark_baseline_q{query_id} AS\n{query_sql};"
-    )
-
-
-def benchmark_attempt_spec(
-    args: argparse.Namespace,
-    out_dir: Path,
-    query_id: str,
-    query_sql: str,
-    policy: str,
-    repeat: int,
-    collect_counters: bool,
-) -> tuple[TimedMaterializedAttemptSpec, str, str]:
-    result_table = f"__jit_benchmark_result_q{query_id}_{policy}_{repeat}"
-    artifact_name = f"q{query_id}_{policy}_r{repeat}_{args.timing_mode}.json"
-    artifact_path = out_dir / artifact_name
-    setup_sql = jit_setup_sql(
-        args,
-        policy,
-        trace_runtime=args.trace_runtime if collect_counters else False,
-        trace_decisions=args.trace_decisions if collect_counters else False,
-        event_log_size=args.event_log_size if collect_counters else 0,
-        reset_events=True,
-        reset_counters=True,
-    )
-    return (
-        TimedMaterializedAttemptSpec(
-            setup_sql=setup_sql,
-            table_name=result_table,
-            query_sql=query_sql,
-            artifact_path=artifact_path,
-            label=f"benchmark q{query_id} {policy} repeat {repeat}",
-            validation_sql=correctness_sql(f"__jit_benchmark_baseline_q{query_id}", result_table),
-            cleanup_sql=f"DROP TABLE IF EXISTS {result_table};",
-            collect_counters=collect_counters,
-        ),
-        artifact_name,
-        result_table,
-    )
-
-
-def benchmark_attempt_row(
-    args: argparse.Namespace,
+def benchmark_run_row(
     query_id: str,
     policy: str,
     repeat: int,
+    *,
+    timing_mode: str,
     result_table: str,
-    attempt: dict,
     query_time_us: int,
-    profile_name: str,
-) -> tuple[dict, list[dict]]:
-    counter_rows = attempt["counters"]
+    validation_rows: list[dict],
+    counter_rows: list[dict],
+    profile_name: str = "",
+) -> dict:
     region_metrics = counter_region_summary(counter_rows)
-    correctness = correctness_from_rows(attempt["validation"], result_table)
-    row = {
+    correctness = correctness_from_rows(validation_rows, result_table)
+    return {
         "query": query_id,
         "policy": policy,
         "repeat": repeat,
-        "timing_mode": args.timing_mode,
+        "timing_mode": timing_mode,
         "query_time_us": query_time_us,
         "correctness_diff": correctness["correctness_diff"],
         "profile_json": profile_name,
         **region_metrics,
     }
-    return row, counter_rows
-
-
-def run_once(
-    args: argparse.Namespace,
-    db_path: Path,
-    out_dir: Path,
-    query_id: str,
-    query_sql: str,
-    policy: str,
-    repeat: int,
-    collect_counters: bool,
-) -> tuple[dict, list[dict]]:
-    attempt_spec, artifact_name, result_table = benchmark_attempt_spec(
-        args, out_dir, query_id, query_sql, policy, repeat, collect_counters
-    )
-    attempt_args = (
-        args,
-        db_path,
-        attempt_spec.setup_sql,
-        attempt_spec.table_name,
-        attempt_spec.query_sql,
-        attempt_spec.artifact_path,
-        attempt_spec.label,
-    )
-    attempt_kwargs = {
-        "validation_sql": attempt_spec.validation_sql,
-        "cleanup_sql": attempt_spec.cleanup_sql,
-        "collect_counters": attempt_spec.collect_counters,
-    }
-    if args.timing_mode == "profile":
-        attempt = profile_materialized_attempt(*attempt_args, **attempt_kwargs)
-        query_time_us = profile_query_time_us(attempt["profile"])
-        profile_name = artifact_name
-    else:
-        attempt = timed_materialized_attempt(*attempt_args, **attempt_kwargs)
-        query_time_us = attempt["query_time_us"]
-        profile_name = ""
-    return benchmark_attempt_row(args, query_id, policy, repeat, result_table, attempt, query_time_us, profile_name)
-
-
-def counter_attempt_spec(
-    args: argparse.Namespace,
-    out_dir: Path,
-    query_id: str,
-    query_sql: str,
-    policy: str,
-    repeat: int,
-) -> TimedMaterializedAttemptSpec:
-    result_table = f"__jit_benchmark_counter_q{query_id}_{policy}_{repeat}"
-    setup_sql = jit_setup_sql(
-        args,
-        policy,
-        trace_runtime=args.trace_runtime,
-        trace_decisions=args.trace_decisions,
-        event_log_size=args.event_log_size,
-        reset_events=True,
-        reset_counters=True,
-    )
-    counter_artifact_path = out_dir / f"q{query_id}_{policy}_r{repeat}_{args.timing_mode}_counters.json"
-    return TimedMaterializedAttemptSpec(
-        setup_sql=setup_sql,
-        table_name=result_table,
-        query_sql=query_sql,
-        artifact_path=counter_artifact_path,
-        label=f"counter collection q{query_id} {policy} repeat {repeat}",
-        cleanup_sql=f"DROP TABLE IF EXISTS {result_table};",
-        collect_counters=True,
-    )
 
 
 def benchmark_counter_rows(counter_rows: list[dict], query_id: str, policy: str, repeat: int) -> list[dict]:
@@ -232,78 +114,131 @@ def run_production_matrix(
     out_dir: Path,
     root: Path,
 ) -> tuple[list[dict], list[dict]]:
-    groups = []
-    jobs = []
+    script = BenchmarkScript(db_path)
+    samples = []
     counter_jobs = []
     for query_id in args.queries:
         query_sql = read_query(root, query_id)
-        group_attempts = []
+        baseline_table = f"__jit_benchmark_baseline_q{query_id}"
+        script.prepare(
+            jit_setup_sql(args, "off", reset_events=True, reset_counters=True)
+            + f"CREATE OR REPLACE TABLE {baseline_table} AS\n{query_sql};"
+        )
         for repeat in range(1, args.repeats + 1):
             policies = list(args.policies)
             if repeat % 2 == 0:
                 policies.reverse()
             for policy in policies:
-                collect_counters = not should_use_separate_counter_run(args, policy)
-                attempt_spec, _, result_table = benchmark_attempt_spec(
-                    args,
-                    out_dir,
-                    query_id,
+                collect_counters = not needs_untimed_counter_run(args, policy)
+                result_table = f"__jit_benchmark_result_q{query_id}_{policy}_{repeat}"
+                artifact_stem = f"q{query_id}_{policy}_r{repeat}_{args.timing_mode}"
+                validation_path = out_dir / f"{artifact_stem}_validation.json"
+                counters_path = out_dir / f"{artifact_stem}_counters.json"
+                label = f"benchmark q{query_id} {policy} repeat {repeat}"
+                outputs = []
+                if collect_counters:
+                    outputs.append((counters_path, "SELECT * FROM duckdb_jit_counters();"))
+                outputs.append((validation_path, correctness_sql(baseline_table, result_table)))
+                script.measure(
+                    jit_setup_sql(
+                        args,
+                        policy,
+                        trace_runtime=args.trace_runtime if collect_counters else False,
+                        trace_decisions=(args.trace_decisions if collect_counters else False),
+                        event_log_size=args.event_log_size if collect_counters else 0,
+                        reset_events=True,
+                        reset_counters=True,
+                    ),
+                    result_table,
                     query_sql,
-                    policy,
-                    repeat,
-                    collect_counters,
+                    label,
+                    tuple(outputs),
                 )
-                group_attempts.append(attempt_spec)
-                jobs.append((query_id, policy, repeat, result_table, attempt_spec))
+                samples.append(
+                    {
+                        "query": query_id,
+                        "policy": policy,
+                        "repeat": repeat,
+                        "result_table": result_table,
+                        "validation_path": validation_path,
+                        "counters_path": counters_path if collect_counters else None,
+                        "label": label,
+                    }
+                )
                 if not collect_counters:
-                    counter_jobs.append((query_id, policy, repeat, query_sql))
-        groups.append(
-            TimedMaterializedAttemptGroup(
-                label=f"TPC-H q{query_id}",
-                preparation_sql=baseline_preparation_sql(args, query_id, query_sql),
-                attempts=tuple(group_attempts),
-            )
+                    counter_jobs.append(
+                        {
+                            "query": query_id,
+                            "policy": policy,
+                            "repeat": repeat,
+                            "query_sql": query_sql,
+                            "counters_path": counters_path,
+                        }
+                    )
+
+    # Traced proof runs are untimed and occur only after every production
+    # sample. They share the shell process, not connection or buffer state.
+    for job in counter_jobs:
+        result_table = f"__jit_benchmark_counter_q{job['query']}_{job['policy']}_{job['repeat']}"
+        script.run_untimed(
+            jit_setup_sql(
+                args,
+                job["policy"],
+                trace_runtime=args.trace_runtime,
+                trace_decisions=args.trace_decisions,
+                event_log_size=args.event_log_size,
+                reset_events=True,
+                reset_counters=True,
+            ),
+            result_table,
+            job["query_sql"],
+            ((job["counters_path"], "SELECT * FROM duckdb_jit_counters();"),),
         )
 
-    attempts = timed_materialized_attempt_groups(args, db_path, groups)
+    query_times = script.execute(args, "TPC-H production matrix")
     rows = []
     counter_rows = []
     run_rows = {}
-    for (query_id, policy, repeat, result_table, _), attempt in zip(jobs, attempts):
-        row, counters = benchmark_attempt_row(
-            args,
-            query_id,
-            policy,
-            repeat,
-            result_table,
-            attempt,
-            attempt["query_time_us"],
-            "",
+    for sample, query_time_us in zip(samples, query_times):
+        validation_path = sample["validation_path"]
+        if not validation_path.exists():
+            raise RuntimeError(f"validation JSON was not written during {sample['label']}: {validation_path}")
+        validation_rows = read_profile_json(validation_path)
+        validation_path.unlink()
+        counters = []
+        counters_path = sample["counters_path"]
+        if counters_path is not None:
+            if not counters_path.exists():
+                raise RuntimeError(f"counter JSON was not written during {sample['label']}: {counters_path}")
+            counters = read_profile_json(counters_path)
+            counters_path.unlink()
+        row = benchmark_run_row(
+            sample["query"],
+            sample["policy"],
+            sample["repeat"],
+            timing_mode=args.timing_mode,
+            result_table=sample["result_table"],
+            query_time_us=query_time_us,
+            validation_rows=validation_rows,
+            counter_rows=counters,
         )
         rows.append(row)
-        run_rows[(query_id, policy, repeat)] = row
-        counter_rows.extend(benchmark_counter_rows(counters, query_id, policy, repeat))
+        key = (sample["query"], sample["policy"], sample["repeat"])
+        run_rows[key] = row
+        counter_rows.extend(benchmark_counter_rows(counters, *key))
 
-    if counter_jobs:
-        counter_specs = [
-            counter_attempt_spec(args, out_dir, query_id, query_sql, policy, repeat)
-            for query_id, policy, repeat, query_sql in counter_jobs
-        ]
-        counter_attempts = timed_materialized_attempt_groups(
-            args,
-            db_path,
-            [
-                TimedMaterializedAttemptGroup(
-                    label="TPC-H counter collection",
-                    preparation_sql="",
-                    attempts=tuple(counter_specs),
-                )
-            ],
-        )
-        for (query_id, policy, repeat, _), attempt in zip(counter_jobs, counter_attempts):
-            counters = attempt["counters"]
-            run_rows[(query_id, policy, repeat)].update(counter_region_summary(counters))
-            counter_rows.extend(benchmark_counter_rows(counters, query_id, policy, repeat))
+    for job in counter_jobs:
+        counters_path = job["counters_path"]
+        if not counters_path.exists():
+            raise RuntimeError(
+                f"counter JSON was not written during q{job['query']} {job['policy']} repeat {job['repeat']}: "
+                f"{counters_path}"
+            )
+        counters = read_profile_json(counters_path)
+        counters_path.unlink()
+        key = (job["query"], job["policy"], job["repeat"])
+        run_rows[key].update(counter_region_summary(counters))
+        counter_rows.extend(benchmark_counter_rows(counters, *key))
 
     return rows, counter_rows
 
@@ -321,8 +256,42 @@ def run_profile_matrix(
         create_baseline(args, db_path, query_id, query_sql)
         for repeat in range(1, args.repeats + 1):
             for policy in args.policies:
-                row, counters = run_once(args, db_path, out_dir, query_id, query_sql, policy, repeat, True)
-                rows.append(row)
+                result_table = f"__jit_benchmark_result_q{query_id}_{policy}_{repeat}"
+                artifact_name = f"q{query_id}_{policy}_r{repeat}_{args.timing_mode}.json"
+                attempt = profile_materialized_attempt(
+                    args,
+                    db_path,
+                    jit_setup_sql(
+                        args,
+                        policy,
+                        trace_runtime=args.trace_runtime,
+                        trace_decisions=args.trace_decisions,
+                        event_log_size=args.event_log_size,
+                        reset_events=True,
+                        reset_counters=True,
+                    ),
+                    result_table,
+                    query_sql,
+                    out_dir / artifact_name,
+                    f"benchmark q{query_id} {policy} repeat {repeat}",
+                    validation_sql=correctness_sql(f"__jit_benchmark_baseline_q{query_id}", result_table),
+                    cleanup_sql=f"DROP TABLE IF EXISTS {result_table};",
+                    collect_counters=True,
+                )
+                counters = attempt["counters"]
+                rows.append(
+                    benchmark_run_row(
+                        query_id,
+                        policy,
+                        repeat,
+                        timing_mode=args.timing_mode,
+                        result_table=result_table,
+                        query_time_us=profile_query_time_us(attempt["profile"]),
+                        validation_rows=attempt["validation"],
+                        counter_rows=counters,
+                        profile_name=artifact_name,
+                    )
+                )
                 counter_rows.extend(benchmark_counter_rows(counters, query_id, policy, repeat))
     return rows, counter_rows
 
@@ -340,7 +309,8 @@ def summarize(rows: list[dict]) -> list[dict]:
     policy_order = {policy: index for index, policy in enumerate(DEFAULT_POLICIES)}
     summary = []
     for (query_id, policy), group in sorted(
-        grouped.items(), key=lambda item: (item[0][0], policy_order.get(item[0][1], 100))
+        grouped.items(),
+        key=lambda item: (item[0][0], policy_order.get(item[0][1], 100)),
     ):
         timings = [row_int(row, "query_time_us") for row in group]
         median_us = median(timings)
@@ -445,7 +415,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--out-dir", type=Path, default=None)
     parser.add_argument("--scale-factor", type=float, default=1)
     parser.add_argument("--queries", nargs="+", default=list(DEFAULT_QUERIES))
-    parser.add_argument("--policies", nargs="+", default=list(DEFAULT_POLICIES), choices=DEFAULT_POLICIES)
+    parser.add_argument(
+        "--policies",
+        nargs="+",
+        default=list(DEFAULT_POLICIES),
+        choices=DEFAULT_POLICIES,
+    )
     parser.add_argument("--backend", default="sljit")
     parser.add_argument("--jit-extension", default="jit_sljit")
     parser.add_argument("--threads", type=int, default=1)
@@ -490,7 +465,9 @@ def main() -> int:
         write_csv(out_dir / "summary.csv", SUMMARY_FIELDS, summary_rows)
         write_csv(out_dir / "counters.csv", COUNTER_FIELDS, counter_rows)
         write_csv(
-            out_dir / "performance_gaps.csv", PERFORMANCE_GAP_FIELDS, performance_gap_rows(summary_rows, counter_rows)
+            out_dir / "performance_gaps.csv",
+            PERFORMANCE_GAP_FIELDS,
+            performance_gap_rows(summary_rows, counter_rows),
         )
         print(f"benchmark output: {out_dir}")
         print(f"summary: {out_dir / 'summary.csv'}")

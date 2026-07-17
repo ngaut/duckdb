@@ -34,10 +34,11 @@ public:
 	             optional_ptr<const SljitHashJoinDirectAggregateConsumerContract> direct_consumer_contract,
 	             SljitHashJoinAggregateConsumerDispatch &direct_consumer_dispatch,
 	             TRY_EXECUTE_DIRECT_CONSUMER &&try_execute_direct_consumer) {
+		auto &primitive = step.hash_join_probe_selection;
 		string deferred_reason;
 		DataChunk *join_input_ptr = nullptr;
 		if (input.HasHashJoinSelection()) {
-			if (!selected_hash_join_inputs.TryPrepareHashProbeInput(step.Op(0), input, join_input_ptr,
+			if (!selected_hash_join_inputs.TryPrepareHashProbeInput(primitive.hash_join_idx, input, join_input_ptr,
 			                                                        deferred_reason)) {
 				if (!deferred_reason.empty()) {
 					return SljitDeferFullPipelineResult(runtime, deferred_reason, result);
@@ -51,7 +52,6 @@ public:
 		if (join_input.size() == 0) {
 			return false;
 		}
-		auto &primitive = step.hash_join_probe_selection;
 		const auto hash_join_idx = primitive.hash_join_idx;
 		auto &hash_join_op = ops[hash_join_idx];
 		if (direct_consumer_contract &&

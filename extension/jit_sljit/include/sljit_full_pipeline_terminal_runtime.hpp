@@ -66,9 +66,9 @@ public:
 			    state.grouped_aggregate_update.Prepare(runtime, ops, scratch, terminal_step.grouped_aggregate_update);
 			break;
 		case SljitFullPipelinePrimitiveKind::POST_JOIN_PROJECTION_AGGREGATE_UPDATE:
-			prepared = state.post_join_projection_aggregate.Prepare(ops, terminal_step.post_join_projection_aggregate,
-			                                                        source_distinct_counts, source_min_values,
-			                                                        source_max_values);
+			state.post_join_projection_aggregate.Prepare(ops, terminal_step.post_join_projection_aggregate,
+			                                             source_distinct_counts, source_min_values, source_max_values);
+			prepared = true;
 			break;
 		case SljitFullPipelinePrimitiveKind::HASH_JOIN_BUILD_SINK:
 			prepared = true;
@@ -77,7 +77,8 @@ public:
 			prepared = state.delim_join_sink.Prepare(runtime, ops, terminal_step.delim_join_sink);
 			break;
 		case SljitFullPipelinePrimitiveKind::APPEND_SINK:
-			prepared = state.append_sink.Prepare(runtime, ops, terminal_step.append_sink);
+			state.append_sink.Prepare(runtime, ops, terminal_step.append_sink);
+			prepared = true;
 			break;
 		case SljitFullPipelinePrimitiveKind::NATIVE_TAIL_DELEGATION:
 			prepared = true;

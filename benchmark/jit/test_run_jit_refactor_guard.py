@@ -127,5 +127,54 @@ class TestPerformanceReceipt(unittest.TestCase):
             self.assertEqual(receipt.read_text(encoding="utf-8"), "verified-tree\n")
 
 
+class TestUnitSuite(unittest.TestCase):
+    def test_green_suite_writes_the_complete_output(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            artifact_dir = Path(temporary)
+            unit_binary = artifact_dir / "unittest"
+            unit_binary.write_text("test binary", encoding="utf-8")
+            args = SimpleNamespace(unit_binary=unit_binary, unit_spec="[jit]")
+            result = subprocess.CompletedProcess(
+                args=[str(unit_binary), "[jit]"],
+                returncode=0,
+                stdout="all tests passed\n",
+                stderr="diagnostics\n",
+            )
+            with mock.patch.object(guard, "run_command", return_value=result) as run:
+                guard.run_unit_suite(args, artifact_dir)
+
+            run.assert_called_once_with(
+                [str(unit_binary), "[jit]"],
+                "JIT unit suite",
+                capture=True,
+                check=False,
+            )
+            self.assertEqual(
+                (artifact_dir / "unit_output.txt").read_text(encoding="utf-8"),
+                "all tests passed\ndiagnostics\n",
+            )
+
+    def test_any_unit_failure_fails_without_a_baseline_exception(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            artifact_dir = Path(temporary)
+            unit_binary = artifact_dir / "unittest"
+            unit_binary.write_text("test binary", encoding="utf-8")
+            args = SimpleNamespace(unit_binary=unit_binary, unit_spec="[jit]")
+            result = subprocess.CompletedProcess(
+                args=[str(unit_binary), "[jit]"],
+                returncode=7,
+                stdout="failed test\n",
+                stderr="assertion failed\n",
+            )
+            with mock.patch.object(guard, "run_command", return_value=result):
+                with self.assertRaisesRegex(guard.GuardError, "exit code 7"):
+                    guard.run_unit_suite(args, artifact_dir)
+
+            self.assertEqual(
+                (artifact_dir / "unit_output.txt").read_text(encoding="utf-8"),
+                "failed test\nassertion failed\n",
+            )
+
+
 if __name__ == "__main__":
     unittest.main()

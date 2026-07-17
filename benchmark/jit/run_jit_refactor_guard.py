@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 #
-# Baseline-aware guard for JIT refactoring.
+# Correctness and performance guard for JIT refactoring.
 
 from __future__ import annotations
 
@@ -15,9 +15,6 @@ from pathlib import Path
 from benchmark_host import HostQuiescenceError, require_host_quiescence, wait_for_host_quiescence
 
 ROOT = Path(__file__).resolve().parents[2]
-DEFAULT_UNIT_BASELINE_ENV = "DUCKDB_JIT_UNIT_BASELINE"
-DEFAULT_TPCH_BASELINE_ENV = "DUCKDB_JIT_TPCH_BASELINE"
-DEFAULT_UNIT_BASELINE_STATE = ROOT / "benchmark" / "jit" / "local_baselines" / "jit_refactor_guard_state.json"
 DEFAULT_TPCH_BASELINE_STATE = ROOT / "benchmark" / "tpch" / "jit" / "local_baselines" / "tpch_refactor_guard_state.json"
 DEFAULT_PRE_COMMIT_RECEIPT = ROOT / "benchmark" / "jit" / "local_baselines" / "pre_commit_verified_tree"
 DEFAULT_UNIT_SPEC = "[jit]"
@@ -352,10 +349,6 @@ def unit_command(args: argparse.Namespace) -> list[str]:
     return [str(args.unit_binary), args.unit_spec]
 
 
-def unit_list_command(args: argparse.Namespace) -> list[str]:
-    return [str(args.unit_binary), "--list-test-names-only", args.unit_spec]
-
-
 def tpch_gate_command(args: argparse.Namespace, *, skip_build: bool, skip_architecture: bool) -> list[str]:
     command = [
         sys.executable,
@@ -373,16 +366,6 @@ def tpch_gate_command(args: argparse.Namespace, *, skip_build: bool, skip_archit
         "--repeats",
         str(args.tpch_repeats),
     ]
-    if args.tpch_triage_failures:
-        command.extend(
-            [
-                "--triage-failures",
-                "--triage-repeats",
-                str(args.tpch_triage_repeats),
-                "--triage-profile-repeats",
-                str(args.tpch_triage_profile_repeats),
-            ]
-        )
     if args.tpch_out_dir is not None:
         command.extend(["--out-dir", str(args.tpch_out_dir)])
     if args.tpch_baseline is not None:
@@ -408,256 +391,15 @@ def tpch_gate_command(args: argparse.Namespace, *, skip_build: bool, skip_archit
     return command
 
 
-def load_known_tests(args: argparse.Namespace, artifact_dir: Path) -> set[str]:
-    result = run_command(unit_list_command(args), "list unit tests", capture=True, check=False)
-    (artifact_dir / "unit_test_names.txt").write_text(result.stdout, encoding="utf-8")
-    tests = {line.strip() for line in result.stdout.splitlines() if line.strip()}
-    if not tests:
-        raise GuardError("unit test listing returned no tests")
-    return tests
-
-
-def is_catch_separator(line: str) -> bool:
-    stripped = line.strip()
-    return len(stripped) >= 20 and set(stripped) == {"-"}
-
-
-def parse_catch_failed_tests(output: str, known_tests: set[str]) -> list[str]:
-    lines = output.splitlines()
-    failures: set[str] = set()
-    for index, line in enumerate(lines):
-        if not is_catch_separator(line):
-            continue
-        probe = index + 1
-        while probe < len(lines) and not lines[probe].strip():
-            probe += 1
-        if probe >= len(lines):
-            continue
-        candidate = lines[probe].strip()
-        if candidate not in known_tests:
-            continue
-        next_line = probe + 1
-        while next_line < len(lines) and not lines[next_line].strip():
-            next_line += 1
-        if next_line < len(lines) and is_catch_separator(lines[next_line]):
-            failures.add(candidate)
-    return sorted(failures)
-
-
-def run_unit_suite(args: argparse.Namespace, artifact_dir: Path) -> tuple[int, list[str]]:
+def run_unit_suite(args: argparse.Namespace, artifact_dir: Path) -> None:
     require_file(args.unit_binary, "unit test binary")
-    known_tests = load_known_tests(args, artifact_dir)
-    if args.unit_execution == "bulk":
-        result = run_command(unit_command(args), "unit ratchet", capture=True, check=False)
-        output = result.stdout + result.stderr
-        (artifact_dir / "unit_output.txt").write_text(output, encoding="utf-8", errors="replace")
-        failures = parse_catch_failed_tests(output, known_tests)
-        if result.returncode != 0 and not failures:
-            raise GuardError("unit suite failed but no failed Catch2 test names were parsed")
-        if result.returncode == 0 and failures:
-            raise GuardError(f"unit suite passed but failed test names were parsed: {failures}")
-        return result.returncode, failures
-
-    output_parts = []
-    failures = []
-    sorted_tests = sorted(known_tests)
-    print(f"[unit ratchet] running {len(sorted_tests)} tests one-by-one", flush=True)
-    for index, test_name in enumerate(sorted_tests, start=1):
-        if index == 1 or index == len(sorted_tests) or index % 20 == 0:
-            print(f"[unit ratchet] {index}/{len(sorted_tests)} {test_name}", flush=True)
-        result = subprocess.run(
-            [str(args.unit_binary), test_name],
-            cwd=ROOT,
-            text=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            check=False,
-        )
-        output_parts.append(f"\n===== {test_name} =====\n")
-        output_parts.append(result.stdout)
-        output_parts.append(result.stderr)
-        if result.returncode != 0:
-            failures.append(test_name)
-            print(f"[unit ratchet] failed: {test_name}", flush=True)
-    (artifact_dir / "unit_output.txt").write_text("".join(output_parts), encoding="utf-8", errors="replace")
-    return len(failures), sorted(failures)
-
-
-def load_json_object(path: Path, label: str) -> dict:
-    try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-    except json.JSONDecodeError as exc:
-        raise GuardError(f"{label} is not valid JSON: {path}") from exc
-    if not isinstance(data, dict):
-        raise GuardError(f"{label} is not a JSON object: {path}")
-    return data
-
-
-def baseline_from_state(path: Path, label: str) -> Path | None:
-    if not path.is_file():
-        return None
-    state = load_json_object(path, f"{label} baseline state")
-    current = state.get("current_baseline")
-    if not current:
-        raise GuardError(f"{label} baseline state is missing current_baseline: {path}")
-    baseline_path = Path(current)
-    if not baseline_path.is_absolute():
-        baseline_path = path.parent / baseline_path
-    return baseline_path.resolve()
-
-
-def tpch_baseline_configured(args: argparse.Namespace) -> bool:
-    if args.tpch_baseline is not None:
-        return True
-    if os.environ.get(DEFAULT_TPCH_BASELINE_ENV):
-        return True
-    return baseline_from_state(args.tpch_baseline_state, "TPC-H") is not None
-
-
-def load_unit_baseline(path: Path) -> dict:
-    require_file(path, "unit baseline")
-    data = load_json_object(path, "unit baseline")
-    if "failed_tests" not in data or not isinstance(data["failed_tests"], list):
-        raise GuardError(f"unit baseline is missing failed_tests: {path}")
-    return data
-
-
-def load_unit_baseline_from_state(path: Path) -> tuple[Path, dict] | None:
-    if not path.is_file():
-        return None
-    state = load_json_object(path, "unit baseline state")
-    current = state.get("current_baseline")
-    if current:
-        baseline_path = Path(current)
-        if not baseline_path.is_absolute():
-            baseline_path = path.parent / baseline_path
-        baseline_path = baseline_path.resolve()
-        if baseline_path.is_file():
-            return baseline_path, load_unit_baseline(baseline_path)
-    if "failed_tests" in state and isinstance(state["failed_tests"], list):
-        return path, state
-    if current:
-        raise GuardError(
-            "unit baseline artifact is missing and state has no embedded failed_tests snapshot: " f"{baseline_path}"
-        )
-    raise GuardError(f"unit baseline state is missing current_baseline: {path}")
-
-
-def load_configured_unit_baseline(args: argparse.Namespace) -> tuple[Path, dict] | None:
-    if args.unit_baseline is not None:
-        path = args.unit_baseline.resolve()
-        return path, load_unit_baseline(path)
-    env_path = os.environ.get(DEFAULT_UNIT_BASELINE_ENV)
-    if env_path:
-        path = Path(env_path).resolve()
-        return path, load_unit_baseline(path)
-    return load_unit_baseline_from_state(args.unit_baseline_state)
-
-
-def write_unit_baseline(
-    path: Path,
-    args: argparse.Namespace,
-    artifact_dir: Path,
-    failures: list[str],
-    *,
-    source: str,
-) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    data = {
-        "created_at": datetime.now().isoformat(timespec="seconds"),
-        "source": source,
-        "artifact_dir": str(artifact_dir.resolve()),
-        "unit_binary": str(args.unit_binary.resolve()),
-        "unit_spec": args.unit_spec,
-        "failed_tests": failures,
-        "failed_test_count": len(failures),
-    }
-    path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
-
-
-def write_unit_state(args: argparse.Namespace, baseline_path: Path, source: str) -> None:
-    baseline = load_unit_baseline(baseline_path)
-    args.unit_baseline_state.parent.mkdir(parents=True, exist_ok=True)
-    accepted_baseline = args.unit_baseline_state.parent / "unit_failures.json"
-    temporary_baseline = accepted_baseline.with_name(f".{accepted_baseline.name}.{os.getpid()}.tmp")
-    accepted = {
-        "created_at": datetime.now().isoformat(timespec="seconds"),
-        "source": source,
-        "unit_spec": args.unit_spec,
-        "failed_tests": baseline["failed_tests"],
-        "failed_test_count": len(baseline["failed_tests"]),
-    }
-    temporary_baseline.write_text(json.dumps(accepted, indent=2) + "\n", encoding="utf-8")
-    os.replace(temporary_baseline, accepted_baseline)
-    state = {
-        "current_baseline": accepted_baseline.name,
-        "updated_at": datetime.now().isoformat(timespec="seconds"),
-        "source": source,
-        "unit_spec": args.unit_spec,
-        "failed_tests": baseline["failed_tests"],
-        "failed_test_count": len(baseline["failed_tests"]),
-    }
-    args.unit_baseline_state.write_text(json.dumps(state, indent=2) + "\n", encoding="utf-8")
-
-
-def compare_unit_failures(args: argparse.Namespace, artifact_dir: Path, failures: list[str]) -> None:
-    candidate_path = artifact_dir / "unit_failures.json"
-    write_unit_baseline(candidate_path, args, artifact_dir, failures, source="candidate")
-
-    if args.init_unit_baseline:
-        write_unit_state(args, candidate_path, "init-unit-baseline")
-        print(f"unit ratchet baseline initialized: {candidate_path}")
-        print(f"unit baseline state: {args.unit_baseline_state}")
-        return
-
-    baseline_config = load_configured_unit_baseline(args)
-    if baseline_config is None:
-        if not failures:
-            print("unit ratchet passed with no baseline because the suite is green")
-            return
-        raise GuardError(
-            "unit suite has failures and no accepted unit baseline exists; "
-            "run with --init-unit-baseline before refactoring"
-        )
-    baseline_path, baseline = baseline_config
-    if baseline.get("unit_spec") != args.unit_spec:
-        raise GuardError(
-            f"unit baseline spec mismatch: baseline={baseline.get('unit_spec')!r} candidate={args.unit_spec!r}"
-        )
-    baseline_failures = set(baseline["failed_tests"])
-    candidate_failures = set(failures)
-    new_failures = sorted(candidate_failures - baseline_failures)
-    resolved_failures = sorted(baseline_failures - candidate_failures)
-    report = {
-        "baseline": str(baseline_path),
-        "candidate": str(candidate_path),
-        "new_failures": new_failures,
-        "resolved_failures": resolved_failures,
-        "baseline_failed_test_count": len(baseline_failures),
-        "candidate_failed_test_count": len(candidate_failures),
-    }
-    (artifact_dir / "unit_failure_comparison.json").write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
-    if new_failures:
-        raise GuardError(
-            "unit ratchet failed: new JIT test failures: "
-            + ", ".join(new_failures)
-            + f"; see {artifact_dir / 'unit_output.txt'}"
-        )
-    if resolved_failures:
-        print(
-            "unit ratchet improved: resolved failures "
-            + ", ".join(resolved_failures)
-            + "; promote the unit baseline after confirming the fix",
-            flush=True,
-        )
-    if args.promote_unit_baseline:
-        write_unit_state(args, candidate_path, "promote-unit-baseline")
-        print(f"unit ratchet baseline promoted: {args.unit_baseline_state}")
-    print(
-        "unit ratchet passed: "
-        f"{len(candidate_failures)} known failures, {len(new_failures)} new failures, "
-        f"{len(resolved_failures)} resolved failures"
-    )
+    result = run_command(unit_command(args), "JIT unit suite", capture=True, check=False)
+    output = result.stdout + result.stderr
+    (artifact_dir / "unit_output.txt").write_text(output, encoding="utf-8", errors="replace")
+    if result.returncode != 0:
+        print(result.stdout, end="")
+        print(result.stderr, end="", file=sys.stderr)
+        raise GuardError(f"JIT unit suite failed with exit code {result.returncode}")
 
 
 def should_run_unit(args: argparse.Namespace) -> bool:
@@ -685,12 +427,9 @@ def write_guard_metadata(args: argparse.Namespace, artifact_dir: Path) -> None:
         "auto_max_level": args.auto_max_level,
         "auto_reasons": args.auto_reasons,
         "unit_spec": args.unit_spec,
-        "unit_execution": args.unit_execution,
-        "unit_baseline_state": str(args.unit_baseline_state),
         "tpch_baseline_state": str(args.tpch_baseline_state),
         "generic_repeats": args.generic_repeats,
         "tpch_repeats": args.tpch_repeats,
-        "tpch_triage_repeats": args.tpch_triage_repeats,
         "host_quiescence": args.host_quiescence,
         "artifact_dir": str(artifact_dir.resolve()),
     }
@@ -747,25 +486,11 @@ def parse_args() -> argparse.Namespace:
         default=ROOT / "build" / "reldebug" / "test" / "unittest",
     )
     parser.add_argument("--unit-spec", default=DEFAULT_UNIT_SPEC)
-    parser.add_argument(
-        "--unit-execution",
-        choices=("each", "bulk"),
-        default="each",
-        help="Run matching unit tests one-by-one for complete failure-set ratcheting, or as one bulk Catch2 run.",
-    )
-    parser.add_argument("--unit-baseline", type=Path, default=None)
-    parser.add_argument("--unit-baseline-state", type=Path, default=DEFAULT_UNIT_BASELINE_STATE)
-    parser.add_argument("--init-unit-baseline", action="store_true")
-    parser.add_argument("--promote-unit-baseline", action="store_true")
-
     parser.add_argument("--tpch-baseline", type=Path, default=None)
     parser.add_argument("--tpch-baseline-state", type=Path, default=DEFAULT_TPCH_BASELINE_STATE)
     parser.add_argument("--tpch-out-dir", type=Path, default=None)
     parser.add_argument("--tpch-queries", nargs="+", default=["all"])
     parser.add_argument("--tpch-repeats", type=int, choices=(5, 10), default=5)
-    parser.add_argument("--tpch-triage-failures", action="store_true")
-    parser.add_argument("--tpch-triage-repeats", type=int, default=10)
-    parser.add_argument("--tpch-triage-profile-repeats", type=int, default=3)
     parser.add_argument("--tpch-db", type=Path, default=None)
     parser.add_argument("--use-existing-tpch-db", action="store_true")
     parser.add_argument("--keep-tpch-db", action="store_true")
@@ -780,12 +505,9 @@ def validate_args(args: argparse.Namespace) -> Path:
     args.duckdb = args.duckdb.resolve()
     args.build_dir = args.build_dir.resolve()
     args.unit_binary = args.unit_binary.resolve()
-    args.unit_baseline_state = args.unit_baseline_state.resolve()
     args.tpch_baseline_state = args.tpch_baseline_state.resolve()
     if args.performance_receipt is not None:
         args.performance_receipt = args.performance_receipt.resolve()
-    if args.unit_baseline is not None:
-        args.unit_baseline = args.unit_baseline.resolve()
     if args.tpch_baseline is not None:
         args.tpch_baseline = args.tpch_baseline.resolve()
     if args.tpch_out_dir is not None:
@@ -814,22 +536,10 @@ def validate_args(args: argparse.Namespace) -> Path:
             print(f"  - {reason}", flush=True)
         if args.auto_required_level == "full" and args.level == "full" and args.skip_tpch:
             raise GuardError("--skip-tpch cannot be used with performance-sensitive auto guard changes")
-    if args.init_unit_baseline and args.promote_unit_baseline:
-        raise GuardError("--init-unit-baseline and --promote-unit-baseline are mutually exclusive")
     if args.init_tpch_baseline and args.promote_tpch_baseline:
         raise GuardError("--init-tpch-baseline and --promote-tpch-baseline are mutually exclusive")
     if args.tpch_repeats <= 0:
         raise GuardError("--tpch-repeats must be positive")
-    if args.tpch_triage_repeats <= 0:
-        raise GuardError("--tpch-triage-repeats must be positive")
-    if args.tpch_triage_profile_repeats <= 0:
-        raise GuardError("--tpch-triage-profile-repeats must be positive")
-    if should_run_tpch(args) and not args.init_tpch_baseline and not tpch_baseline_configured(args):
-        raise GuardError(
-            "TPC-H regression gate is required but no accepted TPC-H baseline is configured; "
-            "run with --init-tpch-baseline after a clean full-query artifact, pass --tpch-baseline, "
-            f"or set {DEFAULT_TPCH_BASELINE_ENV}"
-        )
     if args.host_quiescence and os.name == "nt":
         raise GuardError("--host-quiescence is not supported on Windows; use a quiescent benchmark host")
     validate_performance_receipt_configuration(args)
@@ -852,8 +562,7 @@ def main() -> int:
     if not args.skip_py_compile:
         run_command(py_compile_command(), "py-compile")
     if should_run_unit(args):
-        _, failures = run_unit_suite(args, artifact_dir)
-        compare_unit_failures(args, artifact_dir, failures)
+        run_unit_suite(args, artifact_dir)
     elif args.level == "quick":
         print("quick guard completed its configured checks")
     if args.host_quiescence and (should_run_tpch(args) or should_run_generic(args)):

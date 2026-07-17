@@ -156,23 +156,4 @@ static bool SljitTryBindFilteredGroupedAggregateUpdatePrimitive(const vector<Slj
 	return true;
 }
 
-static SljitGroupedAggregateUpdatePrimitive
-SljitBindGroupedAggregateUpdatePrimitive(const vector<SljitExecutableRegionOp> &ops, idx_t aggregate_idx) {
-	SljitGroupedAggregateUpdatePrimitive primitive;
-	if (!SljitTryBindGroupedAggregateUpdatePrimitive(ops, aggregate_idx, primitive)) {
-		throw InternalException("SLJIT grouped aggregate update primitive has no dedicated backend");
-	}
-	return primitive;
-}
-
-static SljitGroupedAggregateUpdatePrimitive
-SljitBindFilteredGroupedAggregateUpdatePrimitive(const vector<SljitExecutableRegionOp> &ops, idx_t filter_idx,
-                                                 idx_t aggregate_idx) {
-	SljitGroupedAggregateUpdatePrimitive primitive;
-	if (!SljitTryBindFilteredGroupedAggregateUpdatePrimitive(ops, filter_idx, aggregate_idx, primitive)) {
-		throw InternalException("SLJIT filtered grouped aggregate update primitive cannot bind requested operators");
-	}
-	return primitive;
-}
-
 } // namespace duckdb

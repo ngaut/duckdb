@@ -711,50 +711,51 @@ def verify_benchmark_repetition_budget() -> None:
         raise AssertionError("generic benchmark candidates must not silently escalate into triage repetitions")
     if "return failures" not in generic_benchmark:
         raise AssertionError("generic benchmark must fail from the original candidate sample without a retry path")
-    for process_amortization_contract in (
-        "class TimedMaterializedAttemptGroup:",
-        "class TimedMaterializedAttemptSpec:",
-        "def timed_materialized_attempt_groups(",
-        'statements.append(f".open {quoted_db_path}")',
-        'statements.append(".open :memory:")',
+    if "class BenchmarkScript:" not in benchmark_common or 'args.duckdb, Path(":memory:")' not in benchmark_common:
+        raise AssertionError("benchmark timing must use one ordered shell script")
+    generic_matrix = generic_benchmark[
+        generic_benchmark.index("def run_workload_matrix(") : generic_benchmark.index("def minimum_auto_speedup(")
+    ]
+    if (
+        generic_matrix.count("BenchmarkScript(db_path)") != 1
+        or generic_matrix.count("script.execute(") != 1
+        or "run_duckdb(" in generic_matrix
     ):
-        if process_amortization_contract not in benchmark_common:
-            raise AssertionError(
-                f"generic benchmark batches must reopen fresh database state: {process_amortization_contract}"
-            )
-    for process_amortization_contract in (
-        "def run_workload_matrix(",
-        "timed_materialized_attempt_groups(args, db_path, groups)",
-    ):
-        if process_amortization_contract not in generic_benchmark:
-            raise AssertionError(
-                f"generic benchmark must amortize OS process launches across the matrix: {process_amortization_contract}"
-            )
-    if "timed_materialized_attempt(" in generic_benchmark:
-        raise AssertionError("generic samples must not restore one DuckDB process launch per timed attempt")
+        raise AssertionError("generic samples must use exactly one DuckDB shell process")
 
     tpch_benchmark = read("benchmark/tpch/jit/tpch_benchmark.py")
-    for process_amortization_contract in (
-        "def run_production_matrix(",
-        "TimedMaterializedAttemptGroup(",
-        "timed_materialized_attempt_groups(args, db_path, groups)",
-        "def counter_attempt_spec(",
-        'if args.timing_mode == "production":',
-        "rows, counter_rows = run_production_matrix(args, db_path, out_dir, root)",
-    ):
-        if process_amortization_contract not in tpch_benchmark:
-            raise AssertionError(
-                f"TPC-H production timing must amortize OS process launches: {process_amortization_contract}"
-            )
     production_matrix = tpch_benchmark[
         tpch_benchmark.index("def run_production_matrix(") : tpch_benchmark.index("def run_profile_matrix(")
     ]
-    if "timed_materialized_attempt(" in production_matrix or "run_once(" in production_matrix:
-        raise AssertionError("TPC-H production samples must not restore one DuckDB process launch per attempt")
+    if (
+        production_matrix.count("BenchmarkScript(db_path)") != 1
+        or production_matrix.count("script.execute(") != 1
+        or "run_duckdb(" in production_matrix
+    ):
+        raise AssertionError("TPC-H production samples must use exactly one DuckDB shell process")
+    counter_tail = production_matrix[
+        production_matrix.index("for job in counter_jobs:") : production_matrix.index("query_times = script.execute(")
+    ]
+    if "script.measure(" in counter_tail or "script.run_untimed(" not in counter_tail:
+        raise AssertionError("TPC-H traced proof collection must remain untimed after the production matrix")
 
     tpch_gate = read("benchmark/tpch/jit/run_tpch_regression_gate.py")
-    if '"--triage-failures"' not in tpch_gate or "default=False" not in tpch_gate:
-        raise AssertionError("TPC-H focused triage must be opt-in")
+    for stale_retry_contract in (
+        "triage_failed_comparison",
+        "focused_recheck",
+        "merge_rechecked_csv_artifact",
+        "merge_promoted_baseline_artifact",
+        "comparison_passed",
+        '"--triage-failures"',
+    ):
+        if stale_retry_contract in tpch_gate:
+            raise AssertionError(f"TPC-H failed candidates must not have a retry verdict path: {stale_retry_contract}")
+    gate_flow = tpch_gate[tpch_gate.index("def run_benchmark_gate(") : tpch_gate.index("def run_gate(")]
+    comparison_offset = gate_flow.index('"baseline comparison"')
+    promotion_offset = gate_flow.index("if args.promote_baseline:")
+    publication_offset = gate_flow.index("write_baseline_state(", promotion_offset)
+    if not comparison_offset < promotion_offset < publication_offset:
+        raise AssertionError("TPC-H baseline publication must follow a passing candidate comparison")
     for database_reuse_contract in (
         "def gate_database(",
         "with exclusive_database_cache_lock(lock_path):",
@@ -764,7 +765,7 @@ def verify_benchmark_repetition_budget() -> None:
         "validate_tpch_database(args, args.db)",
         "def run_timed_benchmark(",
         "args.use_existing_db = True",
-        "args.use_existing_db or reuse_database",
+        'add_bool_flag(command, args.use_existing_db, "--use-existing-db")',
         "with gate_database(args):",
     ):
         if database_reuse_contract not in tpch_gate:
@@ -773,6 +774,8 @@ def verify_benchmark_repetition_budget() -> None:
             )
     if "reuse_database and args.keep_db" in tpch_gate:
         raise AssertionError("TPC-H database reuse must not depend on retaining the database after the gate")
+    if "reuse_database" in tpch_gate or 'add_bool_flag(command, args.keep_db, "--keep-db")' in tpch_gate:
+        raise AssertionError("TPC-H gate must own database reuse and retention without child lifecycle overrides")
     refactor_guard = read("benchmark/jit/run_jit_refactor_guard.py")
     benchmark_host = read("benchmark/jit/benchmark_host.py")
     for host_quiescence_contract in (
@@ -783,9 +786,7 @@ def verify_benchmark_repetition_budget() -> None:
         'process_name == "syspolicyd" or process_name.startswith("xprotect")',
     ):
         if host_quiescence_contract not in benchmark_host:
-            raise AssertionError(
-                f"shared performance host admission is incomplete: {host_quiescence_contract}"
-            )
+            raise AssertionError(f"shared performance host admission is incomplete: {host_quiescence_contract}")
     if "if args.host_quiescence and (should_run_tpch(args) or should_run_generic(args)):" not in refactor_guard:
         raise AssertionError("combined performance guard must reject a busy host before setup")
     tpch_gate_main = tpch_gate[tpch_gate.index("def run_gate(") :]
@@ -805,16 +806,27 @@ def verify_benchmark_repetition_budget() -> None:
     ):
         if receipt_contract not in refactor_guard:
             raise AssertionError(f"performance receipt ownership is incomplete: {receipt_contract}")
-    if "if args.tpch_triage_failures:" not in refactor_guard:
-        raise AssertionError("refactor guard must pass TPC-H triage only when explicitly requested")
+    for stale_guard_contract in (
+        "tpch_triage",
+        "unit_baseline",
+        "unit ratchet",
+        "failed_tests",
+        "unit_execution",
+        "def baseline_from_state(",
+        "def tpch_baseline_configured(",
+    ):
+        if stale_guard_contract in refactor_guard:
+            raise AssertionError(
+                f"refactor guard must not preserve failed correctness or timing paths: {stale_guard_contract}"
+            )
+    if "run_unit_suite(args, artifact_dir)" not in refactor_guard:
+        raise AssertionError("refactor guard must run the JIT unit suite directly")
     for candidate_budget in (
         'parser.add_argument("--generic-repeats", type=int, choices=(5, 10), default=5)',
         'parser.add_argument("--tpch-repeats", type=int, choices=(5, 10), default=5)',
     ):
         if candidate_budget not in refactor_guard:
             raise AssertionError(f"pre-push candidates must default to five pairs and allow ten: {candidate_budget}")
-    if 'parser.add_argument("--tpch-triage-repeats", type=int, default=10)' not in refactor_guard:
-        raise AssertionError("explicit TPC-H noise triage must retain the ten-pair qualification budget")
     guard_main = refactor_guard[refactor_guard.index("def main() -> int:") :]
     quiescence_offset = guard_main.index("wait_for_host_quiescence()")
     tpch_offset = guard_main.index("if should_run_tpch(args):")
@@ -823,7 +835,10 @@ def verify_benchmark_repetition_budget() -> None:
         raise AssertionError("host quiescence admission must run before production performance measurement")
     if tpch_offset > generic_offset:
         raise AssertionError("historically compared TPC-H timing must run before the generic production heat load")
-    for hook_path in ("benchmark/jit/git_hooks/pre-commit", "benchmark/jit/git_hooks/pre-push"):
+    for hook_path in (
+        "benchmark/jit/git_hooks/pre-commit",
+        "benchmark/jit/git_hooks/pre-push",
+    ):
         hook = read(hook_path)
         if "benchmark/jit/local_baselines/pre_commit_verified_tree" not in hook:
             raise AssertionError(
@@ -834,8 +849,9 @@ def verify_benchmark_repetition_budget() -> None:
                 f"Git-hook verification state must not drift back to disposable candidates: {hook_path}"
             )
     pre_push_hook = read("benchmark/jit/git_hooks/pre-push")
-    if "DUCKDB_JIT_TPCH_TRIAGE_FAILURES" not in pre_push_hook or "--tpch-triage-failures" not in pre_push_hook:
-        raise AssertionError("pre-push must expose explicit focused TPC-H triage without enabling it by default")
+    for stale_hook_contract in ("DUCKDB_JIT_TPCH_TRIAGE_FAILURES", "--tpch-triage-failures"):
+        if stale_hook_contract in pre_push_hook:
+            raise AssertionError(f"pre-push must not expose a retry verdict path: {stale_hook_contract}")
     if "pre_push_verified_tree" not in pre_push_hook or "--performance-receipt" not in pre_push_hook:
         raise AssertionError("pre-push must reuse only exact-tree production performance verification")
 
@@ -907,9 +923,17 @@ def verify_bound_direct_join_terminal_contract() -> None:
         "SljitFullPipelineSourceFetchNeedsPartitionPreservingChunks",
         "SljitFullPipelineIsSelectedHashJoinSinkSequence",
         "SljitFullPipelineFilterHasFusedOwner",
+        "SljitFullPipelinePrimitiveStepOwnsOps",
     ):
         if stale in primitive_contract:
             raise AssertionError(f"recipe publication must not rescan independent shape contracts: {stale}")
+
+    primitive_sequence = read("extension/jit_sljit/include/sljit_full_pipeline_primitive_sequence.hpp")
+    for stale in ("op_indices", "op_count", "idx_t Op(", "SLJIT_FULL_PIPELINE_MAX_PRIMITIVE_STEP_OPS"):
+        if stale in primitive_sequence:
+            raise AssertionError(f"primitive steps must not duplicate typed operator ownership: {stale}")
+    if "idx_t native_tail_start_idx = DConstants::INVALID_INDEX" not in primitive_sequence:
+        raise AssertionError("native-tail primitive ownership must be explicit and typed")
 
     for recipe_binding in (
         "extension/jit_sljit/sljit_full_pipeline_recipe_binding.cpp",
@@ -940,6 +964,52 @@ def verify_bound_direct_join_terminal_contract() -> None:
     ):
         if stale in selection_runtime:
             raise AssertionError(f"hash-join selection must bind direct/materialized dispatch once: {stale}")
+
+    materialize_runtime = read("extension/jit_sljit/include/sljit_hash_join_probe_materialize_primitive_runtime.hpp")
+    native_tail_runtime = read("extension/jit_sljit/include/sljit_native_tail_delegation_runtime.hpp")
+    for runtime_source in (selection_runtime, materialize_runtime, native_tail_runtime):
+        if ".Op(" in runtime_source:
+            raise AssertionError("primitive runtime must consume typed operator ownership")
+
+    append_primitive = read("extension/jit_sljit/include/sljit_append_sink_primitive.hpp")
+    append_runtime = read("extension/jit_sljit/include/sljit_append_sink_runtime.hpp")
+    post_join_runtime = read("extension/jit_sljit/include/sljit_post_join_projection_aggregate_runtime.hpp")
+    if "SljitCanBindAppendSinkPrimitive" in append_primitive + append_runtime:
+        raise AssertionError("published append primitives must not retain a runtime admission API")
+    if "SljitTryBindAppendSinkPrimitive" not in append_primitive:
+        raise AssertionError("append primitive must expose one non-throwing binder")
+    for stale_append_binder in (
+        "SljitCanBindSelectedHashJoinAppendSinkPrimitive",
+        "SljitTryBindSelectedHashJoinAppendSinkPrimitive",
+        "SljitBindSelectedHashJoinAppendSinkPrimitive",
+    ):
+        if stale_append_binder in append_primitive:
+            raise AssertionError(f"append primitive must not preserve duplicate binder APIs: {stale_append_binder}")
+    if "SljitCanBindPostJoinProjectionAggregatePrimitive" in post_join_runtime:
+        raise AssertionError("post-join aggregate runtime must not re-admit a published primitive")
+    for runtime_source in (append_runtime, post_join_runtime):
+        if "void Prepare(" not in runtime_source:
+            raise AssertionError("published terminal preparation must not expose a recipe miss result")
+
+    dead_throwing_binders = {
+        "extension/jit_sljit/include/sljit_hash_join_probe_primitive.hpp": (
+            "SljitBindHashJoinProbeMaterializePrimitive(",
+            "SljitBindHashJoinBuildSinkPrimitive(",
+            "SljitBindMarkProbeFilterBoundaryPrimitive(",
+        ),
+        "extension/jit_sljit/include/sljit_grouped_aggregate_update_primitive.hpp": (
+            "SljitBindGroupedAggregateUpdatePrimitive(",
+            "SljitBindFilteredGroupedAggregateUpdatePrimitive(",
+        ),
+        "extension/jit_sljit/include/sljit_post_join_projection_strategy.hpp": (
+            "SljitBindPostJoinProjectionPrimitive(",
+        ),
+    }
+    for path, stale_binders in dead_throwing_binders.items():
+        binding_source = read(path)
+        for stale_binder in stale_binders:
+            if stale_binder in binding_source:
+                raise AssertionError(f"unused throwing primitive binder must stay deleted: {stale_binder}")
 
     source_runtime = read("extension/jit_sljit/include/sljit_source_pipeline_runtime.hpp")
     for required in (
@@ -981,9 +1051,7 @@ def verify_bound_direct_join_terminal_contract() -> None:
     if "direct_aggregate_consumer_miss.terminal_kind" in terminal_runtime:
         raise AssertionError("terminal execution must not rediscover terminal kind at runtime")
 
-    direct_consumer_runtime = read(
-        "extension/jit_sljit/include/sljit_hash_join_probe_aggregate_consumer_runtime.hpp"
-    )
+    direct_consumer_runtime = read("extension/jit_sljit/include/sljit_hash_join_probe_aggregate_consumer_runtime.hpp")
     if "direct_aggregate_consumer_miss." in direct_consumer_runtime:
         raise AssertionError("direct-consumer physical binding must not expose per-chunk recipe miss paths")
 
@@ -1001,7 +1069,10 @@ def verify_bound_direct_join_terminal_contract() -> None:
     for family in recipe_families:
         if f"TryMake{family}Recipe" not in recipe_binding_header:
             raise AssertionError(f"{family} recipe admission and construction must have one shared binder")
-        if re.search(rf"\b(?:CanMake|Make){family}Recipe\b", recipe_binding_header + recipe_binding_cpp):
+        if re.search(
+            rf"\b(?:CanMake|Make){family}Recipe\b",
+            recipe_binding_header + recipe_binding_cpp,
+        ):
             raise AssertionError(f"{family} recipe shape must not be admitted and reconstructed through duplicate APIs")
         if f"binding.TryMake{family}Recipe(facts, recipe)" not in recipe_builder:
             raise AssertionError(f"recipe builder must consume the shared {family} binder")
@@ -1164,7 +1235,7 @@ def verify_perfect_hash_predicate_cache_ownership() -> None:
     test = read("test/api/test_jit_join.cpp")
     for contract in (
         "direct_aggregate_consumer.shared_predicate_cache=",
-        "!StringUtil::Contains(paths, \"hash_join_probe.perfect_probe.direct_aggregate_consumer.all_valid_rhs=\")",
+        '!StringUtil::Contains(paths, "hash_join_probe.perfect_probe.direct_aggregate_consumer.all_valid_rhs=")',
         "jit_perfect_complementary_compact_orders",
         "REQUIRE(StringUtil::Contains(",
     ):
@@ -1766,7 +1837,10 @@ def verify_regular_hash_join_direct_aggregate_storage_contract() -> None:
             )
 
     rhs_runtime = read("extension/jit_sljit/include/sljit_hash_join_rhs_fixed_column_runtime.hpp")
-    for stale in ('"duckdb/execution/join_hashtable.hpp"', "JoinHashTable::ValidityBytes"):
+    for stale in (
+        '"duckdb/execution/join_hashtable.hpp"',
+        "JoinHashTable::ValidityBytes",
+    ):
         if stale in rhs_runtime:
             raise AssertionError(
                 f"fixed-column backend helpers must depend only on the exported execution ABI: {stale}"

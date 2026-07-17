@@ -98,10 +98,13 @@ binder owns one projection-aggregate family binder instead of constructing a
 temporary binder for each question.
 
 Primitive binding is the semantic authority. Recipe finalization validates
-sequence grammar and descriptor ownership; it does not call the capability
-predicates again. Runtime kind, partition preservation, scan-filter body
-ownership, fused-filter ownership, and the direct-terminal contract are
-finalized together before the recipe plan is published.
+sequence grammar and cross-primitive ownership; it does not call capability
+predicates again. Each step stores operator identities only in its typed
+primitive descriptor—there is no parallel generic index array to reconcile.
+Runtime preparation initializes physical state but cannot return a recipe-shape
+miss. Runtime kind, partition preservation, scan-filter body ownership,
+fused-filter ownership, and the direct-terminal contract are finalized together
+before the recipe plan is published.
 
 Prepared expression capability does not change when selector machine code is
 emitted. The executable builder therefore binds the plan exactly once, emits
@@ -343,8 +346,8 @@ Correctness and performance are both required:
 Candidate measurements use five alternating policy pairs. Promotion and ship
 qualification use ten. Failed candidates are not silently rerun with more
 samples. Generic speedup floors use the median within-repeat `off/auto` ratio,
-while raw JIT-auto ceilings remain independent. Focused triage is an explicit
-action.
+while raw JIT-auto ceilings remain independent. Diagnosis is separate from the
+gate and cannot change its verdict.
 
 A verified performance improvement and its regression baseline are one change.
 Tighten the checked-in workload floor or promote the accepted comparison
@@ -378,8 +381,8 @@ relevant JIT configuration.
 
 A regression-gate invocation clones one immutable, scale-factor-keyed template
 and reuses the private working database for the untraced candidate, traced
-runtime proof, focused recheck, and promotion pass. The default template cache
-is local and ignored, carries an explicit role/format/scale manifest, is
+runtime proof, and full promotion pass. The default template cache is local and
+ignored, carries an explicit role/format/scale manifest, is
 atomically created under an exclusive creation lock, and is rebuilt when
 validation fails. The lock is released before measurement. Filesystem
 copy-on-write avoids a physical SF10 copy where supported; a normal copy is the
@@ -396,22 +399,21 @@ An immediate post-measurement sample invalidates a run if load appeared after
 admission. Host-load admission is measurement hygiene only; it cannot change
 raw ceilings, speedup floors, query coverage, or runtime-proof requirements.
 
-The generic gate amortizes operating-system process launch cost across the
-complete matrix. Its one shell process interleaves each workload's preparation
-immediately before that workload's samples. Preparation and every attempt end
-by closing the database back to `:memory:`; the next attempt reopens the same
-checkpointed file. Samples therefore retain the original workload chronology
-and fresh connection and buffer-manager state while avoiding hundreds of macOS
-provenance assessments. Batching owns only process lifecycle; query timers,
+The generic gate is one ordered SQL script in one shell process. The script
+places each workload's preparation immediately before its samples. Preparation
+and every attempt end by closing the database back to `:memory:`; the next
+attempt reopens the same checkpointed file. Samples therefore retain the
+original workload chronology and fresh connection and buffer-manager state
+while avoiding hundreds of macOS provenance assessments. Query timers,
 alternating policy order, counters, correctness artifacts, and regression
 contracts remain attempt-local.
 
 TPC-H production timing uses the same lifecycle contract across query groups:
 prepare that query's correctness baseline, close the database, then close and
-reopen around every alternating policy sample. Traced counter collection is a
-separate grouped shell session after timing. The primary candidate therefore
-uses one operating-system process and runtime proof uses at most two, without
-sharing database state or trace overhead across timed attempts.
+reopen around every alternating policy sample. Traced counter collection is an
+untimed tail after all candidate timers in the same script. The complete matrix
+therefore uses one operating-system process without sharing connection state or
+trace overhead across timed attempts.
 
 Pre-commit correctness and pre-push performance receipts are bound to the exact
 Git tree. A push can reuse completed production verification without measuring

@@ -117,17 +117,6 @@ static bool SljitTryBindHashJoinProbeMaterializePrimitive(const vector<SljitExec
 	return true;
 }
 
-static SljitHashJoinProbeMaterializePrimitive
-SljitBindHashJoinProbeMaterializePrimitive(const vector<SljitExecutableRegionOp> &ops, idx_t hash_join_idx,
-                                           bool source_key0_int64_to_int32_unchecked = false) {
-	SljitHashJoinProbeMaterializePrimitive primitive;
-	if (!SljitTryBindHashJoinProbeMaterializePrimitive(ops, hash_join_idx, primitive,
-	                                                   source_key0_int64_to_int32_unchecked)) {
-		throw InternalException("SLJIT hash join materialize primitive cannot bind requested operator");
-	}
-	return primitive;
-}
-
 static bool SljitCanBindHashJoinProbeSelectionPrimitive(const vector<SljitExecutableRegionOp> &ops,
                                                         idx_t hash_join_idx) {
 	return hash_join_idx < ops.size() && ops[hash_join_idx].kind == SljitNativeRegionOpKind::HASH_JOIN_PROBE &&
@@ -272,16 +261,6 @@ static bool SljitTryBindHashJoinBuildSinkPrimitive(const vector<SljitExecutableR
 	return true;
 }
 
-static SljitHashJoinBuildSinkPrimitive
-SljitBindHashJoinBuildSinkPrimitive(const vector<SljitExecutableRegionOp> &ops, idx_t sink_idx,
-                                    idx_t projection_idx = DConstants::INVALID_INDEX) {
-	SljitHashJoinBuildSinkPrimitive primitive;
-	if (!SljitTryBindHashJoinBuildSinkPrimitive(ops, sink_idx, projection_idx, primitive)) {
-		throw InternalException("SLJIT hash join build sink primitive cannot bind requested operator");
-	}
-	return primitive;
-}
-
 static bool SljitCanBindMarkProbeFilterBoundaryPrimitive(const vector<SljitExecutableRegionOp> &ops,
                                                          idx_t hash_join_idx, idx_t filter_idx) {
 	return hash_join_idx < ops.size() && filter_idx < ops.size() &&
@@ -326,19 +305,6 @@ static bool SljitTryBindMarkProbeFilterBoundaryPrimitive(const vector<SljitExecu
 	}
 	primitive = candidate;
 	return true;
-}
-
-static SljitMarkProbeFilterBoundaryPrimitive SljitBindMarkProbeFilterBoundaryPrimitive(
-    const vector<SljitExecutableRegionOp> &ops, idx_t hash_join_idx, idx_t filter_idx,
-    bool apply_filter_selection = false, idx_t downstream_projection_idx = DConstants::INVALID_INDEX,
-    bool allow_marker_omission = false, bool materialize_filter_selection = false) {
-	SljitMarkProbeFilterBoundaryPrimitive primitive;
-	if (!SljitTryBindMarkProbeFilterBoundaryPrimitive(ops, hash_join_idx, filter_idx, apply_filter_selection,
-	                                                  downstream_projection_idx, allow_marker_omission,
-	                                                  materialize_filter_selection, primitive)) {
-		throw InternalException("SLJIT MARK probe filter boundary primitive cannot bind requested contract");
-	}
-	return primitive;
 }
 
 } // namespace duckdb

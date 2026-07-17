@@ -12,69 +12,6 @@ namespace duckdb {
 
 namespace {
 
-bool SljitFullPipelinePrimitiveStepOwnsOps(const SljitFullPipelinePrimitiveStep &step) {
-	switch (step.kind) {
-	case SljitFullPipelinePrimitiveKind::SOURCE_FETCH:
-		return step.op_count == 0;
-	case SljitFullPipelinePrimitiveKind::GENERATED_FILTER:
-		return step.op_count == 1 && step.generated_filter.filter_idx == step.Op(0);
-	case SljitFullPipelinePrimitiveKind::HASH_JOIN_PROBE_MATERIALIZE:
-		return step.op_count == 1 && step.hash_join_probe_materialize.hash_join_idx == step.Op(0);
-	case SljitFullPipelinePrimitiveKind::HASH_JOIN_PROBE_SELECTION:
-		return step.op_count == 1 && step.hash_join_probe_selection.hash_join_idx == step.Op(0);
-	case SljitFullPipelinePrimitiveKind::MARK_PROBE_FILTER_BOUNDARY:
-		return step.op_count == 2 && step.mark_probe_filter_boundary.hash_join_idx == step.Op(0) &&
-		       step.mark_probe_filter_boundary.filter_idx == step.Op(1);
-	case SljitFullPipelinePrimitiveKind::PROJECTION_CHAIN:
-		return step.op_count == 2 && step.projection_chain.first_projection_idx == step.Op(0) &&
-		       step.projection_chain.final_projection_idx == step.Op(1);
-	case SljitFullPipelinePrimitiveKind::POST_JOIN_PROJECTION_AGGREGATE_UPDATE:
-		return step.op_count == 2 &&
-		       step.post_join_projection_aggregate.post_join_projection.hash_join_idx == step.Op(0) &&
-		       step.post_join_projection_aggregate.aggregate_idx == step.Op(1);
-	case SljitFullPipelinePrimitiveKind::UNGROUPED_AGGREGATE_UPDATE:
-		if (step.ungrouped_aggregate_update.strategy ==
-		    SljitUngroupedAggregateUpdateStrategyKind::FILTERED_PRIMITIVE_PAYLOAD_UPDATE) {
-			return step.op_count == 2 && step.ungrouped_aggregate_update.filter_idx == step.Op(0) &&
-			       step.ungrouped_aggregate_update.aggregate_idx == step.Op(1);
-		}
-		return step.op_count == 1 && step.ungrouped_aggregate_update.aggregate_idx == step.Op(0);
-	case SljitFullPipelinePrimitiveKind::GROUPED_AGGREGATE_UPDATE:
-		if (step.grouped_aggregate_update.strategy ==
-		    SljitGroupedAggregateUpdateStrategyKind::FILTERED_PRIMITIVE_PAYLOAD_UPDATE) {
-			return step.op_count == 2 && step.grouped_aggregate_update.filter_idx == step.Op(0) &&
-			       step.grouped_aggregate_update.aggregate_idx == step.Op(1);
-		}
-		if (step.grouped_aggregate_update.input_kind == SljitGroupedAggregateUpdateInputKind::PROJECTED_INPUT) {
-			return step.op_count == 3 && step.grouped_aggregate_update.first_projection_idx == step.Op(0) &&
-			       step.grouped_aggregate_update.final_projection_idx == step.Op(1) &&
-			       step.grouped_aggregate_update.aggregate_idx == step.Op(2);
-		}
-		return step.op_count == 1 && step.grouped_aggregate_update.aggregate_idx == step.Op(0);
-	case SljitFullPipelinePrimitiveKind::HASH_JOIN_BUILD_SINK:
-		if (step.hash_join_build_sink.HasProjection()) {
-			return step.op_count == 2 && step.hash_join_build_sink.projection_idx == step.Op(0) &&
-			       step.hash_join_build_sink.sink_idx == step.Op(1);
-		}
-		return step.op_count == 1 && step.hash_join_build_sink.sink_idx == step.Op(0);
-	case SljitFullPipelinePrimitiveKind::DELIM_JOIN_SINK:
-		if (step.delim_join_sink.HasProjection()) {
-			return step.op_count == 3 && step.delim_join_sink.first_projection_idx == step.Op(0) &&
-			       step.delim_join_sink.final_projection_idx == step.Op(1) &&
-			       step.delim_join_sink.sink_idx == step.Op(2);
-		}
-		return step.op_count == 1 && step.delim_join_sink.sink_idx == step.Op(0);
-	case SljitFullPipelinePrimitiveKind::APPEND_SINK:
-		return step.op_count == 2 && step.append_sink.selected_hash_join_idx == step.Op(0) &&
-		       step.append_sink.sink_idx == step.Op(1);
-	case SljitFullPipelinePrimitiveKind::NATIVE_TAIL_DELEGATION:
-		return step.op_count == 1;
-	case SljitFullPipelinePrimitiveKind::INVALID:
-		return false;
-	}
-	return false;
-}
-
 bool SljitFullPipelinePrimitiveIsIntermediate(SljitFullPipelinePrimitiveKind kind) {
 	return kind == SljitFullPipelinePrimitiveKind::GENERATED_FILTER ||
 	       kind == SljitFullPipelinePrimitiveKind::HASH_JOIN_PROBE_MATERIALIZE ||
@@ -142,8 +79,7 @@ SljitFinalizeFullPipelinePrimitiveRecipe(const vector<SljitExecutableRegionOp> &
                                          SljitFullPipelinePrimitiveSequence primitive_sequence,
                                          SljitHashJoinDirectAggregateConsumerContract direct_aggregate_consumer) {
 	if (primitive_sequence.Count() < 2 ||
-	    primitive_sequence.Step(0).kind != SljitFullPipelinePrimitiveKind::SOURCE_FETCH ||
-	    !SljitFullPipelinePrimitiveStepOwnsOps(primitive_sequence.Step(0))) {
+	    primitive_sequence.Step(0).kind != SljitFullPipelinePrimitiveKind::SOURCE_FETCH) {
 		throw InternalException("SLJIT full-pipeline recipe must start with source fetch and have a terminal");
 	}
 
@@ -151,8 +87,7 @@ SljitFinalizeFullPipelinePrimitiveRecipe(const vector<SljitExecutableRegionOp> &
 	for (idx_t step_idx = 1; step_idx < primitive_sequence.Count(); step_idx++) {
 		auto &step = primitive_sequence.Step(step_idx);
 		const bool terminal = step_idx + 1 == primitive_sequence.Count();
-		if (!SljitFullPipelinePrimitiveStepOwnsOps(step) ||
-		    (terminal ? !SljitFullPipelinePrimitiveIsTerminal(step.kind)
+		if ((terminal ? !SljitFullPipelinePrimitiveIsTerminal(step.kind)
 		              : !SljitFullPipelinePrimitiveIsIntermediate(step.kind))) {
 			throw InternalException("SLJIT full-pipeline recipe has invalid primitive ownership");
 		}

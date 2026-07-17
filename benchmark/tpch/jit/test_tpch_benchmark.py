@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import json
+import re
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -16,6 +19,7 @@ from tpch_benchmark import run_production_matrix  # noqa: E402
 def benchmark_args(*, traced: bool) -> SimpleNamespace:
     return SimpleNamespace(
         backend="sljit",
+        duckdb=Path("duckdb"),
         event_log_size=10000 if traced else 0,
         jit_cbo_setting=[],
         jit_extension="jit_sljit",
@@ -30,99 +34,86 @@ def benchmark_args(*, traced: bool) -> SimpleNamespace:
     )
 
 
-def successful_attempt(attempt, query_time_us: int) -> dict:
-    validation = []
-    if attempt.validation_sql:
-        validation = [
-            {
-                "baseline_rows": 1,
-                "result_rows": 1,
-                "result_minus_baseline": 0,
-                "baseline_minus_result": 0,
-            }
-        ]
-    return {
-        "query_time_us": query_time_us,
-        "validation": validation,
-        "counters": [],
-    }
+def write_shell_outputs(sql: str) -> None:
+    for path_text in re.findall(r"\.once '([^']+)'", sql):
+        path = Path(path_text)
+        if path.name.endswith("_validation.json"):
+            rows = [
+                {
+                    "baseline_rows": 1,
+                    "result_rows": 1,
+                    "result_minus_baseline": 0,
+                    "baseline_minus_result": 0,
+                }
+            ]
+        else:
+            rows = []
+        path.write_text(json.dumps(rows), encoding="utf-8")
 
 
 class TestTPCHProductionMatrix(unittest.TestCase):
-    def test_batches_baseline_and_alternating_samples_in_one_shell(self) -> None:
+    def run_matrix(self, *, traced: bool):
         calls = []
 
-        def fake_groups(args, db_path, groups):
-            calls.append(groups)
-            self.assertEqual(db_path.name, "tpch.duckdb")
-            return [
-                successful_attempt(attempt, 100000 + index)
-                for index, group in enumerate(groups)
-                for attempt in group.attempts
-            ]
+        def fake_run_duckdb(duckdb, db_path, sql, label):
+            calls.append((sql, label))
+            write_shell_outputs(sql)
+            timers = "".join(
+                f"Run Time (s): real {0.100 + index / 1000:.3f}\n" for index in range(sql.count(".timer on"))
+            )
+            return subprocess.CompletedProcess([], 0, stdout=timers, stderr="")
 
-        with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary)
-            with (
-                patch("tpch_benchmark.read_query", return_value="SELECT 42"),
-                patch("tpch_benchmark.timed_materialized_attempt_groups", side_effect=fake_groups),
-            ):
-                rows, counters = run_production_matrix(
-                    benchmark_args(traced=False),
-                    root / "tpch.duckdb",
-                    root,
-                    root,
-                )
+        temporary = tempfile.TemporaryDirectory()
+        root = Path(temporary.name)
+        with (
+            patch("tpch_benchmark.read_query", return_value="SELECT 42"),
+            patch("benchmark_common.run_duckdb", side_effect=fake_run_duckdb),
+        ):
+            rows, counters = run_production_matrix(
+                benchmark_args(traced=traced),
+                root / "tpch.duckdb",
+                root,
+                root,
+            )
+        return temporary, calls, rows, counters
+
+    def test_one_shell_preserves_baseline_and_alternating_samples(self) -> None:
+        temporary, calls, rows, counters = self.run_matrix(traced=False)
+        self.addCleanup(temporary.cleanup)
 
         self.assertEqual(len(calls), 1)
-        self.assertEqual(len(calls[0]), 1)
-        group = calls[0][0]
-        self.assertIn("CREATE OR REPLACE TABLE __jit_benchmark_baseline_q01", group.preparation_sql)
+        sql, batch_label = calls[0]
+        self.assertEqual(batch_label, "TPC-H production matrix")
+        self.assertIn("CREATE OR REPLACE TABLE __jit_benchmark_baseline_q01", sql)
+        self.assertEqual(sql.count(".timer on"), 4)
         self.assertEqual(
-            [attempt.label for attempt in group.attempts],
-            [
-                "benchmark q01 off repeat 1",
-                "benchmark q01 auto repeat 1",
-                "benchmark q01 auto repeat 2",
-                "benchmark q01 off repeat 2",
-            ],
+            re.findall(
+                r"CREATE OR REPLACE TABLE __jit_benchmark_result_q01_(off|auto)_([12])",
+                sql,
+            ),
+            [("off", "1"), ("auto", "1"), ("auto", "2"), ("off", "2")],
         )
         self.assertEqual(
-            [(row["policy"], row["repeat"]) for row in rows], [("off", 1), ("auto", 1), ("auto", 2), ("off", 2)]
+            [(row["policy"], row["repeat"]) for row in rows],
+            [("off", 1), ("auto", 1), ("auto", 2), ("off", 2)],
         )
         self.assertEqual(counters, [])
 
-    def test_traced_auto_counters_run_after_the_timing_matrix(self) -> None:
-        calls = []
+    def test_traced_counters_are_untimed_at_the_end_of_the_same_shell(self) -> None:
+        temporary, calls, rows, counters = self.run_matrix(traced=True)
+        self.addCleanup(temporary.cleanup)
 
-        def fake_groups(args, db_path, groups):
-            calls.append(groups)
-            return [
-                successful_attempt(attempt, 100000 + index)
-                for index, group in enumerate(groups)
-                for attempt in group.attempts
-            ]
-
-        with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary)
-            with (
-                patch("tpch_benchmark.read_query", return_value="SELECT 42"),
-                patch("tpch_benchmark.timed_materialized_attempt_groups", side_effect=fake_groups),
-            ):
-                rows, counters = run_production_matrix(
-                    benchmark_args(traced=True),
-                    root / "tpch.duckdb",
-                    root,
-                    root,
-                )
-
+        self.assertEqual(len(calls), 1)
+        sql, _ = calls[0]
         self.assertEqual(len(rows), 4)
         self.assertEqual(counters, [])
-        self.assertEqual(len(calls), 2)
-        self.assertEqual(calls[1][0].label, "TPC-H counter collection")
-        self.assertEqual(
-            [attempt.label for attempt in calls[1][0].attempts],
-            ["counter collection q01 auto repeat 1", "counter collection q01 auto repeat 2"],
+        self.assertEqual(sql.count(".timer on"), 4)
+        counter_tail = sql.index("CREATE OR REPLACE TABLE __jit_benchmark_counter_q01_auto_1")
+        self.assertGreater(counter_tail, sql.rindex(".timer off"))
+        self.assertNotIn(".timer on", sql[counter_tail:])
+        self.assertIn(
+            "CREATE OR REPLACE TABLE __jit_benchmark_counter_q01_auto_2",
+            sql[counter_tail:],
         )
 
 

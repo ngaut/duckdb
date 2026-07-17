@@ -27,7 +27,7 @@ struct SljitNativeTailDelegationRuntimeState {
 		if (input.count == 0) {
 			return false;
 		}
-		const auto tail_start_idx = primitive.Op(0);
+		const auto tail_start_idx = primitive.native_tail_start_idx;
 		auto &tail_op = ops[tail_start_idx];
 		RecordSljitRegionRuntimePath(runtime, tail_op.kind, "native_tail_delegation", input.count);
 		RecordSljitRegionRuntimeDelegation(runtime, tail_op.kind, "native_tail_delegation", input.count);

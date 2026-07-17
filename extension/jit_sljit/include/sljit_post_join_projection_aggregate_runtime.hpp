@@ -25,17 +25,13 @@ struct SljitPostJoinProjectionAggregateRuntimeState {
 		processed_output_rows = 0;
 	}
 
-	bool Prepare(vector<SljitExecutableRegionOp> &ops, const SljitPostJoinProjectionAggregatePrimitive &primitive,
+	void Prepare(vector<SljitExecutableRegionOp> &ops, const SljitPostJoinProjectionAggregatePrimitive &primitive,
 	             const vector<idx_t> &source_distinct_counts, const vector<Value> &source_min_values,
 	             const vector<Value> &source_max_values) {
-		if (!SljitCanBindPostJoinProjectionAggregatePrimitive(ops, primitive)) {
-			return false;
-		}
 		post_join_projection = primitive.post_join_projection.MakeStrategy();
 		direct_join_output_aggregate_strategy = make_uniq<SljitDirectJoinOutputAggregateStrategy>(
 		    primitive.aggregate_idx, source_distinct_counts, source_min_values, source_max_values);
 		prepared = true;
-		return true;
 	}
 
 	template <class EXECUTE_HASH_JOIN_PROBE>

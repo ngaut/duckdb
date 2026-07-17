@@ -15,17 +15,16 @@ from types import SimpleNamespace
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from benchmark_common import (  # noqa: E402
+    BenchmarkScript,
     REGION_SUMMARY_FIELDS,
-    TimedMaterializedAttemptGroup,
-    TimedMaterializedAttemptSpec,
     counter_region_summary,
     correctness_from_rows,
     correctness_sql,
     jit_setup_sql,
     make_output_dir,
+    read_profile_json,
     repo_root,
     row_int,
-    timed_materialized_attempt_groups,
     write_csv,
 )
 
@@ -749,66 +748,22 @@ def policy_order(repeat: int) -> tuple[str, str]:
     return ("off", "auto") if repeat % 2 else ("auto", "off")
 
 
-def workload_preparation_sql(
-    args: SimpleNamespace,
-    workload: dict,
-    expected_table: str,
-    prepare_setup: bool,
-) -> str:
-    sql = jit_setup_sql(
-        args,
-        "off",
-        trace_runtime=False,
-        trace_decisions=False,
-        event_log_size=0,
-    )
-    if prepare_setup:
-        sql += workload.get("setup_sql", "")
-    sql += f"\nCREATE OR REPLACE TABLE {expected_table} AS\n{workload['sql']};"
-    return sql
-
-
-def workload_attempt_spec(
-    args: SimpleNamespace,
-    out_dir: Path,
-    workload: dict,
+def workload_result_row(
+    workload_name: str,
     policy: str,
     repeat: int,
-    expected_table: str,
-) -> TimedMaterializedAttemptSpec:
-    workload_name = workload["name"]
-    result_table = f"__jit_generic_result_{workload_name}_{policy}_{repeat}"
-    setup_sql = jit_setup_sql(
-        args,
-        policy,
-        trace_runtime=args.trace_runtime,
-        trace_decisions=args.trace_runtime,
-        reset_events=True,
-        reset_counters=True,
-    )
-    artifact_path = out_dir / f"{workload_name}_{policy}_{repeat}.json"
-    return TimedMaterializedAttemptSpec(
-        setup_sql=setup_sql,
-        table_name=result_table,
-        query_sql=workload["sql"],
-        artifact_path=artifact_path,
-        label=f"generic workload {workload_name} {policy} repeat {repeat}",
-        validation_sql=correctness_sql(expected_table, result_table),
-        cleanup_sql=f"DROP TABLE IF EXISTS {result_table};",
-        collect_counters=True,
-    )
-
-
-def workload_result_row(workload_name: str, policy: str, repeat: int, attempt: dict) -> dict:
-    counters = attempt["counters"]
+    result_table: str,
+    query_time_us: int,
+    validation_rows: list[dict],
+    counters: list[dict],
+) -> dict:
     region_metrics = counter_region_summary(counters)
-    result_table = f"__jit_generic_result_{workload_name}_{policy}_{repeat}"
-    correctness = correctness_from_rows(attempt["validation"], result_table)
+    correctness = correctness_from_rows(validation_rows, result_table)
     return {
         "workload": workload_name,
         "policy": policy,
         "repeat": repeat,
-        "query_time_us": attempt["query_time_us"],
+        "query_time_us": query_time_us,
         "correctness_diff": correctness["correctness_diff"],
         "jit_runtime_path_counts": ";".join(
             str(row.get("jit_runtime_path_counts", "")) for row in counters if row.get("jit_runtime_path_counts")
@@ -835,41 +790,93 @@ def run_workload_matrix(
     repeats: int,
 ) -> list[dict]:
     prepared_setups: dict[str, str] = {}
-    groups = []
-    jobs = []
+    script = BenchmarkScript(db_path)
+    samples = []
     for workload in workloads:
-        expected_table = f"__jit_generic_expected_{workload['name']}"
-        setup_id = workload.get("setup_id", workload["name"])
+        workload_name = workload["name"]
+        expected_table = f"__jit_generic_expected_{workload_name}"
+        setup_id = workload.get("setup_id", workload_name)
         setup_sql = workload.get("setup_sql", "")
         if setup_id in prepared_setups and prepared_setups[setup_id] != setup_sql:
             raise ValueError(f"workloads sharing setup_id {setup_id!r} must use identical setup_sql")
         materialize_setup = setup_id not in prepared_setups
         prepared_setups[setup_id] = setup_sql
 
-        group_jobs = []
+        preparation_sql = jit_setup_sql(
+            args,
+            "off",
+            trace_runtime=False,
+            trace_decisions=False,
+            event_log_size=0,
+        )
+        if materialize_setup:
+            preparation_sql += setup_sql
+        preparation_sql += f"\nCREATE OR REPLACE TABLE {expected_table} AS\n{workload['sql']};"
+        script.prepare(preparation_sql)
+
         for repeat in range(1, repeats + 1):
             for policy in policy_order(repeat):
-                spec = workload_attempt_spec(args, out_dir, workload, policy, repeat, expected_table)
-                group_jobs.append(spec)
-                jobs.append((workload["name"], policy, repeat, spec))
-        groups.append(
-            TimedMaterializedAttemptGroup(
-                label=f"generic workload {workload['name']}",
-                preparation_sql=workload_preparation_sql(
-                    args,
-                    workload,
-                    expected_table,
-                    prepare_setup=materialize_setup,
-                ),
-                attempts=tuple(group_jobs),
+                result_table = f"__jit_generic_result_{workload_name}_{policy}_{repeat}"
+                label = f"generic workload {workload_name} {policy} repeat {repeat}"
+                validation_path = out_dir / f"{workload_name}_{policy}_{repeat}_validation.json"
+                counters_path = out_dir / f"{workload_name}_{policy}_{repeat}_counters.json"
+                script.measure(
+                    jit_setup_sql(
+                        args,
+                        policy,
+                        trace_runtime=args.trace_runtime,
+                        trace_decisions=args.trace_runtime,
+                        reset_events=True,
+                        reset_counters=True,
+                    ),
+                    result_table,
+                    workload["sql"],
+                    label,
+                    (
+                        (counters_path, "SELECT * FROM duckdb_jit_counters();"),
+                        (
+                            validation_path,
+                            correctness_sql(expected_table, result_table),
+                        ),
+                    ),
+                )
+                samples.append(
+                    {
+                        "workload": workload_name,
+                        "policy": policy,
+                        "repeat": repeat,
+                        "result_table": result_table,
+                        "validation_path": validation_path,
+                        "counters_path": counters_path,
+                        "label": label,
+                    }
+                )
+
+    query_times = script.execute(args, "generic workload matrix")
+    rows = []
+    for sample, query_time_us in zip(samples, query_times):
+        validation_path = sample["validation_path"]
+        counters_path = sample["counters_path"]
+        if not validation_path.exists():
+            raise RuntimeError(f"validation JSON was not written during {sample['label']}: {validation_path}")
+        if not counters_path.exists():
+            raise RuntimeError(f"counter JSON was not written during {sample['label']}: {counters_path}")
+        validation_rows = read_profile_json(validation_path)
+        counters = read_profile_json(counters_path)
+        validation_path.unlink()
+        counters_path.unlink()
+        rows.append(
+            workload_result_row(
+                sample["workload"],
+                sample["policy"],
+                sample["repeat"],
+                sample["result_table"],
+                query_time_us,
+                validation_rows,
+                counters,
             )
         )
-
-    attempts = timed_materialized_attempt_groups(args, db_path, groups)
-    return [
-        workload_result_row(workload_name, policy, repeat, attempt)
-        for (workload_name, policy, repeat, _), attempt in zip(jobs, attempts)
-    ]
+    return rows
 
 
 def minimum_auto_speedup(workload: dict, threads: int) -> float:

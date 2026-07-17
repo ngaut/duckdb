@@ -184,16 +184,4 @@ static bool SljitTryBindPostJoinProjectionPrimitive(const vector<SljitExecutable
 	return true;
 }
 
-static SljitPostJoinProjectionPrimitive SljitBindPostJoinProjectionPrimitive(const vector<SljitExecutableRegionOp> &ops,
-                                                                             idx_t hash_join_idx,
-                                                                             idx_t first_projection_idx,
-                                                                             idx_t final_projection_idx) {
-	SljitPostJoinProjectionPrimitive primitive;
-	if (!SljitTryBindPostJoinProjectionPrimitive(ops, hash_join_idx, first_projection_idx, final_projection_idx,
-	                                             primitive)) {
-		throw InternalException("SLJIT post-join projection primitive cannot bind requested operators");
-	}
-	return primitive;
-}
-
 } // namespace duckdb

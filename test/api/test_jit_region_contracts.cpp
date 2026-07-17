@@ -139,6 +139,18 @@ TEST_CASE("JIT recipe publication validates explicit direct terminal ownership",
 	REQUIRE_THROWS(SljitMakeFullPipelineNativeOnlyPlan(string()));
 }
 
+TEST_CASE("JIT primitive steps keep operator ownership in typed payloads", "[api][jit]") {
+	auto native_tail = SljitFullPipelinePrimitiveStep::NativeTailDelegation(7);
+	REQUIRE(native_tail.kind == SljitFullPipelinePrimitiveKind::NATIVE_TAIL_DELEGATION);
+	REQUIRE(native_tail.native_tail_start_idx == 7);
+
+	SljitHashJoinProbeSelectionPrimitive selection;
+	selection.hash_join_idx = 11;
+	auto probe = SljitFullPipelinePrimitiveStep::HashJoinProbeSelection(selection);
+	REQUIRE(probe.kind == SljitFullPipelinePrimitiveKind::HASH_JOIN_PROBE_SELECTION);
+	REQUIRE(probe.hash_join_probe_selection.hash_join_idx == 11);
+}
+
 TEST_CASE("JIT table-function sources use the generic source contract", "[api][jit]") {
 	DuckDB db;
 	Connection con(db);

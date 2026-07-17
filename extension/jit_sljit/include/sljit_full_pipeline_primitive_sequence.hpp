@@ -8,9 +8,6 @@
 
 #pragma once
 
-#include <array>
-#include <initializer_list>
-
 #include "duckdb/common/constants.hpp"
 #include "duckdb/common/vector.hpp"
 
@@ -43,12 +40,9 @@ enum class SljitFullPipelinePrimitiveKind : uint8_t {
 };
 
 static constexpr idx_t SLJIT_FULL_PIPELINE_MAX_PRIMITIVES = 16;
-static constexpr idx_t SLJIT_FULL_PIPELINE_MAX_PRIMITIVE_STEP_OPS = 3;
 
 struct SljitFullPipelinePrimitiveStep {
 	SljitFullPipelinePrimitiveKind kind = SljitFullPipelinePrimitiveKind::INVALID;
-	std::array<idx_t, SLJIT_FULL_PIPELINE_MAX_PRIMITIVE_STEP_OPS> op_indices;
-	idx_t op_count = 0;
 	SljitHashJoinProbeMaterializePrimitive hash_join_probe_materialize;
 	SljitHashJoinProbeSelectionPrimitive hash_join_probe_selection;
 	SljitGeneratedFilterPrimitive generated_filter;
@@ -60,8 +54,7 @@ struct SljitFullPipelinePrimitiveStep {
 	SljitHashJoinBuildSinkPrimitive hash_join_build_sink;
 	SljitDelimJoinSinkPrimitive delim_join_sink;
 	SljitAppendSinkPrimitive append_sink;
-
-	idx_t Op(idx_t index) const;
+	idx_t native_tail_start_idx = DConstants::INVALID_INDEX;
 
 	static SljitFullPipelinePrimitiveStep SourceFetch();
 	static SljitFullPipelinePrimitiveStep GeneratedFilter(const SljitGeneratedFilterPrimitive &primitive);
@@ -79,11 +72,10 @@ struct SljitFullPipelinePrimitiveStep {
 	static SljitFullPipelinePrimitiveStep HashJoinBuildSink(const SljitHashJoinBuildSinkPrimitive &primitive);
 	static SljitFullPipelinePrimitiveStep DelimJoinSink(const SljitDelimJoinSinkPrimitive &primitive);
 	static SljitFullPipelinePrimitiveStep AppendSink(const SljitAppendSinkPrimitive &primitive);
-	static SljitFullPipelinePrimitiveStep NativeTailDelegation(idx_t op_idx);
+	static SljitFullPipelinePrimitiveStep NativeTailDelegation(idx_t tail_start_idx);
 
 private:
-	static SljitFullPipelinePrimitiveStep Make(SljitFullPipelinePrimitiveKind kind,
-	                                           std::initializer_list<idx_t> op_indices);
+	static SljitFullPipelinePrimitiveStep Make(SljitFullPipelinePrimitiveKind kind);
 };
 
 class SljitFullPipelinePrimitiveSequence {

@@ -11,8 +11,6 @@
 #include "sljit_region_plan.hpp"
 #include "sljit_platform.hpp"
 
-#include "duckdb/execution/execution_region_graph.hpp"
-
 namespace duckdb {
 
 class SljitExecutionRegionBackend : public ExecutionRegionBackend {

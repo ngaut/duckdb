@@ -71,7 +71,9 @@ private:
 			if (Flush(step_idx, execute_output_batch)) {
 				return true;
 			}
-			RecordSljitRegionRuntimePath(runtime, ops[step.Op(0)].kind, "direct_materialized_handoff", output.size());
+			const auto hash_join_idx = step.hash_join_probe_materialize.hash_join_idx;
+			RecordSljitRegionRuntimePath(runtime, ops[hash_join_idx].kind, "direct_materialized_handoff",
+			                             output.size());
 			return execute_output_batch(output);
 		}
 		auto &hash_join_materialize_batch = batches[step_idx];
@@ -80,9 +82,9 @@ private:
 		auto flush_batch = [&]() -> bool {
 			return Flush(step_idx, execute_output_batch);
 		};
-		const auto op_idx = step.Op(0);
-		return SljitAppendChunkToInitializedBatch(runtime, batch, output, op_idx,
-		                                          optional_ptr<const SljitExecutableRegionOp>(&ops[op_idx]),
+		const auto hash_join_idx = step.hash_join_probe_materialize.hash_join_idx;
+		return SljitAppendChunkToInitializedBatch(runtime, batch, output, hash_join_idx,
+		                                          optional_ptr<const SljitExecutableRegionOp>(&ops[hash_join_idx]),
 		                                          "hash_join_output_buffer_append", flush_batch, execute_output_batch);
 	}
 
