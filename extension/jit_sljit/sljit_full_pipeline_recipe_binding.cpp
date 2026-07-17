@@ -11,6 +11,7 @@
 #include "duckdb/common/constants.hpp"
 
 #include "sljit_full_pipeline_primitive_contract.hpp"
+#include "sljit_pre_join_projection_descriptor.hpp"
 #include "sljit_region_plan_internal.hpp"
 
 #include <utility>
@@ -39,22 +40,6 @@ SljitFullPipelineRecipePlan SljitFullPipelineRecipeBinding::MakeNativeOnlyPlan()
 
 SljitFullPipelineRecipePlan
 SljitFullPipelineRecipeBinding::MakePrimitiveRecipePlan(SljitFullPipelineRecipe recipe) const {
-	if (!SljitFullPipelinePrimitiveSequenceIsExecutable(ops, recipe.primitive_sequence)) {
-		throw InternalException("SLJIT recipe builder accepted an invalid full-pipeline primitive sequence");
-	}
-	recipe.runtime_kind = SljitFullPipelineIsSelectedHashJoinSinkSequence(recipe.primitive_sequence)
-	                          ? SljitFullPipelineRuntimeKind::SELECTED_HASH_JOIN_SINK
-	                          : SljitFullPipelineRuntimeKind::PRIMITIVE_SEQUENCE;
-	recipe.preserves_partitioned_source_chunks =
-	    SljitFullPipelineSourceFetchNeedsPartitionPreservingChunks(recipe.primitive_sequence);
-	recipe.has_scan_filter_executable_body =
-	    SljitFullPipelineHasDirectSourceHashBuild(recipe.primitive_sequence) ||
-	    SljitFullPipelineHasExactFilterProbeHashBuild(ops, recipe.primitive_sequence);
-	for (idx_t op_idx = 0; op_idx < ops.size(); op_idx++) {
-		if (SljitFullPipelineFilterHasFusedOwner(ops, recipe.primitive_sequence, op_idx)) {
-			recipe.fused_filter_owners.push_back(op_idx);
-		}
-	}
 	return SljitMakeFullPipelinePrimitiveRecipePlan(std::move(recipe));
 }
 
@@ -225,20 +210,37 @@ bool SljitFullPipelineRecipeBinding::TryMakeSourceHashJoinBuildSinkRecipe(
 	return true;
 }
 
-SljitFullPipelineRecipe SljitFullPipelineRecipeBinding::MakeHashJoinDelimJoinSinkRecipe(idx_t first_hash_join_idx,
-                                                                                        idx_t final_hash_join_idx,
-                                                                                        idx_t sink_idx) const {
-	if (first_hash_join_idx > final_hash_join_idx) {
-		throw InternalException("SLJIT hash-join delimiter recipe has an invalid hash-join range");
+bool SljitFullPipelineRecipeBinding::TryMakeHashJoinDelimJoinSinkRecipe(const SljitHashJoinDelimJoinSinkFacts &facts,
+                                                                        SljitFullPipelineRecipe &recipe) const {
+	if (facts.first_hash_join_idx > facts.final_hash_join_idx ||
+	    facts.sink_idx + 3 > SLJIT_FULL_PIPELINE_MAX_PRIMITIVES) {
+		return false;
 	}
 	auto sequence = MakeSourceSequence();
-	for (idx_t hash_join_idx = first_hash_join_idx; hash_join_idx < final_hash_join_idx; hash_join_idx++) {
-		sequence.Add(MakeHashJoinProbeMaterializeStep(hash_join_idx));
+	for (idx_t hash_join_idx = facts.first_hash_join_idx; hash_join_idx < facts.final_hash_join_idx; hash_join_idx++) {
+		SljitHashJoinProbeMaterializePrimitive probe;
+		const bool unchecked = hash_join_idx == 0 && SljitHashJoinSourceKey0RangeFitsInt32(
+		                                                 ops, hash_join_idx, source_min_values, source_max_values);
+		if (!SljitTryBindHashJoinProbeMaterializePrimitive(ops, hash_join_idx, probe, unchecked)) {
+			return false;
+		}
+		sequence.Add(SljitFullPipelinePrimitiveStep::HashJoinProbeMaterialize(probe));
 	}
-	sequence.Add(MakeHashJoinProbeSelectionStep(final_hash_join_idx));
-	auto delim_sink = SljitBindSelectedHashJoinDelimJoinSinkPrimitive(ops, final_hash_join_idx, sink_idx);
+	SljitHashJoinProbeSelectionPrimitive selection;
+	const bool unchecked =
+	    facts.final_hash_join_idx == 0 &&
+	    SljitHashJoinSourceKey0RangeFitsInt32(ops, facts.final_hash_join_idx, source_min_values, source_max_values);
+	if (!SljitTryBindHashJoinProbeSelectionPrimitive(ops, facts.final_hash_join_idx, selection, unchecked)) {
+		return false;
+	}
+	SljitDelimJoinSinkPrimitive delim_sink;
+	if (!SljitTryBindSelectedHashJoinDelimJoinSinkPrimitive(ops, selection, facts.sink_idx, delim_sink)) {
+		return false;
+	}
+	sequence.Add(SljitFullPipelinePrimitiveStep::HashJoinProbeSelection(selection));
 	sequence.Add(SljitFullPipelinePrimitiveStep::DelimJoinSink(delim_sink));
-	return MakePrimitiveSequence(std::move(sequence));
+	recipe = MakePrimitiveSequence(std::move(sequence));
+	return true;
 }
 
 bool SljitFullPipelineRecipeBinding::TryMakeHashJoinAppendSinkRecipe(const SljitHashJoinAppendSinkFacts &facts,

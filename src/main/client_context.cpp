@@ -9,8 +9,8 @@
 #include "duckdb/common/progress_bar/progress_bar.hpp"
 #include "duckdb/common/serializer/buffered_file_writer.hpp"
 #include "duckdb/common/types/column/column_data_collection.hpp"
-#include "duckdb/common/unordered_map.hpp"
 #include "duckdb/execution/column_binding_resolver.hpp"
+#include "duckdb/execution/execution_region_telemetry.hpp"
 #include "duckdb/execution/operator/helper/physical_result_collector.hpp"
 #include "duckdb/execution/physical_plan_generator.hpp"
 #include "duckdb/main/appender.hpp"
@@ -77,17 +77,6 @@ static bool OsxRosettaIsActive() {
 #endif
 
 namespace duckdb {
-
-static thread_local unordered_map<const ClientContext *, idx_t> compiled_execution_scoped_suppression_depth;
-
-static idx_t GetCompiledExecutionScopedSuppressionDepth(const ClientContext &context) {
-	auto entry = compiled_execution_scoped_suppression_depth.find(&context);
-	return entry == compiled_execution_scoped_suppression_depth.end() ? 0 : entry->second;
-}
-
-static void ClearCompiledExecutionScopedSuppressionDepth(const ClientContext &context) {
-	compiled_execution_scoped_suppression_depth.erase(&context);
-}
 
 struct ActiveQueryContext {
 public:
@@ -304,7 +293,6 @@ void ClientContext::BeginQueryInternal(ClientContextLock &lock, const string &qu
 	// check if we are on AutoCommit. In this case we should start a transaction
 	D_ASSERT(!active_query);
 	compiled_execution_suppressed_for_query = false;
-	ClearCompiledExecutionScopedSuppressionDepth(*this);
 	auto &db_inst = DatabaseInstance::GetDatabase(*this);
 	if (ValidChecker::IsInvalidated(db_inst)) {
 		throw ErrorManager::InvalidatedDatabase(*this, ValidChecker::InvalidatedMessage(db_inst));
@@ -354,7 +342,6 @@ ErrorData ClientContext::EndQueryInternal(ClientContextLock &lock, bool success,
 	D_ASSERT(active_query.get());
 	active_query.reset();
 	compiled_execution_suppressed_for_query = false;
-	ClearCompiledExecutionScopedSuppressionDepth(*this);
 	query_deadline.SetInvalid();
 	query_progress.Initialize();
 	ErrorData error;
@@ -1336,24 +1323,8 @@ void ClientContext::SuppressCompiledExecutionForCurrentQuery() {
 	compiled_execution_suppressed_for_query = true;
 }
 
-void ClientContext::PushCompiledExecutionSuppression() {
-	compiled_execution_scoped_suppression_depth[this]++;
-}
-
-void ClientContext::PopCompiledExecutionSuppression() {
-	auto entry = compiled_execution_scoped_suppression_depth.find(this);
-	D_ASSERT(entry != compiled_execution_scoped_suppression_depth.end() && entry->second > 0);
-	if (entry == compiled_execution_scoped_suppression_depth.end() || entry->second == 0) {
-		return;
-	}
-	entry->second--;
-	if (entry->second == 0) {
-		compiled_execution_scoped_suppression_depth.erase(entry);
-	}
-}
-
 bool ClientContext::IsCompiledExecutionSuppressed() const {
-	return compiled_execution_suppressed_for_query || GetCompiledExecutionScopedSuppressionDepth(*this) > 0;
+	return compiled_execution_suppressed_for_query || ExecutionRegionSuppressionGuard::IsActive(*this);
 }
 
 void ClientContext::RegisterFunction(CreateFunctionInfo &info) {

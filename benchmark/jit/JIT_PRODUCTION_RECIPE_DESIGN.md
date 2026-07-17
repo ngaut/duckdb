@@ -1,6 +1,6 @@
 # JIT Production Recipe Architecture
 
-Last updated: 2026-07-16
+Last updated: 2026-07-17
 
 This document is the stable architecture contract for DuckDB execution-region
 JIT. It describes layer ownership, immutable recipe binding, runtime data
@@ -80,10 +80,10 @@ the single admission boundary:
 
 1. analyze complete operator facts;
 2. bind semantic descriptors;
-3. prove every primitive's contract;
+3. bind each primitive descriptor once;
 4. construct the complete sequence in local state;
-5. validate operator identities and sequence grammar;
-6. publish the recipe only after all checks pass.
+5. make one finalization pass over sequence ownership and runtime metadata;
+6. publish the fully initialized recipe only after all checks pass.
 
 Recipe-family binders expose failure-atomic `TryMake...` operations. Shape
 analysis never calls a separate `CanMake...` path and then reconstructs the
@@ -91,6 +91,12 @@ same descriptor during `Make...`. In particular, projected grouped aggregate
 strategy selection publishes the descriptor it selected, and the full-pipeline
 binder owns one projection-aggregate family binder instead of constructing a
 temporary binder for each question.
+
+Primitive binding is the semantic authority. Recipe finalization validates
+sequence grammar and descriptor ownership; it does not call the capability
+predicates again. Runtime kind, partition preservation, scan-filter body
+ownership, fused-filter ownership, and the direct-terminal contract are
+finalized together before the recipe plan is published.
 
 Prepared expression capability does not change when selector machine code is
 emitted. The executable builder therefore binds the plan exactly once, emits
@@ -159,6 +165,13 @@ materializing a matched row-pointer batch. It currently supports `COUNT(*)`,
 `COUNT(rhs)`, and BIGINT `SUM(rhs)` when the regular probe's all-valid,
 single-key, no-chain contract is proven. Unsupported shapes use the existing
 materialized route.
+
+Physical dispatch is retained in pipeline-local state. The first non-empty
+attempt binds a stable unsupported route directly to `MATERIALIZED`, avoiding
+the same probe on every chunk. A successful direct route starts as `DIRECT`;
+if a later vector shape legitimately needs materialization, it becomes
+`HYBRID` and keeps direct execution for eligible chunks. Empty input does not
+bind a route. These transitions are monotonic and recorded once.
 
 ## Runtime physical ABI
 

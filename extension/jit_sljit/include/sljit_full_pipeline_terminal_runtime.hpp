@@ -24,6 +24,8 @@ namespace duckdb {
 struct SljitFullPipelineTerminalRuntimeState {
 	bool prepared = false;
 	SljitFullPipelinePrimitiveKind kind = SljitFullPipelinePrimitiveKind::INVALID;
+	SljitHashJoinAggregateConsumerDispatch direct_aggregate_consumer_dispatch =
+	    SljitHashJoinAggregateConsumerDispatch::UNBOUND;
 	SljitUngroupedAggregateUpdateRuntimeState ungrouped_aggregate_update;
 	SljitGroupedAggregateUpdateRuntimeState grouped_aggregate_update;
 	SljitPostJoinProjectionAggregateRuntimeState post_join_projection_aggregate;

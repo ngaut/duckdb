@@ -148,7 +148,7 @@ class TestSpeedupFloors(unittest.TestCase):
         )
         self.assertEqual(
             (maximum_auto_median_us(workload, 1), maximum_auto_median_us(workload, 4)),
-            (10500, 5750),
+            (10000, 5750),
         )
         self.assertEqual(
             workload["required_runtime_paths"],

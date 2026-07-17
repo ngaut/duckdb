@@ -20,7 +20,6 @@ enum class SljitHashJoinProbeInputFilterStatus : uint8_t { NOT_APPLICABLE, EMPTY
 struct SljitHashJoinProbeInputFilterResult {
 	SljitHashJoinProbeInputFilterStatus status = SljitHashJoinProbeInputFilterStatus::NOT_APPLICABLE;
 	DataChunk *input = nullptr;
-	const char *blocker = nullptr;
 };
 
 // A post-join filter can run before an inner probe when every referenced join
@@ -109,22 +108,19 @@ static SljitHashJoinProbeInputFilterResult SljitTryExecuteHashJoinProbeInputFilt
 		return result;
 	}
 	if (filter_idx >= ops.size() || hash_join_idx >= ops.size()) {
-		result.blocker = "hash_join_probe.direct_aggregate_consumer_miss.filter_index";
-		return result;
+		throw InternalException("SLJIT direct aggregate consumer filter binding is out of range");
 	}
 	if (!cache.Matches(hash_join_idx, filter_idx, binding, input_types)) {
 		cache.Reset(hash_join_idx, filter_idx, binding, input_types);
 		auto mapped_filter = make_uniq<SljitExecutableRegionOp>();
 		if (!SljitTryBuildHashJoinProbeInputMappedFilter(binding, input_types, ops[filter_idx], *mapped_filter,
 		                                                 cache.blocker)) {
-			result.blocker = "hash_join_probe.direct_aggregate_consumer_miss.filter_mapping";
 			return result;
 		}
 		cache.mapped_filter = std::move(mapped_filter);
 		cache.ready = true;
 	}
 	if (!cache.ready || !cache.mapped_filter) {
-		result.blocker = "hash_join_probe.direct_aggregate_consumer_miss.filter_mapping";
 		return result;
 	}
 

@@ -228,9 +228,15 @@ class ExecutionRegionSuppressionGuard {
 public:
 	explicit ExecutionRegionSuppressionGuard(ClientContext &context);
 	~ExecutionRegionSuppressionGuard();
+	ExecutionRegionSuppressionGuard(const ExecutionRegionSuppressionGuard &) = delete;
+	ExecutionRegionSuppressionGuard &operator=(const ExecutionRegionSuppressionGuard &) = delete;
+
+	static bool IsActive(const ClientContext &context);
 
 private:
 	ClientContext &context;
+	ExecutionRegionSuppressionGuard *previous;
+	static thread_local ExecutionRegionSuppressionGuard *active;
 };
 
 class ExecutionRegionEventLog {

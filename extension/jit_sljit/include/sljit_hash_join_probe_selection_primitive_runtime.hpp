@@ -32,6 +32,7 @@ public:
 	bool Execute(const SljitFullPipelinePrimitiveStep &step, const SljitRuntimeBatchView &input,
 	             EXECUTE_HASH_JOIN_PROBE &execute_hash_join_probe, EXECUTE_NEXT_STEP &&execute_next_step,
 	             optional_ptr<const SljitHashJoinDirectAggregateConsumerContract> direct_consumer_contract,
+	             SljitHashJoinAggregateConsumerDispatch &direct_consumer_dispatch,
 	             TRY_EXECUTE_DIRECT_CONSUMER &&try_execute_direct_consumer) {
 		string deferred_reason;
 		DataChunk *join_input_ptr = nullptr;
@@ -53,19 +54,28 @@ public:
 		auto &primitive = step.hash_join_probe_selection;
 		const auto hash_join_idx = primitive.hash_join_idx;
 		auto &hash_join_op = ops[hash_join_idx];
-		if (direct_consumer_contract) {
-			runtime.RecordJitRuntimePath("hash_join_probe.direct_aggregate_consumer_candidate");
-			auto direct_result = try_execute_direct_consumer(*direct_consumer_contract, primitive, join_input,
-			                                                 execute_hash_join_probe);
-			if (direct_result.blocker && direct_consumer_blocker != direct_result.blocker) {
-				direct_consumer_blocker = direct_result.blocker;
-				runtime.RecordJitRuntimePath(direct_result.blocker);
-			}
+		if (direct_consumer_contract &&
+		    direct_consumer_dispatch != SljitHashJoinAggregateConsumerDispatch::MATERIALIZED) {
+			auto direct_result =
+			    try_execute_direct_consumer(*direct_consumer_contract, primitive, join_input, execute_hash_join_probe);
 			if (direct_result.status == SljitHashJoinAggregateConsumerStatus::DEFERRED) {
 				return SljitDeferFullPipelineResult(runtime, direct_result.deferred_reason, result);
 			}
-			if (direct_result.status == SljitHashJoinAggregateConsumerStatus::EXECUTED) {
+			if (direct_result.status == SljitHashJoinAggregateConsumerStatus::EMPTY) {
 				return false;
+			}
+			if (direct_result.status == SljitHashJoinAggregateConsumerStatus::EXECUTED) {
+				if (direct_consumer_dispatch == SljitHashJoinAggregateConsumerDispatch::UNBOUND) {
+					direct_consumer_dispatch = SljitHashJoinAggregateConsumerDispatch::DIRECT;
+				}
+				return false;
+			}
+			if (direct_consumer_dispatch == SljitHashJoinAggregateConsumerDispatch::UNBOUND) {
+				direct_consumer_dispatch = SljitHashJoinAggregateConsumerDispatch::MATERIALIZED;
+				runtime.RecordJitRuntimePath("hash_join_probe.direct_aggregate_consumer.materialized_dispatch");
+			} else if (direct_consumer_dispatch == SljitHashJoinAggregateConsumerDispatch::DIRECT) {
+				direct_consumer_dispatch = SljitHashJoinAggregateConsumerDispatch::HYBRID;
+				runtime.RecordJitRuntimePath("hash_join_probe.direct_aggregate_consumer.hybrid_dispatch");
 			}
 		}
 		auto &join_output = scratch.TemporaryChunk(hash_join_idx);
@@ -93,7 +103,6 @@ private:
 	vector<SljitExecutableRegionOp> &ops;
 	SljitRegionExecutionScratch &scratch;
 	SljitSelectedHashJoinInputRuntime &selected_hash_join_inputs;
-	const char *direct_consumer_blocker = nullptr;
 };
 
 } // namespace duckdb

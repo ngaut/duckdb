@@ -103,15 +103,28 @@ static bool SljitCanBindHashJoinProbeMaterializePrimitive(const vector<SljitExec
 	       ops[hash_join_idx].hash_join_probe.plan.output_mode != ExecutionHashJoinProbeOutputMode::MARK_BUILD_ONLY;
 }
 
+static bool SljitTryBindHashJoinProbeMaterializePrimitive(const vector<SljitExecutableRegionOp> &ops,
+                                                          idx_t hash_join_idx,
+                                                          SljitHashJoinProbeMaterializePrimitive &primitive,
+                                                          bool source_key0_int64_to_int32_unchecked = false) {
+	if (!SljitCanBindHashJoinProbeMaterializePrimitive(ops, hash_join_idx)) {
+		return false;
+	}
+	SljitHashJoinProbeMaterializePrimitive candidate;
+	candidate.hash_join_idx = hash_join_idx;
+	candidate.source_key0_int64_to_int32_unchecked = source_key0_int64_to_int32_unchecked;
+	primitive = candidate;
+	return true;
+}
+
 static SljitHashJoinProbeMaterializePrimitive
 SljitBindHashJoinProbeMaterializePrimitive(const vector<SljitExecutableRegionOp> &ops, idx_t hash_join_idx,
                                            bool source_key0_int64_to_int32_unchecked = false) {
-	if (!SljitCanBindHashJoinProbeMaterializePrimitive(ops, hash_join_idx)) {
+	SljitHashJoinProbeMaterializePrimitive primitive;
+	if (!SljitTryBindHashJoinProbeMaterializePrimitive(ops, hash_join_idx, primitive,
+	                                                   source_key0_int64_to_int32_unchecked)) {
 		throw InternalException("SLJIT hash join materialize primitive cannot bind requested operator");
 	}
-	SljitHashJoinProbeMaterializePrimitive primitive;
-	primitive.hash_join_idx = hash_join_idx;
-	primitive.source_key0_int64_to_int32_unchecked = source_key0_int64_to_int32_unchecked;
 	return primitive;
 }
 
@@ -122,6 +135,19 @@ static bool SljitCanBindHashJoinProbeSelectionPrimitive(const vector<SljitExecut
 	            ExecutionHashJoinProbeOutputMode::MATCHED_PROBE_AND_BUILD ||
 	        ops[hash_join_idx].hash_join_probe.plan.output_mode ==
 	            ExecutionHashJoinProbeOutputMode::MATCHED_PROBE_ONLY);
+}
+
+static bool SljitTryBindHashJoinProbeSelectionPrimitive(const vector<SljitExecutableRegionOp> &ops, idx_t hash_join_idx,
+                                                        SljitHashJoinProbeSelectionPrimitive &primitive,
+                                                        bool source_key0_int64_to_int32_unchecked = false) {
+	if (!SljitCanBindHashJoinProbeSelectionPrimitive(ops, hash_join_idx)) {
+		return false;
+	}
+	SljitHashJoinProbeSelectionPrimitive candidate;
+	candidate.hash_join_idx = hash_join_idx;
+	candidate.source_key0_int64_to_int32_unchecked = source_key0_int64_to_int32_unchecked;
+	primitive = std::move(candidate);
+	return true;
 }
 
 static bool SljitPreparedHashJoinRemapKeySourceSupported(const SljitNativeHashJoinProbeKeyPlan &key, idx_t key_idx,

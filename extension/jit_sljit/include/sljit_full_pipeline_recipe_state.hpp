@@ -140,21 +140,6 @@ private:
 	string native_only_runtime_path;
 };
 
-static SljitFullPipelineRecipe
-SljitMakeFullPipelinePrimitiveRecipe(bool uses_extended_source_fetch_budget,
-                                     SljitFullPipelinePrimitiveSequence primitive_sequence,
-                                     SljitHashJoinDirectAggregateConsumerContract direct_aggregate_consumer = {}) {
-	if (primitive_sequence.Count() == 0) {
-		throw InternalException("SLJIT full-pipeline primitive recipe cannot be empty");
-	}
-	SljitValidateHashJoinDirectAggregateConsumerContract(primitive_sequence, direct_aggregate_consumer);
-	SljitFullPipelineRecipe recipe;
-	recipe.direct_aggregate_consumer = direct_aggregate_consumer;
-	recipe.uses_extended_source_fetch_budget = uses_extended_source_fetch_budget;
-	recipe.primitive_sequence = std::move(primitive_sequence);
-	return recipe;
-}
-
 inline SljitFullPipelineRecipePlan SljitMakeFullPipelinePrimitiveRecipePlan(SljitFullPipelineRecipe recipe) {
 	SljitFullPipelineRecipePlan plan;
 	plan.kind = SljitFullPipelineRecipePlanKind::PRIMITIVE_RECIPE;

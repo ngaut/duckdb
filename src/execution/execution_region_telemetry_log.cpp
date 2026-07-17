@@ -5,12 +5,25 @@
 
 namespace duckdb {
 
-ExecutionRegionSuppressionGuard::ExecutionRegionSuppressionGuard(ClientContext &context_p) : context(context_p) {
-	context.PushCompiledExecutionSuppression();
+thread_local ExecutionRegionSuppressionGuard *ExecutionRegionSuppressionGuard::active = nullptr;
+
+ExecutionRegionSuppressionGuard::ExecutionRegionSuppressionGuard(ClientContext &context_p)
+    : context(context_p), previous(active) {
+	active = this;
 }
 
 ExecutionRegionSuppressionGuard::~ExecutionRegionSuppressionGuard() {
-	context.PopCompiledExecutionSuppression();
+	D_ASSERT(active == this);
+	active = previous;
+}
+
+bool ExecutionRegionSuppressionGuard::IsActive(const ClientContext &context) {
+	for (auto guard = active; guard; guard = guard->previous) {
+		if (&guard->context == &context) {
+			return true;
+		}
+	}
+	return false;
 }
 
 static hash_t ExecutionRegionTelemetryHashString(const string &value) {

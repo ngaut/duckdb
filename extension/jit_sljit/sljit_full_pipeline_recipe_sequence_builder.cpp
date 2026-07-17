@@ -26,8 +26,8 @@ SljitFullPipelineRecipeSequenceBuilder::SljitFullPipelineRecipeSequenceBuilder(
 SljitFullPipelineRecipe SljitFullPipelineRecipeSequenceBuilder::MakePrimitiveSequence(
     SljitFullPipelinePrimitiveSequence sequence,
     SljitHashJoinDirectAggregateConsumerContract direct_aggregate_consumer) const {
-	return SljitMakeFullPipelinePrimitiveRecipe(uses_extended_source_fetch_budget, std::move(sequence),
-	                                            direct_aggregate_consumer);
+	return SljitFinalizeFullPipelinePrimitiveRecipe(ops, uses_extended_source_fetch_budget, std::move(sequence),
+	                                                direct_aggregate_consumer);
 }
 
 SljitFullPipelinePrimitiveSequence SljitFullPipelineRecipeSequenceBuilder::MakeSourceSequence() const {

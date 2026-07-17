@@ -41,7 +41,8 @@ public:
 	      generated_filter(runtime, ops, scratch), hash_join_materialize(runtime, result, ops, scratch),
 	      hash_join_selection(runtime, result, ops, scratch, selected_hash_join_inputs),
 	      mark_probe_filter_boundary(runtime, result, ops, scratch, selected_hash_join_inputs),
-	      projection_chain(runtime, ops, scratch) {
+	      projection_chain(runtime, ops, scratch),
+	      direct_aggregate_consumer_dispatch(terminal_state_p.direct_aggregate_consumer_dispatch) {
 	}
 
 	bool Execute() {
@@ -100,7 +101,8 @@ private:
 				return SljitHashJoinAggregateConsumerResult {};
 			};
 			return hash_join_selection.Execute(hash_join_step, input, execute_hash_join_probe, execute_terminal,
-			                                   nullptr, try_execute_direct_consumer);
+			                                   nullptr, direct_aggregate_consumer_dispatch,
+			                                   try_execute_direct_consumer);
 		};
 		auto execute_source_chunk = [&](DataChunk &source_chunk, bool have_more_output) {
 			return source_fetch.Execute(source_chunk, have_more_output, execute_source_batch);
@@ -219,7 +221,8 @@ private:
 			                                                        join_input, probe_executor);
 		};
 		return hash_join_selection.Execute(step, input, execute_hash_join_probe, execute_next_step,
-		                                   direct_consumer_contract, try_execute_direct_consumer);
+		                                   direct_consumer_contract, direct_aggregate_consumer_dispatch,
+		                                   try_execute_direct_consumer);
 	}
 
 	bool ExecuteMarkProbeFilterBoundary(idx_t step_idx, const SljitFullPipelinePrimitiveStep &step,
@@ -306,6 +309,7 @@ private:
 	SljitHashJoinProbeSelectionPrimitiveRuntime hash_join_selection;
 	SljitMarkProbeFilterBoundaryRuntime mark_probe_filter_boundary;
 	SljitProjectionChainPrimitiveRuntime projection_chain;
+	SljitHashJoinAggregateConsumerDispatch &direct_aggregate_consumer_dispatch;
 	idx_t processed_batches = 0;
 };
 

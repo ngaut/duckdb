@@ -57,7 +57,6 @@ struct SljitPostJoinProjectionAggregateRuntimeState {
 			throw InternalException("SLJIT bound direct aggregate terminal has inconsistent aggregate ownership");
 		}
 		if (!strategy_ptr || strategy_ptr->disabled) {
-			result.blocker = "hash_join_probe.direct_aggregate_consumer_miss.aggregate_strategy";
 			return result;
 		}
 		strategy_ptr->last_failure.clear();

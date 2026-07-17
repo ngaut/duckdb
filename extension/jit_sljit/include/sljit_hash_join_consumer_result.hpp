@@ -12,12 +12,13 @@
 
 namespace duckdb {
 
-enum class SljitHashJoinAggregateConsumerStatus : uint8_t { NOT_APPLICABLE, EXECUTED, DEFERRED };
+enum class SljitHashJoinAggregateConsumerStatus : uint8_t { MATERIALIZED, EXECUTED, EMPTY, DEFERRED };
+
+enum class SljitHashJoinAggregateConsumerDispatch : uint8_t { UNBOUND, DIRECT, HYBRID, MATERIALIZED };
 
 struct SljitHashJoinAggregateConsumerResult {
-	SljitHashJoinAggregateConsumerStatus status = SljitHashJoinAggregateConsumerStatus::NOT_APPLICABLE;
+	SljitHashJoinAggregateConsumerStatus status = SljitHashJoinAggregateConsumerStatus::MATERIALIZED;
 	idx_t matched_count = 0;
-	const char *blocker = nullptr;
 	string deferred_reason;
 };
 

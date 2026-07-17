@@ -440,9 +440,9 @@ bool SljitProjectionAggregateRecipeBinding::TryMakeProjectionNativeTailRecipe(
 bool SljitProjectionAggregateRecipeBinding::TryMakeProjectionNativeTailRecipe(
     SljitFullPipelinePrimitiveSequence sequence, idx_t first_projection_idx, idx_t final_projection_idx,
     idx_t tail_start_idx, SljitFullPipelineRecipe &recipe) const {
-	if (SljitCanBindProjectedDelimJoinSinkPrimitive(ops, first_projection_idx, final_projection_idx, tail_start_idx)) {
-		auto delim_sink =
-		    SljitBindProjectedDelimJoinSinkPrimitive(ops, first_projection_idx, final_projection_idx, tail_start_idx);
+	SljitDelimJoinSinkPrimitive delim_sink;
+	if (SljitTryBindProjectedDelimJoinSinkPrimitive(ops, first_projection_idx, final_projection_idx, tail_start_idx,
+	                                                delim_sink)) {
 		sequence.Add(SljitFullPipelinePrimitiveStep::DelimJoinSink(delim_sink));
 		recipe = MakePrimitiveSequence(std::move(sequence));
 		return true;

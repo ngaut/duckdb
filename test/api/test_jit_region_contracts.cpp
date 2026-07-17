@@ -1,7 +1,32 @@
 #include "test_jit_helpers.hpp"
+#include "sljit_full_pipeline_primitive_contract.hpp"
 #include "sljit_full_pipeline_recipe_binding.hpp"
+#include "duckdb/execution/execution_region_telemetry.hpp"
 
 using namespace duckdb;
+
+TEST_CASE("JIT execution suppression follows nested context scopes", "[api][jit]") {
+	DuckDB db;
+	Connection first(db);
+	Connection second(db);
+
+	REQUIRE_FALSE(first.context->IsCompiledExecutionSuppressed());
+	REQUIRE_FALSE(second.context->IsCompiledExecutionSuppressed());
+	{
+		ExecutionRegionSuppressionGuard first_guard(*first.context);
+		REQUIRE(first.context->IsCompiledExecutionSuppressed());
+		REQUIRE_FALSE(second.context->IsCompiledExecutionSuppressed());
+		{
+			ExecutionRegionSuppressionGuard second_guard(*second.context);
+			REQUIRE(first.context->IsCompiledExecutionSuppressed());
+			REQUIRE(second.context->IsCompiledExecutionSuppressed());
+		}
+		REQUIRE(first.context->IsCompiledExecutionSuppressed());
+		REQUIRE_FALSE(second.context->IsCompiledExecutionSuppressed());
+	}
+	REQUIRE_FALSE(first.context->IsCompiledExecutionSuppressed());
+	REQUIRE_FALSE(second.context->IsCompiledExecutionSuppressed());
+}
 
 TEST_CASE("JIT recipe binders preserve the output recipe on admission failure", "[api][jit]") {
 	vector<SljitExecutableRegionOp> ops;
@@ -38,6 +63,10 @@ TEST_CASE("JIT recipe binders preserve the output recipe on admission failure", 
 
 	SljitSourceHashJoinBuildSinkFacts source_hash_join_build;
 	REQUIRE_FALSE(binding.TryMakeSourceHashJoinBuildSinkRecipe(source_hash_join_build, recipe));
+	require_unchanged();
+
+	SljitHashJoinDelimJoinSinkFacts hash_join_delim;
+	REQUIRE_FALSE(binding.TryMakeHashJoinDelimJoinSinkRecipe(hash_join_delim, recipe));
 	require_unchanged();
 
 	SljitHashJoinAppendSinkFacts hash_join_append;
@@ -80,6 +109,7 @@ TEST_CASE("JIT recipe binders preserve the output recipe on admission failure", 
 }
 
 TEST_CASE("JIT recipe publication validates explicit direct terminal ownership", "[api][jit]") {
+	vector<SljitExecutableRegionOp> ops;
 	SljitFullPipelinePrimitiveSequence sequence;
 	sequence.Add(SljitFullPipelinePrimitiveStep::SourceFetch());
 	SljitHashJoinProbeSelectionPrimitive probe;
@@ -91,17 +121,17 @@ TEST_CASE("JIT recipe publication validates explicit direct terminal ownership",
 	sequence.Add(SljitFullPipelinePrimitiveStep::PostJoinProjectionAggregateUpdate(terminal));
 
 	auto contract = SljitMakeHashJoinDirectAggregateConsumerContract(1, 2, 3, 5);
-	auto recipe = SljitMakeFullPipelinePrimitiveRecipe(false, sequence, contract);
+	auto recipe = SljitFinalizeFullPipelinePrimitiveRecipe(ops, false, sequence, contract);
 	auto recipe_plan = SljitMakeFullPipelinePrimitiveRecipePlan(std::move(recipe));
 	REQUIRE(recipe_plan.Kind() == SljitFullPipelineRecipePlanKind::PRIMITIVE_RECIPE);
 	REQUIRE(recipe_plan.HasRecipe());
 
 	contract.aggregate_idx = 7;
-	REQUIRE_THROWS(SljitMakeFullPipelinePrimitiveRecipe(false, sequence, contract));
+	REQUIRE_THROWS(SljitFinalizeFullPipelinePrimitiveRecipe(ops, false, sequence, contract));
 
 	SljitHashJoinDirectAggregateConsumerContract partial_contract;
 	partial_contract.probe_step_idx = 1;
-	REQUIRE_THROWS(SljitMakeFullPipelinePrimitiveRecipe(false, sequence, partial_contract));
+	REQUIRE_THROWS(SljitFinalizeFullPipelinePrimitiveRecipe(ops, false, sequence, partial_contract));
 
 	auto native_only_plan = SljitMakeFullPipelineNativeOnlyPlan("full_pipeline.recipe.native_only.test");
 	REQUIRE(native_only_plan.Kind() == SljitFullPipelineRecipePlanKind::NATIVE_ONLY);

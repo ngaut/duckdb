@@ -544,13 +544,14 @@ GENERIC_WORKLOADS = (
         # Slot-directed execution contracts avoid constructing unused source,
         # operator, and sink descriptors during CBO and graph lowering. The
         # once-bound scan plan removes per-vector layout and fusion rebinding.
-        # Ten-pair promotion after one-time recipe publication measured 1.398x
-        # paired at T1 (9.746 ms). Four T4 promotions measured 1.108x, 1.102x,
-        # 1.099x, and 1.104x paired while raw JIT medians improved through 5.649,
-        # 5.618, 5.553, and 5.502 ms. Protect the stable paired margin and ratchet
-        # the independent raw ceiling from 6.000 ms to 5.750 ms.
+        # Ten-pair promotion after replacing per-source-fetch suppression-map
+        # allocation with a thread-local linked scope chain measured 1.426x paired at
+        # T1 (9.654 ms). Four T4 promotions measured 1.108x, 1.102x, 1.099x,
+        # and 1.104x paired while raw JIT medians improved through 5.649, 5.618,
+        # 5.553, and 5.502 ms. Protect both the paired margin and independent raw
+        # ceilings.
         "minimum_auto_speedup_by_threads": {1: 1.35, 4: 1.09},
-        "maximum_auto_median_us_by_threads": {1: 10500, 4: 5750},
+        "maximum_auto_median_us_by_threads": {1: 10000, 4: 5750},
         "max_auto_slowdown": 1.05,
         "requires_compiled_auto": True,
         "required_runtime_paths": (

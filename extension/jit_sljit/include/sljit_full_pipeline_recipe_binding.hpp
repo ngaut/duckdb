@@ -41,8 +41,8 @@ public:
 	bool TryMakeSourceHashJoinBuildSinkRecipe(const SljitSourceHashJoinBuildSinkFacts &facts,
 	                                          SljitFullPipelineRecipe &recipe) const;
 
-	SljitFullPipelineRecipe MakeHashJoinDelimJoinSinkRecipe(idx_t first_hash_join_idx, idx_t final_hash_join_idx,
-	                                                        idx_t sink_idx) const;
+	bool TryMakeHashJoinDelimJoinSinkRecipe(const SljitHashJoinDelimJoinSinkFacts &facts,
+	                                        SljitFullPipelineRecipe &recipe) const;
 
 	bool TryMakeHashJoinAppendSinkRecipe(const SljitHashJoinAppendSinkFacts &facts,
 	                                     SljitFullPipelineRecipe &recipe) const;

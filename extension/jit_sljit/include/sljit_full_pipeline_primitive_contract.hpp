@@ -8,27 +8,16 @@
 
 #pragma once
 
-#include "sljit_full_pipeline_primitive_sequence.hpp"
+#include "sljit_full_pipeline_recipe_state.hpp"
 
 namespace duckdb {
 
-bool SljitFullPipelineSourceFetchNeedsPartitionPreservingChunks(
-    const SljitFullPipelinePrimitiveSequence &primitive_sequence);
-
-bool SljitFullPipelineIsSelectedHashJoinSinkSequence(const SljitFullPipelinePrimitiveSequence &primitive_sequence);
-
-bool SljitFullPipelineHasDirectSourceHashBuild(const SljitFullPipelinePrimitiveSequence &primitive_sequence);
-
-bool SljitFullPipelineHasExactFilterProbeHashBuild(const vector<SljitExecutableRegionOp> &ops,
-                                                   const SljitFullPipelinePrimitiveSequence &primitive_sequence);
-
-bool SljitFullPipelineFilterHasFusedOwner(const vector<SljitExecutableRegionOp> &ops,
-                                          const SljitFullPipelinePrimitiveSequence &primitive_sequence,
-                                          idx_t filter_idx);
+SljitFullPipelineRecipe
+SljitFinalizeFullPipelinePrimitiveRecipe(const vector<SljitExecutableRegionOp> &ops,
+                                         bool uses_extended_source_fetch_budget,
+                                         SljitFullPipelinePrimitiveSequence primitive_sequence,
+                                         SljitHashJoinDirectAggregateConsumerContract direct_aggregate_consumer = {});
 
 bool SljitNativeTailCanConsumeTail(const vector<SljitExecutableRegionOp> &ops, idx_t tail_start_idx);
-
-bool SljitFullPipelinePrimitiveSequenceIsExecutable(const vector<SljitExecutableRegionOp> &ops,
-                                                    const SljitFullPipelinePrimitiveSequence &sequence);
 
 } // namespace duckdb

@@ -1,6 +1,6 @@
 # JIT Broad-Workload Plan
 
-Last updated: 2026-07-16
+Last updated: 2026-07-17
 
 This file defines the current broad-workload direction and TPC-H qualification
 contract. Stable architecture lives in
@@ -13,6 +13,7 @@ Improve generic execution by removing physical work at semantic boundaries:
 
 - bind one immutable primitive recipe instead of rediscovering shape at
   runtime;
+- finalize recipe grammar and all runtime ownership metadata in one pass;
 - publish that recipe once from executable binding and move the same tagged
   plan into the kernel;
 - reduce regular hash matches directly into eligible ungrouped aggregate
@@ -30,6 +31,9 @@ The current direct regular-hash terminal supports semantic `COUNT(*)`,
 The recipe records probe, optional filter, join, aggregate, and terminal
 identities. The canonical aggregate descriptor records RHS output identity and
 type. Runtime resolves only the current physical source and aggregate state.
+Pipeline-local dispatch caches stable materialized routes, keeps direct routes
+for eligible chunks, and becomes hybrid only when a later physical input shape
+requires the materialized implementation.
 
 ## Workload coverage
 

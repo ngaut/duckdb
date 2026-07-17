@@ -28,10 +28,15 @@ struct SljitDelimJoinSinkRuntimeState {
 
 	bool Prepare(ExecutionRegionRuntime &runtime, const vector<SljitExecutableRegionOp> &ops,
 	             const SljitDelimJoinSinkPrimitive &primitive) {
-		if (!SljitCanBindDelimJoinSinkPrimitive(ops, primitive)) {
-			return false;
+		if (primitive.sink_idx >= ops.size() ||
+		    ops[primitive.sink_idx].kind != SljitNativeRegionOpKind::DELIM_JOIN_SINK ||
+		    primitive.HasProjection() == primitive.HasSelectedHashJoinInput()) {
+			throw InternalException("SLJIT bound delimiter sink has invalid runtime ownership");
 		}
 		if (primitive.HasProjection()) {
+			if (!primitive.bound_projection) {
+				throw InternalException("SLJIT bound delimiter sink is missing its projection owner");
+			}
 			projected_input.Ensure(runtime.GetAllocator(), primitive.bound_projection->output_types);
 		}
 		if (primitive.HasSelectedHashJoinInput()) {

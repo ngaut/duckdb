@@ -883,8 +883,11 @@ static SljitHashJoinAggregateConsumerResult SljitTryExecuteHashJoinAggregateCons
     SljitHashJoinProbeInputFilterCache &probe_input_filter_cache, EXECUTE_HASH_JOIN_PROBE &execute_hash_join_probe) {
 	SljitHashJoinAggregateConsumerResult result;
 	const auto hash_join_idx = probe_primitive.hash_join_idx;
-	if (hash_join_idx >= ops.size() || strategy.aggregate_idx >= ops.size() || join_input.size() == 0) {
-		result.blocker = "hash_join_probe.direct_aggregate_consumer_miss.input_shape";
+	if (hash_join_idx >= ops.size() || strategy.aggregate_idx >= ops.size()) {
+		throw InternalException("SLJIT direct aggregate consumer operator binding is out of range");
+	}
+	if (join_input.size() == 0) {
+		result.status = SljitHashJoinAggregateConsumerStatus::EMPTY;
 		return result;
 	}
 	auto contract_view = SljitBuildHashJoinProbeExecutionContractView(
@@ -906,13 +909,16 @@ static SljitHashJoinAggregateConsumerResult SljitTryExecuteHashJoinAggregateCons
 	auto &probe = binding_ptr->hash_join_probe;
 	const bool regular_hash_join = probe.layout_kind == ExecutionHashJoinProbeLayoutKind::REGULAR_HASH_TABLE;
 	const bool perfect_hash_join = probe.layout_kind == ExecutionHashJoinProbeLayoutKind::PERFECT_HASH_TABLE;
-	if ((!regular_hash_join && !perfect_hash_join) || probe.empty_build_side ||
+	if (probe.empty_build_side) {
+		result.status = SljitHashJoinAggregateConsumerStatus::EXECUTED;
+		return result;
+	}
+	if ((!regular_hash_join && !perfect_hash_join) ||
 	    probe.output_mode != ExecutionHashJoinProbeOutputMode::MATCHED_PROBE_AND_BUILD ||
 	    plan.output_mode != ExecutionHashJoinProbeOutputMode::MATCHED_PROBE_AND_BUILD || plan.residual_predicate ||
 	    plan.mark_build_match || plan.mark_build_match_after_residual || plan.keys.size() != 1 ||
 	    plan.equality_key_count != 1 || probe.probe_key_input_indices.size() != plan.keys.size() ||
 	    (probe_input_filter_idx != DConstants::INVALID_INDEX && probe_primitive.HasOutputColumnMap())) {
-		result.blocker = "hash_join_probe.direct_aggregate_consumer_miss.join_semantics";
 		return result;
 	}
 	SljitHashJoinProbeLayoutKind table_layout_kind = SljitHashJoinProbeLayoutKind::NO_CHAIN;
@@ -921,7 +927,6 @@ static SljitHashJoinAggregateConsumerResult SljitTryExecuteHashJoinAggregateCons
 		auto &layout = probe.table_layout;
 		table_layout_kind = SljitValidateRegularHashJoinProbeExecutionLayout(plan, probe);
 		if (layout.needs_chain_matcher || SljitHashJoinProbeLayoutChainsLongerThanOne(table_layout_kind)) {
-			result.blocker = "hash_join_probe.direct_aggregate_consumer_miss.join_chain";
 			return result;
 		}
 		rhs_keys_have_null = layout.stored_keys_have_null;
@@ -930,7 +935,6 @@ static SljitHashJoinAggregateConsumerResult SljitTryExecuteHashJoinAggregateCons
 	    SljitTryExecuteHashJoinProbeInputFilter(runtime, scratch, ops, hash_join_idx, probe_input_filter_idx, probe,
 	                                            join_input.GetTypes(), join_input, probe_input_filter_cache);
 	if (filter_result.status == SljitHashJoinProbeInputFilterStatus::NOT_APPLICABLE) {
-		result.blocker = filter_result.blocker;
 		return result;
 	}
 	if (filter_result.status == SljitHashJoinProbeInputFilterStatus::EMPTY) {
@@ -942,7 +946,6 @@ static SljitHashJoinAggregateConsumerResult SljitTryExecuteHashJoinAggregateCons
 	if (!SljitTryPrepareDirectJoinOutputAggregateDescriptor(
 	        runtime, ops, scratch, optional_ptr<SljitDirectJoinOutputAggregateStrategy>(&strategy),
 	        post_join_projection, probe_input.size(), output_column_map, output_projection_idx)) {
-		result.blocker = "hash_join_probe.direct_aggregate_consumer_miss.aggregate_descriptor";
 		return result;
 	}
 	auto &aggregate_op = ops[strategy.aggregate_idx];
@@ -967,7 +970,6 @@ static SljitHashJoinAggregateConsumerResult SljitTryExecuteHashJoinAggregateCons
 	}
 	if (regular_hash_join && plan.exact_source_filter_identity &&
 	    plan.exact_source_filter_identity == probe.table_layout.runtime_filter_identity) {
-		result.blocker = "hash_join_probe.direct_aggregate_consumer_miss.join_semantics";
 		return result;
 	}
 	SljitPreparedJoinInputComplementarySumUpdate prepared_aggregate;
@@ -976,7 +978,6 @@ static SljitHashJoinAggregateConsumerResult SljitTryExecuteHashJoinAggregateCons
 	        runtime, native_runtime, scratch, hash_join_idx, aggregate_op, strategy, probe_input, probe_input.size(),
 	        deferred_grouped_finish, prepared_aggregate, optional_ptr<string>(&aggregate_failure)) ||
 	    !prepared_aggregate.pipeline_accumulator_enabled) {
-		result.blocker = "hash_join_probe.direct_aggregate_consumer_miss.aggregate_contract";
 		return result;
 	}
 	auto &complementary_plan = strategy.join_input_complementary_sum_plan;
@@ -984,7 +985,6 @@ static SljitHashJoinAggregateConsumerResult SljitTryExecuteHashJoinAggregateCons
 	                                            ? SljitComplementarySumPredicateStorage::PERFECT_HASH_DICTIONARY
 	                                            : SljitComplementarySumPredicateStorage::REGULAR_ROW_POINTER;
 	if (complementary_plan.predicate_storage != expected_predicate_storage) {
-		result.blocker = "hash_join_probe.direct_aggregate_consumer_miss.predicate_storage";
 		return result;
 	}
 	if (complementary_plan.join_input_group_column_idx >= probe_input.ColumnCount()) {
@@ -996,7 +996,6 @@ static SljitHashJoinAggregateConsumerResult SljitTryExecuteHashJoinAggregateCons
 	if (perfect_hash_join) {
 		if (complementary_plan.perfect_hash_rhs_output_idx >= probe.perfect_layout.rhs_dictionary_buffers.size() ||
 		    !probe.perfect_layout.rhs_dictionary_buffers[complementary_plan.perfect_hash_rhs_output_idx]) {
-			result.blocker = "hash_join_probe.direct_aggregate_consumer_miss.predicate_dictionary";
 			return result;
 		}
 		auto &join_output = scratch.TemporaryChunk(hash_join_idx);
@@ -1014,7 +1013,6 @@ static SljitHashJoinAggregateConsumerResult SljitTryExecuteHashJoinAggregateCons
 			return result;
 		}
 		if (!state.finished) {
-			result.blocker = "hash_join_probe.direct_aggregate_consumer_miss.perfect_probe_drain";
 			return result;
 		}
 		if (join_output.size() == 0) {
@@ -1057,7 +1055,6 @@ static SljitHashJoinAggregateConsumerResult SljitTryExecuteHashJoinAggregateCons
 		RecordSljitRegionStageRuntime(runtime, hash_join_idx, hash_join_op.kind,
 		                              "perfect_direct_aggregate_consumer_accumulate", accumulate_start);
 		if (!executed) {
-			result.blocker = "hash_join_probe.direct_aggregate_consumer_miss.perfect_consumer_dispatch";
 			return result;
 		}
 		result.matched_count = join_output.size();
@@ -1076,7 +1073,6 @@ static SljitHashJoinAggregateConsumerResult SljitTryExecuteHashJoinAggregateCons
 	    scratch.HashJoinRowPointers(hash_join_idx), scratch.HashJoinSources(hash_join_idx), state, table_layout_kind,
 	    probe_primitive.source_key0_int64_to_int32_unchecked, rhs_keys_have_null, probe.use_bloom_filter);
 	if (prepared_input.input_kind == SljitHashJoinProbeInputKind::GENERIC) {
-		result.blocker = "hash_join_probe.direct_aggregate_consumer_miss.generic_probe_input";
 		return result;
 	}
 	auto &native_input = prepared_input.native_input;
@@ -1096,7 +1092,6 @@ static SljitHashJoinAggregateConsumerResult SljitTryExecuteHashJoinAggregateCons
 	              complementary_plan.predicate_field, complementary_plan.classification, flush_accumulator,
 	              result.matched_count, used_unchecked_narrowing);
 	if (!executed) {
-		result.blocker = "hash_join_probe.direct_aggregate_consumer_miss.consumer_dispatch";
 		return result;
 	}
 	if (native_input.error) {

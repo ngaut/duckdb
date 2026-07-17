@@ -144,10 +144,6 @@ public:
 
 	//! Suppress compiled execution-region planning for the rest of the currently active query.
 	DUCKDB_API void SuppressCompiledExecutionForCurrentQuery();
-	//! Temporarily suppress compiled execution-region planning in this context.
-	DUCKDB_API void PushCompiledExecutionSuppression();
-	//! Release a temporary compiled execution-region suppression scope.
-	DUCKDB_API void PopCompiledExecutionSuppression();
 	//! True when compiled execution-region planning should not be attempted in this context.
 	DUCKDB_API bool IsCompiledExecutionSuppressed() const;
 

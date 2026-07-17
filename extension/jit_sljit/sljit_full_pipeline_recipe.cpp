@@ -12,9 +12,6 @@
 
 #include "sljit_full_pipeline_recipe_binding.hpp"
 #include "sljit_full_pipeline_recipe_facts.hpp"
-#include "sljit_hash_join_delim_join_sink_recipe.hpp"
-#include "sljit_native_tail_recipe.hpp"
-#include "sljit_projection_aggregate_recipe.hpp"
 
 #include <utility>
 
@@ -95,10 +92,8 @@ private:
 
 	bool TryBuildHashJoinDelimJoinSinkRecipe(SljitFullPipelineRecipe &recipe) const {
 		SljitHashJoinDelimJoinSinkFacts facts;
-		if (!SljitTryAnalyzeHashJoinDelimJoinSink(ops, facts)) {
-			return false;
-		}
-		return SljitTryBuildHashJoinDelimJoinSinkRecipe(ops, binding, recipe, facts);
+		return SljitTryAnalyzeHashJoinDelimJoinSink(ops, facts) &&
+		       binding.TryMakeHashJoinDelimJoinSinkRecipe(facts, recipe);
 	}
 
 	bool TryBuildHashJoinAppendSinkRecipe(SljitFullPipelineRecipe &recipe) const {
@@ -116,11 +111,35 @@ private:
 		if (!SljitTryAnalyzeProjectionAggregatePlan(ops, plan)) {
 			return false;
 		}
-		return SljitTryBuildProjectionAggregateRecipe(binding, recipe, plan);
+		auto &recipes = binding.ProjectionAggregateRecipes();
+		switch (plan.prefix.Kind()) {
+		case SljitProjectionAggregatePrefixKind::SOURCE:
+			return recipes.TryMakeSourceProjectionAggregateTailRecipe(plan.shape, recipe);
+		case SljitProjectionAggregatePrefixKind::JOIN_PREFIX:
+			return recipes.TryMakeMarkFilterProjectionAggregateRecipe(plan.shape, plan.prefix, recipe) ||
+			       recipes.TryMakeMarkFilterNativeTailRecipe(plan.prefix, recipe) ||
+			       recipes.TryMakeJoinDirectProjectionAggregateRecipe(plan.shape, plan.prefix, recipe) ||
+			       recipes.TryMakeJoinProjectionAggregateTailRecipe(plan.shape, plan.prefix, recipe);
+		case SljitProjectionAggregatePrefixKind::INVALID:
+			return false;
+		}
+		return false;
 	}
 
 	bool TryBuildNativeTailRecipe(SljitFullPipelineRecipe &recipe) const {
-		return SljitTryBuildNativeTailRecipe(ops, binding, recipe);
+		SljitMarkFilterProjectionNativeTailFacts mark_filter;
+		if (SljitTryAnalyzeMarkFilterProjectionNativeTail(ops, mark_filter) &&
+		    binding.ProjectionAggregateRecipes().TryMakeMarkFilterProjectionNativeTailRecipe(mark_filter, recipe)) {
+			return true;
+		}
+		SljitGeneratedFilterProjectionNativeTailFacts generated_filter;
+		if (SljitTryAnalyzeGeneratedFilterProjectionNativeTail(ops, generated_filter) &&
+		    binding.TryMakeGeneratedFilterProjectionNativeTailRecipe(generated_filter, recipe)) {
+			return true;
+		}
+		SljitProjectionFilterProjectionNativeTailFacts projection_filter;
+		return SljitTryAnalyzeProjectionFilterProjectionNativeTail(ops, projection_filter) &&
+		       binding.TryMakeProjectionFilterProjectionNativeTailRecipe(projection_filter, recipe);
 	}
 
 private:

@@ -716,7 +716,6 @@ def verify_bound_direct_join_terminal_contract() -> None:
         "idx_t aggregate_idx = DConstants::INVALID_INDEX",
         "SljitMakeHashJoinDirectAggregateConsumerContract",
         "SljitValidateHashJoinDirectAggregateConsumerContract",
-        "recipe.direct_aggregate_consumer =",
     ):
         if required not in recipe_state:
             raise AssertionError(f"recipe binding is missing the immutable direct-terminal contract: {required}")
@@ -749,6 +748,23 @@ def verify_bound_direct_join_terminal_contract() -> None:
     if "bool has_recipe" in recipe_state:
         raise AssertionError("recipe plan kind must not be encoded as an independent boolean")
 
+    primitive_contract = read("extension/jit_sljit/sljit_full_pipeline_primitive_contract.cpp")
+    for required in (
+        "SljitFinalizeFullPipelinePrimitiveRecipe(",
+        "recipe.direct_aggregate_consumer = direct_aggregate_consumer",
+        "recipe.fused_filter_owners = std::move(fused_filter_owners)",
+    ):
+        if required not in primitive_contract:
+            raise AssertionError(f"recipe publication must finalize immutable ownership once: {required}")
+    for stale in (
+        "SljitFullPipelinePrimitiveSequenceIsExecutable",
+        "SljitFullPipelineSourceFetchNeedsPartitionPreservingChunks",
+        "SljitFullPipelineIsSelectedHashJoinSinkSequence",
+        "SljitFullPipelineFilterHasFusedOwner",
+    ):
+        if stale in primitive_contract:
+            raise AssertionError(f"recipe publication must not rescan independent shape contracts: {stale}")
+
     for recipe_binding in (
         "extension/jit_sljit/sljit_full_pipeline_recipe_binding.cpp",
         "extension/jit_sljit/sljit_projection_aggregate_recipe_binding.cpp",
@@ -762,16 +778,27 @@ def verify_bound_direct_join_terminal_contract() -> None:
     selection_runtime = read("extension/jit_sljit/include/sljit_hash_join_probe_selection_primitive_runtime.hpp")
     for required in (
         "optional_ptr<const SljitHashJoinDirectAggregateConsumerContract> direct_consumer_contract",
-        "if (direct_consumer_contract)",
-        '"hash_join_probe.direct_aggregate_consumer_candidate"',
+        "SljitHashJoinAggregateConsumerDispatch &direct_consumer_dispatch",
+        "direct_consumer_dispatch != SljitHashJoinAggregateConsumerDispatch::MATERIALIZED",
+        "direct_consumer_dispatch = SljitHashJoinAggregateConsumerDispatch::DIRECT",
+        "direct_consumer_dispatch = SljitHashJoinAggregateConsumerDispatch::HYBRID",
+        '"hash_join_probe.direct_aggregate_consumer.materialized_dispatch"',
+        '"hash_join_probe.direct_aggregate_consumer.hybrid_dispatch"',
     ):
         if required not in selection_runtime:
             raise AssertionError(f"hash-join selection must consume the bound direct-terminal contract: {required}")
+    for stale in (
+        '"hash_join_probe.direct_aggregate_consumer_candidate"',
+        "direct_aggregate_consumer_miss.",
+        "direct_consumer_blocker",
+    ):
+        if stale in selection_runtime:
+            raise AssertionError(f"hash-join selection must bind direct/materialized dispatch once: {stale}")
 
     source_runtime = read("extension/jit_sljit/include/sljit_source_pipeline_runtime.hpp")
     for required in (
         "recipe.direct_aggregate_consumer.probe_step_idx == step_idx",
-        "direct_consumer_contract, try_execute_direct_consumer",
+        "direct_consumer_contract, direct_aggregate_consumer_dispatch",
         "TryExecuteHashJoinProbeConsumer(runtime, ops, scratch, contract",
     ):
         if required not in source_runtime:
@@ -803,8 +830,16 @@ def verify_bound_direct_join_terminal_contract() -> None:
     terminal_runtime = read("extension/jit_sljit/include/sljit_full_pipeline_terminal_runtime.hpp")
     if "const SljitHashJoinDirectAggregateConsumerContract &contract" not in terminal_runtime:
         raise AssertionError("terminal execution must receive the bound direct-terminal contract")
+    if "SljitHashJoinAggregateConsumerDispatch direct_aggregate_consumer_dispatch" not in terminal_runtime:
+        raise AssertionError("direct/materialized consumer dispatch must be retained by pipeline-local runtime state")
     if "direct_aggregate_consumer_miss.terminal_kind" in terminal_runtime:
         raise AssertionError("terminal execution must not rediscover terminal kind at runtime")
+
+    direct_consumer_runtime = read(
+        "extension/jit_sljit/include/sljit_hash_join_probe_aggregate_consumer_runtime.hpp"
+    )
+    if "direct_aggregate_consumer_miss." in direct_consumer_runtime:
+        raise AssertionError("direct-consumer physical binding must not expose per-chunk recipe miss paths")
 
     recipe_binding_header = read("extension/jit_sljit/include/sljit_full_pipeline_recipe_binding.hpp")
     recipe_binding_cpp = read("extension/jit_sljit/sljit_full_pipeline_recipe_binding.cpp")
@@ -813,6 +848,7 @@ def verify_bound_direct_join_terminal_contract() -> None:
         "SourceFilterAggregate",
         "JoinFilterAggregate",
         "SourceHashJoinBuildSink",
+        "HashJoinDelimJoinSink",
         "HashJoinAppendSink",
         "HashJoinBuildSink",
     )
@@ -827,9 +863,6 @@ def verify_bound_direct_join_terminal_contract() -> None:
     sequence_binding = read("extension/jit_sljit/include/sljit_full_pipeline_recipe_sequence_builder.hpp")
     projection_binding_header = read("extension/jit_sljit/include/sljit_projection_aggregate_recipe_binding.hpp")
     projection_binding = read("extension/jit_sljit/sljit_projection_aggregate_recipe_binding.cpp")
-    projection_builder = read("extension/jit_sljit/sljit_projection_aggregate_recipe.cpp")
-    native_tail_header = read("extension/jit_sljit/include/sljit_native_tail_recipe.hpp")
-    native_tail_builder = read("extension/jit_sljit/sljit_native_tail_recipe.cpp")
     projected_grouped_binding = read(
         "extension/jit_sljit/include/sljit_projected_grouped_aggregate_update_primitive.hpp"
     )
@@ -840,9 +873,7 @@ def verify_bound_direct_join_terminal_contract() -> None:
             sequence_binding,
             projection_binding_header,
             projection_binding,
-            projection_builder,
-            native_tail_header,
-            native_tail_builder,
+            recipe_builder,
             projected_grouped_binding,
         )
     )
@@ -870,14 +901,30 @@ def verify_bound_direct_join_terminal_contract() -> None:
             raise AssertionError(f"recipe family is missing failure-atomic binding: {unified_binder}")
     if "SljitProjectionAggregateRecipeBinding projection_aggregate_recipes" not in recipe_binding_header:
         raise AssertionError("the full-pipeline binder must own one projection-aggregate family binder")
-    if "ProjectionAggregateRecipes().TryMakeMarkFilterProjectionNativeTailRecipe" not in native_tail_builder:
+    if "ProjectionAggregateRecipes().TryMakeMarkFilterProjectionNativeTailRecipe" not in recipe_builder:
         raise AssertionError("native-tail selection must call the owning recipe-family binder directly")
-    if "const vector<SljitExecutableRegionOp> &ops" in projection_builder:
-        raise AssertionError("projection recipe selection must not duplicate backend capability ownership")
-    if "RecipeRegistry" in projection_builder:
-        raise AssertionError("fixed projection recipe precedence must not use an indirect registry")
-    if "schedule_facts" in native_tail_header + native_tail_builder:
-        raise AssertionError("native-tail construction must not retain unused schedule-fact plumbing")
+    for stale_facade in (
+        "extension/jit_sljit/sljit_projection_aggregate_recipe.cpp",
+        "extension/jit_sljit/include/sljit_projection_aggregate_recipe.hpp",
+        "extension/jit_sljit/sljit_native_tail_recipe.cpp",
+        "extension/jit_sljit/include/sljit_native_tail_recipe.hpp",
+        "extension/jit_sljit/sljit_hash_join_delim_join_sink_recipe.cpp",
+        "extension/jit_sljit/include/sljit_hash_join_delim_join_sink_recipe.hpp",
+    ):
+        if (ROOT / stale_facade).exists():
+            raise AssertionError(f"one-caller recipe facade must stay folded into the recipe builder: {stale_facade}")
+    delim_primitive = read("extension/jit_sljit/include/sljit_delim_join_sink_primitive.hpp")
+    for stale in (
+        "SljitCanBindProjectedDelimJoinSinkPrimitive",
+        "SljitBindProjectedDelimJoinSinkPrimitive",
+        "SljitCanBindSelectedHashJoinDelimJoinSinkPrimitive",
+        "SljitBindSelectedHashJoinDelimJoinSinkPrimitive",
+    ):
+        if stale in delim_primitive:
+            raise AssertionError(f"delimiter sink admission must build its descriptor once: {stale}")
+    delim_runtime = read("extension/jit_sljit/include/sljit_delim_join_sink_runtime.hpp")
+    if "SljitCanBind" in delim_runtime:
+        raise AssertionError("delimiter sink runtime must consume the published descriptor without rebinding")
     region_contract_test = read("test/api/test_jit_region_contracts.cpp")
     for failure_atomic_receipt in (
         "TryMakeGeneratedFilterProjectionNativeTailRecipe",
@@ -1605,7 +1652,7 @@ def verify_regular_hash_join_direct_aggregate_storage_contract() -> None:
         "direct_ungrouped_aggregate_consumer=",
         "aggregate_update.join_output_probe_consumer_ungrouped_aggregate.dictionary_source=",
         '"minimum_auto_speedup_by_threads": {1: 1.35, 4: 1.09}',
-        '"maximum_auto_median_us_by_threads": {1: 10500, 4: 5750}',
+        '"maximum_auto_median_us_by_threads": {1: 10000, 4: 5750}',
     ):
         if receipt not in benchmark:
             raise AssertionError(f"direct regular-probe performance proof is not ratcheted: {receipt}")

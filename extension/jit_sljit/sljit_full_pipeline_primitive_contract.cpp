@@ -8,172 +8,100 @@
 
 #include "sljit_full_pipeline_primitive_contract.hpp"
 
-#include "sljit_generated_filter_primitive.hpp"
-#include "sljit_mark_probe_filter_boundary.hpp"
-#include "sljit_projected_grouped_aggregate_update_primitive.hpp"
-
 namespace duckdb {
 
 namespace {
 
-bool SljitFullPipelinePrimitiveStepHasOpCount(const SljitFullPipelinePrimitiveStep &step, idx_t expected_count) {
-	return step.op_count == expected_count;
-}
-
-bool SljitFullPipelineSourcePrimitiveIsExecutable(const SljitFullPipelinePrimitiveStep &step) {
-	return step.kind == SljitFullPipelinePrimitiveKind::SOURCE_FETCH &&
-	       SljitFullPipelinePrimitiveStepHasOpCount(step, 0);
-}
-
-bool SljitFullPipelineIntermediatePrimitiveIsExecutable(const vector<SljitExecutableRegionOp> &ops,
-                                                        const SljitFullPipelinePrimitiveStep &step) {
+bool SljitFullPipelinePrimitiveStepOwnsOps(const SljitFullPipelinePrimitiveStep &step) {
 	switch (step.kind) {
+	case SljitFullPipelinePrimitiveKind::SOURCE_FETCH:
+		return step.op_count == 0;
 	case SljitFullPipelinePrimitiveKind::GENERATED_FILTER:
-		return SljitFullPipelinePrimitiveStepHasOpCount(step, 1) && step.generated_filter.filter_idx == step.Op(0) &&
-		       SljitCanBindGeneratedFilterPrimitive(ops, step.generated_filter.filter_idx);
+		return step.op_count == 1 && step.generated_filter.filter_idx == step.Op(0);
 	case SljitFullPipelinePrimitiveKind::HASH_JOIN_PROBE_MATERIALIZE:
-		return SljitFullPipelinePrimitiveStepHasOpCount(step, 1) &&
-		       SljitCanBindHashJoinProbeMaterializePrimitive(ops, step.Op(0));
+		return step.op_count == 1 && step.hash_join_probe_materialize.hash_join_idx == step.Op(0);
 	case SljitFullPipelinePrimitiveKind::HASH_JOIN_PROBE_SELECTION:
-		return SljitFullPipelinePrimitiveStepHasOpCount(step, 1) &&
-		       SljitCanBindHashJoinProbeSelectionPrimitive(ops, step.Op(0));
+		return step.op_count == 1 && step.hash_join_probe_selection.hash_join_idx == step.Op(0);
 	case SljitFullPipelinePrimitiveKind::MARK_PROBE_FILTER_BOUNDARY:
-		return SljitFullPipelinePrimitiveStepHasOpCount(step, 2) &&
-		       step.mark_probe_filter_boundary.hash_join_idx == step.Op(0) &&
-		       step.mark_probe_filter_boundary.filter_idx == step.Op(1) &&
-		       SljitCanBindMarkProbeFilterBoundaryPrimitive(ops, step.mark_probe_filter_boundary);
+		return step.op_count == 2 && step.mark_probe_filter_boundary.hash_join_idx == step.Op(0) &&
+		       step.mark_probe_filter_boundary.filter_idx == step.Op(1);
 	case SljitFullPipelinePrimitiveKind::PROJECTION_CHAIN:
-		return SljitFullPipelinePrimitiveStepHasOpCount(step, 2) &&
-		       step.projection_chain.first_projection_idx == step.Op(0) &&
-		       step.projection_chain.final_projection_idx == step.Op(1) &&
-		       SljitCanBindProjectionChainPrimitive(ops, step.projection_chain.first_projection_idx,
-		                                            step.projection_chain.final_projection_idx);
-	default:
-		return false;
-	}
-}
-
-bool SljitFullPipelineTerminalPrimitiveIsExecutable(const vector<SljitExecutableRegionOp> &ops,
-                                                    const SljitFullPipelinePrimitiveStep &step) {
-	switch (step.kind) {
+		return step.op_count == 2 && step.projection_chain.first_projection_idx == step.Op(0) &&
+		       step.projection_chain.final_projection_idx == step.Op(1);
 	case SljitFullPipelinePrimitiveKind::POST_JOIN_PROJECTION_AGGREGATE_UPDATE:
-		return SljitFullPipelinePrimitiveStepHasOpCount(step, 2) &&
+		return step.op_count == 2 &&
 		       step.post_join_projection_aggregate.post_join_projection.hash_join_idx == step.Op(0) &&
-		       step.post_join_projection_aggregate.aggregate_idx == step.Op(1) &&
-		       SljitCanBindPostJoinProjectionAggregatePrimitive(ops, step.post_join_projection_aggregate);
+		       step.post_join_projection_aggregate.aggregate_idx == step.Op(1);
 	case SljitFullPipelinePrimitiveKind::UNGROUPED_AGGREGATE_UPDATE:
-		if (!SljitCanBindUngroupedAggregateUpdatePrimitive(ops, step.ungrouped_aggregate_update)) {
-			return false;
-		}
-		switch (step.ungrouped_aggregate_update.strategy) {
-		case SljitUngroupedAggregateUpdateStrategyKind::DIRECT_PRIMITIVE_PAYLOAD_UPDATE:
-			return SljitFullPipelinePrimitiveStepHasOpCount(step, 1) &&
-			       step.ungrouped_aggregate_update.aggregate_idx == step.Op(0);
-		case SljitUngroupedAggregateUpdateStrategyKind::FILTERED_PRIMITIVE_PAYLOAD_UPDATE:
-			return SljitFullPipelinePrimitiveStepHasOpCount(step, 2) &&
-			       step.ungrouped_aggregate_update.filter_idx == step.Op(0) &&
+		if (step.ungrouped_aggregate_update.strategy ==
+		    SljitUngroupedAggregateUpdateStrategyKind::FILTERED_PRIMITIVE_PAYLOAD_UPDATE) {
+			return step.op_count == 2 && step.ungrouped_aggregate_update.filter_idx == step.Op(0) &&
 			       step.ungrouped_aggregate_update.aggregate_idx == step.Op(1);
-		case SljitUngroupedAggregateUpdateStrategyKind::INVALID:
-			break;
 		}
-		return false;
+		return step.op_count == 1 && step.ungrouped_aggregate_update.aggregate_idx == step.Op(0);
 	case SljitFullPipelinePrimitiveKind::GROUPED_AGGREGATE_UPDATE:
-		if (!SljitCanBindGroupedAggregateUpdatePrimitive(ops, step.grouped_aggregate_update)) {
-			return false;
-		}
 		if (step.grouped_aggregate_update.strategy ==
 		    SljitGroupedAggregateUpdateStrategyKind::FILTERED_PRIMITIVE_PAYLOAD_UPDATE) {
-			return step.grouped_aggregate_update.input_kind == SljitGroupedAggregateUpdateInputKind::MATERIALIZED &&
-			       SljitFullPipelinePrimitiveStepHasOpCount(step, 2) &&
-			       step.grouped_aggregate_update.filter_idx == step.Op(0) &&
+			return step.op_count == 2 && step.grouped_aggregate_update.filter_idx == step.Op(0) &&
 			       step.grouped_aggregate_update.aggregate_idx == step.Op(1);
 		}
-		switch (step.grouped_aggregate_update.input_kind) {
-		case SljitGroupedAggregateUpdateInputKind::MATERIALIZED:
-			return SljitFullPipelinePrimitiveStepHasOpCount(step, 1) &&
-			       step.grouped_aggregate_update.aggregate_idx == step.Op(0) &&
-			       step.grouped_aggregate_update.filter_idx == DConstants::INVALID_INDEX;
-		case SljitGroupedAggregateUpdateInputKind::PROJECTED_INPUT:
-			return SljitFullPipelinePrimitiveStepHasOpCount(step, 3) &&
-			       step.grouped_aggregate_update.first_projection_idx == step.Op(0) &&
+		if (step.grouped_aggregate_update.input_kind == SljitGroupedAggregateUpdateInputKind::PROJECTED_INPUT) {
+			return step.op_count == 3 && step.grouped_aggregate_update.first_projection_idx == step.Op(0) &&
 			       step.grouped_aggregate_update.final_projection_idx == step.Op(1) &&
 			       step.grouped_aggregate_update.aggregate_idx == step.Op(2);
 		}
-		return false;
+		return step.op_count == 1 && step.grouped_aggregate_update.aggregate_idx == step.Op(0);
 	case SljitFullPipelinePrimitiveKind::HASH_JOIN_BUILD_SINK:
-		if (!SljitCanBindHashJoinBuildSinkPrimitive(ops, step.hash_join_build_sink.sink_idx,
-		                                            step.hash_join_build_sink.projection_idx)) {
-			return false;
-		}
 		if (step.hash_join_build_sink.HasProjection()) {
-			return SljitFullPipelinePrimitiveStepHasOpCount(step, 2) &&
-			       step.hash_join_build_sink.projection_idx == step.Op(0) &&
+			return step.op_count == 2 && step.hash_join_build_sink.projection_idx == step.Op(0) &&
 			       step.hash_join_build_sink.sink_idx == step.Op(1);
 		}
-		return SljitFullPipelinePrimitiveStepHasOpCount(step, 1) && step.hash_join_build_sink.sink_idx == step.Op(0);
+		return step.op_count == 1 && step.hash_join_build_sink.sink_idx == step.Op(0);
 	case SljitFullPipelinePrimitiveKind::DELIM_JOIN_SINK:
-		if (!SljitCanBindDelimJoinSinkPrimitive(ops, step.delim_join_sink)) {
-			return false;
-		}
 		if (step.delim_join_sink.HasProjection()) {
-			return SljitFullPipelinePrimitiveStepHasOpCount(step, 3) &&
-			       step.delim_join_sink.first_projection_idx == step.Op(0) &&
+			return step.op_count == 3 && step.delim_join_sink.first_projection_idx == step.Op(0) &&
 			       step.delim_join_sink.final_projection_idx == step.Op(1) &&
 			       step.delim_join_sink.sink_idx == step.Op(2);
 		}
-		return SljitFullPipelinePrimitiveStepHasOpCount(step, 1) && step.delim_join_sink.sink_idx == step.Op(0);
+		return step.op_count == 1 && step.delim_join_sink.sink_idx == step.Op(0);
 	case SljitFullPipelinePrimitiveKind::APPEND_SINK:
-		return SljitFullPipelinePrimitiveStepHasOpCount(step, 2) &&
-		       step.append_sink.selected_hash_join_idx == step.Op(0) && step.append_sink.sink_idx == step.Op(1) &&
-		       SljitCanBindAppendSinkPrimitive(ops, step.append_sink);
+		return step.op_count == 2 && step.append_sink.selected_hash_join_idx == step.Op(0) &&
+		       step.append_sink.sink_idx == step.Op(1);
 	case SljitFullPipelinePrimitiveKind::NATIVE_TAIL_DELEGATION:
-		return SljitFullPipelinePrimitiveStepHasOpCount(step, 1) && SljitNativeTailCanConsumeTail(ops, step.Op(0));
-	default:
+		return step.op_count == 1;
+	case SljitFullPipelinePrimitiveKind::INVALID:
 		return false;
 	}
+	return false;
 }
 
-} // namespace
-
-bool SljitFullPipelineSourceFetchNeedsPartitionPreservingChunks(
-    const SljitFullPipelinePrimitiveSequence &primitive_sequence) {
-	// A source-generated filter can turn one ordered scan partition into several sparse chunks. Those chunks must
-	// reach the sink separately so the core batch-index protocol can associate each one with its source partition.
-	return primitive_sequence.Step(1).kind == SljitFullPipelinePrimitiveKind::GENERATED_FILTER;
+bool SljitFullPipelinePrimitiveIsIntermediate(SljitFullPipelinePrimitiveKind kind) {
+	return kind == SljitFullPipelinePrimitiveKind::GENERATED_FILTER ||
+	       kind == SljitFullPipelinePrimitiveKind::HASH_JOIN_PROBE_MATERIALIZE ||
+	       kind == SljitFullPipelinePrimitiveKind::HASH_JOIN_PROBE_SELECTION ||
+	       kind == SljitFullPipelinePrimitiveKind::MARK_PROBE_FILTER_BOUNDARY ||
+	       kind == SljitFullPipelinePrimitiveKind::PROJECTION_CHAIN;
 }
 
-bool SljitFullPipelineIsSelectedHashJoinSinkSequence(const SljitFullPipelinePrimitiveSequence &primitive_sequence) {
-	if (primitive_sequence.Count() != 3 ||
-	    primitive_sequence.Step(0).kind != SljitFullPipelinePrimitiveKind::SOURCE_FETCH ||
-	    primitive_sequence.Step(1).kind != SljitFullPipelinePrimitiveKind::HASH_JOIN_PROBE_SELECTION) {
-		return false;
-	}
-	auto terminal_kind = primitive_sequence.Step(2).kind;
-	return terminal_kind == SljitFullPipelinePrimitiveKind::APPEND_SINK ||
-	       terminal_kind == SljitFullPipelinePrimitiveKind::DELIM_JOIN_SINK;
-}
-
-bool SljitFullPipelineHasDirectSourceHashBuild(const SljitFullPipelinePrimitiveSequence &primitive_sequence) {
-	if (primitive_sequence.Count() < 2 ||
-	    primitive_sequence.Step(0).kind != SljitFullPipelinePrimitiveKind::SOURCE_FETCH) {
-		return false;
-	}
-	auto &terminal = primitive_sequence.Step(primitive_sequence.Count() - 1);
-	return terminal.kind == SljitFullPipelinePrimitiveKind::HASH_JOIN_BUILD_SINK &&
-	       terminal.hash_join_build_sink.direct_source_ingress;
+bool SljitFullPipelinePrimitiveIsTerminal(SljitFullPipelinePrimitiveKind kind) {
+	return kind == SljitFullPipelinePrimitiveKind::POST_JOIN_PROJECTION_AGGREGATE_UPDATE ||
+	       kind == SljitFullPipelinePrimitiveKind::UNGROUPED_AGGREGATE_UPDATE ||
+	       kind == SljitFullPipelinePrimitiveKind::GROUPED_AGGREGATE_UPDATE ||
+	       kind == SljitFullPipelinePrimitiveKind::HASH_JOIN_BUILD_SINK ||
+	       kind == SljitFullPipelinePrimitiveKind::DELIM_JOIN_SINK ||
+	       kind == SljitFullPipelinePrimitiveKind::APPEND_SINK ||
+	       kind == SljitFullPipelinePrimitiveKind::NATIVE_TAIL_DELEGATION;
 }
 
 bool SljitFullPipelineHasExactFilterProbeHashBuild(const vector<SljitExecutableRegionOp> &ops,
-                                                   const SljitFullPipelinePrimitiveSequence &primitive_sequence) {
-	if (primitive_sequence.Count() != 3 ||
-	    primitive_sequence.Step(0).kind != SljitFullPipelinePrimitiveKind::SOURCE_FETCH ||
-	    primitive_sequence.Step(1).kind != SljitFullPipelinePrimitiveKind::HASH_JOIN_PROBE_SELECTION ||
-	    primitive_sequence.Step(2).kind != SljitFullPipelinePrimitiveKind::HASH_JOIN_BUILD_SINK) {
+                                                   const SljitFullPipelinePrimitiveSequence &sequence) {
+	if (sequence.Count() != 3 || sequence.Step(1).kind != SljitFullPipelinePrimitiveKind::HASH_JOIN_PROBE_SELECTION ||
+	    sequence.Step(2).kind != SljitFullPipelinePrimitiveKind::HASH_JOIN_BUILD_SINK) {
 		return false;
 	}
-	const auto probe_idx = primitive_sequence.Step(1).Op(0);
+	const auto probe_idx = sequence.Step(1).hash_join_probe_selection.hash_join_idx;
 	if (probe_idx >= ops.size() || ops[probe_idx].kind != SljitNativeRegionOpKind::HASH_JOIN_PROBE) {
-		return false;
+		throw InternalException("SLJIT bound recipe references an invalid hash join probe");
 	}
 	auto &probe = ops[probe_idx].hash_join_probe.plan;
 	return probe.exact_source_filter_identity && probe.keys.size() == 1 && probe.equality_key_count == 1 &&
@@ -181,36 +109,78 @@ bool SljitFullPipelineHasExactFilterProbeHashBuild(const vector<SljitExecutableR
 	       probe.output_mode == ExecutionHashJoinProbeOutputMode::MATCHED_PROBE_AND_BUILD;
 }
 
-bool SljitFullPipelineFilterHasFusedOwner(const vector<SljitExecutableRegionOp> &ops,
-                                          const SljitFullPipelinePrimitiveSequence &primitive_sequence,
-                                          idx_t filter_idx) {
+void SljitCollectFusedFilterOwner(const vector<SljitExecutableRegionOp> &ops,
+                                  const SljitFullPipelinePrimitiveStep &step, vector<idx_t> &owners) {
+	idx_t filter_idx = DConstants::INVALID_INDEX;
+	idx_t aggregate_idx = DConstants::INVALID_INDEX;
+	if (step.kind == SljitFullPipelinePrimitiveKind::UNGROUPED_AGGREGATE_UPDATE &&
+	    step.ungrouped_aggregate_update.strategy ==
+	        SljitUngroupedAggregateUpdateStrategyKind::FILTERED_PRIMITIVE_PAYLOAD_UPDATE) {
+		filter_idx = step.ungrouped_aggregate_update.filter_idx;
+		aggregate_idx = step.ungrouped_aggregate_update.aggregate_idx;
+	} else if (step.kind == SljitFullPipelinePrimitiveKind::GROUPED_AGGREGATE_UPDATE &&
+	           step.grouped_aggregate_update.strategy ==
+	               SljitGroupedAggregateUpdateStrategyKind::FILTERED_PRIMITIVE_PAYLOAD_UPDATE) {
+		filter_idx = step.grouped_aggregate_update.filter_idx;
+		aggregate_idx = step.grouped_aggregate_update.aggregate_idx;
+	}
+	if (filter_idx == DConstants::INVALID_INDEX) {
+		return;
+	}
+	if (aggregate_idx >= ops.size() || ops[aggregate_idx].kind != SljitNativeRegionOpKind::AGGREGATE_UPDATE ||
+	    !ops[aggregate_idx].aggregate_update.filtered_update.IsExecutable()) {
+		throw InternalException("SLJIT fused filter recipe has no executable aggregate owner");
+	}
+	owners.push_back(filter_idx);
+}
+
+} // namespace
+
+SljitFullPipelineRecipe
+SljitFinalizeFullPipelinePrimitiveRecipe(const vector<SljitExecutableRegionOp> &ops,
+                                         bool uses_extended_source_fetch_budget,
+                                         SljitFullPipelinePrimitiveSequence primitive_sequence,
+                                         SljitHashJoinDirectAggregateConsumerContract direct_aggregate_consumer) {
+	if (primitive_sequence.Count() < 2 ||
+	    primitive_sequence.Step(0).kind != SljitFullPipelinePrimitiveKind::SOURCE_FETCH ||
+	    !SljitFullPipelinePrimitiveStepOwnsOps(primitive_sequence.Step(0))) {
+		throw InternalException("SLJIT full-pipeline recipe must start with source fetch and have a terminal");
+	}
+
+	vector<idx_t> fused_filter_owners;
 	for (idx_t step_idx = 1; step_idx < primitive_sequence.Count(); step_idx++) {
 		auto &step = primitive_sequence.Step(step_idx);
-		idx_t aggregate_idx = DConstants::INVALID_INDEX;
-		switch (step.kind) {
-		case SljitFullPipelinePrimitiveKind::UNGROUPED_AGGREGATE_UPDATE:
-			if (step.ungrouped_aggregate_update.strategy ==
-			        SljitUngroupedAggregateUpdateStrategyKind::FILTERED_PRIMITIVE_PAYLOAD_UPDATE &&
-			    step.ungrouped_aggregate_update.filter_idx == filter_idx) {
-				aggregate_idx = step.ungrouped_aggregate_update.aggregate_idx;
-			}
-			break;
-		case SljitFullPipelinePrimitiveKind::GROUPED_AGGREGATE_UPDATE:
-			if (step.grouped_aggregate_update.strategy ==
-			        SljitGroupedAggregateUpdateStrategyKind::FILTERED_PRIMITIVE_PAYLOAD_UPDATE &&
-			    step.grouped_aggregate_update.filter_idx == filter_idx) {
-				aggregate_idx = step.grouped_aggregate_update.aggregate_idx;
-			}
-			break;
-		default:
-			break;
+		const bool terminal = step_idx + 1 == primitive_sequence.Count();
+		if (!SljitFullPipelinePrimitiveStepOwnsOps(step) ||
+		    (terminal ? !SljitFullPipelinePrimitiveIsTerminal(step.kind)
+		              : !SljitFullPipelinePrimitiveIsIntermediate(step.kind))) {
+			throw InternalException("SLJIT full-pipeline recipe has invalid primitive ownership");
 		}
-		if (aggregate_idx < ops.size() && ops[aggregate_idx].kind == SljitNativeRegionOpKind::AGGREGATE_UPDATE &&
-		    ops[aggregate_idx].aggregate_update.filtered_update.IsExecutable()) {
-			return true;
-		}
+		SljitCollectFusedFilterOwner(ops, step, fused_filter_owners);
 	}
-	return false;
+	SljitValidateHashJoinDirectAggregateConsumerContract(primitive_sequence, direct_aggregate_consumer);
+
+	const auto &terminal = primitive_sequence.Step(primitive_sequence.Count() - 1);
+	const bool selected_hash_join_sink =
+	    primitive_sequence.Count() == 3 &&
+	    primitive_sequence.Step(1).kind == SljitFullPipelinePrimitiveKind::HASH_JOIN_PROBE_SELECTION &&
+	    (terminal.kind == SljitFullPipelinePrimitiveKind::APPEND_SINK ||
+	     terminal.kind == SljitFullPipelinePrimitiveKind::DELIM_JOIN_SINK);
+	const bool direct_source_hash_build = terminal.kind == SljitFullPipelinePrimitiveKind::HASH_JOIN_BUILD_SINK &&
+	                                      terminal.hash_join_build_sink.direct_source_ingress;
+
+	SljitFullPipelineRecipe recipe;
+	recipe.primitive_sequence = std::move(primitive_sequence);
+	recipe.direct_aggregate_consumer = direct_aggregate_consumer;
+	recipe.runtime_kind = selected_hash_join_sink ? SljitFullPipelineRuntimeKind::SELECTED_HASH_JOIN_SINK
+	                                              : SljitFullPipelineRuntimeKind::PRIMITIVE_SEQUENCE;
+	recipe.uses_extended_source_fetch_budget = uses_extended_source_fetch_budget;
+	recipe.preserves_partitioned_source_chunks =
+	    recipe.primitive_sequence.Step(1).kind == SljitFullPipelinePrimitiveKind::GENERATED_FILTER;
+	recipe.has_scan_filter_executable_body =
+	    direct_source_hash_build || SljitFullPipelineHasExactFilterProbeHashBuild(ops, recipe.primitive_sequence);
+	recipe.fused_filter_owners = std::move(fused_filter_owners);
+	return recipe;
 }
 
 bool SljitNativeTailCanConsumeTail(const vector<SljitExecutableRegionOp> &ops, idx_t tail_start_idx) {
@@ -224,21 +194,4 @@ bool SljitNativeTailCanConsumeTail(const vector<SljitExecutableRegionOp> &ops, i
 	return true;
 }
 
-bool SljitFullPipelinePrimitiveSequenceIsExecutable(const vector<SljitExecutableRegionOp> &ops,
-                                                    const SljitFullPipelinePrimitiveSequence &sequence) {
-	if (sequence.Count() < 2 || !SljitFullPipelineSourcePrimitiveIsExecutable(sequence.Step(0))) {
-		return false;
-	}
-	for (idx_t step_idx = 1; step_idx < sequence.Count(); step_idx++) {
-		auto &step = sequence.Step(step_idx);
-		const bool terminal_step = step_idx == sequence.Count() - 1;
-		if (terminal_step) {
-			return SljitFullPipelineTerminalPrimitiveIsExecutable(ops, step);
-		}
-		if (!SljitFullPipelineIntermediatePrimitiveIsExecutable(ops, step)) {
-			return false;
-		}
-	}
-	return false;
-}
 } // namespace duckdb

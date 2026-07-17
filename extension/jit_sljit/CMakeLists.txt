@@ -104,11 +104,8 @@ set(JIT_SLJIT_EXTENSION_FILES
     sljit_full_pipeline_recipe_facts.cpp
     sljit_full_pipeline_recipe_sequence_builder.cpp
     sljit_generated_source_filter_plan.cpp
-    sljit_hash_join_delim_join_sink_recipe.cpp
-    sljit_native_tail_recipe.cpp
     sljit_pre_join_projection_recipe.cpp
     sljit_projection_aggregate_recipe_binding.cpp
-    sljit_projection_aggregate_recipe.cpp
     sljit_region_description.cpp
     sljit_region_aggregate_sink_plan.cpp
     sljit_region_aggregate_fusion.cpp
