@@ -85,6 +85,9 @@ private:
 	MakeMarkProbeFilterBoundaryStep(idx_t hash_join_idx, idx_t filter_idx, bool apply_filter_selection,
 	                                idx_t downstream_projection_idx = DConstants::INVALID_INDEX,
 	                                bool materialize_filter_selection = false) const;
+	bool TryMakeMarkProbeFilterBoundaryStep(idx_t hash_join_idx, idx_t filter_idx, bool apply_filter_selection,
+	                                        idx_t downstream_projection_idx, bool materialize_filter_selection,
+	                                        SljitFullPipelinePrimitiveStep &step) const;
 
 	SljitFullPipelinePrimitiveSequence MakeMarkFilterPrefix(idx_t hash_join_idx, idx_t filter_idx,
 	                                                        bool apply_filter_selection,

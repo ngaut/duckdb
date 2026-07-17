@@ -73,21 +73,48 @@ bool SljitFullPipelineRecipeSequenceBuilder::TryMakeNativeTailRecipe(SljitFullPi
 
 SljitFullPipelinePrimitiveStep
 SljitFullPipelineRecipeSequenceBuilder::MakeHashJoinProbeMaterializeStep(idx_t hash_join_idx) const {
+	SljitFullPipelinePrimitiveStep step;
+	if (!TryMakeHashJoinProbeMaterializeStep(hash_join_idx, step)) {
+		throw InternalException("SLJIT hash join materialize primitive cannot bind requested operator");
+	}
+	return step;
+}
+
+bool SljitFullPipelineRecipeSequenceBuilder::TryMakeHashJoinProbeMaterializeStep(
+    idx_t hash_join_idx, SljitFullPipelinePrimitiveStep &step) const {
 	const auto source_key0_int64_to_int32_unchecked =
 	    hash_join_idx == 0 &&
 	    SljitHashJoinSourceKey0RangeFitsInt32(ops, hash_join_idx, source_min_values, source_max_values);
-	auto primitive =
-	    SljitBindHashJoinProbeMaterializePrimitive(ops, hash_join_idx, source_key0_int64_to_int32_unchecked);
-	return SljitFullPipelinePrimitiveStep::HashJoinProbeMaterialize(primitive);
+	SljitHashJoinProbeMaterializePrimitive primitive;
+	if (!SljitTryBindHashJoinProbeMaterializePrimitive(ops, hash_join_idx, primitive,
+	                                                   source_key0_int64_to_int32_unchecked)) {
+		return false;
+	}
+	step = SljitFullPipelinePrimitiveStep::HashJoinProbeMaterialize(primitive);
+	return true;
 }
 
 SljitFullPipelinePrimitiveStep
 SljitFullPipelineRecipeSequenceBuilder::MakeHashJoinProbeSelectionStep(idx_t hash_join_idx) const {
+	SljitFullPipelinePrimitiveStep step;
+	if (!TryMakeHashJoinProbeSelectionStep(hash_join_idx, step)) {
+		throw InternalException("SLJIT hash join selection primitive cannot bind requested operator");
+	}
+	return step;
+}
+
+bool SljitFullPipelineRecipeSequenceBuilder::TryMakeHashJoinProbeSelectionStep(
+    idx_t hash_join_idx, SljitFullPipelinePrimitiveStep &step) const {
 	const auto source_key0_int64_to_int32_unchecked =
 	    hash_join_idx == 0 &&
 	    SljitHashJoinSourceKey0RangeFitsInt32(ops, hash_join_idx, source_min_values, source_max_values);
-	auto primitive = SljitBindHashJoinProbeSelectionPrimitive(ops, hash_join_idx, source_key0_int64_to_int32_unchecked);
-	return SljitFullPipelinePrimitiveStep::HashJoinProbeSelection(primitive);
+	SljitHashJoinProbeSelectionPrimitive primitive;
+	if (!SljitTryBindHashJoinProbeSelectionPrimitive(ops, hash_join_idx, primitive,
+	                                                 source_key0_int64_to_int32_unchecked)) {
+		return false;
+	}
+	step = SljitFullPipelinePrimitiveStep::HashJoinProbeSelection(primitive);
+	return true;
 }
 
 SljitFullPipelinePrimitiveStep

@@ -26,10 +26,13 @@ SljitProjectionAggregateRecipeBinding::SljitProjectionAggregateRecipeBinding(
 
 bool SljitProjectionAggregateRecipeBinding::TryMakeMarkFilterProjectionNativeTailRecipe(
     const SljitMarkFilterProjectionNativeTailFacts &facts, SljitFullPipelineRecipe &recipe) const {
-	if (!SljitCanBindMarkProbeFilterBoundaryPrimitive(ops, facts.hash_join_idx, facts.filter_idx)) {
+	SljitFullPipelinePrimitiveStep boundary_step;
+	if (!TryMakeMarkProbeFilterBoundaryStep(facts.hash_join_idx, facts.filter_idx, true, facts.first_projection_idx,
+	                                        false, boundary_step)) {
 		return false;
 	}
-	auto sequence = MakeMarkFilterPrefix(facts.hash_join_idx, facts.filter_idx, true, facts.first_projection_idx);
+	auto sequence = MakeSourceSequence();
+	sequence.Add(std::move(boundary_step));
 	return TryMakeProjectionNativeTailRecipe(std::move(sequence), facts.first_projection_idx,
 	                                         facts.final_projection_idx, facts.tail_start_idx, recipe);
 }
@@ -306,6 +309,23 @@ void SljitProjectionAggregateRecipeBinding::AddProjectionAggregateFirstJoinPrefi
 SljitFullPipelinePrimitiveStep SljitProjectionAggregateRecipeBinding::MakeMarkProbeFilterBoundaryStep(
     idx_t hash_join_idx, idx_t filter_idx, bool apply_filter_selection, idx_t downstream_projection_idx,
     bool materialize_filter_selection) const {
+	SljitFullPipelinePrimitiveStep step;
+	if (!TryMakeMarkProbeFilterBoundaryStep(hash_join_idx, filter_idx, apply_filter_selection,
+	                                        downstream_projection_idx, materialize_filter_selection, step)) {
+		throw InternalException("SLJIT MARK probe filter boundary step cannot bind requested contract");
+	}
+	return step;
+}
+
+bool SljitProjectionAggregateRecipeBinding::TryMakeMarkProbeFilterBoundaryStep(
+    idx_t hash_join_idx, idx_t filter_idx, bool apply_filter_selection, idx_t downstream_projection_idx,
+    bool materialize_filter_selection, SljitFullPipelinePrimitiveStep &step) const {
+	SljitMarkProbeFilterBoundaryPrimitive primitive;
+	if (!SljitTryBindMarkProbeFilterBoundaryPrimitive(ops, hash_join_idx, filter_idx, apply_filter_selection,
+	                                                  downstream_projection_idx, false, materialize_filter_selection,
+	                                                  primitive)) {
+		return false;
+	}
 	bool allow_marker_omission = false;
 	if (apply_filter_selection && downstream_projection_idx != DConstants::INVALID_INDEX &&
 	    !materialize_filter_selection) {
@@ -317,10 +337,9 @@ SljitFullPipelinePrimitiveStep SljitProjectionAggregateRecipeBinding::MakeMarkPr
 		allow_marker_omission = !SljitProjectionReferencesInputColumn(ops[downstream_projection_idx],
 		                                                              hash_join_op.output_types.size(), marker_idx);
 	}
-	auto primitive = SljitBindMarkProbeFilterBoundaryPrimitive(ops, hash_join_idx, filter_idx, apply_filter_selection,
-	                                                           downstream_projection_idx, allow_marker_omission,
-	                                                           materialize_filter_selection);
-	return SljitFullPipelinePrimitiveStep::MarkProbeFilterBoundary(primitive);
+	primitive.allow_marker_omission = allow_marker_omission;
+	step = SljitFullPipelinePrimitiveStep::MarkProbeFilterBoundary(primitive);
+	return true;
 }
 
 SljitFullPipelinePrimitiveSequence SljitProjectionAggregateRecipeBinding::MakeMarkFilterPrefix(
@@ -368,13 +387,11 @@ SljitProjectionAggregateRecipeBinding::MakeSourceHashJoinProjectionInputSequence
 bool SljitProjectionAggregateRecipeBinding::TryBindPostJoinProjectionAggregatePrimitive(
     const SljitFullPipelineProjectionAggregateShape &shape, idx_t hash_join_idx,
     SljitPostJoinProjectionAggregatePrimitive &primitive) const {
-	if (!SljitCanBindPostJoinProjectionPrimitive(ops, hash_join_idx, shape.first_projection_idx,
-	                                             shape.final_projection_idx)) {
+	SljitPostJoinProjectionAggregatePrimitive candidate;
+	if (!SljitTryBindPostJoinProjectionPrimitive(ops, hash_join_idx, shape.first_projection_idx,
+	                                             shape.final_projection_idx, candidate.post_join_projection)) {
 		return false;
 	}
-	SljitPostJoinProjectionAggregatePrimitive candidate;
-	candidate.post_join_projection = SljitBindPostJoinProjectionPrimitive(
-	    ops, hash_join_idx, shape.first_projection_idx, shape.final_projection_idx);
 	candidate.aggregate_idx = shape.aggregate_idx;
 	if (!SljitCanBindPostJoinProjectionAggregatePrimitive(ops, candidate)) {
 		return false;
@@ -391,12 +408,14 @@ SljitPreJoinProjectionRecipeBinding SljitProjectionAggregateRecipeBinding::PreJo
 bool SljitProjectionAggregateRecipeBinding::TryMakeProjectionAggregateRecipe(
     SljitFullPipelinePrimitiveSequence sequence, const SljitFullPipelineProjectionAggregateShape &shape,
     bool allow_direct_projected_primitive_payload_update, SljitFullPipelineRecipe &recipe) const {
-	if (SljitCanBindUngroupedAggregateUpdatePrimitive(ops, shape.aggregate_idx)) {
-		if (!SljitCanBindProjectionChainPrimitive(ops, shape.first_projection_idx, shape.final_projection_idx)) {
+	SljitUngroupedAggregateUpdatePrimitive aggregate_update;
+	if (SljitTryBindUngroupedAggregateUpdatePrimitive(ops, shape.aggregate_idx, aggregate_update)) {
+		SljitProjectionChainPrimitive projection;
+		if (!SljitTryBindProjectionChainPrimitive(ops, shape.first_projection_idx, shape.final_projection_idx,
+		                                          projection)) {
 			return false;
 		}
-		AddProjectionChainStep(sequence, shape.first_projection_idx, shape.final_projection_idx);
-		auto aggregate_update = SljitBindUngroupedAggregateUpdatePrimitive(ops, shape.aggregate_idx);
+		sequence.Add(SljitFullPipelinePrimitiveStep::ProjectionChain(projection));
 		sequence.Add(SljitFullPipelinePrimitiveStep::UngroupedAggregateUpdate(aggregate_update));
 		recipe = MakePrimitiveSequence(std::move(sequence));
 		return true;
@@ -410,12 +429,13 @@ bool SljitProjectionAggregateRecipeBinding::TryMakeProjectionAggregateRecipe(
 		recipe = MakePrimitiveSequence(std::move(sequence));
 		return true;
 	}
-	if (!SljitGroupedAggregateUpdateHasDedicatedBackend(ops, shape.aggregate_idx) ||
-	    !SljitCanBindProjectionChainPrimitive(ops, shape.first_projection_idx, shape.final_projection_idx)) {
+	SljitProjectionChainPrimitive projection;
+	if (!SljitTryBindGroupedAggregateUpdatePrimitive(ops, shape.aggregate_idx, grouped_update) ||
+	    !SljitTryBindProjectionChainPrimitive(ops, shape.first_projection_idx, shape.final_projection_idx,
+	                                          projection)) {
 		return false;
 	}
-	AddProjectionChainStep(sequence, shape.first_projection_idx, shape.final_projection_idx);
-	grouped_update = SljitBindGroupedAggregateUpdatePrimitive(ops, shape.aggregate_idx);
+	sequence.Add(SljitFullPipelinePrimitiveStep::ProjectionChain(projection));
 	sequence.Add(SljitFullPipelinePrimitiveStep::GroupedAggregateUpdate(grouped_update));
 	recipe = MakePrimitiveSequence(std::move(sequence));
 	return true;
@@ -447,10 +467,11 @@ bool SljitProjectionAggregateRecipeBinding::TryMakeProjectionNativeTailRecipe(
 		recipe = MakePrimitiveSequence(std::move(sequence));
 		return true;
 	}
-	if (!SljitCanBindProjectionChainPrimitive(ops, first_projection_idx, final_projection_idx)) {
+	SljitProjectionChainPrimitive projection;
+	if (!SljitTryBindProjectionChainPrimitive(ops, first_projection_idx, final_projection_idx, projection)) {
 		return false;
 	}
-	AddProjectionChainStep(sequence, first_projection_idx, final_projection_idx);
+	sequence.Add(SljitFullPipelinePrimitiveStep::ProjectionChain(projection));
 	return TryMakeNativeTailRecipe(std::move(sequence), tail_start_idx, recipe);
 }
 

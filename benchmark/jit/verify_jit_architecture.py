@@ -370,6 +370,41 @@ def verify_production_contract_ownership() -> None:
     manager = read("src/execution/execution_region_manager.cpp")
     if "backend_abi_version != EXECUTION_REGION_BACKEND_ABI_VERSION" not in manager:
         raise AssertionError("execution-region manager must reject incompatible backend ABI versions before use")
+    for stale_virtual_lookup in (
+        "entry.backend->Name()",
+        "entry.backend->Description()",
+        "entry.backend->RunnerKind()",
+        "entry.backend->SupportsRegions()",
+        "entry.backend->IsAvailable()",
+    ):
+        if stale_virtual_lookup in manager:
+            raise AssertionError("backend registry locks must protect frozen metadata, not backend virtual callbacks")
+    for registry_contract in (
+        "string normalized_name;",
+        "ExecutionRunnerKind runner_kind;",
+        "bool supports_regions;",
+    ):
+        if registry_contract not in manager_header:
+            raise AssertionError(f"backend registration must freeze static metadata: {registry_contract}")
+    manager_test = read("test/api/test_jit.cpp")
+    for registry_test in (
+        "Execution region manager freezes backend metadata at registration",
+        "Execution region backend availability does not hold the registry lock",
+    ):
+        if registry_test not in manager_test:
+            raise AssertionError(f"backend registry lock ownership requires direct coverage: {registry_test}")
+
+    sljit_cmake = read("third_party/sljit/CMakeLists.txt")
+    for allocator_contract in (
+        "if(APPLE)",
+        'CMAKE_SYSTEM_NAME STREQUAL "Linux"',
+        "SLJIT_PROT_EXECUTABLE_ALLOCATOR=1",
+        "elseif(WIN32 OR UNIX)",
+        "SLJIT_WX_EXECUTABLE_ALLOCATOR=1",
+        "no W^X executable-memory policy",
+    ):
+        if allocator_contract not in sljit_cmake:
+            raise AssertionError(f"SLJIT executable-memory platform policy is incomplete: {allocator_contract}")
     for backend_registration in (
         "extension/jit_sljit/sljit_backend.cpp",
         "extension/jit_metal/metal_backend.mm",
@@ -400,6 +435,17 @@ def verify_production_contract_ownership() -> None:
         or "result != PipelineExecuteResult::RUNNER_HANDOFF" not in unbounded_execute
     ):
         raise AssertionError("unbounded pipeline execution must consume only explicit runner handoffs")
+    pipeline_header = read("src/include/duckdb/parallel/pipeline.hpp")
+    pipeline = read("src/parallel/pipeline.cpp")
+    if (
+        "bool execution_region_plan_built;" not in pipeline_header
+        or "void EnsureExecutionRegionPlanBuiltLocked();" not in pipeline_header
+        or "execution_region_plan_built = true;" not in pipeline
+        or "EnsureExecutionRegionPlanBuiltLocked();" not in pipeline
+    ):
+        raise AssertionError("recursive rescheduling must reuse one pipeline-scoped execution-region plan")
+    if "void BuildExecutionRegionPlan();" in pipeline_header:
+        raise AssertionError("pipeline-scoped execution-region plans must not expose a public rebuild operation")
     runtime_test = read("test/api/test_jit_runtime.cpp")
     blocked_sink_test = runtime_test[runtime_test.index("JIT blocked append sink transfers retry ownership") :]
     blocked_sink_test = blocked_sink_test[
@@ -599,7 +645,7 @@ def verify_production_contract_ownership() -> None:
         raise AssertionError("TPC-H candidate configuration must inherit and validate the accepted baseline contract")
     comparator = read("benchmark/tpch/jit/compare_tpch_benchmark.py")
     runtime_gate = comparator[
-        comparator.index("def auto_runtime_preserved") : comparator.index("def has_auto_decision")
+        comparator.index("def auto_runtime_preserved") : comparator.index("def has_auto_accelerated_runner")
     ]
     if (
         "off_normalized_candidate_auto_s" in runtime_gate
@@ -613,6 +659,8 @@ def verify_production_contract_ownership() -> None:
         or "baseline runs.csv missing positive" not in comparator
     ):
         raise AssertionError("baseline raw-runtime acceptance must retain the qualified run envelope")
+    if "has_auto_decision(base)" in comparator or "has_auto_decision(candidate)" in comparator:
+        raise AssertionError("raw auto-runtime acceptance must not depend on decision telemetry")
     reject_regex(
         "aggregate descriptor-to-lane ABI reconstructed outside canonical validator",
         (
@@ -706,6 +754,17 @@ def verify_benchmark_repetition_budget() -> None:
 
 
 def verify_bound_direct_join_terminal_contract() -> None:
+    recipe_binding = read("extension/jit_sljit/sljit_full_pipeline_recipe_binding.cpp")
+    append_primitive = read("extension/jit_sljit/include/sljit_append_sink_primitive.hpp")
+    for stale_sentinel_arithmetic in (
+        "facts.sink_idx + 1",
+        "facts.sink_idx + 3",
+    ):
+        if stale_sentinel_arithmetic in recipe_binding:
+            raise AssertionError("recipe admission must range-check sentinel indices before arithmetic")
+    if "hash_join_idx + 1 != sink_idx" in append_primitive:
+        raise AssertionError("append binding must compare validated adjacent indices without sentinel overflow")
+
     recipe_state = read("extension/jit_sljit/include/sljit_full_pipeline_recipe_state.hpp")
     for required in (
         "struct SljitHashJoinDirectAggregateConsumerContract",
@@ -1652,7 +1711,7 @@ def verify_regular_hash_join_direct_aggregate_storage_contract() -> None:
         "direct_ungrouped_aggregate_consumer=",
         "aggregate_update.join_output_probe_consumer_ungrouped_aggregate.dictionary_source=",
         '"minimum_auto_speedup_by_threads": {1: 1.35, 4: 1.09}',
-        '"maximum_auto_median_us_by_threads": {1: 10000, 4: 5750}',
+        '"join_exact_filter_build": {1: 9643, 4: 5935}',
     ):
         if receipt not in benchmark:
             raise AssertionError(f"direct regular-probe performance proof is not ratcheted: {receipt}")

@@ -97,7 +97,6 @@ public:
 	void ResetSinkForReschedule();
 	void ResetForReschedule(bool reset_sink);
 	void ResetSource(bool force);
-	void BuildExecutionRegionPlan();
 	bool PrepareExecutionRegionPlanForExecution();
 	void ClearSource();
 	void Schedule(shared_ptr<Event> &event);
@@ -164,6 +163,8 @@ private:
 	unique_ptr<GlobalSourceState> source_state;
 	//! Query/pipeline-scoped compiled execution plan selected before source state captures scan filters.
 	unique_ptr<ExecutionRegionPlan> execution_region_plan;
+	//! Distinguishes a built vectorized plan (nullptr) from a plan that has not been inspected yet.
+	bool execution_region_plan_built;
 	//! Protects execution region plan refreshes that can happen after stateful dependencies finish.
 	mutex execution_region_plan_lock;
 	//! Selected runner for this pipeline. Vectorized execution is an explicit runner beside compiled regions.
@@ -190,6 +191,7 @@ private:
 
 	bool TryGetMaxThreads(idx_t &max_threads);
 	bool ScheduleParallel(shared_ptr<Event> &event);
+	void EnsureExecutionRegionPlanBuiltLocked();
 	void BuildExecutionRegionPlanLocked();
 	void InitializeSourceStateFromExecutionRegionPlanLocked(ClientContext &client);
 };

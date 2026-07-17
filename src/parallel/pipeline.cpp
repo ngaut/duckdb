@@ -88,7 +88,7 @@ TaskExecutionResult PipelineTask::ExecuteTask(TaskExecutionMode mode) {
 
 Pipeline::Pipeline(Executor &executor_p)
     : executor(executor_p), ready(false), initialized(false), source(nullptr), sink(nullptr),
-      execution_runner(ExecutionRunnerKind::VECTORIZED) {
+      execution_region_plan_built(false), execution_runner(ExecutionRunnerKind::VECTORIZED) {
 }
 
 Pipeline::~Pipeline() {
@@ -317,10 +317,13 @@ void Pipeline::ResetForReschedule(bool reset_sink) {
 	}
 	if (!allow_reuse || !source_state || !source_state->SupportsReuse()) {
 		lock_guard<mutex> guard(execution_region_plan_lock);
-		BuildExecutionRegionPlanLocked();
+		EnsureExecutionRegionPlanBuiltLocked();
 		InitializeSourceStateFromExecutionRegionPlanLocked(client);
 	} else {
-		BuildExecutionRegionPlan();
+		// The execution-region plan is pipeline-scoped. Reusable source state changes
+		// the active input, not the pipeline shape or compiled artifact ownership.
+		// A plan that was waiting for operator readiness is refreshed exactly once by
+		// PrepareExecutionRegionPlanForExecution after dependencies are ready.
 		source_state->Reset(client);
 	}
 	initialized = true;
@@ -332,24 +335,27 @@ void Pipeline::ResetSource(bool force) {
 	}
 	if (force || !source_state) {
 		lock_guard<mutex> guard(execution_region_plan_lock);
-		BuildExecutionRegionPlanLocked();
+		EnsureExecutionRegionPlanBuiltLocked();
 		InitializeSourceStateFromExecutionRegionPlanLocked(GetClientContext());
 	}
 }
 
-void Pipeline::BuildExecutionRegionPlan() {
-	lock_guard<mutex> guard(execution_region_plan_lock);
-	BuildExecutionRegionPlanLocked();
+void Pipeline::EnsureExecutionRegionPlanBuiltLocked() {
+	if (!execution_region_plan_built) {
+		BuildExecutionRegionPlanLocked();
+	}
 }
 
 void Pipeline::BuildExecutionRegionPlanLocked() {
 	if (!source) {
 		execution_region_plan.reset();
+		execution_region_plan_built = false;
 		execution_runner = ExecutionRunnerKind::VECTORIZED;
 		return;
 	}
 	auto &client = GetClientContext();
 	execution_region_plan = ExecutionRegionPlanner::Build(client, *this);
+	execution_region_plan_built = true;
 	execution_runner = GetExecutionRegionRunnerKind(execution_region_plan);
 }
 

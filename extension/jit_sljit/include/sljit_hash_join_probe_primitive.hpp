@@ -260,15 +260,25 @@ static bool SljitCanBindHashJoinBuildSinkPrimitive(const vector<SljitExecutableR
 	       (projection_idx < ops.size() && ops[projection_idx].kind == SljitNativeRegionOpKind::PROJECTION);
 }
 
+static bool SljitTryBindHashJoinBuildSinkPrimitive(const vector<SljitExecutableRegionOp> &ops, idx_t sink_idx,
+                                                   idx_t projection_idx, SljitHashJoinBuildSinkPrimitive &primitive) {
+	if (!SljitCanBindHashJoinBuildSinkPrimitive(ops, sink_idx, projection_idx)) {
+		return false;
+	}
+	SljitHashJoinBuildSinkPrimitive candidate;
+	candidate.sink_idx = sink_idx;
+	candidate.projection_idx = projection_idx;
+	primitive = candidate;
+	return true;
+}
+
 static SljitHashJoinBuildSinkPrimitive
 SljitBindHashJoinBuildSinkPrimitive(const vector<SljitExecutableRegionOp> &ops, idx_t sink_idx,
                                     idx_t projection_idx = DConstants::INVALID_INDEX) {
-	if (!SljitCanBindHashJoinBuildSinkPrimitive(ops, sink_idx, projection_idx)) {
+	SljitHashJoinBuildSinkPrimitive primitive;
+	if (!SljitTryBindHashJoinBuildSinkPrimitive(ops, sink_idx, projection_idx, primitive)) {
 		throw InternalException("SLJIT hash join build sink primitive cannot bind requested operator");
 	}
-	SljitHashJoinBuildSinkPrimitive primitive;
-	primitive.sink_idx = sink_idx;
-	primitive.projection_idx = projection_idx;
 	return primitive;
 }
 
@@ -299,31 +309,35 @@ static bool SljitCanBindMarkProbeFilterBoundaryPrimitive(const vector<SljitExecu
 	return true;
 }
 
+static bool SljitTryBindMarkProbeFilterBoundaryPrimitive(const vector<SljitExecutableRegionOp> &ops,
+                                                         idx_t hash_join_idx, idx_t filter_idx,
+                                                         bool apply_filter_selection, idx_t downstream_projection_idx,
+                                                         bool allow_marker_omission, bool materialize_filter_selection,
+                                                         SljitMarkProbeFilterBoundaryPrimitive &primitive) {
+	SljitMarkProbeFilterBoundaryPrimitive candidate;
+	candidate.hash_join_idx = hash_join_idx;
+	candidate.filter_idx = filter_idx;
+	candidate.apply_filter_selection = apply_filter_selection;
+	candidate.materialize_filter_selection = materialize_filter_selection;
+	candidate.allow_marker_omission = allow_marker_omission;
+	candidate.downstream_projection_idx = downstream_projection_idx;
+	if (!SljitCanBindMarkProbeFilterBoundaryPrimitive(ops, candidate)) {
+		return false;
+	}
+	primitive = candidate;
+	return true;
+}
+
 static SljitMarkProbeFilterBoundaryPrimitive SljitBindMarkProbeFilterBoundaryPrimitive(
     const vector<SljitExecutableRegionOp> &ops, idx_t hash_join_idx, idx_t filter_idx,
     bool apply_filter_selection = false, idx_t downstream_projection_idx = DConstants::INVALID_INDEX,
     bool allow_marker_omission = false, bool materialize_filter_selection = false) {
-	if (!SljitCanBindMarkProbeFilterBoundaryPrimitive(ops, hash_join_idx, filter_idx)) {
-		throw InternalException("SLJIT MARK probe filter boundary primitive cannot bind requested operators");
-	}
-	if (downstream_projection_idx != DConstants::INVALID_INDEX &&
-	    (downstream_projection_idx >= ops.size() ||
-	     ops[downstream_projection_idx].kind != SljitNativeRegionOpKind::PROJECTION)) {
-		throw InternalException("SLJIT MARK probe filter boundary primitive cannot bind downstream projection");
-	}
-	if (allow_marker_omission && !apply_filter_selection) {
-		throw InternalException("SLJIT MARK probe filter boundary marker omission requires an applied filter");
-	}
-	if (materialize_filter_selection && !apply_filter_selection) {
-		throw InternalException("SLJIT MARK probe filter boundary materialization requires an applied filter");
-	}
 	SljitMarkProbeFilterBoundaryPrimitive primitive;
-	primitive.hash_join_idx = hash_join_idx;
-	primitive.filter_idx = filter_idx;
-	primitive.apply_filter_selection = apply_filter_selection;
-	primitive.materialize_filter_selection = materialize_filter_selection;
-	primitive.allow_marker_omission = allow_marker_omission;
-	primitive.downstream_projection_idx = downstream_projection_idx;
+	if (!SljitTryBindMarkProbeFilterBoundaryPrimitive(ops, hash_join_idx, filter_idx, apply_filter_selection,
+	                                                  downstream_projection_idx, allow_marker_omission,
+	                                                  materialize_filter_selection, primitive)) {
+		throw InternalException("SLJIT MARK probe filter boundary primitive cannot bind requested contract");
+	}
 	return primitive;
 }
 

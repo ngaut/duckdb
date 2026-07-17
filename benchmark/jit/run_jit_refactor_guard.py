@@ -17,7 +17,7 @@ DEFAULT_UNIT_BASELINE_ENV = "DUCKDB_JIT_UNIT_BASELINE"
 DEFAULT_TPCH_BASELINE_ENV = "DUCKDB_JIT_TPCH_BASELINE"
 DEFAULT_UNIT_BASELINE_STATE = ROOT / "benchmark" / "jit" / "local_baselines" / "jit_refactor_guard_state.json"
 DEFAULT_TPCH_BASELINE_STATE = ROOT / "benchmark" / "tpch" / "jit" / "local_baselines" / "tpch_refactor_guard_state.json"
-DEFAULT_UNIT_SPEC = "*JIT*"
+DEFAULT_UNIT_SPEC = "[jit]"
 PYTHON_GUARD_FILES = (
     ROOT / "benchmark" / "jit" / "verify_jit_architecture.py",
     ROOT / "benchmark" / "jit" / "generic_benchmark.py",
@@ -53,6 +53,7 @@ JIT_UNIT_PREFIXES = (
     "src/include/duckdb/planner/cost_model.hpp",
 )
 JIT_PERFORMANCE_PREFIXES = (
+    "benchmark/jit/benchmark_common.py",
     "benchmark/jit/generic_benchmark.py",
     "extension/jit_sljit/",
     "src/execution/",
@@ -273,14 +274,16 @@ def architecture_command() -> list[str]:
     ]
 
 
-def generic_gate_command(args: argparse.Namespace, artifact_dir: Path) -> list[str]:
+def generic_gate_command(args: argparse.Namespace, artifact_dir: Path, threads: int) -> list[str]:
     return [
         sys.executable,
         str(ROOT / "benchmark" / "jit" / "generic_benchmark.py"),
         "--duckdb",
         str(args.duckdb),
         "--out-dir",
-        str(artifact_dir / "generic_benchmark"),
+        str(artifact_dir / f"generic_benchmark_t{threads}"),
+        "--threads",
+        str(threads),
         "--repeats",
         str(args.generic_repeats),
     ]
@@ -793,10 +796,11 @@ def main() -> int:
             "tpch regression gate",
         )
     if should_run_generic(args):
-        run_command(
-            generic_gate_command(args, artifact_dir),
-            "generic production performance gate",
-        )
+        for threads in (1, 4):
+            run_command(
+                generic_gate_command(args, artifact_dir, threads),
+                f"generic production performance gate T{threads}",
+            )
     print(f"JIT refactor guard passed: {artifact_dir}")
     return 0
 

@@ -2,13 +2,18 @@
 
 from __future__ import annotations
 
+import math
 import sys
 import unittest
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from generic_benchmark import (
+    BASELINE_ABSOLUTE_NOISE_ALLOWANCE_US,
+    BASELINE_RELATIVE_NOISE_ALLOWANCE,
+    GENERIC_AUTO_BASELINE_MEDIAN_US_BY_THREADS,
     GENERIC_WORKLOADS,
+    baseline_auto_median_us,
     maximum_auto_median_us,
     median_paired_speedup,
     minimum_auto_speedup,
@@ -74,32 +79,7 @@ class TestSpeedupFloors(unittest.TestCase):
             },
         )
 
-    def test_grouped_run_raw_ceilings_track_generated_runtime(self) -> None:
-        names = {
-            "grouped_sorted_runs",
-            "grouped_affine_sorted_runs",
-            "grouped_sparse_sorted_runs",
-        }
-        ceilings = {
-            workload["name"]: maximum_auto_median_us(workload, 1)
-            for workload in GENERIC_WORKLOADS
-            if workload["name"] in names
-        }
-        self.assertEqual(
-            ceilings,
-            {
-                "grouped_sorted_runs": 33500,
-                "grouped_affine_sorted_runs": 37000,
-                "grouped_sparse_sorted_runs": 31500,
-            },
-        )
-        sparse = next(workload for workload in GENERIC_WORKLOADS if workload["name"] == "grouped_sparse_sorted_runs")
-        self.assertEqual(
-            (minimum_auto_speedup(sparse, 4), maximum_auto_median_us(sparse, 4)),
-            (2.90, 11000),
-        )
-
-    def test_selective_grouped_floors_and_raw_ceilings_track_independent_shape_promotion(self) -> None:
+    def test_selective_grouped_floors_track_independent_shape_promotion(self) -> None:
         names = {
             "grouped_selective_multi_aggregate",
             "grouped_selective_conjunction_multi_aggregate",
@@ -117,38 +97,17 @@ class TestSpeedupFloors(unittest.TestCase):
                 "grouped_selective_three_way_conjunction_multi_aggregate": (1.38, 1.23),
             },
         )
-        self.assertEqual(
-            {
-                name: (maximum_auto_median_us(workload, 1), maximum_auto_median_us(workload, 4))
-                for name, workload in workloads.items()
-            },
-            {
-                "grouped_selective_multi_aggregate": (56500, 18000),
-                "grouped_selective_conjunction_multi_aggregate": (55000, 17500),
-                "grouped_selective_three_way_conjunction_multi_aggregate": (52000, 17250),
-            },
-        )
-
-    def test_wide_grouped_floor_and_raw_ceiling_track_proof_owned_finalization_promotion(self) -> None:
+    def test_wide_grouped_floor_tracks_proof_owned_finalization_promotion(self) -> None:
         workload = next(workload for workload in GENERIC_WORKLOADS if workload["name"] == "grouped_wide_sorted_runs")
         self.assertEqual(
             (minimum_auto_speedup(workload, 1), minimum_auto_speedup(workload, 4)),
             (2.80, 3.00),
         )
-        self.assertEqual(
-            (maximum_auto_median_us(workload, 1), maximum_auto_median_us(workload, 4)),
-            (175000, 57000),
-        )
-
     def test_exact_filter_join_tracks_direct_dictionary_reduction_promotion(self) -> None:
         workload = next(workload for workload in GENERIC_WORKLOADS if workload["name"] == "join_exact_filter_build")
         self.assertEqual(
             (minimum_auto_speedup(workload, 1), minimum_auto_speedup(workload, 4)),
             (1.35, 1.09),
-        )
-        self.assertEqual(
-            (maximum_auto_median_us(workload, 1), maximum_auto_median_us(workload, 4)),
-            (10000, 5750),
         )
         self.assertEqual(
             workload["required_runtime_paths"],
@@ -160,12 +119,31 @@ class TestSpeedupFloors(unittest.TestCase):
         )
 
 
+class TestRawRuntimeBaselines(unittest.TestCase):
+    def test_every_production_workload_has_t1_and_t4_baselines(self) -> None:
+        workload_names = {workload["name"] for workload in GENERIC_WORKLOADS}
+        self.assertEqual(set(GENERIC_AUTO_BASELINE_MEDIAN_US_BY_THREADS), workload_names)
+        for workload in GENERIC_WORKLOADS:
+            for threads in (1, 4):
+                baseline = baseline_auto_median_us(workload, threads)
+                expected_allowance = max(
+                    BASELINE_ABSOLUTE_NOISE_ALLOWANCE_US,
+                    math.ceil(baseline * BASELINE_RELATIVE_NOISE_ALLOWANCE),
+                )
+                self.assertGreater(baseline, 0)
+                self.assertEqual(maximum_auto_median_us(workload, threads), baseline + expected_allowance)
+
+    def test_missing_baseline_is_an_error_not_a_disabled_gate(self) -> None:
+        with self.assertRaisesRegex(ValueError, "no raw JIT baseline"):
+            maximum_auto_median_us({"name": "unqualified_workload"}, 1)
+
+
 class TestPerformanceGates(unittest.TestCase):
     def test_raw_auto_ceiling_is_independent_of_speedup_normalization(self) -> None:
         workload = {
             "name": "raw_runtime_guard",
             "minimum_auto_speedup": 2.0,
-            "maximum_auto_median_us_by_threads": {1: 37000},
+            "baseline_auto_median_us_by_threads": {1: 37000},
             "max_auto_slowdown": 1.05,
             "requires_compiled_auto": True,
         }

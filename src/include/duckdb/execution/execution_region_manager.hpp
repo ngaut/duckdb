@@ -48,6 +48,22 @@ public:
 private:
 	friend class ExecutionRegionPlanner;
 
+	struct RegisteredExecutionRegionBackend {
+		RegisteredExecutionRegionBackend(unique_ptr<ExecutionRegionBackend> backend_p, string name_p,
+		                                 string normalized_name_p, string description_p,
+		                                 ExecutionRunnerKind runner_kind_p, bool supports_regions_p)
+		    : backend(std::move(backend_p)), name(std::move(name_p)), normalized_name(std::move(normalized_name_p)),
+		      description(std::move(description_p)), runner_kind(runner_kind_p), supports_regions(supports_regions_p) {
+		}
+
+		unique_ptr<ExecutionRegionBackend> backend;
+		string name;
+		string normalized_name;
+		string description;
+		ExecutionRunnerKind runner_kind;
+		bool supports_regions;
+	};
+
 	idx_t
 	RecordEvent(ClientContext &context, string backend_name, ExecutionRegionCompileStatus status,
 	            ExecutionRegionExecutionMode execution_mode, string reason, string blocker, const string *ir,
@@ -61,7 +77,7 @@ private:
 private:
 	DatabaseInstance &db;
 	mutable mutex lock;
-	vector<unique_ptr<ExecutionRegionBackend>> backends;
+	vector<RegisteredExecutionRegionBackend> backends;
 	ExecutionRegionEventLog event_log;
 };
 

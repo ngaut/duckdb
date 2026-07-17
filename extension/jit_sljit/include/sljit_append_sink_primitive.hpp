@@ -19,7 +19,7 @@ struct SljitAppendSinkPrimitive {
 
 static bool SljitCanBindSelectedHashJoinAppendSinkPrimitive(const vector<SljitExecutableRegionOp> &ops,
                                                             idx_t hash_join_idx, idx_t sink_idx) {
-	if (sink_idx >= ops.size() || sink_idx != ops.size() - 1 || hash_join_idx + 1 != sink_idx ||
+	if (sink_idx >= ops.size() || sink_idx == 0 || sink_idx != ops.size() - 1 || hash_join_idx != sink_idx - 1 ||
 	    ops[sink_idx].kind != SljitNativeRegionOpKind::APPEND_SINK ||
 	    !SljitCanBindHashJoinProbeSelectionPrimitive(ops, hash_join_idx)) {
 		return false;
@@ -27,14 +27,25 @@ static bool SljitCanBindSelectedHashJoinAppendSinkPrimitive(const vector<SljitEx
 	return ops[hash_join_idx].output_types == ops[sink_idx].append_sink.plan.input_types;
 }
 
+static bool SljitTryBindSelectedHashJoinAppendSinkPrimitive(const vector<SljitExecutableRegionOp> &ops,
+                                                            idx_t hash_join_idx, idx_t sink_idx,
+                                                            SljitAppendSinkPrimitive &primitive) {
+	if (!SljitCanBindSelectedHashJoinAppendSinkPrimitive(ops, hash_join_idx, sink_idx)) {
+		return false;
+	}
+	SljitAppendSinkPrimitive candidate;
+	candidate.sink_idx = sink_idx;
+	candidate.selected_hash_join_idx = hash_join_idx;
+	primitive = candidate;
+	return true;
+}
+
 static SljitAppendSinkPrimitive SljitBindSelectedHashJoinAppendSinkPrimitive(const vector<SljitExecutableRegionOp> &ops,
                                                                              idx_t hash_join_idx, idx_t sink_idx) {
-	if (!SljitCanBindSelectedHashJoinAppendSinkPrimitive(ops, hash_join_idx, sink_idx)) {
+	SljitAppendSinkPrimitive primitive;
+	if (!SljitTryBindSelectedHashJoinAppendSinkPrimitive(ops, hash_join_idx, sink_idx, primitive)) {
 		throw InternalException("SLJIT append sink primitive cannot bind selected hash-join input");
 	}
-	SljitAppendSinkPrimitive primitive;
-	primitive.sink_idx = sink_idx;
-	primitive.selected_hash_join_idx = hash_join_idx;
 	return primitive;
 }
 

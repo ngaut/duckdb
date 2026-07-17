@@ -50,6 +50,11 @@ SLJIT owns:
 - generated code, executable ownership, and backend runtime adapters;
 - backend-specific stage receipts and exact delegation reporting.
 
+Executable-memory policy is selected at build time by platform: Apple uses
+SLJIT's `MAP_JIT` allocator, Linux uses distinct pooled RW and RX mappings, and
+Windows and other supported POSIX systems use per-allocation W^X transitions.
+Generated code is never published through a generic RWX allocator.
+
 The backend must not infer semantic support from mutable runtime state. It may
 specialize physical access only after a semantic recipe has been admitted.
 
@@ -209,6 +214,17 @@ or copy its state.
 Source progress, sink backpressure, cancellation, and recursive-pipeline state
 remain core-owned. The backend can coalesce source fetches only through the
 declared source budget and must preserve exact operator protocol.
+
+The structural execution-region plan belongs to the physical pipeline and is
+built at most once. Recursive rescheduling resets source state and refreshes
+dynamic readiness, but it does not reconstruct the graph, rerun capability
+analysis, or emit duplicate decision telemetry for every recursive iteration.
+
+Backend registration freezes name, description, runner kind, and region
+support before publication. The registry mutex protects only that owned
+metadata and backend lifetime. Dynamic availability callbacks run after the
+mutex is released; because backends are never unregistered, snapshots retain a
+stable backend lifetime without executing extension code under a core lock.
 
 Generated code and its owning allocation are published as one lifetime unit.
 Readers acquire the published owner before reading a callable. Lazy publication

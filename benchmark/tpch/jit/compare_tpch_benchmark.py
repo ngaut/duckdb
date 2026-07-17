@@ -143,14 +143,6 @@ def auto_runtime_preserved(
     return raw_slowdown_s <= allowed_s
 
 
-def has_auto_decision(row: dict) -> bool:
-    return (
-        row_int(row, "auto_compiled_regions")
-        + row_int(row, "auto_unsupported_decisions")
-        + row_int(row, "auto_skipped_decisions")
-    ) > 0
-
-
 def has_auto_accelerated_runner(row: dict) -> bool:
     return (
         row_int(row, "auto_compiled_regions") > 0
@@ -248,7 +240,7 @@ def compare_auto_speed(
         baseline_runtime_reference_s = max(base_auto_s, baseline_auto_upper_s)
         allowed_s = allowed_auto_slowdown(baseline_runtime_reference_s, max_slowdown_ratio, max_slowdown_s)
         raw_ceiling_s = baseline_runtime_reference_s + allowed_s
-        if (has_auto_decision(base) or has_auto_decision(candidate)) and not auto_runtime_preserved(
+        if not auto_runtime_preserved(
             base,
             candidate,
             max_slowdown_ratio,

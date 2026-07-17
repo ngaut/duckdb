@@ -107,6 +107,22 @@ class TestExactRegressionThresholds(unittest.TestCase):
         )
         self.assertEqual([failure["category"] for failure in failures], ["auto_runtime"])
 
+    def test_raw_runtime_regression_fails_without_decision_counters(self) -> None:
+        base = gap("0.090", "0.100")
+        candidate = gap("0.120", "0.200")
+        for row in (base, candidate):
+            row["auto_compiled_regions"] = "0"
+            row["auto_runner_cost_selected_accelerated_runner_count"] = "0"
+        failures = compare_auto_speed(
+            {"18": base},
+            {"18": candidate},
+            ["18"],
+            Decimal("1.02"),
+            Decimal("0.002"),
+            Decimal("0.98"),
+        )
+        self.assertEqual([failure["category"] for failure in failures], ["auto_runtime"])
+
     def test_baseline_observed_max_defines_raw_runtime_envelope(self) -> None:
         failures = compare_auto_speed(
             {"18": gap("0.090")},

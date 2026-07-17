@@ -100,8 +100,7 @@ struct SljitPostJoinProjectionStrategy {
 	}
 
 	bool HasProjectionChain() const {
-		return first_projection_idx != DConstants::INVALID_INDEX &&
-		       final_projection_idx != DConstants::INVALID_INDEX;
+		return first_projection_idx != DConstants::INVALID_INDEX && final_projection_idx != DConstants::INVALID_INDEX;
 	}
 
 	idx_t hash_join_idx = DConstants::INVALID_INDEX;
@@ -124,8 +123,7 @@ struct SljitPostJoinProjectionPrimitive {
 	const char *direct_projection_disabled_reason = nullptr;
 
 	bool HasProjectionChain() const {
-		return first_projection_idx != DConstants::INVALID_INDEX &&
-		       final_projection_idx != DConstants::INVALID_INDEX;
+		return first_projection_idx != DConstants::INVALID_INDEX && final_projection_idx != DConstants::INVALID_INDEX;
 	}
 
 	void EnableStringSetCaseGroupedPayload(const SljitStringSetCaseGroupedPayloadProjection &descriptor) {
@@ -170,19 +168,31 @@ static bool SljitCanBindPostJoinProjectionPrimitive(const vector<SljitExecutable
 	return true;
 }
 
+static bool SljitTryBindPostJoinProjectionPrimitive(const vector<SljitExecutableRegionOp> &ops, idx_t hash_join_idx,
+                                                    idx_t first_projection_idx, idx_t final_projection_idx,
+                                                    SljitPostJoinProjectionPrimitive &primitive) {
+	if (!SljitCanBindPostJoinProjectionPrimitive(ops, hash_join_idx, first_projection_idx, final_projection_idx)) {
+		return false;
+	}
+	SljitPostJoinProjectionPrimitive candidate;
+	candidate.hash_join_idx = hash_join_idx;
+	candidate.first_projection_idx = first_projection_idx;
+	candidate.final_projection_idx = final_projection_idx;
+	candidate.trace_projection_idx =
+	    first_projection_idx == DConstants::INVALID_INDEX ? hash_join_idx : first_projection_idx;
+	primitive = candidate;
+	return true;
+}
+
 static SljitPostJoinProjectionPrimitive SljitBindPostJoinProjectionPrimitive(const vector<SljitExecutableRegionOp> &ops,
                                                                              idx_t hash_join_idx,
                                                                              idx_t first_projection_idx,
                                                                              idx_t final_projection_idx) {
-	if (!SljitCanBindPostJoinProjectionPrimitive(ops, hash_join_idx, first_projection_idx, final_projection_idx)) {
+	SljitPostJoinProjectionPrimitive primitive;
+	if (!SljitTryBindPostJoinProjectionPrimitive(ops, hash_join_idx, first_projection_idx, final_projection_idx,
+	                                             primitive)) {
 		throw InternalException("SLJIT post-join projection primitive cannot bind requested operators");
 	}
-	SljitPostJoinProjectionPrimitive primitive;
-	primitive.hash_join_idx = hash_join_idx;
-	primitive.first_projection_idx = first_projection_idx;
-	primitive.final_projection_idx = final_projection_idx;
-	primitive.trace_projection_idx =
-	    first_projection_idx == DConstants::INVALID_INDEX ? hash_join_idx : first_projection_idx;
 	return primitive;
 }
 

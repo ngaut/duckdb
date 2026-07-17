@@ -166,6 +166,29 @@ TEST_CASE("JIT auto vectorized skips avoid telemetry when unobserved", "[api][ji
 	REQUIRE(!manager.GetCounters().empty());
 }
 
+TEST_CASE("Recursive rescheduling reuses the pipeline execution-region plan", "[api][jit]") {
+	DuckDB db;
+	Connection con(db);
+	auto &manager = ExecutionRegionManager::Get(*con.context);
+
+	ConfigureSljitForCoverage(con);
+	ConfigureJitDecisionTrace(con);
+	ClearJitTrace(manager, true);
+	auto result = con.Query("WITH RECURSIVE counter(value) AS ("
+	                        "SELECT 1::BIGINT "
+	                        "UNION ALL "
+	                        "SELECT value + 1 FROM counter WHERE value < 1000"
+	                        ") SELECT sum(value) FROM counter");
+	REQUIRE_NO_FAIL(*result);
+	REQUIRE(result->RowCount() == 1);
+	REQUIRE(result->GetValue(0, 0).ToString() == "500500");
+
+	// Decision telemetry is emitted while the pipeline plan is built. It must
+	// stay proportional to the fixed pipeline graph, not to 1,000 recursive
+	// iterations.
+	REQUIRE(manager.GetEvents().size() <= 10);
+}
+
 TEST_CASE("JIT full pipeline uses explicit append sink contract", "[api][jit]") {
 	DuckDB db;
 	Connection con(db);

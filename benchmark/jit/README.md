@@ -33,8 +33,9 @@ build/reldebug/test/unittest "[jit]"
 
 The generic matrix covers expression, filter, nullable, persistent scan,
 grouped aggregate, DISTINCT, numeric join, string join, selected-view, and
-parallel workload classes. Workload definitions and their thread-specific
-floors are the source of truth in `benchmark/jit/generic_benchmark.py`.
+parallel workload classes. Workload definitions, thread-specific speedup
+floors, accepted raw-runtime baselines, and derived noise ceilings are the
+source of truth in `benchmark/jit/generic_benchmark.py`.
 
 Candidate runs use five alternating repetitions:
 

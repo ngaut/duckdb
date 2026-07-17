@@ -144,6 +144,16 @@ def apply_baseline_state_contract(args: argparse.Namespace, state: dict) -> None
             f"requested timing mode {args.timing_mode} does not match accepted baseline "
             f"timing mode {state_timing_mode}: {args.baseline_state}"
         )
+    state_policies = state.get("policies")
+    if state_policies != list(DEFAULT_POLICIES):
+        raise TPCHConfigurationError(
+            f"accepted baseline must contain policies {' '.join(DEFAULT_POLICIES)}: {args.baseline_state}"
+        )
+    if args.policies != state_policies:
+        raise TPCHConfigurationError(
+            f"requested policies {' '.join(args.policies)} do not match accepted baseline "
+            f"policies {' '.join(state_policies)}: {args.baseline_state}"
+        )
     state_queries = set(normalize_tpch_query_ids(state.get("queries", [])))
     missing_queries = [query for query in args.queries if query not in state_queries]
     if missing_queries:
@@ -171,6 +181,7 @@ def write_baseline_state(
         "updated_at": datetime.now().isoformat(timespec="seconds"),
         "source": source,
         "queries": list(args.queries),
+        "policies": list(args.policies),
         "scale_factor": args.scale_factor,
         "threads": args.threads,
         "repeats": repeats if repeats is not None else args.repeats,
@@ -608,11 +619,16 @@ def candidate_qualifies_for_direct_promotion(args: argparse.Namespace, compariso
         and not args.trace_runtime
         and not args.jit_verify
         and not args.jit_cbo_setting
+        and args.policies == list(DEFAULT_POLICIES)
         and args.repeats == promotion_recheck_repeats(args)
     )
 
 
 def validate_baseline_write_configuration(args: argparse.Namespace) -> None:
+    if args.policies != list(DEFAULT_POLICIES):
+        raise TPCHConfigurationError(
+            f"accepted baselines require policies {' '.join(DEFAULT_POLICIES)}"
+        )
     if args.timing_mode != "production":
         raise TPCHConfigurationError("accepted baselines require --timing-mode production")
     if args.event_log_size != 0 or args.trace_decisions or args.trace_runtime:

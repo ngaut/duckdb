@@ -1,5 +1,9 @@
 #include "test_jit_helpers.hpp"
 
+#include <chrono>
+#include <condition_variable>
+#include <thread>
+
 using namespace duckdb;
 
 namespace duckdb {
@@ -32,6 +36,91 @@ public:
 
 	ExecutionRunnerKind RunnerKind() const override {
 		return ExecutionRunnerKind::COMPILED_GPU;
+	}
+};
+
+struct UnitTestExecutionRegionBackendMetadataCalls {
+	idx_t name = 0;
+	idx_t description = 0;
+	idx_t runner_kind = 0;
+	idx_t supports_regions = 0;
+};
+
+class UnitTestMetadataExecutionRegionBackend : public ExecutionRegionBackend {
+public:
+	explicit UnitTestMetadataExecutionRegionBackend(UnitTestExecutionRegionBackendMetadataCalls &calls_p)
+	    : calls(calls_p) {
+	}
+
+	string Name() const override {
+		calls.get().name++;
+		return "unit_test_metadata_backend";
+	}
+
+	string Description() const override {
+		calls.get().description++;
+		return "unit test metadata backend";
+	}
+
+	ExecutionRunnerKind RunnerKind() const override {
+		calls.get().runner_kind++;
+		return ExecutionRunnerKind::COMPILED_VECTORIZED;
+	}
+
+	bool SupportsRegions() const override {
+		calls.get().supports_regions++;
+		return true;
+	}
+
+private:
+	reference<UnitTestExecutionRegionBackendMetadataCalls> calls;
+};
+
+struct UnitTestBlockingAvailabilityState {
+	std::mutex lock;
+	std::condition_variable condition;
+	bool entered = false;
+	bool release = false;
+};
+
+class UnitTestBlockingAvailabilityBackend : public ExecutionRegionBackend {
+public:
+	explicit UnitTestBlockingAvailabilityBackend(UnitTestBlockingAvailabilityState &state_p) : state(state_p) {
+	}
+
+	string Name() const override {
+		return "unit_test_blocking_availability_backend";
+	}
+
+	string Description() const override {
+		return "unit test blocking availability backend";
+	}
+
+	bool IsAvailable() const override {
+		auto &availability = state.get();
+		std::unique_lock<std::mutex> guard(availability.lock);
+		availability.entered = true;
+		availability.condition.notify_all();
+		availability.condition.wait(guard, [&availability] { return availability.release; });
+		return true;
+	}
+
+	bool SupportsRegions() const override {
+		return true;
+	}
+
+private:
+	reference<UnitTestBlockingAvailabilityState> state;
+};
+
+class UnitTestConcurrentRegistrationBackend : public ExecutionRegionBackend {
+public:
+	string Name() const override {
+		return "unit_test_concurrent_registration_backend";
+	}
+
+	string Description() const override {
+		return "unit test concurrent registration backend";
 	}
 };
 
@@ -208,6 +297,88 @@ TEST_CASE("Execution region manager registers and selects database-local backend
 		}
 	}
 	REQUIRE(selected_backend);
+}
+
+TEST_CASE("Execution region manager freezes backend metadata at registration", "[api][jit]") {
+	UnitTestExecutionRegionBackendMetadataCalls calls;
+	JitTestDatabase test;
+	test.manager.RegisterBackend(make_uniq<UnitTestMetadataExecutionRegionBackend>(calls),
+	                             EXECUTION_REGION_BACKEND_ABI_VERSION);
+
+	REQUIRE(calls.name == 1);
+	REQUIRE(calls.description == 1);
+	REQUIRE(calls.runner_kind == 1);
+	REQUIRE(calls.supports_regions == 1);
+
+	auto backends = test.manager.GetBackends(&test.context);
+	REQUIRE(test.manager.HasAvailableBackendForRunner(test.context, ExecutionRunnerKind::COMPILED_VECTORIZED));
+	string backend_name;
+	auto backend = test.manager.SelectBackend(test.context, backend_name);
+	REQUIRE(backend);
+
+	REQUIRE(calls.name == 1);
+	REQUIRE(calls.description == 1);
+	REQUIRE(calls.runner_kind == 1);
+	REQUIRE(calls.supports_regions == 1);
+}
+
+TEST_CASE("Execution region backend availability does not hold the registry lock", "[api][jit]") {
+	UnitTestBlockingAvailabilityState availability;
+	JitTestDatabase test;
+	test.manager.RegisterBackend(make_uniq<UnitTestBlockingAvailabilityBackend>(availability),
+	                             EXECUTION_REGION_BACKEND_ABI_VERSION);
+
+	std::exception_ptr reader_error;
+	std::thread reader([&] {
+		try {
+			test.manager.GetBackends();
+		} catch (...) {
+			reader_error = std::current_exception();
+		}
+	});
+
+	bool availability_entered;
+	{
+		std::unique_lock<std::mutex> guard(availability.lock);
+		availability_entered = availability.condition.wait_for(guard, std::chrono::seconds(2),
+		                                                       [&availability] { return availability.entered; });
+	}
+
+	std::mutex registration_lock;
+	std::condition_variable registration_condition;
+	bool registration_complete = false;
+	unique_ptr<std::thread> registrar;
+	if (availability_entered) {
+		registrar = make_uniq<std::thread>([&] {
+			test.manager.RegisterBackend(make_uniq<UnitTestConcurrentRegistrationBackend>(),
+			                             EXECUTION_REGION_BACKEND_ABI_VERSION);
+			{
+				std::lock_guard<std::mutex> guard(registration_lock);
+				registration_complete = true;
+			}
+			registration_condition.notify_all();
+		});
+	}
+
+	bool registration_completed_without_waiting = false;
+	if (registrar) {
+		std::unique_lock<std::mutex> guard(registration_lock);
+		registration_completed_without_waiting = registration_condition.wait_for(
+		    guard, std::chrono::seconds(2), [&registration_complete] { return registration_complete; });
+	}
+	{
+		std::lock_guard<std::mutex> guard(availability.lock);
+		availability.release = true;
+	}
+	availability.condition.notify_all();
+	reader.join();
+	if (registrar) {
+		registrar->join();
+	}
+
+	REQUIRE(availability_entered);
+	REQUIRE(registration_completed_without_waiting);
+	REQUIRE(reader_error == nullptr);
 }
 
 TEST_CASE("JIT CBO can select a GPU physical runner when GPU benefit wins", "[api][jit]") {

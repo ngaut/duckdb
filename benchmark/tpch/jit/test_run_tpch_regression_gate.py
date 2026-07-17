@@ -89,6 +89,7 @@ class TestBaselineStateContract(unittest.TestCase):
             scale_factor=scale_factor,
             threads=1,
             timing_mode="production",
+            policies=["off", "auto"],
             queries=["01", "22"],
         )
 
@@ -97,6 +98,7 @@ class TestBaselineStateContract(unittest.TestCase):
             "scale_factor": 10.0,
             "threads": 1,
             "timing_mode": "production",
+            "policies": ["off", "auto"],
             "queries": [f"{query:02d}" for query in range(1, 23)],
         }
 
@@ -109,6 +111,17 @@ class TestBaselineStateContract(unittest.TestCase):
         with self.assertRaisesRegex(TPCHConfigurationError, "does not match accepted baseline"):
             apply_baseline_state_contract(self.args(1.0), self.state())
 
+    def test_rejects_missing_or_mismatched_policy_contract(self) -> None:
+        missing = self.state()
+        del missing["policies"]
+        with self.assertRaisesRegex(TPCHConfigurationError, "must contain policies"):
+            apply_baseline_state_contract(self.args(None), missing)
+
+        args = self.args(None)
+        args.policies = ["auto"]
+        with self.assertRaisesRegex(TPCHConfigurationError, "do not match accepted baseline"):
+            apply_baseline_state_contract(args, self.state())
+
     def test_baseline_state_records_production_jit_configuration(self) -> None:
         temporary_directory = tempfile.TemporaryDirectory()
         self.addCleanup(temporary_directory.cleanup)
@@ -117,6 +130,7 @@ class TestBaselineStateContract(unittest.TestCase):
             allow_partial_baseline=True,
             baseline_state=root / "state.json",
             queries=["01"],
+            policies=["off", "auto"],
             scale_factor=1.0,
             threads=1,
             repeats=10,
@@ -142,6 +156,7 @@ class TestBaselineStateContract(unittest.TestCase):
         self.assertFalse(state["trace_runtime"])
         self.assertFalse(state["jit_verify"])
         self.assertEqual(state["jit_cbo_settings"], [])
+        self.assertEqual(state["policies"], ["off", "auto"])
         self.assertFalse(Path(state["current_baseline"]).is_absolute())
         accepted_baseline = load_baseline_state(args.baseline_state)
         self.assertEqual(accepted_baseline.parent, args.baseline_state.parent.resolve())
@@ -255,6 +270,7 @@ class TestPromotionRepeats(unittest.TestCase):
             trace_runtime=False,
             jit_verify=False,
             jit_cbo_setting=[],
+            policies=["off", "auto"],
         )
 
     def test_reuses_passing_ten_repeat_production_candidate(self) -> None:
@@ -282,6 +298,13 @@ class TestPromotionRepeats(unittest.TestCase):
                 self.assertFalse(candidate_qualifies_for_direct_promotion(args, True))
                 with self.assertRaises(TPCHConfigurationError):
                     validate_baseline_write_configuration(args)
+
+    def test_partial_policy_set_never_qualifies_for_promotion(self) -> None:
+        args = self.promotion_args(10)
+        args.policies = ["auto"]
+        self.assertFalse(candidate_qualifies_for_direct_promotion(args, True))
+        with self.assertRaisesRegex(TPCHConfigurationError, "require policies"):
+            validate_baseline_write_configuration(args)
 
 
 class TestPromotionArtifactMerge(unittest.TestCase):

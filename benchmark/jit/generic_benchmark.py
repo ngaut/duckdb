@@ -7,6 +7,7 @@ from __future__ import annotations
 import argparse
 import collections
 import csv
+import math
 import statistics
 import sys
 from pathlib import Path
@@ -340,9 +341,8 @@ GENERIC_WORKLOADS = (
         ),
         "minimum_auto_speedup": 1.12,
         # Independent ten-pair promotion after separating payload and group vector-shape facts measured 1.498x at T1
-        # and 1.381x at T4. Preserve the speedup with roughly 6% margin and raw JIT-auto runtime with 10% margin.
+        # and 1.381x at T4. Preserve the speedup with roughly 6% margin.
         "minimum_auto_speedup_by_threads": {1: 1.40, 4: 1.30},
-        "maximum_auto_median_us_by_threads": {1: 56500, 4: 18000},
         "max_auto_slowdown": 1.05,
         "requires_compiled_auto": True,
     },
@@ -361,7 +361,6 @@ GENERIC_WORKLOADS = (
         ),
         "minimum_auto_speedup": 1.00,
         "minimum_auto_speedup_by_threads": {1: 1.40, 4: 1.28},
-        "maximum_auto_median_us_by_threads": {1: 55000, 4: 17500},
         "max_auto_slowdown": 1.05,
         "requires_compiled_auto": True,
     },
@@ -382,7 +381,6 @@ GENERIC_WORKLOADS = (
         ),
         "minimum_auto_speedup": 1.00,
         "minimum_auto_speedup_by_threads": {1: 1.38, 4: 1.23},
-        "maximum_auto_median_us_by_threads": {1: 52000, 4: 17250},
         "max_auto_slowdown": 1.05,
         "requires_compiled_auto": True,
     },
@@ -399,10 +397,9 @@ GENERIC_WORKLOADS = (
         "minimum_auto_speedup": 0.0,
         # Two ten-pair qualifications put the generated median at 31.292 ms in
         # isolation and 31.764 ms in the full suite, both faster than the prior
-        # 31.938 ms promotion. Guard that raw runtime independently from the
-        # same-run ratio, which moves when the non-JIT median shifts.
+        # 31.938 ms promotion. Guard the same-run ratio independently from raw
+        # runtime, which has its own suite-wide baseline below.
         "minimum_auto_speedup_by_threads": {1: 3.00, 4: 1.75},
-        "maximum_auto_median_us_by_threads": {1: 33500},
         "max_auto_slowdown": 1.05,
         "requires_compiled_auto": True,
     },
@@ -419,10 +416,9 @@ GENERIC_WORKLOADS = (
         "minimum_auto_speedup": 0.0,
         # The generated path improved from 35.526 ms to 35.193 ms over ten
         # alternating T1 pairs while the same-run non-JIT median shifted enough
-        # to move the ratio from 2.843x to 2.729x. Preserve raw JIT performance
-        # independently; retain the ratio only as a secondary noise signal.
+        # to move the ratio from 2.843x to 2.729x. Preserve the ratio as an
+        # independent signal; raw JIT performance uses the suite-wide baseline.
         "minimum_auto_speedup_by_threads": {1: 2.65, 4: 1.45},
-        "maximum_auto_median_us_by_threads": {1: 37000},
         "max_auto_slowdown": 1.05,
         "requires_compiled_auto": True,
     },
@@ -444,7 +440,6 @@ GENERIC_WORKLOADS = (
         # Progression-boundary publication then removed parallel finalize rehash,
         # measuring 3.106x at T4 (9.550 ms). Ratchet relative and raw contracts.
         "minimum_auto_speedup_by_threads": {1: 3.10, 4: 2.90},
-        "maximum_auto_median_us_by_threads": {1: 31500, 4: 11000},
         "max_auto_slowdown": 1.05,
         "requires_compiled_auto": True,
     },
@@ -485,7 +480,6 @@ GENERIC_WORKLOADS = (
         # promoted T1 contract and ratchet the parallel raw and relative contracts.
         "minimum_auto_speedup": 0.0,
         "minimum_auto_speedup_by_threads": {1: 2.80, 4: 3.00},
-        "maximum_auto_median_us_by_threads": {1: 175000, 4: 57000},
         "max_auto_slowdown": 1.05,
         "requires_compiled_auto": True,
     },
@@ -551,7 +545,6 @@ GENERIC_WORKLOADS = (
         # 5.553, and 5.502 ms. Protect both the paired margin and independent raw
         # ceilings.
         "minimum_auto_speedup_by_threads": {1: 1.35, 4: 1.09},
-        "maximum_auto_median_us_by_threads": {1: 10000, 4: 5750},
         "max_auto_slowdown": 1.05,
         "requires_compiled_auto": True,
         "required_runtime_paths": (
@@ -617,6 +610,46 @@ GENERIC_WORKLOADS = (
     },
 )
 
+# Checked-in production baselines are ten-pair medians from the qualification
+# host. Every production workload has an independent raw-runtime contract at
+# both supported thread counts. The allowance absorbs host scheduling noise;
+# it is not derived from the non-JIT runtime and therefore cannot hide a shared
+# slowdown.
+GENERIC_AUTO_BASELINE_MEDIAN_US_BY_THREADS = {
+    "range_expr": {1: 68742, 4: 69080},
+    "range_filter": {1: 60094, 4: 60580},
+    "range_case": {1: 95654, 4: 95752},
+    "range_multi_aggregate": {1: 112305, 4: 111816},
+    "scan_expr": {1: 26235, 4: 7957},
+    "scan_filter": {1: 55284, 4: 15738},
+    "scan_mixed_numeric_string_filter": {1: 44954, 4: 13540},
+    "scan_like_fragments": {1: 71148, 4: 20496},
+    "scan_low_cardinality_like": {1: 38382, 4: 11019},
+    "scan_compare_columns": {1: 32118, 4: 9715},
+    "scan_nullable": {1: 48810, 4: 13840},
+    "scan_nullable_multi": {1: 89454, 4: 24724},
+    "grouped_scan": {1: 50578, 4: 14622},
+    "grouped_dense_multi_aggregate": {1: 65633, 4: 18988},
+    "grouped_non_null_string_multi_aggregate": {1: 63156, 4: 19376},
+    "grouped_non_null_string_reference_aggregate": {1: 49834, 4: 15432},
+    "grouped_selective_multi_aggregate": {1: 48256, 4: 15754},
+    "grouped_selective_conjunction_multi_aggregate": {1: 46576, 4: 15386},
+    "grouped_selective_three_way_conjunction_multi_aggregate": {1: 44259, 4: 15123},
+    "grouped_sorted_runs": {1: 30162, 4: 9820},
+    "grouped_affine_sorted_runs": {1: 34841, 4: 10985},
+    "grouped_sparse_sorted_runs": {1: 30882, 4: 9585},
+    "grouped_nullable_sorted_runs": {1: 58374, 4: 17248},
+    "grouped_wide_sorted_runs": {1: 175896, 4: 55625},
+    "grouped_distinct": {1: 27898, 4: 16904},
+    "join_range": {1: 11748, 4: 11589},
+    "join_exact_filter_build": {1: 9643, 4: 5935},
+    "join_string_complementary_grouped_sum": {1: 73160, 4: 30440},
+    "join_string_complementary_medium_groups": {1: 96678, 4: 36320},
+}
+
+BASELINE_RELATIVE_NOISE_ALLOWANCE = 0.05
+BASELINE_ABSOLUTE_NOISE_ALLOWANCE_US = 1000
+
 RUN_FIELDS = (
     "workload",
     "policy",
@@ -643,6 +676,7 @@ SUMMARY_FIELDS = (
     "runtime_events",
     "compile_errors",
     "minimum_auto_speedup",
+    "baseline_auto_median_us",
     "maximum_auto_median_us",
     "max_auto_slowdown",
 )
@@ -655,7 +689,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--out-dir", type=Path, default=None)
     parser.add_argument("--backend", default="sljit")
     parser.add_argument("--jit-extension", default="jit_sljit")
-    parser.add_argument("--threads", type=int, default=1)
+    parser.add_argument("--threads", type=int, choices=(1, 4), default=1)
     parser.add_argument(
         "--repeats",
         type=int,
@@ -803,7 +837,21 @@ def minimum_auto_speedup(workload: dict, threads: int) -> float:
 
 
 def maximum_auto_median_us(workload: dict, threads: int) -> int:
-    return int(workload.get("maximum_auto_median_us_by_threads", {}).get(threads, 0))
+    baseline = baseline_auto_median_us(workload, threads)
+    noise_allowance = max(
+        BASELINE_ABSOLUTE_NOISE_ALLOWANCE_US,
+        math.ceil(baseline * BASELINE_RELATIVE_NOISE_ALLOWANCE),
+    )
+    return baseline + noise_allowance
+
+
+def baseline_auto_median_us(workload: dict, threads: int) -> int:
+    baselines = workload.get("baseline_auto_median_us_by_threads")
+    if baselines is None:
+        baselines = GENERIC_AUTO_BASELINE_MEDIAN_US_BY_THREADS.get(workload["name"], {})
+    if threads not in baselines:
+        raise ValueError(f"{workload['name']}: no raw JIT baseline for {threads} threads")
+    return int(baselines[threads])
 
 
 def summarize(rows: list[dict], workloads: tuple[dict, ...], threads: int, trace_runtime: bool) -> list[dict]:
@@ -838,6 +886,7 @@ def summarize(rows: list[dict], workloads: tuple[dict, ...], threads: int, trace
                     "runtime_events": sum(row_int(row, "runtime_events") for row in workload_rows),
                     "compile_errors": sum(row_int(row, "compile_errors") for row in workload_rows),
                     "minimum_auto_speedup": minimum_auto_speedup(workload, threads),
+                    "baseline_auto_median_us": baseline_auto_median_us(workload, threads),
                     "maximum_auto_median_us": maximum_auto_median_us(workload, threads),
                     "max_auto_slowdown": workload.get("max_auto_slowdown", 1.05),
                 }
@@ -869,7 +918,7 @@ def verification_failures(
                 failures.append(f"{name}: auto speedup {speedup:.3f} below required {minimum_speedup:.3f}")
             maximum_median_us = maximum_auto_median_us(workload, threads)
             auto_median_us = int(round(float(auto["median_s"]) * 1_000_000))
-            if maximum_median_us and auto_median_us > maximum_median_us:
+            if auto_median_us > maximum_median_us:
                 failures.append(f"{name}: auto median {auto_median_us} us exceeds raw ceiling {maximum_median_us} us")
             max_slowdown = float(workload.get("max_auto_slowdown", 1.05))
             if speedup > 0 and speedup < 1.0 / max_slowdown:

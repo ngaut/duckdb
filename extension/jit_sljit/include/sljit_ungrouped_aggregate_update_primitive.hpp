@@ -48,27 +48,49 @@ static bool SljitCanBindFilteredUngroupedAggregateUpdatePrimitive(const vector<S
 	       ops[aggregate_idx].aggregate_update.filtered_update.IsExecutable();
 }
 
+static bool SljitTryBindUngroupedAggregateUpdatePrimitive(const vector<SljitExecutableRegionOp> &ops,
+                                                          idx_t aggregate_idx,
+                                                          SljitUngroupedAggregateUpdatePrimitive &primitive) {
+	if (!SljitCanBindUngroupedAggregateUpdatePrimitive(ops, aggregate_idx)) {
+		return false;
+	}
+	SljitUngroupedAggregateUpdatePrimitive candidate;
+	candidate.aggregate_idx = aggregate_idx;
+	candidate.strategy = SljitUngroupedAggregateUpdateStrategyKind::DIRECT_PRIMITIVE_PAYLOAD_UPDATE;
+	primitive = candidate;
+	return true;
+}
+
+static bool SljitTryBindFilteredUngroupedAggregateUpdatePrimitive(const vector<SljitExecutableRegionOp> &ops,
+                                                                  idx_t filter_idx, idx_t aggregate_idx,
+                                                                  SljitUngroupedAggregateUpdatePrimitive &primitive) {
+	if (!SljitCanBindFilteredUngroupedAggregateUpdatePrimitive(ops, filter_idx, aggregate_idx)) {
+		return false;
+	}
+	SljitUngroupedAggregateUpdatePrimitive candidate;
+	candidate.aggregate_idx = aggregate_idx;
+	candidate.filter_idx = filter_idx;
+	candidate.strategy = SljitUngroupedAggregateUpdateStrategyKind::FILTERED_PRIMITIVE_PAYLOAD_UPDATE;
+	primitive = candidate;
+	return true;
+}
+
 static SljitUngroupedAggregateUpdatePrimitive
 SljitBindUngroupedAggregateUpdatePrimitive(const vector<SljitExecutableRegionOp> &ops, idx_t aggregate_idx) {
-	if (!SljitCanBindUngroupedAggregateUpdatePrimitive(ops, aggregate_idx)) {
+	SljitUngroupedAggregateUpdatePrimitive primitive;
+	if (!SljitTryBindUngroupedAggregateUpdatePrimitive(ops, aggregate_idx, primitive)) {
 		throw InternalException("SLJIT ungrouped aggregate update primitive cannot bind requested operator");
 	}
-	SljitUngroupedAggregateUpdatePrimitive primitive;
-	primitive.aggregate_idx = aggregate_idx;
-	primitive.strategy = SljitUngroupedAggregateUpdateStrategyKind::DIRECT_PRIMITIVE_PAYLOAD_UPDATE;
 	return primitive;
 }
 
 static SljitUngroupedAggregateUpdatePrimitive
 SljitBindFilteredUngroupedAggregateUpdatePrimitive(const vector<SljitExecutableRegionOp> &ops, idx_t filter_idx,
                                                    idx_t aggregate_idx) {
-	if (!SljitCanBindFilteredUngroupedAggregateUpdatePrimitive(ops, filter_idx, aggregate_idx)) {
+	SljitUngroupedAggregateUpdatePrimitive primitive;
+	if (!SljitTryBindFilteredUngroupedAggregateUpdatePrimitive(ops, filter_idx, aggregate_idx, primitive)) {
 		throw InternalException("SLJIT filtered ungrouped aggregate update primitive cannot bind requested operators");
 	}
-	SljitUngroupedAggregateUpdatePrimitive primitive;
-	primitive.aggregate_idx = aggregate_idx;
-	primitive.filter_idx = filter_idx;
-	primitive.strategy = SljitUngroupedAggregateUpdateStrategyKind::FILTERED_PRIMITIVE_PAYLOAD_UPDATE;
 	return primitive;
 }
 

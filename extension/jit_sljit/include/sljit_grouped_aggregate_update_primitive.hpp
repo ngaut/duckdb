@@ -126,31 +126,52 @@ static bool SljitGroupedAggregateUpdateHasDedicatedBackend(const vector<SljitExe
 	return SljitChooseGroupedAggregateUpdateStrategy(op) != SljitGroupedAggregateUpdateStrategyKind::INVALID;
 }
 
-static SljitGroupedAggregateUpdatePrimitive
-SljitBindGroupedAggregateUpdatePrimitive(const vector<SljitExecutableRegionOp> &ops, idx_t aggregate_idx) {
+static bool SljitTryBindGroupedAggregateUpdatePrimitive(const vector<SljitExecutableRegionOp> &ops, idx_t aggregate_idx,
+                                                        SljitGroupedAggregateUpdatePrimitive &primitive) {
 	if (!SljitCanBindGroupedAggregateUpdatePrimitive(ops, aggregate_idx)) {
-		throw InternalException("SLJIT grouped aggregate update primitive cannot bind requested operator");
+		return false;
 	}
 	auto strategy = SljitChooseGroupedAggregateUpdateStrategy(ops[aggregate_idx]);
 	if (strategy == SljitGroupedAggregateUpdateStrategyKind::INVALID) {
+		return false;
+	}
+	SljitGroupedAggregateUpdatePrimitive candidate;
+	candidate.aggregate_idx = aggregate_idx;
+	candidate.strategy = strategy;
+	primitive = std::move(candidate);
+	return true;
+}
+
+static bool SljitTryBindFilteredGroupedAggregateUpdatePrimitive(const vector<SljitExecutableRegionOp> &ops,
+                                                                idx_t filter_idx, idx_t aggregate_idx,
+                                                                SljitGroupedAggregateUpdatePrimitive &primitive) {
+	if (!SljitCanBindFilteredGroupedAggregateUpdatePrimitive(ops, filter_idx, aggregate_idx)) {
+		return false;
+	}
+	SljitGroupedAggregateUpdatePrimitive candidate;
+	candidate.aggregate_idx = aggregate_idx;
+	candidate.filter_idx = filter_idx;
+	candidate.strategy = SljitGroupedAggregateUpdateStrategyKind::FILTERED_PRIMITIVE_PAYLOAD_UPDATE;
+	primitive = std::move(candidate);
+	return true;
+}
+
+static SljitGroupedAggregateUpdatePrimitive
+SljitBindGroupedAggregateUpdatePrimitive(const vector<SljitExecutableRegionOp> &ops, idx_t aggregate_idx) {
+	SljitGroupedAggregateUpdatePrimitive primitive;
+	if (!SljitTryBindGroupedAggregateUpdatePrimitive(ops, aggregate_idx, primitive)) {
 		throw InternalException("SLJIT grouped aggregate update primitive has no dedicated backend");
 	}
-	SljitGroupedAggregateUpdatePrimitive primitive;
-	primitive.aggregate_idx = aggregate_idx;
-	primitive.strategy = strategy;
 	return primitive;
 }
 
 static SljitGroupedAggregateUpdatePrimitive
 SljitBindFilteredGroupedAggregateUpdatePrimitive(const vector<SljitExecutableRegionOp> &ops, idx_t filter_idx,
                                                  idx_t aggregate_idx) {
-	if (!SljitCanBindFilteredGroupedAggregateUpdatePrimitive(ops, filter_idx, aggregate_idx)) {
+	SljitGroupedAggregateUpdatePrimitive primitive;
+	if (!SljitTryBindFilteredGroupedAggregateUpdatePrimitive(ops, filter_idx, aggregate_idx, primitive)) {
 		throw InternalException("SLJIT filtered grouped aggregate update primitive cannot bind requested operators");
 	}
-	SljitGroupedAggregateUpdatePrimitive primitive;
-	primitive.aggregate_idx = aggregate_idx;
-	primitive.filter_idx = filter_idx;
-	primitive.strategy = SljitGroupedAggregateUpdateStrategyKind::FILTERED_PRIMITIVE_PAYLOAD_UPDATE;
 	return primitive;
 }
 

@@ -53,21 +53,36 @@ static bool SljitCanBindProjectionChainPrimitive(const vector<SljitExecutableReg
 	return SljitCanBindProjectionChainPrimitive(ops, projection_idx, projection_idx);
 }
 
-static SljitProjectionChainPrimitive SljitBindProjectionChainPrimitive(const vector<SljitExecutableRegionOp> &ops,
-                                                                       idx_t first_projection_idx,
-                                                                       idx_t final_projection_idx) {
+static bool SljitTryBindProjectionChainPrimitive(const vector<SljitExecutableRegionOp> &ops, idx_t first_projection_idx,
+                                                 idx_t final_projection_idx, SljitProjectionChainPrimitive &primitive) {
 	if (!SljitCanBindProjectionChainPrimitive(ops, first_projection_idx, final_projection_idx)) {
-		throw InternalException("SLJIT projection-chain primitive cannot bind requested operator");
+		return false;
 	}
-	SljitProjectionChainPrimitive primitive;
-	primitive.first_projection_idx = first_projection_idx;
-	primitive.final_projection_idx = final_projection_idx;
+	SljitProjectionChainPrimitive candidate;
+	candidate.first_projection_idx = first_projection_idx;
+	candidate.final_projection_idx = final_projection_idx;
 	if (first_projection_idx != final_projection_idx) {
 		auto composed_projection = make_shared_ptr<SljitExecutableRegionOp>();
 		if (SljitBuildProjectionChainComposedProjection(ops, first_projection_idx, final_projection_idx,
 		                                                *composed_projection)) {
-			primitive.bound_composed_projection = std::move(composed_projection);
+			candidate.bound_composed_projection = std::move(composed_projection);
 		}
+	}
+	primitive = std::move(candidate);
+	return true;
+}
+
+static bool SljitTryBindProjectionChainPrimitive(const vector<SljitExecutableRegionOp> &ops, idx_t projection_idx,
+                                                 SljitProjectionChainPrimitive &primitive) {
+	return SljitTryBindProjectionChainPrimitive(ops, projection_idx, projection_idx, primitive);
+}
+
+static SljitProjectionChainPrimitive SljitBindProjectionChainPrimitive(const vector<SljitExecutableRegionOp> &ops,
+                                                                       idx_t first_projection_idx,
+                                                                       idx_t final_projection_idx) {
+	SljitProjectionChainPrimitive primitive;
+	if (!SljitTryBindProjectionChainPrimitive(ops, first_projection_idx, final_projection_idx, primitive)) {
+		throw InternalException("SLJIT projection-chain primitive cannot bind requested operator");
 	}
 	return primitive;
 }

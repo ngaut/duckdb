@@ -43,8 +43,10 @@ protected:
 	                             SljitFullPipelineRecipe &recipe) const;
 
 	SljitFullPipelinePrimitiveStep MakeHashJoinProbeMaterializeStep(idx_t hash_join_idx) const;
+	bool TryMakeHashJoinProbeMaterializeStep(idx_t hash_join_idx, SljitFullPipelinePrimitiveStep &step) const;
 
 	SljitFullPipelinePrimitiveStep MakeHashJoinProbeSelectionStep(idx_t hash_join_idx) const;
+	bool TryMakeHashJoinProbeSelectionStep(idx_t hash_join_idx, SljitFullPipelinePrimitiveStep &step) const;
 
 	SljitFullPipelinePrimitiveStep MakeHashJoinProbeProjectionInputStep(idx_t hash_join_idx) const;
 

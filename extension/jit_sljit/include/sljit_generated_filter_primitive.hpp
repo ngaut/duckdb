@@ -30,13 +30,23 @@ static bool SljitCanBindGeneratedFilterPrimitive(const vector<SljitExecutableReg
 	return filter_idx < ops.size() && ops[filter_idx].kind == SljitNativeRegionOpKind::FILTER && ops[filter_idx].filter;
 }
 
+static bool SljitTryBindGeneratedFilterPrimitive(const vector<SljitExecutableRegionOp> &ops, idx_t filter_idx,
+                                                 SljitGeneratedFilterPrimitive &primitive) {
+	if (!SljitCanBindGeneratedFilterPrimitive(ops, filter_idx)) {
+		return false;
+	}
+	SljitGeneratedFilterPrimitive candidate;
+	candidate.filter_idx = filter_idx;
+	primitive = candidate;
+	return true;
+}
+
 static SljitGeneratedFilterPrimitive SljitBindGeneratedFilterPrimitive(const vector<SljitExecutableRegionOp> &ops,
                                                                        idx_t filter_idx) {
-	if (!SljitCanBindGeneratedFilterPrimitive(ops, filter_idx)) {
+	SljitGeneratedFilterPrimitive primitive;
+	if (!SljitTryBindGeneratedFilterPrimitive(ops, filter_idx, primitive)) {
 		throw InternalException("SLJIT generated filter primitive cannot bind requested operator");
 	}
-	SljitGeneratedFilterPrimitive primitive;
-	primitive.filter_idx = filter_idx;
 	return primitive;
 }
 
