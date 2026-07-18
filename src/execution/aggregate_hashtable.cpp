@@ -454,6 +454,9 @@ unique_ptr<PartitionedTupleData>
 GroupedAggregateHashTable::AcquirePartitionedData(optional_ptr<TupleDataRowLocationRemap> row_location_remap) {
 	dense_single_field_target_cache.Disable();
 	row_pointer_descriptor_target_cache.Reset();
+	// The dictionary group cache stores row pointers; acquiring the data hands those rows
+	// to a collection that may copy them, so the cache must not survive.
+	state.compressed_group_state.dictionary_id = string();
 	const bool needs_unpartitioned_data = radix_bits >= UNPARTITIONED_RADIX_BITS_THRESHOLD || unpartitioned_data;
 	if (unpartitioned_data) {
 		// Flush/unpin unpartitioned data and append to partitioned data
@@ -1022,7 +1025,11 @@ void GroupedAggregateHashTable::ReinsertTuples(PartitionedTupleData &data) {
 				// Find an empty entry
 				auto ht_offset = ApplyBitMask(hash);
 				D_ASSERT(ht_offset == hash % capacity);
+				idx_t probe_count = 0;
 				while (entries[ht_offset].IsOccupied()) {
+					if (DUCKDB_UNLIKELY(++probe_count == capacity)) {
+						throw InternalException("Reinserting tuples cannot find an empty hash table entry");
+					}
 					SaltIncrementAndWrap(ht_offset, salt, bitmask);
 				}
 				auto &entry = entries[ht_offset];
@@ -1499,28 +1506,6 @@ idx_t GroupedAggregateHashTable::FindOrCreateGroupsInternal(DataChunk &groups, V
 
 	addresses_v.Flatten();
 	const auto addresses = FlatVector::GetDataMutable<data_ptr_t>(addresses_v);
-
-	if (skip_lookups) {
-		// Just appending now
-		auto append_start = AggregateTraceStart(recorder);
-		partitioned_data->AppendUnified(state.partitioned_append_state, state.group_chunk,
-		                                *FlatVector::IncrementalSelectionVector(), chunk_size);
-		RowOperations::InitializeStates(*layout_ptr, state.partitioned_append_state.chunk_state.row_locations,
-		                                *FlatVector::IncrementalSelectionVector(), chunk_size);
-
-		const auto row_locations =
-		    FlatVector::GetData<data_ptr_t>(state.partitioned_append_state.chunk_state.row_locations);
-		const auto &row_sel = state.partitioned_append_state.reverse_partition_sel;
-		for (idx_t i = 0; i < chunk_size; i++) {
-			const auto row_idx = row_sel.get_index_unsafe(i);
-			const auto &row_location = row_locations[row_idx];
-			addresses[i] = row_location;
-		}
-		count += chunk_size;
-		FlatVector::SetSize(addresses_v, chunk_size);
-		RecordAggregateTraceStage(recorder, "find_or_create.append_skip_lookup", append_start);
-		return chunk_size;
-	}
 
 	// Compute the entry in the table based on the hash using a modulo,
 	// and precompute the hash salts for faster comparison below
@@ -2511,7 +2496,7 @@ bool GroupedAggregateHashTable::TryFindOrCreateGroupsFastInternal(
 		}
 		return true;
 	}
-	if (skip_lookups || !entries || group_count == 0 || group_count > AGGREGATE_MAX_FAST_GROUPS) {
+	if (!entries || group_count == 0 || group_count > AGGREGATE_MAX_FAST_GROUPS) {
 		return false;
 	}
 	D_ASSERT(group_count + 1 == layout_ptr->ColumnCount());
