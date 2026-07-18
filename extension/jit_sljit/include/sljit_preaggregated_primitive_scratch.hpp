@@ -23,6 +23,42 @@ struct SljitPreaggregatedPrimitivePayloadDeltas {
 	vector<uint8_t> value_is_set;
 };
 
+// One authority for how each primitive kind stores its per-group deltas: counts
+// accumulate in int64_values, int64 sums add value_is_set, hugeint sums use
+// hugeint_values with value_is_set. Shape-only sizing, reset, slice, copy, and
+// append checks derive from these facts; typed accumulate and state-extract
+// logic keeps explicit kind switches.
+struct SljitPreaggregatedPayloadShape {
+	bool supported = false;
+	bool uses_int64_values = false;
+	bool uses_hugeint_values = false;
+	bool uses_value_is_set = false;
+};
+
+static inline SljitPreaggregatedPayloadShape SljitPreaggregatedPayloadShapeForKind(AggregatePrimitiveUpdateKind kind) {
+	SljitPreaggregatedPayloadShape shape;
+	switch (kind) {
+	case AggregatePrimitiveUpdateKind::COUNT_STAR:
+	case AggregatePrimitiveUpdateKind::COUNT:
+		shape.supported = true;
+		shape.uses_int64_values = true;
+		break;
+	case AggregatePrimitiveUpdateKind::SUM_INT64:
+		shape.supported = true;
+		shape.uses_int64_values = true;
+		shape.uses_value_is_set = true;
+		break;
+	case AggregatePrimitiveUpdateKind::SUM_HUGEINT:
+		shape.supported = true;
+		shape.uses_hugeint_values = true;
+		shape.uses_value_is_set = true;
+		break;
+	default:
+		break;
+	}
+	return shape;
+}
+
 enum class SljitPreaggregatedPrimitivePayloadLayout : uint8_t { PER_LANE, SHARED_AFFINE };
 
 struct SljitPreaggregatedPrimitiveAggregateScratch {
@@ -76,20 +112,14 @@ struct SljitPreaggregatedPrimitiveAggregateScratch {
 			payload.int64_values.clear();
 			payload.hugeint_values.clear();
 			payload.value_is_set.clear();
-			switch (payload.kind) {
-			case AggregatePrimitiveUpdateKind::COUNT_STAR:
-			case AggregatePrimitiveUpdateKind::COUNT:
-			case AggregatePrimitiveUpdateKind::SUM_INT64:
+			auto shape = SljitPreaggregatedPayloadShapeForKind(payload.kind);
+			if (shape.uses_int64_values) {
 				payload.int64_values.reserve(capacity);
-				break;
-			case AggregatePrimitiveUpdateKind::SUM_HUGEINT:
-				payload.hugeint_values.reserve(capacity);
-				break;
-			default:
-				break;
 			}
-			if (payload.kind == AggregatePrimitiveUpdateKind::SUM_INT64 ||
-			    payload.kind == AggregatePrimitiveUpdateKind::SUM_HUGEINT) {
+			if (shape.uses_hugeint_values) {
+				payload.hugeint_values.reserve(capacity);
+			}
+			if (shape.uses_value_is_set) {
 				payload.value_is_set.reserve(capacity);
 			}
 		}
@@ -109,20 +139,17 @@ struct SljitPreaggregatedPrimitiveAggregateScratch {
 		Prepare(lanes, capacity);
 		group_row_counts.resize(capacity);
 		for (auto &payload : payloads) {
-			switch (payload.kind) {
-			case AggregatePrimitiveUpdateKind::COUNT_STAR:
-			case AggregatePrimitiveUpdateKind::COUNT:
-			case AggregatePrimitiveUpdateKind::SUM_INT64:
-				payload.int64_values.resize(capacity);
-				break;
-			case AggregatePrimitiveUpdateKind::SUM_HUGEINT:
-				payload.hugeint_values.resize(capacity);
-				break;
-			default:
+			auto shape = SljitPreaggregatedPayloadShapeForKind(payload.kind);
+			if (!shape.supported) {
 				return false;
 			}
-			if (payload.kind == AggregatePrimitiveUpdateKind::SUM_INT64 ||
-			    payload.kind == AggregatePrimitiveUpdateKind::SUM_HUGEINT) {
+			if (shape.uses_int64_values) {
+				payload.int64_values.resize(capacity);
+			}
+			if (shape.uses_hugeint_values) {
+				payload.hugeint_values.resize(capacity);
+			}
+			if (shape.uses_value_is_set) {
 				payload.value_is_set.resize(capacity);
 			}
 		}
@@ -149,24 +176,17 @@ struct SljitPreaggregatedPrimitiveAggregateScratch {
 			if (!lane || payload.kind != lane->kind) {
 				return false;
 			}
-			switch (payload.kind) {
-			case AggregatePrimitiveUpdateKind::COUNT_STAR:
-			case AggregatePrimitiveUpdateKind::COUNT:
-				if (payload.int64_values.size() != capacity) {
-					return false;
-				}
-				break;
-			case AggregatePrimitiveUpdateKind::SUM_INT64:
-				if (payload.int64_values.size() != capacity || payload.value_is_set.size() != capacity) {
-					return false;
-				}
-				break;
-			case AggregatePrimitiveUpdateKind::SUM_HUGEINT:
-				if (payload.hugeint_values.size() != capacity || payload.value_is_set.size() != capacity) {
-					return false;
-				}
-				break;
-			default:
+			auto shape = SljitPreaggregatedPayloadShapeForKind(payload.kind);
+			if (!shape.supported) {
+				return false;
+			}
+			if (shape.uses_int64_values && payload.int64_values.size() != capacity) {
+				return false;
+			}
+			if (shape.uses_hugeint_values && payload.hugeint_values.size() != capacity) {
+				return false;
+			}
+			if (shape.uses_value_is_set && payload.value_is_set.size() != capacity) {
 				return false;
 			}
 		}
@@ -302,26 +322,23 @@ ResetFixedPreaggregatedPrimitiveScratchGroup(SljitPreaggregatedPrimitiveAggregat
 		if (!lane || payload.kind != lane->kind) {
 			return false;
 		}
-		switch (payload.kind) {
-		case AggregatePrimitiveUpdateKind::COUNT_STAR:
-		case AggregatePrimitiveUpdateKind::COUNT:
-		case AggregatePrimitiveUpdateKind::SUM_INT64:
+		auto shape = SljitPreaggregatedPayloadShapeForKind(payload.kind);
+		if (!shape.supported) {
+			return false;
+		}
+		if (shape.uses_int64_values) {
 			if (group_idx >= payload.int64_values.size()) {
 				return false;
 			}
 			payload.int64_values[group_idx] = 0;
-			break;
-		case AggregatePrimitiveUpdateKind::SUM_HUGEINT:
+		}
+		if (shape.uses_hugeint_values) {
 			if (group_idx >= payload.hugeint_values.size()) {
 				return false;
 			}
 			payload.hugeint_values[group_idx] = 0;
-			break;
-		default:
-			return false;
 		}
-		if (payload.kind == AggregatePrimitiveUpdateKind::SUM_INT64 ||
-		    payload.kind == AggregatePrimitiveUpdateKind::SUM_HUGEINT) {
+		if (shape.uses_value_is_set) {
 			if (group_idx >= payload.value_is_set.size()) {
 				return false;
 			}
@@ -385,30 +402,27 @@ static bool CopyPreaggregatedPrimitiveScratchRangeToFixed(
 		    target_payload.kind != source_payload.kind) {
 			return false;
 		}
-		switch (source_payload.kind) {
-		case AggregatePrimitiveUpdateKind::COUNT_STAR:
-		case AggregatePrimitiveUpdateKind::COUNT:
-		case AggregatePrimitiveUpdateKind::SUM_INT64:
+		auto shape = SljitPreaggregatedPayloadShapeForKind(source_payload.kind);
+		if (!shape.supported) {
+			return false;
+		}
+		if (shape.uses_int64_values) {
 			if (target_payload.int64_values.size() < target_offset + count) {
 				return false;
 			}
 			std::copy(source_payload.int64_values.begin() + source_begin,
 			          source_payload.int64_values.begin() + source_end,
 			          target_payload.int64_values.begin() + target_begin);
-			break;
-		case AggregatePrimitiveUpdateKind::SUM_HUGEINT:
+		}
+		if (shape.uses_hugeint_values) {
 			if (target_payload.hugeint_values.size() < target_offset + count) {
 				return false;
 			}
 			std::copy(source_payload.hugeint_values.begin() + source_begin,
 			          source_payload.hugeint_values.begin() + source_end,
 			          target_payload.hugeint_values.begin() + target_begin);
-			break;
-		default:
-			return false;
 		}
-		if (source_payload.kind == AggregatePrimitiveUpdateKind::SUM_INT64 ||
-		    source_payload.kind == AggregatePrimitiveUpdateKind::SUM_HUGEINT) {
+		if (shape.uses_value_is_set) {
 			if (target_payload.value_is_set.size() < target_offset + count) {
 				return false;
 			}
@@ -452,26 +466,17 @@ static bool CanSlicePreaggregatedPrimitiveScratch(const SljitPreaggregatedPrimit
 		if (!lane || source_payload.kind != lane->kind) {
 			return false;
 		}
-		switch (source_payload.kind) {
-		case AggregatePrimitiveUpdateKind::COUNT_STAR:
-		case AggregatePrimitiveUpdateKind::COUNT:
-			if (source_payload.int64_values.size() < offset + count) {
-				return false;
-			}
-			break;
-		case AggregatePrimitiveUpdateKind::SUM_INT64:
-			if (source_payload.int64_values.size() < offset + count ||
-			    source_payload.value_is_set.size() < offset + count) {
-				return false;
-			}
-			break;
-		case AggregatePrimitiveUpdateKind::SUM_HUGEINT:
-			if (source_payload.hugeint_values.size() < offset + count ||
-			    source_payload.value_is_set.size() < offset + count) {
-				return false;
-			}
-			break;
-		default:
+		auto shape = SljitPreaggregatedPayloadShapeForKind(source_payload.kind);
+		if (!shape.supported) {
+			return false;
+		}
+		if (shape.uses_int64_values && source_payload.int64_values.size() < offset + count) {
+			return false;
+		}
+		if (shape.uses_hugeint_values && source_payload.hugeint_values.size() < offset + count) {
+			return false;
+		}
+		if (shape.uses_value_is_set && source_payload.value_is_set.size() < offset + count) {
 			return false;
 		}
 	}
@@ -504,32 +509,26 @@ static bool AppendPreaggregatedPrimitivePayloadRange(const SljitPreaggregatedPri
 	}
 	const auto begin = UnsafeNumericCast<int64_t>(offset);
 	const auto end = UnsafeNumericCast<int64_t>(offset + count);
-	switch (source_payload.kind) {
-	case AggregatePrimitiveUpdateKind::COUNT_STAR:
-	case AggregatePrimitiveUpdateKind::COUNT:
-		target_payload.int64_values.insert(target_payload.int64_values.end(),
-		                                   source_payload.int64_values.begin() + begin,
-		                                   source_payload.int64_values.begin() + end);
+	auto shape = SljitPreaggregatedPayloadShapeForKind(source_payload.kind);
+	if (shape.supported) {
+		if (shape.uses_int64_values) {
+			target_payload.int64_values.insert(target_payload.int64_values.end(),
+			                                   source_payload.int64_values.begin() + begin,
+			                                   source_payload.int64_values.begin() + end);
+		}
+		if (shape.uses_hugeint_values) {
+			target_payload.hugeint_values.insert(target_payload.hugeint_values.end(),
+			                                     source_payload.hugeint_values.begin() + begin,
+			                                     source_payload.hugeint_values.begin() + end);
+		}
+		if (shape.uses_value_is_set) {
+			target_payload.value_is_set.insert(target_payload.value_is_set.end(),
+			                                   source_payload.value_is_set.begin() + begin,
+			                                   source_payload.value_is_set.begin() + end);
+		}
 		return true;
-	case AggregatePrimitiveUpdateKind::SUM_INT64:
-		target_payload.int64_values.insert(target_payload.int64_values.end(),
-		                                   source_payload.int64_values.begin() + begin,
-		                                   source_payload.int64_values.begin() + end);
-		target_payload.value_is_set.insert(target_payload.value_is_set.end(),
-		                                   source_payload.value_is_set.begin() + begin,
-		                                   source_payload.value_is_set.begin() + end);
-		return true;
-	case AggregatePrimitiveUpdateKind::SUM_HUGEINT:
-		target_payload.hugeint_values.insert(target_payload.hugeint_values.end(),
-		                                     source_payload.hugeint_values.begin() + begin,
-		                                     source_payload.hugeint_values.begin() + end);
-		target_payload.value_is_set.insert(target_payload.value_is_set.end(),
-		                                   source_payload.value_is_set.begin() + begin,
-		                                   source_payload.value_is_set.begin() + end);
-		return true;
-	default:
-		return false;
 	}
+	return false;
 }
 
 static bool SlicePreaggregatedPrimitiveScratch(const SljitPreaggregatedPrimitiveAggregateScratch &source,
@@ -613,25 +612,17 @@ static bool MergePreaggregatedPrimitiveScratchGroup(const SljitPreaggregatedPrim
 		if (source_payload.kind != target_payload.kind) {
 			return false;
 		}
-		switch (source_payload.kind) {
-		case AggregatePrimitiveUpdateKind::COUNT_STAR:
-		case AggregatePrimitiveUpdateKind::COUNT:
-			if (target_payload.int64_values.size() <= target_idx) {
-				return false;
-			}
-			break;
-		case AggregatePrimitiveUpdateKind::SUM_INT64:
-			if (target_payload.int64_values.size() <= target_idx || target_payload.value_is_set.size() <= target_idx) {
-				return false;
-			}
-			break;
-		case AggregatePrimitiveUpdateKind::SUM_HUGEINT:
-			if (target_payload.hugeint_values.size() <= target_idx ||
-			    target_payload.value_is_set.size() <= target_idx) {
-				return false;
-			}
-			break;
-		default:
+		auto shape = SljitPreaggregatedPayloadShapeForKind(source_payload.kind);
+		if (!shape.supported) {
+			return false;
+		}
+		if (shape.uses_int64_values && target_payload.int64_values.size() <= target_idx) {
+			return false;
+		}
+		if (shape.uses_hugeint_values && target_payload.hugeint_values.size() <= target_idx) {
+			return false;
+		}
+		if (shape.uses_value_is_set && target_payload.value_is_set.size() <= target_idx) {
 			return false;
 		}
 	}
