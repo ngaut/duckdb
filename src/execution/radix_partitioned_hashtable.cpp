@@ -856,7 +856,6 @@ public:
 	idx_t local_sink_capacity;
 	//! Avoid checking the full allocation footprint for every small vector while still enforcing the budget during
 	//! large accelerated batches.
-	idx_t next_memory_check_count;
 
 	//! Data that is abandoned ends up here (only if we're doing external aggregation)
 	unique_ptr<PartitionedTupleData> abandoned_data;
@@ -865,7 +864,7 @@ public:
 RadixHTLocalSinkState::RadixHTLocalSinkState(ClientContext &, const RadixPartitionedHashTable &radix_ht)
     : existing_group_addresses(LogicalType::POINTER), adapted(false), direct_append_attempted_rows(0),
       direct_append_new_rows(0), direct_append_adapted(false), registered(false),
-      local_sink_capacity(DConstants::INVALID_INDEX), next_memory_check_count(0) {
+      local_sink_capacity(DConstants::INVALID_INDEX) {
 	// If there are no groups we create a fake group so everything has the same group
 	group_chunk.InitializeEmpty(radix_ht.group_types);
 	if (radix_ht.grouping_set.empty()) {
@@ -878,7 +877,6 @@ void RadixHTLocalSinkState::ResetForReuse(const RadixPartitionedHashTable &radix
 	direct_append_attempted_rows = 0;
 	direct_append_new_rows = 0;
 	direct_append_adapted = false;
-	next_memory_check_count = 0;
 	if (radix_ht.grouping_set.empty()) {
 		group_chunk.data[0].Reference(Value::TINYINT(42), count_t(STANDARD_VECTOR_SIZE));
 	}
@@ -990,6 +988,9 @@ void DecideAdaptation(RadixHTGlobalSinkState &gstate, RadixHTLocalSinkState &lst
 	}
 
 	auto &ht = *lstate.ht;
+	if (!ht.HLLEnabled()) {
+		return; // No statistics to adapt on; the grow strategy never enabled the HLL
+	}
 	const auto sink_count = ht.GetSinkCount();
 	D_ASSERT(sink_count >= RadixHTLocalSinkState::ADAPTIVITY_THRESHOLD);
 
@@ -1163,11 +1164,7 @@ static void FinishRadixHTSinkState(ClientContext &context, RadixHTGlobalSinkStat
 	MaybeAdaptRadixHTSinkState(gstate, lstate, row_location_remap);
 
 	const auto resize_threshold = GroupedAggregateHashTable::ResizeThreshold(lstate.local_sink_capacity);
-	const bool memory_check_due = ht.Count() >= lstate.next_memory_check_count;
-	if (memory_check_due) {
-		lstate.next_memory_check_count = ht.Count() + STANDARD_VECTOR_SIZE * 32;
-	}
-	const bool memory_limit_exceeded = memory_check_due && RadixHTMemoryLimitExceeded(gstate, ht);
+	const bool memory_limit_exceeded = RadixHTMemoryLimitExceeded(gstate, ht);
 	const bool pointer_capacity_exhausted =
 	    !ht.LookupsSkipped() && ht.Count() + STANDARD_VECTOR_SIZE >= resize_threshold;
 	if (!memory_limit_exceeded && !pointer_capacity_exhausted) {
@@ -1556,6 +1553,11 @@ bool RadixPartitionedHashTable::TryFindOrCreateRowPointerGroupStateTargets(
 		return false;
 	}
 	RecordRadixTraceStage(recorder, "row_pointer_grouped_targets.lookup", lookup_start);
+	auto &gstate = input.global_state.Cast<RadixHTGlobalSinkState>();
+	auto &lstate = input.local_state.Cast<RadixHTLocalSinkState>();
+	auto finish_start = RadixTraceStart(recorder);
+	FinishRadixHTSinkState(context.client, gstate, lstate);
+	RecordRadixTraceStage(recorder, "row_pointer_grouped_targets.finish_sink_state", finish_start);
 	return true;
 }
 
@@ -1580,6 +1582,11 @@ bool RadixPartitionedHashTable::TryFindOrCreateInputVectorGroupStateTargets(
 		return false;
 	}
 	RecordRadixTraceStage(recorder, "direct_input_vector_grouped_targets.lookup", lookup_start);
+	auto &gstate = input.global_state.Cast<RadixHTGlobalSinkState>();
+	auto &lstate = input.local_state.Cast<RadixHTLocalSinkState>();
+	auto finish_start = RadixTraceStart(recorder);
+	FinishRadixHTSinkState(context.client, gstate, lstate);
+	RecordRadixTraceStage(recorder, "direct_input_vector_grouped_targets.finish_sink_state", finish_start);
 	return true;
 }
 
