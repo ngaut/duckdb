@@ -7242,6 +7242,10 @@ void GroupedAggregateHashTable::Combine(GroupedAggregateHashTable &other) {
 
 void GroupedAggregateHashTable::Combine(TupleDataCollection &other_data, optional_ptr<atomic<double>> progress,
                                         optional_ptr<TupleDataRowLocationRemap> state_remap) {
+	// Combined groups are unknown to the dense target cache; a later dense append
+	// consulting a cached range that lacks them would recreate an existing group.
+	// Phase ordering makes that unreachable today; disabling makes it impossible.
+	dense_single_field_target_cache.Disable();
 	D_ASSERT(other_data.GetLayout().GetAggrWidth() == layout_ptr->GetAggrWidth());
 	D_ASSERT(other_data.GetLayout().GetDataWidth() == layout_ptr->GetDataWidth());
 	D_ASSERT(other_data.GetLayout().GetRowWidth() == layout_ptr->GetRowWidth());

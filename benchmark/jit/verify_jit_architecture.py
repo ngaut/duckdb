@@ -1484,6 +1484,36 @@ def verify_runtime_proofs_are_typed() -> None:
     )
 
 
+def verify_cache_keys_use_stable_identities() -> None:
+    """Fast-path caches must not key validity on reusable addresses.
+
+    A buffer or entry address can be recycled by the allocator with an equal
+    element count, replaying stale cached state against different content (the
+    2026-07-18 dictionary-filter ABA bug). Cache validity must compare stable
+    identities (dictionary ids, value keys, epochs), never raw addresses.
+    """
+    filter_state = read("src/include/duckdb/planner/table_filter_state.hpp")
+    if "fast_dictionary_matches_dictionary_id" not in filter_state:
+        raise AssertionError("dictionary filter match cache must be keyed by the stable dictionary id")
+    reject_regex(
+        "address-keyed cache validity in filter state",
+        (r"const void \*fast_\w*(?:cache|match|entry)",),
+        ("src/include/duckdb/planner/table_filter_state.hpp",),
+    )
+    aggregate_ht = read("src/execution/aggregate_hashtable.cpp")
+    for relocating_event in (
+        "void GroupedAggregateHashTable::Abandon",
+        "void GroupedAggregateHashTable::Repartition",
+        "GroupedAggregateHashTable::AcquirePartitionedData",
+        "void GroupedAggregateHashTable::Combine",
+    ):
+        event_body = aggregate_ht.split(relocating_event, 1)
+        if len(event_body) < 2 or "dense_single_field_target_cache.Disable()" not in event_body[1][:2500]:
+            raise AssertionError(
+                f"row-relocating event must disable the dense address cache: {relocating_event}"
+            )
+
+
 def verify_runner_cost_schema_single_authority() -> None:
     """Every summable runner-cost field must be visited by the schema walks.
 
@@ -1928,6 +1958,7 @@ def main() -> None:
     verify_regular_hash_join_direct_aggregate_storage_contract()
     verify_runtime_proofs_are_typed()
     verify_runner_cost_schema_single_authority()
+    verify_cache_keys_use_stable_identities()
     verify_production_contract_ownership()
     verify_benchmark_repetition_budget()
     verify_bound_direct_join_terminal_contract()
