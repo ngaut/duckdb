@@ -472,7 +472,7 @@ public:
 		}
 		auto single_grouping = GetSingleGroupingSinkState();
 		return single_grouping.grouping.table_data.TryUpdateNewPrimitiveGroups(
-		    context, input, single_grouping.input, sink_info, lanes, recorder, finish, dense_domain);
+		    context, input, single_grouping.input, sink_info, lanes, recorder, dense_domain);
 	}
 
 	bool TryUpdateNewGroupsWithPayloadInput(
@@ -487,7 +487,7 @@ public:
 		auto single_grouping = GetSingleGroupingSinkState();
 		return single_grouping.grouping.table_data.TryUpdateNewPrimitiveGroupsWithPayloadInput(
 		    context, groups, payload_input, payload_source_indices, single_grouping.input, sink_info, lanes, recorder,
-		    finish, precomputed_hashes, dense_domain);
+		    precomputed_hashes, dense_domain);
 	}
 
 	bool TryAppendNewGroups(DataChunk &input, const ExecutionRegionSinkInfo &sink_info,
@@ -499,7 +499,7 @@ public:
 		}
 		auto single_grouping = GetSingleGroupingSinkState();
 		return single_grouping.grouping.table_data.TryAppendNewPrimitiveGroups(
-		    context, input, single_grouping.input, sink_info, lanes, recorder, finish, dense_domain);
+		    context, input, single_grouping.input, sink_info, lanes, recorder, dense_domain);
 	}
 
 	bool TryUpdateNewGroupsWithSelectedStateAddresses(
@@ -513,7 +513,7 @@ public:
 		}
 		auto single_grouping = GetSingleGroupingSinkState();
 		return single_grouping.grouping.table_data.TryUpdateNewGroupsWithSelectedStateAddresses(
-		    context, input, single_grouping.input, sink_info, update_function, update_state, recorder, finish,
+		    context, input, single_grouping.input, sink_info, update_function, update_state, recorder,
 		    precomputed_hashes, dense_domain);
 	}
 
@@ -528,7 +528,7 @@ public:
 		}
 		auto single_grouping = GetSingleGroupingSinkState();
 		return single_grouping.grouping.table_data.TryUpdateGroupKeysWithSelectedStateAddresses(
-		    context, groups, single_grouping.input, sink_info, update_function, update_state, recorder, finish,
+		    context, groups, single_grouping.input, sink_info, update_function, update_state, recorder,
 		    precomputed_hashes, dense_domain);
 	}
 
@@ -570,7 +570,7 @@ public:
 		}
 		auto single_grouping = GetSingleGroupingSinkState();
 		return single_grouping.grouping.table_data.TryUpdateInputVectorGroupCountOne(
-		    context, payload_input, count, single_grouping.input, group_sources, sink_info, lane, recorder, finish,
+		    context, payload_input, count, single_grouping.input, group_sources, sink_info, lane, recorder,
 		    dense_domain);
 	}
 
@@ -587,7 +587,7 @@ public:
 		auto single_grouping = GetSingleGroupingSinkState();
 		return single_grouping.grouping.table_data.TryUpdateRowPointerGroupPrimitivePayloads(
 		    context, payload_input, row_pointers, count, group_sources, payload_source_indices, single_grouping.input,
-		    sink_info, lanes, recorder, finish);
+		    sink_info, lanes, recorder);
 	}
 
 	bool TryAppendNewGroupsWithStateAddresses(
@@ -600,8 +600,7 @@ public:
 		}
 		auto single_grouping = GetSingleGroupingSinkState();
 		return single_grouping.grouping.table_data.TryAppendNewGroupsWithStateAddresses(
-		    context, input, single_grouping.input, sink_info, update_function, update_state, recorder, finish,
-		    dense_domain);
+		    context, input, single_grouping.input, sink_info, update_function, update_state, recorder, dense_domain);
 	}
 
 	bool TryAppendNewGroupKeysWithStateAddresses(
@@ -614,8 +613,7 @@ public:
 		}
 		auto single_grouping = GetSingleGroupingSinkState();
 		return single_grouping.grouping.table_data.TryAppendNewGroupKeysWithStateAddresses(
-		    context, groups, single_grouping.input, sink_info, update_function, update_state, recorder, finish,
-		    dense_domain);
+		    context, groups, single_grouping.input, sink_info, update_function, update_state, recorder, dense_domain);
 	}
 
 	bool TryEnableProvenUniqueAppend(DataChunk &groups,
@@ -644,7 +642,7 @@ public:
 		}
 		auto single_grouping = GetSingleGroupingSinkState();
 		return single_grouping.grouping.table_data.TryResolveNewGroupAddresses(context, input, single_grouping.input,
-		                                                                       sink_info, addresses, recorder, finish);
+		                                                                       sink_info, addresses, recorder);
 	}
 
 	void RecordDirectStateAddressUpdates(idx_t count) override {
@@ -1600,9 +1598,9 @@ static bool TryFinalizeDistinctCountFastPath(ExecutionContext &context, const Ha
 	payload_source_indices.push_back(fast_path.payload_index);
 	Vector group_hashes(LogicalType::HASH);
 	compact_groups.Hash(group_hashes);
-	if (grouping_data.table_data.TryUpdateNewPrimitiveGroupsWithPayloadInput(
-	        context, compact_groups, distinct_rows, payload_source_indices, sink_input, sink_info, lanes, nullptr, true,
-	        group_hashes)) {
+	if (grouping_data.table_data.TryUpdateNewPrimitiveGroupsWithPayloadInput(context, compact_groups, distinct_rows,
+	                                                                         payload_source_indices, sink_input,
+	                                                                         sink_info, lanes, nullptr, group_hashes)) {
 		return true;
 	}
 

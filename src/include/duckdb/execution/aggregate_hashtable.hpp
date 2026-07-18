@@ -194,6 +194,9 @@ public:
 	bool TryContinueProvenUniqueAppend(DataChunk &groups, ExecutionGroupedAggregateAppendProof append_proof = {});
 	//! Whether append-only rows require final duplicate reconciliation.
 	bool LookupsSkippedRequireFinalCombine() const;
+	//! Start a fresh lookup epoch if adaptive appends left the pointer table behind the
+	//! materialized rows: abandon the appended epochs and resume pointer-table ownership.
+	void EnsureLookupEpoch();
 	//! Return bounded local covering intervals when the append-only uniqueness proof is still intact.
 	optional_ptr<const vector<GroupedAggregateProvenUniqueRange>> GetProvenUniqueAppendRanges() const;
 	//! Enable/disable HLL
@@ -372,6 +375,9 @@ private:
 	//! Cold append-only proof state is kept after the existing hot hash-table members so adding the
 	//! contract does not shift descriptor lookup, aggregate update, or cache state.
 	bool skip_lookups_require_final_combine;
+	//! Whether abandoned append epochs force final duplicate reconciliation even after
+	//! lookups resume (set when a lookup epoch follows adaptive appends).
+	bool epochs_require_final_combine = false;
 	PhysicalType proven_unique_append_key_type;
 	bool proven_unique_append_has_last_key;
 	int64_t proven_unique_append_last_signed_key;

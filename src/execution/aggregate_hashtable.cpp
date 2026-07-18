@@ -906,13 +906,25 @@ bool GroupedAggregateHashTable::TryContinueProvenUniqueAppend(DataChunk &groups,
 }
 
 bool GroupedAggregateHashTable::LookupsSkippedRequireFinalCombine() const {
-	return skip_lookups && skip_lookups_require_final_combine;
+	return (skip_lookups && skip_lookups_require_final_combine) || epochs_require_final_combine;
+}
+
+void GroupedAggregateHashTable::EnsureLookupEpoch() {
+	if (!skip_lookups) {
+		return;
+	}
+	// Adaptive appends left rows the pointer table does not cover, so lookups may only
+	// run against a fresh epoch. The abandoned epochs can duplicate future groups,
+	// which makes the final combine mandatory and voids any uniqueness proof.
+	Abandon();
+	skip_lookups = false;
+	epochs_require_final_combine = true;
 }
 
 optional_ptr<const vector<GroupedAggregateProvenUniqueRange>>
 GroupedAggregateHashTable::GetProvenUniqueAppendRanges() const {
-	if (!skip_lookups || skip_lookups_require_final_combine || !proven_unique_append_has_last_key ||
-	    proven_unique_append_ranges.empty()) {
+	if (!skip_lookups || skip_lookups_require_final_combine || epochs_require_final_combine ||
+	    !proven_unique_append_has_last_key || proven_unique_append_ranges.empty()) {
 		return nullptr;
 	}
 	return &proven_unique_append_ranges;
@@ -936,7 +948,16 @@ void GroupedAggregateHashTable::Resize(idx_t size) {
 	if (Count() != 0 && size < capacity) {
 		throw InternalException("Cannot downsize a non-empty hash table!");
 	}
-	D_ASSERT(Count() == 0 || Count() == GetMaterializedCount());
+	// Reinsertion walks all materialized rows, so the pointer table may only be resized
+	// while it tracks exactly those rows. After an Abandon, materialized data retains
+	// abandoned epochs the pointer table no longer covers; reinserting them would
+	// oversubscribe the new table and the probe loop below would never terminate.
+	if (Count() != 0 && Count() != GetMaterializedCount()) {
+		throw InternalException("Cannot resize a hash table whose pointer table does not cover its materialized rows "
+		                        "(count %llu, materialized %llu)",
+		                        static_cast<unsigned long long>(Count()),
+		                        static_cast<unsigned long long>(GetMaterializedCount()));
+	}
 
 	capacity = size;
 	hash_map = buffer_manager.GetBufferAllocator().Allocate(capacity * sizeof(ht_entry_t));
@@ -1432,6 +1453,7 @@ static void GroupedAggregateHashTableInnerLoop(ht_entry_t *const entries, const 
 idx_t GroupedAggregateHashTable::FindOrCreateGroupsInternal(DataChunk &groups, Vector &group_hashes_v,
                                                             Vector &addresses_v, SelectionVector &new_groups_out,
                                                             optional_ptr<ExecutionOperatorStageRecorder> recorder) {
+	EnsureLookupEpoch();
 	D_ASSERT(groups.ColumnCount() + 1 == layout_ptr->ColumnCount());
 	D_ASSERT(group_hashes_v.GetType() == LogicalType::HASH);
 	D_ASSERT(state.ht_offsets.GetVectorType() == VectorType::FLAT_VECTOR);
@@ -1743,6 +1765,7 @@ void GroupedAggregateHashTable::FindOrCreateGroups(DataChunk &groups, Vector &ad
 
 idx_t GroupedAggregateHashTable::FindOrCreateGroupAddresses(DataChunk &groups, Vector &addresses_out,
                                                             optional_ptr<ExecutionOperatorStageRecorder> recorder) {
+	EnsureLookupEpoch();
 	sink_count += groups.size();
 	auto compressed_start = AggregateTraceStart(recorder);
 	auto compressed_result = TryResolveCompressedGroups(groups, addresses_out);
@@ -2473,6 +2496,7 @@ bool GroupedAggregateHashTable::TryFindOrCreateGroupsFastInternal(
     optional_ptr<ExecutionOperatorStageRecorder> recorder, optional_ptr<Vector> precomputed_hashes,
     optional_ptr<SelectionVector> duplicates_out, idx_t *duplicate_count_out,
     optional_ptr<const ExecutionDenseGroupDomain> dense_domain, bool insert_only) {
+	EnsureLookupEpoch();
 	const auto chunk_size = groups.size();
 	const auto group_count = groups.ColumnCount();
 	if (!insert_only && !addresses_out && !selected_update_function && !duplicates_out) {
@@ -7031,6 +7055,7 @@ bool GroupedAggregateHashTable::TryFindOrCreateRowPointerGroupStateTargetsFast(
     DataChunk &payload_input, Vector &row_pointers, idx_t count,
     const vector<ExecutionRowPointerGroupKeySource> &group_sources, ExecutionGroupedAggregateStateTargetBatch &targets,
     optional_ptr<ExecutionOperatorStageRecorder> recorder) {
+	EnsureLookupEpoch();
 	targets.Reset();
 	if (row_pointers.GetVectorType() != VectorType::FLAT_VECTOR) {
 		return false;
@@ -7474,6 +7499,7 @@ void GroupedAggregateHashTable::ResetForNewIteration(idx_t initial_capacity, idx
 	sink_count = 0;
 	skip_lookups = false;
 	skip_lookups_require_final_combine = false;
+	epochs_require_final_combine = false;
 	proven_unique_append_key_type = PhysicalType::INVALID;
 	proven_unique_append_has_last_key = false;
 	proven_unique_append_last_signed_key = 0;
