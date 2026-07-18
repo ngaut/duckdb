@@ -1,6 +1,6 @@
 # JIT Production Recipe Architecture
 
-Last updated: 2026-07-17
+Last updated: 2026-07-18
 
 This document is the stable architecture contract for DuckDB execution-region
 JIT. It describes layer ownership, immutable recipe binding, runtime data
@@ -399,21 +399,15 @@ An immediate post-measurement sample invalidates a run if load appeared after
 admission. Host-load admission is measurement hygiene only; it cannot change
 raw ceilings, speedup floors, query coverage, or runtime-proof requirements.
 
-The generic gate is one ordered SQL script in one shell process. The script
-places each workload's preparation immediately before its samples. Preparation
-and every attempt end by closing the database back to `:memory:`; the next
-attempt reopens the same checkpointed file. Samples therefore retain the
-original workload chronology and fresh connection and buffer-manager state
-while avoiding hundreds of macOS provenance assessments. Query timers,
-alternating policy order, counters, correctness artifacts, and regression
-contracts remain attempt-local.
-
-TPC-H production timing uses the same lifecycle contract across query groups:
-prepare that query's correctness baseline, close the database, then close and
-reopen around every alternating policy sample. Traced counter collection is an
-untimed tail after all candidate timers in the same script. The complete matrix
-therefore uses one operating-system process without sharing connection state or
-trace overhead across timed attempts.
+Both gates share one measurement lifecycle: one ordered SQL script in one
+shell process, each workload or query's preparation placed immediately before
+its samples, and every preparation and attempt closing the database back to
+`:memory:` so the next attempt reopens the same checkpointed file with fresh
+connection and buffer-manager state. This preserves workload chronology while
+avoiding a macOS provenance assessment per sample. Query timers, alternating
+policy order, counters, correctness artifacts, and regression contracts remain
+attempt-local, and traced counter collection is an untimed tail after all
+candidate timers.
 
 Pre-commit correctness and pre-push performance receipts are bound to the exact
 Git tree. A push can reuse completed production verification without measuring
@@ -422,22 +416,10 @@ Any tree change invalidates both receipts.
 
 ## Verification
 
-Static architecture checks enforce layer and ownership invariants:
-
-```sh
-python3 benchmark/jit/verify_jit_architecture.py
-```
-
-Focused correctness and complete JIT API coverage use the reldebug unit binary:
-
-```sh
-build/reldebug/test/unittest "[jit]"
-```
-
-Generic production and TPC-H gates are documented in
-`benchmark/jit/README.md`. Every implementation change must pass proportionate
-focused tests first, then architecture, complete JIT correctness, generic
-one-thread and parallel workloads, and affected TPC-H scale factors.
+Commands for every gate live in `benchmark/jit/README.md`. Every
+implementation change must pass proportionate focused tests first, then
+static architecture checks, complete JIT correctness, generic one-thread and
+parallel workloads, and affected TPC-H scale factors.
 
 ## Current boundaries
 

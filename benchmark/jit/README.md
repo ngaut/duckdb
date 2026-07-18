@@ -61,33 +61,17 @@ python3 benchmark/jit/generic_benchmark.py \
 
 Production samples disable runtime tracing and verification. A failed
 five-repeat candidate is reported as-is; the runner does not schedule an
-automatic larger retry.
-
-The matrix uses one DuckDB shell process. Each workload's fixture is prepared
-immediately before its samples, then the shell closes the database to
-`:memory:`. It repeats that close/reopen boundary before every timed attempt, so
-workload chronology, connection state, and buffer-manager freshness are
-preserved. This changes process-launch cost, not sample semantics: correctness
-artifacts, counters, policy order, and the query-only timer remain per attempt.
-In particular, macOS no longer performs a provenance assessment for every
-sample.
-
-Each speedup sample is the `off/auto` ratio from the same alternating repeat;
-the gate uses the median paired ratio. The raw JIT-auto median is checked
-independently, so pairing cannot hide an absolute runtime regression.
+automatic larger retry. Each speedup sample is the `off/auto` ratio from the
+same alternating repeat, and the raw JIT-auto median is checked independently.
+The single-process close/reopen measurement lifecycle is specified in the
+design contract.
 
 ## TPC-H regression gate
 
 The standalone gate builds, measures, verifies result artifacts, compares
 against accepted raw-runtime and speedup contracts, and runs a separate traced
-proof pass for every compiled or accelerated-runner-selected query.
-
-Production timing uses one DuckDB shell process for the complete query matrix.
-Each query baseline is prepared immediately before its samples; preparation and
-every attempt close back to `:memory:` so the next sample reopens the same
-checkpointed database with fresh connection and buffer-manager state. When
-tracing is enabled, untimed counter collection runs after every candidate timer
-in the same script and cannot perturb the candidate measurements.
+proof pass for every compiled or accelerated-runner-selected query. It uses the
+same single-process measurement lifecycle as the generic matrix.
 
 SF10 uses the default accepted state:
 
@@ -159,37 +143,16 @@ git push
 The first command performs the same production guard and publishes the receipt;
 the second only verifies that the current Git tree still matches it.
 
-The combined guard samples process CPU before setup and rejects a median above
-ten percent of logical CPU capacity. The TPC-H gate samples again after its
-working database is ready, and the combined guard rechecks before each generic
-measurement. On macOS, sustained `syspolicyd` or XProtect activity is rejected
-independently because one busy core can distort a single-thread benchmark even
-when machine-wide utilization looks low. Admission retries a bounded series of
-cheap samples so short setup-triggered scans can settle, but no timed workload
-starts while the host is contaminated. Every timing-bearing run also requires
-an immediate clean post-sample; load that begins mid-run invalidates the timing
-artifact instead of being normalized away. This prevents unrelated work from
-producing misleading raw-runtime failures.
+Measurement admission rejects a busy host before setup, rechecks at each
+measurement boundary, and invalidates any run where load appears mid-sample;
+macOS security scanners have an independent single-core ceiling. The complete
+admission and interpretation contract — including why failed candidates are
+never retried and why paired ratios cannot excuse a raw regression — is the
+"Performance contract" and "Baselines and artifacts" sections of
+`JIT_PRODUCTION_RECIPE_DESIGN.md`.
 
 The combined guard forwards baseline configuration unchanged. The TPC-H gate
 alone resolves and validates the accepted baseline contract.
-
-A failed five-pair candidate remains failed. Diagnose it from the original
-artifact and profile the affected workload separately; neither retries nor
-normalization may change the gate verdict.
-
-## Interpreting a result
-
-Correctness, compilation, execution proof, and timing are independent:
-
-- result differences or compile errors always fail;
-- a CBO-selected accelerated query needs execution proof or an explicit
-  failure receipt;
-- raw JIT-auto runtime ceilings are independent of `jit_policy=off` timing;
-- normalized and paired ratios help analyze noise but cannot excuse a raw
-  regression;
-- a verified improvement must tighten its checked-in floor or promote its
-  accepted baseline in the same change.
 
 Benchmark scratch output is disposable. Accepted baselines are the only timing
 artifacts with durable regression meaning.
