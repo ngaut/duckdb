@@ -128,7 +128,6 @@ public:
 	bool uses_preclassified_input = false;
 	bool source_key0_int64_to_int32_unchecked = false;
 	optional_ptr<SljitRegionExecutionScratch> scratch;
-	optional_ptr<bool> deferred_grouped_finish;
 };
 
 struct SljitPendingInputVectorAggregateBatch {
@@ -155,7 +154,6 @@ struct SljitPendingInputVectorAggregateBatch {
 	bool initialized = false;
 	bool source_key0_int64_to_int32_unchecked = false;
 	optional_ptr<SljitRegionExecutionScratch> scratch;
-	optional_ptr<bool> deferred_grouped_finish;
 };
 
 struct SljitDirectJoinOutputAggregateStrategy {
@@ -176,12 +174,10 @@ struct SljitDirectJoinOutputAggregateStrategy {
 	SljitPendingInputVectorAggregateBatch pending_input_vector_batch;
 	shared_ptr<SljitPendingPreaggregatedPrimitiveGroupBatch> pending_preaggregated_groups;
 	optional_ptr<SljitRegionExecutionScratch> pending_preaggregated_scratch;
-	optional_ptr<bool> pending_preaggregated_deferred_grouped_finish;
 	SljitPendingRowPointerAggregateBatch pending_batch;
 	SljitJoinInputRowPointerComplementarySumPlan join_input_complementary_sum_plan;
 	unique_ptr<SljitJoinInputRowPointerComplementarySumAccumulator> join_input_complementary_sum_accumulator;
 	optional_ptr<SljitRegionExecutionScratch> join_input_complementary_sum_scratch;
-	optional_ptr<bool> join_input_complementary_sum_deferred_grouped_finish;
 	vector<idx_t> string_set_classification_payload_sources;
 	SljitStringSetComplementarySumDescriptor string_set_classification;
 	bool string_set_classification_checked = false;

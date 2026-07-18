@@ -54,9 +54,6 @@ static bool TryExecuteDirectRowPointerGroupedTargetPayloadUpdate(
 		SljitExecuteGroupedStateTargetBatch(targets, update_state);
 		RecordSljitRegionStageRuntime(runtime, op_idx, op.kind, "direct_row_pointer_grouped_target_payload_update",
 		                              target_payload_start);
-		if (finish) {
-			FinishGroupedAggregateStateUpdates(runtime, op_idx, grouped_state, "finish_grouped_state_updates");
-		}
 	}
 	scratch.RecordDirectNewAggregateUpdateResult(op_idx, updated);
 	RecordSljitRegionStageRuntimePath(runtime, op_idx, op.kind, updated ? stage_name : miss_stage_name, stage_start);
@@ -135,9 +132,6 @@ static bool TryExecuteDirectRowPointerPreaggregatedPrimitiveUpdate(
 	ExecuteSljitPreaggregatedPrimitiveTargetBatch(targets, update_state);
 	RecordSljitRegionStageRuntime(runtime, op_idx, op.kind, "row_pointer_preaggregated_primitive_payload_update",
 	                              update_start);
-	if (finish) {
-		FinishGroupedAggregateStateUpdates(runtime, op_idx, grouped_state, "finish_grouped_state_updates");
-	}
 	scratch.RecordDirectNewAggregateUpdateResult(op_idx, true);
 	RecordSljitRegionStageRuntimePath(runtime, op_idx, op.kind, "row_pointer_preaggregated_grouped_primitive_update",
 	                                  stage_start);
@@ -179,9 +173,6 @@ static bool SljitTryExecuteRowPointerCountOneGroupedAggregateUpdate(
 	auto update_start = SljitRegionStageStart(runtime);
 	ExecuteSljitPrimitiveCountOneTargetBatch(targets, count_one_update);
 	RecordSljitRegionStageRuntime(runtime, op_idx, op.kind, "direct_row_pointer_group_count_one_update", update_start);
-	if (finish) {
-		FinishGroupedAggregateStateUpdates(runtime, op_idx, grouped_state, "finish_grouped_state_updates");
-	}
 	scratch.RecordDirectNewAggregateUpdateResult(op_idx, true);
 	RecordSljitRegionMaterializationElisionPath(runtime, op.kind, "direct_row_pointer_group_count_one_update", count);
 	return true;
@@ -259,7 +250,7 @@ static bool SljitTryExecuteRowPointerGroupedSplitPayloadUpdate(
 	    [&](optional_ptr<ExecutionOperatorStageRecorder> recorder) {
 		    return grouped_state.state->TryUpdateRowPointerGroupPayloads(
 		        payload_input, row_pointers, count, group_sources, payload_source_indices,
-		        op.aggregate_update.plan.sink_info, payload_lanes, recorder, finish);
+		        op.aggregate_update.plan.sink_info, payload_lanes, recorder);
 	    });
 	scratch.RecordDirectNewAggregateUpdateResult(op_idx, updated);
 	RecordSljitRegionStageRuntimePath(
@@ -276,7 +267,7 @@ static bool SljitTryExecuteNativeRowPointerGroupedAggregateUpdate(
     idx_t op_idx, SljitExecutableRegionOp &op, DataChunk &payload_input, Vector &row_pointers,
     const vector<ExecutionRowPointerGroupKeySource> &group_sources, const vector<idx_t> &payload_source_indices,
     SljitAggregatePayloadSourceLayout payload_source_layout, bool defer_grouped_finish,
-    optional_ptr<bool> deferred_grouped_finish, bool source_key0_int64_to_int32_unchecked = false) {
+    bool source_key0_int64_to_int32_unchecked = false) {
 	auto record_unsupported = [&](const char *reason) {
 		auto path = string("row_pointer_grouped_lookup_update_unsupported.") + reason;
 		RecordSljitRegionRuntimePath(runtime, op.kind, path.c_str());
@@ -343,14 +334,12 @@ static bool SljitTryExecuteNativeRowPointerGroupedAggregateUpdate(
 	        runtime, scratch, op_idx, op, payload_input, row_pointers, count, proven_group_sources,
 	        payload_source_indices, payload_lanes, grouped_state, payload_scratch,
 	        decision.uses_generated_payload_preaggregation, finish)) {
-		MarkDeferredGroupedFinish(defer_grouped_finish, deferred_grouped_finish);
 		return true;
 	}
 	if (decision.try_count_one_targets &&
 	    SljitTryExecuteRowPointerCountOneGroupedAggregateUpdate(
 	        runtime, scratch, op_idx, op, payload_input, row_pointers, count, proven_group_sources,
 	        payload_source_indices, payload_lanes, grouped_state, finish)) {
-		MarkDeferredGroupedFinish(defer_grouped_finish, deferred_grouped_finish);
 		return true;
 	}
 	if (decision.try_input_vector_groups &&
@@ -358,14 +347,12 @@ static bool SljitTryExecuteNativeRowPointerGroupedAggregateUpdate(
 	        runtime, scratch, op_idx, op, payload_input, proven_group_sources, payload_source_indices, nullptr,
 	        payload_source_layout, payload_lanes, grouped_state, payload_scratch, finish,
 	        source_key0_int64_to_int32_unchecked)) {
-		MarkDeferredGroupedFinish(defer_grouped_finish, deferred_grouped_finish);
 		return true;
 	}
 	if (decision.use_target_payload_update) {
 		if (SljitTryExecuteRowPointerGroupedTargetPayloadUpdate(
 		        runtime, scratch, op_idx, op, payload_input, row_pointers, count, proven_group_sources,
 		        payload_source_indices, payload_source_layout, payload_lanes, grouped_state, payload_scratch, finish)) {
-			MarkDeferredGroupedFinish(defer_grouped_finish, deferred_grouped_finish);
 			return true;
 		}
 		record_unsupported("grouped_lookup_update");
@@ -375,7 +362,6 @@ static bool SljitTryExecuteNativeRowPointerGroupedAggregateUpdate(
 	    SljitTryExecuteRowPointerGroupedSplitPayloadUpdate(runtime, scratch, op_idx, op, payload_input, row_pointers,
 	                                                       count, proven_group_sources, payload_source_indices,
 	                                                       payload_lanes, grouped_state, finish)) {
-		MarkDeferredGroupedFinish(defer_grouped_finish, deferred_grouped_finish);
 		return true;
 	}
 	record_unsupported("row_pointer_payload_update");

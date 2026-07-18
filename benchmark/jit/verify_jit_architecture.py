@@ -622,7 +622,7 @@ def verify_production_contract_ownership() -> None:
     ):
         raise AssertionError("proven-unique pending groups must not request lookup-table reservation")
     proof_call = pending_groups[proof_execution : proof_execution + 500]
-    if not re.search(r"pending\.represented_row_count,\s*false,\s*true,", proof_call):
+    if not re.search(r"pending\.represented_row_count,\s*false,\s*true\)", proof_call):
         raise AssertionError("proven-unique pending execution must not re-request reservation in its batch helper")
     if (
         "JIT executable group ranges prove signed narrowing casts once" not in aggregate_test

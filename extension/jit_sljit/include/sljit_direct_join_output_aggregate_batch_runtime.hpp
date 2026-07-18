@@ -73,8 +73,7 @@ static void SljitFlushPendingRowPointerAggregateBatch(ExecutionRegionRuntime &ru
 	if (!SljitTryExecuteNativeRowPointerGroupedAggregateUpdate(
 	        runtime, runtime.ExecutionOperators(), *batch.scratch, aggregate_idx, aggregate_op, payload_input,
 	        batch.row_pointers, batch_group_sources, descriptor.payload_source_indices,
-	        descriptor.payload_source_layout, true, batch.deferred_grouped_finish,
-	        source_key0_int64_to_int32_unchecked)) {
+	        descriptor.payload_source_layout, true, source_key0_int64_to_int32_unchecked)) {
 		throw InternalException("SLJIT batched direct row-pointer aggregate update failed");
 	}
 	RecordSljitRegionMaterializationElisionPath(runtime, aggregate_op.kind,
@@ -106,11 +105,10 @@ static void SljitFlushPendingInputVectorAggregateBatch(ExecutionRegionRuntime &r
 		strategy.pending_preaggregated_groups = make_shared_ptr<SljitPendingPreaggregatedPrimitiveGroupBatch>();
 	}
 	strategy.pending_preaggregated_scratch = &scratch;
-	strategy.pending_preaggregated_deferred_grouped_finish = batch.deferred_grouped_finish;
 	if (!SljitTryExecuteNativeInputVectorGroupedAggregateUpdate(
 	        runtime, runtime.ExecutionOperators(), scratch, aggregate_idx, aggregate_op, aggregate_input,
 	        batch_group_sources, strategy.descriptor.payload_source_indices, strategy.descriptor.payload_source_layout,
-	        true, batch.deferred_grouped_finish, batch.source_key0_int64_to_int32_unchecked, dense_domain_ptr,
+	        true, batch.source_key0_int64_to_int32_unchecked, dense_domain_ptr,
 	        optional_ptr<string>(&input_vector_failure),
 	        optional_ptr<SljitPendingPreaggregatedPrimitiveGroupBatch>(strategy.pending_preaggregated_groups.get()))) {
 		throw InternalException("SLJIT batched direct input-vector aggregate update failed: %s",
@@ -174,13 +172,14 @@ SljitAppendPreclassifiedStringSetComplementarySumBatch(SljitPendingRowPointerAgg
 	classified_input.SetChildCardinality(old_count + append_count);
 }
 
-static void SljitAppendPendingInputVectorAggregateBatch(
-    ExecutionRegionRuntime &runtime, idx_t aggregate_idx, SljitExecutableRegionOp &aggregate_op,
-    SljitDirectJoinOutputAggregateStrategy &strategy, SljitRegionExecutionScratch &scratch,
-    optional_ptr<bool> deferred_grouped_finish, DataChunk &aggregate_input, bool source_key0_int64_to_int32_unchecked) {
+static void SljitAppendPendingInputVectorAggregateBatch(ExecutionRegionRuntime &runtime, idx_t aggregate_idx,
+                                                        SljitExecutableRegionOp &aggregate_op,
+                                                        SljitDirectJoinOutputAggregateStrategy &strategy,
+                                                        SljitRegionExecutionScratch &scratch,
+                                                        DataChunk &aggregate_input,
+                                                        bool source_key0_int64_to_int32_unchecked) {
 	auto &batch = strategy.pending_input_vector_batch;
 	batch.scratch = &scratch;
-	batch.deferred_grouped_finish = deferred_grouped_finish;
 	batch.Ensure(runtime.GetAllocator(), strategy.descriptor.input_types);
 	if (batch.Count() != 0 && batch.source_key0_int64_to_int32_unchecked != source_key0_int64_to_int32_unchecked) {
 		SljitFlushPendingInputVectorAggregateBatch(runtime, scratch, aggregate_idx, aggregate_op, strategy);
@@ -201,11 +200,10 @@ static void SljitAppendPendingInputVectorAggregateBatch(
 static void SljitAppendPendingRowPointerAggregateBatch(
     ExecutionRegionRuntime &runtime, idx_t aggregate_idx, SljitExecutableRegionOp &aggregate_op,
     SljitJoinProjectionAggregateDescriptor &descriptor, SljitPendingRowPointerAggregateBatch &batch,
-    SljitRegionExecutionScratch &scratch, optional_ptr<bool> deferred_grouped_finish, DataChunk &aggregate_input,
-    Vector &row_pointers, bool source_key0_int64_to_int32_unchecked,
+    SljitRegionExecutionScratch &scratch, DataChunk &aggregate_input, Vector &row_pointers,
+    bool source_key0_int64_to_int32_unchecked,
     optional_ptr<const SljitStringSetComplementarySumDescriptor> classification) {
 	batch.scratch = &scratch;
-	batch.deferred_grouped_finish = deferred_grouped_finish;
 	const bool use_preclassified = classification != nullptr;
 	if (batch.Count() != 0 && batch.uses_preclassified_input != use_preclassified) {
 		SljitFlushPendingRowPointerAggregateBatch(runtime, aggregate_idx, aggregate_op, descriptor, batch);
@@ -263,9 +261,9 @@ static void SljitFlushPendingDirectInputVectorAggregate(ExecutionRegionRuntime &
 		    !binding.aggregate_update.grouped_state.state) {
 			throw InternalException("SLJIT pending direct input-vector preaggregation has no grouped state");
 		}
-		if (!SljitFlushPendingPreaggregatedPrimitiveGroups(
-		        runtime, scratch, strategy.aggregate_idx, aggregate_op, *strategy.pending_preaggregated_groups,
-		        binding.aggregate_update.grouped_state, strategy.pending_preaggregated_deferred_grouped_finish)) {
+		if (!SljitFlushPendingPreaggregatedPrimitiveGroups(runtime, scratch, strategy.aggregate_idx, aggregate_op,
+		                                                   *strategy.pending_preaggregated_groups,
+		                                                   binding.aggregate_update.grouped_state)) {
 			throw InternalException("SLJIT pending direct preaggregation flush failed");
 		}
 	}

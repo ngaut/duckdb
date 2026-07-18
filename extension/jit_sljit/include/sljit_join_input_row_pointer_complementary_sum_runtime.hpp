@@ -692,8 +692,8 @@ struct SljitPreparedJoinInputComplementarySumUpdate {
 static bool SljitTryPrepareJoinInputComplementarySumUpdate(
     ExecutionRegionRuntime &runtime, ExecutionOperatorRuntime &native_runtime, SljitRegionExecutionScratch &scratch,
     idx_t hash_join_idx, SljitExecutableRegionOp &aggregate_op, SljitDirectJoinOutputAggregateStrategy &strategy,
-    DataChunk &join_input, idx_t count, optional_ptr<bool> deferred_grouped_finish,
-    SljitPreparedJoinInputComplementarySumUpdate &prepared, optional_ptr<string> failure_reason = nullptr) {
+    DataChunk &join_input, idx_t count, SljitPreparedJoinInputComplementarySumUpdate &prepared,
+    optional_ptr<string> failure_reason = nullptr) {
 	auto block = [&](const char *reason) {
 		strategy.join_input_complementary_sum_plan.build_state.Block(reason);
 		if (failure_reason) {
@@ -747,7 +747,6 @@ static bool SljitTryPrepareJoinInputComplementarySumUpdate(
 	prepared.pipeline_accumulator_enabled = SljitJoinInputComplementarySumAccumulatorEnabled(strategy, plan);
 	if (prepared.pipeline_accumulator_enabled) {
 		strategy.join_input_complementary_sum_scratch = &scratch;
-		strategy.join_input_complementary_sum_deferred_grouped_finish = deferred_grouped_finish;
 	}
 	return true;
 }
@@ -756,8 +755,7 @@ static bool SljitTryExecuteJoinInputRowPointerComplementarySumUpdate(
     ExecutionRegionRuntime &runtime, ExecutionOperatorRuntime &native_runtime, SljitRegionExecutionScratch &scratch,
     idx_t hash_join_idx, SljitExecutableRegionOp &aggregate_op, SljitDirectJoinOutputAggregateStrategy &strategy,
     DataChunk &join_input, const SelectionVector &match_selection, Vector &row_pointers, idx_t count,
-    optional_ptr<bool> deferred_grouped_finish, bool source_key0_int64_to_int32_unchecked,
-    optional_ptr<string> failure_reason = nullptr) {
+    bool source_key0_int64_to_int32_unchecked, optional_ptr<string> failure_reason = nullptr) {
 	if (count == 0) {
 		return false;
 	}
@@ -769,8 +767,7 @@ static bool SljitTryExecuteJoinInputRowPointerComplementarySumUpdate(
 	}
 	SljitPreparedJoinInputComplementarySumUpdate prepared;
 	if (!SljitTryPrepareJoinInputComplementarySumUpdate(runtime, native_runtime, scratch, hash_join_idx, aggregate_op,
-	                                                    strategy, join_input, count, deferred_grouped_finish, prepared,
-	                                                    failure_reason)) {
+	                                                    strategy, join_input, count, prepared, failure_reason)) {
 		return false;
 	}
 	auto &descriptor = strategy.descriptor;
@@ -858,11 +855,9 @@ static bool SljitTryExecuteJoinInputRowPointerComplementarySumUpdate(
 		strategy.pending_preaggregated_groups = make_shared_ptr<SljitPendingPreaggregatedPrimitiveGroupBatch>();
 	}
 	strategy.pending_preaggregated_scratch = &scratch;
-	strategy.pending_preaggregated_deferred_grouped_finish = deferred_grouped_finish;
 	if (!SljitBufferPreaggregatedPrimitiveGroups(
 	        runtime, scratch, strategy.aggregate_idx, aggregate_op, compact_groups, preaggregate_scratch, payload_lanes,
-	        sink_binding.aggregate_update.grouped_state, count, *strategy.pending_preaggregated_groups, false,
-	        deferred_grouped_finish)) {
+	        sink_binding.aggregate_update.grouped_state, count, *strategy.pending_preaggregated_groups, false)) {
 		throw InternalException("Validated SLJIT join-input row-pointer complementary preaggregation buffer failed");
 	}
 	RecordSljitRegionMaterializationElisionPath(runtime, aggregate_op.kind,

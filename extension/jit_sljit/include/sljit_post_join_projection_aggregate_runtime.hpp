@@ -63,8 +63,7 @@ struct SljitPostJoinProjectionAggregateRuntimeState {
 		result = SljitTryExecuteHashJoinAggregateConsumer(
 		    runtime, runtime.ExecutionOperators(), ops, scratch, probe_primitive, hash_join_op, *strategy_ptr,
 		    join_input, post_join_projection, output_column_map, probe_primitive.output_projection_idx,
-		    optional_ptr<bool>(&deferred_grouped_finish), probe_input_filter_idx, probe_input_filter_cache,
-		    execute_hash_join_probe);
+		    probe_input_filter_idx, probe_input_filter_cache, execute_hash_join_probe);
 		if (result.status == SljitHashJoinAggregateConsumerStatus::EXECUTED) {
 			processed_output_rows += result.matched_count;
 		}
@@ -105,7 +104,7 @@ struct SljitPostJoinProjectionAggregateRuntimeState {
 		if (!post_join_projection.HasProjectionChain()) {
 			if (SljitTryExecuteDirectJoinOutputAggregate(runtime, ops, scratch, direct_strategy, post_join_projection,
 			                                             join_input, match_selection, build_selection, row_pointers,
-			                                             join_output, nullptr, output_proof, output_column_map,
+			                                             join_output, output_proof, output_column_map,
 			                                             output_projection_idx)) {
 				processed_output_rows += join_output.size();
 				return false;
@@ -121,10 +120,9 @@ struct SljitPostJoinProjectionAggregateRuntimeState {
 		auto aggregate_sink = MakeAggregateSink(runtime, result, ops, scratch);
 		auto &projected = scratch.TemporaryChunk(post_join_projection.final_projection_idx);
 		bool direct_projected = false;
-		if (SljitTryExecuteDirectJoinOutputAggregate(runtime, ops, scratch, direct_strategy, post_join_projection,
-		                                             join_input, match_selection, build_selection, row_pointers,
-		                                             join_output, aggregate_sink.DeferredGroupedFinishPtr(),
-		                                             output_proof, output_column_map, output_projection_idx)) {
+		if (SljitTryExecuteDirectJoinOutputAggregate(
+		        runtime, ops, scratch, direct_strategy, post_join_projection, join_input, match_selection,
+		        build_selection, row_pointers, join_output, output_proof, output_column_map, output_projection_idx)) {
 			aggregate_sink.Charge(join_output.size());
 			return false;
 		}
@@ -196,7 +194,7 @@ private:
 		auto aggregate_idx = AggregateIndex();
 		auto &aggregate_op = ops[aggregate_idx];
 		if (SljitExecuteProjectedAggregateBatch(runtime, runtime.ExecutionOperators(), scratch, aggregate_idx,
-		                                        aggregate_op, input, deferred_grouped_finish, result)) {
+		                                        aggregate_op, input, result)) {
 			return true;
 		}
 		processed_output_rows += input.size();
@@ -211,13 +209,12 @@ private:
 		auto &aggregate_op = ops[aggregate_idx];
 		return SljitProjectedAggregateSink(ops, runtime, runtime.ExecutionOperators(), scratch, result,
 		                                   final_projection_idx, ops[final_projection_idx], aggregate_idx, aggregate_op,
-		                                   deferred_grouped_finish, processed_output_rows, projected_batch,
-		                                   "post_join_projection_buffer_append", DirectAggregateStrategyPtr());
+		                                   processed_output_rows, projected_batch, "post_join_projection_buffer_append",
+		                                   DirectAggregateStrategyPtr());
 	}
 
 private:
 	bool prepared = false;
-	bool deferred_grouped_finish = false;
 	idx_t processed_output_rows = 0;
 	SljitDataChunkBatch projected_batch;
 	SljitPostJoinProjectionStrategy post_join_projection;

@@ -560,12 +560,11 @@ SljitAppendPreaggregatedPrimitiveGroupRange(ExecutionRegionRuntime &runtime, Slj
 }
 
 template <class TARGET_TYPE>
-static bool SljitFlushPendingDenseSingleLaneGroupsTemplated(ExecutionRegionRuntime &runtime,
-                                                            SljitRegionExecutionScratch &scratch, idx_t op_idx,
-                                                            SljitExecutableRegionOp &op,
-                                                            SljitPendingPreaggregatedPrimitiveGroupBatch &pending,
-                                                            ExecutionGroupedAggregateStateAddressBinding &grouped_state,
-                                                            optional_ptr<bool> deferred_grouped_finish = nullptr) {
+static bool
+SljitFlushPendingDenseSingleLaneGroupsTemplated(ExecutionRegionRuntime &runtime, SljitRegionExecutionScratch &scratch,
+                                                idx_t op_idx, SljitExecutableRegionOp &op,
+                                                SljitPendingPreaggregatedPrimitiveGroupBatch &pending,
+                                                ExecutionGroupedAggregateStateAddressBinding &grouped_state) {
 	if (pending.DenseSingleLaneEmpty()) {
 		return true;
 	}
@@ -611,9 +610,9 @@ static bool SljitFlushPendingDenseSingleLaneGroupsTemplated(ExecutionRegionRunti
 			}
 		}
 		FinishFlatPreaggregatedGroupTarget(groups, group_count);
-		if (!TryExecutePreaggregatedGroupedPrimitiveAggregateUpdateBatches(
-		        runtime, scratch, op_idx, op, groups, preaggregate_scratch, lanes, grouped_state, represented_row_count,
-		        false, true, deferred_grouped_finish)) {
+		if (!TryExecutePreaggregatedGroupedPrimitiveAggregateUpdateBatches(runtime, scratch, op_idx, op, groups,
+		                                                                   preaggregate_scratch, lanes, grouped_state,
+		                                                                   represented_row_count, false, true)) {
 			throw InternalException("Validated SLJIT pending dense single-lane grouped update failed");
 		}
 		flushed_row_count += represented_row_count;
@@ -631,36 +630,35 @@ static bool SljitFlushPendingDenseSingleLaneGroups(ExecutionRegionRuntime &runti
                                                    SljitRegionExecutionScratch &scratch, idx_t op_idx,
                                                    SljitExecutableRegionOp &op,
                                                    SljitPendingPreaggregatedPrimitiveGroupBatch &pending,
-                                                   ExecutionGroupedAggregateStateAddressBinding &grouped_state,
-                                                   optional_ptr<bool> deferred_grouped_finish = nullptr) {
+                                                   ExecutionGroupedAggregateStateAddressBinding &grouped_state) {
 	switch (pending.dense_single_lane_domain.physical_type) {
 	case PhysicalType::BOOL:
 		return SljitFlushPendingDenseSingleLaneGroupsTemplated<bool>(runtime, scratch, op_idx, op, pending,
-		                                                             grouped_state, deferred_grouped_finish);
+		                                                             grouped_state);
 	case PhysicalType::INT8:
 		return SljitFlushPendingDenseSingleLaneGroupsTemplated<int8_t>(runtime, scratch, op_idx, op, pending,
-		                                                               grouped_state, deferred_grouped_finish);
+		                                                               grouped_state);
 	case PhysicalType::INT16:
 		return SljitFlushPendingDenseSingleLaneGroupsTemplated<int16_t>(runtime, scratch, op_idx, op, pending,
-		                                                                grouped_state, deferred_grouped_finish);
+		                                                                grouped_state);
 	case PhysicalType::INT32:
 		return SljitFlushPendingDenseSingleLaneGroupsTemplated<int32_t>(runtime, scratch, op_idx, op, pending,
-		                                                                grouped_state, deferred_grouped_finish);
+		                                                                grouped_state);
 	case PhysicalType::INT64:
 		return SljitFlushPendingDenseSingleLaneGroupsTemplated<int64_t>(runtime, scratch, op_idx, op, pending,
-		                                                                grouped_state, deferred_grouped_finish);
+		                                                                grouped_state);
 	case PhysicalType::UINT8:
 		return SljitFlushPendingDenseSingleLaneGroupsTemplated<uint8_t>(runtime, scratch, op_idx, op, pending,
-		                                                                grouped_state, deferred_grouped_finish);
+		                                                                grouped_state);
 	case PhysicalType::UINT16:
 		return SljitFlushPendingDenseSingleLaneGroupsTemplated<uint16_t>(runtime, scratch, op_idx, op, pending,
-		                                                                 grouped_state, deferred_grouped_finish);
+		                                                                 grouped_state);
 	case PhysicalType::UINT32:
 		return SljitFlushPendingDenseSingleLaneGroupsTemplated<uint32_t>(runtime, scratch, op_idx, op, pending,
-		                                                                 grouped_state, deferred_grouped_finish);
+		                                                                 grouped_state);
 	case PhysicalType::UINT64:
 		return SljitFlushPendingDenseSingleLaneGroupsTemplated<uint64_t>(runtime, scratch, op_idx, op, pending,
-		                                                                 grouped_state, deferred_grouped_finish);
+		                                                                 grouped_state);
 	default:
 		return pending.DenseSingleLaneEmpty();
 	}
@@ -670,10 +668,8 @@ static bool SljitFlushPendingPreaggregatedPrimitiveGroups(ExecutionRegionRuntime
                                                           SljitRegionExecutionScratch &scratch, idx_t op_idx,
                                                           SljitExecutableRegionOp &op,
                                                           SljitPendingPreaggregatedPrimitiveGroupBatch &pending,
-                                                          ExecutionGroupedAggregateStateAddressBinding &grouped_state,
-                                                          optional_ptr<bool> deferred_grouped_finish = nullptr) {
-	if (!SljitFlushPendingDenseSingleLaneGroups(runtime, scratch, op_idx, op, pending, grouped_state,
-	                                            deferred_grouped_finish)) {
+                                                          ExecutionGroupedAggregateStateAddressBinding &grouped_state) {
+	if (!SljitFlushPendingDenseSingleLaneGroups(runtime, scratch, op_idx, op, pending, grouped_state)) {
 		return false;
 	}
 	if (pending.Empty()) {
@@ -691,9 +687,9 @@ static bool SljitFlushPendingPreaggregatedPrimitiveGroups(ExecutionRegionRuntime
 	if (!pending.proven_unique_append_active) {
 		SljitTryReserveGroupedAggregateGroups(runtime, op_idx, op, grouped_state, pending.Count());
 	}
-	if (!TryExecutePreaggregatedGroupedPrimitiveAggregateUpdateBatches(
-	        runtime, scratch, op_idx, op, *published_groups, pending.scratch, pending.lanes, grouped_state,
-	        pending.represented_row_count, false, true, deferred_grouped_finish)) {
+	if (!TryExecutePreaggregatedGroupedPrimitiveAggregateUpdateBatches(runtime, scratch, op_idx, op, *published_groups,
+	                                                                   pending.scratch, pending.lanes, grouped_state,
+	                                                                   pending.represented_row_count, false, true)) {
 		return false;
 	}
 	if (pending.HasGroupOutputTransform()) {
@@ -710,8 +706,7 @@ static bool SljitBufferPreaggregatedPrimitiveGroups(
     DataChunk &groups, SljitPreaggregatedPrimitiveAggregateScratch &source_scratch,
     const vector<const ExecutionPrimitiveAggregateUpdateLane *> &payload_lanes,
     ExecutionGroupedAggregateStateAddressBinding &grouped_state, idx_t preaggregated_row_count,
-    SljitPendingPreaggregatedPrimitiveGroupBatch &pending, bool finish,
-    optional_ptr<bool> deferred_grouped_finish = nullptr) {
+    SljitPendingPreaggregatedPrimitiveGroupBatch &pending, bool finish) {
 	if (groups.size() == 0 || groups.ColumnCount() != 1 ||
 	    !TypeIsConstantSize(groups.data[0].GetType().InternalType()) ||
 	    !CanSlicePreaggregatedPrimitiveScratch(source_scratch, payload_lanes, 0, groups.size())) {
@@ -748,8 +743,7 @@ static bool SljitBufferPreaggregatedPrimitiveGroups(
 			offset += fill_count;
 			append_count -= fill_count;
 		}
-		if (!SljitFlushPendingPreaggregatedPrimitiveGroups(runtime, scratch, op_idx, op, pending, grouped_state,
-		                                                   deferred_grouped_finish)) {
+		if (!SljitFlushPendingPreaggregatedPrimitiveGroups(runtime, scratch, op_idx, op, pending, grouped_state)) {
 			return false;
 		}
 	}
@@ -762,8 +756,7 @@ static bool SljitBufferPreaggregatedPrimitiveGroups(
 		}
 	}
 	if (finish) {
-		if (!SljitFlushPendingPreaggregatedPrimitiveGroups(runtime, scratch, op_idx, op, pending, grouped_state,
-		                                                   deferred_grouped_finish)) {
+		if (!SljitFlushPendingPreaggregatedPrimitiveGroups(runtime, scratch, op_idx, op, pending, grouped_state)) {
 			return false;
 		}
 	}

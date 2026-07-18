@@ -23,7 +23,6 @@ namespace duckdb {
 class SljitGroupedDirectPrimitivePayloadUpdateRuntimeState {
 public:
 	bool Prepare(vector<SljitExecutableRegionOp> &ops, const SljitGroupedAggregateUpdatePrimitive &primitive) {
-		deferred_grouped_finish = false;
 		materialized_direct_descriptor_ready = false;
 		materialized_direct_group_sources.clear();
 		materialized_direct_payload_source_indices.clear();
@@ -75,7 +74,6 @@ public:
 		if (!FlushDirectPreaggregatedBatch(runtime, ops, scratch, primitive)) {
 			throw InternalException("SLJIT direct preaggregated grouped update flush failed");
 		}
-		SljitFinishDeferredGroupedAggregateUpdate(runtime, scratch, primitive.aggregate_idx, deferred_grouped_finish);
 		return false;
 	}
 
@@ -107,13 +105,10 @@ private:
 			TransitionMaterializedDirectPendingToFallback(runtime, scratch, primitive.aggregate_idx, aggregate_op,
 			                                              bound_direct_update);
 			sink_result = SljitExecuteBoundGroupedPrimitiveAggregateUpdate(
-			    runtime, scratch, bound_direct_update, input_chunk, input.selection, input.count, true,
-			    optional_ptr<bool>(&deferred_grouped_finish));
+			    runtime, scratch, bound_direct_update, input_chunk, input.selection, input.count, true);
 		}
 		sink_result = native_runtime.RecordSinkResult(input.count, sink_result);
 		if (SljitNativeSinkResultStopsExecution(runtime, sink_result, result)) {
-			SljitFinishDeferredGroupedAggregateUpdate(runtime, scratch, primitive.aggregate_idx,
-			                                          deferred_grouped_finish);
 			return true;
 		}
 		processed_batches++;
@@ -176,7 +171,7 @@ private:
 		if (TryPreaggregateInputVectorPrimitiveGroupsIntoPending(
 		        runtime, scratch, op_idx, op, input, materialized_direct_group_sources,
 		        materialized_direct_payload_source_indices, *bound.payload_lanes, *bound.grouped_state,
-		        direct_preaggregated_batch, false, optional_ptr<bool>(&deferred_grouped_finish))) {
+		        direct_preaggregated_batch, false)) {
 			RecordSljitRegionMaterializationElisionPath(
 			    runtime, op.kind, "direct_materialized_pending_preaggregated_grouped_update", count);
 			return true;
@@ -196,8 +191,7 @@ private:
 		}
 		if (direct_preaggregated_batch.HasPending() &&
 		    !SljitFlushPendingPreaggregatedPrimitiveGroups(runtime, scratch, op_idx, op, direct_preaggregated_batch,
-		                                                   *bound.grouped_state,
-		                                                   optional_ptr<bool>(&deferred_grouped_finish))) {
+		                                                   *bound.grouped_state)) {
 			throw InternalException("SLJIT materialized direct pending grouped update flush failed");
 		}
 		if (direct_preaggregated_batch.proven_unique_append_active) {
@@ -259,12 +253,9 @@ private:
 		SljitBindGroupedPrimitiveAggregateUpdate(native_runtime, scratch, primitive.aggregate_idx, aggregate_op,
 		                                         input_chunk, bound_direct_update);
 		auto sink_result = SljitExecuteBoundGroupedPrimitiveAggregateUpdate(
-		    runtime, scratch, bound_direct_update, input_chunk, &filter_selection, selected_count, true,
-		    optional_ptr<bool>(&deferred_grouped_finish));
+		    runtime, scratch, bound_direct_update, input_chunk, &filter_selection, selected_count, true);
 		sink_result = native_runtime.RecordSinkResult(input_chunk, sink_result);
 		if (SljitNativeSinkResultStopsExecution(runtime, sink_result, result)) {
-			SljitFinishDeferredGroupedAggregateUpdate(runtime, scratch, primitive.aggregate_idx,
-			                                          deferred_grouped_finish);
 			return true;
 		}
 		processed_batches++;
@@ -367,8 +358,7 @@ private:
 		if (!SljitTryExecuteNativeInputVectorGroupedAggregateUpdate(
 		        runtime, native_runtime, scratch, primitive.aggregate_idx, aggregate_op, source_input, group_sources,
 		        projected_direct_update->payload_source_indices, projected_direct_update->payload_source_layout, true,
-		        optional_ptr<bool>(&deferred_grouped_finish), false, dense_domain,
-		        optional_ptr<string>(&failure_reason),
+		        false, dense_domain, optional_ptr<string>(&failure_reason),
 		        optional_ptr<SljitPendingPreaggregatedPrimitiveGroupBatch>(&direct_preaggregated_batch),
 		        optional_ptr<const vector<bool>>(&projected_direct_update->payload_source_not_null))) {
 			auto unsupported = string("projected_source_input_grouped_update_unsupported.") +
@@ -398,13 +388,12 @@ private:
 		    !binding.aggregate_update.grouped_state.state) {
 			throw InternalException("SLJIT direct preaggregated grouped update has no grouped state");
 		}
-		return SljitFlushPendingPreaggregatedPrimitiveGroups(
-		    runtime, scratch, primitive.aggregate_idx, aggregate_op, direct_preaggregated_batch,
-		    binding.aggregate_update.grouped_state, optional_ptr<bool>(&deferred_grouped_finish));
+		return SljitFlushPendingPreaggregatedPrimitiveGroups(runtime, scratch, primitive.aggregate_idx, aggregate_op,
+		                                                     direct_preaggregated_batch,
+		                                                     binding.aggregate_update.grouped_state);
 	}
 
 private:
-	bool deferred_grouped_finish = false;
 	shared_ptr<SljitProjectedInputGroupedAggregateDescriptor> projected_direct_update;
 	SljitDataChunkBatch projected_direct_selected_input;
 	SljitPendingPreaggregatedPrimitiveGroupBatch direct_preaggregated_batch;

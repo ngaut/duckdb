@@ -465,7 +465,7 @@ public:
 
 	bool TryUpdateNewGroups(DataChunk &input, const ExecutionRegionSinkInfo &sink_info,
 	                        const vector<const ExecutionPrimitiveAggregateUpdateLane *> &lanes,
-	                        optional_ptr<ExecutionOperatorStageRecorder> recorder = nullptr, bool finish = true,
+	                        optional_ptr<ExecutionOperatorStageRecorder> recorder = nullptr,
 	                        optional_ptr<const ExecutionDenseGroupDomain> dense_domain = nullptr) override {
 		if (!CanUseSingleGroupingState()) {
 			return false;
@@ -478,7 +478,7 @@ public:
 	bool TryUpdateNewGroupsWithPayloadInput(
 	    DataChunk &groups, DataChunk &payload_input, const vector<idx_t> &payload_source_indices,
 	    const ExecutionRegionSinkInfo &sink_info, const vector<const ExecutionPrimitiveAggregateUpdateLane *> &lanes,
-	    optional_ptr<ExecutionOperatorStageRecorder> recorder = nullptr, bool finish = true,
+	    optional_ptr<ExecutionOperatorStageRecorder> recorder = nullptr,
 	    optional_ptr<Vector> precomputed_hashes = nullptr,
 	    optional_ptr<const ExecutionDenseGroupDomain> dense_domain = nullptr) override {
 		if (!CanUseSingleGroupingState()) {
@@ -492,7 +492,7 @@ public:
 
 	bool TryAppendNewGroups(DataChunk &input, const ExecutionRegionSinkInfo &sink_info,
 	                        const vector<const ExecutionPrimitiveAggregateUpdateLane *> &lanes,
-	                        optional_ptr<ExecutionOperatorStageRecorder> recorder = nullptr, bool finish = true,
+	                        optional_ptr<ExecutionOperatorStageRecorder> recorder = nullptr,
 	                        optional_ptr<const ExecutionDenseGroupDomain> dense_domain = nullptr) override {
 		if (!CanUseSingleGroupingState()) {
 			return false;
@@ -505,7 +505,7 @@ public:
 	bool TryUpdateNewGroupsWithSelectedStateAddresses(
 	    DataChunk &input, const ExecutionRegionSinkInfo &sink_info,
 	    ExecutionGroupedAggregateStateSelectedAddressUpdateFunction update_function, void *update_state,
-	    optional_ptr<ExecutionOperatorStageRecorder> recorder = nullptr, bool finish = true,
+	    optional_ptr<ExecutionOperatorStageRecorder> recorder = nullptr,
 	    optional_ptr<Vector> precomputed_hashes = nullptr,
 	    optional_ptr<const ExecutionDenseGroupDomain> dense_domain = nullptr) override {
 		if (!CanUseSingleGroupingState()) {
@@ -520,7 +520,7 @@ public:
 	bool TryUpdateGroupKeysWithSelectedStateAddresses(
 	    DataChunk &groups, const ExecutionRegionSinkInfo &sink_info,
 	    ExecutionGroupedAggregateStateSelectedAddressUpdateFunction update_function, void *update_state,
-	    optional_ptr<ExecutionOperatorStageRecorder> recorder = nullptr, bool finish = true,
+	    optional_ptr<ExecutionOperatorStageRecorder> recorder = nullptr,
 	    optional_ptr<Vector> precomputed_hashes = nullptr,
 	    optional_ptr<const ExecutionDenseGroupDomain> dense_domain = nullptr) override {
 		if (!CanUseSingleGroupingState()) {
@@ -563,7 +563,7 @@ public:
 	bool TryUpdateInputVectorGroupCountOne(
 	    DataChunk &payload_input, idx_t count, const vector<ExecutionRowPointerGroupKeySource> &group_sources,
 	    const ExecutionRegionSinkInfo &sink_info, const ExecutionPrimitiveAggregateUpdateLane &lane,
-	    optional_ptr<ExecutionOperatorStageRecorder> recorder = nullptr, bool finish = true,
+	    optional_ptr<ExecutionOperatorStageRecorder> recorder = nullptr,
 	    optional_ptr<const ExecutionDenseGroupDomain> dense_domain = nullptr) override {
 		if (!CanUseSingleGroupingState()) {
 			return false;
@@ -579,8 +579,7 @@ public:
 	                                      const vector<idx_t> &payload_source_indices,
 	                                      const ExecutionRegionSinkInfo &sink_info,
 	                                      const vector<const ExecutionPrimitiveAggregateUpdateLane *> &lanes,
-	                                      optional_ptr<ExecutionOperatorStageRecorder> recorder = nullptr,
-	                                      bool finish = true) override {
+	                                      optional_ptr<ExecutionOperatorStageRecorder> recorder = nullptr) override {
 		if (!CanUseSingleGroupingState()) {
 			return false;
 		}
@@ -593,7 +592,7 @@ public:
 	bool TryAppendNewGroupsWithStateAddresses(
 	    DataChunk &input, const ExecutionRegionSinkInfo &sink_info,
 	    ExecutionGroupedAggregateStateAddressUpdateFunction update_function, void *update_state,
-	    optional_ptr<ExecutionOperatorStageRecorder> recorder = nullptr, bool finish = true,
+	    optional_ptr<ExecutionOperatorStageRecorder> recorder = nullptr,
 	    optional_ptr<const ExecutionDenseGroupDomain> dense_domain = nullptr) override {
 		if (!CanUseSingleGroupingState()) {
 			return false;
@@ -606,7 +605,7 @@ public:
 	bool TryAppendNewGroupKeysWithStateAddresses(
 	    DataChunk &groups, const ExecutionRegionSinkInfo &sink_info,
 	    ExecutionGroupedAggregateStateAddressUpdateFunction update_function, void *update_state,
-	    optional_ptr<ExecutionOperatorStageRecorder> recorder = nullptr, bool finish = true,
+	    optional_ptr<ExecutionOperatorStageRecorder> recorder = nullptr,
 	    optional_ptr<const ExecutionDenseGroupDomain> dense_domain = nullptr) override {
 		if (!CanUseSingleGroupingState()) {
 			return false;
@@ -635,8 +634,7 @@ public:
 	}
 
 	bool TryResolveNewGroups(DataChunk &input, const ExecutionRegionSinkInfo &sink_info, Vector &addresses,
-	                         optional_ptr<ExecutionOperatorStageRecorder> recorder = nullptr,
-	                         bool finish = true) override {
+	                         optional_ptr<ExecutionOperatorStageRecorder> recorder = nullptr) override {
 		if (!CanUseSingleGroupingState()) {
 			return false;
 		}
@@ -651,12 +649,6 @@ public:
 		}
 		auto single_grouping = GetSingleGroupingSinkState();
 		single_grouping.grouping.table_data.RecordDirectStateAddressUpdates(context, single_grouping.input, count);
-	}
-
-	void FinishStateUpdates() override {
-		RequireSingleGroupingStateShape("execution region hash aggregate state update requires one grouping state");
-		auto single_grouping = GetSingleGroupingSinkState();
-		single_grouping.grouping.table_data.FinishStateUpdates(context, single_grouping.input);
 	}
 
 private:

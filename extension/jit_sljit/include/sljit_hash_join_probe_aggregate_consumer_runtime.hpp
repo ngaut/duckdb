@@ -879,7 +879,7 @@ static SljitHashJoinAggregateConsumerResult SljitTryExecuteHashJoinAggregateCons
     SljitRegionExecutionScratch &scratch, const SljitHashJoinProbeSelectionPrimitive &probe_primitive,
     SljitExecutableRegionOp &hash_join_op, SljitDirectJoinOutputAggregateStrategy &strategy, DataChunk &join_input,
     SljitPostJoinProjectionStrategy &post_join_projection, optional_ptr<const vector<idx_t>> output_column_map,
-    idx_t output_projection_idx, optional_ptr<bool> deferred_grouped_finish, idx_t probe_input_filter_idx,
+    idx_t output_projection_idx, idx_t probe_input_filter_idx,
     SljitHashJoinProbeInputFilterCache &probe_input_filter_cache, EXECUTE_HASH_JOIN_PROBE &execute_hash_join_probe) {
 	SljitHashJoinAggregateConsumerResult result;
 	const auto hash_join_idx = probe_primitive.hash_join_idx;
@@ -974,9 +974,9 @@ static SljitHashJoinAggregateConsumerResult SljitTryExecuteHashJoinAggregateCons
 	}
 	SljitPreparedJoinInputComplementarySumUpdate prepared_aggregate;
 	string aggregate_failure;
-	if (!SljitTryPrepareJoinInputComplementarySumUpdate(
-	        runtime, native_runtime, scratch, hash_join_idx, aggregate_op, strategy, probe_input, probe_input.size(),
-	        deferred_grouped_finish, prepared_aggregate, optional_ptr<string>(&aggregate_failure)) ||
+	if (!SljitTryPrepareJoinInputComplementarySumUpdate(runtime, native_runtime, scratch, hash_join_idx, aggregate_op,
+	                                                    strategy, probe_input, probe_input.size(), prepared_aggregate,
+	                                                    optional_ptr<string>(&aggregate_failure)) ||
 	    !prepared_aggregate.pipeline_accumulator_enabled) {
 		return result;
 	}

@@ -184,8 +184,8 @@ static bool SljitTryExecuteDirectJoinOutputAggregate(
     optional_ptr<SljitDirectJoinOutputAggregateStrategy> strategy_ptr,
     SljitPostJoinProjectionStrategy &post_join_projection, DataChunk &join_input,
     const SelectionVector &match_selection, const SelectionVector &build_selection, Vector &row_pointers,
-    DataChunk &join_output, optional_ptr<bool> deferred_grouped_finish,
-    ExecutionHashJoinProbeOutputProof output_proof = {}, optional_ptr<const vector<idx_t>> output_column_map = nullptr,
+    DataChunk &join_output, ExecutionHashJoinProbeOutputProof output_proof = {},
+    optional_ptr<const vector<idx_t>> output_column_map = nullptr,
     idx_t output_projection_idx = DConstants::INVALID_INDEX) {
 	if (!strategy_ptr || strategy_ptr->disabled) {
 		return false;
@@ -205,8 +205,8 @@ static bool SljitTryExecuteDirectJoinOutputAggregate(
 	string complementary_sum_failure;
 	if (SljitTryExecuteJoinInputRowPointerComplementarySumUpdate(
 	        runtime, runtime.ExecutionOperators(), scratch, post_join_projection.hash_join_idx, aggregate_op, strategy,
-	        join_input, match_selection, row_pointers, join_output.size(), deferred_grouped_finish,
-	        output_proof.source_key0_int64_to_int32, optional_ptr<string>(&complementary_sum_failure))) {
+	        join_input, match_selection, row_pointers, join_output.size(), output_proof.source_key0_int64_to_int32,
+	        optional_ptr<string>(&complementary_sum_failure))) {
 		return true;
 	}
 	if (!complementary_sum_failure.empty()) {
@@ -310,8 +310,7 @@ static bool SljitTryExecuteDirectJoinOutputAggregate(
 		SljitFlushPendingRowPointerAggregateBatch(runtime, strategy.aggregate_idx, aggregate_op, descriptor,
 		                                          strategy.pending_batch);
 		SljitAppendPendingInputVectorAggregateBatch(runtime, strategy.aggregate_idx, aggregate_op, strategy, scratch,
-		                                            deferred_grouped_finish, aggregate_input,
-		                                            output_proof.source_key0_int64_to_int32);
+		                                            aggregate_input, output_proof.source_key0_int64_to_int32);
 		return true;
 	}
 
@@ -322,9 +321,8 @@ static bool SljitTryExecuteDirectJoinOutputAggregate(
 	auto string_set_classification =
 	    SljitGetDirectJoinOutputStringSetClassification(strategy, aggregate_op, aggregate_input);
 	SljitAppendPendingRowPointerAggregateBatch(runtime, strategy.aggregate_idx, aggregate_op, descriptor,
-	                                           strategy.pending_batch, scratch, deferred_grouped_finish,
-	                                           aggregate_input, row_pointers, output_proof.source_key0_int64_to_int32,
-	                                           string_set_classification);
+	                                           strategy.pending_batch, scratch, aggregate_input, row_pointers,
+	                                           output_proof.source_key0_int64_to_int32, string_set_classification);
 	return true;
 }
 

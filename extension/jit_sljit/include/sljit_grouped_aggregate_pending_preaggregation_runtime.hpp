@@ -104,8 +104,8 @@ static bool SljitExecuteBoundGeneratedPrimitiveRunsIntoPending(
     SljitPreaggregatedInputVectorGroupKeySource &group_source,
     const vector<const ExecutionPrimitiveAggregateUpdateLane *> &payload_lanes,
     ExecutionGroupedAggregateStateAddressBinding &grouped_state, SljitPendingPreaggregatedPrimitiveGroupBatch &pending,
-    idx_t count, bool finish, optional_ptr<bool> deferred_grouped_finish, SljitNativePrimitiveRunInput &native_input,
-    SljitNativePrimitiveRunFunction function, const char *path_name, bool shared_affine_output) {
+    idx_t count, bool finish, SljitNativePrimitiveRunInput &native_input, SljitNativePrimitiveRunFunction function,
+    const char *path_name, bool shared_affine_output) {
 	TARGET_TYPE first_key {};
 	if (!pending.Empty()) {
 		if (!SljitLoadPreaggregatedInputVectorGroupKey(group_source, 0, first_key)) {
@@ -113,8 +113,7 @@ static bool SljitExecuteBoundGeneratedPrimitiveRunsIntoPending(
 		}
 		if (!SljitPendingPreaggregatedPrimitiveLastGroupMatches<TARGET_TYPE>(pending, first_key) &&
 		    !SljitPendingPreaggregatedPrimitiveContinuesTailStep<TARGET_TYPE>(pending, first_key)) {
-			if (!SljitFlushPendingPreaggregatedPrimitiveGroups(runtime, scratch, op_idx, op, pending, grouped_state,
-			                                                   deferred_grouped_finish)) {
+			if (!SljitFlushPendingPreaggregatedPrimitiveGroups(runtime, scratch, op_idx, op, pending, grouped_state)) {
 				throw InternalException(
 				    "SLJIT generated primitive run update could not preserve its progression boundary");
 			}
@@ -187,8 +186,8 @@ static bool SljitExecuteBoundGeneratedPrimitiveRunsIntoPending(
 		if (native_input.input_offset == native_input.input_count) {
 			break;
 		}
-		if (pending.Empty() || !SljitFlushPendingPreaggregatedPrimitiveGroups(runtime, scratch, op_idx, op, pending,
-		                                                                      grouped_state, deferred_grouped_finish)) {
+		if (pending.Empty() ||
+		    !SljitFlushPendingPreaggregatedPrimitiveGroups(runtime, scratch, op_idx, op, pending, grouped_state)) {
 			throw InternalException("SLJIT generated primitive run update could not flush a full output batch");
 		}
 		pending.BeginGeneratedAppendProof();
@@ -213,8 +212,8 @@ static bool SljitExecuteBoundGeneratedPrimitiveRunsIntoPending(
 	                              count);
 	RecordSljitRegionRuntimeProof(runtime, op.kind, ExecutionRegionJitRuntimeProof::GENERATED_BACKEND_WORK, path_name,
 	                              count);
-	if (finish && !SljitFlushPendingPreaggregatedPrimitiveGroups(runtime, scratch, op_idx, op, pending, grouped_state,
-	                                                             deferred_grouped_finish)) {
+	if (finish &&
+	    !SljitFlushPendingPreaggregatedPrimitiveGroups(runtime, scratch, op_idx, op, pending, grouped_state)) {
 		throw InternalException("SLJIT generated primitive run update final flush failed");
 	}
 	return true;
@@ -227,7 +226,7 @@ static bool TryExecuteGeneratedPrimitiveRunsIntoPending(
     SljitPreaggregatedPrimitivePayloadSources &payload_sources,
     const vector<const ExecutionPrimitiveAggregateUpdateLane *> &payload_lanes,
     ExecutionGroupedAggregateStateAddressBinding &grouped_state, SljitPendingPreaggregatedPrimitiveGroupBatch &pending,
-    idx_t count, bool finish, optional_ptr<bool> deferred_grouped_finish) {
+    idx_t count, bool finish) {
 	auto reject = [&](const char *blocker) {
 		if (runtime.TraceRuntime()) {
 			auto path = string("generated_pending_primitive_group_runs_miss.") + blocker;
@@ -245,7 +244,7 @@ static bool TryExecuteGeneratedPrimitiveRunsIntoPending(
 	}
 	if (!SljitExecuteBoundGeneratedPrimitiveRunsIntoPending<TARGET_TYPE>(
 	        runtime, scratch, op_idx, op, group_source, payload_lanes, grouped_state, pending, count, finish,
-	        deferred_grouped_finish, native_input, function, "generated_pending_primitive_group_runs", false)) {
+	        native_input, function, "generated_pending_primitive_group_runs", false)) {
 		return reject("output");
 	}
 	return true;
@@ -258,7 +257,7 @@ static bool TryExecuteGeneratedFusedAffinePrimitiveRunsIntoPending(
     const vector<idx_t> &payload_source_indices,
     const vector<const ExecutionPrimitiveAggregateUpdateLane *> &payload_lanes,
     ExecutionGroupedAggregateStateAddressBinding &grouped_state, SljitPendingPreaggregatedPrimitiveGroupBatch &pending,
-    idx_t count, bool finish, optional_ptr<bool> deferred_grouped_finish) {
+    idx_t count, bool finish) {
 	auto reject = [&](const char *blocker) {
 		if (runtime.TraceRuntime()) {
 			auto path = string("generated_pending_fused_affine_primitive_group_runs_miss.") + blocker;
@@ -277,8 +276,7 @@ static bool TryExecuteGeneratedFusedAffinePrimitiveRunsIntoPending(
 	}
 	const bool valid_counts_are_row_counts = native_input.payload_validity == nullptr;
 	if (!pending.Empty() && pending.scratch.shared_valid_counts_are_row_counts != valid_counts_are_row_counts) {
-		if (!SljitFlushPendingPreaggregatedPrimitiveGroups(runtime, scratch, op_idx, op, pending, grouped_state,
-		                                                   deferred_grouped_finish)) {
+		if (!SljitFlushPendingPreaggregatedPrimitiveGroups(runtime, scratch, op_idx, op, pending, grouped_state)) {
 			return reject("valid_count_representation");
 		}
 	}
@@ -293,8 +291,7 @@ static bool TryExecuteGeneratedFusedAffinePrimitiveRunsIntoPending(
 	}
 	if (!SljitExecuteBoundGeneratedPrimitiveRunsIntoPending<TARGET_TYPE>(
 	        runtime, scratch, op_idx, op, group_source, payload_lanes, grouped_state, pending, count, finish,
-	        deferred_grouped_finish, native_input, function, "generated_pending_fused_affine_primitive_group_runs",
-	        true)) {
+	        native_input, function, "generated_pending_fused_affine_primitive_group_runs", true)) {
 		return reject("output");
 	}
 	return true;
@@ -464,7 +461,7 @@ static bool TryPreaggregateInputVectorPrimitiveGroupsIntoPendingWithAccumulator(
     DataChunk &input, UnifiedVectorFormat &group_format,
     const vector<const ExecutionPrimitiveAggregateUpdateLane *> &payload_lanes,
     ExecutionGroupedAggregateStateAddressBinding &grouped_state, SljitPendingPreaggregatedPrimitiveGroupBatch &pending,
-    bool finish, optional_ptr<bool> deferred_grouped_finish, ACCUMULATOR accumulator) {
+    bool finish, ACCUMULATOR accumulator) {
 	const auto count = input.size();
 	if (payload_lanes.size() != 1 || !payload_lanes[0] || !accumulator.BindOutput(pending, *payload_lanes[0])) {
 		return false;
@@ -500,8 +497,8 @@ static bool TryPreaggregateInputVectorPrimitiveGroupsIntoPendingWithAccumulator(
 			flush_active_group();
 			if (!first_input_run || !SljitPendingPreaggregatedPrimitiveLastGroupMatches<TARGET_TYPE>(pending, key)) {
 				if (pending.Count() == SLJIT_PENDING_PREAGGREGATED_GROUP_CAPACITY &&
-				    !SljitFlushPendingPreaggregatedPrimitiveGroups(runtime, scratch, op_idx, op, pending, grouped_state,
-				                                                   deferred_grouped_finish)) {
+				    !SljitFlushPendingPreaggregatedPrimitiveGroups(runtime, scratch, op_idx, op, pending,
+				                                                   grouped_state)) {
 					throw InternalException("SLJIT proven pending preaggregated group flush failed");
 				}
 				if (pending.Empty()) {
@@ -524,8 +521,7 @@ static bool TryPreaggregateInputVectorPrimitiveGroupsIntoPendingWithAccumulator(
 	flush_active_group();
 	pending.represented_row_count += count;
 	if (finish) {
-		if (!SljitFlushPendingPreaggregatedPrimitiveGroups(runtime, scratch, op_idx, op, pending, grouped_state,
-		                                                   deferred_grouped_finish)) {
+		if (!SljitFlushPendingPreaggregatedPrimitiveGroups(runtime, scratch, op_idx, op, pending, grouped_state)) {
 			throw InternalException("SLJIT proven pending preaggregated group flush failed");
 		}
 	}
@@ -538,7 +534,7 @@ static bool TryPreaggregateInputVectorPrimitiveGroupsIntoPendingWithTypedSingleL
     DataChunk &input, UnifiedVectorFormat &group_format, SljitPreaggregatedPrimitivePayloadSources &payload_sources,
     const vector<const ExecutionPrimitiveAggregateUpdateLane *> &payload_lanes,
     ExecutionGroupedAggregateStateAddressBinding &grouped_state, SljitPendingPreaggregatedPrimitiveGroupBatch &pending,
-    bool finish, optional_ptr<bool> deferred_grouped_finish) {
+    bool finish) {
 	return SljitSelectPreaggregatedSingleLaneAccumulator<SljitPendingSingleLaneInt64SumAccumulator,
 	                                                     SljitPendingSingleLaneHugeintSumAccumulator,
 	                                                     SljitPendingSingleLaneCountAccumulator>(
@@ -546,7 +542,7 @@ static bool TryPreaggregateInputVectorPrimitiveGroupsIntoPendingWithTypedSingleL
 		    return TryPreaggregateInputVectorPrimitiveGroupsIntoPendingWithAccumulator<TARGET_TYPE, SOURCE_TYPE,
 		                                                                               CAST_KEY, GROUP_HAS_SELECTION>(
 		        runtime, scratch, op_idx, op, input, group_format, payload_lanes, grouped_state, pending, finish,
-		        deferred_grouped_finish, accumulator);
+		        accumulator);
 	    });
 }
 
@@ -556,17 +552,15 @@ static bool TryPreaggregateInputVectorPrimitiveGroupsIntoPendingWithTypedSingleL
     DataChunk &input, UnifiedVectorFormat &group_format, SljitPreaggregatedPrimitivePayloadSources &payload_sources,
     const vector<const ExecutionPrimitiveAggregateUpdateLane *> &payload_lanes,
     ExecutionGroupedAggregateStateAddressBinding &grouped_state, SljitPendingPreaggregatedPrimitiveGroupBatch &pending,
-    bool finish, optional_ptr<bool> deferred_grouped_finish) {
+    bool finish) {
 	if (group_format.sel->IsSet()) {
 		return TryPreaggregateInputVectorPrimitiveGroupsIntoPendingWithTypedSingleLanePayloadSelection<
 		    TARGET_TYPE, SOURCE_TYPE, CAST_KEY, true>(runtime, scratch, op_idx, op, input, group_format,
-		                                              payload_sources, payload_lanes, grouped_state, pending, finish,
-		                                              deferred_grouped_finish);
+		                                              payload_sources, payload_lanes, grouped_state, pending, finish);
 	}
 	return TryPreaggregateInputVectorPrimitiveGroupsIntoPendingWithTypedSingleLanePayloadSelection<
 	    TARGET_TYPE, SOURCE_TYPE, CAST_KEY, false>(runtime, scratch, op_idx, op, input, group_format, payload_sources,
-	                                               payload_lanes, grouped_state, pending, finish,
-	                                               deferred_grouped_finish);
+	                                               payload_lanes, grouped_state, pending, finish);
 }
 
 template <class TARGET_TYPE, class LOAD_KEY>
@@ -575,7 +569,7 @@ static bool SljitReplayInputVectorPrimitiveGroupsIntoPending(
     idx_t count, SljitPreaggregatedPrimitivePayloadSources &payload_sources,
     const vector<const ExecutionPrimitiveAggregateUpdateLane *> &payload_lanes,
     ExecutionGroupedAggregateStateAddressBinding &grouped_state, SljitPendingPreaggregatedPrimitiveGroupBatch &pending,
-    bool finish, optional_ptr<bool> deferred_grouped_finish, LOAD_KEY &&load_key) {
+    bool finish, LOAD_KEY &&load_key) {
 	const bool use_single_lane = payload_lanes.size() == 1 && payload_lanes[0];
 	TARGET_TYPE active_key {};
 	bool has_active_key = false;
@@ -591,8 +585,8 @@ static bool SljitReplayInputVectorPrimitiveGroupsIntoPending(
 			const bool first_input_run = !has_active_key;
 			if (!first_input_run || !SljitPendingPreaggregatedPrimitiveLastGroupMatches<TARGET_TYPE>(pending, key)) {
 				if (pending.Count() == SLJIT_PENDING_PREAGGREGATED_GROUP_CAPACITY &&
-				    !SljitFlushPendingPreaggregatedPrimitiveGroups(runtime, scratch, op_idx, op, pending, grouped_state,
-				                                                   deferred_grouped_finish)) {
+				    !SljitFlushPendingPreaggregatedPrimitiveGroups(runtime, scratch, op_idx, op, pending,
+				                                                   grouped_state)) {
 					throw InternalException("SLJIT proven pending preaggregated group flush failed");
 				}
 				if (pending.Empty()) {
@@ -621,8 +615,7 @@ static bool SljitReplayInputVectorPrimitiveGroupsIntoPending(
 		pending.represented_row_count++;
 	}
 	if (finish) {
-		if (!SljitFlushPendingPreaggregatedPrimitiveGroups(runtime, scratch, op_idx, op, pending, grouped_state,
-		                                                   deferred_grouped_finish)) {
+		if (!SljitFlushPendingPreaggregatedPrimitiveGroups(runtime, scratch, op_idx, op, pending, grouped_state)) {
 			throw InternalException("SLJIT proven pending preaggregated group flush failed");
 		}
 	}
@@ -635,7 +628,7 @@ static bool TryPreaggregateInputVectorPrimitiveGroupsIntoPendingWithKeyData(
     DataChunk &input, UnifiedVectorFormat &group_format, SljitPreaggregatedPrimitivePayloadSources &payload_sources,
     const vector<const ExecutionPrimitiveAggregateUpdateLane *> &payload_lanes,
     ExecutionGroupedAggregateStateAddressBinding &grouped_state, SljitPendingPreaggregatedPrimitiveGroupBatch &pending,
-    bool finish, optional_ptr<bool> deferred_grouped_finish) {
+    bool finish) {
 	const auto count = input.size();
 	auto group_data = UnifiedVectorFormat::GetData<SOURCE_TYPE>(group_format);
 	auto group_sel = group_format.sel;
@@ -652,16 +645,16 @@ static bool TryPreaggregateInputVectorPrimitiveGroupsIntoPendingWithKeyData(
 	    TryPreaggregateInputVectorPrimitiveGroupsIntoPendingWithTypedSingleLanePayload<TARGET_TYPE, SOURCE_TYPE,
 	                                                                                   CAST_KEY>(
 	        runtime, scratch, op_idx, op, input, group_format, payload_sources, payload_lanes, grouped_state, pending,
-	        finish, deferred_grouped_finish)) {
+	        finish)) {
 		return true;
 	}
 	auto replay_key = [&](idx_t row_idx, TARGET_TYPE &key) {
 		key = load_key(row_idx);
 		return true;
 	};
-	return SljitReplayInputVectorPrimitiveGroupsIntoPending<TARGET_TYPE>(
-	    runtime, scratch, op_idx, op, count, payload_sources, payload_lanes, grouped_state, pending, finish,
-	    deferred_grouped_finish, replay_key);
+	return SljitReplayInputVectorPrimitiveGroupsIntoPending<TARGET_TYPE>(runtime, scratch, op_idx, op, count,
+	                                                                     payload_sources, payload_lanes, grouped_state,
+	                                                                     pending, finish, replay_key);
 }
 
 struct SljitPendingPreaggregationKeyDispatch {
@@ -675,13 +668,12 @@ struct SljitPendingPreaggregationKeyDispatch {
 	ExecutionGroupedAggregateStateAddressBinding &grouped_state;
 	SljitPendingPreaggregatedPrimitiveGroupBatch &pending;
 	bool finish;
-	optional_ptr<bool> deferred_grouped_finish;
 
 	template <class TARGET_TYPE, class SOURCE_TYPE, bool CAST_KEY>
 	bool Execute(UnifiedVectorFormat &group_format) {
 		return TryPreaggregateInputVectorPrimitiveGroupsIntoPendingWithKeyData<TARGET_TYPE, SOURCE_TYPE, CAST_KEY>(
 		    runtime, scratch, op_idx, op, input, group_format, payload_sources, payload_lanes, grouped_state, pending,
-		    finish, deferred_grouped_finish);
+		    finish);
 	}
 };
 
@@ -755,7 +747,7 @@ static bool TryPreaggregateInputVectorFusedAffinePrimitiveGroupsIntoPendingTempl
     const vector<idx_t> &payload_source_indices,
     const vector<const ExecutionPrimitiveAggregateUpdateLane *> &payload_lanes,
     ExecutionGroupedAggregateStateAddressBinding &grouped_state, SljitPendingPreaggregatedPrimitiveGroupBatch &pending,
-    bool finish, optional_ptr<bool> deferred_grouped_finish) {
+    bool finish) {
 	auto reject = [&](const char *blocker) {
 		if (runtime.TraceRuntime()) {
 			auto path = string("pending_fused_affine_primitive_group_runs_miss.") + blocker;
@@ -772,7 +764,7 @@ static bool TryPreaggregateInputVectorFusedAffinePrimitiveGroupsIntoPendingTempl
 	}
 	if (!TryExecuteGeneratedFusedAffinePrimitiveRunsIntoPending<TARGET_TYPE>(
 	        runtime, scratch, op_idx, op, input, group_source, payload_source_indices, payload_lanes, grouped_state,
-	        pending, input.size(), finish, deferred_grouped_finish)) {
+	        pending, input.size(), finish)) {
 		pending.InvalidateGeneratedAppendProof();
 		return reject("generated");
 	}
@@ -786,7 +778,7 @@ static bool TryPreaggregateInputVectorPrimitiveGroupsIntoPendingTemplated(
     const vector<idx_t> &payload_source_indices,
     const vector<const ExecutionPrimitiveAggregateUpdateLane *> &payload_lanes,
     ExecutionGroupedAggregateStateAddressBinding &grouped_state, SljitPendingPreaggregatedPrimitiveGroupBatch &pending,
-    bool finish, optional_ptr<bool> deferred_grouped_finish) {
+    bool finish) {
 	const auto count = input.size();
 	auto reject = [&](const char *blocker) {
 		if (runtime.TraceRuntime()) {
@@ -811,30 +803,21 @@ static bool TryPreaggregateInputVectorPrimitiveGroupsIntoPendingTemplated(
 	}
 	if (TryExecuteGeneratedPrimitiveRunsIntoPending<TARGET_TYPE>(runtime, scratch, op_idx, op, group_source,
 	                                                             payload_sources, payload_lanes, grouped_state, pending,
-	                                                             count, finish, deferred_grouped_finish)) {
+	                                                             count, finish)) {
 		return true;
 	}
 	pending.InvalidateGeneratedAppendProof();
-	SljitPendingPreaggregationKeyDispatch dispatch {runtime,
-	                                                scratch,
-	                                                op_idx,
-	                                                op,
-	                                                input,
-	                                                payload_sources,
-	                                                payload_lanes,
-	                                                grouped_state,
-	                                                pending,
-	                                                finish,
-	                                                deferred_grouped_finish};
+	SljitPendingPreaggregationKeyDispatch dispatch {runtime,         scratch,       op_idx,        op,      input,
+	                                                payload_sources, payload_lanes, grouped_state, pending, finish};
 	if (SljitDispatchPreaggregatedInputVectorGroupKeyCast<TARGET_TYPE>(group_source, dispatch)) {
 		return true;
 	}
 	auto load_replay_key = [&](idx_t row_idx, TARGET_TYPE &key) {
 		return SljitLoadPreaggregatedInputVectorGroupKey(group_source, row_idx, key);
 	};
-	return SljitReplayInputVectorPrimitiveGroupsIntoPending<TARGET_TYPE>(
-	    runtime, scratch, op_idx, op, count, payload_sources, payload_lanes, grouped_state, pending, finish,
-	    deferred_grouped_finish, load_replay_key);
+	return SljitReplayInputVectorPrimitiveGroupsIntoPending<TARGET_TYPE>(runtime, scratch, op_idx, op, count,
+	                                                                     payload_sources, payload_lanes, grouped_state,
+	                                                                     pending, finish, load_replay_key);
 }
 
 struct SljitPendingPreaggregationTargetDispatch {
@@ -849,13 +832,12 @@ struct SljitPendingPreaggregationTargetDispatch {
 	ExecutionGroupedAggregateStateAddressBinding &grouped_state;
 	SljitPendingPreaggregatedPrimitiveGroupBatch &pending;
 	bool finish;
-	optional_ptr<bool> deferred_grouped_finish;
 
 	template <class TARGET_TYPE>
 	bool Execute() {
 		return TryPreaggregateInputVectorPrimitiveGroupsIntoPendingTemplated<TARGET_TYPE>(
 		    runtime, scratch, op_idx, op, input, group_sources, payload_source_indices, payload_lanes, grouped_state,
-		    pending, finish, deferred_grouped_finish);
+		    pending, finish);
 	}
 };
 
@@ -871,13 +853,12 @@ struct SljitPendingFusedAffinePreaggregationTargetDispatch {
 	ExecutionGroupedAggregateStateAddressBinding &grouped_state;
 	SljitPendingPreaggregatedPrimitiveGroupBatch &pending;
 	bool finish;
-	optional_ptr<bool> deferred_grouped_finish;
 
 	template <class TARGET_TYPE>
 	bool Execute() {
 		return TryPreaggregateInputVectorFusedAffinePrimitiveGroupsIntoPendingTemplated<TARGET_TYPE>(
 		    runtime, scratch, op_idx, op, input, group_sources, payload_source_indices, payload_lanes, grouped_state,
-		    pending, finish, deferred_grouped_finish);
+		    pending, finish);
 	}
 };
 
@@ -887,22 +868,13 @@ static bool TryPreaggregateInputVectorFusedAffinePrimitiveGroupsIntoPending(
     const vector<idx_t> &payload_source_indices,
     const vector<const ExecutionPrimitiveAggregateUpdateLane *> &payload_lanes,
     ExecutionGroupedAggregateStateAddressBinding &grouped_state, SljitPendingPreaggregatedPrimitiveGroupBatch &pending,
-    bool finish, optional_ptr<bool> deferred_grouped_finish) {
+    bool finish) {
 	if (group_sources.size() != 1 || !op.aggregate_update.fused_affine_run_update.Ready()) {
 		return false;
 	}
-	SljitPendingFusedAffinePreaggregationTargetDispatch dispatch {runtime,
-	                                                              scratch,
-	                                                              op_idx,
-	                                                              op,
-	                                                              input,
-	                                                              group_sources,
-	                                                              payload_source_indices,
-	                                                              payload_lanes,
-	                                                              grouped_state,
-	                                                              pending,
-	                                                              finish,
-	                                                              deferred_grouped_finish};
+	SljitPendingFusedAffinePreaggregationTargetDispatch dispatch {
+	    runtime,       scratch,       op_idx,  op,    input, group_sources, payload_source_indices,
+	    payload_lanes, grouped_state, pending, finish};
 	return SljitDispatchPreaggregatedInputVectorGroupTargetType(SljitGroupKeyEquivalencePhysicalType(group_sources[0]),
 	                                                            dispatch);
 }
@@ -915,22 +887,13 @@ static bool TryPreaggregateInputVectorPrimitiveGroupsIntoPending(
     const vector<idx_t> &payload_source_indices,
     const vector<const ExecutionPrimitiveAggregateUpdateLane *> &payload_lanes,
     ExecutionGroupedAggregateStateAddressBinding &grouped_state, SljitPendingPreaggregatedPrimitiveGroupBatch &pending,
-    bool finish, optional_ptr<bool> deferred_grouped_finish) {
+    bool finish) {
 	if (group_sources.size() != 1) {
 		return false;
 	}
-	SljitPendingPreaggregationTargetDispatch dispatch {runtime,
-	                                                   scratch,
-	                                                   op_idx,
-	                                                   op,
-	                                                   input,
-	                                                   group_sources,
-	                                                   payload_source_indices,
-	                                                   payload_lanes,
-	                                                   grouped_state,
-	                                                   pending,
-	                                                   finish,
-	                                                   deferred_grouped_finish};
+	SljitPendingPreaggregationTargetDispatch dispatch {
+	    runtime,       scratch,       op_idx,  op,    input, group_sources, payload_source_indices,
+	    payload_lanes, grouped_state, pending, finish};
 	return SljitDispatchPreaggregatedInputVectorGroupTargetType(SljitGroupKeyEquivalencePhysicalType(group_sources[0]),
 	                                                            dispatch);
 }

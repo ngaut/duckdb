@@ -108,10 +108,12 @@ static void SljitBindRecordedGroupedPrimitiveAggregateUpdate(ExecutionRegionRunt
 	}
 }
 
-static SinkResultType SljitExecuteBoundGroupedPrimitiveAggregateUpdate(
-    ExecutionRegionRuntime &runtime, SljitRegionExecutionScratch &scratch,
-    SljitBoundGroupedPrimitiveAggregateUpdate &bound, DataChunk &input, const SelectionVector *execute_sel, idx_t count,
-    bool defer_grouped_finish = false, optional_ptr<bool> deferred_grouped_finish = nullptr) {
+static SinkResultType SljitExecuteBoundGroupedPrimitiveAggregateUpdate(ExecutionRegionRuntime &runtime,
+                                                                       SljitRegionExecutionScratch &scratch,
+                                                                       SljitBoundGroupedPrimitiveAggregateUpdate &bound,
+                                                                       DataChunk &input,
+                                                                       const SelectionVector *execute_sel, idx_t count,
+                                                                       bool defer_grouped_finish = false) {
 	if (!bound.ready || bound.strategy == SljitBoundGroupedAggregateStrategy::UNBOUND || !bound.op ||
 	    !bound.payload_descriptors || !bound.payload_lanes || !bound.reduction_lanes || !bound.payload_scratch) {
 		throw InternalException("SLJIT grouped primitive aggregate update executed before binding");
@@ -130,14 +132,13 @@ static SinkResultType SljitExecuteBoundGroupedPrimitiveAggregateUpdate(
 		auto &grouped_state = *bound.grouped_state;
 		if (TryExecuteDirectGroupedAggregateUpdate(runtime, scratch, bound.op_idx, op, input, payload_lanes,
 		                                           reduction_lanes, execute_sel, count, grouped_state, payload_scratch,
-		                                           defer_grouped_finish, deferred_grouped_finish)) {
+		                                           defer_grouped_finish)) {
 			return SinkResultType::NEED_MORE_INPUT;
 		}
 		grouped_state_addresses = &scratch.AggregateStateAddresses(bound.op_idx);
 		if (SljitCanResolveDirectNewGroupedStateAddresses(scratch, bound.op_idx, op, input, execute_sel, count) &&
 		    TryResolveDirectNewGroupedStateAddresses(runtime, scratch, bound.op_idx, op, input, grouped_state,
 		                                             *grouped_state_addresses, !defer_grouped_finish)) {
-			MarkDeferredGroupedFinish(defer_grouped_finish, deferred_grouped_finish);
 		} else {
 			auto resolve_stage_start = SljitRegionStageStart(runtime);
 			ExecuteSljitRegionRecordedOperation(
@@ -209,13 +210,10 @@ static SinkResultType SljitExecuteBoundGroupedPrimitiveAggregateUpdate(
 	}
 	if (owns_grouped_state_addresses) {
 		if (defer_grouped_finish) {
-			MarkDeferredGroupedFinish(defer_grouped_finish, deferred_grouped_finish);
 		} else {
 			if (!bound.grouped_state) {
 				throw InternalException("SLJIT grouped primitive aggregate update is missing grouped state binding");
 			}
-			FinishGroupedAggregateStateUpdates(runtime, bound.op_idx, *bound.grouped_state,
-			                                   "finish_grouped_state_updates");
 		}
 	}
 	return SinkResultType::NEED_MORE_INPUT;

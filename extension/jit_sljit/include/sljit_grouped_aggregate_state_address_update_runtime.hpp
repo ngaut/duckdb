@@ -143,12 +143,12 @@ static bool TryResolveDirectNewGroupedStateAddresses(ExecutionRegionRuntime &run
                                                      ExecutionGroupedAggregateStateAddressBinding &grouped_state,
                                                      Vector &addresses, bool finish = true) {
 	auto stage_start = SljitRegionStageStart(runtime);
-	auto resolved = ExecuteSljitRegionRecordedOperation(
-	    runtime, op_idx, op.kind, "direct_new_grouped_state_addresses", stage_start,
-	    [&](optional_ptr<ExecutionOperatorStageRecorder> recorder) {
-		    return grouped_state.state->TryResolveNewGroups(input, op.aggregate_update.plan.sink_info, addresses,
-		                                                    recorder, finish);
-	    });
+	auto resolved =
+	    ExecuteSljitRegionRecordedOperation(runtime, op_idx, op.kind, "direct_new_grouped_state_addresses", stage_start,
+	                                        [&](optional_ptr<ExecutionOperatorStageRecorder> recorder) {
+		                                        return grouped_state.state->TryResolveNewGroups(
+		                                            input, op.aggregate_update.plan.sink_info, addresses, recorder);
+	                                        });
 	scratch.RecordDirectNewAggregateUpdateResult(op_idx, resolved);
 	RecordSljitRegionStageRuntimePath(
 	    runtime, op_idx, op.kind,
@@ -175,7 +175,7 @@ static bool TryExecuteDirectGroupedStateAddressPayloadUpdate(
 	    runtime, op_idx, op.kind, stage_name, stage_start, [&](optional_ptr<ExecutionOperatorStageRecorder> recorder) {
 		    return grouped_state.state->TryUpdateNewGroupsWithSelectedStateAddresses(
 		        input, op.aggregate_update.plan.sink_info, SljitExecuteGroupedSelectedStateAddressUpdate, &update_state,
-		        recorder, finish, nullptr, dense_domain);
+		        recorder, nullptr, dense_domain);
 	    });
 	scratch.RecordDirectNewAggregateUpdateResult(op_idx, updated);
 	RecordSljitRegionStageRuntimePath(runtime, op_idx, op.kind, updated ? stage_name : miss_stage_name, stage_start);
@@ -207,7 +207,7 @@ static bool TryExecuteDirectProjectedGroupedStateAddressPayloadUpdate(
 	    runtime, op_idx, op.kind, stage_name, stage_start, [&](optional_ptr<ExecutionOperatorStageRecorder> recorder) {
 		    return grouped_state.state->TryUpdateGroupKeysWithSelectedStateAddresses(
 		        groups, op.aggregate_update.plan.sink_info, SljitExecuteGroupedSelectedStateAddressUpdate,
-		        &update_state, recorder, finish, precomputed_hashes, dense_domain);
+		        &update_state, recorder, precomputed_hashes, dense_domain);
 	    });
 	scratch.RecordDirectNewAggregateUpdateResult(op_idx, updated);
 	if (updated) {

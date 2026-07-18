@@ -87,7 +87,7 @@ static bool SljitTryPrepareCountStarGroupedAggregateUpdate(ExecutionRegionRuntim
 static bool TryExecutePreparedPreaggregatedCountStarGroupedAggregateUpdate(
     ExecutionRegionRuntime &runtime, idx_t op_idx, SljitExecutableRegionOp &op, DataChunk &compact_groups,
     const vector<int64_t> &count_deltas, SljitCountStarGroupedAggregateUpdateDescriptor &descriptor,
-    idx_t preaggregated_row_count, bool defer_grouped_finish, optional_ptr<bool> deferred_grouped_finish) {
+    idx_t preaggregated_row_count, bool defer_grouped_finish) {
 	if (compact_groups.size() == 0 || count_deltas.size() < compact_groups.size() || !descriptor.Ready()) {
 		return false;
 	}
@@ -104,7 +104,7 @@ static bool TryExecutePreparedPreaggregatedCountStarGroupedAggregateUpdate(
 	    [&](optional_ptr<ExecutionOperatorStageRecorder> recorder) {
 		    return grouped_state.state->TryUpdateGroupKeysWithSelectedStateAddresses(
 		        compact_groups, op.aggregate_update.plan.sink_info, ExecuteSljitPreaggregatedCountStarUpdate,
-		        &update_state, recorder, finish);
+		        &update_state, recorder);
 	    });
 	RecordSljitRegionStageRuntimePath(runtime, op_idx, op.kind,
 	                                  updated ? "direct_preaggregated_count_star_update"
@@ -115,7 +115,6 @@ static bool TryExecutePreparedPreaggregatedCountStarGroupedAggregateUpdate(
 	}
 	RecordSljitRegionMaterializationElisionProof(runtime, op.kind, "direct_preaggregated_count_star_update",
 	                                             preaggregated_row_count);
-	MarkDeferredGroupedFinish(defer_grouped_finish, deferred_grouped_finish);
 	return true;
 }
 
@@ -140,7 +139,6 @@ public:
 		pending_row_count_deltas.clear();
 		pending_preaggregated_row_count = 0;
 		pending_row_count = 0;
-		deferred_grouped_finish = false;
 		if (primitive.input_kind == SljitGroupedAggregateUpdateInputKind::PROJECTED_INPUT) {
 			projected_count_star_group_projection = primitive.projected_count_star_group_projection;
 			if (!projected_count_star_group_projection ||
@@ -175,7 +173,6 @@ public:
 		if (!FlushPendingRowCountStar(runtime, scratch, primitive.aggregate_idx, ops[primitive.aggregate_idx])) {
 			throw InternalException("SLJIT grouped count-star pending row-delta flush failed");
 		}
-		SljitFinishDeferredGroupedAggregateUpdate(runtime, scratch, primitive.aggregate_idx, deferred_grouped_finish);
 		return false;
 	}
 
@@ -310,7 +307,7 @@ private:
 		}
 		return TryExecutePreparedPreaggregatedCountStarGroupedAggregateUpdate(
 		    runtime, aggregate_idx, aggregate_op, compact_groups, count_deltas, count_star_update,
-		    represented_row_count, true, &deferred_grouped_finish);
+		    represented_row_count, true);
 	}
 
 	bool FlushPendingPreaggregatedCountStar(ExecutionRegionRuntime &runtime, SljitRegionExecutionScratch &scratch,
@@ -321,7 +318,7 @@ private:
 		const auto represented_row_count = pending_preaggregated_row_count;
 		auto updated = TryExecutePreparedPreaggregatedCountStarGroupedAggregateUpdate(
 		    runtime, aggregate_idx, aggregate_op, pending_preaggregated_groups, pending_preaggregated_count_deltas,
-		    count_star_update, represented_row_count, true, &deferred_grouped_finish);
+		    count_star_update, represented_row_count, true);
 		pending_preaggregated_groups.Reset();
 		pending_preaggregated_count_deltas.clear();
 		pending_preaggregated_row_count = 0;
@@ -344,7 +341,7 @@ private:
 		if (pending_row_groups.ColumnCount() == 0) {
 			return TryExecutePreparedPreaggregatedCountStarGroupedAggregateUpdate(
 			    runtime, aggregate_idx, aggregate_op, groups, count_deltas, count_star_update, represented_row_count,
-			    true, &deferred_grouped_finish);
+			    true);
 		}
 		if (pending_row_groups.size() + groups.size() > STANDARD_VECTOR_SIZE &&
 		    !FlushPendingRowCountStar(runtime, scratch, aggregate_idx, aggregate_op)) {
@@ -369,7 +366,7 @@ private:
 		const auto represented_row_count = pending_row_count;
 		auto updated = TryExecutePreparedPreaggregatedCountStarGroupedAggregateUpdate(
 		    runtime, aggregate_idx, aggregate_op, pending_row_groups, pending_row_count_deltas, count_star_update,
-		    represented_row_count, true, &deferred_grouped_finish);
+		    represented_row_count, true);
 		pending_row_groups.Reset();
 		pending_row_count_deltas.clear();
 		pending_row_count = 0;
@@ -381,7 +378,6 @@ private:
 	}
 
 private:
-	bool deferred_grouped_finish = false;
 	vector<LogicalType> group_types;
 	DataChunk preaggregated_groups;
 	vector<int64_t> preaggregated_count_deltas;

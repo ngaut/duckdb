@@ -19,8 +19,7 @@ static SinkResultType
 SljitExecutePrimitiveAggregateUpdate(ExecutionRegionRuntime &runtime, ExecutionOperatorRuntime &native_runtime,
                                      SljitRegionExecutionScratch &scratch, idx_t op_idx, SljitExecutableRegionOp &op,
                                      DataChunk &input, const SelectionVector *execute_sel = nullptr,
-                                     idx_t count = DConstants::INVALID_INDEX, bool defer_grouped_finish = false,
-                                     optional_ptr<bool> deferred_grouped_finish = nullptr) {
+                                     idx_t count = DConstants::INVALID_INDEX, bool defer_grouped_finish = false) {
 	if (count == DConstants::INVALID_INDEX) {
 		count = input.size();
 	}
@@ -29,7 +28,7 @@ SljitExecutePrimitiveAggregateUpdate(ExecutionRegionRuntime &runtime, ExecutionO
 		auto &bound = scratch.AggregateBoundGroupedUpdate(op_idx);
 		SljitBindRecordedGroupedPrimitiveAggregateUpdate(runtime, native_runtime, scratch, op_idx, op, input, bound);
 		return SljitExecuteBoundGroupedPrimitiveAggregateUpdate(runtime, scratch, bound, input, execute_sel, count,
-		                                                        defer_grouped_finish, deferred_grouped_finish);
+		                                                        defer_grouped_finish);
 	}
 	SljitBoundUngroupedPrimitiveAggregateUpdate bound;
 	SljitBindRecordedUngroupedPrimitiveAggregateUpdate(runtime, native_runtime, scratch, op_idx, op, input, bound);
@@ -68,14 +67,13 @@ static SinkResultType SljitExecuteDuckDBAggregateUpdate(ExecutionRegionRuntime &
 static SinkResultType SljitExecuteNativePipelineAggregateUpdate(
     ExecutionRegionRuntime &runtime, ExecutionOperatorRuntime &native_runtime, SljitRegionExecutionScratch &scratch,
     idx_t op_idx, SljitExecutableRegionOp &op, DataChunk &input, const SelectionVector *execute_sel = nullptr,
-    idx_t count = DConstants::INVALID_INDEX, bool defer_grouped_finish = false,
-    optional_ptr<bool> deferred_grouped_finish = nullptr) {
+    idx_t count = DConstants::INVALID_INDEX, bool defer_grouped_finish = false) {
 	if (count == DConstants::INVALID_INDEX) {
 		count = input.size();
 	}
 	if (op.aggregate_update.plan.UsesPrimitivePayloads()) {
 		return SljitExecutePrimitiveAggregateUpdate(runtime, native_runtime, scratch, op_idx, op, input, execute_sel,
-		                                            count, defer_grouped_finish, deferred_grouped_finish);
+		                                            count, defer_grouped_finish);
 	}
 	return SljitExecuteDuckDBAggregateUpdate(runtime, native_runtime, scratch, op_idx, op, input, execute_sel, count);
 }

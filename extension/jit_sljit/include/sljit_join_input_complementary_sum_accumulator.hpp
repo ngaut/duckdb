@@ -288,12 +288,10 @@ static bool SljitFlushJoinInputComplementarySumAccumulator(ExecutionRegionRuntim
 		strategy.pending_preaggregated_groups = make_shared_ptr<SljitPendingPreaggregatedPrimitiveGroupBatch>();
 	}
 	strategy.pending_preaggregated_scratch = &scratch;
-	strategy.pending_preaggregated_deferred_grouped_finish =
-	    strategy.join_input_complementary_sum_deferred_grouped_finish;
-	if (!SljitBufferPreaggregatedPrimitiveGroups(
-	        runtime, scratch, strategy.aggregate_idx, aggregate_op, compact_groups, preaggregate_scratch, payload_lanes,
-	        binding.aggregate_update.grouped_state, represented_row_count, *strategy.pending_preaggregated_groups,
-	        false, strategy.join_input_complementary_sum_deferred_grouped_finish)) {
+	if (!SljitBufferPreaggregatedPrimitiveGroups(runtime, scratch, strategy.aggregate_idx, aggregate_op, compact_groups,
+	                                             preaggregate_scratch, payload_lanes,
+	                                             binding.aggregate_update.grouped_state, represented_row_count,
+	                                             *strategy.pending_preaggregated_groups, false)) {
 		return false;
 	}
 	RecordSljitRegionMaterializationElisionPath(

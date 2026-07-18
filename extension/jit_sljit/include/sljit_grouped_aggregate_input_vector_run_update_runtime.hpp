@@ -74,7 +74,6 @@ static bool TryExecuteRunPreaggregatedInputVectorCarryoverOnlyUpdate(
 	    runtime, op.kind, "direct_input_vector_run_preaggregated_carryover_update", represented_row_count);
 	SljitRecordInputVectorPreaggregatedUpdateBoundaries(runtime, op.kind, run_group_keys.size(), represented_row_count);
 	if (finish) {
-		FinishGroupedAggregateStateUpdates(runtime, op_idx, grouped_state, "finish_grouped_state_updates");
 		continuation.Clear();
 	}
 	return true;
@@ -135,7 +134,7 @@ static bool TryExecuteRunPreaggregatedInputVectorAppendSuffixWithPrefixUpdate(
 	    [&](optional_ptr<ExecutionOperatorStageRecorder> recorder) {
 		    return grouped_state.state->TryAppendNewGroupKeysWithStateAddresses(
 		        run_group_suffix, sink_info, ExecuteSljitPreaggregatedPrimitiveAddressUpdate, &suffix_update_state,
-		        recorder, false, dense_domain);
+		        recorder, dense_domain);
 	    });
 	if (!suffix_appended) {
 		RecordSljitRegionStageRuntimePath(runtime, op_idx, op.kind,
@@ -167,7 +166,6 @@ static bool TryExecuteRunPreaggregatedInputVectorAppendSuffixWithPrefixUpdate(
 	SljitRecordInputVectorPreaggregatedUpdateBoundaries(runtime, op.kind, prefix_count, prefix_row_count);
 
 	if (finish) {
-		FinishGroupedAggregateStateUpdates(runtime, op_idx, grouped_state, "finish_grouped_state_updates");
 		continuation.Clear();
 	} else {
 		SljitStorePreaggregatedGroupContinuation(continuation, run_group_keys, run_group_keys.size() - 1,
@@ -205,7 +203,7 @@ static bool TryExecuteRunPreaggregatedInputVectorAppendNewUpdate(
 	    [&](optional_ptr<ExecutionOperatorStageRecorder> recorder) {
 		    return grouped_state.state->TryAppendNewGroupKeysWithStateAddresses(
 		        run_group_keys, sink_info, ExecuteSljitPreaggregatedPrimitiveAddressUpdate, &update_state, recorder,
-		        finish, dense_domain);
+		        dense_domain);
 	    });
 	if (appended) {
 		RecordPreaggregatedGroupedAggregateRepresentedRows(grouped_state, represented_row_count, run_group_keys.size());
@@ -300,9 +298,6 @@ static bool TryExecuteRunPreaggregatedInputVectorGroupedTargetPayloadUpdate(
 	RecordPreaggregatedGroupedAggregateRepresentedRows(grouped_state, payload_input.size(), run_count);
 	RecordSljitRegionStageRuntime(runtime, op_idx, op.kind, "direct_input_vector_run_preaggregated_payload_update",
 	                              update_start);
-	if (finish) {
-		FinishGroupedAggregateStateUpdates(runtime, op_idx, grouped_state, "finish_grouped_state_updates");
-	}
 	if (fused_run_payloads) {
 		RecordSljitRegionMaterializationElisionPath(
 		    runtime, op.kind, "direct_input_vector_run_fused_preaggregated_grouped_update", payload_input.size());
