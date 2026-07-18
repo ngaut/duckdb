@@ -15,7 +15,7 @@
 
 namespace duckdb {
 
-enum class SljitProjectionDirectAppendReservationStatus : uint8_t { READY, UNAVAILABLE, BLOCKED };
+enum class SljitProjectionDirectAppendReservationStatus : uint8_t { READY, UNAVAILABLE };
 
 static ExecutionSinkBinding &SljitBindProjectionDirectAppendSink(ExecutionRegionRuntime &runtime,
                                                                  ExecutionOperatorRuntime &native_runtime,
@@ -60,15 +60,6 @@ static SljitProjectionDirectAppendReservationStatus SljitPrepareProjectionDirect
 	    ExecutionPrepareDirectAppend(binding.append_sink, op.output_types, input.size() - source_offset, reservation,
 	                                 blocker, &direct_append_profile);
 	direct_stage_timers.AddPrepare(prepare_stage_start);
-	if (direct_result == ExecutionOperatorBindResult::DEFERRED) {
-		if (source_offset > 0) {
-			throw InternalException("SLJIT direct append became deferred after a partial commit: %s", blocker.c_str());
-		}
-		string deferred_reason = blocker.empty() ? string("direct-append-deferred") : std::move(blocker);
-		SljitDeferBlockedSinkResult(runtime, deferred_reason, sink_result);
-		RecordSljitDirectAppendProfile(runtime, sink_idx, sink_op.kind, direct_append_profile);
-		return SljitProjectionDirectAppendReservationStatus::BLOCKED;
-	}
 	if (direct_result != ExecutionOperatorBindResult::READY) {
 		if (source_offset > 0) {
 			throw InternalException("SLJIT direct append became unavailable after a partial commit: %s",
@@ -122,10 +113,6 @@ static bool SljitTryExecuteProjectionDirectAppendLoop(
 		const auto reservation_status = SljitPrepareProjectionDirectAppendReservation(
 		    runtime, binding, scratch, sink_idx, op, sink_op, input, source_offset, direct_stage_timers, sink_result,
 		    direct_append_profile);
-		if (reservation_status == SljitProjectionDirectAppendReservationStatus::BLOCKED) {
-			direct_stage_timers.Flush();
-			return true;
-		}
 		if (reservation_status == SljitProjectionDirectAppendReservationStatus::UNAVAILABLE) {
 			direct_stage_timers.Flush();
 			return false;

@@ -186,11 +186,14 @@ ExecutionRunnerResult CompiledVectorizedRunner::ExecuteAdaptive(ExecutionRegionP
 			}
 			if (ExecutionRegionSettings::TraceRuntime(client) &&
 			    ab.phase.load() != ExecutionRegionAdaptiveAbPhase::MEASURING_COMPILED_RUNNING) {
-				auto reason = StringUtil::Format("adaptive_ab verdict=%s compiled_leg_us=%lld native_leg_us=%lld",
-				                                 ab.phase.load() == ExecutionRegionAdaptiveAbPhase::FALLBACK_NATIVE
-				                                     ? "fallback_native"
-				                                     : "commit_compiled",
-				                                 ab.compiled_leg_us.load(), ab.native_leg_us.load());
+				auto reason = StringUtil::Format(
+				    "adaptive_ab verdict=%s compiled_leg_us=%lld native_leg_us=%lld compiled_leg_rows=%llu "
+				    "native_leg_rows=%llu",
+				    ab.phase.load() == ExecutionRegionAdaptiveAbPhase::FALLBACK_NATIVE ? "fallback_native"
+				                                                                       : "commit_compiled",
+				    ab.compiled_leg_us.load(), ab.native_leg_us.load(),
+				    static_cast<unsigned long long>(ab.compiled_leg_rows.load()),
+				    static_cast<unsigned long long>(ab.native_leg_rows.load()));
 				ExecutionRegionManager::Get(client).RecordRuntimeEvent(
 				    client, kernel, ExecutionRegionEventStatus::EXECUTED, std::move(reason), 0, 0, 0, "adaptive_ab");
 			}

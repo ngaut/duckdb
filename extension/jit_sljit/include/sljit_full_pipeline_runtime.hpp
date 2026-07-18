@@ -52,6 +52,10 @@ static bool SljitNativeSinkResultStopsExecution(ExecutionRegionRuntime &runtime,
 		return false;
 	}
 	if (sink_result == SinkResultType::BLOCKED) {
+		// A plain blocked sink yields and resumes compiled. A blocked sink WITH a
+		// deferred reason arises when a legal boundary deferral unwinds through a
+		// flush path that still sinks pending batches: the deferral must win, or
+		// the pipeline would re-enter a kernel that already handed off its claim.
 		result =
 		    runtime.DeferredReason().empty() ? ExecutionRegionResult::INTERRUPTED : ExecutionRegionResult::DEFERRED;
 		return true;
@@ -62,7 +66,8 @@ static bool SljitNativeSinkResultStopsExecution(ExecutionRegionRuntime &runtime,
 
 //! The stop result for a blocked source fetch: a plain block yields and resumes
 //! compiled, while a block carrying a deferred reason hands the pipeline to the
-//! vectorized continuation, mirroring the blocked-sink protocol above.
+//! vectorized continuation. Reasons only arise at the legal deferral points —
+//! kernel entry or a declined claim boundary — where nothing is in flight.
 static ExecutionRegionResult SljitBlockedSourceStopResult(ExecutionRegionRuntime &runtime) {
 	return runtime.DeferredReason().empty() ? ExecutionRegionResult::INTERRUPTED : ExecutionRegionResult::DEFERRED;
 }
@@ -109,6 +114,9 @@ static bool SljitRunFullPipelineSourceContractLoop(ExecutionRegionRuntime &runti
 	}
 }
 
+//! Routes a native blocker into the runtime's deferral-legality enforcement:
+//! only legal at kernel entry; a mid-stream request throws there, because a
+//! handoff with rows in flight would abandon them.
 static bool SljitDeferFullPipelineResult(ExecutionRegionRuntime &runtime, string &deferred_reason,
                                          ExecutionRegionResult &result) {
 	runtime.Defer(std::move(deferred_reason));
@@ -116,6 +124,8 @@ static bool SljitDeferFullPipelineResult(ExecutionRegionRuntime &runtime, string
 	return true;
 }
 
+//! Same legality routing as SljitDeferFullPipelineResult for blocked-sink call
+//! shapes; mid-stream requests throw inside Defer.
 static bool SljitDeferBlockedSinkResult(ExecutionRegionRuntime &runtime, string &deferred_reason,
                                         SinkResultType &sink_result) {
 	runtime.Defer(std::move(deferred_reason));

@@ -113,7 +113,6 @@ private:
 	//! Partition info that is used by this executor
 	OperatorPartitionInfo required_partition_info;
 
-	//! Source operator indicated that there is no more output possible
 	//! Remaining vectorized new-row-group claims; INVALID_INDEX means unlimited.
 	idx_t vectorized_source_claim_budget = DConstants::INVALID_INDEX;
 	//! Set when the source declined a claim and the executor yielded at the boundary.
@@ -127,6 +126,7 @@ private:
 	//! Entry deferral is only legal before this point: afterwards the contract
 	//! cursor can hold a partially-read row group a handoff would abandon.
 	bool compiled_source_contract_fetched = false;
+	//! Source operator indicated that there is no more output possible
 	bool exhausted_source = false;
 	//! Source or intermediate operator indicated that there is no more output possible
 	bool exhausted_pipeline = false;

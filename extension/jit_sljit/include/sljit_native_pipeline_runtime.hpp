@@ -343,6 +343,9 @@ SljitExecuteNativeFullPipelineFrom(KERNEL &kernel, ExecutionRegionRuntime &runti
 		if (SljitTryExecuteProjectionDirectAppend(runtime, native_runtime, scratch, ops, source_distinct_counts, op_idx,
 		                                          op, *current, direct_append_result)) {
 			if (direct_append_result == SinkResultType::BLOCKED && !runtime.DeferredReason().empty()) {
+				// A commit blocked while a boundary deferral is unwinding: the
+				// deferral owns the handoff, so the chunk must not also be
+				// transferred to the core continuation.
 				return direct_append_result;
 			}
 			return native_runtime.RecordSinkResult(*current, direct_append_result);

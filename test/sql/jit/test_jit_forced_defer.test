@@ -1,5 +1,5 @@
 # name: test/sql/jit/test_jit_forced_defer.test
-# description: Mid-query compiled-to-native handoff at row-group boundaries preserves results per sink kind
+# description: Compiled-to-native handoff preserves results per sink kind: boundary deferral (serial and parallel), entry deferral, and the distinct-key-sink recipe refusing mid-query handoff
 # group: [jit]
 
 statement ok
