@@ -200,6 +200,48 @@ static bool TryPreaggregateConsecutivePrimitiveGroupsTemplated(
 	return true;
 }
 
+template <class TARGET_DISPATCH>
+static bool SljitDispatchPreaggregatedInputVectorGroupTargetType(PhysicalType target_type, TARGET_DISPATCH &dispatch) {
+	switch (target_type) {
+	case PhysicalType::INT8:
+		return dispatch.template Execute<int8_t>();
+	case PhysicalType::INT16:
+		return dispatch.template Execute<int16_t>();
+	case PhysicalType::INT32:
+		return dispatch.template Execute<int32_t>();
+	case PhysicalType::INT64:
+		return dispatch.template Execute<int64_t>();
+	case PhysicalType::UINT8:
+		return dispatch.template Execute<uint8_t>();
+	case PhysicalType::UINT16:
+		return dispatch.template Execute<uint16_t>();
+	case PhysicalType::UINT32:
+		return dispatch.template Execute<uint32_t>();
+	case PhysicalType::UINT64:
+		return dispatch.template Execute<uint64_t>();
+	case PhysicalType::INT128:
+		return dispatch.template Execute<hugeint_t>();
+	case PhysicalType::UINT128:
+		return dispatch.template Execute<uhugeint_t>();
+	default:
+		return false;
+	}
+}
+
+struct SljitConsecutivePrimitiveGroupsTargetDispatch {
+	SljitExecutableRegionOp &op;
+	DataChunk &input;
+	const vector<const ExecutionPrimitiveAggregateUpdateLane *> &payload_lanes;
+	DataChunk &compact_groups;
+	SljitPreaggregatedPrimitiveAggregateScratch &scratch;
+
+	template <class TARGET_TYPE>
+	bool Execute() {
+		return TryPreaggregateConsecutivePrimitiveGroupsTemplated<TARGET_TYPE>(op, input, payload_lanes, compact_groups,
+		                                                                       scratch);
+	}
+};
+
 static bool
 TryPreaggregateConsecutivePrimitiveGroups(SljitExecutableRegionOp &op, DataChunk &input,
                                           const vector<const ExecutionPrimitiveAggregateUpdateLane *> &payload_lanes,
@@ -215,40 +257,9 @@ TryPreaggregateConsecutivePrimitiveGroups(SljitExecutableRegionOp &op, DataChunk
 	    compact_groups.data[0].GetType() != sink_info.groups[0].type) {
 		return false;
 	}
-	switch (input.data[group_source_index].GetType().InternalType()) {
-	case PhysicalType::INT8:
-		return TryPreaggregateConsecutivePrimitiveGroupsTemplated<int8_t>(op, input, payload_lanes, compact_groups,
-		                                                                  scratch);
-	case PhysicalType::INT16:
-		return TryPreaggregateConsecutivePrimitiveGroupsTemplated<int16_t>(op, input, payload_lanes, compact_groups,
-		                                                                   scratch);
-	case PhysicalType::INT32:
-		return TryPreaggregateConsecutivePrimitiveGroupsTemplated<int32_t>(op, input, payload_lanes, compact_groups,
-		                                                                   scratch);
-	case PhysicalType::INT64:
-		return TryPreaggregateConsecutivePrimitiveGroupsTemplated<int64_t>(op, input, payload_lanes, compact_groups,
-		                                                                   scratch);
-	case PhysicalType::INT128:
-		return TryPreaggregateConsecutivePrimitiveGroupsTemplated<hugeint_t>(op, input, payload_lanes, compact_groups,
-		                                                                     scratch);
-	case PhysicalType::UINT8:
-		return TryPreaggregateConsecutivePrimitiveGroupsTemplated<uint8_t>(op, input, payload_lanes, compact_groups,
-		                                                                   scratch);
-	case PhysicalType::UINT16:
-		return TryPreaggregateConsecutivePrimitiveGroupsTemplated<uint16_t>(op, input, payload_lanes, compact_groups,
-		                                                                    scratch);
-	case PhysicalType::UINT32:
-		return TryPreaggregateConsecutivePrimitiveGroupsTemplated<uint32_t>(op, input, payload_lanes, compact_groups,
-		                                                                    scratch);
-	case PhysicalType::UINT64:
-		return TryPreaggregateConsecutivePrimitiveGroupsTemplated<uint64_t>(op, input, payload_lanes, compact_groups,
-		                                                                    scratch);
-	case PhysicalType::UINT128:
-		return TryPreaggregateConsecutivePrimitiveGroupsTemplated<uhugeint_t>(op, input, payload_lanes, compact_groups,
-		                                                                      scratch);
-	default:
-		return false;
-	}
+	SljitConsecutivePrimitiveGroupsTargetDispatch dispatch {op, input, payload_lanes, compact_groups, scratch};
+	return SljitDispatchPreaggregatedInputVectorGroupTargetType(input.data[group_source_index].GetType().InternalType(),
+	                                                            dispatch);
 }
 
 struct SljitPreaggregatedInputVectorGroupKeySource {
@@ -399,34 +410,6 @@ static bool SljitDispatchPreaggregatedInputVectorGroupKeyCast(SljitPreaggregated
 			return dispatch.template Execute<int8_t, int32_t, true>(group_source.format);
 		}
 		return false;
-	default:
-		return false;
-	}
-}
-
-template <class TARGET_DISPATCH>
-static bool SljitDispatchPreaggregatedInputVectorGroupTargetType(PhysicalType target_type, TARGET_DISPATCH &dispatch) {
-	switch (target_type) {
-	case PhysicalType::INT8:
-		return dispatch.template Execute<int8_t>();
-	case PhysicalType::INT16:
-		return dispatch.template Execute<int16_t>();
-	case PhysicalType::INT32:
-		return dispatch.template Execute<int32_t>();
-	case PhysicalType::INT64:
-		return dispatch.template Execute<int64_t>();
-	case PhysicalType::UINT8:
-		return dispatch.template Execute<uint8_t>();
-	case PhysicalType::UINT16:
-		return dispatch.template Execute<uint16_t>();
-	case PhysicalType::UINT32:
-		return dispatch.template Execute<uint32_t>();
-	case PhysicalType::UINT64:
-		return dispatch.template Execute<uint64_t>();
-	case PhysicalType::INT128:
-		return dispatch.template Execute<hugeint_t>();
-	case PhysicalType::UINT128:
-		return dispatch.template Execute<uhugeint_t>();
 	default:
 		return false;
 	}

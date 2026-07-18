@@ -36,27 +36,9 @@ static bool SljitCanApplyRunPreaggregatedInputVectorAggregateUpdate(
     const vector<ExecutionRowPointerGroupKeySource> &group_sources,
     const vector<const ExecutionPrimitiveAggregateUpdateLane *> &payload_lanes,
     ExecutionGroupedAggregateStateAddressBinding &grouped_state) {
-	if (run_count == 0 || op.aggregate_update.plan.sink_info.kind != ExecutionRegionSinkKind::HASH_AGGREGATE_UPDATE ||
-	    !op.aggregate_update.plan.UsesPrimitivePayloads() || !op.aggregate_update.plan.use_grouped_state_addresses ||
-	    !grouped_state.ready || !grouped_state.state) {
-		return false;
-	}
-	auto &sink_info = op.aggregate_update.plan.sink_info;
-	if (sink_info.groups.size() != group_sources.size() ||
-	    sink_info.aggregates.size() != op.aggregate_update.payloads.size() ||
-	    sink_info.aggregates.size() != op.aggregate_update.payload_descriptors.size() ||
-	    sink_info.aggregates.size() != payload_lanes.size() ||
-	    sink_info.aggregates.size() != preaggregate_scratch.payloads.size() ||
-	    preaggregate_scratch.group_row_counts.size() != run_count) {
-		return false;
-	}
-	for (idx_t payload_idx = 0; payload_idx < sink_info.aggregates.size(); payload_idx++) {
-		if (op.aggregate_update.payload_descriptors[payload_idx].primitive_kind !=
-		    preaggregate_scratch.payloads[payload_idx].kind) {
-			return false;
-		}
-	}
-	return true;
+	return run_count != 0 && preaggregate_scratch.group_row_counts.size() == run_count &&
+	       SljitPreaggregatedGroupedPrimitiveUpdateContractApplies(op, group_sources.size(), preaggregate_scratch,
+	                                                               payload_lanes, grouped_state);
 }
 
 static void SljitRecordInputVectorPreaggregatedUpdateBoundaries(ExecutionRegionRuntime &runtime,

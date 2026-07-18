@@ -219,4 +219,35 @@ static bool TryExecuteDirectProjectedGroupedStateAddressPayloadUpdate(
 	return updated;
 }
 
+// Shared admission core for applying preaggregated primitive payloads through
+// DuckDB's grouped state addresses: the plan must own primitive payloads with
+// grouped state addressing, and the scratch payload lanes must match the bound
+// descriptors exactly. Callers add their own input-shape checks.
+static bool SljitPreaggregatedGroupedPrimitiveUpdateContractApplies(
+    SljitExecutableRegionOp &op, idx_t group_column_count,
+    SljitPreaggregatedPrimitiveAggregateScratch &preaggregate_scratch,
+    const vector<const ExecutionPrimitiveAggregateUpdateLane *> &payload_lanes,
+    ExecutionGroupedAggregateStateAddressBinding &grouped_state) {
+	if (op.aggregate_update.plan.sink_info.kind != ExecutionRegionSinkKind::HASH_AGGREGATE_UPDATE ||
+	    !op.aggregate_update.plan.UsesPrimitivePayloads() || !op.aggregate_update.plan.use_grouped_state_addresses ||
+	    !grouped_state.ready || !grouped_state.state) {
+		return false;
+	}
+	auto &sink_info = op.aggregate_update.plan.sink_info;
+	if (sink_info.groups.size() != group_column_count ||
+	    sink_info.aggregates.size() != op.aggregate_update.payloads.size() ||
+	    sink_info.aggregates.size() != op.aggregate_update.payload_descriptors.size() ||
+	    sink_info.aggregates.size() != payload_lanes.size() ||
+	    sink_info.aggregates.size() != preaggregate_scratch.payloads.size()) {
+		return false;
+	}
+	for (idx_t payload_idx = 0; payload_idx < sink_info.aggregates.size(); payload_idx++) {
+		if (op.aggregate_update.payload_descriptors[payload_idx].primitive_kind !=
+		    preaggregate_scratch.payloads[payload_idx].kind) {
+			return false;
+		}
+	}
+	return true;
+}
+
 } // namespace duckdb
