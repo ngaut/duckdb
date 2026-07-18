@@ -151,6 +151,7 @@ ExecutionRunnerResult CompiledVectorizedRunner::ExecuteAdaptive(ExecutionRegionP
 			auto leg_start = std::chrono::steady_clock::now();
 			auto exec_result = pipeline.ExecuteVectorizedPipeline(max_chunks);
 			ab.native_leg_us.fetch_add(ExecutionRegionElapsedMicros(leg_start));
+			ab.native_leg_rows.store(pipeline.VectorizedSourceLegRows());
 			const auto declined = pipeline.ConsumeVectorizedSourceDeclinedYield();
 			if (declined) {
 				pipeline.ClearVectorizedSourceClaimBudget();
@@ -406,6 +407,9 @@ public:
 			auto declined_result = pipeline.FetchSourceContract(result, nullptr, true, &declined_new_row_group);
 			if (!declined_new_row_group) {
 				fetched_source_chunks++;
+				if (adaptive_probe_armed && result) {
+					adaptive_leg_rows += result->size();
+				}
 				return declined_result;
 			}
 			if (debug_defer_armed) {
@@ -416,6 +420,7 @@ public:
 			adaptive_verdict_done = true;
 			const auto compiled_us = ExecutionRegionElapsedMicros(entry_time);
 			adaptive_ab->compiled_leg_us.store(compiled_us);
+			adaptive_ab->compiled_leg_rows.store(adaptive_leg_rows);
 			const auto native_us = adaptive_ab->native_leg_us.load();
 			const bool commit_compiled = compiled_us * (10000 + adaptive_margin_basis_points) <= native_us * 10000;
 			if (!commit_compiled) {
@@ -430,12 +435,19 @@ public:
 		}
 		fetched_source_chunks++;
 		if (!trace_runtime) {
-			return pipeline.FetchSourceContract(result);
+			auto plain_result = pipeline.FetchSourceContract(result);
+			if (adaptive_ab && !adaptive_verdict_done && result) {
+				adaptive_leg_rows += result->size();
+			}
+			return plain_result;
 		}
 		ExecutionRegionSourceContractMetrics source_metrics;
 		auto trace_start = std::chrono::steady_clock::now();
 		auto source_result = pipeline.FetchSourceContract(result, &source_metrics);
 		auto source_elapsed_us = ExecutionRegionElapsedMicros(trace_start);
+		if (adaptive_ab && !adaptive_verdict_done && result) {
+			adaptive_leg_rows += result->size();
+		}
 		source_contract_output_rows += result ? result->size() : 0;
 		source_contract_invocation_count++;
 		source_contract_runtime_time_us += source_elapsed_us;
@@ -571,6 +583,7 @@ private:
 	int64_t adaptive_margin_basis_points;
 	std::chrono::steady_clock::time_point entry_time;
 	bool adaptive_verdict_done = false;
+	idx_t adaptive_leg_rows = 0;
 	idx_t fetched_source_chunks = 0;
 	idx_t source_contract_output_rows = 0;
 	idx_t source_contract_invocation_count = 0;

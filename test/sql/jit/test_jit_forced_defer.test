@@ -100,5 +100,22 @@ SELECT count(*) > 0 FROM duckdb_jit_events() WHERE reason LIKE '%forced defer at
 ----
 true
 
+# Parallel handoff: each thread's kernel defers independently; results must stay
+# exact across the shared distribution.
+statement ok
+SET threads=4;
+
+statement ok
+SET jit_debug_force_defer_after_chunks=1;
+
+query I
+SELECT count(*) FROM (
+  (SELECT g, sum(v) s, count(*) c FROM facts GROUP BY g EXCEPT SELECT * FROM ref_grouped)
+  UNION ALL
+  (SELECT * FROM ref_grouped EXCEPT SELECT g, sum(v) s, count(*) c FROM facts GROUP BY g)
+)
+----
+0
+
 statement ok
 SET jit_debug_force_defer_after_chunks=0;

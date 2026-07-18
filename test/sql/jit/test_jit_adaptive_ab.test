@@ -92,5 +92,23 @@ FROM duckdb_jit_events() WHERE reason LIKE 'adaptive_ab verdict%'
 statement ok
 SET jit_adaptive_ab_band_basis_points=0;
 
+# Parallel execution: verdicts are timing-dependent with bystander threads, so
+# only exact results are asserted; this covers the measurement-owner/bystander
+# split over the shared distribution.
+statement ok
+SET threads=4;
+
+statement ok
+SET jit_adaptive_ab_margin_basis_points=1000;
+
+query I
+SELECT count(*) FROM (
+  (SELECT g, sum(v) s, count(*) c FROM facts GROUP BY g EXCEPT SELECT * FROM ref_grouped)
+  UNION ALL
+  (SELECT * FROM ref_grouped EXCEPT SELECT g, sum(v) s, count(*) c FROM facts GROUP BY g)
+)
+----
+0
+
 statement ok
 SET jit_adaptive_ab=false;

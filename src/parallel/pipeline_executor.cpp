@@ -701,6 +701,7 @@ DataChunk &PipelineExecutor::GetSourceChunkForInitialIdx(idx_t initial_idx) {
 void PipelineExecutor::SetVectorizedSourceClaimBudget(idx_t budget) {
 	vectorized_source_claim_budget = budget;
 	vectorized_source_declined_yield = false;
+	vectorized_source_leg_rows = 0;
 }
 
 void PipelineExecutor::ClearVectorizedSourceClaimBudget() {
@@ -710,6 +711,10 @@ void PipelineExecutor::ClearVectorizedSourceClaimBudget() {
 
 bool PipelineExecutor::HasVectorizedSourceClaimBudget() const {
 	return vectorized_source_claim_budget != DConstants::INVALID_INDEX;
+}
+
+idx_t PipelineExecutor::VectorizedSourceLegRows() const {
+	return vectorized_source_leg_rows;
 }
 
 bool PipelineExecutor::ConsumeVectorizedSourceDeclinedYield() {

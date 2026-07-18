@@ -59,6 +59,10 @@ struct ExecutionRegionAdaptiveAbState {
 	std::atomic<ExecutionRegionAdaptiveAbPhase> phase {ExecutionRegionAdaptiveAbPhase::UNDECIDED};
 	std::atomic<int64_t> compiled_leg_us {0};
 	std::atomic<int64_t> native_leg_us {0};
+	//! Rows each leg processed, so verdict analysis can normalize for short tail
+	//! row groups and quantify cold-first-leg bias from the recorded events.
+	std::atomic<idx_t> compiled_leg_rows {0};
+	std::atomic<idx_t> native_leg_rows {0};
 
 	bool TryBeginPhase(ExecutionRegionAdaptiveAbPhase expected, ExecutionRegionAdaptiveAbPhase next) {
 		return phase.compare_exchange_strong(expected, next);

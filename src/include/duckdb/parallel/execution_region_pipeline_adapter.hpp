@@ -44,6 +44,7 @@ public:
 	void ClearVectorizedSourceClaimBudget();
 	bool ConsumeVectorizedSourceDeclinedYield();
 	bool HasVectorizedSourceClaimBudget() const;
+	idx_t VectorizedSourceLegRows() const;
 	ExecutionOperatorBindResult BindOperator(idx_t operator_index, DataChunk &input,
 	                                         const ExecutionRegionOperatorInfo &operator_info,
 	                                         ExecutionOperatorBinding &binding);

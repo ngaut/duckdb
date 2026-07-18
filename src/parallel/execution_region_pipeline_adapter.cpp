@@ -95,6 +95,10 @@ bool ExecutionRegionPipelineAdapter::HasVectorizedSourceClaimBudget() const {
 	return executor.HasVectorizedSourceClaimBudget();
 }
 
+idx_t ExecutionRegionPipelineAdapter::VectorizedSourceLegRows() const {
+	return executor.VectorizedSourceLegRows();
+}
+
 bool ExecutionRegionPipelineAdapter::ConsumeVectorizedSourceDeclinedYield() {
 	return executor.ConsumeVectorizedSourceDeclinedYield();
 }

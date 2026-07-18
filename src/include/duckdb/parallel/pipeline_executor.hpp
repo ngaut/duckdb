@@ -118,6 +118,7 @@ private:
 	idx_t vectorized_source_claim_budget = DConstants::INVALID_INDEX;
 	//! Set when the source declined a claim and the executor yielded at the boundary.
 	bool vectorized_source_declined_yield = false;
+	idx_t vectorized_source_leg_rows = 0;
 	bool exhausted_source = false;
 	//! Source or intermediate operator indicated that there is no more output possible
 	bool exhausted_pipeline = false;
@@ -159,6 +160,7 @@ private:
 	void ClearVectorizedSourceClaimBudget();
 	bool ConsumeVectorizedSourceDeclinedYield();
 	bool HasVectorizedSourceClaimBudget() const;
+	idx_t VectorizedSourceLegRows() const;
 	SourceResultType FetchFromSourceContract(DataChunk *&result,
 	                                         ExecutionRegionSourceContractMetrics *metrics = nullptr,
 	                                         bool decline_new_row_group = false,

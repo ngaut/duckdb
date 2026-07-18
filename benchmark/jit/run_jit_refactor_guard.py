@@ -400,6 +400,22 @@ def run_unit_suite(args: argparse.Namespace, artifact_dir: Path) -> None:
         print(result.stdout, end="")
         print(result.stderr, end="", file=sys.stderr)
         raise GuardError(f"JIT unit suite failed with exit code {result.returncode}")
+    if getattr(args, "slow_suite", False):
+        run_slow_suite(args, artifact_dir)
+
+
+def run_slow_suite(args: argparse.Namespace, artifact_dir: Path) -> None:
+    """The slow sqllogictests live outside every default gate; the struct-variant
+    TPC-H correctness bug stayed invisible for that reason. This opt-in tier runs
+    them when a cadence (or a scan/filter-path change) warrants the cost."""
+    command = [str(args.unit_binary), "test/sql/tpch/*.test_slow"]
+    result = run_command(command, "slow TPC-H suite", capture=True, check=False)
+    output = result.stdout + result.stderr
+    (artifact_dir / "slow_suite_output.txt").write_text(output, encoding="utf-8", errors="replace")
+    if result.returncode != 0:
+        print(result.stdout, end="")
+        print(result.stderr, end="", file=sys.stderr)
+        raise GuardError(f"slow TPC-H suite failed with exit code {result.returncode}")
 
 
 def should_run_unit(args: argparse.Namespace) -> bool:
@@ -456,6 +472,11 @@ def parse_args() -> argparse.Namespace:
         choices=("quick", "unit", "full"),
         default="full",
         help="Maximum concrete level selected by --level auto. Hooks use this to make pre-commit fast.",
+    )
+    parser.add_argument(
+        "--slow-suite",
+        action="store_true",
+        help="also run the slow TPC-H sqllogictests after the unit suite",
     )
     parser.add_argument("--out-dir", type=Path, default=None)
     parser.add_argument(
