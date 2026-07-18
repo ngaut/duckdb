@@ -434,6 +434,12 @@ private:
 	    void *selected_update_state, optional_ptr<ExecutionOperatorStageRecorder> recorder,
 	    optional_ptr<SelectionVector> duplicates_out = nullptr, idx_t *duplicate_count_out = nullptr,
 	    optional_ptr<const ExecutionDenseGroupDomain> dense_domain = nullptr);
+	//! Dense single-field dispatch functors routed through
+	//! AggregateDispatchDenseIntegralType; defined in the translation unit.
+	struct SingleFieldGroupsDenseDispatchOp;
+	struct SingleInputVectorGroupsDenseDispatchOp;
+	struct RowPointerSingleFieldDirectDispatchOp;
+	struct InputVectorSingleFieldDirectDispatchOp;
 	template <class T>
 	bool TryFindOrCreateSingleFieldGroupsDenseTemplated(
 	    DataChunk &groups, optional_ptr<Vector> addresses_out,

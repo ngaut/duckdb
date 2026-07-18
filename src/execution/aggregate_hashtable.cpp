@@ -1864,6 +1864,48 @@ static bool AggregateDenseDomainCanAdmit(const ExecutionDenseGroupDomain &domain
 	return AggregateDenseDomainCanPrepare(domain, physical_type, domain_range);
 }
 
+//! The single authority over the integral group types the dense single-field fast
+//! paths support. Every dense single-field dispatch routes through this switch, so a
+//! newly supported type is one case here instead of a sweep over per-operation
+//! switches. OP::Run<T> receives the group type's storage type; an unsupported type
+//! returns the fallback.
+template <class OP, class RESULT, class... ARGS>
+static RESULT AggregateDispatchDenseIntegralType(PhysicalType physical_type, RESULT fallback, ARGS &&...args) {
+	switch (physical_type) {
+	case PhysicalType::BOOL:
+		return OP::template Run<bool>(std::forward<ARGS>(args)...);
+	case PhysicalType::UINT8:
+		return OP::template Run<uint8_t>(std::forward<ARGS>(args)...);
+	case PhysicalType::INT8:
+		return OP::template Run<int8_t>(std::forward<ARGS>(args)...);
+	case PhysicalType::UINT16:
+		return OP::template Run<uint16_t>(std::forward<ARGS>(args)...);
+	case PhysicalType::INT16:
+		return OP::template Run<int16_t>(std::forward<ARGS>(args)...);
+	case PhysicalType::UINT32:
+		return OP::template Run<uint32_t>(std::forward<ARGS>(args)...);
+	case PhysicalType::INT32:
+		return OP::template Run<int32_t>(std::forward<ARGS>(args)...);
+	case PhysicalType::UINT64:
+		return OP::template Run<uint64_t>(std::forward<ARGS>(args)...);
+	case PhysicalType::INT64:
+		return OP::template Run<int64_t>(std::forward<ARGS>(args)...);
+	default:
+		return fallback;
+	}
+}
+
+struct AggregateDenseIntegralTypeSupportedOp {
+	template <class T>
+	static bool Run() {
+		return true;
+	}
+};
+
+static bool AggregateDenseIntegralTypeSupported(PhysicalType physical_type) {
+	return AggregateDispatchDenseIntegralType<AggregateDenseIntegralTypeSupportedOp>(physical_type, false);
+}
+
 template <class T, class CACHE>
 static bool
 AggregateTryPrepareDenseSingleFieldTargetCacheTemplated(const AggregateFastGroupSourceInfo &sources, idx_t chunk_size,
@@ -1928,6 +1970,14 @@ AggregateTryPrepareDenseSingleFieldTargetCacheTemplated(const AggregateFastGroup
 	return true;
 }
 
+struct AggregateTryPrepareDenseSingleFieldTargetCacheOp {
+	template <class T, class... ARGS>
+	static auto Run(ARGS &&...args)
+	    -> decltype(AggregateTryPrepareDenseSingleFieldTargetCacheTemplated<T>(std::forward<ARGS>(args)...)) {
+		return AggregateTryPrepareDenseSingleFieldTargetCacheTemplated<T>(std::forward<ARGS>(args)...);
+	}
+};
+
 template <class CACHE>
 static bool AggregateTryPrepareDenseSingleFieldTargetCache(
     DataChunk &groups, const vector<LogicalType> &layout_types, const vector<idx_t> &layout_offsets, idx_t chunk_size,
@@ -1942,37 +1992,8 @@ static bool AggregateTryPrepareDenseSingleFieldTargetCache(
 		return false;
 	}
 	const auto layout_offset = layout_offsets[0];
-	switch (sources.physical_types[0]) {
-	case PhysicalType::BOOL:
-		return AggregateTryPrepareDenseSingleFieldTargetCacheTemplated<bool>(sources, chunk_size, existing_count,
-		                                                                     layout_offset, cache, dense_domain);
-	case PhysicalType::UINT8:
-		return AggregateTryPrepareDenseSingleFieldTargetCacheTemplated<uint8_t>(sources, chunk_size, existing_count,
-		                                                                        layout_offset, cache, dense_domain);
-	case PhysicalType::INT8:
-		return AggregateTryPrepareDenseSingleFieldTargetCacheTemplated<int8_t>(sources, chunk_size, existing_count,
-		                                                                       layout_offset, cache, dense_domain);
-	case PhysicalType::UINT16:
-		return AggregateTryPrepareDenseSingleFieldTargetCacheTemplated<uint16_t>(sources, chunk_size, existing_count,
-		                                                                         layout_offset, cache, dense_domain);
-	case PhysicalType::INT16:
-		return AggregateTryPrepareDenseSingleFieldTargetCacheTemplated<int16_t>(sources, chunk_size, existing_count,
-		                                                                        layout_offset, cache, dense_domain);
-	case PhysicalType::UINT32:
-		return AggregateTryPrepareDenseSingleFieldTargetCacheTemplated<uint32_t>(sources, chunk_size, existing_count,
-		                                                                         layout_offset, cache, dense_domain);
-	case PhysicalType::INT32:
-		return AggregateTryPrepareDenseSingleFieldTargetCacheTemplated<int32_t>(sources, chunk_size, existing_count,
-		                                                                        layout_offset, cache, dense_domain);
-	case PhysicalType::UINT64:
-		return AggregateTryPrepareDenseSingleFieldTargetCacheTemplated<uint64_t>(sources, chunk_size, existing_count,
-		                                                                         layout_offset, cache, dense_domain);
-	case PhysicalType::INT64:
-		return AggregateTryPrepareDenseSingleFieldTargetCacheTemplated<int64_t>(sources, chunk_size, existing_count,
-		                                                                        layout_offset, cache, dense_domain);
-	default:
-		return false;
-	}
+	return AggregateDispatchDenseIntegralType<AggregateTryPrepareDenseSingleFieldTargetCacheOp>(
+	    sources.physical_types[0], false, sources, chunk_size, existing_count, layout_offset, cache, dense_domain);
 }
 
 template <class T, class CACHE>
@@ -1996,42 +2017,24 @@ static bool AggregatePopulateDenseSingleFieldTargetCacheTemplated(const Aggregat
 	return true;
 }
 
+struct AggregatePopulateDenseSingleFieldTargetCacheOp {
+	template <class T, class... ARGS>
+	static auto Run(ARGS &&...args)
+	    -> decltype(AggregatePopulateDenseSingleFieldTargetCacheTemplated<T>(std::forward<ARGS>(args)...)) {
+		return AggregatePopulateDenseSingleFieldTargetCacheTemplated<T>(std::forward<ARGS>(args)...);
+	}
+};
+
 template <class CACHE>
 static bool AggregatePopulateDenseSingleFieldTargetCache(const AggregateFastGroupSourceInfo &sources,
                                                          const data_ptr_t *row_locations,
                                                          const SelectionVector &row_sel, idx_t chunk_size,
                                                          CACHE &cache) {
-	switch (sources.physical_types[0]) {
-	case PhysicalType::BOOL:
-		return AggregatePopulateDenseSingleFieldTargetCacheTemplated<bool>(sources, row_locations, row_sel, chunk_size,
-		                                                                   cache);
-	case PhysicalType::UINT8:
-		return AggregatePopulateDenseSingleFieldTargetCacheTemplated<uint8_t>(sources, row_locations, row_sel,
-		                                                                      chunk_size, cache);
-	case PhysicalType::INT8:
-		return AggregatePopulateDenseSingleFieldTargetCacheTemplated<int8_t>(sources, row_locations, row_sel,
-		                                                                     chunk_size, cache);
-	case PhysicalType::UINT16:
-		return AggregatePopulateDenseSingleFieldTargetCacheTemplated<uint16_t>(sources, row_locations, row_sel,
-		                                                                       chunk_size, cache);
-	case PhysicalType::INT16:
-		return AggregatePopulateDenseSingleFieldTargetCacheTemplated<int16_t>(sources, row_locations, row_sel,
-		                                                                      chunk_size, cache);
-	case PhysicalType::UINT32:
-		return AggregatePopulateDenseSingleFieldTargetCacheTemplated<uint32_t>(sources, row_locations, row_sel,
-		                                                                       chunk_size, cache);
-	case PhysicalType::INT32:
-		return AggregatePopulateDenseSingleFieldTargetCacheTemplated<int32_t>(sources, row_locations, row_sel,
-		                                                                      chunk_size, cache);
-	case PhysicalType::UINT64:
-		return AggregatePopulateDenseSingleFieldTargetCacheTemplated<uint64_t>(sources, row_locations, row_sel,
-		                                                                       chunk_size, cache);
-	case PhysicalType::INT64:
-		return AggregatePopulateDenseSingleFieldTargetCacheTemplated<int64_t>(sources, row_locations, row_sel,
-		                                                                      chunk_size, cache);
-	default:
+	if (!AggregateDenseIntegralTypeSupported(sources.physical_types[0])) {
 		throw InternalException("Unsupported dense single-field target cache type");
 	}
+	return AggregateDispatchDenseIntegralType<AggregatePopulateDenseSingleFieldTargetCacheOp>(
+	    sources.physical_types[0], false, sources, row_locations, row_sel, chunk_size, cache);
 }
 
 enum class AggregateDenseAppendProof : uint8_t { UNAVAILABLE, PROVEN_NEW, DUPLICATE_EXISTING, DUPLICATE_INPUT };
@@ -2066,32 +2069,20 @@ AggregateProveDenseSingleFieldAppendKeysNewTemplated(const AggregateFastGroupSou
 	return AggregateDenseAppendProof::PROVEN_NEW;
 }
 
+struct AggregateProveDenseSingleFieldAppendKeysNewOp {
+	template <class T, class... ARGS>
+	static auto Run(ARGS &&...args)
+	    -> decltype(AggregateProveDenseSingleFieldAppendKeysNewTemplated<T>(std::forward<ARGS>(args)...)) {
+		return AggregateProveDenseSingleFieldAppendKeysNewTemplated<T>(std::forward<ARGS>(args)...);
+	}
+};
+
 template <class CACHE>
 static AggregateDenseAppendProof
 AggregateProveDenseSingleFieldAppendKeysNew(const AggregateFastGroupSourceInfo &sources, idx_t chunk_size,
                                             CACHE &cache) {
-	switch (sources.physical_types[0]) {
-	case PhysicalType::BOOL:
-		return AggregateProveDenseSingleFieldAppendKeysNewTemplated<bool>(sources, chunk_size, cache);
-	case PhysicalType::UINT8:
-		return AggregateProveDenseSingleFieldAppendKeysNewTemplated<uint8_t>(sources, chunk_size, cache);
-	case PhysicalType::INT8:
-		return AggregateProveDenseSingleFieldAppendKeysNewTemplated<int8_t>(sources, chunk_size, cache);
-	case PhysicalType::UINT16:
-		return AggregateProveDenseSingleFieldAppendKeysNewTemplated<uint16_t>(sources, chunk_size, cache);
-	case PhysicalType::INT16:
-		return AggregateProveDenseSingleFieldAppendKeysNewTemplated<int16_t>(sources, chunk_size, cache);
-	case PhysicalType::UINT32:
-		return AggregateProveDenseSingleFieldAppendKeysNewTemplated<uint32_t>(sources, chunk_size, cache);
-	case PhysicalType::INT32:
-		return AggregateProveDenseSingleFieldAppendKeysNewTemplated<int32_t>(sources, chunk_size, cache);
-	case PhysicalType::UINT64:
-		return AggregateProveDenseSingleFieldAppendKeysNewTemplated<uint64_t>(sources, chunk_size, cache);
-	case PhysicalType::INT64:
-		return AggregateProveDenseSingleFieldAppendKeysNewTemplated<int64_t>(sources, chunk_size, cache);
-	default:
-		return AggregateDenseAppendProof::UNAVAILABLE;
-	}
+	return AggregateDispatchDenseIntegralType<AggregateProveDenseSingleFieldAppendKeysNewOp>(
+	    sources.physical_types[0], AggregateDenseAppendProof::UNAVAILABLE, sources, chunk_size, cache);
 }
 
 template <class T, class CACHE>
@@ -2421,6 +2412,13 @@ bool GroupedAggregateHashTable::TryFindOrCreateSingleFieldGroupsDenseTemplated(
 	return true;
 }
 
+struct GroupedAggregateHashTable::SingleFieldGroupsDenseDispatchOp {
+	template <class T, class... ARGS>
+	static bool Run(GroupedAggregateHashTable &ht, ARGS &&...args) {
+		return ht.TryFindOrCreateSingleFieldGroupsDenseTemplated<T>(std::forward<ARGS>(args)...);
+	}
+};
+
 bool GroupedAggregateHashTable::TryFindOrCreateSingleFieldGroupsDense(
     DataChunk &groups, optional_ptr<Vector> addresses_out,
     ExecutionGroupedAggregateStateSelectedAddressUpdateFunction selected_update_function, void *selected_update_state,
@@ -2431,48 +2429,14 @@ bool GroupedAggregateHashTable::TryFindOrCreateSingleFieldGroupsDense(
 		RecordAggregateTraceStage(recorder, "find_or_create_dense_miss.vector", miss_start);
 		return false;
 	}
-	switch (groups.data[0].GetType().InternalType()) {
-	case PhysicalType::BOOL:
-		return TryFindOrCreateSingleFieldGroupsDenseTemplated<bool>(groups, addresses_out, selected_update_function,
-		                                                            selected_update_state, recorder, duplicates_out,
-		                                                            duplicate_count_out, dense_domain);
-	case PhysicalType::UINT8:
-		return TryFindOrCreateSingleFieldGroupsDenseTemplated<uint8_t>(groups, addresses_out, selected_update_function,
-		                                                               selected_update_state, recorder, duplicates_out,
-		                                                               duplicate_count_out, dense_domain);
-	case PhysicalType::INT8:
-		return TryFindOrCreateSingleFieldGroupsDenseTemplated<int8_t>(groups, addresses_out, selected_update_function,
-		                                                              selected_update_state, recorder, duplicates_out,
-		                                                              duplicate_count_out, dense_domain);
-	case PhysicalType::UINT16:
-		return TryFindOrCreateSingleFieldGroupsDenseTemplated<uint16_t>(groups, addresses_out, selected_update_function,
-		                                                                selected_update_state, recorder, duplicates_out,
-		                                                                duplicate_count_out, dense_domain);
-	case PhysicalType::INT16:
-		return TryFindOrCreateSingleFieldGroupsDenseTemplated<int16_t>(groups, addresses_out, selected_update_function,
-		                                                               selected_update_state, recorder, duplicates_out,
-		                                                               duplicate_count_out, dense_domain);
-	case PhysicalType::UINT32:
-		return TryFindOrCreateSingleFieldGroupsDenseTemplated<uint32_t>(groups, addresses_out, selected_update_function,
-		                                                                selected_update_state, recorder, duplicates_out,
-		                                                                duplicate_count_out, dense_domain);
-	case PhysicalType::INT32:
-		return TryFindOrCreateSingleFieldGroupsDenseTemplated<int32_t>(groups, addresses_out, selected_update_function,
-		                                                               selected_update_state, recorder, duplicates_out,
-		                                                               duplicate_count_out, dense_domain);
-	case PhysicalType::UINT64:
-		return TryFindOrCreateSingleFieldGroupsDenseTemplated<uint64_t>(groups, addresses_out, selected_update_function,
-		                                                                selected_update_state, recorder, duplicates_out,
-		                                                                duplicate_count_out, dense_domain);
-	case PhysicalType::INT64:
-		return TryFindOrCreateSingleFieldGroupsDenseTemplated<int64_t>(groups, addresses_out, selected_update_function,
-		                                                               selected_update_state, recorder, duplicates_out,
-		                                                               duplicate_count_out, dense_domain);
-	default:
+	if (!AggregateDenseIntegralTypeSupported(groups.data[0].GetType().InternalType())) {
 		auto miss_start = AggregateTraceStart(recorder);
 		RecordAggregateTraceStage(recorder, "find_or_create_dense_miss.physical_type", miss_start);
 		return false;
 	}
+	return AggregateDispatchDenseIntegralType<SingleFieldGroupsDenseDispatchOp>(
+	    groups.data[0].GetType().InternalType(), false, *this, groups, addresses_out, selected_update_function,
+	    selected_update_state, recorder, duplicates_out, duplicate_count_out, dense_domain);
 }
 
 bool GroupedAggregateHashTable::TryFindOrCreateGroupsFastInternal(
@@ -5155,6 +5119,13 @@ bool GroupedAggregateHashTable::TryFindOrCreateRowPointerSingleInputVectorGroupS
 	                                                              recorder);
 }
 
+struct GroupedAggregateHashTable::SingleInputVectorGroupsDenseDispatchOp {
+	template <class T, class... ARGS>
+	static bool Run(GroupedAggregateHashTable &ht, ARGS &&...args) {
+		return ht.TryFindOrCreateSingleInputVectorGroupsDenseTemplated<T>(std::forward<ARGS>(args)...);
+	}
+};
+
 bool GroupedAggregateHashTable::TryFindOrCreateSingleInputVectorGroupStateTargetsDense(
     DataChunk &payload_input, idx_t count, const vector<ExecutionRowPointerGroupKeySource> &group_sources,
     ExecutionGroupedAggregateStateTargetBatch &targets, optional_ptr<ExecutionOperatorStageRecorder> recorder,
@@ -5162,37 +5133,9 @@ bool GroupedAggregateHashTable::TryFindOrCreateSingleInputVectorGroupStateTarget
 	if (group_sources.size() != 1) {
 		return false;
 	}
-	switch (group_sources[0].target_physical_type) {
-	case PhysicalType::BOOL:
-		return TryFindOrCreateSingleInputVectorGroupsDenseTemplated<bool>(payload_input, count, group_sources, &targets,
-		                                                                  nullptr, recorder, dense_domain);
-	case PhysicalType::UINT8:
-		return TryFindOrCreateSingleInputVectorGroupsDenseTemplated<uint8_t>(payload_input, count, group_sources,
-		                                                                     &targets, nullptr, recorder, dense_domain);
-	case PhysicalType::INT8:
-		return TryFindOrCreateSingleInputVectorGroupsDenseTemplated<int8_t>(payload_input, count, group_sources,
-		                                                                    &targets, nullptr, recorder, dense_domain);
-	case PhysicalType::UINT16:
-		return TryFindOrCreateSingleInputVectorGroupsDenseTemplated<uint16_t>(
-		    payload_input, count, group_sources, &targets, nullptr, recorder, dense_domain);
-	case PhysicalType::INT16:
-		return TryFindOrCreateSingleInputVectorGroupsDenseTemplated<int16_t>(payload_input, count, group_sources,
-		                                                                     &targets, nullptr, recorder, dense_domain);
-	case PhysicalType::UINT32:
-		return TryFindOrCreateSingleInputVectorGroupsDenseTemplated<uint32_t>(
-		    payload_input, count, group_sources, &targets, nullptr, recorder, dense_domain);
-	case PhysicalType::INT32:
-		return TryFindOrCreateSingleInputVectorGroupsDenseTemplated<int32_t>(payload_input, count, group_sources,
-		                                                                     &targets, nullptr, recorder, dense_domain);
-	case PhysicalType::UINT64:
-		return TryFindOrCreateSingleInputVectorGroupsDenseTemplated<uint64_t>(
-		    payload_input, count, group_sources, &targets, nullptr, recorder, dense_domain);
-	case PhysicalType::INT64:
-		return TryFindOrCreateSingleInputVectorGroupsDenseTemplated<int64_t>(payload_input, count, group_sources,
-		                                                                     &targets, nullptr, recorder, dense_domain);
-	default:
-		return false;
-	}
+	return AggregateDispatchDenseIntegralType<SingleInputVectorGroupsDenseDispatchOp>(
+	    group_sources[0].target_physical_type, false, *this, payload_input, count, group_sources, &targets, nullptr,
+	    recorder, dense_domain);
 }
 
 bool GroupedAggregateHashTable::TryUpdateSingleInputVectorGroupCountOneDense(
@@ -5202,37 +5145,9 @@ bool GroupedAggregateHashTable::TryUpdateSingleInputVectorGroupCountOneDense(
 	if (group_sources.size() != 1) {
 		return false;
 	}
-	switch (group_sources[0].target_physical_type) {
-	case PhysicalType::BOOL:
-		return TryFindOrCreateSingleInputVectorGroupsDenseTemplated<bool>(payload_input, count, group_sources, nullptr,
-		                                                                  &lane, recorder, dense_domain);
-	case PhysicalType::UINT8:
-		return TryFindOrCreateSingleInputVectorGroupsDenseTemplated<uint8_t>(payload_input, count, group_sources,
-		                                                                     nullptr, &lane, recorder, dense_domain);
-	case PhysicalType::INT8:
-		return TryFindOrCreateSingleInputVectorGroupsDenseTemplated<int8_t>(payload_input, count, group_sources,
-		                                                                    nullptr, &lane, recorder, dense_domain);
-	case PhysicalType::UINT16:
-		return TryFindOrCreateSingleInputVectorGroupsDenseTemplated<uint16_t>(payload_input, count, group_sources,
-		                                                                      nullptr, &lane, recorder, dense_domain);
-	case PhysicalType::INT16:
-		return TryFindOrCreateSingleInputVectorGroupsDenseTemplated<int16_t>(payload_input, count, group_sources,
-		                                                                     nullptr, &lane, recorder, dense_domain);
-	case PhysicalType::UINT32:
-		return TryFindOrCreateSingleInputVectorGroupsDenseTemplated<uint32_t>(payload_input, count, group_sources,
-		                                                                      nullptr, &lane, recorder, dense_domain);
-	case PhysicalType::INT32:
-		return TryFindOrCreateSingleInputVectorGroupsDenseTemplated<int32_t>(payload_input, count, group_sources,
-		                                                                     nullptr, &lane, recorder, dense_domain);
-	case PhysicalType::UINT64:
-		return TryFindOrCreateSingleInputVectorGroupsDenseTemplated<uint64_t>(payload_input, count, group_sources,
-		                                                                      nullptr, &lane, recorder, dense_domain);
-	case PhysicalType::INT64:
-		return TryFindOrCreateSingleInputVectorGroupsDenseTemplated<int64_t>(payload_input, count, group_sources,
-		                                                                     nullptr, &lane, recorder, dense_domain);
-	default:
-		return false;
-	}
+	return AggregateDispatchDenseIntegralType<SingleInputVectorGroupsDenseDispatchOp>(
+	    group_sources[0].target_physical_type, false, *this, payload_input, count, group_sources, nullptr, &lane,
+	    recorder, dense_domain);
 }
 
 template <class T>
@@ -5980,6 +5895,13 @@ bool GroupedAggregateHashTable::TryFindOrCreateRowPointerSingleFieldGroupStateTa
 	                                                                     row_pointer_source);
 }
 
+struct GroupedAggregateHashTable::RowPointerSingleFieldDirectDispatchOp {
+	template <class T, class... ARGS>
+	static bool Run(GroupedAggregateHashTable &ht, ARGS &&...args) {
+		return ht.TryFindOrCreateRowPointerSingleFieldGroupStateTargetsDirectTemplated<T>(std::forward<ARGS>(args)...);
+	}
+};
+
 bool GroupedAggregateHashTable::TryFindOrCreateRowPointerSingleFieldGroupStateTargetsDirect(
     DataChunk &payload_input, Vector &row_pointers, idx_t count,
     const vector<ExecutionRowPointerGroupKeySource> &group_sources, ExecutionGroupedAggregateStateTargetBatch &targets,
@@ -5987,37 +5909,9 @@ bool GroupedAggregateHashTable::TryFindOrCreateRowPointerSingleFieldGroupStateTa
 	if (!AggregateRowPointerSingleFieldCanProbeDirect(payload_input, row_pointers, group_sources)) {
 		return false;
 	}
-	switch (group_sources[0].target_physical_type) {
-	case PhysicalType::BOOL:
-		return TryFindOrCreateRowPointerSingleFieldGroupStateTargetsDirectTemplated<bool>(
-		    payload_input, row_pointers, count, group_sources, targets, recorder);
-	case PhysicalType::UINT8:
-		return TryFindOrCreateRowPointerSingleFieldGroupStateTargetsDirectTemplated<uint8_t>(
-		    payload_input, row_pointers, count, group_sources, targets, recorder);
-	case PhysicalType::INT8:
-		return TryFindOrCreateRowPointerSingleFieldGroupStateTargetsDirectTemplated<int8_t>(
-		    payload_input, row_pointers, count, group_sources, targets, recorder);
-	case PhysicalType::UINT16:
-		return TryFindOrCreateRowPointerSingleFieldGroupStateTargetsDirectTemplated<uint16_t>(
-		    payload_input, row_pointers, count, group_sources, targets, recorder);
-	case PhysicalType::INT16:
-		return TryFindOrCreateRowPointerSingleFieldGroupStateTargetsDirectTemplated<int16_t>(
-		    payload_input, row_pointers, count, group_sources, targets, recorder);
-	case PhysicalType::UINT32:
-		return TryFindOrCreateRowPointerSingleFieldGroupStateTargetsDirectTemplated<uint32_t>(
-		    payload_input, row_pointers, count, group_sources, targets, recorder);
-	case PhysicalType::INT32:
-		return TryFindOrCreateRowPointerSingleFieldGroupStateTargetsDirectTemplated<int32_t>(
-		    payload_input, row_pointers, count, group_sources, targets, recorder);
-	case PhysicalType::UINT64:
-		return TryFindOrCreateRowPointerSingleFieldGroupStateTargetsDirectTemplated<uint64_t>(
-		    payload_input, row_pointers, count, group_sources, targets, recorder);
-	case PhysicalType::INT64:
-		return TryFindOrCreateRowPointerSingleFieldGroupStateTargetsDirectTemplated<int64_t>(
-		    payload_input, row_pointers, count, group_sources, targets, recorder);
-	default:
-		return false;
-	}
+	return AggregateDispatchDenseIntegralType<RowPointerSingleFieldDirectDispatchOp>(
+	    group_sources[0].target_physical_type, false, *this, payload_input, row_pointers, count, group_sources, targets,
+	    recorder);
 }
 
 static bool
@@ -6162,43 +6056,21 @@ bool GroupedAggregateHashTable::TryFindOrCreateInputVectorSingleFieldGroupStateT
 	                                                                     input_vector_source);
 }
 
+struct GroupedAggregateHashTable::InputVectorSingleFieldDirectDispatchOp {
+	template <class T, class... ARGS>
+	static bool Run(GroupedAggregateHashTable &ht, ARGS &&...args) {
+		return ht.TryFindOrCreateInputVectorSingleFieldGroupStateTargetsDirectTemplated<T>(std::forward<ARGS>(args)...);
+	}
+};
+
 bool GroupedAggregateHashTable::TryFindOrCreateInputVectorSingleFieldGroupStateTargetsDirect(
     DataChunk &payload_input, idx_t count, const vector<ExecutionRowPointerGroupKeySource> &group_sources,
     ExecutionGroupedAggregateStateTargetBatch &targets, optional_ptr<ExecutionOperatorStageRecorder> recorder) {
 	if (!AggregateInputVectorSingleFieldCanProbeDirect(payload_input, group_sources)) {
 		return false;
 	}
-	switch (group_sources[0].target_physical_type) {
-	case PhysicalType::BOOL:
-		return TryFindOrCreateInputVectorSingleFieldGroupStateTargetsDirectTemplated<bool>(
-		    payload_input, count, group_sources, targets, recorder);
-	case PhysicalType::UINT8:
-		return TryFindOrCreateInputVectorSingleFieldGroupStateTargetsDirectTemplated<uint8_t>(
-		    payload_input, count, group_sources, targets, recorder);
-	case PhysicalType::INT8:
-		return TryFindOrCreateInputVectorSingleFieldGroupStateTargetsDirectTemplated<int8_t>(
-		    payload_input, count, group_sources, targets, recorder);
-	case PhysicalType::UINT16:
-		return TryFindOrCreateInputVectorSingleFieldGroupStateTargetsDirectTemplated<uint16_t>(
-		    payload_input, count, group_sources, targets, recorder);
-	case PhysicalType::INT16:
-		return TryFindOrCreateInputVectorSingleFieldGroupStateTargetsDirectTemplated<int16_t>(
-		    payload_input, count, group_sources, targets, recorder);
-	case PhysicalType::UINT32:
-		return TryFindOrCreateInputVectorSingleFieldGroupStateTargetsDirectTemplated<uint32_t>(
-		    payload_input, count, group_sources, targets, recorder);
-	case PhysicalType::INT32:
-		return TryFindOrCreateInputVectorSingleFieldGroupStateTargetsDirectTemplated<int32_t>(
-		    payload_input, count, group_sources, targets, recorder);
-	case PhysicalType::UINT64:
-		return TryFindOrCreateInputVectorSingleFieldGroupStateTargetsDirectTemplated<uint64_t>(
-		    payload_input, count, group_sources, targets, recorder);
-	case PhysicalType::INT64:
-		return TryFindOrCreateInputVectorSingleFieldGroupStateTargetsDirectTemplated<int64_t>(
-		    payload_input, count, group_sources, targets, recorder);
-	default:
-		return false;
-	}
+	return AggregateDispatchDenseIntegralType<InputVectorSingleFieldDirectDispatchOp>(
+	    group_sources[0].target_physical_type, false, *this, payload_input, count, group_sources, targets, recorder);
 }
 
 struct AggregateStringPrefixTargetKey {
