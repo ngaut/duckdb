@@ -39,6 +39,7 @@ class LogicalDependencyList;
 class LogicalGet;
 class TableFunction;
 class TableFilterSet;
+struct ParallelTableScanState;
 class TableFunctionRef;
 class TableCatalogEntry;
 class SampleOptions;
@@ -75,6 +76,14 @@ public:
 
 	virtual idx_t MaxThreads() const {
 		return 1;
+	}
+
+	//! The storage-scan parallel distribution this state owns, when the function
+	//! scans DuckDB storage. The execution-region source contract borrows it so
+	//! compiled and vectorized consumption of one pipeline source share a single
+	//! position.
+	virtual ParallelTableScanState *GetStorageParallelScanState() {
+		return nullptr;
 	}
 
 	template <class TARGET>

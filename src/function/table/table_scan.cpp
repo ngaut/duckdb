@@ -281,6 +281,10 @@ public:
 public:
 	ParallelTableScanState state;
 
+	ParallelTableScanState *GetStorageParallelScanState() override {
+		return &state;
+	}
+
 private:
 	const TableScanBindData &bind_data;
 	DuckTableEntry &duck_table;
@@ -308,10 +312,10 @@ public:
 		l_state->scan_state.Initialize(std::move(storage_ids), context.client, input.filters, input.sample_options,
 		                               input.filter_execution_mode);
 
-		l_state->rows_in_current_row_group = storage.NextParallelScan(context.client, state, l_state->scan_state);
-		if (l_state->rows_in_current_row_group > 0) {
-			l_state->row_groups_scanned++;
-		}
+		// The first row group is claimed lazily by the scan loop: an unclaimed scan
+		// returns an empty chunk and the loop claims from the shared distribution.
+		// Claims made at construction would strand row groups in locals that never
+		// scan when another consumer shares the distribution.
 		if (input.CanRemoveFilterColumns()) {
 			l_state->all_columns.Initialize(context.client, scanned_types);
 		}

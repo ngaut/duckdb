@@ -34,7 +34,16 @@ struct TableScanExecutionSourceConfig {
 struct TableScanExecutionSourceContractGlobalState {
 	DataTable *storage = nullptr;
 	DuckTransaction *transaction = nullptr;
+	//! The distribution shared with the vectorized table scan when the function
+	//! state exposes one: consumed row groups are then a single fact, so compiled
+	//! progress survives a handoff to the vectorized continuation. The owned state
+	//! is the fallback for storage-scan sources without an exposed distribution.
+	ParallelTableScanState *shared_parallel_state = nullptr;
 	ParallelTableScanState parallel_state;
+
+	ParallelTableScanState &Distribution() {
+		return shared_parallel_state ? *shared_parallel_state : parallel_state;
+	}
 	vector<StorageIndex> storage_ids;
 	vector<LogicalType> scanned_types;
 	vector<idx_t> projection_ids;
@@ -124,10 +133,13 @@ static LogicalType GetExecutionSourceContractTableScanColumnType(const PhysicalT
 static void
 InitializeExecutionSourceContractTableScanGlobalState(ClientContext &context, const PhysicalTableScan &op,
                                                       TableScanExecutionSourceConfig &execution_source_config,
-                                                      TableScanExecutionSourceContractGlobalState &contract_state) {
+                                                      TableScanExecutionSourceContractGlobalState &contract_state,
+                                                      optional_ptr<GlobalTableFunctionState> function_global_state) {
 	if (!execution_source_config.use_source_contract || !GetExecutionSourceContractCapability(op).uses_storage_scan) {
 		return;
 	}
+	contract_state.shared_parallel_state =
+	    function_global_state ? function_global_state->GetStorageParallelScanState() : nullptr;
 	auto &bind_data = op.bind_data->Cast<TableScanBindData>();
 	auto &duck_table = bind_data.table.Cast<DuckTableEntry>();
 	auto &storage = duck_table.GetStorage();
@@ -168,6 +180,11 @@ InitializeExecutionSourceContractTableScanGlobalState(ClientContext &context, co
 	                                           !can_scan_projected_layout && !contract_state.projection_ids.empty() &&
 	                                           contract_state.projection_ids.size() != op.column_ids.size();
 
+	if (contract_state.shared_parallel_state) {
+		// The vectorized table scan configured and initialized the shared
+		// distribution; initializing it again would hand out every row group twice.
+		return;
+	}
 	if (bind_data.order_options) {
 		auto transaction = TransactionData(*contract_state.transaction);
 		contract_state.parallel_state.scan_state.reorderer =
@@ -228,7 +245,7 @@ public:
 			}
 			execution_source_config = BuildTableScanExecutionSourceConfig(op, execution_filters, open_request);
 			InitializeExecutionSourceContractTableScanGlobalState(context, op, execution_source_config,
-			                                                      execution_source_contract);
+			                                                      execution_source_contract, global_state.get());
 		} else {
 			max_threads = 1;
 		}
@@ -297,11 +314,9 @@ private:
 		    gstate.execution_source_contract.storage_ids, context.client, filters, op.extra_info.sample_options,
 		    TableFilterExecutionMode::FILTER_AND_PRUNE, gstate.execution_source_config.filter_kernel_provider,
 		    filter_kernel_indices);
-		auto rows_in_current_row_group = gstate.execution_source_contract.storage->NextParallelScan(
-		    context.client, gstate.execution_source_contract.parallel_state, execution_source_contract_scan_state);
-		if (rows_in_current_row_group > 0) {
-			execution_source_contract_row_groups_scanned++;
-		}
+		// The first row group is claimed lazily by the contract fetch loop, mirroring
+		// the vectorized scan: construction-time claims strand row groups when the
+		// distribution is shared across consumers.
 		if (gstate.execution_source_contract.can_remove_filter_columns) {
 			execution_source_contract_all_columns.Initialize(context.client,
 			                                                 gstate.execution_source_contract.scanned_types);
@@ -380,7 +395,7 @@ SourceResultType PhysicalTableScan::GetExecutionSourceContractDataInternal(Execu
 		{
 			ExecutionOperatorStageTimer timer(input.stage_recorder, "source_contract.table_scan.next_parallel_scan");
 			rows_in_current_row_group =
-			    contract_state.storage->NextParallelScan(context.client, contract_state.parallel_state, scan_state);
+			    contract_state.storage->NextParallelScan(context.client, contract_state.Distribution(), scan_state);
 		}
 		if (rows_in_current_row_group > 0) {
 			l_state.execution_source_contract_row_groups_scanned++;
