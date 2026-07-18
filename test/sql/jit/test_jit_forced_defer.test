@@ -3,6 +3,20 @@
 # group: [jit]
 
 statement ok
+LOAD jit_sljit
+
+# Deterministic engagement: single-threaded with runtime tracing so the deferral
+# events prove the compiled kernels actually ran and handed off.
+statement ok
+SET threads=1;
+
+statement ok
+SET jit_event_log_size=4000;
+
+statement ok
+SET jit_trace_runtime=true;
+
+statement ok
 CREATE TABLE facts AS
 SELECT (i % 97)::INTEGER g, i::BIGINT v, (i % 7)::BIGINT w
 FROM range(500000) tbl(i);
@@ -79,6 +93,12 @@ SELECT count(*) FROM (
 1
 
 endloop
+
+# The proof is non-vacuous only if compiled kernels actually deferred.
+query I
+SELECT count(*) > 0 FROM duckdb_jit_events() WHERE reason LIKE '%forced defer at row-group boundary%'
+----
+true
 
 statement ok
 SET jit_debug_force_defer_after_chunks=0;

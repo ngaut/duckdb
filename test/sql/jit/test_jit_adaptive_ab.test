@@ -1,0 +1,66 @@
+# name: test/sql/jit/test_jit_adaptive_ab.test
+# description: Measured runner A/B preserves exact results for either verdict and records its decision
+# group: [jit]
+
+# The verdict-event assertion is deterministic only single-threaded: with
+# parallel bystanders the pipeline can finish natively before the measurement
+# owner reaches a verdict, which is correct behavior without a recorded verdict.
+statement ok
+LOAD jit_sljit
+
+statement ok
+SET threads=1;
+
+statement ok
+SET jit_event_log_size=1000;
+
+statement ok
+SET jit_trace_runtime=true;
+
+statement ok
+CREATE TABLE facts AS
+SELECT (i % 97)::INTEGER g, i::BIGINT v FROM range(1000000) tbl(i);
+
+statement ok
+SET jit_policy='off';
+
+statement ok
+CREATE TABLE ref_grouped AS SELECT g, sum(v) s, count(*) c FROM facts GROUP BY g;
+
+statement ok
+SET jit_policy='auto';
+
+statement ok
+SET jit_adaptive_ab=true;
+
+# Default margin: the verdict is measured and may go either way; results must be
+# exact regardless.
+query I
+SELECT count(*) FROM (
+  (SELECT g, sum(v) s, count(*) c FROM facts GROUP BY g EXCEPT SELECT * FROM ref_grouped)
+  UNION ALL
+  (SELECT * FROM ref_grouped EXCEPT SELECT g, sum(v) s, count(*) c FROM facts GROUP BY g)
+)
+----
+0
+
+# An extreme margin forces the fallback verdict deterministically.
+statement ok
+SET jit_adaptive_ab_margin_basis_points=100000000;
+
+query I
+SELECT count(*) FROM (
+  (SELECT g, sum(v) s, count(*) c FROM facts GROUP BY g EXCEPT SELECT * FROM ref_grouped)
+  UNION ALL
+  (SELECT * FROM ref_grouped EXCEPT SELECT g, sum(v) s, count(*) c FROM facts GROUP BY g)
+)
+----
+0
+
+query I
+SELECT count(*) > 0 FROM duckdb_jit_events() WHERE reason LIKE 'adaptive_ab verdict%'
+----
+true
+
+statement ok
+SET jit_adaptive_ab=false;

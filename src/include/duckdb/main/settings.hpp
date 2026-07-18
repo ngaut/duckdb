@@ -1392,6 +1392,30 @@ struct IntegerDivisionSetting {
 	static constexpr idx_t SettingIndex = NEXT_SETTING_INDEX();
 };
 
+struct JitAdaptiveAbSetting {
+	using RETURN_TYPE = bool;
+	static constexpr const char *Name = "jit_adaptive_ab";
+	static constexpr const char *Description =
+	    "Measure one compiled and one native row group per compiled-selected pipeline and commit to the measured "
+	    "winner; the compiled runner must win by jit_adaptive_ab_margin_basis_points";
+	static constexpr const char *InputType = "BOOLEAN";
+	static constexpr const char *DefaultValue = "false";
+	static constexpr SettingScopeTarget Scope = SettingScopeTarget::LOCAL_DEFAULT;
+	static constexpr idx_t SettingIndex = NEXT_SETTING_INDEX();
+};
+
+struct JitAdaptiveAbMarginBasisPointsSetting {
+	using RETURN_TYPE = idx_t;
+	static constexpr const char *Name = "jit_adaptive_ab_margin_basis_points";
+	static constexpr const char *Description =
+	    "Required compiled advantage over the measured native leg in basis points before the adaptive A/B commits to "
+	    "the compiled runner";
+	static constexpr const char *InputType = "UBIGINT";
+	static constexpr const char *DefaultValue = "1000";
+	static constexpr SettingScopeTarget Scope = SettingScopeTarget::LOCAL_DEFAULT;
+	static constexpr idx_t SettingIndex = NEXT_SETTING_INDEX();
+};
+
 struct JitBackendSetting {
 	using RETURN_TYPE = string;
 	static constexpr const char *Name = "jit_backend";

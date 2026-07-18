@@ -44,12 +44,21 @@ public:
 	ExecutionRunnerResult Execute(ExecutionRegionPipelineAdapter &pipeline, idx_t max_chunks) override;
 };
 
+class ExecutionRegionKernel;
+struct ExecutionRegionAdaptiveAbState;
+
 class CompiledVectorizedRunner : public ExecutionRunner {
 public:
 	ExecutionRunnerResult Execute(ExecutionRegionPipelineAdapter &pipeline, idx_t max_chunks) override;
 
-	static CompiledVectorizedRunStatus ExecuteCompiledRegion(ExecutionRegionPipelineAdapter &pipeline, idx_t max_chunks,
-	                                                         PipelineExecuteResult &result);
+	static CompiledVectorizedRunStatus
+	ExecuteCompiledRegion(ExecutionRegionPipelineAdapter &pipeline, idx_t max_chunks, PipelineExecuteResult &result,
+	                      optional_ptr<ExecutionRegionAdaptiveAbState> adaptive_ab = nullptr,
+	                      int64_t adaptive_margin_basis_points = 0);
+
+private:
+	static ExecutionRunnerResult ExecuteAdaptive(ExecutionRegionPipelineAdapter &pipeline,
+	                                             ExecutionRegionKernel &kernel, idx_t max_chunks);
 };
 
 ExecutionRunner &GetExecutionRunner(ExecutionRunnerKind kind);

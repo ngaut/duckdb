@@ -476,6 +476,7 @@ SourceResultType PhysicalTableScan::GetDataInternal(ExecutionContext &context, D
 	auto &l_state = input.local_state.Cast<TableScanLocalSourceState>();
 
 	TableFunctionInput data(bind_data.get(), l_state.local_state.get(), g_state.global_state.get());
+	data.decline_new_row_group = input.decline_new_row_group;
 
 	if (function.function) {
 		data.async_result = AsyncResultType::IMPLICIT;
@@ -494,6 +495,8 @@ SourceResultType PhysicalTableScan::GetDataInternal(ExecutionContext &context, D
 		// inconsistencies
 		ValidateAsyncStrategyResult(execution_strategy, input_execution_mode, data.results_execution_mode,
 		                            initial_async_result, output_async_result, chunk.size());
+		input.declined_new_row_group = data.declined_new_row_group;
+		input.new_row_groups_claimed = data.new_row_groups_claimed;
 
 		// Handle results
 		switch (output_async_result) {
@@ -511,6 +514,11 @@ SourceResultType PhysicalTableScan::GetDataInternal(ExecutionContext &context, D
 		}
 		case AsyncResultType::IMPLICIT:
 			if (chunk.size() > 0) {
+				return SourceResultType::HAVE_MORE_OUTPUT;
+			}
+			if (data.declined_new_row_group) {
+				// The scan declined to claim a new row group: this is a runner-switch
+				// yield at a row-group boundary, not source exhaustion.
 				return SourceResultType::HAVE_MORE_OUTPUT;
 			}
 			return SourceResultType::FINISHED;

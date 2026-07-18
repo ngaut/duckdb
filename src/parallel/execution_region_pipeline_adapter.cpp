@@ -83,6 +83,22 @@ SourceResultType ExecutionRegionPipelineAdapter::FetchSourceContract(DataChunk *
 	return source_result;
 }
 
+void ExecutionRegionPipelineAdapter::SetVectorizedSourceClaimBudget(idx_t budget) {
+	executor.SetVectorizedSourceClaimBudget(budget);
+}
+
+void ExecutionRegionPipelineAdapter::ClearVectorizedSourceClaimBudget() {
+	executor.ClearVectorizedSourceClaimBudget();
+}
+
+bool ExecutionRegionPipelineAdapter::HasVectorizedSourceClaimBudget() const {
+	return executor.HasVectorizedSourceClaimBudget();
+}
+
+bool ExecutionRegionPipelineAdapter::ConsumeVectorizedSourceDeclinedYield() {
+	return executor.ConsumeVectorizedSourceDeclinedYield();
+}
+
 SinkNextBatchType ExecutionRegionPipelineAdapter::AdvanceSinkBatch(DataChunk &source_chunk, bool have_more_output) {
 	if (!executor.required_partition_info.AnyRequired()) {
 		return SinkNextBatchType::READY;

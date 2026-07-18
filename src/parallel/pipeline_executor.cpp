@@ -365,6 +365,11 @@ PipelineExecuteResult PipelineExecutor::ExecuteVectorizedPipeline(idx_t max_chun
 				source_chunk = &GetSourceChunkForInitialIdx(source_chunk_initial_idx);
 				source_chunk->Reset();
 				source_result = FetchFromSource(source_chunk);
+				if (vectorized_source_declined_yield) {
+					// Runner-switch yield at a row-group boundary: nothing is in flight
+					// and the source is not exhausted.
+					return PipelineExecuteResult::NOT_FINISHED;
+				}
 				if (source_result == SourceResultType::BLOCKED) {
 					return PipelineExecuteResult::INTERRUPTED;
 				}
@@ -693,14 +698,42 @@ DataChunk &PipelineExecutor::GetSourceChunkForInitialIdx(idx_t initial_idx) {
 	return *intermediate_chunks[initial_idx];
 }
 
+void PipelineExecutor::SetVectorizedSourceClaimBudget(idx_t budget) {
+	vectorized_source_claim_budget = budget;
+	vectorized_source_declined_yield = false;
+}
+
+void PipelineExecutor::ClearVectorizedSourceClaimBudget() {
+	vectorized_source_claim_budget = DConstants::INVALID_INDEX;
+	vectorized_source_declined_yield = false;
+}
+
+bool PipelineExecutor::HasVectorizedSourceClaimBudget() const {
+	return vectorized_source_claim_budget != DConstants::INVALID_INDEX;
+}
+
+bool PipelineExecutor::ConsumeVectorizedSourceDeclinedYield() {
+	const auto declined = vectorized_source_declined_yield;
+	vectorized_source_declined_yield = false;
+	return declined;
+}
+
 SourceResultType PipelineExecutor::FetchFromSource(DataChunk *&result) {
 	StartOperator(*pipeline.source);
 
 	OperatorSourceInput source_input = {*pipeline.source_state, *local_source_state, interrupt_state};
+	source_input.decline_new_row_group = vectorized_source_claim_budget == 0;
 	source_chunk_initial_idx = 0;
 	auto &fetch_chunk = *result;
 	fetch_chunk.Reset();
 	auto res = GetData(fetch_chunk, source_input);
+	if (vectorized_source_claim_budget != DConstants::INVALID_INDEX) {
+		vectorized_source_claim_budget -=
+		    MinValue<idx_t>(vectorized_source_claim_budget, source_input.new_row_groups_claimed);
+		if (source_input.declined_new_row_group) {
+			vectorized_source_declined_yield = true;
+		}
+	}
 
 	// Ensures sources only return empty results when Blocking or Finished
 	D_ASSERT(res != SourceResultType::BLOCKED || fetch_chunk.size() == 0);

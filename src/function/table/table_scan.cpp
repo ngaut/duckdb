@@ -342,9 +342,14 @@ public:
 				return;
 			}
 
+			if (data_p.decline_new_row_group) {
+				data_p.declined_new_row_group = true;
+				return;
+			}
 			l_state.rows_in_current_row_group = storage.NextParallelScan(context, state, l_state.scan_state);
 			if (l_state.rows_in_current_row_group > 0) {
 				l_state.row_groups_scanned++;
+				data_p.new_row_groups_claimed++;
 			}
 
 			if (data_p.results_execution_mode == AsyncResultsExecutionMode::TASK_EXECUTOR) {

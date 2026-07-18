@@ -114,6 +114,10 @@ private:
 	OperatorPartitionInfo required_partition_info;
 
 	//! Source operator indicated that there is no more output possible
+	//! Remaining vectorized new-row-group claims; INVALID_INDEX means unlimited.
+	idx_t vectorized_source_claim_budget = DConstants::INVALID_INDEX;
+	//! Set when the source declined a claim and the executor yielded at the boundary.
+	bool vectorized_source_declined_yield = false;
 	bool exhausted_source = false;
 	//! Source or intermediate operator indicated that there is no more output possible
 	bool exhausted_pipeline = false;
@@ -149,6 +153,12 @@ private:
 	void GoToSource(idx_t &current_idx, idx_t initial_idx, stack<idx_t> &operators_in_process);
 	DataChunk &GetSourceChunkForInitialIdx(idx_t initial_idx);
 	SourceResultType FetchFromSource(DataChunk *&result);
+	//! Runner-switch support: the vectorized source declines new row-group claims
+	//! once the budget is exhausted; the executor then yields at the boundary.
+	void SetVectorizedSourceClaimBudget(idx_t budget);
+	void ClearVectorizedSourceClaimBudget();
+	bool ConsumeVectorizedSourceDeclinedYield();
+	bool HasVectorizedSourceClaimBudget() const;
 	SourceResultType FetchFromSourceContract(DataChunk *&result,
 	                                         ExecutionRegionSourceContractMetrics *metrics = nullptr,
 	                                         bool decline_new_row_group = false,

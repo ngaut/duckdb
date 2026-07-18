@@ -118,7 +118,116 @@ ExecutionRunnerResult VectorizedRunner::Execute(ExecutionRegionPipelineAdapter &
 	return ExecutionRunnerResult::Executed(result);
 }
 
+//! The measured runner decision. One thread owns each measurement leg; every other
+//! thread executes natively meanwhile, which is safe because both runners consume
+//! the shared source distribution and the native-owned sinks. Legs are one row
+//! group each: the compiled leg arms the decline after its first fetch and defers
+//! at the boundary, and the native leg runs under a one-claim budget.
+ExecutionRunnerResult CompiledVectorizedRunner::ExecuteAdaptive(ExecutionRegionPipelineAdapter &pipeline,
+                                                                ExecutionRegionKernel &kernel, idx_t max_chunks) {
+	auto &client = pipeline.GetClientContext();
+	auto &ab = kernel.AdaptiveAb();
+	while (true) {
+		switch (ab.phase.load()) {
+		case ExecutionRegionAdaptiveAbPhase::UNDECIDED: {
+			if (!ab.TryBeginPhase(ExecutionRegionAdaptiveAbPhase::UNDECIDED,
+			                      ExecutionRegionAdaptiveAbPhase::MEASURING_NATIVE)) {
+				continue;
+			}
+			// Native leg first: one row group under a claim budget. Measuring native
+			// before entering the compiled kernel keeps deferral one-way, because the
+			// compiled leg then decides between continuing (commit) and deferring
+			// (fallback) without ever re-entering a deferred kernel.
+			pipeline.SetVectorizedSourceClaimBudget(1);
+			continue;
+		}
+		case ExecutionRegionAdaptiveAbPhase::MEASURING_NATIVE: {
+			if (!pipeline.HasVectorizedSourceClaimBudget()) {
+				// Another executor owns the leg; run natively as a bystander.
+				return ExecutionRunnerResult::ContinueVectorized();
+			}
+			// A scheduler yield mid row group must resume this leg, never switch
+			// runners: switching with an in-flight row group strands its rows.
+			auto leg_start = std::chrono::steady_clock::now();
+			auto exec_result = pipeline.ExecuteVectorizedPipeline(max_chunks);
+			ab.native_leg_us.fetch_add(ExecutionRegionElapsedMicros(leg_start));
+			const auto declined = pipeline.ConsumeVectorizedSourceDeclinedYield();
+			if (declined) {
+				pipeline.ClearVectorizedSourceClaimBudget();
+				ab.phase.store(ExecutionRegionAdaptiveAbPhase::MEASURING_COMPILED);
+				continue;
+			}
+			if (exec_result == PipelineExecuteResult::NOT_FINISHED) {
+				return ExecutionRunnerResult::Executed(exec_result);
+			}
+			// The pipeline finished or blocked inside the native leg; stay native.
+			pipeline.ClearVectorizedSourceClaimBudget();
+			ab.phase.store(ExecutionRegionAdaptiveAbPhase::FALLBACK_NATIVE);
+			return ExecutionRunnerResult::Executed(exec_result);
+		}
+		case ExecutionRegionAdaptiveAbPhase::MEASURING_COMPILED: {
+			if (!ab.TryBeginPhase(ExecutionRegionAdaptiveAbPhase::MEASURING_COMPILED,
+			                      ExecutionRegionAdaptiveAbPhase::MEASURING_COMPILED_RUNNING)) {
+				continue;
+			}
+			// The compiled kernel resolves the verdict at its first row-group
+			// boundary: commit disarms the probe and continues inside the same entry,
+			// fallback defers to the vectorized continuation.
+			PipelineExecuteResult result;
+			auto status = ExecuteCompiledRegion(
+			    pipeline, max_chunks, result, ab,
+			    NumericCast<int64_t>(ExecutionRegionSettings::AdaptiveAbMarginBasisPoints(client)));
+			const auto phase = ab.phase.load();
+			if (phase == ExecutionRegionAdaptiveAbPhase::MEASURING_COMPILED_RUNNING) {
+				// The kernel finished, yielded, or could not enter before reaching a
+				// boundary; keep the CBO's compiled selection.
+				ab.phase.store(ExecutionRegionAdaptiveAbPhase::COMMIT_COMPILED);
+			}
+			if (ExecutionRegionSettings::TraceRuntime(client) &&
+			    ab.phase.load() != ExecutionRegionAdaptiveAbPhase::MEASURING_COMPILED_RUNNING) {
+				auto reason = StringUtil::Format("adaptive_ab verdict=%s compiled_leg_us=%lld native_leg_us=%lld",
+				                                 ab.phase.load() == ExecutionRegionAdaptiveAbPhase::FALLBACK_NATIVE
+				                                     ? "fallback_native"
+				                                     : "commit_compiled",
+				                                 ab.compiled_leg_us.load(), ab.native_leg_us.load());
+				ExecutionRegionManager::Get(client).RecordRuntimeEvent(
+				    client, kernel, ExecutionRegionEventStatus::EXECUTED, std::move(reason), 0, 0, 0, "adaptive_ab");
+			}
+			switch (status) {
+			case CompiledVectorizedRunStatus::EXECUTED:
+				return ExecutionRunnerResult::Executed(result);
+			default:
+				return ExecutionRunnerResult::ContinueVectorized();
+			}
+		}
+		case ExecutionRegionAdaptiveAbPhase::MEASURING_COMPILED_RUNNING:
+			// Another thread owns the measurement; execute natively meanwhile.
+			return ExecutionRunnerResult::ContinueVectorized();
+		case ExecutionRegionAdaptiveAbPhase::FALLBACK_NATIVE:
+			return ExecutionRunnerResult::ContinueVectorized();
+		case ExecutionRegionAdaptiveAbPhase::COMMIT_COMPILED: {
+			PipelineExecuteResult result;
+			auto status = ExecuteCompiledRegion(pipeline, max_chunks, result);
+			switch (status) {
+			case CompiledVectorizedRunStatus::EXECUTED:
+				return ExecutionRunnerResult::Executed(result);
+			default:
+				return ExecutionRunnerResult::ContinueVectorized();
+			}
+		}
+		}
+	}
+}
+
 ExecutionRunnerResult CompiledVectorizedRunner::Execute(ExecutionRegionPipelineAdapter &pipeline, idx_t max_chunks) {
+	{
+		auto &client = pipeline.GetClientContext();
+		auto kernel = pipeline.GetExecutableFullPipelineKernel();
+		if (kernel && kernel->CanExecuteFullPipeline() && !pipeline.IsCompiledExecutionSuppressed() &&
+		    ExecutionRegionSettings::AdaptiveAb(client)) {
+			return ExecuteAdaptive(pipeline, *kernel, max_chunks);
+		}
+	}
 	PipelineExecuteResult result;
 	auto status = ExecuteCompiledRegion(pipeline, max_chunks, result);
 	switch (status) {
@@ -169,9 +278,13 @@ class CompiledRegionRuntime : public ExecutionRegionRuntime, public ExecutionOpe
 public:
 	CompiledRegionRuntime(ExecutionRegionPipelineAdapter &pipeline_p, ExecutionRegionKernel &kernel_p,
 	                      ExecutionRegionLocalState &local_state_p, idx_t max_chunks_p, bool trace_runtime_p,
-	                      idx_t debug_force_defer_after_chunks_p)
+	                      idx_t debug_force_defer_after_chunks_p,
+	                      optional_ptr<ExecutionRegionAdaptiveAbState> adaptive_ab_p = nullptr,
+	                      int64_t adaptive_margin_basis_points_p = 0)
 	    : pipeline(pipeline_p), kernel(kernel_p), local_state(local_state_p), max_chunks(max_chunks_p),
-	      trace_runtime(trace_runtime_p), debug_force_defer_after_chunks(debug_force_defer_after_chunks_p) {
+	      trace_runtime(trace_runtime_p), debug_force_defer_after_chunks(debug_force_defer_after_chunks_p),
+	      adaptive_ab(adaptive_ab_p), adaptive_margin_basis_points(adaptive_margin_basis_points_p),
+	      entry_time(std::chrono::steady_clock::now()) {
 	}
 
 	idx_t MaxChunks() const override {
@@ -280,21 +393,40 @@ public:
 		if (sink_finished) {
 			throw InternalException("compiled region runtime cannot fetch source contract data after a finished sink");
 		}
-		// Once the debug forced defer arms, the source declines new row groups: the
-		// current one drains through normal fetches and the declined fetch converts to
-		// a deferral, so the vectorized continuation resumes at a row-group boundary
-		// with no in-flight rows.
-		const bool decline_new_row_group =
+		// Once armed, the source declines new row groups: the current one drains
+		// through normal fetches and the declined fetch either converts to a deferral
+		// (debug forced defer, or an adaptive fallback verdict) or resolves the
+		// adaptive verdict in the compiled runner's favor and refetches with the claim
+		// allowed. Deferral stays one-way: a committed verdict never defers at all.
+		const bool debug_defer_armed =
 		    debug_force_defer_after_chunks != 0 && fetched_source_chunks >= debug_force_defer_after_chunks;
+		const bool adaptive_probe_armed = adaptive_ab && !adaptive_verdict_done && fetched_source_chunks >= 1;
 		bool declined_new_row_group = false;
-		if (decline_new_row_group) {
+		if (debug_defer_armed || adaptive_probe_armed) {
 			auto declined_result = pipeline.FetchSourceContract(result, nullptr, true, &declined_new_row_group);
-			if (declined_new_row_group) {
+			if (!declined_new_row_group) {
+				fetched_source_chunks++;
+				return declined_result;
+			}
+			if (debug_defer_armed) {
 				Defer("debug forced defer at row-group boundary");
 				return SourceResultType::BLOCKED;
 			}
+			// The first-row-group boundary: decide the measured verdict here.
+			adaptive_verdict_done = true;
+			const auto compiled_us = ExecutionRegionElapsedMicros(entry_time);
+			adaptive_ab->compiled_leg_us.store(compiled_us);
+			const auto native_us = adaptive_ab->native_leg_us.load();
+			const bool commit_compiled = compiled_us * (10000 + adaptive_margin_basis_points) <= native_us * 10000;
+			if (!commit_compiled) {
+				adaptive_ab->phase.store(ExecutionRegionAdaptiveAbPhase::FALLBACK_NATIVE);
+				Defer("adaptive_ab fallback_native at row-group boundary");
+				return SourceResultType::BLOCKED;
+			}
+			adaptive_ab->phase.store(ExecutionRegionAdaptiveAbPhase::COMMIT_COMPILED);
+			auto committed_result = pipeline.FetchSourceContract(result);
 			fetched_source_chunks++;
-			return declined_result;
+			return committed_result;
 		}
 		fetched_source_chunks++;
 		if (!trace_runtime) {
@@ -435,6 +567,10 @@ private:
 	idx_t max_chunks;
 	bool trace_runtime;
 	idx_t debug_force_defer_after_chunks;
+	optional_ptr<ExecutionRegionAdaptiveAbState> adaptive_ab;
+	int64_t adaptive_margin_basis_points;
+	std::chrono::steady_clock::time_point entry_time;
+	bool adaptive_verdict_done = false;
 	idx_t fetched_source_chunks = 0;
 	idx_t source_contract_output_rows = 0;
 	idx_t source_contract_invocation_count = 0;
@@ -450,9 +586,9 @@ private:
 	string deferred_reason;
 };
 
-CompiledVectorizedRunStatus CompiledVectorizedRunner::ExecuteCompiledRegion(ExecutionRegionPipelineAdapter &pipeline,
-                                                                            idx_t max_chunks,
-                                                                            PipelineExecuteResult &result) {
+CompiledVectorizedRunStatus CompiledVectorizedRunner::ExecuteCompiledRegion(
+    ExecutionRegionPipelineAdapter &pipeline, idx_t max_chunks, PipelineExecuteResult &result,
+    optional_ptr<ExecutionRegionAdaptiveAbState> adaptive_ab, int64_t adaptive_margin_basis_points) {
 	auto &client = pipeline.GetClientContext();
 	if (pipeline.IsCompiledExecutionSuppressed()) {
 		return CompiledVectorizedRunStatus::VECTORIZED_SUPPRESSED;
@@ -486,7 +622,8 @@ CompiledVectorizedRunStatus CompiledVectorizedRunner::ExecuteCompiledRegion(Exec
 		}
 		auto &local_state = pipeline.GetOrCreateLocalState(*kernel);
 		CompiledRegionRuntime runtime(pipeline, *kernel, local_state, max_chunks, trace_runtime,
-		                              ExecutionRegionSettings::DebugForceDeferAfterChunks(client));
+		                              ExecutionRegionSettings::DebugForceDeferAfterChunks(client), adaptive_ab,
+		                              adaptive_margin_basis_points);
 		ExecutionRegionResult compiled_result = ExecutionRegionResult::NOT_FINISHED;
 		auto compiled_executed = kernel->TryExecuteFullPipeline(runtime, compiled_result);
 		if (!compiled_executed) {

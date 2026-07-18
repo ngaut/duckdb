@@ -199,6 +199,14 @@ public:
 	optional_ptr<GlobalTableFunctionState> global_state;
 	AsyncResult async_result {};
 	AsyncResultsExecutionMode results_execution_mode {AsyncResultsExecutionMode::SYNCHRONOUS};
+	//! Execution-region runner switching: when set, the function must not claim a
+	//! new row group; it drains current work and reports declined_new_row_group.
+	//! new_row_groups_claimed reports claims made during the call so the executor
+	//! can enforce a claim budget. Functions without storage-scan claims ignore all
+	//! three fields.
+	bool decline_new_row_group = false;
+	bool declined_new_row_group = false;
+	idx_t new_row_groups_claimed = 0;
 };
 
 struct TableFunctionPartitionInput {

@@ -41,9 +41,37 @@ public:
 	virtual idx_t CodeSize() const;
 };
 
+//! The lifecycle of one pipeline's measured runner decision. One thread at a time
+//! owns a measurement leg; the verdict, once published, is final for the pipeline.
+enum class ExecutionRegionAdaptiveAbPhase : uint8_t {
+	UNDECIDED,
+	MEASURING_NATIVE,
+	MEASURING_COMPILED,
+	MEASURING_COMPILED_RUNNING,
+	COMMIT_COMPILED,
+	FALLBACK_NATIVE
+};
+// MEASURING_NATIVE doubles as the running state: the executor that holds the
+// vectorized claim budget owns the leg and resumes it across scheduler yields;
+// every other executor runs natively as a bystander.
+
+struct ExecutionRegionAdaptiveAbState {
+	std::atomic<ExecutionRegionAdaptiveAbPhase> phase {ExecutionRegionAdaptiveAbPhase::UNDECIDED};
+	std::atomic<int64_t> compiled_leg_us {0};
+	std::atomic<int64_t> native_leg_us {0};
+
+	bool TryBeginPhase(ExecutionRegionAdaptiveAbPhase expected, ExecutionRegionAdaptiveAbPhase next) {
+		return phase.compare_exchange_strong(expected, next);
+	}
+};
+
 class DUCKDB_API ExecutionRegionKernel : public TableFilterKernelProvider {
 public:
 	virtual ~ExecutionRegionKernel();
+
+	ExecutionRegionAdaptiveAbState &AdaptiveAb() {
+		return adaptive_ab;
+	}
 
 	virtual const string &BackendName() const = 0;
 	virtual idx_t CodeSize() const;
@@ -87,6 +115,7 @@ private:
 	string trace_candidate_pipeline_shape;
 	idx_t trace_candidate_estimated_cardinality = 0;
 	bool trace_candidate_uses_scan_filters = false;
+	ExecutionRegionAdaptiveAbState adaptive_ab;
 };
 
 } // namespace duckdb

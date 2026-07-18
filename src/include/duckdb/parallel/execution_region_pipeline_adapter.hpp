@@ -40,6 +40,10 @@ public:
 	SourceResultType FetchSourceContract(DataChunk *&result, ExecutionRegionSourceContractMetrics *metrics = nullptr,
 	                                     bool decline_new_row_group = false, bool *declined_new_row_group = nullptr);
 	SinkNextBatchType AdvanceSinkBatch(DataChunk &source_chunk, bool have_more_output);
+	void SetVectorizedSourceClaimBudget(idx_t budget);
+	void ClearVectorizedSourceClaimBudget();
+	bool ConsumeVectorizedSourceDeclinedYield();
+	bool HasVectorizedSourceClaimBudget() const;
 	ExecutionOperatorBindResult BindOperator(idx_t operator_index, DataChunk &input,
 	                                         const ExecutionRegionOperatorInfo &operator_info,
 	                                         ExecutionOperatorBinding &binding);

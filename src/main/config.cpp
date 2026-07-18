@@ -186,6 +186,8 @@ static const ConfigurationOption internal_options[] = {
     DUCKDB_SETTING_CALLBACK(IndexScanPercentageSetting),
     DUCKDB_SETTING_CALLBACK(InitialColumnSegmentSizeSetting),
     DUCKDB_SETTING(IntegerDivisionSetting),
+    DUCKDB_SETTING(JitAdaptiveAbSetting),
+    DUCKDB_SETTING(JitAdaptiveAbMarginBasisPointsSetting),
     DUCKDB_SETTING_CALLBACK(JitBackendSetting),
     DUCKDB_SETTING(JitCboFullPipelineBenefitSetting),
     DUCKDB_SETTING(JitCboGeneratedStageBenefitSetting),

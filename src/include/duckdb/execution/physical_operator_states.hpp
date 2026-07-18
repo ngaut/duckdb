@@ -214,6 +214,7 @@ struct OperatorSourceInput {
 	//! vectorized continuation without stranding in-flight rows.
 	bool decline_new_row_group = false;
 	bool declined_new_row_group = false;
+	idx_t new_row_groups_claimed = 0;
 };
 
 struct OperatorSinkCombineInput {
