@@ -58,57 +58,26 @@ static inline idx_t SljitArm64NeonIntegerLaneCount(SljitNativeIntegerKind kind) 
 	}
 }
 
-static inline uint32_t SljitArm64NeonIntegerBinaryInstruction(SljitNativeIntegerKind kind,
-                                                              SljitNativeIntegerBinaryOp op, uint32_t dst,
-                                                              uint32_t left, uint32_t right) {
-	uint32_t base;
-	switch (kind) {
-	case SljitNativeIntegerKind::INT32:
-		switch (op) {
-		case SljitNativeIntegerBinaryOp::ADD:
-			base = 0x4ea08400;
-			break;
-		case SljitNativeIntegerBinaryOp::SUBTRACT:
-			base = 0x6ea08400;
-			break;
-		case SljitNativeIntegerBinaryOp::MULTIPLY:
-			base = 0x4ea09c00;
-			break;
-		default:
-			throw InternalException("Unsupported ARM64 NEON int32 binary op");
-		}
-		break;
-	case SljitNativeIntegerKind::INT64:
-		switch (op) {
-		case SljitNativeIntegerBinaryOp::ADD:
-			base = 0x4ee08400;
-			break;
-		case SljitNativeIntegerBinaryOp::SUBTRACT:
-			base = 0x6ee08400;
-			break;
-		default:
-			throw InternalException("Unsupported ARM64 NEON int64 binary op");
-		}
-		break;
+static inline sljit_s32 SljitArm64NeonIntegerBinarySimdOp2(SljitNativeIntegerBinaryOp op) {
+	switch (op) {
+	case SljitNativeIntegerBinaryOp::ADD:
+		return SLJIT_SIMD_OP2_ADD;
+	case SljitNativeIntegerBinaryOp::SUBTRACT:
+		return SLJIT_SIMD_OP2_SUB;
+	case SljitNativeIntegerBinaryOp::MULTIPLY:
+		return SLJIT_SIMD_OP2_MUL;
 	default:
-		throw InternalException("Unsupported ARM64 NEON integer kind");
+		throw InternalException("Unsupported SLJIT SIMD integer binary op");
 	}
-	return base | (right << 16) | (left << 5) | dst;
 }
 
 static inline void EmitSljitArm64NeonIntegerBinary(struct sljit_compiler *compiler, SljitNativeIntegerKind kind,
                                                    SljitNativeIntegerBinaryOp op, sljit_s32 dst_vreg,
                                                    sljit_s32 left_vreg, sljit_s32 right_vreg) {
-	auto dst = sljit_get_register_index(SLJIT_SIMD_REG_128, dst_vreg);
-	auto left = sljit_get_register_index(SLJIT_SIMD_REG_128, left_vreg);
-	auto right = sljit_get_register_index(SLJIT_SIMD_REG_128, right_vreg);
-	if (dst < 0 || left < 0 || right < 0) {
-		throw InternalException("SLJIT ARM64 NEON register mapping is unavailable");
+	auto type = SljitArm64NeonIntegerSimdType(kind) | SljitArm64NeonIntegerBinarySimdOp2(op);
+	if (sljit_emit_simd_op2(compiler, type, dst_vreg, left_vreg, right_vreg, 0) != SLJIT_SUCCESS) {
+		throw InternalException("SLJIT SIMD integer binary emission failed");
 	}
-	auto instruction =
-	    SljitArm64NeonIntegerBinaryInstruction(kind, op, UnsafeNumericCast<uint32_t>(dst),
-	                                           UnsafeNumericCast<uint32_t>(left), UnsafeNumericCast<uint32_t>(right));
-	sljit_emit_op_custom(compiler, &instruction, sizeof(instruction));
 }
 
 } // namespace duckdb
