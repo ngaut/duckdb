@@ -381,7 +381,17 @@ public:
 	}
 
 	void Defer(string reason) override {
+		if (!CanDeferAtEntry()) {
+			throw InternalException("compiled kernel requested a mid-stream deferral (%s): deferral is only legal "
+			                        "before the first source fetch or at a declined claim boundary, because the "
+			                        "contract cursor holds in-flight rows a handoff would abandon",
+			                        reason);
+		}
 		deferred_reason = std::move(reason);
+	}
+
+	bool CanDeferAtEntry() const override {
+		return !pipeline.SourceContractFetched();
 	}
 
 	const string &DeferredReason() const override {
@@ -415,7 +425,7 @@ public:
 				return declined_result;
 			}
 			if (debug_defer_armed) {
-				Defer("debug forced defer at row-group boundary");
+				DeferAtClaimBoundary("debug forced defer at row-group boundary");
 				return SourceResultType::BLOCKED;
 			}
 			// The first-row-group boundary: decide the measured verdict here.
@@ -427,7 +437,7 @@ public:
 			const bool commit_compiled = compiled_us * (10000 + adaptive_margin_basis_points) <= native_us * 10000;
 			if (!commit_compiled) {
 				adaptive_ab->phase.store(ExecutionRegionAdaptiveAbPhase::FALLBACK_NATIVE);
-				Defer("adaptive_ab fallback_native at row-group boundary");
+				DeferAtClaimBoundary("adaptive_ab fallback_native at row-group boundary");
 				return SourceResultType::BLOCKED;
 			}
 			adaptive_ab->phase.store(ExecutionRegionAdaptiveAbPhase::COMMIT_COMPILED);
@@ -478,6 +488,18 @@ public:
 	                                         const ExecutionRegionOperatorInfo &operator_info,
 	                                         ExecutionOperatorBinding &binding) override {
 		return pipeline.BindOperator(operator_index, input, operator_info, binding);
+	}
+
+	ExecutionOperatorReadiness GetOperatorReadiness(idx_t operator_index,
+	                                                const ExecutionRegionOperatorInfo &operator_info) override {
+		return pipeline.GetOperatorReadiness(operator_index, operator_info);
+	}
+
+	//! Claim-boundary deferral: legal after fetches because the declined fetch
+	//! proves the contract cursor sits at a row-group boundary with nothing in
+	//! flight. Only the decline protocol may use this.
+	void DeferAtClaimBoundary(string reason) {
+		deferred_reason = std::move(reason);
 	}
 
 	bool BindSink(DataChunk &input, const ExecutionRegionSinkInfo &sink_info, ExecutionSinkBinding &binding) override {
@@ -640,7 +662,14 @@ CompiledVectorizedRunStatus CompiledVectorizedRunner::ExecuteCompiledRegion(
 		                              ExecutionRegionSettings::DebugForceDeferAfterChunks(client), adaptive_ab,
 		                              adaptive_margin_basis_points);
 		ExecutionRegionResult compiled_result = ExecutionRegionResult::NOT_FINISHED;
-		auto compiled_executed = kernel->TryExecuteFullPipeline(runtime, compiled_result);
+		bool compiled_executed;
+		if (ExecutionRegionSettings::DebugForceEntryDefer(client) && runtime.CanDeferAtEntry()) {
+			runtime.Defer("debug forced defer at kernel entry");
+			compiled_result = ExecutionRegionResult::DEFERRED;
+			compiled_executed = true;
+		} else {
+			compiled_executed = kernel->TryExecuteFullPipeline(runtime, compiled_result);
+		}
 		if (!compiled_executed) {
 			throw InternalException("compiled full pipeline kernel returned false at runtime");
 		}

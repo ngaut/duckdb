@@ -113,6 +113,37 @@ private:
 	SljitExpressionAdapterScratch expression_scratch;
 };
 
+//! Entry prologue for genuine native-fallback states: a native-delegated join
+//! probe whose runtime state is not ready (external-partitioned table layout,
+//! unfinalized build) defers to the vectorized continuation BEFORE any source
+//! fetch, where a handoff is trivially legal. After the first fetch the runtime
+//! rejects deferral outright, so not-ready states discovered any later fail
+//! loudly instead of abandoning in-flight rows.
+static bool SljitTryDeferNotReadyNativeJoinProbesAtEntry(ExecutionRegionRuntime &runtime,
+                                                         vector<SljitExecutableRegionOp> &ops,
+                                                         ExecutionRegionResult &result) {
+	for (auto &op : ops) {
+		const ExecutionRegionOperatorInfo *operator_info = nullptr;
+		if (op.kind == SljitNativeRegionOpKind::HASH_JOIN_PROBE) {
+			operator_info = &op.hash_join_probe.plan.operator_info;
+		} else if (op.kind == SljitNativeRegionOpKind::NESTED_LOOP_JOIN_PROBE) {
+			operator_info = &op.nested_loop_join_probe.plan.operator_info;
+		}
+		if (!operator_info) {
+			continue;
+		}
+		auto readiness = runtime.ExecutionOperators().GetOperatorReadiness(op.operator_index, *operator_info);
+		if (readiness.status != ExecutionOperatorReadinessStatus::NOT_READY) {
+			continue;
+		}
+		runtime.Defer(readiness.blocker.empty() ? string("native operator not ready at kernel entry")
+		                                        : readiness.blocker);
+		result = ExecutionRegionResult::DEFERRED;
+		return true;
+	}
+	return false;
+}
+
 class SljitNativeRegionKernel : public ExecutionRegionKernel {
 public:
 	SljitNativeRegionKernel(string backend_name_p, vector<SljitExecutableRegionOp> ops_p,
@@ -184,12 +215,7 @@ public:
 		}
 		auto &sequence = full_pipeline_recipe_plan.Recipe().primitive_sequence;
 		for (idx_t step_idx = 0; step_idx < sequence.Count(); step_idx++) {
-			auto &step = sequence.Step(step_idx);
-			if (step.kind == SljitFullPipelinePrimitiveKind::GROUPED_AGGREGATE_UPDATE &&
-			    step.grouped_aggregate_update.strategy == SljitGroupedAggregateUpdateStrategyKind::DISTINCT_KEY_SINK) {
-				// Inline distinct-key counting owns the pipeline's counting; the
-				// native runner counts through finalize, so mixing runners loses
-				// whichever side's contribution the finalize decision ignores.
+			if (!SljitFullPipelinePrimitiveStepSupportsRunnerHandoff(sequence.Step(step_idx))) {
 				return false;
 			}
 		}
@@ -280,6 +306,9 @@ public:
 	bool TryExecuteFullPipeline(ExecutionRegionRuntime &runtime, ExecutionRegionResult &result) override {
 		if (!ExecutionRegionABIIsFullPipeline(abi)) {
 			throw InternalException("SLJIT full pipeline kernel entered without full-pipeline ABI");
+		}
+		if (runtime.CanDeferAtEntry() && SljitTryDeferNotReadyNativeJoinProbesAtEntry(runtime, ops, result)) {
+			return true;
 		}
 		auto &local_state = runtime.LocalState().Cast<SljitNativeRegionLocalState>();
 		auto executed = SljitTryExecuteFullPipelineRecipe(

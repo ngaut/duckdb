@@ -78,6 +78,15 @@ private:
 	static SljitFullPipelinePrimitiveStep Make(SljitFullPipelinePrimitiveKind kind);
 };
 
+//! Single authority for whether a primitive step permits a mid-query runner
+//! handoff; a kernel's capability is the conjunction over its recipe steps.
+static bool SljitFullPipelinePrimitiveStepSupportsRunnerHandoff(const SljitFullPipelinePrimitiveStep &step) {
+	if (step.kind == SljitFullPipelinePrimitiveKind::GROUPED_AGGREGATE_UPDATE) {
+		return SljitGroupedAggregateUpdateStrategySupportsRunnerHandoff(step.grouped_aggregate_update.strategy);
+	}
+	return true;
+}
+
 class SljitFullPipelinePrimitiveSequence {
 public:
 	SljitFullPipelinePrimitiveSequence();

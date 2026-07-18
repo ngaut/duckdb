@@ -1528,6 +1528,18 @@ struct JitDebugForceDeferAfterChunksSetting {
 	static constexpr idx_t SettingIndex = NEXT_SETTING_INDEX();
 };
 
+struct JitDebugForceEntryDeferSetting {
+	using RETURN_TYPE = bool;
+	static constexpr const char *Name = "jit_debug_force_entry_defer";
+	static constexpr const char *Description =
+	    "Debug: compiled full-pipeline kernels defer to the vectorized continuation at kernel entry before any "
+	    "source fetch, exercising the entry-deferral handoff used by not-ready native runtime states";
+	static constexpr const char *InputType = "BOOLEAN";
+	static constexpr const char *DefaultValue = "false";
+	static constexpr SettingScopeTarget Scope = SettingScopeTarget::LOCAL_DEFAULT;
+	static constexpr idx_t SettingIndex = NEXT_SETTING_INDEX();
+};
+
 struct JitDumpIrSetting {
 	using RETURN_TYPE = bool;
 	static constexpr const char *Name = "jit_dump_ir";

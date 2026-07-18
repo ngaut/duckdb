@@ -1942,6 +1942,45 @@ def verify_regular_hash_join_direct_aggregate_storage_contract() -> None:
             raise AssertionError(f"direct regular-probe performance proof is not ratcheted: {receipt}")
 
 
+
+def verify_deferral_legality_and_handoff_single_authority() -> None:
+    """Runner handoff must be impossible with rows in flight, and the recipe
+    strategies that refuse it must be classified in one place.
+
+    A mid-stream deferral abandons the contract cursor's partially-read row
+    group (measured 2026-07-19: one full row group silently lost per defer), so
+    the runtime accepts a deferral only at kernel entry or through the
+    declined-claim boundary path and throws otherwise. The strategy-level
+    handoff classification lives next to the strategy enum; the kernel derives
+    its capability from it instead of pattern-matching strategy names locally.
+    """
+    runner = read("src/execution/execution_region_runner.cpp")
+    if "requested a mid-stream deferral" not in runner:
+        raise AssertionError("the runtime must reject mid-stream deferral requests loudly")
+    if runner.count("DeferAtClaimBoundary(") < 3:
+        raise AssertionError(
+            "declined-claim boundary deferrals must use the boundary-only path, not the public Defer"
+        )
+    if "CanDeferAtEntry" not in runner:
+        raise AssertionError("the runtime must expose entry-deferral legality to kernels")
+    kernel = read("extension/jit_sljit/sljit_region_runtime.cpp")
+    if "DISTINCT_KEY_SINK" in kernel:
+        raise AssertionError(
+            "the kernel must not pattern-match strategy names; handoff capability is the "
+            "conjunction of SljitFullPipelinePrimitiveStepSupportsRunnerHandoff over recipe steps"
+        )
+    if "SljitFullPipelinePrimitiveStepSupportsRunnerHandoff" not in kernel:
+        raise AssertionError("the kernel capability must derive from the step-level single authority")
+    if "SljitTryDeferNotReadyNativeJoinProbesAtEntry" not in kernel:
+        raise AssertionError("the kernel must probe native join readiness in its entry prologue")
+    strategy_header = read("extension/jit_sljit/include/sljit_grouped_aggregate_update_primitive.hpp")
+    if ("enum class SljitGroupedAggregateUpdateStrategyKind" not in strategy_header
+            or "SljitGroupedAggregateUpdateStrategySupportsRunnerHandoff" not in strategy_header):
+        raise AssertionError(
+            "the strategy handoff classification must live beside the strategy enum definition"
+        )
+
+
 def main() -> None:
     verify_layer_boundaries()
     verify_no_benchmark_shaped_logic()
@@ -1959,6 +1998,7 @@ def main() -> None:
     verify_runtime_proofs_are_typed()
     verify_runner_cost_schema_single_authority()
     verify_cache_keys_use_stable_identities()
+    verify_deferral_legality_and_handoff_single_authority()
     verify_production_contract_ownership()
     verify_benchmark_repetition_budget()
     verify_bound_direct_join_terminal_contract()

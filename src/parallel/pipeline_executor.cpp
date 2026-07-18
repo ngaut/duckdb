@@ -764,6 +764,7 @@ SourceResultType PipelineExecutor::FetchFromSourceContract(DataChunk *&result,
 		    "execution region source contract fetch selected for a source without source contract support");
 	}
 
+	compiled_source_contract_fetched = true;
 	auto stage_start = metrics ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point();
 	source_chunk_initial_idx = 0;
 	auto &source_chunk = execution_source_input_chunk;

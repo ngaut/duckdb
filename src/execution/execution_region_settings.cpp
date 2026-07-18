@@ -31,6 +31,10 @@ idx_t ExecutionRegionSettings::DebugForceDeferAfterChunks(ClientContext &context
 	return Settings::Get<JitDebugForceDeferAfterChunksSetting>(context);
 }
 
+bool ExecutionRegionSettings::DebugForceEntryDefer(ClientContext &context) {
+	return Settings::Get<JitDebugForceEntryDeferSetting>(context);
+}
+
 bool ExecutionRegionSettings::TraceDecisions(ClientContext &context) {
 	return Settings::Get<JitTraceDecisionsSetting>(context);
 }

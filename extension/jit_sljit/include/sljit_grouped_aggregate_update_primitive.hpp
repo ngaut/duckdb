@@ -25,6 +25,25 @@ enum class SljitGroupedAggregateUpdateStrategyKind : uint8_t {
 
 enum class SljitGroupedAggregateUpdateInputKind : uint8_t { MATERIALIZED, PROJECTED_INPUT };
 
+//! Whether a grouped-update strategy tolerates a mid-query runner handoff.
+//! DISTINCT_KEY_SINK counts inline off the dedup hash table's new-key signal —
+//! an exclusive claim over the pipeline's counting that the vectorized
+//! continuation cannot see, so rows it sinks after a handoff would never be
+//! counted. Every strategy must be classified here: the execution kernel
+//! derives its handoff capability from this single authority.
+static bool SljitGroupedAggregateUpdateStrategySupportsRunnerHandoff(SljitGroupedAggregateUpdateStrategyKind kind) {
+	switch (kind) {
+	case SljitGroupedAggregateUpdateStrategyKind::INVALID:
+	case SljitGroupedAggregateUpdateStrategyKind::COUNT_STAR_PREAGGREGATION:
+	case SljitGroupedAggregateUpdateStrategyKind::DIRECT_PRIMITIVE_PAYLOAD_UPDATE:
+	case SljitGroupedAggregateUpdateStrategyKind::FILTERED_PRIMITIVE_PAYLOAD_UPDATE:
+		return true;
+	case SljitGroupedAggregateUpdateStrategyKind::DISTINCT_KEY_SINK:
+		return false;
+	}
+	throw InternalException("grouped aggregate update strategy is not classified for runner handoff");
+}
+
 struct SljitGroupedAggregateUpdatePrimitive {
 	idx_t aggregate_idx = DConstants::INVALID_INDEX;
 	idx_t filter_idx = DConstants::INVALID_INDEX;

@@ -116,6 +116,23 @@ SinkNextBatchType ExecutionRegionPipelineAdapter::AdvanceSinkBatch(DataChunk &so
 	return result;
 }
 
+ExecutionOperatorReadiness
+ExecutionRegionPipelineAdapter::GetOperatorReadiness(idx_t operator_index,
+                                                     const ExecutionRegionOperatorInfo &operator_info) {
+	auto &operators = executor.pipeline.GetIntermediateOperators();
+	if (operator_index >= operators.size()) {
+		ExecutionOperatorReadiness readiness;
+		readiness.kind = operator_info.kind;
+		readiness.blocker = "execution-operator-runtime-index-out-of-range";
+		return readiness;
+	}
+	return operators[operator_index].get().GetExecutionOperatorReadiness(GetClientContext(), operator_info);
+}
+
+bool ExecutionRegionPipelineAdapter::SourceContractFetched() const {
+	return executor.compiled_source_contract_fetched;
+}
+
 ExecutionOperatorBindResult
 ExecutionRegionPipelineAdapter::BindOperator(idx_t operator_index, DataChunk &input,
                                              const ExecutionRegionOperatorInfo &operator_info,

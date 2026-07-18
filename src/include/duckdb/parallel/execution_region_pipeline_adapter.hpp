@@ -46,6 +46,9 @@ public:
 	bool HasVectorizedSourceClaimBudget() const;
 	void LatchDeferredCompiledExecution();
 	idx_t VectorizedSourceLegRows() const;
+	ExecutionOperatorReadiness GetOperatorReadiness(idx_t operator_index,
+	                                                const ExecutionRegionOperatorInfo &operator_info);
+	bool SourceContractFetched() const;
 	ExecutionOperatorBindResult BindOperator(idx_t operator_index, DataChunk &input,
 	                                         const ExecutionRegionOperatorInfo &operator_info,
 	                                         ExecutionOperatorBinding &binding);

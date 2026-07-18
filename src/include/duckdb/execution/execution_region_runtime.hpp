@@ -24,6 +24,10 @@ public:
 	virtual ExecutionOperatorBindResult BindOperator(idx_t operator_index, DataChunk &input,
 	                                                 const ExecutionRegionOperatorInfo &operator_info,
 	                                                 ExecutionOperatorBinding &binding) = 0;
+	//! Chunk-free readiness probe for a native-delegated operator; kernels call
+	//! this at entry so not-ready runtime states defer before anything is fetched.
+	virtual ExecutionOperatorReadiness GetOperatorReadiness(idx_t operator_index,
+	                                                        const ExecutionRegionOperatorInfo &operator_info) = 0;
 	virtual bool BindSink(DataChunk &input, const ExecutionRegionSinkInfo &sink_info,
 	                      ExecutionSinkBinding &binding) = 0;
 	//! Records the sink result. BLOCKED transfers the chunk to the core continuation and leaves it empty, ensuring
@@ -114,8 +118,14 @@ public:
 	virtual void RecordJitRuntimeDelegation(const char *delegation, idx_t count = 1);
 	virtual void RecordLazyCodegen(const ExecutionRegionLazyCodegenMetrics &metrics);
 	virtual bool TryMarkOnce(ExecutionRegionRuntimeOnceFlag flag, idx_t index);
+	//! Request a handoff to the vectorized continuation. Only legal while
+	//! CanDeferAtEntry() holds — afterwards the source contract cursor can hold a
+	//! partially-read row group that a handoff would silently abandon, so a
+	//! mid-stream request throws.
 	virtual void Defer(string reason) = 0;
 	virtual const string &DeferredReason() const = 0;
+	//! True until the source contract has been touched for this pipeline.
+	virtual bool CanDeferAtEntry() const = 0;
 };
 
 } // namespace duckdb

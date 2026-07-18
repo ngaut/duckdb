@@ -123,6 +123,10 @@ private:
 	//! vectorized continuation permanently, because a deferred kernel's terminal
 	//! state does not support re-entry.
 	bool compiled_execution_deferred = false;
+	//! Set once the compiled source contract has touched the shared source.
+	//! Entry deferral is only legal before this point: afterwards the contract
+	//! cursor can hold a partially-read row group a handoff would abandon.
+	bool compiled_source_contract_fetched = false;
 	bool exhausted_source = false;
 	//! Source or intermediate operator indicated that there is no more output possible
 	bool exhausted_pipeline = false;

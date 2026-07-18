@@ -234,11 +234,27 @@ source drains its current row group, declines the next claim, and the runtime
 converts the declined fetch into a deferral. Deferral is one-way — deferring
 latches the pipeline's compiled suppression so a deferred kernel is never
 re-entered — and sources without the storage contract never decline, so
-switching is inert where it is not proven. Handoff is additionally a kernel
-capability: a recipe that claims exclusive ownership of sink finalization
-(inline distinct-key counting) refuses handoff entirely, because the rows the
-other runner sinks would be stranded under a claim it cannot see. The per-sink
-handoff proof and its forced-defer debug setting are regression fixtures.
+switching is inert where it is not proven.
+
+Deferral is legal at exactly two points, enforced by the runtime: at kernel
+entry before the first source fetch (nothing is claimed), and at a declined
+claim boundary (the declined fetch proves nothing is in flight). Any other
+deferral request throws, because the contract cursor can hold a partially-read
+row group that a handoff would silently abandon. Genuine native-fallback
+states — a native-delegated join probe whose runtime layout is not ready, such
+as an externally partitioned hash table — are chunk-independent operator
+readiness facts, so the kernel probes readiness in an entry prologue and
+defers there.
+
+Handoff is additionally a kernel capability: a recipe step that claims
+exclusive ownership of sink finalization (inline distinct-key counting)
+refuses mid-query handoff entirely, because the rows the other runner sinks
+would be stranded under a claim it cannot see. Entry deferral remains legal
+for such recipes — no claim exists before the first row. The classification is
+a single authority next to the strategy definition; the kernel's capability is
+the conjunction over its recipe steps. The per-sink handoff proof and its two
+debug settings (forced boundary defer, forced entry defer) are regression
+fixtures.
 
 ## Measured runner selection
 
