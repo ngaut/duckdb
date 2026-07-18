@@ -1,6 +1,6 @@
 # JIT Production Recipe Architecture
 
-Last updated: 2026-07-18
+Last updated: 2026-07-19
 
 This document is the stable architecture contract for DuckDB execution-region
 JIT. It describes layer ownership, immutable recipe binding, runtime data
@@ -200,6 +200,11 @@ row-pointer grouping, and complementary row-field consumers explicitly reject
 dictionary storage. Silent interpretation of dictionary indices as row values
 is forbidden.
 
+Fast-path caches must key their validity on stable identities — dictionary
+ids, value keys, epochs — never on reusable addresses, and every event that
+relocates rows must disable caches holding row addresses. Both rules are
+enforced by static architecture checks.
+
 ## Batch and continuation ownership
 
 Recipe execution carries an explicit batch view:
@@ -217,6 +222,33 @@ or copy its state.
 Source progress, sink backpressure, cancellation, and recursive-pipeline state
 remain core-owned. The backend can coalesce source fetches only through the
 declared source budget and must preserve exact operator protocol.
+
+## Runner switching
+
+Compiled and vectorized execution consume one shared source distribution: for
+storage scans both paths claim row groups from the same parallel state, and
+first claims are made lazily by the scan loops, never at local-state
+construction. Switching runners is legal only at claim points, where no local
+holds an in-flight row group. A compiled kernel switches by decline-claim: the
+source drains its current row group, declines the next claim, and the runtime
+converts the declined fetch into a deferral. Deferral is one-way — a deferred
+kernel is never re-entered — and sources without the storage contract never
+decline, so switching is inert where it is not proven. The per-sink handoff
+proof and its forced-defer debug setting are regression fixtures.
+
+## Measured runner selection
+
+`jit_adaptive_ab` (default off) measures one native and one compiled row group
+per compiled-selected pipeline and commits to the measured winner; the planner
+admits a pipeline to measurement only when its static net benefit lies within
+`jit_adaptive_ab_band_basis_points` of its required benefit, so confident
+selections pay no measurement tax. The native leg runs first under a one-claim
+budget owned by its executor and resumed across scheduler yields; the compiled
+kernel then resolves the verdict at its own first row-group boundary — commit
+continues in-entry, fallback defers one-way. Other threads execute natively
+during a measurement. Verdicts are recorded as runtime events carrying per-leg
+times and rows, a recorded fallback verdict satisfies the kernel's declared
+runtime proof requirements, and a verdict is final for its kernel's lifetime.
 
 The structural execution-region plan belongs to the physical pipeline and is
 built at most once. Recursive rescheduling resets source state and refreshes

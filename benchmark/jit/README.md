@@ -32,6 +32,13 @@ Run JIT correctness:
 build/reldebug/test/unittest "[jit]"
 ```
 
+The slow TPC-H sqllogictests are outside the default suite; run them with the
+guard's opt-in step when a change touches scan or filter paths:
+
+```sh
+python3 benchmark/jit/run_jit_refactor_guard.py --slow-suite
+```
+
 ## Generic production workloads
 
 The generic matrix covers expression, filter, nullable, persistent scan,
