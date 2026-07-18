@@ -49,6 +49,14 @@ struct ExecutionRegionStageTimings {
 	int64_t kernel_build_time_us = 0;
 };
 
+struct ExecutionRegionRunnerCostAxisTotals {
+	int64_t runner_benefit = 0;
+	int64_t transfer_cost = 0;
+	int64_t startup_cost = 0;
+	int64_t required_benefit = 0;
+	int64_t net_benefit = 0;
+};
+
 struct ExecutionRegionRunnerCostTotals {
 	bool present = false;
 	int64_t rows = 0;
@@ -84,23 +92,22 @@ struct ExecutionRegionRunnerCostTotals {
 	int64_t full_pipeline_work = 0;
 	int64_t stateful_protocol_penalty = 0;
 	int64_t saved_work_per_batch = 0;
-	int64_t compiled_vectorized_runner_benefit = 0;
-	int64_t compiled_vectorized_startup_cost = 0;
-	int64_t compiled_vectorized_required_benefit = 0;
-	int64_t compiled_vectorized_net_benefit = 0;
-	int64_t gpu_runner_benefit = 0;
-	int64_t gpu_transfer_cost = 0;
-	int64_t gpu_startup_cost = 0;
-	int64_t gpu_required_benefit = 0;
-	int64_t gpu_net_benefit = 0;
 	int64_t accelerated_runner_benefit = 0;
 	int64_t startup_cost = 0;
 	int64_t required_benefit = 0;
 	int64_t net_benefit = 0;
 	ExecutionRegionJitRuntimeProofMask required_runtime_proofs = 0;
+	//! Mirrors PhysicalRunnerAxisCostBreakdown's cost fields so the runner-cost column
+	//! appenders can be templated over a profile and its totals alike.
+	ExecutionRegionRunnerCostAxisTotals compiled_vectorized;
+	ExecutionRegionRunnerCostAxisTotals gpu;
 	idx_t selected_accelerated_runner_count = 0;
 	idx_t selected_compiled_vectorized_runner_count = 0;
 	idx_t selected_gpu_runner_count = 0;
+
+	ExecutionRegionRunnerCostAxisTotals &AxisAt(idx_t axis_idx) {
+		return axis_idx == 0 ? compiled_vectorized : gpu;
+	}
 };
 
 struct ExecutionRegionEvent {

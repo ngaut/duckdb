@@ -51,24 +51,61 @@ struct PhysicalRunnerCostInput {
 	bool vectorized_execution_preferred = false;
 };
 
-struct PhysicalRunnerCostParameters {
-	bool compiled_vectorized_runner_available = true;
+//! The cost knobs of one accelerated runner. Every accelerated runner is priced by the
+//! same model over these knobs; runner-specific pricing differences are expressed as
+//! knob values (an in-memory runner simply has transfer_cost_per_batch = 0), never as
+//! runner-specific code paths.
+struct RunnerCostAxis {
+	bool available = false;
 	idx_t generated_stage_benefit = 0;
 	idx_t native_operator_stage_benefit = 0;
 	idx_t materialization_elision_benefit = 0;
 	idx_t full_pipeline_benefit = 0;
-	idx_t source_contract_scan_filter_penalty = 4096;
 	idx_t startup_base_cost = 0;
 	idx_t startup_margin_basis_points = 0;
+	//! Per-batch cost of moving data into the runner's memory domain.
+	idx_t transfer_cost_per_batch = 0;
+
+	bool HasEnabledBenefit() const {
+		return available && (generated_stage_benefit > 0 || native_operator_stage_benefit > 0 ||
+		                     materialization_elision_benefit > 0 || full_pipeline_benefit > 0);
+	}
+};
+
+struct PhysicalRunnerCostParameters {
+	//! Inputs shared by every axis: properties of the plan and the host, not of a runner.
+	idx_t source_contract_scan_filter_penalty = 4096;
 	idx_t vectorized_parallelism = 1;
-	bool gpu_runner_available = false;
-	idx_t gpu_generated_stage_benefit = 0;
-	idx_t gpu_native_operator_stage_benefit = 0;
-	idx_t gpu_materialization_elision_benefit = 0;
-	idx_t gpu_full_pipeline_benefit = 0;
-	idx_t gpu_startup_base_cost = 0;
-	idx_t gpu_startup_margin_basis_points = 0;
-	idx_t gpu_transfer_cost_per_batch = 0;
+	//! Axis order is the selection tie-break: an earlier axis keeps a tied net benefit.
+	//! The first axis is the reference axis; it is costed even when unavailable so
+	//! telemetry can report the hypothetical compiled-vectorized economics.
+	RunnerCostAxis compiled_vectorized;
+	RunnerCostAxis gpu;
+
+	static constexpr idx_t AXIS_COUNT = 2;
+	RunnerCostAxis &AxisAt(idx_t axis_idx) {
+		return axis_idx == 0 ? compiled_vectorized : gpu;
+	}
+	const RunnerCostAxis &AxisAt(idx_t axis_idx) const {
+		return axis_idx == 0 ? compiled_vectorized : gpu;
+	}
+	static ExecutionRunnerKind AxisRunner(idx_t axis_idx) {
+		return axis_idx == 0 ? ExecutionRunnerKind::COMPILED_VECTORIZED : ExecutionRunnerKind::COMPILED_GPU;
+	}
+};
+
+//! One accelerated runner's selection economics inside a cost profile.
+struct PhysicalRunnerAxisCostBreakdown {
+	bool available = false;
+	//! Whether this axis passed selection analysis on its own; the winning runner is
+	//! the selected axis with the highest net benefit.
+	bool selected = false;
+	string selection_reason;
+	int64_t runner_benefit = 0;
+	int64_t transfer_cost = 0;
+	int64_t startup_cost = 0;
+	int64_t required_benefit = 0;
+	int64_t net_benefit = 0;
 };
 
 struct PhysicalRunnerCostProfile {
@@ -110,23 +147,30 @@ struct PhysicalRunnerCostProfile {
 	int64_t full_pipeline_work = 0;
 	int64_t stateful_protocol_penalty = 0;
 	int64_t saved_work_per_batch = 0;
-	int64_t compiled_vectorized_runner_benefit = 0;
-	int64_t compiled_vectorized_startup_cost = 0;
-	int64_t compiled_vectorized_required_benefit = 0;
-	int64_t compiled_vectorized_net_benefit = 0;
-	int64_t gpu_runner_benefit = 0;
-	int64_t gpu_transfer_cost = 0;
-	int64_t gpu_startup_cost = 0;
-	int64_t gpu_required_benefit = 0;
-	int64_t gpu_net_benefit = 0;
 	int64_t accelerated_runner_benefit = 0;
 	int64_t startup_cost = 0;
 	int64_t required_benefit = 0;
 	int64_t net_benefit = 0;
 	ExecutionRegionJitRuntimeProofMask required_runtime_proofs = 0;
-	bool selected_accelerated_runner = false;
-	bool selected_compiled_vectorized_runner = false;
-	bool selected_gpu_runner = false;
+	//! Per-axis selection economics; filled for every axis regardless of which one won.
+	PhysicalRunnerAxisCostBreakdown compiled_vectorized;
+	PhysicalRunnerAxisCostBreakdown gpu;
+
+	bool SelectedAcceleratedRunner() const {
+		return selected_runner != ExecutionRunnerKind::VECTORIZED;
+	}
+	bool SelectedCompiledVectorizedRunner() const {
+		return selected_runner == ExecutionRunnerKind::COMPILED_VECTORIZED;
+	}
+	bool SelectedGpuRunner() const {
+		return selected_runner == ExecutionRunnerKind::COMPILED_GPU;
+	}
+	PhysicalRunnerAxisCostBreakdown &AxisAt(idx_t axis_idx) {
+		return axis_idx == 0 ? compiled_vectorized : gpu;
+	}
+	const PhysicalRunnerAxisCostBreakdown &AxisAt(idx_t axis_idx) const {
+		return axis_idx == 0 ? compiled_vectorized : gpu;
+	}
 };
 
 class DuckDBCostModel {

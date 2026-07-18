@@ -137,23 +137,23 @@ static void AccumulateExecutionRegionRunnerCostTotals(ExecutionRegionRunnerCostT
 	target.full_pipeline_work += source.full_pipeline_work;
 	target.stateful_protocol_penalty += source.stateful_protocol_penalty;
 	target.saved_work_per_batch += source.saved_work_per_batch;
-	target.compiled_vectorized_runner_benefit += source.compiled_vectorized_runner_benefit;
-	target.compiled_vectorized_startup_cost += source.compiled_vectorized_startup_cost;
-	target.compiled_vectorized_required_benefit += source.compiled_vectorized_required_benefit;
-	target.compiled_vectorized_net_benefit += source.compiled_vectorized_net_benefit;
-	target.gpu_runner_benefit += source.gpu_runner_benefit;
-	target.gpu_transfer_cost += source.gpu_transfer_cost;
-	target.gpu_startup_cost += source.gpu_startup_cost;
-	target.gpu_required_benefit += source.gpu_required_benefit;
-	target.gpu_net_benefit += source.gpu_net_benefit;
+	for (idx_t axis_idx = 0; axis_idx < PhysicalRunnerCostParameters::AXIS_COUNT; axis_idx++) {
+		auto &axis_totals = target.AxisAt(axis_idx);
+		auto &axis_breakdown = source.AxisAt(axis_idx);
+		axis_totals.runner_benefit += axis_breakdown.runner_benefit;
+		axis_totals.transfer_cost += axis_breakdown.transfer_cost;
+		axis_totals.startup_cost += axis_breakdown.startup_cost;
+		axis_totals.required_benefit += axis_breakdown.required_benefit;
+		axis_totals.net_benefit += axis_breakdown.net_benefit;
+	}
 	target.accelerated_runner_benefit += source.accelerated_runner_benefit;
 	target.startup_cost += source.startup_cost;
 	target.required_benefit += source.required_benefit;
 	target.net_benefit += source.net_benefit;
 	target.required_runtime_proofs |= source.required_runtime_proofs;
-	target.selected_accelerated_runner_count += source.selected_accelerated_runner ? 1 : 0;
-	target.selected_compiled_vectorized_runner_count += source.selected_compiled_vectorized_runner ? 1 : 0;
-	target.selected_gpu_runner_count += source.selected_gpu_runner ? 1 : 0;
+	target.selected_accelerated_runner_count += source.SelectedAcceleratedRunner() ? 1 : 0;
+	target.selected_compiled_vectorized_runner_count += source.SelectedCompiledVectorizedRunner() ? 1 : 0;
+	target.selected_gpu_runner_count += source.SelectedGpuRunner() ? 1 : 0;
 }
 
 static void AccumulateExecutionRegionStageTimings(ExecutionRegionStageTimings &target,

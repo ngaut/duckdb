@@ -443,8 +443,10 @@ unique_ptr<ExecutionRegionPlan> ExecutionRegionPlanner::Build(ClientContext &con
 			return;
 		}
 		auto runner_kind = backend->RunnerKind();
-		cost_parameters.compiled_vectorized_runner_available = runner_kind == ExecutionRunnerKind::COMPILED_VECTORIZED;
-		cost_parameters.gpu_runner_available = runner_kind == ExecutionRunnerKind::COMPILED_GPU;
+		for (idx_t axis_idx = 0; axis_idx < PhysicalRunnerCostParameters::AXIS_COUNT; axis_idx++) {
+			cost_parameters.AxisAt(axis_idx).available =
+			    PhysicalRunnerCostParameters::AxisRunner(axis_idx) == runner_kind;
+		}
 	};
 	auto requested_backend_is_auto = StringUtil::CIEquals(ExecutionRegionSettings::RequestedBackend(context), "auto");
 	auto desired_runner = ExecutionRunnerKind::COMPILED_VECTORIZED;

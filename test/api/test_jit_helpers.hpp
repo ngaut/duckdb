@@ -243,7 +243,7 @@ static vector<idx_t> RequireSljitMaterializationElisionCboKernelIds(ExecutionReg
 			continue;
 		}
 		kernel_ids.push_back(event.kernel_id);
-		REQUIRE(event.runner_cost.selected_accelerated_runner);
+		REQUIRE(event.runner_cost.SelectedAcceleratedRunner());
 	}
 	REQUIRE(!kernel_ids.empty());
 	return kernel_ids;
@@ -257,7 +257,7 @@ static vector<idx_t> RequireSljitMaterializationElisionCboKernelIds(ExecutionReg
 			continue;
 		}
 		kernel_ids.push_back(event.kernel_id);
-		REQUIRE(event.runner_cost.selected_accelerated_runner);
+		REQUIRE(event.runner_cost.SelectedAcceleratedRunner());
 	}
 	REQUIRE(!kernel_ids.empty());
 	return kernel_ids;
@@ -381,8 +381,9 @@ static void ConfigureSljitForCoverage(Connection &con, bool verify = false, bool
 
 static PhysicalRunnerCostParameters ZeroStartupRunnerCostParameters() {
 	PhysicalRunnerCostParameters parameters;
-	parameters.startup_base_cost = 0;
-	parameters.startup_margin_basis_points = 0;
+	parameters.compiled_vectorized.available = true;
+	parameters.compiled_vectorized.startup_base_cost = 0;
+	parameters.compiled_vectorized.startup_margin_basis_points = 0;
 	return parameters;
 }
 
@@ -413,7 +414,7 @@ static void RequireGeneratedMachineCodeRegion(const ExecutionRegionEvent &event)
 static void RequireVectorizedCboSkip(const ExecutionRegionEvent &event) {
 	REQUIRE(event.selected_runner == ExecutionRunnerKind::VECTORIZED);
 	REQUIRE(event.runner_cost.present);
-	REQUIRE_FALSE(event.runner_cost.selected_accelerated_runner);
+	REQUIRE_FALSE(event.runner_cost.SelectedAcceleratedRunner());
 	REQUIRE(event.blocker == EXECUTION_REGION_BLOCKER_DUCKDB_SELECTED_VECTORIZED);
 }
 

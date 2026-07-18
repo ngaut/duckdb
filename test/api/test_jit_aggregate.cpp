@@ -638,7 +638,7 @@ TEST_CASE("JIT auto CBO selects high-work filtered primitive aggregate fusion", 
 	    [](const ExecutionRegionEvent &event) {
 		    REQUIRE(event.selected_runner == ExecutionRunnerKind::COMPILED_VECTORIZED);
 		    REQUIRE(event.runner_cost.present);
-		    REQUIRE(event.runner_cost.selected_accelerated_runner);
+		    REQUIRE(event.runner_cost.SelectedAcceleratedRunner());
 		    REQUIRE(event.runner_cost.materialization_elision_count == 1);
 		    REQUIRE(event.runner_cost.accelerated_runner_benefit > event.runner_cost.required_benefit);
 		    REQUIRE(StringUtil::Contains(event.ir, "primitive_payloads=native:"));
@@ -3822,7 +3822,7 @@ TEST_CASE("JIT production CBO keeps reference-only string perfect hash aggregate
 	    },
 	    [](const ExecutionRegionEvent &event) {
 		    REQUIRE(event.selected_runner == ExecutionRunnerKind::VECTORIZED);
-		    REQUIRE_FALSE(event.runner_cost.selected_accelerated_runner);
+		    REQUIRE_FALSE(event.runner_cost.SelectedAcceleratedRunner());
 		    REQUIRE(event.runner_cost.generated_backend_stage_count == 0);
 		    REQUIRE(event.runner_cost.materialization_elision_count == 0);
 		    REQUIRE(event.runner_cost.selection_reason == "rejected_no_accelerated_work");

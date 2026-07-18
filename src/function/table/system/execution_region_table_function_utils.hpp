@@ -350,31 +350,31 @@ static inline void AppendExecutionRegionRunnerCostWorkColumn(Vector &output, idx
 		output.Append(Value::BIGINT(cost.net_benefit));
 		return;
 	case 14:
-		output.Append(Value::BIGINT(cost.compiled_vectorized_runner_benefit));
+		output.Append(Value::BIGINT(cost.compiled_vectorized.runner_benefit));
 		return;
 	case 15:
-		output.Append(Value::BIGINT(cost.compiled_vectorized_startup_cost));
+		output.Append(Value::BIGINT(cost.compiled_vectorized.startup_cost));
 		return;
 	case 16:
-		output.Append(Value::BIGINT(cost.compiled_vectorized_required_benefit));
+		output.Append(Value::BIGINT(cost.compiled_vectorized.required_benefit));
 		return;
 	case 17:
-		output.Append(Value::BIGINT(cost.compiled_vectorized_net_benefit));
+		output.Append(Value::BIGINT(cost.compiled_vectorized.net_benefit));
 		return;
 	case 18:
-		output.Append(Value::BIGINT(cost.gpu_runner_benefit));
+		output.Append(Value::BIGINT(cost.gpu.runner_benefit));
 		return;
 	case 19:
-		output.Append(Value::BIGINT(cost.gpu_transfer_cost));
+		output.Append(Value::BIGINT(cost.gpu.transfer_cost));
 		return;
 	case 20:
-		output.Append(Value::BIGINT(cost.gpu_startup_cost));
+		output.Append(Value::BIGINT(cost.gpu.startup_cost));
 		return;
 	case 21:
-		output.Append(Value::BIGINT(cost.gpu_required_benefit));
+		output.Append(Value::BIGINT(cost.gpu.required_benefit));
 		return;
 	case 22:
-		output.Append(Value::BIGINT(cost.gpu_net_benefit));
+		output.Append(Value::BIGINT(cost.gpu.net_benefit));
 		return;
 	default:
 		throw InternalException("Unsupported execution region runner cost work column index");

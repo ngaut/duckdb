@@ -345,13 +345,13 @@ static void AppendJitEventColumn(Vector &output, idx_t column_id, const Executio
 		output.Append(Value(PhysicalRunnerNativeProtocolClassToString(entry.runner_cost.native_protocol_class)));
 		return;
 	case JIT_EVENT_RUNNER_COST_SELECTED_ACCELERATED_RUNNER:
-		output.Append(Value::BOOLEAN(entry.runner_cost.selected_accelerated_runner));
+		output.Append(Value::BOOLEAN(entry.runner_cost.SelectedAcceleratedRunner()));
 		return;
 	case JIT_EVENT_RUNNER_COST_SELECTED_COMPILED_VECTORIZED_RUNNER:
-		output.Append(Value::BOOLEAN(entry.runner_cost.selected_compiled_vectorized_runner));
+		output.Append(Value::BOOLEAN(entry.runner_cost.SelectedCompiledVectorizedRunner()));
 		return;
 	case JIT_EVENT_RUNNER_COST_SELECTED_GPU_RUNNER:
-		output.Append(Value::BOOLEAN(entry.runner_cost.selected_gpu_runner));
+		output.Append(Value::BOOLEAN(entry.runner_cost.SelectedGpuRunner()));
 		return;
 	case JIT_EVENT_PIPELINE_SHAPE_COLUMN:
 		if (entry.has_pipeline) {

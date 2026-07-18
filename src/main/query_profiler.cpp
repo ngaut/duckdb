@@ -215,7 +215,7 @@ static string ExecutionRegionProfileCostComponents(const PhysicalRunnerCostProfi
 	result += ",source_contract_scan_penalty:" + std::to_string(cost.source_contract_scan_penalty);
 	result += ",full:" + std::to_string(cost.full_pipeline_work);
 	result += ",protocol_penalty:" + std::to_string(cost.stateful_protocol_penalty);
-	result += ",gpu_transfer:" + std::to_string(cost.gpu_transfer_cost);
+	result += ",gpu_transfer:" + std::to_string(cost.gpu.transfer_cost);
 	return result;
 }
 
@@ -381,24 +381,24 @@ static void AddExecutionRegionEvent(QueryProfileResult &row, const ExecutionRegi
 	     {"runner_cost_full_pipeline_work", Time(event.runner_cost.full_pipeline_work)},
 	     {"runner_cost_stateful_protocol_penalty", Time(event.runner_cost.stateful_protocol_penalty)},
 	     {"runner_cost_saved_work_per_batch", Time(event.runner_cost.saved_work_per_batch)},
-	     {"runner_cost_compiled_vectorized_runner_benefit", Time(event.runner_cost.compiled_vectorized_runner_benefit)},
-	     {"runner_cost_compiled_vectorized_startup_cost", Time(event.runner_cost.compiled_vectorized_startup_cost)},
+	     {"runner_cost_compiled_vectorized_runner_benefit", Time(event.runner_cost.compiled_vectorized.runner_benefit)},
+	     {"runner_cost_compiled_vectorized_startup_cost", Time(event.runner_cost.compiled_vectorized.startup_cost)},
 	     {"runner_cost_compiled_vectorized_required_benefit",
-	      Time(event.runner_cost.compiled_vectorized_required_benefit)},
-	     {"runner_cost_compiled_vectorized_net_benefit", Time(event.runner_cost.compiled_vectorized_net_benefit)},
-	     {"runner_cost_gpu_runner_benefit", Time(event.runner_cost.gpu_runner_benefit)},
-	     {"runner_cost_gpu_transfer_cost", Time(event.runner_cost.gpu_transfer_cost)},
-	     {"runner_cost_gpu_startup_cost", Time(event.runner_cost.gpu_startup_cost)},
-	     {"runner_cost_gpu_required_benefit", Time(event.runner_cost.gpu_required_benefit)},
-	     {"runner_cost_gpu_net_benefit", Time(event.runner_cost.gpu_net_benefit)},
+	      Time(event.runner_cost.compiled_vectorized.required_benefit)},
+	     {"runner_cost_compiled_vectorized_net_benefit", Time(event.runner_cost.compiled_vectorized.net_benefit)},
+	     {"runner_cost_gpu_runner_benefit", Time(event.runner_cost.gpu.runner_benefit)},
+	     {"runner_cost_gpu_transfer_cost", Time(event.runner_cost.gpu.transfer_cost)},
+	     {"runner_cost_gpu_startup_cost", Time(event.runner_cost.gpu.startup_cost)},
+	     {"runner_cost_gpu_required_benefit", Time(event.runner_cost.gpu.required_benefit)},
+	     {"runner_cost_gpu_net_benefit", Time(event.runner_cost.gpu.net_benefit)},
 	     {"runner_cost_accelerated_runner_benefit", Time(event.runner_cost.accelerated_runner_benefit)},
 	     {"runner_cost_startup_cost", Time(event.runner_cost.startup_cost)},
 	     {"runner_cost_required_benefit", Time(event.runner_cost.required_benefit)},
 	     {"runner_cost_net_benefit", Time(event.runner_cost.net_benefit)},
-	     {"runner_cost_selected_accelerated_runner", Value::BOOLEAN(event.runner_cost.selected_accelerated_runner)},
+	     {"runner_cost_selected_accelerated_runner", Value::BOOLEAN(event.runner_cost.SelectedAcceleratedRunner())},
 	     {"runner_cost_selected_compiled_vectorized_runner",
-	      Value::BOOLEAN(event.runner_cost.selected_compiled_vectorized_runner)},
-	     {"runner_cost_selected_gpu_runner", Value::BOOLEAN(event.runner_cost.selected_gpu_runner)},
+	      Value::BOOLEAN(event.runner_cost.SelectedCompiledVectorizedRunner())},
+	     {"runner_cost_selected_gpu_runner", Value::BOOLEAN(event.runner_cost.SelectedGpuRunner())},
 	     {"reason", Text(event.reason)},
 	     {"blocker", NullableText(event.blocker)},
 	     {"runtime_result", Text(event.runtime_result)},
@@ -515,7 +515,7 @@ static void RenderExecutionRegionCboPipelineToStream(std::ostream &ss, const Que
 			   << " runtime_proofs="
 			   << ExecutionRegionProfileToken(
 			          RenderExecutionRegionJitRuntimeProofRequirements(event.runner_cost.required_runtime_proofs), 64)
-			   << " selected=" << (event.runner_cost.selected_accelerated_runner ? "true" : "false");
+			   << " selected=" << (event.runner_cost.SelectedAcceleratedRunner() ? "true" : "false");
 		} else {
 			ss << " cost=none";
 		}
