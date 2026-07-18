@@ -167,6 +167,12 @@ ExecutionRunnerResult CompiledVectorizedRunner::ExecuteAdaptive(ExecutionRegionP
 			return ExecutionRunnerResult::Executed(exec_result);
 		}
 		case ExecutionRegionAdaptiveAbPhase::MEASURING_COMPILED: {
+			if (pipeline.VectorizedSourceCursorDirty()) {
+				// This executor ran vectorized without a claim budget: its cursor
+				// can hold a partially-scanned row group, so it must never take
+				// the compiled leg. Another executor with a clean cursor will.
+				return ExecutionRunnerResult::ContinueVectorized();
+			}
 			if (!ab.TryBeginPhase(ExecutionRegionAdaptiveAbPhase::MEASURING_COMPILED,
 			                      ExecutionRegionAdaptiveAbPhase::MEASURING_COMPILED_RUNNING)) {
 				continue;
@@ -210,6 +216,13 @@ ExecutionRunnerResult CompiledVectorizedRunner::ExecuteAdaptive(ExecutionRegionP
 		case ExecutionRegionAdaptiveAbPhase::FALLBACK_NATIVE:
 			return ExecutionRunnerResult::ContinueVectorized();
 		case ExecutionRegionAdaptiveAbPhase::COMMIT_COMPILED: {
+			if (pipeline.VectorizedSourceCursorDirty()) {
+				// A bystander that ran vectorized during measurement finishes the
+				// pipeline vectorized: switching into compiled would abandon the
+				// row group its cursor still holds. Runners may only change at
+				// claim points, and an unmanaged cursor proves none.
+				return ExecutionRunnerResult::ContinueVectorized();
+			}
 			PipelineExecuteResult result;
 			auto status = ExecuteCompiledRegion(pipeline, max_chunks, result);
 			switch (status) {

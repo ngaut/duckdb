@@ -133,6 +133,10 @@ bool ExecutionRegionPipelineAdapter::SourceContractFetched() const {
 	return executor.compiled_source_contract_fetched;
 }
 
+bool ExecutionRegionPipelineAdapter::VectorizedSourceCursorDirty() const {
+	return executor.vectorized_source_unmanaged_fetch;
+}
+
 ExecutionOperatorBindResult
 ExecutionRegionPipelineAdapter::BindOperator(idx_t operator_index, DataChunk &input,
                                              const ExecutionRegionOperatorInfo &operator_info,

@@ -728,6 +728,9 @@ SourceResultType PipelineExecutor::FetchFromSource(DataChunk *&result) {
 
 	OperatorSourceInput source_input = {*pipeline.source_state, *local_source_state, interrupt_state};
 	source_input.decline_new_row_group = vectorized_source_claim_budget == 0;
+	if (vectorized_source_claim_budget == DConstants::INVALID_INDEX) {
+		vectorized_source_unmanaged_fetch = true;
+	}
 	source_chunk_initial_idx = 0;
 	auto &fetch_chunk = *result;
 	fetch_chunk.Reset();

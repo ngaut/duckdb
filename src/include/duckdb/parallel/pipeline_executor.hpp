@@ -117,6 +117,11 @@ private:
 	idx_t vectorized_source_claim_budget = DConstants::INVALID_INDEX;
 	//! Set when the source declined a claim and the executor yielded at the boundary.
 	bool vectorized_source_declined_yield = false;
+	//! Set once this executor fetched from the vectorized source WITHOUT a claim
+	//! budget: its cursor can then hold a partially-scanned row group at any
+	//! yield, so it must never switch into compiled execution. Budget-managed
+	//! leg fetches end at a proven declined boundary and do not set this.
+	bool vectorized_source_unmanaged_fetch = false;
 	idx_t vectorized_source_leg_rows = 0;
 	//! Latched when a compiled kernel defers: deferral hands this pipeline to the
 	//! vectorized continuation permanently, because a deferred kernel's terminal

@@ -266,7 +266,12 @@ selections pay no measurement tax. The native leg runs first under a one-claim
 budget owned by its executor and resumed across scheduler yields; the compiled
 kernel then resolves the verdict at its own first row-group boundary — commit
 continues in-entry, fallback defers one-way. Other threads execute natively
-during a measurement. Verdicts are recorded as runtime events carrying per-leg
+during a measurement, and an executor that has fetched from the vectorized
+source without a claim budget is latched vectorized for the pipeline's
+remainder: its cursor can hold a partially-scanned row group at any yield, so
+switching it into compiled execution — including after a commit verdict —
+would abandon those rows. Only executors with clean cursors take the compiled
+leg or join a committed kernel. Verdicts are recorded as runtime events carrying per-leg
 times and rows, a recorded fallback verdict satisfies the kernel's declared
 runtime proof requirements, and a verdict is final for its kernel's lifetime.
 
