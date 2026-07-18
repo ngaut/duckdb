@@ -532,100 +532,6 @@ static bool TryPreaggregateInputVectorPrimitiveGroupsIntoPendingWithAccumulator(
 	return true;
 }
 
-template <class TARGET_TYPE, class SOURCE_TYPE, bool CAST_KEY, bool GROUP_HAS_SELECTION, class PAYLOAD_TYPE>
-static bool TryPreaggregateInputVectorPrimitiveGroupsIntoPendingWithInt64Payload(
-    ExecutionRegionRuntime &runtime, SljitRegionExecutionScratch &scratch, idx_t op_idx, SljitExecutableRegionOp &op,
-    DataChunk &input, UnifiedVectorFormat &group_format,
-    const vector<const ExecutionPrimitiveAggregateUpdateLane *> &payload_lanes,
-    ExecutionGroupedAggregateStateAddressBinding &grouped_state, SljitPendingPreaggregatedPrimitiveGroupBatch &pending,
-    bool finish, optional_ptr<bool> deferred_grouped_finish, const SljitPreaggregatedPrimitivePayloadSource &source) {
-	auto data = UnifiedVectorFormat::GetData<PAYLOAD_TYPE>(source.format);
-	auto selection = source.format.sel;
-	if (selection->IsSet()) {
-		SljitPendingSingleLaneInt64SumAccumulator<PAYLOAD_TYPE, true> accumulator {data, selection};
-		return TryPreaggregateInputVectorPrimitiveGroupsIntoPendingWithAccumulator<TARGET_TYPE, SOURCE_TYPE, CAST_KEY,
-		                                                                           GROUP_HAS_SELECTION>(
-		    runtime, scratch, op_idx, op, input, group_format, payload_lanes, grouped_state, pending, finish,
-		    deferred_grouped_finish, accumulator);
-	}
-	SljitPendingSingleLaneInt64SumAccumulator<PAYLOAD_TYPE, false> accumulator {data, selection};
-	return TryPreaggregateInputVectorPrimitiveGroupsIntoPendingWithAccumulator<TARGET_TYPE, SOURCE_TYPE, CAST_KEY,
-	                                                                           GROUP_HAS_SELECTION>(
-	    runtime, scratch, op_idx, op, input, group_format, payload_lanes, grouped_state, pending, finish,
-	    deferred_grouped_finish, accumulator);
-}
-
-template <class TARGET_TYPE, class SOURCE_TYPE, bool CAST_KEY, bool GROUP_HAS_SELECTION, class PAYLOAD_TYPE>
-static bool TryPreaggregateInputVectorPrimitiveGroupsIntoPendingWithHugeintPayload(
-    ExecutionRegionRuntime &runtime, SljitRegionExecutionScratch &scratch, idx_t op_idx, SljitExecutableRegionOp &op,
-    DataChunk &input, UnifiedVectorFormat &group_format,
-    const vector<const ExecutionPrimitiveAggregateUpdateLane *> &payload_lanes,
-    ExecutionGroupedAggregateStateAddressBinding &grouped_state, SljitPendingPreaggregatedPrimitiveGroupBatch &pending,
-    bool finish, optional_ptr<bool> deferred_grouped_finish, const SljitPreaggregatedPrimitivePayloadSource &source) {
-	auto data = UnifiedVectorFormat::GetData<PAYLOAD_TYPE>(source.format);
-	auto selection = source.format.sel;
-	if (selection->IsSet()) {
-		SljitPendingSingleLaneHugeintSumAccumulator<PAYLOAD_TYPE, true> accumulator {data, selection};
-		return TryPreaggregateInputVectorPrimitiveGroupsIntoPendingWithAccumulator<TARGET_TYPE, SOURCE_TYPE, CAST_KEY,
-		                                                                           GROUP_HAS_SELECTION>(
-		    runtime, scratch, op_idx, op, input, group_format, payload_lanes, grouped_state, pending, finish,
-		    deferred_grouped_finish, accumulator);
-	}
-	SljitPendingSingleLaneHugeintSumAccumulator<PAYLOAD_TYPE, false> accumulator {data, selection};
-	return TryPreaggregateInputVectorPrimitiveGroupsIntoPendingWithAccumulator<TARGET_TYPE, SOURCE_TYPE, CAST_KEY,
-	                                                                           GROUP_HAS_SELECTION>(
-	    runtime, scratch, op_idx, op, input, group_format, payload_lanes, grouped_state, pending, finish,
-	    deferred_grouped_finish, accumulator);
-}
-
-template <class TARGET_TYPE, class SOURCE_TYPE, bool CAST_KEY, bool GROUP_HAS_SELECTION>
-struct SljitPendingInt64PayloadDispatch {
-	ExecutionRegionRuntime &runtime;
-	SljitRegionExecutionScratch &scratch;
-	idx_t op_idx;
-	SljitExecutableRegionOp &op;
-	DataChunk &input;
-	UnifiedVectorFormat &group_format;
-	const vector<const ExecutionPrimitiveAggregateUpdateLane *> &payload_lanes;
-	ExecutionGroupedAggregateStateAddressBinding &grouped_state;
-	SljitPendingPreaggregatedPrimitiveGroupBatch &pending;
-	bool finish;
-	optional_ptr<bool> deferred_grouped_finish;
-	const SljitPreaggregatedPrimitivePayloadSource &source;
-
-	template <class PAYLOAD_TYPE>
-	bool Execute() {
-		return TryPreaggregateInputVectorPrimitiveGroupsIntoPendingWithInt64Payload<TARGET_TYPE, SOURCE_TYPE, CAST_KEY,
-		                                                                            GROUP_HAS_SELECTION, PAYLOAD_TYPE>(
-		    runtime, scratch, op_idx, op, input, group_format, payload_lanes, grouped_state, pending, finish,
-		    deferred_grouped_finish, source);
-	}
-};
-
-template <class TARGET_TYPE, class SOURCE_TYPE, bool CAST_KEY, bool GROUP_HAS_SELECTION>
-struct SljitPendingHugeintPayloadDispatch {
-	ExecutionRegionRuntime &runtime;
-	SljitRegionExecutionScratch &scratch;
-	idx_t op_idx;
-	SljitExecutableRegionOp &op;
-	DataChunk &input;
-	UnifiedVectorFormat &group_format;
-	const vector<const ExecutionPrimitiveAggregateUpdateLane *> &payload_lanes;
-	ExecutionGroupedAggregateStateAddressBinding &grouped_state;
-	SljitPendingPreaggregatedPrimitiveGroupBatch &pending;
-	bool finish;
-	optional_ptr<bool> deferred_grouped_finish;
-	const SljitPreaggregatedPrimitivePayloadSource &source;
-
-	template <class PAYLOAD_TYPE>
-	bool Execute() {
-		return TryPreaggregateInputVectorPrimitiveGroupsIntoPendingWithHugeintPayload<
-		    TARGET_TYPE, SOURCE_TYPE, CAST_KEY, GROUP_HAS_SELECTION, PAYLOAD_TYPE>(
-		    runtime, scratch, op_idx, op, input, group_format, payload_lanes, grouped_state, pending, finish,
-		    deferred_grouped_finish, source);
-	}
-};
-
 template <class TARGET_TYPE, class SOURCE_TYPE, bool CAST_KEY, bool GROUP_HAS_SELECTION>
 static bool TryPreaggregateInputVectorPrimitiveGroupsIntoPendingWithTypedSingleLanePayloadSelection(
     ExecutionRegionRuntime &runtime, SljitRegionExecutionScratch &scratch, idx_t op_idx, SljitExecutableRegionOp &op,
@@ -633,58 +539,15 @@ static bool TryPreaggregateInputVectorPrimitiveGroupsIntoPendingWithTypedSingleL
     const vector<const ExecutionPrimitiveAggregateUpdateLane *> &payload_lanes,
     ExecutionGroupedAggregateStateAddressBinding &grouped_state, SljitPendingPreaggregatedPrimitiveGroupBatch &pending,
     bool finish, optional_ptr<bool> deferred_grouped_finish) {
-	if (payload_lanes.size() != 1 || !payload_lanes[0]) {
-		return false;
-	}
-	auto &lane = *payload_lanes[0];
-	if (lane.kind == AggregatePrimitiveUpdateKind::COUNT_STAR ||
-	    (lane.kind == AggregatePrimitiveUpdateKind::COUNT && !payload_sources.SourceCanHaveNull(0))) {
-		SljitPendingSingleLaneCountAccumulator accumulator;
-		return TryPreaggregateInputVectorPrimitiveGroupsIntoPendingWithAccumulator<TARGET_TYPE, SOURCE_TYPE, CAST_KEY,
-		                                                                           GROUP_HAS_SELECTION>(
-		    runtime, scratch, op_idx, op, input, group_format, payload_lanes, grouped_state, pending, finish,
-		    deferred_grouped_finish, accumulator);
-	}
-	auto source = payload_sources.GetSource(0);
-	if (!source || payload_sources.SourceCanHaveNull(0)) {
-		return false;
-	}
-	switch (lane.kind) {
-	case AggregatePrimitiveUpdateKind::SUM_INT64: {
-		SljitPendingInt64PayloadDispatch<TARGET_TYPE, SOURCE_TYPE, CAST_KEY, GROUP_HAS_SELECTION> dispatch {
-		    runtime,
-		    scratch,
-		    op_idx,
-		    op,
-		    input,
-		    group_format,
-		    payload_lanes,
-		    grouped_state,
-		    pending,
-		    finish,
-		    deferred_grouped_finish,
-		    *source};
-		return SljitDispatchPreaggregatedInt64PayloadType(source->type, dispatch);
-	}
-	case AggregatePrimitiveUpdateKind::SUM_HUGEINT: {
-		SljitPendingHugeintPayloadDispatch<TARGET_TYPE, SOURCE_TYPE, CAST_KEY, GROUP_HAS_SELECTION> dispatch {
-		    runtime,
-		    scratch,
-		    op_idx,
-		    op,
-		    input,
-		    group_format,
-		    payload_lanes,
-		    grouped_state,
-		    pending,
-		    finish,
-		    deferred_grouped_finish,
-		    *source};
-		return SljitDispatchPreaggregatedHugeintPayloadType(source->type, dispatch);
-	}
-	default:
-		return false;
-	}
+	return SljitSelectPreaggregatedSingleLaneAccumulator<SljitPendingSingleLaneInt64SumAccumulator,
+	                                                     SljitPendingSingleLaneHugeintSumAccumulator,
+	                                                     SljitPendingSingleLaneCountAccumulator>(
+	    payload_sources, payload_lanes, [&](auto &accumulator) {
+		    return TryPreaggregateInputVectorPrimitiveGroupsIntoPendingWithAccumulator<TARGET_TYPE, SOURCE_TYPE,
+		                                                                               CAST_KEY, GROUP_HAS_SELECTION>(
+		        runtime, scratch, op_idx, op, input, group_format, payload_lanes, grouped_state, pending, finish,
+		        deferred_grouped_finish, accumulator);
+	    });
 }
 
 template <class TARGET_TYPE, class SOURCE_TYPE, bool CAST_KEY>

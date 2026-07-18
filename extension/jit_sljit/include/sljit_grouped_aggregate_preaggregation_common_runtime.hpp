@@ -395,6 +395,59 @@ static bool SljitDispatchPreaggregatedHugeintPayloadType(PhysicalType payload_ty
 	}
 }
 
+template <template <class, bool> class SUM_ACCUMULATOR, class SINK>
+struct SljitPreaggregatedSingleLanePayloadAccumulatorDispatch {
+	const SljitPreaggregatedPrimitivePayloadSource &source;
+	SINK &sink;
+
+	template <class PAYLOAD_TYPE>
+	bool Execute() {
+		auto data = UnifiedVectorFormat::GetData<PAYLOAD_TYPE>(source.format);
+		auto selection = source.format.sel;
+		if (selection->IsSet()) {
+			SUM_ACCUMULATOR<PAYLOAD_TYPE, true> accumulator {data, selection};
+			return sink(accumulator);
+		}
+		SUM_ACCUMULATOR<PAYLOAD_TYPE, false> accumulator {data, selection};
+		return sink(accumulator);
+	}
+};
+
+// One authority for typed single-lane accumulator selection, shared by the run and
+// pending preaggregation paths: (lane kind, payload physical type, payload selection)
+// choose the accumulator; the sink owns the continuation it feeds.
+template <template <class, bool> class INT64_SUM_ACCUMULATOR, template <class, bool> class HUGEINT_SUM_ACCUMULATOR,
+          class COUNT_ACCUMULATOR, class SINK>
+static bool SljitSelectPreaggregatedSingleLaneAccumulator(
+    SljitPreaggregatedPrimitivePayloadSources &payload_sources,
+    const vector<const ExecutionPrimitiveAggregateUpdateLane *> &payload_lanes, SINK sink) {
+	if (payload_lanes.size() != 1 || !payload_lanes[0]) {
+		return false;
+	}
+	auto &lane = *payload_lanes[0];
+	if (lane.kind == AggregatePrimitiveUpdateKind::COUNT_STAR ||
+	    (lane.kind == AggregatePrimitiveUpdateKind::COUNT && !payload_sources.SourceCanHaveNull(0))) {
+		COUNT_ACCUMULATOR accumulator;
+		return sink(accumulator);
+	}
+	auto source = payload_sources.GetSource(0);
+	if (!source || payload_sources.SourceCanHaveNull(0)) {
+		return false;
+	}
+	switch (lane.kind) {
+	case AggregatePrimitiveUpdateKind::SUM_INT64: {
+		SljitPreaggregatedSingleLanePayloadAccumulatorDispatch<INT64_SUM_ACCUMULATOR, SINK> dispatch {*source, sink};
+		return SljitDispatchPreaggregatedInt64PayloadType(source->type, dispatch);
+	}
+	case AggregatePrimitiveUpdateKind::SUM_HUGEINT: {
+		SljitPreaggregatedSingleLanePayloadAccumulatorDispatch<HUGEINT_SUM_ACCUMULATOR, SINK> dispatch {*source, sink};
+		return SljitDispatchPreaggregatedHugeintPayloadType(source->type, dispatch);
+	}
+	default:
+		return false;
+	}
+}
+
 template <class TARGET_TYPE, class LOAD_KEY>
 static bool SljitTryInputVectorHasConsecutiveRepeat(idx_t count, LOAD_KEY &&load_key, bool &has_consecutive_repeat) {
 	has_consecutive_repeat = false;
