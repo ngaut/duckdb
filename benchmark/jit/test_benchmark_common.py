@@ -10,7 +10,28 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from benchmark_common import BenchmarkScript, parse_shell_timers_us  # noqa: E402
+from benchmark_common import BenchmarkScript, jit_cbo_setting_sql, parse_shell_timers_us  # noqa: E402
+
+
+class TestJitCboSettingSql(unittest.TestCase):
+    def test_accepts_cbo_and_adaptive_settings(self) -> None:
+        statements = jit_cbo_setting_sql(
+            ["jit_cbo_startup_base_cost=0", "jit_adaptive_ab=true", "jit_adaptive_ab_margin_basis_points=500"]
+        )
+        self.assertEqual(
+            statements,
+            [
+                "SET jit_cbo_startup_base_cost=0;",
+                "SET jit_adaptive_ab=true;",
+                "SET jit_adaptive_ab_margin_basis_points=500;",
+            ],
+        )
+
+    def test_rejects_non_runner_policy_settings(self) -> None:
+        with self.assertRaises(ValueError):
+            jit_cbo_setting_sql(["jit_policy=off"])
+        with self.assertRaises(ValueError):
+            jit_cbo_setting_sql(["jit_adaptive_ab"])
 
 
 class TestTimedShell(unittest.TestCase):

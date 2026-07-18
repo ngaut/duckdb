@@ -135,12 +135,19 @@ def duckdb_shell_quote(value) -> str:
     return '"' + str(value).replace("\\", "\\\\").replace('"', '\\"') + '"'
 
 
+#! The runner-policy settings a benchmark invocation may override: the static CBO
+#! knobs and the measured-runner A/B controls, which are CBO configuration too.
+JIT_CBO_SETTING_PREFIXES = ("jit_cbo_", "jit_adaptive_ab")
+
+
 def jit_cbo_setting_sql(settings: list[str]) -> list[str]:
     statements = []
     for setting in settings:
         name, separator, value = setting.partition("=")
-        if not separator or not name.startswith("jit_cbo_") or not value:
-            raise ValueError(f"invalid --jit-cbo-setting {setting!r}, expected jit_cbo_name=value")
+        if not separator or not name.startswith(JIT_CBO_SETTING_PREFIXES) or not value:
+            raise ValueError(
+                f"invalid --jit-cbo-setting {setting!r}, expected jit_cbo_name=value or jit_adaptive_ab...=value"
+            )
         statements.append(f"SET {name}={value};")
     return statements
 
