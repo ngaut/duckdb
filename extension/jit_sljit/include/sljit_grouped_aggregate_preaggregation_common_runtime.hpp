@@ -448,31 +448,6 @@ static bool SljitSelectPreaggregatedSingleLaneAccumulator(
 	}
 }
 
-template <class TARGET_TYPE, class LOAD_KEY>
-static bool SljitTryInputVectorHasConsecutiveRepeat(idx_t count, LOAD_KEY &&load_key, bool &has_consecutive_repeat) {
-	has_consecutive_repeat = false;
-	if (count < 2) {
-		return true;
-	}
-	TARGET_TYPE previous_key;
-	if (!load_key(0, previous_key)) {
-		return false;
-	}
-	const auto sample_count = MinValue<idx_t>(count, 64);
-	for (idx_t row_idx = 1; row_idx < sample_count; row_idx++) {
-		TARGET_TYPE key;
-		if (!load_key(row_idx, key)) {
-			return false;
-		}
-		if (key == previous_key) {
-			has_consecutive_repeat = true;
-			return true;
-		}
-		previous_key = key;
-	}
-	return true;
-}
-
 template <class LOAD_KEY>
 static bool SljitInputVectorHasConsecutiveRepeat(idx_t count, LOAD_KEY &&load_key) {
 	if (count < 2) {
