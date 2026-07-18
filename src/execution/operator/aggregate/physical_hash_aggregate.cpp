@@ -1298,7 +1298,6 @@ bool PhysicalHashAggregate::BindExecutionSink(ExecutionContext &context, DataChu
 	binding.aggregate_update.grouped_state.ready = true;
 	binding.aggregate_update.grouped_state.state = make_shared_ptr<HashAggregateStateAddressState>(
 	    context, *this, global_state, local_state, sink_input.interrupt_state);
-	binding.aggregate_update.grouped_state.aggregate_state_offsets = sink_info.aggregate_contract.grouped_state_offsets;
 	binding.aggregate_update.grouped_state.blocker.clear();
 	binding.aggregate_update.primitive = BuildHashAggregatePrimitiveUpdateBinding(*this, sink_info);
 	binding.aggregate_update.blocker.clear();

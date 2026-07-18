@@ -388,7 +388,6 @@ struct ExecutionPrimitiveAggregateUpdateBinding {
 struct ExecutionGroupedAggregateStateAddressBinding {
 	bool ready = false;
 	shared_ptr<ExecutionGroupedAggregateStateAddressState> state;
-	vector<idx_t> aggregate_state_offsets;
 	ExecutionPerfectAggregateStateAddressLayout perfect_hash_layout;
 	string blocker;
 };

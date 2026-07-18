@@ -360,7 +360,6 @@ bool PhysicalPerfectHashAggregate::BindExecutionSink(ExecutionContext &context, 
 	binding.aggregate_update.grouped_state.ready = true;
 	binding.aggregate_update.grouped_state.state =
 	    make_shared_ptr<PerfectHashAggregateStateAddressState>(context, *this, local_state);
-	binding.aggregate_update.grouped_state.aggregate_state_offsets = sink_info.aggregate_contract.grouped_state_offsets;
 	auto state_layout = local_state.ht->GetStateLayout();
 	binding.aggregate_update.grouped_state.perfect_hash_layout.ready = state_layout.data && state_layout.group_is_set;
 	binding.aggregate_update.grouped_state.perfect_hash_layout.data = state_layout.data;
