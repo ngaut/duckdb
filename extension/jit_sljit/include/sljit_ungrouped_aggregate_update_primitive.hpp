@@ -84,16 +84,6 @@ SljitBindUngroupedAggregateUpdatePrimitive(const vector<SljitExecutableRegionOp>
 	return primitive;
 }
 
-static SljitUngroupedAggregateUpdatePrimitive
-SljitBindFilteredUngroupedAggregateUpdatePrimitive(const vector<SljitExecutableRegionOp> &ops, idx_t filter_idx,
-                                                   idx_t aggregate_idx) {
-	SljitUngroupedAggregateUpdatePrimitive primitive;
-	if (!SljitTryBindFilteredUngroupedAggregateUpdatePrimitive(ops, filter_idx, aggregate_idx, primitive)) {
-		throw InternalException("SLJIT filtered ungrouped aggregate update primitive cannot bind requested operators");
-	}
-	return primitive;
-}
-
 static bool SljitCanBindUngroupedAggregateUpdatePrimitive(const vector<SljitExecutableRegionOp> &ops,
                                                           const SljitUngroupedAggregateUpdatePrimitive &primitive) {
 	switch (primitive.strategy) {

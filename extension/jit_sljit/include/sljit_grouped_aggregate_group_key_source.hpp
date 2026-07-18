@@ -233,21 +233,6 @@ static void SljitAttachHashJoinBuildConditionType(const ExecutionHashJoinProbeBi
 	group_source.hash_join_build_key_physical_type = binding.rhs_condition_types[condition_idx].InternalType();
 }
 
-static bool SljitInputVectorGroupSourceUsesProjection(const ExecutionRowPointerGroupKeySource &source) {
-	if (source.HasOutputTransform()) {
-		return true;
-	}
-	switch (source.cast_kind) {
-	case ExecutionRowPointerGroupKeyCastKind::INTEGRAL_COMPRESS:
-	case ExecutionRowPointerGroupKeyCastKind::DATE_YEAR_COMPRESS:
-	case ExecutionRowPointerGroupKeyCastKind::STRING_COMPRESS:
-	case ExecutionRowPointerGroupKeyCastKind::STRING_SUBSTRING:
-		return true;
-	default:
-		return false;
-	}
-}
-
 static PhysicalType SljitGroupKeyEquivalencePhysicalType(const ExecutionRowPointerGroupKeySource &source) {
 	return source.HasOutputTransform() ? source.source_physical_type : source.target_physical_type;
 }

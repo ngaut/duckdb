@@ -117,15 +117,6 @@ SljitChooseGroupedAggregateUpdateStrategy(const SljitExecutableRegionOp &op) {
 	return SljitGroupedAggregateUpdateStrategyKind::INVALID;
 }
 
-static bool SljitGroupedAggregateUpdateHasDedicatedBackend(const vector<SljitExecutableRegionOp> &ops,
-                                                           idx_t aggregate_idx) {
-	if (!SljitCanBindGroupedAggregateUpdatePrimitive(ops, aggregate_idx)) {
-		return false;
-	}
-	auto &op = ops[aggregate_idx];
-	return SljitChooseGroupedAggregateUpdateStrategy(op) != SljitGroupedAggregateUpdateStrategyKind::INVALID;
-}
-
 static bool SljitTryBindGroupedAggregateUpdatePrimitive(const vector<SljitExecutableRegionOp> &ops, idx_t aggregate_idx,
                                                         SljitGroupedAggregateUpdatePrimitive &primitive) {
 	if (!SljitCanBindGroupedAggregateUpdatePrimitive(ops, aggregate_idx)) {

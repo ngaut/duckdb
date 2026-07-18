@@ -131,21 +131,4 @@ static inline void EmitRetryHashJoinProbeSlot(struct sljit_compiler *compiler, s
 	EmitRepeatHashJoinProbeSlot(compiler, probe_loop, salt_mismatch, bitmask_reg_available);
 }
 
-static inline void EmitSkipHashJoinProbeRow(struct sljit_compiler *compiler, struct sljit_label *row_loop,
-                                            struct sljit_jump *empty_slot,
-                                            const vector<struct sljit_jump *> &source_is_null,
-                                            struct sljit_jump *advance_row = nullptr,
-                                            struct sljit_jump *advance_after_predicate = nullptr) {
-	auto skip_row = sljit_emit_label(compiler);
-	sljit_set_label(empty_slot, skip_row);
-	SetSljitJumpLabels(source_is_null, skip_row);
-	if (advance_row) {
-		sljit_set_label(advance_row, skip_row);
-	}
-	if (advance_after_predicate) {
-		sljit_set_label(advance_after_predicate, skip_row);
-	}
-	EmitRepeatHashJoinProbeRow(compiler, row_loop);
-}
-
 } // namespace duckdb

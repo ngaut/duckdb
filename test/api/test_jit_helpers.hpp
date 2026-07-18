@@ -112,15 +112,6 @@ static string EventJitRuntimeDelegationCounts(const ExecutionRegionEvent &event)
 	return RenderExecutionRegionCounterBreakdown(event.jit_runtime.runtime_delegation_counts);
 }
 
-static bool StageNameHasPrefix(const vector<ExecutionRegionRecordedStageRuntime> &stages, const string &prefix) {
-	for (auto &stage : stages) {
-		if (StringUtil::StartsWith(stage.stage.name, prefix)) {
-			return true;
-		}
-	}
-	return false;
-}
-
 static bool StageNameContains(const vector<ExecutionRegionRecordedStageRuntime> &stages, const string &needle) {
 	for (auto &stage : stages) {
 		if (StringUtil::Contains(stage.stage.name, needle)) {
