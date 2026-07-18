@@ -901,6 +901,8 @@ void ExecutionRegionPlanner::Compile(ClientContext &context, ExecutionRegionBack
 		    &compiled_region.physical_runner.runner_cost);
 		if (status == ExecutionRegionCompileStatus::COMPILED && result.kernel) {
 			result.kernel->SetTraceInfo(trace_id, execution_mode, reason, compile_time_us, code_size);
+			result.kernel->SetAdaptiveMeasurementCandidate(
+			    ExecutionRegionAdaptiveMeasurementWithinBand(context, compiled_region.physical_runner.runner_cost));
 			result.kernel->SetExecutionABI(candidate.contract.abi);
 			result.kernel->SetTraceSelectedSourceExecution(compiled_region.lowering_plan.SelectedSourceExecution());
 			result.kernel->SetTraceUsesScanFilters(compiled_region.lowering_plan.UsesScanFilters());

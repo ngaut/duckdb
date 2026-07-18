@@ -62,5 +62,35 @@ SELECT count(*) > 0 FROM duckdb_jit_events() WHERE reason LIKE 'adaptive_ab verd
 ----
 true
 
+# A tight band excludes this confidently-winning pipeline from measurement:
+# results stay exact and no new verdict is recorded.
+statement ok
+SET jit_adaptive_ab_margin_basis_points=1000;
+
+statement ok
+SET jit_adaptive_ab_band_basis_points=1;
+
+statement ok
+CREATE TABLE verdicts_before AS
+SELECT count(*) n FROM duckdb_jit_events() WHERE reason LIKE 'adaptive_ab verdict%';
+
+query I
+SELECT count(*) FROM (
+  (SELECT g, sum(v) s, count(*) c FROM facts GROUP BY g EXCEPT SELECT * FROM ref_grouped)
+  UNION ALL
+  (SELECT * FROM ref_grouped EXCEPT SELECT g, sum(v) s, count(*) c FROM facts GROUP BY g)
+)
+----
+0
+
+query I
+SELECT count(*) - (SELECT n FROM verdicts_before)
+FROM duckdb_jit_events() WHERE reason LIKE 'adaptive_ab verdict%'
+----
+0
+
+statement ok
+SET jit_adaptive_ab_band_basis_points=0;
+
 statement ok
 SET jit_adaptive_ab=false;

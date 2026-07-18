@@ -161,6 +161,16 @@ bool ExecutionRegionGraphMayHaveCostedAcceleration(const ExecutionRegionGraph &g
 	return false;
 }
 
+bool ExecutionRegionAdaptiveMeasurementWithinBand(ClientContext &context, const PhysicalRunnerCostProfile &cost) {
+	const auto band = ExecutionRegionSettings::AdaptiveAbBandBasisPoints(context);
+	if (band == 0) {
+		return true;
+	}
+	// The measurement pays for itself only when the static margin is thin: net
+	// benefit within band basis points of the required benefit.
+	return cost.net_benefit * 10000 <= cost.required_benefit * NumericCast<int64_t>(band);
+}
+
 static void SelectExecutionRegionAcceleratedRunner(ExecutionRegionPhysicalRunnerSelection &selection) {
 	selection.selected_runner = selection.runner_cost.selected_runner;
 	selection.use_compiled_runner = selection.selected_runner != ExecutionRunnerKind::VECTORIZED;

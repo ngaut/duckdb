@@ -23,6 +23,10 @@ idx_t ExecutionRegionSettings::AdaptiveAbMarginBasisPoints(ClientContext &contex
 	return Settings::Get<JitAdaptiveAbMarginBasisPointsSetting>(context);
 }
 
+idx_t ExecutionRegionSettings::AdaptiveAbBandBasisPoints(ClientContext &context) {
+	return Settings::Get<JitAdaptiveAbBandBasisPointsSetting>(context);
+}
+
 idx_t ExecutionRegionSettings::DebugForceDeferAfterChunks(ClientContext &context) {
 	return Settings::Get<JitDebugForceDeferAfterChunksSetting>(context);
 }

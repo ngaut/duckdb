@@ -223,8 +223,8 @@ ExecutionRunnerResult CompiledVectorizedRunner::Execute(ExecutionRegionPipelineA
 	{
 		auto &client = pipeline.GetClientContext();
 		auto kernel = pipeline.GetExecutableFullPipelineKernel();
-		if (kernel && kernel->CanExecuteFullPipeline() && !pipeline.IsCompiledExecutionSuppressed() &&
-		    ExecutionRegionSettings::AdaptiveAb(client)) {
+		if (kernel && kernel->CanExecuteFullPipeline() && kernel->AdaptiveMeasurementCandidate() &&
+		    !pipeline.IsCompiledExecutionSuppressed() && ExecutionRegionSettings::AdaptiveAb(client)) {
 			return ExecuteAdaptive(pipeline, *kernel, max_chunks);
 		}
 	}

@@ -73,6 +73,15 @@ public:
 		return adaptive_ab;
 	}
 
+	//! Whether the planner judged this pipeline's static selection thin enough to be
+	//! worth a measured verdict; confident selections skip the measurement tax.
+	void SetAdaptiveMeasurementCandidate(bool candidate) {
+		adaptive_measurement_candidate = candidate;
+	}
+	bool AdaptiveMeasurementCandidate() const {
+		return adaptive_measurement_candidate;
+	}
+
 	virtual const string &BackendName() const = 0;
 	virtual idx_t CodeSize() const;
 	virtual bool HasExecutableBody() const;
@@ -116,6 +125,7 @@ private:
 	idx_t trace_candidate_estimated_cardinality = 0;
 	bool trace_candidate_uses_scan_filters = false;
 	ExecutionRegionAdaptiveAbState adaptive_ab;
+	bool adaptive_measurement_candidate = true;
 };
 
 } // namespace duckdb

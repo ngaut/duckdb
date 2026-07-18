@@ -1416,6 +1416,18 @@ struct JitAdaptiveAbMarginBasisPointsSetting {
 	static constexpr idx_t SettingIndex = NEXT_SETTING_INDEX();
 };
 
+struct JitAdaptiveAbBandBasisPointsSetting {
+	using RETURN_TYPE = idx_t;
+	static constexpr const char *Name = "jit_adaptive_ab_band_basis_points";
+	static constexpr const char *Description =
+	    "Measure the runner A/B only when the selection is thin: static net benefit within this many basis points of "
+	    "the required benefit; zero measures every compiled-selected pipeline";
+	static constexpr const char *InputType = "UBIGINT";
+	static constexpr const char *DefaultValue = "0";
+	static constexpr SettingScopeTarget Scope = SettingScopeTarget::LOCAL_DEFAULT;
+	static constexpr idx_t SettingIndex = NEXT_SETTING_INDEX();
+};
+
 struct JitBackendSetting {
 	using RETURN_TYPE = string;
 	static constexpr const char *Name = "jit_backend";
