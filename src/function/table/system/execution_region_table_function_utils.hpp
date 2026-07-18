@@ -73,34 +73,23 @@ static constexpr ExecutionRegionTraceColumn EXECUTION_REGION_RUNNER_COST_PROFILE
 static constexpr idx_t EXECUTION_REGION_RUNNER_COST_PROFILE_COLUMN_COUNT =
     sizeof(EXECUTION_REGION_RUNNER_COST_PROFILE_COLUMNS) / sizeof(ExecutionRegionTraceColumn);
 
-static constexpr ExecutionRegionTraceColumn EXECUTION_REGION_RUNNER_COST_WORK_COLUMNS[] = {
-    {"runner_cost_generated_expression_work", LogicalTypeId::BIGINT},
-    {"runner_cost_generated_stage_work", LogicalTypeId::BIGINT},
-    {"runner_cost_generated_backend_stage_work", LogicalTypeId::BIGINT},
-    {"runner_cost_native_operator_work", LogicalTypeId::BIGINT},
-    {"runner_cost_materialization_elision_work", LogicalTypeId::BIGINT},
-    {"runner_cost_selected_hash_join_filter_materialization_penalty", LogicalTypeId::BIGINT},
-    {"runner_cost_source_contract_scan_penalty", LogicalTypeId::BIGINT},
-    {"runner_cost_full_pipeline_work", LogicalTypeId::BIGINT},
-    {"runner_cost_stateful_protocol_penalty", LogicalTypeId::BIGINT},
-    {"runner_cost_saved_work_per_batch", LogicalTypeId::BIGINT},
-    {"runner_cost_accelerated_runner_benefit", LogicalTypeId::BIGINT},
-    {"runner_cost_startup_cost", LogicalTypeId::BIGINT},
-    {"runner_cost_required_benefit", LogicalTypeId::BIGINT},
-    {"runner_cost_net_benefit", LogicalTypeId::BIGINT},
-    {"runner_cost_compiled_vectorized_runner_benefit", LogicalTypeId::BIGINT},
-    {"runner_cost_compiled_vectorized_startup_cost", LogicalTypeId::BIGINT},
-    {"runner_cost_compiled_vectorized_required_benefit", LogicalTypeId::BIGINT},
-    {"runner_cost_compiled_vectorized_net_benefit", LogicalTypeId::BIGINT},
-    {"runner_cost_gpu_runner_benefit", LogicalTypeId::BIGINT},
-    {"runner_cost_gpu_transfer_cost", LogicalTypeId::BIGINT},
-    {"runner_cost_gpu_startup_cost", LogicalTypeId::BIGINT},
-    {"runner_cost_gpu_required_benefit", LogicalTypeId::BIGINT},
-    {"runner_cost_gpu_net_benefit", LogicalTypeId::BIGINT},
-};
+//! The work columns derive from ForEachPhysicalRunnerCostWorkField; the count stays a
+//! constant because the per-table column enums static_assert against it. Registration
+//! throws if the walk and the constant ever disagree, so schema drift fails loudly.
+static constexpr idx_t EXECUTION_REGION_RUNNER_COST_WORK_COLUMN_COUNT = 24;
 
-static constexpr idx_t EXECUTION_REGION_RUNNER_COST_WORK_COLUMN_COUNT =
-    sizeof(EXECUTION_REGION_RUNNER_COST_WORK_COLUMNS) / sizeof(ExecutionRegionTraceColumn);
+static inline void AddExecutionRegionRunnerCostWorkColumns(vector<LogicalType> &return_types, vector<string> &names) {
+	PhysicalRunnerCostProfile profile;
+	idx_t column_count = 0;
+	ForEachPhysicalRunnerCostWorkField(profile, profile, [&](const char *name, int64_t &, int64_t &) {
+		names.emplace_back(string("runner_cost_") + name);
+		return_types.emplace_back(LogicalType::BIGINT);
+		column_count++;
+	});
+	if (column_count != EXECUTION_REGION_RUNNER_COST_WORK_COLUMN_COUNT) {
+		throw InternalException("Runner cost work schema drifted from its declared column count");
+	}
+}
 
 static constexpr ExecutionRegionTraceColumn EXECUTION_REGION_STAGE_TIMING_COLUMNS[] = {
     {"ir_lowering_time_us", LogicalTypeId::BIGINT},      {"backend_analysis_time_us", LogicalTypeId::BIGINT},
@@ -306,77 +295,15 @@ static inline void AppendExecutionRegionRunnerCostProfileColumn(Vector &output, 
 
 template <class RUNNER_COST>
 static inline void AppendExecutionRegionRunnerCostWorkColumn(Vector &output, idx_t column_id, const RUNNER_COST &cost) {
-	switch (column_id) {
-	case 0:
-		output.Append(Value::BIGINT(cost.generated_expression_work));
-		return;
-	case 1:
-		output.Append(Value::BIGINT(cost.generated_stage_work));
-		return;
-	case 2:
-		output.Append(Value::BIGINT(cost.generated_backend_stage_work));
-		return;
-	case 3:
-		output.Append(Value::BIGINT(cost.native_operator_work));
-		return;
-	case 4:
-		output.Append(Value::BIGINT(cost.materialization_elision_work));
-		return;
-	case 5:
-		output.Append(Value::BIGINT(cost.selected_hash_join_filter_materialization_penalty));
-		return;
-	case 6:
-		output.Append(Value::BIGINT(cost.source_contract_scan_penalty));
-		return;
-	case 7:
-		output.Append(Value::BIGINT(cost.full_pipeline_work));
-		return;
-	case 8:
-		output.Append(Value::BIGINT(cost.stateful_protocol_penalty));
-		return;
-	case 9:
-		output.Append(Value::BIGINT(cost.saved_work_per_batch));
-		return;
-	case 10:
-		output.Append(Value::BIGINT(cost.accelerated_runner_benefit));
-		return;
-	case 11:
-		output.Append(Value::BIGINT(cost.startup_cost));
-		return;
-	case 12:
-		output.Append(Value::BIGINT(cost.required_benefit));
-		return;
-	case 13:
-		output.Append(Value::BIGINT(cost.net_benefit));
-		return;
-	case 14:
-		output.Append(Value::BIGINT(cost.compiled_vectorized.runner_benefit));
-		return;
-	case 15:
-		output.Append(Value::BIGINT(cost.compiled_vectorized.startup_cost));
-		return;
-	case 16:
-		output.Append(Value::BIGINT(cost.compiled_vectorized.required_benefit));
-		return;
-	case 17:
-		output.Append(Value::BIGINT(cost.compiled_vectorized.net_benefit));
-		return;
-	case 18:
-		output.Append(Value::BIGINT(cost.gpu.runner_benefit));
-		return;
-	case 19:
-		output.Append(Value::BIGINT(cost.gpu.transfer_cost));
-		return;
-	case 20:
-		output.Append(Value::BIGINT(cost.gpu.startup_cost));
-		return;
-	case 21:
-		output.Append(Value::BIGINT(cost.gpu.required_benefit));
-		return;
-	case 22:
-		output.Append(Value::BIGINT(cost.gpu.net_benefit));
-		return;
-	default:
+	idx_t field_idx = 0;
+	bool appended = false;
+	ForEachPhysicalRunnerCostWorkField(cost, cost, [&](const char *, const int64_t &value, const int64_t &) {
+		if (field_idx++ == column_id) {
+			output.Append(Value::BIGINT(value));
+			appended = true;
+		}
+	});
+	if (!appended) {
 		throw InternalException("Unsupported execution region runner cost work column index");
 	}
 }

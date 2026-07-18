@@ -105,6 +105,7 @@ enum JitEventColumn : idx_t {
 	JIT_EVENT_RUNNER_COST_REQUIRED_BENEFIT,
 	JIT_EVENT_RUNNER_COST_NET_BENEFIT,
 	JIT_EVENT_RUNNER_COST_COMPILED_VECTORIZED_RUNNER_BENEFIT,
+	JIT_EVENT_RUNNER_COST_COMPILED_VECTORIZED_TRANSFER_COST,
 	JIT_EVENT_RUNNER_COST_COMPILED_VECTORIZED_STARTUP_COST,
 	JIT_EVENT_RUNNER_COST_COMPILED_VECTORIZED_REQUIRED_BENEFIT,
 	JIT_EVENT_RUNNER_COST_COMPILED_VECTORIZED_NET_BENEFIT,
@@ -140,8 +141,7 @@ static void AddJitEventRunnerCostColumns(vector<LogicalType> &return_types, vect
 	                                      LogicalType::VARCHAR);
 	AddExecutionRegionTableFunctionColumn(return_types, names, "runner_cost_native_protocol_class",
 	                                      LogicalType::VARCHAR);
-	AddExecutionRegionTableFunctionColumns(return_types, names, EXECUTION_REGION_RUNNER_COST_WORK_COLUMNS,
-	                                       EXECUTION_REGION_RUNNER_COST_WORK_COLUMN_COUNT);
+	AddExecutionRegionRunnerCostWorkColumns(return_types, names);
 	AddExecutionRegionTableFunctionColumn(return_types, names, "runner_cost_selected_accelerated_runner",
 	                                      LogicalType::BOOLEAN);
 	AddExecutionRegionTableFunctionColumn(return_types, names, "runner_cost_selected_compiled_vectorized_runner",

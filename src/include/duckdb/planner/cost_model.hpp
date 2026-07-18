@@ -131,7 +131,6 @@ struct PhysicalRunnerCostProfile {
 	int64_t native_aggregate_stage_count = 0;
 	int64_t native_grouped_aggregate_stage_count = 0;
 	int64_t native_sort_stage_count = 0;
-	int64_t source_filter_count = 0;
 	bool full_pipeline = false;
 	PhysicalRunnerGeneratedWorkClass generated_work_class = PhysicalRunnerGeneratedWorkClass::NONE;
 	PhysicalRunnerNativeProtocolClass native_protocol_class = PhysicalRunnerNativeProtocolClass::NONE;
@@ -172,6 +171,72 @@ struct PhysicalRunnerCostProfile {
 		return axis_idx == 0 ? compiled_vectorized : gpu;
 	}
 };
+
+//! The single authority over the summable runner-cost schema. Every surface that
+//! enumerates these fields — totals accumulation, system-table columns and appenders,
+//! profiler emission — derives from these two walks, so a new field is one line here.
+//! Visit order is the external column order of the corresponding system-table group.
+//! The paired form exists so accumulation can walk a profile and its totals in
+//! lockstep; single-object consumers pass the same object twice. Fields with
+//! non-summable types (bools, strings, the proof mask, selection state) are handled
+//! by each surface explicitly and exempted in the architecture verifier.
+template <class A, class B, class FN>
+void ForEachPhysicalRunnerCostShapeField(A &a, B &b, FN &&fn) {
+	fn("rows", a.rows, b.rows);
+	fn("batches", a.batches, b.batches);
+	fn("costed_batches", a.costed_batches, b.costed_batches);
+	fn("expression_cost", a.expression_cost, b.expression_cost);
+	fn("source_contract_input_rows", a.source_contract_input_rows, b.source_contract_input_rows);
+	fn("source_contract_input_batches", a.source_contract_input_batches, b.source_contract_input_batches);
+	fn("generated_stage_count", a.generated_stage_count, b.generated_stage_count);
+	fn("generated_backend_stage_count", a.generated_backend_stage_count, b.generated_backend_stage_count);
+	fn("generated_grouped_aggregate_stage_count", a.generated_grouped_aggregate_stage_count,
+	   b.generated_grouped_aggregate_stage_count);
+	fn("native_grouped_state_address_lookup_count", a.native_grouped_state_address_lookup_count,
+	   b.native_grouped_state_address_lookup_count);
+	fn("materialization_elision_count", a.materialization_elision_count, b.materialization_elision_count);
+	fn("selected_hash_join_filter_materialization_count", a.selected_hash_join_filter_materialization_count,
+	   b.selected_hash_join_filter_materialization_count);
+	fn("native_join_stage_count", a.native_join_stage_count, b.native_join_stage_count);
+	fn("native_hash_join_build_sink_count", a.native_hash_join_build_sink_count, b.native_hash_join_build_sink_count);
+	fn("native_aggregate_stage_count", a.native_aggregate_stage_count, b.native_aggregate_stage_count);
+	fn("native_grouped_aggregate_stage_count", a.native_grouped_aggregate_stage_count,
+	   b.native_grouped_aggregate_stage_count);
+	fn("native_sort_stage_count", a.native_sort_stage_count, b.native_sort_stage_count);
+	fn("grouped_aggregate_estimated_cardinality", a.grouped_aggregate_estimated_cardinality,
+	   b.grouped_aggregate_estimated_cardinality);
+}
+
+template <class A, class B, class FN>
+void ForEachPhysicalRunnerCostWorkField(A &a, B &b, FN &&fn) {
+	fn("generated_expression_work", a.generated_expression_work, b.generated_expression_work);
+	fn("generated_stage_work", a.generated_stage_work, b.generated_stage_work);
+	fn("generated_backend_stage_work", a.generated_backend_stage_work, b.generated_backend_stage_work);
+	fn("native_operator_work", a.native_operator_work, b.native_operator_work);
+	fn("materialization_elision_work", a.materialization_elision_work, b.materialization_elision_work);
+	fn("selected_hash_join_filter_materialization_penalty", a.selected_hash_join_filter_materialization_penalty,
+	   b.selected_hash_join_filter_materialization_penalty);
+	fn("source_contract_scan_penalty", a.source_contract_scan_penalty, b.source_contract_scan_penalty);
+	fn("full_pipeline_work", a.full_pipeline_work, b.full_pipeline_work);
+	fn("stateful_protocol_penalty", a.stateful_protocol_penalty, b.stateful_protocol_penalty);
+	fn("saved_work_per_batch", a.saved_work_per_batch, b.saved_work_per_batch);
+	fn("accelerated_runner_benefit", a.accelerated_runner_benefit, b.accelerated_runner_benefit);
+	fn("startup_cost", a.startup_cost, b.startup_cost);
+	fn("required_benefit", a.required_benefit, b.required_benefit);
+	fn("net_benefit", a.net_benefit, b.net_benefit);
+	fn("compiled_vectorized_runner_benefit", a.compiled_vectorized.runner_benefit,
+	   b.compiled_vectorized.runner_benefit);
+	fn("compiled_vectorized_transfer_cost", a.compiled_vectorized.transfer_cost, b.compiled_vectorized.transfer_cost);
+	fn("compiled_vectorized_startup_cost", a.compiled_vectorized.startup_cost, b.compiled_vectorized.startup_cost);
+	fn("compiled_vectorized_required_benefit", a.compiled_vectorized.required_benefit,
+	   b.compiled_vectorized.required_benefit);
+	fn("compiled_vectorized_net_benefit", a.compiled_vectorized.net_benefit, b.compiled_vectorized.net_benefit);
+	fn("gpu_runner_benefit", a.gpu.runner_benefit, b.gpu.runner_benefit);
+	fn("gpu_transfer_cost", a.gpu.transfer_cost, b.gpu.transfer_cost);
+	fn("gpu_startup_cost", a.gpu.startup_cost, b.gpu.startup_cost);
+	fn("gpu_required_benefit", a.gpu.required_benefit, b.gpu.required_benefit);
+	fn("gpu_net_benefit", a.gpu.net_benefit, b.gpu.net_benefit);
+}
 
 class DuckDBCostModel {
 public:

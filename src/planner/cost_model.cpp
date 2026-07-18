@@ -1030,7 +1030,6 @@ static void PhysicalRunnerInitializeProfile(const PhysicalRunnerCostInput &input
 	profile.native_aggregate_stage_count = SaturatingCostCast(input.native_aggregate_stage_count);
 	profile.native_grouped_aggregate_stage_count = SaturatingCostCast(input.native_grouped_aggregate_stage_count);
 	profile.native_sort_stage_count = SaturatingCostCast(input.native_sort_stage_count);
-	profile.source_filter_count = SaturatingCostCast(input.source_filter_count);
 	profile.full_pipeline = input.full_pipeline;
 	profile.generated_work_class = input.generated_work_class;
 	profile.native_protocol_class = input.native_protocol_class;

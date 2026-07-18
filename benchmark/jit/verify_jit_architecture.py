@@ -1484,6 +1484,40 @@ def verify_runtime_proofs_are_typed() -> None:
     )
 
 
+def verify_runner_cost_schema_single_authority() -> None:
+    """Every summable runner-cost field must be visited by the schema walks.
+
+    The walks in cost_model.hpp are the single authority the totals accumulation,
+    system-table work columns, and profiler emission derive from; an int64 profile
+    field missing from both walks would silently vanish from every surface.
+    """
+    cost_header = read("src/include/duckdb/planner/cost_model.hpp")
+    profile_body = cost_header.split("struct PhysicalRunnerCostProfile", 1)[1].split("};", 1)[0]
+    fields = re.findall(r"int64_t\s+(\w+)\s*=", profile_body)
+    walk_bodies = "".join(
+        cost_header.split(marker, 1)[1].split("\n}\n", 1)[0]
+        for marker in ("void ForEachPhysicalRunnerCostShapeField", "void ForEachPhysicalRunnerCostWorkField")
+    )
+    for field in fields:
+        if re.search(r"\b" + field + r"\b", walk_bodies):
+            continue
+        raise AssertionError(f"runner cost field is missing from the schema walks: {field}")
+    breakdown_body = cost_header.split("struct PhysicalRunnerAxisCostBreakdown", 1)[1].split("};", 1)[0]
+    for field in re.findall(r"int64_t\s+(\w+)\s*=", breakdown_body):
+        for axis in ("compiled_vectorized", "gpu"):
+            if not re.search(r"\b" + axis + r"\." + field + r"\b", walk_bodies):
+                raise AssertionError(f"axis breakdown field is missing from the work walk: {axis}.{field}")
+    for consumer, marker in (
+        ("src/execution/execution_region_telemetry_log.cpp", "ForEachPhysicalRunnerCostShapeField"),
+        ("src/execution/execution_region_telemetry_log.cpp", "ForEachPhysicalRunnerCostWorkField"),
+        ("src/function/table/system/execution_region_table_function_utils.hpp", "ForEachPhysicalRunnerCostWorkField"),
+        ("src/main/query_profiler.cpp", "ForEachPhysicalRunnerCostShapeField"),
+        ("src/main/query_profiler.cpp", "ForEachPhysicalRunnerCostWorkField"),
+    ):
+        if marker not in read(consumer):
+            raise AssertionError(f"runner cost surface must derive from the schema walks: {consumer}")
+
+
 def verify_compiled_artifact_ownership() -> None:
     artifact = read("extension/jit_sljit/include/sljit_compiled_function.hpp")
     for immutable_contract in (
@@ -1893,6 +1927,7 @@ def main() -> None:
     verify_hash_join_null_fact_ownership()
     verify_regular_hash_join_direct_aggregate_storage_contract()
     verify_runtime_proofs_are_typed()
+    verify_runner_cost_schema_single_authority()
     verify_production_contract_ownership()
     verify_benchmark_repetition_budget()
     verify_bound_direct_join_terminal_contract()

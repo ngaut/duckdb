@@ -102,54 +102,17 @@ static void AccumulateExecutionRegionRunnerCostTotals(ExecutionRegionRunnerCostT
 		return;
 	}
 	target.present = true;
-	target.rows += source.rows;
-	target.batches += source.batches;
-	target.costed_batches += source.costed_batches;
-	target.expression_cost += source.expression_cost;
-	target.source_contract_input_rows += source.source_contract_input_rows;
-	target.source_contract_input_batches += source.source_contract_input_batches;
+	const auto accumulate_field = [](const char *, const int64_t &source_value, int64_t &target_value) {
+		target_value += source_value;
+	};
+	ForEachPhysicalRunnerCostShapeField(source, target, accumulate_field);
+	ForEachPhysicalRunnerCostWorkField(source, target, accumulate_field);
 	target.source_contract_output_cardinality_unknown =
 	    target.source_contract_output_cardinality_unknown || source.source_contract_output_cardinality_unknown;
-	target.generated_stage_count += source.generated_stage_count;
-	target.generated_backend_stage_count += source.generated_backend_stage_count;
-	target.generated_grouped_aggregate_stage_count += source.generated_grouped_aggregate_stage_count;
-	target.native_grouped_state_address_lookup_count += source.native_grouped_state_address_lookup_count;
-	target.grouped_aggregate_estimated_cardinality += source.grouped_aggregate_estimated_cardinality;
-	target.materialization_elision_count += source.materialization_elision_count;
-	target.selected_hash_join_filter_materialization_count += source.selected_hash_join_filter_materialization_count;
-	target.native_join_stage_count += source.native_join_stage_count;
-	target.native_hash_join_build_sink_count += source.native_hash_join_build_sink_count;
-	target.native_aggregate_stage_count += source.native_aggregate_stage_count;
-	target.native_grouped_aggregate_stage_count += source.native_grouped_aggregate_stage_count;
-	target.native_sort_stage_count += source.native_sort_stage_count;
 	target.full_pipeline = target.full_pipeline || source.full_pipeline;
 	AccumulateExecutionRegionRuleName(target.input_scope, ExecutionRegionRunnerCostInputScope(source));
 	AccumulateExecutionRegionRuleName(target.admission_class, source.admission_class);
 	AccumulateExecutionRegionRuleName(target.selection_reason, source.selection_reason);
-	target.generated_expression_work += source.generated_expression_work;
-	target.generated_stage_work += source.generated_stage_work;
-	target.generated_backend_stage_work += source.generated_backend_stage_work;
-	target.native_operator_work += source.native_operator_work;
-	target.materialization_elision_work += source.materialization_elision_work;
-	target.selected_hash_join_filter_materialization_penalty +=
-	    source.selected_hash_join_filter_materialization_penalty;
-	target.source_contract_scan_penalty += source.source_contract_scan_penalty;
-	target.full_pipeline_work += source.full_pipeline_work;
-	target.stateful_protocol_penalty += source.stateful_protocol_penalty;
-	target.saved_work_per_batch += source.saved_work_per_batch;
-	for (idx_t axis_idx = 0; axis_idx < PhysicalRunnerCostParameters::AXIS_COUNT; axis_idx++) {
-		auto &axis_totals = target.AxisAt(axis_idx);
-		auto &axis_breakdown = source.AxisAt(axis_idx);
-		axis_totals.runner_benefit += axis_breakdown.runner_benefit;
-		axis_totals.transfer_cost += axis_breakdown.transfer_cost;
-		axis_totals.startup_cost += axis_breakdown.startup_cost;
-		axis_totals.required_benefit += axis_breakdown.required_benefit;
-		axis_totals.net_benefit += axis_breakdown.net_benefit;
-	}
-	target.accelerated_runner_benefit += source.accelerated_runner_benefit;
-	target.startup_cost += source.startup_cost;
-	target.required_benefit += source.required_benefit;
-	target.net_benefit += source.net_benefit;
 	target.required_runtime_proofs |= source.required_runtime_proofs;
 	target.selected_accelerated_runner_count += source.SelectedAcceleratedRunner() ? 1 : 0;
 	target.selected_compiled_vectorized_runner_count += source.SelectedCompiledVectorizedRunner() ? 1 : 0;
