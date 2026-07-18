@@ -608,46 +608,22 @@ static bool TryAccumulateExecutionRegionPhysicalScanCost(const PhysicalOperator 
 	return true;
 }
 
-static ExecutionRegionSourceKind ExecutionRegionPhysicalSourceKind(PhysicalOperatorType type) {
-	switch (type) {
-	case PhysicalOperatorType::TABLE_SCAN:
-		return ExecutionRegionSourceKind::DUCKDB_TABLE_SCAN;
-	case PhysicalOperatorType::DUMMY_SCAN:
-	case PhysicalOperatorType::COLUMN_DATA_SCAN:
-	case PhysicalOperatorType::CHUNK_SCAN:
-	case PhysicalOperatorType::CTE_SCAN:
-	case PhysicalOperatorType::DELIM_SCAN:
-	case PhysicalOperatorType::EXPRESSION_SCAN:
-	case PhysicalOperatorType::POSITIONAL_SCAN:
-		return ExecutionRegionSourceKind::GENERIC_SCAN;
-	case PhysicalOperatorType::HASH_JOIN:
-	case PhysicalOperatorType::NESTED_LOOP_JOIN:
-	case PhysicalOperatorType::LEFT_DELIM_JOIN:
-	case PhysicalOperatorType::RIGHT_DELIM_JOIN:
-	case PhysicalOperatorType::BLOCKWISE_NL_JOIN:
-	case PhysicalOperatorType::PIECEWISE_MERGE_JOIN:
-	case PhysicalOperatorType::IE_JOIN:
-	case PhysicalOperatorType::ASOF_JOIN:
-	case PhysicalOperatorType::CROSS_PRODUCT:
-	case PhysicalOperatorType::POSITIONAL_JOIN:
-	case PhysicalOperatorType::UNGROUPED_AGGREGATE:
-	case PhysicalOperatorType::HASH_GROUP_BY:
-	case PhysicalOperatorType::PERFECT_HASH_GROUP_BY:
-	case PhysicalOperatorType::ORDER_BY:
-	case PhysicalOperatorType::TOP_N:
-		return ExecutionRegionSourceKind::STATEFUL_OPERATOR;
-	default:
-		return ExecutionRegionSourceKind::NONE;
+// The operator's own execution contract is the classification authority. An operator
+// that publishes no contract follows the graph's contract-less routing: scan-kind
+// operators lower to generic scan boundaries, every other source is a stateful
+// operator output.
+static ExecutionRegionSourceKind ExecutionRegionPhysicalSourceKind(const PhysicalOperator &source,
+                                                                   const ExecutionContract &contract) {
+	if (contract.HasSource()) {
+		return contract.source.kind;
 	}
-}
-
-static void AccumulateExecutionRegionPhysicalSourceTraits(const PhysicalOperator &source,
-                                                          ExecutionRegionCandidateTraits &traits) {
-	traits.source_kind = ExecutionRegionPhysicalSourceKind(source.type);
-}
-
-static bool ExecutionRegionPhysicalOperatorIsStatefulSource(const PhysicalOperator &op) {
-	return ExecutionRegionPhysicalSourceKind(op.type) == ExecutionRegionSourceKind::STATEFUL_OPERATOR;
+	switch (source.GetExecutionRegionOperatorKind()) {
+	case ExecutionRegionOperatorKind::TABLE_SCAN:
+	case ExecutionRegionOperatorKind::SCAN_SOURCE:
+		return ExecutionRegionSourceKind::GENERIC_SCAN;
+	default:
+		return ExecutionRegionSourceKind::STATEFUL_OPERATOR;
+	}
 }
 
 static bool ExecutionRegionPhysicalSourceUsesReadySourceContract(const ExecutionContract &contract) {
@@ -664,8 +640,8 @@ static idx_t ExecutionRegionPhysicalSourceContractInputCardinality(const Physica
 }
 
 static void AccumulateExecutionRegionPhysicalSourceContractCost(const PhysicalOperator &source,
+                                                                const ExecutionContract &contract,
                                                                 ExecutionRegionPhysicalPipelineCostFacts &facts) {
-	auto contract = source.GetExecutionContract(ExecutionRegionOperatorSlot::SOURCE, false);
 	if (!ExecutionRegionPhysicalSourceUsesReadySourceContract(contract)) {
 		return;
 	}
@@ -683,45 +659,6 @@ static void AccumulateExecutionRegionPhysicalSourceContractCost(const PhysicalOp
 	}
 }
 
-static void AccumulateExecutionRegionPhysicalSinkTraits(const PhysicalOperator &sink,
-                                                        ExecutionRegionCandidateTraits &traits) {
-	traits.sink_present = true;
-	switch (sink.type) {
-	case PhysicalOperatorType::CREATE_TABLE_AS:
-	case PhysicalOperatorType::BATCH_CREATE_TABLE_AS:
-	case PhysicalOperatorType::INSERT:
-	case PhysicalOperatorType::BATCH_INSERT:
-		traits.sink_kind = ExecutionRegionSinkKind::MATERIALIZATION;
-		return;
-	case PhysicalOperatorType::HASH_GROUP_BY:
-		traits.sink_kind = ExecutionRegionSinkKind::HASH_AGGREGATE_UPDATE;
-		return;
-	case PhysicalOperatorType::PERFECT_HASH_GROUP_BY:
-		traits.sink_kind = ExecutionRegionSinkKind::PERFECT_HASH_AGGREGATE_UPDATE;
-		return;
-	case PhysicalOperatorType::UNGROUPED_AGGREGATE:
-		traits.sink_kind = ExecutionRegionSinkKind::UNGROUPED_AGGREGATE_UPDATE;
-		return;
-	case PhysicalOperatorType::HASH_JOIN:
-		traits.sink_kind = ExecutionRegionSinkKind::HASH_JOIN_BUILD;
-		return;
-	case PhysicalOperatorType::NESTED_LOOP_JOIN:
-		traits.sink_kind = ExecutionRegionSinkKind::NESTED_LOOP_JOIN_BUILD;
-		return;
-	case PhysicalOperatorType::LEFT_DELIM_JOIN:
-	case PhysicalOperatorType::RIGHT_DELIM_JOIN:
-		traits.sink_kind = ExecutionRegionSinkKind::DELIM_JOIN_SINK;
-		return;
-	case PhysicalOperatorType::ORDER_BY:
-	case PhysicalOperatorType::TOP_N:
-		traits.sink_kind = ExecutionRegionSinkKind::SORT;
-		return;
-	default:
-		traits.sink_kind = ExecutionRegionSinkKind::NONE;
-		return;
-	}
-}
-
 static bool TryAccumulateExecutionRegionPhysicalOperatorCost(const PhysicalOperator &op,
                                                              ExecutionRegionPhysicalPipelineCostFacts &facts,
                                                              ExecutionRegionPhysicalPipelineSlot slot,
@@ -730,14 +667,18 @@ static bool TryAccumulateExecutionRegionPhysicalOperatorCost(const PhysicalOpera
 	auto &traits = facts.traits;
 	input.estimated_cardinality = MaxValue(input.estimated_cardinality, op.estimated_cardinality);
 	if (slot == ExecutionRegionPhysicalPipelineSlot::SOURCE) {
-		AccumulateExecutionRegionPhysicalSourceTraits(op, traits);
-		AccumulateExecutionRegionPhysicalSourceContractCost(op, facts);
+		auto source_contract = op.GetExecutionContract(ExecutionRegionOperatorSlot::SOURCE, false);
+		traits.source_kind = ExecutionRegionPhysicalSourceKind(op, source_contract);
+		AccumulateExecutionRegionPhysicalSourceContractCost(op, source_contract, facts);
+		if (traits.source_kind == ExecutionRegionSourceKind::STATEFUL_OPERATOR) {
+			return true;
+		}
 	}
+	ExecutionContract sink_contract;
 	if (slot == ExecutionRegionPhysicalPipelineSlot::SINK) {
-		AccumulateExecutionRegionPhysicalSinkTraits(op, traits);
-	}
-	if (slot == ExecutionRegionPhysicalPipelineSlot::SOURCE && ExecutionRegionPhysicalOperatorIsStatefulSource(op)) {
-		return true;
+		sink_contract = op.GetExecutionContract(ExecutionRegionOperatorSlot::SINK, false);
+		traits.sink_present = true;
+		traits.sink_kind = sink_contract.sink.kind;
 	}
 	switch (op.type) {
 	case PhysicalOperatorType::TABLE_SCAN:
@@ -770,8 +711,7 @@ static bool TryAccumulateExecutionRegionPhysicalOperatorCost(const PhysicalOpera
 			AddExecutionRegionNativeAggregateStage(input, false);
 			return true;
 		}
-		auto contract = op.GetExecutionContract(ExecutionRegionOperatorSlot::SINK, false);
-		auto &sink = contract.sink;
+		auto &sink = sink_contract.sink;
 		if (!ExecutionRegionAggregateUpdateGeneratesBody(sink)) {
 			// A ready native-state-update sink without a generated body is still a
 			// native contract stage inside the region (the generated prefix feeds it
@@ -804,8 +744,7 @@ static bool TryAccumulateExecutionRegionPhysicalOperatorCost(const PhysicalOpera
 			AddExecutionRegionNativeAggregateStage(input, true);
 			return true;
 		}
-		auto contract = op.GetExecutionContract(ExecutionRegionOperatorSlot::SINK, false);
-		auto &sink = contract.sink;
+		auto &sink = sink_contract.sink;
 		if (!ExecutionRegionAggregateUpdateGeneratesBody(sink)) {
 			// Same shape as the ungrouped case: a READY native-state-update sink is a
 			// native contract stage the generated prefix can feed, not a boundary.
@@ -843,8 +782,7 @@ static bool TryAccumulateExecutionRegionPhysicalOperatorCost(const PhysicalOpera
 			AddExecutionRegionNativeAggregateStage(input, true);
 			return true;
 		}
-		auto contract = op.GetExecutionContract(ExecutionRegionOperatorSlot::SINK, false);
-		auto &sink = contract.sink;
+		auto &sink = sink_contract.sink;
 		if (!ExecutionRegionAggregateUpdateGeneratesBody(sink)) {
 			// Same shape as the ungrouped case: a READY native-state-update sink is a
 			// native contract stage the generated prefix can feed, not a boundary.
