@@ -1979,6 +1979,17 @@ def verify_deferral_legality_and_handoff_single_authority() -> None:
         raise AssertionError(
             "the strategy handoff classification must live beside the strategy enum definition"
         )
+    if runner.count("pipeline.VectorizedSourceCursorDirty()") < 2:
+        raise AssertionError(
+            "both compiled entry points in the adaptive state machine must bounce executors whose "
+            "vectorized cursor did an unmanaged fetch (the executor-side layer of the claim-point law)"
+        )
+    executor = read("src/parallel/pipeline_executor.cpp")
+    if "vectorized_source_unmanaged_fetch = true" not in executor:
+        raise AssertionError(
+            "FetchFromSource must record unmanaged vectorized fetches so dirty cursors never enter "
+            "compiled execution"
+        )
 
 
 def main() -> None:

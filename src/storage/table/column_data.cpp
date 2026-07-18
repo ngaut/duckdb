@@ -703,6 +703,10 @@ bool ColumnData::TryGrowDirectAppendSegment(ColumnAppendState &state, idx_t requ
 	if (required_segment_size <= segment_size) {
 		return true;
 	}
+	// This cap reads the block size off the segment's current block, which for
+	// buffer-managed transient blocks is the temporary block manager's size. In
+	// a database with a non-default block size this differs from the table's
+	// block manager; revisit before relying on direct append there.
 	auto block_size = append_segment.GetBlockSize();
 	if (required_segment_size > block_size) {
 		return false;
