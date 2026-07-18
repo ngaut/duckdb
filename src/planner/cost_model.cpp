@@ -707,36 +707,65 @@ static int64_t PhysicalRunnerSourceContractScanPenalty(const PhysicalRunnerCostI
 	return total_penalty / facts.batches;
 }
 
+enum class PhysicalRunnerAdmissionClass : uint8_t {
+	NONE,
+	MATERIALIZATION_ELISION,
+	FULL_PIPELINE,
+	GENERATED,
+	GENERATED_NATIVE_FUSION
+};
+
+//! The telemetry spelling of an admission class; profiles and reasons carry this string.
+static const char *PhysicalRunnerAdmissionClassToString(PhysicalRunnerAdmissionClass admission_class) {
+	switch (admission_class) {
+	case PhysicalRunnerAdmissionClass::MATERIALIZATION_ELISION:
+		return "materialization_elision";
+	case PhysicalRunnerAdmissionClass::FULL_PIPELINE:
+		return "full_pipeline";
+	case PhysicalRunnerAdmissionClass::GENERATED:
+		return "generated";
+	case PhysicalRunnerAdmissionClass::GENERATED_NATIVE_FUSION:
+		return "generated_native_fusion";
+	default:
+		return "none";
+	}
+}
+
 struct PhysicalRunnerAdmission {
-	string admission_class;
+	PhysicalRunnerAdmissionClass admission_class = PhysicalRunnerAdmissionClass::NONE;
 	bool full_pipeline_benefit_pays = false;
 	bool native_operator_work_is_costed = false;
 	string acceleration_basis;
+
+	bool Admitted() const {
+		return admission_class != PhysicalRunnerAdmissionClass::NONE;
+	}
 };
 
-static string PhysicalRunnerAdmissionClass(const PhysicalRunnerCostInput &input, const PhysicalRunnerShapeFacts &facts,
-                                           const PhysicalRunnerAxisEvaluation &evaluation,
-                                           bool full_pipeline_benefit_pays) {
+static PhysicalRunnerAdmissionClass PhysicalRunnerEvaluateAdmissionClass(const PhysicalRunnerCostInput &input,
+                                                                         const PhysicalRunnerShapeFacts &facts,
+                                                                         const PhysicalRunnerAxisEvaluation &evaluation,
+                                                                         bool full_pipeline_benefit_pays) {
 	if (!input.has_accelerated_work) {
-		return "none";
+		return PhysicalRunnerAdmissionClass::NONE;
 	}
 	if (PhysicalRunnerMaterializationElisionBenefitCanPay(input, evaluation)) {
-		return "materialization_elision";
+		return PhysicalRunnerAdmissionClass::MATERIALIZATION_ELISION;
 	}
 	if (full_pipeline_benefit_pays) {
-		return "full_pipeline";
+		return PhysicalRunnerAdmissionClass::FULL_PIPELINE;
 	}
 	if (facts.native_operator_stage_count == 0) {
 		return facts.has_generated_compute_work && input.generated_stage_count > 0 &&
 		               evaluation.axis.generated_stage_benefit > 0 &&
 		               !PhysicalRunnerLargeLowWorkGroupedUpdate(input, evaluation.shared)
-		           ? "generated"
-		           : "none";
+		           ? PhysicalRunnerAdmissionClass::GENERATED
+		           : PhysicalRunnerAdmissionClass::NONE;
 	}
 	if (facts.has_generated_compute_work && input.generated_stage_count > 0 && facts.no_native_sort) {
-		return "generated_native_fusion";
+		return PhysicalRunnerAdmissionClass::GENERATED_NATIVE_FUSION;
 	}
-	return "none";
+	return PhysicalRunnerAdmissionClass::NONE;
 }
 
 static void PhysicalRunnerAppendReasonToken(string &result, const string &token) {
@@ -752,7 +781,7 @@ static void PhysicalRunnerAppendReasonToken(string &result, const string &token)
 static bool PhysicalRunnerNativeOperatorBenefitPays(const PhysicalRunnerCostInput &input,
                                                     const PhysicalRunnerAxisEvaluation &evaluation,
                                                     const PhysicalRunnerAdmission &admission) {
-	if (admission.admission_class == "none" || !PhysicalRunnerNativeStageBenefitCanPay(input, evaluation.axis)) {
+	if (!admission.Admitted() || !PhysicalRunnerNativeStageBenefitCanPay(input, evaluation.axis)) {
 		return false;
 	}
 	if (PhysicalRunnerSmallFinalizedDynamicJoinOnlyTail(input, evaluation.axis)) {
@@ -770,9 +799,10 @@ static void PhysicalRunnerBuildAccelerationBasis(const PhysicalRunnerCostInput &
                                                  const PhysicalRunnerShapeFacts &facts,
                                                  const PhysicalRunnerAxisEvaluation &evaluation,
                                                  PhysicalRunnerAdmission &admission) {
-	if (admission.admission_class != "none") {
+	if (admission.Admitted()) {
 		PhysicalRunnerAppendReasonToken(admission.acceleration_basis,
-		                                string("admission_class:") + admission.admission_class);
+		                                string("admission_class:") +
+		                                    PhysicalRunnerAdmissionClassToString(admission.admission_class));
 	}
 	if (facts.has_generated_compute_work && input.generated_stage_count > 0 &&
 	    evaluation.axis.generated_stage_benefit > 0 &&
@@ -801,9 +831,8 @@ static PhysicalRunnerAdmission PhysicalRunnerEvaluateAdmission(const PhysicalRun
 	admission.full_pipeline_benefit_pays =
 	    evaluation.axis.full_pipeline_benefit > 0 && PhysicalRunnerFullPipelineBenefitPays(input, facts);
 	admission.admission_class =
-	    PhysicalRunnerAdmissionClass(input, facts, evaluation, admission.full_pipeline_benefit_pays);
-	admission.native_operator_work_is_costed =
-	    facts.native_operator_stage_count == 0 || admission.admission_class != "none";
+	    PhysicalRunnerEvaluateAdmissionClass(input, facts, evaluation, admission.full_pipeline_benefit_pays);
+	admission.native_operator_work_is_costed = facts.native_operator_stage_count == 0 || admission.Admitted();
 	PhysicalRunnerBuildAccelerationBasis(input, facts, evaluation, admission);
 	return admission;
 }
@@ -1005,7 +1034,7 @@ static void PhysicalRunnerInitializeProfile(const PhysicalRunnerCostInput &input
 	profile.full_pipeline = input.full_pipeline;
 	profile.generated_work_class = input.generated_work_class;
 	profile.native_protocol_class = input.native_protocol_class;
-	profile.admission_class = admission.admission_class;
+	profile.admission_class = PhysicalRunnerAdmissionClassToString(admission.admission_class);
 }
 
 struct PhysicalRunnerSelectionAnalysis {
