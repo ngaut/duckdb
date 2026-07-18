@@ -715,7 +715,8 @@ SourceResultType PipelineExecutor::FetchFromSource(DataChunk *&result) {
 }
 
 SourceResultType PipelineExecutor::FetchFromSourceContract(DataChunk *&result,
-                                                           ExecutionRegionSourceContractMetrics *metrics) {
+                                                           ExecutionRegionSourceContractMetrics *metrics,
+                                                           bool decline_new_row_group, bool *declined_new_row_group) {
 	auto region_plan = pipeline.GetExecutionRegionPlan();
 	if (!region_plan || !region_plan->RequiresSourceContract()) {
 		throw InternalException("execution region source contract fetch requires a selected source contract");
@@ -741,12 +742,16 @@ SourceResultType PipelineExecutor::FetchFromSourceContract(DataChunk *&result,
 	}
 
 	OperatorSourceInput source_input = {*pipeline.source_state, *local_source_state, interrupt_state};
+	source_input.decline_new_row_group = decline_new_row_group;
 	if (metrics) {
 		source_input.stage_recorder = *metrics;
 	}
 
 	stage_start = metrics ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point();
 	auto res = pipeline.source->GetExecutionSourceContractData(context, source_chunk, source_input);
+	if (declined_new_row_group) {
+		*declined_new_row_group = source_input.declined_new_row_group;
+	}
 	if (metrics) {
 		metrics->get_data_runtime_time_us += PipelineExecutorElapsedMicros(stage_start);
 	}

@@ -391,6 +391,10 @@ SourceResultType PhysicalTableScan::GetExecutionSourceContractDataInternal(Execu
 			return SourceResultType::HAVE_MORE_OUTPUT;
 		}
 
+		if (input.decline_new_row_group) {
+			input.declined_new_row_group = true;
+			return SourceResultType::HAVE_MORE_OUTPUT;
+		}
 		idx_t rows_in_current_row_group;
 		{
 			ExecutionOperatorStageTimer timer(input.stage_recorder, "source_contract.table_scan.next_parallel_scan");

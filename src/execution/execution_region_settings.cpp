@@ -15,6 +15,10 @@ bool ExecutionRegionSettings::DumpIR(ClientContext &context) {
 	return Settings::Get<JitDumpIrSetting>(context);
 }
 
+idx_t ExecutionRegionSettings::DebugForceDeferAfterChunks(ClientContext &context) {
+	return Settings::Get<JitDebugForceDeferAfterChunksSetting>(context);
+}
+
 bool ExecutionRegionSettings::TraceDecisions(ClientContext &context) {
 	return Settings::Get<JitTraceDecisionsSetting>(context);
 }

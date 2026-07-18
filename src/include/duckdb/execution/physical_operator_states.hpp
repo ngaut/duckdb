@@ -208,6 +208,12 @@ struct OperatorSourceInput {
 	LocalSourceState &local_state;
 	InterruptState &interrupt_state;
 	optional_ptr<ExecutionOperatorStageRecorder> stage_recorder;
+	//! Execution-region source contract: when set, the source must not claim a new
+	//! row group; it drains the current one and then reports declined_new_row_group,
+	//! which is the only point where a compiled kernel may hand the pipeline to the
+	//! vectorized continuation without stranding in-flight rows.
+	bool decline_new_row_group = false;
+	bool declined_new_row_group = false;
 };
 
 struct OperatorSinkCombineInput {

@@ -45,7 +45,7 @@ static bool SljitTryExecuteFullPipelineNativeOnly(ExecutionRegionRuntime &runtim
 	return SljitRunFullPipelineSourceContractLoop(
 	    runtime, fetched_chunks, [&]() { return processed_chunks >= max_chunks; }, execute_source_chunk,
 	    [&]() { return stop_after_flush(ExecutionRegionResult::NOT_FINISHED); },
-	    [&]() { return stop_after_flush(ExecutionRegionResult::INTERRUPTED); },
+	    [&]() { return stop_after_flush(SljitBlockedSourceStopResult(runtime)); },
 	    [&]() { return stop_after_flush(ExecutionRegionResult::FINISHED); });
 }
 

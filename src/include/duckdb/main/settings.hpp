@@ -1480,6 +1480,18 @@ struct JitCboStartupMarginBasisPointsSetting {
 	static constexpr idx_t SettingIndex = NEXT_SETTING_INDEX();
 };
 
+struct JitDebugForceDeferAfterChunksSetting {
+	using RETURN_TYPE = idx_t;
+	static constexpr const char *Name = "jit_debug_force_defer_after_chunks";
+	static constexpr const char *Description =
+	    "Debug: compiled full-pipeline kernels stop claiming new row groups after fetching this many source chunks "
+	    "and defer to the vectorized continuation at the row-group boundary; zero disables";
+	static constexpr const char *InputType = "UBIGINT";
+	static constexpr const char *DefaultValue = "0";
+	static constexpr SettingScopeTarget Scope = SettingScopeTarget::LOCAL_DEFAULT;
+	static constexpr idx_t SettingIndex = NEXT_SETTING_INDEX();
+};
+
 struct JitDumpIrSetting {
 	using RETURN_TYPE = bool;
 	static constexpr const char *Name = "jit_dump_ir";

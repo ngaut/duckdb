@@ -70,9 +70,12 @@ bool ExecutionRegionPipelineAdapter::IsAtCleanSourceToSinkBoundary() const {
 }
 
 SourceResultType ExecutionRegionPipelineAdapter::FetchSourceContract(DataChunk *&result,
-                                                                     ExecutionRegionSourceContractMetrics *metrics) {
+                                                                     ExecutionRegionSourceContractMetrics *metrics,
+                                                                     bool decline_new_row_group,
+                                                                     bool *declined_new_row_group) {
 	ExecutionRegionSuppressionGuard guard(GetClientContext());
-	auto source_result = executor.FetchFromSourceContract(result, metrics);
+	auto source_result =
+	    executor.FetchFromSourceContract(result, metrics, decline_new_row_group, declined_new_row_group);
 	if (source_result == SourceResultType::FINISHED) {
 		executor.exhausted_source = true;
 		executor.exhausted_pipeline = true;

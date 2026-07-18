@@ -37,7 +37,8 @@ public:
 	ExecutionRegionLocalState &GetOrCreateLocalState(ExecutionRegionKernel &kernel);
 	bool IsAtCleanSourceToSinkBoundary() const;
 
-	SourceResultType FetchSourceContract(DataChunk *&result, ExecutionRegionSourceContractMetrics *metrics = nullptr);
+	SourceResultType FetchSourceContract(DataChunk *&result, ExecutionRegionSourceContractMetrics *metrics = nullptr,
+	                                     bool decline_new_row_group = false, bool *declined_new_row_group = nullptr);
 	SinkNextBatchType AdvanceSinkBatch(DataChunk &source_chunk, bool have_more_output);
 	ExecutionOperatorBindResult BindOperator(idx_t operator_index, DataChunk &input,
 	                                         const ExecutionRegionOperatorInfo &operator_info,

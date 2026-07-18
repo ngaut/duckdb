@@ -150,7 +150,9 @@ private:
 	DataChunk &GetSourceChunkForInitialIdx(idx_t initial_idx);
 	SourceResultType FetchFromSource(DataChunk *&result);
 	SourceResultType FetchFromSourceContract(DataChunk *&result,
-	                                         ExecutionRegionSourceContractMetrics *metrics = nullptr);
+	                                         ExecutionRegionSourceContractMetrics *metrics = nullptr,
+	                                         bool decline_new_row_group = false,
+	                                         bool *declined_new_row_group = nullptr);
 	bool TryMarkExecutionRegionRuntimeOnceFlag(ExecutionRegionRuntimeOnceFlag flag, idx_t index);
 
 	void FinishProcessing(int32_t operator_idx = -1);

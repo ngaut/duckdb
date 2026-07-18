@@ -74,7 +74,7 @@ public:
 			                                           [&]() { return FlushRuntimeState(true, false); });
 		    },
 		    [&]() {
-			    return SljitStopFullPipelineAfterFlush(result, ExecutionRegionResult::INTERRUPTED,
+			    return SljitStopFullPipelineAfterFlush(result, SljitBlockedSourceStopResult(runtime),
 			                                           [&]() { return FlushRuntimeState(true, true); });
 		    },
 		    [&]() {
@@ -120,7 +120,7 @@ private:
 		return SljitRunFullPipelineSourceContractLoop(
 		    runtime, fetched_chunks, [&]() { return fetched_chunks >= max_chunks; }, execute_source_chunk,
 		    [&]() { return stop_after_flush(ExecutionRegionResult::NOT_FINISHED, true, false); },
-		    [&]() { return stop_after_flush(ExecutionRegionResult::INTERRUPTED, true, true); },
+		    [&]() { return stop_after_flush(SljitBlockedSourceStopResult(runtime), true, true); },
 		    [&]() { return stop_after_flush(ExecutionRegionResult::FINISHED, false, true); });
 	}
 

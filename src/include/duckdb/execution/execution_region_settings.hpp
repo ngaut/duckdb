@@ -18,6 +18,7 @@ class ExecutionRegionSettings {
 public:
 	static bool Enabled(ClientContext &context);
 	static bool DumpIR(ClientContext &context);
+	static idx_t DebugForceDeferAfterChunks(ClientContext &context);
 	static bool TraceDecisions(ClientContext &context);
 	static bool TraceRuntime(ClientContext &context);
 	static bool TraceVectorizedBaseline(ClientContext &context);

@@ -60,6 +60,13 @@ static bool SljitNativeSinkResultStopsExecution(ExecutionRegionRuntime &runtime,
 	return true;
 }
 
+//! The stop result for a blocked source fetch: a plain block yields and resumes
+//! compiled, while a block carrying a deferred reason hands the pipeline to the
+//! vectorized continuation, mirroring the blocked-sink protocol above.
+static ExecutionRegionResult SljitBlockedSourceStopResult(ExecutionRegionRuntime &runtime) {
+	return runtime.DeferredReason().empty() ? ExecutionRegionResult::INTERRUPTED : ExecutionRegionResult::DEFERRED;
+}
+
 static bool SljitStopFullPipeline(ExecutionRegionResult &result, ExecutionRegionResult stop_result) {
 	result = stop_result;
 	return true;

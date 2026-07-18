@@ -1,0 +1,84 @@
+# name: test/sql/jit/test_jit_forced_defer.test
+# description: Mid-query compiled-to-native handoff at row-group boundaries preserves results per sink kind
+# group: [jit]
+
+statement ok
+CREATE TABLE facts AS
+SELECT (i % 97)::INTEGER g, i::BIGINT v, (i % 7)::BIGINT w
+FROM range(500000) tbl(i);
+
+statement ok
+CREATE TABLE dims AS
+SELECT i::INTEGER k, (i * 3)::BIGINT payload FROM range(97) tbl(i);
+
+# Reference results with the JIT disabled.
+statement ok
+SET jit_policy='off';
+
+statement ok
+CREATE TABLE ref_ungrouped AS SELECT sum(v + 1) s, count(*) c FROM facts WHERE v % 3 = 0;
+
+statement ok
+CREATE TABLE ref_grouped AS SELECT g, sum(v) s, count(*) c FROM facts GROUP BY g;
+
+statement ok
+CREATE TABLE ref_join AS
+SELECT d.k, sum(f.v + d.payload) s
+FROM facts f JOIN dims d ON f.g = d.k
+GROUP BY d.k;
+
+statement ok
+CREATE TABLE ref_distinct AS SELECT count(DISTINCT g) c FROM facts WHERE w < 5;
+
+statement ok
+SET jit_policy='auto';
+
+# Force the compiled kernel to hand off to the vectorized continuation at the
+# first row-group boundary after N fetched chunks. The handoff is only legal
+# with no in-flight rows, so every result must match the native reference
+# exactly; an overcount or undercount here means the handoff protocol strands
+# or replays source rows.
+
+loop force_n 1 3
+
+statement ok
+SET jit_debug_force_defer_after_chunks=${force_n};
+
+query I
+SELECT count(*) FROM (
+  SELECT sum(v + 1) s, count(*) c FROM facts WHERE v % 3 = 0
+) q JOIN ref_ungrouped r ON q.s IS NOT DISTINCT FROM r.s AND q.c IS NOT DISTINCT FROM r.c
+----
+1
+
+query I
+SELECT count(*) FROM (
+  (SELECT g, sum(v) s, count(*) c FROM facts GROUP BY g EXCEPT SELECT * FROM ref_grouped)
+  UNION ALL
+  (SELECT * FROM ref_grouped EXCEPT SELECT g, sum(v) s, count(*) c FROM facts GROUP BY g)
+)
+----
+0
+
+query I
+SELECT count(*) FROM (
+  (SELECT d.k, sum(f.v + d.payload) s FROM facts f JOIN dims d ON f.g = d.k GROUP BY d.k
+   EXCEPT SELECT * FROM ref_join)
+  UNION ALL
+  (SELECT * FROM ref_join
+   EXCEPT SELECT d.k, sum(f.v + d.payload) s FROM facts f JOIN dims d ON f.g = d.k GROUP BY d.k)
+)
+----
+0
+
+query I
+SELECT count(*) FROM (
+  SELECT count(DISTINCT g) c FROM facts WHERE w < 5
+) q JOIN ref_distinct r ON q.c IS NOT DISTINCT FROM r.c
+----
+1
+
+endloop
+
+statement ok
+SET jit_debug_force_defer_after_chunks=0;

@@ -168,9 +168,10 @@ PipelineExecuteResult ExecuteExecutionRunner(ExecutionRunnerKind kind, Execution
 class CompiledRegionRuntime : public ExecutionRegionRuntime, public ExecutionOperatorRuntime {
 public:
 	CompiledRegionRuntime(ExecutionRegionPipelineAdapter &pipeline_p, ExecutionRegionKernel &kernel_p,
-	                      ExecutionRegionLocalState &local_state_p, idx_t max_chunks_p, bool trace_runtime_p)
+	                      ExecutionRegionLocalState &local_state_p, idx_t max_chunks_p, bool trace_runtime_p,
+	                      idx_t debug_force_defer_after_chunks_p)
 	    : pipeline(pipeline_p), kernel(kernel_p), local_state(local_state_p), max_chunks(max_chunks_p),
-	      trace_runtime(trace_runtime_p) {
+	      trace_runtime(trace_runtime_p), debug_force_defer_after_chunks(debug_force_defer_after_chunks_p) {
 	}
 
 	idx_t MaxChunks() const override {
@@ -279,6 +280,23 @@ public:
 		if (sink_finished) {
 			throw InternalException("compiled region runtime cannot fetch source contract data after a finished sink");
 		}
+		// Once the debug forced defer arms, the source declines new row groups: the
+		// current one drains through normal fetches and the declined fetch converts to
+		// a deferral, so the vectorized continuation resumes at a row-group boundary
+		// with no in-flight rows.
+		const bool decline_new_row_group =
+		    debug_force_defer_after_chunks != 0 && fetched_source_chunks >= debug_force_defer_after_chunks;
+		bool declined_new_row_group = false;
+		if (decline_new_row_group) {
+			auto declined_result = pipeline.FetchSourceContract(result, nullptr, true, &declined_new_row_group);
+			if (declined_new_row_group) {
+				Defer("debug forced defer at row-group boundary");
+				return SourceResultType::BLOCKED;
+			}
+			fetched_source_chunks++;
+			return declined_result;
+		}
+		fetched_source_chunks++;
 		if (!trace_runtime) {
 			return pipeline.FetchSourceContract(result);
 		}
@@ -416,6 +434,8 @@ private:
 	ExecutionRegionLocalState &local_state;
 	idx_t max_chunks;
 	bool trace_runtime;
+	idx_t debug_force_defer_after_chunks;
+	idx_t fetched_source_chunks = 0;
 	idx_t source_contract_output_rows = 0;
 	idx_t source_contract_invocation_count = 0;
 	int64_t source_contract_runtime_time_us = 0;
@@ -465,7 +485,8 @@ CompiledVectorizedRunStatus CompiledVectorizedRunner::ExecuteCompiledRegion(Exec
 			trace_started = true;
 		}
 		auto &local_state = pipeline.GetOrCreateLocalState(*kernel);
-		CompiledRegionRuntime runtime(pipeline, *kernel, local_state, max_chunks, trace_runtime);
+		CompiledRegionRuntime runtime(pipeline, *kernel, local_state, max_chunks, trace_runtime,
+		                              ExecutionRegionSettings::DebugForceDeferAfterChunks(client));
 		ExecutionRegionResult compiled_result = ExecutionRegionResult::NOT_FINISHED;
 		auto compiled_executed = kernel->TryExecuteFullPipeline(runtime, compiled_result);
 		if (!compiled_executed) {
