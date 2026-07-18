@@ -45,6 +45,9 @@ statement ok
 CREATE TABLE ref_distinct AS SELECT count(DISTINCT g) c FROM facts WHERE w < 5;
 
 statement ok
+CREATE TABLE ref_grouped_distinct AS SELECT g, count(DISTINCT v % 9973) c FROM facts GROUP BY g;
+
+statement ok
 SET jit_policy='auto';
 
 # Force the compiled kernel to hand off to the vectorized continuation at the
@@ -92,6 +95,18 @@ SELECT count(*) FROM (
 ----
 1
 
+# Grouped distinct compiles into the inline distinct-key-sink recipe, which owns
+# the pipeline's counting and therefore refuses runner handoff: forcing a defer
+# must leave the result exact because the kernel never defers.
+query I
+SELECT count(*) FROM (
+  (SELECT g, count(DISTINCT v % 9973) c FROM facts GROUP BY g EXCEPT SELECT * FROM ref_grouped_distinct)
+  UNION ALL
+  (SELECT * FROM ref_grouped_distinct EXCEPT SELECT g, count(DISTINCT v % 9973) c FROM facts GROUP BY g)
+)
+----
+0
+
 endloop
 
 # The proof is non-vacuous only if compiled kernels actually deferred.
@@ -113,6 +128,15 @@ SELECT count(*) FROM (
   (SELECT g, sum(v) s, count(*) c FROM facts GROUP BY g EXCEPT SELECT * FROM ref_grouped)
   UNION ALL
   (SELECT * FROM ref_grouped EXCEPT SELECT g, sum(v) s, count(*) c FROM facts GROUP BY g)
+)
+----
+0
+
+query I
+SELECT count(*) FROM (
+  (SELECT g, count(DISTINCT v % 9973) c FROM facts GROUP BY g EXCEPT SELECT * FROM ref_grouped_distinct)
+  UNION ALL
+  (SELECT * FROM ref_grouped_distinct EXCEPT SELECT g, count(DISTINCT v % 9973) c FROM facts GROUP BY g)
 )
 ----
 0

@@ -178,6 +178,24 @@ public:
 		return make_uniq<SljitNativeRegionLocalState>(allocator, ops);
 	}
 
+	bool SupportsRunnerHandoff() const override {
+		if (!full_pipeline_recipe_plan.HasRecipe()) {
+			return true;
+		}
+		auto &sequence = full_pipeline_recipe_plan.Recipe().primitive_sequence;
+		for (idx_t step_idx = 0; step_idx < sequence.Count(); step_idx++) {
+			auto &step = sequence.Step(step_idx);
+			if (step.kind == SljitFullPipelinePrimitiveKind::GROUPED_AGGREGATE_UPDATE &&
+			    step.grouped_aggregate_update.strategy == SljitGroupedAggregateUpdateStrategyKind::DISTINCT_KEY_SINK) {
+				// Inline distinct-key counting owns the pipeline's counting; the
+				// native runner counts through finalize, so mixing runners loses
+				// whichever side's contribution the finalize decision ignores.
+				return false;
+			}
+		}
+		return true;
+	}
+
 	bool CanExecuteFullPipeline() const override {
 		return ExecutionRegionABIIsFullPipeline(abi);
 	}

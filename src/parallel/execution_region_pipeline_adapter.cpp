@@ -25,7 +25,7 @@ Allocator &ExecutionRegionPipelineAdapter::GetAllocator() const {
 }
 
 bool ExecutionRegionPipelineAdapter::IsCompiledExecutionSuppressed() const {
-	return GetClientContext().IsCompiledExecutionSuppressed();
+	return GetClientContext().IsCompiledExecutionSuppressed() || executor.compiled_execution_deferred;
 }
 
 idx_t ExecutionRegionPipelineAdapter::MaxThreads() const {
@@ -93,6 +93,10 @@ void ExecutionRegionPipelineAdapter::ClearVectorizedSourceClaimBudget() {
 
 bool ExecutionRegionPipelineAdapter::HasVectorizedSourceClaimBudget() const {
 	return executor.HasVectorizedSourceClaimBudget();
+}
+
+void ExecutionRegionPipelineAdapter::LatchDeferredCompiledExecution() {
+	executor.compiled_execution_deferred = true;
 }
 
 idx_t ExecutionRegionPipelineAdapter::VectorizedSourceLegRows() const {

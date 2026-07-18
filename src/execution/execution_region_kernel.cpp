@@ -113,6 +113,10 @@ bool ExecutionRegionKernel::TraceCandidateUsesScanFilters() const {
 	return trace_candidate_uses_scan_filters;
 }
 
+bool ExecutionRegionKernel::SupportsRunnerHandoff() const {
+	return true;
+}
+
 bool ExecutionRegionKernel::CanExecuteFullPipeline() const {
 	return false;
 }

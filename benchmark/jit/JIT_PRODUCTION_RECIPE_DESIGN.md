@@ -231,10 +231,14 @@ first claims are made lazily by the scan loops, never at local-state
 construction. Switching runners is legal only at claim points, where no local
 holds an in-flight row group. A compiled kernel switches by decline-claim: the
 source drains its current row group, declines the next claim, and the runtime
-converts the declined fetch into a deferral. Deferral is one-way — a deferred
-kernel is never re-entered — and sources without the storage contract never
-decline, so switching is inert where it is not proven. The per-sink handoff
-proof and its forced-defer debug setting are regression fixtures.
+converts the declined fetch into a deferral. Deferral is one-way — deferring
+latches the pipeline's compiled suppression so a deferred kernel is never
+re-entered — and sources without the storage contract never decline, so
+switching is inert where it is not proven. Handoff is additionally a kernel
+capability: a recipe that claims exclusive ownership of sink finalization
+(inline distinct-key counting) refuses handoff entirely, because the rows the
+other runner sinks would be stranded under a claim it cannot see. The per-sink
+handoff proof and its forced-defer debug setting are regression fixtures.
 
 ## Measured runner selection
 

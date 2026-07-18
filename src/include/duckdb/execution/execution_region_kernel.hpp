@@ -111,6 +111,11 @@ public:
 	idx_t TraceCandidateEstimatedCardinality() const;
 	bool TraceCandidateUsesScanFilters() const;
 	virtual bool CanExecuteFullPipeline() const;
+	//! Whether this kernel may hand the pipeline to the vectorized continuation
+	//! mid-query. Recipes that claim exclusive ownership of sink finalization
+	//! (for example inline distinct-key counting) must refuse: a handoff strands
+	//! the rows the other runner sinks under a claim it cannot see.
+	virtual bool SupportsRunnerHandoff() const;
 	virtual bool TryExecuteFullPipeline(ExecutionRegionRuntime &runtime, ExecutionRegionResult &result);
 
 private:

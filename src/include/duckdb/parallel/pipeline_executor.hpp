@@ -119,6 +119,10 @@ private:
 	//! Set when the source declined a claim and the executor yielded at the boundary.
 	bool vectorized_source_declined_yield = false;
 	idx_t vectorized_source_leg_rows = 0;
+	//! Latched when a compiled kernel defers: deferral hands this pipeline to the
+	//! vectorized continuation permanently, because a deferred kernel's terminal
+	//! state does not support re-entry.
+	bool compiled_execution_deferred = false;
 	bool exhausted_source = false;
 	//! Source or intermediate operator indicated that there is no more output possible
 	bool exhausted_pipeline = false;

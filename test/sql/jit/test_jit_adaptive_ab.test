@@ -28,6 +28,9 @@ statement ok
 CREATE TABLE ref_grouped AS SELECT g, sum(v) s, count(*) c FROM facts GROUP BY g;
 
 statement ok
+CREATE TABLE ref_grouped_distinct AS SELECT g, count(DISTINCT v % 9973) c FROM facts GROUP BY g;
+
+statement ok
 SET jit_policy='auto';
 
 statement ok
@@ -40,6 +43,18 @@ SELECT count(*) FROM (
   (SELECT g, sum(v) s, count(*) c FROM facts GROUP BY g EXCEPT SELECT * FROM ref_grouped)
   UNION ALL
   (SELECT * FROM ref_grouped EXCEPT SELECT g, sum(v) s, count(*) c FROM facts GROUP BY g)
+)
+----
+0
+
+# Grouped distinct compiles into the inline distinct-key-sink recipe, which owns
+# the pipeline's counting and therefore refuses runner handoff: the A/B must not
+# measure it, and the result must stay exact.
+query I
+SELECT count(*) FROM (
+  (SELECT g, count(DISTINCT v % 9973) c FROM facts GROUP BY g EXCEPT SELECT * FROM ref_grouped_distinct)
+  UNION ALL
+  (SELECT * FROM ref_grouped_distinct EXCEPT SELECT g, count(DISTINCT v % 9973) c FROM facts GROUP BY g)
 )
 ----
 0

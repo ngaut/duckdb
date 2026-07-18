@@ -224,8 +224,9 @@ ExecutionRunnerResult CompiledVectorizedRunner::Execute(ExecutionRegionPipelineA
 	{
 		auto &client = pipeline.GetClientContext();
 		auto kernel = pipeline.GetExecutableFullPipelineKernel();
-		if (kernel && kernel->CanExecuteFullPipeline() && kernel->AdaptiveMeasurementCandidate() &&
-		    !pipeline.IsCompiledExecutionSuppressed() && ExecutionRegionSettings::AdaptiveAb(client)) {
+		if (kernel && kernel->CanExecuteFullPipeline() && kernel->SupportsRunnerHandoff() &&
+		    kernel->AdaptiveMeasurementCandidate() && !pipeline.IsCompiledExecutionSuppressed() &&
+		    ExecutionRegionSettings::AdaptiveAb(client)) {
 			return ExecuteAdaptive(pipeline, *kernel, max_chunks);
 		}
 	}
@@ -399,8 +400,9 @@ public:
 		// (debug forced defer, or an adaptive fallback verdict) or resolves the
 		// adaptive verdict in the compiled runner's favor and refetches with the claim
 		// allowed. Deferral stays one-way: a committed verdict never defers at all.
-		const bool debug_defer_armed =
-		    debug_force_defer_after_chunks != 0 && fetched_source_chunks >= debug_force_defer_after_chunks;
+		const bool debug_defer_armed = debug_force_defer_after_chunks != 0 &&
+		                               fetched_source_chunks >= debug_force_defer_after_chunks &&
+		                               kernel.SupportsRunnerHandoff();
 		const bool adaptive_probe_armed = adaptive_ab && !adaptive_verdict_done && fetched_source_chunks >= 1;
 		bool declined_new_row_group = false;
 		if (debug_defer_armed || adaptive_probe_armed) {
@@ -654,6 +656,7 @@ CompiledVectorizedRunStatus CompiledVectorizedRunner::ExecuteCompiledRegion(
 				    runtime.SourceContractOutputRows(), runtime.SinkInputRows(), elapsed_us,
 				    CompiledFullPipelineResultToString(compiled_result), runtime_metrics);
 			}
+			pipeline.LatchDeferredCompiledExecution();
 			return CompiledVectorizedRunStatus::VECTORIZED_DEFERRED;
 		}
 		auto pipeline_result = CompiledFullPipelineResultToPipelineExecuteResult(compiled_result);
