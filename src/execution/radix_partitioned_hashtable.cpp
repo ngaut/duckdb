@@ -1193,17 +1193,75 @@ static void FinishRadixHTSinkState(ClientContext &context, RadixHTGlobalSinkStat
 	}
 }
 
+// Every sink entry prepares the same thread-local state and must leave through the
+// memory governor. This scope owns that protocol: construction prepares the local
+// hash table (recording the entry's prepare stage), Arm() marks that governed work
+// happened, and destruction runs FinishRadixHTSinkState on armed exits — an entry
+// cannot forget the governor.
+class RadixSinkEntryScope {
+public:
+	RadixSinkEntryScope(ExecutionContext &context, const RadixPartitionedHashTable &radix_ht, OperatorSinkInput &input,
+	                    optional_ptr<ExecutionOperatorStageRecorder> recorder, const char *prepare_stage,
+	                    const char *finish_stage)
+	    : client(context.client), recorder(recorder), finish_stage(finish_stage),
+	      gstate(input.global_state.Cast<RadixHTGlobalSinkState>()),
+	      lstate(input.local_state.Cast<RadixHTLocalSinkState>()) {
+		auto prepare_start = RadixTraceStart(recorder);
+		ht_ptr = &PrepareRadixHTSinkState(context, radix_ht, input);
+		RecordRadixTraceStage(recorder, prepare_stage, prepare_start);
+	}
+	// The governor legitimately throws (out-of-core transitions surface allocation
+	// failures), so the destructor must be allowed to propagate; when another
+	// exception is already unwinding, the query is failing and governing is moot.
+	~RadixSinkEntryScope() noexcept(false) {
+		if (!armed || std::uncaught_exceptions() > 0) {
+			return;
+		}
+		auto finish_start = RadixTraceStart(recorder);
+		FinishRadixHTSinkState(client, gstate, lstate);
+		RecordRadixTraceStage(recorder, finish_stage, finish_start);
+	}
+	//! Run the governor immediately instead of on exit. Entries that hand out row
+	//! addresses must govern BEFORE computing them: the governor may repartition,
+	//! which relocates rows, and the caller consumes the addresses after we return.
+	void GovernNow() {
+		auto finish_start = RadixTraceStart(recorder);
+		FinishRadixHTSinkState(client, gstate, lstate);
+		RecordRadixTraceStage(recorder, finish_stage, finish_start);
+	}
+	GroupedAggregateHashTable &HT() {
+		return *ht_ptr;
+	}
+	RadixHTGlobalSinkState &GState() {
+		return gstate;
+	}
+	RadixHTLocalSinkState &LState() {
+		return lstate;
+	}
+	void Arm() {
+		armed = true;
+	}
+
+private:
+	ClientContext &client;
+	optional_ptr<ExecutionOperatorStageRecorder> recorder;
+	const char *finish_stage;
+	RadixHTGlobalSinkState &gstate;
+	RadixHTLocalSinkState &lstate;
+	GroupedAggregateHashTable *ht_ptr;
+	bool armed = false;
+};
+
 void RadixPartitionedHashTable::Sink(ExecutionContext &context, DataChunk &chunk, OperatorSinkInput &input,
                                      DataChunk &payload_input, const unsafe_vector<idx_t> &filter) const {
-	auto &gstate = input.global_state.Cast<RadixHTGlobalSinkState>();
-	auto &lstate = input.local_state.Cast<RadixHTLocalSinkState>();
-	auto &ht = PrepareRadixHTSinkState(context, *this, input);
+	RadixSinkEntryScope scope(context, *this, input, nullptr, "sink.prepare_sink_state", "sink.finish_sink_state");
+	auto &ht = scope.HT();
 
-	auto &group_chunk = lstate.group_chunk;
+	auto &group_chunk = scope.LState().group_chunk;
 	PopulateGroupChunk(group_chunk, chunk);
 
 	ht.AddChunk(group_chunk, payload_input, filter);
-	FinishRadixHTSinkState(context.client, gstate, lstate);
+	scope.Arm();
 }
 
 void RadixPartitionedHashTable::SinkSelected(ExecutionContext &context, DataChunk &chunk, OperatorSinkInput &input,
@@ -1212,15 +1270,14 @@ void RadixPartitionedHashTable::SinkSelected(ExecutionContext &context, DataChun
 	if (count == 0) {
 		return;
 	}
-	auto &gstate = input.global_state.Cast<RadixHTGlobalSinkState>();
-	auto &lstate = input.local_state.Cast<RadixHTLocalSinkState>();
-	auto &ht = PrepareRadixHTSinkState(context, *this, input);
+	RadixSinkEntryScope scope(context, *this, input, nullptr, "sink.prepare_sink_state", "sink.finish_sink_state");
+	auto &ht = scope.HT();
 
-	auto &group_chunk = lstate.group_chunk;
+	auto &group_chunk = scope.LState().group_chunk;
 	PopulateGroupChunk(group_chunk, chunk, selection, count);
 
 	ht.AddChunk(group_chunk, payload_input, filter);
-	FinishRadixHTSinkState(context.client, gstate, lstate);
+	scope.Arm();
 }
 
 bool RadixPartitionedHashTable::TrySinkGroupsFast(ExecutionContext &context, DataChunk &chunk, OperatorSinkInput &input,
@@ -1237,11 +1294,10 @@ bool RadixPartitionedHashTable::TrySinkGroupsFast(ExecutionContext &context, Dat
 	if (!selection && count != chunk.size()) {
 		return false;
 	}
-	auto &gstate = input.global_state.Cast<RadixHTGlobalSinkState>();
-	auto &lstate = input.local_state.Cast<RadixHTLocalSinkState>();
-	auto prepare_start = RadixTraceStart(recorder);
-	auto &ht = PrepareRadixHTSinkState(context, *this, input);
-	RecordRadixTraceStage(recorder, "distinct_fast_insert.prepare_sink_state", prepare_start);
+	RadixSinkEntryScope scope(context, *this, input, recorder, "distinct_fast_insert.prepare_sink_state",
+	                          "distinct_fast_insert.finish_sink_state");
+	auto &ht = scope.HT();
+	auto &lstate = scope.LState();
 
 	auto &group_chunk = lstate.group_chunk;
 	auto populate_start = RadixTraceStart(recorder);
@@ -1263,13 +1319,13 @@ bool RadixPartitionedHashTable::TrySinkGroupsFast(ExecutionContext &context, Dat
 		auto vectorized_start = RadixTraceStart(recorder);
 		ht.AddChunk(group_chunk, empty_payload, empty_filter);
 		RecordRadixTraceStage(recorder, "distinct_fast_insert.vectorized_add_chunk", vectorized_start);
-		FinishRadixHTSinkState(context.client, gstate, lstate);
+		scope.Arm();
 		return true;
 	}
 	if (!ht.TryInsertGroupsFast(group_chunk, recorder)) {
 		return false;
 	}
-	FinishRadixHTSinkState(context.client, gstate, lstate);
+	scope.Arm();
 	return true;
 }
 
@@ -1321,10 +1377,9 @@ bool RadixPartitionedHashTable::TryUpdateNewPrimitiveGroups(
 		return false;
 	}
 
-	auto &gstate = input.global_state.Cast<RadixHTGlobalSinkState>();
-	auto prepare_start = RadixTraceStart(recorder);
-	auto &ht = PrepareRadixHTSinkState(context, *this, input);
-	RecordRadixTraceStage(recorder, "direct_new.prepare_sink_state", prepare_start);
+	RadixSinkEntryScope scope(context, *this, input, recorder, "direct_new.prepare_sink_state",
+	                          "direct_new.finish_sink_state");
+	auto &ht = scope.HT();
 
 	auto &group_chunk = lstate.group_chunk;
 	auto populate_start = RadixTraceStart(recorder);
@@ -1344,9 +1399,7 @@ bool RadixPartitionedHashTable::TryUpdateNewPrimitiveGroups(
 	auto update_marker_start = RadixTraceStart(recorder);
 	RecordRadixTraceStage(recorder, "direct_new.primitive_update", update_marker_start);
 
-	auto finish_start = RadixTraceStart(recorder);
-	FinishRadixHTSinkState(context.client, gstate, lstate);
-	RecordRadixTraceStage(recorder, "direct_new.finish_sink_state", finish_start);
+	scope.Arm();
 	return true;
 }
 
@@ -1366,10 +1419,9 @@ bool RadixPartitionedHashTable::TryUpdateNewPrimitiveGroupsWithPayloadInput(
 		return false;
 	}
 
-	auto &gstate = input.global_state.Cast<RadixHTGlobalSinkState>();
-	auto prepare_start = RadixTraceStart(recorder);
-	auto &ht = PrepareRadixHTSinkState(context, *this, input);
-	RecordRadixTraceStage(recorder, "direct_new_split_payload.prepare_sink_state", prepare_start);
+	RadixSinkEntryScope scope(context, *this, input, recorder, "direct_new_split_payload.prepare_sink_state",
+	                          "direct_new_split_payload.finish_sink_state");
+	auto &ht = scope.HT();
 
 	RadixPrimitiveGroupUpdateState update_state;
 	update_state.lanes = &lanes;
@@ -1381,9 +1433,7 @@ bool RadixPartitionedHashTable::TryUpdateNewPrimitiveGroupsWithPayloadInput(
 		RecordRadixTraceStage(recorder, "direct_existing_split_payload.update", existing_start);
 		auto update_marker_start = RadixTraceStart(recorder);
 		RecordRadixTraceStage(recorder, "direct_existing_split_payload.primitive_update", update_marker_start);
-		auto finish_start = RadixTraceStart(recorder);
-		FinishRadixHTSinkState(context.client, gstate, lstate);
-		RecordRadixTraceStage(recorder, "direct_existing_split_payload.finish_sink_state", finish_start);
+		scope.Arm();
 		return true;
 	}
 	RecordRadixTraceStage(recorder, "direct_existing_split_payload.miss", existing_start);
@@ -1398,9 +1448,7 @@ bool RadixPartitionedHashTable::TryUpdateNewPrimitiveGroupsWithPayloadInput(
 	auto update_marker_start = RadixTraceStart(recorder);
 	RecordRadixTraceStage(recorder, "direct_new_split_payload.primitive_update", update_marker_start);
 
-	auto finish_start = RadixTraceStart(recorder);
-	FinishRadixHTSinkState(context.client, gstate, lstate);
-	RecordRadixTraceStage(recorder, "direct_new_split_payload.finish_sink_state", finish_start);
+	scope.Arm();
 	return true;
 }
 
@@ -1415,10 +1463,9 @@ bool RadixPartitionedHashTable::TryAppendNewPrimitiveGroups(
 		return false;
 	}
 
-	auto &gstate = input.global_state.Cast<RadixHTGlobalSinkState>();
-	auto prepare_start = RadixTraceStart(recorder);
-	auto &ht = PrepareRadixHTSinkState(context, *this, input);
-	RecordRadixTraceStage(recorder, "direct_append_new.prepare_sink_state", prepare_start);
+	RadixSinkEntryScope scope(context, *this, input, recorder, "direct_append_new.prepare_sink_state",
+	                          "direct_append_new.finish_sink_state");
+	auto &ht = scope.HT();
 
 	auto &group_chunk = lstate.group_chunk;
 	auto populate_start = RadixTraceStart(recorder);
@@ -1435,13 +1482,11 @@ bool RadixPartitionedHashTable::TryAppendNewPrimitiveGroups(
 		return false;
 	}
 	RecordRadixTraceStage(recorder, "direct_append_new.append", append_start);
-	MaybeAdaptRadixHTSinkState(gstate, lstate);
+	MaybeAdaptRadixHTSinkState(scope.GState(), lstate);
 	auto update_marker_start = RadixTraceStart(recorder);
 	RecordRadixTraceStage(recorder, "direct_append_new.primitive_update", update_marker_start);
 
-	auto finish_start = RadixTraceStart(recorder);
-	FinishRadixHTSinkState(context.client, gstate, lstate);
-	RecordRadixTraceStage(recorder, "direct_append_new.finish_sink_state", finish_start);
+	scope.Arm();
 	return true;
 }
 
@@ -1454,11 +1499,10 @@ bool RadixPartitionedHashTable::TryUpdateNewGroupsWithSelectedStateAddresses(
 		return false;
 	}
 
-	auto &gstate = input.global_state.Cast<RadixHTGlobalSinkState>();
-	auto &lstate = input.local_state.Cast<RadixHTLocalSinkState>();
-	auto prepare_start = RadixTraceStart(recorder);
-	auto &ht = PrepareRadixHTSinkState(context, *this, input);
-	RecordRadixTraceStage(recorder, "direct_new_selected_state.prepare_sink_state", prepare_start);
+	RadixSinkEntryScope scope(context, *this, input, recorder, "direct_new_selected_state.prepare_sink_state",
+	                          "direct_new_selected_state.finish_sink_state");
+	auto &ht = scope.HT();
+	auto &lstate = scope.LState();
 
 	auto &group_chunk = lstate.group_chunk;
 	auto populate_start = RadixTraceStart(recorder);
@@ -1477,16 +1521,12 @@ bool RadixPartitionedHashTable::TryUpdateNewGroupsWithSelectedStateAddresses(
 		update_function(RadixStateAddressSpan(lstate.existing_group_addresses), nullptr, nullptr, group_chunk.size(),
 		                update_state);
 		RecordRadixTraceStage(recorder, "direct_new_selected_state.generic_update", generic_update_start);
-		auto finish_start = RadixTraceStart(recorder);
-		FinishRadixHTSinkState(context.client, gstate, lstate);
-		RecordRadixTraceStage(recorder, "direct_new_selected_state.finish_sink_state", finish_start);
+		scope.Arm();
 		return true;
 	}
 	RecordRadixTraceStage(recorder, "direct_new_selected_state.append_update", append_start);
 
-	auto finish_start = RadixTraceStart(recorder);
-	FinishRadixHTSinkState(context.client, gstate, lstate);
-	RecordRadixTraceStage(recorder, "direct_new_selected_state.finish_sink_state", finish_start);
+	scope.Arm();
 	return true;
 }
 
@@ -1499,11 +1539,10 @@ bool RadixPartitionedHashTable::TryUpdateGroupKeysWithSelectedStateAddresses(
 		return false;
 	}
 
-	auto &gstate = input.global_state.Cast<RadixHTGlobalSinkState>();
-	auto &lstate = input.local_state.Cast<RadixHTLocalSinkState>();
-	auto prepare_start = RadixTraceStart(recorder);
-	auto &ht = PrepareRadixHTSinkState(context, *this, input);
-	RecordRadixTraceStage(recorder, "direct_group_keys_selected_state.prepare_sink_state", prepare_start);
+	RadixSinkEntryScope scope(context, *this, input, recorder, "direct_group_keys_selected_state.prepare_sink_state",
+	                          "direct_group_keys_selected_state.finish_sink_state");
+	auto &ht = scope.HT();
+	auto &lstate = scope.LState();
 
 	auto append_start = RadixTraceStart(recorder);
 	if (!ht.TryFindOrCreateGroupsSelectedStateUpdateFast(groups, update_function, update_state, recorder,
@@ -1517,18 +1556,14 @@ bool RadixPartitionedHashTable::TryUpdateGroupKeysWithSelectedStateAddresses(
 		update_function(RadixStateAddressSpan(lstate.existing_group_addresses), nullptr, nullptr, groups.size(),
 		                update_state);
 		RecordRadixTraceStage(recorder, "direct_group_keys_selected_state.generic_update", generic_update_start);
-		auto finish_start = RadixTraceStart(recorder);
-		FinishRadixHTSinkState(context.client, gstate, lstate);
-		RecordRadixTraceStage(recorder, "direct_group_keys_selected_state.finish_sink_state", finish_start);
+		scope.Arm();
 		return true;
 	}
 	RecordRadixTraceStage(recorder, "direct_group_keys_selected_state.append_update", append_start);
 
 	{
 		auto &lstate = input.local_state.Cast<RadixHTLocalSinkState>();
-		auto finish_start = RadixTraceStart(recorder);
-		FinishRadixHTSinkState(context.client, gstate, lstate);
-		RecordRadixTraceStage(recorder, "direct_group_keys_selected_state.finish_sink_state", finish_start);
+		scope.Arm();
 	}
 	return true;
 }
@@ -1542,9 +1577,10 @@ bool RadixPartitionedHashTable::TryFindOrCreateRowPointerGroupStateTargets(
 		return false;
 	}
 
-	auto prepare_start = RadixTraceStart(recorder);
-	auto &ht = PrepareRadixHTSinkState(context, *this, input);
-	RecordRadixTraceStage(recorder, "row_pointer_grouped_targets.prepare_sink_state", prepare_start);
+	RadixSinkEntryScope scope(context, *this, input, recorder, "row_pointer_grouped_targets.prepare_sink_state",
+	                          "row_pointer_grouped_targets.finish_sink_state");
+	scope.GovernNow();
+	auto &ht = scope.HT();
 
 	auto lookup_start = RadixTraceStart(recorder);
 	if (!ht.TryFindOrCreateRowPointerGroupStateTargetsFast(payload_input, row_pointers, count, group_sources, targets,
@@ -1553,11 +1589,6 @@ bool RadixPartitionedHashTable::TryFindOrCreateRowPointerGroupStateTargets(
 		return false;
 	}
 	RecordRadixTraceStage(recorder, "row_pointer_grouped_targets.lookup", lookup_start);
-	auto &gstate = input.global_state.Cast<RadixHTGlobalSinkState>();
-	auto &lstate = input.local_state.Cast<RadixHTLocalSinkState>();
-	auto finish_start = RadixTraceStart(recorder);
-	FinishRadixHTSinkState(context.client, gstate, lstate);
-	RecordRadixTraceStage(recorder, "row_pointer_grouped_targets.finish_sink_state", finish_start);
 	return true;
 }
 
@@ -1571,9 +1602,10 @@ bool RadixPartitionedHashTable::TryFindOrCreateInputVectorGroupStateTargets(
 		return false;
 	}
 
-	auto prepare_start = RadixTraceStart(recorder);
-	auto &ht = PrepareRadixHTSinkState(context, *this, input);
-	RecordRadixTraceStage(recorder, "direct_input_vector_grouped_targets.prepare_sink_state", prepare_start);
+	RadixSinkEntryScope scope(context, *this, input, recorder, "direct_input_vector_grouped_targets.prepare_sink_state",
+	                          "direct_input_vector_grouped_targets.finish_sink_state");
+	scope.GovernNow();
+	auto &ht = scope.HT();
 
 	auto lookup_start = RadixTraceStart(recorder);
 	if (!ht.TryFindOrCreateInputVectorGroupStateTargetsFast(payload_input, count, group_sources, targets, recorder,
@@ -1582,11 +1614,6 @@ bool RadixPartitionedHashTable::TryFindOrCreateInputVectorGroupStateTargets(
 		return false;
 	}
 	RecordRadixTraceStage(recorder, "direct_input_vector_grouped_targets.lookup", lookup_start);
-	auto &gstate = input.global_state.Cast<RadixHTGlobalSinkState>();
-	auto &lstate = input.local_state.Cast<RadixHTLocalSinkState>();
-	auto finish_start = RadixTraceStart(recorder);
-	FinishRadixHTSinkState(context.client, gstate, lstate);
-	RecordRadixTraceStage(recorder, "direct_input_vector_grouped_targets.finish_sink_state", finish_start);
 	return true;
 }
 
@@ -1599,11 +1626,10 @@ bool RadixPartitionedHashTable::TryUpdateInputVectorGroupCountOne(
 		return false;
 	}
 
-	auto &gstate = input.global_state.Cast<RadixHTGlobalSinkState>();
-	auto &lstate = input.local_state.Cast<RadixHTLocalSinkState>();
-	auto prepare_start = RadixTraceStart(recorder);
-	auto &ht = PrepareRadixHTSinkState(context, *this, input);
-	RecordRadixTraceStage(recorder, "direct_input_vector_count_one.prepare_sink_state", prepare_start);
+	RadixSinkEntryScope scope(context, *this, input, recorder, "direct_input_vector_count_one.prepare_sink_state",
+	                          "direct_input_vector_count_one.finish_sink_state");
+	auto &ht = scope.HT();
+	auto &lstate = scope.LState();
 
 	auto update_start = RadixTraceStart(recorder);
 	if (!ht.TryUpdateSingleInputVectorGroupCountOneFast(payload_input, count, group_sources, lane, recorder,
@@ -1613,9 +1639,7 @@ bool RadixPartitionedHashTable::TryUpdateInputVectorGroupCountOne(
 	}
 	RecordRadixTraceStage(recorder, "direct_input_vector_count_one.lookup_update", update_start);
 
-	auto finish_start = RadixTraceStart(recorder);
-	FinishRadixHTSinkState(context.client, gstate, lstate);
-	RecordRadixTraceStage(recorder, "direct_input_vector_count_one.finish_sink_state", finish_start);
+	scope.Arm();
 	return true;
 }
 
@@ -1635,7 +1659,6 @@ bool RadixPartitionedHashTable::TryUpdateRowPointerGroupPrimitivePayloads(
 		return false;
 	}
 
-	auto &gstate = input.global_state.Cast<RadixHTGlobalSinkState>();
 	RadixPrimitiveGroupUpdateState update_state;
 	update_state.lanes = &lanes;
 	update_state.payloads = &payloads;
@@ -1657,10 +1680,6 @@ bool RadixPartitionedHashTable::TryUpdateRowPointerGroupPrimitivePayloads(
 	RecordRadixTraceStage(recorder, "direct_row_pointer_split_payload.update", update_start);
 	auto update_marker_start = RadixTraceStart(recorder);
 	RecordRadixTraceStage(recorder, "direct_row_pointer_split_payload.primitive_update", update_marker_start);
-
-	auto finish_start = RadixTraceStart(recorder);
-	FinishRadixHTSinkState(context.client, gstate, lstate);
-	RecordRadixTraceStage(recorder, "direct_row_pointer_split_payload.finish_sink_state", finish_start);
 	return true;
 }
 
@@ -1673,11 +1692,10 @@ bool RadixPartitionedHashTable::TryAppendNewGroupsWithStateAddresses(
 		return false;
 	}
 
-	auto &gstate = input.global_state.Cast<RadixHTGlobalSinkState>();
-	auto &lstate = input.local_state.Cast<RadixHTLocalSinkState>();
-	auto prepare_start = RadixTraceStart(recorder);
-	auto &ht = PrepareRadixHTSinkState(context, *this, input);
-	RecordRadixTraceStage(recorder, "direct_append_new_state_address.prepare_sink_state", prepare_start);
+	RadixSinkEntryScope scope(context, *this, input, recorder, "direct_append_new_state_address.prepare_sink_state",
+	                          "direct_append_new_state_address.finish_sink_state");
+	auto &ht = scope.HT();
+	auto &lstate = scope.LState();
 
 	auto &group_chunk = lstate.group_chunk;
 	auto populate_start = RadixTraceStart(recorder);
@@ -1687,17 +1705,15 @@ bool RadixPartitionedHashTable::TryAppendNewGroupsWithStateAddresses(
 	auto append_start = RadixTraceStart(recorder);
 	if (!ht.TryAppendNewGroupsWithStateAddressesFast(group_chunk, update_function, update_state, recorder,
 	                                                 dense_domain)) {
-		RecordRadixHTDirectAppendResult(gstate, lstate, group_chunk.size(), false, recorder);
+		RecordRadixHTDirectAppendResult(scope.GState(), lstate, group_chunk.size(), false, recorder);
 		RecordRadixTraceStage(recorder, "direct_append_new_state_address.append_miss", append_start);
 		return false;
 	}
-	RecordRadixHTDirectAppendResult(gstate, lstate, group_chunk.size(), true, recorder);
+	RecordRadixHTDirectAppendResult(scope.GState(), lstate, group_chunk.size(), true, recorder);
 	RecordRadixTraceStage(recorder, "direct_append_new_state_address.append", append_start);
-	MaybeAdaptRadixHTSinkState(gstate, lstate);
+	MaybeAdaptRadixHTSinkState(scope.GState(), lstate);
 
-	auto finish_start = RadixTraceStart(recorder);
-	FinishRadixHTSinkState(context.client, gstate, lstate);
-	RecordRadixTraceStage(recorder, "direct_append_new_state_address.finish_sink_state", finish_start);
+	scope.Arm();
 	return true;
 }
 
@@ -1716,25 +1732,23 @@ bool RadixPartitionedHashTable::TryAppendNewGroupKeysWithStateAddresses(
 		}
 	}
 
-	auto &gstate = input.global_state.Cast<RadixHTGlobalSinkState>();
-	auto &lstate = input.local_state.Cast<RadixHTLocalSinkState>();
-	auto prepare_start = RadixTraceStart(recorder);
-	auto &ht = PrepareRadixHTSinkState(context, *this, input);
-	RecordRadixTraceStage(recorder, "direct_append_new_group_keys_state_address.prepare_sink_state", prepare_start);
+	RadixSinkEntryScope scope(context, *this, input, recorder,
+	                          "direct_append_new_group_keys_state_address.prepare_sink_state",
+	                          "direct_append_new_group_keys_state_address.finish_sink_state");
+	auto &ht = scope.HT();
+	auto &lstate = scope.LState();
 
 	auto append_start = RadixTraceStart(recorder);
 	if (!ht.TryAppendNewGroupsWithStateAddressesFast(groups, update_function, update_state, recorder, dense_domain)) {
-		RecordRadixHTDirectAppendResult(gstate, lstate, groups.size(), false, recorder);
+		RecordRadixHTDirectAppendResult(scope.GState(), lstate, groups.size(), false, recorder);
 		RecordRadixTraceStage(recorder, "direct_append_new_group_keys_state_address.append_miss", append_start);
 		return false;
 	}
-	RecordRadixHTDirectAppendResult(gstate, lstate, groups.size(), true, recorder);
+	RecordRadixHTDirectAppendResult(scope.GState(), lstate, groups.size(), true, recorder);
 	RecordRadixTraceStage(recorder, "direct_append_new_group_keys_state_address.append", append_start);
-	MaybeAdaptRadixHTSinkState(gstate, lstate);
+	MaybeAdaptRadixHTSinkState(scope.GState(), lstate);
 
-	auto finish_start = RadixTraceStart(recorder);
-	FinishRadixHTSinkState(context.client, gstate, lstate);
-	RecordRadixTraceStage(recorder, "direct_append_new_group_keys_state_address.finish_sink_state", finish_start);
+	scope.Arm();
 	return true;
 }
 
@@ -1764,11 +1778,10 @@ bool RadixPartitionedHashTable::TryResolveNewGroupAddresses(
 		return false;
 	}
 
-	auto &gstate = input.global_state.Cast<RadixHTGlobalSinkState>();
-	auto &lstate = input.local_state.Cast<RadixHTLocalSinkState>();
-	auto prepare_start = RadixTraceStart(recorder);
-	auto &ht = PrepareRadixHTSinkState(context, *this, input);
-	RecordRadixTraceStage(recorder, "direct_new_address.prepare_sink_state", prepare_start);
+	RadixSinkEntryScope scope(context, *this, input, recorder, "direct_new_address.prepare_sink_state",
+	                          "direct_new_address.finish_sink_state");
+	auto &ht = scope.HT();
+	auto &lstate = scope.LState();
 
 	auto &group_chunk = lstate.group_chunk;
 	auto populate_start = RadixTraceStart(recorder);
@@ -1782,9 +1795,7 @@ bool RadixPartitionedHashTable::TryResolveNewGroupAddresses(
 	}
 	RecordRadixTraceStage(recorder, "direct_new_address.append", append_start);
 
-	auto finish_start = RadixTraceStart(recorder);
-	FinishRadixHTSinkState(context.client, gstate, lstate);
-	RecordRadixTraceStage(recorder, "direct_new_address.finish_sink_state", finish_start);
+	scope.Arm();
 	return true;
 }
 
