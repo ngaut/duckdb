@@ -133,7 +133,10 @@ public:
 	bool fast_string_equality_filter_supported = false;
 	vector<string> fast_string_equality_constants;
 	vector<uint8_t> fast_dictionary_matches;
-	const void *fast_dictionary_matches_entry = nullptr;
+	//! The cached bitmap is keyed by the dictionary's stable identity, never by the
+	//! buffer address: a recycled allocation with an equal entry count would
+	//! otherwise replay a stale bitmap against a different dictionary's layout.
+	string fast_dictionary_matches_dictionary_id;
 	idx_t fast_dictionary_matches_count = 0;
 
 	bool fast_internal_filter_initialized = false;

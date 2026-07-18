@@ -1136,8 +1136,8 @@ static bool TryFastDictionaryStringEqualityFilter(SelectionVector &sel, Vector &
 		return false;
 	}
 	auto &dict_buffer = input_vector.Buffer().Cast<DictionaryBuffer>();
-	auto &dict_entry = dict_buffer.GetEntry();
-	const bool can_cache_matches = !dict_buffer.GetDictionaryId().empty();
+	auto &dictionary_id = dict_buffer.GetDictionaryId();
+	const bool can_cache_matches = !dictionary_id.empty();
 	auto &expression_filter = filter.Cast<ExpressionFilter>();
 	const vector<string> *constants;
 	if (!GetFastStringEqualityConstants(expression_filter, state, constants)) {
@@ -1146,8 +1146,8 @@ static bool TryFastDictionaryStringEqualityFilter(SelectionVector &sel, Vector &
 
 	const auto dict_count = dictionary_size.GetIndex();
 	auto &dictionary_matches = state.fast_dictionary_matches;
-	const bool cache_hit = can_cache_matches && state.fast_dictionary_matches_entry == &dict_entry &&
-	                       state.fast_dictionary_matches_count == dict_count;
+	const bool cache_hit = can_cache_matches && state.fast_dictionary_matches_count == dict_count &&
+	                       state.fast_dictionary_matches_dictionary_id == dictionary_id;
 	if (!cache_hit) {
 		auto dict_data = FlatVector::GetData<string_t>(dictionary);
 		auto &dict_validity = FlatVector::Validity(dictionary);
@@ -1168,7 +1168,7 @@ static bool TryFastDictionaryStringEqualityFilter(SelectionVector &sel, Vector &
 				}
 			}
 		}
-		state.fast_dictionary_matches_entry = can_cache_matches ? &dict_entry : nullptr;
+		state.fast_dictionary_matches_dictionary_id = can_cache_matches ? dictionary_id : string();
 		state.fast_dictionary_matches_count = can_cache_matches ? dict_count : 0;
 	}
 
