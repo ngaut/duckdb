@@ -183,8 +183,12 @@ void ColumnSegment::Resize(idx_t new_size) {
 
 	auto &buffer_manager = BufferManager::GetBufferManager(db);
 	auto old_handle = buffer_manager.Pin(block);
-	auto new_handle = buffer_manager.Allocate(MemoryTag::IN_MEMORY_TABLE, new_size);
-	auto new_block = new_handle.GetBlockHandle();
+	// The resized block must keep the transient-segment lifecycle: registered
+	// with the block manager and spillable to temporary storage. A plain
+	// allocation is destroy-on-eviction, and a live table segment on such a
+	// block loses its rows under memory pressure.
+	auto new_block = buffer_manager.RegisterTransientMemory(new_size, block->GetBlockManager());
+	auto new_handle = buffer_manager.Pin(new_block);
 	memcpy(new_handle.GetDataMutable(), old_handle.Ptr(), segment_size);
 
 	D_ASSERT(segment_type == ColumnSegmentType::TRANSIENT);
