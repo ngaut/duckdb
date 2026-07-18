@@ -148,6 +148,24 @@ SljitPerfectHashDictionaryGroupLoopOptions(const SljitPerfectHashFusedUpdateEmit
 	return result;
 }
 
+// The packed-predicate hybrid loop emits this body once per matching lane: load the
+// selected execute index, re-establish the hoisted group array base the packed loop
+// may have clobbered, and update the row through the fast expression path.
+static void EmitSljitPerfectHashSimdLaneRowUpdate(const SljitPerfectHashFusedUpdateEmitContext &context,
+                                                  SljitPerfectHashGroupLookupOptions lookup,
+                                                  const SljitPerfectHashPayloadUpdateOptions &payload_update,
+                                                  const vector<SljitTypedExpressionTreeDataPointerHoist> *data_hoists,
+                                                  void (*emit_hoisted_array_base)(struct sljit_compiler *)) {
+	EmitLoadFusedAggregateExecuteIndex(context.compiler, true);
+	if (emit_hoisted_array_base) {
+		emit_hoisted_array_base(context.compiler);
+	}
+	lookup.expression_fast_path = true;
+	lookup.expression_all_valid = true;
+	lookup.expression_data_hoists = data_hoists;
+	EmitSljitPerfectHashRowUpdate(context, lookup, payload_update, false);
+}
+
 static sljit_jump *
 EmitSljitPerfectHashFlatFastLoop(const SljitPerfectHashFusedUpdateEmitContext &context,
                                  const SljitPerfectHashFusedUpdatePlan &update_plan,
@@ -157,18 +175,12 @@ EmitSljitPerfectHashFlatFastLoop(const SljitPerfectHashFusedUpdateEmitContext &c
 		EmitSljitTypedExpressionTreeSimdHybridFilterLoop(
 		    compiler, *context.predicate, update_plan.predicate_simd_plan, update_plan.predicate_simd_mask_offset,
 		    [&]() {
-			    EmitLoadFusedAggregateExecuteIndex(compiler, true);
-			    if (update_plan.hoist_fast_group_data_array_base) {
-				    EmitSljitPerfectHashFastGroupDataArrayBase(compiler);
-			    }
-			    auto lookup =
-			        SljitPerfectHashDirectGroupLookupOptions(context, update_plan.hoist_fast_group_data_array_base);
-			    lookup.expression_fast_path = true;
-			    lookup.expression_all_valid = true;
-			    lookup.expression_data_hoists = fast_data_hoists;
-			    EmitSljitPerfectHashRowUpdate(
-			        context, lookup, SljitPerfectHashPayloadUpdateOptionsForLoop(true, true, false, fast_data_hoists),
-			        false);
+			    EmitSljitPerfectHashSimdLaneRowUpdate(
+			        context,
+			        SljitPerfectHashDirectGroupLookupOptions(context, update_plan.hoist_fast_group_data_array_base),
+			        SljitPerfectHashPayloadUpdateOptionsForLoop(true, true, false, fast_data_hoists), fast_data_hoists,
+			        update_plan.hoist_fast_group_data_array_base ? EmitSljitPerfectHashFastGroupDataArrayBase
+			                                                     : nullptr);
 		    });
 	}
 	auto fast_loop = sljit_emit_label(compiler);
@@ -204,15 +216,11 @@ static sljit_jump *EmitSljitPerfectHashFlatPayloadDictionaryGroupLoop(
 		EmitSljitTypedExpressionTreeSimdHybridFilterLoop(
 		    compiler, *context.predicate, update_plan.predicate_simd_plan, update_plan.predicate_simd_mask_offset,
 		    [&]() {
-			    EmitLoadFusedAggregateExecuteIndex(compiler, true);
-			    if (loop_options.load_fast_group_dictionary_runtime_array_base) {
-				    EmitSljitPerfectHashFastGroupDictionaryRuntimeArrayBase(compiler);
-			    }
-			    auto lookup = loop_options.group_lookup;
-			    lookup.expression_fast_path = true;
-			    lookup.expression_all_valid = true;
-			    lookup.expression_data_hoists = data_hoists;
-			    EmitSljitPerfectHashRowUpdate(context, lookup, loop_options.payload_update, false);
+			    EmitSljitPerfectHashSimdLaneRowUpdate(context, loop_options.group_lookup, loop_options.payload_update,
+			                                          data_hoists,
+			                                          loop_options.load_fast_group_dictionary_runtime_array_base
+			                                              ? EmitSljitPerfectHashFastGroupDictionaryRuntimeArrayBase
+			                                              : nullptr);
 		    });
 	}
 	return EmitSljitPerfectHashUpdateLoop(context, loop_options);
@@ -237,19 +245,14 @@ static sljit_jump *EmitSljitPerfectHashFlatPayloadSelectedGroupLoop(
 	    use_group_data_array_base_reg ? SLJIT_PERFECT_HASH_STATE_REG : 0;
 	loop_options.payload_update = SljitPerfectHashPayloadUpdateOptionsForLoop(true, true, false, data_hoists);
 	if (update_plan.predicate_simd_plan.supported) {
-		EmitSljitTypedExpressionTreeSimdHybridFilterLoop(compiler, *context.predicate, update_plan.predicate_simd_plan,
-		                                                 update_plan.predicate_simd_mask_offset, [&]() {
-			                                                 EmitLoadFusedAggregateExecuteIndex(compiler, true);
-			                                                 if (loop_options.load_fast_group_data_array_base) {
-				                                                 EmitSljitPerfectHashFastGroupDataArrayBase(compiler);
-			                                                 }
-			                                                 auto lookup = loop_options.group_lookup;
-			                                                 lookup.expression_fast_path = true;
-			                                                 lookup.expression_all_valid = true;
-			                                                 lookup.expression_data_hoists = data_hoists;
-			                                                 EmitSljitPerfectHashRowUpdate(
-			                                                     context, lookup, loop_options.payload_update, false);
-		                                                 });
+		EmitSljitTypedExpressionTreeSimdHybridFilterLoop(
+		    compiler, *context.predicate, update_plan.predicate_simd_plan, update_plan.predicate_simd_mask_offset,
+		    [&]() {
+			    EmitSljitPerfectHashSimdLaneRowUpdate(
+			        context, loop_options.group_lookup, loop_options.payload_update, data_hoists,
+			        loop_options.load_fast_group_data_array_base ? EmitSljitPerfectHashFastGroupDataArrayBase
+			                                                     : nullptr);
+		    });
 	}
 	return EmitSljitPerfectHashUpdateLoop(context, loop_options);
 }
