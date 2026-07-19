@@ -1943,16 +1943,14 @@ def verify_regular_hash_join_direct_aggregate_storage_contract() -> None:
 
 
 
-def verify_deferral_legality_and_handoff_single_authority() -> None:
-    """Runner handoff must be impossible with rows in flight, and the recipe
-    strategies that refuse it must be classified in one place.
+def verify_deferral_legality() -> None:
+    """Deferral is legal only at kernel entry or a declined claim boundary.
 
     A mid-stream deferral abandons the contract cursor's partially-read row
     group (measured 2026-07-19: one full row group silently lost per defer), so
-    the runtime accepts a deferral only at kernel entry or through the
-    declined-claim boundary path and throws otherwise. The strategy-level
-    handoff classification lives next to the strategy enum; the kernel derives
-    its capability from it instead of pattern-matching strategy names locally.
+    the runtime accepts a deferral only at kernel entry or through the private
+    declined-boundary path and throws otherwise; the kernel probes native join
+    readiness in an entry prologue so genuine fallback states defer legally.
     """
     runner = read("src/execution/execution_region_runner.cpp")
     if "requested a mid-stream deferral" not in runner:
@@ -1964,6 +1962,19 @@ def verify_deferral_legality_and_handoff_single_authority() -> None:
     if "CanDeferAtEntry" not in runner:
         raise AssertionError("the runtime must expose entry-deferral legality to kernels")
     kernel = read("extension/jit_sljit/sljit_region_runtime.cpp")
+    if "SljitTryDeferNotReadyNativeJoinProbesAtEntry" not in kernel:
+        raise AssertionError("the kernel must probe native join readiness in its entry prologue")
+
+
+def verify_handoff_capability_single_authority() -> None:
+    """Runner-handoff capability derives from one classification per strategy.
+
+    Recipes that claim exclusive sink ownership (inline distinct-key counting)
+    and kernels that batch without a per-chunk flush (metal) can never hand off
+    mid-query; the classification lives beside the strategy enum and the kernel
+    derives its capability instead of pattern-matching strategy names.
+    """
+    kernel = read("extension/jit_sljit/sljit_region_runtime.cpp")
     if "DISTINCT_KEY_SINK" in kernel:
         raise AssertionError(
             "the kernel must not pattern-match strategy names; handoff capability is the "
@@ -1971,18 +1982,38 @@ def verify_deferral_legality_and_handoff_single_authority() -> None:
         )
     if "SljitFullPipelinePrimitiveStepSupportsRunnerHandoff" not in kernel:
         raise AssertionError("the kernel capability must derive from the step-level single authority")
-    if "SljitTryDeferNotReadyNativeJoinProbesAtEntry" not in kernel:
-        raise AssertionError("the kernel must probe native join readiness in its entry prologue")
     strategy_header = read("extension/jit_sljit/include/sljit_grouped_aggregate_update_primitive.hpp")
     if ("enum class SljitGroupedAggregateUpdateStrategyKind" not in strategy_header
             or "SljitGroupedAggregateUpdateStrategySupportsRunnerHandoff" not in strategy_header):
         raise AssertionError(
             "the strategy handoff classification must live beside the strategy enum definition"
         )
+    metal = read("extension/jit_metal/metal_backend.mm")
+    if "SupportsRunnerHandoff" not in metal:
+        raise AssertionError(
+            "the metal kernel must refuse runner handoff: it batches source chunks without a per-chunk "
+            "flush, so a declined claim boundary would strand claimed-but-unsunk rows"
+        )
+
+
+def verify_runner_switch_state_machine() -> None:
+    """Runner-switch legality is owned by explicit state machines.
+
+    The executor's source-cursor state machine makes illegal switches
+    unrepresentable, and every adaptive phase transition is a method on the
+    adaptive state — split-brain writes are how the runner-switch bugs were
+    born.
+    """
+    runner = read("src/execution/execution_region_runner.cpp")
     if runner.count("pipeline.VectorizedSourceCursorDirty()") < 2:
         raise AssertionError(
             "both compiled entry points in the adaptive state machine must bounce executors whose "
             "vectorized cursor did an unmanaged fetch (the executor-side layer of the claim-point law)"
+        )
+    if ".phase.store(" in runner:
+        raise AssertionError(
+            "adaptive phase transitions must live in ExecutionRegionAdaptiveAbState methods, not in the "
+            "runner: split-brain phase writes are how the runner-switch bugs were born"
         )
     executor_header = read("src/include/duckdb/parallel/pipeline_executor.hpp")
     if "enum class SourceCursorState" not in executor_header:
@@ -1997,11 +2028,16 @@ def verify_deferral_legality_and_handoff_single_authority() -> None:
         raise AssertionError(
             "FetchFromSourceContract must reject contract fetches over an in-flight vectorized cursor"
         )
-    if ".phase.store(" in runner:
-        raise AssertionError(
-            "adaptive phase transitions must live in ExecutionRegionAdaptiveAbState methods, not in the "
-            "runner: split-brain phase writes are how the runner-switch bugs were born"
-        )
+
+
+def verify_input_layout_single_authority() -> None:
+    """Layout validation consumes the one authority for dereferenced inputs.
+
+    Fused input transforms are invisible to delegation, so recipe admission
+    proves DeclaredInputConstraints — what an op's execution actually
+    dereferences — against the fed layout, instead of consulting scattered
+    kind-specific fields (the silent-empty-vector trap).
+    """
     builder = read("extension/jit_sljit/sljit_full_pipeline_recipe_sequence_builder.cpp")
     if "NativeTailInputLayoutMatches" not in builder:
         raise AssertionError(
@@ -2015,12 +2051,15 @@ def verify_deferral_legality_and_handoff_single_authority() -> None:
                 f"the {name} layout validation must consume DeclaredInputConstraints — the single "
                 "authority for what an op's execution dereferences — instead of kind-specific fields"
             )
-    metal = read("extension/jit_metal/metal_backend.mm")
-    if "SupportsRunnerHandoff" not in metal:
-        raise AssertionError(
-            "the metal kernel must refuse runner handoff: it batches source chunks without a per-chunk "
-            "flush, so a declined claim boundary would strand claimed-but-unsunk rows"
-        )
+
+
+def verify_storage_buffer_lifecycle() -> None:
+    """Live table segments must never sit on destroy-on-eviction buffers.
+
+    ColumnSegment::Resize grows live transient segments for direct append; a
+    plain allocation is destroy-on-eviction and silently loses table data under
+    memory pressure, so the grown block must register as transient memory.
+    """
     column_segment = read("src/storage/table/column_segment.cpp")
     if "RegisterTransientMemory" not in column_segment:
         raise AssertionError(
@@ -2046,7 +2085,11 @@ def main() -> None:
     verify_runtime_proofs_are_typed()
     verify_runner_cost_schema_single_authority()
     verify_cache_keys_use_stable_identities()
-    verify_deferral_legality_and_handoff_single_authority()
+    verify_deferral_legality()
+    verify_handoff_capability_single_authority()
+    verify_runner_switch_state_machine()
+    verify_input_layout_single_authority()
+    verify_storage_buffer_lifecycle()
     verify_production_contract_ownership()
     verify_benchmark_repetition_budget()
     verify_bound_direct_join_terminal_contract()

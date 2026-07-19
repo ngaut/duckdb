@@ -231,6 +231,12 @@ enum class SljitAggregatePayloadBindingState : uint8_t {
 
 struct SljitNativeAggregateUpdatePlan {
 	ExecutionRegionSinkInfo sink_info;
+	//! The layout the region graph FEEDS this aggregate (compiled updates bind
+	//! against it). NOT the delegated physical sink's expectation: delegation
+	//! dereferences sink_info's reference declarations, which can differ when
+	//! input transforms (payload compute, perfect-hash group compression) are
+	//! fused into the compiled representation. DeclaredInputConstraints() is the
+	//! single authority for what execution actually touches.
 	vector<LogicalType> input_types;
 	vector<SljitNativeRegionExpressionPlan> payloads;
 	vector<SljitNativeRegionExpressionPlan> group_expressions;
