@@ -67,6 +67,12 @@ static bool SljitExecuteGeneratedFilterPrimitive(ExecutionRegionRuntime &runtime
 	    SljitSelectFilter(filter_op, source_chunk, filter_selection,
 	                      scratch.ExpressionAdapterScratch(primitive.filter_idx, 0), input.selection, input.count);
 	RecordSljitRegionStageRuntime(runtime, primitive.filter_idx, filter_op.kind, "selection", filter_stage_start);
+	// Rows-weighted SIMD coverage: traces answer "how much filter input ran
+	// through the packed prefix" without a dedicated benchmark.
+	RecordSljitRegionRuntimePath(runtime, filter_op.kind,
+	                             filter_op.filter->expression.predicate_partial_simd ? "selection.partial_simd"
+	                                                                                 : "selection.scalar",
+	                             input.count);
 	if (selected_count == 0) {
 		return false;
 	}

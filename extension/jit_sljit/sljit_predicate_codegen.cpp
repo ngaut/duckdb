@@ -157,7 +157,8 @@ static sljit_jump *EmitSljitNativePredicateLoop(struct sljit_compiler *compiler,
 unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativePredicate(const SljitNativePredicate &predicate,
                                                                 bool materialize_result,
                                                                 SljitNativePredicateFunction &function, string &error,
-                                                                const ExecutionExpressionIR *typed_root) {
+                                                                const ExecutionExpressionIR *typed_root,
+                                                                bool *used_partial_simd) {
 	auto compiler = sljit_create_compiler(nullptr);
 	if (!compiler) {
 		error = "failed to create SLJIT compiler";
@@ -167,6 +168,9 @@ unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativePredicate(const SljitNativ
 	auto partial_simd = !materialize_result && typed_root
 	                        ? TryPlanSljitNativePredicatePartialSimd(*typed_root, predicate.source_not_null)
 	                        : SljitNativePredicatePartialSimdPlan();
+	if (used_partial_simd) {
+		*used_partial_simd = partial_simd.supported;
+	}
 	auto local_size = NumericCast<sljit_sw>(materialize_result ? 0 : SLJIT_SELECT_LOCAL_SIZE);
 	if (SljitPredicateDoubleCompareUsesHelper(predicate)) {
 		local_size = SLJIT_SELECT_LOCAL_SIZE + sizeof(double) * 2;

@@ -35,6 +35,9 @@ struct SljitExecutableRegionExpression {
 	SljitCompiledFunction<SljitNativeVectorFunction> select;
 	SljitCompiledFunction<SljitNativePredicateFunction> predicate;
 	SljitCompiledFunction<SljitNativePredicateFunction> predicate_select;
+	//! The selection predicate emitted a packed-SIMD prefix (scalar residual
+	//! remains); recorded so traces report rows-weighted SIMD coverage.
+	bool predicate_partial_simd = false;
 	string overflow_message;
 
 	bool HasSelectionKernel() const {

@@ -340,7 +340,7 @@ bool SljitCompilePreparedExecutableRegionExpression(SljitExecutableRegionExpress
 		if (require_boolean) {
 			return build_predicate_select([&](SljitNativePredicateFunction &function) {
 				return BuildSljitNativePredicate(*semantic.predicate, false, function, error,
-				                                 semantic.expression_tree.get());
+				                                 semantic.expression_tree.get(), &expr.predicate_partial_simd);
 			});
 		}
 		return build_predicate([&](SljitNativePredicateFunction &function) {
