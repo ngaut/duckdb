@@ -1,4 +1,5 @@
 #include "duckdb/parallel/execution_region_pipeline_adapter.hpp"
+#include "duckdb/main/query_profiler.hpp"
 
 #include "duckdb/common/allocator.hpp"
 #include "duckdb/common/exception.hpp"
@@ -135,6 +136,28 @@ bool ExecutionRegionPipelineAdapter::SourceContractFetched() const {
 
 bool ExecutionRegionPipelineAdapter::VectorizedSourceCursorDirty() const {
 	return executor.vectorized_source_unmanaged_fetch;
+}
+
+void ExecutionRegionPipelineAdapter::AddProfilingAnnotation(const string &key, const string &value,
+                                                            bool covered_operators) {
+	auto &profiler = QueryProfiler::Get(executor.context.client);
+	if (!profiler.IsEnabled()) {
+		return;
+	}
+	auto &pipeline = executor.pipeline;
+	auto source = pipeline.GetSource();
+	if (source) {
+		profiler.AddOperatorAnnotation(*source, key, value);
+	}
+	if (!covered_operators) {
+		return;
+	}
+	for (auto &op : pipeline.GetIntermediateOperators()) {
+		profiler.AddOperatorAnnotation(op.get(), key, value);
+	}
+	if (pipeline.GetSink()) {
+		profiler.AddOperatorAnnotation(*pipeline.GetSink(), key, value);
+	}
 }
 
 ExecutionOperatorBindResult

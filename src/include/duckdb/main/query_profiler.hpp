@@ -133,6 +133,11 @@ public:
 	DUCKDB_API void Flush(OperatorProfiler &profiler);
 	//! Adds the top level query information to the global profiler.
 	DUCKDB_API void SetBlockedTime(const double &blocked_thread_time);
+	//! Attach an EXPLAIN ANALYZE annotation to an operator's profiling node.
+	//! Annotations are applied as a final overlay after all metric flushes, so
+	//! per-thread extra-info refreshes cannot clobber them. First write wins per
+	//! key; unknown operators are ignored.
+	DUCKDB_API void AddOperatorAnnotation(const PhysicalOperator &op, string key, string value);
 	//! Returns true when execution-region events can be captured by this query profiler.
 	DUCKDB_API bool AcceptsExecutionRegionEvents() const;
 	//! Captures one execution-region telemetry event for this query's EXPLAIN/profiler output.
@@ -194,6 +199,8 @@ private:
 
 	//! A map of a Physical Operator pointer to a tree node
 	TreeMap tree_map;
+	//! Pending operator annotations, applied to the tree after execution.
+	reference_map_t<const PhysicalOperator, InsertionOrderPreservingMap<string>> operator_annotations;
 	//! Whether or not we are running as part of a explain_analyze query
 	bool is_explain_analyze;
 	//! Whether root metrics have been finalized for output

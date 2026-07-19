@@ -190,6 +190,13 @@ ExecutionRunnerResult CompiledVectorizedRunner::ExecuteAdaptive(ExecutionRegionP
 				// boundary; keep the CBO's compiled selection.
 				ab.phase.store(ExecutionRegionAdaptiveAbPhase::COMMIT_COMPILED);
 			}
+			if (ab.phase.load() != ExecutionRegionAdaptiveAbPhase::MEASURING_COMPILED_RUNNING) {
+				pipeline.AddProfilingAnnotation("jit_adaptive",
+				                                ab.phase.load() == ExecutionRegionAdaptiveAbPhase::FALLBACK_NATIVE
+				                                    ? "fallback_native"
+				                                    : "commit_compiled",
+				                                false);
+			}
 			if (ExecutionRegionSettings::TraceRuntime(client) &&
 			    ab.phase.load() != ExecutionRegionAdaptiveAbPhase::MEASURING_COMPILED_RUNNING) {
 				auto reason = StringUtil::Format(
@@ -702,6 +709,11 @@ CompiledVectorizedRunStatus CompiledVectorizedRunner::ExecuteCompiledRegion(
 				    CompiledFullPipelineResultToString(compiled_result), runtime_metrics);
 			}
 			pipeline.LatchDeferredCompiledExecution();
+			pipeline.AddProfilingAnnotation("jit_deferred",
+			                                runtime.DeferredReason().empty()
+			                                    ? string("deferred to vectorized continuation")
+			                                    : runtime.DeferredReason(),
+			                                false);
 			return CompiledVectorizedRunStatus::VECTORIZED_DEFERRED;
 		}
 		auto pipeline_result = CompiledFullPipelineResultToPipelineExecuteResult(compiled_result);
@@ -711,6 +723,7 @@ CompiledVectorizedRunStatus CompiledVectorizedRunner::ExecuteCompiledRegion(
 			compiled_result = PipelineExecuteResultToCompiledFullPipelineResult(pipeline_result);
 		}
 		result = pipeline_result;
+		pipeline.AddProfilingAnnotation("jit", "compiled full-pipeline kernel (" + kernel->BackendName() + ")", true);
 		auto elapsed_us = trace_runtime ? ExecutionRegionElapsedMicros(trace_start) : 0;
 		if (trace_runtime) {
 			auto runtime_metrics = runtime.Metrics(elapsed_us);

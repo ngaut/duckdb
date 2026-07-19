@@ -413,8 +413,9 @@ static void AddExecutionRegionEvents(QueryProfileResult &node, const QueryProfil
 	}
 }
 
-static void RenderExecutionRegionCboPipelineToStream(std::ostream &ss, const QueryProfilerExecutionRegionTrace &trace);
-static void RenderExecutionRegionRuntimePipelineToStream(std::ostream &ss,
+static void RenderExecutionRegionCboPipelineToStream(std::ostream &ss, ClientContext &context,
+                                                     const QueryProfilerExecutionRegionTrace &trace);
+static void RenderExecutionRegionRuntimePipelineToStream(std::ostream &ss, ClientContext &context,
                                                          const QueryProfilerExecutionRegionTrace &trace);
 
 static void RenderExecutionRegionsToStream(std::ostream &ss, ClientContext &context, double query_runtime_seconds,
@@ -445,11 +446,13 @@ static void RenderExecutionRegionsToStream(std::ostream &ss, ClientContext &cont
 	   << " kernel_build_us=" << summary.kernel_build_us << " lazy_codegen_us=" << summary.lazy_codegen.codegen_time_us
 	   << " lazy_machine_codegen_us=" << summary.lazy_codegen.machine_codegen_time_us
 	   << " lazy_code_size=" << summary.lazy_codegen.code_size << "\n";
-	RenderExecutionRegionCboPipelineToStream(ss, trace);
-	RenderExecutionRegionRuntimePipelineToStream(ss, trace);
+	RenderExecutionRegionCboPipelineToStream(ss, context, trace);
+	RenderExecutionRegionRuntimePipelineToStream(ss, context, trace);
 }
 
-static void RenderExecutionRegionCboPipelineToStream(std::ostream &ss, const QueryProfilerExecutionRegionTrace &trace) {
+static void RenderExecutionRegionCboPipelineToStream(std::ostream &ss, ClientContext &context,
+                                                     const QueryProfilerExecutionRegionTrace &trace) {
+	const bool full_detail = ExecutionRegionSettings::TraceDecisions(context);
 	bool wrote_header = false;
 	for (const auto &event : trace) {
 		if (ExecutionRegionEventIsRuntime(event) || !ExecutionRegionEventIsVisibleInQueryProfile(event)) {
@@ -458,6 +461,23 @@ static void RenderExecutionRegionCboPipelineToStream(std::ostream &ss, const Que
 		if (!wrote_header) {
 			ss << "  CBO_PIPELINE\n";
 			wrote_header = true;
+		}
+		if (!full_detail) {
+			// One line per decision: enable jit_trace_decisions for the full cost story.
+			ss << "    id=" << event.event_id << " status=" << ExecutionRegionEventStatusToString(event.status_kind)
+			   << " runner=" << ExecutionRunnerKindToString(event.selected_runner);
+			if (event.runner_cost.present) {
+				ss << " net_benefit=" << event.runner_cost.net_benefit
+				   << " reason=" << ExecutionRegionProfileToken(event.runner_cost.selection_reason, 72);
+			}
+			if (event.code_size > 0) {
+				ss << " code_size=" << event.code_size;
+			}
+			if (!event.blocker.empty() && event.blocker != "none") {
+				ss << " blocker=" << ExecutionRegionProfileToken(event.blocker, 48);
+			}
+			ss << "\n";
+			continue;
 		}
 		ss << "    id=" << event.event_id << " phase=" << ExecutionRegionEventPhaseToString(event.phase_kind)
 		   << " status=" << ExecutionRegionEventStatusToString(event.status_kind)
@@ -496,8 +516,60 @@ static void RenderExecutionRegionCboPipelineToStream(std::ostream &ss, const Que
 	}
 }
 
-static void RenderExecutionRegionRuntimePipelineToStream(std::ostream &ss,
+struct ExecutionRegionKernelRuntimeAggregate {
+	idx_t entries = 0;
+	idx_t input_rows = 0;
+	idx_t output_rows = 0;
+	int64_t runtime_us = 0;
+	int64_t source_us = 0;
+	int64_t generated_us = 0;
+	int64_t sink_us = 0;
+	string backend_name;
+	string sample_reason;
+};
+
+//! Default runtime view: one aggregate line per kernel; jit_trace_decisions
+//! switches to the full per-entry event lines.
+static void RenderExecutionRegionRuntimeKernelSummaryToStream(std::ostream &ss,
+                                                              const QueryProfilerExecutionRegionTrace &trace) {
+	map<idx_t, ExecutionRegionKernelRuntimeAggregate> kernels;
+	for (const auto &event : trace) {
+		if (!ExecutionRegionEventIsRuntime(event) || !ExecutionRegionEventIsVisibleInQueryProfile(event)) {
+			continue;
+		}
+		auto &agg = kernels[event.kernel_id];
+		agg.entries++;
+		agg.input_rows += event.input_rows;
+		agg.output_rows += event.output_rows;
+		agg.runtime_us += event.runtime_time_us;
+		agg.source_us += event.source_contract_runtime_time_us;
+		agg.generated_us += event.generated_body_runtime_time_us;
+		agg.sink_us += event.sink_next_batch_runtime_time_us;
+		agg.backend_name = event.backend_name;
+		if (agg.sample_reason.empty() || event.reason.find("verdict") != string::npos ||
+		    event.reason.find("defer") != string::npos) {
+			agg.sample_reason = event.reason;
+		}
+	}
+	if (kernels.empty()) {
+		return;
+	}
+	ss << "  RUNTIME_KERNELS\n";
+	for (auto &entry : kernels) {
+		auto &agg = entry.second;
+		ss << "    kernel=" << entry.first << " backend=" << agg.backend_name << " entries=" << agg.entries
+		   << " rows=" << agg.input_rows << "->" << agg.output_rows << " runtime_us=" << agg.runtime_us
+		   << " source_us=" << agg.source_us << " generated_us=" << agg.generated_us << " sink_us=" << agg.sink_us
+		   << " last_note=" << ExecutionRegionProfileToken(agg.sample_reason, 72) << "\n";
+	}
+}
+
+static void RenderExecutionRegionRuntimePipelineToStream(std::ostream &ss, ClientContext &context,
                                                          const QueryProfilerExecutionRegionTrace &trace) {
+	if (!ExecutionRegionSettings::TraceDecisions(context)) {
+		RenderExecutionRegionRuntimeKernelSummaryToStream(ss, trace);
+		return;
+	}
 	bool wrote_header = false;
 	for (const auto &event : trace) {
 		if (!ExecutionRegionEventIsRuntime(event) || !ExecutionRegionEventIsVisibleInQueryProfile(event)) {
@@ -1558,6 +1630,17 @@ void QueryProfiler::WriteToFile(const char *path, string &info) const {
 	file->Close();
 }
 
+void QueryProfiler::AddOperatorAnnotation(const PhysicalOperator &op, string key, string value) {
+	lock_guard<std::mutex> guard(lock);
+	if (tree_map.find(op) == tree_map.end()) {
+		return;
+	}
+	auto &annotations = operator_annotations[op];
+	if (annotations.find(key) == annotations.end()) {
+		annotations.insert(make_pair(std::move(key), std::move(value)));
+	}
+}
+
 unique_ptr<ProfilingNode> QueryProfiler::CreateTree(const PhysicalOperator &root_p, const idx_t depth) {
 	if (OperatorRequiresProfiling(root_p.type)) {
 		query_requires_profiling = true;
@@ -1683,6 +1766,16 @@ void QueryProfiler::FinalizeMetricsInternal() {
 	}
 	query_metrics.FinalizeMetrics(*metrics);
 	metrics_finalized = true;
+	for (auto &annotation_entry : operator_annotations) {
+		auto tree_entry = tree_map.find(annotation_entry.first);
+		if (tree_entry == tree_map.end()) {
+			continue;
+		}
+		auto &info = tree_entry->second.get().GetOperatorMetrics();
+		for (auto &kv : annotation_entry.second) {
+			info.AddExtraInfo(kv.first, kv.second);
+		}
+	}
 }
 
 } // namespace duckdb

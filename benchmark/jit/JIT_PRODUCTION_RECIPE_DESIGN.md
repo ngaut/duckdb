@@ -275,6 +275,21 @@ leg or join a committed kernel. Verdicts are recorded as runtime events carrying
 times and rows, a recorded fallback verdict satisfies the kernel's declared
 runtime proof requirements, and a verdict is final for its kernel's lifetime.
 
+## Observability
+
+EXPLAIN ANALYZE carries the execution-region story at three levels. The
+`JIT_EXECUTION_REGIONS` block summarizes policy, backend, and the region time
+split; `CBO_PIPELINE` prints one line per selection decision and
+`RUNTIME_KERNELS` one aggregate line per executed kernel. The operator tree
+itself is annotated: every operator covered by a compiled full-pipeline kernel
+carries a `jit` attribution (which also explains their near-zero native
+timings — the kernel bypasses per-operator execution), the pipeline source
+carries `jit_adaptive` verdicts and `jit_deferred` reasons when those occur.
+Annotations are applied as a post-execution overlay so per-thread extra-info
+refreshes cannot clobber them. `jit_trace_decisions=true` switches both
+sections to the full per-event lines; `duckdb_jit_events()` remains the
+machine-readable authority.
+
 The structural execution-region plan belongs to the physical pipeline and is
 built at most once. Recursive rescheduling resets source state and refreshes
 dynamic readiness, but it does not reconstruct the graph, rerun capability

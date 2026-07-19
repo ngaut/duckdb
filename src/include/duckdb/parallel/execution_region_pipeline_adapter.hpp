@@ -50,6 +50,9 @@ public:
 	                                                const ExecutionRegionOperatorInfo &operator_info);
 	bool SourceContractFetched() const;
 	bool VectorizedSourceCursorDirty() const;
+	//! EXPLAIN ANALYZE attribution: annotate this pipeline's profiling nodes.
+	//! covered_operators=true also marks the intermediate operators and sink.
+	void AddProfilingAnnotation(const string &key, const string &value, bool covered_operators);
 	ExecutionOperatorBindResult BindOperator(idx_t operator_index, DataChunk &input,
 	                                         const ExecutionRegionOperatorInfo &operator_info,
 	                                         ExecutionOperatorBinding &binding);

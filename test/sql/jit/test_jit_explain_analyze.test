@@ -1,0 +1,57 @@
+# name: test/sql/jit/test_jit_explain_analyze.test
+# description: EXPLAIN ANALYZE renders JIT attribution: condensed sections, tree annotations, verbose detail, adaptive verdicts
+# group: [jit]
+
+statement ok
+LOAD jit_sljit
+
+statement ok
+SET threads=1;
+
+statement ok
+CREATE TABLE t AS SELECT (range % 97)::INTEGER g, range::BIGINT v FROM range(500000);
+
+# Compiled pipeline: condensed CBO + runtime-kernel sections and operator tree
+# annotations must render without error.
+statement ok
+EXPLAIN ANALYZE SELECT g, sum(v) FROM t WHERE v % 3 = 0 GROUP BY g;
+
+# Verbose mode: full per-decision and per-entry event lines.
+statement ok
+SET jit_trace_decisions=true;
+
+statement ok
+EXPLAIN ANALYZE SELECT g, sum(v) FROM t WHERE v % 3 = 0 GROUP BY g;
+
+statement ok
+SET jit_trace_decisions=false;
+
+# Adaptive measurement: verdict annotation path.
+statement ok
+SET jit_adaptive_ab=true;
+
+statement ok
+EXPLAIN ANALYZE SELECT g, sum(v) FROM t WHERE v % 3 = 0 GROUP BY g;
+
+statement ok
+SET jit_adaptive_ab=false;
+
+# Entry deferral annotation path.
+statement ok
+SET jit_debug_force_entry_defer=true;
+
+statement ok
+EXPLAIN ANALYZE SELECT g, sum(v) FROM t WHERE v % 3 = 0 GROUP BY g;
+
+statement ok
+SET jit_debug_force_entry_defer=false;
+
+# Vectorized-only queries still render.
+statement ok
+SET jit_policy='off';
+
+statement ok
+EXPLAIN ANALYZE SELECT g, sum(v) FROM t GROUP BY g;
+
+statement ok
+SET jit_policy='auto';

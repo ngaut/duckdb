@@ -693,6 +693,26 @@ TEST_CASE("EXPLAIN ANALYZE exposes compact execution region profile", "[api][jit
 	                        "SELECT sum(i * g) FROM jit_explain_analyze_input");
 	REQUIRE_NO_FAIL(*result);
 	REQUIRE(result->RowCount() == 1);
+	auto condensed_plan = result->GetValue(1, 0).GetValue<string>();
+	// Default rendering is condensed: one line per decision and per kernel, and
+	// the operator tree is annotated with the compiled-region attribution.
+	REQUIRE(StringUtil::Contains(condensed_plan, "JIT_EXECUTION_REGIONS"));
+	REQUIRE(StringUtil::Contains(condensed_plan, "CBO_PIPELINE"));
+	REQUIRE(StringUtil::Contains(condensed_plan, "net_benefit="));
+	REQUIRE(StringUtil::Contains(condensed_plan, "reason="));
+	REQUIRE(StringUtil::Contains(condensed_plan, "RUNTIME_KERNELS"));
+	REQUIRE(StringUtil::Contains(condensed_plan, "generated_us="));
+	REQUIRE(StringUtil::Contains(condensed_plan, "compiled full-pipeline"));
+	REQUIRE(!StringUtil::Contains(condensed_plan, "stages=gen:"));
+	REQUIRE(!StringUtil::Contains(condensed_plan, "RUNTIME_PIPELINE"));
+
+	// Full per-event detail is opt-in through jit_trace_decisions.
+	REQUIRE_NO_FAIL(con.Query("SET jit_trace_decisions=true"));
+	ClearJitTrace(manager, true);
+	result = con.Query("EXPLAIN ANALYZE "
+	                   "SELECT sum(i * g) FROM jit_explain_analyze_input");
+	REQUIRE_NO_FAIL(*result);
+	REQUIRE(result->RowCount() == 1);
 	auto analyzed_plan = result->GetValue(1, 0).GetValue<string>();
 	REQUIRE(StringUtil::Contains(analyzed_plan, "JIT_EXECUTION_REGIONS"));
 	REQUIRE(StringUtil::Contains(analyzed_plan, "policy=auto"));
@@ -715,6 +735,7 @@ TEST_CASE("EXPLAIN ANALYZE exposes compact execution region profile", "[api][jit
 	REQUIRE(StringUtil::Contains(analyzed_plan, "RUNTIME_PIPELINE"));
 	REQUIRE(StringUtil::Contains(analyzed_plan, "dominant="));
 	REQUIRE(HasSourceContractStageBreakdown(manager));
+	REQUIRE_NO_FAIL(con.Query("SET jit_trace_decisions=false"));
 
 	result = con.Query("EXPLAIN (ANALYZE, FORMAT JSON) "
 	                   "SELECT sum(i * g) FROM jit_explain_analyze_input");
@@ -871,10 +892,22 @@ TEST_CASE("EXPLAIN ANALYZE reports compact aggregate auto vectorized-selection f
 	analyzed_plan = result->GetValue(1, 0).GetValue<string>();
 	REQUIRE(StringUtil::Contains(analyzed_plan, "CBO_PIPELINE"));
 	REQUIRE(StringUtil::Contains(analyzed_plan, "runner=vectorized"));
+	REQUIRE(StringUtil::Contains(analyzed_plan, "net_benefit="));
+	REQUIRE(StringUtil::Contains(analyzed_plan, "reason="));
+
+	REQUIRE_NO_FAIL(con.Query("SET jit_trace_decisions=true"));
+	result = con.Query("EXPLAIN ANALYZE "
+	                   "SELECT sum(CAST(((((a * 3) + (b * 5) - (c * 7) + (d * 11)) * 13) + "
+	                   "(((a - b + c) * 17) - ((a + d) * 19)) + "
+	                   "(((b - c + d) * 23) - ((a - d) * 29))) AS BIGINT)) "
+	                   "FROM jit_explain_auto_aggregate_blocker");
+	REQUIRE_NO_FAIL(*result);
+	analyzed_plan = result->GetValue(1, 0).GetValue<string>();
 	REQUIRE(StringUtil::Contains(analyzed_plan, "selected=false"));
 	REQUIRE(StringUtil::Contains(analyzed_plan, "benefit="));
 	REQUIRE(StringUtil::Contains(analyzed_plan, "required="));
 	REQUIRE(StringUtil::Contains(analyzed_plan, "why="));
+	REQUIRE_NO_FAIL(con.Query("SET jit_trace_decisions=false"));
 }
 
 TEST_CASE("JIT event IDs are unique under concurrent compilation", "[api][jit]") {
