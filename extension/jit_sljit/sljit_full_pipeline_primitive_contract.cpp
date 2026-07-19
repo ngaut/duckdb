@@ -118,6 +118,40 @@ SljitFinalizeFullPipelinePrimitiveRecipe(const vector<SljitExecutableRegionOp> &
 	return recipe;
 }
 
+//! A delegated aggregate hands its input chunk to the physical sink, which
+//! references columns by the sink contract's declared indices and types. The
+//! region graph can fuse input projections (payload compute, perfect-hash
+//! group compression) into the aggregate's compiled representation — a plain
+//! delegation cannot honor those, so the declared references must be sound
+//! against the previous op's output layout or the tail is refused.
+static bool SljitDelegatedAggregateLayoutSound(const vector<SljitExecutableRegionOp> &ops, idx_t aggregate_idx) {
+	if (aggregate_idx == 0) {
+		return true;
+	}
+	auto &previous_output = ops[aggregate_idx - 1].output_types;
+	auto &sink_info = ops[aggregate_idx].aggregate_update.plan.sink_info;
+	for (auto &group : sink_info.groups) {
+		if (!group.supported_reference) {
+			continue;
+		}
+		if (group.input_index >= previous_output.size() || previous_output[group.input_index] != group.type) {
+			return false;
+		}
+	}
+	for (auto &aggregate : sink_info.aggregates) {
+		for (idx_t child_idx = 0; child_idx < aggregate.child_indices.size(); child_idx++) {
+			if (aggregate.child_indices[child_idx] >= previous_output.size()) {
+				return false;
+			}
+			if (child_idx < aggregate.child_types.size() &&
+			    previous_output[aggregate.child_indices[child_idx]] != aggregate.child_types[child_idx]) {
+				return false;
+			}
+		}
+	}
+	return true;
+}
+
 bool SljitNativeTailCanConsumeTail(const vector<SljitExecutableRegionOp> &ops, idx_t tail_start_idx) {
 	if (tail_start_idx >= ops.size()) {
 		return false;
@@ -125,6 +159,12 @@ bool SljitNativeTailCanConsumeTail(const vector<SljitExecutableRegionOp> &ops, i
 	auto &tail = ops[tail_start_idx];
 	if (tail.kind == SljitNativeRegionOpKind::AGGREGATE_UPDATE && tail.aggregate_update.plan.UsesPrimitivePayloads()) {
 		return false;
+	}
+	for (idx_t op_idx = tail_start_idx; op_idx < ops.size(); op_idx++) {
+		if (ops[op_idx].kind == SljitNativeRegionOpKind::AGGREGATE_UPDATE &&
+		    !SljitDelegatedAggregateLayoutSound(ops, op_idx)) {
+			return false;
+		}
 	}
 	return true;
 }
