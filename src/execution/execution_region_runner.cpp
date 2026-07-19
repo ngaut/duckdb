@@ -150,12 +150,11 @@ ExecutionRunnerResult CompiledVectorizedRunner::ExecuteAdaptive(ExecutionRegionP
 			// runners: switching with an in-flight row group strands its rows.
 			auto leg_start = std::chrono::steady_clock::now();
 			auto exec_result = pipeline.ExecuteVectorizedPipeline(max_chunks);
-			ab.native_leg_us.fetch_add(ExecutionRegionElapsedMicros(leg_start));
-			ab.native_leg_rows.store(pipeline.VectorizedSourceLegRows());
+			ab.RecordNativeLeg(ExecutionRegionElapsedMicros(leg_start), pipeline.VectorizedSourceLegRows());
 			const auto declined = pipeline.ConsumeVectorizedSourceDeclinedYield();
 			if (declined) {
 				pipeline.ClearVectorizedSourceClaimBudgetAtBoundary();
-				ab.phase.store(ExecutionRegionAdaptiveAbPhase::MEASURING_COMPILED);
+				ab.AdvanceToCompiledLeg();
 				continue;
 			}
 			if (exec_result == PipelineExecuteResult::NOT_FINISHED) {
@@ -163,7 +162,7 @@ ExecutionRunnerResult CompiledVectorizedRunner::ExecuteAdaptive(ExecutionRegionP
 			}
 			// The pipeline finished or blocked inside the native leg; stay native.
 			pipeline.ClearVectorizedSourceClaimBudget();
-			ab.phase.store(ExecutionRegionAdaptiveAbPhase::FALLBACK_NATIVE);
+			ab.ResolveFallbackFromNativeLeg();
 			return ExecutionRunnerResult::Executed(exec_result);
 		}
 		case ExecutionRegionAdaptiveAbPhase::MEASURING_COMPILED: {
@@ -184,12 +183,7 @@ ExecutionRunnerResult CompiledVectorizedRunner::ExecuteAdaptive(ExecutionRegionP
 			auto status = ExecuteCompiledRegion(
 			    pipeline, max_chunks, result, ab,
 			    NumericCast<int64_t>(ExecutionRegionSettings::AdaptiveAbMarginBasisPoints(client)));
-			const auto phase = ab.phase.load();
-			if (phase == ExecutionRegionAdaptiveAbPhase::MEASURING_COMPILED_RUNNING) {
-				// The kernel finished, yielded, or could not enter before reaching a
-				// boundary; keep the CBO's compiled selection.
-				ab.phase.store(ExecutionRegionAdaptiveAbPhase::COMMIT_COMPILED);
-			}
+			ab.ResolveCommitWithoutBoundary();
 			if (ab.phase.load() != ExecutionRegionAdaptiveAbPhase::MEASURING_COMPILED_RUNNING) {
 				pipeline.AddProfilingAnnotation("jit_adaptive",
 				                                ab.phase.load() == ExecutionRegionAdaptiveAbPhase::FALLBACK_NATIVE
@@ -451,19 +445,14 @@ public:
 				DeferAtClaimBoundary("debug forced defer at row-group boundary");
 				return SourceResultType::BLOCKED;
 			}
-			// The first-row-group boundary: decide the measured verdict here.
+			// The first-row-group boundary: the state machine decides the verdict.
 			adaptive_verdict_done = true;
-			const auto compiled_us = ExecutionRegionElapsedMicros(entry_time);
-			adaptive_ab->compiled_leg_us.store(compiled_us);
-			adaptive_ab->compiled_leg_rows.store(adaptive_leg_rows);
-			const auto native_us = adaptive_ab->native_leg_us.load();
-			const bool commit_compiled = compiled_us * (10000 + adaptive_margin_basis_points) <= native_us * 10000;
-			if (!commit_compiled) {
-				adaptive_ab->phase.store(ExecutionRegionAdaptiveAbPhase::FALLBACK_NATIVE);
+			const auto verdict = adaptive_ab->ResolveVerdictAtBoundary(ExecutionRegionElapsedMicros(entry_time),
+			                                                           adaptive_leg_rows, adaptive_margin_basis_points);
+			if (verdict == ExecutionRegionAdaptiveAbVerdict::FALLBACK_NATIVE) {
 				DeferAtClaimBoundary("adaptive_ab fallback_native at row-group boundary");
 				return SourceResultType::BLOCKED;
 			}
-			adaptive_ab->phase.store(ExecutionRegionAdaptiveAbPhase::COMMIT_COMPILED);
 			auto committed_result = pipeline.FetchSourceContract(result);
 			fetched_source_chunks++;
 			return committed_result;

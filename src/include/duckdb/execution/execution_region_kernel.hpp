@@ -55,6 +55,11 @@ enum class ExecutionRegionAdaptiveAbPhase : uint8_t {
 // vectorized claim budget owns the leg and resumes it across scheduler yields;
 // every other executor runs natively as a bystander.
 
+enum class ExecutionRegionAdaptiveAbVerdict : uint8_t { COMMIT_COMPILED, FALLBACK_NATIVE };
+
+//! The measured-runner state machine. This struct is the single transition
+//! authority: every phase store lives in a method here, next to the atomics it
+//! guards, so verdict policy cannot be split across the layers that feed it.
 struct ExecutionRegionAdaptiveAbState {
 	std::atomic<ExecutionRegionAdaptiveAbPhase> phase {ExecutionRegionAdaptiveAbPhase::UNDECIDED};
 	std::atomic<int64_t> compiled_leg_us {0};
@@ -66,6 +71,43 @@ struct ExecutionRegionAdaptiveAbState {
 
 	bool TryBeginPhase(ExecutionRegionAdaptiveAbPhase expected, ExecutionRegionAdaptiveAbPhase next) {
 		return phase.compare_exchange_strong(expected, next);
+	}
+
+	//! The native leg accumulates across scheduler yields; rows are the leg total.
+	void RecordNativeLeg(int64_t leg_us, idx_t leg_rows) {
+		native_leg_us.fetch_add(leg_us);
+		native_leg_rows.store(leg_rows);
+	}
+
+	//! The native leg ended at its declined boundary: the compiled leg may begin.
+	void AdvanceToCompiledLeg() {
+		phase.store(ExecutionRegionAdaptiveAbPhase::MEASURING_COMPILED);
+	}
+
+	//! The native leg finished or blocked before reaching a boundary: there is
+	//! nothing to compare against, stay native.
+	void ResolveFallbackFromNativeLeg() {
+		phase.store(ExecutionRegionAdaptiveAbPhase::FALLBACK_NATIVE);
+	}
+
+	//! The compiled leg reached its first row-group boundary: decide the verdict.
+	ExecutionRegionAdaptiveAbVerdict ResolveVerdictAtBoundary(int64_t compiled_us, idx_t compiled_rows,
+	                                                          int64_t margin_basis_points) {
+		compiled_leg_us.store(compiled_us);
+		compiled_leg_rows.store(compiled_rows);
+		const auto native_us = native_leg_us.load();
+		const bool commit_compiled = compiled_us * (10000 + margin_basis_points) <= native_us * 10000;
+		phase.store(commit_compiled ? ExecutionRegionAdaptiveAbPhase::COMMIT_COMPILED
+		                            : ExecutionRegionAdaptiveAbPhase::FALLBACK_NATIVE);
+		return commit_compiled ? ExecutionRegionAdaptiveAbVerdict::COMMIT_COMPILED
+		                       : ExecutionRegionAdaptiveAbVerdict::FALLBACK_NATIVE;
+	}
+
+	//! The compiled leg finished, yielded, or could not enter before reaching a
+	//! boundary: keep the CBO's compiled selection.
+	void ResolveCommitWithoutBoundary() {
+		auto expected = ExecutionRegionAdaptiveAbPhase::MEASURING_COMPILED_RUNNING;
+		phase.compare_exchange_strong(expected, ExecutionRegionAdaptiveAbPhase::COMMIT_COMPILED);
 	}
 };
 

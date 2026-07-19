@@ -1997,6 +1997,11 @@ def verify_deferral_legality_and_handoff_single_authority() -> None:
         raise AssertionError(
             "FetchFromSourceContract must reject contract fetches over an in-flight vectorized cursor"
         )
+    if ".phase.store(" in runner:
+        raise AssertionError(
+            "adaptive phase transitions must live in ExecutionRegionAdaptiveAbState methods, not in the "
+            "runner: split-brain phase writes are how the runner-switch bugs were born"
+        )
     metal = read("extension/jit_metal/metal_backend.mm")
     if "SupportsRunnerHandoff" not in metal:
         raise AssertionError(
