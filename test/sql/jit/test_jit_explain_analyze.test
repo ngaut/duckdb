@@ -16,6 +16,21 @@ CREATE TABLE t AS SELECT (range % 97)::INTEGER g, range::BIGINT v FROM range(500
 statement ok
 EXPLAIN ANALYZE SELECT g, sum(v) FROM t WHERE v % 3 = 0 GROUP BY g;
 
+# Non-vacuous only if a compiled kernel actually executed under the profiler.
+statement ok
+SET jit_event_log_size=1000;
+
+statement ok
+SET jit_trace_runtime=true;
+
+statement ok
+CREATE TABLE probe AS SELECT g, sum(v) s FROM t WHERE v % 3 = 0 GROUP BY g;
+
+query I
+SELECT count(*) > 0 FROM duckdb_jit_events() WHERE runtime_result IS NOT NULL
+----
+true
+
 # Verbose mode: full per-decision and per-entry event lines.
 statement ok
 SET jit_trace_decisions=true;

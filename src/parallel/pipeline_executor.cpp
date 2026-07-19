@@ -707,6 +707,19 @@ void PipelineExecutor::SetVectorizedSourceClaimBudget(idx_t budget) {
 void PipelineExecutor::ClearVectorizedSourceClaimBudget() {
 	vectorized_source_claim_budget = DConstants::INVALID_INDEX;
 	vectorized_source_declined_yield = false;
+	if (source_cursor_state == SourceCursorState::VECTORIZED_MANAGED) {
+		// The leg did not end at a proven boundary: the cursor may hold an
+		// in-flight row group, so it degrades to the latched vectorized state.
+		source_cursor_state = SourceCursorState::VECTORIZED_UNMANAGED;
+	}
+}
+
+void PipelineExecutor::ClearVectorizedSourceClaimBudgetAtBoundary() {
+	vectorized_source_claim_budget = DConstants::INVALID_INDEX;
+	vectorized_source_declined_yield = false;
+	if (source_cursor_state == SourceCursorState::VECTORIZED_MANAGED) {
+		source_cursor_state = SourceCursorState::UNTOUCHED;
+	}
 }
 
 bool PipelineExecutor::HasVectorizedSourceClaimBudget() const {
@@ -729,7 +742,15 @@ SourceResultType PipelineExecutor::FetchFromSource(DataChunk *&result) {
 	OperatorSourceInput source_input = {*pipeline.source_state, *local_source_state, interrupt_state};
 	source_input.decline_new_row_group = vectorized_source_claim_budget == 0;
 	if (vectorized_source_claim_budget == DConstants::INVALID_INDEX) {
-		vectorized_source_unmanaged_fetch = true;
+		if (source_cursor_state == SourceCursorState::COMPILED_CONTRACT && !compiled_execution_deferred) {
+			throw InternalException(
+			    "vectorized source fetch while the compiled contract owns the cursor without a deferral");
+		}
+		source_cursor_state = SourceCursorState::VECTORIZED_UNMANAGED;
+	} else {
+		D_ASSERT(source_cursor_state == SourceCursorState::UNTOUCHED ||
+		         source_cursor_state == SourceCursorState::VECTORIZED_MANAGED);
+		source_cursor_state = SourceCursorState::VECTORIZED_MANAGED;
 	}
 	source_chunk_initial_idx = 0;
 	auto &fetch_chunk = *result;
@@ -767,7 +788,11 @@ SourceResultType PipelineExecutor::FetchFromSourceContract(DataChunk *&result,
 		    "execution region source contract fetch selected for a source without source contract support");
 	}
 
-	compiled_source_contract_fetched = true;
+	if (source_cursor_state != SourceCursorState::UNTOUCHED &&
+	    source_cursor_state != SourceCursorState::COMPILED_CONTRACT) {
+		throw InternalException("compiled source contract fetch while a vectorized cursor state is in flight");
+	}
+	source_cursor_state = SourceCursorState::COMPILED_CONTRACT;
 	auto stage_start = metrics ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point();
 	source_chunk_initial_idx = 0;
 	auto &source_chunk = execution_source_input_chunk;

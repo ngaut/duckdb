@@ -154,7 +154,7 @@ ExecutionRunnerResult CompiledVectorizedRunner::ExecuteAdaptive(ExecutionRegionP
 			ab.native_leg_rows.store(pipeline.VectorizedSourceLegRows());
 			const auto declined = pipeline.ConsumeVectorizedSourceDeclinedYield();
 			if (declined) {
-				pipeline.ClearVectorizedSourceClaimBudget();
+				pipeline.ClearVectorizedSourceClaimBudgetAtBoundary();
 				ab.phase.store(ExecutionRegionAdaptiveAbPhase::MEASURING_COMPILED);
 				continue;
 			}
@@ -414,7 +414,7 @@ public:
 	}
 
 	bool CanDeferAtEntry() const override {
-		return !pipeline.SourceContractFetched();
+		return pipeline.SourceCursorUntouched();
 	}
 
 	const string &DeferredReason() const override {

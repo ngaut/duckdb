@@ -29,6 +29,25 @@ class ExecutionRegionLocalState;
 struct ExecutionRegionSourceContractMetrics;
 
 //! The Pipeline class represents an execution pipeline
+//! What this executor's source cursor has done, and therefore which runner
+//! transitions are legal. Runners may only change where no cursor holds an
+//! in-flight row group; this state makes the legality queries structural
+//! instead of scattered booleans.
+enum class SourceCursorState : uint8_t {
+	//! Nothing in flight: entry deferral and compiled entry are both legal.
+	UNTOUCHED,
+	//! The compiled source contract owns the cursor: only compiled execution
+	//! may continue; deferral is legal only through the declined-boundary path
+	//! (or after the one-way deferral latch hands the pipeline over).
+	COMPILED_CONTRACT,
+	//! A budgeted measurement leg is fetching: a declined yield returns the
+	//! cursor to UNTOUCHED, anything else degrades it to VECTORIZED_UNMANAGED.
+	VECTORIZED_MANAGED,
+	//! Unmanaged vectorized fetches happened: the cursor can hold a partially
+	//! scanned row group at any yield, so this executor is latched vectorized.
+	VECTORIZED_UNMANAGED,
+};
+
 class PipelineExecutor {
 	friend class ExecutionRegionPipelineAdapter;
 
@@ -117,20 +136,14 @@ private:
 	idx_t vectorized_source_claim_budget = DConstants::INVALID_INDEX;
 	//! Set when the source declined a claim and the executor yielded at the boundary.
 	bool vectorized_source_declined_yield = false;
-	//! Set once this executor fetched from the vectorized source WITHOUT a claim
-	//! budget: its cursor can then hold a partially-scanned row group at any
-	//! yield, so it must never switch into compiled execution. Budget-managed
-	//! leg fetches end at a proven declined boundary and do not set this.
-	bool vectorized_source_unmanaged_fetch = false;
+	//! The source-cursor state machine; transitions live in FetchFromSource and
+	//! FetchFromSourceContract only.
+	SourceCursorState source_cursor_state = SourceCursorState::UNTOUCHED;
 	idx_t vectorized_source_leg_rows = 0;
 	//! Latched when a compiled kernel defers: deferral hands this pipeline to the
 	//! vectorized continuation permanently, because a deferred kernel's terminal
 	//! state does not support re-entry.
 	bool compiled_execution_deferred = false;
-	//! Set once the compiled source contract has touched the shared source.
-	//! Entry deferral is only legal before this point: afterwards the contract
-	//! cursor can hold a partially-read row group a handoff would abandon.
-	bool compiled_source_contract_fetched = false;
 	//! Source operator indicated that there is no more output possible
 	bool exhausted_source = false;
 	//! Source or intermediate operator indicated that there is no more output possible
@@ -171,6 +184,9 @@ private:
 	//! once the budget is exhausted; the executor then yields at the boundary.
 	void SetVectorizedSourceClaimBudget(idx_t budget);
 	void ClearVectorizedSourceClaimBudget();
+	//! Boundary variant: the declined fetch proved the cursor sits at a
+	//! row-group boundary with nothing in flight, so it returns to UNTOUCHED.
+	void ClearVectorizedSourceClaimBudgetAtBoundary();
 	bool ConsumeVectorizedSourceDeclinedYield();
 	bool HasVectorizedSourceClaimBudget() const;
 	idx_t VectorizedSourceLegRows() const;

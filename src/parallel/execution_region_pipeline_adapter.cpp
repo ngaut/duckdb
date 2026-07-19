@@ -130,12 +130,16 @@ ExecutionRegionPipelineAdapter::GetOperatorReadiness(idx_t operator_index,
 	return operators[operator_index].get().GetExecutionOperatorReadiness(GetClientContext(), operator_info);
 }
 
-bool ExecutionRegionPipelineAdapter::SourceContractFetched() const {
-	return executor.compiled_source_contract_fetched;
+bool ExecutionRegionPipelineAdapter::SourceCursorUntouched() const {
+	return executor.source_cursor_state == SourceCursorState::UNTOUCHED;
 }
 
 bool ExecutionRegionPipelineAdapter::VectorizedSourceCursorDirty() const {
-	return executor.vectorized_source_unmanaged_fetch;
+	return executor.source_cursor_state == SourceCursorState::VECTORIZED_UNMANAGED;
+}
+
+void ExecutionRegionPipelineAdapter::ClearVectorizedSourceClaimBudgetAtBoundary() {
+	executor.ClearVectorizedSourceClaimBudgetAtBoundary();
 }
 
 void ExecutionRegionPipelineAdapter::AddProfilingAnnotation(const string &key, const string &value,

@@ -1984,11 +1984,24 @@ def verify_deferral_legality_and_handoff_single_authority() -> None:
             "both compiled entry points in the adaptive state machine must bounce executors whose "
             "vectorized cursor did an unmanaged fetch (the executor-side layer of the claim-point law)"
         )
+    executor_header = read("src/include/duckdb/parallel/pipeline_executor.hpp")
+    if "enum class SourceCursorState" not in executor_header:
+        raise AssertionError("the source-cursor state machine must own runner-switch legality")
     executor = read("src/parallel/pipeline_executor.cpp")
-    if "vectorized_source_unmanaged_fetch = true" not in executor:
+    if "SourceCursorState::VECTORIZED_UNMANAGED" not in executor:
         raise AssertionError(
-            "FetchFromSource must record unmanaged vectorized fetches so dirty cursors never enter "
-            "compiled execution"
+            "FetchFromSource must degrade unmanaged vectorized fetches to VECTORIZED_UNMANAGED so dirty "
+            "cursors never enter compiled execution"
+        )
+    if "compiled source contract fetch while a vectorized cursor state is in flight" not in executor:
+        raise AssertionError(
+            "FetchFromSourceContract must reject contract fetches over an in-flight vectorized cursor"
+        )
+    column_segment = read("src/storage/table/column_segment.cpp")
+    if "RegisterTransientMemory" not in column_segment:
+        raise AssertionError(
+            "ColumnSegment::Resize must register the grown block as transient memory: a plain allocation "
+            "is destroy-on-eviction and loses live table segments under memory pressure"
         )
 
 
