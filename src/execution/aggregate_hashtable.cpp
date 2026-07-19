@@ -951,15 +951,16 @@ void GroupedAggregateHashTable::Resize(idx_t size) {
 	if (Count() != 0 && size < capacity) {
 		throw InternalException("Cannot downsize a non-empty hash table!");
 	}
-	// Reinsertion walks all materialized rows, so the pointer table may only be resized
-	// while it tracks exactly those rows. After an Abandon, materialized data retains
-	// abandoned epochs the pointer table no longer covers; reinserting them would
-	// oversubscribe the new table and the probe loop below would never terminate.
+	// The pointer table indexes only the current epoch. Adaptive skip-lookups appends
+	// materialize rows the table never covered, and abandoning retains them for the
+	// final combine, so reinsertion here — which walks ALL materialized rows — cannot
+	// be used to grow the table: it would reinsert abandoned rows, oversubscribe the
+	// new table, and leave the probe loop unable to terminate. Start a fresh, larger
+	// epoch instead. The retained rows stay materialized and the final combine merges
+	// them, exactly as it does for the epoch EnsureLookupEpoch abandons.
 	if (Count() != 0 && Count() != GetMaterializedCount()) {
-		throw InternalException("Cannot resize a hash table whose pointer table does not cover its materialized rows "
-		                        "(count %llu, materialized %llu)",
-		                        static_cast<unsigned long long>(Count()),
-		                        static_cast<unsigned long long>(GetMaterializedCount()));
+		epochs_require_final_combine = true;
+		Abandon();
 	}
 
 	capacity = size;
