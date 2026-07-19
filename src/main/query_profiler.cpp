@@ -354,6 +354,11 @@ static void AddExecutionRegionEvent(QueryProfileResult &row, const ExecutionRegi
 	                                   [&](const char *name, const int64_t &value, const int64_t &) {
 		                                   row.AddValue(string("runner_cost_") + name, Time(value));
 	                                   });
+	ForEachExecutionRegionEventRuntimeCountField(
+	    event, [&](const char *name, const idx_t &value) { row.AddValue(name, Count(value)); });
+	ForEachExecutionRegionEventRuntimeTimeField(
+	    event,
+	    [&](const char *, const char *profile_name, const int64_t &value) { row.AddValue(profile_name, Time(value)); });
 	AddFields(row, {{"runner_cost_selected_accelerated_runner",
 	                 Value::BOOLEAN(event.runner_cost.SelectedAcceleratedRunner())},
 	                {"runner_cost_selected_compiled_vectorized_runner",
@@ -363,12 +368,6 @@ static void AddExecutionRegionEvent(QueryProfileResult &row, const ExecutionRegi
 	                {"blocker", NullableText(event.blocker)},
 	                {"runtime_result", Text(event.runtime_result)},
 	                {"code_size", Count(ExecutionRegionEventProfileCodeSize(event))},
-	                {"input_rows", Count(event.input_rows)},
-	                {"output_rows", Count(event.output_rows)},
-	                {"invocation_count", Count(event.invocation_count)},
-	                {"source_contract_output_rows", Count(event.source_contract_output_rows)},
-	                {"source_contract_invocation_count", Count(event.source_contract_invocation_count)},
-	                {"sink_next_batch_invocation_count", Count(event.sink_next_batch_invocation_count)},
 	                {"decision_time_us", Time(event.decision_time_us)},
 	                {"compile_time_us", Time(ExecutionRegionEventProfileCompileTime(event))},
 	                {"pipeline_cbo_time_us", Time(event.stage_timings.pipeline_cbo_time_us)},
@@ -390,10 +389,6 @@ static void AddExecutionRegionEvent(QueryProfileResult &row, const ExecutionRegi
 	                 NullableText(RenderExecutionRegionCounterBreakdown(event.jit_runtime.runtime_proof_counts))},
 	                {"jit_runtime_delegation_counts",
 	                 NullableText(RenderExecutionRegionCounterBreakdown(event.jit_runtime.runtime_delegation_counts))},
-	                {"runtime_time_us", Time(event.runtime_time_us)},
-	                {"source_runtime_time_us", Time(event.source_contract_runtime_time_us)},
-	                {"sink_next_batch_runtime_time_us", Time(event.sink_next_batch_runtime_time_us)},
-	                {"generated_runtime_time_us", Time(event.generated_body_runtime_time_us)},
 	                {"source_stage_runtime_breakdown",
 	                 Text(RenderExecutionRegionStageRuntimeBreakdown(event.source_stage_runtime))},
 	                {"generated_stage_runtime_breakdown",

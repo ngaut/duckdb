@@ -2053,6 +2053,38 @@ def verify_input_layout_single_authority() -> None:
             )
 
 
+def verify_runtime_metric_surfaces_agree() -> None:
+    """Every runtime metric reaches every surface that renders runtime metrics.
+
+    The events table function, the profiler's structured output, and EXPLAIN
+    ANALYZE text each render the same metrics under their own vocabularies; a
+    metric wired into one surface and forgotten in another is invisible drift
+    (the per-leg-rows gap was found only by mining artifacts). The visitors are
+    the field list; each surface keeps its own labels.
+    """
+    telemetry = read("src/include/duckdb/execution/execution_region_telemetry.hpp")
+    profiler = read("src/main/query_profiler.cpp")
+    events_table = read("src/function/table/system/duckdb_jit_events.cpp")
+    for visitor in ("ForEachExecutionRegionEventRuntimeCountField",
+                    "ForEachExecutionRegionEventRuntimeTimeField"):
+        if visitor not in telemetry:
+            raise AssertionError(f"{visitor} must define the runtime metric field list")
+        if visitor not in profiler:
+            raise AssertionError(
+                f"the profiler's structured surface must render runtime metrics through {visitor} "
+                "instead of a hand-maintained list"
+            )
+    # Canonical names are the events table function's schema: every visited field
+    # must exist there, so adding one to the visitor forces adding the column.
+    canonical = re.findall(r'fn\("([a-z_]+)"', telemetry)
+    for field in canonical:
+        if f'"{field}"' not in events_table:
+            raise AssertionError(
+                f"runtime metric '{field}' is visited but missing from the events table function: "
+                "a metric must reach every surface, not just the profiler"
+            )
+
+
 def verify_storage_buffer_lifecycle() -> None:
     """Live table segments must never sit on destroy-on-eviction buffers.
 
@@ -2090,6 +2122,7 @@ def main() -> None:
     verify_runner_switch_state_machine()
     verify_input_layout_single_authority()
     verify_storage_buffer_lifecycle()
+    verify_runtime_metric_surfaces_agree()
     verify_production_contract_ownership()
     verify_benchmark_repetition_budget()
     verify_bound_direct_join_terminal_contract()

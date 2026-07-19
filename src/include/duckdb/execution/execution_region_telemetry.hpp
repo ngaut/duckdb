@@ -162,6 +162,33 @@ struct ExecutionRegionEvent {
 	ExecutionRegionJitRuntimeMetrics jit_runtime;
 };
 
+//! Single authority for an event's numeric runtime metrics, split by type the
+//! way the runner-cost visitors are: every surface that renders runtime metrics
+//! (the events table function, the profiler's structured output, EXPLAIN
+//! ANALYZE text) iterates these, so a metric cannot reach one surface and
+//! silently miss another. Non-numeric runtime state (breakdowns, result
+//! strings, jit path counters) stays surface-specific.
+template <class FN>
+void ForEachExecutionRegionEventRuntimeCountField(const ExecutionRegionEvent &event, FN &&fn) {
+	fn("input_rows", event.input_rows);
+	fn("output_rows", event.output_rows);
+	fn("invocation_count", event.invocation_count);
+	fn("source_contract_output_rows", event.source_contract_output_rows);
+	fn("source_contract_invocation_count", event.source_contract_invocation_count);
+	fn("sink_next_batch_invocation_count", event.sink_next_batch_invocation_count);
+}
+
+//! Time fields carry two labels: the canonical struct name used by the events
+//! table function, and the profiler's summary-consistent name. The surfaces
+//! keep their own vocabularies; the field LIST is what must not diverge.
+template <class FN>
+void ForEachExecutionRegionEventRuntimeTimeField(const ExecutionRegionEvent &event, FN &&fn) {
+	fn("runtime_time_us", "runtime_time_us", event.runtime_time_us);
+	fn("source_contract_runtime_time_us", "source_runtime_time_us", event.source_contract_runtime_time_us);
+	fn("sink_next_batch_runtime_time_us", "sink_next_batch_runtime_time_us", event.sink_next_batch_runtime_time_us);
+	fn("generated_body_runtime_time_us", "generated_runtime_time_us", event.generated_body_runtime_time_us);
+}
+
 struct ExecutionRegionTraceSummary {
 	idx_t decisions = 0;
 	idx_t compiled = 0;
