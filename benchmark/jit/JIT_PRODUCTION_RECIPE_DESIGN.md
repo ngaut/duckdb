@@ -234,7 +234,10 @@ source drains its current row group, declines the next claim, and the runtime
 converts the declined fetch into a deferral. Deferral is one-way — deferring
 latches the pipeline's compiled suppression so a deferred kernel is never
 re-entered — and sources without the storage contract never decline, so
-switching is inert where it is not proven.
+switching is inert where it is not proven. Recursive-CTE iterations run
+native by design — iteration-1 pipelines compile normally, and frontier
+iterations sit below the amortization floor — so reused executors keeping
+compiled entry closed there is a decision, not debt.
 
 Deferral is legal at exactly two points, enforced by the runtime: at kernel
 entry before the first source fetch (nothing is claimed), and at a declined
