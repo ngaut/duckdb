@@ -81,6 +81,11 @@ void PipelineExecutor::Reset() {
 	auto allow_reuse = Settings::Get<EnableCachingOperatorsSetting>(context.client);
 
 	// Reset execution flags
+	// The cursor state is per-execution: a reset executor rescans from fresh
+	// source state, so runner-switch legality starts over. The one-way
+	// compiled_execution_deferred latch intentionally survives: a deferred
+	// kernel's terminal state can outlive the reset.
+	source_cursor_state = SourceCursorState::UNTOUCHED;
 	exhausted_pipeline = false;
 	finalized = false;
 	started_flushing = false;

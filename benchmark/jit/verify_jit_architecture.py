@@ -1997,6 +1997,12 @@ def verify_deferral_legality_and_handoff_single_authority() -> None:
         raise AssertionError(
             "FetchFromSourceContract must reject contract fetches over an in-flight vectorized cursor"
         )
+    metal = read("extension/jit_metal/metal_backend.mm")
+    if "SupportsRunnerHandoff" not in metal:
+        raise AssertionError(
+            "the metal kernel must refuse runner handoff: it batches source chunks without a per-chunk "
+            "flush, so a declined claim boundary would strand claimed-but-unsunk rows"
+        )
     column_segment = read("src/storage/table/column_segment.cpp")
     if "RegisterTransientMemory" not in column_segment:
         raise AssertionError(

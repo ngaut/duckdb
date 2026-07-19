@@ -693,6 +693,13 @@ class MetalProjectionKernel : public ExecutionRegionKernel {
         return true;
     }
 
+    bool SupportsRunnerHandoff() const override {
+        // Metal batches source chunks in kernel-local scratch without a
+        // per-chunk flush: at a declined claim boundary the batch would hold
+        // claimed-but-unsunk rows, so a mid-query handoff can never be legal.
+        return false;
+    }
+
     bool CanExecuteFullPipeline() const override {
         return true;
     }
@@ -707,9 +714,9 @@ class MetalProjectionKernel : public ExecutionRegionKernel {
             }
 
             const auto chunk_budget = runtime.MaxChunks() - processed_chunks;
-            const auto batch_chunk_budget =
-                ShouldBatchSourceChunks() ? MinValue<idx_t>(chunk_budget, METAL_MAX_BATCH_CHUNKS)
-                                          : MinValue<idx_t>(chunk_budget, 1);
+            const auto batch_chunk_budget = ShouldBatchSourceChunks()
+                                                ? MinValue<idx_t>(chunk_budget, METAL_MAX_BATCH_CHUNKS)
+                                                : MinValue<idx_t>(chunk_budget, 1);
             bool source_finished = false;
             auto fetch_result = FetchProjectionBatch(runtime, scratch, batch_chunk_budget, source_finished);
             processed_chunks += scratch.batch_chunks;
