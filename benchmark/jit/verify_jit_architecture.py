@@ -2008,6 +2008,13 @@ def verify_deferral_legality_and_handoff_single_authority() -> None:
             "native-tail admission must prove the materialized view layout against the tail operator's "
             "declared input where derivable; a declared mismatch must reject at construction, not at runtime"
         )
+    contract = read("extension/jit_sljit/sljit_full_pipeline_primitive_contract.cpp")
+    for validation_site, name in ((builder, "sequence builder"), (contract, "primitive contract")):
+        if "DeclaredInputConstraints" not in validation_site:
+            raise AssertionError(
+                f"the {name} layout validation must consume DeclaredInputConstraints — the single "
+                "authority for what an op's execution dereferences — instead of kind-specific fields"
+            )
     metal = read("extension/jit_metal/metal_backend.mm")
     if "SupportsRunnerHandoff" not in metal:
         raise AssertionError(

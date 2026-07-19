@@ -450,6 +450,89 @@ struct SljitExecutableRegionOp {
 		return result;
 	}
 
+	//! The single authority for what this op's execution path dereferences from
+	//! its input chunk. Dense layouts (plan input types) become exact-arity
+	//! constraints; delegated aggregates constrain only the sink-contract
+	//! references they actually touch. provable=false means the references
+	//! cannot be derived and callers must not guess.
+	struct InputConstraints {
+		bool provable = false;
+		bool exact_arity = false;
+		idx_t arity = 0;
+		vector<std::pair<idx_t, LogicalType>> references;
+
+		bool SatisfiedBy(const vector<LogicalType> &fed) const {
+			if (!provable) {
+				return true;
+			}
+			if (exact_arity && fed.size() != arity) {
+				return false;
+			}
+			for (auto &reference : references) {
+				if (reference.first >= fed.size() || fed[reference.first] != reference.second) {
+					return false;
+				}
+			}
+			return true;
+		}
+	};
+
+	InputConstraints DeclaredInputConstraints() const {
+		InputConstraints constraints;
+		auto dense = [&](const vector<LogicalType> &types) {
+			if (types.empty()) {
+				return;
+			}
+			constraints.provable = true;
+			constraints.exact_arity = true;
+			constraints.arity = types.size();
+			for (idx_t col_idx = 0; col_idx < types.size(); col_idx++) {
+				constraints.references.emplace_back(col_idx, types[col_idx]);
+			}
+		};
+		switch (kind) {
+		case SljitNativeRegionOpKind::AGGREGATE_UPDATE: {
+			// The delegated sink dereferences exactly the contract's declared
+			// references; fused input transforms are invisible to delegation, so
+			// these are the truth regardless of any declared dense layout.
+			auto &sink_info = aggregate_update.plan.sink_info;
+			for (auto &group : sink_info.groups) {
+				if (!group.supported_reference) {
+					continue;
+				}
+				constraints.provable = true;
+				constraints.references.emplace_back(group.input_index, group.type);
+			}
+			for (auto &aggregate : sink_info.aggregates) {
+				for (idx_t child_idx = 0; child_idx < aggregate.child_indices.size(); child_idx++) {
+					if (child_idx >= aggregate.child_types.size()) {
+						continue;
+					}
+					constraints.provable = true;
+					constraints.references.emplace_back(aggregate.child_indices[child_idx],
+					                                    aggregate.child_types[child_idx]);
+				}
+			}
+			return constraints;
+		}
+		case SljitNativeRegionOpKind::APPEND_SINK:
+			dense(append_sink.plan.input_types);
+			return constraints;
+		case SljitNativeRegionOpKind::ORDER_SINK:
+			dense(order_sink.plan.input_types);
+			return constraints;
+		case SljitNativeRegionOpKind::DELIM_JOIN_SINK:
+			dense(delim_join_sink.plan.input_types);
+			return constraints;
+		case SljitNativeRegionOpKind::HASH_JOIN_BUILD:
+			dense(hash_join_build.plan.input_types);
+			return constraints;
+		default:
+			dense(input_types);
+			return constraints;
+		}
+	}
+
 	bool HasExecutableBody() const {
 		if (CodeSize() > 0) {
 			return true;

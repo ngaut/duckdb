@@ -93,43 +93,9 @@ bool SljitFullPipelineRecipeSequenceBuilder::NativeTailInputLayoutMatches(
 			return true;
 		}
 	}
-	// Sink-kind ops declare their input inside the sink plan, not the generic
-	// field; an empty declaration means the layout is not provable here.
-	auto &tail = ops[tail_start_idx];
-	const vector<LogicalType> *expected = &tail.input_types;
-	if (expected->empty()) {
-		switch (tail.kind) {
-		case SljitNativeRegionOpKind::AGGREGATE_UPDATE:
-			expected = &tail.aggregate_update.plan.input_types;
-			break;
-		case SljitNativeRegionOpKind::APPEND_SINK:
-			expected = &tail.append_sink.plan.input_types;
-			break;
-		case SljitNativeRegionOpKind::ORDER_SINK:
-			expected = &tail.order_sink.plan.input_types;
-			break;
-		case SljitNativeRegionOpKind::DELIM_JOIN_SINK:
-			expected = &tail.delim_join_sink.plan.input_types;
-			break;
-		case SljitNativeRegionOpKind::HASH_JOIN_BUILD:
-			expected = &tail.hash_join_build.plan.input_types;
-			break;
-		default:
-			break;
-		}
-	}
-	if (expected->empty()) {
-		return true;
-	}
-	if (view_types->size() != expected->size()) {
-		return false;
-	}
-	for (idx_t col_idx = 0; col_idx < expected->size(); col_idx++) {
-		if ((*view_types)[col_idx] != (*expected)[col_idx]) {
-			return false;
-		}
-	}
-	return true;
+	// The tail op's declared input references are the single authority for what
+	// its execution dereferences; the derived view must satisfy them.
+	return ops[tail_start_idx].DeclaredInputConstraints().SatisfiedBy(*view_types);
 }
 
 bool SljitFullPipelineRecipeSequenceBuilder::TryMakeNativeTailRecipe(SljitFullPipelinePrimitiveSequence sequence,
