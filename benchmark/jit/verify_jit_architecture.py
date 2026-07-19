@@ -2002,6 +2002,12 @@ def verify_deferral_legality_and_handoff_single_authority() -> None:
             "adaptive phase transitions must live in ExecutionRegionAdaptiveAbState methods, not in the "
             "runner: split-brain phase writes are how the runner-switch bugs were born"
         )
+    builder = read("extension/jit_sljit/sljit_full_pipeline_recipe_sequence_builder.cpp")
+    if "NativeTailInputLayoutMatches" not in builder:
+        raise AssertionError(
+            "native-tail admission must prove the materialized view layout against the tail operator's "
+            "declared input where derivable; a declared mismatch must reject at construction, not at runtime"
+        )
     metal = read("extension/jit_metal/metal_backend.mm")
     if "SupportsRunnerHandoff" not in metal:
         raise AssertionError(

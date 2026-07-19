@@ -60,10 +60,85 @@ void SljitFullPipelineRecipeSequenceBuilder::AddProjectionChainStep(SljitFullPip
 	sequence.Add(MakeProjectionChainStep(first_projection_idx, final_projection_idx));
 }
 
+//! The tail consumes the recipe's materialized view by bound column index, so
+//! the view's layout must match the tail operator's declared input exactly. A
+//! mismatch that reaches runtime references the wrong columns — loud when the
+//! types differ, silent when they coincide — so the recipe is rejected here.
+//! Steps whose view this walk cannot derive yet (selection views, remaps, mark
+//! boundaries) skip validation: enforcement applies only where the layout is
+//! exactly provable, and unproven shapes keep their existing behavior.
+bool SljitFullPipelineRecipeSequenceBuilder::NativeTailInputLayoutMatches(
+    const SljitFullPipelinePrimitiveSequence &sequence, idx_t tail_start_idx) const {
+	const vector<LogicalType> *view_types = &source_output_types;
+	for (idx_t step_idx = 1; step_idx < sequence.Count(); step_idx++) {
+		auto &step = sequence.Step(step_idx);
+		switch (step.kind) {
+		case SljitFullPipelinePrimitiveKind::GENERATED_FILTER:
+			// Selection-only: the view's column layout is unchanged.
+			break;
+		case SljitFullPipelinePrimitiveKind::PROJECTION_CHAIN: {
+			auto &projection = step.projection_chain;
+			if (projection.HasBoundComposedProjection()) {
+				view_types = &projection.bound_composed_projection->output_types;
+				break;
+			}
+			if (projection.final_projection_idx >= ops.size()) {
+				return false;
+			}
+			view_types = &ops[projection.final_projection_idx].output_types;
+			break;
+		}
+		default:
+			// View not derivable: skip validation for this recipe.
+			return true;
+		}
+	}
+	// Sink-kind ops declare their input inside the sink plan, not the generic
+	// field; an empty declaration means the layout is not provable here.
+	auto &tail = ops[tail_start_idx];
+	const vector<LogicalType> *expected = &tail.input_types;
+	if (expected->empty()) {
+		switch (tail.kind) {
+		case SljitNativeRegionOpKind::AGGREGATE_UPDATE:
+			expected = &tail.aggregate_update.plan.input_types;
+			break;
+		case SljitNativeRegionOpKind::APPEND_SINK:
+			expected = &tail.append_sink.plan.input_types;
+			break;
+		case SljitNativeRegionOpKind::ORDER_SINK:
+			expected = &tail.order_sink.plan.input_types;
+			break;
+		case SljitNativeRegionOpKind::DELIM_JOIN_SINK:
+			expected = &tail.delim_join_sink.plan.input_types;
+			break;
+		case SljitNativeRegionOpKind::HASH_JOIN_BUILD:
+			expected = &tail.hash_join_build.plan.input_types;
+			break;
+		default:
+			break;
+		}
+	}
+	if (expected->empty()) {
+		return true;
+	}
+	if (view_types->size() != expected->size()) {
+		return false;
+	}
+	for (idx_t col_idx = 0; col_idx < expected->size(); col_idx++) {
+		if ((*view_types)[col_idx] != (*expected)[col_idx]) {
+			return false;
+		}
+	}
+	return true;
+}
+
 bool SljitFullPipelineRecipeSequenceBuilder::TryMakeNativeTailRecipe(SljitFullPipelinePrimitiveSequence sequence,
                                                                      idx_t tail_start_idx,
                                                                      SljitFullPipelineRecipe &recipe) const {
 	if (tail_start_idx >= ops.size() || !SljitNativeTailCanConsumeTail(ops, tail_start_idx)) {
+		return false;
+	}
+	if (!NativeTailInputLayoutMatches(sequence, tail_start_idx)) {
 		return false;
 	}
 	sequence.Add(SljitFullPipelinePrimitiveStep::NativeTailDelegation(tail_start_idx));

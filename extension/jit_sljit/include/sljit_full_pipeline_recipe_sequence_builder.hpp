@@ -39,6 +39,7 @@ protected:
 	void AddProjectionChainStep(SljitFullPipelinePrimitiveSequence &sequence, idx_t first_projection_idx,
 	                            idx_t final_projection_idx) const;
 
+	bool NativeTailInputLayoutMatches(const SljitFullPipelinePrimitiveSequence &sequence, idx_t tail_start_idx) const;
 	bool TryMakeNativeTailRecipe(SljitFullPipelinePrimitiveSequence sequence, idx_t tail_start_idx,
 	                             SljitFullPipelineRecipe &recipe) const;
 
