@@ -715,6 +715,7 @@ void QueryProfiler::Start(const string &query) {
 
 void QueryProfiler::Reset() {
 	tree_map.clear();
+	operator_annotations.clear();
 	root = nullptr;
 	metrics.reset();
 	running = false;
@@ -1716,6 +1717,7 @@ void QueryProfiler::Initialize(const PhysicalOperator &root_op) {
 		// query does not require profiling: disable profiling for this query
 		running = false;
 		tree_map.clear();
+		operator_annotations.clear();
 		root = nullptr;
 	} else {
 		auto &client_config = ClientConfig::GetConfig(context);

@@ -908,6 +908,18 @@ TEST_CASE("EXPLAIN ANALYZE reports compact aggregate auto vectorized-selection f
 	REQUIRE(StringUtil::Contains(analyzed_plan, "required="));
 	REQUIRE(StringUtil::Contains(analyzed_plan, "why="));
 	REQUIRE_NO_FAIL(con.Query("SET jit_trace_decisions=false"));
+
+	// Tree annotations must not leak across queries: a later vectorized-only
+	// query on the same connection must not inherit a stale compiled-kernel
+	// annotation through operator address reuse.
+	REQUIRE_NO_FAIL(con.Query("SET jit_policy='off'"));
+	result = con.Query("EXPLAIN ANALYZE "
+	                   "SELECT sum(a + b) FROM jit_explain_auto_aggregate_blocker");
+	REQUIRE_NO_FAIL(*result);
+	analyzed_plan = result->GetValue(1, 0).GetValue<string>();
+	REQUIRE(!StringUtil::Contains(analyzed_plan, "compiled full-pipeline"));
+	REQUIRE(!StringUtil::Contains(analyzed_plan, "jit_adaptive"));
+	REQUIRE_NO_FAIL(con.Query("SET jit_policy='auto'"));
 }
 
 TEST_CASE("JIT event IDs are unique under concurrent compilation", "[api][jit]") {
