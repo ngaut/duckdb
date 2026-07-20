@@ -1988,6 +1988,22 @@ def verify_handoff_capability_single_authority() -> None:
         raise AssertionError(
             "the strategy handoff classification must live beside the strategy enum definition"
         )
+    # A grouped aggregate may hand off only when the compiled kernel stores the canonical
+    # native group hash. Projected group inputs (integral narrowing, dictionary-compressed
+    # strings) and the post-join projection-aggregate fusion hash a non-canonical
+    # representation the vectorized continuation will not reproduce; a handoff there splits
+    # groups across duplicate hash-table entries under two stored hashes (silent wrong sums).
+    sequence_header = read("extension/jit_sljit/include/sljit_full_pipeline_primitive_sequence.hpp")
+    if "SljitGroupedAggregateUpdateInputKind::PROJECTED_INPUT" not in sequence_header:
+        raise AssertionError(
+            "the step-level handoff authority must refuse handoff for PROJECTED_INPUT grouped "
+            "aggregates: their compiled group hash is non-canonical and would split groups after a handoff"
+        )
+    if "POST_JOIN_PROJECTION_AGGREGATE_UPDATE" not in sequence_header:
+        raise AssertionError(
+            "the step-level handoff authority must classify POST_JOIN_PROJECTION_AGGREGATE_UPDATE: its "
+            "fused group-key projection hashes a non-canonical representation, so it cannot hand off"
+        )
     metal = read("extension/jit_metal/metal_backend.mm")
     if "SupportsRunnerHandoff" not in metal:
         raise AssertionError(
