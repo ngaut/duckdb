@@ -80,30 +80,9 @@ private:
 
 //! Single authority for whether a primitive step permits a mid-query runner
 //! handoff; a kernel's capability is the conjunction over its recipe steps.
-//!
-//! Handoff safety for grouped aggregates additionally requires that the compiled
-//! kernel store the SAME group hash the vectorized continuation would compute for
-//! an identical key. When the compiled path feeds the hash table a projected group
-//! representation (integral narrowing, dictionary-compressed strings), it hashes
-//! that non-canonical representation, which the native runner does not reproduce.
-//! A mid-query handoff would then leave one shared hash table holding two entries
-//! for the same key under two different stored hashes; the final combine indexes by
-//! the stored hash, so the entries land in different partitions and never merge —
-//! silently splitting the group's aggregate across duplicate output rows. Any step
-//! whose compiled group hash is non-canonical must therefore refuse handoff.
 static bool SljitFullPipelinePrimitiveStepSupportsRunnerHandoff(const SljitFullPipelinePrimitiveStep &step) {
 	if (step.kind == SljitFullPipelinePrimitiveKind::GROUPED_AGGREGATE_UPDATE) {
-		if (step.grouped_aggregate_update.input_kind == SljitGroupedAggregateUpdateInputKind::PROJECTED_INPUT) {
-			// Projected group inputs hash a non-canonical representation the
-			// vectorized runner will not match after a handoff.
-			return false;
-		}
 		return SljitGroupedAggregateUpdateStrategySupportsRunnerHandoff(step.grouped_aggregate_update.strategy);
-	}
-	if (step.kind == SljitFullPipelinePrimitiveKind::POST_JOIN_PROJECTION_AGGREGATE_UPDATE) {
-		// The post-join projection fuses the group-key projection into the aggregate,
-		// so its compiled group hash is non-canonical by construction.
-		return false;
 	}
 	return true;
 }

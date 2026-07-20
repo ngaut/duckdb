@@ -18,6 +18,7 @@
 #include "duckdb/common/vector_operations/vector_operations.hpp"
 #include "duckdb/execution/execution_operator_runtime.hpp"
 #include "duckdb/execution/execution_aggregate_runtime.hpp"
+#include "duckdb/execution/execution_region_settings.hpp"
 #include "duckdb/execution/expression_executor.hpp"
 #include "duckdb/execution/ht_entry.hpp"
 #include "duckdb/function/scalar/string_common.hpp"
@@ -359,11 +360,14 @@ GroupedAggregateHashTable::GroupedAggregateHashTable(ClientContext &context_p, A
                                                      idx_t initial_capacity, idx_t radix_bits,
                                                      TupleDataValidityType group_validity)
     : BaseAggregateHashTable(context_p, allocator, aggregate_objects_p, std::move(payload_types_p)), context(context_p),
-      radix_bits(radix_bits), count(0), capacity(0), sink_count(0), skip_lookups(false), enable_hll(false),
-      aggregate_allocator(make_shared_ptr<ArenaAllocator>(allocator)), state(*aggregate_allocator),
-      skip_lookups_require_final_combine(false), proven_unique_append_key_type(PhysicalType::INVALID),
-      proven_unique_append_has_last_key(false), proven_unique_append_last_signed_key(0),
-      proven_unique_append_last_unsigned_key(0), proven_unique_append_ranges_coalesced(false) {
+      radix_bits(radix_bits), count(0), capacity(0), sink_count(0),
+      require_canonical_group_hash(ExecutionRegionSettings::AdaptiveAb(context_p) ||
+                                   ExecutionRegionSettings::DebugForceDeferAfterChunks(context_p) != 0),
+      skip_lookups(false), enable_hll(false), aggregate_allocator(make_shared_ptr<ArenaAllocator>(allocator)),
+      state(*aggregate_allocator), skip_lookups_require_final_combine(false),
+      proven_unique_append_key_type(PhysicalType::INVALID), proven_unique_append_has_last_key(false),
+      proven_unique_append_last_signed_key(0), proven_unique_append_last_unsigned_key(0),
+      proven_unique_append_ranges_coalesced(false) {
 	clustered_state.all_clustered = AllAggregatesClustered(aggregate_objects_p);
 	clustered_state.n_clustered = CountAggregatesClustered(aggregate_objects_p);
 	if (clustered_state.n_clustered > 1) {
@@ -4261,7 +4265,7 @@ static bool AggregateDescriptorSourceValueMatchesStored(const ExecutionRowPointe
 
 static bool AggregateHashDescriptorRows(const AggregateRowPointerDescriptorSourceInfo &info,
                                         const vector<ExecutionRowPointerGroupKeySource> &group_sources, idx_t count,
-                                        Vector &hashes) {
+                                        Vector &hashes, bool require_canonical_group_hash) {
 	hashes.SetVectorType(VectorType::FLAT_VECTOR);
 	FlatVector::SetSize(hashes, count_t(count));
 	auto hash_data = FlatVector::GetDataMutable<hash_t>(hashes);
@@ -4277,7 +4281,16 @@ static bool AggregateHashDescriptorRows(const AggregateRowPointerDescriptorSourc
 			}
 		}
 	}
-	const auto use_leading_key_hash = AggregateDescriptorCanUseLeadingKeyHash(group_sources);
+	// The stored hash is also the probe hash, the partition-routing key, and the value the final
+	// combine re-reads verbatim, so it must be a canonical function of the full group key whenever
+	// two runners can feed one table: a mid-query handoff (adaptive A/B, forced defer) mixes native
+	// rows (full-column DataChunk::Hash) with compiled rows, and a leading-key-only truncation would
+	// then split one group across two stored hashes into two partitions that never merge. When no
+	// handoff can occur the compiled runner owns the table alone, so the cheaper leading-key hash is
+	// sound. Each per-column descriptor hash already equals VectorOperations::Hash, so folding every
+	// column yields exactly the canonical hash.
+	const auto use_leading_key_hash =
+	    !require_canonical_group_hash && AggregateDescriptorCanUseLeadingKeyHash(group_sources);
 	const idx_t hash_group_count = use_leading_key_hash ? 1 : group_sources.size();
 	for (idx_t row_idx = 0; row_idx < count; row_idx++) {
 		if (can_reuse_row_pointer_hashes && row_idx > 0 &&
@@ -6615,7 +6628,7 @@ bool GroupedAggregateHashTable::TryFindOrCreateDescriptorGroupStateTargetsDirect
 	}
 
 	auto hash_start = AggregateTraceStart(recorder);
-	if (!AggregateHashDescriptorRows(sources, group_sources, count, state.hashes)) {
+	if (!AggregateHashDescriptorRows(sources, group_sources, count, state.hashes, require_canonical_group_hash)) {
 		RecordAggregateTraceStage(recorder, "find_or_create_descriptor.hash_miss", hash_start);
 		return false;
 	}

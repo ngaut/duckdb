@@ -268,6 +268,11 @@ private:
 
 	//! How many tuples went into this HT (before de-duplication)
 	idx_t sink_count;
+	//! If true, a runner handoff can feed this table from two hash functions, so the compiled
+	//! descriptor path must store the canonical full-column group hash (never a leading-key truncation)
+	//! to stay comparable with the native runner's DataChunk::Hash. Set once from the execution's
+	//! handoff-enabling settings; false on the default path, where the leading-key hash stays sound.
+	bool require_canonical_group_hash;
 	//! If true, we just append, skipping HT lookups
 	bool skip_lookups;
 	//! Whether to enable HLL counting the hashes
