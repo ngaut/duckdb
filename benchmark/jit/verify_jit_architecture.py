@@ -2009,6 +2009,30 @@ def verify_handoff_capability_single_authority() -> None:
             "require_canonical_group_hash must be set from the handoff-enabling settings (adaptive A/B and "
             "forced defer); otherwise a handoff can still mix a non-canonical group hash into a shared table"
         )
+    # The aggregate's hash tables are per-thread and merge at the end, so this answer must be identical
+    # on every thread and in every phase. adaptive_ab is bound only on the measuring thread and only
+    # until the verdict commits, so deciding from it lets one thread pick the leading-key hash while
+    # another picks the canonical one -- the same split, reintroduced. Decide from plan-level facts.
+    runner = read("src/execution/execution_region_runner.cpp")
+    marker = "bool RunnerHandoffPossible() const override {"
+    if marker not in runner:
+        raise AssertionError("the compiled runtime must answer RunnerHandoffPossible for its sinks")
+    handoff_body = runner.split(marker, 1)[1].split("\n\t}", 1)[0]
+    # The rationale comment names adaptive_ab to say why it must not be consulted; check code only.
+    handoff_possible = "\n".join(
+        line for line in handoff_body.splitlines() if not line.strip().startswith("//")
+    )
+    if "adaptive_ab" in handoff_possible:
+        raise AssertionError(
+            "RunnerHandoffPossible must not consult the per-run adaptive_ab binding: it is absent on "
+            "bystander threads and after the verdict commits, so threads would disagree and merge two "
+            "group-hash functions into one table"
+        )
+    if "AdaptiveMeasurementCandidate" not in handoff_possible or "SupportsRunnerHandoff" not in handoff_possible:
+        raise AssertionError(
+            "RunnerHandoffPossible must derive from the band-filtered kernel candidacy and the kernel's "
+            "handoff capability, so every thread computes the same answer for the same pipeline"
+        )
 
 
 def verify_runner_switch_state_machine() -> None:

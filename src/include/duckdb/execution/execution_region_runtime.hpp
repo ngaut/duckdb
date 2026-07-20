@@ -126,6 +126,13 @@ public:
 	virtual const string &DeferredReason() const = 0;
 	//! True until the source contract has been touched for this pipeline.
 	virtual bool CanDeferAtEntry() const = 0;
+	//! Whether this execution can hand the pipeline over to the vectorized runner mid-query, so a
+	//! sink can receive rows from both runners. Sinks that store a producer-computed hash must fall
+	//! back to the canonical one when this holds, or the two runners' hashes disagree for one key.
+	//! Conservative by default: only a runtime that knows its handoff protocol may relax it.
+	virtual bool RunnerHandoffPossible() const {
+		return true;
+	}
 };
 
 } // namespace duckdb

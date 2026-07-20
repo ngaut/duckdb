@@ -189,6 +189,12 @@ public:
 	bool LookupsSkipped() const;
 	//! Permanently require final combination for the current append-only stream.
 	void RequireFinalCombine();
+	//! Declare whether a runner handoff can feed this table from two hash functions; see
+	//! require_canonical_group_hash. Only ever tightens or relaxes before rows are appended by the
+	//! compiled path, so every row in one table carries a hash from the same function.
+	void SetRequireCanonicalGroupHash(bool required) {
+		require_canonical_group_hash = required;
+	}
 	//! Continue a producer-proven fixed-width strictly increasing stream. This HT validates the published endpoints
 	//! and owns conservative key bounds so the proof survives backend/runtime and local pointer-table boundaries.
 	bool TryContinueProvenUniqueAppend(DataChunk &groups, ExecutionGroupedAggregateAppendProof append_proof = {});

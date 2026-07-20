@@ -633,6 +633,14 @@ public:
 		single_grouping.grouping.table_data.RequireAppendFinalCombine(context, single_grouping.input);
 	}
 
+	void SetRequireCanonicalGroupHash(bool required) override {
+		if (!CanUseSingleGroupingState()) {
+			return;
+		}
+		auto single_grouping = GetSingleGroupingSinkState();
+		single_grouping.grouping.table_data.SetRequireCanonicalGroupHash(context, single_grouping.input, required);
+	}
+
 	bool TryResolveNewGroups(DataChunk &input, const ExecutionRegionSinkInfo &sink_info, Vector &addresses,
 	                         optional_ptr<ExecutionOperatorStageRecorder> recorder = nullptr) override {
 		if (!CanUseSingleGroupingState()) {

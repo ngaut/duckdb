@@ -36,6 +36,12 @@ SET jit_policy='auto';
 statement ok
 SET jit_adaptive_ab=true;
 
+# These cases assert that a verdict is actually reached, so they must measure every
+# compiled-selected pipeline rather than inherit the shipped band, which measures only
+# thin selections and would leave these clear-cut pipelines unmeasured.
+statement ok
+SET jit_adaptive_ab_band_basis_points=0;
+
 # Default margin: the verdict is measured and may go either way; results must be
 # exact regardless.
 query I

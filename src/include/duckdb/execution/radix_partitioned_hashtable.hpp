@@ -130,6 +130,7 @@ public:
 	bool TryEnableProvenUniqueAppend(ExecutionContext &context, OperatorSinkInput &input, DataChunk &groups,
 	                                 ExecutionGroupedAggregateAppendProof append_proof = {}) const;
 	void RequireAppendFinalCombine(ExecutionContext &context, OperatorSinkInput &input) const;
+	void SetRequireCanonicalGroupHash(ExecutionContext &context, OperatorSinkInput &input, bool required) const;
 	bool TryResolveNewGroupAddresses(ExecutionContext &context, DataChunk &chunk, OperatorSinkInput &input,
 	                                 const ExecutionRegionSinkInfo &sink_info, Vector &addresses_out,
 	                                 optional_ptr<ExecutionOperatorStageRecorder> recorder = nullptr) const;

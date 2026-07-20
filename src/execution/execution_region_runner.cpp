@@ -411,6 +411,19 @@ public:
 		return pipeline.SourceCursorUntouched();
 	}
 
+	bool RunnerHandoffPossible() const override {
+		// Every thread and every phase must agree: the aggregate's hash tables are per-thread and are
+		// combined at the end, so one thread answering differently from another would mix two hash
+		// functions into one merge. Answer from plan-level facts only -- the settings and the kernel's
+		// band-filtered candidacy -- never from this run's adaptive_ab binding, which is absent on
+		// bystander threads and again once the verdict has committed.
+		auto &client = pipeline.GetClientContext();
+		const auto adaptive_handoff =
+		    ExecutionRegionSettings::AdaptiveAb(client) && kernel.AdaptiveMeasurementCandidate();
+		const auto forced_defer_handoff = ExecutionRegionSettings::DebugForceDeferAfterChunks(client) != 0;
+		return (adaptive_handoff || forced_defer_handoff) && kernel.SupportsRunnerHandoff();
+	}
+
 	const string &DeferredReason() const override {
 		return deferred_reason;
 	}

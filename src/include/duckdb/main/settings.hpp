@@ -1399,7 +1399,11 @@ struct JitAdaptiveAbSetting {
 	    "Measure one compiled and one native row group per compiled-selected pipeline and commit to the measured "
 	    "winner; the compiled runner must win by jit_adaptive_ab_margin_basis_points";
 	static constexpr const char *InputType = "BOOLEAN";
-	static constexpr const char *DefaultValue = "false";
+	// Only pipelines the static cost model cannot call on its own are measured (see
+	// jit_adaptive_ab_band_basis_points), so a workload the model is confident about pays nothing:
+	// TPC-H SF10 reaches zero verdicts at the shipped band and is runtime-identical either way. The
+	// measurement earns its keep only where the static margin is too thin to trust.
+	static constexpr const char *DefaultValue = "true";
 	static constexpr SettingScopeTarget Scope = SettingScopeTarget::LOCAL_DEFAULT;
 	static constexpr idx_t SettingIndex = NEXT_SETTING_INDEX();
 };
@@ -1423,7 +1427,11 @@ struct JitAdaptiveAbBandBasisPointsSetting {
 	    "Measure the runner A/B only when the selection is thin: static net benefit within this many basis points of "
 	    "the required benefit; zero measures every compiled-selected pipeline";
 	static constexpr const char *InputType = "UBIGINT";
-	static constexpr const char *DefaultValue = "0";
+	// Measuring every compiled-selected pipeline costs a native leg per execution, and no
+	// cross-execution verdict cache exists to amortize it, so a zero band re-pays that tax on every
+	// run: measured +16%..+63% against the non-adaptive default across TPC-H SF10. Measure only
+	// genuinely thin selections, where the static margin cannot decide the runner on its own.
+	static constexpr const char *DefaultValue = "1000";
 	static constexpr SettingScopeTarget Scope = SettingScopeTarget::LOCAL_DEFAULT;
 	static constexpr idx_t SettingIndex = NEXT_SETTING_INDEX();
 };

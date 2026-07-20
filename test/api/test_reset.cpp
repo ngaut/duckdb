@@ -142,6 +142,8 @@ OptionValueSet GetValueForOption(const string &name, const LogicalType &type) {
 	    {"enable_caching_operators", {false}},
 	    {"enable_jit", {false}},
 	    {"jit_policy", {"off"}},
+	    // Ships enabled, so RESET is only observable from the off value.
+	    {"jit_adaptive_ab", {false}},
 	    {"jit_trace_decisions", {true}},
 	    {"jit_trace_runtime", {true}},
 	    {"enable_optimizer", {false}},

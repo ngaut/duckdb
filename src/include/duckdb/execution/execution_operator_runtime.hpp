@@ -299,6 +299,12 @@ struct ExecutionGroupedAggregateStateAddressState {
 	}
 	virtual void RequireAppendFinalCombine() {
 	}
+	//! Declare whether a runner handoff can feed this sink from two hash functions. While it can, the
+	//! grouped sink must store the canonical full-key hash instead of a cheaper producer-local one, so
+	//! that rows the two runners create for one group still collide and merge.
+	virtual void SetRequireCanonicalGroupHash(bool required) {
+		(void)required;
+	}
 	virtual bool TryResolveNewGroups(DataChunk &input, const ExecutionRegionSinkInfo &sink_info, Vector &addresses,
 	                                 optional_ptr<ExecutionOperatorStageRecorder> recorder = nullptr) {
 		(void)input;
