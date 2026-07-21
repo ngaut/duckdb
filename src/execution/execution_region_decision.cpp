@@ -11,6 +11,7 @@
 #include "duckdb/execution/execution_region_ir.hpp"
 #include "duckdb/execution/execution_region_lowering.hpp"
 #include "duckdb/execution/execution_region_manager.hpp"
+#include "duckdb/common/hugeint.hpp"
 #include "duckdb/execution/execution_region_settings.hpp"
 #include "duckdb/main/client_context.hpp"
 #include "duckdb/main/settings.hpp"
@@ -167,8 +168,13 @@ bool ExecutionRegionAdaptiveMeasurementWithinBand(ClientContext &context, const 
 		return true;
 	}
 	// The measurement pays for itself only when the static margin is thin: net
-	// benefit within band basis points of the required benefit.
-	return cost.net_benefit * 10000 <= cost.required_benefit * NumericCast<int64_t>(band);
+	// benefit within band basis points of the required benefit. net_benefit and required_benefit are
+	// saturating costs that can approach INT64_MAX, so the basis-point cross-multiply is evaluated in
+	// 128-bit: an int64 product would overflow (UB) and wrongly flip a fat-margin pipeline into
+	// "measure", re-arming the native-leg tax the band exists to avoid. Saturating instead of widening
+	// would clamp both sides to INT64_MAX and mis-decide the same way, so the comparison stays exact.
+	return hugeint_t(cost.net_benefit) * hugeint_t(10000) <=
+	       hugeint_t(cost.required_benefit) * hugeint_t(NumericCast<int64_t>(band));
 }
 
 static void SelectExecutionRegionAcceleratedRunner(ExecutionRegionPhysicalRunnerSelection &selection) {

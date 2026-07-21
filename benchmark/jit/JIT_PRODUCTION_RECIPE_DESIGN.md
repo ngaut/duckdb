@@ -261,7 +261,8 @@ fixtures.
 
 ## Measured runner selection
 
-`jit_adaptive_ab` (default off) measures one native and one compiled row group
+`jit_adaptive_ab` (default on, band-gated via `jit_adaptive_ab_band_basis_points`=1000 so only
+thin-margin selections are measured; TPC-H reaches zero verdicts and pays nothing) measures one native and one compiled row group
 per compiled-selected pipeline and commits to the measured winner; the planner
 admits a pipeline to measurement only when its static net benefit lies within
 `jit_adaptive_ab_band_basis_points` of its required benefit, so confident

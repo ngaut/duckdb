@@ -112,11 +112,14 @@ static bool SljitTryReserveGroupedAggregateGroups(ExecutionRegionRuntime &runtim
 	if (!grouped_state.ready || !grouped_state.state) {
 		return false;
 	}
-	// Runs ahead of every compiled grouped append, so the sink knows whether this execution can hand
-	// the pipeline to the vectorized runner before it stores its first group hash. Without a handoff
-	// the compiled runner owns the table and may use its cheaper producer-local hash; with one, both
-	// runners must agree on the canonical hash or a group splits across two of them.
-	grouped_state.state->SetRequireCanonicalGroupHash(runtime.RunnerHandoffPossible());
+	// Declare once, ahead of the first compiled grouped append, whether this execution can hand the
+	// pipeline to the vectorized runner. Without a handoff the compiled runner owns the table and may
+	// use its cheaper producer-local hash; with one, both runners must agree on the canonical hash or a
+	// group splits across two of them. RunnerHandoffPossible() is query-constant, so a per-op-per-thread
+	// once-flag keeps it (and its settings/recipe reads) off the per-chunk aggregate loop.
+	if (runtime.TryMarkOnce(ExecutionRegionRuntimeOnceFlag::CANONICAL_GROUP_HASH_DECLARED, op_idx)) {
+		grouped_state.state->SetRequireCanonicalGroupHash(runtime.RunnerHandoffPossible());
+	}
 	auto &reserve = op.aggregate_update.plan.group_reserve;
 	if (!reserve.CanReserve() && runtime_group_count == 0) {
 		return false;

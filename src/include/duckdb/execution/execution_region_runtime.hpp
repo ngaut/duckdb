@@ -66,8 +66,8 @@ struct ExecutionRegionRuntimeMetrics {
 	ExecutionRegionJitRuntimeMetrics jit_runtime;
 };
 
-enum class ExecutionRegionRuntimeOnceFlag : uint8_t { AGGREGATE_GROUP_RESERVE };
-static constexpr idx_t EXECUTION_REGION_RUNTIME_ONCE_FLAG_COUNT = 1;
+enum class ExecutionRegionRuntimeOnceFlag : uint8_t { AGGREGATE_GROUP_RESERVE, CANONICAL_GROUP_HASH_DECLARED };
+static constexpr idx_t EXECUTION_REGION_RUNTIME_ONCE_FLAG_COUNT = 2;
 
 DUCKDB_API void AddExecutionRegionStageRuntime(vector<ExecutionRegionRecordedStageRuntime> &stages,
                                                ExecutionRegionStageId stage, int64_t runtime_time_us, idx_t count = 1);
