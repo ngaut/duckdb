@@ -110,23 +110,22 @@ unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativeDoubleBinaryConstant(Sljit
 
 	auto done = EmitSljitSelectedSourceInvalidResultLoop(compiler, [&](vector<sljit_jump *> &) {
 		EmitLoadNativeDoubleOperand(compiler, source_kind, offsetof(SljitNativeVectorInput, source_data), SLJIT_R1,
-		                            offsetof(SljitNativeVectorInput, source_double_scale), SLJIT_TMP_FR0,
-		                            single_precision);
-		sljit_emit_fmem(compiler, SLJIT_MOV_F64 | SLJIT_MEM_ALIGNED_32, SLJIT_TMP_FR1, SLJIT_MEM1(SLJIT_S0),
+		                            offsetof(SljitNativeVectorInput, source_double_scale), SLJIT_FR0, single_precision);
+		sljit_emit_fmem(compiler, SLJIT_MOV_F64 | SLJIT_MEM_ALIGNED_32, SLJIT_FR1, SLJIT_MEM1(SLJIT_S0),
 		                offsetof(SljitNativeVectorInput, double_constant));
 		if (single_precision) {
-			sljit_emit_fop1(compiler, SLJIT_CONV_F32_FROM_F64, SLJIT_TMP_FR1, 0, SLJIT_TMP_FR1, 0);
+			sljit_emit_fop1(compiler, SLJIT_CONV_F32_FROM_F64, SLJIT_FR1, 0, SLJIT_FR1, 0);
 		}
 		if (constant_on_left) {
-			sljit_emit_fop2(compiler, binary_op, SLJIT_TMP_FR0, 0, SLJIT_TMP_FR1, 0, SLJIT_TMP_FR0, 0);
+			sljit_emit_fop2(compiler, binary_op, SLJIT_FR0, 0, SLJIT_FR1, 0, SLJIT_FR0, 0);
 		} else {
-			sljit_emit_fop2(compiler, binary_op, SLJIT_TMP_FR0, 0, SLJIT_TMP_FR0, 0, SLJIT_TMP_FR1, 0);
+			sljit_emit_fop2(compiler, binary_op, SLJIT_FR0, 0, SLJIT_FR0, 0, SLJIT_FR1, 0);
 		}
 
 		sljit_emit_op1(compiler, SLJIT_MOV_P, SLJIT_R0, 0, SLJIT_MEM1(SLJIT_S0),
 		               offsetof(SljitNativeVectorInput, result_data));
-		sljit_emit_fmem(compiler, move_op | SLJIT_MEM_STORE | fmem_align, SLJIT_TMP_FR0,
-		                SLJIT_MEM2(SLJIT_R0, SLJIT_S1), result_data_scale);
+		sljit_emit_fmem(compiler, move_op | SLJIT_MEM_STORE | fmem_align, SLJIT_FR0, SLJIT_MEM2(SLJIT_R0, SLJIT_S1),
+		                result_data_scale);
 	});
 	sljit_set_label(done, sljit_emit_label(compiler));
 	sljit_emit_return_void(compiler);
@@ -159,31 +158,31 @@ BuildSljitNativeDoubleBinaryReferences(SljitNativeDoubleBinaryOp op, SljitNative
 	auto done = EmitSljitTwoSourceInvalidResultLoop(compiler, [&](vector<sljit_jump *> &) {
 		if (needs_helper_spill) {
 			EmitLoadNativeDoubleOperand(compiler, left_kind, offsetof(SljitNativeVectorInput, source_data), SLJIT_S3,
-			                            offsetof(SljitNativeVectorInput, source_double_scale), SLJIT_TMP_FR0,
+			                            offsetof(SljitNativeVectorInput, source_double_scale), SLJIT_FR0,
 			                            single_precision);
-			sljit_emit_fmem(compiler, move_op | SLJIT_MEM_STORE | fmem_align, SLJIT_TMP_FR0, SLJIT_MEM1(SLJIT_SP),
+			sljit_emit_fmem(compiler, move_op | SLJIT_MEM_STORE | fmem_align, SLJIT_FR0, SLJIT_MEM1(SLJIT_SP),
 			                left_spill_offset);
 			EmitLoadNativeDoubleOperand(compiler, right_kind, offsetof(SljitNativeVectorInput, right_source_data),
 			                            SLJIT_S4, offsetof(SljitNativeVectorInput, right_source_double_scale),
-			                            SLJIT_TMP_FR0, single_precision);
-			sljit_emit_fmem(compiler, move_op | SLJIT_MEM_STORE | fmem_align, SLJIT_TMP_FR0, SLJIT_MEM1(SLJIT_SP),
+			                            SLJIT_FR0, single_precision);
+			sljit_emit_fmem(compiler, move_op | SLJIT_MEM_STORE | fmem_align, SLJIT_FR0, SLJIT_MEM1(SLJIT_SP),
 			                right_spill_offset);
-			sljit_emit_fmem(compiler, move_op | fmem_align, SLJIT_TMP_FR0, SLJIT_MEM1(SLJIT_SP), left_spill_offset);
-			sljit_emit_fmem(compiler, move_op | fmem_align, SLJIT_TMP_FR1, SLJIT_MEM1(SLJIT_SP), right_spill_offset);
+			sljit_emit_fmem(compiler, move_op | fmem_align, SLJIT_FR0, SLJIT_MEM1(SLJIT_SP), left_spill_offset);
+			sljit_emit_fmem(compiler, move_op | fmem_align, SLJIT_FR1, SLJIT_MEM1(SLJIT_SP), right_spill_offset);
 		} else {
 			EmitLoadNativeDoubleOperand(compiler, left_kind, offsetof(SljitNativeVectorInput, source_data), SLJIT_S3,
-			                            offsetof(SljitNativeVectorInput, source_double_scale), SLJIT_TMP_FR0,
+			                            offsetof(SljitNativeVectorInput, source_double_scale), SLJIT_FR0,
 			                            single_precision);
 			EmitLoadNativeDoubleOperand(compiler, right_kind, offsetof(SljitNativeVectorInput, right_source_data),
 			                            SLJIT_S4, offsetof(SljitNativeVectorInput, right_source_double_scale),
-			                            SLJIT_TMP_FR1, single_precision);
+			                            SLJIT_FR1, single_precision);
 		}
-		sljit_emit_fop2(compiler, binary_op, SLJIT_TMP_FR0, 0, SLJIT_TMP_FR0, 0, SLJIT_TMP_FR1, 0);
+		sljit_emit_fop2(compiler, binary_op, SLJIT_FR0, 0, SLJIT_FR0, 0, SLJIT_FR1, 0);
 
 		sljit_emit_op1(compiler, SLJIT_MOV_P, SLJIT_R0, 0, SLJIT_MEM1(SLJIT_S0),
 		               offsetof(SljitNativeVectorInput, result_data));
-		sljit_emit_fmem(compiler, move_op | SLJIT_MEM_STORE | fmem_align, SLJIT_TMP_FR0,
-		                SLJIT_MEM2(SLJIT_R0, SLJIT_S1), result_data_scale);
+		sljit_emit_fmem(compiler, move_op | SLJIT_MEM_STORE | fmem_align, SLJIT_FR0, SLJIT_MEM2(SLJIT_R0, SLJIT_S1),
+		                result_data_scale);
 	});
 	sljit_set_label(done, sljit_emit_label(compiler));
 	sljit_emit_return_void(compiler);

@@ -84,11 +84,9 @@ sljit_s32 SljitFlatIntegerProjectionSourceScalarRegister(idx_t source_idx) {
 }
 
 idx_t SljitFlatIntegerProjectionGroupSize() {
-#if SLJIT_NUMBER_OF_SAVED_REGISTERS >= 9
-	return 4;
-#else
-	return 2;
-#endif
+	static_assert(SLJIT_NUMBER_OF_SAVED_REGISTERS >= 6,
+	              "flat integer projection requires five invariant registers and one result register");
+	return MinValue<idx_t>(4, SLJIT_NUMBER_OF_SAVED_REGISTERS - 5);
 }
 
 sljit_s32 SljitFlatIntegerProjectionSavedRegisterCount() {

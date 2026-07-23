@@ -269,8 +269,19 @@ static const sljit_u8 freg_lmap[SLJIT_NUMBER_OF_FLOAT_REGISTERS + 2] = {
 #define OR_rm8_r8		0x08
 #define ORPD_x_xm		0x56
 #define PACKSSWB_x_xm		(/* GROUP_0F */ 0x63)
+#define PADDB_x_xm		0xfc
+#define PADDW_x_xm		0xfd
+#define PADDD_x_xm		0xfe
+#define PADDQ_x_xm		0xd4
 #define PAND_x_xm		0xdb
+#define PCMPEQB_x_xm		0x74
+#define PCMPEQW_x_xm		0x75
 #define PCMPEQD_x_xm		0x76
+#define PCMPEQQ_x_xm		0x29
+#define PCMPGTB_x_xm		0x64
+#define PCMPGTW_x_xm		0x65
+#define PCMPGTD_x_xm		0x66
+#define PCMPGTQ_x_xm		0x37
 #define PINSRB_x_rm_i8		0x20
 #define PINSRW_x_rm_i8		0xc4
 #define PINSRD_x_rm_i8		0x22
@@ -290,6 +301,8 @@ static const sljit_u8 freg_lmap[SLJIT_NUMBER_OF_FLOAT_REGISTERS + 2] = {
 #define PMOVZXDQ_x_xm		0x35
 #define PMOVZXWD_x_xm		0x33
 #define PMOVZXWQ_x_xm		0x34
+#define PMULLW_x_xm		0xd5
+#define PMULLD_x_xm		0x40
 #define POP_r			0x58
 #define POP_rm			0x8f
 #define POPF			0x9d
@@ -301,6 +314,10 @@ static const sljit_u8 freg_lmap[SLJIT_NUMBER_OF_FLOAT_REGISTERS + 2] = {
 #define PSRLDQ_x		0x73
 #define PSLLD_x_i8		0x72
 #define PSLLQ_x_i8		0x73
+#define PSUBB_x_xm		0xf8
+#define PSUBW_x_xm		0xf9
+#define PSUBD_x_xm		0xfa
+#define PSUBQ_x_xm		0xfb
 #define PUSH_i32		0x68
 #define PUSH_r			0x50
 #define PUSH_rm			(/* GROUP_FF */ 6 << 3)
@@ -392,6 +409,7 @@ static const sljit_u8 freg_lmap[SLJIT_NUMBER_OF_FLOAT_REGISTERS + 2] = {
 #define CPU_FEATURE_AVX			0x040
 #define CPU_FEATURE_AVX2		0x080
 #define CPU_FEATURE_OSXSAVE		0x100
+#define CPU_FEATURE_SSE42		0x200
 
 static sljit_u32 cpu_feature_list = 0;
 
@@ -568,6 +586,8 @@ static void get_cpu_features(void)
 
 		if (info[2] & 0x80000)
 			feature_list |= CPU_FEATURE_SSE41;
+		if (info[2] & 0x100000)
+			feature_list |= CPU_FEATURE_SSE42;
 		if (info[2] & 0x8000000)
 			feature_list |= CPU_FEATURE_OSXSAVE;
 		if (info[2] & 0x10000000)
@@ -4976,6 +4996,7 @@ SLJIT_API_FUNC_ATTRIBUTE sljit_s32 sljit_emit_simd_op2(struct sljit_compiler *co
 {
 	sljit_s32 reg_size = SLJIT_SIMD_GET_REG_SIZE(type);
 	sljit_s32 elem_size = SLJIT_SIMD_GET_ELEM_SIZE(type);
+	sljit_s32 opcode = SLJIT_SIMD_GET_OPCODE(type);
 	sljit_s32 use_vex = (cpu_feature_list & CPU_FEATURE_AVX) && (compiler->options & SLJIT_ENTER_USE_VEX);
 	sljit_uw op = 0;
 	sljit_uw mov_op = 0;
@@ -4997,7 +5018,7 @@ SLJIT_API_FUNC_ATTRIBUTE sljit_s32 sljit_emit_simd_op2(struct sljit_compiler *co
 	if ((type & SLJIT_SIMD_FLOAT) && (elem_size < 2 || elem_size > 3))
 		return SLJIT_ERR_UNSUPPORTED;
 
-	switch (SLJIT_SIMD_GET_OPCODE(type)) {
+	switch (opcode) {
 	case SLJIT_SIMD_OP2_AND:
 		op = (type & SLJIT_SIMD_FLOAT) ? ANDPD_x_xm : PAND_x_xm;
 
@@ -5015,6 +5036,111 @@ SLJIT_API_FUNC_ATTRIBUTE sljit_s32 sljit_emit_simd_op2(struct sljit_compiler *co
 
 		if (!(type & SLJIT_SIMD_FLOAT) || elem_size == 3)
 			op |= EX86_PREF_66;
+		break;
+	case SLJIT_SIMD_OP2_ADD:
+		if (type & SLJIT_SIMD_FLOAT)
+			return SLJIT_ERR_UNSUPPORTED;
+
+		switch (elem_size) {
+		case 0:
+			op = PADDB_x_xm;
+			break;
+		case 1:
+			op = PADDW_x_xm;
+			break;
+		case 2:
+			op = PADDD_x_xm;
+			break;
+		case 3:
+			op = PADDQ_x_xm;
+			break;
+		default:
+			return SLJIT_ERR_UNSUPPORTED;
+		}
+		op |= EX86_PREF_66;
+		break;
+	case SLJIT_SIMD_OP2_SUB:
+		if (type & SLJIT_SIMD_FLOAT)
+			return SLJIT_ERR_UNSUPPORTED;
+
+		switch (elem_size) {
+		case 0:
+			op = PSUBB_x_xm;
+			break;
+		case 1:
+			op = PSUBW_x_xm;
+			break;
+		case 2:
+			op = PSUBD_x_xm;
+			break;
+		case 3:
+			op = PSUBQ_x_xm;
+			break;
+		default:
+			return SLJIT_ERR_UNSUPPORTED;
+		}
+		op |= EX86_PREF_66;
+		break;
+	case SLJIT_SIMD_OP2_MUL:
+		if (type & SLJIT_SIMD_FLOAT)
+			return SLJIT_ERR_UNSUPPORTED;
+
+		if (elem_size == 1)
+			op = PMULLW_x_xm | EX86_PREF_66;
+		else if (elem_size == 2) {
+			if (reg_size == 4 && !(cpu_feature_list & CPU_FEATURE_SSE41))
+				return SLJIT_ERR_UNSUPPORTED;
+			op = PMULLD_x_xm | EX86_PREF_66 | VEX_OP_0F38;
+		} else
+			return SLJIT_ERR_UNSUPPORTED;
+		break;
+	case SLJIT_SIMD_OP2_CMPGT:
+		if (type & SLJIT_SIMD_FLOAT)
+			return SLJIT_ERR_UNSUPPORTED;
+
+		switch (elem_size) {
+		case 0:
+			op = PCMPGTB_x_xm;
+			break;
+		case 1:
+			op = PCMPGTW_x_xm;
+			break;
+		case 2:
+			op = PCMPGTD_x_xm;
+			break;
+		case 3:
+			if (reg_size == 4 && !(cpu_feature_list & CPU_FEATURE_SSE42))
+				return SLJIT_ERR_UNSUPPORTED;
+			op = PCMPGTQ_x_xm | VEX_OP_0F38;
+			break;
+		default:
+			return SLJIT_ERR_UNSUPPORTED;
+		}
+		op |= EX86_PREF_66;
+		break;
+	case SLJIT_SIMD_OP2_CMPEQ:
+		if (type & SLJIT_SIMD_FLOAT)
+			return SLJIT_ERR_UNSUPPORTED;
+
+		switch (elem_size) {
+		case 0:
+			op = PCMPEQB_x_xm;
+			break;
+		case 1:
+			op = PCMPEQW_x_xm;
+			break;
+		case 2:
+			op = PCMPEQD_x_xm;
+			break;
+		case 3:
+			if (reg_size == 4 && !(cpu_feature_list & CPU_FEATURE_SSE41))
+				return SLJIT_ERR_UNSUPPORTED;
+			op = PCMPEQQ_x_xm | VEX_OP_0F38;
+			break;
+		default:
+			return SLJIT_ERR_UNSUPPORTED;
+		}
+		op |= EX86_PREF_66;
 		break;
 
 	case SLJIT_SIMD_OP2_SHUFFLE:
@@ -5050,7 +5176,8 @@ SLJIT_API_FUNC_ATTRIBUTE sljit_s32 sljit_emit_simd_op2(struct sljit_compiler *co
 
 	if (dst_vreg != src1_vreg) {
 		if (dst_vreg == src2) {
-			if (SLJIT_SIMD_GET_OPCODE(type) == SLJIT_SIMD_OP2_SHUFFLE) {
+			if (opcode == SLJIT_SIMD_OP2_SHUFFLE || opcode == SLJIT_SIMD_OP2_SUB ||
+					opcode == SLJIT_SIMD_OP2_CMPGT) {
 				FAIL_IF(emit_simd_mov(compiler, type, TMP_FREG, src2));
 				FAIL_IF(emit_simd_mov(compiler, type, dst_vreg, src1_vreg));
 				src2 = TMP_FREG;

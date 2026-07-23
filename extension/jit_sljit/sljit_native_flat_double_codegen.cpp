@@ -36,26 +36,26 @@ BuildSljitNativeFlatDoubleBinaryConstant(SljitNativeDoubleBinaryOp op, SljitNati
 	               offsetof(SljitNativeVectorInput, source_data));
 	sljit_emit_op1(compiler, SLJIT_MOV_P, SLJIT_S4, 0, SLJIT_MEM1(SLJIT_S0),
 	               offsetof(SljitNativeVectorInput, result_data));
-	sljit_emit_fmem(compiler, SLJIT_MOV_F64 | SLJIT_MEM_ALIGNED_32, SLJIT_TMP_FR1, SLJIT_MEM1(SLJIT_S0),
+	sljit_emit_fmem(compiler, SLJIT_MOV_F64 | SLJIT_MEM_ALIGNED_32, SLJIT_FR1, SLJIT_MEM1(SLJIT_S0),
 	                offsetof(SljitNativeVectorInput, double_constant));
 	if (single_precision) {
-		sljit_emit_fop1(compiler, SLJIT_CONV_F32_FROM_F64, SLJIT_TMP_FR1, 0, SLJIT_TMP_FR1, 0);
+		sljit_emit_fop1(compiler, SLJIT_CONV_F32_FROM_F64, SLJIT_FR1, 0, SLJIT_FR1, 0);
 	}
 
 	auto emit_row = [&]() {
-		sljit_emit_fmem(compiler, move_op | fmem_align, SLJIT_TMP_FR0, SLJIT_MEM1(SLJIT_S3), 0);
+		sljit_emit_fmem(compiler, move_op | fmem_align, SLJIT_FR0, SLJIT_MEM1(SLJIT_S3), 0);
 		if (constant_on_left) {
-			sljit_emit_fop2(compiler, binary_op, SLJIT_TMP_FR0, 0, SLJIT_TMP_FR1, 0, SLJIT_TMP_FR0, 0);
+			sljit_emit_fop2(compiler, binary_op, SLJIT_FR0, 0, SLJIT_FR1, 0, SLJIT_FR0, 0);
 		} else {
-			sljit_emit_fop2(compiler, binary_op, SLJIT_TMP_FR0, 0, SLJIT_TMP_FR0, 0, SLJIT_TMP_FR1, 0);
+			sljit_emit_fop2(compiler, binary_op, SLJIT_FR0, 0, SLJIT_FR0, 0, SLJIT_FR1, 0);
 		}
-		sljit_emit_fmem(compiler, move_op | SLJIT_MEM_STORE | fmem_align, SLJIT_TMP_FR0, SLJIT_MEM1(SLJIT_S4), 0);
+		sljit_emit_fmem(compiler, move_op | SLJIT_MEM_STORE | fmem_align, SLJIT_FR0, SLJIT_MEM1(SLJIT_S4), 0);
 	};
 
 	if (use_simd) {
 		auto simd_type = SljitArm64NeonFloatingSimdType(single_precision);
 		auto simd_lanes = NumericCast<sljit_sw>(SljitArm64NeonFloatingLaneCount(single_precision));
-		sljit_emit_simd_replicate(compiler, simd_type, SLJIT_VR1, SLJIT_TMP_FR1, 0);
+		sljit_emit_simd_replicate(compiler, simd_type, SLJIT_VR1, SLJIT_FR1, 0);
 
 		auto emit_vector_row = [&]() {
 			sljit_emit_simd_mov(compiler, simd_type, SLJIT_VR0, SLJIT_MEM1(SLJIT_S3), 0);
@@ -116,10 +116,10 @@ BuildSljitNativeFlatDoubleBinaryReferences(SljitNativeDoubleBinaryOp op, SljitNa
 	               offsetof(SljitNativeVectorInput, result_data));
 
 	auto emit_row = [&]() {
-		sljit_emit_fmem(compiler, move_op | fmem_align, SLJIT_TMP_FR0, SLJIT_MEM1(SLJIT_S3), 0);
-		sljit_emit_fmem(compiler, move_op | fmem_align, SLJIT_TMP_FR1, SLJIT_MEM1(SLJIT_S4), 0);
-		sljit_emit_fop2(compiler, binary_op, SLJIT_TMP_FR0, 0, SLJIT_TMP_FR0, 0, SLJIT_TMP_FR1, 0);
-		sljit_emit_fmem(compiler, move_op | SLJIT_MEM_STORE | fmem_align, SLJIT_TMP_FR0, SLJIT_MEM1(SLJIT_S5), 0);
+		sljit_emit_fmem(compiler, move_op | fmem_align, SLJIT_FR0, SLJIT_MEM1(SLJIT_S3), 0);
+		sljit_emit_fmem(compiler, move_op | fmem_align, SLJIT_FR1, SLJIT_MEM1(SLJIT_S4), 0);
+		sljit_emit_fop2(compiler, binary_op, SLJIT_FR0, 0, SLJIT_FR0, 0, SLJIT_FR1, 0);
+		sljit_emit_fmem(compiler, move_op | SLJIT_MEM_STORE | fmem_align, SLJIT_FR0, SLJIT_MEM1(SLJIT_S5), 0);
 	};
 
 	if (use_simd) {

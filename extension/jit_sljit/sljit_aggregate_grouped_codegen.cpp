@@ -138,10 +138,10 @@ unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativeGroupedFusedPrimitiveAggre
 			}
 		} else {
 			EmitLoadFusedAggregateDoubleData(compiler, offsetof(SljitNativeVectorInput, source_data_array), payload_idx,
-			                                 SLJIT_R1, SLJIT_TMP_FR0);
+			                                 SLJIT_R1, SLJIT_FR0);
 			EmitSljitGroupedAggregateAccumulateDoubleImmediate(compiler, SLJIT_S4, state_offset,
 			                                                   descriptor.state_value_offset,
-			                                                   descriptor.state_is_set_offset, SLJIT_TMP_FR0);
+			                                                   descriptor.state_is_set_offset, SLJIT_FR0);
 		}
 		auto payload_done = sljit_emit_jump(compiler, SLJIT_JUMP);
 		auto payload_invalid = sljit_emit_label(compiler);

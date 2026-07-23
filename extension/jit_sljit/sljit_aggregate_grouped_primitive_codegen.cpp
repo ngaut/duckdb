@@ -74,10 +74,10 @@ void EmitSljitGroupedAggregateAccumulateDouble(struct sljit_compiler *compiler, 
 	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_R0, 0, SLJIT_MEM1(SLJIT_S0),
 	               offsetof(SljitNativeVectorInput, aggregate_state_value_offset));
 	sljit_emit_op2(compiler, SLJIT_ADD, SLJIT_R0, 0, state_reg, 0, SLJIT_R0, 0);
-	sljit_emit_fmem(compiler, SLJIT_MOV_F64 | SLJIT_MEM_ALIGNED_32, SLJIT_TMP_FR1, SLJIT_MEM1(SLJIT_R0), 0);
-	sljit_emit_fop2(compiler, SLJIT_ADD_F64, SLJIT_TMP_FR1, 0, SLJIT_TMP_FR1, 0, value_freg, 0);
-	sljit_emit_fmem(compiler, SLJIT_MOV_F64 | SLJIT_MEM_STORE | SLJIT_MEM_ALIGNED_32, SLJIT_TMP_FR1,
-	                SLJIT_MEM1(SLJIT_R0), 0);
+	sljit_emit_fmem(compiler, SLJIT_MOV_F64 | SLJIT_MEM_ALIGNED_32, SLJIT_FR1, SLJIT_MEM1(SLJIT_R0), 0);
+	sljit_emit_fop2(compiler, SLJIT_ADD_F64, SLJIT_FR1, 0, SLJIT_FR1, 0, value_freg, 0);
+	sljit_emit_fmem(compiler, SLJIT_MOV_F64 | SLJIT_MEM_STORE | SLJIT_MEM_ALIGNED_32, SLJIT_FR1, SLJIT_MEM1(SLJIT_R0),
+	                0);
 	EmitSljitGroupedAggregateSetStateIsSet(compiler, state_reg);
 }
 
@@ -215,10 +215,10 @@ void EmitSljitGroupedAggregateAccumulateDoubleImmediate(struct sljit_compiler *c
                                                         idx_t state_offset, idx_t value_offset,
                                                         idx_t state_is_set_offset, sljit_s32 value_freg) {
 	EmitSljitGroupedAggregateValuePointerImmediate(compiler, base_reg, state_offset, value_offset);
-	sljit_emit_fmem(compiler, SLJIT_MOV_F64 | SLJIT_MEM_ALIGNED_32, SLJIT_TMP_FR1, SLJIT_MEM1(SLJIT_R0), 0);
-	sljit_emit_fop2(compiler, SLJIT_ADD_F64, SLJIT_TMP_FR1, 0, SLJIT_TMP_FR1, 0, value_freg, 0);
-	sljit_emit_fmem(compiler, SLJIT_MOV_F64 | SLJIT_MEM_STORE | SLJIT_MEM_ALIGNED_32, SLJIT_TMP_FR1,
-	                SLJIT_MEM1(SLJIT_R0), 0);
+	sljit_emit_fmem(compiler, SLJIT_MOV_F64 | SLJIT_MEM_ALIGNED_32, SLJIT_FR1, SLJIT_MEM1(SLJIT_R0), 0);
+	sljit_emit_fop2(compiler, SLJIT_ADD_F64, SLJIT_FR1, 0, SLJIT_FR1, 0, value_freg, 0);
+	sljit_emit_fmem(compiler, SLJIT_MOV_F64 | SLJIT_MEM_STORE | SLJIT_MEM_ALIGNED_32, SLJIT_FR1, SLJIT_MEM1(SLJIT_R0),
+	                0);
 	EmitSljitGroupedAggregateSetStateIsSetImmediate(compiler, base_reg, state_offset, state_is_set_offset);
 }
 

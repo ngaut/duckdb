@@ -182,7 +182,7 @@ unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativeFilteredUngroupedFusedPrim
 		simd_scratches = 5 | SLJIT_ENTER_VECTOR(NumericCast<sljit_s32>(vector_regs));
 	}
 
-	sljit_emit_enter(compiler, 0, SLJIT_ARGS1V(P), simd_scratches, 7, local_size);
+	sljit_emit_enter(compiler, 0, SLJIT_ARGS1V(P), simd_scratches, SLJIT_NATIVE_VECTOR_SAVED_REG_COUNT, local_size);
 	EmitInitSljitNativeVectorLoop(compiler);
 	for (idx_t payload_idx = 0; payload_idx < payloads.size(); payload_idx++) {
 		sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_MEM1(SLJIT_SP), local_count_offsets[payload_idx], SLJIT_IMM, 0);

@@ -40,6 +40,8 @@ EmitRegularHashJoinProbeHash(struct sljit_compiler *compiler, const SljitNativeH
 	auto &keys = plan.keys;
 	const auto equality_key_count = plan.equality_key_count;
 	const auto hash_multiplier_reg = registers.hash_multiplier_reg;
+	const auto pointer_mask_reg = registers.pointer_mask_reg;
+	const auto bitmask_reg = registers.bitmask_reg;
 	const auto common_source_index_reg = registers.common_source_index_reg;
 	const auto source_index_reg = registers.source_index_reg;
 	const auto &source_data_regs = registers.source_data_regs;
@@ -87,13 +89,15 @@ EmitRegularHashJoinProbeHash(struct sljit_compiler *compiler, const SljitNativeH
 		    EmitJumpIfRegularHashJoinBloomMiss(compiler, SLJIT_R3, SLJIT_R0, SLJIT_R1, SLJIT_R2, SLJIT_R4));
 	}
 	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_R1, 0, SLJIT_R3, 0);
-	sljit_emit_op2(compiler, SLJIT_OR, SLJIT_R3, 0, SLJIT_R3, 0, SLJIT_S5, 0);
-	EmitApplyHashJoinBitmask(compiler, SLJIT_R1, SLJIT_R4, SLJIT_REGULAR_HASH_JOIN_BITMASK_REG_AVAILABLE);
+	EmitLoadHashJoinPointerMask(compiler, SLJIT_R4, pointer_mask_reg);
+	sljit_emit_op2(compiler, SLJIT_OR, SLJIT_R3, 0, SLJIT_R3, 0, SLJIT_R4, 0);
+	EmitApplyHashJoinBitmask(compiler, SLJIT_R1, SLJIT_R4, bitmask_reg);
 	return jumps;
 }
 
 static inline struct sljit_jump *EmitRegularHashJoinSaltMismatch(struct sljit_compiler *compiler,
-                                                                 const SljitHashJoinProbeCodegenConfig &config) {
+                                                                 const SljitHashJoinProbeCodegenConfig &config,
+                                                                 sljit_s32 pointer_mask_reg) {
 	if (!config.HasRuntimeLayout() && !config.UsesSalt()) {
 		return nullptr;
 	}
@@ -113,7 +117,8 @@ static inline struct sljit_jump *EmitRegularHashJoinSaltMismatch(struct sljit_co
 		sljit_set_label(chain_salt, salt_layout);
 	}
 
-	sljit_emit_op2(compiler, SLJIT_OR, SLJIT_R4, 0, SLJIT_R0, 0, SLJIT_S5, 0);
+	EmitLoadHashJoinPointerMask(compiler, SLJIT_R4, pointer_mask_reg);
+	sljit_emit_op2(compiler, SLJIT_OR, SLJIT_R4, 0, SLJIT_R0, 0, SLJIT_R4, 0);
 	auto salt_mismatch = sljit_emit_cmp(compiler, SLJIT_NOT_EQUAL, SLJIT_R4, 0, SLJIT_R3, 0);
 	if (skip_salt) {
 		sljit_set_label(skip_salt, sljit_emit_label(compiler));

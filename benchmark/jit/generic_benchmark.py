@@ -8,6 +8,7 @@ import argparse
 import collections
 import csv
 import math
+import os
 import statistics
 import sys
 from pathlib import Path
@@ -27,6 +28,7 @@ from benchmark_common import (  # noqa: E402
     row_int,
     write_csv,
 )
+from benchmark_host import require_host_quiescence, wait_for_host_quiescence  # noqa: E402
 
 # Read-only query variants share this immutable fixture through `setup_id`.
 # Preparation checkpoints the fixture before measurement. The matrix shell
@@ -699,6 +701,12 @@ def parse_args() -> argparse.Namespace:
         help="order-alternating production pairs: 5 for a candidate, 10 for an explicit promotion",
     )
     parser.add_argument("--event-log-size", type=int, default=0)
+    parser.add_argument(
+        "--host-quiescence",
+        action=argparse.BooleanOptionalAction,
+        default=os.name != "nt",
+        help="Reject a busy host before and after production measurement.",
+    )
     parser.add_argument("--workloads", nargs="+", default=None)
     parser.add_argument("--trace-runtime", action="store_true")
     parser.add_argument(
@@ -994,6 +1002,8 @@ def main() -> int:
     args = parse_args()
     if args.threads <= 0:
         raise ValueError("--threads must be positive")
+    if args.host_quiescence and os.name == "nt":
+        raise ValueError("--host-quiescence is not supported on Windows; use a quiescent benchmark host")
     if not args.duckdb.exists():
         raise FileNotFoundError(args.duckdb)
     out_dir = make_output_dir(args.out_dir, "generic_benchmark")
@@ -1008,10 +1018,14 @@ def main() -> int:
     else:
         workloads = GENERIC_WORKLOADS
     try:
+        if args.host_quiescence:
+            wait_for_host_quiescence()
         rows = run_workload_matrix(runtime_args, db_path, out_dir, workloads, args.repeats)
         summary = summarize(rows, workloads, args.threads, args.trace_runtime)
         write_csv(out_dir / "runs.csv", RUN_FIELDS, rows)
         write_csv(out_dir / "summary.csv", SUMMARY_FIELDS, summary)
+        if args.host_quiescence:
+            require_host_quiescence()
         failures = verification_failures(summary, rows, workloads, args.threads, args.trace_runtime)
         if failures:
             gate = "runtime proof" if args.trace_runtime else "performance"

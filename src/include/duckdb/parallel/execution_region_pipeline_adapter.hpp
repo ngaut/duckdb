@@ -28,6 +28,7 @@ public:
 	ExecutionContext &GetExecutionContext() const;
 	Allocator &GetAllocator() const;
 	bool IsCompiledExecutionSuppressed() const;
+	const void *ExecutionIdentity() const;
 	idx_t MaxThreads() const;
 	bool PreserveSourceChunkBoundaries() const;
 

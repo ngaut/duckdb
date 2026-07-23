@@ -20,13 +20,15 @@
 
 namespace duckdb {
 
-static constexpr bool SLJIT_REGULAR_HASH_JOIN_BITMASK_REG_AVAILABLE = SLJIT_NUMBER_OF_SAVED_REGISTERS >= 7;
-static constexpr sljit_s32 SLJIT_REGULAR_HASH_JOIN_BASE_SAVED_REG_COUNT =
-    SLJIT_REGULAR_HASH_JOIN_BITMASK_REG_AVAILABLE ? 7 : 6;
+static constexpr sljit_s32 SLJIT_REGULAR_HASH_JOIN_FIXED_SAVED_REG_COUNT = 5;
+static_assert(SLJIT_NUMBER_OF_SAVED_REGISTERS >= SLJIT_REGULAR_HASH_JOIN_FIXED_SAVED_REG_COUNT,
+              "regular hash join probe requires five saved registers");
 
 struct SljitRegularHashJoinProbeRegisters {
 	bool assume_all_keys_valid = false;
-	sljit_s32 saved_reg_count = SLJIT_REGULAR_HASH_JOIN_BASE_SAVED_REG_COUNT;
+	sljit_s32 saved_reg_count = SLJIT_REGULAR_HASH_JOIN_FIXED_SAVED_REG_COUNT;
+	sljit_s32 pointer_mask_reg = 0;
+	sljit_s32 bitmask_reg = 0;
 	sljit_s32 hash_multiplier_reg = 0;
 	sljit_s32 common_source_index_reg = 0;
 	sljit_s32 source_index_reg = SLJIT_R1;
@@ -43,14 +45,15 @@ static inline sljit_s32 AllocateRegularHashJoinSavedRegister(sljit_s32 &saved_re
 
 static inline bool PrepareRegularHashJoinProbeRegisters(const SljitNativeHashJoinProbePlan &plan,
                                                         const SljitHashJoinProbeCodegenConfig &config,
-                                                        SljitRegularHashJoinProbeRegisters &registers,
-                                                        string &error) {
+                                                        SljitRegularHashJoinProbeRegisters &registers, string &error) {
 	auto &keys = plan.keys;
 	registers.assume_all_keys_valid = config.AssumesAllKeysValid();
-	registers.saved_reg_count = SLJIT_REGULAR_HASH_JOIN_BASE_SAVED_REG_COUNT;
+	registers.saved_reg_count = SLJIT_REGULAR_HASH_JOIN_FIXED_SAVED_REG_COUNT;
 	registers.source_data_regs.assign(keys.size(), 0);
 
-	registers.hash_multiplier_reg = AllocateRegularHashJoinSavedRegister(registers.saved_reg_count);
+	// The common selected index must survive hashing and collision checks. Reserve
+	// it before optional invariant hoists so smaller register files reload masks
+	// instead of rejecting an otherwise supported probe.
 	if (config.AssumesCommonSelectionAllValid()) {
 		registers.common_source_index_reg = AllocateRegularHashJoinSavedRegister(registers.saved_reg_count);
 		if (registers.common_source_index_reg == 0) {
@@ -58,6 +61,9 @@ static inline bool PrepareRegularHashJoinProbeRegisters(const SljitNativeHashJoi
 			return false;
 		}
 	}
+	registers.pointer_mask_reg = AllocateRegularHashJoinSavedRegister(registers.saved_reg_count);
+	registers.bitmask_reg = AllocateRegularHashJoinSavedRegister(registers.saved_reg_count);
+	registers.hash_multiplier_reg = AllocateRegularHashJoinSavedRegister(registers.saved_reg_count);
 	if (registers.assume_all_keys_valid) {
 		for (idx_t key_idx = 0; key_idx < keys.size(); key_idx++) {
 			auto reg = AllocateRegularHashJoinSavedRegister(registers.saved_reg_count);
@@ -88,10 +94,12 @@ static inline void EmitEnterRegularHashJoinProbe(struct sljit_compiler *compiler
 	               offsetof(SljitNativeRegularHashJoinProbeInput, count));
 	sljit_emit_op1(compiler, SLJIT_MOV_P, SLJIT_S4, 0, SLJIT_MEM1(SLJIT_S0),
 	               offsetof(SljitNativeRegularHashJoinProbeInput, entries));
-	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_S5, 0, SLJIT_MEM1(SLJIT_S0),
-	               offsetof(SljitNativeRegularHashJoinProbeInput, pointer_mask));
-	if (SLJIT_REGULAR_HASH_JOIN_BITMASK_REG_AVAILABLE) {
-		sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_S6, 0, SLJIT_MEM1(SLJIT_S0),
+	if (registers.pointer_mask_reg != 0) {
+		sljit_emit_op1(compiler, SLJIT_MOV, registers.pointer_mask_reg, 0, SLJIT_MEM1(SLJIT_S0),
+		               offsetof(SljitNativeRegularHashJoinProbeInput, pointer_mask));
+	}
+	if (registers.bitmask_reg != 0) {
+		sljit_emit_op1(compiler, SLJIT_MOV, registers.bitmask_reg, 0, SLJIT_MEM1(SLJIT_S0),
 		               offsetof(SljitNativeRegularHashJoinProbeInput, bitmask));
 	}
 	if (registers.hash_multiplier_reg != 0) {

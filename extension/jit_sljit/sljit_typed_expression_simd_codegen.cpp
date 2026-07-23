@@ -29,42 +29,119 @@
 
 namespace duckdb {
 
+namespace {
+
+struct SljitSimd128Op2Capabilities {
+	bool supported[4][SLJIT_SIMD_OP2_CMPEQ + 1] {};
+
+	SljitSimd128Op2Capabilities() {
+		if (!sljit_has_cpu_feature(SLJIT_HAS_SIMD)) {
+			return;
+		}
+		auto compiler = sljit_create_compiler(nullptr);
+		if (!compiler) {
+			return;
+		}
+		if (sljit_emit_enter(compiler, 0, SLJIT_ARGS1V(P), 1 | SLJIT_ENTER_VECTOR(3), 1, 0) != SLJIT_SUCCESS) {
+			sljit_free_compiler(compiler);
+			return;
+		}
+		const sljit_s32 elem_types[] = {SLJIT_SIMD_ELEM_8, SLJIT_SIMD_ELEM_16, SLJIT_SIMD_ELEM_32, SLJIT_SIMD_ELEM_64};
+		const sljit_s32 operations[] = {SLJIT_SIMD_OP2_AND,   SLJIT_SIMD_OP2_OR,   SLJIT_SIMD_OP2_XOR,
+		                                SLJIT_SIMD_OP2_ADD,   SLJIT_SIMD_OP2_SUB,  SLJIT_SIMD_OP2_MUL,
+		                                SLJIT_SIMD_OP2_CMPGT, SLJIT_SIMD_OP2_CMPEQ};
+		for (idx_t elem_idx = 0; elem_idx < 4; elem_idx++) {
+			for (auto operation : operations) {
+				auto type = SLJIT_SIMD_REG_128 | elem_types[elem_idx] | operation | SLJIT_SIMD_TEST;
+				supported[elem_idx][operation] =
+				    sljit_emit_simd_op2(compiler, type, SLJIT_VR0, SLJIT_VR0, SLJIT_VR1, 0) == SLJIT_SUCCESS;
+			}
+		}
+		sljit_free_compiler(compiler);
+	}
+};
+
+static idx_t SljitSimdElementIndex(sljit_s32 elem_type) {
+	switch (elem_type) {
+	case SLJIT_SIMD_ELEM_8:
+		return 0;
+	case SLJIT_SIMD_ELEM_16:
+		return 1;
+	case SLJIT_SIMD_ELEM_32:
+		return 2;
+	case SLJIT_SIMD_ELEM_64:
+		return 3;
+	default:
+		return NumericLimits<idx_t>::Maximum();
+	}
+}
+
+static sljit_s32 SljitSimdElementTypeForScale(sljit_s32 scale) {
+	return scale == 2 ? SLJIT_SIMD_ELEM_32 : SLJIT_SIMD_ELEM_64;
+}
+
+} // namespace
+
+bool SljitSimd128Op2Supported(sljit_s32 elem_type, sljit_s32 operation) {
+	auto elem_idx = SljitSimdElementIndex(elem_type);
+	if (elem_idx == NumericLimits<idx_t>::Maximum() || operation < SLJIT_SIMD_OP2_AND ||
+	    operation > SLJIT_SIMD_OP2_CMPEQ) {
+		return false;
+	}
+	static const SljitSimd128Op2Capabilities capabilities;
+	return capabilities.supported[elem_idx][operation];
+}
+
 // Packed-op capability for (element scale, op) on the current architecture.
 // This is the (type, op, arch) gate: SIMD is emitted only where the PoC proved
 // it wins. int64 (scale 3) multiply is unsupported on ARM NEON / pre-AVX-512
 // x86 and would regress, so it is excluded here (mirrors the SLJIT-layer gate
 // that returns SLJIT_ERR_UNSUPPORTED for MUL.2d).
 static bool SljitSimdPackedArithProfitable(sljit_s32 scale, ExecutionExpressionBinaryOp op) {
-	if (!sljit_has_cpu_feature(SLJIT_HAS_SIMD)) {
-		return false;
-	}
 #if (defined(SLJIT_CONFIG_ARM_64) && SLJIT_CONFIG_ARM_64) || (defined(SLJIT_CONFIG_X86_64) && SLJIT_CONFIG_X86_64)
+	sljit_s32 packed_op;
 	switch (op) {
 	case ExecutionExpressionBinaryOp::ADD:
+		packed_op = SLJIT_SIMD_OP2_ADD;
+		break;
 	case ExecutionExpressionBinaryOp::SUBTRACT:
-		return true;
+		packed_op = SLJIT_SIMD_OP2_SUB;
+		break;
 	case ExecutionExpressionBinaryOp::MULTIPLY:
 		// 64-bit element multiply has no NEON instruction and needs AVX-512DQ on
 		// x86; only 32-bit element multiply is profitable on the supported backends.
-		return scale == 2;
+		if (scale != 2) {
+			return false;
+		}
+		packed_op = SLJIT_SIMD_OP2_MUL;
+		break;
 	default:
 		return false;
 	}
+	return SljitSimd128Op2Supported(SljitSimdElementTypeForScale(scale), packed_op);
 #else
 	return false;
 #endif
 }
 
-static bool SljitSimdComparisonSupported(ExecutionExpressionBinaryOp op, bool &needs_negate) {
+static bool SljitSimdComparisonOperation(ExecutionExpressionBinaryOp op, sljit_s32 &packed_op, bool &needs_negate) {
 	switch (op) {
 	case ExecutionExpressionBinaryOp::COMPARE_EQUAL:
+		packed_op = SLJIT_SIMD_OP2_CMPEQ;
+		needs_negate = false;
+		return true;
 	case ExecutionExpressionBinaryOp::COMPARE_GREATERTHAN:
 	case ExecutionExpressionBinaryOp::COMPARE_LESSTHAN:
+		packed_op = SLJIT_SIMD_OP2_CMPGT;
 		needs_negate = false;
 		return true;
 	case ExecutionExpressionBinaryOp::COMPARE_NOTEQUAL:
+		packed_op = SLJIT_SIMD_OP2_CMPEQ;
+		needs_negate = true;
+		return true;
 	case ExecutionExpressionBinaryOp::COMPARE_GREATERTHANOREQUALTO:
 	case ExecutionExpressionBinaryOp::COMPARE_LESSTHANOREQUALTO:
+		packed_op = SLJIT_SIMD_OP2_CMPGT;
 		needs_negate = true;
 		return true;
 	default:
@@ -150,10 +227,10 @@ static bool CheckSljitSimdEligibleMask(const ExecutionExpressionIR &node,
 			return false;
 		}
 		bool negate;
-		if (!SljitSimdComparisonSupported(node.binary_op, negate)) {
+		sljit_s32 packed_op;
+		if (!SljitSimdComparisonOperation(node.binary_op, packed_op, negate)) {
 			return false;
 		}
-		needs_all_ones = needs_all_ones || negate;
 		sljit_s32 comparison_scale = 0;
 		vector<int64_t> constants;
 		if (!CheckSljitSimdEligibleValue(*node.left, comparison_scale, constants, node_count) ||
@@ -163,6 +240,12 @@ static bool CheckSljitSimdEligibleMask(const ExecutionExpressionIR &node,
 		if (comparison_scale != 2 && comparison_scale != 3) {
 			return false; // no integer reference to anchor the comparison width
 		}
+		auto elem_type = SljitSimdElementTypeForScale(comparison_scale);
+		if (!SljitSimd128Op2Supported(elem_type, packed_op) ||
+		    (negate && !SljitSimd128Op2Supported(elem_type, SLJIT_SIMD_OP2_XOR))) {
+			return false;
+		}
+		needs_all_ones = needs_all_ones || negate;
 		for (auto value : constants) {
 			distinct_constants.insert({value, comparison_scale});
 		}
@@ -454,10 +537,17 @@ void FreeSimdValue(SljitSimdEmitContext &ctx, const SljitSimdValue &value) {
 	}
 }
 
+void EmitSljitSimdOp2(struct sljit_compiler *compiler, sljit_s32 type, sljit_s32 dst_vreg, sljit_s32 src1_vreg,
+                      sljit_s32 src2, sljit_sw src2w) {
+	if (sljit_emit_simd_op2(compiler, type, dst_vreg, src1_vreg, src2, src2w) != SLJIT_SUCCESS) {
+		throw InternalException("SLJIT backend rejected a SIMD binary operation admitted by the expression plan");
+	}
+}
+
 void EmitSljitSimdNot(struct sljit_compiler *compiler, SljitSimdEmitContext &ctx, sljit_s32 reg) {
 	// Bitwise complement via the shared all-ones register; width-agnostic.
-	sljit_emit_simd_op2(compiler, ctx.simd_type | SLJIT_SIMD_OP2_XOR, SLJIT_VR(reg), SLJIT_VR(reg),
-	                    SLJIT_VR(ctx.all_ones_reg), 0);
+	EmitSljitSimdOp2(compiler, ctx.simd_type | SLJIT_SIMD_OP2_XOR, SLJIT_VR(reg), SLJIT_VR(reg),
+	                 SLJIT_VR(ctx.all_ones_reg), 0);
 }
 
 #if defined(SLJIT_CONFIG_ARM_64) && SLJIT_CONFIG_ARM_64
@@ -564,8 +654,8 @@ SljitSimdValue EmitSljitSimdValueExpr(struct sljit_compiler *compiler, const Exe
 		default:
 			throw InternalException("Unsupported SLJIT SIMD arithmetic operator");
 		}
-		sljit_emit_simd_op2(compiler, SljitSimdTypeForScale(scale) | op, SLJIT_VR(dst), SLJIT_VR(left.reg),
-		                    SLJIT_VR(right.reg), 0);
+		EmitSljitSimdOp2(compiler, SljitSimdTypeForScale(scale) | op, SLJIT_VR(dst), SLJIT_VR(left.reg),
+		                 SLJIT_VR(right.reg), 0);
 		FreeSimdValue(ctx, left);
 		FreeSimdValue(ctx, right);
 		return {dst, true};
@@ -585,30 +675,30 @@ SljitSimdValue EmitSljitSimdComparisonAt(struct sljit_compiler *compiler, const 
 	auto st = SljitSimdTypeForScale(scale);
 	switch (node.binary_op) {
 	case ExecutionExpressionBinaryOp::COMPARE_GREATERTHAN: // left > right
-		sljit_emit_simd_op2(compiler, st | SLJIT_SIMD_OP2_CMPGT, SLJIT_VR(dst), SLJIT_VR(left.reg), SLJIT_VR(right.reg),
-		                    0);
+		EmitSljitSimdOp2(compiler, st | SLJIT_SIMD_OP2_CMPGT, SLJIT_VR(dst), SLJIT_VR(left.reg), SLJIT_VR(right.reg),
+		                 0);
 		break;
 	case ExecutionExpressionBinaryOp::COMPARE_LESSTHAN: // left < right == right > left
-		sljit_emit_simd_op2(compiler, st | SLJIT_SIMD_OP2_CMPGT, SLJIT_VR(dst), SLJIT_VR(right.reg), SLJIT_VR(left.reg),
-		                    0);
+		EmitSljitSimdOp2(compiler, st | SLJIT_SIMD_OP2_CMPGT, SLJIT_VR(dst), SLJIT_VR(right.reg), SLJIT_VR(left.reg),
+		                 0);
 		break;
 	case ExecutionExpressionBinaryOp::COMPARE_GREATERTHANOREQUALTO: // !(left < right) == !(right > left)
-		sljit_emit_simd_op2(compiler, st | SLJIT_SIMD_OP2_CMPGT, SLJIT_VR(dst), SLJIT_VR(right.reg), SLJIT_VR(left.reg),
-		                    0);
+		EmitSljitSimdOp2(compiler, st | SLJIT_SIMD_OP2_CMPGT, SLJIT_VR(dst), SLJIT_VR(right.reg), SLJIT_VR(left.reg),
+		                 0);
 		EmitSljitSimdNot(compiler, ctx, dst);
 		break;
 	case ExecutionExpressionBinaryOp::COMPARE_LESSTHANOREQUALTO: // !(left > right)
-		sljit_emit_simd_op2(compiler, st | SLJIT_SIMD_OP2_CMPGT, SLJIT_VR(dst), SLJIT_VR(left.reg), SLJIT_VR(right.reg),
-		                    0);
+		EmitSljitSimdOp2(compiler, st | SLJIT_SIMD_OP2_CMPGT, SLJIT_VR(dst), SLJIT_VR(left.reg), SLJIT_VR(right.reg),
+		                 0);
 		EmitSljitSimdNot(compiler, ctx, dst);
 		break;
 	case ExecutionExpressionBinaryOp::COMPARE_EQUAL:
-		sljit_emit_simd_op2(compiler, st | SLJIT_SIMD_OP2_CMPEQ, SLJIT_VR(dst), SLJIT_VR(left.reg), SLJIT_VR(right.reg),
-		                    0);
+		EmitSljitSimdOp2(compiler, st | SLJIT_SIMD_OP2_CMPEQ, SLJIT_VR(dst), SLJIT_VR(left.reg), SLJIT_VR(right.reg),
+		                 0);
 		break;
 	case ExecutionExpressionBinaryOp::COMPARE_NOTEQUAL:
-		sljit_emit_simd_op2(compiler, st | SLJIT_SIMD_OP2_CMPEQ, SLJIT_VR(dst), SLJIT_VR(left.reg), SLJIT_VR(right.reg),
-		                    0);
+		EmitSljitSimdOp2(compiler, st | SLJIT_SIMD_OP2_CMPEQ, SLJIT_VR(dst), SLJIT_VR(left.reg), SLJIT_VR(right.reg),
+		                 0);
 		EmitSljitSimdNot(compiler, ctx, dst);
 		break;
 	default:
@@ -658,8 +748,8 @@ SljitSimdValue EmitSljitSimdConjunction(struct sljit_compiler *compiler, const E
 	auto acc = EmitSljitSimdMask(compiler, *node.children[0], ctx);
 	for (idx_t child_idx = 1; child_idx < node.children.size(); child_idx++) {
 		auto child = EmitSljitSimdMask(compiler, *node.children[child_idx], ctx);
-		sljit_emit_simd_op2(compiler, ctx.simd_type | combine, SLJIT_VR(acc.reg), SLJIT_VR(acc.reg),
-		                    SLJIT_VR(child.reg), 0);
+		EmitSljitSimdOp2(compiler, ctx.simd_type | combine, SLJIT_VR(acc.reg), SLJIT_VR(acc.reg), SLJIT_VR(child.reg),
+		                 0);
 		FreeSimdValue(ctx, child);
 	}
 	return acc;
@@ -708,8 +798,7 @@ void EmitSljitSimdValidityAnd(struct sljit_compiler *compiler, SljitSimdEmitCont
 	const sljit_sw full_bits = (sljit_sw(1) << lanes) - 1;
 	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_R2, 0, SLJIT_IMM, full_bits);
 	for (auto source_index : source_refs) {
-		sljit_emit_op1(compiler, SLJIT_MOV_P, SLJIT_R0, 0, SLJIT_MEM1(SLJIT_S6),
-		               NumericCast<sljit_sw>(source_index * sizeof(const validity_t *)));
+		EmitLoadSljitNativeSourceValidity(compiler, source_index, SLJIT_R0);
 		auto source_all_valid = sljit_emit_cmp(compiler, SLJIT_EQUAL, SLJIT_R0, 0, SLJIT_IMM, 0);
 		// R3 = validity_word[S1 >> 6] >> (S1 & 63); the group's bits stay inside one
 		// word because the loop advances S1 by `lanes`, which divides 64.
@@ -725,12 +814,12 @@ void EmitSljitSimdValidityAnd(struct sljit_compiler *compiler, SljitSimdEmitCont
 	auto group_all_valid = sljit_emit_cmp(compiler, SLJIT_EQUAL, SLJIT_R2, 0, SLJIT_IMM, full_bits);
 	auto nibble = AllocSimdTemp(ctx);
 	sljit_emit_simd_replicate(compiler, ctx.simd_type, SLJIT_VR(nibble), SLJIT_R2, 0);
-	sljit_emit_simd_op2(compiler, ctx.simd_type | SLJIT_SIMD_OP2_AND, SLJIT_VR(nibble), SLJIT_VR(nibble),
-	                    SLJIT_VR(ctx.lane_bits_reg), 0);
-	sljit_emit_simd_op2(compiler, ctx.simd_type | SLJIT_SIMD_OP2_CMPEQ, SLJIT_VR(nibble), SLJIT_VR(nibble),
-	                    SLJIT_VR(ctx.lane_bits_reg), 0);
-	sljit_emit_simd_op2(compiler, ctx.simd_type | SLJIT_SIMD_OP2_AND, SLJIT_VR(mask_reg), SLJIT_VR(mask_reg),
-	                    SLJIT_VR(nibble), 0);
+	EmitSljitSimdOp2(compiler, ctx.simd_type | SLJIT_SIMD_OP2_AND, SLJIT_VR(nibble), SLJIT_VR(nibble),
+	                 SLJIT_VR(ctx.lane_bits_reg), 0);
+	EmitSljitSimdOp2(compiler, ctx.simd_type | SLJIT_SIMD_OP2_CMPEQ, SLJIT_VR(nibble), SLJIT_VR(nibble),
+	                 SLJIT_VR(ctx.lane_bits_reg), 0);
+	EmitSljitSimdOp2(compiler, ctx.simd_type | SLJIT_SIMD_OP2_AND, SLJIT_VR(mask_reg), SLJIT_VR(mask_reg),
+	                 SLJIT_VR(nibble), 0);
 	FreeSimdValue(ctx, {nibble, true});
 	sljit_set_label(group_all_valid, sljit_emit_label(compiler));
 }
@@ -850,7 +939,9 @@ void EmitSljitTypedExpressionTreeSimdSelectLoop(struct sljit_compiler *compiler,
 	               offsetof(SljitNativeVectorInput, selected_count));
 	sljit_emit_op1(compiler, SLJIT_MOV_P, SLJIT_S4, 0, SLJIT_MEM1(SLJIT_S0),
 	               offsetof(SljitNativeVectorInput, true_sel));
-	const bool hoist_source_data = !validity_refs && !plan.source_refs.empty() && plan.source_refs.size() <= 2;
+	const auto max_source_data_hoists = SLJIT_NATIVE_VECTOR_HAS_EXTRA_SAVED_REG ? idx_t(2) : idx_t(1);
+	const bool hoist_source_data =
+	    !validity_refs && !plan.source_refs.empty() && plan.source_refs.size() <= max_source_data_hoists;
 	if (hoist_source_data) {
 		// Load the second pointer first because S5 initially owns the pointer
 		// array and becomes the first source pointer after the final load.
@@ -1011,12 +1102,12 @@ void EmitSljitTypedExpressionTreeSimdSumLoop(struct sljit_compiler *compiler, co
 		sljit_emit_simd_mov(compiler, ctx.simd_type, SLJIT_VR(reg), SLJIT_VR(payload_val.reg), 0);
 		payload_val = {reg, true};
 	}
-	sljit_emit_simd_op2(compiler, ctx.simd_type | SLJIT_SIMD_OP2_AND, SLJIT_VR(payload_val.reg),
-	                    SLJIT_VR(payload_val.reg), SLJIT_VR(mask.reg), 0);
+	EmitSljitSimdOp2(compiler, ctx.simd_type | SLJIT_SIMD_OP2_AND, SLJIT_VR(payload_val.reg), SLJIT_VR(payload_val.reg),
+	                 SLJIT_VR(mask.reg), 0);
 	// sum_acc.2d += widened pairwise sum of masked.4s ; count_acc -= mask
 	EmitSljitSimdSadalp2d4s(compiler, sum_acc, payload_val.reg);
-	sljit_emit_simd_op2(compiler, ctx.simd_type | SLJIT_SIMD_OP2_SUB, SLJIT_VR(count_acc), SLJIT_VR(count_acc),
-	                    SLJIT_VR(mask.reg), 0);
+	EmitSljitSimdOp2(compiler, ctx.simd_type | SLJIT_SIMD_OP2_SUB, SLJIT_VR(count_acc), SLJIT_VR(count_acc),
+	                 SLJIT_VR(mask.reg), 0);
 	FreeSimdValue(ctx, payload_val);
 	FreeSimdValue(ctx, mask);
 
@@ -1083,8 +1174,7 @@ void EmitSljitTypedExpressionTreeSimdCountLoop(struct sljit_compiler *compiler, 
 		EmitSljitSimdValidityAnd(compiler, ctx, *validity_refs, plan.lanes, mask.reg);
 	}
 	// mask lanes are all-ones (=-1) where true; acc -= mask adds 1 per matching lane.
-	sljit_emit_simd_op2(compiler, ctx.simd_type | SLJIT_SIMD_OP2_SUB, SLJIT_VR(acc), SLJIT_VR(acc), SLJIT_VR(mask.reg),
-	                    0);
+	EmitSljitSimdOp2(compiler, ctx.simd_type | SLJIT_SIMD_OP2_SUB, SLJIT_VR(acc), SLJIT_VR(acc), SLJIT_VR(mask.reg), 0);
 	FreeSimdValue(ctx, mask);
 
 	sljit_emit_op2(compiler, SLJIT_ADD, SLJIT_S1, 0, SLJIT_S1, 0, SLJIT_IMM, plan.lanes);

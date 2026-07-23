@@ -59,11 +59,13 @@ void EmitSljitSharedBinaryPayloadBase(struct sljit_compiler *compiler, const Slj
                                       sljit_s32 shared_value_reg, sljit_sw shared_value_offset,
                                       SljitAggregateExpressionIndexMode index_mode,
                                       vector<SljitExpressionTreeOverflowJumps> &overflows,
-                                      const vector<SljitTypedExpressionTreeDataPointerHoist> *data_hoists = nullptr);
+                                      const vector<SljitTypedExpressionTreeDataPointerHoist> *data_hoists = nullptr,
+                                      bool restore_selected_source_array = false);
 void EmitSljitSharedBinaryPayloadLane(struct sljit_compiler *compiler, const SljitSharedBinaryPayloadLane &lane,
                                       sljit_s32 shared_value_reg, sljit_sw shared_value_offset,
                                       SljitAggregateExpressionIndexMode index_mode,
                                       vector<SljitExpressionTreeOverflowJumps> &overflows,
-                                      const vector<SljitTypedExpressionTreeDataPointerHoist> *data_hoists = nullptr);
+                                      const vector<SljitTypedExpressionTreeDataPointerHoist> *data_hoists = nullptr,
+                                      bool restore_selected_source_array = false);
 
 } // namespace duckdb

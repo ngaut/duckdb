@@ -54,7 +54,7 @@ public:
 	static CompiledVectorizedRunStatus
 	ExecuteCompiledRegion(ExecutionRegionPipelineAdapter &pipeline, idx_t max_chunks, PipelineExecuteResult &result,
 	                      optional_ptr<ExecutionRegionAdaptiveAbState> adaptive_ab = nullptr,
-	                      int64_t adaptive_margin_basis_points = 0);
+	                      idx_t adaptive_margin_basis_points = 0);
 
 private:
 	static ExecutionRunnerResult ExecuteAdaptive(ExecutionRegionPipelineAdapter &pipeline,

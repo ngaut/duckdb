@@ -939,6 +939,27 @@
         "default_value": "false"
     },
     {
+        "name": "jit_adaptive_ab",
+        "description": "Measure one compiled and one native row group per compiled-selected pipeline and commit to the measured winner; the compiled runner must win by jit_adaptive_ab_margin_basis_points",
+        "type": "BOOLEAN",
+        "default_scope": "local",
+        "default_value": "true"
+    },
+    {
+        "name": "jit_adaptive_ab_band_basis_points",
+        "description": "Measure the runner A/B only when the selection is thin: static net benefit within this many basis points of the required benefit; zero measures every compiled-selected pipeline",
+        "type": "UBIGINT",
+        "default_scope": "local",
+        "default_value": "1000"
+    },
+    {
+        "name": "jit_adaptive_ab_margin_basis_points",
+        "description": "Required compiled advantage over the measured native leg in basis points before the adaptive A/B commits to the compiled runner",
+        "type": "UBIGINT",
+        "default_scope": "local",
+        "default_value": "1000"
+    },
+    {
         "name": "jit_backend",
         "description": "Execution-region backend to use, or auto to select the first available backend",
         "type": "VARCHAR",
@@ -996,6 +1017,20 @@
         "type": "UBIGINT",
         "default_scope": "local",
         "default_value": "0"
+    },
+    {
+        "name": "jit_debug_force_defer_after_chunks",
+        "description": "Debug: compiled full-pipeline kernels stop claiming new row groups after fetching this many source chunks and defer to the vectorized continuation at the row-group boundary; zero disables",
+        "type": "UBIGINT",
+        "default_scope": "local",
+        "default_value": "0"
+    },
+    {
+        "name": "jit_debug_force_entry_defer",
+        "description": "Debug: compiled full-pipeline kernels defer to the vectorized continuation at kernel entry before any source fetch, exercising the entry-deferral handoff used by not-ready native runtime states",
+        "type": "BOOLEAN",
+        "default_scope": "local",
+        "default_value": "false"
     },
     {
         "name": "jit_dump_ir",

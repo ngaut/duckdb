@@ -33,7 +33,7 @@ static unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativeUngroupedSumTypedEx
 	                                            : local_sum_offset + NumericCast<sljit_sw>(sizeof(sljit_sw));
 	const auto local_size = saw_value_offset + NumericCast<sljit_sw>(sizeof(sljit_sw));
 
-	sljit_emit_enter(compiler, 0, SLJIT_ARGS1V(P), 5, 7, local_size);
+	sljit_emit_enter(compiler, 0, SLJIT_ARGS1V(P), 5, SLJIT_NATIVE_VECTOR_SAVED_REG_COUNT, local_size);
 	EmitInitSljitNativeExpressionVectorLoop(compiler);
 	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_MEM1(SLJIT_SP), local_sum_offset, SLJIT_IMM, 0);
 	if (hugeint_state) {
@@ -118,8 +118,7 @@ static unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativeUngroupedSumTypedEx
 		sljit_set_label(flat_nullable_done, done_label);
 	}
 	sljit_set_label(done, done_label);
-	EmitSljitAggregateCommitSumState(compiler, state_kind, local_sum_offset, local_sum_upper_offset,
-	                                 saw_value_offset);
+	EmitSljitAggregateCommitSumState(compiler, state_kind, local_sum_offset, local_sum_upper_offset, saw_value_offset);
 	for (auto jump : helper_done) {
 		sljit_set_label(jump, sljit_emit_label(compiler));
 	}

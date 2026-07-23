@@ -42,6 +42,7 @@ unique_ptr<ExecutionRegionCodeHandle> BuildSljitRegularHashJoinProbe(const Sljit
 	}
 	const bool assume_all_keys_valid = registers.assume_all_keys_valid;
 	const auto aux_next_ptrs_reg = registers.aux_next_ptrs_reg;
+	const auto pointer_mask_reg = registers.pointer_mask_reg;
 	EmitEnterRegularHashJoinProbe(compiler, registers);
 
 	struct sljit_jump *resume_row_pointer_ready = nullptr;
@@ -64,9 +65,10 @@ unique_ptr<ExecutionRegionCodeHandle> BuildSljitRegularHashJoinProbe(const Sljit
 	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_R0, 0, SLJIT_MEM2(SLJIT_S4, SLJIT_R1), 3);
 	auto empty_slot = sljit_emit_cmp(compiler, SLJIT_EQUAL, SLJIT_R0, 0, SLJIT_IMM, 0);
 
-	auto salt_mismatch = EmitRegularHashJoinSaltMismatch(compiler, config);
+	auto salt_mismatch = EmitRegularHashJoinSaltMismatch(compiler, config, pointer_mask_reg);
 
-	sljit_emit_op2(compiler, SLJIT_AND, SLJIT_R0, 0, SLJIT_R0, 0, SLJIT_S5, 0);
+	EmitLoadHashJoinPointerMask(compiler, SLJIT_R4, pointer_mask_reg);
+	sljit_emit_op2(compiler, SLJIT_AND, SLJIT_R0, 0, SLJIT_R0, 0, SLJIT_R4, 0);
 	sljit_emit_op_src(compiler, SLJIT_PREFETCH_L1, SLJIT_MEM1(SLJIT_R0),
 	                  NumericCast<sljit_sw>(keys[0].key_layout_offset));
 	if (!assume_all_keys_valid) {
@@ -93,6 +95,7 @@ unique_ptr<ExecutionRegionCodeHandle> BuildSljitRegularHashJoinProbe(const Sljit
 	control.done = done;
 	control.empty_slot = empty_slot;
 	control.salt_mismatch = salt_mismatch;
+	control.bitmask_reg = registers.bitmask_reg;
 	if (mark_build_only) {
 		return FinishRegularHashJoinMarkBuildOnlyOutput(compiler, function, error, control, hash_jumps, key_jumps,
 		                                                !assume_all_keys_valid);

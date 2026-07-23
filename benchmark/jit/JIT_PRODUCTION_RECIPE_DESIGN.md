@@ -331,7 +331,9 @@ filter remains. A possible fused kernel is not an ownership proof.
 Generated conjunctions build the complete packed mask before classifying it.
 Intermediate horizontal classification serializes broad scans and is not part
 of the packed path. Scalar-terminal hybrids use SIMD only when their predicate
-work can amortize mask handling.
+work can amortize mask handling. Packed operation admission uses SLJIT's exact
+operation-and-element-width capability test; a generic SIMD feature bit or CPU
+family is not sufficient proof.
 
 ## Hash joins
 
@@ -469,7 +471,9 @@ The combined production guard rejects a sustained busy host before setup. The
 TPC-H gate checks again after its private database clone is ready, and generic
 measurements recheck at their own boundary. macOS security scanners have an
 independent single-core ceiling because normalized machine-wide utilization can
-hide their effect on a single-thread measurement. Admission may wait through a
+hide their effect on a single-thread measurement. The same principle applies
+generically to any sustained competing process: aggregate host utilization and
+the busiest process have independent ceilings. Admission may wait through a
 bounded transient scan, but measurement never starts on a rejected sample.
 An immediate post-measurement sample invalidates a run if load appeared after
 admission. Host-load admission is measurement hygiene only; it cannot change

@@ -762,6 +762,7 @@ SourceResultType PipelineExecutor::FetchFromSource(DataChunk *&result) {
 	fetch_chunk.Reset();
 	auto res = GetData(fetch_chunk, source_input);
 	if (vectorized_source_claim_budget != DConstants::INVALID_INDEX) {
+		vectorized_source_leg_rows += fetch_chunk.size();
 		vectorized_source_claim_budget -=
 		    MinValue<idx_t>(vectorized_source_claim_budget, source_input.new_row_groups_claimed);
 		if (source_input.declined_new_row_group) {

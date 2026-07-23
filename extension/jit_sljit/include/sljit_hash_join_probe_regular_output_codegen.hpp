@@ -30,6 +30,7 @@ struct SljitRegularHashJoinProbeControlFlow {
 	struct sljit_jump *done = nullptr;
 	struct sljit_jump *empty_slot = nullptr;
 	struct sljit_jump *salt_mismatch = nullptr;
+	sljit_s32 bitmask_reg = 0;
 };
 
 static inline void EmitRetryRegularHashJoinProbeSlot(struct sljit_compiler *compiler,
@@ -38,7 +39,7 @@ static inline void EmitRetryRegularHashJoinProbeSlot(struct sljit_compiler *comp
                                                      bool restore_probe_offset,
                                                      bool include_predicate_mismatches = false) {
 	EmitRetryHashJoinProbeSlot(compiler, control.probe_loop, control.salt_mismatch, key_jumps.equality_key_mismatches,
-	                           restore_probe_offset, SLJIT_REGULAR_HASH_JOIN_BITMASK_REG_AVAILABLE,
+	                           restore_probe_offset, control.bitmask_reg,
 	                           include_predicate_mismatches ? &key_jumps.predicate_key_mismatches : nullptr);
 }
 

@@ -233,7 +233,8 @@ bool BuildSljitFusedAggregateCodegenPlan(const vector<SljitNativeRegionExpressio
 static void EmitSljitSharedPayloadExpression(struct sljit_compiler *compiler, const ExecutionExpressionIR &expression,
                                              SljitAggregateExpressionIndexMode index_mode,
                                              vector<SljitExpressionTreeOverflowJumps> &overflows,
-                                             const vector<SljitTypedExpressionTreeDataPointerHoist> *data_hoists) {
+                                             const vector<SljitTypedExpressionTreeDataPointerHoist> *data_hoists,
+                                             bool restore_selected_source_array) {
 	idx_t spill_index = 0;
 	switch (index_mode) {
 	case SljitAggregateExpressionIndexMode::FLAT:
@@ -243,6 +244,13 @@ static void EmitSljitSharedPayloadExpression(struct sljit_compiler *compiler, co
 		EmitSljitTypedExpressionTreeLogicalFastValueReg(compiler, expression, spill_index, overflows, data_hoists);
 		return;
 	case SljitAggregateExpressionIndexMode::SELECTED:
+		if (restore_selected_source_array) {
+			// Some aggregate layouts borrow S4 for state between shared lanes.
+			// Restore the selected-expression invariant only for those layouts;
+			// dedicated-state targets keep the source base live across updates.
+			sljit_emit_op1(compiler, SLJIT_MOV_P, SLJIT_S4, 0, SLJIT_MEM1(SLJIT_S0),
+			               offsetof(SljitNativeVectorInput, source_sel_array));
+		}
 		EmitSljitTypedExpressionTreeSelectedFastValueReg(compiler, expression, spill_index, overflows, data_hoists);
 		return;
 	}
@@ -253,9 +261,11 @@ void EmitSljitSharedBinaryPayloadBase(struct sljit_compiler *compiler, const Slj
                                       sljit_s32 shared_value_reg, sljit_sw shared_value_offset,
                                       SljitAggregateExpressionIndexMode index_mode,
                                       vector<SljitExpressionTreeOverflowJumps> &overflows,
-                                      const vector<SljitTypedExpressionTreeDataPointerHoist> *data_hoists) {
+                                      const vector<SljitTypedExpressionTreeDataPointerHoist> *data_hoists,
+                                      bool restore_selected_source_array) {
 	D_ASSERT(plan.Enabled());
-	EmitSljitSharedPayloadExpression(compiler, *plan.base, index_mode, overflows, data_hoists);
+	EmitSljitSharedPayloadExpression(compiler, *plan.base, index_mode, overflows, data_hoists,
+	                                 restore_selected_source_array);
 	if (shared_value_reg != 0) {
 		sljit_emit_op1(compiler, SLJIT_MOV, shared_value_reg, 0, SLJIT_R2, 0);
 		return;
@@ -267,7 +277,8 @@ void EmitSljitSharedBinaryPayloadLane(struct sljit_compiler *compiler, const Slj
                                       sljit_s32 shared_value_reg, sljit_sw shared_value_offset,
                                       SljitAggregateExpressionIndexMode index_mode,
                                       vector<SljitExpressionTreeOverflowJumps> &overflows,
-                                      const vector<SljitTypedExpressionTreeDataPointerHoist> *data_hoists) {
+                                      const vector<SljitTypedExpressionTreeDataPointerHoist> *data_hoists,
+                                      bool restore_selected_source_array) {
 	D_ASSERT(lane.matched);
 	if (lane.use_base_directly) {
 		if (shared_value_reg != 0) {
@@ -279,7 +290,8 @@ void EmitSljitSharedBinaryPayloadLane(struct sljit_compiler *compiler, const Slj
 	}
 	D_ASSERT(lane.root);
 	D_ASSERT(lane.other_value);
-	EmitSljitSharedPayloadExpression(compiler, *lane.other_value, index_mode, overflows, data_hoists);
+	EmitSljitSharedPayloadExpression(compiler, *lane.other_value, index_mode, overflows, data_hoists,
+	                                 restore_selected_source_array);
 	if (shared_value_reg != 0) {
 		sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_R4, 0, shared_value_reg, 0);
 	} else {

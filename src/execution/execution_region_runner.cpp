@@ -127,6 +127,38 @@ ExecutionRunnerResult CompiledVectorizedRunner::ExecuteAdaptive(ExecutionRegionP
                                                                 ExecutionRegionKernel &kernel, idx_t max_chunks) {
 	auto &client = pipeline.GetClientContext();
 	auto &ab = kernel.AdaptiveAb();
+	auto execute_compiled_leg = [&]() {
+		// Scheduler yields do not end the measurement. The owning executor keeps
+		// the compiled cursor until the source reports the row-group boundary;
+		// bystanders continue vectorized on their own cursors.
+		PipelineExecuteResult result = PipelineExecuteResult::NOT_FINISHED;
+		auto status = ExecuteCompiledRegion(pipeline, max_chunks, result, ab,
+		                                    ExecutionRegionSettings::AdaptiveAbMarginBasisPoints(client));
+		if (status != CompiledVectorizedRunStatus::EXECUTED || result != PipelineExecuteResult::NOT_FINISHED) {
+			ab.ResolveCommitWithoutBoundary();
+		}
+		const auto phase = ab.phase.load();
+		if (phase != ExecutionRegionAdaptiveAbPhase::MEASURING_COMPILED_RUNNING) {
+			pipeline.AddProfilingAnnotation(
+			    "jit_adaptive",
+			    phase == ExecutionRegionAdaptiveAbPhase::FALLBACK_NATIVE ? "fallback_native" : "commit_compiled",
+			    false);
+		}
+		if (ExecutionRegionSettings::TraceRuntime(client) &&
+		    phase != ExecutionRegionAdaptiveAbPhase::MEASURING_COMPILED_RUNNING) {
+			auto reason = StringUtil::Format(
+			    "adaptive_ab verdict=%s compiled_leg_us=%lld native_leg_us=%lld compiled_leg_rows=%llu "
+			    "native_leg_rows=%llu",
+			    phase == ExecutionRegionAdaptiveAbPhase::FALLBACK_NATIVE ? "fallback_native" : "commit_compiled",
+			    ab.compiled_leg_us.load(), ab.native_leg_us.load(),
+			    static_cast<unsigned long long>(ab.compiled_leg_rows.load()),
+			    static_cast<unsigned long long>(ab.native_leg_rows.load()));
+			ExecutionRegionManager::Get(client).RecordRuntimeEvent(client, kernel, ExecutionRegionEventStatus::EXECUTED,
+			                                                       std::move(reason), 0, 0, 0, "adaptive_ab");
+		}
+		return status == CompiledVectorizedRunStatus::EXECUTED ? ExecutionRunnerResult::Executed(result)
+		                                                       : ExecutionRunnerResult::ContinueVectorized();
+	};
 	while (true) {
 		switch (ab.phase.load()) {
 		case ExecutionRegionAdaptiveAbPhase::UNDECIDED: {
@@ -172,48 +204,20 @@ ExecutionRunnerResult CompiledVectorizedRunner::ExecuteAdaptive(ExecutionRegionP
 				// the compiled leg. Another executor with a clean cursor will.
 				return ExecutionRunnerResult::ContinueVectorized();
 			}
-			if (!ab.TryBeginPhase(ExecutionRegionAdaptiveAbPhase::MEASURING_COMPILED,
-			                      ExecutionRegionAdaptiveAbPhase::MEASURING_COMPILED_RUNNING)) {
+			if (!ab.TryBeginCompiledLeg(pipeline.ExecutionIdentity())) {
 				continue;
 			}
 			// The compiled kernel resolves the verdict at its first row-group
 			// boundary: commit disarms the probe and continues inside the same entry,
 			// fallback defers to the vectorized continuation.
-			PipelineExecuteResult result;
-			auto status = ExecuteCompiledRegion(
-			    pipeline, max_chunks, result, ab,
-			    NumericCast<int64_t>(ExecutionRegionSettings::AdaptiveAbMarginBasisPoints(client)));
-			ab.ResolveCommitWithoutBoundary();
-			if (ab.phase.load() != ExecutionRegionAdaptiveAbPhase::MEASURING_COMPILED_RUNNING) {
-				pipeline.AddProfilingAnnotation("jit_adaptive",
-				                                ab.phase.load() == ExecutionRegionAdaptiveAbPhase::FALLBACK_NATIVE
-				                                    ? "fallback_native"
-				                                    : "commit_compiled",
-				                                false);
-			}
-			if (ExecutionRegionSettings::TraceRuntime(client) &&
-			    ab.phase.load() != ExecutionRegionAdaptiveAbPhase::MEASURING_COMPILED_RUNNING) {
-				auto reason = StringUtil::Format(
-				    "adaptive_ab verdict=%s compiled_leg_us=%lld native_leg_us=%lld compiled_leg_rows=%llu "
-				    "native_leg_rows=%llu",
-				    ab.phase.load() == ExecutionRegionAdaptiveAbPhase::FALLBACK_NATIVE ? "fallback_native"
-				                                                                       : "commit_compiled",
-				    ab.compiled_leg_us.load(), ab.native_leg_us.load(),
-				    static_cast<unsigned long long>(ab.compiled_leg_rows.load()),
-				    static_cast<unsigned long long>(ab.native_leg_rows.load()));
-				ExecutionRegionManager::Get(client).RecordRuntimeEvent(
-				    client, kernel, ExecutionRegionEventStatus::EXECUTED, std::move(reason), 0, 0, 0, "adaptive_ab");
-			}
-			switch (status) {
-			case CompiledVectorizedRunStatus::EXECUTED:
-				return ExecutionRunnerResult::Executed(result);
-			default:
-				return ExecutionRunnerResult::ContinueVectorized();
-			}
+			return execute_compiled_leg();
 		}
 		case ExecutionRegionAdaptiveAbPhase::MEASURING_COMPILED_RUNNING:
-			// Another thread owns the measurement; execute natively meanwhile.
-			return ExecutionRunnerResult::ContinueVectorized();
+			if (!ab.CompiledLegOwnedBy(pipeline.ExecutionIdentity())) {
+				// Another thread owns the measurement; execute natively meanwhile.
+				return ExecutionRunnerResult::ContinueVectorized();
+			}
+			return execute_compiled_leg();
 		case ExecutionRegionAdaptiveAbPhase::FALLBACK_NATIVE:
 			return ExecutionRunnerResult::ContinueVectorized();
 		case ExecutionRegionAdaptiveAbPhase::COMMIT_COMPILED: {
@@ -299,7 +303,7 @@ public:
 	                      ExecutionRegionLocalState &local_state_p, idx_t max_chunks_p, bool trace_runtime_p,
 	                      idx_t debug_force_defer_after_chunks_p,
 	                      optional_ptr<ExecutionRegionAdaptiveAbState> adaptive_ab_p = nullptr,
-	                      int64_t adaptive_margin_basis_points_p = 0)
+	                      idx_t adaptive_margin_basis_points_p = 0)
 	    : pipeline(pipeline_p), kernel(kernel_p), local_state(local_state_p), max_chunks(max_chunks_p),
 	      trace_runtime(trace_runtime_p), debug_force_defer_after_chunks(debug_force_defer_after_chunks_p),
 	      adaptive_ab(adaptive_ab_p), adaptive_margin_basis_points(adaptive_margin_basis_points_p),
@@ -576,6 +580,15 @@ public:
 		return result;
 	}
 
+	void RecordAdaptiveLegProgress() {
+		if (!adaptive_ab || adaptive_verdict_done ||
+		    adaptive_ab->phase.load() != ExecutionRegionAdaptiveAbPhase::MEASURING_COMPILED_RUNNING) {
+			return;
+		}
+		adaptive_ab->RecordCompiledLeg(ExecutionRegionElapsedMicros(entry_time), adaptive_leg_rows);
+		adaptive_leg_rows = 0;
+	}
+
 private:
 	void ValidateSink() const {
 		if (sink_blocked) {
@@ -629,7 +642,7 @@ private:
 	bool trace_runtime;
 	idx_t debug_force_defer_after_chunks;
 	optional_ptr<ExecutionRegionAdaptiveAbState> adaptive_ab;
-	int64_t adaptive_margin_basis_points;
+	idx_t adaptive_margin_basis_points;
 	std::chrono::steady_clock::time_point entry_time;
 	bool adaptive_verdict_done = false;
 	idx_t adaptive_leg_rows = 0;
@@ -650,7 +663,7 @@ private:
 
 CompiledVectorizedRunStatus CompiledVectorizedRunner::ExecuteCompiledRegion(
     ExecutionRegionPipelineAdapter &pipeline, idx_t max_chunks, PipelineExecuteResult &result,
-    optional_ptr<ExecutionRegionAdaptiveAbState> adaptive_ab, int64_t adaptive_margin_basis_points) {
+    optional_ptr<ExecutionRegionAdaptiveAbState> adaptive_ab, idx_t adaptive_margin_basis_points) {
 	auto &client = pipeline.GetClientContext();
 	if (pipeline.IsCompiledExecutionSuppressed()) {
 		return CompiledVectorizedRunStatus::VECTORIZED_SUPPRESSED;
@@ -700,6 +713,7 @@ CompiledVectorizedRunStatus CompiledVectorizedRunner::ExecuteCompiledRegion(
 		}
 		if (compiled_result == ExecutionRegionResult::DEFERRED) {
 			auto elapsed_us = trace_runtime ? ExecutionRegionElapsedMicros(trace_start) : 0;
+			runtime.RecordAdaptiveLegProgress();
 			if (trace_runtime) {
 				auto reason = runtime.DeferredReason().empty()
 				                  ? "full pipeline kernel deferred"
@@ -727,6 +741,7 @@ CompiledVectorizedRunStatus CompiledVectorizedRunner::ExecuteCompiledRegion(
 		result = pipeline_result;
 		pipeline.AddProfilingAnnotation("jit", "compiled full-pipeline kernel (" + kernel->BackendName() + ")", true);
 		auto elapsed_us = trace_runtime ? ExecutionRegionElapsedMicros(trace_start) : 0;
+		runtime.RecordAdaptiveLegProgress();
 		if (trace_runtime) {
 			auto runtime_metrics = runtime.Metrics(elapsed_us);
 			ExecutionRegionManager::Get(client).RecordRuntimeEvent(

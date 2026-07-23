@@ -732,7 +732,7 @@ SljitNativePrimitiveRunFunction SljitEnsureExecutableFusedAffineRunUpdate(
     ExecutionRegionRuntime &runtime, SljitExecutablePrimitiveRunUpdate &primitive_run_update,
     const SljitExecutableFusedAffineRunUpdate &affine_run_update, PhysicalType group_source_type,
     PhysicalType group_output_type, ExecutionRowPointerGroupKeyCastKind group_cast_kind, bool payload_nullable) {
-#if SLJIT_NUMBER_OF_SAVED_REGISTERS < 8 || (SLJIT_NUMBER_OF_REGISTERS - SLJIT_NUMBER_OF_SAVED_REGISTERS) < 7
+#if SLJIT_NUMBER_OF_SAVED_REGISTERS < 6 || (SLJIT_NUMBER_OF_REGISTERS - SLJIT_NUMBER_OF_SAVED_REGISTERS) < 7
 	return nullptr;
 #else
 	if (!affine_run_update.Ready() || affine_run_update.primitive_kind != AggregatePrimitiveUpdateKind::SUM_INT64 ||

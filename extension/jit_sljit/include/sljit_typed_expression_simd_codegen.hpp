@@ -42,6 +42,11 @@ struct SljitTypedExpressionTreeSimdPlan {
 	vector<idx_t> source_refs;
 };
 
+// Exact backend capability for one 128-bit packed binary operation. This uses
+// SLJIT_SIMD_TEST, so the SLJIT backend remains the single authority for CPU,
+// operation, and element-width support.
+bool SljitSimd128Op2Supported(sljit_s32 elem_type, sljit_s32 operation);
+
 // Returns a supported plan iff the boolean predicate can be evaluated with
 // packed SIMD ops profitably on the current architecture (single element width,
 // no overflow-trapping arithmetic, packed ops available for every op).

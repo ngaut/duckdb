@@ -1399,23 +1399,7 @@ struct JitAdaptiveAbSetting {
 	    "Measure one compiled and one native row group per compiled-selected pipeline and commit to the measured "
 	    "winner; the compiled runner must win by jit_adaptive_ab_margin_basis_points";
 	static constexpr const char *InputType = "BOOLEAN";
-	// Only pipelines the static cost model cannot call on its own are measured (see
-	// jit_adaptive_ab_band_basis_points), so a workload the model is confident about pays nothing:
-	// TPC-H SF10 reaches zero verdicts at the shipped band and is runtime-identical either way. The
-	// measurement earns its keep only where the static margin is too thin to trust.
 	static constexpr const char *DefaultValue = "true";
-	static constexpr SettingScopeTarget Scope = SettingScopeTarget::LOCAL_DEFAULT;
-	static constexpr idx_t SettingIndex = NEXT_SETTING_INDEX();
-};
-
-struct JitAdaptiveAbMarginBasisPointsSetting {
-	using RETURN_TYPE = idx_t;
-	static constexpr const char *Name = "jit_adaptive_ab_margin_basis_points";
-	static constexpr const char *Description =
-	    "Required compiled advantage over the measured native leg in basis points before the adaptive A/B commits to "
-	    "the compiled runner";
-	static constexpr const char *InputType = "UBIGINT";
-	static constexpr const char *DefaultValue = "1000";
 	static constexpr SettingScopeTarget Scope = SettingScopeTarget::LOCAL_DEFAULT;
 	static constexpr idx_t SettingIndex = NEXT_SETTING_INDEX();
 };
@@ -1427,10 +1411,17 @@ struct JitAdaptiveAbBandBasisPointsSetting {
 	    "Measure the runner A/B only when the selection is thin: static net benefit within this many basis points of "
 	    "the required benefit; zero measures every compiled-selected pipeline";
 	static constexpr const char *InputType = "UBIGINT";
-	// Measuring every compiled-selected pipeline costs a native leg per execution, and no
-	// cross-execution verdict cache exists to amortize it, so a zero band re-pays that tax on every
-	// run: measured +16%..+63% against the non-adaptive default across TPC-H SF10. Measure only
-	// genuinely thin selections, where the static margin cannot decide the runner on its own.
+	static constexpr const char *DefaultValue = "1000";
+	static constexpr SettingScopeTarget Scope = SettingScopeTarget::LOCAL_DEFAULT;
+	static constexpr idx_t SettingIndex = NEXT_SETTING_INDEX();
+};
+
+struct JitAdaptiveAbMarginBasisPointsSetting {
+	using RETURN_TYPE = idx_t;
+	static constexpr const char *Name = "jit_adaptive_ab_margin_basis_points";
+	static constexpr const char *Description = "Required compiled advantage over the measured native leg in basis "
+	                                           "points before the adaptive A/B commits to the compiled runner";
+	static constexpr const char *InputType = "UBIGINT";
 	static constexpr const char *DefaultValue = "1000";
 	static constexpr SettingScopeTarget Scope = SettingScopeTarget::LOCAL_DEFAULT;
 	static constexpr idx_t SettingIndex = NEXT_SETTING_INDEX();
@@ -1528,8 +1519,8 @@ struct JitDebugForceDeferAfterChunksSetting {
 	using RETURN_TYPE = idx_t;
 	static constexpr const char *Name = "jit_debug_force_defer_after_chunks";
 	static constexpr const char *Description =
-	    "Debug: compiled full-pipeline kernels stop claiming new row groups after fetching this many source chunks "
-	    "and defer to the vectorized continuation at the row-group boundary; zero disables";
+	    "Debug: compiled full-pipeline kernels stop claiming new row groups after fetching this many source chunks and "
+	    "defer to the vectorized continuation at the row-group boundary; zero disables";
 	static constexpr const char *InputType = "UBIGINT";
 	static constexpr const char *DefaultValue = "0";
 	static constexpr SettingScopeTarget Scope = SettingScopeTarget::LOCAL_DEFAULT;
@@ -1540,8 +1531,8 @@ struct JitDebugForceEntryDeferSetting {
 	using RETURN_TYPE = bool;
 	static constexpr const char *Name = "jit_debug_force_entry_defer";
 	static constexpr const char *Description =
-	    "Debug: compiled full-pipeline kernels defer to the vectorized continuation at kernel entry before any "
-	    "source fetch, exercising the entry-deferral handoff used by not-ready native runtime states";
+	    "Debug: compiled full-pipeline kernels defer to the vectorized continuation at kernel entry before any source "
+	    "fetch, exercising the entry-deferral handoff used by not-ready native runtime states";
 	static constexpr const char *InputType = "BOOLEAN";
 	static constexpr const char *DefaultValue = "false";
 	static constexpr SettingScopeTarget Scope = SettingScopeTarget::LOCAL_DEFAULT;

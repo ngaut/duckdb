@@ -18,9 +18,9 @@ struct SljitAggregateIntegerBinaryOverflowJumps {
 };
 
 static void EmitSljitAggregateIntegerBinaryOverflowChecks(struct sljit_compiler *compiler, sljit_s32 value_reg,
-                                                         bool check_arithmetic_overflow, bool check_result_range,
-                                                         int64_t result_min, int64_t result_max,
-                                                         SljitAggregateIntegerBinaryOverflowJumps &jumps) {
+                                                          bool check_arithmetic_overflow, bool check_result_range,
+                                                          int64_t result_min, int64_t result_max,
+                                                          SljitAggregateIntegerBinaryOverflowJumps &jumps) {
 	if (check_arithmetic_overflow) {
 		jumps.overflow = sljit_emit_jump(compiler, SLJIT_OVERFLOW);
 	}
@@ -85,13 +85,13 @@ unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativeUngroupedSumInt64IntegerBi
 		} else {
 			sljit_emit_op2(compiler, emit_binary_op, SLJIT_R2, 0, SLJIT_R2, 0, SLJIT_R3, 0);
 		}
-		EmitSljitAggregateIntegerBinaryOverflowChecks(compiler, SLJIT_R2, check_arithmetic_overflow,
-		                                              check_result_range, result_min, result_max, overflow_jumps);
+		EmitSljitAggregateIntegerBinaryOverflowChecks(compiler, SLJIT_R2, check_arithmetic_overflow, check_result_range,
+		                                              result_min, result_max, overflow_jumps);
 		EmitSljitAggregateAccumulateInt64(compiler, local_sum_offset, saw_value_offset, SLJIT_R2);
 	});
 
-	auto helper_done = EmitSljitAggregateIntegerBinaryOverflowHandler(
-	    compiler, op, check_arithmetic_overflow, check_result_range, overflow_jumps);
+	auto helper_done = EmitSljitAggregateIntegerBinaryOverflowHandler(compiler, op, check_arithmetic_overflow,
+	                                                                  check_result_range, overflow_jumps);
 
 	auto done_label = sljit_emit_label(compiler);
 	sljit_set_label(done, done_label);
@@ -174,13 +174,13 @@ unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativeUngroupedSumInt64IntegerBi
 		                                   load_op, data_scale, SLJIT_R3);
 		sljit_emit_op2(compiler, check_arithmetic_overflow ? binary_op | SLJIT_SET_OVERFLOW : binary_op, SLJIT_R2, 0,
 		               SLJIT_R2, 0, SLJIT_R3, 0);
-		EmitSljitAggregateIntegerBinaryOverflowChecks(compiler, SLJIT_R2, check_arithmetic_overflow,
-		                                              check_result_range, result_min, result_max, overflow_jumps);
+		EmitSljitAggregateIntegerBinaryOverflowChecks(compiler, SLJIT_R2, check_arithmetic_overflow, check_result_range,
+		                                              result_min, result_max, overflow_jumps);
 		EmitSljitAggregateAccumulateInt64(compiler, local_sum_offset, saw_value_offset, SLJIT_R2);
 	});
 
-	auto helper_done = EmitSljitAggregateIntegerBinaryOverflowHandler(
-	    compiler, op, check_arithmetic_overflow, check_result_range, overflow_jumps);
+	auto helper_done = EmitSljitAggregateIntegerBinaryOverflowHandler(compiler, op, check_arithmetic_overflow,
+	                                                                  check_result_range, overflow_jumps);
 
 	auto done_label = sljit_emit_label(compiler);
 	if (fast_commit_done) {
@@ -217,15 +217,15 @@ BuildSljitNativeUngroupedSumDoubleDoubleBinaryConstant(SljitNativeDoubleBinaryOp
 
 	auto done = EmitSljitAggregateSelectedSourceLoop(compiler, [&]() {
 		EmitLoadNativeDoubleOperand(compiler, source_kind, offsetof(SljitNativeVectorInput, source_data), SLJIT_R1,
-		                            offsetof(SljitNativeVectorInput, source_double_scale), SLJIT_TMP_FR0);
-		sljit_emit_fmem(compiler, SLJIT_MOV_F64 | SLJIT_MEM_ALIGNED_32, SLJIT_TMP_FR1, SLJIT_MEM1(SLJIT_S0),
+		                            offsetof(SljitNativeVectorInput, source_double_scale), SLJIT_FR0);
+		sljit_emit_fmem(compiler, SLJIT_MOV_F64 | SLJIT_MEM_ALIGNED_32, SLJIT_FR1, SLJIT_MEM1(SLJIT_S0),
 		                offsetof(SljitNativeVectorInput, double_constant));
 		if (constant_on_left) {
-			sljit_emit_fop2(compiler, binary_op, SLJIT_TMP_FR0, 0, SLJIT_TMP_FR1, 0, SLJIT_TMP_FR0, 0);
+			sljit_emit_fop2(compiler, binary_op, SLJIT_FR0, 0, SLJIT_FR1, 0, SLJIT_FR0, 0);
 		} else {
-			sljit_emit_fop2(compiler, binary_op, SLJIT_TMP_FR0, 0, SLJIT_TMP_FR0, 0, SLJIT_TMP_FR1, 0);
+			sljit_emit_fop2(compiler, binary_op, SLJIT_FR0, 0, SLJIT_FR0, 0, SLJIT_FR1, 0);
 		}
-		EmitSljitAggregateAccumulateDouble(compiler, local_sum_offset, saw_value_offset, SLJIT_TMP_FR0);
+		EmitSljitAggregateAccumulateDouble(compiler, local_sum_offset, saw_value_offset, SLJIT_FR0);
 	});
 
 	auto done_label = sljit_emit_label(compiler);
@@ -260,27 +260,27 @@ unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativeUngroupedSumDoubleDoubleBi
 	auto done = EmitSljitAggregateTwoSourceLoop(compiler, [&]() {
 		if (needs_helper_spill) {
 			EmitLoadNativeDoubleOperand(compiler, left_kind, offsetof(SljitNativeVectorInput, source_data), SLJIT_S3,
-			                            offsetof(SljitNativeVectorInput, source_double_scale), SLJIT_TMP_FR0);
-			sljit_emit_fmem(compiler, SLJIT_MOV_F64 | SLJIT_MEM_STORE | SLJIT_MEM_ALIGNED_32, SLJIT_TMP_FR0,
+			                            offsetof(SljitNativeVectorInput, source_double_scale), SLJIT_FR0);
+			sljit_emit_fmem(compiler, SLJIT_MOV_F64 | SLJIT_MEM_STORE | SLJIT_MEM_ALIGNED_32, SLJIT_FR0,
 			                SLJIT_MEM1(SLJIT_SP), left_spill_offset);
 			EmitLoadNativeDoubleOperand(compiler, right_kind, offsetof(SljitNativeVectorInput, right_source_data),
 			                            SLJIT_S4, offsetof(SljitNativeVectorInput, right_source_double_scale),
-			                            SLJIT_TMP_FR0);
-			sljit_emit_fmem(compiler, SLJIT_MOV_F64 | SLJIT_MEM_STORE | SLJIT_MEM_ALIGNED_32, SLJIT_TMP_FR0,
+			                            SLJIT_FR0);
+			sljit_emit_fmem(compiler, SLJIT_MOV_F64 | SLJIT_MEM_STORE | SLJIT_MEM_ALIGNED_32, SLJIT_FR0,
 			                SLJIT_MEM1(SLJIT_SP), right_spill_offset);
-			sljit_emit_fmem(compiler, SLJIT_MOV_F64 | SLJIT_MEM_ALIGNED_32, SLJIT_TMP_FR0, SLJIT_MEM1(SLJIT_SP),
+			sljit_emit_fmem(compiler, SLJIT_MOV_F64 | SLJIT_MEM_ALIGNED_32, SLJIT_FR0, SLJIT_MEM1(SLJIT_SP),
 			                left_spill_offset);
-			sljit_emit_fmem(compiler, SLJIT_MOV_F64 | SLJIT_MEM_ALIGNED_32, SLJIT_TMP_FR1, SLJIT_MEM1(SLJIT_SP),
+			sljit_emit_fmem(compiler, SLJIT_MOV_F64 | SLJIT_MEM_ALIGNED_32, SLJIT_FR1, SLJIT_MEM1(SLJIT_SP),
 			                right_spill_offset);
 		} else {
 			EmitLoadNativeDoubleOperand(compiler, left_kind, offsetof(SljitNativeVectorInput, source_data), SLJIT_S3,
-			                            offsetof(SljitNativeVectorInput, source_double_scale), SLJIT_TMP_FR0);
+			                            offsetof(SljitNativeVectorInput, source_double_scale), SLJIT_FR0);
 			EmitLoadNativeDoubleOperand(compiler, right_kind, offsetof(SljitNativeVectorInput, right_source_data),
 			                            SLJIT_S4, offsetof(SljitNativeVectorInput, right_source_double_scale),
-			                            SLJIT_TMP_FR1);
+			                            SLJIT_FR1);
 		}
-		sljit_emit_fop2(compiler, binary_op, SLJIT_TMP_FR0, 0, SLJIT_TMP_FR0, 0, SLJIT_TMP_FR1, 0);
-		EmitSljitAggregateAccumulateDouble(compiler, local_sum_offset, saw_value_offset, SLJIT_TMP_FR0);
+		sljit_emit_fop2(compiler, binary_op, SLJIT_FR0, 0, SLJIT_FR0, 0, SLJIT_FR1, 0);
+		EmitSljitAggregateAccumulateDouble(compiler, local_sum_offset, saw_value_offset, SLJIT_FR0);
 	});
 
 	auto done_label = sljit_emit_label(compiler);

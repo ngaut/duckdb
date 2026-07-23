@@ -7,6 +7,7 @@
 
 #pragma once
 
+#include "duckdb/common/uhugeint.hpp"
 #include "duckdb/execution/execution_region_ir.hpp"
 #include "duckdb/planner/table_filter_state.hpp"
 
@@ -68,15 +69,43 @@ struct ExecutionRegionAdaptiveAbState {
 	//! row groups and quantify cold-first-leg bias from the recorded events.
 	std::atomic<idx_t> compiled_leg_rows {0};
 	std::atomic<idx_t> native_leg_rows {0};
+	std::atomic<const void *> compiled_leg_owner {nullptr};
 
 	bool TryBeginPhase(ExecutionRegionAdaptiveAbPhase expected, ExecutionRegionAdaptiveAbPhase next) {
 		return phase.compare_exchange_strong(expected, next);
+	}
+
+	bool TryBeginCompiledLeg(const void *owner) {
+		D_ASSERT(owner);
+		const void *expected_owner = nullptr;
+		if (!compiled_leg_owner.compare_exchange_strong(expected_owner, owner, std::memory_order_relaxed)) {
+			return false;
+		}
+		auto expected = ExecutionRegionAdaptiveAbPhase::MEASURING_COMPILED;
+		if (!phase.compare_exchange_strong(expected, ExecutionRegionAdaptiveAbPhase::MEASURING_COMPILED_RUNNING,
+		                                   std::memory_order_release, std::memory_order_relaxed)) {
+			compiled_leg_owner.store(nullptr, std::memory_order_relaxed);
+			return false;
+		}
+		return true;
+	}
+
+	bool CompiledLegOwnedBy(const void *owner) const {
+		if (phase.load(std::memory_order_acquire) != ExecutionRegionAdaptiveAbPhase::MEASURING_COMPILED_RUNNING) {
+			return false;
+		}
+		return compiled_leg_owner.load(std::memory_order_relaxed) == owner;
 	}
 
 	//! The native leg accumulates across scheduler yields; rows are the leg total.
 	void RecordNativeLeg(int64_t leg_us, idx_t leg_rows) {
 		native_leg_us.fetch_add(leg_us);
 		native_leg_rows.store(leg_rows);
+	}
+
+	void RecordCompiledLeg(int64_t leg_us, idx_t leg_rows) {
+		compiled_leg_us.fetch_add(leg_us);
+		compiled_leg_rows.fetch_add(leg_rows);
 	}
 
 	//! The native leg ended at its declined boundary: the compiled leg may begin.
@@ -92,18 +121,65 @@ struct ExecutionRegionAdaptiveAbState {
 
 	//! The compiled leg reached its first row-group boundary: decide the verdict.
 	ExecutionRegionAdaptiveAbVerdict ResolveVerdictAtBoundary(int64_t compiled_us, idx_t compiled_rows,
-	                                                          int64_t margin_basis_points) {
-		compiled_leg_us.store(compiled_us);
-		compiled_leg_rows.store(compiled_rows);
+	                                                          idx_t margin_basis_points) {
+		RecordCompiledLeg(compiled_us, compiled_rows);
+		compiled_us = compiled_leg_us.load();
+		compiled_rows = compiled_leg_rows.load();
 		const auto native_us = native_leg_us.load();
-		const bool commit_compiled = compiled_us * (10000 + margin_basis_points) <= native_us * 10000;
+		const auto native_rows = native_leg_rows.load();
+		// Empty-output row groups do not provide a rate sample. Keep the static CBO
+		// selection instead of manufacturing an infinite or zero per-row cost.
+		bool commit_compiled = compiled_rows == 0 || native_rows == 0;
+		if (!commit_compiled) {
+			// The complete UBIGINT margin domain needs up to 193 bits after
+			// cross-multiplying two 64-bit rate terms. Keep the comparison exact
+			// with four little-endian limbs instead of narrowing the setting or
+			// silently wrapping a 128-bit intermediate.
+			struct WideCost {
+				uint64_t words[4] {};
+
+				explicit WideCost(uhugeint_t value) {
+					words[0] = value.lower;
+					words[1] = value.upper;
+				}
+
+				void Multiply(uint64_t factor) {
+					uint64_t carry = 0;
+					for (idx_t word_idx = 0; word_idx < 4; word_idx++) {
+						auto product = uhugeint_t(words[word_idx]) * uhugeint_t(factor) + uhugeint_t(carry);
+						words[word_idx] = product.lower;
+						carry = product.upper;
+					}
+					D_ASSERT(carry == 0);
+				}
+
+				bool operator<=(const WideCost &other) const {
+					for (idx_t word_idx = 4; word_idx > 0; word_idx--) {
+						if (words[word_idx - 1] != other.words[word_idx - 1]) {
+							return words[word_idx - 1] < other.words[word_idx - 1];
+						}
+					}
+					return true;
+				}
+			};
+
+			D_ASSERT(compiled_us >= 0);
+			D_ASSERT(native_us >= 0);
+			WideCost compiled_cost(uhugeint_t(margin_basis_points) + uhugeint_t(10000));
+			compiled_cost.Multiply(static_cast<uint64_t>(compiled_us));
+			compiled_cost.Multiply(native_rows);
+			WideCost native_cost(uhugeint_t(10000));
+			native_cost.Multiply(static_cast<uint64_t>(native_us));
+			native_cost.Multiply(compiled_rows);
+			commit_compiled = compiled_cost <= native_cost;
+		}
 		phase.store(commit_compiled ? ExecutionRegionAdaptiveAbPhase::COMMIT_COMPILED
 		                            : ExecutionRegionAdaptiveAbPhase::FALLBACK_NATIVE);
 		return commit_compiled ? ExecutionRegionAdaptiveAbVerdict::COMMIT_COMPILED
 		                       : ExecutionRegionAdaptiveAbVerdict::FALLBACK_NATIVE;
 	}
 
-	//! The compiled leg finished, yielded, or could not enter before reaching a
+	//! The compiled leg finished or could not enter before reaching a
 	//! boundary: keep the CBO's compiled selection.
 	void ResolveCommitWithoutBoundary() {
 		auto expected = ExecutionRegionAdaptiveAbPhase::MEASURING_COMPILED_RUNNING;

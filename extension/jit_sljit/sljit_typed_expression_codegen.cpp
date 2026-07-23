@@ -111,8 +111,7 @@ static void EmitSljitTypedExpressionTreeReference(struct sljit_compiler *compile
 	EmitLoadSljitExpressionTreeSourceIndex(compiler, node.ref_index, SLJIT_R1);
 	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_R3, 0, SLJIT_IMM, 1);
 	if (!SljitTypedExpressionTreeSourceKnownValid(known_valid_sources, node.ref_index)) {
-		sljit_emit_op1(compiler, SLJIT_MOV_P, SLJIT_R0, 0, SLJIT_MEM1(SLJIT_S6),
-		               NumericCast<sljit_sw>(node.ref_index * sizeof(const validity_t *)));
+		EmitLoadSljitNativeSourceValidity(compiler, node.ref_index, SLJIT_R0);
 		auto source_all_valid = sljit_emit_cmp(compiler, SLJIT_EQUAL, SLJIT_R0, 0, SLJIT_IMM, 0);
 		sljit_emit_op1(compiler, SLJIT_MOV_P, SLJIT_R4, 0, SLJIT_R0, 0);
 		sljit_emit_op2(compiler, SLJIT_LSHR, SLJIT_R2, 0, SLJIT_R1, 0, SLJIT_IMM, 6);
@@ -163,10 +162,10 @@ EmitSljitTypedExpressionTreeDateYear(struct sljit_compiler *compiler, const Exec
 	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_R3, 0, SLJIT_MEM1(SLJIT_SP), source_slot.valid_offset);
 	auto source_invalid = sljit_emit_cmp(compiler, SLJIT_EQUAL, SLJIT_R3, 0, SLJIT_IMM, 0);
 	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_R2, 0, SLJIT_MEM1(SLJIT_SP), source_slot.value_offset);
-	auto positive_infinity = sljit_emit_cmp(compiler, SLJIT_EQUAL, SLJIT_R2, 0, SLJIT_IMM,
-	                                        NumericCast<sljit_sw>(date_t::infinity().days));
-	auto negative_infinity = sljit_emit_cmp(compiler, SLJIT_EQUAL, SLJIT_R2, 0, SLJIT_IMM,
-	                                        NumericCast<sljit_sw>(date_t::ninfinity().days));
+	auto positive_infinity =
+	    sljit_emit_cmp(compiler, SLJIT_EQUAL, SLJIT_R2, 0, SLJIT_IMM, NumericCast<sljit_sw>(date_t::infinity().days));
+	auto negative_infinity =
+	    sljit_emit_cmp(compiler, SLJIT_EQUAL, SLJIT_R2, 0, SLJIT_IMM, NumericCast<sljit_sw>(date_t::ninfinity().days));
 	EmitSljitDateYearFromDays(compiler, SLJIT_R2, SLJIT_R2);
 	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_R3, 0, SLJIT_IMM, 1);
 	EmitStoreSljitTypedExpressionTreeSlot(compiler, result_slot, SLJIT_R2, SLJIT_R3);
@@ -372,7 +371,7 @@ SljitTypedExpressionTreeSlot EmitSljitTypedExpressionTreeValue(struct sljit_comp
 		}
 		if (node.intrinsic == ExecutionExpressionIntrinsicKind::INTEGRAL_COMPRESS) {
 			return EmitSljitTypedExpressionTreeIntegralCompress(compiler, node, slot_index, overflows,
-			                                                   known_valid_sources);
+			                                                    known_valid_sources);
 		}
 		return EmitSljitTypedExpressionTreeStringPrefix(compiler, node, slot_index);
 	default:

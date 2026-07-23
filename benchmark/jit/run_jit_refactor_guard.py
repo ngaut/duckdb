@@ -333,6 +333,7 @@ def generic_gate_command(args: argparse.Namespace, artifact_dir: Path, threads: 
         str(threads),
         "--repeats",
         str(args.generic_repeats),
+        "--no-host-quiescence",
     ]
 
 

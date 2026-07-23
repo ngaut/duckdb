@@ -28,14 +28,14 @@ def compiled_row(requirements: str, **work: str) -> dict[str, str]:
     return row
 
 
-def runtime_row(proofs: str) -> dict[str, str]:
+def runtime_row(proofs: str, status: str = "executed") -> dict[str, str]:
     return {
         "query": "1",
         "policy": "auto",
         "repeat": "1",
         "backend_name": "jit_sljit",
         "kernel_id": "7",
-        "status": "executed",
+        "status": status,
         "execution_mode": "native",
         "jit_runtime_proof_counts": proofs,
         "invocation_count": "1",
@@ -57,22 +57,32 @@ def adaptive_fallback_row() -> dict[str, str]:
 
 
 class TestTypedRuntimeProofLedger(unittest.TestCase):
-    def test_adaptive_fallback_verdict_satisfies_declared_requirements(self) -> None:
+    def test_adaptive_fallback_marker_does_not_exempt_missing_proof(self) -> None:
         rows = [
             compiled_row("full_pipeline_ownership", runner_cost_full_pipeline_work="4096"),
             adaptive_fallback_row(),
         ]
-        verify_cbo_runtime_counter_contract(rows, require_runtime_proof=True)
-
-    def test_commit_verdict_does_not_exempt_missing_proof(self) -> None:
-        commit_row = adaptive_fallback_row()
-        commit_row["reason"] = "adaptive_ab verdict=commit_compiled compiled_leg_us=50 native_leg_us=93"
-        rows = [
-            compiled_row("full_pipeline_ownership", runner_cost_full_pipeline_work="4096"),
-            commit_row,
-        ]
         with self.assertRaises(AssertionError):
             verify_cbo_runtime_counter_contract(rows, require_runtime_proof=True)
+
+    def test_adaptive_fallback_accepts_deferred_compiled_leg_proof(self) -> None:
+        rows = [
+            compiled_row("full_pipeline_ownership", runner_cost_full_pipeline_work="4096"),
+            runtime_row("full_pipeline_ownership=1", status="skipped"),
+            adaptive_fallback_row(),
+        ]
+        verify_cbo_runtime_counter_contract(rows, require_runtime_proof=True)
+
+    def test_selected_compile_failure_is_an_explicit_outcome(self) -> None:
+        row = compiled_row("full_pipeline_ownership", runner_cost_full_pipeline_work="4096")
+        row.update({"kernel_id": "0", "status": "error", "blocker": "backend_compile_error"})
+        verify_cbo_runtime_counter_contract([row], require_runtime_proof=True)
+
+    def test_selected_noncompiled_row_requires_explicit_failure(self) -> None:
+        row = compiled_row("full_pipeline_ownership", runner_cost_full_pipeline_work="4096")
+        row.update({"kernel_id": "0", "status": "error", "blocker": ""})
+        with self.assertRaises(AssertionError):
+            verify_cbo_runtime_counter_contract([row], require_runtime_proof=True)
 
     def test_declared_requirement_accepts_matching_runtime_proof(self) -> None:
         rows = [
@@ -90,6 +100,15 @@ class TestTypedRuntimeProofLedger(unittest.TestCase):
         rows = [
             compiled_row("full_pipeline_ownership", runner_cost_full_pipeline_work="4096"),
             runtime_row("generated_stage_work=1"),
+        ]
+        with self.assertRaises(AssertionError):
+            verify_cbo_runtime_counter_contract(rows, require_runtime_proof=True)
+
+    def test_runtime_error_does_not_exempt_sibling_invocations(self) -> None:
+        rows = [
+            compiled_row("full_pipeline_ownership", runner_cost_full_pipeline_work="4096"),
+            runtime_row("full_pipeline_ownership=1"),
+            runtime_row("", status="error"),
         ]
         with self.assertRaises(AssertionError):
             verify_cbo_runtime_counter_contract(rows, require_runtime_proof=True)

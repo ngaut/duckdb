@@ -96,8 +96,8 @@ BuildSljitNativeUngroupedSumDoubleReference(SljitNativeDoubleSourceKind kind,
 
 	auto done = EmitSljitAggregateSelectedSourceLoop(compiler, [&]() {
 		EmitLoadNativeDoubleOperand(compiler, kind, offsetof(SljitNativeVectorInput, source_data), SLJIT_R1,
-		                            offsetof(SljitNativeVectorInput, source_double_scale), SLJIT_TMP_FR0);
-		EmitSljitAggregateAccumulateDouble(compiler, local_sum_offset, saw_value_offset, SLJIT_TMP_FR0);
+		                            offsetof(SljitNativeVectorInput, source_double_scale), SLJIT_FR0);
+		EmitSljitAggregateAccumulateDouble(compiler, local_sum_offset, saw_value_offset, SLJIT_FR0);
 	});
 
 	auto done_label = sljit_emit_label(compiler);

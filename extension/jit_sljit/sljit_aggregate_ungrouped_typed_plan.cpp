@@ -93,7 +93,7 @@ bool TryBuildSljitUngroupedFusedAggregateUpdatePlan(const vector<SljitNativeRegi
 	result.hoist_fast_source_data_pointers = !result.fast_source_data_hoists.empty();
 	result.saved_register_count = result.hoist_source_data_pointers || result.hoist_fast_source_data_pointers
 	                                  ? NumericCast<sljit_s32>(10)
-	                                  : NumericCast<sljit_s32>(7);
+	                                  : SLJIT_NATIVE_VECTOR_SAVED_REG_COUNT;
 	if (result.use_conditional_hugeint_register_accumulators) {
 		result.saved_register_count = NumericCast<sljit_s32>(14);
 	}

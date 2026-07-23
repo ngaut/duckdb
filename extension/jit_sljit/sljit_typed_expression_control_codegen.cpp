@@ -91,8 +91,7 @@ static vector<sljit_jump *> EmitSljitTypedExpressionTreeJumpIfAnySourceMayHaveNu
 		if (SljitTypedExpressionTreeSourceKnownValid(&known_valid_sources, source_index)) {
 			continue;
 		}
-		sljit_emit_op1(compiler, SLJIT_MOV_P, SLJIT_R0, 0, SLJIT_MEM1(SLJIT_S6),
-		               NumericCast<sljit_sw>(source_index * sizeof(const validity_t *)));
+		EmitLoadSljitNativeSourceValidity(compiler, source_index, SLJIT_R0);
 		result.push_back(sljit_emit_cmp(compiler, SLJIT_NOT_EQUAL, SLJIT_R0, 0, SLJIT_IMM, 0));
 	}
 	return result;

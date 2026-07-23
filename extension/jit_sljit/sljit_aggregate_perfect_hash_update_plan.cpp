@@ -151,7 +151,7 @@ bool TryBuildSljitPerfectHashFusedUpdatePlan(
 	result.reduction_state_reg =
 	    result.dedicated_reduction_state_register ? SLJIT_PERFECT_HASH_REDUCTION_STATE_REG : SLJIT_S4;
 	result.saved_register_count =
-	    result.dedicated_state_register ? SLJIT_PERFECT_HASH_SAVED_REG_COUNT : NumericCast<sljit_s32>(7);
+	    result.dedicated_state_register ? SLJIT_PERFECT_HASH_SAVED_REG_COUNT : SLJIT_NATIVE_VECTOR_SAVED_REG_COUNT;
 	if (result.dedicated_reduction_state_register) {
 		result.saved_register_count = SLJIT_PERFECT_HASH_SAVED_REG_COUNT;
 	}

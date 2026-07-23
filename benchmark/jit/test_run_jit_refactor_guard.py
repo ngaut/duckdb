@@ -21,7 +21,8 @@ def ps_result(rows: str) -> subprocess.CompletedProcess:
 
 class TestHostQuiescence(unittest.TestCase):
     def test_exact_cpu_ceiling_passes(self) -> None:
-        samples = [ps_result("1 120.0 benchmark-host\n") for _ in range(3)]
+        process_rows = "".join(f"{pid} 10.0 worker-{pid}\n" for pid in range(1, 13))
+        samples = [ps_result(process_rows) for _ in range(3)]
         with (
             mock.patch.object(host.subprocess, "run", side_effect=samples),
             mock.patch.object(host.os, "cpu_count", return_value=12),
@@ -31,9 +32,9 @@ class TestHostQuiescence(unittest.TestCase):
 
     def test_quiet_host_passes_from_median_sample(self) -> None:
         samples = [
-            ps_result("1 80.0 WindowServer\n2 40.0 codex\n"),
-            ps_result("1 70.0 WindowServer\n2 30.0 codex\n"),
-            ps_result("1 75.0 WindowServer\n2 35.0 codex\n"),
+            ps_result("1 8.0 WindowServer\n2 4.0 codex\n"),
+            ps_result("1 7.0 WindowServer\n2 3.0 codex\n"),
+            ps_result("1 7.5 WindowServer\n2 3.5 codex\n"),
         ]
         with (
             mock.patch.object(host.subprocess, "run", side_effect=samples),
@@ -41,6 +42,16 @@ class TestHostQuiescence(unittest.TestCase):
             mock.patch.object(host.time, "sleep"),
         ):
             host.require_host_quiescence()
+
+    def test_single_busy_process_fails_independently_of_total_cpu(self) -> None:
+        samples = [ps_result("613 83.7 /usr/libexec/mediaanalysisd\n") for _ in range(3)]
+        with (
+            mock.patch.object(host.subprocess, "run", side_effect=samples),
+            mock.patch.object(host.os, "cpu_count", return_value=16),
+            mock.patch.object(host.time, "sleep"),
+        ):
+            with self.assertRaisesRegex(host.HostQuiescenceError, r"pid 613 .*mediaanalysisd"):
+                host.require_host_quiescence()
 
     def test_sustained_busy_host_fails_with_top_process(self) -> None:
         samples = [

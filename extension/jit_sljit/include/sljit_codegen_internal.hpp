@@ -16,6 +16,14 @@
 
 namespace duckdb {
 
+#if defined(SLJIT_NUMBER_OF_SAVED_REGISTERS) && SLJIT_NUMBER_OF_SAVED_REGISTERS >= 7
+static constexpr sljit_s32 SLJIT_NATIVE_VECTOR_SAVED_REG_COUNT = 7;
+static constexpr bool SLJIT_NATIVE_VECTOR_HAS_EXTRA_SAVED_REG = true;
+#else
+static constexpr sljit_s32 SLJIT_NATIVE_VECTOR_SAVED_REG_COUNT = 6;
+static constexpr bool SLJIT_NATIVE_VECTOR_HAS_EXTRA_SAVED_REG = false;
+#endif
+
 struct SljitExpressionTreeOverflowJumps {
 	SljitNativeIntegerBinaryOp op = SljitNativeIntegerBinaryOp::ADD;
 	vector<sljit_jump *> jumps;
@@ -112,6 +120,7 @@ inline sljit_sw SljitPointerArrayOffset(idx_t index) {
 void EmitInitSljitNativeVectorLoop(struct sljit_compiler *compiler);
 void EmitInitSljitNativeVectorSourceArrays(struct sljit_compiler *compiler);
 void EmitInitSljitNativeExpressionVectorLoop(struct sljit_compiler *compiler);
+void EmitLoadSljitNativeSourceValidity(struct sljit_compiler *compiler, idx_t source_index, sljit_s32 target);
 void EmitNextSljitNativeVectorLoop(struct sljit_compiler *compiler, struct sljit_label *loop);
 void EmitLoadLogicalIndex(struct sljit_compiler *compiler, sljit_s32 target);
 void EmitLoadSourceIndex(struct sljit_compiler *compiler, sljit_sw sel_offset, sljit_s32 logical_index,

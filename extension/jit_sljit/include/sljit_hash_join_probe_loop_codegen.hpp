@@ -30,14 +30,24 @@ static inline void EmitRestoreHashJoinProbeOffset(struct sljit_compiler *compile
 }
 
 static inline void EmitApplyHashJoinBitmask(struct sljit_compiler *compiler, sljit_s32 target, sljit_s32 scratch,
-                                            bool bitmask_reg_available) {
-	if (bitmask_reg_available) {
-		sljit_emit_op2(compiler, SLJIT_AND, target, 0, target, 0, SLJIT_S6, 0);
+                                            sljit_s32 bitmask_reg) {
+	if (bitmask_reg != 0) {
+		sljit_emit_op2(compiler, SLJIT_AND, target, 0, target, 0, bitmask_reg, 0);
 		return;
 	}
 	sljit_emit_op1(compiler, SLJIT_MOV, scratch, 0, SLJIT_MEM1(SLJIT_S0),
 	               offsetof(SljitNativeRegularHashJoinProbeInput, bitmask));
 	sljit_emit_op2(compiler, SLJIT_AND, target, 0, target, 0, scratch, 0);
+}
+
+static inline void EmitLoadHashJoinPointerMask(struct sljit_compiler *compiler, sljit_s32 target,
+                                               sljit_s32 pointer_mask_reg) {
+	if (pointer_mask_reg != 0) {
+		sljit_emit_op1(compiler, SLJIT_MOV, target, 0, pointer_mask_reg, 0);
+		return;
+	}
+	sljit_emit_op1(compiler, SLJIT_MOV, target, 0, SLJIT_MEM1(SLJIT_S0),
+	               offsetof(SljitNativeRegularHashJoinProbeInput, pointer_mask));
 }
 
 static inline void EmitBloomFilterMaskPart(struct sljit_compiler *compiler, sljit_s32 hash_reg, sljit_s32 mask_reg,
@@ -67,10 +77,9 @@ static inline void EmitBloomFilterMask(struct sljit_compiler *compiler, sljit_s3
 #endif
 }
 
-static inline struct sljit_jump *EmitJumpIfRegularHashJoinBloomMiss(struct sljit_compiler *compiler,
-                                                                    sljit_s32 hash_reg, sljit_s32 bits_reg,
-                                                                    sljit_s32 slot_reg, sljit_s32 mask_reg,
-                                                                    sljit_s32 scratch) {
+static inline struct sljit_jump *EmitJumpIfRegularHashJoinBloomMiss(struct sljit_compiler *compiler, sljit_s32 hash_reg,
+                                                                    sljit_s32 bits_reg, sljit_s32 slot_reg,
+                                                                    sljit_s32 mask_reg, sljit_s32 scratch) {
 	sljit_emit_op1(compiler, SLJIT_MOV_P, bits_reg, 0, SLJIT_MEM1(SLJIT_S0),
 	               offsetof(SljitNativeRegularHashJoinProbeInput, bloom_filter_bits));
 	auto no_bloom = sljit_emit_cmp(compiler, SLJIT_EQUAL, bits_reg, 0, SLJIT_IMM, 0);
@@ -98,13 +107,13 @@ static inline void SetSljitJumpLabels(const vector<struct sljit_jump *> &jumps, 
 }
 
 static inline void EmitRepeatHashJoinProbeSlot(struct sljit_compiler *compiler, struct sljit_label *probe_loop,
-                                               struct sljit_jump *salt_mismatch, bool bitmask_reg_available) {
+                                               struct sljit_jump *salt_mismatch, sljit_s32 bitmask_reg) {
 	auto next_slot = sljit_emit_label(compiler);
 	if (salt_mismatch) {
 		sljit_set_label(salt_mismatch, next_slot);
 	}
 	sljit_emit_op2(compiler, SLJIT_ADD, SLJIT_R1, 0, SLJIT_R1, 0, SLJIT_IMM, 1);
-	EmitApplyHashJoinBitmask(compiler, SLJIT_R1, SLJIT_R4, bitmask_reg_available);
+	EmitApplyHashJoinBitmask(compiler, SLJIT_R1, SLJIT_R4, bitmask_reg);
 	auto repeat_probe = sljit_emit_jump(compiler, SLJIT_JUMP);
 	sljit_set_label(repeat_probe, probe_loop);
 }
@@ -118,7 +127,7 @@ static inline void EmitRepeatHashJoinProbeRow(struct sljit_compiler *compiler, s
 static inline void EmitRetryHashJoinProbeSlot(struct sljit_compiler *compiler, struct sljit_label *probe_loop,
                                               struct sljit_jump *salt_mismatch,
                                               const vector<struct sljit_jump *> &equality_key_mismatches,
-                                              bool restore_probe_offset, bool bitmask_reg_available,
+                                              bool restore_probe_offset, sljit_s32 bitmask_reg,
                                               const vector<struct sljit_jump *> *predicate_key_mismatches = nullptr) {
 	auto restore_hash_offset = sljit_emit_label(compiler);
 	SetSljitJumpLabels(equality_key_mismatches, restore_hash_offset);
@@ -128,7 +137,7 @@ static inline void EmitRetryHashJoinProbeSlot(struct sljit_compiler *compiler, s
 	if (restore_probe_offset) {
 		EmitRestoreHashJoinProbeOffset(compiler);
 	}
-	EmitRepeatHashJoinProbeSlot(compiler, probe_loop, salt_mismatch, bitmask_reg_available);
+	EmitRepeatHashJoinProbeSlot(compiler, probe_loop, salt_mismatch, bitmask_reg);
 }
 
 } // namespace duckdb

@@ -209,13 +209,8 @@ def row_has_no_runtime_work(row: dict) -> bool:
 def selected_cbo_rows(rows: list[dict]) -> list[dict]:
     result = []
     for row in rows:
-        if (
-            row_bool(row, "runner_cost_profile")
-            and row_int(row, "runner_cost_selected_accelerated_runner_count") > 0
-            and row_int(row, "kernel_id") > 0
-        ):
+        if row_bool(row, "runner_cost_profile") and row_int(row, "runner_cost_selected_accelerated_runner_count") > 0:
             result.append(row)
-            require(row["status"] == "compiled", f"counters.csv: selected CBO row is not a compile row: {row}")
             require(row["execution_mode"] == "native", f"counters.csv: selected CBO row is not native: {row}")
             require(
                 row["selected_runner"] == "compiled_vectorized",
@@ -278,27 +273,11 @@ def runtime_proof_requirement_satisfied(proof: str, runtime_rows: list[dict]) ->
     return False
 
 
-def adaptive_fallback_kernel_keys(rows: list[dict]) -> set[tuple[str, str, str, str, str]]:
-    """Kernels whose measured runner verdict fell back to native execution.
-
-    A recorded fallback verdict is the satisfied outcome of the measured runner
-    decision: the compiled kernel ran its measurement leg and handed the pipeline
-    to the vectorized continuation, so no executed compiled runtime rows exist and
-    none are owed.
-    """
-    return {
-        counter_kernel_key(row)
-        for row in rows
-        if row.get("runtime_result", "") == "adaptive_ab" and "verdict=fallback_native" in row.get("reason", "")
-    }
-
-
 def verify_cbo_runtime_counter_contract(rows: list[dict], require_runtime_proof: bool) -> None:
     runtime_rows_by_kernel = collections.defaultdict(list)
     for row in rows:
-        if row["status"] == "executed" and row["execution_mode"] == "native" and row_int(row, "kernel_id") > 0:
+        if row["execution_mode"] == "native" and row_int(row, "kernel_id") > 0 and row_int(row, "invocation_count") > 0:
             runtime_rows_by_kernel[counter_kernel_key(row)].append(row)
-    fallback_kernels = adaptive_fallback_kernel_keys(rows)
 
     credited_work_fields = (
         "runner_cost_generated_stage_work",
@@ -314,15 +293,30 @@ def verify_cbo_runtime_counter_contract(rows: list[dict], require_runtime_proof:
             requirements or credited_work == 0,
             f"counters.csv: selected CBO row credits work without typed runtime proof requirements: {cbo_row}",
         )
+        if cbo_row["status"] != "compiled":
+            require(
+                cbo_row["status"] in ("error", "unsupported", "unavailable", "skipped") and cbo_row["blocker"],
+                f"counters.csv: selected accelerated runner has neither a compiled kernel nor an explicit failure: "
+                f"{cbo_row}",
+            )
+            continue
         if not requirements:
             continue
-        if counter_kernel_key(cbo_row) in fallback_kernels:
-            continue
+        require(
+            row_int(cbo_row, "kernel_id") > 0,
+            f"counters.csv: compiled selected CBO row has no kernel identity: {cbo_row}",
+        )
         runtime_rows = require_runtime_rows(
             runtime_rows_by_kernel, cbo_row, require_runtime_proof, "typed-runtime-proof"
         )
         if not require_runtime_proof:
             continue
+        runtime_errors = [row for row in runtime_rows if row["status"] == "error"]
+        require(
+            not runtime_errors,
+            f"counters.csv: selected CBO kernel recorded a runtime error instead of required proof: "
+            f"{runtime_errors}",
+        )
         for proof in sorted(requirements):
             require(
                 runtime_proof_requirement_satisfied(proof, runtime_rows),

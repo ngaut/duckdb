@@ -1,7 +1,14 @@
 #include "test_jit_helpers.hpp"
 
+#include "sljit_codegen_util.hpp"
+#include "sljit_typed_expression_simd_codegen.hpp"
+
+#include "duckdb/execution/execution_region_kernel.hpp"
+
+#include <array>
 #include <chrono>
 #include <condition_variable>
+#include <cstring>
 #include <thread>
 
 using namespace duckdb;
@@ -249,7 +256,150 @@ static void RequireExecutedMetalProjection(ExecutionRegionManager &manager, idx_
 }
 #endif
 
+struct alignas(16) SljitSimdBinaryTestInput {
+	uint8_t left[16];
+	uint8_t right[16];
+	uint8_t output[16];
+};
+
+template <class T, std::size_t N>
+static std::array<T, N> RunSljitSimdBinary(sljit_s32 elem_type, sljit_s32 operation, const std::array<T, N> &left,
+                                           const std::array<T, N> &right, bool alias_right = false) {
+	static_assert(sizeof(T) * N == 16, "SLJIT SIMD backend tests use one 128-bit register");
+	SljitSimdBinaryTestInput input {};
+	memcpy(input.left, left.data(), sizeof(input.left));
+	memcpy(input.right, right.data(), sizeof(input.right));
+
+	auto compiler = sljit_create_compiler(nullptr);
+	if (!compiler) {
+		throw InternalException("failed to create SLJIT compiler for SIMD backend test");
+	}
+	auto require_success = [&](sljit_s32 result) {
+		if (result != SLJIT_SUCCESS) {
+			sljit_free_compiler(compiler);
+			throw InternalException("SLJIT SIMD backend test emission failed with error %d", result);
+		}
+	};
+	require_success(sljit_emit_enter(compiler, 0, SLJIT_ARGS1V(P), 1 | SLJIT_ENTER_VECTOR(3), 1, 0));
+	const auto simd_type = SLJIT_SIMD_REG_128 | elem_type;
+	require_success(sljit_emit_simd_mov(compiler, simd_type, SLJIT_VR0, SLJIT_MEM1(SLJIT_S0),
+	                                    offsetof(SljitSimdBinaryTestInput, left)));
+	require_success(sljit_emit_simd_mov(compiler, simd_type, SLJIT_VR1, SLJIT_MEM1(SLJIT_S0),
+	                                    offsetof(SljitSimdBinaryTestInput, right)));
+	const auto destination = alias_right ? SLJIT_VR1 : SLJIT_VR2;
+	require_success(sljit_emit_simd_op2(compiler, simd_type | operation, destination, SLJIT_VR0, SLJIT_VR1, 0));
+	require_success(sljit_emit_simd_mov(compiler, simd_type | SLJIT_SIMD_STORE, destination, SLJIT_MEM1(SLJIT_S0),
+	                                    offsetof(SljitSimdBinaryTestInput, output)));
+	require_success(sljit_emit_return_void(compiler));
+
+	using TestFunction = void(SLJIT_FUNC *)(SljitSimdBinaryTestInput *);
+	TestFunction function = nullptr;
+	string error;
+	auto handle = FinishSljitCode(compiler, function, error);
+	if (!handle) {
+		throw InternalException("SLJIT SIMD backend test code generation failed: %s", error);
+	}
+	function(&input);
+	std::array<T, N> result;
+	memcpy(result.data(), input.output, sizeof(input.output));
+	return result;
+}
+
+template <class T, std::size_t N>
+static void RequireSljitSimdBinaryIfSupported(sljit_s32 elem_type, sljit_s32 operation, const std::array<T, N> &left,
+                                              const std::array<T, N> &right, const std::array<T, N> &expected,
+                                              bool alias_right = false) {
+	if (!SljitSimd128Op2Supported(elem_type, operation)) {
+		return;
+	}
+	REQUIRE(RunSljitSimdBinary(elem_type, operation, left, right, alias_right) == expected);
+}
+
 } // namespace
+
+TEST_CASE("SLJIT SIMD binary backend operations preserve lane semantics", "[api][jit][sljit]") {
+	if (!sljit_has_cpu_feature(SLJIT_HAS_SIMD)) {
+		return;
+	}
+	using I8x16 = std::array<int8_t, 16>;
+	using I16x8 = std::array<int16_t, 8>;
+	using I32x4 = std::array<int32_t, 4>;
+	using I64x2 = std::array<int64_t, 2>;
+	RequireSljitSimdBinaryIfSupported(SLJIT_SIMD_ELEM_8, SLJIT_SIMD_OP2_ADD,
+	                                  I8x16 {7, -9, 41, -100, 1, 2, 3, 4, -1, -2, -3, -4, 10, 20, 30, 40},
+	                                  I8x16 {3, 5, -11, 101, 4, 3, 2, 1, 1, 2, 3, 4, -10, -20, -30, -40},
+	                                  I8x16 {10, -4, 30, 1, 5, 5, 5, 5, 0, 0, 0, 0, 0, 0, 0, 0});
+	RequireSljitSimdBinaryIfSupported(
+	    SLJIT_SIMD_ELEM_16, SLJIT_SIMD_OP2_SUB, I16x8 {7, -9, 41, -100, 1000, -2000, 3000, -4000},
+	    I16x8 {3, 5, -11, 101, -500, 500, 1000, -1000}, I16x8 {4, -14, 52, -201, 1500, -2500, 2000, -3000}, true);
+	RequireSljitSimdBinaryIfSupported(SLJIT_SIMD_ELEM_16, SLJIT_SIMD_OP2_MUL, I16x8 {7, -9, 41, -100, 10, -20, 30, -40},
+	                                  I16x8 {3, 5, -11, 101, -5, 5, 10, -10},
+	                                  I16x8 {21, -45, -451, -10100, -50, -100, 300, 400});
+	RequireSljitSimdBinaryIfSupported(SLJIT_SIMD_ELEM_8, SLJIT_SIMD_OP2_CMPGT,
+	                                  I8x16 {7, -9, 41, -100, 1, 2, 3, 4, -1, -2, -3, -4, 10, 20, 30, 40},
+	                                  I8x16 {3, 5, 41, -101, 0, 3, 2, 5, -2, -1, -4, -3, 10, 19, 31, 39},
+	                                  I8x16 {-1, 0, 0, -1, -1, 0, -1, 0, -1, 0, -1, 0, 0, -1, 0, -1}, true);
+	RequireSljitSimdBinaryIfSupported(
+	    SLJIT_SIMD_ELEM_16, SLJIT_SIMD_OP2_CMPEQ, I16x8 {7, -9, 41, -100, 1000, -2000, 3000, -4000},
+	    I16x8 {3, -9, 41, -101, 1000, 2000, -3000, -4000}, I16x8 {0, -1, -1, 0, -1, 0, 0, -1});
+	RequireSljitSimdBinaryIfSupported(SLJIT_SIMD_ELEM_32, SLJIT_SIMD_OP2_ADD, I32x4 {7, -9, 41, -100},
+	                                  I32x4 {3, 5, -11, 101}, I32x4 {10, -4, 30, 1});
+	RequireSljitSimdBinaryIfSupported(SLJIT_SIMD_ELEM_32, SLJIT_SIMD_OP2_SUB, I32x4 {7, -9, 41, -100},
+	                                  I32x4 {3, 5, -11, 101}, I32x4 {4, -14, 52, -201}, true);
+	RequireSljitSimdBinaryIfSupported(SLJIT_SIMD_ELEM_32, SLJIT_SIMD_OP2_MUL, I32x4 {7, -9, 41, -100},
+	                                  I32x4 {3, 5, -11, 101}, I32x4 {21, -45, -451, -10100});
+	RequireSljitSimdBinaryIfSupported(SLJIT_SIMD_ELEM_32, SLJIT_SIMD_OP2_CMPGT, I32x4 {7, -9, 41, -100},
+	                                  I32x4 {3, 5, 41, -101}, I32x4 {-1, 0, 0, -1}, true);
+	RequireSljitSimdBinaryIfSupported(SLJIT_SIMD_ELEM_32, SLJIT_SIMD_OP2_CMPEQ, I32x4 {7, -9, 41, -100},
+	                                  I32x4 {3, -9, 41, -101}, I32x4 {0, -1, -1, 0});
+	RequireSljitSimdBinaryIfSupported(SLJIT_SIMD_ELEM_64, SLJIT_SIMD_OP2_ADD, I64x2 {7, -9}, I64x2 {3, 5},
+	                                  I64x2 {10, -4});
+	RequireSljitSimdBinaryIfSupported(SLJIT_SIMD_ELEM_64, SLJIT_SIMD_OP2_SUB, I64x2 {7, -9}, I64x2 {3, 5},
+	                                  I64x2 {4, -14}, true);
+	RequireSljitSimdBinaryIfSupported(SLJIT_SIMD_ELEM_64, SLJIT_SIMD_OP2_CMPGT, I64x2 {7, -9}, I64x2 {3, -10},
+	                                  I64x2 {-1, -1}, true);
+	RequireSljitSimdBinaryIfSupported(SLJIT_SIMD_ELEM_64, SLJIT_SIMD_OP2_CMPEQ, I64x2 {7, -9}, I64x2 {3, -9},
+	                                  I64x2 {0, -1});
+}
+
+TEST_CASE("JIT adaptive runner compares normalized leg cost", "[api][jit]") {
+	ExecutionRegionAdaptiveAbState state;
+	state.RecordNativeLeg(200, 100);
+	REQUIRE(state.ResolveVerdictAtBoundary(150, 50, 1000) == ExecutionRegionAdaptiveAbVerdict::FALLBACK_NATIVE);
+
+	ExecutionRegionAdaptiveAbState faster_compiled_state;
+	faster_compiled_state.RecordNativeLeg(200, 50);
+	REQUIRE(faster_compiled_state.ResolveVerdictAtBoundary(300, 100, 1000) ==
+	        ExecutionRegionAdaptiveAbVerdict::COMMIT_COMPILED);
+
+	ExecutionRegionAdaptiveAbState empty_sample_state;
+	empty_sample_state.RecordNativeLeg(200, 0);
+	REQUIRE(empty_sample_state.ResolveVerdictAtBoundary(300, 100, 1000) ==
+	        ExecutionRegionAdaptiveAbVerdict::COMMIT_COMPILED);
+
+	ExecutionRegionAdaptiveAbState wide_margin_state;
+	wide_margin_state.RecordNativeLeg(200, 100);
+	REQUIRE(wide_margin_state.ResolveVerdictAtBoundary(150, 100, NumericLimits<idx_t>::Maximum()) ==
+	        ExecutionRegionAdaptiveAbVerdict::FALLBACK_NATIVE);
+
+	ExecutionRegionAdaptiveAbState wide_product_state;
+	wide_product_state.RecordNativeLeg(NumericLimits<int64_t>::Maximum(), NumericLimits<idx_t>::Maximum());
+	REQUIRE(wide_product_state.ResolveVerdictAtBoundary(
+	            NumericLimits<int64_t>::Maximum(), NumericLimits<idx_t>::Maximum(), NumericLimits<idx_t>::Maximum()) ==
+	        ExecutionRegionAdaptiveAbVerdict::FALLBACK_NATIVE);
+
+	ExecutionRegionAdaptiveAbState resumed_state;
+	resumed_state.phase.store(ExecutionRegionAdaptiveAbPhase::MEASURING_COMPILED);
+	int owner;
+	int bystander;
+	REQUIRE(resumed_state.TryBeginCompiledLeg(&owner));
+	REQUIRE(resumed_state.CompiledLegOwnedBy(&owner));
+	REQUIRE_FALSE(resumed_state.CompiledLegOwnedBy(&bystander));
+	resumed_state.RecordNativeLeg(220, 100);
+	resumed_state.RecordCompiledLeg(100, 50);
+	REQUIRE(resumed_state.ResolveVerdictAtBoundary(50, 50, 1000) == ExecutionRegionAdaptiveAbVerdict::COMMIT_COMPILED);
+	REQUIRE(resumed_state.compiled_leg_rows.load() == 100);
+}
 
 TEST_CASE("Execution region manager registers and selects database-local backends", "[api][jit]") {
 	JitTestDatabase test;

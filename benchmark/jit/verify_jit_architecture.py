@@ -280,24 +280,24 @@ def verify_production_contract_ownership() -> None:
     settings = json.loads(read("src/common/settings.json"))
     settings_by_name = {setting["name"]: setting for setting in settings}
     settings_header = read("src/include/duckdb/main/settings.hpp")
-    for name in (
-        "jit_cbo_full_pipeline_benefit",
-        "jit_cbo_generated_stage_benefit",
-        "jit_cbo_materialization_elision_benefit",
-        "jit_cbo_native_operator_stage_benefit",
-        "jit_cbo_source_contract_scan_filter_penalty",
-        "jit_cbo_startup_base_cost",
-        "jit_cbo_startup_margin_basis_points",
-    ):
+    generated_jit_settings = {}
+    for setting_match in re.finditer(r"struct \w+Setting \{(.*?)\n\};", settings_header, re.DOTALL):
+        setting_block = setting_match.group(1)
+        name_match = re.search(r'Name = "(jit_[^"]+)"', setting_block)
+        if name_match:
+            generated_jit_settings[name_match.group(1)] = setting_block
+    for name, setting_block in generated_jit_settings.items():
         if name not in settings_by_name:
             raise AssertionError(f"settings.json must own {name}")
-        name_offset = settings_header.find(f'Name = "{name}"')
-        if name_offset < 0:
-            raise AssertionError(f"generated settings header is missing {name}")
-        setting_block = settings_header[name_offset : name_offset + 1000]
         default_match = re.search(r'DefaultValue = "([^"]+)"', setting_block)
-        if not default_match or default_match.group(1) != settings_by_name[name]["default_value"]:
+        source_default = settings_by_name[name].get("default_value")
+        if source_default is not None and (not default_match or default_match.group(1) != source_default):
             raise AssertionError(f"generated settings default drift for {name}")
+    missing_generated_settings = sorted(
+        name for name in settings_by_name if name.startswith("jit_") and name not in generated_jit_settings
+    )
+    if missing_generated_settings:
+        raise AssertionError(f"generated settings header is missing JIT settings: {missing_generated_settings}")
 
     lazy_artifact = read("extension/jit_sljit/include/sljit_compiled_function.hpp")
     lazy_runtime = read("extension/jit_sljit/sljit_region_runtime.cpp")

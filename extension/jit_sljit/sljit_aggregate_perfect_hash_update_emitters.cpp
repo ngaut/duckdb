@@ -274,17 +274,13 @@ void EmitSljitPerfectHashPayloadUpdates(const SljitPerfectHashFusedUpdateEmitCon
 	                                   ? SljitAggregateExpressionIndexMode::FLAT
 	                                   : (options.no_source_selection ? SljitAggregateExpressionIndexMode::LOGICAL
 	                                                                  : SljitAggregateExpressionIndexMode::SELECTED);
+	const bool selected_shared_payload = shared_index_mode == SljitAggregateExpressionIndexMode::SELECTED;
+	const bool state_clobbers_selected_source_array =
+	    use_reduction ? context.reduction_state_reg == SLJIT_S4 : !context.dedicated_state_register;
 	if (codegen_plan.shared_binary.Enabled() && options.all_valid) {
-		// Group lookup borrows S4 to assemble the perfect-hash index. The selected
-		// expression emitter owns S4 as the source-selection-array base, so restore
-		// that loop invariant before entering the shared payload contract.
-		if (shared_index_mode == SljitAggregateExpressionIndexMode::SELECTED) {
-			sljit_emit_op1(compiler, SLJIT_MOV_P, SLJIT_S4, 0, SLJIT_MEM1(SLJIT_S0),
-			               offsetof(SljitNativeVectorInput, source_sel_array));
-		}
 		EmitSljitSharedBinaryPayloadBase(compiler, codegen_plan.shared_binary, binary_shared_value_reg,
 		                                 context.binary_shared_value_offset, shared_index_mode, context.overflows,
-		                                 options.payload_data_hoists);
+		                                 options.payload_data_hoists, selected_shared_payload);
 	}
 	for (idx_t payload_idx = 0; payload_idx < payloads.size(); payload_idx++) {
 		auto &descriptor = descriptors[payload_idx];
@@ -315,7 +311,8 @@ void EmitSljitPerfectHashPayloadUpdates(const SljitPerfectHashFusedUpdateEmitCon
 		    codegen_plan.shared_binary.lanes[payload_idx].matched) {
 			EmitSljitSharedBinaryPayloadLane(compiler, codegen_plan.shared_binary.lanes[payload_idx],
 			                                 binary_shared_value_reg, context.binary_shared_value_offset,
-			                                 shared_index_mode, context.overflows, options.payload_data_hoists);
+			                                 shared_index_mode, context.overflows, options.payload_data_hoists,
+			                                 selected_shared_payload && state_clobbers_selected_source_array);
 		} else if (payloads[payload_idx].kind == SljitNativeRegionExpressionKind::REFERENCE) {
 			payload_invalid = EmitLoadFusedAggregateReferenceValue(
 			    compiler, payloads[payload_idx], !options.fast_path && !options.no_source_selection, !options.all_valid,

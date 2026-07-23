@@ -46,7 +46,6 @@ struct SljitNativeVectorLoopContext {
 	sljit_s32 count_reg = SLJIT_S2;
 	sljit_s32 source_sel_array_reg = SLJIT_S4;
 	sljit_s32 source_data_array_reg = SLJIT_S5;
-	sljit_s32 source_validity_array_reg = SLJIT_S6;
 };
 
 static constexpr SljitNativeVectorLoopContext SLJIT_NATIVE_VECTOR_LOOP;
@@ -63,8 +62,10 @@ static void EmitInitSljitNativeVectorSourceArrays(struct sljit_compiler *compile
 	               offsetof(SljitNativeVectorInput, source_sel_array));
 	sljit_emit_op1(compiler, SLJIT_MOV_P, loop.source_data_array_reg, 0, SLJIT_MEM1(SLJIT_S0),
 	               offsetof(SljitNativeVectorInput, source_data_array));
-	sljit_emit_op1(compiler, SLJIT_MOV_P, loop.source_validity_array_reg, 0, SLJIT_MEM1(SLJIT_S0),
-	               offsetof(SljitNativeVectorInput, source_validity_array));
+	if (SLJIT_NATIVE_VECTOR_HAS_EXTRA_SAVED_REG) {
+		sljit_emit_op1(compiler, SLJIT_MOV_P, SLJIT_S6, 0, SLJIT_MEM1(SLJIT_S0),
+		               offsetof(SljitNativeVectorInput, source_validity_array));
+	}
 }
 
 void EmitInitSljitNativeVectorLoop(struct sljit_compiler *compiler) {
@@ -78,6 +79,18 @@ void EmitInitSljitNativeVectorSourceArrays(struct sljit_compiler *compiler) {
 void EmitInitSljitNativeExpressionVectorLoop(struct sljit_compiler *compiler) {
 	EmitInitSljitNativeVectorLoop(compiler);
 	EmitInitSljitNativeVectorSourceArrays(compiler);
+}
+
+void EmitLoadSljitNativeSourceValidity(struct sljit_compiler *compiler, idx_t source_index, sljit_s32 target) {
+	if (SLJIT_NATIVE_VECTOR_HAS_EXTRA_SAVED_REG) {
+		sljit_emit_op1(compiler, SLJIT_MOV_P, target, 0, SLJIT_MEM1(SLJIT_S6),
+		               NumericCast<sljit_sw>(source_index * sizeof(const validity_t *)));
+		return;
+	}
+	sljit_emit_op1(compiler, SLJIT_MOV_P, target, 0, SLJIT_MEM1(SLJIT_S0),
+	               offsetof(SljitNativeVectorInput, source_validity_array));
+	sljit_emit_op1(compiler, SLJIT_MOV_P, target, 0, SLJIT_MEM1(target),
+	               NumericCast<sljit_sw>(source_index * sizeof(const validity_t *)));
 }
 
 void EmitLoadSourceIndex(struct sljit_compiler *compiler, sljit_sw sel_offset, sljit_s32 logical_index,

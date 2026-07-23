@@ -14,6 +14,7 @@ from pathlib import Path
 HOST_QUIESCENCE_SAMPLE_COUNT = 3
 HOST_QUIESCENCE_SAMPLE_INTERVAL_S = 1.0
 HOST_QUIESCENCE_MAX_CPU_FRACTION = 0.10
+HOST_QUIESCENCE_MAX_PROCESS_CPU_PERCENT = 20.0
 MACOS_SECURITY_MAX_CPU_PERCENT = 5.0
 HOST_QUIESCENCE_MAX_ATTEMPTS = 12
 HOST_QUIESCENCE_RETRY_INTERVAL_S = 5.0
@@ -78,8 +79,10 @@ def require_host_quiescence() -> None:
 
     cpu_fractions = [sample[0] for sample in samples]
     security_cpu_percents = [sample[1] for sample in samples]
+    busiest_cpu_percents = [sample[2][0][0] for sample in samples]
     median_cpu_fraction = statistics.median(cpu_fractions)
     median_security_cpu_percent = statistics.median(security_cpu_percents)
+    median_busiest_cpu_percent = statistics.median(busiest_cpu_percents)
     rendered_samples = ", ".join(f"{sample * 100.0:.1f}%" for sample in cpu_fractions)
     print(
         "host quiescence: "
@@ -92,6 +95,14 @@ def require_host_quiescence() -> None:
             "macOS security scanning is active: "
             f"median syspolicyd/XProtect CPU {median_security_cpu_percent:.1f}% exceeds "
             f"{MACOS_SECURITY_MAX_CPU_PERCENT:.1f}%"
+        )
+    if median_busiest_cpu_percent > HOST_QUIESCENCE_MAX_PROCESS_CPU_PERCENT:
+        _, pid, command = max(samples, key=lambda sample: sample[2][0][0])[2][0]
+        raise HostQuiescenceError(
+            "a single competing process is too busy for production performance measurement: "
+            f"median busiest-process CPU {median_busiest_cpu_percent:.1f}% exceeds "
+            f"{HOST_QUIESCENCE_MAX_PROCESS_CPU_PERCENT:.1f}%; "
+            f"busiest observed process pid {pid} {command}"
         )
     if median_cpu_fraction <= HOST_QUIESCENCE_MAX_CPU_FRACTION:
         return

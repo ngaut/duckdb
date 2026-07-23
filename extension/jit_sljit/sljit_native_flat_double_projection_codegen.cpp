@@ -78,15 +78,18 @@ static unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativeFlatDoubleProjectio
 	auto constant_width = NativeDirectFloatingDataWidth(single_precision);
 
 	auto stats_float_register_count = NumericCast<sljit_s32>(4 + projection_indices.size() * 2);
-	sljit_emit_enter(compiler, 0, SLJIT_ARGS1V(P), 5 | SLJIT_ENTER_FLOAT(stats_float_register_count), 7, 0);
+	sljit_emit_enter(compiler, 0, SLJIT_ARGS1V(P), 5 | SLJIT_ENTER_FLOAT(stats_float_register_count),
+	                 SLJIT_NATIVE_VECTOR_SAVED_REG_COUNT, 0);
 	EmitInitSljitNativeVectorLoop(compiler);
 
 	EmitSljitFlatProjectionLoadSharedSourcePointers(compiler, shared_plan, SLJIT_R2);
 
 	sljit_emit_op1(compiler, SLJIT_MOV_P, SLJIT_S5, 0, SLJIT_MEM1(SLJIT_S0),
 	               offsetof(SljitNativeVectorInput, result_data_array));
-	sljit_emit_op1(compiler, SLJIT_MOV_P, SLJIT_S6, 0, SLJIT_MEM1(SLJIT_S0),
-	               offsetof(SljitNativeVectorInput, floating_constants));
+	if (SLJIT_NATIVE_VECTOR_HAS_EXTRA_SAVED_REG) {
+		sljit_emit_op1(compiler, SLJIT_MOV_P, SLJIT_S6, 0, SLJIT_MEM1(SLJIT_S0),
+		               offsetof(SljitNativeVectorInput, floating_constants));
+	}
 
 	auto emit_sources = [&]() {
 		for (idx_t source_idx = 0; source_idx < shared_plan.sources.size(); source_idx++) {
@@ -113,7 +116,13 @@ static unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativeFlatDoubleProjectio
 		auto binary_op = NativeDoubleBinaryOp(plan.double_binary_op, single_precision);
 		if (plan.kind == SljitNativeRegionExpressionKind::DOUBLE_BINARY_CONSTANT) {
 			auto constant_offset = NumericCast<sljit_sw>(projection_index * constant_width);
-			sljit_emit_fmem(compiler, move_op | fmem_align, SLJIT_FR3, SLJIT_MEM1(SLJIT_S6), constant_offset);
+			auto constant_base = SLJIT_S6;
+			if (!SLJIT_NATIVE_VECTOR_HAS_EXTRA_SAVED_REG) {
+				constant_base = SLJIT_R4;
+				sljit_emit_op1(compiler, SLJIT_MOV_P, constant_base, 0, SLJIT_MEM1(SLJIT_S0),
+				               offsetof(SljitNativeVectorInput, floating_constants));
+			}
+			sljit_emit_fmem(compiler, move_op | fmem_align, SLJIT_FR3, SLJIT_MEM1(constant_base), constant_offset);
 		}
 		if (plan.kind == SljitNativeRegionExpressionKind::DOUBLE_BINARY_CONSTANT && plan.constant_on_left) {
 			sljit_emit_fop2(compiler, binary_op, SLJIT_FR2, 0, SLJIT_FR3, 0, left_reg, 0);
@@ -190,9 +199,13 @@ BuildSljitNativeFlatDoubleProjection(const vector<SljitNativeRegionExpressionPla
 	}
 
 	SljitFlatProjectionSharedSourcePlan shared_source_plan;
+	static_assert(SLJIT_NUMBER_OF_FLOAT_REGISTERS >= 4,
+	              "flat floating projection requires four scratch floating-point registers");
+	const auto max_stats_projections =
+	    MinValue<idx_t>(8, NumericCast<idx_t>((SLJIT_NUMBER_OF_FLOAT_REGISTERS - 4) / 2));
 	if (TryPlanSljitFlatProjectionSharedSources(plans, projection_indices,
-	                                            SljitNativeRegionExpressionKind::DOUBLE_BINARY_REFERENCES, 2, 8,
-	                                            shared_source_plan)) {
+	                                            SljitNativeRegionExpressionKind::DOUBLE_BINARY_REFERENCES, 2,
+	                                            max_stats_projections, shared_source_plan)) {
 		return BuildSljitNativeFlatDoubleProjectionSharedSources(plans, projection_indices, shared_source_plan,
 		                                                         single_precision, function, error);
 	}
@@ -207,7 +220,7 @@ BuildSljitNativeFlatDoubleProjection(const vector<SljitNativeRegionExpressionPla
 	auto data_scale = NativeDirectFloatingDataScale(single_precision);
 	auto constant_width = NativeDirectFloatingDataWidth(single_precision);
 
-	sljit_emit_enter(compiler, 0, SLJIT_ARGS1V(P), 5 | SLJIT_ENTER_FLOAT(4), 7, 0);
+	sljit_emit_enter(compiler, 0, SLJIT_ARGS1V(P), 5 | SLJIT_ENTER_FLOAT(4), SLJIT_NATIVE_VECTOR_SAVED_REG_COUNT, 0);
 	EmitInitSljitNativeVectorLoop(compiler);
 	sljit_emit_op1(compiler, SLJIT_MOV_P, SLJIT_S3, 0, SLJIT_MEM1(SLJIT_S0),
 	               offsetof(SljitNativeVectorInput, source_data_array));
@@ -215,8 +228,10 @@ BuildSljitNativeFlatDoubleProjection(const vector<SljitNativeRegionExpressionPla
 	               offsetof(SljitNativeVectorInput, right_source_data_array));
 	sljit_emit_op1(compiler, SLJIT_MOV_P, SLJIT_S5, 0, SLJIT_MEM1(SLJIT_S0),
 	               offsetof(SljitNativeVectorInput, result_data_array));
-	sljit_emit_op1(compiler, SLJIT_MOV_P, SLJIT_S6, 0, SLJIT_MEM1(SLJIT_S0),
-	               offsetof(SljitNativeVectorInput, floating_constants));
+	if (SLJIT_NATIVE_VECTOR_HAS_EXTRA_SAVED_REG) {
+		sljit_emit_op1(compiler, SLJIT_MOV_P, SLJIT_S6, 0, SLJIT_MEM1(SLJIT_S0),
+		               offsetof(SljitNativeVectorInput, floating_constants));
+	}
 
 	for (auto projection_index : projection_indices) {
 		auto &plan = plans[projection_index];
@@ -226,28 +241,33 @@ BuildSljitNativeFlatDoubleProjection(const vector<SljitNativeRegionExpressionPla
 			sljit_emit_op1(compiler, SLJIT_MOV_P, SLJIT_R1, 0, SLJIT_MEM1(SLJIT_S4), projection_pointer_offset);
 		} else {
 			auto constant_offset = NumericCast<sljit_sw>(projection_index * constant_width);
-			sljit_emit_fmem(compiler, move_op | fmem_align, SLJIT_TMP_FR1, SLJIT_MEM1(SLJIT_S6), constant_offset);
+			auto constant_base = SLJIT_S6;
+			if (!SLJIT_NATIVE_VECTOR_HAS_EXTRA_SAVED_REG) {
+				constant_base = SLJIT_R4;
+				sljit_emit_op1(compiler, SLJIT_MOV_P, constant_base, 0, SLJIT_MEM1(SLJIT_S0),
+				               offsetof(SljitNativeVectorInput, floating_constants));
+			}
+			sljit_emit_fmem(compiler, move_op | fmem_align, SLJIT_FR1, SLJIT_MEM1(constant_base), constant_offset);
 		}
 		sljit_emit_op1(compiler, SLJIT_MOV_P, SLJIT_R2, 0, SLJIT_MEM1(SLJIT_S5), projection_pointer_offset);
 		sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_S1, 0, SLJIT_IMM, 0);
 
 		auto emit_projection_row = [&]() {
-			sljit_emit_fmem(compiler, move_op | fmem_align, SLJIT_TMP_FR0, SLJIT_MEM2(SLJIT_R0, SLJIT_S1), data_scale);
+			sljit_emit_fmem(compiler, move_op | fmem_align, SLJIT_FR0, SLJIT_MEM2(SLJIT_R0, SLJIT_S1), data_scale);
 			if (plan.kind == SljitNativeRegionExpressionKind::DOUBLE_BINARY_CONSTANT) {
 				auto binary_op = NativeDoubleBinaryOp(plan.double_binary_op, single_precision);
 				if (plan.constant_on_left) {
-					sljit_emit_fop2(compiler, binary_op, SLJIT_TMP_FR0, 0, SLJIT_TMP_FR1, 0, SLJIT_TMP_FR0, 0);
+					sljit_emit_fop2(compiler, binary_op, SLJIT_FR0, 0, SLJIT_FR1, 0, SLJIT_FR0, 0);
 				} else {
-					sljit_emit_fop2(compiler, binary_op, SLJIT_TMP_FR0, 0, SLJIT_TMP_FR0, 0, SLJIT_TMP_FR1, 0);
+					sljit_emit_fop2(compiler, binary_op, SLJIT_FR0, 0, SLJIT_FR0, 0, SLJIT_FR1, 0);
 				}
 			} else {
-				sljit_emit_fmem(compiler, move_op | fmem_align, SLJIT_TMP_FR1, SLJIT_MEM2(SLJIT_R1, SLJIT_S1),
-				                data_scale);
+				sljit_emit_fmem(compiler, move_op | fmem_align, SLJIT_FR1, SLJIT_MEM2(SLJIT_R1, SLJIT_S1), data_scale);
 				auto binary_op = NativeDoubleBinaryOp(plan.double_binary_op, single_precision);
-				sljit_emit_fop2(compiler, binary_op, SLJIT_TMP_FR0, 0, SLJIT_TMP_FR0, 0, SLJIT_TMP_FR1, 0);
+				sljit_emit_fop2(compiler, binary_op, SLJIT_FR0, 0, SLJIT_FR0, 0, SLJIT_FR1, 0);
 			}
-			sljit_emit_fmem(compiler, move_op | SLJIT_MEM_STORE | fmem_align, SLJIT_TMP_FR0,
-			                SLJIT_MEM2(SLJIT_R2, SLJIT_S1), data_scale);
+			sljit_emit_fmem(compiler, move_op | SLJIT_MEM_STORE | fmem_align, SLJIT_FR0, SLJIT_MEM2(SLJIT_R2, SLJIT_S1),
+			                data_scale);
 		};
 
 		auto emit_increment = [&]() {
@@ -259,10 +279,9 @@ BuildSljitNativeFlatDoubleProjection(const vector<SljitNativeRegionExpressionPla
 				return;
 			}
 			if (initialize_stats) {
-				EmitSljitFlatFloatingStatsInit(compiler, move_op, SLJIT_TMP_FR0, SLJIT_FR2, SLJIT_FR3);
+				EmitSljitFlatFloatingStatsInit(compiler, move_op, SLJIT_FR0, SLJIT_FR2, SLJIT_FR3);
 			} else {
-				EmitSljitFlatFloatingStatsUpdate(compiler, move_op, single_precision, SLJIT_TMP_FR0, SLJIT_FR2,
-				                                 SLJIT_FR3);
+				EmitSljitFlatFloatingStatsUpdate(compiler, move_op, single_precision, SLJIT_FR0, SLJIT_FR2, SLJIT_FR3);
 			}
 		};
 		EmitSljitFlatFloatingOptionalStatsLoop(compiler, emit_projection_with_optional_stats, emit_increment, [&]() {
