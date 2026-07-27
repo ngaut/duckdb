@@ -16,7 +16,6 @@
 
 #include "duckdb/execution/execution_hash_join_runtime.hpp"
 #include "duckdb/execution/execution_operator_runtime.hpp"
-#include "duckdb/execution/join_hashtable.hpp"
 
 namespace duckdb {
 
@@ -89,13 +88,16 @@ static idx_t SljitSelectMarkProbeNonMatches(const ExecutionHashJoinProbeBinding 
 	if (count > input.count || count > input_chunk.size()) {
 		throw InternalException("SLJIT MARK probe non-match selection count exceeds input size");
 	}
-	if (binding.hash_table->has_filtered_null) {
+	if (binding.build_side_has_filtered_null) {
 		return 0;
 	}
 
 	vector<UnifiedVectorFormat> nullable_key_formats;
 	for (idx_t key_idx = 0; key_idx < binding.probe_key_input_indices.size(); key_idx++) {
-		if (binding.hash_table->NullValuesAreEqual(key_idx)) {
+		if (key_idx >= binding.condition_null_values_are_equal.size()) {
+			throw InternalException("SLJIT MARK probe key NULL contract is incomplete");
+		}
+		if (binding.condition_null_values_are_equal[key_idx]) {
 			continue;
 		}
 		auto input_col = binding.probe_key_input_indices[key_idx];
@@ -231,7 +233,10 @@ static bool SljitBuildMaterializedMarkProbeBoundaryMarker(const ExecutionHashJoi
 	}
 
 	for (idx_t key_idx = 0; key_idx < binding.probe_key_input_indices.size(); key_idx++) {
-		if (binding.hash_table->NullValuesAreEqual(key_idx)) {
+		if (key_idx >= binding.condition_null_values_are_equal.size()) {
+			return false;
+		}
+		if (binding.condition_null_values_are_equal[key_idx]) {
 			continue;
 		}
 		auto input_col = binding.probe_key_input_indices[key_idx];
@@ -250,7 +255,7 @@ static bool SljitBuildMaterializedMarkProbeBoundaryMarker(const ExecutionHashJoi
 			}
 		}
 	}
-	if (binding.hash_table->has_filtered_null) {
+	if (binding.build_side_has_filtered_null) {
 		for (idx_t row_idx = 0; row_idx < boundary.count; row_idx++) {
 			if (!bool_result[row_idx]) {
 				mask.SetInvalid(row_idx);

@@ -374,13 +374,6 @@ public:
 		                                  ExecutionRegionStageId(ExecutionRegionJitRuntimeProofName(proof)), count);
 	}
 
-	void RecordJitRuntimeProofDetail(const char *proof, idx_t count) override {
-		if (!trace_runtime || !proof || !proof[0]) {
-			return;
-		}
-		AddExecutionRegionRecordedCounter(jit_runtime.runtime_proof_counts, ExecutionRegionStageId(proof), count);
-	}
-
 	void RecordJitRuntimeDelegation(const char *delegation, idx_t count) override {
 		if (!trace_runtime || !delegation || !delegation[0]) {
 			return;

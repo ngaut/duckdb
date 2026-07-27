@@ -62,10 +62,10 @@ ExecutionRegionCompileResult CompileSljitRegion(const string &backend_name,
 			reason += ";source-execution:source-contract";
 		}
 		auto shape = DescribeNativeRegionShape(*native_region);
-		string ir;
-		if (ExecutionRegionSettings::DumpIR(input.context)) {
-			ir = AttachCoreRegionIR(DescribeNativeRegion(*native_region, "native.region"), input.region_ir);
-		}
+		// Keep canonical diagnostics with the semantic artifact. Core telemetry
+		// decides whether to expose them for each execution, so diagnostic
+		// settings never fragment or impoverish the shared artifact.
+		auto ir = AttachCoreRegionIR(DescribeNativeRegion(*native_region, "native.region"), input.region_ir);
 		ExecutionRegionCompileTimings timings;
 		SljitExecutableRegion executable_region;
 		SljitFullPipelineRecipePlan recipe_plan;
@@ -92,12 +92,10 @@ ExecutionRegionCompileResult CompileSljitRegion(const string &backend_name,
 		if (ExecutionRegionSettings::Verify(input.context)) {
 			reason += ";verify:region";
 		}
-		auto kernel_build_start = std::chrono::steady_clock::now();
-		auto kernel = CreateSljitNativeRegionKernel(input.context, backend_name, std::move(executable_region),
-		                                            std::move(recipe_plan), contract.abi);
-		timings.kernel_build_time_us = SljitCompileElapsedMicros(kernel_build_start);
-		auto result = ExecutionRegionCompileResult::Compiled(std::move(kernel), execution_mode, std::move(reason),
-		                                                     MaybeDumpIr(input.context, std::move(ir)));
+		auto artifact = CreateSljitNativeRegionArtifact(backend_name, std::move(executable_region),
+		                                                std::move(recipe_plan), contract.abi);
+		auto result = ExecutionRegionCompileResult::CompiledArtifact(std::move(artifact), execution_mode,
+		                                                             std::move(reason), std::move(ir));
 		result.timings = timings;
 		return result;
 	}

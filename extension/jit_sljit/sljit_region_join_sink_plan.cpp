@@ -21,11 +21,6 @@ SljitRegionNodePlan PlanSljitHashJoinBuildSinkNode(const ExecutionRegionNode &no
 	SljitNativeRegionOpPlan native_op;
 	native_op.kind = SljitNativeRegionOpKind::HASH_JOIN_BUILD;
 	native_op.hash_join_build.sink_info = *node.sink;
-	if (render_diagnostics) {
-		native_op.hash_join_build.ir = "hash_join_build_native<execution=primitive-protocol-build,payload_columns=" +
-		                               std::to_string(contract.payload_column_count) +
-		                               ",keys=" + std::to_string(contract.condition_count) + ">";
-	}
 
 	string reason = "native hash join build contract";
 	if (render_diagnostics) {
@@ -37,8 +32,11 @@ SljitRegionNodePlan PlanSljitHashJoinBuildSinkNode(const ExecutionRegionNode &no
 			reason += ";native_hash_join_build_blocker=" + contract.native_build_contract.blocker;
 		}
 		reason += ";build_sink_shape_ready=true";
+		auto diagnostic = "hash_join_build_native<execution=primitive-protocol-build,payload_columns=" +
+		                  std::to_string(contract.payload_column_count) +
+		                  ",keys=" + std::to_string(contract.condition_count) + ">";
+		AppendSljitReasonPart(reason, diagnostic, true);
 	}
-	AppendSljitReasonPart(reason, native_op.hash_join_build.ir, render_diagnostics);
 	AppendSljitReasonPart(reason, node.sink->ir, render_diagnostics);
 	return SljitNativeNode(std::move(native_op), std::move(reason));
 }
@@ -81,9 +79,6 @@ SljitRegionNodePlan PlanSljitNestedLoopJoinBuildSinkNode(const ExecutionRegionNo
 	native_op.kind = SljitNativeRegionOpKind::NESTED_LOOP_JOIN_BUILD;
 	native_op.nested_loop_join_build.sink_info = *node.sink;
 	native_op.nested_loop_join_build.condition_types = contract.condition_types;
-	if (render_diagnostics) {
-		native_op.nested_loop_join_build.ir = node.sink->ir;
-	}
 	native_op.nested_loop_join_build.rhs_conditions.reserve(contract.conditions.size());
 	for (auto &condition : contract.conditions) {
 		if (!condition.rhs_expression_ready || !condition.rhs_expression.root) {

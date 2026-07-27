@@ -123,16 +123,6 @@ SljitNativeRegionExpressionPlan SljitNativeRegionExpressionPlan::Copy(bool copy_
 	return result;
 }
 
-static vector<SljitNativeRegionExpressionPlan>
-CopySljitNativeRegionExpressions(const vector<SljitNativeRegionExpressionPlan> &input) {
-	vector<SljitNativeRegionExpressionPlan> result;
-	result.reserve(input.size());
-	for (auto &expr : input) {
-		result.push_back(expr.Copy());
-	}
-	return result;
-}
-
 SljitNativeHashJoinProbePlan SljitNativeHashJoinProbePlan::Copy(bool copy_ir) const {
 	SljitNativeHashJoinProbePlan result;
 	result.operator_index = operator_index;
@@ -142,7 +132,7 @@ SljitNativeHashJoinProbePlan SljitNativeHashJoinProbePlan::Copy(bool copy_ir) co
 	result.mark_build_match_after_residual = mark_build_match_after_residual;
 	result.residual_predicate = residual_predicate;
 	result.perfect_hash_probe = perfect_hash_probe;
-	result.exact_source_filter_identity = exact_source_filter_identity;
+	result.exact_source_filter_binding = exact_source_filter_binding;
 	result.found_match_offset = found_match_offset;
 	result.pointer_offset = pointer_offset;
 	result.output_mode = output_mode;
@@ -151,102 +141,6 @@ SljitNativeHashJoinProbePlan SljitNativeHashJoinProbePlan::Copy(bool copy_ir) co
 	result.residual_source_not_null = residual_source_not_null;
 	result.residual_filter = residual_filter.Copy(false, copy_ir);
 	result.operator_info = operator_info;
-	if (copy_ir) {
-		result.ir = ir;
-	}
-	return result;
-}
-
-static SljitNativeNestedLoopJoinProbeConditionPlan
-CopySljitNativeNestedLoopJoinProbeConditionPlan(const SljitNativeNestedLoopJoinProbeConditionPlan &input) {
-	SljitNativeNestedLoopJoinProbeConditionPlan result;
-	result.lhs_condition = input.lhs_condition.Copy();
-	result.type = input.type;
-	result.comparison_type = input.comparison_type;
-	result.value_kind = input.value_kind;
-	result.ir = input.ir;
-	return result;
-}
-
-static SljitNativeNestedLoopJoinProbePlan
-CopySljitNativeNestedLoopJoinProbePlan(const SljitNativeNestedLoopJoinProbePlan &input) {
-	SljitNativeNestedLoopJoinProbePlan result;
-	result.operator_index = input.operator_index;
-	result.input_types = input.input_types;
-	result.condition_types = input.condition_types;
-	result.join_type = input.join_type;
-	result.operator_info = input.operator_info;
-	result.ir = input.ir;
-	result.conditions.reserve(input.conditions.size());
-	for (auto &condition : input.conditions) {
-		result.conditions.push_back(CopySljitNativeNestedLoopJoinProbeConditionPlan(condition));
-	}
-	return result;
-}
-
-static SljitNativeRegionOpPlan CopySljitNativeRegionOp(const SljitNativeRegionOpPlan &input) {
-	SljitNativeRegionOpPlan result;
-	result.kind = input.kind;
-	result.operator_index = input.operator_index;
-	result.input_types = input.input_types;
-	result.output_types = input.output_types;
-	result.filter = input.filter.Copy();
-	result.hash_join_probe = input.hash_join_probe.Copy();
-	result.hash_join_build = input.hash_join_build;
-	result.nested_loop_join_probe = CopySljitNativeNestedLoopJoinProbePlan(input.nested_loop_join_probe);
-	result.nested_loop_join_build.sink_info = input.nested_loop_join_build.sink_info;
-	result.nested_loop_join_build.input_types = input.nested_loop_join_build.input_types;
-	result.nested_loop_join_build.condition_types = input.nested_loop_join_build.condition_types;
-	result.nested_loop_join_build.ir = input.nested_loop_join_build.ir;
-	result.nested_loop_join_build.rhs_conditions =
-	    CopySljitNativeRegionExpressions(input.nested_loop_join_build.rhs_conditions);
-	result.append_sink = input.append_sink;
-	result.delim_join_sink = input.delim_join_sink;
-	result.aggregate_update.sink_info = input.aggregate_update.sink_info;
-	result.aggregate_update.input_types = input.aggregate_update.input_types;
-	result.aggregate_update.estimated_input_count = input.aggregate_update.estimated_input_count;
-	result.aggregate_update.distinct_key_cardinality_upper_bound =
-	    input.aggregate_update.distinct_key_cardinality_upper_bound;
-	result.aggregate_update.group_reserve = input.aggregate_update.group_reserve;
-	result.aggregate_update.payload_binding_state = input.aggregate_update.payload_binding_state;
-	result.aggregate_update.use_grouped_state_addresses = input.aggregate_update.use_grouped_state_addresses;
-	result.aggregate_update.use_perfect_hash_group_lookup = input.aggregate_update.use_perfect_hash_group_lookup;
-	result.aggregate_update.ir = input.aggregate_update.ir;
-	result.aggregate_update.payloads = CopySljitNativeRegionExpressions(input.aggregate_update.payloads);
-	result.aggregate_update.group_expressions =
-	    CopySljitNativeRegionExpressions(input.aggregate_update.group_expressions);
-	result.order_sink.sink_info = input.order_sink.sink_info;
-	result.order_sink.input_types = input.order_sink.input_types;
-	result.order_sink.key_types = input.order_sink.key_types;
-	result.order_sink.ir = input.order_sink.ir;
-	result.order_sink.order_keys = CopySljitNativeRegionExpressions(input.order_sink.order_keys);
-	result.projections = CopySljitNativeRegionExpressions(input.projections);
-	return result;
-}
-
-unique_ptr<SljitNativeRegionPlan> SljitNativeRegionPlan::Copy() const {
-	auto result = make_uniq<SljitNativeRegionPlan>();
-	result->source_execution = source_execution;
-	result->uses_scan_filters = uses_scan_filters;
-	result->source_output_types = source_output_types;
-	result->source_distinct_counts = source_distinct_counts;
-	result->source_distinct_reserve_counts = source_distinct_reserve_counts;
-	result->source_min_values = source_min_values;
-	result->source_max_values = source_max_values;
-	result->source_not_null = source_not_null;
-	result->scan_filters.reserve(scan_filters.size());
-	for (auto &scan_filter : scan_filters) {
-		SljitNativeScanFilterPlan scan_filter_copy;
-		scan_filter_copy.filter_index = scan_filter.filter_index;
-		scan_filter_copy.input_type = scan_filter.input_type;
-		scan_filter_copy.input_not_null = scan_filter.input_not_null;
-		scan_filter_copy.filter = scan_filter.filter.Copy();
-		result->scan_filters.push_back(std::move(scan_filter_copy));
-	}
-	result->ops.reserve(ops.size());
-	for (auto &op : ops) {
-		result->ops.push_back(CopySljitNativeRegionOp(op));
-	}
 	return result;
 }
 

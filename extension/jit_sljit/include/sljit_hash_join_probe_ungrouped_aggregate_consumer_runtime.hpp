@@ -268,7 +268,7 @@ static bool SljitTryExecuteHashJoinDirectUngroupedAggregateConsumer(
 	    selected ? "regular_probe.all_valid.selected.single_key.no_chain.direct_ungrouped_aggregate_consumer"
 	             : "regular_probe.all_valid.flat.single_key.no_chain.direct_ungrouped_aggregate_consumer",
 	    probe_start);
-	RecordSljitRegionMaterializationElisionPath(runtime, aggregate_op.kind,
+	RecordSljitRegionMaterializationElision(runtime, aggregate_op.kind,
 	                                            "join_output_probe_consumer_ungrouped_aggregate", matched_count);
 	const char *source_path = "join_output_probe_consumer_ungrouped_aggregate.source_none";
 	if (plan.primitive_kind != AggregatePrimitiveUpdateKind::COUNT_STAR) {

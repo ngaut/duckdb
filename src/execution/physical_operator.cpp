@@ -7,6 +7,7 @@
 #include "duckdb/common/tree_renderer.hpp"
 #include "duckdb/main/settings.hpp"
 #include "duckdb/execution/execution_context.hpp"
+#include "duckdb/execution/execution_region_kernel.hpp"
 #include "duckdb/execution/operator/set/physical_recursive_cte.hpp"
 #include "duckdb/execution/physical_plan_generator.hpp"
 #include "duckdb/main/client_context.hpp"

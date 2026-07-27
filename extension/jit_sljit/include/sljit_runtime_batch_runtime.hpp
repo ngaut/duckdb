@@ -38,8 +38,7 @@ static bool SljitSourceVectorKnownAllValid(Vector &source) {
 	}
 }
 
-static bool SljitVectorCanFastAppendFixedAllValid(Vector &target, Vector &source, idx_t append_count,
-                                                  idx_t new_count) {
+static bool SljitVectorCanFastAppendFixedAllValid(Vector &target, Vector &source, idx_t append_count, idx_t new_count) {
 	if (target.GetType() != source.GetType()) {
 		return false;
 	}
@@ -126,7 +125,7 @@ static bool SljitTryFastAppendFixedAllValid(DataChunk &target, DataChunk &source
 	}
 	for (idx_t col_idx = 0; col_idx < target.ColumnCount(); col_idx++) {
 		SljitFastAppendFixedAllValidVector(target.data[col_idx], source.data[col_idx], target_count, append_count,
-		                                    new_count);
+		                                   new_count);
 	}
 	target.CheckCardinality(new_count);
 	return true;

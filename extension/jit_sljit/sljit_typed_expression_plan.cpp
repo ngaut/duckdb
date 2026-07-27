@@ -109,8 +109,7 @@ static bool SljitTypedExpressionTreeDateYearSupported(const ExecutionExpressionI
 	return node.kind == ExecutionExpressionIRKind::INTRINSIC &&
 	       node.intrinsic == ExecutionExpressionIntrinsicKind::DATE_YEAR &&
 	       node.return_type.id() == LogicalTypeId::BIGINT && node.physical_type == PhysicalType::INT64 &&
-	       node.children.size() == 1 && node.children[0] &&
-	       node.children[0]->return_type.id() == LogicalTypeId::DATE &&
+	       node.children.size() == 1 && node.children[0] && node.children[0]->return_type.id() == LogicalTypeId::DATE &&
 	       node.children[0]->physical_type == PhysicalType::INT32 &&
 	       SljitTypedExpressionTreeIsSupported(*node.children[0]);
 }
@@ -125,9 +124,8 @@ static bool SljitTypedExpressionTreeIntegralCompressSupported(const ExecutionExp
 	auto &source = *node.children[0];
 	auto &minimum = *node.children[1];
 	return source.return_type.IsIntegral() && SljitTypedExpressionTreeIsIntegerNode(source) &&
-	       SljitTypedExpressionTreeIsSupported(source) &&
-	       minimum.kind == ExecutionExpressionIRKind::CONSTANT && !minimum.constant.IsNull() &&
-	       SljitTypedExpressionTreeSameIntegerKind(source, minimum);
+	       SljitTypedExpressionTreeIsSupported(source) && minimum.kind == ExecutionExpressionIRKind::CONSTANT &&
+	       !minimum.constant.IsNull() && SljitTypedExpressionTreeSameIntegerKind(source, minimum);
 }
 
 static bool SljitTypedExpressionTreeCastExceptionBehaviorIsSafe(const ExecutionExpressionIR &node) {
@@ -317,8 +315,7 @@ bool SljitTypedExpressionTreeFastPathSupported(const ExecutionExpressionIR &node
 		if (node.intrinsic == ExecutionExpressionIntrinsicKind::INTEGRAL_COMPRESS) {
 			return node.children.size() == 2 && node.children[0] && node.children[1] &&
 			       node.children[1]->kind == ExecutionExpressionIRKind::CONSTANT &&
-			       !node.children[1]->constant.IsNull() &&
-			       SljitTypedExpressionTreeFastPathSupported(*node.children[0]);
+			       !node.children[1]->constant.IsNull() && SljitTypedExpressionTreeFastPathSupported(*node.children[0]);
 		}
 		return false;
 	}

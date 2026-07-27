@@ -45,7 +45,7 @@ static SinkResultType SljitExecuteNativeFilteredAggregateUpdate(ExecutionRegionR
 	                                             op.aggregate_update.payload_descriptors, payload_lanes, input,
 	                                             input.size(), payload_scratch);
 	RecordSljitRegionStageRuntimePath(runtime, op_idx, op.kind, "filtered_primitive_update", aggregate_stage_start);
-	RecordSljitRegionMaterializationElisionProof(runtime, op.kind, "filtered_primitive_update", input.size());
+	RecordSljitRegionMaterializationElision(runtime, op.kind, "filtered_primitive_update", input.size());
 	return SinkResultType::NEED_MORE_INPUT;
 }
 

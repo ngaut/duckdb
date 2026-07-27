@@ -45,7 +45,10 @@ static idx_t SljitSelectHashJoinProbeNonNullKeys(const ExecutionHashJoinProbeBin
 	}
 	vector<UnifiedVectorFormat> nullable_key_formats;
 	for (idx_t key_idx = 0; key_idx < probe.probe_key_input_indices.size(); key_idx++) {
-		if (probe.hash_table->NullValuesAreEqual(key_idx)) {
+		if (key_idx >= probe.condition_null_values_are_equal.size()) {
+			throw InternalException("SLJIT MARK probe key NULL contract is incomplete");
+		}
+		if (probe.condition_null_values_are_equal[key_idx]) {
 			continue;
 		}
 		const auto input_col = probe.probe_key_input_indices[key_idx];
@@ -85,8 +88,7 @@ static ExecutionOperatorBindResult SljitExecuteMarkProbeNoTrueNonMatches(Executi
 	state.finished = true;
 	state.output_proof.Reset();
 	RecordSljitRegionRuntimePath(runtime, op.kind, "mark_nonmatch_empty_due_to_build_null");
-	RecordSljitRegionRuntimeProof(runtime, op.kind, ExecutionRegionJitRuntimeProof::NO_WORK,
-	                              "mark_nonmatch_empty_due_to_build_null");
+	runtime.RecordJitRuntimeProof(ExecutionRegionJitRuntimeProof::NO_WORK);
 	output.Reset();
 	return ExecutionOperatorBindResult::READY;
 }
@@ -98,7 +100,7 @@ static ExecutionOperatorBindResult SljitExecuteEmptyHashJoinProbe(
     SljitHashJoinProbeOutputContract output_contract = SljitHashJoinProbeOutputContract::MATERIALIZED_OUTPUT) {
 	state.finished = true;
 	RecordSljitRegionRuntimePath(runtime, op.kind, "empty_build_side");
-	RecordSljitRegionRuntimeProof(runtime, op.kind, ExecutionRegionJitRuntimeProof::NO_WORK, "empty_build_side");
+	runtime.RecordJitRuntimeProof(ExecutionRegionJitRuntimeProof::NO_WORK);
 	switch (op.hash_join_probe.plan.output_mode) {
 	case ExecutionHashJoinProbeOutputMode::LEFT_PROBE_AND_BUILD:
 		return SljitMaterializeLeftHashJoinProbeUnmatchedOutput(runtime, op_idx, op, probe, input, output,

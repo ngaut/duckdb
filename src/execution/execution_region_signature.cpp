@@ -29,12 +29,9 @@ static string ExecutionRegionSignatureBool(bool value) {
 }
 
 static string BuildExecutionRegionSignatureStringList(const vector<string> &values) {
-	string result = "[";
-	for (idx_t value_idx = 0; value_idx < values.size(); value_idx++) {
-		if (value_idx > 0) {
-			result += "|";
-		}
-		result += values[value_idx];
+	string result = "[" + std::to_string(values.size()) + ":";
+	for (auto &value : values) {
+		result += std::to_string(value.size()) + ":" + value + ";";
 	}
 	result += "]";
 	return result;

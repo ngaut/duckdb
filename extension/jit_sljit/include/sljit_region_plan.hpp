@@ -148,6 +148,9 @@ struct SljitNativeHashJoinProbePlan {
 	bool mark_build_match_after_residual = false;
 	bool residual_predicate = false;
 	bool perfect_hash_probe = false;
+	//! Query-local proof identity binds through this stable executable-op slot.
+	//! The shared executable artifact never owns the identity itself.
+	idx_t exact_source_filter_binding = DConstants::INVALID_INDEX;
 	shared_ptr<ExecutionRuntimeFilterIdentity> exact_source_filter_identity;
 	idx_t found_match_offset = 0;
 	idx_t pointer_offset = 0;
@@ -157,7 +160,6 @@ struct SljitNativeHashJoinProbePlan {
 	vector<bool> residual_source_not_null;
 	SljitNativeRegionExpressionPlan residual_filter;
 	ExecutionRegionOperatorInfo operator_info;
-	string ir;
 
 	SljitNativeHashJoinProbePlan Copy(bool copy_ir = true) const;
 };
@@ -165,7 +167,6 @@ struct SljitNativeHashJoinProbePlan {
 struct SljitNativeHashJoinBuildPlan {
 	ExecutionRegionSinkInfo sink_info;
 	vector<LogicalType> input_types;
-	string ir;
 };
 
 struct SljitNativeNestedLoopJoinProbeConditionPlan {
@@ -173,7 +174,6 @@ struct SljitNativeNestedLoopJoinProbeConditionPlan {
 	LogicalType type;
 	ExecutionRegionComparisonType comparison_type = ExecutionRegionComparisonType::INVALID;
 	SljitNativeNestedLoopJoinValueKind value_kind = SljitNativeNestedLoopJoinValueKind::INT64;
-	string ir;
 };
 
 struct SljitNativeNestedLoopJoinProbePlan {
@@ -183,7 +183,6 @@ struct SljitNativeNestedLoopJoinProbePlan {
 	vector<LogicalType> condition_types;
 	ExecutionRegionJoinType join_type = ExecutionRegionJoinType::INVALID;
 	ExecutionRegionOperatorInfo operator_info;
-	string ir;
 };
 
 struct SljitNativeNestedLoopJoinBuildPlan {
@@ -191,19 +190,16 @@ struct SljitNativeNestedLoopJoinBuildPlan {
 	vector<SljitNativeRegionExpressionPlan> rhs_conditions;
 	vector<LogicalType> input_types;
 	vector<LogicalType> condition_types;
-	string ir;
 };
 
 struct SljitNativeAppendSinkPlan {
 	ExecutionRegionSinkInfo sink_info;
 	vector<LogicalType> input_types;
-	string ir;
 };
 
 struct SljitNativeDelimJoinSinkPlan {
 	ExecutionRegionSinkInfo sink_info;
 	vector<LogicalType> input_types;
-	string ir;
 };
 
 struct SljitNativeOrderSinkPlan {
@@ -211,7 +207,6 @@ struct SljitNativeOrderSinkPlan {
 	vector<SljitNativeRegionExpressionPlan> order_keys;
 	vector<LogicalType> input_types;
 	vector<LogicalType> key_types;
-	string ir;
 };
 
 struct SljitAggregateGroupReservePlan {
@@ -305,25 +300,33 @@ struct SljitNativeRegionPlan {
 	vector<Value> source_max_values;
 	vector<bool> source_not_null;
 
-	const vector<LogicalType> &OutputTypes() const {
-		D_ASSERT(!ops.empty());
-		return ops.back().output_types;
-	}
-
 	bool UsesSourceContract() const {
 		return source_execution == ExecutionRegionSourceExecutionKind::SOURCE_CONTRACT;
 	}
-
-	unique_ptr<SljitNativeRegionPlan> Copy() const;
 };
 
 struct SljitRegionBackendPlan : public ExecutionRegionBackendPlan {
+	string ArtifactCacheKey() const override {
+		if (artifact_semantic_key.empty()) {
+			return string();
+		}
+		string result = "sljit-cache-v1";
+		result += ";semantic=" + std::to_string(artifact_semantic_key.size()) + ":" + artifact_semantic_key;
+		result += ";binding=" + std::to_string(artifact_binding_key.size()) + ":" + artifact_binding_key;
+		return result;
+	}
+
 	unique_ptr<SljitNativeRegionPlan> native_region;
 	string error;
+	string artifact_semantic_key;
+	string artifact_binding_key;
 };
 
 string DescribeNativeRegion(const SljitNativeRegionPlan &region, const string &mode);
 string DescribeNativeRegionShape(const SljitNativeRegionPlan &region);
+string BuildSljitRegionArtifactSemanticKey(const ExecutionRegionCandidate &candidate,
+                                           const SljitNativeRegionPlan &region);
+string BuildSljitRegionArtifactBindingKey(const SljitNativeRegionPlan &region);
 ExecutionRegionLoweringPlan BuildSljitRegionPlan(const ExecutionRegionIR &region_ir,
                                                  const ExecutionRegionCandidate &candidate,
                                                  bool render_diagnostics = false);

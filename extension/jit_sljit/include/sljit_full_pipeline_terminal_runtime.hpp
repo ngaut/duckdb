@@ -37,13 +37,15 @@ struct SljitFullPipelineTerminalRuntimeState {
 template <class EXECUTE_NATIVE_FULL_PIPELINE_FROM>
 class SljitFullPipelineTerminalRuntime {
 public:
-	SljitFullPipelineTerminalRuntime(EXECUTE_NATIVE_FULL_PIPELINE_FROM &execute_native_full_pipeline_from_p,
-	                                 const vector<idx_t> &source_distinct_counts_p,
-	                                 const vector<Value> &source_min_values_p, const vector<Value> &source_max_values_p,
-	                                 SljitFullPipelineTerminalRuntimeState &state_p)
+	SljitFullPipelineTerminalRuntime(
+	    EXECUTE_NATIVE_FULL_PIPELINE_FROM &execute_native_full_pipeline_from_p,
+	    const vector<idx_t> &source_distinct_counts_p, const vector<Value> &source_min_values_p,
+	    const vector<Value> &source_max_values_p,
+	    vector<SljitSharedPerfectHashPredicateClassificationCache> &shared_predicate_classifications_p,
+	    SljitFullPipelineTerminalRuntimeState &state_p)
 	    : source_distinct_counts(source_distinct_counts_p), source_min_values(source_min_values_p),
-	      source_max_values(source_max_values_p), state(state_p),
-	      native_tail_delegation(execute_native_full_pipeline_from_p) {
+	      source_max_values(source_max_values_p), shared_predicate_classifications(shared_predicate_classifications_p),
+	      state(state_p), native_tail_delegation(execute_native_full_pipeline_from_p) {
 	}
 
 	bool Prepare(ExecutionRegionRuntime &runtime, vector<SljitExecutableRegionOp> &ops,
@@ -133,8 +135,12 @@ public:
 	                                const SljitHashJoinProbeSelectionPrimitive &probe_primitive, DataChunk &join_input,
 	                                EXECUTE_HASH_JOIN_PROBE &execute_hash_join_probe) {
 		D_ASSERT(contract.IsBound());
+		if (probe_primitive.hash_join_idx >= shared_predicate_classifications.size()) {
+			throw InternalException("SLJIT shared predicate-classification cache index is out of range");
+		}
 		return state.post_join_projection_aggregate.TryExecuteHashJoinProbeConsumer(
-		    runtime, ops, scratch, contract, probe_primitive, join_input, execute_hash_join_probe,
+		    runtime, ops, scratch, contract, probe_primitive, join_input,
+		    shared_predicate_classifications[probe_primitive.hash_join_idx], execute_hash_join_probe,
 		    contract.probe_input_filter_idx);
 	}
 
@@ -200,6 +206,7 @@ private:
 	const vector<idx_t> &source_distinct_counts;
 	const vector<Value> &source_min_values;
 	const vector<Value> &source_max_values;
+	vector<SljitSharedPerfectHashPredicateClassificationCache> &shared_predicate_classifications;
 	SljitFullPipelineTerminalRuntimeState &state;
 	SljitNativeTailDelegationRuntimeState<EXECUTE_NATIVE_FULL_PIPELINE_FROM> native_tail_delegation;
 };

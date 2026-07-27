@@ -293,7 +293,9 @@ static idx_t EstimateExecutionRegionEqualityFilterRows(idx_t source_cardinality,
 	return MaxValue<idx_t>((source_cardinality + distinct_count - 1) / distinct_count, 1);
 }
 
-static bool TryGetExecutionRegionRuntimeMembershipFilterUniqueCount(const Expression &expr, idx_t &unique_count) {
+static bool TryGetExecutionRegionRuntimeMembershipFilterUniqueCount(const Expression &expr,
+                                                                    optional_ptr<const BaseStatistics> source_stats,
+                                                                    idx_t &unique_count) {
 	auto current = optional_ptr<const Expression>(expr);
 	while (current) {
 		auto unwrapped = TryUnwrapExecutionRegionOptionalFilterExpression(*current);
@@ -328,7 +330,12 @@ static bool TryGetExecutionRegionRuntimeMembershipFilterUniqueCount(const Expres
 				return false;
 			}
 			unique_count = data.filter->DistinctCountUpperBound();
-			return unique_count > 0;
+			if (source_stats && source_stats->GetStatsType() == StatisticsType::NUMERIC_STATS &&
+			    NumericStats::HasMinMax(*source_stats)) {
+				unique_count = data.filter->EstimateDistinctCountInRange(NumericStats::Min(*source_stats),
+				                                                         NumericStats::Max(*source_stats));
+			}
+			return true;
 		}
 	}
 
@@ -336,7 +343,7 @@ static bool TryGetExecutionRegionRuntimeMembershipFilterUniqueCount(const Expres
 	idx_t narrowest_count = 0;
 	ExpressionIterator::EnumerateChildren(*current, [&](const Expression &child) {
 		idx_t child_count;
-		if (!TryGetExecutionRegionRuntimeMembershipFilterUniqueCount(child, child_count)) {
+		if (!TryGetExecutionRegionRuntimeMembershipFilterUniqueCount(child, source_stats, child_count)) {
 			return;
 		}
 		if (!found || child_count < narrowest_count) {
@@ -460,7 +467,8 @@ static void ApplyExecutionRegionFinalizedDynamicFilterEstimate(const PhysicalTab
 			continue;
 		}
 		idx_t allowed_distinct_count;
-		if (TryGetExecutionRegionRuntimeMembershipFilterUniqueCount(*expr_filter.expr, allowed_distinct_count)) {
+		if (TryGetExecutionRegionRuntimeMembershipFilterUniqueCount(*expr_filter.expr, stats.get(),
+		                                                            allowed_distinct_count)) {
 			auto filter_estimate = EstimateExecutionRegionDistinctSubsetRows(
 			    estimated_cardinality, allowed_distinct_count, stats->GetDistinctCount());
 			used_finalized_filter_estimate = used_finalized_filter_estimate || filter_estimate < estimated_cardinality;

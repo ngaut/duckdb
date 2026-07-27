@@ -26,11 +26,9 @@ static inline sljit_label *EmitSljitFlatCountedScalarLoop(struct sljit_compiler 
 }
 
 template <class EMIT_SCALAR_ROW, class EMIT_ADVANCE>
-static inline SljitFlatScalarLoopLabels EmitSljitFlatRemainingScalarLoop(struct sljit_compiler *compiler,
-                                                                         sljit_s32 count_reg,
-                                                                         sljit_sw scalar_data_width,
-                                                                         EMIT_SCALAR_ROW &&emit_scalar_row,
-                                                                         EMIT_ADVANCE &&emit_advance) {
+static inline SljitFlatScalarLoopLabels
+EmitSljitFlatRemainingScalarLoop(struct sljit_compiler *compiler, sljit_s32 count_reg, sljit_sw scalar_data_width,
+                                 EMIT_SCALAR_ROW &&emit_scalar_row, EMIT_ADVANCE &&emit_advance) {
 	auto scalar_loop = sljit_emit_label(compiler);
 	auto done = sljit_emit_cmp(compiler, SLJIT_EQUAL, count_reg, 0, SLJIT_IMM, 0);
 	emit_scalar_row();
@@ -60,19 +58,18 @@ static inline sljit_label *EmitSljitFlatUnrolledScalarLoop(struct sljit_compiler
 	auto repeat = sljit_emit_jump(compiler, SLJIT_JUMP);
 	sljit_set_label(repeat, unrolled_loop);
 
-	auto scalar_labels = EmitSljitFlatRemainingScalarLoop(
-	    compiler, count_reg, data_width, [&]() { emit_row(0); }, emit_advance);
+	auto scalar_labels =
+	    EmitSljitFlatRemainingScalarLoop(compiler, count_reg, data_width, [&]() { emit_row(0); }, emit_advance);
 	sljit_set_label(tail, scalar_labels.loop);
 	return scalar_labels.done;
 }
 
 template <class EMIT_VECTOR_ROW, class EMIT_SCALAR_ROW, class EMIT_ADVANCE>
-static inline sljit_label *EmitSljitFlatSimdThenScalarTailLoop(struct sljit_compiler *compiler, sljit_s32 count_reg,
-                                                               sljit_sw simd_lanes, sljit_sw simd_data_width,
-                                                               sljit_sw scalar_data_width,
-                                                               EMIT_VECTOR_ROW &&emit_vector_row,
-                                                               EMIT_SCALAR_ROW &&emit_scalar_row,
-                                                               EMIT_ADVANCE &&emit_advance) {
+static inline sljit_label *
+EmitSljitFlatSimdThenScalarTailLoop(struct sljit_compiler *compiler, sljit_s32 count_reg, sljit_sw simd_lanes,
+                                    sljit_sw simd_data_width, sljit_sw scalar_data_width,
+                                    EMIT_VECTOR_ROW &&emit_vector_row, EMIT_SCALAR_ROW &&emit_scalar_row,
+                                    EMIT_ADVANCE &&emit_advance) {
 	D_ASSERT(simd_lanes > 1);
 	D_ASSERT(simd_data_width > scalar_data_width);
 

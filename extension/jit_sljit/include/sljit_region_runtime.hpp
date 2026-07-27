@@ -14,12 +14,15 @@
 
 namespace duckdb {
 
-class ClientContext;
 struct SljitFullPipelineRecipePlan;
 
-unique_ptr<ExecutionRegionKernel> CreateSljitNativeRegionKernel(ClientContext &context, string backend_name,
-                                                                SljitExecutableRegion &&region,
-                                                                SljitFullPipelineRecipePlan recipe_plan,
-                                                                ExecutionRegionABI abi);
+shared_ptr<const ExecutionRegionArtifact> CreateSljitNativeRegionArtifact(string backend_name,
+                                                                          SljitExecutableRegion &&region,
+                                                                          SljitFullPipelineRecipePlan recipe_plan,
+                                                                          ExecutionRegionABI abi);
+
+unique_ptr<ExecutionRegionKernel>
+InstantiateSljitNativeRegionArtifact(const shared_ptr<const ExecutionRegionArtifact> &artifact,
+                                     const ExecutionRegionCompilationInput &input);
 
 } // namespace duckdb

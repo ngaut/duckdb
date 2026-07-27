@@ -102,7 +102,7 @@ BuildSljitNativeSignedToUnsignedIntegerCast(SljitNativeSignedIntegerWidth source
 
 		range_too_small = sljit_emit_cmp(compiler, SLJIT_SIG_LESS, SLJIT_R2, 0, SLJIT_IMM, 0);
 		range_too_large = sljit_emit_cmp(compiler, SLJIT_SIG_GREATER, SLJIT_R2, 0, SLJIT_IMM,
-		                                  NumericCast<sljit_sw>(NativeUnsignedIntegerMax(target_width)));
+		                                 NumericCast<sljit_sw>(NativeUnsignedIntegerMax(target_width)));
 		if (try_cast) {
 			invalid_jumps.push_back(range_too_small);
 			invalid_jumps.push_back(range_too_large);
@@ -143,38 +143,36 @@ BuildSljitNativeIntegerCoalesce(SljitNativeSignedIntegerWidth width, SljitNative
 	sljit_emit_enter(compiler, 0, SLJIT_ARGS1V(P), 5, 5, 0);
 	EmitInitSljitNativeVectorLoop(compiler);
 
-	auto done = EmitSljitInvalidResultLoop(
-	    compiler, [&](vector<sljit_jump *> &invalid_jumps, vector<sljit_jump *> &next_jumps) {
-		    EmitLoadLogicalIndex(compiler, SLJIT_R1);
-		    EmitLoadSourceIndex(compiler, offsetof(SljitNativeVectorInput, source_sel), SLJIT_R1, SLJIT_S3);
-		    auto source_is_null =
-		        EmitJumpIfValidityNull(compiler, offsetof(SljitNativeVectorInput, source_validity), SLJIT_S3);
+	auto done = EmitSljitInvalidResultLoop(compiler, [&](vector<sljit_jump *> &invalid_jumps,
+	                                                     vector<sljit_jump *> &next_jumps) {
+		EmitLoadLogicalIndex(compiler, SLJIT_R1);
+		EmitLoadSourceIndex(compiler, offsetof(SljitNativeVectorInput, source_sel), SLJIT_R1, SLJIT_S3);
+		auto source_is_null =
+		    EmitJumpIfValidityNull(compiler, offsetof(SljitNativeVectorInput, source_validity), SLJIT_S3);
 
-		    EmitLoadSljitNativeFixedWidthValue(compiler, offsetof(SljitNativeVectorInput, source_data), SLJIT_S3,
-		                                       load_op, data_scale, SLJIT_R2);
-		    EmitStoreSljitNativeFixedWidthResult(compiler, store_op, data_scale, SLJIT_R2);
-		    next_jumps.push_back(sljit_emit_jump(compiler, SLJIT_JUMP));
+		EmitLoadSljitNativeFixedWidthValue(compiler, offsetof(SljitNativeVectorInput, source_data), SLJIT_S3, load_op,
+		                                   data_scale, SLJIT_R2);
+		EmitStoreSljitNativeFixedWidthResult(compiler, store_op, data_scale, SLJIT_R2);
+		next_jumps.push_back(sljit_emit_jump(compiler, SLJIT_JUMP));
 
-		    sljit_set_label(source_is_null, sljit_emit_label(compiler));
-		    if (rhs_kind == SljitNativeCoalesceRhsKind::CONSTANT) {
-			    if (rhs_constant_is_null) {
-				    invalid_jumps.push_back(sljit_emit_jump(compiler, SLJIT_JUMP));
-			    } else {
-				    sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_R2, 0, SLJIT_MEM1(SLJIT_S0),
-				                   offsetof(SljitNativeVectorInput, constant));
-				    EmitStoreSljitNativeFixedWidthResult(compiler, store_op, data_scale, SLJIT_R2);
-			    }
-		    } else {
-			    EmitLoadSourceIndex(compiler, offsetof(SljitNativeVectorInput, right_source_sel), SLJIT_R1,
-			                        SLJIT_S4);
-			    invalid_jumps.push_back(
-			        EmitJumpIfValidityNull(compiler, offsetof(SljitNativeVectorInput, right_source_validity),
-			                               SLJIT_S4));
-			    EmitLoadSljitNativeFixedWidthValue(compiler, offsetof(SljitNativeVectorInput, right_source_data),
-			                                       SLJIT_S4, load_op, data_scale, SLJIT_R2);
-			    EmitStoreSljitNativeFixedWidthResult(compiler, store_op, data_scale, SLJIT_R2);
-		    }
-	    });
+		sljit_set_label(source_is_null, sljit_emit_label(compiler));
+		if (rhs_kind == SljitNativeCoalesceRhsKind::CONSTANT) {
+			if (rhs_constant_is_null) {
+				invalid_jumps.push_back(sljit_emit_jump(compiler, SLJIT_JUMP));
+			} else {
+				sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_R2, 0, SLJIT_MEM1(SLJIT_S0),
+				               offsetof(SljitNativeVectorInput, constant));
+				EmitStoreSljitNativeFixedWidthResult(compiler, store_op, data_scale, SLJIT_R2);
+			}
+		} else {
+			EmitLoadSourceIndex(compiler, offsetof(SljitNativeVectorInput, right_source_sel), SLJIT_R1, SLJIT_S4);
+			invalid_jumps.push_back(
+			    EmitJumpIfValidityNull(compiler, offsetof(SljitNativeVectorInput, right_source_validity), SLJIT_S4));
+			EmitLoadSljitNativeFixedWidthValue(compiler, offsetof(SljitNativeVectorInput, right_source_data), SLJIT_S4,
+			                                   load_op, data_scale, SLJIT_R2);
+			EmitStoreSljitNativeFixedWidthResult(compiler, store_op, data_scale, SLJIT_R2);
+		}
+	});
 
 	sljit_set_label(done, sljit_emit_label(compiler));
 	sljit_emit_return_void(compiler);

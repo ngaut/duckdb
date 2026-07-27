@@ -93,8 +93,8 @@ static bool SljitTrySliceReferenceProjection(DataChunk &output, DataChunk &input
 	}
 	for (idx_t projection_idx = 0; projection_idx < projection_op.projections.size(); projection_idx++) {
 		idx_t source_index;
-		auto source_found = SljitTryGetSingleSourceReferenceProjectionIndex(projection_op.projections[projection_idx],
-		                                                                    source_index);
+		auto source_found =
+		    SljitTryGetSingleSourceReferenceProjectionIndex(projection_op.projections[projection_idx], source_index);
 		D_ASSERT(source_found);
 		if (selection) {
 			output.data[projection_idx].Slice(input.data[source_index], *selection, count);

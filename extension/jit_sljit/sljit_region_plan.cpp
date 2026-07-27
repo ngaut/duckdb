@@ -522,9 +522,19 @@ ExecutionRegionLoweringPlan BuildSljitRegionPlan(const ExecutionRegionIR &region
 		}
 		if (contract.source_boundary_count == 0 && contract.missing_contract_count == 0) {
 			lowering_plan.SetFullyFused(true);
+			for (idx_t op_idx = 0; op_idx < native_region.ops.size(); op_idx++) {
+				auto &op = native_region.ops[op_idx];
+				if (op.kind == SljitNativeRegionOpKind::HASH_JOIN_PROBE &&
+				    op.hash_join_probe.exact_source_filter_identity) {
+					op.hash_join_probe.exact_source_filter_binding = op_idx;
+				}
+			}
 			auto backend_plan = make_shared_ptr<SljitRegionBackendPlan>();
 			backend_plan->error = std::move(backend_error);
 			backend_plan->native_region = make_uniq<SljitNativeRegionPlan>(std::move(native_region));
+			backend_plan->artifact_semantic_key =
+			    BuildSljitRegionArtifactSemanticKey(candidate, *backend_plan->native_region);
+			backend_plan->artifact_binding_key = BuildSljitRegionArtifactBindingKey(*backend_plan->native_region);
 			lowering_plan.backend_plan = std::move(backend_plan);
 			lowering_plan.SetCompiledExecutionMode(ExecutionRegionExecutionMode::NATIVE);
 		}

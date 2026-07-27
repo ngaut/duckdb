@@ -29,7 +29,7 @@ sljit_s32 SljitRegisterFile::MaxAddressableSavedRegisters(sljit_s32 scratch_coun
 }
 
 bool SljitTargetCapabilities::BackendAvailable() const {
-	return platform_available && registers.SupportsLayout(5, 6);
+	return platform_available && Has64BitMachineWord() && registers.SupportsLayout(5, 6);
 }
 
 bool SljitTargetCapabilities::IsArm64() const {
@@ -122,7 +122,7 @@ const SljitTargetCapabilities &GetSljitTargetCapabilities() {
 }
 
 sljit_s32 SljitSavedRegisterAt(sljit_s32 index) {
-	if (!GetSljitTargetCapabilities().registers.HasAddressableSavedRegisters(index + 1)) {
+	if (index < 0 || !GetSljitTargetCapabilities().registers.HasAddressableSavedRegisters(index + 1)) {
 		return 0;
 	}
 	return SLJIT_S(index);

@@ -201,14 +201,14 @@ SELECT COUNT(*) FROM probe_direct JOIN build_direct ON probe_direct.a = build_di
 ----
 2
 
-# All build values in range: all match
+# An out-of-range build value does not suppress filters for the representable range
 statement ok
 INSERT INTO build_direct VALUES (9999999999);
 
 query II
 EXPLAIN ANALYZE SELECT COUNT(*) FROM probe_direct JOIN build_direct ON probe_direct.a = build_direct.b;
 ----
-analyzed_plan	<!REGEX>:.*Dynamic Filters:.*
+analyzed_plan	<REGEX>:.*Dynamic Filters:.*
 
 query I
 SELECT COUNT(*) FROM probe_direct JOIN build_direct ON probe_direct.a = build_direct.b;

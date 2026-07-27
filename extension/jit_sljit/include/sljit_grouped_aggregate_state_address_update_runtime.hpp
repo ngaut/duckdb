@@ -191,7 +191,7 @@ static bool TryExecuteDirectGroupedStateAddressPayloadUpdate(
 	scratch.RecordDirectNewAggregateUpdateResult(op_idx, updated);
 	RecordSljitRegionStageRuntimePath(runtime, op_idx, op.kind, updated ? stage_name : miss_stage_name, stage_start);
 	if (updated) {
-		RecordSljitRegionMaterializationElisionProof(runtime, op.kind, stage_name, input.size());
+		RecordSljitRegionMaterializationElision(runtime, op.kind, stage_name, input.size());
 	}
 	return updated;
 }
@@ -223,7 +223,7 @@ static bool TryExecuteDirectProjectedGroupedStateAddressPayloadUpdate(
 	scratch.RecordDirectNewAggregateUpdateResult(op_idx, updated);
 	if (updated) {
 		RecordSljitRegionStageRuntime(runtime, op_idx, op.kind, stage_name, stage_start);
-		RecordSljitRegionMaterializationElisionProof(runtime, op.kind, stage_name, payload_input.size());
+		RecordSljitRegionMaterializationElision(runtime, op.kind, stage_name, payload_input.size());
 	} else {
 		RecordSljitRegionStageRuntimePath(runtime, op_idx, op.kind, miss_stage_name, stage_start);
 	}

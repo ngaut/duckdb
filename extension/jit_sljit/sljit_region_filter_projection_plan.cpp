@@ -36,8 +36,8 @@ SljitRegionNodePlan PlanSljitFilterNode(const ExecutionRegionNode &node, string 
 }
 
 static bool TryPlanDirectSljitProjection(const ExecutionRegionNode &node, SljitNativeRegionOpPlan &native_op,
-                                         const vector<LogicalType> &input_types,
-                                         string &error, bool render_diagnostics) {
+                                         const vector<LogicalType> &input_types, string &error,
+                                         bool render_diagnostics) {
 	native_op = SljitNativeRegionOpPlan();
 	native_op.kind = SljitNativeRegionOpKind::PROJECTION;
 	native_op.input_types = input_types;

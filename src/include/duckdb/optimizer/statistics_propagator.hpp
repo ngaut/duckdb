@@ -91,9 +91,6 @@ private:
 	//! Multiply the cardinalities together (i.e. new max cardinality is stats.max * new_stats.max): used for
 	//! joins/cross products
 	void MultiplyCardinalities(unique_ptr<NodeStatistics> &stats, NodeStatistics &new_stats);
-	//! Creates and pushes down a filter based on join statistics
-	void CreateFilterFromJoinStats(unique_ptr<LogicalOperator> &child, unique_ptr<Expression> &expr,
-	                               const BaseStatistics &stats_before, const BaseStatistics &stats_after);
 
 	unique_ptr<BaseStatistics> PropagateExpression(unique_ptr<Expression> &expr);
 	unique_ptr<BaseStatistics> PropagateExpression(Expression &expr, unique_ptr<Expression> &expr_ptr);

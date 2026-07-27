@@ -39,6 +39,7 @@ struct SljitPostJoinProjectionAggregateRuntimeState {
 	    ExecutionRegionRuntime &runtime, vector<SljitExecutableRegionOp> &ops, SljitRegionExecutionScratch &scratch,
 	    const SljitHashJoinDirectAggregateConsumerContract &contract,
 	    const SljitHashJoinProbeSelectionPrimitive &probe_primitive, DataChunk &join_input,
+	    SljitSharedPerfectHashPredicateClassificationCache &shared_predicate_classification,
 	    EXECUTE_HASH_JOIN_PROBE &execute_hash_join_probe, idx_t probe_input_filter_idx = DConstants::INVALID_INDEX) {
 		SljitHashJoinAggregateConsumerResult result;
 		if (!prepared) {
@@ -63,7 +64,7 @@ struct SljitPostJoinProjectionAggregateRuntimeState {
 		result = SljitTryExecuteHashJoinAggregateConsumer(
 		    runtime, runtime.ExecutionOperators(), ops, scratch, probe_primitive, hash_join_op, *strategy_ptr,
 		    join_input, post_join_projection, output_column_map, probe_primitive.output_projection_idx,
-		    probe_input_filter_idx, probe_input_filter_cache, execute_hash_join_probe);
+		    probe_input_filter_idx, probe_input_filter_cache, shared_predicate_classification, execute_hash_join_probe);
 		if (result.status == SljitHashJoinAggregateConsumerStatus::EXECUTED) {
 			processed_output_rows += result.matched_count;
 		}

@@ -880,7 +880,9 @@ static SljitHashJoinAggregateConsumerResult SljitTryExecuteHashJoinAggregateCons
     SljitExecutableRegionOp &hash_join_op, SljitDirectJoinOutputAggregateStrategy &strategy, DataChunk &join_input,
     SljitPostJoinProjectionStrategy &post_join_projection, optional_ptr<const vector<idx_t>> output_column_map,
     idx_t output_projection_idx, idx_t probe_input_filter_idx,
-    SljitHashJoinProbeInputFilterCache &probe_input_filter_cache, EXECUTE_HASH_JOIN_PROBE &execute_hash_join_probe) {
+    SljitHashJoinProbeInputFilterCache &probe_input_filter_cache,
+    SljitSharedPerfectHashPredicateClassificationCache &shared_predicate_classification,
+    EXECUTE_HASH_JOIN_PROBE &execute_hash_join_probe) {
 	SljitHashJoinAggregateConsumerResult result;
 	const auto hash_join_idx = probe_primitive.hash_join_idx;
 	if (hash_join_idx >= ops.size() || strategy.aggregate_idx >= ops.size()) {
@@ -949,6 +951,14 @@ static SljitHashJoinAggregateConsumerResult SljitTryExecuteHashJoinAggregateCons
 		return result;
 	}
 	auto &aggregate_op = ops[strategy.aggregate_idx];
+	auto &exact_source_filter_identity = execute_hash_join_probe.ExactSourceFilterIdentity(hash_join_idx);
+	if (regular_hash_join && exact_source_filter_identity &&
+	    exact_source_filter_identity == probe.table_layout.runtime_filter_identity) {
+		// The source contract has already applied this hash table's exact
+		// membership filter. Let the normal probe path consume that proof and
+		// avoid redundant hash-table lookups before aggregation.
+		return result;
+	}
 	if (regular_hash_join) {
 		auto &layout = probe.table_layout;
 		SljitHashJoinProbeDrainState direct_state;
@@ -967,10 +977,6 @@ static SljitHashJoinAggregateConsumerResult SljitTryExecuteHashJoinAggregateCons
 				return result;
 			}
 		}
-	}
-	if (regular_hash_join && plan.exact_source_filter_identity &&
-	    plan.exact_source_filter_identity == probe.table_layout.runtime_filter_identity) {
-		return result;
 	}
 	SljitPreparedJoinInputComplementarySumUpdate prepared_aggregate;
 	string aggregate_failure;
@@ -1030,9 +1036,8 @@ static SljitHashJoinAggregateConsumerResult SljitTryExecuteHashJoinAggregateCons
 			return SljitTryExecutePerfectHashComplementarySumProbeConsumer(
 			    runtime, strategy, probe_input.data[complementary_plan.join_input_group_column_idx], match_selection,
 			    build_index, prepared_aggregate.group_source, predicate_dictionary_entry, predicate_dictionary,
-			    hash_join_op.hash_join_probe.shared_predicate_classification, complementary_plan.predicate_field,
-			    complementary_plan.classification, join_output.size(), state.output_proof.source_key0_int64_to_int32,
-			    flush_accumulator);
+			    shared_predicate_classification, complementary_plan.predicate_field, complementary_plan.classification,
+			    join_output.size(), state.output_proof.source_key0_int64_to_int32, flush_accumulator);
 		};
 		bool executed;
 		if (state.output_proof.perfect_build_selection_is_key_offset) {
@@ -1059,7 +1064,7 @@ static SljitHashJoinAggregateConsumerResult SljitTryExecuteHashJoinAggregateCons
 		}
 		result.matched_count = join_output.size();
 		runtime.RecordJitRuntimePath("hash_join_probe.perfect_probe.direct_aggregate_consumer", result.matched_count);
-		RecordSljitRegionMaterializationElisionPath(runtime, aggregate_op.kind,
+		RecordSljitRegionMaterializationElision(runtime, aggregate_op.kind,
 		                                            "join_input_perfect_hash_probe_consumer_complementary_sum",
 		                                            result.matched_count);
 		result.status = SljitHashJoinAggregateConsumerStatus::EXECUTED;
@@ -1109,9 +1114,9 @@ static SljitHashJoinAggregateConsumerResult SljitTryExecuteHashJoinAggregateCons
 	                                      "direct_aggregate_consumer"
 	                                    : "regular_probe.all_valid.flat.single_key.no_chain.direct_aggregate_consumer"),
 	    probe_start);
-	RecordSljitRegionMaterializationElisionPath(runtime, aggregate_op.kind,
+	RecordSljitRegionMaterializationElision(runtime, aggregate_op.kind,
 	                                            "join_input_probe_consumer_complementary_sum", result.matched_count);
-	RecordSljitRegionMaterializationElisionPath(runtime, aggregate_op.kind,
+	RecordSljitRegionMaterializationElision(runtime, aggregate_op.kind,
 	                                            "join_input_row_pointer_preaggregated_complementary_sum_update",
 	                                            result.matched_count);
 	result.status = SljitHashJoinAggregateConsumerStatus::EXECUTED;

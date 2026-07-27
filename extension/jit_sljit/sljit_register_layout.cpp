@@ -8,12 +8,6 @@ static SljitNativeVectorRegisterLayout BuildSljitNativeVectorRegisterLayout() {
 	if (!registers.Valid()) {
 		return result;
 	}
-	result.input = SljitSavedRegisterAt(0);
-	result.row_index = SljitSavedRegisterAt(1);
-	result.row_count = SljitSavedRegisterAt(2);
-	result.logical_index = SljitSavedRegisterAt(3);
-	result.source_selection = SljitSavedRegisterAt(4);
-	result.source_data = SljitSavedRegisterAt(5);
 	result.optional_invariant = registers.Allocate();
 	result.saved_register_count = registers.SavedRegisterCount();
 	return result;

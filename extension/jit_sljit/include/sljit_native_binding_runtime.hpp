@@ -91,7 +91,7 @@ SljitBindRecordedNativeOperator(ExecutionRegionRuntime &runtime, ExecutionOperat
                                 SljitRegionExecutionScratch &scratch, idx_t op_idx, SljitExecutableRegionOp &op,
                                 DataChunk &input, const ExecutionRegionOperatorInfo &operator_info,
                                 const char *blocker_prefix, const char *error_prefix,
-	ExecutionOperatorBinding *&binding_out, string &deferred_reason) {
+                                ExecutionOperatorBinding *&binding_out, string &deferred_reason) {
 	auto bind_stage_start = SljitRegionStageStart(runtime);
 	bool bound = false;
 	auto bind_result = SljitBindNativeOperator(native_runtime, scratch, op_idx, op, input, operator_info,

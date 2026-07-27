@@ -89,7 +89,8 @@ static ExecutionRunnerKind ExecutionRegionRunnerFromExecutionMode(ExecutionRegio
 	}
 }
 
-static void SetDetailedExecutionRegionCandidate(ExecutionRegionEvent &event, const ExecutionRegionCandidate &candidate) {
+static void SetDetailedExecutionRegionCandidate(ExecutionRegionEvent &event,
+                                                const ExecutionRegionCandidate &candidate) {
 	event.has_candidate = true;
 	event.candidate_id = candidate.candidate_id;
 	event.candidate_shape = candidate.shape;

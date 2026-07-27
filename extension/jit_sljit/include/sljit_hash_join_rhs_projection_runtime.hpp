@@ -16,8 +16,6 @@
 #include "sljit_projection_executor_runtime.hpp"
 #include "sljit_region_runtime_state.hpp"
 
-#include "duckdb/execution/join_hashtable.hpp"
-
 namespace duckdb {
 
 static bool SljitReferenceProjectionTypesMatch(const LogicalType &source_type, const LogicalType &target_type) {

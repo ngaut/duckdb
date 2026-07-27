@@ -9,6 +9,7 @@
 #include "sljit_backend.hpp"
 #include "sljit_region.hpp"
 #include "sljit_region_plan.hpp"
+#include "sljit_region_runtime.hpp"
 #include "sljit_platform.hpp"
 
 namespace duckdb {
@@ -37,6 +38,12 @@ public:
 
 	ExecutionRegionCompileResult CompileRegion(const ExecutionRegionCompilationInput &input) override {
 		return CompileSljitRegion(Name(), input);
+	}
+
+	unique_ptr<ExecutionRegionKernel>
+	InstantiateRegionArtifact(const shared_ptr<const ExecutionRegionArtifact> &artifact,
+	                          const ExecutionRegionCompilationInput &input) override {
+		return InstantiateSljitNativeRegionArtifact(artifact, input);
 	}
 };
 

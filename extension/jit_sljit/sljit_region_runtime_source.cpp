@@ -242,15 +242,14 @@ bool SljitSourceVectorScratch::PrepareFlatSource(DataChunk &input, idx_t input_i
 	data[source_idx] = source_data;
 	selections[source_idx] = nullptr;
 	auto &source_validity = FlatVector::Validity(source);
-	validity[source_idx] = SljitDirectSourceValidityData(source_validity, nullptr, execute_sel, count,
-	                                                    source_known_not_null);
+	validity[source_idx] =
+	    SljitDirectSourceValidityData(source_validity, nullptr, execute_sel, count, source_known_not_null);
 	return true;
 }
 
 bool SljitSourceVectorScratch::PrepareDictionarySource(DataChunk &input, idx_t input_index, idx_t source_idx,
                                                        const_data_ptr_t source_data, idx_t count,
-                                                       const char *out_of_range_error,
-                                                       bool source_known_not_null,
+                                                       const char *out_of_range_error, bool source_known_not_null,
                                                        const SelectionVector *execute_sel) {
 	if (input_index >= input.ColumnCount()) {
 		throw InternalException(out_of_range_error);
@@ -268,7 +267,7 @@ bool SljitSourceVectorScratch::PrepareDictionarySource(DataChunk &input, idx_t i
 	selections[source_idx] = DictionaryVector::SelVector(source).data();
 	auto &source_validity = FlatVector::Validity(child);
 	validity[source_idx] = SljitDirectSourceValidityData(source_validity, selections[source_idx], execute_sel, count,
-	                                                    source_known_not_null);
+	                                                     source_known_not_null);
 	return true;
 }
 
@@ -302,10 +301,10 @@ void SljitSourceVectorScratch::FinishSource(idx_t source_idx, const SelectionVec
                                             bool source_known_not_null) {
 	CheckSourceIndex(source_idx);
 	selections[source_idx] = SljitNormalizedSourceSelectionData(formats[source_idx]);
-	validity[source_idx] = source_known_not_null
-	                           ? nullptr
-	                           : SljitNormalizedSourceValidityData(formats[source_idx], selections[source_idx],
-	                                                               execute_sel, count);
+	validity[source_idx] =
+	    source_known_not_null
+	        ? nullptr
+	        : SljitNormalizedSourceValidityData(formats[source_idx], selections[source_idx], execute_sel, count);
 }
 
 void SljitSourceVectorScratch::PrepareTypedExpressionSource(DataChunk &input, idx_t input_index, idx_t source_idx,
@@ -335,8 +334,7 @@ void SljitSourceVectorScratch::PrepareTypedExpressionSource(DataChunk &input, id
 void SljitSourceVectorScratch::PrepareIntegerSource(DataChunk &input, idx_t input_index, idx_t source_idx,
                                                     SljitNativeIntegerKind integer_kind,
                                                     const SelectionVector *execute_sel, idx_t count,
-                                                    const char *out_of_range_error,
-                                                    bool source_known_not_null) {
+                                                    const char *out_of_range_error, bool source_known_not_null) {
 	if (input_index < input.ColumnCount() && input.data[input_index].GetVectorType() == VectorType::FLAT_VECTOR &&
 	    PrepareFlatSource(input, input_index, source_idx, FlatVector::GetData(input.data[input_index]), count,
 	                      out_of_range_error, source_known_not_null, execute_sel)) {

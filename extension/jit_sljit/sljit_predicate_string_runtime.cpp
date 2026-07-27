@@ -66,10 +66,10 @@ static idx_t SljitLikeFragmentPairAnchor(const char *data, idx_t length) {
 }
 
 #if defined(__aarch64__)
-static __attribute__((noinline, cold)) idx_t SljitVerifyLikeFragmentPairCandidates(const char *sdata,
-                                                                                   const char *fragment,
-                                                                                   idx_t fragment_length,
-                                                                                   idx_t pair_anchor, idx_t position) {
+static
+    __attribute__((noinline, cold)) idx_t SljitVerifyLikeFragmentPairCandidates(const char *sdata, const char *fragment,
+                                                                                idx_t fragment_length,
+                                                                                idx_t pair_anchor, idx_t position) {
 	for (idx_t lane = 0; lane < 16; lane++) {
 		auto pair_position = position + lane;
 		if (sdata[pair_position] != fragment[pair_anchor] || sdata[pair_position + 1] != fragment[pair_anchor + 1]) {
@@ -84,11 +84,9 @@ static __attribute__((noinline, cold)) idx_t SljitVerifyLikeFragmentPairCandidat
 }
 
 static inline uint8x16_t SljitLikeFragmentPairMatches(const char *sdata, idx_t position, uint8x16_t first_byte,
-	                                                   uint8x16_t second_byte) {
-	auto first_matches =
-	    vceqq_u8(vld1q_u8(reinterpret_cast<const uint8_t *>(sdata + position)), first_byte);
-	auto second_matches =
-	    vceqq_u8(vld1q_u8(reinterpret_cast<const uint8_t *>(sdata + position + 1)), second_byte);
+                                                      uint8x16_t second_byte) {
+	auto first_matches = vceqq_u8(vld1q_u8(reinterpret_cast<const uint8_t *>(sdata + position)), first_byte);
+	auto second_matches = vceqq_u8(vld1q_u8(reinterpret_cast<const uint8_t *>(sdata + position + 1)), second_byte);
 	return vandq_u8(first_matches, second_matches);
 }
 
@@ -116,15 +114,15 @@ static idx_t SljitFindLikeFragmentPairArm64(const char *sdata, idx_t slen, const
 				}
 			}
 			if (vmaxvq_u8(matches1) != 0) {
-				auto fragment_position = SljitVerifyLikeFragmentPairCandidates(sdata, fragment, fragment_length,
-				                                                                pair_anchor, position + 16);
+				auto fragment_position =
+				    SljitVerifyLikeFragmentPairCandidates(sdata, fragment, fragment_length, pair_anchor, position + 16);
 				if (fragment_position != DConstants::INVALID_INDEX) {
 					return fragment_position;
 				}
 			}
 			if (vmaxvq_u8(matches2) != 0) {
-				auto fragment_position = SljitVerifyLikeFragmentPairCandidates(sdata, fragment, fragment_length,
-				                                                                pair_anchor, position + 32);
+				auto fragment_position =
+				    SljitVerifyLikeFragmentPairCandidates(sdata, fragment, fragment_length, pair_anchor, position + 32);
 				if (fragment_position != DConstants::INVALID_INDEX) {
 					return fragment_position;
 				}

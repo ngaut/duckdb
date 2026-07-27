@@ -133,7 +133,6 @@ struct SljitExecutableHashJoinProbe {
 	SljitNativeHashJoinProbePlan plan;
 	SljitExecutableRegularHashJoinProbeCode regular;
 	SljitExecutablePerfectHashJoinProbeCode perfect;
-	SljitSharedPerfectHashPredicateClassificationCache shared_predicate_classification;
 	SljitExecutableRegionExpression residual_filter;
 
 	bool ValidateDeferredCodegen(string &error) const;
@@ -551,29 +550,8 @@ struct SljitExecutableRegion {
 	bool uses_scan_filters = false;
 	vector<LogicalType> source_output_types;
 	vector<idx_t> source_distinct_counts;
-	vector<idx_t> source_distinct_reserve_counts;
 	vector<Value> source_min_values;
 	vector<Value> source_max_values;
-
-	idx_t CodeSize() const {
-		idx_t result = 0;
-		for (auto &op : ops) {
-			result += op.CodeSize();
-		}
-		for (auto &scan_filter : scan_filters) {
-			result += scan_filter.CodeSize();
-		}
-		return result;
-	}
-
-	bool HasExecutableBody() const {
-		for (auto &op : ops) {
-			if (op.HasExecutableBody()) {
-				return true;
-			}
-		}
-		return !scan_filters.empty();
-	}
 };
 
 bool BuildSljitExecutableRegion(const SljitNativeRegionPlan &region, SljitExecutableRegion &executable,

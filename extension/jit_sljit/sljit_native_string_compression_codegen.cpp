@@ -225,8 +225,8 @@ BuildSljitNativeStringCompress(idx_t target_size, SljitNativeVectorFunction &fun
 	sljit_emit_enter(compiler, 0, SLJIT_ARGS1V(P), 5, 6, 0);
 	EmitInitSljitNativeVectorLoop(compiler);
 
-	auto done = EmitSljitSelectedSourceInvalidResultBranchLoop(
-	    compiler, [&](vector<sljit_jump *> &, vector<sljit_jump *> &) {
+	auto done =
+	    EmitSljitSelectedSourceInvalidResultBranchLoop(compiler, [&](vector<sljit_jump *> &, vector<sljit_jump *> &) {
 		    sljit_emit_op1(compiler, SLJIT_MOV_P, SLJIT_S3, 0, SLJIT_MEM1(SLJIT_S0),
 		                   offsetof(SljitNativeVectorInput, source_data));
 		    sljit_emit_op2(compiler, SLJIT_SHL, SLJIT_R4, 0, SLJIT_R1, 0, SLJIT_IMM, STRING_T_SHIFT);
@@ -267,8 +267,8 @@ BuildSljitNativeStringDecompress(idx_t source_size, SljitNativeVectorFunction &f
 	EmitInitSljitNativeVectorLoop(compiler);
 
 	sljit_jump *helper_error = nullptr;
-	auto done = EmitSljitSelectedSourceInvalidResultBranchLoop(
-	    compiler, [&](vector<sljit_jump *> &, vector<sljit_jump *> &) {
+	auto done =
+	    EmitSljitSelectedSourceInvalidResultBranchLoop(compiler, [&](vector<sljit_jump *> &, vector<sljit_jump *> &) {
 		    sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_MEM1(SLJIT_S0),
 		                   offsetof(SljitNativeVectorInput, active_source_index), SLJIT_R1, 0);
 		    sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_MEM1(SLJIT_S0),

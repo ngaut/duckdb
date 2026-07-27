@@ -96,18 +96,7 @@ SljitRegionNodePlan PlanSljitNestedLoopJoinProbeOperatorNode(const ExecutionRegi
 	condition_plan.type = condition.type;
 	condition_plan.comparison_type = condition.comparison_type;
 	condition_plan.value_kind = value_kind;
-	if (render_diagnostics) {
-		condition_plan.ir = "condition0<kind=" + string(SljitNestedLoopJoinValueKindToString(value_kind)) +
-		                    ",comparison=" + string(SljitHashJoinComparisonToString(condition.comparison_type)) +
-		                    ",lhs=(" + condition_plan.lhs_condition.ir + ")>";
-	}
 	native_op.nested_loop_join_probe.conditions.push_back(std::move(condition_plan));
-	if (render_diagnostics) {
-		native_op.nested_loop_join_probe.ir =
-		    "nested_loop_join_probe_native<join_type=" + string(ExecutionRegionJoinTypeToString(contract.join_type)) +
-		    ",conditions=1,value_kind=" + string(SljitNestedLoopJoinValueKindToString(value_kind)) +
-		    ",comparison=" + string(SljitHashJoinComparisonToString(condition.comparison_type)) + ">";
-	}
 
 	string reason = "generated native nested loop join probe";
 	if (render_diagnostics) {

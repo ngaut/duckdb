@@ -168,7 +168,8 @@ static bool TryAddDictionaryStringEqualityConstant(const Expression &expr, vecto
 	auto &left = BoundComparisonExpression::Left(comparison);
 	auto &right = BoundComparisonExpression::Right(comparison);
 	optional_ptr<const BoundConstantExpression> constant;
-	if (left.GetExpressionType() == ExpressionType::BOUND_REF && right.GetExpressionType() == ExpressionType::VALUE_CONSTANT) {
+	if (left.GetExpressionType() == ExpressionType::BOUND_REF &&
+	    right.GetExpressionType() == ExpressionType::VALUE_CONSTANT) {
 		constant = &right.Cast<BoundConstantExpression>();
 	} else if (right.GetExpressionType() == ExpressionType::BOUND_REF &&
 	           left.GetExpressionType() == ExpressionType::VALUE_CONSTANT) {
@@ -242,7 +243,8 @@ static bool GetDictionaryStringEqualityConstants(const TableFilter &filter, Tabl
 		state.fast_string_equality_filter_initialized = true;
 		auto &expression_filter = filter.Cast<ExpressionFilter>();
 		state.fast_string_equality_filter_supported =
-		    TryCollectDictionaryStringEqualityConstants(*expression_filter.expr, state.fast_string_equality_constants) &&
+		    TryCollectDictionaryStringEqualityConstants(*expression_filter.expr,
+		                                                state.fast_string_equality_constants) &&
 		    !state.fast_string_equality_constants.empty();
 		if (!state.fast_string_equality_filter_supported) {
 			state.fast_string_equality_constants.clear();

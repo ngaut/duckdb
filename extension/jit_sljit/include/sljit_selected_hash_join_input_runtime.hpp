@@ -11,6 +11,7 @@
 #include "sljit_hash_join_projection_source_runtime.hpp"
 #include "sljit_native_binding_runtime.hpp"
 #include "sljit_region_runtime_state.hpp"
+#include "sljit_region_runtime_trace.hpp"
 #include "sljit_runtime_batch_view.hpp"
 
 namespace duckdb {
@@ -40,7 +41,7 @@ static bool SljitTryPrepareSelectedHashJoinProjectionInput(
     ExecutionRegionRuntime &runtime, SljitRegionExecutionScratch &scratch, vector<SljitExecutableRegionOp> &ops,
     idx_t projection_idx, SljitExecutableRegionOp &semantic_projection, const SljitRuntimeBatchView &input,
     SljitDataChunkBatch &selected_hash_join_input, DataChunk *&input_chunk,
-    unique_ptr<SljitExecutableRegionOp> &mapped_projection, optional_ptr<SljitExecutableRegionOp> &projection_op) {
+    optional_ptr<SljitExecutableRegionOp> &projection_op) {
 	SljitRuntimeHashJoinSelection selected;
 	if (!input.TryGetHashJoinSelection(selected)) {
 		return false;
@@ -56,18 +57,31 @@ static bool SljitTryPrepareSelectedHashJoinProjectionInput(
 
 	projection_op = &semantic_projection;
 	if (selected.output_column_map) {
-		string blocker;
-		mapped_projection = make_uniq<SljitExecutableRegionOp>();
-		if (!SljitTryBuildHashJoinMappedProjection(*selected.output_column_map, *source_binding, semantic_projection,
-		                                           *mapped_projection,
-		                                           optional_ptr<string>(&blocker))) {
-			if (blocker.empty()) {
-				blocker = "mapped_projection";
+		auto &cache = scratch.SelectedProjectionCache(projection_idx);
+		const auto cache_matches = cache.mapped_projection && cache.semantic_projection == &semantic_projection &&
+		                           cache.source_map == *selected.output_column_map &&
+		                           cache.input_types == source_binding->output_types;
+		if (!cache_matches) {
+			string blocker;
+			auto mapped_projection = make_uniq<SljitExecutableRegionOp>();
+			if (!SljitTryBuildHashJoinMappedProjection(*selected.output_column_map, *source_binding,
+			                                           semantic_projection, *mapped_projection,
+			                                           optional_ptr<string>(&blocker))) {
+				if (blocker.empty()) {
+					blocker = "mapped_projection";
+				}
+				throw InternalException("SLJIT selected projection input could not map projection sources: %s",
+				                        blocker.c_str());
 			}
-			throw InternalException("SLJIT selected projection input could not map projection sources: %s",
-			                        blocker.c_str());
+			cache.semantic_projection = &semantic_projection;
+			cache.source_map = *selected.output_column_map;
+			cache.input_types = source_binding->output_types;
+			cache.mapped_projection = std::move(mapped_projection);
+			RecordSljitRegionRuntimePath(runtime, semantic_projection.kind, "selected_projection_cache_build");
+		} else {
+			RecordSljitRegionRuntimePath(runtime, semantic_projection.kind, "selected_projection_cache_hit");
 		}
-		projection_op = mapped_projection.get();
+		projection_op = cache.mapped_projection.get();
 	}
 
 	vector<uint8_t> referenced_columns;
@@ -177,8 +191,8 @@ private:
 
 	bool TryPrepareInput(idx_t target_hash_join_idx, const SljitRuntimeBatchView &selected_input,
 	                     bool include_lhs_output_columns, SljitDataChunkBatch &input_batch, const char *context,
-	                     const char *view_stage, DataChunk *&join_input,
-	                     ExecutionHashJoinProbeBinding *&target_binding, string &deferred_reason) {
+	                     const char *view_stage, DataChunk *&join_input, ExecutionHashJoinProbeBinding *&target_binding,
+	                     string &deferred_reason) {
 		join_input = nullptr;
 		target_binding = nullptr;
 		auto source_binding = TryGetSelectedSourceBinding(selected_input, target_hash_join_idx, context);

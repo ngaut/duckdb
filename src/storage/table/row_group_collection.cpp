@@ -698,8 +698,7 @@ bool RowGroupCollection::TryPrepareDirectAppend(TableAppendState &state, idx_t c
 		auto finalize_start = RowGroupCollectionDirectAppendProfileStart(profile);
 		current_row_group.FinalizeAppend(state.row_group_append_state);
 		if (profile) {
-			profile->prepare_finalize_row_group_time_us +=
-			    RowGroupCollectionDirectAppendProfileElapsed(finalize_start);
+			profile->prepare_finalize_row_group_time_us += RowGroupCollectionDirectAppendProfileElapsed(finalize_start);
 		}
 
 		auto next_start = state.row_group_start + state.row_group_append_state.offset_in_row_group;
@@ -720,8 +719,8 @@ bool RowGroupCollection::TryPrepareDirectAppend(TableAppendState &state, idx_t c
 	}
 	vector<data_ptr_t> targets;
 	auto previous_allocation_size = current_row_group.GetAllocationSize();
-	auto result = current_row_group.TryPrepareDirectAppend(state.row_group_append_state, types, append_count, targets,
-	                                                      profile);
+	auto result =
+	    current_row_group.TryPrepareDirectAppend(state.row_group_append_state, types, append_count, targets, profile);
 	allocation_size += current_row_group.GetAllocationSize() - previous_allocation_size;
 	if (result) {
 		DirectAppendSlice slice;

@@ -328,7 +328,7 @@ unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativeTypedExpressionTreeSelect(
 		sljit_set_label(use_slow_loop, sljit_emit_label(compiler));
 	}
 	// Flat batches that MAY contain NULLs run the packed loop with a lane-expanded
-	// validity mask ANDed in (AND-only predicates: a row with a NULL referenced
+	// validity mask ANDead in (AND-only predicates: a row with a NULL referenced
 	// source cannot pass); the scalar tail pre-checks sources per row.
 	struct sljit_jump *nullable_simd_done = nullptr;
 	if (fast_path.fast_path_supported && simd_plan.supported && simd_plan.nullable_capable) {

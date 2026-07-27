@@ -294,7 +294,7 @@ static bool SljitFlushJoinInputComplementarySumAccumulator(ExecutionRegionRuntim
 	                                             *strategy.pending_preaggregated_groups, false)) {
 		return false;
 	}
-	RecordSljitRegionMaterializationElisionPath(
+	RecordSljitRegionMaterializationElision(
 	    runtime, aggregate_op.kind, "join_input_pipeline_complementary_sum_accumulator_flush", represented_row_count);
 	accumulator->Reset();
 	return true;

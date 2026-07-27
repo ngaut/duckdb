@@ -90,8 +90,7 @@ static bool TryPreaggregateStringCompressedCountStarGroupsTemplated(Vector &sour
 					return false;
 				}
 			}
-			MaterializePreaggregatedCountStarGroups(compressed_keys, counts, group_count, compact_groups,
-			                                        count_deltas);
+			MaterializePreaggregatedCountStarGroups(compressed_keys, counts, group_count, compact_groups, count_deltas);
 			return true;
 		}
 	}
@@ -114,9 +113,8 @@ static bool TryPreaggregateStringCompressedCountStarGroupsTemplated(Vector &sour
 		if (can_have_null && !source_validity.RowIsValid(source_idx)) {
 			return false;
 		}
-		if (!AccumulatePreaggregatedStringCompressedCountStarKey(source_data[source_idx], lookup_keys,
-		                                                         lookup_signatures, compressed_keys, counts,
-		                                                         group_count)) {
+		if (!AccumulatePreaggregatedStringCompressedCountStarKey(
+		        source_data[source_idx], lookup_keys, lookup_signatures, compressed_keys, counts, group_count)) {
 			return false;
 		}
 	}
@@ -129,11 +127,9 @@ static bool TryGetStringCompressedCountStarProjectionSource(const SljitExecutabl
                                                             DataChunk &input, DataChunk &compact_groups, idx_t count,
                                                             idx_t &source_index, PhysicalType &compressed_type) {
 	SljitStringCompressedCountStarProjectionInput projection_input;
-	if (count == 0 ||
-	    !SljitTryReadStringCompressedCountStarProjectionInput(projection_op, projection_input) ||
+	if (count == 0 || !SljitTryReadStringCompressedCountStarProjectionInput(projection_op, projection_input) ||
 	    !SljitStringCompressedCountStarProjectionInputMatchesChunk(projection_input, input) ||
-	    compact_groups.ColumnCount() != 1 ||
-	    compact_groups.data[0].GetType() != projection_op.output_types[0]) {
+	    compact_groups.ColumnCount() != 1 || compact_groups.data[0].GetType() != projection_op.output_types[0]) {
 		return false;
 	}
 	source_index = projection_input.source_index;

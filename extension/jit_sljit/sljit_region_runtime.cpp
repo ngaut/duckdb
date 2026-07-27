@@ -57,8 +57,7 @@ public:
 
 	SljitRegionExecutionScratch scratch;
 	// Mutable terminal strategies and staged fallible group transforms stay below
-	// this execution-local boundary. Immutable perfect-hash predicate classifiers
-	// belong to their executable probe and are retained atomically by each task.
+	// this execution-local boundary.
 	SljitFullPipelineTerminalRuntimeState terminal;
 };
 
@@ -144,41 +143,64 @@ static bool SljitTryDeferNotReadyNativeJoinProbesAtEntry(ExecutionRegionRuntime 
 	return false;
 }
 
-class SljitNativeRegionKernel : public ExecutionRegionKernel {
-public:
-	SljitNativeRegionKernel(string backend_name_p, vector<SljitExecutableRegionOp> ops_p,
-	                        vector<SljitExecutableScanFilter> scan_filters_p, bool uses_scan_filters_p,
-	                        vector<LogicalType> source_output_types_p, vector<idx_t> source_distinct_counts_p,
-	                        vector<Value> source_min_values_p, vector<Value> source_max_values_p,
-	                        SljitFullPipelineRecipePlan recipe_plan_p, ExecutionRegionABI abi_p)
+//! Backend-owned artifact shared by database-local plans with identical
+//! semantic and compile-affecting binding keys. Eager code handles and
+//! concurrency-safe lazy specialization cells live here; counters and adaptive
+//! policy remain on each kernel wrapper.
+struct SljitNativeRegionArtifact : public ExecutionRegionArtifact {
+	SljitNativeRegionArtifact(string backend_name_p, vector<SljitExecutableRegionOp> ops_p,
+	                          vector<SljitExecutableScanFilter> scan_filters_p, bool uses_scan_filters_p,
+	                          vector<idx_t> source_distinct_counts_p, vector<Value> source_min_values_p,
+	                          vector<Value> source_max_values_p, SljitFullPipelineRecipePlan recipe_plan_p,
+	                          ExecutionRegionABI abi_p)
 	    : backend_name(std::move(backend_name_p)), ops(std::move(ops_p)), scan_filters(std::move(scan_filters_p)),
-	      uses_scan_filters(uses_scan_filters_p), source_output_types(std::move(source_output_types_p)),
-	      source_distinct_counts(std::move(source_distinct_counts_p)),
+	      uses_scan_filters(uses_scan_filters_p), source_distinct_counts(std::move(source_distinct_counts_p)),
 	      source_min_values(std::move(source_min_values_p)), source_max_values(std::move(source_max_values_p)),
 	      full_pipeline_recipe_plan(std::move(recipe_plan_p)), abi(abi_p) {
 	}
 
+	string backend_name;
+	//! Lazy code cells are synchronized and publish monotonically. The semantic
+	//! operation graph itself is immutable after artifact construction.
+	mutable vector<SljitExecutableRegionOp> ops;
+	vector<SljitExecutableScanFilter> scan_filters;
+	bool uses_scan_filters;
+	vector<idx_t> source_distinct_counts;
+	vector<Value> source_min_values;
+	vector<Value> source_max_values;
+	SljitFullPipelineRecipePlan full_pipeline_recipe_plan;
+	ExecutionRegionABI abi;
+};
+
+class SljitNativeRegionKernel : public ExecutionRegionKernel {
+public:
+	SljitNativeRegionKernel(shared_ptr<const SljitNativeRegionArtifact> artifact_p,
+	                        vector<shared_ptr<ExecutionRuntimeFilterIdentity>> exact_source_filter_bindings_p)
+	    : artifact(std::move(artifact_p)), exact_source_filter_bindings(std::move(exact_source_filter_bindings_p)),
+	      shared_predicate_classifications(artifact->ops.size()) {
+	}
+
 	const string &BackendName() const override {
-		return backend_name;
+		return artifact->backend_name;
 	}
 
 	idx_t CodeSize() const override {
 		idx_t result = 0;
-		for (auto &op : ops) {
+		for (auto &op : artifact->ops) {
 			result += op.CodeSize();
 		}
-		for (auto &scan_filter : scan_filters) {
+		for (auto &scan_filter : artifact->scan_filters) {
 			result += scan_filter.CodeSize();
 		}
 		return result;
 	}
 
 	bool HasTableFilterKernels() const override {
-		return !scan_filters.empty();
+		return !artifact->scan_filters.empty();
 	}
 
 	bool HasTableFilterKernel(idx_t filter_index) const override {
-		for (auto &scan_filter : scan_filters) {
+		for (auto &scan_filter : artifact->scan_filters) {
 			if (scan_filter.filter_index == filter_index) {
 				return true;
 			}
@@ -187,7 +209,7 @@ public:
 	}
 
 	unique_ptr<TableFilterKernelState> CreateTableFilterKernelState(idx_t filter_index) const override {
-		for (auto &scan_filter : scan_filters) {
+		for (auto &scan_filter : artifact->scan_filters) {
 			if (scan_filter.filter_index == filter_index) {
 				return make_uniq<SljitTableFilterKernelState>(scan_filter, executed_filter_rows);
 			}
@@ -196,24 +218,24 @@ public:
 	}
 
 	bool HasExecutableBody() const override {
-		for (auto &op : ops) {
+		for (auto &op : artifact->ops) {
 			if (op.HasExecutableBody()) {
 				return true;
 			}
 		}
-		return uses_scan_filters && full_pipeline_recipe_plan.HasRecipe() &&
-		       full_pipeline_recipe_plan.Recipe().has_scan_filter_executable_body;
+		return artifact->uses_scan_filters && artifact->full_pipeline_recipe_plan.HasRecipe() &&
+		       artifact->full_pipeline_recipe_plan.Recipe().has_scan_filter_executable_body;
 	}
 
 	unique_ptr<ExecutionRegionLocalState> CreateLocalState(Allocator &allocator) const override {
-		return make_uniq<SljitNativeRegionLocalState>(allocator, ops);
+		return make_uniq<SljitNativeRegionLocalState>(allocator, artifact->ops);
 	}
 
 	bool SupportsRunnerHandoff() const override {
-		if (!full_pipeline_recipe_plan.HasRecipe()) {
+		if (!artifact->full_pipeline_recipe_plan.HasRecipe()) {
 			return true;
 		}
-		auto &sequence = full_pipeline_recipe_plan.Recipe().primitive_sequence;
+		auto &sequence = artifact->full_pipeline_recipe_plan.Recipe().primitive_sequence;
 		for (idx_t step_idx = 0; step_idx < sequence.Count(); step_idx++) {
 			if (!SljitFullPipelinePrimitiveStepSupportsRunnerHandoff(sequence.Step(step_idx))) {
 				return false;
@@ -223,7 +245,12 @@ public:
 	}
 
 	bool CanExecuteFullPipeline() const override {
-		return ExecutionRegionABIIsFullPipeline(abi);
+		return ExecutionRegionABIIsFullPipeline(artifact->abi);
+	}
+
+	const shared_ptr<ExecutionRuntimeFilterIdentity> &ExactSourceFilterIdentity(idx_t binding) const {
+		static const shared_ptr<ExecutionRuntimeFilterIdentity> no_identity;
+		return binding < exact_source_filter_bindings.size() ? exact_source_filter_bindings[binding] : no_identity;
 	}
 
 	void RecordLazyHashJoinProbeCodegen(ExecutionRegionRuntime &runtime, const SljitLazyCodegenTiming &timing,
@@ -304,48 +331,70 @@ public:
 	}
 
 	bool TryExecuteFullPipeline(ExecutionRegionRuntime &runtime, ExecutionRegionResult &result) override {
-		if (!ExecutionRegionABIIsFullPipeline(abi)) {
+		if (!ExecutionRegionABIIsFullPipeline(artifact->abi)) {
 			throw InternalException("SLJIT full pipeline kernel entered without full-pipeline ABI");
 		}
-		if (runtime.CanDeferAtEntry() && SljitTryDeferNotReadyNativeJoinProbesAtEntry(runtime, ops, result)) {
+		if (runtime.CanDeferAtEntry() && SljitTryDeferNotReadyNativeJoinProbesAtEntry(runtime, artifact->ops, result)) {
 			return true;
 		}
 		auto &local_state = runtime.LocalState().Cast<SljitNativeRegionLocalState>();
 		auto executed = SljitTryExecuteFullPipelineRecipe(
-		    *this, runtime, result, ops, source_distinct_counts, source_min_values, source_max_values,
-		    full_pipeline_recipe_plan, local_state.scratch, local_state.terminal);
+		    *this, runtime, result, artifact->ops, artifact->source_distinct_counts, artifact->source_min_values,
+		    artifact->source_max_values, artifact->full_pipeline_recipe_plan, shared_predicate_classifications,
+		    local_state.scratch, local_state.terminal);
 		auto filter_rows = executed_filter_rows.exchange(0, std::memory_order_relaxed);
 		if (filter_rows > 0) {
 			runtime.RecordJitRuntimePath("source.storage_scan.compiled_filter", filter_rows);
 			runtime.RecordJitRuntimeProof(ExecutionRegionJitRuntimeProof::GENERATED_BACKEND_WORK, filter_rows);
-			runtime.RecordJitRuntimeProofDetail("source.storage_scan.compiled_filter", filter_rows);
 		}
 		return executed;
 	}
 
 private:
-	string backend_name;
-	vector<SljitExecutableRegionOp> ops;
-	vector<SljitExecutableScanFilter> scan_filters;
-	bool uses_scan_filters;
-	vector<LogicalType> source_output_types;
-	vector<idx_t> source_distinct_counts;
-	vector<Value> source_min_values;
-	vector<Value> source_max_values;
-	SljitFullPipelineRecipePlan full_pipeline_recipe_plan;
-	ExecutionRegionABI abi;
+	shared_ptr<const SljitNativeRegionArtifact> artifact;
+	vector<shared_ptr<ExecutionRuntimeFilterIdentity>> exact_source_filter_bindings;
+	vector<SljitSharedPerfectHashPredicateClassificationCache> shared_predicate_classifications;
 	mutable atomic<idx_t> executed_filter_rows {0};
 };
 
-unique_ptr<ExecutionRegionKernel> CreateSljitNativeRegionKernel(ClientContext &context, string backend_name,
-                                                                SljitExecutableRegion &&region,
-                                                                SljitFullPipelineRecipePlan recipe_plan,
-                                                                ExecutionRegionABI abi) {
-	(void)context;
-	return make_uniq<SljitNativeRegionKernel>(
+shared_ptr<const ExecutionRegionArtifact> CreateSljitNativeRegionArtifact(string backend_name,
+                                                                          SljitExecutableRegion &&region,
+                                                                          SljitFullPipelineRecipePlan recipe_plan,
+                                                                          ExecutionRegionABI abi) {
+	return make_shared_ptr<SljitNativeRegionArtifact>(
 	    std::move(backend_name), std::move(region.ops), std::move(region.scan_filters), region.uses_scan_filters,
-	    std::move(region.source_output_types), std::move(region.source_distinct_counts),
-	    std::move(region.source_min_values), std::move(region.source_max_values), std::move(recipe_plan), abi);
+	    std::move(region.source_distinct_counts), std::move(region.source_min_values),
+	    std::move(region.source_max_values), std::move(recipe_plan), abi);
+}
+
+unique_ptr<ExecutionRegionKernel>
+InstantiateSljitNativeRegionArtifact(const shared_ptr<const ExecutionRegionArtifact> &artifact,
+                                     const ExecutionRegionCompilationInput &input) {
+	auto sljit_artifact_ptr = dynamic_cast<const SljitNativeRegionArtifact *>(artifact.get());
+	if (!sljit_artifact_ptr || !input.lowering_plan || !input.lowering_plan->backend_plan) {
+		return nullptr;
+	}
+	shared_ptr<const SljitNativeRegionArtifact> sljit_artifact(artifact, sljit_artifact_ptr);
+	auto sljit_plan = dynamic_cast<const SljitRegionBackendPlan *>(input.lowering_plan->backend_plan.get());
+	if (!sljit_plan || !sljit_plan->native_region) {
+		return nullptr;
+	}
+	vector<shared_ptr<ExecutionRuntimeFilterIdentity>> exact_source_filter_bindings(sljit_artifact->ops.size());
+	for (auto &current_op : sljit_plan->native_region->ops) {
+		if (current_op.kind != SljitNativeRegionOpKind::HASH_JOIN_PROBE) {
+			continue;
+		}
+		auto binding = current_op.hash_join_probe.exact_source_filter_binding;
+		if (binding == DConstants::INVALID_INDEX) {
+			continue;
+		}
+		if (binding >= exact_source_filter_bindings.size() ||
+		    !current_op.hash_join_probe.exact_source_filter_identity) {
+			return nullptr;
+		}
+		exact_source_filter_bindings[binding] = current_op.hash_join_probe.exact_source_filter_identity;
+	}
+	return make_uniq<SljitNativeRegionKernel>(std::move(sljit_artifact), std::move(exact_source_filter_bindings));
 }
 
 } // namespace duckdb

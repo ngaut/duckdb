@@ -111,9 +111,9 @@ private:
 		    SljitTryBuildDistinctKeyReferenceView(projected, *prepared.source_chunk, *prepared.projection_op)) {
 			auto &aggregate_op = ops[primitive.aggregate_idx];
 			auto &native_runtime = runtime.ExecutionOperators();
-			auto sink_result = SljitExecuteDistinctKeyAggregateUpdate(
-			    runtime, native_runtime, scratch, primitive.aggregate_idx, aggregate_op, projected, prepared.selection,
-			    prepared.count);
+			auto sink_result =
+			    SljitExecuteDistinctKeyAggregateUpdate(runtime, native_runtime, scratch, primitive.aggregate_idx,
+			                                           aggregate_op, projected, prepared.selection, prepared.count);
 			RecordSljitRegionRuntimePath(runtime, aggregate_op.kind, "projected_distinct_key_reference_sink",
 			                             prepared.count);
 			sink_result = native_runtime.RecordSinkResult(prepared.count, sink_result);

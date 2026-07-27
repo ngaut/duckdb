@@ -57,6 +57,10 @@ struct SljitRecordedHashJoinProbeCallback {
 	ExecutionOperatorRuntime &native_runtime;
 	optional_ptr<SljitRegionExecutionScratch> fixed_scratch;
 
+	const shared_ptr<ExecutionRuntimeFilterIdentity> &ExactSourceFilterIdentity(idx_t hash_join_idx) const {
+		return owner.ExactSourceFilterIdentity(hash_join_idx);
+	}
+
 	ExecutionOperatorBindResult Execute(SljitRegionExecutionScratch &scratch, idx_t hash_join_idx,
 	                                    SljitExecutableRegionOp &hash_join_op, DataChunk &input, DataChunk &output,
 	                                    SljitHashJoinProbeDrainState &state, string &deferred_reason,

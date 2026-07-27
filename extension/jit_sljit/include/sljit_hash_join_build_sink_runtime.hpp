@@ -46,8 +46,8 @@ struct SljitHashJoinBuildSinkRuntimeState {
 		                                                    scratch.HashJoinBuildSelection(sink_idx));
 		auto sink_result = native_runtime.RecordSinkResult(*sink_input, build_result);
 		if (primitive.direct_source_ingress) {
-			RecordSljitRegionRuntimeProof(runtime, sink_op.kind, ExecutionRegionJitRuntimeProof::GENERATED_BACKEND_WORK,
-			                              "direct_source_ingress", sink_input->size());
+			RecordSljitRegionRuntimePath(runtime, sink_op.kind, "direct_source_ingress", sink_input->size());
+			runtime.RecordJitRuntimeProof(ExecutionRegionJitRuntimeProof::GENERATED_BACKEND_WORK, sink_input->size());
 		}
 		if (SljitNativeSinkResultStopsExecution(runtime, sink_result, result)) {
 			return true;

@@ -124,7 +124,8 @@ inline bool DirectAppendSupportsType(const LogicalType &type) {
 	return DirectAppendSupportsFixedSizeType(type) || DirectAppendSupportsSourceAppendType(type);
 }
 
-inline bool DirectAppendSupportsTypes(const vector<LogicalType> &source_types, const vector<LogicalType> &target_types) {
+inline bool DirectAppendSupportsTypes(const vector<LogicalType> &source_types,
+                                      const vector<LogicalType> &target_types) {
 	if (source_types.size() != target_types.size()) {
 		return false;
 	}

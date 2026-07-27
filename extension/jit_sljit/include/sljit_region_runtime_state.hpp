@@ -29,6 +29,13 @@
 
 namespace duckdb {
 
+struct SljitSelectedProjectionCache {
+	const SljitExecutableRegionOp *semantic_projection = nullptr;
+	vector<idx_t> source_map;
+	vector<LogicalType> input_types;
+	unique_ptr<SljitExecutableRegionOp> mapped_projection;
+};
+
 struct SljitRegionExecutionScratch {
 	SljitRegionExecutionScratch(Allocator &allocator, const vector<SljitExecutableRegionOp> &ops) {
 		const auto op_count = ops.size();
@@ -41,6 +48,7 @@ struct SljitRegionExecutionScratch {
 		aggregate_scratch.Resize(op_count);
 		projection_adapter_scratch.resize(op_count);
 		expression_adapter_scratch.resize(op_count);
+		selected_projection_caches.resize(op_count);
 		for (idx_t op_idx = 0; op_idx < op_count; op_idx++) {
 			auto &op = ops[op_idx];
 			InitializeExpressionAdapterScratch(op_idx, op);
@@ -146,6 +154,11 @@ struct SljitRegionExecutionScratch {
 		return SljitCheckedScratchSlot(projection_adapter_scratch, op_idx, "SLJIT projection has no adapter scratch");
 	}
 
+	SljitSelectedProjectionCache &SelectedProjectionCache(idx_t op_idx) {
+		return SljitCheckedScratchSlot(selected_projection_caches, op_idx,
+		                               "SLJIT selected projection has no cache slot");
+	}
+
 	SelectionVector &FilterSelection(idx_t op_idx) {
 		return SljitCheckedScratchPtr(filter_selections, op_idx,
 		                              "SLJIT full pipeline transform has no selection scratch");
@@ -244,6 +257,7 @@ struct SljitRegionExecutionScratch {
 	SljitAggregateUpdateScratchState aggregate_scratch;
 	vector<SljitProjectionAdapterScratch> projection_adapter_scratch;
 	vector<vector<SljitExpressionAdapterScratch>> expression_adapter_scratch;
+	vector<SljitSelectedProjectionCache> selected_projection_caches;
 	DirectAppendReservation direct_append_reservation;
 
 	void InitializeOperatorScratch(Allocator &allocator, idx_t op_idx, const SljitExecutableRegionOp &op) {

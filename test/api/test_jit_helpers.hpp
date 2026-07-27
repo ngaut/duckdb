@@ -452,13 +452,19 @@ struct NoExtraJitEventCheck {
 template <class MATCH, class CHECK>
 static void RequireJitEvent(ExecutionRegionManager &manager, MATCH match, CHECK check) {
 	bool found = false;
+	string observed;
 	for (auto &event : manager.GetEvents()) {
+		observed += "\nbackend=" + event.backend_name + ";phase=" + EventPhase(event) +
+		            ";status=" + EventStatus(event) + ";reason=" + event.reason +
+		            ";runtime_paths=" + EventJitRuntimePathCounts(event) +
+		            ";runtime_proofs=" + EventJitRuntimeProofCounts(event) + ";ir=" + event.ir;
 		if (!match(event)) {
 			continue;
 		}
 		found = true;
 		check(event);
 	}
+	INFO(observed);
 	REQUIRE(found);
 }
 

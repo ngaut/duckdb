@@ -32,11 +32,12 @@ public:
 	    const SljitFullPipelineRecipe &recipe_p, EXECUTE_NATIVE_FULL_PIPELINE_FROM &execute_native_full_pipeline_from_p,
 	    EXECUTE_HASH_JOIN_PROBE &execute_hash_join_probe_p, const vector<idx_t> &source_distinct_counts_p,
 	    const vector<Value> &source_min_values_p, const vector<Value> &source_max_values_p,
+	    vector<SljitSharedPerfectHashPredicateClassificationCache> &shared_predicate_classifications_p,
 	    SljitRegionExecutionScratch &scratch_p, SljitFullPipelineTerminalRuntimeState &terminal_state_p)
 	    : runtime(runtime_p), result(result_p), ops(ops_p), recipe(recipe_p),
 	      execute_hash_join_probe(execute_hash_join_probe_p),
 	      terminal_runtime(execute_native_full_pipeline_from_p, source_distinct_counts_p, source_min_values_p,
-	                       source_max_values_p, terminal_state_p),
+	                       source_max_values_p, shared_predicate_classifications_p, terminal_state_p),
 	      scratch(scratch_p), selected_hash_join_inputs(runtime, ops, scratch), source_fetch(runtime, result, recipe),
 	      generated_filter(runtime, ops, scratch), hash_join_materialize(runtime, result, ops, scratch),
 	      hash_join_selection(runtime, result, ops, scratch, selected_hash_join_inputs),
@@ -319,11 +320,13 @@ static bool SljitTryExecuteFullPipelinePrimitiveSequenceBatched(
     const SljitFullPipelineRecipe &recipe, EXECUTE_NATIVE_FULL_PIPELINE_FROM &&execute_native_full_pipeline_from,
     EXECUTE_HASH_JOIN_PROBE &&execute_hash_join_probe, const vector<idx_t> &source_distinct_counts,
     const vector<Value> &source_min_values, const vector<Value> &source_max_values,
+    vector<SljitSharedPerfectHashPredicateClassificationCache> &shared_predicate_classifications,
     SljitRegionExecutionScratch &scratch, SljitFullPipelineTerminalRuntimeState &terminal_state) {
 	auto executor =
 	    SljitFullPipelinePrimitiveSequenceBatchExecutor<EXECUTE_NATIVE_FULL_PIPELINE_FROM, EXECUTE_HASH_JOIN_PROBE>(
 	        runtime, result, ops, recipe, execute_native_full_pipeline_from, execute_hash_join_probe,
-	        source_distinct_counts, source_min_values, source_max_values, scratch, terminal_state);
+	        source_distinct_counts, source_min_values, source_max_values, shared_predicate_classifications, scratch,
+	        terminal_state);
 	return executor.Execute();
 }
 

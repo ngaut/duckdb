@@ -37,6 +37,7 @@
 #include "duckdb/storage/buffer_manager.hpp"
 #include "duckdb/planner/table_filter_state.hpp"
 
+#include <cmath>
 #include <limits>
 
 namespace duckdb {
@@ -65,6 +66,7 @@ public:
 	void Initialize(ClientContext &context, U min_p, U span_p, idx_t number_of_rows, bool allow_adaptive_exact_bitmap) {
 		min = min_p;
 		span = span_p;
+		build_row_count = number_of_rows;
 		shift = 0;
 
 		const auto exact_span_budget =
@@ -258,6 +260,28 @@ public:
 		return occupied_buckets * bucket_width;
 	}
 
+	idx_t EstimateDistinctCountInRange(U lower_bound, U upper_bound) const {
+		if (!initialized || lower_bound > upper_bound) {
+			return 0;
+		}
+		const auto bitmap_max = min + span;
+		const auto adjusted_lower = MaxValue<U>(lower_bound, min);
+		const auto adjusted_upper = MinValue<U>(upper_bound, bitmap_max);
+		if (adjusted_lower > adjusted_upper ||
+		    LookupRange(adjusted_lower, adjusted_upper) == FilterPropagateResult::FILTER_ALWAYS_FALSE) {
+			return 0;
+		}
+		const auto distinct_upper_bound = MinValue(DistinctCountUpperBound(), build_row_count);
+		if (distinct_upper_bound == 0) {
+			return 0;
+		}
+		const auto total_width = static_cast<long double>(span) + 1;
+		const auto overlap_width = static_cast<long double>(adjusted_upper - adjusted_lower) + 1;
+		const auto estimate =
+		    static_cast<idx_t>(std::ceil(static_cast<long double>(distinct_upper_bound) * overlap_width / total_width));
+		return MinValue(distinct_upper_bound, MaxValue<idx_t>(estimate, 1));
+	}
+
 private:
 	static constexpr idx_t MAX_PREFIX_LENGTH = 20;
 	static constexpr idx_t CAP_BITS = 1ULL << MAX_PREFIX_LENGTH;
@@ -271,6 +295,7 @@ private:
 	U span;
 	idx_t shift;
 	idx_t word_count;
+	idx_t build_row_count;
 	AllocatedData buf_;
 	uint64_t *bitmap;
 };
@@ -371,6 +396,21 @@ public:
 
 	idx_t DistinctCountUpperBound() const override {
 		return bitmap.DistinctCountUpperBound();
+	}
+
+	idx_t EstimateDistinctCountInRange(const Value &lower_bound, const Value &upper_bound) const override {
+		if (lower_bound.IsNull() || upper_bound.IsNull() || lower_bound.type().InternalType() != GetTypeId<T>() ||
+		    upper_bound.type().InternalType() != GetTypeId<T>()) {
+			return DistinctCountUpperBound();
+		}
+		const auto lower_comparable = NumericConverter<T>::Convert(lower_bound.GetValueUnsafe<T>());
+		const auto upper_comparable = NumericConverter<T>::Convert(upper_bound.GetValueUnsafe<T>());
+		// Signed domains that cross zero wrap in their unsigned comparable
+		// representation. Keep the conservative global estimate for that case.
+		if (lower_comparable > upper_comparable) {
+			return DistinctCountUpperBound();
+		}
+		return bitmap.EstimateDistinctCountInRange(lower_comparable, upper_comparable);
 	}
 
 	FilterPropagateResult LookupRange(const Value &lower_bound, const Value &upper_bound) const override {

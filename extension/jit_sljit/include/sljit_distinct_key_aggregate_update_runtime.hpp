@@ -42,10 +42,8 @@ static SinkResultType SljitExecuteDistinctKeyAggregateUpdate(ExecutionRegionRunt
 	    });
 	if (used_fast_insert) {
 		RecordSljitRegionRuntimePath(runtime, op.kind, "distinct_key_fast_insert", count);
-		RecordSljitRegionRuntimeProof(runtime, op.kind, ExecutionRegionJitRuntimeProof::GENERATED_STAGE_WORK,
-		                              "distinct_key_fast_insert");
-		RecordSljitRegionRuntimeProof(runtime, op.kind, ExecutionRegionJitRuntimeProof::GENERATED_BACKEND_WORK,
-		                              "distinct_key_fast_insert");
+		runtime.RecordJitRuntimeProof(ExecutionRegionJitRuntimeProof::GENERATED_STAGE_WORK, count);
+		runtime.RecordJitRuntimeProof(ExecutionRegionJitRuntimeProof::GENERATED_BACKEND_WORK, count);
 		return SinkResultType::NEED_MORE_INPUT;
 	}
 	if (execute_sel != nullptr || count != input.size()) {

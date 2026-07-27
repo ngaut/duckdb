@@ -2,6 +2,8 @@
 
 #include "sljit_codegen_util.hpp"
 #include "sljit_platform.hpp"
+#include "sljit_region_plan.hpp"
+#include "sljit_region_plan_internal.hpp"
 #include "sljit_register_layout.hpp"
 #include "sljit_typed_expression_simd_codegen.hpp"
 
@@ -131,6 +133,14 @@ public:
 	string Description() const override {
 		return "unit test concurrent registration backend";
 	}
+};
+
+class UnitTestExecutionRegionArtifact : public ExecutionRegionArtifact {
+public:
+	explicit UnitTestExecutionRegionArtifact(idx_t value_p) : value(value_p) {
+	}
+
+	idx_t value;
 };
 
 static string MakeRepeatedIntegerExpression(const string &column_name, idx_t terms) {
@@ -327,6 +337,7 @@ TEST_CASE("SLJIT backend requires an addressable native-vector register ABI", "[
 	     saved_index++) {
 		REQUIRE(SljitSavedRegisterAt(saved_index) != 0);
 	}
+	REQUIRE(SljitSavedRegisterAt(-1) == 0);
 	REQUIRE(SljitSavedRegisterAt(capabilities.registers.addressable_saved_register_count) == 0);
 
 	if (capabilities.BackendAvailable()) {
@@ -384,7 +395,7 @@ TEST_CASE("SLJIT target capability policy covers representative register ABIs", 
 	    {"x86-64 SysV", target(SljitTargetArchitecture::X86_64, 13, 6, 6, 8), 6, true, true, true},
 	    {"x86-64 Windows", target(SljitTargetArchitecture::X86_64, 13, 8, 8, 8), 8, true, true, true},
 	    {"ARM64", target(SljitTargetArchitecture::ARM_64, 26, 10, 10, 8), 10, true, true, true},
-	    {"ARM32", target(SljitTargetArchitecture::ARM_32, 12, 8, 8, 4), 7, true, true, false},
+	    {"ARM32", target(SljitTargetArchitecture::ARM_32, 12, 8, 8, 4), 7, true, false, false},
 	    {"S390X constrained enter frame", target(SljitTargetArchitecture::S390X, 12, 8, 8, 8), 7, true, true, false},
 	    {"unavailable x86-64 backend", unavailable, 6, true, false, false},
 	}};
@@ -482,6 +493,155 @@ TEST_CASE("JIT adaptive runner compares normalized leg cost", "[api][jit]") {
 	resumed_state.RecordCompiledLeg(100, 50);
 	REQUIRE(resumed_state.ResolveVerdictAtBoundary(50, 50, 1000) == ExecutionRegionAdaptiveAbVerdict::COMMIT_COMPILED);
 	REQUIRE(resumed_state.compiled_leg_rows.load() == 100);
+}
+
+TEST_CASE("Execution region artifact cache publishes one build to concurrent executions", "[api][jit]") {
+	ExecutionRegionArtifactCache cache;
+	std::mutex gate_lock;
+	std::condition_variable gate_condition;
+	bool build_entered = false;
+	std::atomic<idx_t> build_count {0};
+	std::atomic<bool> first_builder {false};
+	std::atomic<bool> second_hit {false};
+	shared_ptr<const ExecutionRegionCachedArtifact> second;
+	shared_ptr<const UnitTestExecutionRegionArtifact> published_artifact;
+
+	std::thread first_thread([&] {
+		auto reservation = cache.LookupOrReserve("shared-artifact");
+		first_builder.store(reservation.IsBuilder());
+		build_count.fetch_add(1);
+		{
+			lock_guard<std::mutex> guard(gate_lock);
+			build_entered = true;
+			gate_condition.notify_all();
+		}
+		while (cache.WaitingCount("shared-artifact") != 1) {
+			std::this_thread::yield();
+		}
+		auto artifact = make_shared_ptr<UnitTestExecutionRegionArtifact>(4096);
+		published_artifact = artifact;
+		auto cached = make_shared_ptr<ExecutionRegionCachedArtifact>();
+		cached->artifact = std::move(artifact);
+		cached->execution_mode = ExecutionRegionExecutionMode::NATIVE;
+		cached->compile_reason = "unit-test-compile";
+		cached->ir = "unit-test-ir";
+		cache.Publish(reservation, std::move(cached));
+	});
+	{
+		std::unique_lock<std::mutex> guard(gate_lock);
+		gate_condition.wait(guard, [&] { return build_entered; });
+	}
+	std::thread second_thread([&] {
+		auto reservation = cache.LookupOrReserve("shared-artifact");
+		second_hit.store(reservation.IsHit());
+		second = reservation.Cached();
+	});
+	first_thread.join();
+	second_thread.join();
+
+	REQUIRE(build_count.load() == 1);
+	REQUIRE(first_builder.load());
+	REQUIRE(second_hit.load());
+	REQUIRE(second);
+	REQUIRE(second->artifact == published_artifact);
+	REQUIRE(second->execution_mode == ExecutionRegionExecutionMode::NATIVE);
+	REQUIRE(second->compile_reason == "unit-test-compile");
+	REQUIRE(second->ir == "unit-test-ir");
+	REQUIRE(cache.ReadyCount() == 1);
+}
+
+TEST_CASE("Execution region artifact cache retries after an aborted build", "[api][jit]") {
+	ExecutionRegionArtifactCache cache;
+	auto failed = cache.LookupOrReserve("retry-after-failure");
+	REQUIRE(failed.IsBuilder());
+	cache.Abort(failed);
+
+	auto retry = cache.LookupOrReserve("retry-after-failure");
+	REQUIRE(retry.IsBuilder());
+	auto cached = make_shared_ptr<ExecutionRegionCachedArtifact>();
+	cached->artifact = make_shared_ptr<UnitTestExecutionRegionArtifact>(2048);
+	cached->execution_mode = ExecutionRegionExecutionMode::NATIVE;
+	cache.Publish(retry, std::move(cached));
+
+	auto recovered = cache.LookupOrReserve("retry-after-failure");
+	REQUIRE(recovered.IsHit());
+	auto artifact = dynamic_cast<const UnitTestExecutionRegionArtifact *>(recovered.Cached()->artifact.get());
+	REQUIRE(artifact);
+	REQUIRE(artifact->value == 2048);
+}
+
+TEST_CASE("Execution region artifact cache eviction preserves active artifact ownership", "[api][jit]") {
+	ExecutionRegionArtifactCache cache(2);
+	auto publish = [&](const string &key, idx_t value) {
+		auto reservation = cache.LookupOrReserve(key);
+		REQUIRE(reservation.IsBuilder());
+		auto cached = make_shared_ptr<ExecutionRegionCachedArtifact>();
+		cached->artifact = make_shared_ptr<UnitTestExecutionRegionArtifact>(value);
+		cached->execution_mode = ExecutionRegionExecutionMode::NATIVE;
+		cache.Publish(reservation, std::move(cached));
+	};
+	publish("one", 1);
+	publish("two", 2);
+	auto active = cache.LookupOrReserve("one").Cached()->artifact;
+	publish("three", 3);
+	REQUIRE(cache.ReadyCount() == 2);
+	auto active_artifact = dynamic_cast<const UnitTestExecutionRegionArtifact *>(active.get());
+	REQUIRE(active_artifact);
+	REQUIRE(active_artifact->value == 1);
+	auto evicted = cache.LookupOrReserve("two");
+	REQUIRE(evicted.IsBuilder());
+	cache.Abort(evicted);
+}
+
+TEST_CASE("SLJIT artifact cache keys include compile-affecting bindings", "[api][jit]") {
+	SljitRegionBackendPlan first;
+	first.artifact_semantic_key = "same-semantic-plan";
+	first.artifact_binding_key = "source-min=0;source-max=10";
+
+	SljitRegionBackendPlan second;
+	second.artifact_semantic_key = first.artifact_semantic_key;
+	second.artifact_binding_key = "source-min=0;source-max=20";
+
+	REQUIRE(first.ArtifactCacheKey() != second.ArtifactCacheKey());
+	second.artifact_binding_key = first.artifact_binding_key;
+	REQUIRE(first.ArtifactCacheKey() == second.ArtifactCacheKey());
+
+	SljitNativeRegionPlan one_delimited_value;
+	one_delimited_value.source_min_values.emplace_back("x|VARCHAR:y");
+	SljitNativeRegionPlan two_plain_values;
+	two_plain_values.source_min_values.emplace_back("x");
+	two_plain_values.source_min_values.emplace_back("y");
+	REQUIRE(BuildSljitRegionArtifactBindingKey(one_delimited_value) !=
+	        BuildSljitRegionArtifactBindingKey(two_plain_values));
+
+	SljitNativeRegionPlan null_value;
+	null_value.source_min_values.emplace_back(LogicalType::VARCHAR);
+	SljitNativeRegionPlan literal_null;
+	literal_null.source_min_values.emplace_back("NULL");
+	REQUIRE(BuildSljitRegionArtifactBindingKey(null_value) != BuildSljitRegionArtifactBindingKey(literal_null));
+
+	SljitNativeRegionExpressionPlan first_double;
+	first_double.kind = SljitNativeRegionExpressionKind::DOUBLE_BINARY_CONSTANT;
+	first_double.double_constant = 1.0000001;
+	auto second_double = first_double.Copy();
+	second_double.double_constant = 1.0000002;
+	REQUIRE(DescribeNativeRegionExpressionSemantic(first_double) !=
+	        DescribeNativeRegionExpressionSemantic(second_double));
+
+	first_double.double_constant = 0.0;
+	second_double.double_constant = -0.0;
+	REQUIRE(DescribeNativeRegionExpressionSemantic(first_double) !=
+	        DescribeNativeRegionExpressionSemantic(second_double));
+
+	SljitNativeRegionExpressionPlan first_predicate;
+	first_predicate.kind = SljitNativeRegionExpressionKind::PREDICATE;
+	first_predicate.predicate = make_uniq<SljitNativePredicate>();
+	first_predicate.predicate->kind = SljitNativePredicateKind::DOUBLE_COMPARE_CONSTANT;
+	first_predicate.predicate->double_constant = 1.0000001;
+	auto second_predicate = first_predicate.Copy();
+	second_predicate.predicate->double_constant = 1.0000002;
+	REQUIRE(DescribeNativeRegionExpressionSemantic(first_predicate) !=
+	        DescribeNativeRegionExpressionSemantic(second_predicate));
 }
 
 TEST_CASE("Execution region manager registers and selects database-local backends", "[api][jit]") {
@@ -658,6 +818,164 @@ TEST_CASE("JIT CBO keeps CPU JIT when GPU transfer cost dominates", "[api][jit]"
 	REQUIRE(profile.selected_runner == ExecutionRunnerKind::COMPILED_VECTORIZED);
 	REQUIRE(profile.gpu.transfer_cost == 1000);
 	REQUIRE(profile.gpu.net_benefit < profile.compiled_vectorized.net_benefit);
+}
+
+TEST_CASE("JIT prepared executions reuse immutable compiled artifacts", "[api][jit]") {
+	DuckDB db;
+	Connection con(db);
+	auto &manager = ExecutionRegionManager::Get(*con.context);
+
+	ConfigureSljitForCoverage(con, false, false, true, 10000);
+	REQUIRE_NO_FAIL(con.Query("SET threads=1"));
+	REQUIRE_NO_FAIL(con.Query("PREPARE jit_artifact_cache AS "
+	                          "SELECT sum(i + 7) FROM range(1000000) tbl(i)"));
+
+	ClearJitTrace(manager, true);
+	auto first = con.Query("EXECUTE jit_artifact_cache");
+	REQUIRE_NO_FAIL(*first);
+	REQUIRE(first->GetValue(0, 0).ToString() == "500006500000");
+	bool found_initial_compile = false;
+	for (auto &event : manager.GetEvents()) {
+		if (!IsCompiledSljitRegionEvent(event) || EventPhase(event) != "compile") {
+			continue;
+		}
+		found_initial_compile = true;
+		REQUIRE_FALSE(StringUtil::Contains(event.reason, "compiled artifact cache hit"));
+		REQUIRE(event.ir.empty());
+		REQUIRE(event.code_size > 0);
+	}
+	REQUIRE(found_initial_compile);
+
+	REQUIRE_NO_FAIL(con.Query("SET jit_dump_ir=true"));
+	ClearJitTrace(manager, true);
+	auto second = con.Query("EXECUTE jit_artifact_cache");
+	REQUIRE_NO_FAIL(*second);
+	REQUIRE(second->GetValue(0, 0).ToString() == first->GetValue(0, 0).ToString());
+	bool found_cached_compile = false;
+	for (auto &event : manager.GetEvents()) {
+		if (!IsCompiledSljitRegionEvent(event) || EventPhase(event) != "compile") {
+			continue;
+		}
+		found_cached_compile = true;
+		REQUIRE(StringUtil::Contains(event.reason, "compiled artifact cache hit"));
+		REQUIRE_FALSE(event.ir.empty());
+		REQUIRE(event.compile_time_us == 0);
+		REQUIRE(event.stage_timings.codegen_time_us == 0);
+		REQUIRE(event.stage_timings.executable_build_time_us == 0);
+		REQUIRE(event.stage_timings.machine_codegen_time_us == 0);
+		REQUIRE(event.code_size > 0);
+	}
+	REQUIRE(found_cached_compile);
+}
+
+TEST_CASE("JIT artifact cache separates refreshed source bindings after DML", "[api][jit]") {
+	DuckDB db;
+	Connection con(db);
+	auto &manager = ExecutionRegionManager::Get(*con.context);
+
+	ConfigureSljitForCoverage(con, false, true, true, 10000);
+	REQUIRE_NO_FAIL(con.Query("SET threads=1"));
+	REQUIRE_NO_FAIL(con.Query("CREATE TEMP TABLE jit_prepared_cast_source(i BIGINT)"));
+	REQUIRE_NO_FAIL(con.Query("INSERT INTO jit_prepared_cast_source SELECT i FROM range(100000) tbl(i)"));
+	REQUIRE_NO_FAIL(con.Query("PREPARE jit_prepared_cast AS "
+	                          "SELECT sum(i::INTEGER) FROM jit_prepared_cast_source"));
+
+	auto first = con.Query("EXECUTE jit_prepared_cast");
+	REQUIRE_NO_FAIL(*first);
+	REQUIRE(first->GetValue(0, 0).GetValue<int64_t>() == 4999950000LL);
+
+	REQUIRE_NO_FAIL(con.Query("INSERT INTO jit_prepared_cast_source VALUES (2147483648)"));
+	ClearJitTrace(manager, true);
+	auto after_insert = con.Query("EXECUTE jit_prepared_cast");
+	REQUIRE_FAIL(after_insert);
+	REQUIRE(StringUtil::Contains(after_insert->GetError(), "out of range"));
+	RequireJitEvent(manager, [](const ExecutionRegionEvent &event) {
+		return IsCompiledSljitRegionEvent(event) && EventPhase(event) == "compile" &&
+		       !StringUtil::Contains(event.reason, "compiled artifact cache hit");
+	});
+}
+
+TEST_CASE("JIT prepared artifact reuse preserves parameter-dependent semantics", "[api][jit]") {
+	DuckDB db;
+	Connection con(db);
+	auto &manager = ExecutionRegionManager::Get(*con.context);
+
+	ConfigureSljitForCoverage(con, false, true, true, 10000);
+	REQUIRE_NO_FAIL(con.Query("SET threads=1"));
+	REQUIRE_NO_FAIL(con.Query("PREPARE jit_parameter_artifact AS "
+	                          "SELECT sum(i + $1) FROM range(100000) tbl(i)"));
+
+	ClearJitTrace(manager, true);
+	auto first = con.Query("EXECUTE jit_parameter_artifact(7)");
+	REQUIRE_NO_FAIL(*first);
+	REQUIRE(first->GetValue(0, 0).ToString() == "5000650000");
+
+	ClearJitTrace(manager, true);
+	auto second = con.Query("EXECUTE jit_parameter_artifact(7)");
+	REQUIRE_NO_FAIL(*second);
+	REQUIRE(second->GetValue(0, 0).ToString() == first->GetValue(0, 0).ToString());
+	RequireJitEvent(manager, [](const ExecutionRegionEvent &event) {
+		return IsCompiledSljitRegionEvent(event) && EventPhase(event) == "compile" &&
+		       StringUtil::Contains(event.reason, "compiled artifact cache hit");
+	});
+
+	ClearJitTrace(manager, true);
+	auto third = con.Query("EXECUTE jit_parameter_artifact(9)");
+	REQUIRE_NO_FAIL(*third);
+	REQUIRE(third->GetValue(0, 0).ToString() == "5000850000");
+	RequireJitEvent(manager, [](const ExecutionRegionEvent &event) {
+		return IsCompiledSljitRegionEvent(event) && EventPhase(event) == "compile" &&
+		       StringUtil::Contains(event.reason, "compiled artifact cache hit");
+	});
+}
+
+TEST_CASE("JIT prepared artifact reuse refreshes exact runtime-filter identity", "[api][jit]") {
+	DuckDB db;
+	Connection con(db);
+	auto &manager = ExecutionRegionManager::Get(*con.context);
+
+	ConfigureSljitForCoverage(con, false, true, true, 10000);
+	REQUIRE_NO_FAIL(con.Query("SET threads=1"));
+	REQUIRE_NO_FAIL(con.Query("CREATE TEMP TABLE jit_prepared_filter_fact AS "
+	                          "SELECT i::BIGINT AS k FROM range(100000) tbl(i)"));
+	REQUIRE_NO_FAIL(con.Query("CREATE TEMP TABLE jit_prepared_filter_dim AS "
+	                          "SELECT i::BIGINT AS k FROM range(1000) tbl(i)"));
+	REQUIRE_NO_FAIL(con.Query("PREPARE jit_prepared_filter AS "
+	                          "SELECT count(*) FROM jit_prepared_filter_fact f "
+	                          "JOIN jit_prepared_filter_dim d USING (k)"));
+
+	auto first = con.Query("EXECUTE jit_prepared_filter");
+	REQUIRE_NO_FAIL(*first);
+	REQUIRE(first->GetValue(0, 0).GetValue<int64_t>() == 1000);
+	auto exact_filter_executed = [](const ExecutionRegionEvent &event) {
+		if (EventPhase(event) != "runtime" || EventStatus(event) != "executed") {
+			return false;
+		}
+		auto paths = EventJitRuntimePathCounts(event);
+		return StringUtil::Contains(paths, "hash_join_probe.regular_probe.exact_source_filter=") ||
+		       StringUtil::Contains(paths, "hash_join_probe.perfect_probe.exact_source_filter=");
+	};
+
+	ClearJitTrace(manager, true);
+	auto second = con.Query("EXECUTE jit_prepared_filter");
+	REQUIRE_NO_FAIL(*second);
+	REQUIRE(second->GetValue(0, 0).GetValue<int64_t>() == 1000);
+	RequireJitEvent(manager, [](const ExecutionRegionEvent &event) {
+		return IsCompiledSljitRegionEvent(event) && EventPhase(event) == "compile" &&
+		       StringUtil::Contains(event.reason, "compiled artifact cache hit");
+	});
+	RequireJitEvent(manager, exact_filter_executed);
+
+	REQUIRE_NO_FAIL(con.Query("INSERT INTO jit_prepared_filter_dim VALUES (50000)"));
+	ClearJitTrace(manager, true);
+	auto after_insert = con.Query("EXECUTE jit_prepared_filter");
+	REQUIRE_NO_FAIL(*after_insert);
+	REQUIRE(after_insert->GetValue(0, 0).GetValue<int64_t>() == 1001);
+	RequireJitEvent(manager, [](const ExecutionRegionEvent &event) {
+		return IsCompiledSljitRegionEvent(event) && EventPhase(event) == "compile" &&
+		       StringUtil::Contains(event.reason, "compiled artifact cache hit");
+	});
+	RequireJitEvent(manager, exact_filter_executed);
 }
 
 #if defined(__APPLE__)
@@ -2883,6 +3201,7 @@ TEST_CASE("SLJIT native projection handles many FLOAT expressions sharing source
 		           CandidateHasStructure(event, 0, 1, ExecutionRegionSinkKind::MATERIALIZATION);
 	    },
 	    [](const ExecutionRegionEvent &event) {
+		    INFO(event.ir);
 		    RequireGeneratedMachineCodeRegion(event);
 		    REQUIRE(event.candidate_traits.arithmetic_projection_count == 8);
 	    });
@@ -2981,6 +3300,7 @@ TEST_CASE("SLJIT native integer projection elides proven overflow checks", "[api
 		           StringUtil::Contains(event.ir, "overflow_check=false");
 	    },
 	    [](const ExecutionRegionEvent &event) {
+		    INFO(event.ir);
 		    RequireGeneratedMachineCodeRegion(event);
 		    REQUIRE(StringUtil::Contains(event.reason, "region-lowering:native=3"));
 		    REQUIRE(StringUtil::Contains(event.reason, "backend_native="));
@@ -3964,7 +4284,7 @@ TEST_CASE("JIT Bloom dynamic filters preserve bitpacked scan semantics", "[api][
 	RequireJitEvent(manager, [](const ExecutionRegionEvent &event) {
 		return EventPhase(event) == "runtime" && EventStatus(event) == "executed" &&
 		       StringUtil::Contains(EventJitRuntimePathCounts(event),
-		                            "hash_join_probe.perfect_probe.exact_source_filter=");
+		                            "hash_join_probe.regular_probe.exact_source_filter=");
 	});
 	ClearJitTrace(manager, true);
 	auto null_equal_result = con.Query(null_equal_query);

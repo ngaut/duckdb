@@ -136,6 +136,42 @@ to rediscover a route. A recipe that was accepted but is internally
 inconsistent raises an internal error. Unsupported semantics are rejected
 before publication and remain native.
 
+## Compiled artifact lifetime
+
+The database-local execution-region manager owns reusable backend artifacts.
+The backend plan supplies a complete artifact key covering semantic structure
+and every compile-affecting binding fact; an empty key explicitly opts out.
+Equivalent prepared and ad-hoc plans can therefore share code without tying
+artifact lifetime to mutable physical operators, while refreshed source facts
+select a distinct artifact. Core performs single-flight publication, so
+concurrent executions of the same artifact identity produce one artifact
+rather than racing duplicate compilers.
+
+The bounded cache stores only a backend-owned immutable semantic artifact,
+plus the execution mode and diagnostics produced by that compilation. Backend
+compilation returns the artifact, not an execution-bound kernel. Core sends
+both a fresh artifact and a cache hit through the same backend instantiation
+path outside the cache lock. Diagnostic switches such as detailed tracing, IR
+dumping, and verification do not fragment the artifact key; backend settings
+or binding facts that change generated behavior do.
+
+Publication is transactional. Core validates the compile result, instantiates
+the execution-bound kernel, validates its executable body and ABI, and only
+then publishes the artifact. A failed build or first instantiation aborts the
+in-flight reservation. Failure to instantiate a cache hit is a backend
+contract error: the complete cache key must guarantee that every equivalent
+plan can bind the shared artifact, so core does not hide an incomplete key with
+an eviction-and-retry path. Sleeping single-flight callers retain the exact
+publication even if unrelated insertions immediately evict it from the ready
+LRU. Active kernels retain shared ownership after eviction.
+
+Compiled code, immutable descriptors, and concurrency-safe lazy
+specialization cells may be shared. Adaptive-runner state, telemetry, runtime
+counters, operator bindings, dynamic-filter identities, hash-table
+dictionaries, and all other query data live in each instantiated kernel or its
+local states. A backend that cannot make this split remains correct and
+uncached. Changing this contract advances the loadable execution-region ABI.
+
 The primitive sequence starts with `SourceFetch` and ends with exactly one of:
 
 - `PostJoinProjectionAggregateUpdate`;
@@ -215,6 +251,13 @@ Backend helpers depend only on this exported ABI and common validity-mask
 types. They do not include `join_hashtable.hpp` or name private
 `JoinHashTable` layout types.
 
+The probe binding may carry an opaque core-owned hash-table handle, but a
+backend never dereferences it. Core copies immutable probe facts such as
+build-side filtered-NULL state and per-condition NULL-equality semantics into
+the binding. Storage-dependent RHS gathering is an exported core operation.
+This keeps backend code independent of private hash-table layout and lets core
+change that layout without creating a second hidden ABI.
+
 Consumers must state their physical requirement. A generic fixed-column loader
 may dispatch both storage kinds. Row-layout projection, compressed-row string,
 row-pointer grouping, and complementary row-field consumers explicitly reject
@@ -282,9 +325,10 @@ fixtures.
 
 ## Measured runner selection
 
-`jit_adaptive_ab` (default on, band-gated via `jit_adaptive_ab_band_basis_points`=1000 so only
-thin-margin selections are measured; TPC-H reaches zero verdicts and pays nothing) measures one native and one compiled row group
-per compiled-selected pipeline and commits to the measured winner; the planner
+`jit_adaptive_ab` (default on, band-gated via
+`jit_adaptive_ab_band_basis_points`=1000 so only thin-margin selections are
+measured) measures one native and one compiled row group per compiled-selected
+pipeline and commits to the measured winner; the planner
 admits a pipeline to measurement only when its static net benefit lies within
 `jit_adaptive_ab_band_basis_points` of its required benefit, so confident
 selections pay no measurement tax. The native leg runs first under a one-claim

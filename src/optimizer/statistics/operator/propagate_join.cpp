@@ -1,12 +1,8 @@
 #include "duckdb/common/types/hugeint.hpp"
-#include "duckdb/optimizer/filter_pushdown.hpp"
 #include "duckdb/optimizer/statistics_propagator.hpp"
-#include "duckdb/planner/expression/bound_comparison_expression.hpp"
-#include "duckdb/planner/expression/bound_constant_expression.hpp"
 #include "duckdb/planner/operator/logical_any_join.hpp"
 #include "duckdb/planner/operator/logical_comparison_join.hpp"
 #include "duckdb/planner/operator/logical_cross_product.hpp"
-#include "duckdb/planner/operator/logical_filter.hpp"
 #include "duckdb/planner/operator/logical_join.hpp"
 #include "duckdb/planner/operator/logical_limit.hpp"
 #include "duckdb/planner/operator/logical_positional_join.hpp"
@@ -158,16 +154,11 @@ void StatisticsPropagator::PropagateStatistics(LogicalComparisonJoin &join, uniq
 			auto updated_stats_left = PropagateExpression(condition.LeftReference());
 			auto updated_stats_right = PropagateExpression(condition.RightReference());
 
-			// Try to push lhs stats down rhs and vice versa
+			// Carry the narrowed statistics into the join implementation. These statistics are planning-time
+			// estimates: they must not become persistent predicates because prepared physical plans survive DML.
 			if (stats_left && stats_right && updated_stats_left && updated_stats_right &&
 			    condition.GetLHS().GetExpressionType() == ExpressionType::BOUND_COLUMN_REF &&
 			    condition.GetRHS().GetExpressionType() == ExpressionType::BOUND_COLUMN_REF) {
-				CreateFilterFromJoinStats(join.children[0], condition.LeftReference(), *stats_left,
-				                          *updated_stats_left);
-				CreateFilterFromJoinStats(join.children[1], condition.RightReference(), *stats_right,
-				                          *updated_stats_right);
-
-				// Update join_stats when is already part of the join
 				condition.SetLeftStats(std::move(updated_stats_left));
 				condition.SetRightStats(std::move(updated_stats_right));
 			}
@@ -321,52 +312,6 @@ unique_ptr<NodeStatistics> StatisticsPropagator::PropagateStatistics(LogicalPosi
 	}
 
 	return std::move(node_stats);
-}
-
-void StatisticsPropagator::CreateFilterFromJoinStats(unique_ptr<LogicalOperator> &child, unique_ptr<Expression> &expr,
-                                                     const BaseStatistics &stats_before,
-                                                     const BaseStatistics &stats_after) {
-	// Only do this for integral colref's that have stats
-	if (expr->GetExpressionType() != ExpressionType::BOUND_COLUMN_REF || !expr->GetReturnType().IsIntegral() ||
-	    !NumericStats::HasMinMax(stats_before) || !NumericStats::HasMinMax(stats_after)) {
-		return;
-	}
-
-	// Retrieve min/max
-	auto min_before = NumericStats::Min(stats_before);
-	auto max_before = NumericStats::Max(stats_before);
-	auto min_after = NumericStats::Min(stats_after);
-	auto max_after = NumericStats::Max(stats_after);
-
-	vector<unique_ptr<Expression>> filter_exprs;
-	if (min_after > min_before) {
-		filter_exprs.emplace_back(
-		    BoundComparisonExpression::Create(ExpressionType::COMPARE_GREATERTHANOREQUALTO, expr->Copy(),
-		                                      make_uniq<BoundConstantExpression>(std::move(min_after))));
-	}
-	if (max_after < max_before) {
-		filter_exprs.emplace_back(
-		    BoundComparisonExpression::Create(ExpressionType::COMPARE_LESSTHANOREQUALTO, expr->Copy(),
-		                                      make_uniq<BoundConstantExpression>(std::move(max_after))));
-	}
-
-	if (filter_exprs.empty()) {
-		return;
-	}
-
-	auto filter = make_uniq<LogicalFilter>();
-	filter->children.emplace_back(std::move(child));
-	child = std::move(filter);
-
-	for (auto &filter_expr : filter_exprs) {
-		child->expressions.emplace_back(std::move(filter_expr));
-	}
-
-	// not allowed to let filter pushdown change mark joins to semi joins.
-	// semi joins are potentially slower AND the conversion can ruin column binding information
-	FilterPushdown filter_pushdown(optimizer, false);
-	child = filter_pushdown.Rewrite(std::move(child));
-	PropagateExpression(expr);
 }
 
 } // namespace duckdb

@@ -18,8 +18,8 @@ struct ExecutionRegionLoweringPlan;
 PhysicalRunnerCostInput BuildExecutionRegionCandidateCostInput(const ExecutionRegionCandidate &candidate);
 PhysicalRunnerCostInput BuildExecutionRegionCandidateCostInput(const ExecutionRegionCandidate &candidate,
                                                                const ExecutionRegionLoweringPlan &lowering_plan);
-PhysicalRunnerCostInput BuildExecutionRegionPipelineCandidateUpperBoundCostInput(
-    const PhysicalRunnerCostInput &pipeline_input);
+PhysicalRunnerCostInput
+BuildExecutionRegionPipelineCandidateUpperBoundCostInput(const PhysicalRunnerCostInput &pipeline_input);
 bool TryBuildExecutionRegionPipelineCostInput(Pipeline &pipeline, PhysicalRunnerCostInput &cost_input);
 bool ExecutionRegionPipelineHasNonProducingSource(Pipeline &pipeline);
 

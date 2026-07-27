@@ -111,10 +111,9 @@ static void SljitRecordDirectProjectionBatchMaterialization(ExecutionRegionRunti
                                                             SljitExecutableRegionOp &projection_op,
                                                             bool remapped_projection, idx_t count,
                                                             std::chrono::steady_clock::time_point stage_start) {
-	RecordSljitRegionStageRuntime(runtime, projection_idx, projection_op.kind,
-	                              remapped_projection ? "post_join_remap_batch_projection"
-	                                                  : "post_join_batch_projection",
-	                              stage_start);
+	RecordSljitRegionStageRuntime(
+	    runtime, projection_idx, projection_op.kind,
+	    remapped_projection ? "post_join_remap_batch_projection" : "post_join_batch_projection", stage_start);
 }
 
 static void SljitHashDirectProjectionBatch(ExecutionRegionRuntime &runtime, idx_t projection_idx,
@@ -122,10 +121,9 @@ static void SljitHashDirectProjectionBatch(ExecutionRegionRuntime &runtime, idx_
                                            DataChunk &batch, Vector &hashes) {
 	auto hash_start = SljitRegionStageStart(runtime);
 	batch.Hash(hashes);
-	RecordSljitRegionStageRuntime(runtime, projection_idx, projection_op.kind,
-	                              remapped_projection ? "post_join_remap_batch_projection_hash"
-	                                                  : "post_join_batch_projection_hash",
-	                              hash_start);
+	RecordSljitRegionStageRuntime(
+	    runtime, projection_idx, projection_op.kind,
+	    remapped_projection ? "post_join_remap_batch_projection_hash" : "post_join_batch_projection_hash", hash_start);
 }
 
 static void SljitFinishDirectProjectionBatchMaterialization(ExecutionRegionRuntime &runtime, idx_t projection_idx,

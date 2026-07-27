@@ -15,8 +15,6 @@
 
 #include "duckdb/common/constants.hpp"
 #include "duckdb/execution/execution_operator_runtime.hpp"
-#include "duckdb/execution/join_hashtable.hpp"
-
 namespace duckdb {
 
 static bool SljitTryRemapHashJoinProjectionSourceIndex(const vector<idx_t> &source_map, idx_t &source_index,
@@ -341,12 +339,7 @@ static bool SljitTryBuildHashJoinProbeLHSProjectionExpression(const ExecutionHas
 
 static void SljitGatherHashJoinRHSColumn(const ExecutionHashJoinProbeBinding &binding, Vector &row_pointers,
                                          idx_t count, idx_t rhs_col_idx, Vector &result) {
-	if (ExecutionTryDirectGatherHashJoinRHSFixedColumn(binding, row_pointers, count, rhs_col_idx, result)) {
-		return;
-	}
-	D_ASSERT(binding.hash_table);
-	binding.hash_table->GatherRHSColumn(row_pointers, *FlatVector::IncrementalSelectionVector(), count, rhs_col_idx,
-	                                    result);
+	ExecutionGatherHashJoinRHSColumn(binding, row_pointers, count, rhs_col_idx, result);
 }
 
 static bool SljitSelectedHashJoinSelectionIsIdentity(const SelectionVector &selection, idx_t count) {

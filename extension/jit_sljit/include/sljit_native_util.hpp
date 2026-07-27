@@ -14,9 +14,6 @@
 
 namespace duckdb {
 
-class ClientContext;
-
-string MaybeDumpIr(ClientContext &context, string ir);
 string NativeSignedIntegerTypeName(SljitNativeSignedIntegerWidth width);
 string NativeUnsignedIntegerTypeName(SljitNativeUnsignedIntegerWidth width);
 string NativeIntegerBinaryOverflowMessage(SljitNativeIntegerBinaryOp op);

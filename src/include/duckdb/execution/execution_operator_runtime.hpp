@@ -400,12 +400,16 @@ struct ExecutionGroupedAggregateStateAddressBinding {
 
 struct ExecutionHashJoinProbeBinding {
 	bool ready = false;
+	//! Opaque core-owned runtime handle. Execution backends must never dereference this pointer; all semantic
+	//! operations are exported below and all immutable layout facts are copied into this binding.
 	JoinHashTable *hash_table = nullptr;
 	ExecutionHashJoinProbeLayoutKind layout_kind = ExecutionHashJoinProbeLayoutKind::NONE;
 	ExecutionHashJoinTableLayout table_layout;
 	ExecutionPerfectHashJoinTableLayout perfect_layout;
 	bool empty_build_side = false;
 	bool use_bloom_filter = false;
+	bool build_side_has_filtered_null = false;
+	vector<bool> condition_null_values_are_equal;
 	vector<idx_t> probe_key_input_indices;
 	vector<LogicalType> rhs_condition_types;
 	vector<idx_t> lhs_output_column_indices;
@@ -523,6 +527,9 @@ DUCKDB_API void ExecutionMaterializeHashJoinProbe(const ExecutionHashJoinProbeBi
 DUCKDB_API bool ExecutionTryDirectGatherHashJoinRHSFixedColumn(const ExecutionHashJoinProbeBinding &binding,
                                                                Vector &row_pointers, idx_t count, idx_t rhs_output_idx,
                                                                Vector &result);
+
+DUCKDB_API void ExecutionGatherHashJoinRHSColumn(const ExecutionHashJoinProbeBinding &binding, Vector &row_pointers,
+                                                 idx_t count, idx_t rhs_output_idx, Vector &result);
 
 DUCKDB_API bool ExecutionGetHashJoinRHSFixedColumnSource(const ExecutionHashJoinProbeBinding &binding,
                                                          idx_t rhs_output_idx,

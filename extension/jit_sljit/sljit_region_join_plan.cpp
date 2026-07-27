@@ -160,38 +160,6 @@ SljitRegionNodePlan PlanSljitHashJoinProbeOperatorNode(const ExecutionRegionNode
 	native_op.hash_join_probe.mark_build_match = mark_build_match && !native_op.hash_join_probe.residual_predicate;
 	native_op.hash_join_probe.mark_build_match_after_residual =
 	    mark_build_match && native_op.hash_join_probe.residual_predicate;
-	if (render_diagnostics) {
-		native_op.hash_join_probe.ir =
-		    "hash_join_probe_native<hash_keys=" + std::to_string(native_op.hash_join_probe.equality_key_count) +
-		    ",conditions=";
-		native_op.hash_join_probe.ir += DescribeSljitHashJoinProbeKeys(native_op.hash_join_probe.keys, "|");
-		native_op.hash_join_probe.ir += ",probe_shape=native";
-		if (native_op.hash_join_probe.perfect_hash_probe) {
-			native_op.hash_join_probe.ir += ",perfect_hash_probe_shape=native";
-		} else {
-			native_op.hash_join_probe.ir +=
-			    ",perfect_hash_probe_shape=" + (contract.perfect_hash_probe_shape_blocker.empty()
-			                                        ? string("not_applicable")
-			                                        : contract.perfect_hash_probe_shape_blocker);
-		}
-		native_op.hash_join_probe.ir +=
-		    ",output_mode=" + string(SljitHashJoinProbeOutputModeToString(native_op.hash_join_probe.output_mode));
-		if (native_op.hash_join_probe.mark_build_match) {
-			AppendSljitHashJoinProbeMarkOffsets(native_op.hash_join_probe.ir, "mark_build_match",
-			                                    native_op.hash_join_probe);
-		}
-		if (native_op.hash_join_probe.mark_build_match_after_residual) {
-			AppendSljitHashJoinProbeMarkOffsets(native_op.hash_join_probe.ir, "mark_build_match_after_residual",
-			                                    native_op.hash_join_probe);
-		}
-		if (native_op.hash_join_probe.residual_predicate) {
-			native_op.hash_join_probe.ir += ",residual_predicate=true";
-			native_op.hash_join_probe.ir +=
-			    ",residual_sources=" + std::to_string(native_op.hash_join_probe.residual_source_types.size());
-			native_op.hash_join_probe.ir += ",residual_ir=(" + native_op.hash_join_probe.residual_filter.ir + ")";
-		}
-		native_op.hash_join_probe.ir += ">";
-	}
 
 	string reason = "generated native hash join probe";
 	if (render_diagnostics) {

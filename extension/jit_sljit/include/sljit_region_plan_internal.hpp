@@ -148,6 +148,8 @@ const char *SljitHashJoinComparisonToString(ExecutionRegionComparisonType compar
 const char *SljitNestedLoopJoinValueKindToString(SljitNativeNestedLoopJoinValueKind kind);
 string DescribeNativeRegionExpression(const SljitNativeRegionExpressionPlan &expr);
 string DescribeNativeRegionExpressionList(const vector<SljitNativeRegionExpressionPlan> &expressions);
+string DescribeNativeRegionExpressionSemantic(const SljitNativeRegionExpressionPlan &expr);
+string DescribeNativeRegionExpressionListSemantic(const vector<SljitNativeRegionExpressionPlan> &expressions);
 string DescribeSljitHashJoinProbeKeys(const vector<SljitNativeHashJoinProbeKeyPlan> &keys, const char *separator);
 void AppendSljitHashJoinProbeMarkOffsets(string &result, const char *name, const SljitNativeHashJoinProbePlan &probe);
 

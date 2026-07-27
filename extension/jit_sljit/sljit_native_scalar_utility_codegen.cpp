@@ -165,30 +165,29 @@ BuildSljitNativeErrorGuardedReference(idx_t value_size, SljitNativeIntegerCompar
 	EmitInitSljitNativeVectorLoop(compiler);
 
 	struct sljit_jump *guard_is_true = nullptr;
-	auto done = EmitSljitInvalidResultLoop(
-	    compiler, [&](vector<sljit_jump *> &invalid_jumps, vector<sljit_jump *> &) {
-		    EmitLoadLogicalIndex(compiler, SLJIT_R1);
-		    EmitLoadSourceIndex(compiler, offsetof(SljitNativeVectorInput, source_sel), SLJIT_R1, SLJIT_S3);
-		    EmitLoadSourceIndex(compiler, offsetof(SljitNativeVectorInput, right_source_sel), SLJIT_R1, SLJIT_S4);
+	auto done = EmitSljitInvalidResultLoop(compiler, [&](vector<sljit_jump *> &invalid_jumps, vector<sljit_jump *> &) {
+		EmitLoadLogicalIndex(compiler, SLJIT_R1);
+		EmitLoadSourceIndex(compiler, offsetof(SljitNativeVectorInput, source_sel), SLJIT_R1, SLJIT_S3);
+		EmitLoadSourceIndex(compiler, offsetof(SljitNativeVectorInput, right_source_sel), SLJIT_R1, SLJIT_S4);
 
-		    auto guard_is_null =
-		        EmitJumpIfValidityNull(compiler, offsetof(SljitNativeVectorInput, right_source_validity), SLJIT_S4);
-		    EmitLoadSljitNativeFixedWidthValue(compiler, offsetof(SljitNativeVectorInput, right_source_data), SLJIT_S4,
-		                                       SLJIT_MOV, 3, SLJIT_R2);
-		    sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_R3, 0, SLJIT_MEM1(SLJIT_S0),
-		                   offsetof(SljitNativeVectorInput, constant));
-		    if (guard_constant_on_left) {
-			    guard_is_true = sljit_emit_cmp(compiler, compare_type, SLJIT_R3, 0, SLJIT_R2, 0);
-		    } else {
-			    guard_is_true = sljit_emit_cmp(compiler, compare_type, SLJIT_R2, 0, SLJIT_R3, 0);
-		    }
+		auto guard_is_null =
+		    EmitJumpIfValidityNull(compiler, offsetof(SljitNativeVectorInput, right_source_validity), SLJIT_S4);
+		EmitLoadSljitNativeFixedWidthValue(compiler, offsetof(SljitNativeVectorInput, right_source_data), SLJIT_S4,
+		                                   SLJIT_MOV, 3, SLJIT_R2);
+		sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_R3, 0, SLJIT_MEM1(SLJIT_S0),
+		               offsetof(SljitNativeVectorInput, constant));
+		if (guard_constant_on_left) {
+			guard_is_true = sljit_emit_cmp(compiler, compare_type, SLJIT_R3, 0, SLJIT_R2, 0);
+		} else {
+			guard_is_true = sljit_emit_cmp(compiler, compare_type, SLJIT_R2, 0, SLJIT_R3, 0);
+		}
 
-		    auto copy_label = sljit_emit_label(compiler);
-		    sljit_set_label(guard_is_null, copy_label);
-		    invalid_jumps.push_back(
-		        EmitJumpIfValidityNull(compiler, offsetof(SljitNativeVectorInput, source_validity), SLJIT_S3));
-		    EmitCopySljitNativeFixedWidthSourceToResult(compiler, value_size, SLJIT_S3);
-	    });
+		auto copy_label = sljit_emit_label(compiler);
+		sljit_set_label(guard_is_null, copy_label);
+		invalid_jumps.push_back(
+		    EmitJumpIfValidityNull(compiler, offsetof(SljitNativeVectorInput, source_validity), SLJIT_S3));
+		EmitCopySljitNativeFixedWidthSourceToResult(compiler, value_size, SLJIT_S3);
+	});
 
 	auto error_label = sljit_emit_label(compiler);
 	sljit_set_label(guard_is_true, error_label);

@@ -58,7 +58,7 @@ static bool TryExecuteDirectRowPointerGroupedTargetPayloadUpdate(
 	scratch.RecordDirectNewAggregateUpdateResult(op_idx, updated);
 	RecordSljitRegionStageRuntimePath(runtime, op_idx, op.kind, updated ? stage_name : miss_stage_name, stage_start);
 	if (updated) {
-		RecordSljitRegionMaterializationElisionProof(runtime, op.kind, stage_name, count);
+		RecordSljitRegionMaterializationElision(runtime, op.kind, stage_name, count);
 	}
 	return updated;
 }
@@ -135,7 +135,7 @@ static bool TryExecuteDirectRowPointerPreaggregatedPrimitiveUpdate(
 	scratch.RecordDirectNewAggregateUpdateResult(op_idx, true);
 	RecordSljitRegionStageRuntimePath(runtime, op_idx, op.kind, "row_pointer_preaggregated_grouped_primitive_update",
 	                                  stage_start);
-	RecordSljitRegionMaterializationElisionProof(runtime, op.kind, "row_pointer_preaggregated_grouped_primitive_update",
+	RecordSljitRegionMaterializationElision(runtime, op.kind, "row_pointer_preaggregated_grouped_primitive_update",
 	                                             count);
 	return true;
 }
@@ -174,7 +174,7 @@ static bool SljitTryExecuteRowPointerCountOneGroupedAggregateUpdate(
 	ExecuteSljitPrimitiveCountOneTargetBatch(targets, count_one_update);
 	RecordSljitRegionStageRuntime(runtime, op_idx, op.kind, "direct_row_pointer_group_count_one_update", update_start);
 	scratch.RecordDirectNewAggregateUpdateResult(op_idx, true);
-	RecordSljitRegionMaterializationElisionPath(runtime, op.kind, "direct_row_pointer_group_count_one_update", count);
+	RecordSljitRegionMaterializationElision(runtime, op.kind, "direct_row_pointer_group_count_one_update", count);
 	return true;
 }
 
@@ -257,7 +257,7 @@ static bool SljitTryExecuteRowPointerGroupedSplitPayloadUpdate(
 	    runtime, op_idx, op.kind,
 	    updated ? "row_pointer_grouped_lookup_update" : "row_pointer_grouped_lookup_update_miss", stage_start);
 	if (updated) {
-		RecordSljitRegionMaterializationElisionProof(runtime, op.kind, "row_pointer_grouped_lookup_update", count);
+		RecordSljitRegionMaterializationElision(runtime, op.kind, "row_pointer_grouped_lookup_update", count);
 	}
 	return updated;
 }

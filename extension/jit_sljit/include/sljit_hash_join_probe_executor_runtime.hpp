@@ -24,15 +24,16 @@ namespace duckdb {
 template <class OWNER>
 static ExecutionOperatorBindResult SljitExecutePerfectHashJoinProbe(
     OWNER &owner, ExecutionRegionRuntime &runtime, idx_t op_idx, SljitExecutableRegionOp &op,
-    const SljitNativeHashJoinProbePlan &plan, const ExecutionHashJoinProbeBinding &probe, DataChunk &input,
-    DataChunk &output, SelectionVector &match_selection, SelectionVector &build_selection,
-    SljitHashJoinProbeDrainState &state, bool source_key0_int64_to_int32_unchecked = false,
+    const SljitNativeHashJoinProbePlan &plan,
+    const shared_ptr<ExecutionRuntimeFilterIdentity> &exact_source_filter_identity,
+    const ExecutionHashJoinProbeBinding &probe, DataChunk &input, DataChunk &output, SelectionVector &match_selection,
+    SelectionVector &build_selection, SljitHashJoinProbeDrainState &state,
+    bool source_key0_int64_to_int32_unchecked = false,
     SljitHashJoinProbeOutputContract output_contract = SljitHashJoinProbeOutputContract::MATERIALIZED_OUTPUT) {
 	state.output_proof.perfect_build_selection_is_key_offset = false;
 	const bool exact_membership_filter =
-	    plan.exact_source_filter_identity &&
-	    plan.exact_source_filter_identity == probe.perfect_layout.runtime_filter_identity;
-	if (plan.exact_source_filter_identity) {
+	    exact_source_filter_identity && exact_source_filter_identity == probe.perfect_layout.runtime_filter_identity;
+	if (exact_source_filter_identity) {
 		runtime.RecordJitRuntimePath("hash_join_probe.perfect_probe.exact_source_filter_candidate");
 	}
 	auto &key = SljitValidatePerfectHashJoinProbeExecutionLayout(plan, probe, input);
@@ -78,8 +79,8 @@ static ExecutionOperatorBindResult SljitExecutePerfectHashJoinProbe(
 	                                  generated_stage_start);
 	if (exact_membership_filter) {
 		runtime.RecordJitRuntimePath("hash_join_probe.perfect_probe.exact_source_filter", native_input.selected_count);
-		RecordSljitRegionRuntimeProof(runtime, op.kind, ExecutionRegionJitRuntimeProof::GENERATED_BACKEND_WORK,
-		                              "exact_source_filter", native_input.selected_count);
+		runtime.RecordJitRuntimeProof(ExecutionRegionJitRuntimeProof::GENERATED_BACKEND_WORK,
+		                              native_input.selected_count);
 	}
 	state.input_offset = native_input.input_offset;
 	state.resume_row_pointer = nullptr;
@@ -137,15 +138,16 @@ struct SljitExactRegularHashJoinMembershipFilterDispatch {
 template <class OWNER>
 static ExecutionOperatorBindResult SljitExecuteRegularHashJoinProbe(
     OWNER &owner, ExecutionRegionRuntime &runtime, SljitRegionExecutionScratch &scratch, idx_t op_idx,
-    SljitExecutableRegionOp &op, const SljitNativeHashJoinProbePlan &plan, const ExecutionHashJoinProbeBinding &probe,
-    DataChunk &input, DataChunk &output, SelectionVector &match_selection, Vector &row_pointers,
-    SljitHashJoinProbeSourceScratch &source_scratch, DataChunk *residual_chunk, SelectionVector *residual_selection,
-    SelectionVector *compact_match_selection, Vector *compact_row_pointers, SljitHashJoinProbeDrainState &state,
-    bool left_probe_output, bool source_key0_int64_to_int32_unchecked = false,
+    SljitExecutableRegionOp &op, const SljitNativeHashJoinProbePlan &plan,
+    const shared_ptr<ExecutionRuntimeFilterIdentity> &exact_source_filter_identity,
+    const ExecutionHashJoinProbeBinding &probe, DataChunk &input, DataChunk &output, SelectionVector &match_selection,
+    Vector &row_pointers, SljitHashJoinProbeSourceScratch &source_scratch, DataChunk *residual_chunk,
+    SelectionVector *residual_selection, SelectionVector *compact_match_selection, Vector *compact_row_pointers,
+    SljitHashJoinProbeDrainState &state, bool left_probe_output, bool source_key0_int64_to_int32_unchecked = false,
     SljitHashJoinProbeOutputContract output_contract = SljitHashJoinProbeOutputContract::MATERIALIZED_OUTPUT) {
 	auto &layout = probe.table_layout;
 	const auto table_layout_kind = SljitValidateRegularHashJoinProbeExecutionLayout(plan, probe);
-	if (plan.exact_source_filter_identity) {
+	if (exact_source_filter_identity) {
 		runtime.RecordJitRuntimePath("hash_join_probe.regular_probe.exact_source_filter_candidate");
 	}
 	auto prepared_input = SljitPrepareRegularHashJoinProbeInput(
@@ -153,8 +155,7 @@ static ExecutionOperatorBindResult SljitExecuteRegularHashJoinProbe(
 	    table_layout_kind, source_key0_int64_to_int32_unchecked, layout.stored_keys_have_null, probe.use_bloom_filter);
 	auto &native_input = prepared_input.native_input;
 	const bool exact_membership_filter =
-	    plan.exact_source_filter_identity &&
-	    plan.exact_source_filter_identity == probe.table_layout.runtime_filter_identity &&
+	    exact_source_filter_identity && exact_source_filter_identity == probe.table_layout.runtime_filter_identity &&
 	    probe.table_layout.exact_membership_filter_build_keys_unique &&
 	    probe.table_layout.exact_membership_filter_bitmap && plan.keys.size() == 1 && plan.equality_key_count == 1 &&
 	    !plan.residual_predicate && !plan.mark_build_match && !layout.stored_keys_have_null &&
@@ -179,8 +180,8 @@ static ExecutionOperatorBindResult SljitExecuteRegularHashJoinProbe(
 		                                               native_input.selected_count == input.size());
 		output.SetChildCardinality(native_input.selected_count);
 		runtime.RecordJitRuntimePath("hash_join_probe.regular_probe.exact_source_filter", native_input.selected_count);
-		RecordSljitRegionRuntimeProof(runtime, op.kind, ExecutionRegionJitRuntimeProof::GENERATED_BACKEND_WORK,
-		                              "exact_source_filter", native_input.selected_count);
+		runtime.RecordJitRuntimeProof(ExecutionRegionJitRuntimeProof::GENERATED_BACKEND_WORK,
+		                              native_input.selected_count);
 		return ExecutionOperatorBindResult::READY;
 	}
 	const auto mark_selection_mode = SljitHashJoinMarkSelectionModeForOutputContract(output_contract);
@@ -269,6 +270,7 @@ static ExecutionOperatorBindResult SljitExecuteNativeHashJoinProbe(
 		throw InternalException("SLJIT native hash join probe received an incomplete operator binding");
 	}
 	auto &probe = binding.hash_join_probe;
+	auto &exact_source_filter_identity = owner.ExactSourceFilterIdentity(plan.exact_source_filter_binding);
 	if (plan.output_mode == ExecutionHashJoinProbeOutputMode::NONE || probe.output_mode != plan.output_mode) {
 		throw InternalException("SLJIT native hash join probe output mode mismatch");
 	}
@@ -288,7 +290,7 @@ static ExecutionOperatorBindResult SljitExecuteNativeHashJoinProbe(
 		if (!probe.hash_table) {
 			throw InternalException("SLJIT native MARK non-match probe requires a bound hash join table");
 		}
-		if (probe.hash_table->has_filtered_null) {
+		if (probe.build_side_has_filtered_null) {
 			return SljitExecuteMarkProbeNoTrueNonMatches(runtime, op, output, state, input.size());
 		}
 	}
@@ -299,14 +301,14 @@ static ExecutionOperatorBindResult SljitExecuteNativeHashJoinProbe(
 	runtime.RecordHashJoinProbeLayout(SljitHashJoinProbeLayoutName(probe.layout_kind));
 	switch (probe.layout_kind) {
 	case ExecutionHashJoinProbeLayoutKind::PERFECT_HASH_TABLE:
-		return SljitExecutePerfectHashJoinProbe(owner, runtime, op_idx, op, plan, probe, input, output, match_selection,
-		                                        build_selection, state, source_key0_int64_to_int32_unchecked,
-		                                        output_contract);
+		return SljitExecutePerfectHashJoinProbe(owner, runtime, op_idx, op, plan, exact_source_filter_identity, probe,
+		                                        input, output, match_selection, build_selection, state,
+		                                        source_key0_int64_to_int32_unchecked, output_contract);
 	case ExecutionHashJoinProbeLayoutKind::REGULAR_HASH_TABLE:
 		return SljitExecuteRegularHashJoinProbe(
-		    owner, runtime, scratch, op_idx, op, plan, probe, input, output, match_selection, row_pointers,
-		    source_scratch, residual_chunk, residual_selection, compact_match_selection, compact_row_pointers, state,
-		    left_probe_output, source_key0_int64_to_int32_unchecked, output_contract);
+		    owner, runtime, scratch, op_idx, op, plan, exact_source_filter_identity, probe, input, output,
+		    match_selection, row_pointers, source_scratch, residual_chunk, residual_selection, compact_match_selection,
+		    compact_row_pointers, state, left_probe_output, source_key0_int64_to_int32_unchecked, output_contract);
 	default:
 		throw InternalException("SLJIT native hash join probe received an unknown layout kind");
 	}

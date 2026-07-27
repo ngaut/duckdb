@@ -199,7 +199,7 @@ SljitExecuteBoundUngroupedPrimitiveAggregateUpdate(ExecutionRegionRuntime &runti
 			    payload_scratch);
 		}
 		if (trace_runtime) {
-			RecordSljitRegionMaterializationElisionPath(runtime, op.kind, "fused_payload_update");
+			RecordSljitRegionMaterializationElision(runtime, op.kind, "fused_payload_update");
 			RecordSljitRegionStageRuntime(runtime, bound.op_idx, op.kind, "primitive_payload_update_fused",
 			                              payload_stage_start);
 		}
@@ -224,7 +224,7 @@ SljitExecuteBoundUngroupedPrimitiveAggregateUpdate(ExecutionRegionRuntime &runti
 		}
 	}
 	if (trace_runtime) {
-		RecordSljitRegionMaterializationElisionPath(runtime, op.kind, "primitive_payload_update", aggregates.size());
+		RecordSljitRegionMaterializationElision(runtime, op.kind, "primitive_payload_update", aggregates.size());
 	}
 	return SinkResultType::NEED_MORE_INPUT;
 }

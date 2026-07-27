@@ -44,7 +44,8 @@
 
 namespace duckdb {
 
-static std::chrono::steady_clock::time_point RowGroupDirectAppendProfileStart(optional_ptr<DirectAppendProfile> profile) {
+static std::chrono::steady_clock::time_point
+RowGroupDirectAppendProfileStart(optional_ptr<DirectAppendProfile> profile) {
 	return profile ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point();
 }
 

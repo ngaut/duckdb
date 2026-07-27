@@ -67,7 +67,7 @@ static SinkResultType SljitExecuteNativeUngroupedAggregateUpdateWithPayloads(
 			RecordSljitRegionStageRuntime(runtime, op_idx, op.kind, stage_name, payload_stage_start);
 		}
 	}
-	RecordSljitRegionMaterializationElisionPath(runtime, op.kind, runtime_path, payload_input.size());
+	RecordSljitRegionMaterializationElision(runtime, op.kind, runtime_path, payload_input.size());
 	return native_runtime.RecordSinkResult(payload_input, SinkResultType::NEED_MORE_INPUT);
 }
 

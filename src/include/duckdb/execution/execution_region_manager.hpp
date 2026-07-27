@@ -7,6 +7,7 @@
 
 #pragma once
 
+#include "duckdb/execution/execution_region_artifact_cache.hpp"
 #include "duckdb/execution/execution_region_backend.hpp"
 #include "duckdb/execution/execution_region_telemetry.hpp"
 
@@ -78,6 +79,10 @@ private:
 	DatabaseInstance &db;
 	mutable mutex lock;
 	vector<RegisteredExecutionRegionBackend> backends;
+	//! Database-local because artifacts are backend code, not physical-operator
+	//! state. Semantic keys make equivalent prepared and ad-hoc plans share
+	//! code while kernel wrappers retain all execution-local bindings.
+	ExecutionRegionArtifactCache artifact_cache;
 	ExecutionRegionEventLog event_log;
 };
 

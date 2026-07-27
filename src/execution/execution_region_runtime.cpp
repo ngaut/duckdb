@@ -282,9 +282,6 @@ void ExecutionRegionRuntime::RecordJitRuntimePath(const char *, idx_t) {
 void ExecutionRegionRuntime::RecordJitRuntimeProof(ExecutionRegionJitRuntimeProof, idx_t) {
 }
 
-void ExecutionRegionRuntime::RecordJitRuntimeProofDetail(const char *, idx_t) {
-}
-
 void ExecutionRegionRuntime::RecordJitRuntimeDelegation(const char *, idx_t) {
 }
 

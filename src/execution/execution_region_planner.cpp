@@ -820,7 +820,7 @@ unique_ptr<ExecutionRegionPlan> ExecutionRegionPlanner::Build(ClientContext &con
 	if (selected_regions.empty()) {
 		return KeepExecutableExecutionRegionPlan(std::move(plan));
 	}
-	Compile(context, *backend, backend_name, *plan, lowered_region, selected_regions);
+	Compile(context, *backend, backend_name, pipeline, *plan, lowered_region, selected_regions);
 	if (auto kernel = plan->GetExecutableFullPipelineKernel(); kernel && kernel->HasTableFilterKernels()) {
 		plan->source_open_request.table_filter_kernel_provider =
 		    optional_ptr<const TableFilterKernelProvider>(kernel.get());
@@ -833,8 +833,59 @@ unique_ptr<ExecutionRegionPlan> ExecutionRegionPlanner::Build(ClientContext &con
 	return KeepExecutableExecutionRegionPlan(std::move(plan));
 }
 
+static void ValidateExecutionRegionCompileResult(const string &backend_name, const ExecutionRegionCandidate &candidate,
+                                                 const ExecutionRegionLoweringPlan &lowering_plan,
+                                                 const string &artifact_cache_key,
+                                                 const ExecutionRegionCompileResult &result) {
+	if (result.status != ExecutionRegionCompileStatus::COMPILED) {
+		if (result.kernel || result.artifact) {
+			throw InternalException(
+			    "execution region backend \"%s\" returned executable state for non-compiled region status %s",
+			    backend_name, ExecutionRegionCompileStatusToString(result.status));
+		}
+		return;
+	}
+	auto expected_mode = lowering_plan.ExpectedCompiledExecutionMode();
+	if (expected_mode == ExecutionRegionExecutionMode::UNSUPPORTED) {
+		throw InternalException("execution region backend \"%s\" compiled region without native executable nodes",
+		                        backend_name);
+	}
+	if (!lowering_plan.IsFullyFused()) {
+		throw InternalException("execution region backend \"%s\" compiled a region that is not fully fused",
+		                        backend_name);
+	}
+	if (result.execution_mode != expected_mode) {
+		throw InternalException(
+		    "execution region backend \"%s\" compiled region with execution mode %s after advertising %s", backend_name,
+		    ExecutionRegionExecutionModeToString(result.execution_mode),
+		    ExecutionRegionExecutionModeToString(expected_mode));
+	}
+	if (static_cast<bool>(result.kernel) == static_cast<bool>(result.artifact)) {
+		throw InternalException(
+		    "execution region backend \"%s\" must return exactly one of a kernel or a reusable artifact", backend_name);
+	}
+	if (result.artifact && artifact_cache_key.empty()) {
+		throw InternalException("execution region backend \"%s\" returned an artifact without a semantic cache key",
+		                        backend_name);
+	}
+	if (!artifact_cache_key.empty() && !result.artifact) {
+		throw InternalException("execution region backend \"%s\" advertised an artifact cache key without an artifact",
+		                        backend_name);
+	}
+	if (result.kernel && !result.kernel->HasExecutableBody()) {
+		throw InternalException("execution region backend \"%s\" compiled region without executable code",
+		                        backend_name);
+	}
+	if (result.kernel && ExecutionRegionABIIsFullPipeline(candidate.contract.abi) &&
+	    !result.kernel->CanExecuteFullPipeline()) {
+		throw InternalException(
+		    "execution region backend \"%s\" compiled full pipeline without full-pipeline executable ABI",
+		    backend_name);
+	}
+}
+
 void ExecutionRegionPlanner::Compile(ClientContext &context, ExecutionRegionBackend &backend,
-                                     const string &backend_name, ExecutionRegionPlan &plan,
+                                     const string &backend_name, Pipeline &pipeline, ExecutionRegionPlan &plan,
                                      ExecutionRegionIR &region_ir,
                                      vector<ExecutionRegionPlanner::SelectedCandidate> &selected_regions) {
 	plan.kernels.clear();
@@ -849,9 +900,70 @@ void ExecutionRegionPlanner::Compile(ClientContext &context, ExecutionRegionBack
 		auto stage_timings = compiled_region.stage_timings;
 		ExecutionRegionCompilationInput input(context, region_ir, candidate);
 		input.lowering_plan = &compiled_region.lowering_plan;
-		auto start = std::chrono::steady_clock::now();
-		auto result = backend.CompileRegion(input);
-		auto compile_time_us = ExecutionRegionPlannerElapsedMicros(start);
+		ExecutionRegionCompileResult result;
+		int64_t compile_time_us = 0;
+		bool reused_artifact = false;
+		string artifact_cache_key;
+		ExecutionRegionArtifactCacheReservation artifact_reservation;
+		if (compiled_region.lowering_plan.backend_plan) {
+			artifact_cache_key = compiled_region.lowering_plan.backend_plan->ArtifactCacheKey();
+		}
+		if (!artifact_cache_key.empty()) {
+			artifact_cache_key =
+			    backend_name + ":" + std::to_string(EXECUTION_REGION_BACKEND_ABI_VERSION) + ":" + artifact_cache_key;
+			auto &cache = execution_region_manager.artifact_cache;
+			artifact_reservation = cache.LookupOrReserve(artifact_cache_key);
+			if (artifact_reservation.IsHit()) {
+				auto &cached = *artifact_reservation.Cached();
+				auto reason = cached.compile_reason;
+				if (!reason.empty()) {
+					reason += ";";
+				}
+				reason += "compiled artifact cache hit";
+				result = ExecutionRegionCompileResult::CompiledArtifact(cached.artifact, cached.execution_mode,
+				                                                        std::move(reason), cached.ir);
+				reused_artifact = true;
+			} else {
+				auto compile_start = std::chrono::steady_clock::now();
+				result = backend.CompileRegion(input);
+				compile_time_us = ExecutionRegionPlannerElapsedMicros(compile_start);
+				ValidateExecutionRegionCompileResult(backend_name, candidate, compiled_region.lowering_plan,
+				                                     artifact_cache_key, result);
+			}
+		} else {
+			auto compile_start = std::chrono::steady_clock::now();
+			result = backend.CompileRegion(input);
+			compile_time_us = ExecutionRegionPlannerElapsedMicros(compile_start);
+			ValidateExecutionRegionCompileResult(backend_name, candidate, compiled_region.lowering_plan,
+			                                     artifact_cache_key, result);
+		}
+		if (result.status == ExecutionRegionCompileStatus::COMPILED && result.artifact) {
+			auto artifact = result.artifact;
+			auto instantiate_start = std::chrono::steady_clock::now();
+			result.kernel = backend.InstantiateRegionArtifact(artifact, input);
+			result.timings.kernel_build_time_us = ExecutionRegionPlannerElapsedMicros(instantiate_start);
+			if (!result.kernel) {
+				throw InternalException(
+				    "execution region backend \"%s\" could not instantiate its artifact for the advertised cache key",
+				    backend_name);
+			}
+			result.artifact.reset();
+			ValidateExecutionRegionCompileResult(backend_name, candidate, compiled_region.lowering_plan, string(),
+			                                     result);
+			if (artifact_reservation.IsBuilder()) {
+				auto cached = make_shared_ptr<ExecutionRegionCachedArtifact>();
+				cached->artifact = std::move(artifact);
+				cached->execution_mode = result.execution_mode;
+				cached->compile_reason = result.reason;
+				cached->ir = result.ir;
+				execution_region_manager.artifact_cache.Publish(artifact_reservation, std::move(cached));
+			}
+		} else if (artifact_reservation.IsBuilder()) {
+			execution_region_manager.artifact_cache.Abort(artifact_reservation);
+		}
+		if (reused_artifact) {
+			compile_time_us = 0;
+		}
 		stage_timings.codegen_time_us = compile_time_us;
 		stage_timings.executable_build_time_us = result.timings.executable_build_time_us;
 		stage_timings.machine_codegen_time_us = result.timings.machine_codegen_time_us;
@@ -863,36 +975,6 @@ void ExecutionRegionPlanner::Compile(ClientContext &context, ExecutionRegionBack
 		    candidate, ComposeExecutionRegionCompileEventReason(compiled_region.physical_runner, result.reason),
 		    should_record_detailed_telemetry);
 		auto execution_mode = result.execution_mode;
-		if (status != ExecutionRegionCompileStatus::COMPILED && result.kernel) {
-			throw InternalException("execution region backend \"%s\" returned kernel for non-compiled region status %s",
-			                        backend_name, ExecutionRegionCompileStatusToString(status));
-		}
-		if (status == ExecutionRegionCompileStatus::COMPILED) {
-			auto expected_mode = compiled_region.lowering_plan.ExpectedCompiledExecutionMode();
-			if (expected_mode == ExecutionRegionExecutionMode::UNSUPPORTED) {
-				throw InternalException(
-				    "execution region backend \"%s\" compiled region without native executable nodes", backend_name);
-			}
-			if (!compiled_region.lowering_plan.IsFullyFused()) {
-				throw InternalException("execution region backend \"%s\" compiled a region that is not fully fused",
-				                        backend_name);
-			}
-			if (execution_mode != expected_mode) {
-				throw InternalException(
-				    "execution region backend \"%s\" compiled region with execution mode %s after advertising %s",
-				    backend_name, ExecutionRegionExecutionModeToString(execution_mode),
-				    ExecutionRegionExecutionModeToString(expected_mode));
-			}
-			if (!result.kernel || !result.kernel->HasExecutableBody()) {
-				throw InternalException("execution region backend \"%s\" compiled region without executable code",
-				                        backend_name);
-			}
-			if (ExecutionRegionABIIsFullPipeline(candidate.contract.abi) && !result.kernel->CanExecuteFullPipeline()) {
-				throw InternalException(
-				    "execution region backend \"%s\" compiled full pipeline without full-pipeline executable ABI",
-				    backend_name);
-			}
-		}
 		auto trace_id = execution_region_manager.RecordEvent(
 		    context, backend_name, status, execution_mode, reason, ExecutionRegionCompileResultBlockerCode(status),
 		    &result.ir, compiled_region.decision_time_us, compile_time_us, code_size, &candidate,

@@ -84,10 +84,6 @@ bool PerfectHashJoinExecutor::CanDoPerfectHashJoin(const PhysicalHashJoin &op, c
 	}
 	// Physical perfect hashing supports the complete integral key domain. The execution layout carries the
 	// corresponding full-width bounds so native backends can preserve the same contract without truncation.
-	if (perfect_join_statistics.is_build_small) {
-		return true; // Already true based on static statistics
-	}
-
 	// We bail out if there are nested types on the RHS
 	for (auto &type : op.children[1].get().GetTypes()) {
 		switch (type.InternalType()) {
@@ -100,7 +96,11 @@ bool PerfectHashJoinExecutor::CanDoPerfectHashJoin(const PhysicalHashJoin &op, c
 		}
 	}
 
-	// And when the build range is smaller than the threshold
+	// Recompute the range on every call. Planning-time statistics are sufficient
+	// to decide whether collecting build bounds is worthwhile, but prepared
+	// physical plans survive DML. Finalization must therefore replace the
+	// preliminary range with bounds from the current build input.
+	perfect_join_statistics.is_build_small = false;
 	perfect_join_statistics.build_min = min;
 	perfect_join_statistics.build_max = max;
 	static constexpr idx_t DEFAULT_MAX_BUILD_SIZE = 1048576;

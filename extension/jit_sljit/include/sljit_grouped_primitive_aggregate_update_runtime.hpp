@@ -164,7 +164,7 @@ static SinkResultType SljitExecuteBoundGroupedPrimitiveAggregateUpdate(Execution
 		    op.aggregate_update.combined_payload_source_indices, op.aggregate_update.combined_payload_source_not_null,
 		    payload_lanes, reduction_lanes, bound.grouped_state->perfect_hash_layout, input, execute_sel, count,
 		    payload_scratch);
-		RecordSljitRegionMaterializationElisionPath(runtime, op.kind,
+		RecordSljitRegionMaterializationElision(runtime, op.kind,
 		                                            "fused_payload_update_owns_perfect_hash_group_lookup");
 		RecordSljitRegionStageRuntime(runtime, bound.op_idx, op.kind, "primitive_payload_update_fused",
 		                              payload_stage_start);
@@ -183,7 +183,7 @@ static SinkResultType SljitExecuteBoundGroupedPrimitiveAggregateUpdate(Execution
 		    op.aggregate_update.payload_source_layout, op.aggregate_update.combined_payload_source_indices,
 		    op.aggregate_update.combined_payload_source_not_null, payload_lanes, reduction_lanes, input,
 		    grouped_state_address_data, nullptr, execute_sel, false, count, payload_scratch);
-		RecordSljitRegionMaterializationElisionPath(runtime, op.kind,
+		RecordSljitRegionMaterializationElision(runtime, op.kind,
 		                                            "fused_payload_update_with_grouped_state_addresses");
 		RecordSljitRegionStageRuntime(runtime, bound.op_idx, op.kind, "primitive_payload_update_fused",
 		                              payload_stage_start);
@@ -202,7 +202,7 @@ static SinkResultType SljitExecuteBoundGroupedPrimitiveAggregateUpdate(Execution
 			RecordSljitRegionStageRuntime(runtime, bound.op_idx, op.kind, "primitive_payload_update",
 			                              payload_stage_start);
 		}
-		RecordSljitRegionMaterializationElisionPath(runtime, op.kind, "primitive_payload_update",
+		RecordSljitRegionMaterializationElision(runtime, op.kind, "primitive_payload_update",
 		                                            payload_descriptors.size());
 		break;
 	default:

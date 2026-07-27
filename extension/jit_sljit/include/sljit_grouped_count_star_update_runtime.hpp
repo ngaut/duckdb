@@ -113,7 +113,7 @@ static bool TryExecutePreparedPreaggregatedCountStarGroupedAggregateUpdate(
 	if (!updated) {
 		return false;
 	}
-	RecordSljitRegionMaterializationElisionProof(runtime, op.kind, "direct_preaggregated_count_star_update",
+	RecordSljitRegionMaterializationElision(runtime, op.kind, "direct_preaggregated_count_star_update",
 	                                             preaggregated_row_count);
 	return true;
 }
@@ -203,7 +203,7 @@ private:
 			                                      preaggregated_count_deltas, input.size())) {
 				return false;
 			}
-			RecordSljitRegionMaterializationElisionPath(
+			RecordSljitRegionMaterializationElision(
 			    runtime, aggregate_op.kind, "primitive_grouped_preaggregated_count_star_update", input.size());
 			return true;
 		}
@@ -217,7 +217,7 @@ private:
 		                            input.size())) {
 			return false;
 		}
-		RecordSljitRegionMaterializationElisionPath(runtime, aggregate_op.kind,
+		RecordSljitRegionMaterializationElision(runtime, aggregate_op.kind,
 		                                            "primitive_grouped_count_star_row_update", input.size());
 		return true;
 	}
@@ -260,7 +260,7 @@ private:
 			                                      preaggregated_count_deltas, prepared.count)) {
 				return false;
 			}
-			RecordSljitRegionMaterializationElisionPath(
+			RecordSljitRegionMaterializationElision(
 			    runtime, aggregate_op.kind, "primitive_projected_preaggregated_count_star_update", prepared.count);
 			return true;
 		}
@@ -280,7 +280,7 @@ private:
 		                            row_count_deltas, prepared.count)) {
 			return false;
 		}
-		RecordSljitRegionMaterializationElisionPath(runtime, aggregate_op.kind, "count_star_projected_row_update",
+		RecordSljitRegionMaterializationElision(runtime, aggregate_op.kind, "count_star_projected_row_update",
 		                                            prepared.count);
 		return true;
 	}
@@ -323,7 +323,7 @@ private:
 		pending_preaggregated_count_deltas.clear();
 		pending_preaggregated_row_count = 0;
 		if (updated) {
-			RecordSljitRegionMaterializationElisionPath(
+			RecordSljitRegionMaterializationElision(
 			    runtime, aggregate_op.kind, "primitive_pending_preaggregated_count_star_flush", represented_row_count);
 		}
 		return updated;
@@ -371,7 +371,7 @@ private:
 		pending_row_count_deltas.clear();
 		pending_row_count = 0;
 		if (updated) {
-			RecordSljitRegionMaterializationElisionPath(
+			RecordSljitRegionMaterializationElision(
 			    runtime, aggregate_op.kind, "primitive_pending_count_star_row_flush", represented_row_count);
 		}
 		return updated;

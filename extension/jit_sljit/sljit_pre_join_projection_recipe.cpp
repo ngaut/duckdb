@@ -20,9 +20,8 @@ SljitPreJoinProjectionRecipeBinding::SljitPreJoinProjectionRecipeBinding(
                                              uses_extended_source_fetch_budget_p) {
 }
 
-bool SljitPreJoinProjectionRecipeBinding::TryBuildView(
-    idx_t pre_join_projection_idx, idx_t hash_join_idx,
-    SljitPreJoinProjectionViewDescriptor &pre_join_view) const {
+bool SljitPreJoinProjectionRecipeBinding::TryBuildView(idx_t pre_join_projection_idx, idx_t hash_join_idx,
+                                                       SljitPreJoinProjectionViewDescriptor &pre_join_view) const {
 	return SljitTryBuildPreJoinProjectionViewDescriptor(ops, pre_join_projection_idx, hash_join_idx, source_min_values,
 	                                                    source_max_values, pre_join_view);
 }
@@ -63,8 +62,9 @@ bool SljitPreJoinProjectionRecipeBinding::TryAppendElidedHashJoinProbeSelection(
 	return true;
 }
 
-void SljitPreJoinProjectionRecipeBinding::AddMaterializedHashJoinSelection(
-    SljitFullPipelinePrimitiveSequence &sequence, idx_t pre_join_projection_idx, idx_t hash_join_idx) const {
+void SljitPreJoinProjectionRecipeBinding::AddMaterializedHashJoinSelection(SljitFullPipelinePrimitiveSequence &sequence,
+                                                                           idx_t pre_join_projection_idx,
+                                                                           idx_t hash_join_idx) const {
 	AddProjectionChainStep(sequence, pre_join_projection_idx);
 	sequence.Add(MakeHashJoinProbeSelectionStep(hash_join_idx));
 }

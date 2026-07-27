@@ -13,17 +13,11 @@
 namespace duckdb {
 
 struct SljitNativeVectorRegisterLayout {
-	sljit_s32 input = 0;
-	sljit_s32 row_index = 0;
-	sljit_s32 row_count = 0;
-	sljit_s32 logical_index = 0;
-	sljit_s32 source_selection = 0;
-	sljit_s32 source_data = 0;
 	sljit_s32 optional_invariant = 0;
 	sljit_s32 saved_register_count = 0;
 
 	bool Available() const {
-		return input != 0;
+		return saved_register_count >= 6;
 	}
 
 	bool HasOptionalInvariant() const {

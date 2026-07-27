@@ -28,6 +28,24 @@ ExecutionRegionCompileResult ExecutionRegionCompileResult::Compiled(unique_ptr<E
 	return result;
 }
 
+ExecutionRegionCompileResult
+ExecutionRegionCompileResult::CompiledArtifact(shared_ptr<const ExecutionRegionArtifact> artifact,
+                                               ExecutionRegionExecutionMode execution_mode, string reason, string ir) {
+	if (!artifact) {
+		throw InternalException("compiled region result marked compiled without an artifact");
+	}
+	if (!ExecutionRegionExecutionModeIsCompiled(execution_mode)) {
+		throw InternalException("compiled artifact result uses invalid compiled execution mode");
+	}
+	ExecutionRegionCompileResult result;
+	result.status = ExecutionRegionCompileStatus::COMPILED;
+	result.execution_mode = execution_mode;
+	result.reason = std::move(reason);
+	result.ir = std::move(ir);
+	result.artifact = std::move(artifact);
+	return result;
+}
+
 ExecutionRegionCompileResult ExecutionRegionCompileResult::Unsupported(string reason) {
 	ExecutionRegionCompileResult result;
 	result.status = ExecutionRegionCompileStatus::UNSUPPORTED;
@@ -55,6 +73,9 @@ ExecutionRegionCompileResult ExecutionRegionCompileResult::Error(string reason) 
 ExecutionRegionBackend::~ExecutionRegionBackend() {
 }
 
+ExecutionRegionArtifact::~ExecutionRegionArtifact() {
+}
+
 ExecutionRunnerKind ExecutionRegionBackend::RunnerKind() const {
 	return ExecutionRunnerKind::COMPILED_VECTORIZED;
 }
@@ -78,7 +99,17 @@ ExecutionRegionCompileResult ExecutionRegionBackend::CompileRegion(const Executi
 	return ExecutionRegionCompileResult::Unsupported("backend does not compile regions");
 }
 
+unique_ptr<ExecutionRegionKernel>
+ExecutionRegionBackend::InstantiateRegionArtifact(const shared_ptr<const ExecutionRegionArtifact> &,
+                                                  const ExecutionRegionCompilationInput &) {
+	return nullptr;
+}
+
 ExecutionRegionBackendPlan::~ExecutionRegionBackendPlan() {
+}
+
+string ExecutionRegionBackendPlan::ArtifactCacheKey() const {
+	return string();
 }
 
 } // namespace duckdb

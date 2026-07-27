@@ -34,7 +34,7 @@ static bool TryExecuteDirectAppendNewGroupedPrimitiveAggregateUpdate(
 	                                          : "direct_append_new_grouped_primitive_update_miss",
 	                                  stage_start);
 	if (updated) {
-		RecordSljitRegionMaterializationElisionProof(runtime, op.kind, "direct_append_new_grouped_primitive_update",
+		RecordSljitRegionMaterializationElision(runtime, op.kind, "direct_append_new_grouped_primitive_update",
 		                                             input.size());
 	}
 	return updated;
@@ -57,7 +57,7 @@ static bool TryExecuteDirectNewGroupedPrimitiveAggregateUpdate(
 	    runtime, op_idx, op.kind,
 	    updated ? "direct_new_grouped_primitive_update" : "direct_new_grouped_primitive_update_miss", stage_start);
 	if (updated) {
-		RecordSljitRegionMaterializationElisionProof(runtime, op.kind, "direct_new_grouped_primitive_update",
+		RecordSljitRegionMaterializationElision(runtime, op.kind, "direct_new_grouped_primitive_update",
 		                                             input.size());
 	}
 	return updated;

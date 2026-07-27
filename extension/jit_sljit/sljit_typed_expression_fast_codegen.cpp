@@ -260,12 +260,10 @@ EmitSljitTypedExpressionTreeFastCaseReg(struct sljit_compiler *compiler, const E
 	}
 }
 
-static void
-EmitSljitTypedExpressionTreeFastIntegralCompressReg(struct sljit_compiler *compiler, const ExecutionExpressionIR &node,
-                                                    idx_t &spill_index,
-                                                    vector<SljitExpressionTreeOverflowJumps> &overflows,
-                                                    SljitTypedExpressionTreeFastIndexMode index_mode,
-                                                    const vector<SljitTypedExpressionTreeDataPointerHoist> *data_hoists) {
+static void EmitSljitTypedExpressionTreeFastIntegralCompressReg(
+    struct sljit_compiler *compiler, const ExecutionExpressionIR &node, idx_t &spill_index,
+    vector<SljitExpressionTreeOverflowJumps> &overflows, SljitTypedExpressionTreeFastIndexMode index_mode,
+    const vector<SljitTypedExpressionTreeDataPointerHoist> *data_hoists) {
 	D_ASSERT(node.children.size() == 2);
 	EmitSljitTypedExpressionTreeFastValueRegInternal(compiler, *node.children[0], spill_index, overflows, index_mode,
 	                                                 data_hoists);

@@ -44,8 +44,8 @@ static bool SljitStringCompressedCountStarProjectionTypeSupported(PhysicalType p
 	}
 }
 
-static bool SljitTryReadStringCompressedCountStarProjectionInput(
-    const SljitExecutableRegionOp &projection_op, SljitStringCompressedCountStarProjectionInput &input) {
+static bool SljitTryReadStringCompressedCountStarProjectionInput(const SljitExecutableRegionOp &projection_op,
+                                                                 SljitStringCompressedCountStarProjectionInput &input) {
 	input = SljitStringCompressedCountStarProjectionInput();
 	if (projection_op.kind != SljitNativeRegionOpKind::PROJECTION || projection_op.projections.size() != 1 ||
 	    projection_op.output_types.size() != 1) {

@@ -76,11 +76,11 @@ SljitRegionNodePlan PlanSljitAggregateUpdateSinkNode(const ExecutionRegionNode &
 		if (!contract.native_state_update_contract.required_capability.empty()) {
 			reason += ";requires=" + contract.native_state_update_contract.required_capability;
 		}
-			reason += ";sink_kind=" + string(ExecutionRegionSinkKindToString(node.sink->kind));
-			reason += ";aggregate_operator_kind=" + string(ExecutionRegionAggregateOperatorKindToString(contract.kind));
-			reason += ";aggregate_count=" + std::to_string(contract.aggregate_count);
-			reason += ";group_count=" + std::to_string(contract.group_count);
-			reason += ";payload_type_count=" + std::to_string(contract.payload_type_count);
+		reason += ";sink_kind=" + string(ExecutionRegionSinkKindToString(node.sink->kind));
+		reason += ";aggregate_operator_kind=" + string(ExecutionRegionAggregateOperatorKindToString(contract.kind));
+		reason += ";aggregate_count=" + std::to_string(contract.aggregate_count);
+		reason += ";group_count=" + std::to_string(contract.group_count);
+		reason += ";payload_type_count=" + std::to_string(contract.payload_type_count);
 		for (auto &aggregate : node.sink->aggregates) {
 			reason += ";aggregate" + std::to_string(aggregate.aggregate_index) + "_function=" + aggregate.function_name;
 			reason += ";";

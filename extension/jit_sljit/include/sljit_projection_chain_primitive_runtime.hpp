@@ -35,10 +35,9 @@ public:
 		if (step.projection_chain.HasBoundComposedProjection()) {
 			synthetic_projection_scratch = &synthetic_projection_scratch_states[step_idx];
 		}
-		return SljitExecuteProjectionChainPrimitive(runtime, scratch, ops, step.projection_chain, input,
-		                                            projection_chain_batch, selected_hash_join_input,
-		                                            synthetic_projection_output, synthetic_projection_scratch,
-		                                            direct_handoff, execute_output_batch);
+		return SljitExecuteProjectionChainPrimitive(
+		    runtime, scratch, ops, step.projection_chain, input, projection_chain_batch, selected_hash_join_input,
+		    synthetic_projection_output, synthetic_projection_scratch, direct_handoff, execute_output_batch);
 	}
 
 	template <class EXECUTE_OUTPUT_BATCH>

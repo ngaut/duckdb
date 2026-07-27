@@ -70,7 +70,7 @@ static bool TryExecuteRunPreaggregatedInputVectorCarryoverOnlyUpdate(
 	grouped_state.state->RecordDirectStateAddressUpdates(represented_row_count);
 	RecordSljitRegionStageRuntimePath(runtime, op_idx, op.kind,
 	                                  "direct_input_vector_run_preaggregated_carryover_update", stage_start);
-	RecordSljitRegionMaterializationElisionPath(
+	RecordSljitRegionMaterializationElision(
 	    runtime, op.kind, "direct_input_vector_run_preaggregated_carryover_update", represented_row_count);
 	SljitRecordInputVectorPreaggregatedUpdateBoundaries(runtime, op.kind, run_group_keys.size(), represented_row_count);
 	if (finish) {
@@ -161,7 +161,7 @@ static bool TryExecuteRunPreaggregatedInputVectorAppendSuffixWithPrefixUpdate(
 	RecordPreaggregatedGroupedAggregateRepresentedRows(grouped_state, represented_row_count, run_group_keys.size());
 	RecordSljitRegionStageRuntimePath(
 	    runtime, op_idx, op.kind, "direct_input_vector_run_preaggregated_prefix_carryover_update", prefix_stage_start);
-	RecordSljitRegionMaterializationElisionPath(
+	RecordSljitRegionMaterializationElision(
 	    runtime, op.kind, "direct_input_vector_run_preaggregated_prefix_carryover_update", prefix_row_count);
 	SljitRecordInputVectorPreaggregatedUpdateBoundaries(runtime, op.kind, prefix_count, prefix_row_count);
 
@@ -172,7 +172,7 @@ static bool TryExecuteRunPreaggregatedInputVectorAppendSuffixWithPrefixUpdate(
 		                                         suffix_update_state.captured_address);
 	}
 	scratch.RecordDirectAppendNewAggregateUpdateResult(op_idx, true);
-	RecordSljitRegionMaterializationElisionPath(
+	RecordSljitRegionMaterializationElision(
 	    runtime, op.kind, "direct_input_vector_run_preaggregated_suffix_append_prefix_update", represented_row_count);
 	return true;
 }
@@ -218,7 +218,7 @@ static bool TryExecuteRunPreaggregatedInputVectorAppendNewUpdate(
 		RecordSljitRegionStageRuntimePath(runtime, op_idx, op.kind,
 		                                  "direct_append_input_vector_run_preaggregated_grouped_update",
 		                                  append_stage_start);
-		RecordSljitRegionMaterializationElisionPath(
+		RecordSljitRegionMaterializationElision(
 		    runtime, op.kind, "direct_input_vector_run_preaggregated_append_new_grouped_update", represented_row_count);
 		SljitRecordInputVectorPreaggregatedUpdateBoundaries(runtime, op.kind, run_group_keys.size(),
 		                                                    represented_row_count);
@@ -299,10 +299,10 @@ static bool TryExecuteRunPreaggregatedInputVectorGroupedTargetPayloadUpdate(
 	RecordSljitRegionStageRuntime(runtime, op_idx, op.kind, "direct_input_vector_run_preaggregated_payload_update",
 	                              update_start);
 	if (fused_run_payloads) {
-		RecordSljitRegionMaterializationElisionPath(
+		RecordSljitRegionMaterializationElision(
 		    runtime, op.kind, "direct_input_vector_run_fused_preaggregated_grouped_update", payload_input.size());
 	}
-	RecordSljitRegionMaterializationElisionPath(
+	RecordSljitRegionMaterializationElision(
 	    runtime, op.kind, "direct_input_vector_run_preaggregated_grouped_update", payload_input.size());
 	SljitRecordInputVectorPreaggregatedUpdateBoundaries(runtime, op.kind, run_count, payload_input.size());
 	return true;

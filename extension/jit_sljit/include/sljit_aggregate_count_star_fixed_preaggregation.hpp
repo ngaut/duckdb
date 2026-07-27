@@ -261,10 +261,9 @@ static bool TryPreaggregateFixedWidthCountStarGroups(DataChunk &input_groups, Da
 }
 
 template <class T>
-static bool TryAccumulatePreaggregatedCountStarGroupsTemplated(DataChunk &source_groups,
-                                                               const vector<int64_t> &source_count_deltas,
-                                                               DataChunk &pending_groups,
-                                                               vector<int64_t> &pending_count_deltas) {
+static bool
+TryAccumulatePreaggregatedCountStarGroupsTemplated(DataChunk &source_groups, const vector<int64_t> &source_count_deltas,
+                                                   DataChunk &pending_groups, vector<int64_t> &pending_count_deltas) {
 	if (source_groups.ColumnCount() != 1 || pending_groups.ColumnCount() != 1 ||
 	    source_groups.data[0].GetType() != pending_groups.data[0].GetType() ||
 	    source_groups.size() > source_count_deltas.size()) {
@@ -308,35 +307,35 @@ static bool TryAccumulatePreaggregatedCountStarGroups(DataChunk &source_groups,
 	}
 	switch (source_groups.data[0].GetType().InternalType()) {
 	case PhysicalType::INT8:
-		return TryAccumulatePreaggregatedCountStarGroupsTemplated<int8_t>(
-		    source_groups, source_count_deltas, pending_groups, pending_count_deltas);
+		return TryAccumulatePreaggregatedCountStarGroupsTemplated<int8_t>(source_groups, source_count_deltas,
+		                                                                  pending_groups, pending_count_deltas);
 	case PhysicalType::INT16:
-		return TryAccumulatePreaggregatedCountStarGroupsTemplated<int16_t>(
-		    source_groups, source_count_deltas, pending_groups, pending_count_deltas);
+		return TryAccumulatePreaggregatedCountStarGroupsTemplated<int16_t>(source_groups, source_count_deltas,
+		                                                                   pending_groups, pending_count_deltas);
 	case PhysicalType::INT32:
-		return TryAccumulatePreaggregatedCountStarGroupsTemplated<int32_t>(
-		    source_groups, source_count_deltas, pending_groups, pending_count_deltas);
+		return TryAccumulatePreaggregatedCountStarGroupsTemplated<int32_t>(source_groups, source_count_deltas,
+		                                                                   pending_groups, pending_count_deltas);
 	case PhysicalType::INT64:
-		return TryAccumulatePreaggregatedCountStarGroupsTemplated<int64_t>(
-		    source_groups, source_count_deltas, pending_groups, pending_count_deltas);
+		return TryAccumulatePreaggregatedCountStarGroupsTemplated<int64_t>(source_groups, source_count_deltas,
+		                                                                   pending_groups, pending_count_deltas);
 	case PhysicalType::INT128:
-		return TryAccumulatePreaggregatedCountStarGroupsTemplated<hugeint_t>(
-		    source_groups, source_count_deltas, pending_groups, pending_count_deltas);
+		return TryAccumulatePreaggregatedCountStarGroupsTemplated<hugeint_t>(source_groups, source_count_deltas,
+		                                                                     pending_groups, pending_count_deltas);
 	case PhysicalType::UINT8:
-		return TryAccumulatePreaggregatedCountStarGroupsTemplated<uint8_t>(
-		    source_groups, source_count_deltas, pending_groups, pending_count_deltas);
+		return TryAccumulatePreaggregatedCountStarGroupsTemplated<uint8_t>(source_groups, source_count_deltas,
+		                                                                   pending_groups, pending_count_deltas);
 	case PhysicalType::UINT16:
-		return TryAccumulatePreaggregatedCountStarGroupsTemplated<uint16_t>(
-		    source_groups, source_count_deltas, pending_groups, pending_count_deltas);
+		return TryAccumulatePreaggregatedCountStarGroupsTemplated<uint16_t>(source_groups, source_count_deltas,
+		                                                                    pending_groups, pending_count_deltas);
 	case PhysicalType::UINT32:
-		return TryAccumulatePreaggregatedCountStarGroupsTemplated<uint32_t>(
-		    source_groups, source_count_deltas, pending_groups, pending_count_deltas);
+		return TryAccumulatePreaggregatedCountStarGroupsTemplated<uint32_t>(source_groups, source_count_deltas,
+		                                                                    pending_groups, pending_count_deltas);
 	case PhysicalType::UINT64:
-		return TryAccumulatePreaggregatedCountStarGroupsTemplated<uint64_t>(
-		    source_groups, source_count_deltas, pending_groups, pending_count_deltas);
+		return TryAccumulatePreaggregatedCountStarGroupsTemplated<uint64_t>(source_groups, source_count_deltas,
+		                                                                    pending_groups, pending_count_deltas);
 	case PhysicalType::UINT128:
-		return TryAccumulatePreaggregatedCountStarGroupsTemplated<uhugeint_t>(
-		    source_groups, source_count_deltas, pending_groups, pending_count_deltas);
+		return TryAccumulatePreaggregatedCountStarGroupsTemplated<uhugeint_t>(source_groups, source_count_deltas,
+		                                                                      pending_groups, pending_count_deltas);
 	default:
 		return false;
 	}

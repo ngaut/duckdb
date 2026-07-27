@@ -60,6 +60,15 @@ static string DescribeSljitLogicalTypes(const vector<LogicalType> &types) {
 	return result;
 }
 
+static string DescribeSljitLogicalTypesSemantic(const vector<LogicalType> &types) {
+	string result;
+	for (auto &type : types) {
+		auto value = type.ToString();
+		result += std::to_string(value.size()) + ":" + value + ";";
+	}
+	return result;
+}
+
 static const char *SljitHashJoinKeyKindToString(SljitNativeHashJoinKeyKind kind) {
 	switch (kind) {
 	case SljitNativeHashJoinKeyKind::INT8:
@@ -174,7 +183,8 @@ const char *SljitNestedLoopJoinValueKindToString(SljitNativeNestedLoopJoinValueK
 }
 
 static string
-DescribeNativeNestedLoopJoinProbeConditions(const vector<SljitNativeNestedLoopJoinProbeConditionPlan> &conditions) {
+DescribeNativeNestedLoopJoinProbeConditions(const vector<SljitNativeNestedLoopJoinProbeConditionPlan> &conditions,
+                                            bool semantic) {
 	string result;
 	for (idx_t condition_idx = 0; condition_idx < conditions.size(); condition_idx++) {
 		if (condition_idx > 0) {
@@ -184,22 +194,31 @@ DescribeNativeNestedLoopJoinProbeConditions(const vector<SljitNativeNestedLoopJo
 		result += "condition" + std::to_string(condition_idx);
 		result += "<kind=" + string(SljitNestedLoopJoinValueKindToString(condition.value_kind));
 		result += ",comparison=" + string(SljitHashJoinComparisonToString(condition.comparison_type));
-		result += ",lhs=" + DescribeNativeRegionExpression(condition.lhs_condition) + ">";
+		result += ",lhs=" +
+		          (semantic ? DescribeNativeRegionExpressionSemantic(condition.lhs_condition)
+		                    : DescribeNativeRegionExpression(condition.lhs_condition)) +
+		          ">";
 	}
 	return result;
 }
 
-string DescribeNativeRegion(const SljitNativeRegionPlan &region, const string &mode) {
+static string DescribeNativeRegionInternal(const SljitNativeRegionPlan &region, const string &mode, bool semantic) {
 	string result = "sljit.region " + mode;
 	for (idx_t op_idx = 0; op_idx < region.ops.size(); op_idx++) {
 		auto &op = region.ops[op_idx];
 		result += ";op" + std::to_string(op_idx) + "=";
 		switch (op.kind) {
 		case SljitNativeRegionOpKind::FILTER:
-			result += "filter(" + DescribeNativeRegionExpression(op.filter) + ")";
+			result += "filter(" +
+			          (semantic ? DescribeNativeRegionExpressionSemantic(op.filter)
+			                    : DescribeNativeRegionExpression(op.filter)) +
+			          ")";
 			break;
 		case SljitNativeRegionOpKind::PROJECTION:
-			result += "projection(" + DescribeNativeRegionExpressionList(op.projections) + ")";
+			result += "projection(" +
+			          (semantic ? DescribeNativeRegionExpressionListSemantic(op.projections)
+			                    : DescribeNativeRegionExpressionList(op.projections)) +
+			          ")";
 			break;
 		case SljitNativeRegionOpKind::HASH_JOIN_PROBE:
 			result +=
@@ -214,10 +233,15 @@ string DescribeNativeRegion(const SljitNativeRegionPlan &region, const string &m
 			if (op.hash_join_probe.perfect_hash_probe) {
 				result += ",perfect_hash_probe_shape=native";
 			}
+			result += op.hash_join_probe.exact_source_filter_binding != DConstants::INVALID_INDEX
+			              ? ",exact_source_filter_proof=true"
+			              : ",exact_source_filter_proof=false";
 			result += ",output_mode=" + string(SljitHashJoinProbeOutputModeToString(op.hash_join_probe.output_mode));
 			if (op.hash_join_probe.residual_predicate) {
 				result += ",residual_predicate=true";
-				result += ",residual=" + DescribeNativeRegionExpression(op.hash_join_probe.residual_filter);
+				result += ",residual=" +
+				          (semantic ? DescribeNativeRegionExpressionSemantic(op.hash_join_probe.residual_filter)
+				                    : DescribeNativeRegionExpression(op.hash_join_probe.residual_filter));
 			}
 			result += ")";
 			break;
@@ -230,12 +254,13 @@ string DescribeNativeRegion(const SljitNativeRegionPlan &region, const string &m
 			break;
 		case SljitNativeRegionOpKind::NESTED_LOOP_JOIN_PROBE:
 			result += "nested_loop_join_probe(conditions=" +
-			          DescribeNativeNestedLoopJoinProbeConditions(op.nested_loop_join_probe.conditions);
+			          DescribeNativeNestedLoopJoinProbeConditions(op.nested_loop_join_probe.conditions, semantic);
 			result += ")";
 			break;
 		case SljitNativeRegionOpKind::NESTED_LOOP_JOIN_BUILD:
 			result += "nested_loop_join_build(conditions=" +
-			          DescribeNativeRegionExpressionList(op.nested_loop_join_build.rhs_conditions);
+			          (semantic ? DescribeNativeRegionExpressionListSemantic(op.nested_loop_join_build.rhs_conditions)
+			                    : DescribeNativeRegionExpressionList(op.nested_loop_join_build.rhs_conditions));
 			result += ";payload_columns=" + std::to_string(op.nested_loop_join_build.input_types.size());
 			result += ")";
 			break;
@@ -254,10 +279,13 @@ string DescribeNativeRegion(const SljitNativeRegionPlan &region, const string &m
 			result += string(
 			    ExecutionRegionAggregateOperatorKindToString(op.aggregate_update.sink_info.aggregate_contract.kind));
 			result += ";columns=" + std::to_string(op.aggregate_update.input_types.size());
-			result += ";input_types=[" + DescribeSljitLogicalTypes(op.aggregate_update.input_types) + "]";
+			result += ";input_types=[" +
+			          (semantic ? DescribeSljitLogicalTypesSemantic(op.aggregate_update.input_types)
+			                    : DescribeSljitLogicalTypes(op.aggregate_update.input_types)) +
+			          "]";
 			result += ";groups=" + std::to_string(op.aggregate_update.sink_info.groups.size());
 			result += ";aggregates=" + std::to_string(op.aggregate_update.sink_info.aggregates.size());
-			if (!op.aggregate_update.ir.empty()) {
+			if (!semantic && !op.aggregate_update.ir.empty()) {
 				result += ";diagnostics=" + op.aggregate_update.ir;
 			}
 			if (op.aggregate_update.UsesPrimitivePayloads()) {
@@ -265,12 +293,17 @@ string DescribeNativeRegion(const SljitNativeRegionPlan &region, const string &m
 				result += op.aggregate_update.PayloadsWereComposedThroughProjection()
 				              ? ";payload_binding=projection-composed"
 				              : ";payload_binding=direct";
-				result += ";primitive_payloads=" + DescribeNativeRegionExpressionList(op.aggregate_update.payloads);
+				result += ";primitive_payloads=" +
+				          (semantic ? DescribeNativeRegionExpressionListSemantic(op.aggregate_update.payloads)
+				                    : DescribeNativeRegionExpressionList(op.aggregate_update.payloads));
 				if (op.aggregate_update.use_perfect_hash_group_lookup) {
 					result += ";grouped_state_lookup=generated-perfect-hash";
 					if (!op.aggregate_update.group_expressions.empty()) {
-						result += ";group_expressions=" +
-						          DescribeNativeRegionExpressionList(op.aggregate_update.group_expressions);
+						result +=
+						    ";group_expressions=" +
+						    (semantic
+						         ? DescribeNativeRegionExpressionListSemantic(op.aggregate_update.group_expressions)
+						         : DescribeNativeRegionExpressionList(op.aggregate_update.group_expressions));
 					}
 				} else if (op.aggregate_update.use_grouped_state_addresses) {
 					result += ";grouped_state_lookup=native-state-address";
@@ -281,7 +314,9 @@ string DescribeNativeRegion(const SljitNativeRegionPlan &region, const string &m
 			result += ")";
 			break;
 		case SljitNativeRegionOpKind::ORDER_SINK:
-			result += "ordered_sink(keys=" + DescribeNativeRegionExpressionList(op.order_sink.order_keys);
+			result +=
+			    "ordered_sink(keys=" + (semantic ? DescribeNativeRegionExpressionListSemantic(op.order_sink.order_keys)
+			                                     : DescribeNativeRegionExpressionList(op.order_sink.order_keys));
 			result += ";payload_columns=" + std::to_string(op.order_sink.input_types.size());
 			result += ";operator_kind=" +
 			          string(ExecutionRegionOperatorKindToString(op.order_sink.sink_info.order_contract.kind));
@@ -291,7 +326,78 @@ string DescribeNativeRegion(const SljitNativeRegionPlan &region, const string &m
 			result += "unknown";
 			break;
 		}
+		if (semantic) {
+			result += "<operator_index=" + std::to_string(op.operator_index);
+			result += ",input_types=[" + DescribeSljitLogicalTypesSemantic(op.input_types) + "]";
+			result += ",output_types=[" + DescribeSljitLogicalTypesSemantic(op.output_types) + "]>";
+		}
 	}
+	return result;
+}
+
+string DescribeNativeRegion(const SljitNativeRegionPlan &region, const string &mode) {
+	return DescribeNativeRegionInternal(region, mode, false);
+}
+
+static void AppendSljitArtifactKeyField(string &result, const string &name, const string &value) {
+	result += name;
+	result += "=" + std::to_string(value.size()) + ":";
+	result += value;
+	result += ";";
+}
+
+string BuildSljitRegionArtifactSemanticKey(const ExecutionRegionCandidate &candidate,
+                                           const SljitNativeRegionPlan &region) {
+	string result = "sljit-artifact-v2";
+	AppendSljitArtifactKeyField(result, "context", candidate.signature.context);
+	AppendSljitArtifactKeyField(result, "shape", candidate.signature.shape);
+	AppendSljitArtifactKeyField(result, "features", candidate.signature.feature_shape);
+	AppendSljitArtifactKeyField(result, "context_features", candidate.signature.context_feature_shape);
+	AppendSljitArtifactKeyField(result, "contract", candidate.signature.contract_shape);
+	result += ";source_execution=" + std::to_string(static_cast<uint8_t>(region.source_execution));
+	result += region.uses_scan_filters ? ";uses_scan_filters=true" : ";uses_scan_filters=false";
+	AppendSljitArtifactKeyField(result, "source_types", DescribeSljitLogicalTypesSemantic(region.source_output_types));
+	result += "source_not_null_count=" + std::to_string(region.source_not_null.size()) + ";";
+	for (idx_t source_idx = 0; source_idx < region.source_not_null.size(); source_idx++) {
+		result += "source_not_null" + std::to_string(source_idx) + "=";
+		result += region.source_not_null[source_idx] ? "1;" : "0;";
+	}
+	result += "scan_filter_count=" + std::to_string(region.scan_filters.size()) + ";";
+	for (idx_t filter_idx = 0; filter_idx < region.scan_filters.size(); filter_idx++) {
+		auto &scan_filter = region.scan_filters[filter_idx];
+		auto field_prefix = "scan_filter" + std::to_string(filter_idx);
+		result += field_prefix + "_index=" + std::to_string(scan_filter.filter_index) + ";";
+		AppendSljitArtifactKeyField(result, field_prefix + "_type", scan_filter.input_type.ToString());
+		result += field_prefix + (scan_filter.input_not_null ? "_not_null=1;" : "_not_null=0;");
+		AppendSljitArtifactKeyField(result, field_prefix + "_expression",
+		                            DescribeNativeRegionExpressionSemantic(scan_filter.filter));
+	}
+	AppendSljitArtifactKeyField(result, "region", DescribeNativeRegionInternal(region, "semantic", true));
+	return result;
+}
+
+static void AppendSljitArtifactBindingCounts(string &result, const string &name, const vector<idx_t> &values) {
+	result += name + "_count=" + std::to_string(values.size()) + ";";
+	for (idx_t value_idx = 0; value_idx < values.size(); value_idx++) {
+		result += name + std::to_string(value_idx) + "=" + std::to_string(values[value_idx]) + ";";
+	}
+}
+
+static void AppendSljitArtifactBindingValues(string &result, const string &name, const vector<Value> &values) {
+	result += name + "_count=" + std::to_string(values.size()) + ";";
+	for (idx_t value_idx = 0; value_idx < values.size(); value_idx++) {
+		auto field_name = name + std::to_string(value_idx);
+		AppendSljitArtifactKeyField(result, field_name + "_type", values[value_idx].type().ToString());
+		AppendSljitArtifactKeyField(result, field_name + "_value", values[value_idx].ToSQLString());
+	}
+}
+
+string BuildSljitRegionArtifactBindingKey(const SljitNativeRegionPlan &region) {
+	string result = "sljit-binding-v2;";
+	AppendSljitArtifactBindingCounts(result, "distinct", region.source_distinct_counts);
+	AppendSljitArtifactBindingCounts(result, "reserve", region.source_distinct_reserve_counts);
+	AppendSljitArtifactBindingValues(result, "min", region.source_min_values);
+	AppendSljitArtifactBindingValues(result, "max", region.source_max_values);
 	return result;
 }
 

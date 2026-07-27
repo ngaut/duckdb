@@ -1,0 +1,77 @@
+# name: test/sql/prepared/test_prepared_join_statistics.test
+# description: Prepared joins must not turn planning-time statistics into persistent predicates
+# group: [prepared]
+
+statement ok
+CREATE TEMP TABLE prepared_join_fact AS
+SELECT i::INTEGER AS k, i::BIGINT AS payload
+FROM range(10) tbl(i)
+
+statement ok
+CREATE TEMP TABLE prepared_join_dim AS
+SELECT i::INTEGER AS k
+FROM range(3) tbl(i)
+
+statement ok
+PREPARE prepared_inner_join AS
+SELECT count(*), sum(f.payload)
+FROM prepared_join_fact f
+JOIN prepared_join_dim d USING (k)
+
+statement ok
+PREPARE prepared_semi_join AS
+SELECT count(*), sum(f.payload)
+FROM prepared_join_fact f
+SEMI JOIN prepared_join_dim d USING (k)
+
+query II
+EXECUTE prepared_inner_join
+----
+3	3
+
+query II
+EXECUTE prepared_semi_join
+----
+3	3
+
+# Extending the build-side range must be visible to a reusable physical plan.
+statement ok
+INSERT INTO prepared_join_dim VALUES (3)
+
+query II
+EXECUTE prepared_inner_join
+----
+4	6
+
+query II
+EXECUTE prepared_semi_join
+----
+4	6
+
+# Moving a key outside the planning-time range exercises UPDATE invalidation.
+statement ok
+UPDATE prepared_join_dim SET k = 4 WHERE k = 0
+
+query II
+EXECUTE prepared_inner_join
+----
+4	10
+
+query II
+EXECUTE prepared_semi_join
+----
+4	10
+
+# Removing a key must also refresh the execution-time dynamic filter.
+statement ok
+DELETE FROM prepared_join_dim WHERE k = 1
+
+query II
+EXECUTE prepared_inner_join
+----
+3	9
+
+query II
+EXECUTE prepared_semi_join
+----
+3	9

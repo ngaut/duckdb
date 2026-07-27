@@ -179,6 +179,11 @@ public:
 	                         idx_t count) const = 0;
 	virtual bool GetSignedLookupData(PrefixRangeLookupData &result) const = 0;
 	virtual idx_t DistinctCountUpperBound() const = 0;
+	//! Estimate how many distinct filter keys can overlap a scan range. This is
+	//! planning evidence only: lookup remains the semantic authority.
+	virtual idx_t EstimateDistinctCountInRange(const Value &lower_bound, const Value &upper_bound) const {
+		return DistinctCountUpperBound();
+	}
 	virtual FilterPropagateResult LookupRange(const Value &lower_bound, const Value &upper_bound) const = 0;
 	virtual bool IsInitialized() const = 0;
 	static bool SupportedType(const LogicalType &type);

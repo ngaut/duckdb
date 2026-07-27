@@ -114,7 +114,6 @@ public:
 	virtual void RecordHashJoinProbeLayout(const char *layout);
 	virtual void RecordJitRuntimePath(const char *path, idx_t count = 1);
 	virtual void RecordJitRuntimeProof(ExecutionRegionJitRuntimeProof proof, idx_t count = 1);
-	virtual void RecordJitRuntimeProofDetail(const char *proof, idx_t count = 1);
 	virtual void RecordJitRuntimeDelegation(const char *delegation, idx_t count = 1);
 	virtual void RecordLazyCodegen(const ExecutionRegionLazyCodegenMetrics &metrics);
 	virtual bool TryMarkOnce(ExecutionRegionRuntimeOnceFlag flag, idx_t index);

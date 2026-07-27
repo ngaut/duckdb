@@ -32,13 +32,10 @@ void RecordSljitRegionStageRuntime(ExecutionRegionRuntime &runtime, idx_t op_idx
                                    const char *phase, std::chrono::steady_clock::time_point start);
 void RecordSljitRegionRuntimePath(ExecutionRegionRuntime &runtime, SljitNativeRegionOpKind kind, const char *path,
                                   idx_t count = 1);
-void RecordSljitRegionRuntimeProof(ExecutionRegionRuntime &runtime, SljitNativeRegionOpKind kind,
-                                   ExecutionRegionJitRuntimeProof proof, const char *detail = nullptr,
-                                   idx_t count = 1);
-void RecordSljitRegionMaterializationElisionProof(ExecutionRegionRuntime &runtime, SljitNativeRegionOpKind kind,
-                                                  const char *detail = nullptr, idx_t count = 1);
-void RecordSljitRegionMaterializationElisionPath(ExecutionRegionRuntime &runtime, SljitNativeRegionOpKind kind,
-                                                 const char *path, idx_t count = 1);
+//! Record the descriptive path and the two typed proof categories required for
+//! a backend-owned materialization-elision path.
+void RecordSljitRegionMaterializationElision(ExecutionRegionRuntime &runtime, SljitNativeRegionOpKind kind,
+                                             const char *path, idx_t count = 1);
 void RecordSljitRegionRuntimeDelegation(ExecutionRegionRuntime &runtime, SljitNativeRegionOpKind kind,
                                         const char *delegation, idx_t row_count);
 void RecordSljitRegionStageRuntimePath(ExecutionRegionRuntime &runtime, idx_t op_idx, SljitNativeRegionOpKind kind,

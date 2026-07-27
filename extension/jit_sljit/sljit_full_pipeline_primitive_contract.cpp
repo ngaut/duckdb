@@ -41,8 +41,8 @@ bool SljitFullPipelineHasExactFilterProbeHashBuild(const vector<SljitExecutableR
 		throw InternalException("SLJIT bound recipe references an invalid hash join probe");
 	}
 	auto &probe = ops[probe_idx].hash_join_probe.plan;
-	return probe.exact_source_filter_identity && probe.keys.size() == 1 && probe.equality_key_count == 1 &&
-	       !probe.residual_predicate && !probe.mark_build_match &&
+	return probe.exact_source_filter_binding != DConstants::INVALID_INDEX && probe.keys.size() == 1 &&
+	       probe.equality_key_count == 1 && !probe.residual_predicate && !probe.mark_build_match &&
 	       probe.output_mode == ExecutionHashJoinProbeOutputMode::MATCHED_PROBE_AND_BUILD;
 }
 

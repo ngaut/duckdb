@@ -101,46 +101,42 @@ static inline sljit_jump *EmitSljitInvalidResultLoop(struct sljit_compiler *comp
 template <class EMIT_VALID_ROW>
 static inline sljit_jump *EmitSljitSelectedSourceInvalidResultBranchLoop(struct sljit_compiler *compiler,
                                                                          EMIT_VALID_ROW &&emit_valid_row) {
-	return EmitSljitInvalidResultLoop(compiler, [&](vector<sljit_jump *> &invalid_jumps,
-	                                                vector<sljit_jump *> &next_jumps) {
-		EmitLoadSelectedIndex(compiler);
-		invalid_jumps.push_back(EmitSkipInvalidSourceRow(compiler));
-		emit_valid_row(invalid_jumps, next_jumps);
-	});
+	return EmitSljitInvalidResultLoop(compiler,
+	                                  [&](vector<sljit_jump *> &invalid_jumps, vector<sljit_jump *> &next_jumps) {
+		                                  EmitLoadSelectedIndex(compiler);
+		                                  invalid_jumps.push_back(EmitSkipInvalidSourceRow(compiler));
+		                                  emit_valid_row(invalid_jumps, next_jumps);
+	                                  });
 }
 
 template <class EMIT_VALID_ROW>
 static inline sljit_jump *EmitSljitSelectedSourceInvalidResultLoop(struct sljit_compiler *compiler,
                                                                    EMIT_VALID_ROW &&emit_valid_row) {
 	return EmitSljitSelectedSourceInvalidResultBranchLoop(
-	    compiler, [&](vector<sljit_jump *> &invalid_jumps, vector<sljit_jump *> &) {
-		    emit_valid_row(invalid_jumps);
-	    });
+	    compiler, [&](vector<sljit_jump *> &invalid_jumps, vector<sljit_jump *> &) { emit_valid_row(invalid_jumps); });
 }
 
 template <class EMIT_VALID_ROW>
 static inline sljit_jump *EmitSljitTwoSourceInvalidResultBranchLoop(struct sljit_compiler *compiler,
                                                                     EMIT_VALID_ROW &&emit_valid_row) {
-	return EmitSljitInvalidResultLoop(compiler, [&](vector<sljit_jump *> &invalid_jumps,
-	                                                vector<sljit_jump *> &next_jumps) {
-		EmitLoadLogicalIndex(compiler, SLJIT_R1);
-		EmitLoadSourceIndex(compiler, offsetof(SljitNativeVectorInput, source_sel), SLJIT_R1, SLJIT_S3);
-		EmitLoadSourceIndex(compiler, offsetof(SljitNativeVectorInput, right_source_sel), SLJIT_R1, SLJIT_S4);
-		invalid_jumps.push_back(EmitJumpIfValidityNull(compiler, offsetof(SljitNativeVectorInput, source_validity),
-		                                               SLJIT_S3));
-		invalid_jumps.push_back(EmitJumpIfValidityNull(compiler, offsetof(SljitNativeVectorInput, right_source_validity),
-		                                               SLJIT_S4));
-		emit_valid_row(invalid_jumps, next_jumps);
-	});
+	return EmitSljitInvalidResultLoop(
+	    compiler, [&](vector<sljit_jump *> &invalid_jumps, vector<sljit_jump *> &next_jumps) {
+		    EmitLoadLogicalIndex(compiler, SLJIT_R1);
+		    EmitLoadSourceIndex(compiler, offsetof(SljitNativeVectorInput, source_sel), SLJIT_R1, SLJIT_S3);
+		    EmitLoadSourceIndex(compiler, offsetof(SljitNativeVectorInput, right_source_sel), SLJIT_R1, SLJIT_S4);
+		    invalid_jumps.push_back(
+		        EmitJumpIfValidityNull(compiler, offsetof(SljitNativeVectorInput, source_validity), SLJIT_S3));
+		    invalid_jumps.push_back(
+		        EmitJumpIfValidityNull(compiler, offsetof(SljitNativeVectorInput, right_source_validity), SLJIT_S4));
+		    emit_valid_row(invalid_jumps, next_jumps);
+	    });
 }
 
 template <class EMIT_VALID_ROW>
 static inline sljit_jump *EmitSljitTwoSourceInvalidResultLoop(struct sljit_compiler *compiler,
-                                                             EMIT_VALID_ROW &&emit_valid_row) {
+                                                              EMIT_VALID_ROW &&emit_valid_row) {
 	return EmitSljitTwoSourceInvalidResultBranchLoop(
-	    compiler, [&](vector<sljit_jump *> &invalid_jumps, vector<sljit_jump *> &) {
-		    emit_valid_row(invalid_jumps);
-	    });
+	    compiler, [&](vector<sljit_jump *> &invalid_jumps, vector<sljit_jump *> &) { emit_valid_row(invalid_jumps); });
 }
 
 } // namespace duckdb

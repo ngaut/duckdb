@@ -49,15 +49,9 @@ static SljitRegionNodePlan PlanSljitSimpleNativeSinkNode(const ExecutionRegionNo
 	switch (native_kind) {
 	case SljitNativeRegionOpKind::APPEND_SINK:
 		native_op.append_sink.sink_info = *node.sink;
-		if (render_diagnostics) {
-			native_op.append_sink.ir = node.sink->ir;
-		}
 		break;
 	case SljitNativeRegionOpKind::DELIM_JOIN_SINK:
 		native_op.delim_join_sink.sink_info = *node.sink;
-		if (render_diagnostics) {
-			native_op.delim_join_sink.ir = node.sink->ir;
-		}
 		break;
 	default:
 		throw InternalException("Unsupported simple SLJIT native sink kind");
@@ -92,9 +86,6 @@ static SljitRegionNodePlan PlanSljitOrderSinkNode(const ExecutionRegionNode &nod
 	SljitNativeRegionOpPlan native_op;
 	native_op.kind = SljitNativeRegionOpKind::ORDER_SINK;
 	native_op.order_sink.sink_info = *node.sink;
-	if (render_diagnostics) {
-		native_op.order_sink.ir = node.sink->ir;
-	}
 	native_op.order_sink.order_keys.reserve(order_contract.order_keys.size());
 	native_op.order_sink.key_types.reserve(order_contract.order_keys.size());
 	for (auto &key : order_contract.order_keys) {

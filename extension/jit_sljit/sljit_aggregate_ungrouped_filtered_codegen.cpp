@@ -152,7 +152,7 @@ unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativeFilteredUngroupedFusedPrim
 		}
 	}
 	// The nullable variant runs the same packed loops with a lane-expanded validity
-	// mask ANDed in; the row-skip semantics require an AND-only predicate and cover
+	// mask ANDead in; the row-skip semantics require an AND-only predicate and cover
 	// payload references only when there is a single payload (or none for count(*)).
 	vector<idx_t> simd_validity_refs;
 	bool simd_nullable_ok = false;
@@ -254,7 +254,7 @@ unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativeFilteredUngroupedFusedPrim
 		sljit_set_label(use_generic_loop, sljit_emit_label(compiler));
 
 		// Flat batches that MAY contain NULLs run the same packed loops with a
-		// lane-expanded validity mask ANDed into the predicate mask; the scalar
+		// lane-expanded validity mask ANDead into the predicate mask; the scalar
 		// tail pre-checks the referenced sources per row (a null row cannot pass
 		// an AND-only predicate, and a single payload's sources are covered too).
 		if (simd_nullable_ok) {

@@ -172,7 +172,7 @@ private:
 		        runtime, scratch, op_idx, op, input, materialized_direct_group_sources,
 		        materialized_direct_payload_source_indices, *bound.payload_lanes, *bound.grouped_state,
 		        direct_preaggregated_batch, false)) {
-			RecordSljitRegionMaterializationElisionPath(
+			RecordSljitRegionMaterializationElision(
 			    runtime, op.kind, "direct_materialized_pending_preaggregated_grouped_update", count);
 			return true;
 		}
@@ -232,7 +232,7 @@ private:
 			    input_chunk.size(), *bound.payload_scratch);
 			RecordSljitRegionStageRuntime(runtime, primitive.aggregate_idx, aggregate_op.kind,
 			                              "filtered_perfect_hash_update", stage_start);
-			RecordSljitRegionMaterializationElisionPath(runtime, aggregate_op.kind, "filtered_perfect_hash_update",
+			RecordSljitRegionMaterializationElision(runtime, aggregate_op.kind, "filtered_perfect_hash_update",
 			                                            input_chunk.size());
 			processed_batches++;
 			return false;
@@ -367,7 +367,7 @@ private:
 			projected_direct_failure_reason = failure_reason.empty() ? "unknown" : failure_reason;
 			return false;
 		}
-		RecordSljitRegionMaterializationElisionPath(runtime, aggregate_op.kind, "projected_source_input_grouped_update",
+		RecordSljitRegionMaterializationElision(runtime, aggregate_op.kind, "projected_source_input_grouped_update",
 		                                            source_input.size());
 		processed_batches++;
 		return true;

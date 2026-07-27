@@ -313,17 +313,18 @@ JOIN phj_build_cast_down b
 ----
 10
 
-# Bloom filters need a larger sparse build side so PRF is not selected first.
+# Bloom filters need a build side larger than the bounded exact-PRF admission
+# limit so PRF is not selected first.
 # The residual inequality also prevents using the perfect hash join path.
 statement ok
 CREATE TABLE bf_probe_cast_up AS
 SELECT i::INTEGER AS k, (i % 7)::INTEGER AS g
-FROM range(0, 2000000) t(i)
+FROM range(0, 4000000) t(i)
 
 statement ok
 CREATE TABLE bf_build_cast_up AS
 SELECT (100000 + i * 3)::BIGINT AS k, ((100000 + i * 3) % 7)::INTEGER AS g
-FROM range(0, 600000) t(i)
+FROM range(0, 1100000) t(i)
 
 statement ok
 CHECKPOINT
@@ -345,17 +346,17 @@ JOIN bf_build_cast_up b
   ON p.k = b.k
  AND p.g >= b.g
 ----
-600000
+1100000
 
 statement ok
 CREATE TABLE bf_probe_cast_down AS
 SELECT i::BIGINT AS k, (i % 7)::INTEGER AS g
-FROM range(0, 2000000) t(i)
+FROM range(0, 4000000) t(i)
 
 statement ok
 CREATE TABLE bf_build_cast_down AS
 SELECT (100000 + i * 3)::INTEGER AS k, ((100000 + i * 3) % 7)::INTEGER AS g
-FROM range(0, 600000) t(i)
+FROM range(0, 1100000) t(i)
 
 statement ok
 CHECKPOINT
@@ -377,4 +378,4 @@ JOIN bf_build_cast_down b
   ON p.k = b.k
  AND p.g >= b.g
 ----
-600000
+1100000

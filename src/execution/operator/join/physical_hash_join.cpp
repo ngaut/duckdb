@@ -1766,7 +1766,10 @@ bool JoinFilterPushdownInfo::CanUsePrefixRangeFilter(ClientContext &context, opt
 		return false;
 	}
 
-	static constexpr idx_t BUILD_SIZE_THRESHOLD = 524288;
+	// Prefix bitmaps are bounded independently; allow up to one million build
+	// rows so dense integral domains can use exact rejection instead of a
+	// probabilistic Bloom filter.
+	static constexpr idx_t BUILD_SIZE_THRESHOLD = 1048576;
 	bool ht_is_small = ht->Count() <= BUILD_SIZE_THRESHOLD;
 	bool span_is_small = false;
 
@@ -1933,6 +1936,43 @@ static bool TryCastPrefixRangeBounds(const LogicalType &target_type, const Value
 	return target_min <= target_max;
 }
 
+static bool TryIntersectIntegralBounds(const LogicalType &target_type, const Value &min_val, const Value &max_val,
+                                       Value &target_min, Value &target_max) {
+	if (min_val.IsNull() || max_val.IsNull()) {
+		return false;
+	}
+	if (!target_type.IsIntegral() || !min_val.type().IsIntegral() || !max_val.type().IsIntegral()) {
+		return TryCastPrefixRangeBounds(target_type, min_val, max_val, target_min, target_max);
+	}
+
+	// Join-filter aggregates are evaluated in the join-key domain, while the
+	// pushed filter is evaluated in the scan column's storage domain. Intersect
+	// those domains at finalization time so prepared plans remain correct after
+	// DML and out-of-range build keys do not suppress useful runtime filters.
+	auto source_min = min_val;
+	auto source_max = max_val;
+	auto storage_min = Value::MinimumValue(target_type);
+	auto storage_max = Value::MaximumValue(target_type);
+	if (!source_min.DefaultTryCastAs(LogicalType::HUGEINT) || !source_max.DefaultTryCastAs(LogicalType::HUGEINT) ||
+	    !storage_min.DefaultTryCastAs(LogicalType::HUGEINT) || !storage_max.DefaultTryCastAs(LogicalType::HUGEINT)) {
+		return false;
+	}
+
+	if (source_max < storage_min || source_min > storage_max) {
+		return false;
+	}
+	if (source_min < storage_min) {
+		source_min = std::move(storage_min);
+	}
+	if (source_max > storage_max) {
+		source_max = std::move(storage_max);
+	}
+	target_min = std::move(source_min);
+	target_max = std::move(source_max);
+	return target_min.DefaultTryCastAs(target_type) && target_max.DefaultTryCastAs(target_type) &&
+	       !target_min.IsNull() && !target_max.IsNull() && target_min <= target_max;
+}
+
 unique_ptr<DataChunk>
 JoinFilterPushdownInfo::FinalizeFilters(ClientContext &context, const PhysicalComparisonJoin &op,
                                         unique_ptr<DataChunk> final_min_max, optional_ptr<JoinHashTable> ht,
@@ -1956,12 +1996,12 @@ JoinFilterPushdownInfo::FinalizeFilters(ClientContext &context, const PhysicalCo
 			auto min_val = min_val_before_cast;
 			auto max_val = max_val_before_cast;
 
-			// Cast to storage type, skip if fails
+			// Intersect current build bounds with the probe storage domain. This
+			// replaces the old planning-time join-stat predicates, whose values
+			// became stale when a prepared physical plan survived DML.
 			if (pushdown_column.storage_type.IsValid()) {
-				if (!min_val.DefaultTryCastAs(pushdown_column.storage_type)) {
-					continue;
-				}
-				if (!max_val.DefaultTryCastAs(pushdown_column.storage_type)) {
+				if (!TryIntersectIntegralBounds(pushdown_column.storage_type, min_val_before_cast, max_val_before_cast,
+				                                min_val, max_val)) {
 					continue;
 				}
 			}
@@ -2633,6 +2673,12 @@ ExecutionOperatorBindResult PhysicalHashJoin::BindExecutionOperator(ExecutionCon
 	binding.hash_join_probe.use_bloom_filter =
 	    !perfect_hash_layout && SelectJitHashJoinProbeFilterStrategy(*this, sink.hash_table->Count()) ==
 	                                JitHashJoinProbeFilterStrategy::BLOOM_REJECT;
+	binding.hash_join_probe.build_side_has_filtered_null = sink.hash_table->has_filtered_null;
+	binding.hash_join_probe.condition_null_values_are_equal.resize(contract.condition_count);
+	for (idx_t condition_idx = 0; condition_idx < contract.condition_count; condition_idx++) {
+		binding.hash_join_probe.condition_null_values_are_equal[condition_idx] =
+		    sink.hash_table->NullValuesAreEqual(condition_idx);
+	}
 	binding.hash_join_probe.table_layout = std::move(table_layout);
 	binding.hash_join_probe.perfect_layout = std::move(perfect_layout);
 	binding.hash_join_probe.empty_build_side = empty_build_side;
@@ -2953,6 +2999,25 @@ bool ExecutionTryDirectGatherHashJoinRHSFixedColumn(const ExecutionHashJoinProbe
 	}
 	return binding.hash_table->TryGatherRHSColumnFlat(row_pointers, *FlatVector::IncrementalSelectionVector(), count,
 	                                                  rhs_output_idx, result);
+}
+
+void ExecutionGatherHashJoinRHSColumn(const ExecutionHashJoinProbeBinding &binding, Vector &row_pointers, idx_t count,
+                                      idx_t rhs_output_idx, Vector &result) {
+	if (ExecutionTryDirectGatherHashJoinRHSFixedColumn(binding, row_pointers, count, rhs_output_idx, result)) {
+		return;
+	}
+	if (!binding.ready || !binding.hash_table ||
+	    binding.layout_kind != ExecutionHashJoinProbeLayoutKind::REGULAR_HASH_TABLE ||
+	    binding.output_mode != ExecutionHashJoinProbeOutputMode::MATCHED_PROBE_AND_BUILD ||
+	    rhs_output_idx >= binding.rhs_output_column_count) {
+		throw InternalException("execution native hash join RHS gather requires a regular matched probe binding");
+	}
+	const auto join_output_idx = binding.lhs_output_column_indices.size() + rhs_output_idx;
+	if (join_output_idx >= binding.output_types.size() || result.GetType() != binding.output_types[join_output_idx]) {
+		throw InternalException("execution native hash join RHS gather type mismatch");
+	}
+	binding.hash_table->GatherRHSColumn(row_pointers, *FlatVector::IncrementalSelectionVector(), count, rhs_output_idx,
+	                                    result);
 }
 
 bool ExecutionGetHashJoinRHSFixedColumnSource(const ExecutionHashJoinProbeBinding &binding, idx_t rhs_output_idx,

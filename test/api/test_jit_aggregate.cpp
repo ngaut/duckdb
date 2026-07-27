@@ -320,6 +320,7 @@ TEST_CASE("JIT fuses projection payloads into primitive ungrouped aggregate redu
 			continue;
 		}
 		found_compile = true;
+		INFO(event.ir);
 		RequireGeneratedMachineCodeRegion(event);
 		REQUIRE(StringUtil::Contains(event.reason, "execution:native-sljit-region-aggregate-update"));
 		REQUIRE(StringUtil::Contains(event.ir, "primitive_payloads=native:"));

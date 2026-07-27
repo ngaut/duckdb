@@ -140,8 +140,8 @@ TEST_CASE("JIT composes DuckDB string-set scans with direct hash build", "[api][
 			REQUIRE(StringUtil::Contains(event.reason, "duckdb-scan-filtered-source-contract"));
 		}
 		if (EventPhase(event) == "runtime" && EventStatus(event) == "executed" &&
-		    StringUtil::Contains(EventJitRuntimeProofCounts(event),
-		                         "hash_join_build.generated_backend_work.direct_source_ingress=")) {
+		    StringUtil::Contains(EventJitRuntimePathCounts(event), "hash_join_build.direct_source_ingress=") &&
+		    HasJitRuntimeProof(event, ExecutionRegionJitRuntimeProof::GENERATED_BACKEND_WORK)) {
 			found_build_runtime = true;
 			REQUIRE(EventJitRuntimeDelegationCounts(event).empty());
 		}

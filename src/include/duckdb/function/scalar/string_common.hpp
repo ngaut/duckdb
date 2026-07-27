@@ -99,7 +99,7 @@ static inline RESULT_TYPE StringCompressWideValue(const string_t &input) {
 	} else if (input.IsInlined()) {
 		static constexpr auto REMAINDER = sizeof(RESULT_TYPE) - string_t::INLINE_LENGTH;
 		StringCompressionReverseMemCpy<string_t::INLINE_LENGTH>(result_ptr + REMAINDER,
-		                                                         const_data_ptr_cast(input.GetPrefix()));
+		                                                        const_data_ptr_cast(input.GetPrefix()));
 		memset(result_ptr, '\0', REMAINDER);
 	} else {
 		const auto size = MinValue<idx_t>(sizeof(RESULT_TYPE), input.GetSize());

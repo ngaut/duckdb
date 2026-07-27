@@ -410,6 +410,7 @@ def verify_production_contract_ownership() -> None:
         "DetectSljitTargetCapabilities",
         "registers.addressable_saved_register_count++",
         "sljit_get_register_index(SLJIT_GP_REGISTER, SLJIT_S(saved_index)) < 0",
+        "Has64BitMachineWord()",
         "registers.SupportsLayout(5, 6)",
         "MaxAddressableSavedRegisters",
     ):
@@ -1263,19 +1264,25 @@ def verify_perfect_hash_predicate_cache_ownership() -> None:
         raise AssertionError("direct aggregate state must not retain the replaced local classifier")
 
     executable = read("extension/jit_sljit/include/sljit_region_executable.hpp")
-    if "SljitSharedPerfectHashPredicateClassificationCache shared_predicate_classification" not in executable:
-        raise AssertionError("the executable perfect-hash probe must own the shared immutable classifier")
+    if "SljitSharedPerfectHashPredicateClassificationCache shared_predicate_classification" in executable:
+        raise AssertionError(
+            "the reusable executable artifact must not retain a query hash-table dictionary through its classifier"
+        )
 
     local_state = read("extension/jit_sljit/sljit_region_runtime.cpp")
     for contract in (
         "class SljitNativeRegionLocalState : public ExecutionRegionLocalState",
         "SljitFullPipelineTerminalRuntimeState terminal",
-        "return make_uniq<SljitNativeRegionLocalState>(allocator, ops)",
+        "return make_uniq<SljitNativeRegionLocalState>(allocator, artifact->ops)",
+        "vector<SljitSharedPerfectHashPredicateClassificationCache> shared_predicate_classifications",
     ):
         if contract not in local_state:
-            raise AssertionError("local state must retain only mutable terminal execution state")
-    if "shared_predicate_classification" in local_state:
-        raise AssertionError("shared predicate classification must not be stored in pipeline-local state")
+            raise AssertionError("kernel execution state is missing query-local mutable ownership")
+    artifact_body = local_state.split("struct SljitNativeRegionArtifact", 1)[1].split(
+        "class SljitNativeRegionKernel", 1
+    )[0]
+    if "shared_predicate_classification" in artifact_body:
+        raise AssertionError("a cached SLJIT artifact must not retain query-specific predicate classification")
 
     consumer = read("extension/jit_sljit/include/sljit_hash_join_probe_aggregate_consumer_runtime.hpp")
     if "shared_predicate_classification.Observe(predicate_dictionary_entry, count" not in consumer:
@@ -1528,8 +1535,12 @@ def verify_runtime_proofs_are_typed() -> None:
     if "PhysicalRunnerBuildRuntimeProofRequirements" not in cost_model:
         raise AssertionError("CBO credited work must build its runtime proof ledger centrally")
     runtime_trace = read("extension/jit_sljit/sljit_region_runtime_trace.cpp")
-    if "RecordSljitRegionMaterializationElisionPath" not in runtime_trace:
+    if "RecordSljitRegionMaterializationElision" not in runtime_trace:
         raise AssertionError("SLJIT materialization-elision proof must have an explicit trace API")
+    if "RecordJitRuntimeProofDetail" in runtime_trace + read(
+        "src/include/duckdb/execution/execution_region_runtime.hpp"
+    ):
+        raise AssertionError("descriptive runtime paths must not be mixed into the typed proof ledger")
     source_fetch = read("extension/jit_sljit/include/sljit_source_fetch_primitive_runtime.hpp")
     if "ExecutionRegionJitRuntimeProof::FULL_PIPELINE_OWNERSHIP" not in source_fetch:
         raise AssertionError("SLJIT source-fetch ownership must emit full-pipeline runtime proof")
@@ -1579,9 +1590,7 @@ def verify_cache_keys_use_stable_identities() -> None:
     ):
         event_body = aggregate_ht.split(relocating_event, 1)
         if len(event_body) < 2 or "dense_single_field_target_cache.Disable()" not in event_body[1][:2500]:
-            raise AssertionError(
-                f"row-relocating event must disable the dense address cache: {relocating_event}"
-            )
+            raise AssertionError(f"row-relocating event must disable the dense address cache: {relocating_event}")
 
 
 def verify_runner_cost_schema_single_authority() -> None:
@@ -1649,6 +1658,136 @@ def verify_compiled_artifact_ownership() -> None:
             "extension/jit_sljit/**/*.cpp",
         ),
     )
+    kernel = read("src/include/duckdb/execution/execution_region_kernel.hpp")
+    cache = read("src/include/duckdb/execution/execution_region_artifact_cache.hpp")
+    cache_impl = read("src/execution/execution_region_artifact_cache.cpp")
+    backend = read("src/include/duckdb/execution/execution_region_backend.hpp")
+    planner = read("src/execution/execution_region_planner.cpp")
+    runtime = read("extension/jit_sljit/sljit_region_runtime.cpp")
+    manager = read("src/include/duckdb/execution/execution_region_manager.hpp")
+    physical_operator = read("src/include/duckdb/execution/physical_operator.hpp")
+    for contract, source in (
+        ("struct ExecutionRegionCachedArtifact", cache),
+        ("string compile_reason", cache),
+        ("class ExecutionRegionArtifactCache", cache),
+        ("ExecutionRegionArtifactCacheReservation LookupOrReserve", cache),
+        ("void Publish(ExecutionRegionArtifactCacheReservation &reservation", cache),
+        ("shared_ptr<const ExecutionRegionCachedArtifact> published", cache),
+        ("class DUCKDB_API ExecutionRegionArtifact", backend),
+        ("shared_ptr<const ExecutionRegionArtifact> artifact", backend),
+        ("virtual string ArtifactCacheKey() const", backend),
+        ("InstantiateRegionArtifact", backend),
+        ("CompiledArtifact", backend),
+        ("execution_region_manager.artifact_cache", planner),
+        ("cache.LookupOrReserve(artifact_cache_key)", planner),
+        ("backend.InstantiateRegionArtifact(artifact, input)", planner),
+        ("ValidateExecutionRegionCompileResult", planner),
+        ("artifact_cache.Publish(artifact_reservation", planner),
+        ("struct SljitNativeRegionArtifact", runtime),
+        ("shared_ptr<const SljitNativeRegionArtifact> artifact", runtime),
+        ("vector<shared_ptr<ExecutionRuntimeFilterIdentity>> exact_source_filter_bindings", runtime),
+        ("ExecutionRegionArtifactCache artifact_cache", manager),
+    ):
+        if contract not in source:
+            raise AssertionError(f"prepared execution artifact reuse is missing ownership contract: {contract}")
+    for stale_contract in (
+        "CloneForExecution",
+        "ExecutionRegionKernelCache",
+        "ExecutionRegionKernelCacheValue",
+        "GetOrBuild(",
+    ):
+        if stale_contract in kernel + planner + physical_operator:
+            raise AssertionError(f"stale prototype-kernel cache contract remains: {stale_contract}")
+    for diagnostic_key in ('":details="', '":dump_ir="', '":verify="'):
+        if diagnostic_key in planner:
+            raise AssertionError(f"diagnostic-only state must not fragment semantic artifacts: {diagnostic_key}")
+    if planner.count("backend.InstantiateRegionArtifact(") != 1:
+        raise AssertionError("fresh and cached artifacts must use one kernel-instantiation path")
+    artifact_body = runtime.split("struct SljitNativeRegionArtifact", 1)[1].split(
+        "class SljitNativeRegionKernel", 1
+    )[0]
+    if "semantic_key" in artifact_body or "binding_key" in artifact_body:
+        raise AssertionError("the exact cache lookup key must be the only artifact identity")
+    sljit_plan = read("extension/jit_sljit/include/sljit_region_plan.hpp")
+    for cache_key_contract in (
+        'result += ";semantic=" + std::to_string(artifact_semantic_key.size()) + ":" + artifact_semantic_key;',
+        'result += ";binding=" + std::to_string(artifact_binding_key.size()) + ":" + artifact_binding_key;',
+    ):
+        if cache_key_contract not in sljit_plan:
+            raise AssertionError(
+                f"SLJIT artifact cache key omits compile-affecting plan state: {cache_key_contract}"
+            )
+    if "return artifact_semantic_key;" in sljit_plan:
+        raise AssertionError("SLJIT semantic identity alone must not key artifacts with embedded binding statistics")
+    sljit_description = read("extension/jit_sljit/sljit_region_description.cpp")
+    for binding_key_contract in (
+        '"sljit-artifact-v2"',
+        '"sljit-binding-v2;"',
+        '"scan_filter_count="',
+        "values[value_idx].ToSQLString()",
+        "AppendSljitArtifactKeyField(result, field_name + \"_value\"",
+    ):
+        if binding_key_contract not in sljit_description:
+            raise AssertionError(f"SLJIT artifact binding key is not collision-safe: {binding_key_contract}")
+    expression_description = read("extension/jit_sljit/sljit_region_expression_description.cpp")
+    if "String(name, value.ToString())" in expression_description:
+        raise AssertionError("SLJIT semantic constants must distinguish typed NULL from literal NULL strings")
+    if re.search(
+        r'key\.String\("double_[^"]+", std::to_string\((?:expr|predicate)\.double',
+        expression_description,
+    ):
+        raise AssertionError("SLJIT semantic floating values must not lose precision through decimal formatting")
+    for floating_key_contract in (
+        "void Double(const char *name, double value)",
+        "memcpy(&bits, &value, sizeof(bits));",
+        'key.Double("double_constant", expr.double_constant);',
+        'key.Double("double_constant", predicate.double_constant);',
+    ):
+        if floating_key_contract not in expression_description:
+            raise AssertionError(f"SLJIT semantic floating key is not bit-exact: {floating_key_contract}")
+    signature = read("src/execution/execution_region_signature.cpp")
+    if 'result += std::to_string(value.size()) + ":" + value + ";";' not in signature:
+        raise AssertionError("execution-region semantic string lists must be length-prefixed")
+    if "ExecutionRegionArtifactCache" in physical_operator + kernel:
+        raise AssertionError("artifact cache policy must not leak into physical operators or backend kernels")
+    compile_body = planner.split("void ExecutionRegionPlanner::Compile(", 1)[1]
+    final_kernel_validation = compile_body.find(
+        "ValidateExecutionRegionCompileResult(backend_name, candidate, compiled_region.lowering_plan, string()"
+    )
+    publication = compile_body.find("artifact_cache.Publish(artifact_reservation")
+    if final_kernel_validation < 0 or publication < 0 or final_kernel_validation > publication:
+        raise AssertionError("compile results must be validated before artifact publication")
+    if "state->published = artifact;" not in cache_impl:
+        raise AssertionError("single-flight waiters must retain the exact publication across ready-LRU eviction")
+    if "EXECUTION_REGION_BACKEND_ABI_VERSION = 3" not in backend:
+        raise AssertionError("the reusable artifact contract must advance the loadable backend ABI")
+
+
+def verify_selected_projection_cache_ownership() -> None:
+    runtime_state = read("extension/jit_sljit/include/sljit_region_runtime_state.hpp")
+    selected_runtime = read("extension/jit_sljit/include/sljit_selected_hash_join_input_runtime.hpp")
+    for contract in (
+        "struct SljitSelectedProjectionCache",
+        "vector<SljitSelectedProjectionCache> selected_projection_caches",
+        "SljitSelectedProjectionCache &SelectedProjectionCache(idx_t op_idx)",
+    ):
+        if contract not in runtime_state:
+            raise AssertionError(f"selected projection cache is missing execution-local ownership: {contract}")
+    for cache_key in (
+        "cache.semantic_projection == &semantic_projection",
+        "cache.source_map == *selected.output_column_map",
+        "cache.input_types == source_binding->output_types",
+    ):
+        if cache_key not in selected_runtime:
+            raise AssertionError(f"selected projection cache key is incomplete: {cache_key}")
+    for prepared_runtime in (
+        "extension/jit_sljit/include/sljit_projection_chain_runtime.hpp",
+        "extension/jit_sljit/include/sljit_projected_aggregate_input_runtime.hpp",
+    ):
+        if "unique_ptr<SljitExecutableRegionOp> mapped_projection" in read(prepared_runtime):
+            raise AssertionError(
+                f"{prepared_runtime}: a chunk-local prepared input must not own a remapped executable projection"
+            )
 
 
 def verify_scan_filter_ownership() -> None:
@@ -1754,7 +1893,6 @@ def verify_scan_filter_ownership() -> None:
         (
             r"SljitAggregateRuntimePathProvesMaterializationElision",
             r"proof_path\.find",
-            r"RecordSljitRegionRuntimePath[^{]+ExecutionRegionJitRuntimeProof::MATERIALIZATION_ELISION",
         ),
         (
             "extension/jit_sljit/**/*.hpp",
@@ -1889,6 +2027,22 @@ def verify_hash_join_null_fact_ownership() -> None:
     probe_runtime = read("extension/jit_sljit/include/sljit_hash_join_probe_executor_runtime.hpp")
     if "layout.stored_keys_have_null" not in probe_runtime:
         raise AssertionError("native hash probes must specialize from actual retained-key NULL state")
+    operator_runtime = read("src/include/duckdb/execution/execution_operator_runtime.hpp")
+    for contract in (
+        "bool build_side_has_filtered_null = false;",
+        "vector<bool> condition_null_values_are_equal;",
+        "ExecutionGatherHashJoinRHSColumn",
+    ):
+        if contract not in operator_runtime:
+            raise AssertionError(f"hash-join backend ABI is missing immutable runtime contract: {contract}")
+    reject_regex(
+        "execution backend dependency on private JoinHashTable implementation",
+        (
+            r'#include\s+"duckdb/execution/join_hashtable\.hpp"',
+            r"\b(?:binding|probe)\.hash_table->",
+        ),
+        ("extension/jit_sljit/**/*.hpp", "extension/jit_sljit/**/*.cpp"),
+    )
 
 
 def verify_regular_hash_join_direct_aggregate_storage_contract() -> None:
@@ -2012,7 +2166,6 @@ def verify_regular_hash_join_direct_aggregate_storage_contract() -> None:
             raise AssertionError(f"direct regular-probe performance proof is not ratcheted: {receipt}")
 
 
-
 def verify_deferral_legality() -> None:
     """Deferral is legal only at kernel entry or a declined claim boundary.
 
@@ -2026,9 +2179,7 @@ def verify_deferral_legality() -> None:
     if "requested a mid-stream deferral" not in runner:
         raise AssertionError("the runtime must reject mid-stream deferral requests loudly")
     if runner.count("DeferAtClaimBoundary(") < 3:
-        raise AssertionError(
-            "declined-claim boundary deferrals must use the boundary-only path, not the public Defer"
-        )
+        raise AssertionError("declined-claim boundary deferrals must use the boundary-only path, not the public Defer")
     if "CanDeferAtEntry" not in runner:
         raise AssertionError("the runtime must expose entry-deferral legality to kernels")
     kernel = read("extension/jit_sljit/sljit_region_runtime.cpp")
@@ -2053,11 +2204,11 @@ def verify_handoff_capability_single_authority() -> None:
     if "SljitFullPipelinePrimitiveStepSupportsRunnerHandoff" not in kernel:
         raise AssertionError("the kernel capability must derive from the step-level single authority")
     strategy_header = read("extension/jit_sljit/include/sljit_grouped_aggregate_update_primitive.hpp")
-    if ("enum class SljitGroupedAggregateUpdateStrategyKind" not in strategy_header
-            or "SljitGroupedAggregateUpdateStrategySupportsRunnerHandoff" not in strategy_header):
-        raise AssertionError(
-            "the strategy handoff classification must live beside the strategy enum definition"
-        )
+    if (
+        "enum class SljitGroupedAggregateUpdateStrategyKind" not in strategy_header
+        or "SljitGroupedAggregateUpdateStrategySupportsRunnerHandoff" not in strategy_header
+    ):
+        raise AssertionError("the strategy handoff classification must live beside the strategy enum definition")
     metal = read("extension/jit_metal/metal_backend.mm")
     if "SupportsRunnerHandoff" not in metal:
         raise AssertionError(
@@ -2089,9 +2240,7 @@ def verify_handoff_capability_single_authority() -> None:
         raise AssertionError("the compiled runtime must answer RunnerHandoffPossible for its sinks")
     handoff_body = runner.split(marker, 1)[1].split("\n\t}", 1)[0]
     # The rationale comment names adaptive_ab to say why it must not be consulted; check code only.
-    handoff_possible = "\n".join(
-        line for line in handoff_body.splitlines() if not line.strip().startswith("//")
-    )
+    handoff_possible = "\n".join(line for line in handoff_body.splitlines() if not line.strip().startswith("//"))
     if "adaptive_ab" in handoff_possible:
         raise AssertionError(
             "RunnerHandoffPossible must not consult the per-run adaptive_ab binding: it is absent on "
@@ -2134,9 +2283,7 @@ def verify_runner_switch_state_machine() -> None:
             "cursors never enter compiled execution"
         )
     if "compiled source contract fetch while a vectorized cursor state is in flight" not in executor:
-        raise AssertionError(
-            "FetchFromSourceContract must reject contract fetches over an in-flight vectorized cursor"
-        )
+        raise AssertionError("FetchFromSourceContract must reject contract fetches over an in-flight vectorized cursor")
 
 
 def verify_input_layout_single_authority() -> None:
@@ -2174,8 +2321,7 @@ def verify_runtime_metric_surfaces_agree() -> None:
     telemetry = read("src/include/duckdb/execution/execution_region_telemetry.hpp")
     profiler = read("src/main/query_profiler.cpp")
     events_table = read("src/function/table/system/duckdb_jit_events.cpp")
-    for visitor in ("ForEachExecutionRegionEventRuntimeCountField",
-                    "ForEachExecutionRegionEventRuntimeTimeField"):
+    for visitor in ("ForEachExecutionRegionEventRuntimeCountField", "ForEachExecutionRegionEventRuntimeTimeField"):
         if visitor not in telemetry:
             raise AssertionError(f"{visitor} must define the runtime metric field list")
         if visitor not in profiler:
@@ -2218,6 +2364,7 @@ def main() -> None:
     verify_aggregate_payload_descriptor_owns_typed_abi()
     verify_grouped_reduction_lane_binding()
     verify_compiled_artifact_ownership()
+    verify_selected_projection_cache_ownership()
     verify_scan_filter_ownership()
     verify_partial_predicate_simd_contract()
     verify_string_batch_selection_contract()

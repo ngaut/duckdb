@@ -97,9 +97,9 @@ static inline void EmitLoadHashJoinNextPointer(struct sljit_compiler *compiler, 
 	sljit_set_label(pointer_loaded.direct_loaded, done_label);
 }
 
-static inline void EmitMarkHashJoinBuildChain(struct sljit_compiler *compiler, sljit_s32 row_pointer,
-                                              sljit_s32 scratch, sljit_s32 next_pointer, idx_t found_match_offset,
-                                              idx_t pointer_offset, const SljitHashJoinProbeCodegenConfig &config,
+static inline void EmitMarkHashJoinBuildChain(struct sljit_compiler *compiler, sljit_s32 row_pointer, sljit_s32 scratch,
+                                              sljit_s32 next_pointer, idx_t found_match_offset, idx_t pointer_offset,
+                                              const SljitHashJoinProbeCodegenConfig &config,
                                               sljit_s32 aux_next_ptrs_reg = 0) {
 	sljit_emit_op1(compiler, SLJIT_MOV_U8, scratch, 0, SLJIT_MEM1(row_pointer),
 	               NumericCast<sljit_sw>(found_match_offset));

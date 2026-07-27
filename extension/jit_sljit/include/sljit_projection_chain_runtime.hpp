@@ -89,7 +89,6 @@ static bool SljitProjectionHasVariableWidthOutput(const SljitExecutableRegionOp 
 struct SljitPreparedProjectionChainInput {
 	DataChunk *source_chunk = nullptr;
 	optional_ptr<SljitExecutableRegionOp> projection_op;
-	unique_ptr<SljitExecutableRegionOp> mapped_projection;
 	const SelectionVector *selection = nullptr;
 	idx_t count = 0;
 };
@@ -104,9 +103,9 @@ static bool SljitPrepareProjectionChainInput(ExecutionRegionRuntime &runtime, Sl
 	prepared.selection = input.selection;
 	prepared.count = input.count;
 	if (input.HasHashJoinSelection()) {
-		if (!SljitTryPrepareSelectedHashJoinProjectionInput(
-		        runtime, scratch, ops, projection_idx, semantic_projection, input, selected_hash_join_input,
-		        prepared.source_chunk, prepared.mapped_projection, prepared.projection_op)) {
+		if (!SljitTryPrepareSelectedHashJoinProjectionInput(runtime, scratch, ops, projection_idx, semantic_projection,
+		                                                    input, selected_hash_join_input, prepared.source_chunk,
+		                                                    prepared.projection_op)) {
 			return false;
 		}
 		prepared.selection = nullptr;
@@ -132,7 +131,7 @@ static bool SljitMaterializeProjectionChainStep(ExecutionRegionRuntime &runtime,
 	}
 	output.Reset();
 	SljitExecuteProjection(scratch, projection_idx, *prepared.projection_op, *prepared.source_chunk, output,
-	                        prepared.selection, prepared.count);
+	                       prepared.selection, prepared.count);
 	return output.size() > 0;
 }
 
@@ -140,8 +139,8 @@ template <class EXECUTE_OUTPUT_BATCH>
 static bool SljitExecuteProjectionChainPrimitiveSequential(
     ExecutionRegionRuntime &runtime, SljitRegionExecutionScratch &scratch, vector<SljitExecutableRegionOp> &ops,
     const SljitProjectionChainPrimitive &primitive, const SljitRuntimeBatchView &input,
-    SljitDataChunkBatch &projection_chain_batch, SljitDataChunkBatch &selected_hash_join_input,
-    bool direct_handoff, EXECUTE_OUTPUT_BATCH &&execute_output_batch) {
+    SljitDataChunkBatch &projection_chain_batch, SljitDataChunkBatch &selected_hash_join_input, bool direct_handoff,
+    EXECUTE_OUTPUT_BATCH &&execute_output_batch) {
 	SljitRuntimeBatchView current_input = input;
 	DataChunk *final_output = nullptr;
 	for (idx_t projection_idx = primitive.first_projection_idx; projection_idx <= primitive.final_projection_idx;
@@ -220,14 +219,13 @@ static bool SljitExecuteProjectionChainPrimitive(
     const SljitProjectionChainPrimitive &primitive, const SljitRuntimeBatchView &input,
     SljitDataChunkBatch &projection_chain_batch, SljitDataChunkBatch &selected_hash_join_input,
     SljitDataChunkBatch &synthetic_projection_output,
-    optional_ptr<SljitProjectionChainSyntheticProjectionScratch> synthetic_projection_scratch,
-    bool direct_handoff, EXECUTE_OUTPUT_BATCH &&execute_output_batch) {
+    optional_ptr<SljitProjectionChainSyntheticProjectionScratch> synthetic_projection_scratch, bool direct_handoff,
+    EXECUTE_OUTPUT_BATCH &&execute_output_batch) {
 	optional_ptr<SljitExecutableRegionOp> projection_op;
 	if (!SljitResolveBoundProjectionChain(ops, primitive, projection_op)) {
 		return SljitExecuteProjectionChainPrimitiveSequential(runtime, scratch, ops, primitive, input,
 		                                                      projection_chain_batch, selected_hash_join_input,
-		                                                      direct_handoff,
-		                                                      execute_output_batch);
+		                                                      direct_handoff, execute_output_batch);
 	}
 	SljitPreparedProjectionChainInput prepared;
 	if (!SljitPrepareProjectionChainInput(runtime, scratch, ops, primitive.final_projection_idx, *projection_op, input,

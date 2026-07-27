@@ -111,9 +111,9 @@ static bool SljitTryExecuteDirectJoinOutputPerfectHashAggregateUpdate(
 	    payload_lanes, reduction_lanes, grouped_state.perfect_hash_layout, aggregate_input, nullptr,
 	    aggregate_input.size(), payload_scratch);
 	RecordSljitRegionStageRuntime(runtime, op_idx, op.kind, "primitive_payload_update_fused", payload_stage_start);
-	RecordSljitRegionMaterializationElisionPath(runtime, op.kind, "join_output_perfect_hash_payload_update",
+	RecordSljitRegionMaterializationElision(runtime, op.kind, "join_output_perfect_hash_payload_update",
 	                                            aggregate_input.size());
-	RecordSljitRegionMaterializationElisionPath(runtime, op.kind, "fused_payload_update_owns_perfect_hash_group_lookup",
+	RecordSljitRegionMaterializationElision(runtime, op.kind, "fused_payload_update_owns_perfect_hash_group_lookup",
 	                                            aggregate_input.size());
 	return true;
 }
@@ -273,7 +273,7 @@ static bool SljitTryExecuteDirectJoinOutputAggregate(
 		    descriptor.remapped_payloads, descriptor.payload_source_layout, descriptor.payload_source_indices,
 		    descriptor.payload_source_not_null, "join_output_ungrouped_payload_update",
 		    "join_output_ungrouped_payload_update");
-		RecordSljitRegionMaterializationElisionPath(runtime, aggregate_op.kind, "join_output_ungrouped_update",
+		RecordSljitRegionMaterializationElision(runtime, aggregate_op.kind, "join_output_ungrouped_update",
 		                                            aggregate_input.size());
 		return true;
 	}

@@ -76,7 +76,7 @@ static void SljitFlushPendingRowPointerAggregateBatch(ExecutionRegionRuntime &ru
 	        descriptor.payload_source_layout, true, source_key0_int64_to_int32_unchecked)) {
 		throw InternalException("SLJIT batched direct row-pointer aggregate update failed");
 	}
-	RecordSljitRegionMaterializationElisionPath(runtime, aggregate_op.kind,
+	RecordSljitRegionMaterializationElision(runtime, aggregate_op.kind,
 	                                            "projection_aggregate.row_pointer_grouped_update", pending_count);
 	batch.Reset();
 }
@@ -114,7 +114,7 @@ static void SljitFlushPendingInputVectorAggregateBatch(ExecutionRegionRuntime &r
 		throw InternalException("SLJIT batched direct input-vector aggregate update failed: %s",
 		                        input_vector_failure.empty() ? "unknown" : input_vector_failure.c_str());
 	}
-	RecordSljitRegionMaterializationElisionPath(runtime, aggregate_op.kind,
+	RecordSljitRegionMaterializationElision(runtime, aggregate_op.kind,
 	                                            "projection_aggregate.input_vector_grouped_update", pending_count);
 	batch.Reset();
 }

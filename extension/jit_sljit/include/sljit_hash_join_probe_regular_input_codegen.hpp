@@ -18,8 +18,8 @@
 
 namespace duckdb {
 
-static inline void EmitLoadRegularHashJoinSourceIndex(struct sljit_compiler *compiler, idx_t key_idx,
-                                                      sljit_s32 target, sljit_s32 scratch) {
+static inline void EmitLoadRegularHashJoinSourceIndex(struct sljit_compiler *compiler, idx_t key_idx, sljit_s32 target,
+                                                      sljit_s32 scratch) {
 	sljit_emit_op1(compiler, SLJIT_MOV_P, scratch, 0, SLJIT_MEM1(SLJIT_S0),
 	               offsetof(SljitNativeRegularHashJoinProbeInput, source_sel));
 	auto no_sel_array = sljit_emit_cmp(compiler, SLJIT_EQUAL, scratch, 0, SLJIT_IMM, 0);
@@ -62,8 +62,7 @@ static inline struct sljit_jump *EmitJumpIfRegularHashJoinSourceNull(struct slji
 
 static inline struct sljit_jump *EmitJumpIfHashJoinRhsKeyNull(struct sljit_compiler *compiler, idx_t key_idx,
                                                               sljit_s32 row_pointer, sljit_s32 scratch,
-                                                              sljit_s32 scratch2,
-                                                              bool assume_rhs_all_valid = false) {
+                                                              sljit_s32 scratch2, bool assume_rhs_all_valid = false) {
 	if (assume_rhs_all_valid) {
 		return nullptr;
 	}
@@ -77,8 +76,7 @@ static inline struct sljit_jump *EmitJumpIfHashJoinRhsKeyNull(struct sljit_compi
 	return rhs_is_null;
 }
 
-static inline void EmitLoadRegularHashJoinSourceData(struct sljit_compiler *compiler, idx_t key_idx,
-                                                     sljit_s32 target,
+static inline void EmitLoadRegularHashJoinSourceData(struct sljit_compiler *compiler, idx_t key_idx, sljit_s32 target,
                                                      const vector<sljit_s32> &source_data_regs) {
 	if (key_idx < source_data_regs.size() && source_data_regs[key_idx] != 0) {
 		sljit_emit_op1(compiler, SLJIT_MOV_P, target, 0, source_data_regs[key_idx], 0);

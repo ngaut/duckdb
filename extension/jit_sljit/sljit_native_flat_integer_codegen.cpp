@@ -79,7 +79,9 @@ BuildSljitNativeFlatIntegerBinaryConstant(SljitNativeIntegerKind kind, SljitNati
 			}
 			sljit_emit_simd_mov(compiler, simd_type | SLJIT_SIMD_STORE, SLJIT_VR2, SLJIT_MEM1(SLJIT_S4), 0);
 		};
-		auto emit_scalar_row = [&]() { emit_integer_constant_row(0); };
+		auto emit_scalar_row = [&]() {
+			emit_integer_constant_row(0);
+		};
 		EmitSljitFlatSimdThenScalarTailLoop(compiler, SLJIT_S1, simd_lanes, 16, data_width, emit_vector_row,
 		                                    emit_scalar_row, emit_integer_constant_advance);
 	} else {
@@ -137,7 +139,9 @@ unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativeFlatIntegerBinaryReference
 			EmitSljitArm64NeonIntegerBinary(compiler, kind, op, SLJIT_VR2, SLJIT_VR0, SLJIT_VR1);
 			sljit_emit_simd_mov(compiler, simd_type | SLJIT_SIMD_STORE, SLJIT_VR2, SLJIT_MEM1(SLJIT_S5), 0);
 		};
-		auto emit_scalar_row = [&]() { emit_integer_reference_row(0); };
+		auto emit_scalar_row = [&]() {
+			emit_integer_reference_row(0);
+		};
 		EmitSljitFlatSimdThenScalarTailLoop(compiler, SLJIT_S1, simd_lanes, 16, data_width, emit_vector_row,
 		                                    emit_scalar_row, emit_integer_reference_advance);
 	} else {

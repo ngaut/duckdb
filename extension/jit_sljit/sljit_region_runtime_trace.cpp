@@ -97,32 +97,11 @@ void RecordSljitRegionRuntimePath(ExecutionRegionRuntime &runtime, SljitNativeRe
 	runtime.RecordJitRuntimePath(runtime_path.c_str(), count);
 }
 
-void RecordSljitRegionRuntimeProof(ExecutionRegionRuntime &runtime, SljitNativeRegionOpKind kind,
-                                   ExecutionRegionJitRuntimeProof proof, const char *detail, idx_t count) {
-	if (!runtime.TraceRuntime()) {
-		return;
-	}
-	runtime.RecordJitRuntimeProof(proof, count);
-	if (!detail || !detail[0]) {
-		return;
-	}
-	auto runtime_proof =
-	    string(SljitRegionOpKindName(kind)) + "." + ExecutionRegionJitRuntimeProofName(proof) + "." + detail;
-	runtime.RecordJitRuntimeProofDetail(runtime_proof.c_str(), count);
-}
-
-void RecordSljitRegionMaterializationElisionProof(ExecutionRegionRuntime &runtime, SljitNativeRegionOpKind kind,
-                                                  const char *detail, idx_t count) {
-	RecordSljitRegionRuntimeProof(runtime, kind, ExecutionRegionJitRuntimeProof::GENERATED_BACKEND_WORK, detail,
-	                              count);
-	RecordSljitRegionRuntimeProof(runtime, kind, ExecutionRegionJitRuntimeProof::MATERIALIZATION_ELISION, detail,
-	                              count);
-}
-
-void RecordSljitRegionMaterializationElisionPath(ExecutionRegionRuntime &runtime, SljitNativeRegionOpKind kind,
-                                                 const char *path, idx_t count) {
+void RecordSljitRegionMaterializationElision(ExecutionRegionRuntime &runtime, SljitNativeRegionOpKind kind,
+                                             const char *path, idx_t count) {
 	RecordSljitRegionRuntimePath(runtime, kind, path, count);
-	RecordSljitRegionMaterializationElisionProof(runtime, kind, path, count);
+	runtime.RecordJitRuntimeProof(ExecutionRegionJitRuntimeProof::GENERATED_BACKEND_WORK, count);
+	runtime.RecordJitRuntimeProof(ExecutionRegionJitRuntimeProof::MATERIALIZATION_ELISION, count);
 }
 
 void RecordSljitRegionRuntimeDelegation(ExecutionRegionRuntime &runtime, SljitNativeRegionOpKind kind,

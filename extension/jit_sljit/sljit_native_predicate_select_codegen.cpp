@@ -82,8 +82,8 @@ BuildSljitNativeIntegerSelectConstant(SljitNativeIntegerKind kind, SljitNativeIn
 		EmitSljitNativeSelectLoadResultAndSourceIndex(compiler);
 		auto source_is_null = EmitSkipInvalidSourceRow(compiler);
 
-		EmitLoadSljitNativeFixedWidthValue(compiler, offsetof(SljitNativeVectorInput, source_data), SLJIT_R1,
-		                                   load_op, data_scale, SLJIT_R2);
+		EmitLoadSljitNativeFixedWidthValue(compiler, offsetof(SljitNativeVectorInput, source_data), SLJIT_R1, load_op,
+		                                   data_scale, SLJIT_R2);
 		sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_R3, 0, SLJIT_MEM1(SLJIT_S0),
 		               offsetof(SljitNativeVectorInput, constant));
 		struct sljit_jump *comparison_true;
@@ -133,8 +133,8 @@ unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativeIntegerSelectReferences(Sl
 		auto right_is_null =
 		    EmitJumpIfValidityNull(compiler, offsetof(SljitNativeVectorInput, right_source_validity), SLJIT_S4);
 
-		EmitLoadSljitNativeFixedWidthValue(compiler, offsetof(SljitNativeVectorInput, source_data), SLJIT_S3,
-		                                   load_op, data_scale, SLJIT_R2);
+		EmitLoadSljitNativeFixedWidthValue(compiler, offsetof(SljitNativeVectorInput, source_data), SLJIT_S3, load_op,
+		                                   data_scale, SLJIT_R2);
 		EmitLoadSljitNativeFixedWidthValue(compiler, offsetof(SljitNativeVectorInput, right_source_data), SLJIT_S4,
 		                                   load_op, data_scale, SLJIT_R3);
 
