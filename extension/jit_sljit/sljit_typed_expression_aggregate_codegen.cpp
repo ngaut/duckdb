@@ -33,7 +33,8 @@ static unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativeUngroupedSumTypedEx
 	                                            : local_sum_offset + NumericCast<sljit_sw>(sizeof(sljit_sw));
 	const auto local_size = saw_value_offset + NumericCast<sljit_sw>(sizeof(sljit_sw));
 
-	sljit_emit_enter(compiler, 0, SLJIT_ARGS1V(P), 5, SLJIT_NATIVE_VECTOR_SAVED_REG_COUNT, local_size);
+	sljit_emit_enter(compiler, 0, SLJIT_ARGS1V(P), 5, GetSljitNativeVectorRegisterLayout().saved_register_count,
+	                 local_size);
 	EmitInitSljitNativeExpressionVectorLoop(compiler);
 	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_MEM1(SLJIT_SP), local_sum_offset, SLJIT_IMM, 0);
 	if (hugeint_state) {

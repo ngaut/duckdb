@@ -9,22 +9,9 @@
 #pragma once
 
 #include "sljit_aggregate_typed_payload_codegen.hpp"
+#include "sljit_register_layout.hpp"
 
 namespace duckdb {
-
-#if defined(SLJIT_NUMBER_OF_SAVED_REGISTERS) && SLJIT_NUMBER_OF_SAVED_REGISTERS >= 14
-static constexpr bool SLJIT_HAS_UNGROUPED_CONDITIONAL_HUGEINT_SUM_REGS = true;
-static constexpr sljit_s32 SLJIT_UNGROUPED_SHARED_LOWER_REG = SLJIT_S10;
-static constexpr sljit_s32 SLJIT_UNGROUPED_SHARED_UPPER_REG = SLJIT_S11;
-static constexpr sljit_s32 SLJIT_UNGROUPED_CONDITIONAL_LOWER_REG = SLJIT_S12;
-static constexpr sljit_s32 SLJIT_UNGROUPED_CONDITIONAL_UPPER_REG = SLJIT_S13;
-#else
-static constexpr bool SLJIT_HAS_UNGROUPED_CONDITIONAL_HUGEINT_SUM_REGS = false;
-static constexpr sljit_s32 SLJIT_UNGROUPED_SHARED_LOWER_REG = SLJIT_R0;
-static constexpr sljit_s32 SLJIT_UNGROUPED_SHARED_UPPER_REG = SLJIT_R0;
-static constexpr sljit_s32 SLJIT_UNGROUPED_CONDITIONAL_LOWER_REG = SLJIT_R0;
-static constexpr sljit_s32 SLJIT_UNGROUPED_CONDITIONAL_UPPER_REG = SLJIT_R0;
-#endif
 
 struct SljitUngroupedFusedAggregateUpdatePlan {
 	SljitFusedAggregateCodegenPlan codegen_plan;

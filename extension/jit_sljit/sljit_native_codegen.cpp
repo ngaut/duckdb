@@ -62,8 +62,9 @@ static void EmitInitSljitNativeVectorSourceArrays(struct sljit_compiler *compile
 	               offsetof(SljitNativeVectorInput, source_sel_array));
 	sljit_emit_op1(compiler, SLJIT_MOV_P, loop.source_data_array_reg, 0, SLJIT_MEM1(SLJIT_S0),
 	               offsetof(SljitNativeVectorInput, source_data_array));
-	if (SLJIT_NATIVE_VECTOR_HAS_EXTRA_SAVED_REG) {
-		sljit_emit_op1(compiler, SLJIT_MOV_P, SLJIT_S6, 0, SLJIT_MEM1(SLJIT_S0),
+	const auto &registers = GetSljitNativeVectorRegisterLayout();
+	if (registers.HasOptionalInvariant()) {
+		sljit_emit_op1(compiler, SLJIT_MOV_P, registers.optional_invariant, 0, SLJIT_MEM1(SLJIT_S0),
 		               offsetof(SljitNativeVectorInput, source_validity_array));
 	}
 }
@@ -82,8 +83,9 @@ void EmitInitSljitNativeExpressionVectorLoop(struct sljit_compiler *compiler) {
 }
 
 void EmitLoadSljitNativeSourceValidity(struct sljit_compiler *compiler, idx_t source_index, sljit_s32 target) {
-	if (SLJIT_NATIVE_VECTOR_HAS_EXTRA_SAVED_REG) {
-		sljit_emit_op1(compiler, SLJIT_MOV_P, target, 0, SLJIT_MEM1(SLJIT_S6),
+	const auto &registers = GetSljitNativeVectorRegisterLayout();
+	if (registers.HasOptionalInvariant()) {
+		sljit_emit_op1(compiler, SLJIT_MOV_P, target, 0, SLJIT_MEM1(registers.optional_invariant),
 		               NumericCast<sljit_sw>(source_index * sizeof(const validity_t *)));
 		return;
 	}

@@ -8,6 +8,7 @@
 #include "sljit_native_codegen.hpp"
 
 #include "sljit_codegen_util.hpp"
+#include "sljit_register_layout.hpp"
 
 #include "duckdb/common/exception.hpp"
 #include "duckdb/common/types/hugeint.hpp"
@@ -19,22 +20,11 @@
 namespace duckdb {
 
 bool SljitPrimitiveRunMachineWordSupported() {
-#if defined(SLJIT_32BIT_ARCHITECTURE) && SLJIT_32BIT_ARCHITECTURE
-	return false;
-#else
-	return sizeof(sljit_sw) >= sizeof(int64_t);
-#endif
+	return GetSljitTargetCapabilities().Has64BitMachineWord();
 }
 
 bool SljitPrimitiveRunCodegenSupported() {
-	if (!SljitPrimitiveRunMachineWordSupported()) {
-		return false;
-	}
-#if SLJIT_NUMBER_OF_SAVED_REGISTERS < 6 || (SLJIT_NUMBER_OF_REGISTERS - SLJIT_NUMBER_OF_SAVED_REGISTERS) < 7
-	return false;
-#else
-	return true;
-#endif
+	return GetSljitPrimitiveRunRegisterLayout().supported;
 }
 
 static bool SljitPrimitiveRunGroupTypeSupported(PhysicalType type) {
@@ -210,55 +200,46 @@ static void EmitSljitPrimitiveRunLoadKey(struct sljit_compiler *compiler, Physic
 }
 
 static sljit_s32 EmitSljitPrimitiveRunOutputGroupData(struct sljit_compiler *compiler, sljit_s32 fallback) {
-#if defined(SLJIT_NUMBER_OF_SAVED_REGISTERS) && SLJIT_NUMBER_OF_SAVED_REGISTERS >= 10
-	(void)compiler;
-	(void)fallback;
-	return SLJIT_S6;
-#else
+	const auto &registers = GetSljitPrimitiveRunRegisterLayout();
+	if (registers.has_output_pointer_hoists) {
+		return registers.output_group_data;
+	}
 	sljit_emit_op1(compiler, SLJIT_MOV_P, fallback, 0, SLJIT_MEM1(SLJIT_S0),
 	               offsetof(SljitNativePrimitiveRunInput, output_group_data));
 	return fallback;
-#endif
 }
 
 static sljit_s32 EmitSljitPrimitiveRunOutputRowCounts(struct sljit_compiler *compiler, sljit_s32 fallback) {
-#if defined(SLJIT_NUMBER_OF_SAVED_REGISTERS) && SLJIT_NUMBER_OF_SAVED_REGISTERS >= 10
-	(void)compiler;
-	(void)fallback;
-	return SLJIT_S7;
-#else
+	const auto &registers = GetSljitPrimitiveRunRegisterLayout();
+	if (registers.has_output_pointer_hoists) {
+		return registers.output_row_counts;
+	}
 	sljit_emit_op1(compiler, SLJIT_MOV_P, fallback, 0, SLJIT_MEM1(SLJIT_S0),
 	               offsetof(SljitNativePrimitiveRunInput, output_row_counts));
 	return fallback;
-#endif
 }
 
 static sljit_s32 EmitSljitPrimitiveRunOutputValues(struct sljit_compiler *compiler, sljit_s32 fallback,
                                                    AggregatePrimitiveUpdateKind primitive_kind) {
-#if defined(SLJIT_NUMBER_OF_SAVED_REGISTERS) && SLJIT_NUMBER_OF_SAVED_REGISTERS >= 10
-	(void)compiler;
-	(void)fallback;
-	(void)primitive_kind;
-	return SLJIT_S8;
-#else
+	const auto &registers = GetSljitPrimitiveRunRegisterLayout();
+	if (registers.has_output_pointer_hoists) {
+		return registers.output_values;
+	}
 	const auto offset = primitive_kind == AggregatePrimitiveUpdateKind::SUM_HUGEINT
 	                        ? offsetof(SljitNativePrimitiveRunInput, output_hugeint_values)
 	                        : offsetof(SljitNativePrimitiveRunInput, output_int64_values);
 	sljit_emit_op1(compiler, SLJIT_MOV_P, fallback, 0, SLJIT_MEM1(SLJIT_S0), offset);
 	return fallback;
-#endif
 }
 
 static sljit_s32 EmitSljitPrimitiveRunOutputValueIsSet(struct sljit_compiler *compiler, sljit_s32 fallback) {
-#if defined(SLJIT_NUMBER_OF_SAVED_REGISTERS) && SLJIT_NUMBER_OF_SAVED_REGISTERS >= 10
-	(void)compiler;
-	(void)fallback;
-	return SLJIT_S9;
-#else
+	const auto &registers = GetSljitPrimitiveRunRegisterLayout();
+	if (registers.has_output_pointer_hoists) {
+		return registers.output_value_is_set;
+	}
 	sljit_emit_op1(compiler, SLJIT_MOV_P, fallback, 0, SLJIT_MEM1(SLJIT_S0),
 	               offsetof(SljitNativePrimitiveRunInput, output_value_is_set));
 	return fallback;
-#endif
 }
 
 static void EmitSljitPrimitiveRunRecordIncreasingTransition(struct sljit_compiler *compiler,
@@ -559,21 +540,18 @@ BuildSljitNativePrimitiveRunUpdate(PhysicalType group_source_type, PhysicalType 
 		error = "unsupported SLJIT primitive run aggregate payload";
 		return nullptr;
 	}
-#if SLJIT_NUMBER_OF_SAVED_REGISTERS < 6 || (SLJIT_NUMBER_OF_REGISTERS - SLJIT_NUMBER_OF_SAVED_REGISTERS) < 7
-	error = "unsupported SLJIT primitive run register file";
-	return nullptr;
-#else
+	const auto &registers = GetSljitPrimitiveRunRegisterLayout();
+	if (!registers.supported) {
+		error = "unsupported SLJIT primitive run register layout";
+		return nullptr;
+	}
 	auto compiler = sljit_create_compiler(nullptr);
 	if (!compiler) {
 		error = "failed to create SLJIT compiler";
 		return nullptr;
 	}
 
-#if defined(SLJIT_NUMBER_OF_SAVED_REGISTERS) && SLJIT_NUMBER_OF_SAVED_REGISTERS >= 10
-	sljit_emit_enter(compiler, 0, SLJIT_ARGS1V(P), 7, 10, 0);
-#else
-	sljit_emit_enter(compiler, 0, SLJIT_ARGS1V(P), 7, 6, 0);
-#endif
+	sljit_emit_enter(compiler, 0, SLJIT_ARGS1V(P), 7, registers.saved_register_count, 0);
 	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_S1, 0, SLJIT_MEM1(SLJIT_S0),
 	               offsetof(SljitNativePrimitiveRunInput, input_offset));
 	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_S2, 0, SLJIT_MEM1(SLJIT_S0),
@@ -586,21 +564,21 @@ BuildSljitNativePrimitiveRunUpdate(PhysicalType group_source_type, PhysicalType 
 		sljit_emit_op1(compiler, SLJIT_MOV_P, SLJIT_S5, 0, SLJIT_MEM1(SLJIT_S0),
 		               offsetof(SljitNativePrimitiveRunInput, payload_data));
 	}
-#if defined(SLJIT_NUMBER_OF_SAVED_REGISTERS) && SLJIT_NUMBER_OF_SAVED_REGISTERS >= 10
-	sljit_emit_op1(compiler, SLJIT_MOV_P, SLJIT_S6, 0, SLJIT_MEM1(SLJIT_S0),
-	               offsetof(SljitNativePrimitiveRunInput, output_group_data));
-	sljit_emit_op1(compiler, SLJIT_MOV_P, SLJIT_S7, 0, SLJIT_MEM1(SLJIT_S0),
-	               offsetof(SljitNativePrimitiveRunInput, output_row_counts));
-	const auto output_values_offset = primitive_kind == AggregatePrimitiveUpdateKind::SUM_HUGEINT
-	                                      ? offsetof(SljitNativePrimitiveRunInput, output_hugeint_values)
-	                                      : offsetof(SljitNativePrimitiveRunInput, output_int64_values);
-	sljit_emit_op1(compiler, SLJIT_MOV_P, SLJIT_S8, 0, SLJIT_MEM1(SLJIT_S0), output_values_offset);
-	if (primitive_kind == AggregatePrimitiveUpdateKind::SUM_INT64 ||
-	    primitive_kind == AggregatePrimitiveUpdateKind::SUM_HUGEINT) {
-		sljit_emit_op1(compiler, SLJIT_MOV_P, SLJIT_S9, 0, SLJIT_MEM1(SLJIT_S0),
-		               offsetof(SljitNativePrimitiveRunInput, output_value_is_set));
+	if (registers.has_output_pointer_hoists) {
+		sljit_emit_op1(compiler, SLJIT_MOV_P, registers.output_group_data, 0, SLJIT_MEM1(SLJIT_S0),
+		               offsetof(SljitNativePrimitiveRunInput, output_group_data));
+		sljit_emit_op1(compiler, SLJIT_MOV_P, registers.output_row_counts, 0, SLJIT_MEM1(SLJIT_S0),
+		               offsetof(SljitNativePrimitiveRunInput, output_row_counts));
+		const auto output_values_offset = primitive_kind == AggregatePrimitiveUpdateKind::SUM_HUGEINT
+		                                      ? offsetof(SljitNativePrimitiveRunInput, output_hugeint_values)
+		                                      : offsetof(SljitNativePrimitiveRunInput, output_int64_values);
+		sljit_emit_op1(compiler, SLJIT_MOV_P, registers.output_values, 0, SLJIT_MEM1(SLJIT_S0), output_values_offset);
+		if (primitive_kind == AggregatePrimitiveUpdateKind::SUM_INT64 ||
+		    primitive_kind == AggregatePrimitiveUpdateKind::SUM_HUGEINT) {
+			sljit_emit_op1(compiler, SLJIT_MOV_P, registers.output_value_is_set, 0, SLJIT_MEM1(SLJIT_S0),
+			               offsetof(SljitNativePrimitiveRunInput, output_value_is_set));
+		}
 	}
-#endif
 
 	auto input_done = sljit_emit_cmp(compiler, SLJIT_GREATER_EQUAL, SLJIT_S1, 0, SLJIT_S2, 0);
 	EmitSljitPrimitiveRunLoadKey(compiler, group_source_type, SLJIT_R4);
@@ -643,7 +621,6 @@ BuildSljitNativePrimitiveRunUpdate(PhysicalType group_source_type, PhysicalType 
 	               SLJIT_S3, 0);
 	sljit_emit_return_void(compiler);
 	return FinishSljitCode(compiler, function, error);
-#endif
 }
 
 static constexpr idx_t SLJIT_PRIMITIVE_RUN_UNROLLED_LANE_BUDGET = 8;
@@ -923,7 +900,8 @@ static unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativePrimitiveRunHomogen
 		return nullptr;
 	}
 
-	sljit_emit_enter(compiler, 0, SLJIT_ARGS1V(P), 7, 6, 0);
+	sljit_emit_enter(compiler, 0, SLJIT_ARGS1V(P), 7, GetSljitPrimitiveRunRegisterLayout().base_saved_register_count,
+	                 0);
 	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_S1, 0, SLJIT_MEM1(SLJIT_S0),
 	               offsetof(SljitNativePrimitiveRunInput, input_offset));
 	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_S2, 0, SLJIT_MEM1(SLJIT_S0),
@@ -975,49 +953,43 @@ static unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativePrimitiveRunHomogen
 	return FinishSljitCode(compiler, function, error);
 }
 
-#if defined(SLJIT_NUMBER_OF_SAVED_REGISTERS) && SLJIT_NUMBER_OF_SAVED_REGISTERS >= 8
-static constexpr sljit_s32 SLJIT_PRIMITIVE_RUN_AFFINE_SAVED_REG_COUNT = 8;
-static constexpr sljit_sw SLJIT_PRIMITIVE_RUN_AFFINE_LOCAL_SIZE = 0;
-
-static void EmitSljitPrimitiveRunAffineReset(struct sljit_compiler *compiler) {
-	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_S6, 0, SLJIT_IMM, 0);
-	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_S7, 0, SLJIT_IMM, 0);
-}
-
-static void EmitSljitPrimitiveRunAffineAccumulateValue(struct sljit_compiler *compiler, sljit_s32 value_reg) {
-	sljit_emit_op2(compiler, SLJIT_ADD, SLJIT_S6, 0, SLJIT_S6, 0, value_reg, 0);
-}
-
-static void EmitSljitPrimitiveRunAffineIncrementValidCount(struct sljit_compiler *compiler) {
-	sljit_emit_op2(compiler, SLJIT_ADD, SLJIT_S7, 0, SLJIT_S7, 0, SLJIT_IMM, 1);
-}
-
-static sljit_s32 EmitSljitPrimitiveRunAffineValueOperand(struct sljit_compiler *) {
-	return SLJIT_S6;
-}
-
-static sljit_s32 EmitSljitPrimitiveRunAffineValidCountOperand(struct sljit_compiler *) {
-	return SLJIT_S7;
-}
-#else
-static constexpr sljit_s32 SLJIT_PRIMITIVE_RUN_AFFINE_SAVED_REG_COUNT = 6;
 static constexpr sljit_sw SLJIT_PRIMITIVE_RUN_AFFINE_VALUE_OFFSET = 0;
 static constexpr sljit_sw SLJIT_PRIMITIVE_RUN_AFFINE_VALID_COUNT_OFFSET = sizeof(sljit_sw);
-static constexpr sljit_sw SLJIT_PRIMITIVE_RUN_AFFINE_LOCAL_SIZE = 2 * sizeof(sljit_sw);
+
+static sljit_sw SljitPrimitiveRunAffineLocalSize() {
+	return GetSljitPrimitiveRunRegisterLayout().has_affine_accumulators ? 0 : 2 * sizeof(sljit_sw);
+}
 
 static void EmitSljitPrimitiveRunAffineReset(struct sljit_compiler *compiler) {
+	const auto &registers = GetSljitPrimitiveRunRegisterLayout();
+	if (registers.has_affine_accumulators) {
+		sljit_emit_op1(compiler, SLJIT_MOV, registers.affine_value, 0, SLJIT_IMM, 0);
+		sljit_emit_op1(compiler, SLJIT_MOV, registers.affine_valid_count, 0, SLJIT_IMM, 0);
+		return;
+	}
 	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_MEM1(SLJIT_SP), SLJIT_PRIMITIVE_RUN_AFFINE_VALUE_OFFSET, SLJIT_IMM, 0);
 	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_MEM1(SLJIT_SP), SLJIT_PRIMITIVE_RUN_AFFINE_VALID_COUNT_OFFSET, SLJIT_IMM,
 	               0);
 }
 
 static void EmitSljitPrimitiveRunAffineAccumulateValue(struct sljit_compiler *compiler, sljit_s32 value_reg) {
+	const auto &registers = GetSljitPrimitiveRunRegisterLayout();
+	if (registers.has_affine_accumulators) {
+		sljit_emit_op2(compiler, SLJIT_ADD, registers.affine_value, 0, registers.affine_value, 0, value_reg, 0);
+		return;
+	}
 	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_R4, 0, SLJIT_MEM1(SLJIT_SP), SLJIT_PRIMITIVE_RUN_AFFINE_VALUE_OFFSET);
 	sljit_emit_op2(compiler, SLJIT_ADD, SLJIT_R4, 0, SLJIT_R4, 0, value_reg, 0);
 	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_MEM1(SLJIT_SP), SLJIT_PRIMITIVE_RUN_AFFINE_VALUE_OFFSET, SLJIT_R4, 0);
 }
 
 static void EmitSljitPrimitiveRunAffineIncrementValidCount(struct sljit_compiler *compiler) {
+	const auto &registers = GetSljitPrimitiveRunRegisterLayout();
+	if (registers.has_affine_accumulators) {
+		sljit_emit_op2(compiler, SLJIT_ADD, registers.affine_valid_count, 0, registers.affine_valid_count, 0, SLJIT_IMM,
+		               1);
+		return;
+	}
 	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_R4, 0, SLJIT_MEM1(SLJIT_SP),
 	               SLJIT_PRIMITIVE_RUN_AFFINE_VALID_COUNT_OFFSET);
 	sljit_emit_op2(compiler, SLJIT_ADD, SLJIT_R4, 0, SLJIT_R4, 0, SLJIT_IMM, 1);
@@ -1026,16 +998,23 @@ static void EmitSljitPrimitiveRunAffineIncrementValidCount(struct sljit_compiler
 }
 
 static sljit_s32 EmitSljitPrimitiveRunAffineValueOperand(struct sljit_compiler *compiler) {
+	const auto &registers = GetSljitPrimitiveRunRegisterLayout();
+	if (registers.has_affine_accumulators) {
+		return registers.affine_value;
+	}
 	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_R0, 0, SLJIT_MEM1(SLJIT_SP), SLJIT_PRIMITIVE_RUN_AFFINE_VALUE_OFFSET);
 	return SLJIT_R0;
 }
 
 static sljit_s32 EmitSljitPrimitiveRunAffineValidCountOperand(struct sljit_compiler *compiler) {
+	const auto &registers = GetSljitPrimitiveRunRegisterLayout();
+	if (registers.has_affine_accumulators) {
+		return registers.affine_valid_count;
+	}
 	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_R0, 0, SLJIT_MEM1(SLJIT_SP),
 	               SLJIT_PRIMITIVE_RUN_AFFINE_VALID_COUNT_OFFSET);
 	return SLJIT_R0;
 }
-#endif
 
 static void EmitSljitPrimitiveRunAffineStartFreshGroup(struct sljit_compiler *compiler, PhysicalType group_type,
                                                        ExecutionRowPointerGroupKeyCastKind group_cast_kind) {
@@ -1139,18 +1118,19 @@ BuildSljitNativePrimitiveRunAffineInt64Update(PhysicalType group_source_type, Ph
 		error = "unsupported SLJIT affine int64 primitive run shape";
 		return nullptr;
 	}
-#if SLJIT_NUMBER_OF_SAVED_REGISTERS < 6 || (SLJIT_NUMBER_OF_REGISTERS - SLJIT_NUMBER_OF_SAVED_REGISTERS) < 7
-	error = "unsupported SLJIT affine int64 primitive run register file";
-	return nullptr;
-#else
+	const auto &registers = GetSljitPrimitiveRunRegisterLayout();
+	if (!registers.supported) {
+		error = "unsupported SLJIT affine int64 primitive run register layout";
+		return nullptr;
+	}
 	auto compiler = sljit_create_compiler(nullptr);
 	if (!compiler) {
 		error = "failed to create SLJIT compiler";
 		return nullptr;
 	}
 
-	sljit_emit_enter(compiler, 0, SLJIT_ARGS1V(P), 7, SLJIT_PRIMITIVE_RUN_AFFINE_SAVED_REG_COUNT,
-	                 SLJIT_PRIMITIVE_RUN_AFFINE_LOCAL_SIZE);
+	sljit_emit_enter(compiler, 0, SLJIT_ARGS1V(P), 7, registers.affine_saved_register_count,
+	                 SljitPrimitiveRunAffineLocalSize());
 	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_S1, 0, SLJIT_MEM1(SLJIT_S0),
 	               offsetof(SljitNativePrimitiveRunInput, input_offset));
 	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_S2, 0, SLJIT_MEM1(SLJIT_S0),
@@ -1239,7 +1219,6 @@ BuildSljitNativePrimitiveRunAffineInt64Update(PhysicalType group_source_type, Ph
 	               SLJIT_S3, 0);
 	sljit_emit_return_void(compiler);
 	return FinishSljitCode(compiler, function, error);
-#endif
 }
 
 unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativePrimitiveRunMultiUpdate(
@@ -1259,10 +1238,10 @@ unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativePrimitiveRunMultiUpdate(
 		error = "unsupported SLJIT multi-lane primitive run shape";
 		return nullptr;
 	}
-#if SLJIT_NUMBER_OF_SAVED_REGISTERS < 6 || (SLJIT_NUMBER_OF_REGISTERS - SLJIT_NUMBER_OF_SAVED_REGISTERS) < 7
-	error = "unsupported SLJIT multi-lane primitive run register file";
-	return nullptr;
-#else
+	if (!GetSljitPrimitiveRunRegisterLayout().supported) {
+		error = "unsupported SLJIT multi-lane primitive run register layout";
+		return nullptr;
+	}
 	if (primitive_kinds.size() > SLJIT_PRIMITIVE_RUN_UNROLLED_LANE_BUDGET) {
 		return BuildSljitNativePrimitiveRunHomogeneousMultiUpdate(group_source_type, group_type, group_cast_kind,
 		                                                          payload_types[0], primitive_kinds[0],
@@ -1274,7 +1253,8 @@ unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativePrimitiveRunMultiUpdate(
 		return nullptr;
 	}
 
-	sljit_emit_enter(compiler, 0, SLJIT_ARGS1V(P), 7, 6, 0);
+	sljit_emit_enter(compiler, 0, SLJIT_ARGS1V(P), 7, GetSljitPrimitiveRunRegisterLayout().base_saved_register_count,
+	                 0);
 	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_S1, 0, SLJIT_MEM1(SLJIT_S0),
 	               offsetof(SljitNativePrimitiveRunInput, input_offset));
 	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_S2, 0, SLJIT_MEM1(SLJIT_S0),
@@ -1327,7 +1307,6 @@ unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativePrimitiveRunMultiUpdate(
 	               SLJIT_S3, 0);
 	sljit_emit_return_void(compiler);
 	return FinishSljitCode(compiler, function, error);
-#endif
 }
 
 } // namespace duckdb

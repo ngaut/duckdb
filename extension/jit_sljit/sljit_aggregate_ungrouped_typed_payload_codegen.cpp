@@ -35,9 +35,10 @@ void EmitSljitUngroupedTypedConditionalSharedFastPayload(
 	auto kind = aggregates[shared_lane].primitive_update_kind;
 	EmitSljitUngroupedTypedFastPayloadValueReg(compiler, *codegen_plan.shared_value, selected, overflows, data_hoists);
 	if (use_conditional_hugeint_register_accumulators) {
-		sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_S7, 0, SLJIT_R2, 0);
-		EmitUngroupedAggregateAccumulateHugeintInt64Regs(compiler, SLJIT_UNGROUPED_SHARED_LOWER_REG,
-		                                                 SLJIT_UNGROUPED_SHARED_UPPER_REG, SLJIT_S7);
+		const auto &registers = GetSljitUngroupedAggregateRegisterLayout();
+		sljit_emit_op1(compiler, SLJIT_MOV, registers.conditional_payload, 0, SLJIT_R2, 0);
+		EmitUngroupedAggregateAccumulateHugeintInt64Regs(compiler, registers.shared_lower, registers.shared_upper,
+		                                                 registers.conditional_payload);
 	} else {
 		sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_MEM1(SLJIT_SP), shared_fast_value_offset, SLJIT_R2, 0);
 		EmitUngroupedAggregateAccumulate(compiler, kind, local_sum_offsets[shared_lane],
@@ -49,8 +50,9 @@ void EmitSljitUngroupedTypedConditionalSharedFastPayload(
 	                                           data_hoists);
 	auto condition_false = sljit_emit_cmp(compiler, SLJIT_EQUAL, SLJIT_R2, 0, SLJIT_IMM, 0);
 	if (use_conditional_hugeint_register_accumulators) {
-		EmitUngroupedAggregateAccumulateHugeintInt64Regs(compiler, SLJIT_UNGROUPED_CONDITIONAL_LOWER_REG,
-		                                                 SLJIT_UNGROUPED_CONDITIONAL_UPPER_REG, SLJIT_S7);
+		const auto &registers = GetSljitUngroupedAggregateRegisterLayout();
+		EmitUngroupedAggregateAccumulateHugeintInt64Regs(compiler, registers.conditional_lower,
+		                                                 registers.conditional_upper, registers.conditional_payload);
 	} else {
 		sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_R2, 0, SLJIT_MEM1(SLJIT_SP), shared_fast_value_offset);
 		EmitUngroupedAggregateAccumulate(compiler, kind, local_sum_offsets[conditional_lane],

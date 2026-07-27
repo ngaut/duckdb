@@ -84,9 +84,11 @@ sljit_s32 SljitFlatIntegerProjectionSourceScalarRegister(idx_t source_idx) {
 }
 
 idx_t SljitFlatIntegerProjectionGroupSize() {
-	static_assert(SLJIT_NUMBER_OF_SAVED_REGISTERS >= 6,
-	              "flat integer projection requires five invariant registers and one result register");
-	return MinValue<idx_t>(4, SLJIT_NUMBER_OF_SAVED_REGISTERS - 5);
+	const auto available_saved_registers = GetSljitTargetCapabilities().registers.MaxAddressableSavedRegisters(5);
+	if (available_saved_registers <= 5) {
+		throw InternalException("SLJIT flat integer projection register layout is unavailable");
+	}
+	return MinValue<idx_t>(4, NumericCast<idx_t>(available_saved_registers - 5));
 }
 
 sljit_s32 SljitFlatIntegerProjectionSavedRegisterCount() {
@@ -94,18 +96,10 @@ sljit_s32 SljitFlatIntegerProjectionSavedRegisterCount() {
 }
 
 sljit_s32 SljitFlatIntegerProjectionResultPointerRegister(idx_t group_idx) {
-	switch (group_idx) {
-	case 0:
-		return SLJIT_S5;
-	case 1:
-		return SLJIT_S6;
-	case 2:
-		return SLJIT_S7;
-	case 3:
-		return SLJIT_S8;
-	default:
+	if (group_idx >= SljitFlatIntegerProjectionGroupSize()) {
 		throw InternalException("SLJIT flat integer projection result register is out of range");
 	}
+	return SljitSavedRegisterAt(NumericCast<sljit_s32>(5 + group_idx));
 }
 
 void EmitSljitFlatIntegerProjectionOverflowReturns(struct sljit_compiler *compiler,

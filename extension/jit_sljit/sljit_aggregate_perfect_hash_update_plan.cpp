@@ -31,6 +31,7 @@ bool TryBuildSljitPerfectHashFusedUpdatePlan(
     const vector<bool> &source_not_null, const vector<Value> &source_min_values, const vector<Value> &source_max_values,
     SljitPerfectHashFusedUpdatePlan &result, string &error) {
 	result = SljitPerfectHashFusedUpdatePlan();
+	const auto &registers = GetSljitPerfectHashRegisterLayout();
 	const bool typed_group_expressions = SljitPerfectHashGroupExpressionsUseTypedTree(group_expressions);
 	if (!TryBuildSljitPerfectHashGroupPlans(groups, group_expressions, contract, result.group_plans,
 	                                        typed_group_expressions) ||
@@ -98,11 +99,11 @@ bool TryBuildSljitPerfectHashFusedUpdatePlan(
 			auto vector_register_count = result.predicate_simd_plan.constant_count +
 			                             result.predicate_simd_plan.max_live_temps +
 			                             (result.predicate_simd_plan.needs_all_ones ? idx_t(1) : idx_t(0));
-#if defined(SLJIT_CONFIG_ARM_64) && SLJIT_CONFIG_ARM_64
 			// ARM64 keeps one horizontal mask-reduction destination live so uniform
 			// groups avoid materializing a full scalar movemask.
-			vector_register_count++;
-#endif
+			if (GetSljitTargetCapabilities().IsArm64()) {
+				vector_register_count++;
+			}
 			result.scratch_register_count = 5 | SLJIT_ENTER_VECTOR(NumericCast<sljit_s32>(vector_register_count));
 		}
 	}
@@ -113,11 +114,11 @@ bool TryBuildSljitPerfectHashFusedUpdatePlan(
 	                                                    batch_lower_never_overflows, result.local_size,
 	                                                    result.dense_reduction_plan);
 	result.source_data_hoists = BuildSljitPerfectHashSourceDataPointerHoists(payloads);
-	result.hoist_source_data_pointers = SLJIT_HAS_PERFECT_HASH_GROUP_DATA_REGS &&
+	result.hoist_source_data_pointers = registers.has_group_data &&
 	                                    result.source_data_hoists.size() >= result.group_plans.size() &&
 	                                    !result.source_data_hoists.empty();
 	const bool group_data_pointer_hoist_candidate =
-	    !result.hoist_source_data_pointers && SLJIT_HAS_PERFECT_HASH_GROUP_DATA_REGS && result.group_plans.size() <= 2;
+	    !result.hoist_source_data_pointers && registers.has_group_data && result.group_plans.size() <= 2;
 	if (!result.dense_reduction_plan.Ready()) {
 		TryBuildSljitDeferredPerfectHashFlagPlan(aggregates, contract, result.local_size, result.deferred_flag_plan);
 	}
@@ -135,10 +136,8 @@ bool TryBuildSljitPerfectHashFusedUpdatePlan(
 	result.hoist_fast_source_data_pointers = !result.fast_source_data_hoists.empty() &&
 	                                         (!result.hoist_source_data_pointers ||
 	                                          result.fast_source_data_hoists.size() > result.source_data_hoists.size());
-	result.dedicated_state_register =
-	    SLJIT_HAS_DEDICATED_PERFECT_HASH_STATE_REG && !result.dense_reduction_plan.Ready();
-	result.dedicated_reduction_state_register =
-	    SLJIT_HAS_DEDICATED_PERFECT_HASH_STATE_REG && result.dense_reduction_plan.Ready();
+	result.dedicated_state_register = registers.has_dedicated_state && !result.dense_reduction_plan.Ready();
+	result.dedicated_reduction_state_register = registers.has_dedicated_state && result.dense_reduction_plan.Ready();
 	// In each flat fast-path row, S7 starts as a transient group-data-array base
 	// and becomes the direct perfect-hash state pointer only after every group
 	// key has consumed it. This removes repeated input-struct loads without
@@ -147,16 +146,16 @@ bool TryBuildSljitPerfectHashFusedUpdatePlan(
 	    result.hoist_source_data_pointers && result.codegen_plan.fast_path_supported &&
 	    (result.dense_reduction_plan.Ready() || result.dedicated_state_register) &&
 	    SljitCanPrecomputePerfectHashStringGroupOffset(result.group_plans);
-	result.state_pointer_reg = result.dedicated_state_register ? SLJIT_PERFECT_HASH_STATE_REG : SLJIT_S4;
-	result.reduction_state_reg =
-	    result.dedicated_reduction_state_register ? SLJIT_PERFECT_HASH_REDUCTION_STATE_REG : SLJIT_S4;
-	result.saved_register_count =
-	    result.dedicated_state_register ? SLJIT_PERFECT_HASH_SAVED_REG_COUNT : SLJIT_NATIVE_VECTOR_SAVED_REG_COUNT;
+	result.state_pointer_reg = result.dedicated_state_register ? registers.state : SLJIT_S4;
+	result.reduction_state_reg = result.dedicated_reduction_state_register ? registers.reduction_state : SLJIT_S4;
+	result.saved_register_count = result.dedicated_state_register
+	                                  ? registers.saved_register_count
+	                                  : GetSljitNativeVectorRegisterLayout().saved_register_count;
 	if (result.dedicated_reduction_state_register) {
-		result.saved_register_count = SLJIT_PERFECT_HASH_SAVED_REG_COUNT;
+		result.saved_register_count = registers.saved_register_count;
 	}
 	if (result.hoist_group_data_pointers || result.hoist_source_data_pointers) {
-		result.saved_register_count = SLJIT_PERFECT_HASH_GROUP_DATA_SAVED_REG_COUNT;
+		result.saved_register_count = registers.group_data_saved_register_count;
 	}
 	return true;
 }

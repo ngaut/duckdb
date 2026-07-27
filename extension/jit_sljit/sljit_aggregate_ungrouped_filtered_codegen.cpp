@@ -132,14 +132,14 @@ unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativeFilteredUngroupedFusedPrim
 			auto predicate_plan = TryPlanSljitTypedExpressionTreeSimd(predicate);
 			// SADALP widens int32->int64, so the packed SUM path needs a 4-lane int32
 			// predicate and a 4-lane int32 value payload; it is ARM64-only.
-#if defined(SLJIT_CONFIG_ARM_64) && SLJIT_CONFIG_ARM_64
-			auto payload_plan = TryPlanSljitTypedExpressionTreeSimdValue(*payloads[0].expression_tree, 2);
-			if (predicate_plan.supported && predicate_plan.elem_scale == 2 && payload_plan.supported) {
-				simd_plan = predicate_plan;
-				simd_payload_plan = payload_plan;
-				simd_is_sum = true;
+			if (GetSljitTargetCapabilities().IsArm64()) {
+				auto payload_plan = TryPlanSljitTypedExpressionTreeSimdValue(*payloads[0].expression_tree, 2);
+				if (predicate_plan.supported && predicate_plan.elem_scale == 2 && payload_plan.supported) {
+					simd_plan = predicate_plan;
+					simd_payload_plan = payload_plan;
+					simd_is_sum = true;
+				}
 			}
-#endif
 		}
 	}
 	// Hybrid: when no fully-packed form fits the payloads, the predicate mask can
@@ -182,7 +182,8 @@ unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativeFilteredUngroupedFusedPrim
 		simd_scratches = 5 | SLJIT_ENTER_VECTOR(NumericCast<sljit_s32>(vector_regs));
 	}
 
-	sljit_emit_enter(compiler, 0, SLJIT_ARGS1V(P), simd_scratches, SLJIT_NATIVE_VECTOR_SAVED_REG_COUNT, local_size);
+	sljit_emit_enter(compiler, 0, SLJIT_ARGS1V(P), simd_scratches,
+	                 GetSljitNativeVectorRegisterLayout().saved_register_count, local_size);
 	EmitInitSljitNativeVectorLoop(compiler);
 	for (idx_t payload_idx = 0; payload_idx < payloads.size(); payload_idx++) {
 		sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_MEM1(SLJIT_SP), local_count_offsets[payload_idx], SLJIT_IMM, 0);

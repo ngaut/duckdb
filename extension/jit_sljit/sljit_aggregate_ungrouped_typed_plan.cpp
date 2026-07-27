@@ -17,17 +17,19 @@ namespace duckdb {
 static vector<sljit_s32> BuildSljitUngroupedAggregateSourceDataPointerRegs(idx_t max_hoists,
                                                                            bool include_fast_spare_reg) {
 	vector<sljit_s32> result;
-#if defined(SLJIT_NUMBER_OF_SAVED_REGISTERS) && SLJIT_NUMBER_OF_SAVED_REGISTERS >= 10
+	const auto &registers = GetSljitUngroupedAggregateRegisterLayout();
+	if (!registers.has_source_data_hoists) {
+		return result;
+	}
 	if (max_hoists > 0) {
-		result.push_back(SLJIT_S8);
+		result.push_back(registers.source_data[0]);
 	}
 	if (max_hoists > 1) {
-		result.push_back(SLJIT_S9);
+		result.push_back(registers.source_data[1]);
 	}
 	if (include_fast_spare_reg && max_hoists > 2) {
-		result.push_back(SLJIT_S6);
+		result.push_back(registers.fast_source_data);
 	}
-#endif
 	return result;
 }
 
@@ -43,6 +45,7 @@ bool TryBuildSljitUngroupedFusedAggregateUpdatePlan(const vector<SljitNativeRegi
                                                     const vector<ExecutionRegionAggregateInput> &aggregates,
                                                     SljitUngroupedFusedAggregateUpdatePlan &result, string &error) {
 	result = SljitUngroupedFusedAggregateUpdatePlan();
+	const auto &registers = GetSljitUngroupedAggregateRegisterLayout();
 	if (!BuildSljitFusedAggregateCodegenPlan(payloads, aggregates, result.codegen_plan)) {
 		error = "unsupported fused aggregate payload shape";
 		return false;
@@ -58,7 +61,7 @@ bool TryBuildSljitUngroupedFusedAggregateUpdatePlan(const vector<SljitNativeRegi
 		result.local_size += NumericCast<sljit_sw>(sizeof(sljit_sw));
 	}
 	result.use_conditional_hugeint_register_accumulators =
-	    SLJIT_HAS_UNGROUPED_CONDITIONAL_HUGEINT_SUM_REGS && result.codegen_plan.conditional_shared_payload &&
+	    registers.has_conditional_hugeint_accumulators && result.codegen_plan.conditional_shared_payload &&
 	    aggregates[result.codegen_plan.shared_lane].primitive_update_kind ==
 	        AggregatePrimitiveUpdateKind::SUM_HUGEINT &&
 	    aggregates[result.codegen_plan.conditional_lane].primitive_update_kind ==
@@ -92,10 +95,10 @@ bool TryBuildSljitUngroupedFusedAggregateUpdatePlan(const vector<SljitNativeRegi
 	result.hoist_source_data_pointers = !result.source_data_hoists.empty();
 	result.hoist_fast_source_data_pointers = !result.fast_source_data_hoists.empty();
 	result.saved_register_count = result.hoist_source_data_pointers || result.hoist_fast_source_data_pointers
-	                                  ? NumericCast<sljit_s32>(10)
-	                                  : SLJIT_NATIVE_VECTOR_SAVED_REG_COUNT;
+	                                  ? registers.source_data_saved_register_count
+	                                  : GetSljitNativeVectorRegisterLayout().saved_register_count;
 	if (result.use_conditional_hugeint_register_accumulators) {
-		result.saved_register_count = NumericCast<sljit_s32>(14);
+		result.saved_register_count = registers.conditional_hugeint_saved_register_count;
 	}
 	return true;
 }

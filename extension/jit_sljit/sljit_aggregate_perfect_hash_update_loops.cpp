@@ -10,14 +10,16 @@
 
 namespace duckdb {
 
-static constexpr sljit_s32 SLJIT_PERFECT_HASH_GROUP_SEL_ARRAY_BASE_REG =
-    SLJIT_NATIVE_VECTOR_HAS_EXTRA_SAVED_REG ? SLJIT_S6 : 0;
+static sljit_s32 SljitPerfectHashGroupSelectionArrayBaseReg() {
+	return GetSljitNativeVectorRegisterLayout().optional_invariant;
+}
 
 static void EmitSljitPerfectHashGroupSelectionArrayBase(struct sljit_compiler *compiler) {
-	if (SLJIT_PERFECT_HASH_GROUP_SEL_ARRAY_BASE_REG == 0) {
+	const auto group_selection_array_base = SljitPerfectHashGroupSelectionArrayBaseReg();
+	if (group_selection_array_base == 0) {
 		return;
 	}
-	sljit_emit_op1(compiler, SLJIT_MOV_P, SLJIT_PERFECT_HASH_GROUP_SEL_ARRAY_BASE_REG, 0, SLJIT_MEM1(SLJIT_S0),
+	sljit_emit_op1(compiler, SLJIT_MOV_P, group_selection_array_base, 0, SLJIT_MEM1(SLJIT_S0),
 	               offsetof(SljitNativeVectorInput, group_sel_array));
 }
 
@@ -36,12 +38,12 @@ struct SljitPerfectHashUpdateLoopOptions {
 };
 
 static void EmitSljitPerfectHashFastGroupDataArrayBase(struct sljit_compiler *compiler) {
-	sljit_emit_op1(compiler, SLJIT_MOV_P, SLJIT_PERFECT_HASH_STATE_REG, 0, SLJIT_MEM1(SLJIT_S0),
+	sljit_emit_op1(compiler, SLJIT_MOV_P, GetSljitPerfectHashRegisterLayout().state, 0, SLJIT_MEM1(SLJIT_S0),
 	               offsetof(SljitNativeVectorInput, group_data_array));
 }
 
 static void EmitSljitPerfectHashFastGroupDictionaryRuntimeArrayBase(struct sljit_compiler *compiler) {
-	sljit_emit_op1(compiler, SLJIT_MOV_P, SLJIT_PERFECT_HASH_STATE_REG, 0, SLJIT_MEM1(SLJIT_S0),
+	sljit_emit_op1(compiler, SLJIT_MOV_P, GetSljitPerfectHashRegisterLayout().state, 0, SLJIT_MEM1(SLJIT_S0),
 	               offsetof(SljitNativeVectorInput, perfect_hash_dictionary_groups));
 }
 
@@ -146,13 +148,13 @@ SljitPerfectHashDictionaryGroupLoopOptions(const SljitPerfectHashFusedUpdateEmit
 	result.direct_logical_index = true;
 	result.all_valid = true;
 	result.predicate_data_hoists = data_hoists;
-	result.load_fast_group_dictionary_runtime_array_base = SLJIT_HAS_DEDICATED_PERFECT_HASH_STATE_REG;
+	const auto &registers = GetSljitPerfectHashRegisterLayout();
+	result.load_fast_group_dictionary_runtime_array_base = registers.has_dedicated_state;
 	result.group_lookup = SljitPerfectHashSelectedGroupLookupOptions(context);
 	result.group_lookup.group_selection_all_present = true;
 	result.group_lookup.use_dictionary_group_contributions = true;
-	result.group_lookup.group_sel_array_base_reg = SLJIT_PERFECT_HASH_GROUP_SEL_ARRAY_BASE_REG;
-	result.group_lookup.group_dictionary_runtime_array_base_reg =
-	    SLJIT_HAS_DEDICATED_PERFECT_HASH_STATE_REG ? SLJIT_PERFECT_HASH_STATE_REG : 0;
+	result.group_lookup.group_sel_array_base_reg = SljitPerfectHashGroupSelectionArrayBaseReg();
+	result.group_lookup.group_dictionary_runtime_array_base_reg = registers.has_dedicated_state ? registers.state : 0;
 	result.load_common_selected_source_index = payload_uses_common_selection;
 	result.payload_update =
 	    SljitPerfectHashPayloadUpdateOptionsForLoop(false, true, payload_uses_common_selection, data_hoists);
@@ -249,9 +251,9 @@ static sljit_jump *EmitSljitPerfectHashFlatPayloadSelectedGroupLoop(
 	loop_options.load_fast_group_data_array_base = use_group_data_array_base_reg;
 	loop_options.group_lookup = SljitPerfectHashSelectedGroupLookupOptions(context);
 	loop_options.group_lookup.group_selection_all_present = true;
-	loop_options.group_lookup.group_sel_array_base_reg = SLJIT_PERFECT_HASH_GROUP_SEL_ARRAY_BASE_REG;
+	loop_options.group_lookup.group_sel_array_base_reg = SljitPerfectHashGroupSelectionArrayBaseReg();
 	loop_options.group_lookup.group_data_array_base_reg_override =
-	    use_group_data_array_base_reg ? SLJIT_PERFECT_HASH_STATE_REG : 0;
+	    use_group_data_array_base_reg ? GetSljitPerfectHashRegisterLayout().state : 0;
 	loop_options.payload_update = SljitPerfectHashPayloadUpdateOptionsForLoop(true, true, false, data_hoists);
 	if (update_plan.predicate_simd_plan.supported) {
 		EmitSljitTypedExpressionTreeSimdHybridFilterLoop(
@@ -358,9 +360,9 @@ void EmitSljitPerfectHashFusedUpdateLoops(const SljitPerfectHashFusedUpdateEmitC
 		loop_options.load_fast_group_data_array_base = can_use_common_selected_group_data_base_reg;
 		loop_options.group_lookup = SljitPerfectHashSelectedGroupLookupOptions(context);
 		loop_options.group_lookup.group_selection_all_present = true;
-		loop_options.group_lookup.group_sel_array_base_reg = SLJIT_PERFECT_HASH_GROUP_SEL_ARRAY_BASE_REG;
+		loop_options.group_lookup.group_sel_array_base_reg = SljitPerfectHashGroupSelectionArrayBaseReg();
 		loop_options.group_lookup.group_data_array_base_reg_override =
-		    can_use_common_selected_group_data_base_reg ? SLJIT_PERFECT_HASH_STATE_REG : 0;
+		    can_use_common_selected_group_data_base_reg ? GetSljitPerfectHashRegisterLayout().state : 0;
 		loop_options.load_common_selected_source_index = true;
 		loop_options.payload_update = SljitPerfectHashPayloadUpdateOptionsForLoop(false, true, true, data_hoists);
 		common_selected_group_present_fast_done = EmitSljitPerfectHashUpdateLoop(context, loop_options);

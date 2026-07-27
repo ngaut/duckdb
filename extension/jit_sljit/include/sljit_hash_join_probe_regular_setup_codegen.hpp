@@ -11,6 +11,7 @@
 #include "sljit_hash_join_probe_key_codegen.hpp"
 #include "sljit_hash_join_probe_loop_codegen.hpp"
 #include "sljit_join_probe_codegen.hpp"
+#include "sljit_platform.hpp"
 
 #include "duckdb/common/numeric_utils.hpp"
 
@@ -21,8 +22,6 @@
 namespace duckdb {
 
 static constexpr sljit_s32 SLJIT_REGULAR_HASH_JOIN_FIXED_SAVED_REG_COUNT = 5;
-static_assert(SLJIT_NUMBER_OF_SAVED_REGISTERS >= SLJIT_REGULAR_HASH_JOIN_FIXED_SAVED_REG_COUNT,
-              "regular hash join probe requires five saved registers");
 
 struct SljitRegularHashJoinProbeRegisters {
 	bool assume_all_keys_valid = false;
@@ -36,17 +35,20 @@ struct SljitRegularHashJoinProbeRegisters {
 	sljit_s32 aux_next_ptrs_reg = 0;
 };
 
-static inline sljit_s32 AllocateRegularHashJoinSavedRegister(sljit_s32 &saved_reg_count) {
-	if (saved_reg_count >= SLJIT_NUMBER_OF_SAVED_REGISTERS) {
-		return 0;
-	}
-	return SLJIT_S(saved_reg_count++);
-}
-
 static inline bool PrepareRegularHashJoinProbeRegisters(const SljitNativeHashJoinProbePlan &plan,
                                                         const SljitHashJoinProbeCodegenConfig &config,
                                                         SljitRegularHashJoinProbeRegisters &registers, string &error) {
 	auto &keys = plan.keys;
+	SljitSavedRegisterAllocator register_allocator(5, SLJIT_REGULAR_HASH_JOIN_FIXED_SAVED_REG_COUNT);
+	if (!register_allocator.Valid()) {
+		error = "not enough addressable saved registers for regular hash join probe";
+		return false;
+	}
+	auto allocate_saved_register = [&]() {
+		auto reg = register_allocator.Allocate();
+		registers.saved_reg_count = register_allocator.SavedRegisterCount();
+		return reg;
+	};
 	registers.assume_all_keys_valid = config.AssumesAllKeysValid();
 	registers.saved_reg_count = SLJIT_REGULAR_HASH_JOIN_FIXED_SAVED_REG_COUNT;
 	registers.source_data_regs.assign(keys.size(), 0);
@@ -55,18 +57,18 @@ static inline bool PrepareRegularHashJoinProbeRegisters(const SljitNativeHashJoi
 	// it before optional invariant hoists so smaller register files reload masks
 	// instead of rejecting an otherwise supported probe.
 	if (config.AssumesCommonSelectionAllValid()) {
-		registers.common_source_index_reg = AllocateRegularHashJoinSavedRegister(registers.saved_reg_count);
+		registers.common_source_index_reg = allocate_saved_register();
 		if (registers.common_source_index_reg == 0) {
 			error = "not enough saved registers for selected all-valid hash join probe";
 			return false;
 		}
 	}
-	registers.pointer_mask_reg = AllocateRegularHashJoinSavedRegister(registers.saved_reg_count);
-	registers.bitmask_reg = AllocateRegularHashJoinSavedRegister(registers.saved_reg_count);
-	registers.hash_multiplier_reg = AllocateRegularHashJoinSavedRegister(registers.saved_reg_count);
+	registers.pointer_mask_reg = allocate_saved_register();
+	registers.bitmask_reg = allocate_saved_register();
+	registers.hash_multiplier_reg = allocate_saved_register();
 	if (registers.assume_all_keys_valid) {
 		for (idx_t key_idx = 0; key_idx < keys.size(); key_idx++) {
-			auto reg = AllocateRegularHashJoinSavedRegister(registers.saved_reg_count);
+			auto reg = allocate_saved_register();
 			if (reg == 0) {
 				break;
 			}
@@ -74,7 +76,7 @@ static inline bool PrepareRegularHashJoinProbeRegisters(const SljitNativeHashJoi
 		}
 	}
 	if (config.PreloadsAuxNextPointers()) {
-		registers.aux_next_ptrs_reg = AllocateRegularHashJoinSavedRegister(registers.saved_reg_count);
+		registers.aux_next_ptrs_reg = allocate_saved_register();
 	}
 	registers.source_index_reg =
 	    config.AssumesFlatAllValid()

@@ -12,7 +12,9 @@
 namespace duckdb {
 
 static bool SljitUseArm64FlatSimpleCompareSelect(const ExecutionExpressionIR &root) {
-#if defined(SLJIT_CONFIG_ARM_64) && SLJIT_CONFIG_ARM_64
+	if (!GetSljitTargetCapabilities().IsArm64() || !GetSljitNativeVectorRegisterLayout().HasOptionalInvariant()) {
+		return false;
+	}
 	if (root.kind != ExecutionExpressionIRKind::BINARY || root.return_type.id() != LogicalTypeId::BOOLEAN ||
 	    !root.left || !root.right || !SljitTypedExpressionTreeComparisonSupported(root.binary_op) ||
 	    !SljitTypedExpressionTreeSameIntegerKind(*root.left, *root.right)) {
@@ -25,10 +27,6 @@ static bool SljitUseArm64FlatSimpleCompareSelect(const ExecutionExpressionIR &ro
 	auto has_reference = root.left->kind == ExecutionExpressionIRKind::REFERENCE ||
 	                     root.right->kind == ExecutionExpressionIRKind::REFERENCE;
 	return left_simple && right_simple && has_reference;
-#else
-	(void)root;
-	return false;
-#endif
 }
 
 static sljit_s32 SljitArm64SimpleCompareFlags(ExecutionExpressionBinaryOp op) {
@@ -133,6 +131,7 @@ static void EmitSljitFlatConstantModuloCompareSelect(struct sljit_compiler *comp
 // match. This removes the data-dependent branch without materializing false rows.
 static void EmitSljitArm64FlatSimpleCompareSelect(struct sljit_compiler *compiler, const ExecutionExpressionIR &root) {
 	D_ASSERT(SljitUseArm64FlatSimpleCompareSelect(root));
+	const auto second_source_data = GetSljitNativeVectorRegisterLayout().optional_invariant;
 	auto left_is_reference = root.left->kind == ExecutionExpressionIRKind::REFERENCE;
 	auto right_is_reference = root.right->kind == ExecutionExpressionIRKind::REFERENCE;
 	auto integer_kind = SljitTypedExpressionTreeIntegerKind(*root.left);
@@ -140,7 +139,7 @@ static void EmitSljitArm64FlatSimpleCompareSelect(struct sljit_compiler *compile
 	// S5 initially owns source_data_array. Two-reference comparisons hoist the
 	// right pointer first; one-reference comparisons use S5 alone.
 	if (left_is_reference && right_is_reference) {
-		sljit_emit_op1(compiler, SLJIT_MOV_P, SLJIT_S6, 0, SLJIT_MEM1(SLJIT_S5),
+		sljit_emit_op1(compiler, SLJIT_MOV_P, second_source_data, 0, SLJIT_MEM1(SLJIT_S5),
 		               NumericCast<sljit_sw>(root.right->ref_index * sizeof(const_data_ptr_t)));
 		sljit_emit_op1(compiler, SLJIT_MOV_P, SLJIT_S5, 0, SLJIT_MEM1(SLJIT_S5),
 		               NumericCast<sljit_sw>(root.left->ref_index * sizeof(const_data_ptr_t)));
@@ -174,7 +173,7 @@ static void EmitSljitArm64FlatSimpleCompareSelect(struct sljit_compiler *compile
 		if (right_is_reference) {
 			right_operand = SLJIT_R3;
 			right_operand_value = 0;
-			auto right_data_reg = left_is_reference ? SLJIT_S6 : SLJIT_S5;
+			auto right_data_reg = left_is_reference ? second_source_data : SLJIT_S5;
 			sljit_emit_op1(compiler, load_op, right_operand, 0, SLJIT_MEM1(right_data_reg), data_offset);
 		} else {
 			right_operand = SLJIT_IMM;
@@ -212,7 +211,8 @@ static void EmitSljitArm64FlatSimpleCompareSelect(struct sljit_compiler *compile
 	sljit_emit_op2(compiler, SLJIT_ADD, SLJIT_S1, 0, SLJIT_S1, 0, SLJIT_IMM, UNROLL);
 	sljit_emit_op2(compiler, SLJIT_ADD, SLJIT_S5, 0, SLJIT_S5, 0, SLJIT_IMM, UNROLL * data_width);
 	if (left_is_reference && right_is_reference) {
-		sljit_emit_op2(compiler, SLJIT_ADD, SLJIT_S6, 0, SLJIT_S6, 0, SLJIT_IMM, UNROLL * data_width);
+		sljit_emit_op2(compiler, SLJIT_ADD, second_source_data, 0, second_source_data, 0, SLJIT_IMM,
+		               UNROLL * data_width);
 	}
 	auto unrolled_repeat = sljit_emit_jump(compiler, SLJIT_JUMP);
 	sljit_set_label(unrolled_repeat, unrolled_loop);
@@ -224,7 +224,7 @@ static void EmitSljitArm64FlatSimpleCompareSelect(struct sljit_compiler *compile
 	sljit_emit_op2(compiler, SLJIT_ADD, SLJIT_S1, 0, SLJIT_S1, 0, SLJIT_IMM, 1);
 	sljit_emit_op2(compiler, SLJIT_ADD, SLJIT_S5, 0, SLJIT_S5, 0, SLJIT_IMM, data_width);
 	if (left_is_reference && right_is_reference) {
-		sljit_emit_op2(compiler, SLJIT_ADD, SLJIT_S6, 0, SLJIT_S6, 0, SLJIT_IMM, data_width);
+		sljit_emit_op2(compiler, SLJIT_ADD, second_source_data, 0, second_source_data, 0, SLJIT_IMM, data_width);
 	}
 	auto tail_repeat = sljit_emit_jump(compiler, SLJIT_JUMP);
 	sljit_set_label(tail_repeat, tail_loop);
@@ -283,14 +283,15 @@ unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativeTypedExpressionTreeSelect(
 		// + peak live temporaries.
 		auto vector_regs = simd_plan.constant_count + (simd_plan.needs_all_ones ? 1 : 0) + simd_plan.max_live_temps +
 		                   (simd_plan.nullable_capable ? idx_t(2) : idx_t(0));
-#if defined(SLJIT_CONFIG_ARM_64) && SLJIT_CONFIG_ARM_64
 		// ARM64 selection keeps one horizontal-mask reduction destination live
 		// alongside the predicate temporaries.
-		vector_regs++;
-#endif
+		if (GetSljitTargetCapabilities().IsArm64()) {
+			vector_regs++;
+		}
 		simd_scratches = 5 | SLJIT_ENTER_VECTOR(NumericCast<sljit_s32>(vector_regs));
 	}
-	sljit_emit_enter(compiler, 0, SLJIT_ARGS1V(P), simd_scratches, SLJIT_NATIVE_VECTOR_SAVED_REG_COUNT, local_size);
+	sljit_emit_enter(compiler, 0, SLJIT_ARGS1V(P), simd_scratches,
+	                 GetSljitNativeVectorRegisterLayout().saved_register_count, local_size);
 	EmitInitSljitNativeExpressionVectorLoop(compiler);
 	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_MEM1(SLJIT_S0), offsetof(SljitNativeVectorInput, selected_count),
 	               SLJIT_IMM, 0);

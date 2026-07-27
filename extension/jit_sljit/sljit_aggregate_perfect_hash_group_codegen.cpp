@@ -20,17 +20,19 @@ namespace duckdb {
 
 static vector<sljit_s32> BuildSljitPerfectHashSourceDataPointerRegs(idx_t max_hoists, bool include_fast_validity_reg) {
 	vector<sljit_s32> result;
-#if defined(SLJIT_NUMBER_OF_SAVED_REGISTERS) && SLJIT_NUMBER_OF_SAVED_REGISTERS >= 10
+	const auto &registers = GetSljitPerfectHashRegisterLayout();
+	if (!registers.has_group_data) {
+		return result;
+	}
 	if (max_hoists > 0) {
-		result.push_back(SLJIT_S8);
+		result.push_back(registers.group_data[0]);
 	}
 	if (max_hoists > 1) {
-		result.push_back(SLJIT_S9);
+		result.push_back(registers.group_data[1]);
 	}
 	if (include_fast_validity_reg && max_hoists > 2) {
-		result.push_back(SLJIT_S6);
+		result.push_back(GetSljitNativeVectorRegisterLayout().optional_invariant);
 	}
-#endif
 	return result;
 }
 
@@ -50,9 +52,9 @@ BuildSljitPerfectHashSourceDataPointerHoists(const vector<SljitNativeRegionExpre
 vector<SljitTypedExpressionTreeDataPointerHoist>
 BuildSljitPerfectHashSpareFastSourceDataPointerHoists(const vector<SljitNativeRegionExpressionPlan> &payloads) {
 	vector<sljit_s32> regs;
-#if defined(SLJIT_NUMBER_OF_SAVED_REGISTERS) && SLJIT_NUMBER_OF_SAVED_REGISTERS >= 10
-	regs.push_back(SLJIT_S6);
-#endif
+	if (GetSljitPerfectHashRegisterLayout().has_group_data) {
+		regs.push_back(GetSljitNativeVectorRegisterLayout().optional_invariant);
+	}
 	return BuildSljitAggregateSourceDataPointerHoists(payloads, regs, 2);
 }
 
@@ -258,16 +260,10 @@ void EmitLoadFusedAggregateGroupData(struct sljit_compiler *compiler, idx_t grou
 }
 
 sljit_s32 SljitPerfectHashGroupDataPointerReg(idx_t group_idx) {
-#if defined(SLJIT_NUMBER_OF_SAVED_REGISTERS) && SLJIT_NUMBER_OF_SAVED_REGISTERS >= 10
-	switch (group_idx) {
-	case 0:
-		return SLJIT_S8;
-	case 1:
-		return SLJIT_S9;
-	default:
-		break;
+	const auto &registers = GetSljitPerfectHashRegisterLayout();
+	if (registers.has_group_data && group_idx < 2) {
+		return registers.group_data[group_idx];
 	}
-#endif
 	throw InternalException("SLJIT perfect-hash group data register is out of range");
 }
 
@@ -276,7 +272,7 @@ sljit_s32 SljitPerfectHashSourceDataPointerReg(idx_t hoist_idx, bool include_fas
 		return SljitPerfectHashGroupDataPointerReg(hoist_idx);
 	}
 	if (include_fast_validity_reg && hoist_idx == 2) {
-		return SLJIT_S6;
+		return GetSljitNativeVectorRegisterLayout().optional_invariant;
 	}
 	throw InternalException("SLJIT perfect-hash source data register is out of range");
 }

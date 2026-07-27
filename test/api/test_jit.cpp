@@ -1,6 +1,8 @@
 #include "test_jit_helpers.hpp"
 
 #include "sljit_codegen_util.hpp"
+#include "sljit_platform.hpp"
+#include "sljit_register_layout.hpp"
 #include "sljit_typed_expression_simd_codegen.hpp"
 
 #include "duckdb/execution/execution_region_kernel.hpp"
@@ -317,8 +319,89 @@ static void RequireSljitSimdBinaryIfSupported(sljit_s32 elem_type, sljit_s32 ope
 
 } // namespace
 
+TEST_CASE("SLJIT backend requires an addressable native-vector register ABI", "[api][jit][sljit]") {
+	const auto &capabilities = GetSljitTargetCapabilities();
+	REQUIRE(SljitPlatformAvailable() == capabilities.BackendAvailable());
+	REQUIRE(capabilities.registers.addressable_saved_register_count <= capabilities.registers.saved_register_count);
+	for (sljit_s32 saved_index = 0; saved_index < capabilities.registers.addressable_saved_register_count;
+	     saved_index++) {
+		REQUIRE(SljitSavedRegisterAt(saved_index) != 0);
+	}
+	REQUIRE(SljitSavedRegisterAt(capabilities.registers.addressable_saved_register_count) == 0);
+
+	if (capabilities.BackendAvailable()) {
+		const auto &native_vector = GetSljitNativeVectorRegisterLayout();
+		const auto has_optional_invariant = capabilities.registers.SupportsLayout(5, 7);
+		REQUIRE(native_vector.Available());
+		REQUIRE(native_vector.saved_register_count == (has_optional_invariant ? 7 : 6));
+		REQUIRE(native_vector.HasOptionalInvariant() == has_optional_invariant);
+
+		const auto &perfect_hash = GetSljitPerfectHashRegisterLayout();
+		CHECK(perfect_hash.has_dedicated_state == capabilities.registers.SupportsLayout(5, 8));
+		CHECK(perfect_hash.has_group_data == capabilities.registers.SupportsLayout(5, 10));
+
+		const auto &ungrouped = GetSljitUngroupedAggregateRegisterLayout();
+		CHECK(ungrouped.has_source_data_hoists == capabilities.registers.SupportsLayout(5, 10));
+		CHECK(ungrouped.has_conditional_hugeint_accumulators == capabilities.registers.SupportsLayout(5, 14));
+
+		const auto &primitive_run = GetSljitPrimitiveRunRegisterLayout();
+		CHECK(primitive_run.supported == capabilities.SupportsPrimitiveRunRegisterABI());
+		CHECK(primitive_run.has_affine_accumulators ==
+		      (primitive_run.supported && capabilities.registers.SupportsLayout(7, 8)));
+		CHECK(primitive_run.has_output_pointer_hoists ==
+		      (primitive_run.supported && capabilities.registers.SupportsLayout(7, 10)));
+
+		const auto &perfect_hash_probe = GetSljitPerfectHashProbeRegisterLayout();
+		CHECK(perfect_hash_probe.has_invariant_hoists == capabilities.registers.SupportsLayout(5, 10));
+	}
+}
+
+TEST_CASE("SLJIT target capability policy covers representative register ABIs", "[api][jit][sljit]") {
+	auto target = [](SljitTargetArchitecture architecture, sljit_s32 register_count, sljit_s32 saved_register_count,
+	                 sljit_s32 addressable_saved_register_count, sljit_s32 machine_word_bytes) {
+		SljitTargetCapabilities result;
+		result.architecture = architecture;
+		result.registers.register_count = register_count;
+		result.registers.saved_register_count = saved_register_count;
+		result.registers.addressable_saved_register_count = addressable_saved_register_count;
+		result.machine_word_bytes = machine_word_bytes;
+		result.platform_available = true;
+		return result;
+	};
+	struct TargetCase {
+		const char *name;
+		SljitTargetCapabilities capabilities;
+		sljit_s32 max_native_saved_registers;
+		bool native_layout_fits;
+		bool backend_available;
+		bool primitive_run_available;
+	};
+	auto unavailable = target(SljitTargetArchitecture::X86_64, 13, 6, 6, 8);
+	unavailable.platform_available = false;
+	const std::array<TargetCase, 7> cases {{
+	    {"x86-32 virtual saved registers", target(SljitTargetArchitecture::X86_32, 12, 7, 3, 4), 3, false, false,
+	     false},
+	    {"x86-64 SysV", target(SljitTargetArchitecture::X86_64, 13, 6, 6, 8), 6, true, true, true},
+	    {"x86-64 Windows", target(SljitTargetArchitecture::X86_64, 13, 8, 8, 8), 8, true, true, true},
+	    {"ARM64", target(SljitTargetArchitecture::ARM_64, 26, 10, 10, 8), 10, true, true, true},
+	    {"ARM32", target(SljitTargetArchitecture::ARM_32, 12, 8, 8, 4), 7, true, true, false},
+	    {"S390X constrained enter frame", target(SljitTargetArchitecture::S390X, 12, 8, 8, 8), 7, true, true, false},
+	    {"unavailable x86-64 backend", unavailable, 6, true, false, false},
+	}};
+	for (auto &test : cases) {
+		CAPTURE(test.name);
+		CHECK(test.capabilities.BackendAvailable() == test.backend_available);
+		CHECK(test.capabilities.SupportsPrimitiveRunRegisterABI() == test.primitive_run_available);
+		CHECK(test.capabilities.registers.SupportsLayout(5, 6) == test.native_layout_fits);
+		CHECK(test.capabilities.registers.MaxAddressableSavedRegisters(5) == test.max_native_saved_registers);
+		CHECK(test.capabilities.registers.MaxAddressableSavedRegisters(-1) == 0);
+		CHECK(test.capabilities.registers.MaxAddressableSavedRegisters(test.capabilities.registers.register_count +
+		                                                               1) == 0);
+	}
+}
+
 TEST_CASE("SLJIT SIMD binary backend operations preserve lane semantics", "[api][jit][sljit]") {
-	if (!sljit_has_cpu_feature(SLJIT_HAS_SIMD)) {
+	if (!GetSljitTargetCapabilities().simd_available) {
 		return;
 	}
 	using I8x16 = std::array<int8_t, 16>;

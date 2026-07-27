@@ -1,6 +1,6 @@
 # JIT Production Recipe Architecture
 
-Last updated: 2026-07-19
+Last updated: 2026-07-27
 
 This document is the stable architecture contract for DuckDB execution-region
 JIT. It describes layer ownership, immutable recipe binding, runtime data
@@ -54,6 +54,27 @@ Executable-memory policy is selected at build time by platform: Apple uses
 SLJIT's `MAP_JIT` allocator, Linux uses distinct pooled RW and RX mappings, and
 Windows and other supported POSIX systems use per-allocation W^X transitions.
 Generated code is never published through a generic RWX allocator.
+
+Backend availability is also an ABI admission boundary. The native-vector
+calling convention requires six saved registers that SLJIT exposes as real
+addressable machine registers, and each kernel layout must fit beside its
+declared scratch-register set. Register count alone is not sufficient:
+x86-32 virtualizes the required `S3`-`S5` registers, so the SLJIT backend is
+registered as unavailable and DuckDB remains on vectorized execution.
+
+`SljitTargetCapabilities` is the single owner of target architecture, machine
+word width, SIMD availability, register-file size, and addressable saved
+registers. Only that layer may read SLJIT target macros or feature probes. It
+builds one immutable process-lifetime snapshot; planning and code generation
+query the snapshot, and generated row loops contain no capability branches.
+
+Kernel code does not derive fast paths from register counts. Semantic layouts
+assign registers to native-vector metadata, perfect-hash state and group data,
+ungrouped accumulators, primitive-run state, and perfect-hash probe invariants.
+An optional role is either assigned an addressable machine register or absent;
+the planner then selects the corresponding register or spill layout. This keeps
+portable fallback and target-specific acceleration under one ABI instead of
+duplicating architecture checks in individual emitters.
 
 The backend must not infer semantic support from mutable runtime state. It may
 specialize physical access only after a semantic recipe has been admitted.
@@ -275,9 +296,10 @@ source without a claim budget is latched vectorized for the pipeline's
 remainder: its cursor can hold a partially-scanned row group at any yield, so
 switching it into compiled execution — including after a commit verdict —
 would abandon those rows. Only executors with clean cursors take the compiled
-leg or join a committed kernel. Verdicts are recorded as runtime events carrying per-leg
-times and rows, a recorded fallback verdict satisfies the kernel's declared
-runtime proof requirements, and a verdict is final for its kernel's lifetime.
+leg or join a committed kernel. Verdicts are recorded as runtime events carrying
+per-leg times and rows. A fallback verdict records runner choice but does not
+replace the kernel's declared typed runtime proofs. A verdict is final for its
+kernel's lifetime.
 
 ## Observability
 

@@ -10,19 +10,12 @@
 
 #include "sljit_codegen_util.hpp"
 #include "sljit_function_types.hpp"
+#include "sljit_register_layout.hpp"
 
 #include "duckdb/execution/execution_expression_ir.hpp"
 #include "duckdb/execution/execution_region_kernel.hpp"
 
 namespace duckdb {
-
-#if defined(SLJIT_NUMBER_OF_SAVED_REGISTERS) && SLJIT_NUMBER_OF_SAVED_REGISTERS >= 7
-static constexpr sljit_s32 SLJIT_NATIVE_VECTOR_SAVED_REG_COUNT = 7;
-static constexpr bool SLJIT_NATIVE_VECTOR_HAS_EXTRA_SAVED_REG = true;
-#else
-static constexpr sljit_s32 SLJIT_NATIVE_VECTOR_SAVED_REG_COUNT = 6;
-static constexpr bool SLJIT_NATIVE_VECTOR_HAS_EXTRA_SAVED_REG = false;
-#endif
 
 struct SljitExpressionTreeOverflowJumps {
 	SljitNativeIntegerBinaryOp op = SljitNativeIntegerBinaryOp::ADD;

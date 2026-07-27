@@ -89,6 +89,7 @@ set(JIT_SLJIT_EXTENSION_FILES
     sljit_native_util.cpp
     sljit_nested_loop_join_codegen.cpp
     sljit_platform.cpp
+    sljit_register_layout.cpp
     sljit_predicate_branch_codegen.cpp
     sljit_predicate_constant_or_null_codegen.cpp
     sljit_predicate_codegen.cpp

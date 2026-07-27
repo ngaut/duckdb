@@ -9,6 +9,7 @@
 #pragma once
 
 #include "sljit_native_types.hpp"
+#include "sljit_platform.hpp"
 
 #include "duckdb/common/exception.hpp"
 #include "duckdb/common/helper.hpp"
@@ -18,8 +19,8 @@
 namespace duckdb {
 
 static inline bool SljitArm64NeonIntegerBinarySupported(SljitNativeIntegerKind kind, SljitNativeIntegerBinaryOp op) {
-#if defined(SLJIT_CONFIG_ARM_64) && SLJIT_CONFIG_ARM_64
-	if (!sljit_has_cpu_feature(SLJIT_HAS_SIMD)) {
+	const auto &capabilities = GetSljitTargetCapabilities();
+	if (!capabilities.IsArm64() || !capabilities.simd_available) {
 		return false;
 	}
 	switch (kind) {
@@ -31,9 +32,6 @@ static inline bool SljitArm64NeonIntegerBinarySupported(SljitNativeIntegerKind k
 	default:
 		return false;
 	}
-#else
-	return false;
-#endif
 }
 
 static inline sljit_s32 SljitArm64NeonIntegerSimdType(SljitNativeIntegerKind kind) {

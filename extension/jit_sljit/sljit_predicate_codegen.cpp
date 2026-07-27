@@ -77,8 +77,9 @@ static vector<sljit_jump *> EmitSljitPartialSimdFallbackChecks(struct sljit_comp
 }
 
 static void EmitStoreSljitPartialSimdMatch(struct sljit_compiler *compiler) {
+	const auto output_selection = GetSljitNativeVectorRegisterLayout().optional_invariant;
 	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_R2, 0, SLJIT_MEM1(SLJIT_SP), SLJIT_SELECT_TRUE_COUNT_OFFSET);
-	sljit_emit_op1(compiler, SLJIT_MOV_U32, SLJIT_MEM2(SLJIT_S6, SLJIT_R2), 2, SLJIT_S1, 0);
+	sljit_emit_op1(compiler, SLJIT_MOV_U32, SLJIT_MEM2(output_selection, SLJIT_R2), 2, SLJIT_S1, 0);
 	sljit_emit_op2(compiler, SLJIT_ADD, SLJIT_R2, 0, SLJIT_R2, 0, SLJIT_IMM, 1);
 	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_MEM1(SLJIT_SP), SLJIT_SELECT_TRUE_COUNT_OFFSET, SLJIT_R2, 0);
 }
@@ -168,6 +169,10 @@ unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativePredicate(const SljitNativ
 	auto partial_simd = !materialize_result && typed_root
 	                        ? TryPlanSljitNativePredicatePartialSimd(*typed_root, predicate.source_not_null)
 	                        : SljitNativePredicatePartialSimdPlan();
+	const auto &native_registers = GetSljitNativeVectorRegisterLayout();
+	if (partial_simd.supported && !native_registers.HasOptionalInvariant()) {
+		partial_simd = SljitNativePredicatePartialSimdPlan();
+	}
 	if (used_partial_simd) {
 		*used_partial_simd = partial_simd.supported;
 	}
@@ -183,13 +188,13 @@ unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativePredicate(const SljitNativ
 		local_size = simd_mask_offset + 24;
 		auto vector_register_count = partial_simd.simd.constant_count + partial_simd.simd.max_live_temps +
 		                             (partial_simd.simd.needs_all_ones ? idx_t(1) : idx_t(0));
-#if defined(SLJIT_CONFIG_ARM_64) && SLJIT_CONFIG_ARM_64
 		// ARM64 keeps a horizontal mask classifier live across the packed
 		// predicate, avoiding a full movemask for uniform groups.
-		vector_register_count++;
-#endif
+		if (GetSljitTargetCapabilities().IsArm64()) {
+			vector_register_count++;
+		}
 		scratches |= SLJIT_ENTER_VECTOR(NumericCast<sljit_s32>(vector_register_count));
-		saved_registers = 7;
+		saved_registers = native_registers.saved_register_count;
 	}
 	sljit_emit_enter(compiler, 0, SLJIT_ARGS1V(P), scratches, saved_registers, local_size);
 	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_S2, 0, SLJIT_MEM1(SLJIT_S0), offsetof(SljitNativePredicateInput, count));
@@ -201,7 +206,7 @@ unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativePredicate(const SljitNativ
 		// Keep the append target live through packed prefix classification and the
 		// scalar residual. This removes two ABI pointer loads and one null branch
 		// from every matching row.
-		sljit_emit_op1(compiler, SLJIT_MOV_P, SLJIT_S6, 0, SLJIT_MEM1(SLJIT_S0),
+		sljit_emit_op1(compiler, SLJIT_MOV_P, native_registers.optional_invariant, 0, SLJIT_MEM1(SLJIT_S0),
 		               offsetof(SljitNativePredicateInput, true_sel));
 		EmitResetPredicateLoopState(compiler, false);
 		EmitSljitTypedExpressionTreeSimdHybridFilterLoop(

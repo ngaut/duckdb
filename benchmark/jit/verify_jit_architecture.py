@@ -405,12 +405,82 @@ def verify_production_contract_ownership() -> None:
     ):
         if allocator_contract not in sljit_cmake:
             raise AssertionError(f"SLJIT executable-memory platform policy is incomplete: {allocator_contract}")
+    sljit_platform = read("extension/jit_sljit/sljit_platform.cpp")
+    for platform_abi_contract in (
+        "DetectSljitTargetCapabilities",
+        "registers.addressable_saved_register_count++",
+        "sljit_get_register_index(SLJIT_GP_REGISTER, SLJIT_S(saved_index)) < 0",
+        "registers.SupportsLayout(5, 6)",
+        "MaxAddressableSavedRegisters",
+    ):
+        if platform_abi_contract not in sljit_platform:
+            raise AssertionError(
+                f"SLJIT backend availability must prove its native-vector register ABI: {platform_abi_contract}"
+            )
+    platform_header = read("extension/jit_sljit/include/sljit_platform.hpp")
+    for capability_contract in (
+        "struct SljitRegisterFile",
+        "struct SljitTargetCapabilities",
+        "class SljitSavedRegisterAllocator",
+        "SupportsPrimitiveRunRegisterABI",
+    ):
+        if capability_contract not in platform_header:
+            raise AssertionError(f"SLJIT target capability ownership is incomplete: {capability_contract}")
+    register_layout = read("extension/jit_sljit/include/sljit_register_layout.hpp")
+    for register_role_contract in (
+        "struct SljitNativeVectorRegisterLayout",
+        "struct SljitPerfectHashRegisterLayout",
+        "struct SljitUngroupedAggregateRegisterLayout",
+        "struct SljitPrimitiveRunRegisterLayout",
+        "struct SljitPerfectHashProbeRegisterLayout",
+    ):
+        if register_role_contract not in register_layout:
+            raise AssertionError(f"SLJIT semantic register-layout ownership is incomplete: {register_role_contract}")
+    if "sljit_register_layout.cpp" not in read("extension/jit_sljit/CMakeLists.txt"):
+        raise AssertionError("SLJIT semantic register layouts must be linked into the backend")
+    reject_regex(
+        "target ABI admission outside the capability owner",
+        (
+            r"\bSLJIT_CONFIG_",
+            r"\bSLJIT_NUMBER_OF_(?:SAVED_)?REGISTERS\b",
+            r"\bSLJIT_32BIT_ARCHITECTURE\b",
+            r"\bsljit_has_cpu_feature\s*\(\s*SLJIT_HAS_SIMD\s*\)",
+            r"\bSLJIT_S\s*\(",
+        ),
+        ("extension/jit_sljit/**/*.hpp", "extension/jit_sljit/**/*.cpp"),
+        ("extension/jit_sljit/sljit_platform.cpp",),
+    )
+    reject_regex(
+        "stale register-count capability alias",
+        (
+            r"\bSLJIT_NATIVE_VECTOR_SAVED_REG_COUNT\b",
+            r"\bSLJIT_NATIVE_VECTOR_HAS_(?:ADDRESSABLE_)?EXTRA_SAVED_REG\b",
+            r"\bSLJIT_HAS_PERFECT_HASH_GROUP_DATA_REGS\b",
+            r"\bSLJIT_HAS_DEDICATED_PERFECT_HASH_STATE_REG\b",
+        ),
+        ("extension/jit_sljit/**/*.hpp", "extension/jit_sljit/**/*.cpp"),
+    )
+    reject_regex(
+        "high saved-register role outside the semantic layout owner",
+        (r"\bSLJIT_S(?:[6-9]|[1-9][0-9]+)\b",),
+        ("extension/jit_sljit/**/*.hpp", "extension/jit_sljit/**/*.cpp"),
+        ("extension/jit_sljit/sljit_register_layout.cpp",),
+    )
+    if "SLJIT backend requires an addressable native-vector register ABI" not in manager_test:
+        raise AssertionError("SLJIT platform admission requires direct register-addressability coverage")
+    if "SLJIT target capability policy covers representative register ABIs" not in manager_test:
+        raise AssertionError("SLJIT target capability policy requires synthetic cross-target coverage")
     for backend_registration in (
         "extension/jit_sljit/sljit_backend.cpp",
         "extension/jit_metal/metal_backend.mm",
     ):
         if "EXECUTION_REGION_BACKEND_ABI_VERSION" not in read(backend_registration):
             raise AssertionError(f"{backend_registration}: backend registration must declare its ABI version")
+    design = read("benchmark/jit/JIT_PRODUCTION_RECIPE_DESIGN.md")
+    if "fallback verdict satisfies the kernel's declared" in design:
+        raise AssertionError("adaptive fallback must not exempt a kernel from typed runtime proof")
+    if "A fallback verdict records runner choice but does not" not in design:
+        raise AssertionError("the production design must distinguish adaptive verdicts from typed runtime proof")
 
     adapter = read("src/parallel/execution_region_pipeline_adapter.cpp")
     take_blocked = adapter[adapter.index("void ExecutionRegionPipelineAdapter::TakeBlockedSinkChunk") :]

@@ -35,7 +35,7 @@ struct SljitSimd128Op2Capabilities {
 	bool supported[4][SLJIT_SIMD_OP2_CMPEQ + 1] {};
 
 	SljitSimd128Op2Capabilities() {
-		if (!sljit_has_cpu_feature(SLJIT_HAS_SIMD)) {
+		if (!GetSljitTargetCapabilities().simd_available) {
 			return;
 		}
 		auto compiler = sljit_create_compiler(nullptr);
@@ -98,7 +98,10 @@ bool SljitSimd128Op2Supported(sljit_s32 elem_type, sljit_s32 operation) {
 // x86 and would regress, so it is excluded here (mirrors the SLJIT-layer gate
 // that returns SLJIT_ERR_UNSUPPORTED for MUL.2d).
 static bool SljitSimdPackedArithProfitable(sljit_s32 scale, ExecutionExpressionBinaryOp op) {
-#if (defined(SLJIT_CONFIG_ARM_64) && SLJIT_CONFIG_ARM_64) || (defined(SLJIT_CONFIG_X86_64) && SLJIT_CONFIG_X86_64)
+	const auto &capabilities = GetSljitTargetCapabilities();
+	if (!capabilities.IsArm64() && !capabilities.IsX86_64()) {
+		return false;
+	}
 	sljit_s32 packed_op;
 	switch (op) {
 	case ExecutionExpressionBinaryOp::ADD:
@@ -119,9 +122,6 @@ static bool SljitSimdPackedArithProfitable(sljit_s32 scale, ExecutionExpressionB
 		return false;
 	}
 	return SljitSimd128Op2Supported(SljitSimdElementTypeForScale(scale), packed_op);
-#else
-	return false;
-#endif
 }
 
 static bool SljitSimdComparisonOperation(ExecutionExpressionBinaryOp op, sljit_s32 &packed_op, bool &needs_negate) {
@@ -392,11 +392,9 @@ SljitTypedExpressionTreeSimdPlan TryPlanSljitTypedExpressionTreeSimd(const Execu
 		return plan;
 	}
 	const bool mixed = has_scale32 && has_scale64;
-#if !(defined(SLJIT_CONFIG_ARM_64) && SLJIT_CONFIG_ARM_64)
-	if (mixed) {
+	if (mixed && !GetSljitTargetCapabilities().IsArm64()) {
 		return plan; // 64->32 mask narrowing (UZP1) is emitted as a raw ARM64 instruction
 	}
-#endif
 	// Register budget: persistent registers (constants + all-ones) plus peak live
 	// temporaries plus one accumulator must fit the vector register file with
 	// margin. This uses true register pressure, not node count. Mixed-width masks
@@ -550,7 +548,6 @@ void EmitSljitSimdNot(struct sljit_compiler *compiler, SljitSimdEmitContext &ctx
 	                 SLJIT_VR(ctx.all_ones_reg), 0);
 }
 
-#if defined(SLJIT_CONFIG_ARM_64) && SLJIT_CONFIG_ARM_64
 // UZP1 Vd.4S, Vn.4S, Vm.4S : take the even-indexed 32-bit elements of Vn then Vm.
 // For two 2x64-bit masks (each lane all-ones/all-zeros) this packs the low words
 // into one 4x32-bit mask covering rows 0..3 — the 64->32 mask narrowing step.
@@ -586,7 +583,6 @@ void EmitSljitSimdMaskLaneSum(struct sljit_compiler *compiler, sljit_s32 dst_vre
 	sljit_emit_op_custom(compiler, &reduce, sizeof(reduce));
 	sljit_emit_op_custom(compiler, &move, sizeof(move));
 }
-#endif
 
 // Publish a packed boolean mask as one scalar classification value. On ARM64
 // this is the signed lane sum (0 for all-false, -lanes for all-true); elsewhere
@@ -595,16 +591,15 @@ void EmitSljitSimdMaskLaneSum(struct sljit_compiler *compiler, sljit_s32 dst_vre
 static sljit_sw EmitSljitSimdMaskClass(struct sljit_compiler *compiler, const SljitSimdEmitContext &ctx,
                                        const SljitTypedExpressionTreeSimdPlan &plan, sljit_s32 mask_reg,
                                        sljit_s32 mask_reduce_reg) {
-#if defined(SLJIT_CONFIG_ARM_64) && SLJIT_CONFIG_ARM_64
-	EmitSljitSimdMaskLaneSum(compiler, mask_reduce_reg, mask_reg, plan.elem_scale, SLJIT_R3);
-	return NumericCast<sljit_sw>(-plan.lanes);
-#else
+	if (GetSljitTargetCapabilities().IsArm64()) {
+		EmitSljitSimdMaskLaneSum(compiler, mask_reduce_reg, mask_reg, plan.elem_scale, SLJIT_R3);
+		return NumericCast<sljit_sw>(-plan.lanes);
+	}
 	(void)mask_reduce_reg;
 	sljit_emit_simd_sign(compiler, ctx.simd_type | SLJIT_SIMD_STORE | SLJIT_32, SLJIT_VR(mask_reg), SLJIT_R3, 0);
 	const auto all_lanes_mask = NumericCast<sljit_sw>((sljit_uw(1) << plan.lanes) - 1);
 	sljit_emit_op2(compiler, SLJIT_AND, SLJIT_R3, 0, SLJIT_R3, 0, SLJIT_IMM, all_lanes_mask);
 	return all_lanes_mask;
-#endif
 }
 
 // Evaluate a pure VALUE expression (references, constants, add/sub/mul) at the
@@ -727,7 +722,9 @@ SljitSimdValue EmitSljitSimdComparisonMask(struct sljit_compiler *compiler, cons
 	if (!ctx.mixed || comparison_scale == ctx.scale) {
 		return EmitSljitSimdComparisonAt(compiler, node, ctx, ctx.scale, 0);
 	}
-#if defined(SLJIT_CONFIG_ARM_64) && SLJIT_CONFIG_ARM_64
+	if (!GetSljitTargetCapabilities().IsArm64()) {
+		throw InternalException("SLJIT SIMD mixed-width mask narrowing requires ARM64");
+	}
 	D_ASSERT(comparison_scale == 3 && ctx.scale == 2);
 	auto lo = EmitSljitSimdComparisonAt(compiler, node, ctx, 3, 0);
 	auto hi = EmitSljitSimdComparisonAt(compiler, node, ctx, 3, 2);
@@ -736,9 +733,6 @@ SljitSimdValue EmitSljitSimdComparisonMask(struct sljit_compiler *compiler, cons
 	FreeSimdValue(ctx, lo);
 	FreeSimdValue(ctx, hi);
 	return {dst, true};
-#else
-	throw InternalException("SLJIT SIMD mixed-width mask narrowing requires ARM64");
-#endif
 }
 
 SljitSimdValue EmitSljitSimdConjunction(struct sljit_compiler *compiler, const ExecutionExpressionIR &node,
@@ -924,10 +918,8 @@ void EmitSljitTypedExpressionTreeSimdSelectLoop(struct sljit_compiler *compiler,
 	if (validity_refs) {
 		EmitSljitSimdInitLaneBits(compiler, ctx, plan.lanes, mask_offset);
 	}
-#if defined(SLJIT_CONFIG_ARM_64) && SLJIT_CONFIG_ARM_64
 	// Persistent reduction destination; predicate temporaries start after it.
-	auto mask_reduce_reg = ctx.next_temp++;
-#endif
+	const auto mask_reduce_reg = GetSljitTargetCapabilities().IsArm64() ? ctx.next_temp++ : 0;
 
 	// Flat packed selection does not use the generic-loop logical-index register
 	// (S3) or the source-selection-array register (S4). Keep the append cursor in
@@ -939,7 +931,8 @@ void EmitSljitTypedExpressionTreeSimdSelectLoop(struct sljit_compiler *compiler,
 	               offsetof(SljitNativeVectorInput, selected_count));
 	sljit_emit_op1(compiler, SLJIT_MOV_P, SLJIT_S4, 0, SLJIT_MEM1(SLJIT_S0),
 	               offsetof(SljitNativeVectorInput, true_sel));
-	const auto max_source_data_hoists = SLJIT_NATIVE_VECTOR_HAS_EXTRA_SAVED_REG ? idx_t(2) : idx_t(1);
+	const auto &registers = GetSljitNativeVectorRegisterLayout();
+	const auto max_source_data_hoists = registers.HasOptionalInvariant() ? idx_t(2) : idx_t(1);
 	const bool hoist_source_data =
 	    !validity_refs && !plan.source_refs.empty() && plan.source_refs.size() <= max_source_data_hoists;
 	if (hoist_source_data) {
@@ -947,9 +940,9 @@ void EmitSljitTypedExpressionTreeSimdSelectLoop(struct sljit_compiler *compiler,
 		// array and becomes the first source pointer after the final load.
 		if (plan.source_refs.size() == 2) {
 			auto source_index = plan.source_refs[1];
-			sljit_emit_op1(compiler, SLJIT_MOV_P, SLJIT_S6, 0, SLJIT_MEM1(SLJIT_S5),
+			sljit_emit_op1(compiler, SLJIT_MOV_P, registers.optional_invariant, 0, SLJIT_MEM1(SLJIT_S5),
 			               NumericCast<sljit_sw>(source_index * sizeof(const_data_ptr_t)));
-			ctx.source_data_reg[source_index] = SLJIT_S6;
+			ctx.source_data_reg[source_index] = registers.optional_invariant;
 		}
 		auto source_index = plan.source_refs[0];
 		sljit_emit_op1(compiler, SLJIT_MOV_P, SLJIT_S5, 0, SLJIT_MEM1(SLJIT_S5),
@@ -970,13 +963,14 @@ void EmitSljitTypedExpressionTreeSimdSelectLoop(struct sljit_compiler *compiler,
 	// Classify all-true/all-false masks cheaply. ARM64 uses a two-instruction
 	// horizontal lane sum; other backends use their native movemask. The full
 	// bitset is needed only by the mixed-lane path below.
-#if defined(SLJIT_CONFIG_ARM_64) && SLJIT_CONFIG_ARM_64
-	EmitSljitSimdMaskLaneSum(compiler, mask_reduce_reg, mask.reg, plan.elem_scale, SLJIT_R3);
-	const auto all_lanes_mask = NumericCast<sljit_sw>(-plan.lanes);
-#else
-	sljit_emit_simd_sign(compiler, ctx.simd_type | SLJIT_SIMD_STORE | SLJIT_32, SLJIT_VR(mask.reg), SLJIT_R3, 0);
-	const auto all_lanes_mask = NumericCast<sljit_sw>((sljit_uw(1) << plan.lanes) - 1);
-#endif
+	sljit_sw all_lanes_mask;
+	if (GetSljitTargetCapabilities().IsArm64()) {
+		EmitSljitSimdMaskLaneSum(compiler, mask_reduce_reg, mask.reg, plan.elem_scale, SLJIT_R3);
+		all_lanes_mask = NumericCast<sljit_sw>(-plan.lanes);
+	} else {
+		sljit_emit_simd_sign(compiler, ctx.simd_type | SLJIT_SIMD_STORE | SLJIT_32, SLJIT_VR(mask.reg), SLJIT_R3, 0);
+		all_lanes_mask = NumericCast<sljit_sw>((sljit_uw(1) << plan.lanes) - 1);
+	}
 	auto not_all_lanes = sljit_emit_cmp(compiler, SLJIT_NOT_EQUAL, SLJIT_R3, 0, SLJIT_IMM, all_lanes_mask);
 
 	// All lanes pass. Defer writes while the whole prefix remains identity;
@@ -1004,9 +998,9 @@ void EmitSljitTypedExpressionTreeSimdSelectLoop(struct sljit_compiler *compiler,
 	sljit_set_label(not_all_lanes, sljit_emit_label(compiler));
 	auto no_lanes_true = sljit_emit_cmp(compiler, SLJIT_EQUAL, SLJIT_R3, 0, SLJIT_IMM, 0);
 	EmitSljitSimdEnsureIdentityPrefixMaterialized(compiler);
-#if defined(SLJIT_CONFIG_ARM_64) && SLJIT_CONFIG_ARM_64
-	sljit_emit_simd_sign(compiler, ctx.simd_type | SLJIT_SIMD_STORE | SLJIT_32, SLJIT_VR(mask.reg), SLJIT_R3, 0);
-#endif
+	if (GetSljitTargetCapabilities().IsArm64()) {
+		sljit_emit_simd_sign(compiler, ctx.simd_type | SLJIT_SIMD_STORE | SLJIT_32, SLJIT_VR(mask.reg), SLJIT_R3, 0);
+	}
 	for (sljit_s32 lane = 0; lane < plan.lanes; lane++) {
 		sljit_emit_op2(compiler, SLJIT_AND, SLJIT_R1, 0, SLJIT_R3, 0, SLJIT_IMM, sljit_sw(1) << lane);
 		auto lane_false = sljit_emit_cmp(compiler, SLJIT_EQUAL, SLJIT_R1, 0, SLJIT_IMM, 0);
@@ -1214,13 +1208,9 @@ void EmitSljitTypedExpressionTreeSimdHybridFilterLoop(struct sljit_compiler *com
 	if (validity_refs) {
 		EmitSljitSimdInitLaneBits(compiler, ctx, plan.lanes, mask_offset);
 	}
-#if defined(SLJIT_CONFIG_ARM_64) && SLJIT_CONFIG_ARM_64
 	// Keep the horizontal classifier live across predicate evaluation. It lets
 	// all-true and all-false groups bypass ARM64's more expensive full movemask.
-	auto mask_reduce_reg = ctx.next_temp++;
-#else
-	const sljit_s32 mask_reduce_reg = 0;
-#endif
+	const auto mask_reduce_reg = GetSljitTargetCapabilities().IsArm64() ? ctx.next_temp++ : 0;
 
 	// S1 is the flat row base (0 on entry).
 	auto simd_loop = sljit_emit_label(compiler);
@@ -1258,11 +1248,11 @@ void EmitSljitTypedExpressionTreeSimdHybridFilterLoop(struct sljit_compiler *com
 	sljit_emit_op2(compiler, SLJIT_ADD, SLJIT_S1, 0, SLJIT_S1, 0, SLJIT_IMM, plan.lanes);
 	auto empty_done = sljit_emit_jump(compiler, SLJIT_JUMP);
 	sljit_set_label(nonempty_mask, sljit_emit_label(compiler));
-#if defined(SLJIT_CONFIG_ARM_64) && SLJIT_CONFIG_ARM_64
 	// The lane sum distinguishes uniform masks but does not preserve lane bits.
 	// Materialize the full movemask only for a genuinely mixed group.
-	sljit_emit_simd_sign(compiler, ctx.simd_type | SLJIT_SIMD_STORE | SLJIT_32, SLJIT_VR(mask.reg), SLJIT_R3, 0);
-#endif
+	if (GetSljitTargetCapabilities().IsArm64()) {
+		sljit_emit_simd_sign(compiler, ctx.simd_type | SLJIT_SIMD_STORE | SLJIT_32, SLJIT_VR(mask.reg), SLJIT_R3, 0);
+	}
 	FreeSimdValue(ctx, mask);
 	auto mixed_loop = sljit_emit_label(compiler);
 	// Visit only set lanes. The old shift-and-test loop dispatched once per lane,

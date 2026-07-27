@@ -3,6 +3,7 @@
 #include "sljit_native_flat_loop_codegen.hpp"
 #include "sljit_native_double_source_helpers.hpp"
 #include "sljit_native_types.hpp"
+#include "sljit_platform.hpp"
 
 #include "duckdb/common/exception.hpp"
 #include "duckdb/common/helper.hpp"
@@ -12,8 +13,8 @@
 namespace duckdb {
 
 static inline bool SljitArm64NeonFloatingBinarySupported(SljitNativeDoubleBinaryOp op) {
-#if defined(SLJIT_CONFIG_ARM_64) && SLJIT_CONFIG_ARM_64
-	if (!sljit_has_cpu_feature(SLJIT_HAS_SIMD)) {
+	const auto &capabilities = GetSljitTargetCapabilities();
+	if (!capabilities.IsArm64() || !capabilities.simd_available) {
 		return false;
 	}
 	switch (op) {
@@ -25,9 +26,6 @@ static inline bool SljitArm64NeonFloatingBinarySupported(SljitNativeDoubleBinary
 	default:
 		return false;
 	}
-#else
-	return false;
-#endif
 }
 
 static inline sljit_s32 SljitArm64NeonFloatingSimdType(bool single_precision) {

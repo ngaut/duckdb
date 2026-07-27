@@ -66,11 +66,12 @@ BuildSljitNativeUngroupedFusedAggregateUpdate(const vector<SljitNativeRegionExpr
 		sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_MEM1(SLJIT_SP), saw_value_offsets[payload_idx], SLJIT_IMM, 0);
 	}
 	if (use_conditional_hugeint_register_accumulators) {
+		const auto &registers = GetSljitUngroupedAggregateRegisterLayout();
 		sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_MEM1(SLJIT_SP), register_accumulator_used_offset, SLJIT_IMM, 0);
-		sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_UNGROUPED_SHARED_LOWER_REG, 0, SLJIT_IMM, 0);
-		sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_UNGROUPED_SHARED_UPPER_REG, 0, SLJIT_IMM, 0);
-		sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_UNGROUPED_CONDITIONAL_LOWER_REG, 0, SLJIT_IMM, 0);
-		sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_UNGROUPED_CONDITIONAL_UPPER_REG, 0, SLJIT_IMM, 0);
+		sljit_emit_op1(compiler, SLJIT_MOV, registers.shared_lower, 0, SLJIT_IMM, 0);
+		sljit_emit_op1(compiler, SLJIT_MOV, registers.shared_upper, 0, SLJIT_IMM, 0);
+		sljit_emit_op1(compiler, SLJIT_MOV, registers.conditional_lower, 0, SLJIT_IMM, 0);
+		sljit_emit_op1(compiler, SLJIT_MOV, registers.conditional_upper, 0, SLJIT_IMM, 0);
 	}
 	EmitInitSljitNativeVectorSourceArrays(compiler);
 	if (hoist_source_data_pointers) {
@@ -295,16 +296,17 @@ BuildSljitNativeUngroupedFusedAggregateUpdate(const vector<SljitNativeRegionExpr
 	if (use_conditional_hugeint_register_accumulators) {
 		auto shared_lane = codegen_plan.shared_lane;
 		auto conditional_lane = codegen_plan.conditional_lane;
+		const auto &registers = GetSljitUngroupedAggregateRegisterLayout();
 		sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_R0, 0, SLJIT_MEM1(SLJIT_SP), register_accumulator_used_offset);
 		auto no_register_accumulator = sljit_emit_cmp(compiler, SLJIT_EQUAL, SLJIT_R0, 0, SLJIT_IMM, 0);
 		sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_MEM1(SLJIT_SP), local_sum_offsets[shared_lane],
-		               SLJIT_UNGROUPED_SHARED_LOWER_REG, 0);
+		               registers.shared_lower, 0);
 		sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_MEM1(SLJIT_SP), local_sum_upper_offsets[shared_lane],
-		               SLJIT_UNGROUPED_SHARED_UPPER_REG, 0);
+		               registers.shared_upper, 0);
 		sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_MEM1(SLJIT_SP), local_sum_offsets[conditional_lane],
-		               SLJIT_UNGROUPED_CONDITIONAL_LOWER_REG, 0);
+		               registers.conditional_lower, 0);
 		sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_MEM1(SLJIT_SP), local_sum_upper_offsets[conditional_lane],
-		               SLJIT_UNGROUPED_CONDITIONAL_UPPER_REG, 0);
+		               registers.conditional_upper, 0);
 		sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_R0, 0, SLJIT_IMM, 0);
 		auto empty_input = sljit_emit_cmp(compiler, SLJIT_EQUAL, SLJIT_S2, 0, SLJIT_IMM, 0);
 		sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_R0, 0, SLJIT_IMM, 1);

@@ -23,7 +23,8 @@ BuildSljitNativeExpressionTree(const ExecutionExpressionIR &root, SljitNativeVec
 	}
 
 	auto local_size = NumericCast<sljit_sw>(CountSljitExpressionTreeSpills(root) * sizeof(sljit_sw));
-	sljit_emit_enter(compiler, 0, SLJIT_ARGS1V(P), 5, SLJIT_NATIVE_VECTOR_SAVED_REG_COUNT, local_size);
+	sljit_emit_enter(compiler, 0, SLJIT_ARGS1V(P), 5, GetSljitNativeVectorRegisterLayout().saved_register_count,
+	                 local_size);
 	// Hoist loop-invariant vector-format arrays so source indexing and references do not reload them
 	// for every expression node in the fused tree.
 	EmitInitSljitNativeExpressionVectorLoop(compiler);
@@ -122,7 +123,8 @@ BuildSljitNativeUngroupedSumExpressionTree(const ExecutionExpressionIR &root,
 	                                            : local_sum_offset + NumericCast<sljit_sw>(sizeof(sljit_sw));
 	const auto local_size = saw_value_offset + NumericCast<sljit_sw>(sizeof(sljit_sw));
 
-	sljit_emit_enter(compiler, 0, SLJIT_ARGS1V(P), 5, SLJIT_NATIVE_VECTOR_SAVED_REG_COUNT, local_size);
+	sljit_emit_enter(compiler, 0, SLJIT_ARGS1V(P), 5, GetSljitNativeVectorRegisterLayout().saved_register_count,
+	                 local_size);
 	EmitInitSljitNativeVectorLoop(compiler);
 	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_MEM1(SLJIT_SP), local_sum_offset, SLJIT_IMM, 0);
 	if (hugeint_state) {

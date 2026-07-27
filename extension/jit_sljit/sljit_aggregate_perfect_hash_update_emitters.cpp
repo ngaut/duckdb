@@ -206,7 +206,7 @@ void EmitSljitPerfectHashGroupLookup(const SljitPerfectHashFusedUpdateEmitContex
 			const auto group_data_reg =
 			    context.hoist_group_data_pointers ? SljitPerfectHashGroupDataPointerReg(group_idx) : SLJIT_R0;
 			const auto group_data_array_base_reg = options.use_fast_group_data_array_base
-			                                           ? SLJIT_PERFECT_HASH_STATE_REG
+			                                           ? GetSljitPerfectHashRegisterLayout().state
 			                                           : options.group_data_array_base_reg_override;
 			EmitLoadFusedAggregateGroupData(
 			    compiler, group_idx, group, SLJIT_R1, SLJIT_R2, context.hoist_group_data_pointers, group_data_reg,

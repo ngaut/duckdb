@@ -732,9 +732,9 @@ SljitNativePrimitiveRunFunction SljitEnsureExecutableFusedAffineRunUpdate(
     ExecutionRegionRuntime &runtime, SljitExecutablePrimitiveRunUpdate &primitive_run_update,
     const SljitExecutableFusedAffineRunUpdate &affine_run_update, PhysicalType group_source_type,
     PhysicalType group_output_type, ExecutionRowPointerGroupKeyCastKind group_cast_kind, bool payload_nullable) {
-#if SLJIT_NUMBER_OF_SAVED_REGISTERS < 6 || (SLJIT_NUMBER_OF_REGISTERS - SLJIT_NUMBER_OF_SAVED_REGISTERS) < 7
-	return nullptr;
-#else
+	if (!SljitPrimitiveRunCodegenSupported()) {
+		return nullptr;
+	}
 	if (!affine_run_update.Ready() || affine_run_update.primitive_kind != AggregatePrimitiveUpdateKind::SUM_INT64 ||
 	    affine_run_update.source_type == PhysicalType::INT64 || !primitive_run_update.HasDeferredCodegen() ||
 	    primitive_run_update.payload_types.size() != affine_run_update.lanes.size() ||
@@ -778,7 +778,6 @@ SljitNativePrimitiveRunFunction SljitEnsureExecutableFusedAffineRunUpdate(
 		runtime.RecordLazyCodegen(metrics);
 		return SljitCompiledFunction<SljitNativePrimitiveRunFunction>(std::move(code), function);
 	});
-#endif
 }
 
 void SljitSelectExecutableAggregateDirectUpdatePlan(SljitExecutableAggregateUpdate &executable) {

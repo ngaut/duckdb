@@ -78,16 +78,17 @@ static unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativeFlatDoubleProjectio
 	auto constant_width = NativeDirectFloatingDataWidth(single_precision);
 
 	auto stats_float_register_count = NumericCast<sljit_s32>(4 + projection_indices.size() * 2);
+	const auto &registers = GetSljitNativeVectorRegisterLayout();
 	sljit_emit_enter(compiler, 0, SLJIT_ARGS1V(P), 5 | SLJIT_ENTER_FLOAT(stats_float_register_count),
-	                 SLJIT_NATIVE_VECTOR_SAVED_REG_COUNT, 0);
+	                 registers.saved_register_count, 0);
 	EmitInitSljitNativeVectorLoop(compiler);
 
 	EmitSljitFlatProjectionLoadSharedSourcePointers(compiler, shared_plan, SLJIT_R2);
 
 	sljit_emit_op1(compiler, SLJIT_MOV_P, SLJIT_S5, 0, SLJIT_MEM1(SLJIT_S0),
 	               offsetof(SljitNativeVectorInput, result_data_array));
-	if (SLJIT_NATIVE_VECTOR_HAS_EXTRA_SAVED_REG) {
-		sljit_emit_op1(compiler, SLJIT_MOV_P, SLJIT_S6, 0, SLJIT_MEM1(SLJIT_S0),
+	if (registers.HasOptionalInvariant()) {
+		sljit_emit_op1(compiler, SLJIT_MOV_P, registers.optional_invariant, 0, SLJIT_MEM1(SLJIT_S0),
 		               offsetof(SljitNativeVectorInput, floating_constants));
 	}
 
@@ -116,8 +117,8 @@ static unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativeFlatDoubleProjectio
 		auto binary_op = NativeDoubleBinaryOp(plan.double_binary_op, single_precision);
 		if (plan.kind == SljitNativeRegionExpressionKind::DOUBLE_BINARY_CONSTANT) {
 			auto constant_offset = NumericCast<sljit_sw>(projection_index * constant_width);
-			auto constant_base = SLJIT_S6;
-			if (!SLJIT_NATIVE_VECTOR_HAS_EXTRA_SAVED_REG) {
+			auto constant_base = registers.optional_invariant;
+			if (!registers.HasOptionalInvariant()) {
 				constant_base = SLJIT_R4;
 				sljit_emit_op1(compiler, SLJIT_MOV_P, constant_base, 0, SLJIT_MEM1(SLJIT_S0),
 				               offsetof(SljitNativeVectorInput, floating_constants));
@@ -220,7 +221,8 @@ BuildSljitNativeFlatDoubleProjection(const vector<SljitNativeRegionExpressionPla
 	auto data_scale = NativeDirectFloatingDataScale(single_precision);
 	auto constant_width = NativeDirectFloatingDataWidth(single_precision);
 
-	sljit_emit_enter(compiler, 0, SLJIT_ARGS1V(P), 5 | SLJIT_ENTER_FLOAT(4), SLJIT_NATIVE_VECTOR_SAVED_REG_COUNT, 0);
+	const auto &registers = GetSljitNativeVectorRegisterLayout();
+	sljit_emit_enter(compiler, 0, SLJIT_ARGS1V(P), 5 | SLJIT_ENTER_FLOAT(4), registers.saved_register_count, 0);
 	EmitInitSljitNativeVectorLoop(compiler);
 	sljit_emit_op1(compiler, SLJIT_MOV_P, SLJIT_S3, 0, SLJIT_MEM1(SLJIT_S0),
 	               offsetof(SljitNativeVectorInput, source_data_array));
@@ -228,8 +230,8 @@ BuildSljitNativeFlatDoubleProjection(const vector<SljitNativeRegionExpressionPla
 	               offsetof(SljitNativeVectorInput, right_source_data_array));
 	sljit_emit_op1(compiler, SLJIT_MOV_P, SLJIT_S5, 0, SLJIT_MEM1(SLJIT_S0),
 	               offsetof(SljitNativeVectorInput, result_data_array));
-	if (SLJIT_NATIVE_VECTOR_HAS_EXTRA_SAVED_REG) {
-		sljit_emit_op1(compiler, SLJIT_MOV_P, SLJIT_S6, 0, SLJIT_MEM1(SLJIT_S0),
+	if (registers.HasOptionalInvariant()) {
+		sljit_emit_op1(compiler, SLJIT_MOV_P, registers.optional_invariant, 0, SLJIT_MEM1(SLJIT_S0),
 		               offsetof(SljitNativeVectorInput, floating_constants));
 	}
 
@@ -241,8 +243,8 @@ BuildSljitNativeFlatDoubleProjection(const vector<SljitNativeRegionExpressionPla
 			sljit_emit_op1(compiler, SLJIT_MOV_P, SLJIT_R1, 0, SLJIT_MEM1(SLJIT_S4), projection_pointer_offset);
 		} else {
 			auto constant_offset = NumericCast<sljit_sw>(projection_index * constant_width);
-			auto constant_base = SLJIT_S6;
-			if (!SLJIT_NATIVE_VECTOR_HAS_EXTRA_SAVED_REG) {
+			auto constant_base = registers.optional_invariant;
+			if (!registers.HasOptionalInvariant()) {
 				constant_base = SLJIT_R4;
 				sljit_emit_op1(compiler, SLJIT_MOV_P, constant_base, 0, SLJIT_MEM1(SLJIT_S0),
 				               offsetof(SljitNativeVectorInput, floating_constants));

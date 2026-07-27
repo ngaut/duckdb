@@ -5,6 +5,7 @@
 #include "sljit_hash_join_probe_key_codegen.hpp"
 #include "sljit_hash_join_probe_perfect_input_codegen.hpp"
 #include "sljit_hash_join_runtime.hpp"
+#include "sljit_register_layout.hpp"
 
 #include "sljitLir.h"
 
@@ -67,7 +68,6 @@ static void EmitCheckedPerfectHashJoinInt64ToInt32Range(struct sljit_compiler *c
 	sljit_set_label(in_range, done);
 }
 
-#if defined(SLJIT_NUMBER_OF_SAVED_REGISTERS) && SLJIT_NUMBER_OF_SAVED_REGISTERS >= 10
 static void EmitLoadHoistedPerfectHashJoinSourceIndex(struct sljit_compiler *compiler, sljit_s32 source_sel_reg,
                                                       sljit_s32 target) {
 	auto no_sel = sljit_emit_cmp(compiler, SLJIT_EQUAL, source_sel_reg, 0, SLJIT_IMM, 0);
@@ -92,7 +92,6 @@ static struct sljit_jump *EmitJumpIfHoistedPerfectHashJoinSourceNull(struct slji
 	sljit_set_label(source_all_valid, sljit_emit_label(compiler));
 	return source_is_null;
 }
-#endif
 
 static sljit_sw SljitWidePerfectHashJoinBoundOffset(bool unsigned_key, bool maximum, sljit_sw word_offset) {
 	if (unsigned_key) {
@@ -162,26 +161,29 @@ static unique_ptr<ExecutionRegionCodeHandle>
 BuildSljitWidePerfectHashJoinProbe(struct sljit_compiler *compiler, bool unsigned_key,
                                    const SljitPerfectHashJoinProbeCodegenConfig &config,
                                    SljitNativePerfectHashJoinProbeFunction &function, string &error) {
-#if defined(SLJIT_NUMBER_OF_SAVED_REGISTERS) && SLJIT_NUMBER_OF_SAVED_REGISTERS >= 10
-	sljit_emit_enter(compiler, 0, SLJIT_ARGS1V(P), 5, 10, 0);
+	const auto &registers = GetSljitPerfectHashProbeRegisterLayout();
+	D_ASSERT(registers.has_invariant_hoists);
+	sljit_emit_enter(compiler, 0, SLJIT_ARGS1V(P), 5, registers.saved_register_count, 0);
 	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_S1, 0, SLJIT_MEM1(SLJIT_S0),
 	               offsetof(SljitNativePerfectHashJoinProbeInput, input_offset));
 	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_S2, 0, SLJIT_MEM1(SLJIT_S0),
 	               offsetof(SljitNativePerfectHashJoinProbeInput, count));
 	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_S3, 0, SLJIT_IMM, 0);
-	sljit_emit_op1(compiler, SLJIT_MOV_P, SLJIT_S4, 0, SLJIT_MEM1(SLJIT_S0),
+	sljit_emit_op1(compiler, SLJIT_MOV_P, registers.source_data, 0, SLJIT_MEM1(SLJIT_S0),
 	               offsetof(SljitNativePerfectHashJoinProbeInput, source_data));
-	sljit_emit_op1(compiler, SLJIT_MOV_P, SLJIT_S5, 0, SLJIT_MEM1(SLJIT_S0),
+	sljit_emit_op1(compiler, SLJIT_MOV_P, registers.source_selection, 0, SLJIT_MEM1(SLJIT_S0),
 	               offsetof(SljitNativePerfectHashJoinProbeInput, source_sel));
-	sljit_emit_op1(compiler, SLJIT_MOV_P, SLJIT_S6, 0, SLJIT_MEM1(SLJIT_S0),
+	sljit_emit_op1(compiler, SLJIT_MOV_P, registers.source_validity, 0, SLJIT_MEM1(SLJIT_S0),
 	               offsetof(SljitNativePerfectHashJoinProbeInput, source_validity));
-	EmitLoadWidePerfectHashJoinInvariantBounds(compiler, SLJIT_S7, SLJIT_S8, SLJIT_S9, unsigned_key);
+	EmitLoadWidePerfectHashJoinInvariantBounds(compiler, registers.minimum_lower, registers.minimum_upper,
+	                                           registers.maximum_lower, unsigned_key);
 
 	auto loop = sljit_emit_label(compiler);
 	auto done = sljit_emit_cmp(compiler, SLJIT_GREATER_EQUAL, SLJIT_S1, 0, SLJIT_S2, 0);
-	EmitLoadHoistedPerfectHashJoinSourceIndex(compiler, SLJIT_S5, SLJIT_R2);
-	auto source_is_null = EmitJumpIfHoistedPerfectHashJoinSourceNull(compiler, SLJIT_S6, SLJIT_R2, SLJIT_R3, SLJIT_R1);
-	EmitLoadWidePerfectHashJoinKey(compiler, SLJIT_S4, SLJIT_R2, SLJIT_R0, SLJIT_R1, SLJIT_R3);
+	EmitLoadHoistedPerfectHashJoinSourceIndex(compiler, registers.source_selection, SLJIT_R2);
+	auto source_is_null =
+	    EmitJumpIfHoistedPerfectHashJoinSourceNull(compiler, registers.source_validity, SLJIT_R2, SLJIT_R3, SLJIT_R1);
+	EmitLoadWidePerfectHashJoinKey(compiler, registers.source_data, SLJIT_R2, SLJIT_R0, SLJIT_R1, SLJIT_R3);
 	// The target has only three saved registers after the loop state and source
 	// metadata. Keep the fourth bound out of scratch-register lifetime: R4 is
 	// reused below for bitmap indexing and must be reloaded before each compare.
@@ -189,15 +191,15 @@ BuildSljitWidePerfectHashJoinProbe(struct sljit_compiler *compiler, bool unsigne
 	    compiler, SLJIT_MOV, SLJIT_R4, 0, SLJIT_MEM1(SLJIT_S0),
 	    SljitWidePerfectHashJoinBoundOffset(unsigned_key, true, NumericCast<sljit_sw>(offsetof(hugeint_t, upper))));
 	vector<struct sljit_jump *> range_failures;
-	EmitWidePerfectHashJoinRangeChecks(compiler, unsigned_key, SLJIT_R0, SLJIT_R1, SLJIT_S7, SLJIT_S8, SLJIT_S9,
-	                                   SLJIT_R4, range_failures);
+	EmitWidePerfectHashJoinRangeChecks(compiler, unsigned_key, SLJIT_R0, SLJIT_R1, registers.minimum_lower,
+	                                   registers.minimum_upper, registers.maximum_lower, SLJIT_R4, range_failures);
 
 	// Subtract the full-width minimum with the carry flag as the low-word
 	// borrow. The perfect-hash range is bounded to the selection-vector domain,
 	// so the resulting high word is zero and the low word is the table offset.
-	sljit_emit_op2(compiler, SLJIT_SUB | SLJIT_SET_CARRY, SLJIT_R0, 0, SLJIT_R0, 0, SLJIT_S7, 0);
+	sljit_emit_op2(compiler, SLJIT_SUB | SLJIT_SET_CARRY, SLJIT_R0, 0, SLJIT_R0, 0, registers.minimum_lower, 0);
 	sljit_emit_op_flags(compiler, SLJIT_MOV, SLJIT_R3, 0, SLJIT_CARRY);
-	sljit_emit_op2(compiler, SLJIT_SUB, SLJIT_R1, 0, SLJIT_R1, 0, SLJIT_S8, 0);
+	sljit_emit_op2(compiler, SLJIT_SUB, SLJIT_R1, 0, SLJIT_R1, 0, registers.minimum_upper, 0);
 	sljit_emit_op2(compiler, SLJIT_SUB, SLJIT_R1, 0, SLJIT_R1, 0, SLJIT_R3, 0);
 
 	sljit_emit_op1(compiler, SLJIT_MOV_P, SLJIT_R3, 0, SLJIT_MEM1(SLJIT_S0),
@@ -235,14 +237,6 @@ BuildSljitWidePerfectHashJoinProbe(struct sljit_compiler *compiler, bool unsigne
 
 	sljit_set_label(done, sljit_emit_label(compiler));
 	return FinishSljitPerfectHashJoinProbeCode(compiler, function, error, SLJIT_S3);
-#else
-	(void)compiler;
-	(void)unsigned_key;
-	(void)config;
-	(void)function;
-	(void)error;
-	return nullptr;
-#endif
 }
 
 unique_ptr<ExecutionRegionCodeHandle>
@@ -263,9 +257,9 @@ BuildSljitPerfectHashJoinProbe(const SljitNativeHashJoinProbePlan &plan,
 		// the generated word-pair loop when the target exposes the saved-register
 		// file needed to keep the bounds hot; the helper remains the portable
 		// fallback for smaller register files.
-		if (auto wide_code = BuildSljitWidePerfectHashJoinProbe(
-		        compiler, key.key_kind == SljitNativeHashJoinKeyKind::UINT128, config, function, error)) {
-			return wide_code;
+		if (GetSljitPerfectHashProbeRegisterLayout().has_invariant_hoists) {
+			return BuildSljitWidePerfectHashJoinProbe(compiler, key.key_kind == SljitNativeHashJoinKeyKind::UINT128,
+			                                          config, function, error);
 		}
 		sljit_emit_enter(compiler, 0, SLJIT_ARGS1V(P), 4, 1, 0);
 		sljit_emit_op1(compiler, SLJIT_MOV_P, SLJIT_R0, 0, SLJIT_S0, 0);
@@ -282,14 +276,9 @@ BuildSljitPerfectHashJoinProbe(const SljitNativeHashJoinProbePlan &plan,
 	const auto signed_compare = SljitHashJoinKeyKindIsSigned(key.key_kind);
 	const auto less_than_min = signed_compare ? SLJIT_SIG_LESS : SLJIT_LESS;
 	const auto greater_than_max = signed_compare ? SLJIT_SIG_GREATER : SLJIT_GREATER;
+	const auto &registers = GetSljitPerfectHashProbeRegisterLayout();
 
-#if defined(SLJIT_NUMBER_OF_SAVED_REGISTERS) && SLJIT_NUMBER_OF_SAVED_REGISTERS >= 10
-	static constexpr sljit_s32 saved_register_count = 10;
-#else
-	static constexpr sljit_s32 saved_register_count = 5;
-#endif
-
-	sljit_emit_enter(compiler, 0, SLJIT_ARGS1V(P), 5, saved_register_count, 0);
+	sljit_emit_enter(compiler, 0, SLJIT_ARGS1V(P), 5, registers.saved_register_count, 0);
 	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_S1, 0, SLJIT_MEM1(SLJIT_S0),
 	               offsetof(SljitNativePerfectHashJoinProbeInput, input_offset));
 	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_S2, 0, SLJIT_MEM1(SLJIT_S0),
@@ -297,67 +286,72 @@ BuildSljitPerfectHashJoinProbe(const SljitNativeHashJoinProbePlan &plan,
 	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_S3, 0, SLJIT_IMM, 0);
 	sljit_emit_op1(compiler, SLJIT_MOV_P, SLJIT_R0, 0, SLJIT_MEM1(SLJIT_S0),
 	               offsetof(SljitNativePerfectHashJoinProbeInput, source_data));
-	sljit_emit_op1(compiler, SLJIT_MOV_P, SLJIT_S4, 0, SLJIT_R0, 0);
-#if defined(SLJIT_NUMBER_OF_SAVED_REGISTERS) && SLJIT_NUMBER_OF_SAVED_REGISTERS >= 10
-	sljit_emit_op1(compiler, SLJIT_MOV_P, SLJIT_S5, 0, SLJIT_MEM1(SLJIT_S0),
-	               offsetof(SljitNativePerfectHashJoinProbeInput, source_sel));
-	sljit_emit_op1(compiler, SLJIT_MOV_P, SLJIT_S6, 0, SLJIT_MEM1(SLJIT_S0),
-	               offsetof(SljitNativePerfectHashJoinProbeInput, source_validity));
-	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_S7, 0, SLJIT_MEM1(SLJIT_S0),
-	               offsetof(SljitNativePerfectHashJoinProbeInput, perfect_min));
-	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_S8, 0, SLJIT_MEM1(SLJIT_S0),
-	               offsetof(SljitNativePerfectHashJoinProbeInput, perfect_max));
-	sljit_emit_op1(compiler, SLJIT_MOV_P, SLJIT_S9, 0, SLJIT_MEM1(SLJIT_S0),
-	               offsetof(SljitNativePerfectHashJoinProbeInput, perfect_validity));
-#endif
+	sljit_emit_op1(compiler, SLJIT_MOV_P, registers.source_data, 0, SLJIT_R0, 0);
+	if (registers.has_invariant_hoists) {
+		sljit_emit_op1(compiler, SLJIT_MOV_P, registers.source_selection, 0, SLJIT_MEM1(SLJIT_S0),
+		               offsetof(SljitNativePerfectHashJoinProbeInput, source_sel));
+		sljit_emit_op1(compiler, SLJIT_MOV_P, registers.source_validity, 0, SLJIT_MEM1(SLJIT_S0),
+		               offsetof(SljitNativePerfectHashJoinProbeInput, source_validity));
+		sljit_emit_op1(compiler, SLJIT_MOV, registers.minimum, 0, SLJIT_MEM1(SLJIT_S0),
+		               offsetof(SljitNativePerfectHashJoinProbeInput, perfect_min));
+		sljit_emit_op1(compiler, SLJIT_MOV, registers.maximum, 0, SLJIT_MEM1(SLJIT_S0),
+		               offsetof(SljitNativePerfectHashJoinProbeInput, perfect_max));
+		sljit_emit_op1(compiler, SLJIT_MOV_P, registers.perfect_validity, 0, SLJIT_MEM1(SLJIT_S0),
+		               offsetof(SljitNativePerfectHashJoinProbeInput, perfect_validity));
+	}
 
 	auto loop = sljit_emit_label(compiler);
 	auto done = sljit_emit_cmp(compiler, SLJIT_GREATER_EQUAL, SLJIT_S1, 0, SLJIT_S2, 0);
 
-#if defined(SLJIT_NUMBER_OF_SAVED_REGISTERS) && SLJIT_NUMBER_OF_SAVED_REGISTERS >= 10
-	EmitLoadHoistedPerfectHashJoinSourceIndex(compiler, SLJIT_S5, SLJIT_R1);
-	auto source_is_null = EmitJumpIfHoistedPerfectHashJoinSourceNull(compiler, SLJIT_S6, SLJIT_R1, SLJIT_R2, SLJIT_R4);
-#else
-	EmitLoadPerfectHashJoinSourceIndex(compiler, SLJIT_R1, SLJIT_R0);
-	auto source_is_null = EmitJumpIfPerfectHashJoinSourceNull(compiler, SLJIT_R1, SLJIT_R2, SLJIT_R4);
-#endif
+	struct sljit_jump *source_is_null;
+	if (registers.has_invariant_hoists) {
+		EmitLoadHoistedPerfectHashJoinSourceIndex(compiler, registers.source_selection, SLJIT_R1);
+		source_is_null = EmitJumpIfHoistedPerfectHashJoinSourceNull(compiler, registers.source_validity, SLJIT_R1,
+		                                                            SLJIT_R2, SLJIT_R4);
+	} else {
+		EmitLoadPerfectHashJoinSourceIndex(compiler, SLJIT_R1, SLJIT_R0);
+		source_is_null = EmitJumpIfPerfectHashJoinSourceNull(compiler, SLJIT_R1, SLJIT_R2, SLJIT_R4);
+	}
 	if (key.key_kind == SljitNativeHashJoinKeyKind::INT32) {
 		sljit_emit_op1(compiler, SLJIT_MOV_U8, SLJIT_R2, 0, SLJIT_MEM1(SLJIT_S0),
 		               offsetof(SljitNativePerfectHashJoinProbeInput, source_key0_int64_to_int32));
 		auto load_int32 = sljit_emit_cmp(compiler, SLJIT_EQUAL, SLJIT_R2, 0, SLJIT_IMM, 0);
-		sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_R0, 0, SLJIT_MEM2(SLJIT_S4, SLJIT_R1), 3);
+		sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_R0, 0, SLJIT_MEM2(registers.source_data, SLJIT_R1), 3);
 		EmitCheckedPerfectHashJoinInt64ToInt32Range(compiler, SLJIT_R0, SLJIT_R2);
 		auto loaded_key = sljit_emit_jump(compiler, SLJIT_JUMP);
 		sljit_set_label(load_int32, sljit_emit_label(compiler));
-		EmitLoadHashJoinKey(compiler, key.key_kind, SLJIT_R0, SLJIT_S4, SLJIT_R1, 0);
+		EmitLoadHashJoinKey(compiler, key.key_kind, SLJIT_R0, registers.source_data, SLJIT_R1, 0);
 		sljit_set_label(loaded_key, sljit_emit_label(compiler));
 	} else {
-		EmitLoadHashJoinKey(compiler, key.key_kind, SLJIT_R0, SLJIT_S4, SLJIT_R1, 0);
+		EmitLoadHashJoinKey(compiler, key.key_kind, SLJIT_R0, registers.source_data, SLJIT_R1, 0);
 	}
 
-#if defined(SLJIT_NUMBER_OF_SAVED_REGISTERS) && SLJIT_NUMBER_OF_SAVED_REGISTERS >= 10
-	auto below_range = sljit_emit_cmp(compiler, less_than_min, SLJIT_R0, 0, SLJIT_S7, 0);
-	auto above_range = sljit_emit_cmp(compiler, greater_than_max, SLJIT_R0, 0, SLJIT_S8, 0);
-	sljit_emit_op2(compiler, SLJIT_SUB, SLJIT_R0, 0, SLJIT_R0, 0, SLJIT_S7, 0);
+	struct sljit_jump *below_range;
+	struct sljit_jump *above_range;
+	struct sljit_jump *all_valid;
+	if (registers.has_invariant_hoists) {
+		below_range = sljit_emit_cmp(compiler, less_than_min, SLJIT_R0, 0, registers.minimum, 0);
+		above_range = sljit_emit_cmp(compiler, greater_than_max, SLJIT_R0, 0, registers.maximum, 0);
+		sljit_emit_op2(compiler, SLJIT_SUB, SLJIT_R0, 0, SLJIT_R0, 0, registers.minimum, 0);
 
-	auto all_valid = sljit_emit_cmp(compiler, SLJIT_EQUAL, SLJIT_S9, 0, SLJIT_IMM, 0);
-	sljit_emit_op2(compiler, SLJIT_LSHR, SLJIT_R3, 0, SLJIT_R0, 0, SLJIT_IMM, 6);
-	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_R3, 0, SLJIT_MEM2(SLJIT_S9, SLJIT_R3), 3);
-#else
-	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_R2, 0, SLJIT_MEM1(SLJIT_S0),
-	               offsetof(SljitNativePerfectHashJoinProbeInput, perfect_min));
-	auto below_range = sljit_emit_cmp(compiler, less_than_min, SLJIT_R0, 0, SLJIT_R2, 0);
-	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_R3, 0, SLJIT_MEM1(SLJIT_S0),
-	               offsetof(SljitNativePerfectHashJoinProbeInput, perfect_max));
-	auto above_range = sljit_emit_cmp(compiler, greater_than_max, SLJIT_R0, 0, SLJIT_R3, 0);
-	sljit_emit_op2(compiler, SLJIT_SUB, SLJIT_R0, 0, SLJIT_R0, 0, SLJIT_R2, 0);
+		all_valid = sljit_emit_cmp(compiler, SLJIT_EQUAL, registers.perfect_validity, 0, SLJIT_IMM, 0);
+		sljit_emit_op2(compiler, SLJIT_LSHR, SLJIT_R3, 0, SLJIT_R0, 0, SLJIT_IMM, 6);
+		sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_R3, 0, SLJIT_MEM2(registers.perfect_validity, SLJIT_R3), 3);
+	} else {
+		sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_R2, 0, SLJIT_MEM1(SLJIT_S0),
+		               offsetof(SljitNativePerfectHashJoinProbeInput, perfect_min));
+		below_range = sljit_emit_cmp(compiler, less_than_min, SLJIT_R0, 0, SLJIT_R2, 0);
+		sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_R3, 0, SLJIT_MEM1(SLJIT_S0),
+		               offsetof(SljitNativePerfectHashJoinProbeInput, perfect_max));
+		above_range = sljit_emit_cmp(compiler, greater_than_max, SLJIT_R0, 0, SLJIT_R3, 0);
+		sljit_emit_op2(compiler, SLJIT_SUB, SLJIT_R0, 0, SLJIT_R0, 0, SLJIT_R2, 0);
 
-	sljit_emit_op1(compiler, SLJIT_MOV_P, SLJIT_R2, 0, SLJIT_MEM1(SLJIT_S0),
-	               offsetof(SljitNativePerfectHashJoinProbeInput, perfect_validity));
-	auto all_valid = sljit_emit_cmp(compiler, SLJIT_EQUAL, SLJIT_R2, 0, SLJIT_IMM, 0);
-	sljit_emit_op2(compiler, SLJIT_LSHR, SLJIT_R3, 0, SLJIT_R0, 0, SLJIT_IMM, 6);
-	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_R3, 0, SLJIT_MEM2(SLJIT_R2, SLJIT_R3), 3);
-#endif
+		sljit_emit_op1(compiler, SLJIT_MOV_P, SLJIT_R2, 0, SLJIT_MEM1(SLJIT_S0),
+		               offsetof(SljitNativePerfectHashJoinProbeInput, perfect_validity));
+		all_valid = sljit_emit_cmp(compiler, SLJIT_EQUAL, SLJIT_R2, 0, SLJIT_IMM, 0);
+		sljit_emit_op2(compiler, SLJIT_LSHR, SLJIT_R3, 0, SLJIT_R0, 0, SLJIT_IMM, 6);
+		sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_R3, 0, SLJIT_MEM2(SLJIT_R2, SLJIT_R3), 3);
+	}
 	sljit_emit_op2(compiler, SLJIT_AND, SLJIT_R4, 0, SLJIT_R0, 0, SLJIT_IMM, 63);
 	sljit_emit_op2(compiler, SLJIT_SHL, SLJIT_R4, 0, SLJIT_IMM, 1, SLJIT_R4, 0);
 	sljit_emit_op2(compiler, SLJIT_AND | SLJIT_SET_Z, SLJIT_R4, 0, SLJIT_R4, 0, SLJIT_R3, 0);
