@@ -82,19 +82,17 @@ SljitValidateHashJoinDirectAggregateConsumerContract(const SljitFullPipelinePrim
 	}
 }
 
-enum class SljitFullPipelineRuntimeKind : uint8_t { PRIMITIVE_SEQUENCE, SELECTED_HASH_JOIN_SINK };
-
 struct SljitFullPipelineRecipe {
 	SljitFullPipelinePrimitiveSequence primitive_sequence;
 	SljitHashJoinDirectAggregateConsumerContract direct_aggregate_consumer;
-	SljitFullPipelineRuntimeKind runtime_kind = SljitFullPipelineRuntimeKind::PRIMITIVE_SEQUENCE;
+	vector<ExecutionAggregateStateCombineLane> primitive_aggregate_state_source_lanes;
 	bool uses_extended_source_fetch_budget = false;
 	bool preserves_partitioned_source_chunks = false;
 	bool has_scan_filter_executable_body = false;
 	vector<idx_t> fused_filter_owners;
 
-	bool UsesSelectedHashJoinSinkRuntime() const {
-		return runtime_kind == SljitFullPipelineRuntimeKind::SELECTED_HASH_JOIN_SINK;
+	bool UsesPrimitiveAggregateStateSource() const {
+		return !primitive_aggregate_state_source_lanes.empty();
 	}
 
 	bool OwnsFusedFilter(idx_t filter_idx) const {

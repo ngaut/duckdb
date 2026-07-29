@@ -68,22 +68,6 @@ static void SljitBindUngroupedSumPrimitiveLane(const ExecutionPrimitiveAggregate
 	aggregate_row_counts[payload_idx] = lane.row_count;
 }
 
-static void SljitBindUngroupedInt64SumPrimitiveLane(const ExecutionPrimitiveAggregateUpdateLane &lane,
-                                                    vector<int64_t *> &aggregate_int64_values,
-                                                    vector<bool *> &aggregate_state_is_sets,
-                                                    vector<idx_t *> &aggregate_row_counts, idx_t payload_idx,
-                                                    const char *unsupported_message, const char *incomplete_message) {
-	if (lane.kind != AggregatePrimitiveUpdateKind::SUM_INT64) {
-		throw InternalException(unsupported_message);
-	}
-	if (!lane.ready || !lane.sum_int64_value || !lane.state_is_set || !lane.row_count) {
-		SljitThrowIncompletePrimitiveLane(lane, incomplete_message, "aggregate-primitive-lane-incomplete");
-	}
-	aggregate_int64_values[payload_idx] = lane.sum_int64_value;
-	aggregate_state_is_sets[payload_idx] = lane.state_is_set;
-	aggregate_row_counts[payload_idx] = lane.row_count;
-}
-
 static bool SljitSkipCountStarPrimitivePayload(const SljitAggregatePayloadDescriptor &descriptor,
                                                const ExecutionPrimitiveAggregateUpdateLane &lane,
                                                const char *unexpected_payload_message) {

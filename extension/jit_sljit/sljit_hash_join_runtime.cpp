@@ -12,6 +12,7 @@
 #include "sljit_region_runtime_trace.hpp"
 
 #include "duckdb/common/exception.hpp"
+#include "duckdb/common/numeric_utils.hpp"
 #include "duckdb/common/vector/flat_vector.hpp"
 #include "duckdb/execution/execution_hash_join_runtime.hpp"
 
@@ -244,8 +245,30 @@ SljitHashJoinProbeLayoutKind
 SljitValidateRegularHashJoinProbeExecutionLayout(const SljitNativeHashJoinProbePlan &plan,
                                                  const ExecutionHashJoinProbeBinding &probe) {
 	auto &layout = probe.table_layout;
-	if (!layout.ready || !layout.entries || layout.layout_offsets.empty()) {
+	if (!layout.Ready() || !layout.entries.words || layout.layout_offsets.empty()) {
 		throw InternalException("SLJIT native hash join probe received an incomplete hash table layout");
+	}
+	if (layout.entries.capacity == 0 || layout.entries.bitmask != layout.entries.capacity - 1) {
+		throw InternalException("SLJIT native hash join probe received an invalid entry-table capacity");
+	}
+	if (layout.entries.pointer_mask == 0 || (layout.entries.pointer_mask & layout.entries.salt_mask) != 0 ||
+	    (layout.entries.pointer_mask | layout.entries.salt_mask) != NumericLimits<uint64_t>::Maximum()) {
+		throw InternalException("SLJIT native hash join probe received incompatible entry-word masks");
+	}
+	switch (layout.entries.encoding) {
+	case ExecutionHashJoinEntryEncoding::POINTER:
+		if (layout.entries.pointer_mask != NumericLimits<uint64_t>::Maximum() || layout.entries.salt_mask != 0) {
+			throw InternalException("SLJIT native hash join probe received an invalid pointer entry encoding");
+		}
+		break;
+	case ExecutionHashJoinEntryEncoding::POINTER_LOWER_48_SALT_UPPER_16:
+		if (layout.entries.pointer_mask != EXECUTION_HASH_JOIN_POINTER_LOWER_48_MASK ||
+		    layout.entries.salt_mask != EXECUTION_HASH_JOIN_SALT_UPPER_16_MASK) {
+			throw InternalException("SLJIT native hash join probe received an invalid 48-bit pointer entry encoding");
+		}
+		break;
+	default:
+		break;
 	}
 	if (layout.layout_offsets.size() < plan.keys.size()) {
 		throw InternalException("SLJIT native hash join probe layout key count mismatch");
@@ -263,7 +286,7 @@ SljitValidateRegularHashJoinProbeExecutionLayout(const SljitNativeHashJoinProbeP
 		}
 		if (plan.output_mode == ExecutionHashJoinProbeOutputMode::MARK_BUILD_ONLY &&
 		    SljitHashJoinProbeLayoutUsesDictionaryEmission(table_layout_kind) &&
-		    SljitHashJoinProbeLayoutChainsLongerThanOne(table_layout_kind) && !layout.aux_next_ptrs) {
+		    SljitHashJoinProbeLayoutChainsLongerThanOne(table_layout_kind) && !layout.entries.aux_next_ptrs) {
 			throw InternalException("SLJIT native hash join mark-only probe requires dictionary chain pointers");
 		}
 	}

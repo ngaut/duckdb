@@ -173,6 +173,7 @@ bool SljitPrimitiveRunPayloadSupported(PhysicalType payload_type, AggregatePrimi
                                        bool payload_nullable);
 bool SljitPrimitiveRunMultiUpdateSupported(const vector<PhysicalType> &payload_types,
                                            const vector<AggregatePrimitiveUpdateKind> &primitive_kinds);
+bool SljitPreaggregatedPrimitiveStateLayoutSupported(const ExecutionPrimitiveAggregateUpdateLane &lane);
 unique_ptr<ExecutionRegionCodeHandle>
 BuildSljitNativePrimitiveRunUpdate(PhysicalType group_source_type, PhysicalType group_type,
                                    ExecutionRowPointerGroupKeyCastKind group_cast_kind, PhysicalType payload_type,
@@ -181,12 +182,17 @@ BuildSljitNativePrimitiveRunUpdate(PhysicalType group_source_type, PhysicalType 
 unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativePrimitiveRunMultiUpdate(
     PhysicalType group_source_type, PhysicalType group_type, ExecutionRowPointerGroupKeyCastKind group_cast_kind,
     const vector<PhysicalType> &payload_types, const vector<AggregatePrimitiveUpdateKind> &primitive_kinds,
-    SljitNativePrimitiveRunFunction &function, string &error);
+    bool shared_payload_validity, SljitNativePrimitiveRunFunction &function, string &error);
 unique_ptr<ExecutionRegionCodeHandle>
 BuildSljitNativePrimitiveRunAffineInt64Update(PhysicalType group_source_type, PhysicalType group_type,
                                               ExecutionRowPointerGroupKeyCastKind group_cast_kind,
                                               PhysicalType payload_type, idx_t lane_count, bool payload_nullable,
                                               SljitNativePrimitiveRunFunction &function, string &error);
+unique_ptr<ExecutionRegionCodeHandle>
+BuildSljitNativePreaggregatedPrimitiveUpdate(const vector<AggregatePrimitiveUpdateKind> &primitive_kinds,
+                                             const vector<idx_t> &state_offsets, bool initialize_states,
+                                             SljitNativePreaggregatedPrimitiveUpdateFunction &function, string &error,
+                                             bool address_selected = false, bool row_selected = false);
 unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativeUngroupedSumInt64IntegerBinaryConstant(
     SljitNativeIntegerKind kind, SljitNativeIntegerBinaryOp op, bool constant_on_left,
     SljitNativeAggregateUpdateFunction &function, string &error, bool check_arithmetic_overflow = true,

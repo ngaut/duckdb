@@ -60,6 +60,33 @@ struct PrefixRangeBitmapBuildState : public PrefixRangeFilter::BuildState {
 	uint64_t *bitmap;
 };
 
+static constexpr idx_t PREFIX_RANGE_MAX_PREFIX_LENGTH = 20;
+static constexpr uint64_t PREFIX_RANGE_CAP_BITS = 1ULL << PREFIX_RANGE_MAX_PREFIX_LENGTH;
+static constexpr uint64_t PREFIX_RANGE_MAX_EXACT_BITS = 1ULL << 23;
+static constexpr uint64_t PREFIX_RANGE_MAX_EXACT_BITS_PER_BUILD_ROW = 256;
+
+struct PrefixRangeBitmapShape {
+	idx_t shift;
+	idx_t bucket_count;
+};
+
+static PrefixRangeBitmapShape ComputePrefixRangeBitmapShape(uint64_t span, idx_t number_of_rows,
+                                                            bool allow_adaptive_exact_bitmap) {
+	const auto exact_span_budget =
+	    number_of_rows > NumericLimits<uint64_t>::Maximum() / PREFIX_RANGE_MAX_EXACT_BITS_PER_BUILD_ROW
+	        ? NumericLimits<uint64_t>::Maximum()
+	        : static_cast<uint64_t>(number_of_rows) * PREFIX_RANGE_MAX_EXACT_BITS_PER_BUILD_ROW;
+	const bool adaptive_exact =
+	    allow_adaptive_exact_bitmap && span < PREFIX_RANGE_MAX_EXACT_BITS && span <= exact_span_budget;
+
+	idx_t shift = 0;
+	if (span >= PREFIX_RANGE_CAP_BITS && !adaptive_exact) {
+		const auto quotient = span >> PREFIX_RANGE_MAX_PREFIX_LENGTH;
+		shift = quotient <= 1 ? 0 : 64 - CountZeros<uint64_t>::Leading(quotient - 1);
+	}
+	return {shift, UnsafeNumericCast<idx_t>((span >> shift) + 1)};
+}
+
 template <typename U>
 class PrefixRangeBitmap {
 public:
@@ -67,20 +94,10 @@ public:
 		min = min_p;
 		span = span_p;
 		build_row_count = number_of_rows;
-		shift = 0;
-
-		const auto exact_span_budget =
-		    number_of_rows > NumericLimits<uint64_t>::Maximum() / MAX_EXACT_BITS_PER_BUILD_ROW
-		        ? NumericLimits<uint64_t>::Maximum()
-		        : static_cast<uint64_t>(number_of_rows) * MAX_EXACT_BITS_PER_BUILD_ROW;
-		const bool adaptive_exact = allow_adaptive_exact_bitmap && static_cast<uint64_t>(span) < MAX_EXACT_BITS &&
-		                            static_cast<uint64_t>(span) <= exact_span_budget;
-		if (span >= CAP_BITS && !adaptive_exact) {
-			const auto q = UnsafeNumericCast<uint64_t>(span >> MAX_PREFIX_LENGTH);
-			shift = (q <= 1) ? 0 : (64 - CountZeros<uint64_t>::Leading(q - 1));
-		}
-
-		const idx_t buckets = UnsafeNumericCast<idx_t>((span >> shift) + 1);
+		const auto shape = ComputePrefixRangeBitmapShape(UnsafeNumericCast<uint64_t>(span), number_of_rows,
+		                                                 allow_adaptive_exact_bitmap);
+		shift = shape.shift;
+		const auto buckets = shape.bucket_count;
 		word_count = buckets == 0 ? 1 : (buckets + 63) >> WORD_SHIFT;
 
 		buf_ = AllocateBitmap(context, word_count, bitmap);
@@ -283,10 +300,6 @@ public:
 	}
 
 private:
-	static constexpr idx_t MAX_PREFIX_LENGTH = 20;
-	static constexpr idx_t CAP_BITS = 1ULL << MAX_PREFIX_LENGTH;
-	static constexpr idx_t MAX_EXACT_BITS = 1ULL << 23;
-	static constexpr idx_t MAX_EXACT_BITS_PER_BUILD_ROW = 256;
 	static constexpr idx_t WORD_SHIFT = 6;
 	static constexpr idx_t WORD_MASK = 63;
 
@@ -604,6 +617,35 @@ bool PrefixRangeFilter::TryComputeSpan(const Value &lower_bound, const Value &up
 	default:
 		return false;
 	}
+}
+
+bool PrefixRangeFilter::TryEstimateMaxBucketDensity(idx_t number_of_rows, const Value &lower_bound,
+                                                    const Value &upper_bound, double &result) {
+	if (number_of_rows == 0) {
+		return false;
+	}
+	uhugeint_t wide_span;
+	if (!TryComputeSpan(lower_bound, upper_bound, wide_span) || wide_span == 0) {
+		return false;
+	}
+	uint64_t span;
+	if (!Uhugeint::TryCast(wide_span, span)) {
+		return false;
+	}
+	const bool allow_adaptive_exact_bitmap = lower_bound.type().InternalType() != PhysicalType::VARCHAR;
+	const auto shape = ComputePrefixRangeBitmapShape(span, number_of_rows, allow_adaptive_exact_bitmap);
+	if (shape.bucket_count <= 1) {
+		return false;
+	}
+
+	// Min and max already occupy the endpoints. Model the remaining build
+	// cardinality over the remaining prefix intervals. This is conservative in
+	// the presence of duplicates, and exactly classifies evenly spaced domains
+	// at the adaptive filter's selectivity boundary.
+	const auto bucket_intervals = shape.bucket_count - 1;
+	const auto build_intervals = MinValue(number_of_rows - 1, bucket_intervals);
+	result = static_cast<double>(build_intervals) / static_cast<double>(bucket_intervals);
+	return true;
 }
 
 bool PrefixRangeFilter::SupportedType(const LogicalType &type) {

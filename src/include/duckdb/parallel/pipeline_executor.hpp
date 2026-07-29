@@ -194,6 +194,9 @@ private:
 	                                         ExecutionRegionSourceContractMetrics *metrics = nullptr,
 	                                         bool decline_new_row_group = false,
 	                                         bool *declined_new_row_group = nullptr);
+	SourceResultType
+	FetchFromPrimitiveAggregateStateSourceContract(ExecutionAggregateStateScanBatch *&result,
+	                                               ExecutionRegionSourceContractMetrics *metrics = nullptr);
 	bool TryMarkExecutionRegionRuntimeOnceFlag(ExecutionRegionRuntimeOnceFlag flag, idx_t index);
 
 	void FinishProcessing(int32_t operator_idx = -1);

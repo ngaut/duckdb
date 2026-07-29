@@ -4,7 +4,6 @@
 #include "duckdb/common/allocator.hpp"
 #include "duckdb/common/exception.hpp"
 #include "duckdb/execution/execution_region_plan.hpp"
-#include "duckdb/execution/execution_region_telemetry.hpp"
 #include "duckdb/main/client_context.hpp"
 #include "duckdb/parallel/pipeline_executor.hpp"
 
@@ -78,9 +77,18 @@ SourceResultType ExecutionRegionPipelineAdapter::FetchSourceContract(DataChunk *
                                                                      ExecutionRegionSourceContractMetrics *metrics,
                                                                      bool decline_new_row_group,
                                                                      bool *declined_new_row_group) {
-	ExecutionRegionSuppressionGuard guard(GetClientContext());
 	auto source_result =
 	    executor.FetchFromSourceContract(result, metrics, decline_new_row_group, declined_new_row_group);
+	if (source_result == SourceResultType::FINISHED) {
+		executor.exhausted_source = true;
+		executor.exhausted_pipeline = true;
+	}
+	return source_result;
+}
+
+SourceResultType ExecutionRegionPipelineAdapter::FetchPrimitiveAggregateStateSourceContract(
+    ExecutionAggregateStateScanBatch *&result, ExecutionRegionSourceContractMetrics *metrics) {
+	auto source_result = executor.FetchFromPrimitiveAggregateStateSourceContract(result, metrics);
 	if (source_result == SourceResultType::FINISHED) {
 		executor.exhausted_source = true;
 		executor.exhausted_pipeline = true;

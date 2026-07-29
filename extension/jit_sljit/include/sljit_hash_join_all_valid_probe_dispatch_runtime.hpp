@@ -47,12 +47,13 @@ static bool TryExecuteAllValidUint64PairNoChainProbeFastest(const SljitNativeHas
 	if constexpr (SELECTED) {
 		key_sel = input.source_sel[0];
 	}
-	const auto entries = reinterpret_cast<const ht_entry_t *__restrict>(input.entries);
+	const uint64_t *__restrict entries = input.entries;
 	const auto bitmask = input.bitmask;
 	const auto key0_offset = plan.keys[0].key_layout_offset;
 	const auto key1_offset = plan.keys[1].key_layout_offset;
 	data_ptr_t *__restrict row_pointers = input.row_pointers;
 	sel_t *__restrict match_sel = input.match_sel;
+	const SljitHashJoinEntryDecoder entry_decoder(input);
 	auto selected_count = input.selected_count;
 
 	auto row_idx = input.input_offset;
@@ -78,11 +79,11 @@ static bool TryExecuteAllValidUint64PairNoChainProbeFastest(const SljitNativeHas
 			}
 
 			while (true) {
-				const auto entry_value = entries[ht_offset].GetValue();
+				const auto entry_value = entries[ht_offset];
 				if (!entry_value) {
 					break;
 				}
-				auto row_location = SljitHashJoinEntryPointer(entry_value);
+				auto row_location = entry_decoder.Pointer(entry_value);
 				if (SljitHashJoinKeysEqual<uint64_t>(row_location, key0_offset, key0) &&
 				    SljitHashJoinKeysEqual<uint64_t>(row_location, key1_offset, key1)) {
 					row_pointers[selected_count] = row_location;
@@ -133,11 +134,12 @@ static void ExecuteAllValidUncheckedInt64ToInt32SingleKeyNoChainProbe(const Slji
 	if constexpr (SELECTED) {
 		key_sel = input.source_sel[0];
 	}
-	const auto entries = reinterpret_cast<const ht_entry_t *__restrict>(input.entries);
+	const uint64_t *__restrict entries = input.entries;
 	const auto bitmask = input.bitmask;
 	const auto key_offset = plan.keys[0].key_layout_offset;
 	data_ptr_t *__restrict row_pointers = input.row_pointers;
 	sel_t *__restrict match_sel = input.match_sel;
+	const SljitHashJoinEntryDecoder entry_decoder(input);
 	auto selected_count = input.selected_count;
 
 	auto row_idx = input.input_offset;
@@ -164,20 +166,20 @@ static void ExecuteAllValidUncheckedInt64ToInt32SingleKeyNoChainProbe(const Slji
 			if (SljitBloomFilterMayContainTemplated<HAS_BLOOM>(input, hash)) {
 				hash_t salt = 0;
 				if constexpr (USE_SALT) {
-					salt = hash & ht_entry_t::SALT_MASK;
+					salt = entry_decoder.Salt(hash);
 				}
 				while (true) {
-					const auto entry_value = entries[ht_offset].GetValue();
+					const auto entry_value = entries[ht_offset];
 					if (!entry_value) {
 						break;
 					}
 					if constexpr (USE_SALT) {
-						if ((entry_value & ht_entry_t::SALT_MASK) != salt) {
+						if (!entry_decoder.SaltMatches(entry_value, salt)) {
 							ht_offset = UnsafeNumericCast<idx_t>((ht_offset + 1) & bitmask);
 							continue;
 						}
 					}
-					auto row_location = SljitHashJoinEntryPointer(entry_value);
+					auto row_location = entry_decoder.Pointer(entry_value);
 					if (SljitHashJoinKeysEqual<int32_t>(row_location, key_offset, key)) {
 						row_pointers[selected_count] = row_location;
 						match_sel[selected_count] = UnsafeNumericCast<sel_t>(row_idx);

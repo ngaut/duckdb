@@ -9,7 +9,34 @@
 
 #include "duckdb/execution/join_hashtable.hpp"
 
+#include "execution_hash_join_layout.hpp"
+
 namespace duckdb {
+
+ExecutionHashJoinRowLayout BuildExecutionHashJoinRowLayout(const vector<LogicalType> &condition_types,
+                                                           const vector<LogicalType> &payload_types,
+                                                           bool found_match_column_present) {
+	ExecutionHashJoinRowLayout result;
+	const auto condition_count = condition_types.size();
+	const auto payload_column_count = payload_types.size();
+
+	vector<LogicalType> layout_types(condition_types);
+	layout_types.insert(layout_types.end(), payload_types.begin(), payload_types.end());
+	if (found_match_column_present) {
+		layout_types.emplace_back(LogicalType::BOOLEAN);
+	}
+	const auto hash_column_index = layout_types.size();
+	layout_types.emplace_back(LogicalType::HASH);
+
+	result.layout = make_shared_ptr<TupleDataLayout>();
+	result.layout->Initialize(std::move(layout_types), TupleDataValidityType::CAN_HAVE_NULL_VALUES);
+	const auto &offsets = result.layout->GetOffsets();
+	D_ASSERT(offsets.size() > hash_column_index);
+	result.tuple_size = offsets[condition_count + payload_column_count];
+	result.pointer_offset = offsets.back();
+	result.entry_size = result.layout->GetRowWidth();
+	return result;
+}
 
 static string ExecutionHashJoinBool(bool value) {
 	return value ? "true" : "false";
@@ -44,38 +71,28 @@ bool ExecutionGetHashJoinTableLayout(const JoinHashTable &hash_table, ExecutionH
 }
 
 string DescribeExecutionHashJoinTableLayout(const ExecutionHashJoinTableLayout &layout) {
-	string result = "native_hash_join_table_layout<ready=" + ExecutionHashJoinBool(layout.ready);
-	result += ",join_type=" + string(ExecutionRegionJoinTypeToString(layout.join_type));
-	result += ",finalized=" + ExecutionHashJoinBool(layout.finalized);
-	result += ",in_memory=" + ExecutionHashJoinBool(layout.in_memory);
+	string result = "native_hash_join_table_layout<status=";
+	result += ExecutionHashJoinTableLayoutStatusToString(layout.status);
 	result += ",needs_chain_matcher=" + ExecutionHashJoinBool(layout.needs_chain_matcher);
 	result += ",chains_longer_than_one=" + ExecutionHashJoinBool(layout.chains_longer_than_one);
-	result += ",residual_predicate=" + ExecutionHashJoinBool(layout.residual_predicate);
 	result += ",dictionary_emission=" + ExecutionHashJoinBool(layout.dictionary_emission);
-	result += ",can_have_null=" + ExecutionHashJoinBool(layout.can_have_null);
 	result += ",use_salt=" + ExecutionHashJoinBool(layout.use_salt);
 	result += ",null_keys_are_filtered=" + ExecutionHashJoinBool(layout.null_keys_are_filtered);
 	result += ",stored_keys_have_null=" + ExecutionHashJoinBool(layout.stored_keys_have_null);
 	result += ",condition_count=" + std::to_string(layout.condition_count);
 	result += ",condition_types=" + ExecutionHashJoinTypeList(layout.condition_types);
-	result += ",payload_columns=" + std::to_string(layout.payload_column_count);
-	result += ",payload_types=" + ExecutionHashJoinTypeList(layout.payload_types);
 	result += ",layout_columns=" + std::to_string(layout.layout_column_count);
 	result += ",layout_offsets=" + ExecutionHashJoinIdxList(layout.layout_offsets);
 	result += ",tuple_size=" + std::to_string(layout.tuple_size);
-	result += ",entry_size=" + std::to_string(layout.entry_size);
 	result += ",pointer_offset=" + std::to_string(layout.pointer_offset);
-	result += ",hash_column_index=" + std::to_string(layout.hash_column_index);
 	result += ",found_match_column_present=" + ExecutionHashJoinBool(layout.found_match_column_present);
-	result += ",found_match_column_index=" + std::to_string(layout.found_match_column_index);
-	result += ",capacity=" + std::to_string(layout.capacity);
-	result += ",bitmask=" + std::to_string(layout.bitmask);
-	result += ",pointer_mask=" + std::to_string(layout.pointer_mask);
-	result += ",salt_mask=" + std::to_string(layout.salt_mask);
-	result += ",entries=" + ExecutionHashJoinBool(layout.entries != nullptr);
-	result += ",aux_next_ptrs=" + ExecutionHashJoinBool(layout.aux_next_ptrs != nullptr);
-	result += ",bloom_filter=" + ExecutionHashJoinBool(layout.bloom_filter != nullptr);
-	result += ",blocker=" + layout.blocker;
+	result += ",capacity=" + std::to_string(layout.entries.capacity);
+	result += ",bitmask=" + std::to_string(layout.entries.bitmask);
+	result += ",pointer_mask=" + std::to_string(layout.entries.pointer_mask);
+	result += ",salt_mask=" + std::to_string(layout.entries.salt_mask);
+	result += ",entries=" + ExecutionHashJoinBool(layout.entries.words != nullptr);
+	result += ",aux_next_ptrs=" + ExecutionHashJoinBool(layout.entries.aux_next_ptrs != nullptr);
+	result += ",bloom_filter=" + ExecutionHashJoinBool(layout.bloom_filter.words != nullptr);
 	result += ">";
 	return result;
 }

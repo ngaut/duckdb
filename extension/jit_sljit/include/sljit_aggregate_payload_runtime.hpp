@@ -223,6 +223,7 @@ static void SljitExecuteFusedPrimitiveAggregatePayloadUpdate(
 	auto &payload_sources = adapter_scratch.payload_sources;
 	auto &right_payload_sources = adapter_scratch.right_payload_sources;
 	auto &aggregate_int64_values = adapter_scratch.aggregate_int64_values;
+	auto &aggregate_hugeint_values = adapter_scratch.aggregate_hugeint_values;
 	auto &aggregate_state_is_sets = adapter_scratch.aggregate_state_is_sets;
 	auto &aggregate_row_counts = adapter_scratch.aggregate_row_counts;
 	auto &constants = adapter_scratch.constants;
@@ -249,10 +250,9 @@ static void SljitExecuteFusedPrimitiveAggregatePayloadUpdate(
 		if (plan.return_type.InternalType() != lane.payload_type) {
 			throw InternalException("SLJIT fused aggregate primitive payload type mismatch");
 		}
-		SljitBindUngroupedInt64SumPrimitiveLane(lane, aggregate_int64_values, aggregate_state_is_sets,
-		                                        aggregate_row_counts, payload_idx,
-		                                        "SLJIT fused aggregate primitive lane has unsupported state kind",
-		                                        "SLJIT fused aggregate primitive lane is incomplete: %s");
+		SljitBindUngroupedSumPrimitiveLane(lane, aggregate_int64_values, aggregate_hugeint_values,
+		                                   aggregate_state_is_sets, aggregate_row_counts, payload_idx,
+		                                   "SLJIT fused aggregate primitive lane is incomplete: %s");
 		if (payloads.size() == 1) {
 			single_aggregate_int64_value = lane.sum_int64_value;
 			single_aggregate_state_is_set = lane.state_is_set;
@@ -261,10 +261,17 @@ static void SljitExecuteFusedPrimitiveAggregatePayloadUpdate(
 
 		switch (plan.kind) {
 		case SljitNativeRegionExpressionKind::REFERENCE:
-			payload_sources.PrepareIntegerSource(
-			    input, plan.source_index, payload_idx, plan.integer_kind, execute_sel, count,
-			    "SLJIT fused aggregate reference source is out of range",
-			    SljitInputSourceKnownNotNull(payloads[payload_idx].input_source_not_null, 0));
+			if (payload_descriptors[payload_idx].IsDoubleWord()) {
+				payload_sources.PrepareTypedExpressionSource(
+				    input, plan.source_index, payload_idx, execute_sel, count,
+				    "SLJIT fused aggregate reference source is out of range",
+				    SljitInputSourceKnownNotNull(payloads[payload_idx].input_source_not_null, 0));
+			} else {
+				payload_sources.PrepareIntegerSource(
+				    input, plan.source_index, payload_idx, plan.integer_kind, execute_sel, count,
+				    "SLJIT fused aggregate reference source is out of range",
+				    SljitInputSourceKnownNotNull(payloads[payload_idx].input_source_not_null, 0));
+			}
 			if (payloads.size() == 1) {
 				single_source_data = payload_sources.DataArray()[0];
 				single_source_sel = payload_sources.SelectionArray()[0];
@@ -329,6 +336,7 @@ static void SljitExecuteFusedPrimitiveAggregatePayloadUpdate(
 		native_input.aggregate_row_count = single_aggregate_row_count;
 	}
 	native_input.aggregate_int64_values = aggregate_int64_values.data();
+	native_input.aggregate_hugeint_values = aggregate_hugeint_values.data();
 	native_input.aggregate_state_is_sets = aggregate_state_is_sets.data();
 	native_input.aggregate_row_counts = aggregate_row_counts.data();
 	native_input.count = count;

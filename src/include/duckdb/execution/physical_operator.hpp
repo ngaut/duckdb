@@ -142,17 +142,24 @@ public:
 	virtual unique_ptr<GlobalSourceState> GetGlobalSourceState(ClientContext &context,
 	                                                           const ExecutionRegionOpenRequest &open_request) const;
 	virtual bool SupportsExecutionSourceContract(const ExecutionRegionOpenRequest &open_request) const;
+	virtual bool
+	SupportsExecutionPrimitiveAggregateStateSourceContract(const ExecutionRegionOpenRequest &open_request) const;
 
 protected:
 	virtual SourceResultType GetDataInternal(ExecutionContext &context, DataChunk &chunk,
 	                                         OperatorSourceInput &input) const;
 	virtual SourceResultType GetExecutionSourceContractDataInternal(ExecutionContext &context, DataChunk &chunk,
 	                                                                OperatorSourceInput &input) const;
+	virtual SourceResultType GetExecutionPrimitiveAggregateStateSourceContractDataInternal(
+	    ExecutionContext &context, ExecutionAggregateStateScanBatch *&batch, OperatorSourceInput &input) const;
 
 public:
 	SourceResultType GetData(ExecutionContext &context, DataChunk &chunk, OperatorSourceInput &input) const;
 	SourceResultType GetExecutionSourceContractData(ExecutionContext &context, DataChunk &chunk,
 	                                                OperatorSourceInput &input) const;
+	SourceResultType GetExecutionPrimitiveAggregateStateSourceContractData(ExecutionContext &context,
+	                                                                       ExecutionAggregateStateScanBatch *&batch,
+	                                                                       OperatorSourceInput &input) const;
 
 	virtual OperatorPartitionData GetPartitionData(ExecutionContext &context, DataChunk &chunk,
 	                                               GlobalSourceState &gstate, LocalSourceState &lstate,

@@ -182,6 +182,12 @@ bool PhysicalOperator::SupportsExecutionSourceContract(const ExecutionRegionOpen
 	return false;
 }
 
+bool PhysicalOperator::SupportsExecutionPrimitiveAggregateStateSourceContract(
+    const ExecutionRegionOpenRequest &open_request) const {
+	(void)open_request;
+	return false;
+}
+
 // LCOV_EXCL_START
 SourceResultType PhysicalOperator::GetData(ExecutionContext &context, DataChunk &chunk,
                                            OperatorSourceInput &input) const {
@@ -193,6 +199,11 @@ SourceResultType PhysicalOperator::GetExecutionSourceContractData(ExecutionConte
 	return GetExecutionSourceContractDataInternal(context, chunk, input);
 }
 
+SourceResultType PhysicalOperator::GetExecutionPrimitiveAggregateStateSourceContractData(
+    ExecutionContext &context, ExecutionAggregateStateScanBatch *&batch, OperatorSourceInput &input) const {
+	return GetExecutionPrimitiveAggregateStateSourceContractDataInternal(context, batch, input);
+}
+
 SourceResultType PhysicalOperator::GetDataInternal(ExecutionContext &context, DataChunk &chunk,
                                                    OperatorSourceInput &input) const {
 	throw InternalException("Calling GetDataInternal on a node that is not a source!");
@@ -202,6 +213,13 @@ SourceResultType PhysicalOperator::GetExecutionSourceContractDataInternal(Execut
                                                                           OperatorSourceInput &input) const {
 	throw InternalException(
 	    "Calling GetExecutionSourceContractDataInternal on a source without an execution source contract");
+}
+
+SourceResultType PhysicalOperator::GetExecutionPrimitiveAggregateStateSourceContractDataInternal(
+    ExecutionContext &context, ExecutionAggregateStateScanBatch *&batch, OperatorSourceInput &input) const {
+	throw InternalException(
+	    "Calling GetExecutionPrimitiveAggregateStateSourceContractDataInternal on a source without a primitive "
+	    "aggregate-state source contract");
 }
 
 OperatorPartitionData PhysicalOperator::GetPartitionData(ExecutionContext &context, DataChunk &chunk,

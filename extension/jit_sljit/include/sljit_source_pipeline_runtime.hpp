@@ -47,8 +47,8 @@ public:
 	}
 
 	bool Execute() {
-		if (recipe.UsesSelectedHashJoinSinkRuntime()) {
-			return ExecuteLoweredSelectedHashJoinSinkRecipe();
+		if (recipe.UsesPrimitiveAggregateStateSource()) {
+			return ExecutePrimitiveAggregateStateSourceRecipe();
 		}
 		if (!terminal_runtime.Prepare(runtime, ops, scratch, TerminalStep())) {
 			throw InternalException("SLJIT primitive sequence terminal preparation failed");
@@ -85,44 +85,64 @@ public:
 	}
 
 private:
-	bool ExecuteLoweredSelectedHashJoinSinkRecipe() {
-		auto &hash_join_step = recipe.primitive_sequence.Step(1);
-		auto &terminal_step = recipe.primitive_sequence.Step(2);
-		if (!terminal_runtime.Prepare(runtime, ops, scratch, terminal_step)) {
-			throw InternalException("SLJIT lowered selected hash-join terminal preparation failed");
+	bool ExecutePrimitiveAggregateStateSourceRecipe() {
+		if (recipe.primitive_sequence.Count() != 2 ||
+		    TerminalStep().kind != SljitFullPipelinePrimitiveKind::UNGROUPED_AGGREGATE_UPDATE) {
+			throw InternalException(
+			    "SLJIT primitive aggregate-state source requires a direct ungrouped aggregate terminal");
 		}
-		idx_t fetched_chunks = 0;
-		const auto max_chunks = runtime.MaxChunks();
-		auto execute_source_batch = [&](const SljitRuntimeBatchView &input, bool have_more_output) {
-			auto execute_terminal = [&](const SljitRuntimeBatchView &selected_output) {
-				return terminal_runtime.Execute(runtime, result, ops, scratch, terminal_step, selected_output,
-				                                have_more_output, processed_batches);
-			};
-			auto try_execute_direct_consumer = [](const auto &, const auto &, auto &, auto &) {
-				return SljitHashJoinAggregateConsumerResult {};
-			};
-			return hash_join_selection.Execute(hash_join_step, input, execute_hash_join_probe, execute_terminal,
-			                                   nullptr, direct_aggregate_consumer_dispatch,
-			                                   try_execute_direct_consumer);
-		};
-		auto execute_source_chunk = [&](DataChunk &source_chunk, bool have_more_output) {
-			return source_fetch.Execute(source_chunk, have_more_output, execute_source_batch);
-		};
-		auto stop_after_flush = [&](ExecutionRegionResult stop_result, bool have_more_output, bool flush_terminal) {
-			if (source_fetch.Flush(have_more_output, execute_source_batch)) {
-				return true;
+		auto &primitive = TerminalStep().ungrouped_aggregate_update;
+		if (primitive.strategy != SljitUngroupedAggregateUpdateStrategyKind::DIRECT_PRIMITIVE_PAYLOAD_UPDATE ||
+		    primitive.aggregate_idx >= ops.size()) {
+			throw InternalException("SLJIT primitive aggregate-state source has an invalid terminal binding");
+		}
+		auto &aggregate_op = ops[primitive.aggregate_idx];
+		DataChunk binding_input;
+		auto &binding = SljitBindRecordedNativeSink(
+		    runtime, runtime.ExecutionOperators(), scratch, primitive.aggregate_idx, aggregate_op.kind, binding_input,
+		    aggregate_op.aggregate_update.plan.sink_info, "aggregate-update-runtime-binding-failed",
+		    "SLJIT primitive aggregate-state source sink");
+		if (!binding.ready || !binding.aggregate_update.ready || !binding.aggregate_update.primitive.ready) {
+			throw InternalException("SLJIT primitive aggregate-state source sink binding is incomplete");
+		}
+
+		idx_t fetched_batches = 0;
+		while (fetched_batches < runtime.MaxChunks()) {
+			ExecutionAggregateStateScanBatch *batch = nullptr;
+			auto source_result = runtime.FetchPrimitiveAggregateStateSourceContract(batch);
+			if (source_result == SourceResultType::BLOCKED) {
+				return SljitStopFullPipeline(result, SljitBlockedSourceStopResult(runtime));
 			}
-			if (flush_terminal &&
-			    terminal_runtime.Flush(runtime, result, ops, scratch, terminal_step, processed_batches)) {
-				return true;
+			fetched_batches++;
+			if (batch) {
+				if (batch->Count() == 0) {
+					throw InternalException("SLJIT primitive aggregate-state source returned an empty batch");
+				}
+				string blocker;
+				auto combine_start = SljitRegionStageStart(runtime);
+				if (!batch->CombinePrimitive(recipe.primitive_aggregate_state_source_lanes,
+				                             binding.aggregate_update.primitive, blocker)) {
+					throw InternalException("SLJIT primitive aggregate-state combine failed: %s",
+					                        blocker.empty() ? "unknown" : blocker.c_str());
+				}
+				RecordSljitRegionStageRuntime(runtime, primitive.aggregate_idx, aggregate_op.kind,
+				                              "primitive_state_source_combine", combine_start);
+				runtime.RecordJitRuntimePath("source.hash_aggregate.primitive_state_combine", batch->Count());
+				runtime.RecordJitRuntimeProof(ExecutionRegionJitRuntimeProof::GENERATED_BACKEND_WORK, batch->Count());
+				runtime.RecordJitRuntimeProof(ExecutionRegionJitRuntimeProof::MATERIALIZATION_ELISION, batch->Count());
+				runtime.RecordJitRuntimeProof(ExecutionRegionJitRuntimeProof::FULL_PIPELINE_OWNERSHIP, batch->Count());
+				auto sink_result =
+				    runtime.ExecutionOperators().RecordSinkResult(batch->Count(), SinkResultType::NEED_MORE_INPUT);
+				if (SljitNativeSinkResultStopsExecution(runtime, sink_result, result)) {
+					return true;
+				}
+				processed_batches++;
 			}
-			return SljitStopFullPipeline(result, stop_result);
-		};
-		return SljitRunFullPipelineSourceContractLoop(
-		    runtime, fetched_chunks, [&]() { return fetched_chunks >= max_chunks; }, execute_source_chunk,
-		    [&]() { return stop_after_flush(ExecutionRegionResult::NOT_FINISHED, true, false); },
-		    [&]() { return stop_after_flush(SljitBlockedSourceStopResult(runtime), true, true); },
-		    [&]() { return stop_after_flush(ExecutionRegionResult::FINISHED, false, true); });
+			if (source_result == SourceResultType::FINISHED) {
+				return SljitStopFullPipeline(result, ExecutionRegionResult::FINISHED);
+			}
+		}
+		return SljitStopFullPipeline(result, ExecutionRegionResult::NOT_FINISHED);
 	}
 
 	const SljitFullPipelinePrimitiveStep &TerminalStep() const {
@@ -154,7 +174,7 @@ private:
 		case SljitFullPipelinePrimitiveKind::HASH_JOIN_PROBE_MATERIALIZE:
 			return ExecuteHashJoinProbeMaterialize(step_idx, step, input);
 		case SljitFullPipelinePrimitiveKind::HASH_JOIN_PROBE_SELECTION:
-			return ExecuteHashJoinProbeSelection(step_idx, step, input);
+			return ExecuteHashJoinProbeSelection(step_idx, step, input, have_more_output);
 		case SljitFullPipelinePrimitiveKind::MARK_PROBE_FILTER_BOUNDARY:
 			return ExecuteMarkProbeFilterBoundary(step_idx, step, input);
 		case SljitFullPipelinePrimitiveKind::PROJECTION_CHAIN:
@@ -204,10 +224,10 @@ private:
 	}
 
 	bool ExecuteHashJoinProbeSelection(idx_t step_idx, const SljitFullPipelinePrimitiveStep &step,
-	                                   const SljitRuntimeBatchView &input) {
+	                                   const SljitRuntimeBatchView &input, bool have_more_output) {
 		const auto next_step_idx = step_idx + 1;
 		auto execute_next_step = [&](const SljitRuntimeBatchView &output) {
-			return ExecuteStep(next_step_idx, output, true);
+			return ExecuteStep(next_step_idx, output, have_more_output);
 		};
 		const auto direct_consumer_contract =
 		    recipe.direct_aggregate_consumer.probe_step_idx == step_idx

@@ -847,6 +847,63 @@ SourceResultType PipelineExecutor::FetchFromSourceContract(DataChunk *&result,
 	return res;
 }
 
+SourceResultType
+PipelineExecutor::FetchFromPrimitiveAggregateStateSourceContract(ExecutionAggregateStateScanBatch *&result,
+                                                                 ExecutionRegionSourceContractMetrics *metrics) {
+	auto region_plan = pipeline.GetExecutionRegionPlan();
+	if (!region_plan || !region_plan->RequiresSourceContract()) {
+		throw InternalException("primitive aggregate-state source fetch requires a selected execution source contract");
+	}
+	if (!pipeline.source->SupportsExecutionPrimitiveAggregateStateSourceContract(region_plan->OpenRequest())) {
+		throw InternalException(
+		    "primitive aggregate-state source fetch selected for a source without primitive state support");
+	}
+	if (source_cursor_state != SourceCursorState::UNTOUCHED &&
+	    source_cursor_state != SourceCursorState::COMPILED_CONTRACT) {
+		throw InternalException("primitive aggregate-state source fetch while a vectorized cursor state is in flight");
+	}
+	source_cursor_state = SourceCursorState::COMPILED_CONTRACT;
+	result = nullptr;
+
+	auto stage_start = metrics ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point();
+	if (metrics) {
+		metrics->setup_runtime_time_us += PipelineExecutorElapsedMicros(stage_start);
+	}
+
+	stage_start = metrics ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point();
+	StartOperator(*pipeline.source);
+	if (metrics) {
+		metrics->start_operator_runtime_time_us += PipelineExecutorElapsedMicros(stage_start);
+	}
+
+	OperatorSourceInput source_input = {*pipeline.source_state, *local_source_state, interrupt_state};
+	if (metrics) {
+		source_input.stage_recorder = *metrics;
+	}
+
+	stage_start = metrics ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point();
+	auto res = pipeline.source->GetExecutionPrimitiveAggregateStateSourceContractData(context, result, source_input);
+	if (metrics) {
+		metrics->get_data_runtime_time_us += PipelineExecutorElapsedMicros(stage_start);
+	}
+
+	D_ASSERT(res != SourceResultType::BLOCKED || !result || result->Count() == 0);
+	if (res == SourceResultType::FINISHED) {
+		stage_start = metrics ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point();
+		context.thread.profiler.FinishSource(*pipeline.source_state, *local_source_state);
+		source_profiling_finalized = true;
+		if (metrics) {
+			metrics->finish_source_runtime_time_us += PipelineExecutorElapsedMicros(stage_start);
+		}
+	}
+	stage_start = metrics ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point();
+	EndOperator(*pipeline.source, nullptr);
+	if (metrics) {
+		metrics->end_operator_runtime_time_us += PipelineExecutorElapsedMicros(stage_start);
+	}
+	return res;
+}
+
 bool PipelineExecutor::TryMarkExecutionRegionRuntimeOnceFlag(ExecutionRegionRuntimeOnceFlag flag, idx_t index) {
 	const auto flag_idx = static_cast<idx_t>(flag);
 	if (flag_idx >= execution_region_runtime_once_flags.size()) {

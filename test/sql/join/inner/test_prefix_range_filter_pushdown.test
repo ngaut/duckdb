@@ -64,6 +64,24 @@ JOIN adaptive_build b
 ----
 8192
 
+# A build that is small enough for the old cardinality cutoff can still
+# saturate the coarsened prefix bitmap. Select the Bloom filter from the actual
+# bitmap shape instead of emitting a PRF that immediately pauses.
+statement ok
+CREATE OR REPLACE TABLE wide_prefix_build AS
+SELECT (i * 100)::BIGINT AS k, ((i * 100) % 7)::INTEGER AS g
+FROM range(0, 600000) t(i);
+
+query II
+EXPLAIN ANALYZE
+SELECT count(*)
+FROM adaptive_probe p
+JOIN wide_prefix_build b
+  ON p.k = b.k
+ AND p.g >= b.g;
+----
+analyzed_plan	<REGEX>:.*IN BF\(k\).*
+
 statement ok
 CREATE OR REPLACE TABLE probe_with_null AS
 SELECT i::BIGINT AS k, (i % 7)::INTEGER AS g

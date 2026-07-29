@@ -28,7 +28,7 @@ if [ "$VERIFIED_TREE" = "$CURRENT_TREE" ]; then
         --change-set branch \
         --no-build \
         --skip-architecture \
-        --skip-py-compile \
+        --skip-python \
         --skip-unit \
         --performance-receipt "$PERFORMANCE_RECEIPT"
 fi

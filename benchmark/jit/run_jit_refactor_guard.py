@@ -12,22 +12,26 @@ import sys
 from datetime import datetime
 from pathlib import Path
 
+from benchmark_common import PRODUCTION_CANDIDATE_REPEATS, PRODUCTION_REPEAT_CHOICES
 from benchmark_host import HostQuiescenceError, require_host_quiescence, wait_for_host_quiescence
 
 ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_TPCH_BASELINE_STATE = ROOT / "benchmark" / "tpch" / "jit" / "local_baselines" / "tpch_refactor_guard_state.json"
 DEFAULT_PRE_COMMIT_RECEIPT = ROOT / "benchmark" / "jit" / "local_baselines" / "pre_commit_verified_tree"
 DEFAULT_UNIT_SPEC = "[jit]"
-PYTHON_GUARD_FILES = (
-    ROOT / "benchmark" / "jit" / "benchmark_host.py",
-    ROOT / "benchmark" / "jit" / "verify_jit_architecture.py",
-    ROOT / "benchmark" / "jit" / "generic_benchmark.py",
-    ROOT / "benchmark" / "jit" / "run_jit_refactor_guard.py",
-    ROOT / "benchmark" / "jit" / "install_refactor_guard_hooks.py",
-    ROOT / "benchmark" / "tpch" / "jit" / "compare_tpch_benchmark.py",
-    ROOT / "benchmark" / "tpch" / "jit" / "run_tpch_regression_gate.py",
-    ROOT / "benchmark" / "tpch" / "jit" / "verify_tpch_benchmark.py",
+PYTHON_SOURCE_ROOTS = (
+    ROOT / "benchmark" / "jit",
+    ROOT / "benchmark" / "tpch" / "jit",
 )
+PYTHON_TEST_SUITES = (
+    ("jit", ROOT / "benchmark" / "jit"),
+    ("tpch_jit", ROOT / "benchmark" / "tpch" / "jit"),
+)
+GENERATED_SOURCE_CHECKS = (
+    ("generated_settings", ROOT / "scripts" / "generate_settings.py"),
+    ("generated_metrics", ROOT / "scripts" / "generate_metrics.py"),
+)
+PYTHON_IGNORED_DIRECTORIES = frozenset({"__pycache__", "local_baselines", "tmp"})
 LEVEL_ORDER = {"quick": 0, "unit": 1, "full": 2}
 IGNORED_CHANGE_PREFIXES = (
     "benchmark/jit/local_baselines/",
@@ -153,7 +157,7 @@ def validate_performance_receipt_configuration(args: argparse.Namespace) -> None
     )
     if status.stdout.strip():
         raise GuardError("--performance-receipt requires a clean worktree and index")
-    skipped_pre_commit_check = args.no_build or args.skip_architecture or args.skip_py_compile or args.skip_unit
+    skipped_pre_commit_check = args.no_build or args.skip_architecture or args.skip_python or args.skip_unit
     if skipped_pre_commit_check and receipt_tree(DEFAULT_PRE_COMMIT_RECEIPT) != current_tree:
         raise GuardError("skipped pre-commit checks require an exact-tree pre-commit receipt")
 
@@ -317,7 +321,7 @@ def build_command(args: argparse.Namespace) -> list[str]:
 def architecture_command() -> list[str]:
     return [
         sys.executable,
-        str(ROOT / "benchmark" / "jit" / "verify_jit_architecture.py"),
+        str(ROOT / "benchmark" / "jit" / "verify_jit_boundaries.py"),
     ]
 
 
@@ -337,12 +341,36 @@ def generic_gate_command(args: argparse.Namespace, artifact_dir: Path, threads: 
     ]
 
 
+def python_source_files() -> list[Path]:
+    source_files = []
+    for source_root in PYTHON_SOURCE_ROOTS:
+        for path in source_root.rglob("*.py"):
+            relative_parts = path.relative_to(source_root).parts
+            if any(part in PYTHON_IGNORED_DIRECTORIES for part in relative_parts):
+                continue
+            source_files.append(path)
+    return sorted(source_files)
+
+
 def py_compile_command() -> list[str]:
     return [
         sys.executable,
         "-m",
         "py_compile",
-        *[str(path) for path in PYTHON_GUARD_FILES],
+        *[str(path) for path in python_source_files()],
+    ]
+
+
+def python_test_command(suite_dir: Path) -> list[str]:
+    return [
+        sys.executable,
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        str(suite_dir),
+        "-p",
+        "test_*.py",
     ]
 
 
@@ -392,15 +420,38 @@ def tpch_gate_command(args: argparse.Namespace, *, skip_build: bool, skip_archit
     return command
 
 
-def run_unit_suite(args: argparse.Namespace, artifact_dir: Path) -> None:
-    require_file(args.unit_binary, "unit test binary")
-    result = run_command(unit_command(args), "JIT unit suite", capture=True, check=False)
+def run_captured_check(command: list[str], label: str, output_path: Path) -> None:
+    result = run_command(command, label, capture=True, check=False)
     output = result.stdout + result.stderr
-    (artifact_dir / "unit_output.txt").write_text(output, encoding="utf-8", errors="replace")
+    output_path.write_text(output, encoding="utf-8", errors="replace")
     if result.returncode != 0:
         print(result.stdout, end="")
         print(result.stderr, end="", file=sys.stderr)
-        raise GuardError(f"JIT unit suite failed with exit code {result.returncode}")
+        raise GuardError(f"{label} failed with exit code {result.returncode}")
+
+
+def run_python_checks(artifact_dir: Path) -> None:
+    source_files = python_source_files()
+    if not source_files:
+        raise GuardError("Python source verification found no files")
+    run_captured_check(py_compile_command(), "Python syntax", artifact_dir / "python_syntax_output.txt")
+    for check_name, script_path in GENERATED_SOURCE_CHECKS:
+        run_captured_check(
+            [sys.executable, str(script_path), "--check"],
+            check_name.replace("_", " "),
+            artifact_dir / f"{check_name}_output.txt",
+        )
+    for suite_name, suite_dir in PYTHON_TEST_SUITES:
+        run_captured_check(
+            python_test_command(suite_dir),
+            f"Python {suite_name} tests",
+            artifact_dir / f"python_{suite_name}_test_output.txt",
+        )
+
+
+def run_unit_suite(args: argparse.Namespace, artifact_dir: Path) -> None:
+    require_file(args.unit_binary, "unit test binary")
+    run_captured_check(unit_command(args), "JIT unit suite", artifact_dir / "unit_output.txt")
     if getattr(args, "slow_suite", False):
         run_slow_suite(args, artifact_dir)
 
@@ -453,7 +504,7 @@ def write_guard_metadata(args: argparse.Namespace, artifact_dir: Path) -> None:
     (artifact_dir / "refactor_guard.json").write_text(json.dumps(metadata, indent=2) + "\n", encoding="utf-8")
 
 
-def parse_args() -> argparse.Namespace:
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Run the JIT refactor regression guard")
     parser.add_argument("--level", choices=("auto", "quick", "unit", "tpch", "full"), default="auto")
     parser.add_argument(
@@ -491,7 +542,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--build-config", default="RelWithDebInfo")
     parser.add_argument("--no-build", action="store_true")
     parser.add_argument("--skip-architecture", action="store_true")
-    parser.add_argument("--skip-py-compile", action="store_true")
+    parser.add_argument("--skip-python", action="store_true")
     parser.add_argument("--skip-unit", action="store_true")
     parser.add_argument("--skip-tpch", action="store_true")
     parser.add_argument(
@@ -500,7 +551,12 @@ def parse_args() -> argparse.Namespace:
         default=os.name != "nt",
         help="Reject a busy host before running production performance gates.",
     )
-    parser.add_argument("--generic-repeats", type=int, choices=(5, 10), default=5)
+    parser.add_argument(
+        "--generic-repeats",
+        type=int,
+        choices=PRODUCTION_REPEAT_CHOICES,
+        default=PRODUCTION_CANDIDATE_REPEATS,
+    )
 
     parser.add_argument(
         "--unit-binary",
@@ -512,14 +568,19 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--tpch-baseline-state", type=Path, default=DEFAULT_TPCH_BASELINE_STATE)
     parser.add_argument("--tpch-out-dir", type=Path, default=None)
     parser.add_argument("--tpch-queries", nargs="+", default=["all"])
-    parser.add_argument("--tpch-repeats", type=int, choices=(5, 10), default=5)
+    parser.add_argument(
+        "--tpch-repeats",
+        type=int,
+        choices=PRODUCTION_REPEAT_CHOICES,
+        default=PRODUCTION_CANDIDATE_REPEATS,
+    )
     parser.add_argument("--tpch-db", type=Path, default=None)
     parser.add_argument("--use-existing-tpch-db", action="store_true")
     parser.add_argument("--keep-tpch-db", action="store_true")
     parser.add_argument("--init-tpch-baseline", action="store_true")
     parser.add_argument("--promote-tpch-baseline", action="store_true")
     parser.add_argument("--allow-partial-tpch-baseline", action="store_true")
-    return parser.parse_args()
+    return parser.parse_args(argv)
 
 
 def validate_args(args: argparse.Namespace) -> Path:
@@ -581,8 +642,8 @@ def main() -> int:
     require_file(args.duckdb, "DuckDB binary")
     if not args.skip_architecture:
         run_command(architecture_command(), "architecture")
-    if not args.skip_py_compile:
-        run_command(py_compile_command(), "py-compile")
+    if not args.skip_python:
+        run_python_checks(artifact_dir)
     if should_run_unit(args):
         run_unit_suite(args, artifact_dir)
     elif args.level == "quick":

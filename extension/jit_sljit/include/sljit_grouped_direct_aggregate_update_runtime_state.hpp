@@ -168,12 +168,12 @@ private:
 		    !bound.grouped_state || !bound.payload_lanes) {
 			return false;
 		}
-		if (TryPreaggregateInputVectorPrimitiveGroupsIntoPending(
+		if (SljitTryPreaggregateInputVectorPrimitiveGroupsIntoPending(
 		        runtime, scratch, op_idx, op, input, materialized_direct_group_sources,
 		        materialized_direct_payload_source_indices, *bound.payload_lanes, *bound.grouped_state,
 		        direct_preaggregated_batch, false)) {
-			RecordSljitRegionMaterializationElision(
-			    runtime, op.kind, "direct_materialized_pending_preaggregated_grouped_update", count);
+			RecordSljitRegionMaterializationElision(runtime, op.kind,
+			                                        "direct_materialized_pending_preaggregated_grouped_update", count);
 			return true;
 		}
 		return false;
@@ -233,7 +233,7 @@ private:
 			RecordSljitRegionStageRuntime(runtime, primitive.aggregate_idx, aggregate_op.kind,
 			                              "filtered_perfect_hash_update", stage_start);
 			RecordSljitRegionMaterializationElision(runtime, aggregate_op.kind, "filtered_perfect_hash_update",
-			                                            input_chunk.size());
+			                                        input_chunk.size());
 			processed_batches++;
 			return false;
 		}
@@ -368,7 +368,7 @@ private:
 			return false;
 		}
 		RecordSljitRegionMaterializationElision(runtime, aggregate_op.kind, "projected_source_input_grouped_update",
-		                                            source_input.size());
+		                                        source_input.size());
 		processed_batches++;
 		return true;
 	}

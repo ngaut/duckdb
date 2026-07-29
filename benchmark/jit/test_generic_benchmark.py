@@ -2,12 +2,18 @@
 
 from __future__ import annotations
 
+import io
 import math
 import sys
+import tempfile
 import unittest
+from contextlib import redirect_stderr
 from pathlib import Path
+from types import SimpleNamespace
+from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+import generic_benchmark as benchmark
 from generic_benchmark import (
     BASELINE_ABSOLUTE_NOISE_ALLOWANCE_US,
     BASELINE_RELATIVE_NOISE_ALLOWANCE,
@@ -20,6 +26,44 @@ from generic_benchmark import (
     policy_order,
     verification_failures,
 )
+
+
+class TestBenchmarkArguments(unittest.TestCase):
+    def test_candidate_repeat_budget_is_five_or_ten(self) -> None:
+        self.assertEqual(benchmark.parse_args([]).repeats, 5)
+        self.assertEqual(benchmark.parse_args(["--repeats", "10"]).repeats, 10)
+        with redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+            benchmark.parse_args(["--repeats", "6"])
+
+    def test_failed_candidate_is_not_retried(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            duckdb = root / "duckdb"
+            duckdb.touch()
+            args = SimpleNamespace(
+                backend="sljit",
+                duckdb=duckdb,
+                event_log_size=0,
+                host_quiescence=False,
+                jit_cbo_setting=[],
+                jit_extension="jit_sljit",
+                out_dir=root,
+                repeats=5,
+                threads=1,
+                trace_runtime=False,
+                workloads=None,
+            )
+            with (
+                mock.patch.object(benchmark, "parse_args", return_value=args),
+                mock.patch.object(benchmark, "make_output_dir", return_value=root),
+                mock.patch.object(benchmark, "run_workload_matrix", return_value=[]) as run,
+                mock.patch.object(benchmark, "summarize", return_value=[]),
+                mock.patch.object(benchmark, "write_csv"),
+                mock.patch.object(benchmark, "verification_failures", return_value=["candidate failed"]),
+            ):
+                with self.assertRaisesRegex(RuntimeError, "candidate failed"):
+                    benchmark.main()
+            run.assert_called_once()
 
 
 class TestPolicyOrder(unittest.TestCase):
@@ -97,12 +141,14 @@ class TestSpeedupFloors(unittest.TestCase):
                 "grouped_selective_three_way_conjunction_multi_aggregate": (1.38, 1.23),
             },
         )
+
     def test_wide_grouped_floor_tracks_proof_owned_finalization_promotion(self) -> None:
         workload = next(workload for workload in GENERIC_WORKLOADS if workload["name"] == "grouped_wide_sorted_runs")
         self.assertEqual(
             (minimum_auto_speedup(workload, 1), minimum_auto_speedup(workload, 4)),
             (2.80, 3.00),
         )
+
     def test_exact_filter_join_tracks_direct_dictionary_reduction_promotion(self) -> None:
         workload = next(workload for workload in GENERIC_WORKLOADS if workload["name"] == "join_exact_filter_build")
         self.assertEqual(

@@ -39,6 +39,7 @@ set(JIT_SLJIT_EXTENSION_FILES
     sljit_backend.cpp
     sljit_codegen_util.cpp
     sljit_dense_group_preaggregation.cpp
+    sljit_direct_join_output_aggregate_runtime.cpp
     sljit_executable_aggregate_codegen.cpp
     sljit_executable_aggregate_filtered_codegen.cpp
     sljit_executable_aggregate_payload_codegen.cpp
@@ -53,10 +54,12 @@ set(JIT_SLJIT_EXTENSION_FILES
     sljit_expression_tree_source_codegen.cpp
     sljit_expression_tree_value_codegen.cpp
     sljit_hash_join_runtime.cpp
+    sljit_hash_join_aggregate_consumer_runtime.cpp
     sljit_hash_join_all_valid_probe_fast_path_runtime.cpp
     sljit_hash_join_probe_codegen_validation.cpp
     sljit_hash_join_probe_perfect_codegen.cpp
     sljit_hash_join_probe_regular_codegen.cpp
+    sljit_grouped_aggregate_preaggregation_runtime.cpp
     sljit_native_codegen.cpp
     sljit_native_date_plan.cpp
     sljit_native_double_plan.cpp
@@ -129,6 +132,7 @@ set(JIT_SLJIT_EXTENSION_FILES
     sljit_region_predicate_expression_plan.cpp
     sljit_region_projection_fusion.cpp
     sljit_region_projection_sources.cpp
+    sljit_region_pipeline_runtime.cpp
     sljit_region_runtime.cpp
     sljit_region_runtime_source.cpp
     sljit_region_runtime_trace.cpp

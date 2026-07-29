@@ -105,7 +105,7 @@ static bool SljitExecuteBoundGeneratedPrimitiveRunsIntoPending(
     const vector<const ExecutionPrimitiveAggregateUpdateLane *> &payload_lanes,
     ExecutionGroupedAggregateStateAddressBinding &grouped_state, SljitPendingPreaggregatedPrimitiveGroupBatch &pending,
     idx_t count, bool finish, SljitNativePrimitiveRunInput &native_input, SljitNativePrimitiveRunFunction function,
-    const char *path_name, bool shared_affine_output) {
+    const char *path_name, bool shared_affine_output, bool shared_payload_validity) {
 	TARGET_TYPE first_key {};
 	if (!pending.Empty()) {
 		if (!SljitLoadPreaggregatedInputVectorGroupKey(group_source, 0, first_key)) {
@@ -205,6 +205,9 @@ static bool SljitExecuteBoundGeneratedPrimitiveRunsIntoPending(
 	}
 	RecordSljitRegionStageRuntime(runtime, op_idx, op.kind, path_name, generated_start);
 	RecordSljitRegionRuntimePath(runtime, op.kind, path_name, count);
+	if (shared_payload_validity) {
+		RecordSljitRegionRuntimePath(runtime, op.kind, "generated_primitive_group_runs.shared_payload_validity", count);
+	}
 	if (group_source.source->cast_kind == ExecutionRowPointerGroupKeyCastKind::INTEGRAL_COMPRESS) {
 		RecordSljitRegionRuntimePath(runtime, op.kind, "generated_primitive_group_cast.integral_compress", count);
 	}
@@ -234,15 +237,16 @@ static bool TryExecuteGeneratedPrimitiveRunsIntoPending(
 	};
 	SljitNativePrimitiveRunInput native_input;
 	SljitNativePrimitiveRunFunction function = nullptr;
+	bool shared_payload_validity = false;
 	const char *blocker = nullptr;
-	if (!SljitTryBindGeneratedPrimitiveRunSource(runtime, op.aggregate_update.primitive_run_update, group_source,
-	                                             payload_sources, payload_lanes, count,
-	                                             pending.generated_run_lane_inputs, native_input, function, blocker)) {
+	if (!SljitTryBindGeneratedPrimitiveRunSource(
+	        runtime, op.aggregate_update.primitive_run_update, group_source, payload_sources, payload_lanes, count,
+	        pending.generated_run_lane_inputs, native_input, function, shared_payload_validity, blocker)) {
 		return reject(blocker ? blocker : "binding");
 	}
 	if (!SljitExecuteBoundGeneratedPrimitiveRunsIntoPending<TARGET_TYPE>(
 	        runtime, scratch, op_idx, op, group_source, payload_lanes, grouped_state, pending, count, finish,
-	        native_input, function, "generated_pending_primitive_group_runs", false)) {
+	        native_input, function, "generated_pending_primitive_group_runs", false, shared_payload_validity)) {
 		return reject("output");
 	}
 	return true;
@@ -289,7 +293,7 @@ static bool TryExecuteGeneratedFusedAffinePrimitiveRunsIntoPending(
 	}
 	if (!SljitExecuteBoundGeneratedPrimitiveRunsIntoPending<TARGET_TYPE>(
 	        runtime, scratch, op_idx, op, group_source, payload_lanes, grouped_state, pending, count, finish,
-	        native_input, function, "generated_pending_fused_affine_primitive_group_runs", true)) {
+	        native_input, function, "generated_pending_fused_affine_primitive_group_runs", true, false)) {
 		return reject("output");
 	}
 	return true;

@@ -9,6 +9,10 @@ import subprocess
 import tempfile
 from pathlib import Path
 
+PRODUCTION_REPEAT_CHOICES = (5, 10)
+PRODUCTION_CANDIDATE_REPEATS = 5
+PRODUCTION_PROMOTION_REPEATS = 10
+
 REGION_SUMMARY_FIELDS = (
     "compiled_regions",
     "compile_errors",

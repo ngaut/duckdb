@@ -53,15 +53,23 @@ struct SljitPrimitiveRunRegisterLayout {
 	bool supported = false;
 	bool has_output_pointer_hoists = false;
 	bool has_affine_accumulators = false;
+	bool has_multi_output_index = false;
+	bool has_multi_output_row_counts = false;
+	bool has_multi_shared_validity = false;
 	sljit_s32 output_group_data = 0;
 	sljit_s32 output_row_counts = 0;
 	sljit_s32 output_values = 0;
 	sljit_s32 output_value_is_set = 0;
 	sljit_s32 affine_value = 0;
 	sljit_s32 affine_valid_count = 0;
+	sljit_s32 multi_output_index = 0;
+	sljit_s32 multi_output_row_counts = 0;
+	sljit_s32 multi_shared_validity = 0;
 	sljit_s32 base_saved_register_count = 0;
 	sljit_s32 saved_register_count = 0;
 	sljit_s32 affine_saved_register_count = 0;
+	sljit_s32 multi_saved_register_count = 0;
+	sljit_s32 shared_validity_multi_saved_register_count = 0;
 };
 
 struct SljitPerfectHashProbeRegisterLayout {

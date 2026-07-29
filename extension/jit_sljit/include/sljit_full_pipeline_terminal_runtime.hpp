@@ -127,13 +127,12 @@ public:
 		}
 	}
 
-	template <class EXECUTE_HASH_JOIN_PROBE>
 	SljitHashJoinAggregateConsumerResult
 	TryExecuteHashJoinProbeConsumer(ExecutionRegionRuntime &runtime, vector<SljitExecutableRegionOp> &ops,
 	                                SljitRegionExecutionScratch &scratch,
 	                                const SljitHashJoinDirectAggregateConsumerContract &contract,
 	                                const SljitHashJoinProbeSelectionPrimitive &probe_primitive, DataChunk &join_input,
-	                                EXECUTE_HASH_JOIN_PROBE &execute_hash_join_probe) {
+	                                SljitNativeRegionHashJoinProbeExecutor &execute_hash_join_probe) {
 		D_ASSERT(contract.IsBound());
 		if (probe_primitive.hash_join_idx >= shared_predicate_classifications.size()) {
 			throw InternalException("SLJIT shared predicate-classification cache index is out of range");

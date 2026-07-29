@@ -615,9 +615,19 @@ void SljitPlanExecutablePrimitiveRunUpdate(const SljitNativeAggregateUpdatePlan 
 	auto group_type = sink.groups[0].type.InternalType();
 	vector<PhysicalType> payload_types;
 	vector<AggregatePrimitiveUpdateKind> primitive_kinds;
+	vector<idx_t> state_offsets;
 	payload_types.reserve(executable.payload_descriptors.size());
 	primitive_kinds.reserve(executable.payload_descriptors.size());
+	state_offsets.reserve(executable.payload_descriptors.size());
 	for (auto &descriptor : executable.payload_descriptors) {
+		if (!sink.aggregate_contract.grouped_state_layout_ready ||
+		    descriptor.aggregate_index >= sink.aggregate_contract.grouped_state_offsets.size()) {
+			return;
+		}
+		const auto state_offset = sink.aggregate_contract.grouped_state_offsets[descriptor.aggregate_index];
+		if (state_offset == DConstants::INVALID_INDEX) {
+			return;
+		}
 		auto primitive_kind = descriptor.primitive_kind;
 		PhysicalType payload_type = PhysicalType::INVALID;
 		switch (primitive_kind) {
@@ -638,6 +648,7 @@ void SljitPlanExecutablePrimitiveRunUpdate(const SljitNativeAggregateUpdatePlan 
 		}
 		payload_types.push_back(payload_type);
 		primitive_kinds.push_back(primitive_kind);
+		state_offsets.push_back(state_offset);
 	}
 	if (primitive_kinds.size() > 1 && !SljitPrimitiveRunMultiUpdateSupported(payload_types, primitive_kinds)) {
 		return;
@@ -682,18 +693,21 @@ void SljitPlanExecutablePrimitiveRunUpdate(const SljitNativeAggregateUpdatePlan 
 	executable.primitive_run_update.group_type = group_type;
 	executable.primitive_run_update.payload_types = std::move(payload_types);
 	executable.primitive_run_update.primitive_kinds = std::move(primitive_kinds);
+	executable.primitive_run_update.state_offsets = std::move(state_offsets);
 }
 
 SljitNativePrimitiveRunFunction
 SljitEnsureExecutablePrimitiveRunUpdate(ExecutionRegionRuntime &runtime, SljitExecutablePrimitiveRunUpdate &run_update,
                                         PhysicalType group_source_type, PhysicalType group_output_type,
-                                        ExecutionRowPointerGroupKeyCastKind group_cast_kind, bool payload_nullable) {
+                                        ExecutionRowPointerGroupKeyCastKind group_cast_kind, bool payload_nullable,
+                                        bool shared_payload_validity) {
 	auto specialization = run_update.Specialization(group_source_type, group_output_type, group_cast_kind);
 	if (!specialization || !run_update.HasDeferredCodegen()) {
 		return nullptr;
 	}
 	auto &artifact = run_update.primitive_kinds.size() > 1
-	                     ? specialization->multi_lane_compiled
+	                     ? (shared_payload_validity ? specialization->shared_validity_multi_lane_compiled
+	                                                : specialization->multi_lane_compiled)
 	                     : (payload_nullable ? specialization->nullable_compiled : specialization->compiled);
 	return artifact.Ensure([&]() {
 		SljitNativePrimitiveRunFunction function = nullptr;
@@ -710,7 +724,7 @@ SljitEnsureExecutablePrimitiveRunUpdate(ExecutionRegionRuntime &runtime, SljitEx
 			} else {
 				code = BuildSljitNativePrimitiveRunMultiUpdate(group_source_type, group_output_type, group_cast_kind,
 				                                               run_update.payload_types, run_update.primitive_kinds,
-				                                               function, error);
+				                                               shared_payload_validity, function, error);
 			}
 		}
 		if (!code || !function) {
@@ -777,6 +791,60 @@ SljitNativePrimitiveRunFunction SljitEnsureExecutableFusedAffineRunUpdate(
 		metrics.code_size = code->CodeSize();
 		runtime.RecordLazyCodegen(metrics);
 		return SljitCompiledFunction<SljitNativePrimitiveRunFunction>(std::move(code), function);
+	});
+}
+
+static bool
+SljitBindPreaggregatedPrimitiveUpdateLayout(const SljitExecutablePrimitiveRunUpdate &primitive_run_update,
+                                            const vector<const ExecutionPrimitiveAggregateUpdateLane *> &lanes) {
+	if (!primitive_run_update.HasDeferredCodegen() || lanes.empty() ||
+	    lanes.size() != primitive_run_update.primitive_kinds.size()) {
+		return false;
+	}
+	for (idx_t lane_idx = 0; lane_idx < lanes.size(); lane_idx++) {
+		auto lane = lanes[lane_idx];
+		if (!lane || !lane->ready || lane->kind != primitive_run_update.primitive_kinds[lane_idx] ||
+		    lane->state_offset != primitive_run_update.state_offsets[lane_idx] ||
+		    !SljitPreaggregatedPrimitiveStateLayoutSupported(*lane)) {
+			return false;
+		}
+	}
+	return true;
+}
+
+SljitNativePreaggregatedPrimitiveUpdateFunction
+SljitEnsureExecutablePreaggregatedPrimitiveUpdate(ExecutionRegionRuntime &runtime,
+                                                  SljitExecutablePrimitiveRunUpdate &primitive_run_update,
+                                                  const vector<const ExecutionPrimitiveAggregateUpdateLane *> &lanes,
+                                                  bool initialize_states, bool address_selected, bool row_selected) {
+	if (!SljitBindPreaggregatedPrimitiveUpdateLayout(primitive_run_update, lanes)) {
+		return nullptr;
+	}
+	auto &artifact = primitive_run_update.PreaggregatedArtifact(initialize_states, address_selected, row_selected);
+	return artifact.Ensure([&]() {
+		SljitNativePreaggregatedPrimitiveUpdateFunction function = nullptr;
+		string error;
+		ExecutionRegionCompileTimings timings;
+		auto codegen_start = std::chrono::steady_clock::now();
+		unique_ptr<ExecutionRegionCodeHandle> code;
+		{
+			SljitCodegenTimingScope codegen_timing_scope(&timings);
+			code = BuildSljitNativePreaggregatedPrimitiveUpdate(primitive_run_update.primitive_kinds,
+			                                                    primitive_run_update.state_offsets, initialize_states,
+			                                                    function, error, address_selected, row_selected);
+		}
+		if (!code || !function) {
+			throw InternalException("SLJIT preaggregated primitive update lazy code generation failed: %s",
+			                        error.empty() ? "unknown error" : error);
+		}
+		ExecutionRegionLazyCodegenMetrics metrics;
+		metrics.codegen_time_us =
+		    std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - codegen_start)
+		        .count();
+		metrics.machine_codegen_time_us = timings.machine_codegen_time_us;
+		metrics.code_size = code->CodeSize();
+		runtime.RecordLazyCodegen(metrics);
+		return SljitCompiledFunction<SljitNativePreaggregatedPrimitiveUpdateFunction>(std::move(code), function);
 	});
 }
 

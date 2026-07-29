@@ -40,6 +40,9 @@ public:
 
 	SourceResultType FetchSourceContract(DataChunk *&result, ExecutionRegionSourceContractMetrics *metrics = nullptr,
 	                                     bool decline_new_row_group = false, bool *declined_new_row_group = nullptr);
+	SourceResultType
+	FetchPrimitiveAggregateStateSourceContract(ExecutionAggregateStateScanBatch *&result,
+	                                           ExecutionRegionSourceContractMetrics *metrics = nullptr);
 	SinkNextBatchType AdvanceSinkBatch(DataChunk &source_chunk, bool have_more_output);
 	void SetVectorizedSourceClaimBudget(idx_t budget);
 	void ClearVectorizedSourceClaimBudget();

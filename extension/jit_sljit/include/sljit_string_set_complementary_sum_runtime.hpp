@@ -13,6 +13,7 @@
 #include "sljit_aggregate_preaggregated_update_runtime.hpp"
 #include "sljit_aggregate_row_pointer_preaggregation.hpp"
 #include "sljit_grouped_aggregate_state_runtime.hpp"
+#include "sljit_grouped_aggregate_input_vector_groups.hpp"
 #include "sljit_grouped_reduction_lane.hpp"
 #include "sljit_string_set_case_projection_runtime.hpp"
 
@@ -402,7 +403,7 @@ static bool TryExecutePreaggregatedRowPointerPreclassifiedStringSetComplementary
 	                              "row_pointer_preaggregated_string_set_complementary_sum_update", update_start);
 	scratch.RecordDirectNewAggregateUpdateResult(op_idx, true);
 	RecordSljitRegionMaterializationElision(runtime, op.kind,
-	                                            "row_pointer_preaggregated_string_set_complementary_sum_update", count);
+	                                        "row_pointer_preaggregated_string_set_complementary_sum_update", count);
 	return true;
 }
 
@@ -442,8 +443,8 @@ static bool TryExecuteDirectRowPointerStringSetComplementarySumUpdate(
 	RecordSljitRegionStageRuntime(runtime, op_idx, op.kind, "direct_row_pointer_string_set_complementary_sum_update",
 	                              update_start);
 	scratch.RecordDirectNewAggregateUpdateResult(op_idx, true);
-	RecordSljitRegionMaterializationElision(runtime, op.kind,
-	                                            "direct_row_pointer_string_set_complementary_sum_update", count);
+	RecordSljitRegionMaterializationElision(runtime, op.kind, "direct_row_pointer_string_set_complementary_sum_update",
+	                                        count);
 	return true;
 }
 
@@ -496,7 +497,7 @@ static bool TryExecuteDirectRowPointerPreclassifiedStringSetComplementarySumUpda
 	                              "row_pointer_preclassified_string_set_complementary_sum_update", update_start);
 	scratch.RecordDirectNewAggregateUpdateResult(op_idx, true);
 	RecordSljitRegionMaterializationElision(runtime, op.kind,
-	                                            "row_pointer_preclassified_string_set_complementary_sum_update", count);
+	                                        "row_pointer_preclassified_string_set_complementary_sum_update", count);
 	return true;
 }
 

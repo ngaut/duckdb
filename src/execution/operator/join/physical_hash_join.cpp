@@ -1766,30 +1766,22 @@ bool JoinFilterPushdownInfo::CanUsePrefixRangeFilter(ClientContext &context, opt
 		return false;
 	}
 
-	// Prefix bitmaps are bounded independently; allow up to one million build
-	// rows so dense integral domains can use exact rejection instead of a
-	// probabilistic Bloom filter.
-	static constexpr idx_t BUILD_SIZE_THRESHOLD = 1048576;
-	bool ht_is_small = ht->Count() <= BUILD_SIZE_THRESHOLD;
-	bool span_is_small = false;
-
-	uhugeint_t span;
-	if (PrefixRangeFilter::TryComputeSpan(min, max, span)) {
-		if (span == 0) {
-			// Filter will not be more expressive than min/max, bail
-			return false;
-		}
-		static const auto SPAN_THRESHOLD = Uhugeint::Convert(1048576);
-		span_is_small = span <= SPAN_THRESHOLD;
-	} else {
+	if (!PrefixRangeFilter::SupportedType(filter_key_type)) {
 		return false;
 	}
 
-	if (!ht_is_small && !span_is_small) {
+	// Select from the bitmap shape that will actually be allocated. A build-size
+	// cutoff cannot distinguish sparse exact domains from saturated coarse
+	// prefixes: the former benefit from PRF while the latter immediately pause
+	// and should use the Bloom filter instead.
+	double max_bucket_density;
+	if (!PrefixRangeFilter::TryEstimateMaxBucketDensity(ht->Count(), min, max, max_bucket_density)) {
 		return false;
 	}
-
-	return PrefixRangeFilter::SupportedType(filter_key_type);
+	float selectivity_threshold;
+	idx_t vectors_to_check;
+	GetThresholdAndVectorsToCheck(SelectivityOptionalFilterType::PRF, selectivity_threshold, vectors_to_check);
+	return max_bucket_density <= selectivity_threshold;
 }
 
 static unique_ptr<ExpressionFilter> CreateSelectivityOptionalExpressionFilter(unique_ptr<Expression> child_expr,
@@ -2352,11 +2344,6 @@ unique_ptr<OperatorState> PhysicalHashJoin::GetOperatorState(ExecutionContext &c
 	return std::move(state);
 }
 
-static bool ExecutionHashJoinProbeLayoutCanDefer(const string &blocker) {
-	return blocker == "hash-join-native-table-not-finalized" || blocker == "hash-join-native-pointer-table-missing" ||
-	       blocker == "hash-join-native-external-partitioned-table";
-}
-
 static bool ExecutionHashJoinProbeEmptyBuildSideSupported(ExecutionHashJoinProbeOutputMode output_mode,
                                                           bool correlated_mark_counts_required) {
 	switch (output_mode) {
@@ -2397,6 +2384,102 @@ static bool TryGetNativePerfectHashJoinProbeLayout(const HashJoinGlobalSinkState
 		return false;
 	}
 	return true;
+}
+
+enum class ExecutionHashJoinProbeLayoutResolutionStatus : uint8_t { READY, NOT_READY, INVALID };
+
+struct ExecutionHashJoinProbeLayoutResolution {
+	ExecutionHashJoinProbeLayoutResolutionStatus status = ExecutionHashJoinProbeLayoutResolutionStatus::INVALID;
+	ExecutionHashJoinProbeLayoutKind kind = ExecutionHashJoinProbeLayoutKind::NONE;
+	ExecutionHashJoinTableLayout table_layout;
+	ExecutionPerfectHashJoinTableLayout perfect_layout;
+	bool empty_build_side = false;
+	string blocker;
+};
+
+static ExecutionHashJoinProbeLayoutResolution
+ResolveExecutionHashJoinProbeLayout(const HashJoinGlobalSinkState &sink,
+                                    const ExecutionRegionHashJoinContract &contract) {
+	ExecutionHashJoinProbeLayoutResolution result;
+	if (TryGetNativePerfectHashJoinProbeLayout(sink, contract, result.perfect_layout)) {
+		result.status = ExecutionHashJoinProbeLayoutResolutionStatus::READY;
+		result.kind = ExecutionHashJoinProbeLayoutKind::PERFECT_HASH_TABLE;
+		return result;
+	}
+
+	ExecutionGetHashJoinTableLayout(*sink.hash_table, result.table_layout);
+	if (result.table_layout.Ready()) {
+		result.status = ExecutionHashJoinProbeLayoutResolutionStatus::READY;
+		result.kind = ExecutionHashJoinProbeLayoutKind::REGULAR_HASH_TABLE;
+		return result;
+	}
+
+	if (result.table_layout.status == ExecutionHashJoinTableLayoutStatus::NOT_FINALIZED && sink.finalized &&
+	    sink.perfect_join_executor) {
+		if (!contract.perfect_hash_probe_shape_ready) {
+			result.blocker = contract.perfect_hash_probe_shape_blocker.empty()
+			                     ? "perfect-hash-join-native-probe-shape-not-ready"
+			                     : contract.perfect_hash_probe_shape_blocker;
+			return result;
+		}
+		if (!sink.perfect_join_executor->GetExecutionPerfectHashJoinTableLayout(result.perfect_layout)) {
+			result.blocker = result.perfect_layout.blocker.empty() ? "perfect-hash-join-native-layout-not-ready"
+			                                                       : result.perfect_layout.blocker;
+			return result;
+		}
+		if (result.perfect_layout.rhs_output_column_count != contract.rhs_output_column_count) {
+			result.blocker = "perfect-hash-join-native-rhs-output-count-mismatch";
+			return result;
+		}
+		result.status = ExecutionHashJoinProbeLayoutResolutionStatus::READY;
+		result.kind = ExecutionHashJoinProbeLayoutKind::PERFECT_HASH_TABLE;
+		return result;
+	}
+
+	if (result.table_layout.Empty() &&
+	    ExecutionHashJoinProbeEmptyBuildSideSupported(contract.native_probe_output_mode,
+	                                                  contract.correlated_mark_counts_required)) {
+		result.status = ExecutionHashJoinProbeLayoutResolutionStatus::READY;
+		result.kind = ExecutionHashJoinProbeLayoutKind::REGULAR_HASH_TABLE;
+		result.empty_build_side = true;
+		return result;
+	}
+
+	result.blocker = ExecutionHashJoinTableLayoutBlocker(result.table_layout.status);
+	result.status = result.table_layout.CanDefer() ? ExecutionHashJoinProbeLayoutResolutionStatus::NOT_READY
+	                                               : ExecutionHashJoinProbeLayoutResolutionStatus::INVALID;
+	return result;
+}
+
+static string ValidateExecutionHashJoinProbeLayout(const HashJoinGlobalSinkState &sink,
+                                                   const ExecutionRegionHashJoinContract &contract,
+                                                   const ExecutionHashJoinProbeLayoutResolution &resolution) {
+	if (contract.non_equality_condition_count != 0 &&
+	    contract.native_probe_output_mode != ExecutionHashJoinProbeOutputMode::MATCHED_PROBE_AND_BUILD &&
+	    contract.native_probe_output_mode != ExecutionHashJoinProbeOutputMode::LEFT_PROBE_AND_BUILD &&
+	    contract.native_probe_output_mode != ExecutionHashJoinProbeOutputMode::MATCHED_PROBE_ONLY) {
+		return "hash-join-native-non-equality-output-mode-contract-invariant";
+	}
+	if (resolution.kind == ExecutionHashJoinProbeLayoutKind::REGULAR_HASH_TABLE &&
+	    resolution.table_layout.dictionary_emission && resolution.table_layout.chains_longer_than_one &&
+	    !resolution.table_layout.entries.aux_next_ptrs &&
+	    contract.native_probe_output_mode == ExecutionHashJoinProbeOutputMode::MARK_BUILD_ONLY) {
+		return "hash-join-native-dictionary-chain-layout-missing";
+	}
+	if (resolution.kind == ExecutionHashJoinProbeLayoutKind::REGULAR_HASH_TABLE &&
+	    resolution.table_layout.condition_count != contract.condition_count) {
+		return "hash-join-native-condition-count-mismatch";
+	}
+	if (contract.correlated_mark_counts_required) {
+		auto &mark_info = sink.hash_table->correlated_mark_join_info;
+		if (!mark_info.correlated_counts) {
+			return "hash-join-native-missing-correlated-mark-counts";
+		}
+		if (mark_info.correlated_types.size() != contract.delim_type_count) {
+			return "hash-join-native-correlated-mark-count-shape-mismatch";
+		}
+	}
+	return string();
 }
 
 ExecutionOperatorReadiness
@@ -2447,72 +2530,17 @@ PhysicalHashJoin::GetExecutionOperatorReadiness(ClientContext &context,
 		return not_ready("hash-join-native-readiness-missing-hash-table");
 	}
 
-	ExecutionHashJoinTableLayout table_layout;
-	ExecutionPerfectHashJoinTableLayout perfect_layout;
-	bool perfect_hash_layout = false;
-	perfect_hash_layout = TryGetNativePerfectHashJoinProbeLayout(sink, contract, perfect_layout);
-	if (!perfect_hash_layout) {
-		ExecutionGetHashJoinTableLayout(*sink.hash_table, table_layout);
+	auto resolution = ResolveExecutionHashJoinProbeLayout(sink, contract);
+	if (resolution.status == ExecutionHashJoinProbeLayoutResolutionStatus::NOT_READY) {
+		return not_ready(std::move(resolution.blocker));
 	}
-	auto output_mode = contract.native_probe_output_mode;
-	const bool native_residual_probe =
-	    (contract.residual_predicate || contract.residual_info) && contract.residual_expression_ready;
-	if (!perfect_hash_layout && !table_layout.ready) {
-		if (sink.finalized && sink.perfect_join_executor &&
-		    table_layout.blocker == "hash-join-native-table-not-finalized") {
-			if (!contract.perfect_hash_probe_shape_ready) {
-				return invalid(contract.perfect_hash_probe_shape_blocker.empty()
-				                   ? "perfect-hash-join-native-probe-shape-not-ready"
-				                   : contract.perfect_hash_probe_shape_blocker);
-			}
-			if (!sink.perfect_join_executor->GetExecutionPerfectHashJoinTableLayout(perfect_layout)) {
-				return invalid(perfect_layout.blocker.empty() ? "perfect-hash-join-native-layout-not-ready"
-				                                              : perfect_layout.blocker);
-			}
-			if (perfect_layout.rhs_output_column_count != contract.rhs_output_column_count) {
-				return invalid("perfect-hash-join-native-rhs-output-count-mismatch");
-			}
-			perfect_hash_layout = true;
-		}
-		if (!perfect_hash_layout && table_layout.finalized && sink.hash_table->Count() == 0 &&
-		    ExecutionHashJoinProbeEmptyBuildSideSupported(output_mode, contract.correlated_mark_counts_required)) {
-			table_layout.ready = true;
-			table_layout.blocker.clear();
-		} else if (!perfect_hash_layout && native_residual_probe &&
-		           table_layout.blocker == "hash-join-native-residual-predicate") {
-			table_layout.ready = true;
-			table_layout.blocker.clear();
-		} else if (!perfect_hash_layout) {
-			auto blocker = table_layout.blocker.empty() ? "hash-join-native-readiness-table-layout-not-ready"
-			                                            : table_layout.blocker;
-			if (ExecutionHashJoinProbeLayoutCanDefer(blocker)) {
-				return not_ready(std::move(blocker));
-			}
-			return invalid(std::move(blocker));
-		}
+	if (resolution.status != ExecutionHashJoinProbeLayoutResolutionStatus::READY) {
+		return invalid(resolution.blocker.empty() ? "hash-join-native-readiness-table-layout-invalid"
+		                                          : std::move(resolution.blocker));
 	}
-	if (contract.non_equality_condition_count != 0 &&
-	    contract.native_probe_output_mode != ExecutionHashJoinProbeOutputMode::MATCHED_PROBE_AND_BUILD &&
-	    contract.native_probe_output_mode != ExecutionHashJoinProbeOutputMode::LEFT_PROBE_AND_BUILD &&
-	    contract.native_probe_output_mode != ExecutionHashJoinProbeOutputMode::MATCHED_PROBE_ONLY) {
-		return invalid("hash-join-native-readiness-non-equality-output-mode-contract-invariant");
-	}
-	if (!perfect_hash_layout && table_layout.dictionary_emission && table_layout.chains_longer_than_one &&
-	    !table_layout.aux_next_ptrs &&
-	    contract.native_probe_output_mode == ExecutionHashJoinProbeOutputMode::MARK_BUILD_ONLY) {
-		return invalid("hash-join-native-readiness-dictionary-chain-layout-missing");
-	}
-	if (!perfect_hash_layout && table_layout.condition_count != contract.condition_count) {
-		return invalid("hash-join-native-readiness-condition-count-mismatch");
-	}
-	if (contract.correlated_mark_counts_required) {
-		auto &mark_info = sink.hash_table->correlated_mark_join_info;
-		if (!mark_info.correlated_counts) {
-			return invalid("hash-join-native-readiness-missing-correlated-mark-counts");
-		}
-		if (mark_info.correlated_types.size() != contract.delim_type_count) {
-			return invalid("hash-join-native-readiness-correlated-mark-count-shape-mismatch");
-		}
+	auto layout_blocker = ValidateExecutionHashJoinProbeLayout(sink, contract, resolution);
+	if (!layout_blocker.empty()) {
+		return invalid(std::move(layout_blocker));
 	}
 	return ready();
 }
@@ -2573,91 +2601,31 @@ ExecutionOperatorBindResult PhysicalHashJoin::BindExecutionOperator(ExecutionCon
 		return ExecutionOperatorBindResult::INVALID;
 	}
 
-	ExecutionHashJoinTableLayout table_layout;
-	ExecutionPerfectHashJoinTableLayout perfect_layout;
-	bool perfect_hash_layout = false;
-	perfect_hash_layout = TryGetNativePerfectHashJoinProbeLayout(sink, contract, perfect_layout);
-	if (!perfect_hash_layout) {
-		ExecutionGetHashJoinTableLayout(*sink.hash_table, table_layout);
+	auto resolution = ResolveExecutionHashJoinProbeLayout(sink, contract);
+	if (resolution.status == ExecutionHashJoinProbeLayoutResolutionStatus::NOT_READY) {
+		binding.blocker = std::move(resolution.blocker);
+		return ExecutionOperatorBindResult::DEFERRED;
 	}
-	auto output_mode = contract.native_probe_output_mode;
-	const bool native_residual_probe =
-	    (contract.residual_predicate || contract.residual_info) && contract.residual_expression_ready;
-	bool empty_build_side = false;
-	if (!perfect_hash_layout && !table_layout.ready) {
-		if (sink.finalized && sink.perfect_join_executor &&
-		    table_layout.blocker == "hash-join-native-table-not-finalized") {
-			if (!contract.perfect_hash_probe_shape_ready) {
-				binding.blocker = contract.perfect_hash_probe_shape_blocker.empty()
-				                      ? "perfect-hash-join-native-runtime-probe-shape-not-ready"
-				                      : contract.perfect_hash_probe_shape_blocker;
-				return ExecutionOperatorBindResult::INVALID;
-			}
-			if (!sink.perfect_join_executor->GetExecutionPerfectHashJoinTableLayout(perfect_layout)) {
-				binding.blocker = perfect_layout.blocker.empty() ? "perfect-hash-join-native-runtime-layout-not-ready"
-				                                                 : perfect_layout.blocker;
-				return ExecutionOperatorBindResult::INVALID;
-			}
-			if (perfect_layout.rhs_output_column_count != contract.rhs_output_column_count) {
-				binding.blocker = "perfect-hash-join-native-runtime-rhs-output-count-mismatch";
-				return ExecutionOperatorBindResult::INVALID;
-			}
-			perfect_hash_layout = true;
-		}
-		if (!perfect_hash_layout && table_layout.finalized && sink.hash_table->Count() == 0 &&
-		    ExecutionHashJoinProbeEmptyBuildSideSupported(output_mode, contract.correlated_mark_counts_required)) {
-			empty_build_side = true;
-			table_layout.ready = true;
-			table_layout.blocker.clear();
-		} else if (!perfect_hash_layout && native_residual_probe &&
-		           table_layout.blocker == "hash-join-native-residual-predicate") {
-			table_layout.ready = true;
-			table_layout.blocker.clear();
-		} else if (!perfect_hash_layout) {
-			binding.blocker =
-			    table_layout.blocker.empty() ? "hash-join-native-runtime-table-layout-not-ready" : table_layout.blocker;
-			if (ExecutionHashJoinProbeLayoutCanDefer(binding.blocker)) {
-				return ExecutionOperatorBindResult::DEFERRED;
-			}
-			return ExecutionOperatorBindResult::INVALID;
-		}
-	}
-	if (contract.non_equality_condition_count != 0 &&
-	    contract.native_probe_output_mode != ExecutionHashJoinProbeOutputMode::MATCHED_PROBE_AND_BUILD &&
-	    contract.native_probe_output_mode != ExecutionHashJoinProbeOutputMode::LEFT_PROBE_AND_BUILD &&
-	    contract.native_probe_output_mode != ExecutionHashJoinProbeOutputMode::MATCHED_PROBE_ONLY) {
-		binding.blocker = "hash-join-native-runtime-non-equality-output-mode-contract-invariant";
+	if (resolution.status != ExecutionHashJoinProbeLayoutResolutionStatus::READY) {
+		binding.blocker = resolution.blocker.empty() ? "hash-join-native-runtime-table-layout-invalid"
+		                                             : std::move(resolution.blocker);
 		return ExecutionOperatorBindResult::INVALID;
 	}
-	if (!perfect_hash_layout && table_layout.dictionary_emission && table_layout.chains_longer_than_one &&
-	    !table_layout.aux_next_ptrs &&
-	    contract.native_probe_output_mode == ExecutionHashJoinProbeOutputMode::MARK_BUILD_ONLY) {
-		binding.blocker = "hash-join-native-runtime-dictionary-chain-layout-missing";
+	auto layout_blocker = ValidateExecutionHashJoinProbeLayout(sink, contract, resolution);
+	if (!layout_blocker.empty()) {
+		binding.blocker = std::move(layout_blocker);
 		return ExecutionOperatorBindResult::INVALID;
 	}
-	if (!perfect_hash_layout && table_layout.condition_count != contract.condition_count) {
-		binding.blocker = "hash-join-native-runtime-condition-count-mismatch";
-		return ExecutionOperatorBindResult::INVALID;
-	}
-	if (contract.correlated_mark_counts_required) {
-		auto &mark_info = sink.hash_table->correlated_mark_join_info;
-		if (!mark_info.correlated_counts) {
-			binding.blocker = "hash-join-native-runtime-missing-correlated-mark-counts";
-			return ExecutionOperatorBindResult::INVALID;
-		}
-		if (mark_info.correlated_types.size() != contract.delim_type_count) {
-			binding.blocker = "hash-join-native-runtime-correlated-mark-count-shape-mismatch";
-			return ExecutionOperatorBindResult::INVALID;
-		}
-	}
-	if (!perfect_hash_layout && table_layout.ready && !empty_build_side &&
-	    SelectJitHashJoinProbeFilterStrategy(*this, sink.hash_table->Count()) ==
-	        JitHashJoinProbeFilterStrategy::BLOOM_REJECT) {
+
+	const bool perfect_hash_layout = resolution.kind == ExecutionHashJoinProbeLayoutKind::PERFECT_HASH_TABLE;
+	const bool use_bloom_filter = !perfect_hash_layout && !resolution.empty_build_side &&
+	                              SelectJitHashJoinProbeFilterStrategy(*this, sink.hash_table->Count()) ==
+	                                  JitHashJoinProbeFilterStrategy::BLOOM_REJECT;
+	if (use_bloom_filter) {
 		sink.hash_table->EnsureBloomFilterForProbe();
-		if (!ExecutionGetHashJoinTableLayout(*sink.hash_table, table_layout)) {
-			binding.blocker =
-			    table_layout.blocker.empty() ? "hash-join-native-runtime-table-layout-not-ready" : table_layout.blocker;
-			if (ExecutionHashJoinProbeLayoutCanDefer(binding.blocker)) {
+		if (!ExecutionGetHashJoinTableLayout(*sink.hash_table, resolution.table_layout)) {
+			binding.blocker = ExecutionHashJoinTableLayoutBlocker(resolution.table_layout.status);
+			if (resolution.table_layout.CanDefer()) {
 				return ExecutionOperatorBindResult::DEFERRED;
 			}
 			return ExecutionOperatorBindResult::INVALID;
@@ -2668,24 +2636,29 @@ ExecutionOperatorBindResult PhysicalHashJoin::BindExecutionOperator(ExecutionCon
 	binding.blocker.clear();
 	binding.hash_join_probe.ready = true;
 	binding.hash_join_probe.hash_table = sink.hash_table.get();
-	binding.hash_join_probe.layout_kind = perfect_hash_layout ? ExecutionHashJoinProbeLayoutKind::PERFECT_HASH_TABLE
-	                                                          : ExecutionHashJoinProbeLayoutKind::REGULAR_HASH_TABLE;
-	binding.hash_join_probe.use_bloom_filter =
-	    !perfect_hash_layout && SelectJitHashJoinProbeFilterStrategy(*this, sink.hash_table->Count()) ==
-	                                JitHashJoinProbeFilterStrategy::BLOOM_REJECT;
+	binding.hash_join_probe.layout_kind = resolution.kind;
+	binding.hash_join_probe.use_bloom_filter = use_bloom_filter;
 	binding.hash_join_probe.build_side_has_filtered_null = sink.hash_table->has_filtered_null;
 	binding.hash_join_probe.condition_null_values_are_equal.resize(contract.condition_count);
 	for (idx_t condition_idx = 0; condition_idx < contract.condition_count; condition_idx++) {
 		binding.hash_join_probe.condition_null_values_are_equal[condition_idx] =
 		    sink.hash_table->NullValuesAreEqual(condition_idx);
 	}
-	binding.hash_join_probe.table_layout = std::move(table_layout);
-	binding.hash_join_probe.perfect_layout = std::move(perfect_layout);
-	binding.hash_join_probe.empty_build_side = empty_build_side;
+	binding.hash_join_probe.table_layout = std::move(resolution.table_layout);
+	binding.hash_join_probe.perfect_layout = std::move(resolution.perfect_layout);
+	binding.hash_join_probe.empty_build_side = resolution.empty_build_side;
 	binding.hash_join_probe.probe_key_input_indices = std::move(probe_key_input_indices);
 	binding.hash_join_probe.rhs_condition_types = contract.rhs_condition_types;
 	binding.hash_join_probe.lhs_output_column_indices = contract.lhs_output_column_indices;
 	binding.hash_join_probe.rhs_output_column_count = contract.rhs_output_column_count;
+	binding.hash_join_probe.rhs_fixed_column_sources.resize(contract.rhs_output_column_count);
+	if (!perfect_hash_layout && !resolution.empty_build_side &&
+	    contract.native_probe_output_mode == ExecutionHashJoinProbeOutputMode::MATCHED_PROBE_AND_BUILD) {
+		for (idx_t rhs_idx = 0; rhs_idx < contract.rhs_output_column_count; rhs_idx++) {
+			sink.hash_table->TryGetRHSFixedColumnSource(rhs_idx,
+			                                            binding.hash_join_probe.rhs_fixed_column_sources[rhs_idx]);
+		}
+	}
 	binding.hash_join_probe.exact_rhs_output_probe_input_indices.assign(contract.rhs_output_column_count,
 	                                                                    DConstants::INVALID_INDEX);
 	for (idx_t rhs_idx = 0; rhs_idx < contract.rhs_output_column_count; rhs_idx++) {
@@ -3023,14 +2996,14 @@ void ExecutionGatherHashJoinRHSColumn(const ExecutionHashJoinProbeBinding &bindi
 bool ExecutionGetHashJoinRHSFixedColumnSource(const ExecutionHashJoinProbeBinding &binding, idx_t rhs_output_idx,
                                               ExecutionHashJoinRHSFixedColumnSource &source) {
 	source = ExecutionHashJoinRHSFixedColumnSource();
-	if (!binding.ready || !binding.hash_table ||
-	    binding.layout_kind != ExecutionHashJoinProbeLayoutKind::REGULAR_HASH_TABLE ||
+	if (!binding.ready || binding.layout_kind != ExecutionHashJoinProbeLayoutKind::REGULAR_HASH_TABLE ||
 	    binding.output_mode != ExecutionHashJoinProbeOutputMode::MATCHED_PROBE_AND_BUILD ||
-	    rhs_output_idx >= binding.rhs_output_column_count) {
+	    rhs_output_idx >= binding.rhs_fixed_column_sources.size()) {
 		source.blocker = "hash-join-rhs-source-binding-shape";
 		return false;
 	}
-	return binding.hash_table->TryGetRHSFixedColumnSource(rhs_output_idx, source);
+	source = binding.rhs_fixed_column_sources[rhs_output_idx];
+	return source.ready;
 }
 
 bool ExecutionMaterializeHashJoinProbeProjectionSources(const ExecutionHashJoinProbeBinding &binding, DataChunk &input,

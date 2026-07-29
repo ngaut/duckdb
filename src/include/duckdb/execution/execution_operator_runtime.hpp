@@ -49,6 +49,30 @@ struct ExecutionOperatorReadiness {
 };
 
 struct ExecutionPrimitiveAggregateUpdateLane;
+struct ExecutionPrimitiveAggregateUpdateBinding;
+
+enum class ExecutionAggregateStateCombineSourceKind : uint8_t { AGGREGATE_STATE, ROW_COUNT };
+
+//! Semantic mapping from one state-scan fact to one aggregate state owned by
+//! the pipeline sink. ROW_COUNT represents the number of groups in the batch
+//! and lets COUNT(*) participate without materializing a synthetic vector.
+struct ExecutionAggregateStateCombineLane {
+	ExecutionAggregateStateCombineSourceKind source_kind = ExecutionAggregateStateCombineSourceKind::AGGREGATE_STATE;
+	idx_t source_aggregate_index = DConstants::INVALID_INDEX;
+	idx_t target_aggregate_index = DConstants::INVALID_INDEX;
+};
+
+//! Opaque batch of aggregate states. The core keeps ownership of row
+//! storage and physical offsets; execution backends can only request a semantic
+//! primitive combine into a core-provided sink binding.
+class DUCKDB_API ExecutionAggregateStateScanBatch {
+public:
+	virtual ~ExecutionAggregateStateScanBatch();
+
+	virtual idx_t Count() const = 0;
+	virtual bool CombinePrimitive(const vector<ExecutionAggregateStateCombineLane> &lanes,
+	                              ExecutionPrimitiveAggregateUpdateBinding &target, string &blocker) const = 0;
+};
 
 struct ExecutionAppendSinkState {
 	virtual ~ExecutionAppendSinkState() {
@@ -414,6 +438,9 @@ struct ExecutionHashJoinProbeBinding {
 	vector<LogicalType> rhs_condition_types;
 	vector<idx_t> lhs_output_column_indices;
 	idx_t rhs_output_column_count = 0;
+	//! Operator-lifetime physical sources resolved once by core. Backends may
+	//! inspect these immutable views but never dereference hash_table.
+	vector<ExecutionHashJoinRHSFixedColumnSource> rhs_fixed_column_sources;
 	vector<idx_t> exact_rhs_output_probe_input_indices;
 	vector<idx_t> lhs_probe_column_indices;
 	vector<LogicalType> lhs_probe_types;

@@ -22,10 +22,11 @@ static void ExecuteAllValidHashJoinChainProbe(const SljitNativeHashJoinProbePlan
                                               SljitNativeRegularHashJoinProbeInput &input, MATCHER matcher) {
 	using Row = typename MATCHER::Row;
 	const auto key_sel = SELECTED ? input.source_sel[0] : nullptr;
-	const auto entries = reinterpret_cast<const ht_entry_t *>(input.entries);
+	const auto entries = input.entries;
 	const auto bitmask = input.bitmask;
 	const auto count = input.count;
 	const auto prefetch_offset = matcher.PrefetchOffset();
+	const SljitHashJoinEntryDecoder entry_decoder(input);
 	SljitHashJoinMatchedRowConsumer<MARK_BUILD_MATCH, MATCHED_PROBE_ONLY> consumer(input, plan);
 	auto row_idx = input.input_offset;
 	auto resume_row_pointer = input.resume_row_pointer;
@@ -63,7 +64,7 @@ static void ExecuteAllValidHashJoinChainProbe(const SljitNativeHashJoinProbePlan
 		resume_row_pointer = nullptr;
 		if (!row_location) {
 			row_location = SljitHashJoinFindFirstChainPointer<USE_SALT, HAS_BLOOM>(
-			    input, entries, hash, ht_offset, prefetch_offset,
+			    input, entry_decoder, entries, hash, ht_offset, prefetch_offset,
 			    [&](data_ptr_t candidate) { return matcher.MatchesFirst(key_row, candidate); });
 			row_matches_first = row_location != nullptr;
 		}
@@ -135,13 +136,14 @@ template <bool SELECTED, bool USE_SALT, bool HAS_BLOOM, class MATCHER, class CON
 static void ExecuteAllValidHashJoinNoChainProbe(SljitNativeRegularHashJoinProbeInput &input, MATCHER matcher,
                                                 CONSUMER &consumer) {
 	using Row = typename MATCHER::Row;
-	const auto entries = reinterpret_cast<const ht_entry_t *__restrict>(input.entries);
+	const uint64_t *__restrict entries = input.entries;
 	const sel_t *__restrict key_sel = nullptr;
 	if (SELECTED) {
 		key_sel = input.source_sel[0];
 	}
 	const auto bitmask = input.bitmask;
 	const auto count = input.count;
+	const SljitHashJoinEntryDecoder entry_decoder(input);
 
 	if (count > input.output_capacity) {
 		throw InternalException("SLJIT no-chain hash join probe input exceeds output capacity");
@@ -171,20 +173,20 @@ static void ExecuteAllValidHashJoinNoChainProbe(SljitNativeRegularHashJoinProbeI
 			if (SljitBloomFilterMayContainTemplated<HAS_BLOOM>(input, hash)) {
 				hash_t salt = 0;
 				if constexpr (USE_SALT) {
-					salt = hash & ht_entry_t::SALT_MASK;
+					salt = entry_decoder.Salt(hash);
 				}
 				while (true) {
-					const auto entry_value = entries[ht_offset].GetValue();
+					const auto entry_value = entries[ht_offset];
 					if (!entry_value) {
 						break;
 					}
 					if constexpr (USE_SALT) {
-						if ((entry_value & ht_entry_t::SALT_MASK) != salt) {
+						if (!entry_decoder.SaltMatches(entry_value, salt)) {
 							ht_offset = UnsafeNumericCast<idx_t>((ht_offset + 1) & bitmask);
 							continue;
 						}
 					}
-					auto row_location = SljitHashJoinEntryPointer(entry_value);
+					auto row_location = entry_decoder.Pointer(entry_value);
 					if (matcher.Matches(key_row, row_location)) {
 						consumer.EmitNoChainMatch(row_idx, row_location);
 						break;

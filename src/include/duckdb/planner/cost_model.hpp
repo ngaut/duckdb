@@ -94,62 +94,83 @@ struct PhysicalRunnerCostParameters {
 	}
 };
 
+#define DUCKDB_PHYSICAL_RUNNER_COST_SHAPE_FIELDS(FIELD)                                                                \
+	FIELD(rows)                                                                                                        \
+	FIELD(batches)                                                                                                     \
+	FIELD(costed_batches)                                                                                              \
+	FIELD(expression_cost)                                                                                             \
+	FIELD(source_contract_input_rows)                                                                                  \
+	FIELD(source_contract_input_batches)                                                                               \
+	FIELD(generated_stage_count)                                                                                       \
+	FIELD(generated_backend_stage_count)                                                                               \
+	FIELD(generated_grouped_aggregate_stage_count)                                                                     \
+	FIELD(native_grouped_state_address_lookup_count)                                                                   \
+	FIELD(materialization_elision_count)                                                                               \
+	FIELD(selected_hash_join_filter_materialization_count)                                                             \
+	FIELD(native_join_stage_count)                                                                                     \
+	FIELD(native_hash_join_build_sink_count)                                                                           \
+	FIELD(native_aggregate_stage_count)                                                                                \
+	FIELD(native_grouped_aggregate_stage_count)                                                                        \
+	FIELD(native_sort_stage_count)                                                                                     \
+	FIELD(grouped_aggregate_estimated_cardinality)
+
+#define DUCKDB_PHYSICAL_RUNNER_COST_WORK_FIELDS(FIELD)                                                                 \
+	FIELD(generated_expression_work)                                                                                   \
+	FIELD(generated_stage_work)                                                                                        \
+	FIELD(generated_backend_stage_work)                                                                                \
+	FIELD(native_operator_work)                                                                                        \
+	FIELD(materialization_elision_work)                                                                                \
+	FIELD(selected_hash_join_filter_materialization_penalty)                                                           \
+	FIELD(source_contract_scan_penalty)                                                                                \
+	FIELD(full_pipeline_work)                                                                                          \
+	FIELD(stateful_protocol_penalty)                                                                                   \
+	FIELD(saved_work_per_batch)                                                                                        \
+	FIELD(accelerated_runner_benefit)                                                                                  \
+	FIELD(startup_cost)                                                                                                \
+	FIELD(required_benefit)                                                                                            \
+	FIELD(net_benefit)
+
+#define DUCKDB_PHYSICAL_RUNNER_AXIS_COST_FIELDS(FIELD)                                                                 \
+	FIELD(runner_benefit)                                                                                              \
+	FIELD(transfer_cost)                                                                                               \
+	FIELD(startup_cost)                                                                                                \
+	FIELD(required_benefit)                                                                                            \
+	FIELD(net_benefit)
+
+//! Numeric runner-cost storage shared by live profiles and accumulated totals.
+//! The field lists above also generate every schema walk below.
+struct PhysicalRunnerCostNumericFields {
+#define DUCKDB_DECLARE_RUNNER_COST_FIELD(name) int64_t name = 0;
+	DUCKDB_PHYSICAL_RUNNER_COST_SHAPE_FIELDS(DUCKDB_DECLARE_RUNNER_COST_FIELD)
+	DUCKDB_PHYSICAL_RUNNER_COST_WORK_FIELDS(DUCKDB_DECLARE_RUNNER_COST_FIELD)
+#undef DUCKDB_DECLARE_RUNNER_COST_FIELD
+};
+
+struct PhysicalRunnerAxisCostValues {
+#define DUCKDB_DECLARE_RUNNER_AXIS_COST_FIELD(name) int64_t name = 0;
+	DUCKDB_PHYSICAL_RUNNER_AXIS_COST_FIELDS(DUCKDB_DECLARE_RUNNER_AXIS_COST_FIELD)
+#undef DUCKDB_DECLARE_RUNNER_AXIS_COST_FIELD
+};
+
 //! One accelerated runner's selection economics inside a cost profile.
-struct PhysicalRunnerAxisCostBreakdown {
+struct PhysicalRunnerAxisCostBreakdown : PhysicalRunnerAxisCostValues {
 	bool available = false;
 	//! Whether this axis passed selection analysis on its own; the winning runner is
 	//! the selected axis with the highest net benefit.
 	bool selected = false;
 	string selection_reason;
-	int64_t runner_benefit = 0;
-	int64_t transfer_cost = 0;
-	int64_t startup_cost = 0;
-	int64_t required_benefit = 0;
-	int64_t net_benefit = 0;
 };
 
-struct PhysicalRunnerCostProfile {
+struct PhysicalRunnerCostProfile : PhysicalRunnerCostNumericFields {
 	bool present = false;
 	ExecutionRunnerKind selected_runner = ExecutionRunnerKind::VECTORIZED;
 	PhysicalRunnerCostInputScope input_scope = PhysicalRunnerCostInputScope::EXECUTION_REGION_CANDIDATE;
-	int64_t rows = 0;
-	int64_t batches = 0;
-	int64_t costed_batches = 0;
-	int64_t expression_cost = 0;
-	int64_t source_contract_input_rows = 0;
-	int64_t source_contract_input_batches = 0;
 	bool source_contract_output_cardinality_unknown = false;
-	int64_t generated_stage_count = 0;
-	int64_t generated_backend_stage_count = 0;
-	int64_t generated_grouped_aggregate_stage_count = 0;
-	int64_t native_grouped_state_address_lookup_count = 0;
-	int64_t grouped_aggregate_estimated_cardinality = 0;
-	int64_t materialization_elision_count = 0;
-	int64_t selected_hash_join_filter_materialization_count = 0;
-	int64_t native_join_stage_count = 0;
-	int64_t native_hash_join_build_sink_count = 0;
-	int64_t native_aggregate_stage_count = 0;
-	int64_t native_grouped_aggregate_stage_count = 0;
-	int64_t native_sort_stage_count = 0;
 	bool full_pipeline = false;
 	PhysicalRunnerGeneratedWorkClass generated_work_class = PhysicalRunnerGeneratedWorkClass::NONE;
 	PhysicalRunnerNativeProtocolClass native_protocol_class = PhysicalRunnerNativeProtocolClass::NONE;
 	string admission_class;
 	string selection_reason;
-	int64_t generated_expression_work = 0;
-	int64_t generated_stage_work = 0;
-	int64_t generated_backend_stage_work = 0;
-	int64_t native_operator_work = 0;
-	int64_t materialization_elision_work = 0;
-	int64_t selected_hash_join_filter_materialization_penalty = 0;
-	int64_t source_contract_scan_penalty = 0;
-	int64_t full_pipeline_work = 0;
-	int64_t stateful_protocol_penalty = 0;
-	int64_t saved_work_per_batch = 0;
-	int64_t accelerated_runner_benefit = 0;
-	int64_t startup_cost = 0;
-	int64_t required_benefit = 0;
-	int64_t net_benefit = 0;
 	ExecutionRegionJitRuntimeProofMask required_runtime_proofs = 0;
 	//! Per-axis selection economics; filled for every axis regardless of which one won.
 	PhysicalRunnerAxisCostBreakdown compiled_vectorized;
@@ -179,64 +200,31 @@ struct PhysicalRunnerCostProfile {
 //! The paired form exists so accumulation can walk a profile and its totals in
 //! lockstep; single-object consumers pass the same object twice. Fields with
 //! non-summable types (bools, strings, the proof mask, selection state) are handled
-//! by each surface explicitly and exempted in the architecture verifier.
+//! by each surface explicitly and are not part of the numeric schema.
 template <class A, class B, class FN>
 void ForEachPhysicalRunnerCostShapeField(A &a, B &b, FN &&fn) {
-	fn("rows", a.rows, b.rows);
-	fn("batches", a.batches, b.batches);
-	fn("costed_batches", a.costed_batches, b.costed_batches);
-	fn("expression_cost", a.expression_cost, b.expression_cost);
-	fn("source_contract_input_rows", a.source_contract_input_rows, b.source_contract_input_rows);
-	fn("source_contract_input_batches", a.source_contract_input_batches, b.source_contract_input_batches);
-	fn("generated_stage_count", a.generated_stage_count, b.generated_stage_count);
-	fn("generated_backend_stage_count", a.generated_backend_stage_count, b.generated_backend_stage_count);
-	fn("generated_grouped_aggregate_stage_count", a.generated_grouped_aggregate_stage_count,
-	   b.generated_grouped_aggregate_stage_count);
-	fn("native_grouped_state_address_lookup_count", a.native_grouped_state_address_lookup_count,
-	   b.native_grouped_state_address_lookup_count);
-	fn("materialization_elision_count", a.materialization_elision_count, b.materialization_elision_count);
-	fn("selected_hash_join_filter_materialization_count", a.selected_hash_join_filter_materialization_count,
-	   b.selected_hash_join_filter_materialization_count);
-	fn("native_join_stage_count", a.native_join_stage_count, b.native_join_stage_count);
-	fn("native_hash_join_build_sink_count", a.native_hash_join_build_sink_count, b.native_hash_join_build_sink_count);
-	fn("native_aggregate_stage_count", a.native_aggregate_stage_count, b.native_aggregate_stage_count);
-	fn("native_grouped_aggregate_stage_count", a.native_grouped_aggregate_stage_count,
-	   b.native_grouped_aggregate_stage_count);
-	fn("native_sort_stage_count", a.native_sort_stage_count, b.native_sort_stage_count);
-	fn("grouped_aggregate_estimated_cardinality", a.grouped_aggregate_estimated_cardinality,
-	   b.grouped_aggregate_estimated_cardinality);
+#define DUCKDB_VISIT_RUNNER_COST_SHAPE_FIELD(name) fn(#name, a.name, b.name);
+	DUCKDB_PHYSICAL_RUNNER_COST_SHAPE_FIELDS(DUCKDB_VISIT_RUNNER_COST_SHAPE_FIELD)
+#undef DUCKDB_VISIT_RUNNER_COST_SHAPE_FIELD
 }
 
 template <class A, class B, class FN>
 void ForEachPhysicalRunnerCostWorkField(A &a, B &b, FN &&fn) {
-	fn("generated_expression_work", a.generated_expression_work, b.generated_expression_work);
-	fn("generated_stage_work", a.generated_stage_work, b.generated_stage_work);
-	fn("generated_backend_stage_work", a.generated_backend_stage_work, b.generated_backend_stage_work);
-	fn("native_operator_work", a.native_operator_work, b.native_operator_work);
-	fn("materialization_elision_work", a.materialization_elision_work, b.materialization_elision_work);
-	fn("selected_hash_join_filter_materialization_penalty", a.selected_hash_join_filter_materialization_penalty,
-	   b.selected_hash_join_filter_materialization_penalty);
-	fn("source_contract_scan_penalty", a.source_contract_scan_penalty, b.source_contract_scan_penalty);
-	fn("full_pipeline_work", a.full_pipeline_work, b.full_pipeline_work);
-	fn("stateful_protocol_penalty", a.stateful_protocol_penalty, b.stateful_protocol_penalty);
-	fn("saved_work_per_batch", a.saved_work_per_batch, b.saved_work_per_batch);
-	fn("accelerated_runner_benefit", a.accelerated_runner_benefit, b.accelerated_runner_benefit);
-	fn("startup_cost", a.startup_cost, b.startup_cost);
-	fn("required_benefit", a.required_benefit, b.required_benefit);
-	fn("net_benefit", a.net_benefit, b.net_benefit);
-	fn("compiled_vectorized_runner_benefit", a.compiled_vectorized.runner_benefit,
-	   b.compiled_vectorized.runner_benefit);
-	fn("compiled_vectorized_transfer_cost", a.compiled_vectorized.transfer_cost, b.compiled_vectorized.transfer_cost);
-	fn("compiled_vectorized_startup_cost", a.compiled_vectorized.startup_cost, b.compiled_vectorized.startup_cost);
-	fn("compiled_vectorized_required_benefit", a.compiled_vectorized.required_benefit,
-	   b.compiled_vectorized.required_benefit);
-	fn("compiled_vectorized_net_benefit", a.compiled_vectorized.net_benefit, b.compiled_vectorized.net_benefit);
-	fn("gpu_runner_benefit", a.gpu.runner_benefit, b.gpu.runner_benefit);
-	fn("gpu_transfer_cost", a.gpu.transfer_cost, b.gpu.transfer_cost);
-	fn("gpu_startup_cost", a.gpu.startup_cost, b.gpu.startup_cost);
-	fn("gpu_required_benefit", a.gpu.required_benefit, b.gpu.required_benefit);
-	fn("gpu_net_benefit", a.gpu.net_benefit, b.gpu.net_benefit);
+#define DUCKDB_VISIT_RUNNER_COST_WORK_FIELD(name) fn(#name, a.name, b.name);
+	DUCKDB_PHYSICAL_RUNNER_COST_WORK_FIELDS(DUCKDB_VISIT_RUNNER_COST_WORK_FIELD)
+#undef DUCKDB_VISIT_RUNNER_COST_WORK_FIELD
+#define DUCKDB_VISIT_COMPILED_RUNNER_AXIS_COST_FIELD(name)                                                             \
+	fn("compiled_vectorized_" #name, a.compiled_vectorized.name, b.compiled_vectorized.name);
+	DUCKDB_PHYSICAL_RUNNER_AXIS_COST_FIELDS(DUCKDB_VISIT_COMPILED_RUNNER_AXIS_COST_FIELD)
+#undef DUCKDB_VISIT_COMPILED_RUNNER_AXIS_COST_FIELD
+#define DUCKDB_VISIT_GPU_RUNNER_AXIS_COST_FIELD(name) fn("gpu_" #name, a.gpu.name, b.gpu.name);
+	DUCKDB_PHYSICAL_RUNNER_AXIS_COST_FIELDS(DUCKDB_VISIT_GPU_RUNNER_AXIS_COST_FIELD)
+#undef DUCKDB_VISIT_GPU_RUNNER_AXIS_COST_FIELD
 }
+
+#undef DUCKDB_PHYSICAL_RUNNER_COST_SHAPE_FIELDS
+#undef DUCKDB_PHYSICAL_RUNNER_COST_WORK_FIELDS
+#undef DUCKDB_PHYSICAL_RUNNER_AXIS_COST_FIELDS
 
 class DuckDBCostModel {
 public:

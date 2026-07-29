@@ -95,10 +95,14 @@ public:
 	unique_ptr<LocalSourceState> GetLocalSourceState(ExecutionContext &context,
 	                                                 GlobalSourceState &gstate) const override;
 	bool SupportsExecutionSourceContract(const ExecutionRegionOpenRequest &open_request) const override;
+	bool SupportsExecutionPrimitiveAggregateStateSourceContract(
+	    const ExecutionRegionOpenRequest &open_request) const override;
 	SourceResultType GetDataInternal(ExecutionContext &context, DataChunk &chunk,
 	                                 OperatorSourceInput &input) const override;
 	SourceResultType GetExecutionSourceContractDataInternal(ExecutionContext &context, DataChunk &chunk,
 	                                                        OperatorSourceInput &input) const override;
+	SourceResultType GetExecutionPrimitiveAggregateStateSourceContractDataInternal(
+	    ExecutionContext &context, ExecutionAggregateStateScanBatch *&batch, OperatorSourceInput &input) const override;
 
 	ProgressData GetProgress(ClientContext &context, GlobalSourceState &gstate) const override;
 

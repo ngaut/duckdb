@@ -107,11 +107,12 @@ public:
 	                   const idx_t append_count = DConstants::INVALID_INDEX);
 	bool TryAppendUnifiedSinglePartition(PartitionedTupleDataAppendState &state, DataChunk &input,
 	                                     const SelectionVector &append_sel = *FlatVector::IncrementalSelectionVector(),
-	                                     const idx_t append_count = DConstants::INVALID_INDEX);
+	                                     const idx_t append_count = DConstants::INVALID_INDEX,
+	                                     bool build_reverse_selection = true);
 	bool TryAppendUnifiedFixedWidthSinglePartition(
 	    PartitionedTupleDataAppendState &state, DataChunk &input,
 	    const SelectionVector &append_sel = *FlatVector::IncrementalSelectionVector(),
-	    const idx_t append_count = DConstants::INVALID_INDEX);
+	    const idx_t append_count = DConstants::INVALID_INDEX, bool build_reverse_selection = true);
 	//! Appends rows to this PartitionedTupleData
 	void Append(PartitionedTupleDataAppendState &state, TupleDataChunkState &input, const idx_t count,
 	            optional_ptr<TupleDataRowLocationRemap> row_location_remap = nullptr);

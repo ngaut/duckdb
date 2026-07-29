@@ -2012,7 +2012,56 @@ static SourceResultType ScanHashAggregateState(ExecutionContext &context, DataCh
 	return chunk.size() == 0 ? SourceResultType::FINISHED : SourceResultType::HAVE_MORE_OUTPUT;
 }
 
+static SourceResultType ScanHashAggregatePrimitiveState(ExecutionContext &context,
+                                                        ExecutionAggregateStateScanBatch *&batch,
+                                                        OperatorSourceInput &input, const PhysicalHashAggregate &op) {
+	batch = nullptr;
+	auto &sink_gstate = op.sink_state->Cast<HashAggregateGlobalSinkState>();
+	auto &gstate = input.global_state.Cast<HashAggregateGlobalSourceState>();
+	auto &lstate = input.local_state.Cast<HashAggregateLocalSourceState>();
+	while (true) {
+		if (!lstate.radix_idx.IsValid()) {
+			lstate.radix_idx = gstate.state_index.load();
+		}
+		const auto radix_idx = lstate.radix_idx.GetIndex();
+		if (radix_idx >= op.groupings.size()) {
+			break;
+		}
+
+		auto &grouping = op.groupings[radix_idx];
+		auto &radix_table = grouping.table_data;
+		auto &grouping_gstate = sink_gstate.grouping_states[radix_idx];
+		OperatorSourceInput source_input {*gstate.radix_states[radix_idx], *lstate.radix_states[radix_idx],
+		                                  input.interrupt_state, input.stage_recorder};
+		auto res =
+		    radix_table.GetPrimitiveAggregateStateBatch(context, batch, *grouping_gstate.table_state, source_input);
+		if (res == SourceResultType::BLOCKED) {
+			return res;
+		}
+		if (batch && batch->Count() != 0) {
+			return SourceResultType::HAVE_MORE_OUTPUT;
+		}
+
+		{
+			ExecutionOperatorStageTimer timer(input.stage_recorder,
+			                                  "source_contract.hash_aggregate_state_scan.advance_radix_table");
+			annotated_lock_guard<annotated_mutex> guard(gstate.lock);
+			lstate.radix_idx = lstate.radix_idx.GetIndex() + 1;
+			if (lstate.radix_idx.GetIndex() > gstate.state_index) {
+				gstate.state_index = lstate.radix_idx.GetIndex();
+			}
+			lstate.radix_idx = gstate.state_index.load();
+		}
+	}
+	return SourceResultType::FINISHED;
+}
+
 bool PhysicalHashAggregate::SupportsExecutionSourceContract(const ExecutionRegionOpenRequest &open_request) const {
+	return open_request.UsesSourceContract();
+}
+
+bool PhysicalHashAggregate::SupportsExecutionPrimitiveAggregateStateSourceContract(
+    const ExecutionRegionOpenRequest &open_request) const {
 	return open_request.UsesSourceContract();
 }
 
@@ -2025,6 +2074,11 @@ SourceResultType PhysicalHashAggregate::GetExecutionSourceContractDataInternal(E
                                                                                DataChunk &chunk,
                                                                                OperatorSourceInput &input) const {
 	return ScanHashAggregateState(context, chunk, input, *this);
+}
+
+SourceResultType PhysicalHashAggregate::GetExecutionPrimitiveAggregateStateSourceContractDataInternal(
+    ExecutionContext &context, ExecutionAggregateStateScanBatch *&batch, OperatorSourceInput &input) const {
+	return ScanHashAggregatePrimitiveState(context, batch, input, *this);
 }
 
 ProgressData PhysicalHashAggregate::GetProgress(ClientContext &context, GlobalSourceState &gstate_p) const {

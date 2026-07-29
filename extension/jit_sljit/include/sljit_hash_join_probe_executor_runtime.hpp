@@ -8,13 +8,13 @@
 
 #pragma once
 
-#include "sljit_hash_join_all_valid_probe_matcher_runtime.hpp"
 #include "sljit_hash_join_probe_execution_contract.hpp"
 #include "sljit_hash_join_probe_output_runtime.hpp"
 #include "sljit_hash_join_probe_primitive.hpp"
 #include "sljit_hash_join_probe_path_runtime.hpp"
 #include "sljit_hash_join_probe_runtime.hpp"
 #include "sljit_hash_join_runtime.hpp"
+#include "sljit_hash_join_single_key_reader_runtime.hpp"
 #include "sljit_native_binding_runtime.hpp"
 #include "sljit_native_function_runtime.hpp"
 #include "sljit_region_runtime_trace.hpp"
@@ -146,7 +146,7 @@ static ExecutionOperatorBindResult SljitExecuteRegularHashJoinProbe(
     SljitHashJoinProbeDrainState &state, bool left_probe_output, bool source_key0_int64_to_int32_unchecked = false,
     SljitHashJoinProbeOutputContract output_contract = SljitHashJoinProbeOutputContract::MATERIALIZED_OUTPUT) {
 	auto &layout = probe.table_layout;
-	const auto table_layout_kind = SljitValidateRegularHashJoinProbeExecutionLayout(plan, probe);
+	const auto table_layout_kind = SljitHashJoinTableLayoutKind(layout);
 	if (exact_source_filter_identity) {
 		runtime.RecordJitRuntimePath("hash_join_probe.regular_probe.exact_source_filter_candidate");
 	}

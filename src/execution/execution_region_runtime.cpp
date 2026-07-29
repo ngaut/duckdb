@@ -270,6 +270,9 @@ SinkResultType ExecutionSinkDelimJoin(const ExecutionDelimJoinSinkBinding &bindi
 ExecutionOperatorRuntime::~ExecutionOperatorRuntime() {
 }
 
+ExecutionAggregateStateScanBatch::~ExecutionAggregateStateScanBatch() {
+}
+
 ExecutionRegionRuntime::~ExecutionRegionRuntime() {
 }
 

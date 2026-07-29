@@ -8,6 +8,7 @@
 
 #pragma once
 
+#include "sljit_preaggregated_primitive_update_codegen.hpp"
 #include "sljit_region_executable.hpp"
 
 namespace duckdb {
@@ -28,7 +29,8 @@ void SljitPlanExecutablePrimitiveRunUpdate(const SljitNativeAggregateUpdatePlan 
 SljitNativePrimitiveRunFunction
 SljitEnsureExecutablePrimitiveRunUpdate(ExecutionRegionRuntime &runtime, SljitExecutablePrimitiveRunUpdate &run_update,
                                         PhysicalType group_source_type, PhysicalType group_output_type,
-                                        ExecutionRowPointerGroupKeyCastKind group_cast_kind, bool payload_nullable);
+                                        ExecutionRowPointerGroupKeyCastKind group_cast_kind, bool payload_nullable,
+                                        bool shared_payload_validity);
 SljitNativePrimitiveRunFunction SljitEnsureExecutableFusedAffineRunUpdate(
     ExecutionRegionRuntime &runtime, SljitExecutablePrimitiveRunUpdate &primitive_run_update,
     const SljitExecutableFusedAffineRunUpdate &affine_run_update, PhysicalType group_source_type,

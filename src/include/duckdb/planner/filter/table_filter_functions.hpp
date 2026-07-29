@@ -10,6 +10,7 @@
 
 #include "duckdb/common/bswap.hpp"
 #include "duckdb/common/common.hpp"
+#include "duckdb/common/hash_bloom_filter.hpp"
 #include "duckdb/common/optional_ptr.hpp"
 #include "duckdb/common/enums/expression_type.hpp"
 #include "duckdb/common/enums/filter_propagate_result.hpp"
@@ -86,13 +87,7 @@ public:
 	void Reset();
 
 	static inline uint64_t GetMask(hash_t hash) {
-#if DUCKDB_IS_BIG_ENDIAN
-		return (1ULL << ((hash >> 24) & 0x3F)) | (1ULL << ((hash >> 16) & 0x3F)) | (1ULL << ((hash >> 8) & 0x3F)) |
-		       (1ULL << (hash & 0x3F));
-#else
-		return (1ULL << ((hash >> 32) & 0x3F)) | (1ULL << ((hash >> 40) & 0x3F)) | (1ULL << ((hash >> 48) & 0x3F)) |
-		       (1ULL << ((hash >> 56) & 0x3F));
-#endif
+		return HashBloomFilterMask(hash);
 	}
 
 	bool IsInitialized() const {
@@ -189,6 +184,12 @@ public:
 	static bool SupportedType(const LogicalType &type);
 	static unique_ptr<PrefixRangeFilter> CreatePrefixRangeFilter(const LogicalType &key_type);
 	static bool TryComputeSpan(const Value &lower_bound, const Value &upper_bound, uhugeint_t &result);
+	//! Conservatively estimates the largest fraction of prefix buckets that the
+	//! build keys can occupy. The estimate uses the exact bitmap shape that
+	//! Initialize creates, so join-filter selection and runtime allocation cannot
+	//! drift apart.
+	static bool TryEstimateMaxBucketDensity(idx_t number_of_rows, const Value &lower_bound, const Value &upper_bound,
+	                                        double &result);
 };
 
 //! FunctionData for prefix range internal function

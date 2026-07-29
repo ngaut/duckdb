@@ -7,6 +7,8 @@
 
 namespace duckdb {
 
+static string DescribeExecutionRegionPrimitiveUpdateKind(AggregatePrimitiveUpdateKind kind);
+
 static string ExecutionRegionBool(bool value) {
 	return value ? "true" : "false";
 }
@@ -256,14 +258,9 @@ static string DescribeExecutionRegionHashJoinContract(const ExecutionRegionHashJ
 	    ",native_probe_output_mode=" + ExecutionHashJoinProbeOutputModeToString(contract.native_probe_output_mode);
 	result += ",build_sink_shape_ready=" + ExecutionRegionBool(contract.build_sink_shape_ready);
 	result += ",build_sink_shape_blocker=" + contract.build_sink_shape_blocker;
-	result += ",hash_join_layout_column_count=" + std::to_string(contract.layout_column_count);
 	result += ",hash_join_layout_offsets=" + BuildExecutionRegionIdxList(contract.layout_offsets);
 	result += ",hash_join_tuple_size=" + std::to_string(contract.tuple_size);
-	result += ",hash_join_entry_size=" + std::to_string(contract.entry_size);
 	result += ",hash_join_pointer_offset=" + std::to_string(contract.pointer_offset);
-	result += ",hash_join_hash_column_index=" + std::to_string(contract.hash_column_index);
-	result += ",hash_join_found_match_column_present=" + ExecutionRegionBool(contract.found_match_column_present);
-	result += ",hash_join_found_match_column_index=" + std::to_string(contract.found_match_column_index);
 	result += ",hash_join_native_contract_blocker=" + contract.native_contract_blocker;
 	AppendExecutionRegionContractIR(result, contract.native_probe_contract.ir);
 	AppendExecutionRegionContractIR(result, contract.native_build_contract.ir);
@@ -368,6 +365,23 @@ static string DescribeExecutionRegionNativeStateScanContract(const ExecutionRegi
 	    "native_state_scan_contract_status=" + string(ExecutionRegionStateContractStatusToString(contract.status));
 	result += ",native_state_scan_required_capability=" + contract.required_capability;
 	result += ",native_state_scan_contract_version=" + contract.contract_version;
+	result += ",native_state_scan_primitive_aggregate_batch=" +
+	          string(contract.primitive_aggregate_batch_ready ? "true" : "false");
+	result += ",native_state_scan_primitive_aggregate_lanes=[";
+	for (idx_t lane_idx = 0; lane_idx < contract.primitive_aggregate_lanes.size(); lane_idx++) {
+		if (lane_idx > 0) {
+			result += "|";
+		}
+		auto &lane = contract.primitive_aggregate_lanes[lane_idx];
+		result += "aggregate=" + std::to_string(lane.aggregate_index);
+		result += ":source_output=" + std::to_string(lane.source_output_index);
+		result += ":return_type=" + lane.return_type.ToString();
+		result += ":kind=" + DescribeExecutionRegionPrimitiveUpdateKind(lane.primitive_update_kind);
+	}
+	result += "]";
+	if (!contract.primitive_aggregate_batch_blocker.empty()) {
+		result += ",native_state_scan_primitive_aggregate_batch_blocker=" + contract.primitive_aggregate_batch_blocker;
+	}
 	if (!contract.blocker.empty()) {
 		result += ",native_state_scan_blocker=" + contract.blocker;
 	}
@@ -427,7 +441,6 @@ static string DescribeExecutionRegionAggregateContract(const ExecutionRegionAggr
 	result += ",perfect_group_minima=" + BuildExecutionRegionValueList(contract.perfect_group_minima);
 	result += ",grouped_state_layout_ready=" + ExecutionRegionBool(contract.grouped_state_layout_ready);
 	result += ",grouped_state_offsets=" + BuildExecutionRegionIdxList(contract.grouped_state_offsets);
-	result += ",grouped_state_payload_sizes=" + BuildExecutionRegionIdxList(contract.grouped_state_payload_sizes);
 	if (include_update_contracts) {
 		AppendExecutionRegionContractIR(result, contract.native_grouped_state_contract.ir);
 		AppendExecutionRegionContractIR(result, contract.native_state_update_contract.ir);

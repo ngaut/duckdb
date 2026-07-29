@@ -12,18 +12,15 @@ Build with the repository-required thread count:
 cmake --build build/reldebug --config RelWithDebInfo -j12
 ```
 
-Run static architecture checks and Python tests:
+Run static boundary checks and the same Python verification used by the
+refactor guard:
 
 ```sh
-python3 benchmark/jit/verify_jit_architecture.py
-python3 -m unittest \
-  benchmark/jit/test_benchmark_common.py \
-  benchmark/jit/test_run_jit_refactor_guard.py \
-  benchmark/jit/test_generic_benchmark.py \
-  benchmark/tpch/jit/test_compare_tpch_benchmark.py \
-  benchmark/tpch/jit/test_tpch_benchmark.py \
-  benchmark/tpch/jit/test_run_tpch_regression_gate.py \
-  benchmark/tpch/jit/test_verify_tpch_benchmark.py
+python3 benchmark/jit/verify_jit_boundaries.py
+python3 scripts/generate_settings.py --check
+python3 scripts/generate_metrics.py --check
+python3 -m unittest discover -s benchmark/jit -p 'test_*.py'
+python3 -m unittest discover -s benchmark/tpch/jit -p 'test_*.py'
 ```
 
 Run JIT correctness:
@@ -99,7 +96,7 @@ Promotion requires a complete 22-query, ten-repeat production artifact:
 
 ```sh
 python3 benchmark/tpch/jit/run_tpch_regression_gate.py \
-  --queries all --promote-baseline --promotion-repeats 10
+  --queries all --promote-baseline
 ```
 
 The default SF10 state is

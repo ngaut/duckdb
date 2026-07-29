@@ -49,53 +49,15 @@ struct ExecutionRegionStageTimings {
 	int64_t kernel_build_time_us = 0;
 };
 
-struct ExecutionRegionRunnerCostAxisTotals {
-	int64_t runner_benefit = 0;
-	int64_t transfer_cost = 0;
-	int64_t startup_cost = 0;
-	int64_t required_benefit = 0;
-	int64_t net_benefit = 0;
-};
+using ExecutionRegionRunnerCostAxisTotals = PhysicalRunnerAxisCostValues;
 
-struct ExecutionRegionRunnerCostTotals {
+struct ExecutionRegionRunnerCostTotals : PhysicalRunnerCostNumericFields {
 	bool present = false;
-	int64_t rows = 0;
-	int64_t batches = 0;
-	int64_t costed_batches = 0;
-	int64_t expression_cost = 0;
-	int64_t source_contract_input_rows = 0;
-	int64_t source_contract_input_batches = 0;
 	bool source_contract_output_cardinality_unknown = false;
-	int64_t generated_stage_count = 0;
-	int64_t generated_backend_stage_count = 0;
-	int64_t generated_grouped_aggregate_stage_count = 0;
-	int64_t native_grouped_state_address_lookup_count = 0;
-	int64_t grouped_aggregate_estimated_cardinality = 0;
-	int64_t materialization_elision_count = 0;
-	int64_t selected_hash_join_filter_materialization_count = 0;
-	int64_t native_join_stage_count = 0;
-	int64_t native_hash_join_build_sink_count = 0;
-	int64_t native_aggregate_stage_count = 0;
-	int64_t native_grouped_aggregate_stage_count = 0;
-	int64_t native_sort_stage_count = 0;
 	bool full_pipeline = false;
 	string input_scope;
 	string admission_class;
 	string selection_reason;
-	int64_t generated_expression_work = 0;
-	int64_t generated_stage_work = 0;
-	int64_t generated_backend_stage_work = 0;
-	int64_t native_operator_work = 0;
-	int64_t materialization_elision_work = 0;
-	int64_t selected_hash_join_filter_materialization_penalty = 0;
-	int64_t source_contract_scan_penalty = 0;
-	int64_t full_pipeline_work = 0;
-	int64_t stateful_protocol_penalty = 0;
-	int64_t saved_work_per_batch = 0;
-	int64_t accelerated_runner_benefit = 0;
-	int64_t startup_cost = 0;
-	int64_t required_benefit = 0;
-	int64_t net_benefit = 0;
 	ExecutionRegionJitRuntimeProofMask required_runtime_proofs = 0;
 	//! Mirrors PhysicalRunnerAxisCostBreakdown's cost fields so the runner-cost column
 	//! appenders can be templated over a profile and its totals alike.

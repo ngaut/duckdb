@@ -291,6 +291,7 @@ static bool SljitCanBuildFilteredAggregateUpdate(const vector<SljitNativeRegionO
 bool BuildSljitExecutableRegion(const SljitNativeRegionPlan &region, SljitExecutableRegion &executable,
                                 SljitFullPipelineRecipePlan &recipe_plan, string &error) {
 	executable.uses_scan_filters = region.uses_scan_filters;
+	executable.aggregate_state_source = region.aggregate_state_source;
 	executable.source_output_types = region.source_output_types;
 	executable.source_distinct_counts = region.source_distinct_counts;
 	executable.source_min_values = region.source_min_values;
@@ -361,8 +362,9 @@ bool BuildSljitExecutableRegion(const SljitNativeRegionPlan &region, SljitExecut
 	// native-only execution needs the standalone selector. Bind once with prepared
 	// filters, publish only the selectors that recipe cannot own, then move the
 	// same final plan into the kernel.
-	recipe_plan = BuildSljitFullPipelineRecipePlan(executable.ops, executable.source_output_types,
-	                                               executable.source_min_values, executable.source_max_values);
+	recipe_plan = BuildSljitFullPipelineRecipePlan(executable.ops, executable.aggregate_state_source,
+	                                               executable.source_output_types, executable.source_min_values,
+	                                               executable.source_max_values);
 	for (idx_t op_idx = 0; op_idx < executable.ops.size(); op_idx++) {
 		auto &op = executable.ops[op_idx];
 		if (op.kind != SljitNativeRegionOpKind::FILTER || !op.filter || op.filter->expression.HasSelectionKernel()) {

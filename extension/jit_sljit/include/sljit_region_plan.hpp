@@ -288,9 +288,15 @@ struct SljitNativeRegionOpPlan {
 	vector<SljitNativeRegionExpressionPlan> projections;
 };
 
+struct SljitNativeAggregateStateSourcePlan {
+	string function_name;
+	ExecutionRegionNativeStateScanContract state_scan_contract;
+};
+
 struct SljitNativeRegionPlan {
 	vector<SljitNativeRegionOpPlan> ops;
 	vector<SljitNativeScanFilterPlan> scan_filters;
+	SljitNativeAggregateStateSourcePlan aggregate_state_source;
 	ExecutionRegionSourceExecutionKind source_execution = ExecutionRegionSourceExecutionKind::NONE;
 	bool uses_scan_filters = false;
 	vector<LogicalType> source_output_types;

@@ -76,6 +76,25 @@ static SljitPrimitiveRunRegisterLayout BuildSljitPrimitiveRunRegisterLayout() {
 	result.base_saved_register_count = 6;
 	result.saved_register_count = result.base_saved_register_count;
 	result.affine_saved_register_count = result.base_saved_register_count;
+	result.multi_saved_register_count = result.base_saved_register_count;
+	result.shared_validity_multi_saved_register_count = result.base_saved_register_count;
+	if (capabilities.registers.SupportsLayout(7, 7)) {
+		result.has_multi_output_index = true;
+		result.multi_output_index = SljitSavedRegisterAt(6);
+		result.multi_saved_register_count = 7;
+		result.shared_validity_multi_saved_register_count = 7;
+	}
+	if (capabilities.registers.SupportsLayout(7, 8)) {
+		result.has_multi_output_row_counts = true;
+		result.multi_output_row_counts = SljitSavedRegisterAt(7);
+		result.multi_saved_register_count = 8;
+		result.shared_validity_multi_saved_register_count = 8;
+	}
+	if (capabilities.registers.SupportsLayout(7, 9)) {
+		result.has_multi_shared_validity = true;
+		result.multi_shared_validity = SljitSavedRegisterAt(8);
+		result.shared_validity_multi_saved_register_count = 9;
+	}
 	if (capabilities.registers.SupportsLayout(7, 8)) {
 		result.has_affine_accumulators = true;
 		result.affine_value = SljitSavedRegisterAt(6);

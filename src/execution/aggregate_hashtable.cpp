@@ -1875,7 +1875,7 @@ static bool AggregateDenseDomainCanAdmit(const ExecutionDenseGroupDomain &domain
 //! switches. OP::Run<T> receives the group type's storage type; an unsupported type
 //! returns the fallback.
 template <class OP, class RESULT, class... ARGS>
-static RESULT AggregateDispatchDenseIntegralType(PhysicalType physical_type, RESULT fallback, ARGS &&...args) {
+static RESULT AggregateDispatchDenseIntegralType(PhysicalType physical_type, RESULT fallback, ARGS &&... args) {
 	switch (physical_type) {
 	case PhysicalType::BOOL:
 		return OP::template Run<bool>(std::forward<ARGS>(args)...);
@@ -1977,7 +1977,7 @@ AggregateTryPrepareDenseSingleFieldTargetCacheTemplated(const AggregateFastGroup
 
 struct AggregateTryPrepareDenseSingleFieldTargetCacheOp {
 	template <class T, class... ARGS>
-	static auto Run(ARGS &&...args)
+	static auto Run(ARGS &&... args)
 	    -> decltype(AggregateTryPrepareDenseSingleFieldTargetCacheTemplated<T>(std::forward<ARGS>(args)...)) {
 		return AggregateTryPrepareDenseSingleFieldTargetCacheTemplated<T>(std::forward<ARGS>(args)...);
 	}
@@ -2024,7 +2024,7 @@ static bool AggregatePopulateDenseSingleFieldTargetCacheTemplated(const Aggregat
 
 struct AggregatePopulateDenseSingleFieldTargetCacheOp {
 	template <class T, class... ARGS>
-	static auto Run(ARGS &&...args)
+	static auto Run(ARGS &&... args)
 	    -> decltype(AggregatePopulateDenseSingleFieldTargetCacheTemplated<T>(std::forward<ARGS>(args)...)) {
 		return AggregatePopulateDenseSingleFieldTargetCacheTemplated<T>(std::forward<ARGS>(args)...);
 	}
@@ -2076,7 +2076,7 @@ AggregateProveDenseSingleFieldAppendKeysNewTemplated(const AggregateFastGroupSou
 
 struct AggregateProveDenseSingleFieldAppendKeysNewOp {
 	template <class T, class... ARGS>
-	static auto Run(ARGS &&...args)
+	static auto Run(ARGS &&... args)
 	    -> decltype(AggregateProveDenseSingleFieldAppendKeysNewTemplated<T>(std::forward<ARGS>(args)...)) {
 		return AggregateProveDenseSingleFieldAppendKeysNewTemplated<T>(std::forward<ARGS>(args)...);
 	}
@@ -2419,7 +2419,7 @@ bool GroupedAggregateHashTable::TryFindOrCreateSingleFieldGroupsDenseTemplated(
 
 struct GroupedAggregateHashTable::SingleFieldGroupsDenseDispatchOp {
 	template <class T, class... ARGS>
-	static bool Run(GroupedAggregateHashTable &ht, ARGS &&...args) {
+	static bool Run(GroupedAggregateHashTable &ht, ARGS &&... args) {
 		return ht.TryFindOrCreateSingleFieldGroupsDenseTemplated<T>(std::forward<ARGS>(args)...);
 	}
 };
@@ -5135,7 +5135,7 @@ bool GroupedAggregateHashTable::TryFindOrCreateRowPointerSingleInputVectorGroupS
 
 struct GroupedAggregateHashTable::SingleInputVectorGroupsDenseDispatchOp {
 	template <class T, class... ARGS>
-	static bool Run(GroupedAggregateHashTable &ht, ARGS &&...args) {
+	static bool Run(GroupedAggregateHashTable &ht, ARGS &&... args) {
 		return ht.TryFindOrCreateSingleInputVectorGroupsDenseTemplated<T>(std::forward<ARGS>(args)...);
 	}
 };
@@ -5911,7 +5911,7 @@ bool GroupedAggregateHashTable::TryFindOrCreateRowPointerSingleFieldGroupStateTa
 
 struct GroupedAggregateHashTable::RowPointerSingleFieldDirectDispatchOp {
 	template <class T, class... ARGS>
-	static bool Run(GroupedAggregateHashTable &ht, ARGS &&...args) {
+	static bool Run(GroupedAggregateHashTable &ht, ARGS &&... args) {
 		return ht.TryFindOrCreateRowPointerSingleFieldGroupStateTargetsDirectTemplated<T>(std::forward<ARGS>(args)...);
 	}
 };
@@ -6072,7 +6072,7 @@ bool GroupedAggregateHashTable::TryFindOrCreateInputVectorSingleFieldGroupStateT
 
 struct GroupedAggregateHashTable::InputVectorSingleFieldDirectDispatchOp {
 	template <class T, class... ARGS>
-	static bool Run(GroupedAggregateHashTable &ht, ARGS &&...args) {
+	static bool Run(GroupedAggregateHashTable &ht, ARGS &&... args) {
 		return ht.TryFindOrCreateInputVectorSingleFieldGroupStateTargetsDirectTemplated<T>(std::forward<ARGS>(args)...);
 	}
 };
@@ -7139,11 +7139,14 @@ bool GroupedAggregateHashTable::TryAppendNewGroupsFastInternal(
 	auto target = PrepareAppendTarget(state.group_chunk, chunk_size, append_only);
 	RecordAggregateTraceStage(recorder, "find_new.group_format", group_format_start);
 	const auto &append_selection = *FlatVector::IncrementalSelectionVector();
+	// Append-only state publication consumes physical row locations directly. A
+	// single-partition append preserves input order, so no reverse map is needed.
+	const bool build_reverse_selection = !append_only || addresses;
 	const auto fixed_width_append = target.data.TryAppendUnifiedFixedWidthSinglePartition(
-	    target.state, state.group_chunk, append_selection, chunk_size);
-	const auto single_partition_append =
-	    fixed_width_append ||
-	    target.data.TryAppendUnifiedSinglePartition(target.state, state.group_chunk, append_selection, chunk_size);
+	    target.state, state.group_chunk, append_selection, chunk_size, build_reverse_selection);
+	const auto single_partition_append = fixed_width_append || target.data.TryAppendUnifiedSinglePartition(
+	                                                               target.state, state.group_chunk, append_selection,
+	                                                               chunk_size, build_reverse_selection);
 	if (!single_partition_append) {
 		target.data.AppendUnified(target.state, state.group_chunk, append_selection, chunk_size);
 	}

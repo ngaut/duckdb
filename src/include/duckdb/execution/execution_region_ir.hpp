@@ -71,11 +71,23 @@ struct ExecutionRegionNativeGroupedStateContract {
 	string ir;
 };
 
+//! Semantic description of one aggregate state exposed by a native state-scan
+//! batch. Physical state offsets and hash-table layout remain core-owned.
+struct ExecutionRegionPrimitiveAggregateStateLane {
+	idx_t aggregate_index = DConstants::INVALID_INDEX;
+	idx_t source_output_index = DConstants::INVALID_INDEX;
+	LogicalType return_type;
+	AggregatePrimitiveUpdateKind primitive_update_kind = AggregatePrimitiveUpdateKind::NONE;
+};
+
 struct ExecutionRegionNativeStateScanContract {
 	ExecutionRegionStateContractStatus status = ExecutionRegionStateContractStatus::NONE;
 	string required_capability;
 	string contract_version;
 	string blocker;
+	bool primitive_aggregate_batch_ready = false;
+	vector<ExecutionRegionPrimitiveAggregateStateLane> primitive_aggregate_lanes;
+	string primitive_aggregate_batch_blocker;
 	string ir;
 };
 
@@ -154,17 +166,12 @@ struct ExecutionRegionHashJoinContract {
 	bool source_produces_rows = false;
 	bool regular_hash_table_layout_ready = false;
 	bool perfect_hash_probe_shape_ready = false;
-	bool found_match_column_present = false;
 	bool native_probe_shape_ready = false;
 	bool build_sink_shape_ready = false;
 	ExecutionHashJoinProbeOutputMode native_probe_output_mode = ExecutionHashJoinProbeOutputMode::NONE;
-	idx_t layout_column_count = 0;
 	vector<idx_t> layout_offsets;
 	idx_t tuple_size = 0;
-	idx_t entry_size = 0;
 	idx_t pointer_offset = 0;
-	idx_t hash_column_index = 0;
-	idx_t found_match_column_index = 0;
 	string native_contract_blocker;
 	string native_probe_shape_blocker;
 	string perfect_hash_probe_shape_blocker;
@@ -245,7 +252,6 @@ struct ExecutionRegionAggregateContract {
 	vector<Value> perfect_group_minima;
 	bool grouped_state_layout_ready = false;
 	vector<idx_t> grouped_state_offsets;
-	vector<idx_t> grouped_state_payload_sizes;
 	ExecutionRegionNativeGroupedStateContract native_grouped_state_contract;
 	ExecutionRegionNativeOperatorContract native_state_update_contract;
 	string ir;

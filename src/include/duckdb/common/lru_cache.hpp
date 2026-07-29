@@ -51,30 +51,42 @@ public:
 	// Insert `value` with key `key` and explicit memory size. This will replace any previous entry with the same key.
 	template <typename... Types>
 	void Put(Key key, shared_ptr<Val> value, Types... constructor_args) {
-		// Remove existing entry if present
-		auto existing_it = entry_map.find(key);
-		if (existing_it != entry_map.end()) {
-			DeleteImpl(existing_it);
-		}
-
+		// Construct every potentially-throwing payload before changing the cache.
 		auto payload = make_uniq<Payload>(std::forward<Types>(constructor_args)...);
 		auto payload_weight = payload->GetWeight();
 
-		// Evict entries if needed to make room
-		if (max_total_weight > 0 && payload_weight > 0) {
-			EvictIfNeeded(payload_weight);
+		auto existing_it = entry_map.find(key);
+		if (existing_it != entry_map.end()) {
+			current_total_weight -= existing_it->second.payload_weight;
+			existing_it->second.value = std::move(value);
+			existing_it->second.payload = std::move(payload);
+			existing_it->second.payload_weight = payload_weight;
+			current_total_weight += payload_weight;
+			lru_list.splice(lru_list.begin(), lru_list, existing_it->second.lru_iterator);
+			EvictIfNeeded();
+			return;
 		}
 
-		// Add new entry
-		lru_list.emplace_front(key);
+		// Allocate both ownership nodes before evicting anything. If map
+		// insertion throws, remove the unpublished list node and leave the
+		// existing cache untouched.
+		lru_list.emplace_front(std::move(key));
 		Entry new_entry;
 		new_entry.value = std::move(value);
 		new_entry.lru_iterator = lru_list.begin();
 		new_entry.payload = std::move(payload);
 		new_entry.payload_weight = payload_weight;
-
-		entry_map[std::move(key)] = std::move(new_entry);
+		try {
+			auto inserted = entry_map.emplace(lru_list.front(), std::move(new_entry));
+			if (!inserted.second) {
+				throw InternalException("LRU cache key equality changed during insertion");
+			}
+		} catch (...) {
+			lru_list.pop_front();
+			throw;
+		}
 		current_total_weight += payload_weight;
+		EvictIfNeeded();
 	}
 
 	// Delete the entry with key `key`.
@@ -152,13 +164,14 @@ private:
 		entry_map.erase(iter);
 	}
 
-	void EvictIfNeeded(idx_t required_weight) {
+	void EvictIfNeeded() {
 		if (max_total_weight == 0) {
 			return;
 		}
 
-		// Evict LRU entries until we have enough space
-		while (!lru_list.empty() && (current_total_weight + required_weight > max_total_weight)) {
+		// Retain the newest entry even when it is individually larger than the
+		// configured capacity.
+		while (lru_list.size() > 1 && current_total_weight > max_total_weight) {
 			const auto &stale_key = lru_list.back();
 			auto stale_it = entry_map.find(stale_key);
 			if (stale_it != entry_map.end()) {

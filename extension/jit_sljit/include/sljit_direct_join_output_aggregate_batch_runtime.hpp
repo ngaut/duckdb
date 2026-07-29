@@ -8,7 +8,7 @@
 
 #pragma once
 
-#include "sljit_join_input_complementary_sum_accumulator.hpp"
+#include "sljit_join_input_complementary_sum_api.hpp"
 
 #include "sljit_dense_group_domain.hpp"
 #include "sljit_direct_join_output_aggregate_state.hpp"
@@ -77,7 +77,7 @@ static void SljitFlushPendingRowPointerAggregateBatch(ExecutionRegionRuntime &ru
 		throw InternalException("SLJIT batched direct row-pointer aggregate update failed");
 	}
 	RecordSljitRegionMaterializationElision(runtime, aggregate_op.kind,
-	                                            "projection_aggregate.row_pointer_grouped_update", pending_count);
+	                                        "projection_aggregate.row_pointer_grouped_update", pending_count);
 	batch.Reset();
 }
 
@@ -115,7 +115,7 @@ static void SljitFlushPendingInputVectorAggregateBatch(ExecutionRegionRuntime &r
 		                        input_vector_failure.empty() ? "unknown" : input_vector_failure.c_str());
 	}
 	RecordSljitRegionMaterializationElision(runtime, aggregate_op.kind,
-	                                            "projection_aggregate.input_vector_grouped_update", pending_count);
+	                                        "projection_aggregate.input_vector_grouped_update", pending_count);
 	batch.Reset();
 }
 

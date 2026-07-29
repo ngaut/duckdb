@@ -17,6 +17,8 @@ from types import SimpleNamespace
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from benchmark_common import (  # noqa: E402
     BenchmarkScript,
+    PRODUCTION_CANDIDATE_REPEATS,
+    PRODUCTION_REPEAT_CHOICES,
     REGION_SUMMARY_FIELDS,
     counter_region_summary,
     correctness_from_rows,
@@ -398,10 +400,9 @@ GENERIC_WORKLOADS = (
             ") grouped"
         ),
         "minimum_auto_speedup": 0.0,
-        # Two ten-pair qualifications put the generated median at 31.292 ms in
-        # isolation and 31.764 ms in the full suite, both faster than the prior
-        # 31.938 ms promotion. Guard the same-run ratio independently from raw
-        # runtime, which has its own suite-wide baseline below.
+        # A strict host-admitted ten-pair T1 qualification measured 25.096 ms
+        # and 3.743x after append-only publication stopped building an unused
+        # reverse map. Guard same-run speedup independently from raw runtime.
         "minimum_auto_speedup_by_threads": {1: 3.00, 4: 1.75},
         "max_auto_slowdown": 1.05,
         "requires_compiled_auto": True,
@@ -417,10 +418,8 @@ GENERIC_WORKLOADS = (
             ") grouped"
         ),
         "minimum_auto_speedup": 0.0,
-        # The generated path improved from 35.526 ms to 35.193 ms over ten
-        # alternating T1 pairs while the same-run non-JIT median shifted enough
-        # to move the ratio from 2.843x to 2.729x. Preserve the ratio as an
-        # independent signal; raw JIT performance uses the suite-wide baseline.
+        # The same strict T1 qualification measured 29.225 ms and 3.167x.
+        # Preserve the relative contract independently from the raw baseline.
         "minimum_auto_speedup_by_threads": {1: 2.65, 4: 1.45},
         "max_auto_slowdown": 1.05,
         "requires_compiled_auto": True,
@@ -458,6 +457,8 @@ GENERIC_WORKLOADS = (
             ") grouped"
         ),
         "minimum_auto_speedup": 0.0,
+        # Shared physical payload descriptors and append-only publication
+        # measured 38.194 ms and 2.627x in a strict ten-pair T1 qualification.
         "minimum_auto_speedup_by_threads": {1: 1.70, 4: 1.45},
         "max_auto_slowdown": 1.05,
         "requires_compiled_auto": True,
@@ -477,10 +478,9 @@ GENERIC_WORKLOADS = (
         # and use a raw-pointer progression writer, while wide values retain the
         # exact general path. Append-only ownership also removes pointer-table
         # resize and capacity-abandon work after exact uniqueness proof. Direct
-        # proof-owned finalization measured 2.959x at T1 (174.550 ms) and 3.032x at
-        # T4 (56.804 ms) over ten alternating production pairs. Progression-boundary
-        # publication then measured 3.189x at T4 (52.660 ms). Preserve the independently
-        # promoted T1 contract and ratchet the parallel raw and relative contracts.
+        # proof-owned finalization measured 5.617x at T1 (81.461 ms) in the
+        # strict ten-pair qualification. The independently promoted T4
+        # progression-boundary receipt remains 52.660 ms.
         "minimum_auto_speedup": 0.0,
         "minimum_auto_speedup_by_threads": {1: 2.80, 4: 3.00},
         "max_auto_slowdown": 1.05,
@@ -638,11 +638,11 @@ GENERIC_AUTO_BASELINE_MEDIAN_US_BY_THREADS = {
     "grouped_selective_multi_aggregate": {1: 48256, 4: 15754},
     "grouped_selective_conjunction_multi_aggregate": {1: 46576, 4: 15386},
     "grouped_selective_three_way_conjunction_multi_aggregate": {1: 44259, 4: 15123},
-    "grouped_sorted_runs": {1: 30162, 4: 9820},
-    "grouped_affine_sorted_runs": {1: 34841, 4: 10985},
+    "grouped_sorted_runs": {1: 25096, 4: 9820},
+    "grouped_affine_sorted_runs": {1: 29225, 4: 10985},
     "grouped_sparse_sorted_runs": {1: 30882, 4: 9585},
-    "grouped_nullable_sorted_runs": {1: 58374, 4: 17248},
-    "grouped_wide_sorted_runs": {1: 175896, 4: 55625},
+    "grouped_nullable_sorted_runs": {1: 38194, 4: 17248},
+    "grouped_wide_sorted_runs": {1: 81461, 4: 55625},
     "grouped_distinct": {1: 27898, 4: 16904},
     "join_range": {1: 11748, 4: 11589},
     "join_exact_filter_build": {1: 9643, 4: 5935},
@@ -685,7 +685,7 @@ SUMMARY_FIELDS = (
 )
 
 
-def parse_args() -> argparse.Namespace:
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     root = repo_root()
     parser = argparse.ArgumentParser(description="Benchmark generic DuckDB execution-region JIT workloads")
     parser.add_argument("--duckdb", type=Path, default=root / "build" / "reldebug" / "duckdb")
@@ -696,8 +696,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--repeats",
         type=int,
-        choices=(5, 10),
-        default=5,
+        choices=PRODUCTION_REPEAT_CHOICES,
+        default=PRODUCTION_CANDIDATE_REPEATS,
         help="order-alternating production pairs: 5 for a candidate, 10 for an explicit promotion",
     )
     parser.add_argument("--event-log-size", type=int, default=0)
@@ -716,7 +716,7 @@ def parse_args() -> argparse.Namespace:
         metavar="NAME=VALUE",
         help="repeatable JIT CBO setting override",
     )
-    return parser.parse_args()
+    return parser.parse_args(argv)
 
 
 def make_args(args: argparse.Namespace) -> SimpleNamespace:

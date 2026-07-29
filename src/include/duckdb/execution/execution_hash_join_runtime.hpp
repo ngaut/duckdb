@@ -13,26 +13,81 @@
 #include "duckdb/common/types/hugeint.hpp"
 #include "duckdb/common/types/vector.hpp"
 #include "duckdb/common/vector.hpp"
-#include "duckdb/execution/ht_entry.hpp"
 #include "duckdb/execution/execution_region_common.hpp"
 
 namespace duckdb {
 
-class BloomFilter;
 class JoinHashTable;
 
 enum class ExecutionHashJoinProbeLayoutKind : uint8_t { NONE, REGULAR_HASH_TABLE, PERFECT_HASH_TABLE };
 
+enum class ExecutionHashJoinTableLayoutStatus : uint8_t { INVALID, READY, NOT_FINALIZED, EMPTY, POINTER_TABLE_MISSING };
+
+//! Physical encoding of one regular hash-table entry word.
+//!
+//! MASKS is the generic ABI: pointer_mask and salt_mask are authoritative.
+//! The named encodings let backends specialize once per bound table without
+//! importing DuckDB's private ht_entry_t layout.
+enum class ExecutionHashJoinEntryEncoding : uint8_t { MASKS, POINTER, POINTER_LOWER_48_SALT_UPPER_16 };
+
+static constexpr uint64_t EXECUTION_HASH_JOIN_POINTER_LOWER_48_MASK = 0x0000FFFFFFFFFFFF;
+static constexpr uint64_t EXECUTION_HASH_JOIN_SALT_UPPER_16_MASK = 0xFFFF000000000000;
+
+static inline const char *ExecutionHashJoinTableLayoutStatusToString(ExecutionHashJoinTableLayoutStatus status) {
+	switch (status) {
+	case ExecutionHashJoinTableLayoutStatus::READY:
+		return "ready";
+	case ExecutionHashJoinTableLayoutStatus::NOT_FINALIZED:
+		return "not_finalized";
+	case ExecutionHashJoinTableLayoutStatus::EMPTY:
+		return "empty";
+	case ExecutionHashJoinTableLayoutStatus::POINTER_TABLE_MISSING:
+		return "pointer_table_missing";
+	default:
+		return "invalid";
+	}
+}
+
+static inline const char *ExecutionHashJoinTableLayoutBlocker(ExecutionHashJoinTableLayoutStatus status) {
+	switch (status) {
+	case ExecutionHashJoinTableLayoutStatus::READY:
+		return "none";
+	case ExecutionHashJoinTableLayoutStatus::NOT_FINALIZED:
+		return "hash-join-native-table-not-finalized";
+	case ExecutionHashJoinTableLayoutStatus::EMPTY:
+		return "hash-join-native-empty-build-side";
+	case ExecutionHashJoinTableLayoutStatus::POINTER_TABLE_MISSING:
+		return "hash-join-native-pointer-table-missing";
+	default:
+		return "hash-join-native-table-layout-invalid";
+	}
+}
+
+//! Non-owning view of the regular hash map's entry words.
+//!
+//! The encoded word format is described entirely by the masks below. This is
+//! the physical ABI; backend code must not depend on DuckDB's private ht_entry_t.
+struct ExecutionHashJoinEntryView {
+	const uint64_t *words = nullptr;
+	idx_t capacity = 0;
+	uint64_t bitmask = 0;
+	ExecutionHashJoinEntryEncoding encoding = ExecutionHashJoinEntryEncoding::MASKS;
+	uint64_t pointer_mask = 0;
+	uint64_t salt_mask = 0;
+	const data_ptr_t *aux_next_ptrs = nullptr;
+};
+
+//! Non-owning read-only Bloom view. Its owner is the bound JoinHashTable.
+struct ExecutionHashJoinBloomFilterView {
+	const uint64_t *words = nullptr;
+	uint64_t bitmask = 0;
+};
+
 struct ExecutionHashJoinTableLayout {
-	bool ready = false;
-	ExecutionRegionJoinType join_type = ExecutionRegionJoinType::INVALID;
-	bool finalized = false;
-	bool in_memory = false;
+	ExecutionHashJoinTableLayoutStatus status = ExecutionHashJoinTableLayoutStatus::INVALID;
 	bool needs_chain_matcher = false;
 	bool chains_longer_than_one = false;
-	bool residual_predicate = false;
 	bool dictionary_emission = false;
-	bool can_have_null = false;
 	bool use_salt = false;
 	bool null_keys_are_filtered = false;
 	//! Whether a row retained in the physical hash table actually contains a NULL condition key.
@@ -40,23 +95,13 @@ struct ExecutionHashJoinTableLayout {
 	bool stored_keys_have_null = false;
 	idx_t condition_count = 0;
 	vector<LogicalType> condition_types;
-	idx_t payload_column_count = 0;
-	vector<LogicalType> payload_types;
 	idx_t layout_column_count = 0;
 	vector<idx_t> layout_offsets;
 	idx_t tuple_size = 0;
-	idx_t entry_size = 0;
 	idx_t pointer_offset = 0;
-	idx_t hash_column_index = 0;
 	bool found_match_column_present = false;
-	idx_t found_match_column_index = 0;
-	idx_t capacity = 0;
-	uint64_t bitmask = 0;
-	uint64_t pointer_mask = 0;
-	uint64_t salt_mask = 0;
-	const ht_entry_t *entries = nullptr;
-	const data_ptr_t *aux_next_ptrs = nullptr;
-	const BloomFilter *bloom_filter = nullptr;
+	ExecutionHashJoinEntryView entries;
+	ExecutionHashJoinBloomFilterView bloom_filter;
 	//! Exact membership bitmap owned by the hash table. A backend may use this to replace a unique single-key probe,
 	//! but must execute the membership test itself; scan-side adaptive filters are not an execution proof.
 	bool exact_membership_filter_build_keys_unique = false;
@@ -64,7 +109,19 @@ struct ExecutionHashJoinTableLayout {
 	uint64_t exact_membership_filter_span = 0;
 	const uint64_t *exact_membership_filter_bitmap = nullptr;
 	shared_ptr<ExecutionRuntimeFilterIdentity> runtime_filter_identity;
-	string blocker;
+
+	bool Ready() const {
+		return status == ExecutionHashJoinTableLayoutStatus::READY;
+	}
+
+	bool Empty() const {
+		return status == ExecutionHashJoinTableLayoutStatus::EMPTY;
+	}
+
+	bool CanDefer() const {
+		return status == ExecutionHashJoinTableLayoutStatus::NOT_FINALIZED ||
+		       status == ExecutionHashJoinTableLayoutStatus::POINTER_TABLE_MISSING;
+	}
 };
 
 struct ExecutionPerfectHashJoinTableLayout {

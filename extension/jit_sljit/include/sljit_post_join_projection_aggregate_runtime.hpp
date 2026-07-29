@@ -10,7 +10,8 @@
 
 #include "sljit_direct_join_output_aggregate_runtime.hpp"
 #include "sljit_full_pipeline_runtime.hpp"
-#include "sljit_hash_join_probe_aggregate_consumer_runtime.hpp"
+#include "sljit_hash_join_aggregate_consumer_api.hpp"
+#include "sljit_hash_join_probe_input_filter_runtime.hpp"
 #include "sljit_hash_join_probe_runtime.hpp"
 #include "sljit_hash_join_projection_runtime.hpp"
 #include "sljit_post_join_projection_runtime.hpp"
@@ -34,13 +35,14 @@ struct SljitPostJoinProjectionAggregateRuntimeState {
 		prepared = true;
 	}
 
-	template <class EXECUTE_HASH_JOIN_PROBE>
-	SljitHashJoinAggregateConsumerResult TryExecuteHashJoinProbeConsumer(
-	    ExecutionRegionRuntime &runtime, vector<SljitExecutableRegionOp> &ops, SljitRegionExecutionScratch &scratch,
-	    const SljitHashJoinDirectAggregateConsumerContract &contract,
-	    const SljitHashJoinProbeSelectionPrimitive &probe_primitive, DataChunk &join_input,
-	    SljitSharedPerfectHashPredicateClassificationCache &shared_predicate_classification,
-	    EXECUTE_HASH_JOIN_PROBE &execute_hash_join_probe, idx_t probe_input_filter_idx = DConstants::INVALID_INDEX) {
+	SljitHashJoinAggregateConsumerResult
+	TryExecuteHashJoinProbeConsumer(ExecutionRegionRuntime &runtime, vector<SljitExecutableRegionOp> &ops,
+	                                SljitRegionExecutionScratch &scratch,
+	                                const SljitHashJoinDirectAggregateConsumerContract &contract,
+	                                const SljitHashJoinProbeSelectionPrimitive &probe_primitive, DataChunk &join_input,
+	                                SljitSharedPerfectHashPredicateClassificationCache &shared_predicate_classification,
+	                                SljitNativeRegionHashJoinProbeExecutor &execute_hash_join_probe,
+	                                idx_t probe_input_filter_idx = DConstants::INVALID_INDEX) {
 		SljitHashJoinAggregateConsumerResult result;
 		if (!prepared) {
 			throw InternalException("SLJIT bound direct aggregate terminal was not prepared");

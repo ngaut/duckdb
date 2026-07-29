@@ -10,6 +10,7 @@
 
 #include "sljit_aggregate_preaggregation.hpp"
 #include "sljit_executable_aggregate_codegen.hpp"
+#include "sljit_grouped_aggregate_group_key_source.hpp"
 
 namespace duckdb {
 
@@ -48,16 +49,16 @@ SljitPreaggregatedInputVectorGroupRowsAllValid(const SljitPreaggregatedInputVect
 	return group_source.rows_all_valid;
 }
 
-static bool
-SljitTryBindGeneratedPrimitiveRunSource(ExecutionRegionRuntime &runtime, SljitExecutablePrimitiveRunUpdate &run_update,
-                                        SljitPreaggregatedInputVectorGroupKeySource &group_source,
-                                        SljitPreaggregatedPrimitivePayloadSources &payload_sources,
-                                        const vector<const ExecutionPrimitiveAggregateUpdateLane *> &payload_lanes,
-                                        idx_t count, vector<SljitNativePrimitiveRunLaneInput> &lane_inputs,
-                                        SljitNativePrimitiveRunInput &native_input,
-                                        SljitNativePrimitiveRunFunction &function, const char *&blocker) {
+static bool SljitTryBindGeneratedPrimitiveRunSource(
+    ExecutionRegionRuntime &runtime, SljitExecutablePrimitiveRunUpdate &run_update,
+    SljitPreaggregatedInputVectorGroupKeySource &group_source,
+    SljitPreaggregatedPrimitivePayloadSources &payload_sources,
+    const vector<const ExecutionPrimitiveAggregateUpdateLane *> &payload_lanes, idx_t count,
+    vector<SljitNativePrimitiveRunLaneInput> &lane_inputs, SljitNativePrimitiveRunInput &native_input,
+    SljitNativePrimitiveRunFunction &function, bool &shared_payload_validity, const char *&blocker) {
 	blocker = nullptr;
 	function = nullptr;
+	shared_payload_validity = false;
 	if (!run_update.HasDeferredCodegen()) {
 		blocker = "code";
 		return false;
@@ -129,8 +130,28 @@ SljitTryBindGeneratedPrimitiveRunSource(ExecutionRegionRuntime &runtime, SljitEx
 		}
 	}
 	const bool single_lane_nullable = lane_inputs.size() == 1 && lane_inputs[0].payload_validity != nullptr;
-	function = SljitEnsureExecutablePrimitiveRunUpdate(runtime, run_update, source.source_physical_type,
-	                                                   group_output_type, source.cast_kind, single_lane_nullable);
+	shared_payload_validity = lane_inputs.size() > 1;
+	const validity_t *common_payload_validity = nullptr;
+	bool common_payload_validity_set = false;
+	idx_t shared_payload_validity_lane_count = 0;
+	for (idx_t lane_idx = 0; lane_idx < lane_inputs.size(); lane_idx++) {
+		if (run_update.primitive_kinds[lane_idx] == AggregatePrimitiveUpdateKind::COUNT_STAR) {
+			continue;
+		}
+		shared_payload_validity_lane_count++;
+		if (!common_payload_validity_set) {
+			common_payload_validity = lane_inputs[lane_idx].payload_validity;
+			common_payload_validity_set = true;
+		} else if (lane_inputs[lane_idx].payload_validity != common_payload_validity) {
+			shared_payload_validity = false;
+			break;
+		}
+	}
+	shared_payload_validity =
+	    shared_payload_validity && common_payload_validity_set && shared_payload_validity_lane_count >= 2;
+	function =
+	    SljitEnsureExecutablePrimitiveRunUpdate(runtime, run_update, source.source_physical_type, group_output_type,
+	                                            source.cast_kind, single_lane_nullable, shared_payload_validity);
 	if (!function) {
 		blocker = "specialization";
 		return false;

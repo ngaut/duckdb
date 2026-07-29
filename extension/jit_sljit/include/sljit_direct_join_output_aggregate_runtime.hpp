@@ -8,12 +8,13 @@
 
 #pragma once
 
+#include "sljit_direct_join_output_aggregate_api.hpp"
 #include "sljit_direct_join_output_aggregate_batch_runtime.hpp"
 #include "sljit_direct_join_output_aggregate_trace.hpp"
 #include "sljit_grouped_aggregate_input_vector_groups.hpp"
 #include "sljit_hash_join_projection_aggregate_input_runtime.hpp"
 #include "sljit_hash_join_projection_materialization_runtime.hpp"
-#include "sljit_join_input_row_pointer_complementary_sum_runtime.hpp"
+#include "sljit_join_input_complementary_sum_api.hpp"
 #include "sljit_post_join_projection_strategy.hpp"
 #include "sljit_projection_aggregate_descriptor.hpp"
 #include "sljit_region_runtime_state.hpp"
@@ -21,39 +22,6 @@
 #include "sljit_ungrouped_aggregate_payload_update_runtime.hpp"
 
 namespace duckdb {
-
-static bool SljitTryPrepareDirectJoinOutputAggregateDescriptor(
-    ExecutionRegionRuntime &runtime, vector<SljitExecutableRegionOp> &ops, SljitRegionExecutionScratch &scratch,
-    optional_ptr<SljitDirectJoinOutputAggregateStrategy> strategy_ptr,
-    SljitPostJoinProjectionStrategy &post_join_projection, idx_t row_count,
-    optional_ptr<const vector<idx_t>> output_column_map = nullptr,
-    idx_t output_projection_idx = DConstants::INVALID_INDEX) {
-	if (!strategy_ptr || strategy_ptr->disabled) {
-		return false;
-	}
-	auto &strategy = *strategy_ptr;
-	if (strategy.aggregate_idx >= ops.size()) {
-		throw InternalException("SLJIT direct join-output aggregate index is out of range");
-	}
-	const bool has_projection_chain = post_join_projection.HasProjectionChain();
-	const bool descriptor_ready =
-	    has_projection_chain
-	        ? SljitTryBuildPostJoinProjectionAggregateDescriptor(ops, scratch, post_join_projection,
-	                                                             strategy.aggregate_idx, strategy.descriptor,
-	                                                             output_column_map, output_projection_idx)
-	        : SljitTryBuildSelectedJoinAggregateInputDescriptor(ops, scratch, post_join_projection.hash_join_idx,
-	                                                            strategy.aggregate_idx, strategy.descriptor,
-	                                                            output_column_map, output_projection_idx);
-	if (descriptor_ready) {
-		strategy.descriptor.EnsureInput(runtime.GetAllocator());
-		return true;
-	}
-	SljitRecordDirectJoinOutputAggregateProjectionUnsupported(runtime, ops, post_join_projection,
-	                                                          strategy.descriptor.Blocker(), row_count);
-	strategy.last_failure = strategy.descriptor.Blocker();
-	strategy.disabled = true;
-	return false;
-}
 
 static bool SljitTryExecuteDirectJoinOutputPerfectHashAggregateUpdate(
     ExecutionRegionRuntime &runtime, ExecutionOperatorRuntime &native_runtime, SljitRegionExecutionScratch &scratch,
@@ -112,9 +80,9 @@ static bool SljitTryExecuteDirectJoinOutputPerfectHashAggregateUpdate(
 	    aggregate_input.size(), payload_scratch);
 	RecordSljitRegionStageRuntime(runtime, op_idx, op.kind, "primitive_payload_update_fused", payload_stage_start);
 	RecordSljitRegionMaterializationElision(runtime, op.kind, "join_output_perfect_hash_payload_update",
-	                                            aggregate_input.size());
+	                                        aggregate_input.size());
 	RecordSljitRegionMaterializationElision(runtime, op.kind, "fused_payload_update_owns_perfect_hash_group_lookup",
-	                                            aggregate_input.size());
+	                                        aggregate_input.size());
 	return true;
 }
 
@@ -274,7 +242,7 @@ static bool SljitTryExecuteDirectJoinOutputAggregate(
 		    descriptor.payload_source_not_null, "join_output_ungrouped_payload_update",
 		    "join_output_ungrouped_payload_update");
 		RecordSljitRegionMaterializationElision(runtime, aggregate_op.kind, "join_output_ungrouped_update",
-		                                            aggregate_input.size());
+		                                        aggregate_input.size());
 		return true;
 	}
 	string payload_source_failure;

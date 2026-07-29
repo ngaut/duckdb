@@ -14,6 +14,7 @@
 namespace duckdb {
 
 SljitFullPipelineRecipePlan BuildSljitFullPipelineRecipePlan(const vector<SljitExecutableRegionOp> &ops,
+                                                             const SljitNativeAggregateStateSourcePlan &source,
                                                              const vector<LogicalType> &source_output_types,
                                                              const vector<Value> &source_min_values,
                                                              const vector<Value> &source_max_values);

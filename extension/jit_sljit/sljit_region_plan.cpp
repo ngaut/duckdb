@@ -301,6 +301,10 @@ struct SljitRegionLoweringCursor {
 			}
 		}
 		native_region.source_output_types = source_output_types;
+		if (node.source) {
+			native_region.aggregate_state_source.function_name = node.source->function_name;
+			native_region.aggregate_state_source.state_scan_contract = node.source->native_state_scan_contract;
+		}
 		if (source_not_null.size() != source_output_types.size()) {
 			source_not_null.assign(source_output_types.size(), false);
 		}

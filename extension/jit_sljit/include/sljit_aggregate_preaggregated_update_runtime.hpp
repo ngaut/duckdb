@@ -8,6 +8,7 @@
 
 #pragma once
 
+#include "sljit_preaggregated_primitive_update_codegen.hpp"
 #include "sljit_region_runtime_state.hpp"
 
 #include "duckdb/common/operator/add.hpp"
@@ -121,10 +122,59 @@ struct SljitPreaggregatedPrimitiveUpdateState {
 	const SljitExecutableFusedAffineRunUpdate *affine = nullptr;
 	idx_t shared_affine_state_offset = 0;
 	idx_t shared_affine_state_stride = 0;
-	bool shared_affine_canonical_int64_states = false;
+	bool shared_affine_canonical_states = false;
+	ExecutionRegionRuntime *runtime = nullptr;
+	SljitExecutablePrimitiveRunUpdate *primitive_run_update = nullptr;
+	vector<SljitNativePreaggregatedPrimitiveLaneInput> native_lane_inputs;
+	idx_t native_input_capacity = 0;
+	idx_t generated_initialize_count = 0;
+	idx_t generated_update_count = 0;
 	idx_t capture_row_idx = DConstants::INVALID_INDEX;
 	uintptr_t captured_address = 0;
 };
+
+static bool SljitBindPreaggregatedPrimitiveNativeInputs(SljitPreaggregatedPrimitiveUpdateState &state) {
+	if (!state.lanes || !state.payloads || state.lanes->empty() || state.lanes->size() != state.payloads->size()) {
+		return false;
+	}
+	state.native_lane_inputs.clear();
+	state.native_lane_inputs.resize(state.lanes->size());
+	state.native_input_capacity = NumericLimits<idx_t>::Maximum();
+	for (idx_t lane_idx = 0; lane_idx < state.lanes->size(); lane_idx++) {
+		auto lane = (*state.lanes)[lane_idx];
+		if (!lane) {
+			return false;
+		}
+		auto &payload = (*state.payloads)[lane_idx];
+		auto &native = state.native_lane_inputs[lane_idx];
+		native.state_offset = lane->state_offset;
+		switch (lane->kind) {
+		case AggregatePrimitiveUpdateKind::COUNT_STAR:
+		case AggregatePrimitiveUpdateKind::COUNT:
+			native.int64_values = payload.int64_values.data();
+			state.native_input_capacity =
+			    MinValue(state.native_input_capacity, NumericCast<idx_t>(payload.int64_values.size()));
+			break;
+		case AggregatePrimitiveUpdateKind::SUM_INT64:
+			native.int64_values = payload.int64_values.data();
+			native.value_is_set = payload.value_is_set.data();
+			state.native_input_capacity =
+			    MinValue(state.native_input_capacity, MinValue(NumericCast<idx_t>(payload.int64_values.size()),
+			                                                   NumericCast<idx_t>(payload.value_is_set.size())));
+			break;
+		case AggregatePrimitiveUpdateKind::SUM_HUGEINT:
+			native.hugeint_values = payload.hugeint_values.data();
+			native.value_is_set = payload.value_is_set.data();
+			state.native_input_capacity =
+			    MinValue(state.native_input_capacity, MinValue(NumericCast<idx_t>(payload.hugeint_values.size()),
+			                                                   NumericCast<idx_t>(payload.value_is_set.size())));
+			break;
+		default:
+			return false;
+		}
+	}
+	return state.native_input_capacity != NumericLimits<idx_t>::Maximum();
+}
 
 static SljitPreaggregatedPrimitiveUpdateState
 SljitMakePreaggregatedPrimitiveUpdateState(const vector<const ExecutionPrimitiveAggregateUpdateLane *> &lanes,
@@ -134,6 +184,7 @@ SljitMakePreaggregatedPrimitiveUpdateState(const vector<const ExecutionPrimitive
 	state.lanes = &lanes;
 	state.payloads = &payloads;
 	state.capture_row_idx = capture_row_idx;
+	SljitBindPreaggregatedPrimitiveNativeInputs(state);
 	return state;
 }
 
@@ -153,21 +204,21 @@ SljitMakePreaggregatedPrimitiveUpdateState(const vector<const ExecutionPrimitive
 		state.shared_valid_counts =
 		    scratch.shared_valid_counts_are_row_counts ? &scratch.group_row_counts : &scratch.shared_valid_counts;
 		state.affine = affine.get();
-		if (affine->primitive_kind == AggregatePrimitiveUpdateKind::SUM_INT64 && !lanes.empty()) {
-			const auto state_stride = sizeof(int64_t) + sizeof(uint64_t);
+		if (!lanes.empty()) {
+			const auto state_value_size = AggregatePrimitiveUpdateStateValueSize(affine->primitive_kind);
+			const auto state_stride = state_value_size + sizeof(uint64_t);
 			const auto state_offset = lanes[0] ? lanes[0]->state_offset : 0;
-			state.shared_affine_canonical_int64_states = true;
+			state.shared_affine_canonical_states = true;
 			for (idx_t lane_idx = 0; lane_idx < lanes.size(); lane_idx++) {
 				auto lane = lanes[lane_idx];
-				if (!lane || lane->kind != AggregatePrimitiveUpdateKind::SUM_INT64 ||
-				    lane->state_size != state_stride || lane->state_value_offset != 0 ||
-				    lane->state_is_set_offset != sizeof(int64_t) ||
+				if (!lane || lane->kind != affine->primitive_kind || lane->state_size != state_stride ||
+				    lane->state_value_offset != 0 || lane->state_is_set_offset != state_value_size ||
 				    lane->state_offset != state_offset + lane_idx * state_stride) {
-					state.shared_affine_canonical_int64_states = false;
+					state.shared_affine_canonical_states = false;
 					break;
 				}
 			}
-			if (state.shared_affine_canonical_int64_states) {
+			if (state.shared_affine_canonical_states) {
 				state.shared_affine_state_offset = state_offset;
 				state.shared_affine_state_stride = state_stride;
 			}
@@ -181,6 +232,62 @@ static void SljitCapturePreaggregatedPrimitiveAddress(SljitPreaggregatedPrimitiv
 	if (state.capture_row_idx == row_idx) {
 		state.captured_address = address;
 	}
+}
+
+static bool SljitPrepareGeneratedPreaggregatedPrimitiveSelection(const uintptr_t *addresses, const sel_t *address_sel,
+                                                                 const sel_t *execute_sel, idx_t count,
+                                                                 SljitPreaggregatedPrimitiveUpdateState &state) {
+	if (!execute_sel) {
+		if (count > state.native_input_capacity) {
+			return false;
+		}
+		if (state.capture_row_idx < count) {
+			const auto address_idx = address_sel ? address_sel[state.capture_row_idx] : state.capture_row_idx;
+			state.captured_address = addresses[address_idx];
+		}
+		return true;
+	}
+	for (idx_t idx = 0; idx < count; idx++) {
+		const auto row_idx = execute_sel[idx];
+		if (row_idx >= state.native_input_capacity) {
+			return false;
+		}
+		if (row_idx == state.capture_row_idx) {
+			const auto address_idx = address_sel ? address_sel[row_idx] : idx;
+			state.captured_address = addresses[address_idx];
+		}
+	}
+	return true;
+}
+
+static bool ExecuteSljitGeneratedPreaggregatedPrimitiveUpdate(const uintptr_t *addresses, const sel_t *address_sel,
+                                                              const sel_t *execute_sel, idx_t count,
+                                                              bool initialize_states,
+                                                              SljitPreaggregatedPrimitiveUpdateState &state) {
+	if ((count != 0 && !addresses) || !state.lanes || !state.runtime || !state.primitive_run_update ||
+	    state.native_lane_inputs.size() != state.lanes->size() ||
+	    !SljitPrepareGeneratedPreaggregatedPrimitiveSelection(addresses, address_sel, execute_sel, count, state)) {
+		return false;
+	}
+	auto function = SljitEnsureExecutablePreaggregatedPrimitiveUpdate(*state.runtime, *state.primitive_run_update,
+	                                                                  *state.lanes, initialize_states,
+	                                                                  address_sel != nullptr, execute_sel != nullptr);
+	if (!function) {
+		return false;
+	}
+	SljitNativePreaggregatedPrimitiveUpdateInput input;
+	input.addresses = addresses;
+	input.address_sel = address_sel;
+	input.execute_sel = execute_sel;
+	input.lane_inputs = state.native_lane_inputs.data();
+	input.count = count;
+	function(&input);
+	if (initialize_states) {
+		state.generated_initialize_count += count;
+	} else {
+		state.generated_update_count += count;
+	}
+	return true;
 }
 
 template <class VALUE_TYPE>
@@ -380,6 +487,10 @@ static bool SljitTryMultiplySharedAffineInt64Delta(int64_t left, int64_t right, 
 #endif
 }
 
+static inline hugeint_t SljitHugeintFromInt64Bits(int64_t value) {
+	return hugeint_t(value < 0 ? -1 : 0, static_cast<uint64_t>(value));
+}
+
 static bool ExecuteSljitCanonicalSharedAffineInt64Initialization(
     const uintptr_t *addresses, idx_t count, SljitPreaggregatedPrimitiveUpdateState &state,
     const vector<int64_t> &shared_values, const vector<uint8_t> &wide_values, const vector<idx_t> &valid_counts,
@@ -434,6 +545,84 @@ static bool ExecuteSljitCanonicalSharedAffineInt64Initialization(
 	return true;
 }
 
+static hugeint_t SljitComputeSharedAffineHugeintDelta(const hugeint_t &shared_value, const hugeint_t &valid_count,
+                                                      const SljitFusedAffineRunLane &lane) {
+	const auto scaled_value = lane.scale == 0   ? hugeint_t(0)
+	                          : lane.scale == 1 ? shared_value
+	                                            : shared_value * hugeint_t(lane.scale);
+	const auto offset_value = lane.offset == 0   ? hugeint_t(0)
+	                          : lane.offset == 1 ? valid_count
+	                                             : valid_count * hugeint_t(lane.offset);
+	return scaled_value + offset_value;
+}
+
+static bool ExecuteSljitCanonicalSharedAffineHugeintInitialization(
+    const uintptr_t *addresses, idx_t count, SljitPreaggregatedPrimitiveUpdateState &state,
+    const vector<int64_t> &shared_int64_values, const vector<hugeint_t> &shared_hugeint_values,
+    const vector<uint8_t> &shared_value_is_wide, const vector<idx_t> &valid_counts, idx_t lane_count,
+    idx_t state_offset, idx_t state_stride, uint64_t canonical_is_set_word) {
+	auto &affine = *state.affine;
+	const auto lane_span = NumericCast<int64_t>(lane_count - 1);
+	for (idx_t row_idx = 0; row_idx < count; row_idx++) {
+		const auto valid_count = valid_counts[row_idx];
+		if (valid_count > NumericLimits<int64_t>::Maximum()) {
+			return false;
+		}
+		const auto state_is_set_word = valid_count != 0 ? canonical_is_set_word : 0;
+		int64_t first_machine_value = 0;
+		int64_t machine_value_step = 0;
+		int64_t last_machine_value = 0;
+		bool machine_word_progression = valid_count == 0;
+		if (!machine_word_progression && shared_value_is_wide[row_idx] == 0) {
+			int64_t machine_value_span;
+			const auto machine_word_valid_count = UnsafeNumericCast<int64_t>(valid_count);
+			machine_word_progression =
+			    SljitTryComputeSharedAffineInt64Delta(shared_int64_values[row_idx], machine_word_valid_count,
+			                                          affine.lanes.front(), first_machine_value) &&
+			    SljitTryComputeSharedAffineInt64Delta(shared_int64_values[row_idx], machine_word_valid_count,
+			                                          affine.lane_step, machine_value_step) &&
+			    SljitTryMultiplySharedAffineInt64Delta(machine_value_step, lane_span, machine_value_span) &&
+			    SljitTryAddSharedAffineInt64Delta(first_machine_value, machine_value_span, last_machine_value);
+		}
+		if (machine_word_progression) {
+			auto state_base = reinterpret_cast<data_ptr_t>(addresses[row_idx]) + state_offset;
+			auto value = first_machine_value;
+			for (idx_t lane_idx = 1; lane_idx < lane_count; lane_idx++) {
+				Store<hugeint_t>(SljitHugeintFromInt64Bits(value), state_base);
+				Store<uint64_t>(state_is_set_word, state_base + sizeof(hugeint_t));
+				state_base += state_stride;
+				value += machine_value_step;
+			}
+			Store<hugeint_t>(SljitHugeintFromInt64Bits(value), state_base);
+			Store<uint64_t>(state_is_set_word, state_base + sizeof(hugeint_t));
+			D_ASSERT(value == last_machine_value);
+			continue;
+		}
+		const auto shared_value =
+		    shared_value_is_wide[row_idx] ? shared_hugeint_values[row_idx] : hugeint_t(shared_int64_values[row_idx]);
+		const auto wide_valid_count = hugeint_t(UnsafeNumericCast<int64_t>(valid_count));
+		auto value = valid_count == 0
+		                 ? hugeint_t(0)
+		                 : SljitComputeSharedAffineHugeintDelta(shared_value, wide_valid_count, affine.lanes.front());
+		const auto value_step =
+		    valid_count == 0 ? hugeint_t(0)
+		                     : SljitComputeSharedAffineHugeintDelta(shared_value, wide_valid_count, affine.lane_step);
+		auto state_base = reinterpret_cast<data_ptr_t>(addresses[row_idx]) + state_offset;
+		for (idx_t lane_idx = 1; lane_idx < lane_count; lane_idx++) {
+			Store<hugeint_t>(value, state_base);
+			Store<uint64_t>(state_is_set_word, state_base + sizeof(hugeint_t));
+			state_base += state_stride;
+			value += value_step;
+		}
+		Store<hugeint_t>(value, state_base);
+		Store<uint64_t>(state_is_set_word, state_base + sizeof(hugeint_t));
+	}
+	if (state.capture_row_idx < count) {
+		state.captured_address = addresses[state.capture_row_idx];
+	}
+	return true;
+}
+
 template <bool INITIALIZE_STATES>
 static bool
 ExecuteSljitSharedAffinePreaggregatedPrimitiveUpdateTemplated(const uintptr_t *addresses, const sel_t *address_sel,
@@ -469,12 +658,21 @@ ExecuteSljitSharedAffinePreaggregatedPrimitiveUpdateTemplated(const uintptr_t *a
 		}
 	}
 	if constexpr (INITIALIZE_STATES) {
-		if (!address_sel && !execute_sel && state.shared_affine_canonical_int64_states &&
-		    state.affine->lanes_form_arithmetic_progression &&
-		    ExecuteSljitCanonicalSharedAffineInt64Initialization(
-		        addresses, count, state, shared_int64_values, shared_value_is_wide, valid_counts, lane_count, lane_span,
-		        shared_affine_state_offset, shared_affine_state_stride, canonical_is_set_word)) {
-			return true;
+		if (!address_sel && !execute_sel && state.shared_affine_canonical_states &&
+		    state.affine->lanes_form_arithmetic_progression) {
+			if (state.affine->primitive_kind == AggregatePrimitiveUpdateKind::SUM_INT64 &&
+			    ExecuteSljitCanonicalSharedAffineInt64Initialization(
+			        addresses, count, state, shared_int64_values, shared_value_is_wide, valid_counts, lane_count,
+			        lane_span, shared_affine_state_offset, shared_affine_state_stride, canonical_is_set_word)) {
+				return true;
+			}
+			if (state.affine->primitive_kind == AggregatePrimitiveUpdateKind::SUM_HUGEINT &&
+			    ExecuteSljitCanonicalSharedAffineHugeintInitialization(
+			        addresses, count, state, shared_int64_values, shared_hugeint_values, shared_value_is_wide,
+			        valid_counts, lane_count, shared_affine_state_offset, shared_affine_state_stride,
+			        canonical_is_set_word)) {
+				return true;
+			}
 		}
 	}
 	for (idx_t idx = 0; idx < count; idx++) {
@@ -513,7 +711,8 @@ ExecuteSljitSharedAffinePreaggregatedPrimitiveUpdateTemplated(const uintptr_t *a
 		const auto machine_word_valid_count =
 		    machine_word_inputs ? UnsafeNumericCast<int64_t>(valid_count) : int64_t(0);
 		if constexpr (INITIALIZE_STATES) {
-			if (machine_word_inputs && state.shared_affine_canonical_int64_states &&
+			if (machine_word_inputs && state.shared_affine_canonical_states &&
+			    state.affine->primitive_kind == AggregatePrimitiveUpdateKind::SUM_INT64 &&
 			    state.affine->lanes_form_arithmetic_progression) {
 				int64_t first_value;
 				int64_t value_step;
@@ -618,6 +817,10 @@ static void ExecuteSljitPreaggregatedPrimitiveUpdateInternal(const uintptr_t *ad
 	}
 	if (ExecuteSljitSharedAffinePreaggregatedPrimitiveUpdate(addresses, address_sel, execute_sel, count, state,
 	                                                         initialize_states)) {
+		return;
+	}
+	if (ExecuteSljitGeneratedPreaggregatedPrimitiveUpdate(addresses, address_sel, execute_sel, count, initialize_states,
+	                                                      state)) {
 		return;
 	}
 	if (ExecuteSljitSingleLanePreaggregatedPrimitiveUpdate(addresses, address_sel, execute_sel, count, state,

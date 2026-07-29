@@ -79,13 +79,10 @@ static bool RadixLoadPrimitiveDouble(const_data_ptr_t data, PhysicalType type, i
 	}
 }
 
-static void RadixAccumulateHugeintInt64(hugeint_t &sum, int64_t value) {
-	const auto old_lower = sum.lower;
-	sum.lower += UnsafeNumericCast<uint64_t>(value);
-	sum.upper += value >> 63;
-	if (sum.lower < old_lower) {
-		sum.upper++;
-	}
+static inline void RadixAccumulateHugeintInt64(hugeint_t &sum, int64_t value) {
+	const auto previous_lower = sum.lower;
+	sum.lower += static_cast<uint64_t>(value);
+	sum.upper += static_cast<int64_t>(sum.lower < previous_lower) - static_cast<int64_t>(value < 0);
 }
 
 struct RadixPrimitiveAggregatePayload {
@@ -2067,6 +2064,368 @@ public:
 
 enum class RadixHTScanStatus : uint8_t { INIT, IN_PROGRESS, DONE };
 
+class RadixPrimitiveAggregateStateScanBatch : public ExecutionAggregateStateScanBatch {
+public:
+	explicit RadixPrimitiveAggregateStateScanBatch(const RadixPartitionedHashTable &radix_ht) {
+		auto &layout = radix_ht.GetLayout();
+		auto &offsets = layout.GetOffsets();
+		auto aggregate_offset_idx = layout.ColumnCount();
+		if (layout.HasDestructor() || offsets.size() < aggregate_offset_idx + radix_ht.op.aggregates.size()) {
+			source.blocker = layout.HasDestructor() ? "hash-aggregate-primitive-state-scan-destructor"
+			                                        : "hash-aggregate-primitive-state-scan-layout";
+			return;
+		}
+		source.lanes.reserve(radix_ht.op.aggregates.size());
+		for (idx_t aggregate_idx = 0; aggregate_idx < radix_ht.op.aggregates.size(); aggregate_idx++) {
+			auto &expression = radix_ht.op.aggregates[aggregate_idx]->Cast<BoundAggregateExpression>();
+			auto &function = expression.Function();
+			if (!function.HasPrimitiveUpdateABI()) {
+				source.blocker = "hash-aggregate-primitive-state-scan-aggregate-abi";
+				return;
+			}
+			auto &abi = function.GetPrimitiveUpdateABI();
+			auto value_size = AggregatePrimitiveUpdateStateValueSize(abi.kind);
+			if (!AggregatePrimitiveUpdateKindIsSupported(abi.kind) || value_size == 0 ||
+			    abi.state_value_offset + value_size > abi.state_size ||
+			    (AggregatePrimitiveUpdateHasStateIsSet(abi.kind) &&
+			     abi.state_is_set_offset + sizeof(bool) > abi.state_size)) {
+				source.blocker = "hash-aggregate-primitive-state-scan-state-layout";
+				return;
+			}
+			ExecutionPrimitiveAggregateUpdateLane lane;
+			lane.ready = true;
+			lane.kind = abi.kind;
+			lane.aggregate_index = aggregate_idx;
+			lane.payload_type = abi.input_type;
+			lane.state_size = abi.state_size;
+			lane.state_offset = offsets[aggregate_offset_idx + aggregate_idx];
+			lane.state_value_offset = abi.state_value_offset;
+			lane.state_is_set_offset = abi.state_is_set_offset;
+			source.lanes.push_back(lane);
+		}
+		source.ready = !source.lanes.empty();
+		source.blocker = source.ready ? string() : "hash-aggregate-primitive-state-scan-empty";
+	}
+
+	void Bind(Vector &row_locations_p, idx_t count_p) {
+		row_locations = FlatVector::GetData<data_ptr_t>(row_locations_p);
+		count = count_p;
+	}
+
+	void Reset() {
+		row_locations = nullptr;
+		count = 0;
+	}
+
+	idx_t Count() const override {
+		return count;
+	}
+
+	bool CombinePrimitive(const vector<ExecutionAggregateStateCombineLane> &lanes,
+	                      ExecutionPrimitiveAggregateUpdateBinding &target, string &blocker) const override {
+		if (!source.ready || !target.ready || !row_locations || count == 0 || lanes.empty()) {
+			blocker =
+			    !source.ready ? source.blocker : (!target.ready ? target.blocker : "aggregate-state-combine-empty");
+			return false;
+		}
+		struct BoundLane {
+			ExecutionAggregateStateCombineSourceKind source_kind;
+			const ExecutionPrimitiveAggregateUpdateLane *source = nullptr;
+			const ExecutionPrimitiveAggregateUpdateLane *target = nullptr;
+			int64_t int64_value = 0;
+			hugeint_t hugeint_value = hugeint_t(0);
+			double double_value = 0;
+			bool saw_value = false;
+		};
+		vector<BoundLane> bound_lanes;
+		bound_lanes.reserve(lanes.size());
+		for (idx_t lane_idx = 0; lane_idx < lanes.size(); lane_idx++) {
+			auto &mapping = lanes[lane_idx];
+			auto target_lane = target.FindLane(mapping.target_aggregate_index);
+			if (!target_lane || !target_lane->ready || !target_lane->row_count) {
+				blocker = "aggregate-state-combine-lane-missing";
+				return false;
+			}
+			for (idx_t prior_idx = 0; prior_idx < lane_idx; prior_idx++) {
+				if (lanes[prior_idx].target_aggregate_index == mapping.target_aggregate_index) {
+					blocker = "aggregate-state-combine-duplicate-target";
+					return false;
+				}
+			}
+			if (mapping.source_kind == ExecutionAggregateStateCombineSourceKind::ROW_COUNT) {
+				if (mapping.source_aggregate_index != DConstants::INVALID_INDEX ||
+				    target_lane->kind != AggregatePrimitiveUpdateKind::COUNT_STAR || !target_lane->sum_int64_value) {
+					blocker = "aggregate-state-combine-row-count-kind";
+					return false;
+				}
+				BoundLane bound;
+				bound.source_kind = mapping.source_kind;
+				bound.target = target_lane;
+				bound_lanes.push_back(bound);
+				continue;
+			}
+			if (mapping.source_kind != ExecutionAggregateStateCombineSourceKind::AGGREGATE_STATE) {
+				blocker = "aggregate-state-combine-source-kind";
+				return false;
+			}
+			auto source_lane = source.FindLane(mapping.source_aggregate_index);
+			if (!source_lane || !source_lane->ready) {
+				blocker = "aggregate-state-combine-source-lane-missing";
+				return false;
+			}
+			switch (target_lane->kind) {
+			case AggregatePrimitiveUpdateKind::SUM_INT64:
+				if (!target_lane->sum_int64_value || !target_lane->state_is_set ||
+				    (!AggregatePrimitiveUpdateUsesInt64State(source_lane->kind))) {
+					blocker = "aggregate-state-combine-int64-kind";
+					return false;
+				}
+				break;
+			case AggregatePrimitiveUpdateKind::SUM_HUGEINT:
+				if (!target_lane->sum_hugeint_value || !target_lane->state_is_set ||
+				    (!AggregatePrimitiveUpdateUsesHugeintState(source_lane->kind) &&
+				     !AggregatePrimitiveUpdateUsesInt64State(source_lane->kind))) {
+					blocker = "aggregate-state-combine-hugeint-kind";
+					return false;
+				}
+				break;
+			case AggregatePrimitiveUpdateKind::SUM_DOUBLE:
+				if (!target_lane->sum_double_value || !target_lane->state_is_set ||
+				    source_lane->kind != AggregatePrimitiveUpdateKind::SUM_DOUBLE) {
+					blocker = "aggregate-state-combine-double-kind";
+					return false;
+				}
+				break;
+			default:
+				blocker = "aggregate-state-combine-target-kind";
+				return false;
+			}
+			BoundLane bound;
+			bound.source_kind = mapping.source_kind;
+			bound.source = source_lane;
+			bound.target = target_lane;
+			bound_lanes.push_back(bound);
+		}
+
+		idx_t source_lane_count = 0;
+		optional_idx single_source_lane;
+		for (idx_t lane_idx = 0; lane_idx < bound_lanes.size(); lane_idx++) {
+			if (bound_lanes[lane_idx].source) {
+				source_lane_count++;
+				single_source_lane = lane_idx;
+			}
+		}
+		if (source_lane_count == 1) {
+			// Keep the type dispatch outside the hot loop for narrow reductions.
+			auto &bound = bound_lanes[single_source_lane.GetIndex()];
+			auto &source_lane = *bound.source;
+			switch (bound.target->kind) {
+			case AggregatePrimitiveUpdateKind::SUM_INT64:
+				for (idx_t row_idx = 0; row_idx < count; row_idx++) {
+					auto state = row_locations[row_idx] + source_lane.state_offset;
+					if (AggregatePrimitiveUpdateHasStateIsSet(source_lane.kind) &&
+					    !Load<bool>(state + source_lane.state_is_set_offset)) {
+						continue;
+					}
+					bound.int64_value += Load<int64_t>(state + source_lane.state_value_offset);
+					bound.saw_value = true;
+				}
+				break;
+			case AggregatePrimitiveUpdateKind::SUM_HUGEINT:
+				for (idx_t row_idx = 0; row_idx < count; row_idx++) {
+					auto state = row_locations[row_idx] + source_lane.state_offset;
+					if (AggregatePrimitiveUpdateHasStateIsSet(source_lane.kind) &&
+					    !Load<bool>(state + source_lane.state_is_set_offset)) {
+						continue;
+					}
+					auto value = AggregatePrimitiveUpdateUsesHugeintState(source_lane.kind)
+					                 ? Load<hugeint_t>(state + source_lane.state_value_offset)
+					                 : hugeint_t(Load<int64_t>(state + source_lane.state_value_offset));
+					bound.hugeint_value = Hugeint::Add(bound.hugeint_value, value);
+					bound.saw_value = true;
+				}
+				break;
+			case AggregatePrimitiveUpdateKind::SUM_DOUBLE:
+				for (idx_t row_idx = 0; row_idx < count; row_idx++) {
+					auto state = row_locations[row_idx] + source_lane.state_offset;
+					if (!Load<bool>(state + source_lane.state_is_set_offset)) {
+						continue;
+					}
+					bound.double_value += Load<double>(state + source_lane.state_value_offset);
+					bound.saw_value = true;
+				}
+				break;
+			default:
+				throw InternalException("validated aggregate-state combine target changed kind");
+			}
+		} else if (source_lane_count > 1) {
+			struct Int64HugeintLane {
+				idx_t bound_lane_index;
+				idx_t state_value_offset;
+				idx_t state_is_set_offset;
+				bool has_state_is_set;
+				hugeint_t value = hugeint_t(0);
+				bool saw_value = false;
+			};
+			vector<Int64HugeintLane> int64_hugeint_lanes;
+			int64_hugeint_lanes.reserve(source_lane_count);
+			for (idx_t bound_lane_idx = 0; bound_lane_idx < bound_lanes.size(); bound_lane_idx++) {
+				auto &bound = bound_lanes[bound_lane_idx];
+				if (!bound.source) {
+					continue;
+				}
+				auto &source_lane = *bound.source;
+				if (bound.target->kind != AggregatePrimitiveUpdateKind::SUM_HUGEINT ||
+				    !AggregatePrimitiveUpdateUsesInt64State(source_lane.kind)) {
+					int64_hugeint_lanes.clear();
+					break;
+				}
+				Int64HugeintLane lane;
+				lane.bound_lane_index = bound_lane_idx;
+				lane.state_value_offset = source_lane.state_offset + source_lane.state_value_offset;
+				lane.state_is_set_offset = source_lane.state_offset + source_lane.state_is_set_offset;
+				lane.has_state_is_set = AggregatePrimitiveUpdateHasStateIsSet(source_lane.kind);
+				int64_hugeint_lanes.push_back(lane);
+			}
+			if (!int64_hugeint_lanes.empty()) {
+				// A batch contains at most idx_t rows, so its exact signed-int64 sum
+				// always fits in 128 bits. Accumulate the homogeneous common case
+				// inline and perform checked target-state addition once per lane,
+				// instead of calling the generic checked hugeint helper per cell.
+				static constexpr idx_t CANONICAL_INT64_SUM_STATE_STRIDE = sizeof(int64_t) + sizeof(uint64_t);
+				bool canonical_sum_run =
+				    int64_hugeint_lanes.size() <= STANDARD_VECTOR_SIZE && int64_hugeint_lanes[0].has_state_is_set;
+				const auto first_value_offset = int64_hugeint_lanes[0].state_value_offset;
+				for (idx_t lane_idx = 0; lane_idx < int64_hugeint_lanes.size(); lane_idx++) {
+					auto &lane = int64_hugeint_lanes[lane_idx];
+					canonical_sum_run =
+					    canonical_sum_run && lane.has_state_is_set &&
+					    lane.state_value_offset == first_value_offset + lane_idx * CANONICAL_INT64_SUM_STATE_STRIDE &&
+					    lane.state_is_set_offset == lane.state_value_offset + sizeof(int64_t);
+				}
+				if (canonical_sum_run) {
+					// Keep the canonical physical walk entirely inside the core.
+					// Compact exact accumulators give the compiler a regular
+					// adjacent-lane loop while the public contract stays semantic
+					// and opaque. The stack scratch is bounded by DuckDB's vector
+					// width; exceptionally wider schemas retain the generic path.
+					std::array<hugeint_t, STANDARD_VECTOR_SIZE> values;
+					std::array<uint8_t, STANDARD_VECTOR_SIZE> saw_values;
+					for (idx_t lane_idx = 0; lane_idx < int64_hugeint_lanes.size(); lane_idx++) {
+						values[lane_idx] = hugeint_t(0);
+						saw_values[lane_idx] = 0;
+					}
+					idx_t unseen_values = int64_hugeint_lanes.size();
+					for (idx_t row_idx = 0; row_idx < count; row_idx++) {
+						auto state = row_locations[row_idx] + first_value_offset;
+						if (unseen_values != 0) {
+							for (idx_t lane_idx = 0; lane_idx < int64_hugeint_lanes.size(); lane_idx++) {
+								if (!saw_values[lane_idx] &&
+								    Load<bool>(state + lane_idx * CANONICAL_INT64_SUM_STATE_STRIDE + sizeof(int64_t))) {
+									saw_values[lane_idx] = 1;
+									unseen_values--;
+								}
+							}
+						}
+						for (idx_t lane_idx = 0; lane_idx < int64_hugeint_lanes.size(); lane_idx++) {
+							const auto value = Load<int64_t>(state + lane_idx * CANONICAL_INT64_SUM_STATE_STRIDE);
+							RadixAccumulateHugeintInt64(values[lane_idx], value);
+						}
+					}
+					for (idx_t lane_idx = 0; lane_idx < int64_hugeint_lanes.size(); lane_idx++) {
+						auto &lane = int64_hugeint_lanes[lane_idx];
+						lane.value = values[lane_idx];
+						lane.saw_value = saw_values[lane_idx] != 0;
+					}
+				} else {
+					for (idx_t row_idx = 0; row_idx < count; row_idx++) {
+						auto row = row_locations[row_idx];
+						for (auto &lane : int64_hugeint_lanes) {
+							// Primitive SUM states define zero as the value of an
+							// unset state. Consume every value without a nullable
+							// branch and track only whether the batch saw a value.
+							lane.saw_value =
+							    lane.saw_value || !lane.has_state_is_set || Load<bool>(row + lane.state_is_set_offset);
+							RadixAccumulateHugeintInt64(lane.value, Load<int64_t>(row + lane.state_value_offset));
+						}
+					}
+				}
+				for (auto &lane : int64_hugeint_lanes) {
+					auto &bound = bound_lanes[lane.bound_lane_index];
+					bound.hugeint_value = lane.value;
+					bound.saw_value = lane.saw_value;
+				}
+			} else {
+				// State rows are wider than a cache line for multi-aggregate queries.
+				// Traverse each row once so its adjacent aggregate states are consumed
+				// together instead of rereading the row-location stream once per lane.
+				for (idx_t row_idx = 0; row_idx < count; row_idx++) {
+					auto row = row_locations[row_idx];
+					for (auto &bound : bound_lanes) {
+						if (!bound.source) {
+							continue;
+						}
+						auto &source_lane = *bound.source;
+						auto state = row + source_lane.state_offset;
+						if (AggregatePrimitiveUpdateHasStateIsSet(source_lane.kind) &&
+						    !Load<bool>(state + source_lane.state_is_set_offset)) {
+							continue;
+						}
+						auto &target_lane = *bound.target;
+						switch (target_lane.kind) {
+						case AggregatePrimitiveUpdateKind::SUM_INT64:
+							bound.int64_value += Load<int64_t>(state + source_lane.state_value_offset);
+							break;
+						case AggregatePrimitiveUpdateKind::SUM_HUGEINT: {
+							auto value = AggregatePrimitiveUpdateUsesHugeintState(source_lane.kind)
+							                 ? Load<hugeint_t>(state + source_lane.state_value_offset)
+							                 : hugeint_t(Load<int64_t>(state + source_lane.state_value_offset));
+							bound.hugeint_value = Hugeint::Add(bound.hugeint_value, value);
+							break;
+						}
+						case AggregatePrimitiveUpdateKind::SUM_DOUBLE:
+							bound.double_value += Load<double>(state + source_lane.state_value_offset);
+							break;
+						default:
+							throw InternalException("validated aggregate-state combine target changed kind");
+						}
+						bound.saw_value = true;
+					}
+				}
+			}
+		}
+		for (auto &bound : bound_lanes) {
+			auto &target_lane = *bound.target;
+			if (bound.source_kind == ExecutionAggregateStateCombineSourceKind::ROW_COUNT) {
+				*target_lane.sum_int64_value += NumericCast<int64_t>(count);
+			} else if (bound.saw_value) {
+				switch (target_lane.kind) {
+				case AggregatePrimitiveUpdateKind::SUM_INT64:
+					*target_lane.sum_int64_value += bound.int64_value;
+					break;
+				case AggregatePrimitiveUpdateKind::SUM_HUGEINT:
+					*target_lane.sum_hugeint_value = Hugeint::Add(*target_lane.sum_hugeint_value, bound.hugeint_value);
+					break;
+				case AggregatePrimitiveUpdateKind::SUM_DOUBLE:
+					*target_lane.sum_double_value += bound.double_value;
+					break;
+				default:
+					throw InternalException("validated aggregate-state combine target changed kind");
+				}
+				*target_lane.state_is_set = true;
+			}
+			*target_lane.row_count += count;
+		}
+		blocker.clear();
+		return true;
+	}
+
+private:
+	ExecutionPrimitiveAggregateUpdateBinding source;
+	const data_ptr_t *row_locations = nullptr;
+	idx_t count = 0;
+};
+
 class RadixHTLocalSourceState : public LocalSourceState {
 public:
 	explicit RadixHTLocalSourceState(ExecutionContext &context, const RadixPartitionedHashTable &radix_ht);
@@ -2075,13 +2434,24 @@ public:
 public:
 	//! Do the work this thread has been assigned
 	void ExecuteTask(RadixHTGlobalSinkState &sink, RadixHTGlobalSourceState &gstate, DataChunk &chunk);
+	void ExecutePrimitiveAggregateStateTask(RadixHTGlobalSinkState &sink, RadixHTGlobalSourceState &gstate);
 	//! Whether this thread has finished the work it has been assigned
 	bool TaskFinished();
+	ExecutionAggregateStateScanBatch &PrimitiveBatch() {
+		return primitive_batch;
+	}
+	void ResetPrimitiveBatch() {
+		primitive_batch.Reset();
+	}
 
 private:
 	//! Execute the finalize or scan task
 	void Finalize(RadixHTGlobalSinkState &sink, RadixHTGlobalSourceState &gstate);
 	void Scan(RadixHTGlobalSinkState &sink, RadixHTGlobalSourceState &gstate, DataChunk &chunk);
+	bool ScanRows(RadixHTGlobalSinkState &sink, RadixHTGlobalSourceState &gstate);
+	bool ScanPrimitiveStateRows(RadixHTGlobalSinkState &sink, RadixHTGlobalSourceState &gstate);
+	bool ScanRowsInternal(RadixHTGlobalSinkState &sink, RadixHTGlobalSourceState &gstate,
+	                      const vector<column_t> &column_ids, DataChunk &result);
 
 public:
 	//! Current task and index
@@ -2102,6 +2472,8 @@ private:
 	//! State and chunk for scanning
 	TupleDataScanState scan_state;
 	DataChunk scan_chunk;
+	DataChunk primitive_state_scan_chunk;
+	RadixPrimitiveAggregateStateScanBatch primitive_batch;
 };
 
 unique_ptr<GlobalSourceState> RadixPartitionedHashTable::GetGlobalSourceState(ClientContext &context) const {
@@ -2158,7 +2530,7 @@ SourceResultType RadixHTGlobalSourceState::AssignTask(RadixHTGlobalSinkState &si
 
 RadixHTLocalSourceState::RadixHTLocalSourceState(ExecutionContext &context, const RadixPartitionedHashTable &radix_ht)
     : layout(radix_ht.GetLayout().Copy()), aggregate_allocator(BufferAllocator::Get(context.client)),
-      row_state(aggregate_allocator) {
+      row_state(aggregate_allocator), primitive_batch(radix_ht) {
 	auto &allocator = BufferAllocator::Get(context.client);
 	auto scan_chunk_types = radix_ht.group_types;
 	for (auto &aggr_type : radix_ht.op.aggregate_return_types) {
@@ -2177,6 +2549,8 @@ void RadixHTLocalSourceState::ResetForReuse() {
 	row_state.addresses.reset();
 	scan_state.Reset();
 	scan_chunk.Reset();
+	primitive_state_scan_chunk.Reset();
+	primitive_batch.Reset();
 }
 
 void RadixPartitionedHashTable::ResetLocalSourceState(ExecutionContext &context, LocalSourceState &lstate_p) const {
@@ -2196,6 +2570,23 @@ void RadixHTLocalSourceState::ExecuteTask(RadixHTGlobalSinkState &sink, RadixHTG
 		break;
 	default:
 		throw InternalException("Unexpected RadixHTSourceTaskType in ExecuteTask!");
+	}
+}
+
+void RadixHTLocalSourceState::ExecutePrimitiveAggregateStateTask(RadixHTGlobalSinkState &sink,
+                                                                 RadixHTGlobalSourceState &gstate) {
+	D_ASSERT(task != RadixHTSourceTaskType::NO_TASK);
+	switch (task) {
+	case RadixHTSourceTaskType::FINALIZE:
+		Finalize(sink, gstate);
+		break;
+	case RadixHTSourceTaskType::SCAN:
+		if (ScanPrimitiveStateRows(sink, gstate)) {
+			primitive_batch.Bind(scan_state.chunk_state.row_locations, primitive_state_scan_chunk.size());
+		}
+		break;
+	default:
+		throw InternalException("Unexpected RadixHTSourceTaskType in primitive aggregate-state scan");
 	}
 }
 
@@ -2258,7 +2649,20 @@ void RadixHTLocalSourceState::Finalize(RadixHTGlobalSinkState &sink, RadixHTGlob
 	scan_status = RadixHTScanStatus::INIT;
 }
 
-void RadixHTLocalSourceState::Scan(RadixHTGlobalSinkState &sink, RadixHTGlobalSourceState &gstate, DataChunk &chunk) {
+bool RadixHTLocalSourceState::ScanRows(RadixHTGlobalSinkState &sink, RadixHTGlobalSourceState &gstate) {
+	return ScanRowsInternal(sink, gstate, gstate.column_ids, scan_chunk);
+}
+
+bool RadixHTLocalSourceState::ScanPrimitiveStateRows(RadixHTGlobalSinkState &sink, RadixHTGlobalSourceState &gstate) {
+	// Primitive consumers combine aggregate states by semantic lane and do not
+	// consume grouping columns. An empty projection keeps the tuple scan focused
+	// on pinning the row-address batch instead of gathering unused group keys.
+	static const vector<column_t> no_columns;
+	return ScanRowsInternal(sink, gstate, no_columns, primitive_state_scan_chunk);
+}
+
+bool RadixHTLocalSourceState::ScanRowsInternal(RadixHTGlobalSinkState &sink, RadixHTGlobalSourceState &gstate,
+                                               const vector<column_t> &column_ids, DataChunk &result) {
 	D_ASSERT(task == RadixHTSourceTaskType::SCAN);
 	D_ASSERT(scan_status != RadixHTScanStatus::DONE);
 
@@ -2267,11 +2671,11 @@ void RadixHTLocalSourceState::Scan(RadixHTGlobalSinkState &sink, RadixHTGlobalSo
 	auto &data_collection = *partition.data;
 
 	if (scan_status == RadixHTScanStatus::INIT) {
-		data_collection.InitializeScan(scan_state, gstate.column_ids, sink.scan_pin_properties);
+		data_collection.InitializeScan(scan_state, column_ids, sink.scan_pin_properties);
 		scan_status = RadixHTScanStatus::IN_PROGRESS;
 	}
 
-	if (!data_collection.Scan(scan_state, scan_chunk)) {
+	if (!data_collection.Scan(scan_state, result)) {
 		if (sink.scan_pin_properties == TupleDataPinProperties::DESTROY_AFTER_DONE) {
 			data_collection.Reset();
 		}
@@ -2280,9 +2684,15 @@ void RadixHTLocalSourceState::Scan(RadixHTGlobalSinkState &sink, RadixHTGlobalSo
 		if (++gstate.task_done == sink.partitions.size()) {
 			gstate.finished = true;
 		}
+		return false;
+	}
+	return true;
+}
+
+void RadixHTLocalSourceState::Scan(RadixHTGlobalSinkState &sink, RadixHTGlobalSourceState &gstate, DataChunk &chunk) {
+	if (!ScanRows(sink, gstate)) {
 		return;
 	}
-
 	const auto group_cols = layout.ColumnCount() - 1;
 	RowOperations::FinalizeStates(row_state, layout, scan_state.chunk_state.row_locations, scan_chunk, group_cols);
 
@@ -2404,6 +2814,60 @@ SourceResultType RadixPartitionedHashTable::GetData(ExecutionContext &context, D
 	} else {
 		return SourceResultType::FINISHED;
 	}
+}
+
+SourceResultType RadixPartitionedHashTable::GetPrimitiveAggregateStateBatch(ExecutionContext &context,
+                                                                            ExecutionAggregateStateScanBatch *&batch,
+                                                                            GlobalSinkState &sink_p,
+                                                                            OperatorSourceInput &input) const {
+	(void)context;
+	batch = nullptr;
+	auto &sink = sink_p.Cast<RadixHTGlobalSinkState>();
+	D_ASSERT(sink.finalized);
+	if (input.stage_recorder && !sink.finalize_strategy_recorded.exchange(true)) {
+		input.stage_recorder->RecordStageRuntime(
+		    ExecutionRegionStageId(RadixHTFinalizeStrategyStage(sink.finalize_strategy)), 0);
+	}
+	if (GetLayout().HasDestructor() || grouping_set.empty()) {
+		throw InternalException("primitive aggregate-state scan entered an unsupported radix-table layout");
+	}
+
+	auto &gstate = input.global_state.Cast<RadixHTGlobalSourceState>();
+	auto &lstate = input.local_state.Cast<RadixHTLocalSourceState>();
+	lstate.ResetPrimitiveBatch();
+	D_ASSERT(sink.scan_pin_properties == TupleDataPinProperties::UNPIN_AFTER_DONE ||
+	         sink.scan_pin_properties == TupleDataPinProperties::DESTROY_AFTER_DONE);
+	if (gstate.finished) {
+		return SourceResultType::FINISHED;
+	}
+	if (sink.count_before_combining == 0) {
+		gstate.finished = true;
+		return SourceResultType::FINISHED;
+	}
+
+	while (!gstate.finished && !batch) {
+		if (lstate.TaskFinished()) {
+			SourceResultType res;
+			{
+				ExecutionOperatorStageTimer timer(
+				    input.stage_recorder, "source_contract.hash_aggregate_state_scan.primitive_batch_assign_task");
+				res = gstate.AssignTask(sink, lstate, input.interrupt_state);
+			}
+			if (res != SourceResultType::HAVE_MORE_OUTPUT) {
+				D_ASSERT(res == SourceResultType::FINISHED || res == SourceResultType::BLOCKED);
+				return res;
+			}
+		}
+		{
+			ExecutionOperatorStageTimer timer(input.stage_recorder,
+			                                  "source_contract.hash_aggregate_state_scan.primitive_batch_execute_task");
+			lstate.ExecutePrimitiveAggregateStateTask(sink, gstate);
+		}
+		if (lstate.PrimitiveBatch().Count() != 0) {
+			batch = &lstate.PrimitiveBatch();
+		}
+	}
+	return batch ? SourceResultType::HAVE_MORE_OUTPUT : SourceResultType::FINISHED;
 }
 
 ProgressData RadixPartitionedHashTable::GetProgress(ClientContext &, GlobalSinkState &sink_p,

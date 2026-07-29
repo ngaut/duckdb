@@ -238,6 +238,27 @@ static bool PrepareSljitPreaggregatedPrimitivePayloadSource(DataChunk &input,
 	return true;
 }
 
+static bool SljitPreparedPrimitivePayloadSourceSupportsLane(DataChunk &input,
+                                                            const ExecutionPrimitiveAggregateUpdateLane *lane,
+                                                            idx_t source_idx, bool require_lane_payload_type,
+                                                            const SljitPreaggregatedPrimitivePayloadSource &source) {
+	if (!lane) {
+		return false;
+	}
+	if (lane->kind == AggregatePrimitiveUpdateKind::COUNT_STAR) {
+		return source_idx == DConstants::INVALID_INDEX && source.type == PhysicalType::INVALID;
+	}
+	if (lane->kind == AggregatePrimitiveUpdateKind::COUNT && source_idx == DConstants::INVALID_INDEX) {
+		return source.type == PhysicalType::INVALID;
+	}
+	if (source_idx >= input.ColumnCount()) {
+		return false;
+	}
+	const auto input_type = input.data[source_idx].GetType().InternalType();
+	return source.type == input_type && (!require_lane_payload_type || input_type == lane->payload_type) &&
+	       SljitPreaggregatedPrimitivePayloadSupported(lane->kind, input_type);
+}
+
 struct SljitPreaggregatedPrimitivePayloadSources {
 	bool Prepare(SljitExecutableRegionOp &op, DataChunk &input,
 	             const vector<const ExecutionPrimitiveAggregateUpdateLane *> &payload_lanes) {
@@ -245,7 +266,7 @@ struct SljitPreaggregatedPrimitivePayloadSources {
 		if (payload_lanes.size() != aggregates.size()) {
 			return false;
 		}
-		sources.resize(aggregates.size());
+		Reset(payload_lanes.size());
 		for (idx_t payload_idx = 0; payload_idx < aggregates.size(); payload_idx++) {
 			auto lane = payload_lanes[payload_idx];
 			idx_t source_idx = DConstants::INVALID_INDEX;
@@ -256,8 +277,7 @@ struct SljitPreaggregatedPrimitivePayloadSources {
 				}
 				source_idx = aggregate.child_indices[0];
 			}
-			if (!PrepareSljitPreaggregatedPrimitivePayloadSource(input, lane, source_idx, false,
-			                                                     sources[payload_idx])) {
+			if (!Bind(input, lane, source_idx, false)) {
 				return false;
 			}
 		}
@@ -269,11 +289,9 @@ struct SljitPreaggregatedPrimitivePayloadSources {
 		if (payload_source_indices.size() != payload_lanes.size()) {
 			return false;
 		}
-		sources.resize(payload_lanes.size());
+		Reset(payload_lanes.size());
 		for (idx_t payload_idx = 0; payload_idx < payload_lanes.size(); payload_idx++) {
-			if (!PrepareSljitPreaggregatedPrimitivePayloadSource(input, payload_lanes[payload_idx],
-			                                                     payload_source_indices[payload_idx], true,
-			                                                     sources[payload_idx])) {
+			if (!Bind(input, payload_lanes[payload_idx], payload_source_indices[payload_idx], true)) {
 				return false;
 			}
 		}
@@ -281,44 +299,90 @@ struct SljitPreaggregatedPrimitivePayloadSources {
 	}
 
 	bool RowIsValid(idx_t payload_idx, idx_t row_idx) {
-		if (payload_idx >= sources.size()) {
+		auto source = GetMutableSource(payload_idx);
+		if (!source) {
 			return false;
 		}
-		auto &source = sources[payload_idx];
-		if (source.type == PhysicalType::INVALID) {
+		if (source->type == PhysicalType::INVALID) {
 			return true;
 		}
-		auto source_idx = source.format.sel->get_index(row_idx);
-		return source.rows_all_valid || source.format.validity.RowIsValid(source_idx);
+		auto source_idx = source->format.sel->get_index(row_idx);
+		return source->rows_all_valid || source->format.validity.RowIsValid(source_idx);
 	}
 
 	bool LoadInt64(idx_t payload_idx, idx_t row_idx, int64_t &result) {
-		return payload_idx < sources.size() &&
-		       SljitLoadPreaggregatedInt64Payload(sources[payload_idx], row_idx, result);
+		auto source = GetMutableSource(payload_idx);
+		return source && SljitLoadPreaggregatedInt64Payload(*source, row_idx, result);
 	}
 
 	bool LoadHugeint(idx_t payload_idx, idx_t row_idx, hugeint_t &result) {
-		return payload_idx < sources.size() &&
-		       SljitLoadPreaggregatedHugeintPayload(sources[payload_idx], row_idx, result);
+		auto source = GetMutableSource(payload_idx);
+		return source && SljitLoadPreaggregatedHugeintPayload(*source, row_idx, result);
 	}
 
 	bool SourceCanHaveNull(idx_t payload_idx) const {
-		if (payload_idx >= sources.size()) {
+		auto source = GetSourceInternal(payload_idx);
+		if (!source) {
 			return true;
 		}
-		auto &source = sources[payload_idx];
-		return source.type != PhysicalType::INVALID && source.format.validity.CanHaveNull();
+		return source->type != PhysicalType::INVALID && source->format.validity.CanHaveNull();
 	}
 
 	optional_ptr<const SljitPreaggregatedPrimitivePayloadSource> GetSource(idx_t payload_idx) const {
-		if (payload_idx >= sources.size()) {
-			return nullptr;
-		}
-		return optional_ptr<const SljitPreaggregatedPrimitivePayloadSource>(&sources[payload_idx]);
+		return optional_ptr<const SljitPreaggregatedPrimitivePayloadSource>(GetSourceInternal(payload_idx));
 	}
 
 private:
+	void Reset(idx_t lane_count) {
+		sources.clear();
+		input_source_indices.clear();
+		lane_source_bindings.clear();
+		sources.reserve(lane_count);
+		input_source_indices.reserve(lane_count);
+		lane_source_bindings.reserve(lane_count);
+	}
+
+	bool Bind(DataChunk &input, const ExecutionPrimitiveAggregateUpdateLane *lane, idx_t source_idx,
+	          bool require_lane_payload_type) {
+		for (idx_t unique_idx = 0; unique_idx < input_source_indices.size(); unique_idx++) {
+			if (input_source_indices[unique_idx] != source_idx) {
+				continue;
+			}
+			if (!SljitPreparedPrimitivePayloadSourceSupportsLane(input, lane, source_idx, require_lane_payload_type,
+			                                                     sources[unique_idx])) {
+				return false;
+			}
+			lane_source_bindings.push_back(unique_idx);
+			return true;
+		}
+		sources.emplace_back();
+		if (!PrepareSljitPreaggregatedPrimitivePayloadSource(input, lane, source_idx, require_lane_payload_type,
+		                                                     sources.back())) {
+			sources.pop_back();
+			return false;
+		}
+		input_source_indices.push_back(source_idx);
+		lane_source_bindings.push_back(sources.size() - 1);
+		return true;
+	}
+
+	SljitPreaggregatedPrimitivePayloadSource *GetMutableSource(idx_t payload_idx) {
+		if (payload_idx >= lane_source_bindings.size() || lane_source_bindings[payload_idx] >= sources.size()) {
+			return nullptr;
+		}
+		return &sources[lane_source_bindings[payload_idx]];
+	}
+
+	const SljitPreaggregatedPrimitivePayloadSource *GetSourceInternal(idx_t payload_idx) const {
+		if (payload_idx >= lane_source_bindings.size() || lane_source_bindings[payload_idx] >= sources.size()) {
+			return nullptr;
+		}
+		return &sources[lane_source_bindings[payload_idx]];
+	}
+
 	vector<SljitPreaggregatedPrimitivePayloadSource> sources;
+	vector<idx_t> input_source_indices;
+	vector<idx_t> lane_source_bindings;
 };
 
 static bool SljitStartPreaggregatedPrimitivePayloadGroup(

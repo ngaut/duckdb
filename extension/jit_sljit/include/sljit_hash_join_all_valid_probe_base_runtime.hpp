@@ -10,10 +10,9 @@
 
 #include "sljit_hash_join_runtime.hpp"
 
-#include "duckdb/common/operator/cast_operators.hpp"
+#include "duckdb/common/hash_bloom_filter.hpp"
+#include "duckdb/common/numeric_utils.hpp"
 #include "duckdb/common/types/hash.hpp"
-#include "duckdb/execution/ht_entry.hpp"
-#include "duckdb/planner/filter/table_filter_functions.hpp"
 
 namespace duckdb {
 
@@ -28,7 +27,7 @@ static inline bool SljitHashJoinKeysEqual(const data_ptr_t row_location, idx_t l
 	return Load<T>(row_location + layout_offset) == probe_key;
 }
 
-static inline void SljitPrefetchHashJoinEntry(const ht_entry_t *entries, idx_t ht_offset) {
+static inline void SljitPrefetchHashJoinEntry(const uint64_t *entries, idx_t ht_offset) {
 #if defined(__GNUC__) || defined(__clang__)
 	__builtin_prefetch(entries + ht_offset, 0, 3);
 #else
@@ -46,21 +45,28 @@ static inline void SljitPrefetchHashJoinRow(data_ptr_t row_location, idx_t layou
 #endif
 }
 
-static inline data_ptr_t SljitHashJoinEntryPointer(hash_t entry_value) {
-	return cast_uint64_to_pointer(entry_value & ht_entry_t::POINTER_MASK);
-}
-
-template <bool UNCHECKED>
-static inline int32_t SljitCastHashJoinKeyInt64ToInt32(int64_t value) {
-	if constexpr (UNCHECKED) {
-		return UnsafeNumericCast<int32_t>(value);
-	} else {
-		return NumericCast<int32_t>(value);
+struct SljitHashJoinEntryDecoder {
+	explicit SljitHashJoinEntryDecoder(const SljitNativeRegularHashJoinProbeInput &input)
+	    : pointer_mask(input.pointer_mask) {
 	}
-}
+
+	inline data_ptr_t Pointer(hash_t entry_value) const {
+		return cast_uint64_to_pointer(entry_value & pointer_mask);
+	}
+
+	inline hash_t Salt(hash_t hash) const {
+		return hash & ~pointer_mask;
+	}
+
+	inline bool SaltMatches(hash_t entry_value, hash_t salt) const {
+		return (entry_value & ~pointer_mask) == salt;
+	}
+
+	uint64_t pointer_mask;
+};
 
 static inline uint64_t SljitBloomFilterMask(hash_t hash) {
-	return BloomFilter::GetMask(hash);
+	return HashBloomFilterMask(hash);
 }
 
 static inline bool SljitBloomFilterMayContainKnownPresent(const uint64_t *bits, uint64_t bitmask, hash_t hash) {
@@ -145,27 +151,28 @@ static inline data_ptr_t SljitHashJoinNextChainPointer(const SljitNativeRegularH
 
 template <bool USE_SALT, bool HAS_BLOOM, class MATCH>
 static inline data_ptr_t SljitHashJoinFindFirstChainPointer(const SljitNativeRegularHashJoinProbeInput &input,
-                                                            const ht_entry_t *entries, hash_t hash, idx_t ht_offset,
+                                                            const SljitHashJoinEntryDecoder &entry_decoder,
+                                                            const uint64_t *entries, hash_t hash, idx_t ht_offset,
                                                             idx_t prefetch_offset, MATCH match) {
 	if (!SljitBloomFilterMayContainTemplated<HAS_BLOOM>(input, hash)) {
 		return nullptr;
 	}
 	hash_t salt = 0;
 	if constexpr (USE_SALT) {
-		salt = hash & ht_entry_t::SALT_MASK;
+		salt = entry_decoder.Salt(hash);
 	}
 	while (true) {
-		const auto &entry = entries[ht_offset];
-		if (!entry.IsOccupied()) {
+		const auto entry = entries[ht_offset];
+		if (!entry) {
 			return nullptr;
 		}
 		if constexpr (USE_SALT) {
-			if (entry.GetSaltWithNulls() != salt) {
+			if (!entry_decoder.SaltMatches(entry, salt)) {
 				ht_offset = UnsafeNumericCast<idx_t>((ht_offset + 1) & input.bitmask);
 				continue;
 			}
 		}
-		auto row_location = entry.GetPointer();
+		auto row_location = entry_decoder.Pointer(entry);
 		SljitPrefetchHashJoinRow(row_location, prefetch_offset);
 		if (match(row_location)) {
 			return row_location;

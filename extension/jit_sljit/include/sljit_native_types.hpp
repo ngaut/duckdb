@@ -389,6 +389,24 @@ struct SljitNativePrimitiveRunInput {
 	uint8_t output_groups_strictly_increasing = 0;
 };
 
+struct SljitNativePreaggregatedPrimitiveLaneInput {
+	const int64_t *int64_values = nullptr;
+	const hugeint_t *hugeint_values = nullptr;
+	const uint8_t *value_is_set = nullptr;
+	idx_t state_offset = 0;
+};
+
+// Backend-private ABI for publishing preaggregated primitive deltas into
+// core-owned aggregate states. The address array and semantic state offsets are
+// supplied by the core; generated code never observes hash-table row layout.
+struct SljitNativePreaggregatedPrimitiveUpdateInput {
+	const uintptr_t *addresses = nullptr;
+	const sel_t *address_sel = nullptr;
+	const sel_t *execute_sel = nullptr;
+	const SljitNativePreaggregatedPrimitiveLaneInput *lane_inputs = nullptr;
+	idx_t count = 0;
+};
+
 struct SljitNativePredicateInput {
 	const_data_ptr_t *source_data = nullptr;
 	const sel_t **source_sel = nullptr;
@@ -411,7 +429,7 @@ struct SljitNativeRegularHashJoinProbeInput {
 	bool source_key0_int64_to_int32 = false;
 	bool source_key0_int64_to_int32_unchecked = false;
 	idx_t count = 0;
-	const_data_ptr_t entries = nullptr;
+	const uint64_t *entries = nullptr;
 	uint64_t bitmask = 0;
 	uint64_t pointer_mask = 0;
 	SljitHashJoinProbeLayoutKind layout_kind = SljitHashJoinProbeLayoutKind::NO_CHAIN;

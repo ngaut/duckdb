@@ -10,7 +10,7 @@
 
 #include "sljit_aggregate_preaggregated_update_runtime.hpp"
 #include "sljit_grouped_aggregate_input_vector_groups.hpp"
-#include "sljit_grouped_aggregate_run_preaggregation_runtime.hpp"
+#include "sljit_grouped_aggregate_preaggregation_api.hpp"
 #include "sljit_grouped_aggregate_state_address_update_runtime.hpp"
 #include "sljit_grouped_aggregate_state_runtime.hpp"
 #include "sljit_preaggregated_group_continuation_runtime.hpp"
@@ -70,8 +70,8 @@ static bool TryExecuteRunPreaggregatedInputVectorCarryoverOnlyUpdate(
 	grouped_state.state->RecordDirectStateAddressUpdates(represented_row_count);
 	RecordSljitRegionStageRuntimePath(runtime, op_idx, op.kind,
 	                                  "direct_input_vector_run_preaggregated_carryover_update", stage_start);
-	RecordSljitRegionMaterializationElision(
-	    runtime, op.kind, "direct_input_vector_run_preaggregated_carryover_update", represented_row_count);
+	RecordSljitRegionMaterializationElision(runtime, op.kind, "direct_input_vector_run_preaggregated_carryover_update",
+	                                        represented_row_count);
 	SljitRecordInputVectorPreaggregatedUpdateBoundaries(runtime, op.kind, run_group_keys.size(), represented_row_count);
 	if (finish) {
 		continuation.Clear();
@@ -248,7 +248,7 @@ static bool TryExecuteRunPreaggregatedInputVectorGroupedTargetPayloadUpdate(
 	idx_t run_count = 0;
 	bool fused_run_payloads = false;
 	auto preaggregate_stage_start = SljitRegionStageStart(runtime);
-	if (!TryPreaggregateInputVectorPrimitiveGroupRunsBest(
+	if (!SljitTryPreaggregateInputVectorPrimitiveGroupRunsBest(
 	        op, payload_input, group_sources, payload_source_indices, payload_source_layout, payload_lanes,
 	        reduction_lanes, preaggregate_scratch, payload_scratch, optional_ptr<DataChunk>(&run_group_keys), run_count,
 	        fused_run_payloads)) {
@@ -302,8 +302,8 @@ static bool TryExecuteRunPreaggregatedInputVectorGroupedTargetPayloadUpdate(
 		RecordSljitRegionMaterializationElision(
 		    runtime, op.kind, "direct_input_vector_run_fused_preaggregated_grouped_update", payload_input.size());
 	}
-	RecordSljitRegionMaterializationElision(
-	    runtime, op.kind, "direct_input_vector_run_preaggregated_grouped_update", payload_input.size());
+	RecordSljitRegionMaterializationElision(runtime, op.kind, "direct_input_vector_run_preaggregated_grouped_update",
+	                                        payload_input.size());
 	SljitRecordInputVectorPreaggregatedUpdateBoundaries(runtime, op.kind, run_count, payload_input.size());
 	return true;
 }

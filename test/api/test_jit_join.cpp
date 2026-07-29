@@ -3154,6 +3154,68 @@ TEST_CASE("JIT mark filter projection delimiter sink uses selected join input", 
 	REQUIRE(diff->GetValue(0, 0).GetValue<int64_t>() == 0);
 }
 
+TEST_CASE("JIT sparse exact-filter delimiter sink batches source before probing", "[api][jit]") {
+	DuckDB db;
+	Connection con(db);
+	auto &manager = ExecutionRegionManager::Get(*con.context);
+
+	ConfigureSljitForCoverage(con, false, true, true, 10000);
+	REQUIRE_NO_FAIL(con.Query("SET threads=1"));
+	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_sparse_delim_part AS "
+	                          "SELECT i::INTEGER AS partkey, "
+	                          "       CASE WHEN i % 1000 = 23 THEN 'selected' ELSE 'other' END AS brand, "
+	                          "       CASE WHEN i % 1000 = 23 THEN 'box' ELSE 'bag' END AS container "
+	                          "FROM range(10000) tbl(i)"));
+	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_sparse_delim_lineitem AS "
+	                          "SELECT (i % 10000)::INTEGER AS partkey, "
+	                          "       ((i / 10000) % 20 + 1)::INTEGER AS quantity, "
+	                          "       (i % 997 + 1)::BIGINT AS price "
+	                          "FROM range(262144) tbl(i)"));
+
+	const string query = "SELECT sum(l.price) "
+	                     "FROM jit_sparse_delim_lineitem l, jit_sparse_delim_part p "
+	                     "WHERE p.partkey = l.partkey AND p.brand = 'selected' AND p.container = 'box' "
+	                     "  AND l.quantity < ("
+	                     "    SELECT 0.2 * avg(l2.quantity) "
+	                     "    FROM jit_sparse_delim_lineitem l2 "
+	                     "    WHERE l2.partkey = p.partkey"
+	                     "  )";
+	REQUIRE_NO_FAIL(con.Query("SET jit_policy='off'"));
+	auto reference = con.Query(query);
+	REQUIRE_NO_FAIL(*reference);
+
+	REQUIRE_NO_FAIL(con.Query("SET jit_policy='auto'"));
+	ClearJitTrace(manager, true);
+	auto result = con.Query(query);
+	REQUIRE_NO_FAIL(*result);
+	REQUIRE(result->GetValue(0, 0) == reference->GetValue(0, 0));
+
+	RequireJitEvent(
+	    manager,
+	    [](const ExecutionRegionEvent &event) {
+		    return EventPhase(event) == "runtime" && EventStatus(event) == "executed" &&
+		           HasJitDelimJoinSinkRuntimePath(event) &&
+		           StringUtil::Contains(EventJitRuntimePathCounts(event),
+		                                "hash_join_probe.perfect_probe.exact_source_filter_candidate=");
+	    },
+	    [](const ExecutionRegionEvent &event) {
+		    idx_t probe_invocations = 0;
+		    idx_t selected_rows = 0;
+		    for (auto &counter : event.jit_runtime.runtime_path_counts) {
+			    if (counter.counter.name == "hash_join_probe.perfect_probe.exact_source_filter_candidate") {
+				    probe_invocations += counter.count;
+			    } else if (counter.counter.name == "hash_join_probe.perfect_probe.exact_source_filter") {
+				    selected_rows += counter.count;
+			    }
+		    }
+		    REQUIRE(selected_rows > 0);
+		    REQUIRE(probe_invocations < 32);
+		    REQUIRE(probe_invocations < selected_rows);
+		    REQUIRE(StringUtil::Contains(EventGeneratedStageCountBreakdown(event), "selected_sink_batch_append"));
+		    REQUIRE(EventJitRuntimeDelegationCounts(event).empty());
+	    });
+}
+
 TEST_CASE("JIT mark filter reference aggregate slices selected projection", "[api][jit]") {
 	DuckDB db;
 	Connection con(db);

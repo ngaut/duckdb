@@ -20,6 +20,9 @@ static bool SljitFusedUngroupedPrimitiveAggregatePayloadSupported(const SljitNat
 	if (descriptor.primitive_kind == AggregatePrimitiveUpdateKind::COUNT_STAR) {
 		return true;
 	}
+	if (descriptor.primitive_kind == AggregatePrimitiveUpdateKind::SUM_HUGEINT && descriptor.IsDoubleWord()) {
+		return payload.kind == SljitNativeRegionExpressionKind::REFERENCE;
+	}
 	return descriptor.primitive_kind == AggregatePrimitiveUpdateKind::SUM_INT64 && descriptor.IsMachineWord() &&
 	       (payload.kind == SljitNativeRegionExpressionKind::REFERENCE ||
 	        payload.kind == SljitNativeRegionExpressionKind::INTEGER_BINARY_CONSTANT ||
@@ -78,16 +81,22 @@ BuildSljitNativeUngroupedFusedPrimitiveAggregateUpdate(const vector<SljitNativeR
 	}
 
 	vector<sljit_sw> local_sum_offsets(payloads.size(), -1);
+	vector<sljit_sw> local_sum_upper_offsets(payloads.size(), -1);
 	vector<sljit_sw> saw_value_offsets(payloads.size(), -1);
 	bool has_sum_lane = false;
 	sljit_sw local_size = 0;
 	for (idx_t payload_idx = 0; payload_idx < payloads.size(); payload_idx++) {
-		if (descriptors[payload_idx].primitive_kind != AggregatePrimitiveUpdateKind::SUM_INT64) {
+		auto kind = descriptors[payload_idx].primitive_kind;
+		if (kind != AggregatePrimitiveUpdateKind::SUM_INT64 && kind != AggregatePrimitiveUpdateKind::SUM_HUGEINT) {
 			continue;
 		}
 		has_sum_lane = true;
 		local_sum_offsets[payload_idx] = local_size;
 		local_size += NumericCast<sljit_sw>(sizeof(sljit_sw));
+		if (kind == AggregatePrimitiveUpdateKind::SUM_HUGEINT) {
+			local_sum_upper_offsets[payload_idx] = local_size;
+			local_size += NumericCast<sljit_sw>(sizeof(sljit_sw));
+		}
 		saw_value_offsets[payload_idx] = local_size;
 		local_size += NumericCast<sljit_sw>(sizeof(sljit_sw));
 	}
@@ -104,6 +113,10 @@ BuildSljitNativeUngroupedFusedPrimitiveAggregateUpdate(const vector<SljitNativeR
 			continue;
 		}
 		sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_MEM1(SLJIT_SP), local_sum_offsets[payload_idx], SLJIT_IMM, 0);
+		if (local_sum_upper_offsets[payload_idx] >= 0) {
+			sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_MEM1(SLJIT_SP), local_sum_upper_offsets[payload_idx], SLJIT_IMM,
+			               0);
+		}
 		sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_MEM1(SLJIT_SP), saw_value_offsets[payload_idx], SLJIT_IMM, 0);
 	}
 
@@ -127,6 +140,20 @@ BuildSljitNativeUngroupedFusedPrimitiveAggregateUpdate(const vector<SljitNativeR
 			                                  payload_idx, SLJIT_S4);
 			invalid_jumps.push_back(EmitFusedAggregateJumpIfValidityNull(
 			    compiler, offsetof(SljitNativeVectorInput, right_source_validity_array), payload_idx, SLJIT_S4));
+		}
+		if (descriptors[payload_idx].primitive_kind == AggregatePrimitiveUpdateKind::SUM_HUGEINT) {
+			EmitLoadFusedAggregateHugeintData(compiler, offsetof(SljitNativeVectorInput, source_data_array),
+			                                  payload_idx, SLJIT_R1, SLJIT_R2, SLJIT_R3);
+			EmitSljitAggregateAccumulateHugeint(compiler, local_sum_offsets[payload_idx],
+			                                    local_sum_upper_offsets[payload_idx], saw_value_offsets[payload_idx],
+			                                    SLJIT_R2, SLJIT_R3);
+			auto payload_done = sljit_emit_jump(compiler, SLJIT_JUMP);
+			auto payload_invalid = sljit_emit_label(compiler);
+			for (auto invalid_jump : invalid_jumps) {
+				sljit_set_label(invalid_jump, payload_invalid);
+			}
+			sljit_set_label(payload_done, sljit_emit_label(compiler));
+			continue;
 		}
 		EmitLoadFusedAggregateIntegerData(compiler, offsetof(SljitNativeVectorInput, source_data_array), payload_idx,
 		                                  payload.integer_kind, SLJIT_R1, SLJIT_R2);
@@ -198,6 +225,10 @@ BuildSljitNativeUngroupedFusedPrimitiveAggregateUpdate(const vector<SljitNativeR
 	for (idx_t payload_idx = 0; payload_idx < payloads.size(); payload_idx++) {
 		if (descriptors[payload_idx].primitive_kind == AggregatePrimitiveUpdateKind::COUNT_STAR) {
 			EmitUngroupedAggregateCommitCountStar(compiler, payload_idx);
+		} else if (descriptors[payload_idx].primitive_kind == AggregatePrimitiveUpdateKind::SUM_HUGEINT) {
+			EmitUngroupedAggregateCommitSumHugeint(compiler, payload_idx, local_sum_offsets[payload_idx],
+			                                       local_sum_upper_offsets[payload_idx],
+			                                       saw_value_offsets[payload_idx]);
 		} else {
 			EmitUngroupedAggregateCommitSumInt64(compiler, payload_idx, local_sum_offsets[payload_idx],
 			                                     saw_value_offsets[payload_idx]);

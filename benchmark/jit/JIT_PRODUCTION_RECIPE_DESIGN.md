@@ -1,6 +1,6 @@
 # JIT Production Recipe Architecture
 
-Last updated: 2026-07-27
+Last updated: 2026-07-28
 
 This document is the stable architecture contract for DuckDB execution-region
 JIT. It describes layer ownership, immutable recipe binding, runtime data
@@ -123,9 +123,10 @@ sequence grammar and cross-primitive ownership; it does not call capability
 predicates again. Each step stores operator identities only in its typed
 primitive descriptor—there is no parallel generic index array to reconcile.
 Runtime preparation initializes physical state but cannot return a recipe-shape
-miss. Runtime kind, partition preservation, scan-filter body ownership,
-fused-filter ownership, and the direct-terminal contract are finalized together
-before the recipe plan is published.
+miss. Partition preservation, scan-filter body ownership, fused-filter
+ownership, and the direct-terminal contract are finalized together before the
+recipe plan is published. Every vector-source recipe uses the same primitive
+sequence executor; selected hash-join sinks are not a second runtime mode.
 
 Prepared expression capability does not change when selector machine code is
 emitted. The executable builder therefore binds the plan exactly once, emits
@@ -172,6 +173,36 @@ dictionaries, and all other query data live in each instantiated kernel or its
 local states. A backend that cannot make this split remains correct and
 uncached. Changing this contract advances the loadable execution-region ABI.
 
+Backend-private compile ownership follows the same boundary. The concrete
+SLJIT artifact and kernel declarations are private to the extension. Artifact
+construction, cache instantiation, metadata, and table-filter binding compile
+without the full-pipeline template graph. A dedicated execution owner alone
+instantiates full-pipeline dispatch against the concrete kernel, so its typed
+row loops remain statically bound without leaking backend implementation types
+through the loadable backend ABI.
+
+Heavy typed runtime families must be partitioned only at batch-level dispatch
+boundaries. Moving a `PhysicalType` switch or recipe-kind switch out of a
+translation unit is valid; adding a virtual call, callback, or function-pointer
+dispatch inside a row, match, or aggregate-update loop is not. This rule keeps
+compile ownership and object size local while preserving the direct calls that
+the optimizer needs in hot loops.
+
+Grouped run and pending preaggregation follow that rule through
+`sljit_grouped_aggregate_preaggregation_api.hpp`. General pipeline orchestration
+submits one vector batch through this private API. Its dedicated runtime owner
+performs physical key and payload type selection and contains every resulting
+typed row-loop specialization.
+
+Direct hash-probe complementary aggregation follows the same rule through
+`sljit_hash_join_aggregate_consumer_api.hpp` and
+`sljit_join_input_complementary_sum_api.hpp`. Pipeline orchestration passes the
+concrete native probe executor and one vector batch to the dedicated aggregate
+consumer owner. Descriptor preparation, typed group accumulation,
+preaggregation, materialization, and accumulator flush stay behind those
+batch-level APIs. Probe code generation remains statically bound, and neither
+API introduces indirect dispatch into match or aggregate-update loops.
+
 The primitive sequence starts with `SourceFetch` and ends with exactly one of:
 
 - `PostJoinProjectionAggregateUpdate`;
@@ -215,6 +246,14 @@ hash-table object. Execution resolves the current physical source from
 `ExecutionHashJoinRHSFixedColumnSource` and validates that it still matches the
 bound semantic descriptor.
 
+All-valid regular-probe template dispatch has one translation-unit owner.
+Pipeline orchestration sees only the generic key-reader primitive and
+vector-level entry points for the two concrete direct-consumer ABIs: bounded
+matched-row batches and direct ungrouped reduction. The probe loop remains
+statically specialized inside that owner; there is no virtual or indirect call
+per match. This keeps terminal semantics out of matcher policy and prevents
+every pipeline consumer from instantiating the full key-type dispatch graph.
+
 This separation is deliberate:
 
 ```text
@@ -240,13 +279,42 @@ bind a route. These transitions are monotonic and recorded once.
 
 ## Runtime physical ABI
 
+Regular hash-join compilation and execution deliberately use two different
+contracts:
+
+- semantic IR contains only reusable facts: key types, row-layout offsets,
+  tuple/pointer offsets, join semantics, and output mapping;
+- query-local binding contains non-owning physical views: encoded entry words,
+  pointer/salt masks, optional chain pointers, and Bloom words.
+
+Live pointers never enter an artifact key or compiled artifact. Core constructs
+the physical `TupleDataLayout` and the semantic row-layout contract through the
+same canonical builder, so zero-copy offsets cannot drift between the native
+table and JIT planning. The runtime table accessor reports typed physical
+states (`READY`, `EMPTY`, `NOT_FINALIZED`, or `POINTER_TABLE_MISSING`);
+diagnostic strings are derived from those states and are not control flow.
+
+The entry view is an array of `uint64_t` words whose pointer and salt regions
+are defined by published masks. The Bloom view is a word array plus bitmask,
+and both core and backends use the shared common Bloom-mask primitive. Backend
+code must not include or name `ht_entry_t`, `BloomFilter`, or
+`JoinHashTable`. This preserves direct, zero-copy probing without turning
+core-private C++ classes into an extension ABI.
+
+The hash-table physical view entered the execution-region backend ABI in
+version 4. ABI version 5 adds opaque aggregate-state batch consumption; a
+loadable backend built against either older binding layout is rejected at
+registration.
+
 `ExecutionHashJoinRHSFixedColumnSource` is the core/backend boundary for fixed
 build-side columns. It represents either:
 
 - `ROW`: row-layout offset plus row validity metadata; or
 - `DICTIONARY`: dictionary-index offset, data, validity, and count.
 
-Core initializes all storage-specific fields before publishing `ready=true`.
+Core resolves and caches these operator-lifetime sources when it publishes the
+probe binding. It initializes all storage-specific fields before publishing
+`ready=true`.
 Backend helpers depend only on this exported ABI and common validity-mask
 types. They do not include `join_hashtable.hpp` or name private
 `JoinHashTable` layout types.
@@ -286,6 +354,20 @@ or copy its state.
 Source progress, sink backpressure, cancellation, and recursive-pipeline state
 remain core-owned. The backend can coalesce source fetches only through the
 declared source budget and must preserve exact operator protocol.
+
+Sparse source-output batching is independent of terminal kind. Small chunks
+are copied into one backend-owned source batch before downstream expression or
+probe work, including recipes whose terminal consumes a selected hash-join
+view. The selected terminal's output batch is a separate owner and is not a
+reason to re-enter the probe once per sparse source chunk. Batching stops at
+the source-result boundary and is disabled whenever core requires partition
+boundaries and the recipe marks its source chunks partition-sensitive.
+
+Recursive JIT suppression covers one complete compiled-kernel execution,
+including native source, operator, sink, flush, and finalize callbacks. Source
+contracts do not enter and leave suppression for each chunk. This gives every
+callback the same recursion rule and removes thread-local transitions from hot
+batch loops.
 
 ## Runner switching
 
@@ -427,10 +509,33 @@ Aggregate recipes bind primitive state ABI, payload sources, group sources,
 nullability, and initialization semantics once. Operator-lifetime descriptors
 and lane bindings are cached outside per-chunk loops.
 
+Per-chunk payload binding follows the physical source graph rather than the
+aggregate list: one `UnifiedVectorFormat` and validity classification is built
+for each referenced input vector, then every `SUM`, `COUNT`, or other primitive
+lane that consumes that vector binds to the shared descriptor.
+
+Materialized ungrouped multi-lane reducers use one generated row loop for both
+machine-word and exact double-word reference payloads. A signed-128 lane loads
+its lower and upper words under the same selection and validity contract,
+accumulates into a lane-local exact state, and performs one checked aggregate
+state commit per batch. Single-lane exact reducers retain their dedicated
+direct ABI, while aggregate-state sources use the separate semantic combine
+contract below.
+
 Ungrouped and grouped routes must preserve DuckDB aggregate behavior for empty
 input, NULL input, overflow, state initialization, combine, and finalize.
 Generated grouped run reducers are admitted from semantic ordering and range
 facts, not workload identity.
+
+Multi-lane run codegen specializes from runtime vector identity. When at least
+two non-`COUNT(*)` lanes share the same validity-mask pointer, one lazy kernel
+artifact tests that mask once per row; `COUNT(*)` lanes remain unconditional,
+and each payload still uses its own data pointer. Different masks retain the
+independent-lane artifact. On register files with spare saved registers, the
+kernel also hoists the lane-array base, compact-output index, row-count output,
+and common validity pointer. Smaller targets retain the same semantics through
+the base register layout. These are backend runtime facts, not query-name or
+benchmark-shape checks.
 
 Group-key min/max facts belong to the executable. Proven signed narrowing can
 remove per-chunk range scans. Unknown or incompatible ranges retain checked
@@ -454,6 +559,76 @@ runs retain the normal full-vector publication path.
 
 Parallel finalization can skip rehash only when conservative key summaries
 prove disjointness; overlapping boundaries reconcile through the normal path.
+
+### Aggregate-state targets
+
+Grouped-state publication uses the semantic sink contract, not the hash-table
+row layout. Core records each aggregate's state offset in
+`ExecutionRegionAggregateContract.grouped_state_offsets`; the executable copies
+the offsets and primitive kinds into its immutable primitive-run plan. These
+offsets identify aggregate states within a core-provided state address. They do
+not expose tuple rows, hash slots, salts, chains, or ownership.
+
+Before generated publication, runtime lanes must match the planned primitive
+kind, semantic state offset, and canonical state layout. The backend-private
+call ABI then carries only core-owned state addresses, semantic row/address
+selections, and preaggregated primitive deltas. Selector-shape-specific
+artifacts cover identity, row-selected, address-selected, and fully selected
+publication without adding selector branches to the identity hot loop. The
+publisher can initialize appended groups and update selected existing groups
+without exposing the hash-table layout. Generated artifacts never specialize
+from the first runtime caller.
+
+Core row storage likewise keeps selection ownership explicit. Proven append-only
+single-partition publication consumes fresh state addresses in input order and
+does not construct a reverse partition map that no consumer can observe.
+Lookup-backed and address-returning append routes still request that map.
+
+The common lane budget emits direct constant-offset stores from the immutable
+plan. Wider homogeneous primitive lists use one bounded lane loop and read the
+already-validated semantic offset from each lane input, so machine-code size
+does not grow with lane count. Wider heterogeneous lists retain the generic C++
+publisher. Initialization clears the complete canonical nullable-state flag,
+updates preserve NULL semantics, and hugeint addition carries exactly.
+
+### Aggregate-state sources
+
+A hash-aggregate source does not publish its sink-state layout back through
+source IR. Its state-scan contract contains only semantic primitive lanes:
+aggregate index, source output index, logical return type, and primitive update
+kind. Physical row addresses, aggregate offsets, state-value offsets, and
+validity offsets remain core-owned.
+
+The backend maps those source lanes to target aggregate indices once while
+building the recipe. At runtime it asks the core-owned
+`ExecutionAggregateStateScanBatch` to combine the mapped primitive states.
+Core validates source and target lane compatibility before mutation and keeps
+the row traversal behind that semantic API. Unsupported, destructor-bearing,
+or incompatible aggregate states use the normal finalized-vector source path.
+
+Direct state consumption is an economics decision, not a workload exception.
+The current recipe admits it only when unique mapped aggregate states span at
+least 128 semantic bytes; synthetic row-count lanes do not contribute to that
+threshold. Narrow reductions are cheaper through DuckDB's existing finalized
+vectors. Wide reductions scan each state row once. Their common signed-int64
+to hugeint route accumulates exactly in 128 bits inside core and performs one
+checked target-state update per lane per batch, avoiding a checked hugeint call
+for every state cell. The primitive source scan uses an empty tuple projection:
+it pins and advances row-address batches without gathering grouping columns
+that the semantic combine cannot consume.
+
+Built-in primitive SUM states define zero as the value of an unset state, so
+the homogeneous reducer accumulates values without a per-cell NULL branch and
+tracks only whether each lane observed a value. When core-owned signed-int64
+SUM states form the canonical adjacent layout, core walks that run with compact
+exact stack accumulators. This physical classification never crosses the
+source contract; non-canonical layouts and schemas wider than the bounded
+scratch retain the branchless semantic-lane loop.
+
+Runtime proof distinguishes
+`source.hash_aggregate.primitive_state_combine` from the finalized scan stage.
+Tests cover both sides of the economics boundary, including NULL state,
+negative values, and accumulation beyond signed 64-bit range.
 
 ## Runtime accounting
 
@@ -571,8 +746,9 @@ parallel workloads, and affected TPC-H scale factors.
 
 - Variable-width expression coverage is narrower than fixed-width coverage.
 - Unsupported aggregate layouts, DISTINCT shapes, and join modes remain native.
-- Generated run reducers support bounded, proven primitive lane layouts; wider
-  or heterogeneous layouts retain exact generic execution.
+- Generated run reducers unroll bounded, proven primitive lane layouts; wider
+  homogeneous layouts use a bounded lane loop, while wider heterogeneous
+  layouts retain exact generic execution.
 - Multi-key, selected, and non-flat grouped inputs require an explicit proven
   route before generated run ownership can expand.
 - Native source and sink protocols remain native unless an exported execution

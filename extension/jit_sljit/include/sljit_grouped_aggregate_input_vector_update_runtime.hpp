@@ -12,10 +12,11 @@
 #include "sljit_grouped_aggregate_direct_update_capability_runtime.hpp"
 #include "sljit_grouped_aggregate_input_vector_groups.hpp"
 #include "sljit_grouped_aggregate_input_vector_run_update_runtime.hpp"
-#include "sljit_grouped_aggregate_pending_preaggregation_runtime.hpp"
+#include "sljit_grouped_aggregate_preaggregation_api.hpp"
 #include "sljit_grouped_aggregate_state_address_update_runtime.hpp"
 #include "sljit_grouped_aggregate_state_runtime.hpp"
 #include "sljit_native_binding_runtime.hpp"
+#include "sljit_pending_preaggregated_group_batch_runtime.hpp"
 #include "sljit_region_runtime_trace.hpp"
 #include "sljit_runtime_batch_runtime.hpp"
 
@@ -117,7 +118,7 @@ static bool SljitTryExecuteInputVectorGroupedAggregateUpdate(
 			RecordSljitRegionStageRuntime(runtime, op_idx, op.kind, "pending_dense_single_lane_accumulate",
 			                              dense_pending_start);
 			RecordSljitRegionMaterializationElision(runtime, op.kind, "pending_dense_single_lane_grouped_update",
-			                                            payload_input.size());
+			                                        payload_input.size());
 			if (finish && !SljitFlushPendingPreaggregatedPrimitiveGroups(
 			                  runtime, scratch, op_idx, op, *pending_preaggregated_groups, grouped_state)) {
 				record_unsupported("pending_dense_single_lane_flush");
@@ -133,7 +134,7 @@ static bool SljitTryExecuteInputVectorGroupedAggregateUpdate(
 	}
 	if (pending_preaggregated_groups && payload_source_layout == SljitAggregatePayloadSourceLayout::FUSED_COMBINED) {
 		auto pending_preaggregate_start = SljitRegionStageStart(runtime);
-		if (TryPreaggregateInputVectorFusedAffinePrimitiveGroupsIntoPending(
+		if (SljitTryPreaggregateInputVectorFusedAffinePrimitiveGroupsIntoPending(
 		        runtime, scratch, op_idx, op, payload_input, group_sources, payload_source_indices, payload_lanes,
 		        grouped_state, *pending_preaggregated_groups, finish)) {
 			RecordSljitRegionStageRuntime(runtime, op_idx, op.kind,
@@ -147,7 +148,7 @@ static bool SljitTryExecuteInputVectorGroupedAggregateUpdate(
 	}
 	if (pending_preaggregated_groups && direct_payload_sources) {
 		auto pending_preaggregate_start = SljitRegionStageStart(runtime);
-		if (TryPreaggregateInputVectorPrimitiveGroupsIntoPending(
+		if (SljitTryPreaggregateInputVectorPrimitiveGroupsIntoPending(
 		        runtime, scratch, op_idx, op, payload_input, group_sources, payload_source_indices, payload_lanes,
 		        grouped_state, *pending_preaggregated_groups, finish)) {
 			RecordSljitRegionStageRuntime(runtime, op_idx, op.kind,
@@ -164,7 +165,7 @@ static bool SljitTryExecuteInputVectorGroupedAggregateUpdate(
 	if (pending_preaggregated_groups && !has_group_output_transform) {
 		idx_t preaggregated_group_count = 0;
 		bool fused_run_payloads = false;
-		if (TryPreaggregateInputVectorPrimitiveGroupRunsBest(
+		if (SljitTryPreaggregateInputVectorPrimitiveGroupRunsBest(
 		        op, payload_input, group_sources, payload_source_indices, payload_source_layout, payload_lanes,
 		        reduction_lanes, preaggregate_scratch, payload_scratch, optional_ptr<DataChunk>(&preaggregated_groups),
 		        preaggregated_group_count, fused_run_payloads)) {
@@ -201,8 +202,8 @@ static bool SljitTryExecuteInputVectorGroupedAggregateUpdate(
 		        runtime, scratch, op_idx, op, payload_input, group_sources, payload_source_indices,
 		        payload_source_not_null, payload_lanes, reduction_lanes, grouped_state, payload_scratch, finish,
 		        !pending_preaggregated_groups, dense_domain)) {
-			RecordSljitRegionMaterializationElision(
-			    runtime, op.kind, "direct_input_vector_dense_target_grouped_update", payload_input.size());
+			RecordSljitRegionMaterializationElision(runtime, op.kind, "direct_input_vector_dense_target_grouped_update",
+			                                        payload_input.size());
 			return true;
 		}
 	}
@@ -288,8 +289,8 @@ static bool SljitTryExecuteInputVectorGroupedAggregateUpdate(
 			ExecuteSljitPrimitiveCountOneTargetBatch(targets, count_one_update);
 			RecordSljitRegionStageRuntime(runtime, op_idx, op.kind, "input_vector_group_targets.count_one_update",
 			                              update_start);
-			RecordSljitRegionMaterializationElision(
-			    runtime, op.kind, "input_vector_group_targets.count_one_update", payload_input.size());
+			RecordSljitRegionMaterializationElision(runtime, op.kind, "input_vector_group_targets.count_one_update",
+			                                        payload_input.size());
 			return true;
 		}
 		if (descriptor_count_one_payload) {
@@ -356,8 +357,8 @@ static bool SljitTryExecuteInputVectorGroupedAggregateUpdate(
 		if (updated) {
 			RecordSljitRegionStageRuntime(runtime, op_idx, op.kind, "direct_projected_group_payload_input_update",
 			                              stage_start);
-			RecordSljitRegionMaterializationElision(
-			    runtime, op.kind, "direct_projected_group_payload_input_update", payload_input.size());
+			RecordSljitRegionMaterializationElision(runtime, op.kind, "direct_projected_group_payload_input_update",
+			                                        payload_input.size());
 			return true;
 		}
 		RecordSljitRegionStageRuntimePath(runtime, op_idx, op.kind, "direct_projected_group_payload_input_update_miss",

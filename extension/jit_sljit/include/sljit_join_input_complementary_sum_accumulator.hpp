@@ -8,6 +8,7 @@
 
 #pragma once
 
+#include "sljit_join_input_complementary_sum_api.hpp"
 #include "sljit_direct_join_output_aggregate_state.hpp"
 #include "sljit_grouped_aggregate_preaggregated_update_runtime.hpp"
 #include "sljit_typed_local_group_index.hpp"
@@ -257,9 +258,9 @@ static bool SljitTryMaterializeJoinInputComplementarySumAccumulator(
 	    strategy.join_input_complementary_sum_accumulator->physical_type, dispatch);
 }
 
-static bool SljitFlushJoinInputComplementarySumAccumulator(ExecutionRegionRuntime &runtime,
-                                                           SljitExecutableRegionOp &aggregate_op,
-                                                           SljitDirectJoinOutputAggregateStrategy &strategy) {
+bool SljitFlushJoinInputComplementarySumAccumulator(ExecutionRegionRuntime &runtime,
+                                                    SljitExecutableRegionOp &aggregate_op,
+                                                    SljitDirectJoinOutputAggregateStrategy &strategy) {
 	auto accumulator = optional_ptr<SljitJoinInputRowPointerComplementarySumAccumulator>(
 	    strategy.join_input_complementary_sum_accumulator.get());
 	if (!accumulator || accumulator->Empty()) {

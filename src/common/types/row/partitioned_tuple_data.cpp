@@ -94,8 +94,8 @@ void PartitionedTupleData::AppendUnified(PartitionedTupleDataAppendState &state,
 }
 
 bool PartitionedTupleData::TryAppendUnifiedSinglePartition(PartitionedTupleDataAppendState &state, DataChunk &input,
-                                                           const SelectionVector &append_sel,
-                                                           const idx_t append_count) {
+                                                           const SelectionVector &append_sel, const idx_t append_count,
+                                                           bool build_reverse_selection) {
 	if (partitions.size() != 1) {
 		return false;
 	}
@@ -103,7 +103,7 @@ bool PartitionedTupleData::TryAppendUnifiedSinglePartition(PartitionedTupleDataA
 	if (actual_append_count == 0) {
 		return true;
 	}
-	if (state.compute_reverse_partition_sel) {
+	if (build_reverse_selection && state.compute_reverse_partition_sel) {
 		for (sel_t i = 0; i < actual_append_count; i++) {
 			state.reverse_partition_sel[append_sel.get_index(i)] = i;
 		}
@@ -142,7 +142,8 @@ static void StoreIdentitySelectedFixedColumn(const_data_ptr_t source, data_ptr_t
 bool PartitionedTupleData::TryAppendUnifiedFixedWidthSinglePartition(PartitionedTupleDataAppendState &state,
                                                                      DataChunk &input,
                                                                      const SelectionVector &append_sel,
-                                                                     const idx_t append_count) {
+                                                                     const idx_t append_count,
+                                                                     bool build_reverse_selection) {
 	static constexpr idx_t MAX_FAST_COLUMNS = 16;
 	struct FixedColumnSource {
 		const_data_ptr_t data;
@@ -174,7 +175,7 @@ bool PartitionedTupleData::TryAppendUnifiedFixedWidthSinglePartition(Partitioned
 		}
 		sources[col_idx] = {format.data, format.sel, GetTypeIdSize(physical_type), layout_offsets[col_idx]};
 	}
-	if (state.compute_reverse_partition_sel) {
+	if (build_reverse_selection && state.compute_reverse_partition_sel) {
 		if (!append_sel.IsSet()) {
 			for (sel_t i = 0; i < actual_append_count; i++) {
 				state.reverse_partition_sel[i] = i;

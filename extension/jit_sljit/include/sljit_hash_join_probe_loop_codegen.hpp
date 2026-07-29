@@ -10,6 +10,7 @@
 
 #include "sljit_join_probe_codegen.hpp"
 
+#include "duckdb/common/hash_bloom_filter.hpp"
 #include "duckdb/common/numeric_utils.hpp"
 
 #include "sljitLir.h"
@@ -64,17 +65,10 @@ static inline void EmitBloomFilterMaskPart(struct sljit_compiler *compiler, slji
 
 static inline void EmitBloomFilterMask(struct sljit_compiler *compiler, sljit_s32 hash_reg, sljit_s32 mask_reg,
                                        sljit_s32 scratch) {
-#if DUCKDB_IS_BIG_ENDIAN
-	EmitBloomFilterMaskPart(compiler, hash_reg, mask_reg, scratch, 24, true);
-	EmitBloomFilterMaskPart(compiler, hash_reg, mask_reg, scratch, 16, false);
-	EmitBloomFilterMaskPart(compiler, hash_reg, mask_reg, scratch, 8, false);
-	EmitBloomFilterMaskPart(compiler, hash_reg, mask_reg, scratch, 0, false);
-#else
-	EmitBloomFilterMaskPart(compiler, hash_reg, mask_reg, scratch, 32, true);
-	EmitBloomFilterMaskPart(compiler, hash_reg, mask_reg, scratch, 40, false);
-	EmitBloomFilterMaskPart(compiler, hash_reg, mask_reg, scratch, 48, false);
-	EmitBloomFilterMaskPart(compiler, hash_reg, mask_reg, scratch, 56, false);
-#endif
+	EmitBloomFilterMaskPart(compiler, hash_reg, mask_reg, scratch, HashBloomFilterConstants::SHIFT_0, true);
+	EmitBloomFilterMaskPart(compiler, hash_reg, mask_reg, scratch, HashBloomFilterConstants::SHIFT_1, false);
+	EmitBloomFilterMaskPart(compiler, hash_reg, mask_reg, scratch, HashBloomFilterConstants::SHIFT_2, false);
+	EmitBloomFilterMaskPart(compiler, hash_reg, mask_reg, scratch, HashBloomFilterConstants::SHIFT_3, false);
 }
 
 static inline struct sljit_jump *EmitJumpIfRegularHashJoinBloomMiss(struct sljit_compiler *compiler, sljit_s32 hash_reg,

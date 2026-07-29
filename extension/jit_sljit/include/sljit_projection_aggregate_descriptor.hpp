@@ -8,8 +8,10 @@
 
 #pragma once
 
+#include "sljit_hash_join_projection_source_runtime.hpp"
 #include "sljit_post_join_projection_strategy.hpp"
 #include "sljit_projection_aggregate_ungrouped_descriptor.hpp"
+#include "sljit_projection_chain_primitive.hpp"
 #include "sljit_projection_perfect_hash_aggregate_descriptor.hpp"
 
 namespace duckdb {

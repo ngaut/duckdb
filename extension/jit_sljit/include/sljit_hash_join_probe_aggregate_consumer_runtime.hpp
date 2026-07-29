@@ -8,8 +8,10 @@
 
 #pragma once
 
-#include "sljit_hash_join_all_valid_probe_dispatch_runtime.hpp"
+#include "sljit_direct_join_output_aggregate_api.hpp"
+#include "sljit_hash_join_all_valid_probe_api.hpp"
 #include "sljit_hash_join_consumer_result.hpp"
+#include "sljit_hash_join_matched_row_batch_consumer_runtime.hpp"
 #include "sljit_hash_join_probe_execution_contract.hpp"
 #include "sljit_hash_join_probe_input_filter_runtime.hpp"
 #include "sljit_hash_join_probe_ungrouped_aggregate_consumer_runtime.hpp"
@@ -20,13 +22,13 @@
 
 namespace duckdb {
 
-template <bool SELECTED, class CONSUMER>
+template <class CONSUMER>
 static bool TryExecuteAllValidUncheckedInt64ToInt32SingleKeyNoChainBufferedConsumer(
-    ExecutionRegionRuntime &runtime, idx_t hash_join_idx, SljitNativeRegionOpKind hash_join_kind,
+    bool selected, ExecutionRegionRuntime &runtime, idx_t hash_join_idx, SljitNativeRegionOpKind hash_join_kind,
     const SljitNativeHashJoinProbePlan &plan, SljitNativeRegularHashJoinProbeInput &input, CONSUMER &consumer,
     idx_t &matched_count) {
 	auto probe_start = SljitRegionStageStart(runtime);
-	if (!TryExecuteAllValidUncheckedInt64ToInt32SingleKeyNoChainProbe<SELECTED>(plan, input)) {
+	if (!SljitTryExecuteAllValidUncheckedInt64ToInt32SingleKeyNoChainProbe(selected, plan, input)) {
 		return false;
 	}
 	RecordSljitRegionStageRuntime(runtime, hash_join_idx, hash_join_kind, "direct_aggregate_consumer_probe",
@@ -37,115 +39,6 @@ static bool TryExecuteAllValidUncheckedInt64ToInt32SingleKeyNoChainBufferedConsu
 	RecordSljitRegionStageRuntime(runtime, hash_join_idx, hash_join_kind, "direct_aggregate_consumer_accumulate",
 	                              consume_start);
 	return true;
-}
-
-template <bool SELECTED, bool USE_SALT, bool HAS_BLOOM>
-static void
-ExecuteAllValidUncheckedInt64ToInt32SingleKeyNoChainProbeConsumer(const SljitNativeHashJoinProbePlan &plan,
-                                                                  SljitNativeRegularHashJoinProbeInput &input,
-                                                                  SljitHashJoinMatchedRowBatchConsumer &consumer) {
-	const auto count = input.count;
-	const auto key_data = reinterpret_cast<const int64_t *__restrict>(input.source_data[0]);
-	const sel_t *__restrict key_sel = nullptr;
-	if constexpr (SELECTED) {
-		key_sel = input.source_sel[0];
-	}
-	const auto entries = reinterpret_cast<const ht_entry_t *__restrict>(input.entries);
-	const auto bitmask = input.bitmask;
-	const auto key_offset = plan.keys[0].key_layout_offset;
-
-	auto row_idx = input.input_offset;
-	if (row_idx < count) {
-		auto source_idx = SELECTED ? key_sel[row_idx] : UnsafeNumericCast<sel_t>(row_idx);
-		auto key = UnsafeNumericCast<int32_t>(key_data[source_idx]);
-		auto hash = Hash<int32_t>(key);
-		auto ht_offset = UnsafeNumericCast<idx_t>(hash & bitmask);
-
-		while (true) {
-			const auto next_row_idx = row_idx + 1;
-			const bool has_next = next_row_idx < count;
-			int32_t next_key = 0;
-			hash_t next_hash = 0;
-			idx_t next_ht_offset = 0;
-			if (has_next) {
-				const auto next_source_idx = SELECTED ? key_sel[next_row_idx] : UnsafeNumericCast<sel_t>(next_row_idx);
-				next_key = UnsafeNumericCast<int32_t>(key_data[next_source_idx]);
-				next_hash = Hash<int32_t>(next_key);
-				next_ht_offset = UnsafeNumericCast<idx_t>(next_hash & bitmask);
-				SljitPrefetchHashJoinEntry(entries, next_ht_offset);
-			}
-
-			if (SljitBloomFilterMayContainTemplated<HAS_BLOOM>(input, hash)) {
-				hash_t salt = 0;
-				if constexpr (USE_SALT) {
-					salt = hash & ht_entry_t::SALT_MASK;
-				}
-				while (true) {
-					const auto entry_value = entries[ht_offset].GetValue();
-					if (!entry_value) {
-						break;
-					}
-					if constexpr (USE_SALT) {
-						if ((entry_value & ht_entry_t::SALT_MASK) != salt) {
-							ht_offset = UnsafeNumericCast<idx_t>((ht_offset + 1) & bitmask);
-							continue;
-						}
-					}
-					auto row_location = SljitHashJoinEntryPointer(entry_value);
-					if (SljitHashJoinKeysEqual<int32_t>(row_location, key_offset, key)) {
-						consumer.EmitNoChainMatch(row_idx, row_location);
-						break;
-					}
-					ht_offset = UnsafeNumericCast<idx_t>((ht_offset + 1) & bitmask);
-				}
-			}
-			if (!has_next) {
-				break;
-			}
-			row_idx = next_row_idx;
-			key = next_key;
-			hash = next_hash;
-			ht_offset = next_ht_offset;
-		}
-	}
-	consumer.Finish();
-}
-
-template <bool SELECTED, bool USE_SALT>
-static void
-ExecuteAllValidUncheckedInt64ToInt32SingleKeyNoChainProbeConsumer(const SljitNativeHashJoinProbePlan &plan,
-                                                                  SljitNativeRegularHashJoinProbeInput &input,
-                                                                  SljitHashJoinMatchedRowBatchConsumer &consumer) {
-	if (input.bloom_filter_bits) {
-		return ExecuteAllValidUncheckedInt64ToInt32SingleKeyNoChainProbeConsumer<SELECTED, USE_SALT, true>(plan, input,
-		                                                                                                   consumer);
-	}
-	return ExecuteAllValidUncheckedInt64ToInt32SingleKeyNoChainProbeConsumer<SELECTED, USE_SALT, false>(plan, input,
-	                                                                                                    consumer);
-}
-
-template <bool SELECTED>
-static bool
-TryExecuteAllValidUncheckedInt64ToInt32SingleKeyNoChainProbeConsumer(const SljitNativeHashJoinProbePlan &plan,
-                                                                     SljitNativeRegularHashJoinProbeInput &input,
-                                                                     SljitHashJoinMatchedRowBatchConsumer &consumer) {
-	if (!input.source_key0_int64_to_int32 || !input.source_key0_int64_to_int32_unchecked || plan.keys.size() != 1 ||
-	    plan.keys[0].key_kind != SljitNativeHashJoinKeyKind::INT32 ||
-	    !SljitHashJoinHasAllValidEqualityKey(plan.keys[0]) || plan.mark_build_match || plan.residual_predicate ||
-	    plan.output_mode != ExecutionHashJoinProbeOutputMode::MATCHED_PROBE_AND_BUILD ||
-	    !SljitHashJoinCanUseAllValidNoChainProbe(plan, input, SELECTED)) {
-		return false;
-	}
-	switch (input.layout_kind) {
-	case SljitHashJoinProbeLayoutKind::NO_CHAIN:
-		ExecuteAllValidUncheckedInt64ToInt32SingleKeyNoChainProbeConsumer<SELECTED, false>(plan, input, consumer);
-		return true;
-	case SljitHashJoinProbeLayoutKind::NO_CHAIN_SALT:
-		ExecuteAllValidUncheckedInt64ToInt32SingleKeyNoChainProbeConsumer<SELECTED, true>(plan, input, consumer);
-		return true;
-	default:
-		return false;
-	}
 }
 
 template <class GROUP_TYPE, class LOAD_GROUP, class PREDICATE_MATCHER, class FLUSH_ACCUMULATOR>
@@ -201,16 +94,14 @@ static bool SljitTryExecuteComplementarySumProbeConsumerWithGroupLoader(
 		SljitJoinInputComplementarySumProbeConsumer<GROUP_TYPE, LOAD_GROUP, decltype(predicate_matcher),
 		                                            FLUSH_ACCUMULATOR>
 		    typed_consumer(accumulator, load_group, predicate_matcher, flush_accumulator);
-		if (TryExecuteAllValidUncheckedInt64ToInt32SingleKeyNoChainBufferedConsumer<SELECTED>(
-		        runtime, hash_join_idx, hash_join_kind, plan, input, typed_consumer, matched_count)) {
+		if (TryExecuteAllValidUncheckedInt64ToInt32SingleKeyNoChainBufferedConsumer(
+		        SELECTED, runtime, hash_join_idx, hash_join_kind, plan, input, typed_consumer, matched_count)) {
 			used_unchecked_narrowing = true;
 			return true;
 		}
 		SljitHashJoinMatchedRowBatchConsumer consumer(input, typed_consumer);
-		used_unchecked_narrowing =
-		    TryExecuteAllValidUncheckedInt64ToInt32SingleKeyNoChainProbeConsumer<SELECTED>(plan, input, consumer);
-		if (!used_unchecked_narrowing &&
-		    !TryExecuteAllValidSingleKeyNoChainProbeWithConsumer<SELECTED>(plan, input, consumer)) {
+		used_unchecked_narrowing = false;
+		if (!SljitTryExecuteAllValidSingleKeyNoChainProbeWithBatchConsumer(SELECTED, plan, input, consumer)) {
 			return false;
 		}
 		matched_count = consumer.MatchedCount();
@@ -873,8 +764,7 @@ static bool SljitTryExecutePerfectHashComplementarySumProbeConsumer(
 	return execute(predicate_matcher);
 }
 
-template <class EXECUTE_HASH_JOIN_PROBE>
-static SljitHashJoinAggregateConsumerResult SljitTryExecuteHashJoinAggregateConsumer(
+SljitHashJoinAggregateConsumerResult SljitTryExecuteHashJoinAggregateConsumer(
     ExecutionRegionRuntime &runtime, ExecutionOperatorRuntime &native_runtime, vector<SljitExecutableRegionOp> &ops,
     SljitRegionExecutionScratch &scratch, const SljitHashJoinProbeSelectionPrimitive &probe_primitive,
     SljitExecutableRegionOp &hash_join_op, SljitDirectJoinOutputAggregateStrategy &strategy, DataChunk &join_input,
@@ -882,7 +772,7 @@ static SljitHashJoinAggregateConsumerResult SljitTryExecuteHashJoinAggregateCons
     idx_t output_projection_idx, idx_t probe_input_filter_idx,
     SljitHashJoinProbeInputFilterCache &probe_input_filter_cache,
     SljitSharedPerfectHashPredicateClassificationCache &shared_predicate_classification,
-    EXECUTE_HASH_JOIN_PROBE &execute_hash_join_probe) {
+    SljitNativeRegionHashJoinProbeExecutor &execute_hash_join_probe) {
 	SljitHashJoinAggregateConsumerResult result;
 	const auto hash_join_idx = probe_primitive.hash_join_idx;
 	if (hash_join_idx >= ops.size() || strategy.aggregate_idx >= ops.size()) {
@@ -927,7 +817,7 @@ static SljitHashJoinAggregateConsumerResult SljitTryExecuteHashJoinAggregateCons
 	bool rhs_keys_have_null = false;
 	if (regular_hash_join) {
 		auto &layout = probe.table_layout;
-		table_layout_kind = SljitValidateRegularHashJoinProbeExecutionLayout(plan, probe);
+		table_layout_kind = SljitHashJoinTableLayoutKind(layout);
 		if (layout.needs_chain_matcher || SljitHashJoinProbeLayoutChainsLongerThanOne(table_layout_kind)) {
 			return result;
 		}
@@ -1065,8 +955,8 @@ static SljitHashJoinAggregateConsumerResult SljitTryExecuteHashJoinAggregateCons
 		result.matched_count = join_output.size();
 		runtime.RecordJitRuntimePath("hash_join_probe.perfect_probe.direct_aggregate_consumer", result.matched_count);
 		RecordSljitRegionMaterializationElision(runtime, aggregate_op.kind,
-		                                            "join_input_perfect_hash_probe_consumer_complementary_sum",
-		                                            result.matched_count);
+		                                        "join_input_perfect_hash_probe_consumer_complementary_sum",
+		                                        result.matched_count);
 		result.status = SljitHashJoinAggregateConsumerStatus::EXECUTED;
 		return result;
 	}
@@ -1114,11 +1004,11 @@ static SljitHashJoinAggregateConsumerResult SljitTryExecuteHashJoinAggregateCons
 	                                      "direct_aggregate_consumer"
 	                                    : "regular_probe.all_valid.flat.single_key.no_chain.direct_aggregate_consumer"),
 	    probe_start);
+	RecordSljitRegionMaterializationElision(runtime, aggregate_op.kind, "join_input_probe_consumer_complementary_sum",
+	                                        result.matched_count);
 	RecordSljitRegionMaterializationElision(runtime, aggregate_op.kind,
-	                                            "join_input_probe_consumer_complementary_sum", result.matched_count);
-	RecordSljitRegionMaterializationElision(runtime, aggregate_op.kind,
-	                                            "join_input_row_pointer_preaggregated_complementary_sum_update",
-	                                            result.matched_count);
+	                                        "join_input_row_pointer_preaggregated_complementary_sum_update",
+	                                        result.matched_count);
 	result.status = SljitHashJoinAggregateConsumerStatus::EXECUTED;
 	return result;
 }

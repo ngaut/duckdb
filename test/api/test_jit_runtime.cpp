@@ -5,6 +5,7 @@
 
 #include "sljit_native_runtime.hpp"
 
+#include <algorithm>
 #include <atomic>
 #include <cstdint>
 #include <thread>
@@ -140,6 +141,32 @@ TEST_CASE("Execution region events are bounded and counters are cumulative", "[a
 		REQUIRE(counter.jit_runtime.lazy_codegen.code_size == 0);
 	}
 	REQUIRE(found_auto_skip);
+}
+
+TEST_CASE("Execution region runner cost schema accumulates every numeric field", "[api][jit]") {
+	ExecutionRegionEvent event;
+	event.backend_name = "schema-test";
+	event.runner_cost.present = true;
+	int64_t next_value = 1;
+	ForEachPhysicalRunnerCostShapeField(event.runner_cost, event.runner_cost,
+	                                    [&](const char *, int64_t &value, int64_t &) { value = next_value++; });
+	ForEachPhysicalRunnerCostWorkField(event.runner_cost, event.runner_cost,
+	                                   [&](const char *, int64_t &value, int64_t &) { value = next_value++; });
+
+	ExecutionRegionEventLog log;
+	log.Record(0, event);
+	auto counters = log.GetCounters();
+	REQUIRE(counters.size() == 1);
+	ForEachPhysicalRunnerCostShapeField(event.runner_cost, counters[0].runner_cost,
+	                                    [&](const char *name, const int64_t &source, const int64_t &total) {
+		                                    INFO(name);
+		                                    REQUIRE(total == source);
+	                                    });
+	ForEachPhysicalRunnerCostWorkField(event.runner_cost, counters[0].runner_cost,
+	                                   [&](const char *name, const int64_t &source, const int64_t &total) {
+		                                   INFO(name);
+		                                   REQUIRE(total == source);
+	                                   });
 }
 
 TEST_CASE("JIT auto vectorized skips avoid telemetry when unobserved", "[api][jit]") {
@@ -684,6 +711,25 @@ TEST_CASE("EXPLAIN ANALYZE exposes compact execution region profile", "[api][jit
 	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_explain_analyze_input AS "
 	                          "SELECT i::BIGINT AS i, (i + 1)::BIGINT AS g FROM range(10000) tbl(i)"));
 
+	auto event_schema = con.Query("SELECT * FROM duckdb_jit_events() LIMIT 0");
+	REQUIRE_NO_FAIL(*event_schema);
+	ExecutionRegionEvent empty_event;
+	auto event_schema_has_column = [&](const string &name) {
+		return std::find(event_schema->names.begin(), event_schema->names.end(), name) != event_schema->names.end();
+	};
+	ForEachExecutionRegionEventRuntimeCountField(
+	    empty_event, [&](const char *name, idx_t) { REQUIRE(event_schema_has_column(name)); });
+	ForEachExecutionRegionEventRuntimeTimeField(
+	    empty_event, [&](const char *name, const char *, int64_t) { REQUIRE(event_schema_has_column(name)); });
+	ForEachPhysicalRunnerCostShapeField(empty_event.runner_cost, empty_event.runner_cost,
+	                                    [&](const char *name, int64_t &, int64_t &) {
+		                                    REQUIRE(event_schema_has_column(string("runner_cost_") + name));
+	                                    });
+	ForEachPhysicalRunnerCostWorkField(empty_event.runner_cost, empty_event.runner_cost,
+	                                   [&](const char *name, int64_t &, int64_t &) {
+		                                   REQUIRE(event_schema_has_column(string("runner_cost_") + name));
+	                                   });
+
 	auto trace_setting = con.Query("SELECT current_setting('jit_trace_runtime')");
 	REQUIRE_NO_FAIL(*trace_setting);
 	REQUIRE(trace_setting->GetValue(0, 0).ToString() == "false");
@@ -757,16 +803,11 @@ TEST_CASE("EXPLAIN ANALYZE exposes compact execution region profile", "[api][jit
 	REQUIRE(StringUtil::Contains(analyzed_plan, "\"jit_selected_backend\""));
 	REQUIRE(StringUtil::Contains(analyzed_plan, "\"kernel_id\""));
 	REQUIRE(StringUtil::Contains(analyzed_plan, "\"query_runtime_time_us\""));
-	REQUIRE(StringUtil::Contains(analyzed_plan, "\"source_contract_output_rows\""));
-	REQUIRE(StringUtil::Contains(analyzed_plan, "\"source_contract_invocation_count\""));
-	REQUIRE(StringUtil::Contains(analyzed_plan, "\"generated_runtime_time_us\""));
 	REQUIRE(StringUtil::Contains(analyzed_plan, "\"runtime_unattributed_time_us\""));
 	REQUIRE(StringUtil::Contains(analyzed_plan, "\"source_runtime_pct\""));
 	REQUIRE(StringUtil::Contains(analyzed_plan, "\"generated_runtime_pct\""));
 	REQUIRE(StringUtil::Contains(analyzed_plan, "\"runtime_unattributed_pct\""));
 	REQUIRE(StringUtil::Contains(analyzed_plan, "\"runtime_dominant_component\""));
-	REQUIRE(StringUtil::Contains(analyzed_plan, "\"sink_next_batch_runtime_time_us\""));
-	REQUIRE(StringUtil::Contains(analyzed_plan, "\"sink_next_batch_invocation_count\""));
 	REQUIRE(StringUtil::Contains(analyzed_plan, "\"estimated_cardinality\""));
 	REQUIRE(StringUtil::Contains(analyzed_plan, "\"pipeline_cbo_time_us\""));
 	REQUIRE(StringUtil::Contains(analyzed_plan, "\"graph_build_time_us\""));
@@ -785,11 +826,23 @@ TEST_CASE("EXPLAIN ANALYZE exposes compact execution region profile", "[api][jit
 	REQUIRE(StringUtil::Contains(analyzed_plan, "\"jit_runtime_proof_counts\""));
 	REQUIRE(StringUtil::Contains(analyzed_plan, "\"jit_runtime_delegation_counts\""));
 	REQUIRE(StringUtil::Contains(analyzed_plan, "\"runner_cost_profile\""));
-	REQUIRE(StringUtil::Contains(analyzed_plan, "\"runner_cost_accelerated_runner_benefit\""));
-	REQUIRE(StringUtil::Contains(analyzed_plan, "\"runner_cost_startup_cost\""));
 	REQUIRE(StringUtil::Contains(analyzed_plan, "\"runner_cost_selected_accelerated_runner\""));
 	REQUIRE(StringUtil::Contains(analyzed_plan, "\"blocker\""));
 	REQUIRE(StringUtil::Contains(analyzed_plan, "aggregate_update"));
+	ForEachExecutionRegionEventRuntimeCountField(empty_event, [&](const char *name, idx_t) {
+		REQUIRE(StringUtil::Contains(analyzed_plan, string("\"") + name + "\""));
+	});
+	ForEachExecutionRegionEventRuntimeTimeField(empty_event, [&](const char *, const char *profile_name, int64_t) {
+		REQUIRE(StringUtil::Contains(analyzed_plan, string("\"") + profile_name + "\""));
+	});
+	ForEachPhysicalRunnerCostShapeField(
+	    empty_event.runner_cost, empty_event.runner_cost, [&](const char *name, int64_t &, int64_t &) {
+		    REQUIRE(StringUtil::Contains(analyzed_plan, string("\"runner_cost_") + name + "\""));
+	    });
+	ForEachPhysicalRunnerCostWorkField(
+	    empty_event.runner_cost, empty_event.runner_cost, [&](const char *name, int64_t &, int64_t &) {
+		    REQUIRE(StringUtil::Contains(analyzed_plan, string("\"runner_cost_") + name + "\""));
+	    });
 
 	REQUIRE_NO_FAIL(con.Query("SET jit_event_log_size=0"));
 	ClearJitTrace(manager, true);

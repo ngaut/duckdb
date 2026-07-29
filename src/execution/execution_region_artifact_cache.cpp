@@ -98,8 +98,11 @@ void ExecutionRegionArtifactCache::Publish(ExecutionRegionArtifactCacheReservati
 		if (found == building.end() || found->second != state) {
 			throw InternalException("execution-region artifact cache lost its build reservation");
 		}
-		state->published = artifact;
-		ready.Put(reservation.key, std::move(artifact));
+		// Ready-cache insertion is the only potentially-throwing publication
+		// step. Keep the build private until it succeeds so reservation
+		// cleanup makes waiters retry instead of exposing a partial publish.
+		ready.Put(reservation.key, artifact);
+		state->published = std::move(artifact);
 		building.erase(found);
 		state->building = false;
 		reservation.completed = true;

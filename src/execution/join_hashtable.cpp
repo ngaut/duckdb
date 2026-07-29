@@ -16,6 +16,7 @@
 #include "duckdb/planner/expression/bound_aggregate_expression.hpp"
 #include "duckdb/storage/buffer_manager.hpp"
 
+#include "execution_hash_join_layout.hpp"
 #include "execution_region_duckdb_type_adapter.hpp"
 
 namespace duckdb {
@@ -85,18 +86,10 @@ JoinHashTable::JoinHashTable(ClientContext &context_p, const PhysicalOperator &o
 	// at least one equality is necessary
 	D_ASSERT(!equality_types.empty());
 
-	// Types for the layout
-	auto layout = make_shared_ptr<TupleDataLayout>();
-	vector<LogicalType> layout_types(condition_types);
-	layout_types.insert(layout_types.end(), build_types.begin(), build_types.end());
-	if (PropagatesBuildSide(join_type)) {
-		// full/right outer joins need an extra bool to keep track of whether or not a tuple has found a matching entry
-		// we place the bool before the NEXT pointer
-		layout_types.emplace_back(LogicalType::BOOLEAN);
-	}
-	layout_types.emplace_back(LogicalType::HASH);
-	layout->Initialize(layout_types, TupleDataValidityType::CAN_HAVE_NULL_VALUES);
-	layout_ptr = std::move(layout);
+	// The physical table and the execution-region contract share one canonical
+	// row-layout constructor. This keeps zero-copy offsets stable by construction.
+	auto row_layout = BuildExecutionHashJoinRowLayout(condition_types, build_types, PropagatesBuildSide(join_type));
+	layout_ptr = std::move(row_layout.layout);
 
 	// Initialize the row matcher that are used for filtering during the probing only if there are non-equality preds
 	if (!non_equality_predicates.empty()) {
@@ -115,10 +108,9 @@ JoinHashTable::JoinHashTable(ClientContext &context_p, const PhysicalOperator &o
 	chains_longer_than_one = false;
 	row_matcher_build.Initialize(true, *layout_ptr, equality_predicates);
 
-	const auto &offsets = layout_ptr->GetOffsets();
-	tuple_size = offsets[condition_types.size() + build_types.size()];
-	pointer_offset = offsets.back();
-	entry_size = layout_ptr->GetRowWidth();
+	tuple_size = row_layout.tuple_size;
+	pointer_offset = row_layout.pointer_offset;
+	entry_size = row_layout.entry_size;
 
 	data_collection = make_uniq<TupleDataCollection>(buffer_manager, layout_ptr, MemoryTag::HASH_TABLE);
 	sink_collection = make_uniq<RadixPartitionedTupleData>(buffer_manager, layout_ptr, MemoryTag::HASH_TABLE,
@@ -493,35 +485,33 @@ inline bool JoinHashTable::UseSalt() const {
 
 bool JoinHashTable::GetExecutionHashJoinTableLayout(ExecutionHashJoinTableLayout &layout) const {
 	layout = ExecutionHashJoinTableLayout();
-	layout.join_type = ExecutionRegionJoinTypeFromDuckDB(join_type);
-	layout.finalized = finalized;
-	layout.in_memory = finalized && hash_map.get();
 	layout.needs_chain_matcher = needs_chain_matcher;
 	layout.chains_longer_than_one = chains_longer_than_one;
-	layout.residual_predicate = static_cast<bool>(residual_predicate) || static_cast<bool>(residual_info);
 	layout.dictionary_emission = use_dict_emission;
-	layout.can_have_null = layout_ptr && layout_ptr->CanHaveNull();
 	layout.use_salt = UseSalt();
 	layout.condition_count = condition_types.size();
 	layout.condition_types = condition_types;
-	layout.payload_column_count = build_types.size();
-	layout.payload_types = build_types;
 	layout.layout_column_count = layout_ptr ? layout_ptr->ColumnCount() : 0;
 	layout.layout_offsets = layout_ptr ? layout_ptr->GetOffsets() : vector<idx_t>();
 	layout.tuple_size = tuple_size;
-	layout.entry_size = entry_size;
 	layout.pointer_offset = pointer_offset;
 	layout.found_match_column_present = PropagatesBuildSide(join_type);
-	layout.found_match_column_index = condition_types.size() + build_types.size();
-	layout.hash_column_index =
-	    layout.found_match_column_present ? layout.found_match_column_index + 1 : layout.found_match_column_index;
-	layout.capacity = capacity == DConstants::INVALID_INDEX ? 0 : capacity;
-	layout.bitmask = bitmask == DConstants::INVALID_INDEX ? 0 : bitmask;
-	layout.pointer_mask = ht_entry_t::POINTER_MASK;
-	layout.salt_mask = ht_entry_t::SALT_MASK;
-	layout.entries = hash_map.get() ? reinterpret_cast<const ht_entry_t *>(hash_map.get()) : nullptr;
-	layout.aux_next_ptrs = aux_next_ptrs_data;
-	layout.bloom_filter = bloom_filter.IsInitialized() ? &bloom_filter : nullptr;
+	layout.entries.capacity = capacity == DConstants::INVALID_INDEX ? 0 : capacity;
+	layout.entries.bitmask = bitmask == DConstants::INVALID_INDEX ? 0 : bitmask;
+	layout.entries.pointer_mask = ht_entry_t::POINTER_MASK;
+	layout.entries.salt_mask = ht_entry_t::SALT_MASK;
+	if (ht_entry_t::POINTER_MASK == NumericLimits<uint64_t>::Maximum() && ht_entry_t::SALT_MASK == 0) {
+		layout.entries.encoding = ExecutionHashJoinEntryEncoding::POINTER;
+	} else if (ht_entry_t::POINTER_MASK == EXECUTION_HASH_JOIN_POINTER_LOWER_48_MASK &&
+	           ht_entry_t::SALT_MASK == EXECUTION_HASH_JOIN_SALT_UPPER_16_MASK) {
+		layout.entries.encoding = ExecutionHashJoinEntryEncoding::POINTER_LOWER_48_SALT_UPPER_16;
+	}
+	layout.entries.words = hash_map.get() ? reinterpret_cast<const uint64_t *>(hash_map.get()) : nullptr;
+	layout.entries.aux_next_ptrs = aux_next_ptrs_data;
+	if (bloom_filter.IsInitialized()) {
+		layout.bloom_filter.words = bloom_filter.Data();
+		layout.bloom_filter.bitmask = bloom_filter.Bitmask();
+	}
 	PrefixRangeLookupData prefix_lookup;
 	if (prefix_range_filter && TypeIsInteger(prefix_range_filter_key_type.InternalType()) &&
 	    prefix_range_filter->GetSignedLookupData(prefix_lookup) && prefix_lookup.shift == 0) {
@@ -541,24 +531,19 @@ bool JoinHashTable::GetExecutionHashJoinTableLayout(ExecutionHashJoinTableLayout
 	}
 	layout.stored_keys_have_null = has_stored_null;
 
-	if (!layout.finalized) {
-		layout.blocker = "hash-join-native-table-not-finalized";
+	if (!finalized) {
+		layout.status = ExecutionHashJoinTableLayoutStatus::NOT_FINALIZED;
 		return false;
 	}
-	if (!layout.entries || layout.capacity == 0) {
-		layout.blocker = "hash-join-native-pointer-table-missing";
+	if (Count() == 0) {
+		layout.status = ExecutionHashJoinTableLayoutStatus::EMPTY;
 		return false;
 	}
-	if (!layout.in_memory) {
-		layout.blocker = "hash-join-native-external-partitioned-table";
+	if (!layout.entries.words || layout.entries.capacity == 0) {
+		layout.status = ExecutionHashJoinTableLayoutStatus::POINTER_TABLE_MISSING;
 		return false;
 	}
-	if (layout.residual_predicate) {
-		layout.blocker = "hash-join-native-residual-predicate";
-		return false;
-	}
-	layout.ready = true;
-	layout.blocker.clear();
+	layout.status = ExecutionHashJoinTableLayoutStatus::READY;
 	return true;
 }
 

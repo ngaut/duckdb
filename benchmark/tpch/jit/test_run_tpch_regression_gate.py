@@ -3,12 +3,13 @@
 from __future__ import annotations
 
 import csv
+import io
 import json
 import os
 import sys
 import tempfile
 import unittest
-from contextlib import contextmanager
+from contextlib import contextmanager, redirect_stderr
 from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
@@ -24,7 +25,6 @@ from run_tpch_regression_gate import (
     database_cache_paths,
     gate_database,
     load_baseline_state,
-    promotion_qualification_repeats,
     run_gate,
     run_timed_benchmark,
     selected_auto_queries,
@@ -424,28 +424,15 @@ class TestRuntimeContractQuerySelection(unittest.TestCase):
 
 
 class TestPromotionRepeats(unittest.TestCase):
-    def test_default_is_ten_repeats(self) -> None:
-        self.assertEqual(
-            promotion_qualification_repeats(SimpleNamespace(repeats=5, promotion_repeats=None)),
-            10,
-        )
-
-    def test_default_never_reduces_candidate_sample_count(self) -> None:
-        self.assertEqual(
-            promotion_qualification_repeats(SimpleNamespace(repeats=12, promotion_repeats=None)),
-            12,
-        )
-
-    def test_explicit_repeat_count_wins(self) -> None:
-        self.assertEqual(
-            promotion_qualification_repeats(SimpleNamespace(repeats=5, promotion_repeats=7)),
-            7,
-        )
+    def test_candidate_repeat_budget_is_five_or_ten(self) -> None:
+        self.assertEqual(gate.parse_args([]).repeats, 5)
+        self.assertEqual(gate.parse_args(["--repeats", "10"]).repeats, 10)
+        with redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+            gate.parse_args(["--repeats", "7"])
 
     def promotion_args(self, repeats: int) -> SimpleNamespace:
         return SimpleNamespace(
             repeats=repeats,
-            promotion_repeats=10,
             timing_mode="production",
             event_log_size=0,
             trace_decisions=False,
@@ -460,6 +447,31 @@ class TestPromotionRepeats(unittest.TestCase):
 
     def test_five_repeat_candidate_still_requires_promotion_run(self) -> None:
         self.assertFalse(candidate_qualifies_for_direct_promotion(self.promotion_args(5)))
+
+    def test_promotion_qualification_always_uses_ten_repeats(self) -> None:
+        args = SimpleNamespace(repeats=5, queries=["01"])
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            candidate = root / "candidate"
+            candidate.mkdir()
+            promoted = candidate / "promotion_qualification"
+
+            def run_timed(_args, _command, _label):
+                promoted.mkdir()
+
+            with (
+                mock.patch.object(gate, "run_timed_benchmark", side_effect=run_timed),
+                mock.patch.object(gate, "benchmark_command", return_value=["benchmark"]) as benchmark,
+                mock.patch.object(gate, "require_artifact_dir"),
+                mock.patch.object(gate, "verify_command", return_value=["verify"]),
+                mock.patch.object(gate, "compare_command", return_value=["compare"]),
+                mock.patch.object(gate, "run_command"),
+            ):
+                promoted_dir, repeats = gate.build_promoted_baseline(args, root / "baseline", candidate)
+
+        self.assertEqual(promoted_dir, promoted)
+        self.assertEqual(repeats, 10)
+        self.assertEqual(benchmark.call_args.kwargs["repeats"], 10)
 
     def test_failed_candidate_comparison_cannot_reach_promotion(self) -> None:
         args = SimpleNamespace(runtime_contract_check=False, init_baseline=False, promote_baseline=True)
@@ -511,6 +523,7 @@ class TestPromotionRepeats(unittest.TestCase):
         self.assertFalse(candidate_qualifies_for_direct_promotion(args))
         with self.assertRaisesRegex(TPCHConfigurationError, "require policies"):
             validate_baseline_write_configuration(args)
+
 
 if __name__ == "__main__":
     unittest.main()

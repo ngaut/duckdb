@@ -151,6 +151,9 @@ public:
 
 	SourceResultType GetData(ExecutionContext &context, DataChunk &chunk, GlobalSinkState &sink,
 	                         OperatorSourceInput &input) const;
+	SourceResultType GetPrimitiveAggregateStateBatch(ExecutionContext &context,
+	                                                 ExecutionAggregateStateScanBatch *&batch, GlobalSinkState &sink,
+	                                                 OperatorSourceInput &input) const;
 
 	ProgressData GetProgress(ClientContext &context, GlobalSinkState &sink_p, GlobalSourceState &gstate) const;
 	optional_idx FinalizedCount(GlobalSinkState &sink) const;

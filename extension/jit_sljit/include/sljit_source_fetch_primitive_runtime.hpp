@@ -18,7 +18,7 @@ namespace duckdb {
 struct SljitSourceFetchPrimitiveRuntime {
 	SljitSourceFetchPrimitiveRuntime(ExecutionRegionRuntime &runtime_p, ExecutionRegionResult &result_p,
 	                                 const SljitFullPipelineRecipe &recipe)
-	    : runtime(runtime_p), result(result_p), selected_hash_join_sink(recipe.UsesSelectedHashJoinSinkRuntime()),
+	    : runtime(runtime_p), result(result_p),
 	      preserves_partitioned_source_chunks(recipe.preserves_partitioned_source_chunks) {
 	}
 
@@ -27,8 +27,7 @@ struct SljitSourceFetchPrimitiveRuntime {
 		if (source_chunk.size() == 0) {
 			return false;
 		}
-		if (selected_hash_join_sink ||
-		    (runtime.PreserveSourceChunkBoundaries() && preserves_partitioned_source_chunks) ||
+		if ((runtime.PreserveSourceChunkBoundaries() && preserves_partitioned_source_chunks) ||
 		    !ShouldBatchSourceContractChunk(source_contract_batch.Count(), source_chunk.size())) {
 			return ExecuteSourceChunk(source_chunk, have_more_output, execute_next_step);
 		}
@@ -94,7 +93,6 @@ private:
 private:
 	ExecutionRegionRuntime &runtime;
 	ExecutionRegionResult &result;
-	bool selected_hash_join_sink;
 	bool preserves_partitioned_source_chunks;
 	SljitDataChunkBatch source_contract_batch;
 };

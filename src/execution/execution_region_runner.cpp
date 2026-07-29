@@ -489,6 +489,33 @@ public:
 		return source_result;
 	}
 
+	SourceResultType FetchPrimitiveAggregateStateSourceContract(ExecutionAggregateStateScanBatch *&result) override {
+		if (sink_blocked) {
+			throw InternalException(
+			    "compiled region runtime cannot fetch aggregate-state source data after a blocked sink");
+		}
+		if (sink_finished) {
+			throw InternalException(
+			    "compiled region runtime cannot fetch aggregate-state source data after a finished sink");
+		}
+		if (kernel.SupportsRunnerHandoff() && (adaptive_ab || debug_force_defer_after_chunks != 0)) {
+			throw InternalException("primitive aggregate-state source recipe cannot participate in runner handoff");
+		}
+		fetched_source_chunks++;
+		if (!trace_runtime) {
+			return pipeline.FetchPrimitiveAggregateStateSourceContract(result);
+		}
+		ExecutionRegionSourceContractMetrics source_metrics;
+		auto trace_start = std::chrono::steady_clock::now();
+		auto source_result = pipeline.FetchPrimitiveAggregateStateSourceContract(result, &source_metrics);
+		auto source_elapsed_us = ExecutionRegionElapsedMicros(trace_start);
+		source_contract_output_rows += result ? result->Count() : 0;
+		source_contract_invocation_count++;
+		source_contract_runtime_time_us += source_elapsed_us;
+		RecordSourceMetrics(source_metrics);
+		return source_result;
+	}
+
 	SinkNextBatchType AdvanceSinkBatch(DataChunk &source_chunk, bool have_more_output) override {
 		if (sink_blocked) {
 			throw InternalException("compiled region runtime cannot advance sink batch after a blocked sink");
@@ -693,16 +720,31 @@ CompiledVectorizedRunStatus CompiledVectorizedRunner::ExecuteCompiledRegion(
 		                              ExecutionRegionSettings::DebugForceDeferAfterChunks(client), adaptive_ab,
 		                              adaptive_margin_basis_points);
 		ExecutionRegionResult compiled_result = ExecutionRegionResult::NOT_FINISHED;
-		bool compiled_executed;
-		if (ExecutionRegionSettings::DebugForceEntryDefer(client) && runtime.CanDeferAtEntry()) {
-			runtime.Defer("debug forced defer at kernel entry");
-			compiled_result = ExecutionRegionResult::DEFERRED;
-			compiled_executed = true;
-		} else {
-			compiled_executed = kernel->TryExecuteFullPipeline(runtime, compiled_result);
-		}
-		if (!compiled_executed) {
-			throw InternalException("compiled full pipeline kernel returned false at runtime");
+		auto pipeline_result = PipelineExecuteResult::NOT_FINISHED;
+		string runtime_reason = "full pipeline kernel executed";
+		{
+			// Native source, operator, and sink callbacks execute as one compiled-region
+			// scope. Suppressing recursive planning once here avoids per-chunk TLS
+			// transitions and covers every callback, not only source fetches.
+			ExecutionRegionSuppressionGuard guard(client);
+			bool compiled_executed;
+			if (ExecutionRegionSettings::DebugForceEntryDefer(client) && runtime.CanDeferAtEntry()) {
+				runtime.Defer("debug forced defer at kernel entry");
+				compiled_result = ExecutionRegionResult::DEFERRED;
+				compiled_executed = true;
+			} else {
+				compiled_executed = kernel->TryExecuteFullPipeline(runtime, compiled_result);
+			}
+			if (!compiled_executed) {
+				throw InternalException("compiled full pipeline kernel returned false at runtime");
+			}
+			if (compiled_result != ExecutionRegionResult::DEFERRED) {
+				pipeline_result = CompiledFullPipelineResultToPipelineExecuteResult(compiled_result);
+				if (compiled_result == ExecutionRegionResult::FINISHED) {
+					pipeline_result = pipeline.FlushAndFinalizeAfterCompiledFinish(max_chunks, runtime_reason);
+					compiled_result = PipelineExecuteResultToCompiledFullPipelineResult(pipeline_result);
+				}
+			}
 		}
 		if (compiled_result == ExecutionRegionResult::DEFERRED) {
 			auto elapsed_us = trace_runtime ? ExecutionRegionElapsedMicros(trace_start) : 0;
@@ -724,12 +766,6 @@ CompiledVectorizedRunStatus CompiledVectorizedRunner::ExecuteCompiledRegion(
 			                                    : runtime.DeferredReason(),
 			                                false);
 			return CompiledVectorizedRunStatus::VECTORIZED_DEFERRED;
-		}
-		auto pipeline_result = CompiledFullPipelineResultToPipelineExecuteResult(compiled_result);
-		string runtime_reason = "full pipeline kernel executed";
-		if (compiled_result == ExecutionRegionResult::FINISHED) {
-			pipeline_result = pipeline.FlushAndFinalizeAfterCompiledFinish(max_chunks, runtime_reason);
-			compiled_result = PipelineExecuteResultToCompiledFullPipelineResult(pipeline_result);
 		}
 		result = pipeline_result;
 		pipeline.AddProfilingAnnotation("jit", "compiled full-pipeline kernel (" + kernel->BackendName() + ")", true);

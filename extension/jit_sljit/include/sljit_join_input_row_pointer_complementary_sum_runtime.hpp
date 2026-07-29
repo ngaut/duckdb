@@ -11,6 +11,7 @@
 #include "sljit_direct_join_output_aggregate_batch_runtime.hpp"
 #include "sljit_grouped_aggregate_preaggregated_update_runtime.hpp"
 #include "sljit_hash_join_projection_aggregate_input_runtime.hpp"
+#include "sljit_join_input_complementary_sum_accumulator.hpp"
 #include "sljit_selected_input_vector_group_key.hpp"
 #include "sljit_typed_local_group_index.hpp"
 
@@ -751,11 +752,11 @@ static bool SljitTryPrepareJoinInputComplementarySumUpdate(
 	return true;
 }
 
-static bool SljitTryExecuteJoinInputRowPointerComplementarySumUpdate(
+bool SljitTryExecuteJoinInputRowPointerComplementarySumUpdate(
     ExecutionRegionRuntime &runtime, ExecutionOperatorRuntime &native_runtime, SljitRegionExecutionScratch &scratch,
     idx_t hash_join_idx, SljitExecutableRegionOp &aggregate_op, SljitDirectJoinOutputAggregateStrategy &strategy,
     DataChunk &join_input, const SelectionVector &match_selection, Vector &row_pointers, idx_t count,
-    bool source_key0_int64_to_int32_unchecked, optional_ptr<string> failure_reason = nullptr) {
+    bool source_key0_int64_to_int32_unchecked, optional_ptr<string> failure_reason) {
 	if (count == 0) {
 		return false;
 	}
@@ -821,14 +822,14 @@ static bool SljitTryExecuteJoinInputRowPointerComplementarySumUpdate(
 		RecordSljitRegionStageRuntime(runtime, strategy.aggregate_idx, aggregate_op.kind,
 		                              "pipeline_accumulate_join_input_row_pointer_complementary_sum", accumulate_start);
 		RecordSljitRegionMaterializationElision(runtime, aggregate_op.kind,
-		                                            "join_input_pipeline_complementary_sum_accumulate", count);
-		RecordSljitRegionMaterializationElision(
-		    runtime, aggregate_op.kind,
-		    direct_selected_group_transform ? "join_input_pipeline_complementary_sum.selected_group_transform"
-		                                    : "join_input_pipeline_complementary_sum.typed_group_view",
-		    count);
-		RecordSljitRegionMaterializationElision(
-		    runtime, aggregate_op.kind, "join_input_row_pointer_preaggregated_complementary_sum_update", count);
+		                                        "join_input_pipeline_complementary_sum_accumulate", count);
+		RecordSljitRegionMaterializationElision(runtime, aggregate_op.kind,
+		                                        direct_selected_group_transform
+		                                            ? "join_input_pipeline_complementary_sum.selected_group_transform"
+		                                            : "join_input_pipeline_complementary_sum.typed_group_view",
+		                                        count);
+		RecordSljitRegionMaterializationElision(runtime, aggregate_op.kind,
+		                                        "join_input_row_pointer_preaggregated_complementary_sum_update", count);
 		return true;
 	}
 
@@ -861,7 +862,7 @@ static bool SljitTryExecuteJoinInputRowPointerComplementarySumUpdate(
 		throw InternalException("Validated SLJIT join-input row-pointer complementary preaggregation buffer failed");
 	}
 	RecordSljitRegionMaterializationElision(runtime, aggregate_op.kind,
-	                                            "join_input_row_pointer_preaggregated_complementary_sum_update", count);
+	                                        "join_input_row_pointer_preaggregated_complementary_sum_update", count);
 	return true;
 }
 

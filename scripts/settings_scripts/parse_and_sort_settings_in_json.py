@@ -3,17 +3,18 @@ from .config import Setting, SettingsList, JSON_PATH
 
 
 # sort settings in json by name
-def sort_json_data(path):
+def sort_json_data(path, write_sorted=True):
     with open(path, 'r') as file:
         data = json.load(file)
     sorted_data = sorted(data, key=lambda x: x['name'])
-    with open(path, 'w') as file:
-        json.dump(sorted_data, file, indent=4)
+    if write_sorted:
+        with open(path, 'w') as file:
+            json.dump(sorted_data, file, indent=4)
     return sorted_data
 
 
 # parse json data and stores each entry as a settings object in the global list SettingsList
-def add_all_settings_to_global_list():
+def add_all_settings_to_global_list(write_sorted=True):
     valid_entries = [
         'name',
         'description',
@@ -31,7 +32,7 @@ def add_all_settings_to_global_list():
 
     print(f"Parsing and sorting the settings data in {JSON_PATH}")
     clear_global_settings_list()
-    json_data = sort_json_data(JSON_PATH)
+    json_data = sort_json_data(JSON_PATH, write_sorted)
     # store all the settings in the SettingsList
     for entry in json_data:
         for field_entry in entry:

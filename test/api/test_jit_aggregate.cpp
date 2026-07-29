@@ -3,6 +3,7 @@
 #include "sljit_aggregate_preaggregated_update_runtime.hpp"
 #include "sljit_codegen_capabilities.hpp"
 #include "sljit_grouped_aggregate_input_vector_groups.hpp"
+#include "sljit_native_codegen.hpp"
 
 #include "duckdb/execution/aggregate_hashtable.hpp"
 
@@ -45,6 +46,306 @@ TEST_CASE("Primitive aggregate fresh-state initialization has an endian-independ
 	REQUIRE_FALSE(Load<bool>(state.data() + lane.state_is_set_offset));
 	for (idx_t tail_idx = 1; tail_idx < sizeof(uint64_t); tail_idx++) {
 		REQUIRE(state[lane.state_is_set_offset + tail_idx] == 0);
+	}
+}
+
+TEST_CASE("JIT generated preaggregated state writer preserves canonical primitive semantics", "[api][jit]") {
+	if (!SljitPrimitiveRunCodegenSupported()) {
+		return;
+	}
+
+	vector<ExecutionPrimitiveAggregateUpdateLane> lanes(3);
+	lanes[0].ready = true;
+	lanes[0].kind = AggregatePrimitiveUpdateKind::SUM_HUGEINT;
+	lanes[0].state_offset = 0;
+	lanes[0].state_size = sizeof(hugeint_t) + sizeof(uint64_t);
+	lanes[0].state_value_offset = 0;
+	lanes[0].state_is_set_offset = sizeof(hugeint_t);
+	lanes[1].ready = true;
+	lanes[1].kind = AggregatePrimitiveUpdateKind::COUNT;
+	lanes[1].state_offset = lanes[0].state_size;
+	lanes[1].state_size = sizeof(int64_t);
+	lanes[1].state_value_offset = 0;
+	lanes[2].ready = true;
+	lanes[2].kind = AggregatePrimitiveUpdateKind::SUM_INT64;
+	lanes[2].state_offset = lanes[1].state_offset + lanes[1].state_size;
+	lanes[2].state_size = sizeof(int64_t) + sizeof(uint64_t);
+	lanes[2].state_value_offset = 0;
+	lanes[2].state_is_set_offset = sizeof(int64_t);
+	const idx_t row_size = lanes[2].state_offset + lanes[2].state_size;
+
+	std::array<std::array<uint8_t, 48>, 3> states;
+	REQUIRE(row_size == states[0].size());
+	for (auto &state : states) {
+		state.fill(0xa5);
+	}
+	const uintptr_t addresses[] = {reinterpret_cast<uintptr_t>(states[0].data()),
+	                               reinterpret_cast<uintptr_t>(states[1].data()),
+	                               reinterpret_cast<uintptr_t>(states[2].data())};
+	vector<hugeint_t> huge_values {hugeint_t(1, NumericLimits<uint64_t>::Maximum()), hugeint_t(3, 7), hugeint_t(-2, 9)};
+	vector<int64_t> count_values {2, 3, 4};
+	vector<int64_t> int64_values {5, -6, 7};
+	vector<uint8_t> huge_is_set {1, 0, 1};
+	vector<uint8_t> int64_is_set {1, 1, 0};
+	vector<SljitNativePreaggregatedPrimitiveLaneInput> lane_inputs(3);
+	lane_inputs[0].hugeint_values = huge_values.data();
+	lane_inputs[0].value_is_set = huge_is_set.data();
+	lane_inputs[0].state_offset = lanes[0].state_offset;
+	lane_inputs[1].int64_values = count_values.data();
+	lane_inputs[1].state_offset = lanes[1].state_offset;
+	lane_inputs[2].int64_values = int64_values.data();
+	lane_inputs[2].value_is_set = int64_is_set.data();
+	lane_inputs[2].state_offset = lanes[2].state_offset;
+	vector<AggregatePrimitiveUpdateKind> primitive_kinds;
+	vector<idx_t> state_offsets;
+	for (auto &lane : lanes) {
+		primitive_kinds.push_back(lane.kind);
+		state_offsets.push_back(lane.state_offset);
+	}
+
+	SljitNativePreaggregatedPrimitiveUpdateFunction initialize = nullptr;
+	string error;
+	auto initialize_code =
+	    BuildSljitNativePreaggregatedPrimitiveUpdate(primitive_kinds, state_offsets, true, initialize, error);
+	REQUIRE(initialize_code);
+	REQUIRE(initialize);
+	SljitNativePreaggregatedPrimitiveUpdateInput input;
+	input.addresses = addresses;
+	input.lane_inputs = lane_inputs.data();
+	input.count = states.size();
+	initialize(&input);
+
+	REQUIRE(Load<hugeint_t>(states[0].data()) == huge_values[0]);
+	REQUIRE(Load<bool>(states[0].data() + lanes[0].state_is_set_offset));
+	REQUIRE(Load<hugeint_t>(states[1].data()) == hugeint_t(0));
+	REQUIRE_FALSE(Load<bool>(states[1].data() + lanes[0].state_is_set_offset));
+	REQUIRE(Load<int64_t>(states[1].data() + lanes[1].state_offset) == 3);
+	REQUIRE(Load<int64_t>(states[1].data() + lanes[2].state_offset) == -6);
+	REQUIRE(Load<bool>(states[1].data() + lanes[2].state_offset + lanes[2].state_is_set_offset));
+	REQUIRE(Load<int64_t>(states[2].data() + lanes[2].state_offset) == 0);
+	REQUIRE_FALSE(Load<bool>(states[2].data() + lanes[2].state_offset + lanes[2].state_is_set_offset));
+	for (idx_t padding_idx = 1; padding_idx < sizeof(uint64_t); padding_idx++) {
+		REQUIRE(states[1][lanes[0].state_is_set_offset + padding_idx] == 0);
+		REQUIRE(states[2][lanes[2].state_offset + lanes[2].state_is_set_offset + padding_idx] == 0);
+	}
+
+	huge_values = {hugeint_t(0, 1), hugeint_t(-1, NumericLimits<uint64_t>::Maximum()), hugeint_t(4, 5)};
+	count_values = {10, 20, 30};
+	int64_values = {40, 50, 60};
+	huge_is_set = {1, 1, 0};
+	int64_is_set = {1, 0, 1};
+	lane_inputs[0].hugeint_values = huge_values.data();
+	lane_inputs[0].value_is_set = huge_is_set.data();
+	lane_inputs[1].int64_values = count_values.data();
+	lane_inputs[2].int64_values = int64_values.data();
+	lane_inputs[2].value_is_set = int64_is_set.data();
+	SljitNativePreaggregatedPrimitiveUpdateFunction update = nullptr;
+	auto update_code =
+	    BuildSljitNativePreaggregatedPrimitiveUpdate(primitive_kinds, state_offsets, false, update, error);
+	REQUIRE(update_code);
+	REQUIRE(update);
+	update(&input);
+
+	REQUIRE(Load<hugeint_t>(states[0].data()) == hugeint_t(2, 0));
+	REQUIRE(Load<hugeint_t>(states[1].data()) == hugeint_t(-1, NumericLimits<uint64_t>::Maximum()));
+	REQUIRE(Load<bool>(states[1].data() + lanes[0].state_is_set_offset));
+	REQUIRE(Load<int64_t>(states[0].data() + lanes[1].state_offset) == 12);
+	REQUIRE(Load<int64_t>(states[1].data() + lanes[1].state_offset) == 23);
+	REQUIRE(Load<int64_t>(states[2].data() + lanes[1].state_offset) == 34);
+	REQUIRE(Load<int64_t>(states[0].data() + lanes[2].state_offset) == 45);
+	REQUIRE(Load<int64_t>(states[1].data() + lanes[2].state_offset) == -6);
+	REQUIRE(Load<int64_t>(states[2].data() + lanes[2].state_offset) == 60);
+	REQUIRE(Load<bool>(states[2].data() + lanes[2].state_offset + lanes[2].state_is_set_offset));
+}
+
+TEST_CASE("JIT generated preaggregated state writer follows row and address selections", "[api][jit]") {
+	if (!SljitPrimitiveRunCodegenSupported()) {
+		return;
+	}
+
+	const vector<AggregatePrimitiveUpdateKind> primitive_kinds {AggregatePrimitiveUpdateKind::SUM_INT64};
+	const vector<idx_t> state_offsets {0};
+	string error;
+	SljitNativePreaggregatedPrimitiveUpdateFunction row_selected_update = nullptr;
+	auto row_selected_update_code = BuildSljitNativePreaggregatedPrimitiveUpdate(
+	    primitive_kinds, state_offsets, false, row_selected_update, error, false, true);
+	REQUIRE(row_selected_update_code);
+	REQUIRE(row_selected_update);
+
+	const vector<int64_t> values {10, 20, 30};
+	const vector<uint8_t> value_is_set {1, 1, 1};
+	SljitNativePreaggregatedPrimitiveLaneInput lane;
+	lane.int64_values = values.data();
+	lane.value_is_set = value_is_set.data();
+
+	constexpr idx_t state_size = sizeof(int64_t) + sizeof(uint64_t);
+	std::array<std::array<uint8_t, state_size>, 3> states;
+	std::array<uintptr_t, 3> addresses;
+	for (idx_t state_idx = 0; state_idx < states.size(); state_idx++) {
+		states[state_idx].fill(0);
+		Store<int64_t>(NumericCast<int64_t>(100 * (state_idx + 1)), states[state_idx].data());
+		Store<uint64_t>(1, states[state_idx].data() + sizeof(int64_t));
+		addresses[state_idx] = reinterpret_cast<uintptr_t>(states[state_idx].data());
+	}
+
+	const sel_t execute_sel[] = {2, 0};
+	SljitNativePreaggregatedPrimitiveUpdateInput input;
+	input.addresses = addresses.data();
+	input.execute_sel = execute_sel;
+	input.lane_inputs = &lane;
+	input.count = 2;
+	row_selected_update(&input);
+	REQUIRE(Load<int64_t>(states[0].data()) == 130);
+	REQUIRE(Load<int64_t>(states[1].data()) == 210);
+	REQUIRE(Load<int64_t>(states[2].data()) == 300);
+
+	const sel_t address_sel[] = {1, 2, 0};
+	input.address_sel = address_sel;
+	SljitNativePreaggregatedPrimitiveUpdateFunction fully_selected_update = nullptr;
+	auto fully_selected_update_code = BuildSljitNativePreaggregatedPrimitiveUpdate(
+	    primitive_kinds, state_offsets, false, fully_selected_update, error, true, true);
+	REQUIRE(fully_selected_update_code);
+	REQUIRE(fully_selected_update);
+	fully_selected_update(&input);
+	REQUIRE(Load<int64_t>(states[0].data()) == 160);
+	REQUIRE(Load<int64_t>(states[1].data()) == 220);
+	REQUIRE(Load<int64_t>(states[2].data()) == 300);
+
+	input.execute_sel = nullptr;
+	SljitNativePreaggregatedPrimitiveUpdateFunction address_selected_update = nullptr;
+	auto address_selected_update_code = BuildSljitNativePreaggregatedPrimitiveUpdate(
+	    primitive_kinds, state_offsets, false, address_selected_update, error, true, false);
+	REQUIRE(address_selected_update_code);
+	REQUIRE(address_selected_update);
+	address_selected_update(&input);
+	REQUIRE(Load<int64_t>(states[0].data()) == 160);
+	REQUIRE(Load<int64_t>(states[1].data()) == 230);
+	REQUIRE(Load<int64_t>(states[2].data()) == 320);
+}
+
+TEST_CASE("JIT generated preaggregated state writer loops wide homogeneous lanes", "[api][jit]") {
+	if (!SljitPrimitiveRunCodegenSupported()) {
+		return;
+	}
+	constexpr idx_t lane_count = 9;
+	constexpr idx_t comparison_lane_count = 16;
+	constexpr idx_t row_count = 2;
+	const std::array<AggregatePrimitiveUpdateKind, 3> kinds {AggregatePrimitiveUpdateKind::COUNT,
+	                                                         AggregatePrimitiveUpdateKind::SUM_INT64,
+	                                                         AggregatePrimitiveUpdateKind::SUM_HUGEINT};
+
+	auto make_lanes = [](AggregatePrimitiveUpdateKind kind, idx_t count) {
+		vector<ExecutionPrimitiveAggregateUpdateLane> lanes(count);
+		const auto value_size = AggregatePrimitiveUpdateStateValueSize(kind);
+		const auto has_state_is_set = AggregatePrimitiveUpdateHasStateIsSet(kind);
+		const auto state_size = value_size + (has_state_is_set ? sizeof(uint64_t) : 0);
+		for (idx_t lane_idx = 0; lane_idx < count; lane_idx++) {
+			auto &lane = lanes[lane_idx];
+			lane.ready = true;
+			lane.kind = kind;
+			lane.state_offset = lane_idx * state_size;
+			lane.state_size = state_size;
+			lane.state_value_offset = 0;
+			lane.state_is_set_offset = has_state_is_set ? value_size : 0;
+		}
+		return lanes;
+	};
+
+	for (auto kind : kinds) {
+		auto lanes = make_lanes(kind, lane_count);
+		const vector<AggregatePrimitiveUpdateKind> primitive_kinds(lane_count, kind);
+		vector<idx_t> state_offsets;
+		for (auto &lane : lanes) {
+			state_offsets.push_back(lane.state_offset);
+		}
+		const auto row_state_size = lane_count * lanes[0].state_size;
+		vector<uint8_t> states(row_count * row_state_size, 0xa5);
+		vector<uintptr_t> addresses(row_count);
+		for (idx_t row_idx = 0; row_idx < row_count; row_idx++) {
+			addresses[row_idx] = reinterpret_cast<uintptr_t>(states.data() + row_idx * row_state_size);
+		}
+
+		vector<vector<int64_t>> int64_values(lane_count, vector<int64_t>(row_count));
+		vector<vector<hugeint_t>> hugeint_values(lane_count, vector<hugeint_t>(row_count));
+		vector<vector<uint8_t>> value_is_set(lane_count, vector<uint8_t>(row_count));
+		vector<SljitNativePreaggregatedPrimitiveLaneInput> lane_inputs(lane_count);
+		for (idx_t lane_idx = 0; lane_idx < lane_count; lane_idx++) {
+			int64_values[lane_idx] = {NumericCast<int64_t>(lane_idx + 1), NumericCast<int64_t>(lane_idx + 11)};
+			hugeint_values[lane_idx] = {hugeint_t(int64_values[lane_idx][0]), hugeint_t(int64_values[lane_idx][1])};
+			value_is_set[lane_idx] = {1, static_cast<uint8_t>(lane_idx % 2 == 0)};
+			auto &input = lane_inputs[lane_idx];
+			input.int64_values = int64_values[lane_idx].data();
+			input.hugeint_values = hugeint_values[lane_idx].data();
+			input.value_is_set = value_is_set[lane_idx].data();
+			input.state_offset = lanes[lane_idx].state_offset;
+		}
+
+		string error;
+		SljitNativePreaggregatedPrimitiveUpdateFunction initialize = nullptr;
+		auto initialize_code =
+		    BuildSljitNativePreaggregatedPrimitiveUpdate(primitive_kinds, state_offsets, true, initialize, error);
+		REQUIRE(initialize_code);
+		REQUIRE(initialize);
+		SljitNativePreaggregatedPrimitiveUpdateInput input;
+		input.addresses = addresses.data();
+		input.lane_inputs = lane_inputs.data();
+		input.count = row_count;
+		initialize(&input);
+
+		for (idx_t lane_idx = 0; lane_idx < lane_count; lane_idx++) {
+			int64_values[lane_idx] = {NumericCast<int64_t>(lane_idx + 101), NumericCast<int64_t>(lane_idx + 201)};
+			hugeint_values[lane_idx] = {hugeint_t(int64_values[lane_idx][0]), hugeint_t(int64_values[lane_idx][1])};
+			value_is_set[lane_idx] = {1, static_cast<uint8_t>(lane_idx % 2 != 0)};
+			lane_inputs[lane_idx].int64_values = int64_values[lane_idx].data();
+			lane_inputs[lane_idx].hugeint_values = hugeint_values[lane_idx].data();
+			lane_inputs[lane_idx].value_is_set = value_is_set[lane_idx].data();
+		}
+		SljitNativePreaggregatedPrimitiveUpdateFunction update = nullptr;
+		auto update_code =
+		    BuildSljitNativePreaggregatedPrimitiveUpdate(primitive_kinds, state_offsets, false, update, error);
+		REQUIRE(update_code);
+		REQUIRE(update);
+		update(&input);
+
+		for (idx_t row_idx = 0; row_idx < row_count; row_idx++) {
+			for (idx_t lane_idx = 0; lane_idx < lane_count; lane_idx++) {
+				auto state = states.data() + row_idx * row_state_size + lanes[lane_idx].state_offset;
+				if (kind == AggregatePrimitiveUpdateKind::COUNT) {
+					const auto expected = NumericCast<int64_t>(2 * lane_idx + (row_idx == 0 ? 102 : 212));
+					REQUIRE(Load<int64_t>(state) == expected);
+					continue;
+				}
+				const bool initialized = row_idx == 0 || lane_idx % 2 == 0;
+				const bool updated = row_idx == 0 || lane_idx % 2 != 0;
+				const auto initial_value = NumericCast<int64_t>(lane_idx + (row_idx == 0 ? 1 : 11));
+				const auto update_value = NumericCast<int64_t>(lane_idx + (row_idx == 0 ? 101 : 201));
+				const auto expected = (initialized ? initial_value : 0) + (updated ? update_value : 0);
+				if (kind == AggregatePrimitiveUpdateKind::SUM_INT64) {
+					REQUIRE(Load<int64_t>(state) == expected);
+				} else {
+					REQUIRE(Load<hugeint_t>(state) == hugeint_t(expected));
+				}
+				REQUIRE(Load<bool>(state + lanes[lane_idx].state_is_set_offset));
+			}
+		}
+
+		const vector<AggregatePrimitiveUpdateKind> comparison_primitive_kinds(comparison_lane_count, kind);
+		vector<idx_t> comparison_state_offsets(comparison_lane_count);
+		for (idx_t lane_idx = 0; lane_idx < comparison_lane_count; lane_idx++) {
+			comparison_state_offsets[lane_idx] = lane_idx * lanes[0].state_size;
+		}
+		SljitNativePreaggregatedPrimitiveUpdateFunction comparison_initialize = nullptr;
+		auto comparison_initialize_code = BuildSljitNativePreaggregatedPrimitiveUpdate(
+		    comparison_primitive_kinds, comparison_state_offsets, true, comparison_initialize, error);
+		REQUIRE(comparison_initialize_code);
+		REQUIRE(comparison_initialize);
+		REQUIRE(comparison_initialize_code->CodeSize() == initialize_code->CodeSize());
+		SljitNativePreaggregatedPrimitiveUpdateFunction comparison_update = nullptr;
+		auto comparison_update_code = BuildSljitNativePreaggregatedPrimitiveUpdate(
+		    comparison_primitive_kinds, comparison_state_offsets, false, comparison_update, error);
+		REQUIRE(comparison_update_code);
+		REQUIRE(comparison_update);
+		REQUIRE(comparison_update_code->CodeSize() == update_code->CodeSize());
 	}
 }
 
@@ -135,6 +436,7 @@ TEST_CASE("Grouped aggregate append callbacks expose identity address order dire
 		}
 	};
 
+	ht.SkipLookups(false);
 	REQUIRE(ht.TryAppendNewGroupsWithStateAddressesFast(groups, update, &update_state));
 	REQUIRE(update_state.called);
 	REQUIRE(update_state.identity_order);
@@ -241,7 +543,7 @@ TEST_CASE("JIT shared affine progressions bind canonical aggregate states once",
 	affine.lanes_form_arithmetic_progression = true;
 	affine.lane_step = {0, 1};
 	auto update_state = SljitMakePreaggregatedPrimitiveUpdateState(lanes, scratch, &affine);
-	REQUIRE(update_state.shared_affine_canonical_int64_states);
+	REQUIRE(update_state.shared_affine_canonical_states);
 	REQUIRE(update_state.shared_affine_state_stride == sizeof(int64_t) + sizeof(uint64_t));
 
 	std::array<uint8_t, 3 * (sizeof(int64_t) + sizeof(uint64_t))> states;
@@ -260,6 +562,66 @@ TEST_CASE("JIT shared affine progressions bind canonical aggregate states once",
 	REQUIRE(SljitMaterializeSharedAffineValidCounts(scratch));
 	REQUIRE_FALSE(scratch.shared_valid_counts_are_row_counts);
 	REQUIRE(scratch.shared_valid_counts == vector<idx_t> {3});
+}
+
+TEST_CASE("JIT shared affine hugeint progressions initialize canonical aggregate states once", "[api][jit]") {
+	std::array<ExecutionPrimitiveAggregateUpdateLane, 3> lane_storage;
+	vector<const ExecutionPrimitiveAggregateUpdateLane *> lanes;
+	for (idx_t lane_idx = 0; lane_idx < lane_storage.size(); lane_idx++) {
+		auto &lane = lane_storage[lane_idx];
+		lane.ready = true;
+		lane.kind = AggregatePrimitiveUpdateKind::SUM_HUGEINT;
+		lane.state_size = sizeof(hugeint_t) + sizeof(uint64_t);
+		lane.state_offset = lane_idx * lane.state_size;
+		lane.state_value_offset = 0;
+		lane.state_is_set_offset = sizeof(hugeint_t);
+		lanes.push_back(&lane);
+	}
+
+	SljitPreaggregatedPrimitiveAggregateScratch scratch;
+	scratch.PrepareSharedAffine(lanes, 3);
+	const vector<idx_t> valid_counts {3, 2, 3};
+	const vector<hugeint_t> shared_values {hugeint_t(6), hugeint_t(-6),
+	                                       hugeint_t(NumericLimits<int64_t>::Maximum()) + hugeint_t(17)};
+	for (idx_t row_idx = 0; row_idx < shared_values.size(); row_idx++) {
+		scratch.group_row_counts.push_back(valid_counts[row_idx]);
+		SljitAppendSharedAffineValue(scratch, shared_values[row_idx]);
+		scratch.shared_valid_counts.push_back(0);
+	}
+	scratch.shared_valid_counts_are_row_counts = true;
+
+	SljitExecutableFusedAffineRunUpdate affine;
+	affine.source_position = 0;
+	affine.source_type = PhysicalType::INT64;
+	affine.primitive_kind = AggregatePrimitiveUpdateKind::SUM_HUGEINT;
+	affine.lanes = {{1, 0}, {1, 1}, {1, 2}};
+	affine.lanes_form_arithmetic_progression = true;
+	affine.lane_step = {0, 1};
+	auto update_state = SljitMakePreaggregatedPrimitiveUpdateState(lanes, scratch, &affine);
+	REQUIRE(update_state.shared_affine_canonical_states);
+	REQUIRE(update_state.shared_affine_state_stride == sizeof(hugeint_t) + sizeof(uint64_t));
+
+	const auto row_state_size = lane_storage.size() * (sizeof(hugeint_t) + sizeof(uint64_t));
+	std::array<uint8_t, 3 * 3 * (sizeof(hugeint_t) + sizeof(uint64_t))> states;
+	states.fill(0xa5);
+	const uintptr_t addresses[] = {reinterpret_cast<uintptr_t>(states.data()),
+	                               reinterpret_cast<uintptr_t>(states.data() + row_state_size),
+	                               reinterpret_cast<uintptr_t>(states.data() + 2 * row_state_size)};
+	ExecuteSljitPreaggregatedPrimitiveAddressUpdate(
+	    addresses, nullptr, shared_values.size(),
+	    ExecutionGroupedAggregateStateAddressUpdateMode::INITIALIZE_AND_UPDATE, &update_state);
+	for (idx_t row_idx = 0; row_idx < shared_values.size(); row_idx++) {
+		for (idx_t lane_idx = 0; lane_idx < lane_storage.size(); lane_idx++) {
+			auto state = states.data() + row_idx * row_state_size + lane_storage[lane_idx].state_offset;
+			const auto lane_delta =
+			    hugeint_t(NumericCast<int64_t>(valid_counts[row_idx])) * hugeint_t(NumericCast<int64_t>(lane_idx));
+			REQUIRE(Load<hugeint_t>(state) == shared_values[row_idx] + lane_delta);
+			REQUIRE(Load<bool>(state + sizeof(hugeint_t)));
+			for (idx_t tail_idx = 1; tail_idx < sizeof(uint64_t); tail_idx++) {
+				REQUIRE(state[sizeof(hugeint_t) + tail_idx] == 0);
+			}
+		}
+	}
 }
 
 TEST_CASE("JIT ungrouped aggregate sinks use native state-update contracts", "[api][jit]") {
@@ -694,6 +1056,44 @@ TEST_CASE("JIT fuses multiple primitive ungrouped aggregate payload lanes into o
 		                                   "aggregate_update.primitive_payload_update="));
 	}
 	REQUIRE(found_fused_runtime);
+}
+
+TEST_CASE("JIT fuses exact-width ungrouped hugeint reference lanes", "[api][jit]") {
+	DuckDB db;
+	Connection con(db);
+	auto &manager = ExecutionRegionManager::Get(*con.context);
+
+	ConfigureSljitForCoverage(con, false, true, true, 10000);
+	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_multi_hugeint_payload AS "
+	                          "SELECT CASE WHEN i % 7 = 0 THEN NULL "
+	                          "            ELSE i::HUGEINT * 1000000000000::HUGEINT END AS a, "
+	                          "       CASE WHEN i % 11 = 0 THEN NULL "
+	                          "            ELSE -i::HUGEINT * 1000000000000000::HUGEINT END AS b "
+	                          "FROM range(10000) tbl(i)"));
+
+	const string query = "SELECT sum(a), sum(b), count(*) FROM jit_multi_hugeint_payload";
+	REQUIRE_NO_FAIL(con.Query("SET jit_policy='off'"));
+	auto reference = con.Query(query);
+	REQUIRE_NO_FAIL(*reference);
+
+	REQUIRE_NO_FAIL(con.Query("SET jit_policy='auto'"));
+	ClearJitTrace(manager, true);
+	auto result = con.Query(query);
+	REQUIRE_NO_FAIL(*result);
+	for (idx_t col_idx = 0; col_idx < result->ColumnCount(); col_idx++) {
+		REQUIRE(result->GetValue(col_idx, 0).ToString() == reference->GetValue(col_idx, 0).ToString());
+	}
+
+	RequireJitEvent(
+	    manager,
+	    [](const ExecutionRegionEvent &event) {
+		    return EventPhase(event) == "runtime" && event.backend_name == "sljit" &&
+		           StringUtil::Contains(EventJitRuntimePathCounts(event), "aggregate_update.fused_payload_update=");
+	    },
+	    [](const ExecutionRegionEvent &event) {
+		    REQUIRE_FALSE(
+		        StringUtil::Contains(EventJitRuntimePathCounts(event), "aggregate_update.primitive_payload_update="));
+	    });
 }
 
 TEST_CASE("JIT fuses decimal CASE aggregate payload lanes", "[api][jit]") {
@@ -1487,6 +1887,7 @@ TEST_CASE("JIT sorted grouped sums preserve compact runs across scheduler yields
 
 	idx_t generated_rows = 0;
 	idx_t flushed_rows = 0;
+	idx_t generated_state_initializations = 0;
 	idx_t generated_runtime_count = 0;
 	idx_t lazy_codegen_code_size = 0;
 	bool proven_unique_append_enabled = false;
@@ -1511,6 +1912,8 @@ TEST_CASE("JIT sorted grouped sums preserve compact runs across scheduler yields
 				generated_rows += counter.count;
 			} else if (counter.counter.name == "aggregate_update.pending_preaggregated_grouped_update_flush") {
 				flushed_rows += counter.count;
+			} else if (counter.counter.name == "aggregate_update.generated_preaggregated_state_initialize") {
+				generated_state_initializations += counter.count;
 			} else if (counter.counter.name == "aggregate_update.proven_unique_append.enabled") {
 				proven_unique_append_enabled = true;
 			} else if (counter.counter.name == "aggregate_update.proven_unique_append.producer_order_proof") {
@@ -1526,11 +1929,64 @@ TEST_CASE("JIT sorted grouped sums preserve compact runs across scheduler yields
 	REQUIRE(lazy_codegen_code_size > 0);
 	REQUIRE(generated_rows == 131072);
 	REQUIRE(flushed_rows == 131072);
+	REQUIRE(generated_state_initializations > 0);
 	REQUIRE(proven_unique_append_enabled);
 	REQUIRE(producer_order_proof);
 	REQUIRE_FALSE(final_combine_required);
 	REQUIRE(grouped_aggregate_reserve_target <= STANDARD_VECTOR_SIZE);
 	REQUIRE_FALSE(grouped_aggregate_reserve_resized);
+}
+
+TEST_CASE("JIT generated grouped runs publish existing aggregate states", "[api][jit]") {
+	DuckDB db;
+	Connection con(db);
+	auto &manager = ExecutionRegionManager::Get(*con.context);
+
+	ConfigureSljitForCoverage(con, false, true, true, 10000);
+	REQUIRE_NO_FAIL(con.Query("PRAGMA threads=1"));
+	REQUIRE_NO_FAIL(con.Query("SET perfect_ht_threshold=0"));
+	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_repeated_group_runs AS "
+	                          "SELECT ((i % 2048) // 4)::BIGINT AS group_id, "
+	                          "       CASE WHEN i % 101 = 0 THEN NULL ELSE (i % 97)::INTEGER END AS value "
+	                          "FROM range(32768) tbl(i)"));
+
+	const string query = "SELECT group_id, sum(value) AS value_sum, count(value) AS value_count "
+	                     "FROM jit_repeated_group_runs GROUP BY group_id";
+	REQUIRE_NO_FAIL(con.Query("SET jit_policy='off'"));
+	REQUIRE_NO_FAIL(con.Query("CREATE TEMP TABLE jit_repeated_group_runs_reference AS " + query));
+
+	ConfigureSljitForCoverageSettings(con, false, true, true, 10000);
+	REQUIRE_NO_FAIL(con.Query("SET jit_cbo_generated_stage_benefit=1"));
+	ClearJitTrace(manager, true);
+	REQUIRE_NO_FAIL(con.Query("CREATE TEMP TABLE jit_repeated_group_runs_output AS " + query));
+	auto difference = con.Query("SELECT count(*) FROM ("
+	                            "  (SELECT * FROM jit_repeated_group_runs_output EXCEPT ALL "
+	                            "   SELECT * FROM jit_repeated_group_runs_reference) UNION ALL "
+	                            "  (SELECT * FROM jit_repeated_group_runs_reference EXCEPT ALL "
+	                            "   SELECT * FROM jit_repeated_group_runs_output)"
+	                            ") differences");
+	REQUIRE_NO_FAIL(*difference);
+	REQUIRE(difference->GetValue(0, 0).ToString() == "0");
+	if (!SljitPrimitiveRunCodegenSupported()) {
+		RequirePrimitiveRunGenericFallback(manager);
+		return;
+	}
+
+	idx_t generated_state_updates = 0;
+	string observed_runtime_paths;
+	for (auto &event : manager.GetEvents()) {
+		if (EventPhase(event) != "runtime" || event.backend_name != "sljit") {
+			continue;
+		}
+		observed_runtime_paths += EventJitRuntimePathCounts(event) + "\n";
+		for (auto &counter : event.jit_runtime.runtime_path_counts) {
+			if (counter.counter.name == "aggregate_update.generated_preaggregated_state_update") {
+				generated_state_updates += counter.count;
+			}
+		}
+	}
+	INFO(observed_runtime_paths);
+	REQUIRE(generated_state_updates > 0);
 }
 
 TEST_CASE("JIT unordered grouped input does not generate unused run kernels", "[api][jit]") {
@@ -1916,7 +2372,9 @@ TEST_CASE("JIT generated sparse grouped runs preserve local uniqueness across th
 	                          "            ELSE -200::BIGINT END AS big_value "
 	                          "FROM range(32768) tbl(i)"));
 
-	auto require_generated_runs = [&](const string &name, const string &aggregate) {
+	auto require_generated_runs = [&](const string &name, const string &aggregate,
+	                                  bool require_shared_payload_validity = false,
+	                                  bool require_generated_state_initialize = false) {
 		const auto query = "SELECT group_id, " + aggregate +
 		                   " AS aggregate_value "
 		                   "FROM jit_signed_grouped_runs GROUP BY group_id";
@@ -1951,28 +2409,37 @@ TEST_CASE("JIT generated sparse grouped runs preserve local uniqueness across th
 
 		RequireJitEvent(
 		    manager,
-		    [](const ExecutionRegionEvent &event) {
+		    [&](const ExecutionRegionEvent &event) {
 			    if (EventPhase(event) != "runtime" || event.backend_name != "sljit") {
 				    return false;
 			    }
 			    const auto runtime_paths = EventJitRuntimePathCounts(event);
-			    return StringUtil::Contains(runtime_paths,
-			                                "aggregate_update.generated_pending_primitive_group_runs=32768") &&
-			           StringUtil::Contains(
-			               runtime_paths, "aggregate_update.generated_primitive_group_cast.integral_compress=32768") &&
-			           StringUtil::Contains(runtime_paths,
-			                                "aggregate_update.proven_unique_append.producer_order_proof=8192") &&
-			           StringUtil::Contains(runtime_paths, "aggregate_update.proven_unique_append.enabled=1") &&
-			           !StringUtil::Contains(runtime_paths,
-			                                 "aggregate_update.proven_unique_append.final_combine_required") &&
-			           !StringUtil::Contains(runtime_paths, "pending_primitive_group_runs_miss.group_replay");
+			    const bool base_paths =
+			        StringUtil::Contains(runtime_paths,
+			                             "aggregate_update.generated_pending_primitive_group_runs=32768") &&
+			        StringUtil::Contains(runtime_paths,
+			                             "aggregate_update.generated_primitive_group_cast.integral_compress=32768") &&
+			        StringUtil::Contains(runtime_paths,
+			                             "aggregate_update.proven_unique_append.producer_order_proof=8192") &&
+			        StringUtil::Contains(runtime_paths, "aggregate_update.proven_unique_append.enabled=1") &&
+			        !StringUtil::Contains(runtime_paths,
+			                              "aggregate_update.proven_unique_append.final_combine_required") &&
+			        !StringUtil::Contains(runtime_paths, "pending_primitive_group_runs_miss.group_replay");
+			    return base_paths &&
+			           (!require_shared_payload_validity ||
+			            StringUtil::Contains(
+			                runtime_paths,
+			                "aggregate_update.generated_primitive_group_runs.shared_payload_validity=32768")) &&
+			           (!require_generated_state_initialize ||
+			            StringUtil::Contains(runtime_paths,
+			                                 "aggregate_update.generated_preaggregated_state_initialize=8192"));
 		    },
 		    [](const ExecutionRegionEvent &event) { RequireGeneratedAggregateUpdateRuntimeOwnership(event); });
 	};
 
 	require_generated_runs("jit_signed_grouped_sum", "sum(value)");
 	require_generated_runs("jit_signed_grouped_count", "count(value)");
-	require_generated_runs("jit_signed_grouped_multi", "sum(value), count(value), count(*)");
+	require_generated_runs("jit_signed_grouped_multi", "sum(value), count(value), count(*)", true, true);
 	require_generated_runs("jit_signed_grouped_hugeint_sum", "sum(big_value)");
 	require_generated_runs("jit_signed_grouped_hugeint_multi", "sum(big_value), count(big_value), sum(value)");
 }
@@ -2377,6 +2844,17 @@ TEST_CASE("JIT regular hash aggregate fuses typed expression payloads with nativ
 	for (idx_t col_idx = 0; col_idx < result->ColumnCount(); col_idx++) {
 		REQUIRE(result->GetValue(col_idx, 0).ToString() == reference->GetValue(col_idx, 0).ToString());
 	}
+
+	RequireJitEvent(
+	    manager,
+	    [](const ExecutionRegionEvent &event) {
+		    return EventPhase(event) == "runtime" && event.backend_name == "sljit" &&
+		           StringUtil::Contains(EventJitRuntimePathCounts(event), "aggregate_update.fused_payload_update=5");
+	    },
+	    [](const ExecutionRegionEvent &event) {
+		    REQUIRE_FALSE(
+		        StringUtil::Contains(EventJitRuntimePathCounts(event), "aggregate_update.primitive_payload_update="));
+	    });
 
 	RequireJitEvent(
 	    manager,
@@ -3984,49 +4462,190 @@ TEST_CASE("JIT hash aggregate cast-only keys use native state addresses", "[api]
 	REQUIRE(found_direct_runtime);
 }
 
-TEST_CASE("JIT auto skips grouped hash aggregate updates without native lookup ownership", "[api][jit]") {
+TEST_CASE("JIT combines grouped aggregate states without finalizing payload vectors", "[api][jit]") {
 	DuckDB db;
 	Connection con(db);
 	auto &manager = ExecutionRegionManager::Get(*con.context);
 
 	ConfigureSljit(con, "off");
-	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_auto_hash_aggregate_large AS "
-	                          "SELECT i::BIGINT AS k, (i % 17)::BIGINT AS v FROM range(1000000) tbl(i)"));
-
-	auto reference = con.Query("SELECT count(*), sum(s)::HUGEINT "
-	                           "FROM (SELECT k, sum(v) AS s FROM jit_auto_hash_aggregate_large GROUP BY k)");
+	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_aggregate_state_source AS "
+	                          "SELECT k, v, d, v + 1 AS v1, v + 2 AS v2, v + 3 AS v3, "
+	                          "       9223372036854775807::BIGINT AS extreme_max_v, "
+	                          "       (-9223372036854775807::BIGINT - 1) AS extreme_min_v "
+	                          "FROM (SELECT i::BIGINT AS k, "
+	                          "             CASE WHEN i % 7 = 0 THEN NULL "
+	                          "                  ELSE ((i % 17) - 8)::BIGINT END AS v, "
+	                          "             CASE WHEN i % 11 = 0 THEN NULL "
+	                          "                  ELSE ((i % 23) - 11)::DOUBLE / 7 END AS d "
+	                          "      FROM range(200000) tbl(i)) source"));
+	const string query = "SELECT count(*), sum(s), sum(ds), sum(c), sum(cv), "
+	                     "       sum(s1), sum(s2), sum(s3), sum(extreme_max_sum), sum(extreme_min_sum) "
+	                     "FROM (SELECT k, sum(v) AS s, sum(d) AS ds, count(*) AS c, count(v) AS cv, "
+	                     "             sum(v1) AS s1, sum(v2) AS s2, sum(v3) AS s3, "
+	                     "             sum(extreme_max_v) AS extreme_max_sum, sum(extreme_min_v) AS extreme_min_sum "
+	                     "      FROM jit_aggregate_state_source GROUP BY k)";
+	auto reference = con.Query(query);
 	REQUIRE_NO_FAIL(*reference);
-	REQUIRE(reference->GetValue(0, 0).ToString() == "1000000");
+	REQUIRE(reference->GetValue(0, 0).ToString() == "200000");
 
-	ConfigureSljitSettings(con, "auto", false, true, true, 10000);
+	ConfigureSljitForCoverageSettings(con, false, true, true, 10000);
 	ClearJitTrace(manager, true);
-	auto result = con.Query("SELECT count(*), sum(s)::HUGEINT "
-	                        "FROM (SELECT k, sum(v) AS s FROM jit_auto_hash_aggregate_large GROUP BY k)");
+	auto result = con.Query(query);
 	REQUIRE_NO_FAIL(*result);
 	REQUIRE(result->GetValue(0, 0).ToString() == reference->GetValue(0, 0).ToString());
 	REQUIRE(result->GetValue(1, 0).ToString() == reference->GetValue(1, 0).ToString());
-
-	bool found_auto_hash_aggregate_decision = false;
-	for (auto &event : manager.GetEvents()) {
-		if (!IsSljitRegionEvent(event)) {
-			continue;
-		}
-		if (!(StringUtil::Contains(event.ir, "hash-aggregate-update") ||
-		      StringUtil::Contains(event.ir, "hash-group-by") ||
-		      StringUtil::Contains(event.reason, "hash-aggregate-update") ||
-		      StringUtil::Contains(event.reason, "hash-group-by") ||
-		      event.candidate_traits.sink_kind == ExecutionRegionSinkKind::HASH_AGGREGATE_UPDATE)) {
-			continue;
-		}
-		found_auto_hash_aggregate_decision = true;
-		if (EventStatus(event) == "compiled") {
-			REQUIRE(event.selected_runner == ExecutionRunnerKind::COMPILED_VECTORIZED);
-		} else {
-			REQUIRE(event.selected_runner == ExecutionRunnerKind::VECTORIZED);
-		}
-		REQUIRE_FALSE(StringUtil::Contains(event.reason, "pure_hash_aggregate_update=true"));
+	REQUIRE(result->GetValue(2, 0).GetValue<double>() ==
+	        Approx(reference->GetValue(2, 0).GetValue<double>()).epsilon(1e-12));
+	for (idx_t col_idx = 3; col_idx < result->ColumnCount(); col_idx++) {
+		REQUIRE(result->GetValue(col_idx, 0).ToString() == reference->GetValue(col_idx, 0).ToString());
 	}
-	REQUIRE(found_auto_hash_aggregate_decision);
+
+	bool found_state_source_contract = false;
+	bool found_state_combine_runtime = false;
+	string observed_state_source_events;
+	for (auto &event : manager.GetEvents()) {
+		if (event.has_candidate && event.candidate_traits.source_kind == ExecutionRegionSourceKind::STATEFUL_OPERATOR) {
+			observed_state_source_events += "phase=" + EventPhase(event) + ";status=" + EventStatus(event) +
+			                                ";reason=" + event.reason + ";ir=" + event.ir +
+			                                ";paths=" + EventJitRuntimePathCounts(event) + "\n";
+		}
+		if (IsCompiledSljitRegionEvent(event) && event.has_candidate &&
+		    event.candidate_traits.source_kind == ExecutionRegionSourceKind::STATEFUL_OPERATOR &&
+		    event.candidate_traits.sink_kind == ExecutionRegionSinkKind::UNGROUPED_AGGREGATE_UPDATE) {
+			found_state_source_contract = true;
+			REQUIRE(event.candidate_contract.OwnsStateScan());
+			REQUIRE(StringUtil::Contains(event.ir, "native_state_scan_primitive_aggregate_batch=true"));
+		}
+		if (EventPhase(event) != "runtime" || EventStatus(event) != "executed" ||
+		    !StringUtil::Contains(EventJitRuntimePathCounts(event), "source.hash_aggregate.primitive_state_combine=")) {
+			continue;
+		}
+		found_state_combine_runtime = true;
+		RequireNativeGeneratedRuntimeWork(event);
+		REQUIRE(HasJitRuntimeProof(event, ExecutionRegionJitRuntimeProof::MATERIALIZATION_ELISION));
+		REQUIRE(HasJitRuntimeProof(event, ExecutionRegionJitRuntimeProof::FULL_PIPELINE_OWNERSHIP));
+		REQUIRE(EventJitRuntimeDelegationCounts(event).empty());
+		bool found_primitive_batch_scan = false;
+		for (auto &stage : event.source_stage_runtime) {
+			if (stage.stage.name == "source_contract.hash_aggregate_state_scan.primitive_batch_execute_task") {
+				found_primitive_batch_scan = true;
+			}
+			REQUIRE(stage.stage.name != "source_contract.hash_aggregate_state_scan.execute_task");
+		}
+		REQUIRE(found_primitive_batch_scan);
+		REQUIRE(StringUtil::Contains(EventGeneratedStageCountBreakdown(event),
+		                             "aggregate_update.primitive_state_source_combine="));
+		REQUIRE_FALSE(StringUtil::Contains(EventGeneratedStageCountBreakdown(event),
+		                                   "aggregate_update.primitive_payload_update="));
+	}
+	INFO(observed_state_source_events);
+	REQUIRE(found_state_source_contract);
+	REQUIRE(found_state_combine_runtime);
+}
+
+TEST_CASE("JIT homogeneous aggregate-state combine preserves signed hugeint limits", "[api][jit]") {
+	DuckDB db;
+	Connection con(db);
+	auto &manager = ExecutionRegionManager::Get(*con.context);
+
+	ConfigureSljit(con, "off");
+	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_homogeneous_aggregate_state_source AS "
+	                          "SELECT i::BIGINT AS k, "
+	                          "       9223372036854775807::BIGINT AS max_v, "
+	                          "       (-9223372036854775807::BIGINT - 1) AS min_v, "
+	                          "       CASE WHEN i % 2 = 0 THEN 9223372036854775807::BIGINT "
+	                          "            ELSE (-9223372036854775807::BIGINT - 1) END AS mixed_v, "
+	                          "       i::BIGINT AS rising_v, -i::BIGINT AS falling_v, "
+	                          "       17::BIGINT AS constant_v, "
+	                          "       CASE WHEN i % 7 = 0 THEN NULL "
+	                          "            ELSE 9223372036854775807::BIGINT END AS nullable_max_v, "
+	                          "       CASE WHEN i % 11 = 0 THEN NULL "
+	                          "            ELSE (-9223372036854775807::BIGINT - 1) END AS nullable_min_v "
+	                          "FROM range(200000) tbl(i)"));
+	const string query = "SELECT sum(s0), sum(s1), sum(s2), sum(s3), sum(s4), sum(s5), sum(s6), sum(s7) "
+	                     "FROM (SELECT k, sum(max_v) AS s0, sum(min_v) AS s1, sum(mixed_v) AS s2, "
+	                     "             sum(rising_v) AS s3, sum(falling_v) AS s4, sum(constant_v) AS s5, "
+	                     "             sum(nullable_max_v) AS s6, sum(nullable_min_v) AS s7 "
+	                     "      FROM jit_homogeneous_aggregate_state_source GROUP BY k)";
+	auto reference = con.Query(query);
+	REQUIRE_NO_FAIL(*reference);
+
+	ConfigureSljitForCoverageSettings(con, false, true, true, 10000);
+	ClearJitTrace(manager, true);
+	auto result = con.Query(query);
+	REQUIRE_NO_FAIL(*result);
+	for (idx_t col_idx = 0; col_idx < result->ColumnCount(); col_idx++) {
+		REQUIRE(result->GetValue(col_idx, 0).ToString() == reference->GetValue(col_idx, 0).ToString());
+	}
+
+	bool found_state_combine_runtime = false;
+	for (auto &event : manager.GetEvents()) {
+		if (EventPhase(event) != "runtime" || EventStatus(event) != "executed" ||
+		    !StringUtil::Contains(EventJitRuntimePathCounts(event), "source.hash_aggregate.primitive_state_combine=")) {
+			continue;
+		}
+		found_state_combine_runtime = true;
+		RequireNativeGeneratedRuntimeWork(event);
+		REQUIRE(HasJitRuntimeProof(event, ExecutionRegionJitRuntimeProof::MATERIALIZATION_ELISION));
+		REQUIRE(EventJitRuntimeDelegationCounts(event).empty());
+		REQUIRE(StringUtil::Contains(EventGeneratedStageCountBreakdown(event),
+		                             "aggregate_update.primitive_state_source_combine="));
+	}
+	REQUIRE(found_state_combine_runtime);
+}
+
+TEST_CASE("JIT retains finalized vectors for narrow grouped aggregate states", "[api][jit]") {
+	DuckDB db;
+	Connection con(db);
+	auto &manager = ExecutionRegionManager::Get(*con.context);
+
+	ConfigureSljit(con, "off");
+	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_narrow_aggregate_state_source AS "
+	                          "SELECT i::BIGINT AS k, "
+	                          "       CASE WHEN i % 7 = 0 THEN NULL ELSE ((i % 17) - 8)::BIGINT END AS v "
+	                          "FROM range(200000) tbl(i)"));
+	const string query = "SELECT sum(s) FROM (SELECT k, sum(v) AS s FROM jit_narrow_aggregate_state_source GROUP BY k)";
+	auto reference = con.Query(query);
+	REQUIRE_NO_FAIL(*reference);
+
+	ConfigureSljitForCoverageSettings(con, false, true, true, 10000);
+	ClearJitTrace(manager, true);
+	auto result = con.Query(query);
+	REQUIRE_NO_FAIL(*result);
+	REQUIRE(result->GetValue(0, 0).ToString() == reference->GetValue(0, 0).ToString());
+
+	bool found_state_source_contract = false;
+	bool found_finalized_state_scan = false;
+	string observed_state_source_events;
+	for (auto &event : manager.GetEvents()) {
+		const bool state_source_candidate =
+		    event.has_candidate && event.candidate_traits.source_kind == ExecutionRegionSourceKind::STATEFUL_OPERATOR &&
+		    event.candidate_traits.sink_kind == ExecutionRegionSinkKind::UNGROUPED_AGGREGATE_UPDATE;
+		if (state_source_candidate || EventPhase(event) == "runtime") {
+			observed_state_source_events += "phase=" + EventPhase(event) + ";status=" + EventStatus(event) +
+			                                ";reason=" + event.reason + ";paths=" + EventJitRuntimePathCounts(event) +
+			                                "\n";
+		}
+		if (state_source_candidate && IsCompiledSljitRegionEvent(event)) {
+			found_state_source_contract = true;
+			REQUIRE(event.candidate_contract.OwnsStateScan());
+			REQUIRE(StringUtil::Contains(event.ir, "native_state_scan_primitive_aggregate_batch=true"));
+		}
+		if (EventPhase(event) != "runtime" || EventStatus(event) != "executed") {
+			continue;
+		}
+		REQUIRE_FALSE(
+		    StringUtil::Contains(EventJitRuntimePathCounts(event), "source.hash_aggregate.primitive_state_combine="));
+		for (auto &stage : event.source_stage_runtime) {
+			if (stage.stage.name == "source_contract.hash_aggregate_state_scan.execute_task") {
+				found_finalized_state_scan = true;
+			}
+			REQUIRE(stage.stage.name != "source_contract.hash_aggregate_state_scan.primitive_batch_execute_task");
+		}
+	}
+	INFO(observed_state_source_events);
+	REQUIRE(found_state_source_contract);
+	REQUIRE(found_finalized_state_scan);
 }
 
 TEST_CASE("JIT auto skips grouped hash aggregate address-only updates", "[api][jit]") {

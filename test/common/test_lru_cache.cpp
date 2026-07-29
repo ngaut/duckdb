@@ -19,7 +19,77 @@ struct TestValue {
 	}
 };
 
+struct ThrowingPayload {
+	explicit ThrowingPayload(bool should_throw = false) {
+		if (should_throw) {
+			throw std::runtime_error("payload construction failed");
+		}
+	}
+
+	idx_t GetWeight() const {
+		return 1;
+	}
+};
+
+struct ThrowingCopyKey {
+	explicit ThrowingCopyKey(int value_p) : value(value_p) {
+	}
+
+	ThrowingCopyKey(const ThrowingCopyKey &other) : value(other.value) {
+		if (throw_on_copy) {
+			throw std::runtime_error("key copy failed");
+		}
+	}
+
+	ThrowingCopyKey(ThrowingCopyKey &&) noexcept = default;
+	ThrowingCopyKey &operator=(const ThrowingCopyKey &) = default;
+	ThrowingCopyKey &operator=(ThrowingCopyKey &&) noexcept = default;
+
+	bool operator==(const ThrowingCopyKey &other) const {
+		return value == other.value;
+	}
+
+	int value;
+	static bool throw_on_copy;
+};
+
+bool ThrowingCopyKey::throw_on_copy = false;
+
+struct ThrowingCopyKeyHash {
+	size_t operator()(const ThrowingCopyKey &key) const noexcept {
+		return std::hash<int> {}(key.value);
+	}
+};
+
 } // namespace
+
+TEST_CASE("LRU cache insertion is transactional", "[lru_cache]") {
+	SECTION("payload construction failure preserves existing entries") {
+		SharedLruCache<string, TestValue, ThrowingPayload> cache(1);
+		auto original = make_shared_ptr<TestValue>(1);
+		cache.Put("original", original, false);
+
+		REQUIRE_THROWS_AS(cache.Put("original", make_shared_ptr<TestValue>(2), true), std::runtime_error);
+		REQUIRE(cache.Size() == 1);
+		REQUIRE(cache.CurrentTotalWeight() == 1);
+		REQUIRE(cache.Get("original") == original);
+	}
+
+	SECTION("map insertion failure rolls back the unpublished LRU node") {
+		SharedLruCache<ThrowingCopyKey, TestValue, DefaultPayload, ThrowingCopyKeyHash> cache(1);
+		auto original = make_shared_ptr<TestValue>(1);
+		cache.Put(ThrowingCopyKey(1), original);
+
+		ThrowingCopyKey::throw_on_copy = true;
+		REQUIRE_THROWS_AS(cache.Put(ThrowingCopyKey(2), make_shared_ptr<TestValue>(2)), std::runtime_error);
+		ThrowingCopyKey::throw_on_copy = false;
+
+		REQUIRE(cache.Size() == 1);
+		REQUIRE(cache.CurrentTotalWeight() == 1);
+		REQUIRE(cache.Get(ThrowingCopyKey(1)) == original);
+		REQUIRE(cache.Get(ThrowingCopyKey(2)) == nullptr);
+	}
+}
 
 TEST_CASE("LRU Cache Basic Operations", "[lru_cache]") {
 	DuckDB db;

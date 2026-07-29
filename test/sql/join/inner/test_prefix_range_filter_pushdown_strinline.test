@@ -14,6 +14,9 @@ CREATE OR REPLACE TABLE build_varchar AS
 SELECT lpad(i::VARCHAR, 8, '0') AS k, (i % 7)::INTEGER AS g
 FROM range(0, 30000) t(i);
 
+# These values occupy every four-byte string-prefix bucket between the
+# endpoints. A PRF cannot reject anything beyond min/max, so use the Bloom
+# filter even though the build cardinality is small.
 query II
 EXPLAIN ANALYZE
 SELECT count(*)
@@ -22,7 +25,7 @@ JOIN build_varchar b
   ON p.k = b.k
  AND p.g >= b.g;
 ----
-analyzed_plan	<REGEX>:.*IN PRF\(k\).*
+analyzed_plan	<REGEX>:.*IN BF\(k\).*
 
 statement ok
 CREATE OR REPLACE TABLE prf_probe_string (k VARCHAR, g INTEGER, id INTEGER);
@@ -206,4 +209,3 @@ JOIN prf_build_string_nul_stats b
  AND p.g >= b.g;
 ----
 2048
-

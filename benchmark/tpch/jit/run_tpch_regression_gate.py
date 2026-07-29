@@ -18,6 +18,11 @@ from datetime import datetime
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "jit"))
+from benchmark_common import (
+    PRODUCTION_CANDIDATE_REPEATS,
+    PRODUCTION_PROMOTION_REPEATS,
+    PRODUCTION_REPEAT_CHOICES,
+)
 from benchmark_host import HostQuiescenceError, require_host_quiescence, wait_for_host_quiescence
 from tpch_common import (
     DEFAULT_POLICIES,
@@ -30,7 +35,6 @@ from tpch_common import (
 
 ROOT = Path(__file__).resolve().parents[3]
 DEFAULT_BASELINE_ENV = "DUCKDB_JIT_TPCH_BASELINE"
-DEFAULT_HIGH_SAMPLE_REPEATS = 10
 DEFAULT_BASELINE_STATE = ROOT / "benchmark" / "tpch" / "jit" / "local_baselines" / "tpch_refactor_guard_state.json"
 DEFAULT_DATABASE_CACHE_DIR = ROOT / "benchmark" / "tpch" / "jit" / "local_baselines" / "databases"
 DATABASE_CACHE_FORMAT_VERSION = 2
@@ -634,12 +638,6 @@ def compare_command(
     return command
 
 
-def promotion_qualification_repeats(args: argparse.Namespace) -> int:
-    if args.promotion_repeats is not None:
-        return args.promotion_repeats
-    return max(args.repeats, DEFAULT_HIGH_SAMPLE_REPEATS)
-
-
 def candidate_qualifies_for_direct_promotion(args: argparse.Namespace) -> bool:
     return (
         args.timing_mode == "production"
@@ -649,15 +647,13 @@ def candidate_qualifies_for_direct_promotion(args: argparse.Namespace) -> bool:
         and not args.jit_verify
         and not args.jit_cbo_setting
         and args.policies == list(DEFAULT_POLICIES)
-        and args.repeats == promotion_qualification_repeats(args)
+        and args.repeats == PRODUCTION_PROMOTION_REPEATS
     )
 
 
 def validate_baseline_write_configuration(args: argparse.Namespace) -> None:
     if args.policies != list(DEFAULT_POLICIES):
-        raise TPCHConfigurationError(
-            f"accepted baselines require policies {' '.join(DEFAULT_POLICIES)}"
-        )
+        raise TPCHConfigurationError(f"accepted baselines require policies {' '.join(DEFAULT_POLICIES)}")
     if args.timing_mode != "production":
         raise TPCHConfigurationError("accepted baselines require --timing-mode production")
     if args.event_log_size != 0 or args.trace_decisions or args.trace_runtime:
@@ -674,7 +670,7 @@ def build_promoted_baseline(
     out_dir: Path,
     reuse_candidate: bool = False,
 ) -> tuple[Path, int]:
-    repeats = promotion_qualification_repeats(args)
+    repeats = PRODUCTION_PROMOTION_REPEATS
     promoted_dir = out_dir if reuse_candidate else out_dir / "promotion_qualification"
     if not reuse_candidate:
         run_timed_benchmark(
@@ -720,7 +716,7 @@ def build_promoted_baseline(
     return promoted_dir, repeats
 
 
-def parse_args() -> argparse.Namespace:
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Run the TPC-H JIT refactor regression gate")
     parser.add_argument("--baseline", type=Path, default=None)
     parser.add_argument("--baseline-state", type=Path, default=DEFAULT_BASELINE_STATE)
@@ -755,7 +751,12 @@ def parse_args() -> argparse.Namespace:
         default=list(DEFAULT_POLICIES),
         choices=DEFAULT_POLICIES,
     )
-    parser.add_argument("--repeats", type=int, default=5)
+    parser.add_argument(
+        "--repeats",
+        type=int,
+        choices=PRODUCTION_REPEAT_CHOICES,
+        default=PRODUCTION_CANDIDATE_REPEATS,
+    )
     parser.add_argument("--timing-mode", choices=("production", "profile"), default="production")
     parser.add_argument(
         "--scale-factor",
@@ -814,12 +815,6 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-runtime-component-ratio", type=float, default=1.10)
     parser.add_argument("--max-runtime-component-us", type=int, default=200)
     parser.add_argument(
-        "--promotion-repeats",
-        type=int,
-        default=None,
-        help="Full-query repeat count used only for baseline promotion. Defaults to max(repeats, 10).",
-    )
-    parser.add_argument(
         "--runtime-contract-check",
         action=argparse.BooleanOptionalAction,
         default=True,
@@ -827,7 +822,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--runtime-contract-repeats", type=int, default=1)
     parser.add_argument("--runtime-contract-event-log-size", type=int, default=10000)
-    return parser.parse_args()
+    return parser.parse_args(argv)
 
 
 def validate_args(args: argparse.Namespace) -> tuple[Path | None, Path]:
@@ -853,8 +848,6 @@ def validate_args(args: argparse.Namespace) -> tuple[Path | None, Path]:
         raise TPCHConfigurationError("--use-existing-db requires --db")
     if args.host_quiescence and os.name == "nt":
         raise TPCHConfigurationError("--host-quiescence is not supported on Windows; use a quiescent benchmark host")
-    if args.promotion_repeats is not None and args.promotion_repeats <= 0:
-        raise TPCHConfigurationError("--promotion-repeats must be positive")
     if args.runtime_contract_repeats <= 0:
         raise TPCHConfigurationError("--runtime-contract-repeats must be positive")
     if args.runtime_contract_event_log_size < 0:
@@ -944,7 +937,7 @@ def run_gate(args: argparse.Namespace, baseline: Path | None, out_dir: Path) -> 
         run_command(
             [
                 sys.executable,
-                str(ROOT / "benchmark" / "jit" / "verify_jit_architecture.py"),
+                str(ROOT / "benchmark" / "jit" / "verify_jit_boundaries.py"),
             ],
             "architecture",
         )

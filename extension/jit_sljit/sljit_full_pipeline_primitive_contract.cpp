@@ -96,19 +96,12 @@ SljitFinalizeFullPipelinePrimitiveRecipe(const vector<SljitExecutableRegionOp> &
 	SljitValidateHashJoinDirectAggregateConsumerContract(primitive_sequence, direct_aggregate_consumer);
 
 	const auto &terminal = primitive_sequence.Step(primitive_sequence.Count() - 1);
-	const bool selected_hash_join_sink =
-	    primitive_sequence.Count() == 3 &&
-	    primitive_sequence.Step(1).kind == SljitFullPipelinePrimitiveKind::HASH_JOIN_PROBE_SELECTION &&
-	    (terminal.kind == SljitFullPipelinePrimitiveKind::APPEND_SINK ||
-	     terminal.kind == SljitFullPipelinePrimitiveKind::DELIM_JOIN_SINK);
 	const bool direct_source_hash_build = terminal.kind == SljitFullPipelinePrimitiveKind::HASH_JOIN_BUILD_SINK &&
 	                                      terminal.hash_join_build_sink.direct_source_ingress;
 
 	SljitFullPipelineRecipe recipe;
 	recipe.primitive_sequence = std::move(primitive_sequence);
 	recipe.direct_aggregate_consumer = direct_aggregate_consumer;
-	recipe.runtime_kind = selected_hash_join_sink ? SljitFullPipelineRuntimeKind::SELECTED_HASH_JOIN_SINK
-	                                              : SljitFullPipelineRuntimeKind::PRIMITIVE_SEQUENCE;
 	recipe.uses_extended_source_fetch_budget = uses_extended_source_fetch_budget;
 	recipe.preserves_partitioned_source_chunks =
 	    recipe.primitive_sequence.Step(1).kind == SljitFullPipelinePrimitiveKind::GENERATED_FILTER;

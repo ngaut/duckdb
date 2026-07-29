@@ -5,6 +5,7 @@ splice the DUCKDB_METRIC list into the existing metrics_manager.cpp between
 the 'internal_metrics[]' array opening and the 'FINAL_METRIC' sentinel.
 """
 
+import argparse
 import json
 import os
 
@@ -123,8 +124,8 @@ def generate_metric_list(data: dict) -> list:
     return lines
 
 
-def update_source(data: dict, source_path: str) -> None:
-    """Splice the generated metric list into the existing metrics_manager.cpp.
+def generate_source(data: dict, source_path: str) -> str:
+    """Build metrics_manager.cpp with the generated metric list spliced in.
 
     Looks for the line containing both 'internal_metrics[]' and '= {' as the
     start marker, then the next line containing 'FINAL_METRIC' as the end
@@ -154,11 +155,17 @@ def update_source(data: dict, source_path: str) -> None:
     if not result.endswith("\n"):
         result += "\n"
 
-    with open(source_path, "w") as fh:
-        fh.write(result)
+    return result
 
 
-def main() -> None:
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Generate DuckDB metrics sources")
+    parser.add_argument("--check", action="store_true", help="fail if checked-in metrics sources are stale")
+    return parser.parse_args(argv)
+
+
+def main(argv: list[str] | None = None) -> None:
+    args = parse_args(argv)
     script_dir = os.path.dirname(os.path.abspath(__file__))
     repo_root = os.path.dirname(script_dir)
 
@@ -166,10 +173,26 @@ def main() -> None:
         data = json.load(fh)
 
     header = generate_header(data)
-    with open(os.path.join(repo_root, OUTPUT_HEADER), "w") as fh:
-        fh.write(header)
+    header_path = os.path.join(repo_root, OUTPUT_HEADER)
+    source_path = os.path.join(repo_root, OUTPUT_SOURCE)
+    source = generate_source(data, source_path)
+    if args.check:
+        drift = []
+        with open(header_path, "r") as fh:
+            if fh.read() != header:
+                drift.append(OUTPUT_HEADER)
+        with open(source_path, "r") as fh:
+            if fh.read() != source:
+                drift.append(OUTPUT_SOURCE)
+        if drift:
+            raise SystemExit("stale generated metrics sources: " + ", ".join(drift))
+        print(f"- Verified {sum(len(v) for v in data.values())} generated metric(s)")
+        return
 
-    update_source(data, os.path.join(repo_root, OUTPUT_SOURCE))
+    with open(header_path, "w") as fh:
+        fh.write(header)
+    with open(source_path, "w") as fh:
+        fh.write(source)
 
     total = sum(len(v) for v in data.values())
     print(f"- Generated {total} static metric(s) into {OUTPUT_HEADER}")

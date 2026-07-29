@@ -8,6 +8,7 @@
 
 #pragma once
 
+#include "sljit_hash_join_runtime.hpp"
 #include "sljit_region_executable.hpp"
 #include "sljit_region_runtime_state.hpp"
 #include "sljit_region_runtime_trace.hpp"
@@ -43,6 +44,11 @@ SljitBindNativeOperator(ExecutionOperatorRuntime &native_runtime, SljitRegionExe
 	if (bind_result != ExecutionOperatorBindResult::READY) {
 		auto blocker = binding.blocker.empty() ? string("unknown") : binding.blocker;
 		throw InternalException("%s operator binding failed: %s", error_prefix, blocker);
+	}
+	if (op.kind == SljitNativeRegionOpKind::HASH_JOIN_PROBE && binding.hash_join_probe.ready &&
+	    binding.hash_join_probe.layout_kind == ExecutionHashJoinProbeLayoutKind::REGULAR_HASH_TABLE &&
+	    !binding.hash_join_probe.empty_build_side) {
+		SljitValidateRegularHashJoinProbeExecutionLayout(op.hash_join_probe.plan, binding.hash_join_probe);
 	}
 	scratch.MarkOperatorBindingReady(op_idx);
 	return bind_result;

@@ -246,15 +246,25 @@ struct SljitExecutablePrimitiveRunSpecialization {
 	SljitLazyCompiledFunction<SljitNativePrimitiveRunFunction> compiled;
 	SljitLazyCompiledFunction<SljitNativePrimitiveRunFunction> nullable_compiled;
 	SljitLazyCompiledFunction<SljitNativePrimitiveRunFunction> multi_lane_compiled;
+	SljitLazyCompiledFunction<SljitNativePrimitiveRunFunction> shared_validity_multi_lane_compiled;
 	SljitLazyCompiledFunction<SljitNativePrimitiveRunFunction> affine_int64_compiled;
 	SljitLazyCompiledFunction<SljitNativePrimitiveRunFunction> affine_int64_nullable_compiled;
 };
 
 struct SljitExecutablePrimitiveRunUpdate {
+	static constexpr idx_t PREAGGREGATED_SELECTOR_SHAPE_COUNT = 4;
+
 	PhysicalType group_type = PhysicalType::INVALID;
 	vector<PhysicalType> payload_types;
 	vector<AggregatePrimitiveUpdateKind> primitive_kinds;
+	vector<idx_t> state_offsets;
 	vector<SljitExecutablePrimitiveRunSpecialization> flat_specializations;
+	std::array<SljitLazyCompiledFunction<SljitNativePreaggregatedPrimitiveUpdateFunction>,
+	           PREAGGREGATED_SELECTOR_SHAPE_COUNT>
+	    preaggregated_initialize;
+	std::array<SljitLazyCompiledFunction<SljitNativePreaggregatedPrimitiveUpdateFunction>,
+	           PREAGGREGATED_SELECTOR_SHAPE_COUNT>
+	    preaggregated_update;
 
 	optional_ptr<SljitExecutablePrimitiveRunSpecialization>
 	Specialization(PhysicalType group_source_type, PhysicalType group_output_type,
@@ -269,17 +279,30 @@ struct SljitExecutablePrimitiveRunUpdate {
 		return nullptr;
 	}
 
+	SljitLazyCompiledFunction<SljitNativePreaggregatedPrimitiveUpdateFunction> &
+	PreaggregatedArtifact(bool initialize_states, bool address_selected, bool row_selected) {
+		const auto selector_shape = (address_selected ? idx_t(1) : idx_t(0)) | (row_selected ? idx_t(2) : idx_t(0));
+		D_ASSERT(selector_shape < PREAGGREGATED_SELECTOR_SHAPE_COUNT);
+		return initialize_states ? preaggregated_initialize[selector_shape] : preaggregated_update[selector_shape];
+	}
+
 	bool HasDeferredCodegen() const {
 		return !primitive_kinds.empty() && primitive_kinds.size() == payload_types.size() &&
-		       !flat_specializations.empty();
+		       primitive_kinds.size() == state_offsets.size() && !flat_specializations.empty();
 	}
 
 	idx_t CodeSize() const {
 		idx_t result = 0;
 		for (auto &specialization : flat_specializations) {
 			result += specialization.compiled.CodeSize() + specialization.nullable_compiled.CodeSize() +
-			          specialization.multi_lane_compiled.CodeSize() + specialization.affine_int64_compiled.CodeSize() +
+			          specialization.multi_lane_compiled.CodeSize() +
+			          specialization.shared_validity_multi_lane_compiled.CodeSize() +
+			          specialization.affine_int64_compiled.CodeSize() +
 			          specialization.affine_int64_nullable_compiled.CodeSize();
+		}
+		for (idx_t selector_shape = 0; selector_shape < PREAGGREGATED_SELECTOR_SHAPE_COUNT; selector_shape++) {
+			result +=
+			    preaggregated_initialize[selector_shape].CodeSize() + preaggregated_update[selector_shape].CodeSize();
 		}
 		return result;
 	}
@@ -547,6 +570,7 @@ struct SljitExecutableRegionOp {
 struct SljitExecutableRegion {
 	vector<SljitExecutableRegionOp> ops;
 	vector<SljitExecutableScanFilter> scan_filters;
+	SljitNativeAggregateStateSourcePlan aggregate_state_source;
 	bool uses_scan_filters = false;
 	vector<LogicalType> source_output_types;
 	vector<idx_t> source_distinct_counts;

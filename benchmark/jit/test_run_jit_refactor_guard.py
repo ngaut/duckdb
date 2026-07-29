@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import io
 import subprocess
 import sys
 import tempfile
 import unittest
+from contextlib import redirect_stderr
 from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
@@ -108,7 +110,7 @@ class TestPerformanceReceipt(unittest.TestCase):
             tpch_queries=["all"],
             no_build=True,
             skip_architecture=True,
-            skip_py_compile=True,
+            skip_python=True,
             skip_unit=True,
         )
 
@@ -185,6 +187,91 @@ class TestUnitSuite(unittest.TestCase):
                 (artifact_dir / "unit_output.txt").read_text(encoding="utf-8"),
                 "failed test\nassertion failed\n",
             )
+
+
+class TestPythonChecks(unittest.TestCase):
+    def test_python_checks_compile_all_sources_and_run_both_suites(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            artifact_dir = Path(temporary)
+            results = [
+                subprocess.CompletedProcess(args=["compile"], returncode=0, stdout="", stderr=""),
+                subprocess.CompletedProcess(args=["settings"], returncode=0, stdout="settings verified\n", stderr=""),
+                subprocess.CompletedProcess(args=["metrics"], returncode=0, stdout="metrics verified\n", stderr=""),
+                subprocess.CompletedProcess(args=["jit"], returncode=0, stdout="31 tests passed\n", stderr=""),
+                subprocess.CompletedProcess(args=["tpch"], returncode=0, stdout="46 tests passed\n", stderr=""),
+            ]
+            with mock.patch.object(guard, "run_command", side_effect=results) as run:
+                guard.run_python_checks(artifact_dir)
+
+            self.assertEqual(run.call_count, 5)
+            self.assertEqual(run.call_args_list[0].args[0], guard.py_compile_command())
+            self.assertEqual(
+                [call.args[0] for call in run.call_args_list[3:]],
+                [guard.python_test_command(suite_dir) for _, suite_dir in guard.PYTHON_TEST_SUITES],
+            )
+            self.assertEqual(
+                (artifact_dir / "python_jit_test_output.txt").read_text(encoding="utf-8"),
+                "31 tests passed\n",
+            )
+            self.assertEqual(
+                (artifact_dir / "python_tpch_jit_test_output.txt").read_text(encoding="utf-8"),
+                "46 tests passed\n",
+            )
+
+    def test_python_failure_stops_before_later_suites(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            artifact_dir = Path(temporary)
+            results = [
+                subprocess.CompletedProcess(args=["compile"], returncode=0, stdout="", stderr=""),
+                subprocess.CompletedProcess(args=["settings"], returncode=0, stdout="", stderr=""),
+                subprocess.CompletedProcess(args=["metrics"], returncode=0, stdout="", stderr=""),
+                subprocess.CompletedProcess(args=["jit"], returncode=3, stdout="failed\n", stderr="trace\n"),
+            ]
+            with mock.patch.object(guard, "run_command", side_effect=results) as run:
+                with self.assertRaisesRegex(guard.GuardError, "Python jit tests failed with exit code 3"):
+                    guard.run_python_checks(artifact_dir)
+
+            self.assertEqual(run.call_count, 4)
+            self.assertEqual(
+                (artifact_dir / "python_jit_test_output.txt").read_text(encoding="utf-8"),
+                "failed\ntrace\n",
+            )
+            self.assertFalse((artifact_dir / "python_tpch_jit_test_output.txt").exists())
+
+    def test_python_failure_prevents_performance_receipt_publication(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            artifact_dir = Path(temporary)
+            duckdb = artifact_dir / "duckdb"
+            duckdb.write_text("binary", encoding="utf-8")
+            args = SimpleNamespace(
+                no_build=True,
+                duckdb=duckdb,
+                skip_architecture=True,
+                skip_python=False,
+            )
+            with (
+                mock.patch.object(guard, "parse_args", return_value=args),
+                mock.patch.object(guard, "validate_args", return_value=artifact_dir),
+                mock.patch.object(guard, "write_guard_metadata"),
+                mock.patch.object(guard, "run_python_checks", side_effect=guard.GuardError("Python failed")),
+                mock.patch.object(guard, "write_performance_receipt") as publish,
+            ):
+                with self.assertRaisesRegex(guard.GuardError, "Python failed"):
+                    guard.main()
+            publish.assert_not_called()
+
+    def test_skip_python_is_the_only_python_skip_option(self) -> None:
+        self.assertTrue(guard.parse_args(["--skip-python"]).skip_python)
+        with redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+            guard.parse_args(["--skip-py-compile"])
+
+    def test_candidate_repeat_budget_is_five_or_ten(self) -> None:
+        defaults = guard.parse_args([])
+        self.assertEqual((defaults.generic_repeats, defaults.tpch_repeats), (5, 5))
+        tens = guard.parse_args(["--generic-repeats", "10", "--tpch-repeats", "10"])
+        self.assertEqual((tens.generic_repeats, tens.tpch_repeats), (10, 10))
+        with redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+            guard.parse_args(["--generic-repeats", "6"])
 
 
 if __name__ == "__main__":
