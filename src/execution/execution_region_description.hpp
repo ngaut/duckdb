@@ -12,8 +12,4 @@ void FinalizeExecutionRegionStagePlan(ExecutionRegionStagePlan &plan, ExecutionR
 void FinalizeExecutionRegionCandidate(ExecutionRegionCandidate &candidate, ExecutionRegionIRMode mode);
 void FinalizeExecutionRegionIR(ExecutionRegionIR &region_ir, ExecutionRegionIRMode mode);
 
-string DescribeExecutionRegionCandidateSpan(idx_t first_node, idx_t node_count, idx_t start_operator_index,
-                                            idx_t end_operator_index,
-                                            ExecutionRegionSourceExecutionKind source_execution);
-
 } // namespace duckdb

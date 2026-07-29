@@ -28,48 +28,22 @@ struct SljitProjectionGraphLowering {
 
 struct SljitSourceContractPlan {
 	ExecutionRegionScanFilterMode scan_filter_mode = ExecutionRegionScanFilterMode::NONE;
+	idx_t low_cardinality_string_like_max_distinct_count = 0;
 	vector<LogicalType> source_contract_input_types;
 	vector<LogicalType> source_output_types;
-
-	bool UsesScanFilters() const {
-		return scan_filter_mode != ExecutionRegionScanFilterMode::NONE;
-	}
 
 	bool UsesSourceContractInputLayout() const {
 		return !source_contract_input_types.empty();
 	}
-
-	void Merge(const SljitSourceContractPlan &other) {
-		if (other.scan_filter_mode != ExecutionRegionScanFilterMode::NONE) {
-			D_ASSERT(scan_filter_mode == ExecutionRegionScanFilterMode::NONE ||
-			         scan_filter_mode == other.scan_filter_mode);
-			scan_filter_mode = other.scan_filter_mode;
-		}
-		if (source_contract_input_types.empty()) {
-			source_contract_input_types = other.source_contract_input_types;
-		}
-		if (source_output_types.empty()) {
-			source_output_types = other.source_output_types;
-		}
-	}
-};
-
-struct SljitSourceStrategyContext {
-	//! The CBO candidate already selected storage-owned scan filters for this source.
-	bool candidate_uses_scan_filters = false;
-	//! Hash-build sources retain their specialized storage-filter safety rule.
-	bool prefer_direct_build_scan_filters = false;
-	bool supports_generated_mixed_filter = false;
 };
 
 struct SljitRegionNodePlan {
 	ExecutionRegionLoweringKind kind = ExecutionRegionLoweringKind::BOUNDARY;
 	string reason;
+	string fusion_blocker;
 	vector<SljitNativeRegionOpPlan> native_ops;
 	vector<SljitNativeScanFilterPlan> scan_filters;
 	SljitSourceContractPlan source_contract;
-	ExecutionRegionSourceExecutionKind source_execution = ExecutionRegionSourceExecutionKind::NONE;
-	bool requires_source_contract = false;
 };
 
 bool TryLowerNativeRegionExpression(const ExecutionExpressionFragment &fragment, bool require_boolean,
@@ -99,7 +73,7 @@ bool SljitRegionNodeHasNativeOps(const SljitRegionNodePlan &node_plan);
 SljitNativeRegionOpPlan &SljitRegionNodeLastNativeOp(SljitRegionNodePlan &node_plan);
 SljitRegionNodePlan SljitNativeNode(SljitNativeRegionOpPlan &&native_op, string reason);
 SljitRegionNodePlan SljitNativeNode(vector<SljitNativeRegionOpPlan> native_ops, string reason);
-SljitRegionNodePlan SljitRegionBoundaryNode(string reason);
+SljitRegionNodePlan SljitRegionBoundaryNode(string reason, string fusion_blocker = string());
 SljitRegionNodePlan SljitNodeBlockerBoundary(const ExecutionRegionNode &node, const char *fallback);
 string SljitBlockerOrReason(const string &blocker, const char *reason);
 void AppendSljitReasonPart(string &reason, const string &part, bool render_diagnostics);
@@ -107,10 +81,9 @@ SljitNativeRegionExpressionPlan SljitNativeReferenceExpression(idx_t source_inde
                                                                bool references_region_input);
 SljitRegionNodePlan SljitBlockedContractBoundary(const string &blocker, const char *reason);
 
-SljitRegionNodePlan PlanSljitFilterNode(const ExecutionRegionNode &node, string &error, bool render_diagnostics);
+SljitRegionNodePlan PlanSljitFilterNode(const ExecutionRegionNode &node, bool render_diagnostics);
 SljitRegionNodePlan PlanSljitProjectionNode(const ExecutionRegionNode &node, const vector<LogicalType> &input_types,
-                                            string &error, bool render_diagnostics);
-string SljitSourceBoundaryReason(const ExecutionRegionNode &node, bool render_diagnostics);
+                                            bool render_diagnostics);
 void AppendSljitSourceFilterFacts(string &reason, const ExecutionRegionNode &node,
                                   const ExecutionRegionTableScanContract &contract, bool include_input_columns);
 bool TryPlanSljitGeneratedSourceFilters(const ExecutionRegionNode &node, SljitSourceContractPlan &contract_plan,
@@ -118,10 +91,8 @@ bool TryPlanSljitGeneratedSourceFilters(const ExecutionRegionNode &node, SljitSo
                                         bool render_diagnostics);
 void PlanSljitStorageScanFilters(const ExecutionRegionNode &node, vector<SljitNativeScanFilterPlan> &scan_filters,
                                  bool render_diagnostics);
-SljitRegionNodePlan PlanSljitSourceNode(const ExecutionRegionNode &node, const ExecutionRegionContract &contract,
-                                        ExecutionRegionSourceExecutionKind source_execution, bool render_diagnostics,
-                                        const SljitSourceStrategyContext &strategy_context = {});
-bool SljitCanExecuteSourceNode(const ExecutionRegionNode &node, const ExecutionRegionContract &contract);
+SljitRegionNodePlan PlanSljitSourceNode(const ExecutionRegionNode &node, ExecutionRegionSinkKind sink_kind,
+                                        bool render_diagnostics);
 SljitRegionNodePlan PlanSljitHashJoinProbeOperatorNode(const ExecutionRegionNode &node,
                                                        const vector<LogicalType> &input_types,
                                                        const vector<bool> &input_not_null, bool render_diagnostics);
@@ -136,11 +107,6 @@ SljitRegionNodePlan PlanSljitSinkNode(const ExecutionRegionNode &node, const vec
                                       bool render_diagnostics);
 SljitRegionNodePlan PlanSljitFullPipelineSinkNode(const ExecutionRegionNode &node,
                                                   const vector<LogicalType> &input_types, bool render_diagnostics);
-void AddSljitFullPipelineSinkBlockers(ExecutionRegionLoweringPlan &lowering_plan, string &backend_error,
-                                      const ExecutionRegionNode &node, const SljitRegionNodePlan &node_plan,
-                                      const ExecutionRegionContract &contract);
-void AddSljitOperatorContractBlockers(ExecutionRegionLoweringPlan &lowering_plan, string &backend_error,
-                                      const ExecutionRegionNode &node, const SljitRegionNodePlan &node_plan);
 
 const char *SljitNativeRegionOpKindName(SljitNativeRegionOpKind kind);
 const char *SljitHashJoinProbeOutputModeToString(ExecutionHashJoinProbeOutputMode mode);

@@ -212,8 +212,8 @@ public:
 	                  int64_t compile_time_us, idx_t code_size);
 	void AddTraceCodeSize(idx_t code_size);
 	void SetTraceSelectedSourceExecution(ExecutionRegionSourceExecutionKind source_execution);
-	void SetTraceUsesScanFilters(bool uses_scan_filters);
-	void SetTracePipeline(const ExecutionRegionCandidate &candidate);
+	void SetTraceScanFilterMode(ExecutionRegionScanFilterMode scan_filter_mode);
+	void SetTracePipeline(const ExecutionRegionCandidate &candidate, const string &pipeline_shape);
 	void SetExecutionABI(ExecutionRegionABI abi);
 	idx_t TraceId() const;
 	ExecutionRegionExecutionMode ExecutionMode() const;
@@ -225,9 +225,8 @@ public:
 	idx_t TraceCodeSize() const;
 	bool HasTracePipeline() const;
 	const string &TraceCandidateShape() const;
-	const string &TraceCandidatePipelineShape() const;
+	const string &TracePipelineShape() const;
 	idx_t TraceCandidateEstimatedCardinality() const;
-	bool TraceCandidateUsesScanFilters() const;
 	virtual bool CanExecuteFullPipeline() const;
 	//! Whether this kernel may hand the pipeline to the vectorized continuation
 	//! mid-query. Recipes that claim exclusive ownership of sink finalization
@@ -240,7 +239,7 @@ private:
 	idx_t trace_id = 0;
 	ExecutionRegionExecutionMode execution_mode = ExecutionRegionExecutionMode::NONE;
 	ExecutionRegionSourceExecutionKind selected_source_execution = ExecutionRegionSourceExecutionKind::NONE;
-	bool uses_scan_filters = false;
+	ExecutionRegionScanFilterMode scan_filter_mode = ExecutionRegionScanFilterMode::NONE;
 	ExecutionRegionABI execution_abi = ExecutionRegionABI::NONE;
 	string trace_compile_reason;
 	int64_t trace_compile_time_us = 0;
@@ -248,9 +247,8 @@ private:
 	std::atomic<idx_t> trace_lazy_code_size {0};
 	bool has_trace_pipeline = false;
 	string trace_candidate_shape;
-	string trace_candidate_pipeline_shape;
+	string trace_pipeline_shape;
 	idx_t trace_candidate_estimated_cardinality = 0;
-	bool trace_candidate_uses_scan_filters = false;
 	ExecutionRegionAdaptiveAbState adaptive_ab;
 	bool adaptive_measurement_candidate = true;
 };

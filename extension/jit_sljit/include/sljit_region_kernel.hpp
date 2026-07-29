@@ -18,17 +18,17 @@ namespace duckdb {
 //! ABI.
 struct SljitNativeRegionArtifact : public ExecutionRegionArtifact {
 	SljitNativeRegionArtifact(string backend_name, vector<SljitExecutableRegionOp> ops,
-	                          vector<SljitExecutableScanFilter> scan_filters, bool uses_scan_filters,
-	                          vector<idx_t> source_distinct_counts, vector<Value> source_min_values,
-	                          vector<Value> source_max_values, SljitFullPipelineRecipePlan recipe_plan,
-	                          ExecutionRegionABI abi);
+	                          vector<SljitExecutableScanFilter> scan_filters,
+	                          ExecutionRegionScanFilterMode scan_filter_mode, vector<idx_t> source_distinct_counts,
+	                          vector<Value> source_min_values, vector<Value> source_max_values,
+	                          SljitFullPipelineRecipePlan recipe_plan, ExecutionRegionABI abi);
 
 	string backend_name;
 	//! Lazy code cells are synchronized and publish monotonically. The semantic
 	//! operation graph itself is immutable after artifact construction.
 	mutable vector<SljitExecutableRegionOp> ops;
 	vector<SljitExecutableScanFilter> scan_filters;
-	bool uses_scan_filters;
+	ExecutionRegionScanFilterMode scan_filter_mode;
 	vector<idx_t> source_distinct_counts;
 	vector<Value> source_min_values;
 	vector<Value> source_max_values;

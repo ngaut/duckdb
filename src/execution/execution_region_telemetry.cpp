@@ -92,17 +92,11 @@ static ExecutionRunnerKind ExecutionRegionRunnerFromExecutionMode(ExecutionRegio
 static void SetDetailedExecutionRegionCandidate(ExecutionRegionEvent &event,
                                                 const ExecutionRegionCandidate &candidate) {
 	event.has_candidate = true;
-	event.candidate_id = candidate.candidate_id;
 	event.candidate_shape = candidate.shape;
-	event.candidate_pipeline_shape = candidate.pipeline_shape;
 	event.candidate_signature = candidate.signature;
-	event.candidate_node_count = candidate.node_count;
-	event.candidate_start_operator_index = candidate.start_operator_index;
-	event.candidate_end_operator_index = candidate.end_operator_index;
 	event.candidate_estimated_cardinality = candidate.estimated_cardinality;
 	event.candidate_traits = candidate.traits;
-	event.candidate_contract = candidate.contract;
-	event.candidate_uses_scan_filters = candidate.uses_scan_filters;
+	event.candidate_abi = candidate.abi;
 }
 
 bool ExecutionRegionEventIsRuntime(const ExecutionRegionEvent &event) {
@@ -119,7 +113,7 @@ bool ExecutionRegionEventIsVisibleInQueryProfile(const ExecutionRegionEvent &eve
 }
 
 const string &ExecutionRegionEventPipelineShape(const ExecutionRegionEvent &event) {
-	return event.candidate_pipeline_shape.empty() ? event.pipeline_shape : event.candidate_pipeline_shape;
+	return event.pipeline_shape;
 }
 
 idx_t ExecutionRegionEventEstimatedCardinality(const ExecutionRegionEvent &event) {
@@ -232,10 +226,10 @@ void ExecutionRegionManager::ApplyEventRetentionLimit(idx_t event_log_size) {
 idx_t ExecutionRegionManager::RecordEvent(
     ClientContext &context, string backend_name, ExecutionRegionCompileStatus status,
     ExecutionRegionExecutionMode execution_mode, string reason, string blocker, const string *ir,
-    int64_t decision_time_us, int64_t compile_time_us, idx_t code_size, const ExecutionRegionCandidate *candidate,
-    ExecutionRunnerKind selected_runner, const ExecutionRegionStageTimings *stage_timings,
-    ExecutionRegionSourceExecutionKind selected_source_execution, bool selected_uses_scan_filters,
-    const PhysicalRunnerCostProfile *runner_cost) {
+    int64_t decision_time_us, int64_t compile_time_us, idx_t code_size, const string *pipeline_shape,
+    const ExecutionRegionCandidate *candidate, ExecutionRunnerKind selected_runner,
+    const ExecutionRegionStageTimings *stage_timings, ExecutionRegionSourceExecutionKind selected_source_execution,
+    ExecutionRegionScanFilterMode selected_scan_filter_mode, const PhysicalRunnerCostProfile *runner_cost) {
 	if (context.IsCompiledExecutionSuppressed()) {
 		return 0;
 	}
@@ -243,10 +237,12 @@ idx_t ExecutionRegionManager::RecordEvent(
 	if (candidate && ExecutionRegionSettings::ShouldRecordDetailedTelemetry(context)) {
 		SetDetailedExecutionRegionCandidate(event, *candidate);
 	}
-	if (candidate && !event.has_pipeline) {
+	if (pipeline_shape && !pipeline_shape->empty()) {
 		event.has_pipeline = true;
-		event.pipeline_shape = candidate->pipeline_shape;
-		event.pipeline_estimated_cardinality = candidate->estimated_cardinality;
+		event.pipeline_shape = *pipeline_shape;
+		if (candidate) {
+			event.pipeline_estimated_cardinality = candidate->estimated_cardinality;
+		}
 	}
 	event.selected_runner = selected_runner;
 	if (runner_cost) {
@@ -263,7 +259,7 @@ idx_t ExecutionRegionManager::RecordEvent(
 	event.status_kind = ExecutionRegionEventStatusFromCompileStatus(status);
 	event.execution_mode_kind = execution_mode;
 	event.selected_source_execution = selected_source_execution;
-	event.selected_uses_scan_filters = selected_uses_scan_filters || event.candidate_uses_scan_filters;
+	event.selected_uses_scan_filters = selected_scan_filter_mode != ExecutionRegionScanFilterMode::NONE;
 	event.reason = std::move(reason);
 	event.blocker = std::move(blocker);
 	if (ir && ExecutionRegionSettings::DumpIR(context)) {
@@ -307,11 +303,10 @@ static void SetRuntimeRegionPipeline(ExecutionRegionEvent &event, const Executio
 		return;
 	}
 	event.has_pipeline = true;
-	event.pipeline_shape = kernel.TraceCandidatePipelineShape();
+	event.pipeline_shape = kernel.TracePipelineShape();
 	event.pipeline_estimated_cardinality = kernel.TraceCandidateEstimatedCardinality();
 	event.candidate_shape = kernel.TraceCandidateShape();
 	event.candidate_estimated_cardinality = kernel.TraceCandidateEstimatedCardinality();
-	event.candidate_uses_scan_filters = kernel.TraceCandidateUsesScanFilters();
 }
 
 static void SetRuntimeRegionSourceTrace(ExecutionRegionEvent &event, const ExecutionRegionKernel &kernel) {

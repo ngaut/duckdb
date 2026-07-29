@@ -103,7 +103,6 @@ PROFILE_EVENT_FIELDS = (
     "jit_runtime_delegation_counts",
     "selected_source_execution",
     "selected_uses_scan_filters",
-    "candidate_uses_scan_filters",
     "source_stage_runtime_breakdown",
     "generated_stage_runtime_breakdown",
 )

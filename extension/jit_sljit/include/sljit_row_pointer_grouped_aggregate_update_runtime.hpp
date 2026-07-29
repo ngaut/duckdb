@@ -136,7 +136,7 @@ static bool TryExecuteDirectRowPointerPreaggregatedPrimitiveUpdate(
 	RecordSljitRegionStageRuntimePath(runtime, op_idx, op.kind, "row_pointer_preaggregated_grouped_primitive_update",
 	                                  stage_start);
 	RecordSljitRegionMaterializationElision(runtime, op.kind, "row_pointer_preaggregated_grouped_primitive_update",
-	                                             count);
+	                                        count);
 	return true;
 }
 

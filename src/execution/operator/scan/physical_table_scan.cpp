@@ -26,6 +26,8 @@ struct TableScanExecutionSourceConfig {
 	vector<idx_t> projection_ids;
 	vector<LogicalType> source_contract_input_types;
 	optional_ptr<TableFilterSet> filters;
+	optional_ptr<TableFilterSet> residual_filters;
+	TableFilterExecutionMode filter_execution_mode = TableFilterExecutionMode::FILTER_AND_PRUNE;
 	optional_ptr<const TableFilterKernelProvider> filter_kernel_provider;
 	vector<idx_t> filter_kernel_indices;
 	bool return_source_contract_input = false;
@@ -69,8 +71,11 @@ BuildTableScanExecutionSourceConfig(const PhysicalTableScan &op, optional_ptr<Ta
 	if (result.use_source_contract && !open_request.UsesScanFilters()) {
 		result.filters = nullptr;
 	}
+	if (open_request.UsesStaticPruningOnly()) {
+		result.filter_execution_mode = TableFilterExecutionMode::PRUNE_ONLY;
+	}
 	if (!result.use_source_contract || !result.filters || !open_request.table_filter_kernel_provider ||
-	    !op.table_filters) {
+	    !op.table_filters || open_request.scan_filter_mode != ExecutionRegionScanFilterMode::ALL) {
 		return result;
 	}
 
@@ -238,12 +243,16 @@ public:
 				max_threads = global_state->MaxThreads();
 			}
 			auto execution_filters = filters;
-			if (open_request.UsesDynamicScanFiltersOnly()) {
-				execution_source_scan_filters =
+			if (open_request.UsesDynamicFiltersWithStaticPruning()) {
+				execution_source_residual_filters =
 				    op.dynamic_filters ? op.dynamic_filters->GetFinalTableFilters(op, nullptr) : nullptr;
-				execution_filters = execution_source_scan_filters.get();
+				if (!execution_source_residual_filters || !execution_source_residual_filters->HasFilters()) {
+					throw InternalException(
+					    "mixed execution-region scan filtering requires a non-empty dynamic residual filter set");
+				}
 			}
 			execution_source_config = BuildTableScanExecutionSourceConfig(op, execution_filters, open_request);
+			execution_source_config.residual_filters = execution_source_residual_filters.get();
 			InitializeExecutionSourceContractTableScanGlobalState(context, op, execution_source_config,
 			                                                      execution_source_contract, global_state.get());
 		} else {
@@ -269,8 +278,8 @@ public:
 	DataChunk input_chunk;
 	//! Combined table filters, if we have dynamic filters
 	unique_ptr<TableFilterSet> table_filters;
-	//! Scan-owned filter subset when generated code owns static filters.
-	unique_ptr<TableFilterSet> execution_source_scan_filters;
+	//! Scan-owned residual subset when generated code owns static filters.
+	unique_ptr<TableFilterSet> execution_source_residual_filters;
 	TableScanExecutionSourceConfig execution_source_config;
 	TableScanExecutionSourceContractGlobalState execution_source_contract;
 
@@ -310,10 +319,17 @@ private:
 		if (gstate.execution_source_config.filter_kernel_provider) {
 			filter_kernel_indices = &gstate.execution_source_config.filter_kernel_indices;
 		}
-		execution_source_contract_scan_state.Initialize(
-		    gstate.execution_source_contract.storage_ids, context.client, filters, op.extra_info.sample_options,
-		    TableFilterExecutionMode::FILTER_AND_PRUNE, gstate.execution_source_config.filter_kernel_provider,
-		    filter_kernel_indices);
+		if (gstate.execution_source_config.residual_filters) {
+			D_ASSERT(filters);
+			execution_source_contract_scan_state.InitializeWithSeparateResidualFilters(
+			    gstate.execution_source_contract.storage_ids, context.client, *filters,
+			    *gstate.execution_source_config.residual_filters, op.extra_info.sample_options);
+		} else {
+			execution_source_contract_scan_state.Initialize(
+			    gstate.execution_source_contract.storage_ids, context.client, filters, op.extra_info.sample_options,
+			    gstate.execution_source_config.filter_execution_mode,
+			    gstate.execution_source_config.filter_kernel_provider, filter_kernel_indices);
+		}
 		// The first row group is claimed lazily by the contract fetch loop, mirroring
 		// the vectorized scan: construction-time claims strand row groups when the
 		// distribution is shared across consumers.

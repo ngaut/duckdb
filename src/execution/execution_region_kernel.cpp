@@ -45,16 +45,15 @@ void ExecutionRegionKernel::SetTraceSelectedSourceExecution(ExecutionRegionSourc
 	selected_source_execution = source_execution;
 }
 
-void ExecutionRegionKernel::SetTraceUsesScanFilters(bool uses_scan_filters_p) {
-	uses_scan_filters = uses_scan_filters_p;
+void ExecutionRegionKernel::SetTraceScanFilterMode(ExecutionRegionScanFilterMode scan_filter_mode_p) {
+	scan_filter_mode = scan_filter_mode_p;
 }
 
-void ExecutionRegionKernel::SetTracePipeline(const ExecutionRegionCandidate &candidate) {
+void ExecutionRegionKernel::SetTracePipeline(const ExecutionRegionCandidate &candidate, const string &pipeline_shape) {
 	has_trace_pipeline = true;
 	trace_candidate_shape = candidate.shape;
-	trace_candidate_pipeline_shape = candidate.pipeline_shape;
+	trace_pipeline_shape = pipeline_shape;
 	trace_candidate_estimated_cardinality = candidate.estimated_cardinality;
-	trace_candidate_uses_scan_filters = candidate.uses_scan_filters;
 }
 
 void ExecutionRegionKernel::SetExecutionABI(ExecutionRegionABI abi) {
@@ -74,7 +73,7 @@ ExecutionRegionSourceExecutionKind ExecutionRegionKernel::SelectedSourceExecutio
 }
 
 bool ExecutionRegionKernel::UsesScanFilters() const {
-	return uses_scan_filters;
+	return scan_filter_mode != ExecutionRegionScanFilterMode::NONE;
 }
 
 ExecutionRegionABI ExecutionRegionKernel::ExecutionABI() const {
@@ -101,16 +100,12 @@ const string &ExecutionRegionKernel::TraceCandidateShape() const {
 	return trace_candidate_shape;
 }
 
-const string &ExecutionRegionKernel::TraceCandidatePipelineShape() const {
-	return trace_candidate_pipeline_shape;
+const string &ExecutionRegionKernel::TracePipelineShape() const {
+	return trace_pipeline_shape;
 }
 
 idx_t ExecutionRegionKernel::TraceCandidateEstimatedCardinality() const {
 	return trace_candidate_estimated_cardinality;
-}
-
-bool ExecutionRegionKernel::TraceCandidateUsesScanFilters() const {
-	return trace_candidate_uses_scan_filters;
 }
 
 bool ExecutionRegionKernel::SupportsRunnerHandoff() const {

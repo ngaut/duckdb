@@ -66,10 +66,10 @@ static idx_t SljitLikeFragmentPairAnchor(const char *data, idx_t length) {
 }
 
 #if defined(__aarch64__)
-static
-    __attribute__((noinline, cold)) idx_t SljitVerifyLikeFragmentPairCandidates(const char *sdata, const char *fragment,
-                                                                                idx_t fragment_length,
-                                                                                idx_t pair_anchor, idx_t position) {
+static __attribute__((noinline, cold)) idx_t SljitVerifyLikeFragmentPairCandidates(const char *sdata,
+                                                                                   const char *fragment,
+                                                                                   idx_t fragment_length,
+                                                                                   idx_t pair_anchor, idx_t position) {
 	for (idx_t lane = 0; lane < 16; lane++) {
 		auto pair_position = position + lane;
 		if (sdata[pair_position] != fragment[pair_anchor] || sdata[pair_position + 1] != fragment[pair_anchor + 1]) {

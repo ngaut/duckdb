@@ -1,4 +1,5 @@
 #include "test_jit_helpers.hpp"
+#include "duckdb/storage/storage_info.hpp"
 
 #include <cmath>
 
@@ -123,7 +124,7 @@ TEST_CASE("JIT lowers date year intrinsic as native scalar projection", "[api][j
 	REQUIRE(result->GetValue(0, 3).IsNull());
 
 	RequireNativeSljitIr(manager, "date_year", [&](const ExecutionRegionEvent &event) {
-		REQUIRE(event.candidate_contract.abi == ExecutionRegionABI::FULL_PIPELINE);
+		REQUIRE(event.candidate_abi == ExecutionRegionABI::FULL_PIPELINE);
 		REQUIRE(event.candidate_traits.projection_count > 0);
 	});
 }
@@ -594,7 +595,7 @@ TEST_CASE("JIT owns proven-safe modulo table scan filters as generated source fi
 	    });
 	RequireJitEvent(manager, [](const ExecutionRegionEvent &event) {
 		return IsSljitRegionEvent(event) && EventPhase(event) == "runtime" && EventStatus(event) == "executed" &&
-		       !event.selected_uses_scan_filters && event.source_contract_output_rows > 0 &&
+		       event.selected_uses_scan_filters && event.source_contract_output_rows > 0 &&
 		       HasJitAggregateUpdatePath(event);
 	});
 }
@@ -652,12 +653,39 @@ TEST_CASE("JIT owns pruned table scan filters through source input layout", "[ap
 	    manager,
 	    [](const ExecutionRegionEvent &event) {
 		    return IsCompiledSljitRegionEvent(event) && event.candidate_traits.source_filter_count > 0 &&
-		           StringUtil::Contains(event.reason, "source_contract_filter_prune_required=true");
+		           StringUtil::Contains(event.reason, "source_contract_filter_pushdown=prune-only");
 	    },
 	    [](const ExecutionRegionEvent &event) {
 		    RequireGeneratedSourceFilterContract(event);
 		    RequireGeneratedMachineCodeRegion(event);
 	    });
+}
+
+TEST_CASE("JIT generated source filters retain zonemap pruning without storage residuals", "[api][jit]") {
+	DuckDB db;
+	Connection con(db);
+	auto &manager = ExecutionRegionManager::Get(*con.context);
+
+	ConfigureSljitForCoverage(con, false, true, true, 10000);
+	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_generated_row_group_pruning AS "
+	                          "SELECT i::BIGINT AS i FROM range(400000) tbl(i)"));
+
+	ClearJitTrace(manager, true);
+	auto result = con.Query("SELECT sum(i) FROM jit_generated_row_group_pruning WHERE i < 10");
+	REQUIRE_NO_FAIL(*result);
+	REQUIRE(result->GetValue(0, 0).ToString() == "45");
+
+	RequireJitEvent(
+	    manager,
+	    [](const ExecutionRegionEvent &event) {
+		    return IsCompiledSljitRegionEvent(event) && event.candidate_traits.source_filter_count > 0;
+	    },
+	    [](const ExecutionRegionEvent &event) { RequireGeneratedSourceFilterContract(event); });
+	RequireJitEvent(manager, [](const ExecutionRegionEvent &event) {
+		return IsSljitRegionEvent(event) && EventPhase(event) == "runtime" && EventStatus(event) == "executed" &&
+		       event.selected_uses_scan_filters && event.source_contract_output_rows > 10 &&
+		       event.source_contract_output_rows < DEFAULT_ROW_GROUP_SIZE && HasJitAggregateUpdatePath(event);
+	});
 }
 
 TEST_CASE("JIT owns date range source filters through source input layout", "[api][jit]") {

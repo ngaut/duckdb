@@ -58,8 +58,8 @@ static inline sljit_label *EmitSljitFlatUnrolledScalarLoop(struct sljit_compiler
 	auto repeat = sljit_emit_jump(compiler, SLJIT_JUMP);
 	sljit_set_label(repeat, unrolled_loop);
 
-	auto scalar_labels =
-	    EmitSljitFlatRemainingScalarLoop(compiler, count_reg, data_width, [&]() { emit_row(0); }, emit_advance);
+	auto scalar_labels = EmitSljitFlatRemainingScalarLoop(
+	    compiler, count_reg, data_width, [&]() { emit_row(0); }, emit_advance);
 	sljit_set_label(tail, scalar_labels.loop);
 	return scalar_labels.done;
 }

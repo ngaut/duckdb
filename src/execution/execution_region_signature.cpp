@@ -214,23 +214,6 @@ string DescribeExecutionRegionPipelineShape(const ExecutionRegionIR &region_ir) 
 	return result;
 }
 
-string DescribeExecutionRegionPipelineShape(const ExecutionRegionIR &region_ir, idx_t first_node, idx_t node_count) {
-	string result = "pipeline";
-	auto end_node = first_node + node_count;
-	for (idx_t node_idx = first_node; node_idx < end_node && node_idx < region_ir.nodes.size(); node_idx++) {
-		auto &node = region_ir.nodes[node_idx];
-		result += ";";
-		result += node.label;
-		result += ":";
-		result += StringUtil::Lower(string(ExecutionRegionNodeKindToString(node.kind)));
-		result += ":";
-		result += node.operator_name;
-		result += ":";
-		result += StringUtil::Lower(string(ExecutionRegionBoundaryKindToString(node.boundary)));
-	}
-	return result;
-}
-
 static void AppendExecutionRegionCandidateShapeSegment(string &result, const string &segment) {
 	if (segment.empty()) {
 		return;
@@ -264,11 +247,9 @@ static void AppendExecutionRegionSourceShapeSegments(string &result, const Execu
 	}
 }
 
-string DescribeExecutionRegionCandidateShape(const ExecutionRegionIR &region_ir,
-                                             const ExecutionRegionCandidate &candidate) {
+string DescribeExecutionRegionCandidateShape(const ExecutionRegionIR &region_ir) {
 	string result;
-	for (idx_t node_idx = candidate.first_node; node_idx < candidate.EndNode(); node_idx++) {
-		auto &node = region_ir.nodes[node_idx];
+	for (auto &node : region_ir.nodes) {
 		if (node.kind == ExecutionRegionNodeKind::SOURCE) {
 			AppendExecutionRegionSourceShapeSegments(result, node);
 			continue;
@@ -279,8 +260,8 @@ string DescribeExecutionRegionCandidateShape(const ExecutionRegionIR &region_ir,
 	return result.empty() ? "boundary-only" : result;
 }
 
-static string GetExecutionRegionSignatureContext(const ExecutionRegionContract &contract) {
-	if (ExecutionRegionABIIsFullPipeline(contract.abi)) {
+static string GetExecutionRegionSignatureContext(ExecutionRegionABI abi) {
+	if (ExecutionRegionABIIsFullPipeline(abi)) {
 		return "full-pipeline";
 	}
 	return "unknown";
@@ -340,21 +321,17 @@ static string GetExecutionRegionNodeSignatureFeature(const ExecutionRegionNode &
 	return ExecutionRegionOperatorKindSignatureSegment(node.operator_kind);
 }
 
-static string BuildExecutionRegionFeatureShape(const ExecutionRegionIR &region_ir, idx_t first_node, idx_t node_count) {
+static string BuildExecutionRegionFeatureShape(const ExecutionRegionIR &region_ir) {
 	vector<string> features;
-	const auto end_node = MinValue(first_node + node_count, NumericCast<idx_t>(region_ir.nodes.size()));
-	for (idx_t node_idx = first_node; node_idx < end_node; node_idx++) {
-		AddExecutionRegionSignatureFeature(features, GetExecutionRegionNodeSignatureFeature(region_ir.nodes[node_idx]));
+	for (auto &node : region_ir.nodes) {
+		AddExecutionRegionSignatureFeature(features, GetExecutionRegionNodeSignatureFeature(node));
 	}
 	return BuildExecutionRegionSignatureFeatureSetShape(std::move(features));
 }
 
-static string BuildExecutionRegionContractShape(const ExecutionRegionIR &region_ir, idx_t first_node,
-                                                idx_t node_count) {
+static string BuildExecutionRegionContractShape(const ExecutionRegionIR &region_ir) {
 	string result;
-	const auto end_node = MinValue(first_node + node_count, NumericCast<idx_t>(region_ir.nodes.size()));
-	for (idx_t node_idx = first_node; node_idx < end_node; node_idx++) {
-		auto &node = region_ir.nodes[node_idx];
+	for (auto &node : region_ir.nodes) {
 		switch (node.kind) {
 		case ExecutionRegionNodeKind::SOURCE:
 			if (node.source) {
@@ -383,11 +360,11 @@ static string BuildExecutionRegionContractShape(const ExecutionRegionIR &region_
 ExecutionRegionSignature BuildExecutionRegionSignature(const ExecutionRegionIR &region_ir,
                                                        const ExecutionRegionCandidate &candidate) {
 	ExecutionRegionSignature signature;
-	signature.context = GetExecutionRegionSignatureContext(candidate.contract);
+	signature.context = GetExecutionRegionSignatureContext(candidate.abi);
 	signature.shape = candidate.shape;
-	signature.feature_shape = BuildExecutionRegionFeatureShape(region_ir, candidate.first_node, candidate.node_count);
-	signature.context_feature_shape = BuildExecutionRegionFeatureShape(region_ir, 0, region_ir.nodes.size());
-	signature.contract_shape = BuildExecutionRegionContractShape(region_ir, candidate.first_node, candidate.node_count);
+	signature.feature_shape = BuildExecutionRegionFeatureShape(region_ir);
+	signature.context_feature_shape = signature.feature_shape;
+	signature.contract_shape = BuildExecutionRegionContractShape(region_ir);
 	return signature;
 }
 

@@ -188,6 +188,52 @@ class TestUnitSuite(unittest.TestCase):
                 "failed test\nassertion failed\n",
             )
 
+    def test_slow_suite_runs_each_test_file_without_shell_glob_expansion(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            artifact_dir = root / "artifacts"
+            test_dir = root / "test" / "sql" / "tpch"
+            artifact_dir.mkdir()
+            test_dir.mkdir(parents=True)
+            first = test_dir / "a.test_slow"
+            second = test_dir / "b.test_slow"
+            first.touch()
+            second.touch()
+            unit_binary = root / "unittest"
+            unit_binary.touch()
+            args = SimpleNamespace(unit_binary=unit_binary)
+            results = [
+                subprocess.CompletedProcess(args=[], returncode=0, stdout="a passed\n", stderr=""),
+                subprocess.CompletedProcess(args=[], returncode=0, stdout="b passed\n", stderr=""),
+            ]
+            with (
+                mock.patch.object(guard, "ROOT", root),
+                mock.patch.object(guard, "run_command", side_effect=results) as run,
+            ):
+                guard.run_slow_suite(args, artifact_dir)
+
+            self.assertEqual(
+                [call.args[0] for call in run.call_args_list],
+                [
+                    [str(unit_binary), "test/sql/tpch/a.test_slow"],
+                    [str(unit_binary), "test/sql/tpch/b.test_slow"],
+                ],
+            )
+            self.assertEqual(
+                (artifact_dir / "slow_suite_output.txt").read_text(encoding="utf-8"),
+                "a passed\nb passed\n",
+            )
+
+    def test_slow_suite_rejects_an_empty_test_set(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            artifact_dir = root / "artifacts"
+            artifact_dir.mkdir()
+            args = SimpleNamespace(unit_binary=root / "unittest")
+            with mock.patch.object(guard, "ROOT", root):
+                with self.assertRaisesRegex(guard.GuardError, "no test files"):
+                    guard.run_slow_suite(args, artifact_dir)
+
 
 class TestPythonChecks(unittest.TestCase):
     def test_python_checks_compile_all_sources_and_run_both_suites(self) -> None:

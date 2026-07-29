@@ -15,7 +15,6 @@ enum JitEventColumn : idx_t {
 	JIT_EVENT_EXECUTION_MODE,
 	JIT_EVENT_SELECTED_SOURCE_EXECUTION,
 	JIT_EVENT_SELECTED_USES_SCAN_FILTERS,
-	JIT_EVENT_CANDIDATE_USES_SCAN_FILTERS,
 	JIT_EVENT_REASON,
 	JIT_EVENT_IR,
 	JIT_EVENT_DECISION_TIME_US,
@@ -38,12 +37,8 @@ enum JitEventColumn : idx_t {
 	JIT_EVENT_GENERATED_BODY_RUNTIME_TIME_US,
 	JIT_EVENT_GENERATED_STAGE_RUNTIME_BREAKDOWN,
 	JIT_EVENT_GENERATED_STAGE_COUNT_BREAKDOWN,
-	JIT_EVENT_CANDIDATE_ID,
 	JIT_EVENT_CANDIDATE_SHAPE,
-	JIT_EVENT_CANDIDATE_NODE_COUNT,
 	JIT_EVENT_CANDIDATE_ESTIMATED_CARDINALITY,
-	JIT_EVENT_CANDIDATE_START_OPERATOR_INDEX,
-	JIT_EVENT_CANDIDATE_END_OPERATOR_INDEX,
 	JIT_EVENT_SELECTED_RUNNER,
 	JIT_EVENT_BLOCKER,
 	JIT_EVENT_IR_LOWERING_TIME_US,
@@ -62,7 +57,6 @@ enum JitEventColumn : idx_t {
 	JIT_EVENT_JIT_RUNTIME_PATH_COUNTS,
 	JIT_EVENT_JIT_RUNTIME_PROOF_COUNTS,
 	JIT_EVENT_JIT_RUNTIME_DELEGATION_COUNTS,
-	JIT_EVENT_CANDIDATE_PIPELINE_SHAPE,
 	JIT_EVENT_RUNNER_COST_PROFILE,
 	JIT_EVENT_RUNNER_COST_ROWS,
 	JIT_EVENT_RUNNER_COST_BATCHES,
@@ -155,7 +149,7 @@ static void AppendJitEventCandidateColumn(Vector &output, idx_t column_id, const
 	auto candidate_column_id = column_id - JIT_EVENT_CANDIDATE_TRACE_COLUMN_OFFSET;
 	if (entry.has_candidate) {
 		AppendExecutionRegionCandidateTraceColumn(output, candidate_column_id, entry.candidate_signature,
-		                                          entry.candidate_traits, entry.candidate_contract);
+		                                          entry.candidate_traits, entry.candidate_abi);
 	} else {
 		AppendNullExecutionRegionCandidateTraceColumn(output, candidate_column_id);
 	}
@@ -202,9 +196,6 @@ static void AppendJitEventColumn(Vector &output, idx_t column_id, const Executio
 		return;
 	case JIT_EVENT_SELECTED_USES_SCAN_FILTERS:
 		output.Append(Value::BOOLEAN(entry.selected_uses_scan_filters));
-		return;
-	case JIT_EVENT_CANDIDATE_USES_SCAN_FILTERS:
-		output.Append(Value::BOOLEAN(entry.candidate_uses_scan_filters));
 		return;
 	case JIT_EVENT_REASON:
 		output.Append(Value(entry.reason));
@@ -276,9 +267,6 @@ static void AppendJitEventColumn(Vector &output, idx_t column_id, const Executio
 		AppendExecutionRegionNullableString(output,
 		                                    RenderExecutionRegionStageCountBreakdown(entry.generated_stage_runtime));
 		return;
-	case JIT_EVENT_CANDIDATE_ID:
-		output.Append(entry.has_candidate ? Value::UBIGINT(entry.candidate_id) : Value(LogicalType::UBIGINT));
-		return;
 	case JIT_EVENT_CANDIDATE_SHAPE:
 		if (entry.has_candidate) {
 			output.Append(Value(entry.candidate_shape));
@@ -286,19 +274,8 @@ static void AppendJitEventColumn(Vector &output, idx_t column_id, const Executio
 			output.Append(Value(LogicalType::VARCHAR));
 		}
 		return;
-	case JIT_EVENT_CANDIDATE_NODE_COUNT:
-		output.Append(entry.has_candidate ? Value::UBIGINT(entry.candidate_node_count) : Value(LogicalType::UBIGINT));
-		return;
 	case JIT_EVENT_CANDIDATE_ESTIMATED_CARDINALITY:
 		output.Append(entry.has_candidate ? Value::UBIGINT(entry.candidate_estimated_cardinality)
-		                                  : Value(LogicalType::UBIGINT));
-		return;
-	case JIT_EVENT_CANDIDATE_START_OPERATOR_INDEX:
-		output.Append(entry.has_candidate ? Value::UBIGINT(entry.candidate_start_operator_index)
-		                                  : Value(LogicalType::UBIGINT));
-		return;
-	case JIT_EVENT_CANDIDATE_END_OPERATOR_INDEX:
-		output.Append(entry.has_candidate ? Value::UBIGINT(entry.candidate_end_operator_index)
 		                                  : Value(LogicalType::UBIGINT));
 		return;
 	case JIT_EVENT_SELECTED_RUNNER:
@@ -330,13 +307,6 @@ static void AppendJitEventColumn(Vector &output, idx_t column_id, const Executio
 	case JIT_EVENT_JIT_RUNTIME_DELEGATION_COUNTS:
 		AppendExecutionRegionNullableString(
 		    output, RenderExecutionRegionCounterBreakdown(entry.jit_runtime.runtime_delegation_counts));
-		return;
-	case JIT_EVENT_CANDIDATE_PIPELINE_SHAPE:
-		if (entry.has_candidate) {
-			AppendExecutionRegionNullableString(output, entry.candidate_pipeline_shape);
-		} else {
-			output.Append(Value(LogicalType::VARCHAR));
-		}
 		return;
 	case JIT_EVENT_RUNNER_COST_GENERATED_WORK_CLASS:
 		output.Append(Value(PhysicalRunnerGeneratedWorkClassToString(entry.runner_cost.generated_work_class)));
@@ -377,7 +347,6 @@ static unique_ptr<FunctionData> DuckDBJitEventsBind(ClientContext &context, Tabl
 	AddExecutionRegionTableFunctionColumn(return_types, names, "execution_mode", LogicalType::VARCHAR);
 	AddExecutionRegionTableFunctionColumn(return_types, names, "selected_source_execution", LogicalType::VARCHAR);
 	AddExecutionRegionTableFunctionColumn(return_types, names, "selected_uses_scan_filters", LogicalType::BOOLEAN);
-	AddExecutionRegionTableFunctionColumn(return_types, names, "candidate_uses_scan_filters", LogicalType::BOOLEAN);
 	AddExecutionRegionTableFunctionColumn(return_types, names, "reason", LogicalType::VARCHAR);
 	AddExecutionRegionTableFunctionColumn(return_types, names, "ir", LogicalType::VARCHAR);
 	AddExecutionRegionTableFunctionColumn(return_types, names, "decision_time_us", LogicalType::BIGINT);
@@ -403,12 +372,8 @@ static unique_ptr<FunctionData> DuckDBJitEventsBind(ClientContext &context, Tabl
 	AddExecutionRegionTableFunctionColumn(return_types, names, "generated_stage_runtime_breakdown",
 	                                      LogicalType::VARCHAR);
 	AddExecutionRegionTableFunctionColumn(return_types, names, "generated_stage_count_breakdown", LogicalType::VARCHAR);
-	AddExecutionRegionTableFunctionColumn(return_types, names, "candidate_id", LogicalType::UBIGINT);
 	AddExecutionRegionTableFunctionColumn(return_types, names, "candidate_shape", LogicalType::VARCHAR);
-	AddExecutionRegionTableFunctionColumn(return_types, names, "candidate_node_count", LogicalType::UBIGINT);
 	AddExecutionRegionTableFunctionColumn(return_types, names, "candidate_estimated_cardinality", LogicalType::UBIGINT);
-	AddExecutionRegionTableFunctionColumn(return_types, names, "candidate_start_operator_index", LogicalType::UBIGINT);
-	AddExecutionRegionTableFunctionColumn(return_types, names, "candidate_end_operator_index", LogicalType::UBIGINT);
 	AddExecutionRegionTableFunctionColumn(return_types, names, "selected_runner", LogicalType::VARCHAR);
 	AddExecutionRegionTableFunctionColumn(return_types, names, "blocker", LogicalType::VARCHAR);
 	AddExecutionRegionStageTimingColumns(return_types, names);
@@ -419,7 +384,6 @@ static unique_ptr<FunctionData> DuckDBJitEventsBind(ClientContext &context, Tabl
 	AddExecutionRegionTableFunctionColumn(return_types, names, "jit_runtime_path_counts", LogicalType::VARCHAR);
 	AddExecutionRegionTableFunctionColumn(return_types, names, "jit_runtime_proof_counts", LogicalType::VARCHAR);
 	AddExecutionRegionTableFunctionColumn(return_types, names, "jit_runtime_delegation_counts", LogicalType::VARCHAR);
-	AddExecutionRegionTableFunctionColumn(return_types, names, "candidate_pipeline_shape", LogicalType::VARCHAR);
 	AddJitEventRunnerCostColumns(return_types, names);
 	AddExecutionRegionCandidateTraceColumns(return_types, names);
 	D_ASSERT(names.size() == JIT_EVENT_CANDIDATE_TRACE_COLUMN_OFFSET + EXECUTION_REGION_CANDIDATE_TRACE_COLUMN_COUNT);

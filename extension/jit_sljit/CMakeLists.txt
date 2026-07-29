@@ -115,7 +115,6 @@ set(JIT_SLJIT_EXTENSION_FILES
     sljit_region_aggregate_fusion.cpp
     sljit_region_aggregate_partial_fusion.cpp
     sljit_region_aggregate_projection_fusion.cpp
-    sljit_region_contract_blockers.cpp
     sljit_region_executable.cpp
     sljit_region_expression_description.cpp
     sljit_region_filter_projection_plan.cpp

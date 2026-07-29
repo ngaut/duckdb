@@ -48,63 +48,50 @@ ExecutionRegionCompileResult CompileSljitRegion(const string &backend_name,
 	                  ? lowering_plan.EventReason()
 	                  : lowering_plan.CompactEventReason();
 	auto native_region = sljit_plan->native_region.get();
-	auto error = sljit_plan->error;
 	auto execution_mode = lowering_plan.ExpectedCompiledExecutionMode();
-	auto &contract = input.candidate.contract;
 	if (!ExecutionRegionExecutionModeIsCompiled(execution_mode)) {
 		throw InternalException("SLJIT region compile requires compiled execution mode");
 	}
-	if (native_region) {
-		if (ExecutionRegionABIIsFullPipeline(contract.abi) && !native_region->UsesSourceContract()) {
-			return ExecutionRegionCompileResult::Error("SLJIT full-pipeline native regions require a source contract");
-		}
-		if (native_region->UsesSourceContract()) {
-			reason += ";source-execution:source-contract";
-		}
-		auto shape = DescribeNativeRegionShape(*native_region);
-		// Keep canonical diagnostics with the semantic artifact. Core telemetry
-		// decides whether to expose them for each execution, so diagnostic
-		// settings never fragment or impoverish the shared artifact.
-		auto ir = AttachCoreRegionIR(DescribeNativeRegion(*native_region, "native.region"), input.region_ir);
-		ExecutionRegionCompileTimings timings;
-		SljitExecutableRegion executable_region;
-		SljitFullPipelineRecipePlan recipe_plan;
-		auto executable_build_start = std::chrono::steady_clock::now();
-		{
-			SljitCodegenTimingScope codegen_timing_scope(&timings);
-			if (!BuildSljitExecutableRegion(*native_region, executable_region, recipe_plan, error)) {
-				timings.executable_build_time_us = SljitCompileElapsedMicros(executable_build_start);
-				auto result = ExecutionRegionCompileResult::Error(std::move(error));
-				result.timings = timings;
-				return result;
-			}
-		}
-		timings.executable_build_time_us = SljitCompileElapsedMicros(executable_build_start);
-		if (executable_region.ops.empty()) {
-			throw InternalException(
-			    "SLJIT compiled region reached code generation without executable region operators");
-		}
-		if (execution_mode != ExecutionRegionExecutionMode::NATIVE) {
-			throw InternalException("SLJIT executable mode native does not match analyzed mode %s",
-			                        ExecutionRegionExecutionModeToString(execution_mode));
-		}
-		reason += ";execution:native-sljit-region-" + shape;
-		if (ExecutionRegionSettings::Verify(input.context)) {
-			reason += ";verify:region";
-		}
-		auto artifact = CreateSljitNativeRegionArtifact(backend_name, std::move(executable_region),
-		                                                std::move(recipe_plan), contract.abi);
-		auto result = ExecutionRegionCompileResult::CompiledArtifact(std::move(artifact), execution_mode,
-		                                                             std::move(reason), std::move(ir));
-		result.timings = timings;
-		return result;
+	if (!native_region) {
+		throw InternalException("SLJIT compiled backend plan requires a native region");
 	}
-	if (!error.empty()) {
-		return ExecutionRegionCompileResult::Error(std::move(error));
+	reason += ";source-execution:source-contract";
+	auto shape = DescribeNativeRegionShape(*native_region);
+	// Keep canonical diagnostics with the semantic artifact. Core telemetry
+	// decides whether to expose them for each execution, so diagnostic
+	// settings never fragment or impoverish the shared artifact.
+	auto ir = AttachCoreRegionIR(DescribeNativeRegion(*native_region, "native.region"), input.region_ir);
+	ExecutionRegionCompileTimings timings;
+	SljitExecutableRegion executable_region;
+	SljitFullPipelineRecipePlan recipe_plan;
+	string error;
+	auto executable_build_start = std::chrono::steady_clock::now();
+	{
+		SljitCodegenTimingScope codegen_timing_scope(&timings);
+		if (!BuildSljitExecutableRegion(*native_region, executable_region, recipe_plan, error)) {
+			timings.executable_build_time_us = SljitCompileElapsedMicros(executable_build_start);
+			auto result = ExecutionRegionCompileResult::Error(std::move(error));
+			result.timings = timings;
+			return result;
+		}
 	}
-	reason += ";execution:unsupported";
-	auto result = ExecutionRegionCompileResult::Unsupported(std::move(reason));
-	result.ir = input.region_ir.ir;
+	timings.executable_build_time_us = SljitCompileElapsedMicros(executable_build_start);
+	if (executable_region.ops.empty()) {
+		throw InternalException("SLJIT compiled region reached code generation without executable region operators");
+	}
+	if (execution_mode != ExecutionRegionExecutionMode::NATIVE) {
+		throw InternalException("SLJIT executable mode native does not match analyzed mode %s",
+		                        ExecutionRegionExecutionModeToString(execution_mode));
+	}
+	reason += ";execution:native-sljit-region-" + shape;
+	if (ExecutionRegionSettings::Verify(input.context)) {
+		reason += ";verify:region";
+	}
+	auto artifact = CreateSljitNativeRegionArtifact(backend_name, std::move(executable_region), std::move(recipe_plan),
+	                                                input.candidate.abi);
+	auto result = ExecutionRegionCompileResult::CompiledArtifact(std::move(artifact), execution_mode, std::move(reason),
+	                                                             std::move(ir));
+	result.timings = timings;
 	return result;
 }
 

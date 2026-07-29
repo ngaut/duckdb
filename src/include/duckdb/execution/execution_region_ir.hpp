@@ -103,13 +103,6 @@ struct ExecutionRegionTableScanContract {
 	bool present = false;
 	string function_name;
 	idx_t estimated_source_cardinality = 0;
-	idx_t output_column_count = 0;
-	idx_t returned_column_count = 0;
-	idx_t column_id_count = 0;
-	idx_t projected_column_count = 0;
-	vector<idx_t> column_ids;
-	vector<idx_t> projection_ids;
-	idx_t source_contract_input_column_count = 0;
 	vector<LogicalType> source_contract_input_types;
 	vector<bool> source_contract_input_not_null;
 	vector<idx_t> source_contract_input_distinct_counts;
@@ -117,14 +110,9 @@ struct ExecutionRegionTableScanContract {
 	vector<Value> source_contract_input_min_values;
 	vector<Value> source_contract_input_max_values;
 	vector<idx_t> source_contract_output_projection_map;
-	bool source_contract_filter_prune_required = false;
-	bool projection_pushdown = false;
 	bool filter_pushdown = false;
-	bool filter_prune = false;
 	bool dynamic_filters = false;
 	bool finalized_dynamic_filter_cardinality_estimate = false;
-	bool in_out_function = false;
-	idx_t filter_count = 0;
 	string ir;
 };
 
@@ -404,36 +392,6 @@ struct ExecutionRegionSinkInfo {
 	string ir;
 };
 
-struct ExecutionRegionContract {
-	ExecutionRegionABI abi = ExecutionRegionABI::NONE;
-	ExecutionRegionOwnershipKind source_ownership = ExecutionRegionOwnershipKind::NONE;
-	ExecutionRegionOwnershipKind state_scan_ownership = ExecutionRegionOwnershipKind::NONE;
-	ExecutionRegionOwnershipKind transform_ownership = ExecutionRegionOwnershipKind::NONE;
-	ExecutionRegionOwnershipKind sink_ownership = ExecutionRegionOwnershipKind::NONE;
-	idx_t generated_operator_count = 0;
-	idx_t source_boundary_count = 0;
-	idx_t missing_contract_count = 0;
-	vector<string> required_capabilities;
-	vector<string> blockers;
-	string ir;
-
-	bool OwnsSource() const {
-		return source_ownership != ExecutionRegionOwnershipKind::NONE;
-	}
-
-	bool OwnsTransform() const {
-		return transform_ownership != ExecutionRegionOwnershipKind::NONE;
-	}
-
-	bool OwnsSink() const {
-		return sink_ownership != ExecutionRegionOwnershipKind::NONE;
-	}
-
-	bool OwnsStateScan() const {
-		return state_scan_ownership != ExecutionRegionOwnershipKind::NONE;
-	}
-};
-
 struct ExecutionRegionCandidateTraits {
 	ExecutionRegionSourceKind source_kind = ExecutionRegionSourceKind::NONE;
 	ExecutionRegionSourceExecutionKind source_execution = ExecutionRegionSourceExecutionKind::NONE;
@@ -507,10 +465,10 @@ struct ExecutionRegionSignature {
 struct ExecutionRegionStage {
 	ExecutionRegionStageKind kind = ExecutionRegionStageKind::OPERATOR_BOUNDARY;
 	ExecutionRegionStageExecutionKind execution = ExecutionRegionStageExecutionKind::NONE;
-	ExecutionRegionOwnershipKind ownership = ExecutionRegionOwnershipKind::NONE;
 	ExecutionCompiledContractKind operation = ExecutionCompiledContractKind::NONE;
 	ExecutionCompiledDrainKind drain = ExecutionCompiledDrainKind::NONE;
 	bool executable_work = false;
+	idx_t expression_cost = 0;
 	idx_t node_index = DConstants::INVALID_INDEX;
 	idx_t operator_index = DConstants::INVALID_INDEX;
 	idx_t filter_index = DConstants::INVALID_INDEX;
@@ -523,40 +481,46 @@ struct ExecutionRegionStagePlan {
 	vector<ExecutionRegionStage> stages;
 	string shape;
 	string ir;
-	bool has_executable_work = false;
 
 	bool HasStages() const {
 		return !stages.empty();
 	}
 
 	bool HasExecutableWork() const {
-		return has_executable_work;
+		for (auto &stage : stages) {
+			if (stage.executable_work && stage.execution != ExecutionRegionStageExecutionKind::MISSING_CONTRACT &&
+			    stage.execution != ExecutionRegionStageExecutionKind::SOURCE_BOUNDARY) {
+				return true;
+			}
+		}
+		return false;
+	}
+
+	idx_t CountExecution(ExecutionRegionStageExecutionKind execution) const {
+		idx_t count = 0;
+		for (auto &stage : stages) {
+			count += stage.execution == execution;
+		}
+		return count;
+	}
+
+	idx_t SourceBoundaryCount() const {
+		return CountExecution(ExecutionRegionStageExecutionKind::SOURCE_BOUNDARY);
+	}
+
+	idx_t MissingContractCount() const {
+		return CountExecution(ExecutionRegionStageExecutionKind::MISSING_CONTRACT);
 	}
 };
 
 struct ExecutionRegionCandidate {
-	idx_t candidate_id = 0;
-	idx_t first_node = 0;
-	idx_t node_count = 0;
-	idx_t start_operator_index = 0;
-	idx_t end_operator_index = 0;
+	ExecutionRegionABI abi = ExecutionRegionABI::NONE;
 	idx_t estimated_cardinality = 0;
-	vector<LogicalType> input_types;
-	vector<LogicalType> output_types;
 	string shape;
-	string pipeline_shape;
 	ExecutionRegionCandidateTraits traits;
-	ExecutionRegionContract contract;
-	bool context_has_missing_operator_contract = false;
-	ExecutionRegionSourceExecutionKind source_execution = ExecutionRegionSourceExecutionKind::NONE;
-	bool uses_scan_filters = false;
 	ExecutionRegionSignature signature;
 	ExecutionRegionStagePlan stage_plan;
 	string ir;
-
-	idx_t EndNode() const {
-		return first_node + node_count;
-	}
 };
 
 DUCKDB_API string ExecutionRegionAggregateNativeStateUpdateBlocker(
@@ -567,8 +531,8 @@ DUCKDB_API bool ExecutionRegionAggregateLookupGeneratesBody(const ExecutionRegio
 
 struct ExecutionRegionIR {
 	vector<ExecutionRegionNode> nodes;
-	vector<ExecutionRegionCandidate> candidates;
-	vector<string> candidate_blockers;
+	unique_ptr<ExecutionRegionCandidate> candidate;
+	string candidate_blocker;
 	string pipeline_shape;
 	string ir;
 };

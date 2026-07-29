@@ -41,8 +41,7 @@ string AttachExecutionRegionCandidateReason(const ExecutionRegionCandidate &cand
 	if (!reason.empty()) {
 		reason += ";";
 	}
-	reason += "candidate_id=" + std::to_string(candidate.candidate_id);
-	reason += ";candidate_shape=" + candidate.shape;
+	reason += "candidate_shape=" + candidate.shape;
 	return reason;
 }
 
@@ -52,10 +51,10 @@ string FirstExecutionRegionReasonToken(const string &reason) {
 }
 
 string ExecutionRegionCandidateBlockerCode(const ExecutionRegionIR &region_ir) {
-	if (region_ir.candidate_blockers.empty()) {
+	if (region_ir.candidate_blocker.empty()) {
 		return EXECUTION_REGION_BLOCKER_NO_EXECUTION_REGION_CANDIDATES;
 	}
-	if (region_ir.candidate_blockers[0].find("candidate-builder-blocked:no-executable-work") != string::npos) {
+	if (region_ir.candidate_blocker.find("candidate-builder-blocked:no-executable-work") != string::npos) {
 		return EXECUTION_REGION_BLOCKER_NO_EXECUTABLE_REGION_WORK;
 	}
 	return EXECUTION_REGION_BLOCKER_NO_EXECUTION_REGION_CANDIDATES;
@@ -172,7 +171,7 @@ bool ExecutionRegionAdaptiveMeasurementWithinBand(ClientContext &context, const 
 	// saturating costs that can approach INT64_MAX, so the basis-point cross-multiply is evaluated in
 	// unsigned 128-bit: an int64 product would overflow (UB) and wrongly flip a fat-margin pipeline into
 	// "measure", re-arming the native-leg tax the band exists to avoid. Saturating instead of widening
-	// would clamp both sides to INT64_MAX and mis-decide the same way, so the comparison stays exact.
+	// would clamp both sides to INT64_MAX and make the same wrong decision, so the comparison stays exact.
 	D_ASSERT(cost.net_benefit >= 0);
 	D_ASSERT(cost.required_benefit >= 0);
 	return uhugeint_t(static_cast<uint64_t>(cost.net_benefit)) * uhugeint_t(10000) <=
@@ -333,7 +332,7 @@ SelectExecutionRegionPhysicalRunner(const PhysicalRunnerCostParameters &cost_par
                                     const ExecutionRegionCandidate &candidate,
                                     const ExecutionRegionLoweringPlan &lowering_plan, bool record_detailed_telemetry) {
 	ExecutionRegionPhysicalRunnerSelection selection;
-	if (!lowering_plan.IsFullyFused()) {
+	if (lowering_plan.SelectedStageCount() != candidate.stage_plan.stages.size()) {
 		selection.reason = "duckdb_cbo skips accelerated runner because region is not fully fused";
 		selection.reason += ";requires=fused";
 		selection.reason += ";" + ExecutionRegionLoweringEventReason(lowering_plan, record_detailed_telemetry);

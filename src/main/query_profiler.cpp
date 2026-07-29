@@ -327,7 +327,6 @@ static void AddExecutionRegionEvent(QueryProfileResult &row, const ExecutionRegi
 	                {"selected_source_execution",
 	                 Text(ExecutionRegionSourceExecutionKindToString(event.selected_source_execution))},
 	                {"selected_uses_scan_filters", Value::BOOLEAN(event.selected_uses_scan_filters)},
-	                {"candidate_uses_scan_filters", Value::BOOLEAN(event.candidate_uses_scan_filters)},
 	                {"shape", Text(event.candidate_shape)},
 	                {"pipeline_shape", Text(ExecutionRegionEventPipelineShape(event))},
 	                {"estimated_cardinality", Count(ExecutionRegionEventEstimatedCardinality(event))},

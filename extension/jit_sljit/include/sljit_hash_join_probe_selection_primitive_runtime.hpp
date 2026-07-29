@@ -14,6 +14,7 @@
 #include "sljit_hash_join_probe_drain_runtime.hpp"
 #include "sljit_region_runtime_state.hpp"
 #include "sljit_runtime_batch_view.hpp"
+#include "sljit_runtime_batch_state.hpp"
 #include "sljit_selected_hash_join_input_runtime.hpp"
 
 namespace duckdb {
@@ -45,6 +46,15 @@ public:
 				}
 				throw InternalException("SLJIT hash probe could not prepare selected upstream hash-join input");
 			}
+		} else if (input.selection) {
+			auto &source = SljitBindRuntimeBatchInput(input, "SLJIT selected hash join probe input");
+			selected_source_input.Ensure(runtime.GetAllocator(), source.GetTypes());
+			auto &selected = selected_source_input.chunk;
+			selected.Reset();
+			selected.Slice(source, *input.selection, input.count);
+			join_input_ptr = &selected;
+			RecordSljitRegionRuntimePath(runtime, ops[primitive.hash_join_idx].kind, "selected_source_view",
+			                             input.count);
 		} else {
 			join_input_ptr = &SljitBindMaterializedRuntimeBatchInput(input, "SLJIT hash join selection primitive");
 		}
@@ -103,6 +113,7 @@ private:
 	vector<SljitExecutableRegionOp> &ops;
 	SljitRegionExecutionScratch &scratch;
 	SljitSelectedHashJoinInputRuntime &selected_hash_join_inputs;
+	SljitDataChunkBatch selected_source_input;
 };
 
 } // namespace duckdb

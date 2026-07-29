@@ -35,10 +35,11 @@ SljitRegionNodePlan SljitNativeNode(vector<SljitNativeRegionOpPlan> native_ops, 
 	return result;
 }
 
-SljitRegionNodePlan SljitRegionBoundaryNode(string reason) {
+SljitRegionNodePlan SljitRegionBoundaryNode(string reason, string fusion_blocker) {
 	SljitRegionNodePlan result;
 	result.kind = ExecutionRegionLoweringKind::BOUNDARY;
 	result.reason = std::move(reason);
+	result.fusion_blocker = std::move(fusion_blocker);
 	return result;
 }
 
@@ -69,7 +70,7 @@ SljitNativeRegionExpressionPlan SljitNativeReferenceExpression(idx_t source_inde
 }
 
 SljitRegionNodePlan SljitBlockedContractBoundary(const string &blocker, const char *reason) {
-	return SljitRegionBoundaryNode(SljitBlockerOrReason(blocker, reason));
+	return SljitRegionBoundaryNode(SljitBlockerOrReason(blocker, reason), blocker);
 }
 
 } // namespace duckdb

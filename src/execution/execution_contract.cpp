@@ -1921,34 +1921,16 @@ BuildExecutionContractUngroupedAggregateContract(const PhysicalUngroupedAggregat
 	return result;
 }
 
-static ExecutionRegionTableScanContract
-BuildExecutionContractTableScanContract(const PhysicalTableScan &scan,
-                                        const ExecutionSourceContractCapability &capability) {
+static ExecutionRegionTableScanContract BuildExecutionContractTableScanContract(const PhysicalTableScan &scan) {
 	ExecutionRegionTableScanContract result;
 	result.present = true;
 	result.function_name = StringUtil::Lower(scan.function.name.GetIdentifierName());
 	result.estimated_source_cardinality = GetExecutionRegionTableScanSourceCardinality(scan);
-	result.output_column_count = scan.GetTypes().size();
-	result.returned_column_count = scan.returned_types.size();
-	result.column_id_count = scan.column_ids.size();
-	result.projected_column_count =
-	    scan.function.projection_pushdown
-	        ? (scan.function.filter_prune ? scan.projection_ids.size() : scan.column_ids.size())
-	        : scan.GetTypes().size();
-	result.column_ids = BuildExecutionContractColumnIndexList(scan.column_ids);
-	result.projection_ids = scan.projection_ids;
-	result.source_contract_input_column_count = scan.column_ids.size();
 	result.source_contract_input_types = BuildExecutionContractTableScanSourceInputTypes(scan);
 	result.source_contract_input_not_null = BuildExecutionContractTableScanSourceInputNotNull(scan);
 	result.source_contract_output_projection_map = BuildExecutionContractTableScanOutputProjectionMap(scan);
-	result.source_contract_filter_prune_required =
-	    scan.table_filters && scan.function.filter_prune && !scan.projection_ids.empty();
-	result.projection_pushdown = scan.function.projection_pushdown;
 	result.filter_pushdown = scan.function.filter_pushdown;
-	result.filter_prune = scan.function.filter_prune;
 	result.dynamic_filters = scan.dynamic_filters && scan.dynamic_filters->HasFilters();
-	result.in_out_function = static_cast<bool>(scan.function.in_out_function);
-	result.filter_count = scan.table_filters ? scan.table_filters->FilterCount() : 0;
 	return result;
 }
 
@@ -1963,25 +1945,14 @@ static string BuildExecutionContractTableScanSourceBoundaryReason(const Executio
 	}
 	result += ";function=" + contract.function_name;
 	result += ";estimated_source_cardinality=" + std::to_string(contract.estimated_source_cardinality);
-	result += ";output_columns=" + std::to_string(contract.output_column_count);
-	result += ";returned_columns=" + std::to_string(contract.returned_column_count);
-	result += ";column_ids=" + std::to_string(contract.column_id_count);
-	result += ";projection_pushdown=" + ExecutionContractBool(contract.projection_pushdown);
-	result += ";projected_columns=" + std::to_string(contract.projected_column_count);
-	result += ";source_contract_input_columns=" + std::to_string(contract.source_contract_input_column_count);
 	result +=
 	    ";source_contract_input_types=" + BuildExecutionContractLogicalTypeList(contract.source_contract_input_types);
 	result +=
 	    ";source_contract_input_not_null=" + BuildExecutionContractBoolList(contract.source_contract_input_not_null);
 	result += ";source_contract_output_projection_map=" +
 	          BuildExecutionContractIdxList(contract.source_contract_output_projection_map);
-	result += ";source_contract_filter_prune_required=" +
-	          ExecutionContractBool(contract.source_contract_filter_prune_required);
 	result += ";filter_pushdown=" + ExecutionContractBool(contract.filter_pushdown);
-	result += ";filter_prune=" + ExecutionContractBool(contract.filter_prune);
-	result += ";filter_count=" + std::to_string(contract.filter_count);
 	result += ";dynamic_filters=" + ExecutionContractBool(contract.dynamic_filters);
-	result += ";in_out_function=" + ExecutionContractBool(contract.in_out_function);
 	return result;
 }
 
@@ -2255,7 +2226,7 @@ ExecutionContract PhysicalTableScan::GetExecutionContract(ExecutionRegionOperato
                                                           bool render_diagnostics) const {
 	ExecutionContract result;
 	auto capability = GetExecutionSourceContractCapability(*this);
-	auto table_scan_contract = BuildExecutionContractTableScanContract(*this, capability);
+	auto table_scan_contract = BuildExecutionContractTableScanContract(*this);
 	result.source.kind = capability.kind;
 	result.source.execution = capability.execution;
 	if (result.source.execution == ExecutionRegionSourceExecutionKind::NONE) {

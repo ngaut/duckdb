@@ -5,9 +5,7 @@
 namespace duckdb {
 
 string DescribeExecutionRegionPipelineShape(const ExecutionRegionIR &region_ir);
-string DescribeExecutionRegionPipelineShape(const ExecutionRegionIR &region_ir, idx_t first_node, idx_t node_count);
-string DescribeExecutionRegionCandidateShape(const ExecutionRegionIR &region_ir,
-                                             const ExecutionRegionCandidate &candidate);
+string DescribeExecutionRegionCandidateShape(const ExecutionRegionIR &region_ir);
 ExecutionRegionSignature BuildExecutionRegionSignature(const ExecutionRegionIR &region_ir,
                                                        const ExecutionRegionCandidate &candidate);
 

@@ -643,14 +643,13 @@ TEST_CASE("JIT ungrouped aggregate sinks use native state-update contracts", "[a
 		if (!IsCompiledSljitRegionEvent(event)) {
 			continue;
 		}
-		if (!event.has_candidate || !event.candidate_contract.OwnsSink() ||
+		if (!event.has_candidate ||
 		    event.candidate_traits.sink_kind != ExecutionRegionSinkKind::UNGROUPED_AGGREGATE_UPDATE) {
 			continue;
 		}
 		found_aggregate_update = true;
 		RequireGeneratedMachineCodeRegion(event);
 		RequireGeneratedSourceFilterContract(event);
-		REQUIRE(event.candidate_contract.missing_contract_count == 0);
 		REQUIRE(StringUtil::Contains(event.reason, "native aggregate update sink contract"));
 		REQUIRE(StringUtil::Contains(event.reason, "ungrouped-aggregate-native-state-update"));
 		REQUIRE(StringUtil::Contains(event.reason, "aggregate_state_update_contract_status=ready"));
@@ -4157,7 +4156,7 @@ TEST_CASE("JIT perfect hash aggregate generates primitive decimal sum and count 
 		if (!IsSljitRegionEvent(event)) {
 			continue;
 		}
-		if (!event.has_candidate || !event.candidate_contract.OwnsSink() ||
+		if (!event.has_candidate ||
 		    event.candidate_traits.sink_kind != ExecutionRegionSinkKind::PERFECT_HASH_AGGREGATE_UPDATE) {
 			continue;
 		}
@@ -4166,7 +4165,6 @@ TEST_CASE("JIT perfect hash aggregate generates primitive decimal sum and count 
 		}
 		found_compiled_primitive_sink = true;
 		RequireGeneratedMachineCodeRegion(event);
-		REQUIRE(event.candidate_contract.missing_contract_count == 0);
 		REQUIRE(StringUtil::Contains(event.reason, "native aggregate update sink contract"));
 		REQUIRE(StringUtil::Contains(event.ir, "aggregate_contract<"));
 		REQUIRE(StringUtil::Contains(event.ir, "grouped_state_layout_ready=true"));
@@ -4431,7 +4429,7 @@ TEST_CASE("JIT hash aggregate cast-only keys use native state addresses", "[api]
 
 	bool found_hash_state_address_update = false;
 	for (auto &event : manager.GetEvents()) {
-		if (!IsSljitRegionEvent(event) || !event.has_candidate || !event.candidate_contract.OwnsSink()) {
+		if (!IsSljitRegionEvent(event) || !event.has_candidate) {
 			continue;
 		}
 		if (event.candidate_traits.sink_kind != ExecutionRegionSinkKind::HASH_AGGREGATE_UPDATE) {
@@ -4513,7 +4511,7 @@ TEST_CASE("JIT combines grouped aggregate states without finalizing payload vect
 		    event.candidate_traits.source_kind == ExecutionRegionSourceKind::STATEFUL_OPERATOR &&
 		    event.candidate_traits.sink_kind == ExecutionRegionSinkKind::UNGROUPED_AGGREGATE_UPDATE) {
 			found_state_source_contract = true;
-			REQUIRE(event.candidate_contract.OwnsStateScan());
+			REQUIRE(event.selected_source_execution == ExecutionRegionSourceExecutionKind::SOURCE_CONTRACT);
 			REQUIRE(StringUtil::Contains(event.ir, "native_state_scan_primitive_aggregate_batch=true"));
 		}
 		if (EventPhase(event) != "runtime" || EventStatus(event) != "executed" ||
@@ -4628,7 +4626,7 @@ TEST_CASE("JIT retains finalized vectors for narrow grouped aggregate states", "
 		}
 		if (state_source_candidate && IsCompiledSljitRegionEvent(event)) {
 			found_state_source_contract = true;
-			REQUIRE(event.candidate_contract.OwnsStateScan());
+			REQUIRE(event.selected_source_execution == ExecutionRegionSourceExecutionKind::SOURCE_CONTRACT);
 			REQUIRE(StringUtil::Contains(event.ir, "native_state_scan_primitive_aggregate_batch=true"));
 		}
 		if (EventPhase(event) != "runtime" || EventStatus(event) != "executed") {

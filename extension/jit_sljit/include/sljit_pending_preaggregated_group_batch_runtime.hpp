@@ -621,7 +621,7 @@ SljitFlushPendingDenseSingleLaneGroupsTemplated(ExecutionRegionRuntime &runtime,
 		throw InternalException("SLJIT pending dense single-lane flush row count mismatch");
 	}
 	RecordSljitRegionMaterializationElision(runtime, op.kind, "pending_dense_single_lane_grouped_update_flush",
-	                                            pending.dense_single_lane_represented_row_count);
+	                                        pending.dense_single_lane_represented_row_count);
 	pending.ResetDenseSingleLane();
 	return true;
 }
@@ -696,7 +696,7 @@ static bool SljitFlushPendingPreaggregatedPrimitiveGroups(ExecutionRegionRuntime
 		RecordSljitRegionRuntimePath(runtime, op.kind, "pending_group_output_transform.add_constant", pending.Count());
 	}
 	RecordSljitRegionMaterializationElision(runtime, op.kind, "pending_preaggregated_grouped_update_flush",
-	                                            pending.represented_row_count);
+	                                        pending.represented_row_count);
 	pending.Reset();
 	return true;
 }

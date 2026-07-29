@@ -170,8 +170,7 @@ TEST_CASE("JIT table-function sources use the generic source contract", "[api][j
 		}
 		if (IsCompiledSljitRegionEvent(event) && event.has_candidate &&
 		    event.candidate_traits.source_kind == ExecutionRegionSourceKind::TABLE_FUNCTION_SCAN &&
-		    event.selected_source_execution == ExecutionRegionSourceExecutionKind::SOURCE_CONTRACT &&
-		    event.candidate_contract.source_ownership == ExecutionRegionOwnershipKind::NATIVE_CONTRACT) {
+		    event.selected_source_execution == ExecutionRegionSourceExecutionKind::SOURCE_CONTRACT) {
 			found_source_contract = true;
 			RequireGeneratedMachineCodeRegion(event);
 			REQUIRE(event.runner_cost.source_contract_input_rows == 100000);
@@ -260,10 +259,7 @@ TEST_CASE("JIT aggregate state scans are native source contracts", "[api][jit]")
 		REQUIRE(StringUtil::Contains(event.ir, "native_state_scan_contract_status=ready"));
 		REQUIRE(StringUtil::Contains(event.ir, "native_state_scan_required_capability="
 		                                       "perfect-hash-aggregate-native-state-scan"));
-		REQUIRE(event.candidate_contract.source_ownership == ExecutionRegionOwnershipKind::NATIVE_CONTRACT);
-		REQUIRE(event.candidate_contract.state_scan_ownership == ExecutionRegionOwnershipKind::NATIVE_CONTRACT);
-		REQUIRE(event.candidate_contract.OwnsSource());
-		REQUIRE(event.candidate_contract.OwnsStateScan());
+		REQUIRE(event.selected_source_execution == ExecutionRegionSourceExecutionKind::SOURCE_CONTRACT);
 	}
 	REQUIRE(found_perfect_scan);
 
@@ -283,8 +279,7 @@ TEST_CASE("JIT aggregate state scans are native source contracts", "[api][jit]")
 		REQUIRE(StringUtil::Contains(event.ir, "native_state_scan_contract_status=ready"));
 		REQUIRE(StringUtil::Contains(event.ir, "native_state_scan_required_capability="
 		                                       "ungrouped-aggregate-native-state-scan"));
-		REQUIRE(event.candidate_contract.source_ownership == ExecutionRegionOwnershipKind::NATIVE_CONTRACT);
-		REQUIRE(event.candidate_contract.state_scan_ownership == ExecutionRegionOwnershipKind::NATIVE_CONTRACT);
+		REQUIRE(event.selected_source_execution == ExecutionRegionSourceExecutionKind::SOURCE_CONTRACT);
 	}
 	REQUIRE(found_ungrouped_scan);
 }
@@ -312,8 +307,7 @@ TEST_CASE("JIT sort and top-n state scans are source contracts", "[api][jit]") {
 			REQUIRE(StringUtil::Contains(event.ir, "source<kind=stateful-operator"));
 			REQUIRE(StringUtil::Contains(event.ir, "native_state_scan_contract_status=ready"));
 			REQUIRE(StringUtil::Contains(event.ir, "native_state_scan_required_capability=" + capability));
-			REQUIRE(event.candidate_contract.OwnsSource());
-			REQUIRE(event.candidate_contract.OwnsStateScan());
+			REQUIRE(event.selected_source_execution == ExecutionRegionSourceExecutionKind::SOURCE_CONTRACT);
 		}
 		REQUIRE(found_contract);
 	};
@@ -345,7 +339,6 @@ TEST_CASE("JIT aggregate sinks expose ready native state-update contracts", "[ap
 		}
 		found_aggregate_update = true;
 		RequireGeneratedMachineCodeRegion(event);
-		REQUIRE(event.candidate_contract.missing_contract_count == 0);
 		REQUIRE(StringUtil::Contains(event.reason, "native aggregate update sink contract"));
 		REQUIRE(StringUtil::Contains(event.reason, "aggregate_state_update_contract_status=ready"));
 		REQUIRE(StringUtil::Contains(event.reason, "execution:native-sljit-region-aggregate-update"));

@@ -100,8 +100,12 @@ struct SljitProjectionAggregatePrefixFacts {
 	vector<SljitProjectionAggregateJoinPrefixStep> joins;
 	idx_t mark_filter_idx = DConstants::INVALID_INDEX;
 
-	bool HasSourceFilterProjection() const {
-		return source_filter_idx != DConstants::INVALID_INDEX && source_projection_idx != DConstants::INVALID_INDEX;
+	bool HasSourceFilter() const {
+		return source_filter_idx != DConstants::INVALID_INDEX;
+	}
+
+	bool HasSourceProjection() const {
+		return source_projection_idx != DConstants::INVALID_INDEX;
 	}
 
 	bool HasFirstHashJoin() const {

@@ -26,7 +26,7 @@ public:
 private:
 	static void Compile(ClientContext &context, ExecutionRegionBackend &backend, const string &backend_name,
 	                    Pipeline &pipeline, ExecutionRegionPlan &plan, ExecutionRegionIR &region_ir,
-	                    vector<SelectedCandidate> &selected_regions);
+	                    SelectedCandidate &selected_region);
 };
 
 } // namespace duckdb

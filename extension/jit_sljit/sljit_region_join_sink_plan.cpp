@@ -2,7 +2,8 @@
 
 namespace duckdb {
 
-SljitRegionNodePlan PlanSljitHashJoinBuildSinkNode(const ExecutionRegionNode &node, bool render_diagnostics) {
+static SljitRegionNodePlan PlanSljitHashJoinBuildSinkNodeInternal(const ExecutionRegionNode &node,
+                                                                  bool render_diagnostics) {
 	if (!node.sink) {
 		return SljitRegionBoundaryNode("hash join sink is missing native sink IR");
 	}
@@ -41,7 +42,21 @@ SljitRegionNodePlan PlanSljitHashJoinBuildSinkNode(const ExecutionRegionNode &no
 	return SljitNativeNode(std::move(native_op), std::move(reason));
 }
 
-SljitRegionNodePlan PlanSljitNestedLoopJoinBuildSinkNode(const ExecutionRegionNode &node, bool render_diagnostics) {
+SljitRegionNodePlan PlanSljitHashJoinBuildSinkNode(const ExecutionRegionNode &node, bool render_diagnostics) {
+	auto result = PlanSljitHashJoinBuildSinkNodeInternal(node, render_diagnostics);
+	if (result.kind != ExecutionRegionLoweringKind::BOUNDARY) {
+		return result;
+	}
+	const bool contract_ready =
+	    node.sink && node.sink->hash_join_contract.present &&
+	    node.sink->hash_join_contract.native_build_contract.status == ExecutionRegionStateContractStatus::READY;
+	result.fusion_blocker = contract_ready ? "sink-contract-blocker:hash-join-build-native-lowering;" + result.reason
+	                                       : "sink-contract-blocker:hash-join-build-contract-missing";
+	return result;
+}
+
+static SljitRegionNodePlan PlanSljitNestedLoopJoinBuildSinkNodeInternal(const ExecutionRegionNode &node,
+                                                                        bool render_diagnostics) {
 	if (!node.sink) {
 		return SljitRegionBoundaryNode("nested loop join sink is missing native sink IR");
 	}
@@ -106,6 +121,20 @@ SljitRegionNodePlan PlanSljitNestedLoopJoinBuildSinkNode(const ExecutionRegionNo
 	}
 	AppendSljitReasonPart(reason, node.sink->ir, render_diagnostics);
 	return SljitNativeNode(std::move(native_op), std::move(reason));
+}
+
+SljitRegionNodePlan PlanSljitNestedLoopJoinBuildSinkNode(const ExecutionRegionNode &node, bool render_diagnostics) {
+	auto result = PlanSljitNestedLoopJoinBuildSinkNodeInternal(node, render_diagnostics);
+	if (result.kind != ExecutionRegionLoweringKind::BOUNDARY) {
+		return result;
+	}
+	const bool contract_ready =
+	    node.sink && node.sink->nested_loop_join_contract.present &&
+	    node.sink->nested_loop_join_contract.native_build_contract.status == ExecutionRegionStateContractStatus::READY;
+	result.fusion_blocker =
+	    contract_ready ? "sink-contract-blocker:nested-loop-join-build-native-lowering-missing;" + result.reason
+	                   : "sink-contract-blocker:nested-loop-join-build-contract-missing";
+	return result;
 }
 
 } // namespace duckdb

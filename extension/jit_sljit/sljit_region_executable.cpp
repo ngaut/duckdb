@@ -290,7 +290,7 @@ static bool SljitCanBuildFilteredAggregateUpdate(const vector<SljitNativeRegionO
 
 bool BuildSljitExecutableRegion(const SljitNativeRegionPlan &region, SljitExecutableRegion &executable,
                                 SljitFullPipelineRecipePlan &recipe_plan, string &error) {
-	executable.uses_scan_filters = region.uses_scan_filters;
+	executable.scan_filter_mode = region.scan_filter_mode;
 	executable.aggregate_state_source = region.aggregate_state_source;
 	executable.source_output_types = region.source_output_types;
 	executable.source_distinct_counts = region.source_distinct_counts;

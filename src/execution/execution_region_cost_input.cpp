@@ -261,6 +261,39 @@ static ExecutionRegionCostFacts BuildExecutionRegionCostFacts(const ExecutionReg
 	return result;
 }
 
+static idx_t CountExecutionRegionGeneratedSourceFilterStages(const ExecutionRegionStagePlan &stage_plan) {
+	idx_t result = 0;
+	for (auto &stage : stage_plan.stages) {
+		if (stage.kind == ExecutionRegionStageKind::SOURCE_FILTER &&
+		    stage.execution == ExecutionRegionStageExecutionKind::GENERATED_IR && stage.executable_work) {
+			result++;
+		}
+	}
+	return result;
+}
+
+struct ExecutionRegionSelectedSourceFilterCost {
+	idx_t count = 0;
+	idx_t expression_cost = 0;
+};
+
+static ExecutionRegionSelectedSourceFilterCost
+GetExecutionRegionSelectedSourceFilterCost(const ExecutionRegionStagePlan &stage_plan,
+                                           const vector<ExecutionRegionSelectedStage> &selected_stages) {
+	ExecutionRegionSelectedSourceFilterCost result;
+	for (auto &selected_stage : selected_stages) {
+		D_ASSERT(selected_stage.stage_index < stage_plan.stages.size());
+		auto &stage = stage_plan.stages[selected_stage.stage_index];
+		if (stage.kind != ExecutionRegionStageKind::SOURCE_FILTER ||
+		    selected_stage.execution != ExecutionRegionStageExecutionKind::GENERATED_IR || !stage.executable_work) {
+			continue;
+		}
+		result.count++;
+		result.expression_cost += stage.expression_cost;
+	}
+	return result;
+}
+
 PhysicalRunnerCostInput BuildExecutionRegionCandidateCostInput(const ExecutionRegionCandidate &candidate) {
 	auto cost_facts = BuildExecutionRegionCostFacts(candidate);
 	PhysicalRunnerCostInput input;
@@ -277,8 +310,7 @@ PhysicalRunnerCostInput BuildExecutionRegionCandidateCostInput(const ExecutionRe
 	input.native_grouped_state_address_lookup_count = cost_facts.native_grouped_state_address_lookup_count;
 	input.grouped_aggregate_estimated_cardinality = candidate.traits.grouped_aggregate_estimated_cardinality;
 	input.materialization_elision_count = cost_facts.materialization_elision_count;
-	input.full_pipeline =
-	    ExecutionRegionABIIsFullPipeline(candidate.contract.abi) && cost_facts.may_anchor_compiled_body;
+	input.full_pipeline = ExecutionRegionABIIsFullPipeline(candidate.abi) && cost_facts.may_anchor_compiled_body;
 	input.selected_hash_join_filter_materialization_count =
 	    candidate.traits.selected_hash_join_filter_materialization_count;
 	input.native_join_stage_count = cost_facts.native_join_stage_count;
@@ -287,7 +319,6 @@ PhysicalRunnerCostInput BuildExecutionRegionCandidateCostInput(const ExecutionRe
 	input.native_aggregate_stage_count = cost_facts.native_aggregate_stage_count;
 	input.native_grouped_aggregate_stage_count = cost_facts.native_grouped_aggregate_stage_count;
 	input.source_filter_count = candidate.traits.source_filter_count;
-	input.uses_scan_filters = candidate.uses_scan_filters;
 	input.generated_work_class = cost_facts.generated_work_class;
 	input.native_protocol_class = cost_facts.native_protocol_class;
 	input.has_accelerated_work = cost_facts.may_anchor_compiled_body;
@@ -297,7 +328,20 @@ PhysicalRunnerCostInput BuildExecutionRegionCandidateCostInput(const ExecutionRe
 PhysicalRunnerCostInput BuildExecutionRegionCandidateCostInput(const ExecutionRegionCandidate &candidate,
                                                                const ExecutionRegionLoweringPlan &lowering_plan) {
 	auto input = BuildExecutionRegionCandidateCostInput(candidate);
-	input.uses_scan_filters = lowering_plan.UsesScanFilters();
+	const auto candidate_generated_source_filters =
+	    CountExecutionRegionGeneratedSourceFilterStages(candidate.stage_plan);
+	D_ASSERT(input.generated_stage_count >= candidate_generated_source_filters);
+	input.generated_stage_count -= candidate_generated_source_filters;
+	const auto selected_source_filter_cost =
+	    GetExecutionRegionSelectedSourceFilterCost(candidate.stage_plan, lowering_plan.SelectedStages());
+	input.generated_stage_count += selected_source_filter_cost.count;
+	input.expression_cost += selected_source_filter_cost.expression_cost;
+	auto selected_traits = candidate.traits;
+	selected_traits.source_filter_expression_count = selected_source_filter_cost.count;
+	input.generated_work_class = ClassifyExecutionRegionGeneratedWork(selected_traits);
+	input.has_accelerated_work = input.generated_stage_count > 0 || input.generated_backend_stage_count > 0 ||
+	                             input.native_join_stage_count > 0 || input.native_aggregate_stage_count > 0;
+	input.uses_scan_filters = lowering_plan.UsesResidualScanFilters();
 	auto &backend_facts = lowering_plan.capability_facts;
 	input.native_grouped_state_address_lookup_count = backend_facts.backend_native_state_address_lookup_count;
 	input.vectorized_execution_preferred = backend_facts.backend_low_cardinality_string_predicate_count > 0;
@@ -307,6 +351,7 @@ PhysicalRunnerCostInput BuildExecutionRegionCandidateCostInput(const ExecutionRe
 		input.native_hash_join_build_sink_count -= direct_hash_join_build_count;
 		input.generated_stage_count += direct_hash_join_build_count;
 		input.generated_backend_stage_count += direct_hash_join_build_count;
+		input.generated_work_class = PhysicalRunnerGeneratedWorkClass::COMPUTE;
 		input.has_accelerated_work = true;
 	}
 	const auto distinct_key_fast_insert_count =

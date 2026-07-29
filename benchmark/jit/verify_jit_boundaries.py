@@ -60,9 +60,7 @@ def require_text(path: str, rule: str, snippets: tuple[str, ...]) -> None:
 def require_absent_files(paths: tuple[str, ...]) -> None:
     for path in paths:
         if (ROOT / path).exists():
-            raise AssertionError(
-                f"{path}: obsolete one-caller recipe facade must stay deleted"
-            )
+            raise AssertionError(f"{path}: obsolete JIT ownership file must stay deleted")
 
 
 def verify_dependency_boundaries() -> None:
@@ -120,9 +118,7 @@ def verify_dependency_boundaries() -> None:
     require_text(
         "src/execution/execution_contract.cpp",
         "semantic hash-join contract must use the canonical execution row-layout builder",
-        (
-            "BuildExecutionHashJoinRowLayout(result.condition_types, result.payload_types",
-        ),
+        ("BuildExecutionHashJoinRowLayout(result.condition_types, result.payload_types",),
     )
     reject_regex(
         "regular hash-join layout validation below operator binding",
@@ -179,17 +175,13 @@ def verify_dependency_boundaries() -> None:
         "join-input complementary row-loop graph outside aggregate-consumer implementation",
         (r'#include\s+"sljit_join_input_row_pointer_complementary_sum_runtime\.hpp"',),
         BACKEND_SOURCES,
-        (
-            "extension/jit_sljit/include/sljit_hash_join_probe_aggregate_consumer_runtime.hpp",
-        ),
+        ("extension/jit_sljit/include/sljit_hash_join_probe_aggregate_consumer_runtime.hpp",),
     )
     reject_regex(
         "join-input complementary accumulator templates outside their row-loop implementation",
         (r'#include\s+"sljit_join_input_complementary_sum_accumulator\.hpp"',),
         BACKEND_SOURCES,
-        (
-            "extension/jit_sljit/include/sljit_join_input_row_pointer_complementary_sum_runtime.hpp",
-        ),
+        ("extension/jit_sljit/include/sljit_join_input_row_pointer_complementary_sum_runtime.hpp",),
     )
     reject_regex(
         "artifact-cache policy below the planner/manager layer",
@@ -261,14 +253,45 @@ def verify_backend_and_platform_abi() -> None:
             "class DUCKDB_API ExecutionRegionBackend",
             "EXECUTION_REGION_BACKEND_ABI_VERSION",
             "uint64_t backend_abi_version",
+            "EXECUTION_REGION_BACKEND_ABI_VERSION = 7",
+        ),
+    )
+    require_text(
+        "src/include/duckdb/execution/execution_region_lowering.hpp",
+        "backend lowering must publish one selected-stage and source-recipe receipt",
+        (
+            "struct DUCKDB_API ExecutionRegionSelectedSourceRecipe",
+            "struct DUCKDB_API ExecutionRegionSelectedStage",
+            "void SelectStage(idx_t stage_index, ExecutionRegionStageExecutionKind execution)",
+            "void SetSourceRecipe(ExecutionRegionSelectedSourceRecipe source_recipe)",
+            "vector<ExecutionRegionSelectedStage> selected_stages",
+            "ExecutionRegionSelectedSourceRecipe source_recipe",
+        ),
+    )
+    reject_regex(
+        "obsolete backend fusion or source-cost self-attestation",
+        (
+            r"\bSetFullyFused\b",
+            r"\bIsFullyFused\b",
+            r"\bSetGeneratedSourceFilterCost\b",
+            r"\bSetSelectedSourceExecution\b",
+            r"\bSetScanFilterMode\b",
+            r"\bgenerated_source_filter_(?:count|expression_cost)\b",
+        ),
+        (
+            "src/include/duckdb/execution/execution_region_lowering.hpp",
+            "src/execution/execution_region_types.cpp",
+            "src/execution/execution_region_planner.cpp",
+            "src/execution/execution_region_cost_input.cpp",
+            "extension/jit_sljit/**/*.hpp",
+            "extension/jit_sljit/**/*.cpp",
+            "extension/jit_metal/**/*.mm",
         ),
     )
     require_text(
         "src/include/duckdb/execution/execution_region_manager.hpp",
         "backend registration must carry the ABI version",
-        (
-            "RegisterBackend(unique_ptr<ExecutionRegionBackend> backend, uint64_t backend_abi_version)",
-        ),
+        ("RegisterBackend(unique_ptr<ExecutionRegionBackend> backend, uint64_t backend_abi_version)",),
     )
     for backend in (
         "extension/jit_sljit/sljit_backend.cpp",
@@ -382,7 +405,20 @@ def verify_recipe_ownership() -> None:
             "extension/jit_sljit/include/sljit_native_tail_recipe.hpp",
             "extension/jit_sljit/sljit_hash_join_delim_join_sink_recipe.cpp",
             "extension/jit_sljit/include/sljit_hash_join_delim_join_sink_recipe.hpp",
+            "extension/jit_sljit/sljit_region_contract_blockers.cpp",
         )
+    )
+    reject_regex(
+        "duplicate backend planning authority",
+        (
+            r"\bSljitCanExecuteSourceNode\b",
+            r"\bSljitSourceBoundaryReason\b",
+            r"\bAddSljitFullPipelineSinkBlockers\b",
+            r"\bAddSljitOperatorContractBlockers\b",
+            r"\bcandidate\.input_types\b",
+            r"\bsljit_plan->error\b",
+        ),
+        JIT_SOURCES + ("extension/jit_metal/**/*.mm",),
     )
 
 
@@ -443,9 +479,7 @@ def verify_publication_and_cache_ownership() -> None:
         "void Set(",
     ):
         if mutable_api in artifact:
-            raise AssertionError(
-                f"compiled artifact exposes split mutable state: {mutable_api}"
-            )
+            raise AssertionError(f"compiled artifact exposes split mutable state: {mutable_api}")
     reject_regex(
         "split compiled-artifact publication",
         (r"\.(?:Code|Function)\(\)\s*=", r"\.Set\(\s*std::move\([^\n]+code"),

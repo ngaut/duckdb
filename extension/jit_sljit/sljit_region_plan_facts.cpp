@@ -360,7 +360,7 @@ bool SljitNativeRegionHasExecutableBodyGap(const SljitNativeRegionPlan &region, 
 		generates_machine_code = generates_machine_code || SljitNativeRegionOpGeneratesMachineCode(op);
 	}
 	if (!generates_machine_code) {
-		if (region.uses_scan_filters && SljitRegionPlanHasDirectSourceHashBuild(region.ops)) {
+		if (region.UsesScanFilters() && SljitRegionPlanHasDirectSourceHashBuild(region.ops)) {
 			return false;
 		}
 		blocker = "SLJIT native region emits no generated machine code";

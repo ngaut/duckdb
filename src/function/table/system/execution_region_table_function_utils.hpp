@@ -108,11 +108,7 @@ static constexpr ExecutionRegionTraceColumn EXECUTION_REGION_CANDIDATE_TRACE_COL
     {"candidate_signature_feature_shape", LogicalTypeId::VARCHAR},
     {"candidate_signature_context_feature_shape", LogicalTypeId::VARCHAR},
     {"candidate_contract_shape", LogicalTypeId::VARCHAR},
-    {"candidate_contract_abi", LogicalTypeId::VARCHAR},
-    {"candidate_owns_source", LogicalTypeId::BOOLEAN},
-    {"candidate_owns_transform", LogicalTypeId::BOOLEAN},
-    {"candidate_owns_sink", LogicalTypeId::BOOLEAN},
-    {"candidate_owns_state_scan", LogicalTypeId::BOOLEAN},
+    {"candidate_abi", LogicalTypeId::VARCHAR},
     {"candidate_has_source", LogicalTypeId::BOOLEAN},
     {"candidate_has_sink", LogicalTypeId::BOOLEAN},
     {"candidate_source_kind", LogicalTypeId::VARCHAR},
@@ -126,31 +122,10 @@ static constexpr ExecutionRegionTraceColumn EXECUTION_REGION_CANDIDATE_TRACE_COL
     {"candidate_operator_count", LogicalTypeId::UBIGINT},
     {"candidate_arithmetic_projection_count", LogicalTypeId::UBIGINT},
     {"candidate_reference_projection_count", LogicalTypeId::UBIGINT},
-    {"candidate_source_ownership", LogicalTypeId::VARCHAR},
-    {"candidate_state_scan_ownership", LogicalTypeId::VARCHAR},
-    {"candidate_transform_ownership", LogicalTypeId::VARCHAR},
-    {"candidate_sink_ownership", LogicalTypeId::VARCHAR},
-    {"candidate_generated_operator_count", LogicalTypeId::UBIGINT},
-    {"candidate_source_boundary_count", LogicalTypeId::UBIGINT},
-    {"candidate_missing_contract_count", LogicalTypeId::UBIGINT},
-    {"candidate_required_capabilities", LogicalTypeId::VARCHAR},
-    {"candidate_fusion_blockers", LogicalTypeId::VARCHAR},
 };
 
 static constexpr idx_t EXECUTION_REGION_CANDIDATE_TRACE_COLUMN_COUNT =
     sizeof(EXECUTION_REGION_CANDIDATE_TRACE_COLUMNS) / sizeof(ExecutionRegionTraceColumn);
-
-static inline string FormatExecutionRegionStringList(const vector<string> &values) {
-	string result = "[";
-	for (idx_t value_idx = 0; value_idx < values.size(); value_idx++) {
-		if (value_idx > 0) {
-			result += "|";
-		}
-		result += values[value_idx];
-	}
-	result += "]";
-	return result;
-}
 
 static inline void AppendExecutionRegionNullableString(Vector &output, const string &value) {
 	if (value.empty()) {
@@ -336,7 +311,7 @@ static inline void AppendNullExecutionRegionCandidateTraceColumn(Vector &output,
 static inline void AppendExecutionRegionCandidateTraceColumn(Vector &output, idx_t column_id,
                                                              const ExecutionRegionSignature &signature,
                                                              const ExecutionRegionCandidateTraits &traits,
-                                                             const ExecutionRegionContract &contract) {
+                                                             ExecutionRegionABI abi) {
 	switch (column_id) {
 	case 0:
 		output.Append(Value(signature.context));
@@ -354,85 +329,46 @@ static inline void AppendExecutionRegionCandidateTraceColumn(Vector &output, idx
 		output.Append(Value(signature.contract_shape));
 		return;
 	case 5:
-		output.Append(Value(ExecutionRegionABIToString(contract.abi)));
+		output.Append(Value(ExecutionRegionABIToString(abi)));
 		return;
 	case 6:
-		output.Append(Value::BOOLEAN(contract.OwnsSource()));
-		return;
-	case 7:
-		output.Append(Value::BOOLEAN(contract.OwnsTransform()));
-		return;
-	case 8:
-		output.Append(Value::BOOLEAN(contract.OwnsSink()));
-		return;
-	case 9:
-		output.Append(Value::BOOLEAN(contract.OwnsStateScan()));
-		return;
-	case 10:
 		output.Append(Value::BOOLEAN(traits.HasSource()));
 		return;
-	case 11:
+	case 7:
 		output.Append(Value::BOOLEAN(traits.HasSink()));
 		return;
-	case 12:
+	case 8:
 		output.Append(Value(ExecutionRegionSourceKindToString(traits.source_kind)));
 		return;
-	case 13:
+	case 9:
 		output.Append(Value(ExecutionRegionSourceExecutionKindToString(traits.source_execution)));
 		return;
-	case 14:
+	case 10:
 		output.Append(Value(ExecutionRegionSinkKindToString(traits.sink_kind)));
 		return;
-	case 15:
+	case 11:
 		output.Append(Value::UBIGINT(traits.source_filter_count));
 		return;
-	case 16:
+	case 12:
 		output.Append(Value::UBIGINT(traits.source_filter_expression_count));
 		return;
-	case 17:
+	case 13:
 		output.Append(Value::UBIGINT(traits.source_conjunction_filter_count));
 		return;
-	case 18:
+	case 14:
 		output.Append(Value::UBIGINT(traits.filter_count));
 		return;
-	case 19:
+	case 15:
 		output.Append(Value::UBIGINT(traits.projection_count));
 		return;
-	case 20:
+	case 16:
 		output.Append(Value::UBIGINT(traits.operator_count));
 		return;
-	case 21:
+	case 17:
 		output.Append(Value::UBIGINT(traits.arithmetic_projection_count));
 		return;
-	case 22:
+	case 18:
 		output.Append(Value::UBIGINT(traits.reference_projection_count));
-		return;
-	case 23:
-		output.Append(Value(ExecutionRegionOwnershipKindToString(contract.source_ownership)));
-		return;
-	case 24:
-		output.Append(Value(ExecutionRegionOwnershipKindToString(contract.state_scan_ownership)));
-		return;
-	case 25:
-		output.Append(Value(ExecutionRegionOwnershipKindToString(contract.transform_ownership)));
-		return;
-	case 26:
-		output.Append(Value(ExecutionRegionOwnershipKindToString(contract.sink_ownership)));
-		return;
-	case 27:
-		output.Append(Value::UBIGINT(contract.generated_operator_count));
-		return;
-	case 28:
-		output.Append(Value::UBIGINT(contract.source_boundary_count));
-		return;
-	case 29:
-		output.Append(Value::UBIGINT(contract.missing_contract_count));
-		return;
-	case 30:
-		output.Append(Value(FormatExecutionRegionStringList(contract.required_capabilities)));
-		return;
-	case 31:
-		output.Append(Value(FormatExecutionRegionStringList(contract.blockers)));
 		return;
 	default:
 		throw InternalException("Unsupported execution region candidate trace column index");

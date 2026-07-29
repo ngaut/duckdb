@@ -489,23 +489,6 @@ const char *ExecutionRegionBoundaryKindToString(ExecutionRegionBoundaryKind kind
 	}
 }
 
-const char *ExecutionRegionOwnershipKindToString(ExecutionRegionOwnershipKind kind) {
-	switch (kind) {
-	case ExecutionRegionOwnershipKind::NONE:
-		return "none";
-	case ExecutionRegionOwnershipKind::GENERATED_IR:
-		return "generated-ir";
-	case ExecutionRegionOwnershipKind::NATIVE_CONTRACT:
-		return "native-contract";
-	case ExecutionRegionOwnershipKind::SOURCE_BOUNDARY:
-		return "source-boundary";
-	case ExecutionRegionOwnershipKind::MISSING_CONTRACT:
-		return "missing-contract";
-	default:
-		return "unknown";
-	}
-}
-
 const char *ExecutionRegionStageKindToString(ExecutionRegionStageKind kind) {
 	switch (kind) {
 	case ExecutionRegionStageKind::SOURCE:
@@ -1001,20 +984,12 @@ void ExecutionRegionLoweringPlan::SetCompiledExecutionMode(ExecutionRegionExecut
 	compiled_execution_mode = execution_mode;
 }
 
-void ExecutionRegionLoweringPlan::SetFullyFused(bool fully_fused_p) {
-	fully_fused = fully_fused_p;
+void ExecutionRegionLoweringPlan::SelectStage(idx_t stage_index, ExecutionRegionStageExecutionKind execution) {
+	selected_stages.push_back({stage_index, execution});
 }
 
-void ExecutionRegionLoweringPlan::SetScanFilterMode(ExecutionRegionScanFilterMode scan_filter_mode_p) {
-	scan_filter_mode = scan_filter_mode_p;
-}
-
-void ExecutionRegionLoweringPlan::SetSelectedSourceExecution(ExecutionRegionSourceExecutionKind source_execution) {
-	selected_source_execution = source_execution;
-}
-
-void ExecutionRegionLoweringPlan::SetSourceContractInputTypes(vector<LogicalType> input_types) {
-	source_contract_input_types = std::move(input_types);
+void ExecutionRegionLoweringPlan::SetSourceRecipe(ExecutionRegionSelectedSourceRecipe source_recipe_p) {
+	source_recipe = std::move(source_recipe_p);
 }
 
 void ExecutionRegionLoweringPlan::SetOperatorStageIR(string stage_ir) {
@@ -1029,6 +1004,10 @@ idx_t ExecutionRegionLoweringPlan::BoundaryCount() const {
 	return boundary_count;
 }
 
+idx_t ExecutionRegionLoweringPlan::SelectedStageCount() const {
+	return selected_stages.size();
+}
+
 bool ExecutionRegionLoweringPlan::HasNodes() const {
 	return node_count > 0;
 }
@@ -1041,24 +1020,29 @@ ExecutionRegionExecutionMode ExecutionRegionLoweringPlan::ExpectedCompiledExecut
 	return compiled_execution_mode;
 }
 
-bool ExecutionRegionLoweringPlan::IsFullyFused() const {
-	return fully_fused;
+bool ExecutionRegionLoweringPlan::UsesScanFilters() const {
+	return source_recipe.scan_filter_mode != ExecutionRegionScanFilterMode::NONE;
 }
 
-bool ExecutionRegionLoweringPlan::UsesScanFilters() const {
-	return scan_filter_mode != ExecutionRegionScanFilterMode::NONE;
+bool ExecutionRegionLoweringPlan::UsesResidualScanFilters() const {
+	return source_recipe.scan_filter_mode == ExecutionRegionScanFilterMode::ALL ||
+	       source_recipe.scan_filter_mode == ExecutionRegionScanFilterMode::DYNAMIC_FILTERS_WITH_STATIC_PRUNING;
 }
 
 ExecutionRegionScanFilterMode ExecutionRegionLoweringPlan::ScanFilterMode() const {
-	return scan_filter_mode;
+	return source_recipe.scan_filter_mode;
 }
 
 ExecutionRegionSourceExecutionKind ExecutionRegionLoweringPlan::SelectedSourceExecution() const {
-	return selected_source_execution;
+	return source_recipe.execution;
 }
 
 const vector<LogicalType> &ExecutionRegionLoweringPlan::SourceContractInputTypes() const {
-	return source_contract_input_types;
+	return source_recipe.input_types;
+}
+
+const vector<ExecutionRegionSelectedStage> &ExecutionRegionLoweringPlan::SelectedStages() const {
+	return selected_stages;
 }
 
 static void AppendFirstExecutionRegionLoweringReasonToken(string &result, const string &reason) {
@@ -1287,7 +1271,7 @@ string ExecutionRegionLoweringPlan::CompactEventReason() const {
 		result += ";";
 	}
 	result += "region-lowering:native=" + std::to_string(native_count) + ",boundary=" + std::to_string(boundary_count) +
-	          ",fully-fused=" + (fully_fused ? string("true") : "false");
+	          ",selected-stages=" + std::to_string(selected_stages.size());
 	AppendExecutionRegionOperatorKindCounts(result, "backend_native", capability_facts.native_operator_kind_counts);
 	AppendExecutionRegionOperatorKindCounts(result, "backend_boundary", capability_facts.boundary_operator_kind_counts);
 	AppendExecutionRegionVectorFormatKindCounts(result, "backend_input_format",
@@ -1307,9 +1291,9 @@ string ExecutionRegionLoweringPlan::CompactEventReason() const {
 	AppendExecutionRegionCapabilityTypeKindCounts(result, "backend_payload_type",
 	                                              capability_facts.backend_payload_type_counts);
 	AppendExecutionRegionBackendCapabilityFacts(result, *this);
-	if (selected_source_execution != ExecutionRegionSourceExecutionKind::NONE) {
+	if (source_recipe.execution != ExecutionRegionSourceExecutionKind::NONE) {
 		result += ";selected-source-execution=";
-		result += ExecutionRegionSourceExecutionKindToString(selected_source_execution);
+		result += ExecutionRegionSourceExecutionKindToString(source_recipe.execution);
 	}
 	if (UsesScanFilters()) {
 		result += ";uses-scan-filters=true";

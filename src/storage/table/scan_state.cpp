@@ -26,6 +26,10 @@ void TableScanState::Initialize(vector<StorageIndex> column_ids_p, optional_ptr<
 		filters.Initialize(*context, *table_filters, column_ids, filter_execution_mode, kernel_provider,
 		                   kernel_filter_indices);
 	}
+	InitializeSampling(table_sampling);
+}
+
+void TableScanState::InitializeSampling(optional_ptr<SampleOptions> table_sampling) {
 	if (table_sampling) {
 		sampling_info.do_system_sample = table_sampling->method == SampleMethod::SYSTEM_SAMPLE;
 		sampling_info.sample_rate = table_sampling->sample_size.GetValue<double>() / 100.0;
@@ -33,6 +37,15 @@ void TableScanState::Initialize(vector<StorageIndex> column_ids_p, optional_ptr<
 			table_state.random.SetSeed(table_sampling->seed.GetIndex());
 		}
 	}
+}
+
+void TableScanState::InitializeWithSeparateResidualFilters(vector<StorageIndex> column_ids_p, ClientContext &context,
+                                                           TableFilterSet &pruning_filters,
+                                                           TableFilterSet &residual_filters,
+                                                           optional_ptr<SampleOptions> table_sampling) {
+	this->column_ids = std::move(column_ids_p);
+	filters.Initialize(context, pruning_filters, residual_filters, column_ids);
+	InitializeSampling(table_sampling);
 }
 
 const vector<StorageIndex> &TableScanState::GetColumnIds() {
@@ -64,16 +77,53 @@ ScanFilter::ScanFilter(ClientContext &context, idx_t filter_index_p, ProjectionI
 	}
 }
 
-void ScanFilterInfo::Initialize(ClientContext &context, TableFilterSet &filters, const vector<StorageIndex> &column_ids,
-                                TableFilterExecutionMode execution_mode,
-                                optional_ptr<const TableFilterKernelProvider> kernel_provider,
-                                optional_ptr<const vector<idx_t>> kernel_filter_indices) {
+void ScanFilterInfo::InitializeFilterList(ClientContext &context, TableFilterSet &filters,
+                                          const vector<StorageIndex> &column_ids, vector<ScanFilter> &result,
+                                          optional_ptr<const TableFilterKernelProvider> kernel_provider,
+                                          optional_ptr<const vector<idx_t>> kernel_filter_indices) {
 	D_ASSERT(filters.HasFilters());
 	if (kernel_filter_indices && kernel_filter_indices->size() != filters.FilterCount()) {
 		throw InternalException("table filter kernel mapping does not match the active filter count");
 	}
-	table_filters = &filters;
+	result.reserve(filters.FilterCount());
+	idx_t filter_index = 0;
+	for (auto &entry : filters) {
+		auto kernel_filter_index =
+		    kernel_filter_indices ? (*kernel_filter_indices)[filter_index] : DConstants::INVALID_INDEX;
+		result.emplace_back(context, filter_index++, entry.GetIndex(), column_ids, entry.Filter(), kernel_provider,
+		                    kernel_filter_index);
+	}
+}
+
+void ScanFilterInfo::Initialize(ClientContext &context, TableFilterSet &filters, const vector<StorageIndex> &column_ids,
+                                TableFilterExecutionMode execution_mode,
+                                optional_ptr<const TableFilterKernelProvider> kernel_provider,
+                                optional_ptr<const vector<idx_t>> kernel_filter_indices) {
+	pruning_filters = &filters;
 	execute_residual_filters = execution_mode == TableFilterExecutionMode::FILTER_AND_PRUNE;
+	InitializeFilterList(context, filters, column_ids, pruning_filter_list, kernel_provider, kernel_filter_indices);
+	if (execute_residual_filters) {
+		InitializeResidualFilterMetadata(context, filters, column_ids);
+	} else {
+		column_has_filter.resize(column_ids.size(), false);
+		base_column_has_filter = column_has_filter;
+	}
+}
+
+void ScanFilterInfo::Initialize(ClientContext &context, TableFilterSet &pruning_filters_p,
+                                TableFilterSet &residual_filters_p, const vector<StorageIndex> &column_ids) {
+	D_ASSERT(pruning_filters_p.HasFilters());
+	D_ASSERT(residual_filters_p.HasFilters());
+	pruning_filters = &pruning_filters_p;
+	separate_residual_filters = true;
+	execute_residual_filters = true;
+	InitializeFilterList(context, pruning_filters_p, column_ids, pruning_filter_list);
+	InitializeFilterList(context, residual_filters_p, column_ids, residual_filter_list);
+	InitializeResidualFilterMetadata(context, residual_filters_p, column_ids);
+}
+
+void ScanFilterInfo::InitializeResidualFilterMetadata(ClientContext &context, TableFilterSet &filters,
+                                                      const vector<StorageIndex> &column_ids) {
 	adaptive_filter = make_uniq<AdaptiveFilter>(filters);
 	vector<idx_t> filter_identities;
 	filter_identities.reserve(filters.FilterCount());
@@ -84,18 +134,9 @@ void ScanFilterInfo::Initialize(ClientContext &context, TableFilterSet &filters,
 		                                : projection_index);
 	}
 	adaptive_filter->SetLogger(context.logger, "", AdaptiveFilterSource::INITIAL, filter_identities);
-	filter_list.reserve(filters.FilterCount());
-	idx_t filter_index = 0;
-	for (auto &entry : filters) {
-		auto kernel_filter_index =
-		    kernel_filter_indices ? (*kernel_filter_indices)[filter_index] : DConstants::INVALID_INDEX;
-		filter_list.emplace_back(context, filter_index++, entry.GetIndex(), column_ids, entry.Filter(), kernel_provider,
-		                         kernel_filter_index);
-	}
 	column_has_filter.reserve(column_ids.size());
 	for (auto col_idx : ProjectionIndex::GetIndexes(column_ids.size())) {
-		bool has_filter = table_filters->HasFilter(col_idx);
-		column_has_filter.push_back(has_filter);
+		column_has_filter.push_back(filters.HasFilter(col_idx));
 	}
 	base_column_has_filter = column_has_filter;
 }
@@ -115,12 +156,15 @@ bool ScanFilterInfo::HasFilters() const {
 	if (!execute_residual_filters) {
 		return false;
 	}
-	if (!table_filters) {
+	if (!pruning_filters) {
 		// no filters
 		return false;
 	}
+	if (separate_residual_filters) {
+		return !residual_filter_list.empty();
+	}
 	// if we have filters - check if we need to check any of them
-	return always_true_filters < filter_list.size();
+	return always_true_filters < pruning_filter_list.size();
 }
 
 bool ScanFilterInfo::ExecutesResidualFilters() const {
@@ -134,18 +178,23 @@ void ScanFilterInfo::CheckAllFilters() {
 		column_has_filter[col_idx] = base_column_has_filter[col_idx];
 	}
 	// set "always_true" in the individual filters to false
-	for (auto &filter : filter_list) {
+	for (auto &filter : pruning_filter_list) {
+		filter.always_true = false;
+	}
+	for (auto &filter : residual_filter_list) {
 		filter.always_true = false;
 	}
 }
 
 void ScanFilterInfo::SetFilterAlwaysTrue(idx_t filter_idx) {
-	auto &filter = filter_list[filter_idx];
+	auto &filter = pruning_filter_list[filter_idx];
 	if (filter.always_true) {
 		return;
 	}
 	filter.always_true = true;
-	column_has_filter[filter.scan_column_index] = false;
+	if (!separate_residual_filters) {
+		column_has_filter[filter.scan_column_index] = false;
+	}
 	always_true_filters++;
 }
 

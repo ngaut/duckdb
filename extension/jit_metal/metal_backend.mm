@@ -519,100 +519,72 @@ static shared_ptr<MetalRegionBackendPlan> BuildMetalRegionPlan(const ExecutionRe
     if (candidate.stage_plan.HasStages()) {
         lowering_plan.SetOperatorStageIR(candidate.stage_plan.ir);
     }
-    if (!ExecutionRegionABIIsFullPipeline(candidate.contract.abi)) {
+    if (!ExecutionRegionABIIsFullPipeline(candidate.abi)) {
         lowering_plan.AddFusionBlocker("metal-backend-blocker:requires-full-pipeline-abi");
         return nullptr;
     }
-    if (candidate.EndNode() > region_ir.nodes.size()) {
-        lowering_plan.AddFusionBlocker("metal-backend-blocker:candidate-outside-region-ir");
+    if (region_ir.nodes.size() != 3) {
+        lowering_plan.AddFusionBlocker("metal-backend-blocker:requires-source-projection-append-recipe");
+        return nullptr;
+    }
+
+    auto &source_node = region_ir.nodes[0];
+    auto &projection_node = region_ir.nodes[1];
+    auto &sink_node = region_ir.nodes[2];
+    if (source_node.kind != ExecutionRegionNodeKind::SOURCE ||
+        projection_node.kind != ExecutionRegionNodeKind::PROJECTION ||
+        sink_node.kind != ExecutionRegionNodeKind::SINK) {
+        lowering_plan.AddFusionBlocker("metal-backend-blocker:requires-source-projection-append-recipe");
         return nullptr;
     }
 
     auto plan = make_shared_ptr<MetalRegionBackendPlan>();
-    vector<LogicalType> current_types = candidate.input_types;
-    bool saw_source_contract = false;
-    bool saw_projection = false;
-    bool saw_sink = false;
-
-    for (idx_t node_idx = candidate.first_node; node_idx < candidate.EndNode(); node_idx++) {
-        auto &node = region_ir.nodes[node_idx];
-        switch (node.kind) {
-        case ExecutionRegionNodeKind::SOURCE:
-            if (!node.source || node.source->source_contract.status != ExecutionRegionSourceContractStatus::READY ||
-                node.source->execution != ExecutionRegionSourceExecutionKind::SOURCE_CONTRACT) {
-                auto reason = "Metal backend requires a ready source contract";
-                lowering_plan.AddNode(node.label, node.operator_name, node.operator_kind,
-                                      ExecutionRegionLoweringKind::BOUNDARY, reason);
-                lowering_plan.AddFusionBlocker("metal-backend-blocker:source-contract-missing");
-                return nullptr;
-            }
-            current_types = node.output_types;
-            saw_source_contract = true;
-            lowering_plan.AddNode(node.label, node.operator_name, node.operator_kind,
-                                  ExecutionRegionLoweringKind::NATIVE, "Metal source contract");
-            break;
-        case ExecutionRegionNodeKind::PROJECTION: {
-            if (saw_projection) {
-                auto reason = "Metal backend currently supports one projection stage";
-                lowering_plan.AddNode(node.label, node.operator_name, node.operator_kind,
-                                      ExecutionRegionLoweringKind::BOUNDARY, reason);
-                lowering_plan.AddFusionBlocker("metal-backend-blocker:multiple-projection-stages");
-                return nullptr;
-            }
-            string error;
-            if (!BuildMetalProjectionStage(node, current_types, plan->projection, error)) {
-                lowering_plan.AddNode(node.label, node.operator_name, node.operator_kind,
-                                      ExecutionRegionLoweringKind::BOUNDARY, error);
-                lowering_plan.AddFusionBlocker("metal-backend-blocker:" + error);
-                return nullptr;
-            }
-            current_types = plan->projection.output_types;
-            saw_projection = true;
-            lowering_plan.AddNode(node.label, node.operator_name, node.operator_kind,
-                                  ExecutionRegionLoweringKind::NATIVE, "Metal scalar projection");
-            break;
-        }
-        case ExecutionRegionNodeKind::SINK:
-            if (!node.sink || !IsMetalAppendSink(*node.sink)) {
-                auto reason = "Metal backend currently requires a native append/materialization sink";
-                lowering_plan.AddNode(node.label, node.operator_name, node.operator_kind,
-                                      ExecutionRegionLoweringKind::BOUNDARY, reason);
-                lowering_plan.AddFusionBlocker("metal-backend-blocker:append-sink-contract-missing");
-                return nullptr;
-            }
-            plan->sink_info = *node.sink;
-            saw_sink = true;
-            lowering_plan.AddNode(node.label, node.operator_name, node.operator_kind,
-                                  ExecutionRegionLoweringKind::NATIVE, "Metal append sink");
-            break;
-        default: {
-            auto reason = "Metal backend currently supports source-projection-append pipelines";
-            lowering_plan.AddNode(node.label, node.operator_name, node.operator_kind,
-                                  ExecutionRegionLoweringKind::BOUNDARY, reason);
-            lowering_plan.AddFusionBlocker("metal-backend-blocker:unsupported-node-kind");
-            return nullptr;
-        }
-        }
-    }
-
-    if (!saw_source_contract) {
+    if (!source_node.source ||
+        source_node.source->source_contract.status != ExecutionRegionSourceContractStatus::READY ||
+        source_node.source->execution != ExecutionRegionSourceExecutionKind::SOURCE_CONTRACT) {
+        auto reason = "Metal backend requires a ready source contract";
+        lowering_plan.AddNode(source_node.label, source_node.operator_name, source_node.operator_kind,
+                              ExecutionRegionLoweringKind::BOUNDARY, reason);
         lowering_plan.AddFusionBlocker("metal-backend-blocker:source-contract-missing");
         return nullptr;
     }
-    if (!saw_projection) {
-        lowering_plan.AddFusionBlocker("metal-backend-blocker:projection-missing");
+    lowering_plan.AddNode(source_node.label, source_node.operator_name, source_node.operator_kind,
+                          ExecutionRegionLoweringKind::NATIVE, "Metal source contract");
+
+    string error;
+    if (!BuildMetalProjectionStage(projection_node, source_node.output_types, plan->projection, error)) {
+        lowering_plan.AddNode(projection_node.label, projection_node.operator_name, projection_node.operator_kind,
+                              ExecutionRegionLoweringKind::BOUNDARY, error);
+        lowering_plan.AddFusionBlocker("metal-backend-blocker:" + error);
         return nullptr;
     }
-    if (!saw_sink) {
-        lowering_plan.AddFusionBlocker("metal-backend-blocker:append-sink-missing");
+    lowering_plan.AddNode(projection_node.label, projection_node.operator_name, projection_node.operator_kind,
+                          ExecutionRegionLoweringKind::NATIVE, "Metal scalar projection");
+
+    if (!sink_node.sink || !IsMetalAppendSink(*sink_node.sink)) {
+        auto reason = "Metal backend currently requires a native append/materialization sink";
+        lowering_plan.AddNode(sink_node.label, sink_node.operator_name, sink_node.operator_kind,
+                              ExecutionRegionLoweringKind::BOUNDARY, reason);
+        lowering_plan.AddFusionBlocker("metal-backend-blocker:append-sink-contract-missing");
         return nullptr;
     }
+    plan->sink_info = *sink_node.sink;
+    lowering_plan.AddNode(sink_node.label, sink_node.operator_name, sink_node.operator_kind,
+                          ExecutionRegionLoweringKind::NATIVE, "Metal append sink");
 
     plan->ir = MetalRegionIR(*plan);
-    lowering_plan.SetFullyFused(true);
+    for (idx_t stage_idx = 0; stage_idx < candidate.stage_plan.stages.size(); stage_idx++) {
+        auto &stage = candidate.stage_plan.stages[stage_idx];
+        if ((stage.node_index == 0 && stage.kind == ExecutionRegionStageKind::SOURCE) ||
+            (stage.node_index == 1 && stage.kind == ExecutionRegionStageKind::PROJECTION) ||
+            (stage.node_index == 2 && stage.kind == ExecutionRegionStageKind::APPEND_SINK)) {
+            lowering_plan.SelectStage(stage_idx, stage.execution);
+        }
+    }
+    ExecutionRegionSelectedSourceRecipe source_recipe;
+    source_recipe.execution = ExecutionRegionSourceExecutionKind::SOURCE_CONTRACT;
+    lowering_plan.SetSourceRecipe(std::move(source_recipe));
     lowering_plan.SetCompiledExecutionMode(ExecutionRegionExecutionMode::GPU);
-    lowering_plan.SetSelectedSourceExecution(ExecutionRegionSourceExecutionKind::SOURCE_CONTRACT);
-    lowering_plan.SetScanFilterMode(ExecutionRegionScanFilterMode::NONE);
     lowering_plan.backend_plan = plan;
     return plan;
 }

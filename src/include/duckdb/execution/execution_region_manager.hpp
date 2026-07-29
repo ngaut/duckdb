@@ -69,11 +69,12 @@ private:
 	RecordEvent(ClientContext &context, string backend_name, ExecutionRegionCompileStatus status,
 	            ExecutionRegionExecutionMode execution_mode, string reason, string blocker, const string *ir,
 	            int64_t decision_time_us, int64_t compile_time_us, idx_t code_size,
-	            const ExecutionRegionCandidate *candidate = nullptr,
+	            const string *pipeline_shape = nullptr, const ExecutionRegionCandidate *candidate = nullptr,
 	            ExecutionRunnerKind selected_runner = ExecutionRunnerKind::VECTORIZED,
 	            const ExecutionRegionStageTimings *stage_timings = nullptr,
 	            ExecutionRegionSourceExecutionKind selected_source_execution = ExecutionRegionSourceExecutionKind::NONE,
-	            bool selected_uses_scan_filters = false, const PhysicalRunnerCostProfile *runner_cost = nullptr);
+	            ExecutionRegionScanFilterMode selected_scan_filter_mode = ExecutionRegionScanFilterMode::NONE,
+	            const PhysicalRunnerCostProfile *runner_cost = nullptr);
 
 private:
 	DatabaseInstance &db;

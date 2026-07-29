@@ -161,13 +161,6 @@ static string DescribeExecutionRegionTableScanContract(const ExecutionRegionTabl
 	}
 	string result = "table_scan_contract<function=" + contract.function_name;
 	result += ",estimated_source_cardinality=" + std::to_string(contract.estimated_source_cardinality);
-	result += ",output_columns=" + std::to_string(contract.output_column_count);
-	result += ",returned_columns=" + std::to_string(contract.returned_column_count);
-	result += ",column_ids=" + std::to_string(contract.column_id_count);
-	result += ",projected_columns=" + std::to_string(contract.projected_column_count);
-	result += ",column_id_bindings=" + BuildExecutionRegionIdxList(contract.column_ids);
-	result += ",projection_ids=" + BuildExecutionRegionIdxList(contract.projection_ids);
-	result += ",source_contract_input_columns=" + std::to_string(contract.source_contract_input_column_count);
 	result +=
 	    ",source_contract_input_types=" + BuildExecutionRegionLogicalTypeList(contract.source_contract_input_types);
 	result += ",source_contract_input_distinct_counts=" +
@@ -180,16 +173,10 @@ static string DescribeExecutionRegionTableScanContract(const ExecutionRegionTabl
 	    ",source_contract_input_max_values=" + BuildExecutionRegionValueList(contract.source_contract_input_max_values);
 	result += ",source_contract_output_projection_map=" +
 	          BuildExecutionRegionIdxList(contract.source_contract_output_projection_map);
-	result +=
-	    ",source_contract_filter_prune_required=" + ExecutionRegionBool(contract.source_contract_filter_prune_required);
-	result += ",projection_pushdown=" + ExecutionRegionBool(contract.projection_pushdown);
 	result += ",filter_pushdown=" + ExecutionRegionBool(contract.filter_pushdown);
-	result += ",filter_prune=" + ExecutionRegionBool(contract.filter_prune);
 	result += ",dynamic_filters=" + ExecutionRegionBool(contract.dynamic_filters);
 	result += ",finalized_dynamic_filter_cardinality_estimate=" +
 	          ExecutionRegionBool(contract.finalized_dynamic_filter_cardinality_estimate);
-	result += ",in_out_function=" + ExecutionRegionBool(contract.in_out_function);
-	result += ",filter_count=" + std::to_string(contract.filter_count);
 	result += ">";
 	return result;
 }
@@ -954,8 +941,6 @@ static string DescribeExecutionRegionStagePlan(const ExecutionRegionStagePlan &p
 		result += ExecutionRegionStageKindToString(stage.kind);
 		result += ":";
 		result += ExecutionRegionStageExecutionKindToString(stage.execution);
-		result += ":";
-		result += ExecutionRegionOwnershipKindToString(stage.ownership);
 		result += ":operation=";
 		result += ExecutionCompiledContractKindToString(stage.operation);
 		result += ":drain=";
@@ -993,48 +978,14 @@ static string DescribeExecutionRegionStagePlan(const ExecutionRegionStagePlan &p
 }
 
 static string DescribeExecutionRegionCandidate(const ExecutionRegionCandidate &candidate) {
-	string result = "candidate" + std::to_string(candidate.candidate_id);
-	result += "<first_node=" + std::to_string(candidate.first_node);
-	result += ",node_count=" + std::to_string(candidate.node_count);
-	result += ",start_operator_index=" + std::to_string(candidate.start_operator_index);
-	result += ",end_operator_index=" + std::to_string(candidate.end_operator_index);
-	result += ",estimated_cardinality=" + std::to_string(candidate.estimated_cardinality);
-	if (candidate.source_execution != ExecutionRegionSourceExecutionKind::NONE) {
-		result += ",source_execution=";
-		result += ExecutionRegionSourceExecutionKindToString(candidate.source_execution);
-	}
-	if (candidate.uses_scan_filters) {
-		result += ",uses_scan_filters=true";
-	}
-	result += ",inputs=" + DescribeExecutionRegionTypeList(candidate.input_types);
-	result += ",outputs=" + DescribeExecutionRegionTypeList(candidate.output_types);
+	string result = "candidate<estimated_cardinality=" + std::to_string(candidate.estimated_cardinality);
 	result += ",shape=" + candidate.shape;
 	if (!candidate.stage_plan.ir.empty()) {
 		result += ",";
 		result += candidate.stage_plan.ir;
 	}
-	if (candidate.context_has_missing_operator_contract) {
-		result += ",context_has_missing_operator_contract=true";
-	}
-	result += ",pipeline_shape=" + candidate.pipeline_shape;
 	result += "," + candidate.traits.ir;
-	result += "," + candidate.contract.ir;
 	result += ">";
-	return result;
-}
-
-string DescribeExecutionRegionCandidateSpan(idx_t first_node, idx_t node_count, idx_t start_operator_index,
-                                            idx_t end_operator_index,
-                                            ExecutionRegionSourceExecutionKind source_execution) {
-	string result = "span[first_node=" + std::to_string(first_node);
-	result += ",node_count=" + std::to_string(node_count);
-	result +=
-	    ",operator_range=[" + std::to_string(start_operator_index) + "," + std::to_string(end_operator_index) + ")";
-	if (source_execution != ExecutionRegionSourceExecutionKind::NONE) {
-		result += ",source_execution=";
-		result += ExecutionRegionSourceExecutionKindToString(source_execution);
-	}
-	result += "]";
 	return result;
 }
 
@@ -1170,13 +1121,13 @@ void FinalizeExecutionRegionIR(ExecutionRegionIR &region_ir, ExecutionRegionIRMo
 		return;
 	}
 	region_ir.ir = "duckdb.region typed-vector-ir";
-	for (auto &candidate : region_ir.candidates) {
+	if (region_ir.candidate) {
 		region_ir.ir += ";";
-		region_ir.ir += candidate.ir;
+		region_ir.ir += region_ir.candidate->ir;
 	}
-	for (auto &blocker : region_ir.candidate_blockers) {
+	if (!region_ir.candidate_blocker.empty()) {
 		region_ir.ir += ";candidate-blocker:";
-		region_ir.ir += blocker;
+		region_ir.ir += region_ir.candidate_blocker;
 	}
 	for (auto &node : region_ir.nodes) {
 		region_ir.ir += ";";

@@ -425,13 +425,21 @@ static void RequireDuckDBScanFilteredSourceContract(const ExecutionRegionEvent &
 	REQUIRE(StringUtil::Contains(event.reason, "uses-scan-filters=true"));
 }
 
+static void RequireGeneratedSourceFilterCost(const ExecutionRegionEvent &event) {
+	REQUIRE(event.runner_cost.present);
+	REQUIRE(event.runner_cost.generated_stage_count > 0);
+	REQUIRE(event.runner_cost.expression_cost > event.candidate_traits.expression_cost);
+}
+
 static void RequireGeneratedSourceFilterContract(const ExecutionRegionEvent &event) {
 	REQUIRE(event.selected_source_execution == ExecutionRegionSourceExecutionKind::SOURCE_CONTRACT);
-	REQUIRE_FALSE(event.selected_uses_scan_filters);
+	REQUIRE(event.selected_uses_scan_filters);
 	REQUIRE(StringUtil::Contains(event.reason, "generated table scan filters"));
 	REQUIRE(StringUtil::Contains(event.reason, "source-strategy=generated-source-filter"));
+	REQUIRE(StringUtil::Contains(event.reason, "source_contract_filter_pushdown=prune-only"));
 	REQUIRE(StringUtil::Contains(event.reason, "source_contract_input_layout=true"));
-	REQUIRE_FALSE(StringUtil::Contains(event.reason, "uses-scan-filters=true"));
+	REQUIRE(StringUtil::Contains(event.reason, "uses-scan-filters=true"));
+	RequireGeneratedSourceFilterCost(event);
 }
 
 static void RequireMixedSourceFilterContract(const ExecutionRegionEvent &event) {
@@ -440,8 +448,9 @@ static void RequireMixedSourceFilterContract(const ExecutionRegionEvent &event) 
 	REQUIRE(event.selected_uses_scan_filters);
 	REQUIRE(StringUtil::Contains(event.reason, "generated static table scan filters with vectorized dynamic filters"));
 	REQUIRE(StringUtil::Contains(event.reason, "source-strategy=mixed-source-filter"));
-	REQUIRE(StringUtil::Contains(event.reason, "source_contract_filter_pushdown=dynamic-only"));
+	REQUIRE(StringUtil::Contains(event.reason, "source_contract_filter_pushdown=static-pruning-plus-dynamic-residual"));
 	REQUIRE(StringUtil::Contains(event.reason, "uses-scan-filters=true"));
+	RequireGeneratedSourceFilterCost(event);
 }
 
 struct NoExtraJitEventCheck {

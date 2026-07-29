@@ -20,11 +20,7 @@ from settings_scripts.parse_and_sort_settings_in_json import (
 class TestGeneratedSettingsCheck(unittest.TestCase):
     def test_cpp_token_comparison_ignores_formatting_and_literal_wrapping(self) -> None:
         generated = 'static constexpr const char *Description = "one long description";'
-        formatted = (
-            "static constexpr const char * Description =\n"
-            '    "one long "\n'
-            '    "description";\n'
-        )
+        formatted = "static constexpr const char * Description =\n" '    "one long "\n' '    "description";\n'
         self.assertEqual(normalized_cpp(generated), normalized_cpp(formatted))
 
     def test_cpp_token_comparison_preserves_content_and_token_boundaries(self) -> None:
@@ -32,9 +28,7 @@ class TestGeneratedSettingsCheck(unittest.TestCase):
             normalized_cpp('const char *value = "left";'),
             normalized_cpp('const char *value = "right";'),
         )
-        self.assertNotEqual(
-            normalized_cpp("int value = 1;"), normalized_cpp("intvalue = 1;")
-        )
+        self.assertNotEqual(normalized_cpp("int value = 1;"), normalized_cpp("intvalue = 1;"))
 
     def test_check_mode_sorting_does_not_rewrite_json(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

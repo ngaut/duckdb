@@ -42,6 +42,15 @@ struct SljitPreJoinProjectionViewDescriptor {
 		       residual_probe_sources_can_remap &&
 		       (hash_probe_key_inputs_match_source || hash_probe_key_inputs_can_remap);
 	}
+
+	bool PreservesSourceColumnOrdinals() const {
+		for (idx_t output_idx = 0; output_idx < projected_to_source.size(); output_idx++) {
+			if (projected_to_source[output_idx] != output_idx) {
+				return false;
+			}
+		}
+		return true;
+	}
 };
 
 static bool SljitTryReadSignedIntegerValue(const Value &value, int64_t &result) {

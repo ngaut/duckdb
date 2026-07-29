@@ -114,7 +114,7 @@ static bool TryExecutePreparedPreaggregatedCountStarGroupedAggregateUpdate(
 		return false;
 	}
 	RecordSljitRegionMaterializationElision(runtime, op.kind, "direct_preaggregated_count_star_update",
-	                                             preaggregated_row_count);
+	                                        preaggregated_row_count);
 	return true;
 }
 
@@ -203,8 +203,8 @@ private:
 			                                      preaggregated_count_deltas, input.size())) {
 				return false;
 			}
-			RecordSljitRegionMaterializationElision(
-			    runtime, aggregate_op.kind, "primitive_grouped_preaggregated_count_star_update", input.size());
+			RecordSljitRegionMaterializationElision(runtime, aggregate_op.kind,
+			                                        "primitive_grouped_preaggregated_count_star_update", input.size());
 			return true;
 		}
 		row_count_deltas.assign(input.size(), 1);
@@ -217,8 +217,8 @@ private:
 		                            input.size())) {
 			return false;
 		}
-		RecordSljitRegionMaterializationElision(runtime, aggregate_op.kind,
-		                                            "primitive_grouped_count_star_row_update", input.size());
+		RecordSljitRegionMaterializationElision(runtime, aggregate_op.kind, "primitive_grouped_count_star_row_update",
+		                                        input.size());
 		return true;
 	}
 
@@ -281,7 +281,7 @@ private:
 			return false;
 		}
 		RecordSljitRegionMaterializationElision(runtime, aggregate_op.kind, "count_star_projected_row_update",
-		                                            prepared.count);
+		                                        prepared.count);
 		return true;
 	}
 
@@ -371,8 +371,8 @@ private:
 		pending_row_count_deltas.clear();
 		pending_row_count = 0;
 		if (updated) {
-			RecordSljitRegionMaterializationElision(
-			    runtime, aggregate_op.kind, "primitive_pending_count_star_row_flush", represented_row_count);
+			RecordSljitRegionMaterializationElision(runtime, aggregate_op.kind,
+			                                        "primitive_pending_count_star_row_flush", represented_row_count);
 		}
 		return updated;
 	}

@@ -5,7 +5,6 @@
 namespace duckdb {
 
 ExecutionRegionStagePlan BuildExecutionRegionStagePlan(const ExecutionRegionIR &region_ir,
-                                                       const ExecutionRegionCandidate &candidate,
-                                                       ExecutionRegionIRMode mode);
+                                                       const string &candidate_shape, ExecutionRegionIRMode mode);
 
 } // namespace duckdb

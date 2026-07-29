@@ -62,7 +62,6 @@ private:
 };
 
 struct ExecutionRegionPlanner::SelectedCandidate {
-	idx_t candidate_index = 0;
 	ExecutionRegionLoweringPlan lowering_plan;
 	ExecutionRegionPhysicalRunnerSelection physical_runner;
 	ExecutionRegionStageTimings stage_timings;
@@ -94,8 +93,6 @@ static string DescribeExecutionRegionStageFusionBlocker(const ExecutionRegionSta
 	result += ExecutionRegionStageKindToString(stage.kind);
 	result += ";stage_execution=";
 	result += ExecutionRegionStageExecutionKindToString(stage.execution);
-	result += ";stage_ownership=";
-	result += ExecutionRegionOwnershipKindToString(stage.ownership);
 	if (stage.node_index != DConstants::INVALID_INDEX) {
 		result += ";stage_node=" + std::to_string(stage.node_index);
 	}
@@ -111,33 +108,15 @@ static string DescribeExecutionRegionStageFusionBlocker(const ExecutionRegionSta
 	return result;
 }
 
-static bool ExecutionRegionContractHasOnlyNativeStages(const ExecutionRegionContract &contract) {
-	return contract.source_boundary_count == 0 && contract.missing_contract_count == 0;
-}
-
-struct ExecutionRegionFusedStageContractDecision {
+struct ExecutionRegionFusedStagePlanDecision {
 	bool valid = true;
 	string reason;
 	string blocker;
 };
 
-static ExecutionRegionFusedStageContractDecision
-BuildExecutionRegionFusedContractBoundaryDecision(const ExecutionRegionContract &contract) {
-	ExecutionRegionFusedStageContractDecision decision;
-	decision.valid = false;
-	decision.blocker = EXECUTION_REGION_BLOCKER_FUSED_REGION_CONTRACT_HAS_BOUNDARIES;
-	decision.reason = "core region contract cannot form fused region";
-	decision.reason += ";source_boundaries=" + std::to_string(contract.source_boundary_count);
-	decision.reason += ";missing_contracts=" + std::to_string(contract.missing_contract_count);
-	if (!contract.ir.empty()) {
-		decision.reason += ";" + contract.ir;
-	}
-	return decision;
-}
-
-static ExecutionRegionFusedStageContractDecision
+static ExecutionRegionFusedStagePlanDecision
 ValidateExecutionRegionFusedStagePlan(const ExecutionRegionStagePlan &stage_plan) {
-	ExecutionRegionFusedStageContractDecision decision;
+	ExecutionRegionFusedStagePlanDecision decision;
 	if (!stage_plan.HasStages()) {
 		decision.valid = false;
 		decision.blocker = "fused_region_stage_plan_empty";
@@ -166,17 +145,176 @@ ValidateExecutionRegionFusedStagePlan(const ExecutionRegionStagePlan &stage_plan
 	return decision;
 }
 
-static ExecutionRegionFusedStageContractDecision
-ValidateExecutionRegionFusedStageContract(const ExecutionRegionCandidate &candidate,
-                                          const ExecutionRegionLoweringPlan &lowering_plan) {
-	ExecutionRegionFusedStageContractDecision decision;
-	if (!lowering_plan.IsFullyFused()) {
+static ExecutionRegionFusedStagePlanDecision
+ValidateExecutionRegionFusedStagePlan(const ExecutionRegionIR &region_ir, const ExecutionRegionCandidate &candidate,
+                                      const ExecutionRegionLoweringPlan &lowering_plan) {
+	auto decision = ValidateExecutionRegionFusedStagePlan(candidate.stage_plan);
+	if (!decision.valid) {
 		return decision;
 	}
-	if (!ExecutionRegionContractHasOnlyNativeStages(candidate.contract)) {
-		return BuildExecutionRegionFusedContractBoundaryDecision(candidate.contract);
+	auto &candidate_stages = candidate.stage_plan.stages;
+	auto &selected_stages = lowering_plan.SelectedStages();
+	if (selected_stages.size() != candidate_stages.size()) {
+		decision.valid = false;
+		decision.blocker = "fused_region_stage_selection_incomplete";
+		decision.reason = "backend stage selection does not cover the complete core stage plan;selected=" +
+		                  std::to_string(selected_stages.size()) +
+		                  ";required=" + std::to_string(candidate_stages.size());
+		return decision;
 	}
-	return ValidateExecutionRegionFusedStagePlan(candidate.stage_plan);
+
+	optional_ptr<const ExecutionRegionSourceInfo> selected_source;
+	bool has_source_filters = false;
+	bool has_generated_source_filters = false;
+	for (idx_t stage_idx = 0; stage_idx < candidate_stages.size(); stage_idx++) {
+		auto &selected_stage = selected_stages[stage_idx];
+		if (selected_stage.stage_index != stage_idx) {
+			decision.valid = false;
+			decision.blocker = "fused_region_stage_selection_order_mismatch";
+			decision.reason = "backend stage selection must use every core stage exactly once in order;receipt_index=" +
+			                  std::to_string(stage_idx) +
+			                  ";selected_stage_index=" + std::to_string(selected_stage.stage_index);
+			return decision;
+		}
+		auto &candidate_stage = candidate_stages[stage_idx];
+		if (!ExecutionRegionStageExecutionIsFused(selected_stage.execution)) {
+			decision.valid = false;
+			decision.blocker = "fused_region_stage_selection_not_executable";
+			auto rejected_stage = candidate_stage;
+			rejected_stage.execution = selected_stage.execution;
+			decision.reason =
+			    "backend stage selection contains an unfused stage;stage_index=" + std::to_string(stage_idx) + ";" +
+			    DescribeExecutionRegionStageFusionBlocker(rejected_stage);
+			return decision;
+		}
+		if (candidate_stage.kind != ExecutionRegionStageKind::SOURCE_FILTER &&
+		    selected_stage.execution != candidate_stage.execution) {
+			decision.valid = false;
+			decision.blocker = "fused_region_stage_selection_execution_mismatch";
+			auto rejected_stage = candidate_stage;
+			rejected_stage.execution = selected_stage.execution;
+			decision.reason =
+			    "backend stage selection changed the core execution kind;stage_index=" + std::to_string(stage_idx) +
+			    ";core_stage_execution=" + ExecutionRegionStageExecutionKindToString(candidate_stage.execution) + ";" +
+			    DescribeExecutionRegionStageFusionBlocker(rejected_stage);
+			return decision;
+		}
+		if (candidate_stage.node_index >= region_ir.nodes.size()) {
+			decision.valid = false;
+			decision.blocker = "fused_region_stage_selection_invalid_node";
+			decision.reason =
+			    "backend stage selection points outside core region nodes;stage_index=" + std::to_string(stage_idx);
+			return decision;
+		}
+		auto &node = region_ir.nodes[candidate_stage.node_index];
+		if (candidate_stage.kind == ExecutionRegionStageKind::SOURCE) {
+			if (!node.source || selected_stage.execution != ExecutionRegionStageExecutionKind::NATIVE_CONTRACT) {
+				decision.valid = false;
+				decision.blocker = "fused_region_source_selection_invalid";
+				decision.reason = "backend source stage selection requires a native source contract;stage_index=" +
+				                  std::to_string(stage_idx);
+				return decision;
+			}
+			selected_source = node.source.get();
+		}
+		if (candidate_stage.kind == ExecutionRegionStageKind::SOURCE_FILTER) {
+			has_source_filters = true;
+			has_generated_source_filters = has_generated_source_filters ||
+			                               selected_stage.execution == ExecutionRegionStageExecutionKind::GENERATED_IR;
+		}
+	}
+
+	if (!selected_source) {
+		decision.valid = false;
+		decision.blocker = "fused_region_source_selection_missing";
+		decision.reason = "backend stage selection contains no source stage";
+		return decision;
+	}
+	auto &source = *selected_source;
+	if (lowering_plan.SelectedSourceExecution() != ExecutionRegionSourceExecutionKind::SOURCE_CONTRACT ||
+	    source.source_contract.status != ExecutionRegionSourceContractStatus::READY) {
+		decision.valid = false;
+		decision.blocker = "fused_region_source_recipe_invalid";
+		decision.reason = "backend source recipe requires a ready source contract";
+		return decision;
+	}
+	if (!lowering_plan.SourceContractInputTypes().empty()) {
+		if (!source.table_scan_contract.present ||
+		    lowering_plan.SourceContractInputTypes() != source.table_scan_contract.source_contract_input_types) {
+			decision.valid = false;
+			decision.blocker = "fused_region_source_recipe_layout_mismatch";
+			decision.reason = "backend source recipe input layout disagrees with the core source contract";
+			return decision;
+		}
+	}
+
+	auto scan_filter_mode = lowering_plan.ScanFilterMode();
+	if (!source.table_scan_contract.present) {
+		if (scan_filter_mode != ExecutionRegionScanFilterMode::NONE || has_source_filters) {
+			decision.valid = false;
+			decision.blocker = "fused_region_stateful_source_filter_recipe_invalid";
+			decision.reason = "stateful source recipe cannot claim table scan filter ownership";
+		}
+		return decision;
+	}
+	const bool has_dynamic_filters = source.table_scan_contract.dynamic_filters;
+	if (scan_filter_mode != ExecutionRegionScanFilterMode::NONE && !source.table_scan_contract.filter_pushdown) {
+		decision.valid = false;
+		decision.blocker = "fused_region_scan_filter_contract_missing";
+		decision.reason = "backend source recipe claims scan-filter ownership without source filter pushdown";
+		return decision;
+	}
+	if (has_dynamic_filters && scan_filter_mode != ExecutionRegionScanFilterMode::ALL &&
+	    scan_filter_mode != ExecutionRegionScanFilterMode::DYNAMIC_FILTERS_WITH_STATIC_PRUNING) {
+		decision.valid = false;
+		decision.blocker = "fused_region_dynamic_filter_ownership_missing";
+		decision.reason = "backend source recipe does not preserve dynamic scan filters";
+		return decision;
+	}
+	if (has_generated_source_filters && lowering_plan.SourceContractInputTypes().empty()) {
+		decision.valid = false;
+		decision.blocker = "fused_region_generated_filter_layout_missing";
+		decision.reason = "generated source-filter stages require the source-contract input layout";
+		return decision;
+	}
+	if (!has_generated_source_filters && !lowering_plan.SourceContractInputTypes().empty()) {
+		decision.valid = false;
+		decision.blocker = "fused_region_source_recipe_layout_spurious";
+		decision.reason = "backend source recipe publishes an input layout without generated source filters";
+		return decision;
+	}
+	if (!has_dynamic_filters &&
+	    scan_filter_mode == ExecutionRegionScanFilterMode::DYNAMIC_FILTERS_WITH_STATIC_PRUNING) {
+		decision.valid = false;
+		decision.blocker = "fused_region_dynamic_filter_ownership_spurious";
+		decision.reason = "backend source recipe claims dynamic scan filters that are absent";
+		return decision;
+	}
+	if (!has_source_filters && scan_filter_mode == ExecutionRegionScanFilterMode::STATIC_PRUNING_ONLY) {
+		decision.valid = false;
+		decision.blocker = "fused_region_static_filter_ownership_spurious";
+		decision.reason = "backend source recipe claims static filter pruning without static filters";
+		return decision;
+	}
+	const auto expected_static_filter_execution = scan_filter_mode == ExecutionRegionScanFilterMode::ALL
+	                                                  ? ExecutionRegionStageExecutionKind::NATIVE_CONTRACT
+	                                                  : ExecutionRegionStageExecutionKind::GENERATED_IR;
+	for (auto &selected_stage : selected_stages) {
+		D_ASSERT(selected_stage.stage_index < candidate_stages.size());
+		auto &candidate_stage = candidate_stages[selected_stage.stage_index];
+		if (candidate_stage.kind != ExecutionRegionStageKind::SOURCE_FILTER ||
+		    selected_stage.execution == expected_static_filter_execution) {
+			continue;
+		}
+		decision.valid = false;
+		decision.blocker = "fused_region_static_filter_ownership_mismatch";
+		auto rejected_stage = candidate_stage;
+		rejected_stage.execution = selected_stage.execution;
+		decision.reason = "backend source recipe and selected source-filter stages disagree;" +
+		                  DescribeExecutionRegionStageFusionBlocker(rejected_stage);
+		return decision;
+	}
+	return decision;
 }
 
 static bool ExecutionRegionStageNeedsOperatorReadiness(const ExecutionRegionStage &stage) {
@@ -285,8 +423,7 @@ static bool ExecutionRegionRuntimeCanEnter(Pipeline &pipeline, string &reason) {
 static bool ExecutionRegionCandidateNeedsFinalizedSourceCardinality(const ExecutionRegionIR &region_ir,
                                                                     const ExecutionRegionCandidate &candidate,
                                                                     string &reason) {
-	for (idx_t node_idx = candidate.first_node; node_idx < candidate.EndNode() && node_idx < region_ir.nodes.size();
-	     node_idx++) {
+	for (idx_t node_idx = 0; node_idx < region_ir.nodes.size(); node_idx++) {
 		auto &node = region_ir.nodes[node_idx];
 		if (!node.source || !node.source->finalized_source_cardinality_required ||
 		    node.source->estimated_source_cardinality_exact) {
@@ -310,10 +447,10 @@ static bool ExecutionRegionCandidateNeedsFinalizedSourceCardinality(const Execut
 static void AccumulateExecutionRegionOpenRequest(ExecutionRegionPlan &plan, const ExecutionRegionIR &region_ir,
                                                  const ExecutionRegionCandidate &candidate,
                                                  const ExecutionRegionLoweringPlan &lowering_plan) {
-	if (!ExecutionRegionABIIsFullPipeline(candidate.contract.abi)) {
+	if (!ExecutionRegionABIIsFullPipeline(candidate.abi)) {
 		return;
 	}
-	for (idx_t node_idx = candidate.first_node; node_idx < candidate.EndNode(); node_idx++) {
+	for (idx_t node_idx = 0; node_idx < region_ir.nodes.size(); node_idx++) {
 		auto &node = region_ir.nodes[node_idx];
 		if (!node.source) {
 			continue;
@@ -325,10 +462,9 @@ static void AccumulateExecutionRegionOpenRequest(ExecutionRegionPlan &plan, cons
 		        : source.execution;
 		auto native_fused_source_owner =
 		    ExecutionRegionExecutionModeIsCompiled(lowering_plan.ExpectedCompiledExecutionMode()) &&
-		    lowering_plan.IsFullyFused();
+		    lowering_plan.SelectedStageCount() == candidate.stage_plan.stages.size();
 		if (source.kind == ExecutionRegionSourceKind::STATEFUL_OPERATOR) {
 			auto &contract = plan.source_open_request;
-			contract.present = true;
 			contract.source_execution =
 			    selected_source_execution == ExecutionRegionSourceExecutionKind::SOURCE_CONTRACT &&
 			            source.source_contract.status == ExecutionRegionSourceContractStatus::READY &&
@@ -345,7 +481,6 @@ static void AccumulateExecutionRegionOpenRequest(ExecutionRegionPlan &plan, cons
 		}
 		auto &table_scan_contract = source.table_scan_contract;
 		auto &plan_contract = plan.source_open_request;
-		plan_contract.present = true;
 		plan_contract.source_execution =
 		    selected_source_execution == ExecutionRegionSourceExecutionKind::SOURCE_CONTRACT &&
 		            source.source_contract.status == ExecutionRegionSourceContractStatus::READY &&
@@ -386,17 +521,19 @@ unique_ptr<ExecutionRegionPlan> ExecutionRegionPlanner::Build(ClientContext &con
 	auto needs_candidate_diagnostics = ExecutionRegionPlanningNeedsCandidateDiagnostics(context);
 	string backend_name;
 	optional_ptr<ExecutionRegionBackend> backend;
-	auto record_decision_event =
-	    [&](string event_backend_name, ExecutionRegionCompileStatus status, ExecutionRegionExecutionMode execution_mode,
-	        string reason, string blocker, const string *ir, int64_t decision_time_us,
-	        const ExecutionRegionCandidate *candidate, ExecutionRunnerKind selected_runner,
-	        const ExecutionRegionStageTimings *stage_timings,
-	        ExecutionRegionSourceExecutionKind selected_source_execution, bool selected_uses_scan_filters,
-	        const PhysicalRunnerCostProfile *runner_cost) -> idx_t {
+	const string *active_pipeline_shape = nullptr;
+	auto record_decision_event = [&](string event_backend_name, ExecutionRegionCompileStatus status,
+	                                 ExecutionRegionExecutionMode execution_mode, string reason, string blocker,
+	                                 const string *ir, int64_t decision_time_us,
+	                                 const ExecutionRegionCandidate *candidate, ExecutionRunnerKind selected_runner,
+	                                 const ExecutionRegionStageTimings *stage_timings,
+	                                 ExecutionRegionSourceExecutionKind selected_source_execution,
+	                                 ExecutionRegionScanFilterMode selected_scan_filter_mode,
+	                                 const PhysicalRunnerCostProfile *runner_cost) -> idx_t {
 		return execution_region_manager.RecordEvent(context, std::move(event_backend_name), status, execution_mode,
 		                                            std::move(reason), std::move(blocker), ir, decision_time_us, 0, 0,
-		                                            candidate, selected_runner, stage_timings,
-		                                            selected_source_execution, selected_uses_scan_filters, runner_cost);
+		                                            active_pipeline_shape, candidate, selected_runner, stage_timings,
+		                                            selected_source_execution, selected_scan_filter_mode, runner_cost);
 	};
 	auto select_backend_for_runner = [&](ExecutionRunnerKind runner_kind) -> bool {
 		if (backend) {
@@ -409,7 +546,8 @@ unique_ptr<ExecutionRegionPlan> ExecutionRegionPlanner::Build(ClientContext &con
 				record_decision_event(backend_name, ExecutionRegionCompileStatus::UNAVAILABLE,
 				                      ExecutionRegionExecutionMode::NONE, "no available execution region backend",
 				                      "backend_unavailable", nullptr, 0, nullptr, ExecutionRunnerKind::VECTORIZED,
-				                      nullptr, ExecutionRegionSourceExecutionKind::NONE, false, nullptr);
+				                      nullptr, ExecutionRegionSourceExecutionKind::NONE,
+				                      ExecutionRegionScanFilterMode::NONE, nullptr);
 			}
 			return false;
 		}
@@ -418,7 +556,8 @@ unique_ptr<ExecutionRegionPlan> ExecutionRegionPlanner::Build(ClientContext &con
 				record_decision_event(
 				    backend_name, ExecutionRegionCompileStatus::UNSUPPORTED, ExecutionRegionExecutionMode::UNSUPPORTED,
 				    "backend does not compile regions", "backend_does_not_compile_regions", nullptr, 0, nullptr,
-				    ExecutionRunnerKind::VECTORIZED, nullptr, ExecutionRegionSourceExecutionKind::NONE, false, nullptr);
+				    ExecutionRunnerKind::VECTORIZED, nullptr, ExecutionRegionSourceExecutionKind::NONE,
+				    ExecutionRegionScanFilterMode::NONE, nullptr);
 			}
 			return false;
 		}
@@ -430,8 +569,8 @@ unique_ptr<ExecutionRegionPlan> ExecutionRegionPlanner::Build(ClientContext &con
 		}
 		record_decision_event("policy", ExecutionRegionCompileStatus::DISABLED, ExecutionRegionExecutionMode::NONE,
 		                      "execution_region_policy=off", "policy_off", nullptr, 0, nullptr,
-		                      ExecutionRunnerKind::VECTORIZED, nullptr, ExecutionRegionSourceExecutionKind::NONE, false,
-		                      nullptr);
+		                      ExecutionRunnerKind::VECTORIZED, nullptr, ExecutionRegionSourceExecutionKind::NONE,
+		                      ExecutionRegionScanFilterMode::NONE, nullptr);
 		return nullptr;
 	}
 	auto cost_parameters = BuildPhysicalRunnerCostParameters(context);
@@ -481,7 +620,8 @@ unique_ptr<ExecutionRegionPlan> ExecutionRegionPlanner::Build(ClientContext &con
 				record_decision_event(backend_name, ExecutionRegionCompileStatus::UNAVAILABLE,
 				                      ExecutionRegionExecutionMode::NONE, "no available execution region backend",
 				                      "backend_unavailable", nullptr, 0, nullptr, ExecutionRunnerKind::VECTORIZED,
-				                      nullptr, ExecutionRegionSourceExecutionKind::NONE, false, nullptr);
+				                      nullptr, ExecutionRegionSourceExecutionKind::NONE,
+				                      ExecutionRegionScanFilterMode::NONE, nullptr);
 			}
 			return false;
 		}
@@ -490,7 +630,8 @@ unique_ptr<ExecutionRegionPlan> ExecutionRegionPlanner::Build(ClientContext &con
 				record_decision_event(
 				    backend_name, ExecutionRegionCompileStatus::UNSUPPORTED, ExecutionRegionExecutionMode::UNSUPPORTED,
 				    "backend does not compile regions", "backend_does_not_compile_regions", nullptr, 0, nullptr,
-				    ExecutionRunnerKind::VECTORIZED, nullptr, ExecutionRegionSourceExecutionKind::NONE, false, nullptr);
+				    ExecutionRunnerKind::VECTORIZED, nullptr, ExecutionRegionSourceExecutionKind::NONE,
+				    ExecutionRegionScanFilterMode::NONE, nullptr);
 			}
 			return false;
 		}
@@ -514,11 +655,11 @@ unique_ptr<ExecutionRegionPlan> ExecutionRegionPlanner::Build(ClientContext &con
 					return nullptr;
 				}
 				auto decision_time_us = ExecutionRegionPlannerElapsedMicros(pipeline_decision_start);
-				record_decision_event(backend_name, ExecutionRegionCompileStatus::SKIPPED,
-				                      ExecutionRegionExecutionMode::UNSUPPORTED, physical_runner.reason,
-				                      physical_runner.blocker, nullptr, decision_time_us, nullptr,
-				                      physical_runner.SelectedRunner(), &shared_stage_timings,
-				                      ExecutionRegionSourceExecutionKind::NONE, false, &physical_runner.runner_cost);
+				record_decision_event(
+				    backend_name, ExecutionRegionCompileStatus::SKIPPED, ExecutionRegionExecutionMode::UNSUPPORTED,
+				    physical_runner.reason, physical_runner.blocker, nullptr, decision_time_us, nullptr,
+				    physical_runner.SelectedRunner(), &shared_stage_timings, ExecutionRegionSourceExecutionKind::NONE,
+				    ExecutionRegionScanFilterMode::NONE, &physical_runner.runner_cost);
 			}
 			return nullptr;
 		}
@@ -546,8 +687,8 @@ unique_ptr<ExecutionRegionPlan> ExecutionRegionPlanner::Build(ClientContext &con
 			    backend_name, ExecutionRegionCompileStatus::UNSUPPORTED, ExecutionRegionExecutionMode::UNSUPPORTED,
 			    "core region graph builder produced no execution-region graph", "no_execution_region_graph", nullptr,
 			    shared_stage_timings.pipeline_cbo_time_us + graph_build_time_us, nullptr,
-			    ExecutionRunnerKind::VECTORIZED, &shared_stage_timings, ExecutionRegionSourceExecutionKind::NONE, false,
-			    nullptr);
+			    ExecutionRunnerKind::VECTORIZED, &shared_stage_timings, ExecutionRegionSourceExecutionKind::NONE,
+			    ExecutionRegionScanFilterMode::NONE, nullptr);
 		}
 		return nullptr;
 	}
@@ -556,12 +697,12 @@ unique_ptr<ExecutionRegionPlan> ExecutionRegionPlanner::Build(ClientContext &con
 		if (should_record_decision_telemetry) {
 			string reason = "duckdb_cbo skips region lowering because pipeline has no costed acceleration";
 			reason += ";region_lowering=skipped";
-			record_decision_event(backend_name, ExecutionRegionCompileStatus::SKIPPED,
-			                      ExecutionRegionExecutionMode::UNSUPPORTED, std::move(reason),
-			                      EXECUTION_REGION_BLOCKER_DUCKDB_SELECTED_VECTORIZED, nullptr,
-			                      shared_stage_timings.pipeline_cbo_time_us + graph_build_time_us, nullptr,
-			                      ExecutionRunnerKind::VECTORIZED, &shared_stage_timings,
-			                      ExecutionRegionSourceExecutionKind::NONE, false, nullptr);
+			record_decision_event(
+			    backend_name, ExecutionRegionCompileStatus::SKIPPED, ExecutionRegionExecutionMode::UNSUPPORTED,
+			    std::move(reason), EXECUTION_REGION_BLOCKER_DUCKDB_SELECTED_VECTORIZED, nullptr,
+			    shared_stage_timings.pipeline_cbo_time_us + graph_build_time_us, nullptr,
+			    ExecutionRunnerKind::VECTORIZED, &shared_stage_timings, ExecutionRegionSourceExecutionKind::NONE,
+			    ExecutionRegionScanFilterMode::NONE, nullptr);
 		}
 		return nullptr;
 	}
@@ -572,40 +713,41 @@ unique_ptr<ExecutionRegionPlan> ExecutionRegionPlanner::Build(ClientContext &con
 	if (!region_ir) {
 		if (should_record_decision_telemetry) {
 			auto rejected_reason = DescribeExecutionRegionLoweringRejection(*pipeline_descriptor);
-			record_decision_event(backend_name, ExecutionRegionCompileStatus::UNSUPPORTED,
-			                      ExecutionRegionExecutionMode::UNSUPPORTED, std::move(rejected_reason),
-			                      "no_typed_region_ir", nullptr, decision_recorder.SharedDecisionTime(), nullptr,
-			                      ExecutionRunnerKind::VECTORIZED, &shared_stage_timings,
-			                      ExecutionRegionSourceExecutionKind::NONE, false, nullptr);
+			record_decision_event(
+			    backend_name, ExecutionRegionCompileStatus::UNSUPPORTED, ExecutionRegionExecutionMode::UNSUPPORTED,
+			    std::move(rejected_reason), "no_typed_region_ir", nullptr, decision_recorder.SharedDecisionTime(),
+			    nullptr, ExecutionRunnerKind::VECTORIZED, &shared_stage_timings,
+			    ExecutionRegionSourceExecutionKind::NONE, ExecutionRegionScanFilterMode::NONE, nullptr);
 		}
 		return nullptr;
 	}
 	auto &lowered_region = *region_ir;
-	if (lowered_region.candidates.empty()) {
+	active_pipeline_shape = &lowered_region.pipeline_shape;
+	if (!lowered_region.candidate) {
 		if (should_record_decision_telemetry) {
 			string reason = "core region lowering produced no candidates";
-			if (!lowered_region.candidate_blockers.empty()) {
+			if (!lowered_region.candidate_blocker.empty()) {
 				reason = "core-region-candidate-blocked:" +
-				         FirstExecutionRegionReasonToken(lowered_region.candidate_blockers[0]) + ";" + reason + ";" +
-				         lowered_region.candidate_blockers[0];
+				         FirstExecutionRegionReasonToken(lowered_region.candidate_blocker) + ";" + reason + ";" +
+				         lowered_region.candidate_blocker;
 			}
-			record_decision_event(backend_name, ExecutionRegionCompileStatus::UNSUPPORTED,
-			                      ExecutionRegionExecutionMode::UNSUPPORTED, reason,
-			                      ExecutionRegionCandidateBlockerCode(lowered_region), &lowered_region.ir,
-			                      decision_recorder.SharedDecisionTime(), nullptr, ExecutionRunnerKind::VECTORIZED,
-			                      &shared_stage_timings, ExecutionRegionSourceExecutionKind::NONE, false, nullptr);
+			record_decision_event(
+			    backend_name, ExecutionRegionCompileStatus::UNSUPPORTED, ExecutionRegionExecutionMode::UNSUPPORTED,
+			    reason, ExecutionRegionCandidateBlockerCode(lowered_region), &lowered_region.ir,
+			    decision_recorder.SharedDecisionTime(), nullptr, ExecutionRunnerKind::VECTORIZED, &shared_stage_timings,
+			    ExecutionRegionSourceExecutionKind::NONE, ExecutionRegionScanFilterMode::NONE, nullptr);
 		}
 		return nullptr;
 	}
 
-	vector<SelectedCandidate> selected_regions;
-	for (idx_t candidate_index = 0; candidate_index < lowered_region.candidates.size(); candidate_index++) {
-		auto &candidate = lowered_region.candidates[candidate_index];
+	unique_ptr<SelectedCandidate> selected_region;
+	do {
+		auto &candidate = *lowered_region.candidate;
 		auto candidate_trace = decision_recorder.BeginCandidate();
 		auto &stage_timings = candidate_trace.stage_timings;
 		ExecutionRegionPhysicalRunnerSelection cost_only_physical_runner;
 		bool has_cost_only_physical_runner = false;
-		if (ExecutionRegionABIIsFullPipeline(candidate.contract.abi)) {
+		if (ExecutionRegionABIIsFullPipeline(candidate.abi)) {
 			string full_pipeline_entry_reason;
 			if (!ExecutionRegionRuntimeCanEnter(pipeline, full_pipeline_entry_reason)) {
 				if (should_record_decision_telemetry) {
@@ -616,7 +758,7 @@ unique_ptr<ExecutionRegionPlan> ExecutionRegionPlanner::Build(ClientContext &con
 					                                         should_record_detailed_telemetry),
 					    "full_pipeline_runtime_missing_source_or_sink", &lowered_region.ir, decision_time_us,
 					    &candidate, ExecutionRunnerKind::VECTORIZED, &stage_timings,
-					    ExecutionRegionSourceExecutionKind::NONE, false, nullptr);
+					    ExecutionRegionSourceExecutionKind::NONE, ExecutionRegionScanFilterMode::NONE, nullptr);
 				}
 				continue;
 			}
@@ -627,14 +769,14 @@ unique_ptr<ExecutionRegionPlan> ExecutionRegionPlanner::Build(ClientContext &con
 			plan->operator_readiness_refresh = true;
 			if (should_record_decision_telemetry) {
 				auto decision_time_us = decision_recorder.ClaimCandidateDecisionTime(candidate_trace);
-				record_decision_event(decision_event_backend_name(ExecutionRunnerKind::COMPILED_VECTORIZED),
-				                      ExecutionRegionCompileStatus::SKIPPED, ExecutionRegionExecutionMode::UNSUPPORTED,
-				                      AttachExecutionRegionCandidateReason(candidate,
-				                                                           std::move(finalized_cardinality_reason),
-				                                                           should_record_detailed_telemetry),
-				                      "state_scan_source_cardinality_not_ready", &lowered_region.ir, decision_time_us,
-				                      &candidate, ExecutionRunnerKind::VECTORIZED, &stage_timings,
-				                      ExecutionRegionSourceExecutionKind::NONE, false, nullptr);
+				record_decision_event(
+				    decision_event_backend_name(ExecutionRunnerKind::COMPILED_VECTORIZED),
+				    ExecutionRegionCompileStatus::SKIPPED, ExecutionRegionExecutionMode::UNSUPPORTED,
+				    AttachExecutionRegionCandidateReason(candidate, std::move(finalized_cardinality_reason),
+				                                         should_record_detailed_telemetry),
+				    "state_scan_source_cardinality_not_ready", &lowered_region.ir, decision_time_us, &candidate,
+				    ExecutionRunnerKind::VECTORIZED, &stage_timings, ExecutionRegionSourceExecutionKind::NONE,
+				    ExecutionRegionScanFilterMode::NONE, nullptr);
 			}
 			continue;
 		}
@@ -652,7 +794,7 @@ unique_ptr<ExecutionRegionPlan> ExecutionRegionPlanner::Build(ClientContext &con
 					                                         should_record_detailed_telemetry),
 					    physical_runner.blocker, &lowered_region.ir, decision_time_us, &candidate,
 					    physical_runner.SelectedRunner(), &stage_timings, ExecutionRegionSourceExecutionKind::NONE,
-					    false, &physical_runner.runner_cost);
+					    ExecutionRegionScanFilterMode::NONE, &physical_runner.runner_cost);
 				}
 				continue;
 			}
@@ -666,33 +808,19 @@ unique_ptr<ExecutionRegionPlan> ExecutionRegionPlanner::Build(ClientContext &con
 			}
 			restrict_cost_parameters_to_backend();
 		}
-		if (!needs_backend_diagnostics && !ExecutionRegionContractHasOnlyNativeStages(candidate.contract)) {
-			if (should_record_decision_telemetry) {
-				auto contract_decision = BuildExecutionRegionFusedContractBoundaryDecision(candidate.contract);
-				auto decision_time_us = decision_recorder.ClaimCandidateDecisionTime(candidate_trace);
-				record_decision_event(
-				    backend_name, ExecutionRegionCompileStatus::UNSUPPORTED, ExecutionRegionExecutionMode::UNSUPPORTED,
-				    AttachExecutionRegionCandidateReason(candidate, std::move(contract_decision.reason),
-				                                         should_record_detailed_telemetry),
-				    contract_decision.blocker, &lowered_region.ir, decision_time_us, &candidate,
-				    ExecutionRunnerKind::VECTORIZED, &stage_timings, ExecutionRegionSourceExecutionKind::NONE, false,
-				    nullptr);
-			}
-			continue;
-		}
 		if (!needs_backend_diagnostics) {
 			auto stage_plan_decision = ValidateExecutionRegionFusedStagePlan(candidate.stage_plan);
 			if (!stage_plan_decision.valid) {
 				if (should_record_decision_telemetry) {
 					auto decision_time_us = decision_recorder.ClaimCandidateDecisionTime(candidate_trace);
-					record_decision_event(backend_name, ExecutionRegionCompileStatus::UNSUPPORTED,
-					                      ExecutionRegionExecutionMode::UNSUPPORTED,
-					                      AttachExecutionRegionCandidateReason(candidate,
-					                                                           std::move(stage_plan_decision.reason),
-					                                                           should_record_detailed_telemetry),
-					                      stage_plan_decision.blocker, &lowered_region.ir, decision_time_us, &candidate,
-					                      ExecutionRunnerKind::VECTORIZED, &stage_timings,
-					                      ExecutionRegionSourceExecutionKind::NONE, false, nullptr);
+					record_decision_event(
+					    backend_name, ExecutionRegionCompileStatus::UNSUPPORTED,
+					    ExecutionRegionExecutionMode::UNSUPPORTED,
+					    AttachExecutionRegionCandidateReason(candidate, std::move(stage_plan_decision.reason),
+					                                         should_record_detailed_telemetry),
+					    stage_plan_decision.blocker, &lowered_region.ir, decision_time_us, &candidate,
+					    ExecutionRunnerKind::VECTORIZED, &stage_timings, ExecutionRegionSourceExecutionKind::NONE,
+					    ExecutionRegionScanFilterMode::NONE, nullptr);
 				}
 				continue;
 			}
@@ -718,13 +846,13 @@ unique_ptr<ExecutionRegionPlan> ExecutionRegionPlanner::Build(ClientContext &con
 					empty_analysis_reason += ";";
 					empty_analysis_reason += lowering_reason;
 				}
-				record_decision_event(
-				    backend_name, ExecutionRegionCompileStatus::UNSUPPORTED, ExecutionRegionExecutionMode::UNSUPPORTED,
-				    AttachExecutionRegionCandidateReason(candidate, std::move(empty_analysis_reason),
-				                                         should_record_detailed_telemetry),
-				    "backend_empty_analysis", &lowered_region.ir, decision_time_us, &candidate,
-				    ExecutionRunnerKind::VECTORIZED, &stage_timings, lowering_plan.SelectedSourceExecution(),
-				    lowering_plan.UsesScanFilters(), nullptr);
+				record_decision_event(backend_name, ExecutionRegionCompileStatus::UNSUPPORTED,
+				                      ExecutionRegionExecutionMode::UNSUPPORTED,
+				                      AttachExecutionRegionCandidateReason(candidate, std::move(empty_analysis_reason),
+				                                                           should_record_detailed_telemetry),
+				                      "backend_empty_analysis", &lowered_region.ir, decision_time_us, &candidate,
+				                      ExecutionRunnerKind::VECTORIZED, &stage_timings,
+				                      lowering_plan.SelectedSourceExecution(), lowering_plan.ScanFilterMode(), nullptr);
 			}
 			continue;
 		}
@@ -740,29 +868,30 @@ unique_ptr<ExecutionRegionPlan> ExecutionRegionPlanner::Build(ClientContext &con
 					unsupported_reason = "region lowering contains no native executable nodes: " + unsupported_reason +
 					                     ";execution:unsupported";
 				}
-				record_decision_event(
-				    backend_name, ExecutionRegionCompileStatus::UNSUPPORTED, ExecutionRegionExecutionMode::UNSUPPORTED,
-				    AttachExecutionRegionCandidateReason(candidate, std::move(unsupported_reason),
-				                                         should_record_detailed_telemetry),
-				    ExecutionRegionUnsupportedBlockerCode(lowering_plan), &lowered_region.ir, decision_time_us,
-				    &candidate, ExecutionRunnerKind::VECTORIZED, &stage_timings,
-				    lowering_plan.SelectedSourceExecution(), lowering_plan.UsesScanFilters(), nullptr);
+				record_decision_event(backend_name, ExecutionRegionCompileStatus::UNSUPPORTED,
+				                      ExecutionRegionExecutionMode::UNSUPPORTED,
+				                      AttachExecutionRegionCandidateReason(candidate, std::move(unsupported_reason),
+				                                                           should_record_detailed_telemetry),
+				                      ExecutionRegionUnsupportedBlockerCode(lowering_plan), &lowered_region.ir,
+				                      decision_time_us, &candidate, ExecutionRunnerKind::VECTORIZED, &stage_timings,
+				                      lowering_plan.SelectedSourceExecution(), lowering_plan.ScanFilterMode(), nullptr);
 			}
 			continue;
 		}
-		auto fused_contract_decision = ValidateExecutionRegionFusedStageContract(candidate, lowering_plan);
-		if (!fused_contract_decision.valid) {
+		auto fused_stage_plan_decision =
+		    ValidateExecutionRegionFusedStagePlan(lowered_region, candidate, lowering_plan);
+		if (!fused_stage_plan_decision.valid) {
 			if (should_record_decision_telemetry) {
 				auto decision_time_us = decision_recorder.ClaimCandidateDecisionTime(candidate_trace);
 				auto reason = ExecutionRegionLoweringEventReason(lowering_plan, should_record_detailed_telemetry) +
-				              ";execution:unsupported;" + std::move(fused_contract_decision.reason);
-				record_decision_event(
-				    backend_name, ExecutionRegionCompileStatus::UNSUPPORTED, ExecutionRegionExecutionMode::UNSUPPORTED,
-				    AttachExecutionRegionCandidateReason(candidate, std::move(reason),
-				                                         should_record_detailed_telemetry),
-				    fused_contract_decision.blocker, &lowered_region.ir, decision_time_us, &candidate,
-				    ExecutionRunnerKind::VECTORIZED, &stage_timings, lowering_plan.SelectedSourceExecution(),
-				    lowering_plan.UsesScanFilters(), nullptr);
+				              ";execution:unsupported;" + std::move(fused_stage_plan_decision.reason);
+				record_decision_event(backend_name, ExecutionRegionCompileStatus::UNSUPPORTED,
+				                      ExecutionRegionExecutionMode::UNSUPPORTED,
+				                      AttachExecutionRegionCandidateReason(candidate, std::move(reason),
+				                                                           should_record_detailed_telemetry),
+				                      fused_stage_plan_decision.blocker, &lowered_region.ir, decision_time_us,
+				                      &candidate, ExecutionRunnerKind::VECTORIZED, &stage_timings,
+				                      lowering_plan.SelectedSourceExecution(), lowering_plan.ScanFilterMode(), nullptr);
 			}
 			continue;
 		}
@@ -779,13 +908,13 @@ unique_ptr<ExecutionRegionPlan> ExecutionRegionPlanner::Build(ClientContext &con
 				              ? "execution:state-not-ready;"
 				              : "execution:unsupported;";
 				reason += std::move(readiness_decision.reason);
-				record_decision_event(
-				    backend_name, readiness_decision.status, ExecutionRegionExecutionMode::UNSUPPORTED,
-				    AttachExecutionRegionCandidateReason(candidate, std::move(reason),
-				                                         should_record_detailed_telemetry),
-				    readiness_decision.blocker, &lowered_region.ir, decision_time_us, &candidate,
-				    ExecutionRunnerKind::VECTORIZED, &stage_timings, lowering_plan.SelectedSourceExecution(),
-				    lowering_plan.UsesScanFilters(), nullptr);
+				record_decision_event(backend_name, readiness_decision.status,
+				                      ExecutionRegionExecutionMode::UNSUPPORTED,
+				                      AttachExecutionRegionCandidateReason(candidate, std::move(reason),
+				                                                           should_record_detailed_telemetry),
+				                      readiness_decision.blocker, &lowered_region.ir, decision_time_us, &candidate,
+				                      ExecutionRunnerKind::VECTORIZED, &stage_timings,
+				                      lowering_plan.SelectedSourceExecution(), lowering_plan.ScanFilterMode(), nullptr);
 			}
 			continue;
 		}
@@ -803,32 +932,28 @@ unique_ptr<ExecutionRegionPlan> ExecutionRegionPlanner::Build(ClientContext &con
 				                                         should_record_detailed_telemetry),
 				    physical_runner.blocker, &lowered_region.ir, decision_time_us, &candidate,
 				    physical_runner.SelectedRunner(), &stage_timings, lowering_plan.SelectedSourceExecution(),
-				    lowering_plan.UsesScanFilters(), &physical_runner.runner_cost);
+				    lowering_plan.ScanFilterMode(), &physical_runner.runner_cost);
 			}
 			continue;
 		}
 
-		SelectedCandidate selected_region;
-		selected_region.candidate_index = candidate_index;
-		selected_region.lowering_plan = std::move(lowering_plan);
-		selected_region.physical_runner = std::move(physical_runner);
-		selected_region.decision_time_us = decision_recorder.ClaimCandidateDecisionTime(candidate_trace);
-		selected_region.stage_timings = stage_timings;
-		AccumulateExecutionRegionOpenRequest(*plan, lowered_region, candidate, selected_region.lowering_plan);
-		selected_regions.push_back(std::move(selected_region));
-	}
-	if (selected_regions.empty()) {
+		selected_region = make_uniq<SelectedCandidate>();
+		selected_region->lowering_plan = std::move(lowering_plan);
+		selected_region->physical_runner = std::move(physical_runner);
+		selected_region->decision_time_us = decision_recorder.ClaimCandidateDecisionTime(candidate_trace);
+		selected_region->stage_timings = stage_timings;
+		AccumulateExecutionRegionOpenRequest(*plan, lowered_region, candidate, selected_region->lowering_plan);
+	} while (false);
+	if (!selected_region) {
 		return KeepExecutableExecutionRegionPlan(std::move(plan));
 	}
-	Compile(context, *backend, backend_name, pipeline, *plan, lowered_region, selected_regions);
+	Compile(context, *backend, backend_name, pipeline, *plan, lowered_region, *selected_region);
 	if (auto kernel = plan->GetExecutableFullPipelineKernel(); kernel && kernel->HasTableFilterKernels()) {
 		plan->source_open_request.table_filter_kernel_provider =
 		    optional_ptr<const TableFilterKernelProvider>(kernel.get());
 	}
 	if (plan->HasExecutableFullPipeline() && !ExecutionRegionSettings::TraceVectorizedBaseline(context)) {
-		auto runner = selected_regions.empty() ? ExecutionRunnerKind::COMPILED_VECTORIZED
-		                                       : selected_regions[0].physical_runner.SelectedRunner();
-		plan->SelectRunner(runner);
+		plan->SelectRunner(selected_region->physical_runner.SelectedRunner());
 	}
 	return KeepExecutableExecutionRegionPlan(std::move(plan));
 }
@@ -850,7 +975,7 @@ static void ValidateExecutionRegionCompileResult(const string &backend_name, con
 		throw InternalException("execution region backend \"%s\" compiled region without native executable nodes",
 		                        backend_name);
 	}
-	if (!lowering_plan.IsFullyFused()) {
+	if (lowering_plan.SelectedStageCount() != candidate.stage_plan.stages.size()) {
 		throw InternalException("execution region backend \"%s\" compiled a region that is not fully fused",
 		                        backend_name);
 	}
@@ -876,8 +1001,7 @@ static void ValidateExecutionRegionCompileResult(const string &backend_name, con
 		throw InternalException("execution region backend \"%s\" compiled region without executable code",
 		                        backend_name);
 	}
-	if (result.kernel && ExecutionRegionABIIsFullPipeline(candidate.contract.abi) &&
-	    !result.kernel->CanExecuteFullPipeline()) {
+	if (result.kernel && ExecutionRegionABIIsFullPipeline(candidate.abi) && !result.kernel->CanExecuteFullPipeline()) {
 		throw InternalException(
 		    "execution region backend \"%s\" compiled full pipeline without full-pipeline executable ABI",
 		    backend_name);
@@ -887,49 +1011,41 @@ static void ValidateExecutionRegionCompileResult(const string &backend_name, con
 void ExecutionRegionPlanner::Compile(ClientContext &context, ExecutionRegionBackend &backend,
                                      const string &backend_name, Pipeline &pipeline, ExecutionRegionPlan &plan,
                                      ExecutionRegionIR &region_ir,
-                                     vector<ExecutionRegionPlanner::SelectedCandidate> &selected_regions) {
-	plan.kernels.clear();
-	if (context.IsCompiledExecutionSuppressed() || !ExecutionRegionSettings::Enabled(context) ||
-	    selected_regions.empty()) {
+                                     ExecutionRegionPlanner::SelectedCandidate &selected_region) {
+	plan.kernel.reset();
+	if (context.IsCompiledExecutionSuppressed() || !ExecutionRegionSettings::Enabled(context)) {
 		return;
 	}
 	auto &execution_region_manager = ExecutionRegionManager::Get(context);
 	auto should_record_detailed_telemetry = ExecutionRegionSettings::ShouldRecordDetailedTelemetry(context);
-	for (auto &compiled_region : selected_regions) {
-		auto &candidate = region_ir.candidates[compiled_region.candidate_index];
-		auto stage_timings = compiled_region.stage_timings;
-		ExecutionRegionCompilationInput input(context, region_ir, candidate);
-		input.lowering_plan = &compiled_region.lowering_plan;
-		ExecutionRegionCompileResult result;
-		int64_t compile_time_us = 0;
-		bool reused_artifact = false;
-		string artifact_cache_key;
-		ExecutionRegionArtifactCacheReservation artifact_reservation;
-		if (compiled_region.lowering_plan.backend_plan) {
-			artifact_cache_key = compiled_region.lowering_plan.backend_plan->ArtifactCacheKey();
-		}
-		if (!artifact_cache_key.empty()) {
-			artifact_cache_key =
-			    backend_name + ":" + std::to_string(EXECUTION_REGION_BACKEND_ABI_VERSION) + ":" + artifact_cache_key;
-			auto &cache = execution_region_manager.artifact_cache;
-			artifact_reservation = cache.LookupOrReserve(artifact_cache_key);
-			if (artifact_reservation.IsHit()) {
-				auto &cached = *artifact_reservation.Cached();
-				auto reason = cached.compile_reason;
-				if (!reason.empty()) {
-					reason += ";";
-				}
-				reason += "compiled artifact cache hit";
-				result = ExecutionRegionCompileResult::CompiledArtifact(cached.artifact, cached.execution_mode,
-				                                                        std::move(reason), cached.ir);
-				reused_artifact = true;
-			} else {
-				auto compile_start = std::chrono::steady_clock::now();
-				result = backend.CompileRegion(input);
-				compile_time_us = ExecutionRegionPlannerElapsedMicros(compile_start);
-				ValidateExecutionRegionCompileResult(backend_name, candidate, compiled_region.lowering_plan,
-				                                     artifact_cache_key, result);
+	auto &compiled_region = selected_region;
+	auto &candidate = *region_ir.candidate;
+	auto stage_timings = compiled_region.stage_timings;
+	ExecutionRegionCompilationInput input(context, region_ir, candidate);
+	input.lowering_plan = &compiled_region.lowering_plan;
+	ExecutionRegionCompileResult result;
+	int64_t compile_time_us = 0;
+	bool reused_artifact = false;
+	string artifact_cache_key;
+	ExecutionRegionArtifactCacheReservation artifact_reservation;
+	if (compiled_region.lowering_plan.backend_plan) {
+		artifact_cache_key = compiled_region.lowering_plan.backend_plan->ArtifactCacheKey();
+	}
+	if (!artifact_cache_key.empty()) {
+		artifact_cache_key =
+		    backend_name + ":" + std::to_string(EXECUTION_REGION_BACKEND_ABI_VERSION) + ":" + artifact_cache_key;
+		auto &cache = execution_region_manager.artifact_cache;
+		artifact_reservation = cache.LookupOrReserve(artifact_cache_key);
+		if (artifact_reservation.IsHit()) {
+			auto &cached = *artifact_reservation.Cached();
+			auto reason = cached.compile_reason;
+			if (!reason.empty()) {
+				reason += ";";
 			}
+			reason += "compiled artifact cache hit";
+			result = ExecutionRegionCompileResult::CompiledArtifact(cached.artifact, cached.execution_mode,
+			                                                        std::move(reason), cached.ir);
+			reused_artifact = true;
 		} else {
 			auto compile_start = std::chrono::steady_clock::now();
 			result = backend.CompileRegion(input);
@@ -937,67 +1053,72 @@ void ExecutionRegionPlanner::Compile(ClientContext &context, ExecutionRegionBack
 			ValidateExecutionRegionCompileResult(backend_name, candidate, compiled_region.lowering_plan,
 			                                     artifact_cache_key, result);
 		}
-		if (result.status == ExecutionRegionCompileStatus::COMPILED && result.artifact) {
-			auto artifact = result.artifact;
-			auto instantiate_start = std::chrono::steady_clock::now();
-			result.kernel = backend.InstantiateRegionArtifact(artifact, input);
-			result.timings.kernel_build_time_us = ExecutionRegionPlannerElapsedMicros(instantiate_start);
-			if (!result.kernel) {
-				throw InternalException(
-				    "execution region backend \"%s\" could not instantiate its artifact for the advertised cache key",
-				    backend_name);
-			}
-			result.artifact.reset();
-			ValidateExecutionRegionCompileResult(backend_name, candidate, compiled_region.lowering_plan, string(),
-			                                     result);
-			if (artifact_reservation.IsBuilder()) {
-				auto cached = make_shared_ptr<ExecutionRegionCachedArtifact>();
-				cached->artifact = std::move(artifact);
-				cached->execution_mode = result.execution_mode;
-				cached->compile_reason = result.reason;
-				cached->ir = result.ir;
-				execution_region_manager.artifact_cache.Publish(artifact_reservation, std::move(cached));
-			}
-		} else if (artifact_reservation.IsBuilder()) {
-			execution_region_manager.artifact_cache.Abort(artifact_reservation);
+	} else {
+		auto compile_start = std::chrono::steady_clock::now();
+		result = backend.CompileRegion(input);
+		compile_time_us = ExecutionRegionPlannerElapsedMicros(compile_start);
+		ValidateExecutionRegionCompileResult(backend_name, candidate, compiled_region.lowering_plan, artifact_cache_key,
+		                                     result);
+	}
+	if (result.status == ExecutionRegionCompileStatus::COMPILED && result.artifact) {
+		auto artifact = result.artifact;
+		auto instantiate_start = std::chrono::steady_clock::now();
+		result.kernel = backend.InstantiateRegionArtifact(artifact, input);
+		result.timings.kernel_build_time_us = ExecutionRegionPlannerElapsedMicros(instantiate_start);
+		if (!result.kernel) {
+			throw InternalException(
+			    "execution region backend \"%s\" could not instantiate its artifact for the advertised cache key",
+			    backend_name);
 		}
-		if (reused_artifact) {
-			compile_time_us = 0;
+		result.artifact.reset();
+		ValidateExecutionRegionCompileResult(backend_name, candidate, compiled_region.lowering_plan, string(), result);
+		if (artifact_reservation.IsBuilder()) {
+			auto cached = make_shared_ptr<ExecutionRegionCachedArtifact>();
+			cached->artifact = std::move(artifact);
+			cached->execution_mode = result.execution_mode;
+			cached->compile_reason = result.reason;
+			cached->ir = result.ir;
+			execution_region_manager.artifact_cache.Publish(artifact_reservation, std::move(cached));
 		}
-		stage_timings.codegen_time_us = compile_time_us;
-		stage_timings.executable_build_time_us = result.timings.executable_build_time_us;
-		stage_timings.machine_codegen_time_us = result.timings.machine_codegen_time_us;
-		stage_timings.kernel_build_time_us = result.timings.kernel_build_time_us;
+	} else if (artifact_reservation.IsBuilder()) {
+		execution_region_manager.artifact_cache.Abort(artifact_reservation);
+	}
+	if (reused_artifact) {
+		compile_time_us = 0;
+	}
+	stage_timings.codegen_time_us = compile_time_us;
+	stage_timings.executable_build_time_us = result.timings.executable_build_time_us;
+	stage_timings.machine_codegen_time_us = result.timings.machine_codegen_time_us;
+	stage_timings.kernel_build_time_us = result.timings.kernel_build_time_us;
 
-		idx_t code_size = result.kernel ? result.kernel->CodeSize() : 0;
-		auto status = result.status;
-		auto reason = AttachExecutionRegionCandidateReason(
-		    candidate, ComposeExecutionRegionCompileEventReason(compiled_region.physical_runner, result.reason),
-		    should_record_detailed_telemetry);
-		auto execution_mode = result.execution_mode;
-		auto trace_id = execution_region_manager.RecordEvent(
-		    context, backend_name, status, execution_mode, reason, ExecutionRegionCompileResultBlockerCode(status),
-		    &result.ir, compiled_region.decision_time_us, compile_time_us, code_size, &candidate,
-		    compiled_region.physical_runner.SelectedRunner(), &stage_timings,
-		    compiled_region.lowering_plan.SelectedSourceExecution(), compiled_region.lowering_plan.UsesScanFilters(),
-		    &compiled_region.physical_runner.runner_cost);
-		if (status == ExecutionRegionCompileStatus::COMPILED && result.kernel) {
-			result.kernel->SetTraceInfo(trace_id, execution_mode, reason, compile_time_us, code_size);
-			result.kernel->SetAdaptiveMeasurementCandidate(
-			    ExecutionRegionAdaptiveMeasurementWithinBand(context, compiled_region.physical_runner.runner_cost));
-			result.kernel->SetExecutionABI(candidate.contract.abi);
-			result.kernel->SetTraceSelectedSourceExecution(compiled_region.lowering_plan.SelectedSourceExecution());
-			result.kernel->SetTraceUsesScanFilters(compiled_region.lowering_plan.UsesScanFilters());
-			if (ExecutionRegionSettings::TraceRuntime(context)) {
-				result.kernel->SetTracePipeline(candidate);
-			}
+	idx_t code_size = result.kernel ? result.kernel->CodeSize() : 0;
+	auto status = result.status;
+	auto reason = AttachExecutionRegionCandidateReason(
+	    candidate, ComposeExecutionRegionCompileEventReason(compiled_region.physical_runner, result.reason),
+	    should_record_detailed_telemetry);
+	auto execution_mode = result.execution_mode;
+	auto trace_id = execution_region_manager.RecordEvent(
+	    context, backend_name, status, execution_mode, reason, ExecutionRegionCompileResultBlockerCode(status),
+	    &result.ir, compiled_region.decision_time_us, compile_time_us, code_size, &region_ir.pipeline_shape, &candidate,
+	    compiled_region.physical_runner.SelectedRunner(), &stage_timings,
+	    compiled_region.lowering_plan.SelectedSourceExecution(), compiled_region.lowering_plan.ScanFilterMode(),
+	    &compiled_region.physical_runner.runner_cost);
+	if (status == ExecutionRegionCompileStatus::COMPILED && result.kernel) {
+		result.kernel->SetTraceInfo(trace_id, execution_mode, reason, compile_time_us, code_size);
+		result.kernel->SetAdaptiveMeasurementCandidate(
+		    ExecutionRegionAdaptiveMeasurementWithinBand(context, compiled_region.physical_runner.runner_cost));
+		result.kernel->SetExecutionABI(candidate.abi);
+		result.kernel->SetTraceSelectedSourceExecution(compiled_region.lowering_plan.SelectedSourceExecution());
+		result.kernel->SetTraceScanFilterMode(compiled_region.lowering_plan.ScanFilterMode());
+		if (ExecutionRegionSettings::TraceRuntime(context)) {
+			result.kernel->SetTracePipeline(candidate, region_ir.pipeline_shape);
 		}
-		if (status == ExecutionRegionCompileStatus::ERROR) {
-			throw InvalidInputException("Execution region compilation failed: %s", reason);
-		}
-		if (result.kernel) {
-			plan.kernels.push_back(std::move(result.kernel));
-		}
+	}
+	if (status == ExecutionRegionCompileStatus::ERROR) {
+		throw InvalidInputException("Execution region compilation failed: %s", reason);
+	}
+	if (result.kernel) {
+		plan.kernel = std::move(result.kernel);
 	}
 }
 

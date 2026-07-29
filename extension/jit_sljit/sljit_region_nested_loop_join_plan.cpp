@@ -21,9 +21,9 @@ static bool TryGetSljitNestedLoopJoinValueKind(const LogicalType &type, SljitNat
 	}
 }
 
-SljitRegionNodePlan PlanSljitNestedLoopJoinProbeOperatorNode(const ExecutionRegionNode &node,
-                                                             const vector<LogicalType> &input_types,
-                                                             bool render_diagnostics) {
+static SljitRegionNodePlan PlanSljitNestedLoopJoinProbeOperatorNodeInternal(const ExecutionRegionNode &node,
+                                                                            const vector<LogicalType> &input_types,
+                                                                            bool render_diagnostics) {
 	if (!node.operator_info) {
 		return SljitRegionBoundaryNode("nested loop join probe operator is missing typed operator IR");
 	}
@@ -105,6 +105,22 @@ SljitRegionNodePlan PlanSljitNestedLoopJoinProbeOperatorNode(const ExecutionRegi
 	}
 	AppendSljitReasonPart(reason, node.operator_info->ir, render_diagnostics);
 	return SljitNativeNode(std::move(native_op), std::move(reason));
+}
+
+SljitRegionNodePlan PlanSljitNestedLoopJoinProbeOperatorNode(const ExecutionRegionNode &node,
+                                                             const vector<LogicalType> &input_types,
+                                                             bool render_diagnostics) {
+	auto result = PlanSljitNestedLoopJoinProbeOperatorNodeInternal(node, input_types, render_diagnostics);
+	if (result.kind != ExecutionRegionLoweringKind::BOUNDARY) {
+		return result;
+	}
+	const bool contract_ready = node.operator_info && node.operator_info->nested_loop_join_contract.present &&
+	                            node.operator_info->nested_loop_join_contract.native_probe_contract.status ==
+	                                ExecutionRegionStateContractStatus::READY;
+	result.fusion_blocker =
+	    contract_ready ? "operator-contract-blocker:nested-loop-join-probe-native-lowering-missing;" + result.reason
+	                   : "operator-contract-blocker:nested-loop-join-probe-contract-missing";
+	return result;
 }
 
 } // namespace duckdb

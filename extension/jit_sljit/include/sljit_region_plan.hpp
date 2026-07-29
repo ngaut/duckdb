@@ -297,8 +297,7 @@ struct SljitNativeRegionPlan {
 	vector<SljitNativeRegionOpPlan> ops;
 	vector<SljitNativeScanFilterPlan> scan_filters;
 	SljitNativeAggregateStateSourcePlan aggregate_state_source;
-	ExecutionRegionSourceExecutionKind source_execution = ExecutionRegionSourceExecutionKind::NONE;
-	bool uses_scan_filters = false;
+	ExecutionRegionScanFilterMode scan_filter_mode = ExecutionRegionScanFilterMode::NONE;
 	vector<LogicalType> source_output_types;
 	vector<idx_t> source_distinct_counts;
 	vector<idx_t> source_distinct_reserve_counts;
@@ -306,8 +305,8 @@ struct SljitNativeRegionPlan {
 	vector<Value> source_max_values;
 	vector<bool> source_not_null;
 
-	bool UsesSourceContract() const {
-		return source_execution == ExecutionRegionSourceExecutionKind::SOURCE_CONTRACT;
+	bool UsesScanFilters() const {
+		return scan_filter_mode != ExecutionRegionScanFilterMode::NONE;
 	}
 };
 
@@ -323,7 +322,6 @@ struct SljitRegionBackendPlan : public ExecutionRegionBackendPlan {
 	}
 
 	unique_ptr<SljitNativeRegionPlan> native_region;
-	string error;
 	string artifact_semantic_key;
 	string artifact_binding_key;
 };

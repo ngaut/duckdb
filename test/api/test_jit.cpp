@@ -135,6 +135,61 @@ public:
 	}
 };
 
+struct UnitTestStageMutationBackendState {
+	bool selected_mismatched_stage = false;
+	bool compile_called = false;
+};
+
+class UnitTestStageMutationBackend : public ExecutionRegionBackend {
+public:
+	explicit UnitTestStageMutationBackend(UnitTestStageMutationBackendState &state_p) : state(state_p) {
+	}
+
+	string Name() const override {
+		return "unit_test_stage_mutation_backend";
+	}
+
+	string Description() const override {
+		return "unit test backend that mutates core stage execution";
+	}
+
+	bool SupportsRegions() const override {
+		return true;
+	}
+
+	ExecutionRegionLoweringPlan AnalyzeRegion(const ExecutionRegionCompilationInput &input) override {
+		ExecutionRegionLoweringPlan plan;
+		plan.SetCompiledExecutionMode(ExecutionRegionExecutionMode::NATIVE);
+		plan.AddCompactNode(ExecutionRegionOperatorKind::GENERIC, ExecutionRegionLoweringKind::NATIVE,
+		                    "unit test stage mutation");
+
+		ExecutionRegionSelectedSourceRecipe source_recipe;
+		source_recipe.execution = ExecutionRegionSourceExecutionKind::SOURCE_CONTRACT;
+		plan.SetSourceRecipe(std::move(source_recipe));
+
+		auto &backend_state = state.get();
+		for (idx_t stage_idx = 0; stage_idx < input.candidate.stage_plan.stages.size(); stage_idx++) {
+			auto &stage = input.candidate.stage_plan.stages[stage_idx];
+			auto execution = stage.execution;
+			if (!backend_state.selected_mismatched_stage && stage.kind == ExecutionRegionStageKind::APPEND_SINK &&
+			    execution == ExecutionRegionStageExecutionKind::NATIVE_CONTRACT) {
+				execution = ExecutionRegionStageExecutionKind::GENERATED_IR;
+				backend_state.selected_mismatched_stage = true;
+			}
+			plan.SelectStage(stage_idx, execution);
+		}
+		return plan;
+	}
+
+	ExecutionRegionCompileResult CompileRegion(const ExecutionRegionCompilationInput &) override {
+		state.get().compile_called = true;
+		return ExecutionRegionCompileResult::Unsupported("unit test backend must be rejected before compilation");
+	}
+
+private:
+	reference<UnitTestStageMutationBackendState> state;
+};
+
 class UnitTestExecutionRegionArtifact : public ExecutionRegionArtifact {
 public:
 	explicit UnitTestExecutionRegionArtifact(idx_t value_p) : value(value_p) {
@@ -774,6 +829,42 @@ TEST_CASE("Execution region backend availability does not hold the registry lock
 	REQUIRE(reader_error == nullptr);
 }
 
+TEST_CASE("Execution region core rejects backend stage execution mutation", "[api][jit]") {
+	UnitTestStageMutationBackendState state;
+	JitTestDatabase test;
+	test.manager.RegisterBackend(make_uniq<UnitTestStageMutationBackend>(state), EXECUTION_REGION_BACKEND_ABI_VERSION);
+
+	REQUIRE_NO_FAIL(test.con.Query("SET enable_jit=false"));
+	REQUIRE_NO_FAIL(test.con.Query("CREATE TEMP TABLE jit_stage_mutation_input AS "
+	                               "SELECT i::BIGINT AS i FROM range(100000) tbl(i)"));
+	REQUIRE_NO_FAIL(test.con.Query("SET enable_jit=true"));
+	REQUIRE_NO_FAIL(test.con.Query("SET jit_backend='unit_test_stage_mutation_backend'"));
+	REQUIRE_NO_FAIL(test.con.Query("SET jit_policy='auto'"));
+	REQUIRE_NO_FAIL(test.con.Query("SET jit_event_log_size=10000"));
+	ConfigureJitCoverageCbo(test.con);
+	ConfigureJitDecisionTrace(test.con);
+
+	ClearJitTrace(test.manager);
+	REQUIRE_NO_FAIL(test.con.Query("CREATE TEMP TABLE jit_stage_mutation_output AS "
+	                               "SELECT i + 1 AS j FROM jit_stage_mutation_input"));
+	REQUIRE(state.selected_mismatched_stage);
+	REQUIRE_FALSE(state.compile_called);
+
+	bool found_execution_mismatch = false;
+	for (auto &event : test.manager.GetEvents()) {
+		if (event.backend_name == "unit_test_stage_mutation_backend" &&
+		    event.blocker == "fused_region_stage_selection_execution_mismatch") {
+			found_execution_mismatch = true;
+		}
+	}
+	REQUIRE(found_execution_mismatch);
+
+	REQUIRE_NO_FAIL(test.con.Query("SET enable_jit=false"));
+	auto result = test.con.Query("SELECT sum(j) FROM jit_stage_mutation_output");
+	REQUIRE_NO_FAIL(*result);
+	REQUIRE(result->GetValue(0, 0).ToString() == "5000050000");
+}
+
 TEST_CASE("JIT CBO can select a GPU physical runner when GPU benefit wins", "[api][jit]") {
 	PhysicalRunnerCostInput input;
 	input.estimated_cardinality = 4096;
@@ -1034,6 +1125,50 @@ TEST_CASE("JIT auto policy runs supported projections on Apple Metal GPU", "[api
 		    REQUIRE(StringUtil::Contains(EventGeneratedStageCountBreakdown(event), "metal.projection=1"));
 		    REQUIRE(unbatched_projection_count > 1);
 	    });
+}
+
+TEST_CASE("JIT Metal never claims filtered source rows it does not execute", "[api][jit][metal]") {
+	JitTestDatabase test;
+	auto &con = test.con;
+	auto &manager = test.manager;
+
+	REQUIRE_NO_FAIL(con.Query("LOAD jit_metal"));
+	if (!MetalBackendAvailable(test.context, manager)) {
+		WARN("Skipping Metal JIT GPU test because no available Metal device was reported");
+		return;
+	}
+
+	REQUIRE_NO_FAIL(con.Query("SET enable_jit=false"));
+	REQUIRE_NO_FAIL(con.Query("CREATE TEMP TABLE jit_metal_filtered_input AS "
+	                          "SELECT i::BIGINT AS i FROM range(100000) tbl(i)"));
+	REQUIRE_NO_FAIL(con.Query("CREATE TEMP TABLE jit_metal_filtered_baseline AS "
+	                          "SELECT i + 7 AS j FROM jit_metal_filtered_input WHERE i < 10"));
+
+	ConfigureMetalGpuSettings(con);
+	REQUIRE_NO_FAIL(con.Query("SET jit_backend='jit_metal'"));
+	ClearJitTrace(manager, true);
+	REQUIRE_NO_FAIL(con.Query("CREATE TEMP TABLE jit_metal_filtered_output AS "
+	                          "SELECT i + 7 AS j FROM jit_metal_filtered_input WHERE i < 10"));
+
+	bool rejected_filtered_recipe = false;
+	for (auto &event : manager.GetEvents()) {
+		REQUIRE_FALSE(IsCompiledMetalRegionEvent(event));
+		if (IsMetalRegionEvent(event) && event.blocker == "fused_region_stage_selection_incomplete") {
+			rejected_filtered_recipe = true;
+		}
+	}
+	REQUIRE(rejected_filtered_recipe);
+
+	auto result = con.Query("SELECT count(*), sum(j) FROM jit_metal_filtered_output");
+	REQUIRE_NO_FAIL(*result);
+	REQUIRE(result->GetValue(0, 0).GetValue<int64_t>() == 10);
+	REQUIRE(result->GetValue(1, 0).GetValue<int64_t>() == 115);
+	auto difference = con.Query("SELECT * FROM (FROM jit_metal_filtered_baseline EXCEPT ALL "
+	                            "FROM jit_metal_filtered_output) "
+	                            "UNION ALL SELECT * FROM (FROM jit_metal_filtered_output EXCEPT ALL "
+	                            "FROM jit_metal_filtered_baseline)");
+	REQUIRE_NO_FAIL(*difference);
+	REQUIRE(difference->RowCount() == 0);
 }
 
 TEST_CASE("JIT Metal projection supports FLOAT arithmetic", "[api][jit][metal]") {
@@ -1511,7 +1646,7 @@ TEST_CASE("JIT CBO charges grouped aggregate fusion against parallel vectorized 
 	REQUIRE_FALSE(profile.SelectedAcceleratedRunner());
 }
 
-TEST_CASE("JIT backend owns scan-filtered aggregate terminals through DuckDB scan filters", "[api][jit]") {
+TEST_CASE("JIT backend owns generated source-filter aggregate terminals", "[api][jit]") {
 	DuckDB db;
 	Connection con(db);
 	auto &manager = ExecutionRegionManager::Get(*con.context);
@@ -1537,29 +1672,19 @@ TEST_CASE("JIT backend owns scan-filtered aggregate terminals through DuckDB sca
 	REQUIRE_NO_FAIL(*result);
 	REQUIRE(result->GetValue(0, 0).ToString() == reference->GetValue(0, 0).ToString());
 	REQUIRE(result->GetValue(1, 0).ToString() == reference->GetValue(1, 0).ToString());
-	vector<idx_t> scan_filtered_kernel_ids;
+	vector<idx_t> generated_filter_kernel_ids;
 	for (auto &event : manager.GetEvents()) {
 		if (!IsCompiledSljitRegionEvent(event) ||
-		    event.candidate_traits.sink_kind != ExecutionRegionSinkKind::UNGROUPED_AGGREGATE_UPDATE ||
-		    !event.candidate_uses_scan_filters) {
+		    event.candidate_traits.sink_kind != ExecutionRegionSinkKind::UNGROUPED_AGGREGATE_UPDATE) {
 			continue;
 		}
-		scan_filtered_kernel_ids.push_back(event.kernel_id);
-		RequireDuckDBScanFilteredSourceContract(event);
+		generated_filter_kernel_ids.push_back(event.kernel_id);
+		RequireGeneratedSourceFilterContract(event);
 		REQUIRE(event.runner_cost.SelectedAcceleratedRunner());
 		REQUIRE(event.runner_cost.materialization_elision_count > 0);
 	}
-	REQUIRE(!scan_filtered_kernel_ids.empty());
-	RequireMaterializationElisionRuntimeProof(manager, scan_filtered_kernel_ids);
-	bool found_compiled_storage_filter = false;
-	for (auto &event : manager.GetEvents()) {
-		if (EventPhase(event) == "runtime" && EventStatus(event) == "executed" &&
-		    HasJitRuntimePathPrefix(event, "source.storage_scan.compiled_filter")) {
-			found_compiled_storage_filter = true;
-			REQUIRE(HasJitRuntimeProof(event, ExecutionRegionJitRuntimeProof::GENERATED_BACKEND_WORK));
-		}
-	}
-	REQUIRE(found_compiled_storage_filter);
+	REQUIRE(!generated_filter_kernel_ids.empty());
+	RequireMaterializationElisionRuntimeProof(manager, generated_filter_kernel_ids);
 }
 
 TEST_CASE("JIT production CBO uses modulo domains for filtered reductions", "[api][jit]") {
@@ -1580,10 +1705,10 @@ TEST_CASE("JIT production CBO uses modulo domains for filtered reductions", "[ap
 	    manager,
 	    [](const ExecutionRegionEvent &event) {
 		    return IsCompiledSljitRegionEvent(event) && event.has_candidate && event.runner_cost.present &&
-		           event.candidate_traits.sink_kind == ExecutionRegionSinkKind::UNGROUPED_AGGREGATE_UPDATE &&
-		           event.candidate_uses_scan_filters;
+		           event.candidate_traits.sink_kind == ExecutionRegionSinkKind::UNGROUPED_AGGREGATE_UPDATE;
 	    },
 	    [](const ExecutionRegionEvent &event) {
+		    RequireGeneratedSourceFilterContract(event);
 		    REQUIRE(event.runner_cost.rows >= 100000);
 		    REQUIRE(event.runner_cost.rows <= 150000);
 		    REQUIRE(event.runner_cost.materialization_elision_count == 1);
@@ -1713,7 +1838,7 @@ TEST_CASE("JIT keeps generated-safe grouped aggregate filters in generated sourc
 			continue;
 		}
 		found_generated_grouped_filter = true;
-		REQUIRE_FALSE(event.selected_uses_scan_filters);
+		REQUIRE(event.selected_uses_scan_filters);
 		REQUIRE(StringUtil::Contains(event.reason, "source-strategy=generated-source-filter"));
 		RequireGeneratedSourceFilterContract(event);
 	}

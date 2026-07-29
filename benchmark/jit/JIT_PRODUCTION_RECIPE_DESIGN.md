@@ -1,6 +1,6 @@
 # JIT Production Recipe Architecture
 
-Last updated: 2026-07-28
+Last updated: 2026-07-30
 
 This document is the stable architecture contract for DuckDB execution-region
 JIT. It describes layer ownership, immutable recipe binding, runtime data
@@ -19,12 +19,41 @@ The execution path is:
 ```text
 physical pipeline
   -> backend-neutral execution-region graph
+  -> one core full-pipeline stage plan
   -> backend capability analysis and semantic descriptors
   -> core-owned cost selection
   -> immutable backend recipe
   -> runtime physical binding
   -> compiled primitive sequence or explicit native execution
 ```
+
+### Region planning authority
+
+A physical pipeline produces at most one full-pipeline candidate. The
+candidate begins at the pipeline source, ends at its sink, carries one explicit
+full-pipeline ABI, and owns one ordered stage plan. The stage plan is the sole
+authority for generated stages, native contracts, source boundaries, and
+missing contracts.
+
+There is no candidate span, candidate id, candidate vector, aggregate ownership
+summary, or parallel contract blocker list. Those representations described
+the same pipeline with weaker information and could drift from the stage plan.
+Backend analysis consumes the complete region and stage plan and returns one
+ordered selected-stage receipt containing only core stage indexes and selected
+execution kinds. Core rejects missing, duplicated, reordered, or unfused
+ownership before cost selection. Source-filter stages are the only stages whose
+execution kind can change, and their selected kind must agree with the source
+recipe's scan-filter mode; every other selected kind must match the core stage
+plan. Stage identity and diagnostics remain core-owned. An execution plan
+publishes at most one full-pipeline kernel.
+
+Each backend node planner returns one lowering result containing its native
+operations or boundary, diagnostic reason, and canonical fusion blocker. A
+later pass must not reconstruct blockers from the physical node. SLJIT source
+planning is the sole authority for the selected source contract and its output
+layout; candidate metadata does not duplicate that layout. Metal admits one
+exact typed recipe—source contract, scalar projection, append sink—in that
+order.
 
 ## Layer ownership
 
@@ -89,6 +118,43 @@ cost. They do not implement a second query selector.
 compiled runner only when capability and cost both approve it. A selected
 runner that cannot compile or execute its admitted recipe is a failed proof,
 not evidence that the route was never selected.
+
+### Source-filter ownership
+
+Source-filter selection has one output: the selected-stage receipt plus the
+source recipe published by backend lowering. The receipt identifies whether
+each static filter is generated or storage-owned; the recipe identifies the
+exact residual scan-filter mode and source input layout. Core derives generated
+filter count and expression cost from the validated selected stages for runner
+selection, source opening, artifact binding, kernel telemetry, and runtime
+proof. There is no backend-reported cost counter or candidate-level scan-filter
+shadow.
+
+Generated static filters and DuckDB storage pruning are complementary:
+
+- `STATIC_PRUNING_ONLY`: generated code owns row-level static evaluation;
+  storage retains the same filters only for row-group and segment zonemap
+  pruning;
+- `DYNAMIC_FILTERS_WITH_STATIC_PRUNING`: generated code owns row-level static
+  evaluation; storage sees the combined set for row-group and segment zonemap
+  pruning and evaluates only the runtime dynamic subset as residual filters;
+- `ALL`: storage owns pruning and row-level residual evaluation;
+- `NONE`: the source recipe needs no storage filter participation.
+
+Prune-only filters are not executed at every vector or charged as residual
+scan work. This prevents non-prunable expressions from paying repeated zonemap
+cost while preserving coarse pruning for clustered data. A vectorized
+continuation still owns the complete combined filter set, so fallback after
+compiled progress preserves semantics.
+
+There is no selectivity percentage, range-width threshold, min/max ratio, or
+workload-specific source selector. Numeric and date ranges use the same
+ownership contract as other generated predicates. Storage-sensitive
+low-cardinality string predicates and direct hash-build filters retain their
+measured storage recipe; this is physical capability selection, not a second
+query policy. Min/max and distinct-count statistics may order predicates inside
+an already selected generated filter for short-circuit efficiency; they never
+select generated versus storage ownership.
 
 ## Immutable recipe boundary
 
@@ -302,9 +368,11 @@ code must not include or name `ht_entry_t`, `BloomFilter`, or
 core-private C++ classes into an extension ABI.
 
 The hash-table physical view entered the execution-region backend ABI in
-version 4. ABI version 5 adds opaque aggregate-state batch consumption; a
-loadable backend built against either older binding layout is rejected at
-registration.
+version 4. ABI version 5 adds opaque aggregate-state batch consumption. ABI
+version 6 adds source-recipe scan-filter ownership modes. ABI version 7 replaces
+backend self-attestation and source-filter cost counters with the core-validated
+selected-stage receipt. A loadable backend built against an older binding or
+lowering layout is rejected at registration.
 
 `ExecutionHashJoinRHSFixedColumnSource` is the core/backend boundary for fixed
 build-side columns. It represents either:

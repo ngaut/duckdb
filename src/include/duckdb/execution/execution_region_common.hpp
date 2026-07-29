@@ -29,8 +29,6 @@ static constexpr const char *EXECUTION_REGION_BLOCKER_NO_EXECUTABLE_REGION_WORK 
 static constexpr const char *EXECUTION_REGION_BLOCKER_UNSUPPORTED_REGION_EXECUTION = "unsupported_region_execution";
 static constexpr const char *EXECUTION_REGION_BLOCKER_REGION_CONTAINS_NO_NATIVE_NODES =
     "region_contains_no_native_nodes";
-static constexpr const char *EXECUTION_REGION_BLOCKER_FUSED_REGION_CONTRACT_HAS_BOUNDARIES =
-    "fused_region_contract_has_boundaries";
 static constexpr idx_t EXECUTION_REGION_LOW_CARDINALITY_STRING_SEARCH_LIMIT = 64;
 
 enum class ExecutionRegionOperatorKind : uint8_t {
@@ -65,7 +63,12 @@ enum class ExecutionRegionSourceKind : uint8_t {
 	STATEFUL_OPERATOR
 };
 enum class ExecutionRegionSourceExecutionKind : uint8_t { NONE, DUCKDB_SOURCE_BOUNDARY, SOURCE_CONTRACT };
-enum class ExecutionRegionScanFilterMode : uint8_t { NONE, ALL, DYNAMIC_ONLY };
+enum class ExecutionRegionScanFilterMode : uint8_t {
+	NONE,
+	ALL,
+	STATIC_PRUNING_ONLY,
+	DYNAMIC_FILTERS_WITH_STATIC_PRUNING
+};
 enum class ExecutionRegionSourceContractStatus : uint8_t { NONE, READY, BLOCKED };
 enum class ExecutionRegionStateContractStatus : uint8_t { NONE, READY, MISSING, BLOCKED };
 enum class ExecutionRegionOperatorContractKind : uint8_t { NONE, HASH_JOIN_PROBE, NESTED_LOOP_JOIN_PROBE };
@@ -167,13 +170,6 @@ enum class ExecutionRegionBoundaryKind : uint8_t {
 	OPERATOR_CONTRACT_BOUNDARY,
 	OPERATOR_MISSING,
 	EXPRESSION_MISSING
-};
-enum class ExecutionRegionOwnershipKind : uint8_t {
-	NONE,
-	GENERATED_IR,
-	NATIVE_CONTRACT,
-	SOURCE_BOUNDARY,
-	MISSING_CONTRACT
 };
 enum class ExecutionRegionStageKind : uint8_t {
 	SOURCE,
@@ -311,7 +307,6 @@ struct ExecutionRegionRecordedCounter {
 };
 
 struct ExecutionRegionOpenRequest {
-	bool present = false;
 	ExecutionRegionSourceExecutionKind source_execution = ExecutionRegionSourceExecutionKind::NONE;
 	ExecutionRegionScanFilterMode scan_filter_mode = ExecutionRegionScanFilterMode::NONE;
 	vector<LogicalType> source_contract_input_types;
@@ -325,8 +320,12 @@ struct ExecutionRegionOpenRequest {
 		return scan_filter_mode != ExecutionRegionScanFilterMode::NONE;
 	}
 
-	bool UsesDynamicScanFiltersOnly() const {
-		return scan_filter_mode == ExecutionRegionScanFilterMode::DYNAMIC_ONLY;
+	bool UsesStaticPruningOnly() const {
+		return scan_filter_mode == ExecutionRegionScanFilterMode::STATIC_PRUNING_ONLY;
+	}
+
+	bool UsesDynamicFiltersWithStaticPruning() const {
+		return scan_filter_mode == ExecutionRegionScanFilterMode::DYNAMIC_FILTERS_WITH_STATIC_PRUNING;
 	}
 
 	bool UsesSourceContractInputLayout() const {
@@ -359,7 +358,6 @@ DUCKDB_API const char *ExecutionRegionSelectionSourceKindToString(ExecutionRegio
 DUCKDB_API const char *ExecutionRegionCapabilityTypeKindToString(ExecutionRegionCapabilityTypeKind kind);
 DUCKDB_API const char *ExecutionRegionCapabilityValidityKindToString(ExecutionRegionCapabilityValidityKind kind);
 DUCKDB_API const char *ExecutionRegionBoundaryKindToString(ExecutionRegionBoundaryKind kind);
-DUCKDB_API const char *ExecutionRegionOwnershipKindToString(ExecutionRegionOwnershipKind kind);
 DUCKDB_API const char *ExecutionRegionStageKindToString(ExecutionRegionStageKind kind);
 DUCKDB_API const char *ExecutionRegionStageExecutionKindToString(ExecutionRegionStageExecutionKind kind);
 DUCKDB_API const char *ExecutionRunnerKindToString(ExecutionRunnerKind kind);

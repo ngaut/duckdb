@@ -79,6 +79,15 @@ static bool TryBuildSljitGeneratedSourceFilterExpression(const ExecutionRegionSo
 	return true;
 }
 
+static bool SljitSourceFilterIsConstantTrue(const ExecutionRegionSourceFilter &filter) {
+	if (!filter.expression || !filter.expression->root) {
+		return false;
+	}
+	auto &root = *filter.expression->root;
+	return root.kind == ExecutionExpressionIRKind::CONSTANT && root.return_type.id() == LogicalTypeId::BOOLEAN &&
+	       !root.constant.IsNull() && BooleanValue::Get(root.constant);
+}
+
 static idx_t SljitGeneratedSourceFilterTypeCost(const LogicalType &type) {
 	if (type.id() == LogicalTypeId::DECIMAL) {
 		return 64;
@@ -305,6 +314,9 @@ SljitOrderGeneratedSourceFilters(const ExecutionRegionNode &node, const Executio
 	vector<const ExecutionRegionSourceFilter *> ordered_filters;
 	ordered_filters.reserve(node.source->filters.size());
 	for (auto &filter : node.source->filters) {
+		if (SljitSourceFilterIsConstantTrue(filter)) {
+			continue;
+		}
 		ordered_filters.push_back(&filter);
 	}
 	std::stable_sort(ordered_filters.begin(), ordered_filters.end(),
@@ -331,7 +343,7 @@ static bool TryPlanSljitGeneratedSourceFilter(const ExecutionRegionNode &node,
 		predicates.push_back(std::move(predicate));
 	}
 	if (predicates.empty()) {
-		error = "generated source filter requires at least one predicate";
+		error = "generated source filters contain no executable predicate";
 		return false;
 	}
 
@@ -449,6 +461,9 @@ void PlanSljitStorageScanFilters(const ExecutionRegionNode &node, vector<SljitNa
 	}
 	auto &contract = node.source->table_scan_contract;
 	for (auto &source_filter : node.source->filters) {
+		if (SljitSourceFilterIsConstantTrue(source_filter)) {
+			continue;
+		}
 		if (source_filter.scan_column_index >= contract.source_contract_input_types.size()) {
 			continue;
 		}

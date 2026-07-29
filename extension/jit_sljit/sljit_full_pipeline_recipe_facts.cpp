@@ -256,11 +256,14 @@ static bool SljitTryAnalyzeProjectionAggregatePrefix(const vector<SljitExecutabl
 		return true;
 	}
 
-	if (op_idx + 1 < prefix_end && SljitFullPipelineOpIsAt(ops, op_idx, SljitNativeRegionOpKind::FILTER) &&
-	    SljitFullPipelineOpIsAt(ops, op_idx + 1, SljitNativeRegionOpKind::PROJECTION)) {
-		facts.source_filter_idx = op_idx;
-		facts.source_projection_idx = op_idx + 1;
-		op_idx += 2;
+	if (op_idx < prefix_end && SljitFullPipelineOpIsAt(ops, op_idx, SljitNativeRegionOpKind::FILTER)) {
+		facts.source_filter_idx = op_idx++;
+		if (op_idx < prefix_end && SljitFullPipelineOpIsAt(ops, op_idx, SljitNativeRegionOpKind::PROJECTION)) {
+			facts.source_projection_idx = op_idx++;
+		}
+		if (op_idx == prefix_end) {
+			return false;
+		}
 	}
 
 	while (op_idx < prefix_end) {

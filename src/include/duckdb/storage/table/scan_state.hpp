@@ -196,9 +196,15 @@ public:
 	                TableFilterExecutionMode execution_mode = TableFilterExecutionMode::FILTER_AND_PRUNE,
 	                optional_ptr<const TableFilterKernelProvider> kernel_provider = nullptr,
 	                optional_ptr<const vector<idx_t>> kernel_filter_indices = nullptr);
+	void Initialize(ClientContext &context, TableFilterSet &pruning_filters, TableFilterSet &residual_filters,
+	                const vector<StorageIndex> &column_ids);
 
-	const vector<ScanFilter> &GetFilterList() const {
-		return filter_list;
+	const vector<ScanFilter> &GetPruningFilterList() const {
+		return pruning_filter_list;
+	}
+
+	const vector<ScanFilter> &GetResidualFilterList() const {
+		return separate_residual_filters ? residual_filter_list : pruning_filter_list;
 	}
 
 	optional_ptr<AdaptiveFilter> GetAdaptiveFilter();
@@ -219,12 +225,20 @@ public:
 	void SetFilterAlwaysTrue(idx_t filter_idx);
 
 private:
-	//! The table filters (if any)
-	optional_ptr<TableFilterSet> table_filters;
+	void InitializeFilterList(ClientContext &context, TableFilterSet &filters, const vector<StorageIndex> &column_ids,
+	                          vector<ScanFilter> &result,
+	                          optional_ptr<const TableFilterKernelProvider> kernel_provider = nullptr,
+	                          optional_ptr<const vector<idx_t>> kernel_filter_indices = nullptr);
+	void InitializeResidualFilterMetadata(ClientContext &context, TableFilterSet &filters,
+	                                      const vector<StorageIndex> &column_ids);
+
+	//! The filters used to skip row groups and column segments.
+	optional_ptr<TableFilterSet> pruning_filters;
 	//! Adaptive filter info (if any)
 	unique_ptr<AdaptiveFilter> adaptive_filter;
-	//! The set of filters
-	vector<ScanFilter> filter_list;
+	vector<ScanFilter> pruning_filter_list;
+	vector<ScanFilter> residual_filter_list;
+	bool separate_residual_filters = false;
 	//! Whether table filters should also be evaluated as row-level residual filters during vector scans.
 	bool execute_residual_filters = true;
 	//! Whether or not the column has a filter active right now
@@ -330,6 +344,9 @@ public:
 	                TableFilterExecutionMode filter_execution_mode = TableFilterExecutionMode::FILTER_AND_PRUNE,
 	                optional_ptr<const TableFilterKernelProvider> kernel_provider = nullptr,
 	                optional_ptr<const vector<idx_t>> kernel_filter_indices = nullptr);
+	void InitializeWithSeparateResidualFilters(vector<StorageIndex> column_ids, ClientContext &context,
+	                                           TableFilterSet &pruning_filters, TableFilterSet &residual_filters,
+	                                           optional_ptr<SampleOptions> table_sampling = nullptr);
 
 	const vector<StorageIndex> &GetColumnIds();
 
@@ -338,6 +355,8 @@ public:
 	ScanSamplingInfo &GetSamplingInfo();
 
 private:
+	void InitializeSampling(optional_ptr<SampleOptions> table_sampling);
+
 	//! The column identifiers of the scan
 	vector<StorageIndex> column_ids;
 };

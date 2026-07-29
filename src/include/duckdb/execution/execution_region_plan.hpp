@@ -21,12 +21,12 @@ struct ExecutionRegionPlan {
 
 	string backend_name;
 	ExecutionRegionOpenRequest source_open_request;
-	vector<unique_ptr<ExecutionRegionKernel>> kernels;
+	unique_ptr<ExecutionRegionKernel> kernel;
 	ExecutionRunnerKind selected_runner = ExecutionRunnerKind::VECTORIZED;
 	bool operator_readiness_refresh = false;
 
 	bool HasExecutableRegions() const {
-		return !kernels.empty();
+		return kernel != nullptr;
 	}
 	bool HasExecutableFullPipeline() const;
 	void SelectRunner(ExecutionRunnerKind runner);
@@ -38,14 +38,8 @@ struct ExecutionRegionPlan {
 	bool RequiresOperatorReadinessRefresh() const {
 		return operator_readiness_refresh && !HasExecutableFullPipeline();
 	}
-	vector<unique_ptr<ExecutionRegionKernel>> &Kernels() {
-		return kernels;
-	}
-	const vector<unique_ptr<ExecutionRegionKernel>> &Kernels() const {
-		return kernels;
-	}
 	bool RequiresSourceContract() const {
-		return source_open_request.present && source_open_request.UsesSourceContract();
+		return source_open_request.UsesSourceContract();
 	}
 	const ExecutionRegionOpenRequest &OpenRequest() const {
 		return source_open_request;

@@ -1,6 +1,5 @@
 #include "duckdb/execution/execution_region_lowering.hpp"
 
-#include "execution_region_contract.hpp"
 #include "execution_region_description.hpp"
 #include "execution_region_signature.hpp"
 #include "execution_region_stage_plan.hpp"
@@ -647,9 +646,8 @@ static bool ExecutionRegionNodeProducesMatchedHashJoinSelection(const ExecutionR
 }
 
 static bool PreviousExecutionRegionNodeProducesMatchedHashJoinSelection(const ExecutionRegionIR &region_ir,
-                                                                        const ExecutionRegionCandidate &candidate,
                                                                         idx_t node_idx) {
-	if (node_idx <= candidate.first_node || node_idx == 0) {
+	if (node_idx == 0) {
 		return false;
 	}
 	return ExecutionRegionNodeProducesMatchedHashJoinSelection(region_ir.nodes[node_idx - 1]);
@@ -681,17 +679,15 @@ static bool ExecutionRegionFilterReadsMarkProbeMarker(const ExecutionRegionNode 
 }
 
 static ExecutionRegionCandidateTraits BuildExecutionRegionCandidateTraits(const ExecutionRegionIR &region_ir,
-                                                                          const ExecutionRegionCandidate &candidate,
                                                                           const ExecutionRegionStagePlan &stage_plan,
                                                                           ExecutionRegionIRMode mode) {
 	ExecutionRegionCandidateTraits traits;
-	for (idx_t node_idx = candidate.first_node; node_idx < candidate.EndNode() && node_idx < region_ir.nodes.size();
-	     node_idx++) {
+	for (idx_t node_idx = 0; node_idx < region_ir.nodes.size(); node_idx++) {
 		auto &node = region_ir.nodes[node_idx];
 		switch (node.kind) {
 		case ExecutionRegionNodeKind::SOURCE:
-			AccumulateExecutionRegionSourceTraits(node, GetExecutionRegionCandidateSourceExecution(candidate, node),
-			                                      traits);
+			AccumulateExecutionRegionSourceTraits(
+			    node, node.source ? node.source->execution : ExecutionRegionSourceExecutionKind::NONE, traits);
 			break;
 		case ExecutionRegionNodeKind::SINK:
 			traits.sink_present = true;
@@ -714,7 +710,7 @@ static ExecutionRegionCandidateTraits BuildExecutionRegionCandidateTraits(const 
 			break;
 		case ExecutionRegionNodeKind::FILTER:
 			traits.filter_count++;
-			if (node_idx > candidate.first_node && node_idx > 0) {
+			if (node_idx > 0) {
 				auto &previous_node = region_ir.nodes[node_idx - 1];
 				if (ExecutionRegionFilterReadsMarkProbeMarker(previous_node, node)) {
 					traits.mark_probe_filter_count++;
@@ -728,7 +724,7 @@ static ExecutionRegionCandidateTraits BuildExecutionRegionCandidateTraits(const 
 			break;
 		case ExecutionRegionNodeKind::PROJECTION:
 			traits.projection_count++;
-			if (PreviousExecutionRegionNodeProducesMatchedHashJoinSelection(region_ir, candidate, node_idx)) {
+			if (PreviousExecutionRegionNodeProducesMatchedHashJoinSelection(region_ir, node_idx)) {
 				traits.selected_hash_join_view_materialization_count++;
 			}
 			if (node.projections.empty()) {
@@ -752,7 +748,7 @@ static ExecutionRegionCandidateTraits BuildExecutionRegionCandidateTraits(const 
 			break;
 		case ExecutionRegionNodeKind::OPERATOR:
 			traits.operator_count++;
-			if (PreviousExecutionRegionNodeProducesMatchedHashJoinSelection(region_ir, candidate, node_idx)) {
+			if (PreviousExecutionRegionNodeProducesMatchedHashJoinSelection(region_ir, node_idx)) {
 				traits.selected_hash_join_view_materialization_count++;
 			}
 			if (node.operator_info && node.operator_info->hash_join_contract.present) {
@@ -782,10 +778,9 @@ static bool ExecutionRegionNodeCannotExpandInput(const ExecutionRegionNode &node
 	       join.join_type == ExecutionRegionJoinType::ANTI || join.join_type == ExecutionRegionJoinType::MARK;
 }
 
-static idx_t EstimateExecutionRegionCandidateCardinality(const ExecutionRegionIR &region_ir,
-                                                         const ExecutionRegionCandidate &candidate) {
-	if (candidate.first_node < region_ir.nodes.size()) {
-		auto &source = region_ir.nodes[candidate.first_node];
+static idx_t EstimateExecutionRegionCandidateCardinality(const ExecutionRegionIR &region_ir) {
+	if (!region_ir.nodes.empty()) {
+		auto &source = region_ir.nodes[0];
 		const bool has_finalized_dynamic_filter_estimate =
 		    source.kind == ExecutionRegionNodeKind::SOURCE && source.source &&
 		    source.source->table_scan_contract.present &&
@@ -796,7 +791,7 @@ static idx_t EstimateExecutionRegionCandidateCardinality(const ExecutionRegionIR
 		if (has_finalized_dynamic_filter_estimate &&
 		    source.estimated_cardinality < source.source->table_scan_contract.estimated_source_cardinality) {
 			bool source_estimate_caps_candidate = true;
-			for (idx_t node_idx = candidate.first_node + 1; node_idx < candidate.EndNode(); node_idx++) {
+			for (idx_t node_idx = 1; node_idx < region_ir.nodes.size(); node_idx++) {
 				auto &node = region_ir.nodes[node_idx];
 				if (!ExecutionRegionNodeCannotExpandInput(node)) {
 					source_estimate_caps_candidate = false;
@@ -814,7 +809,7 @@ static idx_t EstimateExecutionRegionCandidateCardinality(const ExecutionRegionIR
 				return 0;
 			}
 			bool row_preserving_or_reducing = true;
-			for (idx_t node_idx = candidate.first_node + 1; node_idx < candidate.EndNode(); node_idx++) {
+			for (idx_t node_idx = 1; node_idx < region_ir.nodes.size(); node_idx++) {
 				auto &node = region_ir.nodes[node_idx];
 				if (node.kind != ExecutionRegionNodeKind::FILTER && node.kind != ExecutionRegionNodeKind::PROJECTION &&
 				    node.kind != ExecutionRegionNodeKind::SINK) {
@@ -826,67 +821,17 @@ static idx_t EstimateExecutionRegionCandidateCardinality(const ExecutionRegionIR
 				return source.estimated_cardinality;
 			}
 			idx_t downstream_estimate = 0;
-			for (idx_t node_idx = candidate.first_node; node_idx < candidate.EndNode(); node_idx++) {
-				downstream_estimate = MaxValue(downstream_estimate, region_ir.nodes[node_idx].estimated_cardinality);
+			for (auto &node : region_ir.nodes) {
+				downstream_estimate = MaxValue(downstream_estimate, node.estimated_cardinality);
 			}
 			return MinValue(source.estimated_cardinality, downstream_estimate);
 		}
 	}
 	idx_t result = 0;
-	if (candidate.first_node > 0 && candidate.first_node - 1 < region_ir.nodes.size()) {
-		result = MaxValue(result, region_ir.nodes[candidate.first_node - 1].estimated_cardinality);
-	}
-	for (idx_t node_idx = candidate.first_node; node_idx < candidate.EndNode(); node_idx++) {
-		result = MaxValue(result, region_ir.nodes[node_idx].estimated_cardinality);
+	for (auto &node : region_ir.nodes) {
+		result = MaxValue(result, node.estimated_cardinality);
 	}
 	return result;
-}
-
-static vector<LogicalType> GetExecutionRegionCandidateInputTypes(const ExecutionRegionIR &region_ir,
-                                                                 const ExecutionRegionCandidate &candidate) {
-	if (candidate.first_node < region_ir.nodes.size() &&
-	    region_ir.nodes[candidate.first_node].kind == ExecutionRegionNodeKind::SOURCE) {
-		return region_ir.nodes[candidate.first_node].output_types;
-	}
-	if (candidate.first_node > 0) {
-		return region_ir.nodes[candidate.first_node - 1].output_types;
-	}
-	if (!region_ir.nodes.empty()) {
-		return region_ir.nodes[candidate.first_node].output_types;
-	}
-	return vector<LogicalType>();
-}
-
-static vector<LogicalType> GetExecutionRegionCandidateOutputTypes(const ExecutionRegionIR &region_ir,
-                                                                  const ExecutionRegionCandidate &candidate) {
-	for (idx_t node_offset = candidate.node_count; node_offset > 0; node_offset--) {
-		auto &node = region_ir.nodes[candidate.first_node + node_offset - 1];
-		if (node.kind == ExecutionRegionNodeKind::SINK) {
-			continue;
-		}
-		return node.output_types;
-	}
-	return vector<LogicalType>();
-}
-
-static bool HasExecutionRegionCandidate(const ExecutionRegionIR &region_ir, idx_t first_node, idx_t node_count,
-                                        idx_t start_operator_index, idx_t end_operator_index,
-                                        ExecutionRegionSourceExecutionKind source_execution) {
-	for (auto &candidate : region_ir.candidates) {
-		if (candidate.first_node == first_node && candidate.node_count == node_count &&
-		    candidate.start_operator_index == start_operator_index &&
-		    candidate.end_operator_index == end_operator_index && candidate.source_execution == source_execution) {
-			return true;
-		}
-	}
-	return false;
-}
-
-static void AddExecutionRegionCandidateBlocker(ExecutionRegionIR &region_ir, string reason) {
-	if (std::find(region_ir.candidate_blockers.begin(), region_ir.candidate_blockers.end(), reason) ==
-	    region_ir.candidate_blockers.end()) {
-		region_ir.candidate_blockers.push_back(std::move(reason));
-	}
 }
 
 static string AppendExecutionRegionCandidateDiagnostic(string reason, const string &diagnostic) {
@@ -896,143 +841,38 @@ static string AppendExecutionRegionCandidateDiagnostic(string reason, const stri
 	return std::move(reason) + ";" + diagnostic;
 }
 
-struct ExecutionRegionCandidateSummary {
-	ExecutionRegionCandidate candidate;
-	string blocker;
-
-	bool Accepted() const {
-		return blocker.empty();
-	}
-};
-
-static bool ExecutionRegionCandidateCoversFullPipeline(const ExecutionRegionIR &region_ir,
-                                                       const ExecutionRegionCandidate &candidate) {
-	return candidate.first_node == 0 && candidate.node_count == region_ir.nodes.size();
-}
-
-static bool ExecutionRegionCandidateContextHasMissingOperatorContract(const ExecutionRegionIR &region_ir,
-                                                                      const ExecutionRegionCandidate &candidate) {
-	if (ExecutionRegionCandidateCoversFullPipeline(region_ir, candidate)) {
-		return CountExecutionRegionMissingOperatorContracts(candidate.stage_plan) > 0;
-	}
-	ExecutionRegionCandidate context_candidate;
-	context_candidate.first_node = 0;
-	context_candidate.node_count = region_ir.nodes.size();
-	context_candidate.contract =
-	    BuildExecutionRegionContract(region_ir, context_candidate, ExecutionRegionIRMode::COMPACT);
-	context_candidate.stage_plan =
-	    BuildExecutionRegionStagePlan(region_ir, context_candidate, ExecutionRegionIRMode::COMPACT);
-	return CountExecutionRegionMissingOperatorContracts(context_candidate.stage_plan) > 0;
-}
-
-static ExecutionRegionCandidateSummary
-BuildExecutionRegionCandidateSummary(const ExecutionRegionIR &region_ir, idx_t candidate_id, idx_t first_node,
-                                     idx_t node_count, idx_t start_operator_index, idx_t end_operator_index,
-                                     ExecutionRegionSourceExecutionKind source_execution, ExecutionRegionIRMode mode) {
-	ExecutionRegionCandidateSummary summary;
-	auto &candidate = summary.candidate;
-	candidate.candidate_id = candidate_id;
-	candidate.first_node = first_node;
-	candidate.node_count = node_count;
-	candidate.start_operator_index = start_operator_index;
-	candidate.end_operator_index = end_operator_index;
-	candidate.source_execution = source_execution;
-	candidate.estimated_cardinality = EstimateExecutionRegionCandidateCardinality(region_ir, candidate);
-	candidate.input_types = GetExecutionRegionCandidateInputTypes(region_ir, candidate);
-	candidate.output_types = GetExecutionRegionCandidateOutputTypes(region_ir, candidate);
-	candidate.shape = DescribeExecutionRegionCandidateShape(region_ir, candidate);
-	candidate.pipeline_shape = DescribeExecutionRegionPipelineShape(region_ir, first_node, node_count);
-	candidate.contract = BuildExecutionRegionContract(region_ir, candidate, mode);
-
-	auto describe_span = [&]() {
-		return DescribeExecutionRegionCandidateSpan(first_node, node_count, start_operator_index, end_operator_index,
-		                                            source_execution);
-	};
-	if (!candidate.contract.OwnsSource()) {
-		summary.blocker = AppendExecutionRegionCandidateDiagnostic(
-		    "candidate-builder-blocked:source-ownership-missing;" + describe_span(), candidate.contract.ir);
-		return summary;
-	}
-	if (!candidate.contract.OwnsSink()) {
-		summary.blocker = AppendExecutionRegionCandidateDiagnostic(
-		    "candidate-builder-blocked:sink-ownership-missing;" + describe_span(), candidate.contract.ir);
-		return summary;
-	}
-	if (!ExecutionRegionABIIsFullPipeline(candidate.contract.abi)) {
-		summary.blocker = AppendExecutionRegionCandidateDiagnostic(
-		    "candidate-builder-blocked:requires-full-pipeline-abi;" + describe_span(), candidate.contract.ir);
-		return summary;
-	}
-
-	candidate.stage_plan = BuildExecutionRegionStagePlan(region_ir, candidate, mode);
+static unique_ptr<ExecutionRegionCandidate> BuildExecutionRegionCandidate(const ExecutionRegionIR &region_ir,
+                                                                          ExecutionRegionIRMode mode, string &blocker) {
+	auto result = make_uniq<ExecutionRegionCandidate>();
+	auto &candidate = *result;
+	candidate.estimated_cardinality = EstimateExecutionRegionCandidateCardinality(region_ir);
+	candidate.shape = DescribeExecutionRegionCandidateShape(region_ir);
+	candidate.abi = ExecutionRegionABI::FULL_PIPELINE;
+	candidate.stage_plan = BuildExecutionRegionStagePlan(region_ir, candidate.shape, mode);
 	if (!candidate.stage_plan.HasExecutableWork()) {
-		summary.blocker = AppendExecutionRegionCandidateDiagnostic(
-		    "candidate-builder-blocked:no-executable-work;" + describe_span(), candidate.stage_plan.ir);
-		return summary;
+		blocker = AppendExecutionRegionCandidateDiagnostic(
+		    "candidate-builder-blocked:no-executable-work;region=full-pipeline", candidate.stage_plan.ir);
+		return nullptr;
 	}
-	candidate.traits = BuildExecutionRegionCandidateTraits(region_ir, candidate, candidate.stage_plan, mode);
-	if (candidate.first_node < region_ir.nodes.size()) {
-		candidate.uses_scan_filters = ExecutionRegionCandidateUsesScanFilters(candidate, region_ir.nodes[first_node]);
-		if (candidate.uses_scan_filters) {
-			candidate.stage_plan = BuildExecutionRegionStagePlan(region_ir, candidate, mode);
-			candidate.traits = BuildExecutionRegionCandidateTraits(region_ir, candidate, candidate.stage_plan, mode);
-		}
-	}
+	candidate.traits = BuildExecutionRegionCandidateTraits(region_ir, candidate.stage_plan, mode);
 	candidate.signature = BuildExecutionRegionSignature(region_ir, candidate);
-	candidate.context_has_missing_operator_contract =
-	    ExecutionRegionCandidateContextHasMissingOperatorContract(region_ir, candidate);
 	FinalizeExecutionRegionCandidate(candidate, mode);
-	return summary;
+	return result;
 }
 
-static bool AddExecutionRegionCandidate(
-    ExecutionRegionIR &region_ir, idx_t candidate_id, idx_t first_node, idx_t node_count, idx_t start_operator_index,
-    idx_t end_operator_index,
-    ExecutionRegionSourceExecutionKind source_execution = ExecutionRegionSourceExecutionKind::NONE,
-    ExecutionRegionIRMode mode = ExecutionRegionIRMode::COMPACT) {
-	D_ASSERT(node_count > 0);
-	if (HasExecutionRegionCandidate(region_ir, first_node, node_count, start_operator_index, end_operator_index,
-	                                source_execution)) {
-		return false;
-	}
-	if (first_node >= region_ir.nodes.size() || region_ir.nodes[first_node].kind != ExecutionRegionNodeKind::SOURCE) {
-		AddExecutionRegionCandidateBlocker(
-		    region_ir, "candidate-builder-blocked:span-does-not-start-at-source;" +
-		                   DescribeExecutionRegionCandidateSpan(first_node, node_count, start_operator_index,
-		                                                        end_operator_index, source_execution));
-		return false;
-	}
-	auto summary =
-	    BuildExecutionRegionCandidateSummary(region_ir, candidate_id, first_node, node_count, start_operator_index,
-	                                         end_operator_index, source_execution, mode);
-	if (!summary.Accepted()) {
-		AddExecutionRegionCandidateBlocker(region_ir, std::move(summary.blocker));
-		return false;
-	}
-	region_ir.candidates.push_back(std::move(summary.candidate));
-	return true;
-}
-
-static bool AddExecutionRegionCandidateAndIncrement(ExecutionRegionIR &region_ir, idx_t &candidate_id, idx_t first_node,
-                                                    idx_t node_count, idx_t start_operator_index,
-                                                    idx_t end_operator_index,
-                                                    ExecutionRegionIRMode mode = ExecutionRegionIRMode::COMPACT) {
-	if (AddExecutionRegionCandidate(region_ir, candidate_id, first_node, node_count, start_operator_index,
-	                                end_operator_index, ExecutionRegionSourceExecutionKind::NONE, mode)) {
-		candidate_id++;
-		return true;
-	}
-	return false;
-}
-
-static void BuildExecutionRegionCandidates(ExecutionRegionIR &region_ir, idx_t operator_count,
-                                           ExecutionRegionIRMode mode) {
+static void BuildExecutionRegionCandidate(ExecutionRegionIR &region_ir, ExecutionRegionIRMode mode) {
 	if (region_ir.nodes.empty()) {
 		return;
 	}
-	idx_t candidate_id = 0;
-	AddExecutionRegionCandidateAndIncrement(region_ir, candidate_id, 0, region_ir.nodes.size(), 0, operator_count,
-	                                        mode);
+	if (region_ir.nodes[0].kind != ExecutionRegionNodeKind::SOURCE) {
+		region_ir.candidate_blocker = "candidate-builder-blocked:region-does-not-start-at-source;region=full-pipeline";
+		return;
+	}
+	if (region_ir.nodes.back().kind != ExecutionRegionNodeKind::SINK) {
+		region_ir.candidate_blocker = "candidate-builder-blocked:region-does-not-end-at-sink;region=full-pipeline";
+		return;
+	}
+	region_ir.candidate = BuildExecutionRegionCandidate(region_ir, mode, region_ir.candidate_blocker);
 }
 
 static ExecutionExpressionIRMode ExecutionExpressionModeFromRegionMode(ExecutionRegionIRMode mode) {
@@ -1087,7 +927,7 @@ static unique_ptr<ExecutionRegionIR> TryBuildExecutionRegion(const ExecutionRegi
 		return nullptr;
 	}
 	result->pipeline_shape = DescribeExecutionRegionPipelineShape(*result);
-	BuildExecutionRegionCandidates(*result, descriptor.OperatorCount(), mode);
+	BuildExecutionRegionCandidate(*result, mode);
 	FinalizeExecutionRegionIR(*result, mode);
 	return result;
 }

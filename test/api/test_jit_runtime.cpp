@@ -247,7 +247,7 @@ TEST_CASE("JIT full pipeline uses explicit append sink contract", "[api][jit]") 
 		    StringUtil::Contains(event.reason, "append sink contract") &&
 		    StringUtil::Contains(event.reason, "sink_kind=result-collector-sink")) {
 			REQUIRE(event.has_candidate);
-			REQUIRE(event.candidate_contract.abi == ExecutionRegionABI::FULL_PIPELINE);
+			REQUIRE(event.candidate_abi == ExecutionRegionABI::FULL_PIPELINE);
 			found_compiled_result_collector = true;
 			REQUIRE(StringUtil::Contains(event.reason, "source:TABLE_SCAN:native"));
 			REQUIRE(StringUtil::Contains(event.reason, "sink:RESULT_COLLECTOR:native"));
@@ -256,8 +256,7 @@ TEST_CASE("JIT full pipeline uses explicit append sink contract", "[api][jit]") 
 			REQUIRE(StringUtil::Contains(event.reason, "full-pipeline-native-sink"));
 			REQUIRE(StringUtil::Contains(event.ir, "append_sink("));
 			REQUIRE(StringUtil::Contains(event.ir, "sink<kind=result-collector-sink"));
-			REQUIRE(event.candidate_contract.OwnsSink());
-			REQUIRE(event.candidate_contract.sink_ownership == ExecutionRegionOwnershipKind::NATIVE_CONTRACT);
+			REQUIRE(event.candidate_traits.HasSink());
 		}
 		if (EventPhase(event) == "runtime" && EventStatus(event) == "executed" &&
 		    EventExecutionMode(event) == "native" &&
@@ -346,7 +345,7 @@ TEST_CASE("JIT full pipeline uses append sink contract for CTE materialization",
 	bool found_compiled_materialization = false;
 	for (auto &event : manager.GetEvents()) {
 		if (!IsSljitRegionEvent(event) || !event.has_candidate ||
-		    event.candidate_contract.abi != ExecutionRegionABI::FULL_PIPELINE) {
+		    event.candidate_abi != ExecutionRegionABI::FULL_PIPELINE) {
 			continue;
 		}
 		if (EventStatus(event) == "compiled" && EventExecutionMode(event) == "native" &&
@@ -360,8 +359,7 @@ TEST_CASE("JIT full pipeline uses append sink contract for CTE materialization",
 			REQUIRE(StringUtil::Contains(event.reason, "full-pipeline-native-sink"));
 			REQUIRE(StringUtil::Contains(event.ir, "append_sink("));
 			REQUIRE(StringUtil::Contains(event.ir, "sink<kind=materialization"));
-			REQUIRE(event.candidate_contract.OwnsSink());
-			REQUIRE(event.candidate_contract.sink_ownership == ExecutionRegionOwnershipKind::NATIVE_CONTRACT);
+			REQUIRE(event.candidate_traits.HasSink());
 		}
 	}
 	REQUIRE(found_compiled_materialization);
@@ -396,7 +394,7 @@ TEST_CASE("JIT full pipeline uses ordered sink native contract when order keys g
 				found_ordered_sink_runtime_breakdown = true;
 			}
 			if (!IsSljitRegionEvent(event) || !event.has_candidate ||
-			    event.candidate_contract.abi != ExecutionRegionABI::FULL_PIPELINE) {
+			    event.candidate_abi != ExecutionRegionABI::FULL_PIPELINE) {
 				continue;
 			}
 			if (StringUtil::Contains(event.reason, "ordered sink contract") &&
@@ -417,8 +415,7 @@ TEST_CASE("JIT full pipeline uses ordered sink native contract when order keys g
 				REQUIRE(StringUtil::Contains(event.ir, "order_keys=[order_key0"));
 				REQUIRE(StringUtil::Contains(event.ir, "expression_ready=true"));
 				REQUIRE(StringUtil::Contains(event.ir, "expression_ir=(duckdb.expr typed-vector-ir"));
-				REQUIRE(event.candidate_contract.OwnsSink());
-				REQUIRE(event.candidate_contract.sink_ownership == ExecutionRegionOwnershipKind::NATIVE_CONTRACT);
+				REQUIRE(event.candidate_traits.HasSink());
 			}
 		}
 		REQUIRE(found_ordered_sink_contract);
@@ -625,7 +622,6 @@ TEST_CASE("JIT source contracts preserve joined table scan filter contracts", "[
 		           StringUtil::Contains(event.reason, "source-execution:source-contract");
 	    },
 	    [](const ExecutionRegionEvent &event) {
-		    REQUIRE(event.candidate_uses_scan_filters);
 		    REQUIRE(event.selected_uses_scan_filters);
 		    RequireGeneratedMachineCodeRegion(event);
 	    });
@@ -684,7 +680,6 @@ TEST_CASE("JIT composes dynamic scan filters with generated static filters", "[a
 		           StringUtil::Contains(event.ir, "dynamic_filters=true");
 	    },
 	    [](const ExecutionRegionEvent &event) {
-		    REQUIRE(event.candidate_uses_scan_filters);
 		    RequireMixedSourceFilterContract(event);
 		    RequireGeneratedMachineCodeRegion(event);
 	    });
@@ -717,6 +712,7 @@ TEST_CASE("EXPLAIN ANALYZE exposes compact execution region profile", "[api][jit
 	auto event_schema_has_column = [&](const string &name) {
 		return std::find(event_schema->names.begin(), event_schema->names.end(), name) != event_schema->names.end();
 	};
+	REQUIRE_FALSE(event_schema_has_column("candidate_uses_scan_filters"));
 	ForEachExecutionRegionEventRuntimeCountField(
 	    empty_event, [&](const char *name, idx_t) { REQUIRE(event_schema_has_column(name)); });
 	ForEachExecutionRegionEventRuntimeTimeField(
@@ -796,7 +792,7 @@ TEST_CASE("EXPLAIN ANALYZE exposes compact execution region profile", "[api][jit
 	REQUIRE(StringUtil::Contains(analyzed_plan, "\"runtime_result\""));
 	REQUIRE(StringUtil::Contains(analyzed_plan, "\"selected_source_execution\""));
 	REQUIRE(StringUtil::Contains(analyzed_plan, "\"selected_uses_scan_filters\""));
-	REQUIRE(StringUtil::Contains(analyzed_plan, "\"candidate_uses_scan_filters\""));
+	REQUIRE(!StringUtil::Contains(analyzed_plan, "\"candidate_uses_scan_filters\""));
 	REQUIRE(StringUtil::Contains(analyzed_plan, "\"jit_enabled\""));
 	REQUIRE(StringUtil::Contains(analyzed_plan, "\"jit_policy\""));
 	REQUIRE(StringUtil::Contains(analyzed_plan, "\"jit_requested_backend\""));

@@ -111,7 +111,7 @@ bool SljitProjectionAggregateRecipeBinding::TryMakeMarkFilterNativeTailRecipe(
 
 bool SljitProjectionAggregateRecipeBinding::CanBindMarkFilterBoundary(
     const SljitProjectionAggregatePrefixFacts &facts) const {
-	if (!facts.HasMarkFilter() || facts.HasSourceFilterProjection() || facts.HasAnyJoinInputProjection()) {
+	if (!facts.HasMarkFilter() || facts.HasSourceFilter() || facts.HasAnyJoinInputProjection()) {
 		return false;
 	}
 	const auto hash_join_idx = facts.MarkFilterHashJoinIdx();
@@ -136,12 +136,17 @@ bool SljitProjectionAggregateRecipeBinding::CanBindDirectProjectionAggregate(
 		     !SljitFullPipelineHashJoinProbeIsMatchedProbeAndBuild(ops, hash_join_idx))) {
 			return false;
 		}
-		if (facts.HasSourceFilterProjection()) {
-			return !facts.HasJoinInputProjection(0) && shape.ProjectionCount() == 1;
+		if (facts.HasSourceFilter() && (!SljitCanBindGeneratedFilterPrimitive(ops, facts.source_filter_idx) ||
+		                                (facts.HasSourceProjection() &&
+		                                 !SljitCanBindProjectionChainPrimitive(ops, facts.source_projection_idx)))) {
+			return false;
+		}
+		if (facts.HasSourceFilter()) {
+			return !facts.HasJoinInputProjection(0) && shape.ProjectionCount() <= 2;
 		}
 		return facts.HasJoinInputProjection(0) || shape.ProjectionCount() <= 2;
 	}
-	if (facts.HasMarkFilter() || facts.HasSourceFilterProjection() ||
+	if (facts.HasMarkFilter() || facts.HasSourceFilter() ||
 	    !SljitCanBindHashJoinProbeSelectionPrimitive(ops, facts.FinalHashJoinIdx()) ||
 	    !CanBindJoinPrefixInputs(facts)) {
 		return false;
@@ -172,9 +177,10 @@ bool SljitProjectionAggregateRecipeBinding::CanBindProjectionAggregateTail(
 		if (facts.HasMarkFilter() || !CanBindHashJoinProbeProjectionInput(hash_join_idx)) {
 			return false;
 		}
-		if (facts.HasSourceFilterProjection() &&
-		    (!SljitCanBindGeneratedFilterPrimitive(ops, facts.source_filter_idx) ||
-		     !SljitCanBindProjectionChainPrimitive(ops, facts.source_projection_idx))) {
+		if (facts.HasSourceFilter() && !SljitCanBindGeneratedFilterPrimitive(ops, facts.source_filter_idx)) {
+			return false;
+		}
+		if (facts.HasSourceProjection() && !SljitCanBindProjectionChainPrimitive(ops, facts.source_projection_idx)) {
 			return false;
 		}
 		return !facts.HasJoinInputProjection(0) ||
@@ -190,7 +196,7 @@ bool SljitProjectionAggregateRecipeBinding::CanBindProjectionAggregateTailPrefix
 	if (facts.HasMarkFilter()) {
 		return false;
 	}
-	if (facts.HasSourceFilterProjection()) {
+	if (facts.HasSourceFilter()) {
 		return facts.JoinCount() == 1 || !facts.HasJoinInputProjection(0);
 	}
 	return true;
@@ -225,10 +231,29 @@ SljitFullPipelinePrimitiveSequence SljitProjectionAggregateRecipeBinding::MakeSi
     SljitPostJoinProjectionAggregatePrimitive &post_join_aggregate) const {
 	const auto hash_join_idx = facts.HashJoinIdx(0);
 	auto sequence = MakeSourceSequence();
-	if (facts.HasSourceFilterProjection()) {
+	if (facts.HasSourceFilter()) {
 		auto generated_filter = SljitBindGeneratedFilterPrimitive(ops, facts.source_filter_idx);
 		sequence.Add(SljitFullPipelinePrimitiveStep::GeneratedFilter(generated_filter));
+	}
+	if (facts.HasSourceProjection()) {
+		auto pre_join_projection = PreJoinProjectionBinding();
+		SljitPreJoinProjectionViewDescriptor pre_join_view;
+		if (pre_join_projection.TryBuildView(facts.source_projection_idx, hash_join_idx, pre_join_view) &&
+		    pre_join_view.PreservesSourceColumnOrdinals()) {
+			SljitStringSetCaseGroupedPayloadProjection string_set_case_projection;
+			if (SljitTryBuildStringSetCaseGroupedPayloadProjection(
+			        ops, pre_join_view, post_join_aggregate.post_join_projection.first_projection_idx,
+			        post_join_aggregate.post_join_projection.final_projection_idx, string_set_case_projection)) {
+				post_join_aggregate.post_join_projection.EnableStringSetCaseGroupedPayload(string_set_case_projection);
+			}
+			if (pre_join_projection.TryAppendElidedHashJoinProbeSelection(sequence, pre_join_view,
+			                                                              facts.source_projection_idx, hash_join_idx)) {
+				return sequence;
+			}
+		}
 		AddProjectionChainStep(sequence, facts.source_projection_idx);
+	}
+	if (facts.HasSourceFilter()) {
 		sequence.Add(MakeHashJoinProbeSelectionStep(hash_join_idx));
 	} else if (facts.HasJoinInputProjection(0)) {
 		SljitPreJoinProjectionViewDescriptor pre_join_view;
@@ -259,7 +284,7 @@ SljitProjectionAggregateRecipeBinding::MakeSingleJoinProjectionAggregateTailPref
     const SljitProjectionAggregatePrefixFacts &facts) const {
 	const auto hash_join_idx = facts.HashJoinIdx(0);
 	auto sequence = MakeSourceSequence();
-	if (facts.HasJoinInputProjection(0) && !facts.HasSourceFilterProjection() &&
+	if (facts.HasJoinInputProjection(0) && !facts.HasSourceFilter() &&
 	    PreJoinProjectionBinding().TryAppendElidedHashJoinProbeSelection(sequence, facts.JoinInputProjectionIdx(0),
 	                                                                     hash_join_idx)) {
 		return sequence;
@@ -285,9 +310,11 @@ SljitFullPipelinePrimitiveSequence SljitProjectionAggregateRecipeBinding::MakeJo
 
 void SljitProjectionAggregateRecipeBinding::AddProjectionAggregateSourcePrefix(
     SljitFullPipelinePrimitiveSequence &sequence, const SljitProjectionAggregatePrefixFacts &facts) const {
-	if (facts.HasSourceFilterProjection()) {
+	if (facts.HasSourceFilter()) {
 		auto generated_filter = SljitBindGeneratedFilterPrimitive(ops, facts.source_filter_idx);
 		sequence.Add(SljitFullPipelinePrimitiveStep::GeneratedFilter(generated_filter));
+	}
+	if (facts.HasSourceProjection()) {
 		AddProjectionChainStep(sequence, facts.source_projection_idx);
 	}
 }
@@ -367,7 +394,7 @@ SljitFullPipelinePrimitiveSequence SljitProjectionAggregateRecipeBinding::MakePr
 SljitFullPipelinePrimitiveSequence SljitProjectionAggregateRecipeBinding::MakeProjectionAggregateMarkFilterPrefix(
     const SljitProjectionAggregatePrefixFacts &facts, bool materialize_filter_selection,
     idx_t downstream_projection_idx) const {
-	if (facts.JoinCount() > 1 || facts.HasSourceFilterProjection() || facts.HasJoinInputProjection(0)) {
+	if (facts.JoinCount() > 1 || facts.HasSourceFilter() || facts.HasJoinInputProjection(0)) {
 		auto sequence = MakeProjectionAggregatePreMarkJoinPrefix(facts);
 		sequence.Add(MakeMarkProbeFilterBoundaryStep(facts.FinalHashJoinIdx(), facts.mark_filter_idx, true,
 		                                             downstream_projection_idx, materialize_filter_selection));

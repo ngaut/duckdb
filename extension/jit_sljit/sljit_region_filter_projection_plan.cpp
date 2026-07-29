@@ -19,7 +19,7 @@ static SljitRegionNodePlan SljitUnsupportedExpressionBoundaryNode(const string &
 	return SljitRegionBoundaryNode(std::move(reason));
 }
 
-SljitRegionNodePlan PlanSljitFilterNode(const ExecutionRegionNode &node, string &error, bool render_diagnostics) {
+SljitRegionNodePlan PlanSljitFilterNode(const ExecutionRegionNode &node, bool render_diagnostics) {
 	if (!node.blocker_reason.empty() || !node.filter) {
 		return SljitNodeBlockerBoundary(node, "filter expression unsupported by SLJIT IR lowering");
 	}
@@ -27,6 +27,7 @@ SljitRegionNodePlan PlanSljitFilterNode(const ExecutionRegionNode &node, string 
 	SljitNativeRegionOpPlan native_op;
 	native_op.kind = SljitNativeRegionOpKind::FILTER;
 	native_op.output_types = node.output_types;
+	string error;
 	if (!TryLowerNativeRegionExpression(*node.filter, true, native_op.filter, error, render_diagnostics)) {
 		return SljitUnsupportedExpressionBoundaryNode(error);
 	}
@@ -89,19 +90,21 @@ static bool TryPlanExpandedSljitProjection(const ExecutionRegionNode &node, cons
 }
 
 SljitRegionNodePlan PlanSljitProjectionNode(const ExecutionRegionNode &node, const vector<LogicalType> &input_types,
-                                            string &error, bool render_diagnostics) {
+                                            bool render_diagnostics) {
 	if (!node.blocker_reason.empty() || node.projections.empty()) {
 		return SljitNodeBlockerBoundary(node, "projection has no lowered JIT IR expressions");
 	}
 
 	SljitNativeRegionOpPlan native_op;
-	if (TryPlanDirectSljitProjection(node, native_op, input_types, error, render_diagnostics)) {
+	string direct_error;
+	if (TryPlanDirectSljitProjection(node, native_op, input_types, direct_error, render_diagnostics)) {
 		return SljitNativeNode(std::move(native_op), "native projection");
 	}
 
 	vector<SljitNativeRegionOpPlan> native_ops;
-	if (!TryPlanExpandedSljitProjection(node, input_types, native_ops, error, render_diagnostics)) {
-		return SljitUnsupportedExpressionBoundaryNode(error);
+	string expanded_error;
+	if (!TryPlanExpandedSljitProjection(node, input_types, native_ops, expanded_error, render_diagnostics)) {
+		return SljitUnsupportedExpressionBoundaryNode(expanded_error.empty() ? direct_error : expanded_error);
 	}
 	return SljitNativeNode(std::move(native_ops), "generated typed projection expression graph");
 }

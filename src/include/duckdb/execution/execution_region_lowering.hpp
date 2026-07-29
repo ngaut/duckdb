@@ -77,6 +77,17 @@ struct ExecutionRegionLoweringCapabilityFacts {
 	idx_t backend_low_cardinality_string_max_distinct_count = 0;
 };
 
+struct DUCKDB_API ExecutionRegionSelectedSourceRecipe {
+	ExecutionRegionSourceExecutionKind execution = ExecutionRegionSourceExecutionKind::NONE;
+	ExecutionRegionScanFilterMode scan_filter_mode = ExecutionRegionScanFilterMode::NONE;
+	vector<LogicalType> input_types;
+};
+
+struct DUCKDB_API ExecutionRegionSelectedStage {
+	idx_t stage_index = DConstants::INVALID_INDEX;
+	ExecutionRegionStageExecutionKind execution = ExecutionRegionStageExecutionKind::NONE;
+};
+
 struct DUCKDB_API ExecutionRegionLoweringPlan {
 	void AddNode(string label, string operator_name, ExecutionRegionLoweringKind kind, string reason);
 	void AddNode(string label, string operator_name, ExecutionRegionOperatorKind operator_kind,
@@ -106,21 +117,21 @@ struct DUCKDB_API ExecutionRegionLoweringPlan {
 	void AddFusionBlocker(string reason);
 	void SetRecordDetailedNodes(bool record_detailed_nodes);
 	void SetCompiledExecutionMode(ExecutionRegionExecutionMode execution_mode);
-	void SetFullyFused(bool fully_fused);
-	void SetScanFilterMode(ExecutionRegionScanFilterMode scan_filter_mode);
-	void SetSelectedSourceExecution(ExecutionRegionSourceExecutionKind source_execution);
-	void SetSourceContractInputTypes(vector<LogicalType> input_types);
+	void SelectStage(idx_t stage_index, ExecutionRegionStageExecutionKind execution);
+	void SetSourceRecipe(ExecutionRegionSelectedSourceRecipe source_recipe);
 	void SetOperatorStageIR(string stage_ir);
 	idx_t NativeCount() const;
 	idx_t BoundaryCount() const;
+	idx_t SelectedStageCount() const;
 	bool HasNodes() const;
 	bool RecordDetailedNodes() const;
 	ExecutionRegionExecutionMode ExpectedCompiledExecutionMode() const;
-	bool IsFullyFused() const;
 	bool UsesScanFilters() const;
+	bool UsesResidualScanFilters() const;
 	ExecutionRegionScanFilterMode ScanFilterMode() const;
 	ExecutionRegionSourceExecutionKind SelectedSourceExecution() const;
 	const vector<LogicalType> &SourceContractInputTypes() const;
+	const vector<ExecutionRegionSelectedStage> &SelectedStages() const;
 	string CompactEventReason() const;
 	string EventReason() const;
 
@@ -133,10 +144,8 @@ struct DUCKDB_API ExecutionRegionLoweringPlan {
 	idx_t boundary_count = 0;
 	ExecutionRegionLoweringCapabilityFacts capability_facts;
 	bool record_detailed_nodes = true;
-	bool fully_fused = false;
-	ExecutionRegionSourceExecutionKind selected_source_execution = ExecutionRegionSourceExecutionKind::NONE;
-	ExecutionRegionScanFilterMode scan_filter_mode = ExecutionRegionScanFilterMode::NONE;
-	vector<LogicalType> source_contract_input_types;
+	vector<ExecutionRegionSelectedStage> selected_stages;
+	ExecutionRegionSelectedSourceRecipe source_recipe;
 	string operator_stage_ir;
 	string first_boundary_reason;
 	string first_fusion_blocker;

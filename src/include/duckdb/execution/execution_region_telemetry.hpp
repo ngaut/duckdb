@@ -78,16 +78,11 @@ struct ExecutionRegionEvent {
 	string pipeline_shape;
 	idx_t pipeline_estimated_cardinality = 0;
 	bool has_candidate = false;
-	idx_t candidate_id = 0;
 	string candidate_shape;
-	string candidate_pipeline_shape;
 	ExecutionRegionSignature candidate_signature;
-	idx_t candidate_node_count = 0;
-	idx_t candidate_start_operator_index = 0;
-	idx_t candidate_end_operator_index = 0;
 	idx_t candidate_estimated_cardinality = 0;
 	ExecutionRegionCandidateTraits candidate_traits;
-	ExecutionRegionContract candidate_contract;
+	ExecutionRegionABI candidate_abi = ExecutionRegionABI::NONE;
 	ExecutionRunnerKind selected_runner = ExecutionRunnerKind::VECTORIZED;
 	PhysicalRunnerCostProfile runner_cost;
 	ExecutionRegionEventPhase phase_kind = ExecutionRegionEventPhase::NONE;
@@ -96,7 +91,6 @@ struct ExecutionRegionEvent {
 	ExecutionRegionExecutionMode execution_mode_kind = ExecutionRegionExecutionMode::NONE;
 	ExecutionRegionSourceExecutionKind selected_source_execution = ExecutionRegionSourceExecutionKind::NONE;
 	bool selected_uses_scan_filters = false;
-	bool candidate_uses_scan_filters = false;
 	string reason;
 	string blocker;
 	string ir;

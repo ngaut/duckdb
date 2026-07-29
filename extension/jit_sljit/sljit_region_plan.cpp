@@ -97,10 +97,43 @@ static vector<T> BuildSljitSourceOutputStats(const ExecutionRegionSourceInfo &so
 	return result;
 }
 
-static void ApplySljitSourceContractPlan(const SljitSourceContractPlan &contract_plan,
-                                         ExecutionRegionLoweringPlan &lowering_plan) {
-	lowering_plan.SetScanFilterMode(contract_plan.scan_filter_mode);
-	lowering_plan.SetSourceContractInputTypes(contract_plan.source_contract_input_types);
+static void SelectSljitSourceStages(const ExecutionRegionCandidate &candidate, idx_t node_idx,
+                                    const SljitSourceContractPlan &contract_plan,
+                                    ExecutionRegionLoweringPlan &lowering_plan) {
+	ExecutionRegionSelectedSourceRecipe source_recipe;
+	source_recipe.execution = ExecutionRegionSourceExecutionKind::SOURCE_CONTRACT;
+	source_recipe.scan_filter_mode = contract_plan.scan_filter_mode;
+	source_recipe.input_types = contract_plan.source_contract_input_types;
+	lowering_plan.SetSourceRecipe(std::move(source_recipe));
+	for (idx_t stage_idx = 0; stage_idx < candidate.stage_plan.stages.size(); stage_idx++) {
+		auto &stage = candidate.stage_plan.stages[stage_idx];
+		if (stage.node_index != node_idx) {
+			continue;
+		}
+		auto execution = stage.execution;
+		if (stage.kind == ExecutionRegionStageKind::SOURCE) {
+			execution = ExecutionRegionStageExecutionKind::NATIVE_CONTRACT;
+		} else if (stage.kind == ExecutionRegionStageKind::SOURCE_FILTER) {
+			execution = contract_plan.scan_filter_mode == ExecutionRegionScanFilterMode::ALL
+			                ? ExecutionRegionStageExecutionKind::NATIVE_CONTRACT
+			                : ExecutionRegionStageExecutionKind::GENERATED_IR;
+		}
+		lowering_plan.SelectStage(stage_idx, execution);
+	}
+	if (contract_plan.low_cardinality_string_like_max_distinct_count > 0) {
+		lowering_plan.AddBackendLowCardinalityStringPredicatePreference(
+		    contract_plan.low_cardinality_string_like_max_distinct_count);
+	}
+}
+
+static void SelectSljitNodeStages(const ExecutionRegionCandidate &candidate, idx_t node_idx,
+                                  ExecutionRegionLoweringPlan &lowering_plan) {
+	for (idx_t stage_idx = 0; stage_idx < candidate.stage_plan.stages.size(); stage_idx++) {
+		auto &stage = candidate.stage_plan.stages[stage_idx];
+		if (stage.node_index == node_idx) {
+			lowering_plan.SelectStage(stage_idx, stage.execution);
+		}
+	}
 }
 
 static vector<bool> BuildSljitSourceNotNullForContractPlan(const ExecutionRegionSourceInfo &source,
@@ -149,18 +182,12 @@ static vector<Value> BuildSljitSourceMaxValuesForContractPlan(const ExecutionReg
 }
 
 static SljitRegionNodePlan PlanSljitRegionNode(const ExecutionRegionNode &node, const vector<LogicalType> &input_types,
-                                               const vector<bool> &input_not_null, string &error,
-                                               bool render_diagnostics) {
+                                               const vector<bool> &input_not_null, bool render_diagnostics) {
 	switch (node.kind) {
 	case ExecutionRegionNodeKind::FILTER:
-		return PlanSljitFilterNode(node, error, render_diagnostics);
+		return PlanSljitFilterNode(node, render_diagnostics);
 	case ExecutionRegionNodeKind::PROJECTION:
-		return PlanSljitProjectionNode(node, input_types, error, render_diagnostics);
-	case ExecutionRegionNodeKind::SOURCE:
-		return SljitRegionBoundaryNode(SljitSourceBoundaryReason(node, render_diagnostics));
-	case ExecutionRegionNodeKind::SINK: {
-		return PlanSljitSinkNode(node, input_types, render_diagnostics);
-	}
+		return PlanSljitProjectionNode(node, input_types, render_diagnostics);
 	case ExecutionRegionNodeKind::OPERATOR:
 		if (node.operator_info && node.operator_info->kind == ExecutionRegionOperatorContractKind::HASH_JOIN_PROBE) {
 			return PlanSljitHashJoinProbeOperatorNode(node, input_types, input_not_null, render_diagnostics);
@@ -177,11 +204,10 @@ static SljitRegionNodePlan PlanSljitRegionNode(const ExecutionRegionNode &node, 
 
 static idx_t SljitEstimatedNodeInputCardinality(const ExecutionRegionIR &region_ir,
                                                 const ExecutionRegionCandidate &candidate, idx_t node_idx) {
-	if (node_idx > candidate.first_node && node_idx - 1 < region_ir.nodes.size()) {
+	if (node_idx > 0 && node_idx - 1 < region_ir.nodes.size()) {
 		return region_ir.nodes[node_idx - 1].estimated_cardinality;
 	}
-	if (node_idx == candidate.first_node && node_idx < region_ir.nodes.size() &&
-	    region_ir.nodes[node_idx].kind == ExecutionRegionNodeKind::SOURCE) {
+	if (node_idx == 0 && !region_ir.nodes.empty() && region_ir.nodes[0].kind == ExecutionRegionNodeKind::SOURCE) {
 		return region_ir.nodes[node_idx].estimated_cardinality;
 	}
 	return candidate.estimated_cardinality;
@@ -230,6 +256,9 @@ static void AddSljitLoweredNode(ExecutionRegionLoweringPlan &lowering_plan, cons
 		lowering_plan.AddBackendDataShapeCapability(node.input_format, node.output_format, node.vector_source,
 		                                            node.selection_source);
 	}
+	if (!node_plan.fusion_blocker.empty()) {
+		lowering_plan.AddFusionBlocker(node_plan.fusion_blocker);
+	}
 	if (lowering_plan.RecordDetailedNodes()) {
 		lowering_plan.AddNode(node.label, node.operator_name, node.operator_kind, node_plan.kind, node_plan.reason);
 		return;
@@ -238,8 +267,7 @@ static void AddSljitLoweredNode(ExecutionRegionLoweringPlan &lowering_plan, cons
 }
 
 struct SljitRegionLoweringCursor {
-	SljitRegionLoweringCursor(vector<LogicalType> input_types, SljitNativeRegionPlan &native_region)
-	    : current_types(std::move(input_types)), native_region(native_region) {
+	explicit SljitRegionLoweringCursor(SljitNativeRegionPlan &native_region) : native_region(native_region) {
 	}
 
 	const vector<LogicalType> &InputTypes() const {
@@ -383,63 +411,28 @@ ExecutionRegionLoweringPlan BuildSljitRegionPlan(const ExecutionRegionIR &region
                                                  const ExecutionRegionCandidate &candidate, bool render_diagnostics) {
 	ExecutionRegionLoweringPlan lowering_plan;
 	lowering_plan.SetRecordDetailedNodes(render_diagnostics);
-	string backend_error;
 	lowering_plan.SetCompiledExecutionMode(ExecutionRegionExecutionMode::UNSUPPORTED);
 	if (candidate.stage_plan.HasStages()) {
 		lowering_plan.SetOperatorStageIR(candidate.stage_plan.ir);
 	}
-	SljitNativeRegionPlan native_region;
-	SljitRegionLoweringCursor cursor(candidate.input_types, native_region);
-	if (candidate.EndNode() > region_ir.nodes.size()) {
-		backend_error = "SLJIT region candidate references nodes outside the region IR";
+	if (!ExecutionRegionABIIsFullPipeline(candidate.abi)) {
+		lowering_plan.AddFusionBlocker("sljit-backend-blocker:requires-full-pipeline-abi");
 		return lowering_plan;
 	}
-	auto &contract = candidate.contract;
-	SljitSourceContractPlan selected_source_contract;
-	for (idx_t node_idx = candidate.first_node; node_idx < candidate.EndNode(); node_idx++) {
+	SljitNativeRegionPlan native_region;
+	SljitRegionLoweringCursor cursor(native_region);
+	for (idx_t node_idx = 0; node_idx < region_ir.nodes.size(); node_idx++) {
 		auto &node = region_ir.nodes[node_idx];
 		if (node.kind == ExecutionRegionNodeKind::SOURCE) {
-			auto executable_source = SljitCanExecuteSourceNode(node, contract);
-			SljitSourceStrategyContext source_strategy;
-			source_strategy.candidate_uses_scan_filters = candidate.uses_scan_filters;
-			source_strategy.prefer_direct_build_scan_filters =
-			    candidate.traits.sink_kind == ExecutionRegionSinkKind::HASH_JOIN_BUILD;
-			source_strategy.supports_generated_mixed_filter =
-			    candidate.traits.sink_kind == ExecutionRegionSinkKind::HASH_AGGREGATE_UPDATE ||
-			    candidate.traits.sink_kind == ExecutionRegionSinkKind::PERFECT_HASH_AGGREGATE_UPDATE;
-			auto source_execution =
-			    candidate.source_execution != ExecutionRegionSourceExecutionKind::NONE
-			        ? candidate.source_execution
-			        : (node.source ? node.source->execution : ExecutionRegionSourceExecutionKind::NONE);
-			auto node_plan = executable_source ? PlanSljitSourceNode(node, contract, source_execution,
-			                                                         render_diagnostics, source_strategy)
-			                                   : PlanSljitRegionNode(node, cursor.InputTypes(), cursor.InputNotNull(),
-			                                                         backend_error, render_diagnostics);
-			const bool source_requires_native = executable_source &&
-			                                    node_plan.kind == ExecutionRegionLoweringKind::BOUNDARY &&
-			                                    node_plan.requires_source_contract;
+			auto node_plan = PlanSljitSourceNode(node, candidate.traits.sink_kind, render_diagnostics);
 			AddSljitLoweredNode(lowering_plan, node, node_plan);
-			if (source_requires_native) {
-				lowering_plan.AddFusionBlocker(
-				    "source-contract-blocker:requires-source-contract;source_execution=duckdb-source-boundary");
-			}
-			if (executable_source && node_plan.kind != ExecutionRegionLoweringKind::BOUNDARY) {
-				auto selected_source_execution = node_plan.source_execution != ExecutionRegionSourceExecutionKind::NONE
-				                                     ? node_plan.source_execution
-				                                     : node.source->execution;
-				lowering_plan.SetSelectedSourceExecution(selected_source_execution);
-				native_region.source_execution = selected_source_execution;
-			}
-			if (executable_source && node_plan.kind == ExecutionRegionLoweringKind::NATIVE) {
-				selected_source_contract.Merge(node_plan.source_contract);
+			if (node_plan.kind == ExecutionRegionLoweringKind::NATIVE) {
+				SelectSljitSourceStages(candidate, node_idx, node_plan.source_contract, lowering_plan);
+				native_region.scan_filter_mode = node_plan.source_contract.scan_filter_mode;
 				for (auto &scan_filter : node_plan.scan_filters) {
 					native_region.scan_filters.push_back(std::move(scan_filter));
 				}
-				native_region.uses_scan_filters =
-				    native_region.uses_scan_filters || node_plan.source_contract.UsesScanFilters();
 				vector<bool> source_not_null;
-				vector<Value> source_min_values;
-				vector<Value> source_max_values;
 				if (node.source && node.source->table_scan_contract.present) {
 					native_region.source_distinct_counts =
 					    BuildSljitSourceDistinctCountsForContractPlan(*node.source, node_plan.source_contract);
@@ -459,18 +452,12 @@ ExecutionRegionLoweringPlan BuildSljitRegionPlan(const ExecutionRegionIR &region
 			continue;
 		}
 		if (node.kind == ExecutionRegionNodeKind::SINK) {
-			auto node_plan =
-			    ExecutionRegionABIIsFullPipeline(contract.abi)
-			        ? PlanSljitFullPipelineSinkNode(node, cursor.InputTypes(), render_diagnostics)
-			    : candidate.context_has_missing_operator_contract
-			        ? SljitRegionBoundaryNode("sink region requires upstream operators with native contracts")
-			        : PlanSljitRegionNode(node, cursor.InputTypes(), cursor.InputNotNull(), backend_error,
-			                              render_diagnostics);
+			auto node_plan = PlanSljitFullPipelineSinkNode(node, cursor.InputTypes(), render_diagnostics);
 			ApplySljitAggregateUpdateInputEstimate(node_plan,
 			                                       SljitEstimatedNodeInputCardinality(region_ir, candidate, node_idx));
 			AddSljitLoweredNode(lowering_plan, node, node_plan);
-			AddSljitFullPipelineSinkBlockers(lowering_plan, backend_error, node, node_plan, contract);
 			if (node_plan.kind == ExecutionRegionLoweringKind::NATIVE && SljitRegionNodeHasNativeOps(node_plan)) {
+				SelectSljitNodeStages(candidate, node_idx, lowering_plan);
 				cursor.AcceptSink(node_plan);
 			} else {
 				cursor.BreakAtBoundary(node.output_types);
@@ -478,33 +465,21 @@ ExecutionRegionLoweringPlan BuildSljitRegionPlan(const ExecutionRegionIR &region
 			continue;
 		}
 		SljitRegionNodePlan node_plan;
-		if (node.kind == ExecutionRegionNodeKind::OPERATOR &&
-		    node.boundary == ExecutionRegionBoundaryKind::OPERATOR_NATIVE &&
-		    !ExecutionRegionABIIsFullPipeline(contract.abi)) {
-			node_plan = SljitRegionBoundaryNode("native operator contract requires full-pipeline region ABI");
-		} else if (node.kind == ExecutionRegionNodeKind::OPERATOR &&
-		           node.boundary == ExecutionRegionBoundaryKind::OPERATOR_CONTRACT_BOUNDARY &&
-		           !ExecutionRegionABIIsFullPipeline(contract.abi)) {
-			node_plan =
-			    SljitRegionBoundaryNode("native operator contract boundary requires full-pipeline region ownership");
-		} else {
-			node_plan = PlanSljitRegionNode(node, cursor.InputTypes(), cursor.InputNotNull(), backend_error,
-			                                render_diagnostics);
-		}
+		node_plan = PlanSljitRegionNode(node, cursor.InputTypes(), cursor.InputNotNull(), render_diagnostics);
 		if (node_plan.kind == ExecutionRegionLoweringKind::NATIVE) {
 			cursor.ApplyExactFilterProof(node_plan);
 		}
 		AddSljitLoweredNode(lowering_plan, node, node_plan);
-		AddSljitOperatorContractBlockers(lowering_plan, backend_error, node, node_plan);
 		if (node_plan.kind != ExecutionRegionLoweringKind::NATIVE || !SljitRegionNodeHasNativeOps(node_plan)) {
 			cursor.BreakAtBoundary(node.output_types);
 			continue;
 		}
+		SelectSljitNodeStages(candidate, node_idx, lowering_plan);
 		cursor.AcceptOperator(node, node_plan);
 	}
 	if (cursor.CanFuse() && !native_region.ops.empty()) {
 		FuseAdjacentNativeProjections(native_region, render_diagnostics);
-		FusePrimitiveAggregateUpdates(native_region, candidate.input_types, render_diagnostics);
+		FusePrimitiveAggregateUpdates(native_region, native_region.source_output_types, render_diagnostics);
 		ApplySljitAggregateUpdateInputEstimate(native_region, candidate.estimated_cardinality);
 		SpecializeSljitNativeRegionAggregatePayloadRanges(native_region);
 		if (candidate.estimated_cardinality < SLJIT_FLAT_NULLABLE_FAST_PATH_MIN_CARDINALITY) {
@@ -512,20 +487,22 @@ ExecutionRegionLoweringPlan BuildSljitRegionPlan(const ExecutionRegionIR &region
 		}
 		AddSljitNativeRegionCapabilityFacts(lowering_plan, native_region);
 		AddSljitLowCardinalityStringPredicatePreferences(native_region, lowering_plan);
-		ApplySljitSourceContractPlan(selected_source_contract, lowering_plan);
 		string codegen_blocker;
 		if (SljitNativeRegionHasExecutableBodyGap(native_region, codegen_blocker)) {
-			backend_error = codegen_blocker;
 			auto fusion_blocker =
 			    "operator-contract-blocker:native-operator-executable-body-missing;" + codegen_blocker;
-			if (!candidate.contract.ir.empty()) {
-				fusion_blocker += ";" + candidate.contract.ir;
+			if (!candidate.stage_plan.ir.empty()) {
+				fusion_blocker += ";" + candidate.stage_plan.ir;
 			}
 			lowering_plan.AddFusionBlocker(std::move(fusion_blocker));
 			return lowering_plan;
 		}
-		if (contract.source_boundary_count == 0 && contract.missing_contract_count == 0) {
-			lowering_plan.SetFullyFused(true);
+		if (candidate.stage_plan.SourceBoundaryCount() == 0 && candidate.stage_plan.MissingContractCount() == 0) {
+			if (lowering_plan.SelectedStageCount() != candidate.stage_plan.stages.size()) {
+				lowering_plan.AddFusionBlocker("candidate-stage-plan-blocker:incomplete-backend-stage-selection;" +
+				                               candidate.stage_plan.ir);
+				return lowering_plan;
+			}
 			for (idx_t op_idx = 0; op_idx < native_region.ops.size(); op_idx++) {
 				auto &op = native_region.ops[op_idx];
 				if (op.kind == SljitNativeRegionOpKind::HASH_JOIN_PROBE &&
@@ -534,7 +511,6 @@ ExecutionRegionLoweringPlan BuildSljitRegionPlan(const ExecutionRegionIR &region
 				}
 			}
 			auto backend_plan = make_shared_ptr<SljitRegionBackendPlan>();
-			backend_plan->error = std::move(backend_error);
 			backend_plan->native_region = make_uniq<SljitNativeRegionPlan>(std::move(native_region));
 			backend_plan->artifact_semantic_key =
 			    BuildSljitRegionArtifactSemanticKey(candidate, *backend_plan->native_region);
@@ -542,12 +518,14 @@ ExecutionRegionLoweringPlan BuildSljitRegionPlan(const ExecutionRegionIR &region
 			lowering_plan.backend_plan = std::move(backend_plan);
 			lowering_plan.SetCompiledExecutionMode(ExecutionRegionExecutionMode::NATIVE);
 		}
-		if (!lowering_plan.IsFullyFused()) {
-			if (contract.source_boundary_count > 0) {
-				lowering_plan.AddFusionBlocker("candidate-contract-blocker:source-boundary;" + contract.ir);
+		if (lowering_plan.SelectedStageCount() != candidate.stage_plan.stages.size()) {
+			if (candidate.stage_plan.SourceBoundaryCount() > 0) {
+				lowering_plan.AddFusionBlocker("candidate-stage-plan-blocker:source-boundary;" +
+				                               candidate.stage_plan.ir);
 			}
-			if (contract.missing_contract_count > 0) {
-				lowering_plan.AddFusionBlocker("candidate-contract-blocker:missing-contract;" + contract.ir);
+			if (candidate.stage_plan.MissingContractCount() > 0) {
+				lowering_plan.AddFusionBlocker("candidate-stage-plan-blocker:missing-contract;" +
+				                               candidate.stage_plan.ir);
 			}
 		}
 	}

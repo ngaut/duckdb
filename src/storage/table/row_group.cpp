@@ -770,7 +770,7 @@ static bool IsExecutableExactRootOptionalStringFilter(const TableFilter &filter)
 }
 
 bool RowGroup::CheckZonemap(optional_ptr<ClientContext> context, ScanFilterInfo &filters) {
-	auto &filter_list = filters.GetFilterList();
+	auto &filter_list = filters.GetPruningFilterList();
 	// new row group - label all filters as up for grabs again
 	filters.CheckAllFilters();
 	for (idx_t i = 0; i < filter_list.size(); i++) {
@@ -797,7 +797,7 @@ bool RowGroup::CheckZonemap(optional_ptr<ClientContext> context, ScanFilterInfo 
 bool RowGroup::CheckZonemapSegments(CollectionScanState &state) {
 	auto &filters = state.GetFilterInfo();
 	optional_idx target_vector_index_max;
-	for (auto &entry : filters.GetFilterList()) {
+	for (auto &entry : filters.GetPruningFilterList()) {
 		if (entry.IsAlwaysTrue()) {
 			// filter is always true - avoid checking
 			continue;
@@ -922,7 +922,7 @@ void RowGroup::Scan(ScanOptions options, CollectionScanState &state, DataChunk &
 			auto adaptive_filter = filter_info.GetAdaptiveFilter();
 			auto filter_state = filter_info.BeginFilter();
 			if (has_filters) {
-				auto &filter_list = filter_info.GetFilterList();
+				auto &filter_list = filter_info.GetResidualFilterList();
 				const auto &permutation = adaptive_filter->GetPermutation();
 				for (idx_t i = 0; i < filter_list.size(); i++) {
 					auto filter_idx = permutation[i];
