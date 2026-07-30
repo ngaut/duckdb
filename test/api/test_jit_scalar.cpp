@@ -124,7 +124,7 @@ TEST_CASE("JIT lowers date year intrinsic as native scalar projection", "[api][j
 	REQUIRE(result->GetValue(0, 3).IsNull());
 
 	RequireNativeSljitIr(manager, "date_year", [&](const ExecutionRegionEvent &event) {
-		REQUIRE(event.candidate_abi == ExecutionRegionABI::FULL_PIPELINE);
+		REQUIRE(event.has_candidate);
 		REQUIRE(event.candidate_traits.projection_count > 0);
 	});
 }

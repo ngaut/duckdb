@@ -12,21 +12,15 @@ ExecutionRegionPlan::~ExecutionRegionPlan() {
 }
 
 optional_ptr<ExecutionRegionKernel> ExecutionRegionPlan::GetExecutableFullPipelineKernel() {
-	if (!kernel || !ExecutionRegionABIIsFullPipeline(kernel->ExecutionABI()) || !kernel->CanExecuteFullPipeline()) {
-		return nullptr;
-	}
-	return *kernel;
+	return kernel ? optional_ptr<ExecutionRegionKernel>(*kernel) : nullptr;
 }
 
 optional_ptr<const ExecutionRegionKernel> ExecutionRegionPlan::GetExecutableFullPipelineKernel() const {
-	if (!kernel || !ExecutionRegionABIIsFullPipeline(kernel->ExecutionABI()) || !kernel->CanExecuteFullPipeline()) {
-		return nullptr;
-	}
-	return *kernel;
+	return kernel ? optional_ptr<const ExecutionRegionKernel>(*kernel) : nullptr;
 }
 
 bool ExecutionRegionPlan::HasExecutableFullPipeline() const {
-	return GetExecutableFullPipelineKernel() != nullptr;
+	return kernel != nullptr;
 }
 
 void ExecutionRegionPlan::SelectRunner(ExecutionRunnerKind runner) {

@@ -907,7 +907,6 @@ static string DescribeExecutionRegionCandidateTraits(const ExecutionRegionCandid
 	          ExecutionRegionBool(traits.finalized_dynamic_filter_cardinality_estimate);
 	result += ",source_filters=" + std::to_string(traits.source_filter_count);
 	result += ",source_filter_expressions=" + std::to_string(traits.source_filter_expression_count);
-	result += ",source_conjunction_filters=" + std::to_string(traits.source_conjunction_filter_count);
 	result += ",filters=" + std::to_string(traits.filter_count);
 	result += ",projections=" + std::to_string(traits.projection_count);
 	result += ",operators=" + std::to_string(traits.operator_count);
@@ -930,8 +929,8 @@ static string DescribeExecutionRegionCandidateTraits(const ExecutionRegionCandid
 	return result;
 }
 
-static string DescribeExecutionRegionStagePlan(const ExecutionRegionStagePlan &plan) {
-	string result = "duckdb.operator-stage-region<shape=" + plan.shape;
+static string DescribeExecutionRegionStagePlan(const ExecutionRegionStagePlan &plan, const string &candidate_shape) {
+	string result = "duckdb.operator-stage-region<shape=full-pipeline:" + candidate_shape;
 	result += ",stages=[";
 	for (idx_t stage_idx = 0; stage_idx < plan.stages.size(); stage_idx++) {
 		auto &stage = plan.stages[stage_idx];
@@ -984,7 +983,7 @@ static string DescribeExecutionRegionCandidate(const ExecutionRegionCandidate &c
 		result += ",";
 		result += candidate.stage_plan.ir;
 	}
-	result += "," + candidate.traits.ir;
+	result += "," + DescribeExecutionRegionCandidateTraits(candidate.traits);
 	result += ">";
 	return result;
 }
@@ -1098,21 +1097,10 @@ void FinalizeExecutionRegionSinkInfo(ExecutionRegionSinkInfo &sink, ExecutionReg
 	sink.ir = DescribeExecutionRegionSinkInfo(sink);
 }
 
-void FinalizeExecutionRegionCandidateTraits(ExecutionRegionCandidateTraits &traits, ExecutionRegionIRMode mode) {
+void FinalizeExecutionRegionStagePlan(ExecutionRegionStagePlan &plan, const string &candidate_shape,
+                                      ExecutionRegionIRMode mode) {
 	if (ExecutionRegionShouldRenderDiagnostics(mode)) {
-		traits.ir = DescribeExecutionRegionCandidateTraits(traits);
-	}
-}
-
-void FinalizeExecutionRegionStagePlan(ExecutionRegionStagePlan &plan, ExecutionRegionIRMode mode) {
-	if (ExecutionRegionShouldRenderDiagnostics(mode)) {
-		plan.ir = DescribeExecutionRegionStagePlan(plan);
-	}
-}
-
-void FinalizeExecutionRegionCandidate(ExecutionRegionCandidate &candidate, ExecutionRegionIRMode mode) {
-	if (ExecutionRegionShouldRenderDiagnostics(mode)) {
-		candidate.ir = DescribeExecutionRegionCandidate(candidate);
+		plan.ir = DescribeExecutionRegionStagePlan(plan, candidate_shape);
 	}
 }
 
@@ -1123,7 +1111,7 @@ void FinalizeExecutionRegionIR(ExecutionRegionIR &region_ir, ExecutionRegionIRMo
 	region_ir.ir = "duckdb.region typed-vector-ir";
 	if (region_ir.candidate) {
 		region_ir.ir += ";";
-		region_ir.ir += region_ir.candidate->ir;
+		region_ir.ir += DescribeExecutionRegionCandidate(*region_ir.candidate);
 	}
 	if (!region_ir.candidate_blocker.empty()) {
 		region_ir.ir += ";candidate-blocker:";

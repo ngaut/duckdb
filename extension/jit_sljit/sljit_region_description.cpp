@@ -348,11 +348,9 @@ static void AppendSljitArtifactKeyField(string &result, const string &name, cons
 
 string BuildSljitRegionArtifactSemanticKey(const ExecutionRegionCandidate &candidate,
                                            const SljitNativeRegionPlan &region) {
-	string result = "sljit-artifact-v3";
-	AppendSljitArtifactKeyField(result, "context", candidate.signature.context);
-	AppendSljitArtifactKeyField(result, "shape", candidate.signature.shape);
+	string result = "sljit-artifact-v4";
+	AppendSljitArtifactKeyField(result, "shape", candidate.shape);
 	AppendSljitArtifactKeyField(result, "features", candidate.signature.feature_shape);
-	AppendSljitArtifactKeyField(result, "context_features", candidate.signature.context_feature_shape);
 	AppendSljitArtifactKeyField(result, "contract", candidate.signature.contract_shape);
 	result += ";scan_filter_mode=" + std::to_string(static_cast<uint8_t>(region.scan_filter_mode));
 	AppendSljitArtifactKeyField(result, "source_types", DescribeSljitLogicalTypesSemantic(region.source_output_types));

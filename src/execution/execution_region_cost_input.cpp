@@ -310,7 +310,7 @@ PhysicalRunnerCostInput BuildExecutionRegionCandidateCostInput(const ExecutionRe
 	input.native_grouped_state_address_lookup_count = cost_facts.native_grouped_state_address_lookup_count;
 	input.grouped_aggregate_estimated_cardinality = candidate.traits.grouped_aggregate_estimated_cardinality;
 	input.materialization_elision_count = cost_facts.materialization_elision_count;
-	input.full_pipeline = ExecutionRegionABIIsFullPipeline(candidate.abi) && cost_facts.may_anchor_compiled_body;
+	input.full_pipeline = cost_facts.may_anchor_compiled_body;
 	input.selected_hash_join_filter_materialization_count =
 	    candidate.traits.selected_hash_join_filter_materialization_count;
 	input.native_join_stage_count = cost_facts.native_join_stage_count;

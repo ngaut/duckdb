@@ -260,13 +260,6 @@ string DescribeExecutionRegionCandidateShape(const ExecutionRegionIR &region_ir)
 	return result.empty() ? "boundary-only" : result;
 }
 
-static string GetExecutionRegionSignatureContext(ExecutionRegionABI abi) {
-	if (ExecutionRegionABIIsFullPipeline(abi)) {
-		return "full-pipeline";
-	}
-	return "unknown";
-}
-
 static string GetExecutionRegionSinkSignatureFeature(const ExecutionRegionNode &node) {
 	if (!node.sink) {
 		return ExecutionRegionOperatorKindSignatureSegment(node.operator_kind) + "-sink";
@@ -357,13 +350,9 @@ static string BuildExecutionRegionContractShape(const ExecutionRegionIR &region_
 	return result;
 }
 
-ExecutionRegionSignature BuildExecutionRegionSignature(const ExecutionRegionIR &region_ir,
-                                                       const ExecutionRegionCandidate &candidate) {
+ExecutionRegionSignature BuildExecutionRegionSignature(const ExecutionRegionIR &region_ir) {
 	ExecutionRegionSignature signature;
-	signature.context = GetExecutionRegionSignatureContext(candidate.abi);
-	signature.shape = candidate.shape;
 	signature.feature_shape = BuildExecutionRegionFeatureShape(region_ir);
-	signature.context_feature_shape = signature.feature_shape;
 	signature.contract_shape = BuildExecutionRegionContractShape(region_ir);
 	return signature;
 }

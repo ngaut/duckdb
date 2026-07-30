@@ -149,7 +149,7 @@ static void AppendJitEventCandidateColumn(Vector &output, idx_t column_id, const
 	auto candidate_column_id = column_id - JIT_EVENT_CANDIDATE_TRACE_COLUMN_OFFSET;
 	if (entry.has_candidate) {
 		AppendExecutionRegionCandidateTraceColumn(output, candidate_column_id, entry.candidate_signature,
-		                                          entry.candidate_traits, entry.candidate_abi);
+		                                          entry.candidate_traits);
 	} else {
 		AppendNullExecutionRegionCandidateTraceColumn(output, candidate_column_id);
 	}

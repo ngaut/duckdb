@@ -19,15 +19,11 @@ struct ExecutionRegionPlan {
 	ExecutionRegionPlan();
 	~ExecutionRegionPlan();
 
-	string backend_name;
 	ExecutionRegionOpenRequest source_open_request;
 	unique_ptr<ExecutionRegionKernel> kernel;
 	ExecutionRunnerKind selected_runner = ExecutionRunnerKind::VECTORIZED;
 	bool operator_readiness_refresh = false;
 
-	bool HasExecutableRegions() const {
-		return kernel != nullptr;
-	}
 	bool HasExecutableFullPipeline() const;
 	void SelectRunner(ExecutionRunnerKind runner);
 	ExecutionRunnerKind SelectedRunner() const {

@@ -21,7 +21,7 @@ struct SljitNativeRegionArtifact : public ExecutionRegionArtifact {
 	                          vector<SljitExecutableScanFilter> scan_filters,
 	                          ExecutionRegionScanFilterMode scan_filter_mode, vector<idx_t> source_distinct_counts,
 	                          vector<Value> source_min_values, vector<Value> source_max_values,
-	                          SljitFullPipelineRecipePlan recipe_plan, ExecutionRegionABI abi);
+	                          SljitFullPipelineRecipePlan recipe_plan);
 
 	string backend_name;
 	//! Lazy code cells are synchronized and publish monotonically. The semantic
@@ -33,7 +33,6 @@ struct SljitNativeRegionArtifact : public ExecutionRegionArtifact {
 	vector<Value> source_min_values;
 	vector<Value> source_max_values;
 	SljitFullPipelineRecipePlan full_pipeline_recipe_plan;
-	ExecutionRegionABI abi;
 };
 
 //! Concrete execution kernel used by the full-pipeline template owner. Keeping
@@ -53,7 +52,6 @@ public:
 	bool HasExecutableBody() const override;
 	unique_ptr<ExecutionRegionLocalState> CreateLocalState(Allocator &allocator) const override;
 	bool SupportsRunnerHandoff() const override;
-	bool CanExecuteFullPipeline() const override;
 	bool TryExecuteFullPipeline(ExecutionRegionRuntime &runtime, ExecutionRegionResult &result) override;
 
 	const shared_ptr<ExecutionRuntimeFilterIdentity> &ExactSourceFilterIdentity(idx_t binding) const;

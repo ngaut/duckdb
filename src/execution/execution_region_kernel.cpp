@@ -56,10 +56,6 @@ void ExecutionRegionKernel::SetTracePipeline(const ExecutionRegionCandidate &can
 	trace_candidate_estimated_cardinality = candidate.estimated_cardinality;
 }
 
-void ExecutionRegionKernel::SetExecutionABI(ExecutionRegionABI abi) {
-	execution_abi = abi;
-}
-
 idx_t ExecutionRegionKernel::TraceId() const {
 	return trace_id;
 }
@@ -74,10 +70,6 @@ ExecutionRegionSourceExecutionKind ExecutionRegionKernel::SelectedSourceExecutio
 
 bool ExecutionRegionKernel::UsesScanFilters() const {
 	return scan_filter_mode != ExecutionRegionScanFilterMode::NONE;
-}
-
-ExecutionRegionABI ExecutionRegionKernel::ExecutionABI() const {
-	return execution_abi;
 }
 
 const string &ExecutionRegionKernel::TraceCompileReason() const {
@@ -110,14 +102,6 @@ idx_t ExecutionRegionKernel::TraceCandidateEstimatedCardinality() const {
 
 bool ExecutionRegionKernel::SupportsRunnerHandoff() const {
 	return true;
-}
-
-bool ExecutionRegionKernel::CanExecuteFullPipeline() const {
-	return false;
-}
-
-bool ExecutionRegionKernel::TryExecuteFullPipeline(ExecutionRegionRuntime &, ExecutionRegionResult &) {
-	return false;
 }
 
 } // namespace duckdb

@@ -519,10 +519,6 @@ static shared_ptr<MetalRegionBackendPlan> BuildMetalRegionPlan(const ExecutionRe
     if (candidate.stage_plan.HasStages()) {
         lowering_plan.SetOperatorStageIR(candidate.stage_plan.ir);
     }
-    if (!ExecutionRegionABIIsFullPipeline(candidate.abi)) {
-        lowering_plan.AddFusionBlocker("metal-backend-blocker:requires-full-pipeline-abi");
-        return nullptr;
-    }
     if (region_ir.nodes.size() != 3) {
         lowering_plan.AddFusionBlocker("metal-backend-blocker:requires-source-projection-append-recipe");
         return nullptr;
@@ -670,10 +666,6 @@ class MetalProjectionKernel : public ExecutionRegionKernel {
         // per-chunk flush: at a declined claim boundary the batch would hold
         // claimed-but-unsunk rows, so a mid-query handoff can never be legal.
         return false;
-    }
-
-    bool CanExecuteFullPipeline() const override {
-        return true;
     }
 
     bool TryExecuteFullPipeline(ExecutionRegionRuntime &runtime, ExecutionRegionResult &result) override {

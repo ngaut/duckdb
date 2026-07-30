@@ -415,10 +415,6 @@ ExecutionRegionLoweringPlan BuildSljitRegionPlan(const ExecutionRegionIR &region
 	if (candidate.stage_plan.HasStages()) {
 		lowering_plan.SetOperatorStageIR(candidate.stage_plan.ir);
 	}
-	if (!ExecutionRegionABIIsFullPipeline(candidate.abi)) {
-		lowering_plan.AddFusionBlocker("sljit-backend-blocker:requires-full-pipeline-abi");
-		return lowering_plan;
-	}
 	SljitNativeRegionPlan native_region;
 	SljitRegionLoweringCursor cursor(native_region);
 	for (idx_t node_idx = 0; node_idx < region_ir.nodes.size(); node_idx++) {

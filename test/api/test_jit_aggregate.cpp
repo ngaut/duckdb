@@ -3873,7 +3873,7 @@ TEST_CASE("JIT projected grouped distinct aggregate uses selected reference dist
 	    [](const ExecutionRegionEvent &event) {
 		    return IsCompiledSljitRegionEvent(event) && event.has_candidate &&
 		           event.candidate_traits.sink_kind == ExecutionRegionSinkKind::HASH_AGGREGATE_UPDATE &&
-		           StringUtil::Contains(event.candidate_signature.shape, "operator-filter-projection") &&
+		           StringUtil::Contains(event.candidate_shape, "operator-filter-projection") &&
 		           StringUtil::Contains(event.ir, "distinct_aggregate_count=1");
 	    },
 	    [](const ExecutionRegionEvent &event) {

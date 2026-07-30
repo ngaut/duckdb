@@ -18,8 +18,7 @@ struct SljitFullPipelineRecipePlan;
 
 shared_ptr<const ExecutionRegionArtifact> CreateSljitNativeRegionArtifact(string backend_name,
                                                                           SljitExecutableRegion &&region,
-                                                                          SljitFullPipelineRecipePlan recipe_plan,
-                                                                          ExecutionRegionABI abi);
+                                                                          SljitFullPipelineRecipePlan recipe_plan);
 
 unique_ptr<ExecutionRegionKernel>
 InstantiateSljitNativeRegionArtifact(const shared_ptr<const ExecutionRegionArtifact> &artifact,

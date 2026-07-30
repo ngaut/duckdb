@@ -142,17 +142,9 @@ static bool AddExecutionRegionCompiledStages(ExecutionRegionStagePlan &plan, con
 	return true;
 }
 
-static string BuildExecutionRegionStagePlanShape(const string &candidate_shape) {
-	string result = "full-pipeline";
-	result += ":";
-	result += candidate_shape;
-	return result;
-}
-
 ExecutionRegionStagePlan BuildExecutionRegionStagePlan(const ExecutionRegionIR &region_ir,
                                                        const string &candidate_shape, ExecutionRegionIRMode mode) {
 	ExecutionRegionStagePlan plan;
-	plan.shape = BuildExecutionRegionStagePlanShape(candidate_shape);
 	for (idx_t node_idx = 0; node_idx < region_ir.nodes.size(); node_idx++) {
 		auto &node = region_ir.nodes[node_idx];
 		switch (node.kind) {
@@ -230,7 +222,7 @@ ExecutionRegionStagePlan BuildExecutionRegionStagePlan(const ExecutionRegionIR &
 			break;
 		}
 	}
-	FinalizeExecutionRegionStagePlan(plan, mode);
+	FinalizeExecutionRegionStagePlan(plan, candidate_shape, mode);
 	return plan;
 }
 

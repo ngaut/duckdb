@@ -59,7 +59,7 @@ SET jit_policy='auto';
 loop force_n 1 3
 
 statement ok
-SET jit_debug_force_defer_after_chunks=${force_n};
+SET jit_debug_force_defer_after_chunks={force_n};
 
 query I
 SELECT count(*) FROM (

@@ -183,14 +183,7 @@ bool SljitNativeRegionKernel::SupportsRunnerHandoff() const {
 	return true;
 }
 
-bool SljitNativeRegionKernel::CanExecuteFullPipeline() const {
-	return ExecutionRegionABIIsFullPipeline(artifact->abi);
-}
-
 bool SljitNativeRegionKernel::TryExecuteFullPipeline(ExecutionRegionRuntime &runtime, ExecutionRegionResult &result) {
-	if (!ExecutionRegionABIIsFullPipeline(artifact->abi)) {
-		throw InternalException("SLJIT full pipeline kernel entered without full-pipeline ABI");
-	}
 	if (runtime.CanDeferAtEntry() && SljitTryDeferNotReadyNativeJoinProbesAtEntry(runtime, artifact->ops, result)) {
 		return true;
 	}

@@ -54,7 +54,6 @@ enum class ExecutionRegionOperatorKind : uint8_t {
 static constexpr idx_t EXECUTION_REGION_OPERATOR_KIND_COUNT = static_cast<idx_t>(ExecutionRegionOperatorKind::COUNT);
 using ExecutionRegionOperatorKindCounts = array<idx_t, EXECUTION_REGION_OPERATOR_KIND_COUNT>;
 enum class ExecutionRegionNodeKind : uint8_t { SOURCE, FILTER, PROJECTION, OPERATOR, SINK };
-enum class ExecutionRegionABI : uint8_t { NONE, FULL_PIPELINE };
 enum class ExecutionRegionSourceKind : uint8_t {
 	NONE,
 	DUCKDB_TABLE_SCAN,
@@ -340,8 +339,6 @@ DUCKDB_API const char *ExecutionRegionLoweringKindToString(ExecutionRegionLoweri
 DUCKDB_API const char *ExecutionRegionOperatorKindToString(ExecutionRegionOperatorKind kind);
 DUCKDB_API const char *ExecutionRegionOperatorKindToTraceLabel(ExecutionRegionOperatorKind kind);
 DUCKDB_API const char *ExecutionRegionNodeKindToString(ExecutionRegionNodeKind kind);
-DUCKDB_API const char *ExecutionRegionABIToString(ExecutionRegionABI abi);
-DUCKDB_API bool ExecutionRegionABIIsFullPipeline(ExecutionRegionABI abi);
 DUCKDB_API const char *ExecutionRegionSourceKindToString(ExecutionRegionSourceKind kind);
 DUCKDB_API const char *ExecutionRegionSourceExecutionKindToString(ExecutionRegionSourceExecutionKind kind);
 DUCKDB_API const char *ExecutionRegionSourceContractStatusToString(ExecutionRegionSourceContractStatus status);

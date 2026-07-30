@@ -96,7 +96,6 @@ static void SetDetailedExecutionRegionCandidate(ExecutionRegionEvent &event,
 	event.candidate_signature = candidate.signature;
 	event.candidate_estimated_cardinality = candidate.estimated_cardinality;
 	event.candidate_traits = candidate.traits;
-	event.candidate_abi = candidate.abi;
 }
 
 bool ExecutionRegionEventIsRuntime(const ExecutionRegionEvent &event) {

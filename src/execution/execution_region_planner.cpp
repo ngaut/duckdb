@@ -447,9 +447,6 @@ static bool ExecutionRegionCandidateNeedsFinalizedSourceCardinality(const Execut
 static void AccumulateExecutionRegionOpenRequest(ExecutionRegionPlan &plan, const ExecutionRegionIR &region_ir,
                                                  const ExecutionRegionCandidate &candidate,
                                                  const ExecutionRegionLoweringPlan &lowering_plan) {
-	if (!ExecutionRegionABIIsFullPipeline(candidate.abi)) {
-		return;
-	}
 	for (idx_t node_idx = 0; node_idx < region_ir.nodes.size(); node_idx++) {
 		auto &node = region_ir.nodes[node_idx];
 		if (!node.source) {
@@ -501,7 +498,7 @@ static unique_ptr<ExecutionRegionPlan> KeepExecutableExecutionRegionPlan(unique_
 	if (!plan) {
 		return nullptr;
 	}
-	if (plan->HasExecutableRegions() || plan->RequiresOperatorReadinessRefresh()) {
+	if (plan->HasExecutableFullPipeline() || plan->RequiresOperatorReadinessRefresh()) {
 		return plan;
 	}
 	return nullptr;
@@ -540,7 +537,6 @@ unique_ptr<ExecutionRegionPlan> ExecutionRegionPlanner::Build(ClientContext &con
 			return backend->RunnerKind() == runner_kind;
 		}
 		backend = execution_region_manager.SelectBackend(context, backend_name, runner_kind);
-		plan->backend_name = backend_name;
 		if (!backend) {
 			if (should_record_decision_telemetry) {
 				record_decision_event(backend_name, ExecutionRegionCompileStatus::UNAVAILABLE,
@@ -614,7 +610,6 @@ unique_ptr<ExecutionRegionPlan> ExecutionRegionPlanner::Build(ClientContext &con
 		if (!backend) {
 			backend = execution_region_manager.SelectBackend(context, backend_name, ExecutionRunnerKind::COMPILED_GPU);
 		}
-		plan->backend_name = backend_name;
 		if (!backend) {
 			if (should_record_decision_telemetry) {
 				record_decision_event(backend_name, ExecutionRegionCompileStatus::UNAVAILABLE,
@@ -747,21 +742,19 @@ unique_ptr<ExecutionRegionPlan> ExecutionRegionPlanner::Build(ClientContext &con
 		auto &stage_timings = candidate_trace.stage_timings;
 		ExecutionRegionPhysicalRunnerSelection cost_only_physical_runner;
 		bool has_cost_only_physical_runner = false;
-		if (ExecutionRegionABIIsFullPipeline(candidate.abi)) {
-			string full_pipeline_entry_reason;
-			if (!ExecutionRegionRuntimeCanEnter(pipeline, full_pipeline_entry_reason)) {
-				if (should_record_decision_telemetry) {
-					auto decision_time_us = decision_recorder.ClaimCandidateDecisionTime(candidate_trace);
-					record_decision_event(
-					    backend_name, ExecutionRegionCompileStatus::SKIPPED, ExecutionRegionExecutionMode::UNSUPPORTED,
-					    AttachExecutionRegionCandidateReason(candidate, std::move(full_pipeline_entry_reason),
-					                                         should_record_detailed_telemetry),
-					    "full_pipeline_runtime_missing_source_or_sink", &lowered_region.ir, decision_time_us,
-					    &candidate, ExecutionRunnerKind::VECTORIZED, &stage_timings,
-					    ExecutionRegionSourceExecutionKind::NONE, ExecutionRegionScanFilterMode::NONE, nullptr);
-				}
-				continue;
+		string full_pipeline_entry_reason;
+		if (!ExecutionRegionRuntimeCanEnter(pipeline, full_pipeline_entry_reason)) {
+			if (should_record_decision_telemetry) {
+				auto decision_time_us = decision_recorder.ClaimCandidateDecisionTime(candidate_trace);
+				record_decision_event(
+				    backend_name, ExecutionRegionCompileStatus::SKIPPED, ExecutionRegionExecutionMode::UNSUPPORTED,
+				    AttachExecutionRegionCandidateReason(candidate, std::move(full_pipeline_entry_reason),
+				                                         should_record_detailed_telemetry),
+				    "full_pipeline_runtime_missing_source_or_sink", &lowered_region.ir, decision_time_us, &candidate,
+				    ExecutionRunnerKind::VECTORIZED, &stage_timings, ExecutionRegionSourceExecutionKind::NONE,
+				    ExecutionRegionScanFilterMode::NONE, nullptr);
 			}
+			continue;
 		}
 		string finalized_cardinality_reason;
 		if (ExecutionRegionCandidateNeedsFinalizedSourceCardinality(lowered_region, candidate,
@@ -1001,11 +994,6 @@ static void ValidateExecutionRegionCompileResult(const string &backend_name, con
 		throw InternalException("execution region backend \"%s\" compiled region without executable code",
 		                        backend_name);
 	}
-	if (result.kernel && ExecutionRegionABIIsFullPipeline(candidate.abi) && !result.kernel->CanExecuteFullPipeline()) {
-		throw InternalException(
-		    "execution region backend \"%s\" compiled full pipeline without full-pipeline executable ABI",
-		    backend_name);
-	}
 }
 
 void ExecutionRegionPlanner::Compile(ClientContext &context, ExecutionRegionBackend &backend,
@@ -1107,7 +1095,6 @@ void ExecutionRegionPlanner::Compile(ClientContext &context, ExecutionRegionBack
 		result.kernel->SetTraceInfo(trace_id, execution_mode, reason, compile_time_us, code_size);
 		result.kernel->SetAdaptiveMeasurementCandidate(
 		    ExecutionRegionAdaptiveMeasurementWithinBand(context, compiled_region.physical_runner.runner_cost));
-		result.kernel->SetExecutionABI(candidate.abi);
 		result.kernel->SetTraceSelectedSourceExecution(compiled_region.lowering_plan.SelectedSourceExecution());
 		result.kernel->SetTraceScanFilterMode(compiled_region.lowering_plan.ScanFilterMode());
 		if (ExecutionRegionSettings::TraceRuntime(context)) {

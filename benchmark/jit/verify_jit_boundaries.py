@@ -253,7 +253,7 @@ def verify_backend_and_platform_abi() -> None:
             "class DUCKDB_API ExecutionRegionBackend",
             "EXECUTION_REGION_BACKEND_ABI_VERSION",
             "uint64_t backend_abi_version",
-            "EXECUTION_REGION_BACKEND_ABI_VERSION = 7",
+            "EXECUTION_REGION_BACKEND_ABI_VERSION = 8",
         ),
     )
     require_text(
@@ -286,6 +286,27 @@ def verify_backend_and_platform_abi() -> None:
             "extension/jit_sljit/**/*.hpp",
             "extension/jit_sljit/**/*.cpp",
             "extension/jit_metal/**/*.mm",
+        ),
+    )
+    reject_regex(
+        "obsolete single-value execution ABI and duplicate kernel capability state",
+        (
+            r"\bExecutionRegionABI\b",
+            r"\bCanExecuteFullPipeline\b",
+            r"\bcandidate_abi\b",
+            r"\bcandidate_signature_context(?:_feature_shape)?\b",
+            r"\bcandidate_signature_shape\b",
+            r"\bcandidate_has_(?:source|sink)\b",
+            r"\bcandidate_source_conjunction_filter_count\b",
+        ),
+        (
+            "src/**/*.hpp",
+            "src/**/*.cpp",
+            "extension/jit_sljit/**/*.hpp",
+            "extension/jit_sljit/**/*.cpp",
+            "extension/jit_metal/**/*.mm",
+            "test/api/test_jit*.cpp",
+            "test/sql/jit/*.test",
         ),
     )
     require_text(

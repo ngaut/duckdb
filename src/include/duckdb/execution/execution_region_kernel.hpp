@@ -214,12 +214,10 @@ public:
 	void SetTraceSelectedSourceExecution(ExecutionRegionSourceExecutionKind source_execution);
 	void SetTraceScanFilterMode(ExecutionRegionScanFilterMode scan_filter_mode);
 	void SetTracePipeline(const ExecutionRegionCandidate &candidate, const string &pipeline_shape);
-	void SetExecutionABI(ExecutionRegionABI abi);
 	idx_t TraceId() const;
 	ExecutionRegionExecutionMode ExecutionMode() const;
 	ExecutionRegionSourceExecutionKind SelectedSourceExecution() const;
 	bool UsesScanFilters() const;
-	ExecutionRegionABI ExecutionABI() const;
 	const string &TraceCompileReason() const;
 	int64_t TraceCompileTime() const;
 	idx_t TraceCodeSize() const;
@@ -227,20 +225,18 @@ public:
 	const string &TraceCandidateShape() const;
 	const string &TracePipelineShape() const;
 	idx_t TraceCandidateEstimatedCardinality() const;
-	virtual bool CanExecuteFullPipeline() const;
 	//! Whether this kernel may hand the pipeline to the vectorized continuation
 	//! mid-query. Recipes that claim exclusive ownership of sink finalization
 	//! (for example inline distinct-key counting) must refuse: a handoff strands
 	//! the rows the other runner sinks under a claim it cannot see.
 	virtual bool SupportsRunnerHandoff() const;
-	virtual bool TryExecuteFullPipeline(ExecutionRegionRuntime &runtime, ExecutionRegionResult &result);
+	virtual bool TryExecuteFullPipeline(ExecutionRegionRuntime &runtime, ExecutionRegionResult &result) = 0;
 
 private:
 	idx_t trace_id = 0;
 	ExecutionRegionExecutionMode execution_mode = ExecutionRegionExecutionMode::NONE;
 	ExecutionRegionSourceExecutionKind selected_source_execution = ExecutionRegionSourceExecutionKind::NONE;
 	ExecutionRegionScanFilterMode scan_filter_mode = ExecutionRegionScanFilterMode::NONE;
-	ExecutionRegionABI execution_abi = ExecutionRegionABI::NONE;
 	string trace_compile_reason;
 	int64_t trace_compile_time_us = 0;
 	idx_t trace_code_size = 0;

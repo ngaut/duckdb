@@ -82,7 +82,6 @@ struct ExecutionRegionEvent {
 	ExecutionRegionSignature candidate_signature;
 	idx_t candidate_estimated_cardinality = 0;
 	ExecutionRegionCandidateTraits candidate_traits;
-	ExecutionRegionABI candidate_abi = ExecutionRegionABI::NONE;
 	ExecutionRunnerKind selected_runner = ExecutionRunnerKind::VECTORIZED;
 	PhysicalRunnerCostProfile runner_cost;
 	ExecutionRegionEventPhase phase_kind = ExecutionRegionEventPhase::NONE;

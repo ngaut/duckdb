@@ -103,20 +103,13 @@ static constexpr idx_t EXECUTION_REGION_STAGE_TIMING_COLUMN_COUNT =
     sizeof(EXECUTION_REGION_STAGE_TIMING_COLUMNS) / sizeof(ExecutionRegionTraceColumn);
 
 static constexpr ExecutionRegionTraceColumn EXECUTION_REGION_CANDIDATE_TRACE_COLUMNS[] = {
-    {"candidate_signature_context", LogicalTypeId::VARCHAR},
-    {"candidate_signature_shape", LogicalTypeId::VARCHAR},
     {"candidate_signature_feature_shape", LogicalTypeId::VARCHAR},
-    {"candidate_signature_context_feature_shape", LogicalTypeId::VARCHAR},
     {"candidate_contract_shape", LogicalTypeId::VARCHAR},
-    {"candidate_abi", LogicalTypeId::VARCHAR},
-    {"candidate_has_source", LogicalTypeId::BOOLEAN},
-    {"candidate_has_sink", LogicalTypeId::BOOLEAN},
     {"candidate_source_kind", LogicalTypeId::VARCHAR},
     {"candidate_source_execution", LogicalTypeId::VARCHAR},
     {"candidate_sink_kind", LogicalTypeId::VARCHAR},
     {"candidate_source_filter_count", LogicalTypeId::UBIGINT},
     {"candidate_source_filter_expression_count", LogicalTypeId::UBIGINT},
-    {"candidate_source_conjunction_filter_count", LogicalTypeId::UBIGINT},
     {"candidate_filter_count", LogicalTypeId::UBIGINT},
     {"candidate_projection_count", LogicalTypeId::UBIGINT},
     {"candidate_operator_count", LogicalTypeId::UBIGINT},
@@ -310,64 +303,42 @@ static inline void AppendNullExecutionRegionCandidateTraceColumn(Vector &output,
 
 static inline void AppendExecutionRegionCandidateTraceColumn(Vector &output, idx_t column_id,
                                                              const ExecutionRegionSignature &signature,
-                                                             const ExecutionRegionCandidateTraits &traits,
-                                                             ExecutionRegionABI abi) {
+                                                             const ExecutionRegionCandidateTraits &traits) {
 	switch (column_id) {
 	case 0:
-		output.Append(Value(signature.context));
-		return;
-	case 1:
-		output.Append(Value(signature.shape));
-		return;
-	case 2:
 		output.Append(Value(signature.feature_shape));
 		return;
-	case 3:
-		output.Append(Value(signature.context_feature_shape));
-		return;
-	case 4:
+	case 1:
 		output.Append(Value(signature.contract_shape));
 		return;
-	case 5:
-		output.Append(Value(ExecutionRegionABIToString(abi)));
-		return;
-	case 6:
-		output.Append(Value::BOOLEAN(traits.HasSource()));
-		return;
-	case 7:
-		output.Append(Value::BOOLEAN(traits.HasSink()));
-		return;
-	case 8:
+	case 2:
 		output.Append(Value(ExecutionRegionSourceKindToString(traits.source_kind)));
 		return;
-	case 9:
+	case 3:
 		output.Append(Value(ExecutionRegionSourceExecutionKindToString(traits.source_execution)));
 		return;
-	case 10:
+	case 4:
 		output.Append(Value(ExecutionRegionSinkKindToString(traits.sink_kind)));
 		return;
-	case 11:
+	case 5:
 		output.Append(Value::UBIGINT(traits.source_filter_count));
 		return;
-	case 12:
+	case 6:
 		output.Append(Value::UBIGINT(traits.source_filter_expression_count));
 		return;
-	case 13:
-		output.Append(Value::UBIGINT(traits.source_conjunction_filter_count));
-		return;
-	case 14:
+	case 7:
 		output.Append(Value::UBIGINT(traits.filter_count));
 		return;
-	case 15:
+	case 8:
 		output.Append(Value::UBIGINT(traits.projection_count));
 		return;
-	case 16:
+	case 9:
 		output.Append(Value::UBIGINT(traits.operator_count));
 		return;
-	case 17:
+	case 10:
 		output.Append(Value::UBIGINT(traits.arithmetic_projection_count));
 		return;
-	case 18:
+	case 11:
 		output.Append(Value::UBIGINT(traits.reference_projection_count));
 		return;
 	default:

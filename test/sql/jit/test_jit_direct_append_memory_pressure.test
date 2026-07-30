@@ -15,7 +15,7 @@ statement ok
 SET jit_trace_runtime=true;
 
 statement ok
-SET temp_directory='__TEST_DIR__/direct_append_spill';
+SET temp_directory='{TEST_DIR}/direct_append_spill';
 
 # Build the tables with the JIT enabled so the CTAS takes the direct-append
 # materialization path, which grows segments through ColumnSegment::Resize.

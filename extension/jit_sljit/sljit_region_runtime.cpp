@@ -71,12 +71,11 @@ private:
 SljitNativeRegionArtifact::SljitNativeRegionArtifact(
     string backend_name_p, vector<SljitExecutableRegionOp> ops_p, vector<SljitExecutableScanFilter> scan_filters_p,
     ExecutionRegionScanFilterMode scan_filter_mode_p, vector<idx_t> source_distinct_counts_p,
-    vector<Value> source_min_values_p, vector<Value> source_max_values_p, SljitFullPipelineRecipePlan recipe_plan_p,
-    ExecutionRegionABI abi_p)
+    vector<Value> source_min_values_p, vector<Value> source_max_values_p, SljitFullPipelineRecipePlan recipe_plan_p)
     : backend_name(std::move(backend_name_p)), ops(std::move(ops_p)), scan_filters(std::move(scan_filters_p)),
       scan_filter_mode(scan_filter_mode_p), source_distinct_counts(std::move(source_distinct_counts_p)),
       source_min_values(std::move(source_min_values_p)), source_max_values(std::move(source_max_values_p)),
-      full_pipeline_recipe_plan(std::move(recipe_plan_p)), abi(abi_p) {
+      full_pipeline_recipe_plan(std::move(recipe_plan_p)) {
 }
 
 SljitNativeRegionKernel::SljitNativeRegionKernel(
@@ -144,12 +143,11 @@ SljitNativeRegionKernel::ExactSourceFilterIdentity(idx_t binding) const {
 
 shared_ptr<const ExecutionRegionArtifact> CreateSljitNativeRegionArtifact(string backend_name,
                                                                           SljitExecutableRegion &&region,
-                                                                          SljitFullPipelineRecipePlan recipe_plan,
-                                                                          ExecutionRegionABI abi) {
+                                                                          SljitFullPipelineRecipePlan recipe_plan) {
 	return make_shared_ptr<SljitNativeRegionArtifact>(
 	    std::move(backend_name), std::move(region.ops), std::move(region.scan_filters), region.scan_filter_mode,
 	    std::move(region.source_distinct_counts), std::move(region.source_min_values),
-	    std::move(region.source_max_values), std::move(recipe_plan), abi);
+	    std::move(region.source_max_values), std::move(recipe_plan));
 }
 
 unique_ptr<ExecutionRegionKernel>

@@ -625,9 +625,6 @@ static void AccumulateExecutionRegionSourceTraits(const ExecutionRegionNode &nod
 			continue;
 		}
 		traits.source_filter_expression_count++;
-		if (filter.expression->traits.has_conjunction) {
-			traits.source_conjunction_filter_count++;
-		}
 	}
 }
 
@@ -679,8 +676,7 @@ static bool ExecutionRegionFilterReadsMarkProbeMarker(const ExecutionRegionNode 
 }
 
 static ExecutionRegionCandidateTraits BuildExecutionRegionCandidateTraits(const ExecutionRegionIR &region_ir,
-                                                                          const ExecutionRegionStagePlan &stage_plan,
-                                                                          ExecutionRegionIRMode mode) {
+                                                                          const ExecutionRegionStagePlan &stage_plan) {
 	ExecutionRegionCandidateTraits traits;
 	for (idx_t node_idx = 0; node_idx < region_ir.nodes.size(); node_idx++) {
 		auto &node = region_ir.nodes[node_idx];
@@ -760,7 +756,6 @@ static ExecutionRegionCandidateTraits BuildExecutionRegionCandidateTraits(const 
 			break;
 		}
 	}
-	FinalizeExecutionRegionCandidateTraits(traits, mode);
 	return traits;
 }
 
@@ -847,16 +842,14 @@ static unique_ptr<ExecutionRegionCandidate> BuildExecutionRegionCandidate(const 
 	auto &candidate = *result;
 	candidate.estimated_cardinality = EstimateExecutionRegionCandidateCardinality(region_ir);
 	candidate.shape = DescribeExecutionRegionCandidateShape(region_ir);
-	candidate.abi = ExecutionRegionABI::FULL_PIPELINE;
 	candidate.stage_plan = BuildExecutionRegionStagePlan(region_ir, candidate.shape, mode);
 	if (!candidate.stage_plan.HasExecutableWork()) {
 		blocker = AppendExecutionRegionCandidateDiagnostic(
 		    "candidate-builder-blocked:no-executable-work;region=full-pipeline", candidate.stage_plan.ir);
 		return nullptr;
 	}
-	candidate.traits = BuildExecutionRegionCandidateTraits(region_ir, candidate.stage_plan, mode);
-	candidate.signature = BuildExecutionRegionSignature(region_ir, candidate);
-	FinalizeExecutionRegionCandidate(candidate, mode);
+	candidate.traits = BuildExecutionRegionCandidateTraits(region_ir, candidate.stage_plan);
+	candidate.signature = BuildExecutionRegionSignature(region_ir);
 	return result;
 }
 

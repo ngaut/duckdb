@@ -87,8 +87,7 @@ ExecutionRegionCompileResult CompileSljitRegion(const string &backend_name,
 	if (ExecutionRegionSettings::Verify(input.context)) {
 		reason += ";verify:region";
 	}
-	auto artifact = CreateSljitNativeRegionArtifact(backend_name, std::move(executable_region), std::move(recipe_plan),
-	                                                input.candidate.abi);
+	auto artifact = CreateSljitNativeRegionArtifact(backend_name, std::move(executable_region), std::move(recipe_plan));
 	auto result = ExecutionRegionCompileResult::CompiledArtifact(std::move(artifact), execution_mode, std::move(reason),
 	                                                             std::move(ir));
 	result.timings = timings;

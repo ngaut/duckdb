@@ -402,7 +402,6 @@ struct ExecutionRegionCandidateTraits {
 	bool finalized_dynamic_filter_cardinality_estimate = false;
 	idx_t source_filter_count = 0;
 	idx_t source_filter_expression_count = 0;
-	idx_t source_conjunction_filter_count = 0;
 	idx_t filter_count = 0;
 	idx_t projection_count = 0;
 	idx_t operator_count = 0;
@@ -420,7 +419,6 @@ struct ExecutionRegionCandidateTraits {
 	idx_t predicate_expression_count = 0;
 	idx_t control_expression_count = 0;
 	idx_t expression_cost = 0;
-	string ir;
 
 	bool HasSource() const {
 		return source_kind != ExecutionRegionSourceKind::NONE;
@@ -455,10 +453,7 @@ struct ExecutionRegionNode {
 };
 
 struct ExecutionRegionSignature {
-	string context;
-	string shape;
 	string feature_shape;
-	string context_feature_shape;
 	string contract_shape;
 };
 
@@ -479,7 +474,6 @@ struct ExecutionRegionStage {
 
 struct ExecutionRegionStagePlan {
 	vector<ExecutionRegionStage> stages;
-	string shape;
 	string ir;
 
 	bool HasStages() const {
@@ -514,13 +508,11 @@ struct ExecutionRegionStagePlan {
 };
 
 struct ExecutionRegionCandidate {
-	ExecutionRegionABI abi = ExecutionRegionABI::NONE;
 	idx_t estimated_cardinality = 0;
 	string shape;
 	ExecutionRegionCandidateTraits traits;
 	ExecutionRegionSignature signature;
 	ExecutionRegionStagePlan stage_plan;
-	string ir;
 };
 
 DUCKDB_API string ExecutionRegionAggregateNativeStateUpdateBlocker(

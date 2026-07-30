@@ -30,8 +30,8 @@ physical pipeline
 ### Region planning authority
 
 A physical pipeline produces at most one full-pipeline candidate. The
-candidate begins at the pipeline source, ends at its sink, carries one explicit
-full-pipeline ABI, and owns one ordered stage plan. The stage plan is the sole
+candidate begins at the pipeline source, ends at its sink, and owns one ordered
+stage plan. Partial candidates are not representable. The stage plan is the sole
 authority for generated stages, native contracts, source boundaries, and
 missing contracts.
 
@@ -223,7 +223,7 @@ dumping, and verification do not fragment the artifact key; backend settings
 or binding facts that change generated behavior do.
 
 Publication is transactional. Core validates the compile result, instantiates
-the execution-bound kernel, validates its executable body and ABI, and only
+the execution-bound kernel, validates its executable body, and only
 then publishes the artifact. A failed build or first instantiation aborts the
 in-flight reservation. Failure to instantiate a cache hit is a backend
 contract error: the complete cache key must guarantee that every equivalent
@@ -371,8 +371,10 @@ The hash-table physical view entered the execution-region backend ABI in
 version 4. ABI version 5 adds opaque aggregate-state batch consumption. ABI
 version 6 adds source-recipe scan-filter ownership modes. ABI version 7 replaces
 backend self-attestation and source-filter cost counters with the core-validated
-selected-stage receipt. A loadable backend built against an older binding or
-lowering layout is rejected at registration.
+selected-stage receipt. ABI version 8 makes full-pipeline ownership intrinsic
+to every candidate and executable kernel, removing the single-value execution
+ABI and duplicate capability flag. A loadable backend built against an older
+binding or lowering layout is rejected at registration.
 
 `ExecutionHashJoinRHSFixedColumnSource` is the core/backend boundary for fixed
 build-side columns. It represents either:

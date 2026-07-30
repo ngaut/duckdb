@@ -232,8 +232,6 @@ WHERE backend_name='sljit'
   AND execution_mode <> 'native'
   AND candidate_filter_count=1
   AND candidate_projection_count=1
-  AND candidate_has_sink
-  AND candidate_signature_context='full-pipeline'
 ----
 1
 
@@ -315,8 +313,6 @@ WHERE backend_name='sljit'
   AND execution_mode <> 'native'
   AND candidate_filter_count=1
   AND candidate_projection_count=1
-  AND candidate_has_sink
-  AND candidate_signature_context='full-pipeline'
 ----
 1
 
@@ -350,9 +346,6 @@ WHERE backend_name='sljit'
   AND execution_mode='unsupported'
   AND candidate_filter_count=0
   AND candidate_projection_count=2
-  AND candidate_has_sink
-  AND candidate_signature_context='full-pipeline'
-  AND candidate_abi='full_pipeline'
   AND pipeline_shape LIKE '%source:source:%:scan%'
   AND pipeline_shape LIKE '%sink:sink:%:sink%'
   AND ir LIKE '%native_aggregate_state_update_contract_status=ready%'
@@ -375,8 +368,6 @@ WHERE backend_name='sljit'
   AND selected_source_execution='source-contract'
   AND candidate_filter_count=1
   AND candidate_projection_count=2
-  AND candidate_has_sink
-  AND candidate_abi='full_pipeline'
 ----
 1
 
@@ -408,7 +399,7 @@ WHERE backend_name='sljit'
   AND execution_mode='unsupported'
   AND candidate_filter_count=1
   AND candidate_projection_count=2
-  AND NOT candidate_has_sink
+  AND candidate_sink_kind='none'
 ----
 1
 
@@ -442,7 +433,7 @@ WHERE phase='runtime'
   AND execution_mode <> 'native'
   AND candidate_filter_count=1
   AND candidate_projection_count=0
-  AND NOT candidate_has_sink
+  AND candidate_sink_kind='none'
 ----
 1
 
@@ -455,7 +446,7 @@ WHERE phase='runtime'
   AND execution_mode <> 'native'
   AND candidate_filter_count=1
   AND candidate_projection_count=0
-  AND NOT candidate_has_sink
+  AND candidate_sink_kind='none'
 ----
 1
 
@@ -485,7 +476,7 @@ WHERE backend_name='sljit'
   AND execution_mode='native'
   AND candidate_filter_count=0
   AND candidate_projection_count=1
-  AND NOT candidate_has_sink
+  AND candidate_sink_kind='none'
 ----
 1
 
@@ -498,7 +489,7 @@ WHERE phase='runtime'
   AND execution_mode='native'
   AND candidate_filter_count=0
   AND candidate_projection_count=1
-  AND NOT candidate_has_sink
+  AND candidate_sink_kind='none'
 ----
 1
 
@@ -524,7 +515,7 @@ WHERE backend_name='sljit'
   AND execution_mode='native'
   AND candidate_filter_count=0
   AND candidate_projection_count=1
-  AND NOT candidate_has_sink
+  AND candidate_sink_kind='none'
 ----
 1
 
@@ -533,7 +524,7 @@ SELECT count(*) = 0
 FROM duckdb_jit_events()
 WHERE backend_name='sljit'
   AND candidate_shape IS NOT NULL
-  AND candidate_signature_context NOT IN ('full-pipeline', 'state-scan')
+  AND (candidate_source_kind='none' OR candidate_sink_kind='none')
 ----
 1
 
@@ -546,7 +537,7 @@ WHERE phase='runtime'
   AND execution_mode='native'
   AND candidate_filter_count=0
   AND candidate_projection_count=1
-  AND NOT candidate_has_sink
+  AND candidate_sink_kind='none'
 ----
 1
 
@@ -709,7 +700,6 @@ WHERE event_id > base_event_id
   AND code_size > 0
   AND candidate_filter_count=0
   AND candidate_projection_count=1
-  AND candidate_has_sink
 ----
 1
 
@@ -764,7 +754,6 @@ WHERE event_id > base_event_id
   AND code_size > 0
   AND candidate_filter_count=0
   AND candidate_projection_count=1
-  AND candidate_has_sink
   AND ir LIKE '%aggregate_update(kind=ungrouped%'
 ----
 1
@@ -865,7 +854,6 @@ WHERE event_id > base_event_id
   AND code_size > 0
   AND candidate_filter_count=0
   AND candidate_projection_count=1
-  AND candidate_has_sink
   AND ir LIKE '%case<%'
 ----
 1
@@ -896,7 +884,6 @@ WHERE event_id > base_event_id
   AND code_size > 0
   AND candidate_filter_count=0
   AND candidate_projection_count=1
-  AND candidate_has_sink
   AND ir LIKE '%aggregate_update(kind=ungrouped%'
 ----
 1
@@ -960,7 +947,6 @@ WHERE event_id > base_event_id
   AND code_size > 0
   AND candidate_filter_count=0
   AND candidate_projection_count=1
-  AND candidate_has_sink
   AND ir LIKE '%case<%'
   AND ir LIKE '%coalesce<%'
 ----
@@ -1008,7 +994,6 @@ WHERE event_id > base_event_id
   AND code_size > 0
   AND candidate_filter_count=0
   AND candidate_projection_count=1
-  AND candidate_has_sink
   AND ir LIKE '%case<%'
 ----
 1
@@ -1303,7 +1288,6 @@ WHERE event_id > base_event_id
   AND status='compiled'
   AND execution_mode='native'
   AND code_size > 0
-  AND code_size>0
   AND ir LIKE '%DECIMAL%'
 ----
 1
@@ -1348,10 +1332,8 @@ WHERE event_id > base_event_id
   AND status='compiled'
   AND execution_mode='native'
   AND code_size > 0
-  AND code_size>0
   AND candidate_filter_count=0
   AND candidate_projection_count=1
-  AND candidate_has_sink
   AND ir LIKE '%DECIMAL%'
 ----
 1
@@ -1387,10 +1369,8 @@ WHERE event_id > base_event_id
   AND status='compiled'
   AND execution_mode='native'
   AND code_size > 0
-  AND code_size>0
   AND candidate_filter_count=0
   AND candidate_projection_count=1
-  AND candidate_has_sink
   AND ir LIKE '%DECIMAL%'
 ----
 1
@@ -1456,10 +1436,8 @@ WHERE event_id > base_event_id
   AND status='compiled'
   AND execution_mode='native'
   AND code_size > 0
-  AND code_size>0
   AND candidate_filter_count=0
   AND candidate_projection_count=1
-  AND candidate_has_sink
   AND ir LIKE '%case%'
   AND ir LIKE '%conjunction%'
   AND ir LIKE '%physical=INT64%'
@@ -1475,7 +1453,6 @@ WHERE event_id > base_event_id
   AND execution_mode='unsupported'
   AND candidate_filter_count=0
   AND candidate_projection_count=1
-  AND candidate_has_sink
   AND ir LIKE '%case<%'
 ----
 1
@@ -1553,7 +1530,6 @@ WHERE event_id > base_event_id
   AND candidate_sink_kind='perfect-hash-aggregate-update'
   AND candidate_filter_count=0
   AND candidate_projection_count=1
-  AND candidate_has_sink
   AND ir LIKE '%aggregate_update(kind=perfect-hash%'
   AND ir LIKE '%payload_update=generated-primitive%'
   AND ir LIKE '%grouped_state_lookup=generated-perfect-hash%'
@@ -1658,7 +1634,6 @@ WHERE event_id > base_event_id
   AND candidate_sink_kind='perfect-hash-aggregate-update'
   AND candidate_filter_count=0
   AND candidate_projection_count=1
-  AND candidate_has_sink
   AND candidate_signature_feature_shape='perfect-hash-aggregate-update+table-scan-source'
   AND ir LIKE '%aggregate_update(kind=perfect-hash%'
   AND ir LIKE '%payload_update=generated-primitive%'
@@ -1922,12 +1897,10 @@ WHERE event_id > base_event_id
   AND execution_mode='native'
   AND selected_runner='compiled_vectorized'
   AND runner_cost_selection_reason LIKE 'admitted_%'
-  AND candidate_has_source
   AND candidate_source_filter_count=3
   AND candidate_filter_count=0
   AND candidate_projection_count=1
   AND candidate_operator_count > 0
-  AND candidate_has_sink
   AND reason LIKE '%uses-scan-filters=true%'
   AND reason LIKE '%backend_join=hash_probe%'
   AND reason LIKE '%backend_aggregate=ungrouped_update%'

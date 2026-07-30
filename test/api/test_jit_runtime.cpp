@@ -247,7 +247,6 @@ TEST_CASE("JIT full pipeline uses explicit append sink contract", "[api][jit]") 
 		    StringUtil::Contains(event.reason, "append sink contract") &&
 		    StringUtil::Contains(event.reason, "sink_kind=result-collector-sink")) {
 			REQUIRE(event.has_candidate);
-			REQUIRE(event.candidate_abi == ExecutionRegionABI::FULL_PIPELINE);
 			found_compiled_result_collector = true;
 			REQUIRE(StringUtil::Contains(event.reason, "source:TABLE_SCAN:native"));
 			REQUIRE(StringUtil::Contains(event.reason, "sink:RESULT_COLLECTOR:native"));
@@ -344,8 +343,7 @@ TEST_CASE("JIT full pipeline uses append sink contract for CTE materialization",
 
 	bool found_compiled_materialization = false;
 	for (auto &event : manager.GetEvents()) {
-		if (!IsSljitRegionEvent(event) || !event.has_candidate ||
-		    event.candidate_abi != ExecutionRegionABI::FULL_PIPELINE) {
+		if (!IsSljitRegionEvent(event) || !event.has_candidate) {
 			continue;
 		}
 		if (EventStatus(event) == "compiled" && EventExecutionMode(event) == "native" &&
@@ -393,8 +391,7 @@ TEST_CASE("JIT full pipeline uses ordered sink native contract when order keys g
 			    StringUtil::Contains(EventGeneratedStageRuntimeBreakdown(event), "order_sink.sink_update=")) {
 				found_ordered_sink_runtime_breakdown = true;
 			}
-			if (!IsSljitRegionEvent(event) || !event.has_candidate ||
-			    event.candidate_abi != ExecutionRegionABI::FULL_PIPELINE) {
+			if (!IsSljitRegionEvent(event) || !event.has_candidate) {
 				continue;
 			}
 			if (StringUtil::Contains(event.reason, "ordered sink contract") &&

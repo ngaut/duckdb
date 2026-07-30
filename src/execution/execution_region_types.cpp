@@ -163,21 +163,6 @@ const char *ExecutionRegionNodeKindToString(ExecutionRegionNodeKind kind) {
 	}
 }
 
-const char *ExecutionRegionABIToString(ExecutionRegionABI abi) {
-	switch (abi) {
-	case ExecutionRegionABI::NONE:
-		return "none";
-	case ExecutionRegionABI::FULL_PIPELINE:
-		return "full_pipeline";
-	default:
-		return "unknown";
-	}
-}
-
-bool ExecutionRegionABIIsFullPipeline(ExecutionRegionABI abi) {
-	return abi == ExecutionRegionABI::FULL_PIPELINE;
-}
-
 const char *ExecutionRegionSourceKindToString(ExecutionRegionSourceKind kind) {
 	switch (kind) {
 	case ExecutionRegionSourceKind::NONE:
