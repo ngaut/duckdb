@@ -57,6 +57,12 @@ def require_text(path: str, rule: str, snippets: tuple[str, ...]) -> None:
         raise AssertionError(f"{path}: {rule}: missing {missing}")
 
 
+def require_regex_count(path: str, rule: str, pattern: str, expected: int) -> None:
+    count = len(re.findall(pattern, read(path)))
+    if count != expected:
+        raise AssertionError(f"{path}: {rule}: expected {expected}, found {count}: {pattern}")
+
+
 def require_absent_files(paths: tuple[str, ...]) -> None:
     for path in paths:
         if (ROOT / path).exists():
@@ -253,8 +259,23 @@ def verify_backend_and_platform_abi() -> None:
             "class DUCKDB_API ExecutionRegionBackend",
             "EXECUTION_REGION_BACKEND_ABI_VERSION",
             "uint64_t backend_abi_version",
-            "EXECUTION_REGION_BACKEND_ABI_VERSION = 8",
+            "EXECUTION_REGION_BACKEND_ABI_VERSION = 9",
         ),
+    )
+    require_text(
+        "src/include/duckdb/execution/execution_hash_join_runtime.hpp",
+        "perfect-hash table and scan-filter views must share one membership layout",
+        (
+            "struct ExecutionPerfectHashJoinMembershipLayout",
+            "struct ExecutionPerfectHashJoinTableLayout : public ExecutionPerfectHashJoinMembershipLayout",
+            "struct ExecutionPerfectHashJoinFilterLayout : public ExecutionPerfectHashJoinMembershipLayout",
+        ),
+    )
+    require_regex_count(
+        "src/include/duckdb/execution/execution_region_ir.hpp",
+        "only backend-facing top-level diagnostics may be cached in semantic region IR",
+        r"\bstring ir;",
+        5,
     )
     require_text(
         "src/include/duckdb/execution/execution_region_lowering.hpp",

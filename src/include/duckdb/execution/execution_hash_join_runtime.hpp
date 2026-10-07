@@ -124,9 +124,9 @@ struct ExecutionHashJoinTableLayout {
 	}
 };
 
-struct ExecutionPerfectHashJoinTableLayout {
+//! Allocation-free membership data shared by scan filters and full table bindings.
+struct ExecutionPerfectHashJoinMembershipLayout {
 	bool ready = false;
-	LogicalType key_type;
 	PhysicalType key_physical_type = PhysicalType::INVALID;
 	bool is_build_dense = false;
 	idx_t build_range = 0;
@@ -143,6 +143,10 @@ struct ExecutionPerfectHashJoinTableLayout {
 	//! One bit per build_validity word; set when that word contains at least one build key.
 	const validity_t *build_validity_non_empty_words = nullptr;
 	idx_t build_validity_word_count = 0;
+};
+
+struct ExecutionPerfectHashJoinTableLayout : public ExecutionPerfectHashJoinMembershipLayout {
+	LogicalType key_type;
 	shared_ptr<ExecutionRuntimeFilterIdentity> runtime_filter_identity;
 	idx_t rhs_output_column_count = 0;
 	vector<LogicalType> rhs_output_types;
@@ -150,25 +154,9 @@ struct ExecutionPerfectHashJoinTableLayout {
 	string blocker;
 };
 
-//! Allocation-free membership view used by scan filters. Unlike the full table layout this contains no
-//! materialization columns, owning buffers, or diagnostic strings, so it is safe to request for every vector.
-struct ExecutionPerfectHashJoinFilterLayout {
-	bool ready = false;
-	PhysicalType key_physical_type = PhysicalType::INVALID;
-	bool is_build_dense = false;
-	idx_t build_range = 0;
-	idx_t build_capacity = 0;
-	idx_t build_unique_count = 0;
-	uint64_t build_min = 0;
-	uint64_t build_max = 0;
-	hugeint_t build_min_128;
-	hugeint_t build_max_128;
-	uhugeint_t build_min_u128;
-	uhugeint_t build_max_u128;
-	const validity_t *build_validity = nullptr;
-	const validity_t *build_validity_non_empty_words = nullptr;
-	idx_t build_validity_word_count = 0;
-};
+//! Scan filters use only the shared membership data, with no materialization columns,
+//! owning buffers, or diagnostic strings.
+struct ExecutionPerfectHashJoinFilterLayout : public ExecutionPerfectHashJoinMembershipLayout {};
 
 enum class ExecutionHashJoinRHSFixedColumnStorageKind : uint8_t { NONE, ROW, DICTIONARY };
 

@@ -54,7 +54,6 @@ ExecutionSourceProtocolContract BuildExecutionSourceProtocolContract(ExecutionRe
 	default:
 		break;
 	}
-	result.ir = DescribeExecutionSourceProtocolContract(result);
 	return result;
 }
 

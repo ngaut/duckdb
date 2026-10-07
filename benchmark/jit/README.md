@@ -149,11 +149,10 @@ the second only verifies that the current Git tree still matches it.
 
 Measurement admission rejects a busy host before setup, rechecks at each
 measurement boundary, and invalidates any run where load appears mid-sample;
-macOS security scanners have an independent single-core ceiling. The complete
-admission and interpretation contract — including why failed candidates are
-never retried and why paired ratios cannot excuse a raw regression — is the
-"Performance contract" and "Baselines and artifacts" sections of
-`JIT_PRODUCTION_RECIPE_DESIGN.md`.
+macOS security scanners have an independent single-core ceiling. The
+architecture invariants behind the gate are in the "Performance contract"
+section of `JIT_PRODUCTION_RECIPE_DESIGN.md`; this README and the scripts are
+the source of truth for operational policy.
 
 The combined guard forwards baseline configuration unchanged. The TPC-H gate
 alone resolves and validates the accepted baseline contract.

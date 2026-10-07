@@ -265,30 +265,16 @@ bool PerfectHashJoinExecutor::GetExecutionPerfectHashJoinTableLayout(
 		layout.blocker = "perfect-hash-join-native-layout-not-published";
 		return false;
 	}
-	layout.key_physical_type = filter_layout->key_physical_type;
-	layout.is_build_dense = filter_layout->is_build_dense;
-	layout.build_range = filter_layout->build_range;
-	layout.build_capacity = filter_layout->build_capacity;
-	layout.build_unique_count = filter_layout->build_unique_count;
-	layout.build_min = filter_layout->build_min;
-	layout.build_max = filter_layout->build_max;
-	layout.build_min_128 = filter_layout->build_min_128;
-	layout.build_max_128 = filter_layout->build_max_128;
-	layout.build_min_u128 = filter_layout->build_min_u128;
-	layout.build_max_u128 = filter_layout->build_max_u128;
-	layout.build_validity = filter_layout->build_validity;
-	layout.build_validity_non_empty_words = filter_layout->build_validity_non_empty_words;
-	layout.build_validity_word_count = filter_layout->build_validity_word_count;
+	if (perfect_hash_table.size() != join.rhs_output_columns.col_types.size()) {
+		layout.blocker = "perfect-hash-join-native-layout-rhs-shape-mismatch";
+		return false;
+	}
+	// The published membership layout is ready, so copying it last makes the table layout ready only on success.
+	static_cast<ExecutionPerfectHashJoinMembershipLayout &>(layout) = *filter_layout;
 	layout.runtime_filter_identity = runtime_filter_identity;
 	layout.rhs_output_column_count = perfect_hash_table.size();
 	layout.rhs_output_types = join.rhs_output_columns.col_types;
 	layout.rhs_dictionary_buffers = perfect_hash_table;
-	if (layout.rhs_output_column_count != layout.rhs_output_types.size()) {
-		layout.blocker = "perfect-hash-join-native-layout-rhs-shape-mismatch";
-		return false;
-	}
-	layout.ready = true;
-	layout.blocker.clear();
 	return true;
 }
 

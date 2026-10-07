@@ -1,6 +1,6 @@
 # JIT Production Recipe Architecture
 
-Last updated: 2026-07-30
+Last updated: 2026-08-01
 
 This document is the stable architecture contract for DuckDB execution-region
 JIT. It describes layer ownership, immutable recipe binding, runtime data
@@ -367,14 +367,11 @@ code must not include or name `ht_entry_t`, `BloomFilter`, or
 `JoinHashTable`. This preserves direct, zero-copy probing without turning
 core-private C++ classes into an extension ABI.
 
-The hash-table physical view entered the execution-region backend ABI in
-version 4. ABI version 5 adds opaque aggregate-state batch consumption. ABI
-version 6 adds source-recipe scan-filter ownership modes. ABI version 7 replaces
-backend self-attestation and source-filter cost counters with the core-validated
-selected-stage receipt. ABI version 8 makes full-pipeline ownership intrinsic
-to every candidate and executable kernel, removing the single-value execution
-ABI and duplicate capability flag. A loadable backend built against an older
-binding or lowering layout is rejected at registration.
+Execution-region backends use DuckDB's version- and platform-matched C++
+extension contract plus an execution-region-specific ABI version. The current
+ABI is version 9. Any backend-visible layout or virtual interface change must
+bump that version; registration rejects an older backend and requires it to be
+rebuilt against the current DuckDB tree.
 
 `ExecutionHashJoinRHSFixedColumnSource` is the core/backend boundary for fixed
 build-side columns. It represents either:
@@ -732,78 +729,15 @@ Correctness and performance are both required:
 - one-thread and parallel floors remain separate when scheduling changes the
   demonstrated margin.
 
-Candidate measurements use five alternating policy pairs. Promotion and ship
-qualification use ten. Failed candidates are not silently rerun with more
-samples. Generic speedup floors use the median within-repeat `off/auto` ratio,
-while raw JIT-auto ceilings remain independent. Diagnosis is separate from the
-gate and cannot change its verdict.
-
 A verified performance improvement and its regression baseline are one change.
 Tighten the checked-in workload floor or promote the accepted comparison
 artifact in the same increment; otherwise the gate still accepts the slower
 performance that the implementation replaced.
 
-## Baselines and artifacts
-
-Disposable benchmark output lives under ignored `tmp/` directories and may be
-deleted at any time. Accepted local TPC-H evidence lives under ignored
-`benchmark/tpch/jit/local_baselines/`; accepted state stores paths relative to
-that directory. Promotion copies a fully verified artifact into durable local
-baseline storage before atomically publishing state and removes the previous
-local accepted artifact afterward.
-
-An accepted TPC-H baseline requires:
-
-- all 22 queries;
-- production timing with tracing and verification disabled;
-- ten alternating repetitions;
-- result correctness;
-- artifact-schema verification;
-- independent raw JIT-auto runtime ceilings;
-- preserved speedup and component contracts;
-- a separate traced runtime-proof pass for every compiled or CBO-selected
-  accelerated query.
-
-SF1 and SF10 use separate state files because scale factor is part of the
-baseline contract. State also binds thread count, timing mode, query set, and
-relevant JIT configuration.
-
-A regression-gate invocation clones one immutable, scale-factor-keyed template
-and reuses the private working database for the untraced candidate, traced
-runtime proof, and full promotion pass. The default template cache is local and
-ignored, carries an explicit role/format/scale manifest, is
-atomically created under an exclusive creation lock, and is rebuilt when
-validation fails. The lock is released before measurement. Filesystem
-copy-on-write avoids a physical SF10 copy where supported; a normal copy is the
-portable fallback. Disabling the cache explicitly exercises dbgen. Database
-generation is setup, not repeated proof.
-
-The combined production guard rejects a sustained busy host before setup. The
-TPC-H gate checks again after its private database clone is ready, and generic
-measurements recheck at their own boundary. macOS security scanners have an
-independent single-core ceiling because normalized machine-wide utilization can
-hide their effect on a single-thread measurement. The same principle applies
-generically to any sustained competing process: aggregate host utilization and
-the busiest process have independent ceilings. Admission may wait through a
-bounded transient scan, but measurement never starts on a rejected sample.
-An immediate post-measurement sample invalidates a run if load appeared after
-admission. Host-load admission is measurement hygiene only; it cannot change
-raw ceilings, speedup floors, query coverage, or runtime-proof requirements.
-
-Both gates share one measurement lifecycle: one ordered SQL script in one
-shell process, each workload or query's preparation placed immediately before
-its samples, and every preparation and attempt closing the database back to
-`:memory:` so the next attempt reopens the same checkpointed file with fresh
-connection and buffer-manager state. This preserves workload chronology while
-avoiding a macOS provenance assessment per sample. Query timers, alternating
-policy order, counters, correctness artifacts, and regression contracts remain
-attempt-local, and traced counter collection is an untimed tail after all
-candidate timers.
-
-Pre-commit correctness and pre-push performance receipts are bound to the exact
-Git tree. A push can reuse completed production verification without measuring
-inside the `git push` process, which can itself activate macOS security work.
-Any tree change invalidates both receipts.
+Benchmark commands, repetition counts, artifact schemas, host-admission rules,
+baseline locations, and promotion mechanics are operational policy. Their
+single source of truth is `benchmark/jit/README.md` and the gate scripts it
+names; they are intentionally not duplicated in this architecture contract.
 
 ## Verification
 

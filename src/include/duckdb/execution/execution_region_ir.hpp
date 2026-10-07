@@ -68,7 +68,6 @@ struct ExecutionRegionNativeGroupedStateContract {
 	string required_capability;
 	string contract_version;
 	string blocker;
-	string ir;
 };
 
 //! Semantic description of one aggregate state exposed by a native state-scan
@@ -88,7 +87,6 @@ struct ExecutionRegionNativeStateScanContract {
 	bool primitive_aggregate_batch_ready = false;
 	vector<ExecutionRegionPrimitiveAggregateStateLane> primitive_aggregate_lanes;
 	string primitive_aggregate_batch_blocker;
-	string ir;
 };
 
 struct ExecutionRegionNativeOperatorContract {
@@ -96,7 +94,6 @@ struct ExecutionRegionNativeOperatorContract {
 	string required_capability;
 	string contract_version;
 	string blocker;
-	string ir;
 };
 
 struct ExecutionRegionTableScanContract {
@@ -113,7 +110,6 @@ struct ExecutionRegionTableScanContract {
 	bool filter_pushdown = false;
 	bool dynamic_filters = false;
 	bool finalized_dynamic_filter_cardinality_estimate = false;
-	string ir;
 };
 
 struct ExecutionRegionHashJoinContract {
@@ -166,7 +162,6 @@ struct ExecutionRegionHashJoinContract {
 	string build_sink_shape_blocker;
 	ExecutionRegionNativeOperatorContract native_probe_contract;
 	ExecutionRegionNativeOperatorContract native_build_contract;
-	string ir;
 };
 
 struct ExecutionRegionNestedLoopJoinConditionInput {
@@ -179,7 +174,6 @@ struct ExecutionRegionNestedLoopJoinConditionInput {
 	bool rhs_expression_ready = false;
 	ExecutionExpressionFragment rhs_expression;
 	string rhs_expression_blocker;
-	string ir;
 };
 
 struct ExecutionRegionNestedLoopJoinContract {
@@ -206,7 +200,6 @@ struct ExecutionRegionNestedLoopJoinContract {
 	ExecutionRegionNativeOperatorContract native_probe_contract;
 	ExecutionRegionNativeOperatorContract native_build_contract;
 	vector<ExecutionRegionNestedLoopJoinConditionInput> conditions;
-	string ir;
 };
 
 struct ExecutionRegionAggregateContract {
@@ -242,7 +235,6 @@ struct ExecutionRegionAggregateContract {
 	vector<idx_t> grouped_state_offsets;
 	ExecutionRegionNativeGroupedStateContract native_grouped_state_contract;
 	ExecutionRegionNativeOperatorContract native_state_update_contract;
-	string ir;
 };
 
 struct ExecutionRegionOrderKeyInput {
@@ -255,7 +247,6 @@ struct ExecutionRegionOrderKeyInput {
 	ExecutionExpressionFragment expression;
 	string expression_blocker;
 	string reason;
-	string ir;
 };
 
 struct ExecutionRegionOrderContract {
@@ -274,7 +265,6 @@ struct ExecutionRegionOrderContract {
 	bool all_order_keys_ready = false;
 	string order_key_blocker;
 	vector<ExecutionRegionOrderKeyInput> order_keys;
-	string ir;
 };
 
 struct ExecutionRegionAggregateInput {
@@ -302,7 +292,6 @@ struct ExecutionRegionAggregateInput {
 	bool payload_expressions_ready = false;
 	string payload_expression_blocker;
 	string reason;
-	string ir;
 };
 
 struct ExecutionRegionHashJoinKeyInput {
@@ -311,7 +300,6 @@ struct ExecutionRegionHashJoinKeyInput {
 	LogicalType type;
 	bool supported_reference = false;
 	string reason;
-	string ir;
 };
 
 struct ExecutionRegionGroupInput {
@@ -323,7 +311,6 @@ struct ExecutionRegionGroupInput {
 	ExecutionExpressionFragment expression;
 	string expression_blocker;
 	string reason;
-	string ir;
 };
 
 struct ExecutionSourceProtocolContract {
@@ -331,7 +318,6 @@ struct ExecutionSourceProtocolContract {
 	string required_capability;
 	string contract_version;
 	string blocker;
-	string ir;
 };
 
 struct ExecutionRegionSourceInfo {
