@@ -13,9 +13,11 @@ namespace duckdb {
 static unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativeUngroupedSumTypedExpressionTree(
     const ExecutionExpressionIR &root, SljitNativeAggregateUpdateFunction &function, string &error,
     SljitNativeAggregateSumStateKind state_kind, bool emit_flat_nullable_fast_path) {
+	// Every integer result kind evaluates to a sign- or zero-extended machine word, which is what the sum state
+	// accumulates; the planner admits a tree whose kind matches the aggregate input, narrow kinds included
 	const auto tree_plan = BuildSljitTypedExpressionTreePlan(root, emit_flat_nullable_fast_path);
-	if (!tree_plan.supported || !tree_plan.result_is_int64) {
-		error = "SLJIT aggregate typed expression-tree reducer only supports INT64/DECIMAL64 expression trees";
+	if (!tree_plan.supported || tree_plan.result_is_bool) {
+		error = "SLJIT aggregate typed expression-tree reducer requires an integer expression tree";
 		return nullptr;
 	}
 

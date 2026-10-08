@@ -32,7 +32,8 @@ statement ok
 CREATE TABLE mode_rewrite(g INTEGER, v VARCHAR);
 
 statement ok
-INSERT INTO mode_rewrite VALUES (1, 'b'), (1, 'a'), (1, 'a'), (1, 'b'), (1, 'a'), (2, 'z'), (2, 'y'), (3, NULL), (3, 'q');
+INSERT INTO mode_rewrite VALUES
+	(1, 'b'), (1, 'a'), (1, 'a'), (1, 'b'), (1, 'a'), (2, 'z'), (2, 'y'), (3, NULL), (3, 'q');
 
 # the plain plan compiles first, then the re-planned one with different group statistics
 query TR

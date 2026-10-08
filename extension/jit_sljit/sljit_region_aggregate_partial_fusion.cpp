@@ -175,21 +175,9 @@ bool TryPartiallyFuseNativeProjectionIntoRegularHashAggregateUpdate(const vector
 		return false;
 	}
 
-	bool has_typed_payload = false;
-	for (idx_t payload_idx = 0; payload_idx < payloads.size(); payload_idx++) {
-		auto &aggregate = sink.aggregates[payload_idx];
-		if (aggregate.primitive_update_kind == AggregatePrimitiveUpdateKind::COUNT_STAR) {
-			continue;
-		}
-		if (payloads[payload_idx].kind == SljitNativeRegionExpressionKind::TYPED_EXPRESSION_TREE) {
-			has_typed_payload = true;
-			continue;
-		}
-		if (payloads[payload_idx].kind != SljitNativeRegionExpressionKind::REFERENCE) {
-			return false;
-		}
-	}
-	if (!has_typed_payload) {
+	// Admit exactly what the generated grouped typed update compiles: it has no COUNT lane, so a typed SUM next to
+	// a COUNT payload stays with DuckDB's update
+	if (!SljitGroupedStateAddressTypedPayloadsSupported(sink, payloads)) {
 		return false;
 	}
 
