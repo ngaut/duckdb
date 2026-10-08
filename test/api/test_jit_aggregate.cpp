@@ -444,6 +444,37 @@ TEST_CASE("Grouped aggregate append callbacks expose identity address order dire
 	REQUIRE(ht.Count() == group_count);
 }
 
+TEST_CASE("Native lookups in a skip-lookups epoch append without voiding the epoch", "[api][jit]") {
+	DuckDB db;
+	Connection con(db);
+	auto &allocator = Allocator::Get(*con.context);
+	GroupedAggregateHashTable ht(*con.context, allocator, {LogicalType::INTEGER},
+	                             TupleDataValidityType::CANNOT_HAVE_NULL_VALUES);
+
+	DataChunk groups;
+	groups.Initialize(allocator, {LogicalType::INTEGER});
+	const idx_t row_count = 64;
+	auto group_data = FlatVector::GetDataMutable<int32_t>(groups.data[0]);
+	for (idx_t row_idx = 0; row_idx < row_count; row_idx++) {
+		group_data[row_idx] = UnsafeNumericCast<int32_t>(row_idx % 8);
+	}
+	FlatVector::SetSize(groups.data[0], row_count);
+	groups.SetChildCardinality(row_count);
+
+	// A proven-unique epoch may skip the final combine until an unproven append arrives.
+	ht.SkipLookups(false);
+	REQUIRE_FALSE(ht.LookupsSkippedRequireFinalCombine());
+
+	// DuckDB's lookup appends every row while lookups are skipped, as in upstream's adaptive aggregation.
+	Vector addresses(LogicalType::POINTER);
+	ht.FindOrCreateGroups(groups, addresses);
+	REQUIRE(ht.LookupsSkipped());
+	REQUIRE(ht.Count() == row_count);
+	REQUIRE(ht.GetMaterializedCount() == row_count);
+	// The appended keys repeat, so the final combine must deduplicate them.
+	REQUIRE(ht.LookupsSkippedRequireFinalCombine());
+}
+
 TEST_CASE("JIT shared affine grouped deltas do not overflow before cancellation", "[api][jit]") {
 	ExecutionPrimitiveAggregateUpdateLane left_lane;
 	left_lane.ready = true;

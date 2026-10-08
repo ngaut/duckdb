@@ -193,8 +193,6 @@ public:
 	                                            const ExecutionPrimitiveAggregateUpdateLane &lane,
 	                                            optional_ptr<ExecutionOperatorStageRecorder> recorder = nullptr,
 	                                            optional_ptr<const ExecutionDenseGroupDomain> dense_domain = nullptr);
-	bool TryAppendNewGroupAddressesFast(DataChunk &groups, Vector &addresses_out,
-	                                    optional_ptr<ExecutionOperatorStageRecorder> recorder = nullptr);
 	bool TryAppendNewGroupsWithStateAddressesFast(DataChunk &groups,
 	                                              ExecutionGroupedAggregateStateAddressUpdateFunction update_function,
 	                                              void *update_state,
@@ -347,6 +345,7 @@ private:
 		SelectionVector existing_groups;
 		Vector descriptor_group_hashes;
 		DataChunk descriptor_group_chunk;
+		DataChunk input_vector_group_chunk;
 		AggregateCompressedGroupState compressed_group_state;
 
 		RowOperationsState row_state;
@@ -462,6 +461,8 @@ private:
 	                               bool ht_offsets_valid);
 
 	//! Does the actual group matching / creation
+	idx_t AppendGroupsSkippingLookups(DataChunk &groups, Vector &group_hashes, Vector &addresses,
+	                                  optional_ptr<ExecutionOperatorStageRecorder> recorder);
 	idx_t FindOrCreateGroupsInternal(DataChunk &groups, Vector &group_hashes, Vector &addresses,
 	                                 SelectionVector &new_groups,
 	                                 optional_ptr<ExecutionOperatorStageRecorder> recorder);
@@ -474,33 +475,25 @@ private:
 	    DataChunk &groups, optional_ptr<Vector> addresses_out,
 	    ExecutionGroupedAggregateStateSelectedAddressUpdateFunction selected_update_function,
 	    void *selected_update_state, optional_ptr<ExecutionOperatorStageRecorder> recorder,
-	    optional_ptr<Vector> precomputed_hashes = nullptr, optional_ptr<SelectionVector> duplicates_out = nullptr,
-	    idx_t *duplicate_count_out = nullptr, optional_ptr<const ExecutionDenseGroupDomain> dense_domain = nullptr,
-	    bool insert_only = false);
+	    optional_ptr<Vector> precomputed_hashes = nullptr,
+	    optional_ptr<const ExecutionDenseGroupDomain> dense_domain = nullptr, bool insert_only = false);
 	bool TryFindOrCreateSingleFieldGroupsDense(
 	    DataChunk &groups, optional_ptr<Vector> addresses_out,
 	    ExecutionGroupedAggregateStateSelectedAddressUpdateFunction selected_update_function,
 	    void *selected_update_state, optional_ptr<ExecutionOperatorStageRecorder> recorder,
-	    optional_ptr<SelectionVector> duplicates_out = nullptr, idx_t *duplicate_count_out = nullptr,
 	    optional_ptr<const ExecutionDenseGroupDomain> dense_domain = nullptr);
 	//! Dense single-field dispatch functors routed through
 	//! AggregateDispatchDenseIntegralType; defined in the translation unit.
 	struct SingleFieldGroupsDenseDispatchOp;
 	struct SingleInputVectorGroupsDenseDispatchOp;
 	struct RowPointerSingleFieldDirectDispatchOp;
-	struct InputVectorSingleFieldDirectDispatchOp;
 	template <class T>
 	bool TryFindOrCreateSingleFieldGroupsDenseTemplated(
 	    DataChunk &groups, optional_ptr<Vector> addresses_out,
 	    ExecutionGroupedAggregateStateSelectedAddressUpdateFunction selected_update_function,
 	    void *selected_update_state, optional_ptr<ExecutionOperatorStageRecorder> recorder,
-	    optional_ptr<SelectionVector> duplicates_out, idx_t *duplicate_count_out,
 	    optional_ptr<const ExecutionDenseGroupDomain> dense_domain = nullptr);
 	bool TryFindOrCreateRowPointerSingleFieldGroupStateTargetsDirect(
-	    DataChunk &payload_input, Vector &row_pointers, idx_t count,
-	    const vector<ExecutionRowPointerGroupKeySource> &group_sources,
-	    ExecutionGroupedAggregateStateTargetBatch &targets, optional_ptr<ExecutionOperatorStageRecorder> recorder);
-	bool TryFindOrCreateRowPointerSingleInputVectorGroupStateTargetsDense(
 	    DataChunk &payload_input, Vector &row_pointers, idx_t count,
 	    const vector<ExecutionRowPointerGroupKeySource> &group_sources,
 	    ExecutionGroupedAggregateStateTargetBatch &targets, optional_ptr<ExecutionOperatorStageRecorder> recorder);
@@ -519,13 +512,6 @@ private:
 	    DataChunk &payload_input, idx_t count, const vector<ExecutionRowPointerGroupKeySource> &group_sources,
 	    const ExecutionPrimitiveAggregateUpdateLane &lane, optional_ptr<ExecutionOperatorStageRecorder> recorder,
 	    optional_ptr<const ExecutionDenseGroupDomain> dense_domain = nullptr);
-	bool TryFindOrCreateInputVectorSingleFieldGroupStateTargetsDirect(
-	    DataChunk &payload_input, idx_t count, const vector<ExecutionRowPointerGroupKeySource> &group_sources,
-	    ExecutionGroupedAggregateStateTargetBatch &targets, optional_ptr<ExecutionOperatorStageRecorder> recorder);
-	template <class T>
-	bool TryFindOrCreateInputVectorSingleFieldGroupStateTargetsDirectTemplated(
-	    DataChunk &payload_input, idx_t count, const vector<ExecutionRowPointerGroupKeySource> &group_sources,
-	    ExecutionGroupedAggregateStateTargetBatch &targets, optional_ptr<ExecutionOperatorStageRecorder> recorder);
 	template <class T>
 	bool TryFindOrCreateRowPointerSingleFieldGroupStateTargetsDirectTemplated(
 	    DataChunk &payload_input, Vector &row_pointers, idx_t count,
@@ -547,13 +533,10 @@ private:
 	                                                 ExecutionGroupedAggregateStateTargetBatch &targets,
 	                                                 optional_ptr<ExecutionOperatorStageRecorder> recorder);
 	bool TryFindOrCreateDescriptorGroupStateTargetsDirect(
-	    DataChunk &payload_input, optional_ptr<Vector> row_pointers, idx_t count,
+	    DataChunk &payload_input, Vector &row_pointers, idx_t count,
 	    const vector<ExecutionRowPointerGroupKeySource> &group_sources,
 	    ExecutionGroupedAggregateStateTargetBatch &targets, optional_ptr<ExecutionOperatorStageRecorder> recorder,
 	    optional_ptr<const ExecutionDenseGroupDomain> dense_domain = nullptr);
-	bool TryFindOrCreateInputVectorStringPrefixGroupStateTargets(
-	    DataChunk &payload_input, idx_t count, const vector<ExecutionRowPointerGroupKeySource> &group_sources,
-	    ExecutionGroupedAggregateStateTargetBatch &targets, optional_ptr<ExecutionOperatorStageRecorder> recorder);
 	bool TryFindOrCreateRowPointerGroupStateTargetsMaterialized(
 	    DataChunk &payload_input, Vector &row_pointers, idx_t count,
 	    const vector<ExecutionRowPointerGroupKeySource> &group_sources,

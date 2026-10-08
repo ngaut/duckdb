@@ -1,0 +1,163 @@
+# name: test/sql/jit/test_jit_input_vector_group_lookup.test
+# description: Compiled aggregates over input-vector group keys take DuckDB's vectorized group lookup: high-cardinality
+#              keys (resizes), NULL keys, referenced and materialized (compressed) keys all match the native result
+# group: [jit]
+
+statement ok
+LOAD jit_sljit
+
+statement ok
+SET jit_cbo_startup_base_cost=0
+
+statement ok
+SET jit_trace_runtime=true
+
+statement ok
+SET jit_event_log_size=100000
+
+statement ok
+CREATE TABLE t AS
+SELECT (hash(i % 150000) % 100000000)::BIGINT AS k,
+       (i % 150000)::INTEGER AS k32,
+       CASE WHEN i % 11 = 0 THEN NULL ELSE 'key_' || (i % 40000) END AS s,
+       (i % 37)::INTEGER AS g,
+       CASE WHEN i % 13 = 0 THEN NULL ELSE (i % 1000)::BIGINT END AS v,
+       i % 10 AS f
+FROM range(1500000) t(i)
+
+foreach threads 1 4
+
+statement ok
+SET threads={threads}
+
+# int_count
+statement ok
+SET jit_policy='off'
+
+statement ok
+CREATE OR REPLACE TABLE expected AS SELECT k, count(*) AS n FROM t WHERE f < 9 GROUP BY k
+
+statement ok
+SET jit_policy='auto'
+
+statement ok
+CREATE OR REPLACE TABLE actual AS SELECT k, count(*) AS n FROM t WHERE f < 9 GROUP BY k
+
+query I
+SELECT count(*) FROM ((SELECT * FROM expected EXCEPT ALL SELECT * FROM actual)
+                      UNION ALL (SELECT * FROM actual EXCEPT ALL SELECT * FROM expected))
+----
+0
+
+# int_sum
+statement ok
+SET jit_policy='off'
+
+statement ok
+CREATE OR REPLACE TABLE expected AS SELECT k, count(v) AS n, sum(v) AS s FROM t WHERE f < 9 GROUP BY k
+
+statement ok
+SET jit_policy='auto'
+
+statement ok
+CREATE OR REPLACE TABLE actual AS SELECT k, count(v) AS n, sum(v) AS s FROM t WHERE f < 9 GROUP BY k
+
+query I
+SELECT count(*) FROM ((SELECT * FROM expected EXCEPT ALL SELECT * FROM actual)
+                      UNION ALL (SELECT * FROM actual EXCEPT ALL SELECT * FROM expected))
+----
+0
+
+# int32_count
+statement ok
+SET jit_policy='off'
+
+statement ok
+CREATE OR REPLACE TABLE expected AS SELECT k32, count(*) AS n FROM t WHERE f < 9 GROUP BY k32
+
+statement ok
+SET jit_policy='auto'
+
+statement ok
+CREATE OR REPLACE TABLE actual AS SELECT k32, count(*) AS n FROM t WHERE f < 9 GROUP BY k32
+
+query I
+SELECT count(*) FROM ((SELECT * FROM expected EXCEPT ALL SELECT * FROM actual)
+                      UNION ALL (SELECT * FROM actual EXCEPT ALL SELECT * FROM expected))
+----
+0
+
+# str_count
+statement ok
+SET jit_policy='off'
+
+statement ok
+CREATE OR REPLACE TABLE expected AS SELECT s, count(*) AS n FROM t WHERE f < 9 GROUP BY s
+
+statement ok
+SET jit_policy='auto'
+
+statement ok
+CREATE OR REPLACE TABLE actual AS SELECT s, count(*) AS n FROM t WHERE f < 9 GROUP BY s
+
+query I
+SELECT count(*) FROM ((SELECT * FROM expected EXCEPT ALL SELECT * FROM actual)
+                      UNION ALL (SELECT * FROM actual EXCEPT ALL SELECT * FROM expected))
+----
+0
+
+# multi_count
+statement ok
+SET jit_policy='off'
+
+statement ok
+CREATE OR REPLACE TABLE expected AS SELECT s, g, count(*) AS n FROM t WHERE f < 9 GROUP BY s, g
+
+statement ok
+SET jit_policy='auto'
+
+statement ok
+CREATE OR REPLACE TABLE actual AS SELECT s, g, count(*) AS n FROM t WHERE f < 9 GROUP BY s, g
+
+query I
+SELECT count(*) FROM ((SELECT * FROM expected EXCEPT ALL SELECT * FROM actual)
+                      UNION ALL (SELECT * FROM actual EXCEPT ALL SELECT * FROM expected))
+----
+0
+
+# multi_sum
+statement ok
+SET jit_policy='off'
+
+statement ok
+CREATE OR REPLACE TABLE expected AS SELECT k32, g, count(v) AS n, sum(v) AS s FROM t WHERE f < 9 GROUP BY k32, g
+
+statement ok
+SET jit_policy='auto'
+
+statement ok
+CREATE OR REPLACE TABLE actual AS SELECT k32, g, count(v) AS n, sum(v) AS s FROM t WHERE f < 9 GROUP BY k32, g
+
+query I
+SELECT count(*) FROM ((SELECT * FROM expected EXCEPT ALL SELECT * FROM actual)
+                      UNION ALL (SELECT * FROM actual EXCEPT ALL SELECT * FROM expected))
+----
+0
+
+endloop
+
+# The multi-key count runs through the compiled aggregate's vectorized input-vector lookup
+statement ok
+SET threads=1
+
+statement ok
+SELECT * FROM duckdb_jit_clear_events()
+
+statement ok
+CREATE OR REPLACE TABLE actual AS SELECT s, g, count(*) AS n FROM t WHERE f < 9 GROUP BY s, g
+
+query I
+SELECT count(*) > 0 FROM duckdb_jit_events()
+WHERE phase = 'runtime' AND generated_stage_runtime_breakdown LIKE '%find_or_create_input_vector.hash%'
+----
+true
