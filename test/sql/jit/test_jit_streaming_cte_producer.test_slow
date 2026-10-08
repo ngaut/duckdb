@@ -37,7 +37,8 @@ CREATE TABLE p AS SELECT i::BIGINT AS i, (i % 4)::BIGINT AS k FROM range(20000) 
 statement ok
 CREATE TABLE b AS SELECT i::BIGINT AS j, (i % 4)::BIGINT AS k FROM range(400) tbl(i)
 
-# a correlated subquery over a join: the join output is a delim CTE with a direct and a materialized consumer
+# a correlated subquery over a join: the join output is a delim CTE with a direct and a materialized consumer; the
+# sparse variant's probe emits a few rows per source chunk, which coalesce before the CTE sink
 statement ok
 CREATE TABLE li AS
 SELECT (i % 2000)::BIGINT AS pk, (i % 50)::DECIMAL(15,2) AS qty, (i % 1000)::DECIMAL(15,2) AS price
@@ -69,6 +70,10 @@ UNION ALL
 SELECT 'delim', count(*), sum(price * 100)::HUGEINT, sum(qty * 100)::HUGEINT
 FROM li, pa
 WHERE pa.pk = li.pk AND brand = 3 AND qty < (SELECT 0.2 * avg(qty) FROM li l2 WHERE l2.pk = pa.pk)
+UNION ALL
+SELECT 'delim_sparse', count(*), sum(price * 100)::HUGEINT, sum(qty * 100)::HUGEINT
+FROM li, pa
+WHERE pa.pk = li.pk AND brand = 3 AND pa.pk < 40 AND qty < (SELECT 0.2 * avg(qty) FROM li l2 WHERE l2.pk = pa.pk)
 
 statement ok
 SET jit_policy='auto'
@@ -91,6 +96,10 @@ UNION ALL
 SELECT 'delim', count(*), sum(price * 100)::HUGEINT, sum(qty * 100)::HUGEINT
 FROM li, pa
 WHERE pa.pk = li.pk AND brand = 3 AND qty < (SELECT 0.2 * avg(qty) FROM li l2 WHERE l2.pk = pa.pk)
+UNION ALL
+SELECT 'delim_sparse', count(*), sum(price * 100)::HUGEINT, sum(qty * 100)::HUGEINT
+FROM li, pa
+WHERE pa.pk = li.pk AND brand = 3 AND pa.pk < 40 AND qty < (SELECT 0.2 * avg(qty) FROM li l2 WHERE l2.pk = pa.pk)
 
 query I
 SELECT count(*) FROM ((SELECT * FROM expected EXCEPT ALL SELECT * FROM actual)

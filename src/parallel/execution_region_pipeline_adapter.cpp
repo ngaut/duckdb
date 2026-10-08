@@ -3,7 +3,6 @@
 
 #include "duckdb/common/allocator.hpp"
 #include "duckdb/common/exception.hpp"
-#include "duckdb/common/types/column/column_data_collection.hpp"
 #include "duckdb/execution/execution_region_plan.hpp"
 #include "duckdb/main/client_context.hpp"
 #include "duckdb/parallel/pipeline_executor.hpp"
@@ -247,35 +246,70 @@ bool ExecutionRegionPipelineAdapter::BindSink(DataChunk &input, const ExecutionR
 }
 
 void ExecutionRegionPipelineAdapter::QueueSinkChunk(DataChunk &chunk) {
-	if (!executor.remaining_sink_chunk) {
-		executor.final_chunk.Reset();
-		chunk.Copy(executor.final_chunk);
-		executor.remaining_sink_chunk = true;
-		return;
+	executor.QueueCoalescedSinkChunk();
+	executor.EnqueueSinkChunk(chunk);
+}
+
+//! The rows the core holds for a kernel sink through the operator's Sink, as the retry of a blocked chunk does
+SinkResultType ExecutionRegionPipelineAdapter::SinkCoalescedChunk() {
+	auto &coalesced = executor.coalesced_sink_chunk;
+	if (!executor.coalesced_sink_chunk_initialized || coalesced.size() == 0) {
+		return SinkResultType::NEED_MORE_INPUT;
 	}
-	if (!executor.queued_sink_chunks) {
-		executor.queued_sink_chunks =
-		    make_uniq<ColumnDataCollection>(GetClientContext(), executor.final_chunk.GetTypes());
+	OperatorSinkInput sink_input {*executor.pipeline.GetSink()->sink_state, *executor.local_sink_state,
+	                              executor.interrupt_state};
+	auto result = executor.Sink(coalesced, sink_input);
+	if (result == SinkResultType::BLOCKED) {
+		executor.EnqueueSinkChunk(coalesced);
+		result = SinkResultType::NEED_MORE_INPUT;
 	}
-	executor.queued_sink_chunks->Append(chunk);
+	coalesced.Reset();
+	return result;
 }
 
 SinkResultType ExecutionRegionPipelineAdapter::AppendSink(const ExecutionAppendSinkBinding &binding, DataChunk &chunk) {
 	if (executor.remaining_sink_chunk) {
-		QueueSinkChunk(chunk);
+		executor.EnqueueSinkChunk(chunk);
+		return SinkResultType::NEED_MORE_INPUT;
+	}
+	auto &coalesced = executor.coalesced_sink_chunk;
+	const bool coalesce =
+	    chunk.size() <= CachingPhysicalOperator::CACHE_THRESHOLD && !executor.required_partition_info.AnyRequired();
+	if (coalesce) {
+		if (!executor.coalesced_sink_chunk_initialized) {
+			coalesced.Initialize(GetAllocator(), executor.final_chunk.GetTypes());
+			executor.coalesced_sink_chunk_initialized = true;
+		}
+		if (coalesced.size() + chunk.size() <= STANDARD_VECTOR_SIZE) {
+			coalesced.Append(chunk);
+			return SinkResultType::NEED_MORE_INPUT;
+		}
+	}
+	// The chunk does not join the coalesced rows: they sink first
+	auto result = SinkCoalescedChunk();
+	if (result == SinkResultType::FINISHED) {
+		return result;
+	}
+	if (executor.remaining_sink_chunk) {
+		// The coalesced rows blocked the Sink: the chunk queues behind them
+		executor.EnqueueSinkChunk(chunk);
+		return SinkResultType::NEED_MORE_INPUT;
+	}
+	if (coalesce) {
+		coalesced.Append(chunk);
 		return SinkResultType::NEED_MORE_INPUT;
 	}
 #ifdef DUCKDB_DEBUG_ASYNC_SINK_SOURCE
-	auto result = executor.TryDebugBlock(executor.debug_blocked_sink_count, executor.interrupt_state)
-	                  ? SinkResultType::BLOCKED
-	                  : ExecutionSinkAppend(binding, chunk);
+	result = executor.TryDebugBlock(executor.debug_blocked_sink_count, executor.interrupt_state)
+	             ? SinkResultType::BLOCKED
+	             : ExecutionSinkAppend(binding, chunk);
 #else
-	auto result = ExecutionSinkAppend(binding, chunk);
+	result = ExecutionSinkAppend(binding, chunk);
 #endif
 	if (result != SinkResultType::BLOCKED) {
 		return result;
 	}
-	QueueSinkChunk(chunk);
+	executor.EnqueueSinkChunk(chunk);
 	return SinkResultType::NEED_MORE_INPUT;
 }
 

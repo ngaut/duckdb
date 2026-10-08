@@ -107,6 +107,9 @@ void PipelineExecutor::Reset() {
 	remaining_sink_chunk = false;
 	queued_sink_chunks.reset();
 	next_queued_sink_chunk = 0;
+	if (coalesced_sink_chunk_initialized) {
+		coalesced_sink_chunk.Reset();
+	}
 	compiled_source_replay = false;
 	next_batch_blocked = false;
 	pending_batch_advance_state = PendingBatchAdvanceState::NONE;
@@ -390,6 +393,8 @@ PipelineExecuteResult PipelineExecutor::Execute(idx_t max_chunks) {
 
 PipelineExecuteResult PipelineExecutor::ExecuteVectorizedPipeline(idx_t max_chunks) {
 	D_ASSERT(pipeline.sink);
+	// Rows a compiled kernel coalesced sink before anything the vectorized loop produces
+	QueueCoalescedSinkChunk();
 	auto &source_chunk = pipeline.operators.empty() ? final_chunk : *intermediate_chunks[0];
 	ExecutionBudget chunk_budget(max_chunks);
 
@@ -711,6 +716,27 @@ OperatorResultType PipelineExecutor::SinkRemainingChunks(ExecutionBudget &chunk_
 	}
 }
 
+void PipelineExecutor::EnqueueSinkChunk(DataChunk &chunk) {
+	if (!remaining_sink_chunk) {
+		final_chunk.Reset();
+		chunk.Copy(final_chunk);
+		remaining_sink_chunk = true;
+		return;
+	}
+	if (!queued_sink_chunks) {
+		queued_sink_chunks = make_uniq<ColumnDataCollection>(context.client, final_chunk.GetTypes());
+	}
+	queued_sink_chunks->Append(chunk);
+}
+
+void PipelineExecutor::QueueCoalescedSinkChunk() {
+	if (!coalesced_sink_chunk_initialized || coalesced_sink_chunk.size() == 0) {
+		return;
+	}
+	EnqueueSinkChunk(coalesced_sink_chunk);
+	coalesced_sink_chunk.Reset();
+}
+
 PipelineExecuteResult PipelineExecutor::PushInputChunk(DataChunk &input, ExecutionBudget &chunk_budget,
                                                        PipelineInputChunkMode mode) {
 	if (remaining_sink_chunk) {
@@ -747,6 +773,7 @@ PipelineExecuteResult PipelineExecutor::PushInputChunk(DataChunk &input, Executi
 }
 
 PipelineExecuteResult PipelineExecutor::FlushAndFinalize(ExecutionBudget &chunk_budget) {
+	QueueCoalescedSinkChunk();
 	if (remaining_sink_chunk) {
 		auto result = SinkRemainingChunks(chunk_budget);
 		if (result == OperatorResultType::BLOCKED) {

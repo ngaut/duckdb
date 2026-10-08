@@ -76,6 +76,9 @@ public:
 	PipelineExecuteResult FlushAndFinalizeAfterCompiledFinish(idx_t max_chunks, string &runtime_reason);
 
 private:
+	SinkResultType SinkCoalescedChunk();
+
+private:
 	PipelineExecutor &executor;
 };
 

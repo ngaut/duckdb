@@ -179,6 +179,11 @@ private:
 	//! final_chunk, so the kernel finishes its source chunk instead of dropping the rest of that chunk's output
 	unique_ptr<ColumnDataCollection> queued_sink_chunks;
 	idx_t next_queued_sink_chunk = 0;
+	//! Small chunks a compiled kernel appended, held back until they fill a chunk as a caching operator holds back
+	//! its output: a sink pays per call, and a compiled probe emits a few rows per source chunk. Only sinks without
+	//! partition requirements coalesce, so no partition advance has to wait for these rows
+	DataChunk coalesced_sink_chunk;
+	bool coalesced_sink_chunk_initialized = false;
 	//! Set when the sink batch advance of a compiled kernel blocked on the source chunk it fetched: the kernel re-reads
 	//! execution_source_input_chunk, with the fetch result it had, at its next source fetch
 	bool compiled_source_replay = false;
@@ -244,6 +249,10 @@ private:
 	OperatorResultType ExecutePushInternal(DataChunk &input, ExecutionBudget &chunk_budget, idx_t initial_idx = 0);
 	//! Sinks final_chunk, which the Sink blocked on, and then every queued sink chunk
 	OperatorResultType SinkRemainingChunks(ExecutionBudget &chunk_budget);
+	//! Queues a chunk for SinkRemainingChunks: the first becomes final_chunk, later ones follow it in order
+	void EnqueueSinkChunk(DataChunk &chunk);
+	//! Moves the coalesced rows of a compiled kernel into the sink queue, ahead of anything queued after them
+	void QueueCoalescedSinkChunk();
 	PipelineExecuteResult PushInputChunk(DataChunk &input, ExecutionBudget &chunk_budget, PipelineInputChunkMode mode);
 	PipelineExecuteResult FlushAndFinalize(ExecutionBudget &chunk_budget);
 	//! Pushes a chunk through the pipeline and returns a single result chunk
