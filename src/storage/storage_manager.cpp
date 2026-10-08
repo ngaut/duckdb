@@ -154,7 +154,8 @@ void StorageOptions::Initialize(unordered_map<string, Value> &options) {
 }
 
 StorageManager::StorageManager(AttachedDatabase &db, string path_p, AttachOptions &options)
-    : db(db), path(std::move(path_p)), read_only(options.access_mode == AccessMode::READ_ONLY), wal_size(0) {
+    : db(db), path(std::move(path_p)), read_only(options.access_mode == AccessMode::READ_ONLY), wal_size(0),
+      prefetched_file(std::move(options.prefetched)) {
 	if (path.empty()) {
 		path = IN_MEMORY_PATH;
 		return;
@@ -250,22 +251,26 @@ bool StorageManager::HasWAL() const {
 bool StorageManager::WALStartCheckpoint(MetaBlockPointer meta_block, CheckpointOptions &options,
                                         ActiveCheckpointWrapper &active_checkpoint) {
 	unique_lock<mutex> guard;
-	// Lock ordering: WAL lock -> transaction lock (in GetCheckpointTransaction)
-	if (!options.wal_lock) {
-		// not holding the WAL lock yet - grab it
-		guard = GetWALLock();
+	// Lock ordering: commit lock -> transaction lock (in ActiveCheckpointWrapper::Begin)
+	if (!options.commit_lock) {
+		// not holding the commit lock yet - grab it
+		guard = GetCommitLock();
 	}
-	if (active_checkpoint.HasCheckpointContext()) {
-		// While holding the WAL lock, if we have a context then start a checkpoint transaction.
-		// The start time of this transaction defines the visibility for checkpointing, any new commits are written
-		// to the next WAL.
-		active_checkpoint.GetCheckpointTransaction(options);
-	} else {
-		auto &transaction_manager = db.GetTransactionManager().Cast<DuckTransactionManager>();
-		options.transaction_id = transaction_manager.GetLastCommit();
+	// drain under the commit lock before the checkpoint transaction starts: its snapshot would
+	// otherwise be bounded below commits whose WAL this checkpoint deletes
+	auto &transaction_manager = DuckTransactionManager::Get(db);
+	transaction_manager.WaitForDurability();
+	if (options.type == CheckpointType::FULL_CHECKPOINT &&
+	    transaction_manager.GetLastCommit() >= transaction_manager.LowestVisibilityBound()) {
+		// an active bounded snapshot still needs state a full checkpoint would vacuum away
+		options.type = CheckpointType::CONCURRENT_CHECKPOINT;
 	}
 
-	DUCKDB_LOG(db.GetDatabase(), TransactionLogType, db, "Start Checkpoint", options.transaction_id);
+	// While holding the commit lock: any new commits are written to the next WAL
+	active_checkpoint.Begin(options);
+
+	D_ASSERT(options.checkpoint_id.IsValid());
+	DUCKDB_LOG(db.GetDatabase(), TransactionLogType, db, "Start Checkpoint", options.checkpoint_id.GetIndex());
 	if (!wal) {
 		return false;
 	}
@@ -318,6 +323,8 @@ void StorageManager::WALFinishCheckpoint(unique_lock<mutex> &) {
 	}
 
 	// we have had writes to the checkpoint WAL - we need to override our WAL with the checkpoint WAL
+	// commits to the checkpoint WAL may still be syncing: drain before destroying the WAL object
+	DuckTransactionManager::Get(db).WaitForDurability();
 	// first close the WAL writer
 	auto checkpoint_wal_path = wal->GetPath();
 	wal.reset();
@@ -332,8 +339,8 @@ void StorageManager::WALFinishCheckpoint(unique_lock<mutex> &) {
 	DUCKDB_LOG(db.GetDatabase(), TransactionLogType, db, "Finish Checkpoint");
 }
 
-unique_lock<mutex> StorageManager::GetWALLock() {
-	return unique_lock<mutex>(wal_lock);
+unique_lock<mutex> StorageManager::GetCommitLock() {
+	return unique_lock<mutex>(commit_lock);
 }
 
 string StorageManager::GetWALPath(const string &suffix) {
@@ -426,8 +433,7 @@ void SingleFileStorageManager::LoadDatabase(QueryContext context) {
 	StorageManagerOptions options;
 	options.read_only = read_only;
 	// MMAP + encryption would corrupt the file (in-place decryption); demote to BUFFERED_IO.
-	auto resolved_io_mode =
-	    storage_options.io_mode ? *storage_options.io_mode : Settings::Get<DefaultIoModeSetting>(config);
+	auto resolved_io_mode = storage_options.io_mode ? *storage_options.io_mode : FileIOMode::BUFFERED_IO;
 	if (storage_options.encryption && resolved_io_mode == FileIOMode::MMAP) {
 		DUCKDB_LOG_WARNING(db.GetDatabase(),
 		                   "MMAP IO_MODE is incompatible with encryption; falling back to BUFFERED_IO for \"%s\"",
@@ -523,6 +529,9 @@ void SingleFileStorageManager::LoadDatabase(QueryContext context) {
 			options.block_header_size = config.options.default_block_header_size;
 		}
 
+		// Carry the prefetched header into the block manager options so the initial header reads hit memory.
+		options.prefetched = std::move(prefetched_file);
+
 		// Initialize the block manager while loading the database file.
 		// We'll construct the SingleFileBlockManager with the default block allocation size,
 		// and later adjust it when reading the file header.
@@ -615,7 +624,7 @@ public:
 	//! Revert the commit
 	void RevertCommit() override;
 	// Make the commit persistent
-	void FlushCommit() override;
+	idx_t FlushCommit(bool sync_now) override;
 
 	void AddRowGroupData(DataTable &table, idx_t start_index, idx_t count,
 	                     unique_ptr<PersistentCollectionData> row_group_data) override;
@@ -666,13 +675,20 @@ void SingleFileStorageCommitState::RevertCommit() {
 	state = WALCommitState::TRUNCATED;
 }
 
-void SingleFileStorageCommitState::FlushCommit() {
+idx_t SingleFileStorageCommitState::FlushCommit(bool sync_now) {
 	if (state != WALCommitState::IN_PROGRESS) {
-		return;
+		return 0;
 	}
 	// Move the blocks in this COMMIT into the WAL and mark them as "in use".
-	wal.Flush();
+	idx_t wal_sync_offset = 0;
+	if (sync_now) {
+		wal.Flush();
+	} else {
+		// only the marker is written here: the sync happens once the locks are released
+		wal_sync_offset = wal.FlushMarker();
+	}
 	state = WALCommitState::FLUSHED;
+	return wal_sync_offset;
 }
 
 void SingleFileStorageCommitState::AddRowGroupData(DataTable &table, idx_t start_index, idx_t count,
@@ -768,7 +784,15 @@ void SingleFileStorageManager::CreateCheckpoint(QueryContext context, Checkpoint
 
 		} catch (std::exception &ex) {
 			ErrorData error(ex);
-			throw FatalException("Failed to create checkpoint because of error: %s", error.Message());
+			if (db.IsInitialDatabase()) {
+				ValidChecker::Invalidate(db.GetDatabase(), error.RawMessage());
+				throw FatalException("Failed to create checkpoint because of error: %s", error.RawMessage());
+			}
+			// A non-initial database can be detached and reattached, so scope invalidation to this db.
+			db.Invalidate(error.RawMessage());
+			throw IOException("Checkpoint failed for database %s. The database has been invalidated. Original "
+			                  "error: %s",
+			                  db.GetName(), error.RawMessage());
 		}
 	}
 

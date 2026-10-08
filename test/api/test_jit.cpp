@@ -1029,8 +1029,10 @@ TEST_CASE("JIT prepared artifact reuse refreshes exact runtime-filter identity",
 	REQUIRE_NO_FAIL(con.Query("SET threads=1"));
 	REQUIRE_NO_FAIL(con.Query("CREATE TEMP TABLE jit_prepared_filter_fact AS "
 	                          "SELECT i::BIGINT AS k FROM range(100000) tbl(i)"));
+	// Sparse even build keys leave room for the later insert of 999: join statistics bake the build keys' [min, max]
+	// into a fact-scan filter, so only a key inside that range keeps the rebound plan, and its artifact, unchanged.
 	REQUIRE_NO_FAIL(con.Query("CREATE TEMP TABLE jit_prepared_filter_dim AS "
-	                          "SELECT i::BIGINT AS k FROM range(1000) tbl(i)"));
+	                          "SELECT (i * 2)::BIGINT AS k FROM range(1000) tbl(i)"));
 	REQUIRE_NO_FAIL(con.Query("PREPARE jit_prepared_filter AS "
 	                          "SELECT count(*) FROM jit_prepared_filter_fact f "
 	                          "JOIN jit_prepared_filter_dim d USING (k)"));
@@ -1057,7 +1059,7 @@ TEST_CASE("JIT prepared artifact reuse refreshes exact runtime-filter identity",
 	});
 	RequireJitEvent(manager, exact_filter_executed);
 
-	REQUIRE_NO_FAIL(con.Query("INSERT INTO jit_prepared_filter_dim VALUES (50000)"));
+	REQUIRE_NO_FAIL(con.Query("INSERT INTO jit_prepared_filter_dim VALUES (999)"));
 	ClearJitTrace(manager, true);
 	auto after_insert = con.Query("EXECUTE jit_prepared_filter");
 	REQUIRE_NO_FAIL(*after_insert);
@@ -1264,30 +1266,6 @@ TEST_CASE("JIT Metal projection supports INT64-backed DECIMAL add/subtract", "[a
 	REQUIRE(result->GetValue(1, 0).ToString() == "5000675000.00");
 
 	RequireExecutedMetalProjection(manager, 100000);
-}
-
-TEST_CASE("JIT Metal projection reports DECIMAL overflow", "[api][jit][metal]") {
-	JitTestDatabase test;
-	auto &con = test.con;
-	auto &manager = test.manager;
-
-	REQUIRE_NO_FAIL(con.Query("LOAD jit_metal"));
-	if (!MetalBackendAvailable(test.context, manager)) {
-		WARN("Skipping Metal JIT GPU test because no available Metal device was reported");
-		return;
-	}
-
-	ConfigureMetalGpuSettings(con);
-	REQUIRE_NO_FAIL(con.Query("CREATE TEMP TABLE jit_metal_decimal_overflow_input AS "
-	                          "SELECT 999999999999999999::DECIMAL(18,0) AS d"));
-
-	ClearJitTrace(manager, true);
-	auto overflow = con.Query("CREATE TEMP TABLE jit_metal_decimal_overflow_output AS "
-	                          "SELECT d + 1::DECIMAL(18,0) AS y FROM jit_metal_decimal_overflow_input");
-	REQUIRE_FAIL(overflow);
-	REQUIRE(StringUtil::Contains(overflow->GetError(), "Overflow in Metal DECIMAL projection"));
-
-	RequireJitEvent(manager, [](const ExecutionRegionEvent &event) { return IsCompiledMetalRegionEvent(event); });
 }
 #endif
 
@@ -2511,12 +2489,6 @@ TEST_CASE("JIT CBO trusts padded finalized dynamic-filter estimates", "[api][jit
 	REQUIRE(profile.SelectedAcceleratedRunner());
 	parameters.compiled_vectorized.startup_base_cost = 10000;
 
-	input.native_delim_join_sink = true;
-	profile = DuckDBCostModel::SelectPhysicalRunner(input, parameters);
-	REQUIRE(profile.generated_backend_stage_work == 0);
-	REQUIRE(profile.native_operator_work == int64_t(parameters.compiled_vectorized.native_operator_stage_benefit));
-	REQUIRE(profile.SelectedAcceleratedRunner());
-
 	input.estimated_cardinality = STANDARD_VECTOR_SIZE * 4;
 	profile = DuckDBCostModel::SelectPhysicalRunner(input, parameters);
 	REQUIRE(profile.generated_backend_stage_work == 0);
@@ -3703,20 +3675,20 @@ TEST_CASE("SLJIT fused DECIMAL64 direct append preserves projection overflow mes
 	                          "FROM range(10000) tbl(i)"));
 
 	ClearJitTrace(manager, true);
+	// DECIMAL(18) +/- widens to DECIMAL(19) and cannot overflow; multiplication stays DECIMAL64 with checks.
 	auto overflow = con.Query("CREATE TEMP TABLE jit_decimal_fused_overflow_output AS "
-	                          "SELECT (d + 1::DECIMAL(18,0)) AS ok, "
-	                          "(d - 1::DECIMAL(18,0)) AS lo "
+	                          "SELECT (d * CAST(-1 AS DECIMAL(1,0))) AS ok, "
+	                          "(d * CAST(2 AS DECIMAL(1,0))) AS hi "
 	                          "FROM jit_decimal_fused_overflow_input");
 	REQUIRE_FAIL(overflow);
-	REQUIRE(StringUtil::Contains(overflow->GetError(), "Overflow in subtract of DECIMAL"));
+	REQUIRE(StringUtil::Contains(overflow->GetError(), "Overflow in multiplication of DECIMAL"));
 
 	RequireJitEvent(
 	    manager,
 	    [](const ExecutionRegionEvent &event) {
 		    return IsCompiledSljitRegionEvent(event) &&
 		           CandidateHasStructure(event, 0, 1, ExecutionRegionSinkKind::MATERIALIZATION) &&
-		           StringUtil::Contains(event.ir, "native:decimal64-add-constant") &&
-		           StringUtil::Contains(event.ir, "native:decimal64-subtract-constant");
+		           StringUtil::Contains(event.ir, "native:decimal64-multiply-constant");
 	    },
 	    [](const ExecutionRegionEvent &event) { RequireGeneratedMachineCodeRegion(event); });
 
@@ -3724,7 +3696,7 @@ TEST_CASE("SLJIT fused DECIMAL64 direct append preserves projection overflow mes
 	    manager,
 	    [](const ExecutionRegionEvent &event) {
 		    return IsSljitRegionEvent(event) && EventPhase(event) == "runtime" && EventStatus(event) == "error" &&
-		           StringUtil::Contains(event.reason, "Overflow in subtract of DECIMAL");
+		           StringUtil::Contains(event.reason, "Overflow in multiplication of DECIMAL");
 	    },
 	    NoExtraJitEventCheck());
 }
@@ -4366,9 +4338,11 @@ TEST_CASE("JIT Bloom dynamic filters preserve bitpacked scan semantics", "[api][
 	TestDeleteFile(db_path);
 	TestDeleteFile(db_path + ".wal");
 	REQUIRE_NO_FAIL(con.Query("ATTACH " + SQLString(db_path) + " AS packed (ROW_GROUP_SIZE 2048)"));
+	// The trailing 1572864 (the largest dim key) makes the probe keys span the dim keys. Otherwise join statistics
+	// clamp the build scan to the probe range, shrinking the build key range enough to make this a perfect hash join.
 	REQUIRE_NO_FAIL(con.Query("CREATE TABLE packed.fact_big AS "
 	                          "SELECT CASE WHEN i % 257 = 0 THEN NULL ELSE i END::BIGINT AS k "
-	                          "FROM range(700000) tbl(i)"));
+	                          "FROM range(700000) tbl(i) UNION ALL SELECT 1572864"));
 	REQUIRE_NO_FAIL(con.Query("CREATE TABLE packed.fact_int AS "
 	                          "SELECT CASE WHEN i % 257 = 0 THEN NULL ELSE i END::INTEGER AS k "
 	                          "FROM range(700000) tbl(i)"));
@@ -4393,10 +4367,10 @@ TEST_CASE("JIT Bloom dynamic filters preserve bitpacked scan semantics", "[api][
 	REQUIRE_NO_FAIL(con.Query("SET jit_policy='off'"));
 	auto exact_reference = con.Query(exact_query);
 	REQUIRE_NO_FAIL(*exact_reference);
-	REQUIRE(exact_reference->GetValue(0, 0).GetValue<int64_t>() == 232426);
+	REQUIRE(exact_reference->GetValue(0, 0).GetValue<int64_t>() == 232427);
 	auto null_equal_reference = con.Query(null_equal_query);
 	REQUIRE_NO_FAIL(*null_equal_reference);
-	REQUIRE(null_equal_reference->GetValue(0, 0).GetValue<int64_t>() == 235150);
+	REQUIRE(null_equal_reference->GetValue(0, 0).GetValue<int64_t>() == 235151);
 	auto cast_reference = con.Query(cast_query);
 	REQUIRE_NO_FAIL(*cast_reference);
 	REQUIRE(cast_reference->GetValue(0, 0).GetValue<int64_t>() == 232426);
@@ -4439,8 +4413,9 @@ TEST_CASE("JIT CBO carries finalized dynamic filter cardinality through regular 
 	REQUIRE_NO_FAIL(con.Query("SET perfect_ht_threshold=0"));
 	REQUIRE_NO_FAIL(con.Query("CREATE TEMP TABLE jit_regular_dynamic_filter_fact AS "
 	                          "SELECT i::BIGINT AS k, i::BIGINT AS payload FROM range(200000) tbl(i)"));
+	// Keep the build key span below 2^26 so DuckDB emits an exact prefix-range filter instead of Bloom + min/max.
 	REQUIRE_NO_FAIL(con.Query("CREATE TEMP TABLE jit_regular_dynamic_filter_dim AS "
-	                          "SELECT (i * 1000000)::BIGINT AS k FROM range(500) tbl(i)"));
+	                          "SELECT (i * 100000 + 199999)::BIGINT AS k FROM range(500) tbl(i)"));
 
 	ClearJitTrace(manager, true);
 	auto result = con.Query("SELECT count(*) FROM jit_regular_dynamic_filter_fact f "

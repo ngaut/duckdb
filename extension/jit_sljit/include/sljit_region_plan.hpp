@@ -19,11 +19,8 @@ enum class SljitNativeRegionOpKind : uint8_t {
 	PROJECTION,
 	HASH_JOIN_PROBE,
 	HASH_JOIN_BUILD,
-	NESTED_LOOP_JOIN_PROBE,
-	NESTED_LOOP_JOIN_BUILD,
 	ORDER_SINK,
 	APPEND_SINK,
-	DELIM_JOIN_SINK,
 	AGGREGATE_UPDATE
 };
 enum class SljitNativeRegionExpressionKind : uint8_t {
@@ -43,7 +40,6 @@ enum class SljitNativeRegionExpressionKind : uint8_t {
 	DECIMAL64_TO_DOUBLE,
 	DECIMAL128_SCALE_UP,
 	DECIMAL128_WIDENING_MULTIPLY,
-	CONSTANT_OR_NULL,
 	INTEGRAL_COMPRESS,
 	INTEGRAL_DECOMPRESS,
 	STRING_COMPRESS,
@@ -53,7 +49,6 @@ enum class SljitNativeRegionExpressionKind : uint8_t {
 	ERROR_GUARDED_REFERENCE,
 	NULL_CHECK,
 	PREDICATE,
-	EXPRESSION_TREE,
 	TYPED_EXPRESSION_TREE
 };
 
@@ -122,7 +117,6 @@ struct SljitNativeRegionExpressionPlan {
 	unique_ptr<SljitNativePredicate> predicate;
 	unique_ptr<ExecutionExpressionIR> expression_tree;
 	vector<idx_t> expression_tree_source_indices;
-	SljitNativeConstantOrNull constant_or_null;
 	bool references_region_input = true;
 	bool emit_flat_nullable_fast_path = true;
 	string ir;
@@ -169,35 +163,7 @@ struct SljitNativeHashJoinBuildPlan {
 	vector<LogicalType> input_types;
 };
 
-struct SljitNativeNestedLoopJoinProbeConditionPlan {
-	SljitNativeRegionExpressionPlan lhs_condition;
-	LogicalType type;
-	ExecutionRegionComparisonType comparison_type = ExecutionRegionComparisonType::INVALID;
-	SljitNativeNestedLoopJoinValueKind value_kind = SljitNativeNestedLoopJoinValueKind::INT64;
-};
-
-struct SljitNativeNestedLoopJoinProbePlan {
-	idx_t operator_index = DConstants::INVALID_INDEX;
-	vector<SljitNativeNestedLoopJoinProbeConditionPlan> conditions;
-	vector<LogicalType> input_types;
-	vector<LogicalType> condition_types;
-	ExecutionRegionJoinType join_type = ExecutionRegionJoinType::INVALID;
-	ExecutionRegionOperatorInfo operator_info;
-};
-
-struct SljitNativeNestedLoopJoinBuildPlan {
-	ExecutionRegionSinkInfo sink_info;
-	vector<SljitNativeRegionExpressionPlan> rhs_conditions;
-	vector<LogicalType> input_types;
-	vector<LogicalType> condition_types;
-};
-
 struct SljitNativeAppendSinkPlan {
-	ExecutionRegionSinkInfo sink_info;
-	vector<LogicalType> input_types;
-};
-
-struct SljitNativeDelimJoinSinkPlan {
 	ExecutionRegionSinkInfo sink_info;
 	vector<LogicalType> input_types;
 };
@@ -236,7 +202,6 @@ struct SljitNativeAggregateUpdatePlan {
 	vector<SljitNativeRegionExpressionPlan> payloads;
 	vector<SljitNativeRegionExpressionPlan> group_expressions;
 	idx_t estimated_input_count = 0;
-	idx_t distinct_key_cardinality_upper_bound = 0;
 	SljitAggregateGroupReservePlan group_reserve;
 	SljitAggregatePayloadBindingState payload_binding_state = SljitAggregatePayloadBindingState::UNBOUND;
 	bool use_grouped_state_addresses = false;
@@ -279,10 +244,7 @@ struct SljitNativeRegionOpPlan {
 	SljitNativeRegionExpressionPlan filter;
 	SljitNativeHashJoinProbePlan hash_join_probe;
 	SljitNativeHashJoinBuildPlan hash_join_build;
-	SljitNativeNestedLoopJoinProbePlan nested_loop_join_probe;
-	SljitNativeNestedLoopJoinBuildPlan nested_loop_join_build;
 	SljitNativeAppendSinkPlan append_sink;
-	SljitNativeDelimJoinSinkPlan delim_join_sink;
 	SljitNativeOrderSinkPlan order_sink;
 	SljitNativeAggregateUpdatePlan aggregate_update;
 	vector<SljitNativeRegionExpressionPlan> projections;

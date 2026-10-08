@@ -375,7 +375,6 @@ bool TryMapNativeProjectionExpressionSources(const vector<SljitNativeRegionExpre
 	case SljitNativeRegionExpressionKind::DECIMAL128_SCALE_UP:
 	case SljitNativeRegionExpressionKind::INTEGER_IN_LIST:
 	case SljitNativeRegionExpressionKind::INTEGER_BETWEEN:
-	case SljitNativeRegionExpressionKind::CONSTANT_OR_NULL:
 	case SljitNativeRegionExpressionKind::INTEGRAL_COMPRESS:
 	case SljitNativeRegionExpressionKind::INTEGRAL_DECOMPRESS:
 	case SljitNativeRegionExpressionKind::STRING_COMPRESS:
@@ -388,14 +387,6 @@ bool TryMapNativeProjectionExpressionSources(const vector<SljitNativeRegionExpre
 			return TryMapNativeProjectionSourceIndex(input_projection, expr.source_index) &&
 			       TryMapNativeProjectionSourceIndex(input_projection, expr.guard_source_index) &&
 			       TryMapNativeExpressionTreeSourceIndicesThroughProjection(input_projection, expr);
-		}
-		if (expr.kind == SljitNativeRegionExpressionKind::CONSTANT_OR_NULL) {
-			for (auto &source_index : expr.constant_or_null.guard_source_indices) {
-				if (!TryMapNativeProjectionSourceIndex(input_projection, source_index)) {
-					return false;
-				}
-			}
-			return TryMapNativeExpressionTreeSourceIndicesThroughProjection(input_projection, expr);
 		}
 		return TryMapNativeProjectionSourceIndex(input_projection, expr.source_index) &&
 		       TryMapNativeExpressionTreeSourceIndicesThroughProjection(input_projection, expr);
@@ -421,7 +412,6 @@ bool TryMapNativeProjectionExpressionSources(const vector<SljitNativeRegionExpre
 		}
 		FinalizeSljitNativePredicateSourceIndices(*expr.predicate);
 		return TryMapNativeExpressionTreeSourceIndicesThroughProjection(input_projection, expr);
-	case SljitNativeRegionExpressionKind::EXPRESSION_TREE:
 	case SljitNativeRegionExpressionKind::TYPED_EXPRESSION_TREE:
 		return TryMapNativeExpressionTreeSourceIndicesThroughProjection(input_projection, expr);
 	default:

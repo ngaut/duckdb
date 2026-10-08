@@ -12,7 +12,6 @@
 
 namespace duckdb {
 
-struct SljitHashJoinDirectUngroupedAggregateProbeConsumer;
 struct SljitHashJoinMatchedRowBatchConsumer;
 
 //! Consumer-specialized probe templates are owned by the runtime translation
@@ -25,8 +24,5 @@ bool SljitTryExecuteAllValidSingleKeyNoChainProbeWithBatchConsumer(bool selected
                                                                    const SljitNativeHashJoinProbePlan &plan,
                                                                    SljitNativeRegularHashJoinProbeInput &input,
                                                                    SljitHashJoinMatchedRowBatchConsumer &consumer);
-bool SljitTryExecuteAllValidSingleKeyNoChainDirectUngroupedAggregateProbe(
-    bool selected, const SljitNativeHashJoinProbePlan &plan, SljitNativeRegularHashJoinProbeInput &input,
-    SljitHashJoinDirectUngroupedAggregateProbeConsumer &consumer);
 
 } // namespace duckdb

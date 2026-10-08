@@ -114,7 +114,7 @@ static constexpr idx_t JIT_COUNTER_RUNNER_COST_WORK_COLUMN_OFFSET = JIT_COUNTER_
 static_assert(JIT_COUNTER_RUNNER_COST_GPU_NET_BENEFIT - JIT_COUNTER_RUNNER_COST_WORK_COLUMN_OFFSET + 1 ==
               EXECUTION_REGION_RUNNER_COST_WORK_COLUMN_COUNT);
 
-static void AddJitCounterRunnerCostColumns(vector<LogicalType> &return_types, vector<string> &names) {
+static void AddJitCounterRunnerCostColumns(vector<LogicalType> &return_types, vector<Identifier> &names) {
 	AddExecutionRegionTableFunctionColumns(return_types, names, EXECUTION_REGION_RUNNER_COST_PROFILE_COLUMNS,
 	                                       EXECUTION_REGION_RUNNER_COST_PROFILE_COLUMN_COUNT);
 	AddExecutionRegionRunnerCostWorkColumns(return_types, names);
@@ -263,7 +263,7 @@ static void AppendJitCounterColumn(Vector &output, idx_t column_id, const Execut
 }
 
 static unique_ptr<FunctionData> DuckDBJitCountersBind(ClientContext &context, TableFunctionBindInput &input,
-                                                      vector<LogicalType> &return_types, vector<string> &names) {
+                                                      vector<LogicalType> &return_types, vector<Identifier> &names) {
 	AddExecutionRegionTableFunctionColumn(return_types, names, "backend_name", LogicalType::VARCHAR);
 	AddExecutionRegionTableFunctionColumn(return_types, names, "kernel_id", LogicalType::UBIGINT);
 	AddExecutionRegionTableFunctionColumn(return_types, names, "status", LogicalType::VARCHAR);

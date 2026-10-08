@@ -9,7 +9,6 @@
 #include "sljit_hash_join_all_valid_probe_api.hpp"
 #include "sljit_hash_join_all_valid_probe_fast_path_runtime.hpp"
 #include "sljit_hash_join_all_valid_probe_dispatch_runtime.hpp"
-#include "sljit_hash_join_direct_ungrouped_aggregate_probe_consumer_runtime.hpp"
 #include "sljit_hash_join_matched_row_batch_consumer_runtime.hpp"
 
 namespace duckdb {
@@ -243,13 +242,6 @@ bool SljitTryExecuteAllValidSingleKeyNoChainProbeWithBatchConsumer(bool selected
                                                                    const SljitNativeHashJoinProbePlan &plan,
                                                                    SljitNativeRegularHashJoinProbeInput &input,
                                                                    SljitHashJoinMatchedRowBatchConsumer &consumer) {
-	return selected ? TryExecuteAllValidSingleKeyNoChainProbeWithConsumer<true>(plan, input, consumer)
-	                : TryExecuteAllValidSingleKeyNoChainProbeWithConsumer<false>(plan, input, consumer);
-}
-
-bool SljitTryExecuteAllValidSingleKeyNoChainDirectUngroupedAggregateProbe(
-    bool selected, const SljitNativeHashJoinProbePlan &plan, SljitNativeRegularHashJoinProbeInput &input,
-    SljitHashJoinDirectUngroupedAggregateProbeConsumer &consumer) {
 	return selected ? TryExecuteAllValidSingleKeyNoChainProbeWithConsumer<true>(plan, input, consumer)
 	                : TryExecuteAllValidSingleKeyNoChainProbeWithConsumer<false>(plan, input, consumer);
 }

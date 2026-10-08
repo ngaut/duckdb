@@ -23,6 +23,4 @@ struct SljitStringSetCaseGroupedPayloadProjection {
 	std::array<string, CONSTANT_COUNT> constants;
 };
 
-enum class SljitPostJoinProjectionFastPath : uint8_t { NONE, STRING_SET_CASE_GROUPED_PAYLOAD };
-
 } // namespace duckdb

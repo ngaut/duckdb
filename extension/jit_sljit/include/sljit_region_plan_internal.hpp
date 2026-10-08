@@ -50,14 +50,14 @@ bool TryLowerNativeRegionExpression(const ExecutionExpressionFragment &fragment,
                                     SljitNativeRegionExpressionPlan &expr, string &error, bool render_diagnostics);
 bool TryReadNativeRegionExpression(const ExecutionExpressionIR &root, bool require_boolean,
                                    SljitNativeRegionExpressionPlan &expr);
-bool TryReadNativeRegionPredicateExpression(const ExecutionExpressionIR &root, SljitNativeRegionExpressionPlan &expr);
+bool TryReadNativeRegionPredicateExpression(const ExecutionExpressionIR &root, bool require_boolean,
+                                            SljitNativeRegionExpressionPlan &expr);
 bool TryReadNativeScalarIntrinsicRegionExpression(const ExecutionExpressionIR &root,
                                                   SljitNativeRegionExpressionPlan &expr);
 bool TryBuildSljitProjectionGraphExpression(const ExecutionExpressionIR &root, SljitProjectionGraphLowering &graph,
                                             SljitNativeRegionExpressionPlan &expression);
 bool TryBuildSljitNativeTypedExpressionTreePlan(const ExecutionExpressionIR &root,
                                                 SljitNativeRegionExpressionPlan &expr);
-bool TryBuildSljitNativeAnyExpressionTreePlan(const ExecutionExpressionIR &root, SljitNativeRegionExpressionPlan &expr);
 void AttachSljitNativeExpressionTree(const ExecutionExpressionIR &root, SljitNativeRegionExpressionPlan &expr);
 bool TryMapNativeProjectionExpressionSources(const vector<SljitNativeRegionExpressionPlan> &input_projection,
                                              SljitNativeRegionExpressionPlan &expr);
@@ -96,11 +96,7 @@ SljitRegionNodePlan PlanSljitSourceNode(const ExecutionRegionNode &node, Executi
 SljitRegionNodePlan PlanSljitHashJoinProbeOperatorNode(const ExecutionRegionNode &node,
                                                        const vector<LogicalType> &input_types,
                                                        const vector<bool> &input_not_null, bool render_diagnostics);
-SljitRegionNodePlan PlanSljitNestedLoopJoinProbeOperatorNode(const ExecutionRegionNode &node,
-                                                             const vector<LogicalType> &input_types,
-                                                             bool render_diagnostics);
 SljitRegionNodePlan PlanSljitHashJoinBuildSinkNode(const ExecutionRegionNode &node, bool render_diagnostics);
-SljitRegionNodePlan PlanSljitNestedLoopJoinBuildSinkNode(const ExecutionRegionNode &node, bool render_diagnostics);
 SljitRegionNodePlan PlanSljitAggregateUpdateSinkNode(const ExecutionRegionNode &node, bool render_diagnostics);
 SljitRegionNodePlan PlanSljitHashAggregateSinkNode(const ExecutionRegionNode &node, bool render_diagnostics);
 SljitRegionNodePlan PlanSljitSinkNode(const ExecutionRegionNode &node, const vector<LogicalType> &input_types,
@@ -111,7 +107,6 @@ SljitRegionNodePlan PlanSljitFullPipelineSinkNode(const ExecutionRegionNode &nod
 const char *SljitNativeRegionOpKindName(SljitNativeRegionOpKind kind);
 const char *SljitHashJoinProbeOutputModeToString(ExecutionHashJoinProbeOutputMode mode);
 const char *SljitHashJoinComparisonToString(ExecutionRegionComparisonType comparison_type);
-const char *SljitNestedLoopJoinValueKindToString(SljitNativeNestedLoopJoinValueKind kind);
 string DescribeNativeRegionExpression(const SljitNativeRegionExpressionPlan &expr);
 string DescribeNativeRegionExpressionList(const vector<SljitNativeRegionExpressionPlan> &expressions);
 string DescribeNativeRegionExpressionSemantic(const SljitNativeRegionExpressionPlan &expr);

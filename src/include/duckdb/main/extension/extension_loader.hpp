@@ -11,13 +11,15 @@
 #include "duckdb/common/constants.hpp"
 #include "duckdb/function/cast/cast_function_set.hpp"
 #include "duckdb/function/function_set.hpp"
-#include "duckdb/main/metric_info.hpp"
+#include "duckdb/main/profiler/metric_info.hpp"
 #include "duckdb/main/secret/secret.hpp"
 #include "duckdb/parser/parsed_data/create_type_info.hpp"
 #include "duckdb/main/extension_install_info.hpp"
 #include "duckdb/main/extension_manager.hpp"
 
 namespace duckdb {
+struct CreateCoordinateSystemInfo;
+class TableFunctionCatalogEntry;
 
 class DatabaseInstance;
 struct CreateMacroInfo;
@@ -119,6 +121,8 @@ public:
 	//! Registers a new type
 	DUCKDB_API void RegisterType(string type_name, LogicalType type,
 	                             bind_logical_type_function_t bind_function = nullptr);
+	//! Registers a new type together with the constructors that bind its type modifiers
+	DUCKDB_API void RegisterType(string type_name, LogicalType type, TypeConstructorSet constructors);
 
 	//! Registers a new secret type
 	DUCKDB_API void RegisterSecretType(SecretType secret_type);
@@ -129,10 +133,15 @@ public:
 	DUCKDB_API void RegisterCastFunction(const LogicalType &source, const LogicalType &target, BoundCastInfo function,
 	                                     int64_t implicit_cast_cost = -1);
 
+	//! Registers a rule for combining two types in implicit type resolution (LogicalType::TryGetMaxLogicalType)
+	DUCKDB_API void RegisterCombineTypesRule(CombineTypesRule rule);
+
 	//! Registers a custom metric so it appears in duckdb_available_metrics.
 	DUCKDB_API void RegisterMetric(MetricInfo info);
 
 private:
+	void RegisterType(CreateTypeInfo &info);
+
 	void FinalizeLoad();
 
 private:

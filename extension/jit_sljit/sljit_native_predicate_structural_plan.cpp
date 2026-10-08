@@ -78,7 +78,7 @@ bool ShouldTryNativePredicateRoot(const ExecutionExpressionIR &root) {
 	if (root.kind == ExecutionExpressionIRKind::CONSTANT) {
 		return true;
 	}
-	if (root.kind == ExecutionExpressionIRKind::IN_LIST) {
+	if (root.kind == ExecutionExpressionIRKind::IN_LIST || root.kind == ExecutionExpressionIRKind::BETWEEN) {
 		return true;
 	}
 	if (IsNativeCompareRoot(root)) {

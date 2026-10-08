@@ -36,28 +36,17 @@ static void AppendSljitSinkIR(string &reason, const ExecutionRegionSinkInfo &sin
 	AppendSljitReasonPart(reason, sink.ir, render_diagnostics);
 }
 
-static SljitRegionNodePlan PlanSljitSimpleNativeSinkNode(const ExecutionRegionNode &node,
-                                                         SljitNativeRegionOpKind native_kind,
-                                                         const char *contract_label, const char *runtime_binding,
-                                                         const char *blocked_reason, bool render_diagnostics) {
+static SljitRegionNodePlan PlanSljitAppendSinkNode(const ExecutionRegionNode &node, bool render_diagnostics) {
 	auto &contract = node.sink->native_sink_contract;
 	if (contract.status != ExecutionRegionStateContractStatus::READY) {
-		return SljitBlockedContractBoundary(contract.blocker, blocked_reason);
+		return SljitBlockedContractBoundary(contract.blocker, "append sink contract is not ready");
 	}
 	SljitNativeRegionOpPlan native_op;
-	native_op.kind = native_kind;
-	switch (native_kind) {
-	case SljitNativeRegionOpKind::APPEND_SINK:
-		native_op.append_sink.sink_info = *node.sink;
-		break;
-	case SljitNativeRegionOpKind::DELIM_JOIN_SINK:
-		native_op.delim_join_sink.sink_info = *node.sink;
-		break;
-	default:
-		throw InternalException("Unsupported simple SLJIT native sink kind");
-	}
+	native_op.kind = SljitNativeRegionOpKind::APPEND_SINK;
+	native_op.append_sink.sink_info = *node.sink;
 
-	auto reason = BuildSljitNativeSinkReason(contract_label, runtime_binding, *node.sink, contract, render_diagnostics);
+	auto reason = BuildSljitNativeSinkReason("append sink contract", "append_sink_runtime_binding", *node.sink,
+	                                         contract, render_diagnostics);
 	AppendSljitSinkIR(reason, *node.sink, render_diagnostics);
 	return SljitNativeNode(std::move(native_op), std::move(reason));
 }
@@ -121,17 +110,11 @@ static void SetSljitNativeSinkInputTypes(SljitNativeRegionOpPlan &op, const vect
 	case SljitNativeRegionOpKind::HASH_JOIN_BUILD:
 		op.hash_join_build.input_types = input_types;
 		break;
-	case SljitNativeRegionOpKind::NESTED_LOOP_JOIN_BUILD:
-		op.nested_loop_join_build.input_types = input_types;
-		break;
 	case SljitNativeRegionOpKind::ORDER_SINK:
 		op.order_sink.input_types = input_types;
 		break;
 	case SljitNativeRegionOpKind::APPEND_SINK:
 		op.append_sink.input_types = input_types;
-		break;
-	case SljitNativeRegionOpKind::DELIM_JOIN_SINK:
-		op.delim_join_sink.input_types = input_types;
 		break;
 	case SljitNativeRegionOpKind::AGGREGATE_UPDATE:
 		op.aggregate_update.input_types = input_types;
@@ -177,9 +160,6 @@ SljitRegionNodePlan PlanSljitSinkNode(const ExecutionRegionNode &node, const vec
 	case ExecutionRegionSinkKind::HASH_JOIN_BUILD:
 		sink = PlanSljitHashJoinBuildSinkNode(node, render_diagnostics);
 		break;
-	case ExecutionRegionSinkKind::NESTED_LOOP_JOIN_BUILD:
-		sink = PlanSljitNestedLoopJoinBuildSinkNode(node, render_diagnostics);
-		break;
 	case ExecutionRegionSinkKind::HASH_AGGREGATE_UPDATE:
 		sink = PlanSljitHashAggregateSinkNode(node, render_diagnostics);
 		break;
@@ -189,17 +169,10 @@ SljitRegionNodePlan PlanSljitSinkNode(const ExecutionRegionNode &node, const vec
 		break;
 	case ExecutionRegionSinkKind::RESULT_COLLECTOR_SINK:
 	case ExecutionRegionSinkKind::MATERIALIZATION:
-		sink = PlanSljitSimpleNativeSinkNode(node, SljitNativeRegionOpKind::APPEND_SINK, "append sink contract",
-		                                     "append_sink_runtime_binding", "append sink contract is not ready",
-		                                     render_diagnostics);
+		sink = PlanSljitAppendSinkNode(node, render_diagnostics);
 		break;
 	case ExecutionRegionSinkKind::SORT:
 		sink = PlanSljitOrderSinkNode(node, render_diagnostics);
-		break;
-	case ExecutionRegionSinkKind::DELIM_JOIN_SINK:
-		sink = PlanSljitSimpleNativeSinkNode(node, SljitNativeRegionOpKind::DELIM_JOIN_SINK,
-		                                     "delimiter join sink contract", "delim_join_sink_runtime_binding",
-		                                     "delim join sink contract is not ready", render_diagnostics);
 		break;
 	default:
 		return SljitNodeBlockerBoundary(node, "sink kind is outside SLJIT native sink lowering");
@@ -226,12 +199,6 @@ SljitRegionNodePlan PlanSljitFullPipelineSinkNode(const ExecutionRegionNode &nod
 		return SljitFullPipelineSinkBoundary(
 		    node, native_sink, "full pipeline hash join build sink requires native hash build primitive lowering",
 		    "hash-join-build-contract-boundary", render_diagnostics);
-	}
-	if (node.sink->kind == ExecutionRegionSinkKind::NESTED_LOOP_JOIN_BUILD) {
-		return SljitFullPipelineSinkBoundary(
-		    node, native_sink,
-		    "full pipeline nested loop join build sink requires native nested loop join build lowering",
-		    "nested-loop-join-build-contract-boundary", render_diagnostics);
 	}
 	return SljitFullPipelineSinkBoundary(node, native_sink, "full pipeline sink requires native sink contract",
 	                                     "native-sink-lowering", render_diagnostics);

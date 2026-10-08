@@ -31,7 +31,7 @@ TEST_CASE("JIT auto compiles decimal projection chains through fused regions", "
 
 	ClearJitTrace(manager);
 	auto result = con.Query("SELECT x + CAST(1 AS DECIMAL(15,2)) AS y "
-	                        "FROM (SELECT d * CAST(2 AS DECIMAL(15,2)) AS x, i "
+	                        "FROM (SELECT d * CAST(2 AS DECIMAL(2,0)) AS x, i "
 	                        "      FROM jit_decimal_projection_chain WHERE i < 5) p");
 	REQUIRE_NO_FAIL(*result);
 	REQUIRE(result->RowCount() == 5);
@@ -43,7 +43,7 @@ TEST_CASE("JIT auto compiles decimal projection chains through fused regions", "
 		}
 		RequireGeneratedMachineCodeRegion(event);
 		RequireGeneratedSourceFilterContract(event);
-		REQUIRE(StringUtil::Contains(event.ir, "projection(native:expression-tree"));
+		REQUIRE(StringUtil::Contains(event.ir, "projection(native:typed-expression-tree"));
 		REQUIRE(!StringUtil::Contains(event.ir, "op3=projection(native"));
 		return true;
 	});
@@ -59,11 +59,12 @@ TEST_CASE("JIT canonicalizes type-preserving arithmetic identities before loweri
 	                          "SELECT i, CAST(i % 1000 AS DECIMAL(18,10)) AS d FROM range(10000) tbl(i)"));
 
 	ClearJitTrace(manager, true);
-	auto result = con.Query("SELECT (d * CAST(1 AS DECIMAL(1,0))) * CAST(1 AS DECIMAL(1,0)) + "
-	                        "CAST(10 AS DECIMAL(18,10)) AS y "
+	auto result = con.Query("SELECT (d * CAST(1 AS DECIMAL(1,0))) * CAST(1 AS DECIMAL(1,0)) > "
+	                        "CAST(1 AS DECIMAL(18,10)) AS y "
 	                        "FROM jit_decimal_identity_projection WHERE i < 4");
 	REQUIRE_NO_FAIL(*result);
-	REQUIRE(CHECK_COLUMN(result, 0, {"10.0000000000", "11.0000000000", "12.0000000000", "13.0000000000"}));
+	REQUIRE(CHECK_COLUMN(result, 0,
+	                     {Value::BOOLEAN(false), Value::BOOLEAN(false), Value::BOOLEAN(true), Value::BOOLEAN(true)}));
 
 	bool found_compile = false;
 	for (auto &event : manager.GetEvents()) {
@@ -200,7 +201,9 @@ TEST_CASE("JIT lowers fixed-prefix substring as native scalar projection", "[api
 	RequireNativeSljitIr(manager, "native:string-substring:prefix=2", [](const ExecutionRegionEvent &event) {
 		REQUIRE(event.candidate_traits.projection_count > 0);
 		REQUIRE(event.candidate_traits.sink_kind == ExecutionRegionSinkKind::HASH_AGGREGATE_UPDATE);
-		REQUIRE(StringUtil::Contains(event.reason, "backend_group_key_type=varchar"));
+		// Compressed materialization packs the short prefix into a UHUGEINT group key.
+		REQUIRE(StringUtil::Contains(event.ir, "native:string-compress:16"));
+		REQUIRE(StringUtil::Contains(event.reason, "backend_group_key_type=uint128"));
 	});
 	RequireNoUnsupportedReason(manager, "function=substring");
 }
@@ -609,16 +612,17 @@ TEST_CASE("JIT keeps unproven modulo divisors in DuckDB scan filters", "[api][ji
 	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_unproven_modulo_source_filter AS "
 	                          "SELECT i::BIGINT AS i FROM range(10003) tbl(i)"));
 
+	// Integer modulo by zero raises an error; the DuckDB scan filter must keep raising it under JIT.
 	const string query = "SELECT sum(i) FROM jit_unproven_modulo_source_filter WHERE i % 0 = 3";
 	REQUIRE_NO_FAIL(con.Query("SET jit_policy='off'"));
 	auto expected = con.Query(query);
-	REQUIRE_NO_FAIL(*expected);
-	REQUIRE(expected->GetValue(0, 0).IsNull());
+	REQUIRE_FAIL(expected);
+	REQUIRE(StringUtil::Contains(expected->GetError(), "Division by zero"));
 	REQUIRE_NO_FAIL(con.Query("SET jit_policy='auto'"));
 	ClearJitTrace(manager, true);
 	auto actual = con.Query(query);
-	REQUIRE_NO_FAIL(*actual);
-	REQUIRE(actual->GetValue(0, 0).IsNull());
+	REQUIRE_FAIL(actual);
+	REQUIRE(actual->GetError() == expected->GetError());
 
 	RequireJitEvent(
 	    manager,
@@ -628,8 +632,8 @@ TEST_CASE("JIT keeps unproven modulo divisors in DuckDB scan filters", "[api][ji
 	    },
 	    [](const ExecutionRegionEvent &event) { RequireDuckDBScanFilteredSourceContract(event); });
 	RequireJitEvent(manager, [](const ExecutionRegionEvent &event) {
-		return IsSljitRegionEvent(event) && EventPhase(event) == "runtime" && EventStatus(event) == "executed" &&
-		       event.selected_uses_scan_filters;
+		return IsSljitRegionEvent(event) && EventPhase(event) == "runtime" && EventStatus(event) == "error" &&
+		       event.selected_uses_scan_filters && StringUtil::Contains(event.reason, "Division by zero");
 	});
 }
 

@@ -272,7 +272,19 @@ MetadataResult ShowHelp(ShellState &state, const vector<string> &args) {
 	return MetadataResult::SUCCESS;
 }
 
+MetadataResult OpenProfileWeb(ShellState &state, const vector<string> &args) {
+	if (state.safe_mode) {
+		state.Print(PrintOutput::STDERR, ".web cannot be used in -safe mode\n");
+		return MetadataResult::FAIL;
+	}
+	return OpenProfileInBrowser(state) ? MetadataResult::SUCCESS : MetadataResult::FAIL;
+}
+
 MetadataResult RenderLastResult(ShellState &state, const vector<string> &args) {
+	// if the last query produced a profiling tree (e.g. EXPLAIN ANALYZE), show the full expanded query tree
+	if (RenderExpandedQueryTree(state)) {
+		return MetadataResult::SUCCESS;
+	}
 	if (state.last_result) {
 		auto renderer = state.GetRenderer();
 		renderer->RemoveRenderLimits();
@@ -454,21 +466,21 @@ MetadataResult QuitProcess(ShellState &, const vector<string> &args) {
 }
 
 MetadataResult SetOutput(ShellState &state, const vector<string> &args) {
-	if (!state.SetOutputFile(args, '\0')) {
+	if (!state.SetOutputFile(args, OutputCommand::OUTPUT)) {
 		return MetadataResult::FAIL;
 	}
 	return MetadataResult::SUCCESS;
 }
 
 MetadataResult SetOutputOnce(ShellState &state, const vector<string> &args) {
-	if (!state.SetOutputFile(args, 'o')) {
+	if (!state.SetOutputFile(args, OutputCommand::ONCE)) {
 		return MetadataResult::FAIL;
 	}
 	return MetadataResult::SUCCESS;
 }
 
 MetadataResult SetOutputExcel(ShellState &state, const vector<string> &args) {
-	if (!state.SetOutputFile(args, 'e')) {
+	if (!state.SetOutputFile(args, OutputCommand::EXCEL)) {
 		return MetadataResult::FAIL;
 	}
 	return MetadataResult::SUCCESS;
@@ -562,14 +574,15 @@ MetadataResult ShowIndexes(ShellState &state, const vector<string> &args) {
 	return state.DisplayEntries(args, 'i');
 }
 
+MetadataResult ShowManual(ShellState &state, const vector<string> &args) {
+	return state.DisplayManual(args);
+}
+
 MetadataResult ShowTables(ShellState &state, const vector<string> &args) {
 	return state.DisplayTables(args);
 }
 
-MetadataResult SetUICommand(ShellState &state, const vector<string> &args) {
-	if (args.size() < 1) {
-		return MetadataResult::PRINT_USAGE;
-	}
+static string JoinArguments(const vector<string> &args) {
 	string command;
 	for (idx_t i = 1; i < args.size(); i++) {
 		if (i > 1) {
@@ -577,7 +590,30 @@ MetadataResult SetUICommand(ShellState &state, const vector<string> &args) {
 		}
 		command += args[i];
 	}
-	state.ui_command = "CALL " + command;
+	return command;
+}
+
+MetadataResult SetUICommand(ShellState &state, const vector<string> &args) {
+	if (args.size() < 1) {
+		return MetadataResult::PRINT_USAGE;
+	}
+	state.ui_command = "CALL " + JoinArguments(args);
+	return MetadataResult::SUCCESS;
+}
+
+MetadataResult SetServeCommand(ShellState &state, const vector<string> &args) {
+	if (args.size() < 2) {
+		return MetadataResult::PRINT_USAGE;
+	}
+	state.serve_command = JoinArguments(args);
+	return MetadataResult::SUCCESS;
+}
+
+MetadataResult SetConnectCommand(ShellState &state, const vector<string> &args) {
+	if (args.size() < 2) {
+		return MetadataResult::PRINT_USAGE;
+	}
+	state.connect_command = JoinArguments(args);
 	return MetadataResult::SUCCESS;
 }
 
@@ -860,6 +896,8 @@ static const MetadataCommand metadata_commands[] = {
     {"cd", 2, ChangeDirectory, "DIRECTORY", "Change the working directory to DIRECTORY", 0, ""},
     {"changes", 2, ToggleChanges, "on|off", "Show number of rows changed by SQL", 3, ""},
     {"columns", 1, SetColumnRendering, "", "Column-wise rendering of query results", 0, ""},
+    {"connect_command", 0, SetConnectCommand, "COMMAND", "Set the command executed by -connect", 0,
+     "Placeholders of the form {parameter|default} are replaced by the -host/-port/-token arguments"},
 #ifdef HAVE_LINENOISE
     {"comment", 2, SetHighlightingColor<DeprecatedHighlightColors::COMMENT>, "?COLOR?",
      "DEPRECATED: Sets the syntax highlighting color used for comment values", 0, nullptr},
@@ -918,10 +956,14 @@ static const MetadataCommand metadata_commands[] = {
     {"keyword", 2, SetHighlightingColor<DeprecatedHighlightColors::KEYWORD>, "?COLOR?",
      "DEPRECATED: Sets the syntax highlighting color used for keywords", 0, nullptr},
 #endif
-    {"last", 1, RenderLastResult, "", "Render the last result without truncating", 0, ""},
+    {"last", 1, RenderLastResult, "",
+     "Render the last result in full (after EXPLAIN ANALYZE: the full, expanded query tree)", 0, ""},
     {"large_number_rendering", 2, SetLargeNumberRendering, "MODE",
      "Toggle readable rendering of large numbers (duckbox only)", 0, "Mode: all|footer|off"},
     {"log", 2, ToggleLog, "FILE|off", "Turn logging on or off.  FILE can be stderr/stdout", 0, ""},
+    {"manual", 2, ShowManual, "FUNCTION", "Show the manual page for a SQL function", 0,
+     "Displays the signatures, descriptions and examples of all overloads of FUNCTION.\n"
+     "FUNCTION may be qualified: [database.][schema.]function."},
     {"maxrows", 0, SetMaxRows, "COUNT",
      "Sets the maximum number of rows for display (default: 40). Only for duckbox mode.", 0, ""},
     {"maxwidth", 0, SetMaxWidth, "COUNT",
@@ -970,6 +1012,8 @@ static const MetadataCommand metadata_commands[] = {
     {"rows", 1, SetRowRendering, "", "Row-wise rendering of query results (default)", 0, ""},
     {"safe_mode", 0, ShellState::EnableSafeMode, "", "Enable safe-mode", 0, ""},
     {"separator", 0, ShellState::SetSeparator, "COL ?ROW?", "Change the column and row separators", 0, ""},
+    {"serve_command", 0, SetServeCommand, "COMMAND", "Set the command executed by -serve", 0,
+     "Placeholders of the form {parameter|default} are replaced by the -host/-port/-token arguments"},
     {"schema", 0, DisplaySchemas, "?PATTERN?", "Show the CREATE statements matching PATTERN", 0,
      "By default the schema is pretty-printed using the SQL formatter.\nOptions:\n\t--no-indent\tPrint the schema as "
      "it is stored, without formatting\n\t--no-format\tAlias for --no-indent\n\t--indent\tForce pretty-printing (the "
@@ -988,6 +1032,7 @@ static const MetadataCommand metadata_commands[] = {
     {"timer", 2, ShellState::ToggleTimer, "on|off", "Turn SQL timer on or off", 0, ""},
     {"ui_command", 0, SetUICommand, "[command]", "Set the UI command", 0, ""},
     {"version", 1, ShowVersion, "", "Show the version", 0, ""},
+    {"web", 1, OpenProfileWeb, "", "Open the last query profile (EXPLAIN ANALYZE) in a web browser", 0, ""},
     {"width", 0, SetWidths, "NUM1 NUM2 ...", "Set minimum column widths for columnar output", 0,
      "Negative values right-justify"},
 #if defined(_WIN32) || defined(WIN32)

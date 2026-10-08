@@ -8,6 +8,7 @@
 #include "duckdb/execution/execution_operator_runtime.hpp"
 #include "duckdb/function/table/table_scan.hpp"
 #include "duckdb/planner/expression/bound_conjunction_expression.hpp"
+#include "duckdb/planner/filter/expression_filter.hpp"
 #include "duckdb/transaction/transaction.hpp"
 #include "duckdb/transaction/duck_transaction.hpp"
 #include "duckdb/main/database.hpp"
@@ -326,7 +327,7 @@ private:
 			    *gstate.execution_source_config.residual_filters, op.extra_info.sample_options);
 		} else {
 			execution_source_contract_scan_state.Initialize(
-			    gstate.execution_source_contract.storage_ids, context.client, filters, op.extra_info.sample_options,
+			    gstate.execution_source_contract.storage_ids, context.client, filters, op.extra_info.sample_options, 0,
 			    gstate.execution_source_config.filter_execution_mode,
 			    gstate.execution_source_config.filter_kernel_provider, filter_kernel_indices);
 		}
@@ -411,18 +412,16 @@ SourceResultType PhysicalTableScan::GetExecutionSourceContractDataInternal(Execu
 			input.declined_new_row_group = true;
 			return SourceResultType::HAVE_MORE_OUTPUT;
 		}
-		idx_t rows_in_current_row_group;
+		optional_idx claimed_rows;
 		{
 			ExecutionOperatorStageTimer timer(input.stage_recorder, "source_contract.table_scan.next_parallel_scan");
-			rows_in_current_row_group =
+			claimed_rows =
 			    contract_state.storage->NextParallelScan(context.client, contract_state.Distribution(), scan_state);
 		}
-		if (rows_in_current_row_group > 0) {
-			l_state.execution_source_contract_row_groups_scanned++;
-		}
-		if (rows_in_current_row_group == 0) {
+		if (!claimed_rows.IsValid()) {
 			return SourceResultType::FINISHED;
 		}
+		l_state.execution_source_contract_row_groups_scanned++;
 		{
 			ExecutionOperatorStageTimer timer(input.stage_recorder, "source_contract.table_scan.interrupt_check");
 			context.client.InterruptCheck();
@@ -493,6 +492,9 @@ SourceResultType PhysicalTableScan::GetDataInternal(ExecutionContext &context, D
 
 	TableFunctionInput data(bind_data.get(), l_state.local_state.get(), g_state.global_state.get());
 	data.decline_new_row_group = input.decline_new_row_group;
+	if (input.interrupt_state.CanCallback()) {
+		data.interrupt_state = &input.interrupt_state;
+	}
 
 	if (function.function) {
 		data.async_result = AsyncResultType::IMPLICIT;
@@ -515,10 +517,12 @@ SourceResultType PhysicalTableScan::GetDataInternal(ExecutionContext &context, D
 		input.new_row_groups_claimed = data.new_row_groups_claimed;
 
 		// Handle results
-		switch (output_async_result) {
-		case AsyncResultType::BLOCKED: {
-			D_ASSERT(data.async_result.HasTasks());
-			{
+		if (output_async_result == AsyncResultType::BLOCKED) {
+			if (!data.async_result.HasTasks()) {
+				// the function parked
+				return SourceResultType::BLOCKED;
+			}
+			if (input.interrupt_state.CanCallback()) {
 				annotated_lock_guard<annotated_mutex> guard(g_state.lock);
 				if (g_state.CanBlock()) {
 					data.async_result.ScheduleTasks(input.interrupt_state, context.pipeline->executor);
@@ -528,26 +532,12 @@ SourceResultType PhysicalTableScan::GetDataInternal(ExecutionContext &context, D
 			data.async_result.ExecuteTasksSynchronously();
 			return SourceResultType::HAVE_MORE_OUTPUT;
 		}
-		case AsyncResultType::IMPLICIT:
-			if (chunk.size() > 0) {
-				return SourceResultType::HAVE_MORE_OUTPUT;
-			}
-			if (data.declined_new_row_group) {
-				// The scan declined to claim a new row group: this is a runner-switch
-				// yield at a row-group boundary, not source exhaustion.
-				return SourceResultType::HAVE_MORE_OUTPUT;
-			}
-			return SourceResultType::FINISHED;
-		case AsyncResultType::FINISHED:
-			return SourceResultType::FINISHED;
-		case AsyncResultType::HAVE_MORE_OUTPUT:
+		if (output_async_result == AsyncResultType::IMPLICIT && chunk.size() == 0 && data.declined_new_row_group) {
+			// The scan declined to claim a new row group: this is a runner-switch
+			// yield at a row-group boundary, not source exhaustion.
 			return SourceResultType::HAVE_MORE_OUTPUT;
-		default:
-			throw InternalException(
-			    "PhysicalTableScan::GetData call of function.function returned unexpected return '%'",
-			    EnumUtil::ToChars(data.async_result.GetResultType()));
 		}
-		throw InternalException("PhysicalTableScan::GetData hasn't handled a function.function return");
+		return AsyncResult::GetSourceResultType(output_async_result, chunk.size());
 	}
 
 	if (g_state.in_out_final) {
@@ -726,7 +716,8 @@ InsertionOrderPreservingMap<string> PhysicalTableScan::ParamsToString() const {
 	}
 
 	if (extra_info.sample_options) {
-		result["Sample Method"] = "System: " + extra_info.sample_options->sample_size.ToString() + "%";
+		result["Sample Method"] = "System: " + extra_info.sample_options->sample_size.ToString() +
+		                          (extra_info.sample_options->is_percentage ? "%" : " rows");
 	}
 	if (!extra_info.file_filters.empty()) {
 		result["File Filters"] = extra_info.file_filters;

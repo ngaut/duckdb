@@ -78,6 +78,9 @@ public:
 public:
 	InsertionOrderPreservingMap<string> ParamsToString() const override;
 	ExecutionContract GetExecutionContract(ExecutionRegionOperatorSlot slot, bool render_diagnostics) const override;
+	//! Per build payload column, the dict-index width of the row layout the sink published (0 = native slot). Empty
+	//! until the sink publishes its layout on its first chunk (or on empty-input finalize).
+	vector<uint8_t> GetPublishedBuildDictIndexWidths() const;
 
 public:
 	// Operator Interface
@@ -94,6 +97,12 @@ public:
 
 	bool ParallelOperator() const override {
 		return true;
+	}
+	PipelineExternalInputSupport GetExternalInputSupport() const override {
+		return PipelineExternalInputSupport::SUPPORTED;
+	}
+	PipelineExternalInputCost GetExternalInputCost() const override {
+		return PipelineExternalInputCost::SERIALIZED_FANOUT;
 	}
 
 protected:

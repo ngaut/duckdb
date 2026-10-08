@@ -27,16 +27,10 @@ const char *SljitRegionOpKindName(SljitNativeRegionOpKind kind) {
 		return "hash_join_probe";
 	case SljitNativeRegionOpKind::HASH_JOIN_BUILD:
 		return "hash_join_build";
-	case SljitNativeRegionOpKind::NESTED_LOOP_JOIN_PROBE:
-		return "nested_loop_join_probe";
-	case SljitNativeRegionOpKind::NESTED_LOOP_JOIN_BUILD:
-		return "nested_loop_join_build";
 	case SljitNativeRegionOpKind::ORDER_SINK:
 		return "order_sink";
 	case SljitNativeRegionOpKind::APPEND_SINK:
 		return "append_sink";
-	case SljitNativeRegionOpKind::DELIM_JOIN_SINK:
-		return "delim_join_sink";
 	case SljitNativeRegionOpKind::AGGREGATE_UPDATE:
 		return "aggregate_update";
 	default:
@@ -56,11 +50,8 @@ static bool SljitRegionOpKindProvesGeneratedBackendWork(SljitNativeRegionOpKind 
 	switch (kind) {
 	case SljitNativeRegionOpKind::HASH_JOIN_PROBE:
 	case SljitNativeRegionOpKind::HASH_JOIN_BUILD:
-	case SljitNativeRegionOpKind::NESTED_LOOP_JOIN_PROBE:
-	case SljitNativeRegionOpKind::NESTED_LOOP_JOIN_BUILD:
 	case SljitNativeRegionOpKind::ORDER_SINK:
 	case SljitNativeRegionOpKind::APPEND_SINK:
-	case SljitNativeRegionOpKind::DELIM_JOIN_SINK:
 	case SljitNativeRegionOpKind::AGGREGATE_UPDATE:
 		return true;
 	default:
@@ -131,74 +122,6 @@ void RecordSljitRegionStageRuntimeWithSuffix(ExecutionRegionRuntime &runtime, id
 		return;
 	}
 	runtime.RecordGeneratedStageRuntime(SljitRegionStageName(op_idx, kind) + suffix, SljitRegionElapsedMicros(start));
-}
-
-static void RecordSljitDirectAppendProfileStage(ExecutionRegionRuntime &runtime, const string &stage_prefix,
-                                                const char *stage_name, int64_t runtime_time_us, idx_t count = 1) {
-	if (!runtime.TraceRuntime() || runtime_time_us <= 0 || count == 0) {
-		return;
-	}
-	runtime.RecordGeneratedStageRuntime(stage_prefix + "." + stage_name, runtime_time_us, count);
-}
-
-void RecordSljitDirectAppendProfile(ExecutionRegionRuntime &runtime, idx_t op_idx, SljitNativeRegionOpKind kind,
-                                    const DirectAppendProfile &profile) {
-	if (!runtime.TraceRuntime()) {
-		return;
-	}
-	auto prepare_prefix = SljitRegionStageName(op_idx, kind, "append_prepare");
-	RecordSljitDirectAppendProfileStage(runtime, prepare_prefix, "storage_finalize_row_group",
-	                                    profile.prepare_finalize_row_group_time_us);
-	RecordSljitDirectAppendProfileStage(runtime, prepare_prefix, "storage_new_row_group",
-	                                    profile.prepare_new_row_group_time_us);
-	RecordSljitDirectAppendProfileStage(runtime, prepare_prefix, "storage_fixed_column_prepare",
-	                                    profile.prepare_fixed_column_time_us, profile.prepare_fixed_column_count);
-
-	auto commit_prefix = SljitRegionStageName(op_idx, kind, "append_commit");
-	RecordSljitDirectAppendProfileStage(runtime, commit_prefix, "storage_source_format",
-	                                    profile.commit_source_format_time_us,
-	                                    profile.commit_source_append_column_count);
-	RecordSljitDirectAppendProfileStage(runtime, commit_prefix, "storage_source_append",
-	                                    profile.commit_source_append_time_us,
-	                                    profile.commit_source_append_column_count);
-	RecordSljitDirectAppendProfileStage(runtime, commit_prefix, "storage_fixed_column_commit",
-	                                    profile.commit_fixed_column_time_us, profile.commit_fixed_column_count);
-	RecordSljitDirectAppendProfileStage(runtime, commit_prefix, "storage_distinct_lock",
-	                                    profile.commit_distinct_lock_time_us);
-	RecordSljitDirectAppendProfileStage(runtime, commit_prefix, "storage_source_distinct_stats",
-	                                    profile.commit_source_distinct_stats_time_us,
-	                                    profile.commit_source_distinct_stats_column_count);
-	RecordSljitDirectAppendProfileStage(runtime, commit_prefix, "storage_target_distinct_stats",
-	                                    profile.commit_target_distinct_stats_time_us,
-	                                    profile.commit_target_distinct_stats_column_count);
-	RecordSljitDirectAppendProfileStage(runtime, commit_prefix, "storage_provided_distinct_count",
-	                                    profile.commit_provided_distinct_count_time_us,
-	                                    profile.commit_provided_distinct_count_column_count);
-}
-
-SljitRegionStageAccumulator::SljitRegionStageAccumulator(ExecutionRegionRuntime &runtime_p, idx_t op_idx,
-                                                         SljitNativeRegionOpKind kind, const char *phase)
-    : runtime(runtime_p), enabled(runtime.TraceRuntime()) {
-	if (enabled) {
-		stage = SljitRegionStageName(op_idx, kind, phase);
-	}
-}
-
-void SljitRegionStageAccumulator::Add(std::chrono::steady_clock::time_point start) {
-	if (!enabled) {
-		return;
-	}
-	runtime_time_us += SljitRegionElapsedMicros(start);
-	count++;
-}
-
-void SljitRegionStageAccumulator::Flush() {
-	if (!enabled || count == 0) {
-		return;
-	}
-	runtime.RecordGeneratedStageRuntime(stage, runtime_time_us, count);
-	runtime_time_us = 0;
-	count = 0;
 }
 
 SljitRegionStageRecorder::SljitRegionStageRecorder(ExecutionRegionRuntime &runtime_p, string stage_prefix_p)

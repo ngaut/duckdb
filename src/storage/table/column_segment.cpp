@@ -25,7 +25,6 @@
 #include "duckdb/storage/table/scan_state.hpp"
 #include "duckdb/planner/table_filter_state.hpp"
 #include "duckdb/planner/filter/bloom_filter.hpp"
-#include "duckdb/execution/operator/join/perfect_hash_join_executor.hpp"
 
 #include <algorithm>
 #include <cstring>
@@ -37,10 +36,15 @@ namespace duckdb {
 //===--------------------------------------------------------------------===//
 
 unique_ptr<ColumnSegment> ColumnSegment::CreatePersistentSegment(DatabaseInstance &db, BlockManager &block_manager,
-                                                                 block_id_t block_id, idx_t offset, idx_t count,
-                                                                 CompressionType compression_type,
-                                                                 BaseStatistics statistics,
-                                                                 unique_ptr<ColumnSegmentState> segment_state) {
+                                                                 DataPointer &data_pointer) {
+	auto &block_id = data_pointer.block_pointer.block_id;
+	auto &offset = data_pointer.block_pointer.offset;
+	auto &count = data_pointer.tuple_count;
+	auto &compression_type = data_pointer.compression_type;
+	auto &statistics = data_pointer.statistics;
+	auto &segment_state = data_pointer.segment_state;
+	auto &byte_size = data_pointer.byte_size;
+
 	auto &config = DBConfig::GetConfig(db);
 	shared_ptr<BlockHandle> block;
 
@@ -52,7 +56,8 @@ unique_ptr<ColumnSegment> ColumnSegment::CreatePersistentSegment(DatabaseInstanc
 
 	auto segment_size = block_manager.GetBlockSize();
 	return make_uniq<ColumnSegment>(db, std::move(block), ColumnSegmentType::PERSISTENT, count, function,
-	                                std::move(statistics), block_id, offset, segment_size, std::move(segment_state));
+	                                std::move(statistics), block_id, offset, segment_size, std::move(segment_state),
+	                                byte_size);
 }
 
 unique_ptr<ColumnSegment> ColumnSegment::CreateTransientSegment(DatabaseInstance &db,
@@ -68,6 +73,27 @@ unique_ptr<ColumnSegment> ColumnSegment::CreateTransientSegment(DatabaseInstance
 	                                BaseStatistics::CreateEmpty(type), INVALID_BLOCK, 0U, segment_size);
 }
 
+unique_ptr<ColumnSegment> SuballocationBlock::CreateTransientSegment(DatabaseInstance &db,
+                                                                     const CompressionFunction &function,
+                                                                     const LogicalType &type, const idx_t segment_size,
+                                                                     BlockManager &block_manager) {
+	auto &buffer_manager = BufferManager::GetBufferManager(db);
+	D_ASSERT(&buffer_manager == &block_manager.buffer_manager);
+
+	//	Do we have enough room in the block?
+	if (!block || block->GetBlockSize() < allocated + segment_size) {
+		auto &temp_block_manger = buffer_manager.GetTemporaryBlockManager();
+		block = buffer_manager.RegisterTransientMemory(temp_block_manger.GetBlockSize(), temp_block_manger);
+		allocated = 0;
+		block_id = block->BlockId();
+	}
+
+	const auto offset = allocated;
+	allocated += segment_size;
+	return make_uniq<ColumnSegment>(db, block, ColumnSegmentType::TRANSIENT, 0U, function,
+	                                BaseStatistics::CreateEmpty(type), INVALID_BLOCK, offset, segment_size);
+}
+
 //===--------------------------------------------------------------------===//
 // Construct/Destruct
 //===--------------------------------------------------------------------===//
@@ -75,11 +101,12 @@ ColumnSegment::ColumnSegment(DatabaseInstance &db, shared_ptr<BlockHandle> block
                              const ColumnSegmentType segment_type, const idx_t count,
                              const CompressionFunction &function_p, BaseStatistics statistics,
                              const block_id_t block_id_p, const idx_t offset, const idx_t segment_size_p,
-                             const unique_ptr<ColumnSegmentState> segment_state_p)
+                             const unique_ptr<ColumnSegmentState> segment_state_p,
+                             optional<uint32_t> data_size_in_bytes_p)
 
     : SegmentBase<ColumnSegment>(count), db(db), segment_type(segment_type), block(std::move(block_p)),
       function(function_p), block_id(block_id_p), offset(offset), segment_size(segment_size_p),
-      stats(std::move(statistics)) {
+      data_size_in_bytes(data_size_in_bytes_p), stats(std::move(statistics)) {
 	if (function.get().init_segment) {
 		segment_state = function.get().init_segment(*this, block_id, segment_state_p.get());
 	}
@@ -91,7 +118,8 @@ ColumnSegment::ColumnSegment(DatabaseInstance &db, shared_ptr<BlockHandle> block
 ColumnSegment::ColumnSegment(ColumnSegment &other)
     : SegmentBase<ColumnSegment>(other.count.load()), db(other.db), segment_type(other.segment_type),
       block(std::move(other.block)), function(other.function), block_id(other.block_id), offset(other.offset),
-      segment_size(other.segment_size), segment_state(std::move(other.segment_state)), stats(std::move(other.stats)) {
+      segment_size(other.segment_size), data_size_in_bytes(other.data_size_in_bytes),
+      segment_state(std::move(other.segment_state)), stats(std::move(other.stats)) {
 	// For constant segments (CompressionType::COMPRESSION_CONSTANT) the block is a nullptr.
 	D_ASSERT(!block || segment_size <= GetBlockSize());
 }
@@ -163,7 +191,7 @@ void ColumnSegment::ScanPartial(ColumnScanState &state, idx_t scan_count, Vector
 // Fetch
 //===--------------------------------------------------------------------===//
 void ColumnSegment::FetchRow(ColumnFetchState &state, row_t row_id, Vector &result, idx_t result_idx) {
-	if (UnsafeNumericCast<idx_t>(row_id) > count) {
+	if (row_id < 0 || NumericCast<idx_t>(row_id) >= count) {
 		throw InternalException("ColumnSegment::FetchRow - row_id out of range for segment");
 	}
 	function.get().fetch_row(*this, state, row_id, result, result_idx);
@@ -282,6 +310,7 @@ DataPointer ColumnSegment::GetDataPointer(idx_t row_start) {
 	pointer.row_start = row_start;
 	pointer.tuple_count = count;
 	pointer.compression_type = function.get().type;
+	pointer.byte_size = data_size_in_bytes;
 	if (function.get().serialize_state) {
 		pointer.segment_state = function.get().serialize_state(*this);
 	}
@@ -303,11 +332,15 @@ void ColumnSegment::VisitBlockIds(BlockIdVisitor &visitor) const {
 //===--------------------------------------------------------------------===//
 // Filter Selection
 //===--------------------------------------------------------------------===//
-static SelectionVector &GetFastFilterSelection(ExpressionFilterState &state, idx_t count) {
-	if (state.fast_filter_sel.Capacity() < count) {
-		state.fast_filter_sel.Initialize(MaxValue<idx_t>(count, STANDARD_VECTOR_SIZE));
+static SelectionVector &EnsureSelectionCapacity(SelectionVector &selection, idx_t count) {
+	if (selection.Capacity() < count) {
+		selection.Initialize(MaxValue<idx_t>(count, STANDARD_VECTOR_SIZE));
 	}
-	return state.fast_filter_sel;
+	return selection;
+}
+
+static SelectionVector &GetFastFilterSelection(ExpressionFilterState &state, idx_t count) {
+	return EnsureSelectionCapacity(state.fast_filter_sel, count);
 }
 
 template <class T, class OP, bool HAS_NULL>
@@ -530,15 +563,13 @@ static void SignedNumericRangeSelectionSwitch(ExpressionFilterState &state, cons
 	sel.Initialize(result_sel);
 }
 
-static bool TryFastSignedNumericRangeFilter(SelectionVector &sel, Vector &input_vector, UnifiedVectorFormat &vdata,
-                                            const TableFilter &filter, ExpressionFilterState &state,
+static bool TryFastSignedNumericRangeFilter(SelectionVector &sel, Vector &input_vector, ExpressionFilterState &state,
                                             idx_t &approved_tuple_count) {
-	if (approved_tuple_count == 0 || filter.filter_type != TableFilterType::EXPRESSION_FILTER) {
+	if (approved_tuple_count == 0) {
 		return false;
 	}
-	auto &expression_filter = filter.Cast<ExpressionFilter>();
 	SignedNumericRangeFilterData range;
-	if (!TryGetSignedNumericRange(expression_filter, state, input_vector.GetType(), range)) {
+	if (!TryGetSignedNumericRange(state, input_vector.GetType(), range)) {
 		return false;
 	}
 	if (range.empty) {
@@ -546,6 +577,8 @@ static bool TryFastSignedNumericRangeFilter(SelectionVector &sel, Vector &input_
 		return true;
 	}
 
+	UnifiedVectorFormat vdata;
+	input_vector.ToUnifiedFormat(vdata);
 	switch (input_vector.GetType().InternalType()) {
 	case PhysicalType::INT8:
 		SignedNumericRangeSelectionSwitch<int8_t>(state, vdata, sel, approved_tuple_count, range.has_lower, range.lower,
@@ -579,7 +612,20 @@ static optional_ptr<const SelectivityOptionalFilterFunctionData> TryGetSelectivi
 	return &function_expr.BindInfo()->Cast<SelectivityOptionalFilterFunctionData>();
 }
 
-static optional_ptr<const PrefixRangeFunctionData> TryGetPrefixRangeFunctionData(const Expression &expr) {
+//! Whether the internal filter reads the scanned column directly in the filter's key representation. Filters over a
+//! cast of the column (runtime filters across join key types) must stay on the expression-executor path.
+static bool InternalFilterInputMatchesTarget(const BoundFunctionExpression &function_expr,
+                                             const LogicalType &filter_key_type, const LogicalType &target_type) {
+	if (function_expr.GetChildren().size() != 1) {
+		return false;
+	}
+	auto &input = *function_expr.GetChildren()[0];
+	return input.GetExpressionClass() == ExpressionClass::BOUND_REF && filter_key_type == target_type &&
+	       input.GetReturnType() == target_type;
+}
+
+static optional_ptr<const PrefixRangeFunctionData> TryGetPrefixRangeFunctionData(const Expression &expr,
+                                                                                 const LogicalType &target_type) {
 	if (expr.GetExpressionClass() != ExpressionClass::BOUND_FUNCTION) {
 		return nullptr;
 	}
@@ -587,45 +633,12 @@ static optional_ptr<const PrefixRangeFunctionData> TryGetPrefixRangeFunctionData
 	if (function_expr.Function().GetName() != PrefixRangeScalarFun::NAME || !function_expr.BindInfo()) {
 		return nullptr;
 	}
-	return &function_expr.BindInfo()->Cast<PrefixRangeFunctionData>();
-}
-
-static bool InternalFilterInputMatchesTarget(const BoundFunctionExpression &function_expr,
-                                             const LogicalType &filter_key_type, const LogicalType &target_type,
-                                             bool allow_checked_integral_cast) {
-	if (function_expr.GetChildren().size() != 1) {
-		return false;
-	}
-	auto &input = *function_expr.GetChildren()[0];
-	if (input.GetExpressionClass() == ExpressionClass::BOUND_REF) {
-		return filter_key_type == target_type && input.GetReturnType() == target_type;
-	}
-	if (!allow_checked_integral_cast || input.GetExpressionClass() != ExpressionClass::BOUND_CAST ||
-	    input.GetReturnType() != filter_key_type || !TypeIsInteger(target_type.InternalType()) ||
-	    !TypeIsInteger(filter_key_type.InternalType())) {
-		return false;
-	}
-	auto &cast = input.Cast<BoundCastExpression>();
-	return cast.Child().GetExpressionClass() == ExpressionClass::BOUND_REF &&
-	       cast.Child().GetReturnType() == target_type;
-}
-
-static optional_ptr<const PerfectHashJoinFunctionData>
-TryGetPerfectHashJoinFunctionData(const Expression &expr, const LogicalType &target_type) {
-	if (expr.GetExpressionClass() != ExpressionClass::BOUND_FUNCTION) {
+	auto &data = function_expr.BindInfo()->Cast<PrefixRangeFunctionData>();
+	// The native lookup drops NULL keys, so a filter that lets NULLs pass stays on the expression-executor path.
+	if (!data.filters_null_values) {
 		return nullptr;
 	}
-	auto &function_expr = expr.Cast<BoundFunctionExpression>();
-	if (function_expr.Function().GetName() != PerfectHashJoinScalarFun::NAME || !function_expr.BindInfo() ||
-	    function_expr.GetChildren().size() != 1) {
-		return nullptr;
-	}
-	auto &data = function_expr.BindInfo()->Cast<PerfectHashJoinFunctionData>();
-	if (!data.executor) {
-		return nullptr;
-	}
-	return InternalFilterInputMatchesTarget(function_expr, data.executor->GetKeyType(), target_type, true) ? &data
-	                                                                                                       : nullptr;
+	return InternalFilterInputMatchesTarget(function_expr, data.key_type, target_type) ? &data : nullptr;
 }
 
 static optional_ptr<const BloomFilterFunctionData> TryGetBloomFilterFunctionData(const Expression &expr,
@@ -643,11 +656,7 @@ static optional_ptr<const BloomFilterFunctionData> TryGetBloomFilterFunctionData
 	}
 	// Bloom filters hash the post-cast key representation. Hashing the source representation directly is only
 	// equivalent when both physical types match, so cast inputs must remain on the expression-executor path.
-	return InternalFilterInputMatchesTarget(function_expr, data.key_type, target_type, false) ? &data : nullptr;
-}
-
-static bool PrefixRangeMatchesInputType(const PrefixRangeFunctionData &data, const LogicalType &target_type) {
-	return data.key_type == target_type;
+	return InternalFilterInputMatchesTarget(function_expr, data.key_type, target_type) ? &data : nullptr;
 }
 
 static void ApplyFastSignedNumericRangeOperation(ExpressionFilterState &state, SelectionVector &sel,
@@ -685,41 +694,36 @@ static void ApplyFastSignedNumericRangeOperation(ExpressionFilterState &state, S
 	}
 }
 
-static bool TryApplyFastPrefixRangeFilter(ExpressionFilterState &state, SelectionVector &sel, Vector &input_vector,
-                                          const PrefixRangeFunctionData &data, idx_t &approved_tuple_count) {
+static void ApplyFastPrefixRangeFilter(ExpressionFilterState &state, SelectionVector &sel, Vector &input_vector,
+                                       const PrefixRangeFunctionData &data, idx_t &approved_tuple_count) {
 	if (!data.filter || !data.filter->IsInitialized()) {
-		return true;
+		// not published yet: the filter passes every row
+		return;
 	}
-	if (!PrefixRangeMatchesInputType(data, input_vector.GetType())) {
-		return false;
-	}
-
-	auto &result_sel = GetFastFilterSelection(state, approved_tuple_count);
-	const auto local_count = data.filter->LookupKeys(input_vector, sel, result_sel, approved_tuple_count);
-	sel.Initialize(result_sel);
-	approved_tuple_count = local_count;
-	return true;
-}
-
-static bool TryApplyFastPerfectHashJoinFilter(ExpressionFilterState &state, SelectionVector &sel, Vector &input_vector,
-                                              UnifiedVectorFormat &vdata, const PerfectHashJoinFunctionData &data,
-                                              idx_t &approved_tuple_count) {
-	D_ASSERT(data.executor);
-	auto &result_sel = GetFastFilterSelection(state, approved_tuple_count);
-	optional_ptr<const SelectionVector> input_sel = &sel;
-	if (approved_tuple_count == 0 ||
-	    (sel.get_index(0) == 0 && sel.get_index(approved_tuple_count - 1) + 1 == approved_tuple_count)) {
-#ifdef DEBUG
-		for (idx_t i = 0; i < approved_tuple_count; i++) {
-			D_ASSERT(sel.get_index(i) == i);
+	D_ASSERT(data.filters_null_values);
+	if (!sel.IsSet()) {
+		// without an input selection the lookup positions are the row ids
+		auto &result_sel = GetFastFilterSelection(state, approved_tuple_count);
+		const auto result_count = data.filter->LookupKeys(input_vector, result_sel, approved_tuple_count);
+		if (result_count != approved_tuple_count) {
+			sel.Initialize(result_sel);
+			approved_tuple_count = result_count;
 		}
-#endif
-		input_sel = nullptr;
+		return;
 	}
-	approved_tuple_count =
-	    data.executor->FilterSelection(vdata, input_vector.GetType(), input_sel, approved_tuple_count, result_sel);
+	// the lookup yields positions local to sel; they are strictly increasing and at least their own index, so the
+	// translation back to row ids can compact into a buffer that aliases sel
+	auto &local_sel = EnsureSelectionCapacity(state.fast_filter_local_sel, approved_tuple_count);
+	const auto result_count = data.filter->LookupKeys(input_vector, sel, local_sel, approved_tuple_count);
+	if (result_count == approved_tuple_count) {
+		return;
+	}
+	auto &result_sel = GetFastFilterSelection(state, approved_tuple_count);
+	for (idx_t i = 0; i < result_count; i++) {
+		result_sel.set_index(i, sel.get_index(local_sel.get_index(i)));
+	}
 	sel.Initialize(result_sel);
-	return true;
+	approved_tuple_count = result_count;
 }
 
 template <class T>
@@ -806,6 +810,7 @@ static bool TryBuildFastInternalFilterOperation(const Expression &expr, const Lo
 		if (!optional_data->child_filter_expr) {
 			return false;
 		}
+		// the wrapper owns the selectivity policy of the single operation it wraps
 		FastInternalFilterOperation child_operation {FastInternalFilterOperationType::SIGNED_NUMERIC_RANGE};
 		if (!TryBuildFastInternalFilterOperation(*optional_data->child_filter_expr, target_type, child_operation,
 		                                         exact) ||
@@ -829,23 +834,10 @@ static bool TryBuildFastInternalFilterOperation(const Expression &expr, const Lo
 		exact = false;
 		return true;
 	}
-	if (auto prefix_data = TryGetPrefixRangeFunctionData(expr)) {
-		if (!PrefixRangeMatchesInputType(*prefix_data, target_type)) {
-			return false;
-		}
+	if (auto prefix_data = TryGetPrefixRangeFunctionData(expr, target_type)) {
 		operation = FastInternalFilterOperation {FastInternalFilterOperationType::PREFIX_RANGE};
 		operation.prefix_range_data = prefix_data;
 		exact = false;
-		return true;
-	}
-	if (auto perfect_data = TryGetPerfectHashJoinFunctionData(expr, target_type)) {
-		if (!perfect_data->filter_layout ||
-		    perfect_data->filter_layout->key_physical_type != target_type.InternalType()) {
-			return false;
-		}
-		operation = FastInternalFilterOperation {FastInternalFilterOperationType::PERFECT_HASH_JOIN};
-		operation.perfect_hash_join_data = perfect_data;
-		exact = true;
 		return true;
 	}
 	if (auto bloom_data = TryGetBloomFilterFunctionData(expr, target_type)) {
@@ -907,20 +899,6 @@ static void BuildFastInternalFilterScanPlan(ExpressionFilterState &state) {
 			plan.primary_operation_count++;
 		}
 	}
-
-	if (operations[0].type != FastInternalFilterOperationType::PERFECT_HASH_JOIN ||
-	    !operations[0].perfect_hash_join_data || !operations[0].perfect_hash_join_data->filter_layout) {
-		return;
-	}
-	auto layout = operations[0].perfect_hash_join_data->filter_layout;
-	D_ASSERT(layout->ready);
-	D_ASSERT(layout->key_physical_type == state.fast_internal_filter_type);
-	if (!layout->is_build_dense &&
-	    (!layout->build_validity || !layout->build_validity_non_empty_words ||
-	     layout->build_validity_word_count != ValidityMask::EntryCount(layout->build_capacity))) {
-		return;
-	}
-	plan.perfect_hash_join_layout = layout;
 }
 
 bool ColumnSegment::PrepareInternalFilterPlan(ExpressionFilterState &state, const Expression &expr,
@@ -979,12 +957,7 @@ void ColumnSegment::ApplyInternalFilterPlan(ExpressionFilterState &state, Select
 			break;
 		case FastInternalFilterOperationType::PREFIX_RANGE:
 			D_ASSERT(operation.prefix_range_data);
-			TryApplyFastPrefixRangeFilter(state, sel, input_vector, *operation.prefix_range_data, approved_tuple_count);
-			break;
-		case FastInternalFilterOperationType::PERFECT_HASH_JOIN:
-			D_ASSERT(operation.perfect_hash_join_data);
-			TryApplyFastPerfectHashJoinFilter(state, sel, input_vector, vdata, *operation.perfect_hash_join_data,
-			                                  approved_tuple_count);
+			ApplyFastPrefixRangeFilter(state, sel, input_vector, *operation.prefix_range_data, approved_tuple_count);
 			break;
 		case FastInternalFilterOperationType::BLOOM_FILTER:
 			D_ASSERT(operation.bloom_filter_data);
@@ -1017,17 +990,16 @@ idx_t ColumnSegment::ApplyInternalFilterResidual(ExpressionFilterState &state, S
 	                                        scan_count, approved_tuple_count);
 }
 
-static bool TryFastInternalFilterExpression(SelectionVector &sel, Vector &input_vector, UnifiedVectorFormat &vdata,
-                                            const TableFilter &filter, ExpressionFilterState &state, idx_t scan_count,
-                                            idx_t &approved_tuple_count) {
-	if (approved_tuple_count == 0 || filter.filter_type != TableFilterType::EXPRESSION_FILTER) {
+static bool TryFastInternalFilterExpression(SelectionVector &sel, Vector &input_vector, ExpressionFilterState &state,
+                                            idx_t scan_count, idx_t &approved_tuple_count) {
+	if (approved_tuple_count == 0) {
 		return false;
 	}
-	auto &expression_filter = filter.Cast<ExpressionFilter>();
-	auto &expr = *expression_filter.expr;
-	if (!ColumnSegment::PrepareInternalFilterPlan(state, expr, input_vector.GetType())) {
+	if (!ColumnSegment::PrepareInternalFilterPlan(state, state.expression, input_vector.GetType())) {
 		return false;
 	}
+	UnifiedVectorFormat vdata;
+	input_vector.ToUnifiedFormat(vdata);
 	ColumnSegment::ApplyInternalFilterPlan(state, sel, input_vector, vdata, approved_tuple_count);
 	ColumnSegment::ApplyInternalFilterResidual(state, sel, input_vector, scan_count, approved_tuple_count);
 	return true;
@@ -1106,12 +1078,11 @@ static bool TryCollectStringEqualityConstants(const Expression &expr, vector<str
 	return TryAddStringEqualityConstant(expr, constants);
 }
 
-static bool GetFastStringEqualityConstants(const ExpressionFilter &filter, ExpressionFilterState &state,
-                                           const vector<string> *&constants) {
+static bool GetFastStringEqualityConstants(ExpressionFilterState &state, const vector<string> *&constants) {
 	if (!state.fast_string_equality_filter_initialized) {
 		state.fast_string_equality_filter_initialized = true;
 		state.fast_string_equality_filter_supported =
-		    TryCollectStringEqualityConstants(*filter.expr, state.fast_string_equality_constants) &&
+		    TryCollectStringEqualityConstants(state.expression, state.fast_string_equality_constants) &&
 		    !state.fast_string_equality_constants.empty();
 		if (!state.fast_string_equality_filter_supported) {
 			state.fast_string_equality_constants.clear();
@@ -1124,11 +1095,10 @@ static bool GetFastStringEqualityConstants(const ExpressionFilter &filter, Expre
 	return true;
 }
 
-static bool TryFastDictionaryStringEqualityFilter(SelectionVector &sel, Vector &input_vector, const TableFilter &filter,
+static bool TryFastDictionaryStringEqualityFilter(SelectionVector &sel, Vector &input_vector,
                                                   ExpressionFilterState &state, idx_t &approved_tuple_count) {
 	if (approved_tuple_count == 0 || input_vector.GetVectorType() != VectorType::DICTIONARY_VECTOR ||
-	    input_vector.GetType().id() != LogicalTypeId::VARCHAR ||
-	    filter.filter_type != TableFilterType::EXPRESSION_FILTER) {
+	    input_vector.GetType().id() != LogicalTypeId::VARCHAR) {
 		return false;
 	}
 	auto dictionary_size = DictionaryVector::DictionarySize(input_vector);
@@ -1142,9 +1112,8 @@ static bool TryFastDictionaryStringEqualityFilter(SelectionVector &sel, Vector &
 	auto &dict_buffer = input_vector.Buffer().Cast<DictionaryBuffer>();
 	auto &dictionary_id = dict_buffer.GetDictionaryId();
 	const bool can_cache_matches = !dictionary_id.empty();
-	auto &expression_filter = filter.Cast<ExpressionFilter>();
 	const vector<string> *constants;
-	if (!GetFastStringEqualityConstants(expression_filter, state, constants)) {
+	if (!GetFastStringEqualityConstants(state, constants)) {
 		return false;
 	}
 
@@ -1194,18 +1163,33 @@ static bool TryFastDictionaryStringEqualityFilter(SelectionVector &sel, Vector &
 idx_t ColumnSegment::FilterSelection(SelectionVector &sel, Vector &vector, UnifiedVectorFormat &vdata,
                                      const TableFilter &filter, TableFilterState &filter_state, idx_t scan_count,
                                      idx_t &approved_tuple_count) {
+	(void)vdata;
+	return FilterSelection(sel, vector, filter_state, scan_count, approved_tuple_count);
+}
+
+idx_t ColumnSegment::FilterSelection(SelectionVector &sel, Vector &vector, TableFilterState &filter_state,
+                                     idx_t scan_count, idx_t &approved_tuple_count) {
 	auto &state = filter_state.Cast<ExpressionFilterState>();
-	if (TryFastSignedNumericRangeFilter(sel, vector, vdata, filter, state, approved_tuple_count)) {
+	// native storage fast paths first, then a backend-compiled kernel, then the generic fast executor and finally the
+	// canonical expression executor
+	if (TryFastSignedNumericRangeFilter(sel, vector, state, approved_tuple_count)) {
 		return approved_tuple_count;
 	}
-	if (TryFastInternalFilterExpression(sel, vector, vdata, filter, state, scan_count, approved_tuple_count)) {
+	if (TryFastInternalFilterExpression(sel, vector, state, scan_count, approved_tuple_count)) {
 		return approved_tuple_count;
 	}
-	if (TryFastDictionaryStringEqualityFilter(sel, vector, filter, state, approved_tuple_count)) {
+	if (TryFastDictionaryStringEqualityFilter(sel, vector, state, approved_tuple_count)) {
 		return approved_tuple_count;
 	}
-	if (state.kernel && state.kernel->TrySelect(vector, vdata, sel, scan_count, approved_tuple_count)) {
-		return approved_tuple_count;
+	if (state.kernel) {
+		UnifiedVectorFormat vdata;
+		vector.ToUnifiedFormat(vdata);
+		if (state.kernel->TrySelect(vector, vdata, sel, scan_count, approved_tuple_count)) {
+			return approved_tuple_count;
+		}
+	}
+	if (state.fast_executor && scan_count <= STANDARD_VECTOR_SIZE) {
+		return state.fast_executor->FilterSelection(sel, vector, scan_count, approved_tuple_count);
 	}
 	D_ASSERT(state.executor);
 	return ExecuteExpressionFilterSelection(sel, vector, *state.executor, scan_count, approved_tuple_count);

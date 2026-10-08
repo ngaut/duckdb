@@ -8,9 +8,8 @@
 
 #pragma once
 
-#include "duckdb/function/table_function.hpp"
-#include "duckdb/function/copy_function.hpp"
 #include "duckdb/common/exception/conversion_exception.hpp"
+#include "duckdb/common/types/selection_vector.hpp"
 #include "duckdb/parser/expression/constant_expression.hpp"
 #include "duckdb/common/open_file_info.hpp"
 #include <numeric>
@@ -110,15 +109,6 @@ public:
 		}
 		D_ASSERT(identifier.type().id() == LogicalTypeId::VARCHAR);
 		return identifier.GetValue<string>();
-	}
-
-	Value GetDefaultValue() const {
-		D_ASSERT(default_expression);
-		if (default_expression->GetExpressionType() != ExpressionType::VALUE_CONSTANT) {
-			throw NotImplementedException("Default expression that isn't constant is not supported yet");
-		}
-		auto &constant_expr = default_expression->Cast<ConstantExpression>();
-		return constant_expr.GetValue();
 	}
 
 public:

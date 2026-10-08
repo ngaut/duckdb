@@ -124,7 +124,6 @@ SljitFullPipelineRecipeSequenceBuilder::MakeHashJoinProbeMaterializeStep(idx_t h
 bool SljitFullPipelineRecipeSequenceBuilder::TryMakeHashJoinProbeMaterializeStep(
     idx_t hash_join_idx, SljitFullPipelinePrimitiveStep &step) const {
 	const auto source_key0_int64_to_int32_unchecked =
-	    hash_join_idx == 0 &&
 	    SljitHashJoinSourceKey0RangeFitsInt32(ops, hash_join_idx, source_min_values, source_max_values);
 	SljitHashJoinProbeMaterializePrimitive primitive;
 	if (!SljitTryBindHashJoinProbeMaterializePrimitive(ops, hash_join_idx, primitive,
@@ -147,7 +146,6 @@ SljitFullPipelineRecipeSequenceBuilder::MakeHashJoinProbeSelectionStep(idx_t has
 bool SljitFullPipelineRecipeSequenceBuilder::TryMakeHashJoinProbeSelectionStep(
     idx_t hash_join_idx, SljitFullPipelinePrimitiveStep &step) const {
 	const auto source_key0_int64_to_int32_unchecked =
-	    hash_join_idx == 0 &&
 	    SljitHashJoinSourceKey0RangeFitsInt32(ops, hash_join_idx, source_min_values, source_max_values);
 	SljitHashJoinProbeSelectionPrimitive primitive;
 	if (!SljitTryBindHashJoinProbeSelectionPrimitive(ops, hash_join_idx, primitive,

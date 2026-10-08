@@ -184,6 +184,13 @@ static bool SljitTryExecuteInputVectorGroupedAggregateUpdate(
 		}
 	}
 
+	// The paths below look groups up in the table instead of appending them, which voids any proven-unique append
+	// the pending batch established; the batch must stop claiming it once one of them has updated the table.
+	auto end_proven_unique_append = [&]() {
+		if (pending_preaggregated_groups) {
+			SljitInvalidateProvenUniqueAppendContract(runtime, op, *pending_preaggregated_groups, grouped_state);
+		}
+	};
 	if (!has_group_output_transform && !descriptor_count_one_payload && dense_domain && dense_domain->ready &&
 	    op.aggregate_update.fused_payload_update.Function()) {
 		if (pending_preaggregated_groups && pending_preaggregated_groups->HasPending() &&
@@ -196,12 +203,14 @@ static bool SljitTryExecuteInputVectorGroupedAggregateUpdate(
 		        runtime, scratch, op_idx, op, payload_input, group_sources, payload_source_indices,
 		        payload_source_layout, payload_lanes, reduction_lanes, grouped_state, payload_scratch, finish,
 		        dense_domain)) {
+			end_proven_unique_append();
 			return true;
 		}
 		if (TryExecuteDirectInputVectorGroupedTargetPayloadUpdate(
 		        runtime, scratch, op_idx, op, payload_input, group_sources, payload_source_indices,
 		        payload_source_not_null, payload_lanes, reduction_lanes, grouped_state, payload_scratch, finish,
 		        !pending_preaggregated_groups, dense_domain)) {
+			end_proven_unique_append();
 			RecordSljitRegionMaterializationElision(runtime, op.kind, "direct_input_vector_dense_target_grouped_update",
 			                                        payload_input.size());
 			return true;
@@ -234,6 +243,7 @@ static bool SljitTryExecuteInputVectorGroupedAggregateUpdate(
 		if (!has_group_output_transform && TryExecutePreaggregatedGroupedPrimitiveAggregateUpdateBatches(
 		                                       runtime, scratch, op_idx, op, preaggregated_groups, preaggregate_scratch,
 		                                       payload_lanes, grouped_state, payload_input.size(), true, !finish)) {
+			end_proven_unique_append();
 			RecordSljitRegionMaterializationElision(
 			    runtime, op.kind, "direct_input_vector_preaggregated_grouped_update", payload_input.size());
 			return true;
@@ -245,9 +255,7 @@ static bool SljitTryExecuteInputVectorGroupedAggregateUpdate(
 		record_unsupported("pending_preaggregated_flush");
 		return false;
 	}
-	if (pending_preaggregated_groups) {
-		SljitInvalidateProvenUniqueAppendContract(runtime, op, *pending_preaggregated_groups, grouped_state);
-	}
+	end_proven_unique_append();
 
 	bool updated = false;
 	if (!has_group_output_transform && count_one_update_ready) {

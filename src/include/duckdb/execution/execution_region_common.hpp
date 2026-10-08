@@ -9,6 +9,7 @@
 
 #include "duckdb/common/array.hpp"
 #include "duckdb/common/common.hpp"
+#include "duckdb/common/optional_ptr.hpp"
 
 namespace duckdb {
 

@@ -25,10 +25,29 @@ static bool SljitHashJoinRHSFixedColumnSourceCanLoad(const ExecutionHashJoinRHSF
 		       (source.all_valid ||
 		        (source.layout_column_idx != DConstants::INVALID_INDEX && source.layout_column_count != 0));
 	case ExecutionHashJoinRHSFixedColumnStorageKind::DICTIONARY:
-		return source.dictionary_index_offset != DConstants::INVALID_INDEX && source.dictionary_data &&
-		       source.dictionary_count != 0 && (source.all_valid || source.dictionary_validity);
+		return source.dictionary_index_offset != DConstants::INVALID_INDEX &&
+		       (source.dictionary_index_width == sizeof(uint8_t) || source.dictionary_index_width == sizeof(uint16_t) ||
+		        source.dictionary_index_width == sizeof(uint32_t)) &&
+		       source.dictionary_data && source.dictionary_count != 0 &&
+		       (source.all_valid || source.dictionary_validity);
 	default:
 		return false;
+	}
+}
+
+//! Reads the dictionary index a DICTIONARY RHS source stores in the build row. The width is fixed per source, so the
+//! switch is perfectly predictable inside a row loop.
+static inline idx_t SljitLoadHashJoinRHSDictionaryIndex(const_data_ptr_t row_pointer, idx_t index_offset,
+                                                        uint8_t index_width) {
+	switch (index_width) {
+	case sizeof(uint8_t):
+		return Load<uint8_t>(row_pointer + index_offset);
+	case sizeof(uint16_t):
+		return Load<uint16_t>(row_pointer + index_offset);
+	case sizeof(uint32_t):
+		return Load<uint32_t>(row_pointer + index_offset);
+	default:
+		throw InternalException("SLJIT hash-join RHS dictionary source has an unsupported index width");
 	}
 }
 
@@ -39,7 +58,8 @@ static bool SljitTryGetHashJoinRHSDictionaryIndex(data_ptr_t row_pointer,
 	    source.dictionary_index_offset == DConstants::INVALID_INDEX) {
 		return false;
 	}
-	dictionary_idx = Load<uint32_t>(row_pointer + source.dictionary_index_offset);
+	dictionary_idx =
+	    SljitLoadHashJoinRHSDictionaryIndex(row_pointer, source.dictionary_index_offset, source.dictionary_index_width);
 	return dictionary_idx < source.dictionary_count;
 }
 

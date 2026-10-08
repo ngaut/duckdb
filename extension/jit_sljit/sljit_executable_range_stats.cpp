@@ -104,7 +104,6 @@ static bool SljitExpressionRangeValues(const SljitNativeRegionExpressionPlan &ex
 			return false;
 		}
 	}
-	case SljitNativeRegionExpressionKind::EXPRESSION_TREE:
 	case SljitNativeRegionExpressionKind::TYPED_EXPRESSION_TREE: {
 		if (!expr.expression_tree) {
 			return false;

@@ -165,10 +165,12 @@ static bool TryCastMetalConstant(const Value &value, const LogicalType &target_t
         return false;
     }
     string cast_error;
-    if (!value.DefaultTryCastAs(target_type, result, &cast_error) || result.IsNull()) {
+    auto cast_value = value.DefaultTryCastAs(target_type, &cast_error);
+    if (!cast_value || cast_value->IsNull()) {
         error = cast_error.empty() ? "Metal projection constant cannot be cast to the target type" : cast_error;
         return false;
     }
+    result = std::move(*cast_value);
     return true;
 }
 

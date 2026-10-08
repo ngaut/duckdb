@@ -15,7 +15,9 @@ idx_t RowIdColumnData::GetRowStart(ColumnScanState &state) {
 	return state.parent->row_group->GetRowStart();
 }
 
-FilterPropagateResult RowIdColumnData::CheckZonemap(ColumnScanState &state, TableFilter &filter) {
+FilterPropagateResult RowIdColumnData::CheckZonemap(ColumnScanState &state, TableFilter &filter,
+                                                    optional_ptr<SegmentNode<ColumnSegment>> &checked_segment) {
+	checked_segment = nullptr;
 	auto row_start = GetRowStart(state);
 	return RowGroup::CheckRowIdFilter(filter, row_start, row_start + count);
 }
@@ -95,9 +97,7 @@ void RowIdColumnData::Filter(TransactionData transaction, idx_t vector_index, Co
 	}
 
 	// Now apply the filter
-	UnifiedVectorFormat vdata;
-	result.ToUnifiedFormat(vdata);
-	ColumnSegment::FilterSelection(sel, result, vdata, filter, filter_state, count, count);
+	ColumnSegment::FilterSelection(sel, result, filter_state, count, count);
 }
 
 void RowIdColumnData::Select(TransactionData transaction, idx_t vector_index, ColumnScanState &state, Vector &result,

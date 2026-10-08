@@ -25,18 +25,18 @@ bool SljitFullPipelinePrimitiveIsTerminal(SljitFullPipelinePrimitiveKind kind) {
 	       kind == SljitFullPipelinePrimitiveKind::UNGROUPED_AGGREGATE_UPDATE ||
 	       kind == SljitFullPipelinePrimitiveKind::GROUPED_AGGREGATE_UPDATE ||
 	       kind == SljitFullPipelinePrimitiveKind::HASH_JOIN_BUILD_SINK ||
-	       kind == SljitFullPipelinePrimitiveKind::DELIM_JOIN_SINK ||
-	       kind == SljitFullPipelinePrimitiveKind::APPEND_SINK ||
 	       kind == SljitFullPipelinePrimitiveKind::NATIVE_TAIL_DELEGATION;
 }
 
 bool SljitFullPipelineHasExactFilterProbeHashBuild(const vector<SljitExecutableRegionOp> &ops,
                                                    const SljitFullPipelinePrimitiveSequence &sequence) {
-	if (sequence.Count() != 3 || sequence.Step(1).kind != SljitFullPipelinePrimitiveKind::HASH_JOIN_PROBE_SELECTION ||
-	    sequence.Step(2).kind != SljitFullPipelinePrimitiveKind::HASH_JOIN_BUILD_SINK) {
+	// Steps ahead of the final probe only shape its input: the exact probe feeding the build is the work either way.
+	const auto count = sequence.Count();
+	if (count < 3 || sequence.Step(count - 2).kind != SljitFullPipelinePrimitiveKind::HASH_JOIN_PROBE_SELECTION ||
+	    sequence.Step(count - 1).kind != SljitFullPipelinePrimitiveKind::HASH_JOIN_BUILD_SINK) {
 		return false;
 	}
-	const auto probe_idx = sequence.Step(1).hash_join_probe_selection.hash_join_idx;
+	const auto probe_idx = sequence.Step(count - 2).hash_join_probe_selection.hash_join_idx;
 	if (probe_idx >= ops.size() || ops[probe_idx].kind != SljitNativeRegionOpKind::HASH_JOIN_PROBE) {
 		throw InternalException("SLJIT bound recipe references an invalid hash join probe");
 	}

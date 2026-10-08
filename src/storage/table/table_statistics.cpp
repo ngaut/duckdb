@@ -20,15 +20,19 @@ void TableStatistics::Initialize(const vector<LogicalType> &types, PersistentTab
 		table_sample = make_uniq<ReservoirSample>(static_cast<idx_t>(FIXED_SAMPLE_SIZE));
 	}
 	if (column_stats.size() != types.size()) { // LCOV_EXCL_START
-		throw IOException("Table statistics column count is not aligned with table column count. Corrupt file?");
+		throw DataCorruptionException(
+		    "Table statistics column count is not aligned with table column count. Corrupt file?");
 	} // LCOV_EXCL_STOP
 }
 
 void TableStatistics::InitializeEmpty(const TableStatistics &other) {
 	D_ASSERT(Empty());
 	D_ASSERT(!table_sample);
+	D_ASSERT(other.stats_lock);
 
 	stats_lock = make_shared_ptr<mutex>();
+	// concurrent appends merge into the other statistics
+	lock_guard<mutex> other_lock(*other.stats_lock);
 	if (other.table_sample) {
 		D_ASSERT(other.table_sample->type == SampleType::RESERVOIR_SAMPLE);
 		auto &res = other.table_sample->Cast<ReservoirSample>();
@@ -188,12 +192,6 @@ void TableStatistics::DestroyTableSample(TableStatisticsLock &lock) const {
 	if (table_sample) {
 		table_sample->Destroy();
 	}
-}
-
-void TableStatistics::SetStats(TableStatistics &other) {
-	TableStatisticsLock lock(*stats_lock);
-	column_stats = std::move(other.column_stats);
-	table_sample = std::move(other.table_sample);
 }
 
 unique_ptr<BaseStatistics> TableStatistics::CopyStats(const StorageIndex &index) {

@@ -44,17 +44,10 @@ struct StrfTimeBindData : public FunctionData {
 
 template <bool REVERSED>
 static unique_ptr<FunctionData> StrfTimeBindFunction(BindScalarFunctionInput &input) {
-	auto &context = input.GetClientContext();
 	auto &arguments = input.GetArguments();
 	auto format_idx = REVERSED ? 0U : 1U;
 	auto &format_arg = arguments[format_idx];
-	if (format_arg->HasParameter()) {
-		throw ParameterNotResolvedException();
-	}
-	if (!format_arg->IsFoldable()) {
-		throw InvalidInputException(*format_arg, "strftime format must be a constant");
-	}
-	Value options_str = ExpressionExecutor::EvaluateScalar(context, *format_arg);
+	Value options_str = input.GetConstant(format_idx);
 	auto format_string = options_str.GetValue<string>();
 	StrfTimeFormat format;
 	bool is_null = options_str.IsNull();
@@ -195,16 +188,9 @@ struct StrpTimeFunction {
 	}
 
 	static unique_ptr<FunctionData> Bind(BindScalarFunctionInput &input) {
-		auto &context = input.GetClientContext();
 		auto &bound_function = input.GetBoundFunction();
 		auto &arguments = input.GetArguments();
-		if (arguments[1]->HasParameter()) {
-			throw ParameterNotResolvedException();
-		}
-		if (!arguments[1]->IsFoldable()) {
-			throw InvalidInputException(*arguments[0], "strptime format must be a constant");
-		}
-		Value format_value = ExpressionExecutor::EvaluateScalar(context, *arguments[1]);
+		Value format_value = input.GetConstant(1);
 		string format_string;
 		StrpTimeFormat format;
 		if (format_value.IsNull()) {
@@ -285,40 +271,86 @@ struct StrpTimeFunction {
 ScalarFunctionSet StrfTimeFun::GetFunctions() {
 	ScalarFunctionSet strftime("strftime");
 
-	strftime.AddFunction(ScalarFunction({LogicalType::DATE, LogicalType::VARCHAR}, LogicalType::VARCHAR,
-	                                    StrfTimeFunctionDate<false>, StrfTimeBindFunction<false>));
-	strftime.AddFunction(ScalarFunction({LogicalType::VARCHAR, LogicalType::DATE}, LogicalType::VARCHAR,
-	                                    StrfTimeFunctionDate<true>, StrfTimeBindFunction<true>));
-	strftime.AddFunction(ScalarFunction({LogicalType::TIMESTAMP, LogicalType::VARCHAR}, LogicalType::VARCHAR,
-	                                    StrfTimeFunctionTimestamp<false>, StrfTimeBindFunction<false>));
-	strftime.AddFunction(ScalarFunction({LogicalType::VARCHAR, LogicalType::TIMESTAMP}, LogicalType::VARCHAR,
-	                                    StrfTimeFunctionTimestamp<true>, StrfTimeBindFunction<true>));
-	strftime.AddFunction(ScalarFunction({LogicalType::TIMESTAMP_NS, LogicalType::VARCHAR}, LogicalType::VARCHAR,
-	                                    StrfTimeFunctionTimestampNS<false>, StrfTimeBindFunction<false>));
-	strftime.AddFunction(ScalarFunction({LogicalType::VARCHAR, LogicalType::TIMESTAMP_NS}, LogicalType::VARCHAR,
-	                                    StrfTimeFunctionTimestampNS<true>, StrfTimeBindFunction<true>));
-	strftime.AddFunction(ScalarFunction({LogicalType::TIMESTAMP_TZ, LogicalType::VARCHAR}, LogicalType::VARCHAR,
-	                                    StrfTimeFunctionTimestamp<false>, StrfTimeBindFunction<false>));
-	strftime.AddFunction(ScalarFunction({LogicalType::VARCHAR, LogicalType::TIMESTAMP_TZ}, LogicalType::VARCHAR,
-	                                    StrfTimeFunctionTimestamp<true>, StrfTimeBindFunction<true>));
-	strftime.AddFunction(ScalarFunction({LogicalType::TIMESTAMP_TZ_NS, LogicalType::VARCHAR}, LogicalType::VARCHAR,
-	                                    StrfTimeFunctionTimestampNS<false>, StrfTimeBindFunction<false>));
-	strftime.AddFunction(ScalarFunction({LogicalType::VARCHAR, LogicalType::TIMESTAMP_TZ_NS}, LogicalType::VARCHAR,
-	                                    StrfTimeFunctionTimestampNS<true>, StrfTimeBindFunction<true>));
+	ScalarFunction data_format({}, LogicalType::VARCHAR, StrfTimeFunctionDate<false>, StrfTimeBindFunction<false>);
+	data_format.GetSignature().AddParameter("data", LogicalType::DATE).AddParameter("format", LogicalType::VARCHAR);
+	strftime.AddFunction(data_format);
+
+	ScalarFunction format_data({}, LogicalType::VARCHAR, StrfTimeFunctionDate<true>, StrfTimeBindFunction<true>);
+	format_data.GetSignature().AddParameter("format", LogicalType::VARCHAR).AddParameter("data", LogicalType::DATE);
+	strftime.AddFunction(format_data);
+
+	ScalarFunction ts_data_format({}, LogicalType::VARCHAR, StrfTimeFunctionTimestamp<false>,
+	                              StrfTimeBindFunction<false>);
+	ts_data_format.GetSignature()
+	    .AddParameter("data", LogicalType::TIMESTAMP)
+	    .AddParameter("format", LogicalType::VARCHAR);
+	strftime.AddFunction(ts_data_format);
+
+	ScalarFunction ts_format_data({}, LogicalType::VARCHAR, StrfTimeFunctionTimestamp<true>,
+	                              StrfTimeBindFunction<true>);
+	ts_format_data.GetSignature()
+	    .AddParameter("format", LogicalType::VARCHAR)
+	    .AddParameter("data", LogicalType::TIMESTAMP);
+	strftime.AddFunction(ts_format_data);
+
+	ScalarFunction ts_ns_data_format({}, LogicalType::VARCHAR, StrfTimeFunctionTimestampNS<false>,
+	                                 StrfTimeBindFunction<false>);
+	ts_ns_data_format.GetSignature()
+	    .AddParameter("data", LogicalType::TIMESTAMP_NS)
+	    .AddParameter("format", LogicalType::VARCHAR);
+	strftime.AddFunction(ts_ns_data_format);
+
+	ScalarFunction ts_ns_format_data({}, LogicalType::VARCHAR, StrfTimeFunctionTimestampNS<true>,
+	                                 StrfTimeBindFunction<true>);
+	ts_ns_format_data.GetSignature()
+	    .AddParameter("format", LogicalType::VARCHAR)
+	    .AddParameter("data", LogicalType::TIMESTAMP_NS);
+	strftime.AddFunction(ts_ns_format_data);
+
+	ScalarFunction ts_tz_data_format({}, LogicalType::VARCHAR, StrfTimeFunctionTimestamp<false>,
+	                                 StrfTimeBindFunction<false>);
+	ts_tz_data_format.GetSignature()
+	    .AddParameter("data", LogicalType::TIMESTAMP_TZ)
+	    .AddParameter("format", LogicalType::VARCHAR);
+	strftime.AddFunction(ts_tz_data_format);
+
+	ScalarFunction ts_tz_format_data({}, LogicalType::VARCHAR, StrfTimeFunctionTimestamp<true>,
+	                                 StrfTimeBindFunction<true>);
+	ts_tz_format_data.GetSignature()
+	    .AddParameter("format", LogicalType::VARCHAR)
+	    .AddParameter("data", LogicalType::TIMESTAMP_TZ);
+	strftime.AddFunction(ts_tz_format_data);
+
+	ScalarFunction ts_tz_ns_data_format({}, LogicalType::VARCHAR, StrfTimeFunctionTimestampNS<false>,
+	                                    StrfTimeBindFunction<false>);
+	ts_tz_ns_data_format.GetSignature()
+	    .AddParameter("data", LogicalType::TIMESTAMP_TZ_NS)
+	    .AddParameter("format", LogicalType::VARCHAR);
+	strftime.AddFunction(ts_tz_ns_data_format);
+
+	ScalarFunction ts_tz_ns_format_data({}, LogicalType::VARCHAR, StrfTimeFunctionTimestampNS<true>,
+	                                    StrfTimeBindFunction<true>);
+	ts_tz_ns_format_data.GetSignature()
+	    .AddParameter("format", LogicalType::VARCHAR)
+	    .AddParameter("data", LogicalType::TIMESTAMP_TZ_NS);
+	strftime.AddFunction(ts_tz_ns_format_data);
+
+	// throws for unsupported format specifiers
+	strftime.SetFallible();
 	return strftime;
 }
 ScalarFunctionSet StrpTimeFun::GetFunctions() {
 	ScalarFunctionSet strptime("strptime");
 
 	const auto list_type = LogicalType::LIST(LogicalType::VARCHAR);
-	auto fun = ScalarFunction({LogicalType::VARCHAR, LogicalType::VARCHAR}, LogicalType::TIMESTAMP,
-	                          StrpTimeFunction::Parse<timestamp_t>, StrpTimeFunction::Bind);
+	auto fun = ScalarFunction({}, LogicalType::TIMESTAMP, StrpTimeFunction::Parse<timestamp_t>, StrpTimeFunction::Bind);
+	fun.GetSignature().AddParameter("text", LogicalType::VARCHAR).AddParameter("format", LogicalType::VARCHAR);
 	fun.SetNullHandling(FunctionNullHandling::SPECIAL_HANDLING);
 	fun.SetFallible();
 	strptime.AddFunction(fun);
 
-	fun = ScalarFunction({LogicalType::VARCHAR, list_type}, LogicalType::TIMESTAMP,
-	                     StrpTimeFunction::Parse<timestamp_t>, StrpTimeFunction::Bind);
+	fun = ScalarFunction({}, LogicalType::TIMESTAMP, StrpTimeFunction::Parse<timestamp_t>, StrpTimeFunction::Bind);
+	fun.GetSignature().AddParameter("text", LogicalType::VARCHAR).AddParameter("format-list", list_type);
 	fun.SetFallible();
 	fun.SetNullHandling(FunctionNullHandling::SPECIAL_HANDLING);
 	strptime.AddFunction(fun);
@@ -329,13 +361,14 @@ ScalarFunctionSet TryStrpTimeFun::GetFunctions() {
 	ScalarFunctionSet try_strptime("try_strptime");
 
 	const auto list_type = LogicalType::LIST(LogicalType::VARCHAR);
-	auto fun = ScalarFunction({LogicalType::VARCHAR, LogicalType::VARCHAR}, LogicalType::TIMESTAMP,
-	                          StrpTimeFunction::TryParse<timestamp_t>, StrpTimeFunction::Bind);
+	auto fun =
+	    ScalarFunction({}, LogicalType::TIMESTAMP, StrpTimeFunction::TryParse<timestamp_t>, StrpTimeFunction::Bind);
+	fun.GetSignature().AddParameter("text", LogicalType::VARCHAR).AddParameter("format", LogicalType::VARCHAR);
 	fun.SetNullHandling(FunctionNullHandling::SPECIAL_HANDLING);
 	try_strptime.AddFunction(fun);
 
-	fun = ScalarFunction({LogicalType::VARCHAR, list_type}, LogicalType::TIMESTAMP,
-	                     StrpTimeFunction::TryParse<timestamp_t>, StrpTimeFunction::Bind);
+	fun = ScalarFunction({}, LogicalType::TIMESTAMP, StrpTimeFunction::TryParse<timestamp_t>, StrpTimeFunction::Bind);
+	fun.GetSignature().AddParameter("text", LogicalType::VARCHAR).AddParameter("format", list_type);
 	fun.SetNullHandling(FunctionNullHandling::SPECIAL_HANDLING);
 	try_strptime.AddFunction(fun);
 

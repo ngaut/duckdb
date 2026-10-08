@@ -22,7 +22,6 @@ namespace duckdb {
 static void PragmaEnableProfilingStatement(ClientContext &context, const FunctionParameters &parameters) {
 	auto &config = ClientConfig::GetConfig(context);
 	config.enable_profiler = true;
-	config.emit_profiler_output = true;
 }
 
 void RegisterEnableProfiling(BuiltinFunctions &set) {
@@ -54,7 +53,21 @@ static void PragmaDisablePrintProgressBar(ClientContext &context, const Function
 	ClientConfig::GetConfig(context).print_progress_bar = false;
 }
 
+//! Warn that a pragma that no longer does anything is on its way out
+static void WarnDeprecatedPragma(ClientContext &context, const char *name) {
+	DUCKDB_LOG_WARNING(
+	    context,
+	    StringUtil::Format("The '%s' pragma no longer has any effect; it is deprecated and will be removed in a "
+	                       "future release.",
+	                       name));
+}
+
+static void PragmaEnableVerification(ClientContext &context, const FunctionParameters &parameters) {
+	WarnDeprecatedPragma(context, "enable_verification");
+}
+
 static void PragmaDisableVerification(ClientContext &context, const FunctionParameters &parameters) {
+	WarnDeprecatedPragma(context, "disable_verification");
 }
 
 static void PragmaEnableForceParallelism(ClientContext &context, const FunctionParameters &parameters) {
@@ -70,9 +83,11 @@ static void PragmaDisableForceParallelism(ClientContext &context, const Function
 }
 
 static void PragmaEnableObjectCache(ClientContext &context, const FunctionParameters &parameters) {
+	WarnDeprecatedPragma(context, "enable_object_cache");
 }
 
 static void PragmaDisableObjectCache(ClientContext &context, const FunctionParameters &parameters) {
+	WarnDeprecatedPragma(context, "disable_object_cache");
 }
 
 static void PragmaEnableCheckpointOnShutdown(ClientContext &context, const FunctionParameters &parameters) {
@@ -101,6 +116,7 @@ void PragmaFunctions::RegisterFunction(BuiltinFunctions &set) {
 	set.AddFunction(PragmaFunction::PragmaStatement("disable_profile", PragmaDisableProfiling));
 	set.AddFunction(PragmaFunction::PragmaStatement("disable_profiling", PragmaDisableProfiling));
 
+	set.AddFunction(PragmaFunction::PragmaStatement("enable_verification", PragmaEnableVerification));
 	set.AddFunction(PragmaFunction::PragmaStatement("disable_verification", PragmaDisableVerification));
 
 	set.AddFunction(PragmaFunction::PragmaStatement("verify_parallelism", PragmaEnableForceParallelism));

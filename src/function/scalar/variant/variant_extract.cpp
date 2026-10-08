@@ -54,29 +54,26 @@ static unique_ptr<BaseStatistics> VariantExtractPropagateStats(ClientContext &co
 }
 
 static unique_ptr<FunctionData> VariantExtractBind(BindScalarFunctionInput &input) {
-	auto &context = input.GetClientContext();
 	auto &arguments = input.GetArguments();
 
 	if (arguments.size() != 2) {
 		throw BinderException("'variant_extract' expects two arguments, VARIANT column and VARCHAR path");
 	}
 	const auto &path = *arguments[1];
-	if (path.GetReturnType().id() != LogicalTypeId::VARCHAR && path.GetReturnType().id() != LogicalTypeId::UINTEGER) {
-		throw BinderException("'variant_extract' expects the second argument to be of type VARCHAR or UINTEGER, not %s",
-		                      path.GetReturnType().ToString());
+	if (path.GetReturnType().id() != LogicalTypeId::VARCHAR && !path.GetReturnType().IsIntegral()) {
+		throw BinderException(
+		    "'variant_extract' expects the second argument to be of type VARCHAR or any integer type, not %s",
+		    path.GetReturnType().ToString());
 	}
 
-	Value constant_arg;
-	if (!VariantBindUtils::GetConstantArgument(context, path, constant_arg)) {
-		throw BinderException("'variant_extract' expects the second argument to be a constant expression");
-	}
+	auto constant_arg = input.GetNonNullConstant(1);
 
 	if (constant_arg.type().id() == LogicalTypeId::VARCHAR) {
 		return make_uniq<VariantExtractBindData>(constant_arg.GetValue<string>());
-	} else if (constant_arg.type().id() == LogicalTypeId::UINTEGER) {
+	} else if (constant_arg.type().IsIntegral()) {
 		return make_uniq<VariantExtractBindData>(constant_arg.GetValue<uint32_t>());
 	} else {
-		throw InternalException("Constant-folded argument was not of type UINTEGER or VARCHAR");
+		throw InternalException("Constant-folded argument was not of type VARCHAR or any integer type");
 	}
 }
 
@@ -110,6 +107,10 @@ static bool TryShreddedExtractRecursive(const Vector &input, const vector<Varian
 		// only by key supported
 		return false;
 	}
+	if (input.GetType().id() != LogicalTypeId::STRUCT) {
+		//! Not shredded on OBJECT, can't extract a key
+		return false;
+	}
 	// first entry is "typed_value"
 	auto &typed_entries = StructVector::GetEntries(input);
 	auto &typed_value = typed_entries[0];
@@ -119,7 +120,7 @@ static bool TryShreddedExtractRecursive(const Vector &input, const vector<Varian
 	auto &child_entries = StructVector::GetEntries(typed_value);
 	for (idx_t child_idx = 0; child_idx < child_types.size(); child_idx++) {
 		auto &entry = child_types[child_idx];
-		if (entry.first == component.key) {
+		if (entry.first.GetIdentifierName() == component.key) {
 			// key found - move onto next component
 			return TryShreddedExtractRecursive(child_entries[child_idx], components, result, count, path_index + 1);
 		}
@@ -289,11 +290,12 @@ ScalarFunctionSet VariantExtractFun::GetFunctions() {
 	ScalarFunction variant_extract("variant_extract", {}, variant_type, VariantExtractFunction, VariantExtractBind,
 	                               VariantExtractPropagateStats);
 
-	variant_extract.GetSignature().AddParameter(variant_type);
-	variant_extract.GetSignature().AddParameter(LogicalType::VARCHAR);
+	variant_extract.GetSignature().AddParameter("input_variant", variant_type);
+	variant_extract.GetSignature().AddParameter("field", LogicalType::VARCHAR);
 	fun_set.AddFunction(variant_extract);
 
 	variant_extract.GetSignature().GetParameter(1).SetType(LogicalType::UINTEGER);
+	variant_extract.GetSignature().GetParameter(1).SetName("index");
 	fun_set.AddFunction(variant_extract);
 	return fun_set;
 }

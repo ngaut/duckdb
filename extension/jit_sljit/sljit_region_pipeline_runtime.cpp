@@ -74,16 +74,11 @@ static bool SljitTryDeferNotReadyNativeJoinProbesAtEntry(ExecutionRegionRuntime 
                                                          vector<SljitExecutableRegionOp> &ops,
                                                          ExecutionRegionResult &result) {
 	for (auto &op : ops) {
-		const ExecutionRegionOperatorInfo *operator_info = nullptr;
-		if (op.kind == SljitNativeRegionOpKind::HASH_JOIN_PROBE) {
-			operator_info = &op.hash_join_probe.plan.operator_info;
-		} else if (op.kind == SljitNativeRegionOpKind::NESTED_LOOP_JOIN_PROBE) {
-			operator_info = &op.nested_loop_join_probe.plan.operator_info;
-		}
-		if (!operator_info) {
+		if (op.kind != SljitNativeRegionOpKind::HASH_JOIN_PROBE) {
 			continue;
 		}
-		auto readiness = runtime.ExecutionOperators().GetOperatorReadiness(op.operator_index, *operator_info);
+		auto readiness =
+		    runtime.ExecutionOperators().GetOperatorReadiness(op.operator_index, op.hash_join_probe.plan.operator_info);
 		if (readiness.status != ExecutionOperatorReadinessStatus::NOT_READY) {
 			continue;
 		}
@@ -168,19 +163,8 @@ unique_ptr<ExecutionRegionLocalState> SljitNativeRegionKernel::CreateLocalState(
 }
 
 bool SljitNativeRegionKernel::SupportsRunnerHandoff() const {
-	if (!artifact->full_pipeline_recipe_plan.HasRecipe()) {
-		return true;
-	}
-	if (artifact->full_pipeline_recipe_plan.Recipe().UsesPrimitiveAggregateStateSource()) {
-		return false;
-	}
-	auto &sequence = artifact->full_pipeline_recipe_plan.Recipe().primitive_sequence;
-	for (idx_t step_idx = 0; step_idx < sequence.Count(); step_idx++) {
-		if (!SljitFullPipelinePrimitiveStepSupportsRunnerHandoff(sequence.Step(step_idx))) {
-			return false;
-		}
-	}
-	return true;
+	return !artifact->full_pipeline_recipe_plan.HasRecipe() ||
+	       !artifact->full_pipeline_recipe_plan.Recipe().UsesPrimitiveAggregateStateSource();
 }
 
 bool SljitNativeRegionKernel::TryExecuteFullPipeline(ExecutionRegionRuntime &runtime, ExecutionRegionResult &result) {

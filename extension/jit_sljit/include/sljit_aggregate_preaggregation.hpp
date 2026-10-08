@@ -8,11 +8,11 @@
 
 #pragma once
 
-#include "sljit_aggregate_flat_single_preaggregation.hpp"
 #include "sljit_aggregate_primitive_preaggregation_runtime.hpp"
 #include "sljit_aggregate_preaggregation_common.hpp"
 #include "sljit_dense_group_preaggregation.hpp"
 
+#include "duckdb/common/operator/cast_operators.hpp"
 #include "duckdb/common/operator/subtract.hpp"
 #include "duckdb/common/types/hugeint.hpp"
 #include "duckdb/common/types/uhugeint.hpp"
@@ -145,9 +145,6 @@ static bool TryPreaggregateConsecutivePrimitiveGroupsTemplated(
 	}
 	if (!prefer_consecutive_runs &&
 	    TryPreaggregateBoundedPrimitiveGroupsTemplated<T>(op, input, payload_lanes, compact_groups, scratch)) {
-		return true;
-	}
-	if (TryPreaggregateFlatAllValidSinglePrimitiveGroup<T>(op, input, payload_lanes, compact_groups, scratch)) {
 		return true;
 	}
 	if (!has_consecutive_repeat) {

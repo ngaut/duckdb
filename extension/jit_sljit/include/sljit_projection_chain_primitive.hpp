@@ -106,43 +106,6 @@ static SljitProjectionChainPrimitive SljitBindProjectionChainPrimitive(const vec
 	return SljitBindProjectionChainPrimitive(ops, projection_idx, projection_idx);
 }
 
-static bool SljitOutputTypesAreFixedWidth(const vector<LogicalType> &types) {
-	for (auto &type : types) {
-		if (!TypeIsConstantSize(type.InternalType())) {
-			return false;
-		}
-	}
-	return true;
-}
-
-static bool SljitProjectionOutputsAreFixedWidth(const SljitExecutableRegionOp &projection_op) {
-	return projection_op.kind == SljitNativeRegionOpKind::PROJECTION &&
-	       SljitOutputTypesAreFixedWidth(projection_op.output_types);
-}
-
-static bool SljitBuildReferenceProjectionOutputMap(const SljitExecutableRegionOp &projection_op,
-                                                   const SljitExecutableRegionOp &reference_projection_op,
-                                                   vector<idx_t> &output_to_projection) {
-	if (projection_op.kind != SljitNativeRegionOpKind::PROJECTION ||
-	    reference_projection_op.kind != SljitNativeRegionOpKind::PROJECTION ||
-	    !SljitProjectionOutputsAreFixedWidth(reference_projection_op)) {
-		return false;
-	}
-	output_to_projection.clear();
-	output_to_projection.reserve(reference_projection_op.projections.size());
-	for (auto &reference_expr : reference_projection_op.projections) {
-		auto &reference = reference_expr.plan;
-		if (reference.kind != SljitNativeRegionExpressionKind::REFERENCE ||
-		    reference.source_index >= projection_op.projections.size() ||
-		    reference.return_type != projection_op.projections[reference.source_index].plan.return_type) {
-			output_to_projection.clear();
-			return false;
-		}
-		output_to_projection.push_back(reference.source_index);
-	}
-	return true;
-}
-
 static bool SljitBuildProjectionChainSemanticProjection(const vector<SljitExecutableRegionOp> &ops,
                                                         idx_t first_projection_idx, idx_t final_projection_idx,
                                                         SljitExecutableRegionOp &composed_projection,

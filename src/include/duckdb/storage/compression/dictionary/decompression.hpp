@@ -7,25 +7,27 @@ namespace duckdb {
 //===--------------------------------------------------------------------===//
 // Scan
 //===--------------------------------------------------------------------===//
-// FIXME: why is this StringScanState when we also define: `BufferHandle handle` ???
-struct CompressedStringScanState : public StringScanState {
+struct CompressedStringScanState : public SegmentScanState {
 public:
 	explicit CompressedStringScanState(BufferHandle &&handle_p)
-	    : StringScanState(), owned_handle(std::move(handle_p)), handle(owned_handle) {
+	    : owned_handle(std::move(handle_p)), handle(owned_handle) {
 	}
-	explicit CompressedStringScanState(BufferHandle &handle_p) : StringScanState(), owned_handle(), handle(handle_p) {
+	explicit CompressedStringScanState(BufferHandle &handle_p) : owned_handle(), handle(handle_p) {
 	}
 
 public:
 	void Initialize(ColumnSegment &segment, bool initialize_dictionary = true);
+	template <bool NEEDS_STRING_OFFSET_CHECK = false>
 	void ScanToFlatVector(Vector &result, idx_t result_offset, idx_t start, idx_t scan_count);
 	void ScanToDictionaryVector(ColumnSegment &segment, Vector &result, idx_t result_offset, idx_t start,
 	                            idx_t scan_count);
-	const SelectionVector &GetSelVec(idx_t start, idx_t scan_count);
 
 private:
-	string_t FetchStringFromDict(int32_t dict_offset, uint16_t string_len);
+	string_t FetchStringFromDict(uint32_t dict_offset, uint16_t string_len);
 	uint16_t GetStringLength(sel_t index);
+	void ValidateDictionary(const SelectionVector &sel, idx_t scan_count) const;
+	//! Validate the index buffer (offsets monotonic and within the dictionary) so scans can trust it.
+	void ValidateIndexBuffer() const;
 
 public:
 	BufferHandle owned_handle;
@@ -34,7 +36,6 @@ public:
 	bitpacking_width_t current_width;
 	buffer_ptr<SelectionVector> sel_vec;
 	idx_t sel_vec_size = 0;
-	SelectionVector filter_sel;
 
 	//! Start of the block (pointing to the dictionary_header)
 	data_ptr_t baseptr;
@@ -45,7 +46,6 @@ public:
 
 	buffer_ptr<DictionaryEntry> dictionary;
 	idx_t dictionary_size;
-	unsafe_unique_array<bool> filter_result;
 	StringDictionaryContainer dict;
 	idx_t block_size;
 };

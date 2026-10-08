@@ -44,11 +44,6 @@ struct SljitExecutableRegionExpression {
 		switch (plan.kind) {
 		case SljitNativeRegionExpressionKind::PREDICATE:
 			return predicate_select.Function() != nullptr;
-		case SljitNativeRegionExpressionKind::INTEGER_COMPARE_CONSTANT:
-		case SljitNativeRegionExpressionKind::INTEGER_COMPARE_REFERENCES:
-		case SljitNativeRegionExpressionKind::INTEGER_IN_LIST:
-		case SljitNativeRegionExpressionKind::INTEGER_BETWEEN:
-		case SljitNativeRegionExpressionKind::NULL_CHECK:
 		case SljitNativeRegionExpressionKind::TYPED_EXPRESSION_TREE:
 			return select.Function() != nullptr;
 		default:
@@ -151,39 +146,8 @@ struct SljitExecutableHashJoinBuild {
 	SljitNativeHashJoinBuildPlan plan;
 };
 
-struct SljitExecutableNestedLoopJoinProbe {
-	SljitNativeNestedLoopJoinProbePlan plan;
-	SljitCompiledFunction<SljitNativeNestedLoopJoinProbeFunction> compiled;
-	vector<SljitExecutableRegionExpression> lhs_conditions;
-
-	idx_t CodeSize() const {
-		idx_t result = compiled.CodeSize();
-		for (auto &condition : lhs_conditions) {
-			result += condition.CodeSize();
-		}
-		return result;
-	}
-};
-
-struct SljitExecutableNestedLoopJoinBuild {
-	SljitNativeNestedLoopJoinBuildPlan plan;
-	vector<SljitExecutableRegionExpression> rhs_conditions;
-
-	idx_t CodeSize() const {
-		idx_t result = 0;
-		for (auto &condition : rhs_conditions) {
-			result += condition.CodeSize();
-		}
-		return result;
-	}
-};
-
 struct SljitExecutableAppendSink {
 	SljitNativeAppendSinkPlan plan;
-};
-
-struct SljitExecutableDelimJoinSink {
-	SljitNativeDelimJoinSinkPlan plan;
 };
 
 struct SljitExecutableOrderSink {
@@ -395,10 +359,6 @@ struct SljitExecutableAggregateUpdate {
 	}
 };
 
-enum class SljitDirectProjectionKind : uint8_t { NONE, FLOAT, DOUBLE, INT32, INT64, DECIMAL64, DATE };
-
-enum class SljitDirectProjectionStatsMode : uint8_t { NONE, GENERATED_FLOATING_MIN_MAX, POSTPASS_FIXED_STATS };
-
 struct SljitDirectProjectionSourceRef {
 	idx_t input_index = DConstants::INVALID_INDEX;
 	idx_t projection_index = DConstants::INVALID_INDEX;
@@ -406,15 +366,9 @@ struct SljitDirectProjectionSourceRef {
 };
 
 struct SljitDirectProjectionPlan {
-	SljitDirectProjectionKind kind = SljitDirectProjectionKind::NONE;
-	SljitDirectProjectionStatsMode stats_mode = SljitDirectProjectionStatsMode::NONE;
 	vector<idx_t> projection_indices;
 	vector<SljitDirectProjectionSourceRef> sources;
 	bool covers_all_projections = false;
-
-	bool SinglePrecision() const {
-		return kind == SljitDirectProjectionKind::FLOAT;
-	}
 };
 
 struct SljitExecutableRegionOp {
@@ -429,15 +383,10 @@ struct SljitExecutableRegionOp {
 	unique_ptr<SljitExecutableFilter> filter;
 	SljitExecutableHashJoinProbe hash_join_probe;
 	SljitExecutableHashJoinBuild hash_join_build;
-	SljitExecutableNestedLoopJoinProbe nested_loop_join_probe;
-	SljitExecutableNestedLoopJoinBuild nested_loop_join_build;
 	SljitExecutableAppendSink append_sink;
-	SljitExecutableDelimJoinSink delim_join_sink;
 	SljitExecutableOrderSink order_sink;
 	SljitExecutableAggregateUpdate aggregate_update;
 	vector<SljitExecutableRegionExpression> projections;
-	SljitDirectProjectionPlan flat_fused_floating_projection_plan;
-	SljitCompiledFunction<SljitNativeVectorFunction> flat_fused_floating_projection;
 	vector<SljitDirectProjectionPlan> flat_fused_fixed_projection_plans;
 	vector<SljitCompiledFunction<SljitNativeVectorFunction>> flat_fused_fixed_projections;
 
@@ -450,19 +399,12 @@ struct SljitExecutableRegionOp {
 		if (kind == SljitNativeRegionOpKind::HASH_JOIN_PROBE) {
 			result += hash_join_probe.CodeSize();
 		}
-		if (kind == SljitNativeRegionOpKind::NESTED_LOOP_JOIN_PROBE) {
-			result += nested_loop_join_probe.CodeSize();
-		}
-		if (kind == SljitNativeRegionOpKind::NESTED_LOOP_JOIN_BUILD) {
-			result += nested_loop_join_build.CodeSize();
-		}
 		if (kind == SljitNativeRegionOpKind::ORDER_SINK) {
 			result += order_sink.CodeSize();
 		}
 		if (kind == SljitNativeRegionOpKind::AGGREGATE_UPDATE) {
 			result += aggregate_update.CodeSize();
 		}
-		result += flat_fused_floating_projection.CodeSize();
 		for (auto &projection : flat_fused_fixed_projections) {
 			result += projection.CodeSize();
 		}
@@ -542,9 +484,6 @@ struct SljitExecutableRegionOp {
 			return constraints;
 		case SljitNativeRegionOpKind::ORDER_SINK:
 			dense(order_sink.plan.input_types);
-			return constraints;
-		case SljitNativeRegionOpKind::DELIM_JOIN_SINK:
-			dense(delim_join_sink.plan.input_types);
 			return constraints;
 		case SljitNativeRegionOpKind::HASH_JOIN_BUILD:
 			dense(hash_join_build.plan.input_types);

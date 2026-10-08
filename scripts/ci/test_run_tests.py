@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 import os
+import shlex
 import sys
 import tempfile
 import textwrap
 import unittest
-from io import StringIO
+from io import BytesIO, StringIO, TextIOWrapper
 from unittest import mock
 from pathlib import Path
 
@@ -33,6 +34,25 @@ def strip_ansi_lines(lines: list[str]) -> list[str]:
 
 
 class RunTestsScriptTest(unittest.TestCase):
+    def test_line_buffering_escapes_unicode_for_non_utf8_streams(self):
+        stdout_buffer = BytesIO()
+        stderr_buffer = BytesIO()
+        stdout = TextIOWrapper(stdout_buffer, encoding="cp1252")
+        stderr = TextIOWrapper(stderr_buffer, encoding="cp1252")
+
+        with (
+            mock.patch("scripts.ci.run_tests.sys.stdout", stdout),
+            mock.patch("scripts.ci.run_tests.sys.stderr", stderr),
+        ):
+            run_tests.enable_line_buffering()
+            print("❌ ran tests", file=run_tests.sys.stdout)
+            print("❌ failed", file=run_tests.sys.stderr)
+            run_tests.sys.stdout.flush()
+            run_tests.sys.stderr.flush()
+
+        self.assertEqual(stdout_buffer.getvalue(), b"\\u274c ran tests\n")
+        self.assertEqual(stderr_buffer.getvalue(), b"\\u274c failed\n")
+
     def test_highlight_stack_trace_lines_colors_frame_index_and_function_name(self):
         lines = run_tests.highlight_stack_trace_lines(
             [
@@ -106,6 +126,26 @@ class RunTestsScriptTest(unittest.TestCase):
         finally:
             unittest_path.unlink(missing_ok=True)
             os.rmdir(wrapper_dir)
+
+    def test_failed_tests_reproducer_uses_runner_and_preserves_context(self):
+        command = run_tests.format_failed_tests_reproducer(
+            "/repo/build/reldebug/test/unittest",
+            "--force-storage --label 'two words'",
+            ["test/configs/a config.json"],
+            ["test/sql/a.test", "Compiled, test's name"],
+        )
+
+        self.assertEqual(
+            shlex.split(command),
+            [
+                os.path.relpath("/repo/build/reldebug/test/run", REPO_ROOT),
+                "--test-flags",
+                "--force-storage --label 'two words'",
+                "--test-config",
+                "test/configs/a config.json",
+                '"test/sql/a.test","Compiled, test\'s name"',
+            ],
+        )
 
     def test_summarizes_wrong_result_failure(self):
         stderr = """
@@ -236,6 +276,39 @@ mode skip unsupported: 1
                 self.assertIn("Skipped tests for the following reasons:", proc.stdout)
                 for expected_reason in case["expected_reasons"]:
                     self.assertIn(expected_reason, proc.stdout)
+
+    def test_successful_batches_print_progress_bar(self):
+        test_list_path = create_temp_file("test/sql/a.test\ntest/sql/b.test\n")
+        result = {
+            "failed": False,
+            "stdout": "All tests passed (1 assertion in 1 test case)\n",
+            "stderr": "",
+            "message": None,
+            "peak_rss_bytes": 0,
+        }
+
+        try:
+            with mock.patch("scripts.ci.run_tests.run_batch", side_effect=[result, result]):
+                proc = start_runner(
+                    [
+                        "--workers",
+                        "1",
+                        "--batch-size",
+                        "1",
+                        "--test-list",
+                        str(test_list_path),
+                        "--test-command",
+                        "echo fake-run {test_list}",
+                        "unused-binary",
+                    ]
+                )
+        finally:
+            test_list_path.unlink(missing_ok=True)
+
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        self.assertEqual(proc.stdout.count(".................................................."), 2)
+        self.assertIn("[ 50%]", proc.stdout)
+        self.assertIn("[100%]", proc.stdout)
 
     def test_aggregates_skipped_tests_from_multiple_batches(self):
         test_list_path = create_temp_file("test/sql/a.test\ntest/sql/b.test\n")
@@ -775,7 +848,12 @@ require windows: 2
                 returncode=0, passed_tests=1, failed_tests=0, skipped_tests=0, elapsed_seconds=0.0
             ),
             run_tests.ConfigRunResult(
-                returncode=1, passed_tests=0, failed_tests=1, skipped_tests=0, elapsed_seconds=0.0
+                returncode=1,
+                passed_tests=0,
+                failed_tests=1,
+                skipped_tests=0,
+                elapsed_seconds=0.0,
+                failed_test_names=("test/sql/fast.test",),
             ),
         ]
 
@@ -800,6 +878,8 @@ require windows: 2
 
         self.assertEqual(proc.returncode, 1, proc.stdout + proc.stderr)
         self.assertIn("error: stabilization rerun failure detected", proc.stdout)
+        self.assertIn("reproduce all failed tests:", proc.stdout)
+        self.assertIn("run '\"test/sql/fast.test\"'", proc.stdout)
 
     def test_retries_failed_fake_job(self):
         test_list_path = create_temp_file("test/sql/a.test\n")
@@ -851,6 +931,7 @@ require windows: 2
         self.assertIn("recovered: passed on retry 1/1", proc.stdout)
         self.assertEqual(proc.stdout.count("fake failure"), 1)
         self.assertIn("ran tests: ", proc.stdout)
+        self.assertNotIn("reproduce all failed tests:", proc.stdout)
 
     def test_retries_timed_out_sleep_job(self):
         test_list_path = create_temp_file("test/sql/a.test\n")
@@ -956,6 +1037,106 @@ require windows: 2
         self.assertIn("details: Mismatch on row 1, column count_star()(index 1)", proc.stdout)
         self.assertNotIn("### failed test batch", proc.stdout)
         self.assertNotIn("attempts:", proc.stdout)
+
+    def test_final_reproducer_includes_every_failure_in_test_list_order(self):
+        test_names = ["test/sql/a.test", "Compiled test name", "test/sql/b.test"]
+        test_list_path = create_temp_file("\n".join(test_names) + "\n")
+        stdout = """
+-------------------------------------------------------------------------------
+Compiled test name
+-------------------------------------------------------------------------------
+/repo/test.cpp:10
+...............................................................................
+
+/repo/test.cpp:12: FAILED:
+  REQUIRE( false )
+with expansion:
+  false
+"""
+        stderr = """
+1. test/sql/b.test:7
+================================================================================
+Error: Catalog Error: b failed
+================================================================================
+2. test/sql/a.test:9
+================================================================================
+Error: Catalog Error: a failed
+================================================================================
+"""
+
+        try:
+            with mock.patch(
+                "scripts.ci.run_tests.run_batch",
+                return_value={
+                    "failed": True,
+                    "stdout": stdout,
+                    "stderr": stderr,
+                    "message": None,
+                    "peak_rss_bytes": 0,
+                },
+            ):
+                proc = start_runner(
+                    [
+                        "--workers",
+                        "1",
+                        "--batch-size",
+                        "3",
+                        "--test-list",
+                        str(test_list_path),
+                        "--test-command",
+                        "echo fake-run {test_list}",
+                        "unused-binary",
+                    ]
+                )
+        finally:
+            test_list_path.unlink(missing_ok=True)
+
+        self.assertEqual(proc.returncode, 1, proc.stdout + proc.stderr)
+        self.assertIn("reproduce all failed tests:", proc.stdout)
+        command = proc.stdout.rstrip().splitlines()[-1]
+        self.assertEqual(
+            shlex.split(command),
+            ["run", '"test/sql/a.test","Compiled test name","test/sql/b.test"'],
+        )
+
+    def test_final_reproducer_unions_failures_across_exhausted_retries(self):
+        test_list_path = create_temp_file("test/sql/a.test\ntest/sql/b.test\n")
+
+        def failure(test_name):
+            return {
+                "failed": True,
+                "stdout": "",
+                "stderr": f"1. {test_name}:4\nError: failed\n",
+                "message": None,
+                "peak_rss_bytes": 0,
+            }
+
+        try:
+            with mock.patch(
+                "scripts.ci.run_tests.run_batch",
+                side_effect=[failure("test/sql/b.test"), failure("test/sql/a.test")],
+            ):
+                proc = start_runner(
+                    [
+                        "--workers",
+                        "1",
+                        "--batch-size",
+                        "2",
+                        "--retry",
+                        "1",
+                        "--test-list",
+                        str(test_list_path),
+                        "--test-command",
+                        "echo fake-run {test_list}",
+                        "unused-binary",
+                    ]
+                )
+        finally:
+            test_list_path.unlink(missing_ok=True)
+
+        self.assertEqual(proc.returncode, 1, proc.stdout + proc.stderr)
+        command = proc.stdout.rstrip().splitlines()[-1]
+        self.assertEqual(shlex.split(command), ["run", '"test/sql/a.test","test/sql/b.test"'])
 
     def test_failed_batch_includes_mismatch_context(self):
         test_list_path = create_temp_file("test/sql/a.test\n")
@@ -1171,6 +1352,54 @@ unittest is a Catch v2.13.7 host application.
             ],
         )
 
+    def test_empty_stdout_assertion_uses_sqllogictest_stderr_diagnostics(self):
+        batch = ["/tmp/fail.test"]
+        stdout = """
+Filters: /tmp/fail.test
+
+[0/1] (0%): /tmp/fail.test
+-------------------------------------------------------------------------------
+/tmp/fail.test
+-------------------------------------------------------------------------------
+/duckdb/test/sqlite/test_sqllogictest.cpp:47
+...............................................................................
+
+/tmp/fail.test:314: FAILED:
+
+
+[1/1] (100%): /tmp/fail.test took 0.015s
+===============================================================================
+test cases:  1 |  0 passed | 1 failed
+assertions: 28 | 27 passed | 1 failed
+"""
+        stderr = """
+1. /tmp/fail.test:314
+================================================================================
+Query unexpectedly failed (/tmp/fail.test:314)
+ (/tmp/fail.test:314)!
+================================================================================
+SELECT x'303132' IN (SELECT * FROM t1);
+================================================================================
+Actual result:
+================================================================================
+Binder Error: Cannot compare values of type BLOB and INTEGER in IN/ANY/ALL clause - an explicit cast is required
+
+LINE 1: SELECT x'303132' IN (SELECT * FROM t1)
+                            ^^^^^^^^^^^^^^^^^^
+"""
+        lines, reproduce_batch = run_tests.summarize_failure_output(None, stdout, stderr, batch)
+        stripped_lines = strip_ansi_lines(lines)
+
+        self.assertEqual(reproduce_batch, batch)
+        self.assertIn("error: FAIL /tmp/fail.test", stripped_lines)
+        self.assertIn(
+            "Binder Error: Cannot compare values of type BLOB and INTEGER in IN/ANY/ALL clause - "
+            "an explicit cast is required",
+            stripped_lines,
+        )
+        self.assertIn("LINE 1: SELECT x'303132' IN (SELECT * FROM t1)", stripped_lines)
+        self.assertIn("                            ^^^^^^^^^^^^^^^^^^", stripped_lines)
+
     def test_fatal_stdout_failure_uses_last_started_test_and_signal(self):
         batch = [
             "/duckdb_build_dir/build/release/_deps/vss_extension_fc-src/test/sql/slow/hnsw_reclaim_storage.test_slow",
@@ -1202,6 +1431,34 @@ Replacing deprecated string __TEST_DIR__ in path "__TEST_DIR__/hnsw_reclaim_spac
             reproduce_batch,
             ["/duckdb_build_dir/build/release/_deps/vss_extension_fc-src/test/sql/hnsw/hnsw_lateral_join_group.test"],
         )
+
+    def test_fatal_stdout_failure_preserves_stacktrace(self):
+        batch = ["test/sql/crash.test"]
+        stdout = """
+[0/1] (0%): test/sql/crash.test
+/duckdb/test/sqlite/test_sqllogictest.cpp:41: FAILED:
+  {Unknown expression after the reported line}
+due to a fatal error condition:
+  SIGSEGV - Segmentation violation signal
+
+/duckdb/build/release/test/unittest(duckdb::CrashHere()+0x12) [0x1234]
+/duckdb/build/release/src/libduckdb.so(duckdb::Execute()+0x34) [0x5678]
+===============================================================================
+test cases: 1 | 1 failed
+"""
+        lines, reproduce_batch = run_tests.summarize_failure_output(None, stdout, "", batch, returncode=-11)
+        self.assertEqual(
+            strip_ansi_lines(lines)[1:],
+            [
+                "error: FAIL test/sql/crash.test",
+                "",
+                "SIGSEGV - Segmentation violation signal",
+                "",
+                "/duckdb/build/release/test/unittest(duckdb::CrashHere()+0x12) [0x1234]",
+                "/duckdb/build/release/src/libduckdb.so(duckdb::Execute()+0x34) [0x5678]",
+            ],
+        )
+        self.assertEqual(reproduce_batch, batch)
 
     def test_signal_only_failure_prefers_returncode_over_unrelated_stdout(self):
         batch = ["test/sql/crash.test"]
@@ -1277,6 +1534,33 @@ READ of size 4 at 0xdeadbeef thread T0
         self.assertEqual(reproduce_batch, ["test/sql/asan.test"])
         self.assertNotIn(run_tests.format_signal_summary(-6), lines)
 
+    def test_thread_sanitizer_output_is_not_truncated(self):
+        batch = ["test/sql/threadsan.test"]
+        stderr = """
+WARNING: ThreadSanitizer: data race (pid=123)
+  Read of size 8 by thread T2:
+    #0 duckdb::ArenaAllocator::AlignNext()
+
+  Previous write of size 8 by thread T1:
+    #0 duckdb_tdigest::TDigest::updateCumulative()
+
+  Location is heap block allocated by main thread:
+    #0 operator new(unsigned long)
+
+SUMMARY: ThreadSanitizer: data race in duckdb::ArenaAllocator::AlignNext()
+==================
+ThreadSanitizer: reported 1 warnings
+"""
+        lines, reproduce_batch = run_tests.summarize_failure_output(None, "", stderr, batch, returncode=66)
+        stripped_lines = strip_ansi_lines(lines)
+
+        self.assertIn("WARNING: ThreadSanitizer: data race (pid=123)", stripped_lines)
+        self.assertIn("Previous write of size 8 by thread T1:", stripped_lines)
+        self.assertIn("Location is heap block allocated by main thread:", stripped_lines)
+        self.assertIn("SUMMARY: ThreadSanitizer: data race in duckdb::ArenaAllocator::AlignNext()", stripped_lines)
+        self.assertIn("ThreadSanitizer: reported 1 warnings", stripped_lines)
+        self.assertEqual(reproduce_batch, batch)
+
     def test_stdout_failed_block_extracts_explicit_message_reason(self):
         batch = ["/tmp/a.test", "/tmp/fail.test"]
         stdout = """
@@ -1321,10 +1605,10 @@ Run with -? for options
 -------------------------------------------------------------------------------
 Test Progress Bar Fast
 -------------------------------------------------------------------------------
-{progress_bar_path}:91
+{progress_bar_path}:102
 ...............................................................................
 
-{progress_bar_path}:73: FAILED:
+{progress_bar_path}:84: FAILED:
   REQUIRE( cur_rows_read == total_cardinality )
 with expansion:
   20000 (0x4e20) == 100020002 (0x5f62f22)
@@ -1344,19 +1628,106 @@ assertions: 359 | 358 passed | 1 failed
             [
                 "error: FAIL Test Progress Bar Fast",
                 "",
-                "    70          if (std::getenv(\"FORCE_ASYNC_SINK_SOURCE\") != nullptr) {",
-                "    71              return;",
-                "    72          }",
-                "  > 73          error.SetError([cur_rows_read, total_cardinality]() { REQUIRE(cur_rows_read == total_cardinality); });",
-                "    74      }",
-                "    75  }",
-                "    76  void Start() {",
+                '    81          if (std::getenv("FORCE_ASYNC_SINK_SOURCE") != nullptr) {',
+                "    82              return;",
+                "    83          }",
+                "  > 84          error.SetError([cur_rows_read, total_cardinality]() { REQUIRE(cur_rows_read == total_cardinality); });",
+                "    85      }",
+                "    86  }",
+                "    87  void Start() {",
                 "",
                 "FAILED: REQUIRE( cur_rows_read == total_cardinality )",
                 "  with expansion:",
                 "20000 (0x4e20) == 100020002 (0x5f62f22)",
             ],
         )
+
+    def test_msvc_catch_assertion_location_is_parsed(self):
+        # MSVC builds of Catch print source locations as "path(line):" instead of "path:line:"
+        progress_bar_path = REPO_ROOT / "test" / "api" / "test_progress_bar.cpp"
+        batch = [
+            "Test Progress Bar Fast",
+            "Test UUID API",
+        ]
+        stdout = """
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+unittest is a Catch v2.13.7 host application.
+Run with -? for options
+
+-------------------------------------------------------------------------------
+Test Progress Bar Fast
+-------------------------------------------------------------------------------
+{progress_bar_path}(102)
+...............................................................................
+
+{progress_bar_path}(84): FAILED:
+  REQUIRE( cur_rows_read == total_cardinality )
+with expansion:
+  20000 (0x4e20) == 100020002 (0x5f62f22)
+
+[2/2] (100%): Test UUID API took 0.079s
+===============================================================================
+test cases:  2 |   1 passed | 1 failed
+assertions: 359 | 358 passed | 1 failed
+""".format(
+            progress_bar_path=progress_bar_path
+        )
+        stderr = ""
+        lines, reproduce_batch = run_tests.summarize_failure_output(None, stdout, stderr, batch)
+        self.assertEqual(reproduce_batch, ["Test Progress Bar Fast"])
+        self.assertEqual(
+            strip_ansi_lines(lines)[1:],
+            [
+                "error: FAIL Test Progress Bar Fast",
+                "",
+                '    81          if (std::getenv("FORCE_ASYNC_SINK_SOURCE") != nullptr) {',
+                "    82              return;",
+                "    83          }",
+                "  > 84          error.SetError([cur_rows_read, total_cardinality]() { REQUIRE(cur_rows_read == total_cardinality); });",
+                "    85      }",
+                "    86  }",
+                "    87  void Start() {",
+                "",
+                "FAILED: REQUIRE( cur_rows_read == total_cardinality )",
+                "  with expansion:",
+                "20000 (0x4e20) == 100020002 (0x5f62f22)",
+            ],
+        )
+
+    def test_unparsable_batch_failure_dumps_raw_output(self):
+        # when we cannot extract a useful failure description, the raw unittest output should be dumped
+        # so that CI logs contain everything needed to diagnose the failure
+        batch = ["/tmp/a.test", "/tmp/b.test"]
+        stdout = """
+[0/2] (0%): /tmp/a.test
+[1/2] (50%): /tmp/a.test took 0.1s
+[1/2] (50%): /tmp/b.test
+===============================================================================
+test cases:  2 |   1 passed | 1 failed
+assertions: 16 | 15 passed | 1 failed
+"""
+        stderr = ""
+        lines, reproduce_batch = run_tests.summarize_failure_output(None, stdout, stderr, batch, returncode=1)
+        stripped_lines = strip_ansi_lines(lines)
+        self.assertIn("--- raw unittest stdout ---", stripped_lines)
+        self.assertIn("--- raw unittest stderr: empty ---", stripped_lines)
+        self.assertIn("assertions: 16 | 15 passed | 1 failed", stripped_lines)
+        self.assertEqual(reproduce_batch, ["/tmp/a.test", "/tmp/b.test"])
+
+    def test_informative_failures_do_not_dump_raw_output(self):
+        batch = ["/tmp/fail.test"]
+        stderr = """
+================================================================
+FAIL: /tmp/fail.test
+================================================================
+Wrong result in query! (/tmp/fail.test:25)!
+================================================================
+Mismatch on row 1, column 1
+[3, 1, 2] <> [1, 2, 3]
+"""
+        lines, _ = run_tests.summarize_failure_output(None, "", stderr, batch)
+        stripped_lines = strip_ansi_lines(lines)
+        self.assertFalse(any(line.startswith("--- raw unittest") for line in stripped_lines))
 
     def test_generic_failure_merges_query_diagnostics_with_assertion_failure(self):
         remote_optimizer_path = REPO_ROOT / "test" / "extension" / "test_remote_optimizer.cpp"
@@ -1413,7 +1784,7 @@ For more information, see https://duckdb.org/docs/current/dev/internal_errors
                 "    150  if (kill(pid, SIGKILL) != 0) {",
                 "    151      FAIL();",
                 "",
-                "Query failed with message: INTERNAL Error: Failed to read \"8\" bytes from socket - read 0 instead",
+                'Query failed with message: INTERNAL Error: Failed to read "8" bytes from socket - read 0 instead',
                 "Stack Trace:",
                 "0        _ZN6duckdb9Exception6ToJSONENS_13ExceptionTypeERKNSt3__112basic_stringIcNS2_11char_traitsIcEENS2_9allocatorIcEEEE + 48",
                 "1        _ZN6duckdb17InternalExceptionC1ERKNSt3__112basic_stringIcNS1_11char_traitsIcEENS1_9allocatorIcEEEE + 32",
@@ -1484,7 +1855,7 @@ For more information, see https://duckdb.org/docs/current/dev/internal_errors
                 "    30  (FORMAT PARQUET, PARTITION_BY (p), ORDER_BY (p, v), ROW_GROUP_SIZE 2048);",
                 "",
                 ""
-                "INTERNAL Error: Assertion triggered in file \"/Users/sander/dev/duckdb/duckdb/src/execution/operator/persistent/physical_copy_to_file.cpp\" on line 1335: batch_state.mode == PartitionedCopyBatchMode::PREPARING",
+                'INTERNAL Error: Assertion triggered in file "/Users/sander/dev/duckdb/duckdb/src/execution/operator/persistent/physical_copy_to_file.cpp" on line 1335: batch_state.mode == PartitionedCopyBatchMode::PREPARING',
                 "Stack Trace:",
                 "0        duckdb::Exception::Exception(duckdb::ExceptionType, std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char>> const&) + 288",
                 "1        duckdb::InternalException::InternalException<char const*&, int&, char const*&>(std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char>> const&, char const*&, int&, char const*&) + 396",
@@ -1532,6 +1903,47 @@ For more information, see https://duckdb.org/docs/current/dev/internal_errors
                 "    4  }",
             ],
         )
+
+    def test_snippet_ignores_line_number_past_end_of_file(self):
+        snippet_test_path = create_temp_file("query I\nSELECT 42\n----\n42\n")
+        try:
+            self.assertEqual(run_tests.render_test_snippet(str(snippet_test_path), 4000), [])
+            self.assertEqual(run_tests.render_context_snippet(str(snippet_test_path), 4000), [])
+        finally:
+            snippet_test_path.unlink(missing_ok=True)
+
+    def test_assertion_source_line_is_not_applied_to_the_test_file(self):
+        # the assertion location points at a C++ source that is not present, so it renders no snippet of its own
+        test_path = create_temp_file("query I\nSELECT 42\n----\n42\n")
+        stdout = textwrap.dedent(
+            f"""
+            [1/2] (50%): {test_path}
+            -------------------------------------------------------------------------------
+            {test_path}
+            -------------------------------------------------------------------------------
+            /elsewhere/test/sqlite/sqllogic_test_runner.cpp:4000: FAILED:
+              REQUIRE( result->success )
+            with expansion:
+              false
+            """
+        )
+        try:
+            lines, reproduce_batch = run_tests.summarize_failure_output(None, stdout, "", [str(test_path)])
+        finally:
+            test_path.unlink(missing_ok=True)
+
+        self.assertEqual(
+            strip_ansi_lines(lines),
+            [
+                run_tests.FAILURE_MARKER,
+                f"error: FAIL {test_path}",
+                "",
+                "FAILED: REQUIRE( result->success )",
+                "  with expansion:",
+                "false",
+            ],
+        )
+        self.assertEqual(reproduce_batch, [str(test_path)])
 
     def test_timeout_names_last_file_in_multi_test_batch(self):
         lines, reproduce_batch = run_tests.summarize_failure_output(
@@ -1659,6 +2071,56 @@ For more information, see https://duckdb.org/docs/current/dev/internal_errors
         self.assertEqual(proc.returncode, 1, proc.stdout + proc.stderr)
         self.assertIn("error: no tests selected for config 'test/configs/empty.json'", proc.stdout)
         self.assertIn("error: 1 config runs failed: test/configs/empty.json", proc.stdout)
+
+    def test_final_reproducer_preserves_flags_and_failed_configs(self):
+        test_list_path = create_temp_file("test/sql/a.test\ntest/sql/b.test\n")
+        run_results = [
+            run_tests.ConfigRunResult(
+                returncode=0, passed_tests=2, failed_tests=0, skipped_tests=0, elapsed_seconds=0.0
+            ),
+            run_tests.ConfigRunResult(
+                returncode=1,
+                passed_tests=1,
+                failed_tests=1,
+                skipped_tests=0,
+                elapsed_seconds=0.0,
+                failed_test_names=("test/sql/b.test",),
+            ),
+        ]
+
+        try:
+            with mock.patch("scripts.ci.run_tests.run_tests", side_effect=run_results):
+                proc = start_runner(
+                    [
+                        "--workers",
+                        "1",
+                        "--test-list",
+                        str(test_list_path),
+                        "--test-flags",
+                        "--force-storage --force-reload",
+                        "--test-config",
+                        "test/configs/pass.json",
+                        "--test-config",
+                        "test/configs/fail.json",
+                        "build/reldebug/test/unittest",
+                    ]
+                )
+        finally:
+            test_list_path.unlink(missing_ok=True)
+
+        self.assertEqual(proc.returncode, 1, proc.stdout + proc.stderr)
+        command = proc.stdout.rstrip().splitlines()[-1]
+        self.assertEqual(
+            shlex.split(command),
+            [
+                "build/reldebug/test/run",
+                "--test-flags",
+                "--force-storage --force-reload",
+                "--test-config",
+                "test/configs/fail.json",
+                '"test/sql/b.test"',
+            ],
+        )
 
     def test_ci_groups_close_when_all_configs_pass(self):
         listed_tests_path = create_temp_file(

@@ -18,40 +18,19 @@ struct SljitFullPipelineScheduleFacts {
 	bool uses_extended_source_fetch_budget = false;
 };
 
-struct SljitHashJoinDelimJoinSinkFacts {
-	idx_t first_hash_join_idx = DConstants::INVALID_INDEX;
-	idx_t final_hash_join_idx = DConstants::INVALID_INDEX;
-	idx_t sink_idx = DConstants::INVALID_INDEX;
-};
-
-struct SljitHashJoinAppendSinkFacts {
-	idx_t first_hash_join_idx = DConstants::INVALID_INDEX;
-	idx_t final_hash_join_idx = DConstants::INVALID_INDEX;
-	idx_t sink_idx = DConstants::INVALID_INDEX;
-};
-
+//! ops [0, first_hash_join_idx) form the source prefix (see SljitFullPipelineSourcePrefixEnd).
 struct SljitHashJoinBuildSinkFacts {
-	idx_t pre_projection_idx = DConstants::INVALID_INDEX;
-	idx_t filter_idx = DConstants::INVALID_INDEX;
-	idx_t filter_projection_idx = DConstants::INVALID_INDEX;
 	idx_t first_hash_join_idx = DConstants::INVALID_INDEX;
 	idx_t final_hash_join_idx = DConstants::INVALID_INDEX;
 	idx_t projection_idx = DConstants::INVALID_INDEX;
 	idx_t sink_idx = DConstants::INVALID_INDEX;
-
-	bool HasPreProjection() const {
-		return pre_projection_idx != DConstants::INVALID_INDEX;
-	}
-
-	bool HasFilterProjection() const {
-		return filter_idx != DConstants::INVALID_INDEX && filter_projection_idx != DConstants::INVALID_INDEX;
-	}
 
 	bool HasProjection() const {
 		return projection_idx != DConstants::INVALID_INDEX;
 	}
 };
 
+//! ops [0, sink_idx) form the source prefix (see SljitFullPipelineSourcePrefixEnd).
 struct SljitSourceHashJoinBuildSinkFacts {
 	idx_t sink_idx = DConstants::INVALID_INDEX;
 };
@@ -65,18 +44,13 @@ struct SljitSourceFilterAggregateFacts {
 	idx_t aggregate_idx = DConstants::INVALID_INDEX;
 };
 
+//! ops [0, hash_join_idx) form the source prefix (see SljitFullPipelineSourcePrefixEnd).
 struct SljitJoinFilterAggregateFacts {
-	idx_t first_projection_idx = DConstants::INVALID_INDEX;
-	idx_t final_projection_idx = DConstants::INVALID_INDEX;
 	idx_t hash_join_idx = DConstants::INVALID_INDEX;
 	idx_t filter_idx = DConstants::INVALID_INDEX;
 	idx_t first_post_join_projection_idx = DConstants::INVALID_INDEX;
 	idx_t final_post_join_projection_idx = DConstants::INVALID_INDEX;
 	idx_t aggregate_idx = DConstants::INVALID_INDEX;
-
-	bool HasProjectionPrefix() const {
-		return first_projection_idx != DConstants::INVALID_INDEX;
-	}
 
 	bool HasPostJoinProjection() const {
 		return first_post_join_projection_idx != DConstants::INVALID_INDEX;
@@ -201,12 +175,13 @@ struct SljitProjectionFilterProjectionNativeTailFacts {
 };
 
 bool SljitFullPipelineOpIsAt(const vector<SljitExecutableRegionOp> &ops, idx_t op_idx, SljitNativeRegionOpKind kind);
+//! The source prefix is the longest run of ops in [0, limit) that only select rows (FILTER) or compute columns
+//! (PROJECTION) ahead of the recipe's first operator; recipes bind it as generated-filter and projection-chain steps.
+//! Returns the run's end.
+idx_t SljitFullPipelineSourcePrefixEnd(const vector<SljitExecutableRegionOp> &ops, idx_t limit);
 bool SljitFullPipelineHashJoinProbeIsMatchedProbeAndBuild(const vector<SljitExecutableRegionOp> &ops, idx_t op_idx);
 
 SljitFullPipelineScheduleFacts SljitAnalyzeFullPipelineScheduleFacts(const vector<SljitExecutableRegionOp> &ops);
-bool SljitTryAnalyzeHashJoinDelimJoinSink(const vector<SljitExecutableRegionOp> &ops,
-                                          SljitHashJoinDelimJoinSinkFacts &facts);
-bool SljitTryAnalyzeHashJoinAppendSink(const vector<SljitExecutableRegionOp> &ops, SljitHashJoinAppendSinkFacts &facts);
 bool SljitTryAnalyzeHashJoinBuildSink(const vector<SljitExecutableRegionOp> &ops, SljitHashJoinBuildSinkFacts &facts);
 bool SljitTryAnalyzeSourceHashJoinBuildSink(const vector<SljitExecutableRegionOp> &ops,
                                             SljitSourceHashJoinBuildSinkFacts &facts);

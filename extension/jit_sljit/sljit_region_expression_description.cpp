@@ -295,9 +295,6 @@ static string DescribeNativeRegionExpressionInternal(const SljitNativeRegionExpr
 	case SljitNativeRegionExpressionKind::INTEGER_BETWEEN:
 		result = NativeIntegerBetweenReason(expr.integer_kind, expr.not_between);
 		break;
-	case SljitNativeRegionExpressionKind::CONSTANT_OR_NULL:
-		result = "native:constant-or-null";
-		break;
 	case SljitNativeRegionExpressionKind::STRING_COMPRESS:
 		result = "native:string-compress:" + std::to_string(expr.string_compress_target_size);
 		break;
@@ -324,13 +321,6 @@ static string DescribeNativeRegionExpressionInternal(const SljitNativeRegionExpr
 		break;
 	case SljitNativeRegionExpressionKind::PREDICATE:
 		result = "native:boolean-predicate";
-		break;
-	case SljitNativeRegionExpressionKind::EXPRESSION_TREE:
-		result = "native:expression-tree:sources=" +
-		         DescribeSljitExpressionSourceIndexList(expr.expression_tree_source_indices);
-		if (expr.expression_tree) {
-			result += ":tree=" + DescribeSljitExpressionTreeNode(*expr.expression_tree);
-		}
 		break;
 	case SljitNativeRegionExpressionKind::TYPED_EXPRESSION_TREE:
 		result = "native:typed-expression-tree:sources=" +
@@ -408,11 +398,6 @@ string DescribeNativeRegionExpressionSemantic(const SljitNativeRegionExpressionP
 	key.Bool("not_between", expr.not_between);
 	key.Bool("lower_inclusive", expr.lower_inclusive);
 	key.Bool("upper_inclusive", expr.upper_inclusive);
-	key.ValueField("constant_or_null", expr.constant_or_null.constant);
-	key.Bool("constant_or_null_guard", expr.constant_or_null.guard_has_null_constant);
-	for (auto value : expr.constant_or_null.guard_source_indices) {
-		key.Number("constant_or_null_source", value);
-	}
 	key.Bool("references_region_input", expr.references_region_input);
 	key.Bool("flat_nullable_fast_path", expr.emit_flat_nullable_fast_path);
 	key.Bool("predicate", expr.predicate != nullptr);

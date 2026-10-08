@@ -8,8 +8,6 @@
 
 #pragma once
 
-#include "sljit_append_sink_runtime.hpp"
-#include "sljit_delim_join_sink_runtime.hpp"
 #include "sljit_full_pipeline_primitive_contract.hpp"
 #include "sljit_full_pipeline_runtime.hpp"
 #include "sljit_grouped_aggregate_update_runtime_state.hpp"
@@ -30,8 +28,6 @@ struct SljitFullPipelineTerminalRuntimeState {
 	SljitGroupedAggregateUpdateRuntimeState grouped_aggregate_update;
 	SljitPostJoinProjectionAggregateRuntimeState post_join_projection_aggregate;
 	SljitHashJoinBuildSinkRuntimeState hash_join_build_sink;
-	SljitDelimJoinSinkRuntimeState delim_join_sink;
-	SljitAppendSinkRuntimeState append_sink;
 };
 
 template <class EXECUTE_NATIVE_FULL_PIPELINE_FROM>
@@ -75,13 +71,6 @@ public:
 		case SljitFullPipelinePrimitiveKind::HASH_JOIN_BUILD_SINK:
 			prepared = true;
 			break;
-		case SljitFullPipelinePrimitiveKind::DELIM_JOIN_SINK:
-			prepared = state.delim_join_sink.Prepare(runtime, ops, terminal_step.delim_join_sink);
-			break;
-		case SljitFullPipelinePrimitiveKind::APPEND_SINK:
-			state.append_sink.Prepare(runtime, ops, terminal_step.append_sink);
-			prepared = true;
-			break;
 		case SljitFullPipelinePrimitiveKind::NATIVE_TAIL_DELEGATION:
 			prepared = true;
 			break;
@@ -113,12 +102,6 @@ public:
 		case SljitFullPipelinePrimitiveKind::HASH_JOIN_BUILD_SINK:
 			(void)have_more_output;
 			return ExecuteHashJoinBuildSink(runtime, result, ops, scratch, terminal_step, input, processed_batches);
-		case SljitFullPipelinePrimitiveKind::DELIM_JOIN_SINK:
-			return state.delim_join_sink.Execute(runtime, result, ops, scratch, terminal_step.delim_join_sink, input,
-			                                     processed_batches);
-		case SljitFullPipelinePrimitiveKind::APPEND_SINK:
-			return state.append_sink.Execute(runtime, result, ops, scratch, terminal_step.append_sink, input,
-			                                 processed_batches);
 		case SljitFullPipelinePrimitiveKind::NATIVE_TAIL_DELEGATION:
 			return native_tail_delegation.Execute(runtime, result, ops, scratch, terminal_step, input,
 			                                      processed_batches);
@@ -156,11 +139,6 @@ public:
 			return state.post_join_projection_aggregate.Flush(runtime, result, ops, scratch);
 		case SljitFullPipelinePrimitiveKind::HASH_JOIN_BUILD_SINK:
 			return false;
-		case SljitFullPipelinePrimitiveKind::DELIM_JOIN_SINK:
-			return state.delim_join_sink.Flush(runtime, result, ops, scratch, terminal_step.delim_join_sink,
-			                                   processed_batches);
-		case SljitFullPipelinePrimitiveKind::APPEND_SINK:
-			return state.append_sink.Flush(runtime, result, ops, scratch, terminal_step.append_sink, processed_batches);
 		case SljitFullPipelinePrimitiveKind::NATIVE_TAIL_DELEGATION:
 			native_tail_delegation.Finalize(scratch);
 			return false;

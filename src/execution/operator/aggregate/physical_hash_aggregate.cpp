@@ -5,7 +5,6 @@
 #include "duckdb/common/mutex.hpp"
 #include "duckdb/common/optional_idx.hpp"
 #include "duckdb/common/unordered_map.hpp"
-#include "duckdb/common/types/row/tuple_data_row_location_remap.hpp"
 #include "duckdb/common/vector_operations/vector_operations.hpp"
 #include "duckdb/execution/aggregate_hashtable.hpp"
 #include "duckdb/execution/execution_operator_runtime.hpp"
@@ -709,7 +708,8 @@ BuildHashAggregatePrimitiveUpdateBinding(const PhysicalHashAggregate &op, const 
 			result.blocker = "hash-aggregate-primitive-update-requires-no-payload";
 			return result;
 		}
-		if (function.HasStateSizeCallback() && function.GetStateSizeCallback()(function) != abi.state_size) {
+		AggregateStateInput state_input(function, aggregate.BindInfo().get());
+		if (function.HasStateSizeCallback() && function.GetStateSizeCallback()(state_input) != abi.state_size) {
 			result.blocker = "hash-aggregate-primitive-update-state-size-mismatch";
 			return result;
 		}
@@ -921,9 +921,9 @@ void HashAggregateDirectDistinctCountState::ResizeFixedPairs(idx_t required_coun
 		resized_hashes[offset] = hash;
 		resized_groups[offset] = group_address;
 		resized_occupied[offset] = 1;
-		FastMemcpy(resized_payloads.get() + offset * direct_fixed_distinct_pair_payload_width,
-		           direct_fixed_distinct_pair_payloads.get() + old_idx * direct_fixed_distinct_pair_payload_width,
-		           direct_fixed_distinct_pair_payload_width);
+		memcpy(resized_payloads.get() + offset * direct_fixed_distinct_pair_payload_width,
+		       direct_fixed_distinct_pair_payloads.get() + old_idx * direct_fixed_distinct_pair_payload_width,
+		       direct_fixed_distinct_pair_payload_width);
 	}
 	direct_fixed_distinct_pair_hashes = std::move(resized_hashes);
 	direct_fixed_distinct_pair_groups = std::move(resized_groups);
@@ -978,7 +978,7 @@ bool HashAggregateDirectDistinctCountState::TryInsertFixedPairs(idx_t state_valu
 				direct_fixed_distinct_pair_hashes[offset] = hash;
 				direct_fixed_distinct_pair_groups[offset] = group_address;
 				direct_fixed_distinct_pair_occupied[offset] = 1;
-				FastMemcpy(entry_payload, payload, payload_width);
+				memcpy(entry_payload, payload, payload_width);
 				direct_fixed_distinct_pair_count++;
 				auto state = reinterpret_cast<int64_t *>(group_address + state_value_offset);
 				(*state)++;
@@ -1506,7 +1506,8 @@ static bool TryGetDistinctCountFinalizeFastPath(const PhysicalHashAggregate &op,
 	    abi.state_value_offset + sizeof(int64_t) > abi.state_size) {
 		return false;
 	}
-	if (function.HasStateSizeCallback() && function.GetStateSizeCallback()(function) != abi.state_size) {
+	AggregateStateInput state_input(function, aggregate.BindInfo().get());
+	if (function.HasStateSizeCallback() && function.GetStateSizeCallback()(state_input) != abi.state_size) {
 		return false;
 	}
 	auto &layout = grouping_data.table_data.GetLayout();
@@ -1627,7 +1628,7 @@ static bool TryFinalizeDistinctCountFastPath(ExecutionContext &context, const Ha
 
 void HashAggregateDistinctFinalizeEvent::Schedule() {
 	auto n_tasks = CreateGlobalSources();
-	n_tasks = MinValue<idx_t>(n_tasks, NumericCast<idx_t>(TaskScheduler::GetScheduler(context).NumberOfThreads()));
+	n_tasks = MinValue<idx_t>(n_tasks, TaskScheduler::GetScheduler(context).NumberOfThreads());
 	vector<shared_ptr<Task>> tasks;
 	for (idx_t i = 0; i < n_tasks; i++) {
 		tasks.push_back(make_uniq<HashAggregateDistinctFinalizeTask>(*pipeline, shared_from_this(), op, gstate));
@@ -1985,7 +1986,8 @@ static SourceResultType ScanHashAggregateState(ExecutionContext &context, DataCh
 		auto &grouping_gstate = sink_gstate.grouping_states[radix_idx];
 
 		OperatorSourceInput source_input {*gstate.radix_states[radix_idx], *lstate.radix_states[radix_idx],
-		                                  input.interrupt_state, input.stage_recorder};
+		                                  input.interrupt_state, SourceBatchIndexState::UNCHANGED,
+		                                  input.stage_recorder};
 		auto res = radix_table.GetData(context, chunk, *grouping_gstate.table_state, source_input);
 		if (res == SourceResultType::BLOCKED) {
 			return res;
@@ -2032,7 +2034,8 @@ static SourceResultType ScanHashAggregatePrimitiveState(ExecutionContext &contex
 		auto &radix_table = grouping.table_data;
 		auto &grouping_gstate = sink_gstate.grouping_states[radix_idx];
 		OperatorSourceInput source_input {*gstate.radix_states[radix_idx], *lstate.radix_states[radix_idx],
-		                                  input.interrupt_state, input.stage_recorder};
+		                                  input.interrupt_state, SourceBatchIndexState::UNCHANGED,
+		                                  input.stage_recorder};
 		auto res =
 		    radix_table.GetPrimitiveAggregateStateBatch(context, batch, *grouping_gstate.table_state, source_input);
 		if (res == SourceResultType::BLOCKED) {

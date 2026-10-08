@@ -27,13 +27,13 @@ struct ExecutionRegionTableFunctionState : public GlobalTableFunctionState {
 	idx_t offset = 0;
 };
 
-static inline void AddExecutionRegionTableFunctionColumn(vector<LogicalType> &return_types, vector<string> &names,
+static inline void AddExecutionRegionTableFunctionColumn(vector<LogicalType> &return_types, vector<Identifier> &names,
                                                          const char *name, LogicalType type) {
 	names.emplace_back(name);
 	return_types.emplace_back(type);
 }
 
-static inline void AddExecutionRegionTableFunctionColumns(vector<LogicalType> &return_types, vector<string> &names,
+static inline void AddExecutionRegionTableFunctionColumns(vector<LogicalType> &return_types, vector<Identifier> &names,
                                                           const ExecutionRegionTraceColumn *columns,
                                                           idx_t column_count) {
 	for (idx_t column_idx = 0; column_idx < column_count; column_idx++) {
@@ -78,7 +78,8 @@ static constexpr idx_t EXECUTION_REGION_RUNNER_COST_PROFILE_COLUMN_COUNT =
 //! throws if the walk and the constant ever disagree, so schema drift fails loudly.
 static constexpr idx_t EXECUTION_REGION_RUNNER_COST_WORK_COLUMN_COUNT = 24;
 
-static inline void AddExecutionRegionRunnerCostWorkColumns(vector<LogicalType> &return_types, vector<string> &names) {
+static inline void AddExecutionRegionRunnerCostWorkColumns(vector<LogicalType> &return_types,
+                                                           vector<Identifier> &names) {
 	PhysicalRunnerCostProfile profile;
 	idx_t column_count = 0;
 	ForEachPhysicalRunnerCostWorkField(profile, profile, [&](const char *name, int64_t &, int64_t &) {
@@ -136,7 +137,7 @@ static inline void AppendExecutionRegionRunnerCostInputScope(Vector &output, con
 	AppendExecutionRegionNullableString(output, input_scope);
 }
 
-static inline void AddExecutionRegionStageTimingColumns(vector<LogicalType> &return_types, vector<string> &names) {
+static inline void AddExecutionRegionStageTimingColumns(vector<LogicalType> &return_types, vector<Identifier> &names) {
 	AddExecutionRegionTableFunctionColumns(return_types, names, EXECUTION_REGION_STAGE_TIMING_COLUMNS,
 	                                       EXECUTION_REGION_STAGE_TIMING_COLUMN_COUNT);
 }
@@ -346,7 +347,8 @@ static inline void AppendExecutionRegionCandidateTraceColumn(Vector &output, idx
 	}
 }
 
-static inline void AddExecutionRegionCandidateTraceColumns(vector<LogicalType> &return_types, vector<string> &names) {
+static inline void AddExecutionRegionCandidateTraceColumns(vector<LogicalType> &return_types,
+                                                           vector<Identifier> &names) {
 	for (const auto &column : EXECUTION_REGION_CANDIDATE_TRACE_COLUMNS) {
 		names.emplace_back(column.name);
 		return_types.emplace_back(column.type);

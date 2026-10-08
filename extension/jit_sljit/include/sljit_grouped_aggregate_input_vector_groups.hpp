@@ -8,7 +8,6 @@
 
 #pragma once
 
-#include "sljit_date_year_runtime.hpp"
 #include "sljit_grouped_aggregate_group_key_source.hpp"
 #include "sljit_region_adapter_scratch.hpp"
 
@@ -269,37 +268,6 @@ struct SljitInputVectorGroupCastMaterializeDispatch {
 };
 
 template <class DST>
-static void SljitMaterializeDateYearCompressedInputVectorGroup(Vector &source, Vector &target, idx_t count,
-                                                               int64_t minimum) {
-	target.SetVectorType(VectorType::FLAT_VECTOR);
-	auto &target_validity = FlatVector::ValidityMutable(target);
-	target_validity.Reset(count);
-	target_validity.EnsureWritable();
-	target_validity.SetAllValid(count);
-	auto target_data = FlatVector::GetDataMutable<DST>(target);
-
-	UnifiedVectorFormat source_format;
-	source.ToUnifiedFormat(source_format);
-	auto source_data = UnifiedVectorFormat::GetData<int32_t>(source_format);
-	if (!source_format.validity.CanHaveNull()) {
-		for (idx_t row_idx = 0; row_idx < count; row_idx++) {
-			target_data[row_idx] = SljitDateYearCompressedGroupKeyOrThrow<DST>(
-			    source_data[source_format.sel->get_index(row_idx)], minimum);
-		}
-	} else {
-		for (idx_t row_idx = 0; row_idx < count; row_idx++) {
-			const auto source_idx = source_format.sel->get_index(row_idx);
-			if (!source_format.validity.RowIsValid(source_idx)) {
-				target_validity.SetInvalid(row_idx);
-				continue;
-			}
-			target_data[row_idx] = SljitDateYearCompressedGroupKeyOrThrow<DST>(source_data[source_idx], minimum);
-		}
-	}
-	FlatVector::SetSize(target, count);
-}
-
-template <class DST>
 static bool SljitMaterializeStringCompressedInputVectorGroup(Vector &source, Vector &target, idx_t count) {
 	target.SetVectorType(VectorType::FLAT_VECTOR);
 	auto &target_validity = FlatVector::ValidityMutable(target);
@@ -487,13 +455,6 @@ static bool SljitTryMaterializeInputVectorGroupSource(DataChunk &payload_input,
 			return false;
 		}
 		target.Reference(input);
-		return true;
-	case ExecutionRowPointerGroupKeyCastKind::DATE_YEAR_COMPRESS:
-		if (source.source_physical_type != PhysicalType::INT32 || source.source_type.id() != LogicalTypeId::DATE ||
-		    source.target_physical_type != PhysicalType::UINT8) {
-			return false;
-		}
-		SljitMaterializeDateYearCompressedInputVectorGroup<uint8_t>(input, target, count, source.cast_constant);
 		return true;
 	case ExecutionRowPointerGroupKeyCastKind::STRING_COMPRESS:
 		if (source.source_physical_type != PhysicalType::VARCHAR) {

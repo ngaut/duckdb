@@ -18,6 +18,7 @@
 #include "duckdb/execution/operator/join/physical_nested_loop_join.hpp"
 #include "duckdb/execution/operator/projection/physical_projection.hpp"
 #include "duckdb/execution/operator/scan/physical_table_scan.hpp"
+#include "duckdb/optimizer/expression_heuristics.hpp"
 #include "duckdb/parallel/pipeline.hpp"
 #include "duckdb/planner/expression/bound_aggregate_expression.hpp"
 #include "duckdb/planner/expression/bound_function_expression.hpp"
@@ -229,7 +230,8 @@ static ExecutionRegionCostFacts BuildExecutionRegionCostFacts(const ExecutionReg
 	RemoveExecutionRegionGeneratedAggregateUpdateNativeCost(result, candidate.traits);
 	const bool has_selected_view_materialization =
 	    candidate.traits.selected_hash_join_filter_materialization_count > 0 ||
-	    candidate.traits.selected_hash_join_view_materialization_count > 0;
+	    candidate.traits.selected_hash_join_view_materialization_count > 0 ||
+	    candidate.traits.materialized_hash_join_output_count > 0;
 	if ((has_filter || has_projection) && candidate.traits.generated_aggregate_update_count > 0 &&
 	    !has_selected_view_materialization) {
 		result.materialization_elision_count = 1;
@@ -630,7 +632,7 @@ static bool TryAccumulateExecutionRegionPhysicalScanCost(const PhysicalOperator 
 		                              filter.Filter(), GetExecutionRegionTableScanSourceInputType(scan, filter_idx),
 		                              filter_count, has_string_like);
 		if (can_generate) {
-			filter_cost += DuckDBCostModel::FilterCost(filter.Filter());
+			filter_cost += ExpressionHeuristics::Cost(filter.Filter());
 			generated_filter_count++;
 			if (has_string_like) {
 				const auto distinct_count = GetExecutionRegionTableScanDistinctCount(op, context, filter_idx);
@@ -938,9 +940,11 @@ static void FinalizeExecutionRegionPhysicalPipelineCostInput(Pipeline &pipeline,
 	    facts.traits.projection_count > 0;
 	const bool generated_projection_aggregate =
 	    facts.generated_aggregate_update_count > 0 && facts.traits.projection_count > 0;
-	if ((facts.generated_aggregate_update_count > 0 &&
-	     (facts.traits.filter_count > 0 || facts.traits.source_filter_expression_count > 0)) ||
-	    generated_filtered_reduction || generated_projection_aggregate) {
+	// A probe that materializes its output (a LEFT probe emits unmatched rows) leaves nothing to elide downstream.
+	if (facts.traits.materialized_hash_join_output_count == 0 &&
+	    ((facts.generated_aggregate_update_count > 0 &&
+	      (facts.traits.filter_count > 0 || facts.traits.source_filter_expression_count > 0)) ||
+	     generated_filtered_reduction || generated_projection_aggregate)) {
 		cost_input.materialization_elision_count = 1;
 	}
 	cost_input.source_filter_count = facts.traits.source_filter_count;

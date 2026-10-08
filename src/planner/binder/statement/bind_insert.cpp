@@ -20,15 +20,20 @@
 #include "duckdb/planner/expression_iterator.hpp"
 #include "duckdb/planner/expression_binder/where_binder.hpp"
 #include "duckdb/planner/expression_binder/update_binder.hpp"
+#include "duckdb/planner/expression/bound_columnref_expression.hpp"
+#include "duckdb/planner/expression/bound_constant_expression.hpp"
 #include "duckdb/parser/statement/update_statement.hpp"
 #include "duckdb/planner/expression/bound_default_expression.hpp"
 #include "duckdb/catalog/catalog_entry/index_catalog_entry.hpp"
 #include "duckdb/catalog/catalog_entry/table_catalog_entry.hpp"
+#include "duckdb/execution/expression_executor.hpp"
+#include "duckdb/function/scalar/struct_functions.hpp"
 #include "duckdb/parser/parsed_expression_iterator.hpp"
 #include "duckdb/storage/table_storage_info.hpp"
 #include "duckdb/parser/tableref/basetableref.hpp"
 #include "duckdb/parser/tableref/emptytableref.hpp"
 #include "duckdb/parser/tableref/subqueryref.hpp"
+#include "duckdb/parser/expression/lambda_expression.hpp"
 
 namespace duckdb {
 
@@ -47,7 +52,7 @@ unique_ptr<ParsedExpression> ExpandDefaultExpression(const ColumnDefinition &col
 	if (column.HasDefaultValue()) {
 		return column.DefaultValue().Copy();
 	} else {
-		return make_uniq<ConstantExpression>(Value(column.Type()));
+		return ConstantExpression::FromValue(Value(column.Type()));
 	}
 }
 
@@ -67,30 +72,84 @@ void Binder::ExpandDefaultInValuesList(InsertQueryNode &node, TableCatalogEntry 
 	idx_t expected_columns = node.columns.empty() ? table.GetColumns().PhysicalColumnCount() : node.columns.size();
 
 	// special case: check if we are inserting from a VALUES statement
-	if (values_list) {
-		auto &expr_list = values_list->Cast<ExpressionListRef>();
-		expr_list.expected_types.resize(expected_columns);
-		expr_list.expected_names.resize(expected_columns);
+	auto &expr_list = values_list->Cast<ExpressionListRef>();
+	expr_list.expected_types.resize(expected_columns);
+	expr_list.expected_names.resize(expected_columns);
 
-		D_ASSERT(!expr_list.values.empty());
-		CheckInsertColumnCountMismatch(expected_columns, expr_list.values[0].size(), !node.columns.empty(), table.name);
+	D_ASSERT(!expr_list.values.empty());
+	CheckInsertColumnCountMismatch(expected_columns, expr_list.values[0].size(), !node.columns.empty(), table.name);
 
-		// VALUES list!
-		for (idx_t col_idx = 0; col_idx < expected_columns; col_idx++) {
-			D_ASSERT(named_column_map.size() >= col_idx);
-			auto &table_col_idx = named_column_map[col_idx];
+	// VALUES list!
+	for (idx_t col_idx = 0; col_idx < expected_columns; col_idx++) {
+		D_ASSERT(named_column_map.size() >= col_idx);
+		auto &table_col_idx = named_column_map[col_idx];
 
-			// set the expected types as the types for the INSERT statement
-			auto &column = table.GetColumn(table_col_idx);
-			expr_list.expected_types[col_idx] = column.Type();
-			expr_list.expected_names[col_idx] = column.Name();
+		// set the expected types as the types for the INSERT statement
+		auto &column = table.GetColumn(table_col_idx);
+		expr_list.expected_types[col_idx] = table.GetExpectedTypeForInsert(column);
+		expr_list.expected_names[col_idx] = column.Name();
 
-			// now replace any DEFAULT values with the corresponding default expression
-			for (idx_t list_idx = 0; list_idx < expr_list.values.size(); list_idx++) {
-				TryReplaceDefaultExpression(expr_list.values[list_idx][col_idx], column);
+		// now replace any DEFAULT values with the corresponding default expression
+		for (idx_t list_idx = 0; list_idx < expr_list.values.size(); list_idx++) {
+			TryReplaceDefaultExpression(expr_list.values[list_idx][col_idx], column);
+		}
+	}
+}
+
+unique_ptr<LogicalOperator> Binder::ResolveInputProjection(LogicalInsert &insert,
+                                                           const IndexVector<idx_t, PhysicalIndex> &column_index_map,
+                                                           unique_ptr<LogicalOperator> root,
+                                                           const vector<LogicalType> &source_types) {
+	auto &table = insert.table;
+	auto source_bindings = root->GetColumnBindings();
+	vector<unique_ptr<Expression>> select_list;
+	for (auto &col : table.GetColumns().Physical()) {
+		auto storage_idx = col.StorageOid();
+		auto mapped_index = column_index_map.empty() ? storage_idx : column_index_map[col.Physical()];
+		if (mapped_index == DConstants::INVALID_INDEX) {
+			// Push default value
+			select_list.push_back(std::move(insert.bound_defaults[storage_idx]));
+			continue;
+		}
+		auto &original_type = source_types[mapped_index];
+		auto source_binding = source_bindings[mapped_index];
+		auto expression = table.GetDefaultExpressionForColumn(context, original_type, col.Type(), source_binding,
+		                                                      *insert.bound_defaults[storage_idx]);
+		if (!expression->HasQueryLocation() && root->type == LogicalOperatorType::LOGICAL_PROJECTION) {
+			expression->SetQueryLocation(root->expressions[mapped_index]->GetQueryLocation());
+		}
+		select_list.push_back(std::move(expression));
+	}
+
+	bool can_inline_projection = root->type == LogicalOperatorType::LOGICAL_PROJECTION;
+	if (can_inline_projection) {
+		for (auto &expression : root->expressions) {
+			if (expression->GetExpressionType() != ExpressionType::BOUND_COLUMN_REF) {
+				can_inline_projection = false;
+				break;
 			}
 		}
 	}
+	if (can_inline_projection) {
+		auto &child_projection = root->Cast<LogicalProjection>();
+		for (auto &expression : select_list) {
+			ExpressionIterator::EnumerateExpression(expression, [&](unique_ptr<Expression> &child) {
+				if (child->GetExpressionType() != ExpressionType::BOUND_COLUMN_REF) {
+					return;
+				}
+				auto &column_ref = child->Cast<BoundColumnRefExpression>();
+				if (column_ref.Binding().table_index != child_projection.table_index) {
+					return;
+				}
+				child = child_projection.expressions[column_ref.Binding().column_index]->Copy();
+			});
+		}
+		root = std::move(child_projection.children[0]);
+	}
+
+	auto projection = make_uniq<LogicalProjection>(GenerateTableIndex(), std::move(select_list));
+	projection->AddChild(std::move(root));
+	return std::move(projection);
 }
 
 void DoUpdateSetQualify(unique_ptr<ParsedExpression> &expr, const string &table_name,
@@ -196,7 +255,7 @@ unique_ptr<UpdateSetInfo> CreateSetInfoForReplace(TableCatalogEntry &table, Inse
 	if (insert.columns.empty()) {
 		for (auto &column : column_list.Physical()) {
 			// FIXME: can these column names be aliased somehow?
-			if (conflict_columns.count(column.Oid())) {
+			if (conflict_columns.count(column.Physical().index)) {
 				continue;
 			}
 			columns.emplace_back(column.Name());
@@ -205,7 +264,7 @@ unique_ptr<UpdateSetInfo> CreateSetInfoForReplace(TableCatalogEntry &table, Inse
 		// a list of columns was explicitly supplied, only update those
 		for (auto &name : insert.columns) {
 			auto &column = column_list.GetColumn(name);
-			if (conflict_columns.count(column.Oid())) {
+			if (conflict_columns.count(column.Physical().index)) {
 				continue;
 			}
 			columns.push_back(name);
@@ -231,7 +290,7 @@ void Binder::BindInsertColumnList(TableCatalogEntry &table, vector<Identifier> &
 		for (idx_t i = 0; i < columns.size(); i++) {
 			auto entry = column_name_map.insert(make_pair(columns[i], i));
 			if (!entry.second) {
-				throw BinderException("Duplicate column name \"%s\" in INSERT", columns[i]);
+				throw BinderException("Duplicate column name %s in INSERT", columns[i]);
 			}
 			auto column_index = table.GetColumnIndex(columns[i]);
 			if (column_index.index == COLUMN_IDENTIFIER_ROW_ID) {
@@ -289,8 +348,8 @@ unique_ptr<MergeIntoStatement> Binder::GenerateMergeInto(InsertQueryNode &node, 
 	auto &on_conflict_info = *node.on_conflict_info;
 	auto merge_into = make_uniq<MergeIntoStatement>();
 	// set up the target table
-	string table_name =
-	    !node.table_ref->alias.empty() ? node.table_ref->alias.GetIdentifierName() : node.table.GetIdentifierName();
+	string table_name = !node.table_ref->alias.empty() ? node.table_ref->alias.GetIdentifierName()
+	                                                   : node.qualified_name.Name().GetIdentifierName();
 	merge_into->node->target = std::move(node.table_ref);
 
 	auto storage_info = table.GetStorageInfo(context);
@@ -307,6 +366,11 @@ unique_ptr<MergeIntoStatement> Binder::GenerateMergeInto(InsertQueryNode &node, 
 		for (auto &index : storage_info.index_info) {
 			if (!index.is_unique) {
 				continue;
+			}
+			if (index.check_mode == ConstraintCheckMode::DEFERRED) {
+				// Without a conflict target, every constraint is a conflict target.
+				throw BinderException("DEFERRED PRIMARY KEY or UNIQUE constraints cannot be ON CONFLICT targets, "
+				                      "specify the ON CONFLICT columns of a constraint that is not DEFERRED");
 			}
 
 			vector<unique_ptr<ParsedExpression>> and_children;
@@ -382,17 +446,22 @@ unique_ptr<MergeIntoStatement> Binder::GenerateMergeInto(InsertQueryNode &node, 
 			}
 		}
 		bool index_references_columns = false;
+		bool deferred_index_matches = false;
 		for (auto &index : storage_info.index_info) {
-			if (!index.is_unique) {
+			if (!index.is_unique || on_conflict_filter != index.column_set) {
 				continue;
 			}
-			bool index_matches = on_conflict_filter == index.column_set;
-			if (index_matches) {
-				index_references_columns = true;
-				break;
+			if (index.check_mode == ConstraintCheckMode::DEFERRED) {
+				deferred_index_matches = true;
+				continue;
 			}
+			index_references_columns = true;
+			break;
 		}
 		if (!index_references_columns) {
+			if (deferred_index_matches) {
+				throw BinderException("DEFERRED PRIMARY KEY or UNIQUE constraints cannot be ON CONFLICT targets");
+			}
 			// Same as before, this is essentially a no-op, turning this into a DO THROW instead
 			// But since this makes no logical sense, it's probably better to throw an error
 			throw BinderException("The specified columns as conflict target are not referenced by a UNIQUE/PRIMARY KEY "
@@ -448,7 +517,7 @@ unique_ptr<MergeIntoStatement> Binder::GenerateMergeInto(InsertQueryNode &node, 
 					if (column.HasDefaultValue()) {
 						expr = column.DefaultValue().Copy();
 					} else {
-						expr = make_uniq<ConstantExpression>(Value(column.Type()));
+						expr = ConstantExpression::FromValue(Value(column.Type()));
 					}
 				} else {
 					// column is specified - add a reference to it
@@ -540,10 +609,19 @@ BoundStatement Binder::BindNode(InsertQueryNode &node) {
 	result.names = {"Count"};
 	result.types = {LogicalType::BIGINT};
 
-	BindSchemaOrCatalog(node.catalog, node.schema);
-	auto &table = Catalog::GetEntry<TableCatalogEntry>(context, node.catalog, node.schema, node.table);
+	node.qualified_name = BindTableName(node.qualified_name);
+	EntryLookupInfo table_lookup(CatalogType::TABLE_ENTRY, node.qualified_name);
+	auto &table_entry = *entry_retriever.GetEntry(table_lookup, OnEntryNotFound::THROW_EXCEPTION);
+	if (table_entry.type != CatalogType::TABLE_ENTRY) {
+		throw CatalogException("%s is not an %s", node.qualified_name.Name().GetIdentifierName(),
+		                       TableCatalogEntry::Name);
+	}
+	auto &table = table_entry.Cast<TableCatalogEntry>();
 
-	if (auto expanded = TryExpandTriggers(node, node.returning_list, table, TriggerEventType::INSERT_EVENT)) {
+	if (auto expanded = TryExpandTriggers(node, table, TriggerEventType::INSERT_EVENT)) {
+		return std::move(*expanded);
+	}
+	if (auto expanded = TryExpandRowTriggers(node, node.returning_list, table, TriggerEventType::INSERT_EVENT)) {
 		return std::move(*expanded);
 	}
 
@@ -586,9 +664,10 @@ BoundStatement Binder::BindNode(InsertQueryNode &node) {
 		node.columns = root_select.names;
 	}
 
+	physical_index_vector_t<idx_t> column_index_map;
 	vector<LogicalIndex> named_column_map;
 	BindInsertColumnList(table, node.columns, node.default_values, named_column_map, insert->expected_types,
-	                     insert->column_index_map);
+	                     column_index_map);
 
 	// bind the default values
 	auto &catalog_name = table.ParentCatalog().GetName();
@@ -615,9 +694,23 @@ BoundStatement Binder::BindNode(InsertQueryNode &node) {
 		// inserting from a select - check if the column count matches
 		CheckInsertColumnCountMismatch(expected_columns, root_select.types.size(), !node.columns.empty(), table.name);
 
-		root = CastLogicalOperatorToTypes(root_select.types, insert->expected_types, std::move(root_select.plan));
+		auto source_types = root_select.types;
+		auto target_types = insert->expected_types;
+		root_select.plan = ResolveInputProjection(*insert, column_index_map, std::move(root_select.plan), source_types);
+		target_types.clear();
+		for (auto &column : table.GetColumns().Physical()) {
+			target_types.push_back(column.Type());
+		}
+		source_types.clear();
+		for (auto &expr : root_select.plan->expressions) {
+			source_types.push_back(expr->GetReturnType());
+		}
+		root = CastLogicalOperatorToTypes(source_types, target_types, std::move(root_select.plan));
 	} else {
 		root = make_uniq<LogicalDummyScan>(GenerateTableIndex());
+		if (node.default_values) {
+			root = ResolveInputProjection(*insert, column_index_map, std::move(root), {});
+		}
 	}
 
 	insert->AddChild(std::move(root));

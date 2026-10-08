@@ -1,4 +1,5 @@
 #include "duckdb/common/types/row/partitioned_tuple_data.hpp"
+#include "duckdb/main/client_context.hpp"
 
 #include "duckdb/common/radix_partitioning.hpp"
 #include "duckdb/common/types/row/tuple_data_iterator.hpp"
@@ -8,14 +9,15 @@
 namespace duckdb {
 
 PartitionedTupleData::PartitionedTupleData(PartitionedTupleDataType type_p, BufferManager &buffer_manager_p,
-                                           shared_ptr<TupleDataLayout> &layout_ptr_p, MemoryTag tag_p)
-    : type(type_p), buffer_manager(buffer_manager_p),
+                                           shared_ptr<TupleDataLayout> &layout_ptr_p, MemoryTag tag_p,
+                                           QueryContext context_p)
+    : type(type_p), buffer_manager(buffer_manager_p), context(context_p),
       stl_allocator(make_shared_ptr<ArenaAllocator>(buffer_manager.GetBufferAllocator())), layout_ptr(layout_ptr_p),
       layout(*layout_ptr), tag(tag_p), count(0), data_size(0) {
 }
 
 PartitionedTupleData::PartitionedTupleData(PartitionedTupleData &other)
-    : PartitionedTupleData(other.type, other.buffer_manager, other.layout_ptr, other.tag) {
+    : PartitionedTupleData(other.type, other.buffer_manager, other.layout_ptr, other.tag, other.context) {
 }
 
 PartitionedTupleData::~PartitionedTupleData() {
@@ -133,7 +135,7 @@ static void StoreIdentitySelectedFixedColumn(const_data_ptr_t source, data_ptr_t
 			Store<uint64_t>(Load<uint64_t>(source), target);
 		} else {
 			static_assert(WIDTH == 16, "Unsupported fixed-width row-store column width");
-			FastMemcpy(target, source, WIDTH);
+			memcpy(target, source, WIDTH);
 		}
 		source += WIDTH;
 	}
@@ -202,7 +204,7 @@ bool PartitionedTupleData::TryAppendUnifiedFixedWidthSinglePartition(Partitioned
 	if (identity_selected) {
 		if (validity_bytes != 0) {
 			for (idx_t row_idx = 0; row_idx < actual_append_count; row_idx++) {
-				FastMemset(row_locations[row_idx], 0xff, validity_bytes);
+				memset(row_locations[row_idx], 0xff, validity_bytes);
 			}
 		}
 		for (idx_t col_idx = 0; col_idx < input.ColumnCount(); col_idx++) {
@@ -233,7 +235,7 @@ bool PartitionedTupleData::TryAppendUnifiedFixedWidthSinglePartition(Partitioned
 			const auto input_idx = append_sel.get_index(row_idx);
 			auto row_location = row_locations[row_idx];
 			if (validity_bytes != 0) {
-				FastMemset(row_location, 0xff, validity_bytes);
+				memset(row_location, 0xff, validity_bytes);
 			}
 			for (idx_t col_idx = 0; col_idx < input.ColumnCount(); col_idx++) {
 				const auto &source = sources[col_idx];
@@ -254,7 +256,7 @@ bool PartitionedTupleData::TryAppendUnifiedFixedWidthSinglePartition(Partitioned
 					Store<uint64_t>(Load<uint64_t>(source_location), target_location);
 					break;
 				case 16:
-					FastMemcpy(target_location, source_location, 16);
+					memcpy(target_location, source_location, 16);
 					break;
 				default:
 					throw InternalException("Unsupported fixed-width row-store column width");
@@ -270,8 +272,7 @@ bool PartitionedTupleData::TryAppendUnifiedFixedWidthSinglePartition(Partitioned
 }
 
 void PartitionedTupleData::Append(PartitionedTupleDataAppendState &state, TupleDataChunkState &input,
-                                  const idx_t append_count,
-                                  optional_ptr<TupleDataRowLocationRemap> row_location_remap) {
+                                  const idx_t append_count) {
 	const auto max_partition_idx = MaxPartitionIndex();
 	const auto use_fixed_size_map = max_partition_idx < PartitionedTupleDataAppendState::MAP_THRESHOLD;
 
@@ -293,8 +294,7 @@ void PartitionedTupleData::Append(PartitionedTupleDataAppendState &state, TupleD
 		partition.Build(partition_pin_state, state.chunk_state, 0, append_count);
 		data_size += partition.data_size - size_before;
 
-		partition.CopyRows(state.chunk_state, input, *FlatVector::IncrementalSelectionVector(), append_count,
-		                   row_location_remap);
+		partition.CopyRows(state.chunk_state, input, *FlatVector::IncrementalSelectionVector(), append_count);
 	} else {
 		// Build the buffer space
 		state.chunk_state.heap_sizes.Slice(input.heap_sizes, state.partition_sel, append_count);
@@ -302,7 +302,7 @@ void PartitionedTupleData::Append(PartitionedTupleDataAppendState &state, TupleD
 		BuildBufferSpace(state);
 
 		// Copy the rows
-		partitions[0]->CopyRows(state.chunk_state, input, state.partition_sel, append_count, row_location_remap);
+		partitions[0]->CopyRows(state.chunk_state, input, state.partition_sel, append_count);
 	}
 
 	count += append_count;
@@ -501,16 +501,19 @@ void PartitionedTupleData::Reset() {
 }
 
 void PartitionedTupleData::Repartition(ClientContext &context, PartitionedTupleData &new_partitioned_data,
-                                       optional_ptr<TupleDataRowLocationRemap> row_location_remap) {
+                                       optional_ptr<PartitionedTupleDataRepartitionKeyTracker> key_tracker) {
 	D_ASSERT(layout.GetTypes() == new_partitioned_data.layout.GetTypes());
 
 	if (partitions.size() == new_partitioned_data.partitions.size()) {
-		// Combine transfers row ownership without copying rows; existing row locations remain valid.
 		new_partitioned_data.Combine(*this);
-		if (row_location_remap) {
-			row_location_remap->Flush();
-		}
 		return;
+	}
+
+	// Repartitioning only ever goes to more partitions - fewer would underflow the partition math and index
+	// out of bounds, so throw instead of corrupting memory.
+	if (partitions.size() > new_partitioned_data.partitions.size()) {
+		throw InternalException("PartitionedTupleData::Repartition into fewer partitions (%llu -> %llu)",
+		                        partitions.size(), new_partitioned_data.partitions.size());
 	}
 
 	PartitionedTupleDataAppendState append_state;
@@ -525,8 +528,11 @@ void PartitionedTupleData::Repartition(ClientContext &context, PartitionedTupleD
 			do {
 				// Check for interrupts with each chunk
 				context.InterruptCheck();
-				new_partitioned_data.Append(append_state, chunk_state, iterator.GetCurrentChunkCount(),
-				                            row_location_remap);
+				const auto count = iterator.GetCurrentChunkCount();
+				new_partitioned_data.Append(append_state, chunk_state, count);
+				if (key_tracker) {
+					key_tracker->RepartitionChunk(partition, chunk_state, append_state, count);
+				}
 			} while (iterator.Next());
 
 			RepartitionFinalizeStates(*this, new_partitioned_data, append_state, partition_idx);
@@ -534,9 +540,6 @@ void PartitionedTupleData::Repartition(ClientContext &context, PartitionedTupleD
 		partitions[partition_idx]->Reset();
 	}
 	new_partitioned_data.FlushAppendState(append_state);
-	if (row_location_remap) {
-		row_location_remap->Flush();
-	}
 
 	count = 0;
 	data_size = 0;
@@ -556,7 +559,7 @@ unsafe_vector<unique_ptr<TupleDataCollection>> &PartitionedTupleData::GetPartiti
 
 unique_ptr<TupleDataCollection> PartitionedTupleData::GetUnpartitioned() {
 	auto data_collection = std::move(partitions[0]);
-	partitions[0] = make_uniq<TupleDataCollection>(buffer_manager, layout_ptr, tag);
+	partitions[0] = make_uniq<TupleDataCollection>(buffer_manager, layout_ptr, tag, nullptr, context);
 
 	for (idx_t i = 1; i < partitions.size(); i++) {
 		data_collection->Combine(*partitions[i]);

@@ -49,9 +49,10 @@ UngroupedAggregateState::UngroupedAggregateState(const vector<unique_ptr<Express
 		auto &aggregate = aggregate_expressions[i];
 		D_ASSERT(aggregate->GetExpressionClass() == ExpressionClass::BOUND_AGGREGATE);
 		auto &aggr = aggregate->Cast<BoundAggregateExpression>();
-		auto state =
-		    make_unsafe_uniq_array_uninitialized<data_t>(aggr.Function().GetStateSizeCallback()(aggr.Function()));
-		aggr.Function().GetStateInitCallback()(aggr.Function(), state.get());
+		AggregateStateInput state_input(aggr.Function(), aggr.BindInfo().get());
+		auto state = make_unsafe_uniq_array_uninitialized<data_t>(aggr.Function().GetStateSizeCallback()(state_input));
+		data_ptr_t state_ptr = state.get();
+		aggr.Function().GetStateInitCallback()(state_input, &state_ptr, 1);
 		aggregate_data.push_back(std::move(state));
 		bind_data.push_back(aggr.BindInfo() ? aggr.BindInfo()->Copy() : nullptr);
 		functions.push_back(aggr.Function());
@@ -69,8 +70,10 @@ UngroupedAggregateState::UngroupedAggregateState(const UngroupedAggregateState &
 	counts = make_uniq_array<idx_t>(functions.size());
 	for (idx_t i = 0; i < functions.size(); i++) {
 		auto &func = functions[i];
-		auto state = make_unsafe_uniq_array_uninitialized<data_t>(func.GetStateSizeCallback()(func));
-		func.GetStateInitCallback()(func, state.get());
+		AggregateStateInput state_input(func, global_state.bind_data[i].get());
+		auto state = make_unsafe_uniq_array_uninitialized<data_t>(func.GetStateSizeCallback()(state_input));
+		data_ptr_t state_ptr = state.get();
+		func.GetStateInitCallback()(state_input, &state_ptr, 1);
 		aggregate_data.push_back(std::move(state));
 		bind_data.push_back(global_state.bind_data[i] ? global_state.bind_data[i]->Copy() : nullptr);
 		counts[i] = 0;
@@ -374,7 +377,8 @@ BuildUngroupedAggregatePrimitiveUpdateBinding(const PhysicalUngroupedAggregate &
 			result.blocker = "ungrouped-aggregate-primitive-update-requires-no-payload";
 			return result;
 		}
-		if (function.HasStateSizeCallback() && function.GetStateSizeCallback()(function) != abi.state_size) {
+		AggregateStateInput state_input(function, aggregate.BindInfo().get());
+		if (function.HasStateSizeCallback() && function.GetStateSizeCallback()(state_input) != abi.state_size) {
 			result.blocker = "ungrouped-aggregate-primitive-update-state-size-mismatch";
 			return result;
 		}
@@ -682,7 +686,7 @@ void UngroupedDistinctAggregateFinalizeEvent::Schedule() {
 		global_source_states.push_back(radix_table_p.GetGlobalSourceState(context));
 	}
 	n_tasks = MaxValue<idx_t>(n_tasks, 1);
-	n_tasks = MinValue<idx_t>(n_tasks, NumericCast<idx_t>(TaskScheduler::GetScheduler(context).NumberOfThreads()));
+	n_tasks = MinValue<idx_t>(n_tasks, TaskScheduler::GetScheduler(context).NumberOfThreads());
 
 	vector<shared_ptr<Task>> tasks;
 	for (idx_t i = 0; i < n_tasks; i++) {
@@ -838,7 +842,7 @@ void GlobalUngroupedAggregateState::Finalize(DataChunk &result, idx_t column_off
 	for (idx_t aggr_idx = 0; aggr_idx < state.functions.size(); aggr_idx++) {
 		auto &func = state.functions[aggr_idx];
 		Vector state_vector(Value::POINTER(CastPointerToValue(state.aggregate_data[aggr_idx].get())), count_t(1));
-		AggregateInputData aggr_input_data(func, state.bind_data[aggr_idx].get(), allocator);
+		AggregateFinalizeInputData aggr_input_data(func, state.bind_data[aggr_idx].get(), allocator);
 		func.GetStateFinalizeCallback()(state_vector, aggr_input_data, result.data[column_offset + aggr_idx], 1, 0);
 		FlatVector::SetSize(result.data[column_offset + aggr_idx], count_t(1));
 	}

@@ -199,7 +199,6 @@ static inline bool SljitHashJoinProbeLayoutUsesDictionaryEmission(SljitHashJoinP
 	       kind == SljitHashJoinProbeLayoutKind::CHAIN_SALT_DICTIONARY;
 }
 
-enum class SljitNativeNestedLoopJoinValueKind : uint8_t { INT32, INT64, INT128, DOUBLE };
 enum class SljitNativeCoalesceRhsKind : uint8_t { CONSTANT, REFERENCE };
 enum class SljitNativeNullCheckOp : uint8_t { IS_NULL, IS_NOT_NULL };
 enum class SljitNativePredicateKind : uint8_t {
@@ -267,12 +266,6 @@ struct SljitNativePredicate {
 	unique_ptr<SljitNativePredicate> Copy() const;
 };
 
-struct SljitNativeConstantOrNull {
-	Value constant;
-	vector<idx_t> guard_source_indices;
-	bool guard_has_null_constant = false;
-};
-
 struct SljitPerfectHashDictionaryGroupRuntime {
 	idx_t *contributions = nullptr;
 	sel_t *active_indices = nullptr;
@@ -287,9 +280,6 @@ struct SljitNativeVectorInput {
 	const_data_ptr_t *group_data_array = nullptr;
 	SljitPerfectHashDictionaryGroupRuntime *perfect_hash_dictionary_groups = nullptr;
 	data_ptr_t *result_data_array = nullptr;
-	const_data_ptr_t floating_constants = nullptr;
-	data_ptr_t floating_stats_min = nullptr;
-	data_ptr_t floating_stats_max = nullptr;
 	const char **overflow_messages = nullptr;
 	const sel_t *execute_sel = nullptr;
 	const sel_t *source_sel = nullptr;
@@ -468,24 +458,6 @@ struct SljitNativePerfectHashJoinProbeInput {
 	idx_t input_offset = 0;
 	bool finished = false;
 	std::exception_ptr error;
-};
-
-struct SljitNativeNestedLoopJoinProbeInput {
-	const_data_ptr_t left_data = nullptr;
-	const_data_ptr_t right_data = nullptr;
-	const sel_t *left_sel = nullptr;
-	const sel_t *right_sel = nullptr;
-	const validity_t *left_validity = nullptr;
-	const validity_t *right_validity = nullptr;
-	idx_t left_count = 0;
-	idx_t right_count = 0;
-	idx_t left_offset = 0;
-	idx_t right_offset = 0;
-	idx_t output_capacity = 0;
-	sel_t *left_match_sel = nullptr;
-	sel_t *right_match_sel = nullptr;
-	idx_t selected_count = 0;
-	bool right_chunk_finished = false;
 };
 
 } // namespace duckdb

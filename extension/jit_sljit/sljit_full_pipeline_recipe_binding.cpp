@@ -126,12 +126,6 @@ bool SljitFullPipelineRecipeBinding::TryMakeSourceFilterAggregateRecipe(const Sl
 
 bool SljitFullPipelineRecipeBinding::TryMakeJoinFilterAggregateRecipe(const SljitJoinFilterAggregateFacts &facts,
                                                                       SljitFullPipelineRecipe &recipe) const {
-	SljitProjectionChainPrimitive projection_prefix;
-	if (facts.HasProjectionPrefix() &&
-	    !SljitTryBindProjectionChainPrimitive(ops, facts.first_projection_idx, facts.final_projection_idx,
-	                                          projection_prefix)) {
-		return false;
-	}
 	SljitFullPipelinePrimitiveStep probe_step;
 	SljitGeneratedFilterPrimitive generated_filter;
 	if (!TryMakeHashJoinProbeSelectionStep(facts.hash_join_idx, probe_step) ||
@@ -150,8 +144,8 @@ bool SljitFullPipelineRecipeBinding::TryMakeJoinFilterAggregateRecipe(const Slji
 	}
 
 	auto sequence = MakeSourceSequence();
-	if (facts.HasProjectionPrefix()) {
-		sequence.Add(SljitFullPipelinePrimitiveStep::ProjectionChain(projection_prefix));
+	if (!TryAddSourcePrefixSteps(sequence, facts.hash_join_idx)) {
+		return false;
 	}
 	sequence.Add(std::move(probe_step));
 	const auto probe_step_idx = sequence.Count() - 1;
@@ -177,28 +171,43 @@ bool SljitFullPipelineRecipeBinding::TryMakeGeneratedFilterProjectionNativeTailR
 	return TryMakeNativeTailRecipe(std::move(sequence), facts.tail_start_idx, recipe);
 }
 
-bool SljitFullPipelineRecipeBinding::TryMakeSourceHashJoinBuildSinkRecipe(
-    const SljitSourceHashJoinBuildSinkFacts &facts, SljitFullPipelineRecipe &recipe) const {
-	if (facts.sink_idx >= ops.size() || facts.sink_idx != ops.size() - 1) {
-		return false;
-	}
-	auto sequence = MakeSourceSequence();
-	for (idx_t op_idx = 0; op_idx < facts.sink_idx; op_idx++) {
+bool SljitFullPipelineRecipeBinding::TryAddSourcePrefixSteps(SljitFullPipelinePrimitiveSequence &sequence,
+                                                             idx_t prefix_end) const {
+	idx_t op_idx = 0;
+	while (op_idx < prefix_end) {
 		if (ops[op_idx].kind == SljitNativeRegionOpKind::FILTER) {
 			SljitGeneratedFilterPrimitive generated_filter;
 			if (!SljitTryBindGeneratedFilterPrimitive(ops, op_idx, generated_filter)) {
 				return false;
 			}
 			sequence.Add(SljitFullPipelinePrimitiveStep::GeneratedFilter(generated_filter));
-		} else if (ops[op_idx].kind == SljitNativeRegionOpKind::PROJECTION) {
-			SljitProjectionChainPrimitive projection;
-			if (!SljitTryBindProjectionChainPrimitive(ops, op_idx, projection)) {
-				return false;
-			}
-			sequence.Add(SljitFullPipelinePrimitiveStep::ProjectionChain(projection));
-		} else {
+			op_idx++;
+			continue;
+		}
+		// Consecutive projections run as one chain.
+		auto final_projection_idx = op_idx;
+		while (final_projection_idx + 1 < prefix_end &&
+		       ops[final_projection_idx + 1].kind == SljitNativeRegionOpKind::PROJECTION) {
+			final_projection_idx++;
+		}
+		SljitProjectionChainPrimitive projection;
+		if (!SljitTryBindProjectionChainPrimitive(ops, op_idx, final_projection_idx, projection)) {
 			return false;
 		}
+		sequence.Add(SljitFullPipelinePrimitiveStep::ProjectionChain(projection));
+		op_idx = final_projection_idx + 1;
+	}
+	return true;
+}
+
+bool SljitFullPipelineRecipeBinding::TryMakeSourceHashJoinBuildSinkRecipe(
+    const SljitSourceHashJoinBuildSinkFacts &facts, SljitFullPipelineRecipe &recipe) const {
+	if (facts.sink_idx >= ops.size() || facts.sink_idx != ops.size() - 1) {
+		return false;
+	}
+	auto sequence = MakeSourceSequence();
+	if (!TryAddSourcePrefixSteps(sequence, facts.sink_idx)) {
+		return false;
 	}
 	SljitHashJoinBuildSinkPrimitive sink;
 	if (!SljitTryBindHashJoinBuildSinkPrimitive(ops, facts.sink_idx, DConstants::INVALID_INDEX, sink)) {
@@ -210,81 +219,9 @@ bool SljitFullPipelineRecipeBinding::TryMakeSourceHashJoinBuildSinkRecipe(
 	return true;
 }
 
-bool SljitFullPipelineRecipeBinding::TryMakeHashJoinDelimJoinSinkRecipe(const SljitHashJoinDelimJoinSinkFacts &facts,
-                                                                        SljitFullPipelineRecipe &recipe) const {
-	if (facts.first_hash_join_idx > facts.final_hash_join_idx || facts.sink_idx >= ops.size() ||
-	    facts.sink_idx > SLJIT_FULL_PIPELINE_MAX_PRIMITIVES - 3) {
-		return false;
-	}
-	auto sequence = MakeSourceSequence();
-	for (idx_t hash_join_idx = facts.first_hash_join_idx; hash_join_idx < facts.final_hash_join_idx; hash_join_idx++) {
-		SljitHashJoinProbeMaterializePrimitive probe;
-		const bool unchecked = hash_join_idx == 0 && SljitHashJoinSourceKey0RangeFitsInt32(
-		                                                 ops, hash_join_idx, source_min_values, source_max_values);
-		if (!SljitTryBindHashJoinProbeMaterializePrimitive(ops, hash_join_idx, probe, unchecked)) {
-			return false;
-		}
-		sequence.Add(SljitFullPipelinePrimitiveStep::HashJoinProbeMaterialize(probe));
-	}
-	SljitHashJoinProbeSelectionPrimitive selection;
-	const bool unchecked =
-	    facts.final_hash_join_idx == 0 &&
-	    SljitHashJoinSourceKey0RangeFitsInt32(ops, facts.final_hash_join_idx, source_min_values, source_max_values);
-	if (!SljitTryBindHashJoinProbeSelectionPrimitive(ops, facts.final_hash_join_idx, selection, unchecked)) {
-		return false;
-	}
-	SljitDelimJoinSinkPrimitive delim_sink;
-	if (!SljitTryBindSelectedHashJoinDelimJoinSinkPrimitive(ops, selection, facts.sink_idx, delim_sink)) {
-		return false;
-	}
-	sequence.Add(SljitFullPipelinePrimitiveStep::HashJoinProbeSelection(selection));
-	sequence.Add(SljitFullPipelinePrimitiveStep::DelimJoinSink(delim_sink));
-	recipe = MakePrimitiveSequence(std::move(sequence));
-	return true;
-}
-
-bool SljitFullPipelineRecipeBinding::TryMakeHashJoinAppendSinkRecipe(const SljitHashJoinAppendSinkFacts &facts,
-                                                                     SljitFullPipelineRecipe &recipe) const {
-	if (facts.first_hash_join_idx > facts.final_hash_join_idx) {
-		return false;
-	}
-	auto sequence = MakeSourceSequence();
-	for (idx_t hash_join_idx = facts.first_hash_join_idx; hash_join_idx < facts.final_hash_join_idx; hash_join_idx++) {
-		SljitFullPipelinePrimitiveStep probe_step;
-		if (!TryMakeHashJoinProbeMaterializeStep(hash_join_idx, probe_step)) {
-			return false;
-		}
-		sequence.Add(std::move(probe_step));
-	}
-	SljitFullPipelinePrimitiveStep selection_step;
-	if (!TryMakeHashJoinProbeSelectionStep(facts.final_hash_join_idx, selection_step)) {
-		return false;
-	}
-	sequence.Add(std::move(selection_step));
-	SljitAppendSinkPrimitive sink;
-	if (!SljitTryBindAppendSinkPrimitive(ops, facts.final_hash_join_idx, facts.sink_idx, sink)) {
-		return false;
-	}
-	sequence.Add(SljitFullPipelinePrimitiveStep::AppendSink(sink));
-	recipe = MakePrimitiveSequence(std::move(sequence));
-	return true;
-}
-
 bool SljitFullPipelineRecipeBinding::TryMakeHashJoinBuildSinkRecipe(const SljitHashJoinBuildSinkFacts &facts,
                                                                     SljitFullPipelineRecipe &recipe) const {
 	if (facts.first_hash_join_idx > facts.final_hash_join_idx) {
-		return false;
-	}
-	SljitProjectionChainPrimitive pre_projection;
-	if (facts.HasPreProjection() &&
-	    !SljitTryBindProjectionChainPrimitive(ops, facts.pre_projection_idx, pre_projection)) {
-		return false;
-	}
-	SljitGeneratedFilterPrimitive generated_filter;
-	SljitProjectionChainPrimitive filter_projection;
-	if (facts.HasFilterProjection() &&
-	    (!SljitTryBindGeneratedFilterPrimitive(ops, facts.filter_idx, generated_filter) ||
-	     !SljitTryBindProjectionChainPrimitive(ops, facts.filter_projection_idx, filter_projection))) {
 		return false;
 	}
 	SljitHashJoinBuildSinkPrimitive sink;
@@ -292,12 +229,8 @@ bool SljitFullPipelineRecipeBinding::TryMakeHashJoinBuildSinkRecipe(const SljitH
 		return false;
 	}
 	auto sequence = MakeSourceSequence();
-	if (facts.HasPreProjection()) {
-		sequence.Add(SljitFullPipelinePrimitiveStep::ProjectionChain(pre_projection));
-	}
-	if (facts.HasFilterProjection()) {
-		sequence.Add(SljitFullPipelinePrimitiveStep::GeneratedFilter(generated_filter));
-		sequence.Add(SljitFullPipelinePrimitiveStep::ProjectionChain(filter_projection));
+	if (!TryAddSourcePrefixSteps(sequence, facts.first_hash_join_idx)) {
+		return false;
 	}
 	for (idx_t hash_join_idx = facts.first_hash_join_idx; hash_join_idx < facts.final_hash_join_idx; hash_join_idx++) {
 		SljitFullPipelinePrimitiveStep probe_step;

@@ -244,6 +244,13 @@ static bool SljitHashJoinSourceKey0RangeFitsInt32(const vector<SljitExecutableRe
 	if (hash_join_idx >= ops.size()) {
 		return false;
 	}
+	// The source ranges bound the probe key only while the probe reads the source layout: selection-only filters
+	// may precede it, any other operator changes the layout.
+	for (idx_t op_idx = 0; op_idx < hash_join_idx; op_idx++) {
+		if (ops[op_idx].kind != SljitNativeRegionOpKind::FILTER) {
+			return false;
+		}
+	}
 	auto &join_op = ops[hash_join_idx];
 	if (join_op.kind != SljitNativeRegionOpKind::HASH_JOIN_PROBE) {
 		return false;

@@ -38,6 +38,16 @@
         "type": "optional_idx",
         "default": "optional_idx()",
         "equals_skip": true
+      },
+      {
+        "id": 104,
+        "name": "query_location_length",
+        "type": "uint32_t",
+        "property": "query_location.length",
+        "default": "0",
+        "version": "v2.0.0",
+        "equals_skip": true,
+        "hash_skip": true
       }
     ]
   },
@@ -105,14 +115,15 @@
       {
         "id": 201,
         "name": "cast_type",
-        "type": "LogicalType"
+        "type": "TypeExpression*"
       },
       {
         "id": 202,
         "name": "try_cast",
         "type": "bool"
       }
-    ]
+    ],
+    "custom_implementation": true
   },
   {
     "class": "CollateExpression",
@@ -215,9 +226,21 @@
       {
         "id": 200,
         "name": "value",
-        "type": "Value"
+        "type": "Value",
+        "status": "read_only",
+        "version": "v2.0.0",
+        "serialize_property": "GetValueForSerialization()",
+        "deserialize_default": "Value()"
+      },
+      {
+        "id": 201,
+        "name": "literal",
+        "type": "Literal",
+        "version": "v2.0.0",
+        "deserialize_default": "Literal()"
       }
-    ]
+    ],
+    "constructor_method": "ConstantExpression::DeserializeConstant"
   },
   {
     "class": "DefaultExpression",
@@ -232,17 +255,8 @@
     "members": [
       {
         "id": 200,
-        "name": "function_name",
-        "type": "Identifier",
-        "accessor_mut": "FunctionNameMutable()",
-        "accessor": "FunctionName()"
-      },
-      {
-        "id": 201,
-        "name": "schema",
-        "type": "Identifier",
-        "accessor_mut": "SchemaMutable()",
-        "accessor": "Schema()"
+        "name": "qualified_name",
+        "type": "QualifiedName"
       },
       {
         "id": 202,
@@ -289,13 +303,6 @@
         "type": "bool",
         "accessor_mut": "ExportStateMutable()",
         "accessor": "ExportState()"
-      },
-      {
-        "id": 208,
-        "name": "catalog",
-        "type": "Identifier",
-        "accessor_mut": "CatalogMutable()",
-        "accessor": "Catalog()"
       },
       {
         "id": 209,
@@ -366,6 +373,13 @@
         "type": "duckdb::Identifier"
       }
     ]
+  },
+  {
+    "class": "PatternExpression",
+    "base": "ParsedExpression",
+    "enum": "PATTERN",
+    "custom_implementation": true,
+    "custom_switch_code": "result = PatternExpression::Deserialize(deserializer);\nbreak;"
   },
   {
     "class": "PositionalReferenceExpression",
@@ -478,18 +492,8 @@
     "members": [
       {
         "id": 200,
-        "name": "function_name",
-        "type": "Identifier"
-      },
-      {
-        "id": 201,
-        "name": "schema",
-        "type": "Identifier"
-      },
-      {
-        "id": 202,
-        "name": "catalog",
-        "type": "Identifier"
+        "name": "qualified_name",
+        "type": "QualifiedName"
       },
       {
         "id": 203,
@@ -607,24 +611,56 @@
       {
         "id": 200,
         "name": "catalog",
-        "type": "Identifier"
+        "serialize_property": "qualified_name.Catalog()",
+        "type": "Identifier",
+        "equals_skip": true,
+        "hash_skip": true
       },
       {
         "id": 201,
         "name": "schema",
-        "type": "Identifier"
+        "serialize_property": "qualified_name.Schema()",
+        "type": "Identifier",
+        "equals_skip": true,
+        "hash_skip": true
       },
       {
         "id": 202,
         "name": "type_name",
-        "type": "Identifier"
+        "serialize_property": "qualified_name.Name()",
+        "type": "Identifier",
+        "equals_skip": true,
+        "hash_skip": true
       },
       {
         "id": 203,
         "name": "children",
         "type": "vector<unique_ptr<ParsedExpression>>",
         "accessor_mut": "GetChildren()"
+      },
+      {
+        "id": 204,
+        "name": "qualified_name",
+        "serialize_property": "qualified_name",
+        "deserialize_property": "qualified_name",
+        "type": "QualifiedName",
+        "version": "v2.0.0",
+        "serialize_condition": "qualified_name.Path().size() > 3",
+        "deserialize_default": "QualifiedName()",
+        "deserialize_skip_assign": true
       }
-    ]
+    ],
+    "finalize_deserialization": [
+      "if (!qualified_name.Path().empty()) {",
+      "\tresult->SetQualifiedName(std::move(qualified_name));",
+      "}"
+    ],
+    "methods": {
+      "SetQualifiedName": [
+        "catalog",
+        "schema",
+        "type_name"
+      ]
+    }
   }
 ]

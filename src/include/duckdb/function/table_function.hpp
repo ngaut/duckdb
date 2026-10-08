@@ -13,19 +13,19 @@
 #include "duckdb/execution/execution_context.hpp"
 #include "duckdb/execution/physical_operator_states.hpp"
 #include "duckdb/function/function.hpp"
-#include "duckdb/planner/logical_operator.hpp"
 #include "duckdb/storage/statistics/node_statistics.hpp"
-#include "duckdb/storage/table/row_group_reorderer.hpp"
 #include "duckdb/common/column_index.hpp"
-#include "duckdb/common/enums/metric_type.hpp"
+#include "duckdb/common/projection_index.hpp"
 #include "duckdb/common/table_column.hpp"
 #include "duckdb/parallel/async_result.hpp"
-#include "duckdb/function/partition_stats.hpp"
 #include "duckdb/common/exception/binder_exception.hpp"
 #include "duckdb/common/enums/order_preservation_type.hpp"
+#include "duckdb/common/enums/statement_type.hpp"
 #include "duckdb/planner/table_filter_set.hpp"
 
 namespace duckdb {
+enum class TablePartitionInfo : uint8_t;
+struct PartitionStatistics;
 
 //! Controls how a table function manages parallelism.
 enum class TableFunctionParallelism : uint8_t {
@@ -50,6 +50,9 @@ struct OperatorMetrics;
 enum class OrderByColumnType : uint8_t;
 enum class OrderType : uint8_t;
 enum class OrderByStatistics : uint8_t;
+struct RowGroupOrderOptions;
+class LogicalOperator;
+class Binder;
 
 struct TableFunctionInfo {
 	DUCKDB_API virtual ~TableFunctionInfo();
@@ -133,30 +136,39 @@ struct TableFunctionBindInput {
 	TableFunction &table_function;
 	const TableFunctionRef &ref;
 	optional_ptr<unique_ptr<LogicalOperator>> input_plan;
+	//! (Optional) The schema this bind is expected to produce. This is set when binding a single file of a
+	//! multi-file scan whose schema was already determined - the bind should read the file using this schema
+	//! instead of determining a schema of its own
+	optional_ptr<const vector<Identifier>> expected_names;
+	optional_ptr<const vector<LogicalType>> expected_types;
+	//! (Optional) The bind data that determined the schema above, when it came from another bind of this same
+	//! function. This lets the bind read the file exactly the way the schema was determined, rather than deriving
+	//! that from the names and types alone
+	optional_ptr<const FunctionData> expected_bind_data;
+
+	bool HasExpectedSchema() const {
+		return expected_names && expected_types;
+	}
 };
 
 struct TableFunctionInitInput {
-	TableFunctionInitInput(
-	    optional_ptr<const FunctionData> bind_data_p, vector<column_t> column_ids_p,
-	    const vector<idx_t> &projection_ids_p, optional_ptr<TableFilterSet> filters_p,
-	    optional_ptr<SampleOptions> sample_options_p = nullptr, optional_ptr<const PhysicalOperator> op_p = nullptr,
-	    TableFilterExecutionMode filter_execution_mode_p = TableFilterExecutionMode::FILTER_AND_PRUNE)
+	TableFunctionInitInput(optional_ptr<const FunctionData> bind_data_p, vector<column_t> column_ids_p,
+	                       const vector<idx_t> &projection_ids_p, optional_ptr<TableFilterSet> filters_p,
+	                       optional_ptr<SampleOptions> sample_options_p = nullptr,
+	                       optional_ptr<const PhysicalOperator> op_p = nullptr)
 	    : bind_data(bind_data_p), column_ids(std::move(column_ids_p)), projection_ids(projection_ids_p),
-	      filters(filters_p), sample_options(sample_options_p), op(op_p),
-	      filter_execution_mode(filter_execution_mode_p) {
+	      filters(filters_p), sample_options(sample_options_p), op(op_p) {
 		for (auto &col_id : column_ids) {
 			column_indexes.emplace_back(col_id);
 		}
 	}
 
-	TableFunctionInitInput(
-	    optional_ptr<const FunctionData> bind_data_p, vector<ColumnIndex> column_indexes_p,
-	    const vector<idx_t> &projection_ids_p, optional_ptr<TableFilterSet> filters_p,
-	    optional_ptr<SampleOptions> sample_options_p = nullptr, optional_ptr<const PhysicalOperator> op_p = nullptr,
-	    TableFilterExecutionMode filter_execution_mode_p = TableFilterExecutionMode::FILTER_AND_PRUNE)
+	TableFunctionInitInput(optional_ptr<const FunctionData> bind_data_p, vector<ColumnIndex> column_indexes_p,
+	                       const vector<idx_t> &projection_ids_p, optional_ptr<TableFilterSet> filters_p,
+	                       optional_ptr<SampleOptions> sample_options_p = nullptr,
+	                       optional_ptr<const PhysicalOperator> op_p = nullptr)
 	    : bind_data(bind_data_p), column_indexes(std::move(column_indexes_p)), projection_ids(projection_ids_p),
-	      filters(filters_p), sample_options(sample_options_p), op(op_p),
-	      filter_execution_mode(filter_execution_mode_p) {
+	      filters(filters_p), sample_options(sample_options_p), op(op_p) {
 		for (auto &col_id : column_indexes) {
 			column_ids.emplace_back(col_id.GetPrimaryIndex());
 		}
@@ -169,7 +181,6 @@ struct TableFunctionInitInput {
 	optional_ptr<TableFilterSet> filters;
 	optional_ptr<SampleOptions> sample_options;
 	optional_ptr<const PhysicalOperator> op;
-	TableFilterExecutionMode filter_execution_mode;
 
 	bool CanRemoveFilterColumns() const {
 		if (projection_ids.empty()) {
@@ -185,6 +196,16 @@ struct TableFunctionInitInput {
 	}
 };
 
+//! Input for combining the schemas of several files that were bound individually into one schema
+struct TableFunctionCombineSchemaInput {
+	explicit TableFunctionCombineSchemaInput(const vector<reference<const FunctionData>> &bind_data_p)
+	    : bind_data(bind_data_p) {
+	}
+
+	//! The bind data of each of the files whose schemas are being combined - in file order
+	const vector<reference<const FunctionData>> &bind_data;
+};
+
 struct TableFunctionInput {
 public:
 	TableFunctionInput(optional_ptr<const FunctionData> bind_data_p,
@@ -194,11 +215,17 @@ public:
 	}
 
 public:
+	//! Handles a BLOCKED result per the execution mode, returns true when the function must return to yield
+	DUCKDB_API bool HandleBlocked(AsyncResult &blocked_result);
+
+public:
 	optional_ptr<const FunctionData> bind_data;
 	optional_ptr<LocalTableFunctionState> local_state;
 	optional_ptr<GlobalTableFunctionState> global_state;
 	AsyncResult async_result {};
 	AsyncResultsExecutionMode results_execution_mode {AsyncResultsExecutionMode::SYNCHRONOUS};
+	//! Interrupt state of the calling task, so the function might park and wake-up by returning a taskless Blocked res
+	optional_ptr<const InterruptState> interrupt_state;
 	//! Execution-region runner switching: when set, the function must not claim a
 	//! new row group; it drains current work and reports declined_new_row_group.
 	//! new_row_groups_claimed reports claims made during the call so the executor
@@ -216,6 +243,13 @@ struct TableFunctionPartitionInput {
 
 	optional_ptr<const FunctionData> bind_data;
 	const vector<column_t> &partition_ids;
+};
+
+struct TableFunctionProjectionExpressionInput {
+	const LogicalGet &get;
+	const Expression &expr;
+	//! Position of pushed down column within get, usage: get.GetColumnIds()[column_index]
+	ProjectionIndex column_index;
 };
 
 struct TableFunctionToStringInput {
@@ -323,12 +357,12 @@ public:
 };
 
 typedef unique_ptr<FunctionData> (*table_function_bind_t)(ClientContext &context, TableFunctionBindInput &input,
-                                                          vector<LogicalType> &return_types, vector<string> &names);
+                                                          vector<LogicalType> &return_types, vector<Identifier> &names);
 typedef unique_ptr<TableRef> (*table_function_bind_replace_t)(ClientContext &context, TableFunctionBindInput &input);
 typedef unique_ptr<LogicalOperator> (*table_function_bind_operator_t)(ClientContext &context,
                                                                       TableFunctionBindInput &input,
                                                                       TableIndex bind_index,
-                                                                      vector<string> &return_names);
+                                                                      vector<Identifier> &return_names);
 typedef unique_ptr<GlobalTableFunctionState> (*table_function_init_global_t)(ClientContext &context,
                                                                              TableFunctionInitInput &input);
 typedef unique_ptr<LocalTableFunctionState> (*table_function_init_local_t)(ExecutionContext &context,
@@ -354,6 +388,9 @@ typedef bool (*table_function_supports_pushdown_type_t)(const FunctionData &bind
 
 typedef bool (*table_function_supports_pushdown_extract_t)(const FunctionData &bind_data, const LogicalIndex &col_idx);
 
+//! Whether repeated executions with the same bound data are stable within one query.
+typedef bool (*table_function_is_repeatable_t)(optional_ptr<const FunctionData> bind_data);
+
 typedef double (*table_function_progress_t)(ClientContext &context, const FunctionData *bind_data,
                                             const GlobalTableFunctionState *global_state);
 typedef void (*table_function_dependency_t)(LogicalDependencyList &dependencies, const FunctionData *bind_data);
@@ -364,14 +401,29 @@ typedef void (*table_function_pushdown_complex_filter_t)(ClientContext &context,
                                                          FunctionData *bind_data,
                                                          vector<unique_ptr<Expression>> &filters);
 typedef bool (*table_function_pushdown_expression_t)(ClientContext &context, const LogicalGet &get, Expression &expr);
+//! Claims the next batch for the given local state - returns false when there is nothing left to scan.
+//! A function that implements this is scanned one batch at a time by its caller, rather than being run until it
+//! returns an empty chunk. This lets the caller tell the batches apart, so that batches scanned in parallel can be
+//! put back in order
+typedef bool (*table_function_claim_batch_t)(ClientContext &context, TableFunctionInput &input);
+//! Called when a local state will not scan any more batches - lets the function release the resources of the batch
+//! it scanned last. The counterpart of table_function_claim_batch_t
+typedef void (*table_function_finish_batch_t)(ClientContext &context, TableFunctionInput &input);
+//! Combines the schemas of several individually bound files into one. Returns the bind data describing the combined
+//! schema, which is handed to the bind of every file that is read - or nullptr if the schemas could not be combined,
+//! in which case the caller falls back to combining the return types
+typedef unique_ptr<FunctionData> (*table_function_combine_schema_t)(ClientContext &context,
+                                                                    TableFunctionCombineSchemaInput &input,
+                                                                    vector<LogicalType> &return_types,
+                                                                    vector<Identifier> &names);
 typedef InsertionOrderPreservingMap<string> (*table_function_to_string_t)(TableFunctionToStringInput &input);
 
 typedef void (*table_function_serialize_t)(Serializer &serializer, const optional_ptr<FunctionData> bind_data,
                                            const TableFunction &function);
 typedef unique_ptr<FunctionData> (*table_function_deserialize_t)(Deserializer &deserializer, TableFunction &function);
 
-typedef void (*table_function_type_pushdown_t)(ClientContext &context, optional_ptr<FunctionData> bind_data,
-                                               const unordered_map<idx_t, LogicalType> &new_column_types);
+typedef bool (*table_function_projection_expression_pushdown_t)(ClientContext &context,
+                                                                const TableFunctionProjectionExpressionInput &input);
 typedef TablePartitionInfo (*table_function_get_partition_info_t)(ClientContext &context,
                                                                   TableFunctionPartitionInput &input);
 
@@ -484,6 +536,13 @@ public:
 	table_function_pushdown_complex_filter_t pushdown_complex_filter;
 	//! (Optional) whether or not this table function supports pushing down an expression into a TableFilter
 	table_function_pushdown_expression_t pushdown_expression;
+	//! (Optional) combines the schemas of several files that were bound individually into a single schema
+	//! Used when this function reads a single file and is wrapped into a multi-file function
+	table_function_combine_schema_t combine_schema;
+	//! (Optional) claims the next batch for a local state - see table_function_claim_batch_t
+	table_function_claim_batch_t claim_batch;
+	//! (Optional) called when a local state will not scan any more batches - see table_function_finish_batch_t
+	table_function_finish_batch_t finish_batch;
 	//! (Optional) function for rendering the operator to a string in explain/profiling output (invoked pre-execution)
 	table_function_to_string_t to_string;
 	//! (Optional) return how much of the table we have scanned up to this point (% of the data)
@@ -492,14 +551,18 @@ public:
 	table_function_get_partition_data_t get_partition_data;
 	//! (Optional) returns extra bind info
 	table_function_get_bind_info_t get_bind_info;
-	//! (Optional) pushes down type information to scanner, returns true if pushdown was successful
-	table_function_type_pushdown_t type_pushdown;
+	//! (Optional) pushes down projection expressions like len() in "SELECT len(str)" or
+	//! casts like "col as UINTEGER" in "SELECT col::UINTEGER" to scanner.
+	//! Returns true if pushdown was successful
+	table_function_projection_expression_pushdown_t projection_expression_pushdown;
 	//! (Optional) allows injecting a custom MultiFileReader implementation
 	table_function_get_multi_file_reader_t get_multi_file_reader;
 	//! (Optional) If this scanner supports filter pushdown, but not to all data types
 	table_function_supports_pushdown_type_t supports_pushdown_type;
 	//! (Optional) If this scanner supports projection pushdown of struct extracts
 	table_function_supports_pushdown_extract_t supports_pushdown_extract;
+	//! Optional repeatability capability. An absent callback is treated conservatively as unknown.
+	table_function_is_repeatable_t is_repeatable;
 	//! Get partition info of the table
 	table_function_get_partition_info_t get_partition_info;
 	//! (Optional) get a list of all the partition stats of the table
@@ -534,6 +597,9 @@ public:
 	//! Whether or not compiled execution regions should be suppressed for statements that bind this function
 	bool suppress_compiled_execution;
 	TableFunctionReturnType return_type;
+	//! The return type used when this function is invoked through a CALL statement
+	//! By default a CALL returns a query result - functions that only have side effects can use NOTHING instead
+	StatementReturnType call_return_type = StatementReturnType::QUERY_RESULT;
 	//! Additional function info, passed to the bind
 	shared_ptr<TableFunctionInfo> function_info;
 	//! The order preservation type of the table function

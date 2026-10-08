@@ -13,9 +13,9 @@
 #include "duckdb/common/file_opener.hpp"
 #include "duckdb/common/mutex.hpp"
 #include "duckdb/common/open_file_info.hpp"
+#include "duckdb/common/query_context.hpp"
 #include "duckdb/common/shared_ptr.hpp"
 #include "duckdb/common/winapi.hpp"
-#include "duckdb/main/client_context.hpp"
 #include "duckdb/storage/external_file_cache/external_file_cache.hpp"
 #include "duckdb/storage/external_file_cache/file_buffer_handle_group.hpp"
 
@@ -32,6 +32,23 @@ struct NetworkThroughputEstimate;
 class QueryContext;
 class CachingFileSystem;
 
+struct ReadThroughputEstimator {
+	//! Record a timed read.
+	void AddSample(double seconds, idx_t bytes);
+	//! Try to produce an estimate. Needs reads of at least two different sizes to separate latency from bandwidth.
+	bool TryEstimate(NetworkThroughputEstimate &result) const;
+
+private:
+	mutable mutex lock;
+	idx_t sample_count = 0;
+	double sum_bytes = 0;
+	double sum_seconds = 0;
+	//! sum of bytes squared
+	double sum_bytes_sq = 0;
+	//! sum of bytes times seconds
+	double sum_bytes_seconds = 0;
+};
+
 struct CachingFileHandle {
 public:
 	using CachedFile = ExternalFileCache::CachedFile;
@@ -42,8 +59,8 @@ public:
 	DUCKDB_API ~CachingFileHandle();
 
 public:
-	//! Get the underlying FileHandle
-	DUCKDB_API FileHandle &GetFileHandle();
+	//! Get shared ownership of the underlying FileHandle
+	DUCKDB_API shared_ptr<FileHandle> GetFileHandle();
 	//! Get the buffer-manager-backed Allocator.
 	DUCKDB_API Allocator &GetBufferAllocator() const;
 	//! Read [nr_bytes] bytes at the requested [location].
@@ -51,6 +68,10 @@ public:
 	DUCKDB_API FileBufferHandleGroup Read(idx_t nr_bytes, idx_t location);
 	//! Read [nr_bytes] bytes and sets [nr_bytes] to the actually read bytes.
 	DUCKDB_API FileBufferHandleGroup Read(idx_t &nr_bytes);
+	//! Read and record time
+	DUCKDB_API void ReadAndRecord(QueryContext context, data_ptr_t buffer, idx_t nr_bytes, idx_t location);
+	//! Whether responses observed by this handle prohibit sharing cached data (e.g., HTTP no-store/Vary)
+	DUCKDB_API bool IsCacheReuseProhibited();
 	//! Get some properties of the file
 	DUCKDB_API string GetPath() const;
 	DUCKDB_API idx_t GetFileSize();
@@ -69,6 +90,13 @@ private:
 	bool StripForceFullDownloadIfPresent();
 	//! Refresh the cached file if the global cache state has changed.
 	shared_ptr<CachedFile> EnsureCachedFileCurrent();
+	//! Whether validation metadata permits using cached blocks.
+	bool CanUseCache();
+	//! Reconcile cached blocks with validation metadata observed while reading them.
+	void ReconcileCacheAfterRead(CachedFile &cached_file, idx_t first_block,
+	                             const vector<shared_ptr<CacheBlock>> &blocks);
+	//! Record a timed read of a local file into the throughput estimate
+	void RecordReadThroughput(double total_seconds, idx_t bytes);
 
 private:
 	QueryContext context;
@@ -91,13 +119,15 @@ private:
 	//! Used to ensure file handle and cached file metadata is only initialized once.
 	annotated_mutex file_handle_mutex;
 	//! File handle for the internal filesystem.
-	unique_ptr<FileHandle> file_handle;
-	//! Last modified time and version tag (if FileHandle is opened)
-	timestamp_t last_modified;
-	string version_tag;
+	shared_ptr<FileHandle> file_handle;
+	//! Metadata snapshot taken with a single Stats call when the file handle is opened.
+	CacheValidationInfo validation_info;
 
 	//! Current position (if non-seeking reads)
 	idx_t position;
+
+	//! Throughput fitted from this handle's own reads, used for local files (remote files measure their own).
+	ReadThroughputEstimator throughput_estimator;
 };
 
 //! CachingFileSystem is a read-only file system that closely resembles the FileSystem API.

@@ -67,6 +67,7 @@ vector<ColumnBinding> LateMaterialization::ConstructRHS(unique_ptr<LogicalOperat
 			if (filter.HasProjectionMap()) {
 				// if the filter has a projection map, we need to project the new column
 				filter.projection_map.emplace_back(column_count - 1);
+				column_count = filter.projection_map.size();
 			}
 			break;
 		}
@@ -226,6 +227,11 @@ bool LateMaterialization::TryLateMaterialization(unique_ptr<LogicalOperator> &op
 	}
 	if (!get.function.late_materialization) {
 		// this function does not support late materialization
+		return false;
+	}
+	if (get.extra_info.sample_options && !get.extra_info.sample_options->is_percentage) {
+		// we should not apply late materialization when row-count sampling is pushed down
+		// the sample scan is already fast and creating a semi-join would duplicate the full table scan
 		return false;
 	}
 	if (!get.function.get_row_id_columns) {

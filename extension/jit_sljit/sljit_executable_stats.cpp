@@ -77,7 +77,6 @@ static idx_t SljitExpressionDistinctCount(const SljitNativeRegionExpressionPlan 
 			return 0;
 		}
 		return input_distinct_counts[expr.source_index];
-	case SljitNativeRegionExpressionKind::EXPRESSION_TREE:
 	case SljitNativeRegionExpressionKind::TYPED_EXPRESSION_TREE: {
 		if (!expr.expression_tree || expr.expression_tree->kind != ExecutionExpressionIRKind::BINARY ||
 		    expr.expression_tree->binary_op != ExecutionExpressionBinaryOp::MODULO || !expr.expression_tree->left ||

@@ -19,7 +19,7 @@
 #include "duckdb/main/config.hpp"
 #include "duckdb/main/secret/secret_manager.hpp"
 #include "duckdb/main/database.hpp"
-#include "duckdb/main/metrics_manager.hpp"
+#include "duckdb/main/profiler/metrics_manager.hpp"
 
 #include "duckdb/main/extension_callback_manager.hpp"
 #include "re2/re2.h"
@@ -60,7 +60,7 @@ void ExtensionLoader::CreateSchema(const Identifier &name) const {
 	auto data = CatalogTransaction::GetSystemTransaction(db);
 
 	CreateSchemaInfo info;
-	info.schema = name;
+	info.SetQualifiedName(QualifiedName(info.GetQualifiedName().Catalog(), name, info.GetQualifiedName().Name()));
 	info.internal = true;
 	// TODO; we can give the user more control here
 	info.on_conflict = OnCreateConflict::ERROR_ON_CONFLICT;
@@ -70,7 +70,7 @@ void ExtensionLoader::CreateSchema(const Identifier &name) const {
 void ExtensionLoader::UseDefaultSchema(const Identifier &name) {
 	if (loader_info.extension_schema != DEFAULT_SCHEMA && name != DEFAULT_SCHEMA &&
 	    loader_info.extension_schema != name) {
-		throw InvalidInputException("Cannot set extension schema to '%s', schema is already set to '%s'", name,
+		throw InvalidInputException("Cannot set extension schema to %s, schema is already set to %s", name,
 		                            loader_info.extension_schema);
 	}
 	if (name == "pg_catalog") {
@@ -127,7 +127,8 @@ void ExtensionLoader::RegisterFunction(ScalarFunction function) {
 
 void ExtensionLoader::RegisterFunction(ScalarFunctionSet function) {
 	CreateScalarFunctionInfo info(std::move(function));
-	info.schema = loader_info.extension_schema;
+	info.SetQualifiedName(
+	    QualifiedName(info.GetQualifiedName().Catalog(), loader_info.extension_schema, info.GetQualifiedName().Name()));
 	info.on_conflict = OnCreateConflict::ALTER_ON_CONFLICT;
 	RegisterFunction(std::move(info));
 }
@@ -135,8 +136,9 @@ void ExtensionLoader::RegisterFunction(ScalarFunctionSet function) {
 void ExtensionLoader::RegisterFunction(CreateScalarFunctionInfo function) {
 	D_ASSERT(!function.functions.name.empty());
 	function.extension_name = GetRegisteredExtensionName();
-	if (function.schema == DEFAULT_SCHEMA) {
-		function.schema = loader_info.extension_schema;
+	if (function.GetQualifiedName().Schema() == DEFAULT_SCHEMA) {
+		function.SetQualifiedName(QualifiedName(function.GetQualifiedName().Catalog(), loader_info.extension_schema,
+		                                        function.GetQualifiedName().Name()));
 	}
 	auto &system_catalog = Catalog::GetSystemCatalog(db);
 	auto data = CatalogTransaction::GetSystemTransaction(db);
@@ -151,15 +153,17 @@ void ExtensionLoader::RegisterFunction(AggregateFunction function) {
 
 void ExtensionLoader::RegisterFunction(AggregateFunctionSet function) {
 	CreateAggregateFunctionInfo info(std::move(function));
-	info.schema = loader_info.extension_schema;
+	info.SetQualifiedName(
+	    QualifiedName(info.GetQualifiedName().Catalog(), loader_info.extension_schema, info.GetQualifiedName().Name()));
 	info.on_conflict = OnCreateConflict::ALTER_ON_CONFLICT;
 	RegisterFunction(std::move(info));
 }
 
 void ExtensionLoader::RegisterFunction(CreateAggregateFunctionInfo function) {
 	D_ASSERT(!function.functions.name.empty());
-	if (function.schema == DEFAULT_SCHEMA) {
-		function.schema = loader_info.extension_schema;
+	if (function.GetQualifiedName().Schema() == DEFAULT_SCHEMA) {
+		function.SetQualifiedName(QualifiedName(function.GetQualifiedName().Catalog(), loader_info.extension_schema,
+		                                        function.GetQualifiedName().Name()));
 	}
 	function.extension_name = GetRegisteredExtensionName();
 	auto &system_catalog = Catalog::GetSystemCatalog(db);
@@ -175,15 +179,17 @@ void ExtensionLoader::RegisterFunction(WindowFunction function) {
 
 void ExtensionLoader::RegisterFunction(WindowFunctionSet function) {
 	CreateWindowFunctionInfo info(std::move(function));
-	info.schema = loader_info.extension_schema;
+	info.SetQualifiedName(
+	    QualifiedName(info.GetQualifiedName().Catalog(), loader_info.extension_schema, info.GetQualifiedName().Name()));
 	info.on_conflict = OnCreateConflict::ALTER_ON_CONFLICT;
 	RegisterFunction(std::move(info));
 }
 
 void ExtensionLoader::RegisterFunction(CreateWindowFunctionInfo function) {
 	D_ASSERT(!function.functions.name.empty());
-	if (function.schema == DEFAULT_SCHEMA) {
-		function.schema = loader_info.extension_schema;
+	if (function.GetQualifiedName().Schema() == DEFAULT_SCHEMA) {
+		function.SetQualifiedName(QualifiedName(function.GetQualifiedName().Catalog(), loader_info.extension_schema,
+		                                        function.GetQualifiedName().Name()));
 	}
 	function.extension_name = GetRegisteredExtensionName();
 	auto &system_catalog = Catalog::GetSystemCatalog(db);
@@ -206,7 +212,8 @@ void ExtensionLoader::RegisterFunction(TableFunction function) {
 void ExtensionLoader::RegisterFunction(TableFunctionSet function) {
 	D_ASSERT(!function.name.empty());
 	CreateTableFunctionInfo info(std::move(function));
-	info.schema = loader_info.extension_schema;
+	info.SetQualifiedName(
+	    QualifiedName(info.GetQualifiedName().Catalog(), loader_info.extension_schema, info.GetQualifiedName().Name()));
 	info.on_conflict = OnCreateConflict::ALTER_ON_CONFLICT;
 	RegisterFunction(std::move(info));
 }
@@ -214,8 +221,9 @@ void ExtensionLoader::RegisterFunction(TableFunctionSet function) {
 void ExtensionLoader::RegisterFunction(CreateTableFunctionInfo info) {
 	D_ASSERT(!info.functions.name.empty());
 	info.extension_name = GetRegisteredExtensionName();
-	if (info.schema == DEFAULT_SCHEMA) {
-		info.schema = loader_info.extension_schema;
+	if (info.GetQualifiedName().Schema() == DEFAULT_SCHEMA) {
+		info.SetQualifiedName(QualifiedName(info.GetQualifiedName().Catalog(), loader_info.extension_schema,
+		                                    info.GetQualifiedName().Name()));
 	}
 	auto &system_catalog = Catalog::GetSystemCatalog(db);
 	auto data = CatalogTransaction::GetSystemTransaction(db);
@@ -233,7 +241,8 @@ void ExtensionLoader::RegisterFunction(PragmaFunctionSet function) {
 	D_ASSERT(!function.name.empty());
 	CreatePragmaFunctionInfo info(std::move(function));
 	info.extension_name = GetRegisteredExtensionName();
-	info.schema = loader_info.extension_schema;
+	info.SetQualifiedName(
+	    QualifiedName(info.GetQualifiedName().Catalog(), loader_info.extension_schema, info.GetQualifiedName().Name()));
 	auto &system_catalog = Catalog::GetSystemCatalog(db);
 	auto data = CatalogTransaction::GetSystemTransaction(db);
 	system_catalog.CreatePragmaFunction(data, info);
@@ -242,7 +251,8 @@ void ExtensionLoader::RegisterFunction(PragmaFunctionSet function) {
 void ExtensionLoader::RegisterFunction(CopyFunction function) {
 	CreateCopyFunctionInfo info(std::move(function));
 	info.extension_name = GetRegisteredExtensionName();
-	info.schema = loader_info.extension_schema;
+	info.SetQualifiedName(
+	    QualifiedName(info.GetQualifiedName().Catalog(), loader_info.extension_schema, info.GetQualifiedName().Name()));
 	auto &system_catalog = Catalog::GetSystemCatalog(db);
 	auto data = CatalogTransaction::GetSystemTransaction(db);
 	system_catalog.CreateCopyFunction(data, info);
@@ -250,8 +260,9 @@ void ExtensionLoader::RegisterFunction(CopyFunction function) {
 
 void ExtensionLoader::RegisterFunction(CreateMacroInfo &info) {
 	info.extension_name = GetRegisteredExtensionName();
-	if (info.schema == DEFAULT_SCHEMA) {
-		info.schema = loader_info.extension_schema;
+	if (info.GetQualifiedName().Schema() == DEFAULT_SCHEMA) {
+		info.SetQualifiedName(QualifiedName(info.GetQualifiedName().Catalog(), loader_info.extension_schema,
+		                                    info.GetQualifiedName().Name()));
 	}
 	auto &system_catalog = Catalog::GetSystemCatalog(db);
 	auto data = CatalogTransaction::GetSystemTransaction(db);
@@ -262,8 +273,9 @@ void ExtensionLoader::RegisterCollation(CreateCollationInfo &info) {
 	info.extension_name = GetRegisteredExtensionName();
 	auto &system_catalog = Catalog::GetSystemCatalog(db);
 	auto data = CatalogTransaction::GetSystemTransaction(db);
-	if (info.schema == DEFAULT_SCHEMA) {
-		info.schema = loader_info.extension_schema;
+	if (info.GetQualifiedName().Schema() == DEFAULT_SCHEMA) {
+		info.SetQualifiedName(QualifiedName(info.GetQualifiedName().Catalog(), loader_info.extension_schema,
+		                                    info.GetQualifiedName().Name()));
 	}
 	info.on_conflict = OnCreateConflict::IGNORE_ON_CONFLICT;
 	system_catalog.CreateCollation(data, info);
@@ -271,7 +283,8 @@ void ExtensionLoader::RegisterCollation(CreateCollationInfo &info) {
 	// Also register as a function for serialisation
 	CreateScalarFunctionInfo finfo(info.function);
 	finfo.extension_name = GetRegisteredExtensionName();
-	finfo.schema = loader_info.extension_schema;
+	finfo.SetQualifiedName(QualifiedName(finfo.GetQualifiedName().Catalog(), loader_info.extension_schema,
+	                                     finfo.GetQualifiedName().Name()));
 	finfo.on_conflict = OnCreateConflict::IGNORE_ON_CONFLICT;
 	system_catalog.CreateFunction(data, finfo);
 }
@@ -284,22 +297,24 @@ void ExtensionLoader::RegisterCoordinateSystem(CreateCoordinateSystemInfo &info)
 
 void ExtensionLoader::AddFunctionOverload(ScalarFunction function) {
 	auto &scalar_function = GetFunction(function.name);
-	scalar_function.functions.AddFunction(std::move(function));
+	scalar_function.functions.AddFunction(scalar_function.FinalizeFunction(std::move(function)));
 }
 
 void ExtensionLoader::AddFunctionOverload(ScalarFunctionSet functions) { // NOLINT
 	D_ASSERT(!functions.name.empty());
 	auto &scalar_function = GetFunction(functions.name);
 	for (auto &function : functions.functions) {
-		function.name = functions.name;
+		function = scalar_function.FinalizeFunction(*function);
+	}
+	for (auto &function : functions.functions) {
 		scalar_function.functions.AddFunction(std::move(function));
 	}
 }
 
 void ExtensionLoader::AddFunctionOverload(TableFunctionSet functions) { // NOLINT
 	auto &table_function = GetTableFunction(functions.name);
+	functions.ApplyToFunctions([&](TableFunction &function) { function.name = functions.name; });
 	for (auto &function : functions.functions) {
-		function.name = functions.name;
 		table_function.functions.AddFunction(std::move(function));
 	}
 }
@@ -339,10 +354,21 @@ TableFunctionCatalogEntry &ExtensionLoader::GetTableFunction(const Identifier &n
 void ExtensionLoader::RegisterType(string type_name, LogicalType type, bind_logical_type_function_t bind_modifiers) {
 	D_ASSERT(!type_name.empty());
 	CreateTypeInfo info(std::move(type_name), std::move(type), bind_modifiers);
+	RegisterType(info);
+}
+
+void ExtensionLoader::RegisterType(string type_name, LogicalType type, TypeConstructorSet constructors) {
+	D_ASSERT(!type_name.empty());
+	CreateTypeInfo info(std::move(type_name), std::move(type), std::move(constructors));
+	RegisterType(info);
+}
+
+void ExtensionLoader::RegisterType(CreateTypeInfo &info) {
 	info.temporary = true;
 	info.internal = true;
 	info.extension_name = GetRegisteredExtensionName();
-	info.schema = loader_info.extension_schema;
+	info.SetQualifiedName(
+	    QualifiedName(info.GetQualifiedName().Catalog(), loader_info.extension_schema, info.GetQualifiedName().Name()));
 	auto &system_catalog = Catalog::GetSystemCatalog(db);
 	auto data = CatalogTransaction::GetSystemTransaction(db);
 	system_catalog.CreateType(data, info);
@@ -365,6 +391,10 @@ void ExtensionLoader::RegisterCastFunction(const LogicalType &source, const Logi
 	auto &config = DBConfig::GetConfig(db);
 	auto &casts = config.GetCastFunctions();
 	casts.RegisterCastFunction(source, target, std::move(function), implicit_cast_cost);
+}
+
+void ExtensionLoader::RegisterCombineTypesRule(CombineTypesRule rule) {
+	DBConfig::GetConfig(db).GetCastFunctions().RegisterCombineTypesRule(rule);
 }
 
 void ExtensionLoader::RegisterMetric(MetricInfo info) {

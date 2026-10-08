@@ -17,7 +17,6 @@
 #include "duckdb/common/shared_ptr.hpp"
 #include "duckdb/common/string.hpp"
 #include "duckdb/common/unordered_map.hpp"
-#include "duckdb/storage/buffer/buffer_pool_reservation.hpp"
 
 namespace duckdb {
 
@@ -67,9 +66,8 @@ public:
 			return;
 		}
 
-		// Allocate both ownership nodes before evicting anything. If map
-		// insertion throws, remove the unpublished list node and leave the
-		// existing cache untouched.
+		// Allocate both ownership nodes before evicting anything. The map key references the key owned by the list
+		// node. If map insertion throws, remove the unpublished list node and leave the existing cache untouched.
 		lru_list.emplace_front(std::move(key));
 		Entry new_entry;
 		new_entry.value = std::move(value);
@@ -77,7 +75,7 @@ public:
 		new_entry.payload = std::move(payload);
 		new_entry.payload_weight = payload_weight;
 		try {
-			auto inserted = entry_map.emplace(lru_list.front(), std::move(new_entry));
+			auto inserted = entry_map.emplace(std::cref(lru_list.front()), std::move(new_entry));
 			if (!inserted.second) {
 				throw InternalException("LRU cache key equality changed during insertion");
 			}
@@ -156,12 +154,27 @@ private:
 		idx_t payload_weight;
 	};
 
-	using EntryMap = unordered_map<Key, Entry, KeyHash, KeyEqual>;
+	using KeyConstReference = std::reference_wrapper<const Key>;
+
+	struct KeyReferenceHash {
+		size_t operator()(KeyConstReference key) const {
+			return KeyHash()(key.get());
+		}
+	};
+
+	struct KeyReferenceEqual {
+		bool operator()(KeyConstReference lhs, KeyConstReference rhs) const {
+			return KeyEqual()(lhs.get(), rhs.get());
+		}
+	};
+
+	using EntryMap = unordered_map<KeyConstReference, Entry, KeyReferenceHash, KeyReferenceEqual>;
 
 	void DeleteImpl(typename EntryMap::iterator iter) {
+		auto lru_iterator = iter->second.lru_iterator;
 		current_total_weight -= iter->second.payload_weight;
-		lru_list.erase(iter->second.lru_iterator);
 		entry_map.erase(iter);
+		lru_list.erase(lru_iterator);
 	}
 
 	void EvictIfNeeded() {

@@ -77,23 +77,6 @@ static bool SljitTryFastSelectFlatAllValidBetween(idx_t source_index, int64_t lo
 	return true;
 }
 
-static bool SljitTryFastSelectFlatAllValidIntegerBetween(const SljitNativeRegionExpressionPlan &filter,
-                                                         DataChunk &input, SelectionVector &filter_selection,
-                                                         idx_t &selected_count) {
-	if (filter.kind != SljitNativeRegionExpressionKind::INTEGER_BETWEEN) {
-		return false;
-	}
-	switch (filter.integer_kind) {
-	case SljitNativeIntegerKind::INT32:
-	case SljitNativeIntegerKind::DATE:
-		return SljitTryFastSelectFlatAllValidBetween<int32_t>(
-		    filter.source_index, filter.lower, filter.upper, filter.lower_inclusive, filter.upper_inclusive,
-		    filter.not_between, input, filter_selection, selected_count);
-	default:
-		return false;
-	}
-}
-
 static bool SljitTryFastSelectFlatAllValidIntegerBetween(const SljitNativePredicate &predicate, DataChunk &input,
                                                          SelectionVector &filter_selection, idx_t &selected_count) {
 	if (predicate.kind != SljitNativePredicateKind::INTEGER_BETWEEN) {
@@ -200,32 +183,6 @@ static bool SljitTryFastSelectFlatAllValidCompareReferences(idx_t source_index, 
 	}
 }
 
-static bool SljitTryFastSelectFlatAllValidIntegerCompareReferences(const SljitNativeRegionExpressionPlan &filter,
-                                                                   DataChunk &input, SelectionVector &filter_selection,
-                                                                   idx_t &selected_count) {
-	if (filter.kind != SljitNativeRegionExpressionKind::INTEGER_COMPARE_REFERENCES) {
-		return false;
-	}
-	switch (filter.integer_kind) {
-	case SljitNativeIntegerKind::INT8:
-		return SljitTryFastSelectFlatAllValidCompareReferences<int8_t>(
-		    filter.source_index, filter.right_source_index, filter.compare_op, input, filter_selection, selected_count);
-	case SljitNativeIntegerKind::UINT8:
-		return SljitTryFastSelectFlatAllValidCompareReferences<uint8_t>(
-		    filter.source_index, filter.right_source_index, filter.compare_op, input, filter_selection, selected_count);
-	case SljitNativeIntegerKind::INT32:
-	case SljitNativeIntegerKind::DATE:
-		return SljitTryFastSelectFlatAllValidCompareReferences<int32_t>(
-		    filter.source_index, filter.right_source_index, filter.compare_op, input, filter_selection, selected_count);
-	case SljitNativeIntegerKind::INT64:
-	case SljitNativeIntegerKind::DECIMAL64:
-		return SljitTryFastSelectFlatAllValidCompareReferences<int64_t>(
-		    filter.source_index, filter.right_source_index, filter.compare_op, input, filter_selection, selected_count);
-	default:
-		return false;
-	}
-}
-
 static bool SljitTryFastSelectFlatAllValidIntegerCompareReferences(const SljitNativePredicate &predicate,
                                                                    DataChunk &input, SelectionVector &filter_selection,
                                                                    idx_t &selected_count) {
@@ -305,57 +262,7 @@ static idx_t SljitSelectExpression(const SljitExecutableRegionExpression &expres
 		}
 		return native_input.selected_count;
 	}
-	D_ASSERT(filter.kind == SljitNativeRegionExpressionKind::INTEGER_COMPARE_CONSTANT ||
-	         filter.kind == SljitNativeRegionExpressionKind::INTEGER_COMPARE_REFERENCES ||
-	         filter.kind == SljitNativeRegionExpressionKind::INTEGER_IN_LIST ||
-	         filter.kind == SljitNativeRegionExpressionKind::INTEGER_BETWEEN ||
-	         filter.kind == SljitNativeRegionExpressionKind::NULL_CHECK);
-	idx_t fast_selected_count;
-	if (!execute_sel &&
-	    SljitTryFastSelectFlatAllValidIntegerBetween(filter, input, filter_selection, fast_selected_count)) {
-		return fast_selected_count;
-	}
-	if (!execute_sel &&
-	    SljitTryFastSelectFlatAllValidIntegerCompareReferences(filter, input, filter_selection, fast_selected_count)) {
-		return fast_selected_count;
-	}
-	UnifiedVectorFormat source_format;
-	UnifiedVectorFormat right_source_format;
-	input.data[filter.source_index].ToUnifiedFormat(source_format);
-	if (filter.kind == SljitNativeRegionExpressionKind::INTEGER_COMPARE_REFERENCES) {
-		D_ASSERT(filter.right_source_index < input.ColumnCount());
-		input.data[filter.right_source_index].ToUnifiedFormat(right_source_format);
-	}
-
-	SljitNativeVectorInput native_input;
-	native_input.source_data = filter.kind == SljitNativeRegionExpressionKind::NULL_CHECK
-	                               ? nullptr
-	                               : NativeIntegerSourceData(source_format, filter.integer_kind);
-	native_input.right_source_data = filter.kind == SljitNativeRegionExpressionKind::INTEGER_COMPARE_REFERENCES
-	                                     ? NativeIntegerSourceData(right_source_format, filter.integer_kind)
-	                                     : nullptr;
-	native_input.execute_sel = execute_sel ? execute_sel->data() : nullptr;
-	native_input.source_sel = source_format.sel ? source_format.sel->data() : nullptr;
-	native_input.right_source_sel =
-	    filter.kind == SljitNativeRegionExpressionKind::INTEGER_COMPARE_REFERENCES && right_source_format.sel
-	        ? right_source_format.sel->data()
-	        : nullptr;
-	native_input.source_validity = source_format.validity.GetData();
-	native_input.right_source_validity = filter.kind == SljitNativeRegionExpressionKind::INTEGER_COMPARE_REFERENCES
-	                                         ? right_source_format.validity.GetData()
-	                                         : nullptr;
-	native_input.constants = filter.constants.data();
-	native_input.constant = filter.constant;
-	native_input.result_data = nullptr;
-	native_input.result_validity = nullptr;
-	native_input.true_sel = filter_selection.data();
-	native_input.false_sel = nullptr;
-	native_input.selected_count = 0;
-	native_input.overflow_message = nullptr;
-	native_input.count = count;
-	SljitExecuteNativeFunction(expression.select.Function(), native_input);
-
-	return native_input.selected_count;
+	throw InternalException("SLJIT filter expression has no generated selector");
 }
 
 template <class ADAPTER_SCRATCH>

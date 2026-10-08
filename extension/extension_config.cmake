@@ -14,3 +14,4 @@ if(APPLE)
   duckdb_extension_load(jit_metal)
 endif()
 duckdb_extension_load(parquet)
+

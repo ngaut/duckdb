@@ -12,7 +12,6 @@
 #include "sljit_hash_join_execution_scratch.hpp"
 #include "sljit_hash_join_runtime.hpp"
 #include "sljit_join_drain_state.hpp"
-#include "sljit_nested_loop_execution_scratch.hpp"
 #include "sljit_native_runtime.hpp"
 #include "sljit_order_execution_scratch.hpp"
 #include "sljit_region_adapter_scratch.hpp"
@@ -43,7 +42,6 @@ struct SljitRegionExecutionScratch {
 		filter_selections.resize(op_count);
 		binding_scratch.Resize(op_count);
 		hash_join_scratch.Resize(op_count);
-		nested_loop_scratch.Resize(op_count);
 		order_scratch.Resize(op_count);
 		aggregate_scratch.Resize(op_count);
 		projection_adapter_scratch.resize(op_count);
@@ -224,22 +222,6 @@ struct SljitRegionExecutionScratch {
 		return hash_join_scratch.Sources(op_idx);
 	}
 
-	DataChunk &NestedLoopLeftConditionChunk(idx_t op_idx) {
-		return nested_loop_scratch.LeftConditionChunk(op_idx);
-	}
-
-	SelectionVector &NestedLoopLeftSelection(idx_t op_idx) {
-		return nested_loop_scratch.LeftSelection(op_idx);
-	}
-
-	SelectionVector &NestedLoopRightSelection(idx_t op_idx) {
-		return nested_loop_scratch.RightSelection(op_idx);
-	}
-
-	DataChunk &NestedLoopConditionChunk(idx_t op_idx) {
-		return nested_loop_scratch.ConditionChunk(op_idx);
-	}
-
 	DataChunk &OrderKeyChunk(idx_t op_idx) {
 		return order_scratch.KeyChunk(op_idx);
 	}
@@ -252,13 +234,11 @@ struct SljitRegionExecutionScratch {
 	vector<unique_ptr<SelectionVector>> filter_selections;
 	SljitBindingExecutionScratch binding_scratch;
 	SljitHashJoinExecutionScratch hash_join_scratch;
-	SljitNestedLoopJoinExecutionScratch nested_loop_scratch;
 	SljitOrderExecutionScratch order_scratch;
 	SljitAggregateUpdateScratchState aggregate_scratch;
 	vector<SljitProjectionAdapterScratch> projection_adapter_scratch;
 	vector<vector<SljitExpressionAdapterScratch>> expression_adapter_scratch;
 	vector<SljitSelectedProjectionCache> selected_projection_caches;
-	DirectAppendReservation direct_append_reservation;
 
 	void InitializeOperatorScratch(Allocator &allocator, idx_t op_idx, const SljitExecutableRegionOp &op) {
 		switch (op.kind) {
@@ -271,12 +251,6 @@ struct SljitRegionExecutionScratch {
 			break;
 		case SljitNativeRegionOpKind::HASH_JOIN_BUILD:
 			hash_join_scratch.InitializeBuild(op_idx);
-			break;
-		case SljitNativeRegionOpKind::NESTED_LOOP_JOIN_PROBE:
-			nested_loop_scratch.InitializeProbe(allocator, op_idx, op);
-			break;
-		case SljitNativeRegionOpKind::NESTED_LOOP_JOIN_BUILD:
-			nested_loop_scratch.InitializeBuild(allocator, op_idx, op);
 			break;
 		case SljitNativeRegionOpKind::ORDER_SINK:
 			order_scratch.InitializeSink(allocator, op_idx, op);
@@ -301,12 +275,6 @@ struct SljitRegionExecutionScratch {
 		case SljitNativeRegionOpKind::HASH_JOIN_PROBE:
 			expression_count = op.hash_join_probe.plan.residual_predicate ? 1 : 0;
 			break;
-		case SljitNativeRegionOpKind::NESTED_LOOP_JOIN_PROBE:
-			expression_count = op.nested_loop_join_probe.lhs_conditions.size();
-			break;
-		case SljitNativeRegionOpKind::NESTED_LOOP_JOIN_BUILD:
-			expression_count = op.nested_loop_join_build.rhs_conditions.size();
-			break;
 		case SljitNativeRegionOpKind::ORDER_SINK:
 			expression_count = op.order_sink.order_keys.size();
 			break;
@@ -322,10 +290,8 @@ struct SljitRegionExecutionScratch {
 	static bool OpIsSink(SljitNativeRegionOpKind kind) {
 		switch (kind) {
 		case SljitNativeRegionOpKind::HASH_JOIN_BUILD:
-		case SljitNativeRegionOpKind::NESTED_LOOP_JOIN_BUILD:
 		case SljitNativeRegionOpKind::ORDER_SINK:
 		case SljitNativeRegionOpKind::APPEND_SINK:
-		case SljitNativeRegionOpKind::DELIM_JOIN_SINK:
 		case SljitNativeRegionOpKind::AGGREGATE_UPDATE:
 			return true;
 		default:

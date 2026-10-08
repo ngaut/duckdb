@@ -13,7 +13,6 @@
 #include "sljit_direct_join_output_aggregate_trace.hpp"
 #include "sljit_grouped_aggregate_input_vector_groups.hpp"
 #include "sljit_hash_join_projection_aggregate_input_runtime.hpp"
-#include "sljit_hash_join_projection_materialization_runtime.hpp"
 #include "sljit_join_input_complementary_sum_api.hpp"
 #include "sljit_post_join_projection_strategy.hpp"
 #include "sljit_projection_aggregate_descriptor.hpp"
@@ -202,17 +201,11 @@ static bool SljitTryExecuteDirectJoinOutputAggregate(
 	               aggregate_input)) {
 	} else {
 		string materialize_failure;
-		if (!output_proof.ExactSourceFilterMatches() &&
-		    SljitTryMaterializeHashJoinProjectionAggregateInputsToChunk(
+		if (output_proof.ExactSourceFilterMatches() ||
+		    !SljitTryMaterializeHashJoinProjectionAggregateInputsToChunk(
 		        runtime, scratch, post_join_projection.hash_join_idx, aggregate_projection_idx, descriptor.Projection(),
 		        join_input, match_selection, build_selection, row_pointers, descriptor.input_sources,
 		        join_output.size(), aggregate_input, optional_ptr<string>(&materialize_failure))) {
-		} else if (!SljitJoinProjectionAggregateInputsUseOnlyProjectionOutputs(descriptor) ||
-		           !SljitTryDirectMaterializeHashJoinProjectionSourcesToBatch(
-		               runtime, ops, scratch, post_join_projection.hash_join_idx, aggregate_projection_idx,
-		               descriptor.Projection(), join_input, match_selection, row_pointers, join_output, aggregate_input,
-		               optional_ptr<const vector<idx_t>>(&descriptor.output_to_projection), nullptr, nullptr,
-		               output_proof)) {
 			SljitRecordDirectJoinOutputAggregateProjectionUnsupported(runtime, ops, post_join_projection, "materialize",
 			                                                          join_output.size());
 			strategy.last_failure =

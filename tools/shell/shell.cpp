@@ -44,13 +44,18 @@
 #endif
 
 #include <stdlib.h>
+#include "duckdb/logging/log_storage.hpp"
+#include "duckdb/logging/log_manager.hpp"
+#include "duckdb/main/statement_iterator.hpp"
 #include <string.h>
 #include <stdio.h>
 #include <assert.h>
 
+#include "duckdb/common/time_point.hpp"
 #include "duckdb/common/file_system.hpp"
 #include "duckdb/parser/qualified_name.hpp"
 #include "duckdb/parser/parser.hpp"
+#include "duckdb/parser/statement/explain_statement.hpp"
 #include "duckdb/common/local_file_system.hpp"
 #include "shell_progress_bar.hpp"
 #include "shell_prompt.hpp"
@@ -83,10 +88,12 @@
 #ifdef HAVE_LINENOISE
 #include "linenoise.h"
 #endif
+#include "terminal.hpp"
 
 #include "duckdb.hpp"
 #include "shell_renderer.hpp"
 #include "shell_highlight.hpp"
+#include "shell_manual.hpp"
 #include "shell_state.hpp"
 #include "duckdb/main/error_manager.hpp"
 #include "duckdb/main/client_config.hpp"
@@ -169,12 +176,6 @@ static void setTextMode(FILE *file, int isOutput) {
 /* True if the timer is enabled */
 static bool enableTimer = false;
 
-/* Return monotonic elapsed-time ticks in microseconds. */
-static int64_t monotonicTimeMicros(void) {
-	auto current_time = std::chrono::steady_clock::now().time_since_epoch();
-	return (int64_t)std::chrono::duration_cast<std::chrono::microseconds>(current_time).count();
-}
-
 #if !defined(_WIN32) && !defined(WIN32) && !defined(__minux)
 #include <sys/time.h>
 #include <sys/resource.h>
@@ -189,8 +190,8 @@ struct rusage {
 #endif
 
 /* Saved resource information for the beginning of an operation */
-static struct rusage sBegin; /* CPU time at start */
-static int64_t iBegin;       /* Wall-clock time at start */
+static struct rusage sBegin;     /* CPU time at start */
+static duckdb::TimePoint iBegin; /* Monotonic time at start */
 
 /*
 ** Begin timing an operation
@@ -198,7 +199,7 @@ static int64_t iBegin;       /* Wall-clock time at start */
 static void beginTimer(void) {
 	if (enableTimer) {
 		getrusage(RUSAGE_SELF, &sBegin);
-		iBegin = monotonicTimeMicros();
+		iBegin = duckdb::TimePoint::Tick();
 	}
 }
 
@@ -212,10 +213,10 @@ static double timeDiff(struct timeval *pStart, struct timeval *pEnd) {
 */
 static void endTimer(void) {
 	if (enableTimer) {
-		int64_t iEnd = monotonicTimeMicros();
+		int64_t elapsed_micros = iBegin.ElapsedMicros();
 		struct rusage sEnd;
 		getrusage(RUSAGE_SELF, &sEnd);
-		printf("Run Time (s): real %.6f user %f sys %f\n", (iEnd - iBegin) * 0.000001,
+		printf("Run Time (s): real %.6f user %f sys %f\n", elapsed_micros * 0.000001,
 		       timeDiff(&sBegin.ru_utime, &sEnd.ru_utime), timeDiff(&sBegin.ru_stime, &sEnd.ru_stime));
 	}
 }
@@ -230,7 +231,7 @@ static void endTimer(void) {
 static HANDLE hProcess;
 static FILETIME ftKernelBegin;
 static FILETIME ftUserBegin;
-static int64_t ftWallBegin;
+static duckdb::TimePoint ftMonotonicBegin;
 typedef BOOL(WINAPI *GETPROCTIMES)(HANDLE, LPFILETIME, LPFILETIME, LPFILETIME, LPFILETIME);
 static GETPROCTIMES getProcessTimesAddr = NULL;
 
@@ -270,7 +271,7 @@ static void beginTimer(void) {
 	if (enableTimer && getProcessTimesAddr) {
 		FILETIME ftCreation, ftExit;
 		getProcessTimesAddr(hProcess, &ftCreation, &ftExit, &ftKernelBegin, &ftUserBegin);
-		ftWallBegin = monotonicTimeMicros();
+		ftMonotonicBegin = duckdb::TimePoint::Tick();
 	}
 }
 
@@ -287,9 +288,9 @@ static double timeDiff(FILETIME *pStart, FILETIME *pEnd) {
 static void endTimer(void) {
 	if (enableTimer && getProcessTimesAddr) {
 		FILETIME ftCreation, ftExit, ftKernelEnd, ftUserEnd;
-		int64_t ftWallEnd = monotonicTimeMicros();
+		int64_t ftMonotonicElapsedMicros = ftMonotonicBegin.ElapsedMicros();
 		getProcessTimesAddr(hProcess, &ftCreation, &ftExit, &ftKernelEnd, &ftUserEnd);
-		printf("Run Time (s): real %.6f user %f sys %f\n", (ftWallEnd - ftWallBegin) * 0.000001,
+		printf("Run Time (s): real %.6f user %f sys %f\n", ftMonotonicElapsedMicros * 0.000001,
 		       timeDiff(&ftUserBegin, &ftUserEnd), timeDiff(&ftKernelBegin, &ftKernelEnd));
 	}
 }
@@ -935,8 +936,16 @@ ShellState &ShellState::Get() {
 	return *GetReference();
 }
 
+static bool ResultIsDescribeShaped(const duckdb::QueryResult &result) {
+	// The describe renderer reads the fixed column layout produced by DESCRIBE / a table describe (column_name,
+	// column_type, null, key, default, extra). Anything else - e.g. a setting value from a bareword "SHOW name" - is a
+	// regular result that must not be rendered in describe mode.
+	auto &names = result.GetNames();
+	return names.size() == 6 && names[0] == "column_name" && names[1] == "column_type";
+}
+
 SuccessState ShellState::ExecuteStatement(unique_ptr<duckdb::SQLStatement> statement) {
-	if (!statement->named_param_map.empty()) {
+	if (statement->has_anonymous_parameters) {
 		PrintDatabaseError("Prepared statement parameters cannot be used directly\nTo use prepared "
 		                   "statement parameters, use PREPARE to prepare a statement, followed by EXECUTE");
 		return SuccessState::FAILURE;
@@ -959,15 +968,18 @@ SuccessState ShellState::ExecuteStatement(unique_ptr<duckdb::SQLStatement> state
 		PrintDatabaseError(res.GetError());
 		return SuccessState::FAILURE;
 	}
-	auto &properties = res.properties;
+	auto &properties = res.GetStatementProperties();
 	if (properties.return_type == duckdb::StatementReturnType::CHANGED_ROWS) {
 		auto result_chunk = res.Fetch();
 		if (result_chunk && result_chunk->size() == 1) {
 			// update total changes
 			auto row_changes = result_chunk->GetValue(0, 0);
-			if (!row_changes.IsNull() && row_changes.DefaultTryCastAs(duckdb::LogicalType::BIGINT)) {
-				last_changes = row_changes.GetValue<int64_t>();
-				total_changes += last_changes;
+			if (!row_changes.IsNull()) {
+				auto cast_row_changes = row_changes.DefaultTryCastAs(duckdb::LogicalType::BIGINT);
+				if (cast_row_changes) {
+					last_changes = cast_row_changes->GetValue<int64_t>();
+					total_changes += last_changes;
+				}
 			}
 		}
 	}
@@ -975,11 +987,19 @@ SuccessState ShellState::ExecuteStatement(unique_ptr<duckdb::SQLStatement> state
 		// only SELECT statements return results that need to be rendered
 		return SuccessState::SUCCESS;
 	}
-	if (res.type == duckdb::QueryResultType::MATERIALIZED_RESULT) {
+	if (res.GetResultType() == duckdb::QueryResultType::MATERIALIZED_RESULT) {
 		last_result = duckdb::unique_ptr_cast<duckdb::QueryResult, MaterializedQueryResult>(std::move(result));
 	}
+	// A bareword "SHOW name" is optimistically routed to the describe renderer, but it may have resolved to a setting
+	// value rather than a table describe. Only a describe-shaped result can be rendered in describe mode - fall back to
+	// the default rendering otherwise.
+	if (cMode == RenderMode::DESCRIBE && !ResultIsDescribeShaped(res)) {
+		cMode = mode;
+		renderer = GetRenderer();
+	}
 	// analyze the query result so we know how long/wide the result will be
-	return RenderQueryResult(*renderer, res);
+	auto render_state = RenderQueryResult(*renderer, res);
+	return render_state;
 }
 
 /*
@@ -987,13 +1007,44 @@ SuccessState ShellState::ExecuteStatement(unique_ptr<duckdb::SQLStatement> state
 ** any result rows/columns depending on the current mode
 ** set via the supplied callback.
 */
+void ShellState::SetupPrettyExplain(duckdb::SQLStatement &statement) {
+	auto &explain = statement.Cast<duckdb::ExplainStatement>();
+	if (explain.format != duckdb::ProfilerPrintFormat::Default()) {
+		// the user explicitly requested an output format (e.g. EXPLAIN (FORMAT json))
+		return;
+	}
+	if (explain.explain_type == duckdb::ExplainType::EXPLAIN_ANALYZE) {
+		auto &profiler_format = duckdb::ClientConfig::GetConfig(*conn->context).profiler_print_format;
+		if (profiler_format != "query_tree" && profiler_format != "no_output") {
+			// a custom profiler output format is configured - respect it
+			return;
+		}
+	}
+	// default to the full plan; only fold low-impact operators in an interactive console session, where the user
+	// can type ".last" to expand the tree again (batch/redirected output has no such affordance)
+	if (stdin_is_interactive && stdout_is_console) {
+		duckdb::ClientConfig::GetConfig(*conn->context).profiling_renderer_settings["expand_all"] =
+		    duckdb::Value::BOOLEAN(false);
+	}
+	if (!stdout_is_console) {
+		// only pretty-print to an interactive console - redirected output keeps the plain plan as a result value
+		return;
+	}
+	// render the plan as a highlighted string (see RegisterProfilerHighlighting)
+	explain.format = duckdb::ProfilerPrintFormat("shell_explain_printer");
+}
+
 SuccessState ShellState::ExecuteSQL(const string &zSql) {
 	auto &con = *conn;
 	try {
-		auto statements = con.ExtractStatements(zSql);
-		for (auto &statement : statements) {
-			idx_t start_pos = statement->stmt_location;
-			idx_t len = statement->stmt_length;
+		auto iterator = con.context->IterateStatements(zSql);
+		while (iterator.Peek()) {
+			auto statement = iterator.GetStatementForExecution();
+			if (!statement) {
+				continue; // a peel that preprocessing swallowed
+			}
+			idx_t start_pos = statement->stmt_location.offset;
+			idx_t len = statement->stmt_location.length;
 			while (len > 0 && IsSpace(zSql[start_pos])) {
 				start_pos++;
 				len--;
@@ -1008,6 +1059,7 @@ SuccessState ShellState::ExecuteSQL(const string &zSql) {
 			cMode = mode;
 			if (statement->type == duckdb::StatementType::EXPLAIN_STATEMENT) {
 				cMode = RenderMode::EXPLAIN;
+				SetupPrettyExplain(*statement);
 			}
 			if (mode == RenderMode::DUCKBOX && UseDescribeRenderMode(*statement, describe_table_name)) {
 				cMode = RenderMode::DESCRIBE;
@@ -1022,6 +1074,7 @@ SuccessState ShellState::ExecuteSQL(const string &zSql) {
 		} /* end while */
 	} catch (std::exception &ex) {
 		duckdb::ErrorData error(ex);
+		error.AddErrorLocation(zSql);
 		PrintDatabaseError(error.Message());
 		return SuccessState::FAILURE;
 	}
@@ -1393,6 +1446,31 @@ bool ShellState::ShouldUsePager(idx_t line_count) {
 		}
 	}
 	return true;
+}
+
+idx_t ShellState::GetScreenHeight() {
+	auto size = duckdb::Terminal::GetTerminalSize();
+	return size.ws_row > 0 ? idx_t(size.ws_row) : 0;
+}
+
+bool ShellState::ShouldUsePagerForSize(idx_t line_count, idx_t render_width) {
+	if (!ShouldUsePager()) {
+		return false;
+	}
+	if (pager_mode != PagerMode::PAGER_AUTOMATIC) {
+		// PAGER_ON (PAGER_OFF was already rejected by ShouldUsePager())
+		return true;
+	}
+	// in automatic mode we page when the output does not fit on the screen - either too tall or too wide
+	idx_t screen_rows = GetScreenHeight();
+	idx_t row_threshold = screen_rows > 0 ? screen_rows : pager_min_rows;
+	if (line_count >= row_threshold) {
+		return true;
+	}
+	if (render_width > GetMaxRenderWidth()) {
+		return true;
+	}
+	return false;
 }
 
 bool ShellState::ShouldUsePager(ShellRenderer &renderer, RenderingQueryResult &result) {
@@ -1793,7 +1871,7 @@ ExecuteSQLSingleValueResult ShellState::ExecuteSQLSingleValue(duckdb::Connection
 		result_value = result->GetError();
 		return ExecuteSQLSingleValueResult::EXECUTION_ERROR;
 	}
-	auto is_query = result->properties.return_type == duckdb::StatementReturnType::QUERY_RESULT;
+	auto is_query = result->GetStatementProperties().return_type == duckdb::StatementReturnType::QUERY_RESULT;
 	if (!is_query) {
 		return ExecuteSQLSingleValueResult::EMPTY_RESULT;
 	}
@@ -1924,24 +2002,19 @@ MetadataResult ShellState::SetSeparator(ShellState &state, const vector<string> 
 	return MetadataResult::SUCCESS;
 }
 
-bool ShellState::SetOutputFile(const vector<string> &args, char output_mode) {
+bool ShellState::SetOutputFile(const vector<string> &args, OutputCommand output_command) {
 	if (safe_mode) {
 		PrintF(PrintOutput::STDERR, ".output/.once/.excel cannot be used in -safe mode\n");
 		return false;
 	}
 	string zFile;
 	int bTxtMode = 0;
-	int eMode = 0;
+	enum class OutputFileMode { DEFAULT, TEXT_EDITOR, SPREADSHEET };
+	auto file_mode = OutputFileMode::DEFAULT;
 	bool bBOM = false;
-	int bOnce = 0; /* 0: .output, 1: .once, 2: .excel */
 
-	if (output_mode == 'e') {
-		// .excel
-		eMode = 'x';
-		bOnce = 2;
-	} else if (output_mode == 'o') {
-		// .once
-		bOnce = 1;
+	if (output_command == OutputCommand::EXCEL) {
+		file_mode = OutputFileMode::SPREADSHEET;
 	}
 	for (idx_t i = 1; i < args.size(); i++) {
 		const char *z = args[i].c_str();
@@ -1951,10 +2024,10 @@ bool ShellState::SetOutputFile(const vector<string> &args, char output_mode) {
 			}
 			if (strcmp(z, "-bom") == 0) {
 				bBOM = true;
-			} else if (output_mode != 'e' && strcmp(z, "-x") == 0) {
-				eMode = 'x'; /* spreadsheet */
-			} else if (output_mode != 'e' && strcmp(z, "-e") == 0) {
-				eMode = 'e'; /* text editor */
+			} else if (output_command != OutputCommand::EXCEL && strcmp(z, "-x") == 0) {
+				file_mode = OutputFileMode::SPREADSHEET;
+			} else if (output_command != OutputCommand::EXCEL && strcmp(z, "-e") == 0) {
+				file_mode = OutputFileMode::TEXT_EDITOR;
 			} else {
 				PrintF("ERROR: unknown option: \"%s\".  Usage:\n", args[i].c_str());
 				PrintHelp(args[0].c_str());
@@ -1971,17 +2044,17 @@ bool ShellState::SetOutputFile(const vector<string> &args, char output_mode) {
 	if (zFile.empty()) {
 		zFile = "stdout";
 	}
-	if (bOnce) {
+	if (output_command != OutputCommand::OUTPUT) {
 		outCount = 2;
 	} else {
 		outCount = 0;
 	}
 	ResetOutput();
 #ifndef SQLITE_NOHAVE_SYSTEM
-	if (eMode == 'e' || eMode == 'x') {
+	if (file_mode != OutputFileMode::DEFAULT) {
 		doXdgOpen = 1;
 		PushOutputMode();
-		if (eMode == 'x') {
+		if (file_mode == OutputFileMode::SPREADSHEET) {
 			/* spreadsheet mode.  Output as CSV. */
 			NewTempFile("csv");
 			ShellClearFlag(ShellFlags::SHFLG_Echo);
@@ -2038,6 +2111,12 @@ bool ShellState::ReadFromFile(const string &file) {
 		PrintF(PrintOutput::STDERR, ".read cannot be used in -safe mode\n");
 		return false;
 	}
+	duckdb::LocalFileSystem lfs;
+	auto canonical_file = lfs.CanonicalizePath(file, nullptr);
+	if (!active_read_files.insert(canonical_file).second) {
+		PrintF(PrintOutput::STDERR, "Error: recursive .read of \"%s\"\n", file);
+		return false;
+	}
 	FILE *inSaved = in;
 	int savedLineno = lineno;
 	int rc;
@@ -2048,6 +2127,7 @@ bool ShellState::ReadFromFile(const string &file) {
 		rc = ProcessInput(InputMode::FILE);
 		fclose(in);
 	}
+	active_read_files.erase(canonical_file);
 	in = inSaved;
 	lineno = savedLineno;
 	return rc == 0;
@@ -2220,6 +2300,158 @@ GROUP BY ALL;
 		result.push_back(std::move(table));
 	}
 	RenderTableMetadata(result);
+	return MetadataResult::SUCCESS;
+}
+
+//! Convert a LIST(VARCHAR) Value into a vector of strings (NULL children become "").
+static vector<string> ManualStringList(const duckdb::Value &value) {
+	vector<string> result;
+	if (value.IsNull()) {
+		return result;
+	}
+	for (auto &child : duckdb::ListValue::GetChildren(value)) {
+		result.push_back(child.IsNull() ? "" : child.ToString());
+	}
+	return result;
+}
+
+MetadataResult ShellState::DisplayManual(const vector<string> &args) {
+	if (args.size() != 2) {
+		return MetadataResult::PRINT_USAGE;
+	}
+	auto &con = *conn;
+	// the argument is a function name, optionally qualified: NAME, SCHEMA.NAME or DATABASE.SCHEMA.NAME;
+	// quoted components ("my.func") are handled by the standard qualified-name parsing
+	duckdb::QualifiedName qname;
+	try {
+		qname = duckdb::QualifiedName::Parse(args[1]);
+	} catch (const std::exception &ex) {
+		PrintF(PrintOutput::STDERR, "'%s' is not a valid function name - %s\n", args[1],
+		       ErrorData(ex).RawMessage().c_str());
+		return MetadataResult::FAIL;
+	}
+	if (qname.Path().size() > 3) {
+		// duckdb_functions() only reports the innermost schema, so a nested schema path cannot be matched here
+		PrintF(PrintOutput::STDERR,
+		       "'%s' is not a valid function name - expected NAME, SCHEMA.NAME or DATABASE.SCHEMA.NAME\n", args[1]);
+		return MetadataResult::FAIL;
+	}
+	// missing qualifiers match everything
+	string name_pattern = qname.Name().GetIdentifierName();
+	string schema_pattern = qname.Schema().empty() ? "%" : qname.Schema().GetIdentifierName();
+	string database_pattern = qname.Catalog().empty() ? "%" : qname.Catalog().GetIdentifierName();
+
+	// each part is used directly as a case-insensitive LIKE pattern: a plain word matches exactly,
+	// while wildcards ("%abs") are honored. A pattern may resolve to several distinct functions - each
+	// is rendered as its own manual entry
+	auto prepared = con.Prepare(R"(
+SELECT function_name, function_type, return_type, parameters, parameter_types, varargs, description, examples,
+       database_name, schema_name
+FROM duckdb_functions()
+WHERE database_name ILIKE ? AND schema_name ILIKE ? AND function_name ILIKE ?
+ORDER BY function_name, function_type, database_name, schema_name, length(parameter_types), parameter_types)");
+	if (prepared->HasError()) {
+		PrintDatabaseError(prepared->GetError());
+		return MetadataResult::FAIL;
+	}
+	// note: pass C strings - the variadic Execute maps std::string to BLOB
+	auto query_result = prepared->Execute(database_pattern.c_str(), schema_pattern.c_str(), name_pattern.c_str());
+	if (query_result->HasError()) {
+		PrintDatabaseError(query_result->GetError());
+		return MetadataResult::FAIL;
+	}
+
+	vector<ManualItem> items;
+	for (auto &row : *query_result) {
+		ManualItem item;
+		item.function_name = row.GetValue<string>(0);
+		item.function_type = row.GetValue<string>(1);
+		item.schema_path = row.GetValue<string>(8) + "." + row.GetValue<string>(9);
+		item.return_type = row.IsNull(2) ? string() : row.GetValue<string>(2);
+		item.parameters = ManualStringList(row.GetBaseValue(3));
+		item.parameter_types = ManualStringList(row.GetBaseValue(4));
+		item.varargs = row.IsNull(5) ? string() : row.GetValue<string>(5);
+		item.description = row.IsNull(6) ? string() : row.GetValue<string>(6);
+		item.examples = ManualStringList(row.GetBaseValue(7));
+		items.push_back(std::move(item));
+	}
+
+	if (items.empty()) {
+		PrintF(PrintOutput::STDERR, "No function matches '%s'\n", args[1]);
+		// suggest similarly-named functions within the same qualifiers (typo tolerance) via
+		// Jaro-Winkler similarity
+		auto suggest_prepared = con.Prepare(R"(
+SELECT name FROM (
+  SELECT min(function_name) AS name, max(jaro_winkler_similarity(lower(function_name), lower(?))) AS score
+  FROM duckdb_functions()
+  WHERE database_name ILIKE ? AND schema_name ILIKE ?
+  GROUP BY lower(function_name)
+)
+WHERE score >= 0.7
+ORDER BY score DESC, name
+LIMIT 5)");
+		if (!suggest_prepared->HasError()) {
+			auto suggest_result =
+			    suggest_prepared->Execute(name_pattern.c_str(), database_pattern.c_str(), schema_pattern.c_str());
+			if (!suggest_result->HasError()) {
+				vector<string> suggestions;
+				for (auto &row : *suggest_result) {
+					suggestions.push_back(row.GetValue<string>(0));
+				}
+				if (!suggestions.empty()) {
+					Print(PrintOutput::STDERR, "\nDid you mean:\n");
+					for (auto &suggestion : suggestions) {
+						PrintF(PrintOutput::STDERR, "\t%s\n", suggestion.c_str());
+					}
+				}
+			}
+		}
+		return MetadataResult::SUCCESS;
+	}
+
+	// page width: terminal width, clamped to a readable range
+	idx_t content_width = GetMaxRenderWidth();
+	content_width = duckdb::MaxValue<idx_t>(40, duckdb::MinValue<idx_t>(content_width, 98));
+
+	// coloring is only applied on an interactive console (matching the shell's SQL highlighter);
+	// structural elements: reference markers/rules like the EXPLAIN layout (gray), section headings
+	// and the banner name in bold white, the header schema path / entry type in white, and signature
+	// parameter names in gray italic with parameter/return types in bold
+	ManualStyle style;
+	if (ShellHighlight::IsEnabled() && stdin_is_interactive && stdout_is_console) {
+		auto &layout = ShellHighlight::GetHighlightElement(HighlightElementType::EXPLAIN_LAYOUT);
+		style.layout_on = ShellHighlight::TerminalCode(layout.color, layout.intensity);
+		if (!style.layout_on.empty()) {
+			style.layout_off = ShellHighlight::ResetTerminalCode();
+		}
+		if (linenoiseGetTerminalColorMode() == LINENOISE_LIGHT_MODE) {
+			style.heading_on = ShellHighlight::TerminalCode(PrintColor::BLACK, PrintIntensity::BOLD);
+			style.path_on = ShellHighlight::TerminalCode(PrintColor::BLACK, PrintIntensity::STANDARD);
+		} else {
+			style.heading_on = ShellHighlight::TerminalCode(PrintColor::WHITE, PrintIntensity::BOLD);
+			style.path_on = ShellHighlight::TerminalCode(PrintColor::WHITE, PrintIntensity::STANDARD);
+		}
+		style.param_on = ShellHighlight::TerminalCode(PrintColor::GRAY, PrintIntensity::ITALIC);
+		style.type_on = ShellHighlight::TerminalCode(PrintColor::STANDARD, PrintIntensity::BOLD);
+
+		style.heading_off = ShellHighlight::ResetTerminalCode();
+		style.path_off = ShellHighlight::ResetTerminalCode();
+		style.param_off = ShellHighlight::ResetTerminalCode();
+		style.type_off = ShellHighlight::ResetTerminalCode();
+	}
+
+	// syntax-highlight the examples using the shell's SQL highlighter (no-op off-console)
+	ManualHighlighter highlighter = [this](const string &text) {
+		string highlighted = text;
+		HighlightSQL(highlighted);
+		return highlighted;
+	};
+	string page = RenderManualPage(items, content_width, style, highlighter);
+
+	// page the output when it is long (respecting the user's .pager mode); no-op off an interactive console
+	idx_t line_count = duckdb::NumericCast<idx_t>(std::count(page.begin(), page.end(), '\n'));
+	auto pager_setup = ShouldUsePager(line_count) ? SetupPager() : nullptr;
+	Print(page);
 	return MetadataResult::SUCCESS;
 }
 
@@ -2789,9 +3021,11 @@ int ShellState::ProcessInput(InputMode mode) {
 		zLine = OneInputLine(in, zLine, nSql > 0);
 		if (!zLine) {
 			/* End of input */
-			if (!in && stdin_is_interactive && conn && conn->context && conn->context->IsConnected()) {
+			if (!in && stdin_is_interactive && !started_as_client && conn && conn->context &&
+			    conn->context->IsConnected()) {
 				// First Ctrl-D while CONNECT-ed: implicit DISCONNECT instead of exiting. A second
-				// Ctrl-D (now unbound) will exit normally.
+				// Ctrl-D (now unbound) will exit normally. Shells launched with `-connect` skip this
+				// and exit right away - disconnecting would leave a local shell that was never asked for.
 				printf("\n");
 				conn->Query("DISCONNECT");
 				nSql = 0;
@@ -3259,6 +3493,10 @@ int RunShell(int argc, const char **argv) {
 			}
 			arguments.emplace_back(argv[++i]);
 		}
+		if (option.optional_argument && i + 1 < argc && argv[i + 1][0] != '-') {
+			// an optional argument is only consumed when it is not an option itself
+			arguments.emplace_back(argv[++i]);
+		}
 		if (option.pre_init_callback) {
 			// invoke the pre-init callback (if any)
 			auto result = option.pre_init_callback(data, arguments);
@@ -3270,6 +3508,14 @@ int RunShell(int argc, const char **argv) {
 		command_line_calls.emplace_back(option, std::move(arguments));
 	}
 
+	if (data.started_as_client && !data.zDbFilename.empty()) {
+		// checked before OpenDB, so that a database that does not exist yet is not created either
+		data.PrintDatabaseError(
+		    StringUtil::Format("Invalid Input Error: cannot open a database (%s) together with -connect\n"
+		                       "-connect uses the database of the server it connects to",
+		                       data.zDbFilename));
+		return 1;
+	}
 	if (data.zDbFilename.empty()) {
 		data.zDbFilename = ":memory:";
 	}

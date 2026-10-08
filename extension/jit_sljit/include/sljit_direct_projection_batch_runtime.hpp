@@ -183,13 +183,4 @@ static void SljitCopyDirectProjectionResultToBatch(Vector &result, Vector &targe
 	}
 }
 
-static bool SljitProjectionSkipHasAny(const vector<uint8_t> &skip_projection) {
-	for (auto skip : skip_projection) {
-		if (skip) {
-			return true;
-		}
-	}
-	return false;
-}
-
 } // namespace duckdb

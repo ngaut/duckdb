@@ -31,30 +31,6 @@ static SinkResultType SljitExecuteNativeHashJoinBuild(ExecutionRegionRuntime &ru
 	                                             hash_values, build_sel);
 }
 
-static SinkResultType SljitExecuteNativeNestedLoopJoinBuild(ExecutionOperatorRuntime &native_runtime,
-                                                            SljitRegionExecutionScratch &scratch, idx_t op_idx,
-                                                            SljitExecutableRegionOp &op, DataChunk &input,
-                                                            DataChunk &right_condition) {
-	if (op.nested_loop_join_build.rhs_conditions.size() != right_condition.ColumnCount()) {
-		throw InternalException("SLJIT nested loop join build condition expression count mismatch");
-	}
-	right_condition.Reset();
-	for (idx_t condition_idx = 0; condition_idx < op.nested_loop_join_build.rhs_conditions.size(); condition_idx++) {
-		SljitExecuteProjectionExpression(op.nested_loop_join_build.rhs_conditions[condition_idx], input,
-		                                 right_condition.data[condition_idx], nullptr, input.size(),
-		                                 scratch.ExpressionAdapterScratch(op_idx, condition_idx));
-	}
-	right_condition.SetChildCardinality(input.size());
-
-	auto &binding = SljitBindNativeSink(
-	    native_runtime, scratch, op_idx, input, op.nested_loop_join_build.plan.sink_info,
-	    "nested-loop-join-build-native-runtime-binding-failed", "SLJIT native nested loop join build sink");
-	if (!binding.ready || !binding.nested_loop_join_build.ready) {
-		throw InternalException("SLJIT native nested loop join build sink binding did not return a ready build state");
-	}
-	return ExecutionSinkNestedLoopJoinBuild(binding.nested_loop_join_build, input, right_condition);
-}
-
 static SinkResultType SljitExecuteNativeAppendSink(ExecutionOperatorRuntime &native_runtime,
                                                    SljitRegionExecutionScratch &scratch, idx_t op_idx,
                                                    SljitExecutableRegionOp &op, DataChunk &input) {
@@ -64,17 +40,6 @@ static SinkResultType SljitExecuteNativeAppendSink(ExecutionOperatorRuntime &nat
 		throw InternalException("SLJIT append sink binding did not return a ready append state");
 	}
 	return ExecutionSinkAppend(binding.append_sink, input);
-}
-
-static SinkResultType SljitExecuteNativeDelimJoinSink(ExecutionOperatorRuntime &native_runtime,
-                                                      SljitRegionExecutionScratch &scratch, idx_t op_idx,
-                                                      SljitExecutableRegionOp &op, DataChunk &input) {
-	auto &binding = SljitBindNativeSink(native_runtime, scratch, op_idx, input, op.delim_join_sink.plan.sink_info,
-	                                    "delim-join-sink-runtime-binding-failed", "SLJIT delimiter join sink");
-	if (!binding.ready || !binding.delim_join_sink.ready) {
-		throw InternalException("SLJIT delimiter join sink binding did not return a ready delimiter state");
-	}
-	return ExecutionSinkDelimJoin(binding.delim_join_sink, input);
 }
 
 static SinkResultType SljitExecuteNativeOrderSink(ExecutionRegionRuntime &runtime,
@@ -121,16 +86,6 @@ static bool SljitTryExecuteNativeTerminalNonAggregateSink(ExecutionRegionRuntime
 		    runtime, native_runtime, scratch, op_idx, op, input, scratch.HashJoinBuildSourceChunk(op_idx),
 		    scratch.HashJoinBuildHashValues(op_idx), scratch.HashJoinBuildSelection(op_idx));
 		return true;
-	case SljitNativeRegionOpKind::NESTED_LOOP_JOIN_BUILD: {
-		if (!is_final_operator) {
-			throw InternalException("SLJIT nested loop join build sink must be the final full pipeline operator");
-		}
-		auto stage_start = SljitRegionStageStart(runtime);
-		sink_result = SljitExecuteNativeNestedLoopJoinBuild(native_runtime, scratch, op_idx, op, input,
-		                                                    scratch.NestedLoopConditionChunk(op_idx));
-		RecordSljitRegionStageRuntime(runtime, op_idx, op.kind, stage_start);
-		return true;
-	}
 	case SljitNativeRegionOpKind::ORDER_SINK:
 		if (!is_final_operator) {
 			throw InternalException("SLJIT ordered sink must be the final full pipeline operator");
@@ -144,15 +99,6 @@ static bool SljitTryExecuteNativeTerminalNonAggregateSink(ExecutionRegionRuntime
 		}
 		auto stage_start = SljitRegionStageStart(runtime);
 		sink_result = SljitExecuteNativeAppendSink(native_runtime, scratch, op_idx, op, input);
-		RecordSljitRegionStageRuntime(runtime, op_idx, op.kind, stage_start);
-		return true;
-	}
-	case SljitNativeRegionOpKind::DELIM_JOIN_SINK: {
-		if (!is_final_operator) {
-			throw InternalException("SLJIT delimiter join sink must be the final full pipeline operator");
-		}
-		auto stage_start = SljitRegionStageStart(runtime);
-		sink_result = SljitExecuteNativeDelimJoinSink(native_runtime, scratch, op_idx, op, input);
 		RecordSljitRegionStageRuntime(runtime, op_idx, op.kind, stage_start);
 		return true;
 	}

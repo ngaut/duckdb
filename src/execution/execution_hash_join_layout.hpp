@@ -23,8 +23,14 @@ struct ExecutionHashJoinRowLayout {
 	idx_t entry_size = 0;
 };
 
+//! Logical type of a dict-surviving payload slot that stores a dictionary index of index_width bytes (1, 2 or 4).
+LogicalType ExecutionHashJoinDictIndexType(uint8_t index_width);
+
+//! payload_dict_index_widths: per payload column, 0 keeps the native slot and 1/2/4 narrows it to a dictionary
+//! index slot (dict-surviving join). Empty means every payload column keeps its native width.
 ExecutionHashJoinRowLayout BuildExecutionHashJoinRowLayout(const vector<LogicalType> &condition_types,
                                                            const vector<LogicalType> &payload_types,
-                                                           bool found_match_column_present);
+                                                           bool found_match_column_present,
+                                                           const vector<uint8_t> &payload_dict_index_widths);
 
 } // namespace duckdb

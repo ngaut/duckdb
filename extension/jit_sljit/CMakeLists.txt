@@ -18,8 +18,8 @@ set(JIT_SLJIT_EXTENSION_FILES
     sljit_aggregate_perfect_hash_group_codegen.cpp
     sljit_aggregate_perfect_hash_group_plan.cpp
     sljit_aggregate_perfect_hash_plan.cpp
-    sljit_aggregate_perfect_hash_range_plan.cpp
     sljit_aggregate_perfect_hash_primitive_update_codegen.cpp
+    sljit_aggregate_perfect_hash_range_plan.cpp
     sljit_aggregate_perfect_hash_update_plan.cpp
     sljit_aggregate_perfect_hash_update_codegen.cpp
     sljit_aggregate_perfect_hash_update_emitters.cpp
@@ -49,10 +49,8 @@ set(JIT_SLJIT_EXTENSION_FILES
     sljit_executable_range_analysis.cpp
     sljit_executable_range_stats.cpp
     sljit_executable_stats.cpp
-    sljit_expression_tree_codegen.cpp
     sljit_expression_tree_overflow_codegen.cpp
     sljit_expression_tree_source_codegen.cpp
-    sljit_expression_tree_value_codegen.cpp
     sljit_hash_join_runtime.cpp
     sljit_hash_join_aggregate_consumer_runtime.cpp
     sljit_hash_join_all_valid_probe_fast_path_runtime.cpp
@@ -66,35 +64,28 @@ set(JIT_SLJIT_EXTENSION_FILES
     sljit_native_double_codegen.cpp
     sljit_native_decimal_plan.cpp
     sljit_native_flat_double_codegen.cpp
-    sljit_native_flat_double_projection_codegen.cpp
-    sljit_native_flat_floating_stats_codegen.cpp
     sljit_native_flat_integer_codegen.cpp
     sljit_native_flat_integer_projection_codegen.cpp
     sljit_native_flat_integer_projection_helpers.cpp
     sljit_native_flat_projection_codegen.cpp
     sljit_native_predicate_codegen.cpp
-    sljit_native_predicate_select_codegen.cpp
     sljit_native_int128_plan.cpp
     sljit_native_integer_binary_codegen.cpp
     sljit_native_integer_plan.cpp
     sljit_native_integer_set_plan.cpp
     sljit_native_integer_scalar_codegen.cpp
     sljit_native_scalar_utility_codegen.cpp
-    sljit_native_plan.cpp
     sljit_native_predicate_plan.cpp
     sljit_native_predicate_simd_plan.cpp
     sljit_native_predicate_structural_plan.cpp
     sljit_native_predicate_sources.cpp
-    sljit_native_predicate_select_helpers.cpp
     sljit_native_runtime.cpp
     sljit_native_string_compression_codegen.cpp
     sljit_native_string_plan.cpp
     sljit_native_util.cpp
-    sljit_nested_loop_join_codegen.cpp
     sljit_platform.cpp
     sljit_register_layout.cpp
     sljit_predicate_branch_codegen.cpp
-    sljit_predicate_constant_or_null_codegen.cpp
     sljit_predicate_codegen.cpp
     sljit_predicate_facts.cpp
     sljit_predicate_numeric_branch_codegen.cpp
@@ -123,7 +114,6 @@ set(JIT_SLJIT_EXTENSION_FILES
     sljit_region_expression_tree_plan.cpp
     sljit_region_join_plan.cpp
     sljit_region_join_sink_plan.cpp
-    sljit_region_nested_loop_join_plan.cpp
     sljit_region_node_plan.cpp
     sljit_region_plan_facts.cpp
     sljit_region_plan_copy.cpp

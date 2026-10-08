@@ -11,7 +11,29 @@
 #include "sljit_codegen_internal.hpp"
 #include "sljit_typed_expression_plan.hpp"
 
+#include "duckdb/common/types/hugeint.hpp"
+
 namespace duckdb {
+
+// Stores the root value held in R2 into result_data[S1]. The element layout follows the root's physical type: a narrow
+// DECIMAL128 root is exact in its 64-bit register and is sign-extended into the 16-byte hugeint element. Clobbers R0,
+// R1 and R3.
+static void EmitStoreSljitTypedExpressionTreeVectorResult(struct sljit_compiler *compiler,
+                                                          const ExecutionExpressionIR &root,
+                                                          SljitNativeIntegerKind result_kind) {
+	sljit_emit_op1(compiler, SLJIT_MOV_P, SLJIT_R0, 0, SLJIT_MEM1(SLJIT_S0),
+	               offsetof(SljitNativeVectorInput, result_data));
+	if (SljitTypedExpressionTreeIsNarrowDecimal128Node(root)) {
+		sljit_emit_op2(compiler, SLJIT_SHL, SLJIT_R1, 0, SLJIT_S1, 0, SLJIT_IMM, 4);
+		sljit_emit_op2(compiler, SLJIT_ADD, SLJIT_R0, 0, SLJIT_R0, 0, SLJIT_R1, 0);
+		sljit_emit_op2(compiler, SLJIT_ASHR, SLJIT_R3, 0, SLJIT_R2, 0, SLJIT_IMM, 63);
+		sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_MEM1(SLJIT_R0), offsetof(hugeint_t, lower), SLJIT_R2, 0);
+		sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_MEM1(SLJIT_R0), offsetof(hugeint_t, upper), SLJIT_R3, 0);
+		return;
+	}
+	sljit_emit_op1(compiler, NativeIntegerStoreOp(result_kind), SLJIT_MEM2(SLJIT_R0, SLJIT_S1),
+	               NativeIntegerDataScale(result_kind), SLJIT_R2, 0);
+}
 
 unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativeTypedExpressionTree(const ExecutionExpressionIR &root,
                                                                           SljitNativeIntegerKind result_kind,
@@ -48,10 +70,7 @@ unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativeTypedExpressionTree(const 
 		fast_done = sljit_emit_cmp(compiler, SLJIT_GREATER_EQUAL, SLJIT_S1, 0, SLJIT_S2, 0);
 		idx_t fast_spill_index = 0;
 		EmitSljitTypedExpressionTreeFastValueReg(compiler, root, fast_spill_index, overflows);
-		sljit_emit_op1(compiler, SLJIT_MOV_P, SLJIT_R0, 0, SLJIT_MEM1(SLJIT_S0),
-		               offsetof(SljitNativeVectorInput, result_data));
-		sljit_emit_op1(compiler, NativeIntegerStoreOp(result_kind), SLJIT_MEM2(SLJIT_R0, SLJIT_S1),
-		               NativeIntegerDataScale(result_kind), SLJIT_R2, 0);
+		EmitStoreSljitTypedExpressionTreeVectorResult(compiler, root, result_kind);
 		sljit_emit_op2(compiler, SLJIT_ADD, SLJIT_S1, 0, SLJIT_S1, 0, SLJIT_IMM, 1);
 		auto fast_repeat = sljit_emit_jump(compiler, SLJIT_JUMP);
 		sljit_set_label(fast_repeat, fast_loop);
@@ -72,10 +91,7 @@ unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativeTypedExpressionTree(const 
 		}
 		idx_t flat_nullable_spill_index = 0;
 		EmitSljitTypedExpressionTreeFastValueReg(compiler, root, flat_nullable_spill_index, overflows);
-		sljit_emit_op1(compiler, SLJIT_MOV_P, SLJIT_R0, 0, SLJIT_MEM1(SLJIT_S0),
-		               offsetof(SljitNativeVectorInput, result_data));
-		sljit_emit_op1(compiler, NativeIntegerStoreOp(result_kind), SLJIT_MEM2(SLJIT_R0, SLJIT_S1),
-		               NativeIntegerDataScale(result_kind), SLJIT_R2, 0);
+		EmitStoreSljitTypedExpressionTreeVectorResult(compiler, root, result_kind);
 		auto flat_nullable_next = sljit_emit_jump(compiler, SLJIT_JUMP);
 		auto flat_nullable_invalid = sljit_emit_label(compiler);
 		for (auto source_null_jump : source_null_jumps) {
@@ -97,11 +113,8 @@ unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativeTypedExpressionTree(const 
 	auto root_slot = EmitSljitTypedExpressionTreeValue(compiler, root, slot_index, overflows);
 	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_R3, 0, SLJIT_MEM1(SLJIT_SP), root_slot.valid_offset);
 	auto root_invalid = sljit_emit_cmp(compiler, SLJIT_EQUAL, SLJIT_R3, 0, SLJIT_IMM, 0);
-	sljit_emit_op1(compiler, SLJIT_MOV_P, SLJIT_R0, 0, SLJIT_MEM1(SLJIT_S0),
-	               offsetof(SljitNativeVectorInput, result_data));
 	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_R2, 0, SLJIT_MEM1(SLJIT_SP), root_slot.value_offset);
-	sljit_emit_op1(compiler, NativeIntegerStoreOp(result_kind), SLJIT_MEM2(SLJIT_R0, SLJIT_S1),
-	               NativeIntegerDataScale(result_kind), SLJIT_R2, 0);
+	EmitStoreSljitTypedExpressionTreeVectorResult(compiler, root, result_kind);
 	auto row_done = sljit_emit_jump(compiler, SLJIT_JUMP);
 	sljit_set_label(root_invalid, sljit_emit_label(compiler));
 	EmitSetResultRowInvalid(compiler);

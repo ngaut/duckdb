@@ -88,6 +88,33 @@ void RemapChildVectors(const Vector &result, const vector<reference<Vector>> &in
 	}
 }
 
+//! Copy the list_entry_t values from the input vector into the result, preserving top-level validity
+//! Returns false if the input is a constant NULL - in that case the result is set to a constant NULL
+bool CopyListEntries(Vector &input, Vector &result, idx_t result_size) {
+	bool is_constant = input.GetVectorType() == VectorType::CONSTANT_VECTOR;
+	if (is_constant && ConstantVector::IsNull(input)) {
+		ConstantVector::SetNull(result, count_t(result_size));
+		return false;
+	}
+	auto writer = FlatVector::Writer<list_entry_t>(result, result_size);
+	if (is_constant) {
+		// broadcast the single list entry over all result rows
+		auto list_entry = *ConstantVector::GetData<list_entry_t>(input);
+		for (idx_t i = 0; i < result_size; i++) {
+			writer.WriteValue(list_entry);
+		}
+		return true;
+	}
+	for (const auto entry : input.Values<list_entry_t>()) {
+		if (entry.IsValid()) {
+			writer.WriteValue(entry.GetValueUnsafe());
+		} else {
+			writer.WriteNull();
+		}
+	}
+	return true;
+}
+
 void RemapMap(Vector &input, Vector &default_vector, Vector &result, idx_t result_size,
               const vector<RemapColumnInfo> &remap_info) {
 	auto &input_key_vector = MapVector::GetKeys(input);
@@ -100,23 +127,8 @@ void RemapMap(Vector &input, Vector &default_vector, Vector &result, idx_t resul
 	ListVector::SetListSize(result, list_size);
 
 	// copy over the list_entry_t values from the input vector, preserving top-level validity
-	if (input.GetVectorType() == VectorType::CONSTANT_VECTOR) {
-		if (ConstantVector::IsNull(input)) {
-			ConstantVector::SetNull(result, count_t(result_size));
-			return;
-		}
-		auto list_data = ConstantVector::GetData<list_entry_t>(input);
-		auto result_list_data = FlatVector::GetDataMutable<list_entry_t>(result);
-		memcpy(result_list_data, list_data, sizeof(list_entry_t));
-	} else {
-		auto writer = FlatVector::Writer<list_entry_t>(result, result_size);
-		for (const auto entry : input.Values<list_entry_t>()) {
-			if (entry.IsValid()) {
-				writer.WriteValue(entry.GetValueUnsafe());
-			} else {
-				writer.WriteNull();
-			}
-		}
+	if (!CopyListEntries(input, result, result_size)) {
+		return;
 	}
 	// set up the correct vector references
 	D_ASSERT(remap_info.size() == 2);
@@ -142,23 +154,8 @@ void RemapList(Vector &input, Vector &default_vector, Vector &result, idx_t resu
 	ListVector::SetListSize(result, list_size);
 
 	// copy over the list_entry_t values from the input vector, preserving top-level validity
-	if (input.GetVectorType() == VectorType::CONSTANT_VECTOR) {
-		if (ConstantVector::IsNull(input)) {
-			ConstantVector::SetNull(result, count_t(result_size));
-			return;
-		}
-		auto list_data = ConstantVector::GetData<list_entry_t>(input);
-		auto result_list_data = FlatVector::GetDataMutable<list_entry_t>(result);
-		memcpy(result_list_data, list_data, sizeof(list_entry_t));
-	} else {
-		auto writer = FlatVector::Writer<list_entry_t>(result, result_size);
-		for (const auto entry : input.Values<list_entry_t>()) {
-			if (entry.IsValid()) {
-				writer.WriteValue(entry.GetValueUnsafe());
-			} else {
-				writer.WriteNull();
-			}
-		}
+	if (!CopyListEntries(input, result, result_size)) {
+		return;
 	}
 
 	//! Build up the input for remapping the child of the list
@@ -295,15 +292,16 @@ struct RemapEntry {
 		Value struct_val;
 		if (remap_val.type().id() == LogicalTypeId::VARCHAR) {
 			remap_source = remap_val.ToString();
-		} else if (remap_val.type().id() == LogicalTypeId::STRUCT) {
-			if (!StructType::IsUnnamed(remap_val.type())) {
+		} else if (StructType::IsStruct(remap_val.type())) {
+			// the remap spec is a (source_name, nested_spec) pair, built as an unnamed TUPLE
+			if (remap_val.type().id() != LogicalTypeId::TUPLE) {
 				throw BinderException("Remap keys for remap_struct needs to be an unnamed struct");
 			}
 			auto &children = StructValue::GetChildren(remap_val);
 			if (children.size() != 2) {
 				throw BinderException("Remap keys for remap_struct needs to have two children");
 			}
-			if (children[0].type().id() != LogicalTypeId::VARCHAR || children[1].type().id() != LogicalTypeId::STRUCT) {
+			if (children[0].type().id() != LogicalTypeId::VARCHAR || !StructType::IsStruct(children[1].type())) {
 				throw BinderException("Remap keys for remap_struct need to be varchar and struct");
 			}
 			remap_source = children[0].ToString();
@@ -314,6 +312,13 @@ struct RemapEntry {
 
 		// find the source index
 		auto entry = source_map.find(Identifier(remap_source));
+		if (entry == source_map.end() && parent_type.id() == LogicalTypeId::LIST) {
+			// A LIST has exactly one child, which GetMap canonically keys as "list". Some producers
+			// carry the physical child name instead (e.g. the multi-file reader for Parquet files whose
+			// repeated group is named "array" for parquet-avro/Hive or "bag" for Spark legacy). The
+			// mapping is unambiguous for a LIST, so fall back to the canonical "list" child.
+			entry = source_map.find(Identifier("list"));
+		}
 		if (entry == source_map.end()) {
 			throw BinderException("Source value %s not found", remap_source);
 		}
@@ -521,7 +526,6 @@ struct RemapEntry {
 };
 
 unique_ptr<FunctionData> RemapStructBind(BindScalarFunctionInput &input) {
-	auto &context = input.GetClientContext();
 	auto &bound_function = input.GetBoundFunction();
 	auto &arguments = input.GetArguments();
 	D_ASSERT(arguments.size() == 4);
@@ -537,7 +541,7 @@ unique_ptr<FunctionData> RemapStructBind(BindScalarFunctionInput &input) {
 		if (!IsRemappable(arg->GetReturnType())) {
 			throw BinderException("Struct remap can only remap nested types, not '%s'",
 			                      arg->GetReturnType().ToString());
-		} else if (arg->GetReturnType().id() == LogicalTypeId::STRUCT && StructType::IsUnnamed(arg->GetReturnType())) {
+		} else if (StructType::IsStruct(arg->GetReturnType()) && StructType::IsUnnamed(arg->GetReturnType())) {
 			throw BinderException("Struct remap can only remap named structs");
 		}
 	}
@@ -545,11 +549,10 @@ unique_ptr<FunctionData> RemapStructBind(BindScalarFunctionInput &input) {
 	auto &to_type = arguments[1]->GetReturnType();
 
 	auto &defaults = arguments[3];
-	if (defaults->GetReturnType().id() != LogicalTypeId::SQLNULL &&
-	    defaults->GetReturnType().id() != LogicalTypeId::STRUCT) {
+	if (defaults->GetReturnType().id() != LogicalTypeId::SQLNULL && !StructType::IsStruct(defaults->GetReturnType())) {
 		throw BinderException("The defaults provided to 'remap_struct' should be of type STRUCT if they're not NULL");
 	}
-	if (defaults->GetReturnType().id() == LogicalTypeId::STRUCT && StructType::IsUnnamed(defaults->GetReturnType())) {
+	if (StructType::IsStruct(defaults->GetReturnType()) && StructType::IsUnnamed(defaults->GetReturnType())) {
 		throw BinderException("The defaults have to be either NULL or a named STRUCT, not an unnamed struct");
 	}
 
@@ -558,13 +561,9 @@ unique_ptr<FunctionData> RemapStructBind(BindScalarFunctionInput &input) {
 		                      from_type.ToString(), to_type.ToString());
 	}
 
-	if (!arguments[2]->IsFoldable()) {
-		throw BinderException("Remap keys for remap_struct needs to be a constant value");
-	}
+	Value remap_val = input.GetConstant(2);
 	auto source_map = RemapIndex::GetMap(from_type);
 	auto target_map = RemapIndex::GetMap(to_type);
-
-	Value remap_val = ExpressionExecutor::EvaluateScalar(context, *arguments[2]);
 
 	// (recursively) generate the remap entries
 	identifier_map_t<RemapEntry> remap_map;
@@ -610,9 +609,12 @@ unique_ptr<FunctionData> RemapStructBind(BindScalarFunctionInput &input) {
 } // namespace
 
 ScalarFunction RemapStructFun::GetFunction() {
-	ScalarFunction remap("remap_struct",
-	                     {LogicalTypeId::ANY, LogicalTypeId::ANY, LogicalTypeId::ANY, LogicalTypeId::ANY},
-	                     LogicalTypeId::ANY, RemapStructFunction, RemapStructBind);
+	ScalarFunction remap("remap_struct", {}, LogicalTypeId::ANY, RemapStructFunction, RemapStructBind);
+	remap.GetSignature()
+	    .AddParameter("input", LogicalTypeId::ANY)
+	    .AddParameter("target_type", LogicalTypeId::ANY)
+	    .AddParameter("mapping", LogicalTypeId::ANY)
+	    .AddParameter("defaults", LogicalTypeId::ANY);
 	remap.SetNullHandling(FunctionNullHandling::SPECIAL_HANDLING);
 	return remap;
 }

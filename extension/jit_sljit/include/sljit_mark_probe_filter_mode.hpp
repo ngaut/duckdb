@@ -91,7 +91,6 @@ static SljitMarkProbeFilterMode SljitReadBooleanMarkerFilterMode(const SljitExec
 		return plan.predicate
 		           ? SljitReadBooleanMarkerPredicateMode(*plan.predicate, expression.input_source_indices, marker_index)
 		           : SljitMarkProbeFilterMode::NONE;
-	case SljitNativeRegionExpressionKind::EXPRESSION_TREE:
 	case SljitNativeRegionExpressionKind::TYPED_EXPRESSION_TREE:
 		return plan.expression_tree ? SljitReadBooleanMarkerExpressionTreeMode(
 		                                  *plan.expression_tree, plan.expression_tree_source_indices, marker_index)

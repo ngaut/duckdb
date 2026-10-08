@@ -9,6 +9,7 @@
 #pragma once
 
 #include "duckdb/common/enums/column_segment_info_scan_type.hpp"
+#include "duckdb/common/enums/constraint_check_mode.hpp"
 #include "duckdb/common/unique_ptr.hpp"
 #include "duckdb/planner/table_filter_set.hpp"
 #include "duckdb/storage/table/data_table_info.hpp"
@@ -65,8 +66,8 @@ enum class DataTableVersion {
 class DataTable : public enable_shared_from_this<DataTable> {
 public:
 	//! Constructs a new data table from an (optional) set of persistent segments
-	DataTable(AttachedDatabase &db, shared_ptr<TableIOManager> table_io_manager, const string &schema,
-	          const string &table, vector<ColumnDefinition> column_definitions_p,
+	DataTable(AttachedDatabase &db, shared_ptr<TableIOManager> table_io_manager, vector<Identifier> schema_path,
+	          Identifier table, vector<ColumnDefinition> column_definitions_p,
 	          unique_ptr<PersistentTableData> data = nullptr);
 	//! Constructs a DataTable as a delta on an existing data table with a newly added column
 	DataTable(ClientContext &context, DataTable &parent, ColumnDefinition &new_column, Expression &default_value);
@@ -74,7 +75,8 @@ public:
 	DataTable(ClientContext &context, DataTable &parent, idx_t removed_column);
 	//! Constructs a DataTable as a delta on an existing data table but with one column changed type
 	DataTable(ClientContext &context, DataTable &parent, idx_t changed_idx, const LogicalType &target_type,
-	          const vector<StorageIndex> &bound_columns, Expression &cast_expr);
+	          const vector<StorageIndex> &bound_columns, Expression &cast_expr,
+	          optional_ptr<BoundConstraint> constraint_to_verify = nullptr);
 	//! Constructs a DataTable as a delta on an existing data table but with one column added new constraint
 	DataTable(ClientContext &context, DataTable &parent, BoundConstraint &constraint);
 
@@ -92,14 +94,14 @@ public:
 	const vector<ColumnDefinition> &Columns() const;
 
 	void InitializeScan(ClientContext &context, DuckTransaction &transaction, TableScanState &state,
-	                    const vector<StorageIndex> &column_ids, optional_ptr<TableFilterSet> table_filters = nullptr,
-	                    TableFilterExecutionMode filter_execution_mode = TableFilterExecutionMode::FILTER_AND_PRUNE);
+	                    const vector<StorageIndex> &column_ids, optional_ptr<TableFilterSet> table_filters = nullptr);
 
 	//! Returns the maximum amount of threads that should be assigned to scan this data table
 	idx_t MaxThreads(ClientContext &context) const;
 	void InitializeParallelScan(ClientContext &context, ParallelTableScanState &state,
 	                            const vector<ColumnIndex> &column_indexes);
-	idx_t NextParallelScan(ClientContext &context, ParallelTableScanState &state, TableScanState &scan_state);
+	optional_idx NextParallelScan(ClientContext &context, ParallelTableScanState &state, TableScanState &scan_state,
+	                              bool initialize_columns = true);
 
 	//! Scans up to STANDARD_VECTOR_SIZE elements from the table starting
 	//! from offset and store them in result. Offset is incremented with how many
@@ -199,19 +201,6 @@ public:
 	//! Merge a row group collection directly into this table - appending it to the end of the table without copying
 	void MergeStorage(RowGroupCollection &data, optional_ptr<StorageCommitState> commit_state);
 
-	//! Appends a chunk with the row ids [row_start, ..., row_start + chunk.size()] to all indexes of the table.
-	//! If an index is bound, it appends table_chunk. Else, it buffers index_chunk.
-	static ErrorData AppendToIndexes(TableIndexList &indexes, optional_ptr<TableIndexList> delete_indexes,
-	                                 DataChunk &table_chunk, DataChunk &index_chunk,
-	                                 const vector<StorageIndex> &mapped_column_ids, row_t row_start,
-	                                 const IndexAppendMode index_append_mode, optional_idx active_checkpoint);
-	ErrorData AppendToIndexes(optional_ptr<TableIndexList> delete_indexes, DataChunk &table_chunk,
-	                          DataChunk &index_chunk, const vector<StorageIndex> &mapped_column_ids, row_t row_start,
-	                          const IndexAppendMode index_append_mode);
-	//! Revert a previous append made to indexes in a chunk with the row ids [row_start, ..., row_start + chunk.size()]
-	void RevertIndexAppend(TableAppendState &state, DataChunk &chunk, row_t row_start);
-	//! Revert a previous append made to indexes with the given row-ids
-	void RevertIndexAppend(TableAppendState &state, DataChunk &chunk, Vector &row_identifiers);
 	//! Remove the row identifiers from all the indexes of the table
 	void RemoveFromIndexes(const QueryContext &context, Vector &row_identifiers, idx_t count,
 	                       IndexRemovalType removal_type, optional_idx checkpoint_id = optional_idx());
@@ -240,8 +229,6 @@ public:
 	//! Sets statistics of a physical column within the table
 	void SetDistinct(column_t column_id, unique_ptr<DistinctStatistics> distinct_stats);
 
-	//! Obtains a lock during a checkpoint operation that prevents other threads from reading this table
-	unique_ptr<StorageLockKey> GetCheckpointLock();
 	//! Checkpoint the table to the specified table data writer
 	void Checkpoint(TableDataWriter &writer, Serializer &serializer);
 	//! Accumulates the table's on-disk blocks for reclamation into the drop state.
@@ -289,24 +276,21 @@ public:
 	bool HasForeignKeyIndex(const vector<PhysicalIndex> &keys, ForeignKeyType type);
 	void SetIndexStorageInfo(vector<IndexStorageInfo> index_storage_info);
 	void VacuumIndexes();
-	void VerifyIndexBuffers();
-	void CleanupAppend(transaction_t lowest_transaction, idx_t start, idx_t count);
+	void VerifyIndexBuffers() const;
+	void CleanupAppend(VisibilityBound lowest_visibility_bound, idx_t start, idx_t count);
 	void Destroy();
 
 	Identifier GetTableName() const;
 	void SetTableName(Identifier new_name);
 
-	TableStorageInfo GetStorageInfo();
+	TableStorageInfo GetStorageInfo() const;
 
 	idx_t GetRowGroupSize() const;
 
-	//! Verify any unique indexes using optional delete indexes in the local storage.
-	void VerifyUniqueIndexes(TableIndexList &indexes, optional_ptr<LocalTableStorage> storage, DataChunk &chunk,
-	                         optional_ptr<ConflictManager> manager);
 	//! AddIndex initializes an index and adds it to the table's index list.
 	//! It is either empty, or initialized via its index storage information.
 	void AddIndex(const ColumnList &columns, const vector<LogicalIndex> &column_indexes, const IndexConstraintType type,
-	              IndexStorageInfo index_info);
+	              IndexStorageInfo index_info, ConstraintCheckMode check_mode);
 	//! AddIndex moves an index to this table's index list.
 	void AddIndex(unique_ptr<Index> index);
 

@@ -166,8 +166,6 @@ private:
 		    {&SljitFullPipelineRecipeBuilder::TryBuildSourceFilterAggregateRecipe},
 		    {&SljitFullPipelineRecipeBuilder::TryBuildJoinFilterAggregateRecipe},
 		    {&SljitFullPipelineRecipeBuilder::TryBuildSourceHashJoinBuildSinkRecipe},
-		    {&SljitFullPipelineRecipeBuilder::TryBuildHashJoinDelimJoinSinkRecipe},
-		    {&SljitFullPipelineRecipeBuilder::TryBuildHashJoinAppendSinkRecipe},
 		    {&SljitFullPipelineRecipeBuilder::TryBuildHashJoinBuildSinkRecipe},
 		    {&SljitFullPipelineRecipeBuilder::TryBuildProjectionAggregateRecipe},
 		    {&SljitFullPipelineRecipeBuilder::TryBuildNativeTailRecipe}};
@@ -206,17 +204,6 @@ private:
 		       binding.TryMakeSourceHashJoinBuildSinkRecipe(facts, recipe);
 	}
 
-	bool TryBuildHashJoinDelimJoinSinkRecipe(SljitFullPipelineRecipe &recipe) const {
-		SljitHashJoinDelimJoinSinkFacts facts;
-		return SljitTryAnalyzeHashJoinDelimJoinSink(ops, facts) &&
-		       binding.TryMakeHashJoinDelimJoinSinkRecipe(facts, recipe);
-	}
-
-	bool TryBuildHashJoinAppendSinkRecipe(SljitFullPipelineRecipe &recipe) const {
-		SljitHashJoinAppendSinkFacts facts;
-		return SljitTryAnalyzeHashJoinAppendSink(ops, facts) && binding.TryMakeHashJoinAppendSinkRecipe(facts, recipe);
-	}
-
 	bool TryBuildHashJoinBuildSinkRecipe(SljitFullPipelineRecipe &recipe) const {
 		SljitHashJoinBuildSinkFacts facts;
 		return SljitTryAnalyzeHashJoinBuildSink(ops, facts) && binding.TryMakeHashJoinBuildSinkRecipe(facts, recipe);
@@ -230,7 +217,7 @@ private:
 		auto &recipes = binding.ProjectionAggregateRecipes();
 		switch (plan.prefix.Kind()) {
 		case SljitProjectionAggregatePrefixKind::SOURCE:
-			return recipes.TryMakeSourceProjectionAggregateTailRecipe(plan.shape, recipe);
+			return recipes.TryMakeSourceProjectionAggregateTailRecipe(plan.shape, plan.prefix, recipe);
 		case SljitProjectionAggregatePrefixKind::JOIN_PREFIX:
 			return recipes.TryMakeMarkFilterProjectionAggregateRecipe(plan.shape, plan.prefix, recipe) ||
 			       recipes.TryMakeMarkFilterNativeTailRecipe(plan.prefix, recipe) ||

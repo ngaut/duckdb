@@ -180,16 +180,8 @@ static bool HasJitFilterRuntimePath(const ExecutionRegionEvent &event) {
 	return HasJitRuntimePathPrefix(event, "filter.");
 }
 
-static bool HasJitDelimJoinSinkRuntimePath(const ExecutionRegionEvent &event) {
-	return HasJitRuntimePathPrefix(event, "delim_join_sink.");
-}
-
 static bool HasGeneratedAggregateUpdateStage(const ExecutionRegionEvent &event) {
 	return GeneratedOperatorStageEntryCount(event, "aggregate_update") > 0;
-}
-
-static bool HasGeneratedDelimJoinSinkStage(const ExecutionRegionEvent &event) {
-	return StageNameContains(event.generated_stage_runtime, "delim_join_sink.");
 }
 
 static bool HasHashJoinProbeRuntimePath(const ExecutionRegionEvent &event) {

@@ -441,6 +441,10 @@ struct ExecutionHashJoinProbeBinding {
 	//! Operator-lifetime physical sources resolved once by core. Backends may
 	//! inspect these immutable views but never dereference hash_table.
 	vector<ExecutionHashJoinRHSFixedColumnSource> rhs_fixed_column_sources;
+	//! Per RHS output column: the native probe emits it as a global dictionary (same entry on every chunk) and the
+	//! probe output can reach a dict-surviving build. Such columns are emitted through the native gather, never
+	//! flattened or aliased, because the build narrows its slots on that encoding.
+	vector<bool> rhs_output_requires_global_dictionary;
 	vector<idx_t> exact_rhs_output_probe_input_indices;
 	vector<idx_t> lhs_probe_column_indices;
 	vector<LogicalType> lhs_probe_types;
@@ -626,6 +630,9 @@ DUCKDB_API SinkResultType ExecutionCommitDirectAppend(const ExecutionAppendSinkB
 
 DUCKDB_API SinkResultType ExecutionSinkOrdered(const ExecutionOrderedSinkBinding &binding, DataChunk &order_keys,
                                                DataChunk &payload);
+//! Validates the ordered-sink contract of an ORDER BY or TOP N sink; returns the blocker, empty when bindable.
+string ValidateExecutionOrderedSink(const ExecutionRegionSinkInfo &sink_info,
+                                    ExecutionRegionOperatorKind expected_kind);
 
 DUCKDB_API SinkResultType ExecutionSinkDelimJoin(const ExecutionDelimJoinSinkBinding &binding, DataChunk &input);
 

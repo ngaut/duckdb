@@ -11,14 +11,16 @@
 #include "duckdb/common/types/row/tuple_data_layout.hpp"
 #include "duckdb/common/optional_idx.hpp"
 #include "duckdb/execution/execution_operator_runtime.hpp"
+#include "duckdb/execution/physical_operator_states.hpp"
 #include "duckdb/execution/operator/aggregate/grouped_aggregate_data.hpp"
 #include "duckdb/execution/progress_data.hpp"
 #include "duckdb/parser/group_by_node.hpp"
 
 namespace duckdb {
+class GlobalSinkState;
+class LocalSinkState;
 
 class GroupedAggregateHashTable;
-class TupleDataRowLocationRemap;
 struct ExecutionPrimitiveAggregateUpdateLane;
 struct ExecutionRegionSinkInfo;
 struct ExecutionOperatorStageRecorder;
@@ -135,12 +137,9 @@ public:
 	                                 const ExecutionRegionSinkInfo &sink_info, Vector &addresses_out,
 	                                 optional_ptr<ExecutionOperatorStageRecorder> recorder = nullptr) const;
 	void RecordDirectStateAddressUpdates(ExecutionContext &context, OperatorSinkInput &input, idx_t count) const;
-	void FinishStateUpdates(ExecutionContext &context, OperatorSinkInput &input,
-	                        optional_ptr<TupleDataRowLocationRemap> row_location_remap = nullptr) const;
-	void Combine(ExecutionContext &context, GlobalSinkState &gstate, LocalSinkState &lstate,
-	             optional_ptr<TupleDataRowLocationRemap> row_location_remap = nullptr) const;
-	void Finalize(ClientContext &context, GlobalSinkState &gstate,
-	              optional_ptr<TupleDataRowLocationRemap> state_remap = nullptr) const;
+	void FinishStateUpdates(ExecutionContext &context, OperatorSinkInput &input) const;
+	void Combine(ExecutionContext &context, GlobalSinkState &gstate, LocalSinkState &lstate) const;
+	void Finalize(ClientContext &context, GlobalSinkState &gstate) const;
 
 public:
 	//! Source interface

@@ -65,14 +65,6 @@ TEST_CASE("JIT recipe binders preserve the output recipe on admission failure", 
 	REQUIRE_FALSE(binding.TryMakeSourceHashJoinBuildSinkRecipe(source_hash_join_build, recipe));
 	require_unchanged();
 
-	SljitHashJoinDelimJoinSinkFacts hash_join_delim;
-	REQUIRE_FALSE(binding.TryMakeHashJoinDelimJoinSinkRecipe(hash_join_delim, recipe));
-	require_unchanged();
-
-	SljitHashJoinAppendSinkFacts hash_join_append;
-	REQUIRE_FALSE(binding.TryMakeHashJoinAppendSinkRecipe(hash_join_append, recipe));
-	require_unchanged();
-
 	SljitHashJoinBuildSinkFacts hash_join_build;
 	REQUIRE_FALSE(binding.TryMakeHashJoinBuildSinkRecipe(hash_join_build, recipe));
 	require_unchanged();
@@ -91,10 +83,11 @@ TEST_CASE("JIT recipe binders preserve the output recipe on admission failure", 
 	require_unchanged();
 
 	SljitFullPipelineProjectionAggregateShape projection_aggregate_shape;
-	REQUIRE_FALSE(projection_aggregate.TryMakeSourceProjectionAggregateTailRecipe(projection_aggregate_shape, recipe));
+	SljitProjectionAggregatePrefixFacts projection_aggregate_prefix;
+	REQUIRE_FALSE(projection_aggregate.TryMakeSourceProjectionAggregateTailRecipe(projection_aggregate_shape,
+	                                                                              projection_aggregate_prefix, recipe));
 	require_unchanged();
 
-	SljitProjectionAggregatePrefixFacts projection_aggregate_prefix;
 	REQUIRE_FALSE(projection_aggregate.TryMakeJoinDirectProjectionAggregateRecipe(projection_aggregate_shape,
 	                                                                              projection_aggregate_prefix, recipe));
 	require_unchanged();

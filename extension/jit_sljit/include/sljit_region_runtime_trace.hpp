@@ -43,24 +43,6 @@ void RecordSljitRegionStageRuntimePath(ExecutionRegionRuntime &runtime, idx_t op
 void RecordSljitRegionStageRuntimeWithSuffix(ExecutionRegionRuntime &runtime, idx_t op_idx,
                                              SljitNativeRegionOpKind kind, const char *suffix,
                                              std::chrono::steady_clock::time_point start);
-void RecordSljitDirectAppendProfile(ExecutionRegionRuntime &runtime, idx_t op_idx, SljitNativeRegionOpKind kind,
-                                    const DirectAppendProfile &profile);
-
-class SljitRegionStageAccumulator {
-public:
-	SljitRegionStageAccumulator(ExecutionRegionRuntime &runtime_p, idx_t op_idx, SljitNativeRegionOpKind kind,
-	                            const char *phase);
-
-	void Add(std::chrono::steady_clock::time_point start);
-	void Flush();
-
-private:
-	ExecutionRegionRuntime &runtime;
-	string stage;
-	int64_t runtime_time_us = 0;
-	idx_t count = 0;
-	bool enabled;
-};
 
 class SljitRegionStageRecorder : public ExecutionOperatorStageRecorder {
 public:

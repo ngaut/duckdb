@@ -113,52 +113,12 @@ struct SljitProjectionAdapterScratch {
 		result_data.assign(projection_count, nullptr);
 		overflow_messages.assign(projection_count, nullptr);
 		integer_constants.assign(projection_count, 0);
-		float_constants.assign(projection_count, 0);
-		double_constants.assign(projection_count, 0);
-		collect_floating_stats = false;
 		if (track_fused) {
 			fused.assign(projection_count, 0);
 		} else {
 			fused.clear();
 		}
 		prepared_inputs.clear();
-	}
-
-	void PrepareFloatingStats(idx_t projection_count, bool single_precision) {
-		collect_floating_stats = true;
-		if (single_precision) {
-			float_stats_min.assign(projection_count, 0);
-			float_stats_max.assign(projection_count, 0);
-			double_stats_min.clear();
-			double_stats_max.clear();
-		} else {
-			double_stats_min.assign(projection_count, 0);
-			double_stats_max.assign(projection_count, 0);
-			float_stats_min.clear();
-			float_stats_max.clear();
-		}
-		direct_append_stats.assign(projection_count, DirectAppendColumnStats());
-	}
-
-	void FinishFloatingStats(const vector<SljitExecutableRegionExpression> &projections, bool single_precision) {
-		if (!collect_floating_stats) {
-			direct_append_stats.clear();
-			return;
-		}
-		direct_append_stats.resize(projections.size());
-		for (idx_t projection_idx = 0; projection_idx < projections.size(); projection_idx++) {
-			auto &stats = direct_append_stats[projection_idx];
-			stats.has_stats = true;
-			if (single_precision) {
-				stats.physical_type = PhysicalType::FLOAT;
-				stats.float_min = float_stats_min[projection_idx];
-				stats.float_max = float_stats_max[projection_idx];
-			} else {
-				stats.physical_type = PhysicalType::DOUBLE;
-				stats.double_min = double_stats_min[projection_idx];
-				stats.double_max = double_stats_max[projection_idx];
-			}
-		}
 	}
 
 	void SetSourceData(idx_t projection_idx, bool right_source, const_data_ptr_t source_data) {
@@ -199,16 +159,8 @@ struct SljitProjectionAdapterScratch {
 	vector<data_ptr_t> result_data;
 	vector<const char *> overflow_messages;
 	vector<int64_t> integer_constants;
-	vector<float> float_constants;
-	vector<double> double_constants;
-	vector<float> float_stats_min;
-	vector<float> float_stats_max;
-	vector<double> double_stats_min;
-	vector<double> double_stats_max;
-	vector<DirectAppendColumnStats> direct_append_stats;
 	vector<uint8_t> fused;
 	vector<PreparedInput> prepared_inputs;
-	bool collect_floating_stats = false;
 };
 
 struct SljitExpressionAdapterScratch {
@@ -221,14 +173,8 @@ struct SljitExpressionAdapterScratch {
 		for (idx_t source_idx = 0; source_idx < source_indices.size(); source_idx++) {
 			auto input_index = source_indices[source_idx];
 			const auto known_not_null = SljitInputSourceKnownNotNull(expr.input_source_not_null, source_idx);
-			if (plan.kind == SljitNativeRegionExpressionKind::EXPRESSION_TREE) {
-				sources.PrepareIntegerSource(input, input_index, source_idx, SljitNativeIntegerKind::DECIMAL64,
-				                             execute_sel, count, "SLJIT expression-tree source is out of range",
-				                             known_not_null);
-			} else {
-				sources.PrepareTypedExpressionSource(input, input_index, source_idx, execute_sel, count,
-				                                     "SLJIT expression-tree source is out of range", known_not_null);
-			}
+			sources.PrepareTypedExpressionSource(input, input_index, source_idx, execute_sel, count,
+			                                     "SLJIT expression-tree source is out of range", known_not_null);
 		}
 		source_can_have_null = sources.SourceCanHaveNull();
 		native_input.source_data_array = sources.DataArray();

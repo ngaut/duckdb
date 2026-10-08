@@ -1,0 +1,572 @@
+# name: test/sql/jit/test_jit_decimal128_narrow.test
+# description: DECIMAL +/- results widened to DECIMAL128 by one digit stay in 64-bit JIT registers when their magnitude
+#              is structurally bounded by INT64_MAX (narrow DECIMAL128). Expected values come from jit_policy='off'.
+# group: [jit]
+
+statement ok
+LOAD jit_sljit
+
+statement ok
+SET threads=1
+
+statement ok
+SET jit_cbo_startup_base_cost=0
+
+statement ok
+SET jit_dump_ir=true
+
+statement ok
+SET jit_event_log_size=100000
+
+statement ok
+CREATE TABLE n18 AS
+SELECT i AS id,
+       CASE WHEN i % 97 = 0 THEN NULL
+            WHEN i % 1000 = 1 THEN 99999999999999.9999::DECIMAL(18,4)
+            WHEN i % 1000 = 2 THEN -99999999999999.9999::DECIMAL(18,4)
+            ELSE printf('%d.%04d', (i * 7919 * 1000003) % 20000000000003 - 10000000000001, (i * 37) % 10000)::DECIMAL(18,4)
+       END AS a,
+       CASE WHEN i % 89 = 0 THEN NULL
+            WHEN i % 1000 IN (1, 2) THEN 99999999999999.9999::DECIMAL(18,4)
+            ELSE printf('%d.%04d', (i * 104729 * 100003) % 30000000000007 - 15000000000003, (i * 53) % 10000)::DECIMAL(18,4)
+       END AS b,
+       printf('%d.%04d', (i * 31) % 1000003 - 500001, (i * 71) % 10000)::DECIMAL(18,4) AS c,
+       CASE WHEN i % 83 = 0 THEN NULL ELSE printf('%d.%04d', (i % 4096) - 2048, (i * 13) % 10000)::DECIMAL(18,4) END AS d
+FROM range(20000) tbl(i)
+
+statement ok
+CREATE TABLE n15 AS
+SELECT i AS id,
+       CASE WHEN i % 61 = 0 THEN NULL ELSE printf('%d.%02d', (i * 7919 * 99991) % 2000000000003 - 1000000000001, (i * 37) % 100)::DECIMAL(15,2) END AS a,
+       printf('%d.%02d', (i * 104729 * 9973) % 1999999999973 - 999999999986, (i * 53) % 100)::DECIMAL(15,2) AS b,
+       printf('%d.%02d', (i * 31) % 100000007 - 50000003, (i * 71) % 100)::DECIMAL(15,2) AS c,
+       CASE WHEN i % 53 = 0 THEN NULL ELSE printf('%d.%02d', (i % 4096) - 2048, (i * 13) % 100)::DECIMAL(15,2) END AS d,
+       printf('%d.%02d', (i * 13 * 7777777) % 1999999999999 - 999999999999, (i * 7) % 100)::DECIMAL(15,2) AS e
+FROM range(20000) tbl(i)
+
+statement ok
+CREATE TABLE x18 AS
+SELECT * FROM (VALUES
+    (1, 999999999999999999::DECIMAL(18,0), 999999999999999999::DECIMAL(18,0)),
+    (2, -999999999999999999::DECIMAL(18,0), 999999999999999999::DECIMAL(18,0)),
+    (3, 999999999999999999::DECIMAL(18,0), -999999999999999999::DECIMAL(18,0)),
+    (4, -999999999999999999::DECIMAL(18,0), -999999999999999999::DECIMAL(18,0)),
+    (5, NULL::DECIMAL(18,0), 1::DECIMAL(18,0)),
+    (6, 0::DECIMAL(18,0), -1::DECIMAL(18,0))
+) t(id, a, b)
+
+statement ok
+CREATE TABLE xs AS
+SELECT CASE WHEN i % 2 = 0 THEN 999999999999999999 ELSE -999999999999999999 END::DECIMAL(18,0) AS a,
+       CASE WHEN i % 3 = 0 THEN -999999999999999999 ELSE 999999999999999999 END::DECIMAL(18,0) AS b,
+       (i % 4)::INTEGER AS g
+FROM range(6000) tbl(i)
+
+statement ok
+CREATE TABLE q9t AS
+SELECT i AS id,
+       printf('%d.%02d', (i * 7919) % 2000003 - 1000001, (i * 37) % 100)::DECIMAL(15,2) AS price,
+       printf('0.%02d', (i * 7) % 11)::DECIMAL(15,2) AS disc,
+       CASE WHEN i % 71 = 0 THEN NULL ELSE printf('%d.%02d', (i * 13) % 1001, (i * 3) % 100)::DECIMAL(15,2) END AS cost,
+       printf('%d.00', 1 + (i % 50))::DECIMAL(15,2) AS qty,
+       (i % 5)::INTEGER AS g,
+       'nation_' || (i % 25)::VARCHAR AS nation,
+       ((i * 7) % 1000)::BIGINT AS sk
+FROM range(50000) tbl(i)
+
+statement ok
+CREATE TABLE sup AS
+SELECT i::BIGINT AS sk,
+       printf('%d.%02d', (i * 37) % 1001, (i * 11) % 100)::DECIMAL(15,2) AS supplycost,
+       'nation_' || (i % 25)::VARCHAR AS nation
+FROM range(1000) tbl(i)
+
+# Projection of a + b (DECIMAL(18,4) -> DECIMAL(19,4)) materialized into an INT128 vector, with NULLs and extremes.
+statement ok
+SELECT * FROM duckdb_jit_clear_events()
+
+query IIIII
+SELECT count(*), count(s), sum(s), min(s), max(s) FROM (SELECT a + b AS s FROM n18)
+----
+20000	19571	1307073971791135.7166	-24944823286172.0270	199999999999999.9998
+
+query I
+SELECT count(*) > 0 FROM duckdb_jit_events()
+WHERE status='compiled' AND phase='compile' AND ir LIKE '%DECIMAL(19%'
+----
+true
+
+# Projection of a - b.
+statement ok
+SELECT * FROM duckdb_jit_clear_events()
+
+query IIIII
+SELECT count(*), count(s), sum(s), min(s), max(s) FROM (SELECT a - b AS s FROM n18)
+----
+20000	19571	-5121995428842772.5950	-199999999999999.9998	21101129079616.6830
+
+query I
+SELECT count(*) > 0 FROM duckdb_jit_events()
+WHERE status='compiled' AND phase='compile' AND ir LIKE '%DECIMAL(19%'
+----
+true
+
+# Chain a + b - c + d: narrow -> narrow same-scale widening casts (DECIMAL(19,4) .. DECIMAL(21,4)).
+statement ok
+SELECT * FROM duckdb_jit_clear_events()
+
+query IIIII
+SELECT count(*), count(s), sum(s), min(s), max(s) FROM (SELECT a + b - c + d AS s FROM n18)
+----
+20000	19335	1320903481469869.4520	-24944822788309.0096	200000000497923.0056
+
+query I
+SELECT count(*) > 0 FROM duckdb_jit_events()
+WHERE status='compiled' AND phase='compile' AND ir LIKE '%DECIMAL(19%'
+----
+true
+
+# Narrow constants (folded DECIMAL(19,4) literals).
+statement ok
+SELECT * FROM duckdb_jit_clear_events()
+
+query IIIII
+SELECT count(*), count(s), sum(s), min(s), max(s) FROM (SELECT b - 99999999999999.9999 AS s FROM n18)
+----
+20000	19775	-1974226669304857406.9031	-114998955922694.3636	0.0000
+
+query I
+SELECT count(*) > 0 FROM duckdb_jit_events()
+WHERE status='compiled' AND phase='compile' AND ir LIKE '%DECIMAL(19%'
+----
+true
+
+# DECIMAL(15,2) chain stays DECIMAL64 for four terms and becomes narrow DECIMAL(19,2) at the fifth.
+statement ok
+SELECT * FROM duckdb_jit_clear_events()
+
+query IIIII
+SELECT count(*), count(s), sum(s), min(s), max(s) FROM (SELECT a + b - c + d AS s FROM n15)
+----
+20000	19301	-642182955894533.08	-1998113711016.32	1913627022180.98
+
+statement ok
+SELECT * FROM duckdb_jit_clear_events()
+
+query IIIII
+SELECT count(*), count(s), sum(s), min(s), max(s) FROM (SELECT a + b - c + d + e AS s FROM n15)
+----
+20000	19301	-851711556311348.38	-2998012599914.39	2387300664045.15
+
+query I
+SELECT count(*) > 0 FROM duckdb_jit_events()
+WHERE status='compiled' AND phase='compile' AND ir LIKE '%DECIMAL(19%'
+----
+true
+
+# DECIMAL(18,0) extremes: |a +/- b| = 1999999999999999998 needs the full 64-bit register.
+statement ok
+SELECT * FROM duckdb_jit_clear_events()
+
+query II
+SELECT id, a + b AS s FROM x18 ORDER BY id
+----
+1	1999999999999999998
+2	0
+3	0
+4	-1999999999999999998
+5	NULL
+6	-1
+
+query I
+SELECT count(*) > 0 FROM duckdb_jit_events()
+WHERE status='compiled' AND phase='compile' AND ir LIKE '%DECIMAL(19%'
+----
+true
+
+statement ok
+SELECT * FROM duckdb_jit_clear_events()
+
+query II
+SELECT id, a - b AS s FROM x18 ORDER BY id
+----
+1	0
+2	-1999999999999999998
+3	1999999999999999998
+4	0
+5	NULL
+6	1
+
+query I
+SELECT count(*) > 0 FROM duckdb_jit_events()
+WHERE status='compiled' AND phase='compile' AND ir LIKE '%DECIMAL(19%'
+----
+true
+
+# Nine DECIMAL(18,0) terms are bounded by 9 * (10^18 - 1) < INT64_MAX and stay narrow.
+statement ok
+SELECT * FROM duckdb_jit_clear_events()
+
+query II
+SELECT id, a + b + a + b + a + b + a + b + a AS s FROM x18 ORDER BY id
+----
+1	8999999999999999991
+2	-999999999999999999
+3	999999999999999999
+4	-8999999999999999991
+5	NULL
+6	-4
+
+query I
+SELECT count(*) > 0 FROM duckdb_jit_events()
+WHERE status='compiled' AND phase='compile' AND ir LIKE '%DECIMAL(19%'
+----
+true
+
+# Ten terms exceed the INT64 bound; the result must still be exact (|s| > INT64_MAX).
+statement ok
+SELECT * FROM duckdb_jit_clear_events()
+
+query II
+SELECT id, a + b + a + b + a + b + a + b + a + b AS s FROM x18 ORDER BY id
+----
+1	9999999999999999990
+2	0
+3	0
+4	-9999999999999999990
+5	NULL
+6	-5
+
+# Fast-path null handling: a CASE ... ELSE NULL under a narrow widening cast must stay NULL.
+statement ok
+SELECT * FROM duckdb_jit_clear_events()
+
+query III
+SELECT count(*), count(s), sum(s) FROM (SELECT (CASE WHEN c > 0 THEN c ELSE NULL END) + c AS s FROM n18)
+----
+20000	3870	464392296.5330
+
+query I
+SELECT count(*) > 0 FROM duckdb_jit_events()
+WHERE status='compiled' AND phase='compile' AND ir LIKE '%DECIMAL(19%'
+----
+true
+
+# Filters compare narrow DECIMAL(19,4) values as signed 64-bit integers.
+statement ok
+SELECT * FROM duckdb_jit_clear_events()
+
+query I
+SELECT count(*) FROM n18 WHERE a + b > c
+----
+9773
+
+query I
+SELECT count(*) > 0 FROM duckdb_jit_events()
+WHERE status='compiled' AND phase='compile' AND ir LIKE '%DECIMAL(19%'
+----
+true
+
+statement ok
+SELECT * FROM duckdb_jit_clear_events()
+
+query I
+SELECT count(*) FROM n18 WHERE a - b <= 100.00
+----
+9812
+
+query I
+SELECT count(*) > 0 FROM duckdb_jit_events()
+WHERE status='compiled' AND phase='compile' AND ir LIKE '%DECIMAL(19%'
+----
+true
+
+# Q9-shaped payload sum(a * (1 - b) - c * d): ungrouped, perfect-hash grouped and hash grouped (hugeint state, sign extension).
+statement ok
+SELECT * FROM duckdb_jit_clear_events()
+
+query I
+SELECT sum(price * (1 - disc) - cost * qty) FROM q9t
+----
+-630213127.5791
+
+query I
+SELECT count(*) > 0 FROM duckdb_jit_events()
+WHERE status='compiled' AND phase='compile'
+  AND ir LIKE '%primitive_payloads=native:typed-expression-tree:%:DECIMAL(19,%'
+----
+true
+
+statement ok
+SELECT * FROM duckdb_jit_clear_events()
+
+query II
+SELECT g, sum(price * (1 - disc) - cost * qty) FROM q9t GROUP BY g ORDER BY g
+----
+0	-111400519.7470
+1	-122304600.5502
+2	-125139100.1449
+3	-130470766.5297
+4	-140898140.6073
+
+query I
+SELECT count(*) > 0 FROM duckdb_jit_events()
+WHERE status='compiled' AND phase='compile'
+  AND ir LIKE '%primitive_payloads=native:typed-expression-tree:%:DECIMAL(19,%'
+----
+true
+
+statement ok
+SELECT * FROM duckdb_jit_clear_events()
+
+query II
+SELECT nation, sum(price * (1 - disc) - cost * qty) FROM q9t GROUP BY nation ORDER BY nation
+----
+nation_0	-5566591.5900
+nation_1	-14549458.3197
+nation_10	-20337809.4100
+nation_11	-27003704.0130
+nation_12	-28663170.8739
+nation_13	-23753749.9123
+nation_14	-30188747.7150
+nation_15	-31918158.3745
+nation_16	-25818171.1230
+nation_17	-29326713.9271
+nation_18	-35312835.6885
+nation_19	-27075926.3783
+nation_2	-18378451.8245
+nation_20	-30543714.1200
+nation_21	-36086190.4638
+nation_22	-29982836.8455
+nation_23	-31986991.4258
+nation_24	-41406746.6936
+nation_3	-13661556.8010
+nation_4	-17481285.9458
+nation_5	-23034246.2525
+nation_6	-18847076.6307
+nation_7	-18787926.6739
+nation_8	-25755632.7021
+nation_9	-24745433.8746
+
+query I
+SELECT count(*) > 0 FROM duckdb_jit_events()
+WHERE status='compiled' AND phase='compile'
+  AND ir LIKE '%primitive_payloads=native:typed-expression-tree:%:DECIMAL(19,%'
+----
+true
+
+# Q9-shaped payload through a hash join (projection-aggregate paths).
+statement ok
+SELECT * FROM duckdb_jit_clear_events()
+
+query II
+SELECT s.nation, sum(q.price * (1 - q.disc) - s.supplycost * q.qty) FROM q9t q JOIN sup s ON q.sk = s.sk GROUP BY s.nation ORDER BY s.nation
+----
+nation_0	-11299501.7350
+nation_1	-31416410.0505
+nation_10	-19097797.6365
+nation_11	-32877647.6910
+nation_12	-29686889.8340
+nation_13	-24666920.0463
+nation_14	-14750875.7569
+nation_15	-31644519.6940
+nation_16	-27813039.7444
+nation_17	-20512445.9919
+nation_18	-38832828.9077
+nation_19	-29269653.1289
+nation_2	-25901484.7721
+nation_20	-24791603.0910
+nation_21	-17491042.4894
+nation_22	-33906908.9025
+nation_23	-30080354.6019
+nation_24	-22409689.1662
+nation_3	-19244789.0742
+nation_4	-34498036.5286
+nation_5	-28146728.0215
+nation_6	-23076382.7819
+nation_7	-14959104.9936
+nation_8	-31715453.2168
+nation_9	-25802565.1845
+
+query I
+SELECT count(*) > 0 FROM duckdb_jit_events()
+WHERE status='compiled' AND phase='compile'
+  AND ir LIKE '%primitive_payloads=native:typed-expression-tree:%:DECIMAL(19,%'
+----
+true
+
+statement ok
+SELECT * FROM duckdb_jit_clear_events()
+
+query II
+SELECT q.g, sum(q.price * (1 - q.disc) - s.supplycost * q.qty) FROM q9t q JOIN sup s ON q.sk = s.sk GROUP BY q.g ORDER BY q.g
+----
+0	-114980150.1780
+1	-124966834.4941
+2	-126730819.7651
+3	-132674522.7572
+4	-144540345.8469
+
+query I
+SELECT count(*) > 0 FROM duckdb_jit_events()
+WHERE status='compiled' AND phase='compile'
+  AND ir LIKE '%primitive_payloads=native:typed-expression-tree:%:DECIMAL(19,%'
+----
+true
+
+statement ok
+SELECT * FROM duckdb_jit_clear_events()
+
+query I
+SELECT sum(q.price * (1 - q.disc) - s.supplycost * q.qty) FROM q9t q JOIN sup s ON q.sk = s.sk
+----
+-643892673.0413
+
+query I
+SELECT count(*) > 0 FROM duckdb_jit_events()
+WHERE status='compiled' AND phase='compile'
+  AND ir LIKE '%primitive_payloads=native:typed-expression-tree:%:DECIMAL(19,%'
+----
+true
+
+# Hugeint accumulation of extreme narrow values beyond INT64 range.
+statement ok
+SELECT * FROM duckdb_jit_clear_events()
+
+query I
+SELECT sum(a + b) FROM xs
+----
+1999999999999999998000
+
+query I
+SELECT count(*) > 0 FROM duckdb_jit_events()
+WHERE status='compiled' AND phase='compile'
+  AND ir LIKE '%primitive_payloads=native:typed-expression-tree:%:DECIMAL(19,%'
+----
+true
+
+statement ok
+SELECT * FROM duckdb_jit_clear_events()
+
+query II
+SELECT g, sum(a - b) FROM xs GROUP BY g ORDER BY g
+----
+0	999999999999999999000
+1	-1999999999999999998000
+2	999999999999999999000
+3	-1999999999999999998000
+
+query I
+SELECT count(*) > 0 FROM duckdb_jit_events()
+WHERE status='compiled' AND phase='compile'
+  AND ir LIKE '%primitive_payloads=native:typed-expression-tree:%:DECIMAL(19,%'
+----
+true
+
+# Common-subexpression elimination hoists the shared casts into their own projection; the remaining INT128 references are
+# not narrow (unbounded), so only exact results are required here.
+statement ok
+SELECT * FROM duckdb_jit_clear_events()
+
+query III
+SELECT g, sum(a + b), sum(a - b) FROM xs GROUP BY g ORDER BY g
+----
+0	1999999999999999998000	999999999999999999000
+1	-999999999999999999000	-1999999999999999998000
+2	1999999999999999998000	999999999999999999000
+3	-999999999999999999000	-1999999999999999998000
+
+# Materialization (CREATE TABLE AS) of narrow roots.
+statement ok
+SELECT * FROM duckdb_jit_clear_events()
+
+statement ok
+CREATE TEMP TABLE narrow_out AS SELECT id, a + b - c AS s FROM n18
+
+query I
+SELECT count(*) > 0 FROM duckdb_jit_events()
+WHERE status='compiled' AND phase='compile' AND ir LIKE '%DECIMAL(19%'
+----
+true
+
+query IIIII
+SELECT count(*), count(s), sum(s), min(s), max(s) FROM narrow_out
+----
+20000	19571	1307077690462843.3508	-24944822786264.0057	200000000499970.0069
+
+query II
+SELECT sum(s * id), sum(s * (id % 7)) FROM narrow_out
+----
+207973565140369617875.3620	4097437208525506.5328
+
+# Parallel execution of the same shapes.
+statement ok
+SET threads=4
+
+query I
+SELECT sum(price * (1 - disc) - cost * qty) FROM q9t
+----
+-630213127.5791
+
+query II
+SELECT nation, sum(price * (1 - disc) - cost * qty) FROM q9t GROUP BY nation ORDER BY nation
+----
+nation_0	-5566591.5900
+nation_1	-14549458.3197
+nation_10	-20337809.4100
+nation_11	-27003704.0130
+nation_12	-28663170.8739
+nation_13	-23753749.9123
+nation_14	-30188747.7150
+nation_15	-31918158.3745
+nation_16	-25818171.1230
+nation_17	-29326713.9271
+nation_18	-35312835.6885
+nation_19	-27075926.3783
+nation_2	-18378451.8245
+nation_20	-30543714.1200
+nation_21	-36086190.4638
+nation_22	-29982836.8455
+nation_23	-31986991.4258
+nation_24	-41406746.6936
+nation_3	-13661556.8010
+nation_4	-17481285.9458
+nation_5	-23034246.2525
+nation_6	-18847076.6307
+nation_7	-18787926.6739
+nation_8	-25755632.7021
+nation_9	-24745433.8746
+
+query II
+SELECT s.nation, sum(q.price * (1 - q.disc) - s.supplycost * q.qty) FROM q9t q JOIN sup s ON q.sk = s.sk GROUP BY s.nation ORDER BY s.nation
+----
+nation_0	-11299501.7350
+nation_1	-31416410.0505
+nation_10	-19097797.6365
+nation_11	-32877647.6910
+nation_12	-29686889.8340
+nation_13	-24666920.0463
+nation_14	-14750875.7569
+nation_15	-31644519.6940
+nation_16	-27813039.7444
+nation_17	-20512445.9919
+nation_18	-38832828.9077
+nation_19	-29269653.1289
+nation_2	-25901484.7721
+nation_20	-24791603.0910
+nation_21	-17491042.4894
+nation_22	-33906908.9025
+nation_23	-30080354.6019
+nation_24	-22409689.1662
+nation_3	-19244789.0742
+nation_4	-34498036.5286
+nation_5	-28146728.0215
+nation_6	-23076382.7819
+nation_7	-14959104.9936
+nation_8	-31715453.2168
+nation_9	-25802565.1845
+
+query I
+SELECT count(*) FROM n18 WHERE a + b > c
+----
+9773

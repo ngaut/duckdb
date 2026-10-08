@@ -1,12 +1,15 @@
 #include "duckdb/storage/external_file_cache/caching_file_system.hpp"
 
 #include "duckdb/common/checksum.hpp"
+#include "duckdb/common/chrono.hpp"
 #include "duckdb/common/enums/cache_validation_mode.hpp"
+#include "duckdb/common/enums/destroy_buffer_upon.hpp"
 #include "duckdb/common/enums/memory_tag.hpp"
 #include "duckdb/common/file_system.hpp"
 #include "duckdb/main/client_context.hpp"
 #include "duckdb/parallel/task_executor.hpp"
 #include "duckdb/parallel/task_scheduler.hpp"
+#include "duckdb/storage/buffer/block_handle.hpp"
 #include "duckdb/storage/buffer_manager.hpp"
 #include "duckdb/storage/external_file_cache/external_file_cache.hpp"
 #include "duckdb/storage/external_file_cache/external_file_cache_util.hpp"
@@ -15,6 +18,33 @@ namespace duckdb {
 
 // Forward declaration.
 class DatabaseInstance;
+
+namespace {
+
+// Allocate an uncached read buffer to make sure it's de-allocated immediately, and its metadata is not stored in the
+// eviction queue.
+BufferHandle AllocateUncachedReadBuffer(BufferManager &buffer_manager, idx_t size) {
+	auto buffer = buffer_manager.Allocate(MemoryTag::EXTERNAL_FILE_CACHE, size);
+	buffer.GetBlockHandle()->GetMemory().SetDestroyBufferUpon(DestroyBufferUpon::UNPIN);
+	return buffer;
+}
+
+// IO operation is performed to stat the file.
+CacheValidationInfo GetValidationInfo(FileSystem &file_system, FileHandle &handle) {
+	auto stats = file_system.Stats(handle);
+	CacheValidationInfo result;
+	result.file_size = NumericCast<idx_t>(stats.file_size);
+	result.last_modified = stats.last_modification_time;
+	result.cache_valid_until = stats.cache_valid_until;
+	result.version_tag = std::move(stats.version_tag);
+	return result;
+}
+
+void TightenCacheDeadline(optional<timestamp_t> &cached, const optional<timestamp_t> &current) {
+	if (current && (!cached || *current < *cached)) {
+		cached = current;
+	}
+}
 
 //===----------------------------------------------------------------------===//
 // FetchBlockTask
@@ -53,8 +83,7 @@ public:
 				lk.unlock();
 
 				try {
-					auto &file_handle = caching_file_handle.GetFileHandle();
-					const idx_t file_size = file_handle.GetFileSize();
+					const idx_t file_size = caching_file_handle.GetFileSize();
 					const idx_t offset = block_idx * block_size;
 					if (offset >= file_size) {
 						lk.lock();
@@ -65,10 +94,19 @@ public:
 						return;
 					}
 					const idx_t to_read = MinValue(block_size, file_size - offset);
-					auto buf = buffer_manager.Allocate(MemoryTag::EXTERNAL_FILE_CACHE, to_read);
-					file_handle.Read(context, buf.GetDataMutable(), to_read, offset);
+					auto buf =
+					    ExternalFileCache::AllocateCacheBuffer(buffer_manager, caching_file_handle.GetPath(), to_read);
+					caching_file_handle.ReadAndRecord(context, buf.GetDataMutable(), to_read, offset);
+					const bool share_block = !caching_file_handle.IsCacheReuseProhibited();
 
 					lk.lock();
+					if (!share_block) {
+						block->nr_bytes = to_read;
+						block->state = CacheBlockState::EMPTY;
+						result_pin = std::move(buf);
+						block->cv.notify_all();
+						return;
+					}
 					block->block_handle = buf.GetBlockHandle();
 					block->nr_bytes = to_read;
 					block->state = CacheBlockState::LOADED;
@@ -109,6 +147,8 @@ private:
 	BufferHandle &result_pin;
 };
 
+} // namespace
+
 //===----------------------------------------------------------------------===//
 // CachingFileSystem
 //===----------------------------------------------------------------------===//
@@ -145,8 +185,8 @@ bool CachingFileHandle::StripForceFullDownloadIfPresent() {
 	}
 
 	auto &extended_info = *extended_info_p;
-	const bool contains_force_full_download = extended_info.options.count("force_full_download");
-	if (!contains_force_full_download) {
+	bool force_full_download;
+	if (!extended_info.TryGetOption("force_full_download", force_full_download)) {
 		return false;
 	}
 
@@ -158,11 +198,12 @@ bool CachingFileHandle::StripForceFullDownloadIfPresent() {
 		new_extended_info->options["file_size"] = Value::UBIGINT(GetFileSize());
 	}
 	path.extended_info = new_extended_info;
-	return true;
+	return force_full_download;
 }
 
 shared_ptr<CachingFileHandle::CachedFile> CachingFileHandle::EnsureCachedFileCurrent() {
 	bool needs_reopen = false;
+	shared_ptr<CachedFile> current_cached_file;
 	{
 		annotated_lock_guard<annotated_mutex> guard(file_handle_mutex);
 		if (cached_file && cached_file->generation == external_file_cache.GetGeneration()) {
@@ -173,21 +214,61 @@ shared_ptr<CachingFileHandle::CachedFile> CachingFileHandle::EnsureCachedFileCur
 			file_handle.reset();
 		}
 		cached_file = external_file_cache.GetOrCreateCachedFile(path.path);
+		current_cached_file = cached_file;
 	}
 
 	if (needs_reopen) {
 		GetFileHandle();
 	}
-	return cached_file;
+	return current_cached_file;
+}
+
+bool CachingFileHandle::CanUseCache() {
+	auto current_cached_file = EnsureCachedFileCurrent();
+	if (!Validate()) {
+		annotated_lock_guard<annotated_mutex> guard(current_cached_file->meta_lock);
+		return !current_cached_file->validation_info.IsExpired();
+	}
+	bool has_validation_metadata;
+	{
+		const annotated_lock_guard<annotated_mutex> guard(file_handle_mutex);
+		has_validation_metadata = ExternalFileCache::HasValidationMetadata(validation_info);
+	}
+
+	annotated_lock_guard<annotated_mutex> guard(current_cached_file->meta_lock);
+	if (!current_cached_file->validation_info.cache_valid_until) {
+		return has_validation_metadata;
+	}
+	return !current_cached_file->validation_info.IsExpired();
+}
+
+void CachingFileHandle::ReconcileCacheAfterRead(CachedFile &cached_file, idx_t first_block,
+                                                const vector<shared_ptr<CacheBlock>> &blocks) {
+	CacheValidationInfo current;
+	{
+		const annotated_lock_guard<annotated_mutex> guard(file_handle_mutex);
+		current = validation_info;
+	}
+
+	const annotated_lock_guard<annotated_mutex> guard(cached_file.meta_lock);
+	auto &cached = cached_file.validation_info;
+	if (ExternalFileCache::IsValid(Validate(), cached, current)) {
+		TightenCacheDeadline(cached.cache_valid_until, current.cache_valid_until);
+		return;
+	}
+
+	cached = current;
+	// Existing readers retain their pinned blocks while future reads fetch replacements.
+	external_file_cache.RetireBlocks(cached_file, first_block, blocks);
 }
 
 CachingFileHandle::CachingFileHandle(QueryContext context, CachingFileSystem &caching_file_system_p,
                                      const OpenFileInfo &path_p, FileOpenFlags flags_p,
                                      optional_ptr<FileOpener> opener_p)
     : context(context), caching_file_system(caching_file_system_p),
-      external_file_cache(caching_file_system.external_file_cache), path(path_p), flags(flags_p), opener(opener_p),
-      validate(
-          ExternalFileCacheUtil::GetCacheValidationMode(path_p, context.GetClientContext(), caching_file_system_p.db)),
+      external_file_cache(caching_file_system.external_file_cache), path(path_p), flags(std::move(flags_p)),
+      opener(opener_p), validate(ExternalFileCacheUtil::GetCacheValidationMode(path_p, context.GetClientContext(),
+                                                                               caching_file_system_p.db)),
       cached_file(nullptr), position(0) {
 	cached_file = external_file_cache.GetOrCreateCachedFile(path_p.path);
 	if (!external_file_cache.IsEnabled() || Validate()) {
@@ -213,10 +294,10 @@ CachingFileHandle::CachingFileHandle(QueryContext context, CachingFileSystem &ca
 CachingFileHandle::~CachingFileHandle() {
 }
 
-FileHandle &CachingFileHandle::GetFileHandle() {
+shared_ptr<FileHandle> CachingFileHandle::GetFileHandle() {
 	annotated_lock_guard<annotated_mutex> guard(file_handle_mutex);
 	if (file_handle) {
-		return *file_handle;
+		return file_handle;
 	}
 
 	// The caching file handle can service parallel block fetch tasks against a single shared FileHandle.
@@ -224,27 +305,34 @@ FileHandle &CachingFileHandle::GetFileHandle() {
 	// require explicit opt-in for concurrent pread-style access (e.g., HTTPFS).
 	auto internal_flags = flags | FileFlags::FILE_FLAGS_PARALLEL_ACCESS;
 	file_handle = caching_file_system.file_system.OpenFile(path, internal_flags, opener);
-	last_modified = caching_file_system.file_system.GetLastModifiedTime(*file_handle);
-	version_tag = caching_file_system.file_system.GetVersionTag(*file_handle);
+	// Snapshot the metadata with a single Stats call, avoiding repeated metadata lookups (e.g., fstat)
+	validation_info = GetValidationInfo(caching_file_system.file_system, *file_handle);
 
 	{
 		annotated_lock_guard<annotated_mutex> meta_guard(cached_file->meta_lock);
-		const bool first_access = (cached_file->file_size == 0);
-		if (first_access || Validate()) {
-			if (!ExternalFileCache::IsValid(Validate(), cached_file->version_tag, cached_file->last_modified,
-			                                version_tag, last_modified)) {
+		const bool first_access = (cached_file->validation_info.file_size == 0);
+		const bool refresh_expired_cache = !Validate() && cached_file->validation_info.IsExpired();
+		if (first_access || Validate() || refresh_expired_cache) {
+			const bool cache_is_valid =
+			    !refresh_expired_cache &&
+			    ExternalFileCache::IsValid(Validate(), cached_file->validation_info, validation_info);
+			if (!cache_is_valid) {
 				annotated_lock_guard<annotated_mutex> map_guard(cached_file->map_lock);
 				cached_file->blocks.clear();
 				cached_file->cached_block_size.SetInvalid();
 			}
-			cached_file->file_size = file_handle->GetFileSize();
-			cached_file->last_modified = last_modified;
-			cached_file->version_tag = version_tag;
+			// A successful validator check refreshes freshness. Without validators, preserve the original deadline.
+			const bool revalidated = cache_is_valid && ExternalFileCache::HasValidationMetadata(validation_info);
+			const auto preserved_valid_until = cached_file->validation_info.cache_valid_until;
+			cached_file->validation_info = validation_info;
+			if (cache_is_valid && !revalidated) {
+				cached_file->validation_info.cache_valid_until = preserved_valid_until;
+			}
 			cached_file->can_seek = file_handle->CanSeek();
 			cached_file->on_disk_file = file_handle->OnDiskFile();
 		}
 	}
-	return *file_handle;
+	return file_handle;
 }
 
 Allocator &CachingFileHandle::GetBufferAllocator() const {
@@ -256,9 +344,9 @@ FileBufferHandleGroup CachingFileHandle::Read(const idx_t nr_bytes, const idx_t 
 		return FileBufferHandleGroup();
 	}
 
-	if (!external_file_cache.IsEnabled()) {
-		auto buf = external_file_cache.GetBufferManager().Allocate(MemoryTag::EXTERNAL_FILE_CACHE, nr_bytes);
-		GetFileHandle().Read(context, buf.GetDataMutable(), nr_bytes, location);
+	if (!external_file_cache.IsEnabled() || !external_file_cache.ShouldCacheFile(path.path) || !CanUseCache()) {
+		auto buf = AllocateUncachedReadBuffer(external_file_cache.GetBufferManager(), nr_bytes);
+		ReadAndRecord(context, buf.GetDataMutable(), nr_bytes, location);
 		vector<FileBufferHandleGroup::MemoryHandle> mem_handles;
 		mem_handles.push_back({std::move(buf), 0, nr_bytes});
 		return FileBufferHandleGroup(std::move(mem_handles));
@@ -306,24 +394,25 @@ FileBufferHandleGroup CachingFileHandle::Read(const idx_t nr_bytes, const idx_t 
 		remaining -= length;
 	}
 
-	// After all tasks complete, check if the cache was invalidated by another thread.
-	if (Validate()) {
-		const annotated_lock_guard<annotated_mutex> meta_guard(current_cached_file->meta_lock);
-		if (!ExternalFileCache::IsValid(true, current_cached_file->version_tag, current_cached_file->last_modified,
-		                                version_tag, last_modified)) {
-			for (auto &block : blocks) {
-				block->Reinit();
-			}
-		}
-	}
+	ReconcileCacheAfterRead(*current_cached_file, first_block, blocks);
 
 	return FileBufferHandleGroup(std::move(mem_handles));
 }
 
 FileBufferHandleGroup CachingFileHandle::Read(idx_t &nr_bytes) {
-	if (!external_file_cache.IsEnabled() || !CanSeek()) {
-		auto buf = external_file_cache.GetBufferManager().Allocate(MemoryTag::EXTERNAL_FILE_CACHE, nr_bytes);
-		nr_bytes = NumericCast<idx_t>(GetFileHandle().Read(context, buf.GetDataMutable(), nr_bytes));
+	// If we can't seek, we can't use the cache for these calls,
+	// because we won't be able to seek over any parts we skipped by reading from the cache
+	if (!external_file_cache.IsEnabled() || !CanSeek() || !CanUseCache()) {
+		auto buf = AllocateUncachedReadBuffer(external_file_cache.GetBufferManager(), nr_bytes);
+		auto file_handle = GetFileHandle();
+		// Do positional read if handle can seek, otherwise have to fallback to sequential read.
+		if (file_handle->CanSeek()) {
+			const auto file_size = file_handle->GetFileSize();
+			nr_bytes = position >= file_size ? 0 : MinValue(nr_bytes, file_size - position);
+			file_handle->Read(context, buf.GetDataMutable(), nr_bytes, position);
+		} else {
+			nr_bytes = NumericCast<idx_t>(file_handle->Read(context, buf.GetDataMutable(), nr_bytes));
+		}
 		vector<FileBufferHandleGroup::MemoryHandle> mem_handles;
 		mem_handles.push_back({std::move(buf), 0, nr_bytes});
 		position += nr_bytes;
@@ -350,32 +439,40 @@ idx_t CachingFileHandle::GetFileSize() {
 	if (!Validate()) {
 		auto current_cached_file = EnsureCachedFileCurrent();
 		annotated_lock_guard<annotated_mutex> guard(current_cached_file->meta_lock);
-		return current_cached_file->file_size;
+		return current_cached_file->validation_info.file_size;
 	}
-	return GetFileHandle().GetFileSize();
+	auto file_handle = GetFileHandle();
+	annotated_lock_guard<annotated_mutex> guard(file_handle_mutex);
+	return validation_info.file_size;
 }
 
 timestamp_t CachingFileHandle::GetLastModifiedTime() {
 	if (!Validate()) {
 		auto current_cached_file = EnsureCachedFileCurrent();
 		annotated_lock_guard<annotated_mutex> guard(current_cached_file->meta_lock);
-		return current_cached_file->last_modified;
+		return current_cached_file->validation_info.last_modified;
 	}
-	GetFileHandle();
-	return last_modified;
+	auto file_handle = GetFileHandle();
+	annotated_lock_guard<annotated_mutex> guard(file_handle_mutex);
+	return validation_info.last_modified;
 }
 
 string CachingFileHandle::GetVersionTag() {
 	if (!Validate()) {
 		auto current_cached_file = EnsureCachedFileCurrent();
 		annotated_lock_guard<annotated_mutex> guard(current_cached_file->meta_lock);
-		return current_cached_file->version_tag;
+		return current_cached_file->validation_info.version_tag;
 	}
-	GetFileHandle();
-	return version_tag;
+	auto file_handle = GetFileHandle();
+	annotated_lock_guard<annotated_mutex> guard(file_handle_mutex);
+	return validation_info.version_tag;
 }
 
 bool CachingFileHandle::Validate() const {
+	if (!external_file_cache.ShouldCacheFile(path.path)) {
+		// uncached files have no stale state to serve, so their metadata must always be read fresh
+		return true;
+	}
 	switch (validate) {
 	case CacheValidationMode::VALIDATE_ALL:
 		return true;
@@ -394,7 +491,7 @@ bool CachingFileHandle::CanSeek() {
 		annotated_lock_guard<annotated_mutex> guard(current_cached_file->meta_lock);
 		return current_cached_file->can_seek;
 	}
-	return GetFileHandle().CanSeek();
+	return GetFileHandle()->CanSeek();
 }
 
 bool CachingFileHandle::IsRemoteFile() const {
@@ -407,11 +504,74 @@ bool CachingFileHandle::OnDiskFile() {
 		annotated_lock_guard<annotated_mutex> guard(current_cached_file->meta_lock);
 		return current_cached_file->on_disk_file;
 	}
-	return GetFileHandle().OnDiskFile();
+	return GetFileHandle()->OnDiskFile();
+}
+
+void ReadThroughputEstimator::AddSample(double seconds, idx_t bytes) {
+	const double b = static_cast<double>(bytes);
+	lock_guard<mutex> guard(lock);
+	sample_count++;
+	sum_bytes += b;
+	sum_seconds += seconds;
+	sum_bytes_sq += b * b;
+	sum_bytes_seconds += b * seconds;
+}
+
+bool ReadThroughputEstimator::TryEstimate(NetworkThroughputEstimate &result) const {
+	lock_guard<mutex> guard(lock);
+	if (sample_count < 2) {
+		return false;
+	}
+	const double n = static_cast<double>(sample_count);
+	const double variance = sum_bytes_sq - sum_bytes * sum_bytes / n;
+	if (!(variance > 0)) {
+		// every read was the same size, so we cant really get the latency
+		return false;
+	}
+	// least squares estimate of the line "total_time = intercept + slope * bytes".
+	const double slope = (sum_bytes_seconds - sum_bytes * sum_seconds / n) / variance;
+	const double intercept = (sum_seconds - slope * sum_bytes) / n;
+	if (!(slope > 0) || !(intercept > 0)) {
+		return false;
+	}
+	// intercept is the fixed start-up cost of a read, slope is seconds per byte so bandwidth is 1 / slope
+	result.latency_seconds = intercept;
+	result.bandwidth_bytes_per_s = 1.0 / slope;
+	return true;
 }
 
 bool CachingFileHandle::TryGetNetworkThroughput(NetworkThroughputEstimate &result) {
-	return GetFileHandle().TryGetNetworkThroughput(result);
+	// Remote files measure throughput in their own file system; local files fit it from this handle's own reads.
+	if (GetFileHandle()->TryGetNetworkThroughput(result)) {
+		return true;
+	}
+	return throughput_estimator.TryEstimate(result);
+}
+
+void CachingFileHandle::ReadAndRecord(QueryContext context, data_ptr_t buffer, idx_t nr_bytes, idx_t location) {
+	auto handle = GetFileHandle();
+	const auto read_start = steady_clock::now();
+	handle->Read(context, buffer, nr_bytes, location);
+	auto cache_valid_until = handle->file_system.GetCacheValidUntil(*handle);
+	if (cache_valid_until) {
+		const annotated_lock_guard<annotated_mutex> guard(file_handle_mutex);
+		if (file_handle == handle) {
+			TightenCacheDeadline(validation_info.cache_valid_until, cache_valid_until);
+		}
+	}
+	RecordReadThroughput(duration<double>(steady_clock::now() - read_start).count(), nr_bytes);
+}
+
+bool CachingFileHandle::IsCacheReuseProhibited() {
+	const annotated_lock_guard<annotated_mutex> guard(file_handle_mutex);
+	return validation_info.IsCacheReuseProhibited();
+}
+
+void CachingFileHandle::RecordReadThroughput(double total_seconds, idx_t bytes) {
+	if (IsRemoteFile() || !(total_seconds > 0)) {
+		return;
+	}
+	throughput_estimator.AddSample(total_seconds, bytes);
 }
 
 idx_t CachingFileHandle::SeekPosition() {

@@ -37,6 +37,12 @@ bool SljitTypedExpressionTreeIsDecimal64Node(const ExecutionExpressionIR &node);
 bool TryGetSljitTypedExpressionTreeDecimal64Range(const LogicalType &type, int64_t &result_min, int64_t &result_max);
 bool SljitTypedExpressionTreeIsInt32Node(const ExecutionExpressionIR &node);
 bool SljitTypedExpressionTreeIsBoolNode(const ExecutionExpressionIR &node);
+bool SljitTypedExpressionTreeCastExceptionBehaviorIsSafe(const ExecutionExpressionIR &node);
+//! A narrow DECIMAL128 node is a DECIMAL node with physical INT128 whose magnitude is structurally bounded by
+//! INT64_MAX, so it is computed exactly in one 64-bit register (INT64 register semantics) and only sign-extended where
+//! the value leaves the tree. On success, `bound` is a conservative bound on |value|.
+bool TryGetSljitTypedExpressionTreeNarrowDecimal128Bound(const ExecutionExpressionIR &node, uint64_t &bound);
+bool SljitTypedExpressionTreeIsNarrowDecimal128Node(const ExecutionExpressionIR &node);
 bool SljitTypedExpressionTreeIsValueNode(const ExecutionExpressionIR &node);
 bool SljitTypedExpressionTreeIsIntegerNode(const ExecutionExpressionIR &node);
 bool SljitTypedExpressionTreeSameIntegerKind(const ExecutionExpressionIR &left, const ExecutionExpressionIR &right);

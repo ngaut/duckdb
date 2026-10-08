@@ -15,9 +15,7 @@
 namespace duckdb {
 
 struct PrefixRangeFunctionData;
-struct PerfectHashJoinFunctionData;
 struct BloomFilterFunctionData;
-struct ExecutionPerfectHashJoinFilterLayout;
 struct UnifiedVectorFormat;
 class Vector;
 
@@ -64,12 +62,7 @@ struct FilterSelectivityState {
 	idx_t pause_multiplier;
 };
 
-enum class FastInternalFilterOperationType : uint8_t {
-	SIGNED_NUMERIC_RANGE,
-	PREFIX_RANGE,
-	PERFECT_HASH_JOIN,
-	BLOOM_FILTER
-};
+enum class FastInternalFilterOperationType : uint8_t { SIGNED_NUMERIC_RANGE, PREFIX_RANGE, BLOOM_FILTER };
 
 //! One analyzed operation in a fully supported internal expression filter. The
 //! expression tree is immutable for the lifetime of the state, so retaining the
@@ -83,7 +76,6 @@ struct FastInternalFilterOperation {
 	int64_t range_lower = 0;
 	int64_t range_upper = 0;
 	optional_ptr<const PrefixRangeFunctionData> prefix_range_data;
-	optional_ptr<const PerfectHashJoinFunctionData> perfect_hash_join_data;
 	optional_ptr<const BloomFilterFunctionData> bloom_filter_data;
 	unique_ptr<FilterSelectivityState> selectivity;
 };
@@ -91,10 +83,20 @@ struct FastInternalFilterOperation {
 //! Immutable storage-scan dispatch derived from the analyzed filter operations.
 //! ExpressionFilterState has the same thread-local lifetime as the immutable
 //! table filter, so compression functions can consume this without rebinding
-//! operator-lifetime layout and fusion invariants for every vector.
+//! fusion invariants for every vector.
 struct FastInternalFilterScanPlan {
+	//! Number of leading operations a compression codec may fuse into one decode pass: the primary operation plus
+	//! the signed-range operations that directly follow it (only when the primary has no selectivity policy).
 	idx_t primary_operation_count = 0;
-	optional_ptr<const ExecutionPerfectHashJoinFilterLayout> perfect_hash_join_layout;
+};
+
+//! Upstream vectorized fast path for a table filter expression (comparisons, bloom/prefix-range filters, optional
+//! wrappers and their conjunctions).
+struct ExpressionFilterExecutor {
+	virtual ~ExpressionFilterExecutor() = default;
+
+	virtual idx_t FilterSelection(SelectionVector &sel, Vector &vector, idx_t scan_count,
+	                              idx_t &approved_tuple_count) = 0;
 };
 
 //! Thread-local state for executing a table filter
@@ -104,6 +106,11 @@ public:
 
 public:
 	static unique_ptr<TableFilterState> Initialize(ClientContext &context, const TableFilter &filter);
+
+	//! Whether evaluating the filter can throw. Such a filter must only ever be evaluated on the rows that are still
+	//! selected - evaluating it on the distinct values of a segment (a dictionary, the RLE runs) would raise errors
+	//! for rows that another filter already removed
+	bool can_throw = false;
 
 public:
 	template <class TARGET>
@@ -121,13 +128,18 @@ public:
 struct ExpressionFilterState : public TableFilterState {
 public:
 	ExpressionFilterState(ClientContext &context, const Expression &expression);
+	~ExpressionFilterState() override;
 
 	ClientContext &GetContext() {
 		D_ASSERT(executor);
 		return executor->GetContext();
 	}
 
+	//! The filter expression this state evaluates. It is owned by the immutable table filter, which outlives the
+	//! thread-local state (the executor references it as well).
+	const Expression &expression;
 	unique_ptr<ExpressionExecutor> executor;
+	unique_ptr<ExpressionFilterExecutor> fast_executor;
 	unique_ptr<TableFilterKernelState> kernel;
 	bool fast_string_equality_filter_initialized = false;
 	bool fast_string_equality_filter_supported = false;
@@ -160,7 +172,11 @@ public:
 	bool constant_filter_filters_nulls = false;
 	bool constant_filter_filters_valid_values = false;
 
+	//! Output selection of the native fast paths; it may become the input selection of the next operation, which
+	//! the operations compact in place.
 	SelectionVector fast_filter_sel;
+	//! Positions local to the input selection (e.g. prefix-range lookups); never aliases the input selection.
+	SelectionVector fast_filter_local_sel;
 };
 
 } // namespace duckdb

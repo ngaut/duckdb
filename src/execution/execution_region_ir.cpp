@@ -749,6 +749,10 @@ static ExecutionRegionCandidateTraits BuildExecutionRegionCandidateTraits(const 
 			}
 			if (node.operator_info && node.operator_info->hash_join_contract.present) {
 				traits.hash_join_operator_count++;
+				if (node.operator_info->hash_join_contract.native_probe_output_mode ==
+				    ExecutionHashJoinProbeOutputMode::LEFT_PROBE_AND_BUILD) {
+					traits.materialized_hash_join_output_count++;
+				}
 			}
 			break;
 		default:

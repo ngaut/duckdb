@@ -8,7 +8,6 @@
 
 #pragma once
 
-#include "sljit_date_year_runtime.hpp"
 #include "sljit_grouped_aggregate_group_key_source.hpp"
 
 #include "duckdb/common/exception.hpp"
@@ -85,22 +84,6 @@ private:
 		return TryCast::Operation<int64_t, SRC>(minimum, typed_minimum, false) &&
 		       TrySubtractOperator::Operation<SRC, SRC, SRC>(source, typed_minimum, compressed) &&
 		       TryCast::Operation<SRC, DST>(compressed, target, false);
-	}
-};
-
-template <class DST>
-struct SljitSelectedInputGroupDateYearCompress {
-	static constexpr bool CAN_FAIL = false;
-	static constexpr bool STAGE_TRANSFORMED_KEYS = false;
-
-	int64_t minimum;
-
-	bool operator()(int32_t source, DST &target) const {
-		target = SljitDateYearCompressedGroupKeyOrThrow<DST>(source, minimum);
-		return true;
-	}
-	bool ConvertPreflighted(int32_t source, DST &target) const {
-		return (*this)(source, target);
 	}
 };
 
@@ -388,13 +371,6 @@ static bool SljitDispatchSelectedInputVectorGroupKey(Vector &input, const Select
 		default:
 			return false;
 		}
-	case ExecutionRowPointerGroupKeyCastKind::DATE_YEAR_COMPRESS:
-		if (source.source_physical_type != PhysicalType::INT32 || source.source_type.id() != LogicalTypeId::DATE) {
-			return false;
-		}
-		return SljitWithSelectedInputVectorGroupKey<int32_t, DST>(
-		    input, selection, SljitSelectedInputGroupDateYearCompress<DST> {source.cast_constant},
-		    std::forward<CONSUMER>(consumer));
 	case ExecutionRowPointerGroupKeyCastKind::STRING_COMPRESS:
 		if (source.source_physical_type != PhysicalType::VARCHAR) {
 			return false;

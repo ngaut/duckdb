@@ -179,10 +179,8 @@ bool SljitCompilePreparedExecutableRegionExpression(SljitExecutableRegionExpress
 	}
 	case SljitNativeRegionExpressionKind::INTEGER_COMPARE_CONSTANT:
 		if (require_boolean) {
-			return build_select([&](SljitNativeVectorFunction &function) {
-				return BuildSljitNativeIntegerSelectConstant(semantic.integer_kind, semantic.compare_op,
-				                                             semantic.constant_on_left, function, error);
-			});
+			error = "SLJIT integer comparison has no generated selection kernel";
+			return false;
 		}
 		return build_vector([&](SljitNativeVectorFunction &function) {
 			return BuildSljitNativeIntegerCompareConstant(semantic.integer_kind, semantic.compare_op,
@@ -190,10 +188,8 @@ bool SljitCompilePreparedExecutableRegionExpression(SljitExecutableRegionExpress
 		});
 	case SljitNativeRegionExpressionKind::INTEGER_COMPARE_REFERENCES:
 		if (require_boolean) {
-			return build_select([&](SljitNativeVectorFunction &function) {
-				return BuildSljitNativeIntegerSelectReferences(semantic.integer_kind, semantic.compare_op, function,
-				                                               error);
-			});
+			error = "SLJIT integer comparison has no generated selection kernel";
+			return false;
 		}
 		return build_vector([&](SljitNativeVectorFunction &function) {
 			return BuildSljitNativeIntegerCompareReferences(semantic.integer_kind, semantic.compare_op, function,
@@ -241,10 +237,8 @@ bool SljitCompilePreparedExecutableRegionExpression(SljitExecutableRegionExpress
 		});
 	case SljitNativeRegionExpressionKind::INTEGER_IN_LIST:
 		if (require_boolean) {
-			return build_select([&](SljitNativeVectorFunction &function) {
-				return BuildSljitNativeIntegerInListSelect(semantic.integer_kind, semantic.constants.size(),
-				                                           semantic.list_has_null, semantic.not_in, function, error);
-			});
+			error = "SLJIT integer IN-list has no generated selection kernel";
+			return false;
 		}
 		return build_vector([&](SljitNativeVectorFunction &function) {
 			return BuildSljitNativeIntegerInList(semantic.integer_kind, semantic.constants.size(),
@@ -252,24 +246,13 @@ bool SljitCompilePreparedExecutableRegionExpression(SljitExecutableRegionExpress
 		});
 	case SljitNativeRegionExpressionKind::INTEGER_BETWEEN:
 		if (require_boolean) {
-			return build_select([&](SljitNativeVectorFunction &function) {
-				return BuildSljitNativeIntegerBetweenSelect(semantic.integer_kind, semantic.lower, semantic.upper,
-				                                            semantic.lower_inclusive, semantic.upper_inclusive,
-				                                            semantic.not_between, function, error);
-			});
+			error = "SLJIT integer BETWEEN has no generated selection kernel";
+			return false;
 		}
 		return build_vector([&](SljitNativeVectorFunction &function) {
 			return BuildSljitNativeIntegerBetween(semantic.integer_kind, semantic.lower, semantic.upper,
 			                                      semantic.lower_inclusive, semantic.upper_inclusive,
 			                                      semantic.not_between, function, error);
-		});
-	case SljitNativeRegionExpressionKind::CONSTANT_OR_NULL:
-		if (require_boolean) {
-			error = "SLJIT constant_or_null cannot lower as a predicate";
-			return false;
-		}
-		return build_predicate([&](SljitNativePredicateFunction &function) {
-			return BuildSljitNativeConstantOrNull(semantic.constant_or_null.guard_source_indices, function, error);
 		});
 	case SljitNativeRegionExpressionKind::STRING_COMPRESS:
 		if (require_boolean) {
@@ -329,9 +312,8 @@ bool SljitCompilePreparedExecutableRegionExpression(SljitExecutableRegionExpress
 		});
 	case SljitNativeRegionExpressionKind::NULL_CHECK:
 		if (require_boolean) {
-			return build_select([&](SljitNativeVectorFunction &function) {
-				return BuildSljitNativeNullCheckSelect(semantic.null_check_op, function, error);
-			});
+			error = "SLJIT null check has no generated selection kernel";
+			return false;
 		}
 		return build_vector([&](SljitNativeVectorFunction &function) {
 			return BuildSljitNativeNullCheck(semantic.null_check_op, function, error);
@@ -345,19 +327,6 @@ bool SljitCompilePreparedExecutableRegionExpression(SljitExecutableRegionExpress
 		}
 		return build_predicate([&](SljitNativePredicateFunction &function) {
 			return BuildSljitNativePredicate(*semantic.predicate, true, function, error);
-		});
-	case SljitNativeRegionExpressionKind::EXPRESSION_TREE:
-		if (require_boolean) {
-			error = "SLJIT expression tree cannot lower as a predicate";
-			return false;
-		}
-		if (!semantic.expression_tree) {
-			error = "SLJIT expression tree plan is missing its typed expression IR";
-			return false;
-		}
-		expr.overflow_message = "Overflow in arithmetic expression";
-		return build_vector([&](SljitNativeVectorFunction &function) {
-			return BuildSljitNativeExpressionTree(*semantic.expression_tree, function, error);
 		});
 	case SljitNativeRegionExpressionKind::TYPED_EXPRESSION_TREE:
 		if (require_boolean && semantic.return_type.id() != LogicalTypeId::BOOLEAN) {

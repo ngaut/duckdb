@@ -11,6 +11,8 @@
 #include "sljit_full_pipeline_recipe_state.hpp"
 #include "sljit_region_runtime.hpp"
 
+#include "duckdb/common/atomic.hpp"
+
 namespace duckdb {
 
 //! Private backend artifact shared by execution-bound region kernels. This

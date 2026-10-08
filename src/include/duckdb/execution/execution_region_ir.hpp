@@ -153,6 +153,12 @@ struct ExecutionRegionHashJoinContract {
 	bool native_probe_shape_ready = false;
 	bool build_sink_shape_ready = false;
 	ExecutionHashJoinProbeOutputMode native_probe_output_mode = ExecutionHashJoinProbeOutputMode::NONE;
+	//! The probe's output can reach a sink that narrows global-dictionary payloads (a hash-join build, directly or via
+	//! a delim join). Only then must compiled probes emit global-dictionary RHS columns exactly as native does.
+	bool output_reaches_dictionary_narrowing_sink = false;
+	//! Row layout of the build side as the sink publishes it. Per payload column, a non-zero dict-index width means
+	//! the slot holds a dictionary index of that byte width (dict-surviving join) instead of the value.
+	vector<uint8_t> payload_dict_index_widths;
 	vector<idx_t> layout_offsets;
 	idx_t tuple_size = 0;
 	idx_t pointer_offset = 0;
@@ -396,6 +402,8 @@ struct ExecutionRegionCandidateTraits {
 	idx_t mark_probe_filter_count = 0;
 	idx_t selected_hash_join_filter_materialization_count = 0;
 	idx_t selected_hash_join_view_materialization_count = 0;
+	//! Hash join probes whose output is materialized (a LEFT probe must emit its unmatched rows)
+	idx_t materialized_hash_join_output_count = 0;
 	idx_t generated_aggregate_update_count = 0;
 	idx_t generated_aggregate_lookup_count = 0;
 	idx_t grouped_aggregate_estimated_cardinality = 0;

@@ -72,48 +72,6 @@ static bool SljitTryBindProjectedCountStarGroupedAggregateStrategy(SljitGroupedA
 	return true;
 }
 
-static bool SljitTryBindProjectedDistinctKeySinkStrategy(SljitGroupedAggregateUpdatePrimitive &primitive,
-                                                         SljitExecutableRegionOp &semantic_projection,
-                                                         const SljitExecutableRegionOp &aggregate_op) {
-	if (!SljitGroupedAggregateUpdateCanUseDistinctKeySink(aggregate_op)) {
-		return false;
-	}
-	vector<LogicalType> expected_input_types;
-	if (!SljitTryBuildDistinctKeySinkInputTypes(aggregate_op.aggregate_update.plan.sink_info, expected_input_types)) {
-		return false;
-	}
-	if (semantic_projection.kind != SljitNativeRegionOpKind::PROJECTION ||
-	    semantic_projection.output_types != expected_input_types) {
-		return false;
-	}
-	auto projected_input = make_shared_ptr<SljitExecutableRegionOp>();
-	*projected_input = std::move(semantic_projection);
-	primitive.strategy = SljitGroupedAggregateUpdateStrategyKind::DISTINCT_KEY_SINK;
-	primitive.projected_distinct_key_input_projection = std::move(projected_input);
-	return true;
-}
-
-static bool SljitTryBindSingleProjectionDistinctKeySinkStrategy(SljitGroupedAggregateUpdatePrimitive &primitive,
-                                                                const vector<SljitExecutableRegionOp> &ops,
-                                                                idx_t first_projection_idx,
-                                                                idx_t final_projection_idx) {
-	if (first_projection_idx != final_projection_idx || final_projection_idx >= ops.size()) {
-		return false;
-	}
-	auto &projection_op = ops[final_projection_idx];
-	auto &aggregate_op = ops[primitive.aggregate_idx];
-	vector<LogicalType> expected_input_types;
-	if (!SljitGroupedAggregateUpdateCanUseDistinctKeySink(aggregate_op) ||
-	    !SljitTryBuildDistinctKeySinkInputTypes(aggregate_op.aggregate_update.plan.sink_info, expected_input_types) ||
-	    projection_op.kind != SljitNativeRegionOpKind::PROJECTION ||
-	    projection_op.output_types != expected_input_types) {
-		return false;
-	}
-	primitive.strategy = SljitGroupedAggregateUpdateStrategyKind::DISTINCT_KEY_SINK;
-	primitive.projected_distinct_key_input_projection.reset();
-	return true;
-}
-
 static bool SljitTryBindProjectedDirectPrimitivePayloadUpdateStrategy(SljitGroupedAggregateUpdatePrimitive &primitive,
                                                                       const vector<SljitExecutableRegionOp> &ops,
                                                                       idx_t first_projection_idx,
@@ -146,24 +104,12 @@ static bool SljitTryBindProjectedInputGroupedAggregateUpdateStrategy(const vecto
 		return false;
 	}
 	SljitInitializeProjectedInputGroupedAggregatePrimitive(primitive, first_projection_idx, final_projection_idx);
-	if (SljitTryBindSingleProjectionDistinctKeySinkStrategy(primitive, ops, first_projection_idx,
-	                                                        final_projection_idx)) {
-		return true;
-	}
 	auto semantic_projection = make_uniq<SljitExecutableRegionOp>();
 	if (SljitBuildProjectionChainComposedProjection(ops, first_projection_idx, final_projection_idx,
-	                                                *semantic_projection)) {
-		if (SljitTryBindProjectedCountStarGroupedAggregateStrategy(primitive, *semantic_projection,
-		                                                           ops[primitive.aggregate_idx])) {
-			return true;
-		}
-		if (SljitTryBindProjectedDistinctKeySinkStrategy(primitive, *semantic_projection,
-		                                                 ops[primitive.aggregate_idx])) {
-			return true;
-		}
-	}
-	if (SljitAggregateSinkHasDistinctState(ops[primitive.aggregate_idx].aggregate_update.plan.sink_info)) {
-		return false;
+	                                                *semantic_projection) &&
+	    SljitTryBindProjectedCountStarGroupedAggregateStrategy(primitive, *semantic_projection,
+	                                                           ops[primitive.aggregate_idx])) {
+		return true;
 	}
 	if (allow_direct_primitive_payload_update) {
 		return SljitTryBindProjectedDirectPrimitivePayloadUpdateStrategy(primitive, ops, first_projection_idx,
@@ -225,24 +171,6 @@ static bool SljitCanBindGroupedAggregateUpdatePrimitive(const vector<SljitExecut
 		case SljitGroupedAggregateUpdateStrategyKind::DIRECT_PRIMITIVE_PAYLOAD_UPDATE:
 			return primitive.projected_direct_update && primitive.projected_direct_update->Ready() &&
 			       SljitProjectedInputGroupedAggregateCanUseSourceInput(*primitive.projected_direct_update);
-		case SljitGroupedAggregateUpdateStrategyKind::DISTINCT_KEY_SINK: {
-			if (!SljitGroupedAggregateUpdateCanUseDistinctKeySink(ops[primitive.aggregate_idx])) {
-				return false;
-			}
-			vector<LogicalType> expected_input_types;
-			if (!SljitTryBuildDistinctKeySinkInputTypes(ops[primitive.aggregate_idx].aggregate_update.plan.sink_info,
-			                                            expected_input_types)) {
-				return false;
-			}
-			if (primitive.projected_distinct_key_input_projection) {
-				return primitive.projected_distinct_key_input_projection->kind == SljitNativeRegionOpKind::PROJECTION &&
-				       primitive.projected_distinct_key_input_projection->output_types == expected_input_types;
-			}
-			return primitive.first_projection_idx == primitive.final_projection_idx &&
-			       primitive.final_projection_idx < ops.size() &&
-			       ops[primitive.final_projection_idx].kind == SljitNativeRegionOpKind::PROJECTION &&
-			       ops[primitive.final_projection_idx].output_types == expected_input_types;
-		}
 		case SljitGroupedAggregateUpdateStrategyKind::FILTERED_PRIMITIVE_PAYLOAD_UPDATE:
 			return false;
 		case SljitGroupedAggregateUpdateStrategyKind::INVALID:

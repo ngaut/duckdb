@@ -11,6 +11,8 @@
 
 #include "duckdb/execution/expression_executor_state.hpp"
 #include "duckdb/planner/expression/bound_function_expression.hpp"
+#include "duckdb/planner/expression/bound_comparison_expression.hpp"
+#include "duckdb/planner/expression/bound_constant_expression.hpp"
 
 namespace duckdb {
 
@@ -126,6 +128,7 @@ static idx_t DynamicFilterSelect(DataChunk &args, ExpressionState &state, option
 
 ScalarFunction DynamicFilterScalarFun::GetFunction(const LogicalType &input_type) {
 	ScalarFunction func(NAME, {input_type}, LogicalType::BOOLEAN, nullptr, TableFilterFunctions::Bind);
+	func.GetSignature().GetParameter(0).SetName("col");
 	func.SetSelectCallback(DynamicFilterSelect);
 	func.SetNullHandling(FunctionNullHandling::SPECIAL_HANDLING);
 	func.SetFilterPruneCallback(DynamicFilterScalarFun::FilterPrune);
@@ -146,7 +149,11 @@ FilterPropagateResult DynamicFilterScalarFun::FilterPrune(const FunctionStatisti
 	if (!data.filter_data->initialized) {
 		return FilterPropagateResult::NO_PRUNING_POSSIBLE;
 	}
-	return DynamicFilterData::CheckStatistics(input.stats, data.filter_data->comparison_type,
+	auto column_stats = input.ChildStats(0);
+	if (!column_stats) {
+		return FilterPropagateResult::NO_PRUNING_POSSIBLE;
+	}
+	return DynamicFilterData::CheckStatistics(*column_stats, data.filter_data->comparison_type,
 	                                          data.filter_data->constant);
 }
 

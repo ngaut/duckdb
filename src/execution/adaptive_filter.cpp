@@ -1,8 +1,7 @@
 #include "duckdb/planner/expression/bound_conjunction_expression.hpp"
-#include "duckdb/planner/cost_model.hpp"
+#include "duckdb/optimizer/expression_heuristics.hpp"
 #include "duckdb/execution/adaptive_filter.hpp"
 #include "duckdb/logging/logger.hpp"
-#include "duckdb/planner/filter/expression_filter.hpp"
 #include "duckdb/planner/table_filter.hpp"
 #include "duckdb/planner/filter/table_filter_functions.hpp"
 #include "duckdb/common/enum_util.hpp"
@@ -11,13 +10,14 @@
 #include "duckdb/common/unordered_map.hpp"
 #include "duckdb/common/vector.hpp"
 #include "duckdb/planner/table_filter_set.hpp"
+#include "duckdb/planner/filter/expression_filter.hpp"
+#include "duckdb/planner/expression/expression_barrier.hpp"
 
 namespace duckdb {
 
 static bool ContainsRuntimeDynamicFilter(const Expression &expr) {
 	return ExpressionFilter::ContainsInternalFunction(expr, BloomFilterScalarFun::NAME) ||
 	       ExpressionFilter::ContainsInternalFunction(expr, DynamicFilterScalarFun::NAME) ||
-	       ExpressionFilter::ContainsInternalFunction(expr, PerfectHashJoinScalarFun::NAME) ||
 	       ExpressionFilter::ContainsInternalFunction(expr, PrefixRangeScalarFun::NAME);
 }
 
@@ -39,7 +39,7 @@ AdaptiveFilter::AdaptiveFilter(const Expression &expr) : observe_interval(10), e
 	D_ASSERT(conj_expr.GetChildren().size() > 1);
 	for (idx_t idx = 0; idx < conj_expr.GetChildren().size(); idx++) {
 		permutation.push_back(idx);
-		if (conj_expr.GetChildren()[idx]->CanThrow()) {
+		if (conj_expr.GetChildren()[idx]->CanThrow() || ExpressionBarrier::Contains(*conj_expr.GetChildren()[idx])) {
 			disable_permutations = true;
 		}
 		if (idx != conj_expr.GetChildren().size() - 1) {
@@ -51,8 +51,16 @@ AdaptiveFilter::AdaptiveFilter(const Expression &expr) : observe_interval(10), e
 
 AdaptiveFilter::AdaptiveFilter(const TableFilterSet &table_filters, vector<idx_t> filter_global_pos_p)
     : observe_interval(10), execute_interval(20), warmup(true) {
-	permutation = DuckDBCostModel::InitialFilterOrder(table_filters);
+	permutation = ExpressionHeuristics::GetInitialOrder(table_filters);
+	// join runtime filters keep the cost-model order
 	disable_permutations = ContainsRuntimeDynamicFilter(table_filters);
+	for (auto &entry : table_filters) {
+		auto &expr_filter = ExpressionFilter::GetExpressionFilter(entry.Filter(), "AdaptiveFilter");
+		if (expr_filter.expr->CanThrow() || ExpressionBarrier::Contains(*expr_filter.expr)) {
+			// a filter that can throw must keep the order the optimizer put it in
+			disable_permutations = true;
+		}
+	}
 	for (idx_t idx = 1; idx < table_filters.FilterCount(); idx++) {
 		swap_likeliness.push_back(100);
 	}
@@ -73,7 +81,6 @@ bool AdaptiveFilter::Remap(const TableFilterSet &new_filters, vector<idx_t> new_
 	for (idx_t i = 0; i < filter_global_pos.size(); i++) {
 		auto it = new_position_by_identity.find(filter_global_pos[i]);
 		if (it == new_position_by_identity.end()) {
-			// missing filter cant remap
 			return false;
 		}
 		old_to_new[i] = it->second;
@@ -116,7 +123,7 @@ AdaptiveFilterState AdaptiveFilter::BeginFilter() const {
 		return AdaptiveFilterState();
 	}
 	AdaptiveFilterState state;
-	state.start_time = high_resolution_clock::now();
+	state.monotonic_start = TimePoint::Tick();
 	return state;
 }
 
@@ -125,8 +132,7 @@ void AdaptiveFilter::EndFilter(AdaptiveFilterState state) {
 		// nothing to permute
 		return;
 	}
-	auto end_time = high_resolution_clock::now();
-	AdaptRuntimeStatistics(duration_cast<duration<double>>(end_time - state.start_time).count());
+	AdaptRuntimeStatistics(state.monotonic_start.ElapsedSeconds());
 }
 
 void AdaptiveFilter::AdaptRuntimeStatistics(double duration) {

@@ -228,9 +228,8 @@ void ForEachPhysicalRunnerCostWorkField(A &a, B &b, FN &&fn) {
 
 class DuckDBCostModel {
 public:
+	//! ExpressionHeuristics::Cost, with compressed-materialization string (de)compression priced as free.
 	static idx_t ExpressionCost(const Expression &expr);
-	static idx_t FilterCost(const TableFilter &filter);
-	static vector<idx_t> InitialFilterOrder(const TableFilterSet &table_filters);
 
 	static PhysicalRunnerCostProfile SelectPhysicalRunner(const PhysicalRunnerCostInput &input,
 	                                                      const PhysicalRunnerCostParameters &parameters);

@@ -12,7 +12,8 @@
 
 namespace duckdb {
 
-bool TryReadNativeRegionPredicateExpression(const ExecutionExpressionIR &root, SljitNativeRegionExpressionPlan &expr) {
+static bool TryReadNativeRegionScalarPredicateExpression(const ExecutionExpressionIR &root,
+                                                         SljitNativeRegionExpressionPlan &expr) {
 	SljitNativeIntegerKind in_list_kind;
 	idx_t in_list_source_index;
 	vector<int64_t> in_list_constants;
@@ -86,7 +87,16 @@ bool TryReadNativeRegionPredicateExpression(const ExecutionExpressionIR &root, S
 		expr.compare_op = compare_op;
 		return true;
 	}
+	return false;
+}
 
+bool TryReadNativeRegionPredicateExpression(const ExecutionExpressionIR &root, bool require_boolean,
+                                            SljitNativeRegionExpressionPlan &expr) {
+	// Scalar comparison, IN-list, BETWEEN and NULL-check kinds only compute values. Boolean contexts select
+	// through the generated predicate or the typed expression tree selector.
+	if (!require_boolean && TryReadNativeRegionScalarPredicateExpression(root, expr)) {
+		return true;
+	}
 	if (ShouldTryNativePredicateRoot(root)) {
 		unique_ptr<SljitNativePredicate> predicate;
 		if (TryBuildNativePredicate(root, predicate)) {

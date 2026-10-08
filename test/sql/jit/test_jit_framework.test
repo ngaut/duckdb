@@ -1830,10 +1830,13 @@ SELECT i::BIGINT AS k,
        ((i % 100) + 1)::DECIMAL(15,2) AS price
 FROM range(100000) tbl(i)
 
+# The trailing key 99999 makes the part keys span the line keys, so join statistics add no FILTER above the filtered
+# line scan; line 99999 has instruct 'NONE' and never qualifies, so the results are unchanged.
 statement ok
 CREATE TEMP TABLE jit_source_filter_probe_part AS
 SELECT i::BIGINT AS k
 FROM range(1000) tbl(i)
+UNION ALL SELECT 99999
 
 statement ok
 CREATE TEMP TABLE jit_source_filter_probe_reference AS

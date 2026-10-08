@@ -124,7 +124,14 @@ SinkNextBatchType ExecutionRegionPipelineAdapter::AdvanceSinkBatch(DataChunk &so
 	if (!executor.required_partition_info.AnyRequired()) {
 		return SinkNextBatchType::READY;
 	}
-	auto result = executor.NextBatch(source_chunk, have_more_output);
+	// Mirror the vectorized loop: a finished source with an empty chunk does not advance the batch here; the
+	// final advance to the pipeline's maximum batch index is FlushAndFinalize's job.
+	PipelineExecutor::SourceFetchResult source_result;
+	source_result.result = have_more_output ? SourceResultType::HAVE_MORE_OUTPUT : SourceResultType::FINISHED;
+	if (source_result.result == SourceResultType::FINISHED && source_chunk.size() == 0) {
+		return SinkNextBatchType::READY;
+	}
+	auto result = executor.NextBatch(source_chunk, source_result);
 	executor.next_batch_blocked = result == SinkNextBatchType::BLOCKED;
 	return result;
 }
@@ -232,24 +239,11 @@ bool ExecutionRegionPipelineAdapter::TryMarkRuntimeOnce(ExecutionRegionRuntimeOn
 
 PipelineExecuteResult ExecutionRegionPipelineAdapter::FlushAndFinalizeAfterCompiledFinish(idx_t max_chunks,
                                                                                           string &runtime_reason) {
-	PipelineExecuteResult pipeline_result;
-	if (executor.done_flushing) {
-		pipeline_result = PipelineExecuteResult::FINISHED;
-	} else {
-		ExecutionBudget chunk_budget(max_chunks);
-		auto flush_completed = executor.TryFlushCachingOperators(chunk_budget);
-		if (flush_completed) {
-			executor.done_flushing = true;
-			pipeline_result = PipelineExecuteResult::FINISHED;
-		} else if (executor.remaining_sink_chunk) {
-			pipeline_result = PipelineExecuteResult::INTERRUPTED;
-		} else {
-			D_ASSERT(chunk_budget.IsDepleted());
-			pipeline_result = PipelineExecuteResult::NOT_FINISHED;
-		}
-	}
+	// The vectorized loop's finish protocol is the single authority: pending sink chunk, caching-operator flush,
+	// final batch advance for partition-aware sinks, then sink finalize.
+	ExecutionBudget chunk_budget(max_chunks);
+	auto pipeline_result = executor.FlushAndFinalize(chunk_budget);
 	if (pipeline_result == PipelineExecuteResult::FINISHED) {
-		pipeline_result = executor.PushFinalize();
 		runtime_reason = "full pipeline kernel executed; core flushed final operators and finalized sink";
 	} else {
 		runtime_reason = "full pipeline kernel executed; core final-operator flush is pending";

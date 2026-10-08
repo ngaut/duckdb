@@ -4,6 +4,7 @@
 #include "duckdb/common/vector_operations/vector_operations.hpp"
 #include "duckdb/planner/expression/bound_aggregate_expression.hpp"
 #include "duckdb/function/aggregate/distributive_function_utils.hpp"
+#include "duckdb/function/aggregate_state_layout.hpp"
 #include "duckdb/function/function_set.hpp"
 
 namespace duckdb {
@@ -11,11 +12,10 @@ namespace duckdb {
 namespace {
 
 struct ProductState {
-	static constexpr const char *STATE_NAMES[] = {"empty", "val"};
-	using STATE_TYPE = StructStateType<bool, double>;
+	using STATE_TYPE = OptionalStateType<double>;
 
-	bool empty;
 	double val;
+	bool is_set;
 };
 
 struct ProductReduce {
@@ -39,8 +39,10 @@ struct ProductFunction : public EmptyValAggregate<ProductReduce, ConstantInit<1>
 } // namespace
 
 AggregateFunction ProductFun::GetFunction() {
-	return AggregateFunction::UnaryAggregate<ProductState, double, double, ProductFunction>(
+	auto fun = AggregateFunction::UnaryAggregate<ProductState, double, double, ProductFunction>(
 	    LogicalType(LogicalTypeId::DOUBLE), LogicalType::DOUBLE);
+	fun.GetSignature().GetParameter(0).SetName("arg");
+	return fun;
 }
 
 } // namespace duckdb

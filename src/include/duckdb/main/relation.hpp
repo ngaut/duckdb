@@ -99,7 +99,7 @@ public:
 
 	//! Explain the query plan of this relation
 	DUCKDB_API unique_ptr<QueryResult> Explain(ExplainType type = ExplainType::EXPLAIN_STANDARD,
-	                                           ExplainFormat explain_format = ExplainFormat::DEFAULT);
+	                                           const ProfilerPrintFormat &format = ProfilerPrintFormat::Default());
 
 	DUCKDB_API virtual unique_ptr<TableRef> GetTableRef();
 	virtual bool IsReadOnly() {
@@ -186,17 +186,15 @@ public:
 
 	//! Write a relation to a CSV file
 	DUCKDB_API shared_ptr<Relation>
-	WriteCSVRel(const string &csv_file,
-	            case_insensitive_map_t<vector<Value>> options = case_insensitive_map_t<vector<Value>>());
+	WriteCSVRel(const string &csv_file, identifier_map_t<vector<Value>> options = identifier_map_t<vector<Value>>());
 	DUCKDB_API void WriteCSV(const string &csv_file,
-	                         case_insensitive_map_t<vector<Value>> options = case_insensitive_map_t<vector<Value>>());
+	                         identifier_map_t<vector<Value>> options = identifier_map_t<vector<Value>>());
 	//! Write a relation to a Parquet file
 	DUCKDB_API shared_ptr<Relation>
 	WriteParquetRel(const string &parquet_file,
-	                case_insensitive_map_t<vector<Value>> options = case_insensitive_map_t<vector<Value>>());
-	DUCKDB_API void
-	WriteParquet(const string &parquet_file,
-	             case_insensitive_map_t<vector<Value>> options = case_insensitive_map_t<vector<Value>>());
+	                identifier_map_t<vector<Value>> options = identifier_map_t<vector<Value>>());
+	DUCKDB_API void WriteParquet(const string &parquet_file,
+	                             identifier_map_t<vector<Value>> options = identifier_map_t<vector<Value>>());
 
 	//! Update a table, can only be used on a TableRelation
 	DUCKDB_API virtual void Update(const string &update, const string &condition = string());

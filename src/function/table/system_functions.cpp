@@ -37,7 +37,17 @@ void BuiltinFunctions::RegisterSQLiteFunctions() {
 	DuckDBJitCountersFun::RegisterFunction(*this);
 	DuckDBSchemasFun::RegisterFunction(*this);
 	DuckDBDependenciesFun::RegisterFunction(*this);
+	DuckDBDialectsFun::RegisterFunction(*this);
+	DuckDBGrammarExtensionsFun::RegisterFunction(*this);
 	DuckDBExtensionsFun::RegisterFunction(*this);
+	DuckDBExtensionRepositoriesFun::RegisterFunction(*this);
+	RegisterExternalResourceTypeFun::RegisterFunction(*this);
+	CreateExternalResourceFun::RegisterFunction(*this);
+	DestroyExternalResourceFun::RegisterFunction(*this);
+	RegisterExternalResourceFun::RegisterFunction(*this);
+	DeregisterExternalResourceFun::RegisterFunction(*this);
+	DuckDBExternalResourceTypesFun::RegisterFunction(*this);
+	DuckDBExternalResourcesFun::RegisterFunction(*this);
 	DuckDBMemoryFun::RegisterFunction(*this);
 	DuckDBEvictionQueuesFun::RegisterFunction(*this);
 	DuckDBExternalFileCacheFun::RegisterFunction(*this);
@@ -45,6 +55,7 @@ void BuiltinFunctions::RegisterSQLiteFunctions() {
 	DuckDBOptimizersFun::RegisterFunction(*this);
 	DuckDBSecretsFun::RegisterFunction(*this);
 	DuckDBWhichSecretFun::RegisterFunction(*this);
+	DuckDBSecretTypeParametersFun::RegisterFunction(*this);
 	DuckDBSecretTypesFun::RegisterFunction(*this);
 	DuckDBSequencesFun::RegisterFunction(*this);
 	DuckDBTriggersFun::RegisterFunction(*this);

@@ -1,4 +1,5 @@
 #include "duckdb/catalog/default/default_types.hpp"
+#include "duckdb/parser/parsed_data/create_function_info.hpp"
 #include "duckdb/common/string_util.hpp"
 #include "duckdb/function/function_list.hpp"
 #include "duckdb/function/register_function_list_helper.hpp"
@@ -6,6 +7,7 @@
 #include "duckdb/parser/parsed_data/create_scalar_function_info.hpp"
 #include "duckdb/parser/parsed_data/create_window_function_info.hpp"
 #include "duckdb/main/extension/extension_loader.hpp"
+#include "duckdb/catalog/catalog.hpp"
 
 namespace duckdb {
 

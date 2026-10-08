@@ -38,11 +38,22 @@ bool SljitProjectionAggregateRecipeBinding::TryMakeMarkFilterProjectionNativeTai
 }
 
 bool SljitProjectionAggregateRecipeBinding::TryMakeSourceProjectionAggregateTailRecipe(
-    const SljitFullPipelineProjectionAggregateShape &shape, SljitFullPipelineRecipe &recipe) const {
+    const SljitFullPipelineProjectionAggregateShape &shape, const SljitProjectionAggregatePrefixFacts &facts,
+    SljitFullPipelineRecipe &recipe) const {
 	if (shape.ProjectionCount() == 0) {
 		return false;
 	}
 	auto sequence = MakeSourceSequence();
+	if (facts.HasSourceFilter()) {
+		SljitGeneratedFilterPrimitive source_filter;
+		if (!SljitTryBindGeneratedFilterPrimitive(ops, facts.source_filter_idx, source_filter)) {
+			return false;
+		}
+		sequence.Add(SljitFullPipelinePrimitiveStep::GeneratedFilter(source_filter));
+	}
+	if (facts.HasSourceProjection()) {
+		AddProjectionChainStep(sequence, facts.source_projection_idx);
+	}
 	if (TryMakeProjectionAggregateRecipe(sequence, shape, true, recipe)) {
 		return true;
 	}
@@ -239,17 +250,10 @@ SljitFullPipelinePrimitiveSequence SljitProjectionAggregateRecipeBinding::MakeSi
 		auto pre_join_projection = PreJoinProjectionBinding();
 		SljitPreJoinProjectionViewDescriptor pre_join_view;
 		if (pre_join_projection.TryBuildView(facts.source_projection_idx, hash_join_idx, pre_join_view) &&
-		    pre_join_view.PreservesSourceColumnOrdinals()) {
-			SljitStringSetCaseGroupedPayloadProjection string_set_case_projection;
-			if (SljitTryBuildStringSetCaseGroupedPayloadProjection(
-			        ops, pre_join_view, post_join_aggregate.post_join_projection.first_projection_idx,
-			        post_join_aggregate.post_join_projection.final_projection_idx, string_set_case_projection)) {
-				post_join_aggregate.post_join_projection.EnableStringSetCaseGroupedPayload(string_set_case_projection);
-			}
-			if (pre_join_projection.TryAppendElidedHashJoinProbeSelection(sequence, pre_join_view,
-			                                                              facts.source_projection_idx, hash_join_idx)) {
-				return sequence;
-			}
+		    pre_join_view.PreservesSourceColumnOrdinals() &&
+		    pre_join_projection.TryAppendElidedHashJoinProbeSelection(sequence, pre_join_view,
+		                                                              facts.source_projection_idx, hash_join_idx)) {
+			return sequence;
 		}
 		AddProjectionChainStep(sequence, facts.source_projection_idx);
 	}
@@ -260,13 +264,6 @@ SljitFullPipelinePrimitiveSequence SljitProjectionAggregateRecipeBinding::MakeSi
 		auto pre_join_projection = PreJoinProjectionBinding();
 		const auto has_pre_join_view =
 		    pre_join_projection.TryBuildView(facts.JoinInputProjectionIdx(0), hash_join_idx, pre_join_view);
-		SljitStringSetCaseGroupedPayloadProjection string_set_case_projection;
-		if (has_pre_join_view &&
-		    SljitTryBuildStringSetCaseGroupedPayloadProjection(
-		        ops, pre_join_view, post_join_aggregate.post_join_projection.first_projection_idx,
-		        post_join_aggregate.post_join_projection.final_projection_idx, string_set_case_projection)) {
-			post_join_aggregate.post_join_projection.EnableStringSetCaseGroupedPayload(string_set_case_projection);
-		}
 		optional_ptr<const SljitPreJoinProjectionViewDescriptor> pre_join_view_ptr;
 		if (has_pre_join_view) {
 			pre_join_view_ptr = pre_join_view;
@@ -487,13 +484,6 @@ bool SljitProjectionAggregateRecipeBinding::TryMakeProjectionNativeTailRecipe(
 bool SljitProjectionAggregateRecipeBinding::TryMakeProjectionNativeTailRecipe(
     SljitFullPipelinePrimitiveSequence sequence, idx_t first_projection_idx, idx_t final_projection_idx,
     idx_t tail_start_idx, SljitFullPipelineRecipe &recipe) const {
-	SljitDelimJoinSinkPrimitive delim_sink;
-	if (SljitTryBindProjectedDelimJoinSinkPrimitive(ops, first_projection_idx, final_projection_idx, tail_start_idx,
-	                                                delim_sink)) {
-		sequence.Add(SljitFullPipelinePrimitiveStep::DelimJoinSink(delim_sink));
-		recipe = MakePrimitiveSequence(std::move(sequence));
-		return true;
-	}
 	SljitProjectionChainPrimitive projection;
 	if (!SljitTryBindProjectionChainPrimitive(ops, first_projection_idx, final_projection_idx, projection)) {
 		return false;

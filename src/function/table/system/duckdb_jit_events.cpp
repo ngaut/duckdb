@@ -128,7 +128,7 @@ static constexpr idx_t JIT_EVENT_PIPELINE_SHAPE_COLUMN =
     JIT_EVENT_CANDIDATE_TRACE_COLUMN_OFFSET + EXECUTION_REGION_CANDIDATE_TRACE_COLUMN_COUNT;
 static constexpr idx_t JIT_EVENT_PIPELINE_ESTIMATED_CARDINALITY_COLUMN = JIT_EVENT_PIPELINE_SHAPE_COLUMN + 1;
 
-static void AddJitEventRunnerCostColumns(vector<LogicalType> &return_types, vector<string> &names) {
+static void AddJitEventRunnerCostColumns(vector<LogicalType> &return_types, vector<Identifier> &names) {
 	AddExecutionRegionTableFunctionColumns(return_types, names, EXECUTION_REGION_RUNNER_COST_PROFILE_COLUMNS,
 	                                       EXECUTION_REGION_RUNNER_COST_PROFILE_COLUMN_COUNT);
 	AddExecutionRegionTableFunctionColumn(return_types, names, "runner_cost_generated_work_class",
@@ -340,7 +340,7 @@ static void AppendJitEventColumn(Vector &output, idx_t column_id, const Executio
 }
 
 static unique_ptr<FunctionData> DuckDBJitEventsBind(ClientContext &context, TableFunctionBindInput &input,
-                                                    vector<LogicalType> &return_types, vector<string> &names) {
+                                                    vector<LogicalType> &return_types, vector<Identifier> &names) {
 	AddExecutionRegionTableFunctionColumn(return_types, names, "event_id", LogicalType::UBIGINT);
 	AddExecutionRegionTableFunctionColumn(return_types, names, "backend_name", LogicalType::VARCHAR);
 	AddExecutionRegionTableFunctionColumn(return_types, names, "status", LogicalType::VARCHAR);

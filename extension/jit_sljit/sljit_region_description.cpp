@@ -21,16 +21,10 @@ const char *SljitNativeRegionOpKindName(SljitNativeRegionOpKind kind) {
 		return "hash-join-probe";
 	case SljitNativeRegionOpKind::HASH_JOIN_BUILD:
 		return "hash-join-build";
-	case SljitNativeRegionOpKind::NESTED_LOOP_JOIN_PROBE:
-		return "nested-loop-join-probe";
-	case SljitNativeRegionOpKind::NESTED_LOOP_JOIN_BUILD:
-		return "nested-loop-join-build";
 	case SljitNativeRegionOpKind::ORDER_SINK:
 		return "order-sink";
 	case SljitNativeRegionOpKind::APPEND_SINK:
 		return "append-sink";
-	case SljitNativeRegionOpKind::DELIM_JOIN_SINK:
-		return "delim-join-sink";
 	case SljitNativeRegionOpKind::AGGREGATE_UPDATE:
 		return "aggregate-update";
 	default:
@@ -167,41 +161,6 @@ void AppendSljitHashJoinProbeMarkOffsets(string &result, const char *name, const
 	result += ",pointer_offset=" + std::to_string(probe.pointer_offset);
 }
 
-const char *SljitNestedLoopJoinValueKindToString(SljitNativeNestedLoopJoinValueKind kind) {
-	switch (kind) {
-	case SljitNativeNestedLoopJoinValueKind::INT32:
-		return "int32";
-	case SljitNativeNestedLoopJoinValueKind::INT64:
-		return "int64";
-	case SljitNativeNestedLoopJoinValueKind::INT128:
-		return "int128";
-	case SljitNativeNestedLoopJoinValueKind::DOUBLE:
-		return "double";
-	default:
-		return "unknown";
-	}
-}
-
-static string
-DescribeNativeNestedLoopJoinProbeConditions(const vector<SljitNativeNestedLoopJoinProbeConditionPlan> &conditions,
-                                            bool semantic) {
-	string result;
-	for (idx_t condition_idx = 0; condition_idx < conditions.size(); condition_idx++) {
-		if (condition_idx > 0) {
-			result += ",";
-		}
-		auto &condition = conditions[condition_idx];
-		result += "condition" + std::to_string(condition_idx);
-		result += "<kind=" + string(SljitNestedLoopJoinValueKindToString(condition.value_kind));
-		result += ",comparison=" + string(SljitHashJoinComparisonToString(condition.comparison_type));
-		result += ",lhs=" +
-		          (semantic ? DescribeNativeRegionExpressionSemantic(condition.lhs_condition)
-		                    : DescribeNativeRegionExpression(condition.lhs_condition)) +
-		          ">";
-	}
-	return result;
-}
-
 static string DescribeNativeRegionInternal(const SljitNativeRegionPlan &region, const string &mode, bool semantic) {
 	string result = "sljit.region " + mode;
 	for (idx_t op_idx = 0; op_idx < region.ops.size(); op_idx++) {
@@ -252,26 +211,9 @@ static string DescribeNativeRegionInternal(const SljitNativeRegionPlan &region, 
 			result += ";execution=primitive-protocol-build";
 			result += ")";
 			break;
-		case SljitNativeRegionOpKind::NESTED_LOOP_JOIN_PROBE:
-			result += "nested_loop_join_probe(conditions=" +
-			          DescribeNativeNestedLoopJoinProbeConditions(op.nested_loop_join_probe.conditions, semantic);
-			result += ")";
-			break;
-		case SljitNativeRegionOpKind::NESTED_LOOP_JOIN_BUILD:
-			result += "nested_loop_join_build(conditions=" +
-			          (semantic ? DescribeNativeRegionExpressionListSemantic(op.nested_loop_join_build.rhs_conditions)
-			                    : DescribeNativeRegionExpressionList(op.nested_loop_join_build.rhs_conditions));
-			result += ";payload_columns=" + std::to_string(op.nested_loop_join_build.input_types.size());
-			result += ")";
-			break;
 		case SljitNativeRegionOpKind::APPEND_SINK:
 			result += "append_sink(columns=";
 			result += std::to_string(op.append_sink.input_types.size());
-			result += ")";
-			break;
-		case SljitNativeRegionOpKind::DELIM_JOIN_SINK:
-			result += "delim_join_sink(columns=";
-			result += std::to_string(op.delim_join_sink.input_types.size());
 			result += ")";
 			break;
 		case SljitNativeRegionOpKind::AGGREGATE_UPDATE:

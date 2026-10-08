@@ -47,11 +47,11 @@ public:
 
 private:
 	auto NativePipelineExecutor() {
-		return SljitMakeNativePipelineExecutor(kernel, runtime, ops, source_distinct_counts);
+		return SljitMakeNativePipelineExecutor(kernel, runtime, ops);
 	}
 
 	auto NativeTailPipelineExecutor() {
-		return SljitMakeNativeTailPipelineExecutor(kernel, runtime, ops, source_distinct_counts);
+		return SljitMakeNativeTailPipelineExecutor(kernel, runtime, ops);
 	}
 
 	auto RecordedHashJoinProbeExecutor() {

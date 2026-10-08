@@ -14,11 +14,13 @@
 #include "duckdb/execution/operator/order/physical_top_n.hpp"
 #include "duckdb/execution/operator/scan/physical_column_data_scan.hpp"
 #include "duckdb/execution/operator/scan/physical_table_scan.hpp"
+#include "duckdb/execution/operator/set/physical_cte.hpp"
 #include "duckdb/function/aggregate_state.hpp"
 #include "duckdb/function/table/table_scan.hpp"
 #include "duckdb/parser/constraints/not_null_constraint.hpp"
 #include "duckdb/planner/expression/bound_aggregate_expression.hpp"
 #include "duckdb/planner/expression/bound_cast_expression.hpp"
+#include "duckdb/planner/expression/bound_function_expression.hpp"
 #include "duckdb/planner/expression/bound_reference_expression.hpp"
 #include "duckdb/planner/filter/expression_filter.hpp"
 
@@ -69,17 +71,18 @@ static bool ExecutionContractIsWideningSignedIntegerCast(const LogicalType &sour
 }
 
 static LogicalType ExecutionContractHashJoinConditionDomainType(const Expression &expression) {
-	if (expression.GetExpressionClass() != ExpressionClass::BOUND_CAST) {
+	if (!BoundCastExpression::IsCast(expression)) {
 		return expression.GetReturnType();
 	}
-	auto &cast = expression.Cast<BoundCastExpression>();
-	if (cast.IsTryCast() || cast.Child().GetExpressionClass() != ExpressionClass::BOUND_REF) {
+	auto &cast = expression.Cast<BoundFunctionExpression>();
+	auto &child = BoundCastExpression::Child(cast);
+	if (BoundCastExpression::IsTryCast(cast) || child.GetExpressionClass() != ExpressionClass::BOUND_REF) {
 		return expression.GetReturnType();
 	}
-	if (!ExecutionContractIsWideningSignedIntegerCast(cast.Child().GetReturnType(), expression.GetReturnType())) {
+	if (!ExecutionContractIsWideningSignedIntegerCast(child.GetReturnType(), expression.GetReturnType())) {
 		return expression.GetReturnType();
 	}
-	return cast.Child().GetReturnType();
+	return child.GetReturnType();
 }
 
 static string BuildExecutionContractIdxList(const vector<idx_t> &values) {
@@ -851,9 +854,14 @@ static string BuildExecutionContractHashJoinKeyBindingBlocker(const PhysicalHash
 	return string();
 }
 
-static void AddExecutionContractHashJoinRegularLayout(ExecutionRegionHashJoinContract &result) {
+static void AddExecutionContractHashJoinRegularLayout(const PhysicalHashJoin &join,
+                                                      ExecutionRegionHashJoinContract &result) {
+	// Plan against the layout the sink published: dict-surviving narrowing is decided by the build's first chunk, and
+	// probe pipelines are (re)planned once their build dependency has finalized.
+	result.payload_dict_index_widths = join.GetPublishedBuildDictIndexWidths();
 	auto row_layout = BuildExecutionHashJoinRowLayout(result.condition_types, result.payload_types,
-	                                                  ExecutionRegionJoinTypePropagatesBuildSide(result.join_type));
+	                                                  ExecutionRegionJoinTypePropagatesBuildSide(result.join_type),
+	                                                  result.payload_dict_index_widths);
 	result.layout_offsets = row_layout.layout->GetOffsets();
 	result.tuple_size = row_layout.tuple_size;
 	result.pointer_offset = row_layout.pointer_offset;
@@ -866,10 +874,13 @@ static LogicalType ExecutionContractHashJoinLayoutType(const ExecutionRegionHash
 		return contract.condition_types[layout_col];
 	}
 	auto payload_idx = layout_col - contract.condition_types.size();
-	if (payload_idx < contract.payload_types.size()) {
-		return contract.payload_types[payload_idx];
+	if (payload_idx >= contract.payload_types.size()) {
+		return LogicalType::INVALID;
 	}
-	return LogicalType::INVALID;
+	// The layout type is the stored type: a dict-surviving slot stores a dictionary index, not the value.
+	const auto index_width =
+	    contract.payload_dict_index_widths.empty() ? 0 : contract.payload_dict_index_widths[payload_idx];
+	return index_width == 0 ? contract.payload_types[payload_idx] : ExecutionHashJoinDictIndexType(index_width);
 }
 
 static bool RemapExecutionContractExpressionReferences(ExecutionExpressionIR &node,
@@ -1188,7 +1199,7 @@ static ExecutionRegionHashJoinContract BuildExecutionContractHashJoinContract(co
 		result.filter_pushdown_probe_count = join.filter_pushdown->probe_info.size();
 		result.build_side_has_filter = join.filter_pushdown->build_side_has_filter;
 	}
-	AddExecutionContractHashJoinRegularLayout(result);
+	AddExecutionContractHashJoinRegularLayout(join, result);
 	AddExecutionContractHashJoinResidualExpression(join, result);
 	MarkExecutionContractHashJoinNativeContracts(join, result);
 	return result;
@@ -2254,25 +2265,32 @@ ExecutionContract PhysicalTableScan::GetExecutionContract(ExecutionRegionOperato
 	return FinalizeExecutionContract(std::move(result));
 }
 
-ExecutionContract PhysicalColumnDataScan::GetExecutionContract(ExecutionRegionOperatorSlot slot,
-                                                               bool render_diagnostics) const {
+//! A stateful source that hands its native chunks to the source contract unchanged.
+static ExecutionContract BuildExecutionChunkSourceContract(const PhysicalOperator &op, const char *description,
+                                                           bool render_diagnostics) {
 	ExecutionContract result;
-	if (type != PhysicalOperatorType::CTE_SCAN && type != PhysicalOperatorType::COLUMN_DATA_SCAN) {
-		return FinalizeExecutionContract(std::move(result));
-	}
 	result.source.kind = ExecutionRegionSourceKind::STATEFUL_OPERATOR;
 	result.source.execution = ExecutionRegionSourceExecutionKind::SOURCE_CONTRACT;
 	result.source.source_contract = BuildExecutionSourceProtocolContract(result.source.kind, result.source.execution);
-	result.source.function_name = StringUtil::Lower(PhysicalOperatorToString(type));
-	result.source.output_column_count = GetTypes().size();
-	result.source.returned_column_count = GetTypes().size();
+	result.source.function_name = StringUtil::Lower(PhysicalOperatorToString(op.type));
+	result.source.output_column_count = op.GetTypes().size();
+	result.source.returned_column_count = op.GetTypes().size();
 	if (render_diagnostics) {
-		result.source_boundary_reason = "DuckDB column data source contract";
-		result.source_boundary_reason += ";operator=" + PhysicalOperatorToString(type);
+		result.source_boundary_reason = description;
+		result.source_boundary_reason += ";operator=" + PhysicalOperatorToString(op.type);
 		result.source_boundary_reason += ";function=" + result.source.function_name;
 		result.source_boundary_reason += ";output_columns=" + std::to_string(result.source.output_column_count);
 		result.source_boundary_reason += ";returned_columns=" + std::to_string(result.source.returned_column_count);
 	}
+	return result;
+}
+
+ExecutionContract PhysicalColumnDataScan::GetExecutionContract(ExecutionRegionOperatorSlot slot,
+                                                               bool render_diagnostics) const {
+	if (type != PhysicalOperatorType::CTE_SCAN && type != PhysicalOperatorType::COLUMN_DATA_SCAN) {
+		return FinalizeExecutionContract(ExecutionContract());
+	}
+	auto result = BuildExecutionChunkSourceContract(*this, "DuckDB column data source contract", render_diagnostics);
 	if (collection) {
 		result.source.estimated_source_cardinality = collection->Count();
 		result.source.estimated_source_cardinality_exact = true;
@@ -2280,6 +2298,20 @@ ExecutionContract PhysicalColumnDataScan::GetExecutionContract(ExecutionRegionOp
 			result.source_boundary_reason +=
 			    ";column_data_count=" + std::to_string(result.source.estimated_source_cardinality);
 		}
+	}
+	result.source.reason = result.source_boundary_reason;
+	return FinalizeExecutionContract(std::move(result));
+}
+
+ExecutionContract PhysicalCTEConsumerSource::GetExecutionContract(ExecutionRegionOperatorSlot slot,
+                                                                  bool render_diagnostics) const {
+	if (!SupportsExecutionChunkSourceContract()) {
+		return FinalizeExecutionContract(ExecutionContract());
+	}
+	// The exchange is still being produced while it is consumed, so the source cardinality is not exact.
+	auto result = BuildExecutionChunkSourceContract(*this, "DuckDB CTE consumer source contract", render_diagnostics);
+	if (render_diagnostics) {
+		result.source_boundary_reason += ";cte_consumer=" + std::to_string(consumer_idx);
 	}
 	result.source.reason = result.source_boundary_reason;
 	return FinalizeExecutionContract(std::move(result));

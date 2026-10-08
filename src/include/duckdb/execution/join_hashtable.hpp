@@ -21,6 +21,7 @@
 #include "duckdb/execution/aggregate_hashtable.hpp"
 #include "duckdb/execution/ht_entry.hpp"
 #include "duckdb/planner/filter/table_filter_functions.hpp"
+#include "duckdb/planner/joinside.hpp"
 
 namespace duckdb {
 
@@ -61,6 +62,12 @@ private:
    [POINTER]
    [POINTER]
    The pointers are either NULL
+
+   Two-phase lifecycle: the constructor populates only layout-INDEPENDENT state; all layout-DEPENDENT state
+   (layout_ptr, row matchers, tuple_size/pointer_offset/entry_size, data_collection, sink_collection, dead_end,
+   dict_registry) is published by FinishInitWithLayout on the first build chunk, so slot widths can be chosen from
+   the data's actual runtime encoding. Until then the JHT is unusable except for the null-safe Count() /
+   SizeInBytes() accessors; the layout-dependent accessors assert IsLayoutFinalized().
 */
 class JoinHashTable {
 public:
@@ -118,12 +125,17 @@ public:
 		idx_t last_match_count;
 		SelectionVector last_sel_vector;
 
+		// thread-local probe match count, flushed to ht.total_probe_matches once per thread to avoid contention
+		idx_t local_probe_matches = 0;
+
 		explicit ScanStructure(JoinHashTable &ht, TupleDataChunkState &key_state);
 		void Reset();
 		//! Get the next batch of data from the scan structure
 		void Next(DataChunk &keys, DataChunk &probe_data, DataChunk &result);
 		//! Are pointer chains all pointing to NULL?
 		bool PointersExhausted() const;
+		//! Flush the thread-local probe match count into the global counter (idempotent)
+		void FlushProbeMatches();
 
 	private:
 		//! Next operator for the inner join
@@ -222,6 +234,23 @@ public:
 	              optional_ptr<Expression> predicate_ptr = nullptr, const vector<idx_t> &output_in_probe = {});
 	~JoinHashTable();
 
+	//! The canonical row layout [conditions, build payload, (found flag), hash]. A payload column with a non-zero
+	//! dict_index_width stores a dictionary index of that byte width instead of its value. The physical table and the
+	//! execution-region contract both derive their layout from this builder, so their offsets cannot drift.
+	static shared_ptr<TupleDataLayout> BuildRowLayout(const vector<LogicalType> &condition_types,
+	                                                  const vector<LogicalType> &build_types, JoinType join_type,
+	                                                  const vector<uint8_t> &dict_index_width);
+	//! Initialize layout-dependent state from a layout shared across all per-thread JHTs (deferred ctor body)
+	void FinishInitWithLayout(shared_ptr<TupleDataLayout> published_layout, vector<uint8_t> dict_index_width_p = {});
+	//! True iff FinishInitWithLayout has populated layout-dependent state
+	bool IsLayoutFinalized() const {
+		return layout_ptr.get() != nullptr;
+	}
+
+	//! Per-column index-width decision for the dict-surviving optimisation, consulted by the layout publisher on
+	//! the first build chunk. Returns the narrowed index byte width (1/2/4), or 0 to keep native width.
+	uint8_t GetDictSurvivingIndexWidth(idx_t build_col_idx, const Vector &incoming) const;
+
 	//! Add the given data to the HT
 	void Build(PartitionedTupleDataAppendState &append_state, DataChunk &keys, DataChunk &input);
 	void InitializeBuildChunk(DataChunk &source_chunk) const;
@@ -244,10 +273,17 @@ public:
 	//! Finalize must be called before any call to Probe, and after Finalize is called Build should no longer be
 	//! ever called.
 	void Finalize(idx_t chunk_idx_from, idx_t chunk_idx_to, bool parallel,
-	              optional_ptr<PrefixRangeFilter::BuildState> prefix_range_state = nullptr);
+	              optional_ptr<PrefixRangeFilter::BuildState> prefix_range_state = nullptr,
+	              bool prefix_range_parallel = false);
 	//! Probe the HT with the given input chunk, resulting in the given result
 	void Probe(ScanStructure &scan_structure, DataChunk &keys, TupleDataChunkState &key_state, ProbeState &probe_state,
 	           optional_ptr<Vector> precomputed_hashes = nullptr);
+	//! Enable selective NULL refinement for an uncorrelated multi-column MARK join
+	void InitializeUncorrelatedMarkJoin();
+	bool HasUncorrelatedMarkJoin() const;
+	//! Construct a MARK result, including selective UNKNOWN refinement when enabled
+	void ConstructMarkJoinResult(DataChunk &join_keys, DataChunk &probe_data, DataChunk &result,
+	                             optional_ptr<const bool> found_match = nullptr);
 	//! Scan the HT to construct the full outer join result
 	void ScanFullOuter(JoinHTScanState &state, Vector &addresses, DataChunk &result) const;
 
@@ -269,6 +305,10 @@ public:
 	void GatherRHSColumn(Vector &row_ptrs, const SelectionVector &ptr_sel, const idx_t count, idx_t rhs_output_idx,
 	                     Vector &result) const;
 	//! Emit one fixed-width RHS output column into a flat result vector when the caller immediately consumes flat data.
+	//! True iff GatherRHSColumn emits this RHS output column as a global dictionary (same entry on every chunk).
+	//! Every runner materializing this column must preserve that encoding: downstream dict-surviving builds narrow
+	//! their slots on it.
+	bool RHSOutputIsGlobalDictionary(idx_t rhs_output_idx) const;
 	bool TryGatherRHSColumnFlat(Vector &row_ptrs, const SelectionVector &ptr_sel, const idx_t count,
 	                            idx_t rhs_output_idx, Vector &result) const;
 	//! Return a fixed-width RHS output column source that row pointers can resolve without materializing a vector.
@@ -277,7 +317,7 @@ public:
 	template <bool USE_DICT_EMISSION>
 	inline data_ptr_t GetNextPointer(data_ptr_t row_ptr) const {
 		if (USE_DICT_EMISSION) {
-			if (!chains_longer_than_one) {
+			if (!chains_longer_than_one.load(std::memory_order_relaxed)) {
 				// aux_next_ptrs is unallocated in this case
 				return nullptr;
 			}
@@ -287,17 +327,25 @@ public:
 	}
 
 	idx_t Count() const {
-		return data_collection->Count();
+		return data_collection ? data_collection->Count() : 0;
 	}
 	idx_t SizeInBytes() const {
-		return data_collection->SizeInBytes();
+		idx_t size = data_collection ? data_collection->SizeInBytes() : 0;
+		if (mark_join_info.uncorrelated_condition_rows) {
+			size += mark_join_info.uncorrelated_condition_rows->SizeInBytes();
+		}
+		return size;
 	}
 
 	PartitionedTupleData &GetSinkCollection() {
+		// Only valid after FinishInitWithLayout; assert so a premature access fails loudly, not as a null-deref.
+		D_ASSERT(IsLayoutFinalized());
 		return *sink_collection;
 	}
 
 	TupleDataCollection &GetDataCollection() {
+		// Only valid after FinishInitWithLayout (see GetSinkCollection).
+		D_ASSERT(IsLayoutFinalized());
 		return *data_collection;
 	}
 	//! Export a backend-neutral native execution table-layout contract. This is layout/state metadata only;
@@ -348,7 +396,7 @@ public:
 	bool needs_chain_matcher;
 
 	//! If there is more than one element in the chain, we need to scan the next elements of the chain
-	bool chains_longer_than_one;
+	atomic<bool> chains_longer_than_one {false};
 
 	//! The capacity of the HT. Is the same as hash_map.GetSize() / sizeof(ht_entry_t)
 	idx_t capacity = DConstants::INVALID_INDEX;
@@ -389,6 +437,12 @@ public:
 	bool use_dict_emission = false;
 	//! Pre-materialized columnar data, one entry per RHS output column
 	vector<buffer_ptr<DictionaryEntry>> dict_arrays;
+	//! Per build payload column: pinned upstream dict entry. Non-null means the row store carries a narrow dict
+	//! index for this column instead of the native value.
+	vector<buffer_ptr<DictionaryEntry>> dict_registry;
+	//! Per build payload column: byte width of the narrowed dict-index slot (0 = native, else 1/2/4). Parallel to
+	//! build_types; set by FinishInitWithLayout.
+	vector<uint8_t> dict_index_width;
 	//! Saved NEXT_PTR values, indexed by dict index; only allocated when chains_longer_than_one
 	AllocatedData aux_next_ptrs;
 	//! Typed pointer into aux_next_ptrs; set by BuildDictionaryArrays alongside the allocation
@@ -414,7 +468,11 @@ public:
 		DataChunk correlated_payload;
 		//! Result chunk used for aggregating into correlated_counts
 		DataChunk result_chunk;
-	} correlated_mark_join_info;
+		//! Whether an RHS condition can produce UNKNOWN during equality comparison
+		bool uncorrelated_has_null = false;
+		//! All RHS condition rows, used only for uncorrelated row equality NULL refinement
+		unique_ptr<ColumnDataCollection> uncorrelated_condition_rows;
+	} mark_join_info;
 
 private:
 	void InitializeScanStructure(ScanStructure &scan_structure, DataChunk &keys, TupleDataChunkState &key_state,
@@ -477,7 +535,6 @@ private:
 	idx_t bloom_filter_init_count = 0;
 
 	unique_ptr<PrefixRangeFilter> prefix_range_filter;
-	LogicalType prefix_range_filter_key_type;
 	bool should_build_prefix_range_filter = false;
 	shared_ptr<ExecutionRuntimeFilterIdentity> runtime_filter_identity;
 
@@ -561,7 +618,6 @@ public:
 	void SetBuildBloomFilter(const bool should_build) {
 		this->should_build_bloom_filter = should_build;
 	}
-	void PrepareBuildBloomFilter(idx_t estimated_row_count);
 	void PrepareBloomFilterForFinalize();
 	void EnsureBloomFilterForProbe();
 	void MarkFinalized();
@@ -570,9 +626,8 @@ public:
 		return bloom_filter;
 	}
 
-	void SetPrefixRangeFilter(unique_ptr<PrefixRangeFilter> filter, LogicalType filter_key_type) {
+	void SetPrefixRangeFilter(unique_ptr<PrefixRangeFilter> filter) {
 		prefix_range_filter = std::move(filter);
-		prefix_range_filter_key_type = std::move(filter_key_type);
 	}
 
 	void SetBuildPrefixRangeFilter() {
@@ -583,9 +638,6 @@ public:
 		return prefix_range_filter;
 	}
 
-	const LogicalType &GetPrefixRangeFilterKeyType() const {
-		return prefix_range_filter_key_type;
-	}
 	const shared_ptr<ExecutionRuntimeFilterIdentity> &GetRuntimeFilterIdentity() const {
 		return runtime_filter_identity;
 	}
@@ -594,8 +646,11 @@ public:
 		return should_build_prefix_range_filter && prefix_range_filter;
 	}
 
+	void BuildPrefixRangeFilter();
 	unique_ptr<PrefixRangeFilter::BuildState> InitializePrefixRangeBuildState();
-	void InsertPrefixRangeChunk(TupleDataChunkState &chunk_state, idx_t count, PrefixRangeFilter::BuildState &state);
+	idx_t GetPrefixRangeBuildStateSize() const;
+	void InsertPrefixRangeChunk(TupleDataChunkState &chunk_state, idx_t count, PrefixRangeFilter::BuildState &state,
+	                            bool parallel = false);
 	void MergePrefixRangeBuildState(PrefixRangeFilter::BuildState &state);
 
 	//! Get total size of HT if all partitions would be built
@@ -631,6 +686,13 @@ public:
 	void ProbeAndSpill(ScanStructure &scan_structure, DataChunk &probe_keys, TupleDataChunkState &key_state,
 	                   ProbeState &probe_state, DataChunk &probe_chunk, ProbeSpill &probe_spill,
 	                   ProbeSpillLocalAppendState &spill_state, DataChunk &spill_chunk);
+
+private:
+	//! True iff the residual predicate (if any) reads build payload column build_col_idx from its row slot
+	bool ColumnReferencedByResidual(idx_t build_col_idx) const;
+	//! Validate the incoming dict chunk and pin a self-owned copy of its dictionary into dict_registry on the first
+	//! chunk; on later chunks assert id continuity. Called per narrowed column from Build.
+	void PinDictSurvivingColumn(idx_t build_col_idx, const Vector &incoming, uint8_t index_width);
 
 private:
 	//! The current number of radix bits used to partition

@@ -14,7 +14,6 @@
 #include "sljit_hash_join_matched_row_batch_consumer_runtime.hpp"
 #include "sljit_hash_join_probe_execution_contract.hpp"
 #include "sljit_hash_join_probe_input_filter_runtime.hpp"
-#include "sljit_hash_join_probe_ungrouped_aggregate_consumer_runtime.hpp"
 #include "sljit_join_input_row_pointer_complementary_sum_runtime.hpp"
 #include "sljit_native_binding_runtime.hpp"
 #include "sljit_region_runtime_trace.hpp"
@@ -848,25 +847,6 @@ SljitHashJoinAggregateConsumerResult SljitTryExecuteHashJoinAggregateConsumer(
 		// membership filter. Let the normal probe path consume that proof and
 		// avoid redundant hash-table lookups before aggregation.
 		return result;
-	}
-	if (regular_hash_join) {
-		auto &layout = probe.table_layout;
-		SljitHashJoinProbeDrainState direct_state;
-		auto direct_input = SljitPrepareRegularHashJoinProbeInput(
-		    runtime, hash_join_idx, hash_join_op.kind, plan, layout, probe_input,
-		    scratch.FilterSelection(hash_join_idx), scratch.HashJoinRowPointers(hash_join_idx),
-		    scratch.HashJoinSources(hash_join_idx), direct_state, table_layout_kind,
-		    probe_primitive.source_key0_int64_to_int32_unchecked, rhs_keys_have_null, probe.use_bloom_filter);
-		if (direct_input.input_kind != SljitHashJoinProbeInputKind::GENERIC) {
-			if (SljitTryExecuteHashJoinDirectUngroupedAggregateConsumer(
-			        runtime, native_runtime, scratch, hash_join_idx, hash_join_op, plan, direct_input.native_input,
-			        direct_input.input_kind == SljitHashJoinProbeInputKind::SELECTED_ALL_VALID, strategy, aggregate_op,
-			        probe_input, result.matched_count)) {
-				runtime.RecordHashJoinProbeLayout(SljitHashJoinProbeLayoutName(probe.layout_kind));
-				result.status = SljitHashJoinAggregateConsumerStatus::EXECUTED;
-				return result;
-			}
-		}
 	}
 	SljitPreparedJoinInputComplementarySumUpdate prepared_aggregate;
 	string aggregate_failure;

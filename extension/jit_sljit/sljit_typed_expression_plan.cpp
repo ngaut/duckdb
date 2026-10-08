@@ -13,22 +13,28 @@
 
 namespace duckdb {
 
+static bool SljitTypedExpressionTreeIsRegisterDecimalNode(const ExecutionExpressionIR &node) {
+	return SljitTypedExpressionTreeIsDecimal64Node(node) || SljitTypedExpressionTreeIsNarrowDecimal128Node(node);
+}
+
 static bool SljitTypedExpressionTreeIsArithmeticNode(const ExecutionExpressionIR &node) {
-	return SljitTypedExpressionTreeIsIntegerNode(node) || SljitTypedExpressionTreeIsDecimal64Node(node);
+	return SljitTypedExpressionTreeIsIntegerNode(node) || SljitTypedExpressionTreeIsRegisterDecimalNode(node);
 }
 
 static bool SljitTypedExpressionTreeSameArithmeticKind(const ExecutionExpressionIR &left,
                                                        const ExecutionExpressionIR &right) {
 	return SljitTypedExpressionTreeSameIntegerKind(left, right) ||
-	       (SljitTypedExpressionTreeIsDecimal64Node(left) && SljitTypedExpressionTreeIsDecimal64Node(right));
+	       (SljitTypedExpressionTreeIsDecimal64Node(left) && SljitTypedExpressionTreeIsDecimal64Node(right)) ||
+	       (SljitTypedExpressionTreeIsNarrowDecimal128Node(left) &&
+	        SljitTypedExpressionTreeIsNarrowDecimal128Node(right));
 }
 
-static bool SljitTypedExpressionTreeDecimal64BinaryHasRawSemantics(const ExecutionExpressionIR &node) {
+static bool SljitTypedExpressionTreeDecimalBinaryHasRawSemantics(const ExecutionExpressionIR &node) {
 	if (!node.left || !node.right) {
 		return false;
 	}
-	const auto left_decimal = SljitTypedExpressionTreeIsDecimal64Node(*node.left);
-	const auto right_decimal = SljitTypedExpressionTreeIsDecimal64Node(*node.right);
+	const auto left_decimal = SljitTypedExpressionTreeIsRegisterDecimalNode(*node.left);
+	const auto right_decimal = SljitTypedExpressionTreeIsRegisterDecimalNode(*node.right);
 	if (!left_decimal && !right_decimal) {
 		return true;
 	}
@@ -38,6 +44,10 @@ static bool SljitTypedExpressionTreeDecimal64BinaryHasRawSemantics(const Executi
 	switch (node.binary_op) {
 	case ExecutionExpressionBinaryOp::ADD:
 	case ExecutionExpressionBinaryOp::SUBTRACT: {
+		// A narrow DECIMAL128 sum is admitted together with its same-scale magnitude proof.
+		if (SljitTypedExpressionTreeIsNarrowDecimal128Node(node)) {
+			return true;
+		}
 		int64_t result_min;
 		int64_t result_max;
 		return SljitTypedExpressionTreeIsDecimal64Node(node) &&
@@ -128,11 +138,6 @@ static bool SljitTypedExpressionTreeIntegralCompressSupported(const ExecutionExp
 	       !minimum.constant.IsNull() && SljitTypedExpressionTreeSameIntegerKind(source, minimum);
 }
 
-static bool SljitTypedExpressionTreeCastExceptionBehaviorIsSafe(const ExecutionExpressionIR &node) {
-	return !node.try_cast && node.exception_behavior != ExecutionExpressionExceptionKind::NULL_ON_CAST_ERROR &&
-	       node.exception_behavior != ExecutionExpressionExceptionKind::ERROR;
-}
-
 static bool SljitTypedExpressionTreeInt64CastLogic(const ExecutionExpressionIR &node) {
 	return node.kind == ExecutionExpressionIRKind::CAST && SljitTypedExpressionTreeCastExceptionBehaviorIsSafe(node) &&
 	       SljitTypedExpressionTreeIsInt64Node(node) && node.left &&
@@ -167,9 +172,17 @@ static bool SljitTypedExpressionTreeInt32ToDecimal64ScaleZeroCastLogic(const Exe
 	       SljitTypedExpressionTreeIsSupported(*node.left);
 }
 
+static bool SljitTypedExpressionTreeNarrowDecimal128CastLogic(const ExecutionExpressionIR &node) {
+	// A same-scale cast into a narrow DECIMAL128 (the binder's DECIMAL64 -> DECIMAL128 widening for +/-) keeps the
+	// exact value, proven to fit INT64, in its 64-bit register, so it is a passthrough that cannot round or overflow.
+	return node.kind == ExecutionExpressionIRKind::CAST && node.left &&
+	       SljitTypedExpressionTreeIsNarrowDecimal128Node(node) && SljitTypedExpressionTreeIsSupported(*node.left);
+}
+
 bool SljitTypedExpressionTreeValueCastSupported(const ExecutionExpressionIR &node) {
 	return SljitTypedExpressionTreeInt64CastLogic(node) || SljitTypedExpressionTreeDecimal64WideningCastLogic(node) ||
-	       SljitTypedExpressionTreeInt32ToDecimal64ScaleZeroCastLogic(node);
+	       SljitTypedExpressionTreeInt32ToDecimal64ScaleZeroCastLogic(node) ||
+	       SljitTypedExpressionTreeNarrowDecimal128CastLogic(node);
 }
 
 bool SljitTypedExpressionTreeConstantDivisorReductionSupported(const ExecutionExpressionIR &node) {
@@ -237,7 +250,7 @@ bool SljitTypedExpressionTreeIsSupported(const ExecutionExpressionIR &node) {
 		if (SljitTypedExpressionTreeComparisonSupported(node.binary_op)) {
 			return SljitTypedExpressionTreeIsBoolNode(node) &&
 			       SljitTypedExpressionTreeSameArithmeticKind(*node.left, *node.right) &&
-			       SljitTypedExpressionTreeDecimal64BinaryHasRawSemantics(node) &&
+			       SljitTypedExpressionTreeDecimalBinaryHasRawSemantics(node) &&
 			       SljitTypedExpressionTreeIsSupported(*node.left) && SljitTypedExpressionTreeIsSupported(*node.right);
 		}
 		if (SljitTypedExpressionTreeConstantDivisorReductionSupported(node)) {
@@ -247,7 +260,7 @@ bool SljitTypedExpressionTreeIsSupported(const ExecutionExpressionIR &node) {
 		       SljitTypedExpressionTreeSameArithmeticKind(node, *node.left) &&
 		       SljitTypedExpressionTreeSameArithmeticKind(node, *node.right) &&
 		       SljitExpressionTreeBinaryOpSupported(node.binary_op) &&
-		       SljitTypedExpressionTreeDecimal64BinaryHasRawSemantics(node) &&
+		       SljitTypedExpressionTreeDecimalBinaryHasRawSemantics(node) &&
 		       SljitTypedExpressionTreeIsSupported(*node.left) && SljitTypedExpressionTreeIsSupported(*node.right);
 	case ExecutionExpressionIRKind::CONJUNCTION:
 		if (!SljitTypedExpressionTreeIsBoolNode(node) || node.children.empty()) {
@@ -303,9 +316,6 @@ bool SljitTypedExpressionTreeInt64CastSupported(const ExecutionExpressionIR &nod
 }
 
 bool SljitTypedExpressionTreeFastPathSupported(const ExecutionExpressionIR &node) {
-	if (SljitTypedExpressionTreeValueCastSupported(node)) {
-		return true;
-	}
 	if (node.kind == ExecutionExpressionIRKind::INTRINSIC) {
 		idx_t source_index;
 		string prefix;
@@ -366,7 +376,8 @@ SljitTypedExpressionTreePlan BuildSljitTypedExpressionTreePlan(const ExecutionEx
 		return result;
 	}
 	result.result_is_bool = SljitTypedExpressionTreeIsBoolNode(root);
-	result.result_is_int64 = SljitTypedExpressionTreeIsInt64Node(root) || SljitTypedExpressionTreeIsDecimal64Node(root);
+	result.result_is_int64 =
+	    SljitTypedExpressionTreeIsInt64Node(root) || SljitTypedExpressionTreeIsRegisterDecimalNode(root);
 	result.node_count = CountSljitTypedExpressionTreeNodes(root);
 	result.fast_path = BuildSljitTypedExpressionTreeFastPathPlan(root, emit_flat_nullable_fast_path);
 	return result;

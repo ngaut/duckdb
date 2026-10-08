@@ -123,12 +123,11 @@ static bool SljitSourceFilterValueAsDouble(const LogicalType &type, const Value 
 		result = static_cast<double>(value.GetValue<date_t>().days);
 		return true;
 	}
-	Value double_value;
-	string error;
-	if (!value.DefaultTryCastAs(LogicalType::DOUBLE, double_value, &error) || double_value.IsNull()) {
+	auto double_value = value.DefaultTryCastAs(LogicalType::DOUBLE);
+	if (!double_value || double_value->IsNull()) {
 		return false;
 	}
-	result = double_value.GetValue<double>();
+	result = double_value->GetValue<double>();
 	return true;
 }
 

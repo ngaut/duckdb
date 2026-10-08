@@ -47,18 +47,10 @@ bool TryReadNativeRegionExpression(const ExecutionExpressionIR &root, bool requi
 		return true;
 	}
 
-	if (TryReadNativeRegionPredicateExpression(root, expr)) {
+	if (TryReadNativeRegionPredicateExpression(root, require_boolean, expr)) {
 		if (expr.kind == SljitNativeRegionExpressionKind::PREDICATE) {
 			AttachSljitNativeExpressionTree(root, expr);
 		}
-		return true;
-	}
-
-	SljitNativeConstantOrNull constant_or_null;
-	if (!require_boolean && TryReadNativeConstantOrNull(root, constant_or_null)) {
-		expr.kind = SljitNativeRegionExpressionKind::CONSTANT_OR_NULL;
-		expr.return_type = root.return_type;
-		expr.constant_or_null = std::move(constant_or_null);
 		return true;
 	}
 
@@ -236,10 +228,7 @@ bool TryReadNativeRegionExpression(const ExecutionExpressionIR &root, bool requi
 		AttachSljitNativeExpressionTree(root, expr);
 		return true;
 	}
-	if (TryBuildSljitNativeAnyExpressionTreePlan(root, expr)) {
-		return true;
-	}
-	return false;
+	return TryBuildSljitNativeTypedExpressionTreePlan(root, expr);
 }
 
 bool TryLowerNativeRegionExpression(const ExecutionExpressionFragment &fragment, bool require_boolean,
@@ -267,7 +256,7 @@ bool TryLowerNativeRegionExpression(const ExecutionExpressionFragment &fragment,
 	}
 	if (!require_boolean && !expr.expression_tree) {
 		SljitNativeRegionExpressionPlan expression_tree;
-		if (TryBuildSljitNativeAnyExpressionTreePlan(*fragment.root, expression_tree)) {
+		if (TryBuildSljitNativeTypedExpressionTreePlan(*fragment.root, expression_tree)) {
 			expr.expression_tree = std::move(expression_tree.expression_tree);
 			expr.expression_tree_source_indices = std::move(expression_tree.expression_tree_source_indices);
 		}

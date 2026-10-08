@@ -164,7 +164,6 @@ static void SljitExecutePrimitiveAggregatePayloadUpdate(SljitExecutableRegionExp
 		native_input.source_double_scale = plan.double_source_scale;
 		native_input.right_source_double_scale = plan.double_right_source_scale;
 		break;
-	case SljitNativeRegionExpressionKind::EXPRESSION_TREE:
 	case SljitNativeRegionExpressionKind::TYPED_EXPRESSION_TREE: {
 		if (!plan.expression_tree) {
 			throw InternalException("SLJIT aggregate primitive expression-tree payload is missing IR");

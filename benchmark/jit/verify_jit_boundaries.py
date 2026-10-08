@@ -259,16 +259,15 @@ def verify_backend_and_platform_abi() -> None:
             "class DUCKDB_API ExecutionRegionBackend",
             "EXECUTION_REGION_BACKEND_ABI_VERSION",
             "uint64_t backend_abi_version",
-            "EXECUTION_REGION_BACKEND_ABI_VERSION = 9",
+            "EXECUTION_REGION_BACKEND_ABI_VERSION = 10",
         ),
     )
     require_text(
         "src/include/duckdb/execution/execution_hash_join_runtime.hpp",
-        "perfect-hash table and scan-filter views must share one membership layout",
+        "perfect-hash table bindings must extend the published membership layout",
         (
             "struct ExecutionPerfectHashJoinMembershipLayout",
             "struct ExecutionPerfectHashJoinTableLayout : public ExecutionPerfectHashJoinMembershipLayout",
-            "struct ExecutionPerfectHashJoinFilterLayout : public ExecutionPerfectHashJoinMembershipLayout",
         ),
     )
     require_regex_count(

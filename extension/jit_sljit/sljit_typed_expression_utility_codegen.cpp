@@ -11,6 +11,7 @@
 
 #include "duckdb/common/exception.hpp"
 #include "duckdb/common/helper.hpp"
+#include "duckdb/common/types/hugeint.hpp"
 
 namespace duckdb {
 
@@ -51,6 +52,14 @@ int64_t SljitTypedExpressionTreeConstantValue(const ExecutionExpressionIR &node)
 	}
 	if (SljitTypedExpressionTreeIsInt32Node(node)) {
 		return node.constant.GetValueUnsafe<int32_t>();
+	}
+	if (SljitTypedExpressionTreeIsNarrowDecimal128Node(node)) {
+		// The narrow-DECIMAL128 plan proved |value| <= INT64_MAX, so the hugeint payload narrows exactly.
+		int64_t value;
+		if (!Hugeint::TryCast<int64_t>(node.constant.GetValueUnsafe<hugeint_t>(), value)) {
+			throw InternalException("SLJIT narrow DECIMAL128 constant does not fit INT64");
+		}
+		return value;
 	}
 	return node.constant.GetValueUnsafe<int64_t>();
 }

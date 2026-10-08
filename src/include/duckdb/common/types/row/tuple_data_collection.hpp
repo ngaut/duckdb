@@ -9,11 +9,11 @@
 #pragma once
 
 #include "duckdb/common/types/row/tuple_data_layout.hpp"
-#include "duckdb/common/types/row/tuple_data_row_location_remap.hpp"
 #include "duckdb/common/types/row/tuple_data_segment.hpp"
 #include "duckdb/common/types/row/tuple_data_states.hpp"
 
 namespace duckdb {
+class TaskScheduler;
 
 class TupleDataAllocator;
 struct TupleDataScatterFunction;
@@ -60,7 +60,7 @@ class TupleDataCollection {
 public:
 	//! Constructs a TupleDataCollection with the specified layout
 	TupleDataCollection(BufferManager &buffer_manager, shared_ptr<TupleDataLayout> layout_ptr, MemoryTag tag,
-	                    shared_ptr<ArenaAllocator> stl_allocator = nullptr);
+	                    shared_ptr<ArenaAllocator> stl_allocator = nullptr, QueryContext context = QueryContext());
 	TupleDataCollection(ClientContext &context, shared_ptr<TupleDataLayout> layout_ptr, MemoryTag tag,
 	                    shared_ptr<ArenaAllocator> stl_allocator = nullptr);
 
@@ -166,7 +166,7 @@ public:
 	             const SelectionVector &append_sel, const idx_t append_count) const;
 	//! Copy rows from input to the built Chunk state
 	void CopyRows(TupleDataChunkState &chunk_state, TupleDataChunkState &input, const SelectionVector &append_sel,
-	              const idx_t append_count, optional_ptr<TupleDataRowLocationRemap> row_location_remap = nullptr) const;
+	              const idx_t append_count) const;
 	//! Finds the heap pointers of the rows in the given Chunk state
 	void FindHeapPointers(TupleDataChunkState &chunk_state, const idx_t chunk_count) const;
 

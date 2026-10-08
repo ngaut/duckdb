@@ -18,13 +18,13 @@ namespace duckdb {
 
 enum class TableFilterExecutionMode : uint8_t { FILTER_AND_PRUNE, PRUNE_ONLY };
 
-//! The filters in here are non-composite (only need a single column to be evaluated)
-//! Conditions like `A = 2 OR B = 4` are not pushed into a TableFilterSet.
 class TableFilterSet {
 public:
 	void PushFilter(ProjectionIndex col_idx, unique_ptr<TableFilter> filter);
+	void PushMultiColumnFilter(unique_ptr<TableFilter> filter);
 	bool HasFilters() const;
 	idx_t FilterCount() const;
+	bool HasMultiColumnFilters() const;
 	bool HasFilter(ProjectionIndex col_idx) const;
 	TableFilter &GetFilterByColumnIndexMutable(ProjectionIndex col_idx);
 	optional_ptr<TableFilter> TryGetFilterByColumnIndexMutable(ProjectionIndex col_idx);
@@ -33,6 +33,7 @@ public:
 	void SetFilterByColumnIndex(ProjectionIndex col_idx, unique_ptr<TableFilter> filter);
 	void RemoveFilterByColumnIndex(ProjectionIndex col_idx);
 	void ClearFilters();
+	const vector<unique_ptr<TableFilter>> &GetMultiColumnFilters() const;
 
 	bool Equals(TableFilterSet &other);
 	static bool Equals(TableFilterSet *left, TableFilterSet *right);
@@ -111,6 +112,7 @@ public:
 
 private:
 	map<ProjectionIndex, unique_ptr<TableFilter>> filters;
+	vector<unique_ptr<TableFilter>> multi_column_filters;
 };
 
 class DynamicTableFilterSet {

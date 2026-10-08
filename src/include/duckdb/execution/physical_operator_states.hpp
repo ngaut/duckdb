@@ -8,14 +8,12 @@
 
 #pragma once
 
-#include "duckdb/catalog/catalog.hpp"
 #include "duckdb/common/common.hpp"
 #include "duckdb/common/enums/operator_result_type.hpp"
 #include "duckdb/common/enums/physical_operator_type.hpp"
 #include "duckdb/common/optional_ptr.hpp"
 #include "duckdb/common/types/data_chunk.hpp"
 #include "duckdb/execution/execution_context.hpp"
-#include "duckdb/optimizer/join_order/join_node.hpp"
 #include "duckdb/parallel/interrupt.hpp"
 #include "duckdb/execution/partition_info.hpp"
 
@@ -43,9 +41,6 @@ public:
 	}
 
 	virtual void Reset() {
-	}
-
-	virtual void DisableCaching() {
 	}
 
 	template <class TARGET>
@@ -207,6 +202,7 @@ struct OperatorSourceInput {
 	GlobalSourceState &global_state;
 	LocalSourceState &local_state;
 	InterruptState &interrupt_state;
+	SourceBatchIndexState batch_index_state = SourceBatchIndexState::UNCHANGED;
 	optional_ptr<ExecutionOperatorStageRecorder> stage_recorder;
 	//! Execution-region source contract: when set, the source must not claim a new
 	//! row group; it drains the current one and then reports declined_new_row_group,

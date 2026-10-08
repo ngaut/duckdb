@@ -81,10 +81,6 @@ static inline sljit_s32 NativeDirectFloatingMemoryAlignment(bool single_precisio
 	return single_precision ? SLJIT_MEM_ALIGNED_16 : SLJIT_MEM_ALIGNED_32;
 }
 
-static inline sljit_sw NativeDirectFloatingDataScale(bool single_precision) {
-	return single_precision ? 2 : 3;
-}
-
 static inline sljit_sw NativeDirectFloatingDataWidth(bool single_precision) {
 	return single_precision ? NumericCast<sljit_sw>(sizeof(float)) : NumericCast<sljit_sw>(sizeof(double));
 }

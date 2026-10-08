@@ -131,12 +131,6 @@ void EmitLoadSljitExpressionTreeLogicalIndex(struct sljit_compiler *compiler);
 void EmitLoadSljitExpressionTreeSourceIndex(struct sljit_compiler *compiler, idx_t source_index, sljit_s32 target);
 sljit_jump *EmitJumpIfSljitExpressionTreeSourceNull(struct sljit_compiler *compiler, idx_t source_index);
 sljit_jump *EmitJumpIfSljitExpressionTreeFlatSourceNull(struct sljit_compiler *compiler, idx_t source_index);
-bool SljitExpressionTreeIsSupported(const ExecutionExpressionIR &node);
-idx_t CountSljitExpressionTreeSpills(const ExecutionExpressionIR &node);
-void CollectSljitExpressionTreeSourceRefs(const ExecutionExpressionIR &node, vector<idx_t> &refs);
-void EmitSljitExpressionTreeValue(struct sljit_compiler *compiler, const ExecutionExpressionIR &node, sljit_s32 target,
-                                  idx_t &spill_index, vector<SljitExpressionTreeOverflowJumps> &overflows,
-                                  bool flat_index = false);
 void EmitSljitExpressionTreeOverflowCall(struct sljit_compiler *compiler, SljitNativeIntegerBinaryOp op);
 void EmitSljitAggregateExpressionTreeOverflowCall(struct sljit_compiler *compiler, SljitNativeIntegerBinaryOp op);
 

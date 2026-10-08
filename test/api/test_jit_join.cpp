@@ -196,40 +196,54 @@ TEST_CASE("JIT executes exact-filter probe to hash-build primitive sequences", "
 	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_exact_build_fact AS "
 	                          "SELECT (i % 50000)::INTEGER AS filter_key, i::BIGINT AS join_key "
 	                          "FROM range(200000) tbl(i)"));
-	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_exact_build_filter AS "
+	// The wide filter keys span the fact's whole filter_key domain [0, 49999], so join statistics derive no fact-scan
+	// filter and the exact-filter probe feeds the hash build without any generated code.
+	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_exact_build_wide_filter AS "
+	                          "SELECT i::INTEGER AS filter_key FROM range(499) tbl(i) UNION ALL SELECT 49999"));
+	// The narrow filter keys make join statistics add `filter_key <= 499` to the fact scan, which leads the region as
+	// a generated selection-only filter ahead of the same probe-to-build primitives.
+	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_exact_build_narrow_filter AS "
 	                          "SELECT i::INTEGER AS filter_key FROM range(500) tbl(i)"));
 	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_exact_build_probe AS "
 	                          "SELECT i::BIGINT AS join_key FROM range(200000) tbl(i)"));
 
-	ClearJitTrace(manager, true);
-	auto result = con.Query("SELECT count(*) FROM jit_exact_build_probe p JOIN ("
-	                        "  SELECT f.join_key FROM jit_exact_build_fact f "
-	                        "  JOIN jit_exact_build_filter d USING (filter_key)"
-	                        ") selected USING (join_key)");
-	REQUIRE_NO_FAIL(*result);
-	REQUIRE(result->GetValue(0, 0).ToString() == "2000");
+	auto run_exact_filter_build = [&](const string &filter_table, bool expect_generated_source_filter) {
+		ClearJitTrace(manager, true);
+		auto result = con.Query("SELECT count(*) FROM jit_exact_build_probe p JOIN ("
+		                        "  SELECT f.join_key FROM jit_exact_build_fact f "
+		                        "  JOIN " +
+		                        filter_table +
+		                        " d USING (filter_key)"
+		                        ") selected USING (join_key)");
+		REQUIRE_NO_FAIL(*result);
+		REQUIRE(result->GetValue(0, 0).ToString() == "2000");
 
-	bool found_primitive_compile = false;
-	bool found_primitive_runtime = false;
-	for (auto &event : manager.GetEvents()) {
-		if (IsCompiledSljitRegionEvent(event) && event.has_candidate &&
-		    event.candidate_traits.sink_kind == ExecutionRegionSinkKind::HASH_JOIN_BUILD &&
-		    event.candidate_traits.hash_join_operator_count == 1 && event.selected_uses_scan_filters &&
-		    StringUtil::Contains(event.reason, "exact_filter_proof_count=1")) {
-			found_primitive_compile = true;
-			REQUIRE(event.code_size == 0);
+		bool found_primitive_compile = false;
+		bool found_primitive_runtime = false;
+		for (auto &event : manager.GetEvents()) {
+			if (IsCompiledSljitRegionEvent(event) && event.has_candidate &&
+			    event.candidate_traits.sink_kind == ExecutionRegionSinkKind::HASH_JOIN_BUILD &&
+			    event.candidate_traits.hash_join_operator_count == 1 && event.selected_uses_scan_filters &&
+			    StringUtil::Contains(event.reason, "exact_filter_proof_count=1")) {
+				found_primitive_compile = true;
+				REQUIRE((event.code_size > 0) == expect_generated_source_filter);
+			}
+			if (EventPhase(event) == "runtime" && EventStatus(event) == "executed" &&
+			    StringUtil::Contains(EventJitRuntimePathCounts(event),
+			                         "hash_join_probe.perfect_probe.exact_source_filter=") &&
+			    StringUtil::Contains(EventJitRuntimePathCounts(event), "hash_join_build.selected_required_sources=")) {
+				found_primitive_runtime = true;
+				REQUIRE(StringUtil::Contains(EventJitRuntimePathCounts(event), "filter.selection.") ==
+				        expect_generated_source_filter);
+				REQUIRE(StringUtil::Contains(EventJitRuntimeProofCounts(event), "generated_backend_work="));
+				REQUIRE(EventJitRuntimeDelegationCounts(event).empty());
+			}
 		}
-		if (EventPhase(event) == "runtime" && EventStatus(event) == "executed" &&
-		    StringUtil::Contains(EventJitRuntimePathCounts(event),
-		                         "hash_join_probe.perfect_probe.exact_source_filter=") &&
-		    StringUtil::Contains(EventJitRuntimePathCounts(event), "hash_join_build.selected_required_sources=")) {
-			found_primitive_runtime = true;
-			REQUIRE(StringUtil::Contains(EventJitRuntimeProofCounts(event), "generated_backend_work="));
-			REQUIRE(EventJitRuntimeDelegationCounts(event).empty());
-		}
-	}
-	REQUIRE(found_primitive_compile);
-	REQUIRE(found_primitive_runtime);
+		REQUIRE(found_primitive_compile);
+		REQUIRE(found_primitive_runtime);
+	};
+	run_exact_filter_build("jit_exact_build_wide_filter", false);
+	run_exact_filter_build("jit_exact_build_narrow_filter", true);
 }
 
 TEST_CASE("JIT composes exact regular-prefix probes with projected hash builds", "[api][jit]") {
@@ -243,8 +257,10 @@ TEST_CASE("JIT composes exact regular-prefix probes with projected hash builds",
 	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_regular_exact_build_fact AS "
 	                          "SELECT i::BIGINT AS filter_key, i::BIGINT AS join_key, "
 	                          "       (i % 97)::BIGINT AS payload FROM range(2100000) tbl(i)"));
+	// The filter build must stay above 1/100 of the probe rows: a smaller build makes DuckDB emit its RHS outputs as
+	// a global dictionary that the downstream hash build may narrow, which the exact alias must never replace.
 	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_regular_exact_build_filter AS "
-	                          "SELECT (i * 500)::BIGINT AS filter_key FROM range(4096) tbl(i)"));
+	                          "SELECT (i * 60)::BIGINT AS filter_key FROM range(32768) tbl(i)"));
 	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_regular_exact_build_probe AS "
 	                          "SELECT i::BIGINT AS join_key FROM range(2100000) tbl(i)"));
 
@@ -271,9 +287,10 @@ TEST_CASE("JIT composes exact regular-prefix probes with projected hash builds",
 			    return false;
 		    }
 		    const auto paths = EventJitRuntimePathCounts(event);
+		    // Compressed materialization casts the build keys, so the projection is computed over the full output.
 		    return StringUtil::Contains(paths, "hash_join_probe.regular_probe.exact_source_filter=") &&
 		           (StringUtil::Contains(paths, "hash_join_probe.projected_hash_build_views=") ||
-		            StringUtil::Contains(paths, "hash_join_probe.projected_hash_build_outputs="));
+		            StringUtil::Contains(paths, "hash_join_probe.projected_hash_build_full_output="));
 	    },
 	    [](const ExecutionRegionEvent &event) {
 		    REQUIRE(EventExecutionMode(event) == "native");
@@ -282,10 +299,9 @@ TEST_CASE("JIT composes exact regular-prefix probes with projected hash builds",
 	    });
 }
 
-TEST_CASE("JIT reduces regular hash matches directly from row and dictionary RHS storage", "[api][jit]") {
+TEST_CASE("JIT join ungrouped aggregates over row and dictionary RHS storage match DuckDB", "[api][jit]") {
 	DuckDB db;
 	Connection con(db);
-	auto &manager = ExecutionRegionManager::Get(*con.context);
 
 	ConfigureSljitForCoverage(con, false, false, true, 10000, 4);
 	REQUIRE_NO_FAIL(con.Query("SET perfect_ht_threshold=0"));
@@ -304,59 +320,32 @@ TEST_CASE("JIT reduces regular hash matches directly from row and dictionary RHS
 	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_direct_rhs_aggregate_dictionary_probe AS "
 	                          "SELECT (i * 1000003)::BIGINT AS k FROM range(400000) tbl(i)"));
 
-	auto verify = [&](const string &query, const string &source_path) {
+	auto verify = [&](const string &query) {
 		REQUIRE_NO_FAIL(con.Query("SET jit_policy='off'"));
 		auto reference = con.Query(query);
 		REQUIRE_NO_FAIL(*reference);
 
 		REQUIRE_NO_FAIL(con.Query("SET jit_policy='auto'"));
-		ClearJitTrace(manager, true);
 		auto result = con.Query(query);
 		REQUIRE_NO_FAIL(*result);
 		REQUIRE(result->GetValue(0, 0).ToString() == reference->GetValue(0, 0).ToString());
-
-		string observed_runtime_paths;
-		bool found_direct_consumer = false;
-		for (auto &event : manager.GetEvents()) {
-			if (EventPhase(event) != "runtime" || EventStatus(event) != "executed") {
-				continue;
-			}
-			const auto paths = EventJitRuntimePathCounts(event);
-			observed_runtime_paths += paths + "\n";
-			if (!StringUtil::Contains(paths, "hash_join_probe.regular_probe.all_valid.flat.single_key.no_chain.direct_"
-			                                 "ungrouped_aggregate_consumer=") ||
-			    !StringUtil::Contains(paths, source_path)) {
-				continue;
-			}
-			found_direct_consumer = true;
-			REQUIRE_FALSE(StringUtil::Contains(paths, "aggregate_update.join_output_ungrouped_payload_update="));
-			REQUIRE_FALSE(StringUtil::Contains(paths, "aggregate_update.join_output_ungrouped_update="));
-			REQUIRE(EventJitRuntimeDelegationCounts(event).empty());
-		}
-		INFO(observed_runtime_paths);
-		REQUIRE(found_direct_consumer);
 	};
 
 	verify("SELECT sum(selected.payload) FROM jit_direct_rhs_aggregate_row_probe probe JOIN ("
 	       "SELECT fact.k, fact.payload FROM jit_direct_rhs_aggregate_fact fact "
-	       "JOIN jit_direct_rhs_aggregate_row_filter filter USING (filter_key)) selected USING (k)",
-	       "aggregate_update.join_output_probe_consumer_ungrouped_aggregate.row_source=");
+	       "JOIN jit_direct_rhs_aggregate_row_filter filter USING (filter_key)) selected USING (k)");
 	verify("SELECT count(selected.payload) FROM jit_direct_rhs_aggregate_row_probe probe JOIN ("
 	       "SELECT fact.k, fact.payload FROM jit_direct_rhs_aggregate_fact fact "
-	       "JOIN jit_direct_rhs_aggregate_row_filter filter USING (filter_key)) selected USING (k)",
-	       "aggregate_update.join_output_probe_consumer_ungrouped_aggregate.row_source=");
+	       "JOIN jit_direct_rhs_aggregate_row_filter filter USING (filter_key)) selected USING (k)");
 	verify("SELECT sum(selected.payload) FROM jit_direct_rhs_aggregate_dictionary_probe probe JOIN ("
 	       "SELECT fact.k, fact.payload FROM jit_direct_rhs_aggregate_fact fact "
-	       "JOIN jit_direct_rhs_aggregate_dictionary_filter filter USING (filter_key)) selected USING (k)",
-	       "aggregate_update.join_output_probe_consumer_ungrouped_aggregate.dictionary_source=");
+	       "JOIN jit_direct_rhs_aggregate_dictionary_filter filter USING (filter_key)) selected USING (k)");
 	verify("SELECT count(selected.payload) FROM jit_direct_rhs_aggregate_dictionary_probe probe JOIN ("
 	       "SELECT fact.k, fact.payload FROM jit_direct_rhs_aggregate_fact fact "
-	       "JOIN jit_direct_rhs_aggregate_dictionary_filter filter USING (filter_key)) selected USING (k)",
-	       "aggregate_update.join_output_probe_consumer_ungrouped_aggregate.dictionary_source=");
+	       "JOIN jit_direct_rhs_aggregate_dictionary_filter filter USING (filter_key)) selected USING (k)");
 	verify("SELECT count(*) FROM jit_direct_rhs_aggregate_dictionary_probe probe JOIN ("
 	       "SELECT fact.k FROM jit_direct_rhs_aggregate_fact fact "
-	       "JOIN jit_direct_rhs_aggregate_dictionary_filter filter USING (filter_key)) selected USING (k)",
-	       "aggregate_update.join_output_probe_consumer_ungrouped_aggregate.source_none=");
+	       "JOIN jit_direct_rhs_aggregate_dictionary_filter filter USING (filter_key)) selected USING (k)");
 }
 
 TEST_CASE("JIT exact prefix membership elides only equivalent unique hash probes", "[api][jit]") {
@@ -901,53 +890,6 @@ TEST_CASE("JIT hash join lazy code is published once across parallel pipeline ex
 	REQUIRE(runtime_event_count > 1);
 	REQUIRE(lazy_codegen_event_count == 1);
 	REQUIRE(lazy_codegen_code_size > 0);
-}
-
-TEST_CASE("JIT hash join selected output appends through a primitive recipe", "[api][jit]") {
-	DuckDB db;
-	Connection con(db);
-	auto &manager = ExecutionRegionManager::Get(*con.context);
-
-	ConfigureSljitForCoverage(con, false, true, true, 10000);
-	REQUIRE_NO_FAIL(con.Query("SET threads=1"));
-	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_selected_append_l AS "
-	                          "SELECT ((i % 128) * 1000003)::BIGINT AS k, i::BIGINT AS v "
-	                          "FROM range(65536) tbl(i)"));
-	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_selected_append_r AS "
-	                          "SELECT (i * 1000003)::BIGINT AS k, (i * 3)::BIGINT AS w FROM range(64) tbl(i)"));
-
-	const string query = "WITH matched AS MATERIALIZED ("
-	                     "SELECT l.k, l.v, r.w FROM jit_selected_append_l l "
-	                     "JOIN jit_selected_append_r r ON l.k = r.k"
-	                     ") SELECT count(*), sum(k), sum(v), sum(w) FROM matched";
-	REQUIRE_NO_FAIL(con.Query("SET jit_policy='off'"));
-	auto reference = con.Query(query);
-	REQUIRE_NO_FAIL(*reference);
-
-	REQUIRE_NO_FAIL(con.Query("SET jit_policy='auto'"));
-	ClearJitTrace(manager);
-	auto result = con.Query(query);
-	REQUIRE_NO_FAIL(*result);
-	REQUIRE(result->RowCount() == reference->RowCount());
-	REQUIRE(result->ColumnCount() == reference->ColumnCount());
-	for (idx_t col_idx = 0; col_idx < result->ColumnCount(); col_idx++) {
-		REQUIRE(result->GetValue(col_idx, 0).ToString() == reference->GetValue(col_idx, 0).ToString());
-	}
-
-	RequireJitEvent(
-	    manager,
-	    [](const ExecutionRegionEvent &event) {
-		    return EventPhase(event) == "runtime" && EventStatus(event) == "executed" &&
-		           EventExecutionMode(event) == "native" &&
-		           HasJitRuntimePathPrefix(event, "append_sink.hash_join_selected_append_");
-	    },
-	    [](const ExecutionRegionEvent &event) {
-		    auto stages = EventGeneratedStageRuntimeBreakdown(event);
-		    REQUIRE(StringUtil::Contains(stages, "hash_join_probe.selected_append_materialization="));
-		    REQUIRE(StringUtil::Contains(stages, "append_sink.selected_append_sink="));
-		    REQUIRE_FALSE(StringUtil::Contains(stages, "hash_join_probe.materialize_output="));
-		    REQUIRE(EventJitRuntimeDelegationCounts(event).empty());
-	    });
 }
 
 TEST_CASE("JIT hash join probe preserves selected reference source view", "[api][jit]") {
@@ -2380,9 +2322,11 @@ TEST_CASE("JIT mapped join casts feed dense grouped counts", "[api][jit]") {
 	REQUIRE_NO_FAIL(con.Query("SET perfect_ht_threshold=0"));
 	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_mapped_dense_customer AS "
 	                          "SELECT i::BIGINT AS customer_id FROM range(1, 150001) tbl(i)"));
+	// Three orders per matched customer stays below the 4x fan-out at which the LEFT JOIN owner-outer count
+	// pushdown pre-aggregates orders below the join.
 	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_mapped_dense_orders AS "
 	                          "SELECT ((i * 7919) % 100000 + 1)::BIGINT AS customer_id, i::BIGINT AS order_id "
-	                          "FROM range(1500000) tbl(i)"));
+	                          "FROM range(300000) tbl(i)"));
 	REQUIRE_NO_FAIL(con.Query("VACUUM jit_mapped_dense_customer"));
 	REQUIRE_NO_FAIL(con.Query("VACUUM jit_mapped_dense_orders"));
 
@@ -2401,8 +2345,8 @@ TEST_CASE("JIT mapped join casts feed dense grouped counts", "[api][jit]") {
 	REQUIRE_NO_FAIL(*shape);
 	REQUIRE(shape->GetValue(0, 0).ToString() == "150000");
 	REQUIRE(shape->GetValue(1, 0).ToString() == "0");
-	REQUIRE(shape->GetValue(2, 0).ToString() == "15");
-	REQUIRE(shape->GetValue(3, 0).ToString() == "1500000");
+	REQUIRE(shape->GetValue(2, 0).ToString() == "3");
+	REQUIRE(shape->GetValue(3, 0).ToString() == "300000");
 	auto difference = con.Query("SELECT count(*) FROM ("
 	                            "  (SELECT * FROM jit_mapped_dense_output EXCEPT ALL "
 	                            "   SELECT * FROM jit_mapped_dense_reference) UNION ALL "
@@ -2421,11 +2365,11 @@ TEST_CASE("JIT mapped join casts feed dense grouped counts", "[api][jit]") {
 		    const auto runtime_paths = EventJitRuntimePathCounts(event);
 		    return StringUtil::Contains(
 		               runtime_paths,
-		               "aggregate_update.projection_aggregate.group.input_vector_cast_key0_unchecked=1500000") &&
+		               "aggregate_update.projection_aggregate.group.input_vector_cast_key0_unchecked=300000") &&
 		           StringUtil::Contains(runtime_paths,
-		                                "aggregate_update.pending_dense_single_lane_grouped_update=1500000") &&
+		                                "aggregate_update.pending_dense_single_lane_grouped_update=300000") &&
 		           StringUtil::Contains(runtime_paths,
-		                                "aggregate_update.pending_dense_single_lane_grouped_update_flush=1500000") &&
+		                                "aggregate_update.pending_dense_single_lane_grouped_update_flush=300000") &&
 		           !StringUtil::Contains(runtime_paths, "producer_group_output_map");
 	    },
 	    [](const ExecutionRegionEvent &event) {
@@ -2441,7 +2385,7 @@ TEST_CASE("JIT mapped join casts feed dense grouped counts", "[api][jit]") {
 	REQUIRE_NO_FAIL(*nullable_shape);
 	REQUIRE(nullable_shape->GetValue(0, 0).ToString() == "150001");
 	REQUIRE(nullable_shape->GetValue(1, 0).ToString() == "150000");
-	REQUIRE(nullable_shape->GetValue(2, 0).ToString() == "1500000");
+	REQUIRE(nullable_shape->GetValue(2, 0).ToString() == "300000");
 	RequireJitEvent(
 	    manager,
 	    [](const ExecutionRegionEvent &event) {
@@ -2853,12 +2797,13 @@ TEST_CASE("JIT mark match filter emits LHS selected boundary", "[api][jit]") {
 	                          "SELECT (i * 17)::BIGINT AS item_key "
 	                          "FROM range(512) tbl(i)"));
 
+	// A bare IN/EXISTS marker filter is rewritten to a SEMI join; the double negation keeps the MARK join
+	// with a positive marker filter.
 	const string query = "SELECT group_id, count(*) AS kept_count "
 	                     "FROM jit_mark_match_fact f "
-	                     "WHERE EXISTS ("
-	                     "  SELECT 1 FROM jit_mark_match_allowed a "
-	                     "  WHERE a.item_key = f.item_key"
-	                     ") "
+	                     "WHERE NOT (f.item_key NOT IN ("
+	                     "  SELECT a.item_key FROM jit_mark_match_allowed a"
+	                     ")) "
 	                     "GROUP BY group_id "
 	                     "ORDER BY group_id";
 	REQUIRE_NO_FAIL(con.Query("SET jit_policy='off'"));
@@ -2916,12 +2861,13 @@ TEST_CASE("JIT mark match count-star preaggregates compressed string groups", "[
 	                          "SELECT (i * 17)::BIGINT AS item_key "
 	                          "FROM range(4096) tbl(i)"));
 
+	// A bare IN/EXISTS marker filter is rewritten to a SEMI join; the double negation keeps the MARK join
+	// with a positive marker filter.
 	const string query = "SELECT group_name, count(*) AS kept_count "
 	                     "FROM jit_mark_count_star_string_fact f "
-	                     "WHERE EXISTS ("
-	                     "  SELECT 1 FROM jit_mark_count_star_string_allowed a "
-	                     "  WHERE a.item_key = f.item_key"
-	                     ") "
+	                     "WHERE NOT (f.item_key NOT IN ("
+	                     "  SELECT a.item_key FROM jit_mark_count_star_string_allowed a"
+	                     ")) "
 	                     "GROUP BY group_name "
 	                     "ORDER BY group_name";
 	REQUIRE_NO_FAIL(con.Query("SET jit_policy='off'"));
@@ -3072,148 +3018,6 @@ TEST_CASE("JIT mark filter projection preserves selected nonmatches", "[api][jit
 	                      ") diff");
 	REQUIRE_NO_FAIL(*diff);
 	REQUIRE(diff->GetValue(0, 0).GetValue<int64_t>() == 0);
-}
-
-TEST_CASE("JIT mark filter projection delimiter sink uses selected join input", "[api][jit]") {
-	DuckDB db;
-	Connection con(db);
-	auto &manager = ExecutionRegionManager::Get(*con.context);
-
-	ConfigureSljitForCoverage(con, false, true, true, 10000);
-	REQUIRE_NO_FAIL(con.Query("SET threads=1"));
-	REQUIRE_NO_FAIL(con.Query("SET perfect_ht_threshold=0"));
-	REQUIRE_NO_FAIL(con.Query("SET disabled_optimizers='join_order,build_side_probe_side'"));
-	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_delim_supplier AS "
-	                          "SELECT i::BIGINT AS suppkey, ('S' || i::VARCHAR) AS name, "
-	                          "       (i % 8)::BIGINT AS nationkey "
-	                          "FROM range(256) tbl(i)"));
-	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_delim_nation AS "
-	                          "SELECT i::BIGINT AS nationkey, "
-	                          "       CASE WHEN i=1 THEN 'SAUDI ARABIA' ELSE ('N' || i::VARCHAR) END AS name "
-	                          "FROM range(8) tbl(i)"));
-	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_delim_orders AS "
-	                          "SELECT i::BIGINT AS orderkey, "
-	                          "       CASE WHEN i % 3 = 0 THEN 'F' ELSE 'O' END AS status "
-	                          "FROM range(8192) tbl(i)"));
-	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_delim_lineitem AS "
-	                          "SELECT (i % 8192)::BIGINT AS orderkey, "
-	                          "       ((i / 8192)::BIGINT % 256) AS suppkey, "
-	                          "       DATE '1994-01-01' + ((i * 7) % 1000)::INTEGER AS receiptdate, "
-	                          "       DATE '1994-01-01' + ((i * 5) % 1000)::INTEGER AS commitdate "
-	                          "FROM range(32768) tbl(i)"));
-
-	const string query = "SELECT s.name, count(*) AS numwait "
-	                     "FROM jit_delim_supplier s, jit_delim_lineitem l1, jit_delim_orders o, jit_delim_nation n "
-	                     "WHERE s.suppkey = l1.suppkey "
-	                     "  AND o.orderkey = l1.orderkey "
-	                     "  AND o.status = 'F' "
-	                     "  AND l1.receiptdate > l1.commitdate "
-	                     "  AND s.nationkey = n.nationkey "
-	                     "  AND n.name = 'SAUDI ARABIA' "
-	                     "  AND EXISTS ("
-	                     "      SELECT * FROM jit_delim_lineitem l2 "
-	                     "      WHERE l2.orderkey = l1.orderkey AND l2.suppkey <> l1.suppkey"
-	                     "  ) "
-	                     "  AND NOT EXISTS ("
-	                     "      SELECT * FROM jit_delim_lineitem l3 "
-	                     "      WHERE l3.orderkey = l1.orderkey AND l3.suppkey <> l1.suppkey "
-	                     "        AND l3.receiptdate > l3.commitdate"
-	                     "  ) "
-	                     "GROUP BY s.name "
-	                     "ORDER BY numwait DESC, s.name "
-	                     "LIMIT 100";
-	REQUIRE_NO_FAIL(con.Query("SET jit_policy='off'"));
-	REQUIRE_NO_FAIL(con.Query("CREATE TEMP TABLE jit_delim_reference AS " + query));
-
-	REQUIRE_NO_FAIL(con.Query("SET jit_policy='auto'"));
-	ClearJitTrace(manager, true);
-	REQUIRE_NO_FAIL(con.Query("CREATE TEMP TABLE jit_delim_actual AS " + query));
-
-	RequireJitEvent(
-	    manager,
-	    [](const ExecutionRegionEvent &event) {
-		    return EventPhase(event) == "runtime" && EventStatus(event) == "executed" &&
-		           EventExecutionMode(event) == "native" && HasJitDelimJoinSinkRuntimePath(event) &&
-		           StringUtil::Contains(EventGeneratedStageCountBreakdown(event), "selected_sink_batch_append");
-	    },
-	    [](const ExecutionRegionEvent &event) {
-		    REQUIRE(HasJitDelimJoinSinkRuntimePath(event));
-		    REQUIRE(HasGeneratedDelimJoinSinkStage(event));
-		    REQUIRE(StringUtil::Contains(EventGeneratedStageCountBreakdown(event), "selected_sink_batch_append"));
-	    });
-
-	REQUIRE_NO_FAIL(con.Query("SET jit_policy='off'"));
-	auto diff = con.Query("SELECT count(*) FROM ("
-	                      "    (SELECT * FROM jit_delim_reference "
-	                      "     EXCEPT ALL SELECT * FROM jit_delim_actual) "
-	                      "    UNION ALL "
-	                      "    (SELECT * FROM jit_delim_actual "
-	                      "     EXCEPT ALL SELECT * FROM jit_delim_reference)"
-	                      ") diff");
-	REQUIRE_NO_FAIL(*diff);
-	REQUIRE(diff->GetValue(0, 0).GetValue<int64_t>() == 0);
-}
-
-TEST_CASE("JIT sparse exact-filter delimiter sink batches source before probing", "[api][jit]") {
-	DuckDB db;
-	Connection con(db);
-	auto &manager = ExecutionRegionManager::Get(*con.context);
-
-	ConfigureSljitForCoverage(con, false, true, true, 10000);
-	REQUIRE_NO_FAIL(con.Query("SET threads=1"));
-	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_sparse_delim_part AS "
-	                          "SELECT i::INTEGER AS partkey, "
-	                          "       CASE WHEN i % 1000 = 23 THEN 'selected' ELSE 'other' END AS brand, "
-	                          "       CASE WHEN i % 1000 = 23 THEN 'box' ELSE 'bag' END AS container "
-	                          "FROM range(10000) tbl(i)"));
-	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_sparse_delim_lineitem AS "
-	                          "SELECT (i % 10000)::INTEGER AS partkey, "
-	                          "       ((i / 10000) % 20 + 1)::INTEGER AS quantity, "
-	                          "       (i % 997 + 1)::BIGINT AS price "
-	                          "FROM range(262144) tbl(i)"));
-
-	const string query = "SELECT sum(l.price) "
-	                     "FROM jit_sparse_delim_lineitem l, jit_sparse_delim_part p "
-	                     "WHERE p.partkey = l.partkey AND p.brand = 'selected' AND p.container = 'box' "
-	                     "  AND l.quantity < ("
-	                     "    SELECT 0.2 * avg(l2.quantity) "
-	                     "    FROM jit_sparse_delim_lineitem l2 "
-	                     "    WHERE l2.partkey = p.partkey"
-	                     "  )";
-	REQUIRE_NO_FAIL(con.Query("SET jit_policy='off'"));
-	auto reference = con.Query(query);
-	REQUIRE_NO_FAIL(*reference);
-
-	REQUIRE_NO_FAIL(con.Query("SET jit_policy='auto'"));
-	ClearJitTrace(manager, true);
-	auto result = con.Query(query);
-	REQUIRE_NO_FAIL(*result);
-	REQUIRE(result->GetValue(0, 0) == reference->GetValue(0, 0));
-
-	RequireJitEvent(
-	    manager,
-	    [](const ExecutionRegionEvent &event) {
-		    return EventPhase(event) == "runtime" && EventStatus(event) == "executed" &&
-		           HasJitDelimJoinSinkRuntimePath(event) &&
-		           StringUtil::Contains(EventJitRuntimePathCounts(event),
-		                                "hash_join_probe.perfect_probe.exact_source_filter_candidate=");
-	    },
-	    [](const ExecutionRegionEvent &event) {
-		    idx_t probe_invocations = 0;
-		    idx_t selected_rows = 0;
-		    for (auto &counter : event.jit_runtime.runtime_path_counts) {
-			    if (counter.counter.name == "hash_join_probe.perfect_probe.exact_source_filter_candidate") {
-				    probe_invocations += counter.count;
-			    } else if (counter.counter.name == "hash_join_probe.perfect_probe.exact_source_filter") {
-				    selected_rows += counter.count;
-			    }
-		    }
-		    REQUIRE(selected_rows > 0);
-		    REQUIRE(probe_invocations < 32);
-		    REQUIRE(probe_invocations < selected_rows);
-		    REQUIRE(StringUtil::Contains(EventGeneratedStageCountBreakdown(event), "selected_sink_batch_append"));
-		    REQUIRE(EventJitRuntimeDelegationCounts(event).empty());
-	    });
 }
 
 TEST_CASE("JIT mark filter reference aggregate slices selected projection", "[api][jit]") {

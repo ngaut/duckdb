@@ -99,31 +99,6 @@ struct SljitProjectedAggregateSink {
 		    [&]() { return FlushProjectedBatch(); }, [&](DataChunk &batch) { return ExecuteProjectedBatch(batch); });
 	}
 
-	template <class MATERIALIZE_BATCH>
-	bool TryAppendDirectProjectedBatch(DataChunk &projected, bool &handled, MATERIALIZE_BATCH &&materialize_batch) {
-		handled = false;
-		if (projected.size() == 0) {
-			return false;
-		}
-		FlushDirectAggregate();
-		projected_batch.Ensure(runtime.GetAllocator(), projection_op.output_types);
-		if (projected_batch.chunk.size() + projected.size() > STANDARD_VECTOR_SIZE) {
-			if (FlushProjectedBatch()) {
-				return true;
-			}
-		}
-		if (!materialize_batch(projected_batch.chunk)) {
-			return false;
-		}
-		handled = true;
-		if (projected_batch.chunk.size() == STANDARD_VECTOR_SIZE) {
-			if (FlushProjectedBatch()) {
-				return true;
-			}
-		}
-		return false;
-	}
-
 	void FinishDeferredGroupedUpdate() {
 	}
 

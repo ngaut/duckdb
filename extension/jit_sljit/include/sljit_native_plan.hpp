@@ -82,7 +82,6 @@ bool TryReadNativeStringSubstringReference(const ExecutionExpressionIR &root, id
 bool TryReadNativeStringSubstringInListConstant(const ExecutionExpressionIR &root, idx_t &source_index,
                                                 idx_t &substring_length, vector<string> &constants);
 bool TryReadNativeNullCheck(const ExecutionExpressionIR &root, SljitNativeNullCheckOp &op, idx_t &source_index);
-bool TryReadNativeConstantOrNull(const ExecutionExpressionIR &root, SljitNativeConstantOrNull &expr);
 bool ShouldTryNativePredicateRoot(const ExecutionExpressionIR &root);
 bool TryBuildNativeBasePredicate(const ExecutionExpressionIR &root, unique_ptr<SljitNativePredicate> &predicate);
 bool TryBuildNativeConstantOrNullPredicate(const ExecutionExpressionIR &root,

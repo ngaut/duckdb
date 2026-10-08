@@ -259,29 +259,6 @@ static bool SljitProjectionReferencesInputColumn(const SljitExecutableRegionOp &
 	return false;
 }
 
-static bool SljitSelectedProjectionOutputsAreSkipped(const SljitExecutableRegionOp &projection_op,
-                                                     optional_ptr<const vector<idx_t>> output_to_projection,
-                                                     const vector<uint8_t> &skip_projection) {
-	if (output_to_projection) {
-		for (auto projected_idx : *output_to_projection) {
-			if (projected_idx >= projection_op.projections.size() || projected_idx >= skip_projection.size() ||
-			    !skip_projection[projected_idx]) {
-				return false;
-			}
-		}
-		return true;
-	}
-	if (skip_projection.size() < projection_op.projections.size()) {
-		return false;
-	}
-	for (idx_t projected_idx = 0; projected_idx < projection_op.projections.size(); projected_idx++) {
-		if (!skip_projection[projected_idx]) {
-			return false;
-		}
-	}
-	return true;
-}
-
 static bool SljitTryMapHashJoinProbeLHSOutputColumn(const ExecutionHashJoinProbeBinding &binding, DataChunk &join_input,
                                                     idx_t &source_index) {
 	if (source_index >= binding.lhs_output_column_indices.size()) {

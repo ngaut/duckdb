@@ -10,10 +10,13 @@
 
 #include "sljit_aggregate_payload_value_abi.hpp"
 #include "sljit_region_plan.hpp"
+#include "sljit_typed_expression_plan.hpp"
 
 namespace duckdb {
 
-enum class SljitAggregateTypedPayloadKind : uint8_t { INVALID, INT32, INT64, DECIMAL64 };
+//! NARROW_DECIMAL128 is a DECIMAL128 typed-tree payload whose exact value is produced in one 64-bit register (INT64
+//! register semantics, see TryGetSljitTypedExpressionTreeNarrowDecimal128Bound).
+enum class SljitAggregateTypedPayloadKind : uint8_t { INVALID, INT32, INT64, DECIMAL64, NARROW_DECIMAL128 };
 
 struct SljitAggregatePayloadDescriptor {
 	idx_t aggregate_index = DConstants::INVALID_INDEX;
@@ -40,6 +43,7 @@ struct SljitAggregatePayloadDescriptor {
 			result = SljitNativeIntegerKind::INT32;
 			return true;
 		case SljitAggregateTypedPayloadKind::INT64:
+		case SljitAggregateTypedPayloadKind::NARROW_DECIMAL128:
 			result = SljitNativeIntegerKind::INT64;
 			return true;
 		case SljitAggregateTypedPayloadKind::DECIMAL64:
@@ -83,6 +87,12 @@ static inline bool SljitTryBindAggregatePayloadDescriptor(const SljitNativeRegio
 		                                    ? SljitAggregateTypedPayloadKind::DECIMAL64
 		                                    : SljitAggregateTypedPayloadKind::INT64;
 		break;
+	case PhysicalType::INT128:
+		if (payload.kind == SljitNativeRegionExpressionKind::TYPED_EXPRESSION_TREE && payload.expression_tree &&
+		    SljitTypedExpressionTreeIsNarrowDecimal128Node(*payload.expression_tree)) {
+			descriptor.typed_payload_kind = SljitAggregateTypedPayloadKind::NARROW_DECIMAL128;
+		}
+		break;
 	default:
 		break;
 	}
@@ -93,7 +103,12 @@ static inline bool SljitTryBindAggregatePayloadDescriptor(const SljitNativeRegio
 	if (aggregate.primitive_update_input_type != descriptor.input_type) {
 		return false;
 	}
-	descriptor.value_abi = SljitGetAggregatePayloadValueABI(descriptor.input_type);
+	// The value ABI follows how the payload value reaches the reducer: a narrow DECIMAL128 typed tree yields its exact
+	// value in one signed machine word (sign-extended into the hugeint state); every other payload arrives in the
+	// layout of its physical type.
+	descriptor.value_abi = descriptor.typed_payload_kind == SljitAggregateTypedPayloadKind::NARROW_DECIMAL128
+	                           ? SljitAggregatePayloadValueABI::SIGNED_MACHINE_WORD
+	                           : SljitGetAggregatePayloadValueABI(descriptor.input_type);
 	if (descriptor.value_abi == SljitAggregatePayloadValueABI::INVALID) {
 		return false;
 	}

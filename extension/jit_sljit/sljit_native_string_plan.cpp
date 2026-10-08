@@ -169,12 +169,11 @@ static bool TryReadNativeInt64Constant(const ExecutionExpressionIR &node, int64_
 	if (node.kind != ExecutionExpressionIRKind::CONSTANT || node.constant.IsNull() || !node.return_type.IsIntegral()) {
 		return false;
 	}
-	Value cast_value;
-	string error;
-	if (!node.constant.DefaultTryCastAs(LogicalType::BIGINT, cast_value, &error) || cast_value.IsNull()) {
+	auto cast_value = node.constant.DefaultTryCastAs(LogicalType::BIGINT);
+	if (!cast_value || cast_value->IsNull()) {
 		return false;
 	}
-	value = cast_value.GetValue<int64_t>();
+	value = cast_value->GetValue<int64_t>();
 	return true;
 }
 

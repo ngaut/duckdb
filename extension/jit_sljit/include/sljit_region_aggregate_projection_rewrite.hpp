@@ -157,14 +157,6 @@ static bool RewriteSljitDirectPayloadSourcesThroughPartialProjection(
 				return false;
 			}
 			break;
-		case SljitNativeRegionExpressionKind::CONSTANT_OR_NULL:
-			for (auto &source_index : payload.constant_or_null.guard_source_indices) {
-				if (!RewriteSljitDirectPayloadSourceThroughPartialProjection(
-				        input_types, projections, projection_types, source_map, source_index, render_diagnostics)) {
-					return false;
-				}
-			}
-			break;
 		case SljitNativeRegionExpressionKind::INTEGER_BINARY_REFERENCES:
 		case SljitNativeRegionExpressionKind::DOUBLE_BINARY_REFERENCES:
 		case SljitNativeRegionExpressionKind::INTEGER_COMPARE_REFERENCES:
@@ -196,7 +188,6 @@ static bool RewriteSljitDirectPayloadSourcesThroughPartialProjection(
 			}
 			FinalizeSljitNativePredicateSourceIndices(*payload.predicate);
 			break;
-		case SljitNativeRegionExpressionKind::EXPRESSION_TREE:
 		case SljitNativeRegionExpressionKind::TYPED_EXPRESSION_TREE:
 			break;
 		default:

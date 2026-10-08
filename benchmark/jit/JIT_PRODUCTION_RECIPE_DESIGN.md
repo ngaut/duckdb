@@ -369,7 +369,7 @@ core-private C++ classes into an extension ABI.
 
 Execution-region backends use DuckDB's version- and platform-matched C++
 extension contract plus an execution-region-specific ABI version. The current
-ABI is version 9. Any backend-visible layout or virtual interface change must
+ABI is version 10. Any backend-visible layout or virtual interface change must
 bump that version; registration rejects an older backend and requires it to be
 rebuilt against the current DuckDB tree.
 

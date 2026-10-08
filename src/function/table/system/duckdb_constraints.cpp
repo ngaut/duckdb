@@ -2,6 +2,7 @@
 #include "duckdb/catalog/catalog_entry/duck_table_entry.hpp"
 #include "duckdb/catalog/catalog_entry/schema_catalog_entry.hpp"
 #include "duckdb/catalog/catalog_entry/table_catalog_entry.hpp"
+#include "duckdb/common/enum_util.hpp"
 #include "duckdb/common/exception.hpp"
 #include "duckdb/function/table/system_functions.hpp"
 #include "duckdb/main/client_context.hpp"
@@ -42,7 +43,7 @@ struct DuckDBConstraintsData : public GlobalTableFunctionState {
 };
 
 static unique_ptr<FunctionData> DuckDBConstraintsBind(ClientContext &context, TableFunctionBindInput &input,
-                                                      vector<LogicalType> &return_types, vector<string> &names) {
+                                                      vector<LogicalType> &return_types, vector<Identifier> &names) {
 	names.emplace_back("database_name");
 	return_types.emplace_back(LogicalType::VARCHAR);
 
@@ -89,6 +90,9 @@ static unique_ptr<FunctionData> DuckDBConstraintsBind(ClientContext &context, Ta
 
 	names.emplace_back("referenced_column_names");
 	return_types.push_back(LogicalType::LIST(LogicalType::VARCHAR));
+
+	names.emplace_back("constraint_check_mode");
+	return_types.emplace_back(LogicalType::VARCHAR);
 
 	return nullptr;
 }
@@ -245,6 +249,8 @@ void DuckDBConstraintsFunction(ClientContext &context, TableFunctionInput &data_
 	auto &referenced_table = output.data[13];
 	// referenced_column_names, LIST(VARCHAR)
 	auto &referenced_column_names = output.data[14];
+	// constraint_check_mode, VARCHAR
+	auto &constraint_check_mode = output.data[15];
 
 	while (data.offset < data.entries.size() && count < STANDARD_VECTOR_SIZE) {
 		auto &entry = data.entries[data.offset];
@@ -316,16 +322,20 @@ void DuckDBConstraintsFunction(ClientContext &context, TableFunctionInput &data_
 				column_index_list.push_back(Value::UBIGINT(col_index.index));
 			}
 			for (auto &name : info.column_names) {
-				column_name_list.push_back(Value(std::move(name)));
+				column_name_list.push_back(Value(name));
 			}
 			for (auto &name : info.referenced_columns) {
-				referenced_column_name_list.push_back(Value(std::move(name)));
+				referenced_column_name_list.push_back(Value(name));
 			}
 			constraint_column_indexes.Append(Value::LIST(LogicalType::BIGINT, std::move(column_index_list)));
 			constraint_column_names.Append(Value::LIST(LogicalType::VARCHAR, std::move(column_name_list)));
 			constraint_name_vec.Append(Value(std::move(constraint_name)));
-			referenced_table.Append(info.referenced_table.empty() ? Value() : Value(std::move(info.referenced_table)));
+			referenced_table.Append(info.referenced_table.empty() ? Value() : Value(info.referenced_table));
 			referenced_column_names.Append(Value::LIST(LogicalType::VARCHAR, std::move(referenced_column_name_list)));
+			auto check_mode = constraint->type == ConstraintType::UNIQUE
+			                      ? constraint->Cast<UniqueConstraint>().check_mode
+			                      : ConstraintCheckMode::DEFAULT;
+			constraint_check_mode.Append(Value(EnumUtil::ToString(check_mode)));
 			count++;
 		}
 

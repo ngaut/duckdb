@@ -237,7 +237,6 @@ static void PopulateSljitExecutableAggregatePayloadSourceFacts(SljitExecutableRe
 		payload.input_source_not_null.push_back(SljitSourceKnownNotNull(&input_not_null, plan.right_source_index));
 		return;
 	case SljitNativeRegionExpressionKind::TYPED_EXPRESSION_TREE:
-	case SljitNativeRegionExpressionKind::EXPRESSION_TREE:
 		payload.input_source_indices = plan.expression_tree_source_indices;
 		payload.input_source_not_null.reserve(payload.input_source_indices.size());
 		for (auto source_idx : payload.input_source_indices) {
@@ -271,7 +270,6 @@ void SljitBuildExecutableAggregateUpdateMetadata(const SljitNativeAggregateUpdat
 	executable.plan.sink_info = op.sink_info;
 	executable.plan.input_types = op.input_types;
 	executable.plan.estimated_input_count = op.estimated_input_count;
-	executable.plan.distinct_key_cardinality_upper_bound = op.distinct_key_cardinality_upper_bound;
 	executable.plan.group_reserve = op.group_reserve;
 	executable.plan.payload_binding_state = op.payload_binding_state;
 	executable.plan.use_grouped_state_addresses = op.use_grouped_state_addresses;

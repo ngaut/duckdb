@@ -74,8 +74,8 @@ private:
 	InterruptState &interrupt_state;
 };
 
-static string ValidateOrderedExecutionSink(const ExecutionRegionSinkInfo &sink_info,
-                                           ExecutionRegionOperatorKind expected_kind) {
+string ValidateExecutionOrderedSink(const ExecutionRegionSinkInfo &sink_info,
+                                    ExecutionRegionOperatorKind expected_kind) {
 	if (sink_info.kind != ExecutionRegionSinkKind::SORT) {
 		return "ordered-sink-runtime-kind-mismatch";
 	}
@@ -115,7 +115,7 @@ bool PhysicalOrder::BindExecutionSink(ExecutionContext &context, DataChunk &inpu
 	(void)input;
 	binding = ExecutionSinkBinding();
 	binding.kind = sink_info.kind;
-	auto blocker = ValidateOrderedExecutionSink(sink_info, ExecutionRegionOperatorKind::ORDER_BY);
+	auto blocker = ValidateExecutionOrderedSink(sink_info, ExecutionRegionOperatorKind::ORDER_BY);
 	if (!blocker.empty()) {
 		binding.blocker = blocker;
 		binding.ordered_sink.blocker = blocker;
@@ -219,7 +219,8 @@ SourceResultType PhysicalOrder::GetDataInternal(ExecutionContext &context, DataC
                                                 OperatorSourceInput &input) const {
 	auto &gstate = input.global_state.Cast<OrderGlobalSourceState>();
 	auto &lstate = input.local_state.Cast<OrderLocalSourceState>();
-	OperatorSourceInput sort_input {*gstate.state, *lstate.state, input.interrupt_state, input.stage_recorder};
+	OperatorSourceInput sort_input {*gstate.state, *lstate.state, input.interrupt_state,
+	                                SourceBatchIndexState::UNCHANGED, input.stage_recorder};
 	ExecutionOperatorStageTimer timer(input.stage_recorder, "source_contract.order_state_scan.sort_get_data");
 	return gstate.sort.GetData(context, chunk, sort_input);
 }

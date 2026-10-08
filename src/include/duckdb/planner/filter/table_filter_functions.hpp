@@ -23,14 +23,11 @@ namespace duckdb {
 
 class BaseStatistics;
 class Expression;
-class ExpressionFilter;
-class PerfectHashJoinExecutor;
 class PrefixRangeFilter;
 struct DynamicFilterData;
-struct ExecutionPerfectHashJoinFilterLayout;
 struct ExecutionRuntimeFilterIdentity;
 
-enum class SelectivityOptionalFilterType : uint8_t { MIN_MAX, BF, PHJ, PRF };
+enum class SelectivityOptionalFilterType : uint8_t { MIN_MAX = 0, BF = 1, PRF = 3 };
 
 void GetThresholdAndVectorsToCheck(SelectivityOptionalFilterType type, float &selectivity_threshold,
                                    idx_t &n_vectors_to_check);
@@ -42,7 +39,14 @@ unique_ptr<Expression> CreateSelectivityOptionalFilterExpression(unique_ptr<Expr
                                                                  float selectivity_threshold, idx_t n_vectors_to_check);
 unique_ptr<Expression> CreateDynamicFilterExpression(shared_ptr<DynamicFilterData> filter_data,
                                                      const LogicalType &target_type);
+//! Variant that evaluates the dynamic filter on top of a custom input expression (e.g. a cast chain over
+//! the raw scan column). The input must return `target_type`. When `input` is nullptr, a
+//! BoundReferenceExpression(0) placeholder in `target_type` is used instead.
+unique_ptr<Expression> CreateDynamicFilterExpression(shared_ptr<DynamicFilterData> filter_data,
+                                                     const LogicalType &target_type, unique_ptr<Expression> input);
 
+//! A closed range over a signed integral physical type. The bounds are always inside the domain of the physical type
+//! the range was computed for, so consumers can narrow them to that type without wrapping.
 struct SignedNumericRangeFilterData {
 	bool empty = false;
 	bool has_lower = false;
@@ -54,8 +58,9 @@ struct SignedNumericRangeFilterData {
 bool IsSignedNumericRangePhysicalType(PhysicalType physical_type);
 bool TryGetSignedNumericRange(const Expression &expr, const LogicalType &target_type,
                               SignedNumericRangeFilterData &range);
-bool TryGetSignedNumericRange(const ExpressionFilter &filter, ExpressionFilterState &state,
-                              const LogicalType &target_type, SignedNumericRangeFilterData &range);
+//! Cached variant over the expression the filter state was initialized with.
+bool TryGetSignedNumericRange(ExpressionFilterState &state, const LogicalType &target_type,
+                              SignedNumericRangeFilterData &range);
 
 //! Bind function that prevents user access to internal tablefilter functions
 struct TableFilterFunctions {
@@ -73,6 +78,10 @@ public:
 	void Initialize(ClientContext &context_p, idx_t number_of_rows);
 
 	void InsertHashes(const Vector &hashes_v) const;
+	idx_t LookupHashes(const Vector &hashes_v, SelectionVector &result_sel, idx_t count) const;
+	//! result_sel contains local positions into sel rather than source row ids.
+	idx_t LookupHashes(const Vector &hashes_v, const SelectionVector &sel, SelectionVector &result_sel,
+	                   idx_t count) const;
 
 	void InsertOne(hash_t hash) const;
 	inline bool LookupOne(hash_t hash) const {
@@ -102,6 +111,8 @@ public:
 		return bitmask;
 	}
 
+	static idx_t GetNumberOfSectors(idx_t number_of_rows);
+
 private:
 	idx_t num_sectors;
 	uint64_t bitmask; // num_sectors - 1 -> used to get the sector offset
@@ -117,23 +128,11 @@ struct BloomFilterFunctionData : public FunctionData {
 	BloomFilterFunctionData(optional_ptr<BloomFilter> filter_p, bool filters_null_values_p,
 	                        const string &key_column_name_p, const LogicalType &key_type_p);
 
+	//! Selectivity policy is owned by the selectivity-optional wrapper; the primitive only implements matching.
 	optional_ptr<BloomFilter> filter;
 	bool filters_null_values;
 	string key_column_name;
 	LogicalType key_type;
-
-	unique_ptr<FunctionData> Copy() const override;
-	bool Equals(const FunctionData &other) const override;
-};
-
-//! FunctionData for perfect hash join internal function
-struct PerfectHashJoinFunctionData : public FunctionData {
-	PerfectHashJoinFunctionData(optional_ptr<const PerfectHashJoinExecutor> executor_p,
-	                            const string &key_column_name_p);
-
-	optional_ptr<const PerfectHashJoinExecutor> executor;
-	optional_ptr<const ExecutionPerfectHashJoinFilterLayout> filter_layout;
-	string key_column_name;
 
 	unique_ptr<FunctionData> Copy() const override;
 	bool Equals(const FunctionData &other) const override;
@@ -165,13 +164,17 @@ public:
 	};
 
 	virtual ~PrefixRangeFilter() = default;
-	virtual void Initialize(ClientContext &context, idx_t number_of_rows, Value min, Value max) = 0;
+	virtual void Initialize(ClientContext &context, idx_t number_of_rows, Value min, Value max, idx_t max_bits) = 0;
 	virtual unique_ptr<BuildState> InitializeBuildState(ClientContext &context) const = 0;
 	virtual void InsertKeys(Vector &keys, BuildState &state) const = 0;
+	virtual void InsertKeysParallel(Vector &keys, BuildState &state) const = 0;
 	virtual void MergeBuildState(BuildState &state) = 0;
+	virtual idx_t GetBuildStateSize() const = 0;
 	virtual idx_t LookupKeys(Vector &keys, SelectionVector &result_sel, idx_t count) const = 0;
+	//! result_sel contains local positions into sel rather than source row ids.
 	virtual idx_t LookupKeys(Vector &keys, const SelectionVector &sel, SelectionVector &result_sel,
 	                         idx_t count) const = 0;
+	//! Exposes the bitmap of an integral filter (NULL-free lookup over the unsigned comparable domain).
 	virtual bool GetSignedLookupData(PrefixRangeLookupData &result) const = 0;
 	virtual idx_t DistinctCountUpperBound() const = 0;
 	//! Estimate how many distinct filter keys can overlap a scan range. This is
@@ -184,23 +187,20 @@ public:
 	static bool SupportedType(const LogicalType &type);
 	static unique_ptr<PrefixRangeFilter> CreatePrefixRangeFilter(const LogicalType &key_type);
 	static bool TryComputeSpan(const Value &lower_bound, const Value &upper_bound, uhugeint_t &result);
-	//! Conservatively estimates the largest fraction of prefix buckets that the
-	//! build keys can occupy. The estimate uses the exact bitmap shape that
-	//! Initialize creates, so join-filter selection and runtime allocation cannot
-	//! drift apart.
-	static bool TryEstimateMaxBucketDensity(idx_t number_of_rows, const Value &lower_bound, const Value &upper_bound,
-	                                        double &result);
 };
 
 //! FunctionData for prefix range internal function
 struct PrefixRangeFunctionData : public FunctionData {
-	PrefixRangeFunctionData(optional_ptr<PrefixRangeFilter> filter_p, const string &key_column_name_p,
-	                        const LogicalType &key_type_p,
+	PrefixRangeFunctionData(optional_ptr<PrefixRangeFilter> filter_p, bool filters_null_values_p,
+	                        const string &key_column_name_p, const LogicalType &key_type_p,
 	                        shared_ptr<ExecutionRuntimeFilterIdentity> runtime_filter_identity_p = nullptr);
 
+	//! Selectivity policy is owned by the selectivity-optional wrapper; the primitive only implements matching.
 	optional_ptr<PrefixRangeFilter> filter;
+	bool filters_null_values;
 	string key_column_name;
 	LogicalType key_type;
+	//! Execution-region identity of the build side that publishes this filter (JIT export ABI).
 	shared_ptr<ExecutionRuntimeFilterIdentity> runtime_filter_identity;
 
 	unique_ptr<FunctionData> Copy() const override;
@@ -265,15 +265,6 @@ struct SelectivityOptionalFilterFunctionData : public FunctionData {
 struct BloomFilterScalarFun : public TableFilterBloomFilterFun {
 	using TableFilterBloomFilterFun::GetFunction;
 	static constexpr const char *NAME = TableFilterBloomFilterFun::Name;
-	static ScalarFunction GetFunction(const LogicalType &input_type);
-	static FilterPropagateResult FilterPrune(const FunctionStatisticsPruneInput &input);
-	static string ToString(const string &column_name, const string &key_column_name);
-};
-
-//! Factory for perfect hash join internal function
-struct PerfectHashJoinScalarFun : public TableFilterPerfectHashJoinFun {
-	using TableFilterPerfectHashJoinFun::GetFunction;
-	static constexpr const char *NAME = TableFilterPerfectHashJoinFun::Name;
 	static ScalarFunction GetFunction(const LogicalType &input_type);
 	static FilterPropagateResult FilterPrune(const FunctionStatisticsPruneInput &input);
 	static string ToString(const string &column_name, const string &key_column_name);

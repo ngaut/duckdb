@@ -10,7 +10,6 @@
 
 #include "duckdb/common/row_operations/row_matcher.hpp"
 #include "duckdb/common/types/row/partitioned_tuple_data.hpp"
-#include "duckdb/common/types/row/tuple_data_row_location_remap.hpp"
 #include "duckdb/execution/base_aggregate_hashtable.hpp"
 #include "duckdb/execution/execution_aggregate_runtime.hpp"
 #include "duckdb/execution/ht_entry.hpp"
@@ -18,11 +17,14 @@
 #include "duckdb/common/row_operations/row_operations.hpp"
 #include "duckdb/common/types/hyperloglog.hpp"
 #include "duckdb/common/clustered_aggregate.hpp"
+#include "duckdb/common/atomic.hpp"
 
 namespace duckdb {
 
 class BlockHandle;
+class GroupedAggregateHashTable;
 struct ExecutionOperatorStageRecorder;
+struct ExecutionPrimitiveAggregateUpdateLane;
 
 struct FlushMoveState;
 
@@ -50,6 +52,33 @@ public:
 
 	idx_t partition_idx = 0;
 	TupleDataScanState scan_states;
+};
+
+//! Scratch shared by mutable append probes and task-local read-only lookups.
+struct AggregateHTProbeState {
+public:
+	AggregateHTProbeState();
+
+	Vector hashes;
+	Vector ht_offsets;
+	Vector hash_salts;
+	Vector addresses;
+	SelectionVector group_compare_vector;
+	SelectionVector no_match_vector;
+	DataChunk group_chunk;
+	optional_ptr<const GroupedAggregateHashTable> owner;
+	bool initialized = false;
+};
+
+//! Task-local scratch state for read-only group lookups.
+struct AggregateHTLookupState : public AggregateHTProbeState {
+public:
+	AggregateHTLookupState();
+
+	SelectionVector missing_vector;
+	TupleDataChunkState chunk_state;
+	RowMatcher row_matcher;
+	vector<TupleDataGatherFunction> gather_functions;
 };
 
 class GroupedAggregateHashTable : public BaseAggregateHashTable {
@@ -91,6 +120,14 @@ public:
 	idx_t AddChunk(DataChunk &groups, DataChunk &payload, const unsafe_vector<idx_t> &filter);
 	idx_t AddChunk(DataChunk &groups, Vector &group_hashes, DataChunk &payload, const unsafe_vector<idx_t> &filter);
 	idx_t AddChunk(DataChunk &groups, DataChunk &payload, AggregateType filter);
+	using before_update_callback_t =
+	    std::function<void(const Vector &group_addresses, const SelectionVector &new_groups, idx_t new_group_count)>;
+	//! Adds a chunk and invokes a callback with stable row-start addresses before updating the aggregate states.
+	idx_t AddChunk(DataChunk &groups, DataChunk &payload, AggregateType filter,
+	               const before_update_callback_t &before_update);
+	//! Adds a chunk and returns the stable row-start addresses and input indexes of newly created groups.
+	idx_t AddChunkAndGetNewGroups(DataChunk &groups, DataChunk &payload, AggregateType filter,
+	                              Vector &new_group_addresses, SelectionVector &new_groups_out);
 	optional_idx TryAddCompressedGroups(DataChunk &groups, DataChunk &payload, const unsafe_vector<idx_t> &filter);
 	optional_idx TryAddDictionaryGroups(DataChunk &groups, DataChunk &payload, const unsafe_vector<idx_t> &filter);
 	optional_idx TryAddConstantGroups(DataChunk &groups, DataChunk &payload, const unsafe_vector<idx_t> &filter);
@@ -102,6 +139,8 @@ public:
 	void FetchAggregates(DataChunk &groups, DataChunk &result);
 
 	void InitializeScan(AggregateHTScanState &scan_state);
+	//! Scans group columns without reading or finalizing aggregate states.
+	bool ScanGroups(AggregateHTScanState &scan_state, DataChunk &distinct_rows);
 	bool Scan(AggregateHTScanState &scan_state, DataChunk &distinct_rows, DataChunk &payload_rows);
 
 	//! Finds or creates groups in the hashtable using the specified group keys. The addresses vector will be filled
@@ -112,6 +151,15 @@ public:
 	                         optional_ptr<ExecutionOperatorStageRecorder> recorder = nullptr);
 	idx_t FindOrCreateGroups(DataChunk &groups, Vector &addresses_out, SelectionVector &new_groups_out);
 	void FindOrCreateGroups(DataChunk &groups, Vector &addresses_out);
+	//! Finds existing groups without changing the hash table. Returns the number of matches and writes input-row
+	//! indexes to found_groups_out. Matching row addresses are stored at their input-row indexes in state.addresses.
+	idx_t LookupGroups(DataChunk &groups, AggregateHTLookupState &state, SelectionVector &found_groups_out) const;
+	//! Gathers matched group values from state.addresses in the order specified by found_groups.
+	void GatherGroups(AggregateHTLookupState &state, const SelectionVector &found_groups, idx_t found_count,
+	                  DataChunk &result) const;
+	//! Gathers group values from arbitrary row-start addresses.
+	void GatherGroups(AggregateHTLookupState &state, Vector &addresses, const SelectionVector &groups,
+	                  idx_t group_count, DataChunk &result) const;
 	idx_t FindOrCreateGroupAddresses(DataChunk &groups, Vector &addresses_out,
 	                                 optional_ptr<ExecutionOperatorStageRecorder> recorder = nullptr);
 	bool TryFindExistingGroupsSelectedStateUpdateFast(
@@ -154,14 +202,12 @@ public:
 	                                              optional_ptr<const ExecutionDenseGroupDomain> dense_domain = nullptr);
 
 	const PartitionedTupleData &GetPartitionedData() const;
-	unique_ptr<PartitionedTupleData>
-	AcquirePartitionedData(optional_ptr<TupleDataRowLocationRemap> row_location_remap = nullptr);
+	unique_ptr<PartitionedTupleData> AcquirePartitionedData();
 	//! Transfers append-only rows without radix repartitioning. This succeeds only while all materialized rows are in
 	//! the deferred unpartitioned collection owned by a still-valid uniqueness proof.
-	unique_ptr<PartitionedTupleData>
-	TryAcquireProvenUniqueAppendData(optional_ptr<TupleDataRowLocationRemap> row_location_remap = nullptr);
-	void Abandon(optional_ptr<TupleDataRowLocationRemap> row_location_remap = nullptr);
-	void Repartition(optional_ptr<TupleDataRowLocationRemap> row_location_remap = nullptr);
+	unique_ptr<PartitionedTupleData> TryAcquireProvenUniqueAppendData();
+	void Abandon();
+	void Repartition();
 	shared_ptr<ArenaAllocator> GetAggregateAllocator();
 
 	//! Resize the HT to the specified size. Must be larger than the current size.
@@ -214,10 +260,9 @@ public:
 
 	//! Executes the filter(if any) and update the aggregates
 	void Combine(GroupedAggregateHashTable &other);
-	void Combine(TupleDataCollection &other_data, optional_ptr<atomic<double>> progress = nullptr,
-	             optional_ptr<TupleDataRowLocationRemap> state_remap = nullptr);
+	void Combine(TupleDataCollection &other_data, optional_ptr<atomic<double>> progress = nullptr);
 	//! Reset the HT for a new execution while reusing internal allocations where possible
-	void ResetForNewIteration(idx_t initial_capacity, idx_t radix_bits);
+	void ResetForNewIteration(idx_t radix_bits);
 
 private:
 	ClientContext &context;
@@ -292,22 +337,15 @@ private:
 	vector<shared_ptr<ArenaAllocator>> stored_allocators;
 
 	//! Append state
-	struct AggregateHTAppendState {
+	struct AggregateHTAppendState : public AggregateHTProbeState {
 		explicit AggregateHTAppendState(ArenaAllocator &allocator);
 
 		PartitionedTupleDataAppendState partitioned_append_state;
 		PartitionedTupleDataAppendState unpartitioned_append_state;
 
-		Vector hashes;
-		Vector ht_offsets;
-		Vector hash_salts;
 		SelectionVector new_groups;
-		SelectionVector group_compare_vector;
-		SelectionVector no_match_vector;
 		SelectionVector existing_groups;
-		Vector addresses;
 		Vector descriptor_group_hashes;
-		DataChunk group_chunk;
 		DataChunk descriptor_group_chunk;
 		AggregateCompressedGroupState compressed_group_state;
 
@@ -525,6 +563,7 @@ private:
 	                                    void *address_update_state,
 	                                    optional_ptr<ExecutionOperatorStageRecorder> recorder,
 	                                    optional_ptr<const ExecutionDenseGroupDomain> dense_domain = nullptr);
+	void InitializeLookupState(AggregateHTLookupState &lookup_state) const;
 
 	//! Verify the pointer table of the HT
 	void Verify();

@@ -192,10 +192,6 @@ static SljitRegionNodePlan PlanSljitRegionNode(const ExecutionRegionNode &node, 
 		if (node.operator_info && node.operator_info->kind == ExecutionRegionOperatorContractKind::HASH_JOIN_PROBE) {
 			return PlanSljitHashJoinProbeOperatorNode(node, input_types, input_not_null, render_diagnostics);
 		}
-		if (node.operator_info &&
-		    node.operator_info->kind == ExecutionRegionOperatorContractKind::NESTED_LOOP_JOIN_PROBE) {
-			return PlanSljitNestedLoopJoinProbeOperatorNode(node, input_types, render_diagnostics);
-		}
 		return SljitNodeBlockerBoundary(node, "operator contract boundary has no SLJIT native contract");
 	default:
 		return SljitNodeBlockerBoundary(node, "region IR node is outside SLJIT native region lowering");

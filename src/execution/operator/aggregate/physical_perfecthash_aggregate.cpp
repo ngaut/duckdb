@@ -5,6 +5,8 @@
 #include "duckdb/planner/expression/bound_aggregate_expression.hpp"
 #include "duckdb/planner/expression/bound_reference_expression.hpp"
 #include "duckdb/storage/buffer_manager.hpp"
+#include "duckdb/common/reference_map.hpp"
+#include "duckdb/main/client_context.hpp"
 
 namespace duckdb {
 
@@ -242,7 +244,8 @@ BuildPerfectHashAggregatePrimitiveUpdateBinding(const PhysicalPerfectHashAggrega
 			result.blocker = "perfect-hash-aggregate-primitive-update-requires-no-payload";
 			return result;
 		}
-		if (function.HasStateSizeCallback() && function.GetStateSizeCallback()(function) != abi.state_size) {
+		AggregateStateInput state_input(function, aggregate.BindInfo().get());
+		if (function.HasStateSizeCallback() && function.GetStateSizeCallback()(state_input) != abi.state_size) {
 			result.blocker = "perfect-hash-aggregate-primitive-update-state-size-mismatch";
 			return result;
 		}

@@ -248,6 +248,12 @@ static string DescribeExecutionRegionHashJoinContract(const ExecutionRegionHashJ
 	result += ",hash_join_layout_offsets=" + BuildExecutionRegionIdxList(contract.layout_offsets);
 	result += ",hash_join_tuple_size=" + std::to_string(contract.tuple_size);
 	result += ",hash_join_pointer_offset=" + std::to_string(contract.pointer_offset);
+	result += ",hash_join_dict_index_widths=[";
+	for (idx_t payload_idx = 0; payload_idx < contract.payload_dict_index_widths.size(); payload_idx++) {
+		result += payload_idx == 0 ? "" : "|";
+		result += std::to_string(contract.payload_dict_index_widths[payload_idx]);
+	}
+	result += "]";
 	result += ",hash_join_native_contract_blocker=" + contract.native_contract_blocker;
 	AppendExecutionRegionDescription(result, DescribeExecutionRegionNativeOperatorContract(
 	                                             contract.native_probe_contract, "native_hash_join_probe"));

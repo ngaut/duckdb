@@ -81,19 +81,6 @@ SljitFullPipelinePrimitiveStep::HashJoinBuildSink(const SljitHashJoinBuildSinkPr
 	return step;
 }
 
-SljitFullPipelinePrimitiveStep
-SljitFullPipelinePrimitiveStep::DelimJoinSink(const SljitDelimJoinSinkPrimitive &primitive) {
-	auto step = Make(SljitFullPipelinePrimitiveKind::DELIM_JOIN_SINK);
-	step.delim_join_sink = primitive;
-	return step;
-}
-
-SljitFullPipelinePrimitiveStep SljitFullPipelinePrimitiveStep::AppendSink(const SljitAppendSinkPrimitive &primitive) {
-	auto step = Make(SljitFullPipelinePrimitiveKind::APPEND_SINK);
-	step.append_sink = primitive;
-	return step;
-}
-
 SljitFullPipelinePrimitiveStep SljitFullPipelinePrimitiveStep::NativeTailDelegation(idx_t tail_start_idx) {
 	auto step = Make(SljitFullPipelinePrimitiveKind::NATIVE_TAIL_DELEGATION);
 	step.native_tail_start_idx = tail_start_idx;

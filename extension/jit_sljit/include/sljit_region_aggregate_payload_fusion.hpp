@@ -61,19 +61,14 @@ static bool SljitPrimitiveAggregatePayloadSupported(SljitNativeRegionExpressionP
 			return false;
 		}
 		SljitNativeIntegerKind typed_tree_kind;
-		if (SljitTypedExpressionTreeIsSupported(*payload.expression_tree) &&
-		    TryGetSljitTypedExpressionTreeResultKind(*payload.expression_tree, typed_tree_kind) &&
-		    typed_tree_kind == aggregate_payload_kind) {
-			payload.kind = SljitNativeRegionExpressionKind::TYPED_EXPRESSION_TREE;
-			payload.integer_kind = typed_tree_kind;
-			return true;
+		if (!SljitTypedExpressionTreeIsSupported(*payload.expression_tree) ||
+		    !TryGetSljitTypedExpressionTreeResultKind(*payload.expression_tree, typed_tree_kind) ||
+		    typed_tree_kind != aggregate_payload_kind) {
+			return false;
 		}
-		if (aggregate_payload_kind == SljitNativeIntegerKind::DECIMAL64) {
-			payload.kind = SljitNativeRegionExpressionKind::EXPRESSION_TREE;
-			payload.integer_kind = aggregate_payload_kind;
-			return true;
-		}
-		return false;
+		payload.kind = SljitNativeRegionExpressionKind::TYPED_EXPRESSION_TREE;
+		payload.integer_kind = typed_tree_kind;
+		return true;
 	}
 	if (descriptor.primitive_kind != AggregatePrimitiveUpdateKind::SUM_INT64) {
 		return false;
@@ -93,8 +88,6 @@ static bool SljitPrimitiveAggregatePayloadSupported(SljitNativeRegionExpressionP
 		return TryGetSljitTypedExpressionTreeResultKind(*payload.expression_tree, typed_tree_kind) &&
 		       typed_tree_kind == aggregate_payload_kind;
 	}
-	case SljitNativeRegionExpressionKind::EXPRESSION_TREE:
-		return aggregate_payload_kind == SljitNativeIntegerKind::DECIMAL64 && payload.expression_tree != nullptr;
 	default:
 		return false;
 	}

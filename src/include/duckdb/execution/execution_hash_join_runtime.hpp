@@ -124,7 +124,7 @@ struct ExecutionHashJoinTableLayout {
 	}
 };
 
-//! Allocation-free membership data shared by scan filters and full table bindings.
+//! Allocation-free membership data published by perfect-hash finalization; full table bindings extend it.
 struct ExecutionPerfectHashJoinMembershipLayout {
 	bool ready = false;
 	PhysicalType key_physical_type = PhysicalType::INVALID;
@@ -153,10 +153,6 @@ struct ExecutionPerfectHashJoinTableLayout : public ExecutionPerfectHashJoinMemb
 	vector<buffer_ptr<DictionaryEntry>> rhs_dictionary_buffers;
 	string blocker;
 };
-
-//! Scan filters use only the shared membership data, with no materialization columns,
-//! owning buffers, or diagnostic strings.
-struct ExecutionPerfectHashJoinFilterLayout : public ExecutionPerfectHashJoinMembershipLayout {};
 
 enum class ExecutionHashJoinRHSFixedColumnStorageKind : uint8_t { NONE, ROW, DICTIONARY };
 
@@ -193,6 +189,8 @@ struct ExecutionHashJoinRHSFixedColumnSource {
 	idx_t layout_column_count = 0;
 	idx_t layout_offset = DConstants::INVALID_INDEX;
 	idx_t dictionary_index_offset = DConstants::INVALID_INDEX;
+	//! Byte width (1, 2 or 4) of the dictionary index stored at dictionary_index_offset.
+	uint8_t dictionary_index_width = 0;
 	const_data_ptr_t dictionary_data = nullptr;
 	const validity_t *dictionary_validity = nullptr;
 	idx_t dictionary_count = 0;

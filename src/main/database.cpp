@@ -1,9 +1,12 @@
 #include "duckdb/main/database.hpp"
-#include "duckdb/main/metrics_manager.hpp"
-#include "duckdb/parser/peg/matcher.hpp"
+#include "duckdb/common/multi_file/multi_file_list.hpp"
+#include "duckdb/common/arrow/arrow_type_extension.hpp"
+#include "duckdb/main/profiler/metrics_manager.hpp"
+#include "duckdb/parser/peg/compiled_grammar.hpp"
 
 #include "duckdb/catalog/catalog.hpp"
-#include "duckdb/common/http_util.hpp"
+#include "duckdb/main/http/http_util.hpp"
+#include "duckdb/main/http/http_transport_manager.hpp"
 #include "duckdb/common/virtual_file_system.hpp"
 #include "duckdb/common/local_file_system.hpp"
 #include "duckdb/execution/execution_region_manager.hpp"
@@ -20,6 +23,8 @@
 #include "duckdb/main/database_file_opener.hpp"
 #include "duckdb/main/database_file_path_manager.hpp"
 #include "duckdb/main/database_manager.hpp"
+#include "duckdb/main/external_resource_type_registry.hpp"
+#include "duckdb/main/external_resources_manager.hpp"
 #include "duckdb/main/database_path_and_type.hpp"
 #include "duckdb/main/db_instance_cache.hpp"
 #include "duckdb/main/error_manager.hpp"
@@ -58,7 +63,7 @@ DBConfig::DBConfig() {
 	index_types = make_uniq<IndexTypeSet>();
 	error_manager = make_uniq<ErrorManager>();
 	secret_manager = make_uniq<SecretManager>();
-	http_util = make_shared_ptr<HTTPUtil>();
+	http_transport_manager = HTTPTransportManager::Create(make_shared_ptr<HTTPUtil>());
 	callback_manager = make_uniq<ExtensionCallbackManager>();
 }
 
@@ -68,7 +73,7 @@ DBConfig::DBConfig(bool read_only) : DBConfig::DBConfig() {
 	}
 }
 
-DBConfig::DBConfig(const case_insensitive_map_t<Value> &config_dict, bool read_only) : DBConfig::DBConfig(read_only) {
+DBConfig::DBConfig(const identifier_map_t<Value> &config_dict, bool read_only) : DBConfig::DBConfig(read_only) {
 	SetOptionsByName(config_dict);
 }
 
@@ -78,6 +83,7 @@ DBConfig::~DBConfig() {
 DatabaseInstance::DatabaseInstance() : db_validity(*this) {
 	config.is_user_config = false;
 	create_api_v1 = nullptr;
+	invoke_capi_v2 = nullptr;
 	parser_cache = make_uniq<ParserCache>();
 	execution_region_manager = make_uniq<ExecutionRegionManager>(*this);
 }
@@ -95,6 +101,7 @@ DatabaseInstance::~DatabaseInstance() {
 	if (db_manager) {
 		db_manager->ResetDatabases();
 	}
+	config.http_transport_manager->Close();
 	// destroy child elements
 	connection_manager.reset();
 	object_cache.reset();
@@ -130,6 +137,20 @@ DatabaseManager &DatabaseInstance::GetDatabaseManager() {
 		throw InternalException("Missing DB manager");
 	}
 	return *db_manager;
+}
+
+ExternalResourceTypeRegistry &DatabaseInstance::GetExternalResourceTypeRegistry() {
+	if (!external_resource_type_registry) {
+		throw InternalException("Missing external resource type registry");
+	}
+	return *external_resource_type_registry;
+}
+
+ExternalResourcesManager &DatabaseInstance::GetExternalResourcesManager() {
+	if (!external_resources_manager) {
+		throw InternalException("Missing external resources manager");
+	}
+	return *external_resources_manager;
 }
 
 Catalog &Catalog::GetSystemCatalog(DatabaseInstance &db) {
@@ -221,15 +242,16 @@ void DatabaseInstance::CreateMainDatabase() {
 	Connection con(*this);
 	con.BeginTransaction();
 	AttachOptions options(config.options);
+	options.options = config.options.main_database_options;
 	options.is_main_database = true;
 	db_manager->AttachDatabase(*con.context, info, options);
 	con.Commit();
 }
 
-static void ThrowExtensionSetUnrecognizedOptions(const case_insensitive_map_t<Value> &unrecognized_options) {
+static void ThrowExtensionSetUnrecognizedOptions(const identifier_map_t<Value> &unrecognized_options) {
 	D_ASSERT(!unrecognized_options.empty());
 
-	vector<string> options;
+	vector<duckdb::Identifier> options;
 	for (auto &kv : unrecognized_options) {
 		options.push_back(kv.first);
 	}
@@ -250,7 +272,6 @@ void DatabaseInstance::LoadExtensionSettings() {
 		Connection con(*this);
 		con.BeginTransaction();
 
-		vector<string> extension_options;
 		for (auto &option : unrecognized_options_copy) {
 			auto &name = option.first;
 			auto &value = option.second;
@@ -271,8 +292,7 @@ void DatabaseInstance::LoadExtensionSettings() {
 			// if the extension provided the option, it should no longer be unrecognized.
 			D_ASSERT(config.options.unrecognized_options.find(name) == config.options.unrecognized_options.end());
 			auto &context = *con.context;
-			PhysicalSet::SetExtensionVariable(context, extension_option, name, SetScope::GLOBAL, value);
-			extension_options.push_back(name);
+			PhysicalSet::SetExtensionVariable(context, extension_option, SetScope::GLOBAL, value);
 		}
 
 		con.Commit();
@@ -294,12 +314,17 @@ void DatabaseInstance::Initialize(const char *database_path, DBConfig *user_conf
 	}
 
 	Configure(*config_ptr, database_path);
+	// publish what this binary links, unless the config already carries a set handed to us
+	ExtensionHelper::RegisterLinkedExtensions(config);
 
 	create_api_v1 = CreateAPIv1Wrapper;
+	invoke_capi_v2 = InvokeCAPIV2Entrypoint;
 
 	db_file_system = make_uniq<DatabaseFileSystem>(*this);
 	local_db_file_system = make_uniq<LocalDatabaseFileSystem>(*this);
 	db_manager = make_uniq<DatabaseManager>(*this);
+	external_resource_type_registry = make_uniq<ExternalResourceTypeRegistry>();
+	external_resources_manager = make_uniq<ExternalResourcesManager>();
 	if (config.buffer_manager) {
 		buffer_manager = config.buffer_manager;
 	} else {
@@ -344,7 +369,7 @@ void DatabaseInstance::Initialize(const char *database_path, DBConfig *user_conf
 
 	LoadExtensionSettings();
 
-	if (!db_manager->HasDefaultDatabase()) {
+	if (!db_manager->HasAttachedDatabase()) {
 		CreateMainDatabase();
 	}
 
@@ -426,8 +451,7 @@ LocalDatabaseFileSystem::LocalDatabaseFileSystem(DatabaseInstance &db_p)
 }
 
 FileSystem &LocalDatabaseFileSystem::GetFileSystem() const {
-	auto &vfs = static_cast<VirtualFileSystem &>(*db.config.file_system);
-	if (vfs.SubSystemIsDisabled(local_fs.GetName())) {
+	if (db.config.file_system->SubSystemIsDisabled(local_fs.GetName())) {
 		throw PermissionException("File system %s has been disabled by configuration", local_fs.GetName());
 	}
 	return local_fs;
@@ -468,6 +492,9 @@ Allocator &Allocator::Get(AttachedDatabase &db) {
 void DatabaseInstance::Configure(DBConfig &new_config, const char *database_path) {
 	config.options = new_config.options;
 	config.user_settings = new_config.user_settings;
+	// carry over a capability set handed to us, so a database created by code with its own copy of
+	// DuckDB can be given the extensions the binary that created it links
+	config.linked_extensions = new_config.linked_extensions;
 
 	if (Settings::Get<DuckDBAPISetting>(*this).empty()) {
 		config.SetOptionByName("duckdb_api", "cpp");
@@ -495,6 +522,7 @@ void DatabaseInstance::Configure(DBConfig &new_config, const char *database_path
 	} else {
 		config.file_system = make_uniq<VirtualFileSystem>(FileSystem::CreateLocal());
 	}
+	config.http_transport_manager->Initialize(DBConfig::GetSystemMaxThreads(*config.file_system));
 	if (database_path && !Settings::Get<EnableExternalAccessSetting>(*this)) {
 		config.AddAllowedPath(database_path);
 		config.AddAllowedPath(database_path + string(".wal"));
@@ -562,7 +590,7 @@ const DBConfig &DBConfig::GetConfig(const ClientContext &context) {
 }
 
 idx_t DatabaseInstance::NumberOfThreads() {
-	return NumericCast<idx_t>(scheduler->NumberOfThreads());
+	return scheduler->NumberOfThreads();
 }
 
 idx_t DuckDB::NumberOfThreads() {
@@ -577,7 +605,7 @@ bool DuckDB::ExtensionIsLoaded(const std::string &name) {
 	return instance->ExtensionIsLoaded(name);
 }
 
-SettingLookupResult DatabaseInstance::TryGetCurrentSetting(const string &key, Value &result) const {
+SettingLookupResult DatabaseInstance::TryGetCurrentSetting(const Identifier &key, Value &result) const {
 	// check the session values
 	auto &db_config = DBConfig::GetConfig(*this);
 	return db_config.TryGetCurrentSetting(key, result);
@@ -638,6 +666,13 @@ ValidChecker &DatabaseInstance::GetValidChecker() {
 const duckdb_ext_api_v1 DatabaseInstance::GetExtensionAPIV1() {
 	D_ASSERT(create_api_v1);
 	return create_api_v1();
+}
+
+void DatabaseInstance::InvokeExtensionEntrypointV2(const ExtensionInitResult &init_result, const string &extension_name,
+                                                   ext_init_c_api_v2_fun_t init_fun,
+                                                   optional_ptr<ClientContext> context, bool statically_linked) {
+	D_ASSERT(invoke_capi_v2);
+	invoke_capi_v2(*this, init_result, extension_name, init_fun, context, statically_linked);
 }
 
 LogManager &DatabaseInstance::GetLogManager() const {

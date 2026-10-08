@@ -168,19 +168,6 @@ static bool TryExpressionFiltersNullValuesInternal(const Expression &expression,
 		return TryExpressionFiltersNullValuesInternal(*data.child_filter_expr, filters_nulls, filters_valid_values,
 		                                              cacheable);
 	}
-	if (function_name == PerfectHashJoinScalarFun::NAME) {
-		if (!func_expr->BindInfo()) {
-			cacheable = false;
-			return true;
-		}
-		auto &data = func_expr->BindInfo()->Cast<PerfectHashJoinFunctionData>();
-		if (!data.executor) {
-			cacheable = false;
-			return true;
-		}
-		filters_nulls = true;
-		return true;
-	}
 	if (function_name == PrefixRangeScalarFun::NAME) {
 		if (!func_expr->BindInfo()) {
 			cacheable = false;
@@ -191,7 +178,7 @@ static bool TryExpressionFiltersNullValuesInternal(const Expression &expression,
 			cacheable = false;
 			return true;
 		}
-		filters_nulls = true;
+		filters_nulls = data.filters_null_values;
 		return true;
 	}
 	if (function_name == DynamicFilterScalarFun::NAME) {

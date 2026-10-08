@@ -18,11 +18,13 @@
 #include "duckdb/common/types/data_chunk.hpp"
 #include "duckdb/parser/parsed_data/sample_options.hpp"
 #include "duckdb/planner/table_filter_set.hpp"
+#include "duckdb/common/enums/scan_options.hpp"
 #include "duckdb/storage/storage_index.hpp"
 #include "duckdb/planner/table_filter_state.hpp"
 
 namespace duckdb {
 class AdaptiveFilter;
+class AsyncTask;
 class ColumnSegment;
 class LocalTableStorage;
 class CollectionScanState;
@@ -203,8 +205,19 @@ public:
 		return pruning_filter_list;
 	}
 
+	//! The filters evaluated per row: the pruning filters, unless the scan carries a separate residual subset
 	const vector<ScanFilter> &GetResidualFilterList() const {
 		return separate_residual_filters ? residual_filter_list : pruning_filter_list;
+	}
+	bool HasSeparateResidualFilters() const {
+		return separate_residual_filters;
+	}
+	//! The filter set used for pruning (including the multi-column filters, which only prune)
+	optional_ptr<const TableFilterSet> GetTableFilters() const {
+		return pruning_filters.get();
+	}
+	optional_ptr<const vector<StorageIndex>> GetColumnIds() const {
+		return column_ids;
 	}
 
 	optional_ptr<AdaptiveFilter> GetAdaptiveFilter();
@@ -223,6 +236,8 @@ public:
 	//! Labels the filters for this specific column as always true
 	//! We do not need to execute them anymore until CheckAllFilters is called
 	void SetFilterAlwaysTrue(idx_t filter_idx);
+	//! Labels a separate residual filter as always true until CheckAllFilters is called
+	void SetResidualFilterAlwaysTrue(idx_t filter_idx);
 
 private:
 	void InitializeFilterList(ClientContext &context, TableFilterSet &filters, const vector<StorageIndex> &column_ids,
@@ -231,9 +246,12 @@ private:
 	                          optional_ptr<const vector<idx_t>> kernel_filter_indices = nullptr);
 	void InitializeResidualFilterMetadata(ClientContext &context, TableFilterSet &filters,
 	                                      const vector<StorageIndex> &column_ids);
+	void MarkRowLevelFilterAlwaysTrue(ScanFilter &filter);
 
 	//! The filters used to skip row groups and column segments.
 	optional_ptr<TableFilterSet> pruning_filters;
+	//! Maps scan projection indexes to storage column indexes
+	optional_ptr<const vector<StorageIndex>> column_ids;
 	//! Adaptive filter info (if any)
 	unique_ptr<AdaptiveFilter> adaptive_filter;
 	vector<ScanFilter> pruning_filter_list;
@@ -245,8 +263,37 @@ private:
 	unsafe_vector<bool> column_has_filter;
 	//! Whether or not the column has a filter active at all
 	unsafe_vector<bool> base_column_has_filter;
-	//! The amount of filters that are always true currently
+	//! The amount of row-level (residual) filters that are always true currently
 	idx_t always_true_filters = 0;
+};
+
+enum class VectorPrepareState : uint8_t {
+	//! No vector is currently prepared for processing
+	NONE,
+	//! A vector is prepared for processing
+	PREPARED,
+	//! A vector is prepared and its I/O has been registered
+	IO_REGISTERED
+};
+
+//! Eligibility state of one vector, computed by RowGroup::PrepareScan and consumed by ProcessPreparedScan
+struct PreparedScanVector {
+	PreparedScanVector();
+
+	//! The prepare state of the current vector
+	VectorPrepareState prepare_state = VectorPrepareState::NONE;
+	//! The number of rows in the prepared vector
+	idx_t max_count = 0;
+	//! The number of rows visible to the transaction (held in CollectionScanState::valid_sel)
+	idx_t visible_count = 0;
+	//! Whether the prepared vector has a system sample selection
+	bool has_sample_selection = false;
+	//! The number of sampled rows (held in sample_sel)
+	idx_t sample_count = 0;
+	//! The system sample selection
+	SelectionVector sample_sel;
+
+	void Reset();
 };
 
 class CollectionScanState {
@@ -273,6 +320,12 @@ public:
 	optional_idx row_number_base;
 	//! The valid selection
 	SelectionVector valid_sel;
+	//! The currently prepared vector (see RowGroup::PrepareScan)
+	PreparedScanVector prepared_vector;
+	//! Whether scan I/O for the current row group assignment has been registered
+	bool assignment_io_registered = false;
+	//! Whether the column scans of the current assignment still have to be initialized
+	bool column_scans_pending = false;
 
 	RandomEngine random;
 
@@ -292,7 +345,21 @@ public:
 	optional_ptr<SegmentNode<RowGroup>> GetNextRowGroup(SegmentLock &l, SegmentNode<RowGroup> &row_group) const;
 	optional_ptr<SegmentNode<RowGroup>> GetRootSegment() const;
 	bool Scan(DuckTransaction &transaction, DataChunk &result);
+	bool Scan(ScanOptions options, DataChunk &result, optional_ptr<SegmentLock> l = nullptr);
 	bool Scan(DataChunk &result, TableScanType type, optional_ptr<SegmentLock> l = nullptr);
+	//! Prepares the next eligible vector, collecting its I/O tasks, or the remaining assignment's when registering it
+	bool PrepareScanIO(DuckTransaction &transaction, vector<unique_ptr<AsyncTask>> &tasks,
+	                   bool register_assignment = false);
+	//! Rows of the assignment left to scan from the current vector onwards
+	idx_t RemainingAssignmentRows() const;
+	//! Initializes the column scans a claim deferred
+	void InitializeColumnScans();
+	//! Processes the vector prepared by PrepareScanIO
+	void ProcessPreparedScan(DuckTransaction &transaction, DataChunk &result);
+
+private:
+	//! Registers the remaining assignment's scan I/O, returning the async tasks that execute it
+	vector<unique_ptr<AsyncTask>> RegisterAssignmentIO();
 
 private:
 	TableScanState &parent;
@@ -301,22 +368,19 @@ private:
 struct ScanSamplingInfo {
 	//! Whether or not to do a system sample during scanning
 	bool do_system_sample = false;
-	//! The sampling rate to use
+	//! The sampling rate to use (for percentage-based sampling)
 	double sample_rate;
+	//! The seeded phase used for row-count based systematic sampling
+	double sample_phase = 0;
+	//! Whether the sampling is row-count based or percentage-based
+	bool is_percentage = false;
+	//! Target number of rows to sample (for row-count based sampling)
+	idx_t target_sample_rows = 0;
 };
 
 struct TableScanOptions {
 	//! Fetch rows one-at-a-time instead of using the regular scans.
 	bool force_fetch_row = false;
-};
-
-class CheckpointLock {
-public:
-	explicit CheckpointLock(unique_ptr<StorageLockKey> lock_p) : lock(std::move(lock_p)) {
-	}
-
-private:
-	unique_ptr<StorageLockKey> lock;
 };
 
 class TableScanState {
@@ -330,8 +394,6 @@ public:
 	CollectionScanState local_state;
 	//! Options for scanning
 	TableScanOptions options;
-	//! Shared lock over the checkpoint to prevent checkpoints while reading
-	shared_ptr<CheckpointLock> checkpoint_lock;
 	//! Filter info
 	ScanFilterInfo filters;
 	//! Sampling info
@@ -340,22 +402,27 @@ public:
 public:
 	void Initialize(vector<StorageIndex> column_ids, optional_ptr<ClientContext> context = nullptr,
 	                optional_ptr<TableFilterSet> table_filters = nullptr,
-	                optional_ptr<SampleOptions> table_sampling = nullptr,
+	                optional_ptr<SampleOptions> table_sampling = nullptr, idx_t estimated_table_row_count = 0,
 	                TableFilterExecutionMode filter_execution_mode = TableFilterExecutionMode::FILTER_AND_PRUNE,
 	                optional_ptr<const TableFilterKernelProvider> kernel_provider = nullptr,
 	                optional_ptr<const vector<idx_t>> kernel_filter_indices = nullptr);
 	void InitializeWithSeparateResidualFilters(vector<StorageIndex> column_ids, ClientContext &context,
 	                                           TableFilterSet &pruning_filters, TableFilterSet &residual_filters,
-	                                           optional_ptr<SampleOptions> table_sampling = nullptr);
+	                                           optional_ptr<SampleOptions> table_sampling = nullptr,
+	                                           idx_t estimated_table_row_count = 0);
 
 	const vector<StorageIndex> &GetColumnIds();
 
 	ScanFilterInfo &GetFilterInfo();
 
 	ScanSamplingInfo &GetSamplingInfo();
+	//! Initializes the column scans a claim deferred, for whichever collection holds the assignment
+	void InitializeColumnScans();
+	//! Rows scanned from persistent and transaction-local storage
+	idx_t RowsScanned() const;
 
 private:
-	void InitializeSampling(optional_ptr<SampleOptions> table_sampling);
+	void InitializeSampling(optional_ptr<SampleOptions> table_sampling, idx_t estimated_table_row_count);
 
 	//! The column identifiers of the scan
 	vector<StorageIndex> column_ids;
@@ -395,8 +462,6 @@ struct ParallelTableScanState {
 	ParallelCollectionScanState scan_state;
 	//! Parallel scan state for the transaction-local state
 	ParallelCollectionScanState local_state;
-	//! Shared lock over the checkpoint to prevent checkpoints while reading
-	shared_ptr<CheckpointLock> checkpoint_lock;
 };
 
 struct PrefetchState {

@@ -12,7 +12,6 @@
 #include "sljit_direct_projection_fixed_fused_runtime.hpp"
 #include "sljit_direct_projection_fixed_materialization_runtime.hpp"
 #include "sljit_direct_projection_fixed_source_runtime.hpp"
-#include "sljit_direct_projection_floating_runtime.hpp"
 #include "sljit_filter_runtime.hpp"
 #include "sljit_inline_string_decompress_projection_runtime.hpp"
 #include "sljit_projection_expression_runtime.hpp"
@@ -30,17 +29,7 @@ static void SljitExecuteProjection(SCRATCH &scratch, idx_t op_idx, SljitExecutab
 	if (!execute_sel && SljitTryFastInlineStringDecompressProjection(op, input, output, count)) {
 		return;
 	}
-	auto &projection_scratch = scratch.ProjectionScratch(op_idx);
-	auto fused_projection_executed =
-	    ExecuteFlatFusedFloatingProjection(op, input, output, execute_sel, count, projection_scratch);
-	if (fused_projection_executed && op.flat_fused_floating_projection_plan.covers_all_projections) {
-		output.SetChildCardinality(count);
-		return;
-	}
 	for (idx_t col_idx = 0; col_idx < op.projections.size(); col_idx++) {
-		if (fused_projection_executed && projection_scratch.fused[col_idx]) {
-			continue;
-		}
 		SljitExecuteProjectionExpression(op.projections[col_idx], input, output.data[col_idx], execute_sel, count,
 		                                 scratch.ExpressionAdapterScratch(op_idx, col_idx));
 	}

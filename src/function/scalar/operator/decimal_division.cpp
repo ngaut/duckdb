@@ -53,6 +53,7 @@ static void DecimalDivExecute(DataChunk &args, ExpressionState &state, Vector &r
 	} else {
 		scale_factor = Hugeint::POWERS_OF_TEN[abs_exp];
 	}
+	auto result_width = DecimalType::GetWidth(result.GetType());
 
 	BinaryExecutor::Execute<INPUT_TYPE, INPUT_TYPE, RESULT_TYPE>(
 	    args.data[0], args.data[1], result, args.size(), [&](INPUT_TYPE a, INPUT_TYPE b) -> RESULT_TYPE {
@@ -87,17 +88,43 @@ static void DecimalDivExecute(DataChunk &args, ExpressionState &state, Vector &r
 			    abs_div = divisor.upper < 0 ? -divisor : divisor;
 		    }
 
-		    COMPUTE_TYPE q;
+		    COMPUTE_TYPE q, remainder;
 		    if constexpr (std::is_same_v<COMPUTE_TYPE, int64_t>) {
 			    q = abs_num / abs_div;
+			    remainder = abs_num % abs_div;
 		    } else {
-			    if (abs_div.upper == 0) {
+			    if (abs_div.upper == 0 && abs_div.lower <= uint64_t(NumericLimits<int64_t>::Maximum())) {
 				    uint64_t r64;
 				    q = Hugeint::DivModPositive(abs_num, abs_div.lower, r64);
+				    remainder = hugeint_t(int64_t(r64));
 			    } else {
-				    hugeint_t r;
-				    q = Hugeint::DivMod(abs_num, abs_div, r);
+				    q = Hugeint::DivMod(abs_num, abs_div, remainder);
 			    }
+		    }
+
+		    auto distance_to_next = abs_div - remainder;
+		    bool quotient_is_odd;
+		    if constexpr (std::is_same_v<COMPUTE_TYPE, int64_t>) {
+			    quotient_is_odd = q % 2 != 0;
+		    } else {
+			    quotient_is_odd = q.lower % 2 != 0;
+		    }
+		    if (remainder > distance_to_next || (remainder == distance_to_next && quotient_is_odd)) {
+			    if constexpr (std::is_same_v<COMPUTE_TYPE, int64_t>) {
+				    q++;
+			    } else if (!Hugeint::TryAddInPlace(q, hugeint_t(1))) {
+				    throw OutOfRangeException("decimal_division: result out of range for result type");
+			    }
+		    }
+
+		    bool result_out_of_range;
+		    if constexpr (std::is_same_v<COMPUTE_TYPE, int64_t>) {
+			    result_out_of_range = q >= NumericHelper::POWERS_OF_TEN[result_width];
+		    } else {
+			    result_out_of_range = q >= Hugeint::POWERS_OF_TEN[result_width];
+		    }
+		    if (result_out_of_range) {
+			    throw OutOfRangeException("decimal_division: result out of range for result type");
 		    }
 
 		    COMPUTE_TYPE final_val = negative ? -q : q;
@@ -149,14 +176,8 @@ static unique_ptr<FunctionData> DecimalDivisionBind(BindScalarFunctionInput &inp
 
 	uint8_t result_scale;
 	if (arguments.size() == 3) {
-		if (!arguments[2]->IsFoldable()) {
-			throw NotImplementedException("decimal_division: scale argument must be a constant integer");
-		}
-		Value scale_val = ExpressionExecutor::EvaluateScalar(input.GetClientContext(), *arguments[2]);
-		if (scale_val.IsNull()) {
-			throw InvalidInputException("decimal_division: scale argument must not be NULL");
-		}
-		int32_t scale_i = scale_val.GetValue<int32_t>();
+		auto scale_val = input.GetNonNullConstant(2);
+		auto scale_i = scale_val.GetValue<int32_t>();
 		if (scale_i < 0 || scale_i > Decimal::MAX_WIDTH_DECIMAL) {
 			throw InvalidInputException("decimal_division: scale must be between 0 and %d, got %d",
 			                            Decimal::MAX_WIDTH_DECIMAL, scale_i);
@@ -273,13 +294,16 @@ ScalarFunctionSet DecimalDivisionFun::GetFunctions() {
 	auto decimal_type = LogicalType(LogicalTypeId::DECIMAL);
 	ScalarFunctionSet set("decimal_division");
 
-	ScalarFunction two_arg({decimal_type, decimal_type}, decimal_type,
-	                       DecimalDivExecute<hugeint_t, hugeint_t, hugeint_t>, DecimalDivisionBind);
+	ScalarFunction two_arg({}, decimal_type, DecimalDivExecute<hugeint_t, hugeint_t, hugeint_t>, DecimalDivisionBind);
+	two_arg.GetSignature().AddParameter("x", decimal_type).AddParameter("y", decimal_type);
 	two_arg.SetFallible();
 	set.AddFunction(two_arg);
 
-	ScalarFunction three_arg({decimal_type, decimal_type, LogicalType::INTEGER}, decimal_type,
-	                         DecimalDivExecute<hugeint_t, hugeint_t, hugeint_t>, DecimalDivisionBind);
+	ScalarFunction three_arg({}, decimal_type, DecimalDivExecute<hugeint_t, hugeint_t, hugeint_t>, DecimalDivisionBind);
+	three_arg.GetSignature()
+	    .AddParameter("x", decimal_type)
+	    .AddParameter("y", decimal_type)
+	    .AddParameter("scale", LogicalType::INTEGER);
 	three_arg.SetFallible();
 	set.AddFunction(three_arg);
 

@@ -25,9 +25,21 @@ class TableCatalogEntry;
 template <class T>
 struct SegmentNode;
 class RowGroupSegmentTree;
-class CheckpointLock;
 
 struct TableAppendState;
+
+struct SuballocationBlock {
+	//! The current block being allocated from.
+	shared_ptr<BlockHandle> block;
+	//! The block id
+	block_id_t block_id = INVALID_BLOCK;
+	//! The offset into the block
+	idx_t allocated = 0;
+
+	unique_ptr<ColumnSegment> CreateTransientSegment(DatabaseInstance &db, const CompressionFunction &function,
+	                                                 const LogicalType &type, const idx_t segment_size,
+	                                                 BlockManager &block_manager);
+};
 
 struct ColumnAppendState {
 	//! The current segment of the append
@@ -42,6 +54,8 @@ struct ColumnAppendState {
 	unique_ptr<BaseStatistics> append_stats;
 	//! Stats for the full append to this column
 	unique_ptr<BaseStatistics> full_append_stats;
+	//! The optional block to use for transient allocations
+	optional_ptr<SuballocationBlock> transient;
 
 public:
 	void InitializeStats(const LogicalType &type);
@@ -75,10 +89,8 @@ struct RowGroupAppendState {
 	unsafe_unique_array<ColumnAppendState> states;
 	//! Offset within the row_group
 	idx_t offset_in_row_group;
-};
-
-struct IndexLock {
-	unique_lock<mutex> index_lock;
+	//! A sub-allocation block for transient storage
+	SuballocationBlock transient;
 };
 
 struct TableAppendState {
@@ -87,7 +99,6 @@ struct TableAppendState {
 
 	RowGroupAppendState row_group_append_state;
 	unique_lock<mutex> append_lock;
-	shared_ptr<CheckpointLock> table_lock;
 	row_t row_start;
 	row_t current_row;
 	//! The total number of rows appended by the append operation

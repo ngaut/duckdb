@@ -108,13 +108,11 @@ SljitNativeRegionExpressionPlan SljitNativeRegionExpressionPlan::Copy(bool copy_
 	result.predicate = predicate ? predicate->Copy() : nullptr;
 	const bool copy_expression_tree =
 	    expression_tree &&
-	    (copy_auxiliary_expression_tree || kind == SljitNativeRegionExpressionKind::EXPRESSION_TREE ||
-	     kind == SljitNativeRegionExpressionKind::TYPED_EXPRESSION_TREE);
+	    (copy_auxiliary_expression_tree || kind == SljitNativeRegionExpressionKind::TYPED_EXPRESSION_TREE);
 	if (copy_expression_tree) {
 		result.expression_tree = expression_tree->Copy();
 		result.expression_tree_source_indices = expression_tree_source_indices;
 	}
-	result.constant_or_null = constant_or_null;
 	result.references_region_input = references_region_input;
 	result.emit_flat_nullable_fast_path = emit_flat_nullable_fast_path;
 	if (copy_ir) {

@@ -133,15 +133,6 @@ private:
 			throw InternalException("SLJIT hash join build sink could not materialize selected hash join input");
 		}
 		projected.Reset();
-		if (SljitTryMaterializeHashJoinRequiredProjectionOutputs(
-		        runtime, ops, scratch, selected.hash_join_idx, projection_idx, projection_op, join_input,
-		        selected.MatchSelection(), selected.RowPointers(), join_output, projected, required_columns,
-		        selected.output_proof)) {
-			RecordSljitRegionRuntimePath(runtime, hash_join_op.kind, "projected_hash_build_outputs", projected.size());
-			sink_input = &projected;
-			return true;
-		}
-		projected.Reset();
 		auto projection_stage_start = SljitRegionStageStart(runtime);
 		SljitExecuteProjection(scratch, projection_idx, projection_op, join_output, projected);
 		RecordSljitRegionStageRuntime(runtime, projection_idx, projection_op.kind, "hash_build_projection",

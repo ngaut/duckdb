@@ -19,30 +19,10 @@ enum class SljitGroupedAggregateUpdateStrategyKind : uint8_t {
 	INVALID,
 	COUNT_STAR_PREAGGREGATION,
 	DIRECT_PRIMITIVE_PAYLOAD_UPDATE,
-	FILTERED_PRIMITIVE_PAYLOAD_UPDATE,
-	DISTINCT_KEY_SINK
+	FILTERED_PRIMITIVE_PAYLOAD_UPDATE
 };
 
 enum class SljitGroupedAggregateUpdateInputKind : uint8_t { MATERIALIZED, PROJECTED_INPUT };
-
-//! Whether a grouped-update strategy tolerates a mid-query runner handoff.
-//! DISTINCT_KEY_SINK counts inline off the dedup hash table's new-key signal —
-//! an exclusive claim over the pipeline's counting that the vectorized
-//! continuation cannot see, so rows it sinks after a handoff would never be
-//! counted. Every strategy must be classified here: the execution kernel
-//! derives its handoff capability from this single authority.
-static bool SljitGroupedAggregateUpdateStrategySupportsRunnerHandoff(SljitGroupedAggregateUpdateStrategyKind kind) {
-	switch (kind) {
-	case SljitGroupedAggregateUpdateStrategyKind::INVALID:
-	case SljitGroupedAggregateUpdateStrategyKind::COUNT_STAR_PREAGGREGATION:
-	case SljitGroupedAggregateUpdateStrategyKind::DIRECT_PRIMITIVE_PAYLOAD_UPDATE:
-	case SljitGroupedAggregateUpdateStrategyKind::FILTERED_PRIMITIVE_PAYLOAD_UPDATE:
-		return true;
-	case SljitGroupedAggregateUpdateStrategyKind::DISTINCT_KEY_SINK:
-		return false;
-	}
-	throw InternalException("grouped aggregate update strategy is not classified for runner handoff");
-}
 
 struct SljitGroupedAggregateUpdatePrimitive {
 	idx_t aggregate_idx = DConstants::INVALID_INDEX;
@@ -52,7 +32,6 @@ struct SljitGroupedAggregateUpdatePrimitive {
 	SljitGroupedAggregateUpdateStrategyKind strategy = SljitGroupedAggregateUpdateStrategyKind::INVALID;
 	SljitGroupedAggregateUpdateInputKind input_kind = SljitGroupedAggregateUpdateInputKind::MATERIALIZED;
 	shared_ptr<SljitExecutableRegionOp> projected_count_star_group_projection;
-	shared_ptr<SljitExecutableRegionOp> projected_distinct_key_input_projection;
 	shared_ptr<SljitProjectedInputGroupedAggregateDescriptor> projected_direct_update;
 };
 
@@ -100,14 +79,6 @@ static bool SljitGroupedAggregateUpdateCanUseDirectPrimitivePayloadUpdate(const 
 	return !sink_info.groups.empty() && sink_info.aggregates.size() == op.aggregate_update.payloads.size();
 }
 
-static bool SljitGroupedAggregateUpdateCanUseDistinctKeySink(const SljitExecutableRegionOp &op) {
-	if (op.kind != SljitNativeRegionOpKind::AGGREGATE_UPDATE ||
-	    op.aggregate_update.plan.sink_info.kind != ExecutionRegionSinkKind::HASH_AGGREGATE_UPDATE) {
-		return false;
-	}
-	return SljitAggregateSinkCanUseDistinctKeySink(op.aggregate_update.plan.sink_info);
-}
-
 static bool SljitCanBindFilteredGroupedAggregateUpdatePrimitive(const vector<SljitExecutableRegionOp> &ops,
                                                                 idx_t filter_idx, idx_t aggregate_idx) {
 	if (filter_idx >= ops.size() || ops[filter_idx].kind != SljitNativeRegionOpKind::FILTER ||
@@ -129,9 +100,6 @@ SljitChooseGroupedAggregateUpdateStrategy(const SljitExecutableRegionOp &op) {
 	}
 	if (SljitGroupedAggregateUpdateCanUseDirectPrimitivePayloadUpdate(op)) {
 		return SljitGroupedAggregateUpdateStrategyKind::DIRECT_PRIMITIVE_PAYLOAD_UPDATE;
-	}
-	if (SljitGroupedAggregateUpdateCanUseDistinctKeySink(op)) {
-		return SljitGroupedAggregateUpdateStrategyKind::DISTINCT_KEY_SINK;
 	}
 	return SljitGroupedAggregateUpdateStrategyKind::INVALID;
 }

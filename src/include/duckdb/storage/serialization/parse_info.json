@@ -21,6 +21,11 @@
     "includes": [
       "duckdb/parser/parsed_data/alter_info.hpp"
     ],
+    "finalize_deserialization": [
+      "if (!qualified_name.Path().empty()) {",
+      "\tresult->SetQualifiedName(std::move(qualified_name));",
+      "}"
+    ],
     "members": [
       {
         "id": 200,
@@ -30,16 +35,19 @@
       {
         "id": 201,
         "name": "catalog",
+        "serialize_property": "qualified_name.Catalog()",
         "type": "Identifier"
       },
       {
         "id": 202,
         "name": "schema",
+        "serialize_property": "qualified_name.Schema()",
         "type": "Identifier"
       },
       {
         "id": 203,
         "name": "name",
+        "serialize_property": "qualified_name.Name()",
         "type": "Identifier"
       },
       {
@@ -51,8 +59,26 @@
         "id": 205,
         "name": "allow_internal",
         "type": "bool"
+      },
+      {
+        "id": 206,
+        "name": "qualified_name",
+        "serialize_property": "qualified_name",
+        "deserialize_property": "qualified_name",
+        "type": "QualifiedName",
+        "version": "v2.0.0",
+        "serialize_condition": "qualified_name.Path().size() > 3",
+        "deserialize_default": "QualifiedName()",
+        "deserialize_skip_assign": true
       }
-    ]
+    ],
+    "methods": {
+      "SetQualifiedName": [
+        "catalog",
+        "schema",
+        "name"
+      ]
+    }
   },
   {
     "class": "AlterTableInfo",
@@ -129,6 +155,11 @@
       {
         "id": 401,
         "name": "if_column_not_exists",
+        "type": "bool"
+      },
+      {
+        "id": 402,
+        "name": "add_not_null",
         "type": "bool"
       }
     ],
@@ -485,16 +516,19 @@
       {
         "id": 200,
         "name": "catalog",
+        "serialize_property": "qualified_name.Catalog()",
         "type": "Identifier"
       },
       {
         "id": 201,
         "name": "schema",
+        "serialize_property": "qualified_name.Schema()",
         "type": "Identifier"
       },
       {
         "id": 202,
         "name": "table",
+        "serialize_property": "qualified_name.Name()",
         "type": "Identifier"
       },
       {
@@ -520,7 +554,7 @@
       {
         "id": 207,
         "name": "options",
-        "type": "case_insensitive_map_t<vector<Value>>"
+        "type": "identifier_map_t<vector<Value>>"
       },
       {
         "id": 208,
@@ -531,8 +565,41 @@
         "id": 209,
         "name": "is_format_auto_detected",
         "type": "bool"
+      },
+      {
+        "id": 210,
+        "name": "file_path_expression",
+        "type": "ParsedExpression*"
+      },
+      {
+        "id": 211,
+        "name": "parsed_options",
+        "type": "identifier_map_t<ParsedExpression*>"
+      },
+      {
+        "id": 212,
+        "name": "qualified_name",
+        "serialize_property": "qualified_name",
+        "deserialize_property": "qualified_name",
+        "type": "QualifiedName",
+        "version": "v2.0.0",
+        "serialize_condition": "qualified_name.Path().size() > 3",
+        "deserialize_default": "QualifiedName()",
+        "deserialize_skip_assign": true
       }
-    ]
+    ],
+    "finalize_deserialization": [
+      "if (!qualified_name.Path().empty()) {",
+      "\tresult->SetQualifiedName(std::move(qualified_name));",
+      "}"
+    ],
+    "methods": {
+      "SetQualifiedName": [
+        "catalog",
+        "schema",
+        "table"
+      ]
+    }
   },
   {
     "class": "DetachInfo",
@@ -576,6 +643,11 @@
         "id": 202,
         "name": "target_is_local",
         "type": "bool"
+      },
+      {
+        "id": 203,
+        "name": "options",
+        "type": "unordered_map<string, Value>"
       }
     ]
   },
@@ -595,6 +667,11 @@
     "includes": [
       "duckdb/parser/parsed_data/drop_info.hpp"
     ],
+    "finalize_deserialization": [
+      "if (!qualified_name.Path().empty()) {",
+      "\tresult->qualified_name = std::move(qualified_name);",
+      "}"
+    ],
     "members": [
       {
         "id": 200,
@@ -604,16 +681,19 @@
       {
         "id": 201,
         "name": "catalog",
+        "serialize_property": "qualified_name.Catalog()",
         "type": "Identifier"
       },
       {
         "id": 202,
         "name": "schema",
+        "serialize_property": "qualified_name.Schema()",
         "type": "Identifier"
       },
       {
         "id": 203,
         "name": "name",
+        "serialize_property": "qualified_name.Name()",
         "type": "Identifier"
       },
       {
@@ -635,8 +715,26 @@
         "id": 207,
         "name": "extra_drop_info",
         "type": "unique_ptr<ExtraDropInfo>"
+      },
+      {
+        "id": 208,
+        "name": "qualified_name",
+        "serialize_property": "qualified_name",
+        "deserialize_property": "qualified_name",
+        "type": "QualifiedName",
+        "version": "v2.0.0",
+        "serialize_condition": "qualified_name.Path().size() > 3",
+        "deserialize_default": "QualifiedName()",
+        "deserialize_skip_assign": true
       }
-    ]
+    ],
+    "methods": {
+      "SetQualifiedName": [
+        "catalog",
+        "schema",
+        "name"
+      ]
+    }
   },
   {
     "class": "LoadInfo",
@@ -675,6 +773,34 @@
         "id": 205,
         "name": "alias",
         "type": "Identifier"
+      },
+      {
+        "id": 206,
+        "name": "repository_url",
+        "type": "string"
+      },
+      {
+        "id": 207,
+        "name": "public_keys",
+        "type": "vector<string>"
+      },
+      {
+        "id": 208,
+        "name": "on_conflict",
+        "type": "OnCreateConflict",
+        "default": "OnCreateConflict::ERROR_ON_CONFLICT"
+      },
+      {
+        "id": 209,
+        "name": "missing_ok",
+        "type": "bool",
+        "default": "false"
+      },
+      {
+        "id": 210,
+        "name": "load_after_install",
+        "type": "bool",
+        "default": "false"
       }
     ]
   },

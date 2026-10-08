@@ -13,15 +13,34 @@
 
 namespace duckdb {
 
+LogicalType ExecutionHashJoinDictIndexType(uint8_t index_width) {
+	switch (index_width) {
+	case sizeof(uint8_t):
+		return LogicalType::UTINYINT;
+	case sizeof(uint16_t):
+		return LogicalType::USMALLINT;
+	case sizeof(uint32_t):
+		return LogicalType::UINTEGER;
+	default:
+		throw InternalException("Unsupported dict-surviving hash join index width %d", index_width);
+	}
+}
+
 ExecutionHashJoinRowLayout BuildExecutionHashJoinRowLayout(const vector<LogicalType> &condition_types,
                                                            const vector<LogicalType> &payload_types,
-                                                           bool found_match_column_present) {
+                                                           bool found_match_column_present,
+                                                           const vector<uint8_t> &payload_dict_index_widths) {
+	D_ASSERT(payload_dict_index_widths.empty() || payload_dict_index_widths.size() == payload_types.size());
 	ExecutionHashJoinRowLayout result;
 	const auto condition_count = condition_types.size();
 	const auto payload_column_count = payload_types.size();
 
 	vector<LogicalType> layout_types(condition_types);
-	layout_types.insert(layout_types.end(), payload_types.begin(), payload_types.end());
+	for (idx_t payload_idx = 0; payload_idx < payload_column_count; payload_idx++) {
+		const auto index_width = payload_dict_index_widths.empty() ? 0 : payload_dict_index_widths[payload_idx];
+		layout_types.push_back(index_width == 0 ? payload_types[payload_idx]
+		                                        : ExecutionHashJoinDictIndexType(index_width));
+	}
 	if (found_match_column_present) {
 		layout_types.emplace_back(LogicalType::BOOLEAN);
 	}

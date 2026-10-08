@@ -31,33 +31,52 @@ struct ThrowingPayload {
 	}
 };
 
-struct ThrowingCopyKey {
-	explicit ThrowingCopyKey(int value_p) : value(value_p) {
+//! The cache keys its map by reference to the key owned by the LRU list, so inserting never copies a key. Hashing the
+//! key is the remaining user-code failure point during insertion.
+struct ThrowingHashKey {
+	explicit ThrowingHashKey(int value_p) : value(value_p) {
 	}
 
-	ThrowingCopyKey(const ThrowingCopyKey &other) : value(other.value) {
-		if (throw_on_copy) {
-			throw std::runtime_error("key copy failed");
-		}
-	}
-
-	ThrowingCopyKey(ThrowingCopyKey &&) noexcept = default;
-	ThrowingCopyKey &operator=(const ThrowingCopyKey &) = default;
-	ThrowingCopyKey &operator=(ThrowingCopyKey &&) noexcept = default;
-
-	bool operator==(const ThrowingCopyKey &other) const {
+	bool operator==(const ThrowingHashKey &other) const {
 		return value == other.value;
 	}
 
 	int value;
-	static bool throw_on_copy;
 };
 
-bool ThrowingCopyKey::throw_on_copy = false;
-
-struct ThrowingCopyKeyHash {
-	size_t operator()(const ThrowingCopyKey &key) const noexcept {
+struct ThrowingHashKeyHash {
+	size_t operator()(const ThrowingHashKey &key) const {
+		if (throw_on_value == key.value) {
+			throw std::runtime_error("key hash failed");
+		}
 		return std::hash<int> {}(key.value);
+	}
+
+	static int throw_on_value;
+};
+
+int ThrowingHashKeyHash::throw_on_value = -1;
+
+struct MoveOnlyKey {
+	explicit MoveOnlyKey(int value_p) : value(value_p) {
+	}
+	MoveOnlyKey(MoveOnlyKey &&) = default;
+	MoveOnlyKey &operator=(MoveOnlyKey &&) = default;
+	MoveOnlyKey(const MoveOnlyKey &) = delete;
+	MoveOnlyKey &operator=(const MoveOnlyKey &) = delete;
+
+	int value;
+};
+
+struct MoveOnlyKeyHash {
+	size_t operator()(const MoveOnlyKey &key) const {
+		return std::hash<int>()(key.value);
+	}
+};
+
+struct MoveOnlyKeyEqual {
+	bool operator()(const MoveOnlyKey &lhs, const MoveOnlyKey &rhs) const {
+		return lhs.value == rhs.value;
 	}
 };
 
@@ -75,19 +94,21 @@ TEST_CASE("LRU cache insertion is transactional", "[lru_cache]") {
 		REQUIRE(cache.Get("original") == original);
 	}
 
-	SECTION("map insertion failure rolls back the unpublished LRU node") {
-		SharedLruCache<ThrowingCopyKey, TestValue, DefaultPayload, ThrowingCopyKeyHash> cache(1);
+	SECTION("key insertion failure leaves the cache untouched") {
+		SharedLruCache<ThrowingHashKey, TestValue, DefaultPayload, ThrowingHashKeyHash> cache(1);
 		auto original = make_shared_ptr<TestValue>(1);
-		cache.Put(ThrowingCopyKey(1), original);
+		cache.Put(ThrowingHashKey(1), original);
 
-		ThrowingCopyKey::throw_on_copy = true;
-		REQUIRE_THROWS_AS(cache.Put(ThrowingCopyKey(2), make_shared_ptr<TestValue>(2)), std::runtime_error);
-		ThrowingCopyKey::throw_on_copy = false;
+		// depending on the standard library the hash is first computed by the lookup or by the map insertion (which
+		// must roll back the unpublished LRU node) - either way the cache must be unchanged
+		ThrowingHashKeyHash::throw_on_value = 2;
+		REQUIRE_THROWS_AS(cache.Put(ThrowingHashKey(2), make_shared_ptr<TestValue>(2)), std::runtime_error);
+		ThrowingHashKeyHash::throw_on_value = -1;
 
 		REQUIRE(cache.Size() == 1);
 		REQUIRE(cache.CurrentTotalWeight() == 1);
-		REQUIRE(cache.Get(ThrowingCopyKey(1)) == original);
-		REQUIRE(cache.Get(ThrowingCopyKey(2)) == nullptr);
+		REQUIRE(cache.Get(ThrowingHashKey(1)) == original);
+		REQUIRE(cache.Get(ThrowingHashKey(2)) == nullptr);
 	}
 }
 
@@ -204,6 +225,31 @@ TEST_CASE("LRU Cache Eviction", "[lru_cache]") {
 		REQUIRE(cache.Get("key3") != nullptr);
 		REQUIRE(cache.Get("key4") != nullptr);
 	}
+}
+
+TEST_CASE("LRU Cache Move-Only Key", "[lru_cache]") {
+	SharedLruCache<MoveOnlyKey, TestValue, DefaultPayload, MoveOnlyKeyHash, MoveOnlyKeyEqual> cache(2);
+
+	auto val1 = make_shared_ptr<TestValue>(1);
+	auto val2 = make_shared_ptr<TestValue>(2);
+	auto val3 = make_shared_ptr<TestValue>(3);
+	auto val4 = make_shared_ptr<TestValue>(4);
+
+	cache.Put(MoveOnlyKey(1), val1);
+	cache.Put(MoveOnlyKey(2), val2);
+
+	MoveOnlyKey key1(1);
+	REQUIRE(cache.Get(key1)->value == 1);
+
+	cache.Put(MoveOnlyKey(3), val3);
+
+	MoveOnlyKey key2(2);
+	REQUIRE(cache.Get(key2) == nullptr);
+	REQUIRE(cache.Get(key1)->value == 1);
+
+	cache.Put(MoveOnlyKey(1), val4);
+	REQUIRE(cache.Get(key1)->value == 4);
+	REQUIRE(cache.Size() == 2);
 }
 
 TEST_CASE("LRU Cache Unlimited Memory", "[lru_cache]") {

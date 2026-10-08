@@ -128,22 +128,6 @@ bool SljitBuildExecutableAggregateUpdateFallbackPayloadCode(const SljitNativeAgg
 			    payload.double_binary_op, payload.double_source_kind, payload.double_right_source_kind, function,
 			    error);
 			break;
-		case SljitNativeRegionExpressionKind::EXPRESSION_TREE:
-			if (op.use_grouped_state_addresses) {
-				error = "SLJIT grouped aggregate expression-tree reducer is not supported";
-				return false;
-			}
-			if (payload.expression_tree) {
-				if (primitive_kind == AggregatePrimitiveUpdateKind::SUM_INT64) {
-					code = BuildSljitNativeUngroupedSumInt64ExpressionTree(*payload.expression_tree, function, error);
-				} else if (primitive_kind == AggregatePrimitiveUpdateKind::SUM_HUGEINT) {
-					code = BuildSljitNativeUngroupedSumHugeintExpressionTree(*payload.expression_tree, function, error);
-				} else {
-					error = "SLJIT aggregate expression-tree reducer has no primitive state kind";
-					return false;
-				}
-			}
-			break;
 		case SljitNativeRegionExpressionKind::TYPED_EXPRESSION_TREE:
 			if (op.use_grouped_state_addresses) {
 				error = "SLJIT grouped aggregate typed expression-tree reducer is not supported";

@@ -96,7 +96,12 @@ static string DescribeExecutionRegionHashJoinContractShape(const ExecutionRegion
 	result += ",delim=" + std::to_string(contract.delim_type_count);
 	result += ",residual=" + ExecutionRegionSignatureBool(contract.residual_predicate || contract.residual_info);
 	result += ",residual_ready=" + ExecutionRegionSignatureBool(contract.residual_expression_ready);
-	result += ")";
+	result += ",dict_index_widths=[";
+	for (idx_t payload_idx = 0; payload_idx < contract.payload_dict_index_widths.size(); payload_idx++) {
+		result += payload_idx == 0 ? "" : "|";
+		result += std::to_string(contract.payload_dict_index_widths[payload_idx]);
+	}
+	result += "])";
 	return result;
 }
 

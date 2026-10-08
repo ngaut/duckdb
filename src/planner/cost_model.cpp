@@ -1,28 +1,17 @@
 #include "duckdb/planner/cost_model.hpp"
 
+#include "duckdb/common/limits.hpp"
 #include "duckdb/common/string_util.hpp"
+#include "duckdb/optimizer/expression_heuristics.hpp"
 #include "duckdb/planner/expression.hpp"
-#include "duckdb/planner/expression/bound_between_expression.hpp"
-#include "duckdb/planner/expression/bound_case_expression.hpp"
-#include "duckdb/planner/expression/bound_cast_expression.hpp"
-#include "duckdb/planner/expression/bound_columnref_expression.hpp"
-#include "duckdb/planner/expression/bound_comparison_expression.hpp"
-#include "duckdb/planner/expression/bound_conjunction_expression.hpp"
-#include "duckdb/planner/expression/bound_constant_expression.hpp"
 #include "duckdb/planner/expression/bound_function_expression.hpp"
-#include "duckdb/planner/expression/bound_operator_expression.hpp"
-#include "duckdb/planner/expression/bound_parameter_expression.hpp"
-#include "duckdb/planner/expression/bound_reference_expression.hpp"
-#include "duckdb/planner/filter/expression_filter.hpp"
-#include "duckdb/planner/filter/table_filter_functions.hpp"
-#include "duckdb/planner/table_filter_set.hpp"
+#include "duckdb/planner/expression_iterator.hpp"
 #include "duckdb/common/vector_size.hpp"
 
 #include <limits>
 
 namespace duckdb {
 
-static idx_t DuckDBExpressionCost(const Expression &expr);
 static constexpr int64_t BASIS_POINT_SCALE = 10000;
 static constexpr int64_t NATIVE_JOIN_PROTOCOL_PENALTY = 720;
 static constexpr int64_t NATIVE_HASH_JOIN_BUILD_SINK_PROTOCOL_PENALTY = 720;
@@ -162,233 +151,39 @@ static bool PhysicalRunnerCanAmortizeNativeGroupedStateAddressLookup(const Physi
 	       input.generated_stage_count > input.native_grouped_state_address_lookup_count * 2;
 }
 
-static idx_t DuckDBPhysicalTypeCost(PhysicalType return_type, idx_t multiplier) {
-	switch (return_type) {
-	case PhysicalType::VARCHAR:
-		return 5 * multiplier;
-	case PhysicalType::FLOAT:
-	case PhysicalType::DOUBLE:
-		return 2 * multiplier;
+//! ExpressionHeuristics prices every function it does not know at this cost.
+static constexpr idx_t UNKNOWN_FUNCTION_HEURISTIC_COST = 1000;
+
+static bool IsCompressedStringMaterializationFunction(const Expression &expr) {
+	if (expr.GetExpressionClass() != ExpressionClass::BOUND_FUNCTION) {
+		return false;
+	}
+	auto &name = expr.Cast<BoundFunctionExpression>().Function().GetName().GetIdentifierName();
+	return StringUtil::StartsWith(name, "__internal_compress_string_") || name == "__internal_decompress_string";
+}
+
+//! The heuristic cost ExpressionHeuristics::Cost charges for compressed-materialization string (de)compression.
+//! The traversal mirrors ExpressionHeuristics::Cost, which only descends into these expression classes.
+static idx_t CompressedStringMaterializationCost(const Expression &expr) {
+	switch (expr.GetExpressionClass()) {
+	case ExpressionClass::BOUND_CASE:
+	case ExpressionClass::BOUND_CONJUNCTION:
+	case ExpressionClass::BOUND_FUNCTION:
+	case ExpressionClass::BOUND_OPERATOR:
+		break;
 	default:
-		return multiplier;
+		return 0;
 	}
-}
-
-static idx_t DuckDBBetweenExpressionCost(const BoundFunctionExpression &expr) {
-	auto &input = BoundBetweenExpression::Input(expr);
-	auto &lower_bound = BoundBetweenExpression::LowerBound(expr);
-	auto &upper_bound = BoundBetweenExpression::UpperBound(expr);
-	return DuckDBExpressionCost(input) + DuckDBExpressionCost(lower_bound) + DuckDBExpressionCost(upper_bound) + 10;
-}
-
-static idx_t DuckDBCaseExpressionCost(const BoundCaseExpression &expr) {
-	idx_t case_cost = 0;
-	for (auto &case_check : expr.CaseChecks()) {
-		case_cost += DuckDBExpressionCost(*case_check.then_expr);
-		case_cost += DuckDBExpressionCost(*case_check.when_expr);
-	}
-	case_cost += DuckDBExpressionCost(expr.Else());
-	return case_cost;
-}
-
-static idx_t DuckDBCastExpressionCost(const BoundCastExpression &expr) {
-	idx_t cast_cost = 0;
-	if (expr.GetReturnType() != expr.source_type()) {
-		if (expr.GetReturnType().id() == LogicalTypeId::VARCHAR || expr.source_type().id() == LogicalTypeId::VARCHAR ||
-		    expr.GetReturnType().id() == LogicalTypeId::BLOB || expr.source_type().id() == LogicalTypeId::BLOB) {
-			cast_cost = 200;
-		} else {
-			cast_cost = 5;
-		}
-	}
-	return DuckDBExpressionCost(expr.Child()) + cast_cost;
-}
-
-static idx_t DuckDBComparisonExpressionCost(const BoundFunctionExpression &expr) {
-	auto &left = BoundComparisonExpression::Left(expr);
-	auto &right = BoundComparisonExpression::Right(expr);
-	return DuckDBExpressionCost(left) + 5 + DuckDBExpressionCost(right);
-}
-
-static idx_t DuckDBConjunctionExpressionCost(const BoundConjunctionExpression &expr) {
-	idx_t cost = 5;
-	for (auto &child : expr.GetChildren()) {
-		cost += DuckDBExpressionCost(*child);
-	}
+	idx_t cost = IsCompressedStringMaterializationFunction(expr) ? UNKNOWN_FUNCTION_HEURISTIC_COST : 0;
+	ExpressionIterator::EnumerateChildren(
+	    expr, [&](const Expression &child) { cost += CompressedStringMaterializationCost(child); });
 	return cost;
 }
 
-static bool DuckDBKnownFunctionCost(const string &name, idx_t &cost) {
-	switch (name.size()) {
-	case 1:
-		if (name == "+" || name == "-" || name == "&" || name == "#") {
-			cost = 5;
-			return true;
-		}
-		if (name == "*" || name == "%") {
-			cost = 10;
-			return true;
-		}
-		if (name == "/") {
-			cost = 15;
-			return true;
-		}
-		return false;
-	case 2:
-		if (name == ">>" || name == "<<" || name == "~~" || name == "||") {
-			cost = name == "~~" || name == "||" ? 200 : 5;
-			return true;
-		}
-		return false;
-	case 3:
-		if (StringUtil::CIEquals(name, "abs")) {
-			cost = 5;
-			return true;
-		}
-		if (name == "!~~") {
-			cost = 200;
-			return true;
-		}
-		return false;
-	case 4:
-		if (StringUtil::CIEquals(name, "year")) {
-			cost = 20;
-			return true;
-		}
-		return false;
-	case 5:
-		if (StringUtil::CIEquals(name, "round")) {
-			cost = 100;
-			return true;
-		}
-		return false;
-	case 9:
-		if (StringUtil::CIEquals(name, "date_part")) {
-			cost = 20;
-			return true;
-		}
-		return false;
-	case 14:
-		if (StringUtil::CIEquals(name, "regexp_matches")) {
-			cost = 200;
-			return true;
-		}
-		return false;
-	default:
-		if (StringUtil::StartsWith(name, "__internal_compress_string_") || name == "__internal_decompress_string") {
-			cost = 0;
-			return true;
-		}
-		return false;
-	}
-}
-
-static idx_t DuckDBFunctionExpressionCost(const BoundFunctionExpression &expr) {
-	if (expr.GetExpressionType() == ExpressionType::COMPARE_BETWEEN) {
-		return DuckDBBetweenExpressionCost(expr);
-	}
-	if (BoundComparisonExpression::IsComparison(expr)) {
-		return DuckDBComparisonExpressionCost(expr);
-	}
-
-	idx_t cost_children = 0;
-	for (auto &child : expr.GetChildren()) {
-		cost_children += DuckDBExpressionCost(*child);
-	}
-
-	idx_t function_cost = 0;
-	if (DuckDBKnownFunctionCost(expr.Function().GetName().GetIdentifierName(), function_cost)) {
-		return cost_children + function_cost;
-	}
-	return cost_children + 1000;
-}
-
-static idx_t DuckDBOperatorExpressionCost(const BoundOperatorExpression &expr, ExpressionType expr_type) {
-	idx_t sum = 0;
-	for (auto &child : expr.GetChildren()) {
-		sum += DuckDBExpressionCost(*child);
-	}
-
-	if (expr_type == ExpressionType::OPERATOR_IS_NULL || expr_type == ExpressionType::OPERATOR_IS_NOT_NULL) {
-		return sum + 5;
-	}
-	if (expr_type == ExpressionType::COMPARE_IN || expr_type == ExpressionType::COMPARE_NOT_IN) {
-		return sum + (expr.GetChildren().size() - 1) * 100;
-	}
-	if (expr_type == ExpressionType::OPERATOR_NOT) {
-		return sum + 10;
-	}
-	return sum + 1000;
-}
-
-static idx_t DuckDBExpressionCost(const Expression &expr) {
-	switch (expr.GetExpressionClass()) {
-	case ExpressionClass::BOUND_CASE:
-		return DuckDBCaseExpressionCost(expr.Cast<BoundCaseExpression>());
-	case ExpressionClass::BOUND_CAST:
-		return DuckDBCastExpressionCost(expr.Cast<BoundCastExpression>());
-	case ExpressionClass::BOUND_CONJUNCTION:
-		return DuckDBConjunctionExpressionCost(expr.Cast<BoundConjunctionExpression>());
-	case ExpressionClass::BOUND_FUNCTION:
-		return DuckDBFunctionExpressionCost(expr.Cast<BoundFunctionExpression>());
-	case ExpressionClass::BOUND_OPERATOR:
-		return DuckDBOperatorExpressionCost(expr.Cast<BoundOperatorExpression>(), expr.GetExpressionType());
-	case ExpressionClass::BOUND_COLUMN_REF:
-		return DuckDBPhysicalTypeCost(expr.Cast<BoundColumnRefExpression>().GetReturnType().InternalType(), 8);
-	case ExpressionClass::BOUND_CONSTANT:
-		return DuckDBPhysicalTypeCost(expr.Cast<BoundConstantExpression>().GetReturnType().InternalType(), 1);
-	case ExpressionClass::BOUND_PARAMETER:
-		return DuckDBPhysicalTypeCost(expr.Cast<BoundParameterExpression>().GetReturnType().InternalType(), 1);
-	case ExpressionClass::BOUND_REF:
-		return DuckDBPhysicalTypeCost(expr.Cast<BoundReferenceExpression>().GetReturnType().InternalType(), 8);
-	default:
-		return 1000;
-	}
-}
-
 idx_t DuckDBCostModel::ExpressionCost(const Expression &expr) {
-	return DuckDBExpressionCost(expr);
-}
-
-idx_t DuckDBCostModel::FilterCost(const TableFilter &filter) {
-	auto &expr_filter = ExpressionFilter::GetExpressionFilter(filter, "DuckDBCostModel::FilterCost");
-	auto &expr = *expr_filter.expr;
-	if (ExpressionFilter::ContainsInternalFunction(expr, DynamicFilterScalarFun::NAME) ||
-	    ExpressionFilter::IsOptionalExpression(expr)) {
-		return 0;
-	}
-	return ExpressionCost(expr);
-}
-
-vector<idx_t> DuckDBCostModel::InitialFilterOrder(const TableFilterSet &table_filters) {
-	struct FilterCost {
-		idx_t index;
-		idx_t cost;
-
-		bool operator==(const FilterCost &p) const {
-			return cost == p.cost;
-		}
-		bool operator<(const FilterCost &p) const {
-			return cost < p.cost;
-		}
-	};
-
-	vector<FilterCost> filter_costs;
-	idx_t filter_index = 0;
-	for (auto &entry : table_filters) {
-		FilterCost cost;
-		cost.index = filter_index;
-		cost.cost = DuckDBCostModel::FilterCost(entry.Filter());
-		filter_costs.push_back(cost);
-		filter_index++;
-	}
-	sort(filter_costs.begin(), filter_costs.end());
-
-	vector<idx_t> initial_permutation;
-	for (idx_t i = 0; i < filter_costs.size(); i++) {
-		initial_permutation.push_back(filter_costs[i].index);
-	}
-	return initial_permutation;
+	// Runner selection prices expressions with the optimizer heuristics, except that compressed-materialization
+	// string (de)compression is free: it is a re-encoding that compiled stages consume without a function call.
+	return ExpressionHeuristics::Cost(expr) - CompressedStringMaterializationCost(expr);
 }
 
 static int64_t PhysicalRunnerRows(const PhysicalRunnerCostInput &input) {

@@ -98,9 +98,6 @@ unique_ptr<ExecutionRegionCodeHandle>
 BuildSljitRegularHashJoinProbe(const SljitNativeHashJoinProbePlan &plan,
                                SljitNativeRegularHashJoinProbeFunction &function, string &error,
                                const SljitHashJoinProbeCodegenConfig &config = {});
-unique_ptr<ExecutionRegionCodeHandle> BuildSljitNestedLoopJoinProbe(const SljitNativeNestedLoopJoinProbePlan &plan,
-                                                                    SljitNativeNestedLoopJoinProbeFunction &function,
-                                                                    string &error);
 unique_ptr<ExecutionRegionCodeHandle>
 BuildSljitPerfectHashJoinProbe(const SljitNativeHashJoinProbePlan &plan,
                                SljitNativePerfectHashJoinProbeFunction &function, string &error,

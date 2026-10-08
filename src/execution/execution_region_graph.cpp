@@ -18,6 +18,7 @@
 #include "duckdb/planner/filter/expression_filter.hpp"
 #include "duckdb/planner/filter/table_filter_functions.hpp"
 #include "duckdb/planner/expression/bound_cast_expression.hpp"
+#include "duckdb/planner/expression/bound_function_expression.hpp"
 #include "duckdb/storage/statistics/base_statistics.hpp"
 #include "duckdb/storage/statistics/numeric_stats.hpp"
 
@@ -312,18 +313,7 @@ static bool TryGetExecutionRegionRuntimeMembershipFilterUniqueCount(const Expres
 	}
 	if (current->GetExpressionClass() == ExpressionClass::BOUND_FUNCTION) {
 		auto &function = current->Cast<BoundFunctionExpression>();
-		if (function.Function().GetName() == PerfectHashJoinScalarFun::NAME && function.BindInfo()) {
-			auto &data = function.BindInfo()->Cast<PerfectHashJoinFunctionData>();
-			if (!data.executor) {
-				return false;
-			}
-			ExecutionPerfectHashJoinTableLayout layout;
-			if (!data.executor->GetExecutionPerfectHashJoinTableLayout(layout) || !layout.ready) {
-				return false;
-			}
-			unique_count = layout.build_unique_count;
-			return true;
-		}
+		// An exact prefix range (one bucket per key) counts the distinct build keys exactly; a coarser one bounds them.
 		if (function.Function().GetName() == PrefixRangeScalarFun::NAME && function.BindInfo()) {
 			auto &data = function.BindInfo()->Cast<PrefixRangeFunctionData>();
 			if (!data.filter || !data.filter->IsInitialized()) {
@@ -396,36 +386,29 @@ static void AddExecutionRegionExactMembershipFilterProofs(const Expression &expr
 	if (!function.BindInfo() || function.GetChildren().size() != 1) {
 		return;
 	}
-	shared_ptr<ExecutionRuntimeFilterIdentity> identity;
-	LogicalType filter_key_type;
-	if (function.Function().GetName() == PerfectHashJoinScalarFun::NAME) {
-		auto &data = function.BindInfo()->Cast<PerfectHashJoinFunctionData>();
-		if (!data.executor) {
-			return;
-		}
-		identity = data.executor->GetRuntimeFilterIdentity();
-		filter_key_type = data.executor->GetKeyType();
-	} else if (function.Function().GetName() == PrefixRangeScalarFun::NAME) {
-		auto &data = function.BindInfo()->Cast<PrefixRangeFunctionData>();
-		PrefixRangeLookupData lookup;
-		if (!data.filter || !data.runtime_filter_identity || !TypeIsInteger(data.key_type.InternalType()) ||
-		    !data.filter->GetSignedLookupData(lookup) || lookup.shift != 0) {
-			return;
-		}
-		identity = data.runtime_filter_identity;
-		filter_key_type = data.key_type;
-	} else {
+	// The exact prefix-range filter (one bitmap bucket per key, NULL keys dropped) is the exact membership filter of
+	// a join build side.
+	if (function.Function().GetName() != PrefixRangeScalarFun::NAME) {
 		return;
 	}
+	auto &data = function.BindInfo()->Cast<PrefixRangeFunctionData>();
+	PrefixRangeLookupData lookup;
+	if (!data.filter || !data.runtime_filter_identity || !data.filters_null_values ||
+	    !TypeIsInteger(data.key_type.InternalType()) || !data.filter->GetSignedLookupData(lookup) ||
+	    lookup.shift != 0) {
+		return;
+	}
+	auto identity = data.runtime_filter_identity;
+	auto &filter_key_type = data.key_type;
 	auto &input = *function.GetChildren()[0];
 	const bool direct_reference = input.GetExpressionClass() == ExpressionClass::BOUND_REF &&
 	                              input.GetReturnType() == source_type && filter_key_type == source_type;
 	bool checked_integral_cast = false;
-	if (input.GetExpressionClass() == ExpressionClass::BOUND_CAST && input.GetReturnType() == filter_key_type &&
+	if (BoundCastExpression::IsCast(input) && input.GetReturnType() == filter_key_type &&
 	    TypeIsInteger(source_type.InternalType()) && TypeIsInteger(input.GetReturnType().InternalType())) {
-		auto &cast = input.Cast<BoundCastExpression>();
-		checked_integral_cast = cast.Child().GetExpressionClass() == ExpressionClass::BOUND_REF &&
-		                        cast.Child().GetReturnType() == source_type;
+		auto &cast_child = BoundCastExpression::Child(input.Cast<BoundFunctionExpression>());
+		checked_integral_cast =
+		    cast_child.GetExpressionClass() == ExpressionClass::BOUND_REF && cast_child.GetReturnType() == source_type;
 	}
 	if (!direct_reference && !checked_integral_cast) {
 		return;
@@ -617,6 +600,19 @@ unique_ptr<ExecutionRegionGraph> BuildExecutionRegionGraph(Pipeline &pipeline, b
 		result->sink = BuildExecutionRegionOperatorEntry(*pipeline.GetSink(), ExecutionRegionOperatorSlot::SINK,
 		                                                 render_diagnostics, DConstants::INVALID_INDEX, context);
 		AccumulateExecutionRegionGraphFacts(*result, result->sink);
+		// Hash-join builds narrow global-dictionary payload slots on the first chunk they receive (dict-surviving
+		// join); every chunk that can reach them must keep that encoding whichever runner produced it.
+		switch (pipeline.GetSink()->type) {
+		case PhysicalOperatorType::HASH_JOIN:
+		case PhysicalOperatorType::LEFT_DELIM_JOIN:
+		case PhysicalOperatorType::RIGHT_DELIM_JOIN:
+			for (auto &entry : result->operators) {
+				entry.operator_payload.hash_join_contract.output_reaches_dictionary_narrowing_sink = true;
+			}
+			break;
+		default:
+			break;
+		}
 	}
 	if (result->Empty()) {
 		return nullptr;

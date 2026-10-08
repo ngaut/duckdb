@@ -42,6 +42,30 @@ static bool ExecutionExpressionIsUnsignedIntegerType(const LogicalType &type) {
 	}
 }
 
+//! A cast into DECIMAL that keeps at least as many integral and fractional digits as its source preserves every value
+//! and can never throw. Upstream CastCanThrow conservatively reports every cast into DECIMAL as throwing.
+static bool ExecutionCastIsExactDecimalWidening(const LogicalType &source, const LogicalType &target) {
+	// aliased types are extension-defined; their casts cannot be reasoned about
+	if (target.id() != LogicalTypeId::DECIMAL || source.HasAlias() || target.HasAlias() ||
+	    (source.id() != LogicalTypeId::DECIMAL && !ExecutionExpressionIsSignedIntegerType(source) &&
+	     !ExecutionExpressionIsUnsignedIntegerType(source))) {
+		return false;
+	}
+	uint8_t source_width;
+	uint8_t source_scale;
+	if (!source.GetDecimalProperties(source_width, source_scale)) {
+		return false;
+	}
+	const auto target_width = DecimalType::GetWidth(target);
+	const auto target_scale = DecimalType::GetScale(target);
+	return target_scale >= source_scale && target_width - target_scale >= source_width - source_scale;
+}
+
+static bool ExecutionCastCanThrow(const LogicalType &source, const LogicalType &target, bool try_cast) {
+	return !ExecutionCastIsExactDecimalWidening(source, target) &&
+	       BoundCastExpression::CastCanThrow(source, target, try_cast);
+}
+
 static bool ExecutionExpressionIsCompressibleIntegralType(const LogicalType &type) {
 	switch (type.id()) {
 	case LogicalTypeId::SMALLINT:
@@ -501,14 +525,12 @@ static unique_ptr<ExecutionExpressionIR> NormalizeExecutionExpressionIR(unique_p
 	}
 	if (node->kind == ExecutionExpressionIRKind::CAST && !node->try_cast && node->left &&
 	    node->left->kind == ExecutionExpressionIRKind::CONSTANT) {
-		Value cast_value;
-		string error;
-		if (node->left->constant.DefaultTryCastAs(node->return_type, cast_value, &error) &&
-		    ExecutionExpressionConstantValueMatchesType(cast_value, node->return_type)) {
+		auto cast_value = node->left->constant.DefaultTryCastAs(node->return_type);
+		if (cast_value && ExecutionExpressionConstantValueMatchesType(*cast_value, node->return_type)) {
 			auto constant = make_uniq<ExecutionExpressionIR>();
 			constant->kind = ExecutionExpressionIRKind::CONSTANT;
 			constant->return_type = node->return_type;
-			constant->constant = std::move(cast_value);
+			constant->constant = std::move(*cast_value);
 			return constant;
 		}
 	}
@@ -1161,9 +1183,40 @@ TryBuildExecutionExpressionBetweenIR(ExpressionType type, const BoundFunctionExp
 	return node;
 }
 
+static unique_ptr<ExecutionExpressionIR> TryBuildExecutionCastIR(const Expression &expression) {
+	auto &cast = expression.Cast<BoundFunctionExpression>();
+	const auto source_type = BoundCastExpression::SourceType(cast);
+	const auto &target_type = BoundCastExpression::TargetType(cast);
+	const auto try_cast = BoundCastExpression::IsTryCast(cast);
+	if (!ExecutionExpressionIsScalarType(source_type) || !ExecutionExpressionIsScalarType(target_type)) {
+		return nullptr;
+	}
+	if (ExecutionCastCanThrow(source_type, target_type, try_cast) &&
+	    (!ExecutionExpressionIsSignedIntegerType(source_type) ||
+	     (!ExecutionExpressionIsSignedIntegerType(target_type) &&
+	      !ExecutionExpressionIsUnsignedIntegerType(target_type)))) {
+		return nullptr;
+	}
+	auto child = TryBuildExecutionExpressionIR(BoundCastExpression::Child(cast));
+	if (!child) {
+		return nullptr;
+	}
+	auto node = make_uniq<ExecutionExpressionIR>();
+	node->kind = ExecutionExpressionIRKind::CAST;
+	node->return_type = target_type;
+	node->query_location = expression.GetQueryLocation();
+	node->try_cast = try_cast;
+	node->left = std::move(child);
+	return node;
+}
+
 static unique_ptr<ExecutionExpressionIR> TryBuildExecutionExpressionIR(const Expression &expression) {
 	if (expression.HasParameter()) {
 		return nullptr;
+	}
+	// Casts are bound function expressions; recognize them before generic function lowering.
+	if (BoundCastExpression::IsCast(expression)) {
+		return TryBuildExecutionCastIR(expression);
 	}
 	switch (expression.GetExpressionClass()) {
 	case ExpressionClass::BOUND_CONSTANT: {
@@ -1386,30 +1439,6 @@ static unique_ptr<ExecutionExpressionIR> TryBuildExecutionExpressionIR(const Exp
 		node->right = std::move(right);
 		return node;
 	}
-	case ExpressionClass::BOUND_CAST: {
-		auto &cast = expression.Cast<BoundCastExpression>();
-		if (!ExecutionExpressionIsScalarType(cast.source_type()) ||
-		    !ExecutionExpressionIsScalarType(cast.TargetType())) {
-			return nullptr;
-		}
-		if (!cast.IsTryCast() && cast.CanThrow() &&
-		    (!ExecutionExpressionIsSignedIntegerType(cast.source_type()) ||
-		     (!ExecutionExpressionIsSignedIntegerType(cast.TargetType()) &&
-		      !ExecutionExpressionIsUnsignedIntegerType(cast.TargetType())))) {
-			return nullptr;
-		}
-		auto child = TryBuildExecutionExpressionIR(cast.Child());
-		if (!child) {
-			return nullptr;
-		}
-		auto node = make_uniq<ExecutionExpressionIR>();
-		node->kind = ExecutionExpressionIRKind::CAST;
-		node->return_type = cast.TargetType();
-		node->query_location = expression.GetQueryLocation();
-		node->try_cast = cast.IsTryCast();
-		node->left = std::move(child);
-		return node;
-	}
 	case ExpressionClass::BOUND_CONJUNCTION: {
 		auto &conjunction = expression.Cast<BoundConjunctionExpression>();
 		auto node = make_uniq<ExecutionExpressionIR>();
@@ -1472,6 +1501,17 @@ static string DescribeExecutionExpressionSubject(const Expression &expression) {
 	string result = "class=" + ExpressionClassToString(expression.GetExpressionClass());
 	result += ";type=" + ExpressionTypeToString(expression.GetExpressionType());
 	result += ";return=" + expression.GetReturnType().ToString();
+	if (BoundCastExpression::IsCast(expression)) {
+		auto &cast = expression.Cast<BoundFunctionExpression>();
+		const auto source_type = BoundCastExpression::SourceType(cast);
+		const auto &target_type = BoundCastExpression::TargetType(cast);
+		const auto try_cast = BoundCastExpression::IsTryCast(cast);
+		result += ";source=" + source_type.ToString();
+		result += ";target=" + target_type.ToString();
+		result += ";try_cast=" + ExecutionExpressionBool(try_cast);
+		result += ";can_throw=" + ExecutionExpressionBool(ExecutionCastCanThrow(source_type, target_type, try_cast));
+		return result;
+	}
 	switch (expression.GetExpressionClass()) {
 	case ExpressionClass::BOUND_FUNCTION: {
 		auto &function = expression.Cast<BoundFunctionExpression>();
@@ -1483,14 +1523,6 @@ static string DescribeExecutionExpressionSubject(const Expression &expression) {
 	case ExpressionClass::BOUND_OPERATOR: {
 		auto &op = expression.Cast<BoundOperatorExpression>();
 		result += ";children=" + std::to_string(op.GetChildren().size());
-		break;
-	}
-	case ExpressionClass::BOUND_CAST: {
-		auto &cast = expression.Cast<BoundCastExpression>();
-		result += ";source=" + cast.source_type().ToString();
-		result += ";target=" + cast.TargetType().ToString();
-		result += ";try_cast=" + ExecutionExpressionBool(cast.IsTryCast());
-		result += ";can_throw=" + ExecutionExpressionBool(cast.CanThrow());
 		break;
 	}
 	case ExpressionClass::BOUND_CONJUNCTION: {
@@ -1603,9 +1635,33 @@ static string BuildExecutionExpressionBetweenFailureReason(ExpressionType type, 
 	return BuildExecutionExpressionReasonWithSubject("between_unknown", expression);
 }
 
+static string BuildExecutionCastFailureReason(const Expression &expression) {
+	auto &cast = expression.Cast<BoundFunctionExpression>();
+	const auto source_type = BoundCastExpression::SourceType(cast);
+	const auto &target_type = BoundCastExpression::TargetType(cast);
+	if (!ExecutionExpressionIsScalarType(source_type) || !ExecutionExpressionIsScalarType(target_type)) {
+		return BuildExecutionExpressionReasonWithSubject("cast_type_not_scalar", expression);
+	}
+	if (ExecutionCastCanThrow(source_type, target_type, BoundCastExpression::IsTryCast(cast)) &&
+	    (!ExecutionExpressionIsSignedIntegerType(source_type) ||
+	     (!ExecutionExpressionIsSignedIntegerType(target_type) &&
+	      !ExecutionExpressionIsUnsignedIntegerType(target_type)))) {
+		return BuildExecutionExpressionReasonWithSubject("throwing_cast_requires_signed_source_and_integer_target",
+		                                                 expression);
+	}
+	auto &child = BoundCastExpression::Child(cast);
+	if (!TryBuildExecutionExpressionIR(child)) {
+		return BuildExecutionExpressionChildFailureReason("cast_child_unsupported", 0, child);
+	}
+	return BuildExecutionExpressionReasonWithSubject("unknown_lowering_failure", expression);
+}
+
 static string BuildExecutionExpressionFailureReason(const Expression &expression) {
 	if (expression.HasParameter()) {
 		return BuildExecutionExpressionReasonWithSubject("has_parameter", expression);
+	}
+	if (BoundCastExpression::IsCast(expression)) {
+		return BuildExecutionCastFailureReason(expression);
 	}
 	switch (expression.GetExpressionClass()) {
 	case ExpressionClass::BOUND_CONSTANT: {
@@ -1962,25 +2018,6 @@ static string BuildExecutionExpressionFailureReason(const Expression &expression
 			result += ";left_type=" + left->return_type.ToString();
 			result += ";right_type=" + right->return_type.ToString();
 			return result;
-		}
-		break;
-	}
-	case ExpressionClass::BOUND_CAST: {
-		auto &cast = expression.Cast<BoundCastExpression>();
-		if (!ExecutionExpressionIsScalarType(cast.source_type()) ||
-		    !ExecutionExpressionIsScalarType(cast.TargetType())) {
-			return BuildExecutionExpressionReasonWithSubject("cast_type_not_scalar", expression);
-		}
-		if (!cast.IsTryCast() && cast.CanThrow() &&
-		    (!ExecutionExpressionIsSignedIntegerType(cast.source_type()) ||
-		     (!ExecutionExpressionIsSignedIntegerType(cast.TargetType()) &&
-		      !ExecutionExpressionIsUnsignedIntegerType(cast.TargetType())))) {
-			return BuildExecutionExpressionReasonWithSubject("throwing_cast_requires_signed_source_and_integer_target",
-			                                                 expression);
-		}
-		auto child = TryBuildExecutionExpressionIR(cast.Child());
-		if (!child) {
-			return BuildExecutionExpressionChildFailureReason("cast_child_unsupported", 0, cast.Child());
 		}
 		break;
 	}

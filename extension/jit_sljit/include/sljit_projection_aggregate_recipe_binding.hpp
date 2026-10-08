@@ -30,6 +30,7 @@ public:
 	                                                 SljitFullPipelineRecipe &recipe) const;
 
 	bool TryMakeSourceProjectionAggregateTailRecipe(const SljitFullPipelineProjectionAggregateShape &shape,
+	                                                const SljitProjectionAggregatePrefixFacts &facts,
 	                                                SljitFullPipelineRecipe &recipe) const;
 
 	bool TryMakeJoinDirectProjectionAggregateRecipe(const SljitFullPipelineProjectionAggregateShape &shape,

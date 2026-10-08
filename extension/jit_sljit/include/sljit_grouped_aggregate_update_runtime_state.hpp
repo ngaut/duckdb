@@ -8,7 +8,6 @@
 
 #pragma once
 
-#include "sljit_grouped_distinct_key_sink_runtime.hpp"
 #include "sljit_grouped_direct_aggregate_update_runtime_state.hpp"
 #include "sljit_grouped_aggregate_update_primitive.hpp"
 #include "sljit_grouped_count_star_update_runtime.hpp"
@@ -23,9 +22,6 @@ struct SljitGroupedAggregateUpdateRuntimeState {
 		if (primitive.strategy == SljitGroupedAggregateUpdateStrategyKind::DIRECT_PRIMITIVE_PAYLOAD_UPDATE ||
 		    primitive.strategy == SljitGroupedAggregateUpdateStrategyKind::FILTERED_PRIMITIVE_PAYLOAD_UPDATE) {
 			return direct_payload_update.Prepare(ops, primitive);
-		}
-		if (primitive.strategy == SljitGroupedAggregateUpdateStrategyKind::DISTINCT_KEY_SINK) {
-			return distinct_key_sink.Prepare(primitive);
 		}
 		return count_star_preaggregation.Prepare(runtime, ops, scratch, primitive);
 	}
@@ -42,8 +38,6 @@ struct SljitGroupedAggregateUpdateRuntimeState {
 		case SljitGroupedAggregateUpdateStrategyKind::DIRECT_PRIMITIVE_PAYLOAD_UPDATE:
 		case SljitGroupedAggregateUpdateStrategyKind::FILTERED_PRIMITIVE_PAYLOAD_UPDATE:
 			return direct_payload_update.Execute(runtime, result, ops, scratch, primitive, input, processed_batches);
-		case SljitGroupedAggregateUpdateStrategyKind::DISTINCT_KEY_SINK:
-			return distinct_key_sink.Execute(runtime, result, ops, scratch, primitive, input, processed_batches);
 		case SljitGroupedAggregateUpdateStrategyKind::INVALID:
 			break;
 		}
@@ -56,16 +50,12 @@ struct SljitGroupedAggregateUpdateRuntimeState {
 		    primitive.strategy == SljitGroupedAggregateUpdateStrategyKind::FILTERED_PRIMITIVE_PAYLOAD_UPDATE) {
 			return direct_payload_update.Flush(runtime, ops, scratch, primitive);
 		}
-		if (primitive.strategy == SljitGroupedAggregateUpdateStrategyKind::DISTINCT_KEY_SINK) {
-			return false;
-		}
 		return count_star_preaggregation.Flush(runtime, ops, scratch, primitive);
 	}
 
 private:
 	SljitGroupedCountStarPreaggregationRuntimeState count_star_preaggregation;
 	SljitGroupedDirectPrimitivePayloadUpdateRuntimeState direct_payload_update;
-	SljitGroupedDistinctKeySinkRuntimeState distinct_key_sink;
 };
 
 } // namespace duckdb

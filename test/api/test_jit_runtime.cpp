@@ -283,7 +283,7 @@ TEST_CASE("JIT blocked append sink transfers retry ownership to the core executo
 	ClearJitTrace(manager);
 	auto result = con.SendQuery("SELECT i * 3 + 7 AS v FROM jit_blocked_append_sink");
 	REQUIRE_NO_FAIL(*result);
-	REQUIRE(result->type == QueryResultType::STREAM_RESULT);
+	REQUIRE(result->GetResultType() == QueryResultType::STREAM_RESULT);
 
 	vector<bool> seen(160000, false);
 	idx_t row_count = 0;
@@ -334,9 +334,11 @@ TEST_CASE("JIT full pipeline uses append sink contract for CTE materialization",
 	ConfigureSljitForCoverageSettings(con, true, true, true);
 
 	ClearJitTrace(manager);
+	// A single consumer streams the CTE through the broadcast exchange, which regions do not own. Two hash-join
+	// consumers make a small CTE cheaper to materialize than to fan out, so it runs MATERIALIZED.
 	auto result = con.Query("WITH cte AS MATERIALIZED ("
 	                        "SELECT i + 1 AS j FROM jit_native_cte_materialization WHERE i > 500"
-	                        ") SELECT sum(j) FROM cte");
+	                        ") SELECT sum(a.j) FROM cte a JOIN cte b USING (j)");
 	REQUIRE_NO_FAIL(*result);
 	REQUIRE(result->RowCount() == 1);
 	REQUIRE(result->GetValue(0, 0).GetValue<int64_t>() == 374749);
@@ -707,7 +709,9 @@ TEST_CASE("EXPLAIN ANALYZE exposes compact execution region profile", "[api][jit
 	REQUIRE_NO_FAIL(*event_schema);
 	ExecutionRegionEvent empty_event;
 	auto event_schema_has_column = [&](const string &name) {
-		return std::find(event_schema->names.begin(), event_schema->names.end(), name) != event_schema->names.end();
+		auto &names = event_schema->GetNames();
+		return std::any_of(names.begin(), names.end(),
+		                   [&](const Identifier &column) { return column.GetIdentifierName() == name; });
 	};
 	REQUIRE_FALSE(event_schema_has_column("candidate_uses_scan_filters"));
 	ForEachExecutionRegionEventRuntimeCountField(

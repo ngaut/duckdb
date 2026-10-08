@@ -9,6 +9,7 @@
 #include "duckdb/planner/filter/table_filter_functions.hpp"
 #include "duckdb/planner/filter/table_filter_function_helpers.hpp"
 
+#include "duckdb/common/enum_util.hpp"
 #include "duckdb/common/exception/binder_exception.hpp"
 #include "duckdb/common/limits.hpp"
 #include "duckdb/planner/expression/bound_cast_expression.hpp"
@@ -29,9 +30,9 @@ unique_ptr<FunctionData> TableFilterFunctions::Bind(BindScalarFunctionInput &inp
 }
 
 bool TableFilterFunctions::IsTableFilterFunction(const Identifier &name) {
-	static const char *const TABLE_FILTER_FUNCTIONS[] = {
-	    BloomFilterScalarFun::NAME,     DynamicFilterScalarFun::NAME, OptionalFilterScalarFun::NAME,
-	    PerfectHashJoinScalarFun::NAME, PrefixRangeScalarFun::NAME,   SelectivityOptionalFilterScalarFun::NAME};
+	static const char *const TABLE_FILTER_FUNCTIONS[] = {BloomFilterScalarFun::NAME, DynamicFilterScalarFun::NAME,
+	                                                     OptionalFilterScalarFun::NAME, PrefixRangeScalarFun::NAME,
+	                                                     SelectivityOptionalFilterScalarFun::NAME};
 	for (auto function_name : TABLE_FILTER_FUNCTIONS) {
 		if (name == function_name) {
 			return true;
@@ -45,12 +46,10 @@ void GetThresholdAndVectorsToCheck(SelectivityOptionalFilterType type, float &se
                                    idx_t &n_vectors_to_check) {
 	static constexpr float MIN_MAX_THRESHOLD = 0.9f;
 	static constexpr float BF_THRESHOLD = 0.5f;
-	static constexpr float PHJ_THRESHOLD = 0.3f;
 	static constexpr float PRF_THRESHOLD = 0.5f;
 
 	static constexpr idx_t MIN_MAX_CHECK_N = 6;
 	static constexpr idx_t BF_CHECK_N = 6;
-	static constexpr idx_t PHJ_CHECK_N = 6;
 	static constexpr idx_t PRF_CHECK_N = 6;
 
 	switch (type) {
@@ -61,10 +60,6 @@ void GetThresholdAndVectorsToCheck(SelectivityOptionalFilterType type, float &se
 	case SelectivityOptionalFilterType::BF:
 		selectivity_threshold = BF_THRESHOLD;
 		n_vectors_to_check = BF_CHECK_N;
-		return;
-	case SelectivityOptionalFilterType::PHJ:
-		selectivity_threshold = PHJ_THRESHOLD;
-		n_vectors_to_check = PHJ_CHECK_N;
 		return;
 	case SelectivityOptionalFilterType::PRF:
 		selectivity_threshold = PRF_THRESHOLD;
@@ -87,6 +82,33 @@ bool IsSignedNumericRangePhysicalType(PhysicalType physical_type) {
 	}
 }
 
+//! The value domain of a signed integral physical type. Range bounds must stay inside it: the scan kernels narrow the
+//! int64 bounds to the physical type, so an out-of-domain bound (e.g. `tinyint > 127` computing a lower bound of 128)
+//! would wrap and select the wrong rows.
+static void GetSignedNumericDomain(PhysicalType physical_type, int64_t &domain_min, int64_t &domain_max) {
+	switch (physical_type) {
+	case PhysicalType::INT8:
+		domain_min = NumericLimits<int8_t>::Minimum();
+		domain_max = NumericLimits<int8_t>::Maximum();
+		return;
+	case PhysicalType::INT16:
+		domain_min = NumericLimits<int16_t>::Minimum();
+		domain_max = NumericLimits<int16_t>::Maximum();
+		return;
+	case PhysicalType::INT32:
+		domain_min = NumericLimits<int32_t>::Minimum();
+		domain_max = NumericLimits<int32_t>::Maximum();
+		return;
+	case PhysicalType::INT64:
+		domain_min = NumericLimits<int64_t>::Minimum();
+		domain_max = NumericLimits<int64_t>::Maximum();
+		return;
+	default:
+		throw InternalException("GetSignedNumericDomain: unsupported physical type %s",
+		                        EnumUtil::ToString(physical_type));
+	}
+}
+
 static bool IsIntegralLogicalType(LogicalTypeId type_id) {
 	switch (type_id) {
 	case LogicalTypeId::TINYINT:
@@ -104,17 +126,21 @@ static bool TryGetFoldedConstantValue(const Expression &expr, Value &value) {
 		value = expr.Cast<BoundConstantExpression>().GetValue();
 		return true;
 	}
-	if (expr.GetExpressionClass() == ExpressionClass::BOUND_CAST) {
-		auto &cast_expr = expr.Cast<BoundCastExpression>();
-		if (cast_expr.IsTryCast()) {
+	if (BoundCastExpression::IsCast(expr)) {
+		auto &cast_expr = expr.Cast<BoundFunctionExpression>();
+		if (BoundCastExpression::IsTryCast(cast_expr)) {
 			return false;
 		}
 		Value child_value;
-		if (!TryGetFoldedConstantValue(cast_expr.Child(), child_value)) {
+		if (!TryGetFoldedConstantValue(BoundCastExpression::Child(cast_expr), child_value)) {
 			return false;
 		}
-		string error_message;
-		return child_value.DefaultTryCastAs(cast_expr.TargetType(), value, &error_message, false);
+		auto cast_value = child_value.DefaultTryCastAs(BoundCastExpression::TargetType(cast_expr));
+		if (!cast_value) {
+			return false;
+		}
+		value = std::move(*cast_value);
+		return true;
 	}
 	return false;
 }
@@ -149,10 +175,11 @@ static bool TryGetSignedNumericConstant(const Expression &expr, const LogicalTyp
 	if (value.type() == target_type) {
 		cast_value = value;
 	} else {
-		string error_message;
-		if (!value.DefaultTryCastAs(target_type, cast_value, &error_message, false)) {
+		auto cast_result = value.DefaultTryCastAs(target_type);
+		if (!cast_result) {
 			return false;
 		}
+		cast_value = std::move(*cast_result);
 	}
 	switch (target_type.InternalType()) {
 	case PhysicalType::INT8:
@@ -256,10 +283,16 @@ static bool TryBuildSignedComparisonInterval(const Expression &expr, const Logic
 		return false;
 	}
 
+	// the constant is read through the target physical type, so it is inside that type's domain; the strict
+	// comparisons below step to the neighbouring value only when that value is inside the domain as well
 	int64_t constant;
 	if (!TryGetSignedNumericConstant(*constant_expr, target_type, constant)) {
 		return false;
 	}
+	int64_t domain_min;
+	int64_t domain_max;
+	GetSignedNumericDomain(target_type.InternalType(), domain_min, domain_max);
+	D_ASSERT(constant >= domain_min && constant <= domain_max);
 
 	switch (comparison_type) {
 	case ExpressionType::COMPARE_EQUAL:
@@ -269,7 +302,7 @@ static bool TryBuildSignedComparisonInterval(const Expression &expr, const Logic
 		range.upper = constant;
 		return true;
 	case ExpressionType::COMPARE_GREATERTHAN:
-		if (constant == NumericLimits<int64_t>::Maximum()) {
+		if (constant == domain_max) {
 			MarkRangeEmpty(range);
 		} else {
 			range.has_lower = true;
@@ -281,7 +314,7 @@ static bool TryBuildSignedComparisonInterval(const Expression &expr, const Logic
 		range.lower = constant;
 		return true;
 	case ExpressionType::COMPARE_LESSTHAN:
-		if (constant == NumericLimits<int64_t>::Minimum()) {
+		if (constant == domain_min) {
 			MarkRangeEmpty(range);
 		} else {
 			range.has_upper = true;
@@ -395,8 +428,8 @@ bool TryGetSignedNumericRange(const Expression &expr, const LogicalType &target_
 	return true;
 }
 
-bool TryGetSignedNumericRange(const ExpressionFilter &filter, ExpressionFilterState &state,
-                              const LogicalType &target_type, SignedNumericRangeFilterData &range) {
+bool TryGetSignedNumericRange(ExpressionFilterState &state, const LogicalType &target_type,
+                              SignedNumericRangeFilterData &range) {
 	const auto physical_type = target_type.InternalType();
 	if (!IsSignedNumericRangePhysicalType(physical_type)) {
 		return false;
@@ -407,7 +440,7 @@ bool TryGetSignedNumericRange(const ExpressionFilter &filter, ExpressionFilterSt
 
 		SignedNumericRangeFilterData merged_range;
 		state.fast_signed_numeric_range_filter_supported =
-		    TryGetSignedNumericRange(*filter.expr, target_type, merged_range);
+		    TryGetSignedNumericRange(state.expression, target_type, merged_range);
 		if (state.fast_signed_numeric_range_filter_supported) {
 			state.fast_signed_numeric_range_filter_always_false = merged_range.empty;
 			state.fast_signed_numeric_range_has_lower = merged_range.has_lower;
@@ -455,9 +488,22 @@ unique_ptr<Expression> CreateSelectivityOptionalFilterExpression(unique_ptr<Expr
 
 unique_ptr<Expression> CreateDynamicFilterExpression(shared_ptr<DynamicFilterData> filter_data,
                                                      const LogicalType &target_type) {
+	return CreateDynamicFilterExpression(std::move(filter_data), target_type, nullptr);
+}
+
+unique_ptr<Expression> CreateDynamicFilterExpression(shared_ptr<DynamicFilterData> filter_data,
+                                                     const LogicalType &target_type, unique_ptr<Expression> input) {
 	auto function = DynamicFilterScalarFun::GetFunction(target_type);
 	auto bind_data = make_uniq<DynamicFilterFunctionData>(std::move(filter_data));
-	return CreateSingleArgumentFunctionExpression(function, target_type, std::move(bind_data));
+	if (!input) {
+		input = make_uniq<BoundReferenceExpression>(target_type, storage_t(0));
+	} else {
+		D_ASSERT(input->GetReturnType() == target_type);
+	}
+	vector<unique_ptr<Expression>> arguments;
+	arguments.push_back(std::move(input));
+	return make_uniq<BoundFunctionExpression>(BoundScalarFunction(function), std::move(arguments),
+	                                          std::move(bind_data));
 }
 
 void TableFilterFunctionSerialize(Serializer &serializer, const optional_ptr<FunctionData> bind_data,
@@ -470,11 +516,8 @@ unique_ptr<FunctionData> TableFilterFunctionDeserialize(Deserializer &deserializ
 	if (function.GetName() == BloomFilterScalarFun::NAME) {
 		return make_uniq<BloomFilterFunctionData>(nullptr, false, string(), key_type);
 	}
-	if (function.GetName() == PerfectHashJoinScalarFun::NAME) {
-		return make_uniq<PerfectHashJoinFunctionData>(nullptr, string());
-	}
 	if (function.GetName() == PrefixRangeScalarFun::NAME) {
-		return make_uniq<PrefixRangeFunctionData>(nullptr, string(), key_type);
+		return make_uniq<PrefixRangeFunctionData>(nullptr, true, string(), key_type);
 	}
 	if (function.GetName() == DynamicFilterScalarFun::NAME) {
 		return make_uniq<DynamicFilterFunctionData>(nullptr);

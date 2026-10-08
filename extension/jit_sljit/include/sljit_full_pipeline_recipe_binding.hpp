@@ -41,18 +41,17 @@ public:
 	bool TryMakeSourceHashJoinBuildSinkRecipe(const SljitSourceHashJoinBuildSinkFacts &facts,
 	                                          SljitFullPipelineRecipe &recipe) const;
 
-	bool TryMakeHashJoinDelimJoinSinkRecipe(const SljitHashJoinDelimJoinSinkFacts &facts,
-	                                        SljitFullPipelineRecipe &recipe) const;
-
-	bool TryMakeHashJoinAppendSinkRecipe(const SljitHashJoinAppendSinkFacts &facts,
-	                                     SljitFullPipelineRecipe &recipe) const;
-
 	bool TryMakeHashJoinBuildSinkRecipe(const SljitHashJoinBuildSinkFacts &facts,
 	                                    SljitFullPipelineRecipe &recipe) const;
 
 	const SljitProjectionAggregateRecipeBinding &ProjectionAggregateRecipes() const {
 		return projection_aggregate_recipes;
 	}
+
+private:
+	//! Binds the source prefix [0, prefix_end): each FILTER as a generated-filter step, each run of PROJECTIONs as one
+	//! projection-chain step.
+	bool TryAddSourcePrefixSteps(SljitFullPipelinePrimitiveSequence &sequence, idx_t prefix_end) const;
 
 private:
 	SljitProjectionAggregateRecipeBinding projection_aggregate_recipes;

@@ -183,21 +183,6 @@ static bool SljitTryBuildMappedPostJoinProjectionAggregateDescriptor(
 	    ops, scratch, post_join_projection.hash_join_idx, aggregate_idx, descriptor, nullptr, producer_projection_op);
 }
 
-static bool
-SljitJoinProjectionAggregateInputsUseOnlyProjectionOutputs(const SljitJoinProjectionAggregateDescriptor &descriptor) {
-	if (descriptor.input_sources.size() != descriptor.output_to_projection.size()) {
-		return false;
-	}
-	for (idx_t input_idx = 0; input_idx < descriptor.input_sources.size(); input_idx++) {
-		auto &source = descriptor.input_sources[input_idx];
-		if (source.kind != SljitJoinProjectionAggregateInputKind::PROJECTION_OUTPUT ||
-		    source.projection_idx != descriptor.output_to_projection[input_idx]) {
-			return false;
-		}
-	}
-	return true;
-}
-
 static bool SljitBuildKeyDomainFitsInt32(PhysicalType type) {
 	switch (type) {
 	case PhysicalType::INT8:

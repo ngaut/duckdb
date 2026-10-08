@@ -20,8 +20,7 @@ static bool TryReadProjectionSourceReferenceIndex(const SljitNativeRegionExpress
 		source_index = projection.source_index;
 		return true;
 	}
-	if (projection.kind != SljitNativeRegionExpressionKind::EXPRESSION_TREE &&
-	    projection.kind != SljitNativeRegionExpressionKind::TYPED_EXPRESSION_TREE) {
+	if (projection.kind != SljitNativeRegionExpressionKind::TYPED_EXPRESSION_TREE) {
 		return false;
 	}
 	if (!projection.expression_tree || projection.expression_tree->kind != ExecutionExpressionIRKind::REFERENCE ||
@@ -39,9 +38,8 @@ static bool SljitTryGetExecutableReferenceInputIndex(const SljitExecutableRegion
 		input_index = plan.source_index;
 		return true;
 	}
-	if ((plan.kind != SljitNativeRegionExpressionKind::EXPRESSION_TREE &&
-	     plan.kind != SljitNativeRegionExpressionKind::TYPED_EXPRESSION_TREE) ||
-	    !plan.expression_tree || plan.expression_tree->kind != ExecutionExpressionIRKind::REFERENCE ||
+	if (plan.kind != SljitNativeRegionExpressionKind::TYPED_EXPRESSION_TREE || !plan.expression_tree ||
+	    plan.expression_tree->kind != ExecutionExpressionIRKind::REFERENCE ||
 	    plan.return_type != plan.expression_tree->return_type) {
 		return false;
 	}
@@ -167,9 +165,6 @@ static bool SljitTryApplyProjectionPlanSources(PLAN &plan, HANDLE_SOURCE &&handl
 	case SljitNativeRegionExpressionKind::ERROR_GUARDED_REFERENCE:
 		return handle_source(plan.source_index) && handle_source(plan.guard_source_index) &&
 		       handle_sources(plan.expression_tree_source_indices);
-	case SljitNativeRegionExpressionKind::CONSTANT_OR_NULL:
-		return handle_sources(plan.constant_or_null.guard_source_indices) &&
-		       handle_sources(plan.expression_tree_source_indices);
 	case SljitNativeRegionExpressionKind::INTEGER_BINARY_REFERENCES:
 	case SljitNativeRegionExpressionKind::DOUBLE_BINARY_REFERENCES:
 	case SljitNativeRegionExpressionKind::INTEGER_COMPARE_REFERENCES:
@@ -187,7 +182,6 @@ static bool SljitTryApplyProjectionPlanSources(PLAN &plan, HANDLE_SOURCE &&handl
 		return handle_sources(plan.expression_tree_source_indices);
 	case SljitNativeRegionExpressionKind::PREDICATE:
 		return handle_predicate(plan);
-	case SljitNativeRegionExpressionKind::EXPRESSION_TREE:
 	case SljitNativeRegionExpressionKind::TYPED_EXPRESSION_TREE:
 		return handle_sources(plan.expression_tree_source_indices);
 	default:
@@ -349,8 +343,7 @@ static bool SljitProjectionIsSingleSourceReferenceLike(const SljitNativeRegionEx
 	if (plan.kind == SljitNativeRegionExpressionKind::REFERENCE) {
 		return plan.source_index == 0;
 	}
-	if (plan.kind != SljitNativeRegionExpressionKind::EXPRESSION_TREE &&
-	    plan.kind != SljitNativeRegionExpressionKind::TYPED_EXPRESSION_TREE) {
+	if (plan.kind != SljitNativeRegionExpressionKind::TYPED_EXPRESSION_TREE) {
 		return false;
 	}
 	if (!plan.expression_tree || plan.expression_tree->kind != ExecutionExpressionIRKind::REFERENCE ||

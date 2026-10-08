@@ -1,6 +1,5 @@
 #include "sljit_region_executable.hpp"
 
-#include "sljit_aggregate_contract_utils.hpp"
 #include "sljit_executable_aggregate_codegen.hpp"
 #include "sljit_dense_group_domain.hpp"
 #include "sljit_executable_expression_codegen.hpp"
@@ -43,53 +42,6 @@ static bool BuildExecutableRegionOp(const SljitNativeRegionOpPlan &op, SljitExec
 		executable.hash_join_build.plan.sink_info = op.hash_join_build.sink_info;
 		executable.hash_join_build.plan.input_types = op.hash_join_build.input_types;
 		return true;
-	case SljitNativeRegionOpKind::NESTED_LOOP_JOIN_PROBE: {
-		executable.nested_loop_join_probe.plan.operator_index = op.nested_loop_join_probe.operator_index;
-		executable.nested_loop_join_probe.plan.input_types = op.nested_loop_join_probe.input_types;
-		executable.nested_loop_join_probe.plan.condition_types = op.nested_loop_join_probe.condition_types;
-		executable.nested_loop_join_probe.plan.join_type = op.nested_loop_join_probe.join_type;
-		executable.nested_loop_join_probe.plan.operator_info = op.nested_loop_join_probe.operator_info;
-		executable.nested_loop_join_probe.plan.conditions.reserve(op.nested_loop_join_probe.conditions.size());
-		executable.nested_loop_join_probe.lhs_conditions.reserve(op.nested_loop_join_probe.conditions.size());
-		for (auto &condition : op.nested_loop_join_probe.conditions) {
-			SljitNativeNestedLoopJoinProbeConditionPlan condition_plan;
-			condition_plan.type = condition.type;
-			condition_plan.comparison_type = condition.comparison_type;
-			condition_plan.value_kind = condition.value_kind;
-			condition_plan.lhs_condition = condition.lhs_condition.Copy(false, false);
-			executable.nested_loop_join_probe.plan.conditions.push_back(std::move(condition_plan));
-
-			SljitExecutableRegionExpression executable_condition;
-			if (!SljitPrepareAndCompileExecutableRegionExpression(condition.lhs_condition, false, executable_condition,
-			                                                      error, &input_not_null)) {
-				return false;
-			}
-			executable.nested_loop_join_probe.lhs_conditions.push_back(std::move(executable_condition));
-		}
-		SljitNativeNestedLoopJoinProbeFunction function = nullptr;
-		auto code = BuildSljitNestedLoopJoinProbe(executable.nested_loop_join_probe.plan, function, error);
-		auto compiled =
-		    SljitCompiledFunction<SljitNativeNestedLoopJoinProbeFunction>::TryCreate(std::move(code), function);
-		if (!compiled.IsExecutable()) {
-			return false;
-		}
-		executable.nested_loop_join_probe.compiled = std::move(compiled);
-		return true;
-	}
-	case SljitNativeRegionOpKind::NESTED_LOOP_JOIN_BUILD:
-		executable.nested_loop_join_build.plan.sink_info = op.nested_loop_join_build.sink_info;
-		executable.nested_loop_join_build.plan.input_types = op.nested_loop_join_build.input_types;
-		executable.nested_loop_join_build.plan.condition_types = op.nested_loop_join_build.condition_types;
-		executable.nested_loop_join_build.rhs_conditions.reserve(op.nested_loop_join_build.rhs_conditions.size());
-		for (auto &condition : op.nested_loop_join_build.rhs_conditions) {
-			SljitExecutableRegionExpression executable_condition;
-			if (!SljitPrepareAndCompileExecutableRegionExpression(condition, false, executable_condition, error,
-			                                                      &input_not_null)) {
-				return false;
-			}
-			executable.nested_loop_join_build.rhs_conditions.push_back(std::move(executable_condition));
-		}
-		return true;
 	case SljitNativeRegionOpKind::ORDER_SINK:
 		executable.order_sink.plan.sink_info = op.order_sink.sink_info;
 		executable.order_sink.plan.input_types = op.order_sink.input_types;
@@ -107,14 +59,6 @@ static bool BuildExecutableRegionOp(const SljitNativeRegionOpPlan &op, SljitExec
 	case SljitNativeRegionOpKind::APPEND_SINK:
 		executable.append_sink.plan.sink_info = op.append_sink.sink_info;
 		executable.append_sink.plan.input_types = op.append_sink.input_types;
-		return true;
-	case SljitNativeRegionOpKind::DELIM_JOIN_SINK:
-		if (op.delim_join_sink.sink_info.kind != ExecutionRegionSinkKind::DELIM_JOIN_SINK) {
-			error = "SLJIT delimiter join sink executable is missing delimiter sink info";
-			return false;
-		}
-		executable.delim_join_sink.plan.sink_info = op.delim_join_sink.sink_info;
-		executable.delim_join_sink.plan.input_types = op.delim_join_sink.input_types;
 		return true;
 	case SljitNativeRegionOpKind::AGGREGATE_UPDATE:
 		SljitBuildExecutableAggregateUpdateMetadata(op.aggregate_update, executable.aggregate_update, input_not_null);
@@ -244,43 +188,6 @@ static void SljitTryBuildExecutableAggregateGroupReservePlan(const SljitNativeAg
 	reserve.group_count = reserve_count;
 }
 
-static idx_t SljitBuildDistinctKeyCardinalityUpperBound(const SljitNativeAggregateUpdatePlan &plan,
-                                                        const vector<idx_t> &current_distinct_counts) {
-	if (!SljitAggregateSinkCanUseDistinctKeySink(plan.sink_info)) {
-		return 0;
-	}
-	idx_t result = 1;
-	auto add_input = [&](idx_t input_idx) {
-		if (input_idx >= current_distinct_counts.size() || current_distinct_counts[input_idx] == 0) {
-			return false;
-		}
-		const auto distinct_count = current_distinct_counts[input_idx];
-		const auto estimated_distinct_factor =
-		    plan.estimated_input_count / distinct_count + (plan.estimated_input_count % distinct_count != 0 ? 1 : 0);
-		if (plan.estimated_input_count > 0 && result >= estimated_distinct_factor) {
-			result = plan.estimated_input_count;
-			return true;
-		}
-		return SljitTryMultiplyGroupReserveCount(result, distinct_count, result);
-	};
-	for (auto &group : plan.sink_info.groups) {
-		if (!group.supported_reference || !add_input(group.input_index)) {
-			return 0;
-		}
-	}
-	for (auto &aggregate : plan.sink_info.aggregates) {
-		if (aggregate.child_indices.empty()) {
-			return 0;
-		}
-		for (auto child_idx : aggregate.child_indices) {
-			if (!add_input(child_idx)) {
-				return 0;
-			}
-		}
-	}
-	return result;
-}
-
 static bool SljitCanBuildFilteredAggregateUpdate(const vector<SljitNativeRegionOpPlan> &ops, idx_t op_idx) {
 	if (op_idx == 0 || op_idx + 1 != ops.size() || ops[op_idx].kind != SljitNativeRegionOpKind::AGGREGATE_UPDATE) {
 		return false;
@@ -338,8 +245,6 @@ bool BuildSljitExecutableRegion(const SljitNativeRegionPlan &region, SljitExecut
 			                                           executable_op.aggregate_update.integral_group_key_ranges);
 			SljitTryBuildExecutableAggregateGroupReservePlan(op.aggregate_update, current_distinct_reserve_counts,
 			                                                 executable_op.aggregate_update.plan.group_reserve);
-			executable_op.aggregate_update.plan.distinct_key_cardinality_upper_bound =
-			    SljitBuildDistinctKeyCardinalityUpperBound(op.aggregate_update, current_distinct_counts);
 		}
 		executable.ops.push_back(std::move(executable_op));
 		if (SljitCanBuildFilteredAggregateUpdate(region.ops, op_idx)) {

@@ -23,13 +23,4 @@ struct SljitHashJoinProbeDrainState {
 	bool finished = false;
 };
 
-struct SljitNestedLoopJoinProbeDrainState {
-	bool lhs_materialized = false;
-	bool started = false;
-	bool right_chunk_finished = false;
-	bool finished = false;
-	idx_t left_offset = 0;
-	idx_t right_offset = 0;
-};
-
 } // namespace duckdb

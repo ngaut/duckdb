@@ -14,12 +14,46 @@
 #include "sljit_hash_join_probe_input_filter_runtime.hpp"
 #include "sljit_hash_join_probe_runtime.hpp"
 #include "sljit_hash_join_projection_runtime.hpp"
-#include "sljit_post_join_projection_runtime.hpp"
 #include "sljit_post_join_projection_aggregate_primitive.hpp"
 #include "sljit_projection_executor_runtime.hpp"
+#include "sljit_projection_reference_runtime.hpp"
 #include "sljit_projected_aggregate_sink.hpp"
 
 namespace duckdb {
+
+static void SljitProjectProjectionStep(ExecutionRegionRuntime &runtime, SljitRegionExecutionScratch &scratch,
+                                       vector<SljitExecutableRegionOp> &ops, idx_t projection_idx, DataChunk &input,
+                                       DataChunk &output) {
+	auto &projection_op = ops[projection_idx];
+	output.Reset();
+	auto projection_stage_start = SljitRegionStageStart(runtime);
+	if (SljitTryReferenceProjection(output, input, projection_op)) {
+		RecordSljitRegionStageRuntime(runtime, projection_idx, projection_op.kind, "post_join_reference_projection",
+		                              projection_stage_start);
+		return;
+	}
+	SljitExecuteProjection(scratch, projection_idx, projection_op, input, output);
+	RecordSljitRegionStageRuntime(runtime, projection_idx, projection_op.kind, "post_join_batch_projection",
+	                              projection_stage_start);
+}
+
+//! Generic post-join projection fallback for batches the direct join-output
+//! aggregate does not own: project the materialized join output step by step.
+static void SljitProjectPostJoinProjectionChain(ExecutionRegionRuntime &runtime, SljitRegionExecutionScratch &scratch,
+                                                vector<SljitExecutableRegionOp> &ops, idx_t first_projection_idx,
+                                                idx_t final_projection_idx, DataChunk &input, DataChunk &projected) {
+	DataChunk *current = &input;
+	for (idx_t projection_idx = first_projection_idx; projection_idx <= final_projection_idx; projection_idx++) {
+		auto &projection_output =
+		    projection_idx == final_projection_idx ? projected : scratch.TemporaryChunk(projection_idx);
+		SljitProjectProjectionStep(runtime, scratch, ops, projection_idx, *current, projection_output);
+		current = &projection_output;
+		if (current->size() == 0) {
+			projected.Reset();
+			return;
+		}
+	}
+}
 
 struct SljitPostJoinProjectionAggregateRuntimeState {
 	void BeginInvocation() {
@@ -122,21 +156,10 @@ struct SljitPostJoinProjectionAggregateRuntimeState {
 
 		auto aggregate_sink = MakeAggregateSink(runtime, result, ops, scratch);
 		auto &projected = scratch.TemporaryChunk(post_join_projection.final_projection_idx);
-		bool direct_projected = false;
 		if (SljitTryExecuteDirectJoinOutputAggregate(
 		        runtime, ops, scratch, direct_strategy, post_join_projection, join_input, match_selection,
 		        build_selection, row_pointers, join_output, output_proof, output_column_map, output_projection_idx)) {
 			aggregate_sink.Charge(join_output.size());
-			return false;
-		}
-		if (aggregate_sink.TryAppendDirectProjectedBatch(join_output, direct_projected, [&](DataChunk &batch) {
-			    return SljitTryDirectMaterializeJoinProjectionChainToBatch(runtime, ops, scratch, post_join_projection,
-			                                                               &join_input, &match_selection, &row_pointers,
-			                                                               join_output, batch, output_proof);
-		    })) {
-			return true;
-		}
-		if (direct_projected) {
 			return false;
 		}
 		if (!SljitMaterializeSelectionOnlyHashJoinProbeOutput(runtime, scratch, hash_join_idx, hash_join_op, join_input,
@@ -144,20 +167,9 @@ struct SljitPostJoinProjectionAggregateRuntimeState {
 		                                                      join_output.size(), join_output, output_proof)) {
 			return false;
 		}
-		if (aggregate_sink.TryAppendDirectProjectedBatch(join_output, direct_projected, [&](DataChunk &batch) {
-			    return SljitTryDirectMaterializeJoinProjectionChainToBatch(
-			        runtime, ops, scratch, post_join_projection, nullptr, nullptr, nullptr, join_output, batch);
-		    })) {
-			return true;
-		}
-		if (direct_projected) {
-			return false;
-		}
 		projected.Reset();
-		if (!SljitTryFastProjectJoinOutput(runtime, ops, post_join_projection, join_output, projected)) {
-			SljitProjectPostJoinProjectionChain(runtime, scratch, ops, post_join_projection.first_projection_idx,
-			                                    post_join_projection.final_projection_idx, join_output, projected);
-		}
+		SljitProjectPostJoinProjectionChain(runtime, scratch, ops, post_join_projection.first_projection_idx,
+		                                    post_join_projection.final_projection_idx, join_output, projected);
 		return aggregate_sink.AppendProjectedBatch(projected);
 	}
 

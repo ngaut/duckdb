@@ -57,45 +57,23 @@ static void SljitExecuteProjectionExpression(SljitExecutableRegionExpression &ex
 		FlatVector::SetSize(result, count_t(count));
 		return;
 	}
-	if (plan.kind == SljitNativeRegionExpressionKind::CONSTANT_OR_NULL) {
-		auto constant = plan.constant_or_null.guard_has_null_constant || plan.constant_or_null.constant.IsNull()
-		                    ? Value(plan.return_type)
-		                    : plan.constant_or_null.constant;
-		result.Reference(constant, count_t(count));
-		result.Flatten();
-		auto &result_validity = FlatVector::ValidityMutable(result);
-		result_validity.EnsureWritable();
-		if (!constant.IsNull()) {
-			result_validity.SetAllValid(count);
-			auto native_input =
-			    SljitPrepareNativePredicateInput(adapter_scratch, input, expr.input_source_indices, execute_sel, count,
-			                                     nullptr, result_validity.GetData(), nullptr, nullptr);
-			SljitExecuteNativeFunction(expr.predicate.Function(), native_input);
-		}
-		FlatVector::SetSize(result, count_t(count));
-		return;
-	}
-	if (plan.kind == SljitNativeRegionExpressionKind::EXPRESSION_TREE ||
-	    plan.kind == SljitNativeRegionExpressionKind::TYPED_EXPRESSION_TREE) {
+	if (plan.kind == SljitNativeRegionExpressionKind::TYPED_EXPRESSION_TREE) {
 		SljitNativeVectorInput native_input;
 		adapter_scratch.PrepareExpressionTree(input, expr, native_input, execute_sel, count);
-		auto result_kind = plan.kind == SljitNativeRegionExpressionKind::EXPRESSION_TREE
-		                       ? SljitNativeIntegerKind::DECIMAL64
-		                       : plan.integer_kind;
 
 		result.SetVectorType(VectorType::FLAT_VECTOR);
 		auto &result_validity = FlatVector::ValidityMutable(result);
 		result_validity.Reset(count);
-		validity_t *result_validity_data = nullptr;
-		if (adapter_scratch.source_can_have_null ||
-		    plan.kind == SljitNativeRegionExpressionKind::TYPED_EXPRESSION_TREE) {
-			result_validity.EnsureWritable();
-			result_validity.SetAllValid(count);
-			result_validity_data = result_validity.GetData();
-		}
+		result_validity.EnsureWritable();
+		result_validity.SetAllValid(count);
+		validity_t *result_validity_data = result_validity.GetData();
 
 		native_input.execute_sel = execute_sel ? execute_sel->data() : nullptr;
-		native_input.result_data = NativeIntegerResultData(result, result_kind);
+		// The generated tree stores its root in the root's physical layout: a narrow DECIMAL128 root (the only INT128
+		// typed-tree result) is sign-extended into hugeint elements.
+		native_input.result_data = plan.return_type.InternalType() == PhysicalType::INT128
+		                               ? reinterpret_cast<data_ptr_t>(FlatVector::GetDataMutable<hugeint_t>(result))
+		                               : NativeIntegerResultData(result, plan.integer_kind);
 		native_input.result_validity = result_validity_data;
 		native_input.overflow_message = expr.overflow_message.c_str();
 		native_input.query_location = plan.query_location;

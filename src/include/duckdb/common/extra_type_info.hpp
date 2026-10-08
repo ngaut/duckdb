@@ -50,12 +50,15 @@ protected:
 	ExtraTypeInfo &operator=(const ExtraTypeInfo &other);
 
 public:
-	bool Equals(ExtraTypeInfo *other_p) const;
+	bool Equals(const ExtraTypeInfo *other_p) const;
 
 	virtual void Serialize(Serializer &serializer) const;
 	static shared_ptr<ExtraTypeInfo> Deserialize(Deserializer &source);
 	virtual shared_ptr<ExtraTypeInfo> Copy() const;
 	virtual shared_ptr<ExtraTypeInfo> DeepCopy() const;
+	//! Copy the base fields (alias, extension info) into "target" - used by Copy/DeepCopy implementations that
+	//! reconstruct the type info instead of copy-constructing it
+	void CopyBaseInfo(ExtraTypeInfo &target) const;
 
 	template <class TARGET>
 	TARGET &Cast() {
@@ -69,7 +72,7 @@ public:
 	}
 
 protected:
-	virtual bool EqualsInternal(ExtraTypeInfo *other_p) const;
+	virtual bool EqualsInternal(const ExtraTypeInfo *other_p) const;
 };
 
 struct DecimalTypeInfo : public ExtraTypeInfo {
@@ -84,7 +87,7 @@ public:
 	shared_ptr<ExtraTypeInfo> Copy() const override;
 
 protected:
-	bool EqualsInternal(ExtraTypeInfo *other_p) const override;
+	bool EqualsInternal(const ExtraTypeInfo *other_p) const override;
 
 private:
 	DecimalTypeInfo();
@@ -101,7 +104,7 @@ public:
 	shared_ptr<ExtraTypeInfo> Copy() const override;
 
 protected:
-	bool EqualsInternal(ExtraTypeInfo *other_p) const override;
+	bool EqualsInternal(const ExtraTypeInfo *other_p) const override;
 
 private:
 	StringTypeInfo();
@@ -119,7 +122,7 @@ public:
 	shared_ptr<ExtraTypeInfo> DeepCopy() const override;
 
 protected:
-	bool EqualsInternal(ExtraTypeInfo *other_p) const override;
+	bool EqualsInternal(const ExtraTypeInfo *other_p) const override;
 
 private:
 	ListTypeInfo();
@@ -138,7 +141,7 @@ public:
 	shared_ptr<ExtraTypeInfo> DeepCopy() const override;
 
 protected:
-	bool EqualsInternal(ExtraTypeInfo *other_p) const override;
+	bool EqualsInternal(const ExtraTypeInfo *other_p) const override;
 
 private:
 	StructTypeInfo();
@@ -153,7 +156,7 @@ public:
 	static shared_ptr<ExtraTypeInfo> LegacyDeserialize();
 
 protected:
-	bool EqualsInternal(ExtraTypeInfo *other_p) const override;
+	bool EqualsInternal(const ExtraTypeInfo *other_p) const override;
 
 private:
 	LegacyAggregateStateTypeInfo();
@@ -174,6 +177,7 @@ public:
 	static PhysicalType DictType(idx_t size);
 
 	static LogicalType CreateType(const Vector &ordered_data, idx_t size);
+	static shared_ptr<ExtraTypeInfo> CreateTypeInfo(const Vector &ordered_data, idx_t size);
 
 	void Serialize(Serializer &serializer) const override;
 	static shared_ptr<ExtraTypeInfo> Deserialize(Deserializer &source);
@@ -181,7 +185,7 @@ public:
 
 protected:
 	// Equalities are only used in enums with different catalog entries
-	bool EqualsInternal(ExtraTypeInfo *other_p) const override;
+	bool EqualsInternal(const ExtraTypeInfo *other_p) const override;
 
 	Vector values_insert_order;
 
@@ -202,7 +206,7 @@ public:
 	shared_ptr<ExtraTypeInfo> DeepCopy() const override;
 
 protected:
-	bool EqualsInternal(ExtraTypeInfo *other_p) const override;
+	bool EqualsInternal(const ExtraTypeInfo *other_p) const override;
 };
 
 struct AnyTypeInfo : public ExtraTypeInfo {
@@ -218,7 +222,7 @@ public:
 	shared_ptr<ExtraTypeInfo> DeepCopy() const override;
 
 protected:
-	bool EqualsInternal(ExtraTypeInfo *other_p) const override;
+	bool EqualsInternal(const ExtraTypeInfo *other_p) const override;
 
 private:
 	AnyTypeInfo();
@@ -235,7 +239,7 @@ public:
 	shared_ptr<ExtraTypeInfo> Copy() const override;
 
 protected:
-	bool EqualsInternal(ExtraTypeInfo *other_p) const override;
+	bool EqualsInternal(const ExtraTypeInfo *other_p) const override;
 
 private:
 	IntegerLiteralTypeInfo();
@@ -254,7 +258,7 @@ public:
 	shared_ptr<ExtraTypeInfo> Copy() const override;
 
 protected:
-	bool EqualsInternal(ExtraTypeInfo *other_p) const override;
+	bool EqualsInternal(const ExtraTypeInfo *other_p) const override;
 	TemplateTypeInfo();
 };
 
@@ -270,7 +274,7 @@ public:
 	CoordinateReferenceSystem crs;
 
 protected:
-	bool EqualsInternal(ExtraTypeInfo *other_p) const override;
+	bool EqualsInternal(const ExtraTypeInfo *other_p) const override;
 };
 
 struct UnboundTypeInfo : public ExtraTypeInfo {
@@ -283,7 +287,7 @@ struct UnboundTypeInfo : public ExtraTypeInfo {
 	shared_ptr<ExtraTypeInfo> Copy() const override;
 
 protected:
-	bool EqualsInternal(ExtraTypeInfo *other_p) const override;
+	bool EqualsInternal(const ExtraTypeInfo *other_p) const override;
 
 private:
 	UnboundTypeInfo();

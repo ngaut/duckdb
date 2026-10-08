@@ -8,7 +8,6 @@
 
 #include "sljit_region_plan_internal.hpp"
 
-#include "sljit_aggregate_contract_utils.hpp"
 #include "sljit_hash_join_probe_codegen_validation.hpp"
 
 namespace duckdb {
@@ -52,14 +51,8 @@ static bool SljitNativeRegionOpGeneratesMachineCode(const SljitNativeRegionOpPla
 		        SljitNativeRegionExpressionGeneratesCode(op.hash_join_probe.residual_filter));
 	case SljitNativeRegionOpKind::HASH_JOIN_BUILD:
 		return false;
-	case SljitNativeRegionOpKind::NESTED_LOOP_JOIN_PROBE:
-		return false;
-	case SljitNativeRegionOpKind::NESTED_LOOP_JOIN_BUILD:
-		return SljitNativeRegionExpressionsGenerateCode(op.nested_loop_join_build.rhs_conditions);
 	case SljitNativeRegionOpKind::ORDER_SINK:
 		return SljitNativeRegionExpressionsGenerateCode(op.order_sink.order_keys);
-	case SljitNativeRegionOpKind::DELIM_JOIN_SINK:
-		return false;
 	case SljitNativeRegionOpKind::AGGREGATE_UPDATE:
 		return op.aggregate_update.UsesPrimitivePayloads();
 	default:
@@ -73,10 +66,6 @@ static bool SljitNativeRegionOpIsNativeSink(const SljitNativeRegionOpPlan &op) {
 		return op.hash_join_build.sink_info.kind == ExecutionRegionSinkKind::HASH_JOIN_BUILD &&
 		       op.hash_join_build.sink_info.hash_join_contract.native_build_contract.status ==
 		           ExecutionRegionStateContractStatus::READY;
-	case SljitNativeRegionOpKind::NESTED_LOOP_JOIN_BUILD:
-		return op.nested_loop_join_build.sink_info.kind == ExecutionRegionSinkKind::NESTED_LOOP_JOIN_BUILD &&
-		       op.nested_loop_join_build.sink_info.nested_loop_join_contract.native_build_contract.status ==
-		           ExecutionRegionStateContractStatus::READY;
 	case SljitNativeRegionOpKind::APPEND_SINK:
 		return (op.append_sink.sink_info.kind == ExecutionRegionSinkKind::RESULT_COLLECTOR_SINK ||
 		        op.append_sink.sink_info.kind == ExecutionRegionSinkKind::MATERIALIZATION) &&
@@ -84,9 +73,6 @@ static bool SljitNativeRegionOpIsNativeSink(const SljitNativeRegionOpPlan &op) {
 	case SljitNativeRegionOpKind::ORDER_SINK:
 		return op.order_sink.sink_info.kind == ExecutionRegionSinkKind::SORT &&
 		       op.order_sink.sink_info.native_sink_contract.status == ExecutionRegionStateContractStatus::READY;
-	case SljitNativeRegionOpKind::DELIM_JOIN_SINK:
-		return op.delim_join_sink.sink_info.kind == ExecutionRegionSinkKind::DELIM_JOIN_SINK &&
-		       op.delim_join_sink.sink_info.native_sink_contract.status == ExecutionRegionStateContractStatus::READY;
 	case SljitNativeRegionOpKind::AGGREGATE_UPDATE: {
 		auto &sink = op.aggregate_update.sink_info;
 		return (sink.kind == ExecutionRegionSinkKind::HASH_AGGREGATE_UPDATE ||
@@ -186,7 +172,6 @@ static bool SljitRegionPlanFilterReferencesMarkProbeMarker(const SljitNativeRegi
 		return filter.source_index == marker_index;
 	case SljitNativeRegionExpressionKind::PREDICATE:
 		return filter.predicate && SljitRegionPlanPredicateReferencesMarker(*filter.predicate, marker_index);
-	case SljitNativeRegionExpressionKind::EXPRESSION_TREE:
 	case SljitNativeRegionExpressionKind::TYPED_EXPRESSION_TREE:
 		return filter.expression_tree &&
 		       SljitRegionPlanExpressionTreeReferencesMarker(*filter.expression_tree,
@@ -338,10 +323,6 @@ void DisableSljitRegionFlatNullableFastPath(SljitNativeRegionPlan &region) {
 	for (auto &op : region.ops) {
 		set_expression(op.filter);
 		set_expression(op.hash_join_probe.residual_filter);
-		for (auto &condition : op.nested_loop_join_probe.conditions) {
-			set_expression(condition.lhs_condition);
-		}
-		set_expressions(op.nested_loop_join_build.rhs_conditions);
 		set_expressions(op.order_sink.order_keys);
 		set_expressions(op.aggregate_update.payloads);
 		set_expressions(op.aggregate_update.group_expressions);
@@ -404,18 +385,6 @@ void AddSljitNativeRegionCapabilityFacts(ExecutionRegionLoweringPlan &lowering_p
 				lowering_plan.AddBackendDirectHashJoinBuildCapability();
 			}
 			break;
-		case SljitNativeRegionOpKind::NESTED_LOOP_JOIN_PROBE:
-			for (auto &condition : op.nested_loop_join_probe.conditions) {
-				lowering_plan.AddBackendJoinKeyTypeCapability(condition.type);
-			}
-			lowering_plan.AddBackendNestedLoopJoinProbeCapability();
-			break;
-		case SljitNativeRegionOpKind::NESTED_LOOP_JOIN_BUILD:
-			for (auto &condition_type : op.nested_loop_join_build.condition_types) {
-				lowering_plan.AddBackendJoinKeyTypeCapability(condition_type);
-			}
-			lowering_plan.AddBackendNestedLoopJoinBuildCapability();
-			break;
 		case SljitNativeRegionOpKind::AGGREGATE_UPDATE: {
 			auto &aggregate_update = op.aggregate_update;
 			for (auto &group : aggregate_update.sink_info.groups) {
@@ -427,12 +396,6 @@ void AddSljitNativeRegionCapabilityFacts(ExecutionRegionLoweringPlan &lowering_p
 			lowering_plan.AddBackendAggregateUpdateCapability(
 			    aggregate_update.sink_info.aggregate_contract.kind, aggregate_update.UsesPrimitivePayloads(),
 			    aggregate_update.use_grouped_state_addresses, aggregate_update.use_perfect_hash_group_lookup);
-			auto &aggregate_contract = aggregate_update.sink_info.aggregate_contract;
-			if (SljitAggregateSinkCanUseDistinctKeySink(aggregate_update.sink_info) &&
-			    aggregate_contract.grouping_set_count == 1 && aggregate_contract.distinct_aggregate_count == 1 &&
-			    aggregate_contract.distinct_table_count == 1 && aggregate_update.sink_info.aggregates.size() == 1) {
-				lowering_plan.AddBackendDistinctKeyFastInsertCapability();
-			}
 			break;
 		}
 		default:
