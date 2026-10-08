@@ -7,6 +7,7 @@
 //===----------------------------------------------------------------------===//
 
 #include "duckdb/planner/filter/table_filter_functions.hpp"
+
 #include "duckdb/planner/filter/table_filter_function_helpers.hpp"
 
 #include "duckdb/execution/expression_executor_state.hpp"
@@ -37,6 +38,7 @@
 #include "duckdb/storage/buffer_manager.hpp"
 #include "duckdb/planner/table_filter_state.hpp"
 
+#include <bitset>
 #include <cmath>
 #include <limits>
 
@@ -77,6 +79,7 @@ public:
 		word_count = buckets == 0 ? 1 : (buckets + 63) >> WORD_SHIFT;
 
 		buf_ = AllocateBitmap(context, word_count, bitmap);
+		occupied_buckets = 0;
 
 		// Only mark initialized as true when local bitmaps are merged.
 		initialized = false;
@@ -113,9 +116,14 @@ public:
 	}
 
 	void MergeBuildState(PrefixRangeBitmapBuildState &state) {
+		// Merging is the only writer once the build state exists, so the occupied bucket count is kept here instead of
+		// being recounted by every planner that asks for the distinct count.
+		idx_t occupied = 0;
 		for (idx_t word_idx = 0; word_idx < word_count; word_idx++) {
 			bitmap[word_idx] |= state.bitmap[word_idx];
+			occupied += std::bitset<64>(bitmap[word_idx]).count();
 		}
+		occupied_buckets = occupied;
 		initialized = true;
 	}
 
@@ -253,14 +261,6 @@ public:
 		if (!initialized) {
 			return 0;
 		}
-		idx_t occupied_buckets = 0;
-		for (idx_t word_idx = 0; word_idx < word_count; word_idx++) {
-			auto word = bitmap[word_idx];
-			while (word) {
-				word &= word - 1;
-				occupied_buckets++;
-			}
-		}
 		if (shift >= sizeof(idx_t) * 8) {
 			return std::numeric_limits<idx_t>::max();
 		}
@@ -303,6 +303,7 @@ private:
 	idx_t shift;
 	idx_t word_count;
 	idx_t build_row_count;
+	idx_t occupied_buckets = 0;
 	AllocatedData buf_;
 	uint64_t *bitmap;
 };
