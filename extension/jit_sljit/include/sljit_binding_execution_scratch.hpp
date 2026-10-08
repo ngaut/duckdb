@@ -20,6 +20,8 @@ struct SljitBindingExecutionScratch {
 		operator_binding_ready.resize(count);
 		sink_bindings.resize(count);
 		sink_binding_ready.resize(count);
+		output_operator_bindings.resize(count);
+		output_operator_binding_ready.resize(count);
 	}
 
 	bool HasSink(idx_t op_idx) const {
@@ -53,9 +55,29 @@ struct SljitBindingExecutionScratch {
 		operator_binding_ready[op_idx] = true;
 	}
 
+	//! A second binding of an operator whose output consumers index a different input layout than the one the
+	//! operator itself executes on (a hash join probing the source of an elided pre-join projection)
+	bool HasOutputOperator(idx_t op_idx) const {
+		return op_idx < output_operator_binding_ready.size() && output_operator_binding_ready[op_idx];
+	}
+
+	ExecutionOperatorBinding &OutputOperator(idx_t op_idx) {
+		return SljitCheckedScratchSlot(output_operator_bindings, op_idx,
+		                               "SLJIT full pipeline operator has no output binding scratch");
+	}
+
+	void MarkOutputOperatorReady(idx_t op_idx) {
+		if (op_idx >= output_operator_binding_ready.size()) {
+			throw InternalException("SLJIT full pipeline operator has no output binding-ready scratch");
+		}
+		output_operator_binding_ready[op_idx] = true;
+	}
+
 private:
 	vector<ExecutionOperatorBinding> operator_bindings;
 	vector<bool> operator_binding_ready;
+	vector<ExecutionOperatorBinding> output_operator_bindings;
+	vector<bool> output_operator_binding_ready;
 	vector<ExecutionSinkBinding> sink_bindings;
 	vector<bool> sink_binding_ready;
 };

@@ -9,6 +9,7 @@
 #pragma once
 
 #include "sljit_full_pipeline_runtime.hpp"
+#include "sljit_hash_join_output_source_runtime.hpp"
 #include "sljit_hash_join_probe_runtime.hpp"
 #include "sljit_projection_source_runtime.hpp"
 #include "sljit_region_runtime_state.hpp"
@@ -49,14 +50,11 @@ static bool SljitRequiredColumnsAreStrictSubset(const vector<uint8_t> &required_
 }
 
 static bool SljitMaterializeSelectionOnlyHashJoinProbeOutput(
-    ExecutionRegionRuntime &runtime, SljitRegionExecutionScratch &scratch, idx_t hash_join_idx,
-    SljitExecutableRegionOp &hash_join_op, DataChunk &join_input, const SelectionVector &match_selection,
-    const SelectionVector &build_selection, Vector &row_pointers, idx_t count, DataChunk &join_output,
-    ExecutionHashJoinProbeOutputProof output_proof = {}) {
-	if (!scratch.HasOperatorBinding(hash_join_idx)) {
-		return false;
-	}
-	auto &binding = scratch.OperatorBinding(hash_join_idx).hash_join_probe;
+    ExecutionRegionRuntime &runtime, idx_t hash_join_idx, SljitExecutableRegionOp &hash_join_op,
+    const SljitHashJoinOutputSource &source, const SelectionVector &match_selection,
+    const SelectionVector &build_selection, Vector &row_pointers, idx_t count, DataChunk &join_output) {
+	auto &binding = source.binding;
+	auto &join_input = source.input;
 	if (!binding.ready) {
 		return false;
 	}
@@ -64,7 +62,7 @@ static bool SljitMaterializeSelectionOnlyHashJoinProbeOutput(
 	SljitRegionStageRecorder recorder(runtime, hash_join_idx, hash_join_op.kind, "materialize_selection_output");
 	if (binding.layout_kind == ExecutionHashJoinProbeLayoutKind::REGULAR_HASH_TABLE) {
 		ExecutionMaterializeHashJoinProbe(binding, join_input, row_pointers, match_selection, count, join_output,
-		                                  runtime.TraceRuntime() ? &recorder : nullptr, output_proof);
+		                                  runtime.TraceRuntime() ? &recorder : nullptr, source.output_proof);
 	} else if (binding.layout_kind == ExecutionHashJoinProbeLayoutKind::PERFECT_HASH_TABLE) {
 		ExecutionMaterializePerfectHashJoinProbe(binding, join_input, match_selection, build_selection, count,
 		                                         join_output, runtime.TraceRuntime() ? &recorder : nullptr);
@@ -76,16 +74,19 @@ static bool SljitMaterializeSelectionOnlyHashJoinProbeOutput(
 	return true;
 }
 
-static bool SljitTryMaterializeHashJoinRequiredSources(
-    ExecutionRegionRuntime &runtime, SljitRegionExecutionScratch &scratch, idx_t hash_join_idx,
-    SljitExecutableRegionOp &hash_join_op, DataChunk &join_input, const SelectionVector &match_selection,
-    const SelectionVector &build_selection, Vector &row_pointers, idx_t count, const vector<uint8_t> &required_columns,
-    DataChunk &sink_input, ExecutionHashJoinProbeOutputProof output_proof = {}) {
-	if (count == 0 || !scratch.HasOperatorBinding(hash_join_idx) ||
-	    sink_input.ColumnCount() != required_columns.size()) {
+static bool SljitTryMaterializeHashJoinRequiredSources(ExecutionRegionRuntime &runtime, idx_t hash_join_idx,
+                                                       SljitExecutableRegionOp &hash_join_op,
+                                                       const SljitHashJoinOutputSource &source,
+                                                       const SelectionVector &match_selection,
+                                                       const SelectionVector &build_selection, Vector &row_pointers,
+                                                       idx_t count, const vector<uint8_t> &required_columns,
+                                                       DataChunk &sink_input) {
+	if (count == 0 || sink_input.ColumnCount() != required_columns.size()) {
 		return false;
 	}
-	auto &binding = scratch.OperatorBinding(hash_join_idx).hash_join_probe;
+	auto &binding = source.binding;
+	auto &join_input = source.input;
+	auto &output_proof = source.output_proof;
 	auto stage_start = SljitRegionStageStart(runtime);
 	auto materialized = ExecuteSljitRegionRecordedOperation(
 	    runtime, hash_join_idx, hash_join_op.kind, "materialize_probe_required_sources", stage_start,
@@ -103,16 +104,17 @@ static bool SljitTryMaterializeHashJoinRequiredSources(
 }
 
 static bool SljitTryMaterializeHashJoinRequiredProjectionViews(
-    ExecutionRegionRuntime &runtime, SljitRegionExecutionScratch &scratch, idx_t hash_join_idx, idx_t projection_idx,
-    SljitExecutableRegionOp &projection_op, DataChunk &join_input, const SelectionVector &match_selection,
+    ExecutionRegionRuntime &runtime, idx_t projection_idx, SljitExecutableRegionOp &projection_op,
+    const SljitHashJoinOutputSource &source, const SelectionVector &match_selection,
     const SelectionVector &build_selection, Vector &row_pointers, idx_t count, const vector<uint8_t> &required_columns,
-    DataChunk &projected, ExecutionHashJoinProbeOutputProof output_proof = {}) {
-	if (count == 0 || !scratch.HasOperatorBinding(hash_join_idx) ||
-	    required_columns.size() != projection_op.projections.size() ||
+    DataChunk &projected) {
+	if (count == 0 || required_columns.size() != projection_op.projections.size() ||
 	    projected.ColumnCount() != projection_op.projections.size()) {
 		return false;
 	}
-	auto &binding = scratch.OperatorBinding(hash_join_idx).hash_join_probe;
+	auto &binding = source.binding;
+	auto &join_input = source.input;
+	auto &output_proof = source.output_proof;
 	const bool regular_hash_join = binding.layout_kind == ExecutionHashJoinProbeLayoutKind::REGULAR_HASH_TABLE;
 	const bool perfect_hash_join = binding.layout_kind == ExecutionHashJoinProbeLayoutKind::PERFECT_HASH_TABLE;
 	if (!binding.ready || (!regular_hash_join && !perfect_hash_join) || (regular_hash_join && !binding.hash_table) ||
@@ -243,12 +245,15 @@ static bool SljitTryExecuteHashJoinProbeDirectHashJoinBuild(
 			continue;
 		}
 		auto &match_selection = SljitBindHashJoinMatchSelection(state.output_proof, explicit_match_selection);
+		// The probe ran on join_input itself, so its output columns index that chunk
+		auto source = SljitBindHashJoinOutputSource(runtime, ops, scratch, hash_join_idx, join_input,
+		                                            state.output_proof, nullptr, DConstants::INVALID_INDEX);
 
 		DataChunk *sink_input = nullptr;
 		if (projection_idx == DConstants::INVALID_INDEX) {
-			if (SljitTryMaterializeHashJoinRequiredSources(
-			        runtime, scratch, hash_join_idx, hash_join_op, join_input, match_selection, build_selection,
-			        row_pointers, join_output.size(), required_columns, join_output, state.output_proof)) {
+			if (SljitTryMaterializeHashJoinRequiredSources(runtime, hash_join_idx, hash_join_op, source,
+			                                               match_selection, build_selection, row_pointers,
+			                                               join_output.size(), required_columns, join_output)) {
 				sink_input = &join_output;
 				RecordSljitRegionRuntimePath(runtime, hash_join_op.kind, "required_hash_build_sources",
 				                             join_output.size());
@@ -256,10 +261,9 @@ static bool SljitTryExecuteHashJoinProbeDirectHashJoinBuild(
 		} else {
 			auto &projected = scratch.TemporaryChunk(projection_idx);
 			projected.Reset();
-			if (SljitTryMaterializeHashJoinRequiredProjectionViews(runtime, scratch, hash_join_idx, projection_idx,
-			                                                       ops[projection_idx], join_input, match_selection,
-			                                                       build_selection, row_pointers, join_output.size(),
-			                                                       required_columns, projected, state.output_proof)) {
+			if (SljitTryMaterializeHashJoinRequiredProjectionViews(runtime, projection_idx, ops[projection_idx], source,
+			                                                       match_selection, build_selection, row_pointers,
+			                                                       join_output.size(), required_columns, projected)) {
 				sink_input = &projected;
 				RecordSljitRegionRuntimePath(runtime, hash_join_op.kind, "projected_hash_build_views",
 				                             projected.size());
@@ -267,9 +271,9 @@ static bool SljitTryExecuteHashJoinProbeDirectHashJoinBuild(
 		}
 
 		if (!sink_input) {
-			if (!SljitMaterializeSelectionOnlyHashJoinProbeOutput(
-			        runtime, scratch, hash_join_idx, hash_join_op, join_input, match_selection, build_selection,
-			        row_pointers, join_output.size(), join_output, state.output_proof)) {
+			if (!SljitMaterializeSelectionOnlyHashJoinProbeOutput(runtime, hash_join_idx, hash_join_op, source,
+			                                                      match_selection, build_selection, row_pointers,
+			                                                      join_output.size(), join_output)) {
 				return false;
 			}
 			sink_result = execute_native_full_pipeline_from(hash_join_idx + 1, join_output);

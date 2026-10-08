@@ -186,6 +186,18 @@ struct SljitRegionExecutionScratch {
 		binding_scratch.MarkOperatorReady(op_idx);
 	}
 
+	bool HasOutputOperatorBinding(idx_t op_idx) const {
+		return binding_scratch.HasOutputOperator(op_idx);
+	}
+
+	ExecutionOperatorBinding &OutputOperatorBinding(idx_t op_idx) {
+		return binding_scratch.OutputOperator(op_idx);
+	}
+
+	void MarkOutputOperatorBindingReady(idx_t op_idx) {
+		binding_scratch.MarkOutputOperatorReady(op_idx);
+	}
+
 	Vector &HashJoinRowPointers(idx_t op_idx) {
 		return hash_join_scratch.RowPointers(op_idx);
 	}

@@ -1,0 +1,83 @@
+# name: test/sql/jit/test_jit_elided_pre_join_projection_output.test_slow
+# description: A probe that runs on the source of an elided pre-join projection (struct fields, a key cast to
+#              INTEGER) and whose output a fallback materializes: the fallback reads the projection's output, not the
+#              source chunk the probe ran on (TPC-H Q17 over struct views)
+# group: [jit]
+
+require tpch
+
+load __TEST_DIR__/jit_elided_pre_join_projection_output.db
+
+statement ok
+LOAD jit_sljit
+
+statement ok
+CALL dbgen(sf=0.5, suffix='_normal')
+
+statement ok
+CREATE TABLE lineitem_struct AS SELECT {
+'l_partkey': l_partkey,
+'l_quantity': l_quantity,
+'l_extendedprice': l_extendedprice
+} c FROM lineitem_normal
+
+statement ok
+CREATE VIEW lineitem AS SELECT
+c['l_partkey'] AS l_partkey,
+c['l_quantity'] AS l_quantity,
+c['l_extendedprice'] AS l_extendedprice
+FROM lineitem_struct
+
+statement ok
+CREATE TABLE part_struct AS SELECT {
+'p_partkey': p_partkey,
+'p_brand': p_brand,
+'p_container': p_container
+} c FROM part_normal
+
+statement ok
+CREATE VIEW part AS SELECT
+c['p_partkey'] AS p_partkey,
+c['p_brand'] AS p_brand,
+c['p_container'] AS p_container
+FROM part_struct
+
+statement ok
+SET jit_policy='off'
+
+statement ok
+CREATE TABLE expected AS
+SELECT sum(l_extendedprice) / 7.0 AS avg_yearly
+FROM lineitem, part
+WHERE p_partkey = l_partkey AND p_brand = 'Brand#23' AND p_container = 'MED BOX'
+  AND l_quantity < (SELECT 0.2 * avg(l_quantity) FROM lineitem WHERE l_partkey = p_partkey)
+
+statement ok
+SET jit_policy='auto'
+
+statement ok
+SET jit_cbo_startup_base_cost=0
+
+statement ok
+SET jit_cbo_generated_stage_benefit=4096
+
+statement ok
+SET jit_cbo_materialization_elision_benefit=4096
+
+statement ok
+SET jit_cbo_native_operator_stage_benefit=4096
+
+statement ok
+SET jit_cbo_full_pipeline_benefit=4096
+
+statement ok
+SET jit_cbo_startup_margin_basis_points=0
+
+query I
+SELECT (SELECT sum(l_extendedprice) / 7.0
+        FROM lineitem, part
+        WHERE p_partkey = l_partkey AND p_brand = 'Brand#23' AND p_container = 'MED BOX'
+          AND l_quantity < (SELECT 0.2 * avg(l_quantity) FROM lineitem WHERE l_partkey = p_partkey))
+       = (SELECT avg_yearly FROM expected)
+----
+true

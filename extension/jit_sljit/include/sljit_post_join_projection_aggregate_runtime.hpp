@@ -116,7 +116,7 @@ struct SljitPostJoinProjectionAggregateRuntimeState {
 		}
 		auto &join_output = scratch.TemporaryChunk(selected.hash_join_idx);
 		join_output.SetChildCardinality(selected.count);
-		return ExecuteSelectedJoinOutput(runtime, result, ops, scratch, selected.Input(), join_output,
+		return ExecuteSelectedJoinOutput(runtime, result, ops, scratch, selected.SourceInput(), join_output,
 		                                 selected.MatchSelection(), selected.BuildSelection(), selected.RowPointers(),
 		                                 selected.output_proof, selected.OutputColumnMap(),
 		                                 selected.output_projection_idx);
@@ -146,9 +146,11 @@ struct SljitPostJoinProjectionAggregateRuntimeState {
 				processed_output_rows += join_output.size();
 				return false;
 			}
-			if (!SljitMaterializeSelectionOnlyHashJoinProbeOutput(
-			        runtime, scratch, hash_join_idx, hash_join_op, join_input, match_selection, build_selection,
-			        row_pointers, join_output.size(), join_output, output_proof)) {
+			auto source = SljitBindHashJoinOutputSource(runtime, ops, scratch, hash_join_idx, join_input, output_proof,
+			                                            output_column_map, output_projection_idx);
+			if (!SljitMaterializeSelectionOnlyHashJoinProbeOutput(runtime, hash_join_idx, hash_join_op, source,
+			                                                      match_selection, build_selection, row_pointers,
+			                                                      join_output.size(), join_output)) {
 				return false;
 			}
 			return ExecuteMaterializedAggregateBatch(runtime, result, ops, scratch, join_output);
@@ -162,9 +164,11 @@ struct SljitPostJoinProjectionAggregateRuntimeState {
 			aggregate_sink.Charge(join_output.size());
 			return false;
 		}
-		if (!SljitMaterializeSelectionOnlyHashJoinProbeOutput(runtime, scratch, hash_join_idx, hash_join_op, join_input,
+		auto source = SljitBindHashJoinOutputSource(runtime, ops, scratch, hash_join_idx, join_input, output_proof,
+		                                            output_column_map, output_projection_idx);
+		if (!SljitMaterializeSelectionOnlyHashJoinProbeOutput(runtime, hash_join_idx, hash_join_op, source,
 		                                                      match_selection, build_selection, row_pointers,
-		                                                      join_output.size(), join_output, output_proof)) {
+		                                                      join_output.size(), join_output)) {
 			return false;
 		}
 		projected.Reset();

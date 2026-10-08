@@ -72,12 +72,14 @@ private:
 			throw InternalException("SLJIT hash join build sink received an invalid selected producer");
 		}
 		auto &hash_join_op = ops[hash_join_idx];
-		auto &join_input = selected.Input();
+		auto source = SljitBindHashJoinOutputSource(runtime, ops, scratch, hash_join_idx, selected.SourceInput(),
+		                                            selected.output_proof, selected.OutputColumnMap(),
+		                                            selected.output_projection_idx);
 		auto &join_output = scratch.TemporaryChunk(hash_join_idx);
 		vector<uint8_t> required_columns;
 		if (primitive.HasProjection()) {
 			return TryBindProjectedSelectedHashJoinBuildInput(runtime, ops, scratch, sink_op, primitive, selected,
-			                                                  hash_join_op, join_input, join_output, required_columns,
+			                                                  hash_join_op, source, join_output, required_columns,
 			                                                  sink_input);
 		}
 		if (!SljitBuildHashJoinBuildRequiredInputColumns(sink_op.hash_join_build.plan.sink_info,
@@ -85,18 +87,17 @@ private:
 			throw InternalException("SLJIT hash join build sink could not bind required input columns");
 		}
 		join_output.Reset();
-		if (SljitTryMaterializeHashJoinRequiredSources(runtime, scratch, hash_join_idx, hash_join_op, join_input,
+		if (SljitTryMaterializeHashJoinRequiredSources(runtime, hash_join_idx, hash_join_op, source,
 		                                               selected.MatchSelection(), selected.BuildSelection(),
 		                                               selected.RowPointers(), selected.count, required_columns,
-		                                               join_output, selected.output_proof)) {
+		                                               join_output)) {
 			RecordSljitRegionRuntimePath(runtime, sink_op.kind, "selected_required_sources", join_output.size());
 			sink_input = &join_output;
 			return true;
 		}
-		if (!SljitMaterializeSelectionOnlyHashJoinProbeOutput(runtime, scratch, hash_join_idx, hash_join_op, join_input,
+		if (!SljitMaterializeSelectionOnlyHashJoinProbeOutput(runtime, hash_join_idx, hash_join_op, source,
 		                                                      selected.MatchSelection(), selected.BuildSelection(),
-		                                                      selected.RowPointers(), selected.count, join_output,
-		                                                      selected.output_proof)) {
+		                                                      selected.RowPointers(), selected.count, join_output)) {
 			throw InternalException("SLJIT hash join build sink could not materialize selected hash join input");
 		}
 		RecordSljitRegionRuntimePath(runtime, sink_op.kind, "selected_full_output", join_output.size());
@@ -107,8 +108,9 @@ private:
 	bool TryBindProjectedSelectedHashJoinBuildInput(
 	    ExecutionRegionRuntime &runtime, vector<SljitExecutableRegionOp> &ops, SljitRegionExecutionScratch &scratch,
 	    SljitExecutableRegionOp &sink_op, const SljitHashJoinBuildSinkPrimitive &primitive,
-	    SljitRuntimeHashJoinSelection &selected, SljitExecutableRegionOp &hash_join_op, DataChunk &join_input,
-	    DataChunk &join_output, vector<uint8_t> &required_columns, DataChunk *&sink_input) {
+	    SljitRuntimeHashJoinSelection &selected, SljitExecutableRegionOp &hash_join_op,
+	    const SljitHashJoinOutputSource &source, DataChunk &join_output, vector<uint8_t> &required_columns,
+	    DataChunk *&sink_input) {
 		const auto projection_idx = primitive.projection_idx;
 		auto &projection_op = ops[projection_idx];
 		auto &projected = scratch.TemporaryChunk(projection_idx);
@@ -118,18 +120,16 @@ private:
 			throw InternalException("SLJIT hash join build sink could not bind projected required columns");
 		}
 		if (SljitTryMaterializeHashJoinRequiredProjectionViews(
-		        runtime, scratch, selected.hash_join_idx, projection_idx, projection_op, join_input,
-		        selected.MatchSelection(), selected.BuildSelection(), selected.RowPointers(), selected.count,
-		        required_columns, projected, selected.output_proof)) {
+		        runtime, projection_idx, projection_op, source, selected.MatchSelection(), selected.BuildSelection(),
+		        selected.RowPointers(), selected.count, required_columns, projected)) {
 			RecordSljitRegionRuntimePath(runtime, hash_join_op.kind, "projected_hash_build_views", projected.size());
 			sink_input = &projected;
 			return true;
 		}
 		join_output.Reset();
-		if (!SljitMaterializeSelectionOnlyHashJoinProbeOutput(runtime, scratch, selected.hash_join_idx, hash_join_op,
-		                                                      join_input, selected.MatchSelection(),
-		                                                      selected.BuildSelection(), selected.RowPointers(),
-		                                                      selected.count, join_output, selected.output_proof)) {
+		if (!SljitMaterializeSelectionOnlyHashJoinProbeOutput(runtime, selected.hash_join_idx, hash_join_op, source,
+		                                                      selected.MatchSelection(), selected.BuildSelection(),
+		                                                      selected.RowPointers(), selected.count, join_output)) {
 			throw InternalException("SLJIT hash join build sink could not materialize selected hash join input");
 		}
 		projected.Reset();

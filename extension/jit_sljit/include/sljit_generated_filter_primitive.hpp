@@ -197,7 +197,7 @@ static bool SljitExecuteSelectedHashJoinGeneratedFilterPrimitive(
 		output_proof.SetExplicitMatchSelection();
 	}
 	output = SljitRuntimeBatchViewFromHashJoinSelection(
-	    selected.Input(), scratch.FilterSelection(selected.hash_join_idx),
+	    selected.SourceInput(), scratch.FilterSelection(selected.hash_join_idx),
 	    scratch.HashJoinBuildSelection(selected.hash_join_idx), scratch.HashJoinRowPointers(selected.hash_join_idx),
 	    selected_count, selected.hash_join_idx, output_proof, selected.output_column_map,
 	    selected.output_projection_idx);
