@@ -1,0 +1,119 @@
+# name: test/sql/jit/test_jit_residual_hash_join_chains.test
+# description: Compiled hash join probes with a residual predicate walk every key match: a chain that outlasts an output
+#              batch resumes on the same probe row, and a SEMI row passes when any key match passes the residual
+# group: [jit]
+
+statement ok
+LOAD jit_sljit
+
+statement ok
+SET jit_cbo_startup_base_cost=0
+
+statement ok
+SET jit_trace_runtime=true
+
+statement ok
+SET jit_event_log_size=100000
+
+# kn repeats k with NULLs, which moves the probe off the all-valid key path
+statement ok
+CREATE TABLE probe AS
+SELECT (i % 100)::BIGINT AS k, CASE WHEN i % 7 = 0 THEN NULL ELSE (i % 100)::BIGINT END AS kn, i::BIGINT AS v,
+       CASE WHEN i % 13 = 0 THEN NULL ELSE (i % 1000)::BIGINT END AS n
+FROM range(30000) t(i)
+
+# keys 1..49 hold 40 build rows each; key 0 holds 3040 rows, more than one output batch of matches per probe row
+statement ok
+CREATE TABLE build AS
+SELECT (i % 50)::BIGINT AS k, i::BIGINT AS w FROM range(2000) t(i)
+UNION ALL
+SELECT 0::BIGINT, (100000 + i)::BIGINT FROM range(3000) t(i)
+
+foreach threads 1 4
+
+statement ok
+SET threads={threads}
+
+statement ok
+SET jit_policy='off'
+
+statement ok
+CREATE OR REPLACE TABLE expected AS
+SELECT 'semi_lt' AS q, count(*) AS c, sum(v) AS s, NULL::HUGEINT AS sw
+FROM probe p SEMI JOIN build b ON p.k = b.k AND p.v + b.w < 20000
+UNION ALL
+SELECT 'semi_gt', count(*), sum(v), NULL FROM probe p SEMI JOIN build b ON p.k = b.k AND p.v + b.w > 120000
+UNION ALL
+SELECT 'semi_mod', count(*), sum(v), NULL FROM probe p SEMI JOIN build b ON p.k = b.k AND (p.v + b.w) % 7 = 3
+UNION ALL
+SELECT 'semi_one', count(*), sum(v), NULL FROM probe p SEMI JOIN build b ON p.k = b.k AND b.w + p.v % 2 = 102001
+UNION ALL
+SELECT 'semi_null', count(*), sum(v), NULL FROM probe p SEMI JOIN build b ON p.k = b.k AND p.n + b.w > 3000
+UNION ALL
+SELECT 'semi_nullable_key', count(*), sum(v), NULL
+FROM probe p SEMI JOIN build b ON p.kn = b.k AND (p.v + b.w) % 5 = 1
+UNION ALL
+SELECT 'inner', count(*), sum(v), sum(w) FROM probe p JOIN build b ON p.k = b.k AND (p.v + b.w) % 3 <> 0
+UNION ALL
+SELECT 'inner_nullable_key', count(*), sum(v), sum(w) FROM probe p JOIN build b ON p.kn = b.k AND p.v + b.w > 101000
+UNION ALL
+SELECT 'left', count(*), sum(v), sum(w) FROM probe p LEFT JOIN build b ON p.k = b.k AND (p.v + b.w) % 11 = 4
+UNION ALL
+SELECT 'exists', count(*), sum(v), NULL FROM probe p WHERE EXISTS (SELECT 1 FROM build b WHERE b.k = p.k AND b.w > p.v)
+
+statement ok
+SET jit_policy='auto'
+
+statement ok
+CREATE OR REPLACE TABLE actual AS
+SELECT 'semi_lt' AS q, count(*) AS c, sum(v) AS s, NULL::HUGEINT AS sw
+FROM probe p SEMI JOIN build b ON p.k = b.k AND p.v + b.w < 20000
+UNION ALL
+SELECT 'semi_gt', count(*), sum(v), NULL FROM probe p SEMI JOIN build b ON p.k = b.k AND p.v + b.w > 120000
+UNION ALL
+SELECT 'semi_mod', count(*), sum(v), NULL FROM probe p SEMI JOIN build b ON p.k = b.k AND (p.v + b.w) % 7 = 3
+UNION ALL
+SELECT 'semi_one', count(*), sum(v), NULL FROM probe p SEMI JOIN build b ON p.k = b.k AND b.w + p.v % 2 = 102001
+UNION ALL
+SELECT 'semi_null', count(*), sum(v), NULL FROM probe p SEMI JOIN build b ON p.k = b.k AND p.n + b.w > 3000
+UNION ALL
+SELECT 'semi_nullable_key', count(*), sum(v), NULL
+FROM probe p SEMI JOIN build b ON p.kn = b.k AND (p.v + b.w) % 5 = 1
+UNION ALL
+SELECT 'inner', count(*), sum(v), sum(w) FROM probe p JOIN build b ON p.k = b.k AND (p.v + b.w) % 3 <> 0
+UNION ALL
+SELECT 'inner_nullable_key', count(*), sum(v), sum(w) FROM probe p JOIN build b ON p.kn = b.k AND p.v + b.w > 101000
+UNION ALL
+SELECT 'left', count(*), sum(v), sum(w) FROM probe p LEFT JOIN build b ON p.k = b.k AND (p.v + b.w) % 11 = 4
+UNION ALL
+SELECT 'exists', count(*), sum(v), NULL FROM probe p WHERE EXISTS (SELECT 1 FROM build b WHERE b.k = p.k AND b.w > p.v)
+
+query I
+SELECT count(*) FROM ((SELECT * FROM expected EXCEPT ALL SELECT * FROM actual)
+                      UNION ALL (SELECT * FROM actual EXCEPT ALL SELECT * FROM expected))
+----
+0
+
+query I
+SELECT count(*) FROM actual WHERE c > 0
+----
+10
+
+endloop
+
+# The residual SEMI probe runs compiled, applying the residual to the enumerated key matches
+statement ok
+SET threads=1
+
+statement ok
+SELECT * FROM duckdb_jit_clear_events()
+
+statement ok
+CREATE OR REPLACE TABLE actual AS
+SELECT count(*) AS c FROM probe p SEMI JOIN build b ON p.k = b.k AND (p.v + b.w) % 7 = 3
+
+query I
+SELECT count(*) > 0 FROM duckdb_jit_events()
+WHERE phase = 'runtime' AND generated_stage_count_breakdown LIKE '%hash_join_probe.residual_predicate=%'
+----
+true

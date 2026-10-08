@@ -42,17 +42,11 @@ EmitRegularHashJoinProbeHash(struct sljit_compiler *compiler, const SljitNativeH
 	const auto hash_multiplier_reg = registers.hash_multiplier_reg;
 	const auto pointer_mask_reg = registers.pointer_mask_reg;
 	const auto bitmask_reg = registers.bitmask_reg;
-	const auto common_source_index_reg = registers.common_source_index_reg;
 	const auto source_index_reg = registers.source_index_reg;
 	const auto &source_data_regs = registers.source_data_regs;
 	const bool assume_all_keys_valid = registers.assume_all_keys_valid;
 
-	if (config.AssumesCommonSelectionAllValid()) {
-		sljit_emit_op1(compiler, SLJIT_MOV_P, SLJIT_R0, 0, SLJIT_MEM1(SLJIT_S0),
-		               offsetof(SljitNativeRegularHashJoinProbeInput, source_sel));
-		sljit_emit_op1(compiler, SLJIT_MOV_P, SLJIT_R0, 0, SLJIT_MEM1(SLJIT_R0), 0);
-		sljit_emit_op1(compiler, SLJIT_MOV_U32, common_source_index_reg, 0, SLJIT_MEM2(SLJIT_R0, SLJIT_S1), 2);
-	}
+	EmitLoadRegularHashJoinRowSourceIndex(compiler, config, registers, SLJIT_R0);
 
 	SljitRegularHashJoinProbeHashJumps jumps;
 	for (idx_t key_idx = 0; key_idx < equality_key_count; key_idx++) {

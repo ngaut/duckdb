@@ -23,12 +23,12 @@ static bool SljitHashJoinProbeDrainFinished(ExecutionHashJoinProbeOutputMode out
 	return state.finished && (!SljitIsLeftHashJoinProbeOutputMode(output_mode) || state.left_unmatched_emitted);
 }
 
-static void SljitInitializeLeftHashJoinProbeState(SljitHashJoinProbeDrainState &state, idx_t input_count) {
-	if (state.left_initialized) {
+static void SljitInitializeHashJoinProbeFoundMatch(SljitHashJoinProbeDrainState &state, idx_t input_count) {
+	if (state.found_match_initialized) {
 		return;
 	}
 	state.found_match.assign(input_count, 0);
-	state.left_initialized = true;
+	state.found_match_initialized = true;
 	state.left_unmatched_emitted = false;
 }
 
@@ -43,11 +43,32 @@ static void SljitMarkLeftHashJoinProbeMatches(SljitHashJoinProbeDrainState &stat
 	}
 }
 
+//! Keeps each probe row's first match that passed the residual predicate, across every output batch of the input
+static idx_t SljitKeepFirstHashJoinProbeMatches(SljitHashJoinProbeDrainState &state, SelectionVector &match_selection,
+                                                Vector &row_pointers, idx_t count) {
+	auto row_pointer_data = FlatVector::GetDataMutable<data_ptr_t>(row_pointers);
+	idx_t kept_count = 0;
+	for (idx_t match_idx = 0; match_idx < count; match_idx++) {
+		auto input_idx = match_selection.get_index(match_idx);
+		if (input_idx >= state.found_match.size()) {
+			throw InternalException("SLJIT native SEMI hash join match selection index out of range");
+		}
+		if (state.found_match[input_idx]) {
+			continue;
+		}
+		state.found_match[input_idx] = 1;
+		match_selection.set_index(kept_count, input_idx);
+		row_pointer_data[kept_count] = row_pointer_data[match_idx];
+		kept_count++;
+	}
+	return kept_count;
+}
+
 static void SljitMaterializeLeftHashJoinProbeUnmatched(const ExecutionHashJoinProbeBinding &probe, DataChunk &input,
                                                        DataChunk &output, SelectionVector &unmatched_selection,
                                                        SljitHashJoinProbeDrainState &state,
                                                        optional_ptr<ExecutionOperatorStageRecorder> recorder) {
-	SljitInitializeLeftHashJoinProbeState(state, input.size());
+	SljitInitializeHashJoinProbeFoundMatch(state, input.size());
 	idx_t unmatched_count = 0;
 	for (idx_t input_idx = 0; input_idx < input.size(); input_idx++) {
 		if (state.found_match[input_idx]) {

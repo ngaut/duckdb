@@ -35,47 +35,6 @@ static ExecutionOperatorBindResult SljitMaterializeLeftHashJoinProbeUnmatchedOut
 	return ExecutionOperatorBindResult::READY;
 }
 
-static idx_t SljitSelectHashJoinProbeNonNullKeys(const ExecutionHashJoinProbeBinding &probe, DataChunk &input,
-                                                 SelectionVector &selection) {
-	if (!probe.ready || !probe.hash_table) {
-		throw InternalException("SLJIT MARK probe non-match selection requires a bound hash join table");
-	}
-	vector<UnifiedVectorFormat> nullable_key_formats;
-	for (idx_t key_idx = 0; key_idx < probe.probe_key_input_indices.size(); key_idx++) {
-		if (key_idx >= probe.condition_null_values_are_equal.size()) {
-			throw InternalException("SLJIT MARK probe key NULL contract is incomplete");
-		}
-		if (probe.condition_null_values_are_equal[key_idx]) {
-			continue;
-		}
-		const auto input_col = probe.probe_key_input_indices[key_idx];
-		if (input_col >= input.ColumnCount()) {
-			throw InternalException("SLJIT MARK probe key column index out of range");
-		}
-		UnifiedVectorFormat key_format;
-		input.data[input_col].ToUnifiedFormat(key_format);
-		if (key_format.validity.CanHaveNull()) {
-			nullable_key_formats.push_back(std::move(key_format));
-		}
-	}
-
-	idx_t selected_count = 0;
-	for (idx_t row_idx = 0; row_idx < input.size(); row_idx++) {
-		bool key_has_null = false;
-		for (auto &key_format : nullable_key_formats) {
-			const auto key_row = key_format.sel->get_index(row_idx);
-			if (!key_format.validity.RowIsValidUnsafe(key_row)) {
-				key_has_null = true;
-				break;
-			}
-		}
-		if (!key_has_null) {
-			selection.set_index(selected_count++, row_idx);
-		}
-	}
-	return selected_count;
-}
-
 static ExecutionOperatorBindResult SljitExecuteMarkProbeNoTrueNonMatches(ExecutionRegionRuntime &runtime,
                                                                          SljitExecutableRegionOp &op, DataChunk &output,
                                                                          SljitHashJoinProbeDrainState &state,
@@ -104,12 +63,12 @@ static ExecutionOperatorBindResult SljitExecuteEmptyHashJoinProbe(
 		                                                        match_selection, state);
 	case ExecutionHashJoinProbeOutputMode::MARK_PROBE: {
 		if (SljitHashJoinProbeOutputIsFilteredMarkNonMatches(output_contract)) {
-			const auto selected_count = SljitSelectHashJoinProbeNonNullKeys(probe, input, match_selection);
-			if (selected_count == 0) {
-				output.Reset();
-				break;
+			// Against an empty build side every probe row is a non-match marked false, a NULL key included: only a
+			// build side that held NULLs makes the mark NULL, and that case never reaches here
+			for (idx_t row_idx = 0; row_idx < input.size(); row_idx++) {
+				match_selection.set_index(row_idx, row_idx);
 			}
-			output.SetChildCardinality(selected_count);
+			output.SetChildCardinality(input.size());
 			break;
 		}
 		if (SljitHashJoinProbeOutputIsFilteredMarkMatches(output_contract)) {
@@ -330,6 +289,9 @@ static ExecutionOperatorBindResult SljitExecuteRegularHashJoinProbe(
 		SljitMarkLeftHashJoinProbeMatches(state, match_selection, selected_count);
 		RecordSljitRegionStageRuntime(runtime, op_idx, op.kind, "mark_left_matches", mark_stage_start);
 	}
+	if (plan.ResidualDecidesProbeRows()) {
+		selected_count = SljitKeepFirstHashJoinProbeMatches(state, match_selection, row_pointers, selected_count);
+	}
 	if (plan.mark_build_match_after_residual) {
 		auto mark_build_stage_start = SljitRegionStageStart(runtime);
 		SljitMarkHashJoinBuildMatchesAfterResidual(plan, row_pointers, selected_count);
@@ -392,12 +354,12 @@ static ExecutionOperatorBindResult SljitExecuteNativeHashJoinProbe(
 		throw InternalException("SLJIT native hash join probe output mode mismatch");
 	}
 	const bool left_probe_output = SljitIsLeftHashJoinProbeOutputMode(plan.output_mode);
-	if (left_probe_output) {
-		SljitInitializeLeftHashJoinProbeState(state, input.size());
-		if (state.finished && !state.left_unmatched_emitted) {
-			return SljitMaterializeLeftHashJoinProbeUnmatchedOutput(runtime, op_idx, op, probe, input, output,
-			                                                        match_selection, state);
-		}
+	if (left_probe_output || plan.ResidualDecidesProbeRows()) {
+		SljitInitializeHashJoinProbeFoundMatch(state, input.size());
+	}
+	if (left_probe_output && state.finished && !state.left_unmatched_emitted) {
+		return SljitMaterializeLeftHashJoinProbeUnmatchedOutput(runtime, op_idx, op, probe, input, output,
+		                                                        match_selection, state);
 	}
 	if (probe.probe_key_input_indices.size() != plan.keys.size()) {
 		throw InternalException("SLJIT native hash join probe key binding count mismatch");

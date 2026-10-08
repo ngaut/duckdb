@@ -32,7 +32,19 @@ public:
 	bool Execute(idx_t step_idx, const SljitFullPipelinePrimitiveStep &step, const SljitRuntimeBatchView &input,
 	             bool direct_handoff, EXECUTE_HASH_JOIN_PROBE &execute_hash_join_probe,
 	             EXECUTE_OUTPUT_BATCH &&execute_output_batch) {
-		auto &join_input = SljitBindMaterializedRuntimeBatchInput(input, "SLJIT hash join materialize primitive");
+		DataChunk *join_input_ptr;
+		if (input.selection && !input.HasHashJoinSelection()) {
+			// A generated filter ahead of the probe hands over a selection view of the source chunk
+			auto &source = SljitBindRuntimeBatchInput(input, "SLJIT selected hash join materialize input");
+			selected_source_input.Ensure(runtime.GetAllocator(), source.GetTypes());
+			auto &selected = selected_source_input.chunk;
+			selected.Reset();
+			selected.Slice(source, *input.selection, input.count);
+			join_input_ptr = &selected;
+		} else {
+			join_input_ptr = &SljitBindMaterializedRuntimeBatchInput(input, "SLJIT hash join materialize primitive");
+		}
+		auto &join_input = *join_input_ptr;
 		if (join_input.size() == 0) {
 			return false;
 		}
@@ -94,6 +106,7 @@ private:
 	vector<SljitExecutableRegionOp> &ops;
 	SljitRegionExecutionScratch &scratch;
 	std::array<SljitDataChunkBatch, SLJIT_FULL_PIPELINE_MAX_PRIMITIVES> batches;
+	SljitDataChunkBatch selected_source_input;
 };
 
 } // namespace duckdb

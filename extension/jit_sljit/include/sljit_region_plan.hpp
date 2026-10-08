@@ -155,6 +155,12 @@ struct SljitNativeHashJoinProbePlan {
 	SljitNativeRegionExpressionPlan residual_filter;
 	ExecutionRegionOperatorInfo operator_info;
 
+	//! A probe-only (SEMI) row is decided by its first key match unless the residual predicate can still reject that
+	//! match: then the probe enumerates every key match and keeps each row's first match that passes the residual
+	bool ResidualDecidesProbeRows() const {
+		return output_mode == ExecutionHashJoinProbeOutputMode::MATCHED_PROBE_ONLY && residual_predicate;
+	}
+
 	SljitNativeHashJoinProbePlan Copy(bool copy_ir = true) const;
 };
 

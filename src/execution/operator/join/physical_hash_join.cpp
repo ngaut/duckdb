@@ -2896,6 +2896,11 @@ PhysicalHashJoin::GetExecutionOperatorReadiness(ClientContext &context,
 	if (!sink.hash_table) {
 		return not_ready("hash-join-native-readiness-missing-hash-table");
 	}
+	if (sink.external) {
+		// An external join's table holds only its current partitions: probe rows of the other partitions must be
+		// spilled and probed in later rounds, which only DuckDB's probe implements
+		return invalid("hash-join-native-external-probe-spill");
+	}
 
 	auto resolution = ResolveExecutionHashJoinProbeLayout(sink, contract);
 	if (resolution.status == ExecutionHashJoinProbeLayoutResolutionStatus::NOT_READY) {
@@ -2965,6 +2970,10 @@ ExecutionOperatorBindResult PhysicalHashJoin::BindExecutionOperator(ExecutionCon
 	auto &sink = sink_state->Cast<HashJoinGlobalSinkState>();
 	if (!sink.hash_table) {
 		binding.blocker = "hash-join-native-runtime-missing-hash-table";
+		return ExecutionOperatorBindResult::INVALID;
+	}
+	if (sink.external) {
+		binding.blocker = "hash-join-native-external-probe-spill";
 		return ExecutionOperatorBindResult::INVALID;
 	}
 
@@ -3190,7 +3199,13 @@ static void MaterializeExecutionEmptyMarkJoinProbe(const ExecutionHashJoinProbeB
 		FlatVector::SetSize(mark_vector, count_t(count));
 		auto bool_result = FlatVector::GetDataMutable<bool>(mark_vector);
 		auto &mask = FlatVector::ValidityMutable(mark_vector);
-		mask.SetAllValid(count);
+		// As in ConstructEmptyJoinResult: every row is a non-match, which is false unless the build side held only
+		// NULLs, which makes it unknown
+		if (binding.hash_table->has_filtered_null) {
+			mask.SetAllInvalid(count);
+		} else {
+			mask.SetAllValid(count);
+		}
 		for (idx_t i = 0; i < count; i++) {
 			bool_result[i] = false;
 		}

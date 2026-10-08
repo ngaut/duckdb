@@ -85,6 +85,21 @@ static inline bool PrepareRegularHashJoinProbeRegisters(const SljitNativeHashJoi
 	return true;
 }
 
+//! Loads the per-row source state the key checks read for probe row S1. Every entry into a row's key checks runs it:
+//! the hash phase of a new row and the resume of a row whose chain walk paused on a full output batch.
+static inline void EmitLoadRegularHashJoinRowSourceIndex(struct sljit_compiler *compiler,
+                                                         const SljitHashJoinProbeCodegenConfig &config,
+                                                         const SljitRegularHashJoinProbeRegisters &registers,
+                                                         sljit_s32 scratch) {
+	if (!config.AssumesCommonSelectionAllValid()) {
+		return;
+	}
+	sljit_emit_op1(compiler, SLJIT_MOV_P, scratch, 0, SLJIT_MEM1(SLJIT_S0),
+	               offsetof(SljitNativeRegularHashJoinProbeInput, source_sel));
+	sljit_emit_op1(compiler, SLJIT_MOV_P, scratch, 0, SLJIT_MEM1(scratch), 0);
+	sljit_emit_op1(compiler, SLJIT_MOV_U32, registers.common_source_index_reg, 0, SLJIT_MEM2(scratch, SLJIT_S1), 2);
+}
+
 static inline void EmitEnterRegularHashJoinProbe(struct sljit_compiler *compiler,
                                                  const SljitRegularHashJoinProbeRegisters &registers) {
 	const auto local_size = registers.assume_all_keys_valid ? 0 : SLJIT_HASH_JOIN_PROBE_LOCAL_SIZE;

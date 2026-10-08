@@ -1,0 +1,54 @@
+# name: test/sql/jit/test_jit_external_hash_join.test
+# description: An external hash join keeps only its current partitions in memory and spills the other partitions' probe
+#              rows for later rounds; the JIT leaves such probes to DuckDB instead of probing the partial table
+# group: [jit]
+
+load __TEST_DIR__/jit_external_hash_join.db
+
+statement ok
+LOAD jit_sljit
+
+statement ok
+SET jit_cbo_startup_base_cost=0
+
+statement ok
+SET jit_trace_decisions=true
+
+statement ok
+SET jit_event_log_size=100000
+
+statement ok
+CREATE TABLE tbl AS SELECT range i, range j FROM range(1000000)
+
+statement ok
+SET threads=4
+
+statement ok
+SET memory_limit='70mb'
+
+# probe all hash tables in a single pipeline, so their combined size forces external joins
+statement ok
+SET disabled_optimizers TO 'join_order,build_side_probe_side'
+
+query IIIIII
+SELECT max(i), max(t1.j), max(t2.j), max(t3.j), max(t4.j), count(*)
+FROM tbl AS t1
+JOIN tbl AS t2 USING (i)
+JOIN tbl AS t3 USING (i)
+JOIN tbl AS t4 USING (i)
+----
+999999	999999	999999	999999	999999	1000000
+
+query III
+SELECT count(*), count(t3.j), sum(t3.j)
+FROM tbl AS t1
+JOIN tbl AS t2 USING (i)
+LEFT JOIN (SELECT * FROM tbl WHERE i % 3 = 0) AS t3 USING (i)
+JOIN tbl AS t4 USING (i)
+----
+1000000	333334	166666833333
+
+query I
+SELECT count(*) > 0 FROM duckdb_jit_events() WHERE reason LIKE '%hash-join-native-external-probe-spill%'
+----
+true

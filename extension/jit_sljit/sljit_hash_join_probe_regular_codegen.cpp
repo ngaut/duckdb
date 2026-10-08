@@ -28,7 +28,8 @@ unique_ptr<ExecutionRegionCodeHandle> BuildSljitRegularHashJoinProbe(const Sljit
 	const bool mark_probe = plan.output_mode == ExecutionHashJoinProbeOutputMode::MARK_PROBE;
 	const bool mark_match_selection = mark_probe && config.EmitsMarkMatchesAsSelection();
 	const bool mark_nonmatch_selection = mark_probe && config.EmitsMarkNonMatchesAsSelection();
-	const bool matched_probe_only = plan.output_mode == ExecutionHashJoinProbeOutputMode::MATCHED_PROBE_ONLY;
+	const bool first_match_decides_row =
+	    plan.output_mode == ExecutionHashJoinProbeOutputMode::MATCHED_PROBE_ONLY && !plan.ResidualDecidesProbeRows();
 	auto compiler = sljit_create_compiler(nullptr);
 	if (!compiler) {
 		error = "failed to create SLJIT compiler";
@@ -50,6 +51,7 @@ unique_ptr<ExecutionRegionCodeHandle> BuildSljitRegularHashJoinProbe(const Sljit
 		sljit_emit_op1(compiler, SLJIT_MOV_P, SLJIT_R0, 0, SLJIT_MEM1(SLJIT_S0),
 		               offsetof(SljitNativeRegularHashJoinProbeInput, resume_row_pointer));
 		auto no_resume_row_pointer = sljit_emit_cmp(compiler, SLJIT_EQUAL, SLJIT_R0, 0, SLJIT_IMM, 0);
+		EmitLoadRegularHashJoinRowSourceIndex(compiler, config, registers, SLJIT_R2);
 		resume_row_pointer_ready = sljit_emit_jump(compiler, SLJIT_JUMP);
 		sljit_set_label(no_resume_row_pointer, sljit_emit_label(compiler));
 	}
@@ -119,7 +121,7 @@ unique_ptr<ExecutionRegionCodeHandle> BuildSljitRegularHashJoinProbe(const Sljit
 		return FinishRegularHashJoinNoChainOutput(compiler, function, error, control, hash_jumps, key_jumps,
 		                                          !assume_all_keys_valid);
 	}
-	if (matched_probe_only) {
+	if (first_match_decides_row) {
 		return FinishRegularHashJoinMatchedProbeOnlyOutput(compiler, function, error, plan, config, control, hash_jumps,
 		                                                   key_jumps, aux_next_ptrs_reg, !assume_all_keys_valid);
 	}

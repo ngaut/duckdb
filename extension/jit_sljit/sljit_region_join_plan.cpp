@@ -125,9 +125,11 @@ static SljitRegionNodePlan PlanSljitHashJoinProbeOperatorNodeInternal(const Exec
 		native_op.hash_join_probe.perfect_hash_probe = true;
 	}
 	if (contract.residual_predicate || contract.residual_info) {
-		if (contract.native_probe_output_mode == ExecutionHashJoinProbeOutputMode::MARK_BUILD_ONLY) {
-			return SljitRegionBoundaryNode(
-			    "hash join probe native lowering has unsupported residual mark-build-only contract");
+		// A generated mark probe decides each row (or build row) at its first key match, which a residual predicate
+		// can still reject
+		if (contract.native_probe_output_mode == ExecutionHashJoinProbeOutputMode::MARK_BUILD_ONLY ||
+		    contract.native_probe_output_mode == ExecutionHashJoinProbeOutputMode::MARK_PROBE) {
+			return SljitRegionBoundaryNode("hash join probe native lowering has unsupported residual mark contract");
 		}
 		if (!contract.residual_expression_ready || !contract.residual_expression.root) {
 			return SljitBlockedContractBoundary(

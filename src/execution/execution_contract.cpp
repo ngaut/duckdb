@@ -784,12 +784,12 @@ static string ExecutionContractHashJoinProbeOutputModeToString(ExecutionHashJoin
 	}
 }
 
-static ExecutionHashJoinProbeOutputMode BuildExecutionContractHashJoinProbeOutputMode(ExecutionRegionJoinType join_type,
-                                                                                      idx_t rhs_output_column_count) {
+//! MATCHED_PROBE_ONLY emits each probe row at most once (SEMI): an INNER join repeats a probe row per build match even
+//! when it outputs no build column
+static ExecutionHashJoinProbeOutputMode
+BuildExecutionContractHashJoinProbeOutputMode(ExecutionRegionJoinType join_type) {
 	switch (join_type) {
 	case ExecutionRegionJoinType::INNER:
-		return rhs_output_column_count == 0 ? ExecutionHashJoinProbeOutputMode::MATCHED_PROBE_ONLY
-		                                    : ExecutionHashJoinProbeOutputMode::MATCHED_PROBE_AND_BUILD;
 	case ExecutionRegionJoinType::RIGHT:
 		return ExecutionHashJoinProbeOutputMode::MATCHED_PROBE_AND_BUILD;
 	case ExecutionRegionJoinType::LEFT:
@@ -1177,8 +1177,7 @@ static ExecutionRegionHashJoinContract BuildExecutionContractHashJoinContract(co
 	result.residual_info = static_cast<bool>(join.residual_info);
 	result.filter_pushdown = static_cast<bool>(join.filter_pushdown);
 	result.source_produces_rows = ExecutionContractHashJoinSourceProducesRows(result.join_type);
-	result.native_probe_output_mode =
-	    BuildExecutionContractHashJoinProbeOutputMode(result.join_type, result.rhs_output_column_count);
+	result.native_probe_output_mode = BuildExecutionContractHashJoinProbeOutputMode(result.join_type);
 	for (auto &condition : join.conditions) {
 		if (!condition.IsComparison()) {
 			result.comparison_types.push_back(ExecutionRegionComparisonType::INVALID);
