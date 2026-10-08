@@ -146,7 +146,7 @@ SELECT count(*) FROM ((SELECT * FROM expected EXCEPT ALL SELECT * FROM actual)
 
 endloop
 
-# The multi-key count runs through the compiled aggregate's vectorized input-vector lookup
+# The integer multi-key count runs through the compiled aggregate's vectorized input-vector lookup
 statement ok
 SET threads=1
 
@@ -154,7 +154,7 @@ statement ok
 SELECT * FROM duckdb_jit_clear_events()
 
 statement ok
-CREATE OR REPLACE TABLE actual AS SELECT s, g, count(*) AS n FROM t WHERE f < 9 GROUP BY s, g
+CREATE OR REPLACE TABLE actual AS SELECT k32, g, count(*) AS n FROM t WHERE f < 9 GROUP BY k32, g
 
 query I
 SELECT count(*) > 0 FROM duckdb_jit_events()
