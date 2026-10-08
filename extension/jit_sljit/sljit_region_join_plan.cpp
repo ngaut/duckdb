@@ -28,10 +28,9 @@ static bool SljitHashJoinMatchPredicateSupported(ExecutionRegionComparisonType c
 	}
 }
 
-static SljitRegionNodePlan PlanSljitHashJoinProbeOperatorNodeInternal(const ExecutionRegionNode &node,
-                                                                      const vector<LogicalType> &input_types,
-                                                                      const vector<bool> &input_not_null,
-                                                                      bool render_diagnostics) {
+static SljitRegionNodePlan PlanSljitHashJoinProbeOperatorNodeInternal(
+    const ExecutionRegionNode &node, const vector<ExecutionRegionHashJoinKeyInput> &probe_keys,
+    const vector<LogicalType> &input_types, const vector<bool> &input_not_null, bool render_diagnostics) {
 	if (!node.operator_info) {
 		return SljitRegionBoundaryNode("hash join probe operator is missing typed operator IR");
 	}
@@ -47,7 +46,7 @@ static SljitRegionNodePlan PlanSljitHashJoinProbeOperatorNodeInternal(const Exec
 		return SljitBlockedContractBoundary(contract.native_probe_shape_blocker,
 		                                    "hash join probe native shape is not ready");
 	}
-	if (node.operator_info->hash_join_keys.size() != contract.condition_count) {
+	if (probe_keys.size() != contract.condition_count) {
 		return SljitRegionBoundaryNode("hash join probe native lowering key count does not match contract");
 	}
 	if (contract.layout_offsets.size() < contract.condition_count) {
@@ -58,9 +57,9 @@ static SljitRegionNodePlan PlanSljitHashJoinProbeOperatorNodeInternal(const Exec
 	}
 
 	vector<SljitNativeHashJoinProbeKeyPlan> keys;
-	keys.reserve(node.operator_info->hash_join_keys.size());
-	for (idx_t key_idx = 0; key_idx < node.operator_info->hash_join_keys.size(); key_idx++) {
-		auto &key = node.operator_info->hash_join_keys[key_idx];
+	keys.reserve(probe_keys.size());
+	for (idx_t key_idx = 0; key_idx < probe_keys.size(); key_idx++) {
+		auto &key = probe_keys[key_idx];
 		auto comparison_type = contract.comparison_types[key_idx];
 		auto equality_key = key_idx < contract.equality_condition_count;
 		if (equality_key && !SljitHashJoinEqualityComparisonSupported(comparison_type)) {
@@ -113,6 +112,7 @@ static SljitRegionNodePlan PlanSljitHashJoinProbeOperatorNodeInternal(const Exec
 	native_op.hash_join_probe.pointer_offset = contract.pointer_offset;
 	native_op.hash_join_probe.output_mode = contract.native_probe_output_mode;
 	native_op.hash_join_probe.operator_info = *node.operator_info;
+	native_op.hash_join_probe.operator_info.hash_join_keys = probe_keys;
 	if (contract.perfect_hash_probe_shape_ready) {
 		if (native_op.hash_join_probe.keys.size() != 1 || native_op.hash_join_probe.equality_key_count != 1) {
 			return SljitRegionBoundaryNode("perfect hash join probe native lowering requires one equality key");
@@ -176,11 +176,71 @@ static SljitRegionNodePlan PlanSljitHashJoinProbeOperatorNodeInternal(const Exec
 	return SljitNativeNode(std::move(native_op), std::move(reason));
 }
 
+// Probe keys computed from the input become columns the probe reads like any other: a projection ahead of the probe
+// passes the input through and appends the computed keys, and the keys bind as references to them. The join's output
+// selects its probe columns by index, so the appended keys never leave the probe.
+static bool TryPlanSljitHashJoinProbeKeyProjection(const ExecutionRegionNode &node,
+                                                   const vector<LogicalType> &input_types,
+                                                   vector<ExecutionRegionHashJoinKeyInput> &probe_keys,
+                                                   SljitRegionNodePlan &key_projection, bool render_diagnostics) {
+	ExecutionRegionNode projection_node;
+	projection_node.kind = ExecutionRegionNodeKind::PROJECTION;
+	projection_node.operator_index = node.operator_index;
+	projection_node.output_types = input_types;
+	for (idx_t col_idx = 0; col_idx < input_types.size(); col_idx++) {
+		auto fragment = make_uniq<ExecutionExpressionFragment>();
+		fragment->expression_index = col_idx;
+		fragment->return_type = input_types[col_idx];
+		fragment->root = MakeSljitReferenceExpression(col_idx, input_types[col_idx]);
+		projection_node.projections.push_back(std::move(fragment));
+	}
+	for (auto &key : probe_keys) {
+		if (key.supported_reference || !key.expression_ready) {
+			continue;
+		}
+		key.input_index = projection_node.output_types.size();
+		key.supported_reference = true;
+		projection_node.output_types.push_back(key.type);
+		projection_node.projections.push_back(make_uniq<ExecutionExpressionFragment>(key.expression));
+	}
+	key_projection = PlanSljitProjectionNode(projection_node, input_types, render_diagnostics);
+	return key_projection.kind == ExecutionRegionLoweringKind::NATIVE && SljitRegionNodeHasNativeOps(key_projection);
+}
+
 SljitRegionNodePlan PlanSljitHashJoinProbeOperatorNode(const ExecutionRegionNode &node,
                                                        const vector<LogicalType> &input_types,
                                                        const vector<bool> &input_not_null, bool render_diagnostics) {
-	auto result = PlanSljitHashJoinProbeOperatorNodeInternal(node, input_types, input_not_null, render_diagnostics);
+	if (!node.operator_info) {
+		return SljitRegionBoundaryNode("hash join probe operator is missing typed operator IR");
+	}
+	auto probe_keys = node.operator_info->hash_join_keys;
+	auto probe_input_types = input_types;
+	auto probe_input_not_null = input_not_null;
+	SljitRegionNodePlan key_projection;
+	for (auto &key : probe_keys) {
+		if (key.supported_reference || !key.expression_ready) {
+			continue;
+		}
+		if (!TryPlanSljitHashJoinProbeKeyProjection(node, input_types, probe_keys, key_projection,
+		                                            render_diagnostics)) {
+			auto result = SljitRegionBoundaryNode("hash join probe key expression is unsupported by SLJIT projection;" +
+			                                      key_projection.reason);
+			result.fusion_blocker =
+			    "operator-contract-blocker:hash-join-probe-native-lowering-missing;" + result.reason;
+			return result;
+		}
+		probe_input_types = SljitRegionNodeLastNativeOp(key_projection).output_types;
+		probe_input_not_null.resize(probe_input_types.size(), false);
+		break;
+	}
+	auto result = PlanSljitHashJoinProbeOperatorNodeInternal(node, probe_keys, probe_input_types,
+	                                                         probe_input_not_null, render_diagnostics);
 	if (result.kind != ExecutionRegionLoweringKind::BOUNDARY) {
+		if (!key_projection.native_ops.empty()) {
+			result.native_ops.insert(result.native_ops.begin(),
+			                         std::make_move_iterator(key_projection.native_ops.begin()),
+			                         std::make_move_iterator(key_projection.native_ops.end()));
+		}
 		return result;
 	}
 	const bool contract_ready = node.operator_info && node.operator_info->hash_join_contract.present &&

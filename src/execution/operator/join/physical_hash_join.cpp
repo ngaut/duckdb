@@ -2885,7 +2885,8 @@ PhysicalHashJoin::GetExecutionOperatorReadiness(ClientContext &context,
 		return invalid("hash-join-native-readiness-probe-key-count-mismatch");
 	}
 	for (auto &key : operator_info.hash_join_keys) {
-		if (!key.supported_reference) {
+		// Expression keys are computed by the backend ahead of the probe, which then binds them as references
+		if (!key.supported_reference && !key.expression_ready) {
 			return invalid(key.reason.empty() ? "hash-join-native-readiness-probe-key-not-reference" : key.reason);
 		}
 	}

@@ -305,6 +305,9 @@ struct ExecutionRegionHashJoinKeyInput {
 	idx_t input_index = 0;
 	LogicalType type;
 	bool supported_reference = false;
+	//! A probe key computed from the input: backends evaluate it ahead of the probe
+	bool expression_ready = false;
+	ExecutionExpressionFragment expression;
 	string reason;
 };
 

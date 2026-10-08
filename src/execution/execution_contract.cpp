@@ -846,10 +846,15 @@ static string BuildExecutionContractHashJoinKeyBindingBlocker(const PhysicalHash
 		auto &condition = join.conditions[key_idx];
 		idx_t input_index = 0;
 		auto &expression = build_side ? condition.GetRHS() : condition.GetLHS();
-		if (!IsExecutionContractHashJoinBoundReference(expression, input_index)) {
-			return string("hash-join-native-") + (build_side ? "build" : "probe") +
-			       "-key-not-reference;key_index=" + std::to_string(key_idx);
+		if (IsExecutionContractHashJoinBoundReference(expression, input_index)) {
+			continue;
 		}
+		// A probe key the backend can compute ahead of the probe binds like a reference to the computed column
+		if (!build_side && TryLowerExecutionExpression(expression, key_idx, ExecutionExpressionIRMode::COMPACT)) {
+			continue;
+		}
+		return string("hash-join-native-") + (build_side ? "build" : "probe") +
+		       "-key-not-reference;key_index=" + std::to_string(key_idx);
 	}
 	return string();
 }
@@ -2125,13 +2130,19 @@ static ExecutionRegionHashJoinKeyInput BuildExecutionContractHashJoinProbeKeyInp
 	result.key_index = key_idx;
 	result.type = op.condition_types[key_idx];
 	auto &key_expression = op.conditions[key_idx].GetLHS();
-	if (key_expression.GetExpressionClass() != ExpressionClass::BOUND_REF) {
-		result.reason = "hash join probe key is not a payload reference";
+	if (key_expression.GetExpressionClass() == ExpressionClass::BOUND_REF) {
+		result.input_index = key_expression.Cast<BoundReferenceExpression>().Index();
+		result.supported_reference = true;
 		return result;
 	}
-	auto &bound_ref = key_expression.Cast<BoundReferenceExpression>();
-	result.input_index = bound_ref.Index();
-	result.supported_reference = true;
+	auto lowered_expression = TryLowerExecutionExpression(key_expression, key_idx, ExecutionExpressionIRMode::COMPACT);
+	if (!lowered_expression) {
+		result.reason = "hash join probe key expression lowering unsupported;" +
+		                DescribeExecutionExpressionLoweringFailure(key_expression);
+		return result;
+	}
+	result.expression = std::move(*lowered_expression);
+	result.expression_ready = true;
 	return result;
 }
 

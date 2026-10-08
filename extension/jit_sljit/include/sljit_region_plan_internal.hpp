@@ -46,6 +46,7 @@ struct SljitRegionNodePlan {
 	SljitSourceContractPlan source_contract;
 };
 
+unique_ptr<ExecutionExpressionIR> MakeSljitReferenceExpression(idx_t source_index, const LogicalType &type);
 bool TryLowerNativeRegionExpression(const ExecutionExpressionFragment &fragment, bool require_boolean,
                                     SljitNativeRegionExpressionPlan &expr, string &error, bool render_diagnostics);
 bool TryReadNativeRegionExpression(const ExecutionExpressionIR &root, bool require_boolean,

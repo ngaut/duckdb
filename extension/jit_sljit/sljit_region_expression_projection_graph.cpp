@@ -10,7 +10,7 @@
 
 namespace duckdb {
 
-static unique_ptr<ExecutionExpressionIR> MakeSljitReferenceExpression(idx_t source_index, const LogicalType &type) {
+unique_ptr<ExecutionExpressionIR> MakeSljitReferenceExpression(idx_t source_index, const LogicalType &type) {
 	auto result = make_uniq<ExecutionExpressionIR>();
 	result->kind = ExecutionExpressionIRKind::REFERENCE;
 	result->return_type = type;
