@@ -105,14 +105,16 @@ class SljitSelectedHashJoinInputRuntime {
 public:
 	SljitSelectedHashJoinInputRuntime(ExecutionRegionRuntime &runtime_p, vector<SljitExecutableRegionOp> &ops_p,
 	                                  SljitRegionExecutionScratch &scratch_p)
-	    : runtime(runtime_p), ops(ops_p), scratch(scratch_p) {
+	    : runtime(runtime_p), ops(ops_p), scratch(scratch_p), selected_hash_join_mark_inputs(ops_p.size()),
+	      selected_hash_join_probe_inputs(ops_p.size()) {
 	}
 
 	bool TryPrepareMarkProbeInput(idx_t mark_hash_join_idx, const SljitRuntimeBatchView &selected_input,
 	                              DataChunk *&join_input, string &deferred_reason) {
 		DataChunk *compact_input = nullptr;
 		ExecutionHashJoinProbeBinding *target_binding = nullptr;
-		if (!TryPrepareInput(mark_hash_join_idx, selected_input, true, selected_hash_join_mark_input,
+		if (!TryPrepareInput(mark_hash_join_idx, selected_input, true,
+		                     InputBatch(selected_hash_join_mark_inputs, mark_hash_join_idx),
 		                     "SLJIT selected MARK probe input", "mark_probe_input_view", compact_input, target_binding,
 		                     deferred_reason)) {
 			return false;
@@ -128,7 +130,8 @@ public:
 	                              DataChunk *&join_input, string &deferred_reason) {
 		DataChunk *compact_input = nullptr;
 		ExecutionHashJoinProbeBinding *target_binding = nullptr;
-		if (!TryPrepareInput(target_hash_join_idx, selected_input, true, selected_hash_join_probe_input,
+		if (!TryPrepareInput(target_hash_join_idx, selected_input, true,
+		                     InputBatch(selected_hash_join_probe_inputs, target_hash_join_idx),
 		                     "SLJIT selected hash probe input", "hash_probe_input_view", compact_input, target_binding,
 		                     deferred_reason)) {
 			return false;
@@ -209,7 +212,6 @@ private:
 
 		vector<uint8_t> referenced_columns(source_binding->output_types.size(), 0);
 		MarkTargetProbeInputColumns(*target_binding, referenced_columns, include_lhs_output_columns, context);
-
 		auto selected = selected_input.BindHashJoinSelection(context);
 		const auto source_hash_join_idx = selected.hash_join_idx;
 		auto view_stage_start = SljitRegionStageStart(runtime);
@@ -244,11 +246,20 @@ private:
 	}
 
 private:
+	//! Each target join owns the chunk its input is built in: in a chain of joins, the input of one join is the
+	//! source the next join's input is built from, so the two never share storage
+	static SljitDataChunkBatch &InputBatch(vector<SljitDataChunkBatch> &batches, idx_t target_hash_join_idx) {
+		if (target_hash_join_idx >= batches.size()) {
+			throw InternalException("SLJIT selected hash join input target is out of range");
+		}
+		return batches[target_hash_join_idx];
+	}
+
 	ExecutionRegionRuntime &runtime;
 	vector<SljitExecutableRegionOp> &ops;
 	SljitRegionExecutionScratch &scratch;
-	SljitDataChunkBatch selected_hash_join_mark_input;
-	SljitDataChunkBatch selected_hash_join_probe_input;
+	vector<SljitDataChunkBatch> selected_hash_join_mark_inputs;
+	vector<SljitDataChunkBatch> selected_hash_join_probe_inputs;
 };
 
 } // namespace duckdb
