@@ -890,7 +890,8 @@ static bool CanUseDictSurvivingJoin(const PhysicalHashJoin &op, const JoinHashTa
 enum class JitHashJoinProbeFilterStrategy : uint8_t { DIRECT_HASH_TABLE, BLOOM_REJECT };
 
 static bool JitProbeBloomCandidate(const PhysicalHashJoin &op) {
-	if (op.join_type != JoinType::INNER || op.residual_info) {
+	// Rejecting probe rows that cannot match is sound wherever an unmatched probe row produces no output
+	if ((op.join_type != JoinType::INNER && op.join_type != JoinType::SEMI) || op.residual_info) {
 		return false;
 	}
 	if (op.conditions.empty() || op.conditions.size() > 2) {

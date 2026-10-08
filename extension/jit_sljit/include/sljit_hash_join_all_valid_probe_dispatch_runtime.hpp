@@ -29,10 +29,11 @@ static bool SljitHashJoinHasUint64PairEqualityKeys(const SljitNativeHashJoinProb
 template <bool SELECTED>
 static bool TryExecuteAllValidUint64PairNoChainProbeFastest(const SljitNativeHashJoinProbePlan &plan,
                                                             SljitNativeRegularHashJoinProbeInput &input) {
+	// Without chains every probe row matches at most once, so semi and inner joins select the same rows.
 	if (!SljitHashJoinHasUint64PairEqualityKeys(plan) ||
 	    !SljitHashJoinCanUseAllValidNoChainProbe(plan, input, SELECTED) ||
 	    input.layout_kind != SljitHashJoinProbeLayoutKind::NO_CHAIN || input.bloom_filter_bits ||
-	    plan.mark_build_match || plan.output_mode != ExecutionHashJoinProbeOutputMode::MATCHED_PROBE_AND_BUILD) {
+	    plan.mark_build_match) {
 		return false;
 	}
 
@@ -220,7 +221,6 @@ static bool TryExecuteAllValidUncheckedInt64ToInt32SingleKeyNoChainProbe(const S
 	if (!input.source_key0_int64_to_int32 || !input.source_key0_int64_to_int32_unchecked || plan.keys.size() != 1 ||
 	    plan.keys[0].key_kind != SljitNativeHashJoinKeyKind::INT32 ||
 	    !SljitHashJoinHasAllValidEqualityKey(plan.keys[0]) || plan.mark_build_match || plan.residual_predicate ||
-	    plan.output_mode != ExecutionHashJoinProbeOutputMode::MATCHED_PROBE_AND_BUILD ||
 	    !SljitHashJoinCanUseAllValidNoChainProbe(plan, input, SELECTED)) {
 		return false;
 	}
