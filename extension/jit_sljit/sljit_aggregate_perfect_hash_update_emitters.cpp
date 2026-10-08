@@ -11,20 +11,24 @@
 
 namespace duckdb {
 
-static sljit_jump *EmitSljitPerfectHashExpressionTreeValue(
-    const SljitPerfectHashFusedUpdateEmitContext &context, const ExecutionExpressionIR &expression, bool fast_path,
-    bool all_valid, bool no_source_selection, const vector<SljitTypedExpressionTreeDataPointerHoist> *data_hoists) {
+//! Leaves the expression value in R2. Returns whether the value can be NULL: R3 then holds its validity, and the
+//! caller branches on it once the registers the evaluation borrows (S4 holds the source selections) are restored.
+static bool
+EmitSljitPerfectHashExpressionTreeValue(const SljitPerfectHashFusedUpdateEmitContext &context,
+                                        const ExecutionExpressionIR &expression, bool fast_path, bool all_valid,
+                                        bool no_source_selection,
+                                        const vector<SljitTypedExpressionTreeDataPointerHoist> *data_hoists) {
 	auto compiler = context.compiler;
 	if (fast_path) {
 		idx_t spill_index = 0;
 		EmitSljitTypedExpressionTreeFastValueReg(compiler, expression, spill_index, context.overflows, data_hoists);
-		return nullptr;
+		return false;
 	}
 	if (all_valid && no_source_selection) {
 		idx_t spill_index = 0;
 		EmitSljitTypedExpressionTreeLogicalFastValueReg(compiler, expression, spill_index, context.overflows,
 		                                                data_hoists);
-		return nullptr;
+		return false;
 	}
 	if (all_valid) {
 		sljit_emit_op1(compiler, SLJIT_MOV_P, SLJIT_S4, 0, SLJIT_MEM1(SLJIT_S0),
@@ -32,16 +36,19 @@ static sljit_jump *EmitSljitPerfectHashExpressionTreeValue(
 		idx_t spill_index = 0;
 		EmitSljitTypedExpressionTreeSelectedFastValueReg(compiler, expression, spill_index, context.overflows,
 		                                                 data_hoists);
-		return nullptr;
+		return false;
 	}
 	sljit_emit_op1(compiler, SLJIT_MOV_P, SLJIT_S4, 0, SLJIT_MEM1(SLJIT_S0),
 	               offsetof(SljitNativeVectorInput, source_sel_array));
 	idx_t slot_index = 0;
 	auto slot = EmitSljitTypedExpressionTreeValue(compiler, expression, slot_index, context.overflows);
 	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_R3, 0, SLJIT_MEM1(SLJIT_SP), slot.valid_offset);
-	auto invalid = sljit_emit_cmp(compiler, SLJIT_EQUAL, SLJIT_R3, 0, SLJIT_IMM, 0);
 	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_R2, 0, SLJIT_MEM1(SLJIT_SP), slot.value_offset);
-	return invalid;
+	return true;
+}
+
+static sljit_jump *EmitSljitPerfectHashJumpIfExpressionNull(struct sljit_compiler *compiler, bool may_be_null) {
+	return may_be_null ? sljit_emit_cmp(compiler, SLJIT_EQUAL, SLJIT_R3, 0, SLJIT_IMM, 0) : nullptr;
 }
 
 vector<sljit_jump *>
@@ -52,8 +59,9 @@ EmitSljitPerfectHashPredicateSkipJumps(const SljitPerfectHashFusedUpdateEmitCont
 	if (!context.predicate) {
 		return result;
 	}
-	auto predicate_invalid = EmitSljitPerfectHashExpressionTreeValue(context, *context.predicate, fast_path, all_valid,
-	                                                                 no_source_selection, predicate_data_hoists);
+	const auto predicate_may_be_null = EmitSljitPerfectHashExpressionTreeValue(
+	    context, *context.predicate, fast_path, all_valid, no_source_selection, predicate_data_hoists);
+	auto predicate_invalid = EmitSljitPerfectHashJumpIfExpressionNull(context.compiler, predicate_may_be_null);
 	if (predicate_invalid) {
 		result.push_back(predicate_invalid);
 	}
@@ -191,12 +199,13 @@ void EmitSljitPerfectHashGroupLookup(const SljitPerfectHashFusedUpdateEmitContex
 			if (group_index_initialized) {
 				sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_MEM1(SLJIT_SP), context.group_index_offset, SLJIT_S4, 0);
 			}
-			group_is_null = EmitSljitPerfectHashExpressionTreeValue(
+			const auto group_may_be_null = EmitSljitPerfectHashExpressionTreeValue(
 			    context, *group.expression_tree, options.expression_fast_path, options.expression_all_valid,
 			    options.expression_no_source_selection, options.expression_data_hoists);
 			if (group_index_initialized) {
 				sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_S4, 0, SLJIT_MEM1(SLJIT_SP), context.group_index_offset);
 			}
+			group_is_null = EmitSljitPerfectHashJumpIfExpressionNull(compiler, group_may_be_null);
 		} else {
 			EmitLoadFusedAggregateGroupSourceIndex(compiler, group_idx, SLJIT_R1, group_index_mode,
 			                                       options.group_sel_array_base_reg);
@@ -318,9 +327,10 @@ void EmitSljitPerfectHashPayloadUpdates(const SljitPerfectHashFusedUpdateEmitCon
 			    compiler, payloads[payload_idx], !options.fast_path && !options.no_source_selection, !options.all_valid,
 			    SLJIT_S3, options.payload_data_hoists);
 		} else {
-			payload_invalid = EmitSljitPerfectHashExpressionTreeValue(
+			const auto payload_may_be_null = EmitSljitPerfectHashExpressionTreeValue(
 			    context, *payloads[payload_idx].expression_tree, options.fast_path, options.all_valid,
 			    options.no_source_selection, options.payload_data_hoists);
+			payload_invalid = EmitSljitPerfectHashJumpIfExpressionNull(compiler, payload_may_be_null);
 		}
 		if (use_reduction) {
 			if (context.reduction_state_reg == SLJIT_S4) {

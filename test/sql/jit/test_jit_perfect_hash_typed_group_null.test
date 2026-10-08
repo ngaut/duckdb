@@ -1,0 +1,76 @@
+# name: test/sql/jit/test_jit_perfect_hash_typed_group_null.test
+# description: A perfect-hash aggregate grouped by a computed key that evaluates to NULL keeps its group index: the
+#              NULL branch of a slow-path key expression runs after the registers the evaluation borrowed are restored
+# group: [jit]
+
+statement ok
+LOAD jit_sljit
+
+statement ok
+SET jit_cbo_startup_base_cost=0
+
+statement ok
+SET jit_cbo_generated_stage_benefit=4096
+
+statement ok
+SET jit_cbo_native_operator_stage_benefit=4096
+
+statement ok
+SET jit_cbo_full_pipeline_benefit=4096
+
+statement ok
+SET jit_cbo_startup_margin_basis_points=0
+
+statement ok
+CREATE TABLE wn AS SELECT CASE WHEN i % 3 = 0 THEN NULL ELSE i END::INTEGER AS i FROM range(30000) t(i)
+
+foreach threads 1 4
+
+statement ok
+SET threads={threads}
+
+statement ok
+SET jit_policy='off'
+
+statement ok
+CREATE OR REPLACE TABLE expected AS
+SELECT 'mod2' AS q, i % 2 AS k, NULL::INTEGER AS k2, sum(i % 2) AS s, count(*) AS c FROM wn GROUP BY ALL
+UNION ALL
+SELECT 'mod3', i % 3, NULL, sum(i % 3), count(*) FROM wn GROUP BY ALL
+UNION ALL
+SELECT 'div', i // 10000, NULL, sum(i // 10000), count(*) FROM wn GROUP BY ALL
+UNION ALL
+SELECT 'mod_plus', (i % 2) + 0, NULL, sum((i % 2) + 0), count(*) FROM wn GROUP BY ALL
+UNION ALL
+SELECT 'two_keys', i % 2, i % 3, sum(i % 2), count(*) FROM wn GROUP BY ALL
+
+statement ok
+SET jit_policy='auto'
+
+statement ok
+CREATE OR REPLACE TABLE actual AS
+SELECT 'mod2' AS q, i % 2 AS k, NULL::INTEGER AS k2, sum(i % 2) AS s, count(*) AS c FROM wn GROUP BY ALL
+UNION ALL
+SELECT 'mod3', i % 3, NULL, sum(i % 3), count(*) FROM wn GROUP BY ALL
+UNION ALL
+SELECT 'div', i // 10000, NULL, sum(i // 10000), count(*) FROM wn GROUP BY ALL
+UNION ALL
+SELECT 'mod_plus', (i % 2) + 0, NULL, sum((i % 2) + 0), count(*) FROM wn GROUP BY ALL
+UNION ALL
+SELECT 'two_keys', i % 2, i % 3, sum(i % 2), count(*) FROM wn GROUP BY ALL
+
+query I
+SELECT count(*) FROM ((SELECT * FROM expected EXCEPT ALL SELECT * FROM actual)
+                      UNION ALL (SELECT * FROM actual EXCEPT ALL SELECT * FROM expected))
+----
+0
+
+endloop
+
+# the shape the alias test hit: the group key and the summed value are the same computed column
+query II
+SELECT i % 2 AS k, sum(k) FROM wn GROUP BY k ORDER BY ALL
+----
+0	0
+1	10000
+NULL	NULL
