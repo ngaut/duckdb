@@ -281,7 +281,8 @@ public:
 };
 
 //! The append-sink terminal of a compiled region. Appends run the native Sink, so the exchange push (streaming and
-//! hybrid modes), the materialized append and the blocked-push retry protocol stay identical to the native path.
+//! hybrid modes), the materialized append and the blocked-push retry protocol stay identical to the native path: a
+//! push that blocks while direct consumers drain is retried by the core, which owns the kernel's later output.
 //! It holds the executor-owned sink states, which outlive the binding: the executor drops its region-local state
 //! (and with it this binding) whenever it resets them
 class CTEExecutionRegionSinkState : public ExecutionAppendSinkState {
@@ -375,14 +376,13 @@ ExecutionContract PhysicalCTE::GetExecutionContract(ExecutionRegionOperatorSlot 
 	result.sink.reason = "DuckDB materialization append sink contract";
 	result.sink.reason += ";operator=CTE";
 	result.sink.reason += ";output_columns=" + std::to_string(types.size());
-	if (exchange && (pipeline_selection_state == CTEPipelineSelectionState::UNRESOLVED || UseStreamingExchange())) {
-		// A streaming exchange couples the producer to its consumers: pushes block until they drain, so the
-		// producer pipeline yields and resumes repeatedly. Execution regions only own materializing producers.
+	if (exchange && pipeline_selection_state == CTEPipelineSelectionState::UNRESOLVED) {
+		// Until consumer selection resolves, the sink does not know whether it materializes, fans out, or both
 		result.sink.native_sink_contract.status = ExecutionRegionStateContractStatus::BLOCKED;
 		result.sink.native_sink_contract.required_capability = "materialization-append-sink";
 		result.sink.native_sink_contract.contract_version = "v1";
-		result.sink.native_sink_contract.blocker = "cte-streaming-exchange-sink";
-		result.sink.reason += ";sink_contract_status=blocked;sink_contract_blocker=cte-streaming-exchange-sink";
+		result.sink.native_sink_contract.blocker = "cte-unresolved-exchange-sink";
+		result.sink.reason += ";sink_contract_status=blocked;sink_contract_blocker=cte-unresolved-exchange-sink";
 		return FinalizeExecutionContract(std::move(result));
 	}
 	result.sink.native_sink_contract.status = ExecutionRegionStateContractStatus::READY;

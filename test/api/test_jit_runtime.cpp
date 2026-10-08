@@ -410,8 +410,7 @@ TEST_CASE("JIT full pipeline uses append sink contract for CTE materialization",
 	ConfigureSljitForCoverageSettings(con, true, true, true);
 
 	ClearJitTrace(manager);
-	// A single consumer streams the CTE through the broadcast exchange, which regions do not own. Two hash-join
-	// consumers make a small CTE cheaper to materialize than to fan out, so it runs MATERIALIZED.
+	// Two hash-join consumers make a small CTE cheaper to materialize than to fan out, so it runs MATERIALIZED.
 	auto result = con.Query("WITH cte AS MATERIALIZED ("
 	                        "SELECT i + 1 AS j FROM jit_native_cte_materialization WHERE i > 500"
 	                        ") SELECT sum(a.j) FROM cte a JOIN cte b USING (j)");
