@@ -677,46 +677,48 @@ class MetalProjectionKernel : public ExecutionRegionKernel {
 
     bool TryExecuteFullPipeline(ExecutionRegionRuntime &runtime, ExecutionRegionResult &result) override {
         MetalProjectionScratch scratch(runtime.GetAllocator(), projection.output_types);
-        idx_t processed_chunks = 0;
-        while (true) {
-            if (processed_chunks >= runtime.MaxChunks()) {
-                result = ExecutionRegionResult::NOT_FINISHED;
-                return true;
+        const auto max_batch_chunks = ShouldBatchSourceChunks() ? METAL_MAX_BATCH_CHUNKS : 1;
+        EnsureMetalBuffers(scratch, max_batch_chunks * STANDARD_VECTOR_SIZE);
+        // The batch lives in kernel-local scratch: it sinks before the kernel returns
+        auto stop = [&](ExecutionRegionResult stop_result) {
+            result = SinkProjectionBatch(runtime, scratch) == SinkResultType::FINISHED
+                         ? ExecutionRegionResult::FINISHED
+                         : stop_result;
+            return true;
+        };
+        for (idx_t fetched_chunks = 0; fetched_chunks < runtime.MaxChunks(); fetched_chunks++) {
+            DataChunk *source_chunk = nullptr;
+            auto source_result = runtime.FetchSourceContract(source_chunk);
+            if (source_result == SourceResultType::BLOCKED) {
+                return stop(ExecutionRegionResult::INTERRUPTED);
             }
-
-            const auto chunk_budget = runtime.MaxChunks() - processed_chunks;
-            const auto batch_chunk_budget = ShouldBatchSourceChunks()
-                                                ? MinValue<idx_t>(chunk_budget, METAL_MAX_BATCH_CHUNKS)
-                                                : MinValue<idx_t>(chunk_budget, 1);
-            bool source_finished = false;
-            auto fetch_result = FetchProjectionBatch(runtime, scratch, batch_chunk_budget, source_finished);
-            processed_chunks += scratch.batch_chunks;
-            if (fetch_result == MetalProjectionBatchFetchResult::BLOCKED) {
-                result = ExecutionRegionResult::INTERRUPTED;
-                return true;
-            }
-            if (scratch.batch_rows > 0) {
-                ExecuteMetalProjectionBatch(runtime, scratch);
-                auto sink_result = FlushProjectionBatch(runtime, scratch);
-                if (sink_result == SinkResultType::BLOCKED) {
-                    result = ExecutionRegionResult::INTERRUPTED;
+            if (source_chunk && source_chunk->size() > 0) {
+                const bool have_more_output = source_result == SourceResultType::HAVE_MORE_OUTPUT;
+                // The sink takes rows under the partition current when they sink: the batch sinks before this
+                // chunk moves the sink to its partition
+                if (runtime.AdvancesSinkBatch(*source_chunk, have_more_output) &&
+                    SinkProjectionBatch(runtime, scratch) == SinkResultType::FINISHED) {
+                    result = ExecutionRegionResult::FINISHED;
                     return true;
                 }
-                if (sink_result == SinkResultType::FINISHED) {
+                if (runtime.AdvanceSinkBatch(*source_chunk, have_more_output) == SinkNextBatchType::BLOCKED) {
+                    return stop(ExecutionRegionResult::INTERRUPTED);
+                }
+                AppendChunkToProjectionBatch(scratch, *source_chunk);
+                if (scratch.batch_chunks == max_batch_chunks &&
+                    SinkProjectionBatch(runtime, scratch) == SinkResultType::FINISHED) {
                     result = ExecutionRegionResult::FINISHED;
                     return true;
                 }
             }
-            if (source_finished) {
-                result = ExecutionRegionResult::FINISHED;
-                return true;
+            if (source_result == SourceResultType::FINISHED) {
+                return stop(ExecutionRegionResult::FINISHED);
             }
         }
+        return stop(ExecutionRegionResult::NOT_FINISHED);
     }
 
   private:
-    enum class MetalProjectionBatchFetchResult : uint8_t { READY, BLOCKED };
-
     struct MetalProjectionScratch {
         MetalProjectionScratch(Allocator &allocator, const vector<LogicalType> &output_types) {
             output.Initialize(allocator, output_types);
@@ -872,39 +874,6 @@ class MetalProjectionKernel : public ExecutionRegionKernel {
         scratch.batch_chunks++;
     }
 
-    MetalProjectionBatchFetchResult FetchProjectionBatch(ExecutionRegionRuntime &runtime,
-                                                         MetalProjectionScratch &scratch, idx_t chunk_budget,
-                                                         bool &source_finished) const {
-        scratch.ResetBatch();
-        const auto row_budget = chunk_budget * STANDARD_VECTOR_SIZE;
-        EnsureMetalBuffers(scratch, row_budget);
-        for (idx_t chunk_idx = 0; chunk_idx < chunk_budget; chunk_idx++) {
-            DataChunk *source_chunk = nullptr;
-            auto source_result = runtime.FetchSourceContract(source_chunk);
-            if (source_result == SourceResultType::BLOCKED) {
-                return MetalProjectionBatchFetchResult::BLOCKED;
-            }
-            if (source_chunk) {
-                auto next_batch_result =
-                    runtime.AdvanceSinkBatch(*source_chunk, source_result == SourceResultType::HAVE_MORE_OUTPUT);
-                if (next_batch_result == SinkNextBatchType::BLOCKED) {
-                    return MetalProjectionBatchFetchResult::BLOCKED;
-                }
-            }
-            if (source_chunk && source_chunk->size() > 0) {
-                AppendChunkToProjectionBatch(scratch, *source_chunk);
-            }
-            if (source_result == SourceResultType::FINISHED) {
-                source_finished = true;
-                return MetalProjectionBatchFetchResult::READY;
-            }
-            if (!ShouldBatchSourceChunks() && scratch.batch_chunks > 0) {
-                return MetalProjectionBatchFetchResult::READY;
-            }
-        }
-        return MetalProjectionBatchFetchResult::READY;
-    }
-
     void BindSinkIfNeeded(ExecutionRegionRuntime &runtime, MetalProjectionScratch &scratch) const {
         auto &native_runtime = runtime.ExecutionOperators();
         if (!scratch.sink_bound) {
@@ -920,7 +889,17 @@ class MetalProjectionKernel : public ExecutionRegionKernel {
         }
     }
 
-    SinkResultType FlushProjectionBatch(ExecutionRegionRuntime &runtime, MetalProjectionScratch &scratch) const {
+    SinkResultType SinkProjectionBatch(ExecutionRegionRuntime &runtime, MetalProjectionScratch &scratch) const {
+        if (scratch.batch_rows == 0) {
+            return SinkResultType::NEED_MORE_INPUT;
+        }
+        ExecuteMetalProjectionBatch(runtime, scratch);
+        auto result = SinkProjectionOutput(runtime, scratch);
+        scratch.ResetBatch();
+        return result;
+    }
+
+    SinkResultType SinkProjectionOutput(ExecutionRegionRuntime &runtime, MetalProjectionScratch &scratch) const {
         BindSinkIfNeeded(runtime, scratch);
         idx_t row_offset = 0;
         auto &native_runtime = runtime.ExecutionOperators();
@@ -931,11 +910,8 @@ class MetalProjectionKernel : public ExecutionRegionKernel {
                 CopyMetalBufferToOutputColumn(scratch, col_idx, row_offset, count);
             }
             scratch.output.SetChildCardinality(count);
-            auto sink_result = ExecutionSinkAppend(scratch.sink_binding.append_sink, scratch.output);
-            if (sink_result != SinkResultType::NEED_MORE_INPUT && chunk_idx + 1 < scratch.chunk_sizes.size()) {
-                throw InternalException("Metal batched materialization sink stopped before the batch was flushed");
-            }
-            auto recorded_result = native_runtime.RecordSinkResult(scratch.output, sink_result);
+            auto sink_result = native_runtime.AppendSink(scratch.sink_binding.append_sink, scratch.output);
+            auto recorded_result = native_runtime.RecordSinkResult(count, sink_result);
             if (recorded_result != SinkResultType::NEED_MORE_INPUT) {
                 return recorded_result;
             }

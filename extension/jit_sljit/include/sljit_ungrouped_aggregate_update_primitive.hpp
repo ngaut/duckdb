@@ -280,7 +280,7 @@ private:
 		auto &aggregate_op = ops[primitive.aggregate_idx];
 		auto sink_result = SljitExecuteNativeFilteredAggregateUpdate(
 		    runtime, runtime.ExecutionOperators(), scratch, primitive.aggregate_idx, aggregate_op, input_chunk);
-		sink_result = runtime.ExecutionOperators().RecordSinkResult(input_chunk, sink_result);
+		sink_result = runtime.ExecutionOperators().RecordSinkResult(input_chunk.size(), sink_result);
 		if (SljitNativeSinkResultStopsExecution(runtime, sink_result, result)) {
 			return true;
 		}

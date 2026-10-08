@@ -279,7 +279,7 @@ static bool SljitTryExecuteHashJoinProbeDirectHashJoinBuild(
 			sink_result = execute_native_full_pipeline_from(hash_join_idx + 1, join_output);
 		} else {
 			auto build_result = execute_native_hash_join_build(sink_idx, sink_op, *sink_input);
-			sink_result = native_runtime.RecordSinkResult(*sink_input, build_result);
+			sink_result = native_runtime.RecordSinkResult(sink_input->size(), build_result);
 		}
 		if (SljitSinkResultStopsPipeline(sink_result)) {
 			return true;

@@ -325,10 +325,6 @@ public:
 		return local_state;
 	}
 
-	bool PreserveSourceChunkBoundaries() const override {
-		return pipeline.PreserveSourceChunkBoundaries();
-	}
-
 	ExecutionOperatorRuntime &ExecutionOperators() override {
 		return *this;
 	}
@@ -425,8 +421,35 @@ public:
 	}
 
 	SourceResultType FetchSourceContract(DataChunk *&result) override {
-		if (sink_blocked) {
-			throw InternalException("compiled region runtime cannot fetch source contract data after a blocked sink");
+		return RecordInterrupt(FetchSourceContractInternal(result));
+	}
+
+	SourceResultType FetchPrimitiveAggregateStateSourceContract(ExecutionAggregateStateScanBatch *&result) override {
+		return RecordInterrupt(FetchPrimitiveAggregateStateSourceContractInternal(result));
+	}
+
+	bool AdvancesSinkBatch(DataChunk &source_chunk, bool have_more_output) override {
+		return pipeline.AdvancesSinkBatch(source_chunk, have_more_output);
+	}
+
+	SinkNextBatchType AdvanceSinkBatch(DataChunk &source_chunk, bool have_more_output) override {
+		auto result = AdvanceSinkBatchInternal(source_chunk, have_more_output);
+		interrupt_registered = interrupt_registered || result == SinkNextBatchType::BLOCKED;
+		return result;
+	}
+
+private:
+	//! A blocked fetch registers this task's interrupt, unless it is a deferral at a claim boundary
+	SourceResultType RecordInterrupt(SourceResultType result) {
+		interrupt_registered = interrupt_registered || (result == SourceResultType::BLOCKED && deferred_reason.empty());
+		return result;
+	}
+
+	SourceResultType FetchSourceContractInternal(DataChunk *&result) {
+		if (pipeline.HasRemainingSinkChunks()) {
+			// The kernel finished the source chunk the sink blocked on: it yields at this boundary
+			result = nullptr;
+			return SourceResultType::BLOCKED;
 		}
 		if (sink_finished) {
 			throw InternalException("compiled region runtime cannot fetch source contract data after a finished sink");
@@ -488,10 +511,10 @@ public:
 		return source_result;
 	}
 
-	SourceResultType FetchPrimitiveAggregateStateSourceContract(ExecutionAggregateStateScanBatch *&result) override {
-		if (sink_blocked) {
-			throw InternalException(
-			    "compiled region runtime cannot fetch aggregate-state source data after a blocked sink");
+	SourceResultType FetchPrimitiveAggregateStateSourceContractInternal(ExecutionAggregateStateScanBatch *&result) {
+		if (pipeline.HasRemainingSinkChunks()) {
+			result = nullptr;
+			return SourceResultType::BLOCKED;
 		}
 		if (sink_finished) {
 			throw InternalException(
@@ -515,10 +538,7 @@ public:
 		return source_result;
 	}
 
-	SinkNextBatchType AdvanceSinkBatch(DataChunk &source_chunk, bool have_more_output) override {
-		if (sink_blocked) {
-			throw InternalException("compiled region runtime cannot advance sink batch after a blocked sink");
-		}
+	SinkNextBatchType AdvanceSinkBatchInternal(DataChunk &source_chunk, bool have_more_output) {
 		if (sink_finished) {
 			throw InternalException("compiled region runtime cannot advance sink batch after a finished sink");
 		}
@@ -532,6 +552,7 @@ public:
 		return result;
 	}
 
+public:
 	ExecutionOperatorBindResult BindOperator(idx_t operator_index, DataChunk &input,
 	                                         const ExecutionRegionOperatorInfo &operator_info,
 	                                         ExecutionOperatorBinding &binding) override {
@@ -555,14 +576,14 @@ public:
 		return pipeline.BindSink(input, sink_info, binding);
 	}
 
-	SinkResultType RecordSinkResult(DataChunk &chunk, SinkResultType sink_result) override {
-		if (sink_result == SinkResultType::BLOCKED) {
-			const auto input_rows = chunk.size();
-			pipeline.TakeBlockedSinkChunk(chunk);
-			RecordSinkAccounting(input_rows, sink_result);
-			return sink_result;
+	SinkResultType AppendSink(const ExecutionAppendSinkBinding &binding, DataChunk &chunk) override {
+		ValidateSink();
+		if (interrupt_registered) {
+			// The task already waits on a callback: a sink that blocked here would register a second one
+			pipeline.QueueSinkChunk(chunk);
+			return SinkResultType::NEED_MORE_INPUT;
 		}
-		return RecordSinkResult(chunk.size(), sink_result);
+		return pipeline.AppendSink(binding, chunk);
 	}
 
 	SinkResultType RecordSinkResult(idx_t input_rows, SinkResultType sink_result) override {
@@ -571,7 +592,11 @@ public:
 			throw InternalException(
 			    "compiled full pipeline native sink update returned BLOCKED after entering sink state");
 		}
-		RecordSinkAccounting(input_rows, sink_result);
+		sink_input_rows += input_rows;
+		if (sink_result == SinkResultType::FINISHED) {
+			sink_finished = true;
+			pipeline.FinishProcessing();
+		}
 		return sink_result;
 	}
 
@@ -581,6 +606,10 @@ public:
 
 	idx_t SinkInputRows() const {
 		return sink_input_rows;
+	}
+
+	bool HasQueuedSinkChunks() const {
+		return pipeline.HasRemainingSinkChunks();
 	}
 
 	ExecutionRegionRuntimeMetrics Metrics(int64_t runtime_time_us) const {
@@ -610,24 +639,10 @@ public:
 
 private:
 	void ValidateSink() const {
-		if (sink_blocked) {
-			throw InternalException("compiled region runtime cannot sink after a blocked sink");
-		}
 		if (sink_finished) {
 			throw InternalException("compiled region runtime cannot sink after a finished sink");
 		}
 		// Sink presence and local state are validated by the pipeline adapter.
-	}
-
-	void RecordSinkAccounting(idx_t input_rows, SinkResultType sink_result) {
-		sink_input_rows += input_rows;
-		if (sink_result == SinkResultType::BLOCKED) {
-			sink_blocked = true;
-		}
-		if (sink_result == SinkResultType::FINISHED) {
-			sink_finished = true;
-			pipeline.FinishProcessing();
-		}
 	}
 
 	void RecordSourceMetrics(const ExecutionRegionSourceContractMetrics &metrics) {
@@ -675,8 +690,10 @@ private:
 	vector<ExecutionRegionRecordedStageRuntime> generated_stage_runtime;
 	ExecutionRegionJitRuntimeMetrics jit_runtime;
 	idx_t sink_input_rows = 0;
-	bool sink_blocked = false;
 	bool sink_finished = false;
+	//! Set once a source fetch, a sink batch advance or a sink append registered this task's interrupt: the task
+	//! must wait for that one callback, so every later append queues for the core continuation
+	bool interrupt_registered = false;
 	string deferred_reason;
 };
 
@@ -738,6 +755,12 @@ CompiledVectorizedRunStatus CompiledVectorizedRunner::ExecuteCompiledRegion(
 				throw InternalException("compiled full pipeline kernel returned false at runtime");
 			}
 			if (compiled_result != ExecutionRegionResult::DEFERRED) {
+				if (runtime.HasQueuedSinkChunks()) {
+					// Chunks queue only once this task's interrupt is registered: whatever stopped the kernel,
+					// the queued chunks sink when that callback wakes the task, and only then can the pipeline
+					// continue or finish
+					compiled_result = ExecutionRegionResult::INTERRUPTED;
+				}
 				pipeline_result = CompiledFullPipelineResultToPipelineExecuteResult(compiled_result);
 				if (compiled_result == ExecutionRegionResult::FINISHED) {
 					pipeline_result = pipeline.FlushAndFinalizeAfterCompiledFinish(max_chunks, runtime_reason);
@@ -764,6 +787,12 @@ CompiledVectorizedRunStatus CompiledVectorizedRunner::ExecuteCompiledRegion(
 			                                    ? string("deferred to vectorized continuation")
 			                                    : runtime.DeferredReason(),
 			                                false);
+			if (runtime.HasQueuedSinkChunks()) {
+				// The deferral's flush blocked the sink: the task waits for that callback before the vectorized
+				// continuation sinks the queued chunks and takes over
+				result = PipelineExecuteResult::INTERRUPTED;
+				return CompiledVectorizedRunStatus::EXECUTED;
+			}
 			return CompiledVectorizedRunStatus::VECTORIZED_DEFERRED;
 		}
 		result = pipeline_result;

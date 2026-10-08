@@ -30,7 +30,6 @@ public:
 	bool IsCompiledExecutionSuppressed() const;
 	const void *ExecutionIdentity() const;
 	idx_t MaxThreads() const;
-	bool PreserveSourceChunkBoundaries() const;
 
 	PipelineExecuteResult ExecuteVectorizedPipeline(idx_t max_chunks);
 	bool HasSourceAndSink() const;
@@ -44,6 +43,7 @@ public:
 	FetchPrimitiveAggregateStateSourceContract(ExecutionAggregateStateScanBatch *&result,
 	                                           ExecutionRegionSourceContractMetrics *metrics = nullptr);
 	SinkNextBatchType AdvanceSinkBatch(DataChunk &source_chunk, bool have_more_output);
+	bool AdvancesSinkBatch(DataChunk &source_chunk, bool have_more_output);
 	void SetVectorizedSourceClaimBudget(idx_t budget);
 	void ClearVectorizedSourceClaimBudget();
 	bool ConsumeVectorizedSourceDeclinedYield();
@@ -63,8 +63,14 @@ public:
 	                                         const ExecutionRegionOperatorInfo &operator_info,
 	                                         ExecutionOperatorBinding &binding);
 	bool BindSink(DataChunk &input, const ExecutionRegionSinkInfo &sink_info, ExecutionSinkBinding &binding);
-	//! Transfers a blocked sink input into the core continuation and empties the backend-owned chunk.
-	void TakeBlockedSinkChunk(DataChunk &chunk);
+	//! Appends a compiled kernel's output chunk to the Sink. Once the Sink blocks, the core continuation owns that
+	//! chunk and every later one: it sinks them in order before the kernel re-enters or the pipeline finalizes. The
+	//! chunk the Sink blocked on retries as is, because a blocked Sink may already hold it
+	SinkResultType AppendSink(const ExecutionAppendSinkBinding &binding, DataChunk &chunk);
+	//! Hands a chunk to the core continuation without calling the Sink, behind the chunks already queued
+	void QueueSinkChunk(DataChunk &chunk);
+	//! Whether the Sink blocked and chunks wait for the core continuation
+	bool HasRemainingSinkChunks() const;
 	void FinishProcessing();
 	bool TryMarkRuntimeOnce(ExecutionRegionRuntimeOnceFlag flag, idx_t index);
 	PipelineExecuteResult FlushAndFinalizeAfterCompiledFinish(idx_t max_chunks, string &runtime_reason);

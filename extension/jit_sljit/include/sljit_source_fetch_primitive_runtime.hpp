@@ -16,10 +16,7 @@
 namespace duckdb {
 
 struct SljitSourceFetchPrimitiveRuntime {
-	SljitSourceFetchPrimitiveRuntime(ExecutionRegionRuntime &runtime_p, ExecutionRegionResult &result_p,
-	                                 const SljitFullPipelineRecipe &recipe)
-	    : runtime(runtime_p), result(result_p),
-	      preserves_partitioned_source_chunks(recipe.preserves_partitioned_source_chunks) {
+	explicit SljitSourceFetchPrimitiveRuntime(ExecutionRegionRuntime &runtime_p) : runtime(runtime_p) {
 	}
 
 	template <class EXECUTE_NEXT_STEP>
@@ -27,8 +24,7 @@ struct SljitSourceFetchPrimitiveRuntime {
 		if (source_chunk.size() == 0) {
 			return false;
 		}
-		if ((runtime.PreserveSourceChunkBoundaries() && preserves_partitioned_source_chunks) ||
-		    !ShouldBatchSourceContractChunk(source_contract_batch.Count(), source_chunk.size())) {
+		if (!ShouldBatchSourceContractChunk(source_contract_batch.Count(), source_chunk.size())) {
 			return ExecuteSourceChunk(source_chunk, have_more_output, execute_next_step);
 		}
 		if (source_contract_batch.Initialized() && source_contract_batch.ColumnCount() != source_chunk.ColumnCount()) {
@@ -76,9 +72,6 @@ private:
 		if (runtime.TraceRuntime()) {
 			runtime.RecordJitRuntimeProof(ExecutionRegionJitRuntimeProof::FULL_PIPELINE_OWNERSHIP, source_chunk.size());
 		}
-		if (SljitAdvanceSinkBatchBlocked(runtime, source_chunk, have_more_output)) {
-			return SljitStopFullPipeline(result, ExecutionRegionResult::INTERRUPTED);
-		}
 		auto input_view = SljitRuntimeBatchViewFromChunk(source_chunk);
 		return execute_next_step(input_view, have_more_output);
 	}
@@ -92,8 +85,6 @@ private:
 
 private:
 	ExecutionRegionRuntime &runtime;
-	ExecutionRegionResult &result;
-	bool preserves_partitioned_source_chunks;
 	SljitDataChunkBatch source_contract_batch;
 };
 

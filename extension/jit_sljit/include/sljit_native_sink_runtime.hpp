@@ -39,7 +39,7 @@ static SinkResultType SljitExecuteNativeAppendSink(ExecutionOperatorRuntime &nat
 	if (!binding.ready || !binding.append_sink.ready) {
 		throw InternalException("SLJIT append sink binding did not return a ready append state");
 	}
-	return ExecutionSinkAppend(binding.append_sink, input);
+	return native_runtime.AppendSink(binding.append_sink, input);
 }
 
 static SinkResultType SljitExecuteNativeOrderSink(ExecutionRegionRuntime &runtime,

@@ -322,6 +322,82 @@ TEST_CASE("JIT blocked append sink transfers retry ownership to the core executo
 	REQUIRE(found_interrupted_native_sink);
 }
 
+TEST_CASE("JIT blocked append sink keeps the rest of a fanning-out hash join probe", "[api][jit]") {
+	DuckDB db;
+	Connection con(db);
+	auto &manager = ExecutionRegionManager::Get(*con.context);
+
+	LoadSljit(con);
+	// Every probe row matches 100 build rows: one probe chunk drains into many output chunks, so the streaming
+	// result sink blocks while the probes still have output pending for the same input chunk
+	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_blocked_fanout_probe AS "
+	                          "SELECT i::BIGINT AS i, (i % 4)::BIGINT AS k4, (i % 5)::BIGINT AS k5 "
+	                          "FROM range(20000) tbl(i)"));
+	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_blocked_fanout_build AS "
+	                          "SELECT i::BIGINT AS j, (i % 4)::BIGINT AS k FROM range(400) tbl(i)"));
+	ConfigureSljitForCoverageSettings(con, true, true, true, 10000, 1);
+	REQUIRE_NO_FAIL(con.Query("SET streaming_buffer_size='16KB'"));
+
+	struct StreamFingerprint {
+		idx_t rows = 0;
+		hugeint_t sum = 0;
+		hugeint_t weighted = 0;
+	};
+	auto stream = [&](const string &sql) {
+		StreamFingerprint fingerprint;
+		auto result = con.SendQuery(sql);
+		REQUIRE_NO_FAIL(*result);
+		REQUIRE(result->GetResultType() == QueryResultType::STREAM_RESULT);
+		while (true) {
+			auto chunk = result->Fetch();
+			if (!chunk) {
+				break;
+			}
+			for (idx_t row_idx = 0; row_idx < chunk->size(); row_idx++) {
+				auto i = chunk->GetValue(0, row_idx).GetValue<int64_t>();
+				auto j_value = chunk->GetValue(1, row_idx);
+				auto j = j_value.IsNull() ? int64_t(-1) : j_value.GetValue<int64_t>();
+				fingerprint.rows++;
+				fingerprint.sum += i;
+				fingerprint.weighted += hugeint_t(i) * hugeint_t(1000003) + hugeint_t(j);
+			}
+		}
+		REQUIRE_NO_FAIL(*result);
+		return fingerprint;
+	};
+
+	const vector<string> queries {
+	    // inner: 2,000,000 rows
+	    "SELECT p.i, b.j FROM jit_blocked_fanout_probe p JOIN jit_blocked_fanout_build b ON p.k4 = b.k",
+	    // left: the unmatched rows of a probe chunk drain after its matches
+	    "SELECT p.i, b.j FROM jit_blocked_fanout_probe p LEFT JOIN jit_blocked_fanout_build b ON p.k5 = b.k",
+	    // chained: the second probe drains inside each output chunk of the first
+	    "SELECT p.i, b.j + c.j FROM jit_blocked_fanout_probe p JOIN jit_blocked_fanout_build b ON p.k4 = b.k "
+	    "JOIN jit_blocked_fanout_build c ON b.k = c.k WHERE p.i < 300"};
+	for (auto &sql : queries) {
+		CAPTURE(sql);
+		REQUIRE_NO_FAIL(con.Query("SET jit_policy='off'"));
+		auto expected = stream(sql);
+		REQUIRE(expected.rows > 100000);
+		REQUIRE_NO_FAIL(con.Query("SET jit_policy='auto'"));
+
+		ClearJitTrace(manager);
+		auto actual = stream(sql);
+		REQUIRE(actual.rows == expected.rows);
+		REQUIRE(actual.sum == expected.sum);
+		REQUIRE(actual.weighted == expected.weighted);
+
+		bool found_interrupted_kernel = false;
+		for (auto &event : manager.GetEvents()) {
+			if (IsSljitRegionEvent(event) && EventPhase(event) == "runtime" && EventStatus(event) == "executed" &&
+			    EventExecutionMode(event) == "native" && event.runtime_result == "interrupted") {
+				found_interrupted_kernel = true;
+			}
+		}
+		REQUIRE(found_interrupted_kernel);
+	}
+}
+
 TEST_CASE("JIT full pipeline uses append sink contract for CTE materialization", "[api][jit]") {
 	DuckDB db;
 	Connection con(db);

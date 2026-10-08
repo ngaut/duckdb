@@ -89,7 +89,7 @@ private:
 	                                           SljitExecutableRegionOp &op, DataChunk &batch) {
 		auto result = SljitExecuteNativePipelineAggregateUpdate(runtime, native_runtime, scratch, op_idx, op, batch,
 		                                                        nullptr, DConstants::INVALID_INDEX, true);
-		return native_runtime.RecordSinkResult(batch, result);
+		return native_runtime.RecordSinkResult(batch.size(), result);
 	}
 
 	void FlushPendingAggregateUpdate(ExecutionRegionRuntime &runtime, SljitRegionExecutionScratch &scratch) {
@@ -287,7 +287,7 @@ SljitExecuteNativeFullPipelineFrom(KERNEL &kernel, ExecutionRegionRuntime &runti
 		if (TERMINAL_POLICY::TryExecuteTerminalSink(runtime, native_runtime, scratch, op_idx, op, *current,
 		                                            op_idx + 1 == ops.size(), defer_grouped_finish,
 		                                            terminal_sink_result)) {
-			return native_runtime.RecordSinkResult(*current, terminal_sink_result);
+			return native_runtime.RecordSinkResult(current->size(), terminal_sink_result);
 		}
 		bool filter_projection_needs_input = false;
 		if (SljitTryExecuteFullPipelineFilterProjection(runtime, scratch, ops, op_idx, current,

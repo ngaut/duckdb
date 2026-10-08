@@ -52,10 +52,10 @@ static bool SljitNativeSinkResultStopsExecution(ExecutionRegionRuntime &runtime,
 		return false;
 	}
 	if (sink_result == SinkResultType::BLOCKED) {
-		// A plain blocked sink yields and resumes compiled. A blocked sink WITH a
-		// deferred reason arises when a legal boundary deferral unwinds through a
-		// flush path that still sinks pending batches: the deferral must win, or
-		// the pipeline would re-enter a kernel that already handed off its claim.
+		// A blocked append sink never reaches here: the runtime queues its chunks and
+		// the kernel yields at the next source fetch. BLOCKED is a deferral unwinding
+		// through a flush path that still sinks pending batches: the deferral must win,
+		// or the pipeline would re-enter a kernel that already handed off its claim.
 		result =
 		    runtime.DeferredReason().empty() ? ExecutionRegionResult::INTERRUPTED : ExecutionRegionResult::DEFERRED;
 		return true;

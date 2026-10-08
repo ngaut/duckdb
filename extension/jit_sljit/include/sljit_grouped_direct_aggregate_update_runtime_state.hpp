@@ -254,7 +254,7 @@ private:
 		                                         input_chunk, bound_direct_update);
 		auto sink_result = SljitExecuteBoundGroupedPrimitiveAggregateUpdate(
 		    runtime, scratch, bound_direct_update, input_chunk, &filter_selection, selected_count, true);
-		sink_result = native_runtime.RecordSinkResult(input_chunk, sink_result);
+		sink_result = native_runtime.RecordSinkResult(input_chunk.size(), sink_result);
 		if (SljitNativeSinkResultStopsExecution(runtime, sink_result, result)) {
 			return true;
 		}

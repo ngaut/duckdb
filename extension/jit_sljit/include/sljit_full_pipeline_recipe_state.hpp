@@ -87,7 +87,6 @@ struct SljitFullPipelineRecipe {
 	SljitHashJoinDirectAggregateConsumerContract direct_aggregate_consumer;
 	vector<ExecutionAggregateStateCombineLane> primitive_aggregate_state_source_lanes;
 	bool uses_extended_source_fetch_budget = false;
-	bool preserves_partitioned_source_chunks = false;
 	bool has_scan_filter_executable_body = false;
 	vector<idx_t> fused_filter_owners;
 

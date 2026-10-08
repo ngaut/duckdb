@@ -22,6 +22,7 @@
 #include <functional>
 
 namespace duckdb {
+class ColumnDataCollection;
 class Executor;
 class ExecutionRegionPipelineAdapter;
 class ExecutionRegionKernel;
@@ -174,6 +175,14 @@ private:
 
 	//! This flag is set when the pipeline gets interrupted by the Sink -> the final_chunk should be re-sink-ed.
 	bool remaining_sink_chunk = false;
+	//! The output a compiled kernel appended after its sink blocked on final_chunk. It sinks in order after
+	//! final_chunk, so the kernel finishes its source chunk instead of dropping the rest of that chunk's output
+	unique_ptr<ColumnDataCollection> queued_sink_chunks;
+	idx_t next_queued_sink_chunk = 0;
+	//! Set when the sink batch advance of a compiled kernel blocked on the source chunk it fetched: the kernel re-reads
+	//! execution_source_input_chunk, with the fetch result it had, at its next source fetch
+	bool compiled_source_replay = false;
+	SourceResultType compiled_source_replay_result = SourceResultType::FINISHED;
 
 	//! This flag is set when the pipeline gets interrupted by NextBatch -> NextBatch should be called again and the
 	//! source_chunk should be sent through the pipeline
@@ -233,6 +242,8 @@ private:
 	SinkNextBatchType UpdateMinBatchIndex();
 
 	OperatorResultType ExecutePushInternal(DataChunk &input, ExecutionBudget &chunk_budget, idx_t initial_idx = 0);
+	//! Sinks final_chunk, which the Sink blocked on, and then every queued sink chunk
+	OperatorResultType SinkRemainingChunks(ExecutionBudget &chunk_budget);
 	PipelineExecuteResult PushInputChunk(DataChunk &input, ExecutionBudget &chunk_budget, PipelineInputChunkMode mode);
 	PipelineExecuteResult FlushAndFinalize(ExecutionBudget &chunk_budget);
 	//! Pushes a chunk through the pipeline and returns a single result chunk
@@ -241,6 +252,9 @@ private:
 
 	//! Notifies the sink that a new batch has started
 	SinkNextBatchType NextBatch(DataChunk &source_chunk, const SourceFetchResult &source_result);
+	//! Whether NextBatch for this source chunk moves the sink to another batch
+	bool NextBatchAdvances(DataChunk &source_chunk, const SourceFetchResult &source_result);
+	OperatorPartitionData NextPartitionData(DataChunk &source_chunk, const SourceFetchResult &source_result);
 	SinkNextBatchType NextBatch(OperatorPartitionData next_data, bool force = false,
 	                            optional_idx external_min_batch_index = optional_idx());
 	OperatorPartitionData ToPipelinePartitionData(const OperatorPartitionData &source_data) const;

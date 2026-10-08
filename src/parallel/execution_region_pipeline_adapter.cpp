@@ -3,6 +3,7 @@
 
 #include "duckdb/common/allocator.hpp"
 #include "duckdb/common/exception.hpp"
+#include "duckdb/common/types/column/column_data_collection.hpp"
 #include "duckdb/execution/execution_region_plan.hpp"
 #include "duckdb/main/client_context.hpp"
 #include "duckdb/parallel/pipeline_executor.hpp"
@@ -36,10 +37,6 @@ idx_t ExecutionRegionPipelineAdapter::MaxThreads() const {
 	return executor.pipeline.GetMaxThreads();
 }
 
-bool ExecutionRegionPipelineAdapter::PreserveSourceChunkBoundaries() const {
-	return executor.required_partition_info.AnyRequired();
-}
-
 PipelineExecuteResult ExecutionRegionPipelineAdapter::ExecuteVectorizedPipeline(idx_t max_chunks) {
 	return executor.ExecuteVectorizedPipeline(max_chunks);
 }
@@ -68,15 +65,21 @@ ExecutionRegionLocalState &ExecutionRegionPipelineAdapter::GetOrCreateLocalState
 }
 
 bool ExecutionRegionPipelineAdapter::IsAtCleanSourceToSinkBoundary() const {
+	// A compiled kernel re-reading the source chunk it fetched is at its boundary even when that chunk was the last
 	return executor.in_process_operators.empty() && !executor.remaining_sink_chunk && !executor.next_batch_blocked &&
-	       !executor.started_flushing && !executor.done_flushing && !executor.exhausted_source &&
-	       !executor.exhausted_pipeline && !executor.finalized;
+	       !executor.started_flushing && !executor.done_flushing && !executor.finalized &&
+	       (executor.compiled_source_replay || (!executor.exhausted_source && !executor.exhausted_pipeline));
 }
 
 SourceResultType ExecutionRegionPipelineAdapter::FetchSourceContract(DataChunk *&result,
                                                                      ExecutionRegionSourceContractMetrics *metrics,
                                                                      bool decline_new_row_group,
                                                                      bool *declined_new_row_group) {
+	if (executor.compiled_source_replay) {
+		executor.compiled_source_replay = false;
+		result = &executor.execution_source_input_chunk;
+		return executor.compiled_source_replay_result;
+	}
 	auto source_result =
 	    executor.FetchFromSourceContract(result, metrics, decline_new_row_group, declined_new_row_group);
 	if (source_result == SourceResultType::FINISHED) {
@@ -120,19 +123,40 @@ bool ExecutionRegionPipelineAdapter::ConsumeVectorizedSourceDeclinedYield() {
 	return executor.ConsumeVectorizedSourceDeclinedYield();
 }
 
-SinkNextBatchType ExecutionRegionPipelineAdapter::AdvanceSinkBatch(DataChunk &source_chunk, bool have_more_output) {
-	if (!executor.required_partition_info.AnyRequired()) {
-		return SinkNextBatchType::READY;
-	}
-	// Mirror the vectorized loop: a finished source with an empty chunk does not advance the batch here; the
-	// final advance to the pipeline's maximum batch index is FlushAndFinalize's job.
+//! The fetch result a compiled source chunk advances the sink batch with. Mirrors the vectorized loop: a finished
+//! source with an empty chunk does not advance the batch here; the final advance to the pipeline's maximum batch index
+//! is FlushAndFinalize's job.
+static bool CompiledSourceAdvanceResult(DataChunk &source_chunk, bool have_more_output, SourceResultType &result) {
+	result = have_more_output ? SourceResultType::HAVE_MORE_OUTPUT : SourceResultType::FINISHED;
+	return have_more_output || source_chunk.size() > 0;
+}
+
+bool ExecutionRegionPipelineAdapter::AdvancesSinkBatch(DataChunk &source_chunk, bool have_more_output) {
 	PipelineExecutor::SourceFetchResult source_result;
-	source_result.result = have_more_output ? SourceResultType::HAVE_MORE_OUTPUT : SourceResultType::FINISHED;
-	if (source_result.result == SourceResultType::FINISHED && source_chunk.size() == 0) {
+	return executor.required_partition_info.AnyRequired() &&
+	       CompiledSourceAdvanceResult(source_chunk, have_more_output, source_result.result) &&
+	       executor.NextBatchAdvances(source_chunk, source_result);
+}
+
+SinkNextBatchType ExecutionRegionPipelineAdapter::AdvanceSinkBatch(DataChunk &source_chunk, bool have_more_output) {
+	PipelineExecutor::SourceFetchResult source_result;
+	if (!executor.required_partition_info.AnyRequired() ||
+	    !CompiledSourceAdvanceResult(source_chunk, have_more_output, source_result.result)) {
 		return SinkNextBatchType::READY;
 	}
-	auto result = executor.NextBatch(source_chunk, source_result);
-	executor.next_batch_blocked = result == SinkNextBatchType::BLOCKED;
+	// Chunks of the current batch that wait to sink (the sink blocked while the kernel flushed them before this
+	// advance) hold the advance back as a blocking sink does
+	auto result =
+	    executor.remaining_sink_chunk ? SinkNextBatchType::BLOCKED : executor.NextBatch(source_chunk, source_result);
+	if (result == SinkNextBatchType::BLOCKED) {
+		// The kernel yields with the chunk unprocessed and re-reads it at its next fetch: the vectorized loop's
+		// retry would push its own source chunk instead
+		if (&source_chunk != &executor.execution_source_input_chunk) {
+			throw InternalException("compiled region sink batch advance blocked on a chunk the source did not fetch");
+		}
+		executor.compiled_source_replay = true;
+		executor.compiled_source_replay_result = source_result.result;
+	}
 	return result;
 }
 
@@ -222,11 +246,41 @@ bool ExecutionRegionPipelineAdapter::BindSink(DataChunk &input, const ExecutionR
 	return sink->BindExecutionSink(executor.context, input, sink_input, sink_info, binding);
 }
 
-void ExecutionRegionPipelineAdapter::TakeBlockedSinkChunk(DataChunk &chunk) {
-	executor.final_chunk.Reset();
-	chunk.Copy(executor.final_chunk);
-	chunk.Reset();
-	executor.remaining_sink_chunk = true;
+void ExecutionRegionPipelineAdapter::QueueSinkChunk(DataChunk &chunk) {
+	if (!executor.remaining_sink_chunk) {
+		executor.final_chunk.Reset();
+		chunk.Copy(executor.final_chunk);
+		executor.remaining_sink_chunk = true;
+		return;
+	}
+	if (!executor.queued_sink_chunks) {
+		executor.queued_sink_chunks =
+		    make_uniq<ColumnDataCollection>(GetClientContext(), executor.final_chunk.GetTypes());
+	}
+	executor.queued_sink_chunks->Append(chunk);
+}
+
+SinkResultType ExecutionRegionPipelineAdapter::AppendSink(const ExecutionAppendSinkBinding &binding, DataChunk &chunk) {
+	if (executor.remaining_sink_chunk) {
+		QueueSinkChunk(chunk);
+		return SinkResultType::NEED_MORE_INPUT;
+	}
+#ifdef DUCKDB_DEBUG_ASYNC_SINK_SOURCE
+	auto result = executor.TryDebugBlock(executor.debug_blocked_sink_count, executor.interrupt_state)
+	                  ? SinkResultType::BLOCKED
+	                  : ExecutionSinkAppend(binding, chunk);
+#else
+	auto result = ExecutionSinkAppend(binding, chunk);
+#endif
+	if (result != SinkResultType::BLOCKED) {
+		return result;
+	}
+	QueueSinkChunk(chunk);
+	return SinkResultType::NEED_MORE_INPUT;
+}
+
+bool ExecutionRegionPipelineAdapter::HasRemainingSinkChunks() const {
+	return executor.remaining_sink_chunk;
 }
 
 void ExecutionRegionPipelineAdapter::FinishProcessing() {

@@ -30,10 +30,12 @@ public:
 	                                                        const ExecutionRegionOperatorInfo &operator_info) = 0;
 	virtual bool BindSink(DataChunk &input, const ExecutionRegionSinkInfo &sink_info,
 	                      ExecutionSinkBinding &binding) = 0;
-	//! Records the sink result. BLOCKED transfers the chunk to the core continuation and leaves it empty, ensuring
-	//! that the core executor is the only owner allowed to retry those rows.
-	virtual SinkResultType RecordSinkResult(DataChunk &chunk, SinkResultType sink_result) = 0;
-	//! Records results for sinks that cannot block after entering their native state.
+	//! Appends a chunk to the pipeline's append sink. Once the sink blocks, this chunk and every later one go to the
+	//! core continuation, which sinks them in order; the next source fetch then returns BLOCKED. A kernel therefore
+	//! finishes the source chunk it is processing and yields at a source boundary, never with output in flight.
+	//! Returns NEED_MORE_INPUT or FINISHED, never BLOCKED.
+	virtual SinkResultType AppendSink(const ExecutionAppendSinkBinding &binding, DataChunk &chunk) = 0;
+	//! Records the result of a sink update; only AppendSink handles a sink that blocks.
 	virtual SinkResultType RecordSinkResult(idx_t input_rows, SinkResultType sink_result) = 0;
 };
 
@@ -103,11 +105,15 @@ public:
 	virtual idx_t MaxThreads() const = 0;
 	virtual Allocator &GetAllocator() = 0;
 	virtual ExecutionRegionLocalState &LocalState() = 0;
-	//! Whether source chunks must remain separate to preserve the sink's partition protocol.
-	virtual bool PreserveSourceChunkBoundaries() const = 0;
 	virtual SourceResultType FetchSourceContract(DataChunk *&result) = 0;
 	virtual SourceResultType FetchPrimitiveAggregateStateSourceContract(ExecutionAggregateStateScanBatch *&result) = 0;
+	//! Moves a partition-aware sink to the partition of a fetched source chunk. Call it right after the fetch, while
+	//! the source still describes that chunk. BLOCKED leaves the chunk unprocessed: the kernel yields, and its next
+	//! fetch returns the same chunk.
 	virtual SinkNextBatchType AdvanceSinkBatch(DataChunk &source_chunk, bool have_more_output) = 0;
+	//! Whether AdvanceSinkBatch for this source chunk moves the sink to another partition. The sink takes rows under
+	//! the partition current when they sink, so rows a kernel holds back from earlier source chunks sink first.
+	virtual bool AdvancesSinkBatch(DataChunk &source_chunk, bool have_more_output) = 0;
 	virtual ExecutionOperatorRuntime &ExecutionOperators() = 0;
 	virtual bool TraceRuntime() const = 0;
 	virtual void RecordGeneratedStageRuntime(ExecutionRegionStageId stage, int64_t runtime_time_us,

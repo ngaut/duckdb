@@ -103,8 +103,6 @@ SljitFinalizeFullPipelinePrimitiveRecipe(const vector<SljitExecutableRegionOp> &
 	recipe.primitive_sequence = std::move(primitive_sequence);
 	recipe.direct_aggregate_consumer = direct_aggregate_consumer;
 	recipe.uses_extended_source_fetch_budget = uses_extended_source_fetch_budget;
-	recipe.preserves_partitioned_source_chunks =
-	    recipe.primitive_sequence.Step(1).kind == SljitFullPipelinePrimitiveKind::GENERATED_FILTER;
 	recipe.has_scan_filter_executable_body =
 	    direct_source_hash_build || SljitFullPipelineHasExactFilterProbeHashBuild(ops, recipe.primitive_sequence);
 	recipe.fused_filter_owners = std::move(fused_filter_owners);

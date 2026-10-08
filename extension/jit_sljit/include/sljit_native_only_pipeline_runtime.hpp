@@ -22,6 +22,10 @@ static bool SljitTryExecuteFullPipelineNativeOnly(ExecutionRegionRuntime &runtim
 	idx_t fetched_chunks = 0;
 	const auto max_chunks = runtime.MaxChunks();
 	auto execute_native_batch = [&](DataChunk &batch, bool have_more_output) {
+		// The sink takes rows under the partition current when they sink: batched updates sink first
+		if (runtime.AdvancesSinkBatch(batch, have_more_output)) {
+			execute_native_full_pipeline.Finalize(scratch);
+		}
 		if (SljitAdvanceSinkBatchBlocked(runtime, batch, have_more_output)) {
 			return SljitStopFullPipeline(result, ExecutionRegionResult::INTERRUPTED);
 		}

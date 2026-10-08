@@ -38,7 +38,7 @@ public:
 	      execute_hash_join_probe(execute_hash_join_probe_p),
 	      terminal_runtime(execute_native_full_pipeline_from_p, source_distinct_counts_p, source_min_values_p,
 	                       source_max_values_p, shared_predicate_classifications_p, terminal_state_p),
-	      scratch(scratch_p), selected_hash_join_inputs(runtime, ops, scratch), source_fetch(runtime, result, recipe),
+	      scratch(scratch_p), selected_hash_join_inputs(runtime, ops, scratch), source_fetch(runtime),
 	      generated_filter(runtime, ops, scratch), hash_join_materialize(runtime, result, ops, scratch),
 	      hash_join_selection(runtime, result, ops, scratch, selected_hash_join_inputs),
 	      mark_probe_filter_boundary(runtime, result, ops, scratch, selected_hash_join_inputs),
@@ -157,6 +157,17 @@ private:
 		auto execute_next_step = [&](const SljitRuntimeBatchView &input, bool source_have_more_output) {
 			return ExecuteStep(1, input, source_have_more_output);
 		};
+		if (source_chunk.size() == 0) {
+			return false;
+		}
+		// The sink takes rows under the partition current when they sink: rows the steps still batch from earlier
+		// source chunks sink before this chunk moves the sink to its partition
+		if (runtime.AdvancesSinkBatch(source_chunk, have_more_output) && FlushRuntimeState(true, true)) {
+			return true;
+		}
+		if (SljitAdvanceSinkBatchBlocked(runtime, source_chunk, have_more_output)) {
+			return SljitStopFullPipeline(result, ExecutionRegionResult::INTERRUPTED);
+		}
 		return source_fetch.Execute(source_chunk, have_more_output, execute_next_step);
 	}
 
