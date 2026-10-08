@@ -48,13 +48,18 @@ static string MetalNSErrorToString(NSError *error) {
     return string([description UTF8String]);
 }
 
+// Creating the default device is a WindowServer round trip, and the device cannot come or go while the process runs,
+// so availability is probed once instead of on every pipeline plan.
 static bool MetalDeviceAvailable() {
-    id<MTLDevice> device = MTLCreateSystemDefaultDevice();
-    if (!device) {
-        return false;
-    }
-    [device release];
-    return true;
+    static const bool available = [] {
+        id<MTLDevice> device = MTLCreateSystemDefaultDevice();
+        if (!device) {
+            return false;
+        }
+        [device release];
+        return true;
+    }();
+    return available;
 }
 
 enum class MetalScalarKind : uint8_t { INT64, FLOAT, DECIMAL64 };
