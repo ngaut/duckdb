@@ -531,5 +531,10 @@ BuildExecutionSourceProtocolContract(ExecutionRegionSourceKind kind, ExecutionRe
 DUCKDB_API string DescribeExecutionRegionSourceInfo(
     const ExecutionRegionSourceInfo &source,
     ExecutionRegionSourceExecutionKind execution = ExecutionRegionSourceExecutionKind::NONE);
+//! Every contract fact of an operator or sink, without diagnostic fields. A backend that shares compiled artifacts
+//! across queries keys them on these, so an artifact never runs against a contract it was not compiled for.
+DUCKDB_API string DescribeExecutionRegionOperatorContract(const ExecutionRegionOperatorInfo &operator_info);
+DUCKDB_API string DescribeExecutionRegionSinkContract(const ExecutionRegionSinkInfo &sink);
+DUCKDB_API string DescribeExecutionRegionStateScanContract(const ExecutionRegionNativeStateScanContract &contract);
 
 } // namespace duckdb

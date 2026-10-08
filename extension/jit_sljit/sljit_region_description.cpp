@@ -312,6 +312,42 @@ string BuildSljitRegionArtifactSemanticKey(const ExecutionRegionCandidate &candi
 		                            DescribeNativeRegionExpressionSemantic(scan_filter.filter));
 	}
 	AppendSljitArtifactKeyField(result, "region", DescribeNativeRegionInternal(region, "semantic", true));
+	// Generated code bakes in operator and sink contract facts (perfect-hash group minima and bit widths, state
+	// layouts, hash table offsets), so an artifact is shared only between identical contracts
+	AppendSljitArtifactKeyField(result, "aggregate_state_source",
+	                            region.aggregate_state_source.function_name + ";" +
+	                                DescribeExecutionRegionStateScanContract(
+	                                    region.aggregate_state_source.state_scan_contract));
+	for (idx_t op_idx = 0; op_idx < region.ops.size(); op_idx++) {
+		auto &op = region.ops[op_idx];
+		auto field_prefix = "op" + std::to_string(op_idx);
+		switch (op.kind) {
+		case SljitNativeRegionOpKind::HASH_JOIN_PROBE:
+			AppendSljitArtifactKeyField(result, field_prefix + "_operator",
+			                            DescribeExecutionRegionOperatorContract(op.hash_join_probe.operator_info));
+			break;
+		case SljitNativeRegionOpKind::HASH_JOIN_BUILD:
+			AppendSljitArtifactKeyField(result, field_prefix + "_sink",
+			                            DescribeExecutionRegionSinkContract(op.hash_join_build.sink_info));
+			break;
+		case SljitNativeRegionOpKind::APPEND_SINK:
+			AppendSljitArtifactKeyField(result, field_prefix + "_sink",
+			                            DescribeExecutionRegionSinkContract(op.append_sink.sink_info));
+			break;
+		case SljitNativeRegionOpKind::ORDER_SINK:
+			AppendSljitArtifactKeyField(result, field_prefix + "_sink",
+			                            DescribeExecutionRegionSinkContract(op.order_sink.sink_info));
+			break;
+		case SljitNativeRegionOpKind::AGGREGATE_UPDATE:
+			AppendSljitArtifactKeyField(result, field_prefix + "_sink",
+			                            DescribeExecutionRegionSinkContract(op.aggregate_update.sink_info));
+			result += field_prefix + "_estimated_input_count=" +
+			          std::to_string(op.aggregate_update.estimated_input_count) + ";";
+			break;
+		default:
+			break;
+		}
+	}
 	return result;
 }
 

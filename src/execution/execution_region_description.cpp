@@ -186,11 +186,9 @@ static string DescribeExecutionRegionNativeOperatorContract(const ExecutionRegio
 static void AppendExecutionRegionDescription(string &result, const string &description);
 
 static string DescribeExecutionRegionExpressionFragmentIR(const ExecutionExpressionFragment &fragment) {
-	if (!fragment.ir.empty()) {
-		return fragment.ir;
-	}
+	// The root is authoritative: rendered text is diagnostic-only and goes stale when the root is remapped
 	if (!fragment.root) {
-		return string();
+		return fragment.ir;
 	}
 	return "duckdb.expr typed-vector-ir;" + DescribeExecutionExpressionIR(*fragment.root);
 }
@@ -588,6 +586,10 @@ static string DescribeExecutionRegionHashJoinKeyInput(const ExecutionRegionHashJ
 	result += "<input_index=" + std::to_string(key.input_index);
 	result += ",type=" + key.type.ToString();
 	result += ",supported_reference=" + ExecutionRegionBool(key.supported_reference);
+	result += ",expression_ready=" + ExecutionRegionBool(key.expression_ready);
+	if (key.expression_ready) {
+		result += ",expression=" + DescribeExecutionRegionExpressionFragmentIR(key.expression);
+	}
 	if (!key.reason.empty()) {
 		result += ",reason=" + key.reason;
 	}
@@ -754,9 +756,12 @@ string DescribeExecutionRegionSourceInfo(const ExecutionRegionSourceInfo &source
 	return result;
 }
 
-static string DescribeExecutionRegionOperatorInfo(const ExecutionRegionOperatorInfo &operator_info) {
+static string DescribeExecutionRegionOperatorInfo(const ExecutionRegionOperatorInfo &operator_info,
+                                                  bool include_diagnostic_fields = true) {
 	string result = "operator<kind=" + string(ExecutionRegionOperatorContractKindToString(operator_info.kind));
-	result += ",fields=" + DescribeExecutionRegionContractFields(operator_info.fields);
+	if (include_diagnostic_fields) {
+		result += ",fields=" + DescribeExecutionRegionContractFields(operator_info.fields);
+	}
 	AppendExecutionRegionDescription(result, DescribeExecutionRegionHashJoinContract(operator_info.hash_join_contract));
 	AppendExecutionRegionDescription(
 	    result, DescribeExecutionRegionNestedLoopJoinContract(operator_info.nested_loop_join_contract));
@@ -767,9 +772,12 @@ static string DescribeExecutionRegionOperatorInfo(const ExecutionRegionOperatorI
 	return result;
 }
 
-static string DescribeExecutionRegionSinkInfo(const ExecutionRegionSinkInfo &sink) {
+static string DescribeExecutionRegionSinkInfo(const ExecutionRegionSinkInfo &sink,
+                                              bool include_diagnostic_fields = true) {
 	string result = "sink<kind=" + string(ExecutionRegionSinkKindToString(sink.kind));
-	result += ",fields=" + DescribeExecutionRegionContractFields(sink.fields);
+	if (include_diagnostic_fields) {
+		result += ",fields=" + DescribeExecutionRegionContractFields(sink.fields);
+	}
 	AppendExecutionRegionDescription(result,
 	                                 DescribeExecutionRegionNativeOperatorContract(sink.native_sink_contract, "sink"));
 	AppendExecutionRegionDescription(result, DescribeExecutionRegionHashJoinContract(sink.hash_join_contract));
@@ -788,6 +796,18 @@ static string DescribeExecutionRegionSinkInfo(const ExecutionRegionSinkInfo &sin
 	}
 	result += ">";
 	return result;
+}
+
+string DescribeExecutionRegionOperatorContract(const ExecutionRegionOperatorInfo &operator_info) {
+	return DescribeExecutionRegionOperatorInfo(operator_info, false);
+}
+
+string DescribeExecutionRegionSinkContract(const ExecutionRegionSinkInfo &sink) {
+	return DescribeExecutionRegionSinkInfo(sink, false);
+}
+
+string DescribeExecutionRegionStateScanContract(const ExecutionRegionNativeStateScanContract &contract) {
+	return DescribeExecutionRegionNativeStateScanContract(contract);
 }
 
 static bool ExecutionRegionShouldRenderDiagnostics(ExecutionRegionIRMode mode) {
