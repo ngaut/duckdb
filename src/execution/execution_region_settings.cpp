@@ -31,10 +31,6 @@ bool ExecutionRegionSettings::TraceVectorizedBaseline(ClientContext &context) {
 	return Settings::Get<JitTraceVectorizedBaselineSetting>(context);
 }
 
-bool ExecutionRegionSettings::Verify(ClientContext &context) {
-	return Settings::Get<JitVerifySetting>(context);
-}
-
 bool ExecutionRegionSettings::ShouldRecordDetailedTelemetry(ClientContext &context) {
 	return TraceDecisions(context) || DumpIR(context);
 }

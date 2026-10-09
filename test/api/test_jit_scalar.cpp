@@ -25,7 +25,7 @@ TEST_CASE("JIT auto compiles decimal projection chains through fused regions", "
 	Connection con(db);
 	auto &manager = ExecutionRegionManager::Get(*con.context);
 
-	ConfigureSljitForCoverage(con, false, true, true, 10000);
+	ConfigureSljitForCoverage(con, true, true, 10000);
 	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_decimal_projection_chain AS "
 	                          "SELECT i, CAST(i AS DECIMAL(15,2)) AS d FROM range(10000) t(i)"));
 
@@ -54,7 +54,7 @@ TEST_CASE("JIT canonicalizes type-preserving arithmetic identities before loweri
 	Connection con(db);
 	auto &manager = ExecutionRegionManager::Get(*con.context);
 
-	ConfigureSljitForCoverage(con, false, true, true, 10000);
+	ConfigureSljitForCoverage(con, true, true, 10000);
 	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_decimal_identity_projection AS "
 	                          "SELECT i, CAST(i % 1000 AS DECIMAL(18,10)) AS d FROM range(10000) tbl(i)"));
 
@@ -85,7 +85,7 @@ TEST_CASE("JIT omits flat nullable typed-tree path for small generated regions",
 	Connection con(db);
 	auto &manager = ExecutionRegionManager::Get(*con.context);
 
-	ConfigureSljitForCoverage(con, false, true, false, 10000);
+	ConfigureSljitForCoverage(con, true, false, 10000);
 	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_typed_tree_small AS "
 	                          "SELECT i::BIGINT AS i, (i % 32)::BIGINT AS g FROM range(4096) tbl(i)"));
 	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_typed_tree_large AS "
@@ -109,7 +109,7 @@ TEST_CASE("JIT lowers date year intrinsic as native scalar projection", "[api][j
 	Connection con(db);
 	auto &manager = ExecutionRegionManager::Get(*con.context);
 
-	ConfigureSljitForCoverage(con, true, true, true, 10000);
+	ConfigureSljitForCoverage(con, true, true, 10000);
 	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_date_year_native(d DATE)"));
 	REQUIRE_NO_FAIL(con.Query("INSERT INTO jit_date_year_native VALUES "
 	                          "(DATE '1992-02-29'), (DATE '-0001-01-01'), "
@@ -135,7 +135,7 @@ TEST_CASE("JIT lowers compressed scalar intrinsics as native projections", "[api
 	Connection con(db);
 	auto &manager = ExecutionRegionManager::Get(*con.context);
 
-	ConfigureSljitForCoverage(con, true, true, true, 10000);
+	ConfigureSljitForCoverage(con, true, true, 10000);
 	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_compress_native AS "
 	                          "SELECT CASE WHEN range=10 THEN NULL ELSE (range + 1992)::BIGINT END y "
 	                          "FROM range(11)"));
@@ -154,7 +154,7 @@ TEST_CASE("JIT lowers fixed-prefix substring as native scalar projection", "[api
 	Connection con(db);
 	auto &manager = ExecutionRegionManager::Get(*con.context);
 
-	ConfigureSljitForCoverage(con, true, true, true, 10000);
+	ConfigureSljitForCoverage(con, true, true, 10000);
 	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_string_substring_projection("
 	                          "id INTEGER, s VARCHAR, amount DECIMAL(15,2))"));
 	REQUIRE_NO_FAIL(con.Query("INSERT INTO jit_string_substring_projection VALUES "
@@ -213,7 +213,7 @@ TEST_CASE("JIT lowers string predicates without aggregate sink dependence", "[ap
 	Connection con(db);
 	auto &manager = ExecutionRegionManager::Get(*con.context);
 
-	ConfigureSljitForCoverage(con, true, true, true, 10000);
+	ConfigureSljitForCoverage(con, true, true, 10000);
 	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_string_native(id INTEGER, s VARCHAR)"));
 	REQUIRE_NO_FAIL(con.Query("INSERT INTO jit_string_native VALUES "
 	                          "(1, 'EUROPE BRASS'), "
@@ -344,7 +344,7 @@ TEST_CASE("JIT CBO preserves vectorized low-cardinality string predicates", "[ap
 	Connection con(db);
 	auto &manager = ExecutionRegionManager::Get(*con.context);
 
-	ConfigureSljitForCoverage(con, false, true, false, 10000);
+	ConfigureSljitForCoverage(con, true, false, 10000);
 	ConfigureJitDecisionTrace(con);
 	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_low_cardinality_like AS "
 	                          "SELECT i, CASE WHEN i % 100 = 0 "
@@ -378,7 +378,7 @@ TEST_CASE("JIT CBO rejects low-cardinality string predicates before region graph
 	Connection con(db);
 	auto &manager = ExecutionRegionManager::Get(*con.context);
 
-	ConfigureSljit(con, "auto", false, false, false, 10000);
+	ConfigureSljit(con, "auto", false, false, 10000);
 	ConfigureJitDecisionTrace(con);
 	REQUIRE_NO_FAIL(con.Query("SET threads=4"));
 	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_low_cardinality_like_precheck AS "
@@ -417,7 +417,7 @@ TEST_CASE("JIT lowers decimal CASE payloads with string prefix conditions", "[ap
 	Connection con(db);
 	auto &manager = ExecutionRegionManager::Get(*con.context);
 
-	ConfigureSljitForCoverage(con, true, true, true, 10000);
+	ConfigureSljitForCoverage(con, true, true, 10000);
 	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_decimal_case_shape("
 	                          "id INTEGER, category_name VARCHAR, "
 	                          "base_amount DECIMAL(15,2), rebate_rate DECIMAL(15,2))"));
@@ -461,7 +461,7 @@ TEST_CASE("JIT CASE branch fast path respects selected hash join sources", "[api
 	Connection con(db);
 	auto &manager = ExecutionRegionManager::Get(*con.context);
 
-	ConfigureSljitForCoverage(con, true, true, true, 10000);
+	ConfigureSljitForCoverage(con, true, true, 10000);
 	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_decimal_case_join_probe AS "
 	                          "SELECT i::BIGINT AS item_key, "
 	                          "       100.00::DECIMAL(15,2) + (i % 13)::DECIMAL(15,2) AS base_amount, "
@@ -507,7 +507,7 @@ TEST_CASE("JIT lowers long string predicates through packed native comparisons",
 	Connection con(db);
 	auto &manager = ExecutionRegionManager::Get(*con.context);
 
-	ConfigureSljitForCoverage(con, true, true, true, 10000);
+	ConfigureSljitForCoverage(con, true, true, 10000);
 	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_string_packed(id INTEGER, s VARCHAR)"));
 	REQUIRE_NO_FAIL(con.Query("INSERT INTO jit_string_packed VALUES "
 	                          "(1, 'abcdefghijklmnop'), "
@@ -544,7 +544,7 @@ TEST_CASE("JIT owns retained full-layout table scan filters as generated source 
 	Connection con(db);
 	auto &manager = ExecutionRegionManager::Get(*con.context);
 
-	ConfigureSljitForCoverage(con, false, true, false, 10000);
+	ConfigureSljitForCoverage(con, true, false, 10000);
 	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_generated_source_filter AS "
 	                          "SELECT i::BIGINT AS i FROM range(10000) tbl(i)"));
 
@@ -571,7 +571,7 @@ TEST_CASE("JIT owns proven-safe modulo table scan filters as generated source fi
 	Connection con(db);
 	auto &manager = ExecutionRegionManager::Get(*con.context);
 
-	ConfigureSljitForCoverage(con, false, true, true, 10000);
+	ConfigureSljitForCoverage(con, true, true, 10000);
 	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_generated_arithmetic_source_filter AS "
 	                          "SELECT i::BIGINT AS i FROM range(100003) tbl(i)"));
 
@@ -608,7 +608,7 @@ TEST_CASE("JIT keeps unproven modulo divisors in DuckDB scan filters", "[api][ji
 	Connection con(db);
 	auto &manager = ExecutionRegionManager::Get(*con.context);
 
-	ConfigureSljitForCoverage(con, false, true, true, 10000);
+	ConfigureSljitForCoverage(con, true, true, 10000);
 	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_unproven_modulo_source_filter AS "
 	                          "SELECT i::BIGINT AS i FROM range(10003) tbl(i)"));
 
@@ -642,7 +642,7 @@ TEST_CASE("JIT owns pruned table scan filters through source input layout", "[ap
 	Connection con(db);
 	auto &manager = ExecutionRegionManager::Get(*con.context);
 
-	ConfigureSljitForCoverage(con, false, true, false, 10000);
+	ConfigureSljitForCoverage(con, true, false, 10000);
 	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_generated_pruned_source_filter AS "
 	                          "SELECT i::BIGINT AS i, "
 	                          "(DATE '1998-01-01' + ((i % 10)::INTEGER)) AS d "
@@ -670,7 +670,7 @@ TEST_CASE("JIT generated source filters retain zonemap pruning without storage r
 	Connection con(db);
 	auto &manager = ExecutionRegionManager::Get(*con.context);
 
-	ConfigureSljitForCoverage(con, false, true, true, 10000);
+	ConfigureSljitForCoverage(con, true, true, 10000);
 	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_generated_row_group_pruning AS "
 	                          "SELECT i::BIGINT AS i FROM range(400000) tbl(i)"));
 
@@ -697,7 +697,7 @@ TEST_CASE("JIT owns date range source filters through source input layout", "[ap
 	Connection con(db);
 	auto &manager = ExecutionRegionManager::Get(*con.context);
 
-	ConfigureSljitForCoverage(con, false, true, false, 10000);
+	ConfigureSljitForCoverage(con, true, false, 10000);
 	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_generated_date_range_source_filter AS "
 	                          "SELECT i::BIGINT AS i, "
 	                          "(DATE '1995-09-01' + ((i % 60)::INTEGER)) AS d "
@@ -722,7 +722,7 @@ TEST_CASE("JIT orders generated source filters by generic predicate cost", "[api
 	Connection con(db);
 	auto &manager = ExecutionRegionManager::Get(*con.context);
 
-	ConfigureSljitForCoverage(con, false, true, false, 10000);
+	ConfigureSljitForCoverage(con, true, false, 10000);
 	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_ordered_source_filter AS "
 	                          "SELECT i::BIGINT AS i, "
 	                          "CASE WHEN i % 11 = 0 THEN 'MAIL' ELSE 'AIR' END AS s, "
@@ -764,8 +764,8 @@ TEST_CASE("JIT partially vectorizes mixed generated source predicates", "[api][j
 
 	// The row count exercises the scalar tail. The nullable string remains in the
 	// scalar residual while the preceding DATE/BIGINT conjunction forms the SIMD
-	// prefix; jit_verify compares the generated selection with DuckDB's executor.
-	ConfigureSljitForCoverage(con, true, true, false, 10000);
+	// prefix.
+	ConfigureSljitForCoverage(con, true, false, 10000);
 	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_partial_simd_source_filter AS "
 	                          "SELECT i::BIGINT AS i, "
 	                          "CASE WHEN i % 13 = 0 THEN NULL "
@@ -796,7 +796,7 @@ TEST_CASE("JIT owns large complex scan filters through source input layout", "[a
 	Connection con(db);
 	auto &manager = ExecutionRegionManager::Get(*con.context);
 
-	ConfigureSljitForCoverage(con, false, true, false, 10000);
+	ConfigureSljitForCoverage(con, true, false, 10000);
 	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_large_complex_source_filter AS "
 	                          "SELECT i::BIGINT AS i, "
 	                          "(DATE '1998-01-01' + ((i % 31)::INTEGER)) AS d, "
@@ -825,7 +825,7 @@ TEST_CASE("JIT preserves ordered sink partitions for sparse generated source fil
 	Connection con(db);
 	auto &manager = ExecutionRegionManager::Get(*con.context);
 
-	ConfigureSljitForCoverage(con, false, true, true, 10000);
+	ConfigureSljitForCoverage(con, true, true, 10000);
 	REQUIRE_NO_FAIL(con.Query("SET threads=4"));
 	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_sparse_parallel_source_filter AS "
 	                          "SELECT i::BIGINT AS i, "
@@ -861,7 +861,7 @@ TEST_CASE("JIT auto planner cost skips source-only string filters", "[api][jit]"
 	Connection con(db);
 	auto &manager = ExecutionRegionManager::Get(*con.context);
 
-	ConfigureSljit(con, "auto", false, true, true, 10000);
+	ConfigureSljit(con, "auto", true, true, 10000);
 	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_auto_string_source AS "
 	                          "SELECT i::INTEGER AS id, "
 	                          "CASE WHEN i % 10 = 0 THEN 'ordinary special shipping requests here' "
@@ -904,7 +904,7 @@ TEST_CASE("JIT auto preserves cheap source string equality filters under aggress
 	Connection con(db);
 	auto &manager = ExecutionRegionManager::Get(*con.context);
 
-	ConfigureSljitForCoverage(con, false, true, true, 10000);
+	ConfigureSljitForCoverage(con, true, true, 10000);
 	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_auto_string_equality_source AS "
 	                          "SELECT i::INTEGER AS id, "
 	                          "CASE WHEN i % 4 = 0 THEN 'EUROPE' ELSE 'OTHER' END AS region "
@@ -937,7 +937,7 @@ TEST_CASE("JIT lowers signed INT128 predicates as native filters", "[api][jit]")
 	Connection con(db);
 	auto &manager = ExecutionRegionManager::Get(*con.context);
 
-	ConfigureSljitForCoverage(con, true, true, true, 10000);
+	ConfigureSljitForCoverage(con, true, true, 10000);
 	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_int128_predicate("
 	                          "id INTEGER, d DECIMAL(38,2), d2 DECIMAL(38,2), h HUGEINT, h2 HUGEINT)"));
 	REQUIRE_NO_FAIL(con.Query("INSERT INTO jit_int128_predicate VALUES "
@@ -978,7 +978,7 @@ TEST_CASE("JIT lowers scalar casts and arithmetic as generated code", "[api][jit
 	Connection con(db);
 	auto &manager = ExecutionRegionManager::Get(*con.context);
 
-	ConfigureSljitForCoverage(con, true, true, true, 10000);
+	ConfigureSljitForCoverage(con, true, true, 10000);
 	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_cast_arithmetic AS "
 	                          "SELECT i::INTEGER AS i, (i + 1)::DOUBLE AS d, (i + 2)::DOUBLE AS e "
 	                          "FROM range(10) tbl(i)"));
@@ -1010,7 +1010,7 @@ TEST_CASE("JIT lowers casted numeric double division as generated code", "[api][
 	Connection con(db);
 	auto &manager = ExecutionRegionManager::Get(*con.context);
 
-	ConfigureSljitForCoverage(con, true, true, true, 10000);
+	ConfigureSljitForCoverage(con, true, true, 10000);
 	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_casted_double_division("
 	                          "id INTEGER, d DECIMAL(38,2), n BIGINT)"));
 	REQUIRE_NO_FAIL(con.Query("INSERT INTO jit_casted_double_division VALUES "
@@ -1065,7 +1065,7 @@ TEST_CASE("JIT lowers casted numeric double comparison predicates as generated c
 	Connection con(db);
 	auto &manager = ExecutionRegionManager::Get(*con.context);
 
-	ConfigureSljitForCoverage(con, true, true, true, 10000);
+	ConfigureSljitForCoverage(con, true, true, 10000);
 	REQUIRE_NO_FAIL(con.Query("SET disabled_optimizers='filter_pushdown,top_n'"));
 	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_casted_double_predicate("
 	                          "id INTEGER, d64 DECIMAL(15,2), d128 DECIMAL(38,2), x DOUBLE)"));
@@ -1109,7 +1109,7 @@ TEST_CASE("JIT lowers decimal arithmetic comparison predicates as generated code
 	Connection con(db);
 	auto &manager = ExecutionRegionManager::Get(*con.context);
 
-	ConfigureSljitForCoverage(con, true, true, true, 10000);
+	ConfigureSljitForCoverage(con, true, true, 10000);
 	REQUIRE_NO_FAIL(con.Query("SET disabled_optimizers='filter_pushdown,top_n'"));
 	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_decimal_arith_predicate("
 	                          "id INTEGER, a DECIMAL(13,2), b DECIMAL(13,2), c DECIMAL(13,2))"));
@@ -1145,7 +1145,7 @@ TEST_CASE("JIT lowers integer modulo-by-constant with magic-multiply strength re
 	Connection con(db);
 	auto &manager = ExecutionRegionManager::Get(*con.context);
 
-	ConfigureSljitForCoverage(con, true, true, true, 10000);
+	ConfigureSljitForCoverage(con, true, true, 10000);
 	REQUIRE_NO_FAIL(con.Query("SET disabled_optimizers='filter_pushdown,top_n'"));
 	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_modulo_predicate(id INTEGER, a BIGINT)"));
 	// Negative dividends exercise the truncated-toward-zero remainder sign (-14 % 7 == 0, -7 % 7 == 0), and the NULL
@@ -1220,7 +1220,7 @@ TEST_CASE("JIT lowers int-times-decimal arithmetic through a scale-zero cast", "
 	Connection con(db);
 	auto &manager = ExecutionRegionManager::Get(*con.context);
 
-	ConfigureSljitForCoverage(con, true, true, true, 10000);
+	ConfigureSljitForCoverage(con, true, true, 10000);
 	REQUIRE_NO_FAIL(con.Query("SET disabled_optimizers='filter_pushdown,top_n'"));
 	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_int_decimal(id INTEGER, qty INTEGER, price DECIMAL(13,2))"));
 	// The binder aligns qty * price by casting qty to DECIMAL(x,0); that scale-zero cast is a sign-extended INT64

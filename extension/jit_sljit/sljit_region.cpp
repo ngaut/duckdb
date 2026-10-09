@@ -84,9 +84,6 @@ ExecutionRegionCompileResult CompileSljitRegion(const string &backend_name,
 		                        ExecutionRegionExecutionModeToString(execution_mode));
 	}
 	reason += ";execution:native-sljit-region-" + shape;
-	if (ExecutionRegionSettings::Verify(input.context)) {
-		reason += ";verify:region";
-	}
 	auto artifact = CreateSljitNativeRegionArtifact(backend_name, std::move(executable_region), std::move(recipe_plan));
 	auto result = ExecutionRegionCompileResult::CompiledArtifact(std::move(artifact), execution_mode, std::move(reason),
 	                                                             std::move(ir));

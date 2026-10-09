@@ -51,7 +51,6 @@ class TestGateDatabaseReuse(unittest.TestCase):
             event_log_size=0,
             trace_decisions=False,
             trace_runtime=False,
-            jit_verify=False,
             jit_cbo_setting=[],
         )
 
@@ -330,7 +329,6 @@ class TestBaselineStateContract(unittest.TestCase):
             event_log_size=0,
             trace_decisions=False,
             trace_runtime=False,
-            jit_verify=False,
             jit_cbo_setting=[],
             duckdb=root / "duckdb",
         )
@@ -346,7 +344,6 @@ class TestBaselineStateContract(unittest.TestCase):
         self.assertEqual(state["event_log_size"], 0)
         self.assertFalse(state["trace_decisions"])
         self.assertFalse(state["trace_runtime"])
-        self.assertFalse(state["jit_verify"])
         self.assertEqual(state["jit_cbo_settings"], [])
         self.assertEqual(state["policies"], ["off", "auto"])
         self.assertFalse(Path(state["current_baseline"]).is_absolute())
@@ -437,7 +434,6 @@ class TestPromotionRepeats(unittest.TestCase):
             event_log_size=0,
             trace_decisions=False,
             trace_runtime=False,
-            jit_verify=False,
             jit_cbo_setting=[],
             policies=["off", "auto"],
         )
@@ -506,7 +502,6 @@ class TestPromotionRepeats(unittest.TestCase):
             ("event_log_size", 10000),
             ("trace_decisions", True),
             ("trace_runtime", True),
-            ("jit_verify", True),
             ("jit_cbo_setting", ["jit_cbo_generated_stage_benefit=1"]),
         )
         for field, value in overrides:

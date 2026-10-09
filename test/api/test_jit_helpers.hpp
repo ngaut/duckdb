@@ -313,14 +313,11 @@ static void LoadSljit(Connection &con) {
 	REQUIRE_NO_FAIL(con.Query("LOAD jit_sljit"));
 }
 
-static void ConfigureSljitSettings(Connection &con, const string &policy = "auto", bool verify = false,
-                                   bool dump_ir = false, bool trace_runtime = false, idx_t event_log_size = 10000) {
+static void ConfigureSljitSettings(Connection &con, const string &policy = "auto", bool dump_ir = false,
+                                   bool trace_runtime = false, idx_t event_log_size = 10000) {
 	REQUIRE_NO_FAIL(con.Query("SET enable_jit=true"));
 	REQUIRE_NO_FAIL(con.Query("SET jit_backend='sljit'"));
 	REQUIRE_NO_FAIL(con.Query("SET jit_policy='" + policy + "'"));
-	if (verify) {
-		REQUIRE_NO_FAIL(con.Query("SET jit_verify=true"));
-	}
 	if (dump_ir) {
 		REQUIRE_NO_FAIL(con.Query("SET jit_dump_ir=true"));
 	}
@@ -332,10 +329,10 @@ static void ConfigureSljitSettings(Connection &con, const string &policy = "auto
 	}
 }
 
-static void ConfigureSljit(Connection &con, const string &policy = "auto", bool verify = false, bool dump_ir = false,
+static void ConfigureSljit(Connection &con, const string &policy = "auto", bool dump_ir = false,
                            bool trace_runtime = false, idx_t event_log_size = 10000) {
 	LoadSljit(con);
-	ConfigureSljitSettings(con, policy, verify, dump_ir, trace_runtime, event_log_size);
+	ConfigureSljitSettings(con, policy, dump_ir, trace_runtime, event_log_size);
 }
 
 static void ConfigureJitCoverageCbo(Connection &con, idx_t threads = 1) {
@@ -354,17 +351,16 @@ static void ConfigureJitDecisionTrace(Connection &con) {
 	REQUIRE_NO_FAIL(con.Query("SET jit_trace_decisions=true"));
 }
 
-static void ConfigureSljitForCoverageSettings(Connection &con, bool verify = false, bool dump_ir = false,
-                                              bool trace_runtime = false, idx_t event_log_size = 10000,
-                                              idx_t threads = 1) {
-	ConfigureSljitSettings(con, "auto", verify, dump_ir, trace_runtime, event_log_size);
+static void ConfigureSljitForCoverageSettings(Connection &con, bool dump_ir = false, bool trace_runtime = false,
+                                              idx_t event_log_size = 10000, idx_t threads = 1) {
+	ConfigureSljitSettings(con, "auto", dump_ir, trace_runtime, event_log_size);
 	ConfigureJitCoverageCbo(con, threads);
 }
 
-static void ConfigureSljitForCoverage(Connection &con, bool verify = false, bool dump_ir = false,
-                                      bool trace_runtime = false, idx_t event_log_size = 10000, idx_t threads = 1) {
+static void ConfigureSljitForCoverage(Connection &con, bool dump_ir = false, bool trace_runtime = false,
+                                      idx_t event_log_size = 10000, idx_t threads = 1) {
 	LoadSljit(con);
-	ConfigureSljitForCoverageSettings(con, verify, dump_ir, trace_runtime, event_log_size, threads);
+	ConfigureSljitForCoverageSettings(con, dump_ir, trace_runtime, event_log_size, threads);
 }
 
 static PhysicalRunnerCostParameters ZeroStartupRunnerCostParameters() {

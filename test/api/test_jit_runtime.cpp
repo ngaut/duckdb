@@ -175,7 +175,7 @@ TEST_CASE("JIT auto vectorized skips avoid telemetry when unobserved", "[api][ji
 	auto &context = *con.context;
 	auto &manager = ExecutionRegionManager::Get(context);
 
-	ConfigureSljit(con, "auto", false, false, false, 0);
+	ConfigureSljit(con, "auto", false, false, 0);
 	REQUIRE_NO_FAIL(con.Query("SET threads=1"));
 	REQUIRE_NO_FAIL(con.Query("SET jit_trace_decisions=false"));
 	REQUIRE_NO_FAIL(con.Query("SET jit_dump_ir=false"));
@@ -225,7 +225,7 @@ TEST_CASE("JIT full pipeline uses explicit append sink contract", "[api][jit]") 
 	LoadSljit(con);
 	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_native_result_collector AS "
 	                          "SELECT i::BIGINT AS i FROM range(1000) tbl(i)"));
-	ConfigureSljitForCoverageSettings(con, true, true, true);
+	ConfigureSljitForCoverageSettings(con, true, true);
 
 	ClearJitTrace(manager);
 	auto result = con.Query("SELECT i + 1 AS j FROM jit_native_result_collector WHERE i > 500");
@@ -277,7 +277,7 @@ TEST_CASE("JIT blocked append sink transfers retry ownership to the core executo
 	LoadSljit(con);
 	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_blocked_append_sink AS "
 	                          "SELECT i::BIGINT AS i FROM range(160000) tbl(i)"));
-	ConfigureSljitForCoverageSettings(con, true, true, true, 10000, 4);
+	ConfigureSljitForCoverageSettings(con, true, true, 10000, 4);
 	REQUIRE_NO_FAIL(con.Query("SET streaming_buffer_size='16KB'"));
 
 	ClearJitTrace(manager);
@@ -336,7 +336,7 @@ TEST_CASE("JIT blocked append sink keeps the rest of a fanning-out hash join pro
 	                          "FROM range(20000) tbl(i)"));
 	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_blocked_fanout_build AS "
 	                          "SELECT i::BIGINT AS j, (i % 4)::BIGINT AS k FROM range(400) tbl(i)"));
-	ConfigureSljitForCoverageSettings(con, true, true, true, 10000, 1);
+	ConfigureSljitForCoverageSettings(con, true, true, 10000, 1);
 	REQUIRE_NO_FAIL(con.Query("SET streaming_buffer_size='16KB'"));
 
 	struct StreamFingerprint {
@@ -408,7 +408,7 @@ TEST_CASE("JIT chunk step sinks the rows it holds at the end into a blocked stre
 	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_held_rows_profit AS "
 	                          "SELECT ('n' || (i % 25))::VARCHAR AS nation, (1992 + i % 7)::BIGINT AS o_year, "
 	                          "(i % 1000)::DECIMAL(15,2) AS amount FROM range(1000000) tbl(i)"));
-	ConfigureSljitForCoverageSettings(con, true, true, true, 10000, 1);
+	ConfigureSljitForCoverageSettings(con, true, true, 10000, 1);
 
 	// The sorted groups leave the ORDER BY source as one small chunk, which the step batches and holds until the
 	// source ends. Its final flush is the stream's first chunk, and the first chunk parks until the reader decides how
@@ -452,7 +452,7 @@ TEST_CASE("JIT full pipeline uses append sink contract for CTE materialization",
 	LoadSljit(con);
 	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_native_cte_materialization AS "
 	                          "SELECT i::BIGINT AS i FROM range(1000) tbl(i)"));
-	ConfigureSljitForCoverageSettings(con, true, true, true);
+	ConfigureSljitForCoverageSettings(con, true, true);
 
 	ClearJitTrace(manager);
 	// Two hash-join consumers make a small CTE cheaper to materialize than to fan out, so it runs MATERIALIZED.
@@ -494,7 +494,7 @@ TEST_CASE("JIT full pipeline uses ordered sink native contract when order keys g
 	LoadSljit(con);
 	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_native_sort_sink AS "
 	                          "SELECT (1000 - i)::BIGINT AS i FROM range(1000) tbl(i)"));
-	ConfigureSljitForCoverageSettings(con, true, true, true);
+	ConfigureSljitForCoverageSettings(con, true, true);
 
 	auto require_ordered_sink_contract = [&](const string &sql, const string &operator_name,
 	                                         const string &expected_order_kind, idx_t expected_rows,
@@ -552,7 +552,7 @@ TEST_CASE("JIT dump IR and execution mode expose backend honesty", "[api][jit]")
 	auto &context = *con.context;
 	auto &manager = ExecutionRegionManager::Get(context);
 
-	ConfigureSljitForCoverage(con, false, true);
+	ConfigureSljitForCoverage(con, true);
 
 	ClearJitTrace(manager);
 	REQUIRE_NO_FAIL(con.Query("SELECT i + 1 FROM range(3) tbl(i) WHERE i > 0"));
@@ -581,7 +581,7 @@ TEST_CASE("Execution region runtime trace records kernel execution facts", "[api
 		auto &context = *con.context;
 		auto &manager = ExecutionRegionManager::Get(context);
 
-		ConfigureSljitForCoverage(con, false, false, true);
+		ConfigureSljitForCoverage(con, false, true);
 		REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_runtime_trace_input AS "
 		                          "SELECT i::BIGINT AS i FROM range(16) tbl(i)"));
 
@@ -681,7 +681,7 @@ TEST_CASE("JIT source contracts preserve joined table scan filter contracts", "[
 	Connection con(db);
 	auto &manager = ExecutionRegionManager::Get(*con.context);
 
-	ConfigureSljitForCoverage(con, false, true, true, 10000);
+	ConfigureSljitForCoverage(con, true, true, 10000);
 	REQUIRE_NO_FAIL(con.Query("SET threads=1"));
 	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_source_contract_nation AS "
 	                          "SELECT i::BIGINT AS nationkey, "
@@ -764,7 +764,7 @@ TEST_CASE("JIT composes dynamic scan filters with generated static filters", "[a
 	Connection con(db);
 	auto &manager = ExecutionRegionManager::Get(*con.context);
 
-	ConfigureSljitForCoverage(con, false, true, true, 10000);
+	ConfigureSljitForCoverage(con, true, true, 10000);
 	REQUIRE_NO_FAIL(con.Query("SET threads=1"));
 	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_mixed_filter_keys AS "
 	                          "SELECT i::INTEGER AS join_key FROM range(2500, 7500) tbl(i)"));
@@ -821,7 +821,7 @@ TEST_CASE("EXPLAIN ANALYZE exposes compact execution region profile", "[api][jit
 	auto &context = *con.context;
 	auto &manager = ExecutionRegionManager::Get(context);
 
-	ConfigureSljitForCoverage(con, false, true);
+	ConfigureSljitForCoverage(con, true);
 	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_explain_analyze_input AS "
 	                          "SELECT i::BIGINT AS i, (i + 1)::BIGINT AS g FROM range(10000) tbl(i)"));
 
@@ -1008,7 +1008,7 @@ TEST_CASE("EXPLAIN ANALYZE exposes grouped hash aggregate native state-address l
 	DuckDB db;
 	Connection con(db);
 
-	ConfigureSljitForCoverage(con, false, true);
+	ConfigureSljitForCoverage(con, true);
 	REQUIRE_NO_FAIL(con.Query("SET threads=1"));
 	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_explain_grouped_lookup AS "
 	                          "SELECT i::BIGINT AS k, (i % 17)::BIGINT AS v FROM range(50000) tbl(i)"));

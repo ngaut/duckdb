@@ -23,7 +23,6 @@ def benchmark_args(*, traced: bool) -> SimpleNamespace:
         event_log_size=10000 if traced else 0,
         jit_cbo_setting=[],
         jit_extension="jit_sljit",
-        jit_verify=False,
         policies=["off", "auto"],
         queries=["01"],
         repeats=2,

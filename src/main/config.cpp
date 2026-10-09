@@ -218,7 +218,6 @@ static const ConfigurationOption internal_options[] = {
     DUCKDB_SETTING(JitTraceDecisionsSetting),
     DUCKDB_SETTING(JitTraceRuntimeSetting),
     DUCKDB_SETTING(JitTraceVectorizedBaselineSetting),
-    DUCKDB_SETTING(JitVerifySetting),
     DUCKDB_SETTING_CALLBACK(LambdaSyntaxSetting),
     DUCKDB_SETTING(LateMaterializationMaxRowsSetting),
     DUCKDB_SETTING_CALLBACK(LegacyDisableNullTypeSetting),

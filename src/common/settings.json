@@ -1163,7 +1163,7 @@
     },
     {
         "name": "jit_debug_force_entry_defer",
-        "description": "Debug: compiled full-pipeline kernels defer to the vectorized continuation at kernel entry before any source fetch, exercising the entry-deferral handoff used by not-ready native runtime states",
+        "description": "Debug: compiled full-pipeline kernels defer at entry, before any source fetch, so the pipeline runs vectorized as it does when a native operator the kernel binds is not ready",
         "type": "BOOLEAN",
         "default_scope": "local",
         "default_value": "false"
@@ -1212,13 +1212,6 @@
     {
         "name": "jit_trace_vectorized_baseline",
         "description": "Build execution-region plans but execute vectorized pipelines and record per-region baseline runtime for comparison",
-        "type": "BOOLEAN",
-        "default_scope": "local",
-        "default_value": "false"
-    },
-    {
-        "name": "jit_verify",
-        "description": "Verify compiled-vectorized output against the reference DuckDB execution path",
         "type": "BOOLEAN",
         "default_scope": "local",
         "default_value": "false"

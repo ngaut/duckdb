@@ -660,7 +660,7 @@ TEST_CASE("JIT ungrouped aggregate sinks use native state-update contracts", "[a
 	Connection con(db);
 	auto &manager = ExecutionRegionManager::Get(*con.context);
 
-	ConfigureSljitForCoverage(con, false, true, true, 10000);
+	ConfigureSljitForCoverage(con, true, true, 10000);
 	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_aggregate_boundary AS "
 	                          "SELECT i::BIGINT AS i, CASE WHEN i % 5 = 0 THEN NULL ELSE i::BIGINT END AS v "
 	                          "FROM range(10000) tbl(i)"));
@@ -695,7 +695,7 @@ TEST_CASE("JIT fuses projection payloads into primitive ungrouped aggregate redu
 	Connection con(db);
 	auto &manager = ExecutionRegionManager::Get(*con.context);
 
-	ConfigureSljitForCoverage(con, false, true, true, 10000);
+	ConfigureSljitForCoverage(con, true, true, 10000);
 	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_aggregate_payload AS "
 	                          "SELECT (i % 1000)::BIGINT AS a, (i % 10)::BIGINT AS b "
 	                          "FROM range(10000) tbl(i)"));
@@ -745,7 +745,7 @@ TEST_CASE("JIT primitive decimal aggregate payloads elide stats-proven checks", 
 	Connection con(db);
 	auto &manager = ExecutionRegionManager::Get(*con.context);
 
-	ConfigureSljitForCoverage(con, false, true, true, 10000);
+	ConfigureSljitForCoverage(con, true, true, 10000);
 	REQUIRE_NO_FAIL(con.Query("SET threads=1"));
 	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_decimal_primitive_safe_payload AS "
 	                          "SELECT CAST(i % 1000 AS DECIMAL(15,2)) AS extended_price, "
@@ -783,7 +783,7 @@ TEST_CASE("JIT widening decimal products feed exact hugeint aggregate states", "
 	Connection con(db);
 	auto &manager = ExecutionRegionManager::Get(*con.context);
 
-	ConfigureSljitForCoverage(con, true, true, true, 10000);
+	ConfigureSljitForCoverage(con, true, true, 10000);
 	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_wide_decimal_product AS "
 	                          "SELECT (i % 10000)::INTEGER AS g, "
 	                          "CASE WHEN i % 17 = 0 THEN NULL "
@@ -829,7 +829,7 @@ TEST_CASE("JIT fuses generated filters into primitive ungrouped aggregate reduce
 	Connection con(db);
 	auto &manager = ExecutionRegionManager::Get(*con.context);
 
-	ConfigureSljitForCoverage(con, false, true, true, 10000);
+	ConfigureSljitForCoverage(con, true, true, 10000);
 	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_filtered_aggregate_payload AS "
 	                          "SELECT CASE WHEN i % 9973 = 0 THEN NULL ELSE i::BIGINT END AS a, "
 	                          "CASE WHEN i % 7919 = 0 THEN NULL ELSE (i + 3)::BIGINT END AS b "
@@ -869,7 +869,7 @@ TEST_CASE("JIT filtered aggregate remaps expression-tree sources after generated
 	Connection con(db);
 	auto &manager = ExecutionRegionManager::Get(*con.context);
 
-	ConfigureSljitForCoverage(con, false, true, true, 10000);
+	ConfigureSljitForCoverage(con, true, true, 10000);
 	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_filtered_aggregate_source_remap AS "
 	                          "SELECT CASE i % 10 "
 	                          "       WHEN 0 THEN 0::BIGINT "
@@ -917,7 +917,7 @@ TEST_CASE("JIT fuses generated filters into primitive count-star aggregate reduc
 	Connection con(db);
 	auto &manager = ExecutionRegionManager::Get(*con.context);
 
-	ConfigureSljitForCoverage(con, false, true, true, 10000);
+	ConfigureSljitForCoverage(con, true, true, 10000);
 	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_filtered_count_star_payload AS "
 	                          "SELECT CASE WHEN i % 9973 = 0 THEN NULL ELSE i::BIGINT END AS a, "
 	                          "CASE WHEN i % 7919 = 0 THEN NULL ELSE (i + 3)::BIGINT END AS b "
@@ -956,7 +956,7 @@ TEST_CASE("JIT fuses generated filters into multiple primitive aggregate reducer
 	Connection con(db);
 	auto &manager = ExecutionRegionManager::Get(*con.context);
 
-	ConfigureSljitForCoverage(con, false, true, true, 10000);
+	ConfigureSljitForCoverage(con, true, true, 10000);
 	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_filtered_multi_aggregate_payload AS "
 	                          "SELECT CASE WHEN i % 9973 = 0 THEN NULL ELSE i::BIGINT END AS a, "
 	                          "CASE WHEN i % 7919 = 0 THEN NULL ELSE (i + 3)::BIGINT END AS b, "
@@ -1001,7 +1001,7 @@ TEST_CASE("JIT auto CBO selects high-work filtered primitive aggregate fusion", 
 	Connection con(db);
 	auto &manager = ExecutionRegionManager::Get(*con.context);
 
-	ConfigureSljit(con, "auto", false, true, true, 10000);
+	ConfigureSljit(con, "auto", true, true, 10000);
 	ConfigureJitDecisionTrace(con);
 	REQUIRE_NO_FAIL(con.Query("SET jit_cbo_native_operator_stage_benefit=4096"));
 	REQUIRE_NO_FAIL(con.Query("SET jit_cbo_materialization_elision_benefit=4096"));
@@ -1058,7 +1058,7 @@ TEST_CASE("JIT fuses multiple primitive ungrouped aggregate payload lanes into o
 	Connection con(db);
 	auto &manager = ExecutionRegionManager::Get(*con.context);
 
-	ConfigureSljitForCoverage(con, false, true, true, 10000);
+	ConfigureSljitForCoverage(con, true, true, 10000);
 	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_multi_aggregate_payload AS "
 	                          "SELECT i::BIGINT AS a, (i + 1)::BIGINT AS b "
 	                          "FROM range(10000) tbl(i)"));
@@ -1093,7 +1093,7 @@ TEST_CASE("JIT fuses exact-width ungrouped hugeint reference lanes", "[api][jit]
 	Connection con(db);
 	auto &manager = ExecutionRegionManager::Get(*con.context);
 
-	ConfigureSljitForCoverage(con, false, true, true, 10000);
+	ConfigureSljitForCoverage(con, true, true, 10000);
 	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_multi_hugeint_payload AS "
 	                          "SELECT CASE WHEN i % 7 = 0 THEN NULL "
 	                          "            ELSE i::HUGEINT * 1000000000000::HUGEINT END AS a, "
@@ -1131,7 +1131,7 @@ TEST_CASE("JIT fuses decimal CASE aggregate payload lanes", "[api][jit]") {
 	Connection con(db);
 	auto &manager = ExecutionRegionManager::Get(*con.context);
 
-	ConfigureSljitForCoverage(con, true, true, true, 10000);
+	ConfigureSljitForCoverage(con, true, true, 10000);
 	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_decimal_case_payload_probe AS "
 	                          "SELECT i::BIGINT AS item_key, "
 	                          "       100.00::DECIMAL(15,2) + (i % 13)::DECIMAL(15,2) AS base_amount, "
@@ -1190,7 +1190,7 @@ TEST_CASE("JIT typed aggregate descriptors preserve mixed BIGINT and DECIMAL64 l
 	Connection con(db);
 	auto &manager = ExecutionRegionManager::Get(*con.context);
 
-	ConfigureSljitForCoverage(con, false, true, true, 10000);
+	ConfigureSljitForCoverage(con, true, true, 10000);
 	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_mixed_typed_payload AS "
 	                          "SELECT i::BIGINT AS i, (100.00 + (i % 17))::DECIMAL(15,2) AS amount, "
 	                          "       0.10::DECIMAL(15,2) AS rate "
@@ -1232,7 +1232,7 @@ TEST_CASE("JIT perfect hash aggregate composes date-year group projection into f
 	Connection con(db);
 	auto &manager = ExecutionRegionManager::Get(*con.context);
 
-	ConfigureSljitForCoverage(con, false, true, true, 10000);
+	ConfigureSljitForCoverage(con, true, true, 10000);
 	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_perfect_hash_date_year_group AS "
 	                          "SELECT DATE '1995-01-01' + (i % 700)::INTEGER AS d, "
 	                          "       (i % 100)::DECIMAL(15,2) AS ep, "
@@ -1292,7 +1292,7 @@ TEST_CASE("JIT generic grouped primitive aggregate payload lanes use native stat
 	Connection con(db);
 	auto &manager = ExecutionRegionManager::Get(*con.context);
 
-	ConfigureSljitForCoverage(con, false, true, true, 10000);
+	ConfigureSljitForCoverage(con, true, true, 10000);
 	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_grouped_multi_aggregate_payload AS "
 	                          "SELECT i::BIGINT AS k, i::BIGINT AS v "
 	                          "FROM range(200000) tbl(i)"));
@@ -1568,7 +1568,7 @@ TEST_CASE("JIT regular hash aggregate updates mixed preaggregated groups directl
 	Connection con(db);
 	auto &manager = ExecutionRegionManager::Get(*con.context);
 
-	ConfigureSljitForCoverage(con, false, true, true, 10000);
+	ConfigureSljitForCoverage(con, true, true, 10000);
 	REQUIRE_NO_FAIL(con.Query("PRAGMA threads=1"));
 	REQUIRE_NO_FAIL(con.Query("SET perfect_ht_threshold=0"));
 	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_existing_grouped_update AS "
@@ -1584,7 +1584,7 @@ TEST_CASE("JIT regular hash aggregate updates mixed preaggregated groups directl
 	REQUIRE_NO_FAIL(*reference);
 	REQUIRE(reference->RowCount() == 4);
 
-	ConfigureSljitForCoverageSettings(con, false, true, true, 10000);
+	ConfigureSljitForCoverageSettings(con, true, true, 10000);
 	ClearJitTrace(manager, true);
 	auto result = con.Query(query);
 	REQUIRE_NO_FAIL(*result);
@@ -1615,7 +1615,7 @@ TEST_CASE("JIT projected grouped primitive updates existing groups directly", "[
 	Connection con(db);
 	auto &manager = ExecutionRegionManager::Get(*con.context);
 
-	ConfigureSljitForCoverage(con, false, true, true, 10000);
+	ConfigureSljitForCoverage(con, true, true, 10000);
 	REQUIRE_NO_FAIL(con.Query("PRAGMA threads=1"));
 	REQUIRE_NO_FAIL(con.Query("SET perfect_ht_threshold=0"));
 	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_preaggregated_existing_grouped_update AS "
@@ -1633,7 +1633,7 @@ TEST_CASE("JIT projected grouped primitive updates existing groups directly", "[
 	REQUIRE_NO_FAIL(*reference);
 	REQUIRE(reference->RowCount() == 2);
 
-	ConfigureSljitForCoverageSettings(con, false, true, true, 10000);
+	ConfigureSljitForCoverageSettings(con, true, true, 10000);
 	ClearJitTrace(manager, true);
 	auto result = con.Query(query);
 	REQUIRE_NO_FAIL(*result);
@@ -1653,7 +1653,7 @@ TEST_CASE("JIT preaggregated grouped aggregate avoids source-row reserve", "[api
 	Connection con(db);
 	auto &manager = ExecutionRegionManager::Get(*con.context);
 
-	ConfigureSljitForCoverage(con, false, true, true, 10000);
+	ConfigureSljitForCoverage(con, true, true, 10000);
 	REQUIRE_NO_FAIL(con.Query("PRAGMA threads=1"));
 	REQUIRE_NO_FAIL(con.Query("SET perfect_ht_threshold=0"));
 	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_preaggregated_group_reserve AS "
@@ -1673,7 +1673,7 @@ TEST_CASE("JIT preaggregated grouped aggregate avoids source-row reserve", "[api
 	REQUIRE_NO_FAIL(*reference_count);
 	REQUIRE(reference_count->GetValue(0, 0).GetValue<int64_t>() == 100000);
 
-	ConfigureSljitForCoverageSettings(con, false, true, true, 10000);
+	ConfigureSljitForCoverageSettings(con, true, true, 10000);
 	REQUIRE_NO_FAIL(con.Query("SET jit_cbo_generated_stage_benefit=1"));
 	ClearJitTrace(manager, true);
 	REQUIRE_NO_FAIL(con.Query("CREATE TEMP TABLE jit_preaggregated_group_reserve_output AS " + query));
@@ -1712,7 +1712,7 @@ TEST_CASE("JIT join-expanded unique group keys reserve input-vector aggregate gr
 	Connection con(db);
 	auto &manager = ExecutionRegionManager::Get(*con.context);
 
-	ConfigureSljitForCoverage(con, false, true, true, 10000);
+	ConfigureSljitForCoverage(con, true, true, 10000);
 	REQUIRE_NO_FAIL(con.Query("PRAGMA threads=1"));
 	REQUIRE_NO_FAIL(con.Query("SET perfect_ht_threshold=0"));
 	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_join_group_reserve_lhs AS "
@@ -1733,7 +1733,7 @@ TEST_CASE("JIT join-expanded unique group keys reserve input-vector aggregate gr
 	REQUIRE_NO_FAIL(*reference);
 	REQUIRE(reference->RowCount() == 100000);
 
-	ConfigureSljitForCoverageSettings(con, false, true, true, 10000);
+	ConfigureSljitForCoverageSettings(con, true, true, 10000);
 	ClearJitTrace(manager, true);
 	auto result = con.Query(query);
 	REQUIRE_NO_FAIL(*result);
@@ -1766,7 +1766,7 @@ TEST_CASE("JIT count-star distribution aggregate uses dense preaggregated groups
 	Connection con(db);
 	auto &manager = ExecutionRegionManager::Get(*con.context);
 
-	ConfigureSljitForCoverage(con, false, true, true, 10000);
+	ConfigureSljitForCoverage(con, true, true, 10000);
 	REQUIRE_NO_FAIL(con.Query("PRAGMA threads=1"));
 	REQUIRE_NO_FAIL(con.Query("SET perfect_ht_threshold=0"));
 	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_count_star_distribution_ids AS "
@@ -1793,7 +1793,7 @@ TEST_CASE("JIT count-star distribution aggregate uses dense preaggregated groups
 		REQUIRE(reference->GetValue(1, row_idx).ToString() == "100");
 	}
 
-	ConfigureSljitForCoverageSettings(con, false, true, true, 10000);
+	ConfigureSljitForCoverageSettings(con, true, true, 10000);
 	REQUIRE_NO_FAIL(con.Query("SET jit_cbo_generated_stage_benefit=1"));
 	ClearJitTrace(manager, true);
 	auto result = con.Query(query);
@@ -1814,7 +1814,7 @@ TEST_CASE("JIT direct join aggregate accumulates dense count-one groups across b
 	Connection con(db);
 	auto &manager = ExecutionRegionManager::Get(*con.context);
 
-	ConfigureSljitForCoverage(con, false, true, true, 10000);
+	ConfigureSljitForCoverage(con, true, true, 10000);
 	REQUIRE_NO_FAIL(con.Query("PRAGMA threads=1"));
 	REQUIRE_NO_FAIL(con.Query("SET perfect_ht_threshold=0"));
 	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_dense_pending_count_lhs AS "
@@ -1834,7 +1834,7 @@ TEST_CASE("JIT direct join aggregate accumulates dense count-one groups across b
 	REQUIRE_NO_FAIL(con.Query("SET jit_policy='off'"));
 	REQUIRE_NO_FAIL(con.Query("CREATE TEMP TABLE jit_dense_pending_count_reference AS " + query));
 
-	ConfigureSljitForCoverageSettings(con, false, true, true, 10000);
+	ConfigureSljitForCoverageSettings(con, true, true, 10000);
 	ClearJitTrace(manager, true);
 	REQUIRE_NO_FAIL(con.Query("CREATE TEMP TABLE jit_dense_pending_count_output AS " + query));
 	auto result_shape = con.Query("SELECT count(*), min(c), max(c) FROM jit_dense_pending_count_output");
@@ -1878,7 +1878,7 @@ TEST_CASE("JIT sorted grouped sums preserve compact runs across scheduler yields
 	Connection con(db);
 	auto &manager = ExecutionRegionManager::Get(*con.context);
 
-	ConfigureSljitForCoverage(con, false, true, true, 10000);
+	ConfigureSljitForCoverage(con, true, true, 10000);
 	REQUIRE_NO_FAIL(con.Query("PRAGMA threads=1"));
 	REQUIRE_NO_FAIL(con.Query("SET perfect_ht_threshold=0"));
 	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_sorted_grouped_sum AS "
@@ -1891,7 +1891,7 @@ TEST_CASE("JIT sorted grouped sums preserve compact runs across scheduler yields
 	REQUIRE_NO_FAIL(con.Query("SET jit_policy='off'"));
 	REQUIRE_NO_FAIL(con.Query("CREATE TEMP TABLE jit_sorted_grouped_sum_reference AS " + query));
 
-	ConfigureSljitForCoverageSettings(con, false, true, true, 10000);
+	ConfigureSljitForCoverageSettings(con, true, true, 10000);
 	REQUIRE_NO_FAIL(con.Query("SET jit_cbo_generated_stage_benefit=1"));
 	ClearJitTrace(manager, true);
 	REQUIRE_NO_FAIL(con.Query("CREATE TEMP TABLE jit_sorted_grouped_sum_output AS " + query));
@@ -1978,7 +1978,7 @@ TEST_CASE("JIT generated grouped runs publish existing aggregate states", "[api]
 	Connection con(db);
 	auto &manager = ExecutionRegionManager::Get(*con.context);
 
-	ConfigureSljitForCoverage(con, false, true, true, 10000);
+	ConfigureSljitForCoverage(con, true, true, 10000);
 	REQUIRE_NO_FAIL(con.Query("PRAGMA threads=1"));
 	REQUIRE_NO_FAIL(con.Query("SET perfect_ht_threshold=0"));
 	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_repeated_group_runs AS "
@@ -1991,7 +1991,7 @@ TEST_CASE("JIT generated grouped runs publish existing aggregate states", "[api]
 	REQUIRE_NO_FAIL(con.Query("SET jit_policy='off'"));
 	REQUIRE_NO_FAIL(con.Query("CREATE TEMP TABLE jit_repeated_group_runs_reference AS " + query));
 
-	ConfigureSljitForCoverageSettings(con, false, true, true, 10000);
+	ConfigureSljitForCoverageSettings(con, true, true, 10000);
 	REQUIRE_NO_FAIL(con.Query("SET jit_cbo_generated_stage_benefit=1"));
 	ClearJitTrace(manager, true);
 	REQUIRE_NO_FAIL(con.Query("CREATE TEMP TABLE jit_repeated_group_runs_output AS " + query));
@@ -2030,7 +2030,7 @@ TEST_CASE("JIT unordered grouped input does not generate unused run kernels", "[
 	Connection con(db);
 	auto &manager = ExecutionRegionManager::Get(*con.context);
 
-	ConfigureSljitForCoverage(con, false, true, true, 10000);
+	ConfigureSljitForCoverage(con, true, true, 10000);
 	REQUIRE_NO_FAIL(con.Query("PRAGMA threads=1"));
 	REQUIRE_NO_FAIL(con.Query("SET perfect_ht_threshold=0"));
 	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_unordered_grouped_sum AS "
@@ -2043,7 +2043,7 @@ TEST_CASE("JIT unordered grouped input does not generate unused run kernels", "[
 	REQUIRE_NO_FAIL(con.Query("SET jit_policy='off'"));
 	REQUIRE_NO_FAIL(con.Query("CREATE TEMP TABLE jit_unordered_grouped_sum_reference AS " + query));
 
-	ConfigureSljitForCoverageSettings(con, false, true, true, 10000);
+	ConfigureSljitForCoverageSettings(con, true, true, 10000);
 	REQUIRE_NO_FAIL(con.Query("SET jit_cbo_generated_stage_benefit=1"));
 	ClearJitTrace(manager, true);
 	REQUIRE_NO_FAIL(con.Query("CREATE TEMP TABLE jit_unordered_grouped_sum_output AS " + query));
@@ -2081,7 +2081,7 @@ TEST_CASE("JIT grouped run codegen bounds wide homogeneous lane code size", "[ap
 	Connection con(db);
 	auto &manager = ExecutionRegionManager::Get(*con.context);
 
-	ConfigureSljitForCoverage(con, false, true, true, 10000);
+	ConfigureSljitForCoverage(con, true, true, 10000);
 	REQUIRE_NO_FAIL(con.Query("PRAGMA threads=1"));
 	REQUIRE_NO_FAIL(con.Query("SET perfect_ht_threshold=0"));
 	string columns = "(i // 4)::BIGINT AS group_id";
@@ -2108,7 +2108,7 @@ TEST_CASE("JIT grouped run codegen bounds wide homogeneous lane code size", "[ap
 		REQUIRE_NO_FAIL(con.Query("SET jit_policy='off'"));
 		REQUIRE_NO_FAIL(con.Query("CREATE OR REPLACE TEMP TABLE " + prefix + "_reference AS " + query));
 
-		ConfigureSljitForCoverageSettings(con, false, true, true, 10000);
+		ConfigureSljitForCoverageSettings(con, true, true, 10000);
 		REQUIRE_NO_FAIL(con.Query("SET jit_cbo_generated_stage_benefit=1"));
 		ClearJitTrace(manager, true);
 		REQUIRE_NO_FAIL(con.Query("CREATE OR REPLACE TEMP TABLE " + prefix + "_output AS " + query));
@@ -2168,7 +2168,7 @@ TEST_CASE("JIT grouped typed payloads preserve wide shared-source expressions", 
 	Connection con(db);
 	auto &manager = ExecutionRegionManager::Get(*con.context);
 
-	ConfigureSljitForCoverage(con, false, true, true, 10000);
+	ConfigureSljitForCoverage(con, true, true, 10000);
 	REQUIRE_NO_FAIL(con.Query("PRAGMA threads=1"));
 	REQUIRE_NO_FAIL(con.Query("SET perfect_ht_threshold=0"));
 	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_grouped_shared_source_payload AS "
@@ -2206,7 +2206,7 @@ TEST_CASE("JIT grouped typed payloads preserve wide shared-source expressions", 
 	REQUIRE_NO_FAIL(con.Query("SET jit_policy='off'"));
 	REQUIRE_NO_FAIL(con.Query("CREATE TEMP TABLE jit_grouped_shared_source_reference AS " + query));
 
-	ConfigureSljitForCoverageSettings(con, false, true, true, 10000);
+	ConfigureSljitForCoverageSettings(con, true, true, 10000);
 	ClearJitTrace(manager, true);
 	REQUIRE_NO_FAIL(con.Query("CREATE TEMP TABLE jit_grouped_shared_source_output AS " + query));
 	auto difference = con.Query("SELECT count(*) FROM ("
@@ -2256,7 +2256,7 @@ TEST_CASE("JIT parallel sorted grouped sums reconcile only overlapping dense run
 	Connection con(db);
 	auto &manager = ExecutionRegionManager::Get(*con.context);
 
-	ConfigureSljitForCoverage(con, false, true, true, 20000, 4);
+	ConfigureSljitForCoverage(con, true, true, 20000, 4);
 	REQUIRE_NO_FAIL(con.Query("SET perfect_ht_threshold=0"));
 	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_parallel_sorted_grouped_sum AS "
 	                          "SELECT (i // 3)::BIGINT AS disjoint_group_id, "
@@ -2275,7 +2275,7 @@ TEST_CASE("JIT parallel sorted grouped sums reconcile only overlapping dense run
 		auto reference = con.Query(query);
 		REQUIRE_NO_FAIL(*reference);
 
-		ConfigureSljitForCoverageSettings(con, false, true, true, 20000, 4);
+		ConfigureSljitForCoverageSettings(con, true, true, 20000, 4);
 		REQUIRE_NO_FAIL(con.Query("SET jit_cbo_generated_stage_benefit=1"));
 		ClearJitTrace(manager, true);
 		auto result = con.Query(query);
@@ -2339,7 +2339,7 @@ TEST_CASE("JIT generated grouped runs hand a one-row final chunk to the generic 
 	Connection con(db);
 	auto &manager = ExecutionRegionManager::Get(*con.context);
 
-	ConfigureSljitForCoverage(con, false, true, true, 10000);
+	ConfigureSljitForCoverage(con, true, true, 10000);
 	REQUIRE_NO_FAIL(con.Query("PRAGMA threads=1"));
 	REQUIRE_NO_FAIL(con.Query("SET perfect_ht_threshold=0"));
 	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_generated_run_tail AS "
@@ -2350,7 +2350,7 @@ TEST_CASE("JIT generated grouped runs hand a one-row final chunk to the generic 
 
 	REQUIRE_NO_FAIL(con.Query("SET jit_policy='off'"));
 	REQUIRE_NO_FAIL(con.Query("CREATE TEMP TABLE jit_generated_run_tail_reference AS " + query));
-	ConfigureSljitForCoverageSettings(con, false, true, true, 10000);
+	ConfigureSljitForCoverageSettings(con, true, true, 10000);
 	REQUIRE_NO_FAIL(con.Query("SET jit_cbo_generated_stage_benefit=1"));
 	ClearJitTrace(manager, true);
 	REQUIRE_NO_FAIL(con.Query("CREATE TEMP TABLE jit_generated_run_tail_output AS " + query));
@@ -2394,7 +2394,7 @@ TEST_CASE("JIT generated sparse grouped runs preserve local uniqueness across th
 	Connection con(db);
 	auto &manager = ExecutionRegionManager::Get(*con.context);
 
-	ConfigureSljitForCoverage(con, false, true, true, 10000);
+	ConfigureSljitForCoverage(con, true, true, 10000);
 	REQUIRE_NO_FAIL(con.Query("PRAGMA threads=1"));
 	REQUIRE_NO_FAIL(con.Query("SET perfect_ht_threshold=0"));
 	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_signed_grouped_runs AS "
@@ -2417,7 +2417,7 @@ TEST_CASE("JIT generated sparse grouped runs preserve local uniqueness across th
 		REQUIRE_NO_FAIL(con.Query("SET jit_policy='off'"));
 		REQUIRE_NO_FAIL(con.Query("CREATE OR REPLACE TEMP TABLE " + name + "_reference AS " + query));
 
-		ConfigureSljitForCoverageSettings(con, false, true, true, 10000);
+		ConfigureSljitForCoverageSettings(con, true, true, 10000);
 		REQUIRE_NO_FAIL(con.Query("SET jit_cbo_generated_stage_benefit=1"));
 		ClearJitTrace(manager, true);
 		REQUIRE_NO_FAIL(con.Query("CREATE OR REPLACE TEMP TABLE " + name + "_output AS " + query));
@@ -2485,7 +2485,7 @@ TEST_CASE("JIT generated grouped runs elide invariant affine group projections",
 	Connection con(db);
 	auto &manager = ExecutionRegionManager::Get(*con.context);
 
-	ConfigureSljitForCoverage(con, false, true, true, 10000);
+	ConfigureSljitForCoverage(con, true, true, 10000);
 	REQUIRE_NO_FAIL(con.Query("PRAGMA threads=1"));
 	REQUIRE_NO_FAIL(con.Query("SET perfect_ht_threshold=0"));
 	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_affine_grouped_runs AS "
@@ -2499,7 +2499,7 @@ TEST_CASE("JIT generated grouped runs elide invariant affine group projections",
 	REQUIRE_NO_FAIL(con.Query("SET jit_policy='off'"));
 	REQUIRE_NO_FAIL(con.Query("CREATE TEMP TABLE jit_affine_grouped_runs_reference AS " + query));
 
-	ConfigureSljitForCoverageSettings(con, false, true, true, 10000);
+	ConfigureSljitForCoverageSettings(con, true, true, 10000);
 	REQUIRE_NO_FAIL(con.Query("SET jit_cbo_generated_stage_benefit=1"));
 	ClearJitTrace(manager, true);
 	REQUIRE_NO_FAIL(con.Query("CREATE TEMP TABLE jit_affine_grouped_runs_output AS " + query));
@@ -2546,7 +2546,7 @@ TEST_CASE("JIT affine grouped projections preserve nullable invariant semantics"
 	Connection con(db);
 	auto &manager = ExecutionRegionManager::Get(*con.context);
 
-	ConfigureSljitForCoverage(con, false, true, true, 10000);
+	ConfigureSljitForCoverage(con, true, true, 10000);
 	REQUIRE_NO_FAIL(con.Query("PRAGMA threads=1"));
 	REQUIRE_NO_FAIL(con.Query("SET perfect_ht_threshold=0"));
 	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_nullable_affine_groups AS "
@@ -2560,7 +2560,7 @@ TEST_CASE("JIT affine grouped projections preserve nullable invariant semantics"
 	REQUIRE_NO_FAIL(con.Query("SET jit_policy='off'"));
 	REQUIRE_NO_FAIL(con.Query("CREATE TEMP TABLE jit_nullable_affine_groups_reference AS " + query));
 
-	ConfigureSljitForCoverageSettings(con, false, true, true, 10000);
+	ConfigureSljitForCoverageSettings(con, true, true, 10000);
 	REQUIRE_NO_FAIL(con.Query("SET jit_cbo_generated_stage_benefit=1"));
 	ClearJitTrace(manager, true);
 	REQUIRE_NO_FAIL(con.Query("CREATE TEMP TABLE jit_nullable_affine_groups_output AS " + query));
@@ -2598,7 +2598,7 @@ TEST_CASE("JIT large projected grouped sums admit cross-batch run preaggregation
 	Connection con(db);
 	auto &manager = ExecutionRegionManager::Get(*con.context);
 
-	ConfigureSljitForCoverage(con, false, true, true, 10000);
+	ConfigureSljitForCoverage(con, true, true, 10000);
 	REQUIRE_NO_FAIL(con.Query("PRAGMA threads=1"));
 	REQUIRE_NO_FAIL(con.Query("SET perfect_ht_threshold=0"));
 	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_large_projected_grouped_sum AS "
@@ -2657,7 +2657,7 @@ TEST_CASE("JIT sorted grouped sums keep one run strategy across changing batch d
 	Connection con(db);
 	auto &manager = ExecutionRegionManager::Get(*con.context);
 
-	ConfigureSljitForCoverage(con, false, true, true, 10000);
+	ConfigureSljitForCoverage(con, true, true, 10000);
 	REQUIRE_NO_FAIL(con.Query("PRAGMA threads=1"));
 	REQUIRE_NO_FAIL(con.Query("SET perfect_ht_threshold=0"));
 	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_changing_run_density AS "
@@ -2670,7 +2670,7 @@ TEST_CASE("JIT sorted grouped sums keep one run strategy across changing batch d
 	REQUIRE_NO_FAIL(con.Query("SET jit_policy='off'"));
 	REQUIRE_NO_FAIL(con.Query("CREATE TEMP TABLE jit_changing_run_density_reference AS " + query));
 
-	ConfigureSljitForCoverageSettings(con, false, true, true, 10000);
+	ConfigureSljitForCoverageSettings(con, true, true, 10000);
 	REQUIRE_NO_FAIL(con.Query("SET jit_cbo_generated_stage_benefit=1"));
 	ClearJitTrace(manager, true);
 	REQUIRE_NO_FAIL(con.Query("CREATE TEMP TABLE jit_changing_run_density_output AS " + query));
@@ -2723,7 +2723,7 @@ TEST_CASE("JIT high-uniqueness grouped append reconciles late duplicates", "[api
 	Connection con(db);
 	auto &manager = ExecutionRegionManager::Get(*con.context);
 
-	ConfigureSljitForCoverage(con, false, true, true, 10000);
+	ConfigureSljitForCoverage(con, true, true, 10000);
 	REQUIRE_NO_FAIL(con.Query("PRAGMA threads=1"));
 	REQUIRE_NO_FAIL(con.Query("SET perfect_ht_threshold=0"));
 	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_late_duplicate_groups AS "
@@ -2736,7 +2736,7 @@ TEST_CASE("JIT high-uniqueness grouped append reconciles late duplicates", "[api
 	REQUIRE_NO_FAIL(con.Query("SET jit_policy='off'"));
 	REQUIRE_NO_FAIL(con.Query("CREATE TEMP TABLE jit_late_duplicate_reference AS " + query));
 
-	ConfigureSljitForCoverageSettings(con, false, true, true, 10000);
+	ConfigureSljitForCoverageSettings(con, true, true, 10000);
 	ClearJitTrace(manager, true);
 	REQUIRE_NO_FAIL(con.Query("CREATE TEMP TABLE jit_late_duplicate_output AS " + query));
 	auto shape = con.Query("SELECT count(*), min(total), max(total), "
@@ -2771,7 +2771,7 @@ TEST_CASE("JIT count-star grouped aggregate uses row-delta backend for high-card
 	Connection con(db);
 	auto &manager = ExecutionRegionManager::Get(*con.context);
 
-	ConfigureSljitForCoverage(con, false, true, true, 10000);
+	ConfigureSljitForCoverage(con, true, true, 10000);
 	REQUIRE_NO_FAIL(con.Query("PRAGMA threads=1"));
 	REQUIRE_NO_FAIL(con.Query("SET perfect_ht_threshold=0"));
 	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_count_star_row_delta AS "
@@ -2784,7 +2784,7 @@ TEST_CASE("JIT count-star grouped aggregate uses row-delta backend for high-card
 	REQUIRE_NO_FAIL(*reference);
 	REQUIRE(reference->RowCount() == 2048);
 
-	ConfigureSljitForCoverageSettings(con, false, true, true, 10000);
+	ConfigureSljitForCoverageSettings(con, true, true, 10000);
 	ClearJitTrace(manager, true);
 	auto result = con.Query(query);
 	REQUIRE_NO_FAIL(*result);
@@ -2814,7 +2814,7 @@ TEST_CASE("JIT regular hash aggregate appends new groups directly", "[api][jit]"
 	Connection con(db);
 	auto &manager = ExecutionRegionManager::Get(*con.context);
 
-	ConfigureSljitForCoverage(con, false, true, true, 10000);
+	ConfigureSljitForCoverage(con, true, true, 10000);
 	REQUIRE_NO_FAIL(con.Query("PRAGMA threads=1"));
 	REQUIRE_NO_FAIL(con.Query("SET perfect_ht_threshold=0"));
 	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_new_grouped_update AS "
@@ -2827,7 +2827,7 @@ TEST_CASE("JIT regular hash aggregate appends new groups directly", "[api][jit]"
 	REQUIRE_NO_FAIL(*reference);
 	REQUIRE(reference->RowCount() == 64);
 
-	ConfigureSljitForCoverageSettings(con, false, true, true, 10000);
+	ConfigureSljitForCoverageSettings(con, true, true, 10000);
 	ClearJitTrace(manager, true);
 	auto result = con.Query(query);
 	REQUIRE_NO_FAIL(*result);
@@ -2873,7 +2873,7 @@ TEST_CASE("JIT regular hash aggregate fuses typed expression payloads with nativ
 	REQUIRE_NO_FAIL(*reference);
 	REQUIRE(reference->GetValue(0, 0).ToString() == "10000");
 
-	ConfigureSljitForCoverageSettings(con, false, true, true, 10000);
+	ConfigureSljitForCoverageSettings(con, true, true, 10000);
 	ClearJitTrace(manager, true);
 	auto result = con.Query(query);
 	REQUIRE_NO_FAIL(*result);
@@ -2939,7 +2939,7 @@ TEST_CASE("JIT regular hash aggregate fuses typed expression payloads for existi
 	REQUIRE_NO_FAIL(*reference);
 	REQUIRE(reference->GetValue(0, 0).ToString() == "100");
 
-	ConfigureSljitForCoverageSettings(con, false, true, true, 10000);
+	ConfigureSljitForCoverageSettings(con, true, true, 10000);
 	ClearJitTrace(manager, true);
 	auto result = con.Query(query);
 	REQUIRE_NO_FAIL(*result);
@@ -2996,7 +2996,7 @@ TEST_CASE("JIT fused join payloads update compressed group keys through input-ve
 	                     "GROUP BY region_name";
 	REQUIRE_NO_FAIL(con.Query("CREATE TEMP TABLE jit_group_lookup_reference AS " + query));
 
-	ConfigureSljitForCoverageSettings(con, false, true, true, 10000);
+	ConfigureSljitForCoverageSettings(con, true, true, 10000);
 	ClearJitTrace(manager, true);
 	REQUIRE_NO_FAIL(con.Query("CREATE TEMP TABLE jit_group_lookup_output AS " + query));
 	auto difference = con.Query("SELECT count(*) FROM ("
@@ -3064,7 +3064,7 @@ TEST_CASE("JIT grouped aggregate consumes rewritten payloads through generated u
 	REQUIRE_NO_FAIL(*reference);
 	REQUIRE(reference->RowCount() == 1);
 
-	ConfigureSljitForCoverageSettings(con, false, true, true, 10000);
+	ConfigureSljitForCoverageSettings(con, true, true, 10000);
 	ClearJitTrace(manager, true);
 	auto result = con.Query(query);
 	REQUIRE_NO_FAIL(*result);
@@ -3129,7 +3129,7 @@ TEST_CASE("JIT regular hash aggregate fuses INT32 CASE payloads into hugeint gro
 	REQUIRE_NO_FAIL(*reference);
 	REQUIRE(reference->RowCount() == 4);
 
-	ConfigureSljitForCoverageSettings(con, false, true, true, 10000);
+	ConfigureSljitForCoverageSettings(con, true, true, 10000);
 	ClearJitTrace(manager, true);
 	auto result = con.Query(query);
 	REQUIRE_NO_FAIL(*result);
@@ -3175,7 +3175,7 @@ TEST_CASE("JIT grouped aggregate uses native state addresses under high cardinal
 	REQUIRE_NO_FAIL(*reference);
 	REQUIRE(reference->GetValue(0, 0).ToString() == "150000");
 
-	ConfigureSljitForCoverageSettings(con, false, true, true, 10000);
+	ConfigureSljitForCoverageSettings(con, true, true, 10000);
 	ClearJitTrace(manager, true);
 	auto result = con.Query("SELECT count(*), sum(c)::HUGEINT, sum(s)::HUGEINT "
 	                        "FROM (SELECT k, count(*) AS c, sum(v) AS s "
@@ -3205,7 +3205,7 @@ TEST_CASE("JIT fuses scaled decimal expression payloads into primitive hugeint a
 	Connection con(db);
 	auto &manager = ExecutionRegionManager::Get(*con.context);
 
-	ConfigureSljitForCoverage(con, false, true, true, 10000);
+	ConfigureSljitForCoverage(con, true, true, 10000);
 	// Without column statistics the multiplications cannot be proven safe, so the reducer must keep overflow checks.
 	REQUIRE_NO_FAIL(con.Query("SET disabled_optimizers='statistics_propagation'"));
 	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_decimal_aggregate_payload AS "
@@ -3240,7 +3240,7 @@ TEST_CASE("JIT fuses nullable BIGINT case payloads into primitive hugeint aggreg
 	Connection con(db);
 	auto &manager = ExecutionRegionManager::Get(*con.context);
 
-	ConfigureSljitForCoverage(con, false, true, true, 10000);
+	ConfigureSljitForCoverage(con, true, true, 10000);
 	REQUIRE_NO_FAIL(con.Query("SET disabled_optimizers='statistics_propagation'"));
 	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_bigint_case_aggregate_payload AS "
 	                          "SELECT i::BIGINT AS a, (i * 3 + 17)::BIGINT AS b, "
@@ -3304,7 +3304,7 @@ TEST_CASE("JIT typed-tree aggregate payloads preserve all-NULL branch results", 
 	Connection con(db);
 	auto &manager = ExecutionRegionManager::Get(*con.context);
 
-	ConfigureSljitForCoverage(con, false, true, true, 10000);
+	ConfigureSljitForCoverage(con, true, true, 10000);
 	REQUIRE_NO_FAIL(con.Query("SET disabled_optimizers='statistics_propagation'"));
 	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_typed_tree_sum_null_branch AS "
 	                          "SELECT i::BIGINT AS a FROM range(10000) tbl(i)"));
@@ -3343,7 +3343,7 @@ TEST_CASE("JIT generic BIGINT sum uses hugeint local accumulation", "[api][jit]"
 	Connection con(db);
 	auto &manager = ExecutionRegionManager::Get(*con.context);
 
-	ConfigureSljitForCoverage(con, false, true, true, 10000);
+	ConfigureSljitForCoverage(con, true, true, 10000);
 	REQUIRE_NO_FAIL(con.Query("SET disabled_optimizers='statistics_propagation'"));
 	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_bigint_sum_hugeint_local AS "
 	                          "SELECT i, 9223372036854775807::BIGINT AS v FROM range(4096) tbl(i)"));
@@ -3381,7 +3381,7 @@ TEST_CASE("JIT preserves stats-proven non-overflowing decimal arithmetic in expr
 	Connection con(db);
 	auto &manager = ExecutionRegionManager::Get(*con.context);
 
-	ConfigureSljitForCoverage(con, false, true, true, 10000);
+	ConfigureSljitForCoverage(con, true, true, 10000);
 	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_decimal_safe_aggregate_payload AS "
 	                          "SELECT i, CAST(i % 1000 AS DECIMAL(15,2)) AS d "
 	                          "FROM range(10000) tbl(i)"));
@@ -3414,7 +3414,7 @@ TEST_CASE("JIT fuses non-null multi-key perfect-hash aggregate payloads", "[api]
 	Connection con(db);
 	auto &manager = ExecutionRegionManager::Get(*con.context);
 
-	ConfigureSljitForCoverage(con, false, true, true, 10000);
+	ConfigureSljitForCoverage(con, true, true, 10000);
 	REQUIRE_NO_FAIL(con.Query("PRAGMA threads=1"));
 	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_multi_key_perfect_hash_payload("
 	                          "group_flag VARCHAR NOT NULL, group_status VARCHAR NOT NULL, "
@@ -3498,7 +3498,7 @@ TEST_CASE("JIT join-selected perfect-hash aggregate payloads survive selection v
 	Connection con(db);
 	auto &manager = ExecutionRegionManager::Get(*con.context);
 
-	ConfigureSljitForCoverage(con, false, true, true, 10000);
+	ConfigureSljitForCoverage(con, true, true, 10000);
 	REQUIRE_NO_FAIL(con.Query("PRAGMA threads=1"));
 	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_join_selected_perfect_hash_payload AS "
 	                          "SELECT (1995 + (i % 2))::INTEGER AS bucket_year, "
@@ -3568,7 +3568,7 @@ TEST_CASE("JIT generates single typed perfect-hash aggregate payloads", "[api][j
 	Connection con(db);
 	auto &manager = ExecutionRegionManager::Get(*con.context);
 
-	ConfigureSljitForCoverage(con, false, true, true, 10000);
+	ConfigureSljitForCoverage(con, true, true, 10000);
 	REQUIRE_NO_FAIL(con.Query("PRAGMA threads=1"));
 	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_single_typed_payload_l AS "
 	                          "SELECT i::BIGINT AS k, (i % 100)::BIGINT AS g, (i % 7)::BIGINT AS v "
@@ -3633,7 +3633,7 @@ TEST_CASE("JIT gates perfect-hash aggregate updates with generated source filter
 	Connection con(db);
 	auto &manager = ExecutionRegionManager::Get(*con.context);
 
-	ConfigureSljitForCoverage(con, false, true, true, 10000);
+	ConfigureSljitForCoverage(con, true, true, 10000);
 	REQUIRE_NO_FAIL(con.Query("PRAGMA threads=1"));
 	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_filtered_perfect_hash_payload AS "
 	                          "SELECT CASE WHEN i % 3 = 0 THEN 'A' WHEN i % 3 = 1 THEN 'N' ELSE 'R' END AS group_flag, "
@@ -3725,7 +3725,7 @@ TEST_CASE("JIT perfect hash keeps payload and group vector shapes independent", 
 	Connection con(db);
 	auto &manager = ExecutionRegionManager::Get(*con.context);
 
-	ConfigureSljitForCoverage(con, false, true, true, 10000);
+	ConfigureSljitForCoverage(con, true, true, 10000);
 	REQUIRE_NO_FAIL(con.Query("SET threads=4"));
 	auto db_path = TestCreatePath("jit_perfect_hash_independent_vector_shapes.db");
 	TestDeleteFile(db_path);
@@ -3791,7 +3791,7 @@ TEST_CASE("JIT perfect hash aggregate generates primitive decimal sum and count 
 	Connection con(db);
 	auto &manager = ExecutionRegionManager::Get(*con.context);
 
-	ConfigureSljitForCoverage(con, false, true, true, 10000);
+	ConfigureSljitForCoverage(con, true, true, 10000);
 	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_perfect_hash_count_star AS "
 	                          "SELECT (i % 4)::UTINYINT AS g1, (i % 3)::UTINYINT AS g2, "
 	                          "CAST(i % 100 AS DECIMAL(15,2)) AS v FROM range(100000) tbl(i)"));
@@ -3869,7 +3869,7 @@ TEST_CASE("JIT perfect hash direct payloads use their canonical combined source 
 	Connection con(db);
 	auto &manager = ExecutionRegionManager::Get(*con.context);
 
-	ConfigureSljitForCoverage(con, false, true, true, 10000);
+	ConfigureSljitForCoverage(con, true, true, 10000);
 	REQUIRE_NO_FAIL(con.Query("PRAGMA threads=1"));
 	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_perfect_hash_direct_payload_sources("
 	                          "qty_value DECIMAL(15,2) NOT NULL, group_flag VARCHAR NOT NULL, "
@@ -3978,7 +3978,7 @@ TEST_CASE("JIT perfect hash aggregate uses exact wide and double payload ABIs", 
 	Connection con(db);
 	auto &manager = ExecutionRegionManager::Get(*con.context);
 
-	ConfigureSljitForCoverage(con, false, true, true, 10000);
+	ConfigureSljitForCoverage(con, true, true, 10000);
 	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_perfect_hash_wide_payload AS "
 	                          "SELECT (i % 8)::UTINYINT AS g, "
 	                          "       CAST((i % 2001) - 1000 AS DECIMAL(15,2)) AS d, "
@@ -4022,7 +4022,7 @@ TEST_CASE("JIT perfect hash aggregate fuses computed smallint group expressions"
 	Connection con(db);
 	auto &manager = ExecutionRegionManager::Get(*con.context);
 
-	ConfigureSljitForCoverage(con, false, true, true, 10000);
+	ConfigureSljitForCoverage(con, true, true, 10000);
 	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_perfect_hash_smallint_group AS "
 	                          "SELECT i::BIGINT AS i FROM range(200000) tbl(i)"));
 	const string query = "SELECT i % 1000 AS key, sum(i * 31) AS value "
@@ -4077,7 +4077,7 @@ TEST_CASE("JIT hash aggregate cast-only keys use native state addresses", "[api]
 	Connection con(db);
 	auto &manager = ExecutionRegionManager::Get(*con.context);
 
-	ConfigureSljitForCoverage(con, false, true, true, 10000);
+	ConfigureSljitForCoverage(con, true, true, 10000);
 	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_hash_aggregate_cast_projection AS "
 	                          "SELECT i::BIGINT AS k, CAST(i % 100 AS DECIMAL(15,2)) AS v "
 	                          "FROM range(100000) tbl(i)"));
@@ -4149,7 +4149,7 @@ TEST_CASE("JIT combines grouped aggregate states without finalizing payload vect
 	REQUIRE_NO_FAIL(*reference);
 	REQUIRE(reference->GetValue(0, 0).ToString() == "200000");
 
-	ConfigureSljitForCoverageSettings(con, false, true, true, 10000);
+	ConfigureSljitForCoverageSettings(con, true, true, 10000);
 	ClearJitTrace(manager, true);
 	auto result = con.Query(query);
 	REQUIRE_NO_FAIL(*result);
@@ -4231,7 +4231,7 @@ TEST_CASE("JIT homogeneous aggregate-state combine preserves signed hugeint limi
 	auto reference = con.Query(query);
 	REQUIRE_NO_FAIL(*reference);
 
-	ConfigureSljitForCoverageSettings(con, false, true, true, 10000);
+	ConfigureSljitForCoverageSettings(con, true, true, 10000);
 	ClearJitTrace(manager, true);
 	auto result = con.Query(query);
 	REQUIRE_NO_FAIL(*result);
@@ -4269,7 +4269,7 @@ TEST_CASE("JIT retains finalized vectors for narrow grouped aggregate states", "
 	auto reference = con.Query(query);
 	REQUIRE_NO_FAIL(*reference);
 
-	ConfigureSljitForCoverageSettings(con, false, true, true, 10000);
+	ConfigureSljitForCoverageSettings(con, true, true, 10000);
 	ClearJitTrace(manager, true);
 	auto result = con.Query(query);
 	REQUIRE_NO_FAIL(*result);
@@ -4314,7 +4314,7 @@ TEST_CASE("JIT auto skips grouped hash aggregate address-only updates", "[api][j
 	Connection con(db);
 	auto &manager = ExecutionRegionManager::Get(*con.context);
 
-	ConfigureSljit(con, "auto", false, true, false, 10000);
+	ConfigureSljit(con, "auto", true, false, 10000);
 	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_auto_hash_aggregate_small AS "
 	                          "SELECT i::BIGINT AS k, (i % 17)::BIGINT AS v FROM range(10000) tbl(i)"));
 
@@ -4345,7 +4345,7 @@ TEST_CASE("JIT auto planner cost does not treat filtered hash aggregates as pure
 	Connection con(db);
 	auto &manager = ExecutionRegionManager::Get(*con.context);
 
-	ConfigureSljit(con, "auto", false, true, false, 10000);
+	ConfigureSljit(con, "auto", true, false, 10000);
 	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_auto_hash_aggregate_filtered AS "
 	                          "SELECT i::BIGINT AS k, (i % 17)::BIGINT AS v FROM range(1000000) tbl(i)"));
 

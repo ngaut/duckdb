@@ -14,10 +14,6 @@
       "value": "auto"
     },
     {
-      "name": "jit_verify",
-      "value": "true"
-    },
-    {
       "name": "jit_event_log_size",
       "value": "10000"
     },

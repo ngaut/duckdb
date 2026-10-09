@@ -1957,8 +1957,8 @@ struct JitDebugForceEntryDeferSetting {
 	using RETURN_TYPE = bool;
 	static constexpr const char *Name = "jit_debug_force_entry_defer";
 	static constexpr const char *Description =
-	    "Debug: compiled full-pipeline kernels defer to the vectorized continuation at kernel entry before any source "
-	    "fetch, exercising the entry-deferral handoff used by not-ready native runtime states";
+	    "Debug: compiled full-pipeline kernels defer at entry, before any source fetch, so the pipeline runs "
+	    "vectorized as it does when a native operator the kernel binds is not ready";
 	static constexpr const char *InputType = "BOOLEAN";
 	static constexpr bool IsDebug = false;
 	static constexpr bool IsDeprecated = false;
@@ -2038,19 +2038,6 @@ struct JitTraceVectorizedBaselineSetting {
 	static constexpr const char *Name = "jit_trace_vectorized_baseline";
 	static constexpr const char *Description = "Build execution-region plans but execute vectorized pipelines and "
 	                                           "record per-region baseline runtime for comparison";
-	static constexpr const char *InputType = "BOOLEAN";
-	static constexpr bool IsDebug = false;
-	static constexpr bool IsDeprecated = false;
-	static constexpr const char *DefaultValue = "false";
-	static constexpr SettingScopeTarget Scope = SettingScopeTarget::LOCAL_DEFAULT;
-	static constexpr idx_t SettingIndex = NEXT_SETTING_INDEX();
-};
-
-struct JitVerifySetting {
-	using RETURN_TYPE = bool;
-	static constexpr const char *Name = "jit_verify";
-	static constexpr const char *Description =
-	    "Verify compiled-vectorized output against the reference DuckDB execution path";
 	static constexpr const char *InputType = "BOOLEAN";
 	static constexpr bool IsDebug = false;
 	static constexpr bool IsDeprecated = false;

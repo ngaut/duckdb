@@ -727,7 +727,6 @@ def make_args(args: argparse.Namespace) -> SimpleNamespace:
         threads=args.threads,
         event_log_size=args.event_log_size,
         trace_runtime=args.trace_runtime,
-        jit_verify=False,
         jit_cbo_setting=args.jit_cbo_setting,
     )
 

@@ -429,7 +429,6 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--event-log-size", type=int, default=0)
     parser.add_argument("--trace-decisions", action=argparse.BooleanOptionalAction, default=False)
     parser.add_argument("--trace-runtime", action=argparse.BooleanOptionalAction, default=False)
-    parser.add_argument("--jit-verify", action="store_true")
     parser.add_argument(
         "--jit-cbo-setting",
         action="append",

@@ -22,7 +22,6 @@ public:
 	static bool TraceDecisions(ClientContext &context);
 	static bool TraceRuntime(ClientContext &context);
 	static bool TraceVectorizedBaseline(ClientContext &context);
-	static bool Verify(ClientContext &context);
 	static bool ShouldRecordDetailedTelemetry(ClientContext &context);
 	static bool ShouldRecordDecisionTelemetry(ClientContext &context);
 	static idx_t EventLogSize(DatabaseInstance &db);

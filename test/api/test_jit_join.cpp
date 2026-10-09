@@ -7,7 +7,7 @@ TEST_CASE("JIT hash join build selected ingress compiles only inside generated f
 	Connection con(db);
 	auto &manager = ExecutionRegionManager::Get(*con.context);
 
-	ConfigureSljitForCoverage(con, false, true, true, 10000);
+	ConfigureSljitForCoverage(con, true, true, 10000);
 	// Exercise backend-owned filtered projection ingress into the build protocol.
 	REQUIRE_NO_FAIL(con.Query("SET jit_cbo_generated_stage_benefit=256"));
 	string lhs_key = "i";
@@ -79,7 +79,7 @@ TEST_CASE("JIT CBO does not charge generated hash-build sink protocol before bac
 	Connection con(db);
 	auto &manager = ExecutionRegionManager::Get(*con.context);
 
-	ConfigureSljit(con, "auto", false, false, false, 10000);
+	ConfigureSljit(con, "auto", false, false, 10000);
 	ConfigureJitDecisionTrace(con);
 	ConfigureJitCoverageCbo(con);
 	REQUIRE_NO_FAIL(con.Query("SET jit_cbo_materialization_elision_benefit=0"));
@@ -113,7 +113,7 @@ TEST_CASE("JIT composes DuckDB string-set scans with direct hash build", "[api][
 	Connection con(db);
 	auto &manager = ExecutionRegionManager::Get(*con.context);
 
-	ConfigureSljitForCoverage(con, false, true, true, 10000);
+	ConfigureSljitForCoverage(con, true, true, 10000);
 	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_string_build_l AS "
 	                          "SELECT i::BIGINT AS k FROM range(10000) tbl(i)"));
 	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_string_build_r AS "
@@ -155,7 +155,7 @@ TEST_CASE("JIT composes mixed storage filters with direct hash build", "[api][ji
 	Connection con(db);
 	auto &manager = ExecutionRegionManager::Get(*con.context);
 
-	ConfigureSljitForCoverage(con, false, true, true, 10000);
+	ConfigureSljitForCoverage(con, true, true, 10000);
 	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_mixed_build_l AS "
 	                          "SELECT i::BIGINT AS k FROM range(10000) tbl(i)"));
 	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_mixed_build_r AS "
@@ -191,7 +191,7 @@ TEST_CASE("JIT executes exact-filter probe to hash-build primitive sequences", "
 	Connection con(db);
 	auto &manager = ExecutionRegionManager::Get(*con.context);
 
-	ConfigureSljitForCoverage(con, false, true, true, 10000);
+	ConfigureSljitForCoverage(con, true, true, 10000);
 	REQUIRE_NO_FAIL(con.Query("SET threads=1"));
 	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_exact_build_fact AS "
 	                          "SELECT (i % 50000)::INTEGER AS filter_key, i::BIGINT AS join_key "
@@ -251,7 +251,7 @@ TEST_CASE("JIT composes exact regular-prefix probes with projected hash builds",
 	Connection con(db);
 	auto &manager = ExecutionRegionManager::Get(*con.context);
 
-	ConfigureSljitForCoverage(con, false, true, true, 10000);
+	ConfigureSljitForCoverage(con, true, true, 10000);
 	REQUIRE_NO_FAIL(con.Query("SET threads=1"));
 	REQUIRE_NO_FAIL(con.Query("SET disabled_optimizers='join_order,build_side_probe_side'"));
 	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_regular_exact_build_fact AS "
@@ -303,7 +303,7 @@ TEST_CASE("JIT join ungrouped aggregates over row and dictionary RHS storage mat
 	DuckDB db;
 	Connection con(db);
 
-	ConfigureSljitForCoverage(con, false, false, true, 10000, 4);
+	ConfigureSljitForCoverage(con, false, true, 10000, 4);
 	REQUIRE_NO_FAIL(con.Query("SET perfect_ht_threshold=0"));
 	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_direct_rhs_aggregate_fact AS "
 	                          "SELECT i::BIGINT AS filter_key, (i * 1000003)::BIGINT AS k, "
@@ -353,7 +353,7 @@ TEST_CASE("JIT exact prefix membership elides only equivalent unique hash probes
 	Connection con(db);
 	auto &manager = ExecutionRegionManager::Get(*con.context);
 
-	ConfigureSljitForCoverage(con, false, true, true, 10000);
+	ConfigureSljitForCoverage(con, true, true, 10000);
 	REQUIRE_NO_FAIL(con.Query("SET threads=1"));
 	REQUIRE_NO_FAIL(con.Query("SET perfect_ht_threshold=0"));
 	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_exact_prefix_probe AS "
@@ -429,7 +429,7 @@ TEST_CASE("JIT carries exact prefix proof through selected output filters", "[ap
 	Connection con(db);
 	auto &manager = ExecutionRegionManager::Get(*con.context);
 
-	ConfigureSljitForCoverage(con, false, true, true, 10000);
+	ConfigureSljitForCoverage(con, true, true, 10000);
 	REQUIRE_NO_FAIL(con.Query("SET threads=1"));
 	REQUIRE_NO_FAIL(con.Query("SET perfect_ht_threshold=0"));
 	REQUIRE_NO_FAIL(con.Query("SET disabled_optimizers='filter_pushdown'"));
@@ -491,7 +491,7 @@ TEST_CASE("JIT preserves source layout through generated filter projection repai
 	Connection con(db);
 	auto &manager = ExecutionRegionManager::Get(*con.context);
 
-	ConfigureSljitForCoverage(con, false, true, true, 10000);
+	ConfigureSljitForCoverage(con, true, true, 10000);
 	REQUIRE_NO_FAIL(con.Query("SET threads=1"));
 	REQUIRE_NO_FAIL(con.Query("SET perfect_ht_threshold=0"));
 	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_source_repair_fact AS "
@@ -542,7 +542,7 @@ TEST_CASE("JIT hash join build sink consumes selected probe output without nativ
 	Connection con(db);
 	auto &manager = ExecutionRegionManager::Get(*con.context);
 
-	ConfigureSljitForCoverage(con, false, true, true, 10000);
+	ConfigureSljitForCoverage(con, true, true, 10000);
 	REQUIRE_NO_FAIL(con.Query("SET threads=1"));
 	REQUIRE_NO_FAIL(con.Query("SET jit_cbo_startup_base_cost=0"));
 	REQUIRE_NO_FAIL(con.Query("SET jit_cbo_startup_margin_basis_points=0"));
@@ -587,7 +587,7 @@ TEST_CASE("JIT primitive sequence composes projection filter projection before h
 	Connection con(db);
 	auto &manager = ExecutionRegionManager::Get(*con.context);
 
-	ConfigureSljitForCoverage(con, false, true, true, 10000);
+	ConfigureSljitForCoverage(con, true, true, 10000);
 	// Exercise the build protocol from generated expression work without over-crediting protocol stages.
 	REQUIRE_NO_FAIL(con.Query("SET jit_cbo_generated_stage_benefit=256"));
 	REQUIRE_NO_FAIL(con.Query("SET disabled_optimizers='filter_pushdown,expression_rewriter'"));
@@ -634,7 +634,7 @@ TEST_CASE("JIT composes selected source filters before hash build without delega
 	Connection con(db);
 	auto &manager = ExecutionRegionManager::Get(*con.context);
 
-	ConfigureSljitForCoverage(con, false, true, true, 10000);
+	ConfigureSljitForCoverage(con, true, true, 10000);
 	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_selected_build_l AS "
 	                          "SELECT i::BIGINT AS k FROM range(4096) tbl(i)"));
 	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_selected_build_r AS "
@@ -663,7 +663,7 @@ TEST_CASE("JIT CBO does not skip low-value hash-build sink pipelines before back
 	Connection con(db);
 	auto &manager = ExecutionRegionManager::Get(*con.context);
 
-	ConfigureSljitForCoverage(con, false, false, false, 10000);
+	ConfigureSljitForCoverage(con, false, false, 10000);
 	ConfigureJitDecisionTrace(con);
 	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_hash_bodyless_fact AS "
 	                          "SELECT i::BIGINT AS i, (i % 32)::BIGINT AS g, "
@@ -694,7 +694,7 @@ TEST_CASE("JIT CBO does not cost nested-loop join protocol as native join work",
 	Connection con(db);
 	auto &manager = ExecutionRegionManager::Get(*con.context);
 
-	ConfigureSljit(con, "auto", false, false, false, 10000);
+	ConfigureSljit(con, "auto", false, false, 10000);
 	ConfigureJitDecisionTrace(con);
 	REQUIRE_NO_FAIL(con.Query("SET nested_loop_join_threshold=1000000"));
 	REQUIRE_NO_FAIL(con.Query("SET merge_join_threshold=1000000"));
@@ -727,7 +727,7 @@ TEST_CASE("JIT auto costs hash join regions through planner cost selection", "[a
 	Connection con(db);
 	auto &manager = ExecutionRegionManager::Get(*con.context);
 
-	ConfigureSljit(con, "auto", false, true, false, 10000);
+	ConfigureSljit(con, "auto", true, false, 10000);
 	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_auto_hash_join_l AS "
 	                          "SELECT i::BIGINT AS k, i::BIGINT AS v FROM range(10000) tbl(i)"));
 	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_auto_hash_join_r AS "
@@ -777,7 +777,7 @@ TEST_CASE("JIT hash join probe generates native probe with append sink", "[api][
 	Connection con(db);
 	auto &manager = ExecutionRegionManager::Get(*con.context);
 
-	ConfigureSljitForCoverage(con, false, true, true, 10000);
+	ConfigureSljitForCoverage(con, true, true, 10000);
 	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_hash_probe_l AS "
 	                          "SELECT ((i % 32) * 1000003)::BIGINT AS k, i::BIGINT AS v "
 	                          "FROM range(65536) tbl(i)"));
@@ -855,7 +855,7 @@ TEST_CASE("JIT hash join lazy code is published once across parallel pipeline ex
 	Connection con(db);
 	auto &manager = ExecutionRegionManager::Get(*con.context);
 
-	ConfigureSljitForCoverage(con, false, false, true, 10000, 12);
+	ConfigureSljitForCoverage(con, false, true, 10000, 12);
 	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_parallel_lazy_probe_l AS "
 	                          "SELECT CASE WHEN i % 1024 = 0 THEN NULL ELSE ((i % 32) * 1000003)::BIGINT END AS k, "
 	                          "i::BIGINT AS v FROM range(4194304) tbl(i)"));
@@ -897,7 +897,7 @@ TEST_CASE("JIT hash join probe preserves selected reference source view", "[api]
 	Connection con(db);
 	auto &manager = ExecutionRegionManager::Get(*con.context);
 
-	ConfigureSljitForCoverage(con, false, true, true, 10000);
+	ConfigureSljitForCoverage(con, true, true, 10000);
 	REQUIRE_NO_FAIL(con.Query("SET jit_cbo_generated_stage_benefit=4096"));
 	REQUIRE_NO_FAIL(con.Query("SET jit_cbo_materialization_elision_benefit=4096"));
 	REQUIRE_NO_FAIL(con.Query("SET jit_cbo_native_operator_stage_benefit=1048576"));
@@ -948,7 +948,7 @@ TEST_CASE("JIT hash join filter ungrouped aggregate avoids final join materializ
 	Connection con(db);
 	auto &manager = ExecutionRegionManager::Get(*con.context);
 
-	ConfigureSljitForCoverage(con, false, true, true, 10000);
+	ConfigureSljitForCoverage(con, true, true, 10000);
 	REQUIRE_NO_FAIL(con.Query("SET threads=1"));
 	REQUIRE_NO_FAIL(con.Query("SET perfect_ht_threshold=0"));
 	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_direct_filtered_agg_l AS "
@@ -998,7 +998,7 @@ TEST_CASE("JIT multi-join ungrouped aggregate uses remapped combined payload sou
 	Connection con(db);
 	auto &manager = ExecutionRegionManager::Get(*con.context);
 
-	ConfigureSljitForCoverage(con, false, true, true, 10000);
+	ConfigureSljitForCoverage(con, true, true, 10000);
 	REQUIRE_NO_FAIL(con.Query("SET threads=1"));
 	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_exact_payload_fact AS "
 	                          "SELECT (i % 10000)::INTEGER AS filter_key, i::BIGINT AS join_key, "
@@ -1038,7 +1038,7 @@ TEST_CASE("JIT perfect hash join materializes selection-only output before post-
 	Connection con(db);
 	auto &manager = ExecutionRegionManager::Get(*con.context);
 
-	ConfigureSljitForCoverage(con, false, true, true, 10000);
+	ConfigureSljitForCoverage(con, true, true, 10000);
 	REQUIRE_NO_FAIL(con.Query("SET threads=1"));
 	REQUIRE_NO_FAIL(con.Query("SET perfect_ht_threshold=10"));
 	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_perfect_post_join_fact AS "
@@ -1098,7 +1098,7 @@ TEST_CASE("JIT perfect hash join grouped aggregate direct-projects input-vector 
 	Connection con(db);
 	auto &manager = ExecutionRegionManager::Get(*con.context);
 
-	ConfigureSljitForCoverage(con, false, true, true, 10000);
+	ConfigureSljitForCoverage(con, true, true, 10000);
 	REQUIRE_NO_FAIL(con.Query("SET threads=1"));
 	REQUIRE_NO_FAIL(con.Query("SET perfect_ht_threshold=10"));
 	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_perfect_direct_agg_fact AS "
@@ -1149,7 +1149,7 @@ TEST_CASE("JIT perfect hash join grouped aggregate composes cast-chain input-vec
 	Connection con(db);
 	auto &manager = ExecutionRegionManager::Get(*con.context);
 
-	ConfigureSljitForCoverage(con, false, true, true, 10000);
+	ConfigureSljitForCoverage(con, true, true, 10000);
 	REQUIRE_NO_FAIL(con.Query("SET threads=1"));
 	REQUIRE_NO_FAIL(con.Query("SET perfect_ht_threshold=10"));
 	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_perfect_cast_direct_agg_fact AS "
@@ -1200,7 +1200,7 @@ TEST_CASE("JIT perfect hash probe directly consumes complementary string aggrega
 	Connection con(db);
 	auto &manager = ExecutionRegionManager::Get(*con.context);
 
-	ConfigureSljitForCoverage(con, false, true, true, 10000);
+	ConfigureSljitForCoverage(con, true, true, 10000);
 	REQUIRE_NO_FAIL(con.Query("SET threads=4"));
 	REQUIRE_NO_FAIL(con.Query("SET perfect_ht_threshold=10"));
 	REQUIRE_NO_FAIL(con.Query("SET disabled_optimizers='join_order,build_side_probe_side,partial_aggregate_pushdown'"));
@@ -1434,7 +1434,7 @@ TEST_CASE("JIT hash join grouped aggregate proves probe-key casts from matched b
 	Connection con(db);
 	auto &manager = ExecutionRegionManager::Get(*con.context);
 
-	ConfigureSljitForCoverage(con, false, true, true, 10000);
+	ConfigureSljitForCoverage(con, true, true, 10000);
 	REQUIRE_NO_FAIL(con.Query("SET threads=1"));
 	REQUIRE_NO_FAIL(con.Query("SET perfect_ht_threshold=0"));
 	REQUIRE_NO_FAIL(con.Query("SET disabled_optimizers='join_order,build_side_probe_side,partial_aggregate_pushdown,"
@@ -1495,7 +1495,7 @@ TEST_CASE("JIT row-pointer aggregate accepts identity-cast build-side group keys
 	Connection con(db);
 	auto &manager = ExecutionRegionManager::Get(*con.context);
 
-	ConfigureSljitForCoverage(con, false, true, true, 10000);
+	ConfigureSljitForCoverage(con, true, true, 10000);
 	REQUIRE_NO_FAIL(con.Query("SET threads=1"));
 	REQUIRE_NO_FAIL(con.Query("SET perfect_ht_threshold=0"));
 	REQUIRE_NO_FAIL(con.Query("SET disabled_optimizers='expression_rewriter,join_order,build_side_probe_side,"
@@ -1551,7 +1551,7 @@ TEST_CASE("JIT join grouped aggregate direct-projects probe-side grouped keys", 
 	Connection con(db);
 	auto &manager = ExecutionRegionManager::Get(*con.context);
 
-	ConfigureSljitForCoverage(con, false, true, true, 10000);
+	ConfigureSljitForCoverage(con, true, true, 10000);
 	REQUIRE_NO_FAIL(con.Query("PRAGMA threads=1"));
 	REQUIRE_NO_FAIL(con.Query("SET perfect_ht_threshold=0"));
 	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_direct_post_join_l AS "
@@ -1604,7 +1604,7 @@ TEST_CASE("JIT join grouped aggregate direct-projects split probe-side keys", "[
 	Connection con(db);
 	auto &manager = ExecutionRegionManager::Get(*con.context);
 
-	ConfigureSljitForCoverage(con, false, true, true, 10000);
+	ConfigureSljitForCoverage(con, true, true, 10000);
 	REQUIRE_NO_FAIL(con.Query("PRAGMA threads=1"));
 	REQUIRE_NO_FAIL(con.Query("SET perfect_ht_threshold=0"));
 	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_split_payload_l AS "
@@ -1656,7 +1656,7 @@ TEST_CASE("JIT join grouped aggregate direct-projects RHS keys", "[api][jit]") {
 	Connection con(db);
 	auto &manager = ExecutionRegionManager::Get(*con.context);
 
-	ConfigureSljitForCoverage(con, false, true, true, 10000);
+	ConfigureSljitForCoverage(con, true, true, 10000);
 	REQUIRE_NO_FAIL(con.Query("PRAGMA threads=1"));
 	REQUIRE_NO_FAIL(con.Query("SET perfect_ht_threshold=0"));
 	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_row_pointer_group_l AS "
@@ -1716,7 +1716,7 @@ TEST_CASE("JIT row-pointer grouped aggregate separates leading-key hash collisio
 	Connection con(db);
 	auto &manager = ExecutionRegionManager::Get(*con.context);
 
-	ConfigureSljitForCoverage(con, false, true, true, 10000);
+	ConfigureSljitForCoverage(con, true, true, 10000);
 	REQUIRE_NO_FAIL(con.Query("PRAGMA threads=1"));
 	REQUIRE_NO_FAIL(con.Query("SET perfect_ht_threshold=0"));
 	REQUIRE_NO_FAIL(con.Query("SET disabled_optimizers='join_order,build_side_probe_side,partial_aggregate_pushdown,"
@@ -1773,7 +1773,7 @@ TEST_CASE("JIT row-pointer grouped aggregate preaggregates consecutive descripto
 	Connection con(db);
 	auto &manager = ExecutionRegionManager::Get(*con.context);
 
-	ConfigureSljitForCoverage(con, false, true, true, 10000);
+	ConfigureSljitForCoverage(con, true, true, 10000);
 	REQUIRE_NO_FAIL(con.Query("PRAGMA threads=1"));
 	REQUIRE_NO_FAIL(con.Query("SET perfect_ht_threshold=0"));
 	REQUIRE_NO_FAIL(con.Query("SET disabled_optimizers='join_order,build_side_probe_side,partial_aggregate_pushdown,"
@@ -1829,7 +1829,7 @@ TEST_CASE("JIT row-pointer grouped aggregate preaggregates mixed input-vector de
 	Connection con(db);
 	auto &manager = ExecutionRegionManager::Get(*con.context);
 
-	ConfigureSljitForCoverage(con, false, true, true, 10000);
+	ConfigureSljitForCoverage(con, true, true, 10000);
 	REQUIRE_NO_FAIL(con.Query("PRAGMA threads=1"));
 	REQUIRE_NO_FAIL(con.Query("SET perfect_ht_threshold=0"));
 	REQUIRE_NO_FAIL(con.Query("SET disabled_optimizers='join_order,build_side_probe_side,partial_aggregate_pushdown,"
@@ -1886,7 +1886,7 @@ TEST_CASE("JIT fuses selected transformed groups into the hash probe consumer", 
 	Connection con(db);
 	auto &manager = ExecutionRegionManager::Get(*con.context);
 
-	ConfigureSljitForCoverage(con, false, true, true, 10000);
+	ConfigureSljitForCoverage(con, true, true, 10000);
 	REQUIRE_NO_FAIL(con.Query("PRAGMA threads=1"));
 	REQUIRE_NO_FAIL(con.Query("SET perfect_ht_threshold=0"));
 	REQUIRE_NO_FAIL(con.Query("SET disabled_optimizers='filter_pushdown,join_order,build_side_probe_side,"
@@ -1957,7 +1957,7 @@ TEST_CASE("JIT adaptively hashes wide compressed complementary groups", "[api][j
 	Connection con(db);
 	auto &manager = ExecutionRegionManager::Get(*con.context);
 
-	ConfigureSljitForCoverage(con, false, true, true, 10000);
+	ConfigureSljitForCoverage(con, true, true, 10000);
 	REQUIRE_NO_FAIL(con.Query("PRAGMA threads=1"));
 	REQUIRE_NO_FAIL(con.Query("SET perfect_ht_threshold=0"));
 	REQUIRE_NO_FAIL(con.Query("SET disabled_optimizers='join_order,build_side_probe_side,partial_aggregate_pushdown'"));
@@ -2029,7 +2029,7 @@ TEST_CASE("JIT preaggregates probe groups with compressed build-side complementa
 	Connection con(db);
 	auto &manager = ExecutionRegionManager::Get(*con.context);
 
-	ConfigureSljitForCoverage(con, false, true, true, 10000);
+	ConfigureSljitForCoverage(con, true, true, 10000);
 	REQUIRE_NO_FAIL(con.Query("PRAGMA threads=1"));
 	REQUIRE_NO_FAIL(con.Query("SET perfect_ht_threshold=0"));
 	REQUIRE_NO_FAIL(con.Query("SET disabled_optimizers='join_order,build_side_probe_side,partial_aggregate_pushdown'"));
@@ -2095,7 +2095,7 @@ TEST_CASE("JIT probes selected BIGINT keys through proven INTEGER narrowing", "[
 	Connection con(db);
 	auto &manager = ExecutionRegionManager::Get(*con.context);
 
-	ConfigureSljitForCoverage(con, false, true, true, 10000);
+	ConfigureSljitForCoverage(con, true, true, 10000);
 	REQUIRE_NO_FAIL(con.Query("PRAGMA threads=1"));
 	REQUIRE_NO_FAIL(con.Query("SET perfect_ht_threshold=0"));
 	auto db_path = TestCreatePath("jit_unchecked_narrowing_probe.db");
@@ -2175,7 +2175,7 @@ TEST_CASE("JIT probes selected BIGINT keys through proven INTEGER narrowing", "[
 	REQUIRE_NO_FAIL(con.Query("SET jit_policy='off'"));
 	auto flat_reference = con.Query(flat_query);
 	REQUIRE_NO_FAIL(*flat_reference);
-	ConfigureSljitForCoverageSettings(con, false, true, true, 10000);
+	ConfigureSljitForCoverageSettings(con, true, true, 10000);
 	ClearJitTrace(manager, true);
 	auto flat_result = con.Query(flat_query);
 	REQUIRE_NO_FAIL(*flat_result);
@@ -2207,7 +2207,7 @@ TEST_CASE("JIT probes selected BIGINT keys through proven INTEGER narrowing", "[
 	auto range_reference = con.Query(range_query);
 	REQUIRE_NO_FAIL(*range_reference);
 	REQUIRE(range_reference->GetValue(0, 0).ToString() == "2");
-	ConfigureSljitForCoverageSettings(con, false, true, true, 10000);
+	ConfigureSljitForCoverageSettings(con, true, true, 10000);
 	ClearJitTrace(manager, true);
 	auto range_result = con.Query(range_query);
 	REQUIRE_NO_FAIL(*range_result);
@@ -2236,7 +2236,7 @@ TEST_CASE("JIT join grouped aggregate direct-projects variable-width RHS keys", 
 	Connection con(db);
 	auto &manager = ExecutionRegionManager::Get(*con.context);
 
-	ConfigureSljitForCoverage(con, false, true, true, 10000);
+	ConfigureSljitForCoverage(con, true, true, 10000);
 	REQUIRE_NO_FAIL(con.Query("PRAGMA threads=1"));
 	REQUIRE_NO_FAIL(con.Query("SET perfect_ht_threshold=0"));
 	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_varwidth_row_pointer_group_l AS "
@@ -2317,7 +2317,7 @@ TEST_CASE("JIT mapped join casts feed dense grouped counts", "[api][jit]") {
 	Connection con(db);
 	auto &manager = ExecutionRegionManager::Get(*con.context);
 
-	ConfigureSljitForCoverage(con, false, true, true, 10000);
+	ConfigureSljitForCoverage(con, true, true, 10000);
 	REQUIRE_NO_FAIL(con.Query("PRAGMA threads=1"));
 	REQUIRE_NO_FAIL(con.Query("SET perfect_ht_threshold=0"));
 	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_mapped_dense_customer AS "
@@ -2406,7 +2406,7 @@ TEST_CASE("JIT two-join grouped aggregate composes mixed VARCHAR projection chai
 	Connection con(db);
 	auto &manager = ExecutionRegionManager::Get(*con.context);
 
-	ConfigureSljitForCoverage(con, false, true, true, 10000);
+	ConfigureSljitForCoverage(con, true, true, 10000);
 	REQUIRE_NO_FAIL(con.Query("PRAGMA threads=1"));
 	REQUIRE_NO_FAIL(con.Query("SET perfect_ht_threshold=0"));
 	REQUIRE_NO_FAIL(con.Query("SET disabled_optimizers='join_order,build_side_probe_side'"));
@@ -2467,7 +2467,7 @@ TEST_CASE("JIT row-pointer grouped aggregate probes compressed string keys as si
 	Connection con(db);
 	auto &manager = ExecutionRegionManager::Get(*con.context);
 
-	ConfigureSljitForCoverage(con, false, true, true, 10000);
+	ConfigureSljitForCoverage(con, true, true, 10000);
 	REQUIRE_NO_FAIL(con.Query("PRAGMA threads=1"));
 	REQUIRE_NO_FAIL(con.Query("SET perfect_ht_threshold=0"));
 	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_row_pointer_string_l AS "
@@ -2516,7 +2516,7 @@ TEST_CASE("JIT two-join grouped aggregate uses selected projection aggregate bac
 	Connection con(db);
 	auto &manager = ExecutionRegionManager::Get(*con.context);
 
-	ConfigureSljitForCoverage(con, false, true, true, 10000);
+	ConfigureSljitForCoverage(con, true, true, 10000);
 	REQUIRE_NO_FAIL(con.Query("PRAGMA threads=1"));
 	REQUIRE_NO_FAIL(con.Query("SET perfect_ht_threshold=0"));
 	REQUIRE_NO_FAIL(con.Query("SET disabled_optimizers='join_order,build_side_probe_side'"));
@@ -2589,7 +2589,7 @@ TEST_CASE("JIT two-join aggregate composes second-join projection chain", "[api]
 	Connection con(db);
 	auto &manager = ExecutionRegionManager::Get(*con.context);
 
-	ConfigureSljitForCoverage(con, false, true, true, 10000);
+	ConfigureSljitForCoverage(con, true, true, 10000);
 	REQUIRE_NO_FAIL(con.Query("PRAGMA threads=1"));
 	REQUIRE_NO_FAIL(con.Query("SET perfect_ht_threshold=0"));
 	REQUIRE_NO_FAIL(con.Query("SET disabled_optimizers='join_order,build_side_probe_side'"));
@@ -2654,7 +2654,7 @@ TEST_CASE("JIT multi-join aggregate composes generic join-prefix projection chai
 	Connection con(db);
 	auto &manager = ExecutionRegionManager::Get(*con.context);
 
-	ConfigureSljitForCoverage(con, false, true, true, 10000);
+	ConfigureSljitForCoverage(con, true, true, 10000);
 	REQUIRE_NO_FAIL(con.Query("PRAGMA threads=1"));
 	REQUIRE_NO_FAIL(con.Query("SET perfect_ht_threshold=0"));
 	REQUIRE_NO_FAIL(con.Query("SET disabled_optimizers='join_order,build_side_probe_side'"));
@@ -2728,7 +2728,7 @@ TEST_CASE("JIT single mark filter aggregate uses projected source grouped update
 	Connection con(db);
 	auto &manager = ExecutionRegionManager::Get(*con.context);
 
-	ConfigureSljitForCoverage(con, false, true, true, 10000);
+	ConfigureSljitForCoverage(con, true, true, 10000);
 	REQUIRE_NO_FAIL(con.Query("PRAGMA threads=1"));
 	REQUIRE_NO_FAIL(con.Query("SET perfect_ht_threshold=0"));
 	REQUIRE_NO_FAIL(con.Query("SET disabled_optimizers='join_order,build_side_probe_side'"));
@@ -2785,7 +2785,7 @@ TEST_CASE("JIT mark match filter emits LHS selected boundary", "[api][jit]") {
 	Connection con(db);
 	auto &manager = ExecutionRegionManager::Get(*con.context);
 
-	ConfigureSljitForCoverage(con, false, true, true, 10000);
+	ConfigureSljitForCoverage(con, true, true, 10000);
 	REQUIRE_NO_FAIL(con.Query("PRAGMA threads=1"));
 	REQUIRE_NO_FAIL(con.Query("SET perfect_ht_threshold=0"));
 	REQUIRE_NO_FAIL(con.Query("SET disabled_optimizers='join_order,build_side_probe_side'"));
@@ -2843,7 +2843,7 @@ TEST_CASE("JIT mark match count-star preaggregates compressed string groups", "[
 	Connection con(db);
 	auto &manager = ExecutionRegionManager::Get(*con.context);
 
-	ConfigureSljitForCoverage(con, false, true, true, 10000);
+	ConfigureSljitForCoverage(con, true, true, 10000);
 	REQUIRE_NO_FAIL(con.Query("PRAGMA threads=1"));
 	REQUIRE_NO_FAIL(con.Query("SET perfect_ht_threshold=0"));
 	REQUIRE_NO_FAIL(con.Query("SET disabled_optimizers='join_order,build_side_probe_side'"));
@@ -2913,7 +2913,7 @@ TEST_CASE("JIT mark filter aggregate uses grouped primitive selected view", "[ap
 	Connection con(db);
 	auto &manager = ExecutionRegionManager::Get(*con.context);
 
-	ConfigureSljitForCoverage(con, false, true, true, 10000);
+	ConfigureSljitForCoverage(con, true, true, 10000);
 	REQUIRE_NO_FAIL(con.Query("PRAGMA threads=1"));
 	REQUIRE_NO_FAIL(con.Query("SET perfect_ht_threshold=0"));
 	REQUIRE_NO_FAIL(con.Query("SET disabled_optimizers='join_order,build_side_probe_side'"));
@@ -2971,7 +2971,7 @@ TEST_CASE("JIT mark filter projection preserves selected nonmatches", "[api][jit
 	Connection con(db);
 	auto &manager = ExecutionRegionManager::Get(*con.context);
 
-	ConfigureSljitForCoverage(con, false, true, true, 10000);
+	ConfigureSljitForCoverage(con, true, true, 10000);
 	REQUIRE_NO_FAIL(con.Query("PRAGMA threads=1"));
 	REQUIRE_NO_FAIL(con.Query("SET perfect_ht_threshold=0"));
 	REQUIRE_NO_FAIL(con.Query("SET disabled_optimizers='join_order,build_side_probe_side'"));
@@ -3025,7 +3025,7 @@ TEST_CASE("JIT mark filter reference aggregate slices selected projection", "[ap
 	Connection con(db);
 	auto &manager = ExecutionRegionManager::Get(*con.context);
 
-	ConfigureSljitForCoverage(con, false, true, true, 10000);
+	ConfigureSljitForCoverage(con, true, true, 10000);
 	REQUIRE_NO_FAIL(con.Query("PRAGMA threads=1"));
 	REQUIRE_NO_FAIL(con.Query("SET perfect_ht_threshold=0"));
 	REQUIRE_NO_FAIL(con.Query("SET disabled_optimizers='join_order,build_side_probe_side'"));
@@ -3075,7 +3075,7 @@ TEST_CASE("JIT two-projection between-join chain composes primitive boundaries",
 	Connection con(db);
 	auto &manager = ExecutionRegionManager::Get(*con.context);
 
-	ConfigureSljitForCoverage(con, false, true, true, 10000);
+	ConfigureSljitForCoverage(con, true, true, 10000);
 	REQUIRE_NO_FAIL(con.Query("PRAGMA threads=1"));
 	REQUIRE_NO_FAIL(con.Query("SET perfect_ht_threshold=0"));
 	REQUIRE_NO_FAIL(con.Query("SET disabled_optimizers='join_order,build_side_probe_side'"));
@@ -3145,7 +3145,7 @@ TEST_CASE("JIT hash join pair probe preserves bloom-filtered sparse misses", "[a
 	Connection con(db);
 	auto &manager = ExecutionRegionManager::Get(*con.context);
 
-	ConfigureSljitForCoverage(con, false, true, true, 10000);
+	ConfigureSljitForCoverage(con, true, true, 10000);
 	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_hash_pair_bloom_l AS "
 	                          "SELECT i::BIGINT AS k0, (i * 17)::BIGINT AS k1, i::BIGINT AS v "
 	                          "FROM range(300000) tbl(i)"));
@@ -3184,7 +3184,7 @@ TEST_CASE("JIT hash join probe consumes generated-filter selected reference inpu
 	Connection con(db);
 	auto &manager = ExecutionRegionManager::Get(*con.context);
 
-	ConfigureSljitForCoverage(con, false, true, true, 10000);
+	ConfigureSljitForCoverage(con, true, true, 10000);
 	REQUIRE_NO_FAIL(con.Query("SET disabled_optimizers='filter_pushdown'"));
 	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_hash_full_vector_selected_l AS "
 	                          "SELECT ((i % 10000) * 1000003)::BIGINT AS k, i::BIGINT AS v, "
@@ -3234,7 +3234,7 @@ TEST_CASE("JIT selected hash join generated filter remaps pre-join projection so
 	Connection con(db);
 	auto &manager = ExecutionRegionManager::Get(*con.context);
 
-	ConfigureSljitForCoverage(con, false, true, true, 10000);
+	ConfigureSljitForCoverage(con, true, true, 10000);
 	REQUIRE_NO_FAIL(con.Query("SET perfect_ht_threshold=0"));
 	REQUIRE_NO_FAIL(con.Query("SET disabled_optimizers='filter_pushdown,join_order,build_side_probe_side'"));
 	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_selected_filter_map_a AS "
@@ -3277,7 +3277,7 @@ TEST_CASE("JIT hash join chain probe preserves bloom-filtered sparse misses", "[
 	Connection con(db);
 	auto &manager = ExecutionRegionManager::Get(*con.context);
 
-	ConfigureSljitForCoverage(con, false, true, true, 10000);
+	ConfigureSljitForCoverage(con, true, true, 10000);
 	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_hash_chain_bloom_l AS "
 	                          "SELECT i::BIGINT AS k, i::BIGINT AS v FROM range(8192) tbl(i)"));
 	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_hash_chain_bloom_r AS "
@@ -3315,7 +3315,7 @@ TEST_CASE("SLJIT regular hash join preserves wide integral probe sources", "[api
 	Connection con(db);
 	auto &manager = ExecutionRegionManager::Get(*con.context);
 
-	ConfigureSljitForCoverage(con, false, true, true, 10000);
+	ConfigureSljitForCoverage(con, true, true, 10000);
 	REQUIRE_NO_FAIL(con.Query("SET threads=1"));
 	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_wide_probe AS "
 	                          "SELECT CAST(i AS DECIMAL(38,4)) AS k, i::BIGINT AS v "
@@ -3354,7 +3354,7 @@ TEST_CASE("SLJIT perfect hash join preserves signed and unsigned wide keys", "[a
 	Connection con(db);
 	auto &manager = ExecutionRegionManager::Get(*con.context);
 
-	ConfigureSljitForCoverage(con, false, true, true, 10000);
+	ConfigureSljitForCoverage(con, true, true, 10000);
 	REQUIRE_NO_FAIL(con.Query("SET threads=1"));
 	REQUIRE_NO_FAIL(con.Query("SET perfect_ht_threshold=10"));
 	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_wide_perfect_signed_probe AS "

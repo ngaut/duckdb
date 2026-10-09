@@ -877,7 +877,7 @@ TEST_CASE("JIT prepared executions reuse immutable compiled artifacts", "[api][j
 	Connection con(db);
 	auto &manager = ExecutionRegionManager::Get(*con.context);
 
-	ConfigureSljitForCoverage(con, false, false, true, 10000);
+	ConfigureSljitForCoverage(con, false, true, 10000);
 	REQUIRE_NO_FAIL(con.Query("SET threads=1"));
 	REQUIRE_NO_FAIL(con.Query("PREPARE jit_artifact_cache AS "
 	                          "SELECT sum(i + 7) FROM range(1000000) tbl(i)"));
@@ -925,7 +925,7 @@ TEST_CASE("JIT artifact cache separates refreshed source bindings after DML", "[
 	Connection con(db);
 	auto &manager = ExecutionRegionManager::Get(*con.context);
 
-	ConfigureSljitForCoverage(con, false, true, true, 10000);
+	ConfigureSljitForCoverage(con, true, true, 10000);
 	REQUIRE_NO_FAIL(con.Query("SET threads=1"));
 	REQUIRE_NO_FAIL(con.Query("CREATE TEMP TABLE jit_prepared_cast_source(i BIGINT)"));
 	REQUIRE_NO_FAIL(con.Query("INSERT INTO jit_prepared_cast_source SELECT i FROM range(100000) tbl(i)"));
@@ -952,7 +952,7 @@ TEST_CASE("JIT prepared artifact reuse preserves parameter-dependent semantics",
 	Connection con(db);
 	auto &manager = ExecutionRegionManager::Get(*con.context);
 
-	ConfigureSljitForCoverage(con, false, true, true, 10000);
+	ConfigureSljitForCoverage(con, true, true, 10000);
 	REQUIRE_NO_FAIL(con.Query("SET threads=1"));
 	REQUIRE_NO_FAIL(con.Query("PREPARE jit_parameter_artifact AS "
 	                          "SELECT sum(i + $1) FROM range(100000) tbl(i)"));
@@ -986,7 +986,7 @@ TEST_CASE("JIT prepared artifact reuse refreshes exact runtime-filter identity",
 	Connection con(db);
 	auto &manager = ExecutionRegionManager::Get(*con.context);
 
-	ConfigureSljitForCoverage(con, false, true, true, 10000);
+	ConfigureSljitForCoverage(con, true, true, 10000);
 	REQUIRE_NO_FAIL(con.Query("SET threads=1"));
 	REQUIRE_NO_FAIL(con.Query("CREATE TEMP TABLE jit_prepared_filter_fact AS "
 	                          "SELECT i::BIGINT AS k FROM range(100000) tbl(i)"));
@@ -1636,7 +1636,7 @@ TEST_CASE("JIT backend owns generated source-filter aggregate terminals", "[api]
 	Connection con(db);
 	auto &manager = ExecutionRegionManager::Get(*con.context);
 
-	ConfigureSljitForCoverage(con, false, true, true, 10000);
+	ConfigureSljitForCoverage(con, true, true, 10000);
 	REQUIRE_NO_FAIL(con.Query("SET jit_cbo_generated_stage_benefit=1048576"));
 	REQUIRE_NO_FAIL(con.Query("SET jit_cbo_materialization_elision_benefit=1048576"));
 	REQUIRE_NO_FAIL(con.Query("SET jit_cbo_native_operator_stage_benefit=1048576"));
@@ -1677,7 +1677,7 @@ TEST_CASE("JIT production CBO uses modulo domains for filtered reductions", "[ap
 	Connection con(db);
 	auto &manager = ExecutionRegionManager::Get(*con.context);
 
-	ConfigureSljit(con, "auto", false, false, true, 10000);
+	ConfigureSljit(con, "auto", false, true, 10000);
 	ConfigureJitDecisionTrace(con);
 	REQUIRE_NO_FAIL(con.Query("SET threads=1"));
 	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_modulo_filter_cost_input AS "
@@ -1725,7 +1725,7 @@ TEST_CASE("JIT selected scan-filtered grouped aggregate uses direct grouped prim
 	Connection con(db);
 	auto &manager = ExecutionRegionManager::Get(*con.context);
 
-	ConfigureSljitForCoverage(con, false, true, true, 10000);
+	ConfigureSljitForCoverage(con, true, true, 10000);
 	REQUIRE_NO_FAIL(con.Query("SET jit_cbo_generated_stage_benefit=1048576"));
 	REQUIRE_NO_FAIL(con.Query("SET jit_cbo_materialization_elision_benefit=1048576"));
 	REQUIRE_NO_FAIL(con.Query("SET jit_cbo_native_operator_stage_benefit=1048576"));
@@ -1782,7 +1782,7 @@ TEST_CASE("JIT keeps generated-safe grouped aggregate filters in generated sourc
 	Connection con(db);
 	auto &manager = ExecutionRegionManager::Get(*con.context);
 
-	ConfigureSljitForCoverage(con, false, true, true, 10000);
+	ConfigureSljitForCoverage(con, true, true, 10000);
 	REQUIRE_NO_FAIL(con.Query("SET jit_cbo_generated_stage_benefit=1048576"));
 	REQUIRE_NO_FAIL(con.Query("SET jit_cbo_materialization_elision_benefit=1048576"));
 	REQUIRE_NO_FAIL(con.Query("SET jit_cbo_native_operator_stage_benefit=1048576"));
@@ -1835,7 +1835,7 @@ TEST_CASE("JIT materialization-elision runtime proves projected aggregate owners
 	Connection con(db);
 	auto &manager = ExecutionRegionManager::Get(*con.context);
 
-	ConfigureSljitForCoverage(con, false, true, true, 10000);
+	ConfigureSljitForCoverage(con, true, true, 10000);
 	REQUIRE_NO_FAIL(con.Query("SET jit_cbo_generated_stage_benefit=1048576"));
 	REQUIRE_NO_FAIL(con.Query("SET jit_cbo_materialization_elision_benefit=1048576"));
 	REQUIRE_NO_FAIL(con.Query("SET jit_cbo_native_operator_stage_benefit=1048576"));
@@ -1879,7 +1879,7 @@ TEST_CASE("JIT projected source grouped aggregate preserves dense key semantics"
 	Connection con(db);
 	auto &manager = ExecutionRegionManager::Get(*con.context);
 
-	ConfigureSljitForCoverage(con, false, true, true, 10000);
+	ConfigureSljitForCoverage(con, true, true, 10000);
 	REQUIRE_NO_FAIL(con.Query("SET jit_cbo_generated_stage_benefit=1048576"));
 	REQUIRE_NO_FAIL(con.Query("SET jit_cbo_materialization_elision_benefit=1048576"));
 	REQUIRE_NO_FAIL(con.Query("SET jit_cbo_native_operator_stage_benefit=1048576"));
@@ -1922,7 +1922,7 @@ TEST_CASE("JIT projected source grouped aggregate supports substring group keys 
 	Connection con(db);
 	auto &manager = ExecutionRegionManager::Get(*con.context);
 
-	ConfigureSljitForCoverage(con, false, true, true, 10000);
+	ConfigureSljitForCoverage(con, true, true, 10000);
 	REQUIRE_NO_FAIL(con.Query("SET jit_cbo_generated_stage_benefit=1048576"));
 	REQUIRE_NO_FAIL(con.Query("SET jit_cbo_materialization_elision_benefit=1048576"));
 	REQUIRE_NO_FAIL(con.Query("SET jit_cbo_native_operator_stage_benefit=1048576"));
@@ -1971,7 +1971,7 @@ TEST_CASE("JIT projected source grouped aggregate handles sparse projected group
 	Connection con(db);
 	auto &manager = ExecutionRegionManager::Get(*con.context);
 
-	ConfigureSljitForCoverage(con, false, true, true, 10000);
+	ConfigureSljitForCoverage(con, true, true, 10000);
 	REQUIRE_NO_FAIL(con.Query("SET jit_cbo_generated_stage_benefit=1048576"));
 	REQUIRE_NO_FAIL(con.Query("SET jit_cbo_materialization_elision_benefit=1048576"));
 	REQUIRE_NO_FAIL(con.Query("SET jit_cbo_native_operator_stage_benefit=1048576"));
@@ -3190,7 +3190,7 @@ TEST_CASE("JIT auto policy selects high-work materialization through planner cos
 	auto &con = test.con;
 	auto &manager = test.manager;
 
-	ConfigureSljit(con, "auto", false, false);
+	ConfigureSljit(con, "auto", false);
 	ConfigureJitDecisionTrace(con);
 	REQUIRE_NO_FAIL(con.Query("SET jit_cbo_generated_stage_benefit=4096"));
 	REQUIRE_NO_FAIL(con.Query("SET jit_cbo_full_pipeline_benefit=4096"));
@@ -3270,7 +3270,7 @@ TEST_CASE("SLJIT native projection handles many FLOAT expressions sharing source
 	auto &con = test.con;
 	auto &manager = test.manager;
 
-	ConfigureSljitForCoverage(con, false, false, true, 10000);
+	ConfigureSljitForCoverage(con, false, true, 10000);
 	REQUIRE_NO_FAIL(con.Query("SET threads=1"));
 	ConfigureJitDecisionTrace(con);
 	REQUIRE_NO_FAIL(con.Query("CREATE TEMP TABLE jit_many_float_projection_input AS "
@@ -3324,7 +3324,7 @@ TEST_CASE("SLJIT direct FLOAT materialization crosses row group boundaries", "[a
 	auto &con = test.con;
 	auto &manager = test.manager;
 
-	ConfigureSljitForCoverage(con, false, false, true, 10000);
+	ConfigureSljitForCoverage(con, false, true, 10000);
 	REQUIRE_NO_FAIL(con.Query("SET threads=1"));
 	ConfigureJitDecisionTrace(con);
 
@@ -3371,7 +3371,7 @@ TEST_CASE("SLJIT native integer projection elides proven overflow checks", "[api
 	auto &con = test.con;
 	auto &manager = test.manager;
 
-	ConfigureSljitForCoverage(con, false, true, true, 10000);
+	ConfigureSljitForCoverage(con, true, true, 10000);
 	REQUIRE_NO_FAIL(con.Query("SET threads=1"));
 	ConfigureJitDecisionTrace(con);
 	REQUIRE_NO_FAIL(con.Query("CREATE TEMP TABLE jit_integer_no_overflow_input AS "
@@ -3431,7 +3431,7 @@ TEST_CASE("SLJIT native integer flat arithmetic handles SIMD-width tails", "[api
 	auto &con = test.con;
 	auto &manager = test.manager;
 
-	ConfigureSljitForCoverage(con, false, true, true, 10000);
+	ConfigureSljitForCoverage(con, true, true, 10000);
 	REQUIRE_NO_FAIL(con.Query("SET threads=1"));
 	ConfigureJitDecisionTrace(con);
 	REQUIRE_NO_FAIL(con.Query("CREATE TEMP TABLE jit_integer_tail_input AS "
@@ -3501,7 +3501,7 @@ TEST_CASE("SLJIT native floating flat arithmetic handles SIMD-width tails", "[ap
 	auto &con = test.con;
 	auto &manager = test.manager;
 
-	ConfigureSljitForCoverage(con, false, true, true, 10000);
+	ConfigureSljitForCoverage(con, true, true, 10000);
 	REQUIRE_NO_FAIL(con.Query("SET threads=1"));
 	ConfigureJitDecisionTrace(con);
 	REQUIRE_NO_FAIL(con.Query("CREATE TEMP TABLE jit_floating_tail_input AS "
@@ -3563,7 +3563,7 @@ TEST_CASE("SLJIT fixed direct append fuses mixed INTEGER and BIGINT groups", "[a
 	auto &con = test.con;
 	auto &manager = test.manager;
 
-	ConfigureSljitForCoverage(con, false, true, true, 10000);
+	ConfigureSljitForCoverage(con, true, true, 10000);
 	REQUIRE_NO_FAIL(con.Query("SET threads=1"));
 	ConfigureJitDecisionTrace(con);
 	REQUIRE_NO_FAIL(con.Query("CREATE TEMP TABLE jit_mixed_integer_groups_input AS "
@@ -3614,7 +3614,7 @@ TEST_CASE("SLJIT fixed direct append fuses DECIMAL64 groups with checks", "[api]
 	auto &con = test.con;
 	auto &manager = test.manager;
 
-	ConfigureSljitForCoverage(con, false, true, true, 10000);
+	ConfigureSljitForCoverage(con, true, true, 10000);
 	REQUIRE_NO_FAIL(con.Query("SET threads=1"));
 	ConfigureJitDecisionTrace(con);
 	REQUIRE_NO_FAIL(con.Query("CREATE TEMP TABLE jit_decimal_fused_input AS "
@@ -3674,7 +3674,7 @@ TEST_CASE("SLJIT fused DECIMAL64 direct append preserves projection overflow mes
 	auto &con = test.con;
 	auto &manager = test.manager;
 
-	ConfigureSljitForCoverage(con, false, true, true, 10000);
+	ConfigureSljitForCoverage(con, true, true, 10000);
 	REQUIRE_NO_FAIL(con.Query("SET threads=1"));
 	ConfigureJitDecisionTrace(con);
 	REQUIRE_NO_FAIL(con.Query("CREATE TEMP TABLE jit_decimal_fused_overflow_input AS "
@@ -3713,7 +3713,7 @@ TEST_CASE("SLJIT fixed direct append fuses DATE arithmetic groups with checks", 
 	auto &con = test.con;
 	auto &manager = test.manager;
 
-	ConfigureSljitForCoverage(con, false, true, true, 10000);
+	ConfigureSljitForCoverage(con, true, true, 10000);
 	REQUIRE_NO_FAIL(con.Query("SET threads=1"));
 	ConfigureJitDecisionTrace(con);
 	REQUIRE_NO_FAIL(con.Query("CREATE TEMP TABLE jit_date_fused_input AS "
@@ -3771,7 +3771,7 @@ TEST_CASE("SLJIT fused DATE direct append preserves date range errors", "[api][j
 	auto &con = test.con;
 	auto &manager = test.manager;
 
-	ConfigureSljitForCoverage(con, false, true, true, 10000);
+	ConfigureSljitForCoverage(con, true, true, 10000);
 	REQUIRE_NO_FAIL(con.Query("SET threads=1"));
 	ConfigureJitDecisionTrace(con);
 	REQUIRE_NO_FAIL(con.Query("CREATE TEMP TABLE jit_date_fused_overflow_input AS "
@@ -3806,7 +3806,7 @@ TEST_CASE("SLJIT native integer projection preserves required overflow checks", 
 	auto &con = test.con;
 	auto &manager = test.manager;
 
-	ConfigureSljitForCoverage(con, false, true, true, 10000);
+	ConfigureSljitForCoverage(con, true, true, 10000);
 	REQUIRE_NO_FAIL(con.Query("SET threads=1"));
 	REQUIRE_NO_FAIL(con.Query("SET disabled_optimizers='statistics_propagation'"));
 	ConfigureJitDecisionTrace(con);
@@ -3838,7 +3838,7 @@ TEST_CASE("SLJIT direct fixed-width materialization handles INTEGER BIGINT DECIM
 	auto &con = test.con;
 	auto &manager = test.manager;
 
-	ConfigureSljitForCoverage(con, false, false, true, 10000);
+	ConfigureSljitForCoverage(con, false, true, 10000);
 	REQUIRE_NO_FAIL(con.Query("SET threads=1"));
 	ConfigureJitDecisionTrace(con);
 
@@ -3890,7 +3890,7 @@ TEST_CASE("SLJIT direct append source-appends VARCHAR with fixed projections", "
 	auto &con = test.con;
 	auto &manager = test.manager;
 
-	ConfigureSljitForCoverage(con, false, false, true, 10000);
+	ConfigureSljitForCoverage(con, false, true, 10000);
 	REQUIRE_NO_FAIL(con.Query("SET threads=1"));
 	ConfigureJitDecisionTrace(con);
 
@@ -3952,7 +3952,7 @@ TEST_CASE("SLJIT direct fixed-width materialization rolls over column segments w
 	auto &con = test.con;
 	auto &manager = test.manager;
 
-	ConfigureSljitForCoverage(con, false, false, true, 10000);
+	ConfigureSljitForCoverage(con, false, true, 10000);
 	REQUIRE_NO_FAIL(con.Query("SET threads=1"));
 	ConfigureJitDecisionTrace(con);
 	REQUIRE_NO_FAIL(con.Query("CREATE TEMP TABLE jit_direct_segment_rollover_input AS "
@@ -4048,7 +4048,7 @@ TEST_CASE("JIT auto planner skips native-contract projection glue in pipeline CB
 	auto &con = test.con;
 	auto &manager = test.manager;
 
-	ConfigureSljitForCoverage(con, false, false, false, 10000);
+	ConfigureSljitForCoverage(con, false, false, 10000);
 	CreateJitStatefulSortInput(con);
 
 	ClearJitTrace(manager, true);
@@ -4080,7 +4080,7 @@ TEST_CASE("JIT auto planner amortizes grouped lookup for generated division aggr
 	auto &con = test.con;
 	auto &manager = test.manager;
 
-	ConfigureSljitForCoverage(con, false, false, false, 10000);
+	ConfigureSljitForCoverage(con, false, false, 10000);
 	ConfigureJitDecisionTrace(con);
 	CreateJitStatefulSortInput(con);
 
@@ -4123,7 +4123,7 @@ TEST_CASE("JIT generated work class does not label source-filter compute as proj
 	auto &con = test.con;
 	auto &manager = test.manager;
 
-	ConfigureSljitForCoverage(con, false, false, false, 10000);
+	ConfigureSljitForCoverage(con, false, false, 10000);
 	ConfigureJitDecisionTrace(con);
 	REQUIRE_NO_FAIL(con.Query("CREATE TEMP TABLE jit_source_filter_class_input AS "
 	                          "SELECT i::BIGINT AS i FROM range(10000) tbl(i)"));
@@ -4199,7 +4199,7 @@ TEST_CASE("JIT CBO uses finalized perfect-hash dynamic filter cardinality", "[ap
 	auto &con = test.con;
 	auto &manager = test.manager;
 
-	ConfigureSljitForCoverage(con, false, true, true, 10000);
+	ConfigureSljitForCoverage(con, true, true, 10000);
 	ConfigureJitDecisionTrace(con);
 	REQUIRE_NO_FAIL(con.Query("SET threads=1"));
 	REQUIRE_NO_FAIL(con.Query("CREATE TEMP TABLE jit_dynamic_filter_fact AS "
@@ -4279,7 +4279,7 @@ TEST_CASE("JIT exact dynamic filters compose with bitpacked storage scans", "[ap
 	auto &con = test.con;
 	auto &manager = test.manager;
 
-	ConfigureSljitForCoverage(con, false, true, true, 10000);
+	ConfigureSljitForCoverage(con, true, true, 10000);
 	ConfigureJitDecisionTrace(con);
 	REQUIRE_NO_FAIL(con.Query("SET threads=1"));
 	REQUIRE_NO_FAIL(con.Query("PRAGMA force_compression='bitpacking'"));
@@ -4337,7 +4337,7 @@ TEST_CASE("JIT Bloom dynamic filters preserve bitpacked scan semantics", "[api][
 	auto &con = test.con;
 	auto &manager = test.manager;
 
-	ConfigureSljitForCoverage(con, false, true, true, 10000);
+	ConfigureSljitForCoverage(con, true, true, 10000);
 	REQUIRE_NO_FAIL(con.Query("SET threads=1"));
 	REQUIRE_NO_FAIL(con.Query("SET perfect_ht_threshold=0"));
 	REQUIRE_NO_FAIL(con.Query("PRAGMA force_compression='bitpacking'"));
@@ -4414,7 +4414,7 @@ TEST_CASE("JIT CBO carries finalized dynamic filter cardinality through regular 
 	auto &con = test.con;
 	auto &manager = test.manager;
 
-	ConfigureSljitForCoverage(con, false, true, true, 10000);
+	ConfigureSljitForCoverage(con, true, true, 10000);
 	ConfigureJitDecisionTrace(con);
 	REQUIRE_NO_FAIL(con.Query("SET threads=1"));
 	REQUIRE_NO_FAIL(con.Query("SET perfect_ht_threshold=0"));
@@ -4450,7 +4450,7 @@ TEST_CASE("JIT CBO preserves empty finalized dynamic filter cardinality", "[api]
 	auto &con = test.con;
 	auto &manager = test.manager;
 
-	ConfigureSljitForCoverage(con, false, true, true, 10000);
+	ConfigureSljitForCoverage(con, true, true, 10000);
 	ConfigureJitDecisionTrace(con);
 	REQUIRE_NO_FAIL(con.Query("SET threads=1"));
 	REQUIRE_NO_FAIL(con.Query("SET perfect_ht_threshold=0"));
@@ -4508,7 +4508,7 @@ TEST_CASE("JIT diagnostic tracing records generic table-function source ownershi
 	auto &con = test.con;
 	auto &manager = test.manager;
 
-	ConfigureSljitForCoverage(con, false, true);
+	ConfigureSljitForCoverage(con, true);
 	REQUIRE_NO_FAIL(con.Query("SET threads=1"));
 	ConfigureJitDecisionTrace(con);
 
@@ -4575,7 +4575,7 @@ TEST_CASE("JIT auto planner cost uses configurable CBO settings", "[api][jit]") 
 	auto &con = test.con;
 	auto &manager = test.manager;
 
-	ConfigureSljit(con, "auto", false, false);
+	ConfigureSljit(con, "auto", false);
 	ConfigureJitDecisionTrace(con);
 	REQUIRE_NO_FAIL(con.Query("SET jit_cbo_generated_stage_benefit=4096"));
 	REQUIRE_NO_FAIL(con.Query("SET jit_cbo_startup_base_cost=1000000000"));
@@ -4625,7 +4625,7 @@ TEST_CASE("JIT auto compiles branchy native expressions", "[api][jit]") {
 	auto reference = con.Query("SELECT sum(" + expression + ") FROM jit_auto_branchy_expression_input");
 	REQUIRE_NO_FAIL(*reference);
 
-	ConfigureSljitForCoverageSettings(con, false, true);
+	ConfigureSljitForCoverageSettings(con, true);
 	ConfigureJitDecisionTrace(con);
 	ClearJitTrace(manager, true);
 	REQUIRE_NO_FAIL(con.Query("CREATE TEMP TABLE jit_auto_branchy_expression_output AS "
@@ -4646,7 +4646,7 @@ TEST_CASE("JIT auto policy selects high-work ungrouped aggregate updates through
 	auto &con = test.con;
 	auto &manager = test.manager;
 
-	ConfigureSljit(con, "auto", false, true, true, 10000);
+	ConfigureSljit(con, "auto", true, true, 10000);
 	ConfigureJitDecisionTrace(con);
 	REQUIRE_NO_FAIL(con.Query("SET jit_cbo_generated_stage_benefit=4096"));
 	REQUIRE_NO_FAIL(con.Query("SET jit_cbo_native_operator_stage_benefit=4096"));

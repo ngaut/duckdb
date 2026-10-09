@@ -411,7 +411,6 @@ def write_baseline_state(
         "event_log_size": args.event_log_size,
         "trace_decisions": args.trace_decisions,
         "trace_runtime": args.trace_runtime,
-        "jit_verify": args.jit_verify,
         "jit_cbo_settings": list(args.jit_cbo_setting),
         "duckdb": str(args.duckdb),
     }
@@ -445,7 +444,6 @@ def write_gate_metadata(args: argparse.Namespace, out_dir: Path, baseline: Path 
         "event_log_size": args.event_log_size,
         "trace_decisions": args.trace_decisions,
         "trace_runtime": args.trace_runtime,
-        "jit_verify": args.jit_verify,
         "jit_cbo_settings": list(args.jit_cbo_setting),
         "host_quiescence": args.host_quiescence,
         "command": list(sys.argv),
@@ -531,7 +529,6 @@ def benchmark_command(
     add_bool_flag(command, args.use_existing_db, "--use-existing-db")
     add_bool_flag(command, trace_decisions, "--trace-decisions")
     add_bool_flag(command, trace_runtime, "--trace-runtime")
-    add_bool_flag(command, args.jit_verify, "--jit-verify")
     for setting in args.jit_cbo_setting:
         command.extend(["--jit-cbo-setting", setting])
     return command
@@ -644,7 +641,6 @@ def candidate_qualifies_for_direct_promotion(args: argparse.Namespace) -> bool:
         and args.event_log_size == 0
         and not args.trace_decisions
         and not args.trace_runtime
-        and not args.jit_verify
         and not args.jit_cbo_setting
         and args.policies == list(DEFAULT_POLICIES)
         and args.repeats == PRODUCTION_PROMOTION_REPEATS
@@ -658,8 +654,6 @@ def validate_baseline_write_configuration(args: argparse.Namespace) -> None:
         raise TPCHConfigurationError("accepted baselines require --timing-mode production")
     if args.event_log_size != 0 or args.trace_decisions or args.trace_runtime:
         raise TPCHConfigurationError("accepted baselines require untraced execution with --event-log-size 0")
-    if args.jit_verify:
-        raise TPCHConfigurationError("accepted baselines cannot use --jit-verify")
     if args.jit_cbo_setting:
         raise TPCHConfigurationError("accepted baselines cannot use --jit-cbo-setting overrides")
 
@@ -707,7 +701,6 @@ def build_promoted_baseline(
         "timing_mode": "production",
         "trace_decisions": False,
         "trace_runtime": False,
-        "jit_verify": False,
         "jit_cbo_settings": [],
     }
     with (promoted_dir / "promotion.json").open("w", encoding="utf-8") as handle:
@@ -784,7 +777,6 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--event-log-size", type=int, default=0)
     parser.add_argument("--trace-decisions", action="store_true")
     parser.add_argument("--trace-runtime", action="store_true")
-    parser.add_argument("--jit-verify", action="store_true")
     parser.add_argument("--jit-cbo-setting", action="append", default=[])
     parser.add_argument("--auto-no-decision-noise-s", type=float, default=0.005)
     parser.add_argument(

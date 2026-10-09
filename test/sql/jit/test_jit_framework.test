@@ -18,7 +18,6 @@ WHERE name IN (
     'jit_event_log_size',
     'jit_policy',
     'jit_trace_runtime',
-    'jit_verify',
     'jit_dump_ir'
 )
 ORDER BY name
@@ -36,7 +35,6 @@ jit_event_log_size	0
 jit_policy	auto
 jit_trace_decisions	false
 jit_trace_runtime	false
-jit_verify	false
 
 statement ok
 LOAD jit_sljit
@@ -110,9 +108,6 @@ SELECT i FROM jit_test ORDER BY i
 1
 2
 
-statement ok
-SET jit_verify=true
-
 query I
 SELECT i FROM jit_test ORDER BY i
 ----
@@ -124,9 +119,6 @@ query I
 SELECT 42
 ----
 42
-
-statement ok
-SET jit_verify=false
 
 query I
 SELECT random() IS NOT NULL
@@ -205,9 +197,6 @@ GROUP BY counter_count
 
 statement ok
 SET jit_policy='auto'
-
-statement ok
-SET jit_verify=true
 
 statement ok
 SET jit_dump_ir=true
@@ -543,9 +532,6 @@ WHERE phase='runtime'
 
 statement ok
 SET jit_trace_runtime=false
-
-statement ok
-SET jit_verify=false
 
 statement ok
 SET jit_policy='auto'
