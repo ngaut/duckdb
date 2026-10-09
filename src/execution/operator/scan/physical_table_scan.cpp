@@ -38,9 +38,10 @@ struct TableScanExecutionSourceContractGlobalState {
 	DataTable *storage = nullptr;
 	DuckTransaction *transaction = nullptr;
 	//! The distribution shared with the vectorized table scan when the function
-	//! state exposes one: consumed row groups are then a single fact, so compiled
-	//! progress survives a handoff to the vectorized continuation. The owned state
-	//! is the fallback for storage-scan sources without an exposed distribution.
+	//! state exposes one: consumed row groups are then a single fact for the
+	//! threads the contract drives and those it does not (a deferred compiled
+	//! entry). The owned state serves storage-scan sources without an exposed
+	//! distribution.
 	ParallelTableScanState *shared_parallel_state = nullptr;
 	ParallelTableScanState parallel_state;
 
@@ -311,6 +312,9 @@ public:
 	TableScanState execution_source_contract_scan_state;
 	DataChunk execution_source_contract_all_columns;
 	idx_t execution_source_contract_row_groups_scanned = 0;
+	//! Whether the source contract drives this scan. A scan opened for the contract may still be driven by the
+	//! vectorized GetData (an executor whose compiled entry deferred), whose positions live in local_state
+	bool execution_source_contract_cursor = false;
 
 private:
 	void InitializeExecutionSourceContract(ExecutionContext &context, TableScanGlobalSourceState &gstate,
@@ -375,6 +379,7 @@ SourceResultType PhysicalTableScan::GetExecutionSourceContractDataInternal(Execu
 	}
 	auto &contract_state = g_state.execution_source_contract;
 	auto &scan_state = l_state.execution_source_contract_scan_state;
+	l_state.execution_source_contract_cursor = true;
 	scan_state.options.force_fetch_row = Settings::Get<DebugForceFetchRowSetting>(context.client);
 
 	do {
@@ -594,7 +599,7 @@ OperatorPartitionData PhysicalTableScan::GetPartitionData(ExecutionContext &cont
 	D_ASSERT(function.get_partition_data);
 	auto &gstate = gstate_p.Cast<TableScanGlobalSourceState>();
 	auto &state = lstate.Cast<TableScanLocalSourceState>();
-	if (gstate.execution_source_contract.storage) {
+	if (state.execution_source_contract_cursor) {
 		return GetExecutionSourceContractTableScanPartitionData(state.execution_source_contract_scan_state);
 	}
 	if (!state.local_state) {
@@ -756,7 +761,7 @@ void PhysicalTableScan::GetMetrics(ClientContext &context, GlobalSourceState &gs
 	}
 	auto &gstate = gstate_p.Cast<TableScanGlobalSourceState>();
 	auto &state = lstate.Cast<TableScanLocalSourceState>();
-	if (gstate.execution_source_contract.storage) {
+	if (state.execution_source_contract_cursor) {
 		auto &scan_state = state.execution_source_contract_scan_state;
 		operator_metrics.rows_scanned = scan_state.table_state.rows_scanned + scan_state.local_state.rows_scanned;
 		operator_metrics.row_groups_scanned = state.execution_source_contract_row_groups_scanned;
