@@ -1,0 +1,101 @@
+# name: test/sql/jit/test_jit_chunk_step_held_rows_order.test_slow
+# description: A chunk step holds the few rows each row group keeps and sinks them only before the source moves to
+#              another row group or at the end: streamed results, CTAS and INSERT keep insertion order
+# group: [jit]
+
+statement ok
+LOAD jit_sljit
+
+statement ok
+SET jit_cbo_generated_stage_benefit=4096
+
+statement ok
+SET jit_cbo_materialization_elision_benefit=4096
+
+statement ok
+SET jit_cbo_native_operator_stage_benefit=4096
+
+statement ok
+SET jit_cbo_full_pipeline_benefit=4096
+
+statement ok
+SET jit_cbo_source_contract_scan_filter_penalty=0
+
+statement ok
+SET jit_cbo_startup_base_cost=0
+
+statement ok
+SET jit_cbo_startup_margin_basis_points=0
+
+statement ok
+SET jit_trace_runtime=true
+
+statement ok
+SET jit_event_log_size=10000
+
+statement ok
+CREATE TABLE t AS SELECT i::BIGINT AS i, (i % 1000)::BIGINT AS m FROM range(6000000) tbl(i)
+
+# about 123 rows per 122880-row group survive, far fewer than a vector: the step holds them across chunks
+statement ok
+DELETE FROM t WHERE m <> 3
+
+statement ok
+SET threads=4
+
+statement ok
+SET jit_policy='off'
+
+query I nosort p3_result
+SELECT i * 2 + 1 FROM t
+----
+
+
+statement ok
+SET jit_policy='auto'
+
+statement ok
+SELECT * FROM duckdb_jit_clear_events()
+
+query I nosort p3_result
+SELECT i * 2 + 1 FROM t
+----
+
+
+query I
+SELECT count(*) > 0 FROM duckdb_jit_events() WHERE phase='runtime' AND status='executed' AND reason='full pipeline kernel executed' AND pipeline_shape LIKE '%RESULT_COLLECTOR%'
+  AND jit_runtime_path_counts LIKE '%full_pipeline.recipe.native_only%'
+----
+true
+
+statement ok
+SELECT * FROM duckdb_jit_clear_events()
+
+statement ok
+CREATE TABLE o AS SELECT i * 2 + 1 AS k FROM t
+
+query III
+SELECT count(*), sum(k), count(*) FILTER (WHERE prev >= k) FROM (SELECT k, lag(k) OVER (ORDER BY rowid) AS prev FROM o)
+----
+6000	35994042000	0
+
+query I
+SELECT count(*) > 0 FROM duckdb_jit_events() WHERE phase='runtime' AND status='executed' AND pipeline_shape LIKE '%BATCH_CREATE_TABLE_AS%'
+----
+true
+
+statement ok
+SELECT * FROM duckdb_jit_clear_events()
+
+statement ok
+INSERT INTO o SELECT i * 2 + 12000001 FROM t
+
+query III
+SELECT count(*), sum(k), count(*) FILTER (WHERE prev >= k) FROM (SELECT k, lag(k) OVER (ORDER BY rowid) AS prev FROM o)
+----
+12000	143988084000	0
+
+query I
+SELECT count(*) > 0 FROM duckdb_jit_events() WHERE phase='runtime' AND status='executed' AND pipeline_shape LIKE '%BATCH_INSERT%'
+----
+true
