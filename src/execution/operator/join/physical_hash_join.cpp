@@ -1122,6 +1122,19 @@ void JoinFilterPushdownInfo::Sink(DataChunk &chunk, JoinFilterLocalState &lstate
 	}
 }
 
+//! The key statistics every build chunk contributes, whether the native Sink or a compiled kernel appends it: the
+//! join-filter min/max and the perfect-hash build bounds. Finalize sizes the perfect hash table from them, so a chunk
+//! that skipped them would have its keys fall outside the table
+static void RecordHashJoinBuildKeys(HashJoinGlobalSinkState &gstate, HashJoinLocalSinkState &lstate) {
+	auto &filter_pushdown = lstate.op.filter_pushdown;
+	if (filter_pushdown && !gstate.skip_filter_pushdown) {
+		filter_pushdown->Sink(lstate.join_keys, *lstate.local_filter_state);
+	}
+	if (gstate.collect_perfect_join_bounds) {
+		UpdatePerfectHashJoinBuildBounds(lstate.join_keys.data[0], lstate.join_keys.size(), lstate.perfect_join_bounds);
+	}
+}
+
 SinkResultType PhysicalHashJoin::Sink(ExecutionContext &context, DataChunk &chunk, OperatorSinkInput &input) const {
 	auto &gstate = input.global_state.Cast<HashJoinGlobalSinkState>();
 	auto &lstate = input.local_state.Cast<HashJoinLocalSinkState>();
@@ -1129,13 +1142,7 @@ SinkResultType PhysicalHashJoin::Sink(ExecutionContext &context, DataChunk &chun
 	// resolve the join keys for the right chunk
 	lstate.join_keys.Reset();
 	lstate.join_key_executor.Execute(chunk, lstate.join_keys);
-
-	if (filter_pushdown && !gstate.skip_filter_pushdown) {
-		filter_pushdown->Sink(lstate.join_keys, *lstate.local_filter_state);
-	}
-	if (gstate.collect_perfect_join_bounds) {
-		UpdatePerfectHashJoinBuildBounds(lstate.join_keys.data[0], lstate.join_keys.size(), lstate.perfect_join_bounds);
-	}
+	RecordHashJoinBuildKeys(gstate, lstate);
 
 	if (payload_columns.col_types.empty()) { // there are only keys: place an empty chunk in the payload
 		lstate.payload_chunk.SetChildCardinality(chunk.size());
@@ -1260,9 +1267,8 @@ bool ExecutionBindHashJoinBuild(ExecutionContext &context, OperatorSinkInput &in
 	build.append_state = &lstate.append_state;
 	build.join_keys = &lstate.join_keys;
 	build.payload_chunk = &lstate.payload_chunk;
-	build.filter_pushdown = lstate.op.filter_pushdown.get();
-	build.local_filter_state = lstate.local_filter_state.get();
-	build.skip_filter_pushdown = gstate.skip_filter_pushdown;
+	build.global_state = &gstate;
+	build.local_state = &lstate;
 	build.blocker.clear();
 	return true;
 }
@@ -1284,7 +1290,7 @@ static void RecordHashJoinBuildTraceStage(optional_ptr<ExecutionOperatorStageRec
 
 static void AssertExecutionHashJoinBuildReady(const ExecutionHashJoinBuildBinding &binding) {
 	if (!binding.ready || !binding.hash_table || !binding.append_state || !binding.join_keys ||
-	    !binding.payload_chunk) {
+	    !binding.payload_chunk || !binding.global_state || !binding.local_state) {
 		throw InternalException("execution native hash join build sink requires a bound hash join build state");
 	}
 	if (binding.join_keys->ColumnCount() != binding.key_input_indices.size()) {
@@ -1300,15 +1306,11 @@ void ExecutionHashJoinBuildReferenceKeys(const ExecutionHashJoinBuildBinding &bi
 	binding.join_keys->ReferenceColumns(input, binding.key_input_indices);
 }
 
-void ExecutionHashJoinBuildApplyFilterPushdown(const ExecutionHashJoinBuildBinding &binding) {
+void ExecutionHashJoinBuildRecordKeys(const ExecutionHashJoinBuildBinding &binding) {
 	AssertExecutionHashJoinBuildReady(binding);
-	if (!binding.filter_pushdown || binding.skip_filter_pushdown) {
-		return;
-	}
-	if (!binding.local_filter_state) {
-		throw InternalException("execution native hash join build filter pushdown requires local filter state");
-	}
-	binding.filter_pushdown->Sink(*binding.join_keys, *binding.local_filter_state);
+	auto &lstate = binding.local_state->Cast<HashJoinLocalSinkState>();
+	D_ASSERT(binding.join_keys == &lstate.join_keys);
+	RecordHashJoinBuildKeys(binding.global_state->Cast<HashJoinGlobalSinkState>(), lstate);
 }
 
 void ExecutionHashJoinBuildReferencePayload(const ExecutionHashJoinBuildBinding &binding, DataChunk &input) {
@@ -1355,7 +1357,7 @@ SinkResultType ExecutionSinkHashJoinBuild(const ExecutionHashJoinBuildBinding &b
 	RecordHashJoinBuildTraceStage(recorder, "reference_keys", stage_start);
 
 	stage_start = HashJoinBuildTraceStart(recorder);
-	ExecutionHashJoinBuildApplyFilterPushdown(binding);
+	ExecutionHashJoinBuildRecordKeys(binding);
 	RecordHashJoinBuildTraceStage(recorder, "filter_pushdown", stage_start);
 
 	stage_start = HashJoinBuildTraceStart(recorder);

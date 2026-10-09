@@ -462,9 +462,9 @@ struct ExecutionHashJoinBuildBinding {
 	PartitionedTupleDataAppendState *append_state = nullptr;
 	DataChunk *join_keys = nullptr;
 	DataChunk *payload_chunk = nullptr;
-	const JoinFilterPushdownInfo *filter_pushdown = nullptr;
-	JoinFilterLocalState *local_filter_state = nullptr;
-	bool skip_filter_pushdown = false;
+	//! The native sink states: every build chunk records its keys in them as the native Sink does
+	GlobalSinkState *global_state = nullptr;
+	LocalSinkState *local_state = nullptr;
 	vector<column_t> key_input_indices;
 	vector<LogicalType> key_types;
 	vector<column_t> payload_input_indices;
@@ -595,7 +595,8 @@ DUCKDB_API bool ExecutionBindHashJoinBuild(ExecutionContext &context, OperatorSi
                                            const ExecutionRegionSinkInfo &sink_info, ExecutionSinkBinding &binding);
 
 DUCKDB_API void ExecutionHashJoinBuildReferenceKeys(const ExecutionHashJoinBuildBinding &binding, DataChunk &input);
-DUCKDB_API void ExecutionHashJoinBuildApplyFilterPushdown(const ExecutionHashJoinBuildBinding &binding);
+//! Records the build chunk's keys (join-filter min/max, perfect-hash build bounds) exactly as the native Sink does
+DUCKDB_API void ExecutionHashJoinBuildRecordKeys(const ExecutionHashJoinBuildBinding &binding);
 DUCKDB_API void ExecutionHashJoinBuildReferencePayload(const ExecutionHashJoinBuildBinding &binding, DataChunk &input);
 DUCKDB_API idx_t ExecutionHashJoinBuildPrepare(const ExecutionHashJoinBuildBinding &binding, DataChunk &source_chunk,
                                                Vector &hash_values, SelectionVector &build_sel,

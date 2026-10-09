@@ -363,7 +363,7 @@ SinkResultType SljitExecuteNativeHashJoinBuildUpdate(ExecutionRegionRuntime &run
 	RecordSljitRegionStageRuntime(runtime, op_idx, op_kind, "reference_keys", stage_start);
 
 	stage_start = SljitRegionStageStart(runtime);
-	ExecutionHashJoinBuildApplyFilterPushdown(build);
+	ExecutionHashJoinBuildRecordKeys(build);
 	RecordSljitRegionStageRuntime(runtime, op_idx, op_kind, "filter_pushdown", stage_start);
 
 	stage_start = SljitRegionStageStart(runtime);
