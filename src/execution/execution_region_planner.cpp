@@ -1099,9 +1099,8 @@ void ExecutionRegionPlanner::Compile(ClientContext &context, ExecutionRegionBack
 			result.kernel->SetTracePipeline(candidate, region_ir.pipeline_shape);
 		}
 	}
-	if (status == ExecutionRegionCompileStatus::ERROR) {
-		throw InvalidInputException("Execution region compilation failed: %s", reason);
-	}
+	// A region the backend could not build runs vectorized: compilation is an optimization, never a reason for a query
+	// to fail. The recorded event carries the backend's reason.
 	if (result.kernel) {
 		plan.kernel = std::move(result.kernel);
 	}
