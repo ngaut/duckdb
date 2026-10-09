@@ -28,10 +28,6 @@ bool ExecutionRegionPipelineAdapter::IsCompiledExecutionSuppressed() const {
 	return GetClientContext().IsCompiledExecutionSuppressed() || executor.compiled_execution_deferred;
 }
 
-const void *ExecutionRegionPipelineAdapter::ExecutionIdentity() const {
-	return &executor;
-}
-
 idx_t ExecutionRegionPipelineAdapter::MaxThreads() const {
 	return executor.pipeline.GetMaxThreads();
 }
