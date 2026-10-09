@@ -74,6 +74,10 @@ optional_ptr<ExecutionRegionKernel> ExecutionRegionPipelineAdapter::GetExecutabl
 	return plan->GetExecutableFullPipelineKernel();
 }
 
+bool ExecutionRegionPipelineAdapter::CompiledRunnerSelected() const {
+	return executor.pipeline.GetExecutionRunnerKind() != ExecutionRunnerKind::VECTORIZED;
+}
+
 ExecutionRegionLocalState &ExecutionRegionPipelineAdapter::GetOrCreateLocalState(ExecutionRegionKernel &kernel) {
 	if (executor.execution_region_local_state_kernel.get() != &kernel) {
 		executor.execution_region_local_state = kernel.CreateLocalState(GetAllocator());

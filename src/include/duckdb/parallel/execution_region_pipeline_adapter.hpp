@@ -40,6 +40,8 @@ public:
 	optional_ptr<ExecutionRegionRuntime> CompiledStepRuntime(const ExecutionRegionKernel &kernel) const;
 	bool HasSourceAndSink() const;
 	optional_ptr<ExecutionRegionKernel> GetExecutableFullPipelineKernel() const;
+	//! Whether the planner selected a compiled runner for the pipeline
+	bool CompiledRunnerSelected() const;
 	ExecutionRegionLocalState &GetOrCreateLocalState(ExecutionRegionKernel &kernel);
 	bool IsAtCleanSourceToSinkBoundary() const;
 

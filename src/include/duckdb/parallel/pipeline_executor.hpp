@@ -101,6 +101,9 @@ private:
 	//! A partitioned sink takes rows under the partition current when they sink: the rows a chunk step holds sink
 	//! before the fetched chunk moves the sink to another partition
 	OperatorResultType FlushCompiledStepBeforeAdvance(DataChunk &source_chunk, const SourceFetchResult &source_result);
+	//! The same for pushed input, before the producer moves the sink to next_batch_index. A flush that blocked the
+	//! sink leaves the advance pending: the producer's retry sinks the flushed rows, then advances
+	PipelineExecuteResult FlushCompiledStepBeforeExternalAdvance(idx_t next_batch_index);
 
 	//! The pipeline to process
 	Pipeline &pipeline;

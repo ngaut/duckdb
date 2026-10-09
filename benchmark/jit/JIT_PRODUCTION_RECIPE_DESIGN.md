@@ -426,73 +426,51 @@ Sparse source-output batching is independent of terminal kind. Small chunks
 are copied into one backend-owned source batch before downstream expression or
 probe work, including recipes whose terminal consumes a selected hash-join
 view. The selected terminal's output batch is a separate owner and is not a
-reason to re-enter the probe once per sparse source chunk. Batching stops at
-the source-result boundary and is disabled whenever core requires partition
-boundaries and the recipe marks its source chunks partition-sensitive.
+reason to re-enter the probe once per sparse source chunk. Batched rows sink
+before the executor moves a partitioned sink to another partition (see
+chunk-step execution).
 
-Recursive JIT suppression covers one complete compiled-kernel execution,
-including native source, operator, sink, flush, and finalize callbacks. Source
-contracts do not enter and leave suppression for each chunk. This gives every
-callback the same recursion rule and removes thread-local transitions from hot
-batch loops.
+## Chunk-step execution
 
-## Runner switching
+The pipeline executor owns the loop of every compiled kernel over source
+chunks. It fetches each chunk (through the source contract the plan opened),
+advances a partitioned sink's batches, retries a blocked sink, and finalizes,
+exactly as it does for the vectorized operator chain. The kernel binds to one
+executor as a chunk step and replaces the operator chain:
 
-Compiled and vectorized execution consume one shared source distribution: for
-storage scans both paths claim row groups from the same parallel state, and
-first claims are made lazily by the scan loops, never at local-state
-construction. Switching runners is legal only at claim points, where no local
-holds an in-flight row group. A compiled kernel switches by decline-claim: the
-source drains its current row group, declines the next claim, and the runtime
-converts the declined fetch into a deferral. Deferral is one-way — deferring
-latches the pipeline's compiled suppression so a deferred kernel is never
-re-entered — and sources without the storage contract never decline, so
-switching is inert where it is not proven. Recursive-CTE iterations run
-native by design — iteration-1 pipelines compile normally, and frontier
-iterations sit below the amortization floor — so reused executors keeping
-compiled entry closed there is a decision, not debt.
+- `ExecuteChunk` runs one source chunk to completion. Output the sink blocks on
+  queues in the executor; the executor yields after a blocked sink and sinks the
+  queue first when it wakes, so one task never registers two callbacks.
+- `FlushChunks` sinks every row the step batches across chunks. The executor
+  calls it before a fetched chunk moves a partitioned sink to another
+  partition: the sink takes rows under the partition current when they sink.
+- `FinishChunks` sinks what the step holds once the source is exhausted, in
+  place of the caching-operator flush. A pipeline that already finished (a
+  LIMIT finished its sink) drops held rows, as caching operators do.
 
-Deferral is legal at exactly two points, enforced by the runtime: at kernel
-entry before the first source fetch (nothing is claimed), and at a declined
-claim boundary (the declined fetch proves nothing is in flight). Any other
-deferral request throws, because the contract cursor can hold a partially-read
-row group that a handoff would silently abandon. Genuine native-fallback
-states — a native-delegated join probe whose runtime layout is not ready, such
-as an externally partitioned hash table — are chunk-independent operator
-readiness facts, so the kernel probes readiness in an entry prologue and
-defers there.
+The step keeps its state, and the rows it batches, for the executor's
+lifetime; one trace event per executor covers all its entries. Any executor
+state is a legal point to continue from, so nothing in the kernel tracks
+yields, partitions, or interrupt registration.
 
-Handoff is additionally a kernel capability: a recipe step that claims
-exclusive ownership of sink finalization (inline distinct-key counting)
-refuses mid-query handoff entirely, because the rows the other runner sinks
-would be stranded under a claim it cannot see. Entry deferral remains legal
-for such recipes — no claim exists before the first row. The classification is
-a single authority next to the strategy definition; the kernel's capability is
-the conjunction over its recipe steps. The per-sink handoff proof and its two
-debug settings (forced boundary defer, forced entry defer) are regression
-fixtures.
+A pipeline fed by its producers' pushes (a direct CTE consumer) plans like any
+other: the pushed chunks are the chunks its source would return. Its executor
+binds the step when it is created, every push runs the step, and the flush
+before a partition change also precedes the producer's batch advances. A
+kernel whose source is not chunks (the aggregate-state source recipe) keeps
+its own fetch loop for one entry's chunk budget; it neither sinks chunks nor
+advances batches.
 
-## Measured runner selection
-
-`jit_adaptive_ab` (default on, band-gated via
-`jit_adaptive_ab_band_basis_points`=1000 so only thin-margin selections are
-measured) measures one native and one compiled row group per compiled-selected
-pipeline and commits to the measured winner; the planner
-admits a pipeline to measurement only when its static net benefit lies within
-`jit_adaptive_ab_band_basis_points` of its required benefit, so confident
-selections pay no measurement tax. The native leg runs first under a one-claim
-budget owned by its executor and resumed across scheduler yields; the compiled
-kernel then resolves the verdict at its own first row-group boundary — commit
-continues in-entry, fallback defers one-way. Other threads execute natively
-during a measurement, and an executor that has fetched from the vectorized
-source without a claim budget is latched vectorized for the pipeline's
-remainder: its cursor can hold a partially-scanned row group at any yield, so
-switching it into compiled execution — including after a commit verdict —
-would abandon those rows. Only executors with clean cursors take the compiled
-leg or join a committed kernel. Verdicts are recorded as runtime events carrying
-per-leg times and rows. A fallback verdict records runner choice but does not
-replace the kernel's declared typed runtime proofs. A verdict is final for its
-kernel's lifetime.
+No runner takes a running pipeline over. A kernel that cannot start (a
+native-delegated join probe whose runtime layout is not ready, such as an
+externally partitioned hash table) leaves the pipeline to the vectorized loop
+before the first fetch, where nothing is in flight, and the latch keeps that
+executor vectorized. A native operator that stops being ready mid-stream is an
+internal error. The `jit_debug_force_entry_defer` setting exercises the entry
+deferral. Measured runner selection (the former adaptive A/B with row-group
+claim handoff) was removed with this model: it recorded no verdict on TPC-H at
+its shipped band. If measured fallback is needed again, it can switch per chunk
+on top of steps where the step reads native-layout chunks.
 
 ## Observability
 
@@ -502,8 +480,8 @@ split; `CBO_PIPELINE` prints one line per selection decision and
 `RUNTIME_KERNELS` one aggregate line per executed kernel. The operator tree
 itself is annotated: every operator covered by a compiled full-pipeline kernel
 carries a `jit` attribution (which also explains their near-zero native
-timings — the kernel bypasses per-operator execution), the pipeline source
-carries `jit_adaptive` verdicts and `jit_deferred` reasons when those occur.
+timings — the kernel bypasses per-operator execution), and the pipeline source
+carries `jit_deferred` reasons when a kernel could not start.
 Annotations are applied as a post-execution overlay so per-thread extra-info
 refreshes cannot clobber them. `jit_trace_decisions=true` switches both
 sections to the full per-event lines; `duckdb_jit_events()` remains the

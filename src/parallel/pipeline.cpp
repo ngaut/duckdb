@@ -145,9 +145,15 @@ bool Pipeline::TryGetMaxThreads(idx_t &max_threads) {
 	if (!source->ParallelSource()) {
 		return false;
 	}
-	auto source_state = GetSourceState();
-	D_ASSERT(source_state);
-	max_threads = source_state->MaxThreads();
+	if (IsExternalInput()) {
+		// Pushes replace the source: each producer executor feeds an executor of its own, so the scheduler's threads
+		// bound the parallelism below
+		max_threads = NumericLimits<idx_t>::Maximum();
+	} else {
+		auto source_state = GetSourceState();
+		D_ASSERT(source_state);
+		max_threads = source_state->MaxThreads();
+	}
 
 	for (auto &op_ref : operators) {
 		auto &op = op_ref.get();
@@ -477,6 +483,10 @@ void Pipeline::PrepareExternalInput() {
 		return;
 	}
 	ResetSinkAndOperators();
+	{
+		lock_guard<mutex> plan_guard(execution_region_plan_lock);
+		EnsureExecutionRegionPlanBuiltLocked();
+	}
 	initialized = true;
 }
 
@@ -626,9 +636,9 @@ void Pipeline::InvalidateExecutionRegionPlan() {
 }
 
 void Pipeline::BuildExecutionRegionPlanLocked() {
-	// An external-input pipeline is fed by its producers' pushes and never fetches from its own source, so no
-	// region built around the source can run.
-	if (!source || IsExternalInput()) {
+	// An external-input pipeline plans like any other: its producers push the chunks its source would return, and a
+	// chunk step consumes them as they arrive
+	if (!source) {
 		execution_region_plan.reset();
 		execution_region_plan_built = false;
 		execution_runner = ExecutionRunnerKind::VECTORIZED;
@@ -655,7 +665,8 @@ unique_ptr<GlobalSourceState> Pipeline::CreateGlobalSourceState(ClientContext &c
 }
 
 void Pipeline::InitializeSourceStateFromExecutionRegionPlanLocked(ClientContext &client) {
-	if (!source) {
+	if (!source || IsExternalInput()) {
+		// Pushes replace the source: there is no source state to open
 		SetSourceState(nullptr);
 		return;
 	}

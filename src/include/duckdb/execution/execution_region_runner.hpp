@@ -44,12 +44,19 @@ public:
 	ExecutionRunnerResult Execute(ExecutionRegionPipelineAdapter &pipeline, idx_t max_chunks) override;
 };
 
+class ExecutionRegionKernel;
+
 class CompiledVectorizedRunner : public ExecutionRunner {
 public:
 	ExecutionRunnerResult Execute(ExecutionRegionPipelineAdapter &pipeline, idx_t max_chunks) override;
 
 	static CompiledVectorizedRunStatus ExecuteCompiledRegion(ExecutionRegionPipelineAdapter &pipeline, idx_t max_chunks,
 	                                                         PipelineExecuteResult &result);
+	//! A pipeline fed by its producers' pushes never enters a runner: its executor binds the chunk step once, before
+	//! the first push, and every push runs the step
+	static void BindPushedInputStep(ExecutionRegionPipelineAdapter &pipeline);
+	static void RecordPushedInputStepFinished(ExecutionRegionPipelineAdapter &pipeline,
+	                                          const ExecutionRegionKernel &kernel);
 };
 
 ExecutionRunner &GetExecutionRunner(ExecutionRunnerKind kind);

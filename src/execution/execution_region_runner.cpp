@@ -433,6 +433,37 @@ static void RecordCompiledRegionError(ExecutionRegionPipelineAdapter &pipeline, 
 	                                                       0, 0, ExecutionRegionElapsedMicros(trace_start), "error");
 }
 
+//! Binds the kernel to the executor as a chunk step, or leaves the pipeline to the vectorized loop when the kernel
+//! cannot start. Returns the bound step's runtime, or nullptr after a deferral
+static optional_ptr<CompiledRegionRuntime> BindCompiledStep(ExecutionRegionPipelineAdapter &pipeline,
+                                                            ExecutionRegionKernel &kernel, idx_t max_chunks,
+                                                            bool trace_runtime,
+                                                            std::chrono::steady_clock::time_point trace_start) {
+	auto &local_state = pipeline.GetOrCreateLocalState(kernel);
+	auto runtime = make_uniq<CompiledRegionRuntime>(pipeline, kernel, local_state, max_chunks, trace_runtime);
+	string blocker;
+	if (!CompiledEntryReady(pipeline.GetClientContext(), kernel, *runtime, blocker)) {
+		DeferCompiledEntry(pipeline, kernel, blocker, trace_runtime, trace_start);
+		return nullptr;
+	}
+	auto step = kernel.CreateChunkStep(*runtime);
+	optional_ptr<CompiledRegionRuntime> bound_runtime = runtime.get();
+	pipeline.BindCompiledStep(kernel, std::move(runtime), std::move(step));
+	pipeline.AddProfilingAnnotation("jit", "compiled full-pipeline kernel (" + kernel.BackendName() + ")", true);
+	return bound_runtime;
+}
+
+//! One trace event covers every chunk a step ran, recorded once its pipeline finished
+static void RecordCompiledStepFinished(ExecutionRegionPipelineAdapter &pipeline, ExecutionRegionKernel &kernel,
+                                       CompiledRegionRuntime &runtime, const char *reason) {
+	auto &client = pipeline.GetClientContext();
+	auto elapsed_us = runtime.EntryElapsedMicros();
+	ExecutionRegionManager::Get(client).RecordRuntimeEvent(
+	    client, kernel, ExecutionRegionEventStatus::EXECUTED, reason, runtime.SourceContractOutputRows(),
+	    runtime.SinkInputRows(), elapsed_us, CompiledFullPipelineResultToString(ExecutionRegionResult::FINISHED),
+	    runtime.Metrics(elapsed_us));
+}
+
 //! A chunk-step kernel runs inside the executor's own loop, which fetches, advances batches, retries a blocked sink
 //! and finalizes; any executor state is a legal point to continue from. The step stays bound to the executor across
 //! entries, and one trace event covers all of them
@@ -442,25 +473,18 @@ static CompiledVectorizedRunStatus ExecuteCompiledStepRegion(ExecutionRegionPipe
 	auto &client = pipeline.GetClientContext();
 	auto trace_runtime = ExecutionRegionSettings::TraceRuntime(client);
 	auto trace_start = trace_runtime ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point();
-	auto bound_runtime = pipeline.CompiledStepRuntime(kernel);
-	if (!bound_runtime) {
-		auto &local_state = pipeline.GetOrCreateLocalState(kernel);
-		auto runtime = make_uniq<CompiledRegionRuntime>(pipeline, kernel, local_state, max_chunks, trace_runtime);
-		string blocker;
-		if (!CompiledEntryReady(client, kernel, *runtime, blocker)) {
-			return DeferCompiledEntry(pipeline, kernel, blocker, trace_runtime, trace_start);
+	optional_ptr<CompiledRegionRuntime> step_runtime;
+	if (auto bound_runtime = pipeline.CompiledStepRuntime(kernel)) {
+		step_runtime = bound_runtime->Cast<CompiledRegionRuntime>();
+	} else {
+		step_runtime = BindCompiledStep(pipeline, kernel, max_chunks, trace_runtime, trace_start);
+		if (!step_runtime) {
+			return CompiledVectorizedRunStatus::VECTORIZED_DEFERRED;
 		}
-		auto step = kernel.CreateChunkStep(*runtime);
-		bound_runtime = runtime.get();
-		pipeline.BindCompiledStep(kernel, std::move(runtime), std::move(step));
 	}
-	auto &runtime = bound_runtime->Cast<CompiledRegionRuntime>();
+	auto &runtime = *step_runtime;
 	try {
-		{
-			ExecutionRegionSuppressionGuard guard(client);
-			result = pipeline.ExecuteVectorizedPipeline(max_chunks);
-		}
-		pipeline.AddProfilingAnnotation("jit", "compiled full-pipeline kernel (" + kernel.BackendName() + ")", true);
+		result = pipeline.ExecuteVectorizedPipeline(max_chunks);
 		if (trace_runtime) {
 			runtime.AddEntryElapsed(ExecutionRegionElapsedMicros(trace_start));
 			// The executor yields between entries (budget, a blocked source or sink); the step's one event counts them
@@ -469,12 +493,7 @@ static CompiledVectorizedRunStatus ExecuteCompiledStepRegion(ExecutionRegionPipe
 				runtime.RecordJitRuntimePath("chunk_step.entry.interrupted", 1);
 			}
 			if (result == PipelineExecuteResult::FINISHED) {
-				auto elapsed_us = runtime.EntryElapsedMicros();
-				auto compiled_result = PipelineExecuteResultToCompiledFullPipelineResult(result);
-				ExecutionRegionManager::Get(client).RecordRuntimeEvent(
-				    client, kernel, ExecutionRegionEventStatus::EXECUTED, "full pipeline kernel executed",
-				    runtime.SourceContractOutputRows(), runtime.SinkInputRows(), elapsed_us,
-				    CompiledFullPipelineResultToString(compiled_result), runtime.Metrics(elapsed_us));
+				RecordCompiledStepFinished(pipeline, kernel, runtime, "full pipeline kernel executed");
 			}
 		}
 		return CompiledVectorizedRunStatus::EXECUTED;
@@ -484,6 +503,34 @@ static CompiledVectorizedRunStatus ExecuteCompiledStepRegion(ExecutionRegionPipe
 		}
 		throw;
 	}
+}
+
+void CompiledVectorizedRunner::BindPushedInputStep(ExecutionRegionPipelineAdapter &pipeline) {
+	if (pipeline.IsCompiledExecutionSuppressed() || !pipeline.CompiledRunnerSelected()) {
+		return;
+	}
+	auto kernel = pipeline.GetExecutableFullPipelineKernel();
+	if (!kernel || !kernel->SupportsChunkStep()) {
+		// A kernel with its own fetch loop needs a source to fetch from; pushes leave it nothing to fetch
+		return;
+	}
+	auto trace_runtime = ExecutionRegionSettings::TraceRuntime(pipeline.GetClientContext());
+	auto trace_start = trace_runtime ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point();
+	BindCompiledStep(pipeline, *kernel, NumericLimits<idx_t>::Maximum(), trace_runtime, trace_start);
+}
+
+void CompiledVectorizedRunner::RecordPushedInputStepFinished(ExecutionRegionPipelineAdapter &pipeline,
+                                                             const ExecutionRegionKernel &kernel) {
+	if (!ExecutionRegionSettings::TraceRuntime(pipeline.GetClientContext())) {
+		return;
+	}
+	auto runtime = pipeline.CompiledStepRuntime(kernel);
+	auto executable_kernel = pipeline.GetExecutableFullPipelineKernel();
+	if (!runtime || executable_kernel.get() != &kernel) {
+		throw InternalException("pushed-input chunk step finished without a bound runtime of its kernel");
+	}
+	RecordCompiledStepFinished(pipeline, *executable_kernel, runtime->Cast<CompiledRegionRuntime>(),
+	                           "full pipeline kernel executed on pushed input");
 }
 
 //! A kernel whose source is not chunks (the aggregate-state source recipe) fetches from the source contract itself
@@ -514,16 +561,13 @@ static CompiledVectorizedRunStatus ExecuteCompiledLoopRegion(ExecutionRegionPipe
 	try {
 		auto compiled_result = ExecutionRegionResult::NOT_FINISHED;
 		string runtime_reason = "full pipeline kernel executed";
-		{
-			ExecutionRegionSuppressionGuard guard(client);
-			if (!kernel.TryExecuteFullPipeline(runtime, compiled_result)) {
-				throw InternalException("compiled full pipeline kernel returned false at runtime");
-			}
-			result = CompiledFullPipelineResultToPipelineExecuteResult(compiled_result);
-			if (compiled_result == ExecutionRegionResult::FINISHED) {
-				result = pipeline.FlushAndFinalizeAfterCompiledFinish(max_chunks, runtime_reason);
-				compiled_result = PipelineExecuteResultToCompiledFullPipelineResult(result);
-			}
+		if (!kernel.TryExecuteFullPipeline(runtime, compiled_result)) {
+			throw InternalException("compiled full pipeline kernel returned false at runtime");
+		}
+		result = CompiledFullPipelineResultToPipelineExecuteResult(compiled_result);
+		if (compiled_result == ExecutionRegionResult::FINISHED) {
+			result = pipeline.FlushAndFinalizeAfterCompiledFinish(max_chunks, runtime_reason);
+			compiled_result = PipelineExecuteResultToCompiledFullPipelineResult(result);
 		}
 		pipeline.AddProfilingAnnotation("jit", "compiled full-pipeline kernel (" + kernel.BackendName() + ")", true);
 		if (trace_runtime) {
