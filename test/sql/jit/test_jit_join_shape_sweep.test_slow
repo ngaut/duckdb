@@ -1,0 +1,296 @@
+# name: test/sql/jit/test_jit_join_shape_sweep.test_slow
+# description: Plain join, DISTINCT and GROUP BY shapes over TPC-H SF1 at the default cost model: compiled results
+#              match jit_policy='off'. TPC-H's own queries never reached the elided pre-join projection path that seven
+#              of these crashed on
+# group: [jit]
+
+require tpch
+
+statement ok
+LOAD jit_sljit
+
+statement ok
+CALL dbgen(sf=1)
+
+statement ok
+SET threads=4
+
+statement ok
+SET jit_policy='off'
+
+query I rowsort q1
+SELECT count(*) FROM (SELECT DISTINCT o_custkey FROM lineitem JOIN orders ON l_orderkey=o_orderkey)
+----
+
+statement ok
+SET jit_policy='auto'
+
+query I rowsort q1
+SELECT count(*) FROM (SELECT DISTINCT o_custkey FROM lineitem JOIN orders ON l_orderkey=o_orderkey)
+----
+
+statement ok
+SET jit_policy='off'
+
+query I rowsort q2
+SELECT count(*) FROM (SELECT DISTINCT o_orderpriority, l_returnflag FROM lineitem JOIN orders ON l_orderkey=o_orderkey)
+----
+
+statement ok
+SET jit_policy='auto'
+
+query I rowsort q2
+SELECT count(*) FROM (SELECT DISTINCT o_orderpriority, l_returnflag FROM lineitem JOIN orders ON l_orderkey=o_orderkey)
+----
+
+statement ok
+SET jit_policy='off'
+
+query II rowsort q3
+SELECT o_orderpriority, count(*) FROM lineitem JOIN orders ON l_orderkey=o_orderkey GROUP BY 1 ORDER BY 1
+----
+
+statement ok
+SET jit_policy='auto'
+
+query II rowsort q3
+SELECT o_orderpriority, count(*) FROM lineitem JOIN orders ON l_orderkey=o_orderkey GROUP BY 1 ORDER BY 1
+----
+
+statement ok
+SET jit_policy='off'
+
+query II rowsort q4
+SELECT o_orderstatus, sum(l_quantity) FROM lineitem JOIN orders ON l_orderkey=o_orderkey WHERE l_discount > 0.05 GROUP BY 1 ORDER BY 1
+----
+
+statement ok
+SET jit_policy='auto'
+
+query II rowsort q4
+SELECT o_orderstatus, sum(l_quantity) FROM lineitem JOIN orders ON l_orderkey=o_orderkey WHERE l_discount > 0.05 GROUP BY 1 ORDER BY 1
+----
+
+statement ok
+SET jit_policy='off'
+
+query I rowsort q5
+SELECT sum(o_totalprice) FROM lineitem JOIN orders ON l_orderkey=o_orderkey WHERE l_shipmode='AIR'
+----
+
+statement ok
+SET jit_policy='auto'
+
+query I rowsort q5
+SELECT sum(o_totalprice) FROM lineitem JOIN orders ON l_orderkey=o_orderkey WHERE l_shipmode='AIR'
+----
+
+statement ok
+SET jit_policy='off'
+
+query II rowsort q6
+SELECT c_mktsegment, count(DISTINCT o_orderkey) FROM orders JOIN customer ON o_custkey=c_custkey GROUP BY 1 ORDER BY 1
+----
+
+statement ok
+SET jit_policy='auto'
+
+query II rowsort q6
+SELECT c_mktsegment, count(DISTINCT o_orderkey) FROM orders JOIN customer ON o_custkey=c_custkey GROUP BY 1 ORDER BY 1
+----
+
+statement ok
+SET jit_policy='off'
+
+query II rowsort q7
+SELECT n_name, sum(s_acctbal) FROM supplier JOIN nation ON s_nationkey=n_nationkey GROUP BY 1 ORDER BY 1
+----
+
+statement ok
+SET jit_policy='auto'
+
+query II rowsort q7
+SELECT n_name, sum(s_acctbal) FROM supplier JOIN nation ON s_nationkey=n_nationkey GROUP BY 1 ORDER BY 1
+----
+
+statement ok
+SET jit_policy='off'
+
+query II rowsort q8
+SELECT p_brand, sum(ps_supplycost) FROM partsupp JOIN part ON ps_partkey=p_partkey WHERE p_size < 10 GROUP BY 1 ORDER BY 1
+----
+
+statement ok
+SET jit_policy='auto'
+
+query II rowsort q8
+SELECT p_brand, sum(ps_supplycost) FROM partsupp JOIN part ON ps_partkey=p_partkey WHERE p_size < 10 GROUP BY 1 ORDER BY 1
+----
+
+statement ok
+SET jit_policy='off'
+
+query II rowsort q9
+SELECT count(*), sum(l_extendedprice) FROM lineitem JOIN part ON l_partkey=p_partkey WHERE p_container LIKE 'SM%'
+----
+
+statement ok
+SET jit_policy='auto'
+
+query II rowsort q9
+SELECT count(*), sum(l_extendedprice) FROM lineitem JOIN part ON l_partkey=p_partkey WHERE p_container LIKE 'SM%'
+----
+
+statement ok
+SET jit_policy='off'
+
+query II rowsort q10
+SELECT l_shipmode, max(o_orderdate) FROM lineitem JOIN orders ON l_orderkey=o_orderkey GROUP BY 1 ORDER BY 1
+----
+
+statement ok
+SET jit_policy='auto'
+
+query II rowsort q10
+SELECT l_shipmode, max(o_orderdate) FROM lineitem JOIN orders ON l_orderkey=o_orderkey GROUP BY 1 ORDER BY 1
+----
+
+statement ok
+SET jit_policy='off'
+
+query I rowsort q11
+SELECT count(*) FROM (SELECT DISTINCT p_type FROM lineitem JOIN part ON l_partkey=p_partkey WHERE l_quantity > 45)
+----
+
+statement ok
+SET jit_policy='auto'
+
+query I rowsort q11
+SELECT count(*) FROM (SELECT DISTINCT p_type FROM lineitem JOIN part ON l_partkey=p_partkey WHERE l_quantity > 45)
+----
+
+statement ok
+SET jit_policy='off'
+
+query II rowsort q12
+SELECT o_custkey % 10 AS b, count(*) FROM lineitem JOIN orders ON l_orderkey=o_orderkey GROUP BY 1 ORDER BY 1
+----
+
+statement ok
+SET jit_policy='auto'
+
+query II rowsort q12
+SELECT o_custkey % 10 AS b, count(*) FROM lineitem JOIN orders ON l_orderkey=o_orderkey GROUP BY 1 ORDER BY 1
+----
+
+statement ok
+SET jit_policy='off'
+
+query I rowsort q13
+SELECT count(*) FROM lineitem JOIN orders ON l_orderkey=o_orderkey JOIN customer ON o_custkey=c_custkey WHERE c_acctbal > 5000
+----
+
+statement ok
+SET jit_policy='auto'
+
+query I rowsort q13
+SELECT count(*) FROM lineitem JOIN orders ON l_orderkey=o_orderkey JOIN customer ON o_custkey=c_custkey WHERE c_acctbal > 5000
+----
+
+statement ok
+SET jit_policy='off'
+
+query II rowsort q14
+SELECT c_nationkey, count(DISTINCT l_suppkey) FROM lineitem JOIN orders ON l_orderkey=o_orderkey JOIN customer ON o_custkey=c_custkey GROUP BY 1 ORDER BY 1
+----
+
+statement ok
+SET jit_policy='auto'
+
+query II rowsort q14
+SELECT c_nationkey, count(DISTINCT l_suppkey) FROM lineitem JOIN orders ON l_orderkey=o_orderkey JOIN customer ON o_custkey=c_custkey GROUP BY 1 ORDER BY 1
+----
+
+statement ok
+SET jit_policy='off'
+
+query I rowsort q15
+SELECT sum(l_extendedprice * (1 - l_discount)) FROM lineitem JOIN orders ON l_orderkey=o_orderkey WHERE o_orderdate < DATE '1995-01-01' AND l_quantity::INTEGER < 20
+----
+
+statement ok
+SET jit_policy='auto'
+
+query I rowsort q15
+SELECT sum(l_extendedprice * (1 - l_discount)) FROM lineitem JOIN orders ON l_orderkey=o_orderkey WHERE o_orderdate < DATE '1995-01-01' AND l_quantity::INTEGER < 20
+----
+
+statement ok
+SET jit_policy='off'
+
+query II rowsort q16
+SELECT l_linenumber, count(DISTINCT o_clerk) FROM lineitem JOIN orders ON l_orderkey=o_orderkey GROUP BY 1 ORDER BY 1
+----
+
+statement ok
+SET jit_policy='auto'
+
+query II rowsort q16
+SELECT l_linenumber, count(DISTINCT o_clerk) FROM lineitem JOIN orders ON l_orderkey=o_orderkey GROUP BY 1 ORDER BY 1
+----
+
+statement ok
+SET jit_policy='off'
+
+query I rowsort q17
+SELECT count(*) FROM (SELECT l_orderkey, o_custkey FROM lineitem JOIN orders ON l_orderkey=o_orderkey GROUP BY ALL)
+----
+
+statement ok
+SET jit_policy='auto'
+
+query I rowsort q17
+SELECT count(*) FROM (SELECT l_orderkey, o_custkey FROM lineitem JOIN orders ON l_orderkey=o_orderkey GROUP BY ALL)
+----
+
+statement ok
+SET jit_policy='off'
+
+query II rowsort q18
+SELECT s_name, count(*) FROM lineitem JOIN supplier ON l_suppkey=s_suppkey WHERE l_tax > 0.07 GROUP BY 1 ORDER BY 2 DESC, 1 LIMIT 5
+----
+
+statement ok
+SET jit_policy='auto'
+
+query II rowsort q18
+SELECT s_name, count(*) FROM lineitem JOIN supplier ON l_suppkey=s_suppkey WHERE l_tax > 0.07 GROUP BY 1 ORDER BY 2 DESC, 1 LIMIT 5
+----
+
+statement ok
+SET jit_policy='off'
+
+query I rowsort q19
+SELECT count(*) FROM (SELECT DISTINCT o_orderdate FROM lineitem JOIN orders ON l_orderkey=o_orderkey WHERE l_commitdate < l_receiptdate)
+----
+
+statement ok
+SET jit_policy='auto'
+
+query I rowsort q19
+SELECT count(*) FROM (SELECT DISTINCT o_orderdate FROM lineitem JOIN orders ON l_orderkey=o_orderkey WHERE l_commitdate < l_receiptdate)
+----
+
+statement ok
+SET jit_policy='off'
+
+query II rowsort q20
+SELECT min(c_name), max(c_name) FROM orders JOIN customer ON o_custkey=c_custkey WHERE o_totalprice > 400000
+----
+
+statement ok
+SET jit_policy='auto'
+
+query II rowsort q20
+SELECT min(c_name), max(c_name) FROM orders JOIN customer ON o_custkey=c_custkey WHERE o_totalprice > 400000
+----

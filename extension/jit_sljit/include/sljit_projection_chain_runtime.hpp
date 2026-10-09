@@ -88,14 +88,13 @@ static bool SljitProjectionHasVariableWidthOutput(const SljitExecutableRegionOp 
 
 struct SljitPreparedProjectionChainInput {
 	DataChunk *source_chunk = nullptr;
-	optional_ptr<SljitExecutableRegionOp> projection_op;
 	const SelectionVector *selection = nullptr;
 	idx_t count = 0;
 };
 
 static bool SljitPrepareProjectionChainInput(ExecutionRegionRuntime &runtime, SljitRegionExecutionScratch &scratch,
-                                             vector<SljitExecutableRegionOp> &ops, idx_t projection_idx,
-                                             SljitExecutableRegionOp &semantic_projection,
+                                             vector<SljitExecutableRegionOp> &ops,
+                                             const SljitExecutableRegionOp &projection,
                                              const SljitRuntimeBatchView &input,
                                              SljitDataChunkBatch &selected_hash_join_input,
                                              SljitPreparedProjectionChainInput &prepared) {
@@ -103,9 +102,8 @@ static bool SljitPrepareProjectionChainInput(ExecutionRegionRuntime &runtime, Sl
 	prepared.selection = input.selection;
 	prepared.count = input.count;
 	if (input.HasHashJoinSelection()) {
-		if (!SljitTryPrepareSelectedHashJoinProjectionInput(runtime, scratch, ops, projection_idx, semantic_projection,
-		                                                    input, selected_hash_join_input, prepared.source_chunk,
-		                                                    prepared.projection_op)) {
+		if (!SljitTryPrepareSelectedHashJoinProjectionInput(runtime, scratch, ops, projection, input,
+		                                                    selected_hash_join_input, prepared.source_chunk)) {
 			return false;
 		}
 		prepared.selection = nullptr;
@@ -113,11 +111,7 @@ static bool SljitPrepareProjectionChainInput(ExecutionRegionRuntime &runtime, Sl
 		return true;
 	}
 	prepared.source_chunk = &SljitBindRuntimeBatchInput(input, "SLJIT projection-chain primitive");
-	if (input.count == 0) {
-		return false;
-	}
-	prepared.projection_op = &semantic_projection;
-	return true;
+	return input.count > 0;
 }
 
 static bool SljitMaterializeProjectionChainStep(ExecutionRegionRuntime &runtime, SljitRegionExecutionScratch &scratch,
@@ -125,12 +119,12 @@ static bool SljitMaterializeProjectionChainStep(ExecutionRegionRuntime &runtime,
                                                 const SljitRuntimeBatchView &input,
                                                 SljitDataChunkBatch &selected_hash_join_input, DataChunk &output) {
 	SljitPreparedProjectionChainInput prepared;
-	if (!SljitPrepareProjectionChainInput(runtime, scratch, ops, projection_idx, ops[projection_idx], input,
-	                                      selected_hash_join_input, prepared)) {
+	if (!SljitPrepareProjectionChainInput(runtime, scratch, ops, ops[projection_idx], input, selected_hash_join_input,
+	                                      prepared)) {
 		return false;
 	}
 	output.Reset();
-	SljitExecuteProjection(scratch, projection_idx, *prepared.projection_op, *prepared.source_chunk, output,
+	SljitExecuteProjection(scratch, projection_idx, ops[projection_idx], *prepared.source_chunk, output,
 	                       prepared.selection, prepared.count);
 	return output.size() > 0;
 }
@@ -228,11 +222,11 @@ static bool SljitExecuteProjectionChainPrimitive(
 		                                                      direct_handoff, execute_output_batch);
 	}
 	SljitPreparedProjectionChainInput prepared;
-	if (!SljitPrepareProjectionChainInput(runtime, scratch, ops, primitive.final_projection_idx, *projection_op, input,
-	                                      selected_hash_join_input, prepared)) {
+	if (!SljitPrepareProjectionChainInput(runtime, scratch, ops, *projection_op, input, selected_hash_join_input,
+	                                      prepared)) {
 		return false;
 	}
-	auto &bound_projection_op = *prepared.projection_op;
+	auto &bound_projection_op = *projection_op;
 	auto &source_chunk = *prepared.source_chunk;
 	const auto selection = prepared.selection;
 	const auto count = prepared.count;

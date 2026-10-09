@@ -9,6 +9,7 @@
 #pragma once
 
 #include "sljit_executable_expression_codegen.hpp"
+#include "sljit_hash_join_output_source_runtime.hpp"
 #include "sljit_hash_join_probe_runtime.hpp"
 #include "sljit_projection_source_runtime.hpp"
 #include "sljit_runtime_batch_view.hpp"
@@ -164,52 +165,6 @@ static bool SljitTryBuildHashJoinMappedProjection(
 	return mapped_projection.projections.size() == projection_op.projections.size();
 }
 
-static bool SljitTryBuildHashJoinMappedFilter(const vector<idx_t> &source_map,
-                                              const ExecutionHashJoinProbeBinding &source_binding,
-                                              SljitExecutableRegionOp &filter_op,
-                                              SljitExecutableRegionOp &mapped_filter, optional_ptr<string> blocker) {
-	if (source_map.size() > source_binding.output_types.size()) {
-		if (blocker) {
-			*blocker = "source_map_shape";
-		}
-		return false;
-	}
-	vector<idx_t> full_source_map = source_map;
-	full_source_map.reserve(source_binding.output_types.size());
-	for (idx_t source_idx = source_map.size(); source_idx < source_binding.output_types.size(); source_idx++) {
-		full_source_map.push_back(source_idx);
-	}
-
-	D_ASSERT(filter_op.filter);
-	auto mapped_plan = filter_op.filter->expression.plan.Copy(true, false);
-	idx_t failed_source_index = DConstants::INVALID_INDEX;
-	if (!SljitTryRemapHashJoinProjectionPlanSources(full_source_map, mapped_plan,
-	                                                optional_ptr<idx_t>(&failed_source_index))) {
-		if (blocker) {
-			const auto mapped_source_index = failed_source_index < full_source_map.size()
-			                                     ? full_source_map[failed_source_index]
-			                                     : DConstants::INVALID_INDEX;
-			*blocker = "remap_filter_source_" + std::to_string(failed_source_index) + "_map_size_" +
-			           std::to_string(full_source_map.size()) + "_mapped_" + std::to_string(mapped_source_index);
-		}
-		return false;
-	}
-
-	mapped_filter = SljitExecutableRegionOp();
-	mapped_filter.kind = SljitNativeRegionOpKind::FILTER;
-	mapped_filter.input_types = source_binding.output_types;
-	mapped_filter.output_types = source_binding.output_types;
-	string compile_error;
-	if (!SljitPrepareAndCompileExecutableFilter(mapped_plan, mapped_filter, compile_error)) {
-		if (blocker) {
-			*blocker = "compile_mapped_filter_" + compile_error;
-		}
-		mapped_filter = SljitExecutableRegionOp();
-		return false;
-	}
-	return true;
-}
-
 static bool SljitTryCollectHashJoinProjectionExpressionSources(const SljitExecutableRegionExpression &expr,
                                                                idx_t input_column_count, vector<uint8_t> &referenced) {
 	referenced.assign(input_column_count, 0);
@@ -328,17 +283,18 @@ static bool SljitSelectedHashJoinSelectionIsIdentity(const SelectionVector &sele
 	return true;
 }
 
-static bool SljitTryBuildSelectedHashJoinOutputColumns(const ExecutionHashJoinProbeBinding &binding,
-                                                       const SljitRuntimeBatchView &selected_input,
+//! Builds the referenced join output columns of the rows a selection keeps. The output source supplies the chunk the
+//! probe's output indices address and the exact RHS aliases in that chunk's layout; the selection supplies the rows
+static bool SljitTryBuildSelectedHashJoinOutputColumns(const SljitHashJoinOutputSource &source,
+                                                       const SljitRuntimeHashJoinSelection &selected,
                                                        const vector<uint8_t> &referenced_columns, DataChunk &result,
                                                        bool allow_regular_rhs_gather) {
-	SljitRuntimeHashJoinSelection selected;
-	if (!binding.ready || !selected_input.TryGetHashJoinSelection(selected) ||
-	    referenced_columns.size() != binding.output_types.size() ||
+	auto &binding = source.binding;
+	if (!binding.ready || referenced_columns.size() != binding.output_types.size() ||
 	    result.ColumnCount() != binding.output_types.size()) {
 		return false;
 	}
-	auto &source_chunk = selected.Input();
+	auto &source_chunk = source.input;
 	const auto count = selected.count;
 	const bool all_probe_rows_selected =
 	    count == source_chunk.size() && SljitSelectedHashJoinSelectionIsIdentity(selected.MatchSelection(), count);
@@ -367,8 +323,8 @@ static bool SljitTryBuildSelectedHashJoinOutputColumns(const ExecutionHashJoinPr
 				continue;
 			}
 			if (binding.layout_kind == ExecutionHashJoinProbeLayoutKind::REGULAR_HASH_TABLE) {
-				if (selected.ExactSourceFilterMatches()) {
-					auto &rhs_output_probe_input_indices = selected.output_proof.ExactRHSOutputProbeInputIndices();
+				if (source.output_proof.ExactSourceFilterMatches()) {
+					auto &rhs_output_probe_input_indices = source.output_proof.ExactRHSOutputProbeInputIndices();
 					if (rhs_idx >= rhs_output_probe_input_indices.size()) {
 						return false;
 					}
@@ -407,18 +363,18 @@ static bool SljitTryBuildSelectedHashJoinOutputColumns(const ExecutionHashJoinPr
 	return true;
 }
 
-static bool SljitTryMaterializeSelectedHashJoinOutputColumns(const ExecutionHashJoinProbeBinding &binding,
-                                                             const SljitRuntimeBatchView &selected_input,
+static bool SljitTryMaterializeSelectedHashJoinOutputColumns(const SljitHashJoinOutputSource &source,
+                                                             const SljitRuntimeHashJoinSelection &selected,
                                                              const vector<uint8_t> &referenced_columns,
                                                              DataChunk &result) {
-	return SljitTryBuildSelectedHashJoinOutputColumns(binding, selected_input, referenced_columns, result, true);
+	return SljitTryBuildSelectedHashJoinOutputColumns(source, selected, referenced_columns, result, true);
 }
 
-static bool SljitTryBuildSelectedHashJoinOutputColumnViews(const ExecutionHashJoinProbeBinding &binding,
-                                                           const SljitRuntimeBatchView &selected_input,
+static bool SljitTryBuildSelectedHashJoinOutputColumnViews(const SljitHashJoinOutputSource &source,
+                                                           const SljitRuntimeHashJoinSelection &selected,
                                                            const vector<uint8_t> &referenced_columns,
                                                            DataChunk &result) {
-	return SljitTryBuildSelectedHashJoinOutputColumns(binding, selected_input, referenced_columns, result, false);
+	return SljitTryBuildSelectedHashJoinOutputColumns(source, selected, referenced_columns, result, false);
 }
 
 } // namespace duckdb

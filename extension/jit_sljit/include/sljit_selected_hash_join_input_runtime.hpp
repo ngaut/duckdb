@@ -37,64 +37,29 @@ SljitTryGetSelectedHashJoinSourceBinding(const SljitRuntimeBatchView &selected_i
 	return &source_binding;
 }
 
+//! Materializes the join output columns a projection reads for the rows of a selected probe view
 static bool SljitTryPrepareSelectedHashJoinProjectionInput(
     ExecutionRegionRuntime &runtime, SljitRegionExecutionScratch &scratch, vector<SljitExecutableRegionOp> &ops,
-    idx_t projection_idx, SljitExecutableRegionOp &semantic_projection, const SljitRuntimeBatchView &input,
-    SljitDataChunkBatch &selected_hash_join_input, DataChunk *&input_chunk,
-    optional_ptr<SljitExecutableRegionOp> &projection_op) {
+    const SljitExecutableRegionOp &projection, const SljitRuntimeBatchView &input,
+    SljitDataChunkBatch &selected_hash_join_input, DataChunk *&input_chunk) {
 	SljitRuntimeHashJoinSelection selected;
 	if (!input.TryGetHashJoinSelection(selected)) {
 		return false;
 	}
-	if (selected.hash_join_idx >= ops.size() || projection_idx >= ops.size()) {
-		throw InternalException("SLJIT selected projection input has invalid operator indexes");
+	if (selected.hash_join_idx >= ops.size()) {
+		throw InternalException("SLJIT selected projection input has an invalid hash join index");
 	}
-	auto source_binding =
-	    SljitTryGetSelectedHashJoinSourceBinding(input, ops.size(), scratch, "SLJIT selected projection input");
-	if (!source_binding) {
-		return false;
-	}
-
-	projection_op = &semantic_projection;
-	if (selected.output_column_map) {
-		auto &cache = scratch.SelectedProjectionCache(projection_idx);
-		const auto cache_matches = cache.mapped_projection && cache.semantic_projection == &semantic_projection &&
-		                           cache.source_map == *selected.output_column_map &&
-		                           cache.input_types == source_binding->output_types;
-		if (!cache_matches) {
-			string blocker;
-			auto mapped_projection = make_uniq<SljitExecutableRegionOp>();
-			if (!SljitTryBuildHashJoinMappedProjection(*selected.output_column_map, *source_binding,
-			                                           semantic_projection, *mapped_projection,
-			                                           optional_ptr<string>(&blocker))) {
-				if (blocker.empty()) {
-					blocker = "mapped_projection";
-				}
-				throw InternalException("SLJIT selected projection input could not map projection sources: %s",
-				                        blocker.c_str());
-			}
-			cache.semantic_projection = &semantic_projection;
-			cache.source_map = *selected.output_column_map;
-			cache.input_types = source_binding->output_types;
-			cache.mapped_projection = std::move(mapped_projection);
-			RecordSljitRegionRuntimePath(runtime, semantic_projection.kind, "selected_projection_cache_build");
-		} else {
-			RecordSljitRegionRuntimePath(runtime, semantic_projection.kind, "selected_projection_cache_hit");
-		}
-		projection_op = cache.mapped_projection.get();
-	}
-
+	auto source = SljitBindSelectedHashJoinOutputSource(runtime, ops, scratch, selected);
+	auto &output_types = source.binding.output_types;
 	vector<uint8_t> referenced_columns;
-	if (!SljitBuildProjectionSourceColumnSet(*projection_op, source_binding->output_types.size(), nullptr, nullptr,
-	                                         referenced_columns)) {
+	if (!SljitBuildProjectionSourceColumnSet(projection, output_types.size(), nullptr, nullptr, referenced_columns)) {
 		throw InternalException("SLJIT selected projection input could not collect projection sources");
 	}
 
-	selected_hash_join_input.Ensure(runtime.GetAllocator(), source_binding->output_types);
+	selected_hash_join_input.Ensure(runtime.GetAllocator(), output_types);
 	auto &selected_output = selected_hash_join_input.chunk;
 	selected_output.Reset();
-	if (!SljitTryMaterializeSelectedHashJoinOutputColumns(*source_binding, input, referenced_columns,
-	                                                      selected_output)) {
+	if (!SljitTryMaterializeSelectedHashJoinOutputColumns(source, selected, referenced_columns, selected_output)) {
 		throw InternalException("SLJIT selected projection input could not materialize hash-join output columns");
 	}
 	input_chunk = &selected_output;
@@ -214,9 +179,9 @@ private:
 		MarkTargetProbeInputColumns(*target_binding, referenced_columns, include_lhs_output_columns, context);
 		auto selected = selected_input.BindHashJoinSelection(context);
 		const auto source_hash_join_idx = selected.hash_join_idx;
+		auto source = SljitBindSelectedHashJoinOutputSource(runtime, ops, scratch, selected);
 		auto view_stage_start = SljitRegionStageStart(runtime);
-		if (SljitTryBuildSelectedHashJoinOutputColumnViews(*source_binding, selected_input, referenced_columns,
-		                                                   compact_input)) {
+		if (SljitTryBuildSelectedHashJoinOutputColumnViews(source, selected, referenced_columns, compact_input)) {
 			RecordSljitRegionStageRuntime(runtime, source_hash_join_idx, ops[source_hash_join_idx].kind, view_stage,
 			                              view_stage_start);
 			join_input = &compact_input;
@@ -229,8 +194,8 @@ private:
 		    runtime, source_hash_join_idx, ops[source_hash_join_idx].kind, "selected_view_materialization",
 		    materialize_stage_start, [&](optional_ptr<ExecutionOperatorStageRecorder> recorder) {
 			    (void)recorder;
-			    return SljitTryMaterializeSelectedHashJoinOutputColumns(*source_binding, selected_input,
-			                                                            referenced_columns, compact_input);
+			    return SljitTryMaterializeSelectedHashJoinOutputColumns(source, selected, referenced_columns,
+			                                                            compact_input);
 		    });
 		if (!materialized) {
 			RecordSljitRegionStageRuntime(runtime, source_hash_join_idx, ops[source_hash_join_idx].kind,

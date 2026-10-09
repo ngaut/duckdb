@@ -244,14 +244,15 @@ private:
 		if (!projected_count_star_group_projection) {
 			throw InternalException("SLJIT projected count-star group projection is not prepared");
 		}
+		auto &group_projection = *projected_count_star_group_projection;
 		SljitPreparedProjectedAggregateInput prepared;
-		if (!SljitPrepareProjectedAggregateInput(
-		        runtime, ops, scratch, primitive, input, *projected_count_star_group_projection,
-		        projected_count_star_selected_hash_join_input, "SLJIT projected grouped count-star update", prepared)) {
+		if (!SljitPrepareProjectedAggregateInput(runtime, ops, scratch, input, group_projection,
+		                                         projected_count_star_selected_hash_join_input,
+		                                         "SLJIT projected grouped count-star update", prepared)) {
 			return true;
 		}
-		if (SljitTryPreaggregateProjectedCountStarGroups(*prepared.projection_op, *prepared.source_chunk,
-		                                                 prepared.selection, prepared.count, preaggregated_groups,
+		if (SljitTryPreaggregateProjectedCountStarGroups(group_projection, *prepared.source_chunk, prepared.selection,
+		                                                 prepared.count, preaggregated_groups,
 		                                                 preaggregated_count_deltas)) {
 			RecordSljitRegionStageRuntime(runtime, aggregate_idx, aggregate_op.kind,
 			                              "primitive_projected_preaggregate_count_star_groups",
@@ -266,7 +267,7 @@ private:
 		}
 
 		preaggregated_groups.Reset();
-		SljitExecuteProjectionExpression(prepared.projection_op->projections[0], *prepared.source_chunk,
+		SljitExecuteProjectionExpression(group_projection.projections[0], *prepared.source_chunk,
 		                                 preaggregated_groups.data[0], prepared.selection, prepared.count,
 		                                 projected_count_star_group_scratch);
 		preaggregated_groups.SetChildCardinality(prepared.count);

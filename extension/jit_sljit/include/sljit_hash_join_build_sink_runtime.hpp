@@ -72,9 +72,7 @@ private:
 			throw InternalException("SLJIT hash join build sink received an invalid selected producer");
 		}
 		auto &hash_join_op = ops[hash_join_idx];
-		auto source = SljitBindHashJoinOutputSource(runtime, ops, scratch, hash_join_idx, selected.SourceInput(),
-		                                            selected.output_proof, selected.OutputColumnMap(),
-		                                            selected.output_projection_idx);
+		auto source = SljitBindSelectedHashJoinOutputSource(runtime, ops, scratch, selected);
 		auto &join_output = scratch.TemporaryChunk(hash_join_idx);
 		vector<uint8_t> required_columns;
 		if (primitive.HasProjection()) {
@@ -87,10 +85,9 @@ private:
 			throw InternalException("SLJIT hash join build sink could not bind required input columns");
 		}
 		join_output.Reset();
-		if (SljitTryMaterializeHashJoinRequiredSources(runtime, hash_join_idx, hash_join_op, source,
-		                                               selected.MatchSelection(), selected.BuildSelection(),
-		                                               selected.RowPointers(), selected.count, required_columns,
-		                                               join_output)) {
+		if (SljitTryMaterializeHashJoinRequiredSources(
+		        runtime, hash_join_idx, hash_join_op, source, selected.MatchSelection(), selected.BuildSelection(),
+		        selected.RowPointers(), selected.count, required_columns, join_output)) {
 			RecordSljitRegionRuntimePath(runtime, sink_op.kind, "selected_required_sources", join_output.size());
 			sink_input = &join_output;
 			return true;

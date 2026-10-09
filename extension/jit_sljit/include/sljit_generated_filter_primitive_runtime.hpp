@@ -21,7 +21,6 @@ public:
 	                                     SljitRegionExecutionScratch &scratch_p)
 	    : runtime(runtime_p), ops(ops_p), scratch(scratch_p) {
 		selected_hash_join_filter_inputs.resize(ops.size());
-		selected_hash_join_filter_caches.resize(ops.size());
 	}
 
 	template <class EXECUTE_OUTPUT_VIEW>
@@ -33,9 +32,8 @@ public:
 			if (!selected_hash_join_filter_input) {
 				selected_hash_join_filter_input = make_uniq<SljitDataChunkBatch>();
 			}
-			auto &cache = selected_hash_join_filter_caches[step.generated_filter.filter_idx];
 			if (!SljitExecuteSelectedHashJoinGeneratedFilterPrimitive(runtime, scratch, ops, step.generated_filter,
-			                                                          input, *selected_hash_join_filter_input, cache,
+			                                                          input, *selected_hash_join_filter_input,
 			                                                          filtered_input)) {
 				return false;
 			}
@@ -57,7 +55,6 @@ private:
 	vector<SljitExecutableRegionOp> &ops;
 	SljitRegionExecutionScratch &scratch;
 	vector<unique_ptr<SljitDataChunkBatch>> selected_hash_join_filter_inputs;
-	vector<SljitSelectedHashJoinFilterCache> selected_hash_join_filter_caches;
 };
 
 } // namespace duckdb

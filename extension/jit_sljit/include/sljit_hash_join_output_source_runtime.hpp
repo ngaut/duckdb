@@ -10,6 +10,7 @@
 
 #include "sljit_projection_executor_runtime.hpp"
 #include "sljit_region_runtime_state.hpp"
+#include "sljit_runtime_batch_view.hpp"
 
 #include "duckdb/execution/execution_hash_join_runtime.hpp"
 #include "duckdb/execution/execution_region_runtime.hpp"
@@ -50,9 +51,9 @@ SljitBindHashJoinOutputSource(ExecutionRegionRuntime &runtime, vector<SljitExecu
 	auto &hash_join_op = ops[hash_join_idx];
 	auto &output_binding = scratch.OutputOperatorBinding(hash_join_idx);
 	if (!scratch.HasOutputOperatorBinding(hash_join_idx)) {
-		auto bind_result = runtime.ExecutionOperators().BindOperator(
-		    hash_join_op.operator_index, projected_input, hash_join_op.hash_join_probe.plan.operator_info,
-		    output_binding);
+		auto bind_result =
+		    runtime.ExecutionOperators().BindOperator(hash_join_op.operator_index, projected_input,
+		                                              hash_join_op.hash_join_probe.plan.operator_info, output_binding);
 		if (bind_result != ExecutionOperatorBindResult::READY || !output_binding.hash_join_probe.ready) {
 			throw InternalException("SLJIT hash join output source could not bind the probe to its projected input: %s",
 			                        output_binding.blocker);
@@ -72,6 +73,16 @@ SljitBindHashJoinOutputSource(ExecutionRegionRuntime &runtime, vector<SljitExecu
 		                                         output_proof.match_selection_is_identity);
 	}
 	return SljitHashJoinOutputSource {projected_input, output_probe, output_proof};
+}
+
+//! The output source of a selected probe view: the chunk the probe ran on, or the elided projection over it
+static SljitHashJoinOutputSource SljitBindSelectedHashJoinOutputSource(ExecutionRegionRuntime &runtime,
+                                                                       vector<SljitExecutableRegionOp> &ops,
+                                                                       SljitRegionExecutionScratch &scratch,
+                                                                       const SljitRuntimeHashJoinSelection &selected) {
+	return SljitBindHashJoinOutputSource(runtime, ops, scratch, selected.hash_join_idx, selected.SourceInput(),
+	                                     selected.output_proof, selected.OutputColumnMap(),
+	                                     selected.output_projection_idx);
 }
 
 } // namespace duckdb

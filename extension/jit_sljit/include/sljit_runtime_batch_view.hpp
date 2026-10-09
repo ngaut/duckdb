@@ -29,18 +29,9 @@ struct SljitRuntimeHashJoinSelection {
 	idx_t output_projection_idx = DConstants::INVALID_INDEX;
 	ExecutionHashJoinProbeOutputProof output_proof;
 
-	//! The chunk the probe ran on, whose columns its output indices address. A selection probing the source of an
-	//! elided pre-join projection has no such chunk: its consumers either translate through OutputColumnMap() over
-	//! SourceInput(), or read SljitBindHashJoinOutputSource
-	DataChunk &Input() const {
-		if (output_column_map) {
-			throw InternalException("SLJIT hash-join selection over an elided projection has no output-layout input");
-		}
-		return SourceInput();
-	}
-
 	//! The chunk the probe ran on. Under an elided pre-join projection this is the projection's source, which the
-	//! probe's output indices address only through OutputColumnMap()
+	//! probe's output indices address only through OutputColumnMap(); consumers that index the probe's output read
+	//! SljitBindSelectedHashJoinOutputSource instead
 	DataChunk &SourceInput() const {
 		if (!chunk) {
 			throw InternalException("SLJIT runtime hash-join selection has no input chunk");
