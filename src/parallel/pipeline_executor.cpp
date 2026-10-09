@@ -533,7 +533,10 @@ PipelineExecuteResult PipelineExecutor::ExecuteVectorizedPipeline(idx_t max_chun
 
 		if (result == OperatorResultType::FINISHED) {
 			D_ASSERT(in_process_operators.empty());
+			// A finished sink takes no further batch: an advance still pending behind the flush that blocked on these
+			// rows is moot, and the pipeline finishes through FlushAndFinalize's final advance
 			exhausted_pipeline = true;
+			next_batch_blocked = false;
 		}
 	} while (chunk_budget.Next());
 
