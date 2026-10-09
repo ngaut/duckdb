@@ -540,15 +540,7 @@ public:
 				return;
 			}
 
-			if (data_p.decline_new_row_group) {
-				// a runner switch at a row-group boundary: drain without claiming the next assignment
-				data_p.declined_new_row_group = true;
-				return;
-			}
 			const bool claimed = ClaimAssignment(context, l_state);
-			if (claimed) {
-				data_p.new_row_groups_claimed++;
-			}
 			if (data_p.results_execution_mode == AsyncResultsExecutionMode::TASK_EXECUTOR) {
 				// We can avoid looping, and just return as appropriate
 				data_p.async_result = claimed ? AsyncResultType::HAVE_MORE_OUTPUT : AsyncResultType::FINISHED;

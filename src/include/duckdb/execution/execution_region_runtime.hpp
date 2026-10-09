@@ -101,19 +101,18 @@ class ExecutionRegionRuntime {
 public:
 	virtual ~ExecutionRegionRuntime();
 
+	template <class TARGET>
+	TARGET &Cast() {
+		DynamicCastCheck<TARGET>(this);
+		return reinterpret_cast<TARGET &>(*this);
+	}
+
 	virtual idx_t MaxChunks() const = 0;
 	virtual idx_t MaxThreads() const = 0;
 	virtual Allocator &GetAllocator() = 0;
 	virtual ExecutionRegionLocalState &LocalState() = 0;
 	virtual SourceResultType FetchSourceContract(DataChunk *&result) = 0;
 	virtual SourceResultType FetchPrimitiveAggregateStateSourceContract(ExecutionAggregateStateScanBatch *&result) = 0;
-	//! Moves a partition-aware sink to the partition of a fetched source chunk. Call it right after the fetch, while
-	//! the source still describes that chunk. BLOCKED leaves the chunk unprocessed: the kernel yields, and its next
-	//! fetch returns the same chunk.
-	virtual SinkNextBatchType AdvanceSinkBatch(DataChunk &source_chunk, bool have_more_output) = 0;
-	//! Whether AdvanceSinkBatch for this source chunk moves the sink to another partition. The sink takes rows under
-	//! the partition current when they sink, so rows a kernel holds back from earlier source chunks sink first.
-	virtual bool AdvancesSinkBatch(DataChunk &source_chunk, bool have_more_output) = 0;
 	virtual ExecutionOperatorRuntime &ExecutionOperators() = 0;
 	virtual bool TraceRuntime() const = 0;
 	virtual void RecordGeneratedStageRuntime(ExecutionRegionStageId stage, int64_t runtime_time_us,
@@ -124,21 +123,6 @@ public:
 	virtual void RecordJitRuntimeDelegation(const char *delegation, idx_t count = 1);
 	virtual void RecordLazyCodegen(const ExecutionRegionLazyCodegenMetrics &metrics);
 	virtual bool TryMarkOnce(ExecutionRegionRuntimeOnceFlag flag, idx_t index);
-	//! Request a handoff to the vectorized continuation. Only legal while
-	//! CanDeferAtEntry() holds — afterwards the source contract cursor can hold a
-	//! partially-read row group that a handoff would silently abandon, so a
-	//! mid-stream request throws.
-	virtual void Defer(string reason) = 0;
-	virtual const string &DeferredReason() const = 0;
-	//! True until the source contract has been touched for this pipeline.
-	virtual bool CanDeferAtEntry() const = 0;
-	//! Whether this execution can hand the pipeline over to the vectorized runner mid-query, so a
-	//! sink can receive rows from both runners. Sinks that store a producer-computed hash must fall
-	//! back to the canonical one when this holds, or the two runners' hashes disagree for one key.
-	//! Conservative by default: only a runtime that knows its handoff protocol may relax it.
-	virtual bool RunnerHandoffPossible() const {
-		return true;
-	}
 };
 
 } // namespace duckdb

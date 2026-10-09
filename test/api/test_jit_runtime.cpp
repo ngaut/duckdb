@@ -310,10 +310,11 @@ TEST_CASE("JIT blocked append sink transfers retry ownership to the core executo
 		REQUIRE(present);
 	}
 
+	// The compiled step ran while the sink blocked: the executor yielded to the result reader mid-pipeline
 	bool found_interrupted_native_sink = false;
 	for (auto &event : manager.GetEvents()) {
 		if (IsSljitRegionEvent(event) && EventPhase(event) == "runtime" && EventStatus(event) == "executed" &&
-		    EventExecutionMode(event) == "native" && event.runtime_result == "interrupted" &&
+		    EventExecutionMode(event) == "native" && HasInterruptedChunkStepEntry(event) &&
 		    StringUtil::Contains(event.reason, "full pipeline kernel executed")) {
 			found_interrupted_native_sink = true;
 			REQUIRE(event.output_rows > 0);
@@ -390,12 +391,56 @@ TEST_CASE("JIT blocked append sink keeps the rest of a fanning-out hash join pro
 		bool found_interrupted_kernel = false;
 		for (auto &event : manager.GetEvents()) {
 			if (IsSljitRegionEvent(event) && EventPhase(event) == "runtime" && EventStatus(event) == "executed" &&
-			    EventExecutionMode(event) == "native" && event.runtime_result == "interrupted") {
+			    EventExecutionMode(event) == "native" && HasInterruptedChunkStepEntry(event)) {
 				found_interrupted_kernel = true;
 			}
 		}
 		REQUIRE(found_interrupted_kernel);
 	}
+}
+
+TEST_CASE("JIT chunk step sinks the rows it holds at the end into a blocked streaming sink", "[api][jit]") {
+	DuckDB db;
+	Connection con(db);
+	auto &manager = ExecutionRegionManager::Get(*con.context);
+
+	LoadSljit(con);
+	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_held_rows_profit AS "
+	                          "SELECT ('n' || (i % 25))::VARCHAR AS nation, (1992 + i % 7)::BIGINT AS o_year, "
+	                          "(i % 1000)::DECIMAL(15,2) AS amount FROM range(1000000) tbl(i)"));
+	ConfigureSljitForCoverageSettings(con, true, true, true, 10000, 1);
+
+	// The sorted groups leave the ORDER BY source as one small chunk, which the step batches and holds until the
+	// source ends. Its final flush is the stream's first chunk, and the first chunk parks until the reader decides how
+	// to consume the result: the sink blocks inside the final flush
+	const string sql = "SELECT nation, o_year, sum(amount) AS sum_profit FROM jit_held_rows_profit "
+	                   "GROUP BY nation, o_year ORDER BY nation, o_year DESC";
+	auto stream = [&]() {
+		vector<string> rows;
+		auto result = con.SendQuery(sql);
+		REQUIRE_NO_FAIL(*result);
+		REQUIRE(result->GetResultType() == QueryResultType::STREAM_RESULT);
+		while (auto chunk = result->Fetch()) {
+			for (idx_t row_idx = 0; row_idx < chunk->size(); row_idx++) {
+				rows.push_back(chunk->GetValue(0, row_idx).ToString() + "|" + chunk->GetValue(1, row_idx).ToString() +
+				               "|" + chunk->GetValue(2, row_idx).ToString());
+			}
+		}
+		REQUIRE_NO_FAIL(*result);
+		return rows;
+	};
+	REQUIRE_NO_FAIL(con.Query("SET jit_policy='off'"));
+	auto expected = stream();
+	REQUIRE(expected.size() == 175);
+	REQUIRE_NO_FAIL(con.Query("SET jit_policy='auto'"));
+	ClearJitTrace(manager);
+	auto actual = stream();
+	REQUIRE(actual == expected);
+	RequireJitEvent(manager, [](const ExecutionRegionEvent &event) {
+		return IsCompiledSljitRegionEvent(event) &&
+		       StringUtil::Contains(event.pipeline_shape, "source:source:ORDER_BY:source-contract") &&
+		       StringUtil::Contains(event.pipeline_shape, "sink:sink:RESULT_COLLECTOR");
+	});
 }
 
 TEST_CASE("JIT full pipeline uses append sink contract for CTE materialization", "[api][jit]") {

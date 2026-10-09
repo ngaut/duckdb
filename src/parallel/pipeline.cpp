@@ -66,7 +66,6 @@ TaskExecutionResult PipelineTask::ExecuteTask(TaskExecutionMode mode) {
 
 		switch (res) {
 		case PipelineExecuteResult::NOT_FINISHED:
-		case PipelineExecuteResult::RUNNER_HANDOFF:
 			return TaskExecutionResult::TASK_NOT_FINISHED;
 		case PipelineExecuteResult::INTERRUPTED:
 			return TaskExecutionResult::TASK_BLOCKED;
@@ -78,8 +77,6 @@ TaskExecutionResult PipelineTask::ExecuteTask(TaskExecutionMode mode) {
 		switch (res) {
 		case PipelineExecuteResult::NOT_FINISHED:
 			throw InternalException("Execute without limit should not return NOT_FINISHED");
-		case PipelineExecuteResult::RUNNER_HANDOFF:
-			throw InternalException("Execute without limit should consume runner handoffs");
 		case PipelineExecuteResult::INTERRUPTED:
 			return TaskExecutionResult::TASK_BLOCKED;
 		case PipelineExecuteResult::FINISHED:

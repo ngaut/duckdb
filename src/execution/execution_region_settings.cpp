@@ -15,22 +15,6 @@ bool ExecutionRegionSettings::DumpIR(ClientContext &context) {
 	return Settings::Get<JitDumpIrSetting>(context);
 }
 
-bool ExecutionRegionSettings::AdaptiveAb(ClientContext &context) {
-	return Settings::Get<JitAdaptiveAbSetting>(context);
-}
-
-idx_t ExecutionRegionSettings::AdaptiveAbMarginBasisPoints(ClientContext &context) {
-	return Settings::Get<JitAdaptiveAbMarginBasisPointsSetting>(context);
-}
-
-idx_t ExecutionRegionSettings::AdaptiveAbBandBasisPoints(ClientContext &context) {
-	return Settings::Get<JitAdaptiveAbBandBasisPointsSetting>(context);
-}
-
-idx_t ExecutionRegionSettings::DebugForceDeferAfterChunks(ClientContext &context) {
-	return Settings::Get<JitDebugForceDeferAfterChunksSetting>(context);
-}
-
 bool ExecutionRegionSettings::DebugForceEntryDefer(ClientContext &context) {
 	return Settings::Get<JitDebugForceEntryDeferSetting>(context);
 }

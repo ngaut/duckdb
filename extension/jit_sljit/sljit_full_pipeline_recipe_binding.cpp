@@ -21,12 +21,9 @@ namespace duckdb {
 SljitFullPipelineRecipeBinding::SljitFullPipelineRecipeBinding(const vector<SljitExecutableRegionOp> &ops_p,
                                                                const vector<LogicalType> &source_output_types_p,
                                                                const vector<Value> &source_min_values_p,
-                                                               const vector<Value> &source_max_values_p,
-                                                               bool uses_extended_source_fetch_budget_p)
-    : SljitFullPipelineRecipeSequenceBuilder(ops_p, source_output_types_p, source_min_values_p, source_max_values_p,
-                                             uses_extended_source_fetch_budget_p),
-      projection_aggregate_recipes(ops_p, source_output_types_p, source_min_values_p, source_max_values_p,
-                                   uses_extended_source_fetch_budget_p) {
+                                                               const vector<Value> &source_max_values_p)
+    : SljitFullPipelineRecipeSequenceBuilder(ops_p, source_output_types_p, source_min_values_p, source_max_values_p),
+      projection_aggregate_recipes(ops_p, source_output_types_p, source_min_values_p, source_max_values_p) {
 }
 
 SljitFullPipelineRecipePlan SljitFullPipelineRecipeBinding::MakeNativeOnlyPlan() const {

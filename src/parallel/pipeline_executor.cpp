@@ -3,6 +3,7 @@
 #include "duckdb/common/limits.hpp"
 #include "duckdb/common/types/column/column_data_collection.hpp"
 #include "duckdb/common/mutex.hpp"
+#include "duckdb/execution/execution_region_kernel.hpp"
 #include "duckdb/execution/execution_region_manager.hpp"
 #include "duckdb/execution/execution_region_runtime.hpp"
 #include "duckdb/execution/execution_region_runner.hpp"
@@ -110,7 +111,6 @@ void PipelineExecutor::Reset() {
 	if (coalesced_sink_chunk_initialized) {
 		coalesced_sink_chunk.Reset();
 	}
-	compiled_source_replay = false;
 	next_batch_blocked = false;
 	pending_batch_advance_state = PendingBatchAdvanceState::NONE;
 	external_batch_initialized = false;
@@ -121,6 +121,10 @@ void PipelineExecutor::Reset() {
 	for (auto &flags : execution_region_runtime_once_flags) {
 		flags.clear();
 	}
+	compiled_step.reset();
+	compiled_step_runtime.reset();
+	compiled_step_kernel = nullptr;
+	compiled_step_finished = false;
 	execution_region_local_state.reset();
 	execution_region_local_state_kernel = nullptr;
 	while (!in_process_operators.empty()) {
@@ -272,7 +276,7 @@ bool PipelineExecutor::TryFlushCachingOperators(ExecutionBudget &chunk_budget) {
 }
 
 OperatorPartitionData PipelineExecutor::NextPartitionData(DataChunk &source_chunk,
-                                                         const SourceFetchResult &source_result) {
+                                                          const SourceFetchResult &source_result) {
 	D_ASSERT(required_partition_info.AnyRequired());
 	auto max_batch_index = pipeline.base_batch_index + PipelineBuildState::BATCH_INCREMENT - 1;
 	// by default set it to the maximum valid batch index value for the current pipeline
@@ -391,11 +395,34 @@ PipelineExecuteResult PipelineExecutor::Execute(idx_t max_chunks) {
 	return ExecuteExecutionRunner(pipeline.GetExecutionRunnerKind(), region_pipeline, max_chunks);
 }
 
+DataChunk &PipelineExecutor::LoopSourceChunk() {
+	if (compiled_step) {
+		return execution_source_input_chunk;
+	}
+	return pipeline.operators.empty() ? final_chunk : *intermediate_chunks[0];
+}
+
+PipelineExecutor::SourceFetchResult PipelineExecutor::FetchLoopSource(DataChunk &result) {
+	if (!compiled_step) {
+		return FetchFromSource(result);
+	}
+	// Through the region runtime, which accounts the source contract's rows and stages for the kernel's trace
+	SourceFetchResult fetch_result;
+	DataChunk *fetched = nullptr;
+	fetch_result.result = compiled_step_runtime->FetchSourceContract(fetched);
+	if (fetched && fetched != &execution_source_input_chunk) {
+		throw InternalException("chunk-step source contract fetched into a chunk the loop does not own");
+	}
+	return fetch_result;
+}
+
 PipelineExecuteResult PipelineExecutor::ExecuteVectorizedPipeline(idx_t max_chunks) {
 	D_ASSERT(pipeline.sink);
-	// Rows a compiled kernel coalesced sink before anything the vectorized loop produces
-	QueueCoalescedSinkChunk();
-	auto &source_chunk = pipeline.operators.empty() ? final_chunk : *intermediate_chunks[0];
+	if (!compiled_step) {
+		// Rows a compiled kernel coalesced sink before anything the vectorized loop produces
+		QueueCoalescedSinkChunk();
+	}
+	auto &source_chunk = LoopSourceChunk();
 	ExecutionBudget chunk_budget(max_chunks);
 
 	do {
@@ -432,17 +459,8 @@ PipelineExecuteResult PipelineExecutor::ExecuteVectorizedPipeline(idx_t max_chun
 			if (push_result == PipelineExecuteResult::INTERRUPTED) {
 				return PipelineExecuteResult::INTERRUPTED;
 			}
-			if (push_result != PipelineExecuteResult::FINISHED &&
-			    source_cursor_state == SourceCursorState::COMPILED_CONTRACT) {
-				// The retried chunk came from a compiled kernel: re-enter it. Its source contract and the
-				// vectorized source own different cursors; a vectorized fetch here would restart or skip input.
-				return PipelineExecuteResult::RUNNER_HANDOFF;
-			}
 			result = push_result == PipelineExecuteResult::FINISHED ? OperatorResultType::FINISHED
 			                                                        : OperatorResultType::NEED_MORE_INPUT;
-		} else if (compiled_source_replay) {
-			throw InternalException("vectorized pipeline continuation while a compiled kernel owns a fetched source "
-			                        "chunk");
 		} else if (!in_process_operators.empty() && !started_flushing) {
 			// Operator(s) in the pipeline have returned `HAVE_MORE_OUTPUT` in the last Execute call
 			// the operators have to be called with the same input chunk to produce the rest of the output
@@ -456,12 +474,7 @@ PipelineExecuteResult PipelineExecutor::ExecuteVectorizedPipeline(idx_t max_chun
 			if (!next_batch_blocked) {
 				// "Regular" path: fetch a chunk from the source and push it through the pipeline
 				source_chunk.Reset();
-				source_result = FetchFromSource(source_chunk);
-				if (vectorized_source_declined_yield) {
-					// Runner-switch yield at a row-group boundary: nothing is in flight
-					// and the source is not exhausted.
-					return PipelineExecuteResult::NOT_FINISHED;
-				}
+				source_result = FetchLoopSource(source_chunk);
 				if (source_result.batch_index_state == SourceBatchIndexState::ADVANCED) {
 					D_ASSERT(source_result.result == SourceResultType::BLOCKED);
 					D_ASSERT(required_partition_info.RequiresBatchIndex());
@@ -480,6 +493,16 @@ PipelineExecuteResult PipelineExecutor::ExecuteVectorizedPipeline(idx_t max_chun
 
 			if (required_partition_info.AnyRequired() &&
 			    (source_result.result != SourceResultType::FINISHED || source_chunk.size() > 0)) {
+				auto flush_result = FlushCompiledStepBeforeAdvance(source_chunk, source_result);
+				if (flush_result == OperatorResultType::BLOCKED) {
+					// The advance waits until the held rows sank: the loop retries it without fetching again
+					next_batch_blocked = true;
+					return PipelineExecuteResult::INTERRUPTED;
+				}
+				if (flush_result == OperatorResultType::FINISHED) {
+					exhausted_pipeline = true;
+					continue;
+				}
 				auto next_batch_result = NextBatch(source_chunk, source_result);
 				next_batch_blocked = next_batch_result == SinkNextBatchType::BLOCKED;
 				if (next_batch_blocked) {
@@ -491,7 +514,7 @@ PipelineExecuteResult PipelineExecutor::ExecuteVectorizedPipeline(idx_t max_chun
 				continue;
 			}
 
-			result = ExecutePushInternal(source_chunk, chunk_budget);
+			result = PushSourceChunk(source_chunk, chunk_budget);
 		} else {
 			throw InternalException("Unexpected state reached in pipeline executor");
 		}
@@ -516,12 +539,7 @@ PipelineExecuteResult PipelineExecutor::ExecuteVectorizedPipeline(idx_t max_chun
 }
 
 PipelineExecuteResult PipelineExecutor::Execute() {
-	while (true) {
-		auto result = Execute(NumericLimits<idx_t>::Maximum());
-		if (result != PipelineExecuteResult::RUNNER_HANDOFF) {
-			return result;
-		}
-	}
+	return Execute(NumericLimits<idx_t>::Maximum());
 }
 
 PipelineExecuteResult PipelineExecutor::PushExternal(DataChunk &input,
@@ -648,7 +666,6 @@ OperatorResultType PipelineExecutor::ExecutePushInternal(DataChunk &input, Execu
 	if (input.size() == 0) { // LCOV_EXCL_START
 		return OperatorResultType::NEED_MORE_INPUT;
 	} // LCOV_EXCL_STOP
-
 	// this loop will continuously push the input chunk through the pipeline as long as:
 	// - the OperatorResultType for the Execute is HAVE_MORE_OUTPUT
 	// - the Sink doesn't block
@@ -694,6 +711,29 @@ OperatorResultType PipelineExecutor::ExecutePushInternal(DataChunk &input, Execu
 		}
 	} while (chunk_budget.Next());
 	return result;
+}
+
+OperatorResultType PipelineExecutor::FlushCompiledStepBeforeAdvance(DataChunk &source_chunk,
+                                                                    const SourceFetchResult &source_result) {
+	if (!compiled_step || !NextBatchAdvances(source_chunk, source_result)) {
+		return OperatorResultType::NEED_MORE_INPUT;
+	}
+	compiled_step->FlushChunks();
+	if (IsFinished()) {
+		return OperatorResultType::FINISHED;
+	}
+	return remaining_sink_chunk ? OperatorResultType::BLOCKED : OperatorResultType::NEED_MORE_INPUT;
+}
+
+OperatorResultType PipelineExecutor::PushSourceChunk(DataChunk &input, ExecutionBudget &chunk_budget) {
+	if (!compiled_step) {
+		return ExecutePushInternal(input, chunk_budget);
+	}
+	if (compiled_step->ExecuteChunk(input) == SinkResultType::FINISHED) {
+		return OperatorResultType::FINISHED;
+	}
+	// The sink blocked while the step appended: the loop yields with the output queued until it wakes
+	return remaining_sink_chunk ? OperatorResultType::BLOCKED : OperatorResultType::NEED_MORE_INPUT;
 }
 
 OperatorResultType PipelineExecutor::SinkRemainingChunks(ExecutionBudget &chunk_budget) {
@@ -773,6 +813,16 @@ PipelineExecuteResult PipelineExecutor::PushInputChunk(DataChunk &input, Executi
 }
 
 PipelineExecuteResult PipelineExecutor::FlushAndFinalize(ExecutionBudget &chunk_budget) {
+	if (compiled_step && !compiled_step_finished && !IsFinished()) {
+		// The step stands in for the operator chain: the rows it holds are what the operators would flush, and as
+		// theirs, they drop once the pipeline finished
+		compiled_step_finished = true;
+		compiled_step->FinishChunks();
+		if (remaining_sink_chunk) {
+			// The sink blocked on them: as after any blocked sink, the task waits for that one callback
+			return PipelineExecuteResult::INTERRUPTED;
+		}
+	}
 	QueueCoalescedSinkChunk();
 	if (remaining_sink_chunk) {
 		auto result = SinkRemainingChunks(chunk_budget);
@@ -784,7 +834,7 @@ PipelineExecuteResult PipelineExecutor::FlushAndFinalize(ExecutionBudget &chunk_
 		}
 	}
 	if (!done_flushing) {
-		auto flush_completed = TryFlushCachingOperators(chunk_budget);
+		auto flush_completed = compiled_step || TryFlushCachingOperators(chunk_budget);
 		if (!flush_completed) {
 			if (remaining_sink_chunk) {
 				return PipelineExecuteResult::INTERRUPTED;
@@ -972,44 +1022,6 @@ SinkNextBatchType PipelineExecutor::UpdateMinBatchIndex() {
 	return pipeline.sink->UpdateMinBatchIndex(context, input);
 }
 
-void PipelineExecutor::SetVectorizedSourceClaimBudget(idx_t budget) {
-	vectorized_source_claim_budget = budget;
-	vectorized_source_declined_yield = false;
-	vectorized_source_leg_rows = 0;
-}
-
-void PipelineExecutor::ClearVectorizedSourceClaimBudget() {
-	vectorized_source_claim_budget = DConstants::INVALID_INDEX;
-	vectorized_source_declined_yield = false;
-	if (source_cursor_state == SourceCursorState::VECTORIZED_MANAGED) {
-		// The leg did not end at a proven boundary: the cursor may hold an
-		// in-flight row group, so it degrades to the latched vectorized state.
-		source_cursor_state = SourceCursorState::VECTORIZED_UNMANAGED;
-	}
-}
-
-void PipelineExecutor::ClearVectorizedSourceClaimBudgetAtBoundary() {
-	vectorized_source_claim_budget = DConstants::INVALID_INDEX;
-	vectorized_source_declined_yield = false;
-	if (source_cursor_state == SourceCursorState::VECTORIZED_MANAGED) {
-		source_cursor_state = SourceCursorState::UNTOUCHED;
-	}
-}
-
-bool PipelineExecutor::HasVectorizedSourceClaimBudget() const {
-	return vectorized_source_claim_budget != DConstants::INVALID_INDEX;
-}
-
-idx_t PipelineExecutor::VectorizedSourceLegRows() const {
-	return vectorized_source_leg_rows;
-}
-
-bool PipelineExecutor::ConsumeVectorizedSourceDeclinedYield() {
-	const auto declined = vectorized_source_declined_yield;
-	vectorized_source_declined_yield = false;
-	return declined;
-}
-
 PipelineExecutor::SourceFetchResult PipelineExecutor::FetchFromSource(DataChunk &result) {
 	D_ASSERT(!pipeline.IsExternalInput());
 	D_ASSERT(global_source_state);
@@ -1017,29 +1029,13 @@ PipelineExecutor::SourceFetchResult PipelineExecutor::FetchFromSource(DataChunk 
 	StartOperator(*pipeline.source);
 
 	OperatorSourceInput source_input = {*global_source_state, *local_source_state, interrupt_state};
-	source_input.decline_new_row_group = vectorized_source_claim_budget == 0;
-	if (vectorized_source_claim_budget == DConstants::INVALID_INDEX) {
-		if (source_cursor_state == SourceCursorState::COMPILED_CONTRACT && !compiled_execution_deferred) {
-			throw InternalException(
-			    "vectorized source fetch while the compiled contract owns the cursor without a deferral");
-		}
-		source_cursor_state = SourceCursorState::VECTORIZED_UNMANAGED;
-	} else {
-		D_ASSERT(source_cursor_state == SourceCursorState::UNTOUCHED ||
-		         source_cursor_state == SourceCursorState::VECTORIZED_MANAGED);
-		source_cursor_state = SourceCursorState::VECTORIZED_MANAGED;
+	if (source_cursor_state == SourceCursorState::COMPILED_CONTRACT) {
+		throw InternalException("vectorized source fetch after the compiled source contract fetched");
 	}
+	source_cursor_state = SourceCursorState::VECTORIZED;
 	SourceFetchResult fetch_result;
 	fetch_result.result = GetData(result, source_input);
 	fetch_result.batch_index_state = source_input.batch_index_state;
-	if (vectorized_source_claim_budget != DConstants::INVALID_INDEX) {
-		vectorized_source_leg_rows += result.size();
-		vectorized_source_claim_budget -=
-		    MinValue<idx_t>(vectorized_source_claim_budget, source_input.new_row_groups_claimed);
-		if (source_input.declined_new_row_group) {
-			vectorized_source_declined_yield = true;
-		}
-	}
 
 	D_ASSERT(fetch_result.result != SourceResultType::BLOCKED || result.size() == 0);
 	D_ASSERT(fetch_result.batch_index_state != SourceBatchIndexState::ADVANCED ||
@@ -1059,8 +1055,7 @@ template <class FETCH>
 SourceResultType PipelineExecutor::FetchFromCompiledSourceContract(SupportsSourceContract supports_contract,
                                                                    ExecutionRegionSourceContractMetrics *metrics,
                                                                    optional_ptr<DataChunk> source_chunk,
-                                                                   bool decline_new_row_group,
-                                                                   bool *declined_new_row_group, FETCH &&fetch) {
+                                                                   FETCH &&fetch) {
 	auto region_plan = pipeline.GetExecutionRegionPlan();
 	if (!region_plan || !region_plan->RequiresSourceContract()) {
 		throw InternalException("execution region source contract fetch requires a selected source contract");
@@ -1070,9 +1065,8 @@ SourceResultType PipelineExecutor::FetchFromCompiledSourceContract(SupportsSourc
 		    "execution region source contract fetch selected for a source without source contract support");
 	}
 
-	if (source_cursor_state != SourceCursorState::UNTOUCHED &&
-	    source_cursor_state != SourceCursorState::COMPILED_CONTRACT) {
-		throw InternalException("compiled source contract fetch while a vectorized cursor state is in flight");
+	if (source_cursor_state == SourceCursorState::VECTORIZED) {
+		throw InternalException("compiled source contract fetch after the vectorized source fetched");
 	}
 	D_ASSERT(!pipeline.IsExternalInput());
 	D_ASSERT(global_source_state);
@@ -1093,7 +1087,6 @@ SourceResultType PipelineExecutor::FetchFromCompiledSourceContract(SupportsSourc
 	}
 
 	OperatorSourceInput source_input = {*global_source_state, *local_source_state, interrupt_state};
-	source_input.decline_new_row_group = decline_new_row_group;
 	if (metrics) {
 		source_input.stage_recorder = *metrics;
 	}
@@ -1103,9 +1096,6 @@ SourceResultType PipelineExecutor::FetchFromCompiledSourceContract(SupportsSourc
 	if (source_input.batch_index_state == SourceBatchIndexState::ADVANCED) {
 		throw InternalException(
 		    "execution region source contract fetch cannot carry a batch-index advance without data");
-	}
-	if (declined_new_row_group) {
-		*declined_new_row_group = source_input.declined_new_row_group;
 	}
 	if (metrics) {
 		metrics->get_data_runtime_time_us += PipelineExecutorElapsedMicros(stage_start);
@@ -1130,22 +1120,21 @@ SourceResultType PipelineExecutor::FetchFromCompiledSourceContract(SupportsSourc
 }
 
 SourceResultType PipelineExecutor::FetchFromSourceContract(DataChunk *&result,
-                                                           ExecutionRegionSourceContractMetrics *metrics,
-                                                           bool decline_new_row_group, bool *declined_new_row_group) {
+                                                           ExecutionRegionSourceContractMetrics *metrics) {
 	auto &source_chunk = execution_source_input_chunk;
 	result = &source_chunk;
-	return FetchFromCompiledSourceContract(
-	    &PhysicalOperator::SupportsExecutionSourceContract, metrics, &source_chunk, decline_new_row_group,
-	    declined_new_row_group, [&](OperatorSourceInput &source_input) {
-		    return pipeline.source->GetExecutionSourceContractData(context, source_chunk, source_input);
-	    });
+	return FetchFromCompiledSourceContract(&PhysicalOperator::SupportsExecutionSourceContract, metrics, &source_chunk,
+	                                       [&](OperatorSourceInput &source_input) {
+		                                       return pipeline.source->GetExecutionSourceContractData(
+		                                           context, source_chunk, source_input);
+	                                       });
 }
 
 SourceResultType
 PipelineExecutor::FetchFromPrimitiveAggregateStateSourceContract(ExecutionAggregateStateScanBatch *&result,
                                                                  ExecutionRegionSourceContractMetrics *metrics) {
 	return FetchFromCompiledSourceContract(
-	    &PhysicalOperator::SupportsExecutionPrimitiveAggregateStateSourceContract, metrics, nullptr, false, nullptr,
+	    &PhysicalOperator::SupportsExecutionPrimitiveAggregateStateSourceContract, metrics, nullptr,
 	    [&](OperatorSourceInput &source_input) {
 		    result = nullptr;
 		    auto res =

@@ -154,8 +154,6 @@ static void ExecuteRecursivePipelineInline(PipelineExecutor &pipeline_executor) 
 			return;
 		case PipelineExecuteResult::NOT_FINISHED:
 			throw InternalException("Execute without limit should not return NOT_FINISHED");
-		case PipelineExecuteResult::RUNNER_HANDOFF:
-			throw InternalException("Execute without limit should consume runner handoffs");
 		case PipelineExecuteResult::INTERRUPTED:
 			signal_state->Await();
 			break;
@@ -210,11 +208,6 @@ public:
 		case PipelineExecuteResult::NOT_FINISHED:
 			if (mode != TaskExecutionMode::PROCESS_PARTIAL) {
 				throw InternalException("Execute without limit should not return NOT_FINISHED");
-			}
-			return TaskExecutionResult::TASK_NOT_FINISHED;
-		case PipelineExecuteResult::RUNNER_HANDOFF:
-			if (mode != TaskExecutionMode::PROCESS_PARTIAL) {
-				throw InternalException("Execute without limit should consume runner handoffs");
 			}
 			return TaskExecutionResult::TASK_NOT_FINISHED;
 		case PipelineExecuteResult::INTERRUPTED:

@@ -198,7 +198,7 @@ enum class ExecutionRegionStageExecutionKind : uint8_t {
 };
 enum class ExecutionRunnerKind : uint8_t { VECTORIZED, COMPILED_VECTORIZED, COMPILED_GPU };
 enum class ExecutionRegionPolicyMode : uint8_t { AUTO, OFF };
-enum class ExecutionRegionResult : uint8_t { NOT_FINISHED, FINISHED, INTERRUPTED, DEFERRED };
+enum class ExecutionRegionResult : uint8_t { NOT_FINISHED, FINISHED, INTERRUPTED };
 enum class ExecutionRegionJitRuntimeProof : uint8_t {
 	GENERATED_STAGE_WORK,
 	GENERATED_BACKEND_WORK,

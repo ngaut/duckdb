@@ -576,11 +576,6 @@ def verify_obsolete_paths_stay_deleted() -> None:
         ),
     )
     reject_regex(
-        "runner-owned adaptive phase mutation",
-        (r"\.phase\.store\(",),
-        ("src/execution/execution_region_runner.cpp",),
-    )
-    reject_regex(
         "kernel pattern-matches a grouped strategy to decide handoff",
         (r"\bDISTINCT_KEY_SINK\b",),
         (

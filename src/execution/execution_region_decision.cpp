@@ -161,23 +161,6 @@ bool ExecutionRegionGraphMayHaveCostedAcceleration(const ExecutionRegionGraph &g
 	return false;
 }
 
-bool ExecutionRegionAdaptiveMeasurementWithinBand(ClientContext &context, const PhysicalRunnerCostProfile &cost) {
-	const auto band = ExecutionRegionSettings::AdaptiveAbBandBasisPoints(context);
-	if (band == 0) {
-		return true;
-	}
-	// The measurement pays for itself only when the static margin is thin: net
-	// benefit within band basis points of the required benefit. net_benefit and required_benefit are
-	// saturating costs that can approach INT64_MAX, so the basis-point cross-multiply is evaluated in
-	// unsigned 128-bit: an int64 product would overflow (UB) and wrongly flip a fat-margin pipeline into
-	// "measure", re-arming the native-leg tax the band exists to avoid. Saturating instead of widening
-	// would clamp both sides to INT64_MAX and make the same wrong decision, so the comparison stays exact.
-	D_ASSERT(cost.net_benefit >= 0);
-	D_ASSERT(cost.required_benefit >= 0);
-	return uhugeint_t(static_cast<uint64_t>(cost.net_benefit)) * uhugeint_t(10000) <=
-	       uhugeint_t(static_cast<uint64_t>(cost.required_benefit)) * uhugeint_t(band);
-}
-
 static void SelectExecutionRegionAcceleratedRunner(ExecutionRegionPhysicalRunnerSelection &selection) {
 	selection.selected_runner = selection.runner_cost.selected_runner;
 	selection.use_compiled_runner = selection.selected_runner != ExecutionRunnerKind::VECTORIZED;

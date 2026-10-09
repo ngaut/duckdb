@@ -1,5 +1,5 @@
 # name: test/sql/jit/test_jit_explain_analyze.test
-# description: EXPLAIN ANALYZE renders JIT attribution: condensed sections, tree annotations, verbose detail, adaptive verdicts
+# description: EXPLAIN ANALYZE renders JIT attribution: condensed sections, tree annotations, verbose detail, entry deferral
 # group: [jit]
 
 statement ok
@@ -40,16 +40,6 @@ EXPLAIN ANALYZE SELECT g, sum(v) FROM t WHERE v % 3 = 0 GROUP BY g;
 
 statement ok
 SET jit_trace_decisions=false;
-
-# Adaptive measurement: verdict annotation path.
-statement ok
-SET jit_adaptive_ab=true;
-
-statement ok
-EXPLAIN ANALYZE SELECT g, sum(v) FROM t WHERE v % 3 = 0 GROUP BY g;
-
-statement ok
-SET jit_adaptive_ab=false;
 
 # Entry deferral annotation path.
 statement ok

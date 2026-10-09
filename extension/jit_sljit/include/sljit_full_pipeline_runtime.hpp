@@ -16,15 +16,6 @@
 
 namespace duckdb {
 
-static idx_t SljitBatchedSourceContractFetchBudget(idx_t max_chunks) {
-	constexpr idx_t SOURCE_FETCHES_PER_DOWNSTREAM_BATCH = 64;
-	const auto max_idx = NumericLimits<idx_t>::Maximum();
-	if (max_chunks >= max_idx / SOURCE_FETCHES_PER_DOWNSTREAM_BATCH) {
-		return max_idx;
-	}
-	return max_chunks * SOURCE_FETCHES_PER_DOWNSTREAM_BATCH;
-}
-
 static void SljitChargeDownstreamRows(idx_t &processed_rows, idx_t rows) {
 	const auto max_idx = NumericLimits<idx_t>::Maximum();
 	if (processed_rows >= max_idx - rows) {
@@ -52,24 +43,11 @@ static bool SljitNativeSinkResultStopsExecution(ExecutionRegionRuntime &runtime,
 		return false;
 	}
 	if (sink_result == SinkResultType::BLOCKED) {
-		// A blocked append sink never reaches here: the runtime queues its chunks and
-		// the kernel yields at the next source fetch. BLOCKED is a deferral unwinding
-		// through a flush path that still sinks pending batches: the deferral must win,
-		// or the pipeline would re-enter a kernel that already handed off its claim.
-		result =
-		    runtime.DeferredReason().empty() ? ExecutionRegionResult::INTERRUPTED : ExecutionRegionResult::DEFERRED;
-		return true;
+		// A blocked append sink queues its chunks in the executor and reports NEED_MORE_INPUT
+		throw InternalException("SLJIT kernel received a blocked sink result");
 	}
 	result = ExecutionRegionResult::FINISHED;
 	return true;
-}
-
-//! The stop result for a blocked source fetch: a plain block yields and resumes
-//! compiled, while a block carrying a deferred reason hands the pipeline to the
-//! vectorized continuation. Reasons only arise at the legal deferral points —
-//! kernel entry or a declined claim boundary — where nothing is in flight.
-static ExecutionRegionResult SljitBlockedSourceStopResult(ExecutionRegionRuntime &runtime) {
-	return runtime.DeferredReason().empty() ? ExecutionRegionResult::INTERRUPTED : ExecutionRegionResult::DEFERRED;
 }
 
 static bool SljitStopFullPipeline(ExecutionRegionResult &result, ExecutionRegionResult stop_result) {
@@ -86,61 +64,11 @@ static bool SljitStopFullPipelineAfterFlush(ExecutionRegionResult &result, Execu
 	return SljitStopFullPipeline(result, stop_result);
 }
 
-template <class BUDGET_REACHED, class EXECUTE_SOURCE_CHUNK, class STOP_NOT_FINISHED, class STOP_BLOCKED,
-          class STOP_FINISHED>
-static bool SljitRunFullPipelineSourceContractLoop(ExecutionRegionRuntime &runtime, idx_t &fetched_chunks,
-                                                   BUDGET_REACHED &&budget_reached,
-                                                   EXECUTE_SOURCE_CHUNK &&execute_source_chunk,
-                                                   STOP_NOT_FINISHED &&stop_not_finished, STOP_BLOCKED &&stop_blocked,
-                                                   STOP_FINISHED &&stop_finished) {
-	while (true) {
-		if (budget_reached()) {
-			return stop_not_finished();
-		}
-
-		DataChunk *source_chunk = nullptr;
-		auto source_result = runtime.FetchSourceContract(source_chunk);
-		if (source_result == SourceResultType::BLOCKED) {
-			return stop_blocked();
-		}
-		fetched_chunks++;
-
-		if (source_chunk && execute_source_chunk(*source_chunk, source_result == SourceResultType::HAVE_MORE_OUTPUT)) {
-			return true;
-		}
-		if (source_result == SourceResultType::FINISHED) {
-			return stop_finished();
-		}
-	}
-}
-
-//! Routes a native blocker into the runtime's deferral-legality enforcement:
-//! only legal at kernel entry; a mid-stream request throws there, because a
-//! handoff with rows in flight would abandon them.
-static bool SljitDeferFullPipelineResult(ExecutionRegionRuntime &runtime, string &deferred_reason,
-                                         ExecutionRegionResult &result) {
-	runtime.Defer(std::move(deferred_reason));
-	result = ExecutionRegionResult::DEFERRED;
-	return true;
-}
-
-//! Same legality routing as SljitDeferFullPipelineResult for blocked-sink call
-//! shapes; mid-stream requests throw inside Defer.
-static bool SljitDeferBlockedSinkResult(ExecutionRegionRuntime &runtime, string &deferred_reason,
-                                        SinkResultType &sink_result) {
-	runtime.Defer(std::move(deferred_reason));
-	sink_result = SinkResultType::BLOCKED;
-	return true;
-}
-
-static SinkResultType SljitDeferBlockedSinkResult(ExecutionRegionRuntime &runtime, string &deferred_reason) {
-	runtime.Defer(std::move(deferred_reason));
-	return SinkResultType::BLOCKED;
-}
-
-static bool SljitAdvanceSinkBatchBlocked(ExecutionRegionRuntime &runtime, DataChunk &source_chunk,
-                                         bool have_more_output) {
-	return runtime.AdvanceSinkBatch(source_chunk, have_more_output) == SinkNextBatchType::BLOCKED;
+//! A native operator the kernel delegates to is not ready, although the runner found every one ready before the first
+//! source fetch and a running pipeline never changes runners: an invariant violation, not a fallback
+[[noreturn]] static void SljitThrowNativeOperatorNotReady(const string &reason) {
+	throw InternalException("SLJIT kernel delegates to a native operator that is not ready: %s",
+	                        reason.empty() ? string("no reason given") : reason);
 }
 
 } // namespace duckdb

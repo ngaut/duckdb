@@ -14,10 +14,8 @@ namespace duckdb {
 
 SljitPreJoinProjectionRecipeBinding::SljitPreJoinProjectionRecipeBinding(
     const vector<SljitExecutableRegionOp> &ops_p, const vector<LogicalType> &source_output_types_p,
-    const vector<Value> &source_min_values_p, const vector<Value> &source_max_values_p,
-    bool uses_extended_source_fetch_budget_p)
-    : SljitFullPipelineRecipeSequenceBuilder(ops_p, source_output_types_p, source_min_values_p, source_max_values_p,
-                                             uses_extended_source_fetch_budget_p) {
+    const vector<Value> &source_min_values_p, const vector<Value> &source_max_values_p)
+    : SljitFullPipelineRecipeSequenceBuilder(ops_p, source_output_types_p, source_min_values_p, source_max_values_p) {
 }
 
 bool SljitPreJoinProjectionRecipeBinding::TryBuildView(idx_t pre_join_projection_idx, idx_t hash_join_idx,

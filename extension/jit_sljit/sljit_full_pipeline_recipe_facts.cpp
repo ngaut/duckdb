@@ -47,29 +47,6 @@ static bool SljitFullPipelineOpIsUngroupedPrimitiveAggregateUpdate(const SljitEx
 	       op.aggregate_update.plan.UsesPrimitivePayloads();
 }
 
-SljitFullPipelineScheduleFacts SljitAnalyzeFullPipelineScheduleFacts(const vector<SljitExecutableRegionOp> &ops) {
-	SljitFullPipelineScheduleFacts facts;
-	bool has_hash_join_probe = false;
-	for (auto &op : ops) {
-		if (op.kind == SljitNativeRegionOpKind::HASH_JOIN_PROBE) {
-			has_hash_join_probe = true;
-			continue;
-		}
-		if (op.kind == SljitNativeRegionOpKind::AGGREGATE_UPDATE) {
-			facts.uses_extended_source_fetch_budget =
-			    SljitFullPipelineOpIsUngroupedPrimitiveAggregateUpdate(op) ||
-			    (has_hash_join_probe &&
-			     op.aggregate_update.plan.sink_info.kind == ExecutionRegionSinkKind::HASH_AGGREGATE_UPDATE);
-			return facts;
-		}
-	}
-	if (ops.empty()) {
-		return facts;
-	}
-	facts.uses_extended_source_fetch_budget = ops.back().kind == SljitNativeRegionOpKind::HASH_JOIN_BUILD;
-	return facts;
-}
-
 bool SljitTryAnalyzeHashJoinBuildSink(const vector<SljitExecutableRegionOp> &ops, SljitHashJoinBuildSinkFacts &facts) {
 	facts = SljitHashJoinBuildSinkFacts();
 	if (ops.size() < 2 || ops.back().kind != SljitNativeRegionOpKind::HASH_JOIN_BUILD) {

@@ -20,7 +20,6 @@
 #include "duckdb/common/vector_operations/vector_operations.hpp"
 #include "duckdb/execution/execution_operator_runtime.hpp"
 #include "duckdb/execution/execution_aggregate_runtime.hpp"
-#include "duckdb/execution/execution_region_settings.hpp"
 #include "duckdb/execution/expression_executor.hpp"
 #include "duckdb/execution/ht_entry.hpp"
 #include "duckdb/function/scalar/string_common.hpp"
@@ -370,9 +369,7 @@ GroupedAggregateHashTable::GroupedAggregateHashTable(ClientContext &context_p, A
                                                      idx_t initial_capacity, idx_t radix_bits,
                                                      TupleDataValidityType group_validity)
     : BaseAggregateHashTable(context_p, allocator, aggregate_objects_p, std::move(payload_types_p)), context(context_p),
-      radix_bits(radix_bits), count(0), capacity(0), sink_count(0),
-      require_canonical_group_hash(ExecutionRegionSettings::AdaptiveAb(context_p) ||
-                                   ExecutionRegionSettings::DebugForceDeferAfterChunks(context_p) != 0),
+      radix_bits(radix_bits), count(0), capacity(0), sink_count(0), require_canonical_group_hash(true),
       skip_lookups(false), enable_hll(false), aggregate_allocator(make_shared_ptr<ArenaAllocator>(allocator)),
       state(*aggregate_allocator), skip_lookups_require_final_combine(false),
       proven_unique_append_key_type(PhysicalType::INVALID), proven_unique_append_has_last_key(false),
@@ -1983,7 +1980,7 @@ static bool AggregateDenseDomainCanAdmit(const ExecutionDenseGroupDomain &domain
 //! switches. OP::Run<T> receives the group type's storage type; an unsupported type
 //! returns the fallback.
 template <class OP, class RESULT, class... ARGS>
-static RESULT AggregateDispatchDenseIntegralType(PhysicalType physical_type, RESULT fallback, ARGS &&...args) {
+static RESULT AggregateDispatchDenseIntegralType(PhysicalType physical_type, RESULT fallback, ARGS &&... args) {
 	switch (physical_type) {
 	case PhysicalType::BOOL:
 		return OP::template Run<bool>(std::forward<ARGS>(args)...);
@@ -2085,7 +2082,7 @@ AggregateTryPrepareDenseSingleFieldTargetCacheTemplated(const AggregateFastGroup
 
 struct AggregateTryPrepareDenseSingleFieldTargetCacheOp {
 	template <class T, class... ARGS>
-	static auto Run(ARGS &&...args)
+	static auto Run(ARGS &&... args)
 	    -> decltype(AggregateTryPrepareDenseSingleFieldTargetCacheTemplated<T>(std::forward<ARGS>(args)...)) {
 		return AggregateTryPrepareDenseSingleFieldTargetCacheTemplated<T>(std::forward<ARGS>(args)...);
 	}
@@ -2132,7 +2129,7 @@ static bool AggregatePopulateDenseSingleFieldTargetCacheTemplated(const Aggregat
 
 struct AggregatePopulateDenseSingleFieldTargetCacheOp {
 	template <class T, class... ARGS>
-	static auto Run(ARGS &&...args)
+	static auto Run(ARGS &&... args)
 	    -> decltype(AggregatePopulateDenseSingleFieldTargetCacheTemplated<T>(std::forward<ARGS>(args)...)) {
 		return AggregatePopulateDenseSingleFieldTargetCacheTemplated<T>(std::forward<ARGS>(args)...);
 	}
@@ -4087,12 +4084,11 @@ static bool AggregateHashDescriptorRows(const AggregateRowPointerDescriptorSourc
 	}
 	// The stored hash is also the probe hash, the partition-routing key, and the value the final
 	// combine re-reads verbatim, so it must be a canonical function of the full group key whenever
-	// two runners can feed one table: a mid-query handoff (adaptive A/B, forced defer) mixes native
-	// rows (full-column DataChunk::Hash) with compiled rows, and a leading-key-only truncation would
-	// then split one group across two stored hashes into two partitions that never merge. When no
-	// handoff can occur the compiled runner owns the table alone, so the cheaper leading-key hash is
-	// sound. Each per-column descriptor hash already equals VectorOperations::Hash, so folding every
-	// column yields exactly the canonical hash.
+	// two runners can feed one table: native rows (full-column DataChunk::Hash) and compiled rows hashed
+	// by a leading-key-only truncation would split one group across two stored hashes into two
+	// partitions that never merge. A compiled step that owns the table declares so, and only then is the
+	// cheaper leading-key hash sound. Each per-column descriptor hash already equals
+	// VectorOperations::Hash, so folding every column yields exactly the canonical hash.
 	const auto use_leading_key_hash =
 	    !require_canonical_group_hash && AggregateDescriptorCanUseLeadingKeyHash(group_sources);
 	const idx_t hash_group_count = use_leading_key_hash ? 1 : group_sources.size();
@@ -4346,9 +4342,9 @@ static void AggregateFillCompactInputVectorIntegralCastGroupSource(const Aggrega
 //! Stores each selected row's group key through the per-value path, which implements every cast kind that
 //! AggregateDescriptorGroupKeySourcesSupported admits; typed fills are only fast paths over a subset of them.
 static bool AggregateFillCompactDescriptorGroupSourceValues(const AggregateRowPointerDescriptorSourceInfo &info,
-                                                           const ExecutionRowPointerGroupKeySource &source,
-                                                           idx_t group_idx, const SelectionVector &selected_rows,
-                                                           idx_t selected_count, Vector &target) {
+                                                            const ExecutionRowPointerGroupKeySource &source,
+                                                            idx_t group_idx, const SelectionVector &selected_rows,
+                                                            idx_t selected_count, Vector &target) {
 	for (idx_t selected_idx = 0; selected_idx < selected_count; selected_idx++) {
 		const auto row_idx = selected_rows.get_index_unsafe(selected_idx);
 		const_data_ptr_t source_data;

@@ -39,7 +39,7 @@ public:
 			if (!selected_hash_join_inputs.TryPrepareMarkProbeInput(primitive.hash_join_idx, input, join_input_ptr,
 			                                                        deferred_reason)) {
 				if (!deferred_reason.empty()) {
-					return SljitDeferFullPipelineResult(runtime, deferred_reason, result);
+					SljitThrowNativeOperatorNotReady(deferred_reason);
 				}
 				throw InternalException("SLJIT MARK probe boundary could not prepare selected hash-join input");
 			}
@@ -94,8 +94,8 @@ public:
 			                                   filter_idx, filter_op, join_input, marker_mode, mark_filter_mode,
 			                                   mark_count, execute_next_step);
 		};
-		auto handle_defer = [&](string &deferred_reason) {
-			return SljitDeferFullPipelineResult(runtime, deferred_reason, result);
+		auto handle_defer = [&](string &deferred_reason) -> bool {
+			SljitThrowNativeOperatorNotReady(deferred_reason);
 		};
 		return SljitDrainHashJoinProbeOutputs(scratch, hash_join_idx, hash_join_op, join_input, join_output,
 		                                      execute_hash_join_probe, handle_output, handle_defer, false,

@@ -14,10 +14,6 @@
 
 namespace duckdb {
 
-struct SljitFullPipelineScheduleFacts {
-	bool uses_extended_source_fetch_budget = false;
-};
-
 //! ops [0, first_hash_join_idx) form the source prefix (see SljitFullPipelineSourcePrefixEnd).
 struct SljitHashJoinBuildSinkFacts {
 	idx_t first_hash_join_idx = DConstants::INVALID_INDEX;
@@ -181,7 +177,6 @@ bool SljitFullPipelineOpIsAt(const vector<SljitExecutableRegionOp> &ops, idx_t o
 idx_t SljitFullPipelineSourcePrefixEnd(const vector<SljitExecutableRegionOp> &ops, idx_t limit);
 bool SljitFullPipelineHashJoinProbeIsMatchedProbeAndBuild(const vector<SljitExecutableRegionOp> &ops, idx_t op_idx);
 
-SljitFullPipelineScheduleFacts SljitAnalyzeFullPipelineScheduleFacts(const vector<SljitExecutableRegionOp> &ops);
 bool SljitTryAnalyzeHashJoinBuildSink(const vector<SljitExecutableRegionOp> &ops, SljitHashJoinBuildSinkFacts &facts);
 bool SljitTryAnalyzeSourceHashJoinBuildSink(const vector<SljitExecutableRegionOp> &ops,
                                             SljitSourceHashJoinBuildSinkFacts &facts);

@@ -239,7 +239,7 @@ static bool SljitTryExecuteHashJoinProbeDirectHashJoinBuild(
 		    execute_hash_join_probe(hash_join_idx, hash_join_op, join_input, join_output, state, deferred_reason, false,
 		                            SljitHashJoinProbeOutputContract::SELECTED_VIEW);
 		if (bind_result == ExecutionOperatorBindResult::DEFERRED) {
-			return SljitDeferBlockedSinkResult(runtime, deferred_reason, sink_result);
+			SljitThrowNativeOperatorNotReady(deferred_reason);
 		}
 		if (join_output.size() == 0) {
 			continue;

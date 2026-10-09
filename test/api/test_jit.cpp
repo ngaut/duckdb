@@ -511,45 +511,6 @@ TEST_CASE("SLJIT SIMD binary backend operations preserve lane semantics", "[api]
 	                                  I64x2 {0, -1});
 }
 
-TEST_CASE("JIT adaptive runner compares normalized leg cost", "[api][jit]") {
-	ExecutionRegionAdaptiveAbState state;
-	state.RecordNativeLeg(200, 100);
-	REQUIRE(state.ResolveVerdictAtBoundary(150, 50, 1000) == ExecutionRegionAdaptiveAbVerdict::FALLBACK_NATIVE);
-
-	ExecutionRegionAdaptiveAbState faster_compiled_state;
-	faster_compiled_state.RecordNativeLeg(200, 50);
-	REQUIRE(faster_compiled_state.ResolveVerdictAtBoundary(300, 100, 1000) ==
-	        ExecutionRegionAdaptiveAbVerdict::COMMIT_COMPILED);
-
-	ExecutionRegionAdaptiveAbState empty_sample_state;
-	empty_sample_state.RecordNativeLeg(200, 0);
-	REQUIRE(empty_sample_state.ResolveVerdictAtBoundary(300, 100, 1000) ==
-	        ExecutionRegionAdaptiveAbVerdict::COMMIT_COMPILED);
-
-	ExecutionRegionAdaptiveAbState wide_margin_state;
-	wide_margin_state.RecordNativeLeg(200, 100);
-	REQUIRE(wide_margin_state.ResolveVerdictAtBoundary(150, 100, NumericLimits<idx_t>::Maximum()) ==
-	        ExecutionRegionAdaptiveAbVerdict::FALLBACK_NATIVE);
-
-	ExecutionRegionAdaptiveAbState wide_product_state;
-	wide_product_state.RecordNativeLeg(NumericLimits<int64_t>::Maximum(), NumericLimits<idx_t>::Maximum());
-	REQUIRE(wide_product_state.ResolveVerdictAtBoundary(
-	            NumericLimits<int64_t>::Maximum(), NumericLimits<idx_t>::Maximum(), NumericLimits<idx_t>::Maximum()) ==
-	        ExecutionRegionAdaptiveAbVerdict::FALLBACK_NATIVE);
-
-	ExecutionRegionAdaptiveAbState resumed_state;
-	resumed_state.phase.store(ExecutionRegionAdaptiveAbPhase::MEASURING_COMPILED);
-	int owner;
-	int bystander;
-	REQUIRE(resumed_state.TryBeginCompiledLeg(&owner));
-	REQUIRE(resumed_state.CompiledLegOwnedBy(&owner));
-	REQUIRE_FALSE(resumed_state.CompiledLegOwnedBy(&bystander));
-	resumed_state.RecordNativeLeg(220, 100);
-	resumed_state.RecordCompiledLeg(100, 50);
-	REQUIRE(resumed_state.ResolveVerdictAtBoundary(50, 50, 1000) == ExecutionRegionAdaptiveAbVerdict::COMMIT_COMPILED);
-	REQUIRE(resumed_state.compiled_leg_rows.load() == 100);
-}
-
 TEST_CASE("Execution region artifact cache publishes one build to concurrent executions", "[api][jit]") {
 	ExecutionRegionArtifactCache cache;
 	std::mutex gate_lock;
@@ -1267,6 +1228,52 @@ TEST_CASE("JIT Metal projection supports INT64-backed DECIMAL add/subtract", "[a
 
 	RequireExecutedMetalProjection(manager, 100000);
 }
+TEST_CASE("JIT Metal step dispatches once per row group and keeps insertion order", "[api][jit][metal]") {
+	JitTestDatabase test;
+	auto &con = test.con;
+	auto &manager = test.manager;
+
+	REQUIRE_NO_FAIL(con.Query("LOAD jit_metal"));
+	if (!MetalBackendAvailable(test.context, manager)) {
+		WARN("Skipping Metal JIT GPU test because no available Metal device was reported");
+		return;
+	}
+
+	ConfigureMetalGpuSettings(con);
+	REQUIRE_NO_FAIL(con.Query("SET threads=2"));
+	// Eight row groups over two executors, so each executor's row groups are not adjacent: a step batches each row
+	// group into one dispatch, which sinks before the executor's next row group moves the order-preserving
+	// materialization to its batch
+	REQUIRE_NO_FAIL(con.Query("CREATE TEMP TABLE jit_metal_row_groups_input AS "
+	                          "SELECT i::BIGINT AS i FROM range(983040) tbl(i)"));
+
+	ClearJitTrace(manager, true);
+	REQUIRE_NO_FAIL(con.Query("CREATE TEMP TABLE jit_metal_row_groups_output AS "
+	                          "SELECT i + 7 AS j FROM jit_metal_row_groups_input"));
+	auto result = con.Query("SELECT count(*), sum(j), count(*) FILTER (WHERE previous >= j) FROM "
+	                        "(SELECT j, lag(j) OVER (ORDER BY rowid) AS previous FROM jit_metal_row_groups_output)");
+	REQUIRE_NO_FAIL(*result);
+	REQUIRE(result->GetValue(0, 0).GetValue<int64_t>() == 983040);
+	REQUIRE(result->GetValue(1, 0).GetValue<hugeint_t>() == hugeint_t(483190210560LL));
+	REQUIRE(result->GetValue(2, 0).GetValue<int64_t>() == 0);
+
+	idx_t output_rows = 0;
+	idx_t dispatches = 0;
+	for (auto &event : manager.GetEvents()) {
+		if (!IsMetalRegionEvent(event) || EventPhase(event) != "runtime" || EventStatus(event) != "executed") {
+			continue;
+		}
+		output_rows += event.output_rows;
+		for (auto &stage : event.generated_stage_runtime) {
+			if (stage.stage.name == "metal.projection") {
+				dispatches += stage.count;
+			}
+		}
+	}
+	REQUIRE(output_rows == 983040);
+	REQUIRE(dispatches == 8);
+}
+
 #endif
 
 TEST_CASE("JIT CBO rejects native operator stages without generated stage credit", "[api][jit]") {

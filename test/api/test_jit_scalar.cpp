@@ -849,10 +849,11 @@ TEST_CASE("JIT preserves ordered sink partitions for sparse generated source fil
 		           event.candidate_traits.sink_kind == ExecutionRegionSinkKind::MATERIALIZATION;
 	    },
 	    [](const ExecutionRegionEvent &event) { RequireGeneratedSourceFilterContract(event); });
-	RequireJitEvent(manager, [](const ExecutionRegionEvent &event) {
-		return IsSljitRegionEvent(event) && EventPhase(event) == "runtime" && EventStatus(event) == "executed" &&
-		       event.sink_next_batch_invocation_count > 0;
-	});
+	// The materialization keeps insertion order across the threads' partitions
+	auto order = con.Query("SELECT count(*) FROM (SELECT i, lag(i) OVER (ORDER BY rowid) AS previous "
+	                       "FROM jit_sparse_parallel_source_filter_output) WHERE previous >= i");
+	REQUIRE_NO_FAIL(*order);
+	REQUIRE(order->GetValue(0, 0).GetValue<int64_t>() == 0);
 }
 
 TEST_CASE("JIT auto planner cost skips source-only string filters", "[api][jit]") {

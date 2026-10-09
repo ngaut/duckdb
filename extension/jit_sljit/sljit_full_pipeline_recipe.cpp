@@ -173,8 +173,8 @@ public:
 	                               const SljitNativeAggregateStateSourcePlan &source_p,
 	                               const vector<LogicalType> &source_output_types_p,
 	                               const vector<Value> &source_min_values_p, const vector<Value> &source_max_values_p)
-	    : SljitFullPipelineRecipeBuilder(ops_p, source_p, source_output_types_p, source_min_values_p,
-	                                     source_max_values_p, SljitAnalyzeFullPipelineScheduleFacts(ops_p)) {
+	    : ops(ops_p), source(source_p),
+	      binding(ops_p, source_output_types_p, source_min_values_p, source_max_values_p) {
 	}
 
 	SljitFullPipelineRecipePlan Build() const {
@@ -287,15 +287,6 @@ private:
 	}
 
 private:
-	SljitFullPipelineRecipeBuilder(const vector<SljitExecutableRegionOp> &ops_p,
-	                               const SljitNativeAggregateStateSourcePlan &source_p,
-	                               const vector<LogicalType> &source_output_types_p,
-	                               const vector<Value> &source_min_values_p, const vector<Value> &source_max_values_p,
-	                               const SljitFullPipelineScheduleFacts &schedule_facts)
-	    : ops(ops_p), source(source_p), binding(ops_p, source_output_types_p, source_min_values_p, source_max_values_p,
-	                                            schedule_facts.uses_extended_source_fetch_budget) {
-	}
-
 	const vector<SljitExecutableRegionOp> &ops;
 	const SljitNativeAggregateStateSourcePlan &source;
 	SljitFullPipelineRecipeBinding binding;

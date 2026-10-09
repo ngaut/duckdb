@@ -1,5 +1,7 @@
 #include "duckdb/execution/execution_region_kernel.hpp"
 
+#include "duckdb/common/exception.hpp"
+
 namespace duckdb {
 
 ExecutionRegionLocalState::~ExecutionRegionLocalState() {
@@ -100,8 +102,23 @@ idx_t ExecutionRegionKernel::TraceCandidateEstimatedCardinality() const {
 	return trace_candidate_estimated_cardinality;
 }
 
-bool ExecutionRegionKernel::SupportsRunnerHandoff() const {
+bool ExecutionRegionKernel::TryExecuteFullPipeline(ExecutionRegionRuntime &, ExecutionRegionResult &) {
+	throw InternalException("execution region kernel runs as a chunk step, not with its own fetch loop");
+}
+
+bool ExecutionRegionKernel::SupportsChunkStep() const {
+	return false;
+}
+
+bool ExecutionRegionKernel::EntryReady(ExecutionRegionRuntime &, string &) {
 	return true;
+}
+
+unique_ptr<ExecutionRegionChunkStep> ExecutionRegionKernel::CreateChunkStep(ExecutionRegionRuntime &) {
+	throw InternalException("execution region kernel does not support chunk-step execution");
+}
+
+ExecutionRegionChunkStep::~ExecutionRegionChunkStep() {
 }
 
 } // namespace duckdb

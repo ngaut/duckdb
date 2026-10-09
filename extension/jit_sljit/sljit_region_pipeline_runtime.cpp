@@ -8,8 +8,9 @@
 
 #include "sljit_region_kernel.hpp"
 
+#include "sljit_chunk_step_runtime.hpp"
 #include "sljit_codegen_util.hpp"
-#include "sljit_full_pipeline_dispatch_runtime.hpp"
+#include "sljit_aggregate_state_source_runtime.hpp"
 #include "sljit_join_probe_codegen.hpp"
 #include "sljit_region_adapter_scratch.hpp"
 #include "sljit_region_runtime_state.hpp"
@@ -63,32 +64,6 @@ public:
 	// this execution-local boundary.
 	SljitFullPipelineTerminalRuntimeState terminal;
 };
-
-//! Entry prologue for genuine native-fallback states: a native-delegated join
-//! probe whose runtime state is not ready (external-partitioned table layout,
-//! unfinalized build) defers to the vectorized continuation BEFORE any source
-//! fetch, where a handoff is trivially legal. After the first fetch the runtime
-//! rejects deferral outright, so not-ready states discovered any later fail
-//! loudly instead of abandoning in-flight rows.
-static bool SljitTryDeferNotReadyNativeJoinProbesAtEntry(ExecutionRegionRuntime &runtime,
-                                                         vector<SljitExecutableRegionOp> &ops,
-                                                         ExecutionRegionResult &result) {
-	for (auto &op : ops) {
-		if (op.kind != SljitNativeRegionOpKind::HASH_JOIN_PROBE) {
-			continue;
-		}
-		auto readiness =
-		    runtime.ExecutionOperators().GetOperatorReadiness(op.operator_index, op.hash_join_probe.plan.operator_info);
-		if (readiness.status != ExecutionOperatorReadinessStatus::NOT_READY) {
-			continue;
-		}
-		runtime.Defer(readiness.blocker.empty() ? string("native operator not ready at kernel entry")
-		                                        : readiness.blocker);
-		result = ExecutionRegionResult::DEFERRED;
-		return true;
-	}
-	return false;
-}
 
 template <class FUNCTION, class BUILD>
 FUNCTION SljitNativeRegionKernel::EnsureLazyHashJoinProbeCode(ExecutionRegionRuntime &runtime,
@@ -162,25 +137,57 @@ unique_ptr<ExecutionRegionLocalState> SljitNativeRegionKernel::CreateLocalState(
 	return make_uniq<SljitNativeRegionLocalState>(allocator, artifact->ops);
 }
 
-bool SljitNativeRegionKernel::SupportsRunnerHandoff() const {
-	return !artifact->full_pipeline_recipe_plan.HasRecipe() ||
-	       !artifact->full_pipeline_recipe_plan.Recipe().UsesPrimitiveAggregateStateSource();
+bool SljitNativeRegionKernel::SupportsChunkStep() const {
+	return artifact->full_pipeline_recipe_plan.SupportsChunkStep();
 }
 
-bool SljitNativeRegionKernel::TryExecuteFullPipeline(ExecutionRegionRuntime &runtime, ExecutionRegionResult &result) {
-	if (runtime.CanDeferAtEntry() && SljitTryDeferNotReadyNativeJoinProbesAtEntry(runtime, artifact->ops, result)) {
-		return true;
+//! A native-delegated join probe whose runtime state is not ready (external-partitioned table layout, unfinalized
+//! build) leaves the pipeline to the vectorized loop: the executor asks before its first fetch, where nothing is in
+//! flight
+bool SljitNativeRegionKernel::EntryReady(ExecutionRegionRuntime &runtime, string &blocker) {
+	for (auto &op : artifact->ops) {
+		if (op.kind != SljitNativeRegionOpKind::HASH_JOIN_PROBE) {
+			continue;
+		}
+		auto readiness =
+		    runtime.ExecutionOperators().GetOperatorReadiness(op.operator_index, op.hash_join_probe.plan.operator_info);
+		if (readiness.status == ExecutionOperatorReadinessStatus::NOT_READY) {
+			blocker = readiness.blocker.empty() ? string("native operator not ready") : readiness.blocker;
+			return false;
+		}
 	}
+	return true;
+}
+
+unique_ptr<ExecutionRegionChunkStep> SljitNativeRegionKernel::CreateChunkStep(ExecutionRegionRuntime &runtime) {
 	auto &local_state = runtime.LocalState().Cast<SljitNativeRegionLocalState>();
-	auto executed = SljitTryExecuteFullPipelineRecipe(
-	    *this, runtime, result, artifact->ops, artifact->source_distinct_counts, artifact->source_min_values,
-	    artifact->source_max_values, artifact->full_pipeline_recipe_plan, shared_predicate_classifications,
-	    local_state.scratch, local_state.terminal);
+	auto &recipe_plan = artifact->full_pipeline_recipe_plan;
+	if (!recipe_plan.HasRecipe()) {
+		runtime.RecordJitRuntimePath(recipe_plan.NativeOnlyRuntimePath().c_str());
+		return make_uniq<SljitNativeOnlyChunkStep<SljitNativeRegionKernel>>(*this, runtime, artifact->ops,
+		                                                                    local_state.scratch);
+	}
+	return make_uniq<SljitPrimitiveRecipeChunkStep<SljitNativeRegionKernel>>(
+	    *this, runtime, artifact->ops, recipe_plan.Recipe(), artifact->source_distinct_counts,
+	    artifact->source_min_values, artifact->source_max_values, shared_predicate_classifications, local_state.scratch,
+	    local_state.terminal);
+}
+
+void SljitNativeRegionKernel::RecordExecutedFilterRows(ExecutionRegionRuntime &runtime) const {
 	auto filter_rows = executed_filter_rows.exchange(0, std::memory_order_relaxed);
 	if (filter_rows > 0) {
 		runtime.RecordJitRuntimePath("source.storage_scan.compiled_filter", filter_rows);
 		runtime.RecordJitRuntimeProof(ExecutionRegionJitRuntimeProof::GENERATED_BACKEND_WORK, filter_rows);
 	}
+}
+
+bool SljitNativeRegionKernel::TryExecuteFullPipeline(ExecutionRegionRuntime &runtime, ExecutionRegionResult &result) {
+	auto &local_state = runtime.LocalState().Cast<SljitNativeRegionLocalState>();
+	auto executed = SljitTryExecuteAggregateStateSourceRecipe(
+	    *this, runtime, result, artifact->ops, artifact->source_distinct_counts, artifact->source_min_values,
+	    artifact->source_max_values, artifact->full_pipeline_recipe_plan, shared_predicate_classifications,
+	    local_state.scratch, local_state.terminal);
+	RecordExecutedFilterRows(runtime);
 	return executed;
 }
 

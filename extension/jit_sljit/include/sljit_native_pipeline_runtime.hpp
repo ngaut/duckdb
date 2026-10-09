@@ -247,7 +247,7 @@ SljitDrainNativeHashJoinProbe(KERNEL &kernel, ExecutionRegionRuntime &runtime, v
 		                                                              op, input, output, state, deferred_reason);
 		RecordSljitRegionStageRuntime(runtime, op_idx, op.kind, stage_start);
 		if (bind_result == ExecutionOperatorBindResult::DEFERRED) {
-			return SljitDeferBlockedSinkResult(runtime, deferred_reason);
+			SljitThrowNativeOperatorNotReady(deferred_reason);
 		}
 		if (output.size() == 0) {
 			continue;

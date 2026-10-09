@@ -6059,20 +6059,19 @@ const StringUtil::EnumStringLiteral *GetSourceCursorStateValues() {
 	static constexpr StringUtil::EnumStringLiteral values[] {
 		{ static_cast<uint32_t>(SourceCursorState::UNTOUCHED), "UNTOUCHED" },
 		{ static_cast<uint32_t>(SourceCursorState::COMPILED_CONTRACT), "COMPILED_CONTRACT" },
-		{ static_cast<uint32_t>(SourceCursorState::VECTORIZED_MANAGED), "VECTORIZED_MANAGED" },
-		{ static_cast<uint32_t>(SourceCursorState::VECTORIZED_UNMANAGED), "VECTORIZED_UNMANAGED" }
+		{ static_cast<uint32_t>(SourceCursorState::VECTORIZED), "VECTORIZED" }
 	};
 	return values;
 }
 
 template<>
 const char* EnumUtil::ToChars<SourceCursorState>(SourceCursorState value) {
-	return StringUtil::EnumToString(GetSourceCursorStateValues(), 4, "SourceCursorState", static_cast<uint32_t>(value));
+	return StringUtil::EnumToString(GetSourceCursorStateValues(), 3, "SourceCursorState", static_cast<uint32_t>(value));
 }
 
 template<>
 SourceCursorState EnumUtil::FromString<SourceCursorState>(const char *value) {
-	return static_cast<SourceCursorState>(StringUtil::StringToEnum(GetSourceCursorStateValues(), 4, "SourceCursorState", value));
+	return static_cast<SourceCursorState>(StringUtil::StringToEnum(GetSourceCursorStateValues(), 3, "SourceCursorState", value));
 }
 
 const StringUtil::EnumStringLiteral *GetSourceResultTypeValues() {

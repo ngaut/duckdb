@@ -172,6 +172,11 @@ static bool HasJitRuntimePathPrefix(const ExecutionRegionEvent &event, const str
 	return CounterNameHasPrefix(event.jit_runtime.runtime_path_counts, prefix);
 }
 
+//! A chunk step's executor yielded on a blocked source or sink while the step held the pipeline
+static bool HasInterruptedChunkStepEntry(const ExecutionRegionEvent &event) {
+	return HasJitRuntimePathPrefix(event, "chunk_step.entry.interrupted");
+}
+
 static bool HasJitAggregateUpdatePath(const ExecutionRegionEvent &event) {
 	return HasJitRuntimePathPrefix(event, "aggregate_update.");
 }

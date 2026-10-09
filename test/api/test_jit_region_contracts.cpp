@@ -33,7 +33,7 @@ TEST_CASE("JIT recipe binders preserve the output recipe on admission failure", 
 	vector<LogicalType> source_output_types;
 	vector<Value> source_min_values;
 	vector<Value> source_max_values;
-	SljitFullPipelineRecipeBinding binding(ops, source_output_types, source_min_values, source_max_values, false);
+	SljitFullPipelineRecipeBinding binding(ops, source_output_types, source_min_values, source_max_values);
 
 	SljitFullPipelineRecipe recipe;
 	recipe.direct_aggregate_consumer.probe_step_idx = 17;
@@ -41,7 +41,6 @@ TEST_CASE("JIT recipe binders preserve the output recipe on admission failure", 
 	recipe.direct_aggregate_consumer.probe_input_filter_idx = 29;
 	recipe.direct_aggregate_consumer.hash_join_idx = 31;
 	recipe.direct_aggregate_consumer.aggregate_idx = 37;
-	recipe.uses_extended_source_fetch_budget = true;
 
 	auto require_unchanged = [&]() {
 		REQUIRE(recipe.primitive_sequence.Count() == 0);
@@ -50,7 +49,6 @@ TEST_CASE("JIT recipe binders preserve the output recipe on admission failure", 
 		REQUIRE(recipe.direct_aggregate_consumer.probe_input_filter_idx == 29);
 		REQUIRE(recipe.direct_aggregate_consumer.hash_join_idx == 31);
 		REQUIRE(recipe.direct_aggregate_consumer.aggregate_idx == 37);
-		REQUIRE(recipe.uses_extended_source_fetch_budget);
 	};
 
 	SljitSourceFilterAggregateFacts source_filter_aggregate;
@@ -114,17 +112,17 @@ TEST_CASE("JIT recipe publication validates explicit direct terminal ownership",
 	sequence.Add(SljitFullPipelinePrimitiveStep::PostJoinProjectionAggregateUpdate(terminal));
 
 	auto contract = SljitMakeHashJoinDirectAggregateConsumerContract(1, 2, 3, 5);
-	auto recipe = SljitFinalizeFullPipelinePrimitiveRecipe(ops, false, sequence, contract);
+	auto recipe = SljitFinalizeFullPipelinePrimitiveRecipe(ops, sequence, contract);
 	auto recipe_plan = SljitMakeFullPipelinePrimitiveRecipePlan(std::move(recipe));
 	REQUIRE(recipe_plan.Kind() == SljitFullPipelineRecipePlanKind::PRIMITIVE_RECIPE);
 	REQUIRE(recipe_plan.HasRecipe());
 
 	contract.aggregate_idx = 7;
-	REQUIRE_THROWS(SljitFinalizeFullPipelinePrimitiveRecipe(ops, false, sequence, contract));
+	REQUIRE_THROWS(SljitFinalizeFullPipelinePrimitiveRecipe(ops, sequence, contract));
 
 	SljitHashJoinDirectAggregateConsumerContract partial_contract;
 	partial_contract.probe_step_idx = 1;
-	REQUIRE_THROWS(SljitFinalizeFullPipelinePrimitiveRecipe(ops, false, sequence, partial_contract));
+	REQUIRE_THROWS(SljitFinalizeFullPipelinePrimitiveRecipe(ops, sequence, partial_contract));
 
 	auto native_only_plan = SljitMakeFullPipelineNativeOnlyPlan("full_pipeline.recipe.native_only.test");
 	REQUIRE(native_only_plan.Kind() == SljitFullPipelineRecipePlanKind::NATIVE_ONLY);

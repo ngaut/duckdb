@@ -204,13 +204,6 @@ struct OperatorSourceInput {
 	InterruptState &interrupt_state;
 	SourceBatchIndexState batch_index_state = SourceBatchIndexState::UNCHANGED;
 	optional_ptr<ExecutionOperatorStageRecorder> stage_recorder;
-	//! Execution-region source contract: when set, the source must not claim a new
-	//! row group; it drains the current one and then reports declined_new_row_group,
-	//! which is the only point where a compiled kernel may hand the pipeline to the
-	//! vectorized continuation without stranding in-flight rows.
-	bool decline_new_row_group = false;
-	bool declined_new_row_group = false;
-	idx_t new_row_groups_claimed = 0;
 };
 
 struct OperatorSinkCombineInput {

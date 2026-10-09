@@ -32,30 +32,26 @@ public:
 	idx_t MaxThreads() const;
 
 	PipelineExecuteResult ExecuteVectorizedPipeline(idx_t max_chunks);
+	//! Binds a chunk-step kernel to the executor until it resets: from then on the vectorized loop hands every source
+	//! chunk to the step in place of the operator chain
+	void BindCompiledStep(const ExecutionRegionKernel &kernel, unique_ptr<ExecutionRegionRuntime> runtime,
+	                      unique_ptr<ExecutionRegionChunkStep> step);
+	//! The runtime of the chunk step bound for this kernel, or nullptr while none is bound
+	optional_ptr<ExecutionRegionRuntime> CompiledStepRuntime(const ExecutionRegionKernel &kernel) const;
 	bool HasSourceAndSink() const;
 	optional_ptr<ExecutionRegionKernel> GetExecutableFullPipelineKernel() const;
 	ExecutionRegionLocalState &GetOrCreateLocalState(ExecutionRegionKernel &kernel);
 	bool IsAtCleanSourceToSinkBoundary() const;
 
-	SourceResultType FetchSourceContract(DataChunk *&result, ExecutionRegionSourceContractMetrics *metrics = nullptr,
-	                                     bool decline_new_row_group = false, bool *declined_new_row_group = nullptr);
+	SourceResultType FetchSourceContract(DataChunk *&result, ExecutionRegionSourceContractMetrics *metrics = nullptr);
 	SourceResultType
 	FetchPrimitiveAggregateStateSourceContract(ExecutionAggregateStateScanBatch *&result,
 	                                           ExecutionRegionSourceContractMetrics *metrics = nullptr);
-	SinkNextBatchType AdvanceSinkBatch(DataChunk &source_chunk, bool have_more_output);
-	bool AdvancesSinkBatch(DataChunk &source_chunk, bool have_more_output);
-	void SetVectorizedSourceClaimBudget(idx_t budget);
-	void ClearVectorizedSourceClaimBudget();
-	bool ConsumeVectorizedSourceDeclinedYield();
-	bool HasVectorizedSourceClaimBudget() const;
 	void LatchDeferredCompiledExecution();
-	idx_t VectorizedSourceLegRows() const;
 	ExecutionOperatorReadiness GetOperatorReadiness(idx_t operator_index,
 	                                                const ExecutionRegionOperatorInfo &operator_info);
 	//! True while nothing is in flight on this executor's source cursor.
 	bool SourceCursorUntouched() const;
-	bool VectorizedSourceCursorDirty() const;
-	void ClearVectorizedSourceClaimBudgetAtBoundary();
 	//! EXPLAIN ANALYZE attribution: annotate this pipeline's profiling nodes.
 	//! covered_operators=true also marks the intermediate operators and sink.
 	void AddProfilingAnnotation(const string &key, const string &value, bool covered_operators);
@@ -63,14 +59,10 @@ public:
 	                                         const ExecutionRegionOperatorInfo &operator_info,
 	                                         ExecutionOperatorBinding &binding);
 	bool BindSink(DataChunk &input, const ExecutionRegionSinkInfo &sink_info, ExecutionSinkBinding &binding);
-	//! Appends a compiled kernel's output chunk to the Sink. Once the Sink blocks, the core continuation owns that
-	//! chunk and every later one: it sinks them in order before the kernel re-enters or the pipeline finalizes. The
-	//! chunk the Sink blocked on retries as is, because a blocked Sink may already hold it
+	//! Appends a compiled kernel's output chunk to the Sink. Once the Sink blocks, the executor owns that chunk and
+	//! every later one: it sinks them in order before its loop continues or the pipeline finalizes. The chunk the
+	//! Sink blocked on retries as is, because a blocked Sink may already hold it
 	SinkResultType AppendSink(const ExecutionAppendSinkBinding &binding, DataChunk &chunk);
-	//! Hands a chunk to the core continuation without calling the Sink, behind the chunks already queued
-	void QueueSinkChunk(DataChunk &chunk);
-	//! Whether the Sink blocked and chunks wait for the core continuation
-	bool HasRemainingSinkChunks() const;
 	void FinishProcessing();
 	bool TryMarkRuntimeOnce(ExecutionRegionRuntimeOnceFlag flag, idx_t index);
 	PipelineExecuteResult FlushAndFinalizeAfterCompiledFinish(idx_t max_chunks, string &runtime_reason);

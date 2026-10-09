@@ -668,54 +668,12 @@ class MetalProjectionKernel : public ExecutionRegionKernel {
         return true;
     }
 
-    bool SupportsRunnerHandoff() const override {
-        // Metal batches source chunks in kernel-local scratch without a
-        // per-chunk flush: at a declined claim boundary the batch would hold
-        // claimed-but-unsunk rows, so a mid-query handoff can never be legal.
-        return false;
+    bool SupportsChunkStep() const override {
+        return true;
     }
 
-    bool TryExecuteFullPipeline(ExecutionRegionRuntime &runtime, ExecutionRegionResult &result) override {
-        MetalProjectionScratch scratch(runtime.GetAllocator(), projection.output_types);
-        const auto max_batch_chunks = ShouldBatchSourceChunks() ? METAL_MAX_BATCH_CHUNKS : 1;
-        EnsureMetalBuffers(scratch, max_batch_chunks * STANDARD_VECTOR_SIZE);
-        // The batch lives in kernel-local scratch: it sinks before the kernel returns
-        auto stop = [&](ExecutionRegionResult stop_result) {
-            result = SinkProjectionBatch(runtime, scratch) == SinkResultType::FINISHED
-                         ? ExecutionRegionResult::FINISHED
-                         : stop_result;
-            return true;
-        };
-        for (idx_t fetched_chunks = 0; fetched_chunks < runtime.MaxChunks(); fetched_chunks++) {
-            DataChunk *source_chunk = nullptr;
-            auto source_result = runtime.FetchSourceContract(source_chunk);
-            if (source_result == SourceResultType::BLOCKED) {
-                return stop(ExecutionRegionResult::INTERRUPTED);
-            }
-            if (source_chunk && source_chunk->size() > 0) {
-                const bool have_more_output = source_result == SourceResultType::HAVE_MORE_OUTPUT;
-                // The sink takes rows under the partition current when they sink: the batch sinks before this
-                // chunk moves the sink to its partition
-                if (runtime.AdvancesSinkBatch(*source_chunk, have_more_output) &&
-                    SinkProjectionBatch(runtime, scratch) == SinkResultType::FINISHED) {
-                    result = ExecutionRegionResult::FINISHED;
-                    return true;
-                }
-                if (runtime.AdvanceSinkBatch(*source_chunk, have_more_output) == SinkNextBatchType::BLOCKED) {
-                    return stop(ExecutionRegionResult::INTERRUPTED);
-                }
-                AppendChunkToProjectionBatch(scratch, *source_chunk);
-                if (scratch.batch_chunks == max_batch_chunks &&
-                    SinkProjectionBatch(runtime, scratch) == SinkResultType::FINISHED) {
-                    result = ExecutionRegionResult::FINISHED;
-                    return true;
-                }
-            }
-            if (source_result == SourceResultType::FINISHED) {
-                return stop(ExecutionRegionResult::FINISHED);
-            }
-        }
-        return stop(ExecutionRegionResult::NOT_FINISHED);
+    unique_ptr<ExecutionRegionChunkStep> CreateChunkStep(ExecutionRegionRuntime &runtime) override {
+        return make_uniq<MetalProjectionChunkStep>(*this, runtime);
     }
 
   private:
@@ -746,6 +704,45 @@ class MetalProjectionKernel : public ExecutionRegionKernel {
     bool ShouldBatchSourceChunks() const {
         return sink_info.kind == ExecutionRegionSinkKind::MATERIALIZATION;
     }
+
+    //! The projection bound to one pipeline executor: source chunks gather into one Metal dispatch of up to
+    //! METAL_MAX_BATCH_CHUNKS chunks, which runs and sinks once it is full, once the sink moves to another partition,
+    //! or once the source ends
+    class MetalProjectionChunkStep final : public ExecutionRegionChunkStep {
+      public:
+        MetalProjectionChunkStep(const MetalProjectionKernel &kernel_p, ExecutionRegionRuntime &runtime_p)
+            : kernel(kernel_p), runtime(runtime_p),
+              scratch(runtime_p.GetAllocator(), kernel_p.projection.output_types),
+              max_batch_chunks(kernel_p.ShouldBatchSourceChunks() ? METAL_MAX_BATCH_CHUNKS : 1) {
+            kernel.EnsureMetalBuffers(scratch, max_batch_chunks * STANDARD_VECTOR_SIZE);
+        }
+
+        SinkResultType ExecuteChunk(DataChunk &input) override {
+            if (input.size() == 0) {
+                return SinkResultType::NEED_MORE_INPUT;
+            }
+            kernel.AppendChunkToProjectionBatch(scratch, input);
+            if (scratch.batch_chunks < max_batch_chunks) {
+                return SinkResultType::NEED_MORE_INPUT;
+            }
+            return kernel.SinkProjectionBatch(runtime, scratch);
+        }
+
+        void FlushChunks() override {
+            kernel.SinkProjectionBatch(runtime, scratch);
+        }
+
+        void FinishChunks() override {
+            kernel.SinkProjectionBatch(runtime, scratch);
+        }
+
+      private:
+        const MetalProjectionKernel &kernel;
+        ExecutionRegionRuntime &runtime;
+        MetalProjectionScratch scratch;
+        idx_t max_batch_chunks;
+    };
+
 
     void ValidateInputChunk(DataChunk &input) const {
         if (input.ColumnCount() != projection.input_types.size()) {

@@ -75,7 +75,6 @@ void SljitCollectFusedFilterOwner(const vector<SljitExecutableRegionOp> &ops,
 
 SljitFullPipelineRecipe
 SljitFinalizeFullPipelinePrimitiveRecipe(const vector<SljitExecutableRegionOp> &ops,
-                                         bool uses_extended_source_fetch_budget,
                                          SljitFullPipelinePrimitiveSequence primitive_sequence,
                                          SljitHashJoinDirectAggregateConsumerContract direct_aggregate_consumer) {
 	if (primitive_sequence.Count() < 2 ||
@@ -102,7 +101,6 @@ SljitFinalizeFullPipelinePrimitiveRecipe(const vector<SljitExecutableRegionOp> &
 	SljitFullPipelineRecipe recipe;
 	recipe.primitive_sequence = std::move(primitive_sequence);
 	recipe.direct_aggregate_consumer = direct_aggregate_consumer;
-	recipe.uses_extended_source_fetch_budget = uses_extended_source_fetch_budget;
 	recipe.has_scan_filter_executable_body =
 	    direct_source_hash_build || SljitFullPipelineHasExactFilterProbeHashBuild(ops, recipe.primitive_sequence);
 	recipe.fused_filter_owners = std::move(fused_filter_owners);

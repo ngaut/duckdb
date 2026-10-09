@@ -25,29 +25,14 @@ namespace duckdb {
 class ColumnDataCollection;
 class Executor;
 class ExecutionRegionPipelineAdapter;
+class ExecutionRegionChunkStep;
 class ExecutionRegionKernel;
 class ExecutionRegionLocalState;
 struct ExecutionRegionSourceContractMetrics;
 
-//! The Pipeline class represents an execution pipeline
-//! What this executor's source cursor has done, and therefore which runner
-//! transitions are legal. Runners may only change where no cursor holds an
-//! in-flight row group; this state makes the legality queries structural
-//! instead of scattered booleans.
-enum class SourceCursorState : uint8_t {
-	//! Nothing in flight: entry deferral and compiled entry are both legal.
-	UNTOUCHED,
-	//! The compiled source contract owns the cursor: only compiled execution
-	//! may continue; deferral is legal only through the declined-boundary path
-	//! (or after the one-way deferral latch hands the pipeline over).
-	COMPILED_CONTRACT,
-	//! A budgeted measurement leg is fetching: a declined yield returns the
-	//! cursor to UNTOUCHED, anything else degrades it to VECTORIZED_UNMANAGED.
-	VECTORIZED_MANAGED,
-	//! Unmanaged vectorized fetches happened: the cursor can hold a partially
-	//! scanned row group at any yield, so this executor is latched vectorized.
-	VECTORIZED_UNMANAGED,
-};
+//! Which fetch path this executor's source cursor took. A pipeline runs on one path from its first fetch to its end,
+//! so a compiled kernel may only start, or leave the pipeline to the vectorized loop, while nothing was fetched
+enum class SourceCursorState : uint8_t { UNTOUCHED, COMPILED_CONTRACT, VECTORIZED };
 
 class PipelineExecutor {
 	friend class ExecutionRegionPipelineAdapter;
@@ -108,6 +93,14 @@ private:
 
 	void PrepareExecutionSourceInputChunk();
 	PipelineExecuteResult ExecuteVectorizedPipeline(idx_t max_chunks);
+	//! The chunk the loop fetches into: a bound chunk step reads the source contract's chunk
+	DataChunk &LoopSourceChunk();
+	SourceFetchResult FetchLoopSource(DataChunk &result);
+	//! Pushes a source chunk through the bound chunk step, or else through the operator chain
+	OperatorResultType PushSourceChunk(DataChunk &input, ExecutionBudget &chunk_budget);
+	//! A partitioned sink takes rows under the partition current when they sink: the rows a chunk step holds sink
+	//! before the fetched chunk moves the sink to another partition
+	OperatorResultType FlushCompiledStepBeforeAdvance(DataChunk &source_chunk, const SourceFetchResult &source_result);
 
 	//! The pipeline to process
 	Pipeline &pipeline;
@@ -147,17 +140,9 @@ private:
 	//! Partition info that is used by this executor
 	OperatorPartitionInfo required_partition_info;
 
-	//! Remaining vectorized new-row-group claims; INVALID_INDEX means unlimited.
-	idx_t vectorized_source_claim_budget = DConstants::INVALID_INDEX;
-	//! Set when the source declined a claim and the executor yielded at the boundary.
-	bool vectorized_source_declined_yield = false;
-	//! The source-cursor state machine; transitions live in FetchFromSource and
-	//! FetchFromSourceContract only.
+	//! Transitions live in FetchFromSource and FetchFromCompiledSourceContract only
 	SourceCursorState source_cursor_state = SourceCursorState::UNTOUCHED;
-	idx_t vectorized_source_leg_rows = 0;
-	//! Latched when a compiled kernel defers: deferral hands this pipeline to the
-	//! vectorized continuation permanently, because a deferred kernel's terminal
-	//! state does not support re-entry.
+	//! Latched when a compiled kernel cannot start: the vectorized loop runs this pipeline to its end
 	bool compiled_execution_deferred = false;
 	//! Source operator indicated that there is no more output possible
 	bool exhausted_source = false;
@@ -184,10 +169,14 @@ private:
 	//! partition requirements coalesce, so no partition advance has to wait for these rows
 	DataChunk coalesced_sink_chunk;
 	bool coalesced_sink_chunk_initialized = false;
-	//! Set when the sink batch advance of a compiled kernel blocked on the source chunk it fetched: the kernel re-reads
-	//! execution_source_input_chunk, with the fetch result it had, at its next source fetch
-	bool compiled_source_replay = false;
-	SourceResultType compiled_source_replay_result = SourceResultType::FINISHED;
+	//! The chunk-step kernel bound to this executor until it resets, the runtime the step calls back through, and the
+	//! step (declared last: it refers to both the runtime and the region local state). Once bound, the loop fetches,
+	//! advances batches and sinks, and the step replaces the operator chain for every source chunk
+	optional_ptr<const ExecutionRegionKernel> compiled_step_kernel;
+	unique_ptr<ExecutionRegionRuntime> compiled_step_runtime;
+	unique_ptr<ExecutionRegionChunkStep> compiled_step;
+	//! Whether the chunk step sank the rows it held once the source was exhausted
+	bool compiled_step_finished = false;
 
 	//! This flag is set when the pipeline gets interrupted by NextBatch -> NextBatch should be called again and the
 	//! source_chunk should be sent through the pipeline
@@ -210,20 +199,8 @@ private:
 	//! Reset the operator index to the first operator
 	void GoToSource(idx_t &current_idx, idx_t initial_idx);
 	SourceFetchResult FetchFromSource(DataChunk &result);
-	//! Runner-switch support: the vectorized source declines new row-group claims
-	//! once the budget is exhausted; the executor then yields at the boundary.
-	void SetVectorizedSourceClaimBudget(idx_t budget);
-	void ClearVectorizedSourceClaimBudget();
-	//! Boundary variant: the declined fetch proved the cursor sits at a
-	//! row-group boundary with nothing in flight, so it returns to UNTOUCHED.
-	void ClearVectorizedSourceClaimBudgetAtBoundary();
-	bool ConsumeVectorizedSourceDeclinedYield();
-	bool HasVectorizedSourceClaimBudget() const;
-	idx_t VectorizedSourceLegRows() const;
 	SourceResultType FetchFromSourceContract(DataChunk *&result,
-	                                         ExecutionRegionSourceContractMetrics *metrics = nullptr,
-	                                         bool decline_new_row_group = false,
-	                                         bool *declined_new_row_group = nullptr);
+	                                         ExecutionRegionSourceContractMetrics *metrics = nullptr);
 	SourceResultType
 	FetchFromPrimitiveAggregateStateSourceContract(ExecutionAggregateStateScanBatch *&result,
 	                                               ExecutionRegionSourceContractMetrics *metrics = nullptr);
@@ -233,8 +210,7 @@ private:
 	template <class FETCH>
 	SourceResultType FetchFromCompiledSourceContract(SupportsSourceContract supports_contract,
 	                                                 ExecutionRegionSourceContractMetrics *metrics,
-	                                                 optional_ptr<DataChunk> source_chunk, bool decline_new_row_group,
-	                                                 bool *declined_new_row_group, FETCH &&fetch);
+	                                                 optional_ptr<DataChunk> source_chunk, FETCH &&fetch);
 	bool TryMarkExecutionRegionRuntimeOnceFlag(ExecutionRegionRuntimeOnceFlag flag, idx_t index);
 
 	void FinishProcessing(int32_t operator_idx = -1);

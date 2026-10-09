@@ -42,7 +42,7 @@ public:
 			if (!selected_hash_join_inputs.TryPrepareHashProbeInput(primitive.hash_join_idx, input, join_input_ptr,
 			                                                        deferred_reason)) {
 				if (!deferred_reason.empty()) {
-					return SljitDeferFullPipelineResult(runtime, deferred_reason, result);
+					SljitThrowNativeOperatorNotReady(deferred_reason);
 				}
 				throw InternalException("SLJIT hash probe could not prepare selected upstream hash-join input");
 			}
@@ -69,7 +69,7 @@ public:
 			auto direct_result =
 			    try_execute_direct_consumer(*direct_consumer_contract, primitive, join_input, execute_hash_join_probe);
 			if (direct_result.status == SljitHashJoinAggregateConsumerStatus::DEFERRED) {
-				return SljitDeferFullPipelineResult(runtime, direct_result.deferred_reason, result);
+				SljitThrowNativeOperatorNotReady(direct_result.deferred_reason);
 			}
 			if (direct_result.status == SljitHashJoinAggregateConsumerStatus::EMPTY) {
 				return false;
@@ -97,8 +97,8 @@ public:
 			    output_column_map, primitive.output_projection_idx);
 			return execute_next_step(output_view);
 		};
-		auto handle_defer = [&](string &deferred_reason) {
-			return SljitDeferFullPipelineResult(runtime, deferred_reason, result);
+		auto handle_defer = [&](string &deferred_reason) -> bool {
+			SljitThrowNativeOperatorNotReady(deferred_reason);
 		};
 		return SljitDrainHashJoinProbeOutputsWithState(
 		    scratch, hash_join_idx, hash_join_op, join_input, join_output, execute_hash_join_probe, handle_output,

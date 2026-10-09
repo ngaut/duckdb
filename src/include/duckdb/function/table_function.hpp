@@ -226,14 +226,6 @@ public:
 	AsyncResultsExecutionMode results_execution_mode {AsyncResultsExecutionMode::SYNCHRONOUS};
 	//! Interrupt state of the calling task, so the function might park and wake-up by returning a taskless Blocked res
 	optional_ptr<const InterruptState> interrupt_state;
-	//! Execution-region runner switching: when set, the function must not claim a
-	//! new row group; it drains current work and reports declined_new_row_group.
-	//! new_row_groups_claimed reports claims made during the call so the executor
-	//! can enforce a claim budget. Functions without storage-scan claims ignore all
-	//! three fields.
-	bool decline_new_row_group = false;
-	bool declined_new_row_group = false;
-	idx_t new_row_groups_claimed = 0;
 };
 
 struct TableFunctionPartitionInput {

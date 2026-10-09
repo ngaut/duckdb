@@ -17,17 +17,15 @@ namespace duckdb {
 
 SljitFullPipelineRecipeSequenceBuilder::SljitFullPipelineRecipeSequenceBuilder(
     const vector<SljitExecutableRegionOp> &ops_p, const vector<LogicalType> &source_output_types_p,
-    const vector<Value> &source_min_values_p, const vector<Value> &source_max_values_p,
-    bool uses_extended_source_fetch_budget_p)
+    const vector<Value> &source_min_values_p, const vector<Value> &source_max_values_p)
     : ops(ops_p), source_output_types(source_output_types_p), source_min_values(source_min_values_p),
-      source_max_values(source_max_values_p), uses_extended_source_fetch_budget(uses_extended_source_fetch_budget_p) {
+      source_max_values(source_max_values_p) {
 }
 
 SljitFullPipelineRecipe SljitFullPipelineRecipeSequenceBuilder::MakePrimitiveSequence(
     SljitFullPipelinePrimitiveSequence sequence,
     SljitHashJoinDirectAggregateConsumerContract direct_aggregate_consumer) const {
-	return SljitFinalizeFullPipelinePrimitiveRecipe(ops, uses_extended_source_fetch_budget, std::move(sequence),
-	                                                direct_aggregate_consumer);
+	return SljitFinalizeFullPipelinePrimitiveRecipe(ops, std::move(sequence), direct_aggregate_consumer);
 }
 
 SljitFullPipelinePrimitiveSequence SljitFullPipelineRecipeSequenceBuilder::MakeSourceSequence() const {

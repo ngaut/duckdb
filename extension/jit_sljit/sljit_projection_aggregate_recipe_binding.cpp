@@ -18,10 +18,8 @@ namespace duckdb {
 
 SljitProjectionAggregateRecipeBinding::SljitProjectionAggregateRecipeBinding(
     const vector<SljitExecutableRegionOp> &ops_p, const vector<LogicalType> &source_output_types_p,
-    const vector<Value> &source_min_values_p, const vector<Value> &source_max_values_p,
-    bool uses_extended_source_fetch_budget_p)
-    : SljitFullPipelineRecipeSequenceBuilder(ops_p, source_output_types_p, source_min_values_p, source_max_values_p,
-                                             uses_extended_source_fetch_budget_p) {
+    const vector<Value> &source_min_values_p, const vector<Value> &source_max_values_p)
+    : SljitFullPipelineRecipeSequenceBuilder(ops_p, source_output_types_p, source_min_values_p, source_max_values_p) {
 }
 
 bool SljitProjectionAggregateRecipeBinding::TryMakeMarkFilterProjectionNativeTailRecipe(
@@ -425,8 +423,7 @@ bool SljitProjectionAggregateRecipeBinding::TryBindPostJoinProjectionAggregatePr
 }
 
 SljitPreJoinProjectionRecipeBinding SljitProjectionAggregateRecipeBinding::PreJoinProjectionBinding() const {
-	return SljitPreJoinProjectionRecipeBinding(ops, source_output_types, source_min_values, source_max_values,
-	                                           uses_extended_source_fetch_budget);
+	return SljitPreJoinProjectionRecipeBinding(ops, source_output_types, source_min_values, source_max_values);
 }
 
 bool SljitProjectionAggregateRecipeBinding::TryMakeProjectionAggregateRecipe(

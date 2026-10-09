@@ -53,9 +53,13 @@ public:
 	unique_ptr<TableFilterKernelState> CreateTableFilterKernelState(idx_t filter_index) const override;
 	bool HasExecutableBody() const override;
 	unique_ptr<ExecutionRegionLocalState> CreateLocalState(Allocator &allocator) const override;
-	bool SupportsRunnerHandoff() const override;
 	bool TryExecuteFullPipeline(ExecutionRegionRuntime &runtime, ExecutionRegionResult &result) override;
+	bool SupportsChunkStep() const override;
+	bool EntryReady(ExecutionRegionRuntime &runtime, string &blocker) override;
+	unique_ptr<ExecutionRegionChunkStep> CreateChunkStep(ExecutionRegionRuntime &runtime) override;
 
+	//! Hands the rows the storage scan's compiled filters processed since the last call to the runtime's trace
+	void RecordExecutedFilterRows(ExecutionRegionRuntime &runtime) const;
 	const shared_ptr<ExecutionRuntimeFilterIdentity> &ExactSourceFilterIdentity(idx_t binding) const;
 	SljitNativePerfectHashJoinProbeFunction EnsurePerfectHashJoinProbeCode(ExecutionRegionRuntime &runtime,
 	                                                                       SljitExecutableHashJoinProbe &probe,

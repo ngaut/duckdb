@@ -1922,7 +1922,7 @@ TEST_CASE("JIT sorted grouped sums preserve compact runs across scheduler yields
 	idx_t generated_rows = 0;
 	idx_t flushed_rows = 0;
 	idx_t generated_state_initializations = 0;
-	idx_t generated_runtime_count = 0;
+	idx_t chunk_step_entries = 0;
 	idx_t lazy_codegen_code_size = 0;
 	bool proven_unique_append_enabled = false;
 	bool producer_order_proof = false;
@@ -1935,7 +1935,6 @@ TEST_CASE("JIT sorted grouped sums preserve compact runs across scheduler yields
 		                          "aggregate_update.generated_pending_primitive_group_runs=")) {
 			continue;
 		}
-		generated_runtime_count++;
 		lazy_codegen_code_size += event.jit_runtime.lazy_codegen.code_size;
 		RequireGeneratedAggregateUpdateRuntimeOwnership(event);
 		grouped_aggregate_reserve_resized =
@@ -1956,10 +1955,13 @@ TEST_CASE("JIT sorted grouped sums preserve compact runs across scheduler yields
 				final_combine_required = true;
 			} else if (counter.counter.name == "aggregate_update.grouped_aggregate_reserve_target") {
 				grouped_aggregate_reserve_target += counter.count;
+			} else if (counter.counter.name == "chunk_step.entry") {
+				chunk_step_entries += counter.count;
 			}
 		}
 	}
-	REQUIRE(generated_runtime_count > 1);
+	// The scheduler yielded: the executor re-entered the step that kept the runs
+	REQUIRE(chunk_step_entries > 1);
 	REQUIRE(lazy_codegen_code_size > 0);
 	REQUIRE(generated_rows == 131072);
 	REQUIRE(flushed_rows == 131072);

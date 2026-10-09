@@ -51,7 +51,6 @@ string DescribeExecutionRegionLoweringRejection(const ExecutionRegionGraph &grap
 string ExecutionRegionDecisionRunnerName(ExecutionRunnerKind runner);
 
 PhysicalRunnerCostParameters BuildPhysicalRunnerCostParameters(ClientContext &context);
-bool ExecutionRegionAdaptiveMeasurementWithinBand(ClientContext &context, const PhysicalRunnerCostProfile &cost);
 bool ExecutionRegionProductionEligibilityAllowsPlanning(ClientContext &context,
                                                         const PhysicalRunnerCostParameters &parameters);
 bool ExecutionRegionPlanningNeedsBackendDiagnostics(ClientContext &context);

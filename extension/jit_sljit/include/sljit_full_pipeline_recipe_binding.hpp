@@ -18,8 +18,7 @@ class SljitFullPipelineRecipeBinding : private SljitFullPipelineRecipeSequenceBu
 public:
 	SljitFullPipelineRecipeBinding(const vector<SljitExecutableRegionOp> &ops_p,
 	                               const vector<LogicalType> &source_output_types_p,
-	                               const vector<Value> &source_min_values_p, const vector<Value> &source_max_values_p,
-	                               bool uses_extended_source_fetch_budget_p);
+	                               const vector<Value> &source_min_values_p, const vector<Value> &source_max_values_p);
 
 	SljitFullPipelineRecipePlan MakeNativeOnlyPlan() const;
 

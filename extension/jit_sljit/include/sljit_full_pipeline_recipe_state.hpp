@@ -86,7 +86,6 @@ struct SljitFullPipelineRecipe {
 	SljitFullPipelinePrimitiveSequence primitive_sequence;
 	SljitHashJoinDirectAggregateConsumerContract direct_aggregate_consumer;
 	vector<ExecutionAggregateStateCombineLane> primitive_aggregate_state_source_lanes;
-	bool uses_extended_source_fetch_budget = false;
 	bool has_scan_filter_executable_body = false;
 	vector<idx_t> fused_filter_owners;
 
@@ -126,6 +125,14 @@ public:
 	const string &NativeOnlyRuntimePath() const {
 		D_ASSERT(kind == SljitFullPipelineRecipePlanKind::NATIVE_ONLY);
 		return native_only_runtime_path;
+	}
+
+	//! Whether the recipe runs one source chunk at a time inside the pipeline executor's loop. The aggregate-state
+	//! source recipe fetches aggregate-state batches, not chunks, so it keeps its own loop
+	bool SupportsChunkStep() const {
+		return kind == SljitFullPipelineRecipePlanKind::NATIVE_ONLY ||
+		       (kind == SljitFullPipelineRecipePlanKind::PRIMITIVE_RECIPE &&
+		        !recipe.UsesPrimitiveAggregateStateSource());
 	}
 
 private:

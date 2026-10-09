@@ -408,10 +408,6 @@ SourceResultType PhysicalTableScan::GetExecutionSourceContractDataInternal(Execu
 			return SourceResultType::HAVE_MORE_OUTPUT;
 		}
 
-		if (input.decline_new_row_group) {
-			input.declined_new_row_group = true;
-			return SourceResultType::HAVE_MORE_OUTPUT;
-		}
 		optional_idx claimed_rows;
 		{
 			ExecutionOperatorStageTimer timer(input.stage_recorder, "source_contract.table_scan.next_parallel_scan");
@@ -491,7 +487,6 @@ SourceResultType PhysicalTableScan::GetDataInternal(ExecutionContext &context, D
 	auto &l_state = input.local_state.Cast<TableScanLocalSourceState>();
 
 	TableFunctionInput data(bind_data.get(), l_state.local_state.get(), g_state.global_state.get());
-	data.decline_new_row_group = input.decline_new_row_group;
 	if (input.interrupt_state.CanCallback()) {
 		data.interrupt_state = &input.interrupt_state;
 	}
@@ -513,8 +508,6 @@ SourceResultType PhysicalTableScan::GetDataInternal(ExecutionContext &context, D
 		// inconsistencies
 		ValidateAsyncStrategyResult(execution_strategy, input_execution_mode, data.results_execution_mode,
 		                            initial_async_result, output_async_result, chunk.size());
-		input.declined_new_row_group = data.declined_new_row_group;
-		input.new_row_groups_claimed = data.new_row_groups_claimed;
 
 		// Handle results
 		if (output_async_result == AsyncResultType::BLOCKED) {
@@ -530,11 +523,6 @@ SourceResultType PhysicalTableScan::GetDataInternal(ExecutionContext &context, D
 				}
 			}
 			data.async_result.ExecuteTasksSynchronously();
-			return SourceResultType::HAVE_MORE_OUTPUT;
-		}
-		if (output_async_result == AsyncResultType::IMPLICIT && chunk.size() == 0 && data.declined_new_row_group) {
-			// The scan declined to claim a new row group: this is a runner-switch
-			// yield at a row-group boundary, not source exhaustion.
 			return SourceResultType::HAVE_MORE_OUTPUT;
 		}
 		return AsyncResult::GetSourceResultType(output_async_result, chunk.size());

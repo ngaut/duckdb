@@ -1849,47 +1849,6 @@ struct IntegerDivisionSetting {
 	static constexpr idx_t SettingIndex = NEXT_SETTING_INDEX();
 };
 
-struct JitAdaptiveAbSetting {
-	using RETURN_TYPE = bool;
-	static constexpr const char *Name = "jit_adaptive_ab";
-	static constexpr const char *Description =
-	    "Measure one compiled and one native row group per compiled-selected pipeline and commit to the measured "
-	    "winner; the compiled runner must win by jit_adaptive_ab_margin_basis_points";
-	static constexpr const char *InputType = "BOOLEAN";
-	static constexpr bool IsDebug = false;
-	static constexpr bool IsDeprecated = false;
-	static constexpr const char *DefaultValue = "true";
-	static constexpr SettingScopeTarget Scope = SettingScopeTarget::LOCAL_DEFAULT;
-	static constexpr idx_t SettingIndex = NEXT_SETTING_INDEX();
-};
-
-struct JitAdaptiveAbBandBasisPointsSetting {
-	using RETURN_TYPE = idx_t;
-	static constexpr const char *Name = "jit_adaptive_ab_band_basis_points";
-	static constexpr const char *Description =
-	    "Measure the runner A/B only when the selection is thin: static net benefit within this many basis points of "
-	    "the required benefit; zero measures every compiled-selected pipeline";
-	static constexpr const char *InputType = "UBIGINT";
-	static constexpr bool IsDebug = false;
-	static constexpr bool IsDeprecated = false;
-	static constexpr const char *DefaultValue = "1000";
-	static constexpr SettingScopeTarget Scope = SettingScopeTarget::LOCAL_DEFAULT;
-	static constexpr idx_t SettingIndex = NEXT_SETTING_INDEX();
-};
-
-struct JitAdaptiveAbMarginBasisPointsSetting {
-	using RETURN_TYPE = idx_t;
-	static constexpr const char *Name = "jit_adaptive_ab_margin_basis_points";
-	static constexpr const char *Description = "Required compiled advantage over the measured native leg in basis "
-	                                           "points before the adaptive A/B commits to the compiled runner";
-	static constexpr const char *InputType = "UBIGINT";
-	static constexpr bool IsDebug = false;
-	static constexpr bool IsDeprecated = false;
-	static constexpr const char *DefaultValue = "1000";
-	static constexpr SettingScopeTarget Scope = SettingScopeTarget::LOCAL_DEFAULT;
-	static constexpr idx_t SettingIndex = NEXT_SETTING_INDEX();
-};
-
 struct JitBackendSetting {
 	using RETURN_TYPE = string;
 	static constexpr const char *Name = "jit_backend";
@@ -1986,20 +1945,6 @@ struct JitCboStartupMarginBasisPointsSetting {
 	static constexpr const char *Name = "jit_cbo_startup_margin_basis_points";
 	static constexpr const char *Description =
 	    "Required-benefit margin over startup cost in basis points used by the JIT CBO physical-runner decision";
-	static constexpr const char *InputType = "UBIGINT";
-	static constexpr bool IsDebug = false;
-	static constexpr bool IsDeprecated = false;
-	static constexpr const char *DefaultValue = "0";
-	static constexpr SettingScopeTarget Scope = SettingScopeTarget::LOCAL_DEFAULT;
-	static constexpr idx_t SettingIndex = NEXT_SETTING_INDEX();
-};
-
-struct JitDebugForceDeferAfterChunksSetting {
-	using RETURN_TYPE = idx_t;
-	static constexpr const char *Name = "jit_debug_force_defer_after_chunks";
-	static constexpr const char *Description =
-	    "Debug: compiled full-pipeline kernels stop claiming new row groups after fetching this many source chunks and "
-	    "defer to the vectorized continuation at the row-group boundary; zero disables";
 	static constexpr const char *InputType = "UBIGINT";
 	static constexpr bool IsDebug = false;
 	static constexpr bool IsDeprecated = false;

@@ -14,7 +14,6 @@ namespace duckdb {
 
 SljitFullPipelineRecipe
 SljitFinalizeFullPipelinePrimitiveRecipe(const vector<SljitExecutableRegionOp> &ops,
-                                         bool uses_extended_source_fetch_budget,
                                          SljitFullPipelinePrimitiveSequence primitive_sequence,
                                          SljitHashJoinDirectAggregateConsumerContract direct_aggregate_consumer = {});
 
