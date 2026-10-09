@@ -22,10 +22,10 @@ namespace duckdb {
 
 class SljitHashJoinProbeMaterializePrimitiveRuntime {
 public:
-	SljitHashJoinProbeMaterializePrimitiveRuntime(ExecutionRegionRuntime &runtime_p, ExecutionRegionResult &result_p,
+	SljitHashJoinProbeMaterializePrimitiveRuntime(ExecutionRegionRuntime &runtime_p,
 	                                              vector<SljitExecutableRegionOp> &ops_p,
 	                                              SljitRegionExecutionScratch &scratch_p)
-	    : runtime(runtime_p), result(result_p), ops(ops_p), scratch(scratch_p) {
+	    : runtime(runtime_p), ops(ops_p), scratch(scratch_p) {
 	}
 
 	template <class EXECUTE_HASH_JOIN_PROBE, class EXECUTE_OUTPUT_BATCH>
@@ -99,7 +99,6 @@ private:
 
 private:
 	ExecutionRegionRuntime &runtime;
-	ExecutionRegionResult &result;
 	vector<SljitExecutableRegionOp> &ops;
 	SljitRegionExecutionScratch &scratch;
 	std::array<SljitDataChunkBatch, SLJIT_FULL_PIPELINE_MAX_PRIMITIVES> batches;

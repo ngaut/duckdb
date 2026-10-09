@@ -239,13 +239,12 @@ struct SljitUngroupedAggregateUpdateRuntimeState {
 
 	bool Execute(ExecutionRegionRuntime &runtime, ExecutionRegionResult &result, vector<SljitExecutableRegionOp> &ops,
 	             SljitRegionExecutionScratch &scratch, const SljitUngroupedAggregateUpdatePrimitive &primitive,
-	             const SljitRuntimeBatchView &input, idx_t &processed_batches) {
+	             const SljitRuntimeBatchView &input) {
 		if (input.count == 0) {
 			return false;
 		}
 		if (primitive.strategy == SljitUngroupedAggregateUpdateStrategyKind::FILTERED_PRIMITIVE_PAYLOAD_UPDATE) {
-			return ExecuteFilteredPrimitivePayloadUpdate(runtime, result, ops, scratch, primitive, input,
-			                                             processed_batches);
+			return ExecuteFilteredPrimitivePayloadUpdate(runtime, result, ops, scratch, primitive, input);
 		}
 		auto &input_chunk = SljitBindRuntimeBatchInput(input, "SLJIT ungrouped aggregate update");
 		auto &aggregate_op = ops[primitive.aggregate_idx];
@@ -257,7 +256,6 @@ struct SljitUngroupedAggregateUpdateRuntimeState {
 		if (SljitNativeSinkResultStopsExecution(runtime, sink_result, result)) {
 			return true;
 		}
-		processed_batches++;
 		return false;
 	}
 
@@ -275,7 +273,7 @@ private:
 	                                           vector<SljitExecutableRegionOp> &ops,
 	                                           SljitRegionExecutionScratch &scratch,
 	                                           const SljitUngroupedAggregateUpdatePrimitive &primitive,
-	                                           const SljitRuntimeBatchView &input, idx_t &processed_batches) {
+	                                           const SljitRuntimeBatchView &input) {
 		auto &input_chunk = SljitBindMaterializedRuntimeBatchInput(input, "SLJIT filtered ungrouped aggregate update");
 		auto &aggregate_op = ops[primitive.aggregate_idx];
 		auto sink_result = SljitExecuteNativeFilteredAggregateUpdate(
@@ -284,7 +282,6 @@ private:
 		if (SljitNativeSinkResultStopsExecution(runtime, sink_result, result)) {
 			return true;
 		}
-		processed_batches++;
 		return false;
 	}
 

@@ -56,14 +56,12 @@ public:
 
 	bool Execute(ExecutionRegionRuntime &runtime, ExecutionRegionResult &result, vector<SljitExecutableRegionOp> &ops,
 	             SljitRegionExecutionScratch &scratch, const SljitGroupedAggregateUpdatePrimitive &primitive,
-	             const SljitRuntimeBatchView &input, idx_t &processed_batches) {
+	             const SljitRuntimeBatchView &input) {
 		switch (primitive.strategy) {
 		case SljitGroupedAggregateUpdateStrategyKind::DIRECT_PRIMITIVE_PAYLOAD_UPDATE:
-			return ExecuteDirectPrimitivePayloadUpdate(runtime, result, ops, scratch, primitive, input,
-			                                           processed_batches);
+			return ExecuteDirectPrimitivePayloadUpdate(runtime, result, ops, scratch, primitive, input);
 		case SljitGroupedAggregateUpdateStrategyKind::FILTERED_PRIMITIVE_PAYLOAD_UPDATE:
-			return ExecuteFilteredPrimitivePayloadUpdate(runtime, result, ops, scratch, primitive, input,
-			                                             processed_batches);
+			return ExecuteFilteredPrimitivePayloadUpdate(runtime, result, ops, scratch, primitive, input);
 		default:
 			throw InternalException("SLJIT grouped direct update runtime received an unsupported strategy");
 		}
@@ -81,12 +79,11 @@ private:
 	bool ExecuteDirectPrimitivePayloadUpdate(ExecutionRegionRuntime &runtime, ExecutionRegionResult &result,
 	                                         vector<SljitExecutableRegionOp> &ops, SljitRegionExecutionScratch &scratch,
 	                                         const SljitGroupedAggregateUpdatePrimitive &primitive,
-	                                         const SljitRuntimeBatchView &input, idx_t &processed_batches) {
+	                                         const SljitRuntimeBatchView &input) {
 		if (primitive.input_kind == SljitGroupedAggregateUpdateInputKind::PROJECTED_INPUT) {
 			RecordSljitRegionRuntimePath(runtime, ops[primitive.aggregate_idx].kind, "grouped_direct_projected_input",
 			                             input.count);
-			return ExecuteProjectedDirectPrimitivePayloadUpdate(runtime, ops, scratch, primitive, input,
-			                                                    processed_batches);
+			return ExecuteProjectedDirectPrimitivePayloadUpdate(runtime, ops, scratch, primitive, input);
 		}
 		RecordSljitRegionRuntimePath(runtime, ops[primitive.aggregate_idx].kind, "grouped_direct_materialized_input",
 		                             input.count);
@@ -111,7 +108,6 @@ private:
 		if (SljitNativeSinkResultStopsExecution(runtime, sink_result, result)) {
 			return true;
 		}
-		processed_batches++;
 		return false;
 	}
 
@@ -203,7 +199,7 @@ private:
 	                                           vector<SljitExecutableRegionOp> &ops,
 	                                           SljitRegionExecutionScratch &scratch,
 	                                           const SljitGroupedAggregateUpdatePrimitive &primitive,
-	                                           const SljitRuntimeBatchView &input, idx_t &processed_batches) {
+	                                           const SljitRuntimeBatchView &input) {
 		auto &input_chunk = SljitBindMaterializedRuntimeBatchInput(input, "SLJIT filtered grouped aggregate update");
 		auto &aggregate_op = ops[primitive.aggregate_idx];
 		if (aggregate_op.aggregate_update.filtered_update.kind ==
@@ -234,7 +230,6 @@ private:
 			                              "filtered_perfect_hash_update", stage_start);
 			RecordSljitRegionMaterializationElision(runtime, aggregate_op.kind, "filtered_perfect_hash_update",
 			                                        input_chunk.size());
-			processed_batches++;
 			return false;
 		}
 		auto &filter_op = ops[primitive.filter_idx];
@@ -244,7 +239,6 @@ private:
 		                                        scratch.ExpressionAdapterScratch(primitive.filter_idx, 0));
 		RecordSljitRegionStageRuntime(runtime, primitive.filter_idx, filter_op.kind, "selection", filter_stage_start);
 		if (selected_count == 0) {
-			processed_batches++;
 			return false;
 		}
 
@@ -258,7 +252,6 @@ private:
 		if (SljitNativeSinkResultStopsExecution(runtime, sink_result, result)) {
 			return true;
 		}
-		processed_batches++;
 		return false;
 	}
 
@@ -266,7 +259,7 @@ private:
 	                                                  vector<SljitExecutableRegionOp> &ops,
 	                                                  SljitRegionExecutionScratch &scratch,
 	                                                  const SljitGroupedAggregateUpdatePrimitive &primitive,
-	                                                  const SljitRuntimeBatchView &input, idx_t &processed_batches) {
+	                                                  const SljitRuntimeBatchView &input) {
 		auto stage_start = SljitRegionStageStart(runtime);
 		if (!projected_direct_update || !projected_direct_update->Ready()) {
 			throw InternalException("SLJIT projected grouped aggregate direct update descriptor is not prepared");
@@ -289,7 +282,7 @@ private:
 		auto &aggregate_op = ops[primitive.aggregate_idx];
 		auto &group_sources = PrepareProjectedDirectGroupSources(aggregate_op, *source_input);
 		if (TryExecuteProjectedDirectSourceInputPayloadUpdate(runtime, ops, scratch, primitive, *source_input,
-		                                                      group_sources, processed_batches)) {
+		                                                      group_sources)) {
 			RecordSljitRegionStageRuntime(runtime, primitive.aggregate_idx, aggregate_op.kind,
 			                              "projected_source_input_grouped_update", stage_start);
 			return false;
@@ -342,7 +335,7 @@ private:
 	bool TryExecuteProjectedDirectSourceInputPayloadUpdate(
 	    ExecutionRegionRuntime &runtime, vector<SljitExecutableRegionOp> &ops, SljitRegionExecutionScratch &scratch,
 	    const SljitGroupedAggregateUpdatePrimitive &primitive, DataChunk &source_input,
-	    const vector<ExecutionRowPointerGroupKeySource> &group_sources, idx_t &processed_batches) {
+	    const vector<ExecutionRowPointerGroupKeySource> &group_sources) {
 		projected_direct_failure_reason.clear();
 		if (!SljitProjectedInputGroupedAggregateCanUseSourceInput(*projected_direct_update)) {
 			projected_direct_failure_reason = "descriptor";
@@ -369,7 +362,6 @@ private:
 		}
 		RecordSljitRegionMaterializationElision(runtime, aggregate_op.kind, "projected_source_input_grouped_update",
 		                                        source_input.size());
-		processed_batches++;
 		return true;
 	}
 

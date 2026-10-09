@@ -21,12 +21,11 @@ namespace duckdb {
 
 class SljitHashJoinProbeSelectionPrimitiveRuntime {
 public:
-	SljitHashJoinProbeSelectionPrimitiveRuntime(ExecutionRegionRuntime &runtime_p, ExecutionRegionResult &result_p,
+	SljitHashJoinProbeSelectionPrimitiveRuntime(ExecutionRegionRuntime &runtime_p,
 	                                            vector<SljitExecutableRegionOp> &ops_p,
 	                                            SljitRegionExecutionScratch &scratch_p,
 	                                            SljitSelectedHashJoinInputRuntime &selected_hash_join_inputs_p)
-	    : runtime(runtime_p), result(result_p), ops(ops_p), scratch(scratch_p),
-	      selected_hash_join_inputs(selected_hash_join_inputs_p) {
+	    : runtime(runtime_p), ops(ops_p), scratch(scratch_p), selected_hash_join_inputs(selected_hash_join_inputs_p) {
 	}
 
 	template <class EXECUTE_HASH_JOIN_PROBE, class EXECUTE_NEXT_STEP, class TRY_EXECUTE_DIRECT_CONSUMER>
@@ -109,7 +108,6 @@ public:
 
 private:
 	ExecutionRegionRuntime &runtime;
-	ExecutionRegionResult &result;
 	vector<SljitExecutableRegionOp> &ops;
 	SljitRegionExecutionScratch &scratch;
 	SljitSelectedHashJoinInputRuntime &selected_hash_join_inputs;

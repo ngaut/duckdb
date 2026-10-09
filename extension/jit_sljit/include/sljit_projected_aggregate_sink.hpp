@@ -52,21 +52,17 @@ struct SljitProjectedAggregateSink {
 	                            ExecutionOperatorRuntime &native_runtime_p, SljitRegionExecutionScratch &scratch_p,
 	                            ExecutionRegionResult &result_p, idx_t projection_idx_p,
 	                            SljitExecutableRegionOp &projection_op_p, idx_t aggregate_idx_p,
-	                            SljitExecutableRegionOp &aggregate_op_p, idx_t &processed_p,
-	                            SljitDataChunkBatch &projected_batch_p, const char *append_phase_p,
+	                            SljitExecutableRegionOp &aggregate_op_p, SljitDataChunkBatch &projected_batch_p,
+	                            const char *append_phase_p,
 	                            optional_ptr<SljitDirectJoinOutputAggregateStrategy> direct_aggregate_p = nullptr)
 	    : ops(ops_p), runtime(runtime_p), native_runtime(native_runtime_p), scratch(scratch_p), result(result_p),
 	      projection_idx(projection_idx_p), projection_op(projection_op_p), aggregate_idx(aggregate_idx_p),
-	      aggregate_op(aggregate_op_p), processed(processed_p), projected_batch(projected_batch_p),
-	      append_phase(append_phase_p), direct_aggregate(direct_aggregate_p) {
+	      aggregate_op(aggregate_op_p), projected_batch(projected_batch_p), append_phase(append_phase_p),
+	      direct_aggregate(direct_aggregate_p) {
 	}
 
 	void FlushDirectAggregate() {
 		SljitFlushDirectJoinOutputAggregate(runtime, ops, direct_aggregate);
-	}
-
-	void Charge(idx_t rows) {
-		SljitChargeDownstreamRows(processed, rows);
 	}
 
 	bool ExecuteProjectedBatch(DataChunk &projected) {
@@ -78,7 +74,6 @@ struct SljitProjectedAggregateSink {
 		                                        projected, result)) {
 			return true;
 		}
-		Charge(projected.size());
 		return false;
 	}
 
@@ -111,7 +106,6 @@ struct SljitProjectedAggregateSink {
 	SljitExecutableRegionOp &projection_op;
 	idx_t aggregate_idx;
 	SljitExecutableRegionOp &aggregate_op;
-	idx_t &processed;
 	SljitDataChunkBatch &projected_batch;
 	const char *append_phase;
 	optional_ptr<SljitDirectJoinOutputAggregateStrategy> direct_aggregate;

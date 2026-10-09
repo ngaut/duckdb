@@ -38,9 +38,9 @@ public:
 	      terminal_runtime(execute_native_full_pipeline_from_p, source_distinct_counts_p, source_min_values_p,
 	                       source_max_values_p, shared_predicate_classifications_p, terminal_state_p),
 	      scratch(scratch_p), selected_hash_join_inputs(runtime, ops, scratch), source_fetch(runtime),
-	      generated_filter(runtime, ops, scratch), hash_join_materialize(runtime, result, ops, scratch),
-	      hash_join_selection(runtime, result, ops, scratch, selected_hash_join_inputs),
-	      mark_probe_filter_boundary(runtime, result, ops, scratch, selected_hash_join_inputs),
+	      generated_filter(runtime, ops, scratch), hash_join_materialize(runtime, ops, scratch),
+	      hash_join_selection(runtime, ops, scratch, selected_hash_join_inputs),
+	      mark_probe_filter_boundary(runtime, ops, scratch, selected_hash_join_inputs),
 	      projection_chain(runtime, ops, scratch),
 	      direct_aggregate_consumer_dispatch(terminal_state_p.direct_aggregate_consumer_dispatch) {
 	}
@@ -124,7 +124,6 @@ public:
 				if (SljitNativeSinkResultStopsExecution(runtime, sink_result, result)) {
 					return true;
 				}
-				processed_batches++;
 			}
 			if (source_result == SourceResultType::FINISHED) {
 				return SljitStopFullPipeline(result, ExecutionRegionResult::FINISHED);
@@ -168,8 +167,7 @@ private:
 
 	bool ExecuteTerminalStep(const SljitFullPipelinePrimitiveStep &step, const SljitRuntimeBatchView &input,
 	                         bool have_more_output) {
-		return terminal_runtime.Execute(runtime, result, ops, scratch, step, input, have_more_output,
-		                                processed_batches);
+		return terminal_runtime.Execute(runtime, result, ops, scratch, step, input, have_more_output);
 	}
 
 	bool ExecuteMaterializedBatch(idx_t step_idx, DataChunk &batch, bool have_more_output = true) {
@@ -279,7 +277,7 @@ private:
 			return false;
 		}
 		auto &terminal_step = TerminalStep();
-		return terminal_runtime.Flush(runtime, result, ops, scratch, terminal_step, processed_batches);
+		return terminal_runtime.Flush(runtime, result, ops, scratch, terminal_step);
 	}
 
 	bool FlushMaterializingStep(idx_t step_idx, const SljitFullPipelinePrimitiveStep &step) {
@@ -313,7 +311,6 @@ private:
 	SljitMarkProbeFilterBoundaryRuntime mark_probe_filter_boundary;
 	SljitProjectionChainPrimitiveRuntime projection_chain;
 	SljitHashJoinAggregateConsumerDispatch &direct_aggregate_consumer_dispatch;
-	idx_t processed_batches = 0;
 };
 
 } // namespace duckdb

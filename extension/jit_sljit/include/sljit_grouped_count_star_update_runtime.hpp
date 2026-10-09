@@ -155,10 +155,9 @@ public:
 
 	bool Execute(ExecutionRegionRuntime &runtime, vector<SljitExecutableRegionOp> &ops,
 	             SljitRegionExecutionScratch &scratch, const SljitGroupedAggregateUpdatePrimitive &primitive,
-	             const SljitRuntimeBatchView &input, idx_t &processed_batches) {
+	             const SljitRuntimeBatchView &input) {
 		auto &aggregate_op = ops[primitive.aggregate_idx];
 		if (TryExecutePreaggregatedCountStar(runtime, ops, scratch, primitive, aggregate_op, input)) {
-			processed_batches++;
 			return false;
 		}
 		throw InternalException("SLJIT grouped count-star preaggregation update failed");

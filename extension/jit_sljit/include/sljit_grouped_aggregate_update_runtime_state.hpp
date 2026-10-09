@@ -28,16 +28,16 @@ struct SljitGroupedAggregateUpdateRuntimeState {
 
 	bool Execute(ExecutionRegionRuntime &runtime, ExecutionRegionResult &result, vector<SljitExecutableRegionOp> &ops,
 	             SljitRegionExecutionScratch &scratch, const SljitGroupedAggregateUpdatePrimitive &primitive,
-	             const SljitRuntimeBatchView &input, idx_t &processed_batches) {
+	             const SljitRuntimeBatchView &input) {
 		if (input.count == 0) {
 			return false;
 		}
 		switch (primitive.strategy) {
 		case SljitGroupedAggregateUpdateStrategyKind::COUNT_STAR_PREAGGREGATION:
-			return count_star_preaggregation.Execute(runtime, ops, scratch, primitive, input, processed_batches);
+			return count_star_preaggregation.Execute(runtime, ops, scratch, primitive, input);
 		case SljitGroupedAggregateUpdateStrategyKind::DIRECT_PRIMITIVE_PAYLOAD_UPDATE:
 		case SljitGroupedAggregateUpdateStrategyKind::FILTERED_PRIMITIVE_PAYLOAD_UPDATE:
-			return direct_payload_update.Execute(runtime, result, ops, scratch, primitive, input, processed_batches);
+			return direct_payload_update.Execute(runtime, result, ops, scratch, primitive, input);
 		case SljitGroupedAggregateUpdateStrategyKind::INVALID:
 			break;
 		}

@@ -23,7 +23,7 @@ struct SljitNativeTailDelegationRuntimeState {
 
 	bool Execute(ExecutionRegionRuntime &runtime, ExecutionRegionResult &result, vector<SljitExecutableRegionOp> &ops,
 	             SljitRegionExecutionScratch &scratch, const SljitFullPipelinePrimitiveStep &primitive,
-	             const SljitRuntimeBatchView &input, idx_t &processed_batches) {
+	             const SljitRuntimeBatchView &input) {
 		if (input.count == 0) {
 			return false;
 		}
@@ -38,7 +38,6 @@ struct SljitNativeTailDelegationRuntimeState {
 			execute_native_full_pipeline_from.Finalize(scratch);
 			return true;
 		}
-		processed_batches++;
 		return false;
 	}
 
