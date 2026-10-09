@@ -19,6 +19,18 @@ ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_TPCH_BASELINE_STATE = ROOT / "benchmark" / "tpch" / "jit" / "local_baselines" / "tpch_refactor_guard_state.json"
 DEFAULT_PRE_COMMIT_RECEIPT = ROOT / "benchmark" / "jit" / "local_baselines" / "pre_commit_verified_tree"
 DEFAULT_UNIT_SPEC = "[jit]"
+# The default unittest runner does not load jit_sljit, so the general SQL suites never run compiled. This config
+# loads it and calibrates the CBO to compile whatever it can; the suites below are where compiled kernels meet
+# the plan shapes (joins, subqueries, aggregates, CTE exchanges, TPC-H) that found the sink and drain bugs
+FORCED_JIT_CONFIG = "test/configs/jit_cbo_correctness.json"
+FORCED_JIT_SUITES = (
+    "test/sql/jit/*",
+    "test/sql/join/*",
+    "test/sql/subquery/*",
+    "test/sql/aggregate/*",
+    "test/sql/cte/*",
+    "test/sql/tpch/*",
+)
 PYTHON_SOURCE_ROOTS = (
     ROOT / "benchmark" / "jit",
     ROOT / "benchmark" / "tpch" / "jit",
@@ -479,6 +491,32 @@ def run_slow_suite(args: argparse.Namespace, artifact_dir: Path) -> None:
     output_path.write_text("".join(output_parts), encoding="utf-8", errors="replace")
 
 
+def run_forced_jit_suite(args: argparse.Namespace, artifact_dir: Path) -> None:
+    """Runs the SQL suites with the JIT loaded and forced on. Each suite glob goes to the unittest binary, which
+    matches it itself, so no shell expands it."""
+    require_file(args.unit_binary, "unit test binary")
+    output_parts: list[str] = []
+    output_path = artifact_dir / "forced_jit_suite_output.txt"
+    for suite in FORCED_JIT_SUITES:
+        result = run_command(
+            [str(args.unit_binary), "--test-config", FORCED_JIT_CONFIG, suite],
+            f"forced JIT suite: {suite}",
+            capture=True,
+            check=False,
+        )
+        output_parts.extend((result.stdout, result.stderr))
+        if result.returncode != 0:
+            output_path.write_text("".join(output_parts), encoding="utf-8", errors="replace")
+            print(result.stdout, end="")
+            print(result.stderr, end="", file=sys.stderr)
+            raise GuardError(f"forced JIT suite failed for {suite} with exit code {result.returncode}")
+    output_path.write_text("".join(output_parts), encoding="utf-8", errors="replace")
+
+
+def should_run_forced_jit_suite(args: argparse.Namespace) -> bool:
+    return should_run_unit(args) and (args.forced_jit_suite or args.level == "full")
+
+
 def should_run_unit(args: argparse.Namespace) -> bool:
     return args.level in ("unit", "full") and not args.skip_unit
 
@@ -538,6 +576,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--slow-suite",
         action="store_true",
         help="also run the slow TPC-H sqllogictests after the unit suite",
+    )
+    parser.add_argument(
+        "--forced-jit-suite",
+        action="store_true",
+        help="also run the SQL suites with the JIT forced on (always part of --level full)",
     )
     parser.add_argument("--out-dir", type=Path, default=None)
     parser.add_argument(
@@ -655,6 +698,8 @@ def main() -> int:
         run_python_checks(artifact_dir)
     if should_run_unit(args):
         run_unit_suite(args, artifact_dir)
+        if should_run_forced_jit_suite(args):
+            run_forced_jit_suite(args, artifact_dir)
     elif args.level == "quick":
         print("quick guard completed its configured checks")
     if args.host_quiescence and (should_run_tpch(args) or should_run_generic(args)):

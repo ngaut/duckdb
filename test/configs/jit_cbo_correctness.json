@@ -56,6 +56,12 @@
       "paths": [
         "test/sql/jit/test_jit_framework.test"
       ]
+    },
+    {
+      "reason": "This config zeroes the startup cost, so no pipeline's margin falls inside the adaptive A/B band and the test's verdict assertions cannot hold.",
+      "paths": [
+        "test/sql/jit/test_jit_adaptive_ab.test"
+      ]
     }
   ]
 }

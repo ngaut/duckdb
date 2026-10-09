@@ -235,6 +235,56 @@ class TestUnitSuite(unittest.TestCase):
                     guard.run_slow_suite(args, artifact_dir)
 
 
+class TestForcedJitSuite(unittest.TestCase):
+    def test_runs_every_suite_under_the_forced_config(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            artifact_dir = Path(temporary)
+            unit_binary = artifact_dir / "unittest"
+            unit_binary.touch()
+            args = SimpleNamespace(unit_binary=unit_binary)
+            passed = subprocess.CompletedProcess(args=[], returncode=0, stdout="passed\n", stderr="")
+            with mock.patch.object(guard, "run_command", return_value=passed) as run:
+                guard.run_forced_jit_suite(args, artifact_dir)
+
+            self.assertEqual(
+                [call.args[0] for call in run.call_args_list],
+                [
+                    [str(unit_binary), "--test-config", guard.FORCED_JIT_CONFIG, suite]
+                    for suite in guard.FORCED_JIT_SUITES
+                ],
+            )
+            self.assertEqual(
+                (artifact_dir / "forced_jit_suite_output.txt").read_text(encoding="utf-8"),
+                "passed\n" * len(guard.FORCED_JIT_SUITES),
+            )
+
+    def test_a_failing_suite_stops_the_guard(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            artifact_dir = Path(temporary)
+            unit_binary = artifact_dir / "unittest"
+            unit_binary.touch()
+            args = SimpleNamespace(unit_binary=unit_binary)
+            failed = subprocess.CompletedProcess(args=[], returncode=3, stdout="wrong result\n", stderr="")
+            with mock.patch.object(guard, "run_command", return_value=failed) as run:
+                with self.assertRaisesRegex(guard.GuardError, "exit code 3"):
+                    guard.run_forced_jit_suite(args, artifact_dir)
+
+            run.assert_called_once()
+            self.assertEqual(
+                (artifact_dir / "forced_jit_suite_output.txt").read_text(encoding="utf-8"), "wrong result\n"
+            )
+
+    def test_full_level_and_the_flag_select_it(self) -> None:
+        def selected(level: str, flag: bool) -> bool:
+            args = SimpleNamespace(level=level, skip_unit=False, forced_jit_suite=flag)
+            return guard.should_run_forced_jit_suite(args)
+
+        self.assertTrue(selected("full", False))
+        self.assertTrue(selected("unit", True))
+        self.assertFalse(selected("unit", False))
+        self.assertFalse(selected("quick", True))
+
+
 class TestPythonChecks(unittest.TestCase):
     def test_python_checks_compile_all_sources_and_run_both_suites(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
