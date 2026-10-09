@@ -30,10 +30,9 @@ public:
 	                                                        const ExecutionRegionOperatorInfo &operator_info) = 0;
 	virtual bool BindSink(DataChunk &input, const ExecutionRegionSinkInfo &sink_info,
 	                      ExecutionSinkBinding &binding) = 0;
-	//! Appends a chunk to the pipeline's append sink. Once the sink blocks, this chunk and every later one go to the
-	//! core continuation, which sinks them in order; the next source fetch then returns BLOCKED. A kernel therefore
-	//! finishes the source chunk it is processing and yields at a source boundary, never with output in flight.
-	//! Returns NEED_MORE_INPUT or FINISHED, never BLOCKED.
+	//! Appends a chunk to the pipeline's append sink. Once the sink blocks, this chunk and every later one queue in
+	//! the executor, which sinks them in order when the sink wakes it; a step therefore finishes the source chunk it
+	//! is processing and returns, never with output in flight. Returns NEED_MORE_INPUT or FINISHED, never BLOCKED.
 	virtual SinkResultType AppendSink(const ExecutionAppendSinkBinding &binding, DataChunk &chunk) = 0;
 	//! Records the result of a sink update; only AppendSink handles a sink that blocks.
 	virtual SinkResultType RecordSinkResult(idx_t input_rows, SinkResultType sink_result) = 0;

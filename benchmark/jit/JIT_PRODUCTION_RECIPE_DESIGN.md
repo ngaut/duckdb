@@ -143,9 +143,9 @@ Generated static filters and DuckDB storage pruning are complementary:
 
 Prune-only filters are not executed at every vector or charged as residual
 scan work. This prevents non-prunable expressions from paying repeated zonemap
-cost while preserving coarse pruning for clustered data. A vectorized
-continuation still owns the complete combined filter set, so fallback after
-compiled progress preserves semantics.
+cost while preserving coarse pruning for clustered data. The vectorized path
+still owns the complete combined filter set, so a thread whose compiled entry
+defers to it preserves semantics.
 
 There is no selectivity percentage, range-width threshold, min/max ratio, or
 workload-specific source selector. Numeric and date ranges use the same
@@ -233,7 +233,7 @@ publication even if unrelated insertions immediately evict it from the ready
 LRU. Active kernels retain shared ownership after eviction.
 
 Compiled code, immutable descriptors, and concurrency-safe lazy
-specialization cells may be shared. Adaptive-runner state, telemetry, runtime
+specialization cells may be shared. Telemetry, runtime
 counters, operator bindings, dynamic-filter identities, hash-table
 dictionaries, and all other query data live in each instantiated kernel or its
 local states. A backend that cannot make this split remains correct and

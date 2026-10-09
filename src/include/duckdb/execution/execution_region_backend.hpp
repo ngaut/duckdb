@@ -53,7 +53,7 @@ struct DUCKDB_API ExecutionRegionCompilationInput {
 
 //! Backend-owned semantic code artifact. Artifacts may contain internally
 //! synchronized lazy code-publication cells, but must not own query-local
-//! counters, runtime bindings, adaptive state, or trace state.
+//! counters, runtime bindings, or trace state.
 class DUCKDB_API ExecutionRegionArtifact {
 public:
 	virtual ~ExecutionRegionArtifact();
