@@ -1,16 +1,18 @@
 #!/usr/bin/env python3
 """Differential fuzzing of the execution-region JIT against jit_policy='off'.
 
-Generates seeded random queries over the TPC-H schema -- foreign-key chains of inner and outer joins, some with
-non-equality residuals, random filters (IS NULL among them), DISTINCT, GROUP BY (ROLLUP, HAVING) over up to five
-expression keys (CASE among them), FILTER aggregates, partitioned window aggregates, materialized CTEs with one or two
-consumers, UNION ALL and IN/EXISTS subqueries -- and
-runs each one with the JIT off, at the default cost model and with compilation forced. Every run is a fresh shell
+Generates seeded random queries over the TPC-H schema -- foreign-key chains of inner and outer joins (some on
+expression keys, some with non-equality residuals), random filters (IS NULL among them), DISTINCT, GROUP BY (ROLLUP,
+CUBE, GROUPING SETS, HAVING, ORDER BY ALL LIMIT) over up to five expression keys (CASE among them), FILTER aggregates,
+partitioned and ordered window functions, materialized CTEs with one or two consumers, UNION ALL and set operations,
+IN (one or two columns), EXISTS and correlated count subqueries -- and runs each one with the JIT off, at the default
+cost model and with compilation forced. Every run is a fresh shell
 process, so a crash that invalidates the database cannot poison the next query. Results are compared through an
 order-independent fingerprint (row count and the sum of row hashes); generated queries use exact types only and give
 every LIMIT a total order, so any difference is a JIT bug.
 
-    python3 benchmark/jit/jit_differential_fuzz.py --database tpch_sf1.duckdb --queries 300 --seed 1
+    python3 benchmark/jit/jit_differential_fuzz.py --database tpch_sf1.duckdb --queries 300 --seed 1 --report r.json
+    python3 benchmark/jit/jit_differential_fuzz.py --database tpch_sf1.duckdb --replay r.json
 """
 
 from __future__ import annotations
@@ -211,7 +213,12 @@ class QueryGenerator:
             alias, own_cols, other, other_cols, fan_out = self.rng.choice(candidates)
             fanned_out = fanned_out or fan_out
             other_alias = self.alias()
-            condition = " AND ".join(f"{alias}.{a} = {other_alias}.{b}" for a, b in zip(own_cols, other_cols))
+            # an expression key keeps the foreign-key cardinality but takes the hash join's key-expression path
+            key = "{} * 2" if self.rng.random() < 0.15 else "{}"
+            condition = " AND ".join(
+                f"{key.format(f'{alias}.{a}')} = {key.format(f'{other_alias}.{b}')}"
+                for a, b in zip(own_cols, other_cols)
+            )
             own_table = next(table for table_alias, table in tree.tables if table_alias == alias)
             residual = self.join_residual(alias, own_table, other_alias, other)
             if residual:
@@ -309,21 +316,33 @@ class QueryGenerator:
             group_sql = ""
             if groups:
                 group_list = ", ".join(groups)
-                group_sql = f" GROUP BY ROLLUP ({group_list})" if r.random() < 0.1 else f" GROUP BY {group_list}"
+                grouping = r.choices(["plain", "rollup", "cube", "sets"], [17, 2, 1, 1])[0]
+                if grouping == "rollup":
+                    group_sql = f" GROUP BY ROLLUP ({group_list})"
+                elif grouping == "cube" and len(groups) <= 3:
+                    group_sql = f" GROUP BY CUBE ({group_list})"
+                elif grouping == "sets":
+                    group_sql = f" GROUP BY GROUPING SETS (({group_list}), ({groups[0]}), ())"
+                else:
+                    group_sql = f" GROUP BY {group_list}"
                 if r.random() < 0.2:
                     group_sql += f" HAVING count(*) > {r.choice([1, 2, 5])}"
-            return f"SELECT {', '.join(groups + aggregates)} FROM {tree.from_clause()}{where_sql}{group_sql}", len(
-                groups
-            ) + len(aggregates)
+            sql = f"SELECT {', '.join(groups + aggregates)} FROM {tree.from_clause()}{where_sql}{group_sql}"
+            if r.random() < 0.15:
+                # every output column orders the rows, so the rows a LIMIT keeps are determined
+                sql += f" ORDER BY ALL LIMIT {r.choice([1, 10, 100])}"
+            return sql, len(groups) + len(aggregates)
         if shape == "window":
             # a frame-less window aggregate over a partition does not depend on the order of the partition's rows
             numeric = [c for c in columns if c.kind in ("key", "int", "dec")]
             expressions = [self.expression(r.choice(columns)) for _ in range(r.randint(1, 3))]
             window = r.choice(["count(*)", f"sum({r.choice(numeric).ref})", f"max({r.choice(numeric).ref})"])
-            sql = (
-                f"SELECT {', '.join(expressions)}, {window} OVER (PARTITION BY {expressions[0]}) "
-                f"FROM {tree.from_clause()}{where_sql}"
-            )
+            over = f"PARTITION BY {expressions[0]}"
+            if r.random() < 0.4:
+                # ordered: the default frame ends at the current row's last peer, so ties get one value
+                window = r.choice([window, "rank()", "dense_rank()"])
+                over += f" ORDER BY {expressions[-1]}"
+            sql = f"SELECT {', '.join(expressions)}, {window} OVER ({over}) FROM {tree.from_clause()}{where_sql}"
             return sql, len(expressions) + 1
         expressions = [self.expression(r.choice(columns)) for _ in range(r.randint(1, 4))]
         distinct = "DISTINCT " if shape == "distinct" else ""
@@ -341,13 +360,25 @@ class QueryGenerator:
         inner_keys = [c for c in inner.columns() if c.kind == "key"]
         inner_key = r.choice(inner_keys)
         inner_where = self.predicates(inner, 1, 2)
-        if r.random() < 0.5:
-            negate = "NOT " if r.random() < 0.3 else ""
+        negate = "NOT " if r.random() < 0.3 else ""
+        choice = r.randint(0, 4)
+        if choice <= 1:
             return (
                 f"{column.ref} {negate}IN (SELECT {inner_key.ref} FROM {inner.from_clause()} "
                 f"WHERE {' AND '.join(inner_where)})"
             )
-        negate = "NOT " if r.random() < 0.3 else ""
+        if choice == 2:
+            other_column, other_inner_key = r.choice(keys), r.choice(inner_keys)
+            return (
+                f"({column.ref}, {other_column.ref}) {negate}IN (SELECT {inner_key.ref}, {other_inner_key.ref} "
+                f"FROM {inner.from_clause()} WHERE {' AND '.join(inner_where)})"
+            )
+        if choice == 3:
+            # a correlated count: a group that finds no rows counts zero
+            return (
+                f"(SELECT count(*) FROM {inner.from_clause()} WHERE {inner_key.ref} = {column.ref} "
+                f"AND {' AND '.join(inner_where)}) {r.choice(['=', '>', '<'])} {r.choice([0, 1, 3])}"
+            )
         return (
             f"{negate}EXISTS (SELECT 1 FROM {inner.from_clause()} WHERE {inner_key.ref} = {column.ref} "
             f"AND {' AND '.join(inner_where)})"
@@ -360,7 +391,7 @@ class QueryGenerator:
         where = self.predicates(tree)
         if r.random() < 0.2:
             where.append(self.subquery_predicate(tree))
-        family = r.choice(["plain", "plain", "plain", "cte", "cte", "union", "ordered", "ctas"])
+        family = r.choice(["plain", "plain", "plain", "cte", "cte", "union", "setop", "ordered", "ctas"])
         if family in ("ordered", "ctas"):
             return self.ordered_query(family)
         if family == "plain":
@@ -368,6 +399,12 @@ class QueryGenerator:
                 tree, r.choice(["agg", "agg", "distinct", "project", "topn", "window"]), where
             )
             return fingerprint(sql, width)
+        if family == "setop":
+            sql, width = self.core_select(tree, "project", where)
+            other_where = self.predicates(tree, 1, 2)
+            other = sql.split(" WHERE ")[0] + f" WHERE {' AND '.join(other_where)}"
+            operation = r.choice(["UNION", "INTERSECT", "EXCEPT", "INTERSECT ALL", "EXCEPT ALL"])
+            return fingerprint(f"{sql} {operation} {other}", width)
         if family == "union":
             sql, width = self.core_select(tree, "project", where)
             other_where = self.predicates(tree, 1, 2)
@@ -456,15 +493,14 @@ def classify(off: RunResult, run: RunResult) -> str:
     return "ok"
 
 
-def check(args: argparse.Namespace, index: int, sql: str) -> dict:
-    threads = 1 if index % 4 == 0 else args.threads
-    off = run_query(args.duckdb, args.database, CONFIGS["off"], threads, sql, args.timeout)
+def check(args: argparse.Namespace, index: int, sql: str, threads: int) -> dict:
+    off = run_query(args.duckdb, args.database, args.settings + CONFIGS["off"], threads, sql, args.timeout)
     record = {"index": index, "threads": threads, "sql": sql, "off": off.output[-300:], "results": {}}
     if off.returncode != 0 or "Error" in off.output:
         record["invalid"] = True
         return record
     for name in ("default", "forced"):
-        run = run_query(args.duckdb, args.database, CONFIGS[name], threads, sql, args.timeout)
+        run = run_query(args.duckdb, args.database, args.settings + CONFIGS[name], threads, sql, args.timeout)
         verdict = classify(off, run)
         record["results"][name] = verdict
         if verdict != "ok":
@@ -483,13 +519,23 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--workers", type=int, default=3)
     parser.add_argument("--timeout", type=int, default=120)
     parser.add_argument("--report", type=Path, help="JSON report of every non-ok query")
+    parser.add_argument(
+        "--settings",
+        default="",
+        help="SQL every run executes first, e.g. \"SET memory_limit='300MB';\" to make it spill",
+    )
+    parser.add_argument("--replay", type=Path, help="re-check an earlier report's queries at one and --threads threads")
     args = parser.parse_args(argv)
 
-    generator = QueryGenerator(args.seed)
-    queries = [generator.query() for _ in range(args.queries)]
+    if args.replay:
+        earlier = json.loads(args.replay.read_text(encoding="utf-8"))
+        jobs = [(record["index"], record["sql"], threads) for record in earlier for threads in (1, args.threads)]
+    else:
+        generator = QueryGenerator(args.seed)
+        jobs = [(index, generator.query(), 1 if index % 4 == 0 else args.threads) for index in range(args.queries)]
     findings, invalid, done = [], 0, 0
     with concurrent.futures.ThreadPoolExecutor(max_workers=args.workers) as pool:
-        futures = [pool.submit(check, args, index, sql) for index, sql in enumerate(queries)]
+        futures = [pool.submit(check, args, index, sql, threads) for index, sql, threads in jobs]
         for future in concurrent.futures.as_completed(futures):
             record = future.result()
             done += 1
@@ -499,9 +545,9 @@ def main(argv: list[str] | None = None) -> int:
             bad = {name: verdict for name, verdict in record["results"].items() if verdict != "ok"}
             if bad:
                 findings.append(record)
-                print(f"[{done}/{len(queries)}] q{record['index']} t{record['threads']} {bad}", flush=True)
-    findings.sort(key=lambda record: record["index"])
-    print(f"checked {len(queries) - invalid} queries ({invalid} invalid), {len(findings)} with findings")
+                print(f"[{done}/{len(jobs)}] q{record['index']} t{record['threads']} {bad}", flush=True)
+    findings.sort(key=lambda record: (record["index"], record["threads"]))
+    print(f"checked {len(jobs) - invalid} queries ({invalid} invalid), {len(findings)} with findings")
     if args.report:
         args.report.write_text(json.dumps(findings, indent=2) + "\n", encoding="utf-8")
     return 1 if findings else 0
