@@ -110,7 +110,7 @@ static Value Time(int64_t value) {
 }
 
 static int64_t RuntimeUnattributedTime(const ExecutionRegionTraceSummary &summary) {
-	auto attributed = summary.source_us + summary.sink_us + summary.generated_us;
+	auto attributed = summary.source_us + summary.generated_us;
 	if (summary.runtime_us <= attributed) {
 		return 0;
 	}
@@ -126,7 +126,7 @@ static double RuntimePercent(int64_t value, int64_t runtime_us) {
 
 static const char *DominantRuntimeComponent(const ExecutionRegionTraceSummary &summary) {
 	auto unattributed_us = RuntimeUnattributedTime(summary);
-	if (summary.runtime_us <= 0 && summary.source_us <= 0 && summary.sink_us <= 0 && summary.generated_us <= 0) {
+	if (summary.runtime_us <= 0 && summary.source_us <= 0 && summary.generated_us <= 0) {
 		return "none";
 	}
 	auto dominant = "unattributed";
@@ -137,10 +137,6 @@ static const char *DominantRuntimeComponent(const ExecutionRegionTraceSummary &s
 	}
 	if (summary.generated_us >= dominant_us) {
 		dominant = "generated";
-		dominant_us = summary.generated_us;
-	}
-	if (summary.sink_us >= dominant_us) {
-		dominant = "sink";
 	}
 	return dominant;
 }
@@ -275,47 +271,44 @@ static string SelectedExecutionRegionBackendName(ClientContext &context) {
 
 static void AddExecutionRegionSummary(QueryProfileResult &node, ClientContext &context,
                                       const ExecutionRegionTraceSummary &summary, int64_t query_runtime_us) {
-	AddFields(node,
-	          {{"jit_enabled", Value::BOOLEAN(ExecutionRegionSettings::Enabled(context))},
-	           {"jit_policy", Text(ExecutionRegionPolicyModeToString(ExecutionRegionSettings::Policy(context)))},
-	           {"jit_requested_backend", Text(ExecutionRegionSettings::RequestedBackend(context))},
-	           {"jit_selected_backend", Text(SelectedExecutionRegionBackendName(context))},
-	           {"runtime_regions", Count(summary.runtime_regions)},
-	           {"compiled_regions", Count(summary.compiled)},
-	           {"compile_errors", Count(summary.compile_errors)},
-	           {"runtime_events", Count(summary.runtime_events)},
-	           {"decisions", Count(summary.decisions)},
-	           {"unsupported_decisions", Count(summary.unsupported)},
-	           {"skipped_decisions", Count(summary.skipped)},
-	           {"unavailable_decisions", Count(summary.unavailable)},
-	           {"disabled_decisions", Count(summary.disabled)},
-	           {"code_size", Count(summary.code_size)},
-	           {"query_runtime_time_us", Time(query_runtime_us)},
-	           {"runtime_time_us", Time(summary.runtime_us)},
-	           {"source_runtime_time_us", Time(summary.source_us)},
-	           {"sink_next_batch_runtime_time_us", Time(summary.sink_us)},
-	           {"generated_runtime_time_us", Time(summary.generated_us)},
-	           {"runtime_unattributed_time_us", Time(RuntimeUnattributedTime(summary))},
-	           {"source_runtime_pct", Value::DOUBLE(RuntimePercent(summary.source_us, summary.runtime_us))},
-	           {"sink_next_batch_runtime_pct", Value::DOUBLE(RuntimePercent(summary.sink_us, summary.runtime_us))},
-	           {"generated_runtime_pct", Value::DOUBLE(RuntimePercent(summary.generated_us, summary.runtime_us))},
-	           {"runtime_unattributed_pct",
-	            Value::DOUBLE(RuntimePercent(RuntimeUnattributedTime(summary), summary.runtime_us))},
-	           {"runtime_dominant_component", Text(DominantRuntimeComponent(summary))},
-	           {"decision_time_us", Time(summary.decision_us)},
-	           {"compile_time_us", Time(summary.compile_us)},
-	           {"pipeline_cbo_time_us", Time(summary.pipeline_cbo_us)},
-	           {"graph_build_time_us", Time(summary.graph_build_us)},
-	           {"candidate_cbo_time_us", Time(summary.candidate_cbo_us)},
-	           {"ir_lowering_time_us", Time(summary.ir_lowering_us)},
-	           {"backend_analysis_time_us", Time(summary.backend_analysis_us)},
-	           {"codegen_time_us", Time(summary.codegen_us)},
-	           {"executable_build_time_us", Time(summary.executable_build_us)},
-	           {"machine_codegen_time_us", Time(summary.machine_codegen_us)},
-	           {"kernel_build_time_us", Time(summary.kernel_build_us)},
-	           {"lazy_codegen_time_us", Time(summary.lazy_codegen.codegen_time_us)},
-	           {"lazy_machine_codegen_time_us", Time(summary.lazy_codegen.machine_codegen_time_us)},
-	           {"lazy_code_size", Count(summary.lazy_codegen.code_size)}});
+	AddFields(node, {{"jit_enabled", Value::BOOLEAN(ExecutionRegionSettings::Enabled(context))},
+	                 {"jit_policy", Text(ExecutionRegionPolicyModeToString(ExecutionRegionSettings::Policy(context)))},
+	                 {"jit_requested_backend", Text(ExecutionRegionSettings::RequestedBackend(context))},
+	                 {"jit_selected_backend", Text(SelectedExecutionRegionBackendName(context))},
+	                 {"runtime_regions", Count(summary.runtime_regions)},
+	                 {"compiled_regions", Count(summary.compiled)},
+	                 {"compile_errors", Count(summary.compile_errors)},
+	                 {"runtime_events", Count(summary.runtime_events)},
+	                 {"decisions", Count(summary.decisions)},
+	                 {"unsupported_decisions", Count(summary.unsupported)},
+	                 {"skipped_decisions", Count(summary.skipped)},
+	                 {"unavailable_decisions", Count(summary.unavailable)},
+	                 {"disabled_decisions", Count(summary.disabled)},
+	                 {"code_size", Count(summary.code_size)},
+	                 {"query_runtime_time_us", Time(query_runtime_us)},
+	                 {"runtime_time_us", Time(summary.runtime_us)},
+	                 {"source_runtime_time_us", Time(summary.source_us)},
+	                 {"generated_runtime_time_us", Time(summary.generated_us)},
+	                 {"runtime_unattributed_time_us", Time(RuntimeUnattributedTime(summary))},
+	                 {"source_runtime_pct", Value::DOUBLE(RuntimePercent(summary.source_us, summary.runtime_us))},
+	                 {"generated_runtime_pct", Value::DOUBLE(RuntimePercent(summary.generated_us, summary.runtime_us))},
+	                 {"runtime_unattributed_pct",
+	                  Value::DOUBLE(RuntimePercent(RuntimeUnattributedTime(summary), summary.runtime_us))},
+	                 {"runtime_dominant_component", Text(DominantRuntimeComponent(summary))},
+	                 {"decision_time_us", Time(summary.decision_us)},
+	                 {"compile_time_us", Time(summary.compile_us)},
+	                 {"pipeline_cbo_time_us", Time(summary.pipeline_cbo_us)},
+	                 {"graph_build_time_us", Time(summary.graph_build_us)},
+	                 {"candidate_cbo_time_us", Time(summary.candidate_cbo_us)},
+	                 {"ir_lowering_time_us", Time(summary.ir_lowering_us)},
+	                 {"backend_analysis_time_us", Time(summary.backend_analysis_us)},
+	                 {"codegen_time_us", Time(summary.codegen_us)},
+	                 {"executable_build_time_us", Time(summary.executable_build_us)},
+	                 {"machine_codegen_time_us", Time(summary.machine_codegen_us)},
+	                 {"kernel_build_time_us", Time(summary.kernel_build_us)},
+	                 {"lazy_codegen_time_us", Time(summary.lazy_codegen.codegen_time_us)},
+	                 {"lazy_machine_codegen_time_us", Time(summary.lazy_codegen.machine_codegen_time_us)},
+	                 {"lazy_code_size", Count(summary.lazy_codegen.code_size)}});
 }
 
 static void AddExecutionRegionEvent(QueryProfileResult &row, const ExecutionRegionEvent &event, bool is_runtime) {
@@ -427,8 +420,7 @@ static void RenderExecutionRegionsToStream(std::ostream &ss, ClientContext &cont
 	   << " compiled=" << summary.compiled << " runtime_regions=" << summary.runtime_regions
 	   << " decisions=" << summary.decisions << " unsupported=" << summary.unsupported << " skipped=" << summary.skipped
 	   << " query_runtime_us=" << Micros(query_runtime_seconds) << " region_runtime_us=" << summary.runtime_us
-	   << " source_runtime_us=" << summary.source_us << " sink_runtime_us=" << summary.sink_us
-	   << " generated_runtime_us=" << summary.generated_us
+	   << " source_runtime_us=" << summary.source_us << " generated_runtime_us=" << summary.generated_us
 	   << " runtime_unattributed_us=" << RuntimeUnattributedTime(summary)
 	   << " runtime_dominant=" << DominantRuntimeComponent(summary)
 	   << " source_runtime_pct=" << RuntimePercent(summary.source_us, summary.runtime_us)
@@ -518,7 +510,6 @@ struct ExecutionRegionKernelRuntimeAggregate {
 	int64_t runtime_us = 0;
 	int64_t source_us = 0;
 	int64_t generated_us = 0;
-	int64_t sink_us = 0;
 	string backend_name;
 	string sample_reason;
 };
@@ -539,10 +530,8 @@ static void RenderExecutionRegionRuntimeKernelSummaryToStream(std::ostream &ss,
 		agg.runtime_us += event.runtime_time_us;
 		agg.source_us += event.source_contract_runtime_time_us;
 		agg.generated_us += event.generated_body_runtime_time_us;
-		agg.sink_us += event.sink_next_batch_runtime_time_us;
 		agg.backend_name = event.backend_name;
-		if (agg.sample_reason.empty() || event.reason.find("verdict") != string::npos ||
-		    event.reason.find("defer") != string::npos) {
+		if (agg.sample_reason.empty() || event.reason.find("defer") != string::npos) {
 			agg.sample_reason = event.reason;
 		}
 	}
@@ -554,7 +543,7 @@ static void RenderExecutionRegionRuntimeKernelSummaryToStream(std::ostream &ss,
 		auto &agg = entry.second;
 		ss << "    kernel=" << entry.first << " backend=" << agg.backend_name << " entries=" << agg.entries
 		   << " rows=" << agg.input_rows << "->" << agg.output_rows << " runtime_us=" << agg.runtime_us
-		   << " source_us=" << agg.source_us << " generated_us=" << agg.generated_us << " sink_us=" << agg.sink_us
+		   << " source_us=" << agg.source_us << " generated_us=" << agg.generated_us
 		   << " last_note=" << ExecutionRegionProfileToken(agg.sample_reason, 72) << "\n";
 	}
 }
@@ -577,7 +566,6 @@ static void RenderExecutionRegionRuntimePipelineToStream(std::ostream &ss, Clien
 		ExecutionRegionTraceSummary event_summary;
 		event_summary.runtime_us = event.runtime_time_us;
 		event_summary.source_us = event.source_contract_runtime_time_us;
-		event_summary.sink_us = event.sink_next_batch_runtime_time_us;
 		event_summary.generated_us = event.generated_body_runtime_time_us;
 		ss << "    id=" << event.event_id << " kernel=" << event.kernel_id
 		   << " status=" << ExecutionRegionEventStatusToString(event.status_kind)
@@ -587,7 +575,6 @@ static void RenderExecutionRegionRuntimePipelineToStream(std::ostream &ss, Clien
 		   << " rows=" << event.input_rows << "->" << event.output_rows << " calls=" << event.invocation_count
 		   << " runtime_us=" << event.runtime_time_us << " source_us=" << event.source_contract_runtime_time_us
 		   << " generated_us=" << event.generated_body_runtime_time_us
-		   << " sink_us=" << event.sink_next_batch_runtime_time_us
 		   << " hash_join_probe_layout=" << ExecutionRegionProfileToken(event.jit_runtime.hash_join_probe_layout)
 		   << " jit_runtime_path_counts="
 		   << ExecutionRegionProfileToken(RenderExecutionRegionCounterBreakdown(event.jit_runtime.runtime_path_counts),

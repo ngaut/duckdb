@@ -32,8 +32,6 @@ enum JitEventColumn : idx_t {
 	JIT_EVENT_SOURCE_CONTRACT_RUNTIME_TIME_US,
 	JIT_EVENT_SOURCE_STAGE_RUNTIME_BREAKDOWN,
 	JIT_EVENT_SOURCE_STAGE_COUNT_BREAKDOWN,
-	JIT_EVENT_SINK_NEXT_BATCH_INVOCATION_COUNT,
-	JIT_EVENT_SINK_NEXT_BATCH_RUNTIME_TIME_US,
 	JIT_EVENT_GENERATED_BODY_RUNTIME_TIME_US,
 	JIT_EVENT_GENERATED_STAGE_RUNTIME_BREAKDOWN,
 	JIT_EVENT_GENERATED_STAGE_COUNT_BREAKDOWN,
@@ -250,12 +248,6 @@ static void AppendJitEventColumn(Vector &output, idx_t column_id, const Executio
 		AppendExecutionRegionNullableString(output,
 		                                    RenderExecutionRegionStageCountBreakdown(entry.source_stage_runtime));
 		return;
-	case JIT_EVENT_SINK_NEXT_BATCH_INVOCATION_COUNT:
-		output.Append(Value::UBIGINT(entry.sink_next_batch_invocation_count));
-		return;
-	case JIT_EVENT_SINK_NEXT_BATCH_RUNTIME_TIME_US:
-		output.Append(Value::BIGINT(entry.sink_next_batch_runtime_time_us));
-		return;
 	case JIT_EVENT_GENERATED_BODY_RUNTIME_TIME_US:
 		output.Append(Value::BIGINT(entry.generated_body_runtime_time_us));
 		return;
@@ -365,9 +357,6 @@ static unique_ptr<FunctionData> DuckDBJitEventsBind(ClientContext &context, Tabl
 	AddExecutionRegionTableFunctionColumn(return_types, names, "source_contract_runtime_time_us", LogicalType::BIGINT);
 	AddExecutionRegionTableFunctionColumn(return_types, names, "source_stage_runtime_breakdown", LogicalType::VARCHAR);
 	AddExecutionRegionTableFunctionColumn(return_types, names, "source_stage_count_breakdown", LogicalType::VARCHAR);
-	AddExecutionRegionTableFunctionColumn(return_types, names, "sink_next_batch_invocation_count",
-	                                      LogicalType::UBIGINT);
-	AddExecutionRegionTableFunctionColumn(return_types, names, "sink_next_batch_runtime_time_us", LogicalType::BIGINT);
 	AddExecutionRegionTableFunctionColumn(return_types, names, "generated_body_runtime_time_us", LogicalType::BIGINT);
 	AddExecutionRegionTableFunctionColumn(return_types, names, "generated_stage_runtime_breakdown",
 	                                      LogicalType::VARCHAR);

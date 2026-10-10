@@ -39,7 +39,6 @@ REGION_SUMMARY_FIELDS = (
     "code_size",
     "runtime_time_us",
     "source_runtime_time_us",
-    "sink_next_batch_runtime_time_us",
     "generated_runtime_time_us",
 )
 
@@ -267,7 +266,7 @@ def counter_region_summary(counter_rows: list[dict]) -> dict:
             summary["unavailable_decisions"] += count
         elif status == "disabled":
             summary["disabled_decisions"] += count
-        elif status in ("executed", "source_contract"):
+        elif status == "executed":
             summary["runtime_events"] += count
             if row_int(row, "invocation_count") > 0 or row_int(row, "source_contract_invocation_count") > 0:
                 summary["runtime_regions"] += count
@@ -288,7 +287,6 @@ def counter_region_summary(counter_rows: list[dict]) -> dict:
         summary["code_size"] += row_int(row, "code_size")
         summary["runtime_time_us"] += row_int(row, "runtime_time_us")
         summary["source_runtime_time_us"] += row_int(row, "source_contract_runtime_time_us")
-        summary["sink_next_batch_runtime_time_us"] += row_int(row, "sink_next_batch_runtime_time_us")
         summary["generated_runtime_time_us"] += row_int(row, "generated_body_runtime_time_us")
     return summary
 

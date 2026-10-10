@@ -45,8 +45,6 @@ const char *ExecutionRegionEventStatusToString(ExecutionRegionEventStatus status
 		return "error";
 	case ExecutionRegionEventStatus::EXECUTED:
 		return "executed";
-	case ExecutionRegionEventStatus::SOURCE_CONTRACT:
-		return "source_contract";
 	default:
 		return "none";
 	}
@@ -132,11 +130,8 @@ static void SummarizeRuntimeEvent(ExecutionRegionTraceSummary &summary, unordere
                                   const ExecutionRegionEvent &event) {
 	summary.runtime_events++;
 	summary.source_us += event.source_contract_runtime_time_us;
-	if (event.status_kind != ExecutionRegionEventStatus::SOURCE_CONTRACT) {
-		summary.runtime_us += event.runtime_time_us;
-		summary.sink_us += event.sink_next_batch_runtime_time_us;
-		summary.generated_us += event.generated_body_runtime_time_us;
-	}
+	summary.runtime_us += event.runtime_time_us;
+	summary.generated_us += event.generated_body_runtime_time_us;
 	if (ExecutionRegionEventWasInvoked(event)) {
 		runtime_kernels.insert(event.kernel_id);
 	}
@@ -286,7 +281,6 @@ static ExecutionRegionEvent BuildRuntimeEvent(const KERNEL &kernel, ExecutionReg
 	event.selected_runner = ExecutionRegionRunnerFromExecutionMode(execution_mode);
 	event.reason = std::move(reason);
 	event.kernel_id = kernel.TraceId();
-	event.kernel_compile_reason = kernel.TraceCompileReason();
 	event.kernel_compile_time_us = kernel.TraceCompileTime();
 	event.kernel_code_size = kernel.TraceCodeSize();
 	event.input_rows = input_rows;
@@ -318,8 +312,6 @@ static void SetRuntimeMetrics(ExecutionRegionEvent &event, const ExecutionRegion
 	event.source_contract_invocation_count = metrics.source_contract_invocation_count;
 	event.source_contract_runtime_time_us = metrics.source_contract_runtime_time_us;
 	event.source_stage_runtime = metrics.source_stage_runtime;
-	event.sink_next_batch_invocation_count = metrics.sink_next_batch_invocation_count;
-	event.sink_next_batch_runtime_time_us = metrics.sink_next_batch_runtime_time_us;
 	event.generated_body_runtime_time_us = metrics.generated_body_runtime_time_us;
 	event.generated_stage_runtime = metrics.generated_stage_runtime;
 	event.jit_runtime = metrics.jit_runtime;

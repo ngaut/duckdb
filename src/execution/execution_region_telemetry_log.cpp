@@ -46,10 +46,6 @@ static string ExecutionRegionRunnerCostInputScope(const PhysicalRunnerCostProfil
 	return PhysicalRunnerCostInputScopeToString(cost.input_scope);
 }
 
-static const string &ExecutionRegionRunnerCostInputScope(const ExecutionRegionRunnerCostTotals &cost) {
-	return cost.input_scope;
-}
-
 static idx_t ExecutionRegionRingIndex(idx_t start, idx_t capacity, idx_t offset) {
 	D_ASSERT(capacity > 0);
 	return (start + offset) % capacity;
@@ -146,8 +142,6 @@ static void AccumulateExecutionRegionCounter(ExecutionRegionCounter &counter, co
 	counter.source_contract_invocation_count += event.source_contract_invocation_count;
 	counter.source_contract_runtime_time_us += event.source_contract_runtime_time_us;
 	MergeExecutionRegionStageRuntime(counter.source_stage_runtime, event.source_stage_runtime);
-	counter.sink_next_batch_invocation_count += event.sink_next_batch_invocation_count;
-	counter.sink_next_batch_runtime_time_us += event.sink_next_batch_runtime_time_us;
 	counter.generated_body_runtime_time_us += event.generated_body_runtime_time_us;
 	MergeExecutionRegionStageRuntime(counter.generated_stage_runtime, event.generated_stage_runtime);
 	AccumulateExecutionRegionStageTimings(counter.stage_timings, event.stage_timings);

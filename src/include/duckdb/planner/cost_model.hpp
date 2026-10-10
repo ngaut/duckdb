@@ -153,13 +153,7 @@ struct PhysicalRunnerAxisCostValues {
 };
 
 //! One accelerated runner's selection economics inside a cost profile.
-struct PhysicalRunnerAxisCostBreakdown : PhysicalRunnerAxisCostValues {
-	bool available = false;
-	//! Whether this axis passed selection analysis on its own; the winning runner is
-	//! the selected axis with the highest net benefit.
-	bool selected = false;
-	string selection_reason;
-};
+using PhysicalRunnerAxisCostBreakdown = PhysicalRunnerAxisCostValues;
 
 struct PhysicalRunnerCostProfile : PhysicalRunnerCostNumericFields {
 	bool present = false;

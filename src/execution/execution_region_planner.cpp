@@ -1092,7 +1092,7 @@ void ExecutionRegionPlanner::Compile(ClientContext &context, ExecutionRegionBack
 	    compiled_region.lowering_plan.SelectedSourceExecution(), compiled_region.lowering_plan.ScanFilterMode(),
 	    &compiled_region.physical_runner.runner_cost);
 	if (status == ExecutionRegionCompileStatus::COMPILED && result.kernel) {
-		result.kernel->SetTraceInfo(trace_id, execution_mode, reason, compile_time_us, code_size);
+		result.kernel->SetTraceInfo(trace_id, execution_mode, compile_time_us, code_size);
 		result.kernel->SetTraceSelectedSourceExecution(compiled_region.lowering_plan.SelectedSourceExecution());
 		result.kernel->SetTraceScanFilterMode(compiled_region.lowering_plan.ScanFilterMode());
 		if (ExecutionRegionSettings::TraceRuntime(context)) {

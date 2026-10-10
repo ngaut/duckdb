@@ -68,8 +68,8 @@ public:
 	virtual idx_t CodeSize() const;
 	virtual bool HasExecutableBody() const;
 	virtual unique_ptr<ExecutionRegionLocalState> CreateLocalState(Allocator &allocator) const;
-	void SetTraceInfo(idx_t trace_id, ExecutionRegionExecutionMode execution_mode, string compile_reason,
-	                  int64_t compile_time_us, idx_t code_size);
+	void SetTraceInfo(idx_t trace_id, ExecutionRegionExecutionMode execution_mode, int64_t compile_time_us,
+	                  idx_t code_size);
 	void AddTraceCodeSize(idx_t code_size);
 	void SetTraceSelectedSourceExecution(ExecutionRegionSourceExecutionKind source_execution);
 	void SetTraceScanFilterMode(ExecutionRegionScanFilterMode scan_filter_mode);
@@ -78,7 +78,6 @@ public:
 	ExecutionRegionExecutionMode ExecutionMode() const;
 	ExecutionRegionSourceExecutionKind SelectedSourceExecution() const;
 	bool UsesScanFilters() const;
-	const string &TraceCompileReason() const;
 	int64_t TraceCompileTime() const;
 	idx_t TraceCodeSize() const;
 	bool HasTracePipeline() const;
@@ -104,7 +103,6 @@ private:
 	ExecutionRegionExecutionMode execution_mode = ExecutionRegionExecutionMode::NONE;
 	ExecutionRegionSourceExecutionKind selected_source_execution = ExecutionRegionSourceExecutionKind::NONE;
 	ExecutionRegionScanFilterMode scan_filter_mode = ExecutionRegionScanFilterMode::NONE;
-	string trace_compile_reason;
 	int64_t trace_compile_time_us = 0;
 	idx_t trace_code_size = 0;
 	std::atomic<idx_t> trace_lazy_code_size {0};

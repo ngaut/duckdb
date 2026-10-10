@@ -65,8 +65,6 @@ COUNTER_RUNTIME_FIELDS = (
     "source_contract_runtime_time_us",
     "source_stage_runtime_breakdown",
     "source_stage_count_breakdown",
-    "sink_next_batch_invocation_count",
-    "sink_next_batch_runtime_time_us",
     "generated_body_runtime_time_us",
     "generated_stage_runtime_breakdown",
     "generated_stage_count_breakdown",

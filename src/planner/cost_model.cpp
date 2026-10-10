@@ -940,9 +940,6 @@ PhysicalRunnerCostProfile DuckDBCostModel::SelectPhysicalRunner(const PhysicalRu
 	}
 	for (idx_t axis_idx = 0; axis_idx < AXIS_COUNT; axis_idx++) {
 		auto &breakdown = profile.AxisAt(axis_idx);
-		breakdown.available = parameters.AxisAt(axis_idx).available;
-		breakdown.selected = axis_selections[axis_idx].selected;
-		breakdown.selection_reason = axis_selections[axis_idx].selection_reason;
 		breakdown.runner_benefit = axis_profiles[axis_idx].accelerated_runner_benefit;
 		breakdown.transfer_cost = axis_transfer_costs[axis_idx];
 		breakdown.startup_cost = axis_profiles[axis_idx].startup_cost;

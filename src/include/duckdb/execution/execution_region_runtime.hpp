@@ -60,8 +60,6 @@ struct ExecutionRegionRuntimeMetrics {
 	idx_t source_contract_invocation_count = 0;
 	int64_t source_contract_runtime_time_us = 0;
 	vector<ExecutionRegionRecordedStageRuntime> source_stage_runtime;
-	idx_t sink_next_batch_invocation_count = 0;
-	int64_t sink_next_batch_runtime_time_us = 0;
 	int64_t generated_body_runtime_time_us = 0;
 	vector<ExecutionRegionRecordedStageRuntime> generated_stage_runtime;
 	ExecutionRegionJitRuntimeMetrics jit_runtime;

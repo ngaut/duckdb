@@ -33,8 +33,7 @@ enum class ExecutionRegionEventStatus : uint8_t {
 	UNAVAILABLE,
 	DISABLED,
 	ERROR,
-	EXECUTED,
-	SOURCE_CONTRACT
+	EXECUTED
 };
 
 struct ExecutionRegionStageTimings {
@@ -66,10 +65,6 @@ struct ExecutionRegionRunnerCostTotals : PhysicalRunnerCostNumericFields {
 	idx_t selected_accelerated_runner_count = 0;
 	idx_t selected_compiled_vectorized_runner_count = 0;
 	idx_t selected_gpu_runner_count = 0;
-
-	ExecutionRegionRunnerCostAxisTotals &AxisAt(idx_t axis_idx) {
-		return axis_idx == 0 ? compiled_vectorized : gpu;
-	}
 };
 
 struct ExecutionRegionEvent {
@@ -105,12 +100,9 @@ struct ExecutionRegionEvent {
 	idx_t source_contract_invocation_count = 0;
 	int64_t source_contract_runtime_time_us = 0;
 	vector<ExecutionRegionRecordedStageRuntime> source_stage_runtime;
-	idx_t sink_next_batch_invocation_count = 0;
-	int64_t sink_next_batch_runtime_time_us = 0;
 	int64_t generated_body_runtime_time_us = 0;
 	vector<ExecutionRegionRecordedStageRuntime> generated_stage_runtime;
 	string runtime_result;
-	string kernel_compile_reason;
 	int64_t kernel_compile_time_us = 0;
 	idx_t kernel_code_size = 0;
 	ExecutionRegionStageTimings stage_timings;
@@ -130,7 +122,6 @@ void ForEachExecutionRegionEventRuntimeCountField(const ExecutionRegionEvent &ev
 	fn("invocation_count", event.invocation_count);
 	fn("source_contract_output_rows", event.source_contract_output_rows);
 	fn("source_contract_invocation_count", event.source_contract_invocation_count);
-	fn("sink_next_batch_invocation_count", event.sink_next_batch_invocation_count);
 }
 
 //! Time fields carry two labels: the canonical struct name used by the events
@@ -140,7 +131,6 @@ template <class FN>
 void ForEachExecutionRegionEventRuntimeTimeField(const ExecutionRegionEvent &event, FN &&fn) {
 	fn("runtime_time_us", "runtime_time_us", event.runtime_time_us);
 	fn("source_contract_runtime_time_us", "source_runtime_time_us", event.source_contract_runtime_time_us);
-	fn("sink_next_batch_runtime_time_us", "sink_next_batch_runtime_time_us", event.sink_next_batch_runtime_time_us);
 	fn("generated_body_runtime_time_us", "generated_runtime_time_us", event.generated_body_runtime_time_us);
 }
 
@@ -157,7 +147,6 @@ struct ExecutionRegionTraceSummary {
 	idx_t code_size = 0;
 	int64_t runtime_us = 0;
 	int64_t source_us = 0;
-	int64_t sink_us = 0;
 	int64_t generated_us = 0;
 	int64_t decision_us = 0;
 	int64_t compile_us = 0;
@@ -205,8 +194,6 @@ struct ExecutionRegionCounter {
 	idx_t source_contract_invocation_count = 0;
 	int64_t source_contract_runtime_time_us = 0;
 	vector<ExecutionRegionRecordedStageRuntime> source_stage_runtime;
-	idx_t sink_next_batch_invocation_count = 0;
-	int64_t sink_next_batch_runtime_time_us = 0;
 	int64_t generated_body_runtime_time_us = 0;
 	vector<ExecutionRegionRecordedStageRuntime> generated_stage_runtime;
 	ExecutionRegionStageTimings stage_timings;

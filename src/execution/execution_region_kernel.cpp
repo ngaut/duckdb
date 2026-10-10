@@ -30,10 +30,9 @@ unique_ptr<ExecutionRegionLocalState> ExecutionRegionKernel::CreateLocalState(Al
 }
 
 void ExecutionRegionKernel::SetTraceInfo(idx_t trace_id_p, ExecutionRegionExecutionMode execution_mode_p,
-                                         string compile_reason, int64_t compile_time_us, idx_t code_size) {
+                                         int64_t compile_time_us, idx_t code_size) {
 	trace_id = trace_id_p;
 	execution_mode = execution_mode_p;
-	trace_compile_reason = std::move(compile_reason);
 	trace_compile_time_us = compile_time_us;
 	trace_code_size = code_size;
 	trace_lazy_code_size.store(0, std::memory_order_relaxed);
@@ -72,10 +71,6 @@ ExecutionRegionSourceExecutionKind ExecutionRegionKernel::SelectedSourceExecutio
 
 bool ExecutionRegionKernel::UsesScanFilters() const {
 	return scan_filter_mode != ExecutionRegionScanFilterMode::NONE;
-}
-
-const string &ExecutionRegionKernel::TraceCompileReason() const {
-	return trace_compile_reason;
 }
 
 int64_t ExecutionRegionKernel::TraceCompileTime() const {
