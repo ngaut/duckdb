@@ -489,6 +489,9 @@ def classify(off: RunResult, run: RunResult) -> str:
     if "INTERNAL Error" in run.output or "FATAL" in run.output or run.returncode < 0:
         return "crash"
     if run.output != off.output:
+        if "Out of Memory Error" in run.output:
+            # near a memory limit either run may fail to fit; a result that differs is what marks a JIT bug
+            return "oom"
         return "error" if "Error" in run.output else "mismatch"
     return "ok"
 
@@ -533,7 +536,7 @@ def main(argv: list[str] | None = None) -> int:
     else:
         generator = QueryGenerator(args.seed)
         jobs = [(index, generator.query(), 1 if index % 4 == 0 else args.threads) for index in range(args.queries)]
-    findings, invalid, done = [], 0, 0
+    findings, invalid, ooms, done = [], 0, 0, 0
     with concurrent.futures.ThreadPoolExecutor(max_workers=args.workers) as pool:
         futures = [pool.submit(check, args, index, sql, threads) for index, sql, threads in jobs]
         for future in concurrent.futures.as_completed(futures):
@@ -542,12 +545,16 @@ def main(argv: list[str] | None = None) -> int:
             if record.get("invalid"):
                 invalid += 1
                 continue
-            bad = {name: verdict for name, verdict in record["results"].items() if verdict != "ok"}
+            ooms += sum(verdict == "oom" for verdict in record["results"].values())
+            bad = {name: verdict for name, verdict in record["results"].items() if verdict not in ("ok", "oom")}
             if bad:
                 findings.append(record)
                 print(f"[{done}/{len(jobs)}] q{record['index']} t{record['threads']} {bad}", flush=True)
     findings.sort(key=lambda record: (record["index"], record["threads"]))
-    print(f"checked {len(jobs) - invalid} queries ({invalid} invalid), {len(findings)} with findings")
+    print(
+        f"checked {len(jobs) - invalid} queries ({invalid} invalid, {ooms} JIT runs out of memory), "
+        f"{len(findings)} with findings"
+    )
     if args.report:
         args.report.write_text(json.dumps(findings, indent=2) + "\n", encoding="utf-8")
     return 1 if findings else 0

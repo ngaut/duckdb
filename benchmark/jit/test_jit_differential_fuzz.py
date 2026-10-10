@@ -63,6 +63,7 @@ class ClassifyTest(unittest.TestCase):
         self.assertEqual(classify(off, RunResult(1, "INTERNAL Error: boom", 0.1)), "crash")
         self.assertEqual(classify(off, RunResult(1, "Invalid Input Error: x", 0.1)), "error")
         self.assertEqual(classify(off, RunResult(-1, "TIMEOUT", 0.1)), "timeout")
+        self.assertEqual(classify(off, RunResult(1, "Out of Memory Error: failed to pin block", 0.1)), "oom")
 
 
 if __name__ == "__main__":
