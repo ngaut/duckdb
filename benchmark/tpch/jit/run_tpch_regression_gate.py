@@ -568,28 +568,28 @@ def verify_command(
     return command
 
 
-def summary_counter(row: dict[str, str], name: str) -> int:
+def gaps_counter(row: dict[str, str], name: str) -> int:
     value = row.get(name, "0") or "0"
     try:
         result = int(value)
     except ValueError as exc:
-        raise TPCHConfigurationError(f"summary.csv has invalid {name} value {value!r}") from exc
+        raise TPCHConfigurationError(f"performance_gaps.csv has invalid {name} value {value!r}") from exc
     if result < 0:
-        raise TPCHConfigurationError(f"summary.csv has negative {name} value {result}")
+        raise TPCHConfigurationError(f"performance_gaps.csv has negative {name} value {result}")
     return result
 
 
 def selected_auto_queries(out_dir: Path, fallback_queries: list[str]) -> list[str]:
-    summary_path = out_dir / "summary.csv"
-    if not summary_path.is_file():
+    """Queries whose auto run compiled a region, or whose runner CBO admitted an accelerated runner even when that
+    compilation then failed."""
+    gaps_path = out_dir / "performance_gaps.csv"
+    if not gaps_path.is_file():
         return list(fallback_queries)
     selected = []
-    with summary_path.open(newline="", encoding="utf-8") as handle:
+    with gaps_path.open(newline="", encoding="utf-8") as handle:
         for row in csv.DictReader(handle):
-            if row.get("policy") != "auto":
-                continue
-            compiled_regions = summary_counter(row, "compiled_regions")
-            selected_accelerated_runners = summary_counter(row, "runner_cost_selected_accelerated_runner_count")
+            compiled_regions = gaps_counter(row, "auto_compiled_regions")
+            selected_accelerated_runners = gaps_counter(row, "auto_runner_cost_selected_accelerated_runner_count")
             if compiled_regions > 0 or selected_accelerated_runners > 0:
                 selected.append(row["query"])
     return sorted(set(selected), key=lambda query: int(query))

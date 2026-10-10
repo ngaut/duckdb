@@ -349,8 +349,7 @@ def performance_gap_rows(summary_rows: list[dict], counter_rows: list[dict]) -> 
         if row["status"] in ("skipped", "unsupported", "unavailable", "error"):
             auto_blockers[query][blocker] += count
         if row_bool(row, "runner_cost_profile"):
-            if blocker:
-                auto_runner_blockers[query][blocker] += count
+            auto_runner_blockers[query][blocker] += count
             auto_runner_cost[query]["benefit"] += row_int(row, "runner_cost_accelerated_runner_benefit")
             auto_runner_cost[query]["startup_cost"] += row_int(row, "runner_cost_startup_cost")
             auto_runner_cost[query]["required_benefit"] += row_int(row, "runner_cost_required_benefit")

@@ -16,6 +16,7 @@ from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import run_tpch_regression_gate as gate
+import tpch_common
 from tpch_common import TPCHConfigurationError
 from run_tpch_regression_gate import (
     apply_baseline_state_contract,
@@ -356,63 +357,41 @@ class TestBaselineStateContract(unittest.TestCase):
 
 
 class TestRuntimeContractQuerySelection(unittest.TestCase):
-    def write_summary(self, rows: list[dict[str, str]]) -> Path:
+    def write_gaps(self, rows: list[dict[str, str]]) -> Path:
         temporary_directory = tempfile.TemporaryDirectory()
         self.addCleanup(temporary_directory.cleanup)
         out_dir = Path(temporary_directory.name)
-        with (out_dir / "summary.csv").open("w", newline="", encoding="utf-8") as handle:
-            writer = csv.DictWriter(
-                handle,
-                fieldnames=(
-                    "query",
-                    "policy",
-                    "compiled_regions",
-                    "runner_cost_selected_accelerated_runner_count",
-                ),
-            )
+        with (out_dir / "performance_gaps.csv").open("w", newline="", encoding="utf-8") as handle:
+            writer = csv.DictWriter(handle, fieldnames=tpch_common.PERFORMANCE_GAP_FIELDS)
             writer.writeheader()
             writer.writerows(rows)
         return out_dir
 
     def test_selects_compiled_and_admitted_queries(self) -> None:
-        out_dir = self.write_summary(
+        out_dir = self.write_gaps(
             [
-                {
-                    "query": "1",
-                    "policy": "auto",
-                    "compiled_regions": "1",
-                    "runner_cost_selected_accelerated_runner_count": "0",
-                },
-                {
-                    "query": "9",
-                    "policy": "auto",
-                    "compiled_regions": "0",
-                    "runner_cost_selected_accelerated_runner_count": "1",
-                },
+                {"query": "1", "auto_compiled_regions": "1", "auto_runner_cost_selected_accelerated_runner_count": "0"},
+                {"query": "9", "auto_compiled_regions": "0", "auto_runner_cost_selected_accelerated_runner_count": "1"},
                 {
                     "query": "18",
-                    "policy": "auto",
-                    "compiled_regions": "0",
-                    "runner_cost_selected_accelerated_runner_count": "0",
-                },
-                {
-                    "query": "13",
-                    "policy": "off",
-                    "compiled_regions": "1",
-                    "runner_cost_selected_accelerated_runner_count": "1",
+                    "auto_compiled_regions": "0",
+                    "auto_runner_cost_selected_accelerated_runner_count": "0",
                 },
             ]
         )
-        self.assertEqual(selected_auto_queries(out_dir, ["1", "9", "13", "18"]), ["1", "9"])
+        self.assertEqual(selected_auto_queries(out_dir, ["1", "9", "18"]), ["1", "9"])
+
+    def test_benchmark_writes_the_counters_the_selection_reads(self) -> None:
+        for field in ("auto_compiled_regions", "auto_runner_cost_selected_accelerated_runner_count"):
+            self.assertIn(field, tpch_common.PERFORMANCE_GAP_FIELDS)
 
     def test_malformed_admission_counters_do_not_create_false_proof(self) -> None:
-        out_dir = self.write_summary(
+        out_dir = self.write_gaps(
             [
                 {
                     "query": "7",
-                    "policy": "auto",
-                    "compiled_regions": "invalid",
-                    "runner_cost_selected_accelerated_runner_count": "1",
+                    "auto_compiled_regions": "invalid",
+                    "auto_runner_cost_selected_accelerated_runner_count": "1",
                 }
             ]
         )

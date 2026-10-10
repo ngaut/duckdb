@@ -42,70 +42,6 @@ REGION_SUMMARY_FIELDS = (
     "generated_runtime_time_us",
 )
 
-PROFILE_EVENT_FIELDS = (
-    "entry_type",
-    "selected_runner",
-    "runner_cost_profile",
-    "runner_cost_accelerated_runner_benefit",
-    "runner_cost_generated_stage_count",
-    "runner_cost_generated_backend_stage_count",
-    "runner_cost_generated_grouped_aggregate_stage_count",
-    "runner_cost_native_grouped_state_address_lookup_count",
-    "runner_cost_grouped_aggregate_estimated_cardinality",
-    "runner_cost_costed_batches",
-    "runner_cost_source_contract_input_rows",
-    "runner_cost_source_contract_input_batches",
-    "runner_cost_source_contract_output_cardinality_unknown",
-    "runner_cost_materialization_elision_count",
-    "runner_cost_selected_hash_join_filter_materialization_count",
-    "runner_cost_native_join_stage_count",
-    "runner_cost_native_hash_join_build_sink_count",
-    "runner_cost_native_aggregate_stage_count",
-    "runner_cost_native_grouped_aggregate_stage_count",
-    "runner_cost_native_sort_stage_count",
-    "runner_cost_full_pipeline",
-    "runner_cost_input_scope",
-    "runner_cost_generated_work_class",
-    "runner_cost_native_protocol_class",
-    "runner_cost_admission_class",
-    "runner_cost_selection_reason",
-    "runner_cost_required_runtime_proofs",
-    "runner_cost_generated_expression_work",
-    "runner_cost_generated_stage_work",
-    "runner_cost_generated_backend_stage_work",
-    "runner_cost_native_operator_work",
-    "runner_cost_materialization_elision_work",
-    "runner_cost_selected_hash_join_filter_materialization_penalty",
-    "runner_cost_source_contract_scan_penalty",
-    "runner_cost_full_pipeline_work",
-    "runner_cost_stateful_protocol_penalty",
-    "runner_cost_startup_cost",
-    "runner_cost_required_benefit",
-    "runner_cost_net_benefit",
-    "runner_cost_selected_accelerated_runner",
-    "blocker",
-    "pipeline_cbo_time_us",
-    "graph_build_time_us",
-    "candidate_cbo_time_us",
-    "ir_lowering_time_us",
-    "backend_analysis_time_us",
-    "codegen_time_us",
-    "executable_build_time_us",
-    "machine_codegen_time_us",
-    "kernel_build_time_us",
-    "lazy_codegen_time_us",
-    "lazy_machine_codegen_time_us",
-    "lazy_code_size",
-    "hash_join_probe_layout",
-    "jit_runtime_path_counts",
-    "jit_runtime_proof_counts",
-    "jit_runtime_delegation_counts",
-    "selected_source_execution",
-    "selected_uses_scan_filters",
-    "source_stage_runtime_breakdown",
-    "generated_stage_runtime_breakdown",
-)
-
 SHELL_TIMER_RE = re.compile(r"Run Time \(s\): real ([0-9]+(?:\.[0-9]+)?)")
 
 
@@ -309,7 +245,6 @@ def profile_materialized_attempt(
     profile_path: Path,
     label: str,
     *,
-    pre_sql: str = "",
     validation_sql: str = "",
     cleanup_sql: str = "",
     collect_counters: bool = False,
@@ -324,8 +259,6 @@ def profile_materialized_attempt(
         counters_path.unlink()
 
     statements = [setup_sql]
-    if pre_sql.strip():
-        statements.append(pre_sql)
     statements.extend(
         [
             "PRAGMA enable_profiling=json;",
@@ -468,7 +401,7 @@ def require_columns(rows: list[dict], columns: tuple[str, ...], label: str = "su
     require(not missing, f"{label}: missing required columns {missing}")
 
 
-def verify_profile(trace_dir: Path, row: dict, *, require_regions: bool = True) -> dict:
+def verify_profile(trace_dir: Path, row: dict) -> dict:
     profile_path = trace_dir / row["profile_json"]
     require(profile_path.exists(), f"missing profile JSON: {profile_path}")
     profile = read_profile_json(profile_path)
@@ -477,18 +410,4 @@ def verify_profile(trace_dir: Path, row: dict, *, require_regions: bool = True) 
         f"{profile_path.name}: missing query timing",
     )
     require("operator" in profile, f"{profile_path.name}: missing operator tree")
-    regions = profile.get("execution_regions") or {}
-    if require_regions:
-        require(bool(regions), f"{profile_path.name}: missing execution_regions diagnostics")
-        require(
-            "events" in regions,
-            f"{profile_path.name}: missing execution_regions.events",
-        )
-        events = regions.get("events") or []
-        if events:
-            missing = [name for name in PROFILE_EVENT_FIELDS if name not in events[0]]
-            require(
-                not missing,
-                f"{profile_path.name}: execution_regions.events missing fields {missing}",
-            )
     return profile

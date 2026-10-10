@@ -103,11 +103,7 @@ def verify_runs(trace_dir: Path, run_rows: list[dict], queries: list[str], polic
             require(row_int(row, "compiled_regions") == 0, f"runs.csv: off policy compiled regions: {row}")
         require(row["timing_mode"] in ("production", "profile"), f"runs.csv: bad timing mode: {row}")
         if row["profile_json"]:
-            verify_profile(
-                trace_dir,
-                {"profile_json": row["profile_json"]},
-                require_regions=False,
-            )
+            verify_profile(trace_dir, {"profile_json": row["profile_json"]})
 
 
 def verify_counters(rows: list[dict], queries: list[str], policies: list[str], repeats: int) -> None:

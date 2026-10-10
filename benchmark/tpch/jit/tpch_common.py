@@ -136,6 +136,7 @@ COUNTER_RUNNER_COST_WORK_FIELDS = (
     "runner_cost_required_benefit",
     "runner_cost_net_benefit",
     "runner_cost_compiled_vectorized_runner_benefit",
+    "runner_cost_compiled_vectorized_transfer_cost",
     "runner_cost_compiled_vectorized_startup_cost",
     "runner_cost_compiled_vectorized_required_benefit",
     "runner_cost_compiled_vectorized_net_benefit",

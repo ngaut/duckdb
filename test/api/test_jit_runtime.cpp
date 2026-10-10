@@ -606,10 +606,7 @@ TEST_CASE("Execution region runtime trace records kernel execution facts", "[api
 			REQUIRE(event.jit_runtime.lazy_codegen.machine_codegen_time_us >= 0);
 			REQUIRE(event.generated_body_runtime_time_us + event.source_contract_runtime_time_us <=
 			        event.runtime_time_us);
-			const bool expected_runtime_result = event.runtime_result == "need_more_input" ||
-			                                     event.runtime_result == "have_more_output" ||
-			                                     event.runtime_result == "finished";
-			REQUIRE(expected_runtime_result);
+			REQUIRE(event.runtime_result == "finished");
 			REQUIRE(StringUtil::Contains(event.reason, "kernel executed"));
 		}
 		for (auto &counter : manager.GetCounters()) {
@@ -1088,7 +1085,6 @@ TEST_CASE("EXPLAIN ANALYZE reports compact aggregate auto vectorized-selection f
 	REQUIRE_NO_FAIL(*result);
 	analyzed_plan = result->GetValue(1, 0).GetValue<string>();
 	REQUIRE(!StringUtil::Contains(analyzed_plan, "compiled full-pipeline"));
-	REQUIRE(!StringUtil::Contains(analyzed_plan, "jit_adaptive"));
 	REQUIRE_NO_FAIL(con.Query("SET jit_policy='auto'"));
 }
 

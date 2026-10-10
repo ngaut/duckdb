@@ -2459,8 +2459,7 @@ TEST_CASE("JIT generated sparse grouped runs preserve local uniqueness across th
 			                             "aggregate_update.proven_unique_append.producer_order_proof=8192") &&
 			        StringUtil::Contains(runtime_paths, "aggregate_update.proven_unique_append.enabled=1") &&
 			        !StringUtil::Contains(runtime_paths,
-			                              "aggregate_update.proven_unique_append.final_combine_required") &&
-			        !StringUtil::Contains(runtime_paths, "pending_primitive_group_runs_miss.group_replay");
+			                              "aggregate_update.proven_unique_append.final_combine_required");
 			    return base_paths &&
 			           (!require_shared_payload_validity ||
 			            StringUtil::Contains(

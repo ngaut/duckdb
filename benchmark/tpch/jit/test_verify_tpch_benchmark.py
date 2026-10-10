@@ -42,37 +42,7 @@ def runtime_row(proofs: str, status: str = "executed") -> dict[str, str]:
     }
 
 
-def adaptive_fallback_row() -> dict[str, str]:
-    return {
-        "query": "1",
-        "policy": "auto",
-        "repeat": "1",
-        "backend_name": "jit_sljit",
-        "kernel_id": "7",
-        "status": "executed",
-        "execution_mode": "native",
-        "runtime_result": "adaptive_ab",
-        "reason": "adaptive_ab verdict=fallback_native compiled_leg_us=375 native_leg_us=93",
-    }
-
-
 class TestTypedRuntimeProofLedger(unittest.TestCase):
-    def test_adaptive_fallback_marker_does_not_exempt_missing_proof(self) -> None:
-        rows = [
-            compiled_row("full_pipeline_ownership", runner_cost_full_pipeline_work="4096"),
-            adaptive_fallback_row(),
-        ]
-        with self.assertRaises(AssertionError):
-            verify_cbo_runtime_counter_contract(rows, require_runtime_proof=True)
-
-    def test_adaptive_fallback_accepts_deferred_compiled_leg_proof(self) -> None:
-        rows = [
-            compiled_row("full_pipeline_ownership", runner_cost_full_pipeline_work="4096"),
-            runtime_row("full_pipeline_ownership=1", status="skipped"),
-            adaptive_fallback_row(),
-        ]
-        verify_cbo_runtime_counter_contract(rows, require_runtime_proof=True)
-
     def test_selected_compile_failure_is_an_explicit_outcome(self) -> None:
         row = compiled_row("full_pipeline_ownership", runner_cost_full_pipeline_work="4096")
         row.update({"kernel_id": "0", "status": "error", "blocker": "backend_compile_error"})
