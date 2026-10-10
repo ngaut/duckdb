@@ -1,0 +1,164 @@
+# name: test/sql/jit/test_jit_join_ungrouped_aggregate.test
+# description: An ungrouped aggregate over one build column of a regular hash join folds matches inside the probe loop
+# group: [jit]
+
+# The build column is read from the row, or through a dictionary index whose width (1, 2 or 4 bytes) follows the
+# dictionary size, and NULL build values are skipped
+
+statement ok
+LOAD jit_sljit
+
+statement ok
+SET jit_cbo_generated_stage_benefit=4096
+
+statement ok
+SET jit_cbo_materialization_elision_benefit=4096
+
+statement ok
+SET jit_cbo_native_operator_stage_benefit=4096
+
+statement ok
+SET jit_cbo_full_pipeline_benefit=4096
+
+statement ok
+SET jit_cbo_source_contract_scan_filter_penalty=0
+
+statement ok
+SET jit_cbo_startup_base_cost=0
+
+statement ok
+SET jit_cbo_startup_margin_basis_points=0
+
+statement ok
+SET jit_event_log_size=10000
+
+# spread join keys keep the outer join off the perfect hash table; a third of the probe rows find no build row
+statement ok
+CREATE TABLE b AS
+SELECT i * 7919 AS k,
+       CASE WHEN i % 13 = 0 THEN NULL ELSE 'name_' || (i % 40)::VARCHAR END AS s,
+       CASE WHEN i % 17 = 0 THEN NULL ELSE (i % 50)::BIGINT END AS v
+FROM range(60000) t(i)
+
+statement ok
+CREATE TABLE p AS SELECT (i % 90000) * 7919 AS k FROM range(1000000) t(i)
+
+# dense keys put y and y2 on perfect hash tables, whose outputs are dictionaries over all their rows: the outer hash
+# table stores a 1-byte index into the 200 y rows and a 2-byte index into the 3000 y2 rows
+statement ok
+CREATE TABLE y AS
+SELECT i AS yk,
+       CASE WHEN i % 13 = 0 THEN NULL ELSE 'name_' || i::VARCHAR END AS s,
+       CASE WHEN i % 17 = 0 THEN NULL ELSE (i * 1000003)::BIGINT END AS v
+FROM range(200) t(i)
+
+statement ok
+CREATE TABLE y2 AS
+SELECT i AS yk,
+       CASE WHEN i % 13 = 0 THEN NULL ELSE 'name_' || i::VARCHAR END AS s,
+       CASE WHEN i % 17 = 0 THEN NULL ELSE (i * 1000003)::BIGINT END AS v
+FROM range(3000) t(i)
+
+statement ok
+CREATE TABLE x AS SELECT i * 7919 AS k2, i % 200 AS yk, i % 3000 AS yk2 FROM range(60000) t(i)
+
+foreach threads 1 4
+
+statement ok
+SET threads={threads}
+
+foreach policy off auto
+
+statement ok
+SET jit_policy='{policy}'
+
+query I
+SELECT count(b.s) FROM p JOIN b ON p.k = b.k
+----
+618454
+
+query I
+SELECT count(b.v) FROM p JOIN b ON p.k = b.k
+----
+630581
+
+query I
+SELECT sum(b.v) FROM p JOIN b ON p.k = b.k
+----
+15450283
+
+query I
+SELECT count(*) FROM p JOIN b ON p.k = b.k
+----
+670000
+
+query I
+SELECT count(b2.s) FROM p JOIN (SELECT x.k2, y.s FROM x JOIN y ON x.yk = y.yk) b2 ON p.k = b2.k2
+----
+616400
+
+query I
+SELECT count(b2.v) FROM p JOIN (SELECT x.k2, y.v FROM x JOIN y ON x.yk = y.yk) b2 ON p.k = b2.k2
+----
+629800
+
+query I
+SELECT sum(b2.v) FROM p JOIN (SELECT x.k2, y.v FROM x JOIN y ON x.yk = y.yk) b2 ON p.k = b2.k2
+----
+62906488718900
+
+query I
+SELECT count(b2.s) FROM p JOIN (SELECT x.k2, y2.s FROM x JOIN y2 ON x.yk2 = y2.yk) b2 ON p.k = b2.k2
+----
+618410
+
+query I
+SELECT sum(b2.v) FROM p JOIN (SELECT x.k2, y2.v FROM x JOIN y2 ON x.yk2 = y2.yk) b2 ON p.k = b2.k2
+----
+944590130761891
+
+endloop
+
+endloop
+
+# every build-column source reaches the probe-loop consumer
+statement ok
+SET threads=1
+
+statement ok
+SET jit_policy='auto'
+
+statement ok
+SET jit_trace_runtime=true
+
+statement ok
+SELECT * FROM duckdb_jit_clear_events()
+
+query I
+SELECT sum(b.v) FROM p JOIN b ON p.k = b.k
+----
+15450283
+
+query I
+SELECT count(*) > 0 FROM duckdb_jit_events()
+WHERE phase = 'runtime'
+  AND jit_runtime_path_counts LIKE '%single_key.no_chain.direct_ungrouped_aggregate_consumer=%'
+  AND jit_runtime_path_counts LIKE '%join_output_probe_consumer_ungrouped_aggregate.row_source=%'
+----
+true
+
+statement ok
+SELECT * FROM duckdb_jit_clear_events()
+
+query I
+SELECT count(b2.s) FROM p JOIN (SELECT x.k2, y.s FROM x JOIN y ON x.yk = y.yk) b2 ON p.k = b2.k2
+----
+616400
+
+query I
+SELECT count(*) > 0 FROM duckdb_jit_events()
+WHERE phase = 'runtime'
+  AND jit_runtime_path_counts LIKE '%single_key.no_chain.direct_ungrouped_aggregate_consumer=%'
+  AND jit_runtime_path_counts LIKE '%join_output_probe_consumer_ungrouped_aggregate.dictionary_source=%'
+----
+true

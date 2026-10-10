@@ -209,6 +209,24 @@ struct SljitExactRegularHashJoinMembershipFilterDispatch {
 	}
 };
 
+//! Whether the source already applied this hash table's exact membership filter in a form that answers the probe
+//! without lookups: unique single build keys and every build output available from the probe input
+static bool SljitRegularProbeAnsweredByExactSourceFilter(
+    const shared_ptr<ExecutionRuntimeFilterIdentity> &exact_source_filter_identity,
+    const ExecutionHashJoinProbeBinding &probe, const SljitNativeHashJoinProbePlan &plan) {
+	auto &layout = probe.table_layout;
+	return exact_source_filter_identity && exact_source_filter_identity == layout.runtime_filter_identity &&
+	       layout.exact_membership_filter_build_keys_unique && layout.exact_membership_filter_bitmap &&
+	       plan.keys.size() == 1 && plan.equality_key_count == 1 && !plan.residual_predicate &&
+	       !plan.mark_build_match && !layout.stored_keys_have_null &&
+	       probe.exact_rhs_output_probe_input_indices.size() == probe.rhs_output_column_count &&
+	       std::all_of(probe.exact_rhs_output_probe_input_indices.begin(),
+	                   probe.exact_rhs_output_probe_input_indices.end(),
+	                   [](idx_t input_idx) { return input_idx != DConstants::INVALID_INDEX; }) &&
+	       (plan.output_mode == ExecutionHashJoinProbeOutputMode::MATCHED_PROBE_AND_BUILD ||
+	        plan.output_mode == ExecutionHashJoinProbeOutputMode::MATCHED_PROBE_ONLY);
+}
+
 template <class OWNER>
 static void SljitExecuteRegularHashJoinProbe(
     OWNER &owner, ExecutionRegionRuntime &runtime, SljitRegionExecutionScratch &scratch, idx_t op_idx,
@@ -228,19 +246,8 @@ static void SljitExecuteRegularHashJoinProbe(
 	    runtime, op_idx, op.kind, plan, layout, input, match_selection, row_pointers, source_scratch, state,
 	    table_layout_kind, source_key0_int64_to_int32_unchecked, layout.stored_keys_have_null, probe.use_bloom_filter);
 	auto &native_input = prepared_input.native_input;
-	const bool exact_membership_filter =
-	    exact_source_filter_identity && exact_source_filter_identity == probe.table_layout.runtime_filter_identity &&
-	    probe.table_layout.exact_membership_filter_build_keys_unique &&
-	    probe.table_layout.exact_membership_filter_bitmap && plan.keys.size() == 1 && plan.equality_key_count == 1 &&
-	    !plan.residual_predicate && !plan.mark_build_match && !layout.stored_keys_have_null &&
-	    probe.exact_rhs_output_probe_input_indices.size() == probe.rhs_output_column_count &&
-	    std::all_of(probe.exact_rhs_output_probe_input_indices.begin(),
-	                probe.exact_rhs_output_probe_input_indices.end(),
-	                [](idx_t input_idx) { return input_idx != DConstants::INVALID_INDEX; }) &&
-	    (plan.output_mode == ExecutionHashJoinProbeOutputMode::MATCHED_PROBE_AND_BUILD ||
-	     plan.output_mode == ExecutionHashJoinProbeOutputMode::MATCHED_PROBE_ONLY) &&
-	    SljitHashJoinProbeProducesSelectedView(output_contract);
-	if (exact_membership_filter) {
+	if (SljitRegularProbeAnsweredByExactSourceFilter(exact_source_filter_identity, probe, plan) &&
+	    SljitHashJoinProbeProducesSelectedView(output_contract)) {
 		SljitExactRegularHashJoinMembershipFilterDispatch dispatch {layout, native_input};
 		if (!SljitDispatchHashJoinSingleKeyReader(plan, native_input, dispatch)) {
 			throw InternalException("SLJIT exact regular membership filter has an unsupported key type");

@@ -26,6 +26,20 @@ struct SljitJoinProjectionAggregateInputSource {
 	LogicalType type;
 };
 
+//! Immutable semantic terminal descriptor. It identifies a build-side payload;
+//! execution resolves the current row or dictionary storage from the hash table.
+struct SljitHashJoinDirectUngroupedAggregateDescriptor {
+	AggregatePrimitiveUpdateKind primitive_kind = AggregatePrimitiveUpdateKind::NONE;
+	idx_t rhs_output_idx = DConstants::INVALID_INDEX;
+	LogicalType rhs_type;
+	PhysicalType rhs_physical_type = PhysicalType::INVALID;
+
+	bool Ready() const {
+		return primitive_kind == AggregatePrimitiveUpdateKind::COUNT_STAR ||
+		       (rhs_output_idx != DConstants::INVALID_INDEX && rhs_physical_type != PhysicalType::INVALID);
+	}
+};
+
 struct SljitJoinProjectionAggregateDescriptor {
 	SljitDeferredBuildState build_state;
 	idx_t projection_idx = DConstants::INVALID_INDEX;
@@ -39,6 +53,7 @@ struct SljitJoinProjectionAggregateDescriptor {
 	vector<bool> payload_source_not_null;
 	SljitAggregatePayloadSourceLayout payload_source_layout = SljitAggregatePayloadSourceLayout::DIRECT_PER_LANE;
 	vector<SljitExecutableRegionExpression> remapped_payloads;
+	SljitHashJoinDirectUngroupedAggregateDescriptor direct_ungrouped_aggregate;
 	vector<idx_t> producer_output_column_map;
 	bool has_producer_output_column_map = false;
 	SljitDataChunkBatch input;
@@ -84,6 +99,7 @@ struct SljitJoinProjectionAggregateDescriptor {
 		payload_source_not_null.clear();
 		payload_source_layout = SljitAggregatePayloadSourceLayout::DIRECT_PER_LANE;
 		remapped_payloads.clear();
+		direct_ungrouped_aggregate = SljitHashJoinDirectUngroupedAggregateDescriptor();
 	}
 
 	void ClearBuiltState() {

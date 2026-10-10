@@ -13,10 +13,13 @@
 #include "sljit_hash_join_consumer_result.hpp"
 #include "sljit_hash_join_matched_row_batch_consumer_runtime.hpp"
 #include "sljit_hash_join_probe_execution_contract.hpp"
+#include "sljit_hash_join_probe_executor_runtime.hpp"
 #include "sljit_hash_join_probe_input_filter_runtime.hpp"
+#include "sljit_hash_join_probe_ungrouped_aggregate_consumer_runtime.hpp"
 #include "sljit_join_input_row_pointer_complementary_sum_runtime.hpp"
 #include "sljit_native_binding_runtime.hpp"
 #include "sljit_region_runtime_trace.hpp"
+
 #include "duckdb/common/vector/dictionary_vector.hpp"
 
 namespace duckdb {
@@ -834,13 +837,29 @@ SljitHashJoinAggregateConsumerResult SljitTryExecuteHashJoinAggregateConsumer(
 		return result;
 	}
 	auto &aggregate_op = ops[strategy.aggregate_idx];
-	auto &exact_source_filter_identity = execute_hash_join_probe.ExactSourceFilterIdentity(hash_join_idx);
-	if (regular_hash_join && exact_source_filter_identity &&
-	    exact_source_filter_identity == probe.table_layout.runtime_filter_identity) {
-		// The source contract has already applied this hash table's exact
-		// membership filter. Let the normal probe path consume that proof and
-		// avoid redundant hash-table lookups before aggregation.
+	if (regular_hash_join && SljitRegularProbeAnsweredByExactSourceFilter(
+	                             execute_hash_join_probe.ExactSourceFilterIdentity(hash_join_idx), probe, plan)) {
+		// The source contract has already answered this probe with the hash table's exact membership filter. Let
+		// the normal probe path consume that proof and skip the hash-table lookups.
 		return result;
+	}
+	if (regular_hash_join) {
+		// a single-payload ungrouped aggregate folds each build match into its state inside the probe loop
+		SljitHashJoinProbeDrainState direct_state;
+		auto direct_input = SljitPrepareRegularHashJoinProbeInput(
+		    runtime, hash_join_idx, hash_join_op.kind, plan, probe.table_layout, probe_input,
+		    scratch.FilterSelection(hash_join_idx), scratch.HashJoinRowPointers(hash_join_idx),
+		    scratch.HashJoinSources(hash_join_idx), direct_state, table_layout_kind,
+		    probe_primitive.source_key0_int64_to_int32_unchecked, rhs_keys_have_null, probe.use_bloom_filter);
+		if (direct_input.input_kind != SljitHashJoinProbeInputKind::GENERIC &&
+		    SljitTryExecuteHashJoinDirectUngroupedAggregateConsumer(
+		        runtime, native_runtime, scratch, hash_join_idx, hash_join_op, plan, direct_input.native_input,
+		        direct_input.input_kind == SljitHashJoinProbeInputKind::SELECTED_ALL_VALID, strategy, aggregate_op,
+		        probe_input, result.matched_count)) {
+			runtime.RecordHashJoinProbeLayout(SljitHashJoinProbeLayoutName(probe.layout_kind));
+			result.status = SljitHashJoinAggregateConsumerStatus::EXECUTED;
+			return result;
+		}
 	}
 	SljitPreparedJoinInputComplementarySumUpdate prepared_aggregate;
 	string aggregate_failure;
