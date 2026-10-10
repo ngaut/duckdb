@@ -21,7 +21,7 @@ namespace duckdb {
 
 enum class SljitPendingRunStrategy : uint8_t { UNDECIDED, BUFFERED, STREAMING };
 
-// Keep one compact group unpublished between source invocations. If an input run crosses a
+// Keep one compact group unpublished between source chunks. If an input run crosses a
 // vector boundary, its next delta merges into this carry before any hash-table append.
 static constexpr idx_t SLJIT_PENDING_PREAGGREGATED_GROUP_CAPACITY = STANDARD_VECTOR_SIZE - 1;
 

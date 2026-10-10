@@ -83,7 +83,7 @@ ExecutionRegionLocalState &ExecutionRegionPipelineAdapter::GetOrCreateLocalState
 }
 
 bool ExecutionRegionPipelineAdapter::IsAtCleanSourceToSinkBoundary() const {
-	// A compiled kernel re-reading the source chunk it fetched is at its boundary even when that chunk was the last
+	// No rows wait between source and sink and the source is not exhausted, so a self-looping kernel can start fetching
 	return executor.in_process_operators.empty() && !executor.remaining_sink_chunk && !executor.next_batch_blocked &&
 	       !executor.started_flushing && !executor.done_flushing && !executor.finalized && !executor.exhausted_source &&
 	       !executor.exhausted_pipeline;

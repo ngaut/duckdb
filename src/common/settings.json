@@ -1211,7 +1211,7 @@
     },
     {
         "name": "jit_trace_vectorized_baseline",
-        "description": "Build execution-region plans but execute vectorized pipelines and record per-region baseline runtime for comparison",
+        "description": "Build execution-region plans but execute vectorized pipelines; with jit_trace_runtime or EXPLAIN ANALYZE, record per-region baseline runtime for comparison",
         "type": "BOOLEAN",
         "default_scope": "local",
         "default_value": "false"

@@ -576,7 +576,7 @@ def verify_obsolete_paths_stay_deleted() -> None:
         ),
     )
     reject_regex(
-        "kernel pattern-matches a grouped strategy to decide handoff",
+        "kernel pattern-matches a grouped strategy to decide its route",
         (r"\bDISTINCT_KEY_SINK\b",),
         (
             "extension/jit_sljit/sljit_region_runtime.cpp",

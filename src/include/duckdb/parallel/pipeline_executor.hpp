@@ -127,7 +127,7 @@ private:
 	InterruptState interrupt_state;
 	//! The final chunk used for moving data into the sink
 	DataChunk final_chunk;
-	//! Scratch chunk used when compiled source-contract execution fetches a source chunk before generated prefix code.
+	//! The source chunk of the pipeline loop while a compiled chunk step is bound.
 	DataChunk execution_source_input_chunk;
 	std::array<vector<bool>, EXECUTION_REGION_RUNTIME_ONCE_FLAG_COUNT> execution_region_runtime_once_flags;
 	unique_ptr<ExecutionRegionLocalState> execution_region_local_state;

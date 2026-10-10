@@ -1,6 +1,6 @@
 # JIT Production Recipe Architecture
 
-Last updated: 2026-08-01
+Last updated: 2026-10-10
 
 This document is the stable architecture contract for DuckDB execution-region
 JIT. It describes layer ownership, immutable recipe binding, runtime data
@@ -189,10 +189,12 @@ sequence grammar and cross-primitive ownership; it does not call capability
 predicates again. Each step stores operator identities only in its typed
 primitive descriptor—there is no parallel generic index array to reconcile.
 Runtime preparation initializes physical state but cannot return a recipe-shape
-miss. Partition preservation, scan-filter body ownership, fused-filter
-ownership, and the direct-terminal contract are finalized together before the
-recipe plan is published. Every vector-source recipe uses the same primitive
-sequence executor; selected hash-join sinks are not a second runtime mode.
+miss. Scan-filter body ownership, fused-filter ownership, and the
+direct-terminal contract are finalized together before the recipe plan is
+published; partitions need no recipe fact, because the pipeline executor
+flushes every batched row before a partitioned sink moves on. Every
+vector-source recipe uses the same primitive sequence executor; selected
+hash-join sinks are not a second runtime mode.
 
 Prepared expression capability does not change when selector machine code is
 emitted. The executable builder therefore binds the plan exactly once, emits
@@ -218,9 +220,10 @@ The bounded cache stores only a backend-owned immutable semantic artifact,
 plus the execution mode and diagnostics produced by that compilation. Backend
 compilation returns the artifact, not an execution-bound kernel. Core sends
 both a fresh artifact and a cache hit through the same backend instantiation
-path outside the cache lock. Diagnostic switches such as detailed tracing, IR
-dumping, and verification do not fragment the artifact key; backend settings
-or binding facts that change generated behavior do.
+path outside the cache lock. Diagnostic switches such as detailed tracing and IR
+dumping do not fragment the artifact key; backend settings or binding facts
+that change generated behavior do, and so do the query location and source
+alias a compiled cast names when it fails.
 
 Publication is transactional. Core validates the compile result, instantiates
 the execution-bound kernel, validates its executable body, and only
@@ -235,9 +238,10 @@ LRU. Active kernels retain shared ownership after eviction.
 Compiled code, immutable descriptors, and concurrency-safe lazy
 specialization cells may be shared. Telemetry, runtime
 counters, operator bindings, dynamic-filter identities, hash-table
-dictionaries, and all other query data live in each instantiated kernel or its
-local states. A backend that cannot make this split remains correct and
-uncached. Changing this contract advances the loadable execution-region ABI.
+dictionaries, and all other query data live in each instantiated kernel, its
+local states, or the chunk step each pipeline executor binds. A backend that
+cannot make this split remains correct and uncached. Changing this contract
+advances the loadable execution-region ABI.
 
 Backend-private compile ownership follows the same boundary. The concrete
 SLJIT artifact and kernel declarations are private to the extension. Artifact
@@ -419,8 +423,12 @@ until the next scratch mutation; a continuation that outlives the call must own
 or copy its state.
 
 Source progress, sink backpressure, cancellation, and recursive-pipeline state
-remain core-owned. The backend can coalesce source fetches only through the
-declared source budget and must preserve exact operator protocol.
+remain core-owned. The pipeline executor fetches every source chunk and hands it
+to the kernel's chunk step. A step may hold rows back to coalesce small chunks,
+and sinks them when the executor flushes (a partition change) or finishes (the
+source is exhausted), preserving exact operator protocol. The one recipe that
+fetches for itself is the aggregate-state source, which scans aggregate-state
+batches rather than chunks, up to the runtime's chunk budget per entry.
 
 Sparse source-output batching is independent of terminal kind. Small chunks
 are copied into one backend-owned source batch before downstream expression or
@@ -597,8 +605,8 @@ conservative endpoint interval without a duplicate row scan. Batch gaps remain
 explicit until the bounded summary reaches capacity; only then are intervals
 coalesced into one conservative hull.
 
-Pending generated runs flush when a new source invocation breaks the current
-key progression. This keeps non-contiguous scheduler ownership from being
+Pending generated runs flush when a new source chunk breaks the current key
+progression. This keeps non-contiguous scheduler ownership from being
 hidden inside one output-batch envelope, while contiguous and boundary-merged
 runs retain the normal full-vector publication path.
 
@@ -693,8 +701,8 @@ receipts are present. A missing proof is a failure for every query selected by
 the accelerated-runner CBO, including queries that later fail compilation or
 fall back.
 
-Traced proof runs are separate from production timing. Tracing, verification,
-and event logging must not be enabled in a performance sample.
+Traced proof runs are separate from production timing. Tracing and event
+logging must not be enabled in a performance sample.
 
 ## Performance contract
 

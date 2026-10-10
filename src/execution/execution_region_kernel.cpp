@@ -98,7 +98,7 @@ idx_t ExecutionRegionKernel::TraceCandidateEstimatedCardinality() const {
 }
 
 bool ExecutionRegionKernel::TryExecuteFullPipeline(ExecutionRegionRuntime &, ExecutionRegionResult &) {
-	throw InternalException("execution region kernel runs as a chunk step, not with its own fetch loop");
+	throw InternalException("execution region kernel has no self-looping source recipe");
 }
 
 bool ExecutionRegionKernel::SupportsChunkStep() const {

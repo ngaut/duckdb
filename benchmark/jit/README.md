@@ -36,6 +36,14 @@ guard's opt-in step when a change touches scan or filter paths:
 python3 benchmark/jit/run_jit_refactor_guard.py --slow-suite
 ```
 
+The guard's full level also runs the JIT, join, subquery, aggregate, CTE and
+TPC-H SQL suites with the JIT forced on (`test/configs/jit_cbo_correctness.json`);
+`--forced-jit-suite` runs them at any level.
+
+`benchmark/jit/jit_differential_fuzz.py` compares random TPC-H queries under
+`jit_policy='off'` against the default and forced JIT, including the errors
+off raises; `--replay` re-checks an earlier report's findings.
+
 ## Generic production workloads
 
 The generic matrix covers expression, filter, nullable, persistent scan,
@@ -63,12 +71,12 @@ python3 benchmark/jit/generic_benchmark.py \
   --duckdb build/reldebug/duckdb --threads 4 --repeats 10
 ```
 
-Production samples disable runtime tracing and verification. A failed
-five-repeat candidate is reported as-is; the runner does not schedule an
-automatic larger retry. Each speedup sample is the `off/auto` ratio from the
-same alternating repeat, and the raw JIT-auto median is checked independently.
-The single-process close/reopen measurement lifecycle is specified in the
-design contract.
+Production samples disable runtime tracing. A failed five-repeat candidate is
+reported as-is; the runner does not schedule an automatic larger retry. Each
+speedup sample is the `off/auto` ratio from the same alternating repeat, and
+the raw JIT-auto median is checked independently. The matrix shell reopens the
+checkpointed fixture database before every sample, so each sample starts from
+fresh database state in one process.
 
 ## TPC-H regression gate
 

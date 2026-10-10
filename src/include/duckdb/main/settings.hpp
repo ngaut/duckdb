@@ -2036,8 +2036,9 @@ struct JitTraceRuntimeSetting {
 struct JitTraceVectorizedBaselineSetting {
 	using RETURN_TYPE = bool;
 	static constexpr const char *Name = "jit_trace_vectorized_baseline";
-	static constexpr const char *Description = "Build execution-region plans but execute vectorized pipelines and "
-	                                           "record per-region baseline runtime for comparison";
+	static constexpr const char *Description =
+	    "Build execution-region plans but execute vectorized pipelines; with jit_trace_runtime or EXPLAIN ANALYZE, "
+	    "record per-region baseline runtime for comparison";
 	static constexpr const char *InputType = "BOOLEAN";
 	static constexpr bool IsDebug = false;
 	static constexpr bool IsDeprecated = false;
