@@ -26,7 +26,7 @@ struct SljitPerfectHashFusedUpdateEmitContext {
 	const SljitFusedAggregateCodegenPlan &codegen_plan;
 	const SljitDensePerfectHashAggregateReductionPlan &dense_reduction_plan;
 	const SljitDeferredPerfectHashFlagPlan &deferred_flag_plan;
-	vector<SljitExpressionTreeOverflowJumps> &overflows;
+	vector<SljitArithmeticOverflowSite> &overflows;
 	vector<sljit_jump *> &group_out_of_range;
 	idx_t perfect_hash_group_count;
 	sljit_sw state_pointer_offset;

@@ -64,24 +64,19 @@ int64_t SljitTypedExpressionTreeConstantValue(const ExecutionExpressionIR &node)
 	return node.constant.GetValueUnsafe<int64_t>();
 }
 
-void AddSljitTypedExpressionTreeDecimal64RangeJumps(struct sljit_compiler *compiler, const ExecutionExpressionIR &node,
-                                                    sljit_s32 target,
-                                                    vector<SljitExpressionTreeOverflowJumps> &overflows,
-                                                    SljitNativeIntegerBinaryOp native_op) {
-	if (!node.arithmetic_overflow_check || !SljitTypedExpressionTreeIsDecimal64Node(node)) {
-		return;
+SljitIntegerOverflowChecks SljitTypedExpressionTreeOverflowChecks(const ExecutionExpressionIR &node) {
+	SljitIntegerOverflowChecks checks;
+	if (!node.arithmetic_overflow_check) {
+		return checks;
 	}
-	int64_t result_min;
-	int64_t result_max;
-	if (!TryGetSljitTypedExpressionTreeDecimal64Range(node.return_type, result_min, result_max)) {
-		throw InternalException("SLJIT typed expression-tree binary node missing decimal64 result range");
+	checks.overflow = true;
+	if (SljitTypedExpressionTreeIsDecimal64Node(node)) {
+		checks.range = true;
+		if (!TryGetSljitTypedExpressionTreeDecimal64Range(node.return_type, checks.result_min, checks.result_max)) {
+			throw InternalException("SLJIT typed expression-tree binary node missing decimal64 result range");
+		}
 	}
-	AddSljitExpressionOverflowJump(
-	    overflows, native_op,
-	    sljit_emit_cmp(compiler, SLJIT_SIG_LESS, target, 0, SLJIT_IMM, NumericCast<sljit_sw>(result_min)));
-	AddSljitExpressionOverflowJump(
-	    overflows, native_op,
-	    sljit_emit_cmp(compiler, SLJIT_SIG_GREATER, target, 0, SLJIT_IMM, NumericCast<sljit_sw>(result_max)));
+	return checks;
 }
 
 bool TryGetSljitTypedExpressionTreeDataPointerHoist(const vector<SljitTypedExpressionTreeDataPointerHoist> *data_hoists,

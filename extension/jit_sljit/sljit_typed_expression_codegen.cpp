@@ -27,10 +27,10 @@ static SljitSignedDivisionMagic ComputeSljitSignedDivisionMagic(int64_t d) {
 	const uint64_t two63 = 0x8000000000000000ULL;
 	const uint64_t ad = static_cast<uint64_t>(d);
 	const uint64_t t = two63;
-	const uint64_t anc = t - 1 - t % ad;
+	const uint64_t abs_nc = t - 1 - t % ad;
 	int p = 63;
-	uint64_t q1 = two63 / anc;
-	uint64_t r1 = two63 - q1 * anc;
+	uint64_t q1 = two63 / abs_nc;
+	uint64_t r1 = two63 - q1 * abs_nc;
 	uint64_t q2 = two63 / ad;
 	uint64_t r2 = two63 - q2 * ad;
 	uint64_t delta;
@@ -38,9 +38,9 @@ static SljitSignedDivisionMagic ComputeSljitSignedDivisionMagic(int64_t d) {
 		p++;
 		q1 *= 2;
 		r1 *= 2;
-		if (r1 >= anc) {
+		if (r1 >= abs_nc) {
 			q1++;
-			r1 -= anc;
+			r1 -= abs_nc;
 		}
 		q2 *= 2;
 		r2 *= 2;
@@ -136,7 +136,7 @@ static void EmitSljitTypedExpressionTreeReference(struct sljit_compiler *compile
 }
 
 static void EmitSljitTypedExpressionTreeCast(struct sljit_compiler *compiler, const ExecutionExpressionIR &node,
-                                             idx_t &slot_index, vector<SljitExpressionTreeOverflowJumps> &overflows,
+                                             idx_t &slot_index, vector<SljitArithmeticOverflowSite> &overflows,
                                              const SljitTypedExpressionTreeSlot &slot,
                                              const vector<idx_t> *known_valid_sources) {
 	D_ASSERT(SljitTypedExpressionTreeValueCastSupported(node));
@@ -150,10 +150,11 @@ static void EmitSljitTypedExpressionTreeCast(struct sljit_compiler *compiler, co
 	EmitStoreSljitTypedExpressionTreeSlot(compiler, slot, SLJIT_R2, SLJIT_R3);
 }
 
-static SljitTypedExpressionTreeSlot
-EmitSljitTypedExpressionTreeDateYear(struct sljit_compiler *compiler, const ExecutionExpressionIR &node,
-                                     idx_t &slot_index, vector<SljitExpressionTreeOverflowJumps> &overflows,
-                                     const vector<idx_t> *known_valid_sources) {
+static SljitTypedExpressionTreeSlot EmitSljitTypedExpressionTreeDateYear(struct sljit_compiler *compiler,
+                                                                         const ExecutionExpressionIR &node,
+                                                                         idx_t &slot_index,
+                                                                         vector<SljitArithmeticOverflowSite> &overflows,
+                                                                         const vector<idx_t> *known_valid_sources) {
 	D_ASSERT(node.children.size() == 1);
 	auto source_slot =
 	    EmitSljitTypedExpressionTreeValue(compiler, *node.children[0], slot_index, overflows, known_valid_sources);
@@ -181,7 +182,7 @@ EmitSljitTypedExpressionTreeDateYear(struct sljit_compiler *compiler, const Exec
 
 static SljitTypedExpressionTreeSlot
 EmitSljitTypedExpressionTreeIntegralCompress(struct sljit_compiler *compiler, const ExecutionExpressionIR &node,
-                                             idx_t &slot_index, vector<SljitExpressionTreeOverflowJumps> &overflows,
+                                             idx_t &slot_index, vector<SljitArithmeticOverflowSite> &overflows,
                                              const vector<idx_t> *known_valid_sources) {
 	D_ASSERT(node.children.size() == 2);
 	auto source_slot =
@@ -202,10 +203,11 @@ EmitSljitTypedExpressionTreeIntegralCompress(struct sljit_compiler *compiler, co
 	return result_slot;
 }
 
-static SljitTypedExpressionTreeSlot
-EmitSljitTypedExpressionTreeBinary(struct sljit_compiler *compiler, const ExecutionExpressionIR &node,
-                                   idx_t &slot_index, vector<SljitExpressionTreeOverflowJumps> &overflows,
-                                   const vector<idx_t> *known_valid_sources) {
+static SljitTypedExpressionTreeSlot EmitSljitTypedExpressionTreeBinary(struct sljit_compiler *compiler,
+                                                                       const ExecutionExpressionIR &node,
+                                                                       idx_t &slot_index,
+                                                                       vector<SljitArithmeticOverflowSite> &overflows,
+                                                                       const vector<idx_t> *known_valid_sources) {
 	D_ASSERT(node.left);
 	D_ASSERT(node.right);
 	{
@@ -254,18 +256,11 @@ EmitSljitTypedExpressionTreeBinary(struct sljit_compiler *compiler, const Execut
 		if (!TryGetSljitExpressionTreeBinaryOp(node.binary_op, native_op)) {
 			throw InternalException("Unsupported SLJIT typed expression-tree binary operator");
 		}
+		// R1 is dead scratch here, so the result lands there and both operands survive for the overflow stub.
 		auto binary_kind = SljitTypedExpressionTreeIntegerKind(node);
-		auto binary_op = NativeIntegerBinaryOp(binary_kind, native_op);
-		if (node.arithmetic_overflow_check) {
-			sljit_emit_op2(compiler, binary_op | SLJIT_SET_OVERFLOW, SLJIT_R2, 0, SLJIT_R2, 0, SLJIT_R4, 0);
-			AddSljitExpressionOverflowJump(overflows, native_op, sljit_emit_jump(compiler, SLJIT_OVERFLOW));
-		} else {
-			sljit_emit_op2(compiler, binary_op, SLJIT_R2, 0, SLJIT_R2, 0, SLJIT_R4, 0);
-		}
-		AddSljitTypedExpressionTreeDecimal64RangeJumps(compiler, node, SLJIT_R2, overflows, native_op);
-		if (binary_kind == SljitNativeIntegerKind::INT32) {
-			sljit_emit_op1(compiler, SLJIT_MOV_S32, SLJIT_R2, 0, SLJIT_R2, 0);
-		}
+		EmitSljitCheckedIntegerBinaryOp(compiler, binary_kind, native_op, SLJIT_R1, SLJIT_R2, SLJIT_R4,
+		                                SljitTypedExpressionTreeOverflowChecks(node), overflows);
+		sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_R2, 0, SLJIT_R1, 0);
 	}
 	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_R3, 0, SLJIT_IMM, 1);
 	EmitStoreSljitTypedExpressionTreeSlot(compiler, result_slot, SLJIT_R2, SLJIT_R3);
@@ -278,10 +273,11 @@ EmitSljitTypedExpressionTreeBinary(struct sljit_compiler *compiler, const Execut
 	return result_slot;
 }
 
-static SljitTypedExpressionTreeSlot
-EmitSljitTypedExpressionTreeUnary(struct sljit_compiler *compiler, const ExecutionExpressionIR &node, idx_t &slot_index,
-                                  vector<SljitExpressionTreeOverflowJumps> &overflows,
-                                  const vector<idx_t> *known_valid_sources) {
+static SljitTypedExpressionTreeSlot EmitSljitTypedExpressionTreeUnary(struct sljit_compiler *compiler,
+                                                                      const ExecutionExpressionIR &node,
+                                                                      idx_t &slot_index,
+                                                                      vector<SljitArithmeticOverflowSite> &overflows,
+                                                                      const vector<idx_t> *known_valid_sources) {
 	D_ASSERT(node.left);
 	auto child_slot =
 	    EmitSljitTypedExpressionTreeValue(compiler, *node.left, slot_index, overflows, known_valid_sources);
@@ -337,7 +333,7 @@ EmitSljitTypedExpressionTreeUnary(struct sljit_compiler *compiler, const Executi
 
 SljitTypedExpressionTreeSlot EmitSljitTypedExpressionTreeValue(struct sljit_compiler *compiler,
                                                                const ExecutionExpressionIR &node, idx_t &slot_index,
-                                                               vector<SljitExpressionTreeOverflowJumps> &overflows,
+                                                               vector<SljitArithmeticOverflowSite> &overflows,
                                                                const vector<idx_t> *known_valid_sources) {
 	switch (node.kind) {
 	case ExecutionExpressionIRKind::CONSTANT: {

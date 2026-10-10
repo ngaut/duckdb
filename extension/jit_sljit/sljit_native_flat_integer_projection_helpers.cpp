@@ -102,22 +102,4 @@ sljit_s32 SljitFlatIntegerProjectionResultPointerRegister(idx_t group_idx) {
 	return SljitSavedRegisterAt(NumericCast<sljit_s32>(5 + group_idx));
 }
 
-void EmitSljitFlatIntegerProjectionOverflowReturns(struct sljit_compiler *compiler,
-                                                   const vector<SljitFlatIntegerProjectionOverflowJump> &overflow_jumps,
-                                                   vector<struct sljit_jump *> &overflow_returns) {
-	for (auto &overflow_jump : overflow_jumps) {
-		auto overflow_label = sljit_emit_label(compiler);
-		sljit_set_label(overflow_jump.jump, overflow_label);
-		auto overflow_message_offset = SljitPointerArrayOffset(overflow_jump.projection_index);
-		sljit_emit_op1(compiler, SLJIT_MOV_P, SLJIT_R0, 0, SLJIT_MEM1(SLJIT_S0),
-		               offsetof(SljitNativeVectorInput, overflow_messages));
-		sljit_emit_op1(compiler, SLJIT_MOV_P, SLJIT_R1, 0, SLJIT_MEM1(SLJIT_R0), overflow_message_offset);
-		sljit_emit_op1(compiler, SLJIT_MOV_P, SLJIT_MEM1(SLJIT_S0), offsetof(SljitNativeVectorInput, overflow_message),
-		               SLJIT_R1, 0);
-		sljit_emit_op1(compiler, SLJIT_MOV_P, SLJIT_R0, 0, SLJIT_S0, 0);
-		sljit_emit_icall(compiler, SLJIT_CALL, SLJIT_ARGS1V(P), SLJIT_IMM, SLJIT_FUNC_ADDR(SljitNativeIntegerOverflow));
-		overflow_returns.push_back(sljit_emit_jump(compiler, SLJIT_JUMP));
-	}
-}
-
 } // namespace duckdb

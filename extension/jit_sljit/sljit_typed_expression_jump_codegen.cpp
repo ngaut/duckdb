@@ -15,7 +15,7 @@ namespace duckdb {
 
 static vector<sljit_jump *> EmitSljitTypedExpressionTreeJumpIfTrue(struct sljit_compiler *compiler,
                                                                    const ExecutionExpressionIR &node, idx_t &slot_index,
-                                                                   vector<SljitExpressionTreeOverflowJumps> &overflows,
+                                                                   vector<SljitArithmeticOverflowSite> &overflows,
                                                                    const vector<idx_t> *known_valid_sources = nullptr);
 
 static vector<sljit_jump *> EmitSljitTypedExpressionTreeSlotJumpIfTrue(struct sljit_compiler *compiler,
@@ -62,7 +62,7 @@ static bool SljitTypedExpressionTreeIsBoolConstantNotTrue(const ExecutionExpress
 
 static vector<sljit_jump *>
 EmitSljitTypedExpressionTreeComparisonJumpIfTrue(struct sljit_compiler *compiler, const ExecutionExpressionIR &node,
-                                                 idx_t &slot_index, vector<SljitExpressionTreeOverflowJumps> &overflows,
+                                                 idx_t &slot_index, vector<SljitArithmeticOverflowSite> &overflows,
                                                  const vector<idx_t> *known_valid_sources) {
 	D_ASSERT(node.left);
 	D_ASSERT(node.right);
@@ -87,9 +87,10 @@ EmitSljitTypedExpressionTreeComparisonJumpIfTrue(struct sljit_compiler *compiler
 	return vector<sljit_jump *> {result_true};
 }
 
-static vector<sljit_jump *> EmitSljitTypedExpressionTreeComparisonJumpIfNotTrue(
-    struct sljit_compiler *compiler, const ExecutionExpressionIR &node, idx_t &slot_index,
-    vector<SljitExpressionTreeOverflowJumps> &overflows, const vector<idx_t> *known_valid_sources) {
+static vector<sljit_jump *>
+EmitSljitTypedExpressionTreeComparisonJumpIfNotTrue(struct sljit_compiler *compiler, const ExecutionExpressionIR &node,
+                                                    idx_t &slot_index, vector<SljitArithmeticOverflowSite> &overflows,
+                                                    const vector<idx_t> *known_valid_sources) {
 	auto true_jumps =
 	    EmitSljitTypedExpressionTreeComparisonJumpIfTrue(compiler, node, slot_index, overflows, known_valid_sources);
 	auto not_true = sljit_emit_jump(compiler, SLJIT_JUMP);
@@ -98,10 +99,11 @@ static vector<sljit_jump *> EmitSljitTypedExpressionTreeComparisonJumpIfNotTrue(
 	return vector<sljit_jump *> {not_true};
 }
 
-static vector<sljit_jump *>
-EmitSljitTypedExpressionTreeUnaryJumpIfTrue(struct sljit_compiler *compiler, const ExecutionExpressionIR &node,
-                                            idx_t &slot_index, vector<SljitExpressionTreeOverflowJumps> &overflows,
-                                            const vector<idx_t> *known_valid_sources) {
+static vector<sljit_jump *> EmitSljitTypedExpressionTreeUnaryJumpIfTrue(struct sljit_compiler *compiler,
+                                                                        const ExecutionExpressionIR &node,
+                                                                        idx_t &slot_index,
+                                                                        vector<SljitArithmeticOverflowSite> &overflows,
+                                                                        const vector<idx_t> *known_valid_sources) {
 	D_ASSERT(node.left);
 	if (node.left->kind == ExecutionExpressionIRKind::REFERENCE) {
 		switch (node.unary_op) {
@@ -125,7 +127,7 @@ EmitSljitTypedExpressionTreeUnaryJumpIfTrue(struct sljit_compiler *compiler, con
 
 static vector<sljit_jump *>
 EmitSljitTypedExpressionTreeUnaryJumpIfNotTrue(struct sljit_compiler *compiler, const ExecutionExpressionIR &node,
-                                               idx_t &slot_index, vector<SljitExpressionTreeOverflowJumps> &overflows,
+                                               idx_t &slot_index, vector<SljitArithmeticOverflowSite> &overflows,
                                                const vector<idx_t> *known_valid_sources) {
 	D_ASSERT(node.left);
 	if (node.left->kind == ExecutionExpressionIRKind::REFERENCE) {
@@ -148,9 +150,10 @@ EmitSljitTypedExpressionTreeUnaryJumpIfNotTrue(struct sljit_compiler *compiler, 
 	return EmitSljitTypedExpressionTreeSlotJumpIfNotTrue(compiler, slot);
 }
 
-static vector<sljit_jump *> EmitSljitTypedExpressionTreeConjunctionJumpIfTrue(
-    struct sljit_compiler *compiler, const ExecutionExpressionIR &node, idx_t &slot_index,
-    vector<SljitExpressionTreeOverflowJumps> &overflows, const vector<idx_t> *known_valid_sources) {
+static vector<sljit_jump *>
+EmitSljitTypedExpressionTreeConjunctionJumpIfTrue(struct sljit_compiler *compiler, const ExecutionExpressionIR &node,
+                                                  idx_t &slot_index, vector<SljitArithmeticOverflowSite> &overflows,
+                                                  const vector<idx_t> *known_valid_sources) {
 	vector<sljit_jump *> result;
 	if (node.conjunction_op == ExecutionExpressionConjunctionOp::OR) {
 		for (auto &child : node.children) {
@@ -173,9 +176,10 @@ static vector<sljit_jump *> EmitSljitTypedExpressionTreeConjunctionJumpIfTrue(
 	return result;
 }
 
-static vector<sljit_jump *> EmitSljitTypedExpressionTreeConjunctionJumpIfNotTrue(
-    struct sljit_compiler *compiler, const ExecutionExpressionIR &node, idx_t &slot_index,
-    vector<SljitExpressionTreeOverflowJumps> &overflows, const vector<idx_t> *known_valid_sources) {
+static vector<sljit_jump *>
+EmitSljitTypedExpressionTreeConjunctionJumpIfNotTrue(struct sljit_compiler *compiler, const ExecutionExpressionIR &node,
+                                                     idx_t &slot_index, vector<SljitArithmeticOverflowSite> &overflows,
+                                                     const vector<idx_t> *known_valid_sources) {
 	vector<sljit_jump *> result;
 	if (node.conjunction_op == ExecutionExpressionConjunctionOp::AND) {
 		for (auto &child : node.children) {
@@ -200,7 +204,7 @@ static vector<sljit_jump *> EmitSljitTypedExpressionTreeConjunctionJumpIfNotTrue
 
 static vector<sljit_jump *> EmitSljitTypedExpressionTreeJumpIfTrue(struct sljit_compiler *compiler,
                                                                    const ExecutionExpressionIR &node, idx_t &slot_index,
-                                                                   vector<SljitExpressionTreeOverflowJumps> &overflows,
+                                                                   vector<SljitArithmeticOverflowSite> &overflows,
                                                                    const vector<idx_t> *known_valid_sources) {
 	if (SljitTypedExpressionTreeIsBoolConstantTrue(node)) {
 		return vector<sljit_jump *> {sljit_emit_jump(compiler, SLJIT_JUMP)};
@@ -236,7 +240,7 @@ static vector<sljit_jump *> EmitSljitTypedExpressionTreeJumpIfTrue(struct sljit_
 
 vector<sljit_jump *> EmitSljitTypedExpressionTreeJumpIfNotTrue(struct sljit_compiler *compiler,
                                                                const ExecutionExpressionIR &node, idx_t &slot_index,
-                                                               vector<SljitExpressionTreeOverflowJumps> &overflows,
+                                                               vector<SljitArithmeticOverflowSite> &overflows,
                                                                const vector<idx_t> *known_valid_sources) {
 	if (SljitTypedExpressionTreeIsBoolConstantTrue(node)) {
 		return vector<sljit_jump *>();

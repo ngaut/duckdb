@@ -10,11 +10,48 @@
 
 namespace duckdb {
 
+// The result lands in R4 so both operands stay in R2/R3 for the overflow stub; a date operand is always on the left.
+template <class EMIT_ROW>
+static void EmitSljitNativeIntegerBinaryRow(struct sljit_compiler *compiler, SljitNativeIntegerKind kind,
+                                            SljitNativeIntegerBinaryOp op, sljit_s32 left_reg, sljit_s32 right_reg,
+                                            const SljitIntegerOverflowChecks &checks,
+                                            vector<SljitArithmeticOverflowSite> &overflows, EMIT_ROW &&store_result) {
+	struct sljit_jump *date_is_negative_infinity = nullptr;
+	struct sljit_jump *date_is_positive_infinity = nullptr;
+	if (SljitNativeIntegerKindPreservesSourceDateInfinity(kind)) {
+		date_is_negative_infinity =
+		    sljit_emit_cmp(compiler, SLJIT_EQUAL | SLJIT_32, left_reg, 0, SLJIT_IMM, SLJIT_DATE_NEGATIVE_INFINITY_DAYS);
+		date_is_positive_infinity =
+		    sljit_emit_cmp(compiler, SLJIT_EQUAL | SLJIT_32, left_reg, 0, SLJIT_IMM, SLJIT_DATE_POSITIVE_INFINITY_DAYS);
+	}
+	EmitSljitCheckedIntegerBinaryOp(compiler, kind, op, SLJIT_R4, left_reg, right_reg, checks, overflows);
+	if (SljitNativeIntegerKindPreservesSourceDateInfinity(kind)) {
+		auto arithmetic_done = sljit_emit_jump(compiler, SLJIT_JUMP);
+		auto date_infinity_label = sljit_emit_label(compiler);
+		sljit_set_label(date_is_negative_infinity, date_infinity_label);
+		sljit_set_label(date_is_positive_infinity, date_infinity_label);
+		sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_R4, 0, left_reg, 0);
+		sljit_set_label(arithmetic_done, sljit_emit_label(compiler));
+	}
+	store_result(SLJIT_R4);
+}
+
+static unique_ptr<ExecutionRegionCodeHandle>
+FinishSljitNativeIntegerBinary(struct sljit_compiler *compiler, sljit_jump *done,
+                               const vector<SljitArithmeticOverflowSite> &overflows,
+                               SljitNativeVectorFunction &function, string &error) {
+	auto overflow_done = EmitSljitArithmeticOverflowStubs(compiler, overflows);
+	auto done_label = sljit_emit_label(compiler);
+	sljit_set_label(done, done_label);
+	SetSljitJumpLabels(overflow_done, done_label);
+	sljit_emit_return_void(compiler);
+	return FinishSljitCode(compiler, function, error);
+}
+
 unique_ptr<ExecutionRegionCodeHandle>
 BuildSljitNativeIntegerBinaryConstant(SljitNativeIntegerKind kind, SljitNativeIntegerBinaryOp op, bool constant_on_left,
-                                      SljitNativeVectorFunction &function, string &error,
-                                      bool check_arithmetic_overflow, bool check_result_range, int64_t result_min,
-                                      int64_t result_max) {
+                                      const SljitIntegerOverflowChecks &checks, SljitNativeVectorFunction &function,
+                                      string &error) {
 	auto compiler = sljit_create_compiler(nullptr);
 	if (!compiler) {
 		error = "failed to create SLJIT compiler";
@@ -23,83 +60,30 @@ BuildSljitNativeIntegerBinaryConstant(SljitNativeIntegerKind kind, SljitNativeIn
 	auto data_scale = NativeIntegerDataScale(kind);
 	auto load_op = NativeIntegerLoadOp(kind);
 	auto store_op = NativeIntegerStoreOp(kind);
-	auto binary_op = NativeIntegerBinaryOp(kind, op);
 
 	sljit_emit_enter(compiler, 0, SLJIT_ARGS1V(P), 5, 3, 0);
 	EmitInitSljitNativeVectorLoop(compiler);
 
-	struct sljit_jump *overflow = nullptr;
-	struct sljit_jump *range_too_small = nullptr;
-	struct sljit_jump *range_too_large = nullptr;
+	vector<SljitArithmeticOverflowSite> overflows;
 	auto done = EmitSljitSelectedSourceInvalidResultLoop(compiler, [&](vector<sljit_jump *> &) {
 		EmitLoadSljitNativeFixedWidthValue(compiler, offsetof(SljitNativeVectorInput, source_data), SLJIT_R1, load_op,
 		                                   data_scale, SLJIT_R2);
-		struct sljit_jump *date_is_negative_infinity = nullptr;
-		struct sljit_jump *date_is_positive_infinity = nullptr;
-		if (SljitNativeIntegerKindPreservesSourceDateInfinity(kind)) {
-			date_is_negative_infinity = sljit_emit_cmp(compiler, SLJIT_EQUAL | SLJIT_32, SLJIT_R2, 0, SLJIT_IMM,
-			                                           SLJIT_DATE_NEGATIVE_INFINITY_DAYS);
-			date_is_positive_infinity = sljit_emit_cmp(compiler, SLJIT_EQUAL | SLJIT_32, SLJIT_R2, 0, SLJIT_IMM,
-			                                           SLJIT_DATE_POSITIVE_INFINITY_DAYS);
-		}
 		sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_R3, 0, SLJIT_MEM1(SLJIT_S0),
 		               offsetof(SljitNativeVectorInput, constant));
-		auto emit_binary_op = check_arithmetic_overflow ? binary_op | SLJIT_SET_OVERFLOW : binary_op;
-		switch (op) {
-		case SljitNativeIntegerBinaryOp::ADD:
-			sljit_emit_op2(compiler, emit_binary_op, SLJIT_R2, 0, SLJIT_R2, 0, SLJIT_R3, 0);
-			break;
-		case SljitNativeIntegerBinaryOp::SUBTRACT:
-			if (constant_on_left) {
-				sljit_emit_op2(compiler, emit_binary_op, SLJIT_R2, 0, SLJIT_R3, 0, SLJIT_R2, 0);
-			} else {
-				sljit_emit_op2(compiler, emit_binary_op, SLJIT_R2, 0, SLJIT_R2, 0, SLJIT_R3, 0);
-			}
-			break;
-		case SljitNativeIntegerBinaryOp::MULTIPLY:
-			sljit_emit_op2(compiler, emit_binary_op, SLJIT_R2, 0, SLJIT_R2, 0, SLJIT_R3, 0);
-			break;
-		default:
-			throw InternalException("Unknown SLJIT native integer binary operator");
-		}
-		if (check_arithmetic_overflow) {
-			overflow = sljit_emit_jump(compiler, SLJIT_OVERFLOW);
-		}
-		if (check_result_range) {
-			range_too_small =
-			    sljit_emit_cmp(compiler, SLJIT_SIG_LESS, SLJIT_R2, 0, SLJIT_IMM, NumericCast<sljit_sw>(result_min));
-			range_too_large =
-			    sljit_emit_cmp(compiler, SLJIT_SIG_GREATER, SLJIT_R2, 0, SLJIT_IMM, NumericCast<sljit_sw>(result_max));
-		}
-		if (SljitNativeIntegerKindPreservesSourceDateInfinity(kind)) {
-			auto store_date_result = sljit_emit_label(compiler);
-			sljit_set_label(date_is_negative_infinity, store_date_result);
-			sljit_set_label(date_is_positive_infinity, store_date_result);
-		}
-		EmitStoreSljitNativeFixedWidthResult(compiler, store_op, data_scale, SLJIT_R2);
+		EmitSljitNativeIntegerBinaryRow(
+		    compiler, kind, op, constant_on_left ? SLJIT_R3 : SLJIT_R2, constant_on_left ? SLJIT_R2 : SLJIT_R3, checks,
+		    overflows, [&](sljit_s32 result_reg) {
+			    EmitStoreSljitNativeFixedWidthResult(compiler, store_op, data_scale, result_reg);
+		    });
 	});
-
-	if (check_arithmetic_overflow || check_result_range) {
-		auto overflow_label = sljit_emit_label(compiler);
-		if (check_arithmetic_overflow) {
-			sljit_set_label(overflow, overflow_label);
-		}
-		if (check_result_range) {
-			sljit_set_label(range_too_small, overflow_label);
-			sljit_set_label(range_too_large, overflow_label);
-		}
-		sljit_emit_op1(compiler, SLJIT_MOV_P, SLJIT_R0, 0, SLJIT_S0, 0);
-		sljit_emit_icall(compiler, SLJIT_CALL, SLJIT_ARGS1V(P), SLJIT_IMM, SLJIT_FUNC_ADDR(SljitNativeIntegerOverflow));
-	}
-	sljit_set_label(done, sljit_emit_label(compiler));
-	sljit_emit_return_void(compiler);
-
-	return FinishSljitCode(compiler, function, error);
+	return FinishSljitNativeIntegerBinary(compiler, done, overflows, function, error);
 }
 
-unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativeIntegerBinaryReferences(
-    SljitNativeIntegerKind kind, SljitNativeIntegerBinaryOp op, SljitNativeVectorFunction &function, string &error,
-    bool check_arithmetic_overflow, bool check_result_range, int64_t result_min, int64_t result_max) {
+unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativeIntegerBinaryReferences(SljitNativeIntegerKind kind,
+                                                                              SljitNativeIntegerBinaryOp op,
+                                                                              const SljitIntegerOverflowChecks &checks,
+                                                                              SljitNativeVectorFunction &function,
+                                                                              string &error) {
 	auto compiler = sljit_create_compiler(nullptr);
 	if (!compiler) {
 		error = "failed to create SLJIT compiler";
@@ -108,64 +92,22 @@ unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativeIntegerBinaryReferences(
 	auto data_scale = NativeIntegerDataScale(kind);
 	auto load_op = NativeIntegerLoadOp(kind);
 	auto store_op = NativeIntegerStoreOp(kind);
-	auto binary_op = NativeIntegerBinaryOp(kind, op);
 
 	sljit_emit_enter(compiler, 0, SLJIT_ARGS1V(P), 5, 5, 0);
 	EmitInitSljitNativeVectorLoop(compiler);
 
-	struct sljit_jump *overflow = nullptr;
-	struct sljit_jump *range_too_small = nullptr;
-	struct sljit_jump *range_too_large = nullptr;
+	vector<SljitArithmeticOverflowSite> overflows;
 	auto done = EmitSljitTwoSourceInvalidResultLoop(compiler, [&](vector<sljit_jump *> &) {
 		EmitLoadSljitNativeFixedWidthValue(compiler, offsetof(SljitNativeVectorInput, source_data), SLJIT_S3, load_op,
 		                                   data_scale, SLJIT_R2);
 		EmitLoadSljitNativeFixedWidthValue(compiler, offsetof(SljitNativeVectorInput, right_source_data), SLJIT_S4,
 		                                   load_op, data_scale, SLJIT_R3);
-		struct sljit_jump *date_is_negative_infinity = nullptr;
-		struct sljit_jump *date_is_positive_infinity = nullptr;
-		if (SljitNativeIntegerKindPreservesSourceDateInfinity(kind)) {
-			date_is_negative_infinity = sljit_emit_cmp(compiler, SLJIT_EQUAL | SLJIT_32, SLJIT_R2, 0, SLJIT_IMM,
-			                                           SLJIT_DATE_NEGATIVE_INFINITY_DAYS);
-			date_is_positive_infinity = sljit_emit_cmp(compiler, SLJIT_EQUAL | SLJIT_32, SLJIT_R2, 0, SLJIT_IMM,
-			                                           SLJIT_DATE_POSITIVE_INFINITY_DAYS);
-		}
-
-		sljit_emit_op2(compiler, check_arithmetic_overflow ? binary_op | SLJIT_SET_OVERFLOW : binary_op, SLJIT_R2, 0,
-		               SLJIT_R2, 0, SLJIT_R3, 0);
-		if (check_arithmetic_overflow) {
-			overflow = sljit_emit_jump(compiler, SLJIT_OVERFLOW);
-		}
-		if (check_result_range) {
-			range_too_small =
-			    sljit_emit_cmp(compiler, SLJIT_SIG_LESS, SLJIT_R2, 0, SLJIT_IMM, NumericCast<sljit_sw>(result_min));
-			range_too_large =
-			    sljit_emit_cmp(compiler, SLJIT_SIG_GREATER, SLJIT_R2, 0, SLJIT_IMM, NumericCast<sljit_sw>(result_max));
-		}
-		if (SljitNativeIntegerKindPreservesSourceDateInfinity(kind)) {
-			auto store_date_result = sljit_emit_label(compiler);
-			sljit_set_label(date_is_negative_infinity, store_date_result);
-			sljit_set_label(date_is_positive_infinity, store_date_result);
-		}
-		EmitStoreSljitNativeFixedWidthResult(compiler, store_op, data_scale, SLJIT_R2);
+		EmitSljitNativeIntegerBinaryRow(
+		    compiler, kind, op, SLJIT_R2, SLJIT_R3, checks, overflows, [&](sljit_s32 result_reg) {
+			    EmitStoreSljitNativeFixedWidthResult(compiler, store_op, data_scale, result_reg);
+		    });
 	});
-
-	if (check_arithmetic_overflow || check_result_range) {
-		auto overflow_label = sljit_emit_label(compiler);
-		if (check_arithmetic_overflow) {
-			sljit_set_label(overflow, overflow_label);
-		}
-		if (check_result_range) {
-			sljit_set_label(range_too_small, overflow_label);
-			sljit_set_label(range_too_large, overflow_label);
-		}
-		sljit_emit_op1(compiler, SLJIT_MOV_P, SLJIT_R0, 0, SLJIT_S0, 0);
-		sljit_emit_icall(compiler, SLJIT_CALL, SLJIT_ARGS1V(P), SLJIT_IMM, SLJIT_FUNC_ADDR(SljitNativeIntegerOverflow));
-	}
-
-	sljit_set_label(done, sljit_emit_label(compiler));
-	sljit_emit_return_void(compiler);
-
-	return FinishSljitCode(compiler, function, error);
+	return FinishSljitNativeIntegerBinary(compiler, done, overflows, function, error);
 }
 
 unique_ptr<ExecutionRegionCodeHandle>

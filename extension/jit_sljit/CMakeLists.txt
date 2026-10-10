@@ -36,6 +36,7 @@ set(JIT_SLJIT_EXTENSION_FILES
     sljit_aggregate_ungrouped_typed_plan.cpp
     sljit_aggregate_ungrouped_typed_codegen.cpp
     sljit_aggregate_ungrouped_typed_payload_codegen.cpp
+    sljit_arithmetic_overflow_codegen.cpp
     sljit_backend.cpp
     sljit_codegen_util.cpp
     sljit_dense_group_preaggregation.cpp
@@ -49,7 +50,6 @@ set(JIT_SLJIT_EXTENSION_FILES
     sljit_executable_range_analysis.cpp
     sljit_executable_range_stats.cpp
     sljit_executable_stats.cpp
-    sljit_expression_tree_overflow_codegen.cpp
     sljit_expression_tree_source_codegen.cpp
     sljit_hash_join_runtime.cpp
     sljit_hash_join_aggregate_consumer_runtime.cpp

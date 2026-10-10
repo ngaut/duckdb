@@ -72,7 +72,6 @@ static bool TryPrepareFlatFusedFixedProjectionSources(SljitExecutableRegionOp &o
 				return false;
 			}
 			adapter_scratch.integer_constants[projection_idx] = plan.constant;
-			adapter_scratch.overflow_messages[projection_idx] = expr.overflow_message.c_str();
 			adapter_scratch.fused[projection_idx] = 1;
 		}
 	}
@@ -103,7 +102,6 @@ static void RunFlatFusedFixedProjection(SljitExecutableRegionOp &op, idx_t count
 	native_input.right_source_data_array = adapter_scratch.RightSourceDataArray();
 	native_input.result_data_array = adapter_scratch.result_data.data();
 	native_input.constants = adapter_scratch.integer_constants.data();
-	native_input.overflow_messages = adapter_scratch.overflow_messages.data();
 	native_input.count = count;
 	native_input.has_error = false;
 	for (auto &projection : op.flat_fused_fixed_projections) {

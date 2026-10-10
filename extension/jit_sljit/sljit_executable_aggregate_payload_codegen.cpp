@@ -86,9 +86,9 @@ bool SljitBuildExecutableAggregateUpdateFallbackPayloadCode(const SljitNativeAgg
 				error = "SLJIT aggregate binary-constant reducer only supports SUM_INT64";
 				return false;
 			}
-			code = BuildSljitNativeUngroupedSumInt64IntegerBinaryConstant(
-			    payload.integer_kind, payload.binary_op, payload.constant_on_left, function, error,
-			    payload.check_arithmetic_overflow, payload.check_result_range, payload.result_min, payload.result_max);
+			code = BuildSljitNativeUngroupedSumInt64IntegerBinaryConstant(payload.integer_kind, payload.binary_op,
+			                                                              payload.constant_on_left,
+			                                                              payload.OverflowChecks(), function, error);
 			break;
 		case SljitNativeRegionExpressionKind::INTEGER_BINARY_REFERENCES:
 			if (op.use_grouped_state_addresses) {
@@ -99,9 +99,8 @@ bool SljitBuildExecutableAggregateUpdateFallbackPayloadCode(const SljitNativeAgg
 				error = "SLJIT aggregate binary-reference reducer only supports SUM_INT64";
 				return false;
 			}
-			code = BuildSljitNativeUngroupedSumInt64IntegerBinaryReferences(
-			    payload.integer_kind, payload.binary_op, function, error, payload.check_arithmetic_overflow,
-			    payload.check_result_range, payload.result_min, payload.result_max);
+			code = BuildSljitNativeUngroupedSumInt64IntegerBinaryReferences(payload.integer_kind, payload.binary_op,
+			                                                                payload.OverflowChecks(), function, error);
 			break;
 		case SljitNativeRegionExpressionKind::DOUBLE_BINARY_CONSTANT:
 			if (op.use_grouped_state_addresses) {

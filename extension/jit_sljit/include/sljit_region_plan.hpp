@@ -122,6 +122,9 @@ struct SljitNativeRegionExpressionPlan {
 	string ir;
 
 	SljitNativeRegionExpressionPlan Copy(bool copy_auxiliary_expression_tree = true, bool copy_ir = true) const;
+	SljitIntegerOverflowChecks OverflowChecks() const {
+		return {check_arithmetic_overflow, check_result_range, result_min, result_max};
+	}
 };
 
 //! A static single-column table filter compiled for execution inside DuckDB's

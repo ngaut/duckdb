@@ -287,14 +287,29 @@ class QueryGenerator:
             if r.random() < 0.05:
                 # overflows on the larger keys: off and the JIT must raise the same error
                 casts.append(f"CAST({ref} AS INTEGER) * 1000")
+            # TPC-H integers are never negative: subtracting makes negative results, which 64-bit consumers of a
+            # 32-bit result (sums, range checks) must see sign-extended
             return r.choice(
-                [f"{ref} % {r.randint(2, 50)}", f"{ref} + {r.randint(1, 9)}", f"({ref} * 3) % 1000", *casts]
+                [
+                    f"{ref} % {r.randint(2, 50)}",
+                    f"{ref} + {r.randint(1, 9)}",
+                    f"({ref} * 3) % 1000",
+                    f"CAST({ref} AS INTEGER) - {r.randint(10, 100000)}",
+                    *casts,
+                ]
             )
         if column.kind == "dec":
             return r.choice([f"{ref} * 2", f"{ref} + 1", f"CAST({ref} AS INTEGER)", f"CAST({ref} AS BIGINT)"])
         if column.kind == "date":
+            # TPC-H dates are near day 8000 of the epoch: subtracting more reaches negative day counts
             return r.choice(
-                [f"year({ref})", f"month({ref})", f"{ref} + 7", f"date_diff('day', DATE '1992-01-01', {ref})"]
+                [
+                    f"year({ref})",
+                    f"month({ref})",
+                    f"{ref} + 7",
+                    f"{ref} - 9000",
+                    f"date_diff('day', DATE '1992-01-01', {ref})",
+                ]
             )
         return r.choice(
             [

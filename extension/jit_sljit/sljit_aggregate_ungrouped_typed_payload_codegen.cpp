@@ -12,7 +12,7 @@ void EmitFusedTypedConditionalSharedSawElseZero(struct sljit_compiler *compiler,
 
 static void
 EmitSljitUngroupedTypedFastPayloadValueReg(struct sljit_compiler *compiler, const ExecutionExpressionIR &expression,
-                                           bool selected, vector<SljitExpressionTreeOverflowJumps> &overflows,
+                                           bool selected, vector<SljitArithmeticOverflowSite> &overflows,
                                            const vector<SljitTypedExpressionTreeDataPointerHoist> *data_hoists) {
 	idx_t payload_spill_index = 0;
 	if (selected) {
@@ -28,7 +28,7 @@ void EmitSljitUngroupedTypedConditionalSharedFastPayload(
     const vector<ExecutionRegionAggregateInput> &aggregates, const vector<sljit_sw> &local_sum_offsets,
     const vector<sljit_sw> &local_sum_upper_offsets, const vector<sljit_sw> &saw_value_offsets,
     sljit_sw shared_fast_value_offset, bool use_conditional_hugeint_register_accumulators, bool selected,
-    vector<SljitExpressionTreeOverflowJumps> &overflows,
+    vector<SljitArithmeticOverflowSite> &overflows,
     const vector<SljitTypedExpressionTreeDataPointerHoist> *data_hoists) {
 	auto shared_lane = codegen_plan.shared_lane;
 	auto conditional_lane = codegen_plan.conditional_lane;
@@ -73,7 +73,7 @@ void EmitSljitUngroupedTypedFastPayloads(struct sljit_compiler *compiler,
                                          const vector<sljit_sw> &local_sum_offsets,
                                          const vector<sljit_sw> &local_sum_upper_offsets,
                                          const vector<sljit_sw> &saw_value_offsets, bool selected,
-                                         vector<SljitExpressionTreeOverflowJumps> &overflows,
+                                         vector<SljitArithmeticOverflowSite> &overflows,
                                          const vector<SljitTypedExpressionTreeDataPointerHoist> *data_hoists) {
 	for (idx_t payload_idx = 0; payload_idx < payloads.size(); payload_idx++) {
 		auto kind = aggregates[payload_idx].primitive_update_kind;

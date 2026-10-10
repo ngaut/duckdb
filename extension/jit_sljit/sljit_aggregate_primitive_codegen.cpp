@@ -9,27 +9,6 @@
 
 namespace duckdb {
 
-static void SljitNativeAggregateTreeOverflow(SljitNativeVectorInput *input, const char *message) {
-	try {
-		throw OutOfRangeException("%s", message);
-	} catch (...) {
-		input->has_error = true;
-		input->error = std::current_exception();
-	}
-}
-
-static void SLJIT_FUNC SljitNativeAggregateTreeAddOverflow(SljitNativeVectorInput *input) {
-	SljitNativeAggregateTreeOverflow(input, "Overflow in addition of DECIMAL");
-}
-
-static void SLJIT_FUNC SljitNativeAggregateTreeSubtractOverflow(SljitNativeVectorInput *input) {
-	SljitNativeAggregateTreeOverflow(input, "Overflow in subtract of DECIMAL");
-}
-
-static void SLJIT_FUNC SljitNativeAggregateTreeMultiplyOverflow(SljitNativeVectorInput *input) {
-	SljitNativeAggregateTreeOverflow(input, "Overflow in multiplication of DECIMAL");
-}
-
 void SLJIT_FUNC SljitNativeAggregateHugeintCommit(SljitNativeVectorInput *input) {
 	try {
 		if (!input->aggregate_hugeint_value || !input->aggregate_state_is_set) {
@@ -40,26 +19,6 @@ void SLJIT_FUNC SljitNativeAggregateHugeintCommit(SljitNativeVectorInput *input)
 	} catch (...) {
 		input->has_error = true;
 		input->error = std::current_exception();
-	}
-}
-
-void EmitSljitAggregateExpressionTreeOverflowCall(struct sljit_compiler *compiler, SljitNativeIntegerBinaryOp op) {
-	sljit_emit_op1(compiler, SLJIT_MOV_P, SLJIT_R0, 0, SLJIT_S0, 0);
-	switch (op) {
-	case SljitNativeIntegerBinaryOp::ADD:
-		sljit_emit_icall(compiler, SLJIT_CALL, SLJIT_ARGS1V(P), SLJIT_IMM,
-		                 SLJIT_FUNC_ADDR(SljitNativeAggregateTreeAddOverflow));
-		return;
-	case SljitNativeIntegerBinaryOp::SUBTRACT:
-		sljit_emit_icall(compiler, SLJIT_CALL, SLJIT_ARGS1V(P), SLJIT_IMM,
-		                 SLJIT_FUNC_ADDR(SljitNativeAggregateTreeSubtractOverflow));
-		return;
-	case SljitNativeIntegerBinaryOp::MULTIPLY:
-		sljit_emit_icall(compiler, SLJIT_CALL, SLJIT_ARGS1V(P), SLJIT_IMM,
-		                 SLJIT_FUNC_ADDR(SljitNativeAggregateTreeMultiplyOverflow));
-		return;
-	default:
-		throw InternalException("Unknown SLJIT aggregate expression-tree overflow operator");
 	}
 }
 

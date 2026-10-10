@@ -22,17 +22,16 @@ unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativeNullCheck(SljitNativeNullC
                                                                 SljitNativeVectorFunction &function, string &error);
 unique_ptr<ExecutionRegionCodeHandle>
 BuildSljitNativeIntegerBinaryConstant(SljitNativeIntegerKind kind, SljitNativeIntegerBinaryOp op, bool constant_on_left,
-                                      SljitNativeVectorFunction &function, string &error,
-                                      bool check_arithmetic_overflow = true, bool check_result_range = false,
-                                      int64_t result_min = 0, int64_t result_max = 0);
+                                      const SljitIntegerOverflowChecks &checks, SljitNativeVectorFunction &function,
+                                      string &error);
 unique_ptr<ExecutionRegionCodeHandle>
 BuildSljitNativeFlatIntegerBinaryConstant(SljitNativeIntegerKind kind, SljitNativeIntegerBinaryOp op,
                                           bool constant_on_left, SljitNativeVectorFunction &function, string &error);
-unique_ptr<ExecutionRegionCodeHandle>
-BuildSljitNativeIntegerBinaryReferences(SljitNativeIntegerKind kind, SljitNativeIntegerBinaryOp op,
-                                        SljitNativeVectorFunction &function, string &error,
-                                        bool check_arithmetic_overflow = true, bool check_result_range = false,
-                                        int64_t result_min = 0, int64_t result_max = 0);
+unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativeIntegerBinaryReferences(SljitNativeIntegerKind kind,
+                                                                              SljitNativeIntegerBinaryOp op,
+                                                                              const SljitIntegerOverflowChecks &checks,
+                                                                              SljitNativeVectorFunction &function,
+                                                                              string &error);
 unique_ptr<ExecutionRegionCodeHandle>
 BuildSljitNativeDecimal128WideningMultiply(SljitNativeSignedIntegerWidth left_width,
                                            SljitNativeSignedIntegerWidth right_width,
@@ -165,14 +164,14 @@ BuildSljitNativePreaggregatedPrimitiveUpdate(const vector<AggregatePrimitiveUpda
                                              const vector<idx_t> &state_offsets, bool initialize_states,
                                              SljitNativePreaggregatedPrimitiveUpdateFunction &function, string &error,
                                              bool address_selected = false, bool row_selected = false);
-unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativeUngroupedSumInt64IntegerBinaryConstant(
-    SljitNativeIntegerKind kind, SljitNativeIntegerBinaryOp op, bool constant_on_left,
-    SljitNativeAggregateUpdateFunction &function, string &error, bool check_arithmetic_overflow = true,
-    bool check_result_range = false, int64_t result_min = 0, int64_t result_max = 0);
-unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativeUngroupedSumInt64IntegerBinaryReferences(
-    SljitNativeIntegerKind kind, SljitNativeIntegerBinaryOp op, SljitNativeAggregateUpdateFunction &function,
-    string &error, bool check_arithmetic_overflow = true, bool check_result_range = false, int64_t result_min = 0,
-    int64_t result_max = 0);
+unique_ptr<ExecutionRegionCodeHandle>
+BuildSljitNativeUngroupedSumInt64IntegerBinaryConstant(SljitNativeIntegerKind kind, SljitNativeIntegerBinaryOp op,
+                                                       bool constant_on_left, const SljitIntegerOverflowChecks &checks,
+                                                       SljitNativeAggregateUpdateFunction &function, string &error);
+unique_ptr<ExecutionRegionCodeHandle>
+BuildSljitNativeUngroupedSumInt64IntegerBinaryReferences(SljitNativeIntegerKind kind, SljitNativeIntegerBinaryOp op,
+                                                         const SljitIntegerOverflowChecks &checks,
+                                                         SljitNativeAggregateUpdateFunction &function, string &error);
 unique_ptr<ExecutionRegionCodeHandle>
 BuildSljitNativeUngroupedSumDoubleDoubleBinaryConstant(SljitNativeDoubleBinaryOp op,
                                                        SljitNativeDoubleSourceKind source_kind, bool constant_on_left,

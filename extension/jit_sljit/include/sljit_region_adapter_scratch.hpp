@@ -111,7 +111,6 @@ struct SljitProjectionAdapterScratch {
 		sources.Resize(projection_count);
 		right_sources.Resize(projection_count);
 		result_data.assign(projection_count, nullptr);
-		overflow_messages.assign(projection_count, nullptr);
 		integer_constants.assign(projection_count, 0);
 		if (track_fused) {
 			fused.assign(projection_count, 0);
@@ -157,7 +156,6 @@ struct SljitProjectionAdapterScratch {
 	SljitSourceVectorScratch sources;
 	SljitSourceVectorScratch right_sources;
 	vector<data_ptr_t> result_data;
-	vector<const char *> overflow_messages;
 	vector<int64_t> integer_constants;
 	vector<uint8_t> fused;
 	vector<PreparedInput> prepared_inputs;

@@ -46,7 +46,7 @@ static unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativePerfectHashGroupedF
 	const auto saved_register_count = update_plan.saved_register_count;
 	const auto scratch_register_count = update_plan.scratch_register_count;
 
-	vector<SljitExpressionTreeOverflowJumps> overflows;
+	vector<SljitArithmeticOverflowSite> overflows;
 	vector<sljit_jump *> group_out_of_range;
 	sljit_emit_enter(compiler, 0, SLJIT_ARGS1V(P), scratch_register_count, saved_register_count, local_size);
 	EmitZeroSljitDensePerfectHashAggregateReduction(compiler, dense_reduction_plan);
@@ -94,14 +94,9 @@ static unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativePerfectHashGroupedF
 	EmitSljitDeferredPerfectHashFlagsCommit(compiler, deferred_flag_plan, codegen_plan.payload_descriptors, contract);
 	sljit_emit_return_void(compiler);
 
-	for (auto &overflow : overflows) {
-		auto overflow_label = sljit_emit_label(compiler);
-		for (auto jump : overflow.jumps) {
-			sljit_set_label(jump, overflow_label);
-		}
-		EmitSljitAggregateExpressionTreeOverflowCall(compiler, overflow.op);
-		sljit_emit_return_void(compiler);
-	}
+	auto overflow_returns = EmitSljitArithmeticOverflowStubs(compiler, overflows);
+	SetSljitJumpLabels(overflow_returns, sljit_emit_label(compiler));
+	sljit_emit_return_void(compiler);
 
 	auto range_error_label = sljit_emit_label(compiler);
 	for (auto jump : group_out_of_range) {

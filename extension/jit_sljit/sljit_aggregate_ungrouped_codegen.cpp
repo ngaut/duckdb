@@ -40,13 +40,12 @@ static unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativeUngroupedSingleFuse
 	case SljitNativeRegionExpressionKind::REFERENCE:
 		return BuildSljitNativeUngroupedSumInt64Reference(payload.integer_kind, function, error);
 	case SljitNativeRegionExpressionKind::INTEGER_BINARY_CONSTANT:
-		return BuildSljitNativeUngroupedSumInt64IntegerBinaryConstant(
-		    payload.integer_kind, payload.binary_op, payload.constant_on_left, function, error,
-		    payload.check_arithmetic_overflow, payload.check_result_range, payload.result_min, payload.result_max);
+		return BuildSljitNativeUngroupedSumInt64IntegerBinaryConstant(payload.integer_kind, payload.binary_op,
+		                                                              payload.constant_on_left,
+		                                                              payload.OverflowChecks(), function, error);
 	case SljitNativeRegionExpressionKind::INTEGER_BINARY_REFERENCES:
-		return BuildSljitNativeUngroupedSumInt64IntegerBinaryReferences(
-		    payload.integer_kind, payload.binary_op, function, error, payload.check_arithmetic_overflow,
-		    payload.check_result_range, payload.result_min, payload.result_max);
+		return BuildSljitNativeUngroupedSumInt64IntegerBinaryReferences(payload.integer_kind, payload.binary_op,
+		                                                                payload.OverflowChecks(), function, error);
 	default:
 		error = "unsupported fused aggregate payload shape";
 		return nullptr;
@@ -120,7 +119,7 @@ BuildSljitNativeUngroupedFusedPrimitiveAggregateUpdate(const vector<SljitNativeR
 		sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_MEM1(SLJIT_SP), saw_value_offsets[payload_idx], SLJIT_IMM, 0);
 	}
 
-	vector<SljitExpressionTreeOverflowJumps> overflows;
+	vector<SljitArithmeticOverflowSite> overflows;
 	auto loop = sljit_emit_label(compiler);
 	auto done = sljit_emit_cmp(compiler, SLJIT_GREATER_EQUAL, SLJIT_S1, 0, SLJIT_S2, 0);
 	EmitLoadFusedAggregateExecuteIndex(compiler);
@@ -157,49 +156,27 @@ BuildSljitNativeUngroupedFusedPrimitiveAggregateUpdate(const vector<SljitNativeR
 		}
 		EmitLoadFusedAggregateIntegerData(compiler, offsetof(SljitNativeVectorInput, source_data_array), payload_idx,
 		                                  payload.integer_kind, SLJIT_R1, SLJIT_R2);
+		// a binary payload's result lands in R4, so both operands stay in R2/R3 for the overflow stub
+		auto value_reg = SLJIT_R2;
 		if (payload.kind == SljitNativeRegionExpressionKind::INTEGER_BINARY_CONSTANT) {
 			sljit_emit_op1(compiler, SLJIT_MOV_P, SLJIT_R0, 0, SLJIT_MEM1(SLJIT_S0),
 			               offsetof(SljitNativeVectorInput, constants));
 			sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_R3, 0, SLJIT_MEM1(SLJIT_R0),
 			               NumericCast<sljit_sw>(payload_idx * sizeof(int64_t)));
-			if (payload.constant_on_left) {
-				sljit_emit_op2(compiler,
-				               payload.check_arithmetic_overflow
-				                   ? NativeIntegerBinaryOp(payload.integer_kind, payload.binary_op) | SLJIT_SET_OVERFLOW
-				                   : NativeIntegerBinaryOp(payload.integer_kind, payload.binary_op),
-				               SLJIT_R2, 0, SLJIT_R3, 0, SLJIT_R2, 0);
-			} else {
-				sljit_emit_op2(compiler,
-				               payload.check_arithmetic_overflow
-				                   ? NativeIntegerBinaryOp(payload.integer_kind, payload.binary_op) | SLJIT_SET_OVERFLOW
-				                   : NativeIntegerBinaryOp(payload.integer_kind, payload.binary_op),
-				               SLJIT_R2, 0, SLJIT_R2, 0, SLJIT_R3, 0);
-			}
-			if (payload.check_arithmetic_overflow) {
-				AddSljitExpressionOverflowJump(overflows, payload.binary_op, sljit_emit_jump(compiler, SLJIT_OVERFLOW));
-			}
+			EmitSljitCheckedIntegerBinaryOp(compiler, payload.integer_kind, payload.binary_op, SLJIT_R4,
+			                                payload.constant_on_left ? SLJIT_R3 : SLJIT_R2,
+			                                payload.constant_on_left ? SLJIT_R2 : SLJIT_R3, payload.OverflowChecks(),
+			                                overflows);
+			value_reg = SLJIT_R4;
 		} else if (payload.kind == SljitNativeRegionExpressionKind::INTEGER_BINARY_REFERENCES) {
 			EmitLoadFusedAggregateIntegerData(compiler, offsetof(SljitNativeVectorInput, right_source_data_array),
 			                                  payload_idx, payload.integer_kind, SLJIT_S4, SLJIT_R3);
-			sljit_emit_op2(compiler,
-			               payload.check_arithmetic_overflow
-			                   ? NativeIntegerBinaryOp(payload.integer_kind, payload.binary_op) | SLJIT_SET_OVERFLOW
-			                   : NativeIntegerBinaryOp(payload.integer_kind, payload.binary_op),
-			               SLJIT_R2, 0, SLJIT_R2, 0, SLJIT_R3, 0);
-			if (payload.check_arithmetic_overflow) {
-				AddSljitExpressionOverflowJump(overflows, payload.binary_op, sljit_emit_jump(compiler, SLJIT_OVERFLOW));
-			}
-		}
-		if (payload.check_result_range) {
-			AddSljitExpressionOverflowJump(overflows, payload.binary_op,
-			                               sljit_emit_cmp(compiler, SLJIT_SIG_LESS, SLJIT_R2, 0, SLJIT_IMM,
-			                                              NumericCast<sljit_sw>(payload.result_min)));
-			AddSljitExpressionOverflowJump(overflows, payload.binary_op,
-			                               sljit_emit_cmp(compiler, SLJIT_SIG_GREATER, SLJIT_R2, 0, SLJIT_IMM,
-			                                              NumericCast<sljit_sw>(payload.result_max)));
+			EmitSljitCheckedIntegerBinaryOp(compiler, payload.integer_kind, payload.binary_op, SLJIT_R4, SLJIT_R2,
+			                                SLJIT_R3, payload.OverflowChecks(), overflows);
+			value_reg = SLJIT_R4;
 		}
 		EmitSljitAggregateAccumulateInt64(compiler, local_sum_offsets[payload_idx], saw_value_offsets[payload_idx],
-		                                  SLJIT_R2);
+		                                  value_reg);
 		auto payload_done = sljit_emit_jump(compiler, SLJIT_JUMP);
 		auto payload_invalid = sljit_emit_label(compiler);
 		for (auto invalid_jump : invalid_jumps) {
@@ -210,15 +187,7 @@ BuildSljitNativeUngroupedFusedPrimitiveAggregateUpdate(const vector<SljitNativeR
 
 	EmitNextSljitNativeVectorLoop(compiler, loop);
 
-	vector<sljit_jump *> helper_done;
-	for (auto &overflow : overflows) {
-		auto overflow_label = sljit_emit_label(compiler);
-		for (auto jump : overflow.jumps) {
-			sljit_set_label(jump, overflow_label);
-		}
-		EmitSljitAggregateExpressionTreeOverflowCall(compiler, overflow.op);
-		helper_done.push_back(sljit_emit_jump(compiler, SLJIT_JUMP));
-	}
+	auto helper_done = EmitSljitArithmeticOverflowStubs(compiler, overflows);
 
 	auto done_label = sljit_emit_label(compiler);
 	sljit_set_label(done, done_label);

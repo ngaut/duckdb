@@ -272,6 +272,15 @@ struct SljitPerfectHashDictionaryGroupRuntime {
 	idx_t *active_count = nullptr;
 };
 
+//! The checks DuckDB's operator applies to one integer operation: the hardware overflow flag and, for kinds whose
+//! values are narrower than their registers (DECIMAL64, DATE), the result range.
+struct SljitIntegerOverflowChecks {
+	bool overflow = false;
+	bool range = false;
+	int64_t result_min = 0;
+	int64_t result_max = 0;
+};
+
 struct SljitNativeVectorInput {
 	const_data_ptr_t source_data = nullptr;
 	const_data_ptr_t right_source_data = nullptr;
@@ -280,7 +289,6 @@ struct SljitNativeVectorInput {
 	const_data_ptr_t *group_data_array = nullptr;
 	SljitPerfectHashDictionaryGroupRuntime *perfect_hash_dictionary_groups = nullptr;
 	data_ptr_t *result_data_array = nullptr;
-	const char **overflow_messages = nullptr;
 	const sel_t *execute_sel = nullptr;
 	const sel_t *source_sel = nullptr;
 	const sel_t *right_source_sel = nullptr;
@@ -307,7 +315,10 @@ struct SljitNativeVectorInput {
 	const char *overflow_message = nullptr;
 	const char *error_message = nullptr;
 	optional_idx query_location;
+	//! the value a failed cast saw, or the left operand of an overflowing integer operation
 	int64_t overflow_value = 0;
+	//! the right operand of an overflowing integer operation
+	int64_t overflow_right_value = 0;
 	idx_t string_decompress_source_size = 0;
 	idx_t active_source_index = 0;
 	idx_t active_result_index = 0;

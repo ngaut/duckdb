@@ -44,7 +44,7 @@ static unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativeUngroupedSumTypedEx
 	}
 	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_MEM1(SLJIT_SP), saw_value_offset, SLJIT_IMM, 0);
 
-	vector<SljitExpressionTreeOverflowJumps> overflows;
+	vector<SljitArithmeticOverflowSite> overflows;
 	const auto &fast_path = tree_plan.fast_path;
 	struct sljit_jump *fast_done = nullptr;
 	if (fast_path.fast_path_supported) {
@@ -103,15 +103,7 @@ static unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativeUngroupedSumTypedEx
 	sljit_set_label(row_done, sljit_emit_label(compiler));
 	EmitNextSljitNativeVectorLoop(compiler, loop);
 
-	vector<sljit_jump *> helper_done;
-	for (auto &overflow : overflows) {
-		auto overflow_label = sljit_emit_label(compiler);
-		for (auto jump : overflow.jumps) {
-			sljit_set_label(jump, overflow_label);
-		}
-		EmitSljitAggregateExpressionTreeOverflowCall(compiler, overflow.op);
-		helper_done.push_back(sljit_emit_jump(compiler, SLJIT_JUMP));
-	}
+	auto helper_done = EmitSljitArithmeticOverflowStubs(compiler, overflows);
 
 	auto done_label = sljit_emit_label(compiler);
 	if (fast_done) {

@@ -40,19 +40,6 @@ string NativeUnsignedIntegerTypeName(SljitNativeUnsignedIntegerWidth width) {
 	}
 }
 
-string NativeIntegerBinaryOverflowMessage(SljitNativeIntegerBinaryOp op) {
-	switch (op) {
-	case SljitNativeIntegerBinaryOp::ADD:
-		return "Overflow in addition";
-	case SljitNativeIntegerBinaryOp::SUBTRACT:
-		return "Overflow in subtraction";
-	case SljitNativeIntegerBinaryOp::MULTIPLY:
-		return "Overflow in multiplication";
-	default:
-		throw InternalException("Unknown SLJIT native integer binary operator");
-	}
-}
-
 string NativeIntegerCastOverflowMessage(SljitNativeSignedIntegerWidth source_width,
                                         SljitNativeSignedIntegerWidth target_width) {
 	return "Type " + StringUtil::Upper(NativeSignedIntegerTypeName(source_width)) +

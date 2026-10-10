@@ -89,7 +89,7 @@ unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativeGroupedFusedTypedExpressio
 	const auto shared_value_offset = logical_index_offset + NumericCast<sljit_sw>(sizeof(sljit_sw));
 	const auto local_size =
 	    shared_value_offset + (codegen_plan.shared_binary.Enabled() ? NumericCast<sljit_sw>(sizeof(sljit_sw)) : 0);
-	vector<SljitExpressionTreeOverflowJumps> overflows;
+	vector<SljitArithmeticOverflowSite> overflows;
 	sljit_emit_enter(compiler, 0, SLJIT_ARGS1V(P), 5, GetSljitNativeVectorRegisterLayout().saved_register_count,
 	                 local_size);
 	EmitInitSljitNativeVectorLoop(compiler);
@@ -302,15 +302,7 @@ unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativeGroupedFusedTypedExpressio
 	}
 	EmitNextSljitNativeVectorLoop(compiler, loop);
 
-	vector<sljit_jump *> helper_done;
-	for (auto &overflow : overflows) {
-		auto overflow_label = sljit_emit_label(compiler);
-		for (auto jump : overflow.jumps) {
-			sljit_set_label(jump, overflow_label);
-		}
-		EmitSljitAggregateExpressionTreeOverflowCall(compiler, overflow.op);
-		helper_done.push_back(sljit_emit_jump(compiler, SLJIT_JUMP));
-	}
+	auto helper_done = EmitSljitArithmeticOverflowStubs(compiler, overflows);
 
 	auto done_label = sljit_emit_label(compiler);
 	if (fast_done) {

@@ -296,7 +296,7 @@ unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativeTypedExpressionTreeSelect(
 	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_MEM1(SLJIT_S0), offsetof(SljitNativeVectorInput, selected_count),
 	               SLJIT_IMM, 0);
 
-	vector<SljitExpressionTreeOverflowJumps> overflows;
+	vector<SljitArithmeticOverflowSite> overflows;
 	struct sljit_jump *fast_done = nullptr;
 	if (fast_path.fast_path_supported) {
 		sljit_emit_op1(compiler, SLJIT_MOV_U8, SLJIT_R0, 0, SLJIT_MEM1(SLJIT_S0),
@@ -408,15 +408,7 @@ unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativeTypedExpressionTreeSelect(
 	auto repeat = sljit_emit_jump(compiler, SLJIT_JUMP);
 	sljit_set_label(repeat, loop);
 
-	vector<sljit_jump *> helper_done;
-	for (auto &overflow : overflows) {
-		auto overflow_label = sljit_emit_label(compiler);
-		for (auto jump : overflow.jumps) {
-			sljit_set_label(jump, overflow_label);
-		}
-		EmitSljitExpressionTreeOverflowCall(compiler, overflow.op);
-		helper_done.push_back(sljit_emit_jump(compiler, SLJIT_JUMP));
-	}
+	auto helper_done = EmitSljitArithmeticOverflowStubs(compiler, overflows);
 
 	auto done_label = sljit_emit_label(compiler);
 	if (fast_done) {

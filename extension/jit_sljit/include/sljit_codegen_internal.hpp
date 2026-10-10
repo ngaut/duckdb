@@ -17,8 +17,13 @@
 
 namespace duckdb {
 
-struct SljitExpressionTreeOverflowJumps {
+//! One checked integer operation. Its jumps reach an error stub that hands both operands to DuckDB's own operator, so
+//! the error raised is exactly the one native execution raises.
+struct SljitArithmeticOverflowSite {
+	SljitNativeIntegerKind kind = SljitNativeIntegerKind::INT64;
 	SljitNativeIntegerBinaryOp op = SljitNativeIntegerBinaryOp::ADD;
+	sljit_s32 left_reg = 0;
+	sljit_s32 right_reg = 0;
 	vector<sljit_jump *> jumps;
 };
 
@@ -49,10 +54,7 @@ void EmitSljitTypedExpressionTreeModulo(struct sljit_compiler *compiler, int64_t
 void EmitSljitTypedExpressionTreeIntegerDivide(struct sljit_compiler *compiler, int64_t divisor,
                                                SljitNativeIntegerKind binary_kind, sljit_s32 n_reg,
                                                sljit_s32 result_reg);
-void AddSljitTypedExpressionTreeDecimal64RangeJumps(struct sljit_compiler *compiler, const ExecutionExpressionIR &node,
-                                                    sljit_s32 target,
-                                                    vector<SljitExpressionTreeOverflowJumps> &overflows,
-                                                    SljitNativeIntegerBinaryOp native_op);
+SljitIntegerOverflowChecks SljitTypedExpressionTreeOverflowChecks(const ExecutionExpressionIR &node);
 void SetSljitJumpLabels(const vector<sljit_jump *> &jumps, sljit_label *label);
 void EmitSljitTypedExpressionTreeInvalidResult(struct sljit_compiler *compiler,
                                                const SljitTypedExpressionTreeSlot &slot);
@@ -79,19 +81,19 @@ SljitTypedExpressionTreeSlot EmitSljitTypedExpressionTreeStringCompare(struct sl
                                                                        idx_t &slot_index);
 vector<sljit_jump *> EmitSljitTypedExpressionTreeJumpIfNotTrue(struct sljit_compiler *compiler,
                                                                const ExecutionExpressionIR &node, idx_t &slot_index,
-                                                               vector<SljitExpressionTreeOverflowJumps> &overflows,
+                                                               vector<SljitArithmeticOverflowSite> &overflows,
                                                                const vector<idx_t> *known_valid_sources = nullptr);
 SljitTypedExpressionTreeSlot
 EmitSljitTypedExpressionTreeConjunction(struct sljit_compiler *compiler, const ExecutionExpressionIR &node,
-                                        idx_t &slot_index, vector<SljitExpressionTreeOverflowJumps> &overflows,
+                                        idx_t &slot_index, vector<SljitArithmeticOverflowSite> &overflows,
                                         const vector<idx_t> *known_valid_sources = nullptr);
 SljitTypedExpressionTreeSlot EmitSljitTypedExpressionTreeCoalesce(struct sljit_compiler *compiler,
                                                                   const ExecutionExpressionIR &node, idx_t &slot_index,
-                                                                  vector<SljitExpressionTreeOverflowJumps> &overflows,
+                                                                  vector<SljitArithmeticOverflowSite> &overflows,
                                                                   const vector<idx_t> *known_valid_sources = nullptr);
 SljitTypedExpressionTreeSlot EmitSljitTypedExpressionTreeCase(struct sljit_compiler *compiler,
                                                               const ExecutionExpressionIR &node, idx_t &slot_index,
-                                                              vector<SljitExpressionTreeOverflowJumps> &overflows,
+                                                              vector<SljitArithmeticOverflowSite> &overflows,
                                                               const vector<idx_t> *known_valid_sources = nullptr);
 
 enum class SljitNativeAggregateSumStateKind : uint8_t { INT64, HUGEINT };
@@ -125,14 +127,19 @@ void EmitSetResultRowInvalid(struct sljit_compiler *compiler);
 void EmitSljitDateYearFromDays(struct sljit_compiler *compiler, sljit_s32 days_reg, sljit_s32 target_reg);
 
 bool TryGetSljitExpressionTreeBinaryOp(ExecutionExpressionBinaryOp op, SljitNativeIntegerBinaryOp &native_op);
-void AddSljitExpressionOverflowJump(vector<SljitExpressionTreeOverflowJumps> &overflows, SljitNativeIntegerBinaryOp op,
-                                    sljit_jump *jump);
+//! Emits result = left <op> right with the given checks; the result is always a sign-extended machine word. A checked
+//! result must not alias either operand: the error stub reads both operands back from their registers.
+void EmitSljitCheckedIntegerBinaryOp(struct sljit_compiler *compiler, SljitNativeIntegerKind kind,
+                                     SljitNativeIntegerBinaryOp op, sljit_s32 result_reg, sljit_s32 left_reg,
+                                     sljit_s32 right_reg, const SljitIntegerOverflowChecks &checks,
+                                     vector<SljitArithmeticOverflowSite> &overflows);
 void EmitLoadSljitExpressionTreeLogicalIndex(struct sljit_compiler *compiler);
 void EmitLoadSljitExpressionTreeSourceIndex(struct sljit_compiler *compiler, idx_t source_index, sljit_s32 target);
 sljit_jump *EmitJumpIfSljitExpressionTreeSourceNull(struct sljit_compiler *compiler, idx_t source_index);
 sljit_jump *EmitJumpIfSljitExpressionTreeFlatSourceNull(struct sljit_compiler *compiler, idx_t source_index);
-void EmitSljitExpressionTreeOverflowCall(struct sljit_compiler *compiler, SljitNativeIntegerBinaryOp op);
-void EmitSljitAggregateExpressionTreeOverflowCall(struct sljit_compiler *compiler, SljitNativeIntegerBinaryOp op);
+//! Emits one error stub per site, which records the error in the input; returns the stubs' exit jumps.
+vector<sljit_jump *> EmitSljitArithmeticOverflowStubs(struct sljit_compiler *compiler,
+                                                      const vector<SljitArithmeticOverflowSite> &overflows);
 
 void EmitSljitAggregateAccumulateInt64(struct sljit_compiler *compiler, sljit_sw local_sum_offset,
                                        sljit_sw saw_value_offset, sljit_s32 value_reg);
@@ -152,7 +159,6 @@ void EmitSljitAggregateCommitSumState(struct sljit_compiler *compiler, SljitNati
 
 double SLJIT_FUNC SljitNativeHugeintToDouble(uint64_t lower, int64_t upper);
 void SLJIT_FUNC SljitNativeAggregateHugeintCommit(SljitNativeVectorInput *input);
-void SLJIT_FUNC SljitNativeIntegerOverflow(SljitNativeVectorInput *input);
 void SLJIT_FUNC SljitNativeRuntimeError(SljitNativeVectorInput *input);
 sljit_s32 NativeDoubleBinaryOp(SljitNativeDoubleBinaryOp op, bool single_precision = false);
 bool NativeDoubleSourceHasDecimalScale(SljitNativeDoubleSourceKind kind);
@@ -165,19 +171,19 @@ sljit_s32 NativeIntegerUpperBoundFailureJump(SljitNativeIntegerKind kind, bool i
 
 SljitTypedExpressionTreeSlot EmitSljitTypedExpressionTreeValue(struct sljit_compiler *compiler,
                                                                const ExecutionExpressionIR &node, idx_t &slot_index,
-                                                               vector<SljitExpressionTreeOverflowJumps> &overflows,
+                                                               vector<SljitArithmeticOverflowSite> &overflows,
                                                                const vector<idx_t> *known_valid_sources = nullptr);
 void EmitSljitTypedExpressionTreeFastValueReg(
     struct sljit_compiler *compiler, const ExecutionExpressionIR &node, idx_t &spill_index,
-    vector<SljitExpressionTreeOverflowJumps> &overflows,
+    vector<SljitArithmeticOverflowSite> &overflows,
     const vector<SljitTypedExpressionTreeDataPointerHoist> *data_hoists = nullptr);
 void EmitSljitTypedExpressionTreeSelectedFastValueReg(
     struct sljit_compiler *compiler, const ExecutionExpressionIR &node, idx_t &spill_index,
-    vector<SljitExpressionTreeOverflowJumps> &overflows,
+    vector<SljitArithmeticOverflowSite> &overflows,
     const vector<SljitTypedExpressionTreeDataPointerHoist> *data_hoists = nullptr);
 void EmitSljitTypedExpressionTreeLogicalFastValueReg(
     struct sljit_compiler *compiler, const ExecutionExpressionIR &node, idx_t &spill_index,
-    vector<SljitExpressionTreeOverflowJumps> &overflows,
+    vector<SljitArithmeticOverflowSite> &overflows,
     const vector<SljitTypedExpressionTreeDataPointerHoist> *data_hoists = nullptr);
 
 } // namespace duckdb

@@ -12,15 +12,6 @@
 
 namespace duckdb {
 
-void SLJIT_FUNC SljitNativeIntegerOverflow(SljitNativeVectorInput *input) {
-	try {
-		throw OutOfRangeException("%s", input->overflow_message);
-	} catch (...) {
-		input->has_error = true;
-		input->error = std::current_exception();
-	}
-}
-
 void SLJIT_FUNC SljitNativeRuntimeError(SljitNativeVectorInput *input) {
 	try {
 		throw InvalidInputException("%s", input->error_message ? input->error_message : "");

@@ -91,7 +91,7 @@ BuildSljitNativeUngroupedFusedAggregateUpdate(const vector<SljitNativeRegionExpr
 		}
 	};
 
-	vector<SljitExpressionTreeOverflowJumps> overflows;
+	vector<SljitArithmeticOverflowSite> overflows;
 	struct sljit_jump *fast_done = nullptr;
 	struct sljit_jump *selected_fast_done = nullptr;
 	struct sljit_jump *hybrid_done = nullptr;
@@ -272,15 +272,7 @@ BuildSljitNativeUngroupedFusedAggregateUpdate(const vector<SljitNativeRegionExpr
 	}
 	EmitNextSljitNativeVectorLoop(compiler, loop);
 
-	vector<sljit_jump *> helper_done;
-	for (auto &overflow : overflows) {
-		auto overflow_label = sljit_emit_label(compiler);
-		for (auto jump : overflow.jumps) {
-			sljit_set_label(jump, overflow_label);
-		}
-		EmitSljitAggregateExpressionTreeOverflowCall(compiler, overflow.op);
-		helper_done.push_back(sljit_emit_jump(compiler, SLJIT_JUMP));
-	}
+	auto helper_done = EmitSljitArithmeticOverflowStubs(compiler, overflows);
 
 	auto done_label = sljit_emit_label(compiler);
 	if (fast_done) {

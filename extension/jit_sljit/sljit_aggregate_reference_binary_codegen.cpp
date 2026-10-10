@@ -11,50 +11,10 @@
 
 namespace duckdb {
 
-struct SljitAggregateIntegerBinaryOverflowJumps {
-	sljit_jump *overflow = nullptr;
-	sljit_jump *range_too_small = nullptr;
-	sljit_jump *range_too_large = nullptr;
-};
-
-static void EmitSljitAggregateIntegerBinaryOverflowChecks(struct sljit_compiler *compiler, sljit_s32 value_reg,
-                                                          bool check_arithmetic_overflow, bool check_result_range,
-                                                          int64_t result_min, int64_t result_max,
-                                                          SljitAggregateIntegerBinaryOverflowJumps &jumps) {
-	if (check_arithmetic_overflow) {
-		jumps.overflow = sljit_emit_jump(compiler, SLJIT_OVERFLOW);
-	}
-	if (check_result_range) {
-		jumps.range_too_small =
-		    sljit_emit_cmp(compiler, SLJIT_SIG_LESS, value_reg, 0, SLJIT_IMM, NumericCast<sljit_sw>(result_min));
-		jumps.range_too_large =
-		    sljit_emit_cmp(compiler, SLJIT_SIG_GREATER, value_reg, 0, SLJIT_IMM, NumericCast<sljit_sw>(result_max));
-	}
-}
-
-static sljit_jump *
-EmitSljitAggregateIntegerBinaryOverflowHandler(struct sljit_compiler *compiler, SljitNativeIntegerBinaryOp op,
-                                               bool check_arithmetic_overflow, bool check_result_range,
-                                               const SljitAggregateIntegerBinaryOverflowJumps &jumps) {
-	if (!check_arithmetic_overflow && !check_result_range) {
-		return nullptr;
-	}
-	auto overflow_label = sljit_emit_label(compiler);
-	if (check_arithmetic_overflow) {
-		sljit_set_label(jumps.overflow, overflow_label);
-	}
-	if (check_result_range) {
-		sljit_set_label(jumps.range_too_small, overflow_label);
-		sljit_set_label(jumps.range_too_large, overflow_label);
-	}
-	EmitSljitAggregateExpressionTreeOverflowCall(compiler, op);
-	return sljit_emit_jump(compiler, SLJIT_JUMP);
-}
-
-unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativeUngroupedSumInt64IntegerBinaryConstant(
-    SljitNativeIntegerKind kind, SljitNativeIntegerBinaryOp op, bool constant_on_left,
-    SljitNativeAggregateUpdateFunction &function, string &error, bool check_arithmetic_overflow,
-    bool check_result_range, int64_t result_min, int64_t result_max) {
+unique_ptr<ExecutionRegionCodeHandle>
+BuildSljitNativeUngroupedSumInt64IntegerBinaryConstant(SljitNativeIntegerKind kind, SljitNativeIntegerBinaryOp op,
+                                                       bool constant_on_left, const SljitIntegerOverflowChecks &checks,
+                                                       SljitNativeAggregateUpdateFunction &function, string &error) {
 	auto compiler = sljit_create_compiler(nullptr);
 	if (!compiler) {
 		error = "failed to create SLJIT compiler";
@@ -63,7 +23,6 @@ unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativeUngroupedSumInt64IntegerBi
 
 	auto data_scale = NativeIntegerDataScale(kind);
 	auto load_op = NativeIntegerLoadOp(kind);
-	auto binary_op = NativeIntegerBinaryOp(kind, op);
 	const auto local_sum_offset = NumericCast<sljit_sw>(0);
 	const auto saw_value_offset = NumericCast<sljit_sw>(sizeof(sljit_sw));
 	const auto local_size = saw_value_offset + NumericCast<sljit_sw>(sizeof(sljit_sw));
@@ -73,40 +32,33 @@ unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativeUngroupedSumInt64IntegerBi
 	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_MEM1(SLJIT_SP), local_sum_offset, SLJIT_IMM, 0);
 	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_MEM1(SLJIT_SP), saw_value_offset, SLJIT_IMM, 0);
 
-	SljitAggregateIntegerBinaryOverflowJumps overflow_jumps;
+	vector<SljitArithmeticOverflowSite> overflows;
 	auto done = EmitSljitAggregateSelectedSourceLoop(compiler, [&]() {
 		EmitLoadSljitNativeFixedWidthValue(compiler, offsetof(SljitNativeVectorInput, source_data), SLJIT_R1, load_op,
 		                                   data_scale, SLJIT_R2);
 		sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_R3, 0, SLJIT_MEM1(SLJIT_S0),
 		               offsetof(SljitNativeVectorInput, constant));
-		auto emit_binary_op = check_arithmetic_overflow ? binary_op | SLJIT_SET_OVERFLOW : binary_op;
-		if (constant_on_left) {
-			sljit_emit_op2(compiler, emit_binary_op, SLJIT_R2, 0, SLJIT_R3, 0, SLJIT_R2, 0);
-		} else {
-			sljit_emit_op2(compiler, emit_binary_op, SLJIT_R2, 0, SLJIT_R2, 0, SLJIT_R3, 0);
-		}
-		EmitSljitAggregateIntegerBinaryOverflowChecks(compiler, SLJIT_R2, check_arithmetic_overflow, check_result_range,
-		                                              result_min, result_max, overflow_jumps);
-		EmitSljitAggregateAccumulateInt64(compiler, local_sum_offset, saw_value_offset, SLJIT_R2);
+		EmitSljitCheckedIntegerBinaryOp(compiler, kind, op, SLJIT_R4, constant_on_left ? SLJIT_R3 : SLJIT_R2,
+		                                constant_on_left ? SLJIT_R2 : SLJIT_R3, checks, overflows);
+		EmitSljitAggregateAccumulateInt64(compiler, local_sum_offset, saw_value_offset, SLJIT_R4);
 	});
 
-	auto helper_done = EmitSljitAggregateIntegerBinaryOverflowHandler(compiler, op, check_arithmetic_overflow,
-	                                                                  check_result_range, overflow_jumps);
+	// an overflowing chunk records its error and skips the commit
+	auto overflow_done = EmitSljitArithmeticOverflowStubs(compiler, overflows);
 
 	auto done_label = sljit_emit_label(compiler);
 	sljit_set_label(done, done_label);
 	EmitSljitAggregateCommitInt64(compiler, local_sum_offset, saw_value_offset);
-	if (helper_done) {
-		sljit_set_label(helper_done, sljit_emit_label(compiler));
-	}
+	SetSljitJumpLabels(overflow_done, sljit_emit_label(compiler));
 	sljit_emit_return_void(compiler);
 
 	return FinishSljitCode(compiler, function, error);
 }
 
-unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativeUngroupedSumInt64IntegerBinaryReferences(
-    SljitNativeIntegerKind kind, SljitNativeIntegerBinaryOp op, SljitNativeAggregateUpdateFunction &function,
-    string &error, bool check_arithmetic_overflow, bool check_result_range, int64_t result_min, int64_t result_max) {
+unique_ptr<ExecutionRegionCodeHandle>
+BuildSljitNativeUngroupedSumInt64IntegerBinaryReferences(SljitNativeIntegerKind kind, SljitNativeIntegerBinaryOp op,
+                                                         const SljitIntegerOverflowChecks &checks,
+                                                         SljitNativeAggregateUpdateFunction &function, string &error) {
 	auto compiler = sljit_create_compiler(nullptr);
 	if (!compiler) {
 		error = "failed to create SLJIT compiler";
@@ -115,7 +67,6 @@ unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativeUngroupedSumInt64IntegerBi
 
 	auto data_scale = NativeIntegerDataScale(kind);
 	auto load_op = NativeIntegerLoadOp(kind);
-	auto binary_op = NativeIntegerBinaryOp(kind, op);
 	const auto local_sum_offset = NumericCast<sljit_sw>(0);
 	const auto saw_value_offset = NumericCast<sljit_sw>(sizeof(sljit_sw));
 	const auto local_size = saw_value_offset + NumericCast<sljit_sw>(sizeof(sljit_sw));
@@ -125,9 +76,9 @@ unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativeUngroupedSumInt64IntegerBi
 	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_MEM1(SLJIT_SP), local_sum_offset, SLJIT_IMM, 0);
 	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_MEM1(SLJIT_SP), saw_value_offset, SLJIT_IMM, 0);
 
-	SljitAggregateIntegerBinaryOverflowJumps overflow_jumps;
+	vector<SljitArithmeticOverflowSite> overflows;
 	sljit_jump *fast_commit_done = nullptr;
-	if (!check_arithmetic_overflow && !check_result_range) {
+	if (!checks.overflow && !checks.range) {
 		vector<sljit_jump *> generic_loop_jumps;
 		auto jump_to_generic_if_present = [&](sljit_sw input_offset) {
 			sljit_emit_op1(compiler, SLJIT_MOV_P, SLJIT_R0, 0, SLJIT_MEM1(SLJIT_S0), input_offset);
@@ -149,7 +100,7 @@ unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativeUngroupedSumInt64IntegerBi
 		auto fast_done = sljit_emit_cmp(compiler, SLJIT_GREATER_EQUAL, SLJIT_S1, 0, SLJIT_S2, 0);
 		sljit_emit_op1(compiler, load_op, SLJIT_R2, 0, SLJIT_MEM2(SLJIT_S3, SLJIT_S1), data_scale);
 		sljit_emit_op1(compiler, load_op, SLJIT_R3, 0, SLJIT_MEM2(SLJIT_S4, SLJIT_S1), data_scale);
-		sljit_emit_op2(compiler, binary_op, SLJIT_R2, 0, SLJIT_R2, 0, SLJIT_R3, 0);
+		EmitSljitCheckedIntegerBinaryOp(compiler, kind, op, SLJIT_R2, SLJIT_R2, SLJIT_R3, checks, overflows);
 		sljit_emit_op2(compiler, SLJIT_ADD, SLJIT_R4, 0, SLJIT_R4, 0, SLJIT_R2, 0);
 		EmitNextSljitNativeVectorLoop(compiler, fast_loop);
 
@@ -172,15 +123,12 @@ unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativeUngroupedSumInt64IntegerBi
 		                                   data_scale, SLJIT_R2);
 		EmitLoadSljitNativeFixedWidthValue(compiler, offsetof(SljitNativeVectorInput, right_source_data), SLJIT_S4,
 		                                   load_op, data_scale, SLJIT_R3);
-		sljit_emit_op2(compiler, check_arithmetic_overflow ? binary_op | SLJIT_SET_OVERFLOW : binary_op, SLJIT_R2, 0,
-		               SLJIT_R2, 0, SLJIT_R3, 0);
-		EmitSljitAggregateIntegerBinaryOverflowChecks(compiler, SLJIT_R2, check_arithmetic_overflow, check_result_range,
-		                                              result_min, result_max, overflow_jumps);
-		EmitSljitAggregateAccumulateInt64(compiler, local_sum_offset, saw_value_offset, SLJIT_R2);
+		EmitSljitCheckedIntegerBinaryOp(compiler, kind, op, SLJIT_R4, SLJIT_R2, SLJIT_R3, checks, overflows);
+		EmitSljitAggregateAccumulateInt64(compiler, local_sum_offset, saw_value_offset, SLJIT_R4);
 	});
 
-	auto helper_done = EmitSljitAggregateIntegerBinaryOverflowHandler(compiler, op, check_arithmetic_overflow,
-	                                                                  check_result_range, overflow_jumps);
+	// an overflowing chunk records its error and skips the commit
+	auto overflow_done = EmitSljitArithmeticOverflowStubs(compiler, overflows);
 
 	auto done_label = sljit_emit_label(compiler);
 	if (fast_commit_done) {
@@ -188,9 +136,7 @@ unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativeUngroupedSumInt64IntegerBi
 	}
 	sljit_set_label(done, done_label);
 	EmitSljitAggregateCommitInt64(compiler, local_sum_offset, saw_value_offset);
-	if (helper_done) {
-		sljit_set_label(helper_done, sljit_emit_label(compiler));
-	}
+	SetSljitJumpLabels(overflow_done, sljit_emit_label(compiler));
 	sljit_emit_return_void(compiler);
 
 	return FinishSljitCode(compiler, function, error);

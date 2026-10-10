@@ -11,10 +11,11 @@
 
 namespace duckdb {
 
-SljitTypedExpressionTreeSlot
-EmitSljitTypedExpressionTreeConjunction(struct sljit_compiler *compiler, const ExecutionExpressionIR &node,
-                                        idx_t &slot_index, vector<SljitExpressionTreeOverflowJumps> &overflows,
-                                        const vector<idx_t> *known_valid_sources) {
+SljitTypedExpressionTreeSlot EmitSljitTypedExpressionTreeConjunction(struct sljit_compiler *compiler,
+                                                                     const ExecutionExpressionIR &node,
+                                                                     idx_t &slot_index,
+                                                                     vector<SljitArithmeticOverflowSite> &overflows,
+                                                                     const vector<idx_t> *known_valid_sources) {
 	auto result_slot = AllocateSljitTypedExpressionTreeSlot(slot_index);
 	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_MEM1(SLJIT_SP), result_slot.value_offset, SLJIT_IMM, 0);
 	vector<sljit_jump *> decisive_jumps;
@@ -63,7 +64,7 @@ EmitSljitTypedExpressionTreeConjunction(struct sljit_compiler *compiler, const E
 
 SljitTypedExpressionTreeSlot EmitSljitTypedExpressionTreeCoalesce(struct sljit_compiler *compiler,
                                                                   const ExecutionExpressionIR &node, idx_t &slot_index,
-                                                                  vector<SljitExpressionTreeOverflowJumps> &overflows,
+                                                                  vector<SljitArithmeticOverflowSite> &overflows,
                                                                   const vector<idx_t> *known_valid_sources) {
 	auto result_slot = AllocateSljitTypedExpressionTreeSlot(slot_index);
 	vector<sljit_jump *> done_jumps;
@@ -99,7 +100,7 @@ static vector<sljit_jump *> EmitSljitTypedExpressionTreeJumpIfAnySourceMayHaveNu
 
 static void EmitSljitTypedExpressionTreeCaseValue(struct sljit_compiler *compiler, const ExecutionExpressionIR &value,
                                                   const SljitTypedExpressionTreeSlot &result_slot, idx_t &slot_index,
-                                                  vector<SljitExpressionTreeOverflowJumps> &overflows,
+                                                  vector<SljitArithmeticOverflowSite> &overflows,
                                                   const vector<idx_t> &known_valid_sources) {
 	if (!SljitTypedExpressionTreeFastPathSupported(value)) {
 		auto value_slot =
@@ -137,7 +138,7 @@ static void EmitSljitTypedExpressionTreeCaseValue(struct sljit_compiler *compile
 
 SljitTypedExpressionTreeSlot EmitSljitTypedExpressionTreeCase(struct sljit_compiler *compiler,
                                                               const ExecutionExpressionIR &node, idx_t &slot_index,
-                                                              vector<SljitExpressionTreeOverflowJumps> &overflows,
+                                                              vector<SljitArithmeticOverflowSite> &overflows,
                                                               const vector<idx_t> *known_valid_sources) {
 	D_ASSERT(node.else_node);
 	D_ASSERT(node.children.size() % 2 == 0);

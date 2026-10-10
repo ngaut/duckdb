@@ -14,25 +14,6 @@
 
 namespace duckdb {
 
-static string NativeRegionIntegerBinaryOverflowMessage(SljitNativeIntegerKind kind, SljitNativeIntegerBinaryOp op) {
-	if (kind == SljitNativeIntegerKind::DATE) {
-		return "Date out of range";
-	}
-	if (kind != SljitNativeIntegerKind::DECIMAL64) {
-		return NativeIntegerBinaryOverflowMessage(op);
-	}
-	switch (op) {
-	case SljitNativeIntegerBinaryOp::ADD:
-		return "Overflow in addition of DECIMAL";
-	case SljitNativeIntegerBinaryOp::SUBTRACT:
-		return "Overflow in subtract of DECIMAL";
-	case SljitNativeIntegerBinaryOp::MULTIPLY:
-		return "Overflow in multiplication of DECIMAL";
-	default:
-		throw InternalException("Unknown SLJIT native integer binary operator");
-	}
-}
-
 bool SljitCompilePreparedExecutableRegionExpression(SljitExecutableRegionExpression &expr, bool require_boolean,
                                                     string &error) {
 	auto &semantic = expr.plan;
@@ -96,12 +77,10 @@ bool SljitCompilePreparedExecutableRegionExpression(SljitExecutableRegionExpress
 		}
 		return true;
 	case SljitNativeRegionExpressionKind::INTEGER_BINARY_CONSTANT:
-		expr.overflow_message = NativeRegionIntegerBinaryOverflowMessage(semantic.integer_kind, semantic.binary_op);
 		if (!build_vector([&](SljitNativeVectorFunction &function) {
-			    return BuildSljitNativeIntegerBinaryConstant(
-			        semantic.integer_kind, semantic.binary_op, semantic.constant_on_left, function, error,
-			        semantic.check_arithmetic_overflow, semantic.check_result_range, semantic.result_min,
-			        semantic.result_max);
+			    return BuildSljitNativeIntegerBinaryConstant(semantic.integer_kind, semantic.binary_op,
+			                                                 semantic.constant_on_left, semantic.OverflowChecks(),
+			                                                 function, error);
 		    })) {
 			return false;
 		}
@@ -117,11 +96,9 @@ bool SljitCompilePreparedExecutableRegionExpression(SljitExecutableRegionExpress
 		}
 		return true;
 	case SljitNativeRegionExpressionKind::INTEGER_BINARY_REFERENCES:
-		expr.overflow_message = NativeRegionIntegerBinaryOverflowMessage(semantic.integer_kind, semantic.binary_op);
 		if (!build_vector([&](SljitNativeVectorFunction &function) {
-			    return BuildSljitNativeIntegerBinaryReferences(
-			        semantic.integer_kind, semantic.binary_op, function, error, semantic.check_arithmetic_overflow,
-			        semantic.check_result_range, semantic.result_min, semantic.result_max);
+			    return BuildSljitNativeIntegerBinaryReferences(semantic.integer_kind, semantic.binary_op,
+			                                                   semantic.OverflowChecks(), function, error);
 		    })) {
 			return false;
 		}
@@ -337,7 +314,6 @@ bool SljitCompilePreparedExecutableRegionExpression(SljitExecutableRegionExpress
 			error = "SLJIT typed expression tree plan is missing its typed expression IR";
 			return false;
 		}
-		expr.overflow_message = "Overflow in arithmetic expression";
 		if (require_boolean) {
 			return build_select([&](SljitNativeVectorFunction &function) {
 				return BuildSljitNativeTypedExpressionTreeSelect(*semantic.expression_tree, function, error,
