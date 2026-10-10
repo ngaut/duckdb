@@ -8,6 +8,7 @@
 
 #pragma once
 
+#include "sljit_hash_join_probe_primitive.hpp"
 #include "sljit_region_executable.hpp"
 
 #include "duckdb/common/operator/numeric_cast.hpp"
@@ -175,6 +176,11 @@ static bool SljitTryBuildPreJoinProjectionViewDescriptor(const vector<SljitExecu
 	if (projection_op.kind != SljitNativeRegionOpKind::PROJECTION ||
 	    hash_join_op.kind != SljitNativeRegionOpKind::HASH_JOIN_PROBE ||
 	    projection_op.projections.size() != projection_op.output_types.size()) {
+		return false;
+	}
+	// The view stands in for the projection's output only to a selection probe, which reads the source chunk and
+	// leaves the projection unrun; a join whose probe must materialize its output reads the projection itself
+	if (!SljitCanBindHashJoinProbeSelectionPrimitive(ops, hash_join_idx)) {
 		return false;
 	}
 	descriptor.projection_idx = projection_idx;
