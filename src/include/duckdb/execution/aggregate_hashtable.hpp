@@ -233,12 +233,6 @@ public:
 	bool LookupsSkipped() const;
 	//! Permanently require final combination for the current append-only stream.
 	void RequireFinalCombine();
-	//! Declare whether another runner can feed this table with the canonical hash; see
-	//! require_canonical_group_hash. Only ever tightens or relaxes before rows are appended by the
-	//! compiled path, so every row in one table carries a hash from the same function.
-	void SetRequireCanonicalGroupHash(bool required) {
-		require_canonical_group_hash = required;
-	}
 	//! Continue a producer-proven fixed-width strictly increasing stream. This HT validates the published endpoints
 	//! and owns conservative key bounds so the proof survives backend/runtime and local pointer-table boundaries.
 	bool TryContinueProvenUniqueAppend(DataChunk &groups, ExecutionGroupedAggregateAppendProof append_proof = {});
@@ -317,10 +311,6 @@ private:
 
 	//! How many tuples went into this HT (before de-duplication)
 	idx_t sink_count;
-	//! If true, the compiled descriptor path must store the canonical full-column group hash (never a
-	//! leading-key truncation) to stay comparable with the native runner's DataChunk::Hash. True until
-	//! a compiled step that owns the table declares that no other runner feeds it.
-	bool require_canonical_group_hash;
 	//! If true, we just append, skipping HT lookups
 	bool skip_lookups;
 	//! Whether to enable HLL counting the hashes

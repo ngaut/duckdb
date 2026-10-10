@@ -323,13 +323,6 @@ struct ExecutionGroupedAggregateStateAddressState {
 	}
 	virtual void RequireAppendFinalCombine() {
 	}
-	//! Declare whether this thread's table may store a producer-local hash (the leading key alone) for compiled
-	//! descriptor appends instead of the canonical full-key hash. The tables a global sink combines partition and
-	//! merge rows by their stored hash, so every table of the sink must hash one group the same way: a table fed by
-	//! the vectorized loop, or by another pipeline, stores the canonical hash.
-	virtual void SetRequireCanonicalGroupHash(bool required) {
-		(void)required;
-	}
 	virtual bool TryResolveNewGroups(DataChunk &input, const ExecutionRegionSinkInfo &sink_info, Vector &addresses,
 	                                 optional_ptr<ExecutionOperatorStageRecorder> recorder = nullptr) {
 		(void)input;

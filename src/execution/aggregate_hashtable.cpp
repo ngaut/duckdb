@@ -369,12 +369,11 @@ GroupedAggregateHashTable::GroupedAggregateHashTable(ClientContext &context_p, A
                                                      idx_t initial_capacity, idx_t radix_bits,
                                                      TupleDataValidityType group_validity)
     : BaseAggregateHashTable(context_p, allocator, aggregate_objects_p, std::move(payload_types_p)), context(context_p),
-      radix_bits(radix_bits), count(0), capacity(0), sink_count(0), require_canonical_group_hash(true),
-      skip_lookups(false), enable_hll(false), aggregate_allocator(make_shared_ptr<ArenaAllocator>(allocator)),
-      state(*aggregate_allocator), skip_lookups_require_final_combine(false),
-      proven_unique_append_key_type(PhysicalType::INVALID), proven_unique_append_has_last_key(false),
-      proven_unique_append_last_signed_key(0), proven_unique_append_last_unsigned_key(0),
-      proven_unique_append_ranges_coalesced(false) {
+      radix_bits(radix_bits), count(0), capacity(0), sink_count(0), skip_lookups(false), enable_hll(false),
+      aggregate_allocator(make_shared_ptr<ArenaAllocator>(allocator)), state(*aggregate_allocator),
+      skip_lookups_require_final_combine(false), proven_unique_append_key_type(PhysicalType::INVALID),
+      proven_unique_append_has_last_key(false), proven_unique_append_last_signed_key(0),
+      proven_unique_append_last_unsigned_key(0), proven_unique_append_ranges_coalesced(false) {
 	state.owner = this;
 	state.initialized = true;
 	clustered_state.all_clustered = AllAggregatesClustered(aggregate_objects_p);
@@ -3272,44 +3271,6 @@ static bool AggregateDescriptorSourcesAreAllValid(const vector<ExecutionRowPoint
 	return !group_sources.empty();
 }
 
-static bool AggregateDescriptorLeadingKeyHashSourceSupported(const ExecutionRowPointerGroupKeySource &source) {
-	if (source.cast_kind != ExecutionRowPointerGroupKeyCastKind::NONE ||
-	    source.source_physical_type != source.target_physical_type) {
-		return false;
-	}
-	switch (source.target_physical_type) {
-	case PhysicalType::INT16:
-	case PhysicalType::INT32:
-	case PhysicalType::INT64:
-	case PhysicalType::UINT16:
-	case PhysicalType::UINT32:
-	case PhysicalType::UINT64:
-		return true;
-	default:
-		return false;
-	}
-}
-
-static bool AggregateDescriptorLeadingKeyHashIsJoinKey(const vector<ExecutionRowPointerGroupKeySource> &group_sources) {
-	if (group_sources.size() < 2) {
-		return false;
-	}
-	auto &source = group_sources[0];
-	return source.source_kind == ExecutionRowPointerGroupKeySourceKind::INPUT_VECTOR &&
-	       source.hash_join_condition_idx != DConstants::INVALID_INDEX &&
-	       !ExecutionRowPointerGroupKeySourcesAreRowPointerFields(group_sources);
-}
-
-static bool AggregateDescriptorCanUseLeadingKeyHash(const vector<ExecutionRowPointerGroupKeySource> &group_sources) {
-	if (group_sources.empty() || !AggregateDescriptorLeadingKeyHashSourceSupported(group_sources[0])) {
-		return false;
-	}
-	if (AggregateDescriptorLeadingKeyHashIsJoinKey(group_sources)) {
-		return true;
-	}
-	return group_sources.size() >= 4;
-}
-
 static hash_t AggregateHashDescriptorValue(const_data_ptr_t source_data, idx_t source_idx, PhysicalType type) {
 	switch (type) {
 	case PhysicalType::BOOL:
@@ -4066,7 +4027,7 @@ static bool AggregateDescriptorSourceValueMatchesStored(const ExecutionRowPointe
 
 static bool AggregateHashDescriptorRows(const AggregateRowPointerDescriptorSourceInfo &info,
                                         const vector<ExecutionRowPointerGroupKeySource> &group_sources, idx_t count,
-                                        Vector &hashes, bool require_canonical_group_hash) {
+                                        Vector &hashes) {
 	hashes.SetVectorType(VectorType::FLAT_VECTOR);
 	FlatVector::SetSize(hashes, count_t(count));
 	auto hash_data = FlatVector::GetDataMutable<hash_t>(hashes);
@@ -4082,16 +4043,10 @@ static bool AggregateHashDescriptorRows(const AggregateRowPointerDescriptorSourc
 			}
 		}
 	}
-	// The stored hash is also the probe hash, the partition-routing key, and the value the final
-	// combine re-reads verbatim, so it must be a canonical function of the full group key whenever
-	// two runners can feed one table: native rows (full-column DataChunk::Hash) and compiled rows hashed
-	// by a leading-key-only truncation would split one group across two stored hashes into two
-	// partitions that never merge. A compiled step that owns the table declares so, and only then is the
-	// cheaper leading-key hash sound. Each per-column descriptor hash already equals
-	// VectorOperations::Hash, so folding every column yields exactly the canonical hash.
-	const auto use_leading_key_hash =
-	    !require_canonical_group_hash && AggregateDescriptorCanUseLeadingKeyHash(group_sources);
-	const idx_t hash_group_count = use_leading_key_hash ? 1 : group_sources.size();
+	// The stored hash is also the probe hash, the partition-routing key, and the value the final combine re-reads
+	// verbatim, and every other path into the tables of one sink stores DataChunk::Hash: one group must hash the same
+	// way whoever produced it, or it lands in two partitions that never merge. Each per-column descriptor hash equals
+	// VectorOperations::Hash, so folding every column yields exactly that hash.
 	for (idx_t row_idx = 0; row_idx < count; row_idx++) {
 		if (can_reuse_row_pointer_hashes && row_idx > 0 &&
 		    info.row_pointers[row_idx] == info.row_pointers[row_idx - 1]) {
@@ -4104,7 +4059,7 @@ static bool AggregateHashDescriptorRows(const AggregateRowPointerDescriptorSourc
 			continue;
 		}
 		hash_t result = 0;
-		for (idx_t group_idx = 0; group_idx < hash_group_count; group_idx++) {
+		for (idx_t group_idx = 0; group_idx < group_sources.size(); group_idx++) {
 			auto &source = group_sources[group_idx];
 			const_data_ptr_t source_data;
 			idx_t source_idx;
@@ -5984,7 +5939,7 @@ bool GroupedAggregateHashTable::TryFindOrCreateDescriptorGroupStateTargetsDirect
 	}
 
 	auto hash_start = AggregateTraceStart(recorder);
-	if (!AggregateHashDescriptorRows(sources, group_sources, count, state.hashes, require_canonical_group_hash)) {
+	if (!AggregateHashDescriptorRows(sources, group_sources, count, state.hashes)) {
 		RecordAggregateTraceStage(recorder, "find_or_create_descriptor.hash_miss", hash_start);
 		return false;
 	}
@@ -6321,7 +6276,7 @@ bool GroupedAggregateHashTable::TryFindOrCreateInputVectorGroupStateTargetsFast(
 		return true;
 	}
 	// Every other key takes DuckDB's vectorized lookup: it amortizes the pointer-table misses that dominate once the
-	// groups outgrow the cache, and it stores the canonical hash, so any runner can feed the same table.
+	// groups outgrow the cache.
 	auto keys_start = AggregateTraceStart(recorder);
 	auto groups =
 	    AggregatePrepareInputVectorGroupChunk(allocator, payload_input, count, group_sources, layout_ptr->GetTypes(),

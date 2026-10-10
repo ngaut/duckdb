@@ -1983,12 +1983,6 @@ void RadixPartitionedHashTable::RequireAppendFinalCombine(ExecutionContext &cont
 	ht.RequireFinalCombine();
 }
 
-void RadixPartitionedHashTable::SetRequireCanonicalGroupHash(ExecutionContext &context, OperatorSinkInput &input,
-                                                             bool required) const {
-	auto &ht = PrepareRadixHTSinkState(context, *this, input);
-	ht.SetRequireCanonicalGroupHash(required);
-}
-
 bool RadixPartitionedHashTable::TryResolveNewGroupAddresses(
     ExecutionContext &context, DataChunk &chunk, OperatorSinkInput &input, const ExecutionRegionSinkInfo &sink_info,
     Vector &addresses_out, optional_ptr<ExecutionOperatorStageRecorder> recorder) const {

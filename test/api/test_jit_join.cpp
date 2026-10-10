@@ -1711,7 +1711,7 @@ TEST_CASE("JIT join grouped aggregate direct-projects RHS keys", "[api][jit]") {
 	    });
 }
 
-TEST_CASE("JIT row-pointer grouped aggregate separates leading-key hash collisions", "[api][jit]") {
+TEST_CASE("JIT row-pointer grouped aggregate separates groups sharing a constant leading key", "[api][jit]") {
 	DuckDB db;
 	Connection con(db);
 	auto &manager = ExecutionRegionManager::Get(*con.context);

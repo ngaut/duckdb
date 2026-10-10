@@ -112,12 +112,6 @@ static bool SljitTryReserveGroupedAggregateGroups(ExecutionRegionRuntime &runtim
 	if (!grouped_state.ready || !grouped_state.state) {
 		return false;
 	}
-	// Declare once, ahead of the first compiled grouped append, that the compiled step owns this
-	// executor's table: no runner takes the pipeline over mid-query, so the table may use the cheaper
-	// producer-local hash. A per-op-per-thread once-flag keeps the declaration off the per-chunk loop.
-	if (runtime.TryMarkOnce(ExecutionRegionRuntimeOnceFlag::CANONICAL_GROUP_HASH_DECLARED, op_idx)) {
-		grouped_state.state->SetRequireCanonicalGroupHash(false);
-	}
 	auto &reserve = op.aggregate_update.plan.group_reserve;
 	if (!reserve.CanReserve() && runtime_group_count == 0) {
 		return false;
