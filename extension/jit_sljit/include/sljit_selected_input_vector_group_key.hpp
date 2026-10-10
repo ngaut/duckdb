@@ -97,22 +97,21 @@ inline uhugeint_t SljitCompressSelectedStringGroup<uhugeint_t>(const string_t &s
 #if DUCKDB_IS_BIG_ENDIAN
 	return StringCompressValue<uhugeint_t>(source);
 #else
+	if (string_t::INLINE_LENGTH < sizeof(uint64_t)) {
+		// without string inlining a short string lives out of line, where only its own bytes are readable
+		return StringCompressValue<uhugeint_t>(source);
+	}
+	// Fixed-width loads instead of length-sized copies. An inlined string is zero-padded to its inline area, so its
+	// loads read exactly its bytes; a longer string (13 to 15 bytes) loads the 8 bytes ending at its last byte and
+	// shifts out the ones its head already holds.
 	const auto length = source.GetSize();
 	D_ASSERT(length < sizeof(uhugeint_t));
-	const auto data = source.GetDataUnsafe();
-	uint64_t lower = length;
-	uint64_t upper = 0;
-	if (length >= sizeof(uint64_t)) {
-		upper = BSWAP64(Load<uint64_t>(const_data_ptr_cast(data)));
-		uint64_t tail = 0;
-		std::memcpy(&tail, data + sizeof(uint64_t), length - sizeof(uint64_t));
-		lower |= BSWAP64(tail);
-	} else if (length > 0) {
-		uint64_t head = 0;
-		std::memcpy(&head, data, length);
-		upper = BSWAP64(head);
-	}
-	return uhugeint_t(upper, lower);
+	const auto data = const_data_ptr_cast(source.GetDataUnsafe());
+	const auto head = Load<uint64_t>(data);
+	const uint64_t tail = source.IsInlined()
+	                          ? Load<uint32_t>(data + sizeof(uint64_t))
+	                          : Load<uint64_t>(data + length - sizeof(uint64_t)) >> (8 * (sizeof(uhugeint_t) - length));
+	return uhugeint_t(BSWAP64(head), length | BSWAP64(tail));
 #endif
 }
 
