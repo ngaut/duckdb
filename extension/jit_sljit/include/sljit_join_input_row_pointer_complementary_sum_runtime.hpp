@@ -264,49 +264,51 @@ static bool SljitTryBuildJoinInputRowPointerComplementarySumPlan(const Execution
 	return true;
 }
 
-static bool SljitComplementarySumRHSFieldMatches(data_ptr_t row_pointer, const SljitComplementarySumRHSField &field,
-                                                 const SljitStringSetComplementarySumDescriptor &classification) {
-	auto source = row_pointer + field.source.layout_offset;
+//! Physical equality of fixed-width values. uhugeint_t's operator== is an out-of-line DuckDB API call; comparing the
+//! bytes inlines at every width.
+template <class T>
+static inline bool SljitPhysicalEquals(const T &left, const T &right) {
+	return memcmp(&left, &right, sizeof(T)) == 0;
+}
+
+template <class T>
+static inline bool SljitCompressedEqualsEitherConstant(const_data_ptr_t value,
+                                                       const SljitComplementarySumRHSField &field) {
+	const auto compressed = Load<T>(value);
+	return SljitPhysicalEquals(compressed, Load<T>(field.compressed_constants[0].data())) ||
+	       SljitPhysicalEquals(compressed, Load<T>(field.compressed_constants[1].data()));
+}
+
+//! Whether a valid predicate value stored at value is one of the two classified constants. A compressed field stores
+//! the packed physical value; an uncompressed one stores the string.
+static inline bool SljitComplementarySumValueMatches(const_data_ptr_t value, const SljitComplementarySumRHSField &field,
+                                                     const SljitStringSetComplementarySumDescriptor &classification) {
 	switch (field.compressed_size) {
-	case sizeof(uint8_t): {
-		const auto value = Load<uint8_t>(source);
-		return value == Load<uint8_t>(field.compressed_constants[0].data()) ||
-		       value == Load<uint8_t>(field.compressed_constants[1].data());
+	case 0: {
+		auto predicate = Load<string_t>(value);
+		return SljitStringEqualsEitherConstant(predicate, classification.constants[0], classification.signatures[0],
+		                                       classification.constants[1], classification.signatures[1]);
 	}
-	case sizeof(uint16_t): {
-		const auto value = Load<uint16_t>(source);
-		return value == Load<uint16_t>(field.compressed_constants[0].data()) ||
-		       value == Load<uint16_t>(field.compressed_constants[1].data());
-	}
-	case sizeof(uint32_t): {
-		const auto value = Load<uint32_t>(source);
-		return value == Load<uint32_t>(field.compressed_constants[0].data()) ||
-		       value == Load<uint32_t>(field.compressed_constants[1].data());
-	}
-	case sizeof(uint64_t): {
-		const auto value = Load<uint64_t>(source);
-		return value == Load<uint64_t>(field.compressed_constants[0].data()) ||
-		       value == Load<uint64_t>(field.compressed_constants[1].data());
-	}
-	case sizeof(uhugeint_t): {
-		const auto value = Load<uhugeint_t>(source);
-		return value == Load<uhugeint_t>(field.compressed_constants[0].data()) ||
-		       value == Load<uhugeint_t>(field.compressed_constants[1].data());
-	}
-	case 0:
-		break;
+	case sizeof(uint8_t):
+		return SljitCompressedEqualsEitherConstant<uint8_t>(value, field);
+	case sizeof(uint16_t):
+		return SljitCompressedEqualsEitherConstant<uint16_t>(value, field);
+	case sizeof(uint32_t):
+		return SljitCompressedEqualsEitherConstant<uint32_t>(value, field);
+	case sizeof(uint64_t):
+		return SljitCompressedEqualsEitherConstant<uint64_t>(value, field);
+	case sizeof(uhugeint_t):
+		return SljitCompressedEqualsEitherConstant<uhugeint_t>(value, field);
 	default:
 		throw InternalException("SLJIT complementary sum has an unsupported compressed field width");
 	}
-	auto predicate = Load<string_t>(source);
-	return SljitStringEqualsEitherConstant(predicate, classification.constants[0], classification.signatures[0],
-	                                       classification.constants[1], classification.signatures[1]);
 }
 
 struct SljitGenericComplementarySumRHSMatcher {
 	bool Match(data_ptr_t row_pointer, bool &valid) const {
 		valid = SljitHashJoinRHSFixedColumnSourceIsValid(row_pointer, field.source);
-		return valid && SljitComplementarySumRHSFieldMatches(row_pointer, field, classification);
+		return valid &&
+		       SljitComplementarySumValueMatches(row_pointer + field.source.layout_offset, field, classification);
 	}
 
 	const SljitComplementarySumRHSField &field;
@@ -320,7 +322,7 @@ struct SljitAllValidUhugeintComplementarySumRHSMatcher {
 			return false;
 		}
 		const auto value = Load<uhugeint_t>(row_pointer + layout_offset);
-		return value == constant0 || value == constant1;
+		return SljitPhysicalEquals(value, constant0) || SljitPhysicalEquals(value, constant1);
 	}
 
 	idx_t layout_offset;

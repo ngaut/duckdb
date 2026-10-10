@@ -215,41 +215,8 @@ struct SljitPerfectHashDictionaryComplementarySumRHSMatcher {
 
 private:
 	bool MatchKnownValid(idx_t dictionary_idx) const {
-		if (field.compressed_size != 0) {
-			const auto value = data + dictionary_idx * field.compressed_size;
-			switch (field.compressed_size) {
-			case sizeof(uint8_t): {
-				const auto compressed = Load<uint8_t>(value);
-				return compressed == Load<uint8_t>(field.compressed_constants[0].data()) ||
-				       compressed == Load<uint8_t>(field.compressed_constants[1].data());
-			}
-			case sizeof(uint16_t): {
-				const auto compressed = Load<uint16_t>(value);
-				return compressed == Load<uint16_t>(field.compressed_constants[0].data()) ||
-				       compressed == Load<uint16_t>(field.compressed_constants[1].data());
-			}
-			case sizeof(uint32_t): {
-				const auto compressed = Load<uint32_t>(value);
-				return compressed == Load<uint32_t>(field.compressed_constants[0].data()) ||
-				       compressed == Load<uint32_t>(field.compressed_constants[1].data());
-			}
-			case sizeof(uint64_t): {
-				const auto compressed = Load<uint64_t>(value);
-				return compressed == Load<uint64_t>(field.compressed_constants[0].data()) ||
-				       compressed == Load<uint64_t>(field.compressed_constants[1].data());
-			}
-			case sizeof(uhugeint_t): {
-				const auto compressed = Load<uhugeint_t>(value);
-				return compressed == Load<uhugeint_t>(field.compressed_constants[0].data()) ||
-				       compressed == Load<uhugeint_t>(field.compressed_constants[1].data());
-			}
-			default:
-				throw InternalException("SLJIT direct perfect probe has an unsupported compressed predicate width");
-			}
-		}
-		const auto predicate = reinterpret_cast<const string_t *>(data)[dictionary_idx];
-		return SljitStringEqualsEitherConstant(predicate, classification.constants[0], classification.signatures[0],
-		                                       classification.constants[1], classification.signatures[1]);
+		const auto value_size = field.compressed_size != 0 ? field.compressed_size : sizeof(string_t);
+		return SljitComplementarySumValueMatches(data + dictionary_idx * value_size, field, classification);
 	}
 
 public:
@@ -285,7 +252,7 @@ struct SljitPerfectHashAllValidCompressedRHSMatcher {
 
 	bool MatchAllValid(sel_t build_idx) const {
 		const auto value = data[NumericCast<idx_t>(build_idx)];
-		return value == first || value == second;
+		return SljitPhysicalEquals(value, first) || SljitPhysicalEquals(value, second);
 	}
 
 	const STORAGE *data = nullptr;
