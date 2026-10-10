@@ -23,8 +23,9 @@ CREATE TABLE tbl AS SELECT range i, range j FROM range(1000000)
 statement ok
 SET threads=4
 
+# 4 threads need room for their own partition buffers: at 70mb even jit_policy='off' runs out of memory in some runs
 statement ok
-SET memory_limit='70mb'
+SET memory_limit='90mb'
 
 # probe all hash tables in a single pipeline, so their combined size forces external joins
 statement ok
