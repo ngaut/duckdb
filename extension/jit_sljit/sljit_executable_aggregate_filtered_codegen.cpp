@@ -147,6 +147,13 @@ bool SljitTryBuildFilteredAggregateUpdate(SljitExecutableRegionOp &filter_op, Sl
 			                                         &combined_source_min_values, &combined_source_max_values,
 			                                         &input_min_values, &input_max_values);
 		}
+		vector<SljitNativeRegionExpressionPlan> codegen_group_expressions;
+		if (!SljitRemapGroupExpressionsToCombinedInputs(
+		        aggregate_update.plan.group_expressions, combined_sources, codegen_group_expressions,
+		        &combined_source_not_null, &input_not_null, &combined_source_min_values, &combined_source_max_values,
+		        &input_min_values, &input_max_values)) {
+			return true;
+		}
 
 		filtered_update.input_source_indices = combined_sources;
 		filtered_update.input_source_not_null = combined_source_not_null;
@@ -161,12 +168,17 @@ bool SljitTryBuildFilteredAggregateUpdate(SljitExecutableRegionOp &filter_op, Sl
 			payload.plan.expression_tree_source_indices = combined_sources;
 			codegen_payloads.push_back(payload.plan.Copy(true, false));
 		}
+		for (auto &group_expression : codegen_group_expressions) {
+			if (group_expression.kind == SljitNativeRegionExpressionKind::TYPED_EXPRESSION_TREE) {
+				group_expression.expression_tree_source_indices = combined_sources;
+			}
+		}
 
 		SljitNativeAggregateUpdateFunction function = nullptr;
 		string filtered_error;
 		auto code = BuildSljitNativeFilteredPerfectHashGroupedFusedAggregateUpdate(
 		    *filtered_update.filter.plan.expression_tree, codegen_payloads, aggregate_update.plan.sink_info.aggregates,
-		    aggregate_update.plan.sink_info.groups, aggregate_update.plan.group_expressions,
+		    aggregate_update.plan.sink_info.groups, codegen_group_expressions,
 		    aggregate_update.plan.sink_info.aggregate_contract, combined_source_not_null, combined_source_min_values,
 		    combined_source_max_values, function, filtered_error);
 		auto compiled = SljitCompiledFunction<SljitNativeAggregateUpdateFunction>::TryCreate(std::move(code), function);

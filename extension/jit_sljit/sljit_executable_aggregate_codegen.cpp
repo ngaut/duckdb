@@ -76,22 +76,11 @@ static bool TryBuildFusedAggregatePayloads(const SljitNativeAggregateUpdatePlan 
 		                                         input_min_values, input_max_values);
 		payloads.executable_payloads.push_back(std::move(executable_payload));
 	}
-	if (group_expressions) {
-		payloads.codegen_group_expressions.reserve(group_expressions->size());
-		for (auto &group_expression : *group_expressions) {
-			auto codegen_group = group_expression.Copy(true, false);
-			if (codegen_group.kind == SljitNativeRegionExpressionKind::TYPED_EXPRESSION_TREE) {
-				if (!codegen_group.expression_tree || codegen_group.expression_tree_source_indices.empty()) {
-					return false;
-				}
-				vector<idx_t> local_sources = codegen_group.expression_tree_source_indices;
-				RemapSljitExpressionTreeToCombinedInputs(
-				    *codegen_group.expression_tree, local_sources, payloads.combined_sources, combined_source_not_null,
-				    input_not_null, combined_source_min_values, combined_source_max_values, input_min_values,
-				    input_max_values);
-			}
-			payloads.codegen_group_expressions.push_back(std::move(codegen_group));
-		}
+	if (group_expressions && !SljitRemapGroupExpressionsToCombinedInputs(
+	                             *group_expressions, payloads.combined_sources, payloads.codegen_group_expressions,
+	                             combined_source_not_null, input_not_null, combined_source_min_values,
+	                             combined_source_max_values, input_min_values, input_max_values)) {
+		return false;
 	}
 	for (auto &payload : payloads.executable_payloads) {
 		payload.input_source_indices = payloads.combined_sources;

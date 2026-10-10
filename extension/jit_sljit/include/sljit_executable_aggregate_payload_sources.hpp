@@ -89,4 +89,31 @@ static void RemapSljitExpressionTreeToCombinedInputs(
 	}
 }
 
+//! Copies the group expressions of a fused kernel that reads every input through combined_sources: the references of a
+//! typed group expression join combined_sources as the payloads' references do, so a computed key reads its own column
+static bool SljitRemapGroupExpressionsToCombinedInputs(
+    const vector<SljitNativeRegionExpressionPlan> &group_expressions, vector<idx_t> &combined_sources,
+    vector<SljitNativeRegionExpressionPlan> &result, vector<bool> *combined_source_not_null = nullptr,
+    const vector<bool> *input_not_null = nullptr, vector<Value> *combined_source_min_values = nullptr,
+    vector<Value> *combined_source_max_values = nullptr, const vector<Value> *input_min_values = nullptr,
+    const vector<Value> *input_max_values = nullptr) {
+	result.clear();
+	result.reserve(group_expressions.size());
+	for (auto &group_expression : group_expressions) {
+		auto codegen_group = group_expression.Copy(true, false);
+		if (codegen_group.kind == SljitNativeRegionExpressionKind::TYPED_EXPRESSION_TREE) {
+			if (!codegen_group.expression_tree || codegen_group.expression_tree_source_indices.empty()) {
+				return false;
+			}
+			vector<idx_t> local_sources = codegen_group.expression_tree_source_indices;
+			RemapSljitExpressionTreeToCombinedInputs(*codegen_group.expression_tree, local_sources, combined_sources,
+			                                         combined_source_not_null, input_not_null,
+			                                         combined_source_min_values, combined_source_max_values,
+			                                         input_min_values, input_max_values);
+		}
+		result.push_back(std::move(codegen_group));
+	}
+	return true;
+}
+
 } // namespace duckdb
