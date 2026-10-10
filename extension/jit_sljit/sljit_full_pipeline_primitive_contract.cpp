@@ -125,6 +125,16 @@ bool SljitNativeTailCanConsumeTail(const vector<SljitExecutableRegionOp> &ops, i
 			return false;
 		}
 	}
+	// The tail hands DuckDB's aggregate sink the layout the ops before it produce. An aggregate whose payloads absorbed
+	// a projection reads that projection's input instead of its output, and the absorbed expressions are gone from the
+	// tail: matching types cannot tell (p_size * 3) % 1000 from the p_size it was computed from
+	for (idx_t op_idx = tail_start_idx; op_idx < ops.size(); op_idx++) {
+		auto &op = ops[op_idx];
+		if (op.kind == SljitNativeRegionOpKind::AGGREGATE_UPDATE &&
+		    op.aggregate_update.plan.PayloadsWereComposedThroughProjection()) {
+			return false;
+		}
+	}
 	return true;
 }
 
