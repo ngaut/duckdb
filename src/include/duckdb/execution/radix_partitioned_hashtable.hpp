@@ -53,13 +53,6 @@ public:
 
 	void Sink(ExecutionContext &context, DataChunk &chunk, OperatorSinkInput &input, DataChunk &aggregate_input_chunk,
 	          const unsafe_vector<idx_t> &filter) const;
-	void SinkSelected(ExecutionContext &context, DataChunk &chunk, OperatorSinkInput &input,
-	                  DataChunk &aggregate_input_chunk, const unsafe_vector<idx_t> &filter,
-	                  const SelectionVector &selection, idx_t count) const;
-	bool TrySinkGroupsFast(ExecutionContext &context, DataChunk &chunk, OperatorSinkInput &input,
-	                       const SelectionVector *selection = nullptr, idx_t count = DConstants::INVALID_INDEX,
-	                       optional_ptr<ExecutionOperatorStageRecorder> recorder = nullptr,
-	                       idx_t estimated_input_count = 0, idx_t distinct_key_cardinality_upper_bound = 0) const;
 	void ResolveStateAddresses(ExecutionContext &context, DataChunk &chunk, OperatorSinkInput &input,
 	                           Vector &addresses_out, optional_ptr<ExecutionOperatorStageRecorder> recorder = nullptr,
 	                           bool prefer_fast_lookup = false) const;

@@ -13,11 +13,10 @@
 namespace duckdb {
 
 template <class KERNEL>
-static ExecutionOperatorBindResult SljitExecuteNativeHashJoinProbeWithScratch(
+static void SljitExecuteNativeHashJoinProbeWithScratch(
     KERNEL &kernel, ExecutionRegionRuntime &runtime, ExecutionOperatorRuntime &native_runtime,
     SljitRegionExecutionScratch &scratch, idx_t hash_join_idx, SljitExecutableRegionOp &hash_join_op, DataChunk &input,
-    DataChunk &output, SljitHashJoinProbeDrainState &state, string &deferred_reason,
-    bool source_key0_int64_to_int32_unchecked = false,
+    DataChunk &output, SljitHashJoinProbeDrainState &state, bool source_key0_int64_to_int32_unchecked = false,
     SljitHashJoinProbeOutputContract output_contract = SljitHashJoinProbeOutputContract::MATERIALIZED_OUTPUT,
     optional_ptr<const SljitHashJoinProbeInputRemap> input_remap = nullptr) {
 	return SljitExecuteNativeHashJoinProbe(
@@ -31,23 +30,21 @@ static ExecutionOperatorBindResult SljitExecuteNativeHashJoinProbeWithScratch(
 	                                                         : nullptr,
 	    hash_join_op.hash_join_probe.plan.residual_predicate ? &scratch.HashJoinResidualRowPointers(hash_join_idx)
 	                                                         : nullptr,
-	    state, deferred_reason, source_key0_int64_to_int32_unchecked, output_contract, input_remap);
+	    state, source_key0_int64_to_int32_unchecked, output_contract, input_remap);
 }
 
 template <class KERNEL>
-static ExecutionOperatorBindResult SljitExecuteRecordedNativeHashJoinProbeWithScratch(
+static void SljitExecuteRecordedNativeHashJoinProbeWithScratch(
     KERNEL &kernel, ExecutionRegionRuntime &runtime, ExecutionOperatorRuntime &native_runtime,
     SljitRegionExecutionScratch &scratch, idx_t hash_join_idx, SljitExecutableRegionOp &hash_join_op, DataChunk &input,
-    DataChunk &output, SljitHashJoinProbeDrainState &state, string &deferred_reason,
-    bool source_key0_int64_to_int32_unchecked = false,
+    DataChunk &output, SljitHashJoinProbeDrainState &state, bool source_key0_int64_to_int32_unchecked = false,
     SljitHashJoinProbeOutputContract output_contract = SljitHashJoinProbeOutputContract::MATERIALIZED_OUTPUT,
     optional_ptr<const SljitHashJoinProbeInputRemap> input_remap = nullptr) {
 	auto stage_start = SljitRegionStageStart(runtime);
-	auto bind_result = SljitExecuteNativeHashJoinProbeWithScratch(
-	    kernel, runtime, native_runtime, scratch, hash_join_idx, hash_join_op, input, output, state, deferred_reason,
-	    source_key0_int64_to_int32_unchecked, output_contract, input_remap);
+	SljitExecuteNativeHashJoinProbeWithScratch(kernel, runtime, native_runtime, scratch, hash_join_idx, hash_join_op,
+	                                           input, output, state, source_key0_int64_to_int32_unchecked,
+	                                           output_contract, input_remap);
 	RecordSljitRegionStageRuntime(runtime, hash_join_idx, hash_join_op.kind, stage_start);
-	return bind_result;
 }
 
 template <class OWNER>
@@ -61,36 +58,31 @@ struct SljitRecordedHashJoinProbeCallback {
 		return owner.ExactSourceFilterIdentity(hash_join_idx);
 	}
 
-	ExecutionOperatorBindResult Execute(SljitRegionExecutionScratch &scratch, idx_t hash_join_idx,
-	                                    SljitExecutableRegionOp &hash_join_op, DataChunk &input, DataChunk &output,
-	                                    SljitHashJoinProbeDrainState &state, string &deferred_reason,
-	                                    bool source_key0_int64_to_int32_unchecked,
-	                                    SljitHashJoinProbeOutputContract output_contract,
-	                                    optional_ptr<const SljitHashJoinProbeInputRemap> input_remap = nullptr) {
+	void Execute(SljitRegionExecutionScratch &scratch, idx_t hash_join_idx, SljitExecutableRegionOp &hash_join_op,
+	             DataChunk &input, DataChunk &output, SljitHashJoinProbeDrainState &state,
+	             bool source_key0_int64_to_int32_unchecked, SljitHashJoinProbeOutputContract output_contract,
+	             optional_ptr<const SljitHashJoinProbeInputRemap> input_remap = nullptr) {
 		return SljitExecuteRecordedNativeHashJoinProbeWithScratch(
-		    owner, runtime, native_runtime, scratch, hash_join_idx, hash_join_op, input, output, state, deferred_reason,
+		    owner, runtime, native_runtime, scratch, hash_join_idx, hash_join_op, input, output, state,
 		    source_key0_int64_to_int32_unchecked, output_contract, input_remap);
 	}
 
-	ExecutionOperatorBindResult operator()(SljitRegionExecutionScratch &scratch, idx_t hash_join_idx,
-	                                       SljitExecutableRegionOp &hash_join_op, DataChunk &input, DataChunk &output,
-	                                       SljitHashJoinProbeDrainState &state, string &deferred_reason,
-	                                       bool source_key0_int64_to_int32_unchecked,
-	                                       SljitHashJoinProbeOutputContract output_contract,
-	                                       optional_ptr<const SljitHashJoinProbeInputRemap> input_remap = nullptr) {
-		return Execute(scratch, hash_join_idx, hash_join_op, input, output, state, deferred_reason,
-		               source_key0_int64_to_int32_unchecked, output_contract, input_remap);
+	void operator()(SljitRegionExecutionScratch &scratch, idx_t hash_join_idx, SljitExecutableRegionOp &hash_join_op,
+	                DataChunk &input, DataChunk &output, SljitHashJoinProbeDrainState &state,
+	                bool source_key0_int64_to_int32_unchecked, SljitHashJoinProbeOutputContract output_contract,
+	                optional_ptr<const SljitHashJoinProbeInputRemap> input_remap = nullptr) {
+		return Execute(scratch, hash_join_idx, hash_join_op, input, output, state, source_key0_int64_to_int32_unchecked,
+		               output_contract, input_remap);
 	}
 
-	ExecutionOperatorBindResult operator()(idx_t hash_join_idx, SljitExecutableRegionOp &hash_join_op, DataChunk &input,
-	                                       DataChunk &output, SljitHashJoinProbeDrainState &state,
-	                                       string &deferred_reason, bool source_key0_int64_to_int32_unchecked,
-	                                       SljitHashJoinProbeOutputContract output_contract,
-	                                       optional_ptr<const SljitHashJoinProbeInputRemap> input_remap = nullptr) {
+	void operator()(idx_t hash_join_idx, SljitExecutableRegionOp &hash_join_op, DataChunk &input, DataChunk &output,
+	                SljitHashJoinProbeDrainState &state, bool source_key0_int64_to_int32_unchecked,
+	                SljitHashJoinProbeOutputContract output_contract,
+	                optional_ptr<const SljitHashJoinProbeInputRemap> input_remap = nullptr) {
 		if (!fixed_scratch) {
 			throw InternalException("SLJIT recorded hash join probe callback requires fixed scratch");
 		}
-		return Execute(*fixed_scratch, hash_join_idx, hash_join_op, input, output, state, deferred_reason,
+		return Execute(*fixed_scratch, hash_join_idx, hash_join_op, input, output, state,
 		               source_key0_int64_to_int32_unchecked, output_contract, input_remap);
 	}
 };
@@ -110,23 +102,18 @@ SljitMakeFixedScratchRecordedHashJoinProbeCallback(OWNER &owner, ExecutionRegion
 	return {owner, runtime, native_runtime, optional_ptr<SljitRegionExecutionScratch>(&scratch)};
 }
 
-template <class SCRATCH, class EXECUTE_HASH_JOIN_PROBE, class HANDLE_OUTPUT, class HANDLE_DEFER>
+template <class SCRATCH, class EXECUTE_HASH_JOIN_PROBE, class HANDLE_OUTPUT>
 static bool SljitDrainHashJoinProbeOutputsWithState(
     SCRATCH &scratch, idx_t hash_join_idx, SljitExecutableRegionOp &hash_join_op, DataChunk &input, DataChunk &output,
-    EXECUTE_HASH_JOIN_PROBE &&execute_hash_join_probe, HANDLE_OUTPUT &&handle_output, HANDLE_DEFER &&handle_defer,
+    EXECUTE_HASH_JOIN_PROBE &&execute_hash_join_probe, HANDLE_OUTPUT &&handle_output,
     bool source_key0_int64_to_int32_unchecked = false,
     SljitHashJoinProbeOutputContract output_contract = SljitHashJoinProbeOutputContract::MATERIALIZED_OUTPUT,
     optional_ptr<const SljitHashJoinProbeInputRemap> input_remap = nullptr) {
 	SljitHashJoinProbeDrainState state;
 	do {
 		output.Reset();
-		string deferred_reason;
-		auto bind_result =
-		    execute_hash_join_probe(scratch, hash_join_idx, hash_join_op, input, output, state, deferred_reason,
-		                            source_key0_int64_to_int32_unchecked, output_contract, input_remap);
-		if (bind_result == ExecutionOperatorBindResult::DEFERRED) {
-			return handle_defer(deferred_reason);
-		}
+		execute_hash_join_probe(scratch, hash_join_idx, hash_join_op, input, output, state,
+		                        source_key0_int64_to_int32_unchecked, output_contract, input_remap);
 		if (output.size() != 0 && handle_output(output, state)) {
 			return true;
 		}
@@ -134,20 +121,20 @@ static bool SljitDrainHashJoinProbeOutputsWithState(
 	return false;
 }
 
-template <class SCRATCH, class EXECUTE_HASH_JOIN_PROBE, class HANDLE_OUTPUT, class HANDLE_DEFER>
+template <class SCRATCH, class EXECUTE_HASH_JOIN_PROBE, class HANDLE_OUTPUT>
 static bool SljitDrainHashJoinProbeOutputs(
     SCRATCH &scratch, idx_t hash_join_idx, SljitExecutableRegionOp &hash_join_op, DataChunk &input, DataChunk &output,
-    EXECUTE_HASH_JOIN_PROBE &&execute_hash_join_probe, HANDLE_OUTPUT &&handle_output, HANDLE_DEFER &&handle_defer,
+    EXECUTE_HASH_JOIN_PROBE &&execute_hash_join_probe, HANDLE_OUTPUT &&handle_output,
     bool source_key0_int64_to_int32_unchecked = false,
     SljitHashJoinProbeOutputContract output_contract = SljitHashJoinProbeOutputContract::MATERIALIZED_OUTPUT,
     optional_ptr<const SljitHashJoinProbeInputRemap> input_remap = nullptr) {
 	auto handle_output_without_state = [&](DataChunk &output, SljitHashJoinProbeDrainState &) {
 		return handle_output(output);
 	};
-	return SljitDrainHashJoinProbeOutputsWithState(
-	    scratch, hash_join_idx, hash_join_op, input, output,
-	    std::forward<EXECUTE_HASH_JOIN_PROBE>(execute_hash_join_probe), handle_output_without_state,
-	    std::forward<HANDLE_DEFER>(handle_defer), source_key0_int64_to_int32_unchecked, output_contract, input_remap);
+	return SljitDrainHashJoinProbeOutputsWithState(scratch, hash_join_idx, hash_join_op, input, output,
+	                                               std::forward<EXECUTE_HASH_JOIN_PROBE>(execute_hash_join_probe),
+	                                               handle_output_without_state, source_key0_int64_to_int32_unchecked,
+	                                               output_contract, input_remap);
 }
 
 } // namespace duckdb

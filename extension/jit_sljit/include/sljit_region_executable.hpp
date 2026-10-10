@@ -196,10 +196,6 @@ struct SljitGroupedAggregateDirectUpdatePlan {
 	void Clear() {
 		kind = SljitGroupedAggregateDirectUpdatePlanKind::NONE;
 	}
-
-	bool DirectStateAddressPayloadOnly() const {
-		return kind == SljitGroupedAggregateDirectUpdatePlanKind::DIRECT_STATE_ADDRESS_PAYLOAD_ONLY;
-	}
 };
 
 struct SljitExecutablePrimitiveRunSpecialization {

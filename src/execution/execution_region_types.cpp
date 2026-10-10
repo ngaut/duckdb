@@ -895,14 +895,6 @@ void ExecutionRegionLoweringPlan::AddBackendDirectHashJoinBuildCapability() {
 	capability_facts.backend_direct_hash_join_build_count++;
 }
 
-void ExecutionRegionLoweringPlan::AddBackendNestedLoopJoinProbeCapability() {
-	capability_facts.backend_nested_loop_join_probe_count++;
-}
-
-void ExecutionRegionLoweringPlan::AddBackendNestedLoopJoinBuildCapability() {
-	capability_facts.backend_nested_loop_join_build_count++;
-}
-
 void ExecutionRegionLoweringPlan::AddBackendAggregateUpdateCapability(ExecutionRegionAggregateOperatorKind kind,
                                                                       bool primitive_payloads,
                                                                       bool grouped_state_addresses,
@@ -931,10 +923,6 @@ void ExecutionRegionLoweringPlan::AddBackendAggregateUpdateCapability(ExecutionR
 			capability_facts.backend_native_state_address_lookup_count++;
 		}
 	}
-}
-
-void ExecutionRegionLoweringPlan::AddBackendDistinctKeyFastInsertCapability() {
-	capability_facts.backend_distinct_key_fast_insert_count++;
 }
 
 void ExecutionRegionLoweringPlan::AddBackendReferenceOnlyStringPerfectHashAggregateCapability() {
@@ -983,10 +971,6 @@ void ExecutionRegionLoweringPlan::SetOperatorStageIR(string stage_ir) {
 
 idx_t ExecutionRegionLoweringPlan::NativeCount() const {
 	return native_count;
-}
-
-idx_t ExecutionRegionLoweringPlan::BoundaryCount() const {
-	return boundary_count;
 }
 
 idx_t ExecutionRegionLoweringPlan::SelectedStageCount() const {
@@ -1210,10 +1194,6 @@ static void AppendExecutionRegionBackendCapabilityFacts(string &result, const Ex
 	                                     first_join);
 	AppendExecutionRegionCapabilityCount(result, "backend_join", "direct_hash_build",
 	                                     facts.backend_direct_hash_join_build_count, first_join);
-	AppendExecutionRegionCapabilityCount(result, "backend_join", "nested_loop_probe",
-	                                     facts.backend_nested_loop_join_probe_count, first_join);
-	AppendExecutionRegionCapabilityCount(result, "backend_join", "nested_loop_build",
-	                                     facts.backend_nested_loop_join_build_count, first_join);
 
 	bool first_aggregate = true;
 	AppendExecutionRegionCapabilityCount(result, "backend_aggregate", "hash_update",
@@ -1224,8 +1204,6 @@ static void AppendExecutionRegionBackendCapabilityFacts(string &result, const Ex
 	                                     facts.backend_ungrouped_aggregate_update_count, first_aggregate);
 	AppendExecutionRegionCapabilityCount(result, "backend_aggregate", "primitive_payload_update",
 	                                     facts.backend_primitive_aggregate_payload_update_count, first_aggregate);
-	AppendExecutionRegionCapabilityCount(result, "backend_aggregate", "distinct_key_fast_insert",
-	                                     facts.backend_distinct_key_fast_insert_count, first_aggregate);
 	AppendExecutionRegionCapabilityCount(result, "backend_aggregate", "grouped_state_address_lookup",
 	                                     facts.backend_grouped_state_address_lookup_count, first_aggregate);
 	AppendExecutionRegionCapabilityCount(result, "backend_aggregate", "generated_perfect_hash_lookup",

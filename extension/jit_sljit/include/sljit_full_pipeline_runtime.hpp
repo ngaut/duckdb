@@ -38,11 +38,4 @@ static bool SljitStopFullPipeline(ExecutionRegionResult &result, ExecutionRegion
 	return true;
 }
 
-//! A native operator the kernel delegates to is not ready, although the runner found every one ready before the first
-//! source fetch and a running pipeline never changes runners: an invariant violation, not a fallback
-[[noreturn]] static void SljitThrowNativeOperatorNotReady(const string &reason) {
-	throw InternalException("SLJIT kernel delegates to a native operator that is not ready: %s",
-	                        reason.empty() ? string("no reason given") : reason);
-}
-
 } // namespace duckdb

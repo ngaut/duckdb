@@ -46,11 +46,8 @@ public:
 		auto handle_output = [&](DataChunk &output) {
 			return AppendBatch(step_idx, step, output, direct_handoff, execute_output_batch);
 		};
-		auto handle_defer = [&](string &deferred_reason) -> bool {
-			SljitThrowNativeOperatorNotReady(deferred_reason);
-		};
 		return SljitDrainHashJoinProbeOutputs(scratch, hash_join_idx, hash_join_op, join_input, join_output,
-		                                      execute_hash_join_probe, handle_output, handle_defer,
+		                                      execute_hash_join_probe, handle_output,
 		                                      primitive.source_key0_int64_to_int32_unchecked);
 	}
 

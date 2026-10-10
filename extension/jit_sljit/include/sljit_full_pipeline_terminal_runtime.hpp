@@ -85,7 +85,7 @@ public:
 
 	bool Execute(ExecutionRegionRuntime &runtime, ExecutionRegionResult &result, vector<SljitExecutableRegionOp> &ops,
 	             SljitRegionExecutionScratch &scratch, const SljitFullPipelinePrimitiveStep &terminal_step,
-	             const SljitRuntimeBatchView &input, bool have_more_output) {
+	             const SljitRuntimeBatchView &input) {
 		switch (terminal_step.kind) {
 		case SljitFullPipelinePrimitiveKind::UNGROUPED_AGGREGATE_UPDATE:
 			return state.ungrouped_aggregate_update.Execute(runtime, result, ops, scratch,
@@ -93,11 +93,9 @@ public:
 		case SljitFullPipelinePrimitiveKind::GROUPED_AGGREGATE_UPDATE:
 			return ExecuteGroupedAggregateUpdate(runtime, result, ops, scratch, terminal_step, input);
 		case SljitFullPipelinePrimitiveKind::POST_JOIN_PROJECTION_AGGREGATE_UPDATE:
-			(void)have_more_output;
 			return state.post_join_projection_aggregate.Execute(runtime, result, ops, scratch,
 			                                                    terminal_step.post_join_projection_aggregate, input);
 		case SljitFullPipelinePrimitiveKind::HASH_JOIN_BUILD_SINK:
-			(void)have_more_output;
 			return ExecuteHashJoinBuildSink(runtime, result, ops, scratch, terminal_step, input);
 		case SljitFullPipelinePrimitiveKind::NATIVE_TAIL_DELEGATION:
 			return native_tail_delegation.Execute(runtime, result, ops, scratch, terminal_step, input);

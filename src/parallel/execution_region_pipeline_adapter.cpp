@@ -17,10 +17,6 @@ ClientContext &ExecutionRegionPipelineAdapter::GetClientContext() const {
 	return executor.context.client;
 }
 
-ExecutionContext &ExecutionRegionPipelineAdapter::GetExecutionContext() const {
-	return executor.context;
-}
-
 Allocator &ExecutionRegionPipelineAdapter::GetAllocator() const {
 	return BufferAllocator::Get(GetClientContext());
 }

@@ -191,12 +191,6 @@ private:
 };
 
 template <class KERNEL>
-static SljitNativePipelineExecutor<KERNEL, SljitNativePipelineTerminalPolicy>
-SljitMakeNativePipelineExecutor(KERNEL &kernel, ExecutionRegionRuntime &runtime, vector<SljitExecutableRegionOp> &ops) {
-	return SljitNativePipelineExecutor<KERNEL, SljitNativePipelineTerminalPolicy>(kernel, runtime, ops);
-}
-
-template <class KERNEL>
 static SljitNativePipelineExecutor<KERNEL, SljitNativeTailDelegationTerminalPolicy>
 SljitMakeNativeTailPipelineExecutor(KERNEL &kernel, ExecutionRegionRuntime &runtime,
                                     vector<SljitExecutableRegionOp> &ops) {
@@ -241,14 +235,10 @@ SljitDrainNativeHashJoinProbe(KERNEL &kernel, ExecutionRegionRuntime &runtime, v
 	SljitHashJoinProbeDrainState state;
 	do {
 		output.Reset();
-		string deferred_reason;
 		auto stage_start = SljitRegionStageStart(runtime);
-		auto bind_result = SljitExecuteNativeHashJoinProbeWithScratch(kernel, runtime, native_runtime, scratch, op_idx,
-		                                                              op, input, output, state, deferred_reason);
+		SljitExecuteNativeHashJoinProbeWithScratch(kernel, runtime, native_runtime, scratch, op_idx, op, input, output,
+		                                           state);
 		RecordSljitRegionStageRuntime(runtime, op_idx, op.kind, stage_start);
-		if (bind_result == ExecutionOperatorBindResult::DEFERRED) {
-			SljitThrowNativeOperatorNotReady(deferred_reason);
-		}
 		if (output.size() == 0) {
 			continue;
 		}

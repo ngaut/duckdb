@@ -20,52 +20,52 @@ struct SljitSourceFetchPrimitiveRuntime {
 	}
 
 	template <class EXECUTE_NEXT_STEP>
-	bool Execute(DataChunk &source_chunk, bool have_more_output, EXECUTE_NEXT_STEP &&execute_next_step) {
+	bool Execute(DataChunk &source_chunk, EXECUTE_NEXT_STEP &&execute_next_step) {
 		if (source_chunk.size() == 0) {
 			return false;
 		}
 		if (!ShouldBatchSourceContractChunk(source_contract_batch.Count(), source_chunk.size())) {
-			return ExecuteSourceChunk(source_chunk, have_more_output, execute_next_step);
+			return ExecuteSourceChunk(source_chunk, execute_next_step);
 		}
 		if (source_contract_batch.Initialized() && source_contract_batch.ColumnCount() != source_chunk.ColumnCount()) {
-			if (Flush(true, execute_next_step)) {
+			if (Flush(execute_next_step)) {
 				return true;
 			}
-			return ExecuteSourceChunk(source_chunk, have_more_output, execute_next_step);
+			return ExecuteSourceChunk(source_chunk, execute_next_step);
 		}
 
 		source_contract_batch.EnsureFromChunk(runtime.GetAllocator(), source_chunk);
 		auto &batch = source_contract_batch.chunk;
-		if (batch.size() + source_chunk.size() > STANDARD_VECTOR_SIZE && Flush(true, execute_next_step)) {
+		if (batch.size() + source_chunk.size() > STANDARD_VECTOR_SIZE && Flush(execute_next_step)) {
 			return true;
 		}
 		if (!ShouldBatchSourceContractChunk(batch.size(), source_chunk.size())) {
-			return ExecuteSourceChunk(source_chunk, have_more_output, execute_next_step);
+			return ExecuteSourceChunk(source_chunk, execute_next_step);
 		}
 
 		if (!SljitTryFastAppendFixedAllValid(batch, source_chunk)) {
 			batch.Append(source_chunk);
 		}
 		if (batch.size() == STANDARD_VECTOR_SIZE) {
-			return Flush(have_more_output, execute_next_step);
+			return Flush(execute_next_step);
 		}
-		return have_more_output ? false : Flush(false, execute_next_step);
+		return false;
 	}
 
 	template <class EXECUTE_NEXT_STEP>
-	bool Flush(bool have_more_output, EXECUTE_NEXT_STEP &&execute_next_step) {
+	bool Flush(EXECUTE_NEXT_STEP &&execute_next_step) {
 		if (source_contract_batch.Empty()) {
 			return false;
 		}
 		auto execute_source_batch = [&](DataChunk &batch) {
-			return ExecuteSourceChunk(batch, have_more_output, execute_next_step);
+			return ExecuteSourceChunk(batch, execute_next_step);
 		};
 		return SljitFlushDataChunkBatch(source_contract_batch.chunk, execute_source_batch);
 	}
 
 private:
 	template <class EXECUTE_NEXT_STEP>
-	bool ExecuteSourceChunk(DataChunk &source_chunk, bool have_more_output, EXECUTE_NEXT_STEP &execute_next_step) {
+	bool ExecuteSourceChunk(DataChunk &source_chunk, EXECUTE_NEXT_STEP &execute_next_step) {
 		if (source_chunk.size() == 0) {
 			return false;
 		}
@@ -73,7 +73,7 @@ private:
 			runtime.RecordJitRuntimeProof(ExecutionRegionJitRuntimeProof::FULL_PIPELINE_OWNERSHIP, source_chunk.size());
 		}
 		auto input_view = SljitRuntimeBatchViewFromChunk(source_chunk);
-		return execute_next_step(input_view, have_more_output);
+		return execute_next_step(input_view);
 	}
 
 	static bool ShouldBatchSourceContractChunk(idx_t pending_count, idx_t chunk_count) {

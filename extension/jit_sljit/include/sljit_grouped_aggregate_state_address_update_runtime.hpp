@@ -83,9 +83,7 @@ static void SljitExecuteGroupedStateTargetSpan(const ExecutionGroupedAggregateSt
 
 static void SljitExecuteGroupedStateTargetBatch(const ExecutionGroupedAggregateStateTargetBatch &targets,
                                                 SljitGroupedStateAddressUpdateState &state) {
-	for (auto &span : targets.Spans()) {
-		SljitExecuteGroupedStateTargetSpan(span, state);
-	}
+	SljitExecuteGroupedStateTargetSpan(targets.InputOrder(), state);
 }
 
 static idx_t SljitDenseGroupDomainReserveCount(const ExecutionDenseGroupDomain &domain) {

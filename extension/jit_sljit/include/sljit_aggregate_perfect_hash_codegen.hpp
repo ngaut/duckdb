@@ -91,7 +91,6 @@ void EmitLoadFusedAggregateGroupData(struct sljit_compiler *compiler, idx_t grou
                                      sljit_s32 group_data_array_base_reg = 0,
                                      bool fuse_nonempty_string_compress_bias = false);
 sljit_s32 SljitPerfectHashGroupDataPointerReg(idx_t group_idx);
-sljit_s32 SljitPerfectHashSourceDataPointerReg(idx_t hoist_idx, bool include_fast_validity_reg);
 
 vector<bool> BuildSljitAggregatePayloadNotNull(const vector<SljitNativeRegionExpressionPlan> &payloads,
                                                const vector<ExecutionRegionAggregateInput> &aggregates,

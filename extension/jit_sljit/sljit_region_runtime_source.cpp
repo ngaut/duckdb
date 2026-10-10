@@ -57,16 +57,6 @@ bool SljitNormalizedSourceAllValid(const UnifiedVectorFormat &format, const sel_
 	return true;
 }
 
-bool SljitSourceVectorRowsAllValid(Vector &source, idx_t count, const SelectionVector *sel) {
-	UnifiedVectorFormat source_format;
-	source.ToUnifiedFormat(source_format);
-	auto source_sel = SljitNormalizedSourceSelectionData(source_format);
-	if (sel) {
-		return SljitNormalizedSourceAllValid(source_format, source_sel, sel, count);
-	}
-	return SljitNormalizedSourceAllValid(source_format, source_sel, count);
-}
-
 const validity_t *SljitNormalizedSourceValidityData(const UnifiedVectorFormat &format, const sel_t *sel, idx_t count) {
 	return SljitNormalizedSourceAllValid(format, sel, count) ? nullptr : format.validity.GetData();
 }

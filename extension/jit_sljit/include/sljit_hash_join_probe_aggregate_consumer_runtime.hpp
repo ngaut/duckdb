@@ -785,19 +785,13 @@ SljitHashJoinAggregateConsumerResult SljitTryExecuteHashJoinAggregateConsumer(
 	    hash_join_op, optional_ptr<const SljitHashJoinProbeInputRemap>(&probe_primitive.input_remap),
 	    SljitHashJoinProbeOutputContract::IDENTITY_PREFERRED_DIRECT_CONSUMER);
 	auto &plan = *contract_view.plan;
-	ExecutionOperatorBinding *binding_ptr = nullptr;
-	auto bind_result = SljitBindRecordedNativeOperator(
-	    runtime, native_runtime, scratch, hash_join_idx, hash_join_op, join_input, *contract_view.operator_info,
-	    "native-operator-runtime-deferred", "SLJIT direct hash join aggregate consumer", binding_ptr,
-	    result.deferred_reason);
-	if (bind_result == ExecutionOperatorBindResult::DEFERRED) {
-		result.status = SljitHashJoinAggregateConsumerStatus::DEFERRED;
-		return result;
-	}
-	if (!binding_ptr || !binding_ptr->ready || !binding_ptr->hash_join_probe.ready) {
+	auto &binding =
+	    SljitBindRecordedNativeOperator(runtime, native_runtime, scratch, hash_join_idx, hash_join_op, join_input,
+	                                    *contract_view.operator_info, "SLJIT direct hash join aggregate consumer");
+	if (!binding.ready || !binding.hash_join_probe.ready) {
 		throw InternalException("SLJIT direct hash join aggregate consumer received an incomplete operator binding");
 	}
-	auto &probe = binding_ptr->hash_join_probe;
+	auto &probe = binding.hash_join_probe;
 	const bool regular_hash_join = probe.layout_kind == ExecutionHashJoinProbeLayoutKind::REGULAR_HASH_TABLE;
 	const bool perfect_hash_join = probe.layout_kind == ExecutionHashJoinProbeLayoutKind::PERFECT_HASH_TABLE;
 	if (probe.empty_build_side) {
@@ -877,17 +871,10 @@ SljitHashJoinAggregateConsumerResult SljitTryExecuteHashJoinAggregateConsumer(
 		auto &join_output = scratch.TemporaryChunk(hash_join_idx);
 		join_output.Reset();
 		SljitHashJoinProbeDrainState state;
-		string deferred_reason;
-		auto probe_result =
-		    execute_hash_join_probe(scratch, hash_join_idx, hash_join_op, probe_input, join_output, state,
-		                            deferred_reason, probe_primitive.source_key0_int64_to_int32_unchecked,
-		                            SljitHashJoinProbeOutputContract::IDENTITY_PREFERRED_DIRECT_CONSUMER,
-		                            optional_ptr<const SljitHashJoinProbeInputRemap>(&probe_primitive.input_remap));
-		if (probe_result == ExecutionOperatorBindResult::DEFERRED) {
-			result.status = SljitHashJoinAggregateConsumerStatus::DEFERRED;
-			result.deferred_reason = std::move(deferred_reason);
-			return result;
-		}
+		execute_hash_join_probe(scratch, hash_join_idx, hash_join_op, probe_input, join_output, state,
+		                        probe_primitive.source_key0_int64_to_int32_unchecked,
+		                        SljitHashJoinProbeOutputContract::IDENTITY_PREFERRED_DIRECT_CONSUMER,
+		                        optional_ptr<const SljitHashJoinProbeInputRemap>(&probe_primitive.input_remap));
 		if (!state.finished) {
 			return result;
 		}

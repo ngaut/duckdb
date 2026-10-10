@@ -107,9 +107,7 @@ static void ExecuteSljitPrimitiveCountOneTargetSpan(const ExecutionGroupedAggreg
 
 static void ExecuteSljitPrimitiveCountOneTargetBatch(const ExecutionGroupedAggregateStateTargetBatch &targets,
                                                      SljitPrimitiveCountOneUpdateState &state) {
-	for (auto &span : targets.Spans()) {
-		ExecuteSljitPrimitiveCountOneTargetSpan(span, state);
-	}
+	ExecuteSljitPrimitiveCountOneTargetSpan(targets.InputOrder(), state);
 }
 
 struct SljitPreaggregatedPrimitiveUpdateState {
@@ -940,8 +938,6 @@ static void ExecuteSljitPreaggregatedPrimitiveTargetSpan(const ExecutionGroupedA
 
 static void ExecuteSljitPreaggregatedPrimitiveTargetBatch(const ExecutionGroupedAggregateStateTargetBatch &targets,
                                                           SljitPreaggregatedPrimitiveUpdateState &state) {
-	for (auto &span : targets.Spans()) {
-		ExecuteSljitPreaggregatedPrimitiveTargetSpan(span, state);
-	}
+	ExecuteSljitPreaggregatedPrimitiveTargetSpan(targets.InputOrder(), state);
 }
 } // namespace duckdb

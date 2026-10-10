@@ -234,13 +234,8 @@ static bool SljitTryExecuteHashJoinProbeDirectHashJoinBuild(
 	auto &row_pointers = scratch.HashJoinRowPointers(hash_join_idx);
 	do {
 		join_output.Reset();
-		string deferred_reason;
-		auto bind_result =
-		    execute_hash_join_probe(hash_join_idx, hash_join_op, join_input, join_output, state, deferred_reason, false,
-		                            SljitHashJoinProbeOutputContract::SELECTED_VIEW);
-		if (bind_result == ExecutionOperatorBindResult::DEFERRED) {
-			SljitThrowNativeOperatorNotReady(deferred_reason);
-		}
+		execute_hash_join_probe(hash_join_idx, hash_join_op, join_input, join_output, state, false,
+		                        SljitHashJoinProbeOutputContract::SELECTED_VIEW);
 		if (join_output.size() == 0) {
 			continue;
 		}

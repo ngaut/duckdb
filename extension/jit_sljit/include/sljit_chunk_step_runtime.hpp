@@ -59,7 +59,7 @@ public:
 	}
 
 	void FinishChunks() override {
-		SljitChunkStepResult(executor.FinishChunks(), result);
+		SljitChunkStepResult(executor.FlushChunks(), result);
 		kernel.RecordExecutedFilterRows(runtime);
 	}
 
@@ -84,7 +84,7 @@ public:
 	}
 
 	SinkResultType ExecuteChunk(DataChunk &input) override {
-		return SljitChunkStepResult(source_fetch.Execute(input, true, ExecuteBatchFunction()), result);
+		return SljitChunkStepResult(source_fetch.Execute(input, ExecuteBatchFunction()), result);
 	}
 
 	void FlushChunks() override {
@@ -98,7 +98,7 @@ public:
 
 private:
 	auto ExecuteBatchFunction() {
-		return [this](const SljitRuntimeBatchView &input, bool) {
+		return [this](const SljitRuntimeBatchView &input) {
 			auto &batch = SljitBindMaterializedRuntimeBatchInput(input, "SLJIT native-only source batch");
 			auto sink_result = native(scratch, batch);
 			if (SljitNativeSinkResultStopsExecution(runtime, sink_result, result)) {
@@ -110,7 +110,7 @@ private:
 	}
 
 	bool Flush() {
-		if (source_fetch.Flush(false, ExecuteBatchFunction())) {
+		if (source_fetch.Flush(ExecuteBatchFunction())) {
 			return true;
 		}
 		native.Finalize(scratch);

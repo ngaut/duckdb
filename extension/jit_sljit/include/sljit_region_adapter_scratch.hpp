@@ -102,11 +102,6 @@ struct SljitAggregatePayloadAdapterScratch {
 };
 
 struct SljitProjectionAdapterScratch {
-	struct PreparedInput {
-		idx_t input_index = DConstants::INVALID_INDEX;
-		const_data_ptr_t data = nullptr;
-	};
-
 	void Prepare(idx_t projection_count, bool track_fused) {
 		sources.Resize(projection_count);
 		right_sources.Resize(projection_count);
@@ -117,7 +112,6 @@ struct SljitProjectionAdapterScratch {
 		} else {
 			fused.clear();
 		}
-		prepared_inputs.clear();
 	}
 
 	void SetSourceData(idx_t projection_idx, bool right_source, const_data_ptr_t source_data) {
@@ -136,29 +130,11 @@ struct SljitProjectionAdapterScratch {
 		return right_sources.DataArray();
 	}
 
-	bool TryGetPreparedInput(idx_t input_index, const_data_ptr_t &source_data) const {
-		for (auto &prepared_input : prepared_inputs) {
-			if (prepared_input.input_index == input_index) {
-				source_data = prepared_input.data;
-				return true;
-			}
-		}
-		return false;
-	}
-
-	void AddPreparedInput(idx_t input_index, const_data_ptr_t source_data) {
-		PreparedInput prepared_input;
-		prepared_input.input_index = input_index;
-		prepared_input.data = source_data;
-		prepared_inputs.push_back(prepared_input);
-	}
-
 	SljitSourceVectorScratch sources;
 	SljitSourceVectorScratch right_sources;
 	vector<data_ptr_t> result_data;
 	vector<int64_t> integer_constants;
 	vector<uint8_t> fused;
-	vector<PreparedInput> prepared_inputs;
 };
 
 struct SljitExpressionAdapterScratch {

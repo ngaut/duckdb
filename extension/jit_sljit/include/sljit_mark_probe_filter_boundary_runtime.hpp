@@ -81,12 +81,8 @@ public:
 			                                   filter_idx, filter_op, join_input, marker_mode, mark_filter_mode,
 			                                   mark_count, execute_next_step);
 		};
-		auto handle_defer = [&](string &deferred_reason) -> bool {
-			SljitThrowNativeOperatorNotReady(deferred_reason);
-		};
 		return SljitDrainHashJoinProbeOutputs(scratch, hash_join_idx, hash_join_op, join_input, join_output,
-		                                      execute_hash_join_probe, handle_output, handle_defer, false,
-		                                      probe_output_contract);
+		                                      execute_hash_join_probe, handle_output, false, probe_output_contract);
 	}
 
 private:

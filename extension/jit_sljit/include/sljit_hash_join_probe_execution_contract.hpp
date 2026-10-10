@@ -16,10 +16,6 @@ namespace duckdb {
 enum class SljitHashJoinProbeOutputContract {
 	MATERIALIZED_OUTPUT,
 	SELECTED_VIEW,
-	//! The consumer can use the identity input selection when every probe row
-	//! matches. A perfect hash probe may elide match-selection stores, then
-	//! retry its compact-selection kernel if it observes any miss.
-	IDENTITY_PREFERRED_SELECTED_VIEW,
 	//! A direct consumer can derive a perfect-hash build index from its proven
 	//! identity input. The generated probe may elide both temporary selections,
 	//! but retries the compact-selection kernel on the first miss.
@@ -49,15 +45,13 @@ SljitHashJoinMarkSelectionModeForOutputContract(SljitHashJoinProbeOutputContract
 
 static bool SljitHashJoinProbeProducesSelectedView(SljitHashJoinProbeOutputContract output_contract) {
 	return output_contract == SljitHashJoinProbeOutputContract::SELECTED_VIEW ||
-	       output_contract == SljitHashJoinProbeOutputContract::IDENTITY_PREFERRED_SELECTED_VIEW ||
 	       output_contract == SljitHashJoinProbeOutputContract::IDENTITY_PREFERRED_DIRECT_CONSUMER ||
 	       SljitHashJoinProbeOutputIsFilteredMarkMatches(output_contract) ||
 	       SljitHashJoinProbeOutputIsFilteredMarkNonMatches(output_contract);
 }
 
 static bool SljitHashJoinProbePrefersIdentitySelection(SljitHashJoinProbeOutputContract output_contract) {
-	return output_contract == SljitHashJoinProbeOutputContract::IDENTITY_PREFERRED_SELECTED_VIEW ||
-	       output_contract == SljitHashJoinProbeOutputContract::IDENTITY_PREFERRED_DIRECT_CONSUMER;
+	return output_contract == SljitHashJoinProbeOutputContract::IDENTITY_PREFERRED_DIRECT_CONSUMER;
 }
 
 static bool SljitHashJoinProbePrefersDirectConsumerOutput(SljitHashJoinProbeOutputContract output_contract) {

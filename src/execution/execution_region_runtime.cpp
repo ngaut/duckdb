@@ -241,32 +241,6 @@ SinkResultType ExecutionSinkAppend(const ExecutionAppendSinkBinding &binding, Da
 	return binding.state->Append(input);
 }
 
-ExecutionOperatorBindResult ExecutionPrepareDirectAppend(const ExecutionAppendSinkBinding &binding,
-                                                         const vector<LogicalType> &types, idx_t count,
-                                                         DirectAppendReservation &reservation, string &blocker,
-                                                         optional_ptr<DirectAppendProfile> profile) {
-	if (!binding.ready || !binding.state) {
-		throw InternalException("execution append sink binding is incomplete");
-	}
-	return binding.state->PrepareDirectAppend(types, count, reservation, blocker, profile);
-}
-
-SinkResultType ExecutionCommitDirectAppend(const ExecutionAppendSinkBinding &binding,
-                                           const DirectAppendReservation &reservation,
-                                           optional_ptr<DirectAppendProfile> profile) {
-	if (!binding.ready || !binding.state) {
-		throw InternalException("execution append sink binding is incomplete");
-	}
-	return binding.state->CommitDirectAppend(reservation, profile);
-}
-
-SinkResultType ExecutionSinkDelimJoin(const ExecutionDelimJoinSinkBinding &binding, DataChunk &input) {
-	if (!binding.ready || !binding.state) {
-		throw InternalException("execution delimiter join sink binding is incomplete");
-	}
-	return binding.state->Sink(input);
-}
-
 ExecutionOperatorRuntime::~ExecutionOperatorRuntime() {
 }
 

@@ -300,7 +300,6 @@ unique_ptr<T> ClientContext::ErrorResult(ErrorData error, const string &query) {
 void ClientContext::BeginQueryInternal(ClientContextLock &lock, const SQLStatement &statement) {
 	// check if we are on AutoCommit. In this case we should start a transaction
 	D_ASSERT(!active_query);
-	compiled_execution_suppressed_for_query = false;
 	auto &db_inst = DatabaseInstance::GetDatabase(*this);
 	if (ValidChecker::IsInvalidated(db_inst)) {
 		throw ErrorManager::InvalidatedDatabase(*this, ValidChecker::InvalidatedMessage(db_inst));
@@ -350,7 +349,6 @@ ErrorData ClientContext::EndQueryInternal(ClientContextLock &lock, bool success,
 	active_query->progress_bar.reset();
 	D_ASSERT(active_query.get());
 	active_query.reset();
-	compiled_execution_suppressed_for_query = false;
 	query_deadline.SetInvalid();
 	query_progress.Initialize();
 	ErrorData error;
@@ -1374,10 +1372,6 @@ void ClientContext::DisableProfiling() {
 	client_config.enable_profiler = false;
 }
 
-bool ClientContext::QueryProfilerIsEnabled() {
-	return QueryProfiler::Get(*this).IsEnabled();
-}
-
 bool ClientContext::QueryProfilerIsExplainAnalyze() {
 	return QueryProfiler::Get(*this).IsExplainAnalyze();
 }
@@ -1390,12 +1384,8 @@ void ClientContext::RecordExecutionRegionProfileEvent(const ExecutionRegionEvent
 	QueryProfiler::Get(*this).RecordExecutionRegionEvent(event);
 }
 
-void ClientContext::SuppressCompiledExecutionForCurrentQuery() {
-	compiled_execution_suppressed_for_query = true;
-}
-
 bool ClientContext::IsCompiledExecutionSuppressed() const {
-	return compiled_execution_suppressed_for_query || ExecutionRegionSuppressionGuard::IsActive(*this);
+	return ExecutionRegionSuppressionGuard::IsActive(*this);
 }
 
 void ClientContext::RegisterFunction(CreateFunctionInfo &info) {

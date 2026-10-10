@@ -24,21 +24,21 @@ namespace duckdb {
 
 //! Empty-build-side, LEFT-unmatched and MARK-null outputs are data-dependent
 //! correctness paths of every admitted probe; they cannot be refused at plan time.
-static ExecutionOperatorBindResult SljitMaterializeLeftHashJoinProbeUnmatchedOutput(
-    ExecutionRegionRuntime &runtime, idx_t op_idx, SljitExecutableRegionOp &op,
-    const ExecutionHashJoinProbeBinding &probe, DataChunk &input, DataChunk &output, SelectionVector &match_selection,
-    SljitHashJoinProbeDrainState &state) {
+static void SljitMaterializeLeftHashJoinProbeUnmatchedOutput(ExecutionRegionRuntime &runtime, idx_t op_idx,
+                                                             SljitExecutableRegionOp &op,
+                                                             const ExecutionHashJoinProbeBinding &probe,
+                                                             DataChunk &input, DataChunk &output,
+                                                             SelectionVector &match_selection,
+                                                             SljitHashJoinProbeDrainState &state) {
 	auto materialize_stage_start = SljitRegionStageStart(runtime);
 	SljitRegionStageRecorder recorder(runtime, op_idx, op.kind, "materialize_left_unmatched");
 	SljitMaterializeLeftHashJoinProbeUnmatched(probe, input, output, match_selection, state, &recorder);
 	RecordSljitRegionStageRuntime(runtime, op_idx, op.kind, "materialize_left_unmatched", materialize_stage_start);
-	return ExecutionOperatorBindResult::READY;
 }
 
-static ExecutionOperatorBindResult SljitExecuteMarkProbeNoTrueNonMatches(ExecutionRegionRuntime &runtime,
-                                                                         SljitExecutableRegionOp &op, DataChunk &output,
-                                                                         SljitHashJoinProbeDrainState &state,
-                                                                         idx_t input_count) {
+static void SljitExecuteMarkProbeNoTrueNonMatches(ExecutionRegionRuntime &runtime, SljitExecutableRegionOp &op,
+                                                  DataChunk &output, SljitHashJoinProbeDrainState &state,
+                                                  idx_t input_count) {
 	state.input_offset = input_count;
 	state.resume_row_pointer = nullptr;
 	state.finished = true;
@@ -46,10 +46,9 @@ static ExecutionOperatorBindResult SljitExecuteMarkProbeNoTrueNonMatches(Executi
 	RecordSljitRegionRuntimePath(runtime, op.kind, "mark_nonmatch_empty_due_to_build_null");
 	runtime.RecordJitRuntimeProof(ExecutionRegionJitRuntimeProof::NO_WORK);
 	output.Reset();
-	return ExecutionOperatorBindResult::READY;
 }
 
-static ExecutionOperatorBindResult SljitExecuteEmptyHashJoinProbe(
+static void SljitExecuteEmptyHashJoinProbe(
     ExecutionRegionRuntime &runtime, idx_t op_idx, SljitExecutableRegionOp &op,
     const ExecutionHashJoinProbeBinding &probe, DataChunk &input, DataChunk &output, SelectionVector &match_selection,
     Vector &row_pointers, SljitHashJoinProbeDrainState &state,
@@ -95,11 +94,10 @@ static ExecutionOperatorBindResult SljitExecuteEmptyHashJoinProbe(
 	default:
 		throw InternalException("SLJIT native hash join probe cannot execute empty build side for output mode");
 	}
-	return ExecutionOperatorBindResult::READY;
 }
 
 template <class OWNER>
-static ExecutionOperatorBindResult SljitExecutePerfectHashJoinProbe(
+static void SljitExecutePerfectHashJoinProbe(
     OWNER &owner, ExecutionRegionRuntime &runtime, idx_t op_idx, SljitExecutableRegionOp &op,
     const SljitNativeHashJoinProbePlan &plan,
     const shared_ptr<ExecutionRuntimeFilterIdentity> &exact_source_filter_identity,
@@ -167,18 +165,17 @@ static ExecutionOperatorBindResult SljitExecutePerfectHashJoinProbe(
 	state.output_proof.match_selection_is_identity = native_input.selected_count == input.size();
 	if (native_input.selected_count == 0) {
 		output.Reset();
-		return ExecutionOperatorBindResult::READY;
+		return;
 	}
 	if (SljitHashJoinProbeProducesSelectedView(output_contract)) {
 		output.SetChildCardinality(native_input.selected_count);
-		return ExecutionOperatorBindResult::READY;
+		return;
 	}
 	auto materialize_stage_start = SljitRegionStageStart(runtime);
 	SljitRegionStageRecorder recorder(runtime, op_idx, op.kind, "materialize_output");
 	ExecutionMaterializePerfectHashJoinProbe(probe, input, match_selection, build_selection,
 	                                         native_input.selected_count, output, &recorder);
 	RecordSljitRegionStageRuntime(runtime, op_idx, op.kind, "materialize_output", materialize_stage_start);
-	return ExecutionOperatorBindResult::READY;
 }
 
 struct SljitExactRegularHashJoinMembershipFilterDispatch {
@@ -213,7 +210,7 @@ struct SljitExactRegularHashJoinMembershipFilterDispatch {
 };
 
 template <class OWNER>
-static ExecutionOperatorBindResult SljitExecuteRegularHashJoinProbe(
+static void SljitExecuteRegularHashJoinProbe(
     OWNER &owner, ExecutionRegionRuntime &runtime, SljitRegionExecutionScratch &scratch, idx_t op_idx,
     SljitExecutableRegionOp &op, const SljitNativeHashJoinProbePlan &plan,
     const shared_ptr<ExecutionRuntimeFilterIdentity> &exact_source_filter_identity,
@@ -259,7 +256,7 @@ static ExecutionOperatorBindResult SljitExecuteRegularHashJoinProbe(
 		runtime.RecordJitRuntimePath("hash_join_probe.regular_probe.exact_source_filter", native_input.selected_count);
 		runtime.RecordJitRuntimeProof(ExecutionRegionJitRuntimeProof::GENERATED_BACKEND_WORK,
 		                              native_input.selected_count);
-		return ExecutionOperatorBindResult::READY;
+		return;
 	}
 	const auto mark_selection_mode = SljitHashJoinMarkSelectionModeForOutputContract(output_contract);
 
@@ -300,7 +297,7 @@ static ExecutionOperatorBindResult SljitExecuteRegularHashJoinProbe(
 	state.output_proof.source_key0_int64_to_int32 = selected_count != 0 && native_input.source_key0_int64_to_int32;
 	if (plan.output_mode == ExecutionHashJoinProbeOutputMode::MARK_BUILD_ONLY) {
 		output.Reset();
-		return ExecutionOperatorBindResult::READY;
+		return;
 	}
 	if (selected_count == 0) {
 		if (left_probe_output && state.finished) {
@@ -308,7 +305,7 @@ static ExecutionOperatorBindResult SljitExecuteRegularHashJoinProbe(
 			                                                        match_selection, state);
 		}
 		output.Reset();
-		return ExecutionOperatorBindResult::READY;
+		return;
 	}
 	const bool mark_probe = plan.output_mode == ExecutionHashJoinProbeOutputMode::MARK_PROBE;
 	if (!mark_probe) {
@@ -316,35 +313,28 @@ static ExecutionOperatorBindResult SljitExecuteRegularHashJoinProbe(
 	}
 	if (SljitHashJoinProbeProducesSelectedView(output_contract)) {
 		output.SetChildCardinality(selected_count);
-		return ExecutionOperatorBindResult::READY;
+		return;
 	}
 	auto materialize_stage_start = SljitRegionStageStart(runtime);
 	SljitRegionStageRecorder recorder(runtime, op_idx, op.kind, "materialize_output");
 	ExecutionMaterializeHashJoinProbe(probe, input, row_pointers, match_selection, selected_count, output, &recorder);
 	RecordSljitRegionStageRuntime(runtime, op_idx, op.kind, "materialize_output", materialize_stage_start);
-	return ExecutionOperatorBindResult::READY;
 }
 
 template <class OWNER>
-static ExecutionOperatorBindResult SljitExecuteNativeHashJoinProbe(
+static void SljitExecuteNativeHashJoinProbe(
     OWNER &owner, ExecutionRegionRuntime &runtime, ExecutionOperatorRuntime &native_runtime,
     SljitRegionExecutionScratch &scratch, idx_t op_idx, SljitExecutableRegionOp &op, DataChunk &input,
     DataChunk &output, SelectionVector &match_selection, SelectionVector &build_selection, Vector &row_pointers,
     SljitHashJoinProbeSourceScratch &source_scratch, DataChunk *residual_chunk, SelectionVector *residual_selection,
     SelectionVector *compact_match_selection, Vector *compact_row_pointers, SljitHashJoinProbeDrainState &state,
-    string &deferred_reason, bool source_key0_int64_to_int32_unchecked = false,
+    bool source_key0_int64_to_int32_unchecked = false,
     SljitHashJoinProbeOutputContract output_contract = SljitHashJoinProbeOutputContract::MATERIALIZED_OUTPUT,
     optional_ptr<const SljitHashJoinProbeInputRemap> input_remap = nullptr) {
 	auto contract_view = SljitBuildHashJoinProbeExecutionContractView(op, input_remap, output_contract);
 	auto &plan = *contract_view.plan;
-	ExecutionOperatorBinding *binding_ptr = nullptr;
-	auto bind_result = SljitBindRecordedNativeOperator(runtime, native_runtime, scratch, op_idx, op, input,
-	                                                   *contract_view.operator_info, "native-operator-runtime-deferred",
-	                                                   "SLJIT native hash join probe", binding_ptr, deferred_reason);
-	if (bind_result == ExecutionOperatorBindResult::DEFERRED) {
-		return bind_result;
-	}
-	auto &binding = *binding_ptr;
+	auto &binding = SljitBindRecordedNativeOperator(runtime, native_runtime, scratch, op_idx, op, input,
+	                                                *contract_view.operator_info, "SLJIT native hash join probe");
 	if (!binding.ready || !binding.hash_join_probe.ready) {
 		throw InternalException("SLJIT native hash join probe received an incomplete operator binding");
 	}

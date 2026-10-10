@@ -56,20 +56,16 @@ public:
 	//! Chunk step: runs one source chunk, which the pipeline executor fetched and advanced the sink's batch for,
 	//! through the steps. Rows the steps batch wait for later chunks. Returns true when the pipeline stopped
 	bool ExecuteChunk(DataChunk &source_chunk) {
-		auto execute_next_step = [&](const SljitRuntimeBatchView &input, bool have_more_output) {
-			return ExecuteStep(1, input, have_more_output);
+		auto execute_next_step = [&](const SljitRuntimeBatchView &input) {
+			return ExecuteStep(1, input);
 		};
-		return source_fetch.Execute(source_chunk, true, execute_next_step);
+		return source_fetch.Execute(source_chunk, execute_next_step);
 	}
 
-	//! Chunk step: the sink moves to another partition, so every batched row sinks under the current one
+	//! Chunk step: every batched row and the terminal's state sink, because the sink moves to another partition or
+	//! the source is exhausted
 	bool FlushChunks() {
-		return FlushRuntimeState(true, true);
-	}
-
-	//! Chunk step: the source is exhausted, so every batched row and the terminal's state sink
-	bool FinishChunks() {
-		return FlushRuntimeState(false, true);
+		return FlushRuntimeState();
 	}
 
 	//! The aggregate-state source recipe: combines the aggregate-state batches the source scans straight into the
@@ -142,21 +138,21 @@ private:
 		return step_idx + 1 == recipe.primitive_sequence.Count();
 	}
 
-	bool ExecuteStep(idx_t step_idx, const SljitRuntimeBatchView &input, bool have_more_output) {
+	bool ExecuteStep(idx_t step_idx, const SljitRuntimeBatchView &input) {
 		if (step_idx >= recipe.primitive_sequence.Count()) {
 			throw InternalException("SLJIT primitive sequence reached the end without a consumer");
 		}
 		auto &step = recipe.primitive_sequence.Step(step_idx);
 		if (IsTerminalStep(step_idx)) {
-			return ExecuteTerminalStep(step, input, have_more_output);
+			return ExecuteTerminalStep(step, input);
 		}
 		switch (step.kind) {
 		case SljitFullPipelinePrimitiveKind::GENERATED_FILTER:
-			return ExecuteGeneratedFilter(step_idx, step, input, have_more_output);
+			return ExecuteGeneratedFilter(step_idx, step, input);
 		case SljitFullPipelinePrimitiveKind::HASH_JOIN_PROBE_MATERIALIZE:
 			return ExecuteHashJoinProbeMaterialize(step_idx, step, input);
 		case SljitFullPipelinePrimitiveKind::HASH_JOIN_PROBE_SELECTION:
-			return ExecuteHashJoinProbeSelection(step_idx, step, input, have_more_output);
+			return ExecuteHashJoinProbeSelection(step_idx, step, input);
 		case SljitFullPipelinePrimitiveKind::MARK_PROBE_FILTER_BOUNDARY:
 			return ExecuteMarkProbeFilterBoundary(step_idx, step, input);
 		case SljitFullPipelinePrimitiveKind::PROJECTION_CHAIN:
@@ -166,23 +162,22 @@ private:
 		}
 	}
 
-	bool ExecuteTerminalStep(const SljitFullPipelinePrimitiveStep &step, const SljitRuntimeBatchView &input,
-	                         bool have_more_output) {
-		return terminal_runtime.Execute(runtime, result, ops, scratch, step, input, have_more_output);
+	bool ExecuteTerminalStep(const SljitFullPipelinePrimitiveStep &step, const SljitRuntimeBatchView &input) {
+		return terminal_runtime.Execute(runtime, result, ops, scratch, step, input);
 	}
 
-	bool ExecuteMaterializedBatch(idx_t step_idx, DataChunk &batch, bool have_more_output = true) {
+	bool ExecuteMaterializedBatch(idx_t step_idx, DataChunk &batch) {
 		if (batch.size() == 0) {
 			return false;
 		}
 		auto batch_view = SljitRuntimeBatchViewFromChunk(batch);
-		return ExecuteStep(step_idx, batch_view, have_more_output);
+		return ExecuteStep(step_idx, batch_view);
 	}
 
 	bool ExecuteGeneratedFilter(idx_t step_idx, const SljitFullPipelinePrimitiveStep &step,
-	                            const SljitRuntimeBatchView &input, bool have_more_output) {
+	                            const SljitRuntimeBatchView &input) {
 		auto execute_output_view = [&](const SljitRuntimeBatchView &output) {
-			return ExecuteStep(step_idx + 1, output, have_more_output);
+			return ExecuteStep(step_idx + 1, output);
 		};
 		return generated_filter.Execute(step, input, execute_output_view);
 	}
@@ -205,10 +200,10 @@ private:
 	}
 
 	bool ExecuteHashJoinProbeSelection(idx_t step_idx, const SljitFullPipelinePrimitiveStep &step,
-	                                   const SljitRuntimeBatchView &input, bool have_more_output) {
+	                                   const SljitRuntimeBatchView &input) {
 		const auto next_step_idx = step_idx + 1;
 		auto execute_next_step = [&](const SljitRuntimeBatchView &output) {
-			return ExecuteStep(next_step_idx, output, have_more_output);
+			return ExecuteStep(next_step_idx, output);
 		};
 		const auto direct_consumer_contract =
 		    recipe.direct_aggregate_consumer.probe_step_idx == step_idx
@@ -230,7 +225,7 @@ private:
 	bool ExecuteMarkProbeFilterBoundary(idx_t step_idx, const SljitFullPipelinePrimitiveStep &step,
 	                                    const SljitRuntimeBatchView &input) {
 		auto execute_next_step = [&](const SljitRuntimeBatchView &output) {
-			return ExecuteStep(step_idx + 1, output, true);
+			return ExecuteStep(step_idx + 1, output);
 		};
 		return mark_probe_filter_boundary.Execute(step_idx, step, input, execute_hash_join_probe, execute_next_step);
 	}
@@ -257,25 +252,22 @@ private:
 		}
 	}
 
-	bool FlushRuntimeState(bool source_contract_have_more_output, bool flush_terminal) {
-		auto execute_next_step = [&](const SljitRuntimeBatchView &input, bool source_have_more_output) {
-			return ExecuteStep(1, input, source_have_more_output);
+	bool FlushRuntimeState() {
+		auto execute_next_step = [&](const SljitRuntimeBatchView &input) {
+			return ExecuteStep(1, input);
 		};
-		if (source_fetch.Flush(source_contract_have_more_output, execute_next_step)) {
+		if (source_fetch.Flush(execute_next_step)) {
 			return true;
 		}
-		return FlushPendingBatch(flush_terminal);
+		return FlushPendingBatch();
 	}
 
-	bool FlushPendingBatch(bool flush_terminal) {
+	bool FlushPendingBatch() {
 		for (idx_t step_idx = 1; step_idx + 1 < recipe.primitive_sequence.Count(); step_idx++) {
 			auto &step = recipe.primitive_sequence.Step(step_idx);
 			if (FlushMaterializingStep(step_idx, step)) {
 				return true;
 			}
-		}
-		if (!flush_terminal) {
-			return false;
 		}
 		auto &terminal_step = TerminalStep();
 		return terminal_runtime.Flush(runtime, result, ops, scratch, terminal_step);
@@ -284,7 +276,7 @@ private:
 	bool FlushMaterializingStep(idx_t step_idx, const SljitFullPipelinePrimitiveStep &step) {
 		auto next_step_idx = step_idx + 1;
 		auto execute_output_batch = [&](DataChunk &batch) -> bool {
-			return ExecuteMaterializedBatch(next_step_idx, batch, false);
+			return ExecuteMaterializedBatch(next_step_idx, batch);
 		};
 		switch (step.kind) {
 		case SljitFullPipelinePrimitiveKind::HASH_JOIN_PROBE_MATERIALIZE:

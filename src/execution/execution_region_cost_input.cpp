@@ -356,18 +356,6 @@ PhysicalRunnerCostInput BuildExecutionRegionCandidateCostInput(const ExecutionRe
 		input.generated_work_class = PhysicalRunnerGeneratedWorkClass::COMPUTE;
 		input.has_accelerated_work = true;
 	}
-	const auto distinct_key_fast_insert_count =
-	    MinValue(input.native_aggregate_stage_count, backend_facts.backend_distinct_key_fast_insert_count);
-	if (distinct_key_fast_insert_count > 0) {
-		input.native_aggregate_stage_count -= distinct_key_fast_insert_count;
-		const auto grouped_decrement =
-		    MinValue(input.native_grouped_aggregate_stage_count, distinct_key_fast_insert_count);
-		input.native_grouped_aggregate_stage_count -= grouped_decrement;
-		input.generated_stage_count += distinct_key_fast_insert_count;
-		input.generated_backend_stage_count += distinct_key_fast_insert_count;
-		input.generated_grouped_aggregate_stage_count += distinct_key_fast_insert_count;
-		input.has_accelerated_work = true;
-	}
 	const bool weak_stateful_grouped_update =
 	    candidate.traits.source_kind == ExecutionRegionSourceKind::STATEFUL_OPERATOR &&
 	    candidate.traits.source_execution == ExecutionRegionSourceExecutionKind::SOURCE_CONTRACT &&

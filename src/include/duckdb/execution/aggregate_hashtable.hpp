@@ -168,10 +168,6 @@ public:
 	    optional_ptr<Vector> precomputed_hashes = nullptr);
 	bool TryFindOrCreateGroupAddressesFast(DataChunk &groups, Vector &addresses_out,
 	                                       optional_ptr<ExecutionOperatorStageRecorder> recorder = nullptr);
-	bool TryFindOrCreateGroupsFast(DataChunk &groups, Vector &addresses_out, SelectionVector &new_groups_out,
-	                               idx_t &new_group_count,
-	                               optional_ptr<ExecutionOperatorStageRecorder> recorder = nullptr);
-	bool TryInsertGroupsFast(DataChunk &groups, optional_ptr<ExecutionOperatorStageRecorder> recorder = nullptr);
 	bool TryFindOrCreateGroupsSelectedStateUpdateFast(
 	    DataChunk &groups, ExecutionGroupedAggregateStateSelectedAddressUpdateFunction update_function,
 	    void *update_state, optional_ptr<ExecutionOperatorStageRecorder> recorder = nullptr,
@@ -465,7 +461,7 @@ private:
 	    ExecutionGroupedAggregateStateSelectedAddressUpdateFunction selected_update_function,
 	    void *selected_update_state, optional_ptr<ExecutionOperatorStageRecorder> recorder,
 	    optional_ptr<Vector> precomputed_hashes = nullptr,
-	    optional_ptr<const ExecutionDenseGroupDomain> dense_domain = nullptr, bool insert_only = false);
+	    optional_ptr<const ExecutionDenseGroupDomain> dense_domain = nullptr);
 	bool TryFindOrCreateSingleFieldGroupsDense(
 	    DataChunk &groups, optional_ptr<Vector> addresses_out,
 	    ExecutionGroupedAggregateStateSelectedAddressUpdateFunction selected_update_function,

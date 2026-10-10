@@ -399,13 +399,6 @@ SljitFullPipelinePrimitiveSequence SljitProjectionAggregateRecipeBinding::MakePr
 	                            materialize_filter_selection);
 }
 
-SljitFullPipelinePrimitiveSequence
-SljitProjectionAggregateRecipeBinding::MakeSourceHashJoinProjectionInputSequence(idx_t hash_join_idx) const {
-	auto sequence = MakeSourceSequence();
-	sequence.Add(MakeHashJoinProbeProjectionInputStep(hash_join_idx));
-	return sequence;
-}
-
 bool SljitProjectionAggregateRecipeBinding::TryBindPostJoinProjectionAggregatePrimitive(
     const SljitFullPipelineProjectionAggregateShape &shape, idx_t hash_join_idx,
     SljitPostJoinProjectionAggregatePrimitive &primitive) const {

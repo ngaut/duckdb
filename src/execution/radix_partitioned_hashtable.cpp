@@ -385,19 +385,6 @@ static void RadixUpdatePrimitiveGroupTargetSpan(const ExecutionGroupedAggregateS
 	RecordRadixTraceStage(recorder, stage_name, update_start);
 }
 
-static void RadixUpdatePrimitiveGroupTargetBatch(const ExecutionGroupedAggregateStateTargetBatch &targets,
-                                                 void *update_state,
-                                                 optional_ptr<ExecutionOperatorStageRecorder> recorder,
-                                                 const char *input_order_stage_name, const char *existing_stage_name,
-                                                 const char *new_stage_name, const char *duplicate_stage_name) {
-	const char *stage_names[EXECUTION_GROUPED_AGGREGATE_STATE_TARGET_COUNT] = {
-	    input_order_stage_name, existing_stage_name, new_stage_name, duplicate_stage_name};
-	const auto &spans = targets.Spans();
-	for (idx_t target_idx = 0; target_idx < spans.size(); target_idx++) {
-		RadixUpdatePrimitiveGroupTargetSpan(spans[target_idx], update_state, recorder, stage_names[target_idx]);
-	}
-}
-
 static void RadixUpdatePrimitiveGroupAddresses(const uintptr_t *state_addresses, const sel_t *address_sel, idx_t count,
                                                ExecutionGroupedAggregateStateAddressUpdateMode mode, void *state_p) {
 	if (!state_addresses) {
@@ -1478,71 +1465,6 @@ void RadixPartitionedHashTable::Sink(ExecutionContext &context, DataChunk &chunk
 	scope.Arm();
 }
 
-void RadixPartitionedHashTable::SinkSelected(ExecutionContext &context, DataChunk &chunk, OperatorSinkInput &input,
-                                             DataChunk &payload_input, const unsafe_vector<idx_t> &filter,
-                                             const SelectionVector &selection, idx_t count) const {
-	if (count == 0) {
-		return;
-	}
-	RadixSinkEntryScope scope(context, *this, input, nullptr, "sink.prepare_sink_state", "sink.finish_sink_state");
-	auto &ht = scope.HT();
-
-	auto &group_chunk = scope.LState().group_chunk;
-	PopulateGroupChunk(group_chunk, chunk, selection, count);
-
-	ht.AddChunk(group_chunk, payload_input, filter);
-	scope.Arm();
-}
-
-bool RadixPartitionedHashTable::TrySinkGroupsFast(ExecutionContext &context, DataChunk &chunk, OperatorSinkInput &input,
-                                                  const SelectionVector *selection, idx_t count,
-                                                  optional_ptr<ExecutionOperatorStageRecorder> recorder,
-                                                  idx_t estimated_input_count,
-                                                  idx_t distinct_key_cardinality_upper_bound) const {
-	if (count == DConstants::INVALID_INDEX) {
-		count = chunk.size();
-	}
-	if (count == 0) {
-		return true;
-	}
-	if (!selection && count != chunk.size()) {
-		return false;
-	}
-	RadixSinkEntryScope scope(context, *this, input, recorder, "distinct_fast_insert.prepare_sink_state",
-	                          "distinct_fast_insert.finish_sink_state");
-	auto &ht = scope.HT();
-	auto &lstate = scope.LState();
-
-	auto &group_chunk = lstate.group_chunk;
-	auto populate_start = RadixTraceStart(recorder);
-	if (selection) {
-		PopulateGroupChunk(group_chunk, chunk, *selection, count);
-	} else {
-		PopulateGroupChunk(group_chunk, chunk);
-	}
-	RecordRadixTraceStage(recorder, "distinct_fast_insert.populate_group_chunk", populate_start);
-	static constexpr idx_t DISTINCT_FAST_INSERT_MIN_UNIQUE_RATIO_DENOMINATOR = 4;
-	const bool prefer_vectorized_insert =
-	    estimated_input_count > 0 && distinct_key_cardinality_upper_bound > 0 &&
-	    distinct_key_cardinality_upper_bound <
-	        estimated_input_count / DISTINCT_FAST_INSERT_MIN_UNIQUE_RATIO_DENOMINATOR +
-	            (estimated_input_count % DISTINCT_FAST_INSERT_MIN_UNIQUE_RATIO_DENOMINATOR != 0 ? 1 : 0);
-	if (prefer_vectorized_insert) {
-		DataChunk empty_payload;
-		unsafe_vector<idx_t> empty_filter;
-		auto vectorized_start = RadixTraceStart(recorder);
-		ht.AddChunk(group_chunk, empty_payload, empty_filter);
-		RecordRadixTraceStage(recorder, "distinct_fast_insert.vectorized_add_chunk", vectorized_start);
-		scope.Arm();
-		return true;
-	}
-	if (!ht.TryInsertGroupsFast(group_chunk, recorder)) {
-		return false;
-	}
-	scope.Arm();
-	return true;
-}
-
 void RadixPartitionedHashTable::ResolveStateAddresses(ExecutionContext &context, DataChunk &chunk,
                                                       OperatorSinkInput &input, Vector &addresses_out,
                                                       optional_ptr<ExecutionOperatorStageRecorder> recorder,
@@ -1887,10 +1809,8 @@ bool RadixPartitionedHashTable::TryUpdateRowPointerGroupPrimitivePayloads(
 	RecordRadixTraceStage(recorder, "direct_row_pointer_split_payload.lookup", lookup_start);
 
 	auto update_start = RadixTraceStart(recorder);
-	RadixUpdatePrimitiveGroupTargetBatch(
-	    targets, &update_state, recorder, "direct_row_pointer_split_payload.target_input_order_update",
-	    "direct_row_pointer_split_payload.target_existing_update", "direct_row_pointer_split_payload.target_new_update",
-	    "direct_row_pointer_split_payload.target_duplicate_update");
+	RadixUpdatePrimitiveGroupTargetSpan(targets.InputOrder(), &update_state, recorder,
+	                                    "direct_row_pointer_split_payload.target_input_order_update");
 	RecordRadixTraceStage(recorder, "direct_row_pointer_split_payload.update", update_start);
 	auto update_marker_start = RadixTraceStart(recorder);
 	RecordRadixTraceStage(recorder, "direct_row_pointer_split_payload.primitive_update", update_marker_start);

@@ -334,29 +334,6 @@ bool PhysicalNestedLoopJoin::BindExecutionSink(ExecutionContext &context, DataCh
 	return true;
 }
 
-SinkResultType ExecutionSinkNestedLoopJoinBuild(const ExecutionNestedLoopJoinBuildBinding &binding, DataChunk &input,
-                                                DataChunk &right_condition) {
-	if (!binding.ready || !binding.right_condition_data || !binding.right_payload_data || !binding.lock) {
-		throw InternalException("execution native nested loop join build requires a bound build state");
-	}
-	if (right_condition.ColumnCount() != binding.condition_types.size()) {
-		throw InternalException("execution native nested loop join build condition count mismatch");
-	}
-	if (right_condition.size() != input.size()) {
-		throw InternalException("execution native nested loop join build condition payload cardinality mismatch");
-	}
-	for (idx_t condition_idx = 0; condition_idx < binding.condition_types.size(); condition_idx++) {
-		if (right_condition.data[condition_idx].GetType() != binding.condition_types[condition_idx]) {
-			throw InternalException("execution native nested loop join build condition type mismatch");
-		}
-	}
-
-	lock_guard<mutex> nj_guard(*binding.lock);
-	binding.right_payload_data->Append(input);
-	binding.right_condition_data->Append(right_condition);
-	return SinkResultType::NEED_MORE_INPUT;
-}
-
 SinkCombineResultType PhysicalNestedLoopJoin::Combine(ExecutionContext &context,
                                                       OperatorSinkCombineInput &input) const {
 	auto &gstate = input.global_state.Cast<NestedLoopJoinGlobalState>();
@@ -596,68 +573,6 @@ PhysicalNestedLoopJoin::BindExecutionOperator(ExecutionContext &context, DataChu
 	probe.fetch_next_right = &state.fetch_next_right;
 	probe.blocker.clear();
 	return ExecutionOperatorBindResult::READY;
-}
-
-static void ValidateNestedLoopJoinProbeBinding(const ExecutionNestedLoopJoinProbeBinding &binding) {
-	if (!binding.ready || !binding.right_condition_data || !binding.right_payload_data ||
-	    !binding.condition_scan_state || !binding.payload_scan_state || !binding.right_condition ||
-	    !binding.right_payload || !binding.left_tuple || !binding.right_tuple || !binding.fetch_next_left ||
-	    !binding.fetch_next_right) {
-		throw InternalException("execution native nested loop join probe requires a bound probe state");
-	}
-	if (binding.condition_types.size() != binding.comparison_types.size()) {
-		throw InternalException("execution native nested loop join probe condition count mismatch");
-	}
-}
-
-static bool ExecutionNestedLoopJoinProbeScanNextRight(const ExecutionNestedLoopJoinProbeBinding &binding) {
-	if (!binding.right_condition_data->Scan(*binding.condition_scan_state, *binding.right_condition)) {
-		*binding.fetch_next_left = true;
-		return false;
-	}
-	if (!binding.right_payload_data->Scan(*binding.payload_scan_state, *binding.right_payload)) {
-		throw InternalException("execution native nested loop join probe payload and conditions are unaligned");
-	}
-	if (binding.right_condition->size() != binding.right_payload->size()) {
-		throw InternalException("execution native nested loop join probe payload and conditions are unaligned");
-	}
-	return true;
-}
-
-bool ExecutionNestedLoopJoinProbeStartInput(const ExecutionNestedLoopJoinProbeBinding &binding) {
-	ValidateNestedLoopJoinProbeBinding(binding);
-	*binding.left_tuple = 0;
-	*binding.right_tuple = 0;
-	*binding.fetch_next_left = false;
-	*binding.fetch_next_right = false;
-	binding.right_condition_data->InitializeScan(*binding.condition_scan_state);
-	binding.right_payload_data->InitializeScan(*binding.payload_scan_state);
-	return ExecutionNestedLoopJoinProbeScanNextRight(binding);
-}
-
-bool ExecutionNestedLoopJoinProbeAdvanceRight(const ExecutionNestedLoopJoinProbeBinding &binding) {
-	ValidateNestedLoopJoinProbeBinding(binding);
-	*binding.left_tuple = 0;
-	*binding.right_tuple = 0;
-	*binding.fetch_next_right = false;
-	return ExecutionNestedLoopJoinProbeScanNextRight(binding);
-}
-
-void ExecutionMaterializeNestedLoopJoinProbe(const ExecutionNestedLoopJoinProbeBinding &binding, DataChunk &input,
-                                             const SelectionVector &left_sel, const SelectionVector &right_sel,
-                                             idx_t count, DataChunk &result) {
-	ValidateNestedLoopJoinProbeBinding(binding);
-	if (binding.join_type != ExecutionRegionJoinType::INNER) {
-		throw InternalException("execution native nested loop join materialization currently requires INNER join");
-	}
-	if (!binding.right_payload) {
-		throw InternalException("execution native nested loop join materialization requires right payload");
-	}
-	if (input.ColumnCount() + binding.right_payload->ColumnCount() != result.ColumnCount()) {
-		throw InternalException("execution native nested loop join materialization output width mismatch");
-	}
-	result.Slice(input, left_sel, count);
-	result.Slice(*binding.right_payload, right_sel, count, input.ColumnCount());
 }
 
 OperatorResultType PhysicalNestedLoopJoin::ExecuteInternal(ExecutionContext &context, DataChunk &input,

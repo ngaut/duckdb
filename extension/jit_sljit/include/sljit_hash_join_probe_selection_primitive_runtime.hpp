@@ -46,9 +46,6 @@ public:
 		    direct_consumer_dispatch != SljitHashJoinAggregateConsumerDispatch::MATERIALIZED) {
 			auto direct_result =
 			    try_execute_direct_consumer(*direct_consumer_contract, primitive, join_input, execute_hash_join_probe);
-			if (direct_result.status == SljitHashJoinAggregateConsumerStatus::DEFERRED) {
-				SljitThrowNativeOperatorNotReady(direct_result.deferred_reason);
-			}
 			if (direct_result.status == SljitHashJoinAggregateConsumerStatus::EMPTY) {
 				return false;
 			}
@@ -75,13 +72,9 @@ public:
 			    output_column_map, primitive.output_projection_idx);
 			return execute_next_step(output_view);
 		};
-		auto handle_defer = [&](string &deferred_reason) -> bool {
-			SljitThrowNativeOperatorNotReady(deferred_reason);
-		};
 		return SljitDrainHashJoinProbeOutputsWithState(
 		    scratch, hash_join_idx, hash_join_op, join_input, join_output, execute_hash_join_probe, handle_output,
-		    handle_defer, primitive.source_key0_int64_to_int32_unchecked,
-		    SljitHashJoinProbeOutputContract::SELECTED_VIEW,
+		    primitive.source_key0_int64_to_int32_unchecked, SljitHashJoinProbeOutputContract::SELECTED_VIEW,
 		    optional_ptr<const SljitHashJoinProbeInputRemap>(&primitive.input_remap));
 	}
 

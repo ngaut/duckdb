@@ -437,9 +437,7 @@ static bool TryExecuteDirectRowPointerStringSetComplementarySumUpdate(
 	auto update_start = SljitRegionStageStart(runtime);
 	UnifiedVectorFormat predicate_format;
 	payload_input.data[state.predicate_source_idx].ToUnifiedFormat(predicate_format);
-	for (auto &span : targets.Spans()) {
-		SljitExecuteStringSetComplementarySumSpan(span, state, predicate_format);
-	}
+	SljitExecuteStringSetComplementarySumSpan(targets.InputOrder(), state, predicate_format);
 	RecordSljitRegionStageRuntime(runtime, op_idx, op.kind, "direct_row_pointer_string_set_complementary_sum_update",
 	                              update_start);
 	scratch.RecordDirectNewAggregateUpdateResult(op_idx, true);
@@ -490,9 +488,7 @@ static bool TryExecuteDirectRowPointerPreclassifiedStringSetComplementarySumUpda
 	auto update_start = SljitRegionStageStart(runtime);
 	UnifiedVectorFormat predicate_format;
 	payload_input.data[0].ToUnifiedFormat(predicate_format);
-	for (auto &span : targets.Spans()) {
-		SljitExecutePreclassifiedStringSetComplementarySumSpan(span, state, predicate_format);
-	}
+	SljitExecutePreclassifiedStringSetComplementarySumSpan(targets.InputOrder(), state, predicate_format);
 	RecordSljitRegionStageRuntime(runtime, op_idx, op.kind,
 	                              "row_pointer_preclassified_string_set_complementary_sum_update", update_start);
 	scratch.RecordDirectNewAggregateUpdateResult(op_idx, true);

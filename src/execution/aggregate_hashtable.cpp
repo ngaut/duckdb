@@ -2533,10 +2533,10 @@ bool GroupedAggregateHashTable::TryFindOrCreateGroupsFastInternal(
     DataChunk &groups, optional_ptr<Vector> addresses_out,
     ExecutionGroupedAggregateStateSelectedAddressUpdateFunction selected_update_function, void *selected_update_state,
     optional_ptr<ExecutionOperatorStageRecorder> recorder, optional_ptr<Vector> precomputed_hashes,
-    optional_ptr<const ExecutionDenseGroupDomain> dense_domain, bool insert_only) {
+    optional_ptr<const ExecutionDenseGroupDomain> dense_domain) {
 	EnsureLookupEpoch();
 	const auto chunk_size = groups.size();
-	if (!insert_only && !addresses_out && !selected_update_function) {
+	if (!addresses_out && !selected_update_function) {
 		return false;
 	}
 	if (chunk_size == 0) {
@@ -2550,8 +2550,8 @@ bool GroupedAggregateHashTable::TryFindOrCreateGroupsFastInternal(
 	}
 	D_ASSERT(groups.ColumnCount() + 1 == layout_ptr->ColumnCount());
 
-	if (!insert_only && TryFindOrCreateSingleFieldGroupsDense(groups, addresses_out, selected_update_function,
-	                                                          selected_update_state, recorder, dense_domain)) {
+	if (TryFindOrCreateSingleFieldGroupsDense(groups, addresses_out, selected_update_function, selected_update_state,
+	                                          recorder, dense_domain)) {
 		return true;
 	}
 
@@ -2583,29 +2583,6 @@ bool GroupedAggregateHashTable::TryFindOrCreateGroupsFastInternal(
 bool GroupedAggregateHashTable::TryFindOrCreateGroupAddressesFast(
     DataChunk &groups, Vector &addresses_out, optional_ptr<ExecutionOperatorStageRecorder> recorder) {
 	return TryFindOrCreateGroupsFastInternal(groups, addresses_out, nullptr, nullptr, recorder);
-}
-
-bool GroupedAggregateHashTable::TryFindOrCreateGroupsFast(DataChunk &groups, Vector &addresses_out,
-                                                          SelectionVector &new_groups_out, idx_t &new_group_count,
-                                                          optional_ptr<ExecutionOperatorStageRecorder> recorder) {
-	const auto count_before = Count();
-	if (!TryFindOrCreateGroupsFastInternal(groups, addresses_out, nullptr, nullptr, recorder)) {
-		new_group_count = 0;
-		return false;
-	}
-	new_group_count = Count() - count_before;
-	for (idx_t new_idx = 0; new_idx < new_group_count; new_idx++) {
-		new_groups_out.set_index(new_idx, state.new_groups.get_index_unsafe(new_idx));
-	}
-	return true;
-}
-
-bool GroupedAggregateHashTable::TryInsertGroupsFast(DataChunk &groups,
-                                                    optional_ptr<ExecutionOperatorStageRecorder> recorder) {
-	if (!layout_ptr->GetAggregates().empty()) {
-		return false;
-	}
-	return TryFindOrCreateGroupsFastInternal(groups, nullptr, nullptr, nullptr, recorder, nullptr, nullptr, true);
 }
 
 bool GroupedAggregateHashTable::TryFindOrCreateGroupsSelectedStateUpdateFast(
@@ -5869,7 +5846,7 @@ bool GroupedAggregateHashTable::TryFindOrCreateDescriptorGroupStateTargetsDirect
 		if (!descriptor_sources_repeat_with_row_pointer || !cache_row_pointers) {
 			return false;
 		}
-		auto &input_order = cache_targets.Span(ExecutionGroupedAggregateStateTargetKind::INPUT_ORDER);
+		auto &input_order = cache_targets.InputOrder();
 		if (!input_order.addresses || input_order.count != cache_count) {
 			return false;
 		}

@@ -109,51 +109,20 @@ struct ExecutionGroupedAggregateStateTargetSpan {
 	}
 };
 
-enum class ExecutionGroupedAggregateStateTargetKind : uint8_t {
-	INPUT_ORDER = 0,
-	EXISTING = 1,
-	NEW_GROUPS = 2,
-	DUPLICATE_GROUPS = 3
-};
-
-static constexpr idx_t EXECUTION_GROUPED_AGGREGATE_STATE_TARGET_COUNT = 4;
-
+//! The state addresses a grouped lookup resolved, one per input row in input order
 struct ExecutionGroupedAggregateStateTargetBatch {
-	std::array<ExecutionGroupedAggregateStateTargetSpan, EXECUTION_GROUPED_AGGREGATE_STATE_TARGET_COUNT> spans;
-
-	ExecutionGroupedAggregateStateTargetSpan &Span(ExecutionGroupedAggregateStateTargetKind kind) {
-		return spans[static_cast<idx_t>(kind)];
-	}
-
-	const ExecutionGroupedAggregateStateTargetSpan &Span(ExecutionGroupedAggregateStateTargetKind kind) const {
-		return spans[static_cast<idx_t>(kind)];
-	}
+	ExecutionGroupedAggregateStateTargetSpan input_order;
 
 	ExecutionGroupedAggregateStateTargetSpan &InputOrder() {
-		return Span(ExecutionGroupedAggregateStateTargetKind::INPUT_ORDER);
+		return input_order;
 	}
 
-	ExecutionGroupedAggregateStateTargetSpan &Existing() {
-		return Span(ExecutionGroupedAggregateStateTargetKind::EXISTING);
-	}
-
-	ExecutionGroupedAggregateStateTargetSpan &NewGroups() {
-		return Span(ExecutionGroupedAggregateStateTargetKind::NEW_GROUPS);
-	}
-
-	ExecutionGroupedAggregateStateTargetSpan &DuplicateGroups() {
-		return Span(ExecutionGroupedAggregateStateTargetKind::DUPLICATE_GROUPS);
-	}
-
-	const std::array<ExecutionGroupedAggregateStateTargetSpan, EXECUTION_GROUPED_AGGREGATE_STATE_TARGET_COUNT> &
-	Spans() const {
-		return spans;
+	const ExecutionGroupedAggregateStateTargetSpan &InputOrder() const {
+		return input_order;
 	}
 
 	void Reset() {
-		for (auto &span : spans) {
-			span = ExecutionGroupedAggregateStateTargetSpan();
-		}
+		input_order = ExecutionGroupedAggregateStateTargetSpan();
 	}
 };
 

@@ -151,8 +151,6 @@ public:
 	DUCKDB_API void EnableProfiling();
 	//! Disable query profiling
 	DUCKDB_API void DisableProfiling();
-	//! True when query profiling output is active for the current query.
-	DUCKDB_API bool QueryProfilerIsEnabled();
 	//! True when the active query is EXPLAIN ANALYZE.
 	DUCKDB_API bool QueryProfilerIsExplainAnalyze();
 	//! True when the active query profiler can accept execution-region telemetry events.
@@ -160,8 +158,6 @@ public:
 	//! Capture one execution-region telemetry event in the active query profiler.
 	DUCKDB_API void RecordExecutionRegionProfileEvent(const ExecutionRegionEvent &event);
 
-	//! Suppress compiled execution-region planning for the rest of the currently active query.
-	DUCKDB_API void SuppressCompiledExecutionForCurrentQuery();
 	//! True when compiled execution-region planning should not be attempted in this context.
 	DUCKDB_API bool IsCompiledExecutionSuppressed() const;
 
@@ -360,8 +356,6 @@ private:
 	QueryProgress query_progress;
 	//! The connection corresponding to this client context
 	connection_t connection_id;
-	//! Query-global compiled execution-region suppression state.
-	bool compiled_execution_suppressed_for_query = false;
 	//! Routing target for SQL execution while CONNECT-ed (CONNECT/DISCONNECT). When is_connected is
 	//! true and connected_to_database can be locked, the chokepoint dispatches non-control SQL via
 	//! `Catalog::RemoteExecute(string)` and wraps the returned TableRef into a SelectStatement.

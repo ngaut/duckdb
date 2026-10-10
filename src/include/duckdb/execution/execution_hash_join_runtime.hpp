@@ -33,21 +33,6 @@ enum class ExecutionHashJoinEntryEncoding : uint8_t { MASKS, POINTER, POINTER_LO
 static constexpr uint64_t EXECUTION_HASH_JOIN_POINTER_LOWER_48_MASK = 0x0000FFFFFFFFFFFF;
 static constexpr uint64_t EXECUTION_HASH_JOIN_SALT_UPPER_16_MASK = 0xFFFF000000000000;
 
-static inline const char *ExecutionHashJoinTableLayoutStatusToString(ExecutionHashJoinTableLayoutStatus status) {
-	switch (status) {
-	case ExecutionHashJoinTableLayoutStatus::READY:
-		return "ready";
-	case ExecutionHashJoinTableLayoutStatus::NOT_FINALIZED:
-		return "not_finalized";
-	case ExecutionHashJoinTableLayoutStatus::EMPTY:
-		return "empty";
-	case ExecutionHashJoinTableLayoutStatus::POINTER_TABLE_MISSING:
-		return "pointer_table_missing";
-	default:
-		return "invalid";
-	}
-}
-
 static inline const char *ExecutionHashJoinTableLayoutBlocker(ExecutionHashJoinTableLayoutStatus status) {
 	switch (status) {
 	case ExecutionHashJoinTableLayoutStatus::READY:
@@ -239,8 +224,5 @@ struct ExecutionHashJoinProbeOutputProof {
 };
 
 DUCKDB_API bool ExecutionGetHashJoinTableLayout(const JoinHashTable &hash_table, ExecutionHashJoinTableLayout &layout);
-
-DUCKDB_API string DescribeExecutionHashJoinTableLayout(const ExecutionHashJoinTableLayout &layout);
-DUCKDB_API string DescribeExecutionPerfectHashJoinTableLayout(const ExecutionPerfectHashJoinTableLayout &layout);
 
 } // namespace duckdb

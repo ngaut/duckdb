@@ -62,10 +62,6 @@ static int64_t FractionalCost(int64_t value, int64_t numerator, int64_t denomina
 	return multiplied / denominator;
 }
 
-static int64_t DoubleCost(int64_t value) {
-	return AddCost(value, value);
-}
-
 //! The axis-independent evaluation inputs. Shape facts and the amortization predicates
 //! may depend only on these, which is what makes one set of shape facts valid for every
 //! runner axis: the type system rules out accidental per-runner shape divergence.

@@ -17,18 +17,19 @@
 
 namespace duckdb {
 
-static ExecutionOperatorBindResult
-SljitBindNativeOperator(ExecutionOperatorRuntime &native_runtime, SljitRegionExecutionScratch &scratch, idx_t op_idx,
-                        SljitExecutableRegionOp &op, DataChunk &input, const ExecutionRegionOperatorInfo &operator_info,
-                        const char *blocker_prefix, const char *error_prefix, ExecutionOperatorBinding *&binding_out,
-                        string &deferred_reason, optional_ptr<bool> bound = nullptr) {
+//! Binds a native operator the kernel delegates to. The runner found every one ready before the first source fetch
+//! and a running pipeline never changes runners, so an operator that defers is an invariant violation, not a fallback.
+static ExecutionOperatorBinding &SljitBindNativeOperator(ExecutionOperatorRuntime &native_runtime,
+                                                         SljitRegionExecutionScratch &scratch, idx_t op_idx,
+                                                         SljitExecutableRegionOp &op, DataChunk &input,
+                                                         const ExecutionRegionOperatorInfo &operator_info,
+                                                         const char *error_prefix, optional_ptr<bool> bound = nullptr) {
 	auto &binding = scratch.OperatorBinding(op_idx);
-	binding_out = &binding;
 	if (bound) {
 		*bound = false;
 	}
 	if (scratch.HasOperatorBinding(op_idx)) {
-		return ExecutionOperatorBindResult::READY;
+		return binding;
 	}
 	if (op.operator_index == DConstants::INVALID_INDEX) {
 		throw InternalException("%s is missing an operator index", error_prefix);
@@ -38,8 +39,8 @@ SljitBindNativeOperator(ExecutionOperatorRuntime &native_runtime, SljitRegionExe
 		*bound = true;
 	}
 	if (bind_result == ExecutionOperatorBindResult::DEFERRED) {
-		deferred_reason = binding.blocker.empty() ? string(blocker_prefix) : binding.blocker;
-		return bind_result;
+		throw InternalException("%s delegates to a native operator that is not ready: %s", error_prefix,
+		                        binding.blocker.empty() ? string("no reason given") : binding.blocker);
 	}
 	if (bind_result != ExecutionOperatorBindResult::READY) {
 		auto blocker = binding.blocker.empty() ? string("unknown") : binding.blocker;
@@ -51,7 +52,7 @@ SljitBindNativeOperator(ExecutionOperatorRuntime &native_runtime, SljitRegionExe
 		SljitValidateRegularHashJoinProbeExecutionLayout(op.hash_join_probe.plan, binding.hash_join_probe);
 	}
 	scratch.MarkOperatorBindingReady(op_idx);
-	return bind_result;
+	return binding;
 }
 
 static ExecutionSinkBinding &SljitBindNativeSink(ExecutionOperatorRuntime &native_runtime,
@@ -92,20 +93,20 @@ static ExecutionSinkBinding &SljitBindRecordedNativeSink(ExecutionRegionRuntime 
 	return binding;
 }
 
-static ExecutionOperatorBindResult
-SljitBindRecordedNativeOperator(ExecutionRegionRuntime &runtime, ExecutionOperatorRuntime &native_runtime,
-                                SljitRegionExecutionScratch &scratch, idx_t op_idx, SljitExecutableRegionOp &op,
-                                DataChunk &input, const ExecutionRegionOperatorInfo &operator_info,
-                                const char *blocker_prefix, const char *error_prefix,
-                                ExecutionOperatorBinding *&binding_out, string &deferred_reason) {
+static ExecutionOperatorBinding &SljitBindRecordedNativeOperator(ExecutionRegionRuntime &runtime,
+                                                                 ExecutionOperatorRuntime &native_runtime,
+                                                                 SljitRegionExecutionScratch &scratch, idx_t op_idx,
+                                                                 SljitExecutableRegionOp &op, DataChunk &input,
+                                                                 const ExecutionRegionOperatorInfo &operator_info,
+                                                                 const char *error_prefix) {
 	auto bind_stage_start = SljitRegionStageStart(runtime);
 	bool bound = false;
-	auto bind_result = SljitBindNativeOperator(native_runtime, scratch, op_idx, op, input, operator_info,
-	                                           blocker_prefix, error_prefix, binding_out, deferred_reason, bound);
+	auto &binding =
+	    SljitBindNativeOperator(native_runtime, scratch, op_idx, op, input, operator_info, error_prefix, bound);
 	if (bound) {
 		RecordSljitRegionStageRuntime(runtime, op_idx, op.kind, "bind_operator_contract", bind_stage_start);
 	}
-	return bind_result;
+	return binding;
 }
 
 } // namespace duckdb

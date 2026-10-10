@@ -101,33 +101,6 @@ struct ExecutionAggregateUpdateState {
 	virtual ~ExecutionAggregateUpdateState() {
 	}
 	virtual SinkResultType Sink(DataChunk &input) = 0;
-	virtual bool SupportsDistinctSink() const {
-		return false;
-	}
-	virtual bool SupportsDistinctSelectedSink() const {
-		return false;
-	}
-	virtual bool TrySinkDistinctFast(DataChunk &input, const SelectionVector *selection, idx_t count,
-	                                 optional_ptr<ExecutionOperatorStageRecorder> recorder = nullptr,
-	                                 idx_t estimated_input_count = 0, idx_t distinct_key_cardinality_upper_bound = 0) {
-		(void)input;
-		(void)selection;
-		(void)count;
-		(void)recorder;
-		(void)estimated_input_count;
-		(void)distinct_key_cardinality_upper_bound;
-		return false;
-	}
-	virtual SinkResultType SinkDistinct(DataChunk &input) {
-		(void)input;
-		throw InternalException("execution aggregate update state does not support distinct sink ingestion");
-	}
-	virtual SinkResultType SinkDistinctSelected(DataChunk &input, const SelectionVector &selection, idx_t count) {
-		(void)input;
-		(void)selection;
-		(void)count;
-		throw InternalException("execution aggregate update state does not support selected distinct sink ingestion");
-	}
 };
 
 struct ExecutionOperatorStageRecorder {
@@ -603,32 +576,12 @@ DUCKDB_API void ExecutionHashJoinBuildAppend(const ExecutionHashJoinBuildBinding
 DUCKDB_API SinkResultType ExecutionSinkHashJoinBuild(const ExecutionHashJoinBuildBinding &binding, DataChunk &input,
                                                      optional_ptr<ExecutionOperatorStageRecorder> recorder = nullptr);
 
-DUCKDB_API bool ExecutionNestedLoopJoinProbeStartInput(const ExecutionNestedLoopJoinProbeBinding &binding);
-
-DUCKDB_API bool ExecutionNestedLoopJoinProbeAdvanceRight(const ExecutionNestedLoopJoinProbeBinding &binding);
-
-DUCKDB_API void ExecutionMaterializeNestedLoopJoinProbe(const ExecutionNestedLoopJoinProbeBinding &binding,
-                                                        DataChunk &input, const SelectionVector &left_sel,
-                                                        const SelectionVector &right_sel, idx_t count,
-                                                        DataChunk &result);
-
-DUCKDB_API SinkResultType ExecutionSinkNestedLoopJoinBuild(const ExecutionNestedLoopJoinBuildBinding &binding,
-                                                           DataChunk &input, DataChunk &right_condition);
-
 DUCKDB_API SinkResultType ExecutionSinkAppend(const ExecutionAppendSinkBinding &binding, DataChunk &input);
-DUCKDB_API ExecutionOperatorBindResult ExecutionPrepareDirectAppend(
-    const ExecutionAppendSinkBinding &binding, const vector<LogicalType> &types, idx_t count,
-    DirectAppendReservation &reservation, string &blocker, optional_ptr<DirectAppendProfile> profile = nullptr);
-DUCKDB_API SinkResultType ExecutionCommitDirectAppend(const ExecutionAppendSinkBinding &binding,
-                                                      const DirectAppendReservation &reservation,
-                                                      optional_ptr<DirectAppendProfile> profile = nullptr);
 
 DUCKDB_API SinkResultType ExecutionSinkOrdered(const ExecutionOrderedSinkBinding &binding, DataChunk &order_keys,
                                                DataChunk &payload);
 //! Validates the ordered-sink contract of an ORDER BY or TOP N sink; returns the blocker, empty when bindable.
 string ValidateExecutionOrderedSink(const ExecutionRegionSinkInfo &sink_info,
                                     ExecutionRegionOperatorKind expected_kind);
-
-DUCKDB_API SinkResultType ExecutionSinkDelimJoin(const ExecutionDelimJoinSinkBinding &binding, DataChunk &input);
 
 } // namespace duckdb

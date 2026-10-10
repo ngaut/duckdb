@@ -102,8 +102,6 @@ private:
 	                                        bool materialize_filter_selection,
 	                                        idx_t downstream_projection_idx = DConstants::INVALID_INDEX) const;
 
-	SljitFullPipelinePrimitiveSequence MakeSourceHashJoinProjectionInputSequence(idx_t hash_join_idx) const;
-
 	bool TryBindPostJoinProjectionAggregatePrimitive(const SljitFullPipelineProjectionAggregateShape &shape,
 	                                                 idx_t hash_join_idx,
 	                                                 SljitPostJoinProjectionAggregatePrimitive &primitive) const;

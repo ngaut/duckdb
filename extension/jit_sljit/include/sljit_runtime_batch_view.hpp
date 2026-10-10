@@ -64,10 +64,6 @@ struct SljitRuntimeHashJoinSelection {
 		return optional_ptr<const vector<idx_t>>(output_column_map);
 	}
 
-	bool SourceKey0Int64ToInt32MatchesAreProven() const {
-		return output_proof.source_key0_int64_to_int32;
-	}
-
 	bool ExactSourceFilterMatches() const {
 		return output_proof.ExactSourceFilterMatches();
 	}

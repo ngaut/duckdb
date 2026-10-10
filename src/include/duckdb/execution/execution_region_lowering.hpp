@@ -61,13 +61,10 @@ struct ExecutionRegionLoweringCapabilityFacts {
 	idx_t backend_hash_join_non_equality_key_count = 0;
 	idx_t backend_hash_join_build_count = 0;
 	idx_t backend_direct_hash_join_build_count = 0;
-	idx_t backend_nested_loop_join_probe_count = 0;
-	idx_t backend_nested_loop_join_build_count = 0;
 	idx_t backend_hash_aggregate_update_count = 0;
 	idx_t backend_perfect_hash_aggregate_update_count = 0;
 	idx_t backend_ungrouped_aggregate_update_count = 0;
 	idx_t backend_primitive_aggregate_payload_update_count = 0;
-	idx_t backend_distinct_key_fast_insert_count = 0;
 	idx_t backend_grouped_state_address_lookup_count = 0;
 	idx_t backend_generated_perfect_hash_lookup_count = 0;
 	idx_t backend_native_state_address_lookup_count = 0;
@@ -106,11 +103,8 @@ struct DUCKDB_API ExecutionRegionLoweringPlan {
 	                                       idx_t key_count);
 	void AddBackendHashJoinBuildCapability();
 	void AddBackendDirectHashJoinBuildCapability();
-	void AddBackendNestedLoopJoinProbeCapability();
-	void AddBackendNestedLoopJoinBuildCapability();
 	void AddBackendAggregateUpdateCapability(ExecutionRegionAggregateOperatorKind kind, bool primitive_payloads,
 	                                         bool grouped_state_addresses, bool perfect_hash_group_lookup);
-	void AddBackendDistinctKeyFastInsertCapability();
 	void AddBackendReferenceOnlyStringPerfectHashAggregateCapability();
 	void AddBackendWeakAcceleratedWorkCapability();
 	void AddBackendLowCardinalityStringPredicatePreference(idx_t distinct_count);
@@ -121,7 +115,6 @@ struct DUCKDB_API ExecutionRegionLoweringPlan {
 	void SetSourceRecipe(ExecutionRegionSelectedSourceRecipe source_recipe);
 	void SetOperatorStageIR(string stage_ir);
 	idx_t NativeCount() const;
-	idx_t BoundaryCount() const;
 	idx_t SelectedStageCount() const;
 	bool HasNodes() const;
 	bool RecordDetailedNodes() const;

@@ -25,7 +25,6 @@ public:
 	explicit ExecutionRegionPipelineAdapter(PipelineExecutor &executor);
 
 	ClientContext &GetClientContext() const;
-	ExecutionContext &GetExecutionContext() const;
 	Allocator &GetAllocator() const;
 	bool IsCompiledExecutionSuppressed() const;
 	idx_t MaxThreads() const;

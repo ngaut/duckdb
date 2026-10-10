@@ -82,13 +82,9 @@ public:
 		if (input.HasHashJoinSelection()) {
 			DataChunk *join_input = nullptr;
 			ExecutionHashJoinProbeBinding *target_binding = nullptr;
-			string deferred_reason;
 			if (!TryPrepareInput(target_hash_join_idx, input, true,
 			                     InputBatch(selected_hash_join_inputs, target_hash_join_idx), context,
-			                     "probe_input_view", join_input, target_binding, deferred_reason)) {
-				if (!deferred_reason.empty()) {
-					SljitThrowNativeOperatorNotReady(deferred_reason);
-				}
+			                     "probe_input_view", join_input, target_binding)) {
 				throw InternalException("%s could not prepare selected upstream hash-join input", context);
 			}
 			return *join_input;
@@ -115,22 +111,18 @@ private:
 		return SljitTryGetSelectedHashJoinSourceBinding(selected_input, ops.size(), scratch, context);
 	}
 
-	bool TryBindTargetHashJoin(idx_t target_hash_join_idx, DataChunk &compact_input, const char *context,
-	                           ExecutionHashJoinProbeBinding *&target_binding, string &deferred_reason) {
+	ExecutionHashJoinProbeBinding &BindTargetHashJoin(idx_t target_hash_join_idx, DataChunk &compact_input,
+	                                                  const char *context) {
 		auto &target_hash_join_op = ops[target_hash_join_idx];
-		ExecutionOperatorBinding *target_binding_ptr = nullptr;
-		auto bind_result = SljitBindRecordedNativeOperator(
-		    runtime, runtime.ExecutionOperators(), scratch, target_hash_join_idx, target_hash_join_op, compact_input,
-		    target_hash_join_op.hash_join_probe.plan.operator_info, "native-operator-runtime-deferred", context,
-		    target_binding_ptr, deferred_reason);
-		if (bind_result == ExecutionOperatorBindResult::DEFERRED) {
-			return false;
-		}
-		target_binding = &target_binding_ptr->hash_join_probe;
-		if (!target_binding->ready) {
+		auto &target_binding =
+		    SljitBindRecordedNativeOperator(runtime, runtime.ExecutionOperators(), scratch, target_hash_join_idx,
+		                                    target_hash_join_op, compact_input,
+		                                    target_hash_join_op.hash_join_probe.plan.operator_info, context)
+		        .hash_join_probe;
+		if (!target_binding.ready) {
 			throw InternalException(string(context) + " received an invalid target binding");
 		}
-		return true;
+		return target_binding;
 	}
 
 	static void MarkReferencedColumn(vector<uint8_t> &referenced_columns, idx_t column_idx, const char *context) {
@@ -160,8 +152,8 @@ private:
 
 	bool TryPrepareInput(idx_t target_hash_join_idx, const SljitRuntimeBatchView &selected_input,
 	                     bool include_lhs_output_columns, SljitDataChunkBatch &input_batch, const char *context,
-	                     const char *view_stage, DataChunk *&join_input, ExecutionHashJoinProbeBinding *&target_binding,
-	                     string &deferred_reason) {
+	                     const char *view_stage, DataChunk *&join_input,
+	                     ExecutionHashJoinProbeBinding *&target_binding) {
 		join_input = nullptr;
 		target_binding = nullptr;
 		auto source_binding = TryGetSelectedSourceBinding(selected_input, target_hash_join_idx, context);
@@ -172,9 +164,7 @@ private:
 		input_batch.Ensure(runtime.GetAllocator(), source_binding->output_types);
 		auto &compact_input = input_batch.chunk;
 		compact_input.Reset();
-		if (!TryBindTargetHashJoin(target_hash_join_idx, compact_input, context, target_binding, deferred_reason)) {
-			return false;
-		}
+		target_binding = &BindTargetHashJoin(target_hash_join_idx, compact_input, context);
 
 		vector<uint8_t> referenced_columns(source_binding->output_types.size(), 0);
 		MarkTargetProbeInputColumns(*target_binding, referenced_columns, include_lhs_output_columns, context);

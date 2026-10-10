@@ -19,7 +19,6 @@ const sel_t *SljitNormalizedSourceSelectionData(const UnifiedVectorFormat &forma
 bool SljitNormalizedSourceAllValid(const UnifiedVectorFormat &format, const sel_t *sel, idx_t count);
 bool SljitNormalizedSourceAllValid(const UnifiedVectorFormat &format, const sel_t *source_sel,
                                    const SelectionVector *execute_sel, idx_t count);
-bool SljitSourceVectorRowsAllValid(Vector &source, idx_t count, const SelectionVector *sel = nullptr);
 const validity_t *SljitNormalizedSourceValidityData(const UnifiedVectorFormat &format, const sel_t *sel, idx_t count);
 const validity_t *SljitNormalizedSourceValidityData(const UnifiedVectorFormat &format, const sel_t *source_sel,
                                                     const SelectionVector *execute_sel, idx_t count);

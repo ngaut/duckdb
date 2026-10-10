@@ -284,20 +284,6 @@ static void AppendExecutionContractNativeStateScanReason(string &reason,
 	}
 }
 
-static void AppendExecutionContractNativeGroupedStateReason(string &reason,
-                                                            const ExecutionRegionNativeGroupedStateContract &contract) {
-	if (reason.empty() || contract.status == ExecutionRegionStateContractStatus::NONE) {
-		return;
-	}
-	reason += ";native_grouped_state_contract_status=";
-	reason += ExecutionRegionStateContractStatusToString(contract.status);
-	reason += ";native_grouped_state_required_capability=" + contract.required_capability;
-	reason += ";native_grouped_state_contract_version=" + contract.contract_version;
-	if (!contract.blocker.empty()) {
-		reason += ";native_grouped_state_blocker=" + contract.blocker;
-	}
-}
-
 static void AppendExecutionContractNativeOperatorReason(string &reason,
                                                         const ExecutionRegionNativeOperatorContract &contract,
                                                         const string &prefix) {
@@ -2015,16 +2001,6 @@ static bool TryReadExecutionContractAggregateInput(const BoundAggregateExpressio
 		result.payload_index = payload_index;
 	}
 	return true;
-}
-
-static void AppendExecutionContractAggregateReason(ExecutionRegionAggregateInput &aggregate, string reason) {
-	if (reason.empty()) {
-		return;
-	}
-	if (!aggregate.reason.empty()) {
-		aggregate.reason += ";";
-	}
-	aggregate.reason += std::move(reason);
 }
 
 static ExecutionRegionAggregateInput

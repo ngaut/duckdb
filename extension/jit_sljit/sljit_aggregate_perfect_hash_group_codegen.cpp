@@ -267,14 +267,4 @@ sljit_s32 SljitPerfectHashGroupDataPointerReg(idx_t group_idx) {
 	throw InternalException("SLJIT perfect-hash group data register is out of range");
 }
 
-sljit_s32 SljitPerfectHashSourceDataPointerReg(idx_t hoist_idx, bool include_fast_validity_reg) {
-	if (hoist_idx < 2) {
-		return SljitPerfectHashGroupDataPointerReg(hoist_idx);
-	}
-	if (include_fast_validity_reg && hoist_idx == 2) {
-		return GetSljitNativeVectorRegisterLayout().optional_invariant;
-	}
-	throw InternalException("SLJIT perfect-hash source data register is out of range");
-}
-
 } // namespace duckdb
