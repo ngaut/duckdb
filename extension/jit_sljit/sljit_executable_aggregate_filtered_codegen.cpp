@@ -30,6 +30,17 @@ SljitPayloadReferenceExpressionTree(const SljitNativeRegionExpressionPlan &plan)
 	return result;
 }
 
+//! The input column a reference payload reads. A payload whose sources were gathered into input_source_indices (the
+//! fused update's combined sources) names its column by its slot there; a payload without them names the column
+static idx_t SljitFilteredPayloadReferenceColumn(const SljitExecutableRegionExpression &payload) {
+	const auto source_index = payload.plan.source_index;
+	if (payload.input_source_indices.empty()) {
+		return source_index;
+	}
+	return source_index < payload.input_source_indices.size() ? payload.input_source_indices[source_index]
+	                                                          : DConstants::INVALID_INDEX;
+}
+
 static bool NormalizeSljitFilteredAggregatePayloadExpression(SljitExecutableRegionExpression &payload,
                                                              vector<idx_t> &local_sources) {
 	if (payload.plan.expression_tree) {
@@ -41,9 +52,13 @@ static bool NormalizeSljitFilteredAggregatePayloadExpression(SljitExecutableRegi
 	    payload.plan.source_index == DConstants::INVALID_INDEX) {
 		return false;
 	}
+	const auto source_column = SljitFilteredPayloadReferenceColumn(payload);
+	if (source_column == DConstants::INVALID_INDEX) {
+		return false;
+	}
 	payload.plan.expression_tree = SljitPayloadReferenceExpressionTree(payload.plan);
 	local_sources.clear();
-	local_sources.push_back(payload.plan.source_index);
+	local_sources.push_back(source_column);
 	payload.plan.expression_tree_source_indices = local_sources;
 	payload.input_source_indices = local_sources;
 	return true;
@@ -60,11 +75,7 @@ static bool NormalizeSljitFilteredPerfectHashAggregatePayloadExpression(SljitExe
 	    payload.plan.source_index == DConstants::INVALID_INDEX) {
 		return false;
 	}
-	const auto source_index = payload.input_source_indices.empty()
-	                              ? payload.plan.source_index
-	                              : (payload.plan.source_index < payload.input_source_indices.size()
-	                                     ? payload.input_source_indices[payload.plan.source_index]
-	                                     : DConstants::INVALID_INDEX);
+	const auto source_index = SljitFilteredPayloadReferenceColumn(payload);
 	if (source_index == DConstants::INVALID_INDEX) {
 		return false;
 	}
@@ -212,6 +223,8 @@ bool SljitTryBuildFilteredAggregateUpdate(SljitExecutableRegionOp &filter_op, Sl
 	for (auto &payload : aggregate_update.payloads) {
 		SljitExecutableRegionExpression filtered_payload;
 		filtered_payload.plan = payload.plan.Copy(true, false);
+		filtered_payload.input_source_indices = payload.input_source_indices;
+		filtered_payload.input_source_not_null = payload.input_source_not_null;
 		filtered_update.payloads.push_back(std::move(filtered_payload));
 	}
 	if (!filtered_update.filter.plan.expression_tree) {
