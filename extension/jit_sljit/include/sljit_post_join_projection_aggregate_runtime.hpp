@@ -173,6 +173,8 @@ struct SljitPostJoinProjectionAggregateRuntimeState {
 		if (!prepared) {
 			return false;
 		}
+		// The direct join-output aggregate batches rows whether or not a projection chain follows the join
+		SljitFlushDirectJoinOutputAggregate(runtime, ops, DirectAggregateStrategyPtr());
 		if (!post_join_projection.HasProjectionChain()) {
 			return false;
 		}
