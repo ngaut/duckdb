@@ -65,6 +65,15 @@ class ClassifyTest(unittest.TestCase):
         self.assertEqual(classify(off, RunResult(-1, "TIMEOUT", 0.1)), "timeout")
         self.assertEqual(classify(off, RunResult(1, "Out of Memory Error: failed to pin block", 0.1)), "oom")
 
+    def test_errors_compare_by_signature(self) -> None:
+        off = RunResult(1, "Out of Range Error: Overflow in multiplication of INT32 (2147484 * 1000)!", 0.1)
+        same = RunResult(1, "Out of Range Error: Overflow in multiplication of INT32 (5999999 * 1000)!", 0.1)
+        self.assertEqual(classify(off, same), "ok")
+        self.assertEqual(classify(off, RunResult(0, "n,h\n1,2", 0.1)), "mismatch")
+        self.assertEqual(classify(off, RunResult(1, "Conversion Error: Could not convert 'x' to INT32", 0.1)), "error")
+        reworded = RunResult(1, "Out of Range Error: Overflow in multiplication of DECIMAL", 0.1)
+        self.assertEqual(classify(off, reworded), "ok")
+
 
 if __name__ == "__main__":
     unittest.main()

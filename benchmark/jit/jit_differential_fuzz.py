@@ -256,7 +256,10 @@ class QueryGenerator:
         if column.kind == "dec":
             low, high = DEC_BOUNDS.get(column.name, (0, 1000))
             value = round(r.uniform(low, high), 2)
-            return r.choice([f"{ref} < {value}", f"{ref} >= {value}", f"{ref} * 2 > {value}"])
+            # a DOUBLE comparison is exact per value; DOUBLE never reaches a sum, whose rounding depends on order
+            return r.choice(
+                [f"{ref} < {value}", f"{ref} >= {value}", f"{ref} * 2 > {value}", f"CAST({ref} AS DOUBLE) < {value}"]
+            )
         if column.kind == "date":
             day = f"DATE '199{r.randint(2, 8)}-{r.randint(1, 12):02d}-{r.randint(1, 28):02d}'"
             return r.choice([f"{ref} < {day}", f"{ref} >= {day}"])
@@ -277,13 +280,40 @@ class QueryGenerator:
             return ref
         if r.random() < 0.15:
             return f"CASE WHEN {self.predicate(column)} THEN {ref} END"
+        if r.random() < 0.15:
+            return self.null_handling(column)
         if column.kind in ("key", "int"):
-            return r.choice([f"{ref} % {r.randint(2, 50)}", f"{ref} + {r.randint(1, 9)}", f"({ref} * 3) % 1000"])
+            casts = [f"CAST({ref} AS INTEGER)", f"CAST({ref} % 30000 AS SMALLINT)", f"CAST({ref} AS HUGEINT) * 3"]
+            if r.random() < 0.05:
+                # overflows on the larger keys: off and the JIT must raise the same error
+                casts.append(f"CAST({ref} AS INTEGER) * 1000")
+            return r.choice(
+                [f"{ref} % {r.randint(2, 50)}", f"{ref} + {r.randint(1, 9)}", f"({ref} * 3) % 1000", *casts]
+            )
         if column.kind == "dec":
-            return r.choice([f"{ref} * 2", f"{ref} + 1", f"CAST({ref} AS INTEGER)"])
+            return r.choice([f"{ref} * 2", f"{ref} + 1", f"CAST({ref} AS INTEGER)", f"CAST({ref} AS BIGINT)"])
         if column.kind == "date":
-            return r.choice([f"year({ref})", f"month({ref})", f"{ref} + 7"])
-        return r.choice([f"substr({ref}, 1, 3)", f"length({ref})", f"upper(substr({ref}, 1, 2))"])
+            return r.choice(
+                [f"year({ref})", f"month({ref})", f"{ref} + 7", f"date_diff('day', DATE '1992-01-01', {ref})"]
+            )
+        return r.choice(
+            [
+                f"substr({ref}, 1, 3)",
+                f"length({ref})",
+                f"upper(substr({ref}, 1, 2))",
+                f"concat(substr({ref}, 1, 2), '-')",
+            ]
+        )
+
+    def null_handling(self, column: Column) -> str:
+        r, ref = self.rng, column.ref
+        if column.kind in ("key", "int"):
+            return r.choice([f"coalesce({ref}, -1)", f"nullif({ref} % 7, 0)"])
+        if column.kind == "dec":
+            return r.choice([f"coalesce({ref}, 0)", f"nullif({ref}, 0)"])
+        if column.kind == "date":
+            return f"coalesce({ref}, DATE '1990-01-01')"
+        return r.choice([f"coalesce({ref}, 'none')", f"nullif(substr({ref}, 1, 1), 'A')"])
 
     def aggregate(self, columns: list[Column]) -> str:
         r = self.rng
@@ -483,11 +513,30 @@ def run_query(duckdb: Path, database: Path, settings: str, threads: int, sql: st
         return RunResult(-1, "TIMEOUT", time.monotonic() - start)
 
 
+def error_signature(output: str) -> str | None:
+    """The class of the first error (Out of Range Error, Conversion Error, ...). The rest of the message may name the
+    row that tripped it first, which depends on the schedule, and the generated code words some messages differently;
+    what must match is that both runs fail, and how."""
+    for line in output.splitlines():
+        if "Error:" in line:
+            return line.split("Error:", 1)[0].strip() + " Error"
+    return None
+
+
 def classify(off: RunResult, run: RunResult) -> str:
     if run.output == "TIMEOUT":
         return "timeout"
     if "INTERNAL Error" in run.output or "FATAL" in run.output or run.returncode < 0:
         return "crash"
+    off_error = error_signature(off.output)
+    if off_error is not None:
+        # a query off rejects must fail the same way with the JIT; succeeding means a check was skipped
+        run_error = error_signature(run.output)
+        if run_error == off_error:
+            return "ok"
+        if run_error is not None and "Out of Memory Error" in run.output:
+            return "oom"
+        return "error" if run_error is not None else "mismatch"
     if run.output != off.output:
         if "Out of Memory Error" in run.output:
             # near a memory limit either run may fail to fit; a result that differs is what marks a JIT bug
@@ -499,7 +548,11 @@ def classify(off: RunResult, run: RunResult) -> str:
 def check(args: argparse.Namespace, index: int, sql: str, threads: int) -> dict:
     off = run_query(args.duckdb, args.database, args.settings + CONFIGS["off"], threads, sql, args.timeout)
     record = {"index": index, "threads": threads, "sql": sql, "off": off.output[-300:], "results": {}}
-    if off.returncode != 0 or "Error" in off.output:
+    if (
+        off.output == "TIMEOUT"
+        or off.returncode < 0
+        or any(marker in off.output for marker in ("INTERNAL Error", "FATAL", "Out of Memory Error"))
+    ):
         record["invalid"] = True
         return record
     for name in ("default", "forced"):
