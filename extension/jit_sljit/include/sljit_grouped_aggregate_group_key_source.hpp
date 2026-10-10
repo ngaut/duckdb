@@ -301,6 +301,15 @@ static bool SljitInputVectorGroupKeySourceSupportsMaterialization(const Executio
 	}
 }
 
+//! Whether a matched row's probe value equals the build key of the condition. A non-equality condition (a residual
+//! comparison such as probe <= build) only relates the two, so its build key never stands in for the probe value
+static bool SljitHashJoinConditionIsEquality(const ExecutionHashJoinProbeBinding &binding, idx_t condition_idx) {
+	if (binding.layout_kind == ExecutionHashJoinProbeLayoutKind::PERFECT_HASH_TABLE) {
+		return condition_idx == 0;
+	}
+	return condition_idx < binding.table_layout.equality_condition_count;
+}
+
 static bool SljitTryGetHashJoinLHSInputConditionIndex(const ExecutionHashJoinProbeBinding &binding,
                                                       idx_t input_vector_index, const LogicalType &source_type,
                                                       idx_t &condition_idx) {
@@ -313,7 +322,8 @@ static bool SljitTryGetHashJoinLHSInputConditionIndex(const ExecutionHashJoinPro
 		return false;
 	}
 	for (idx_t key_idx = 0; key_idx < binding.probe_key_input_indices.size(); key_idx++) {
-		if (key_idx >= binding.table_layout.condition_types.size()) {
+		if (key_idx >= binding.table_layout.condition_types.size() ||
+		    !SljitHashJoinConditionIsEquality(binding, key_idx)) {
 			return false;
 		}
 		if (binding.probe_key_input_indices[key_idx] == input_vector_index &&
@@ -368,6 +378,7 @@ static bool SljitTryResolveHashJoinMatchedProbeInputForOutput(const ExecutionHas
 		return false;
 	}
 	if (!SljitTryGetHashJoinRHSFixedColumnConditionIndex(binding, rhs_source, condition_idx) ||
+	    !SljitHashJoinConditionIsEquality(binding, condition_idx) ||
 	    condition_idx >= binding.probe_key_input_indices.size()) {
 		return false;
 	}
@@ -427,7 +438,8 @@ static bool SljitTryBuildRowPointerGroupKeySource(const ExecutionHashJoinProbeBi
 		return false;
 	}
 	idx_t condition_idx;
-	if (SljitTryGetHashJoinRHSFixedColumnConditionIndex(binding, rhs_source, condition_idx)) {
+	if (SljitTryGetHashJoinRHSFixedColumnConditionIndex(binding, rhs_source, condition_idx) &&
+	    SljitHashJoinConditionIsEquality(binding, condition_idx)) {
 		if (condition_idx >= binding.probe_key_input_indices.size() ||
 		    condition_idx >= binding.table_layout.condition_types.size()) {
 			return false;

@@ -94,6 +94,9 @@ struct ExecutionHashJoinTableLayout {
 	//! This is distinct from has_filtered_null, which records NULLs removed for MARK semantics.
 	bool stored_keys_have_null = false;
 	idx_t condition_count = 0;
+	//! The leading conditions that are equalities (EQUAL, NOT DISTINCT FROM). Only their build keys equal the probe
+	//! value of a matched row; a non-equality condition's build key is only compared with it
+	idx_t equality_condition_count = 0;
 	vector<LogicalType> condition_types;
 	idx_t layout_column_count = 0;
 	vector<idx_t> layout_offsets;

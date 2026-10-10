@@ -1,0 +1,51 @@
+# name: test/sql/jit/test_jit_non_equality_join_condition_key.test_slow
+# description: A hash join with an equality and a non-equality condition stores both build keys. Only the equality
+#              key equals the probe value of a matched row; reading a non-equality condition's build column (d.bal,
+#              compared with f.price) from its probe column would group by f.price instead
+# group: [jit]
+
+statement ok
+LOAD jit_sljit
+
+statement ok
+CREATE TABLE f AS
+SELECT (i % 50000)::BIGINT AS fk, ((i * 37) % 100000 / 10)::DECIMAL(15,2) AS price, (i % 7)::INTEGER AS t
+FROM range(1500000) t(i)
+
+statement ok
+CREATE TABLE d AS SELECT i::BIGINT AS dk, ((i * 13) % 100000 / 10)::DECIMAL(15,2) AS bal FROM range(50000) t(i)
+
+foreach threads 1 4
+
+statement ok
+SET threads=${threads}
+
+foreach policy off auto
+
+statement ok
+SET jit_policy='${policy}'
+
+query II nosort grouped_build_comparison_key_${threads}
+SELECT count(*), sum(n) FROM (
+    SELECT d.bal, f.fk, f.t, count(*) AS n FROM f JOIN d ON f.fk = d.dk AND f.price <= d.bal GROUP BY ALL)
+----
+
+query II nosort single_group_build_comparison_key_${threads}
+SELECT count(*), sum(n) FROM (SELECT d.bal, count(*) AS n FROM f JOIN d ON f.fk = d.dk AND f.price <= d.bal GROUP BY 1)
+----
+
+# the equality key still stands in for its probe column
+query II nosort grouped_build_equality_key_${threads}
+SELECT count(*), sum(n) FROM (
+    SELECT d.dk, f.t, count(*) AS n FROM f JOIN d ON f.fk = d.dk AND f.price <= d.bal GROUP BY ALL)
+----
+
+endloop
+
+endloop
+
+query II
+SELECT count(*), sum(n) FROM (
+    SELECT d.bal, f.fk, f.t, count(*) AS n FROM f JOIN d ON f.fk = d.dk AND f.price <= d.bal GROUP BY ALL)
+----
+255780	721200

@@ -557,6 +557,7 @@ bool JoinHashTable::GetExecutionHashJoinTableLayout(ExecutionHashJoinTableLayout
 	layout.dictionary_emission = use_dict_emission;
 	layout.use_salt = UseSalt();
 	layout.condition_count = condition_types.size();
+	layout.equality_condition_count = equality_types.size();
 	layout.condition_types = condition_types;
 	layout.layout_column_count = layout_ptr ? layout_ptr->ColumnCount() : 0;
 	layout.layout_offsets = layout_ptr ? layout_ptr->GetOffsets() : vector<idx_t>();
