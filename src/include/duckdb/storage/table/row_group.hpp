@@ -14,7 +14,6 @@
 #include "duckdb/common/enums/column_segment_info_scan_type.hpp"
 #include "duckdb/common/enums/scan_options.hpp"
 #include "duckdb/storage/table/per_column_metadata_blocks.hpp"
-#include "duckdb/storage/table/direct_append_stats.hpp"
 #include "duckdb/common/mutex.hpp"
 #include "duckdb/parser/column_list.hpp"
 #include "duckdb/storage/table/segment_base.hpp"
@@ -241,12 +240,6 @@ public:
 
 	static void InitializeAppend(SegmentNode<RowGroup> &row_group, RowGroupAppendState &append_state);
 	void Append(RowGroupAppendState &append_state, DataChunk &chunk, idx_t append_count);
-	bool TryPrepareDirectAppend(RowGroupAppendState &append_state, const vector<LogicalType> &types, idx_t append_count,
-	                            vector<data_ptr_t> &targets, optional_ptr<DirectAppendProfile> profile = nullptr);
-	void CommitDirectAppend(RowGroupAppendState &append_state, const vector<data_ptr_t> &targets,
-	                        const vector<DirectAppendColumnSource> &sources, idx_t append_count,
-	                        optional_ptr<const vector<DirectAppendColumnStats>> stats = nullptr,
-	                        optional_ptr<DirectAppendProfile> profile = nullptr);
 	void FinalizeAppend(RowGroupAppendState &append_state);
 
 	void Update(TransactionData transaction, DuckTableEntry &table_entry, DataChunk &updates, row_t *ids, idx_t offset,

@@ -222,18 +222,6 @@ ExecutionPrimitiveAggregateUpdateBinding::FindLane(idx_t aggregate_index) const 
 	return nullptr;
 }
 
-ExecutionOperatorBindResult ExecutionAppendSinkState::PrepareDirectAppend(const vector<LogicalType> &, idx_t,
-                                                                          DirectAppendReservation &, string &blocker,
-                                                                          optional_ptr<DirectAppendProfile>) {
-	blocker = "direct-append-not-supported";
-	return ExecutionOperatorBindResult::INVALID;
-}
-
-SinkResultType ExecutionAppendSinkState::CommitDirectAppend(const DirectAppendReservation &,
-                                                            optional_ptr<DirectAppendProfile>) {
-	throw InternalException("direct append commit called on a sink without direct append support");
-}
-
 SinkResultType ExecutionSinkAppend(const ExecutionAppendSinkBinding &binding, DataChunk &input) {
 	if (!binding.ready || !binding.state) {
 		throw InternalException("execution append sink binding is incomplete");

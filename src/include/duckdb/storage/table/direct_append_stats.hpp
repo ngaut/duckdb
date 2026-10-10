@@ -16,25 +16,6 @@ namespace duckdb {
 
 class Vector;
 
-struct DirectAppendColumnStats {
-	bool has_stats = false;
-	PhysicalType physical_type = PhysicalType::INVALID;
-	int64_t signed_min = 0;
-	int64_t signed_max = 0;
-	uint64_t unsigned_min = 0;
-	uint64_t unsigned_max = 0;
-	hugeint_t hugeint_min = {};
-	hugeint_t hugeint_max = {};
-	uhugeint_t uhugeint_min = {};
-	uhugeint_t uhugeint_max = {};
-	float float_min = 0;
-	float float_max = 0;
-	double double_min = 0;
-	double double_max = 0;
-	bool has_distinct_count = false;
-	idx_t distinct_count = 0;
-};
-
 struct DirectAppendColumnSource {
 	optional_ptr<const Vector> vector;
 	idx_t offset = 0;
@@ -49,47 +30,6 @@ struct DirectAppendSlice {
 	idx_t count = 0;
 	vector<data_ptr_t> targets;
 	vector<DirectAppendColumnSource> sources;
-	vector<DirectAppendColumnStats> stats;
-};
-
-struct DirectAppendReservation {
-	void Clear() {
-		slices.clear();
-	}
-
-	bool Empty() const {
-		return slices.empty();
-	}
-
-	idx_t Count() const {
-		idx_t result = 0;
-		for (auto &slice : slices) {
-			result += slice.count;
-		}
-		return result;
-	}
-
-	vector<DirectAppendSlice> slices;
-};
-
-struct DirectAppendProfile {
-	int64_t prepare_finalize_row_group_time_us = 0;
-	int64_t prepare_new_row_group_time_us = 0;
-	int64_t prepare_fixed_column_time_us = 0;
-	int64_t commit_source_format_time_us = 0;
-	int64_t commit_source_append_time_us = 0;
-	int64_t commit_fixed_column_time_us = 0;
-	int64_t commit_distinct_lock_time_us = 0;
-	int64_t commit_source_distinct_stats_time_us = 0;
-	int64_t commit_target_distinct_stats_time_us = 0;
-	int64_t commit_provided_distinct_count_time_us = 0;
-
-	idx_t prepare_fixed_column_count = 0;
-	idx_t commit_source_append_column_count = 0;
-	idx_t commit_fixed_column_count = 0;
-	idx_t commit_source_distinct_stats_column_count = 0;
-	idx_t commit_target_distinct_stats_column_count = 0;
-	idx_t commit_provided_distinct_count_column_count = 0;
 };
 
 inline bool DirectAppendSupportsFixedSizeType(const LogicalType &type) {
@@ -118,42 +58,6 @@ inline bool DirectAppendSupportsFixedSizeType(const LogicalType &type) {
 
 inline bool DirectAppendSupportsSourceAppendType(const LogicalType &type) {
 	return type.id() == LogicalTypeId::VARCHAR;
-}
-
-inline bool DirectAppendSupportsType(const LogicalType &type) {
-	return DirectAppendSupportsFixedSizeType(type) || DirectAppendSupportsSourceAppendType(type);
-}
-
-inline bool DirectAppendSupportsTypes(const vector<LogicalType> &source_types,
-                                      const vector<LogicalType> &target_types) {
-	if (source_types.size() != target_types.size()) {
-		return false;
-	}
-	for (idx_t type_idx = 0; type_idx < source_types.size(); type_idx++) {
-		if (source_types[type_idx] != target_types[type_idx]) {
-			return false;
-		}
-		if (!DirectAppendSupportsType(source_types[type_idx])) {
-			return false;
-		}
-	}
-	return true;
-}
-
-inline bool DirectAppendSupportsFixedSizeTypes(const vector<LogicalType> &source_types,
-                                               const vector<LogicalType> &target_types) {
-	if (source_types.size() != target_types.size()) {
-		return false;
-	}
-	for (idx_t type_idx = 0; type_idx < source_types.size(); type_idx++) {
-		if (source_types[type_idx] != target_types[type_idx]) {
-			return false;
-		}
-		if (!DirectAppendSupportsFixedSizeType(source_types[type_idx])) {
-			return false;
-		}
-	}
-	return true;
 }
 
 } // namespace duckdb

@@ -13,7 +13,6 @@
 #include "duckdb/execution/execution_hash_join_runtime.hpp"
 #include "duckdb/execution/execution_region_ir.hpp"
 #include "duckdb/function/aggregate_primitive_update.hpp"
-#include "duckdb/storage/table/direct_append_stats.hpp"
 
 #include <chrono>
 
@@ -78,11 +77,6 @@ struct ExecutionAppendSinkState {
 	virtual ~ExecutionAppendSinkState() {
 	}
 	virtual SinkResultType Append(DataChunk &input) = 0;
-	virtual ExecutionOperatorBindResult PrepareDirectAppend(const vector<LogicalType> &types, idx_t count,
-	                                                        DirectAppendReservation &reservation, string &blocker,
-	                                                        optional_ptr<DirectAppendProfile> profile = nullptr);
-	virtual SinkResultType CommitDirectAppend(const DirectAppendReservation &reservation,
-	                                          optional_ptr<DirectAppendProfile> profile = nullptr);
 };
 
 struct ExecutionOrderedSinkState {
