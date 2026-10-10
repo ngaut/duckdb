@@ -359,11 +359,10 @@ static bool SljitTryMaterializeAffineInputVectorGroupSource(DataChunk &payload_i
 			continue;
 		}
 		SOURCE_TYPE transformed;
-		if (!TryAddOperator::Operation(input_data[input_idx], constant, transformed)) {
-			throw OutOfRangeException("Overflow in SLJIT affine group-key publication");
-		}
-		if (!TryCast::Operation<SOURCE_TYPE, TARGET_TYPE>(transformed, target_data[row_idx], false)) {
-			throw OutOfRangeException("Cast overflow in SLJIT affine group-key publication");
+		if (!TryAddOperator::Operation(input_data[input_idx], constant, transformed) ||
+		    !TryCast::Operation<SOURCE_TYPE, TARGET_TYPE>(transformed, target_data[row_idx], false)) {
+			// the binder admits an affine key only after column statistics prove that its sum and every cast fit
+			throw InternalException("SLJIT affine group key left the range its column statistics proved");
 		}
 	}
 	FlatVector::SetSize(target, count);
