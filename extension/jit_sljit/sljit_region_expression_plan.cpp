@@ -107,7 +107,7 @@ bool TryReadNativeRegionExpression(const ExecutionExpressionIR &root, bool requi
 		expr.source_index = source_index;
 		expr.cast_source_width = cast_source_width;
 		expr.unsigned_cast_target_width = unsigned_cast_target_width;
-		expr.query_location = root.query_location;
+		expr.cast_chain = ReadNativeIntegerCastChain(root);
 		expr.try_cast = try_cast;
 		return true;
 	}
@@ -117,7 +117,7 @@ bool TryReadNativeRegionExpression(const ExecutionExpressionIR &root, bool requi
 		expr.source_index = source_index;
 		expr.cast_source_width = cast_source_width;
 		expr.cast_target_width = cast_target_width;
-		expr.query_location = root.query_location;
+		expr.cast_chain = ReadNativeIntegerCastChain(root);
 		expr.try_cast = try_cast;
 		return true;
 	}

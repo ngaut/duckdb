@@ -14,6 +14,8 @@ namespace duckdb {
 
 struct SljitHashJoinProbeInputRemap {
 	vector<idx_t> key_input_indices;
+	//! the elided cast key 0 narrows its BIGINT source through
+	SljitIntegerCastChain key0_source_cast;
 	vector<idx_t> residual_probe_source_indices;
 	SljitNativeHashJoinProbePlan prepared_plan;
 	bool has_prepared_plan = false;
@@ -21,7 +23,7 @@ struct SljitHashJoinProbeInputRemap {
 	SljitHashJoinProbeInputRemap() = default;
 
 	SljitHashJoinProbeInputRemap(const SljitHashJoinProbeInputRemap &other)
-	    : key_input_indices(other.key_input_indices),
+	    : key_input_indices(other.key_input_indices), key0_source_cast(other.key0_source_cast),
 	      residual_probe_source_indices(other.residual_probe_source_indices),
 	      has_prepared_plan(other.has_prepared_plan) {
 		if (has_prepared_plan) {
@@ -34,6 +36,7 @@ struct SljitHashJoinProbeInputRemap {
 			return *this;
 		}
 		key_input_indices = other.key_input_indices;
+		key0_source_cast = other.key0_source_cast;
 		residual_probe_source_indices = other.residual_probe_source_indices;
 		has_prepared_plan = other.has_prepared_plan;
 		if (has_prepared_plan) {
@@ -198,8 +201,15 @@ static void SljitPrepareHashJoinProbeInputRemap(const SljitNativeHashJoinProbePl
 				throw InternalException("SLJIT prepared hash join probe key input is out of range");
 			}
 			auto &key = input_remap.prepared_plan.keys[key_idx];
-			if (!SljitPreparedHashJoinRemapKeySourceSupported(key, key_idx, input_types[input_idx].InternalType())) {
+			const auto source_type = input_types[input_idx].InternalType();
+			if (!SljitPreparedHashJoinRemapKeySourceSupported(key, key_idx, source_type)) {
 				throw InternalException("SLJIT prepared hash join probe key source type is unsupported");
+			}
+			if (SljitHashJoinKeyCanUseInt64SourceForInt32Key(key_idx, key.key_kind, source_type)) {
+				if (input_remap.key0_source_cast.steps.empty()) {
+					throw InternalException("SLJIT prepared hash join probe narrows a key without its cast");
+				}
+				key.source_cast = input_remap.key0_source_cast;
 			}
 			key.key_input_index = input_idx;
 			input_remap.prepared_plan.operator_info.hash_join_keys[key_idx].input_index = input_idx;

@@ -75,8 +75,6 @@ static void SljitExecuteProjectionExpression(SljitExecutableRegionExpression &ex
 		                               ? reinterpret_cast<data_ptr_t>(FlatVector::GetDataMutable<hugeint_t>(result))
 		                               : NativeIntegerResultData(result, plan.integer_kind);
 		native_input.result_validity = result_validity_data;
-		native_input.overflow_message = expr.overflow_message.c_str();
-		native_input.query_location = plan.query_location;
 		native_input.count = count;
 		SljitExecuteNativeFunction(expr.vector.Function(), native_input);
 		FlatVector::SetSize(result, count_t(count));
@@ -304,16 +302,9 @@ static void SljitExecuteProjectionExpression(SljitExecutableRegionExpression &ex
 	native_input.true_sel = nullptr;
 	native_input.false_sel = nullptr;
 	native_input.selected_count = 0;
-	native_input.overflow_message =
-	    plan.kind == SljitNativeRegionExpressionKind::INTEGER_BINARY_CONSTANT ||
-	            plan.kind == SljitNativeRegionExpressionKind::INTEGER_BINARY_REFERENCES ||
-	            plan.kind == SljitNativeRegionExpressionKind::INTEGER_CAST ||
-	            plan.kind == SljitNativeRegionExpressionKind::SIGNED_TO_UNSIGNED_INTEGER_CAST
-	        ? expr.overflow_message.c_str()
-	        : nullptr;
 	native_input.error_message =
 	    plan.kind == SljitNativeRegionExpressionKind::ERROR_GUARDED_REFERENCE ? plan.error_message.c_str() : nullptr;
-	native_input.query_location = plan.query_location;
+	native_input.cast_chain = &plan.cast_chain;
 	native_input.overflow_value = 0;
 	native_input.string_decompress_source_size = plan.string_decompress_source_size;
 	native_input.active_source_index = 0;

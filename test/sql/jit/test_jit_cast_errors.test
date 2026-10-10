@@ -1,0 +1,90 @@
+# name: test/sql/jit/test_jit_cast_errors.test
+# description: A compiled integer cast that fails raises DuckDB's own cast error: the type and value of the failing
+#              cast in a collapsed cast chain, and the column the cast reads. That includes a hash join probe that
+#              reads the BIGINT source of an elided INTEGER cast, whose failure used to be an internal error that
+#              invalidated the database (regular hash table) or reported a stack address as the value (perfect hash)
+# group: [jit]
+
+statement ok
+LOAD jit_sljit
+
+statement ok
+SET jit_cbo_generated_stage_benefit=4096
+
+statement ok
+SET jit_cbo_materialization_elision_benefit=4096
+
+statement ok
+SET jit_cbo_native_operator_stage_benefit=4096
+
+statement ok
+SET jit_cbo_full_pipeline_benefit=4096
+
+statement ok
+SET jit_cbo_source_contract_scan_filter_penalty=0
+
+statement ok
+SET jit_cbo_startup_base_cost=0
+
+statement ok
+SET jit_cbo_startup_margin_basis_points=0
+
+# one row per table is out of range, so the reported value does not depend on scheduling
+statement ok
+CREATE TABLE t AS SELECT CASE WHEN i = 77777 THEN 40000 ELSE i % 30000 END::BIGINT AS k FROM range(100000) r(i)
+
+statement ok
+CREATE TABLE big AS SELECT CASE WHEN i = 77777 THEN 5000000000 ELSE i % 5000 END::BIGINT AS x, i AS v
+FROM range(200000) r(i)
+
+# a dense build side probes a perfect hash table, a spread one a regular hash table
+statement ok
+CREATE TABLE dense AS SELECT i::INTEGER AS y FROM range(1000) r(i)
+
+statement ok
+CREATE TABLE spread AS SELECT (i * 100003)::INTEGER AS y FROM range(1000) r(i)
+
+foreach threads 1 4
+
+statement ok
+SET threads=${threads}
+
+foreach policy off auto
+
+statement ok
+SET jit_policy='${policy}'
+
+statement error
+SELECT max(k::SMALLINT) FROM t
+----
+Conversion Error: Type INT64 with value 40000 can't be cast because the value is out of range for the destination type INT16 when casting from source column k
+
+# the ORDER BY carries k compressed to a narrower integer: the cast chain still fails as a BIGINT to SMALLINT cast
+statement error
+SELECT k::SMALLINT FROM (SELECT k FROM t ORDER BY k) ORDER BY 1 LIMIT 3
+----
+Conversion Error: Type INT64 with value 40000 can't be cast because the value is out of range for the destination type INT16 when casting from source column k
+
+statement error
+SELECT count(*) FROM (SELECT x::INTEGER AS xi FROM big) b JOIN dense ON b.xi = dense.y
+----
+Conversion Error: Type INT64 with value 5000000000 can't be cast because the value is out of range for the destination type INT32 when casting from source column x
+
+statement error
+SELECT count(*), sum(v) FROM (SELECT x::INTEGER AS xi, v FROM big) b JOIN spread ON b.xi = spread.y
+----
+Conversion Error: Type INT64 with value 5000000000 can't be cast because the value is out of range for the destination type INT32 when casting from source column x
+
+query III
+SELECT count(*), sum(v), sum(xi) FROM (SELECT x::INTEGER AS xi, v FROM big WHERE v <> 77777) b JOIN dense ON b.xi = dense.y
+----
+40000	3919980000	19980000
+
+query II
+SELECT count(*), sum(v) FROM (SELECT x::INTEGER AS xi, v FROM big WHERE v <> 77777) b JOIN spread ON b.xi = spread.y
+----
+40	3900000
+
+endloop
+
+endloop

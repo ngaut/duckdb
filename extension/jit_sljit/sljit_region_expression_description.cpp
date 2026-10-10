@@ -122,6 +122,17 @@ private:
 
 static string BuildSljitExpressionTreeSemanticKey(const ExecutionExpressionIR &node);
 
+// a cast's error names its query location and the alias of the expression it casts, so both are part of its identity
+static void AppendSljitCastErrorIdentity(SljitSemanticExpressionKey &key, const QueryLocation &query_location,
+                                         const string &source_alias) {
+	key.Bool("query_location", query_location.IsValid());
+	if (query_location.IsValid()) {
+		key.Number("query_location_offset", query_location.offset);
+		key.Number("query_location_length", query_location.length);
+	}
+	key.String("cast_source_alias", source_alias);
+}
+
 static void AppendSljitExpressionTreeChild(SljitSemanticExpressionKey &key, const char *name,
                                            const unique_ptr<ExecutionExpressionIR> &child) {
 	key.Bool(name, child != nullptr);
@@ -138,10 +149,7 @@ static string BuildSljitExpressionTreeSemanticKey(const ExecutionExpressionIR &n
 	key.Number("validity", static_cast<uint8_t>(node.validity));
 	key.Number("source", static_cast<uint8_t>(node.source));
 	key.Number("exception", static_cast<uint8_t>(node.exception_behavior));
-	key.Bool("query_location", node.query_location.IsValid());
-	if (node.query_location.IsValid()) {
-		key.Number("query_location_value", node.query_location.GetIndex());
-	}
+	AppendSljitCastErrorIdentity(key, node.query_location, node.cast_source_alias);
 	key.ValueField("constant", node.constant);
 	key.Number("ref", node.ref_index);
 	key.Number("unary", static_cast<uint8_t>(node.unary_op));
@@ -369,9 +377,11 @@ string DescribeNativeRegionExpressionSemantic(const SljitNativeRegionExpressionP
 	key.Number("cast_target", static_cast<uint8_t>(expr.cast_target_width));
 	key.Number("unsigned_source", static_cast<uint8_t>(expr.unsigned_source_width));
 	key.Number("unsigned_target", static_cast<uint8_t>(expr.unsigned_cast_target_width));
-	key.Bool("query_location", expr.query_location.IsValid());
-	if (expr.query_location.IsValid()) {
-		key.Number("query_location_value", expr.query_location.GetIndex());
+	key.Type("cast_chain_source", expr.cast_chain.source_type);
+	key.Number("cast_chain_steps", expr.cast_chain.steps.size());
+	for (auto &step : expr.cast_chain.steps) {
+		key.Type("cast_chain_target", step.target_type);
+		AppendSljitCastErrorIdentity(key, step.query_location, step.source_alias);
 	}
 	key.Number("string_compress_size", expr.string_compress_target_size);
 	key.Number("string_decompress_size", expr.string_decompress_source_size);

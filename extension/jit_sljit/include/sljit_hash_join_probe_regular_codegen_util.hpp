@@ -53,7 +53,8 @@ FinishSljitRegularHashJoinProbeCode(struct sljit_compiler *compiler, SljitNative
 }
 
 static inline void EmitAbortHashJoinProbeWithCastError(struct sljit_compiler *compiler, sljit_s32 value_reg) {
-	EmitCallHashJoinInt64ToInt32CastError(compiler, offsetof(SljitNativeRegularHashJoinProbeInput, error), value_reg);
+	EmitCallHashJoinInt64ToInt32CastError(compiler, offsetof(SljitNativeRegularHashJoinProbeInput, error),
+	                                      offsetof(SljitNativeRegularHashJoinProbeInput, source_key0_cast), value_reg);
 	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_MEM1(SLJIT_S0),
 	               offsetof(SljitNativeRegularHashJoinProbeInput, selected_count), SLJIT_S3, 0);
 	EmitPauseRegularHashJoinProbe(compiler, SLJIT_IMM);

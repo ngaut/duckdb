@@ -272,6 +272,22 @@ struct SljitPerfectHashDictionaryGroupRuntime {
 	idx_t *active_count = nullptr;
 };
 
+//! One bound integer cast. When it fails, DuckDB names its position and the alias of the expression it casts.
+struct SljitIntegerCastStep {
+	LogicalType target_type;
+	QueryLocation query_location;
+	string source_alias;
+};
+
+//! The bound casts one native integer cast stands for, innermost first. Native code checks only the final range; when
+//! that check fails, the chain replays the value through DuckDB's casts and raises the error of the step that fails.
+struct SljitIntegerCastChain {
+	LogicalType source_type;
+	vector<SljitIntegerCastStep> steps;
+
+	[[noreturn]] void ThrowCastError(int64_t source_value) const;
+};
+
 //! The checks DuckDB's operator applies to one integer operation: the hardware overflow flag and, for kinds whose
 //! values are narrower than their registers (DECIMAL64, DATE), the result range.
 struct SljitIntegerOverflowChecks {
@@ -312,9 +328,9 @@ struct SljitNativeVectorInput {
 	sel_t *true_sel = nullptr;
 	sel_t *false_sel = nullptr;
 	idx_t selected_count = 0;
-	const char *overflow_message = nullptr;
 	const char *error_message = nullptr;
-	optional_idx query_location;
+	//! the casts a native integer cast stands for, which raise its error
+	const SljitIntegerCastChain *cast_chain = nullptr;
 	//! the value a failed cast saw, or the left operand of an overflowing integer operation
 	int64_t overflow_value = 0;
 	//! the right operand of an overflowing integer operation
@@ -429,6 +445,8 @@ struct SljitNativeRegularHashJoinProbeInput {
 	const validity_t **source_validity = nullptr;
 	bool source_key0_int64_to_int32 = false;
 	bool source_key0_int64_to_int32_unchecked = false;
+	//! source_key0_int64_to_int32: the elided cast, which raises a failed narrowing's error
+	const SljitIntegerCastChain *source_key0_cast = nullptr;
 	idx_t count = 0;
 	const uint64_t *entries = nullptr;
 	uint64_t bitmask = 0;
@@ -455,6 +473,8 @@ struct SljitNativePerfectHashJoinProbeInput {
 	const validity_t *source_validity = nullptr;
 	bool source_key0_int64_to_int32 = false;
 	bool source_key0_int64_to_int32_unchecked = false;
+	//! source_key0_int64_to_int32: the elided cast, which raises a failed narrowing's error
+	const SljitIntegerCastChain *source_key0_cast = nullptr;
 	idx_t count = 0;
 	sel_t *match_sel = nullptr;
 	sel_t *build_sel = nullptr;

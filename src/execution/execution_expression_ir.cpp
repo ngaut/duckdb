@@ -1197,7 +1197,8 @@ static unique_ptr<ExecutionExpressionIR> TryBuildExecutionCastIR(const Expressio
 	      !ExecutionExpressionIsUnsignedIntegerType(target_type)))) {
 		return nullptr;
 	}
-	auto child = TryBuildExecutionExpressionIR(BoundCastExpression::Child(cast));
+	auto &child_expression = BoundCastExpression::Child(cast);
+	auto child = TryBuildExecutionExpressionIR(child_expression);
 	if (!child) {
 		return nullptr;
 	}
@@ -1205,6 +1206,9 @@ static unique_ptr<ExecutionExpressionIR> TryBuildExecutionCastIR(const Expressio
 	node->kind = ExecutionExpressionIRKind::CAST;
 	node->return_type = target_type;
 	node->query_location = expression.GetQueryLocation();
+	if (child_expression.HasAlias()) {
+		node->cast_source_alias = child_expression.GetAlias().GetIdentifierName();
+	}
 	node->try_cast = try_cast;
 	node->left = std::move(child);
 	return node;

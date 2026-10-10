@@ -24,6 +24,8 @@ struct SljitPreJoinProjectionViewColumn {
 	LogicalType source_type;
 	LogicalType target_type;
 	bool source_range_fits_target = false;
+	//! INT64_TO_INT32_CAST: the elided casts, which raise a failed narrowing's error
+	SljitIntegerCastChain cast_chain;
 };
 
 struct SljitPreJoinProjectionViewDescriptor {
@@ -128,6 +130,7 @@ static bool SljitTryBuildPreJoinProjectionViewColumn(const SljitExecutableRegion
 		column.target_type = plan.return_type;
 		column.source_range_fits_target =
 		    SljitSourceRangeFitsInt32(plan.source_index, source_min_values, source_max_values);
+		column.cast_chain = plan.cast_chain;
 		return true;
 	}
 	return false;

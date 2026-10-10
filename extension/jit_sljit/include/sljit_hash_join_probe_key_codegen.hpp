@@ -18,21 +18,25 @@
 
 namespace duckdb {
 
-static inline void SLJIT_FUNC SljitNativeHashJoinInt64ToInt32CastError(std::exception_ptr *error, int64_t value) {
+static inline void SLJIT_FUNC SljitNativeHashJoinInt64ToInt32CastError(std::exception_ptr *error,
+                                                                       const SljitIntegerCastChain *cast,
+                                                                       int64_t value) {
 	try {
-		throw OutOfRangeException("Type INT64 with value %lld can't be cast because the value is out of range for "
-		                          "the destination type INT32",
-		                          static_cast<long long>(value));
+		cast->ThrowCastError(value);
 	} catch (...) {
 		*error = std::current_exception();
 	}
 }
 
+//! Calls the error helper for a key value that its elided INTEGER cast rejects; the input struct (S0) holds the error
+//! and the cast at the given offsets.
 static inline void EmitCallHashJoinInt64ToInt32CastError(struct sljit_compiler *compiler, sljit_sw error_offset,
-                                                         sljit_s32 value_reg) {
+                                                         sljit_sw cast_offset, sljit_s32 value_reg) {
+	// the value moves first: it may sit in R0 or R1
+	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_R2, 0, value_reg, 0);
+	sljit_emit_op1(compiler, SLJIT_MOV_P, SLJIT_R1, 0, SLJIT_MEM1(SLJIT_S0), cast_offset);
 	sljit_emit_op2(compiler, SLJIT_ADD, SLJIT_R0, 0, SLJIT_S0, 0, SLJIT_IMM, error_offset);
-	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_R1, 0, value_reg, 0);
-	sljit_emit_icall(compiler, SLJIT_CALL, SLJIT_ARGS2V(P, W), SLJIT_IMM,
+	sljit_emit_icall(compiler, SLJIT_CALL, SLJIT_ARGS3V(P, P, W), SLJIT_IMM,
 	                 SLJIT_FUNC_ADDR(SljitNativeHashJoinInt64ToInt32CastError));
 }
 

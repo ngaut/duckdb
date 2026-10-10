@@ -9,6 +9,7 @@
 
 #include "duckdb/execution/execution_region_common.hpp"
 
+#include "duckdb/common/query_location.hpp"
 #include "duckdb/common/types.hpp"
 #include "duckdb/common/types/value.hpp"
 
@@ -21,7 +22,9 @@ struct ExecutionExpressionIR {
 	ExecutionExpressionValidityKind validity = ExecutionExpressionValidityKind::UNKNOWN;
 	ExecutionExpressionSourceKind source = ExecutionExpressionSourceKind::UNKNOWN;
 	ExecutionExpressionExceptionKind exception_behavior = ExecutionExpressionExceptionKind::UNKNOWN;
-	optional_idx query_location;
+	QueryLocation query_location;
+	//! The alias of the expression a cast casts, which DuckDB's cast error names
+	string cast_source_alias;
 	Value constant;
 	idx_t ref_index = 0;
 	ExecutionExpressionUnaryOp unary_op = ExecutionExpressionUnaryOp::NOT;

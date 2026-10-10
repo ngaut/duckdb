@@ -173,15 +173,11 @@ bool SljitCompilePreparedExecutableRegionExpression(SljitExecutableRegionExpress
 			                                                error);
 		});
 	case SljitNativeRegionExpressionKind::INTEGER_CAST:
-		expr.overflow_message =
-		    NativeIntegerCastOverflowMessage(semantic.cast_source_width, semantic.cast_target_width);
 		return build_vector([&](SljitNativeVectorFunction &function) {
 			return BuildSljitNativeIntegerCast(semantic.cast_source_width, semantic.cast_target_width,
 			                                   semantic.try_cast, function, error);
 		});
 	case SljitNativeRegionExpressionKind::SIGNED_TO_UNSIGNED_INTEGER_CAST:
-		expr.overflow_message = NativeSignedToUnsignedIntegerCastOverflowMessage(semantic.cast_source_width,
-		                                                                         semantic.unsigned_cast_target_width);
 		return build_vector([&](SljitNativeVectorFunction &function) {
 			return BuildSljitNativeSignedToUnsignedIntegerCast(
 			    semantic.cast_source_width, semantic.unsigned_cast_target_width, semantic.try_cast, function, error);

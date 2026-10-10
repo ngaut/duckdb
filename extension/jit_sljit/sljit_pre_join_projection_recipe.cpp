@@ -77,6 +77,10 @@ SljitHashJoinProbeSelectionPrimitive SljitPreJoinProjectionRecipeBinding::BindEl
 	SljitHashJoinProbeInputRemap input_remap;
 	if (!pre_join_view.hash_probe_key_inputs_match_source) {
 		input_remap.key_input_indices = pre_join_view.hash_probe_key_source_indices;
+		auto &join = ops[hash_join_idx].hash_join_probe.plan;
+		if (!join.keys.empty() && join.keys[0].key_input_index < pre_join_view.columns.size()) {
+			input_remap.key0_source_cast = pre_join_view.columns[join.keys[0].key_input_index].cast_chain;
+		}
 	}
 	input_remap.residual_probe_source_indices = pre_join_view.residual_probe_source_indices;
 	return SljitBindHashJoinProbeSelectionPrimitive(

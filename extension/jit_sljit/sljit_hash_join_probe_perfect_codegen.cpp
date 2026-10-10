@@ -40,7 +40,8 @@ FinishSljitPerfectHashJoinProbeCode(struct sljit_compiler *compiler, SljitNative
 }
 
 static void EmitAbortPerfectHashJoinProbeWithCastError(struct sljit_compiler *compiler, sljit_s32 value_reg) {
-	EmitCallHashJoinInt64ToInt32CastError(compiler, offsetof(SljitNativePerfectHashJoinProbeInput, error), value_reg);
+	EmitCallHashJoinInt64ToInt32CastError(compiler, offsetof(SljitNativePerfectHashJoinProbeInput, error),
+	                                      offsetof(SljitNativePerfectHashJoinProbeInput, source_key0_cast), value_reg);
 	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_MEM1(SLJIT_S0),
 	               offsetof(SljitNativePerfectHashJoinProbeInput, selected_count), SLJIT_S3, 0);
 	EmitPausePerfectHashJoinProbe(compiler);

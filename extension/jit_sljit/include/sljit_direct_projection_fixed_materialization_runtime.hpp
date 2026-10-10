@@ -172,14 +172,7 @@ static bool TryDirectMaterializeFixedGenerated(const SljitExecutableRegionExpres
 	native_input.constants = plan.constants.data();
 	native_input.constant = plan.constant;
 	native_input.result_data = target;
-	native_input.overflow_message =
-	    plan.kind == SljitNativeRegionExpressionKind::INTEGER_BINARY_CONSTANT ||
-	            plan.kind == SljitNativeRegionExpressionKind::INTEGER_BINARY_REFERENCES ||
-	            plan.kind == SljitNativeRegionExpressionKind::INTEGER_CAST ||
-	            plan.kind == SljitNativeRegionExpressionKind::SIGNED_TO_UNSIGNED_INTEGER_CAST
-	        ? expr.overflow_message.c_str()
-	        : nullptr;
-	native_input.query_location = plan.query_location;
+	native_input.cast_chain = &plan.cast_chain;
 	native_input.count = count;
 	native_input.has_error = false;
 	auto function = expr.flat.Function() ? expr.flat.Function() : expr.vector.Function();

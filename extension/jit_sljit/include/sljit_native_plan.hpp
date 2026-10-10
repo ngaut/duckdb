@@ -56,6 +56,8 @@ bool TryReadNativeIntegerCompareConstant(const ExecutionExpressionIR &root, Slji
 bool TryReadNativeIntegerCompareReferences(const ExecutionExpressionIR &root, SljitNativeIntegerCompareOp &compare_op,
                                            SljitNativeIntegerKind &kind, idx_t &left_source_index,
                                            idx_t &right_source_index);
+//! The chain of bound casts rooted at root, innermost first
+SljitIntegerCastChain ReadNativeIntegerCastChain(const ExecutionExpressionIR &root);
 bool TryReadNativeIntegerCast(const ExecutionExpressionIR &root, SljitNativeSignedIntegerWidth &source_width,
                               SljitNativeSignedIntegerWidth &target_width, idx_t &source_index, bool &try_cast);
 bool TryReadNativeSignedToUnsignedIntegerCast(const ExecutionExpressionIR &root,

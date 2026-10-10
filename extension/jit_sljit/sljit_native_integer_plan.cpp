@@ -13,6 +13,8 @@
 
 #include "duckdb/common/exception.hpp"
 
+#include <algorithm>
+
 namespace duckdb {
 
 bool TryGetNativeSignedIntegerWidth(const ExecutionExpressionIR &node, SljitNativeSignedIntegerWidth &width) {
@@ -272,6 +274,20 @@ static bool TryCollapseNativeIntegerCastChain(SljitNativeSignedIntegerWidth sour
 		}
 	}
 	return true;
+}
+
+SljitIntegerCastChain ReadNativeIntegerCastChain(const ExecutionExpressionIR &root) {
+	SljitIntegerCastChain chain;
+	reference<const ExecutionExpressionIR> node(root);
+	while (node.get().kind == ExecutionExpressionIRKind::CAST) {
+		auto &cast = node.get();
+		D_ASSERT(cast.left);
+		chain.steps.push_back({cast.return_type, cast.query_location, cast.cast_source_alias});
+		node = *cast.left;
+	}
+	chain.source_type = node.get().return_type;
+	std::reverse(chain.steps.begin(), chain.steps.end());
+	return chain;
 }
 
 bool TryReadNativeIntegerCast(const ExecutionExpressionIR &root, SljitNativeSignedIntegerWidth &source_width,

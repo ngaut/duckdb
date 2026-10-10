@@ -206,6 +206,7 @@ void SljitPreparePerfectHashJoinProbeInput(const SljitNativeHashJoinProbeKeyPlan
 	                                   : result.source_format.validity.GetData();
 	native_input.source_key0_int64_to_int32 = source_key0_int64_to_int32;
 	native_input.source_key0_int64_to_int32_unchecked = source_key0_int64_to_int32 && allow_unchecked_int64_to_int32;
+	native_input.source_key0_cast = source_key0_int64_to_int32 ? &key.source_cast : nullptr;
 	native_input.count = input.size();
 	native_input.match_sel = match_selection.data();
 	native_input.build_sel = build_selection.data();

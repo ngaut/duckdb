@@ -9,7 +9,9 @@
 #include "sljit_native_util.hpp"
 
 #include "duckdb/common/exception.hpp"
-#include "duckdb/common/string_util.hpp"
+#include "duckdb/common/exception/conversion_exception.hpp"
+#include "duckdb/common/types/value.hpp"
+
 namespace duckdb {
 
 string NativeSignedIntegerTypeName(SljitNativeSignedIntegerWidth width) {
@@ -40,18 +42,21 @@ string NativeUnsignedIntegerTypeName(SljitNativeUnsignedIntegerWidth width) {
 	}
 }
 
-string NativeIntegerCastOverflowMessage(SljitNativeSignedIntegerWidth source_width,
-                                        SljitNativeSignedIntegerWidth target_width) {
-	return "Type " + StringUtil::Upper(NativeSignedIntegerTypeName(source_width)) +
-	       " with value %lld can't be cast because the value is out of range for the destination type " +
-	       StringUtil::Upper(NativeSignedIntegerTypeName(target_width));
-}
-
-string NativeSignedToUnsignedIntegerCastOverflowMessage(SljitNativeSignedIntegerWidth source_width,
-                                                        SljitNativeUnsignedIntegerWidth target_width) {
-	return "Type " + StringUtil::Upper(NativeSignedIntegerTypeName(source_width)) +
-	       " with value %lld can't be cast because the value is out of range for the destination type " +
-	       StringUtil::Upper(NativeUnsignedIntegerTypeName(target_width));
+void SljitIntegerCastChain::ThrowCastError(int64_t source_value) const {
+	auto value = Value::BIGINT(source_value).DefaultCastAs(source_type);
+	for (auto &step : steps) {
+		string error;
+		auto result = value.DefaultTryCastAs(step.target_type, &error);
+		if (!result) {
+			// the message DuckDB's cast raises for its expression (HandleCastError::AssignError)
+			if (!step.source_alias.empty()) {
+				error += " when casting from source column " + step.source_alias;
+			}
+			throw ConversionException(step.query_location, error);
+		}
+		value = std::move(*result);
+	}
+	throw InternalException("SLJIT integer cast check failed on %lld, which DuckDB's casts accept", source_value);
 }
 
 bool SljitFilteredAggregateUsesPayloadExpression(AggregatePrimitiveUpdateKind kind) {

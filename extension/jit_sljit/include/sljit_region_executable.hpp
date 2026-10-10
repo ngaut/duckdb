@@ -38,7 +38,6 @@ struct SljitExecutableRegionExpression {
 	//! The selection predicate emitted a packed-SIMD prefix (scalar residual
 	//! remains); recorded so traces report rows-weighted SIMD coverage.
 	bool predicate_partial_simd = false;
-	string overflow_message;
 
 	bool HasSelectionKernel() const {
 		switch (plan.kind) {

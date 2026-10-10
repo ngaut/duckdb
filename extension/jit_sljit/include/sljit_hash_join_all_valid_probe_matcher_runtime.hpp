@@ -304,7 +304,7 @@ struct SljitHashJoinSingleKeyComparisonPredicateMatcher {
 	    : key_data(reinterpret_cast<const KEY_SOURCE *>(input.source_data[0])),
 	      predicate_data(reinterpret_cast<const PREDICATE *>(input.source_data[1])),
 	      key_offset(plan.keys[0].key_layout_offset), predicate_offset(plan.keys[1].key_layout_offset),
-	      comparison_type(plan.keys[1].comparison_type) {
+	      comparison_type(plan.keys[1].comparison_type), key_cast(input.source_key0_cast) {
 	}
 
 	inline Row Load(const sel_t source_idx) const {
@@ -333,11 +333,15 @@ struct SljitHashJoinSingleKeyComparisonPredicateMatcher {
 	}
 
 private:
-	static inline KEY_LAYOUT CastKey(KEY_SOURCE value) {
+	inline KEY_LAYOUT CastKey(KEY_SOURCE value) const {
 		if constexpr (std::is_same<KEY_SOURCE, KEY_LAYOUT>::value) {
 			return value;
+		} else {
+			// the only narrowing source is the BIGINT under an elided INTEGER cast
+			static_assert(std::is_same<KEY_SOURCE, int64_t>::value && std::is_same<KEY_LAYOUT, int32_t>::value,
+			              "SLJIT probe keys narrow only BIGINT to INTEGER");
+			return SljitNarrowHashJoinSourceKey0(value, *key_cast);
 		}
-		return NumericCast<KEY_LAYOUT>(value);
 	}
 
 	const KEY_SOURCE *__restrict key_data;
@@ -345,6 +349,7 @@ private:
 	idx_t key_offset;
 	idx_t predicate_offset;
 	ExecutionRegionComparisonType comparison_type;
+	const SljitIntegerCastChain *key_cast;
 };
 
 template <class KEY_READER>

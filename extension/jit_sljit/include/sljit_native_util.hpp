@@ -16,10 +16,6 @@ namespace duckdb {
 
 string NativeSignedIntegerTypeName(SljitNativeSignedIntegerWidth width);
 string NativeUnsignedIntegerTypeName(SljitNativeUnsignedIntegerWidth width);
-string NativeIntegerCastOverflowMessage(SljitNativeSignedIntegerWidth source_width,
-                                        SljitNativeSignedIntegerWidth target_width);
-string NativeSignedToUnsignedIntegerCastOverflowMessage(SljitNativeSignedIntegerWidth source_width,
-                                                        SljitNativeUnsignedIntegerWidth target_width);
 bool SljitFilteredAggregateUsesPayloadExpression(AggregatePrimitiveUpdateKind kind);
 bool SljitFilteredAggregateKindCanGenerate(AggregatePrimitiveUpdateKind kind);
 

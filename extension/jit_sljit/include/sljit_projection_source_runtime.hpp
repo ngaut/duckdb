@@ -316,7 +316,6 @@ static void SljitBuildBorrowedProjectionExpression(const SljitExecutableRegionEx
 	target.select = source.select;
 	target.predicate = source.predicate;
 	target.predicate_select = source.predicate_select;
-	target.overflow_message = source.overflow_message;
 }
 
 static bool SljitTryBuildSingleSourceProjectionExpression(const SljitExecutableRegionExpression &source,

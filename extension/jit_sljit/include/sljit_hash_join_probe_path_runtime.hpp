@@ -154,6 +154,7 @@ static SljitPreparedRegularHashJoinProbeInput SljitPrepareRegularHashJoinProbeIn
 	native_input.source_validity = source_validity_array;
 	native_input.source_key0_int64_to_int32 = source_key0_int64_to_int32;
 	native_input.source_key0_int64_to_int32_unchecked = source_key0_int64_to_int32 && allow_unchecked_int64_to_int32;
+	native_input.source_key0_cast = source_key0_int64_to_int32 ? &plan.keys[0].source_cast : nullptr;
 	native_input.count = input.size();
 	native_input.entries = layout.entries.words;
 	native_input.bitmask = layout.entries.bitmask;

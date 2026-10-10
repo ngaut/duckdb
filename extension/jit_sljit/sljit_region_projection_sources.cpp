@@ -170,7 +170,6 @@ static unique_ptr<ExecutionExpressionIR> MakeSljitTreeIntegerBinary(const SljitN
 	result->source = ExecutionExpressionSourceKind::DERIVED;
 	result->exception_behavior = expr.check_arithmetic_overflow ? ExecutionExpressionExceptionKind::ARITHMETIC
 	                                                            : ExecutionExpressionExceptionKind::NONE;
-	result->query_location = expr.query_location;
 	result->binary_op = binary_op;
 	result->arithmetic_overflow_check = expr.check_arithmetic_overflow;
 	result->left = std::move(left);
@@ -234,21 +233,25 @@ static unique_ptr<ExecutionExpressionIR> MakeSljitTreeIntrinsic(ExecutionExpress
 	return result;
 }
 
-static unique_ptr<ExecutionExpressionIR> MakeSljitTreeCast(unique_ptr<ExecutionExpressionIR> child,
-                                                           const LogicalType &target_type, optional_idx query_location,
-                                                           bool try_cast) {
-	auto result = make_uniq<ExecutionExpressionIR>();
-	result->kind = ExecutionExpressionIRKind::CAST;
-	result->return_type = target_type;
-	result->physical_type = target_type.InternalType();
-	result->validity =
-	    try_cast ? ExecutionExpressionValidityKind::CHILD_OR_CAST_FAILURE : ExecutionExpressionValidityKind::CHILD;
-	result->source = ExecutionExpressionSourceKind::DERIVED;
-	result->exception_behavior =
-	    try_cast ? ExecutionExpressionExceptionKind::NULL_ON_CAST_ERROR : ExecutionExpressionExceptionKind::CAST;
-	result->query_location = query_location;
-	result->try_cast = try_cast;
-	result->left = std::move(child);
+//! The bound casts of the chain over a reference to the cast source
+static unique_ptr<ExecutionExpressionIR> MakeSljitTreeCastChain(const SljitNativeRegionExpressionPlan &expr) {
+	auto result = MakeSljitTreeReference(expr.source_index, expr.cast_chain.source_type);
+	for (auto &step : expr.cast_chain.steps) {
+		auto cast = make_uniq<ExecutionExpressionIR>();
+		cast->kind = ExecutionExpressionIRKind::CAST;
+		cast->return_type = step.target_type;
+		cast->physical_type = step.target_type.InternalType();
+		cast->validity = expr.try_cast ? ExecutionExpressionValidityKind::CHILD_OR_CAST_FAILURE
+		                               : ExecutionExpressionValidityKind::CHILD;
+		cast->source = ExecutionExpressionSourceKind::DERIVED;
+		cast->exception_behavior = expr.try_cast ? ExecutionExpressionExceptionKind::NULL_ON_CAST_ERROR
+		                                         : ExecutionExpressionExceptionKind::CAST;
+		cast->query_location = step.query_location;
+		cast->cast_source_alias = step.source_alias;
+		cast->try_cast = expr.try_cast;
+		cast->left = std::move(result);
+		result = std::move(cast);
+	}
 	return result;
 }
 
@@ -300,24 +303,9 @@ unique_ptr<ExecutionExpressionIR> CopySljitExpressionPlanAsInputTree(const Sljit
 		}
 		return MakeSljitTreeIntegerBinary(expr, MakeSljitTreeReference(expr.source_index, expr.return_type),
 		                                  MakeSljitTreeReference(expr.right_source_index, expr.return_type));
-	case SljitNativeRegionExpressionKind::INTEGER_CAST: {
-		auto source_type = SljitSignedIntegerWidthType(expr.cast_source_width);
-		auto target_type = SljitSignedIntegerWidthType(expr.cast_target_width);
-		if (expr.return_type != target_type) {
-			return nullptr;
-		}
-		auto child = MakeSljitTreeReference(expr.source_index, source_type);
-		return MakeSljitTreeCast(std::move(child), expr.return_type, expr.query_location, expr.try_cast);
-	}
-	case SljitNativeRegionExpressionKind::SIGNED_TO_UNSIGNED_INTEGER_CAST: {
-		auto source_type = SljitSignedIntegerWidthType(expr.cast_source_width);
-		auto target_type = SljitUnsignedIntegerWidthType(expr.unsigned_cast_target_width);
-		if (expr.return_type != target_type) {
-			return nullptr;
-		}
-		auto child = MakeSljitTreeReference(expr.source_index, source_type);
-		return MakeSljitTreeCast(std::move(child), expr.return_type, expr.query_location, expr.try_cast);
-	}
+	case SljitNativeRegionExpressionKind::INTEGER_CAST:
+	case SljitNativeRegionExpressionKind::SIGNED_TO_UNSIGNED_INTEGER_CAST:
+		return MakeSljitTreeCastChain(expr);
 	case SljitNativeRegionExpressionKind::INTEGRAL_COMPRESS: {
 		auto source_type = SljitSignedIntegerWidthType(expr.cast_source_width);
 		auto target_type = SljitUnsignedIntegerWidthType(expr.unsigned_cast_target_width);

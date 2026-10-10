@@ -14,12 +14,21 @@
 
 namespace duckdb {
 
+//! Narrows a key read from the BIGINT source of an elided INTEGER cast; a value the cast rejects raises its error
+static inline int32_t SljitNarrowHashJoinSourceKey0(int64_t value, const SljitIntegerCastChain &cast) {
+	int32_t result;
+	if (!TryCast::Operation<int64_t, int32_t>(value, result)) {
+		cast.ThrowCastError(value);
+	}
+	return result;
+}
+
 template <bool UNCHECKED>
-static inline int32_t SljitCastHashJoinKeyInt64ToInt32(int64_t value) {
+static inline int32_t SljitCastHashJoinKeyInt64ToInt32(int64_t value, const SljitIntegerCastChain &cast) {
 	if constexpr (UNCHECKED) {
 		return UnsafeNumericCast<int32_t>(value);
 	} else {
-		return NumericCast<int32_t>(value);
+		return SljitNarrowHashJoinSourceKey0(value, cast);
 	}
 }
 
@@ -43,14 +52,15 @@ struct SljitHashJoinInt64ToInt32KeyReader {
 	using Key = int32_t;
 
 	explicit SljitHashJoinInt64ToInt32KeyReader(const SljitNativeRegularHashJoinProbeInput &input)
-	    : data(reinterpret_cast<const int64_t *__restrict>(input.source_data[0])) {
+	    : data(reinterpret_cast<const int64_t *__restrict>(input.source_data[0])), cast(*input.source_key0_cast) {
 	}
 
 	inline int32_t Load(const sel_t source_idx) const {
-		return SljitCastHashJoinKeyInt64ToInt32<UNCHECKED>(data[source_idx]);
+		return SljitCastHashJoinKeyInt64ToInt32<UNCHECKED>(data[source_idx], cast);
 	}
 
 	const int64_t *__restrict data;
+	const SljitIntegerCastChain &cast;
 };
 
 template <class DISPATCH>

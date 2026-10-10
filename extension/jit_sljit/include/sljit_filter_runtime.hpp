@@ -254,8 +254,6 @@ static idx_t SljitSelectExpression(const SljitExecutableRegionExpression &expres
 		native_input.true_sel = filter_selection.data();
 		native_input.false_sel = nullptr;
 		native_input.selected_count = 0;
-		native_input.overflow_message = expression.overflow_message.c_str();
-		native_input.query_location = filter.query_location;
 		native_input.count = count;
 		SljitExecuteNativeFunction(expression.select.Function(), native_input);
 		// A generated selector may leave an all-true identity vector unwritten.

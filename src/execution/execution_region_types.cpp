@@ -1322,6 +1322,7 @@ unique_ptr<ExecutionExpressionIR> ExecutionExpressionIR::Copy() const {
 	result->source = source;
 	result->exception_behavior = exception_behavior;
 	result->query_location = query_location;
+	result->cast_source_alias = cast_source_alias;
 	result->constant = constant;
 	result->ref_index = ref_index;
 	result->unary_op = unary_op;

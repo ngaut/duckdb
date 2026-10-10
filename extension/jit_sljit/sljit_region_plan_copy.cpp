@@ -82,7 +82,7 @@ SljitNativeRegionExpressionPlan SljitNativeRegionExpressionPlan::Copy(bool copy_
 	result.cast_target_width = cast_target_width;
 	result.unsigned_source_width = unsigned_source_width;
 	result.unsigned_cast_target_width = unsigned_cast_target_width;
-	result.query_location = query_location;
+	result.cast_chain = cast_chain;
 	result.string_compress_target_size = string_compress_target_size;
 	result.string_decompress_source_size = string_decompress_source_size;
 	result.string_substring_length = string_substring_length;

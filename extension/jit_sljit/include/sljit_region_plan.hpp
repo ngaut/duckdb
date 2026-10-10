@@ -63,6 +63,8 @@ struct SljitNativeHashJoinProbeKeyPlan {
 	bool equality_key = true;
 	bool null_equal = false;
 	bool source_known_not_null = false;
+	//! A key read from the BIGINT source of an elided INTEGER cast: that cast, which raises a failed narrowing's error
+	SljitIntegerCastChain source_cast;
 };
 
 struct SljitNativeRegionExpressionPlan {
@@ -90,7 +92,8 @@ struct SljitNativeRegionExpressionPlan {
 	SljitNativeSignedIntegerWidth cast_target_width = SljitNativeSignedIntegerWidth::INT32;
 	SljitNativeUnsignedIntegerWidth unsigned_source_width = SljitNativeUnsignedIntegerWidth::UINT8;
 	SljitNativeUnsignedIntegerWidth unsigned_cast_target_width = SljitNativeUnsignedIntegerWidth::UINT16;
-	optional_idx query_location;
+	//! INTEGER_CAST and SIGNED_TO_UNSIGNED_INTEGER_CAST: the bound casts, which raise the cast's error
+	SljitIntegerCastChain cast_chain;
 	idx_t string_compress_target_size = 0;
 	idx_t string_decompress_source_size = 0;
 	idx_t string_substring_length = 0;

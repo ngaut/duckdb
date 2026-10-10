@@ -15,7 +15,7 @@ namespace duckdb {
 
 static void SLJIT_FUNC SljitNativeIntegerCastOverflow(SljitNativeVectorInput *input) {
 	try {
-		throw ConversionException(input->query_location, input->overflow_message, input->overflow_value);
+		input->cast_chain->ThrowCastError(input->overflow_value);
 	} catch (...) {
 		input->has_error = true;
 		input->error = std::current_exception();
