@@ -21,6 +21,12 @@
 
 namespace duckdb {
 
+//! The input column a predicate source slot reads. A predicate names its sources by their position in the
+//! expression's input sources, as its generated selector reads them, not by input column
+static idx_t SljitPredicateSourceColumn(const vector<idx_t> &input_source_indices, idx_t source_slot) {
+	return source_slot < input_source_indices.size() ? input_source_indices[source_slot] : DConstants::INVALID_INDEX;
+}
+
 template <class T>
 static bool SljitTryFastSelectFlatAllValidBetween(idx_t source_index, int64_t lower_value, int64_t upper_value,
                                                   bool lower_inclusive, bool upper_inclusive, bool not_between,
@@ -77,17 +83,19 @@ static bool SljitTryFastSelectFlatAllValidBetween(idx_t source_index, int64_t lo
 	return true;
 }
 
-static bool SljitTryFastSelectFlatAllValidIntegerBetween(const SljitNativePredicate &predicate, DataChunk &input,
+static bool SljitTryFastSelectFlatAllValidIntegerBetween(const SljitNativePredicate &predicate,
+                                                         const vector<idx_t> &input_source_indices, DataChunk &input,
                                                          SelectionVector &filter_selection, idx_t &selected_count) {
 	if (predicate.kind != SljitNativePredicateKind::INTEGER_BETWEEN) {
 		return false;
 	}
+	const auto source_column = SljitPredicateSourceColumn(input_source_indices, predicate.source_index);
 	switch (predicate.integer_kind) {
 	case SljitNativeIntegerKind::INT32:
 	case SljitNativeIntegerKind::DATE:
 		return SljitTryFastSelectFlatAllValidBetween<int32_t>(
-		    predicate.source_index, predicate.lower, predicate.upper, predicate.lower_inclusive,
-		    predicate.upper_inclusive, predicate.not_between, input, filter_selection, selected_count);
+		    source_column, predicate.lower, predicate.upper, predicate.lower_inclusive, predicate.upper_inclusive,
+		    predicate.not_between, input, filter_selection, selected_count);
 	default:
 		return false;
 	}
@@ -184,30 +192,29 @@ static bool SljitTryFastSelectFlatAllValidCompareReferences(idx_t source_index, 
 }
 
 static bool SljitTryFastSelectFlatAllValidIntegerCompareReferences(const SljitNativePredicate &predicate,
+                                                                   const vector<idx_t> &input_source_indices,
                                                                    DataChunk &input, SelectionVector &filter_selection,
                                                                    idx_t &selected_count) {
 	if (predicate.kind != SljitNativePredicateKind::INTEGER_COMPARE_REFERENCES) {
 		return false;
 	}
+	const auto source_column = SljitPredicateSourceColumn(input_source_indices, predicate.source_index);
+	const auto right_source_column = SljitPredicateSourceColumn(input_source_indices, predicate.right_source_index);
 	switch (predicate.integer_kind) {
 	case SljitNativeIntegerKind::INT8:
 		return SljitTryFastSelectFlatAllValidCompareReferences<int8_t>(
-		    predicate.source_index, predicate.right_source_index, predicate.compare_op, input, filter_selection,
-		    selected_count);
+		    source_column, right_source_column, predicate.compare_op, input, filter_selection, selected_count);
 	case SljitNativeIntegerKind::UINT8:
 		return SljitTryFastSelectFlatAllValidCompareReferences<uint8_t>(
-		    predicate.source_index, predicate.right_source_index, predicate.compare_op, input, filter_selection,
-		    selected_count);
+		    source_column, right_source_column, predicate.compare_op, input, filter_selection, selected_count);
 	case SljitNativeIntegerKind::INT32:
 	case SljitNativeIntegerKind::DATE:
 		return SljitTryFastSelectFlatAllValidCompareReferences<int32_t>(
-		    predicate.source_index, predicate.right_source_index, predicate.compare_op, input, filter_selection,
-		    selected_count);
+		    source_column, right_source_column, predicate.compare_op, input, filter_selection, selected_count);
 	case SljitNativeIntegerKind::INT64:
 	case SljitNativeIntegerKind::DECIMAL64:
 		return SljitTryFastSelectFlatAllValidCompareReferences<int64_t>(
-		    predicate.source_index, predicate.right_source_index, predicate.compare_op, input, filter_selection,
-		    selected_count);
+		    source_column, right_source_column, predicate.compare_op, input, filter_selection, selected_count);
 	default:
 		return false;
 	}
@@ -222,13 +229,13 @@ static idx_t SljitSelectExpression(const SljitExecutableRegionExpression &expres
 	if (filter.kind == SljitNativeRegionExpressionKind::PREDICATE) {
 		idx_t fast_selected_count;
 		if (!execute_sel && filter.predicate &&
-		    SljitTryFastSelectFlatAllValidIntegerBetween(*filter.predicate, input, filter_selection,
-		                                                 fast_selected_count)) {
+		    SljitTryFastSelectFlatAllValidIntegerBetween(*filter.predicate, expression.input_source_indices, input,
+		                                                 filter_selection, fast_selected_count)) {
 			return fast_selected_count;
 		}
 		if (!execute_sel && filter.predicate &&
-		    SljitTryFastSelectFlatAllValidIntegerCompareReferences(*filter.predicate, input, filter_selection,
-		                                                           fast_selected_count)) {
+		    SljitTryFastSelectFlatAllValidIntegerCompareReferences(*filter.predicate, expression.input_source_indices,
+		                                                           input, filter_selection, fast_selected_count)) {
 			return fast_selected_count;
 		}
 		auto native_input =
