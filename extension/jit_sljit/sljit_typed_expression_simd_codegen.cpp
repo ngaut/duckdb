@@ -771,11 +771,10 @@ SljitSimdValue EmitSljitSimdMask(struct sljit_compiler *compiler, const Executio
 	}
 }
 
-// Initialize the persistent lane-bit-position register {1,2,...} through the
+// Load the lane-bit positions {1,2,...} into ctx.lane_bits_reg through the
 // caller's 16-byte scratch slot (replicate cannot produce distinct lanes).
-void EmitSljitSimdInitLaneBits(struct sljit_compiler *compiler, SljitSimdEmitContext &ctx, sljit_s32 lanes,
-                               sljit_sw scratch_offset) {
-	ctx.lane_bits_reg = ctx.next_temp++;
+static void EmitSljitSimdLoadLaneBits(struct sljit_compiler *compiler, const SljitSimdEmitContext &ctx, sljit_s32 lanes,
+                                      sljit_sw scratch_offset) {
 	auto lane_bytes = NumericCast<sljit_sw>(sljit_sw(16) / lanes);
 	auto store_op = lanes == 4 ? SLJIT_MOV32 : SLJIT_MOV;
 	for (sljit_s32 lane = 0; lane < lanes; lane++) {
@@ -783,6 +782,32 @@ void EmitSljitSimdInitLaneBits(struct sljit_compiler *compiler, SljitSimdEmitCon
 		               sljit_sw(1) << lane);
 	}
 	sljit_emit_simd_mov(compiler, ctx.simd_type, SLJIT_VR(ctx.lane_bits_reg), SLJIT_MEM1(SLJIT_SP), scratch_offset);
+}
+
+// Allocate the persistent lane-bit-position register and load it.
+void EmitSljitSimdInitLaneBits(struct sljit_compiler *compiler, SljitSimdEmitContext &ctx, sljit_s32 lanes,
+                               sljit_sw scratch_offset) {
+	ctx.lane_bits_reg = ctx.next_temp++;
+	EmitSljitSimdLoadLaneBits(compiler, ctx, lanes, scratch_offset);
+}
+
+// Reload the loop-invariant vector registers (broadcast constants, all-ones, lane bits) into the registers they
+// already own. Vector registers are caller-saved in every ABI SLJIT targets, so code that calls into C between two
+// packed groups (a matching-row callback with a helper call) leaves them undefined.
+static void EmitSljitSimdReloadLoopInvariants(struct sljit_compiler *compiler, const SljitSimdEmitContext &ctx,
+                                              sljit_s32 lanes, sljit_sw scratch_offset) {
+	for (auto &constant : ctx.constant_reg) {
+		sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_R0, 0, SLJIT_IMM, NumericCast<sljit_sw>(constant.first.first));
+		sljit_emit_simd_replicate(compiler, SljitSimdTypeForScale(constant.first.second), SLJIT_VR(constant.second),
+		                          SLJIT_R0, 0);
+	}
+	if (ctx.all_ones_reg >= 0) {
+		sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_R0, 0, SLJIT_IMM, -1);
+		sljit_emit_simd_replicate(compiler, ctx.simd_type, SLJIT_VR(ctx.all_ones_reg), SLJIT_R0, 0);
+	}
+	if (ctx.lane_bits_reg >= 0) {
+		EmitSljitSimdLoadLaneBits(compiler, ctx, lanes, scratch_offset);
+	}
 }
 
 // AND the group's validity into `mask_reg`: combine the per-source validity bits
@@ -1241,6 +1266,8 @@ void EmitSljitTypedExpressionTreeSimdHybridFilterLoop(struct sljit_compiler *com
 	sljit_emit_op2(compiler, SLJIT_AND, SLJIT_R0, 0, SLJIT_S1, 0, SLJIT_IMM, plan.lanes - 1);
 	auto repeat_all_true = sljit_emit_cmp(compiler, SLJIT_NOT_EQUAL, SLJIT_R0, 0, SLJIT_IMM, 0);
 	sljit_set_label(repeat_all_true, all_true_loop);
+	// The callback may call into C: the next group needs its vector invariants back
+	EmitSljitSimdReloadLoopInvariants(compiler, ctx, plan.lanes, mask_offset);
 	auto group_done = sljit_emit_jump(compiler, SLJIT_JUMP);
 
 	sljit_set_label(mixed_mask, sljit_emit_label(compiler));
@@ -1272,6 +1299,7 @@ void EmitSljitTypedExpressionTreeSimdHybridFilterLoop(struct sljit_compiler *com
 	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_R3, 0, SLJIT_MEM1(SLJIT_SP), mask_offset + 16);
 	auto repeat_mixed = sljit_emit_cmp(compiler, SLJIT_NOT_EQUAL, SLJIT_R3, 0, SLJIT_IMM, 0);
 	sljit_set_label(repeat_mixed, mixed_loop);
+	EmitSljitSimdReloadLoopInvariants(compiler, ctx, plan.lanes, mask_offset);
 	// S1 names the final matching lane. Recover the aligned group base and move
 	// to the next packed group without carrying another live register in callbacks.
 	sljit_emit_op2(compiler, SLJIT_AND, SLJIT_R0, 0, SLJIT_S1, 0, SLJIT_IMM, -NumericCast<sljit_sw>(plan.lanes));
