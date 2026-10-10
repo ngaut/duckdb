@@ -48,27 +48,25 @@ bool SljitFullPipelineHasExactFilterProbeHashBuild(const vector<SljitExecutableR
 
 void SljitCollectFusedFilterOwner(const vector<SljitExecutableRegionOp> &ops,
                                   const SljitFullPipelinePrimitiveStep &step, vector<idx_t> &owners) {
-	idx_t filter_idx = DConstants::INVALID_INDEX;
-	idx_t aggregate_idx = DConstants::INVALID_INDEX;
+	// A filtered aggregate step owns its filter; it must be one its binder admits, so the step can execute it
 	if (step.kind == SljitFullPipelinePrimitiveKind::UNGROUPED_AGGREGATE_UPDATE &&
 	    step.ungrouped_aggregate_update.strategy ==
 	        SljitUngroupedAggregateUpdateStrategyKind::FILTERED_PRIMITIVE_PAYLOAD_UPDATE) {
-		filter_idx = step.ungrouped_aggregate_update.filter_idx;
-		aggregate_idx = step.ungrouped_aggregate_update.aggregate_idx;
+		auto &primitive = step.ungrouped_aggregate_update;
+		if (!SljitCanBindFilteredUngroupedAggregateUpdatePrimitive(ops, primitive.filter_idx,
+		                                                           primitive.aggregate_idx)) {
+			throw InternalException("SLJIT fused filter recipe has no executable ungrouped aggregate owner");
+		}
+		owners.push_back(primitive.filter_idx);
 	} else if (step.kind == SljitFullPipelinePrimitiveKind::GROUPED_AGGREGATE_UPDATE &&
 	           step.grouped_aggregate_update.strategy ==
 	               SljitGroupedAggregateUpdateStrategyKind::FILTERED_PRIMITIVE_PAYLOAD_UPDATE) {
-		filter_idx = step.grouped_aggregate_update.filter_idx;
-		aggregate_idx = step.grouped_aggregate_update.aggregate_idx;
+		auto &primitive = step.grouped_aggregate_update;
+		if (!SljitCanBindFilteredGroupedAggregateUpdatePrimitive(ops, primitive.filter_idx, primitive.aggregate_idx)) {
+			throw InternalException("SLJIT fused filter recipe has no executable grouped aggregate owner");
+		}
+		owners.push_back(primitive.filter_idx);
 	}
-	if (filter_idx == DConstants::INVALID_INDEX) {
-		return;
-	}
-	if (aggregate_idx >= ops.size() || ops[aggregate_idx].kind != SljitNativeRegionOpKind::AGGREGATE_UPDATE ||
-	    !ops[aggregate_idx].aggregate_update.filtered_update.IsExecutable()) {
-		throw InternalException("SLJIT fused filter recipe has no executable aggregate owner");
-	}
-	owners.push_back(filter_idx);
 }
 
 } // namespace

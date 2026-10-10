@@ -135,6 +135,15 @@ static SinkResultType SljitExecuteBoundGroupedPrimitiveAggregateUpdate(Execution
 		                                           defer_grouped_finish)) {
 			return SinkResultType::NEED_MORE_INPUT;
 		}
+		if (execute_sel) {
+			// Resolving group addresses finds or creates a group for every row of the chunk it reads: the selected
+			// rows go on as a chunk of their own, or every rejected row would leave an empty group behind
+			DataChunk selected_input;
+			selected_input.Initialize(runtime.GetAllocator(), input.GetTypes(), count);
+			input.Copy(selected_input, *execute_sel, count);
+			return SljitExecuteBoundGroupedPrimitiveAggregateUpdate(runtime, scratch, bound, selected_input, nullptr,
+			                                                        count, defer_grouped_finish);
+		}
 		grouped_state_addresses = &scratch.AggregateStateAddresses(bound.op_idx);
 		if (SljitCanResolveDirectNewGroupedStateAddresses(scratch, bound.op_idx, op, input, execute_sel, count) &&
 		    TryResolveDirectNewGroupedStateAddresses(runtime, scratch, bound.op_idx, op, input, grouped_state,

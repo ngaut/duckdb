@@ -86,15 +86,8 @@ bool SljitFullPipelineRecipeBinding::TryMakeSourceFilterAggregateRecipe(const Sl
 	    SljitTryBindGroupedAggregateUpdatePrimitive(ops, facts.aggregate_idx, grouped);
 	const auto can_bind_generated_filter =
 	    SljitTryBindGeneratedFilterPrimitive(ops, facts.filter_idx, generated_filter);
-	const auto filtered_grouped_uses_fused_kernel =
-	    facts.aggregate_idx < ops.size() &&
-	    ops[facts.aggregate_idx].kind == SljitNativeRegionOpKind::AGGREGATE_UPDATE &&
-	    ops[facts.aggregate_idx].aggregate_update.filtered_update.IsExecutable();
 	if (!can_bind_filtered_ungrouped && !can_bind_ungrouped && !can_bind_filtered_grouped &&
 	    !has_dedicated_grouped_backend) {
-		return false;
-	}
-	if (can_bind_filtered_grouped && !filtered_grouped_uses_fused_kernel && !can_bind_generated_filter) {
 		return false;
 	}
 
@@ -108,12 +101,13 @@ bool SljitFullPipelineRecipeBinding::TryMakeSourceFilterAggregateRecipe(const Sl
 			return false;
 		}
 		sequence.Add(SljitFullPipelinePrimitiveStep::GeneratedFilter(generated_filter));
+		SljitGroupedAggregateUpdatePrimitive selected_grouped;
 		if (can_bind_ungrouped) {
 			sequence.Add(SljitFullPipelinePrimitiveStep::UngroupedAggregateUpdate(ungrouped));
-		} else if (has_dedicated_grouped_backend) {
-			sequence.Add(SljitFullPipelinePrimitiveStep::GroupedAggregateUpdate(grouped));
+		} else if (SljitTryBindSelectedInputGroupedAggregateUpdatePrimitive(ops, facts.aggregate_idx,
+		                                                                    selected_grouped)) {
+			sequence.Add(SljitFullPipelinePrimitiveStep::GroupedAggregateUpdate(selected_grouped));
 		} else {
-			D_ASSERT(false);
 			return false;
 		}
 	}

@@ -202,8 +202,7 @@ private:
 	                                           const SljitRuntimeBatchView &input) {
 		auto &input_chunk = SljitBindMaterializedRuntimeBatchInput(input, "SLJIT filtered grouped aggregate update");
 		auto &aggregate_op = ops[primitive.aggregate_idx];
-		if (aggregate_op.aggregate_update.filtered_update.kind ==
-		    SljitFilteredAggregateKernelKind::PERFECT_HASH_GROUPED) {
+		if (SljitGroupedAggregateHasFusedFilteredKernel(aggregate_op)) {
 			auto &native_runtime = runtime.ExecutionOperators();
 			auto &bound = scratch.AggregateBoundGroupedUpdate(primitive.aggregate_idx);
 			SljitBindRecordedGroupedPrimitiveAggregateUpdate(runtime, native_runtime, scratch, primitive.aggregate_idx,
