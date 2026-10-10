@@ -2,6 +2,7 @@
 #include "duckdb/main/query_profiler.hpp"
 
 #include "duckdb/common/allocator.hpp"
+#include "duckdb/common/vector/dictionary_vector.hpp"
 #include "duckdb/common/exception.hpp"
 #include "duckdb/execution/execution_region_plan.hpp"
 #include "duckdb/main/client_context.hpp"
@@ -211,14 +212,26 @@ SinkResultType ExecutionRegionPipelineAdapter::SinkCoalescedChunk() {
 	return result;
 }
 
+//! A column that carries a global dictionary keeps that dictionary for the producer's lifetime: downstream caching
+//! operators accumulate its indices and treat a change of identity as a producer bug. Coalescing flattens, so such
+//! rows reach the sink as they are.
+static bool ChunkCarriesGlobalDictionary(const DataChunk &chunk) {
+	for (idx_t col_idx = 0; col_idx < chunk.ColumnCount(); col_idx++) {
+		if (DictionaryVector::IsGlobalDictionary(chunk.data[col_idx])) {
+			return true;
+		}
+	}
+	return false;
+}
+
 SinkResultType ExecutionRegionPipelineAdapter::AppendSink(const ExecutionAppendSinkBinding &binding, DataChunk &chunk) {
 	if (executor.remaining_sink_chunk) {
 		executor.EnqueueSinkChunk(chunk);
 		return SinkResultType::NEED_MORE_INPUT;
 	}
 	auto &coalesced = executor.coalesced_sink_chunk;
-	const bool coalesce =
-	    chunk.size() <= CachingPhysicalOperator::CACHE_THRESHOLD && !executor.required_partition_info.AnyRequired();
+	const bool coalesce = chunk.size() <= CachingPhysicalOperator::CACHE_THRESHOLD &&
+	                      !executor.required_partition_info.AnyRequired() && !ChunkCarriesGlobalDictionary(chunk);
 	if (coalesce) {
 		if (!executor.coalesced_sink_chunk_initialized) {
 			coalesced.Initialize(GetAllocator(), executor.final_chunk.GetTypes());
