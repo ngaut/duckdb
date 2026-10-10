@@ -1,0 +1,144 @@
+# name: test/sql/jit/test_jit_string_constant_filter.test
+# description: Compiled string equality and IN-list filters against constants inside and beyond the inline length
+# group: [jit]
+
+# Every value length, values that share the constant's length and prefix, a value that shares all its bytes but is
+# longer, NULL values, and NULL list entries must compare exactly as DuckDB does
+
+statement ok
+LOAD jit_sljit
+
+statement ok
+SET jit_cbo_generated_stage_benefit=4096
+
+statement ok
+SET jit_cbo_materialization_elision_benefit=4096
+
+statement ok
+SET jit_cbo_native_operator_stage_benefit=4096
+
+statement ok
+SET jit_cbo_full_pipeline_benefit=4096
+
+statement ok
+SET jit_cbo_source_contract_scan_filter_penalty=0
+
+statement ok
+SET jit_cbo_startup_base_cost=0
+
+statement ok
+SET jit_cbo_startup_margin_basis_points=0
+
+statement ok
+SET jit_event_log_size=10000
+
+# values of every length from 0 to 21 bytes in four spellings that share prefixes, and NULLs
+statement ok
+CREATE TABLE s AS
+SELECT i AS id,
+       CASE WHEN i % 23 = 22 THEN NULL
+            WHEN (i // 23) % 4 = 0 THEN left('abcdefghijklmnopqrst', (i % 23)::INTEGER)
+            WHEN (i // 23) % 4 = 1 THEN left('abcdeXghijklmnopqrst', (i % 23)::INTEGER)
+            WHEN (i // 23) % 4 = 2 THEN left('abcdefghijkXmnopqrst', (i % 23)::INTEGER)
+            ELSE upper(left('abcdefghijklmnopqrst', (i % 23)::INTEGER)) END AS v
+FROM range(200000) t(i)
+
+foreach threads 1 4
+
+statement ok
+SET threads={threads}
+
+foreach policy off auto
+
+statement ok
+SET jit_policy='{policy}'
+
+# a constant no longer than the 4-byte prefix
+query II
+SELECT count(*), sum(id) FROM s WHERE v = 'abcd'
+----
+6522	652102170
+
+# the empty string
+query II
+SELECT count(*), sum(id) FROM s WHERE v = ''
+----
+8696	869534780
+
+# values of the same length and prefix differ after the prefix
+query II
+SELECT count(*), sum(id) FROM s WHERE v = 'abcdeXgh'
+----
+2174	217376086
+
+# the longest inlined constant: values differ in its last byte, and 13-byte values share all 12
+query II
+SELECT count(*), sum(id) FROM s WHERE v = 'abcdefghijkl'
+----
+2174	217334780
+
+# a constant stored out of line
+query II
+SELECT count(*), sum(id) FROM s WHERE v = 'abcdefghijklm'
+----
+2174	217336954
+
+query II
+SELECT count(*), sum(id) FROM s WHERE v IN ('abc', 'ABCDEFGHIJKL')
+----
+8696	869580434
+
+query II
+SELECT count(*), sum(id) FROM s WHERE v IN ('abcdefghijk', 'abcdefghijkX', 'a', '')
+----
+21740	2173817384
+
+query II
+SELECT count(*), sum(id) FROM s WHERE v NOT IN ('abc', 'ABCDEFGHIJKL', 'abcdeXgh')
+----
+180435	18043417395
+
+query II
+SELECT count(*), sum(id) FROM s WHERE v IN ('abc', NULL)
+----
+6522	652095648
+
+query II
+SELECT count(*), sum(id) FROM s WHERE v NOT IN ('abc', NULL)
+----
+0	NULL
+
+# a list with constants stored out of line
+query II
+SELECT count(*), sum(id) FROM s WHERE v IN ('abcdefghijklmnopq', 'ab', 'abcdefghijklm')
+----
+10870	1086771730
+
+query II
+SELECT count(*), sum(id) FROM s WHERE v = 'abcdeXghijklmnop'
+----
+2174	217393478
+
+endloop
+
+endloop
+
+statement ok
+SET threads=1
+
+statement ok
+SET jit_trace_runtime=true
+
+statement ok
+SELECT * FROM duckdb_jit_clear_events()
+
+query II
+SELECT count(*), sum(id) FROM s WHERE v IN ('abc', 'ABCDEFGHIJKL')
+----
+8696	869580434
+
+query I
+SELECT count(*) > 0 FROM duckdb_jit_events()
+WHERE phase = 'runtime' AND jit_runtime_path_counts LIKE '%filter.selection%'
+----
+true
