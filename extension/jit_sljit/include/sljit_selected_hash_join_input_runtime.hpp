@@ -8,6 +8,7 @@
 
 #pragma once
 
+#include "sljit_full_pipeline_runtime.hpp"
 #include "sljit_hash_join_projection_source_runtime.hpp"
 #include "sljit_native_binding_runtime.hpp"
 #include "sljit_region_runtime_state.hpp"
@@ -70,39 +71,39 @@ class SljitSelectedHashJoinInputRuntime {
 public:
 	SljitSelectedHashJoinInputRuntime(ExecutionRegionRuntime &runtime_p, vector<SljitExecutableRegionOp> &ops_p,
 	                                  SljitRegionExecutionScratch &scratch_p)
-	    : runtime(runtime_p), ops(ops_p), scratch(scratch_p), selected_hash_join_mark_inputs(ops_p.size()),
-	      selected_hash_join_probe_inputs(ops_p.size()) {
+	    : runtime(runtime_p), ops(ops_p), scratch(scratch_p), selected_hash_join_inputs(ops_p.size()),
+	      selected_source_inputs(ops_p.size()) {
 	}
 
-	bool TryPrepareMarkProbeInput(idx_t mark_hash_join_idx, const SljitRuntimeBatchView &selected_input,
-	                              DataChunk *&join_input, string &deferred_reason) {
-		DataChunk *compact_input = nullptr;
-		ExecutionHashJoinProbeBinding *target_binding = nullptr;
-		if (!TryPrepareInput(mark_hash_join_idx, selected_input, true,
-		                     InputBatch(selected_hash_join_mark_inputs, mark_hash_join_idx),
-		                     "SLJIT selected MARK probe input", "mark_probe_input_view", compact_input, target_binding,
-		                     deferred_reason)) {
-			return false;
+	//! The chunk the probe of target_hash_join_idx runs on, whatever view the step ahead of it hands over: the
+	//! selected rows of an upstream join's output, the rows a generated filter selected from the source chunk, or a
+	//! materialized chunk
+	DataChunk &BindProbeInput(idx_t target_hash_join_idx, const SljitRuntimeBatchView &input, const char *context) {
+		if (input.HasHashJoinSelection()) {
+			DataChunk *join_input = nullptr;
+			ExecutionHashJoinProbeBinding *target_binding = nullptr;
+			string deferred_reason;
+			if (!TryPrepareInput(target_hash_join_idx, input, true,
+			                     InputBatch(selected_hash_join_inputs, target_hash_join_idx), context,
+			                     "probe_input_view", join_input, target_binding, deferred_reason)) {
+				if (!deferred_reason.empty()) {
+					SljitThrowNativeOperatorNotReady(deferred_reason);
+				}
+				throw InternalException("%s could not prepare selected upstream hash-join input", context);
+			}
+			return *join_input;
 		}
-		if (target_binding->output_mode != ExecutionHashJoinProbeOutputMode::MARK_PROBE) {
-			throw InternalException("SLJIT selected MARK probe input received an invalid MARK binding");
+		if (input.selection) {
+			auto &source = SljitBindRuntimeBatchInput(input, context);
+			auto &selected_source = InputBatch(selected_source_inputs, target_hash_join_idx);
+			selected_source.Ensure(runtime.GetAllocator(), source.GetTypes());
+			auto &selected = selected_source.chunk;
+			selected.Reset();
+			selected.Slice(source, *input.selection, input.count);
+			RecordSljitRegionRuntimePath(runtime, ops[target_hash_join_idx].kind, "selected_source_view", input.count);
+			return selected;
 		}
-		join_input = compact_input;
-		return true;
-	}
-
-	bool TryPrepareHashProbeInput(idx_t target_hash_join_idx, const SljitRuntimeBatchView &selected_input,
-	                              DataChunk *&join_input, string &deferred_reason) {
-		DataChunk *compact_input = nullptr;
-		ExecutionHashJoinProbeBinding *target_binding = nullptr;
-		if (!TryPrepareInput(target_hash_join_idx, selected_input, true,
-		                     InputBatch(selected_hash_join_probe_inputs, target_hash_join_idx),
-		                     "SLJIT selected hash probe input", "hash_probe_input_view", compact_input, target_binding,
-		                     deferred_reason)) {
-			return false;
-		}
-		join_input = compact_input;
-		return true;
+		return SljitBindMaterializedRuntimeBatchInput(input, context);
 	}
 
 private:
@@ -223,8 +224,8 @@ private:
 	ExecutionRegionRuntime &runtime;
 	vector<SljitExecutableRegionOp> &ops;
 	SljitRegionExecutionScratch &scratch;
-	vector<SljitDataChunkBatch> selected_hash_join_mark_inputs;
-	vector<SljitDataChunkBatch> selected_hash_join_probe_inputs;
+	vector<SljitDataChunkBatch> selected_hash_join_inputs;
+	vector<SljitDataChunkBatch> selected_source_inputs;
 };
 
 } // namespace duckdb

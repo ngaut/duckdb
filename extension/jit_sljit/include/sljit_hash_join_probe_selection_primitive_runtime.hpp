@@ -35,29 +35,8 @@ public:
 	             SljitHashJoinAggregateConsumerDispatch &direct_consumer_dispatch,
 	             TRY_EXECUTE_DIRECT_CONSUMER &&try_execute_direct_consumer) {
 		auto &primitive = step.hash_join_probe_selection;
-		string deferred_reason;
-		DataChunk *join_input_ptr = nullptr;
-		if (input.HasHashJoinSelection()) {
-			if (!selected_hash_join_inputs.TryPrepareHashProbeInput(primitive.hash_join_idx, input, join_input_ptr,
-			                                                        deferred_reason)) {
-				if (!deferred_reason.empty()) {
-					SljitThrowNativeOperatorNotReady(deferred_reason);
-				}
-				throw InternalException("SLJIT hash probe could not prepare selected upstream hash-join input");
-			}
-		} else if (input.selection) {
-			auto &source = SljitBindRuntimeBatchInput(input, "SLJIT selected hash join probe input");
-			selected_source_input.Ensure(runtime.GetAllocator(), source.GetTypes());
-			auto &selected = selected_source_input.chunk;
-			selected.Reset();
-			selected.Slice(source, *input.selection, input.count);
-			join_input_ptr = &selected;
-			RecordSljitRegionRuntimePath(runtime, ops[primitive.hash_join_idx].kind, "selected_source_view",
-			                             input.count);
-		} else {
-			join_input_ptr = &SljitBindMaterializedRuntimeBatchInput(input, "SLJIT hash join selection primitive");
-		}
-		auto &join_input = *join_input_ptr;
+		auto &join_input = selected_hash_join_inputs.BindProbeInput(primitive.hash_join_idx, input,
+		                                                            "SLJIT hash join selection primitive");
 		if (join_input.size() == 0) {
 			return false;
 		}
@@ -111,7 +90,6 @@ private:
 	vector<SljitExecutableRegionOp> &ops;
 	SljitRegionExecutionScratch &scratch;
 	SljitSelectedHashJoinInputRuntime &selected_hash_join_inputs;
-	SljitDataChunkBatch selected_source_input;
 };
 
 } // namespace duckdb

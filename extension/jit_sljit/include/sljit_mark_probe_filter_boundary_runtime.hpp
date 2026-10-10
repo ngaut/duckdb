@@ -31,21 +31,9 @@ public:
 	template <class EXECUTE_HASH_JOIN_PROBE, class EXECUTE_NEXT_STEP>
 	bool Execute(idx_t step_idx, const SljitFullPipelinePrimitiveStep &step, const SljitRuntimeBatchView &input,
 	             EXECUTE_HASH_JOIN_PROBE &execute_hash_join_probe, EXECUTE_NEXT_STEP &&execute_next_step) {
-		string deferred_reason;
-		DataChunk *join_input_ptr = nullptr;
 		const auto &primitive = step.mark_probe_filter_boundary;
-		if (input.HasHashJoinSelection()) {
-			if (!selected_hash_join_inputs.TryPrepareMarkProbeInput(primitive.hash_join_idx, input, join_input_ptr,
-			                                                        deferred_reason)) {
-				if (!deferred_reason.empty()) {
-					SljitThrowNativeOperatorNotReady(deferred_reason);
-				}
-				throw InternalException("SLJIT MARK probe boundary could not prepare selected hash-join input");
-			}
-		} else {
-			join_input_ptr = &SljitBindMaterializedRuntimeBatchInput(input, "SLJIT MARK probe boundary");
-		}
-		auto &join_input = *join_input_ptr;
+		auto &join_input =
+		    selected_hash_join_inputs.BindProbeInput(primitive.hash_join_idx, input, "SLJIT MARK probe boundary");
 		if (join_input.size() == 0) {
 			return false;
 		}

@@ -15,6 +15,7 @@
 #include "sljit_runtime_batch_runtime.hpp"
 #include "sljit_runtime_batch_state.hpp"
 #include "sljit_runtime_batch_view.hpp"
+#include "sljit_selected_hash_join_input_runtime.hpp"
 
 #include <array>
 
@@ -24,32 +25,22 @@ class SljitHashJoinProbeMaterializePrimitiveRuntime {
 public:
 	SljitHashJoinProbeMaterializePrimitiveRuntime(ExecutionRegionRuntime &runtime_p,
 	                                              vector<SljitExecutableRegionOp> &ops_p,
-	                                              SljitRegionExecutionScratch &scratch_p)
-	    : runtime(runtime_p), ops(ops_p), scratch(scratch_p) {
+	                                              SljitRegionExecutionScratch &scratch_p,
+	                                              SljitSelectedHashJoinInputRuntime &selected_hash_join_inputs_p)
+	    : runtime(runtime_p), ops(ops_p), scratch(scratch_p), selected_hash_join_inputs(selected_hash_join_inputs_p) {
 	}
 
 	template <class EXECUTE_HASH_JOIN_PROBE, class EXECUTE_OUTPUT_BATCH>
 	bool Execute(idx_t step_idx, const SljitFullPipelinePrimitiveStep &step, const SljitRuntimeBatchView &input,
 	             bool direct_handoff, EXECUTE_HASH_JOIN_PROBE &execute_hash_join_probe,
 	             EXECUTE_OUTPUT_BATCH &&execute_output_batch) {
-		DataChunk *join_input_ptr;
-		if (input.selection && !input.HasHashJoinSelection()) {
-			// A generated filter ahead of the probe hands over a selection view of the source chunk
-			auto &source = SljitBindRuntimeBatchInput(input, "SLJIT selected hash join materialize input");
-			selected_source_input.Ensure(runtime.GetAllocator(), source.GetTypes());
-			auto &selected = selected_source_input.chunk;
-			selected.Reset();
-			selected.Slice(source, *input.selection, input.count);
-			join_input_ptr = &selected;
-		} else {
-			join_input_ptr = &SljitBindMaterializedRuntimeBatchInput(input, "SLJIT hash join materialize primitive");
-		}
-		auto &join_input = *join_input_ptr;
+		auto &primitive = step.hash_join_probe_materialize;
+		const auto hash_join_idx = primitive.hash_join_idx;
+		auto &join_input =
+		    selected_hash_join_inputs.BindProbeInput(hash_join_idx, input, "SLJIT hash join materialize primitive");
 		if (join_input.size() == 0) {
 			return false;
 		}
-		auto &primitive = step.hash_join_probe_materialize;
-		const auto hash_join_idx = primitive.hash_join_idx;
 		auto &hash_join_op = ops[hash_join_idx];
 		auto &join_output = scratch.TemporaryChunk(hash_join_idx);
 		auto handle_output = [&](DataChunk &output) {
@@ -101,8 +92,8 @@ private:
 	ExecutionRegionRuntime &runtime;
 	vector<SljitExecutableRegionOp> &ops;
 	SljitRegionExecutionScratch &scratch;
+	SljitSelectedHashJoinInputRuntime &selected_hash_join_inputs;
 	std::array<SljitDataChunkBatch, SLJIT_FULL_PIPELINE_MAX_PRIMITIVES> batches;
-	SljitDataChunkBatch selected_source_input;
 };
 
 } // namespace duckdb
