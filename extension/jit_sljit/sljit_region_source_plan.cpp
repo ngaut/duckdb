@@ -201,30 +201,45 @@ struct SljitStorageFilterEvaluationFacts {
 	idx_t low_cardinality_string_like_max_distinct_count = 0;
 };
 
+//! DuckDB storage evaluates a string filter on a low-cardinality column against its dictionary. That beats per-row
+//! generated evaluation for LIKE and CONTAINS anywhere. For other string filters it pays only on compressed storage,
+//! when every filter of the source is such a string filter (generated code has no other predicate to fuse them
+//! with, and storage fetches the remaining columns only for the rows that pass), and when the finalized dynamic
+//! filters are expected to keep at least half the rows (storage evaluates static filters on every row; a generated
+//! filter sees only the dynamic filters' survivors).
 static SljitStorageFilterEvaluationFacts
 SljitStorageFilterEvaluation(const ExecutionRegionNode &node, const ExecutionRegionTableScanContract &contract) {
 	SljitStorageFilterEvaluationFacts result;
 	if (contract.estimated_source_cardinality < STANDARD_VECTOR_SIZE) {
 		return result;
 	}
+	bool all_low_cardinality_string_filters =
+	    contract.compressed_storage && !node.source->filters.empty() &&
+	    node.source->estimated_source_cardinality * 2 >= contract.estimated_source_cardinality;
 	for (auto &filter : node.source->filters) {
-		if (!filter.expression || !filter.expression->root ||
-		    filter.scan_column_index >= contract.source_contract_input_distinct_counts.size()) {
+		const bool low_cardinality_string_column =
+		    filter.scan_column_index < contract.source_contract_input_types.size() &&
+		    filter.scan_column_index < contract.source_contract_input_distinct_counts.size() &&
+		    contract.source_contract_input_types[filter.scan_column_index].InternalType() == PhysicalType::VARCHAR &&
+		    contract.source_contract_input_distinct_counts[filter.scan_column_index] > 0 &&
+		    contract.source_contract_input_distinct_counts[filter.scan_column_index] <=
+		        contract.estimated_source_cardinality / STANDARD_VECTOR_SIZE;
+		all_low_cardinality_string_filters = all_low_cardinality_string_filters && low_cardinality_string_column;
+		if (!low_cardinality_string_column || !filter.expression || !filter.expression->root) {
 			continue;
 		}
 		auto string_filter = SljitStringFilterEvaluation(*filter.expression->root);
 		if (!string_filter.storage_sensitive) {
 			continue;
 		}
-		auto distinct_count = contract.source_contract_input_distinct_counts[filter.scan_column_index];
-		if (distinct_count > 0 && distinct_count <= contract.estimated_source_cardinality / STANDARD_VECTOR_SIZE) {
-			result.benefits_from_storage = true;
-			if (string_filter.has_like) {
-				result.low_cardinality_string_like_max_distinct_count =
-				    MaxValue(result.low_cardinality_string_like_max_distinct_count, distinct_count);
-			}
+		result.benefits_from_storage = true;
+		if (string_filter.has_like) {
+			result.low_cardinality_string_like_max_distinct_count =
+			    MaxValue(result.low_cardinality_string_like_max_distinct_count,
+			             contract.source_contract_input_distinct_counts[filter.scan_column_index]);
 		}
 	}
+	result.benefits_from_storage = result.benefits_from_storage || all_low_cardinality_string_filters;
 	return result;
 }
 

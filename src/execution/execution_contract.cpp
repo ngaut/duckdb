@@ -17,6 +17,9 @@
 #include "duckdb/execution/operator/set/physical_cte.hpp"
 #include "duckdb/function/aggregate_state.hpp"
 #include "duckdb/function/table/table_scan.hpp"
+#include "duckdb/main/attached_database.hpp"
+#include "duckdb/storage/data_table.hpp"
+#include "duckdb/storage/storage_manager.hpp"
 #include "duckdb/parser/constraints/not_null_constraint.hpp"
 #include "duckdb/planner/expression/bound_aggregate_expression.hpp"
 #include "duckdb/planner/expression/bound_cast_expression.hpp"
@@ -1922,6 +1925,16 @@ BuildExecutionContractUngroupedAggregateContract(const PhysicalUngroupedAggregat
 	return result;
 }
 
+//! DuckDB compresses table data at checkpoint unless the database is in-memory and was not attached with COMPRESS
+static bool ExecutionContractTableStorageCompresses(const PhysicalTableScan &scan) {
+	if (!GetExecutionSourceContractCapability(scan).uses_storage_scan) {
+		return false;
+	}
+	auto &storage_manager =
+	    scan.bind_data->Cast<TableScanBindData>().table.GetStorage().GetAttached().GetStorageManager();
+	return !storage_manager.InMemory() || storage_manager.CompressionIsEnabled();
+}
+
 static ExecutionRegionTableScanContract BuildExecutionContractTableScanContract(const PhysicalTableScan &scan) {
 	ExecutionRegionTableScanContract result;
 	result.present = true;
@@ -1932,6 +1945,7 @@ static ExecutionRegionTableScanContract BuildExecutionContractTableScanContract(
 	result.source_contract_output_projection_map = BuildExecutionContractTableScanOutputProjectionMap(scan);
 	result.filter_pushdown = scan.function.filter_pushdown;
 	result.dynamic_filters = scan.dynamic_filters && scan.dynamic_filters->HasFilters();
+	result.compressed_storage = ExecutionContractTableStorageCompresses(scan);
 	return result;
 }
 

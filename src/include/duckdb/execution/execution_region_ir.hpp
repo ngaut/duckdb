@@ -110,6 +110,9 @@ struct ExecutionRegionTableScanContract {
 	bool filter_pushdown = false;
 	bool dynamic_filters = false;
 	bool finalized_dynamic_filter_cardinality_estimate = false;
+	//! The table's checkpointed data is compressed (dictionary strings, bit-packed integers), so a storage scan
+	//! filter can evaluate against the compressed form
+	bool compressed_storage = false;
 };
 
 struct ExecutionRegionHashJoinContract {
