@@ -241,6 +241,11 @@ static idx_t SljitSelectExpression(const SljitExecutableRegionExpression &expres
 		auto native_input =
 		    SljitPrepareNativePredicateInput(adapter_scratch, input, expression.input_source_indices, execute_sel,
 		                                     count, nullptr, nullptr, filter_selection.data(), nullptr);
+		if (expression.predicate_residual_dictionary.Function() && !execute_sel) {
+			native_input.residual_dictionary = adapter_scratch.predicate_sources.ResidualDictionary(
+			    input, expression.input_source_indices, expression.predicate_residual_dictionary_source,
+			    expression.predicate_residual_dictionary.Function(), count);
+		}
 		SljitExecuteNativeFunction(expression.predicate_select.Function(), native_input);
 		return native_input.selected_count;
 	}

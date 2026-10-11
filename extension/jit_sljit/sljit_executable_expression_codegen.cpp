@@ -293,10 +293,28 @@ bool SljitCompilePreparedExecutableRegionExpression(SljitExecutableRegionExpress
 		});
 	case SljitNativeRegionExpressionKind::PREDICATE:
 		if (require_boolean) {
-			return build_predicate_select([&](SljitNativePredicateFunction &function) {
-				return BuildSljitNativePredicate(*semantic.predicate, false, function, error,
-				                                 semantic.expression_tree.get(), &expr.predicate_partial_simd);
-			});
+			if (!build_predicate_select([&](SljitNativePredicateFunction &function) {
+				    return BuildSljitNativePredicate(*semantic.predicate, false, function, error,
+				                                     semantic.expression_tree.get(), &expr.predicate_partial_simd);
+			    })) {
+				return false;
+			}
+			if (expr.predicate_partial_simd) {
+				// without it the residual still runs row by row
+				SljitNativePredicateFunction function = nullptr;
+				idx_t source_index = DConstants::INVALID_INDEX;
+				string residual_error;
+				auto code = BuildSljitNativePredicateDictionaryResidual(*semantic.expression_tree,
+				                                                        semantic.predicate->source_not_null,
+				                                                        source_index, function, residual_error);
+				auto compiled =
+				    SljitCompiledFunction<SljitNativePredicateFunction>::TryCreate(std::move(code), function);
+				if (compiled.IsExecutable()) {
+					expr.predicate_residual_dictionary = std::move(compiled);
+					expr.predicate_residual_dictionary_source = source_index;
+				}
+			}
+			return true;
 		}
 		return build_predicate([&](SljitNativePredicateFunction &function) {
 			return BuildSljitNativePredicate(*semantic.predicate, true, function, error);

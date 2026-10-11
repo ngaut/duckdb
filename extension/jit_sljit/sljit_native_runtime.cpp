@@ -1,6 +1,7 @@
 #include "sljit_native_runtime.hpp"
 
 #include "duckdb/common/exception.hpp"
+#include "duckdb/common/vector/dictionary_vector.hpp"
 #include "duckdb/common/vector/flat_vector.hpp"
 #include "duckdb/common/vector/unified_vector_format.hpp"
 
@@ -158,6 +159,53 @@ void SljitNativePredicateSourceAdapter::Prepare(DataChunk *input, const vector<i
 		                                  : formats[source_idx].validity.GetData();
 		sources_all_valid = sources_all_valid && source_validity[source_idx] == nullptr;
 	}
+}
+
+const uint8_t *SljitNativePredicateSourceAdapter::ResidualDictionary(DataChunk &input,
+                                                                     const vector<idx_t> &input_source_indices,
+                                                                     idx_t source_slot,
+                                                                     SljitNativePredicateFunction residual,
+                                                                     idx_t count) {
+	if (source_slot >= source_sel.size() || source_slot >= input_source_indices.size() || !source_sel[source_slot]) {
+		return nullptr;
+	}
+	auto &source = input.data[input_source_indices[source_slot]];
+	if (source.GetVectorType() != VectorType::DICTIONARY_VECTOR) {
+		return nullptr;
+	}
+	const auto dictionary_size = DictionaryVector::DictionarySize(source);
+	auto &dictionary = DictionaryVector::Child(source);
+	if (!dictionary_size.IsValid() || dictionary_size.GetIndex() * 8 > count ||
+	    dictionary.GetVectorType() != VectorType::FLAT_VECTOR) {
+		return nullptr;
+	}
+	UnifiedVectorFormat dictionary_format;
+	dictionary.ToUnifiedFormat(dictionary_format);
+	// the rows' selection indexes the data the row-by-row residual reads, which must be these entries
+	if (dictionary_format.data != source_data[source_slot]) {
+		return nullptr;
+	}
+	const auto entries = dictionary_size.GetIndex();
+	residual_dictionary.resize(entries);
+	residual_dictionary_validity.assign((entries + 63) / 64, ~validity_t(0));
+	residual_dictionary_data.assign(source_data.size(), nullptr);
+	residual_dictionary_sel.assign(source_data.size(), nullptr);
+	residual_dictionary_source_validity.assign(source_data.size(), nullptr);
+	residual_dictionary_data[source_slot] = dictionary_format.data;
+	const bool entries_all_valid = dictionary_format.validity.CheckAllValid(entries);
+	residual_dictionary_source_validity[source_slot] =
+	    entries_all_valid ? nullptr : dictionary_format.validity.GetData();
+
+	SljitNativePredicateInput dictionary_input;
+	dictionary_input.source_data = residual_dictionary_data.data();
+	dictionary_input.source_sel = residual_dictionary_sel.data();
+	dictionary_input.source_validity = residual_dictionary_source_validity.data();
+	dictionary_input.sources_all_valid = entries_all_valid;
+	dictionary_input.result_data = residual_dictionary.data();
+	dictionary_input.result_validity = residual_dictionary_validity.data();
+	dictionary_input.count = entries;
+	SljitExecuteNativeFunction(residual, dictionary_input);
+	return residual_dictionary.data();
 }
 
 const_data_ptr_t *SljitNativePredicateSourceAdapter::DataArray() {

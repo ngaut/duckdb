@@ -13,6 +13,21 @@ static SljitNativeVectorRegisterLayout BuildSljitNativeVectorRegisterLayout() {
 	return result;
 }
 
+static SljitPredicateDictionaryResidualRegisterLayout BuildSljitPredicateDictionaryResidualRegisterLayout() {
+	SljitPredicateDictionaryResidualRegisterLayout result;
+	const auto &native_vector = GetSljitNativeVectorRegisterLayout();
+	const auto saved_register_count = native_vector.saved_register_count + 3;
+	if (!native_vector.HasOptionalInvariant() ||
+	    !GetSljitTargetCapabilities().registers.SupportsLayout(5, saved_register_count)) {
+		return result;
+	}
+	result.pass_table = SljitSavedRegisterAt(native_vector.saved_register_count);
+	result.dictionary_selection = SljitSavedRegisterAt(native_vector.saved_register_count + 1);
+	result.match_count = SljitSavedRegisterAt(native_vector.saved_register_count + 2);
+	result.saved_register_count = saved_register_count;
+	return result;
+}
+
 static SljitPerfectHashRegisterLayout BuildSljitPerfectHashRegisterLayout() {
 	SljitPerfectHashRegisterLayout result;
 	const auto &registers = GetSljitTargetCapabilities().registers;
@@ -137,6 +152,11 @@ static SljitPerfectHashProbeRegisterLayout BuildSljitPerfectHashProbeRegisterLay
 
 const SljitNativeVectorRegisterLayout &GetSljitNativeVectorRegisterLayout() {
 	static const auto result = BuildSljitNativeVectorRegisterLayout();
+	return result;
+}
+
+const SljitPredicateDictionaryResidualRegisterLayout &GetSljitPredicateDictionaryResidualRegisterLayout() {
+	static const auto result = BuildSljitPredicateDictionaryResidualRegisterLayout();
 	return result;
 }
 

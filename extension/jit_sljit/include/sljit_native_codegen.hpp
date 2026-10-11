@@ -226,5 +226,11 @@ unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativePredicate(const SljitNativ
                                                                 SljitNativePredicateFunction &function, string &error,
                                                                 const ExecutionExpressionIR *typed_root = nullptr,
                                                                 bool *used_partial_simd = nullptr);
+//! The residual of a partial-SIMD predicate that reads one source, generating its result for each row (the entries of
+//! that source's dictionary); nullptr when the predicate has no such residual
+unique_ptr<ExecutionRegionCodeHandle>
+BuildSljitNativePredicateDictionaryResidual(const ExecutionExpressionIR &typed_root,
+                                            const vector<bool> &source_not_null, idx_t &source_index,
+                                            SljitNativePredicateFunction &function, string &error);
 
 } // namespace duckdb

@@ -22,6 +22,13 @@ struct SljitNativePredicatePartialSimdPlan {
 	unique_ptr<ExecutionExpressionIR> packed_prefix;
 	unique_ptr<SljitNativePredicate> residual;
 	SljitTypedExpressionTreeSimdPlan simd;
+	//! The one source the residual reads, when it reads one: a chunk that brings that source as a dictionary vector
+	//! evaluates the residual once per dictionary entry instead of once per row
+	idx_t residual_dictionary_source = DConstants::INVALID_INDEX;
+
+	bool HasResidualDictionary() const {
+		return residual_dictionary_source != DConstants::INVALID_INDEX;
+	}
 };
 
 SljitNativePredicatePartialSimdPlan TryPlanSljitNativePredicatePartialSimd(const ExecutionExpressionIR &root,

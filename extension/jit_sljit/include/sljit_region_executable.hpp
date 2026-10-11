@@ -38,6 +38,10 @@ struct SljitExecutableRegionExpression {
 	//! The selection predicate emitted a packed-SIMD prefix (scalar residual
 	//! remains); recorded so traces report rows-weighted SIMD coverage.
 	bool predicate_partial_simd = false;
+	//! The partial-SIMD residual that reads one source, run over that source's dictionary: its result per entry lets
+	//! the selection predicate look rows up instead of evaluating them
+	SljitCompiledFunction<SljitNativePredicateFunction> predicate_residual_dictionary;
+	idx_t predicate_residual_dictionary_source = DConstants::INVALID_INDEX;
 
 	bool HasSelectionKernel() const {
 		switch (plan.kind) {
@@ -52,7 +56,7 @@ struct SljitExecutableRegionExpression {
 
 	idx_t CodeSize() const {
 		return vector.CodeSize() + flat.CodeSize() + select.CodeSize() + predicate.CodeSize() +
-		       predicate_select.CodeSize();
+		       predicate_select.CodeSize() + predicate_residual_dictionary.CodeSize();
 	}
 };
 

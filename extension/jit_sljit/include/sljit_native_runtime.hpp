@@ -8,6 +8,7 @@
 
 #pragma once
 
+#include "sljit_function_types.hpp"
 #include "sljit_native_function_runtime.hpp"
 #include "sljit_native_types.hpp"
 
@@ -30,6 +31,12 @@ struct SljitNativePredicateSourceAdapter {
 	const validity_t **ValidityArray();
 	idx_t SourceCount() const;
 	bool SourcesAllValid() const;
+	//! After Prepare: the residual run over the dictionary of the source in source_slot, one result per entry, which
+	//! the selection predicate looks rows up in; nullptr when that source is not a dictionary over a flat vector at
+	//! most an eighth the size of the chunk (each entry costs a residual evaluation, as each row reaching the
+	//! residual would)
+	const uint8_t *ResidualDictionary(DataChunk &input, const vector<idx_t> &input_source_indices, idx_t source_slot,
+	                                  SljitNativePredicateFunction residual, idx_t count);
 
 private:
 	vector<UnifiedVectorFormat> formats;
@@ -37,6 +44,11 @@ private:
 	vector<const sel_t *> source_sel;
 	vector<const validity_t *> source_validity;
 	bool sources_all_valid = false;
+	vector<uint8_t> residual_dictionary;
+	vector<validity_t> residual_dictionary_validity;
+	vector<const_data_ptr_t> residual_dictionary_data;
+	vector<const sel_t *> residual_dictionary_sel;
+	vector<const validity_t *> residual_dictionary_source_validity;
 };
 
 template <class ADAPTER_SCRATCH>
