@@ -610,17 +610,12 @@ TEST_CASE("Execution region artifact cache eviction preserves active artifact ow
 }
 
 TEST_CASE("SLJIT artifact cache keys include compile-affecting bindings", "[api][jit]") {
-	SljitRegionBackendPlan first;
-	first.artifact_semantic_key = "same-semantic-plan";
-	first.artifact_binding_key = "source-min=0;source-max=10";
-
-	SljitRegionBackendPlan second;
-	second.artifact_semantic_key = first.artifact_semantic_key;
-	second.artifact_binding_key = "source-min=0;source-max=20";
-
-	REQUIRE(first.ArtifactCacheKey() != second.ArtifactCacheKey());
-	second.artifact_binding_key = first.artifact_binding_key;
-	REQUIRE(first.ArtifactCacheKey() == second.ArtifactCacheKey());
+	REQUIRE(ComposeSljitRegionArtifactCacheKey("same-semantic-plan", "source-min=0;source-max=10") !=
+	        ComposeSljitRegionArtifactCacheKey("same-semantic-plan", "source-min=0;source-max=20"));
+	REQUIRE(ComposeSljitRegionArtifactCacheKey("same-semantic-plan", "source-min=0;source-max=10") ==
+	        ComposeSljitRegionArtifactCacheKey("same-semantic-plan", "source-min=0;source-max=10"));
+	// the length prefix keeps a delimiter inside one part from shifting the boundary between the parts
+	REQUIRE(ComposeSljitRegionArtifactCacheKey("a;binding=1:b", "") != ComposeSljitRegionArtifactCacheKey("a", "b"));
 
 	SljitNativeRegionPlan one_delimited_value;
 	one_delimited_value.source_min_values.emplace_back("x|VARCHAR:y");

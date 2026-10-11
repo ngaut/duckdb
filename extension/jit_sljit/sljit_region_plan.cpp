@@ -504,9 +504,6 @@ ExecutionRegionLoweringPlan BuildSljitRegionPlan(const ExecutionRegionIR &region
 			}
 			auto backend_plan = make_shared_ptr<SljitRegionBackendPlan>();
 			backend_plan->native_region = make_uniq<SljitNativeRegionPlan>(std::move(native_region));
-			backend_plan->artifact_semantic_key =
-			    BuildSljitRegionArtifactSemanticKey(candidate, *backend_plan->native_region);
-			backend_plan->artifact_binding_key = BuildSljitRegionArtifactBindingKey(*backend_plan->native_region);
 			lowering_plan.backend_plan = std::move(backend_plan);
 			lowering_plan.SetCompiledExecutionMode(ExecutionRegionExecutionMode::NATIVE);
 		}

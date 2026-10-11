@@ -1017,7 +1017,7 @@ void ExecutionRegionPlanner::Compile(ClientContext &context, ExecutionRegionBack
 	string artifact_cache_key;
 	ExecutionRegionArtifactCacheReservation artifact_reservation;
 	if (compiled_region.lowering_plan.backend_plan) {
-		artifact_cache_key = compiled_region.lowering_plan.backend_plan->ArtifactCacheKey();
+		artifact_cache_key = compiled_region.lowering_plan.backend_plan->ArtifactCacheKey(candidate);
 	}
 	if (!artifact_cache_key.empty()) {
 		artifact_cache_key =

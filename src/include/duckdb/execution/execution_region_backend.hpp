@@ -37,8 +37,8 @@ public:
 	//! A complete semantic identity for a reusable compiled artifact. Empty
 	//! disables caching. The database-local cache can reuse artifacts across
 	//! equivalent plans, so the key must cover every embedded semantic value
-	//! and the artifact must not retain catalog or query-local objects.
-	virtual string ArtifactCacheKey() const;
+	//! and the artifact must not retain catalog or query-local objects. Built only for a candidate that compiles.
+	virtual string ArtifactCacheKey(const ExecutionRegionCandidate &candidate) const;
 };
 
 struct DUCKDB_API ExecutionRegionCompilationInput {

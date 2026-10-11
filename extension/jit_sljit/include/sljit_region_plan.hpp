@@ -284,27 +284,25 @@ struct SljitNativeRegionPlan {
 	}
 };
 
-struct SljitRegionBackendPlan : public ExecutionRegionBackendPlan {
-	string ArtifactCacheKey() const override {
-		if (artifact_semantic_key.empty()) {
-			return string();
-		}
-		string result = "sljit-cache-v1";
-		result += ";semantic=" + std::to_string(artifact_semantic_key.size()) + ":" + artifact_semantic_key;
-		result += ";binding=" + std::to_string(artifact_binding_key.size()) + ":" + artifact_binding_key;
-		return result;
-	}
-
-	unique_ptr<SljitNativeRegionPlan> native_region;
-	string artifact_semantic_key;
-	string artifact_binding_key;
-};
-
 string DescribeNativeRegion(const SljitNativeRegionPlan &region, const string &mode);
 string DescribeNativeRegionShape(const SljitNativeRegionPlan &region);
 string BuildSljitRegionArtifactSemanticKey(const ExecutionRegionCandidate &candidate,
                                            const SljitNativeRegionPlan &region);
 string BuildSljitRegionArtifactBindingKey(const SljitNativeRegionPlan &region);
+string ComposeSljitRegionArtifactCacheKey(const string &semantic_key, const string &binding_key);
+
+struct SljitRegionBackendPlan : public ExecutionRegionBackendPlan {
+	//! The planner lowers every candidate but compiles few, so the key is described only when one compiles
+	string ArtifactCacheKey(const ExecutionRegionCandidate &candidate) const override {
+		if (!native_region) {
+			throw InternalException("SLJIT backend plan has no native region to key its artifact on");
+		}
+		return ComposeSljitRegionArtifactCacheKey(BuildSljitRegionArtifactSemanticKey(candidate, *native_region),
+		                                          BuildSljitRegionArtifactBindingKey(*native_region));
+	}
+
+	unique_ptr<SljitNativeRegionPlan> native_region;
+};
 ExecutionRegionLoweringPlan BuildSljitRegionPlan(const ExecutionRegionIR &region_ir,
                                                  const ExecutionRegionCandidate &candidate,
                                                  bool render_diagnostics = false);

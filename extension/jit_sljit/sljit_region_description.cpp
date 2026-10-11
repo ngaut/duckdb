@@ -314,10 +314,10 @@ string BuildSljitRegionArtifactSemanticKey(const ExecutionRegionCandidate &candi
 	AppendSljitArtifactKeyField(result, "region", DescribeNativeRegionInternal(region, "semantic", true));
 	// Generated code bakes in operator and sink contract facts (perfect-hash group minima and bit widths, state
 	// layouts, hash table offsets), so an artifact is shared only between identical contracts
-	AppendSljitArtifactKeyField(result, "aggregate_state_source",
-	                            region.aggregate_state_source.function_name + ";" +
-	                                DescribeExecutionRegionStateScanContract(
-	                                    region.aggregate_state_source.state_scan_contract));
+	AppendSljitArtifactKeyField(
+	    result, "aggregate_state_source",
+	    region.aggregate_state_source.function_name + ";" +
+	        DescribeExecutionRegionStateScanContract(region.aggregate_state_source.state_scan_contract));
 	for (idx_t op_idx = 0; op_idx < region.ops.size(); op_idx++) {
 		auto &op = region.ops[op_idx];
 		auto field_prefix = "op" + std::to_string(op_idx);
@@ -341,8 +341,8 @@ string BuildSljitRegionArtifactSemanticKey(const ExecutionRegionCandidate &candi
 		case SljitNativeRegionOpKind::AGGREGATE_UPDATE:
 			AppendSljitArtifactKeyField(result, field_prefix + "_sink",
 			                            DescribeExecutionRegionSinkContract(op.aggregate_update.sink_info));
-			result += field_prefix + "_estimated_input_count=" +
-			          std::to_string(op.aggregate_update.estimated_input_count) + ";";
+			result += field_prefix +
+			          "_estimated_input_count=" + std::to_string(op.aggregate_update.estimated_input_count) + ";";
 			break;
 		default:
 			break;
@@ -365,6 +365,13 @@ static void AppendSljitArtifactBindingValues(string &result, const string &name,
 		AppendSljitArtifactKeyField(result, field_name + "_type", values[value_idx].type().ToString());
 		AppendSljitArtifactKeyField(result, field_name + "_value", values[value_idx].ToSQLString());
 	}
+}
+
+string ComposeSljitRegionArtifactCacheKey(const string &semantic_key, const string &binding_key) {
+	string result = "sljit-cache-v1";
+	result += ";semantic=" + std::to_string(semantic_key.size()) + ":" + semantic_key;
+	result += ";binding=" + std::to_string(binding_key.size()) + ":" + binding_key;
+	return result;
 }
 
 string BuildSljitRegionArtifactBindingKey(const SljitNativeRegionPlan &region) {

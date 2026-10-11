@@ -108,7 +108,7 @@ ExecutionRegionBackend::InstantiateRegionArtifact(const shared_ptr<const Executi
 ExecutionRegionBackendPlan::~ExecutionRegionBackendPlan() {
 }
 
-string ExecutionRegionBackendPlan::ArtifactCacheKey() const {
+string ExecutionRegionBackendPlan::ArtifactCacheKey(const ExecutionRegionCandidate &candidate) const {
 	return string();
 }
 
