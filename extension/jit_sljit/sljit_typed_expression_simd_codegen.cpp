@@ -575,8 +575,10 @@ void EmitSljitSimdMaskLaneSum(struct sljit_compiler *compiler, sljit_s32 dst_vre
 	uint32_t reduce;
 	uint32_t move;
 	if (elem_scale == 2) {
+		// ADDV Sd, Vn.4S; SMOV Xd, Vd.S[0]: the 32-bit lane sum must reach the 64-bit register sign-extended, or the
+		// all-true sum -4 reads as 0xFFFFFFFC and never matches
 		reduce = 0x4eb1b800u | (UnsafeNumericCast<uint32_t>(src) << 5) | UnsafeNumericCast<uint32_t>(dst);
-		move = 0x0e043c00u | (UnsafeNumericCast<uint32_t>(dst) << 5) | UnsafeNumericCast<uint32_t>(target);
+		move = 0x4e042c00u | (UnsafeNumericCast<uint32_t>(dst) << 5) | UnsafeNumericCast<uint32_t>(target);
 	} else {
 		D_ASSERT(elem_scale == 3);
 		reduce = 0x5ef1b800u | (UnsafeNumericCast<uint32_t>(src) << 5) | UnsafeNumericCast<uint32_t>(dst);
