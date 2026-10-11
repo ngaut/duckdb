@@ -1945,112 +1945,6 @@ void RadixPartitionedHashTable::FinishStateUpdates(ExecutionContext &context, Op
 	FinishRadixHTSinkState(context.client, gstate, lstate);
 }
 
-void RadixPartitionedHashTable::Combine(ExecutionContext &context, GlobalSinkState &gstate_p,
-                                        LocalSinkState &lstate_p) const {
-	auto &gstate = gstate_p.Cast<RadixHTGlobalSinkState>();
-	auto &lstate = lstate_p.Cast<RadixHTLocalSinkState>();
-	if (!lstate.ht) {
-		return;
-	}
-
-	// Set any_combined, then check one last time whether we need to repartition
-	gstate.any_combined = true;
-	MaybeRepartition(context.client, gstate, lstate, true);
-
-	auto &ht = *lstate.ht;
-	if (ht.LookupsSkippedRequireFinalCombine()) {
-		gstate.requires_final_combine = true;
-	}
-	const auto proven_unique_ranges = ht.GetProvenUniqueAppendRanges();
-	unique_ptr<PartitionedTupleData> deferred_proven_unique_data;
-	// Deferred proven-unique collections bypass the abandoned/exported data flow entirely, so they are only taken
-	// when aggregate states can never be spilled: exporting frees the arena those rows' states point into, and the
-	// exported-only finalize does not consult deferred collections.
-	if (proven_unique_ranges && !lstate.abandoned_data && !gstate.spill_plan) {
-		deferred_proven_unique_data = ht.TryAcquireProvenUniqueAppendData();
-	}
-	if (!deferred_proven_unique_data) {
-		auto lstate_data = ht.AcquirePartitionedData();
-		if (lstate.abandoned_data) {
-			// Data is abandoned when the sink goes external, and also when aggregate state pressure
-			// forces the states to be exported without the sink being external
-			D_ASSERT(gstate.external || gstate.spill_plan);
-			// The global radix bits may have grown after we last sized abandoned_data - grow it to match before
-			// combining
-			GrowAbandonedDataToRadixBits(context.client, gstate, lstate, gstate.config.GetRadixBits());
-			D_ASSERT(lstate.abandoned_data->PartitionCount() == lstate.ht->GetPartitionedData().PartitionCount());
-			D_ASSERT(lstate.abandoned_data->PartitionCount() ==
-			         RadixPartitioning::NumberOfPartitions(gstate.config.GetRadixBits()));
-			lstate.abandoned_data->Combine(*lstate_data);
-		} else {
-			lstate.abandoned_data = std::move(lstate_data);
-		}
-	}
-
-	bool must_export = false;
-	if (gstate.spill_plan) {
-		// The decision between combining rows natively and exporting them must be synchronized
-		// with the exported width: after it grew beyond the native width, every combine must
-		// export, and conversely a native combine pins the exported width for good
-		const annotated_lock_guard<annotated_mutex> guard {gstate.lock};
-		if (gstate.spill_phase == SpillPhase::EXPORTED_ONLY) {
-			must_export = true;
-		} else {
-			gstate.spill_phase = SpillPhase::NATIVE_COMBINE_STARTED;
-		}
-	}
-	if (gstate.spill_plan && (must_export || ShouldExportStates(gstate, lstate, ht))) {
-		// Everything this thread produced is in abandoned_data now, export it and free the arena
-		ExportAbandonedData(context.client, gstate, lstate);
-		ht.GetAggregateAllocator()->FreeAll();
-	}
-
-	auto aggregate_allocator = ht.GetAggregateAllocator();
-
-	const annotated_lock_guard<annotated_mutex> guard {gstate.lock};
-	D_ASSERT(!gstate.finalized);
-	if (proven_unique_ranges) {
-		gstate.proven_unique_ranges.insert(gstate.proven_unique_ranges.end(), proven_unique_ranges->begin(),
-		                                   proven_unique_ranges->end());
-		gstate.proven_unique_local_count++;
-	}
-	if (deferred_proven_unique_data) {
-		gstate.deferred_proven_unique_data.emplace_back(std::move(deferred_proven_unique_data));
-	} else if (gstate.uncombined_data) {
-		gstate.uncombined_data->Combine(*lstate.abandoned_data);
-	} else {
-		gstate.uncombined_data = std::move(lstate.abandoned_data);
-	}
-	if (!lstate.abandoned_exported_data.empty()) {
-		if (gstate.uncombined_exported_data.empty()) {
-			gstate.uncombined_exported_data = std::move(lstate.abandoned_exported_data);
-		} else {
-			if (gstate.uncombined_exported_data.size() < lstate.abandoned_exported_data.size()) {
-				GrowExportedData(context.client, gstate, gstate.uncombined_exported_data,
-				                 lstate.abandoned_exported_data.size());
-			} else if (lstate.abandoned_exported_data.size() < gstate.uncombined_exported_data.size()) {
-				GrowExportedData(context.client, gstate, lstate.abandoned_exported_data,
-				                 gstate.uncombined_exported_data.size());
-			}
-			for (idx_t i = 0; i < gstate.uncombined_exported_data.size(); i++) {
-				if (!lstate.abandoned_exported_data[i]) {
-					continue;
-				}
-				if (gstate.uncombined_exported_data[i]) {
-					gstate.uncombined_exported_data[i]->Combine(*lstate.abandoned_exported_data[i]);
-				} else {
-					gstate.uncombined_exported_data[i] = std::move(lstate.abandoned_exported_data[i]);
-				}
-			}
-			lstate.abandoned_exported_data.clear();
-		}
-	}
-	if (aggregate_allocator->AllocationSize() != 0) {
-		gstate.stored_allocators.emplace_back(std::move(aggregate_allocator));
-		gstate.stored_allocators_size += gstate.stored_allocators.back()->AllocationSize();
-	}
-}
-
 template <class KEY_TYPE>
 static bool RadixHTProvenUniqueRangesDisjoint(vector<GroupedAggregateProvenUniqueRange> &ranges) {
 	auto first_key = [](const GroupedAggregateProvenUniqueRange &range) {
@@ -2106,6 +2000,151 @@ static bool RadixHTProvenUniqueRangesDisjoint(vector<GroupedAggregateProvenUniqu
 		return RadixHTProvenUniqueRangesDisjoint<uint64_t>(ranges);
 	default:
 		return false;
+	}
+}
+
+//! A thread's proven-unique rows stay unpartitioned while the key ranges of the threads that combined so far are
+//! disjoint: the finalizer may then publish every thread's rows as they are. Once those ranges overlap, or a final
+//! combine is required anyway, the finalizer must rehash. The rows (and any deferred by threads that combined earlier)
+//! are then radix-partitioned here, in parallel with the other threads' combines, instead of one after another in the
+//! finalizer. Returns whether the rows were deferred; otherwise they are the local state's partitioned data.
+static bool CombineProvenUniqueData(ClientContext &context, RadixHTGlobalSinkState &gstate,
+                                    RadixHTLocalSinkState &lstate,
+                                    const vector<GroupedAggregateProvenUniqueRange> &ranges,
+                                    unique_ptr<PartitionedTupleData> data) {
+	D_ASSERT(!lstate.abandoned_data);
+	vector<unique_ptr<PartitionedTupleData>> to_repartition;
+	{
+		const annotated_lock_guard<annotated_mutex> guard {gstate.lock};
+		gstate.proven_unique_ranges.insert(gstate.proven_unique_ranges.end(), ranges.begin(), ranges.end());
+		gstate.proven_unique_local_count++;
+		if (!gstate.requires_final_combine && RadixHTProvenUniqueRangesDisjoint(gstate.proven_unique_ranges)) {
+			gstate.deferred_proven_unique_data.emplace_back(std::move(data));
+			return true;
+		}
+		to_repartition = std::move(gstate.deferred_proven_unique_data);
+		gstate.deferred_proven_unique_data.clear();
+	}
+	to_repartition.push_back(std::move(data));
+	// the radix bits stopped changing when the first thread began combining
+	auto partitioned = make_uniq<RadixPartitionedTupleData>(
+	    BufferManager::GetBufferManager(context), gstate.radix_ht.GetLayoutPtr(), MemoryTag::HASH_TABLE,
+	    gstate.config.GetRadixBits(), gstate.radix_ht.GetLayout().ColumnCount() - 1, context);
+	for (auto &collection : to_repartition) {
+		collection->Repartition(context, *partitioned);
+	}
+	lstate.abandoned_data = std::move(partitioned);
+	return false;
+}
+
+void RadixPartitionedHashTable::Combine(ExecutionContext &context, GlobalSinkState &gstate_p,
+                                        LocalSinkState &lstate_p) const {
+	auto &gstate = gstate_p.Cast<RadixHTGlobalSinkState>();
+	auto &lstate = lstate_p.Cast<RadixHTLocalSinkState>();
+	if (!lstate.ht) {
+		return;
+	}
+
+	// Set any_combined, then check one last time whether we need to repartition
+	gstate.any_combined = true;
+	MaybeRepartition(context.client, gstate, lstate, true);
+
+	auto &ht = *lstate.ht;
+	if (ht.LookupsSkippedRequireFinalCombine()) {
+		gstate.requires_final_combine = true;
+	}
+	const auto proven_unique_ranges = ht.GetProvenUniqueAppendRanges();
+	unique_ptr<PartitionedTupleData> deferred_proven_unique_data;
+	// Deferred proven-unique collections bypass the abandoned/exported data flow entirely, so they are only taken
+	// when aggregate states can never be spilled: exporting frees the arena those rows' states point into, and the
+	// exported-only finalize does not consult deferred collections.
+	if (proven_unique_ranges && !lstate.abandoned_data && !gstate.spill_plan) {
+		deferred_proven_unique_data = ht.TryAcquireProvenUniqueAppendData();
+	}
+	const bool proven_unique_data = deferred_proven_unique_data != nullptr;
+	bool deferred = false;
+	if (proven_unique_data) {
+		deferred = CombineProvenUniqueData(context.client, gstate, lstate, *proven_unique_ranges,
+		                                   std::move(deferred_proven_unique_data));
+	} else {
+		auto lstate_data = ht.AcquirePartitionedData();
+		if (lstate.abandoned_data) {
+			// Data is abandoned when the sink goes external, and also when aggregate state pressure
+			// forces the states to be exported without the sink being external
+			D_ASSERT(gstate.external || gstate.spill_plan);
+			// The global radix bits may have grown after we last sized abandoned_data - grow it to match before
+			// combining
+			GrowAbandonedDataToRadixBits(context.client, gstate, lstate, gstate.config.GetRadixBits());
+			D_ASSERT(lstate.abandoned_data->PartitionCount() == lstate.ht->GetPartitionedData().PartitionCount());
+			D_ASSERT(lstate.abandoned_data->PartitionCount() ==
+			         RadixPartitioning::NumberOfPartitions(gstate.config.GetRadixBits()));
+			lstate.abandoned_data->Combine(*lstate_data);
+		} else {
+			lstate.abandoned_data = std::move(lstate_data);
+		}
+	}
+
+	bool must_export = false;
+	if (gstate.spill_plan) {
+		// The decision between combining rows natively and exporting them must be synchronized
+		// with the exported width: after it grew beyond the native width, every combine must
+		// export, and conversely a native combine pins the exported width for good
+		const annotated_lock_guard<annotated_mutex> guard {gstate.lock};
+		if (gstate.spill_phase == SpillPhase::EXPORTED_ONLY) {
+			must_export = true;
+		} else {
+			gstate.spill_phase = SpillPhase::NATIVE_COMBINE_STARTED;
+		}
+	}
+	if (gstate.spill_plan && (must_export || ShouldExportStates(gstate, lstate, ht))) {
+		// Everything this thread produced is in abandoned_data now, export it and free the arena
+		ExportAbandonedData(context.client, gstate, lstate);
+		ht.GetAggregateAllocator()->FreeAll();
+	}
+
+	auto aggregate_allocator = ht.GetAggregateAllocator();
+
+	const annotated_lock_guard<annotated_mutex> guard {gstate.lock};
+	D_ASSERT(!gstate.finalized);
+	if (proven_unique_ranges && !proven_unique_data) {
+		gstate.proven_unique_ranges.insert(gstate.proven_unique_ranges.end(), proven_unique_ranges->begin(),
+		                                   proven_unique_ranges->end());
+		gstate.proven_unique_local_count++;
+	}
+	if (!deferred) {
+		if (gstate.uncombined_data) {
+			gstate.uncombined_data->Combine(*lstate.abandoned_data);
+		} else {
+			gstate.uncombined_data = std::move(lstate.abandoned_data);
+		}
+	}
+	if (!lstate.abandoned_exported_data.empty()) {
+		if (gstate.uncombined_exported_data.empty()) {
+			gstate.uncombined_exported_data = std::move(lstate.abandoned_exported_data);
+		} else {
+			if (gstate.uncombined_exported_data.size() < lstate.abandoned_exported_data.size()) {
+				GrowExportedData(context.client, gstate, gstate.uncombined_exported_data,
+				                 lstate.abandoned_exported_data.size());
+			} else if (lstate.abandoned_exported_data.size() < gstate.uncombined_exported_data.size()) {
+				GrowExportedData(context.client, gstate, lstate.abandoned_exported_data,
+				                 gstate.uncombined_exported_data.size());
+			}
+			for (idx_t i = 0; i < gstate.uncombined_exported_data.size(); i++) {
+				if (!lstate.abandoned_exported_data[i]) {
+					continue;
+				}
+				if (gstate.uncombined_exported_data[i]) {
+					gstate.uncombined_exported_data[i]->Combine(*lstate.abandoned_exported_data[i]);
+				} else {
+					gstate.uncombined_exported_data[i] = std::move(lstate.abandoned_exported_data[i]);
+				}
+			}
+			lstate.abandoned_exported_data.clear();
+		}
+	}
+	if (aggregate_allocator->AllocationSize() != 0) {
+		gstate.stored_allocators.emplace_back(std::move(aggregate_allocator));
+		gstate.stored_allocators_size += gstate.stored_allocators.back()->AllocationSize();
 	}
 }
 
