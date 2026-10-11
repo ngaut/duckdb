@@ -37,6 +37,9 @@ public:
 	static shared_ptr<CompiledGrammar> Get(ClientContext &context);
 	//! Compile the base DuckDB grammar.
 	static shared_ptr<CompiledGrammar> Create();
+	//! The base DuckDB grammar, compiled once per process: a compiled grammar is immutable, and compiling one takes
+	//! milliseconds, so every parser without grammar extensions shares it
+	static shared_ptr<CompiledGrammar> Base();
 	//! Compile a grammar for the selected extensions without changing the client configuration.
 	static shared_ptr<CompiledGrammar> Create(const ClientContext &context,
 	                                          const case_insensitive_set_t &active_extensions);
@@ -55,14 +58,10 @@ private:
 	const bool has_grammar_changes;
 };
 
-//! Per-database holder for the compiled base grammar.
+//! Per-database access to the compiled base grammar.
 struct ParserCache {
 public:
 	shared_ptr<CompiledGrammar> GetMatcher();
-
-private:
-	std::mutex mutex;
-	shared_ptr<CompiledGrammar> matcher;
 };
 
 } // namespace duckdb

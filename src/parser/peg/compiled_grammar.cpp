@@ -163,20 +163,13 @@ shared_ptr<CompiledGrammar> CompiledGrammar::Create(const ClientContext &context
 	return Create(selected_extensions);
 }
 
-shared_ptr<CompiledGrammar> ParserCache::GetMatcher() {
-	{
-		std::unique_lock<std::mutex> lock(mutex);
-		if (matcher) {
-			return matcher;
-		}
-	}
-	auto new_matcher = CompiledGrammar::Create();
+shared_ptr<CompiledGrammar> CompiledGrammar::Base() {
+	static const auto base = Create();
+	return base;
+}
 
-	std::unique_lock<std::mutex> lock(mutex);
-	if (!matcher) {
-		matcher = std::move(new_matcher);
-	}
-	return matcher;
+shared_ptr<CompiledGrammar> ParserCache::GetMatcher() {
+	return CompiledGrammar::Base();
 }
 
 optional_ptr<const CompiledGrammarRule> CompiledGrammar::GetRule(const string &rule_name) const {
