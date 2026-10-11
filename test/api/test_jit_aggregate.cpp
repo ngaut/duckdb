@@ -3710,13 +3710,15 @@ TEST_CASE("JIT gates perfect-hash aggregate updates with generated source filter
 	auto high_selectivity_result = con.Query(high_selectivity_query);
 	REQUIRE_NO_FAIL(*high_selectivity_result);
 	REQUIRE(high_selectivity_result->ToString() == high_selectivity_reference->ToString());
-	for (auto &event : manager.GetEvents()) {
-		if (EventPhase(event) != "runtime" || EventStatus(event) != "executed") {
-			continue;
-		}
-		REQUIRE_FALSE(
-		    StringUtil::Contains(EventJitRuntimePathCounts(event), "aggregate_update.filtered_perfect_hash_update="));
-	}
+	// a filter that keeps nearly every row still fuses: filtering ahead of the update would slice every column
+	RequireJitEvent(
+	    manager,
+	    [](const ExecutionRegionEvent &event) {
+		    return EventPhase(event) == "runtime" && EventStatus(event) == "executed" &&
+		           StringUtil::Contains(EventJitRuntimePathCounts(event),
+		                                "aggregate_update.filtered_perfect_hash_update=");
+	    },
+	    [](const ExecutionRegionEvent &event) { REQUIRE(EventJitRuntimeDelegationCounts(event).empty()); });
 }
 
 TEST_CASE("JIT perfect hash keeps payload and group vector shapes independent", "[api][jit]") {
@@ -3883,43 +3885,51 @@ TEST_CASE("JIT perfect hash direct payloads use their canonical combined source 
 	                          "       CAST(i % 8 AS DECIMAL(15,2)) "
 	                          "FROM range(120000) tbl(i)"));
 
-	const string query = "SELECT group_flag, group_status, "
-	                     "       sum(qty_value), sum(gross_value), sum(discount_rate), sum(tax_rate), count(*) "
-	                     "FROM jit_perfect_hash_direct_payload_sources "
-	                     "WHERE qty_value + tax_rate > 10.00::DECIMAL(15,2) "
-	                     "GROUP BY group_flag, group_status "
-	                     "ORDER BY group_flag, group_status";
-	REQUIRE_NO_FAIL(con.Query("SET jit_policy='off'"));
-	auto reference = con.Query(query);
-	REQUIRE_NO_FAIL(*reference);
-	REQUIRE(reference->RowCount() == 6);
+	// the filtered query fuses its filter into the update loop; the unfiltered one runs the plain fused update, which
+	// a computed payload gives generated work
+	const string references = "SELECT group_flag, group_status, "
+	                          "       sum(qty_value), sum(gross_value), sum(discount_rate), sum(tax_rate), count(*) ";
+	const string source = "FROM jit_perfect_hash_direct_payload_sources ";
+	const string grouping = "GROUP BY group_flag, group_status ORDER BY group_flag, group_status";
+	const vector<pair<string, string>> cases = {
+	    {references + source + "WHERE qty_value + tax_rate > 10.00::DECIMAL(15,2) " + grouping,
+	     "aggregate_update.filtered_perfect_hash_update="},
+	    {references + ", sum(gross_value * (1.00::DECIMAL(15,2) - discount_rate)) " + source + grouping,
+	     "aggregate_update.primitive_payload_update_fused="}};
+	for (auto &test_case : cases) {
+		auto &query = test_case.first;
+		auto &update_stage = test_case.second;
+		REQUIRE_NO_FAIL(con.Query("SET jit_policy='off'"));
+		auto reference = con.Query(query);
+		REQUIRE_NO_FAIL(*reference);
+		REQUIRE(reference->RowCount() == 6);
 
-	REQUIRE_NO_FAIL(con.Query("SET jit_policy='auto'"));
-	ClearJitTrace(manager, true);
-	auto result = con.Query(query);
-	REQUIRE_NO_FAIL(*result);
-	REQUIRE(result->ToString() == reference->ToString());
+		REQUIRE_NO_FAIL(con.Query("SET jit_policy='auto'"));
+		ClearJitTrace(manager, true);
+		auto result = con.Query(query);
+		REQUIRE_NO_FAIL(*result);
+		REQUIRE(result->ToString() == reference->ToString());
 
-	RequireJitEvent(
-	    manager,
-	    [](const ExecutionRegionEvent &event) {
-		    return IsCompiledSljitRegionEvent(event) && event.has_candidate &&
-		           event.candidate_traits.sink_kind == ExecutionRegionSinkKind::PERFECT_HASH_AGGREGATE_UPDATE &&
-		           StringUtil::Contains(event.ir, "grouped_state_lookup=generated-perfect-hash");
-	    },
-	    [](const ExecutionRegionEvent &event) {
-		    RequireGeneratedMachineCodeRegion(event);
-		    REQUIRE(StringUtil::Contains(event.ir, "primitive_payloads=native:reference"));
-		    REQUIRE(StringUtil::Contains(event.ir, "count_star"));
-	    });
-	RequireJitEvent(
-	    manager,
-	    [](const ExecutionRegionEvent &event) {
-		    return EventPhase(event) == "runtime" && event.backend_name == "sljit" &&
-		           StringUtil::Contains(EventGeneratedStageRuntimeBreakdown(event),
-		                                "aggregate_update.primitive_payload_update_fused=");
-	    },
-	    [](const ExecutionRegionEvent &event) { RequireGeneratedAggregateUpdateRuntimeOwnership(event); });
+		RequireJitEvent(
+		    manager,
+		    [](const ExecutionRegionEvent &event) {
+			    return IsCompiledSljitRegionEvent(event) && event.has_candidate &&
+			           event.candidate_traits.sink_kind == ExecutionRegionSinkKind::PERFECT_HASH_AGGREGATE_UPDATE &&
+			           StringUtil::Contains(event.ir, "grouped_state_lookup=generated-perfect-hash");
+		    },
+		    [](const ExecutionRegionEvent &event) {
+			    RequireGeneratedMachineCodeRegion(event);
+			    REQUIRE(StringUtil::Contains(event.ir, "primitive_payloads=native:reference"));
+			    REQUIRE(StringUtil::Contains(event.ir, "count_star"));
+		    });
+		RequireJitEvent(
+		    manager,
+		    [&](const ExecutionRegionEvent &event) {
+			    return EventPhase(event) == "runtime" && event.backend_name == "sljit" &&
+			           StringUtil::Contains(EventGeneratedStageRuntimeBreakdown(event), update_stage);
+		    },
+		    [](const ExecutionRegionEvent &event) { RequireGeneratedAggregateUpdateRuntimeOwnership(event); });
+	}
 }
 
 TEST_CASE("JIT production CBO keeps reference-only string perfect hash aggregate vectorized", "[api][jit]") {

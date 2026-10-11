@@ -9,13 +9,10 @@
 #include "sljit_executable_aggregate_codegen.hpp"
 
 #include "sljit_executable_aggregate_payload_sources.hpp"
-#include "sljit_expression_selectivity.hpp"
 #include "sljit_native_codegen.hpp"
 #include "sljit_native_util.hpp"
 
 namespace duckdb {
-
-static constexpr idx_t SLJIT_FILTERED_PERFECT_HASH_MAX_SELECTIVITY_BASIS_POINTS = 7500;
 
 static unique_ptr<ExecutionExpressionIR>
 SljitPayloadReferenceExpressionTree(const SljitNativeRegionExpressionPlan &plan) {
@@ -134,11 +131,6 @@ bool SljitTryBuildFilteredAggregateUpdate(SljitExecutableRegionOp &filter_op, Sl
 		                                         combined_sources, &combined_source_not_null, &input_not_null,
 		                                         &combined_source_min_values, &combined_source_max_values,
 		                                         &input_min_values, &input_max_values);
-		if (SljitEstimateExpressionSelectivityBasisPoints(*filtered_update.filter.plan.expression_tree,
-		                                                  combined_source_min_values, combined_source_max_values) >
-		    SLJIT_FILTERED_PERFECT_HASH_MAX_SELECTIVITY_BASIS_POINTS) {
-			return true;
-		}
 
 		for (idx_t payload_idx = 0; payload_idx < aggregate_update.payloads.size(); payload_idx++) {
 			auto &aggregate = aggregate_update.plan.sink_info.aggregates[payload_idx];
