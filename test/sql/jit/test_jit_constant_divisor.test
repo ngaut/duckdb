@@ -1,0 +1,221 @@
+# name: test/sql/jit/test_jit_constant_divisor.test
+# description: Generated modulo and integer division by a constant give DuckDB's results for every dividend
+# group: [jit]
+
+# The quotient comes from a magic-number high multiply; a divisor one off a power of two (2, 3, 7, 33, 65537,
+# 2^31 + 1, 2^62 + 1) forms the remainder with a shift and an add, other divisors with a multiply. Dividends cover
+# negative values and the BIGINT and INTEGER extremes.
+
+statement ok
+LOAD jit_sljit
+
+statement ok
+SET jit_cbo_generated_stage_benefit=4096
+
+statement ok
+SET jit_cbo_materialization_elision_benefit=4096
+
+statement ok
+SET jit_cbo_native_operator_stage_benefit=4096
+
+statement ok
+SET jit_cbo_full_pipeline_benefit=4096
+
+statement ok
+SET jit_cbo_source_contract_scan_filter_penalty=0
+
+statement ok
+SET jit_cbo_startup_base_cost=0
+
+statement ok
+SET jit_cbo_startup_margin_basis_points=0
+
+statement ok
+SET jit_event_log_size=10000
+
+statement ok
+CREATE TABLE t AS
+SELECT (i * 7919 - 800000000)::BIGINT AS v, (i * 37 - 4000000)::INTEGER AS w FROM range(200000) r(i)
+UNION ALL
+SELECT * FROM (VALUES (9223372036854775807::BIGINT, 2147483647), ('-9223372036854775808'::BIGINT, -2147483648),
+                      (-9223372036854775807::BIGINT, -2147483647), (0::BIGINT, 0), (-1::BIGINT, -1), (1::BIGINT, 1)) v(v, w)
+
+foreach threads 1 4
+
+statement ok
+SET threads={threads}
+
+foreach policy off auto
+
+statement ok
+SET jit_policy='{policy}'
+
+query III
+SELECT count(*), sum(v % 2), sum(v // 2) FROM t WHERE v % 2 <> 0
+----
+100004	-1022	-404999999489
+
+query III
+SELECT count(*), sum(v % 3), sum(v // 3) FROM t WHERE v % 3 <> 1
+----
+167012	-35044	-6148919541361657508
+
+query III
+SELECT count(*), sum(v % 5), sum(v // 5) FROM t WHERE v % 5 <> 2
+----
+180209	-43687	-3689350690481659486
+
+query III
+SELECT count(*), sum(v % 7), sum(v // 7) FROM t WHERE v % 7 <> 3
+----
+185866	-48560	-1317625599842388074
+
+query III
+SELECT count(*), sum(v % 9), sum(v // 9) FROM t WHERE v % 9 <> 4
+----
+189009	-52185	-1024819774167533698
+
+query III
+SELECT count(*), sum(v % 15), sum(v // 15) FROM t WHERE v % 15 <> 7
+----
+193406	-60523	-1229783218715441923
+
+query III
+SELECT count(*), sum(v % 17), sum(v // 17) FROM t WHERE v % 17 <> 8
+----
+194183	-62964	-1085102822120840566
+
+query III
+SELECT count(*), sum(v % 31), sum(v // 31) FROM t WHERE v % 31 <> 15
+----
+196813	-78606	-297528222863554413
+
+query III
+SELECT count(*), sum(v % 33), sum(v // 33) FROM t WHERE v % 33 <> 16
+----
+197007	-80748	-279496207066841374
+
+query III
+SELECT count(*), sum(v % 63), sum(v // 63) FROM t WHERE v % 63 <> 31
+----
+198435	-112122	-146402766243508221
+
+query III
+SELECT count(*), sum(v % 65), sum(v // 65) FROM t WHERE v % 65 <> 32
+----
+198483	-114134	-141898065449656962
+
+query III
+SELECT count(*), sum(v % 97), sum(v // 97) FROM t WHERE v % 97 <> 48
+----
+198986	-147238	-95086330489672080
+
+query III
+SELECT count(*), sum(v % 100), sum(v // 100) FROM t WHERE v % 100 <> 49
+----
+199016	-149718	-92233740457025671
+
+query III
+SELECT count(*), sum(v % 127), sum(v // 127) FROM t WHERE v % 127 <> 63
+----
+199226	-178158	-72624991836652120
+
+query III
+SELECT count(*), sum(v % 129), sum(v // 129) FROM t WHERE v % 129 <> 64
+----
+199239	-180096	-71499022931695176
+
+query III
+SELECT count(*), sum(v % 65537), sum(v // 65537) FROM t WHERE v % 65537 <> 5
+----
+200005	-67034660	-140735365639940
+
+query III
+SELECT count(*), sum(v % 1000003), sum(v // 1000003) FROM t WHERE v % 1000003 <> 5
+----
+200006	-1036716092	-9223345986572
+
+query III
+SELECT count(*), sum(v % 2147483649), sum(v // 2147483649) FROM t WHERE v % 2147483649 <> 5
+----
+200006	-1620791900002	-4294967294
+
+query III
+SELECT count(*), sum(v % 4611686018427387905), sum(v // 4611686018427387905) FROM t WHERE v % 4611686018427387905 <> 5
+----
+200006	-4611687639219287903	-1
+
+query III
+SELECT count(*), sum(w % 2), sum(w // 2) FROM t WHERE w % 2 >= -1
+----
+200006	-8108	-31075587770
+
+query III
+SELECT count(*), sum(w % 3), sum(w // 3) FROM t WHERE w % 3 >= -1
+----
+163969	55853	4022549851
+
+query III
+SELECT count(*), sum(w % 7), sum(w // 7) FROM t WHERE w % 7 >= -3
+----
+153673	183006	4359083308
+
+query III
+SELECT count(*), sum(w % 9), sum(w // 9) FROM t WHERE w % 9 >= -4
+----
+151958	247440	3771234384
+
+query III
+SELECT count(*), sum(w % 31), sum(w // 31) FROM t WHERE w % 31 >= -15
+----
+147696	959845	1369982090
+
+query III
+SELECT count(*), sum(w % 33), sum(w // 33) FROM t WHERE w % 33 >= -16
+----
+147590	1024698	1293388966
+
+query III
+SELECT count(*), sum(w % 97), sum(w // 97) FROM t WHERE w % 97 >= -48
+----
+146508	3100067	506542742
+
+query III
+SELECT count(*), sum(w % 65537), sum(w // 65537) FROM t WHERE w % 65537 >= -32768
+----
+145981	2119670519	713343
+
+query III
+SELECT count(*), sum(w % 1000003), sum(w // 1000003) FROM t WHERE w % 1000003 >= -500001
+----
+145951	29189320110	30285
+
+query III
+SELECT count(*), sum(v % 7 + v % 9), sum(v // 3 - v // 5) FROM t WHERE v % 3 = 1 OR v % 5 = -2
+----
+53200	89501	646356673411
+
+endloop
+
+endloop
+
+# the filtered aggregate's generated loop runs them
+statement ok
+SET threads=1
+
+statement ok
+SET jit_trace_runtime=true
+
+statement ok
+SELECT * FROM duckdb_jit_clear_events()
+
+query III
+SELECT count(*), sum(v % 7), sum(v // 7) FROM t WHERE v % 7 <> 3
+----
+185866	-48560	-1317625599842388074
+
+query I
+SELECT count(*) > 0 FROM duckdb_jit_events()
+WHERE phase = 'runtime' AND jit_runtime_path_counts LIKE '%aggregate_update.filtered_primitive_update=%'
+----
+true

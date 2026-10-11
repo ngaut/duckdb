@@ -180,6 +180,11 @@ sljit_s32 NativeIntegerCompareJumpType(SljitNativeIntegerKind kind, SljitNativeI
 	return result;
 }
 
+sljit_s32 SljitCompareConditionSetFlags(sljit_s32 condition) {
+	// each ordering condition shares its flag set with its negation, which sljit numbers next to it
+	return condition <= SLJIT_NOT_EQUAL ? SLJIT_SET_Z : SLJIT_SET(condition & ~1);
+}
+
 sljit_sw NativeSignedIntegerDataScale(SljitNativeSignedIntegerWidth width) {
 	switch (width) {
 	case SljitNativeSignedIntegerWidth::INT8:

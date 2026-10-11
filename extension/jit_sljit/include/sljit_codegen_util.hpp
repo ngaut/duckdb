@@ -50,6 +50,8 @@ sljit_s32 NativeIntegerLoadOp(SljitNativeIntegerKind kind);
 sljit_s32 NativeIntegerStoreOp(SljitNativeIntegerKind kind);
 sljit_s32 NativeIntegerBinaryOp(SljitNativeIntegerKind kind, SljitNativeIntegerBinaryOp op);
 sljit_s32 NativeIntegerCompareJumpType(SljitNativeIntegerKind kind, SljitNativeIntegerCompareOp op);
+//! The flags a flag-setting subtraction must set for a comparison condition (without SLJIT_32) to be read from them
+sljit_s32 SljitCompareConditionSetFlags(sljit_s32 condition);
 
 sljit_sw NativeSignedIntegerDataScale(SljitNativeSignedIntegerWidth width);
 sljit_s32 NativeSignedIntegerLoadOp(SljitNativeSignedIntegerWidth width);

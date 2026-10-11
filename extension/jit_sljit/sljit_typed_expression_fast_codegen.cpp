@@ -35,18 +35,35 @@ EmitSljitTypedExpressionTreeFastLeafReg(struct sljit_compiler *compiler, const E
 	}
 	D_ASSERT(node.kind == ExecutionExpressionIRKind::REFERENCE);
 	auto source_kind = SljitTypedExpressionTreeIntegerKind(node);
-	EmitLoadSljitTypedExpressionTreeFastSourceIndex(compiler, node.ref_index, SLJIT_R1, index_mode);
+	// a flat or logical row reads at the loop's own index register; a selected row first resolves its source index
+	sljit_s32 index_reg = SLJIT_R1;
+	switch (index_mode) {
+	case SljitTypedExpressionTreeFastIndexMode::FLAT:
+		index_reg = SLJIT_S1;
+		break;
+	case SljitTypedExpressionTreeFastIndexMode::LOGICAL:
+		index_reg = SLJIT_S3;
+		break;
+	case SljitTypedExpressionTreeFastIndexMode::SELECTED:
+		EmitLoadSljitTypedExpressionTreeFastSourceIndex(compiler, node.ref_index, SLJIT_R1, index_mode);
+		break;
+	}
 	sljit_s32 data_reg;
-	if (TryGetSljitTypedExpressionTreeDataPointerHoist(data_hoists, node.ref_index, data_reg)) {
-		sljit_emit_op1(compiler, NativeIntegerLoadOp(source_kind), target, 0, SLJIT_MEM2(data_reg, SLJIT_R1),
-		               NativeIntegerDataScale(source_kind));
-		return;
-	} else {
-		sljit_emit_op1(compiler, SLJIT_MOV_P, SLJIT_R0, 0, SLJIT_MEM1(SLJIT_S5),
+	if (!TryGetSljitTypedExpressionTreeDataPointerHoist(data_hoists, node.ref_index, data_reg)) {
+		data_reg = SLJIT_R0;
+		sljit_emit_op1(compiler, SLJIT_MOV_P, data_reg, 0, SLJIT_MEM1(SLJIT_S5),
 		               NumericCast<sljit_sw>(node.ref_index * sizeof(const_data_ptr_t)));
 	}
-	sljit_emit_op1(compiler, NativeIntegerLoadOp(source_kind), target, 0, SLJIT_MEM2(SLJIT_R0, SLJIT_R1),
+	sljit_emit_op1(compiler, NativeIntegerLoadOp(source_kind), target, 0, SLJIT_MEM2(data_reg, index_reg),
 	               NativeIntegerDataScale(source_kind));
+}
+
+//! A comparison, modulo or division reads a constant right operand as an immediate, so it never takes a register
+static bool SljitTypedExpressionTreeFastRightIsImmediate(const ExecutionExpressionIR &node) {
+	return node.right->kind == ExecutionExpressionIRKind::CONSTANT &&
+	       (SljitTypedExpressionTreeComparisonSupported(node.binary_op) ||
+	        node.binary_op == ExecutionExpressionBinaryOp::MODULO ||
+	        node.binary_op == ExecutionExpressionBinaryOp::INTEGER_DIVIDE);
 }
 
 static void EmitSljitTypedExpressionTreeFastBinaryOpReg(struct sljit_compiler *compiler,
@@ -56,12 +73,16 @@ static void EmitSljitTypedExpressionTreeFastBinaryOpReg(struct sljit_compiler *c
 	if (SljitTypedExpressionTreeComparisonSupported(node.binary_op)) {
 		auto compare_type = NativeIntegerCompareJumpType(SljitTypedExpressionTreeIntegerKind(*node.left),
 		                                                 SljitTypedExpressionTreeCompareOp(node.binary_op));
-		auto compare_true = sljit_emit_cmp(compiler, compare_type, left_reg, 0, right_reg, 0);
-		sljit_emit_op1(compiler, SLJIT_MOV, target_reg, 0, SLJIT_IMM, 0);
-		auto compare_done = sljit_emit_jump(compiler, SLJIT_JUMP);
-		sljit_set_label(compare_true, sljit_emit_label(compiler));
-		sljit_emit_op1(compiler, SLJIT_MOV, target_reg, 0, SLJIT_IMM, 1);
-		sljit_set_label(compare_done, sljit_emit_label(compiler));
+		// the flags of the subtraction set the result: a comparison takes no branch
+		const auto condition = compare_type & ~SLJIT_32;
+		const auto compare_op = SLJIT_SUB | (compare_type & SLJIT_32) | SljitCompareConditionSetFlags(condition);
+		if (SljitTypedExpressionTreeFastRightIsImmediate(node)) {
+			sljit_emit_op2u(compiler, compare_op, left_reg, 0, SLJIT_IMM,
+			                NumericCast<sljit_sw>(SljitTypedExpressionTreeConstantValue(*node.right)));
+		} else {
+			sljit_emit_op2u(compiler, compare_op, left_reg, 0, right_reg, 0);
+		}
+		sljit_emit_op_flags(compiler, SLJIT_MOV, target_reg, 0, condition);
 		return;
 	}
 	if (node.binary_op == ExecutionExpressionBinaryOp::MODULO ||
@@ -104,7 +125,9 @@ EmitSljitTypedExpressionTreeFastLeafBinaryReg(struct sljit_compiler *compiler, c
                                               const vector<SljitTypedExpressionTreeDataPointerHoist> *data_hoists) {
 	D_ASSERT(SljitTypedExpressionTreeFastIsLeafBinary(node));
 	EmitSljitTypedExpressionTreeFastLeafReg(compiler, *node.left, target, index_mode, data_hoists);
-	EmitSljitTypedExpressionTreeFastLeafReg(compiler, *node.right, SLJIT_R3, index_mode, data_hoists);
+	if (!SljitTypedExpressionTreeFastRightIsImmediate(node)) {
+		EmitSljitTypedExpressionTreeFastLeafReg(compiler, *node.right, SLJIT_R3, index_mode, data_hoists);
+	}
 	EmitSljitTypedExpressionTreeFastBinaryOpReg(compiler, node, target, SLJIT_R3, target, overflows);
 }
 
@@ -133,7 +156,9 @@ EmitSljitTypedExpressionTreeFastBinaryReg(struct sljit_compiler *compiler, const
 		return;
 	}
 	if (SljitTypedExpressionTreeFastIsLeaf(*node.right)) {
-		EmitSljitTypedExpressionTreeFastLeafReg(compiler, *node.right, SLJIT_R4, index_mode, data_hoists);
+		if (!SljitTypedExpressionTreeFastRightIsImmediate(node)) {
+			EmitSljitTypedExpressionTreeFastLeafReg(compiler, *node.right, SLJIT_R4, index_mode, data_hoists);
+		}
 		EmitSljitTypedExpressionTreeFastBinaryOpReg(compiler, node, SLJIT_R2, SLJIT_R4, SLJIT_R2, overflows);
 		return;
 	}

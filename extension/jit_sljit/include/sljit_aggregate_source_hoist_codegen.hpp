@@ -16,5 +16,10 @@ namespace duckdb {
 vector<SljitTypedExpressionTreeDataPointerHoist>
 BuildSljitAggregateSourceDataPointerHoists(const vector<SljitNativeRegionExpressionPlan> &payloads,
                                            const vector<sljit_s32> &data_regs, idx_t min_use_count);
+//! The sources the expressions reference most often, one per data register, whose data pointers a loop over flat
+//! inputs holds in those registers
+vector<SljitTypedExpressionTreeDataPointerHoist>
+BuildSljitExpressionSourceDataPointerHoists(const vector<reference<const ExecutionExpressionIR>> &expressions,
+                                            const vector<sljit_s32> &data_regs, idx_t min_use_count);
 
 } // namespace duckdb

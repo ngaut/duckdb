@@ -3,6 +3,7 @@
 #include "sljit_aggregate_fused_codegen.hpp"
 #include "sljit_aggregate_payload_descriptor.hpp"
 #include "sljit_aggregate_primitive_codegen.hpp"
+#include "sljit_aggregate_source_hoist_codegen.hpp"
 #include "sljit_aggregate_typed_payload_codegen.hpp"
 #include "sljit_aggregate_ungrouped_shared_codegen.hpp"
 #include "sljit_codegen_internal.hpp"
@@ -182,8 +183,26 @@ unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativeFilteredUngroupedFusedPrim
 		simd_scratches = 5 | SLJIT_ENTER_VECTOR(NumericCast<sljit_s32>(vector_regs));
 	}
 
+	// The scalar loops hold the most used sources' data pointers in registers instead of loading them from the
+	// source array for every reference of every row
+	vector<SljitTypedExpressionTreeDataPointerHoist> data_hoists;
+	const auto &registers = GetSljitUngroupedAggregateRegisterLayout();
+	if (registers.has_source_data_hoists) {
+		vector<reference<const ExecutionExpressionIR>> expressions {predicate};
+		for (idx_t payload_idx = 0; payload_idx < payloads.size(); payload_idx++) {
+			if (codegen_plan.payload_descriptors[payload_idx].primitive_kind !=
+			    AggregatePrimitiveUpdateKind::COUNT_STAR) {
+				expressions.push_back(*payloads[payload_idx].expression_tree);
+			}
+		}
+		data_hoists = BuildSljitExpressionSourceDataPointerHoists(
+		    expressions, {registers.source_data[0], registers.source_data[1]}, 1);
+	}
+	const auto hoists = data_hoists.empty() ? nullptr : &data_hoists;
 	sljit_emit_enter(compiler, 0, SLJIT_ARGS1V(P), simd_scratches,
-	                 GetSljitNativeVectorRegisterLayout().saved_register_count, local_size);
+	                 hoists ? registers.source_data_saved_register_count
+	                        : GetSljitNativeVectorRegisterLayout().saved_register_count,
+	                 local_size);
 	EmitInitSljitNativeVectorLoop(compiler);
 	for (idx_t payload_idx = 0; payload_idx < payloads.size(); payload_idx++) {
 		sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_MEM1(SLJIT_SP), local_count_offsets[payload_idx], SLJIT_IMM, 0);
@@ -197,6 +216,10 @@ unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativeFilteredUngroupedFusedPrim
 		}
 	}
 	EmitInitSljitNativeVectorSourceArrays(compiler);
+	for (auto &hoist : data_hoists) {
+		sljit_emit_op1(compiler, SLJIT_MOV_P, hoist.data_reg, 0, SLJIT_MEM1(SLJIT_S5),
+		               SljitPointerArrayOffset(hoist.source_index));
+	}
 
 	vector<SljitArithmeticOverflowSite> overflows;
 	struct sljit_jump *fast_done = nullptr;
@@ -218,7 +241,7 @@ unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativeFilteredUngroupedFusedPrim
 				}
 				idx_t payload_spill_index = 0;
 				EmitSljitTypedExpressionTreeFastValueReg(compiler, *payloads[payload_idx].expression_tree,
-				                                         payload_spill_index, overflows);
+				                                         payload_spill_index, overflows, hoists);
 				EmitUngroupedAggregateAccumulate(compiler, kind, local_sum_offsets[payload_idx],
 				                                 local_sum_upper_offsets[payload_idx], saw_value_offsets[payload_idx],
 				                                 SLJIT_R2);
@@ -245,7 +268,7 @@ unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativeFilteredUngroupedFusedPrim
 		auto fast_loop = sljit_emit_label(compiler);
 		fast_done = sljit_emit_cmp(compiler, SLJIT_GREATER_EQUAL, SLJIT_S1, 0, SLJIT_S2, 0);
 		idx_t predicate_spill_index = 0;
-		EmitSljitTypedExpressionTreeFastValueReg(compiler, predicate, predicate_spill_index, overflows);
+		EmitSljitTypedExpressionTreeFastValueReg(compiler, predicate, predicate_spill_index, overflows, hoists);
 		auto predicate_false = sljit_emit_cmp(compiler, SLJIT_EQUAL, SLJIT_R2, 0, SLJIT_IMM, 0);
 		emit_payload_updates();
 		sljit_set_label(predicate_false, sljit_emit_label(compiler));
@@ -282,7 +305,7 @@ unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativeFilteredUngroupedFusedPrim
 				tail_null_jumps.push_back(EmitJumpIfSljitExpressionTreeFlatSourceNull(compiler, source_index));
 			}
 			idx_t nullable_tail_spill_index = 0;
-			EmitSljitTypedExpressionTreeFastValueReg(compiler, predicate, nullable_tail_spill_index, overflows);
+			EmitSljitTypedExpressionTreeFastValueReg(compiler, predicate, nullable_tail_spill_index, overflows, hoists);
 			auto nullable_tail_false = sljit_emit_cmp(compiler, SLJIT_EQUAL, SLJIT_R2, 0, SLJIT_IMM, 0);
 			emit_payload_updates();
 			auto nullable_tail_skip = sljit_emit_label(compiler);
@@ -304,8 +327,8 @@ unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativeFilteredUngroupedFusedPrim
 		selected_fast_done = sljit_emit_cmp(compiler, SLJIT_GREATER_EQUAL, SLJIT_S1, 0, SLJIT_S2, 0);
 		EmitLoadSljitExpressionTreeLogicalIndex(compiler);
 		idx_t selected_predicate_spill_index = 0;
-		EmitSljitTypedExpressionTreeSelectedFastValueReg(compiler, predicate, selected_predicate_spill_index,
-		                                                 overflows);
+		EmitSljitTypedExpressionTreeSelectedFastValueReg(compiler, predicate, selected_predicate_spill_index, overflows,
+		                                                 hoists);
 		auto selected_predicate_false = sljit_emit_cmp(compiler, SLJIT_EQUAL, SLJIT_R2, 0, SLJIT_IMM, 0);
 		for (idx_t payload_idx = 0; payload_idx < payloads.size(); payload_idx++) {
 			auto kind = codegen_plan.payload_descriptors[payload_idx].primitive_kind;
@@ -315,7 +338,7 @@ unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativeFilteredUngroupedFusedPrim
 			}
 			idx_t payload_spill_index = 0;
 			EmitSljitTypedExpressionTreeSelectedFastValueReg(compiler, *payloads[payload_idx].expression_tree,
-			                                                 payload_spill_index, overflows);
+			                                                 payload_spill_index, overflows, hoists);
 			EmitUngroupedAggregateAccumulate(compiler, kind, local_sum_offsets[payload_idx],
 			                                 local_sum_upper_offsets[payload_idx], saw_value_offsets[payload_idx],
 			                                 SLJIT_R2);
