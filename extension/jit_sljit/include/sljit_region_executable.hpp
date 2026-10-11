@@ -332,6 +332,10 @@ struct SljitExecutableAggregateUpdate {
 	vector<SljitExecutableIntegralGroupKeyRange> integral_group_key_ranges;
 	SljitExecutableFilteredAggregateUpdate filtered_update;
 	ExecutionDenseGroupDomain dense_group_domain;
+	//! For a hash aggregate without aggregates, the number of key combinations its bounded integer group keys
+	//! span (integral_group_key_ranges), when small enough for a per-thread bitmap of the groups already handed to
+	//! the sink; 0 when there is none
+	idx_t distinct_group_domain_size = 0;
 	SljitGroupedAggregateDirectUpdatePlan grouped_direct_update;
 	SljitExecutablePrimitiveRunUpdate primitive_run_update;
 	SljitExecutableFusedAffineRunUpdate fused_affine_run_update;

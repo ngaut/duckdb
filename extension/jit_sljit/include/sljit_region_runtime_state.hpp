@@ -28,10 +28,25 @@
 
 namespace duckdb {
 
+//! The groups a hash aggregate without aggregates already handed to the DuckDB sink on this thread, as a bitmap over
+//! its bounded group-key domain, and the scratch that selects the rows bringing a new group
+struct SljitDistinctGroupScratch {
+	explicit SljitDistinctGroupScratch(idx_t domain_size)
+	    : seen((domain_size + 63) / 64, 0), new_rows(STANDARD_VECTOR_SIZE) {
+	}
+
+	vector<uint64_t> seen;
+	SelectionVector new_rows;
+	idx_t domain_index[STANDARD_VECTOR_SIZE];
+	bool in_domain[STANDARD_VECTOR_SIZE];
+	DataChunk new_input;
+};
+
 struct SljitRegionExecutionScratch {
 	SljitRegionExecutionScratch(Allocator &allocator, const vector<SljitExecutableRegionOp> &ops) {
 		const auto op_count = ops.size();
 		temporary_chunks.resize(op_count);
+		distinct_groups.resize(op_count);
 		filter_selections.resize(op_count);
 		binding_scratch.Resize(op_count);
 		hash_join_scratch.Resize(op_count);
@@ -144,6 +159,20 @@ struct SljitRegionExecutionScratch {
 		return SljitCheckedScratchSlot(projection_adapter_scratch, op_idx, "SLJIT projection has no adapter scratch");
 	}
 
+	void ResetDistinctGroups(idx_t op_idx) {
+		D_ASSERT(op_idx < distinct_groups.size());
+		distinct_groups[op_idx].reset();
+	}
+
+	SljitDistinctGroupScratch &DistinctGroups(idx_t op_idx, idx_t domain_size) {
+		D_ASSERT(op_idx < distinct_groups.size());
+		auto &result = distinct_groups[op_idx];
+		if (!result) {
+			result = make_uniq<SljitDistinctGroupScratch>(domain_size);
+		}
+		return *result;
+	}
+
 	SelectionVector &FilterSelection(idx_t op_idx) {
 		return SljitCheckedScratchPtr(filter_selections, op_idx,
 		                              "SLJIT full pipeline transform has no selection scratch");
@@ -230,6 +259,7 @@ struct SljitRegionExecutionScratch {
 	}
 
 	vector<unique_ptr<DataChunk>> temporary_chunks;
+	vector<unique_ptr<SljitDistinctGroupScratch>> distinct_groups;
 	vector<unique_ptr<SelectionVector>> filter_selections;
 	SljitBindingExecutionScratch binding_scratch;
 	SljitHashJoinExecutionScratch hash_join_scratch;

@@ -155,6 +155,32 @@ static void SljitBuildExecutableIntegralGroupKeyRanges(const SljitNativeAggregat
 	}
 }
 
+//! A per-thread bitmap of this many key combinations costs at most 512 KiB
+static constexpr idx_t SLJIT_DISTINCT_GROUP_DOMAIN_LIMIT = idx_t(1) << 22;
+
+//! A hash aggregate without aggregates only needs each group once: rows repeating a group this thread already handed
+//! to the sink can be dropped when the group keys span a small bounded domain
+static idx_t SljitBuildExecutableDistinctGroupDomainSize(const SljitExecutableAggregateUpdate &aggregate_update) {
+	auto &sink_info = aggregate_update.plan.sink_info;
+	if (sink_info.kind != ExecutionRegionSinkKind::HASH_AGGREGATE_UPDATE || !sink_info.aggregates.empty() ||
+	    sink_info.groups.empty() || aggregate_update.integral_group_key_ranges.size() != sink_info.groups.size()) {
+		return 0;
+	}
+	idx_t domain_size = 1;
+	for (auto &range : aggregate_update.integral_group_key_ranges) {
+		if (!range.ready) {
+			return 0;
+		}
+		const auto span = static_cast<uint64_t>(range.max_value) - static_cast<uint64_t>(range.min_value) + 1;
+		if (span == 0 || span > SLJIT_DISTINCT_GROUP_DOMAIN_LIMIT ||
+		    domain_size > SLJIT_DISTINCT_GROUP_DOMAIN_LIMIT / span) {
+			return 0;
+		}
+		domain_size *= span;
+	}
+	return domain_size;
+}
+
 static bool SljitTryMultiplyGroupReserveCount(idx_t left, idx_t right, idx_t &result) {
 	if (left == 0 || right == 0 || left > NumericLimits<idx_t>::Maximum() / right) {
 		return false;
@@ -243,6 +269,8 @@ bool BuildSljitExecutableRegion(const SljitNativeRegionPlan &region, SljitExecut
 			                                                 executable_op.aggregate_update.dense_group_domain);
 			SljitBuildExecutableIntegralGroupKeyRanges(op.aggregate_update, current_min_values, current_max_values,
 			                                           executable_op.aggregate_update.integral_group_key_ranges);
+			executable_op.aggregate_update.distinct_group_domain_size =
+			    SljitBuildExecutableDistinctGroupDomainSize(executable_op.aggregate_update);
 			SljitTryBuildExecutableAggregateGroupReservePlan(op.aggregate_update, current_distinct_reserve_counts,
 			                                                 executable_op.aggregate_update.plan.group_reserve);
 		}
