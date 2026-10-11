@@ -256,11 +256,15 @@ static SljitTypedExpressionTreeSlot EmitSljitTypedExpressionTreeBinary(struct sl
 		if (!TryGetSljitExpressionTreeBinaryOp(node.binary_op, native_op)) {
 			throw InternalException("Unsupported SLJIT typed expression-tree binary operator");
 		}
-		// R1 is dead scratch here, so the result lands there and both operands survive for the overflow stub.
+		// a sum or difference overwrites its left operand in place (the overflow stub recovers it); a product lands
+		// in the dead scratch R1 so both operands survive for the stub
 		auto binary_kind = SljitTypedExpressionTreeIntegerKind(node);
-		EmitSljitCheckedIntegerBinaryOp(compiler, binary_kind, native_op, SLJIT_R1, SLJIT_R2, SLJIT_R4,
+		const auto result_reg = native_op == SljitNativeIntegerBinaryOp::MULTIPLY ? SLJIT_R1 : SLJIT_R2;
+		EmitSljitCheckedIntegerBinaryOp(compiler, binary_kind, native_op, result_reg, SLJIT_R2, SLJIT_R4,
 		                                SljitTypedExpressionTreeOverflowChecks(node), overflows);
-		sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_R2, 0, SLJIT_R1, 0);
+		if (result_reg != SLJIT_R2) {
+			sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_R2, 0, result_reg, 0);
+		}
 	}
 	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_R3, 0, SLJIT_IMM, 1);
 	EmitStoreSljitTypedExpressionTreeSlot(compiler, result_slot, SLJIT_R2, SLJIT_R3);

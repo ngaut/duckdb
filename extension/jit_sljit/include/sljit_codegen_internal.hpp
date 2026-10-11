@@ -24,6 +24,7 @@ struct SljitArithmeticOverflowSite {
 	SljitNativeIntegerBinaryOp op = SljitNativeIntegerBinaryOp::ADD;
 	sljit_s32 left_reg = 0;
 	sljit_s32 right_reg = 0;
+	sljit_s32 result_reg = 0;
 	vector<sljit_jump *> jumps;
 };
 
@@ -127,8 +128,9 @@ void EmitSetResultRowInvalid(struct sljit_compiler *compiler);
 void EmitSljitDateYearFromDays(struct sljit_compiler *compiler, sljit_s32 days_reg, sljit_s32 target_reg);
 
 bool TryGetSljitExpressionTreeBinaryOp(ExecutionExpressionBinaryOp op, SljitNativeIntegerBinaryOp &native_op);
-//! Emits result = left <op> right with the given checks; the result is always a sign-extended machine word. A checked
-//! result must not alias either operand: the error stub reads both operands back from their registers.
+//! Emits result = left <op> right with the given checks; the result is always a sign-extended machine word. The error
+//! stub reads both operands back from their registers: a checked sum or difference may overwrite one of them, which
+//! the stub recovers by inverting the operation, but a checked product must not.
 void EmitSljitCheckedIntegerBinaryOp(struct sljit_compiler *compiler, SljitNativeIntegerKind kind,
                                      SljitNativeIntegerBinaryOp op, sljit_s32 result_reg, sljit_s32 left_reg,
                                      sljit_s32 right_reg, const SljitIntegerOverflowChecks &checks,

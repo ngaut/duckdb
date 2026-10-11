@@ -100,8 +100,9 @@ BuildSljitNativeUngroupedSumInt64IntegerBinaryReferences(SljitNativeIntegerKind 
 		auto fast_done = sljit_emit_cmp(compiler, SLJIT_GREATER_EQUAL, SLJIT_S1, 0, SLJIT_S2, 0);
 		sljit_emit_op1(compiler, load_op, SLJIT_R2, 0, SLJIT_MEM2(SLJIT_S3, SLJIT_S1), data_scale);
 		sljit_emit_op1(compiler, load_op, SLJIT_R3, 0, SLJIT_MEM2(SLJIT_S4, SLJIT_S1), data_scale);
-		EmitSljitCheckedIntegerBinaryOp(compiler, kind, op, SLJIT_R2, SLJIT_R2, SLJIT_R3, checks, overflows);
-		sljit_emit_op2(compiler, SLJIT_ADD, SLJIT_R4, 0, SLJIT_R4, 0, SLJIT_R2, 0);
+		// R1 is free in this loop, so a product leaves both operands for the overflow stub
+		EmitSljitCheckedIntegerBinaryOp(compiler, kind, op, SLJIT_R1, SLJIT_R2, SLJIT_R3, checks, overflows);
+		sljit_emit_op2(compiler, SLJIT_ADD, SLJIT_R4, 0, SLJIT_R4, 0, SLJIT_R1, 0);
 		EmitNextSljitNativeVectorLoop(compiler, fast_loop);
 
 		sljit_set_label(fast_done, sljit_emit_label(compiler));

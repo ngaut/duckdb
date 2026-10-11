@@ -125,12 +125,14 @@ void EmitSljitCheckedIntegerBinaryOp(struct sljit_compiler *compiler, SljitNativ
 		}
 		return;
 	}
-	D_ASSERT(result_reg != left_reg && result_reg != right_reg);
+	D_ASSERT(left_reg != right_reg || result_reg != left_reg);
+	D_ASSERT(op != SljitNativeIntegerBinaryOp::MULTIPLY || (result_reg != left_reg && result_reg != right_reg));
 	SljitArithmeticOverflowSite site;
 	site.kind = kind;
 	site.op = op;
 	site.left_reg = left_reg;
 	site.right_reg = right_reg;
+	site.result_reg = result_reg;
 	sljit_emit_op2(compiler, checks.overflow ? binary_op | SLJIT_SET_OVERFLOW : binary_op, result_reg, 0, left_reg, 0,
 	               right_reg, 0);
 	if (checks.overflow) {
@@ -153,6 +155,21 @@ vector<sljit_jump *> EmitSljitArithmeticOverflowStubs(struct sljit_compiler *com
 	vector<sljit_jump *> stub_exits;
 	for (auto &site : overflows) {
 		SetSljitJumpLabels(site.jumps, sljit_emit_label(compiler));
+		// an operand the (possibly wrapped) result overwrote comes back by inverting the sum or difference
+		const auto add = NativeIntegerBinaryOp(site.kind, SljitNativeIntegerBinaryOp::ADD);
+		const auto subtract = NativeIntegerBinaryOp(site.kind, SljitNativeIntegerBinaryOp::SUBTRACT);
+		if (site.result_reg == site.left_reg) {
+			// left = result - right, or result + right for a difference
+			sljit_emit_op2(compiler, site.op == SljitNativeIntegerBinaryOp::ADD ? subtract : add, site.left_reg, 0,
+			               site.result_reg, 0, site.right_reg, 0);
+		} else if (site.result_reg == site.right_reg) {
+			// right = result - left, or left - result for a difference
+			if (site.op == SljitNativeIntegerBinaryOp::ADD) {
+				sljit_emit_op2(compiler, subtract, site.right_reg, 0, site.result_reg, 0, site.left_reg, 0);
+			} else {
+				sljit_emit_op2(compiler, subtract, site.right_reg, 0, site.left_reg, 0, site.result_reg, 0);
+			}
+		}
 		sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_MEM1(SLJIT_S0), offsetof(SljitNativeVectorInput, overflow_value),
 		               site.left_reg, 0);
 		sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_MEM1(SLJIT_S0),

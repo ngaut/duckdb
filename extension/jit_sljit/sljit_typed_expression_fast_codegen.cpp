@@ -81,12 +81,15 @@ static void EmitSljitTypedExpressionTreeFastBinaryOpReg(struct sljit_compiler *c
 	if (!TryGetSljitExpressionTreeBinaryOp(node.binary_op, native_op)) {
 		throw InternalException("Unsupported SLJIT typed expression-tree binary operator");
 	}
-	// The target may alias an operand, so the result lands in the dead scratch R1 first and both operands survive for
-	// the overflow stub.
+	// The target may alias an operand: a sum or difference overwrites it in place (the overflow stub recovers it), a
+	// product lands in the dead scratch R1 so both operands survive for the stub.
 	auto binary_kind = SljitTypedExpressionTreeIntegerKind(node);
-	EmitSljitCheckedIntegerBinaryOp(compiler, binary_kind, native_op, SLJIT_R1, left_reg, right_reg,
+	const auto result_reg = native_op == SljitNativeIntegerBinaryOp::MULTIPLY ? SLJIT_R1 : target_reg;
+	EmitSljitCheckedIntegerBinaryOp(compiler, binary_kind, native_op, result_reg, left_reg, right_reg,
 	                                SljitTypedExpressionTreeOverflowChecks(node), overflows);
-	sljit_emit_op1(compiler, SLJIT_MOV, target_reg, 0, SLJIT_R1, 0);
+	if (result_reg != target_reg) {
+		sljit_emit_op1(compiler, SLJIT_MOV, target_reg, 0, result_reg, 0);
+	}
 }
 
 static bool SljitTypedExpressionTreeFastIsLeafBinary(const ExecutionExpressionIR &node) {
