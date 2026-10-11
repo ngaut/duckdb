@@ -20,6 +20,14 @@
 #include <arm_neon.h>
 #endif
 
+#if defined(_MSC_VER)
+#define SLJIT_LIKE_FORCE_INLINE __forceinline
+#elif defined(__GNUC__) || defined(__clang__)
+#define SLJIT_LIKE_FORCE_INLINE inline __attribute__((always_inline))
+#else
+#define SLJIT_LIKE_FORCE_INLINE inline
+#endif
+
 namespace duckdb {
 
 static uint8_t SljitLikeFragmentAnchorScore(unsigned char c) {
@@ -90,14 +98,13 @@ static inline uint8x16_t SljitLikeFragmentPairMatches(const char *sdata, idx_t p
 	return vandq_u8(first_matches, second_matches);
 }
 
-static idx_t SljitFindLikeFragmentPairArm64(const char *sdata, idx_t slen, const char *fragment, idx_t fragment_length,
-                                            idx_t pair_anchor) {
+static SLJIT_LIKE_FORCE_INLINE idx_t SljitFindLikeFragmentPairArm64(const char *sdata, idx_t slen, const char *fragment,
+                                                                    idx_t fragment_length, idx_t pair_anchor,
+                                                                    uint8x16_t first_byte, uint8x16_t second_byte) {
 	D_ASSERT(fragment_length >= 2);
 	if (fragment_length > slen) {
 		return DConstants::INVALID_INDEX;
 	}
-	const auto first_byte = vdupq_n_u8(static_cast<uint8_t>(fragment[pair_anchor]));
-	const auto second_byte = vdupq_n_u8(static_cast<uint8_t>(fragment[pair_anchor + 1]));
 	idx_t position = pair_anchor;
 	const auto last_pair = slen - fragment_length + pair_anchor;
 	while (position + 47 <= last_pair) {
@@ -167,16 +174,45 @@ static idx_t SljitFindLikeFragmentPairArm64(const char *sdata, idx_t slen, const
 }
 #endif
 
-static idx_t SljitFindLikeFragment(const char *sdata, idx_t slen, const char *fragment, idx_t fragment_length,
-                                   idx_t anchor, idx_t pair_anchor) {
+//! An unanchored LIKE fragment prepared for searching strings: what depends only on the fragment (on ARM64 its anchor
+//! pair splat across a vector) is computed once, not for every string searched
+struct SljitLikeFragmentFinder {
+	SljitLikeFragmentFinder(const char *pattern_data, const SljitNativeStringLikeFragment &fragment)
+	    : data(pattern_data + fragment.start), length(fragment.length), anchor(fragment.anchor),
+	      pair_anchor(fragment.pair_anchor) {
+#if defined(__aarch64__)
+		if (length >= 2) {
+			first_byte = vdupq_n_u8(static_cast<uint8_t>(data[pair_anchor]));
+			second_byte = vdupq_n_u8(static_cast<uint8_t>(data[pair_anchor + 1]));
+		}
+#endif
+	}
+
+	const char *data;
+	idx_t length;
+	idx_t anchor;
+	idx_t pair_anchor;
+#if defined(__aarch64__)
+	uint8x16_t first_byte = vdupq_n_u8(0);
+	uint8x16_t second_byte = vdupq_n_u8(0);
+#endif
+};
+
+//! The offset of the finder's fragment in the string, or INVALID_INDEX; inlined into the loops searching many strings
+static SLJIT_LIKE_FORCE_INLINE idx_t SljitFindLikeFragment(const char *sdata, idx_t slen,
+                                                           const SljitLikeFragmentFinder &finder) {
+	const auto fragment = finder.data;
+	const auto fragment_length = finder.length;
 #if defined(__aarch64__)
 	if (fragment_length >= 2) {
-		return SljitFindLikeFragmentPairArm64(sdata, slen, fragment, fragment_length, pair_anchor);
+		return SljitFindLikeFragmentPairArm64(sdata, slen, fragment, fragment_length, finder.pair_anchor,
+		                                      finder.first_byte, finder.second_byte);
 	}
 #endif
 	if (fragment_length > slen) {
 		return DConstants::INVALID_INDEX;
 	}
+	const auto anchor = finder.anchor;
 	const auto anchor_byte = static_cast<unsigned char>(fragment[anchor]);
 	idx_t position = anchor;
 	const auto last_anchor = slen - fragment_length + anchor;
@@ -257,8 +293,8 @@ sljit_sw SLJIT_FUNC SljitNativeStringLikePercentOnly(const char *sdata, idx_t sl
 			       memcmp(sdata + suffix_position, pdata + fragment_start, fragment_length) == 0;
 		}
 
-		auto match_offset = SljitFindLikeFragment(sdata + position, slen - position, pdata + fragment_start,
-		                                          fragment_length, fragment.anchor, fragment.pair_anchor);
+		auto match_offset =
+		    SljitFindLikeFragment(sdata + position, slen - position, SljitLikeFragmentFinder(pdata, fragment));
 		if (match_offset == DConstants::INVALID_INDEX) {
 			return false;
 		}
@@ -268,29 +304,31 @@ sljit_sw SLJIT_FUNC SljitNativeStringLikePercentOnly(const char *sdata, idx_t sl
 }
 
 static inline bool SljitStringLikeTwoUnanchoredFragments(const char *sdata, idx_t slen,
-                                                         const SljitNativeStringConstant &pattern) {
-	D_ASSERT(!pattern.like_anchor_start);
-	D_ASSERT(!pattern.like_anchor_end);
-	D_ASSERT(pattern.like_fragments.size() == 2);
-
-	const auto fragments = pattern.like_fragments.data();
-	const auto pdata = pattern.value.data();
-	const auto &first = fragments[0];
-	const auto first_offset =
-	    SljitFindLikeFragment(sdata, slen, pdata + first.start, first.length, first.anchor, first.pair_anchor);
+                                                         const SljitLikeFragmentFinder &first,
+                                                         const SljitLikeFragmentFinder &second) {
+	const auto first_offset = SljitFindLikeFragment(sdata, slen, first);
 	if (first_offset == DConstants::INVALID_INDEX) {
 		return false;
 	}
-
 	const auto second_position = first_offset + first.length;
-	const auto &second = fragments[1];
-	return SljitFindLikeFragment(sdata + second_position, slen - second_position, pdata + second.start, second.length,
-	                             second.anchor, second.pair_anchor) != DConstants::INVALID_INDEX;
+	return SljitFindLikeFragment(sdata + second_position, slen - second_position, second) != DConstants::INVALID_INDEX;
+}
+
+//! The two fragments of a %first%second% pattern, prepared for searching
+static pair<SljitLikeFragmentFinder, SljitLikeFragmentFinder>
+SljitTwoUnanchoredFragmentFinders(const SljitNativeStringConstant &pattern) {
+	D_ASSERT(!pattern.like_anchor_start);
+	D_ASSERT(!pattern.like_anchor_end);
+	D_ASSERT(pattern.like_fragments.size() == 2);
+	const auto pdata = pattern.value.data();
+	return {SljitLikeFragmentFinder(pdata, pattern.like_fragments[0]),
+	        SljitLikeFragmentFinder(pdata, pattern.like_fragments[1])};
 }
 
 sljit_sw SLJIT_FUNC SljitNativeStringLikeTwoUnanchoredFragments(const char *sdata, idx_t slen,
                                                                 const SljitNativeStringConstant *pattern) {
-	return SljitStringLikeTwoUnanchoredFragments(sdata, slen, *pattern);
+	auto finders = SljitTwoUnanchoredFragmentFinders(*pattern);
+	return SljitStringLikeTwoUnanchoredFragments(sdata, slen, finders.first, finders.second);
 }
 
 bool TryBuildSljitNativeStringLikeBatchPlan(const SljitNativePredicate &predicate,
@@ -318,6 +356,7 @@ template <bool HAS_EXECUTE_SELECTION, bool HAS_SOURCE_SELECTION, bool HAS_VALIDI
 static idx_t SljitSelectStringLikeBatchLoop(const SljitNativeStringConstant &pattern, const string_t *source_data,
                                             const sel_t *source_sel, const ValidityMask &validity,
                                             const sel_t *execute_sel, sel_t *result, idx_t count) {
+	const auto finders = SljitTwoUnanchoredFragmentFinders(pattern);
 	idx_t selected_count = 0;
 	for (idx_t row_idx = 0; row_idx < count; row_idx++) {
 		const auto logical_index = HAS_EXECUTE_SELECTION ? execute_sel[row_idx] : UnsafeNumericCast<sel_t>(row_idx);
@@ -326,7 +365,8 @@ static idx_t SljitSelectStringLikeBatchLoop(const SljitNativeStringConstant &pat
 			continue;
 		}
 		const auto &value = source_data[source_index];
-		const auto matches = SljitStringLikeTwoUnanchoredFragments(value.GetData(), value.GetSize(), pattern);
+		const auto matches =
+		    SljitStringLikeTwoUnanchoredFragments(value.GetData(), value.GetSize(), finders.first, finders.second);
 		if (matches != NEGATE) {
 			result[selected_count++] = logical_index;
 		}

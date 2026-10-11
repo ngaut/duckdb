@@ -1,0 +1,142 @@
+# name: test/sql/jit/test_jit_like_two_fragments.test
+# description: A %first%second% LIKE gives DuckDB's rows for strings of every length up to 69
+# group: [jit]
+
+# Strings from 0 to 69 bytes (inlined ones, tails shorter than a vector, fragments straddling the 16- and 48-byte search
+# blocks) and NULLs; one-byte fragments search with memchr, longer ones with the packed anchor pair.
+
+statement ok
+LOAD jit_sljit
+
+statement ok
+SET jit_cbo_generated_stage_benefit=4096
+
+statement ok
+SET jit_cbo_materialization_elision_benefit=4096
+
+statement ok
+SET jit_cbo_native_operator_stage_benefit=4096
+
+statement ok
+SET jit_cbo_full_pipeline_benefit=4096
+
+statement ok
+SET jit_cbo_source_contract_scan_filter_penalty=0
+
+statement ok
+SET jit_cbo_startup_base_cost=0
+
+statement ok
+SET jit_cbo_startup_margin_basis_points=0
+
+statement ok
+SET jit_event_log_size=10000
+
+statement ok
+CREATE TABLE ls AS
+SELECT i, CASE WHEN i % 13 = 0 THEN NULL ELSE substring(md5(i::VARCHAR) || md5((i + 1)::VARCHAR) || md5((i + 2)::VARCHAR), 1 + i % 7, i % 70) END AS s
+FROM range(60000) t(i)
+
+foreach threads 1 4
+
+statement ok
+SET threads={threads}
+
+foreach policy off auto
+
+statement ok
+SET jit_policy='{policy}'
+
+query II
+SELECT count(*), sum(i) FROM ls WHERE s LIKE '%a%b%'
+----
+31015	933730234
+
+query II
+SELECT count(*), sum(i) FROM ls WHERE s NOT LIKE '%a%b%'
+----
+24369	727771306
+
+query II
+SELECT count(*), sum(i) FROM ls WHERE s LIKE '%ab%cd%'
+----
+523	15723802
+
+query II
+SELECT count(*), sum(i) FROM ls WHERE s NOT LIKE '%ab%cd%'
+----
+54861	1645777738
+
+query II
+SELECT count(*), sum(i) FROM ls WHERE s LIKE '%0f%f0%'
+----
+610	18848958
+
+query II
+SELECT count(*), sum(i) FROM ls WHERE s NOT LIKE '%0f%f0%'
+----
+54774	1642652582
+
+query II
+SELECT count(*), sum(i) FROM ls WHERE s LIKE '%abc%def%'
+----
+4	32033
+
+query II
+SELECT count(*), sum(i) FROM ls WHERE s NOT LIKE '%abc%def%'
+----
+55380	1661469507
+
+query II
+SELECT count(*), sum(i) FROM ls WHERE s LIKE '%e%9a%'
+----
+4307	130023277
+
+query II
+SELECT count(*), sum(i) FROM ls WHERE s NOT LIKE '%e%9a%'
+----
+51077	1531478263
+
+query II
+SELECT count(*), sum(i) FROM ls WHERE s LIKE '%7c1%e%'
+----
+290	9343695
+
+query II
+SELECT count(*), sum(i) FROM ls WHERE s NOT LIKE '%7c1%e%'
+----
+55094	1652157845
+
+query II
+SELECT count(*), sum(i) FROM ls WHERE s LIKE '%deadbeef%cafe%'
+----
+0	NULL
+
+query II
+SELECT count(*), sum(i) FROM ls WHERE s NOT LIKE '%deadbeef%cafe%'
+----
+55384	1661501540
+
+query II
+SELECT count(*), sum(i) FROM ls WHERE s LIKE '%0%0%'
+----
+31051	931504403
+
+query II
+SELECT count(*), sum(i) FROM ls WHERE s NOT LIKE '%0%0%'
+----
+24333	729997137
+
+query II
+SELECT count(*), sum(i) FROM ls WHERE s LIKE '%ff%ff%'
+----
+462	14185154
+
+query II
+SELECT count(*), sum(i) FROM ls WHERE s NOT LIKE '%ff%ff%'
+----
+54922	1647316386
+
+endloop
+
+endloop
