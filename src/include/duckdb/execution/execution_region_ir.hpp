@@ -449,7 +449,13 @@ struct ExecutionRegionNode {
 	unique_ptr<ExecutionRegionSinkInfo> sink;
 	unique_ptr<ExecutionExpressionFragment> filter;
 	vector<unique_ptr<ExecutionExpressionFragment>> projections;
+	//! Why the node is a boundary, for diagnostics only; the boundary kind is the status
 	string blocker_reason;
+
+	//! Whether a filter or projection node's expressions lowered to region IR
+	bool ExpressionsLowered() const {
+		return boundary != ExecutionRegionBoundaryKind::EXPRESSION_MISSING;
+	}
 };
 
 struct ExecutionRegionSignature {

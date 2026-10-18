@@ -20,7 +20,7 @@ static SljitRegionNodePlan SljitUnsupportedExpressionBoundaryNode(const string &
 }
 
 SljitRegionNodePlan PlanSljitFilterNode(const ExecutionRegionNode &node, bool render_diagnostics) {
-	if (!node.blocker_reason.empty() || !node.filter) {
+	if (!node.ExpressionsLowered() || !node.filter) {
 		return SljitNodeBlockerBoundary(node, "filter expression unsupported by SLJIT IR lowering");
 	}
 
@@ -91,7 +91,7 @@ static bool TryPlanExpandedSljitProjection(const ExecutionRegionNode &node, cons
 
 SljitRegionNodePlan PlanSljitProjectionNode(const ExecutionRegionNode &node, const vector<LogicalType> &input_types,
                                             bool render_diagnostics) {
-	if (!node.blocker_reason.empty() || node.projections.empty()) {
+	if (!node.ExpressionsLowered() || node.projections.empty()) {
 		return SljitNodeBlockerBoundary(node, "projection has no lowered JIT IR expressions");
 	}
 

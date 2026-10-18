@@ -189,19 +189,19 @@ ExecutionRegionStagePlan BuildExecutionRegionStagePlan(const ExecutionRegionIR &
 		}
 		case ExecutionRegionNodeKind::FILTER:
 			AddExecutionRegionStage(plan, ExecutionRegionStageKind::FILTER,
-			                        node.blocker_reason.empty() ? ExecutionRegionStageExecutionKind::GENERATED_IR
-			                                                    : ExecutionRegionStageExecutionKind::MISSING_CONTRACT,
+			                        node.ExpressionsLowered() ? ExecutionRegionStageExecutionKind::GENERATED_IR
+			                                                  : ExecutionRegionStageExecutionKind::MISSING_CONTRACT,
 			                        node_idx, node, DConstants::INVALID_INDEX, node.blocker_reason,
 			                        ExecutionCompiledContractKind::NONE, ExecutionCompiledDrainKind::NONE, string(),
-			                        node.blocker_reason.empty());
+			                        node.ExpressionsLowered());
 			break;
 		case ExecutionRegionNodeKind::PROJECTION:
 			AddExecutionRegionStage(plan, ExecutionRegionStageKind::PROJECTION,
-			                        node.blocker_reason.empty() ? ExecutionRegionStageExecutionKind::GENERATED_IR
-			                                                    : ExecutionRegionStageExecutionKind::MISSING_CONTRACT,
+			                        node.ExpressionsLowered() ? ExecutionRegionStageExecutionKind::GENERATED_IR
+			                                                  : ExecutionRegionStageExecutionKind::MISSING_CONTRACT,
 			                        node_idx, node, DConstants::INVALID_INDEX, node.blocker_reason,
 			                        ExecutionCompiledContractKind::NONE, ExecutionCompiledDrainKind::NONE, string(),
-			                        node.blocker_reason.empty() && ExecutionRegionProjectionHasExecutableWork(node));
+			                        node.ExpressionsLowered() && ExecutionRegionProjectionHasExecutableWork(node));
 			break;
 		case ExecutionRegionNodeKind::OPERATOR: {
 			if (!AddExecutionRegionCompiledStages(plan, node, node_idx)) {
