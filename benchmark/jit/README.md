@@ -47,8 +47,12 @@ off raises; `--replay` re-checks an earlier report's findings.
 The guard runs a fixed-seed campaign at the unit level (120 queries, so every
 pre-commit) and the full level (300 queries). It builds and caches a TPC-H
 SF0.1 database in `benchmark/jit/local_baselines/databases/` in which every
-column the generator references is NULL in one row of sixteen, rebuilds it
-when the binary cannot read it, and fails on any finding. `--fuzz-queries`
+column the generator references is NULL in one row of sixteen. TPC-H has no
+floating-point column, so the database adds FLOAT and DOUBLE columns derived
+from TPC-H ones that mix in both NaN signs, both infinities and both zeros.
+The guard rebuilds the database when the binary cannot read it or it lacks a
+derived column, and fails on any finding. Against a database without the
+derived columns (a plain TPC-H database), the fuzzer leaves them out. `--fuzz-queries`
 changes the campaign size; `--skip-fuzz` skips it and, like the other skips,
 forfeits the pre-commit receipt. Longer campaigns over larger scale factors
 remain a manual step:

@@ -583,7 +583,11 @@ workloads, and the affected TPC-H scale factors.
   random queries over a NULL-injected TPC-H schema at every pre-commit
   (`2b95c8c252c`); longer campaigns over larger scale factors catch
   size-dependent classes such as key compression. A query feature added to
-  the generator is a test of every existing path.
+  the generator is a test of every existing path, and a value domain the
+  schema lacks is an untested class: TPC-H has no floating-point column, and
+  wrong NaN comparisons and fatal floating-point group keys went unseen until
+  the fuzz database derived FLOAT and DOUBLE columns holding NaN, infinities
+  and both zeros.
 - **Properties, not routes.** A test asserts result parity with
   `jit_policy='off'`, order where it matters, and error parity. It may assert
   one coverage counter proving the path ran; it does not encode which route a

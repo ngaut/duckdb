@@ -42,7 +42,8 @@ CONFIGS = {
     "forced": FORCED_SETTINGS,
 }
 
-# column kinds: key (integer key), int, dec (DECIMAL), date, enum (low-cardinality string), text (free text)
+# column kinds: key (integer key), int, dec (DECIMAL), float (FLOAT or DOUBLE), date, enum (low-cardinality string),
+# text (free text)
 SCHEMA: dict[str, dict[str, str]] = {
     "lineitem": {
         "l_orderkey": "key",
@@ -61,6 +62,7 @@ SCHEMA: dict[str, dict[str, str]] = {
         "l_shipinstruct": "enum",
         "l_shipmode": "enum",
         "l_comment": "text",
+        "l_ratio": "float",
     },
     "orders": {
         "o_orderkey": "key",
@@ -99,6 +101,7 @@ SCHEMA: dict[str, dict[str, str]] = {
         "ps_availqty": "int",
         "ps_supplycost": "dec",
         "ps_comment": "text",
+        "ps_weight": "float",
     },
     "supplier": {
         "s_suppkey": "key",
@@ -107,9 +110,29 @@ SCHEMA: dict[str, dict[str, str]] = {
         "s_phone": "text",
         "s_acctbal": "dec",
         "s_comment": "text",
+        "s_score": "float",
     },
     "nation": {"n_nationkey": "key", "n_name": "enum", "n_regionkey": "key", "n_comment": "text"},
     "region": {"r_regionkey": "key", "r_name": "enum", "r_comment": "text"},
+}
+
+# TPC-H has no floating-point column: the fuzz database derives these from TPC-H columns, mixing in both NaN signs, both
+# infinities and both zeros, which DuckDB orders and groups differently from IEEE (every NaN is one value, above
+# infinity; -0.0 is 0.0). s_score reaches joins from the build side
+DERIVED_COLUMNS: dict[str, dict[str, str]] = {
+    "lineitem": {
+        "l_ratio": "CASE l_orderkey % 13 WHEN 0 THEN 'nan'::DOUBLE WHEN 1 THEN -('nan'::DOUBLE) WHEN 2 THEN 'inf'::DOUBLE "
+        "WHEN 3 THEN '-inf'::DOUBLE WHEN 4 THEN -0.0::DOUBLE WHEN 5 THEN 0.0::DOUBLE "
+        "ELSE CAST(l_extendedprice AS DOUBLE) / CAST(l_quantity AS DOUBLE) END",
+    },
+    "partsupp": {
+        "ps_weight": "CASE ps_partkey % 7 WHEN 0 THEN 'nan'::FLOAT WHEN 1 THEN -0.0::FLOAT WHEN 2 THEN 0.0::FLOAT "
+        "WHEN 3 THEN 'inf'::FLOAT ELSE CAST(ps_supplycost AS FLOAT) / 4 END",
+    },
+    "supplier": {
+        "s_score": "CASE s_suppkey % 6 WHEN 0 THEN 'nan'::DOUBLE WHEN 1 THEN -0.0::DOUBLE WHEN 2 THEN 0.0::DOUBLE "
+        "WHEN 3 THEN '-inf'::DOUBLE ELSE CAST(s_acctbal AS DOUBLE) END",
+    },
 }
 
 # foreign-key edges: (table, columns, referenced table, columns)
@@ -254,7 +277,7 @@ class QueryGenerator:
             (name, other_name)
             for name, kind in SCHEMA[table].items()
             for other_name, other_kind in SCHEMA[other].items()
-            if kind == other_kind and kind in ("int", "dec", "date")
+            if kind == other_kind and kind in ("int", "dec", "float", "date")
         ]
         if not pairs:
             return None
@@ -266,6 +289,12 @@ class QueryGenerator:
         r, ref = self.rng, column.ref
         if r.random() < 0.08:
             return f"{ref} IS {r.choice(['', 'NOT '])}NULL"
+        if column.kind in ("key", "int", "dec") and r.random() < 0.1:
+            # DuckDB ranks NaN above infinity and equal to itself; IEEE comparisons leave it unordered
+            operator = r.choice(["=", "<>", "<", ">", "<=", ">="])
+            constant = r.choice(["0", "1.5", "'nan'::DOUBLE", "'inf'::DOUBLE", "-0.0::DOUBLE"])
+            value = self.float_value(ref)
+            return f"{value} {operator} {constant}" if r.random() < 0.5 else f"{constant} {operator} {value}"
         if column.kind == "key":
             return r.choice([f"{ref} % {r.randint(2, 13)} = {r.randint(0, 1)}", f"{ref} < {r.randint(1, 25) * 4000}"])
         if column.kind == "int":
@@ -278,6 +307,12 @@ class QueryGenerator:
             return r.choice(
                 [f"{ref} < {value}", f"{ref} >= {value}", f"{ref} * 2 > {value}", f"CAST({ref} AS DOUBLE) < {value}"]
             )
+        if column.kind == "float":
+            operator = r.choice(["=", "<>", "<", ">", "<=", ">="])
+            constant = r.choice(
+                ["0", "1.5", "1000.25", "'nan'::DOUBLE", "'inf'::DOUBLE", "'-inf'::DOUBLE", "-0.0::DOUBLE"]
+            )
+            return f"{ref} {operator} {constant}" if r.random() < 0.5 else f"{constant} {operator} {ref}"
         if column.kind == "date":
             day = f"DATE '199{r.randint(2, 8)}-{r.randint(1, 12):02d}-{r.randint(1, 28):02d}'"
             return r.choice([f"{ref} < {day}", f"{ref} >= {day}"])
@@ -297,10 +332,12 @@ class QueryGenerator:
         columns = tree.columns()
         return [self.predicate(self.rng.choice(columns)) for _ in range(self.rng.randint(low, high))]
 
-    def expression(self, column: Column) -> str:
+    def expression(self, column: Column, floats: bool = True) -> str:
         r, ref = self.rng, column.ref
         if r.random() < 0.5:
             return ref
+        if floats and column.kind in ("key", "int", "dec") and r.random() < 0.15:
+            return self.float_value(ref)
         if r.random() < 0.15:
             return f"CASE WHEN {self.predicate(column)} THEN {ref} END"
         if r.random() < 0.15:
@@ -323,6 +360,8 @@ class QueryGenerator:
             )
         if column.kind == "dec":
             return r.choice([f"{ref} * 2", f"{ref} + 1", f"CAST({ref} AS INTEGER)", f"CAST({ref} AS BIGINT)"])
+        if column.kind == "float":
+            return r.choice([f"{ref} * 2", f"{ref} + 1", f"-{ref}", f"abs({ref})", f"{ref} / 4"])
         if column.kind == "date":
             # TPC-H dates are near day 8000 of the epoch: subtracting more reaches negative day counts
             return r.choice(
@@ -343,11 +382,28 @@ class QueryGenerator:
             ]
         )
 
+    def float_value(self, ref: str) -> str:
+        """A FLOAT or DOUBLE value, so groups, DISTINCT and joins see floating-point keys: DuckDB treats -0.0 as 0.0
+        and every NaN as the same value, which neither the bits nor a C++ comparison do. The fingerprint hash
+        normalizes both, so whichever representative a group keeps hashes the same"""
+        r = self.rng
+        modulus = r.randint(2, 7)
+        return r.choice(
+            [
+                f"CAST({ref} AS DOUBLE)",
+                f"CAST({ref} AS FLOAT)",
+                f"CAST({ref} % {modulus} AS DOUBLE) / 2",
+                f"CASE {ref} % 4 WHEN 0 THEN -0.0::DOUBLE WHEN 1 THEN 0.0::DOUBLE WHEN 2 THEN 'nan'::DOUBLE "
+                f"ELSE -('nan'::DOUBLE) END",
+                f"CASE {ref} % 3 WHEN 0 THEN -0.0::FLOAT WHEN 1 THEN 'nan'::FLOAT ELSE CAST({ref} % {modulus} AS FLOAT) END",
+            ]
+        )
+
     def null_handling(self, column: Column) -> str:
         r, ref = self.rng, column.ref
         if column.kind in ("key", "int"):
             return r.choice([f"coalesce({ref}, -1)", f"nullif({ref} % 7, 0)"])
-        if column.kind == "dec":
+        if column.kind in ("dec", "float"):
             return r.choice([f"coalesce({ref}, 0)", f"nullif({ref}, 0)"])
         if column.kind == "date":
             return f"coalesce({ref}, DATE '1990-01-01')"
@@ -373,7 +429,8 @@ class QueryGenerator:
             return f"count(DISTINCT {self.expression(r.choice(columns))})"
         if r.random() < 0.3:
             return f"sum({r.choice(numeric).ref}) FILTER (WHERE {self.predicate(r.choice(columns))})"
-        return f"sum({self.expression(r.choice(numeric))})"
+        # a floating-point sum rounds differently in a different order
+        return f"sum({self.expression(r.choice(numeric), floats=False)})"
 
     def core_select(self, tree: JoinTree, shape: str, where: list[str]) -> tuple[str, int]:
         r, columns = self.rng, tree.columns()
@@ -526,6 +583,24 @@ class QueryGenerator:
         )
 
 
+def database_columns(duckdb: Path, database: Path) -> set[tuple[str, str]]:
+    result = subprocess.run(
+        [str(duckdb), "-readonly", "-noheader", "-csv", str(database)],
+        input="SELECT table_name, column_name FROM duckdb_columns();\n",
+        text=True,
+        capture_output=True,
+        check=True,
+    )
+    return {tuple(line.split(",", 1)) for line in result.stdout.splitlines() if line}
+
+
+def restrict_schema(columns: set[tuple[str, str]]) -> None:
+    """Columns the database lacks, such as the derived columns in a plain TPC-H database, are never generated"""
+    for table, table_columns in SCHEMA.items():
+        for name in [name for name in table_columns if (table, name) not in columns]:
+            del table_columns[name]
+
+
 def fingerprint(sql: str, width: int) -> str:
     columns = ", ".join(f"f{i}" for i in range(width))
     return f"SELECT count(*) AS n, sum(hash({columns})) AS h FROM ({sql}) AS q({columns})"
@@ -623,6 +698,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--replay", type=Path, help="re-check an earlier report's queries at one and --threads threads")
     args = parser.parse_args(argv)
 
+    restrict_schema(database_columns(args.duckdb, args.database))
     if args.replay:
         earlier = json.loads(args.replay.read_text(encoding="utf-8"))
         jobs = [(record["index"], record["sql"], threads) for record in earlier for threads in (1, args.threads)]

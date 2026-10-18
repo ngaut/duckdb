@@ -14,6 +14,7 @@ from pathlib import Path
 
 from benchmark_common import PRODUCTION_CANDIDATE_REPEATS, PRODUCTION_REPEAT_CHOICES
 from benchmark_host import HostQuiescenceError, require_host_quiescence, wait_for_host_quiescence
+from jit_differential_fuzz import DERIVED_COLUMNS as FUZZ_DERIVED_COLUMNS
 from jit_differential_fuzz import SCHEMA as FUZZ_SCHEMA
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -505,6 +506,9 @@ def run_slow_suite(args: argparse.Namespace, artifact_dir: Path) -> None:
 
 def fuzz_database_sql() -> str:
     statements = ["CALL dbgen(sf=0.1);"]
+    for table, columns in FUZZ_DERIVED_COLUMNS.items():
+        derived = ", ".join(f"{expression} AS {column}" for column, expression in columns.items())
+        statements.append(f"CREATE OR REPLACE TABLE {table} AS SELECT *, {derived} FROM {table};")
     for table, columns in FUZZ_SCHEMA.items():
         replacements = ", ".join(
             f"CASE WHEN hash(rowid, '{column}') % {FUZZ_NULL_EVERY} = 0 THEN NULL ELSE {column} END AS {column}"
@@ -515,20 +519,28 @@ def fuzz_database_sql() -> str:
     return "\n".join(statements) + "\n"
 
 
-def fuzz_database_is_readable(args: argparse.Namespace, database: Path) -> bool:
-    # A database this binary cannot read makes every run fail identically, which the campaign would count as agreement
+def fuzz_database_is_current(args: argparse.Namespace, database: Path) -> bool:
+    # A database this binary cannot read makes every run fail identically, which the campaign would count as agreement;
+    # one built before a derived column existed would never exercise it
+    derived = ", ".join(
+        f"('{table}', '{column}')" for table, columns in FUZZ_DERIVED_COLUMNS.items() for column in columns
+    )
+    derived_count = sum(len(columns) for columns in FUZZ_DERIVED_COLUMNS.values())
     result = subprocess.run(
         [str(args.duckdb), "-readonly", "-noheader", "-list", str(database)],
-        input="SELECT count(*) FROM lineitem;\n",
+        input=(
+            "SELECT (SELECT count(*) FROM lineitem) > 0 AND (SELECT count(*) FROM duckdb_columns() "
+            f"WHERE (table_name, column_name) IN ({derived})) = {derived_count};\n"
+        ),
         text=True,
         capture_output=True,
         check=False,
     )
-    return result.returncode == 0 and result.stdout.strip().isdigit() and int(result.stdout.strip()) > 0
+    return result.returncode == 0 and result.stdout.strip() == "true"
 
 
 def ensure_fuzz_database(args: argparse.Namespace) -> Path:
-    if FUZZ_DATABASE.exists() and fuzz_database_is_readable(args, FUZZ_DATABASE):
+    if FUZZ_DATABASE.exists() and fuzz_database_is_current(args, FUZZ_DATABASE):
         return FUZZ_DATABASE
     FUZZ_DATABASE.parent.mkdir(parents=True, exist_ok=True)
     partial = FUZZ_DATABASE.with_name(f".{FUZZ_DATABASE.name}.{os.getpid()}.partial")
@@ -537,7 +549,7 @@ def ensure_fuzz_database(args: argparse.Namespace) -> Path:
     result = run_command(
         [str(args.duckdb), str(partial)], "fuzz database", capture=True, check=False, stdin=fuzz_database_sql()
     )
-    if result.returncode != 0 or not fuzz_database_is_readable(args, partial):
+    if result.returncode != 0 or not fuzz_database_is_current(args, partial):
         print(result.stdout, end="")
         print(result.stderr, end="", file=sys.stderr)
         raise GuardError("could not build the differential fuzz database")

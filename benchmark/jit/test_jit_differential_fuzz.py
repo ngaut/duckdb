@@ -5,13 +5,45 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from jit_differential_fuzz import EDGES, SCHEMA, QueryGenerator, RunResult, classify
+import copy
+from unittest import mock
+
+import jit_differential_fuzz
+from jit_differential_fuzz import DERIVED_COLUMNS, EDGES, SCHEMA, QueryGenerator, RunResult, classify
 
 
 class QueryGeneratorTest(unittest.TestCase):
     def test_a_seed_reproduces_its_queries(self) -> None:
         generator_a, generator_b = QueryGenerator(7), QueryGenerator(7)
         self.assertEqual([generator_a.query() for _ in range(50)], [generator_b.query() for _ in range(50)])
+
+    def test_floating_point_columns_are_derived_and_never_summed(self) -> None:
+        floats = {name for table, columns in SCHEMA.items() for name, kind in columns.items() if kind == "float"}
+        self.assertTrue(floats)
+        for table, columns in SCHEMA.items():
+            for name, kind in columns.items():
+                if kind == "float":
+                    self.assertIn(name, DERIVED_COLUMNS[table])
+        generator = QueryGenerator(5)
+        queries = [generator.query() for _ in range(1000)]
+        self.assertTrue(any(name in sql for sql in queries for name in floats))
+        for sql in queries:
+            # a floating-point sum rounds differently in a different order
+            self.assertIsNone(re.search(r"sum\((t\d+\.)?(" + "|".join(floats) + r")\b", sql), sql)
+
+    def test_columns_the_database_lacks_are_never_generated(self) -> None:
+        schema = copy.deepcopy(SCHEMA)
+        present = {(table, name) for table, columns in schema.items() for name in columns}
+        present -= {(table, name) for table, columns in DERIVED_COLUMNS.items() for name in columns}
+        with mock.patch.object(jit_differential_fuzz, "SCHEMA", schema):
+            jit_differential_fuzz.restrict_schema(present)
+            self.assertEqual({(table, name) for table, columns in schema.items() for name in columns}, present)
+            generator = QueryGenerator(9)
+            queries = [generator.query() for _ in range(300)]
+        for sql in queries:
+            for columns in DERIVED_COLUMNS.values():
+                for name in columns:
+                    self.assertNotIn(name, sql)
 
     def test_edges_name_schema_columns(self) -> None:
         for left, left_columns, right, right_columns in EDGES:

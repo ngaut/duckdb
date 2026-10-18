@@ -295,6 +295,16 @@ class TestDifferentialFuzz(unittest.TestCase):
             for column in columns:
                 self.assertIn(f"THEN NULL ELSE {column} END AS {column}", sql)
 
+    def test_derived_columns_exist_before_they_get_nulls(self) -> None:
+        sql = guard.fuzz_database_sql()
+        for table, columns in guard.FUZZ_DERIVED_COLUMNS.items():
+            derive = sql.index(f"CREATE OR REPLACE TABLE {table} AS SELECT *, ")
+            nulls = sql.index(f"CREATE OR REPLACE TABLE {table} AS SELECT * REPLACE (")
+            self.assertLess(derive, nulls)
+            for column, expression in columns.items():
+                self.assertIn(f"{expression} AS {column}", sql)
+                self.assertIn(column, guard.FUZZ_SCHEMA[table])
+
     def test_campaign_size_follows_the_level_unless_given(self) -> None:
         database = Path("fuzz.duckdb")
         artifact_dir = Path("artifacts")
@@ -328,7 +338,7 @@ class TestDifferentialFuzz(unittest.TestCase):
             readable = iter((False, True))
             with (
                 mock.patch.object(guard, "FUZZ_DATABASE", database),
-                mock.patch.object(guard, "fuzz_database_is_readable", side_effect=lambda *_: next(readable)),
+                mock.patch.object(guard, "fuzz_database_is_current", side_effect=lambda *_: next(readable)),
                 mock.patch.object(guard, "run_command", return_value=built) as run,
                 mock.patch.object(guard.os, "replace") as replace,
             ):
@@ -346,7 +356,7 @@ class TestDifferentialFuzz(unittest.TestCase):
             built = subprocess.CompletedProcess(args=[], returncode=0, stdout="", stderr="")
             with (
                 mock.patch.object(guard, "FUZZ_DATABASE", database),
-                mock.patch.object(guard, "fuzz_database_is_readable", return_value=False),
+                mock.patch.object(guard, "fuzz_database_is_current", return_value=False),
                 mock.patch.object(guard, "run_command", return_value=built),
                 redirect_stderr(io.StringIO()),
             ):
