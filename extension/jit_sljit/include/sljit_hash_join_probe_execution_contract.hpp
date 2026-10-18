@@ -77,11 +77,11 @@ SljitBuildHashJoinProbeExecutionContractView(SljitExecutableRegionOp &op,
 	if (!SljitHashJoinProbeProducesSelectedView(output_contract)) {
 		throw InternalException("SLJIT prepared hash join probe remap requires selected-view execution");
 	}
-	if (!input_remap->has_prepared_plan) {
+	if (!input_remap->prepared_plan) {
 		throw InternalException("SLJIT hash join probe remap was not prepared during primitive binding");
 	}
-	view.plan = &input_remap->prepared_plan;
-	view.operator_info = &input_remap->prepared_plan.operator_info;
+	view.plan = input_remap->prepared_plan.get();
+	view.operator_info = &input_remap->prepared_plan->operator_info;
 	return view;
 }
 

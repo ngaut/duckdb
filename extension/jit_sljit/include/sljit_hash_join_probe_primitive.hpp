@@ -17,18 +17,15 @@ struct SljitHashJoinProbeInputRemap {
 	//! the elided cast key 0 narrows its BIGINT source through
 	SljitIntegerCastChain key0_source_cast;
 	vector<idx_t> residual_probe_source_indices;
-	SljitNativeHashJoinProbePlan prepared_plan;
-	bool has_prepared_plan = false;
+	//! The probe plan rebound to the remapped input, once primitive binding prepared it. Held by pointer: every
+	//! pipeline step embeds a probe selection primitive, and most never carry a remap
+	unique_ptr<SljitNativeHashJoinProbePlan> prepared_plan;
 
 	SljitHashJoinProbeInputRemap() = default;
 
 	SljitHashJoinProbeInputRemap(const SljitHashJoinProbeInputRemap &other)
 	    : key_input_indices(other.key_input_indices), key0_source_cast(other.key0_source_cast),
-	      residual_probe_source_indices(other.residual_probe_source_indices),
-	      has_prepared_plan(other.has_prepared_plan) {
-		if (has_prepared_plan) {
-			prepared_plan = other.prepared_plan.Copy(false);
-		}
+	      residual_probe_source_indices(other.residual_probe_source_indices), prepared_plan(CopyPreparedPlan(other)) {
 	}
 
 	SljitHashJoinProbeInputRemap &operator=(const SljitHashJoinProbeInputRemap &other) {
@@ -38,12 +35,7 @@ struct SljitHashJoinProbeInputRemap {
 		key_input_indices = other.key_input_indices;
 		key0_source_cast = other.key0_source_cast;
 		residual_probe_source_indices = other.residual_probe_source_indices;
-		has_prepared_plan = other.has_prepared_plan;
-		if (has_prepared_plan) {
-			prepared_plan = other.prepared_plan.Copy(false);
-		} else {
-			prepared_plan = SljitNativeHashJoinProbePlan();
-		}
+		prepared_plan = CopyPreparedPlan(other);
 		return *this;
 	}
 
@@ -60,6 +52,12 @@ struct SljitHashJoinProbeInputRemap {
 
 	bool HasRemap() const {
 		return HasKeyInputRemap() || HasResidualProbeSourceRemap();
+	}
+
+private:
+	static unique_ptr<SljitNativeHashJoinProbePlan> CopyPreparedPlan(const SljitHashJoinProbeInputRemap &other) {
+		return other.prepared_plan ? make_uniq<SljitNativeHashJoinProbePlan>(other.prepared_plan->Copy(false))
+		                           : nullptr;
 	}
 };
 
@@ -188,19 +186,19 @@ static void SljitPrepareHashJoinProbeInputRemap(const SljitNativeHashJoinProbePl
 	if (!input_remap.HasRemap()) {
 		return;
 	}
-	input_remap.prepared_plan = plan.Copy(false);
-	input_remap.prepared_plan.input_types = input_types;
+	auto prepared_plan = make_uniq<SljitNativeHashJoinProbePlan>(plan.Copy(false));
+	prepared_plan->input_types = input_types;
 	if (input_remap.HasKeyInputRemap()) {
 		if (input_remap.key_input_indices.size() != plan.keys.size() ||
 		    plan.operator_info.hash_join_keys.size() != plan.keys.size()) {
 			throw InternalException("SLJIT prepared hash join probe key count mismatch");
 		}
-		for (idx_t key_idx = 0; key_idx < input_remap.prepared_plan.keys.size(); key_idx++) {
+		for (idx_t key_idx = 0; key_idx < prepared_plan->keys.size(); key_idx++) {
 			const auto input_idx = input_remap.key_input_indices[key_idx];
 			if (input_idx >= input_types.size()) {
 				throw InternalException("SLJIT prepared hash join probe key input is out of range");
 			}
-			auto &key = input_remap.prepared_plan.keys[key_idx];
+			auto &key = prepared_plan->keys[key_idx];
 			const auto source_type = input_types[input_idx].InternalType();
 			if (!SljitPreparedHashJoinRemapKeySourceSupported(key, key_idx, source_type)) {
 				throw InternalException("SLJIT prepared hash join probe key source type is unsupported");
@@ -212,12 +210,12 @@ static void SljitPrepareHashJoinProbeInputRemap(const SljitNativeHashJoinProbePl
 				key.source_cast = input_remap.key0_source_cast;
 			}
 			key.key_input_index = input_idx;
-			input_remap.prepared_plan.operator_info.hash_join_keys[key_idx].input_index = input_idx;
+			prepared_plan->operator_info.hash_join_keys[key_idx].input_index = input_idx;
 		}
 	}
-	SljitApplyPreparedHashJoinResidualProbeSourceRemap(input_remap.prepared_plan.operator_info, input_types,
+	SljitApplyPreparedHashJoinResidualProbeSourceRemap(prepared_plan->operator_info, input_types,
 	                                                   input_remap.residual_probe_source_indices);
-	input_remap.has_prepared_plan = true;
+	input_remap.prepared_plan = std::move(prepared_plan);
 }
 
 static SljitHashJoinProbeSelectionPrimitive SljitBindHashJoinProbeSelectionPrimitive(
