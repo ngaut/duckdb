@@ -131,6 +131,34 @@ static bool SljitTryFastAppendFixedAllValid(DataChunk &target, DataChunk &source
 	return true;
 }
 
+//! Whether appending the chunk to a batch copies bytes beyond its vectors: strings too long to inline in their
+//! string_t, which batching copies one by one into a fresh heap, and nested values. A string column is judged by its
+//! first valid value: the answer only picks the cheaper path, and long-text columns are long throughout
+static bool SljitChunkHasOutOfLineValues(DataChunk &chunk) {
+	for (auto &vector : chunk.data) {
+		const auto physical_type = vector.GetType().InternalType();
+		if (TypeIsConstantSize(physical_type)) {
+			continue;
+		}
+		if (physical_type != PhysicalType::VARCHAR) {
+			return true;
+		}
+		UnifiedVectorFormat format;
+		vector.ToUnifiedFormat(chunk.size(), format);
+		auto data = UnifiedVectorFormat::GetData<string_t>(format);
+		for (idx_t row_idx = 0; row_idx < chunk.size(); row_idx++) {
+			const auto idx = format.sel->get_index(row_idx);
+			if (format.validity.RowIsValid(idx)) {
+				if (!data[idx].IsInlined()) {
+					return true;
+				}
+				break;
+			}
+		}
+	}
+	return false;
+}
+
 template <class FLUSH_BATCH, class EXECUTE_BATCH>
 static bool SljitAppendChunkToInitializedBatch(ExecutionRegionRuntime &runtime, DataChunk &batch, DataChunk &chunk,
                                                idx_t trace_op_idx, optional_ptr<const SljitExecutableRegionOp> trace_op,

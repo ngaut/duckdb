@@ -27,6 +27,14 @@ struct SljitSourceFetchPrimitiveRuntime {
 		if (!ShouldBatchSourceContractChunk(source_contract_batch.Count(), source_chunk.size())) {
 			return ExecuteSourceChunk(source_chunk, execute_next_step);
 		}
+		// Out-of-line strings would be copied into the batch byte by byte, which costs more than the downstream
+		// steps save on a fuller batch
+		if (SljitChunkHasOutOfLineValues(source_chunk)) {
+			if (Flush(execute_next_step)) {
+				return true;
+			}
+			return ExecuteSourceChunk(source_chunk, execute_next_step);
+		}
 		if (source_contract_batch.Initialized() && source_contract_batch.ColumnCount() != source_chunk.ColumnCount()) {
 			if (Flush(execute_next_step)) {
 				return true;
