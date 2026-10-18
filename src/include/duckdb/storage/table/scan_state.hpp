@@ -334,6 +334,8 @@ public:
 
 	//! Optional state for custom row group ordering
 	unique_ptr<RowGroupReorderer> reorderer;
+	//! The flat vectors that receive the rows a filter keeps when the scan compacts filtered columns
+	DataChunk filter_compaction;
 
 public:
 	void Initialize(const QueryContext &context_p, const vector<LogicalType> &types);
@@ -381,6 +383,10 @@ struct ScanSamplingInfo {
 struct TableScanOptions {
 	//! Fetch rows one-at-a-time instead of using the regular scans.
 	bool force_fetch_row = false;
+	//! Copy the rows a filter keeps out of each fixed-width filtered column into flat vectors instead of slicing the
+	//! scanned vector, for a consumer that copies or reads every row it receives: a slice allocates a dictionary
+	//! that is freed again when the chunk is reset
+	bool compact_filtered_vectors = false;
 };
 
 class TableScanState {

@@ -98,9 +98,14 @@ static void SljitFastAppendFixedAllValidVector(Vector &target, Vector &source, i
 	const auto physical_type = target.GetType().InternalType();
 	const auto type_size = GetTypeIdSize(physical_type);
 	auto target_data = FlatVector::GetDataMutable(target) + target_count * type_size;
-	UnifiedVectorFormat source_format;
-	source.ToUnifiedFormat(source_format);
-	SljitCopyFixedWidthUnifiedAllValid(source_format, target_data, append_count, type_size);
+	if (source.GetVectorType() == VectorType::FLAT_VECTOR) {
+		// scans hand over flat vectors, whose rows are contiguous
+		memcpy(target_data, FlatVector::GetData(source), append_count * type_size);
+	} else {
+		UnifiedVectorFormat source_format;
+		source.ToUnifiedFormat(source_format);
+		SljitCopyFixedWidthUnifiedAllValid(source_format, target_data, append_count, type_size);
+	}
 	FlatVector::SetSize(target, new_count);
 }
 

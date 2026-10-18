@@ -1,0 +1,154 @@
+# name: test/sql/jit/test_jit_source_filter_compaction.test
+# description: A region source copies the rows a scan filter keeps out of each fixed-width filtered column into flat
+#              vectors, while variable-width filtered columns stay sliced: join filters on keys of every fixed width,
+#              IN filters, deleted rows, string filters, uncompressed and compressed storage match the vectorized plan
+# group: [jit]
+
+load {TEST_DIR}/jit_source_filter_compaction.db
+
+statement ok
+LOAD jit_sljit
+
+statement ok
+SET jit_cbo_generated_stage_benefit=4096
+
+statement ok
+SET jit_cbo_materialization_elision_benefit=4096
+
+statement ok
+SET jit_cbo_native_operator_stage_benefit=4096
+
+statement ok
+SET jit_cbo_full_pipeline_benefit=4096
+
+statement ok
+SET jit_cbo_source_contract_scan_filter_penalty=0
+
+statement ok
+SET jit_cbo_startup_base_cost=0
+
+statement ok
+SET jit_cbo_startup_margin_basis_points=0
+
+statement ok
+SET jit_trace_runtime=true
+
+statement ok
+SET jit_event_log_size=100000
+
+# Every key keeps a few rows of each scanned vector, so each kept row is copied out of a mostly rejected vector. The
+# temporary table stays uncompressed in memory; the persistent one is checkpointed (compressed)
+statement ok
+CREATE TEMPORARY TABLE facts_mem AS
+SELECT i::BIGINT AS id,
+       (i % 120)::TINYINT AS k8,
+       (i % 30000)::SMALLINT AS k16,
+       (i % 200000)::INTEGER AS k32,
+       i::BIGINT AS k64,
+       i::HUGEINT * 1000000000000000 AS k128,
+       (i % 200000)::UINTEGER AS ku32,
+       i::DOUBLE / 4 AS kd,
+       (i % 200000)::DECIMAL(18, 3) / 8 AS kdec,
+       DATE '2000-01-01' + (i % 20000)::INTEGER AS kdate,
+       TIMESTAMP '2000-01-01' + to_seconds(i) AS kts,
+       's' || (i % 7) AS s,
+       CASE WHEN i % 11 = 0 THEN NULL ELSE i % 997 END AS payload
+FROM range(600000) t(i)
+
+statement ok
+CREATE TABLE facts_disk AS SELECT * FROM facts_mem
+
+statement ok
+CHECKPOINT
+
+foreach key k8 k16 k32 k64 k128 ku32 kd kdec kdate kts
+
+statement ok
+CREATE TABLE keys_{key} AS SELECT DISTINCT {key} FROM facts_mem WHERE id % 613 = 0
+
+endloop
+
+# The second round scans the same rows after deleting a third of them
+foreach round all_rows after_delete
+
+foreach facts facts_mem facts_disk
+
+foreach threads 1 4
+
+statement ok
+SET threads={threads}
+
+foreach key k8 k16 k32 k64 k128 ku32 kd kdec kdate kts
+
+statement ok
+SET jit_policy='off'
+
+statement ok
+CREATE OR REPLACE TABLE expected AS
+SELECT f.id * 3 + 1 AS id, f.{key}, f.s, f.payload FROM {facts} f JOIN keys_{key} USING ({key})
+
+statement ok
+SET jit_policy='auto'
+
+statement ok
+CREATE OR REPLACE TABLE actual AS
+SELECT f.id * 3 + 1 AS id, f.{key}, f.s, f.payload FROM {facts} f JOIN keys_{key} USING ({key})
+
+query I
+SELECT count(*) FROM ((SELECT * FROM expected EXCEPT ALL SELECT * FROM actual)
+                      UNION ALL (SELECT * FROM actual EXCEPT ALL SELECT * FROM expected))
+----
+0
+
+endloop
+
+# An IN filter stays in the scan beside the join filter; the string filter keeps the sliced path
+statement ok
+SET jit_policy='off'
+
+statement ok
+CREATE OR REPLACE TABLE expected AS
+SELECT f.id * 3 + 1 AS id, f.k32, f.k64, f.s, f.payload FROM {facts} f JOIN keys_k64 USING (k64)
+WHERE f.k32 IN (0, 613, 1226, 5000, 199999) AND f.s IN ('s0', 's2', 's5')
+
+statement ok
+SET jit_policy='auto'
+
+statement ok
+CREATE OR REPLACE TABLE actual AS
+SELECT f.id * 3 + 1 AS id, f.k32, f.k64, f.s, f.payload FROM {facts} f JOIN keys_k64 USING (k64)
+WHERE f.k32 IN (0, 613, 1226, 5000, 199999) AND f.s IN ('s0', 's2', 's5')
+
+query I
+SELECT count(*) FROM ((SELECT * FROM expected EXCEPT ALL SELECT * FROM actual)
+                      UNION ALL (SELECT * FROM actual EXCEPT ALL SELECT * FROM expected))
+----
+0
+
+endloop
+
+# The region's source scan applied the join filter
+statement ok
+SET threads=1
+
+statement ok
+SELECT * FROM duckdb_jit_clear_events()
+
+statement ok
+CREATE OR REPLACE TABLE actual AS
+SELECT f.id * 3 + 1 AS id, f.k32, f.s, f.payload FROM {facts} f JOIN keys_k32 USING (k32)
+
+query I
+SELECT count(*) FROM duckdb_jit_events() WHERE phase = 'runtime' AND status = 'executed'
+----
+1
+
+endloop
+
+statement ok
+DELETE FROM facts_mem WHERE id % 3 = 1
+
+statement ok
+DELETE FROM facts_disk WHERE id % 3 = 1
+
+endloop

@@ -2128,6 +2128,9 @@ TEST_CASE("JIT probes selected BIGINT keys through proven INTEGER narrowing", "[
 	                     "JOIN narrowing.jit_narrowing_build build USING (orderkey) "
 	                     "WHERE probe.ship_mode IN ('MAIL', 'SHIP') "
 	                     "GROUP BY probe.ship_mode ORDER BY probe.ship_mode";
+	// The region filters the rows itself and probes the keys through its selection: a scan filter would hand over
+	// the rows it keeps compacted into flat vectors
+	REQUIRE_NO_FAIL(con.Query("SET disabled_optimizers='filter_pushdown'"));
 	REQUIRE_NO_FAIL(con.Query("SET jit_policy='off'"));
 	auto reference = con.Query(query);
 	REQUIRE_NO_FAIL(*reference);
@@ -2172,6 +2175,7 @@ TEST_CASE("JIT probes selected BIGINT keys through proven INTEGER narrowing", "[
 	    "sum(CASE WHEN build.priority = '1-URGENT' OR build.priority = '2-HIGH' THEN 1 ELSE 0 END) "
 	    "FROM narrowing.jit_narrowing_probe probe "
 	    "JOIN narrowing.jit_narrowing_build build USING (orderkey)";
+	REQUIRE_NO_FAIL(con.Query("RESET disabled_optimizers"));
 	REQUIRE_NO_FAIL(con.Query("SET jit_policy='off'"));
 	auto flat_reference = con.Query(flat_query);
 	REQUIRE_NO_FAIL(*flat_reference);

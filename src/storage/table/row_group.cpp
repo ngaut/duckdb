@@ -10,6 +10,7 @@
 #include "duckdb/common/serializer/serializer.hpp"
 #include "duckdb/common/typedefs.hpp"
 #include "duckdb/common/types/vector.hpp"
+#include "duckdb/common/vector_operations/vector_operations.hpp"
 #include "duckdb/common/vector/flat_vector.hpp"
 #include "duckdb/execution/adaptive_filter.hpp"
 #include "duckdb/execution/expression_executor.hpp"
@@ -981,6 +982,11 @@ bool RowGroup::PrepareScan(ScanOptions options, CollectionScanState &state) {
 	}
 }
 
+//! Copying the rows a filter keeps costs their bytes: cheap for fixed-width values, a heap copy per string otherwise
+static bool CompactsFilteredVector(const Vector &filtered) {
+	return TypeIsConstantSize(filtered.GetType().InternalType());
+}
+
 void RowGroup::ProcessPreparedScan(ScanOptions options, CollectionScanState &state, DataChunk &result) {
 	const auto &column_ids = state.GetColumnIds();
 	auto &filter_info = state.GetFilterInfo();
@@ -1013,8 +1019,8 @@ void RowGroup::ProcessPreparedScan(ScanOptions options, CollectionScanState &sta
 		// partial scan: we have deletions or table filters
 		idx_t approved_tuple_count = count;
 		SelectionVector sel;
-		SelectionVector intersect_sel(STANDARD_VECTOR_SIZE);
 		if (has_sample_selection && count != max_count) {
+			SelectionVector intersect_sel(STANDARD_VECTOR_SIZE);
 			approved_tuple_count = IntersectSelections(state.valid_sel, count, sample_sel, sample_count, intersect_sel);
 			if (approved_tuple_count == 0) {
 				NextVector(state);
@@ -1062,11 +1068,32 @@ void RowGroup::ProcessPreparedScan(ScanOptions options, CollectionScanState &sta
 		const bool selection_is_identity =
 		    !has_sample_selection && count == max_count && approved_tuple_count == max_count;
 		if (has_filters && !selection_is_identity) {
+			const bool compact = state.GetOptions().compact_filtered_vectors;
+			if (compact) {
+				if (state.filter_compaction.ColumnCount() == 0) {
+					// The filter list is fixed for the lifetime of the scan: only its fixed-width columns get a vector
+					vector<bool> compacted_columns(result.ColumnCount(), false);
+					for (auto &table_filter : filter_info.GetResidualFilterList()) {
+						compacted_columns[table_filter.scan_column_index] =
+						    CompactsFilteredVector(result.data[table_filter.scan_column_index]);
+					}
+					state.filter_compaction.Initialize(Allocator::DefaultAllocator(), result.GetTypes(),
+					                                   compacted_columns);
+				}
+				state.filter_compaction.Reset();
+			}
 			for (auto &table_filter : filter_info.GetResidualFilterList()) {
 				if (table_filter.IsAlwaysTrue()) {
 					continue;
 				}
-				result.data[table_filter.scan_column_index].Slice(sel, approved_tuple_count);
+				auto &filtered = result.data[table_filter.scan_column_index];
+				if (compact && CompactsFilteredVector(filtered)) {
+					auto &compacted = state.filter_compaction.data[table_filter.scan_column_index];
+					VectorOperations::Copy(filtered, compacted, sel, approved_tuple_count, 0, 0);
+					filtered.Reference(compacted);
+				} else {
+					filtered.Slice(sel, approved_tuple_count);
+				}
 			}
 		}
 		if (approved_tuple_count == 0) {

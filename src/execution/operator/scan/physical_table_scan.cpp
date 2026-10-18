@@ -344,6 +344,8 @@ private:
 		}
 		execution_source_contract_scan_state.options.force_fetch_row =
 		    Settings::Get<DebugForceFetchRowSetting>(context.client);
+		// Every region source copies the chunks it batches and reads the rest flat
+		execution_source_contract_scan_state.options.compact_filtered_vectors = true;
 	}
 };
 
@@ -380,7 +382,6 @@ SourceResultType PhysicalTableScan::GetExecutionSourceContractDataInternal(Execu
 	auto &contract_state = g_state.execution_source_contract;
 	auto &scan_state = l_state.execution_source_contract_scan_state;
 	l_state.execution_source_contract_cursor = true;
-	scan_state.options.force_fetch_row = Settings::Get<DebugForceFetchRowSetting>(context.client);
 
 	do {
 		if (contract_state.is_create_index) {
