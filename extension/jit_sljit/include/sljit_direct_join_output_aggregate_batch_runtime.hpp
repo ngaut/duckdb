@@ -73,7 +73,8 @@ static void SljitFlushPendingRowPointerAggregateBatch(ExecutionRegionRuntime &ru
 	if (!SljitTryExecuteNativeRowPointerGroupedAggregateUpdate(
 	        runtime, runtime.ExecutionOperators(), *batch.scratch, aggregate_idx, aggregate_op, payload_input,
 	        batch.row_pointers, batch_group_sources, descriptor.payload_source_indices,
-	        descriptor.payload_source_layout, true, source_key0_int64_to_int32_unchecked)) {
+	        descriptor.payload_source_layout, true, source_key0_int64_to_int32_unchecked,
+	        batch.uses_preclassified_input)) {
 		throw InternalException("SLJIT batched direct row-pointer aggregate update failed");
 	}
 	RecordSljitRegionMaterializationElision(runtime, aggregate_op.kind,

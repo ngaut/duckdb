@@ -267,7 +267,7 @@ static bool SljitTryExecuteNativeRowPointerGroupedAggregateUpdate(
     idx_t op_idx, SljitExecutableRegionOp &op, DataChunk &payload_input, Vector &row_pointers,
     const vector<ExecutionRowPointerGroupKeySource> &group_sources, const vector<idx_t> &payload_source_indices,
     SljitAggregatePayloadSourceLayout payload_source_layout, bool defer_grouped_finish,
-    bool source_key0_int64_to_int32_unchecked = false) {
+    bool source_key0_int64_to_int32_unchecked = false, bool preclassified_payload = false) {
 	auto record_unsupported = [&](const char *reason) {
 		auto path = string("row_pointer_grouped_lookup_update_unsupported.") + reason;
 		RecordSljitRegionRuntimePath(runtime, op.kind, path.c_str());
@@ -322,6 +322,13 @@ static bool SljitTryExecuteNativeRowPointerGroupedAggregateUpdate(
 	auto &payload_scratch = scratch.AggregatePayloadScratch(op_idx);
 	const bool finish = !defer_grouped_finish;
 	SljitTryReserveGroupedAggregateGroups(runtime, op_idx, op, grouped_state);
+	if (preclassified_payload) {
+		// The payload is one string-set class column in place of the payload sources: every other update strategy
+		// would read it as the sources it replaced
+		return TryExecuteDirectRowPointerPreclassifiedStringSetComplementarySumUpdate(
+		    runtime, scratch, op_idx, op, payload_input, row_pointers, count, proven_group_sources,
+		    payload_source_indices, payload_lanes, grouped_state, finish);
+	}
 	auto decision = SljitPlanRowPointerGroupedAggregateUpdate(scratch, op_idx, op, payload_input, row_pointers, count,
 	                                                          proven_group_sources, payload_source_indices,
 	                                                          payload_source_layout, reduction_lanes);

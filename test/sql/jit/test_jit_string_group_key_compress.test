@@ -178,3 +178,64 @@ NULL	14083	21176
 endloop
 
 endloop
+
+# A preclassified batch holds one string-set class column in place of its payload sources. A probe whose first chunk
+# matches few build rows flushes a small batch first, small enough for local preaggregation: the update must still
+# read it as classes, not as the payload sources it replaced
+statement ok
+CREATE TABLE sparse_first_orders AS
+SELECT CASE WHEN i < 2048 AND i % 400 <> 0 THEN -1 - i ELSE i END::BIGINT AS order_id,
+       CASE i % 5 WHEN 0 THEN '1-URGENT' WHEN 1 THEN '2-HIGH' WHEN 2 THEN '3-MEDIUM' ELSE '4-NOT SPECIFIED' END AS priority
+FROM range(150000) t(i)
+
+statement ok
+SET jit_trace_runtime=true
+
+statement ok
+SET jit_event_log_size=100000
+
+foreach threads 1 4
+
+statement ok
+SET threads={threads}
+
+statement ok
+SET jit_policy='off'
+
+statement ok
+CREATE OR REPLACE TABLE sparse_expected AS
+SELECT s.g,
+       sum(CASE WHEN o.priority = '1-URGENT' OR o.priority = '2-HIGH' THEN 1 ELSE 0 END) AS high,
+       sum(CASE WHEN o.priority <> '1-URGENT' AND o.priority <> '2-HIGH' THEN 1 ELSE 0 END) AS low
+FROM ship s JOIN sparse_first_orders o USING (order_id)
+WHERE s.g IS NULL OR length(s.g) <> 7
+GROUP BY s.g
+
+statement ok
+SET jit_policy='auto'
+
+statement ok
+SELECT * FROM duckdb_jit_clear_events()
+
+statement ok
+CREATE OR REPLACE TABLE sparse_actual AS
+SELECT s.g,
+       sum(CASE WHEN o.priority = '1-URGENT' OR o.priority = '2-HIGH' THEN 1 ELSE 0 END) AS high,
+       sum(CASE WHEN o.priority <> '1-URGENT' AND o.priority <> '2-HIGH' THEN 1 ELSE 0 END) AS low
+FROM ship s JOIN sparse_first_orders o USING (order_id)
+WHERE s.g IS NULL OR length(s.g) <> 7
+GROUP BY s.g
+
+query I
+SELECT count(*) > 0 FROM duckdb_jit_events()
+WHERE phase = 'runtime' AND jit_runtime_path_counts LIKE '%row_pointer_preclassified_string_set_complementary_sum_update%'
+----
+true
+
+query I
+SELECT count(*) FROM ((SELECT * FROM sparse_expected EXCEPT ALL SELECT * FROM sparse_actual)
+                      UNION ALL (SELECT * FROM sparse_actual EXCEPT ALL SELECT * FROM sparse_expected))
+----
+0
+
+endloop
