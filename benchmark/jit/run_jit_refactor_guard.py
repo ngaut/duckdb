@@ -14,6 +14,7 @@ from pathlib import Path
 
 from benchmark_common import PRODUCTION_CANDIDATE_REPEATS, PRODUCTION_REPEAT_CHOICES
 from benchmark_host import HostQuiescenceError, require_host_quiescence, wait_for_host_quiescence
+from jit_differential_fuzz import SCHEMA as FUZZ_SCHEMA
 
 ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_TPCH_BASELINE_STATE = ROOT / "benchmark" / "tpch" / "jit" / "local_baselines" / "tpch_refactor_guard_state.json"
@@ -31,6 +32,13 @@ FORCED_JIT_SUITES = (
     "test/sql/cte/*",
     "test/sql/tpch/*",
 )
+# Hand-written tests cover the shapes they were written for; every feature the differential generator gained found a
+# new bug class within minutes. A fixed-seed campaign compares random queries under the JIT with jit_policy='off' over
+# a TPC-H schema in which every referenced column is NULL in one row of FUZZ_NULL_EVERY
+FUZZ_DATABASE = ROOT / "benchmark" / "jit" / "local_baselines" / "databases" / "fuzz_tpch_sf0_1_nulls.duckdb"
+FUZZ_SEED = 20261018
+FUZZ_QUERIES_BY_LEVEL = {"unit": 120, "full": 300}
+FUZZ_NULL_EVERY = 16
 PYTHON_SOURCE_ROOTS = (
     ROOT / "benchmark" / "jit",
     ROOT / "benchmark" / "tpch" / "jit",
@@ -107,12 +115,14 @@ def run_command(
     capture: bool = False,
     check: bool = True,
     cwd: Path = ROOT,
+    stdin: str | None = None,
 ) -> subprocess.CompletedProcess:
     print(f"[{label}] {' '.join(command)}", flush=True)
     result = subprocess.run(
         command,
         cwd=cwd,
         text=True,
+        input=stdin,
         stdout=subprocess.PIPE if capture else None,
         stderr=subprocess.PIPE if capture else None,
         check=False,
@@ -169,7 +179,9 @@ def validate_performance_receipt_configuration(args: argparse.Namespace) -> None
     )
     if status.stdout.strip():
         raise GuardError("--performance-receipt requires a clean worktree and index")
-    skipped_pre_commit_check = args.no_build or args.skip_architecture or args.skip_python or args.skip_unit
+    skipped_pre_commit_check = (
+        args.no_build or args.skip_architecture or args.skip_python or args.skip_unit or args.skip_fuzz
+    )
     if skipped_pre_commit_check and receipt_tree(DEFAULT_PRE_COMMIT_RECEIPT) != current_tree:
         raise GuardError("skipped pre-commit checks require an exact-tree pre-commit receipt")
 
@@ -491,6 +503,77 @@ def run_slow_suite(args: argparse.Namespace, artifact_dir: Path) -> None:
     output_path.write_text("".join(output_parts), encoding="utf-8", errors="replace")
 
 
+def fuzz_database_sql() -> str:
+    statements = ["CALL dbgen(sf=0.1);"]
+    for table, columns in FUZZ_SCHEMA.items():
+        replacements = ", ".join(
+            f"CASE WHEN hash(rowid, '{column}') % {FUZZ_NULL_EVERY} = 0 THEN NULL ELSE {column} END AS {column}"
+            for column in columns
+        )
+        statements.append(f"CREATE OR REPLACE TABLE {table} AS SELECT * REPLACE ({replacements}) FROM {table};")
+    statements.append("CHECKPOINT;")
+    return "\n".join(statements) + "\n"
+
+
+def fuzz_database_is_readable(args: argparse.Namespace, database: Path) -> bool:
+    # A database this binary cannot read makes every run fail identically, which the campaign would count as agreement
+    result = subprocess.run(
+        [str(args.duckdb), "-readonly", "-noheader", "-list", str(database)],
+        input="SELECT count(*) FROM lineitem;\n",
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    return result.returncode == 0 and result.stdout.strip().isdigit() and int(result.stdout.strip()) > 0
+
+
+def ensure_fuzz_database(args: argparse.Namespace) -> Path:
+    if FUZZ_DATABASE.exists() and fuzz_database_is_readable(args, FUZZ_DATABASE):
+        return FUZZ_DATABASE
+    FUZZ_DATABASE.parent.mkdir(parents=True, exist_ok=True)
+    partial = FUZZ_DATABASE.with_name(f".{FUZZ_DATABASE.name}.{os.getpid()}.partial")
+    for path in (partial, partial.with_name(partial.name + ".wal")):
+        path.unlink(missing_ok=True)
+    result = run_command(
+        [str(args.duckdb), str(partial)], "fuzz database", capture=True, check=False, stdin=fuzz_database_sql()
+    )
+    if result.returncode != 0 or not fuzz_database_is_readable(args, partial):
+        print(result.stdout, end="")
+        print(result.stderr, end="", file=sys.stderr)
+        raise GuardError("could not build the differential fuzz database")
+    os.replace(partial, FUZZ_DATABASE)
+    return FUZZ_DATABASE
+
+
+def fuzz_command(args: argparse.Namespace, database: Path, artifact_dir: Path) -> list[str]:
+    queries = args.fuzz_queries if args.fuzz_queries is not None else FUZZ_QUERIES_BY_LEVEL[args.level]
+    return [
+        sys.executable,
+        str(ROOT / "benchmark" / "jit" / "jit_differential_fuzz.py"),
+        "--duckdb",
+        str(args.duckdb),
+        "--database",
+        str(database),
+        "--queries",
+        str(queries),
+        "--seed",
+        str(FUZZ_SEED),
+        "--report",
+        str(artifact_dir / "fuzz_report.json"),
+    ]
+
+
+def run_differential_fuzz(args: argparse.Namespace, artifact_dir: Path) -> None:
+    database = ensure_fuzz_database(args)
+    run_captured_check(
+        fuzz_command(args, database, artifact_dir), "differential fuzz", artifact_dir / "fuzz_output.txt"
+    )
+
+
+def should_run_fuzz(args: argparse.Namespace) -> bool:
+    return args.level in ("unit", "full") and not args.skip_fuzz
+
+
 def run_forced_jit_suite(args: argparse.Namespace, artifact_dir: Path) -> None:
     """Runs the SQL suites with the JIT loaded and forced on. Each suite glob goes to the unittest binary, which
     matches it itself, so no shell expands it."""
@@ -597,6 +680,13 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--skip-python", action="store_true")
     parser.add_argument("--skip-unit", action="store_true")
     parser.add_argument("--skip-tpch", action="store_true")
+    parser.add_argument("--skip-fuzz", action="store_true")
+    parser.add_argument(
+        "--fuzz-queries",
+        type=int,
+        default=None,
+        help="queries in the differential fuzz campaign (default: 120 at unit level, 300 at full)",
+    )
     parser.add_argument(
         "--host-quiescence",
         action=argparse.BooleanOptionalAction,
@@ -700,7 +790,9 @@ def main() -> int:
         run_unit_suite(args, artifact_dir)
         if should_run_forced_jit_suite(args):
             run_forced_jit_suite(args, artifact_dir)
-    elif args.level == "quick":
+    if should_run_fuzz(args):
+        run_differential_fuzz(args, artifact_dir)
+    if args.level == "quick":
         print("quick guard completed its configured checks")
     if args.host_quiescence and (should_run_tpch(args) or should_run_generic(args)):
         wait_for_host_quiescence()

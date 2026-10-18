@@ -44,6 +44,20 @@ TPC-H SQL suites with the JIT forced on (`test/configs/jit_cbo_correctness.json`
 `jit_policy='off'` against the default and forced JIT, including the errors
 off raises; `--replay` re-checks an earlier report's findings.
 
+The guard runs a fixed-seed campaign at the unit level (120 queries, so every
+pre-commit) and the full level (300 queries). It builds and caches a TPC-H
+SF0.1 database in `benchmark/jit/local_baselines/databases/` in which every
+column the generator references is NULL in one row of sixteen, rebuilds it
+when the binary cannot read it, and fails on any finding. `--fuzz-queries`
+changes the campaign size; `--skip-fuzz` skips it and, like the other skips,
+forfeits the pre-commit receipt. Longer campaigns over larger scale factors
+remain a manual step:
+
+```sh
+python3 benchmark/jit/jit_differential_fuzz.py --database tpch_sf1.duckdb \
+  --queries 3000 --seed 7 --report fuzz.json
+```
+
 ## Generic production workloads
 
 The generic matrix covers expression, filter, nullable, persistent scan,

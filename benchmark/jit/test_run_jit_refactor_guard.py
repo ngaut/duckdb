@@ -285,6 +285,75 @@ class TestForcedJitSuite(unittest.TestCase):
         self.assertFalse(selected("quick", True))
 
 
+class TestDifferentialFuzz(unittest.TestCase):
+    def test_every_referenced_column_gets_nulls_and_the_rest_survive(self) -> None:
+        sql = guard.fuzz_database_sql()
+        self.assertTrue(sql.startswith("CALL dbgen(sf=0.1);"))
+        self.assertTrue(sql.rstrip().endswith("CHECKPOINT;"))
+        for table, columns in guard.FUZZ_SCHEMA.items():
+            self.assertIn(f"CREATE OR REPLACE TABLE {table} AS SELECT * REPLACE (", sql)
+            for column in columns:
+                self.assertIn(f"THEN NULL ELSE {column} END AS {column}", sql)
+
+    def test_campaign_size_follows_the_level_unless_given(self) -> None:
+        database = Path("fuzz.duckdb")
+        artifact_dir = Path("artifacts")
+
+        def queries(level: str, override: int | None) -> str:
+            args = SimpleNamespace(duckdb=Path("duckdb"), level=level, fuzz_queries=override)
+            command = guard.fuzz_command(args, database, artifact_dir)
+            self.assertEqual(command[command.index("--seed") + 1], str(guard.FUZZ_SEED))
+            self.assertEqual(command[command.index("--report") + 1], str(artifact_dir / "fuzz_report.json"))
+            return command[command.index("--queries") + 1]
+
+        self.assertEqual(queries("unit", None), str(guard.FUZZ_QUERIES_BY_LEVEL["unit"]))
+        self.assertEqual(queries("full", None), str(guard.FUZZ_QUERIES_BY_LEVEL["full"]))
+        self.assertEqual(queries("unit", 7), "7")
+
+    def test_unit_and_full_levels_run_it_unless_skipped(self) -> None:
+        def selected(level: str, skip: bool) -> bool:
+            return guard.should_run_fuzz(SimpleNamespace(level=level, skip_fuzz=skip))
+
+        self.assertTrue(selected("unit", False))
+        self.assertTrue(selected("full", False))
+        self.assertFalse(selected("full", True))
+        self.assertFalse(selected("quick", False))
+
+    def test_an_unreadable_database_is_rebuilt_before_the_campaign(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            database = Path(temporary) / "fuzz.duckdb"
+            database.write_text("not a database", encoding="utf-8")
+            args = SimpleNamespace(duckdb=Path("duckdb"))
+            built = subprocess.CompletedProcess(args=[], returncode=0, stdout="", stderr="")
+            readable = iter((False, True))
+            with (
+                mock.patch.object(guard, "FUZZ_DATABASE", database),
+                mock.patch.object(guard, "fuzz_database_is_readable", side_effect=lambda *_: next(readable)),
+                mock.patch.object(guard, "run_command", return_value=built) as run,
+                mock.patch.object(guard.os, "replace") as replace,
+            ):
+                self.assertEqual(guard.ensure_fuzz_database(args), database)
+
+            run.assert_called_once()
+            self.assertEqual(run.call_args.kwargs["stdin"], guard.fuzz_database_sql())
+            replace.assert_called_once()
+            self.assertEqual(replace.call_args.args[1], database)
+
+    def test_a_database_that_stays_unreadable_fails_the_guard(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            database = Path(temporary) / "fuzz.duckdb"
+            args = SimpleNamespace(duckdb=Path("duckdb"))
+            built = subprocess.CompletedProcess(args=[], returncode=0, stdout="", stderr="")
+            with (
+                mock.patch.object(guard, "FUZZ_DATABASE", database),
+                mock.patch.object(guard, "fuzz_database_is_readable", return_value=False),
+                mock.patch.object(guard, "run_command", return_value=built),
+                redirect_stderr(io.StringIO()),
+            ):
+                with self.assertRaisesRegex(guard.GuardError, "differential fuzz database"):
+                    guard.ensure_fuzz_database(args)
+
+
 class TestPythonChecks(unittest.TestCase):
     def test_python_checks_compile_all_sources_and_run_both_suites(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
