@@ -8,7 +8,9 @@
 
 #pragma once
 
+#include "duckdb/common/bswap.hpp"
 #include "duckdb/common/types/hugeint.hpp"
+#include "duckdb/common/types/string_type.hpp"
 #include "duckdb/common/types/uhugeint.hpp"
 #include "duckdb/common/vector/unified_vector_format.hpp"
 #include "duckdb/execution/execution_expression_ir.hpp"
@@ -48,7 +50,8 @@ enum class SljitNativeHashJoinKeyKind : uint8_t {
 	UINT16,
 	UINT32,
 	UINT64,
-	UINT128
+	UINT128,
+	STRING
 };
 
 static inline bool SljitSignedAffineGroupPhysicalType(PhysicalType type) {
@@ -96,6 +99,10 @@ static inline bool SljitTryGetHashJoinKeyKind(PhysicalType physical_type, SljitN
 	case PhysicalType::INT128:
 		kind = SljitNativeHashJoinKeyKind::INT128;
 		return true;
+	case PhysicalType::VARCHAR:
+		// generated string hashing mixes the inline bytes as little-endian words, as DuckDB's Hash(string_t) does
+		kind = SljitNativeHashJoinKeyKind::STRING;
+		return !DUCKDB_IS_BIG_ENDIAN;
 	default:
 		return false;
 	}
@@ -118,6 +125,11 @@ static inline bool SljitHashJoinKeyCanUseInt64SourceForInt32Key(idx_t key_idx, S
 
 static inline bool SljitHashJoinKeyKindIs128(SljitNativeHashJoinKeyKind kind) {
 	return kind == SljitNativeHashJoinKeyKind::INT128 || kind == SljitNativeHashJoinKeyKind::UINT128;
+}
+
+//! Keys that fit one machine word: generated code loads, hashes and orders them with single register operations
+static inline bool SljitHashJoinKeyKindIsWord(SljitNativeHashJoinKeyKind kind) {
+	return !SljitHashJoinKeyKindIs128(kind) && kind != SljitNativeHashJoinKeyKind::STRING;
 }
 
 template <class DISPATCH>
@@ -152,6 +164,9 @@ static bool SljitDispatchHashJoinKeyKind(SljitNativeHashJoinKeyKind kind, DISPAT
 		return true;
 	case SljitNativeHashJoinKeyKind::UINT128:
 		dispatch.template Execute<uhugeint_t>();
+		return true;
+	case SljitNativeHashJoinKeyKind::STRING:
+		dispatch.template Execute<string_t>();
 		return true;
 	default:
 		return false;

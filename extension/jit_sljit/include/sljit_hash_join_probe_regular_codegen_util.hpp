@@ -15,7 +15,9 @@
 
 #include "duckdb/common/exception.hpp"
 #include "duckdb/common/numeric_utils.hpp"
+#include "duckdb/common/types/hash.hpp"
 #include "duckdb/common/types/hugeint.hpp"
+#include "duckdb/common/types/string_type.hpp"
 
 #include "sljitLir.h"
 
@@ -114,10 +116,101 @@ static inline void EmitLoadHashJoinSourceKey(struct sljit_compiler *compiler, id
 	sljit_set_label(done, sljit_emit_label(compiler));
 }
 
+static inline sljit_uw SLJIT_FUNC SljitHashJoinStringKeyHash(const string_t *value) {
+	return Hash(*value);
+}
+
+static inline sljit_sw SLJIT_FUNC SljitHashJoinStringKeysEqual(const string_t *source, const string_t *row) {
+	return *source == *row;
+}
+
+//! Points `address` at the string_t of the probe row's key; `offset` must not hold the source data pointer
+static inline void EmitHashJoinStringKeyAddress(struct sljit_compiler *compiler, sljit_s32 address, sljit_s32 offset,
+                                                sljit_s32 source_data, sljit_s32 source_index) {
+	D_ASSERT(offset != source_data);
+	sljit_emit_op2(compiler, SLJIT_SHL, offset, 0, source_index, 0, SLJIT_IMM, 4);
+	sljit_emit_op2(compiler, SLJIT_ADD, address, 0, source_data, 0, offset, 0);
+}
+
+static inline void EmitMixHashJoinStringKeyBlock(struct sljit_compiler *compiler, sljit_s32 load_op, sljit_s32 hash_reg,
+                                                 sljit_s32 address, sljit_sw offset, sljit_s32 scratch,
+                                                 sljit_s32 multiplier_reg) {
+	sljit_emit_op1(compiler, load_op, scratch, 0, SLJIT_MEM1(address), offset);
+	sljit_emit_op2(compiler, SLJIT_XOR, hash_reg, 0, hash_reg, 0, scratch, 0);
+	EmitDuckDBMurmurMultiply(compiler, hash_reg, scratch, multiplier_reg);
+}
+
+//! Hashes the probe row's string key exactly as DuckDB's Hash(string_t) does. An inlined string mixes its length and
+//! its zero-padded inline bytes here; a longer string calls DuckDB's hash. R0 is the address register: the hash phase
+//! holds nothing in it, and the call preserves R1 and R3 (the hash of the preceding keys) through the spill area.
+static inline void EmitHashJoinStringKeyHash(struct sljit_compiler *compiler, sljit_s32 hash_reg, sljit_s32 source_data,
+                                             sljit_s32 source_index, sljit_s32 scratch, sljit_s32 multiplier_reg) {
+	constexpr auto prefix_offset = static_cast<sljit_sw>(sizeof(uint32_t));
+	constexpr auto block_size = static_cast<sljit_sw>(sizeof(hash_t));
+	EmitHashJoinStringKeyAddress(compiler, SLJIT_R0, scratch, source_data, source_index);
+	sljit_emit_op1(compiler, SLJIT_MOV_U32, scratch, 0, SLJIT_MEM1(SLJIT_R0), 0);
+	auto long_string =
+	    sljit_emit_cmp(compiler, SLJIT_GREATER, scratch, 0, SLJIT_IMM, NumericCast<sljit_sw>(string_t::INLINE_LENGTH));
+	sljit_emit_op2(compiler, SLJIT_MUL, hash_reg, 0, scratch, 0, SLJIT_IMM,
+	               static_cast<sljit_sw>(0xc6a4a7935bd1e995ULL));
+	sljit_emit_op2(compiler, SLJIT_XOR, hash_reg, 0, hash_reg, 0, SLJIT_IMM, 0xe17a1465);
+	auto empty = sljit_emit_cmp(compiler, SLJIT_EQUAL, scratch, 0, SLJIT_IMM, 0);
+	auto one_block = sljit_emit_cmp(compiler, SLJIT_LESS_EQUAL, scratch, 0, SLJIT_IMM, block_size);
+	EmitMixHashJoinStringKeyBlock(compiler, SLJIT_MOV, hash_reg, SLJIT_R0, prefix_offset, scratch, multiplier_reg);
+	EmitMixHashJoinStringKeyBlock(compiler, SLJIT_MOV_U32, hash_reg, SLJIT_R0, prefix_offset + block_size, scratch,
+	                              multiplier_reg);
+	auto blocks_mixed = sljit_emit_jump(compiler, SLJIT_JUMP);
+	sljit_set_label(one_block, sljit_emit_label(compiler));
+	EmitMixHashJoinStringKeyBlock(compiler, SLJIT_MOV, hash_reg, SLJIT_R0, prefix_offset, scratch, multiplier_reg);
+	auto finalize = sljit_emit_label(compiler);
+	sljit_set_label(empty, finalize);
+	sljit_set_label(blocks_mixed, finalize);
+	EmitDuckDBMurmurHash64(compiler, hash_reg, scratch, multiplier_reg);
+	auto hashed = sljit_emit_jump(compiler, SLJIT_JUMP);
+
+	sljit_set_label(long_string, sljit_emit_label(compiler));
+	EmitSpillHashJoinProbeStringCallState(compiler);
+	sljit_emit_icall(compiler, SLJIT_CALL, SLJIT_ARGS1(W, P), SLJIT_IMM, SLJIT_FUNC_ADDR(SljitHashJoinStringKeyHash));
+	sljit_emit_op1(compiler, SLJIT_MOV, hash_reg, 0, SLJIT_R0, 0);
+	EmitRestoreHashJoinProbeStringCallState(compiler);
+	sljit_set_label(hashed, sljit_emit_label(compiler));
+}
+
+//! Compares the probe row's string key with the build row's (R0) as string_t equality does: the length and prefix
+//! word, then the inline word or pointer; differing words of long strings fall back to comparing their bytes.
+static inline void EmitHashJoinStringKeyMismatch(struct sljit_compiler *compiler, sljit_sw key_layout_offset,
+                                                 vector<struct sljit_jump *> &equality_key_mismatches,
+                                                 sljit_s32 source_data, sljit_s32 source_index) {
+	constexpr auto word_size = static_cast<sljit_sw>(sizeof(hash_t));
+	EmitHashJoinStringKeyAddress(compiler, SLJIT_R2, SLJIT_R2, source_data, source_index);
+	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_R4, 0, SLJIT_MEM1(SLJIT_R2), 0);
+	equality_key_mismatches.push_back(
+	    sljit_emit_cmp(compiler, SLJIT_NOT_EQUAL, SLJIT_R4, 0, SLJIT_MEM1(SLJIT_R0), key_layout_offset));
+	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_R4, 0, SLJIT_MEM1(SLJIT_R2), word_size);
+	auto words_equal =
+	    sljit_emit_cmp(compiler, SLJIT_EQUAL, SLJIT_R4, 0, SLJIT_MEM1(SLJIT_R0), key_layout_offset + word_size);
+	sljit_emit_op1(compiler, SLJIT_MOV_U32, SLJIT_R4, 0, SLJIT_MEM1(SLJIT_R2), 0);
+	equality_key_mismatches.push_back(sljit_emit_cmp(compiler, SLJIT_LESS_EQUAL, SLJIT_R4, 0, SLJIT_IMM,
+	                                                 NumericCast<sljit_sw>(string_t::INLINE_LENGTH)));
+	EmitSpillHashJoinProbeStringCallState(compiler);
+	sljit_emit_op2(compiler, SLJIT_ADD, SLJIT_R1, 0, SLJIT_R0, 0, SLJIT_IMM, key_layout_offset);
+	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_R0, 0, SLJIT_R2, 0);
+	sljit_emit_icall(compiler, SLJIT_CALL, SLJIT_ARGS2(W, P, P), SLJIT_IMM,
+	                 SLJIT_FUNC_ADDR(SljitHashJoinStringKeysEqual));
+	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_R2, 0, SLJIT_R0, 0);
+	EmitRestoreHashJoinProbeStringCallState(compiler);
+	equality_key_mismatches.push_back(sljit_emit_cmp(compiler, SLJIT_EQUAL, SLJIT_R2, 0, SLJIT_IMM, 0));
+	sljit_set_label(words_equal, sljit_emit_label(compiler));
+}
+
 static inline void EmitHashJoinKeyHashFromSourceData(struct sljit_compiler *compiler, idx_t key_idx,
                                                      SljitNativeHashJoinKeyKind key_kind, sljit_s32 hash_reg,
                                                      sljit_s32 source_data, sljit_s32 source_index, sljit_s32 scratch,
                                                      sljit_s32 multiplier_reg = 0) {
+	if (key_kind == SljitNativeHashJoinKeyKind::STRING) {
+		EmitHashJoinStringKeyHash(compiler, hash_reg, source_data, source_index, scratch, multiplier_reg);
+		return;
+	}
 	if (!SljitHashJoinKeyKindIs128(key_kind)) {
 		EmitLoadHashJoinSourceKey(compiler, key_idx, key_kind, hash_reg, source_data, source_index, 0, scratch);
 		EmitHashJoinKeyHash(compiler, key_kind, hash_reg, scratch, multiplier_reg);
@@ -139,6 +232,11 @@ static inline void EmitHashJoinEqualityKeyMismatch(struct sljit_compiler *compil
                                                    const vector<sljit_s32> &source_data_regs,
                                                    sljit_s32 source_index_reg) {
 	auto source_data_reg = EmitPrepareRegularHashJoinSourceData(compiler, key_idx, SLJIT_R4, source_data_regs);
+	if (key_kind == SljitNativeHashJoinKeyKind::STRING) {
+		EmitHashJoinStringKeyMismatch(compiler, key_layout_offset, equality_key_mismatches, source_data_reg,
+		                              source_index_reg);
+		return;
+	}
 	if (!SljitHashJoinKeyKindIs128(key_kind)) {
 		EmitLoadHashJoinSourceKey(compiler, key_idx, key_kind, SLJIT_R2, source_data_reg, source_index_reg, 0, SLJIT_R3,
 		                          false);

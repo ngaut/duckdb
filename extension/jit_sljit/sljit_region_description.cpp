@@ -85,6 +85,8 @@ static const char *SljitHashJoinKeyKindToString(SljitNativeHashJoinKeyKind kind)
 		return "uint64";
 	case SljitNativeHashJoinKeyKind::UINT128:
 		return "uint128";
+	case SljitNativeHashJoinKeyKind::STRING:
+		return "string";
 	default:
 		return "unknown";
 	}

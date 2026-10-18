@@ -21,6 +21,29 @@ namespace duckdb {
 
 static constexpr sljit_sw SLJIT_HASH_JOIN_PROBE_OFFSET_LOCAL = 0;
 static constexpr sljit_s32 SLJIT_HASH_JOIN_PROBE_LOCAL_SIZE = static_cast<sljit_s32>(sizeof(sljit_sw));
+//! Long string keys hash and compare through helper calls; the probe registers a call clobbers (R0, R1, R3) spill here
+static constexpr sljit_sw SLJIT_HASH_JOIN_PROBE_STRING_CALL_SPILL_LOCAL = SLJIT_HASH_JOIN_PROBE_LOCAL_SIZE;
+static constexpr sljit_s32 SLJIT_HASH_JOIN_PROBE_STRING_LOCAL_SIZE = static_cast<sljit_s32>(4 * sizeof(sljit_sw));
+
+static inline void EmitSpillHashJoinProbeStringCallState(struct sljit_compiler *compiler) {
+	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_MEM1(SLJIT_SP), SLJIT_HASH_JOIN_PROBE_STRING_CALL_SPILL_LOCAL, SLJIT_R0,
+	               0);
+	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_MEM1(SLJIT_SP),
+	               SLJIT_HASH_JOIN_PROBE_STRING_CALL_SPILL_LOCAL + static_cast<sljit_sw>(sizeof(sljit_sw)), SLJIT_R1,
+	               0);
+	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_MEM1(SLJIT_SP),
+	               SLJIT_HASH_JOIN_PROBE_STRING_CALL_SPILL_LOCAL + static_cast<sljit_sw>(2 * sizeof(sljit_sw)),
+	               SLJIT_R3, 0);
+}
+
+static inline void EmitRestoreHashJoinProbeStringCallState(struct sljit_compiler *compiler) {
+	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_R0, 0, SLJIT_MEM1(SLJIT_SP),
+	               SLJIT_HASH_JOIN_PROBE_STRING_CALL_SPILL_LOCAL);
+	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_R1, 0, SLJIT_MEM1(SLJIT_SP),
+	               SLJIT_HASH_JOIN_PROBE_STRING_CALL_SPILL_LOCAL + static_cast<sljit_sw>(sizeof(sljit_sw)));
+	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_R3, 0, SLJIT_MEM1(SLJIT_SP),
+	               SLJIT_HASH_JOIN_PROBE_STRING_CALL_SPILL_LOCAL + static_cast<sljit_sw>(2 * sizeof(sljit_sw)));
+}
 
 static inline void EmitSaveHashJoinProbeOffset(struct sljit_compiler *compiler) {
 	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_MEM1(SLJIT_SP), SLJIT_HASH_JOIN_PROBE_OFFSET_LOCAL, SLJIT_R1, 0);

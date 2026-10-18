@@ -84,9 +84,9 @@ static SljitRegionNodePlan PlanSljitHashJoinProbeOperatorNodeInternal(
 			return SljitRegionBoundaryNode("hash join probe native lowering has unsupported key type " +
 			                               key.type.ToString());
 		}
-		if (!equality_key && SljitHashJoinKeyKindIs128(key_kind)) {
-			return SljitRegionBoundaryNode("hash join probe native lowering has unsupported 128-bit match predicate " +
-			                               key.type.ToString());
+		if (!equality_key && !SljitHashJoinKeyKindIsWord(key_kind)) {
+			return SljitRegionBoundaryNode(
+			    "hash join probe native lowering has unsupported multi-word match predicate " + key.type.ToString());
 		}
 		SljitNativeHashJoinProbeKeyPlan key_plan;
 		key_plan.key_input_index = key.input_index;
@@ -118,6 +118,9 @@ static SljitRegionNodePlan PlanSljitHashJoinProbeOperatorNodeInternal(
 			return SljitRegionBoundaryNode("perfect hash join probe native lowering requires one equality key");
 		}
 		auto perfect_key_kind = native_op.hash_join_probe.keys[0].key_kind;
+		if (perfect_key_kind == SljitNativeHashJoinKeyKind::STRING) {
+			return SljitRegionBoundaryNode("perfect hash join probe native lowering requires an integer key");
+		}
 		if (native_op.hash_join_probe.output_mode != ExecutionHashJoinProbeOutputMode::MATCHED_PROBE_AND_BUILD &&
 		    native_op.hash_join_probe.output_mode != ExecutionHashJoinProbeOutputMode::MATCHED_PROBE_ONLY) {
 			return SljitRegionBoundaryNode("perfect hash join probe native lowering requires inner output mode");
@@ -233,8 +236,8 @@ SljitRegionNodePlan PlanSljitHashJoinProbeOperatorNode(const ExecutionRegionNode
 		probe_input_not_null.resize(probe_input_types.size(), false);
 		break;
 	}
-	auto result = PlanSljitHashJoinProbeOperatorNodeInternal(node, probe_keys, probe_input_types,
-	                                                         probe_input_not_null, render_diagnostics);
+	auto result = PlanSljitHashJoinProbeOperatorNodeInternal(node, probe_keys, probe_input_types, probe_input_not_null,
+	                                                         render_diagnostics);
 	if (result.kind != ExecutionRegionLoweringKind::BOUNDARY) {
 		if (!key_projection.native_ops.empty()) {
 			result.native_ops.insert(result.native_ops.begin(),

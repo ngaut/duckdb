@@ -33,6 +33,7 @@ struct SljitRegularHashJoinProbeRegisters {
 	sljit_s32 source_index_reg = SLJIT_R1;
 	vector<sljit_s32> source_data_regs;
 	sljit_s32 aux_next_ptrs_reg = 0;
+	sljit_s32 local_size = 0;
 };
 
 static inline bool PrepareRegularHashJoinProbeRegisters(const SljitNativeHashJoinProbePlan &plan,
@@ -78,6 +79,12 @@ static inline bool PrepareRegularHashJoinProbeRegisters(const SljitNativeHashJoi
 	if (config.PreloadsAuxNextPointers()) {
 		registers.aux_next_ptrs_reg = allocate_saved_register();
 	}
+	registers.local_size = registers.assume_all_keys_valid ? 0 : SLJIT_HASH_JOIN_PROBE_LOCAL_SIZE;
+	for (auto &key : keys) {
+		if (key.key_kind == SljitNativeHashJoinKeyKind::STRING) {
+			registers.local_size = SLJIT_HASH_JOIN_PROBE_STRING_LOCAL_SIZE;
+		}
+	}
 	registers.source_index_reg =
 	    config.AssumesFlatAllValid()
 	        ? SLJIT_S1
@@ -102,8 +109,7 @@ static inline void EmitLoadRegularHashJoinRowSourceIndex(struct sljit_compiler *
 
 static inline void EmitEnterRegularHashJoinProbe(struct sljit_compiler *compiler,
                                                  const SljitRegularHashJoinProbeRegisters &registers) {
-	const auto local_size = registers.assume_all_keys_valid ? 0 : SLJIT_HASH_JOIN_PROBE_LOCAL_SIZE;
-	sljit_emit_enter(compiler, 0, SLJIT_ARGS1V(P), 5, registers.saved_reg_count, local_size);
+	sljit_emit_enter(compiler, 0, SLJIT_ARGS1V(P), 5, registers.saved_reg_count, registers.local_size);
 	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_S1, 0, SLJIT_MEM1(SLJIT_S0),
 	               offsetof(SljitNativeRegularHashJoinProbeInput, input_offset));
 	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_S3, 0, SLJIT_IMM, 0);
