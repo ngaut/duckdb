@@ -1,7 +1,7 @@
 # DuckDB JIT Verification
 
 This directory contains architecture, correctness, and performance guardrails
-for execution-region JIT. The stable design contract is
+for execution-region JIT. The architecture contract and migration plan are in
 `benchmark/jit/JIT_PRODUCTION_RECIPE_DESIGN.md`.
 
 ## Fast verification
