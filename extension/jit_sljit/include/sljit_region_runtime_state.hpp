@@ -42,8 +42,18 @@ struct SljitDistinctGroupScratch {
 	DataChunk new_input;
 };
 
+//! The query's exact-filter proof for a probe's binding slot (null without one): the region source applied that
+//! build side's exact membership filter to the probe key
+static inline const shared_ptr<ExecutionRuntimeFilterIdentity> &
+SljitExactSourceFilterIdentity(const vector<shared_ptr<ExecutionRuntimeFilterIdentity>> &bindings, idx_t binding) {
+	static const shared_ptr<ExecutionRuntimeFilterIdentity> no_identity;
+	return binding < bindings.size() ? bindings[binding] : no_identity;
+}
+
 struct SljitRegionExecutionScratch {
-	SljitRegionExecutionScratch(Allocator &allocator, const vector<SljitExecutableRegionOp> &ops) {
+	SljitRegionExecutionScratch(Allocator &allocator, const vector<SljitExecutableRegionOp> &ops,
+	                            vector<shared_ptr<ExecutionRuntimeFilterIdentity>> exact_source_filter_bindings_p)
+	    : exact_source_filter_bindings(std::move(exact_source_filter_bindings_p)) {
 		const auto op_count = ops.size();
 		temporary_chunks.resize(op_count);
 		distinct_groups.resize(op_count);
@@ -190,6 +200,10 @@ struct SljitRegionExecutionScratch {
 		binding_scratch.MarkSinkReady(op_idx);
 	}
 
+	const shared_ptr<ExecutionRuntimeFilterIdentity> &ExactSourceFilterIdentity(idx_t binding) const {
+		return SljitExactSourceFilterIdentity(exact_source_filter_bindings, binding);
+	}
+
 	bool HasOperatorBinding(idx_t op_idx) const {
 		return binding_scratch.HasOperator(op_idx);
 	}
@@ -258,6 +272,7 @@ struct SljitRegionExecutionScratch {
 		return order_scratch.PayloadChunk(op_idx);
 	}
 
+	vector<shared_ptr<ExecutionRuntimeFilterIdentity>> exact_source_filter_bindings;
 	vector<unique_ptr<DataChunk>> temporary_chunks;
 	vector<unique_ptr<SljitDistinctGroupScratch>> distinct_groups;
 	vector<unique_ptr<SelectionVector>> filter_selections;

@@ -46,6 +46,14 @@ static ExecutionOperatorBinding &SljitBindNativeOperator(ExecutionOperatorRuntim
 		auto blocker = binding.blocker.empty() ? string("unknown") : binding.blocker;
 		throw InternalException("%s operator binding failed: %s", error_prefix, blocker);
 	}
+	if (op.kind == SljitNativeRegionOpKind::HASH_JOIN_PROBE && binding.hash_join_probe.bloom_filter_requested) {
+		// Keys that passed this build side's exact membership filter in the source all match, unless the scan dropped
+		// the filter for keeping most rows: a bloom filter would reject nothing worth building it for
+		auto &probe_key_filter = scratch.ExactSourceFilterIdentity(op.hash_join_probe.plan.exact_source_filter_binding);
+		if (!probe_key_filter || probe_key_filter != binding.hash_join_probe.table_layout.runtime_filter_identity) {
+			ExecutionUseHashJoinProbeBloomFilter(binding.hash_join_probe);
+		}
+	}
 	if (op.kind == SljitNativeRegionOpKind::HASH_JOIN_PROBE && binding.hash_join_probe.ready &&
 	    binding.hash_join_probe.layout_kind == ExecutionHashJoinProbeLayoutKind::REGULAR_HASH_TABLE &&
 	    !binding.hash_join_probe.empty_build_side) {
@@ -105,6 +113,11 @@ static ExecutionOperatorBinding &SljitBindRecordedNativeOperator(ExecutionRegion
 	    SljitBindNativeOperator(native_runtime, scratch, op_idx, op, input, operator_info, error_prefix, bound);
 	if (bound) {
 		RecordSljitRegionStageRuntime(runtime, op_idx, op.kind, "bind_operator_contract", bind_stage_start);
+		if (binding.hash_join_probe.bloom_filter_requested) {
+			runtime.RecordJitRuntimePath(binding.hash_join_probe.use_bloom_filter
+			                                 ? "hash_join_probe.bloom_filter.built"
+			                                 : "hash_join_probe.bloom_filter.skipped_exact_source_filter");
+		}
 	}
 	return binding;
 }

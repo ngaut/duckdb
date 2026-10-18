@@ -55,8 +55,9 @@ static void RecordSljitLazyHashJoinProbeCodegen(ExecutionRegionRuntime &runtime,
 
 class SljitNativeRegionLocalState : public ExecutionRegionLocalState {
 public:
-	SljitNativeRegionLocalState(Allocator &allocator, const vector<SljitExecutableRegionOp> &ops)
-	    : scratch(allocator, ops) {
+	SljitNativeRegionLocalState(Allocator &allocator, const vector<SljitExecutableRegionOp> &ops,
+	                            vector<shared_ptr<ExecutionRuntimeFilterIdentity>> exact_source_filter_bindings)
+	    : scratch(allocator, ops, std::move(exact_source_filter_bindings)) {
 	}
 
 	SljitRegionExecutionScratch scratch;
@@ -134,7 +135,7 @@ SljitNativeRegularHashJoinProbeFunction SljitNativeRegionKernel::EnsureAllValidR
 }
 
 unique_ptr<ExecutionRegionLocalState> SljitNativeRegionKernel::CreateLocalState(Allocator &allocator) const {
-	return make_uniq<SljitNativeRegionLocalState>(allocator, artifact->ops);
+	return make_uniq<SljitNativeRegionLocalState>(allocator, artifact->ops, exact_source_filter_bindings);
 }
 
 bool SljitNativeRegionKernel::SupportsChunkStep() const {

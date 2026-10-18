@@ -2997,26 +2997,16 @@ ExecutionOperatorBindResult PhysicalHashJoin::BindExecutionOperator(ExecutionCon
 	}
 
 	const bool perfect_hash_layout = resolution.kind == ExecutionHashJoinProbeLayoutKind::PERFECT_HASH_TABLE;
-	const bool use_bloom_filter = !perfect_hash_layout && !resolution.empty_build_side &&
-	                              SelectJitHashJoinProbeFilterStrategy(*this, sink.hash_table->Count()) ==
-	                                  JitHashJoinProbeFilterStrategy::BLOOM_REJECT;
-	if (use_bloom_filter) {
-		sink.hash_table->EnsureBloomFilterForProbe();
-		if (!ExecutionGetHashJoinTableLayout(*sink.hash_table, resolution.table_layout)) {
-			binding.blocker = ExecutionHashJoinTableLayoutBlocker(resolution.table_layout.status);
-			if (resolution.table_layout.CanDefer()) {
-				return ExecutionOperatorBindResult::DEFERRED;
-			}
-			return ExecutionOperatorBindResult::INVALID;
-		}
-	}
 
 	binding.ready = true;
 	binding.blocker.clear();
 	binding.hash_join_probe.ready = true;
 	binding.hash_join_probe.hash_table = sink.hash_table.get();
 	binding.hash_join_probe.layout_kind = resolution.kind;
-	binding.hash_join_probe.use_bloom_filter = use_bloom_filter;
+	binding.hash_join_probe.bloom_filter_requested =
+	    !perfect_hash_layout && !resolution.empty_build_side &&
+	    SelectJitHashJoinProbeFilterStrategy(*this, sink.hash_table->Count()) ==
+	        JitHashJoinProbeFilterStrategy::BLOOM_REJECT;
 	binding.hash_join_probe.build_side_has_filtered_null = sink.hash_table->has_filtered_null;
 	binding.hash_join_probe.condition_null_values_are_equal.resize(contract.condition_count);
 	for (idx_t condition_idx = 0; condition_idx < contract.condition_count; condition_idx++) {
@@ -3351,6 +3341,19 @@ void ExecutionMaterializeHashJoinProbe(const ExecutionHashJoinProbeBinding &bind
 		}
 	}
 	result.SetChildCardinality(count);
+}
+
+void ExecutionUseHashJoinProbeBloomFilter(ExecutionHashJoinProbeBinding &binding) {
+	if (!binding.ready || !binding.hash_table || !binding.bloom_filter_requested) {
+		throw InternalException("execution hash join probe bloom filter was not requested by its binding");
+	}
+	binding.hash_table->EnsureBloomFilterForProbe();
+	// the finalized table already resolved its layout once: only the bloom filter words change
+	if (!ExecutionGetHashJoinTableLayout(*binding.hash_table, binding.table_layout)) {
+		throw InternalException("execution hash join probe lost its table layout: %s",
+		                        ExecutionHashJoinTableLayoutBlocker(binding.table_layout.status));
+	}
+	binding.use_bloom_filter = true;
 }
 
 bool ExecutionTryDirectGatherHashJoinRHSFixedColumn(const ExecutionHashJoinProbeBinding &binding, Vector &row_pointers,

@@ -137,8 +137,7 @@ bool SljitNativeRegionKernel::HasExecutableBody() const {
 
 const shared_ptr<ExecutionRuntimeFilterIdentity> &
 SljitNativeRegionKernel::ExactSourceFilterIdentity(idx_t binding) const {
-	static const shared_ptr<ExecutionRuntimeFilterIdentity> no_identity;
-	return binding < exact_source_filter_bindings.size() ? exact_source_filter_bindings[binding] : no_identity;
+	return SljitExactSourceFilterIdentity(exact_source_filter_bindings, binding);
 }
 
 shared_ptr<const ExecutionRegionArtifact> CreateSljitNativeRegionArtifact(string backend_name,

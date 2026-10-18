@@ -392,6 +392,10 @@ struct ExecutionHashJoinProbeBinding {
 	ExecutionHashJoinTableLayout table_layout;
 	ExecutionPerfectHashJoinTableLayout perfect_layout;
 	bool empty_build_side = false;
+	//! The probe is expected to meet few matches, so rejecting rows with a bloom filter pays: a backend that probes
+	//! keys its source has not already checked against the build side's exact membership filter calls
+	//! ExecutionUseHashJoinProbeBloomFilter, which builds the filter and sets use_bloom_filter
+	bool bloom_filter_requested = false;
 	bool use_bloom_filter = false;
 	bool build_side_has_filtered_null = false;
 	vector<bool> condition_null_values_are_equal;
@@ -515,6 +519,9 @@ DUCKDB_API void ExecutionMaterializeHashJoinProbe(const ExecutionHashJoinProbeBi
                                                   DataChunk &result,
                                                   optional_ptr<ExecutionOperatorStageRecorder> recorder = nullptr,
                                                   ExecutionHashJoinProbeOutputProof output_proof = {});
+
+//! Builds the bloom filter a probe binding requested and publishes it in the binding's table layout
+DUCKDB_API void ExecutionUseHashJoinProbeBloomFilter(ExecutionHashJoinProbeBinding &binding);
 
 DUCKDB_API bool ExecutionTryDirectGatherHashJoinRHSFixedColumn(const ExecutionHashJoinProbeBinding &binding,
                                                                Vector &row_pointers, idx_t count, idx_t rhs_output_idx,
