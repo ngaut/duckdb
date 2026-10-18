@@ -56,78 +56,64 @@ struct SljitJoinInputRowPointerComplementarySumAccumulator {
 	bool predicate_all_valid;
 };
 
-struct SljitPendingRowPointerAggregateBatch {
-	SljitPendingRowPointerAggregateBatch() : row_pointers(LogicalType::POINTER) {
+//! Rows a direct join-output aggregate collects with their group row pointers until they update the aggregate. The
+//! columns use one of two layouts, each its own type: the descriptor's payload sources, or one string-set class per row
+//! in place of those sources. A consumer of one layout never receives the other
+template <class LAYOUT>
+struct SljitPendingRowPointerBatch {
+	SljitPendingRowPointerBatch() : row_pointers(LogicalType::POINTER) {
 	}
 
 	idx_t Count() const {
+		return initialized ? columns.size() : 0;
+	}
+
+	void Ensure(Allocator &allocator, const vector<LogicalType> &descriptor_input_types) {
 		if (!initialized) {
-			return 0;
+			columns.Initialize(allocator, LAYOUT::ColumnTypes(descriptor_input_types));
+			row_pointers.Initialize(VectorDataInitialization::UNINITIALIZED, STANDARD_VECTOR_SIZE);
+			FlatVector::SetSize(row_pointers, 0);
+			initialized = true;
 		}
-		return uses_preclassified_input ? preclassified_input.size() : input.size();
-	}
-
-	void Ensure(Allocator &allocator, const vector<LogicalType> &input_types) {
-		EnsureRowPointers();
-		if (!input_initialized) {
-			input.Initialize(allocator, input_types);
-			input_initialized = true;
-		}
-		uses_preclassified_input = false;
-		initialized = true;
-	}
-
-	void EnsurePreclassified(Allocator &allocator) {
-		EnsureRowPointers();
-		if (!preclassified_input_initialized) {
-			vector<LogicalType> input_types {LogicalType::UTINYINT};
-			preclassified_input.Initialize(allocator, input_types);
-			preclassified_input_initialized = true;
-		}
-		uses_preclassified_input = true;
-		initialized = true;
 	}
 
 	void Reset() {
 		if (!initialized) {
 			return;
 		}
-		if (input_initialized) {
-			input.Reset();
-		}
-		if (preclassified_input_initialized) {
-			preclassified_input.Reset();
-		}
+		columns.Reset();
 		FlatVector::SetSize(row_pointers, 0);
-		uses_preclassified_input = false;
 		source_key0_int64_to_int32_unchecked = false;
 	}
 
-	DataChunk &PayloadInput() {
-		return uses_preclassified_input ? preclassified_input : input;
-	}
-
-private:
-	void EnsureRowPointers() {
-		if (row_pointers_initialized) {
-			return;
-		}
-		row_pointers.Initialize(VectorDataInitialization::UNINITIALIZED, STANDARD_VECTOR_SIZE);
-		FlatVector::SetSize(row_pointers, 0);
-		row_pointers_initialized = true;
-	}
-
-public:
-	DataChunk input;
-	DataChunk preclassified_input;
+	DataChunk columns;
 	Vector row_pointers;
 	bool initialized = false;
-	bool input_initialized = false;
-	bool preclassified_input_initialized = false;
-	bool row_pointers_initialized = false;
-	bool uses_preclassified_input = false;
 	bool source_key0_int64_to_int32_unchecked = false;
 	optional_ptr<SljitRegionExecutionScratch> scratch;
+};
+
+//! The descriptor's payload sources, as the aggregate input slots hold them
+struct SljitRowPointerPayloadLayout {
+	static vector<LogicalType> ColumnTypes(const vector<LogicalType> &descriptor_input_types) {
+		return descriptor_input_types;
+	}
+};
+
+//! One class per row: whether the row's string matches the complementary sum's constants (NULL for a NULL string)
+struct SljitRowPointerStringSetClassLayout {
+	static vector<LogicalType> ColumnTypes(const vector<LogicalType> &) {
+		return {LogicalType::UTINYINT};
+	}
+};
+
+using SljitPendingRowPointerPayloadBatch = SljitPendingRowPointerBatch<SljitRowPointerPayloadLayout>;
+using SljitPendingRowPointerClassBatch = SljitPendingRowPointerBatch<SljitRowPointerStringSetClassLayout>;
+
+//! A strategy's pending row-pointer rows: at most one of the two batches holds rows
+struct SljitPendingRowPointerAggregateBatches {
+	SljitPendingRowPointerPayloadBatch payload;
+	SljitPendingRowPointerClassBatch classes;
 };
 
 struct SljitPendingInputVectorAggregateBatch {
@@ -174,7 +160,7 @@ struct SljitDirectJoinOutputAggregateStrategy {
 	SljitPendingInputVectorAggregateBatch pending_input_vector_batch;
 	shared_ptr<SljitPendingPreaggregatedPrimitiveGroupBatch> pending_preaggregated_groups;
 	optional_ptr<SljitRegionExecutionScratch> pending_preaggregated_scratch;
-	SljitPendingRowPointerAggregateBatch pending_batch;
+	SljitPendingRowPointerAggregateBatches pending_batch;
 	SljitJoinInputRowPointerComplementarySumPlan join_input_complementary_sum_plan;
 	unique_ptr<SljitJoinInputRowPointerComplementarySumAccumulator> join_input_complementary_sum_accumulator;
 	optional_ptr<SljitRegionExecutionScratch> join_input_complementary_sum_scratch;

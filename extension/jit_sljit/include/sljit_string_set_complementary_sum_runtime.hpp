@@ -454,8 +454,10 @@ static bool TryExecuteDirectRowPointerPreclassifiedStringSetComplementarySumUpda
     ExecutionGroupedAggregateStateAddressBinding &grouped_state, bool finish = true) {
 	SljitStringSetComplementarySumDescriptor descriptor;
 	SljitStringSetComplementarySumUpdateState state;
-	if (payload_input.ColumnCount() != 1 || payload_input.data[0].GetType().id() != LogicalTypeId::UTINYINT ||
-	    !SljitTryBindStringSetComplementarySumDescriptor(op, payload_source_indices, descriptor)) {
+	if (payload_input.ColumnCount() != 1 || payload_input.data[0].GetType().id() != LogicalTypeId::UTINYINT) {
+		throw InternalException("SLJIT string-set class update received a batch in another layout");
+	}
+	if (!SljitTryBindStringSetComplementarySumDescriptor(op, payload_source_indices, descriptor)) {
 		return false;
 	}
 	if (!SljitTryBindStringSetComplementarySumLanes(op, payload_lanes, descriptor, state)) {

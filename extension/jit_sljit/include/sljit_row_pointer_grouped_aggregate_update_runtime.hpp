@@ -222,11 +222,6 @@ static bool SljitTryExecuteRowPointerGroupedTargetPayloadUpdate(
     ExecutionGroupedAggregateStateAddressBinding &grouped_state, SljitAggregatePayloadAdapterScratch &payload_scratch,
     bool finish) {
 	if (payload_source_layout == SljitAggregatePayloadSourceLayout::FUSED_COMBINED) {
-		if (TryExecuteDirectRowPointerPreclassifiedStringSetComplementarySumUpdate(
-		        runtime, scratch, op_idx, op, payload_input, row_pointers, count, group_sources, payload_source_indices,
-		        payload_lanes, grouped_state, finish)) {
-			return true;
-		}
 		if (TryExecuteDirectRowPointerStringSetComplementarySumUpdate(
 		        runtime, scratch, op_idx, op, payload_input, row_pointers, count, group_sources, payload_source_indices,
 		        payload_lanes, grouped_state, finish)) {
@@ -262,17 +257,25 @@ static bool SljitTryExecuteRowPointerGroupedSplitPayloadUpdate(
 	return updated;
 }
 
-static bool SljitTryExecuteNativeRowPointerGroupedAggregateUpdate(
+//! The sink binding, lanes, and proven group sources every row-pointer grouped update reads
+struct SljitRowPointerGroupedUpdateContext {
+	vector<ExecutionRowPointerGroupKeySource> proven_group_sources;
+	optional_ptr<ExecutionGroupedAggregateStateAddressBinding> grouped_state;
+	optional_ptr<const vector<const ExecutionPrimitiveAggregateUpdateLane *>> payload_lanes;
+	optional_ptr<const vector<SljitGroupedReductionLaneBinding>> reduction_lanes;
+	optional_ptr<SljitAggregatePayloadAdapterScratch> payload_scratch;
+};
+
+static bool SljitTryPrepareRowPointerGroupedAggregateUpdate(
     ExecutionRegionRuntime &runtime, ExecutionOperatorRuntime &native_runtime, SljitRegionExecutionScratch &scratch,
-    idx_t op_idx, SljitExecutableRegionOp &op, DataChunk &payload_input, Vector &row_pointers,
+    idx_t op_idx, SljitExecutableRegionOp &op, DataChunk &input, Vector &row_pointers,
     const vector<ExecutionRowPointerGroupKeySource> &group_sources, const vector<idx_t> &payload_source_indices,
-    SljitAggregatePayloadSourceLayout payload_source_layout, bool defer_grouped_finish,
-    bool source_key0_int64_to_int32_unchecked = false, bool preclassified_payload = false) {
+    SljitRowPointerGroupedUpdateContext &context) {
 	auto record_unsupported = [&](const char *reason) {
 		auto path = string("row_pointer_grouped_lookup_update_unsupported.") + reason;
 		RecordSljitRegionRuntimePath(runtime, op.kind, path.c_str());
 	};
-	const auto count = payload_input.size();
+	const auto count = input.size();
 	if (count == 0) {
 		return false;
 	}
@@ -284,13 +287,13 @@ static bool SljitTryExecuteNativeRowPointerGroupedAggregateUpdate(
 		record_unsupported("payload_sources");
 		return false;
 	}
-	auto proven_group_sources = group_sources;
+	context.proven_group_sources = group_sources;
 	SljitApplyExecutableIntegralGroupKeyRangeProofs(op.aggregate_update.integral_group_key_ranges,
-	                                                proven_group_sources);
-	SljitApplyInputVectorGroupBatchCastProofs(payload_input, proven_group_sources, count);
-	SljitApplyRowPointerGroupBatchCastProofs(row_pointers, proven_group_sources, count);
+	                                                context.proven_group_sources);
+	SljitApplyInputVectorGroupBatchCastProofs(input, context.proven_group_sources, count);
+	SljitApplyRowPointerGroupBatchCastProofs(row_pointers, context.proven_group_sources, count);
 	auto &binding = SljitBindRecordedNativeSink(
-	    runtime, native_runtime, scratch, op_idx, op.kind, payload_input, op.aggregate_update.plan.sink_info,
+	    runtime, native_runtime, scratch, op_idx, op.kind, input, op.aggregate_update.plan.sink_info,
 	    "aggregate-update-runtime-binding-failed", "SLJIT aggregate update sink");
 	if (!binding.ready || !binding.aggregate_update.ready || !op.aggregate_update.plan.UsesPrimitivePayloads()) {
 		record_unsupported("sink_binding");
@@ -315,20 +318,41 @@ static bool SljitTryExecuteNativeRowPointerGroupedAggregateUpdate(
 		record_unsupported("aggregate_payload_count");
 		return false;
 	}
-
 	auto &payload_lanes = scratch.AggregatePayloadLanes(op_idx, op.aggregate_update.payload_descriptors, primitive);
-	auto &reduction_lanes = scratch.GroupedReductionLanes(op_idx, op.aggregate_update.plan.sink_info.aggregate_contract,
-	                                                      op.aggregate_update.payload_descriptors, payload_lanes);
-	auto &payload_scratch = scratch.AggregatePayloadScratch(op_idx);
-	const bool finish = !defer_grouped_finish;
+	context.reduction_lanes =
+	    &scratch.GroupedReductionLanes(op_idx, op.aggregate_update.plan.sink_info.aggregate_contract,
+	                                   op.aggregate_update.payload_descriptors, payload_lanes);
+	context.grouped_state = &grouped_state;
+	context.payload_lanes = &payload_lanes;
+	context.payload_scratch = &scratch.AggregatePayloadScratch(op_idx);
 	SljitTryReserveGroupedAggregateGroups(runtime, op_idx, op, grouped_state);
-	if (preclassified_payload) {
-		// The payload is one string-set class column in place of the payload sources: every other update strategy
-		// would read it as the sources it replaced
-		return TryExecuteDirectRowPointerPreclassifiedStringSetComplementarySumUpdate(
-		    runtime, scratch, op_idx, op, payload_input, row_pointers, count, proven_group_sources,
-		    payload_source_indices, payload_lanes, grouped_state, finish);
+	return true;
+}
+
+//! Updates a batch in the payload layout: the descriptor's payload sources
+static bool SljitTryExecuteNativeRowPointerGroupedAggregateUpdate(
+    ExecutionRegionRuntime &runtime, ExecutionOperatorRuntime &native_runtime, SljitRegionExecutionScratch &scratch,
+    idx_t op_idx, SljitExecutableRegionOp &op, DataChunk &payload_input, Vector &row_pointers,
+    const vector<ExecutionRowPointerGroupKeySource> &group_sources, const vector<idx_t> &payload_source_indices,
+    SljitAggregatePayloadSourceLayout payload_source_layout, bool defer_grouped_finish,
+    bool source_key0_int64_to_int32_unchecked = false) {
+	auto record_unsupported = [&](const char *reason) {
+		auto path = string("row_pointer_grouped_lookup_update_unsupported.") + reason;
+		RecordSljitRegionRuntimePath(runtime, op.kind, path.c_str());
+	};
+	SljitRowPointerGroupedUpdateContext context;
+	if (!SljitTryPrepareRowPointerGroupedAggregateUpdate(runtime, native_runtime, scratch, op_idx, op, payload_input,
+	                                                     row_pointers, group_sources, payload_source_indices,
+	                                                     context)) {
+		return false;
 	}
+	const auto count = payload_input.size();
+	auto &proven_group_sources = context.proven_group_sources;
+	auto &grouped_state = *context.grouped_state;
+	auto &payload_lanes = *context.payload_lanes;
+	auto &payload_scratch = *context.payload_scratch;
+	auto &reduction_lanes = *context.reduction_lanes;
+	const bool finish = !defer_grouped_finish;
 	auto decision = SljitPlanRowPointerGroupedAggregateUpdate(scratch, op_idx, op, payload_input, row_pointers, count,
 	                                                          proven_group_sources, payload_source_indices,
 	                                                          payload_source_layout, reduction_lanes);
@@ -373,6 +397,23 @@ static bool SljitTryExecuteNativeRowPointerGroupedAggregateUpdate(
 	}
 	record_unsupported("row_pointer_payload_update");
 	return false;
+}
+
+//! Updates a batch in the string-set class layout: one class per row in place of the payload sources
+static bool SljitTryExecuteNativeRowPointerStringSetClassUpdate(
+    ExecutionRegionRuntime &runtime, ExecutionOperatorRuntime &native_runtime, SljitRegionExecutionScratch &scratch,
+    idx_t op_idx, SljitExecutableRegionOp &op, DataChunk &classes, Vector &row_pointers,
+    const vector<ExecutionRowPointerGroupKeySource> &group_sources, const vector<idx_t> &payload_source_indices,
+    bool defer_grouped_finish) {
+	SljitRowPointerGroupedUpdateContext context;
+	if (!SljitTryPrepareRowPointerGroupedAggregateUpdate(runtime, native_runtime, scratch, op_idx, op, classes,
+	                                                     row_pointers, group_sources, payload_source_indices,
+	                                                     context)) {
+		return false;
+	}
+	return TryExecuteDirectRowPointerPreclassifiedStringSetComplementarySumUpdate(
+	    runtime, scratch, op_idx, op, classes, row_pointers, classes.size(), context.proven_group_sources,
+	    payload_source_indices, *context.payload_lanes, *context.grouped_state, !defer_grouped_finish);
 }
 
 } // namespace duckdb

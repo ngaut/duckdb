@@ -53,10 +53,32 @@ static bool SljitTryBuildDirectJoinOutputAggregateDenseDomain(const SljitDirectJ
 	    (*strategy.source_min_values)[source_idx], (*strategy.source_max_values)[source_idx], domain);
 }
 
-static void SljitFlushPendingRowPointerAggregateBatch(ExecutionRegionRuntime &runtime, idx_t aggregate_idx,
-                                                      SljitExecutableRegionOp &aggregate_op,
-                                                      SljitJoinProjectionAggregateDescriptor &descriptor,
-                                                      SljitPendingRowPointerAggregateBatch &batch) {
+static bool SljitExecutePendingRowPointerBatchUpdate(ExecutionRegionRuntime &runtime, idx_t aggregate_idx,
+                                                     SljitExecutableRegionOp &aggregate_op,
+                                                     SljitJoinProjectionAggregateDescriptor &descriptor,
+                                                     SljitPendingRowPointerPayloadBatch &batch,
+                                                     const vector<ExecutionRowPointerGroupKeySource> &group_sources) {
+	return SljitTryExecuteNativeRowPointerGroupedAggregateUpdate(
+	    runtime, runtime.ExecutionOperators(), *batch.scratch, aggregate_idx, aggregate_op, batch.columns,
+	    batch.row_pointers, group_sources, descriptor.payload_source_indices, descriptor.payload_source_layout, true,
+	    batch.source_key0_int64_to_int32_unchecked);
+}
+
+static bool SljitExecutePendingRowPointerBatchUpdate(ExecutionRegionRuntime &runtime, idx_t aggregate_idx,
+                                                     SljitExecutableRegionOp &aggregate_op,
+                                                     SljitJoinProjectionAggregateDescriptor &descriptor,
+                                                     SljitPendingRowPointerClassBatch &batch,
+                                                     const vector<ExecutionRowPointerGroupKeySource> &group_sources) {
+	return SljitTryExecuteNativeRowPointerStringSetClassUpdate(
+	    runtime, runtime.ExecutionOperators(), *batch.scratch, aggregate_idx, aggregate_op, batch.columns,
+	    batch.row_pointers, group_sources, descriptor.payload_source_indices, true);
+}
+
+template <class LAYOUT>
+static void SljitFlushPendingRowPointerBatch(ExecutionRegionRuntime &runtime, idx_t aggregate_idx,
+                                             SljitExecutableRegionOp &aggregate_op,
+                                             SljitJoinProjectionAggregateDescriptor &descriptor,
+                                             SljitPendingRowPointerBatch<LAYOUT> &batch) {
 	const auto pending_count = batch.Count();
 	if (pending_count == 0) {
 		return;
@@ -64,22 +86,25 @@ static void SljitFlushPendingRowPointerAggregateBatch(ExecutionRegionRuntime &ru
 	if (!batch.scratch) {
 		throw InternalException("SLJIT batched direct row-pointer aggregate has no scratch state");
 	}
-	const auto source_key0_int64_to_int32_unchecked = batch.source_key0_int64_to_int32_unchecked;
-	SljitApplyJoinProjectionGroupCastProofs(descriptor.group_sources, source_key0_int64_to_int32_unchecked);
+	SljitApplyJoinProjectionGroupCastProofs(descriptor.group_sources, batch.source_key0_int64_to_int32_unchecked);
 	auto batch_group_sources = descriptor.group_sources;
-	auto &payload_input = batch.PayloadInput();
-	SljitApplyInputVectorGroupBatchCastProofs(payload_input, batch_group_sources, pending_count);
+	SljitApplyInputVectorGroupBatchCastProofs(batch.columns, batch_group_sources, pending_count);
 	SljitApplyRowPointerGroupBatchCastProofs(batch.row_pointers, batch_group_sources, pending_count);
-	if (!SljitTryExecuteNativeRowPointerGroupedAggregateUpdate(
-	        runtime, runtime.ExecutionOperators(), *batch.scratch, aggregate_idx, aggregate_op, payload_input,
-	        batch.row_pointers, batch_group_sources, descriptor.payload_source_indices,
-	        descriptor.payload_source_layout, true, source_key0_int64_to_int32_unchecked,
-	        batch.uses_preclassified_input)) {
+	if (!SljitExecutePendingRowPointerBatchUpdate(runtime, aggregate_idx, aggregate_op, descriptor, batch,
+	                                              batch_group_sources)) {
 		throw InternalException("SLJIT batched direct row-pointer aggregate update failed");
 	}
 	RecordSljitRegionMaterializationElision(runtime, aggregate_op.kind,
 	                                        "projection_aggregate.row_pointer_grouped_update", pending_count);
 	batch.Reset();
+}
+
+static void SljitFlushPendingRowPointerAggregateBatch(ExecutionRegionRuntime &runtime, idx_t aggregate_idx,
+                                                      SljitExecutableRegionOp &aggregate_op,
+                                                      SljitJoinProjectionAggregateDescriptor &descriptor,
+                                                      SljitPendingRowPointerAggregateBatches &batches) {
+	SljitFlushPendingRowPointerBatch(runtime, aggregate_idx, aggregate_op, descriptor, batches.payload);
+	SljitFlushPendingRowPointerBatch(runtime, aggregate_idx, aggregate_op, descriptor, batches.classes);
 }
 
 static void SljitFlushPendingInputVectorAggregateBatch(ExecutionRegionRuntime &runtime,
@@ -139,13 +164,12 @@ SljitGetDirectJoinOutputStringSetClassification(SljitDirectJoinOutputAggregateSt
 	return &strategy.string_set_classification;
 }
 
-static void
-SljitAppendPreclassifiedStringSetComplementarySumBatch(SljitPendingRowPointerAggregateBatch &batch,
-                                                       const SljitStringSetComplementarySumDescriptor &classification,
-                                                       DataChunk &aggregate_input) {
-	auto &classified_input = batch.preclassified_input;
-	auto &target = classified_input.data[0];
-	const auto old_count = classified_input.size();
+static void SljitAppendStringSetClasses(SljitPendingRowPointerClassBatch &batch,
+                                        const SljitStringSetComplementarySumDescriptor &classification,
+                                        DataChunk &aggregate_input) {
+	auto &classes = batch.columns;
+	auto &target = classes.data[0];
+	const auto old_count = classes.size();
 	const auto append_count = aggregate_input.size();
 	auto target_data = FlatVector::GetDataMutable<uint8_t>(target);
 	auto &target_validity = FlatVector::ValidityMutable(target);
@@ -170,7 +194,15 @@ SljitAppendPreclassifiedStringSetComplementarySumBatch(SljitPendingRowPointerAgg
 		        ? 1
 		        : 0;
 	}
-	classified_input.SetChildCardinality(old_count + append_count);
+	classes.SetChildCardinality(old_count + append_count);
+}
+
+static void SljitAppendPayloadSources(SljitPendingRowPointerPayloadBatch &batch, DataChunk &aggregate_input) {
+	if (batch.columns.ColumnCount() == 0) {
+		batch.columns.SetChildCardinality(batch.Count() + aggregate_input.size());
+		return;
+	}
+	batch.columns.Append(aggregate_input, VectorAppendMode::ERROR_ON_NO_SPACE);
 }
 
 static void SljitAppendPendingInputVectorAggregateBatch(ExecutionRegionRuntime &runtime, idx_t aggregate_idx,
@@ -198,48 +230,46 @@ static void SljitAppendPendingInputVectorAggregateBatch(ExecutionRegionRuntime &
 	}
 }
 
+template <class LAYOUT, class APPEND_COLUMNS>
+static void SljitAppendPendingRowPointerBatch(ExecutionRegionRuntime &runtime, idx_t aggregate_idx,
+                                              SljitExecutableRegionOp &aggregate_op,
+                                              SljitJoinProjectionAggregateDescriptor &descriptor,
+                                              SljitPendingRowPointerBatch<LAYOUT> &batch,
+                                              SljitRegionExecutionScratch &scratch, idx_t append_count,
+                                              Vector &row_pointers, bool source_key0_int64_to_int32_unchecked,
+                                              APPEND_COLUMNS append_columns) {
+	batch.scratch = &scratch;
+	batch.Ensure(runtime.GetAllocator(), descriptor.input_types);
+	if (batch.Count() != 0 && (batch.source_key0_int64_to_int32_unchecked != source_key0_int64_to_int32_unchecked ||
+	                           batch.Count() + append_count > STANDARD_VECTOR_SIZE)) {
+		SljitFlushPendingRowPointerBatch(runtime, aggregate_idx, aggregate_op, descriptor, batch);
+	}
+	batch.source_key0_int64_to_int32_unchecked = source_key0_int64_to_int32_unchecked;
+	append_columns(batch);
+	batch.row_pointers.Append(row_pointers, append_count, VectorAppendMode::ERROR_ON_NO_SPACE);
+}
+
 static void SljitAppendPendingRowPointerAggregateBatch(
     ExecutionRegionRuntime &runtime, idx_t aggregate_idx, SljitExecutableRegionOp &aggregate_op,
-    SljitJoinProjectionAggregateDescriptor &descriptor, SljitPendingRowPointerAggregateBatch &batch,
+    SljitJoinProjectionAggregateDescriptor &descriptor, SljitPendingRowPointerAggregateBatches &batches,
     SljitRegionExecutionScratch &scratch, DataChunk &aggregate_input, Vector &row_pointers,
     bool source_key0_int64_to_int32_unchecked,
     optional_ptr<const SljitStringSetComplementarySumDescriptor> classification) {
-	batch.scratch = &scratch;
-	const bool use_preclassified = classification != nullptr;
-	if (batch.Count() != 0 && batch.uses_preclassified_input != use_preclassified) {
-		SljitFlushPendingRowPointerAggregateBatch(runtime, aggregate_idx, aggregate_op, descriptor, batch);
+	const auto append_count = aggregate_input.size();
+	if (classification) {
+		SljitFlushPendingRowPointerBatch(runtime, aggregate_idx, aggregate_op, descriptor, batches.payload);
+		SljitAppendPendingRowPointerBatch(runtime, aggregate_idx, aggregate_op, descriptor, batches.classes, scratch,
+		                                  append_count, row_pointers, source_key0_int64_to_int32_unchecked,
+		                                  [&](SljitPendingRowPointerClassBatch &batch) {
+			                                  SljitAppendStringSetClasses(batch, *classification, aggregate_input);
+		                                  });
+		return;
 	}
-	if (use_preclassified) {
-		batch.EnsurePreclassified(runtime.GetAllocator());
-	} else {
-		batch.Ensure(runtime.GetAllocator(), descriptor.input_types);
-	}
-	if (batch.Count() != 0 && batch.source_key0_int64_to_int32_unchecked != source_key0_int64_to_int32_unchecked) {
-		SljitFlushPendingRowPointerAggregateBatch(runtime, aggregate_idx, aggregate_op, descriptor, batch);
-		if (use_preclassified) {
-			batch.EnsurePreclassified(runtime.GetAllocator());
-		} else {
-			batch.Ensure(runtime.GetAllocator(), descriptor.input_types);
-		}
-	}
-	batch.source_key0_int64_to_int32_unchecked = source_key0_int64_to_int32_unchecked;
-	if (batch.Count() + aggregate_input.size() > STANDARD_VECTOR_SIZE) {
-		SljitFlushPendingRowPointerAggregateBatch(runtime, aggregate_idx, aggregate_op, descriptor, batch);
-		batch.source_key0_int64_to_int32_unchecked = source_key0_int64_to_int32_unchecked;
-		if (use_preclassified) {
-			batch.EnsurePreclassified(runtime.GetAllocator());
-		} else {
-			batch.Ensure(runtime.GetAllocator(), descriptor.input_types);
-		}
-	}
-	if (use_preclassified) {
-		SljitAppendPreclassifiedStringSetComplementarySumBatch(batch, *classification, aggregate_input);
-	} else if (batch.input.ColumnCount() == 0) {
-		batch.input.SetChildCardinality(batch.Count() + aggregate_input.size());
-	} else {
-		batch.input.Append(aggregate_input, VectorAppendMode::ERROR_ON_NO_SPACE);
-	}
-	batch.row_pointers.Append(row_pointers, aggregate_input.size(), VectorAppendMode::ERROR_ON_NO_SPACE);
+	SljitFlushPendingRowPointerBatch(runtime, aggregate_idx, aggregate_op, descriptor, batches.classes);
+	SljitAppendPendingRowPointerBatch(
+	    runtime, aggregate_idx, aggregate_op, descriptor, batches.payload, scratch, append_count, row_pointers,
+	    source_key0_int64_to_int32_unchecked,
+	    [&](SljitPendingRowPointerPayloadBatch &batch) { SljitAppendPayloadSources(batch, aggregate_input); });
 }
 
 static void SljitFlushPendingDirectInputVectorAggregate(ExecutionRegionRuntime &runtime,
