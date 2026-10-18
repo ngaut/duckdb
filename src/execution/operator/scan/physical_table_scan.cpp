@@ -5,6 +5,7 @@
 #include "duckdb/common/mutex.hpp"
 #include "duckdb/common/optional_idx.hpp"
 #include "duckdb/common/string_util.hpp"
+#include "duckdb/common/vector/dictionary_vector.hpp"
 #include "duckdb/execution/execution_operator_runtime.hpp"
 #include "duckdb/function/table/table_scan.hpp"
 #include "duckdb/planner/expression/bound_conjunction_expression.hpp"
@@ -311,6 +312,12 @@ public:
 	unique_ptr<LocalTableFunctionState> local_state;
 	TableScanState execution_source_contract_scan_state;
 	DataChunk execution_source_contract_all_columns;
+	//! The storage vector a region source scanned last; it waits here when it does not fit the chunk being filled
+	DataChunk execution_source_contract_vector;
+	bool execution_source_contract_vector_pending = false;
+	//! The batch index of the rows in the chunk a region source returns. The scan state moves past an assignment's
+	//! end before the chunk is returned, so the index is taken when each vector is scanned
+	idx_t execution_source_contract_batch_index = 0;
 	idx_t execution_source_contract_row_groups_scanned = 0;
 	//! Whether the source contract drives this scan. A scan opened for the contract may still be driven by the
 	//! vectorized GetData (an executor whose compiled entry deferred), whose positions live in local_state
@@ -368,6 +375,137 @@ bool PhysicalTableScan::SupportsExecutionSourceContract(const ExecutionRegionOpe
 	return open_request.UsesSourceContract() && GetExecutionSourceContractCapability(*this).IsReady();
 }
 
+static idx_t GetExecutionSourceContractTableScanBatchIndex(const TableScanState &scan_state) {
+	if (scan_state.table_state.row_group) {
+		return scan_state.table_state.batch_index;
+	}
+	if (scan_state.local_state.row_group) {
+		return scan_state.table_state.batch_index + scan_state.local_state.batch_index;
+	}
+	return 0;
+}
+
+//! A storage vector with at least this many rows passes into a region uncopied
+static constexpr idx_t SOURCE_CONTRACT_BATCH_ROWS = STANDARD_VECTOR_SIZE / 2;
+
+//! Whether a vector can be copied into a batch: copying must cost only fixed-width bytes (a string column is judged by
+//! its first valid value, since long-text columns are long throughout and inlined strings copy as their string_t), and
+//! must not flatten an encoding a consumer keeps: a storage dictionary (it has an id, or is global) or an FSST vector.
+//! A dictionary the scan made by selecting rows of its own vector carries nothing worth keeping
+static bool SourceContractVectorCanBatch(DataChunk &vector) {
+	for (auto &column : vector.data) {
+		switch (column.GetVectorType()) {
+		case VectorType::FLAT_VECTOR:
+		case VectorType::CONSTANT_VECTOR:
+		case VectorType::SEQUENCE_VECTOR:
+			break;
+		case VectorType::DICTIONARY_VECTOR:
+			if (DictionaryVector::IsGlobalDictionary(column) || !DictionaryVector::DictionaryId(column).empty()) {
+				return false;
+			}
+			break;
+		default:
+			return false;
+		}
+		const auto physical_type = column.GetType().InternalType();
+		if (TypeIsConstantSize(physical_type)) {
+			continue;
+		}
+		if (physical_type != PhysicalType::VARCHAR) {
+			return false;
+		}
+		UnifiedVectorFormat format;
+		column.ToUnifiedFormat(vector.size(), format);
+		auto data = UnifiedVectorFormat::GetData<string_t>(format);
+		for (idx_t row_idx = 0; row_idx < vector.size(); row_idx++) {
+			const auto idx = format.sel->get_index(row_idx);
+			if (format.validity.RowIsValid(idx)) {
+				if (!data[idx].IsInlined()) {
+					return false;
+				}
+				break;
+			}
+		}
+	}
+	return true;
+}
+
+//! The values of an all-valid fixed-width column a scan returned: flat, or a dictionary the scan made by selecting
+//! rows of its own flat vector. Null when the column is neither, or may hold NULLs
+static const_data_ptr_t SourceContractAllValidFixedWidthData(Vector &column, optional_ptr<const SelectionVector> &sel) {
+	if (!TypeIsConstantSize(column.GetType().InternalType())) {
+		return nullptr;
+	}
+	sel = nullptr;
+	reference<Vector> flat(column);
+	if (column.GetVectorType() == VectorType::DICTIONARY_VECTOR) {
+		sel = &DictionaryVector::SelVector(column);
+		flat = DictionaryVector::Child(column);
+	}
+	if (flat.get().GetVectorType() != VectorType::FLAT_VECTOR || !FlatVector::Validity(flat.get()).CannotHaveNull()) {
+		return nullptr;
+	}
+	return FlatVector::GetData(flat.get());
+}
+
+template <idx_t TYPE_SIZE>
+static void GatherSourceContractValues(data_ptr_t target, const_data_ptr_t source, const SelectionVector &sel,
+                                       idx_t count) {
+	for (idx_t row_idx = 0; row_idx < count; row_idx++) {
+		memcpy(target + row_idx * TYPE_SIZE, source + sel.get_index(row_idx) * TYPE_SIZE, TYPE_SIZE);
+	}
+}
+
+static void GatherSourceContractValues(data_ptr_t target, const_data_ptr_t source, const SelectionVector &sel,
+                                       idx_t count, idx_t type_size) {
+	switch (type_size) {
+	case 1:
+		return GatherSourceContractValues<1>(target, source, sel, count);
+	case 2:
+		return GatherSourceContractValues<2>(target, source, sel, count);
+	case 4:
+		return GatherSourceContractValues<4>(target, source, sel, count);
+	case 8:
+		return GatherSourceContractValues<8>(target, source, sel, count);
+	case 16:
+		return GatherSourceContractValues<16>(target, source, sel, count);
+	default:
+		for (idx_t row_idx = 0; row_idx < count; row_idx++) {
+			memcpy(target + row_idx * type_size, source + sel.get_index(row_idx) * type_size, type_size);
+		}
+	}
+}
+
+//! Appends a scanned vector to the chunk being filled. All-valid fixed-width columns copy their bytes directly, as
+//! almost every selective scan's columns are; anything else takes the general append
+static void AppendSourceContractVector(DataChunk &chunk, DataChunk &vector) {
+	const auto offset = chunk.size();
+	const auto count = vector.size();
+	bool direct = true;
+	for (idx_t col_idx = 0; col_idx < vector.ColumnCount() && direct; col_idx++) {
+		optional_ptr<const SelectionVector> sel;
+		direct = SourceContractAllValidFixedWidthData(vector.data[col_idx], sel) &&
+		         chunk.data[col_idx].GetVectorType() == VectorType::FLAT_VECTOR &&
+		         FlatVector::Validity(chunk.data[col_idx]).CannotHaveNull();
+	}
+	if (!direct) {
+		chunk.Append(vector);
+		return;
+	}
+	for (idx_t col_idx = 0; col_idx < vector.ColumnCount(); col_idx++) {
+		optional_ptr<const SelectionVector> sel;
+		auto source = SourceContractAllValidFixedWidthData(vector.data[col_idx], sel);
+		const auto type_size = GetTypeIdSize(vector.data[col_idx].GetType().InternalType());
+		auto target = FlatVector::GetDataMutable(chunk.data[col_idx]) + offset * type_size;
+		if (sel) {
+			GatherSourceContractValues(target, source, *sel, count, type_size);
+		} else {
+			memcpy(target, source, count * type_size);
+		}
+	}
+	chunk.SetChildCardinality(offset + count);
+}
+
 SourceResultType PhysicalTableScan::GetExecutionSourceContractDataInternal(ExecutionContext &context, DataChunk &chunk,
                                                                            OperatorSourceInput &input) const {
 	if (!GetExecutionSourceContractCapability(*this).uses_storage_scan) {
@@ -382,15 +520,14 @@ SourceResultType PhysicalTableScan::GetExecutionSourceContractDataInternal(Execu
 	auto &contract_state = g_state.execution_source_contract;
 	auto &scan_state = l_state.execution_source_contract_scan_state;
 	l_state.execution_source_contract_cursor = true;
-
-	do {
+	auto scan_vector = [&](DataChunk &target) {
 		if (contract_state.is_create_index) {
 			ExecutionOperatorStageTimer timer(input.stage_recorder, "source_contract.table_scan.create_index_scan");
-			contract_state.storage->CreateIndexScan(scan_state, chunk);
+			contract_state.storage->CreateIndexScan(scan_state, target);
 		} else if (contract_state.return_source_contract_input) {
 			ExecutionOperatorStageTimer timer(input.stage_recorder,
 			                                  "source_contract.table_scan.storage_scan_source_input");
-			contract_state.storage->Scan(*contract_state.transaction, chunk, scan_state);
+			contract_state.storage->Scan(*contract_state.transaction, target, scan_state);
 		} else if (contract_state.can_remove_filter_columns) {
 			l_state.execution_source_contract_all_columns.Reset();
 			{
@@ -402,14 +539,52 @@ SourceResultType PhysicalTableScan::GetExecutionSourceContractDataInternal(Execu
 			{
 				ExecutionOperatorStageTimer timer(input.stage_recorder,
 				                                  "source_contract.table_scan.reference_projection");
-				chunk.ReferenceColumns(l_state.execution_source_contract_all_columns, contract_state.projection_ids);
+				target.ReferenceColumns(l_state.execution_source_contract_all_columns, contract_state.projection_ids);
 			}
 		} else {
 			ExecutionOperatorStageTimer timer(input.stage_recorder,
 			                                  "source_contract.table_scan.storage_scan_projected");
-			contract_state.storage->Scan(*contract_state.transaction, chunk, scan_state);
+			contract_state.storage->Scan(*contract_state.transaction, target, scan_state);
 		}
+	};
+	auto &vector = l_state.execution_source_contract_vector;
+	if (vector.ColumnCount() == 0) {
+		vector.Initialize(context.client, chunk.GetTypes());
+	}
 
+	do {
+		// A selective filter leaves a few rows of each storage vector: they are copied into one chunk until the next
+		// vector would not fit, so the region runs per full batch rather than per vector. The chunk never spans two
+		// assignments, whose partition data differ, and a vector that keeps most rows or that copying would cost or
+		// flatten passes through uncopied
+		while (true) {
+			if (!l_state.execution_source_contract_vector_pending) {
+				vector.Reset();
+				scan_vector(vector);
+				if (vector.size() == 0) {
+					break;
+				}
+				l_state.execution_source_contract_vector_pending = true;
+				l_state.execution_source_contract_batch_index =
+				    GetExecutionSourceContractTableScanBatchIndex(scan_state);
+			}
+			if (chunk.size() + vector.size() > STANDARD_VECTOR_SIZE) {
+				return SourceResultType::HAVE_MORE_OUTPUT;
+			}
+			if (vector.size() >= SOURCE_CONTRACT_BATCH_ROWS || !SourceContractVectorCanBatch(vector)) {
+				if (chunk.size() > 0) {
+					return SourceResultType::HAVE_MORE_OUTPUT;
+				}
+				chunk.Reference(vector);
+				l_state.execution_source_contract_vector_pending = false;
+				return SourceResultType::HAVE_MORE_OUTPUT;
+			}
+			{
+				ExecutionOperatorStageTimer timer(input.stage_recorder, "source_contract.table_scan.batch_append");
+				AppendSourceContractVector(chunk, vector);
+			}
+			l_state.execution_source_contract_vector_pending = false;
+		}
 		if (chunk.size() > 0) {
 			return SourceResultType::HAVE_MORE_OUTPUT;
 		}
@@ -583,16 +758,6 @@ bool PhysicalTableScan::SupportsPartitioning(const OperatorPartitionInfo &partit
 	return true;
 }
 
-static OperatorPartitionData GetExecutionSourceContractTableScanPartitionData(const TableScanState &scan_state) {
-	if (scan_state.table_state.row_group) {
-		return OperatorPartitionData(scan_state.table_state.batch_index);
-	}
-	if (scan_state.local_state.row_group) {
-		return OperatorPartitionData(scan_state.table_state.batch_index + scan_state.local_state.batch_index);
-	}
-	return OperatorPartitionData(0);
-}
-
 OperatorPartitionData PhysicalTableScan::GetPartitionData(ExecutionContext &context, DataChunk &chunk,
                                                           GlobalSourceState &gstate_p, LocalSourceState &lstate,
                                                           const OperatorPartitionInfo &partition_info) const {
@@ -601,7 +766,7 @@ OperatorPartitionData PhysicalTableScan::GetPartitionData(ExecutionContext &cont
 	auto &gstate = gstate_p.Cast<TableScanGlobalSourceState>();
 	auto &state = lstate.Cast<TableScanLocalSourceState>();
 	if (state.execution_source_contract_cursor) {
-		return GetExecutionSourceContractTableScanPartitionData(state.execution_source_contract_scan_state);
+		return OperatorPartitionData(state.execution_source_contract_batch_index);
 	}
 	if (!state.local_state) {
 		throw InternalException("PhysicalTableScan::GetPartitionData called without local table function state");

@@ -1,0 +1,173 @@
+# name: test/sql/jit/test_jit_source_contract_batches.test
+# description: A region source fills each chunk with the few rows a storage vector yields (after a selective join
+#              filter or deletions) from many vectors. A chunk never spans two scan assignments and carries the batch
+#              index its rows were scanned under, so insertion order holds across row groups, transaction-local rows
+#              and deleted rows; vectors with long or compressed strings pass through uncopied
+# group: [jit]
+
+load {TEST_DIR}/jit_source_contract_batches.db
+
+statement ok
+LOAD jit_sljit
+
+statement ok
+SET jit_cbo_generated_stage_benefit=4096
+
+statement ok
+SET jit_cbo_materialization_elision_benefit=4096
+
+statement ok
+SET jit_cbo_native_operator_stage_benefit=4096
+
+statement ok
+SET jit_cbo_full_pipeline_benefit=4096
+
+statement ok
+SET jit_cbo_source_contract_scan_filter_penalty=0
+
+statement ok
+SET jit_cbo_startup_base_cost=0
+
+statement ok
+SET jit_cbo_startup_margin_basis_points=0
+
+statement ok
+SET jit_trace_runtime=true
+
+statement ok
+SET jit_event_log_size=100000
+
+# The join's exact membership filter keeps about one row in 250 inside the scan. Row groups alternate between short
+# (inlined) and long strings; once checkpointed, d compresses to a dictionary
+statement ok
+CREATE TABLE facts AS
+SELECT i::BIGINT AS id, (i % 500000)::INTEGER AS k,
+       CASE WHEN (i // 122880) % 2 = 0 THEN 'v' || (i % 13) ELSE 'a string longer than twelve bytes ' || (i % 13)
+       END AS s,
+       'd' || (i % 5) AS d
+FROM range(1500000) t(i)
+
+statement ok
+CREATE TABLE keys AS SELECT ((i * 251) % 500000)::INTEGER AS k FROM range(2000) t(i)
+
+statement ok
+CHECKPOINT
+
+statement ok
+CREATE TEMPORARY TABLE facts_local AS SELECT * FROM facts
+
+# Deletions leave about one row in 97 of every vector visible: the scan itself yields sparse vectors. No automatic
+# checkpoint may vacuum them away
+statement ok
+CREATE TABLE sparse AS SELECT * FROM facts
+
+statement ok
+CHECKPOINT
+
+statement ok
+SET checkpoint_threshold='1TB'
+
+statement ok
+DELETE FROM sparse WHERE id % 97 <> 0
+
+statement ok
+CREATE TEMPORARY TABLE sparse_local AS SELECT * FROM facts
+
+statement ok
+DELETE FROM sparse_local WHERE id % 97 <> 0
+
+foreach facts facts facts_local
+
+foreach threads 1 4
+
+statement ok
+SET threads={threads}
+
+statement ok
+SET jit_policy='off'
+
+statement ok
+CREATE OR REPLACE TABLE expected AS SELECT f.id * 3 + 1 AS id, f.s, f.d FROM {facts} f JOIN keys USING (k)
+
+statement ok
+SET jit_policy='auto'
+
+statement ok
+CREATE OR REPLACE TABLE actual AS SELECT f.id * 3 + 1 AS id, f.s, f.d FROM {facts} f JOIN keys USING (k)
+
+# A parallel join inserts without an order, under either policy
+query I
+SELECT count(*) FROM (SELECT id, lag(id) OVER (ORDER BY rowid) AS previous FROM actual)
+WHERE previous >= id AND current_setting('threads') = 1
+----
+0
+
+query I
+SELECT count(*) FROM ((SELECT * FROM expected EXCEPT ALL SELECT * FROM actual)
+                      UNION ALL (SELECT * FROM actual EXCEPT ALL SELECT * FROM expected))
+----
+0
+
+endloop
+
+endloop
+
+# An order-preserving copy of the sparse tables: every chunk sinks under the batch index of the assignment that scanned
+# its rows, so the copy keeps the source order on any number of threads
+foreach sparse sparse sparse_local
+
+foreach threads 1 4
+
+statement ok
+SET threads={threads}
+
+statement ok
+SET jit_policy='off'
+
+statement ok
+CREATE OR REPLACE TABLE expected AS SELECT id * 3 + 1 AS id, k, s FROM {sparse}
+
+statement ok
+SET jit_policy='auto'
+
+statement ok
+SELECT * FROM duckdb_jit_clear_events()
+
+statement ok
+CREATE OR REPLACE TABLE actual AS SELECT id * 3 + 1 AS id, k FROM {sparse}
+
+query I
+SELECT count(*) > 0 FROM duckdb_jit_events()
+WHERE phase = 'runtime' AND source_stage_count_breakdown LIKE '%source_contract.table_scan.batch_append=%'
+----
+true
+
+query I
+SELECT count(*) FROM (SELECT id, lag(id) OVER (ORDER BY rowid) AS previous FROM actual) WHERE previous >= id
+----
+0
+
+query I
+SELECT count(*) FROM ((SELECT id, k FROM expected EXCEPT ALL SELECT * FROM actual)
+                      UNION ALL (SELECT * FROM actual EXCEPT ALL SELECT id, k FROM expected))
+----
+0
+
+# Long and dictionary-compressed strings pass through: order and rows still hold
+statement ok
+CREATE OR REPLACE TABLE actual AS SELECT id * 3 + 1 AS id, k, s FROM {sparse}
+
+query I
+SELECT count(*) FROM (SELECT id, lag(id) OVER (ORDER BY rowid) AS previous FROM actual) WHERE previous >= id
+----
+0
+
+query I
+SELECT count(*) FROM ((SELECT * FROM expected EXCEPT ALL SELECT * FROM actual)
+                      UNION ALL (SELECT * FROM actual EXCEPT ALL SELECT * FROM expected))
+----
+0
+
+endloop
+
+endloop

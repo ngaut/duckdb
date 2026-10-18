@@ -220,10 +220,15 @@ of aggregate terminals.
 
 ### Today
 
-- `PhysicalTableScan::GetExecutionSourceContractDataInternal` returns one
-  storage vector per call. Since `e687a5ec637` the scan copies a region
-  source's fixed-width filtered columns flat instead of slicing them.
-  `SljitSourceFetchPrimitiveRuntime` then copies chunks under 1024 rows into
+- The table scan's source contract copies the kept rows of successive storage
+  vectors into one chunk until it holds half a vector, within one scan
+  assignment and under the batch index its rows were scanned with. A vector
+  that keeps most rows, has out-of-line strings, or carries a storage
+  dictionary or FSST vector passes through uncopied. Since `e687a5ec637` the
+  scan also copies a region source's fixed-width filtered columns flat instead
+  of slicing them. Strings are copied, not referenced.
+- Other sources still hand over their chunks as produced;
+  `SljitSourceFetchPrimitiveRuntime` copies chunks under 1024 rows into
   `source_contract_batch`, except chunks whose strings are out of line
   (`SljitChunkHasOutOfLineValues`).
 - Batching rules are spread over `ShouldBatchSourceContractChunk`,
@@ -596,7 +601,10 @@ first, because M3-M5 shrink once layouts and instances exist.
 1. **Source batches.** The source contract fills batches across storage
    vectors with compacted survivors; delete the source-fetch batching rules.
    Exit: no per-vector work in the kernel; source batching code deleted;
-   `join_exact_filter_build` and TPC-H no slower.
+   `join_exact_filter_build` and TPC-H no slower. Table scans are done; the
+   kernel's source batching stays for other sources until the coalescer
+   (step 3) replaces it, and strings are copied until batches can reference
+   their buffers.
 2. **Typed layouts.** Introduce `BatchLayout` per recipe edge; convert the
    preclassified row-pointer batch, the preaggregated group batch, the MARK
    boundary, and elided projections to explicit layouts; consumers resolve
@@ -656,6 +664,9 @@ observed cardinalities to the adaptive transitions instead of re-planning.
   native.
 - No backend consumes the nested-loop join binding core exports, so a
   pipeline containing a nested-loop join stays native past it.
+- A region's table-scan source reads storage synchronously: it schedules no
+  async read-ahead or prefetch tasks, which native scans do for cold data
+  (the storage prefetch tests fail with the JIT forced on for that reason).
 - Multi-key, selected, and non-flat grouped inputs require an explicit proven
   route before generated run ownership expands.
 - Native source and sink protocols remain native unless an exported execution
