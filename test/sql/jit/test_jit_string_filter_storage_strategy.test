@@ -96,6 +96,27 @@ SELECT count(*) FROM duckdb_jit_events() WHERE reason LIKE '%source_strategy_rea
 ----
 0
 
+# a long IN list becomes a MARK join plus an optional filter the scan only prunes zones with: it evaluates no row, so
+# the string filter still goes to storage
+statement ok
+SELECT * FROM duckdb_jit_clear_events()
+
+query III
+SELECT s.ship_mode,
+       sum(CASE WHEN o.priority = '1-URGENT' OR o.priority = '2-HIGH' THEN 1 ELSE 0 END),
+       sum(CASE WHEN o.priority <> '1-URGENT' AND o.priority <> '2-HIGH' THEN 1 ELSE 0 END)
+FROM ship s JOIN orders o USING (order_id)
+WHERE s.ship_mode IN ('MAIL', 'SHIP') AND s.weight IN (3, 9, 14, 19, 23, 36, 45, 49, 103, 777)
+GROUP BY s.ship_mode ORDER BY s.ship_mode
+----
+MAIL	400	1600
+SHIP	400	1600
+
+query I
+SELECT count(*) > 0 FROM duckdb_jit_events() WHERE reason LIKE '%source_strategy_reason=storage-sensitive-filter%'
+----
+true
+
 # a join filter that keeps a few rows leaves the string filter only those rows to evaluate
 statement ok
 SELECT * FROM duckdb_jit_clear_events()

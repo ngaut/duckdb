@@ -79,7 +79,7 @@ static bool TryBuildSljitGeneratedSourceFilterExpression(const ExecutionRegionSo
 	return true;
 }
 
-static bool SljitSourceFilterIsConstantTrue(const ExecutionRegionSourceFilter &filter) {
+bool SljitSourceFilterIsConstantTrue(const ExecutionRegionSourceFilter &filter) {
 	if (!filter.expression || !filter.expression->root) {
 		return false;
 	}

@@ -87,6 +87,8 @@ SljitRegionNodePlan PlanSljitProjectionNode(const ExecutionRegionNode &node, con
                                             bool render_diagnostics);
 void AppendSljitSourceFilterFacts(string &reason, const ExecutionRegionNode &node,
                                   const ExecutionRegionTableScanContract &contract, bool include_input_columns);
+//! An optional filter the scan only prunes zones with lowers to TRUE: no row is evaluated against it
+bool SljitSourceFilterIsConstantTrue(const ExecutionRegionSourceFilter &filter);
 bool TryPlanSljitGeneratedSourceFilters(const ExecutionRegionNode &node, SljitSourceContractPlan &contract_plan,
                                         vector<SljitNativeRegionOpPlan> &native_ops, string &error,
                                         bool render_diagnostics);

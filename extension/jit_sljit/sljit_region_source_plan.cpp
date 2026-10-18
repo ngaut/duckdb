@@ -206,7 +206,8 @@ struct SljitStorageFilterEvaluationFacts {
 //! when every filter of the source is such a string filter (generated code has no other predicate to fuse them
 //! with, and storage fetches the remaining columns only for the rows that pass), and when the finalized dynamic
 //! filters are expected to keep at least half the rows (storage evaluates static filters on every row; a generated
-//! filter sees only the dynamic filters' survivors).
+//! filter sees only the dynamic filters' survivors). An optional filter that only prunes zones evaluates no row on
+//! either side, so it counts for neither.
 static SljitStorageFilterEvaluationFacts
 SljitStorageFilterEvaluation(const ExecutionRegionNode &node, const ExecutionRegionTableScanContract &contract) {
 	SljitStorageFilterEvaluationFacts result;
@@ -214,9 +215,14 @@ SljitStorageFilterEvaluation(const ExecutionRegionNode &node, const ExecutionReg
 		return result;
 	}
 	bool all_low_cardinality_string_filters =
-	    contract.compressed_storage && !node.source->filters.empty() &&
+	    contract.compressed_storage &&
 	    node.source->estimated_source_cardinality * 2 >= contract.estimated_source_cardinality;
+	bool evaluated_filters = false;
 	for (auto &filter : node.source->filters) {
+		if (SljitSourceFilterIsConstantTrue(filter)) {
+			continue;
+		}
+		evaluated_filters = true;
 		const bool low_cardinality_string_column =
 		    filter.scan_column_index < contract.source_contract_input_types.size() &&
 		    filter.scan_column_index < contract.source_contract_input_distinct_counts.size() &&
@@ -239,7 +245,8 @@ SljitStorageFilterEvaluation(const ExecutionRegionNode &node, const ExecutionReg
 			             contract.source_contract_input_distinct_counts[filter.scan_column_index]);
 		}
 	}
-	result.benefits_from_storage = result.benefits_from_storage || all_low_cardinality_string_filters;
+	result.benefits_from_storage =
+	    result.benefits_from_storage || (evaluated_filters && all_low_cardinality_string_filters);
 	return result;
 }
 
