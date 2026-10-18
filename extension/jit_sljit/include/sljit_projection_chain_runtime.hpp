@@ -150,7 +150,7 @@ static bool SljitExecuteProjectionChainPrimitiveSequential(
 	if (!final_output || final_output->size() == 0) {
 		return false;
 	}
-	if (direct_handoff) {
+	if (direct_handoff || SljitProjectionHasVariableWidthOutput(ops[primitive.final_projection_idx])) {
 		return execute_output_batch(*final_output);
 	}
 	projection_chain_batch.Ensure(runtime.GetAllocator(), ops[primitive.final_projection_idx].output_types);
@@ -233,7 +233,8 @@ static bool SljitExecuteProjectionChainPrimitive(
 	if (synthetic_projection_scratch) {
 		synthetic_projection_scratch->Ensure(bound_projection_op);
 	}
-	if (direct_handoff) {
+	// Batching compacts rows by copying them: a projection producing strings would copy every string it batches
+	if (direct_handoff || SljitProjectionHasVariableWidthOutput(bound_projection_op)) {
 		return SljitExecuteProjectionChainPrimitiveDirectHandoff(
 		    runtime, scratch, primitive, bound_projection_op, source_chunk, selection, count,
 		    synthetic_projection_output, synthetic_projection_scratch, execute_output_batch);
@@ -243,27 +244,6 @@ static bool SljitExecuteProjectionChainPrimitive(
 	auto flush_output_batch = [&]() -> bool {
 		return SljitFlushDataChunkBatch(batch, execute_output_batch);
 	};
-
-	if (SljitProjectionHasVariableWidthOutput(bound_projection_op)) {
-		DataChunk *reference_output_ptr;
-		if (synthetic_projection_scratch) {
-			synthetic_projection_output.Ensure(runtime.GetAllocator(), bound_projection_op.output_types);
-			reference_output_ptr = &synthetic_projection_output.chunk;
-		} else {
-			reference_output_ptr = &scratch.TemporaryChunk(primitive.final_projection_idx);
-		}
-		auto &reference_output = *reference_output_ptr;
-		reference_output.Reset();
-		if (SljitTrySliceReferenceProjection(reference_output, source_chunk, bound_projection_op, selection, count)) {
-			if (batch.size() > 0 && flush_output_batch()) {
-				return true;
-			}
-			auto handoff_stage_start = SljitRegionStageStart(runtime);
-			RecordSljitRegionStageRuntime(runtime, primitive.final_projection_idx, bound_projection_op.kind,
-			                              "reference_view_handoff", handoff_stage_start);
-			return execute_output_batch(reference_output);
-		}
-	}
 
 	if (batch.size() + count > STANDARD_VECTOR_SIZE && flush_output_batch()) {
 		return true;

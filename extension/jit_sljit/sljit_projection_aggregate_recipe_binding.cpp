@@ -105,6 +105,15 @@ bool SljitProjectionAggregateRecipeBinding::TryMakeMarkFilterProjectionAggregate
 	if (!CanBindMarkFilterBoundary(facts) || (facts.JoinCount() > 1 && shape.ProjectionCount() == 0)) {
 		return false;
 	}
+	SljitUngroupedAggregateUpdatePrimitive aggregate_update;
+	if (shape.ProjectionCount() == 0 &&
+	    SljitTryBindUngroupedAggregateUpdatePrimitive(ops, shape.aggregate_idx, aggregate_update)) {
+		// The aggregate reads the probe rows the marker filter keeps: the probe emits their selection directly
+		auto sequence = MakeProjectionAggregateMarkFilterPrefix(facts, true, DConstants::INVALID_INDEX);
+		sequence.Add(SljitFullPipelinePrimitiveStep::UngroupedAggregateUpdate(aggregate_update));
+		recipe = MakePrimitiveSequence(std::move(sequence));
+		return true;
+	}
 	auto sequence = MakeProjectionAggregateMarkFilterPrefix(facts, false, shape.first_projection_idx);
 	return TryMakeProjectionAggregateRecipe(std::move(sequence), shape, true, recipe);
 }
@@ -120,7 +129,7 @@ bool SljitProjectionAggregateRecipeBinding::TryMakeMarkFilterNativeTailRecipe(
 
 bool SljitProjectionAggregateRecipeBinding::CanBindMarkFilterBoundary(
     const SljitProjectionAggregatePrefixFacts &facts) const {
-	if (!facts.HasMarkFilter() || facts.HasSourceFilter() || facts.HasAnyJoinInputProjection()) {
+	if (!facts.HasMarkFilter()) {
 		return false;
 	}
 	const auto hash_join_idx = facts.MarkFilterHashJoinIdx();
