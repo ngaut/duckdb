@@ -2596,6 +2596,13 @@ bool GroupedAggregateHashTable::TryFindOrCreateGroupsSelectedStateUpdateFast(
 	                                         precomputed_hashes, dense_domain);
 }
 
+// The keys a descriptor lookup stores. The direct probes compare keys with the value type's operator==, which is
+// DuckDB's equality only for AggregateFastExistingMatchType: a NaN never equals itself, while DuckDB groups every NaN
+// together. Floating-point keys therefore take the materialized lookup, which matches through DuckDB's row matcher.
+static bool AggregateDescriptorGroupKeyTypeSupported(PhysicalType type) {
+	return AggregateFastExistingMatchType(type) || type == PhysicalType::FLOAT || type == PhysicalType::DOUBLE;
+}
+
 static bool AggregateDescriptorGroupKeySourcesSupported(const vector<ExecutionRowPointerGroupKeySource> &group_sources,
                                                         const vector<LogicalType> &layout_types) {
 	if (group_sources.empty() || group_sources.size() >= layout_types.size()) {
@@ -2606,7 +2613,7 @@ static bool AggregateDescriptorGroupKeySourcesSupported(const vector<ExecutionRo
 		const auto target_physical_type = layout_types[group_idx].InternalType();
 		if (!source.ready || source.HasOutputTransform() || source.target_physical_type != target_physical_type ||
 		    source.target_type.InternalType() != target_physical_type ||
-		    !AggregateFastExistingMatchType(target_physical_type)) {
+		    !AggregateDescriptorGroupKeyTypeSupported(target_physical_type)) {
 			return false;
 		}
 		switch (source.cast_kind) {
@@ -3133,21 +3140,44 @@ static bool AggregateDescriptorSourcesCanMaterialize(DataChunk &payload_input, o
 	return true;
 }
 
+static bool
+AggregateDescriptorSourcesHaveFastExistingMatch(const vector<ExecutionRowPointerGroupKeySource> &group_sources) {
+	for (auto &source : group_sources) {
+		if (!AggregateFastExistingMatchType(source.target_physical_type)) {
+			return false;
+		}
+	}
+	return true;
+}
+
 static bool AggregateDescriptorSourcesCanProbeDirect(DataChunk &payload_input, optional_ptr<Vector> row_pointers,
                                                      const vector<ExecutionRowPointerGroupKeySource> &group_sources) {
 	return group_sources.size() <= AGGREGATE_MAX_FAST_GROUPS &&
+	       AggregateDescriptorSourcesHaveFastExistingMatch(group_sources) &&
 	       AggregateDescriptorSourcesCanMaterialize(payload_input, row_pointers, group_sources);
 }
 
-static bool
-AggregateInputVectorDescriptorSourcesCanProbeDirect(DataChunk &payload_input,
-                                                    const vector<ExecutionRowPointerGroupKeySource> &group_sources) {
+static bool AggregateDescriptorSourcesAreInputVectors(const vector<ExecutionRowPointerGroupKeySource> &group_sources) {
 	for (auto &source : group_sources) {
 		if (source.source_kind != ExecutionRowPointerGroupKeySourceKind::INPUT_VECTOR) {
 			return false;
 		}
 	}
-	return AggregateDescriptorSourcesCanProbeDirect(payload_input, nullptr, group_sources);
+	return true;
+}
+
+static bool
+AggregateInputVectorDescriptorSourcesCanMaterialize(DataChunk &payload_input,
+                                                    const vector<ExecutionRowPointerGroupKeySource> &group_sources) {
+	return AggregateDescriptorSourcesAreInputVectors(group_sources) &&
+	       AggregateDescriptorSourcesCanMaterialize(payload_input, nullptr, group_sources);
+}
+
+static bool
+AggregateInputVectorDescriptorSourcesCanProbeDirect(DataChunk &payload_input,
+                                                    const vector<ExecutionRowPointerGroupKeySource> &group_sources) {
+	return AggregateDescriptorSourcesAreInputVectors(group_sources) &&
+	       AggregateDescriptorSourcesCanProbeDirect(payload_input, nullptr, group_sources);
 }
 
 static bool
@@ -6245,10 +6275,11 @@ bool GroupedAggregateHashTable::TryFindOrCreateInputVectorGroupStateTargetsFast(
 	}
 	if (payload_input.size() != count ||
 	    !AggregateDescriptorGroupKeySourcesSupported(group_sources, layout_ptr->GetTypes()) ||
-	    !AggregateInputVectorDescriptorSourcesCanProbeDirect(payload_input, group_sources) || !entries) {
+	    !AggregateInputVectorDescriptorSourcesCanMaterialize(payload_input, group_sources) || !entries) {
 		return false;
 	}
-	if (TryFindOrCreateSingleInputVectorGroupStateTargetsDense(payload_input, count, group_sources, targets, recorder,
+	if (AggregateInputVectorDescriptorSourcesCanProbeDirect(payload_input, group_sources) &&
+	    TryFindOrCreateSingleInputVectorGroupStateTargetsDense(payload_input, count, group_sources, targets, recorder,
 	                                                           dense_domain)) {
 		return true;
 	}

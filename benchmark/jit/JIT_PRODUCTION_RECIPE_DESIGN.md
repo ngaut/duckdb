@@ -509,7 +509,13 @@ boundary group across yields, and publication is failure-atomic: raw
 equivalence keys and partial states never escape through DuckDB's grouped-state
 API. Parallel finalization skips rehash only when conservative key summaries
 prove disjointness. Every producer that stores rows into a shared aggregate
-table stores the canonical `DataChunk::Hash` of all group columns.
+table stores the canonical `DataChunk::Hash` of all group columns. A
+grouped-state lookup never declines a descriptor it admitted, because a batched
+caller cannot replay consumed input. Key equality is core's: DuckDB groups every
+NaN together, which a C++ comparison never does, so core sends floating-point
+keys through DuckDB's row matcher and keeps its direct probes for keys whose
+C++ equality is DuckDB's. A backend merges rows only under that equality; keys
+it cannot prove equal go to core's lookup, never into a group of their own.
 
 Grouped-state publication uses the semantic sink contract: core records each
 aggregate's state offset, the executable copies offsets and primitive kinds

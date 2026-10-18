@@ -1,0 +1,182 @@
+# name: test/sql/jit/test_jit_floating_group_keys.test
+# description: Floating-point group keys are equal by value, not by bits: -0.0 equals 0.0 and every NaN equals every
+#              other. A compiled region hands them to core's grouped-state lookups like any other key, and core matches
+#              them through DuckDB's row matcher instead of declining (which failed the query with an internal error)
+# group: [jit]
+
+require tpch
+
+statement ok
+LOAD jit_sljit
+
+statement ok
+SET jit_cbo_generated_stage_benefit=4096
+
+statement ok
+SET jit_cbo_materialization_elision_benefit=4096
+
+statement ok
+SET jit_cbo_native_operator_stage_benefit=1048576
+
+statement ok
+SET jit_cbo_full_pipeline_benefit=0
+
+statement ok
+SET jit_cbo_source_contract_scan_filter_penalty=0
+
+statement ok
+SET jit_cbo_startup_base_cost=0
+
+statement ok
+SET jit_cbo_startup_margin_basis_points=0
+
+statement ok
+SET jit_trace_runtime=true
+
+statement ok
+SET jit_event_log_size=100000
+
+# Probe and build keys cycle through -0.0, 0.0, both NaN signs, NULL and infinity
+statement ok
+CREATE TABLE facts AS
+SELECT i::BIGINT AS id, (i % 1000)::INTEGER AS k,
+       CASE i % 9 WHEN 0 THEN -0.0 WHEN 1 THEN 0.0 WHEN 2 THEN 'nan'::DOUBLE WHEN 3 THEN -('nan'::DOUBLE)
+                  WHEN 4 THEN NULL WHEN 5 THEN 'inf'::DOUBLE ELSE (i % 37) / 4.0 END::DOUBLE AS d,
+       CASE i % 9 WHEN 0 THEN -0.0 WHEN 1 THEN 0.0 WHEN 2 THEN 'nan'::DOUBLE WHEN 3 THEN -('nan'::DOUBLE)
+                  WHEN 4 THEN NULL ELSE (i % 37) / 4.0 END::FLOAT AS f,
+       i % 7 AS v
+FROM range(300000) t(i)
+
+statement ok
+CREATE TABLE dims AS
+SELECT i::INTEGER AS k,
+       CASE i % 5 WHEN 0 THEN -0.0 WHEN 1 THEN 0.0 WHEN 2 THEN 'nan'::DOUBLE WHEN 3 THEN -('nan'::DOUBLE)
+                  ELSE (i % 13) / 2.0 END::DOUBLE AS bd,
+       CASE i % 5 WHEN 0 THEN -0.0 WHEN 1 THEN 0.0 WHEN 2 THEN 'nan'::DOUBLE ELSE (i % 13) / 2.0 END::FLOAT AS bf,
+       i % 3 AS bv
+FROM range(1000) t(i)
+
+statement ok
+CREATE VIEW probe_double AS SELECT d, count(*) FROM facts JOIN dims USING (k) GROUP BY d
+
+statement ok
+CREATE VIEW probe_float AS SELECT f, count(*) FROM facts JOIN dims USING (k) GROUP BY f
+
+statement ok
+CREATE VIEW build_double AS SELECT bd, count(*) FROM facts JOIN dims USING (k) GROUP BY bd
+
+statement ok
+CREATE VIEW build_float_sums AS SELECT bf, sum(v), sum(bv) FROM facts JOIN dims USING (k) GROUP BY bf
+
+statement ok
+CREATE VIEW probe_and_build AS SELECT d, bd, count(*) FROM facts JOIN dims USING (k) GROUP BY d, bd
+
+statement ok
+CREATE VIEW integer_and_float AS SELECT k, bf, count(*) FROM facts JOIN dims USING (k) GROUP BY k, bf
+
+foreach threads 1 4
+
+statement ok
+SET threads={threads}
+
+foreach query probe_double probe_float build_double build_float_sums probe_and_build integer_and_float
+
+statement ok
+SET jit_policy='off'
+
+statement ok
+CREATE OR REPLACE TABLE expected AS SELECT * FROM {query}
+
+statement ok
+SET jit_policy='auto'
+
+statement ok
+SELECT * FROM duckdb_jit_clear_events()
+
+statement ok
+CREATE OR REPLACE TABLE actual AS SELECT * FROM {query}
+
+query I
+SELECT count(*) > 0 FROM duckdb_jit_events()
+WHERE phase = 'runtime' AND generated_stage_count_breakdown LIKE '%find_or_create_input_vector.group_keys=%'
+----
+true
+
+query I
+SELECT count(*) FROM ((SELECT * FROM expected EXCEPT ALL SELECT * FROM actual)
+                      UNION ALL (SELECT * FROM actual EXCEPT ALL SELECT * FROM expected))
+----
+0
+
+endloop
+
+endloop
+
+# TPC-H Q16 over floating-point keys: COUNT(DISTINCT ps_suppkey) is planned as a grouping on the counted column
+statement ok
+CALL dbgen(sf=0.1, suffix='_original')
+
+foreach type DOUBLE FLOAT
+
+# The part key stays INTEGER, so the join casts it to the floating-point partsupp key
+statement ok
+CREATE OR REPLACE TABLE part AS
+SELECT p_partkey::INTEGER AS p_partkey, p_name, p_mfgr, p_brand, p_type, p_size::{type} AS p_size, p_container,
+       p_retailprice::{type} AS p_retailprice, p_comment
+FROM part_original
+
+statement ok
+CREATE OR REPLACE TABLE partsupp AS
+SELECT ps_partkey::{type} AS ps_partkey, ps_suppkey::{type} AS ps_suppkey, ps_availqty::{type} AS ps_availqty,
+       ps_supplycost::{type} AS ps_supplycost, ps_comment
+FROM partsupp_original
+
+statement ok
+CREATE OR REPLACE TABLE supplier AS
+SELECT s_suppkey::{type} AS s_suppkey, s_name, s_address, s_nationkey::{type} AS s_nationkey, s_phone,
+       s_acctbal::{type} AS s_acctbal, s_comment
+FROM supplier_original
+
+foreach threads 1 4
+
+statement ok
+SET threads={threads}
+
+statement ok
+SET jit_policy='off'
+
+statement ok
+CREATE OR REPLACE TABLE expected AS
+SELECT p_brand, p_type, p_size, count(DISTINCT ps_suppkey) AS supplier_cnt
+FROM partsupp, part
+WHERE p_partkey = ps_partkey AND p_brand <> 'Brand#45' AND p_type NOT LIKE 'MEDIUM POLISHED%'
+  AND p_size IN (49, 14, 23, 45, 19, 3, 36, 9)
+  AND ps_suppkey NOT IN (SELECT s_suppkey FROM supplier WHERE s_comment LIKE '%Customer%Complaints%')
+GROUP BY p_brand, p_type, p_size
+
+statement ok
+SET jit_policy='auto'
+
+statement ok
+CREATE OR REPLACE TABLE actual AS
+SELECT p_brand, p_type, p_size, count(DISTINCT ps_suppkey) AS supplier_cnt
+FROM partsupp, part
+WHERE p_partkey = ps_partkey AND p_brand <> 'Brand#45' AND p_type NOT LIKE 'MEDIUM POLISHED%'
+  AND p_size IN (49, 14, 23, 45, 19, 3, 36, 9)
+  AND ps_suppkey NOT IN (SELECT s_suppkey FROM supplier WHERE s_comment LIKE '%Customer%Complaints%')
+GROUP BY p_brand, p_type, p_size
+
+query I
+SELECT count(*) FROM ((SELECT * FROM expected EXCEPT ALL SELECT * FROM actual)
+                      UNION ALL (SELECT * FROM actual EXCEPT ALL SELECT * FROM expected))
+----
+0
+
+query I
+SELECT count(*) > 0 FROM actual
+----
+true
+
+endloop
+
+endloop
