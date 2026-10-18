@@ -6,6 +6,7 @@
 #include "duckdb/common/algorithm.hpp"
 #include "duckdb/common/exception.hpp"
 #include "duckdb/common/operator/cast_operators.hpp"
+#include "duckdb/common/operator/comparison_operators.hpp"
 #include "duckdb/common/operator/subtract.hpp"
 #include "duckdb/common/radix_partitioning.hpp"
 #include "duckdb/common/row_operations/row_operations.hpp"
@@ -2596,9 +2597,8 @@ bool GroupedAggregateHashTable::TryFindOrCreateGroupsSelectedStateUpdateFast(
 	                                         precomputed_hashes, dense_domain);
 }
 
-// The keys a descriptor lookup stores. The direct probes compare keys with the value type's operator==, which is
-// DuckDB's equality only for AggregateFastExistingMatchType: a NaN never equals itself, while DuckDB groups every NaN
-// together. Floating-point keys therefore take the materialized lookup, which matches through DuckDB's row matcher.
+// The keys a descriptor lookup stores: every strategy hashes and matches them with DuckDB's hash and equality
+// (AggregateHashDescriptorValue, AggregateDescriptorRawSourceValuesMatch)
 static bool AggregateDescriptorGroupKeyTypeSupported(PhysicalType type) {
 	return AggregateFastExistingMatchType(type) || type == PhysicalType::FLOAT || type == PhysicalType::DOUBLE;
 }
@@ -3140,20 +3140,9 @@ static bool AggregateDescriptorSourcesCanMaterialize(DataChunk &payload_input, o
 	return true;
 }
 
-static bool
-AggregateDescriptorSourcesHaveFastExistingMatch(const vector<ExecutionRowPointerGroupKeySource> &group_sources) {
-	for (auto &source : group_sources) {
-		if (!AggregateFastExistingMatchType(source.target_physical_type)) {
-			return false;
-		}
-	}
-	return true;
-}
-
 static bool AggregateDescriptorSourcesCanProbeDirect(DataChunk &payload_input, optional_ptr<Vector> row_pointers,
                                                      const vector<ExecutionRowPointerGroupKeySource> &group_sources) {
 	return group_sources.size() <= AGGREGATE_MAX_FAST_GROUPS &&
-	       AggregateDescriptorSourcesHaveFastExistingMatch(group_sources) &&
 	       AggregateDescriptorSourcesCanMaterialize(payload_input, row_pointers, group_sources);
 }
 
@@ -3306,6 +3295,10 @@ static hash_t AggregateHashDescriptorValue(const_data_ptr_t source_data, idx_t s
 		const auto value = Load<hugeint_t>(source_data + source_idx * sizeof(hugeint_t));
 		return MurmurHash64(value.lower) ^ MurmurHash64(static_cast<uint64_t>(value.upper));
 	}
+	case PhysicalType::FLOAT:
+		return Hash(Load<float>(source_data + source_idx * sizeof(float)));
+	case PhysicalType::DOUBLE:
+		return Hash(Load<double>(source_data + source_idx * sizeof(double)));
 	case PhysicalType::INTERVAL:
 		return Hash(Load<interval_t>(source_data + source_idx * sizeof(interval_t)));
 	case PhysicalType::VARCHAR:
@@ -3315,10 +3308,12 @@ static hash_t AggregateHashDescriptorValue(const_data_ptr_t source_data, idx_t s
 	}
 }
 
+// Descriptor keys match under DuckDB's equality, which for floating-point keys is not C++'s: every NaN equals every
+// other. The hashes above agree with it (DuckDB's Hash normalizes -0.0 and NaN)
 template <class T>
 static bool AggregateDescriptorRawSourceValuesMatch(const_data_ptr_t left_data, idx_t left_idx,
                                                     const_data_ptr_t right_data, idx_t right_idx) {
-	return Load<T>(left_data + left_idx * sizeof(T)) == Load<T>(right_data + right_idx * sizeof(T));
+	return Equals::Operation<T>(Load<T>(left_data + left_idx * sizeof(T)), Load<T>(right_data + right_idx * sizeof(T)));
 }
 
 static bool AggregateDescriptorRawStringValuesMatch(const_data_ptr_t left_data, idx_t left_idx,
@@ -3353,6 +3348,10 @@ static bool AggregateDescriptorRawSourceValuesMatch(const_data_ptr_t left_data, 
 		return AggregateDescriptorRawSourceValuesMatch<uhugeint_t>(left_data, left_idx, right_data, right_idx);
 	case PhysicalType::INT128:
 		return AggregateDescriptorRawSourceValuesMatch<hugeint_t>(left_data, left_idx, right_data, right_idx);
+	case PhysicalType::FLOAT:
+		return AggregateDescriptorRawSourceValuesMatch<float>(left_data, left_idx, right_data, right_idx);
+	case PhysicalType::DOUBLE:
+		return AggregateDescriptorRawSourceValuesMatch<double>(left_data, left_idx, right_data, right_idx);
 	case PhysicalType::INTERVAL:
 		return AggregateDescriptorRawSourceValuesMatch<interval_t>(left_data, left_idx, right_data, right_idx);
 	case PhysicalType::VARCHAR:
@@ -3365,7 +3364,7 @@ static bool AggregateDescriptorRawSourceValuesMatch(const_data_ptr_t left_data, 
 template <class T>
 static bool AggregateDescriptorRawSourceValueMatchesStored(const_data_ptr_t source_data, idx_t source_idx,
                                                            data_ptr_t row_location, idx_t layout_offset) {
-	return Load<T>(source_data + source_idx * sizeof(T)) == Load<T>(row_location + layout_offset);
+	return Equals::Operation<T>(Load<T>(source_data + source_idx * sizeof(T)), Load<T>(row_location + layout_offset));
 }
 
 static bool AggregateDescriptorRawStringValueMatchesStored(const_data_ptr_t source_data, idx_t source_idx,
@@ -3412,6 +3411,12 @@ static bool AggregateDescriptorRawSourceValueMatchesStored(const_data_ptr_t sour
 	case PhysicalType::INT128:
 		return AggregateDescriptorRawSourceValueMatchesStored<hugeint_t>(source_data, source_idx, row_location,
 		                                                                 layout_offset);
+	case PhysicalType::FLOAT:
+		return AggregateDescriptorRawSourceValueMatchesStored<float>(source_data, source_idx, row_location,
+		                                                             layout_offset);
+	case PhysicalType::DOUBLE:
+		return AggregateDescriptorRawSourceValueMatchesStored<double>(source_data, source_idx, row_location,
+		                                                              layout_offset);
 	case PhysicalType::INTERVAL:
 		return AggregateDescriptorRawSourceValueMatchesStored<interval_t>(source_data, source_idx, row_location,
 		                                                                  layout_offset);

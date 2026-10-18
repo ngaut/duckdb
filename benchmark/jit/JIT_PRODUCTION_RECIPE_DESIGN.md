@@ -514,11 +514,11 @@ API. Parallel finalization skips rehash only when conservative key summaries
 prove disjointness. Every producer that stores rows into a shared aggregate
 table stores the canonical `DataChunk::Hash` of all group columns. A
 grouped-state lookup never declines a descriptor it admitted, because a batched
-caller cannot replay consumed input. Key equality is core's: DuckDB groups every
-NaN together, which a C++ comparison never does, so core sends floating-point
-keys through DuckDB's row matcher and keeps its direct probes for keys whose
-C++ equality is DuckDB's. A backend merges rows only under that equality; keys
-it cannot prove equal go to core's lookup, never into a group of their own.
+caller cannot replay consumed input. Key equality is core's: every lookup
+strategy, and the key comparison core exports to backends, hashes and matches
+keys with DuckDB's hash and equality, under which every NaN is one value and
+-0.0 equals 0.0. A backend merges rows only under that equality; keys it cannot
+prove equal go to core's lookup, never into a group of their own.
 
 Grouped-state publication uses the semantic sink contract: core records each
 aggregate's state offset, the executable copies offsets and primitive kinds

@@ -1,7 +1,8 @@
 # name: test/sql/jit/test_jit_floating_group_keys.test
 # description: Floating-point group keys are equal by value, not by bits: -0.0 equals 0.0 and every NaN equals every
-#              other. A compiled region hands them to core's grouped-state lookups like any other key, and core matches
-#              them through DuckDB's row matcher instead of declining (which failed the query with an internal error)
+#              other. A compiled region hands them to core's grouped-state lookups like any other key, and core hashes
+#              and matches them with DuckDB's hash and equality instead of declining them or comparing them with C++'s
+#              == (either failed the query with an internal error)
 # group: [jit]
 
 require tpch
@@ -176,6 +177,95 @@ query I
 SELECT count(*) > 0 FROM actual
 ----
 true
+
+endloop
+
+endloop
+
+# Keys that come from the build side as row-pointer fields: a pipeline-local preaggregation compares consecutive rows'
+# keys through core, which compares floating-point keys with DuckDB's equality. One row in sixteen of every column is
+# NULL, as in the differential fuzz database, so the keys take that path
+statement ok
+CREATE TABLE partsupp_nulls AS
+SELECT * REPLACE (CASE WHEN hash(rowid, 'ps_partkey') % 16 = 0 THEN NULL ELSE ps_partkey END AS ps_partkey,
+       CASE WHEN hash(rowid, 'ps_suppkey') % 16 = 0 THEN NULL ELSE ps_suppkey END AS ps_suppkey,
+       CASE WHEN hash(rowid, 'ps_availqty') % 16 = 0 THEN NULL ELSE ps_availqty END AS ps_availqty,
+       CASE WHEN hash(rowid, 'ps_supplycost') % 16 = 0 THEN NULL ELSE ps_supplycost END AS ps_supplycost,
+       CASE WHEN hash(rowid, 'ps_comment') % 16 = 0 THEN NULL ELSE ps_comment END AS ps_comment)
+FROM partsupp_original
+
+statement ok
+CREATE TABLE supplier_nulls AS
+SELECT * REPLACE (CASE WHEN hash(rowid, 's_suppkey') % 16 = 0 THEN NULL ELSE s_suppkey END AS s_suppkey,
+       CASE WHEN hash(rowid, 's_name') % 16 = 0 THEN NULL ELSE s_name END AS s_name,
+       CASE WHEN hash(rowid, 's_nationkey') % 16 = 0 THEN NULL ELSE s_nationkey END AS s_nationkey,
+       CASE WHEN hash(rowid, 's_phone') % 16 = 0 THEN NULL ELSE s_phone END AS s_phone,
+       CASE WHEN hash(rowid, 's_acctbal') % 16 = 0 THEN NULL ELSE s_acctbal END AS s_acctbal,
+       CASE WHEN hash(rowid, 's_comment') % 16 = 0 THEN NULL ELSE s_comment END AS s_comment)
+FROM supplier_original
+
+statement ok
+CREATE TABLE part_nulls AS
+SELECT * REPLACE (CASE WHEN hash(rowid, 'p_partkey') % 16 = 0 THEN NULL ELSE p_partkey END AS p_partkey,
+       CASE WHEN hash(rowid, 'p_name') % 16 = 0 THEN NULL ELSE p_name END AS p_name,
+       CASE WHEN hash(rowid, 'p_mfgr') % 16 = 0 THEN NULL ELSE p_mfgr END AS p_mfgr,
+       CASE WHEN hash(rowid, 'p_brand') % 16 = 0 THEN NULL ELSE p_brand END AS p_brand,
+       CASE WHEN hash(rowid, 'p_type') % 16 = 0 THEN NULL ELSE p_type END AS p_type,
+       CASE WHEN hash(rowid, 'p_size') % 16 = 0 THEN NULL ELSE p_size END AS p_size,
+       CASE WHEN hash(rowid, 'p_container') % 16 = 0 THEN NULL ELSE p_container END AS p_container,
+       CASE WHEN hash(rowid, 'p_retailprice') % 16 = 0 THEN NULL ELSE p_retailprice END AS p_retailprice,
+       CASE WHEN hash(rowid, 'p_comment') % 16 = 0 THEN NULL ELSE p_comment END AS p_comment)
+FROM part_original
+
+statement ok
+CREATE VIEW build_float_union AS
+SELECT c0, c1, count(*) FROM (
+    SELECT CAST(t2.s_acctbal AS DOUBLE), t2.s_comment
+    FROM partsupp_nulls t1 JOIN supplier_nulls t2 ON t1.ps_suppkey = t2.s_suppkey AND t1.ps_supplycost <= t2.s_acctbal
+    WHERE t2.s_acctbal >= 2531.3 AND 1.5 > CAST(t2.s_acctbal AS DOUBLE) AND t1.ps_comment LIKE 'Customer#0000%'
+    UNION ALL
+    SELECT CAST(t2.s_acctbal AS DOUBLE), t2.s_comment
+    FROM partsupp_nulls t1 JOIN supplier_nulls t2 ON t1.ps_suppkey = t2.s_suppkey AND t1.ps_supplycost <= t2.s_acctbal
+    WHERE t1.ps_suppkey < 80000 AND t1.ps_partkey % 3 = 0) AS u(c0, c1)
+GROUP BY c0, c1
+
+statement ok
+CREATE VIEW float_right_join_union AS
+SELECT c0, c1, c2, count(*) FROM (
+    SELECT CAST(t2.ps_supplycost AS FLOAT), t3.p_brand, t1.s_nationkey
+    FROM supplier_nulls t1 JOIN partsupp_nulls t2 ON t1.s_suppkey = t2.ps_suppkey
+    RIGHT JOIN part_nulls t3 ON t2.ps_partkey = t3.p_partkey
+    UNION ALL
+    SELECT CAST(t2.ps_supplycost AS FLOAT), t3.p_brand, t1.s_nationkey
+    FROM supplier_nulls t1 JOIN partsupp_nulls t2 ON t1.s_suppkey = t2.ps_suppkey
+    RIGHT JOIN part_nulls t3 ON t2.ps_partkey = t3.p_partkey
+    WHERE t1.s_name NOT LIKE '%special%') AS u(c0, c1, c2)
+GROUP BY c0, c1, c2
+
+foreach threads 1 4
+
+statement ok
+SET threads={threads}
+
+foreach query build_float_union float_right_join_union
+
+statement ok
+SET jit_policy='off'
+
+statement ok
+CREATE OR REPLACE TABLE expected AS SELECT * FROM {query}
+
+statement ok
+SET jit_policy='auto'
+
+statement ok
+CREATE OR REPLACE TABLE actual AS SELECT * FROM {query}
+
+query I
+SELECT count(*) FROM ((SELECT * FROM expected EXCEPT ALL SELECT * FROM actual)
+                      UNION ALL (SELECT * FROM actual EXCEPT ALL SELECT * FROM expected))
+----
+0
 
 endloop
 
