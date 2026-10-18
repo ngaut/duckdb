@@ -11,10 +11,37 @@
 #include "sljit_predicate_numeric_codegen.hpp"
 
 #include "duckdb/common/helper.hpp"
+#include "duckdb/common/types/value.hpp"
 
 #include <cstddef>
 
 namespace duckdb {
+
+//! Branches on `FR0 op FR1` in DuckDB's order (see SljitDoubleCompareRanks). When the right operand is known not to be
+//! NaN one comparison decides; otherwise an unordered pair compares the operands' ranks. Clobbers R2 and R3
+static void EmitSljitDoubleCompareBranches(struct sljit_compiler *compiler, SljitNativeIntegerCompareOp op,
+                                           bool single_precision, bool right_is_number,
+                                           SljitPredicateBranches &result) {
+	const sljit_s32 precision = single_precision ? SLJIT_32 : 0;
+	if (right_is_number) {
+		result.true_jumps.push_back(sljit_emit_fcmp(compiler, NativeDoubleCompareAgainstNumberJumpType(op) | precision,
+		                                            SLJIT_FR0, 0, SLJIT_FR1, 0));
+		result.false_jumps.push_back(sljit_emit_jump(compiler, SLJIT_JUMP));
+		return;
+	}
+	auto ordered = sljit_emit_fcmp(compiler, SLJIT_ORDERED | precision, SLJIT_FR0, 0, SLJIT_FR1, 0);
+	sljit_emit_fop1(compiler, SLJIT_CMP_F64 | precision | SLJIT_SET_UNORDERED, SLJIT_FR0, 0, SLJIT_FR0, 0);
+	sljit_emit_op_flags(compiler, SLJIT_MOV, SLJIT_R2, 0, SLJIT_UNORDERED);
+	sljit_emit_fop1(compiler, SLJIT_CMP_F64 | precision | SLJIT_SET_UNORDERED, SLJIT_FR1, 0, SLJIT_FR1, 0);
+	sljit_emit_op_flags(compiler, SLJIT_MOV, SLJIT_R3, 0, SLJIT_UNORDERED);
+	result.true_jumps.push_back(sljit_emit_cmp(
+	    compiler, NativeIntegerCompareJumpType(SljitNativeIntegerKind::INT64, op), SLJIT_R2, 0, SLJIT_R3, 0));
+	result.false_jumps.push_back(sljit_emit_jump(compiler, SLJIT_JUMP));
+	sljit_set_label(ordered, sljit_emit_label(compiler));
+	result.true_jumps.push_back(
+	    sljit_emit_fcmp(compiler, NativeDoubleOrderedCompareJumpType(op) | precision, SLJIT_FR0, 0, SLJIT_FR1, 0));
+	result.false_jumps.push_back(sljit_emit_jump(compiler, SLJIT_JUMP));
+}
 
 bool TryEmitSljitNumericPredicateBranches(struct sljit_compiler *compiler, const SljitNativePredicate &predicate,
                                           const vector<bool> &source_not_null, bool sources_all_valid,
@@ -56,7 +83,9 @@ bool TryEmitSljitNumericPredicateBranches(struct sljit_compiler *compiler, const
 	}
 	case SljitNativePredicateKind::DOUBLE_COMPARE_CONSTANT: {
 		auto single_precision = PredicateDoubleSourceIsSinglePrecision(predicate.double_source_kind);
-		auto compare_type = NativeDoubleCompareJumpType(predicate.compare_op) | (single_precision ? SLJIT_32 : 0);
+		// the value is the left operand
+		auto compare_op =
+		    predicate.constant_on_left ? FlipNativeIntegerCompareOp(predicate.compare_op) : predicate.compare_op;
 		EmitLoadPredicateSourceIndex(compiler, predicate.source_index, SLJIT_S3, SLJIT_R1);
 		AppendPredicateSourceNullJump(compiler, result, predicate.source_index, SLJIT_R1, source_not_null,
 		                              sources_all_valid);
@@ -67,19 +96,14 @@ bool TryEmitSljitNumericPredicateBranches(struct sljit_compiler *compiler, const
 		} else {
 			sljit_emit_fset64(compiler, SLJIT_FR1, predicate.double_constant);
 		}
-		if (predicate.constant_on_left) {
-			result.true_jumps.push_back(sljit_emit_fcmp(compiler, compare_type, SLJIT_FR1, 0, SLJIT_FR0, 0));
-		} else {
-			result.true_jumps.push_back(sljit_emit_fcmp(compiler, compare_type, SLJIT_FR0, 0, SLJIT_FR1, 0));
-		}
-		result.false_jumps.push_back(sljit_emit_jump(compiler, SLJIT_JUMP));
+		EmitSljitDoubleCompareBranches(compiler, compare_op, single_precision, !Value::IsNan(predicate.double_constant),
+		                               result);
 		return true;
 	}
 	case SljitNativePredicateKind::DOUBLE_COMPARE_REFERENCES: {
 		static constexpr sljit_sw LEFT_SPILL_OFFSET = SLJIT_SELECT_LOCAL_SIZE;
 		static constexpr sljit_sw RIGHT_SPILL_OFFSET = SLJIT_SELECT_LOCAL_SIZE + sizeof(double);
 		auto single_precision = PredicateDoubleSourceIsSinglePrecision(predicate.double_source_kind);
-		auto compare_type = NativeDoubleCompareJumpType(predicate.compare_op) | (single_precision ? SLJIT_32 : 0);
 		EmitLoadPredicateSourceIndex(compiler, predicate.source_index, SLJIT_S3, SLJIT_R1);
 		EmitLoadPredicateSourceIndex(compiler, predicate.right_source_index, SLJIT_S3, SLJIT_S4);
 		AppendPredicateSourceNullJump(compiler, result, predicate.source_index, SLJIT_R1, source_not_null,
@@ -106,8 +130,7 @@ bool TryEmitSljitNumericPredicateBranches(struct sljit_compiler *compiler, const
 			EmitLoadPredicateDoubleOperand(compiler, predicate.double_right_source_kind, predicate.right_source_index,
 			                               SLJIT_S4, predicate.double_right_source_scale, SLJIT_FR1);
 		}
-		result.true_jumps.push_back(sljit_emit_fcmp(compiler, compare_type, SLJIT_FR0, 0, SLJIT_FR1, 0));
-		result.false_jumps.push_back(sljit_emit_jump(compiler, SLJIT_JUMP));
+		EmitSljitDoubleCompareBranches(compiler, predicate.compare_op, single_precision, false, result);
 		return true;
 	}
 	case SljitNativePredicateKind::INT128_COMPARE_CONSTANT: {

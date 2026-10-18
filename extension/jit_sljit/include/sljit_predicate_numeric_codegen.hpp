@@ -88,7 +88,30 @@ static SljitNativeIntegerCompareOp FlipNativeIntegerCompareOp(SljitNativeInteger
 	}
 }
 
-static sljit_s32 NativeDoubleCompareJumpType(SljitNativeIntegerCompareOp op) {
+//! DuckDB orders a NaN above every other value and equal to every other NaN, where IEEE leaves it unordered. A
+//! comparison that involves a NaN therefore holds exactly when it holds for the operands' ranks: 1 for a NaN, 0 for any
+//! other value
+static bool SljitDoubleCompareRanks(SljitNativeIntegerCompareOp op, int left_rank, int right_rank) {
+	switch (op) {
+	case SljitNativeIntegerCompareOp::EQUAL:
+		return left_rank == right_rank;
+	case SljitNativeIntegerCompareOp::NOT_EQUAL:
+		return left_rank != right_rank;
+	case SljitNativeIntegerCompareOp::LESS_THAN:
+		return left_rank < right_rank;
+	case SljitNativeIntegerCompareOp::GREATER_THAN:
+		return left_rank > right_rank;
+	case SljitNativeIntegerCompareOp::LESS_THAN_OR_EQUAL:
+		return left_rank <= right_rank;
+	case SljitNativeIntegerCompareOp::GREATER_THAN_OR_EQUAL:
+		return left_rank >= right_rank;
+	default:
+		throw InternalException("Unknown SLJIT native double predicate comparison operator");
+	}
+}
+
+//! The jump type of `left op right` when neither operand is NaN
+static sljit_s32 NativeDoubleOrderedCompareJumpType(SljitNativeIntegerCompareOp op) {
 	switch (op) {
 	case SljitNativeIntegerCompareOp::EQUAL:
 		return SLJIT_ORDERED_EQUAL;
@@ -102,6 +125,23 @@ static sljit_s32 NativeDoubleCompareJumpType(SljitNativeIntegerCompareOp op) {
 		return SLJIT_ORDERED_LESS_EQUAL;
 	case SljitNativeIntegerCompareOp::GREATER_THAN_OR_EQUAL:
 		return SLJIT_ORDERED_GREATER_EQUAL;
+	default:
+		throw InternalException("Unknown SLJIT native double predicate comparison operator");
+	}
+}
+
+//! The jump type of `left op right` when only the left operand can be NaN: a NaN ranks above the right operand
+static sljit_s32 NativeDoubleCompareAgainstNumberJumpType(SljitNativeIntegerCompareOp op) {
+	if (!SljitDoubleCompareRanks(op, 1, 0)) {
+		return NativeDoubleOrderedCompareJumpType(op);
+	}
+	switch (op) {
+	case SljitNativeIntegerCompareOp::NOT_EQUAL:
+		return SLJIT_UNORDERED_OR_NOT_EQUAL;
+	case SljitNativeIntegerCompareOp::GREATER_THAN:
+		return SLJIT_UNORDERED_OR_GREATER;
+	case SljitNativeIntegerCompareOp::GREATER_THAN_OR_EQUAL:
+		return SLJIT_UNORDERED_OR_GREATER_EQUAL;
 	default:
 		throw InternalException("Unknown SLJIT native double predicate comparison operator");
 	}

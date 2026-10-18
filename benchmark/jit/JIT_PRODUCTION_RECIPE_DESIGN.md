@@ -482,9 +482,12 @@ signedness, nullability, result ABI, overflow semantics, code generation, and
 runtime adaptation, and matcher, codegen, runtime, and cost model consume the
 same facts. Integer operations sign-extend explicitly; a failing checked
 operation re-runs DuckDB's own operator so the error and operands match.
-Generated conjunctions build the complete packed mask before classifying it,
-and packed operations are admitted by SLJIT's exact operation-and-width
-capability test.
+Floating-point comparisons follow DuckDB's order, not IEEE's: a NaN ranks above
+every other value and equals every other NaN, so a comparison against a number
+reads the unordered outcome from the rank, and a comparison of two values that
+may both be NaN compares their ranks. Generated conjunctions build the
+complete packed mask before classifying it, and packed operations are admitted
+by SLJIT's exact operation-and-width capability test.
 
 ### Hash joins
 

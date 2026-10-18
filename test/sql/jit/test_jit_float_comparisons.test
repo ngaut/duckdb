@@ -1,0 +1,213 @@
+# name: test/sql/jit/test_jit_float_comparisons.test
+# description: Compiled floating-point comparisons follow DuckDB's order, not IEEE's: a NaN ranks above every other
+#              value (infinity included) and equals every other NaN, while -0.0 equals 0.0. Every operator against a
+#              number, against NaN and against another column, on either side, for FLOAT and DOUBLE, in projections and
+#              filters
+# group: [jit]
+
+statement ok
+LOAD jit_sljit
+
+statement ok
+SET jit_cbo_generated_stage_benefit=4096
+
+statement ok
+SET jit_cbo_materialization_elision_benefit=4096
+
+statement ok
+SET jit_cbo_native_operator_stage_benefit=4096
+
+statement ok
+SET jit_cbo_full_pipeline_benefit=4096
+
+statement ok
+SET jit_cbo_source_contract_scan_filter_penalty=0
+
+statement ok
+SET jit_cbo_startup_base_cost=0
+
+statement ok
+SET jit_cbo_startup_margin_basis_points=0
+
+statement ok
+SET jit_trace_runtime=true
+
+statement ok
+SET jit_event_log_size=100000
+
+# f and h, and g and r, pair every kind of value with every other: both NaN signs, both infinities, both zeros, numbers
+# and NULL
+statement ok
+CREATE TABLE floats AS
+SELECT i,
+       CASE i % 9 WHEN 0 THEN 'nan'::DOUBLE WHEN 1 THEN -('nan'::DOUBLE) WHEN 2 THEN 'inf'::DOUBLE
+                  WHEN 3 THEN '-inf'::DOUBLE WHEN 4 THEN -0.0::DOUBLE WHEN 5 THEN 0.0::DOUBLE WHEN 6 THEN 2.5
+                  WHEN 7 THEN -1.5 ELSE NULL END AS f,
+       CASE (i // 9) % 9 WHEN 0 THEN 'nan'::DOUBLE WHEN 1 THEN -('nan'::DOUBLE) WHEN 2 THEN 'inf'::DOUBLE
+                  WHEN 3 THEN '-inf'::DOUBLE WHEN 4 THEN 0.0::DOUBLE WHEN 5 THEN -0.0::DOUBLE WHEN 6 THEN 2.5
+                  WHEN 7 THEN 7.0 ELSE NULL END AS h,
+       CASE i % 9 WHEN 0 THEN 'nan'::FLOAT WHEN 1 THEN -('nan'::FLOAT) WHEN 2 THEN 'inf'::FLOAT
+                  WHEN 3 THEN '-inf'::FLOAT WHEN 4 THEN -0.0::FLOAT WHEN 5 THEN 0.0::FLOAT WHEN 6 THEN 2.5::FLOAT
+                  WHEN 7 THEN -1.5::FLOAT ELSE NULL END AS g,
+       CASE (i // 9) % 9 WHEN 0 THEN 'nan'::FLOAT WHEN 1 THEN -('nan'::FLOAT) WHEN 2 THEN 'inf'::FLOAT
+                  WHEN 3 THEN '-inf'::FLOAT WHEN 4 THEN 0.0::FLOAT WHEN 5 THEN -0.0::FLOAT WHEN 6 THEN 2.5::FLOAT
+                  WHEN 7 THEN 7.0::FLOAT ELSE NULL END AS r
+FROM range(810000) t(i)
+
+statement ok
+CREATE VIEW comparisons AS
+SELECT sum(CASE WHEN f = 2.5 THEN 1 ELSE 0 END),
+       sum(CASE WHEN 2.5 = f THEN 1 ELSE 0 END),
+       sum(CASE WHEN f = 'nan'::DOUBLE THEN 1 ELSE 0 END),
+       sum(CASE WHEN 'nan'::DOUBLE = f THEN 1 ELSE 0 END),
+       sum(CASE WHEN f = h THEN 1 ELSE 0 END),
+       sum(CASE WHEN f <> 2.5 THEN 1 ELSE 0 END),
+       sum(CASE WHEN 2.5 <> f THEN 1 ELSE 0 END),
+       sum(CASE WHEN f <> 'nan'::DOUBLE THEN 1 ELSE 0 END),
+       sum(CASE WHEN 'nan'::DOUBLE <> f THEN 1 ELSE 0 END),
+       sum(CASE WHEN f <> h THEN 1 ELSE 0 END),
+       sum(CASE WHEN f < 2.5 THEN 1 ELSE 0 END),
+       sum(CASE WHEN 2.5 < f THEN 1 ELSE 0 END),
+       sum(CASE WHEN f < 'nan'::DOUBLE THEN 1 ELSE 0 END),
+       sum(CASE WHEN 'nan'::DOUBLE < f THEN 1 ELSE 0 END),
+       sum(CASE WHEN f < h THEN 1 ELSE 0 END),
+       sum(CASE WHEN f > 2.5 THEN 1 ELSE 0 END),
+       sum(CASE WHEN 2.5 > f THEN 1 ELSE 0 END),
+       sum(CASE WHEN f > 'nan'::DOUBLE THEN 1 ELSE 0 END),
+       sum(CASE WHEN 'nan'::DOUBLE > f THEN 1 ELSE 0 END),
+       sum(CASE WHEN f > h THEN 1 ELSE 0 END),
+       sum(CASE WHEN f <= 2.5 THEN 1 ELSE 0 END),
+       sum(CASE WHEN 2.5 <= f THEN 1 ELSE 0 END),
+       sum(CASE WHEN f <= 'nan'::DOUBLE THEN 1 ELSE 0 END),
+       sum(CASE WHEN 'nan'::DOUBLE <= f THEN 1 ELSE 0 END),
+       sum(CASE WHEN f <= h THEN 1 ELSE 0 END),
+       sum(CASE WHEN f >= 2.5 THEN 1 ELSE 0 END),
+       sum(CASE WHEN 2.5 >= f THEN 1 ELSE 0 END),
+       sum(CASE WHEN f >= 'nan'::DOUBLE THEN 1 ELSE 0 END),
+       sum(CASE WHEN 'nan'::DOUBLE >= f THEN 1 ELSE 0 END),
+       sum(CASE WHEN f >= h THEN 1 ELSE 0 END),
+       sum(CASE WHEN g = 2.5::FLOAT THEN 1 ELSE 0 END),
+       sum(CASE WHEN 2.5::FLOAT = g THEN 1 ELSE 0 END),
+       sum(CASE WHEN g = 'nan'::FLOAT THEN 1 ELSE 0 END),
+       sum(CASE WHEN 'nan'::FLOAT = g THEN 1 ELSE 0 END),
+       sum(CASE WHEN g = r THEN 1 ELSE 0 END),
+       sum(CASE WHEN g <> 2.5::FLOAT THEN 1 ELSE 0 END),
+       sum(CASE WHEN 2.5::FLOAT <> g THEN 1 ELSE 0 END),
+       sum(CASE WHEN g <> 'nan'::FLOAT THEN 1 ELSE 0 END),
+       sum(CASE WHEN 'nan'::FLOAT <> g THEN 1 ELSE 0 END),
+       sum(CASE WHEN g <> r THEN 1 ELSE 0 END),
+       sum(CASE WHEN g < 2.5::FLOAT THEN 1 ELSE 0 END),
+       sum(CASE WHEN 2.5::FLOAT < g THEN 1 ELSE 0 END),
+       sum(CASE WHEN g < 'nan'::FLOAT THEN 1 ELSE 0 END),
+       sum(CASE WHEN 'nan'::FLOAT < g THEN 1 ELSE 0 END),
+       sum(CASE WHEN g < r THEN 1 ELSE 0 END),
+       sum(CASE WHEN g > 2.5::FLOAT THEN 1 ELSE 0 END),
+       sum(CASE WHEN 2.5::FLOAT > g THEN 1 ELSE 0 END),
+       sum(CASE WHEN g > 'nan'::FLOAT THEN 1 ELSE 0 END),
+       sum(CASE WHEN 'nan'::FLOAT > g THEN 1 ELSE 0 END),
+       sum(CASE WHEN g > r THEN 1 ELSE 0 END),
+       sum(CASE WHEN g <= 2.5::FLOAT THEN 1 ELSE 0 END),
+       sum(CASE WHEN 2.5::FLOAT <= g THEN 1 ELSE 0 END),
+       sum(CASE WHEN g <= 'nan'::FLOAT THEN 1 ELSE 0 END),
+       sum(CASE WHEN 'nan'::FLOAT <= g THEN 1 ELSE 0 END),
+       sum(CASE WHEN g <= r THEN 1 ELSE 0 END),
+       sum(CASE WHEN g >= 2.5::FLOAT THEN 1 ELSE 0 END),
+       sum(CASE WHEN 2.5::FLOAT >= g THEN 1 ELSE 0 END),
+       sum(CASE WHEN g >= 'nan'::FLOAT THEN 1 ELSE 0 END),
+       sum(CASE WHEN 'nan'::FLOAT >= g THEN 1 ELSE 0 END),
+       sum(CASE WHEN g >= r THEN 1 ELSE 0 END)
+FROM floats
+
+statement ok
+CREATE VIEW f_greater AS SELECT count(*), sum(i) FROM floats WHERE f > 0
+
+statement ok
+CREATE VIEW f_less_or_equal AS SELECT count(*), sum(i) FROM floats WHERE f <= 2.5
+
+statement ok
+CREATE VIEW number_less AS SELECT count(*), sum(i) FROM floats WHERE 0 < f
+
+statement ok
+CREATE VIEW f_is_nan AS SELECT count(*), sum(i) FROM floats WHERE f = 'nan'::DOUBLE
+
+statement ok
+CREATE VIEW f_is_not_nan AS SELECT count(*), sum(i) FROM floats WHERE f <> 'nan'::DOUBLE
+
+statement ok
+CREATE VIEW f_below_nan AS SELECT count(*), sum(i) FROM floats WHERE f < 'nan'::DOUBLE
+
+statement ok
+CREATE VIEW f_at_least_nan AS SELECT count(*), sum(i) FROM floats WHERE f >= 'nan'::DOUBLE
+
+statement ok
+CREATE VIEW f_equal_h AS SELECT count(*), sum(i) FROM floats WHERE f = h
+
+statement ok
+CREATE VIEW f_not_equal_h AS SELECT count(*), sum(i) FROM floats WHERE f <> h
+
+statement ok
+CREATE VIEW f_less_h AS SELECT count(*), sum(i) FROM floats WHERE f < h
+
+statement ok
+CREATE VIEW f_greater_or_equal_h AS SELECT count(*), sum(i) FROM floats WHERE f >= h
+
+statement ok
+CREATE VIEW f_in_list AS SELECT count(*), sum(i) FROM floats WHERE f IN (2.5, 'nan'::DOUBLE)
+
+statement ok
+CREATE VIEW g_greater AS SELECT count(*), sum(i) FROM floats WHERE g > 0
+
+statement ok
+CREATE VIEW g_is_nan AS SELECT count(*), sum(i) FROM floats WHERE g = 'nan'::FLOAT
+
+statement ok
+CREATE VIEW g_greater_r AS SELECT count(*), sum(i) FROM floats WHERE g > r
+
+foreach threads 1 4
+
+statement ok
+SET threads={threads}
+
+foreach query comparisons f_greater f_less_or_equal number_less f_is_nan f_is_not_nan f_below_nan f_at_least_nan f_equal_h f_not_equal_h f_less_h f_greater_or_equal_h f_in_list g_greater g_is_nan g_greater_r
+
+statement ok
+SET jit_policy='off'
+
+statement ok
+CREATE OR REPLACE TABLE expected AS SELECT * FROM {query}
+
+statement ok
+SET jit_policy='auto'
+
+statement ok
+SELECT * FROM duckdb_jit_clear_events()
+
+statement ok
+CREATE OR REPLACE TABLE actual AS SELECT * FROM {query}
+
+query I
+SELECT count(*) > 0 FROM duckdb_jit_events() WHERE phase = 'runtime'
+----
+true
+
+query I
+SELECT count(*) FROM ((SELECT * FROM expected EXCEPT ALL SELECT * FROM actual)
+                      UNION ALL (SELECT * FROM actual EXCEPT ALL SELECT * FROM expected))
+----
+0
+
+endloop
+
+endloop
+
+# DuckDB's order itself, spelled out
+statement ok
+SET threads=1
+
+query IIIIII
+SELECT count(*) FILTER (WHERE f > 'inf'::DOUBLE), count(*) FILTER (WHERE f = 'nan'::DOUBLE),
+       count(*) FILTER (WHERE f < 'nan'::DOUBLE), count(*) FILTER (WHERE f = 0),
+       count(*) FILTER (WHERE g > 0), count(*) FILTER (WHERE g = 'nan'::FLOAT)
+FROM floats
+----
+180000	180000	540000	180000	360000	180000
