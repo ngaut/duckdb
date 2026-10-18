@@ -2,7 +2,8 @@
 """Differential fuzzing of the execution-region JIT against jit_policy='off'.
 
 Generates seeded random queries over the TPC-H schema -- foreign-key chains of inner and outer joins (some on
-expression keys, some with non-equality residuals), random filters (IS NULL among them), DISTINCT, GROUP BY (ROLLUP,
+expression keys, some on the string forms TPC-H also spells them in, some with non-equality residuals), random filters
+(IS NULL among them, and IN lists long enough to plan as MARK joins), DISTINCT, GROUP BY (ROLLUP,
 CUBE, GROUPING SETS, HAVING, ORDER BY ALL LIMIT) over up to five expression keys (CASE among them), FILTER aggregates,
 partitioned and ordered window functions, materialized CTEs with one or two consumers, UNION ALL and set operations,
 IN (one or two columns), EXISTS and correlated count subqueries -- and runs each one with the JIT off, at the default
@@ -125,6 +126,16 @@ EDGES = [
     ("partsupp", ("ps_suppkey",), "supplier", ("s_suppkey",)),
 ]
 
+# Foreign keys TPC-H also spells as strings: a join on them probes VARCHAR keys, inlined (phone country codes) and out of
+# line (names), each side written as (left table expression, right table expression)
+STRING_KEYS = {
+    ("orders", "customer"): ("'Customer#' || lpad(CAST({a}.o_custkey AS VARCHAR), 9, '0')", "{a}.c_name"),
+    ("lineitem", "supplier"): ("'Supplier#' || lpad(CAST({a}.l_suppkey AS VARCHAR), 9, '0')", "{a}.s_name"),
+    ("partsupp", "supplier"): ("'Supplier#' || lpad(CAST({a}.ps_suppkey AS VARCHAR), 9, '0')", "{a}.s_name"),
+    ("customer", "nation"): ("substring({a}.c_phone, 1, 2)", "CAST({a}.n_nationkey + 10 AS VARCHAR)"),
+    ("supplier", "nation"): ("substring({a}.s_phone, 1, 2)", "CAST({a}.n_nationkey + 10 AS VARCHAR)"),
+}
+
 ENUM_VALUES = {
     "l_returnflag": ["A", "N", "R"],
     "l_linestatus": ["F", "O"],
@@ -185,6 +196,8 @@ class QueryGenerator:
     def __init__(self, seed: int):
         self.rng = random.Random(seed)
         self.alias_counter = 0
+        # an IN list of six or more constants plans as a MARK join, which leaves insertion order undefined
+        self.mark_in_lists = True
 
     def alias(self) -> str:
         self.alias_counter += 1
@@ -213,13 +226,18 @@ class QueryGenerator:
             alias, own_cols, other, other_cols, fan_out = self.rng.choice(candidates)
             fanned_out = fanned_out or fan_out
             other_alias = self.alias()
-            # an expression key keeps the foreign-key cardinality but takes the hash join's key-expression path
-            key = "{} * 2" if self.rng.random() < 0.15 else "{}"
-            condition = " AND ".join(
-                f"{key.format(f'{alias}.{a}')} = {key.format(f'{other_alias}.{b}')}"
-                for a, b in zip(own_cols, other_cols)
-            )
             own_table = next(table for table_alias, table in tree.tables if table_alias == alias)
+            string_key = STRING_KEYS.get((other, own_table) if fan_out else (own_table, other))
+            if string_key and self.rng.random() < 0.3:
+                own_key, other_key = (string_key[1], string_key[0]) if fan_out else string_key
+                condition = f"{own_key.format(a=alias)} = {other_key.format(a=other_alias)}"
+            else:
+                # an expression key keeps the foreign-key cardinality but takes the hash join's key-expression path
+                key = "{} * 2" if self.rng.random() < 0.15 else "{}"
+                condition = " AND ".join(
+                    f"{key.format(f'{alias}.{a}')} = {key.format(f'{other_alias}.{b}')}"
+                    for a, b in zip(own_cols, other_cols)
+                )
             residual = self.join_residual(alias, own_table, other_alias, other)
             if residual:
                 condition += f" AND {residual}"
@@ -265,9 +283,14 @@ class QueryGenerator:
             return r.choice([f"{ref} < {day}", f"{ref} >= {day}"])
         if column.kind == "enum":
             values = ENUM_VALUES.get(column.name, ["X"])
-            picked = r.sample(values, min(len(values), r.randint(1, 3)))
+            # six or more constants plan as a MARK join against the constant list
+            count = r.randint(6, 8) if self.mark_in_lists and len(values) >= 6 and r.random() < 0.3 else r.randint(1, 3)
+            picked = r.sample(values, min(len(values), count))
             quoted = ", ".join(f"'{v}'" for v in picked)
             return r.choice([f"{ref} = '{picked[0]}'", f"{ref} IN ({quoted})", f"{ref} <> '{picked[0]}'"])
+        if self.mark_in_lists and column.name in ("c_phone", "s_phone") and r.random() < 0.5:
+            codes = ", ".join(f"'{code}'" for code in r.sample(range(10, 35), 7))
+            return f"substring({ref}, 1, 2) {'NOT ' if r.random() < 0.2 else ''}IN ({codes})"
         return f"{ref} {'NOT ' if r.random() < 0.2 else ''}LIKE '{r.choice(TEXT_PATTERNS)}'"
 
     def predicates(self, tree: JoinTree, low: int = 0, high: int = 3) -> list[str]:
@@ -486,9 +509,11 @@ class QueryGenerator:
         table = r.choice(["lineitem", "lineitem", "orders", "partsupp", "customer", "part"])
         tree = JoinTree([(self.alias(), table)])
         columns = tree.columns()
+        self.mark_in_lists = False
         expressions = [self.expression(r.choice(columns)) for _ in range(r.randint(1, 4))]
         select = ", ".join(f"{e} AS c{i}" for i, e in enumerate(expressions))
         where = self.predicates(tree, 0, 2)
+        self.mark_in_lists = True
         if family == "ordered":
             key = next(c for c in columns if c.kind == "key")
             where.append(f"{key.ref} % {r.randint(97, 1009)} = {r.randint(0, 3)}")
