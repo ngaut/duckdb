@@ -238,9 +238,18 @@ of aggregate terminals.
   group batch, the count-star pending state, the matched-row microbatch, and
   core's sink coalescing. The hash-join materialize batch and the post-join
   projected batch deep-copy strings with no width check.
-- `SljitPendingRowPointerAggregateBatch` replaces payload sources with one
-  class column in preclassified mode; only the `preclassified_payload` flag
-  keeps generic dispatchers from reading it as the payload (`ea83155c33c`).
+- A pending row-pointer batch is typed by its layout
+  (`SljitPendingRowPointerBatch<LAYOUT>`, `978de6d7e21`): the payload batch
+  and the string-set class batch flush through their own updates, so no
+  consumer can read a class column as the payload it replaced
+  (`ea83155c33c`). The pending preaggregated group batch keeps published
+  keys in a chunk of their own.
+- A scan vector that carries a storage dictionary passes through the source
+  contract unbatched, so sparse pipelines over dictionary-compressed string
+  columns (TPC-H Q10, Q12, Q19, Q21) see chunks of 5 to 120 rows. Batching
+  them by flattening the dictionary halved nothing measurable (Q19 JIT 250 ms
+  either way): those pipelines spend their time in the storage scan's
+  per-vector work, which batching cannot remove.
 
 ## Plan representation and artifact identity
 
@@ -622,7 +631,9 @@ first, because M3-M5 shrink once layouts and instances exist.
    preclassified row-pointer batch, the preaggregated group batch, the MARK
    boundary, and elided projections to explicit layouts; consumers resolve
    slots through layouts. Exit: the `preclassified_payload` flag and most
-   remap helpers are gone; layout mismatch fails at bind.
+   remap helpers are gone; layout mismatch fails at bind. The preclassified
+   batch is typed (`978de6d7e21`); the remap helpers of elided projections
+   and the MARK boundary remain.
 3. **One coalescer.** Replace per-step batch owners and per-site batching
    rules with the step coalescer and one byte-based rule. Exit: at most four
    owned batch kinds; no string deep copy decided by a step.
@@ -642,7 +653,15 @@ first, because M3-M5 shrink once layouts and instances exist.
    descriptors and move plans between stages. Exit: op descriptors within
    budget; planning cost per query measured and reduced.
 4. **Typed status.** Replace string control flow with typed status and blocker
-   enums.
+   enums. Region nodes read their lowering status from the boundary kind
+   (`08f44761b44`); contract readiness flags are still derived from blocker
+   strings.
+
+Measured cost (TPC-H Q02, SF10, one thread): planning a query costs about
+0.95 ms cold and 0.5 ms with the artifact cache warm, 1.5-3% of the query;
+the cache already hits for an identical query, and a query differing only in
+a literal recompiles in 40-55 us. Steps 2 and 3 therefore pay for clarity and
+for queries far shorter than TPC-H's, not for TPC-H throughput.
 
 ### M3 — binding
 
