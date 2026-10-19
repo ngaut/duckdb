@@ -4,7 +4,8 @@
 Generates seeded random queries over the TPC-H schema -- foreign-key chains of inner and outer joins (some on
 expression keys, some on the string forms TPC-H also spells them in, some with non-equality residuals), random filters
 (IS NULL among them, and IN lists long enough to plan as MARK joins), DISTINCT, GROUP BY (ROLLUP,
-CUBE, GROUPING SETS, HAVING, ORDER BY ALL LIMIT) over up to five expression keys (CASE among them), FILTER aggregates,
+CUBE, GROUPING SETS, HAVING, ORDER BY ALL LIMIT) over up to five expression keys (CASE and predicates over several
+columns used as values among them), FILTER aggregates,
 partitioned and ordered window functions, materialized CTEs with one or two consumers, UNION ALL and set operations,
 IN (one or two columns), EXISTS and correlated count subqueries -- and runs each one with the JIT off, at the default
 cost model and with compilation forced. Every run is a fresh shell
@@ -404,6 +405,20 @@ class QueryGenerator:
             ]
         )
 
+    def boolean_expression(self, columns: list[Column]) -> str:
+        """A predicate used as a value -- a projection, group key or aggregate argument. Its terms read several columns
+        in an order that need not match the input's, so the slots a compiled predicate reads its sources through differ
+        from the columns; AND, OR and NOT keep their three-valued results"""
+        r = self.rng
+        terms = [self.predicate(r.choice(columns)) for _ in range(r.randint(1, 3))]
+        combined = f" {r.choice(['AND', 'OR'])} ".join(f"({term})" for term in terms)
+        return f"NOT ({combined})" if r.random() < 0.2 else f"({combined})"
+
+    def value(self, columns: list[Column]) -> str:
+        if self.rng.random() < 0.12:
+            return self.boolean_expression(columns)
+        return self.expression(self.rng.choice(columns))
+
     def float_value(self, ref: str) -> str:
         """A FLOAT or DOUBLE value, so groups, DISTINCT and joins see floating-point keys: DuckDB treats -0.0 as 0.0
         and every NaN as the same value, which neither the bits nor a C++ comparison do. The fingerprint hash
@@ -438,6 +453,9 @@ class QueryGenerator:
         numeric = [c for c in columns if c.kind in ("key", "int", "dec")]
         decimals = [c for c in columns if c.kind == "dec"]
         choice = r.randint(0, 6)
+        if choice == 0 and r.random() < 0.3:
+            # counts the rows the predicate does not leave NULL
+            return f"count({self.boolean_expression(columns)})"
         if choice == 0 or not numeric:
             return "count(*)"
         if choice == 1:
@@ -446,11 +464,11 @@ class QueryGenerator:
             a, b = r.sample(decimals, 2)
             return f"sum({a.ref} * (1 - {b.ref}))"
         if choice == 3:
-            return f"min({self.expression(r.choice(columns))})"
+            return f"min({self.value(columns)})"
         if choice == 4:
-            return f"max({self.expression(r.choice(columns))})"
+            return f"max({self.value(columns)})"
         if choice == 5:
-            return f"count(DISTINCT {self.expression(r.choice(columns))})"
+            return f"count(DISTINCT {self.value(columns)})"
         if r.random() < 0.3:
             return f"sum({r.choice(numeric).ref}) FILTER (WHERE {self.predicate(r.choice(columns))})"
         # a floating-point sum rounds differently in a different order
@@ -460,7 +478,7 @@ class QueryGenerator:
         r, columns = self.rng, tree.columns()
         where_sql = f" WHERE {' AND '.join(where)}" if where else ""
         if shape == "agg":
-            groups = [self.expression(r.choice(columns)) for _ in range(r.randint(0, 5))]
+            groups = [self.value(columns) for _ in range(r.randint(0, 5))]
             aggregates = [self.aggregate(columns) for _ in range(r.randint(1, 3))]
             group_sql = ""
             if groups:
@@ -493,7 +511,7 @@ class QueryGenerator:
                 over += f" ORDER BY {expressions[-1]}"
             sql = f"SELECT {', '.join(expressions)}, {window} OVER ({over}) FROM {tree.from_clause()}{where_sql}"
             return sql, len(expressions) + 1
-        expressions = [self.expression(r.choice(columns)) for _ in range(r.randint(1, 4))]
+        expressions = [self.value(columns) for _ in range(r.randint(1, 4))]
         distinct = "DISTINCT " if shape == "distinct" else ""
         sql = f"SELECT {distinct}{', '.join(expressions)} FROM {tree.from_clause()}{where_sql}"
         if shape == "topn":

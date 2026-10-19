@@ -74,6 +74,24 @@ class QueryGeneratorTest(unittest.TestCase):
                 counted = own_select.startswith("SELECT * FROM c ") and "count(*) FROM (" + own_select in sql
                 self.assertTrue("ORDER BY" in own_select or counted, sql)
 
+    def test_predicates_appear_as_values(self) -> None:
+        marker = "(TRUE AND FALSE)"
+        generator = QueryGenerator(7)
+        generator.boolean_expression = lambda columns: marker
+        queries = [generator.query() for _ in range(600)]
+        self.assertTrue(
+            any(marker in sql and "GROUP BY" in sql and sql.index("GROUP BY") < sql.rindex(marker) for sql in queries)
+        )
+        self.assertTrue(any(f"count({marker})" in sql for sql in queries))
+        self.assertTrue(any(f"SELECT {marker}" in sql or f"SELECT DISTINCT {marker}" in sql for sql in queries))
+
+        generator = QueryGenerator(7)
+        tree = generator.join_tree()
+        expressions = [generator.boolean_expression(tree.columns()) for _ in range(200)]
+        self.assertTrue(any(" AND " in e or " OR " in e for e in expressions))
+        for expression in expressions:
+            self.assertEqual(expression.count("("), expression.count(")"), expression)
+
     def test_order_sensitive_families_scan_one_table(self) -> None:
         generator = QueryGenerator(9)
         seen = 0
