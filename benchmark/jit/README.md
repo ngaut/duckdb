@@ -1,7 +1,7 @@
 # DuckDB JIT Verification
 
 This directory contains architecture, correctness, and performance guardrails
-for execution-region JIT. The architecture contract and migration plan are in
+for execution-region JIT. The architecture contract and the remaining work are in
 `benchmark/jit/JIT_PRODUCTION_RECIPE_DESIGN.md`.
 
 ## Fast verification
@@ -163,8 +163,8 @@ python3 benchmark/jit/install_refactor_guard_hooks.py
 Pre-commit validates the staged tree and writes a receipt for its Git tree.
 Pre-push reuses a matching receipt and adds required production performance
 gates. A missing or stale receipt causes the complete guard to run. TPC-H runs
-before the generic matrix so historical comparison is not preheated by an
-unrelated sustained workload.
+before the generic matrix so its comparison is not preheated by an unrelated
+sustained workload.
 
 Successful production verification writes a second exact-tree receipt. A
 normal push reuses it without rerunning benchmarks. If starting `git push`

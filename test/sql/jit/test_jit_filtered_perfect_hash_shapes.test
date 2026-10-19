@@ -64,7 +64,7 @@ foreach policy off auto
 statement ok
 SET jit_policy='{policy}'
 
-# comparisons that keep most rows, which once kept the filter out of the update loop
+# comparisons that keep most rows still run the filter inside the update loop
 query TTIIIII
 SELECT g, gs, count(*), sum(price), sum(price * (1.00::DECIMAL(15,2) - dec)), sum(dec), sum(id)
 FROM f WHERE price > 10.00::DECIMAL(15,2)

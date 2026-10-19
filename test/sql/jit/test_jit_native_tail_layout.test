@@ -10,11 +10,11 @@ SET threads=1;
 
 # The perfect-hash aggregate compresses its group column (CAST b AS TINYINT)
 # through a projection the region graph fuses into the aggregate's compiled
-# representation. A native-tail delegation hands the physical sink the raw
-# probe output instead, so the sink's declared TINYINT group reference used to
-# crash against the INTEGER column at >=~500k rows (the recipe is
-# cardinality-dependent). Admission now proves the delegated references
-# against the previous op's output layout and refuses the tail.
+# representation. A native-tail delegation would hand the physical sink the raw
+# probe output, whose INTEGER column does not match the sink's declared TINYINT
+# group reference, so admission proves the delegated references against the
+# previous op's output layout and refuses the tail. The recipe depends on
+# cardinality, so the table is large.
 statement ok
 CREATE TABLE facts AS SELECT (i % 100000)::INTEGER k, (i % 1000)::INTEGER a, (i % 97)::INTEGER b, i::BIGINT v FROM range(500000) tbl(i);
 

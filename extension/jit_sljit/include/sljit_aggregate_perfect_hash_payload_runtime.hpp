@@ -207,8 +207,8 @@ static void SljitExecuteFusedPerfectHashGroupedPrimitiveAggregatePayloadUpdate(
 	                                   : nullptr;
 	// Payload expressions and group keys can expose different physical vector shapes. In particular, numeric payload
 	// columns can be flat while compressed string group keys retain dictionary selections. Keep those facts
-	// independent: expression lowering only consumes payload facts, group lookup only consumes group facts, and legacy
-	// loops consume their explicit conjunction.
+	// independent: expression lowering only consumes payload facts, group lookup only consumes group facts, and loops
+	// that read both consume their explicit conjunction (perfect_hash_inputs_*).
 	const bool payload_flat_no_selection = payload_sources.FlatNoSelection(native_execute_sel, source_common_sel);
 	const bool payload_all_valid = payload_sources.AllValid();
 	const bool payload_flat_all_valid = payload_flat_no_selection && payload_all_valid;

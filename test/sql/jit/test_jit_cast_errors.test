@@ -1,8 +1,7 @@
 # name: test/sql/jit/test_jit_cast_errors.test
 # description: A compiled integer cast that fails raises DuckDB's own cast error: the type and value of the failing
 #              cast in a collapsed cast chain, and the column the cast reads. That includes a hash join probe that
-#              reads the BIGINT source of an elided INTEGER cast, whose failure used to be an internal error that
-#              invalidated the database (regular hash table) or reported a stack address as the value (perfect hash)
+#              reads the BIGINT source of an elided INTEGER cast, on a regular and on a perfect hash table
 # group: [jit]
 
 statement ok

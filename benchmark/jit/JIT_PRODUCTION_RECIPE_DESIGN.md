@@ -1,13 +1,12 @@
 # JIT Execution Architecture
 
-Last updated: 2026-10-18
-
 This document is the architecture contract for DuckDB execution-region JIT and
 the plan that moves the code to it. Each part states the **contract** (rules
-every change must keep), the **target** (the state the migration reaches), and
-where the code still differs (**today**). The migration plan at the end orders
-the work; every step lands behind the gates in `benchmark/jit/README.md`.
-Benchmark results belong in machine-readable artifacts, not in this design.
+every change must keep), the **target** (the state the remaining work reaches),
+and where the code still differs (**current state**). The plan at the end
+orders the remaining work; every step lands behind the gates in
+`benchmark/jit/README.md`. The document describes the code as it is: history
+lives in the commit log, and benchmark results in machine-readable artifacts.
 
 ## Goal
 
@@ -27,31 +26,23 @@ physical pipeline
   -> chunk step inside the native pipeline executor    (core loop)
 ```
 
-## Why the design changes
+## Where the structure falls short of the principles
 
-An October 2026 review measured the code against this contract's own
-principles. The principles held; the structure did not:
-
-- **Where time goes.** In TPC-H SF10 one-thread execution, generated machine
-  code is about 13% of time, precompiled C++ fast paths about 23%, and
-  DuckDB's storage scan inside kernels about 35%. Most wins come from fused
-  C++ and avoided operator overhead, not from generated code.
-- **Data layer.** Rows move between steps through 16 batch, pending and view
-  types and 19 owned batch instances, translated across 14 index spaces by
-  about 60 remap helpers. Most wrong-result classes the October fuzz
-  campaigns found were index-space confusions, and the preclassified
-  aggregate batch bug (a class column read as the payload it replaced) was a
-  layout that silently differed from what a generic dispatcher assumed.
-- **Strategy catalog.** 235 `SljitTry*` functions, 194 of them reached only
-  at runtime; the grouped input-vector update tries about 13 strategies per
-  call and re-checks facts already known at bind time.
-- **Representations.** One pipeline is described by about 10 structures.
-  Op plans embed every kind's sub-plan (11.7 KB for a native op plan, 13.8 KB
-  for an executable op), operator and sink infos are deep-copied 4-6 times on
-  a cache miss, and the artifact key is a rendered string of 5-29 KB that
-  includes estimates and blocker text.
-- **Binding.** Core binds had side effects the backend could not decline (the
-  eager probe bloom filter), and backends re-check `ready` flags per chunk.
+- **Time.** Precompiled C++ fast paths and DuckDB's storage scan inside
+  kernels account for more execution time than generated machine code; most
+  wins come from fused C++ and avoided operator overhead.
+- **Data layer.** Rows move between steps through many batch, pending and view
+  types and are translated across many index spaces by per-family remap
+  helpers. Index-space confusion is the dominant wrong-result class: a layout
+  that silently differs from what a consumer assumes produces garbage, not an
+  error.
+- **Strategy catalog.** Runtime cascades try strategies in order per call and
+  re-check facts already known at bind time.
+- **Representations.** About ten structures describe one pipeline. Op plans
+  embed every kind's sub-plan, operator and sink infos are deep-copied on a
+  cache miss, and the artifact key is a rendered description that includes
+  estimates and blocker text.
+- **Binding.** Backends re-check `ready` flags and layout facts per chunk.
 
 ## Principles
 
@@ -133,7 +124,7 @@ approve it. A selected runner that cannot compile or execute its admitted
 recipe is a failed proof, not evidence that the route was never selected.
 
 **Target:** one decision point after the graph is built, with one typed input
-and typed rejection reasons. **Today:** five gates
+and typed rejection reasons. **Current state:** five gates
 (`ExecutionRegionProductionEligibilityAllowsPlanning`, the pre-graph runner
 selection, `ExecutionRegionGraphMayHaveCostedAcceleration`, the cost-only
 runner, and the post-analysis runner), all reaching
@@ -142,8 +133,6 @@ runtime cardinality never feeds the decision; adaptive choices live in kernels
 (see Binding contract).
 
 ## Execution model: chunk steps
-
-This part is the target and is in place.
 
 The pipeline executor owns the loop of every compiled kernel. It fetches each
 chunk through the source contract the plan opened, advances a partitioned
@@ -218,16 +207,18 @@ one rule based on the bytes a copy would move. The 19 owned batch instances
 reduce to the source batch, the step coalescer, and the typed pending states
 of aggregate terminals.
 
-### Today
+### Current state
 
 - The table scan's source contract copies the kept rows of successive storage
   vectors into one chunk until it holds half a vector, within one scan
-  assignment and under the batch index its rows were scanned with. A vector
-  that keeps most rows, has out-of-line strings, or carries a storage
-  dictionary or FSST vector passes through uncopied. Since `e687a5ec637` the
-  scan also copies a region source's fixed-width filtered columns flat instead
-  of slicing them. Strings are copied, not referenced.
-- Other sources still hand over their chunks as produced;
+  assignment and under the batch index its rows were scanned with. Fixed-width
+  filtered columns of a region source are copied flat. A vector that keeps most
+  rows, has out-of-line strings, or carries a storage dictionary or FSST vector
+  passes through uncopied, so sparse pipelines over dictionary-compressed
+  string columns see small chunks; their time goes to the storage scan's
+  per-vector work, which batching does not remove. Strings are copied, not
+  referenced.
+- Other sources hand over their chunks as produced;
   `SljitSourceFetchPrimitiveRuntime` copies chunks under 1024 rows into
   `source_contract_batch`, except chunks whose strings are out of line
   (`SljitChunkHasOutOfLineValues`).
@@ -239,17 +230,20 @@ of aggregate terminals.
   core's sink coalescing. The hash-join materialize batch and the post-join
   projected batch deep-copy strings with no width check.
 - A pending row-pointer batch is typed by its layout
-  (`SljitPendingRowPointerBatch<LAYOUT>`, `978de6d7e21`): the payload batch
-  and the string-set class batch flush through their own updates, so no
-  consumer can read a class column as the payload it replaced
-  (`ea83155c33c`). The pending preaggregated group batch keeps published
-  keys in a chunk of their own.
-- A scan vector that carries a storage dictionary passes through the source
-  contract unbatched, so sparse pipelines over dictionary-compressed string
-  columns (TPC-H Q10, Q12, Q19, Q21) see chunks of 5 to 120 rows. Batching
-  them by flattening the dictionary halved nothing measurable (Q19 JIT 250 ms
-  either way): those pipelines spend their time in the storage scan's
-  per-vector work, which batching cannot remove.
+  (`SljitPendingRowPointerBatch<LAYOUT>`): the payload batch and the string-set
+  class batch flush through their own updates, so no consumer reads a class
+  column as the payload it replaced. The pending preaggregated group batch
+  keeps published keys in a chunk of their own.
+- Expressions have two index spaces with one rule each. An executable
+  predicate reads its sources through input slots (`input_source_indices`
+  maps slot to column); a scalar plan reads its source columns from the plan.
+  Composition, semantic remapping and re-preparation start from the semantic
+  plan, which reads input columns (`SljitCopySemanticExpressionPlan`); an
+  executable expression is re-addressed in place, keeping its compiled code,
+  by `SljitTryRemapExecutableExpressionInputs`. Aggregate payloads still carry
+  a second convention: a fused payload's scalar source is a slot of the
+  combined sources, an unfused payload's is a column with the column repeated
+  in `input_source_indices`.
 
 ## Plan representation and artifact identity
 
@@ -321,19 +315,20 @@ artifact.
 **No strings as control flow.** Stage status, blockers, and readiness are typed
 enums; reason text is derived from them.
 
-### Today
+### Current state
 
 - About 10 structures describe one pipeline: the execution contract, region
   graph, region IR, candidate with stage plan, lowering plan, native region
   plan, executable region, artifact, cached artifact, kernel, local state, and
   chunk step.
-- `ComposeSljitRegionArtifactCacheKey` renders the key from
-  `DescribeNativeRegionInternal` and contract descriptions; it includes
-  `op_estimated_input_count`, the cardinality-gated `flat_nullable_fast_path`,
-  blocker and reason strings, and the cast error message and query location.
-  Stats-derived values are baked into the artifact and covered by a separate
-  binding key.
-- Runtime-filter identities already stay out of the artifact: the probe plan
+- The key joins a semantic key (`BuildSljitRegionArtifactSemanticKey`:
+  candidate shape, contract shape, source facts and the semantic rendering of
+  the native region) with a binding key of the statistics generated code bakes
+  in (`BuildSljitRegionArtifactBindingKey`). The semantic part still carries
+  the aggregate update's estimated input count, the cardinality-gated
+  `emit_flat_nullable_fast_path`, and cast-error identity (message, query
+  location, source alias).
+- Runtime-filter identities stay out of the artifact: the probe plan
   records a binding slot, `SljitNativeHashJoinProbePlan::Copy` drops the
   identity, and the kernel hands its identity bindings to each thread's
   scratch. Copies of the first query's diagnostic `fields`, `reason`, and `ir`
@@ -341,10 +336,10 @@ enums; reason text is derived from them.
 - The planner runs up to three times per pipeline: the initial build, a
   rebuild when the source contract is unsupported, and a readiness refresh
   once dependencies finalize. Recursive rescheduling does not re-plan.
-- Strings decide behavior in a few places: `node.blocker_reason.empty()`
-  selects generated versus missing-contract stages, `"seq_scan"` and
-  `"hash_aggregate_scan"` gate statistics and recipe binding, and `*_ready`
-  flags are set from empty blocker strings.
+- Strings decide behavior in two places: the source function names
+  `"seq_scan"` and `"hash_aggregate_scan"` gate statistics and recipe
+  binding, and contract `*_ready` flags are set from empty blocker strings.
+  Region nodes read their lowering status from their boundary kind.
 
 ## Binding contract
 
@@ -392,14 +387,14 @@ kind's fields, no raw pointers to operator local state. Data-dependent choices
 (bloom filters, direct versus materialized consumers, adaptive preaggregation)
 are explicit monotone transitions recorded once, driven by observed counts.
 
-### Today
+### Current state
 
-- The probe bloom filter is the first three-phase binding (`ae686ed84a9`): the
-  bind sets `bloom_filter_requested`, the SLJIT bind requests
+- The probe bloom filter follows the three phases: the bind sets
+  `bloom_filter_requested`, the SLJIT bind requests
   `ExecutionUseHashJoinProbeBloomFilter` unless the probe key's exact-filter
   proof names this hash table, and the decision is a runtime path.
-- `ExecutionHashJoinProbeBinding` has 25 fields and embeds both the regular
-  (22 fields) and perfect (21 fields) layouts. `ExecutionBindHashJoinBuild`
+- `ExecutionHashJoinProbeBinding` embeds both the regular and the perfect
+  layout. `ExecutionBindHashJoinBuild`
   mutates the local sink's payload chunk and append state; aggregate binds
   allocate state adaptors.
 - Runtimes re-check `ready`, `output_mode`, key counts, and payload-source
@@ -430,35 +425,31 @@ Each precompiled C++ family belongs to one of three categories:
 Runtime proof reports generated and C++ work separately, so each family's
 share of a win is measurable.
 
-### Today
+### Current state
 
-The runtime cascades, by number of alternatives tried in order:
+The runtime cascades that try alternatives in order:
 
-| Cascade | Location | Alternatives | On total failure |
-|---|---|---|---|
-| Grouped input-vector update | `sljit_grouped_aggregate_input_vector_update_runtime.hpp` | ~13 | callers throw |
-| Row-pointer grouped update | `sljit_row_pointer_grouped_aggregate_update_runtime.hpp` | 6 + nested | caller throws |
-| Direct join-output aggregate | `sljit_direct_join_output_aggregate_runtime.hpp` | 8 | native materialize |
-| Probe aggregate consumer | `sljit_hash_join_probe_aggregate_consumer_runtime.hpp` | ~8 | generic probe drain |
-| Probe path | `sljit_hash_join_probe_executor_runtime.hpp` | 5 C++ (2 for MARK selection) + generated | generated kernel |
-| Grouped bound update | `sljit_grouped_aggregate_direct_update_runtime.hpp` | adaptive 3 + switch | generic path |
-| Projection chain | `sljit_projection_chain_runtime.hpp` | ~6 | expression runtime |
-| Join projection aggregate inputs | `sljit_hash_join_projection_aggregate_input_runtime.hpp` | ~7 per column | blocked |
-| Full-pipeline step | `sljit_native_pipeline_runtime.hpp` | 5 | throw |
+| Cascade | Location | On total failure |
+|---|---|---|
+| Grouped input-vector update | `sljit_grouped_aggregate_input_vector_update_runtime.hpp` | callers throw |
+| Row-pointer grouped update | `sljit_row_pointer_grouped_aggregate_update_runtime.hpp` | caller throws |
+| Direct join-output aggregate | `sljit_direct_join_output_aggregate_runtime.hpp` | native materialize |
+| Probe aggregate consumer | `sljit_hash_join_probe_aggregate_consumer_runtime.hpp` | generic probe drain |
+| Probe path | `sljit_hash_join_probe_executor_runtime.hpp` | generated kernel |
+| Grouped bound update | `sljit_grouped_aggregate_direct_update_runtime.hpp` | generic path |
+| Projection chain | `sljit_projection_chain_runtime.hpp` | expression runtime |
+| Join projection aggregate inputs | `sljit_hash_join_projection_aggregate_input_runtime.hpp` | blocked |
+| Full-pipeline step | `sljit_native_pipeline_runtime.hpp` | throw |
 
 Most runtime descriptor work runs on the first chunk and is cached; a failure
-disables that strategy for the step. The join projection aggregate inputs
-rebuild expressions per chunk; only TPC-H Q10 reaches them (66 batches at
-SF1). The falls-through that TPC-H takes cost little: a batch the row-pointer
-preaggregation rejects for its group count (Q07, Q09, Q10: about 5% of their
-aggregate input) turns the strategy off adaptively, and a buffered pending-run
-decision (Q13) rejects later batches before touching rows. Strategy binding
-therefore pays for clarity, not TPC-H time; sampled profiles show no
-per-chunk binding or dispatch cost. Families by size: preaggregation (20
-files, ~7.3K lines, mostly C++ with three generated-kernel call sites),
-complementary sums (~1.4K, pure C++), all-valid probe templates (~1.3K, pure
-C++), probe aggregate consumers (~1.1K), count-star preaggregation (~1.0K,
-pure C++), string-set classification (~0.6K, pure C++).
+disables that strategy for the step, and adaptive strategies (row-pointer
+preaggregation, pending-run buffering) switch themselves off after a rejected
+batch, so falling through costs little time. The join projection aggregate
+inputs rebuild their expressions per chunk. The precompiled families are
+preaggregation (mostly C++, with generated-kernel call sites), complementary
+sums, all-valid probe templates, probe aggregate consumers, count-star
+preaggregation and string-set classification, all pure C++ apart from the
+first.
 
 ## Semantic rules that hold throughout
 
@@ -561,7 +552,7 @@ the cost model selected, including queries that later fail compilation.
 Traced proof runs are separate from production timing.
 
 **Target:** runtime proof separates generated work from precompiled C++ work.
-**Today:** `GENERATED_STAGE_WORK` is also recorded for C++ fast paths.
+**Current state:** `GENERATED_STAGE_WORK` is also recorded for C++ fast paths.
 
 ## Performance contract
 
@@ -595,19 +586,16 @@ suite, the differential fuzz campaign, the generic one-thread and parallel
 workloads, and the affected TPC-H scale factors.
 
 - **Differential first.** The refactor guard runs a fixed-seed campaign of
-  random queries over a NULL-injected TPC-H schema at every pre-commit
-  (`2b95c8c252c`); longer campaigns over larger scale factors catch
-  size-dependent classes such as key compression. A query feature added to
-  the generator is a test of every existing path, and a value domain the
-  schema lacks is an untested class: TPC-H has no floating-point column, and
-  wrong NaN comparisons and fatal floating-point group keys went unseen until
-  the fuzz database derived FLOAT and DOUBLE columns holding NaN, infinities
-  and both zeros. It now also derives narrow signed and unsigned integers at
-  both ends of their ranges, UBIGINT above BIGINT, signed HUGEINT,
-  DECIMAL(38,6), BOOLEAN and TIMESTAMP columns. Likewise a query shape the
-  generator never builds is an untested class: predicates over several
-  columns used as values (group keys, select lists, aggregate arguments)
-  are where an executable predicate's input slots differ from its columns.
+  random queries over a NULL-injected TPC-H schema at every pre-commit;
+  longer campaigns over larger scale factors catch size-dependent classes
+  such as key compression. A value domain the schema lacks and a query shape
+  the generator never builds are untested classes, so the fuzz database
+  derives the types TPC-H never stores (FLOAT and DOUBLE with NaN, infinities
+  and both zeros; narrow signed and unsigned integers at both ends of their
+  ranges; UBIGINT above BIGINT; signed HUGEINT; DECIMAL(38,6); BOOLEAN;
+  TIMESTAMP), and the generator builds predicates over several columns as
+  values and comparisons between two columns of one table. Coverage needs
+  NULL-free data too: NULL-injected columns keep every all-valid path cold.
 - **Properties, not routes.** A test asserts result parity with
   `jit_policy='off'`, order where it matters, and error parity. It may assert
   one coverage counter proving the path ran; it does not encode which route a
@@ -615,42 +603,25 @@ workloads, and the affected TPC-H scale factors.
 - **Mutation check.** A new path is verified by breaking it and watching its
   test fail.
 
-## Migration plan
+## Remaining work
 
 Each step is a sequence of commits that pass the full guard; no floor moves.
-Steps within a phase are ordered; phases M1 and M2 are independent and come
-first, because M3-M5 shrink once layouts and instances exist.
-
-### M0 — foundations (done)
-
-- Chunk-step execution with core-owned loop, sink, and partition protocol.
-- Differential fuzz campaign in every pre-commit guard (`2b95c8c252c`).
-- Region sources compact filtered fixed-width columns (`e687a5ec637`).
-- First describe/choose/materialize binding: the probe bloom filter
-  (`ae686ed84a9`, ABI 12 in `341237e1a22`).
+Steps within a phase are ordered; M1 and M2 are independent and come first,
+because M3-M5 shrink once layouts and instances exist.
 
 ### M1 — data layer
 
-1. **Source batches.** The source contract fills batches across storage
-   vectors with compacted survivors; delete the source-fetch batching rules.
-   Exit: no per-vector work in the kernel; source batching code deleted;
-   `join_exact_filter_build` and TPC-H no slower. Table scans are done; the
-   kernel's source batching stays for other sources until the coalescer
-   (step 3) replaces it, and strings are copied until batches can reference
-   their buffers.
+1. **Source batches.** Every source fills batches across its vectors with
+   compacted survivors, as the table scan does, and strings are referenced
+   with their buffers kept alive instead of copied. Exit: the kernel's
+   source-fetch batching rules are deleted; `join_exact_filter_build` and
+   TPC-H are no slower.
 2. **Typed layouts.** Introduce `BatchLayout` per recipe edge; convert the
-   preclassified row-pointer batch, the preaggregated group batch, the MARK
-   boundary, and elided projections to explicit layouts; consumers resolve
-   slots through layouts. Exit: the `preclassified_payload` flag and most
-   remap helpers are gone; layout mismatch fails at bind. The preclassified
-   batch is typed (`978de6d7e21`); the remap helpers of elided projections
-   and the MARK boundary remain. Expressions have two index spaces and one
-   rule each: an executable predicate reads its sources through input slots
-   (`input_source_indices`); composition, remapping and re-preparation start
-   from the semantic plan, which reads input columns
-   (`SljitCopySemanticExpressionPlan`). Re-preparing an executable plan
-   directly had turned a predicate's slots into columns; one executable remap
-   and one semantic remap replace the per-family helpers.
+   preaggregated group batch, the MARK boundary and elided projections to
+   explicit layouts; consumers resolve slots through layouts, and aggregate
+   payloads take the expressions' single slot convention. Exit: the remap
+   helpers of elided projections and the MARK boundary are gone; layout
+   mismatch fails at bind.
 3. **One coalescer.** Replace per-step batch owners and per-site batching
    rules with the step coalescer and one byte-based rule. Exit: at most four
    owned batch kinds; no string deep copy decided by a step.
@@ -669,16 +640,13 @@ first, because M3-M5 shrink once layouts and instances exist.
 3. **Kind-tagged plans.** Replace composed op plans with kind-tagged
    descriptors and move plans between stages. Exit: op descriptors within
    budget; planning cost per query measured and reduced.
-4. **Typed status.** Replace string control flow with typed status and blocker
-   enums. Region nodes read their lowering status from the boundary kind
-   (`08f44761b44`); contract readiness flags are still derived from blocker
-   strings.
+4. **Typed status.** Contract readiness flags are derived from blocker
+   strings; replace them with typed status and blocker enums. Exit: no
+   behavior reads a reason or blocker string.
 
-Measured cost (TPC-H Q02, SF10, one thread): planning a query costs about
-0.95 ms cold and 0.5 ms with the artifact cache warm, 1.5-3% of the query;
-the cache already hits for an identical query, and a query differing only in
-a literal recompiles in 40-55 us. Steps 2 and 3 therefore pay for clarity and
-for queries far shorter than TPC-H's, not for TPC-H throughput.
+Planning is a small fraction of a TPC-H query and the cache already hits for
+an identical query, so steps 2 and 3 pay for clarity and for short queries,
+not for TPC-H throughput.
 
 ### M3 — binding
 
@@ -701,22 +669,11 @@ supports it, generalize or delete shape-specific families. Exit: every
 remaining backend family runs generated code on its hot path or carries a
 measured justification.
 
-Reachability comes first: a family no test, TPC-H query, generic workload or
-fuzz campaign reaches is deleted, provided the cascade behind it covers its
-inputs. The boundary-group continuations of grouped preaggregation (carryover
-and prefix/suffix updates that held a state address from one batch to the
-next) were the first such family; the pending batch's boundary merge covers
-groups that continue across chunks. The pair-key and comparison-predicate
-mark-selection probes and the not-equal chain probe followed, unreached even
-on NULL-free TPC-H; the generated probe kernel serves those plans. Then
-came the join-output entry of join-input complementary sums (the probe's
-aggregate consumer does that work), the direct row-pointer string-set update
-(the preclassified class batch handles it), and core's new-group address
-resolution chain (`TryResolveNewGroups`, ABI 13), whose callers all fell
-through to the find-or-create lookup. Coverage must include NULL-free data:
-the fuzz database's NULLs keep every all-valid probe path cold. A fallback
-at the end of a cascade whose callers throw on failure stays even when no
-workload reaches it.
+Reachability comes first: a family that no test, TPC-H query, generic
+workload or fuzz campaign (NULL-injected and NULL-free) reaches is deleted,
+provided the cascade behind it covers its inputs. A fallback at the end of a
+cascade whose callers throw on failure stays even when no workload reaches
+it.
 
 ### M6 — cost model
 

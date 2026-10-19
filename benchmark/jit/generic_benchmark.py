@@ -126,10 +126,8 @@ GENERIC_WORKLOADS = (
         "name": "scan_filter",
         "setup_sql": "CREATE OR REPLACE TABLE __jit_generic_input AS SELECT i FROM range(40000000) tbl(i);",
         "sql": "SELECT sum(i * 31 + (i % 97)) AS value FROM __jit_generic_input WHERE i % 7 = 3",
-        # Ten alternating T4 production pairs prove 2.016x after the source
-        # contract takes ownership of this proven-safe modulo predicate. Keep
-        # margin for storage-scan variance while preventing a return to the
-        # old vectorized-filter boundary.
+        # The source contract owns this exception-free modulo predicate, so the
+        # filter runs fused with the aggregate instead of as a vectorized filter.
         "minimum_auto_speedup": 1.08,
         "minimum_auto_speedup_by_threads": {4: 1.85},
         "max_auto_slowdown": 1.05,
@@ -151,9 +149,6 @@ GENERIC_WORKLOADS = (
             "WHERE event_date >= DATE '2024-04-01' AND event_date < DATE '2024-10-01' "
             "AND amount >= 200 AND status IN ('ACTIVE', 'PENDING')"
         ),
-        # Production promotion: 1.338x at T1 and 1.286x at T4. Preserve the
-        # demonstrated gain with thread-specific margins instead of a flaky
-        # machine-wide absolute timing threshold.
         "minimum_auto_speedup": 1.15,
         "minimum_auto_speedup_by_threads": {1: 1.25, 4: 1.20},
         "max_auto_slowdown": 1.05,
@@ -173,10 +168,8 @@ GENERIC_WORKLOADS = (
             "SELECT sum(id * 31) AS value FROM __jit_generic_like_fragments "
             "WHERE comment NOT LIKE '%special%requests%'"
         ),
-        # Cold exact-candidate verification, normal-form selection compaction, and
-        # 48-byte ARM64 pair scans with an overlapping vector tail promote at
-        # 1.604x (T1) and 1.556x (T4) over ten alternating repetitions. Preserve
-        # the demonstrated generic filter gain with a host-noise margin.
+        # Multi-fragment LIKE patterns: exact-candidate verification, selection
+        # compaction and paired vector scans with an overlapping tail.
         "minimum_auto_speedup": 1.20,
         "minimum_auto_speedup_by_threads": {1: 1.55, 4: 1.50},
         "max_auto_slowdown": 1.05,
@@ -345,8 +338,6 @@ GENERIC_WORKLOADS = (
             "GROUP BY group_flag, group_status ORDER BY group_flag, group_status"
         ),
         "minimum_auto_speedup": 1.12,
-        # Independent ten-pair promotion after separating payload and group vector-shape facts measured 1.498x at T1
-        # and 1.381x at T4. Preserve the speedup with roughly 6% margin.
         "minimum_auto_speedup_by_threads": {1: 1.40, 4: 1.30},
         "max_auto_slowdown": 1.05,
         "requires_compiled_auto": True,
@@ -400,9 +391,6 @@ GENERIC_WORKLOADS = (
             ") grouped"
         ),
         "minimum_auto_speedup": 0.0,
-        # A strict host-admitted ten-pair T1 qualification measured 25.096 ms
-        # and 3.743x after append-only publication stopped building an unused
-        # reverse map. Guard same-run speedup independently from raw runtime.
         "minimum_auto_speedup_by_threads": {1: 3.00, 4: 1.75},
         "max_auto_slowdown": 1.05,
         "requires_compiled_auto": True,
@@ -418,8 +406,6 @@ GENERIC_WORKLOADS = (
             ") grouped"
         ),
         "minimum_auto_speedup": 0.0,
-        # The same strict T1 qualification measured 29.225 ms and 3.167x.
-        # Preserve the relative contract independently from the raw baseline.
         "minimum_auto_speedup_by_threads": {1: 2.65, 4: 1.45},
         "max_auto_slowdown": 1.05,
         "requires_compiled_auto": True,
@@ -435,12 +421,11 @@ GENERIC_WORKLOADS = (
             ") grouped"
         ),
         # More than one interval per vector crosses the bounded uniqueness-summary
-        # budget. Coalescing remains a proof representation change, not a reason to
+        # budget. Coalescing is a proof representation change, not a reason to
         # rehash a locally monotonic stream during finalization.
         "minimum_auto_speedup": 0.0,
-        # Producer-owned monotonic summaries measured 3.254x at T1 (28.954 ms).
-        # Progression-boundary publication then removed parallel finalize rehash,
-        # measuring 3.106x at T4 (9.550 ms). Ratchet relative and raw contracts.
+        # Producer-owned monotonic summaries and progression-boundary publication
+        # keep parallel finalization from rehashing.
         "minimum_auto_speedup_by_threads": {1: 3.10, 4: 2.90},
         "max_auto_slowdown": 1.05,
         "requires_compiled_auto": True,
@@ -457,8 +442,6 @@ GENERIC_WORKLOADS = (
             ") grouped"
         ),
         "minimum_auto_speedup": 0.0,
-        # Shared physical payload descriptors and append-only publication
-        # measured 38.194 ms and 2.627x in a strict ten-pair T1 qualification.
         "minimum_auto_speedup_by_threads": {1: 1.70, 4: 1.45},
         "max_auto_slowdown": 1.05,
         "requires_compiled_auto": True,
@@ -475,12 +458,9 @@ GENERIC_WORKLOADS = (
         ),
         # Wide affine reductions share one source run and expand directly into
         # final aggregate states. Canonical machine-word batches classify once
-        # and use a raw-pointer progression writer, while wide values retain the
-        # exact general path. Append-only ownership also removes pointer-table
-        # resize and capacity-abandon work after exact uniqueness proof. Direct
-        # proof-owned finalization measured 5.617x at T1 (81.461 ms) in the
-        # strict ten-pair qualification. The independently promoted T4
-        # progression-boundary receipt remains 52.660 ms.
+        # and use a raw-pointer progression writer, while wide values keep the
+        # exact general path. Append-only ownership skips pointer-table resize
+        # and capacity-abandon work once uniqueness is proven.
         "minimum_auto_speedup": 0.0,
         "minimum_auto_speedup_by_threads": {1: 2.80, 4: 3.00},
         "max_auto_slowdown": 1.05,
@@ -534,19 +514,10 @@ GENERIC_WORKLOADS = (
             "USING (join_key)"
         ),
         "minimum_auto_speedup": 1.10,
-        # The outer regular probe now reduces dictionary-backed RHS values
-        # directly into the ungrouped aggregate state: no match selection, RHS
-        # gather, projection, or payload vector is published. The finalized filter
-        # view is bound once and contains no owning materialization state.
-        # Slot-directed execution contracts avoid constructing unused source,
-        # operator, and sink descriptors during CBO and graph lowering. The
-        # once-bound scan plan removes per-vector layout and fusion rebinding.
-        # Ten-pair promotion after replacing per-source-fetch suppression-map
-        # allocation with a thread-local linked scope chain measured 1.426x paired at
-        # T1 (9.654 ms). Four T4 promotions measured 1.108x, 1.102x, 1.099x,
-        # and 1.104x paired while raw JIT medians improved through 5.649, 5.618,
-        # 5.553, and 5.502 ms. Protect both the paired margin and independent raw
-        # ceilings.
+        # The outer regular probe reduces dictionary-backed RHS values directly
+        # into the ungrouped aggregate state: no match selection, RHS gather,
+        # projection, or payload vector is published. The finalized filter view
+        # is bound once and holds no owning materialization state.
         "minimum_auto_speedup_by_threads": {1: 1.35, 4: 1.09},
         "max_auto_slowdown": 1.05,
         "requires_compiled_auto": True,
@@ -570,9 +541,8 @@ GENERIC_WORKLOADS = (
             "WHERE shipment.ship_mode IN ('MAIL', 'SHIP') "
             "GROUP BY shipment.ship_mode ORDER BY shipment.ship_mode"
         ),
-        # Promotion receipts: 1.332x at T1 and 1.250x at T4. Fixed-width RHS
-        # values bind their immutable packed storage once; an external-string
-        # classifier remains reserved for equality that cannot use that layout.
+        # Fixed-width RHS values bind their immutable packed storage once; an
+        # external-string classifier serves equality that cannot use that layout.
         # With direct perfect-hash output, an incremental source derives the
         # build index as key-minus-minimum, while all-valid incremental inline
         # groups accumulate at their ordinal without rebinding selections.
@@ -605,7 +575,6 @@ GENERIC_WORKLOADS = (
         # Nine recurring groups cross the direct-tier boundary and prove that
         # the runtime-observed ninth key switches the exact accumulator to hash
         # lookup even when persisted NDV statistics underestimate the domain.
-        # Wide-key staging promotes at 1.179x (T1) and 1.141x (T4).
         "minimum_auto_speedup": 1.08,
         "minimum_auto_speedup_by_threads": {1: 1.12, 4: 1.08},
         "max_auto_slowdown": 1.05,
