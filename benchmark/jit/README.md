@@ -49,11 +49,14 @@ pre-commit) and the full level (300 queries). It builds and caches a TPC-H
 SF0.1 database in `benchmark/jit/local_baselines/databases/` in which every
 column the generator references is NULL in one row of sixteen. TPC-H has no
 floating-point column, so the database adds FLOAT and DOUBLE columns derived
-from TPC-H ones that mix in both NaN signs, both infinities and both zeros.
-Predicates over several columns also appear as values (select lists, group
-keys, aggregate arguments), where the input slots a compiled predicate reads
-differ from its columns. The guard rebuilds the database when the binary cannot read it or it lacks a
-derived column, and fails on any finding. Against a database without the
+from TPC-H ones that mix in both NaN signs, both infinities and both zeros,
+and likewise derives the types TPC-H never stores: TINYINT, UTINYINT,
+SMALLINT and USMALLINT at both ends of their ranges, UBIGINT above BIGINT,
+signed HUGEINT, DECIMAL(38,6), BOOLEAN and TIMESTAMP. Predicates over several
+columns also appear as values (select lists, group keys, aggregate
+arguments), where the input slots a compiled predicate reads differ from its
+columns. The guard rebuilds the database when the binary cannot read it or it
+lacks a derived column, and fails on any finding. Against a database without the
 derived columns (a plain TPC-H database), the fuzzer leaves them out. `--fuzz-queries`
 changes the campaign size; `--skip-fuzz` skips it and, like the other skips,
 forfeits the pre-commit receipt. Longer campaigns over larger scale factors

@@ -440,7 +440,7 @@ The runtime cascades, by number of alternatives tried in order:
 | Row-pointer grouped update | `sljit_row_pointer_grouped_aggregate_update_runtime.hpp` | 6 + nested | caller throws |
 | Direct join-output aggregate | `sljit_direct_join_output_aggregate_runtime.hpp` | 8 | native materialize |
 | Probe aggregate consumer | `sljit_hash_join_probe_aggregate_consumer_runtime.hpp` | ~8 | generic probe drain |
-| Probe path | `sljit_hash_join_probe_executor_runtime.hpp` | 6 C++ + generated | generated kernel |
+| Probe path | `sljit_hash_join_probe_executor_runtime.hpp` | 5 C++ (2 for MARK selection) + generated | generated kernel |
 | Grouped bound update | `sljit_grouped_aggregate_direct_update_runtime.hpp` | adaptive 3 + switch | generic path |
 | Projection chain | `sljit_projection_chain_runtime.hpp` | ~6 | expression runtime |
 | Join projection aggregate inputs | `sljit_hash_join_projection_aggregate_input_runtime.hpp` | ~7 per column | blocked |
@@ -448,10 +448,16 @@ The runtime cascades, by number of alternatives tried in order:
 
 Most runtime descriptor work runs on the first chunk and is cached; a failure
 disables that strategy for the step. The join projection aggregate inputs
-rebuild expressions per chunk. Families by size: preaggregation (21 files,
-~7.6K lines, mostly C++ with three generated-kernel call sites), all-valid
-probe templates (~2.3K lines, pure C++), complementary sums (~1.7K, pure
-C++), probe aggregate consumers (~1.3K), count-star preaggregation (~1.0K,
+rebuild expressions per chunk; only TPC-H Q10 reaches them (66 batches at
+SF1). The falls-through that TPC-H takes cost little: a batch the row-pointer
+preaggregation rejects for its group count (Q07, Q09, Q10: about 5% of their
+aggregate input) turns the strategy off adaptively, and a buffered pending-run
+decision (Q13) rejects later batches before touching rows. Strategy binding
+therefore pays for clarity, not TPC-H time; sampled profiles show no
+per-chunk binding or dispatch cost. Families by size: preaggregation (20
+files, ~7.3K lines, mostly C++ with three generated-kernel call sites),
+complementary sums (~1.4K, pure C++), all-valid probe templates (~1.3K, pure
+C++), probe aggregate consumers (~1.1K), count-star preaggregation (~1.0K,
 pure C++), string-set classification (~0.6K, pure C++).
 
 ## Semantic rules that hold throughout
@@ -596,7 +602,12 @@ workloads, and the affected TPC-H scale factors.
   schema lacks is an untested class: TPC-H has no floating-point column, and
   wrong NaN comparisons and fatal floating-point group keys went unseen until
   the fuzz database derived FLOAT and DOUBLE columns holding NaN, infinities
-  and both zeros.
+  and both zeros. It now also derives narrow signed and unsigned integers at
+  both ends of their ranges, UBIGINT above BIGINT, signed HUGEINT,
+  DECIMAL(38,6), BOOLEAN and TIMESTAMP columns. Likewise a query shape the
+  generator never builds is an untested class: predicates over several
+  columns used as values (group keys, select lists, aggregate arguments)
+  are where an executable predicate's input slots differ from its columns.
 - **Properties, not routes.** A test asserts result parity with
   `jit_policy='off'`, order where it matters, and error parity. It may assert
   one coverage counter proving the path ran; it does not encode which route a

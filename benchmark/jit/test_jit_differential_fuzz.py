@@ -31,6 +31,16 @@ class QueryGeneratorTest(unittest.TestCase):
             # a floating-point sum rounds differently in a different order
             self.assertIsNone(re.search(r"sum\((t\d+\.)?(" + "|".join(floats) + r")\b", sql), sql)
 
+    def test_every_derived_kind_is_generated(self) -> None:
+        # TPC-H stores only BIGINT/INTEGER keys, DECIMAL(15,2), DATE and strings; the derived columns give every other
+        # type the JIT has native paths for a column, and each must reach generated queries
+        derived = {name: SCHEMA[table][name] for table, columns in DERIVED_COLUMNS.items() for name in columns}
+        self.assertEqual({"float", "small", "wide", "dec", "bool", "ts"}, set(derived.values()))
+        generator = QueryGenerator(11)
+        queries = [generator.query() for _ in range(1000)]
+        for name in derived:
+            self.assertTrue(any(re.search(rf"\b{name}\b", sql) for sql in queries), name)
+
     def test_columns_the_database_lacks_are_never_generated(self) -> None:
         schema = copy.deepcopy(SCHEMA)
         present = {(table, name) for table, columns in schema.items() for name in columns}

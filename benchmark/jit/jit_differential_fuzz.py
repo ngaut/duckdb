@@ -43,8 +43,9 @@ CONFIGS = {
     "forced": FORCED_SETTINGS,
 }
 
-# column kinds: key (integer key), int, dec (DECIMAL), float (FLOAT or DOUBLE), date, enum (low-cardinality string),
-# text (free text)
+# column kinds: key (integer key), int, small (an integer narrower than INTEGER, signed or unsigned), wide (UBIGINT or
+# HUGEINT beyond BIGINT), dec (DECIMAL), float (FLOAT or DOUBLE), date, ts (TIMESTAMP), bool, enum (low-cardinality
+# string), text (free text)
 SCHEMA: dict[str, dict[str, str]] = {
     "lineitem": {
         "l_orderkey": "key",
@@ -64,6 +65,13 @@ SCHEMA: dict[str, dict[str, str]] = {
         "l_shipmode": "enum",
         "l_comment": "text",
         "l_ratio": "float",
+        "l_tiny": "small",
+        "l_usmall": "small",
+        "l_ubig": "wide",
+        "l_huge": "wide",
+        "l_wide": "dec",
+        "l_flag": "bool",
+        "l_ts": "ts",
     },
     "orders": {
         "o_orderkey": "key",
@@ -75,6 +83,8 @@ SCHEMA: dict[str, dict[str, str]] = {
         "o_clerk": "text",
         "o_shippriority": "int",
         "o_comment": "text",
+        "o_utiny": "small",
+        "o_flag": "bool",
     },
     "customer": {
         "c_custkey": "key",
@@ -103,6 +113,7 @@ SCHEMA: dict[str, dict[str, str]] = {
         "ps_supplycost": "dec",
         "ps_comment": "text",
         "ps_weight": "float",
+        "ps_small": "small",
     },
     "supplier": {
         "s_suppkey": "key",
@@ -125,10 +136,24 @@ DERIVED_COLUMNS: dict[str, dict[str, str]] = {
         "l_ratio": "CASE l_orderkey % 13 WHEN 0 THEN 'nan'::DOUBLE WHEN 1 THEN -('nan'::DOUBLE) WHEN 2 THEN 'inf'::DOUBLE "
         "WHEN 3 THEN '-inf'::DOUBLE WHEN 4 THEN -0.0::DOUBLE WHEN 5 THEN 0.0::DOUBLE "
         "ELSE CAST(l_extendedprice AS DOUBLE) / CAST(l_quantity AS DOUBLE) END",
+        # narrow and wide integers at both ends of their ranges, where arithmetic overflows and sign handling differ
+        "l_tiny": "CAST(CASE l_orderkey % 17 WHEN 0 THEN 127 WHEN 1 THEN -128 ELSE l_linenumber * 18 - 64 END AS TINYINT)",
+        "l_usmall": "CAST(CASE l_orderkey % 23 WHEN 0 THEN 65535 WHEN 1 THEN 0 ELSE l_partkey % 65536 END AS USMALLINT)",
+        "l_ubig": "CASE l_orderkey % 19 WHEN 0 THEN 18446744073709551615::UBIGINT WHEN 1 THEN 9223372036854775808::UBIGINT "
+        "ELSE CAST(l_orderkey AS UBIGINT) * 1000003 END",
+        "l_huge": "(CAST(l_orderkey AS HUGEINT) % 7 - 3) * 100000000000000000000 - CAST(l_partkey AS HUGEINT) * 7",
+        "l_wide": "CAST(CAST(l_extendedprice AS DECIMAL(38, 6)) * 12345678901 - 600000000000000 AS DECIMAL(38, 6))",
+        "l_flag": "l_returnflag = 'R' OR l_quantity > 45",
+        "l_ts": "CAST(l_shipdate AS TIMESTAMP) + to_seconds(l_orderkey % 86400)",
+    },
+    "orders": {
+        "o_utiny": "CAST(o_custkey % 256 AS UTINYINT)",
+        "o_flag": "o_orderstatus = 'F'",
     },
     "partsupp": {
         "ps_weight": "CASE ps_partkey % 7 WHEN 0 THEN 'nan'::FLOAT WHEN 1 THEN -0.0::FLOAT WHEN 2 THEN 0.0::FLOAT "
         "WHEN 3 THEN 'inf'::FLOAT ELSE CAST(ps_supplycost AS FLOAT) / 4 END",
+        "ps_small": "CAST(ps_availqty - 5000 AS SMALLINT)",
     },
     "supplier": {
         "s_score": "CASE s_suppkey % 6 WHEN 0 THEN 'nan'::DOUBLE WHEN 1 THEN -0.0::DOUBLE WHEN 2 THEN 0.0::DOUBLE "
@@ -184,8 +209,23 @@ DEC_BOUNDS = {
     "p_retailprice": (900, 2100),
     "ps_supplycost": (1, 1000),
     "s_acctbal": (-999, 9999),
+    "l_wide": (-600000000000000, 700000000000000),
 }
 INT_BOUNDS = {"l_linenumber": (1, 7), "o_shippriority": (0, 0), "p_size": (1, 50), "ps_availqty": (1, 9999)}
+SMALL_BOUNDS = {"l_tiny": (-128, 127), "l_usmall": (0, 65535), "o_utiny": (0, 255), "ps_small": (-4999, 4999)}
+WIDE_CONSTANTS = {
+    "l_ubig": ["0", "9223372036854775807", "9223372036854775808", "18446744073709551614", "30000000000"],
+    "l_huge": [
+        "0",
+        "100000000000000000000",
+        "-5",
+        "30000000000000000000000000",
+        "170141183460469231731687303715884105727",
+    ],
+}
+
+
+NUMERIC_KINDS = ("key", "int", "small", "wide", "dec")
 
 
 @dataclass
@@ -278,7 +318,7 @@ class QueryGenerator:
             (name, other_name)
             for name, kind in SCHEMA[table].items()
             for other_name, other_kind in SCHEMA[other].items()
-            if kind == other_kind and kind in ("int", "dec", "float", "date")
+            if kind == other_kind and kind in ("int", "small", "wide", "dec", "float", "date", "ts")
         ]
         if not pairs:
             return None
@@ -290,13 +330,13 @@ class QueryGenerator:
         r, ref = self.rng, column.ref
         if r.random() < 0.08:
             return f"{ref} IS {r.choice(['', 'NOT '])}NULL"
-        if column.kind in ("key", "int", "dec") and r.random() < 0.1:
+        if column.kind in ("key", "int", "small", "wide", "dec") and r.random() < 0.1:
             # DuckDB ranks NaN above infinity and equal to itself; IEEE comparisons leave it unordered
             operator = r.choice(["=", "<>", "<", ">", "<=", ">="])
             constant = r.choice(["0", "1.5", "'nan'::DOUBLE", "'inf'::DOUBLE", "-0.0::DOUBLE"])
             value = self.float_value(ref)
             return f"{value} {operator} {constant}" if r.random() < 0.5 else f"{constant} {operator} {value}"
-        if column.kind in ("key", "int", "dec") and r.random() < 0.05:
+        if column.kind in ("key", "int", "small", "wide", "dec") and r.random() < 0.05:
             # DISTINCT FROM compares NULL as a value
             negate = "NOT " if r.random() < 0.5 else ""
             value = r.choice(["NULL", str(r.randint(0, 50))])
@@ -306,6 +346,23 @@ class QueryGenerator:
         if column.kind == "int":
             low, high = INT_BOUNDS.get(column.name, (0, 100))
             return r.choice([f"{ref} > {r.randint(low, high)}", f"{ref} BETWEEN {low} AND {r.randint(low, high)}"])
+        if column.kind == "small":
+            low, high = SMALL_BOUNDS.get(column.name, (0, 100))
+            value = r.randint(low, high)
+            return r.choice(
+                [f"{ref} > {value}", f"{ref} <= {value}", f"{ref} BETWEEN {low} AND {value}", f"{ref} = {high}"]
+            )
+        if column.kind == "wide":
+            value = r.choice(WIDE_CONSTANTS.get(column.name, ["0"]))
+            return r.choice([f"{ref} > {value}", f"{ref} <= {value}", f"{ref} = {value}", f"{ref} % 3 = 1"])
+        if column.kind == "bool":
+            return r.choice([ref, f"NOT {ref}", f"{ref} IS TRUE", f"{ref} IS NOT FALSE", f"{ref} = ({ref} IS NULL)"])
+        if column.kind == "ts":
+            moment = (
+                f"TIMESTAMP '199{r.randint(2, 8)}-{r.randint(1, 12):02d}-{r.randint(1, 28):02d} "
+                f"{r.randint(0, 23):02d}:{r.randint(0, 59):02d}:00'"
+            )
+            return r.choice([f"{ref} < {moment}", f"{ref} >= {moment}", f"hour({ref}) < {r.randint(1, 23)}"])
         if column.kind == "dec":
             low, high = DEC_BOUNDS.get(column.name, (0, 1000))
             value = round(r.uniform(low, high), 2)
@@ -347,7 +404,7 @@ class QueryGenerator:
         r, ref = self.rng, column.ref
         if r.random() < 0.5:
             return ref
-        if floats and column.kind in ("key", "int", "dec") and r.random() < 0.15:
+        if floats and column.kind in ("key", "int", "small", "wide", "dec") and r.random() < 0.15:
             return self.float_value(ref)
         if r.random() < 0.15:
             return f"CASE WHEN {self.predicate(column)} THEN {ref} END"
@@ -377,6 +434,43 @@ class QueryGenerator:
                     f"(CAST({ref} AS INTEGER) - {r.randint(10, 100000)}) // {r.randint(2, 9)}",
                     f"-{ref}",
                     *casts,
+                ]
+            )
+        if column.kind == "small":
+            # the narrow type's own arithmetic overflows at its ends; off and the JIT must raise the same error
+            return r.choice(
+                [
+                    f"{ref} + 1",
+                    f"{ref} - 1",
+                    f"{ref} % {r.randint(2, 9)}",
+                    f"{ref} // {r.randint(2, 9)}",
+                    f"CAST({ref} AS INTEGER) * {r.randint(2, 300)}",
+                    f"CAST({ref} AS BIGINT) - {r.randint(1, 70000)}",
+                    f"-CAST({ref} AS INTEGER)",
+                ]
+            )
+        if column.kind == "wide":
+            return r.choice(
+                [
+                    f"{ref} % {r.randint(2, 1000)}",
+                    f"{ref} // {r.randint(2, 9)}",
+                    f"{ref} + 1",
+                    f"{ref} * 2",
+                    f"CAST({ref} % 100000 AS INTEGER)",
+                    f"CAST({ref} AS HUGEINT) - {r.randint(1, 1000)}",
+                ]
+            )
+        if column.kind == "bool":
+            return r.choice([f"NOT {ref}", f"CAST({ref} AS INTEGER)", f"CASE WHEN {ref} THEN 'y' ELSE 'n' END"])
+        if column.kind == "ts":
+            return r.choice(
+                [
+                    f"date_trunc('day', {ref})",
+                    f"hour({ref})",
+                    f"{ref} + INTERVAL 90 MINUTE",
+                    f"epoch_ms({ref})",
+                    f"date_diff('hour', TIMESTAMP '1992-01-01', {ref})",
+                    f"CAST({ref} AS DATE)",
                 ]
             )
         if column.kind == "dec":
@@ -442,6 +536,12 @@ class QueryGenerator:
         r, ref = self.rng, column.ref
         if column.kind in ("key", "int"):
             return r.choice([f"coalesce({ref}, -1)", f"nullif({ref} % 7, 0)"])
+        if column.kind in ("small", "wide"):
+            return r.choice([f"coalesce({ref}, 0)", f"nullif({ref} % 7, 0)"])
+        if column.kind == "bool":
+            return f"coalesce({ref}, false)"
+        if column.kind == "ts":
+            return f"coalesce({ref}, TIMESTAMP '1990-01-01 00:00:00')"
         if column.kind in ("dec", "float"):
             return r.choice([f"coalesce({ref}, 0)", f"nullif({ref}, 0)"])
         if column.kind == "date":
@@ -450,7 +550,7 @@ class QueryGenerator:
 
     def aggregate(self, columns: list[Column]) -> str:
         r = self.rng
-        numeric = [c for c in columns if c.kind in ("key", "int", "dec")]
+        numeric = [c for c in columns if c.kind in NUMERIC_KINDS]
         decimals = [c for c in columns if c.kind == "dec"]
         choice = r.randint(0, 6)
         if choice == 0 and r.random() < 0.3:
@@ -501,7 +601,7 @@ class QueryGenerator:
             return sql, len(groups) + len(aggregates)
         if shape == "window":
             # a frame-less window aggregate over a partition does not depend on the order of the partition's rows
-            numeric = [c for c in columns if c.kind in ("key", "int", "dec")]
+            numeric = [c for c in columns if c.kind in NUMERIC_KINDS]
             expressions = [self.expression(r.choice(columns)) for _ in range(r.randint(1, 3))]
             window = r.choice(["count(*)", f"sum({r.choice(numeric).ref})", f"max({r.choice(numeric).ref})"])
             over = f"PARTITION BY {expressions[0]}"
