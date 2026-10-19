@@ -213,26 +213,6 @@ static SljitRowPointerGroupedAggregateUpdateDecision SljitPlanRowPointerGroupedA
 	return decision;
 }
 
-static bool SljitTryExecuteRowPointerGroupedTargetPayloadUpdate(
-    ExecutionRegionRuntime &runtime, SljitRegionExecutionScratch &scratch, idx_t op_idx, SljitExecutableRegionOp &op,
-    DataChunk &payload_input, Vector &row_pointers, idx_t count,
-    const vector<ExecutionRowPointerGroupKeySource> &group_sources, const vector<idx_t> &payload_source_indices,
-    SljitAggregatePayloadSourceLayout payload_source_layout,
-    const vector<const ExecutionPrimitiveAggregateUpdateLane *> &payload_lanes,
-    ExecutionGroupedAggregateStateAddressBinding &grouped_state, SljitAggregatePayloadAdapterScratch &payload_scratch,
-    bool finish) {
-	if (payload_source_layout == SljitAggregatePayloadSourceLayout::FUSED_COMBINED) {
-		if (TryExecuteDirectRowPointerStringSetComplementarySumUpdate(
-		        runtime, scratch, op_idx, op, payload_input, row_pointers, count, group_sources, payload_source_indices,
-		        payload_lanes, grouped_state, finish)) {
-			return true;
-		}
-	}
-	return TryExecuteDirectRowPointerGroupedTargetPayloadUpdate(
-	    runtime, scratch, op_idx, op, payload_input, row_pointers, count, group_sources, payload_source_indices,
-	    payload_lanes, grouped_state, payload_scratch, finish);
-}
-
 static bool SljitTryExecuteRowPointerGroupedSplitPayloadUpdate(
     ExecutionRegionRuntime &runtime, SljitRegionExecutionScratch &scratch, idx_t op_idx, SljitExecutableRegionOp &op,
     DataChunk &payload_input, Vector &row_pointers, idx_t count,
@@ -381,9 +361,9 @@ static bool SljitTryExecuteNativeRowPointerGroupedAggregateUpdate(
 		return true;
 	}
 	if (decision.use_target_payload_update) {
-		if (SljitTryExecuteRowPointerGroupedTargetPayloadUpdate(
+		if (TryExecuteDirectRowPointerGroupedTargetPayloadUpdate(
 		        runtime, scratch, op_idx, op, payload_input, row_pointers, count, proven_group_sources,
-		        payload_source_indices, payload_source_layout, payload_lanes, grouped_state, payload_scratch, finish)) {
+		        payload_source_indices, payload_lanes, grouped_state, payload_scratch, finish)) {
 			return true;
 		}
 		record_unsupported("grouped_lookup_update");

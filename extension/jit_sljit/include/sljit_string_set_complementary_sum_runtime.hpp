@@ -169,32 +169,6 @@ static void SljitApplyStringSetComplementarySumLane(data_ptr_t state_address,
 	}
 }
 
-static void SljitExecuteStringSetComplementarySumSpan(const ExecutionGroupedAggregateStateTargetSpan &span,
-                                                      SljitStringSetComplementarySumUpdateState &state,
-                                                      UnifiedVectorFormat &predicate_format) {
-	if (!span.HasTargets()) {
-		return;
-	}
-	auto predicate_data = UnifiedVectorFormat::GetData<string_t>(predicate_format);
-	auto predicate_sel = predicate_format.sel;
-	auto &predicate_validity = predicate_format.validity;
-	for (idx_t idx = 0; idx < span.count; idx++) {
-		const auto row_idx = span.row_sel ? span.row_sel[idx] : idx;
-		const auto address_idx = SljitSelectedGroupedStateAddressIndex(span.address_sel, span.row_sel, idx, row_idx);
-		auto state_address = reinterpret_cast<data_ptr_t>(span.addresses[address_idx]);
-		bool matches = false;
-		const auto predicate_idx = predicate_sel->get_index(row_idx);
-		if (predicate_validity.RowIsValid(predicate_idx)) {
-			auto predicate = predicate_data[predicate_idx];
-			matches = SljitStringEqualsEitherConstant(predicate, state.constants[0], state.signatures[0],
-			                                          state.constants[1], state.signatures[1]);
-		}
-		SljitApplyStringSetComplementarySumLane(state_address, *state.matching_lane, matches);
-		SljitApplyStringSetComplementarySumLane(state_address, *state.non_matching_lane,
-		                                        predicate_validity.RowIsValid(predicate_idx) && !matches);
-	}
-}
-
 static void SljitExecutePreclassifiedStringSetComplementarySumSpan(const ExecutionGroupedAggregateStateTargetSpan &span,
                                                                    SljitStringSetComplementarySumUpdateState &state,
                                                                    UnifiedVectorFormat &predicate_format) {
@@ -404,45 +378,6 @@ static bool TryExecutePreaggregatedRowPointerPreclassifiedStringSetComplementary
 	scratch.RecordDirectNewAggregateUpdateResult(op_idx, true);
 	RecordSljitRegionMaterializationElision(runtime, op.kind,
 	                                        "row_pointer_preaggregated_string_set_complementary_sum_update", count);
-	return true;
-}
-
-static bool TryExecuteDirectRowPointerStringSetComplementarySumUpdate(
-    ExecutionRegionRuntime &runtime, SljitRegionExecutionScratch &scratch, idx_t op_idx, SljitExecutableRegionOp &op,
-    DataChunk &payload_input, Vector &row_pointers, idx_t count,
-    const vector<ExecutionRowPointerGroupKeySource> &group_sources, const vector<idx_t> &payload_source_indices,
-    const vector<const ExecutionPrimitiveAggregateUpdateLane *> &payload_lanes,
-    ExecutionGroupedAggregateStateAddressBinding &grouped_state, bool finish = true) {
-	SljitStringSetComplementarySumUpdateState state;
-	if (!SljitTryBindStringSetComplementarySumUpdate(op, payload_input, payload_source_indices, payload_lanes, state)) {
-		return false;
-	}
-	ExecutionGroupedAggregateStateTargetBatch targets;
-	auto stage_start = SljitRegionStageStart(runtime);
-	auto updated = ExecuteSljitRegionRecordedOperation(
-	    runtime, op_idx, op.kind, "direct_row_pointer_string_set_complementary_sum_lookup", stage_start,
-	    [&](optional_ptr<ExecutionOperatorStageRecorder> recorder) {
-		    return grouped_state.state->TryFindOrCreateRowPointerGroupStateTargets(
-		        payload_input, row_pointers, count, group_sources, op.aggregate_update.plan.sink_info, targets,
-		        recorder);
-	    });
-	if (!updated) {
-		scratch.RecordDirectNewAggregateUpdateResult(op_idx, false);
-		RecordSljitRegionStageRuntimePath(runtime, op_idx, op.kind,
-		                                  "direct_row_pointer_string_set_complementary_sum_lookup_miss", stage_start);
-		return false;
-	}
-	RecordSljitRegionStageRuntimePath(runtime, op_idx, op.kind,
-	                                  "direct_row_pointer_string_set_complementary_sum_lookup", stage_start);
-	auto update_start = SljitRegionStageStart(runtime);
-	UnifiedVectorFormat predicate_format;
-	payload_input.data[state.predicate_source_idx].ToUnifiedFormat(predicate_format);
-	SljitExecuteStringSetComplementarySumSpan(targets.InputOrder(), state, predicate_format);
-	RecordSljitRegionStageRuntime(runtime, op_idx, op.kind, "direct_row_pointer_string_set_complementary_sum_update",
-	                              update_start);
-	scratch.RecordDirectNewAggregateUpdateResult(op_idx, true);
-	RecordSljitRegionMaterializationElision(runtime, op.kind, "direct_row_pointer_string_set_complementary_sum_update",
-	                                        count);
 	return true;
 }
 
