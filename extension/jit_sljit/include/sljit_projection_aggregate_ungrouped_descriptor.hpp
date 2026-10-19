@@ -22,67 +22,6 @@ static bool SljitTryMarkProjectionAggregateRequiredOutput(const SljitExecutableR
 	return true;
 }
 
-static bool SljitTryAddExecutableExpressionSourceColumns(const SljitExecutableRegionExpression &expr,
-                                                         idx_t input_column_count,
-                                                         vector<uint8_t> &referenced_columns) {
-	if (!expr.input_source_indices.empty()) {
-		return SljitAddProjectionSourceColumns(expr.input_source_indices, input_column_count, referenced_columns);
-	}
-	return SljitAddProjectionExpressionSourceColumns(expr.plan, input_column_count, referenced_columns);
-}
-
-static bool SljitTryRemapProjectionSourceIndex(idx_t &source_index, const vector<idx_t> &projection_to_input) {
-	if (source_index >= projection_to_input.size() || projection_to_input[source_index] == DConstants::INVALID_INDEX) {
-		return false;
-	}
-	source_index = projection_to_input[source_index];
-	return true;
-}
-
-static bool SljitTryRemapProjectionSourceIndices(vector<idx_t> &source_indices,
-                                                 const vector<idx_t> &projection_to_input) {
-	for (auto &source_index : source_indices) {
-		if (!SljitTryRemapProjectionSourceIndex(source_index, projection_to_input)) {
-			return false;
-		}
-	}
-	return true;
-}
-
-static bool SljitTryRemapProjectionPredicateSourceIndices(SljitNativePredicate &predicate,
-                                                          const vector<idx_t> &projection_to_input) {
-	auto remap_source = [&](idx_t &source_index) {
-		return SljitTryRemapProjectionSourceIndex(source_index, projection_to_input);
-	};
-	auto remap_sources = [&](SljitNativePredicate &predicate) {
-		return SljitTryRemapProjectionSourceIndices(predicate.source_indices, projection_to_input);
-	};
-	auto ignore_sources = [&](SljitNativePredicate &) {
-		return true;
-	};
-	return SljitTryApplyProjectionPredicateSources(predicate, remap_source, remap_sources, ignore_sources);
-}
-
-static bool SljitTryRemapProjectionPlanSourceIndices(SljitNativeRegionExpressionPlan &plan,
-                                                     const vector<idx_t> &projection_to_input) {
-	auto remap_source = [&](idx_t &source_index) {
-		return SljitTryRemapProjectionSourceIndex(source_index, projection_to_input);
-	};
-	auto remap_sources = [&](vector<idx_t> &source_indices) {
-		return SljitTryRemapProjectionSourceIndices(source_indices, projection_to_input);
-	};
-	auto ignore_constant = [&](SljitNativeRegionExpressionPlan &) {
-		return true;
-	};
-	auto remap_predicate = [&](SljitNativeRegionExpressionPlan &plan) {
-		if (plan.predicate) {
-			return SljitTryRemapProjectionPredicateSourceIndices(*plan.predicate, projection_to_input);
-		}
-		return SljitTryRemapProjectionSourceIndices(plan.expression_tree_source_indices, projection_to_input);
-	};
-	return SljitTryApplyProjectionPlanSources(plan, remap_source, remap_sources, ignore_constant, remap_predicate);
-}
-
 static bool SljitTryBuildUngroupedAggregateRequiredProjectionOutputs(
     const SljitExecutableRegionOp &projection_op, const SljitExecutableRegionOp &aggregate_op,
     vector<uint8_t> &required_projection_outputs, optional_ptr<vector<idx_t>> fused_payload_sources = nullptr) {
@@ -198,15 +137,7 @@ static bool SljitTryBuildRemappedUngroupedAggregatePayloads(
 		if (aggregate.primitive_update_kind == AggregatePrimitiveUpdateKind::COUNT_STAR) {
 			continue;
 		}
-		if (!payload.input_source_indices.empty()) {
-			if (!SljitTryRemapProjectionSourceIndices(payload.input_source_indices, projection_to_input)) {
-				return false;
-			}
-			if (payload.plan.kind == SljitNativeRegionExpressionKind::TYPED_EXPRESSION_TREE) {
-				continue;
-			}
-		}
-		if (!SljitTryRemapProjectionPlanSourceIndices(payload.plan, projection_to_input)) {
+		if (!SljitTryRemapExecutableExpressionInputs(projection_to_input, payload)) {
 			return false;
 		}
 	}

@@ -41,8 +41,9 @@ static bool SljitTryBuildCountStarGroupProjection(const SljitExecutableRegionOp 
 		group_projection.output_not_null.push_back(projection_op.output_not_null[group.input_index]);
 	}
 	auto group_expression = make_uniq<SljitExecutableRegionExpression>();
-	SljitPrepareExecutableRegionExpression(projection_op.projections[group.input_index].plan, *group_expression,
-	                                       nullptr, true);
+	SljitPrepareExecutableRegionExpression(
+	    SljitCopySemanticExpressionPlan(projection_op.projections[group.input_index]), *group_expression, nullptr,
+	    true);
 	string compile_error;
 	if (!SljitCompilePreparedExecutableRegionExpression(*group_expression, false, compile_error)) {
 		return false;

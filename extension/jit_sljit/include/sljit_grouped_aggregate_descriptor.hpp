@@ -233,7 +233,7 @@ static bool SljitTryMapProducerGroupSource(
 	producer_group_source.input_vector_repeats_with_row_pointer = repeats_with_row_pointer;
 	SljitAttachHashJoinBuildConditionType(binding, producer_group_source, condition_idx);
 	vector<SljitNativeRegionExpressionPlan> producer_projection;
-	producer_projection.push_back(producer_expr.plan.Copy(true, false));
+	producer_projection.push_back(SljitCopySemanticExpressionPlan(producer_expr));
 	SljitNativeRegionExpressionPlan composed_group_plan;
 	if (!TryComposeNativeProjection(producer_projection, remapped_expr.plan, composed_group_plan, false)) {
 		blocker = "producer_group_compose_producer_kind_" + to_string(static_cast<int>(producer_expr.plan.kind)) +

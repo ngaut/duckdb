@@ -238,6 +238,17 @@ static bool SljitTryFindSingleProjectionPlanSource(const SljitNativeRegionExpres
 	return source_index != DConstants::INVALID_INDEX;
 }
 
+//! The input columns an executable expression reads: its input slots when it has them (a predicate's own sources
+//! are slots), its plan's sources otherwise
+static bool SljitTryAddExecutableExpressionSourceColumns(const SljitExecutableRegionExpression &expr,
+                                                         idx_t input_column_count,
+                                                         vector<uint8_t> &referenced_columns) {
+	if (!expr.input_source_indices.empty()) {
+		return SljitAddProjectionSourceColumns(expr.input_source_indices, input_column_count, referenced_columns);
+	}
+	return SljitAddProjectionExpressionSourceColumns(expr.plan, input_column_count, referenced_columns);
+}
+
 static bool SljitAddProjectionOutputSourceColumns(const SljitExecutableRegionOp &projection_op,
                                                   idx_t input_column_count, idx_t projection_idx,
                                                   optional_ptr<const vector<uint8_t>> skip_projection,
@@ -248,8 +259,8 @@ static bool SljitAddProjectionOutputSourceColumns(const SljitExecutableRegionOp 
 	if (projection_idx >= projection_op.projections.size()) {
 		return false;
 	}
-	return SljitAddProjectionExpressionSourceColumns(projection_op.projections[projection_idx].plan, input_column_count,
-	                                                 referenced);
+	return SljitTryAddExecutableExpressionSourceColumns(projection_op.projections[projection_idx], input_column_count,
+	                                                    referenced);
 }
 
 static bool SljitBuildProjectionSourceColumnSet(const SljitExecutableRegionOp &projection_op, idx_t input_column_count,
@@ -277,6 +288,87 @@ static bool SljitBuildProjectionSourceColumnSet(const SljitExecutableRegionOp &p
 		}
 	}
 	return true;
+}
+
+static bool SljitTryRemapSourceIndex(const vector<idx_t> &source_map, idx_t &source_index,
+                                     optional_ptr<idx_t> failed_source_index = nullptr) {
+	if (source_index >= source_map.size() || source_map[source_index] == DConstants::INVALID_INDEX) {
+		if (failed_source_index) {
+			*failed_source_index = source_index;
+		}
+		return false;
+	}
+	source_index = source_map[source_index];
+	return true;
+}
+
+static bool SljitTryRemapSourceIndices(const vector<idx_t> &source_map, vector<idx_t> &source_indices,
+                                       optional_ptr<idx_t> failed_source_index = nullptr) {
+	for (auto &source_index : source_indices) {
+		if (!SljitTryRemapSourceIndex(source_map, source_index, failed_source_index)) {
+			return false;
+		}
+	}
+	return true;
+}
+
+static bool SljitTryRemapSemanticPredicateSources(const vector<idx_t> &source_map, SljitNativePredicate &predicate,
+                                                  optional_ptr<idx_t> failed_source_index = nullptr) {
+	auto remap_source = [&](idx_t &source_index) {
+		return SljitTryRemapSourceIndex(source_map, source_index, failed_source_index);
+	};
+	auto remap_no_sources_before_scalars = [&](SljitNativePredicate &) {
+		return true;
+	};
+	auto remap_vector_sources = [&](SljitNativePredicate &predicate) {
+		return SljitTryRemapSourceIndices(source_map, predicate.source_indices, failed_source_index) &&
+		       SljitTryRemapSourceIndices(source_map, predicate.guard_source_indices, failed_source_index);
+	};
+	return SljitTryApplyProjectionPredicateSources(predicate, remap_source, remap_no_sources_before_scalars,
+	                                               remap_vector_sources);
+}
+
+//! Re-addresses a semantic plan (one whose predicate reads input columns, see SljitCopySemanticExpressionPlan) to
+//! the input columns source_map assigns
+static bool SljitTryRemapSemanticPlanSources(const vector<idx_t> &source_map, SljitNativeRegionExpressionPlan &plan,
+                                             optional_ptr<idx_t> failed_source_index = nullptr) {
+	auto remap_source = [&](idx_t &source_index) {
+		return SljitTryRemapSourceIndex(source_map, source_index, failed_source_index);
+	};
+	auto remap_sources = [&](vector<idx_t> &source_indices) {
+		return SljitTryRemapSourceIndices(source_map, source_indices, failed_source_index);
+	};
+	auto remap_predicate = [&](SljitNativeRegionExpressionPlan &predicate_plan) {
+		return predicate_plan.predicate &&
+		       SljitTryRemapSemanticPredicateSources(source_map, *predicate_plan.predicate, failed_source_index) &&
+		       SljitTryRemapSourceIndices(source_map, predicate_plan.expression_tree_source_indices,
+		                                  failed_source_index);
+	};
+	auto remap_constant = [&](SljitNativeRegionExpressionPlan &constant_plan) {
+		return SljitTryRemapSourceIndices(source_map, constant_plan.expression_tree_source_indices,
+		                                  failed_source_index);
+	};
+	return SljitTryApplyProjectionPlanSources(plan, remap_source, remap_sources, remap_constant, remap_predicate);
+}
+
+//! Re-addresses an executable expression to the input columns source_map assigns and keeps its compiled code: a
+//! scalar plan reads its sources from the plan, a predicate and a typed tree read theirs through input_source_indices,
+//! so a predicate's input slots stay as they are
+static bool SljitTryRemapExecutableExpressionInputs(const vector<idx_t> &source_map,
+                                                    SljitExecutableRegionExpression &expr,
+                                                    optional_ptr<idx_t> failed_source_index = nullptr) {
+	auto remap_source = [&](idx_t &source_index) {
+		return SljitTryRemapSourceIndex(source_map, source_index, failed_source_index);
+	};
+	auto remap_sources = [&](vector<idx_t> &source_indices) {
+		return SljitTryRemapSourceIndices(source_map, source_indices, failed_source_index);
+	};
+	auto remap_tree_sources = [&](SljitNativeRegionExpressionPlan &plan) {
+		return remap_sources(plan.expression_tree_source_indices);
+	};
+	return remap_sources(expr.input_source_indices) &&
+	       SljitTryApplyProjectionPlanSources(expr.plan, remap_source, remap_sources, remap_tree_sources,
+	                                          remap_tree_sources);
 }
 
 static bool SljitTryNormalizeSingleSourceProjectionPlan(SljitNativeRegionExpressionPlan &plan, idx_t source_index) {

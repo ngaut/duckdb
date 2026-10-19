@@ -18,84 +18,6 @@
 #include "duckdb/execution/execution_operator_runtime.hpp"
 namespace duckdb {
 
-static bool SljitTryRemapHashJoinProjectionSourceIndex(const vector<idx_t> &source_map, idx_t &source_index,
-                                                       optional_ptr<idx_t> failed_source_index = nullptr) {
-	if (source_index >= source_map.size() || source_map[source_index] == DConstants::INVALID_INDEX) {
-		if (failed_source_index) {
-			*failed_source_index = source_index;
-		}
-		return false;
-	}
-	source_index = source_map[source_index];
-	return true;
-}
-
-static bool SljitTryRemapHashJoinProjectionSourceIndices(const vector<idx_t> &source_map, vector<idx_t> &source_indices,
-                                                         optional_ptr<idx_t> failed_source_index = nullptr) {
-	for (auto &source_index : source_indices) {
-		if (!SljitTryRemapHashJoinProjectionSourceIndex(source_map, source_index, failed_source_index)) {
-			return false;
-		}
-	}
-	return true;
-}
-
-static bool SljitTryRemapHashJoinProjectionPredicateSources(const vector<idx_t> &source_map,
-                                                            SljitNativePredicate &predicate,
-                                                            optional_ptr<idx_t> failed_source_index = nullptr) {
-	auto remap_source = [&](idx_t &source_index) {
-		return SljitTryRemapHashJoinProjectionSourceIndex(source_map, source_index, failed_source_index);
-	};
-	auto remap_no_sources_before_scalars = [&](SljitNativePredicate &) {
-		return true;
-	};
-	auto remap_vector_sources = [&](SljitNativePredicate &predicate) {
-		return SljitTryRemapHashJoinProjectionSourceIndices(source_map, predicate.source_indices,
-		                                                    failed_source_index) &&
-		       SljitTryRemapHashJoinProjectionSourceIndices(source_map, predicate.guard_source_indices,
-		                                                    failed_source_index);
-	};
-	return SljitTryApplyProjectionPredicateSources(predicate, remap_source, remap_no_sources_before_scalars,
-	                                               remap_vector_sources);
-}
-
-static bool SljitTryRemapHashJoinProjectionPlanSources(const vector<idx_t> &source_map,
-                                                       SljitNativeRegionExpressionPlan &plan,
-                                                       optional_ptr<idx_t> failed_source_index = nullptr) {
-	auto remap_source = [&](idx_t &source_index) {
-		return SljitTryRemapHashJoinProjectionSourceIndex(source_map, source_index, failed_source_index);
-	};
-	auto remap_sources = [&](vector<idx_t> &source_indices) {
-		return SljitTryRemapHashJoinProjectionSourceIndices(source_map, source_indices, failed_source_index);
-	};
-	auto remap_predicate = [&](SljitNativeRegionExpressionPlan &predicate_plan) {
-		return predicate_plan.predicate &&
-		       SljitTryRemapHashJoinProjectionPredicateSources(source_map, *predicate_plan.predicate,
-		                                                       failed_source_index) &&
-		       SljitTryRemapHashJoinProjectionSourceIndices(source_map, predicate_plan.expression_tree_source_indices,
-		                                                    failed_source_index);
-	};
-	auto remap_constant = [&](SljitNativeRegionExpressionPlan &constant_plan) {
-		return SljitTryRemapHashJoinProjectionSourceIndices(source_map, constant_plan.expression_tree_source_indices,
-		                                                    failed_source_index);
-	};
-	return SljitTryApplyProjectionPlanSources(plan, remap_source, remap_sources, remap_constant, remap_predicate);
-}
-
-static bool SljitTryRemapHashJoinProjectionExpressionSources(const vector<idx_t> &source_map,
-                                                             SljitExecutableRegionExpression &expr,
-                                                             optional_ptr<idx_t> failed_source_index = nullptr) {
-	if (!SljitTryRemapHashJoinProjectionPlanSources(source_map, expr.plan, failed_source_index)) {
-		return false;
-	}
-	for (auto &input_source_idx : expr.input_source_indices) {
-		if (!SljitTryRemapHashJoinProjectionSourceIndex(source_map, input_source_idx, failed_source_index)) {
-			return false;
-		}
-	}
-	return true;
-}
-
 static bool SljitTryBuildHashJoinMappedProjection(
     const vector<idx_t> &source_map, const ExecutionHashJoinProbeBinding &source_binding,
     SljitExecutableRegionOp &projection_op, SljitExecutableRegionOp &mapped_projection, optional_ptr<string> blocker,
@@ -120,7 +42,7 @@ static bool SljitTryBuildHashJoinMappedProjection(
 	mapped_projection.projections.reserve(projection_op.projections.size());
 	for (idx_t projection_idx = 0; projection_idx < projection_op.projections.size(); projection_idx++) {
 		auto &projection = projection_op.projections[projection_idx];
-		auto mapped_plan = projection.plan.Copy(true, false);
+		auto mapped_plan = SljitCopySemanticExpressionPlan(projection);
 		if (required_projection_outputs) {
 			if (projection_idx >= required_projection_outputs->size()) {
 				if (blocker) {
@@ -137,8 +59,8 @@ static bool SljitTryBuildHashJoinMappedProjection(
 			}
 		}
 		idx_t failed_source_index = DConstants::INVALID_INDEX;
-		if (!SljitTryRemapHashJoinProjectionPlanSources(full_source_map, mapped_plan,
-		                                                optional_ptr<idx_t>(&failed_source_index))) {
+		if (!SljitTryRemapSemanticPlanSources(full_source_map, mapped_plan,
+		                                      optional_ptr<idx_t>(&failed_source_index))) {
 			if (blocker) {
 				const auto mapped_source_index = failed_source_index < full_source_map.size()
 				                                     ? full_source_map[failed_source_index]

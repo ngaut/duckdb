@@ -1,4 +1,7 @@
 #include "test_jit_helpers.hpp"
+#include "sljit_executable_expression_codegen.hpp"
+#include "sljit_native_plan.hpp"
+#include "sljit_projection_source_runtime.hpp"
 #include "duckdb/storage/storage_info.hpp"
 
 #include <cmath>
@@ -1239,4 +1242,95 @@ TEST_CASE("JIT lowers int-times-decimal arithmetic through a scale-zero cast", "
 		REQUIRE(StringUtil::Contains(event.ir, "cast:DECIMAL"));
 		REQUIRE_FALSE(StringUtil::Contains(event.reason, "sljit-expression-lowering-unsupported"));
 	});
+}
+
+static unique_ptr<SljitNativePredicate> SljitTestIntegerCompareConstant(idx_t source_index, int64_t constant) {
+	auto predicate = make_uniq<SljitNativePredicate>();
+	predicate->kind = SljitNativePredicateKind::INTEGER_COMPARE_CONSTANT;
+	predicate->return_type = LogicalType::BOOLEAN;
+	predicate->compare_op = SljitNativeIntegerCompareOp::GREATER_THAN;
+	predicate->source_index = source_index;
+	predicate->constant = constant;
+	return predicate;
+}
+
+//! c5 > 1 AND c2 > 2 AND constant_or_null(true, c7): preparation assigns input slots 0, 1, 2 to columns 5, 2, 7
+static SljitNativeRegionExpressionPlan SljitTestOutOfOrderPredicatePlan() {
+	auto guarded = make_uniq<SljitNativePredicate>();
+	guarded->kind = SljitNativePredicateKind::CONSTANT_OR_NULL;
+	guarded->return_type = LogicalType::BOOLEAN;
+	guarded->guard_source_indices = {7};
+	guarded->child = make_uniq<SljitNativePredicate>();
+	guarded->child->kind = SljitNativePredicateKind::CONSTANT;
+	guarded->child->return_type = LogicalType::BOOLEAN;
+	guarded->child->constant_value = true;
+
+	auto conjunction = make_uniq<SljitNativePredicate>();
+	conjunction->kind = SljitNativePredicateKind::CONJUNCTION;
+	conjunction->return_type = LogicalType::BOOLEAN;
+	conjunction->children.push_back(SljitTestIntegerCompareConstant(5, 1));
+	conjunction->children.push_back(SljitTestIntegerCompareConstant(2, 2));
+	conjunction->children.push_back(std::move(guarded));
+	FinalizeSljitNativePredicateSourceIndices(*conjunction);
+
+	SljitNativeRegionExpressionPlan plan;
+	plan.kind = SljitNativeRegionExpressionKind::PREDICATE;
+	plan.return_type = LogicalType::BOOLEAN;
+	plan.predicate = std::move(conjunction);
+	return plan;
+}
+
+static void RequireSljitTestPredicateColumns(const SljitNativePredicate &predicate, idx_t first, idx_t second,
+                                             idx_t guard) {
+	REQUIRE(predicate.children.size() == 3);
+	REQUIRE(predicate.children[0]->source_index == first);
+	REQUIRE(predicate.children[1]->source_index == second);
+	REQUIRE(predicate.children[2]->guard_source_indices == vector<idx_t> {guard});
+}
+
+TEST_CASE("JIT executable predicates keep their input columns through re-preparation and remapping", "[api][jit]") {
+	SljitExecutableRegionExpression expr;
+	SljitPrepareExecutableRegionExpression(SljitTestOutOfOrderPredicatePlan(), expr);
+	REQUIRE(expr.input_source_indices == vector<idx_t> {5, 2, 7});
+	RequireSljitTestPredicateColumns(*expr.plan.predicate, 0, 1, 2);
+
+	// the semantic plan reads input columns again, so preparing it once more assigns the same slots
+	auto semantic = SljitCopySemanticExpressionPlan(expr);
+	RequireSljitTestPredicateColumns(*semantic.predicate, 5, 2, 7);
+	REQUIRE(semantic.predicate->source_indices == vector<idx_t> {2, 5, 7});
+	SljitExecutableRegionExpression reprepared;
+	SljitPrepareExecutableRegionExpression(semantic, reprepared);
+	REQUIRE(reprepared.input_source_indices == expr.input_source_indices);
+	RequireSljitTestPredicateColumns(*reprepared.plan.predicate, 0, 1, 2);
+
+	vector<uint8_t> referenced(8, 0);
+	REQUIRE(SljitTryAddExecutableExpressionSourceColumns(expr, referenced.size(), referenced));
+	REQUIRE(referenced == vector<uint8_t> {0, 0, 1, 0, 0, 1, 0, 1});
+
+	// re-addressing keeps the compiled slots and moves the columns they read
+	vector<idx_t> source_map(8, DConstants::INVALID_INDEX);
+	source_map[5] = 1;
+	source_map[2] = 3;
+	source_map[7] = 0;
+	SljitExecutableRegionExpression remapped;
+	SljitBuildBorrowedProjectionExpression(expr, remapped);
+	REQUIRE(SljitTryRemapExecutableExpressionInputs(source_map, remapped));
+	REQUIRE(remapped.input_source_indices == vector<idx_t> {1, 3, 0});
+	RequireSljitTestPredicateColumns(*remapped.plan.predicate, 0, 1, 2);
+	RequireSljitTestPredicateColumns(*SljitCopySemanticExpressionPlan(remapped).predicate, 1, 3, 0);
+
+	// a semantic plan remaps its columns directly; preparing it addresses them through new slots
+	auto remapped_semantic = SljitCopySemanticExpressionPlan(expr);
+	REQUIRE(SljitTryRemapSemanticPlanSources(source_map, remapped_semantic));
+	SljitExecutableRegionExpression remapped_prepared;
+	SljitPrepareExecutableRegionExpression(remapped_semantic, remapped_prepared);
+	REQUIRE(remapped_prepared.input_source_indices == vector<idx_t> {1, 3, 0});
+
+	// a column the map does not assign fails the remap and names that column
+	source_map[7] = DConstants::INVALID_INDEX;
+	SljitExecutableRegionExpression unmapped;
+	SljitBuildBorrowedProjectionExpression(expr, unmapped);
+	idx_t failed_source_index = DConstants::INVALID_INDEX;
+	REQUIRE_FALSE(SljitTryRemapExecutableExpressionInputs(source_map, unmapped, &failed_source_index));
+	REQUIRE(failed_source_index == 7);
 }

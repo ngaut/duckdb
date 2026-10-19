@@ -76,10 +76,9 @@ static bool SljitTryBuildHashJoinProbeInputMappedFilter(const ExecutionHashJoinP
 	}
 
 	D_ASSERT(filter_op.filter);
-	auto mapped_plan = filter_op.filter->expression.plan.Copy(true, false);
+	auto mapped_plan = SljitCopySemanticExpressionPlan(filter_op.filter->expression);
 	idx_t failed_source_index = DConstants::INVALID_INDEX;
-	if (!SljitTryRemapHashJoinProjectionPlanSources(source_map, mapped_plan,
-	                                                optional_ptr<idx_t>(&failed_source_index))) {
+	if (!SljitTryRemapSemanticPlanSources(source_map, mapped_plan, optional_ptr<idx_t>(&failed_source_index))) {
 		blocker = "non_probe_source_" + std::to_string(failed_source_index);
 		return false;
 	}

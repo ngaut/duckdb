@@ -141,7 +141,7 @@ static bool SljitTryBuildHashJoinProjectionExpressionInput(
 	}
 
 	SljitBuildBorrowedProjectionExpression(source_expr, remapped_expr);
-	if (!SljitTryRemapHashJoinProjectionExpressionSources(source_map, remapped_expr)) {
+	if (!SljitTryRemapExecutableExpressionInputs(source_map, remapped_expr)) {
 		return false;
 	}
 

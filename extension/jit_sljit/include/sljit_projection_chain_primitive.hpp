@@ -124,7 +124,7 @@ static bool SljitBuildProjectionChainSemanticProjection(const vector<SljitExecut
 	auto &first_projection = ops[first_projection_idx];
 	current_projection.reserve(first_projection.projections.size());
 	for (auto &projection : first_projection.projections) {
-		current_projection.push_back(projection.plan.Copy(true, false));
+		current_projection.push_back(SljitCopySemanticExpressionPlan(projection));
 	}
 
 	for (idx_t projection_idx = first_projection_idx + 1; projection_idx <= final_projection_idx; projection_idx++) {
@@ -140,7 +140,8 @@ static bool SljitBuildProjectionChainSemanticProjection(const vector<SljitExecut
 		for (idx_t output_idx = 0; output_idx < projection_op.projections.size(); output_idx++) {
 			auto &projection = projection_op.projections[output_idx];
 			auto composed = make_uniq<SljitNativeRegionExpressionPlan>();
-			if (!TryComposeNativeSemanticProjection(current_projection, projection.plan, *composed, false)) {
+			if (!TryComposeNativeSemanticProjection(current_projection, SljitCopySemanticExpressionPlan(projection),
+			                                        *composed, false)) {
 				if (blocker) {
 					*blocker = "compose_output_" + to_string(output_idx);
 				}

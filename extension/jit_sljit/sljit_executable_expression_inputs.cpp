@@ -7,6 +7,7 @@
 //===----------------------------------------------------------------------===//
 
 #include "sljit_executable_expression_codegen.hpp"
+#include "sljit_native_plan.hpp"
 
 #include "duckdb/common/exception.hpp"
 
@@ -88,6 +89,65 @@ static void RemapSljitPredicateToExecutableInputs(SljitNativePredicate &predicat
 		for (auto &child : predicate.children) {
 			if (child) {
 				RemapSljitPredicateToExecutableInputs(*child, input_sources, local_source_not_null, input_not_null);
+			}
+		}
+		return;
+	default:
+		throw InternalException("Unknown SLJIT native predicate kind");
+	}
+}
+
+static idx_t RestoreSljitInputSource(const vector<idx_t> &input_sources, idx_t input_slot) {
+	if (input_slot >= input_sources.size()) {
+		throw InternalException("SLJIT executable predicate input slot is out of range");
+	}
+	return input_sources[input_slot];
+}
+
+//! Inverse of RemapSljitPredicateToExecutableInputs: each input slot names the input column it was assigned
+static void RestoreSljitPredicateInputSources(SljitNativePredicate &predicate, const vector<idx_t> &input_sources) {
+	switch (predicate.kind) {
+	case SljitNativePredicateKind::CONSTANT:
+		return;
+	case SljitNativePredicateKind::REFERENCE:
+	case SljitNativePredicateKind::INTEGER_COMPARE_CONSTANT:
+	case SljitNativePredicateKind::DOUBLE_COMPARE_CONSTANT:
+	case SljitNativePredicateKind::INT128_COMPARE_CONSTANT:
+	case SljitNativePredicateKind::INTEGER_IN_LIST:
+	case SljitNativePredicateKind::INTEGER_BETWEEN:
+	case SljitNativePredicateKind::STRING_EQUAL_CONSTANT:
+	case SljitNativePredicateKind::STRING_IN_LIST_CONSTANT:
+	case SljitNativePredicateKind::STRING_PREFIX_CONSTANT:
+	case SljitNativePredicateKind::STRING_SUFFIX_CONSTANT:
+	case SljitNativePredicateKind::STRING_CONTAINS_CONSTANT:
+	case SljitNativePredicateKind::STRING_LIKE_CONSTANT:
+	case SljitNativePredicateKind::STRING_SUBSTRING_IN_LIST_CONSTANT:
+	case SljitNativePredicateKind::NULL_CHECK:
+		predicate.source_index = RestoreSljitInputSource(input_sources, predicate.source_index);
+		return;
+	case SljitNativePredicateKind::INTEGER_COMPARE_REFERENCES:
+	case SljitNativePredicateKind::DOUBLE_COMPARE_REFERENCES:
+	case SljitNativePredicateKind::INT128_COMPARE_REFERENCES:
+		predicate.source_index = RestoreSljitInputSource(input_sources, predicate.source_index);
+		predicate.right_source_index = RestoreSljitInputSource(input_sources, predicate.right_source_index);
+		return;
+	case SljitNativePredicateKind::CONSTANT_OR_NULL:
+		for (auto &source_index : predicate.guard_source_indices) {
+			source_index = RestoreSljitInputSource(input_sources, source_index);
+		}
+		if (predicate.child) {
+			RestoreSljitPredicateInputSources(*predicate.child, input_sources);
+		}
+		return;
+	case SljitNativePredicateKind::NOT:
+		if (predicate.child) {
+			RestoreSljitPredicateInputSources(*predicate.child, input_sources);
+		}
+		return;
+	case SljitNativePredicateKind::CONJUNCTION:
+		for (auto &child : predicate.children) {
+			if (child) {
+				RestoreSljitPredicateInputSources(*child, input_sources);
 			}
 		}
 		return;
@@ -178,6 +238,21 @@ void SljitPrepareExecutableRegionExpression(const SljitNativeRegionExpressionPla
                                             bool copy_auxiliary_expression_tree) {
 	expr.plan = plan.Copy(copy_auxiliary_expression_tree, false);
 	PrepareExecutableRegionExpressionInputs(expr, input_not_null);
+}
+
+void SljitPrepareExecutablePredicateInputs(SljitExecutableRegionExpression &expr, const vector<bool> *input_not_null) {
+	D_ASSERT(expr.plan.kind == SljitNativeRegionExpressionKind::PREDICATE);
+	PrepareExecutableRegionExpressionInputs(expr, input_not_null);
+}
+
+SljitNativeRegionExpressionPlan SljitCopySemanticExpressionPlan(const SljitExecutableRegionExpression &expr) {
+	auto plan = expr.plan.Copy(true, false);
+	if (plan.kind == SljitNativeRegionExpressionKind::PREDICATE && plan.predicate) {
+		RestoreSljitPredicateInputSources(*plan.predicate, expr.input_source_indices);
+		FinalizeSljitNativePredicateSourceIndices(*plan.predicate);
+		plan.predicate->source_not_null.clear();
+	}
+	return plan;
 }
 
 } // namespace duckdb

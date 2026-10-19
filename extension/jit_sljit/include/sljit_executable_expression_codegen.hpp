@@ -16,6 +16,12 @@ void SljitPrepareExecutableRegionExpression(const SljitNativeRegionExpressionPla
                                             SljitExecutableRegionExpression &expr,
                                             const vector<bool> *input_not_null = nullptr,
                                             bool copy_auxiliary_expression_tree = false);
+//! Prepares a predicate that is already executable: its sources become input slots through input_source_indices
+void SljitPrepareExecutablePredicateInputs(SljitExecutableRegionExpression &expr,
+                                           const vector<bool> *input_not_null = nullptr);
+//! The plan an executable expression was prepared from. Preparation addresses a predicate's sources by input slot;
+//! composition, remapping and re-preparation read input columns, so they start from this plan, never from expr.plan.
+SljitNativeRegionExpressionPlan SljitCopySemanticExpressionPlan(const SljitExecutableRegionExpression &expr);
 bool SljitCompilePreparedExecutableRegionExpression(SljitExecutableRegionExpression &expr, bool require_boolean,
                                                     string &error);
 bool SljitPrepareAndCompileExecutableRegionExpression(const SljitNativeRegionExpressionPlan &plan, bool require_boolean,

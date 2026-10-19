@@ -11,6 +11,7 @@
 #include "sljit_aggregate_fused_payload_sources.hpp"
 #include "sljit_codegen_util.hpp"
 #include "sljit_executable_aggregate_payload_sources.hpp"
+#include "sljit_executable_expression_codegen.hpp"
 #include "sljit_native_codegen.hpp"
 
 #include "duckdb/common/exception.hpp"
@@ -231,6 +232,10 @@ static void PopulateSljitExecutableAggregatePayloadSourceFacts(SljitExecutableRe
 		for (auto source_idx : payload.input_source_indices) {
 			payload.input_source_not_null.push_back(SljitSourceKnownNotNull(&input_not_null, source_idx));
 		}
+		return;
+	case SljitNativeRegionExpressionKind::PREDICATE:
+		// an executable predicate reads its sources through input slots, as every executable expression's does
+		SljitPrepareExecutablePredicateInputs(payload, &input_not_null);
 		return;
 	default:
 		return;

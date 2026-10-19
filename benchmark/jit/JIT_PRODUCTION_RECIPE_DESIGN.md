@@ -633,7 +633,13 @@ first, because M3-M5 shrink once layouts and instances exist.
    slots through layouts. Exit: the `preclassified_payload` flag and most
    remap helpers are gone; layout mismatch fails at bind. The preclassified
    batch is typed (`978de6d7e21`); the remap helpers of elided projections
-   and the MARK boundary remain.
+   and the MARK boundary remain. Expressions have two index spaces and one
+   rule each: an executable predicate reads its sources through input slots
+   (`input_source_indices`); composition, remapping and re-preparation start
+   from the semantic plan, which reads input columns
+   (`SljitCopySemanticExpressionPlan`). Re-preparing an executable plan
+   directly had turned a predicate's slots into columns; one executable remap
+   and one semantic remap replace the per-family helpers.
 3. **One coalescer.** Replace per-step batch owners and per-site batching
    rules with the step coalescer and one byte-based rule. Exit: at most four
    owned batch kinds; no string deep copy decided by a step.
@@ -691,9 +697,15 @@ and prefix/suffix updates that held a state address from one batch to the
 next) were the first such family; the pending batch's boundary merge covers
 groups that continue across chunks. The pair-key and comparison-predicate
 mark-selection probes and the not-equal chain probe followed, unreached even
-on NULL-free TPC-H; the generated probe kernel serves those plans. Coverage
-must include NULL-free data: the fuzz database's NULLs keep every all-valid
-probe path cold.
+on NULL-free TPC-H; the generated probe kernel serves those plans. Then
+came the join-output entry of join-input complementary sums (the probe's
+aggregate consumer does that work), the direct row-pointer string-set update
+(the preclassified class batch handles it), and core's new-group address
+resolution chain (`TryResolveNewGroups`, ABI 13), whose callers all fell
+through to the find-or-create lookup. Coverage must include NULL-free data:
+the fuzz database's NULLs keep every all-valid probe path cold. A fallback
+at the end of a cascade whose callers throw on failure stays even when no
+workload reaches it.
 
 ### M6 — cost model
 
