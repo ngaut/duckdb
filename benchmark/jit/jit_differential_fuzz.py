@@ -295,6 +295,11 @@ class QueryGenerator:
             constant = r.choice(["0", "1.5", "'nan'::DOUBLE", "'inf'::DOUBLE", "-0.0::DOUBLE"])
             value = self.float_value(ref)
             return f"{value} {operator} {constant}" if r.random() < 0.5 else f"{constant} {operator} {value}"
+        if column.kind in ("key", "int", "dec") and r.random() < 0.05:
+            # DISTINCT FROM compares NULL as a value
+            negate = "NOT " if r.random() < 0.5 else ""
+            value = r.choice(["NULL", str(r.randint(0, 50))])
+            return f"{ref} IS {negate}DISTINCT FROM {value}"
         if column.kind == "key":
             return r.choice([f"{ref} % {r.randint(2, 13)} = {r.randint(0, 1)}", f"{ref} < {r.randint(1, 25) * 4000}"])
         if column.kind == "int":
@@ -330,7 +335,12 @@ class QueryGenerator:
 
     def predicates(self, tree: JoinTree, low: int = 0, high: int = 3) -> list[str]:
         columns = tree.columns()
-        return [self.predicate(self.rng.choice(columns)) for _ in range(self.rng.randint(low, high))]
+        result = []
+        for _ in range(self.rng.randint(low, high)):
+            predicate = self.predicate(self.rng.choice(columns))
+            # NOT keeps the rows a predicate rejects, but not the ones it leaves NULL
+            result.append(f"NOT ({predicate})" if self.rng.random() < 0.1 else predicate)
+        return result
 
     def expression(self, column: Column, floats: bool = True) -> str:
         r, ref = self.rng, column.ref
@@ -340,6 +350,10 @@ class QueryGenerator:
             return self.float_value(ref)
         if r.random() < 0.15:
             return f"CASE WHEN {self.predicate(column)} THEN {ref} END"
+        if r.random() < 0.05:
+            # branches are tried in order: a row the first predicate takes never reaches the second
+            otherwise = r.choice(["NULL", ref])
+            return f"CASE WHEN {self.predicate(column)} THEN {ref} WHEN {self.predicate(column)} THEN {ref} ELSE {otherwise} END"
         if r.random() < 0.15:
             return self.null_handling(column)
         if column.kind in ("key", "int"):
@@ -347,6 +361,9 @@ class QueryGenerator:
             if r.random() < 0.05:
                 # overflows on the larger keys: off and the JIT must raise the same error
                 casts.append(f"CAST({ref} AS INTEGER) * 1000")
+            if r.random() < 0.05:
+                # a divisor that is zero for some rows: off raises a division by zero, unless a filter removed them
+                casts.append(f"{ref} // ({ref} % {r.randint(3, 7)})")
             # TPC-H integers are never negative: subtracting makes negative results, which 64-bit consumers of a
             # 32-bit result (sums, range checks) must see sign-extended
             return r.choice(
@@ -355,11 +372,16 @@ class QueryGenerator:
                     f"{ref} + {r.randint(1, 9)}",
                     f"({ref} * 3) % 1000",
                     f"CAST({ref} AS INTEGER) - {r.randint(10, 100000)}",
+                    f"{ref} // {r.randint(2, 9)}",
+                    f"(CAST({ref} AS INTEGER) - {r.randint(10, 100000)}) // {r.randint(2, 9)}",
+                    f"-{ref}",
                     *casts,
                 ]
             )
         if column.kind == "dec":
-            return r.choice([f"{ref} * 2", f"{ref} + 1", f"CAST({ref} AS INTEGER)", f"CAST({ref} AS BIGINT)"])
+            return r.choice(
+                [f"{ref} * 2", f"{ref} + 1", f"CAST({ref} AS INTEGER)", f"CAST({ref} AS BIGINT)", f"-{ref}"]
+            )
         if column.kind == "float":
             return r.choice([f"{ref} * 2", f"{ref} + 1", f"-{ref}", f"abs({ref})", f"{ref} / 4"])
         if column.kind == "date":
@@ -393,6 +415,8 @@ class QueryGenerator:
                 f"CAST({ref} AS DOUBLE)",
                 f"CAST({ref} AS FLOAT)",
                 f"CAST({ref} % {modulus} AS DOUBLE) / 2",
+                f"{ref} / {modulus}",
+                f"{ref} // {modulus} * 1.5",
                 f"CASE {ref} % 4 WHEN 0 THEN -0.0::DOUBLE WHEN 1 THEN 0.0::DOUBLE WHEN 2 THEN 'nan'::DOUBLE "
                 f"ELSE -('nan'::DOUBLE) END",
                 f"CASE {ref} % 3 WHEN 0 THEN -0.0::FLOAT WHEN 1 THEN 'nan'::FLOAT ELSE CAST({ref} % {modulus} AS FLOAT) END",
