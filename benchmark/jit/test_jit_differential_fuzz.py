@@ -41,6 +41,14 @@ class QueryGeneratorTest(unittest.TestCase):
         for name in derived:
             self.assertTrue(any(re.search(rf"\b{name}\b", sql) for sql in queries), name)
 
+    def test_columns_of_one_table_are_compared(self) -> None:
+        # a comparison between two columns of one table stays a filter above the scan
+        generator = QueryGenerator(4)
+        queries = [generator.query() for _ in range(300)]
+        comparisons = [m for sql in queries for m in re.finditer(r"\b(t\d+)\.(\w+) (?:<|>|<=|>=|=|<>) \1\.(\w+)", sql)]
+        self.assertTrue(comparisons)
+        self.assertTrue(any(SCHEMA["lineitem"].get(m.group(2)) == "date" for m in comparisons))
+
     def test_columns_the_database_lacks_are_never_generated(self) -> None:
         schema = copy.deepcopy(SCHEMA)
         present = {(table, name) for table, columns in schema.items() for name in columns}

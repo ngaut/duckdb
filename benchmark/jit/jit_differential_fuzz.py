@@ -3,7 +3,8 @@
 
 Generates seeded random queries over the TPC-H schema -- foreign-key chains of inner and outer joins (some on
 expression keys, some on the string forms TPC-H also spells them in, some with non-equality residuals), random filters
-(IS NULL among them, and IN lists long enough to plan as MARK joins), DISTINCT, GROUP BY (ROLLUP,
+(IS NULL among them, IN lists long enough to plan as MARK joins, and comparisons between two columns of one table that
+stay filters above the scan), DISTINCT, GROUP BY (ROLLUP,
 CUBE, GROUPING SETS, HAVING, ORDER BY ALL LIMIT) over up to five expression keys (CASE and predicates over several
 columns used as values among them), FILTER aggregates,
 partitioned and ordered window functions, materialized CTEs with one or two consumers, UNION ALL and set operations,
@@ -391,11 +392,32 @@ class QueryGenerator:
             return f"substring({ref}, 1, 2) {'NOT ' if r.random() < 0.2 else ''}IN ({codes})"
         return f"{ref} {'NOT ' if r.random() < 0.2 else ''}LIKE '{r.choice(TEXT_PATTERNS)}'"
 
+    def column_comparison(self, columns: list[Column]) -> str | None:
+        """Two columns of one table compared, like TPC-H's l_commitdate < l_receiptdate: no scan filter can take it, so
+        a filter stays above the scan, and a projection dropping its columns sits between the filter and a join"""
+        r = self.rng
+        comparable = {
+            "date": ("date", "ts"),
+            "ts": ("date", "ts"),
+            **{kind: NUMERIC_KINDS for kind in NUMERIC_KINDS},
+        }
+        pairs = [
+            (a, b)
+            for a in columns
+            for b in columns
+            if a.alias == b.alias and a.name < b.name and b.kind in comparable.get(a.kind, ())
+        ]
+        if not pairs:
+            return None
+        a, b = r.choice(pairs)
+        return f"{a.ref} {r.choice(['<', '>', '<=', '>=', '=', '<>'])} {b.ref}"
+
     def predicates(self, tree: JoinTree, low: int = 0, high: int = 3) -> list[str]:
         columns = tree.columns()
         result = []
         for _ in range(self.rng.randint(low, high)):
-            predicate = self.predicate(self.rng.choice(columns))
+            comparison = self.column_comparison(columns) if self.rng.random() < 0.15 else None
+            predicate = comparison or self.predicate(self.rng.choice(columns))
             # NOT keeps the rows a predicate rejects, but not the ones it leaves NULL
             result.append(f"NOT ({predicate})" if self.rng.random() < 0.1 else predicate)
         return result
