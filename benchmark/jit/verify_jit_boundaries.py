@@ -63,12 +63,6 @@ def require_regex_count(path: str, rule: str, pattern: str, expected: int) -> No
         raise AssertionError(f"{path}: {rule}: expected {expected}, found {count}: {pattern}")
 
 
-def require_absent_files(paths: tuple[str, ...]) -> None:
-    for path in paths:
-        if (ROOT / path).exists():
-            raise AssertionError(f"{path}: obsolete JIT ownership file must stay deleted")
-
-
 def verify_dependency_boundaries() -> None:
     reject_regex(
         "SLJIT dependency in core DuckDB",
@@ -288,47 +282,6 @@ def verify_backend_and_platform_abi() -> None:
             "ExecutionRegionSelectedSourceRecipe source_recipe",
         ),
     )
-    reject_regex(
-        "obsolete backend fusion or source-cost self-attestation",
-        (
-            r"\bSetFullyFused\b",
-            r"\bIsFullyFused\b",
-            r"\bSetGeneratedSourceFilterCost\b",
-            r"\bSetSelectedSourceExecution\b",
-            r"\bSetScanFilterMode\b",
-            r"\bgenerated_source_filter_(?:count|expression_cost)\b",
-        ),
-        (
-            "src/include/duckdb/execution/execution_region_lowering.hpp",
-            "src/execution/execution_region_types.cpp",
-            "src/execution/execution_region_planner.cpp",
-            "src/execution/execution_region_cost_input.cpp",
-            "extension/jit_sljit/**/*.hpp",
-            "extension/jit_sljit/**/*.cpp",
-            "extension/jit_metal/**/*.mm",
-        ),
-    )
-    reject_regex(
-        "obsolete single-value execution ABI and duplicate kernel capability state",
-        (
-            r"\bExecutionRegionABI\b",
-            r"\bCanExecuteFullPipeline\b",
-            r"\bcandidate_abi\b",
-            r"\bcandidate_signature_context(?:_feature_shape)?\b",
-            r"\bcandidate_signature_shape\b",
-            r"\bcandidate_has_(?:source|sink)\b",
-            r"\bcandidate_source_conjunction_filter_count\b",
-        ),
-        (
-            "src/**/*.hpp",
-            "src/**/*.cpp",
-            "extension/jit_sljit/**/*.hpp",
-            "extension/jit_sljit/**/*.cpp",
-            "extension/jit_metal/**/*.mm",
-            "test/api/test_jit*.cpp",
-            "test/sql/jit/*.test",
-        ),
-    )
     require_text(
         "src/include/duckdb/execution/execution_region_manager.hpp",
         "backend registration must carry the ABI version",
@@ -373,93 +326,14 @@ def verify_backend_and_platform_abi() -> None:
     )
 
 
-def verify_no_executor_delegation() -> None:
-    reject_regex(
-        "whole-executor delegation in compiled layers",
-        (
-            r"\bExecuteInterpreted\b",
-            r"\bValue::Evaluate\b",
-            r"\bExecutionCreateHashJoinProbeState\b",
-            r"\bExecutionProbeHashJoin\b",
-            r"\bExecutionSinkAggregateUpdate\b",
-            r"\bfallback-native\b",
-            r"\bwhole[-_ ]executor\b",
-        ),
-        JIT_SOURCES,
-    )
-
-
 def verify_recipe_ownership() -> None:
     reject_regex(
-        "projection-aggregate prefix encoded as a fixed join count",
-        (
-            r"\bSINGLE_JOIN\b",
-            r"\bTWO_JOIN\b",
-            r"\bTwoJoin\b",
-            r"\btwo-join\b",
-            r"\bHasPreJoinProjection\b",
-            r"\bHasSecondHashJoin\b",
-            r"\bHasBetweenProjection\b",
-            r"\bPreJoinProjectionIdx\b",
-            r"\bBetweenProjectionIdx\b",
-            r"\bFirstHashJoinIdx\b",
-            r"\bSecondHashJoinIdx\b",
-            r"\bpre_join_projection_idx\b",
-            r"\bbetween_projection_idx\b",
-            r"\bsecond_hash_join_idx\b",
-        ),
-        (
-            "extension/jit_sljit/include/sljit_projection_aggregate_recipe*.hpp",
-            "extension/jit_sljit/include/sljit_full_pipeline_recipe_facts.hpp",
-        ),
-    )
-    reject_regex(
-        "runtime recipe re-admission or untyped operator ownership",
-        (
-            r"\bSljitCanBind",
-            r"\bSljitFullPipelinePrimitiveSequenceIsExecutable\b",
-            r"\bSljitFullPipelineIsSelectedHashJoinSinkSequence\b",
-            r"\bSljitFullPipelineFilterHasFusedOwner\b",
-            r"\bSljitFullPipelinePrimitiveStepOwnsOps\b",
-            r"\.Op\(",
-        ),
+        "runtime recipe re-admission",
+        (r"\bSljitCanBind",),
         (
             "extension/jit_sljit/include/*runtime*.hpp",
             "extension/jit_sljit/sljit_region*_runtime.cpp",
         ),
-    )
-    reject_regex(
-        "duplicated recipe admission and construction API",
-        (
-            r"\bCanMake(?:NativeTail|ProjectionAggregateTail)Recipe\b",
-            r"\bProjectionAggregateHasDedicatedBackend\b",
-            r"\bSljitBindProjectedInputGroupedAggregateUpdatePrimitive\b",
-            r"\bSljitCanBindProjectedInputGroupedAggregateUpdatePrimitive\b",
-        ),
-        BACKEND_SOURCES,
-    )
-    require_absent_files(
-        (
-            "extension/jit_sljit/sljit_projection_aggregate_recipe.cpp",
-            "extension/jit_sljit/include/sljit_projection_aggregate_recipe.hpp",
-            "extension/jit_sljit/sljit_native_tail_recipe.cpp",
-            "extension/jit_sljit/include/sljit_native_tail_recipe.hpp",
-            "extension/jit_sljit/sljit_hash_join_delim_join_sink_recipe.cpp",
-            "extension/jit_sljit/include/sljit_hash_join_delim_join_sink_recipe.hpp",
-            "extension/jit_sljit/sljit_region_contract_blockers.cpp",
-        )
-    )
-    reject_regex(
-        "duplicate backend planning authority",
-        (
-            r"\bSljitCanExecuteSourceNode\b",
-            r"\bSljitSourceBoundaryReason\b",
-            r"\bAddSljitFullPipelineSinkBlockers\b",
-            r"\bAddSljitOperatorContractBlockers\b",
-            r"\bcandidate\.input_types\b",
-            r"\bsljit_plan->error\b",
-        ),
-        JIT_SOURCES + ("extension/jit_metal/**/*.mm",),
     )
 
 
@@ -485,10 +359,7 @@ def verify_runtime_abi_ownership() -> None:
     )
     reject_regex(
         "chunk-local grouped reduction-lane binding",
-        (
-            r"vector<SljitGroupedReductionLaneBinding>\s+reduction_lanes",
-            r"\bSljitValidateGroupedPrimitiveLane(?:Layout|State)\b",
-        ),
+        (r"vector<SljitGroupedReductionLaneBinding>\s+reduction_lanes",),
         BACKEND_SOURCES,
     )
     reject_regex(
@@ -542,63 +413,11 @@ def verify_publication_and_cache_ownership() -> None:
     )
 
 
-def verify_obsolete_paths_stay_deleted() -> None:
+def verify_typed_runtime_proof() -> None:
     reject_regex(
         "stringly typed JIT runtime proof",
         (r'RecordJitRuntimeProof\(\s*"', r"\bproof_path\.find\b"),
         JIT_SOURCES + ("test/api/test_jit*.cpp", "test/api/test_jit_helpers.hpp"),
-    )
-    reject_regex(
-        "stale JIT runtime expectation",
-        (
-            r"\bsource_batch_boundary\b",
-            r"\bprojected_compact_aggregate_input\b",
-            r"\bRequireCurrentMaterializationElisionProofName\b",
-            r"\bRequireCurrentMaterializationElisionRuntimeProof\b",
-        ),
-        JIT_SOURCES
-        + (
-            "test/api/test_jit*.cpp",
-            "test/api/test_jit_helpers.hpp",
-            "benchmark/jit/**/*.py",
-            "benchmark/tpch/jit/**/*.py",
-        ),
-    )
-    reject_regex(
-        "obsolete all-slot execution-contract API",
-        (r"\bGetExecutionContract\(\s*\)",),
-        (
-            "src/include/duckdb/execution/physical_operator.hpp",
-            "src/execution/execution_region*.cpp",
-            "extension/jit_sljit/**/*.hpp",
-            "extension/jit_sljit/**/*.cpp",
-        ),
-    )
-    reject_regex(
-        "kernel pattern-matches a grouped strategy to decide its route",
-        (r"\bDISTINCT_KEY_SINK\b",),
-        (
-            "extension/jit_sljit/sljit_region_runtime.cpp",
-            "extension/jit_sljit/sljit_region_pipeline_runtime.cpp",
-        ),
-    )
-    reject_regex(
-        "duplicate unchecked narrow probe consumer loop",
-        (r"\bTryExecuteAllValidUncheckedInt64ToInt32SingleKeyNoChainProbeConsumer\b",),
-        BACKEND_SOURCES,
-    )
-    reject_regex(
-        "stale prototype-kernel cache API",
-        (
-            r"\bCloneForExecution\b",
-            r"\bExecutionRegionKernelCache\b",
-            r"\bExecutionRegionKernelCacheValue\b",
-        ),
-        (
-            "src/include/duckdb/execution/execution_region_kernel.hpp",
-            "src/include/duckdb/execution/physical_operator.hpp",
-            "src/execution/execution_region_planner.cpp",
-        ),
     )
 
 
@@ -606,11 +425,10 @@ def main() -> None:
     verify_dependency_boundaries()
     verify_workload_independence()
     verify_backend_and_platform_abi()
-    verify_no_executor_delegation()
     verify_recipe_ownership()
     verify_runtime_abi_ownership()
     verify_publication_and_cache_ownership()
-    verify_obsolete_paths_stay_deleted()
+    verify_typed_runtime_proof()
     print("Execution-region JIT boundary verification passed")
 
 

@@ -25,7 +25,7 @@ from benchmark_common import (  # noqa: E402
     correctness_sql,
     jit_setup_sql,
     make_output_dir,
-    read_profile_json,
+    read_json_file,
     repo_root,
     row_int,
     write_csv,
@@ -317,10 +317,9 @@ GENERIC_WORKLOADS = (
             "FROM __jit_generic_non_null_string_groups "
             "GROUP BY group_flag, group_status ORDER BY group_flag, group_status"
         ),
-        # A generated reference-only string perfect-hash update currently
-        # replaces an already efficient vectorized primitive without removing
-        # expression work. Production CBO must keep this shape vectorized until
-        # the backend has a measured standalone advantage.
+        # A generated reference-only string perfect-hash update would replace an
+        # efficient vectorized primitive without removing expression work, so
+        # the CBO keeps this shape vectorized.
         "minimum_auto_speedup": 0.0,
         "max_auto_slowdown": 1.05,
         "requires_compiled_auto": False,
@@ -659,8 +658,6 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Benchmark generic DuckDB execution-region JIT workloads")
     parser.add_argument("--duckdb", type=Path, default=root / "build" / "reldebug" / "duckdb")
     parser.add_argument("--out-dir", type=Path, default=None)
-    parser.add_argument("--backend", default="sljit")
-    parser.add_argument("--jit-extension", default="jit_sljit")
     parser.add_argument("--threads", type=int, choices=(1, 4), default=1)
     parser.add_argument(
         "--repeats",
@@ -691,8 +688,6 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 def make_args(args: argparse.Namespace) -> SimpleNamespace:
     return SimpleNamespace(
         duckdb=args.duckdb.resolve(),
-        backend=args.backend,
-        jit_extension=args.jit_extension,
         threads=args.threads,
         event_log_size=args.event_log_size,
         trace_runtime=args.trace_runtime,
@@ -837,8 +832,8 @@ def run_workload_matrix(
             raise RuntimeError(f"validation JSON was not written during {sample['label']}: {validation_path}")
         if not counters_path.exists():
             raise RuntimeError(f"counter JSON was not written during {sample['label']}: {counters_path}")
-        validation_rows = read_profile_json(validation_path)
-        counters = read_profile_json(counters_path)
+        validation_rows = read_json_file(validation_path)
+        counters = read_json_file(counters_path)
         validation_path.unlink()
         counters_path.unlink()
         rows.append(

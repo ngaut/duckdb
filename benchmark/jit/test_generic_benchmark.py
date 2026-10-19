@@ -41,12 +41,10 @@ class TestBenchmarkArguments(unittest.TestCase):
             duckdb = root / "duckdb"
             duckdb.touch()
             args = SimpleNamespace(
-                backend="sljit",
                 duckdb=duckdb,
                 event_log_size=0,
                 host_quiescence=False,
                 jit_cbo_setting=[],
-                jit_extension="jit_sljit",
                 out_dir=root,
                 repeats=5,
                 threads=1,

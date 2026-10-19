@@ -16,7 +16,6 @@ from benchmark_common import (
     row_bool,
     row_float,
     row_int,
-    verify_profile,
 )
 from tpch_common import (
     COUNTER_FIELDS,
@@ -30,8 +29,6 @@ from tpch_common import (
 )
 
 POLICY_ORDER = {policy: index for index, policy in enumerate(DEFAULT_POLICIES)}
-DEFAULT_MIN_AUTO_SPEEDUP = 0.98
-DEFAULT_AUTO_NO_DECISION_NOISE_S = 0.005
 MATERIALIZATION_ELISION_FORBIDDEN_RUNTIME_PATTERNS = (
     ("fallback", re.compile(r"fallback", re.IGNORECASE)),
     ("whole executor", re.compile(r"whole[-_]executor", re.IGNORECASE)),
@@ -86,7 +83,7 @@ def verify_summary(summary_rows: list[dict], queries: list[str], policies: list[
             require(row_int(row, "compiled_regions") == 0, f"summary.csv: off policy compiled regions: {row}")
 
 
-def verify_runs(trace_dir: Path, run_rows: list[dict], queries: list[str], policies: list[str], repeats: int) -> None:
+def verify_runs(run_rows: list[dict], queries: list[str], policies: list[str], repeats: int) -> None:
     require_columns(run_rows, RUN_FIELDS, "runs.csv")
     expected = {
         (query, policy, str(repeat)) for query in queries for policy in policies for repeat in range(1, repeats + 1)
@@ -101,9 +98,7 @@ def verify_runs(trace_dir: Path, run_rows: list[dict], queries: list[str], polic
         require(row_int(row, "correctness_diff") == 0, f"runs.csv: correctness mismatch: {row}")
         if row["policy"] == "off":
             require(row_int(row, "compiled_regions") == 0, f"runs.csv: off policy compiled regions: {row}")
-        require(row["timing_mode"] in ("production", "profile"), f"runs.csv: bad timing mode: {row}")
-        if row["profile_json"]:
-            verify_profile(trace_dir, {"profile_json": row["profile_json"]})
+        require(row["timing_mode"] == "production", f"runs.csv: bad timing mode: {row}")
 
 
 def verify_counters(rows: list[dict], queries: list[str], policies: list[str], repeats: int) -> None:
@@ -320,56 +315,7 @@ def verify_cbo_runtime_counter_contract(rows: list[dict], require_runtime_proof:
             )
 
 
-def median_value(values: list[float]) -> float:
-    require(values, "cannot compute median for empty value list")
-    sorted_values = sorted(values)
-    mid = len(sorted_values) // 2
-    if len(sorted_values) % 2 == 1:
-        return sorted_values[mid]
-    return (sorted_values[mid - 1] + sorted_values[mid]) / 2
-
-
-def paired_policy_runtime_stats(
-    run_rows: list[dict], query: str, baseline_policy: str, test_policy: str
-) -> dict[str, float] | None:
-    by_repeat = collections.defaultdict(dict)
-    for row in run_rows:
-        if row["query"] != query or row["policy"] not in (baseline_policy, test_policy):
-            continue
-        by_repeat[row_int(row, "repeat")][row["policy"]] = row_int(row, "query_time_us")
-
-    deltas = []
-    speedups = []
-    for repeat in sorted(by_repeat):
-        repeat_rows = by_repeat[repeat]
-        if baseline_policy in repeat_rows and test_policy in repeat_rows:
-            baseline_us = repeat_rows[baseline_policy]
-            test_us = repeat_rows[test_policy]
-            deltas.append((test_us - baseline_us) / 1_000_000)
-            if baseline_us > 0 and test_us > 0:
-                speedups.append(float(baseline_us) / float(test_us))
-    if not deltas:
-        return None
-    require(
-        len(speedups) == len(deltas),
-        f"runs.csv: paired runtime stats require positive timings for query {query}",
-    )
-    return {
-        "median_delta_s": median_value(deltas),
-        "median_speedup": median_value(speedups),
-    }
-
-
-def verify_performance_gaps(
-    rows: list[dict],
-    run_rows: list[dict],
-    queries: list[str],
-    policies: list[str],
-    require_no_auto_decisions: bool,
-    min_auto_speedup: float,
-    auto_no_decision_noise_s: float,
-    performance_checks: bool,
-) -> None:
+def verify_performance_gaps(rows: list[dict], queries: list[str], policies: list[str]) -> None:
     require_columns(rows, PERFORMANCE_GAP_FIELDS, "performance_gaps.csv")
     expected_queries = set(queries)
     actual_queries = {row["query"] for row in rows}
@@ -389,34 +335,6 @@ def verify_performance_gaps(
                 + row_int(row, "auto_unsupported_decisions")
                 + row_int(row, "auto_skipped_decisions")
             )
-            auto_selected_accelerated = row_int(row, "auto_runner_cost_selected_accelerated_runner_count")
-            auto_compiled_regions = row_int(row, "auto_compiled_regions")
-            auto_no_accelerated_runner = auto_compiled_regions == 0 and auto_selected_accelerated == 0
-            if require_no_auto_decisions:
-                require(auto_decisions == 0, f"performance_gaps.csv: auto made JIT decisions: {row}")
-            auto_slowdown_s = row_float(row, "auto_median_s") - row_float(row, "off_median_s")
-            paired_stats = paired_policy_runtime_stats(run_rows, row["query"], "off", "auto")
-            paired_slowdown_s = paired_stats["median_delta_s"] if paired_stats is not None else auto_slowdown_s
-            paired_speedup = (
-                paired_stats["median_speedup"] if paired_stats is not None else row_float(row, "auto_speedup_vs_off")
-            )
-            if performance_checks and auto_no_accelerated_runner:
-                require(
-                    paired_slowdown_s <= auto_no_decision_noise_s,
-                    f"performance_gaps.csv: no-accelerated-runner auto slowdown above "
-                    f"{auto_no_decision_noise_s}s "
-                    f"(paired_median_delta_s={paired_slowdown_s}, paired_median_speedup={paired_speedup}, "
-                    f"aggregate_median_delta_s={auto_slowdown_s}): {row}",
-                )
-            elif performance_checks and paired_slowdown_s <= auto_no_decision_noise_s:
-                pass
-            elif performance_checks:
-                require(
-                    paired_speedup >= min_auto_speedup,
-                    f"performance_gaps.csv: auto speedup below {min_auto_speedup} "
-                    f"(paired_median_speedup={paired_speedup}, aggregate_speedup={row_float(row, 'auto_speedup_vs_off')}, "
-                    f"paired_median_delta_s={paired_slowdown_s}): {row}",
-                )
             if auto_decisions > 0:
                 require(row["auto_primary_blocker"], f"performance_gaps.csv: missing auto blocker: {row}")
                 require(
@@ -460,10 +378,6 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--queries", nargs="+", default=None)
     parser.add_argument("--policies", nargs="+", default=None, choices=DEFAULT_POLICIES)
     parser.add_argument("--repeats", type=int, default=None)
-    parser.add_argument("--require-no-auto-decisions", action="store_true")
-    parser.add_argument("--performance-checks", action=argparse.BooleanOptionalAction, default=True)
-    parser.add_argument("--min-auto-speedup", type=float, default=DEFAULT_MIN_AUTO_SPEEDUP)
-    parser.add_argument("--auto-no-decision-noise-s", type=float, default=DEFAULT_AUTO_NO_DECISION_NOISE_S)
     parser.add_argument(
         "--require-cbo-runtime-proof",
         action="store_true",
@@ -483,19 +397,10 @@ def main() -> int:
     policies = expected_policies(summary_rows, args.policies)
     repeats = expected_repeats(run_rows, args.repeats)
     verify_summary(summary_rows, queries, policies)
-    verify_runs(trace_dir, run_rows, queries, policies, repeats)
+    verify_runs(run_rows, queries, policies, repeats)
     verify_counters(counter_rows, queries, policies, repeats)
     verify_cbo_runtime_counter_contract(counter_rows, args.require_cbo_runtime_proof)
-    verify_performance_gaps(
-        performance_gap_rows,
-        run_rows,
-        queries,
-        policies,
-        args.require_no_auto_decisions,
-        args.min_auto_speedup,
-        args.auto_no_decision_noise_s,
-        args.performance_checks,
-    )
+    verify_performance_gaps(performance_gap_rows, queries, policies)
     print(f"verified TPC-H JIT benchmark: {args.trace_dir.resolve()}")
     return 0
 

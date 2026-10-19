@@ -105,7 +105,6 @@ class TestPerformanceReceipt(unittest.TestCase):
             performance_receipt=receipt,
             level="full",
             change_set="branch",
-            skip_tpch=False,
             host_quiescence=True,
             tpch_queries=["all"],
             no_build=True,
@@ -146,7 +145,7 @@ class TestUnitSuite(unittest.TestCase):
             artifact_dir = Path(temporary)
             unit_binary = artifact_dir / "unittest"
             unit_binary.write_text("test binary", encoding="utf-8")
-            args = SimpleNamespace(unit_binary=unit_binary, unit_spec="[jit]")
+            args = SimpleNamespace(unit_binary=unit_binary)
             result = subprocess.CompletedProcess(
                 args=[str(unit_binary), "[jit]"],
                 returncode=0,
@@ -172,7 +171,7 @@ class TestUnitSuite(unittest.TestCase):
             artifact_dir = Path(temporary)
             unit_binary = artifact_dir / "unittest"
             unit_binary.write_text("test binary", encoding="utf-8")
-            args = SimpleNamespace(unit_binary=unit_binary, unit_spec="[jit]")
+            args = SimpleNamespace(unit_binary=unit_binary)
             result = subprocess.CompletedProcess(
                 args=[str(unit_binary), "[jit]"],
                 returncode=7,

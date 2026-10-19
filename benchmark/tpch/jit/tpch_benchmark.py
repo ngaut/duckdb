@@ -18,9 +18,7 @@ from benchmark_common import (
     jit_setup_sql,
     make_output_dir,
     materialize_query,
-    profile_materialized_attempt,
-    profile_query_time_us,
-    read_profile_json,
+    read_json_file,
     require_fields,
     repo_root,
     row_bool,
@@ -78,7 +76,6 @@ def benchmark_run_row(
     query_time_us: int,
     validation_rows: list[dict],
     counter_rows: list[dict],
-    profile_name: str = "",
 ) -> dict:
     region_metrics = counter_region_summary(counter_rows)
     correctness = correctness_from_rows(validation_rows, result_table)
@@ -89,7 +86,6 @@ def benchmark_run_row(
         "timing_mode": timing_mode,
         "query_time_us": query_time_us,
         "correctness_diff": correctness["correctness_diff"],
-        "profile_json": profile_name,
         **region_metrics,
     }
 
@@ -131,7 +127,7 @@ def run_production_matrix(
             for policy in policies:
                 collect_counters = not needs_untimed_counter_run(args, policy)
                 result_table = f"__jit_benchmark_result_q{query_id}_{policy}_{repeat}"
-                artifact_stem = f"q{query_id}_{policy}_r{repeat}_{args.timing_mode}"
+                artifact_stem = f"q{query_id}_{policy}_r{repeat}_production"
                 validation_path = out_dir / f"{artifact_stem}_validation.json"
                 counters_path = out_dir / f"{artifact_stem}_counters.json"
                 label = f"benchmark q{query_id} {policy} repeat {repeat}"
@@ -203,20 +199,20 @@ def run_production_matrix(
         validation_path = sample["validation_path"]
         if not validation_path.exists():
             raise RuntimeError(f"validation JSON was not written during {sample['label']}: {validation_path}")
-        validation_rows = read_profile_json(validation_path)
+        validation_rows = read_json_file(validation_path)
         validation_path.unlink()
         counters = []
         counters_path = sample["counters_path"]
         if counters_path is not None:
             if not counters_path.exists():
                 raise RuntimeError(f"counter JSON was not written during {sample['label']}: {counters_path}")
-            counters = read_profile_json(counters_path)
+            counters = read_json_file(counters_path)
             counters_path.unlink()
         row = benchmark_run_row(
             sample["query"],
             sample["policy"],
             sample["repeat"],
-            timing_mode=args.timing_mode,
+            timing_mode="production",
             result_table=sample["result_table"],
             query_time_us=query_time_us,
             validation_rows=validation_rows,
@@ -234,65 +230,12 @@ def run_production_matrix(
                 f"counter JSON was not written during q{job['query']} {job['policy']} repeat {job['repeat']}: "
                 f"{counters_path}"
             )
-        counters = read_profile_json(counters_path)
+        counters = read_json_file(counters_path)
         counters_path.unlink()
         key = (job["query"], job["policy"], job["repeat"])
         run_rows[key].update(counter_region_summary(counters))
         counter_rows.extend(benchmark_counter_rows(counters, *key))
 
-    return rows, counter_rows
-
-
-def run_profile_matrix(
-    args: argparse.Namespace,
-    db_path: Path,
-    out_dir: Path,
-    root: Path,
-) -> tuple[list[dict], list[dict]]:
-    rows = []
-    counter_rows = []
-    for query_id in args.queries:
-        query_sql = read_query(root, query_id)
-        create_baseline(args, db_path, query_id, query_sql)
-        for repeat in range(1, args.repeats + 1):
-            for policy in args.policies:
-                result_table = f"__jit_benchmark_result_q{query_id}_{policy}_{repeat}"
-                artifact_name = f"q{query_id}_{policy}_r{repeat}_{args.timing_mode}.json"
-                attempt = profile_materialized_attempt(
-                    args,
-                    db_path,
-                    jit_setup_sql(
-                        args,
-                        policy,
-                        trace_runtime=args.trace_runtime,
-                        trace_decisions=args.trace_decisions,
-                        event_log_size=args.event_log_size,
-                        reset_events=True,
-                        reset_counters=True,
-                    ),
-                    result_table,
-                    query_sql,
-                    out_dir / artifact_name,
-                    f"benchmark q{query_id} {policy} repeat {repeat}",
-                    validation_sql=correctness_sql(f"__jit_benchmark_baseline_q{query_id}", result_table),
-                    cleanup_sql=f"DROP TABLE IF EXISTS {result_table};",
-                    collect_counters=True,
-                )
-                counters = attempt["counters"]
-                rows.append(
-                    benchmark_run_row(
-                        query_id,
-                        policy,
-                        repeat,
-                        timing_mode=args.timing_mode,
-                        result_table=result_table,
-                        query_time_us=profile_query_time_us(attempt["profile"]),
-                        validation_rows=attempt["validation"],
-                        counter_rows=counters,
-                        profile_name=artifact_name,
-                    )
-                )
-                counter_rows.extend(benchmark_counter_rows(counters, query_id, policy, repeat))
     return rows, counter_rows
 
 
@@ -420,11 +363,8 @@ def parse_args() -> argparse.Namespace:
         default=list(DEFAULT_POLICIES),
         choices=DEFAULT_POLICIES,
     )
-    parser.add_argument("--backend", default="sljit")
-    parser.add_argument("--jit-extension", default="jit_sljit")
     parser.add_argument("--threads", type=int, default=1)
     parser.add_argument("--repeats", type=int, default=5)
-    parser.add_argument("--timing-mode", choices=("production", "profile"), default="production")
     parser.add_argument("--event-log-size", type=int, default=0)
     parser.add_argument("--trace-decisions", action=argparse.BooleanOptionalAction, default=False)
     parser.add_argument("--trace-runtime", action=argparse.BooleanOptionalAction, default=False)
@@ -454,10 +394,7 @@ def main() -> int:
     db_path, temp_dir = prepare_tpch_database(args)
     root = repo_root()
     try:
-        if args.timing_mode == "production":
-            rows, counter_rows = run_production_matrix(args, db_path, out_dir, root)
-        else:
-            rows, counter_rows = run_profile_matrix(args, db_path, out_dir, root)
+        rows, counter_rows = run_production_matrix(args, db_path, out_dir, root)
         summary_rows = summarize(rows)
         write_csv(out_dir / "runs.csv", RUN_FIELDS, rows)
         write_csv(out_dir / "summary.csv", SUMMARY_FIELDS, summary_rows)

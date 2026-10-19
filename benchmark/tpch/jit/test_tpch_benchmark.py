@@ -18,16 +18,13 @@ from tpch_benchmark import run_production_matrix  # noqa: E402
 
 def benchmark_args(*, traced: bool) -> SimpleNamespace:
     return SimpleNamespace(
-        backend="sljit",
         duckdb=Path("duckdb"),
         event_log_size=10000 if traced else 0,
         jit_cbo_setting=[],
-        jit_extension="jit_sljit",
         policies=["off", "auto"],
         queries=["01"],
         repeats=2,
         threads=1,
-        timing_mode="production",
         trace_decisions=traced,
         trace_runtime=traced,
     )

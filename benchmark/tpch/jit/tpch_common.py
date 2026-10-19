@@ -36,7 +36,6 @@ RUN_FIELDS = (
     "query_time_us",
     "correctness_diff",
     *REGION_SUMMARY_FIELDS,
-    "profile_json",
 )
 
 COUNTER_BASE_FIELDS = (

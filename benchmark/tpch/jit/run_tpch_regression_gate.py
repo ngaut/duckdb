@@ -40,6 +40,7 @@ DEFAULT_DATABASE_CACHE_DIR = ROOT / "benchmark" / "tpch" / "jit" / "local_baseli
 DATABASE_CACHE_FORMAT_VERSION = 2
 DATABASE_CACHE_ROLE = "immutable_tpch_template"
 DATABASE_CACHE_LOCK_INITIALIZATION_GRACE_S = 30.0
+RUNTIME_CONTRACT_EVENT_LOG_SIZE = 10000
 PROMOTED_BASELINE_CSV_FILES = (
     "summary.csv",
     "runs.csv",
@@ -360,12 +361,8 @@ def apply_baseline_state_contract(args: argparse.Namespace, state: dict) -> None
             f"requested thread count {args.threads} does not match accepted baseline "
             f"thread count {state_threads}: {args.baseline_state}"
         )
-    state_timing_mode = state.get("timing_mode")
-    if state_timing_mode != args.timing_mode:
-        raise TPCHConfigurationError(
-            f"requested timing mode {args.timing_mode} does not match accepted baseline "
-            f"timing mode {state_timing_mode}: {args.baseline_state}"
-        )
+    if state.get("timing_mode") != "production":
+        raise TPCHConfigurationError(f"accepted baseline is not production-timed: {args.baseline_state}")
     state_policies = state.get("policies")
     if state_policies != list(DEFAULT_POLICIES):
         raise TPCHConfigurationError(
@@ -407,7 +404,7 @@ def write_baseline_state(
         "scale_factor": args.scale_factor,
         "threads": args.threads,
         "repeats": repeats if repeats is not None else args.repeats,
-        "timing_mode": args.timing_mode,
+        "timing_mode": "production",
         "event_log_size": args.event_log_size,
         "trace_decisions": args.trace_decisions,
         "trace_runtime": args.trace_runtime,
@@ -438,7 +435,7 @@ def write_gate_metadata(args: argparse.Namespace, out_dir: Path, baseline: Path 
         "queries": list(args.queries),
         "policies": list(args.policies),
         "repeats": args.repeats,
-        "timing_mode": args.timing_mode,
+        "timing_mode": "production",
         "scale_factor": args.scale_factor,
         "threads": args.threads,
         "event_log_size": args.event_log_size,
@@ -491,14 +488,12 @@ def benchmark_command(
     *,
     queries: list[str] | None = None,
     repeats: int | None = None,
-    timing_mode: str | None = None,
     event_log_size: int | None = None,
     trace_decisions: bool | None = None,
     trace_runtime: bool | None = None,
 ) -> list[str]:
     queries = queries if queries is not None else args.queries
     repeats = repeats if repeats is not None else args.repeats
-    timing_mode = timing_mode if timing_mode is not None else args.timing_mode
     event_log_size = event_log_size if event_log_size is not None else args.event_log_size
     trace_decisions = trace_decisions if trace_decisions is not None else args.trace_decisions
     trace_runtime = trace_runtime if trace_runtime is not None else args.trace_runtime
@@ -513,8 +508,6 @@ def benchmark_command(
         *args.policies,
         "--repeats",
         str(repeats),
-        "--timing-mode",
-        timing_mode,
         "--scale-factor",
         str(args.scale_factor),
         "--threads",
@@ -540,12 +533,10 @@ def verify_command(
     *,
     queries: list[str] | None = None,
     repeats: int | None = None,
-    min_auto_speedup: float | None = None,
     require_cbo_runtime_proof: bool = False,
 ) -> list[str]:
     queries = queries if queries is not None else args.queries
     repeats = repeats if repeats is not None else args.repeats
-    min_auto_speedup = min_auto_speedup if min_auto_speedup is not None else args.artifact_min_auto_speedup
     command = [
         sys.executable,
         str(script_path("verify_tpch_benchmark.py")),
@@ -556,13 +547,7 @@ def verify_command(
         *args.policies,
         "--repeats",
         str(repeats),
-        "--min-auto-speedup",
-        str(min_auto_speedup),
-        "--auto-no-decision-noise-s",
-        str(args.auto_no_decision_noise_s),
     ]
-    if not args.artifact_performance_checks:
-        command.append("--no-performance-checks")
     if require_cbo_runtime_proof:
         command.append("--require-cbo-runtime-proof")
     return command
@@ -637,8 +622,7 @@ def compare_command(
 
 def candidate_qualifies_for_direct_promotion(args: argparse.Namespace) -> bool:
     return (
-        args.timing_mode == "production"
-        and args.event_log_size == 0
+        args.event_log_size == 0
         and not args.trace_decisions
         and not args.trace_runtime
         and not args.jit_cbo_setting
@@ -650,8 +634,6 @@ def candidate_qualifies_for_direct_promotion(args: argparse.Namespace) -> bool:
 def validate_baseline_write_configuration(args: argparse.Namespace) -> None:
     if args.policies != list(DEFAULT_POLICIES):
         raise TPCHConfigurationError(f"accepted baselines require policies {' '.join(DEFAULT_POLICIES)}")
-    if args.timing_mode != "production":
-        raise TPCHConfigurationError("accepted baselines require --timing-mode production")
     if args.event_log_size != 0 or args.trace_decisions or args.trace_runtime:
         raise TPCHConfigurationError("accepted baselines require untraced execution with --event-log-size 0")
     if args.jit_cbo_setting:
@@ -674,7 +656,6 @@ def build_promoted_baseline(
                 promoted_dir,
                 queries=args.queries,
                 repeats=repeats,
-                timing_mode="production",
                 event_log_size=0,
                 trace_decisions=False,
                 trace_runtime=False,
@@ -750,7 +731,6 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         choices=PRODUCTION_REPEAT_CHOICES,
         default=PRODUCTION_CANDIDATE_REPEATS,
     )
-    parser.add_argument("--timing-mode", choices=("production", "profile"), default="production")
     parser.add_argument(
         "--scale-factor",
         type=float,
@@ -778,22 +758,6 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--trace-decisions", action="store_true")
     parser.add_argument("--trace-runtime", action="store_true")
     parser.add_argument("--jit-cbo-setting", action="append", default=[])
-    parser.add_argument("--auto-no-decision-noise-s", type=float, default=0.005)
-    parser.add_argument(
-        "--artifact-performance-checks",
-        action=argparse.BooleanOptionalAction,
-        default=False,
-        help="Let verify_tpch_benchmark.py enforce standalone timing checks before baseline comparison.",
-    )
-    parser.add_argument(
-        "--artifact-min-auto-speedup",
-        type=float,
-        default=0.0,
-        help=(
-            "Absolute speedup floor for artifact verification. "
-            "The refactor gate uses baseline-aware comparison by default."
-        ),
-    )
     parser.add_argument("--max-auto-slowdown-ratio", type=float, default=1.02)
     parser.add_argument("--max-auto-slowdown-s", type=float, default=0.002)
     parser.add_argument("--min-auto-speedup", type=float, default=0.98)
@@ -806,14 +770,6 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument("--max-runtime-component-ratio", type=float, default=1.10)
     parser.add_argument("--max-runtime-component-us", type=int, default=200)
-    parser.add_argument(
-        "--runtime-contract-check",
-        action=argparse.BooleanOptionalAction,
-        default=True,
-        help="Run a traced one-repeat proof pass for queries selected by JIT CBO.",
-    )
-    parser.add_argument("--runtime-contract-repeats", type=int, default=1)
-    parser.add_argument("--runtime-contract-event-log-size", type=int, default=10000)
     return parser.parse_args(argv)
 
 
@@ -840,10 +796,6 @@ def validate_args(args: argparse.Namespace) -> tuple[Path | None, Path]:
         raise TPCHConfigurationError("--use-existing-db requires --db")
     if args.host_quiescence and os.name == "nt":
         raise TPCHConfigurationError("--host-quiescence is not supported on Windows; use a quiescent benchmark host")
-    if args.runtime_contract_repeats <= 0:
-        raise TPCHConfigurationError("--runtime-contract-repeats must be positive")
-    if args.runtime_contract_event_log_size < 0:
-        raise TPCHConfigurationError("--runtime-contract-event-log-size must be non-negative")
     if args.init_baseline and args.baseline is not None:
         raise TPCHConfigurationError("--init-baseline does not accept --baseline; it creates the accepted baseline")
     if args.init_baseline and args.promote_baseline:
@@ -865,35 +817,27 @@ def run_benchmark_gate(args: argparse.Namespace, baseline: Path | None, out_dir:
     run_timed_benchmark(args, benchmark_command(args, out_dir), "benchmark")
     require_artifact_dir(out_dir, "candidate")
     run_command(verify_command(args, out_dir), "artifact verification")
-    if args.runtime_contract_check:
-        contract_queries = selected_auto_queries(out_dir, args.queries)
-        if contract_queries:
-            contract_dir = out_dir / "runtime_contract"
-            run_command(
-                benchmark_command(
-                    args,
-                    contract_dir,
-                    queries=contract_queries,
-                    repeats=args.runtime_contract_repeats,
-                    timing_mode="production",
-                    event_log_size=max(args.event_log_size, args.runtime_contract_event_log_size),
-                    trace_decisions=False,
-                    trace_runtime=True,
-                ),
-                "runtime contract benchmark",
-            )
-            require_artifact_dir(contract_dir, "runtime contract")
-            run_command(
-                verify_command(
-                    args,
-                    contract_dir,
-                    queries=contract_queries,
-                    repeats=args.runtime_contract_repeats,
-                    min_auto_speedup=0.0,
-                    require_cbo_runtime_proof=True,
-                ),
-                "runtime contract verification",
-            )
+    # every query the CBO accelerated reruns once traced, and its runtime proof must hold
+    contract_queries = selected_auto_queries(out_dir, args.queries)
+    if contract_queries:
+        contract_dir = out_dir / "runtime_contract"
+        run_command(
+            benchmark_command(
+                args,
+                contract_dir,
+                queries=contract_queries,
+                repeats=1,
+                event_log_size=max(args.event_log_size, RUNTIME_CONTRACT_EVENT_LOG_SIZE),
+                trace_decisions=False,
+                trace_runtime=True,
+            ),
+            "runtime contract benchmark",
+        )
+        require_artifact_dir(contract_dir, "runtime contract")
+        run_command(
+            verify_command(args, contract_dir, queries=contract_queries, repeats=1, require_cbo_runtime_proof=True),
+            "runtime contract verification",
+        )
     if args.init_baseline:
         write_gate_metadata(args, out_dir, None, "init-baseline")
         write_baseline_state(args, out_dir, "init-baseline")

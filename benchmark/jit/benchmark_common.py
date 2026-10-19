@@ -104,10 +104,9 @@ def jit_setup_sql(
     jit_enabled = policy != "off"
     event_log_size = args.event_log_size if event_log_size is None else event_log_size
     statements = [
-        f"LOAD {args.jit_extension};",
         f"SET threads={args.threads};",
         f"SET enable_jit={sql_bool(jit_enabled)};",
-        f"SET jit_backend={sql_quote(args.backend)};",
+        "SET jit_backend='sljit';",
         f"SET jit_policy={sql_quote(policy)};",
         "SET jit_dump_ir=false;",
         f"SET jit_trace_runtime={sql_bool(trace_runtime)};",
@@ -159,7 +158,7 @@ def require_fields(row: dict, fields: tuple[str, ...]) -> dict:
     return {field: row[field] for field in fields}
 
 
-def read_profile_json(path: Path) -> dict | list[dict]:
+def read_json_file(path: Path) -> dict | list[dict]:
     return json.loads(path.read_text(encoding="utf-8"))
 
 
@@ -178,11 +177,6 @@ def row_bool(row: dict, field: str) -> bool:
     if isinstance(value, bool):
         return value
     return str(value).lower() == "true"
-
-
-def profile_query_time_us(profile: dict) -> int:
-    value = (profile.get("query") or {}).get("total_time", 0)
-    return 0 if value in ("", None) else int(round(float(value) * 1_000_000))
 
 
 def counter_region_summary(counter_rows: list[dict]) -> dict:
@@ -234,74 +228,6 @@ def materialize_query(args, db_path: Path, setup_sql: str, table_name: str, quer
         f"{setup_sql}\nCREATE OR REPLACE TABLE {table_name} AS\n{query_sql};",
         label,
     )
-
-
-def profile_materialized_attempt(
-    args,
-    db_path: Path,
-    setup_sql: str,
-    table_name: str,
-    query_sql: str,
-    profile_path: Path,
-    label: str,
-    *,
-    validation_sql: str = "",
-    cleanup_sql: str = "",
-    collect_counters: bool = False,
-) -> dict:
-    if profile_path.exists():
-        profile_path.unlink()
-    validation_path = profile_path.with_name(f"{profile_path.stem}_validation.json")
-    if validation_path.exists():
-        validation_path.unlink()
-    counters_path = profile_path.with_name(f"{profile_path.stem}_counters.json")
-    if counters_path.exists():
-        counters_path.unlink()
-
-    statements = [setup_sql]
-    statements.extend(
-        [
-            "PRAGMA enable_profiling=json;",
-            "PRAGMA profiling_mode=detailed;",
-            f"PRAGMA profiling_output={sql_quote(profile_path)};",
-            f"CREATE OR REPLACE TABLE {table_name} AS\n{query_sql};",
-            "PRAGMA disable_profiling;",
-        ]
-    )
-    if collect_counters:
-        statements.append(".mode json")
-        statements.append(f".once {sql_quote(counters_path)}")
-        statements.append("SELECT * FROM duckdb_jit_counters();")
-    if validation_sql.strip():
-        statements.append(".mode json")
-        statements.append(f".once {sql_quote(validation_path)}")
-        statements.append(validation_sql)
-    if cleanup_sql.strip():
-        statements.append(cleanup_sql)
-
-    run_duckdb(args.duckdb, db_path, "\n".join(statements), label)
-    if not profile_path.exists():
-        raise RuntimeError(f"profile JSON was not written: {profile_path}")
-
-    validation_rows = []
-    if validation_sql.strip():
-        if not validation_path.exists():
-            raise RuntimeError(f"validation JSON was not written during {label}: {validation_path}")
-        validation_rows = read_profile_json(validation_path)
-        validation_path.unlink()
-
-    counter_rows = []
-    if collect_counters:
-        if not counters_path.exists():
-            raise RuntimeError(f"counter JSON was not written during {label}: {counters_path}")
-        counter_rows = read_profile_json(counters_path)
-        counters_path.unlink()
-
-    return {
-        "profile": read_profile_json(profile_path),
-        "validation": validation_rows,
-        "counters": counter_rows,
-    }
 
 
 def parse_shell_timers_us(output: str, labels: list[str]) -> list[int]:
@@ -399,15 +325,3 @@ def require_columns(rows: list[dict], columns: tuple[str, ...], label: str = "su
     require(bool(rows), f"{label}: expected rows")
     missing = [column for column in columns if column not in rows[0]]
     require(not missing, f"{label}: missing required columns {missing}")
-
-
-def verify_profile(trace_dir: Path, row: dict) -> dict:
-    profile_path = trace_dir / row["profile_json"]
-    require(profile_path.exists(), f"missing profile JSON: {profile_path}")
-    profile = read_profile_json(profile_path)
-    require(
-        row_float(profile.get("query") or {}, "total_time") > 0,
-        f"{profile_path.name}: missing query timing",
-    )
-    require("operator" in profile, f"{profile_path.name}: missing operator tree")
-    return profile

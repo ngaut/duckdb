@@ -46,7 +46,6 @@ class TestGateDatabaseReuse(unittest.TestCase):
             queries=["01"],
             policies=["off", "auto"],
             repeats=5,
-            timing_mode="production",
             scale_factor=10.0,
             threads=1,
             event_log_size=0,
@@ -280,7 +279,6 @@ class TestBaselineStateContract(unittest.TestCase):
             baseline_state=Path("accepted_state.json"),
             scale_factor=scale_factor,
             threads=1,
-            timing_mode="production",
             policies=["off", "auto"],
             queries=["01", "22"],
         )
@@ -326,7 +324,6 @@ class TestBaselineStateContract(unittest.TestCase):
             scale_factor=1.0,
             threads=1,
             repeats=10,
-            timing_mode="production",
             event_log_size=0,
             trace_decisions=False,
             trace_runtime=False,
@@ -409,7 +406,6 @@ class TestPromotionRepeats(unittest.TestCase):
     def promotion_args(self, repeats: int) -> SimpleNamespace:
         return SimpleNamespace(
             repeats=repeats,
-            timing_mode="production",
             event_log_size=0,
             trace_decisions=False,
             trace_runtime=False,
@@ -449,7 +445,7 @@ class TestPromotionRepeats(unittest.TestCase):
         self.assertEqual(benchmark.call_args.kwargs["repeats"], 10)
 
     def test_failed_candidate_comparison_cannot_reach_promotion(self) -> None:
-        args = SimpleNamespace(runtime_contract_check=False, init_baseline=False, promote_baseline=True)
+        args = SimpleNamespace(queries=["01"], init_baseline=False, promote_baseline=True)
 
         def run_command(_command, label, **_kwargs):
             if label == "baseline comparison":
@@ -461,6 +457,7 @@ class TestPromotionRepeats(unittest.TestCase):
             with (
                 mock.patch.object(gate, "run_timed_benchmark"),
                 mock.patch.object(gate, "require_artifact_dir"),
+                mock.patch.object(gate, "selected_auto_queries", return_value=[]),
                 mock.patch.object(gate, "benchmark_command", return_value=["benchmark"]),
                 mock.patch.object(gate, "verify_command", return_value=["verify"]),
                 mock.patch.object(gate, "compare_command", return_value=["compare"]),
@@ -477,7 +474,6 @@ class TestPromotionRepeats(unittest.TestCase):
 
     def test_non_production_options_never_qualify_for_promotion(self) -> None:
         overrides = (
-            ("timing_mode", "profile"),
             ("event_log_size", 10000),
             ("trace_decisions", True),
             ("trace_runtime", True),

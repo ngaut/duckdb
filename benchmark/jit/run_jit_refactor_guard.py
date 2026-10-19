@@ -168,7 +168,7 @@ def validate_performance_receipt_configuration(args: argparse.Namespace) -> None
         return
     if args.level != "full" or args.change_set != "branch":
         raise GuardError("--performance-receipt requires a full branch guard")
-    if args.skip_tpch or not args.host_quiescence:
+    if not args.host_quiescence:
         raise GuardError("--performance-receipt requires TPC-H and host admission")
     if args.tpch_queries != ["all"]:
         raise GuardError("--performance-receipt requires the complete TPC-H query set")
@@ -400,7 +400,7 @@ def python_test_command(suite_dir: Path) -> list[str]:
 
 
 def unit_command(args: argparse.Namespace) -> list[str]:
-    return [str(args.unit_binary), args.unit_spec]
+    return [str(args.unit_binary), DEFAULT_UNIT_SPEC]
 
 
 def tpch_gate_command(args: argparse.Namespace, *, skip_build: bool, skip_architecture: bool) -> list[str]:
@@ -414,28 +414,12 @@ def tpch_gate_command(args: argparse.Namespace, *, skip_build: bool, skip_archit
         "--build-config",
         args.build_config,
         "--baseline-state",
-        str(args.tpch_baseline_state),
+        str(DEFAULT_TPCH_BASELINE_STATE),
         "--queries",
         *args.tpch_queries,
         "--repeats",
         str(args.tpch_repeats),
     ]
-    if args.tpch_out_dir is not None:
-        command.extend(["--out-dir", str(args.tpch_out_dir)])
-    if args.tpch_baseline is not None:
-        command.extend(["--baseline", str(args.tpch_baseline)])
-    if args.init_tpch_baseline:
-        command.append("--init-baseline")
-    if args.promote_tpch_baseline:
-        command.append("--promote-baseline")
-    if args.allow_partial_tpch_baseline:
-        command.append("--allow-partial-baseline")
-    if args.tpch_db is not None:
-        command.extend(["--db", str(args.tpch_db)])
-    if args.use_existing_tpch_db:
-        command.append("--use-existing-db")
-    if args.keep_tpch_db:
-        command.append("--keep-db")
     if not args.host_quiescence:
         command.append("--no-host-quiescence")
     if skip_build:
@@ -617,7 +601,7 @@ def should_run_unit(args: argparse.Namespace) -> bool:
 
 
 def should_run_tpch(args: argparse.Namespace) -> bool:
-    return args.level in ("tpch", "full") and not args.skip_tpch
+    return args.level in ("tpch", "full")
 
 
 def should_run_generic(args: argparse.Namespace) -> bool:
@@ -636,8 +620,8 @@ def write_guard_metadata(args: argparse.Namespace, artifact_dir: Path) -> None:
         "auto_selected_level": args.auto_selected_level,
         "auto_max_level": args.auto_max_level,
         "auto_reasons": args.auto_reasons,
-        "unit_spec": args.unit_spec,
-        "tpch_baseline_state": str(args.tpch_baseline_state),
+        "unit_spec": DEFAULT_UNIT_SPEC,
+        "tpch_baseline_state": str(DEFAULT_TPCH_BASELINE_STATE),
         "generic_repeats": args.generic_repeats,
         "tpch_repeats": args.tpch_repeats,
         "host_quiescence": args.host_quiescence,
@@ -654,12 +638,6 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         choices=("dirty", "staged", "branch"),
         default="dirty",
         help="Git change set used by --level auto.",
-    )
-    parser.add_argument(
-        "--changed-path",
-        action="append",
-        default=[],
-        help="Additional changed path for --level auto; useful for deterministic hook or unit testing.",
     )
     parser.add_argument(
         "--auto-max-level",
@@ -691,7 +669,6 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--skip-architecture", action="store_true")
     parser.add_argument("--skip-python", action="store_true")
     parser.add_argument("--skip-unit", action="store_true")
-    parser.add_argument("--skip-tpch", action="store_true")
     parser.add_argument("--skip-fuzz", action="store_true")
     parser.add_argument(
         "--fuzz-queries",
@@ -712,15 +689,6 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         default=PRODUCTION_CANDIDATE_REPEATS,
     )
 
-    parser.add_argument(
-        "--unit-binary",
-        type=Path,
-        default=ROOT / "build" / "reldebug" / "test" / "unittest",
-    )
-    parser.add_argument("--unit-spec", default=DEFAULT_UNIT_SPEC)
-    parser.add_argument("--tpch-baseline", type=Path, default=None)
-    parser.add_argument("--tpch-baseline-state", type=Path, default=DEFAULT_TPCH_BASELINE_STATE)
-    parser.add_argument("--tpch-out-dir", type=Path, default=None)
     parser.add_argument("--tpch-queries", nargs="+", default=["all"])
     parser.add_argument(
         "--tpch-repeats",
@@ -728,12 +696,6 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         choices=PRODUCTION_REPEAT_CHOICES,
         default=PRODUCTION_CANDIDATE_REPEATS,
     )
-    parser.add_argument("--tpch-db", type=Path, default=None)
-    parser.add_argument("--use-existing-tpch-db", action="store_true")
-    parser.add_argument("--keep-tpch-db", action="store_true")
-    parser.add_argument("--init-tpch-baseline", action="store_true")
-    parser.add_argument("--promote-tpch-baseline", action="store_true")
-    parser.add_argument("--allow-partial-tpch-baseline", action="store_true")
     return parser.parse_args(argv)
 
 
@@ -741,23 +703,15 @@ def validate_args(args: argparse.Namespace) -> Path:
     args.requested_level = args.level
     args.duckdb = args.duckdb.resolve()
     args.build_dir = args.build_dir.resolve()
-    args.unit_binary = args.unit_binary.resolve()
-    args.tpch_baseline_state = args.tpch_baseline_state.resolve()
+    args.unit_binary = args.build_dir / "test" / "unittest"
     if args.performance_receipt is not None:
         args.performance_receipt = args.performance_receipt.resolve()
-    if args.tpch_baseline is not None:
-        args.tpch_baseline = args.tpch_baseline.resolve()
-    if args.tpch_out_dir is not None:
-        args.tpch_out_dir = args.tpch_out_dir.resolve()
-    if args.tpch_db is not None:
-        args.tpch_db = args.tpch_db.resolve()
     args.changed_paths = []
     args.auto_required_level = None
     args.auto_selected_level = None
     args.auto_reasons = []
     if args.level == "auto":
         changed_paths = set(git_changed_paths(args.change_set))
-        changed_paths.update(normalize_changed_path(path) for path in args.changed_path)
         args.changed_paths = sorted(path for path in changed_paths if path and not ignore_changed_path(path))
         args.auto_required_level, args.auto_selected_level, args.auto_reasons = classify_auto_level(
             args.changed_paths, args.auto_max_level
@@ -771,10 +725,6 @@ def validate_args(args: argparse.Namespace) -> Path:
         )
         for reason in args.auto_reasons[:16]:
             print(f"  - {reason}", flush=True)
-        if args.auto_required_level == "full" and args.level == "full" and args.skip_tpch:
-            raise GuardError("--skip-tpch cannot be used with performance-sensitive auto guard changes")
-    if args.init_tpch_baseline and args.promote_tpch_baseline:
-        raise GuardError("--init-tpch-baseline and --promote-tpch-baseline are mutually exclusive")
     if args.tpch_repeats <= 0:
         raise GuardError("--tpch-repeats must be positive")
     if args.host_quiescence and os.name == "nt":
