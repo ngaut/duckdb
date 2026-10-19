@@ -111,17 +111,6 @@ static bool TryExecuteAllValidUint64PairNoChainProbeFastest(const SljitNativeHas
 	return true;
 }
 
-static bool SljitHashJoinHasUint64SingleEqualityNotEqualPredicate(const SljitNativeHashJoinProbePlan &plan) {
-	if (plan.keys.size() != 2 || plan.equality_key_count != 1) {
-		return false;
-	}
-	auto &key = plan.keys[0];
-	auto &predicate = plan.keys[1];
-	return SljitHashJoinHasAllValidEqualityKey(key) && !predicate.equality_key && !predicate.null_equal &&
-	       predicate.comparison_type == ExecutionRegionComparisonType::NOT_EQUAL &&
-	       SljitHashJoinHasUint64CompatibleKey(key) && SljitHashJoinHasUint64CompatibleKey(predicate);
-}
-
 template <bool SELECTED, bool USE_SALT, bool HAS_BLOOM>
 static void ExecuteAllValidUncheckedInt64ToInt32SingleKeyNoChainProbe(const SljitNativeHashJoinProbePlan &plan,
                                                                       SljitNativeRegularHashJoinProbeInput &input) {
@@ -257,20 +246,6 @@ static bool TryExecuteAllValidUint64PairProbe(const SljitNativeHashJoinProbePlan
 	}
 	SljitHashJoinUint64PairMatcher matcher(plan, input);
 	ExecuteAllValidHashJoinProbeWithMatcher<SELECTED, CHAIN>(plan, input, matcher);
-	return true;
-}
-
-template <bool SELECTED>
-static bool TryExecuteAllValidSingleKeyNotEqualPredicateChainProbe(const SljitNativeHashJoinProbePlan &plan,
-                                                                   SljitNativeRegularHashJoinProbeInput &input) {
-	if (!SljitHashJoinHasUint64SingleEqualityNotEqualPredicate(plan) || plan.mark_build_match ||
-	    !SljitHashJoinCanUseAllValidMatchedProbe(plan, input, SELECTED) ||
-	    !SljitHashJoinCanUseAllValidChainInput(input)) {
-		return false;
-	}
-
-	SljitHashJoinSingleUint64NotEqualPredicateMatcher matcher(plan, input);
-	ExecuteAllValidHashJoinProbeWithMatcher<SELECTED, true>(plan, input, matcher);
 	return true;
 }
 

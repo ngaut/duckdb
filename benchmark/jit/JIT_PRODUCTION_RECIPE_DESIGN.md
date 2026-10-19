@@ -689,7 +689,11 @@ fuzz campaign reaches is deleted, provided the cascade behind it covers its
 inputs. The boundary-group continuations of grouped preaggregation (carryover
 and prefix/suffix updates that held a state address from one batch to the
 next) were the first such family; the pending batch's boundary merge covers
-groups that continue across chunks.
+groups that continue across chunks. The pair-key and comparison-predicate
+mark-selection probes and the not-equal chain probe followed, unreached even
+on NULL-free TPC-H; the generated probe kernel serves those plans. Coverage
+must include NULL-free data: the fuzz database's NULLs keep every all-valid
+probe path cold.
 
 ### M6 — cost model
 

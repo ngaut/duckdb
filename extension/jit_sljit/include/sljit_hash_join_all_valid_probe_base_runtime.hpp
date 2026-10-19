@@ -100,22 +100,6 @@ static bool SljitHashJoinHasAllValidEqualityKey(const SljitNativeHashJoinProbeKe
 	                            key.comparison_type == ExecutionRegionComparisonType::NOT_DISTINCT_FROM);
 }
 
-static bool SljitHashJoinHasPlainComparisonPredicateKey(const SljitNativeHashJoinProbeKeyPlan &key) {
-	if (key.equality_key || key.null_equal) {
-		return false;
-	}
-	switch (key.comparison_type) {
-	case ExecutionRegionComparisonType::NOT_EQUAL:
-	case ExecutionRegionComparisonType::LESS_THAN:
-	case ExecutionRegionComparisonType::GREATER_THAN:
-	case ExecutionRegionComparisonType::LESS_THAN_OR_EQUAL:
-	case ExecutionRegionComparisonType::GREATER_THAN_OR_EQUAL:
-		return true;
-	default:
-		return false;
-	}
-}
-
 static bool SljitHashJoinHasUint64CompatibleKey(const SljitNativeHashJoinProbeKeyPlan &key) {
 	return key.key_kind == SljitNativeHashJoinKeyKind::INT64 || key.key_kind == SljitNativeHashJoinKeyKind::UINT64;
 }

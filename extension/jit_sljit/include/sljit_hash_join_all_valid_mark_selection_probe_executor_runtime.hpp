@@ -203,29 +203,6 @@ static void ExecuteAllValidHashJoinNoChainMarkSelectionProbeForInput(SljitNative
 }
 
 template <bool SELECTED, bool CHAIN, SljitHashJoinMarkSelectionMode MODE, bool MARK_BUILD_MATCH, class MATCHER>
-static void ExecuteAllValidHashJoinMarkSelectionProbeWithMatcherMode(const SljitNativeHashJoinProbePlan &plan,
-                                                                     SljitNativeRegularHashJoinProbeInput &input,
-                                                                     MATCHER matcher) {
-	SljitHashJoinMarkSelectionConsumer<MODE, MARK_BUILD_MATCH> consumer(input, plan);
-	if constexpr (CHAIN) {
-		ExecuteAllValidHashJoinChainMarkSelectionProbeForInput<SELECTED>(input, matcher, consumer);
-	} else {
-		ExecuteAllValidHashJoinNoChainMarkSelectionProbeForInput<SELECTED>(input, matcher, consumer);
-	}
-}
-
-template <bool SELECTED, bool CHAIN, SljitHashJoinMarkSelectionMode MODE, class MATCHER>
-static void ExecuteAllValidHashJoinMarkSelectionProbeWithMatcher(const SljitNativeHashJoinProbePlan &plan,
-                                                                 SljitNativeRegularHashJoinProbeInput &input,
-                                                                 MATCHER matcher) {
-	if (plan.mark_build_match) {
-		ExecuteAllValidHashJoinMarkSelectionProbeWithMatcherMode<SELECTED, CHAIN, MODE, true>(plan, input, matcher);
-	} else {
-		ExecuteAllValidHashJoinMarkSelectionProbeWithMatcherMode<SELECTED, CHAIN, MODE, false>(plan, input, matcher);
-	}
-}
-
-template <bool SELECTED, bool CHAIN, SljitHashJoinMarkSelectionMode MODE, bool MARK_BUILD_MATCH, class MATCHER>
 static void ExecuteAllValidHashJoinEqualityMarkSelectionProbeWithMatcherMode(
     const SljitNativeHashJoinProbePlan &plan, SljitNativeRegularHashJoinProbeInput &input, MATCHER matcher) {
 	SljitHashJoinMarkSelectionConsumer<MODE, MARK_BUILD_MATCH> consumer(input, plan);
