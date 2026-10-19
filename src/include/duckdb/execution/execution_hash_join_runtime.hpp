@@ -122,7 +122,7 @@ struct ExecutionPerfectHashJoinMembershipLayout {
 	idx_t build_unique_count = 0;
 	uint64_t build_min = 0;
 	uint64_t build_max = 0;
-	//! Wide integral bounds are kept as full values; the legacy words above are the <=64-bit ABI.
+	//! build_min and build_max carry keys up to 64 bits; wider integral keys carry their bounds here.
 	hugeint_t build_min_128;
 	hugeint_t build_max_128;
 	uhugeint_t build_min_u128;
