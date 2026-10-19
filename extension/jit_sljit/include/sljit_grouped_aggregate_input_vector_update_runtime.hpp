@@ -11,7 +11,6 @@
 #include "sljit_grouped_aggregate_direct_update_runtime.hpp"
 #include "sljit_grouped_aggregate_direct_update_capability_runtime.hpp"
 #include "sljit_grouped_aggregate_input_vector_groups.hpp"
-#include "sljit_grouped_aggregate_input_vector_run_update_runtime.hpp"
 #include "sljit_grouped_aggregate_preaggregation_api.hpp"
 #include "sljit_grouped_aggregate_state_address_update_runtime.hpp"
 #include "sljit_grouped_aggregate_state_runtime.hpp"
@@ -199,13 +198,6 @@ static bool SljitTryExecuteInputVectorGroupedAggregateUpdate(
 			record_unsupported("pending_preaggregated_flush");
 			return false;
 		}
-		if (TryExecuteRunPreaggregatedInputVectorGroupedTargetPayloadUpdate(
-		        runtime, scratch, op_idx, op, payload_input, group_sources, payload_source_indices,
-		        payload_source_layout, payload_lanes, reduction_lanes, grouped_state, payload_scratch, finish,
-		        dense_domain)) {
-			end_proven_unique_append();
-			return true;
-		}
 		if (TryExecuteDirectInputVectorGroupedTargetPayloadUpdate(
 		        runtime, scratch, op_idx, op, payload_input, group_sources, payload_source_indices,
 		        payload_source_not_null, payload_lanes, reduction_lanes, grouped_state, payload_scratch, finish,
@@ -242,7 +234,7 @@ static bool SljitTryExecuteInputVectorGroupedAggregateUpdate(
 		}
 		if (!has_group_output_transform && TryExecutePreaggregatedGroupedPrimitiveAggregateUpdateBatches(
 		                                       runtime, scratch, op_idx, op, preaggregated_groups, preaggregate_scratch,
-		                                       payload_lanes, grouped_state, payload_input.size(), true, !finish)) {
+		                                       payload_lanes, grouped_state, payload_input.size(), true)) {
 			end_proven_unique_append();
 			RecordSljitRegionMaterializationElision(
 			    runtime, op.kind, "direct_input_vector_preaggregated_grouped_update", payload_input.size());

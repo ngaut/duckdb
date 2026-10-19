@@ -141,7 +141,7 @@ static bool TryExecuteDirectGroupedAggregateUpdate(
 	if (direct_update_kind != SljitGroupedAggregateDirectUpdatePlanKind::NONE &&
 	    TryExecutePreaggregatedDirectGroupedAggregateUpdate(runtime, scratch, op_idx, op, input, payload_lanes,
 	                                                        reduction_lanes, execute_sel, count, grouped_state,
-	                                                        payload_scratch, defer_grouped_finish)) {
+	                                                        payload_scratch)) {
 		return true;
 	}
 	switch (direct_update_kind) {

@@ -503,7 +503,6 @@ def verify_runtime_abi_ownership() -> None:
             "extension/jit_sljit/include/sljit_aggregate_primitive_payload_runtime.hpp",
             "extension/jit_sljit/include/sljit_grouped_reduction_lane.hpp",
             "extension/jit_sljit/include/sljit_grouped_aggregate_direct_update_capability_runtime.hpp",
-            "extension/jit_sljit/include/sljit_grouped_aggregate_input_vector_run_update_runtime.hpp",
             "extension/jit_sljit/include/sljit_grouped_aggregate_preaggregated_update_runtime.hpp",
             "extension/jit_sljit/include/sljit_grouped_count_star_update_runtime.hpp",
             "extension/jit_sljit/include/sljit_string_set_complementary_sum_runtime.hpp",

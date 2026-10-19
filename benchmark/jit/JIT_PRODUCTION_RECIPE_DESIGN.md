@@ -684,6 +684,13 @@ supports it, generalize or delete shape-specific families. Exit: every
 remaining backend family runs generated code on its hot path or carries a
 measured justification.
 
+Reachability comes first: a family no test, TPC-H query, generic workload or
+fuzz campaign reaches is deleted, provided the cascade behind it covers its
+inputs. The boundary-group continuations of grouped preaggregation (carryover
+and prefix/suffix updates that held a state address from one batch to the
+next) were the first such family; the pending batch's boundary merge covers
+groups that continue across chunks.
+
 ### M6 — cost model
 
 Merge the five gates into one decision with typed input and reasons; feed

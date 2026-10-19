@@ -383,7 +383,7 @@ TEST_CASE("JIT canonical single-lane sums initialize fresh states directly", "[a
 	payloads[0].kind = AggregatePrimitiveUpdateKind::SUM_INT64;
 	payloads[0].int64_values = {11, 22};
 	payloads[0].value_is_set = {1, 0};
-	auto update_state = SljitMakePreaggregatedPrimitiveUpdateState(lanes, payloads, 1);
+	auto update_state = SljitMakePreaggregatedPrimitiveUpdateState(lanes, payloads);
 
 	std::array<uint8_t, sizeof(int64_t) + sizeof(uint64_t)> first_state;
 	std::array<uint8_t, sizeof(int64_t) + sizeof(uint64_t)> second_state;
@@ -397,7 +397,6 @@ TEST_CASE("JIT canonical single-lane sums initialize fresh states directly", "[a
 	REQUIRE(Load<bool>(first_state.data() + lane.state_is_set_offset));
 	REQUIRE(Load<int64_t>(second_state.data()) == 0);
 	REQUIRE_FALSE(Load<bool>(second_state.data() + lane.state_is_set_offset));
-	REQUIRE(update_state.captured_address == addresses[1]);
 }
 
 TEST_CASE("Grouped aggregate append callbacks expose identity address order directly", "[api][jit]") {

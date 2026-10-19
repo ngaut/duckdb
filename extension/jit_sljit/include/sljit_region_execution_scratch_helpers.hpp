@@ -132,19 +132,6 @@ struct SljitDirectAggregateUpdateTracker {
 	idx_t miss_limit;
 };
 
-struct SljitPreaggregatedGroupContinuationState {
-	void Clear() {
-		ready = false;
-		physical_type = PhysicalType::INVALID;
-		state_address = 0;
-	}
-
-	bool ready = false;
-	PhysicalType physical_type = PhysicalType::INVALID;
-	std::array<uint8_t, sizeof(hugeint_t)> key {};
-	uintptr_t state_address = 0;
-};
-
 enum class SljitBoundGroupedAggregateStrategy : uint8_t {
 	UNBOUND,
 	PERFECT_HASH_FUSED,
@@ -169,7 +156,6 @@ struct SljitAggregateOperatorScratch {
 	unique_ptr<DataChunk> preaggregated_groups;
 	unique_ptr<DataChunk> preaggregated_group_slice;
 	unique_ptr<Vector> preaggregated_row_pointers;
-	SljitPreaggregatedGroupContinuationState preaggregated_group_continuation;
 	SljitPreaggregatedPrimitiveAggregateScratch preaggregate_scratch;
 	SljitPreaggregatedPrimitiveAggregateScratch preaggregate_scratch_slice;
 	SljitAggregatePayloadAdapterScratch payload_scratch;
@@ -226,10 +212,6 @@ struct SljitAggregateUpdateScratchState {
 			throw InternalException("SLJIT aggregate update has no preaggregated row-pointer scratch");
 		}
 		return *state.preaggregated_row_pointers;
-	}
-
-	SljitPreaggregatedGroupContinuationState &PreaggregatedGroupContinuation(idx_t op_idx) {
-		return Operator(op_idx).preaggregated_group_continuation;
 	}
 
 	SljitPreaggregatedPrimitiveAggregateScratch &PreaggregateScratch(idx_t op_idx) {
