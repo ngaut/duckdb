@@ -371,7 +371,7 @@ these per operator and initializes every field before publishing `ready`.
 Storage-dependent RHS gathering is an exported core operation.
 
 Execution-region backends use DuckDB's version- and platform-matched C++
-extension contract plus an execution-region ABI version, currently 12. Any
+extension contract plus an execution-region ABI version, currently 13. Any
 backend-visible layout or virtual-interface change advances it; registration
 rejects other versions, and the boundary verifier pins the value.
 

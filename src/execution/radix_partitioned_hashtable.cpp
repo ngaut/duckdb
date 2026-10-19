@@ -1903,36 +1903,6 @@ void RadixPartitionedHashTable::RequireAppendFinalCombine(ExecutionContext &cont
 	ht.RequireFinalCombine();
 }
 
-bool RadixPartitionedHashTable::TryResolveNewGroupAddresses(
-    ExecutionContext &context, DataChunk &chunk, OperatorSinkInput &input, const ExecutionRegionSinkInfo &sink_info,
-    Vector &addresses_out, optional_ptr<ExecutionOperatorStageRecorder> recorder) const {
-	if (sink_info.kind != ExecutionRegionSinkKind::HASH_AGGREGATE_UPDATE ||
-	    sink_info.aggregate_contract.native_grouped_state_contract.status !=
-	        ExecutionRegionStateContractStatus::READY) {
-		return false;
-	}
-
-	RadixSinkEntryScope scope(context, *this, input, recorder, "direct_new_address.prepare_sink_state",
-	                          "direct_new_address.finish_sink_state");
-	auto &ht = scope.HT();
-	auto &lstate = scope.LState();
-
-	auto &group_chunk = lstate.group_chunk;
-	auto populate_start = RadixTraceStart(recorder);
-	PopulateGroupChunk(group_chunk, chunk);
-	RecordRadixTraceStage(recorder, "direct_new_address.populate_group_chunk", populate_start);
-
-	auto append_start = RadixTraceStart(recorder);
-	if (!ht.TryFindOrCreateGroupAddressesFast(group_chunk, addresses_out, recorder)) {
-		RecordRadixTraceStage(recorder, "direct_new_address.append_miss", append_start);
-		return false;
-	}
-	RecordRadixTraceStage(recorder, "direct_new_address.append", append_start);
-
-	scope.Arm();
-	return true;
-}
-
 void RadixPartitionedHashTable::RecordDirectStateAddressUpdates(ExecutionContext &context, OperatorSinkInput &input,
                                                                 idx_t count) const {
 	auto &ht = PrepareRadixHTSinkState(context, *this, input);

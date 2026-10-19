@@ -569,16 +569,6 @@ public:
 		single_grouping.grouping.table_data.RequireAppendFinalCombine(context, single_grouping.input);
 	}
 
-	bool TryResolveNewGroups(DataChunk &input, const ExecutionRegionSinkInfo &sink_info, Vector &addresses,
-	                         optional_ptr<ExecutionOperatorStageRecorder> recorder = nullptr) override {
-		if (!CanUseSingleGroupingState()) {
-			return false;
-		}
-		auto single_grouping = GetSingleGroupingSinkState();
-		return single_grouping.grouping.table_data.TryResolveNewGroupAddresses(context, input, single_grouping.input,
-		                                                                       sink_info, addresses, recorder);
-	}
-
 	void RecordDirectStateAddressUpdates(idx_t count) override {
 		if (!CanUseSingleGroupingState()) {
 			return;

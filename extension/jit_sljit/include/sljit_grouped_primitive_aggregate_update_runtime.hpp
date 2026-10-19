@@ -145,17 +145,12 @@ static SinkResultType SljitExecuteBoundGroupedPrimitiveAggregateUpdate(Execution
 			                                                        count, defer_grouped_finish);
 		}
 		grouped_state_addresses = &scratch.AggregateStateAddresses(bound.op_idx);
-		if (SljitCanResolveDirectNewGroupedStateAddresses(scratch, bound.op_idx, op, input, execute_sel, count) &&
-		    TryResolveDirectNewGroupedStateAddresses(runtime, scratch, bound.op_idx, op, input, grouped_state,
-		                                             *grouped_state_addresses, !defer_grouped_finish)) {
-		} else {
-			auto resolve_stage_start = SljitRegionStageStart(runtime);
-			ExecuteSljitRegionRecordedOperation(
-			    runtime, bound.op_idx, op.kind, "resolve_grouped_state_addresses", resolve_stage_start,
-			    [&](optional_ptr<ExecutionOperatorStageRecorder> recorder) {
-				    grouped_state.state->ResolveStateAddresses(input, *grouped_state_addresses, recorder);
-			    });
-		}
+		auto resolve_stage_start = SljitRegionStageStart(runtime);
+		ExecuteSljitRegionRecordedOperation(
+		    runtime, bound.op_idx, op.kind, "resolve_grouped_state_addresses", resolve_stage_start,
+		    [&](optional_ptr<ExecutionOperatorStageRecorder> recorder) {
+			    grouped_state.state->ResolveStateAddresses(input, *grouped_state_addresses, recorder);
+		    });
 		RecordSljitRegionRuntimePath(runtime, op.kind, "resolve_grouped_state_addresses");
 	}
 

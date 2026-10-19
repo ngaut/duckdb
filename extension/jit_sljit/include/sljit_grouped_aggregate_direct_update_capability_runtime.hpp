@@ -270,16 +270,4 @@ static bool SljitCanExecuteDirectRowPointerPreaggregatedPrimitiveUpdate(
 	return true;
 }
 
-static bool SljitCanResolveDirectNewGroupedStateAddresses(SljitRegionExecutionScratch &scratch, idx_t op_idx,
-                                                          SljitExecutableRegionOp &op, DataChunk &input,
-                                                          const SelectionVector *execute_sel, idx_t count) {
-	auto &aggregate_update = op.aggregate_update;
-	auto &plan = aggregate_update.plan;
-	auto &sink_info = plan.sink_info;
-	return !scratch.DirectNewAggregateUpdateDisabled(op_idx) && execute_sel == nullptr && count == input.size() &&
-	       plan.UsesPrimitivePayloads() && plan.use_grouped_state_addresses && !plan.use_perfect_hash_group_lookup &&
-	       !aggregate_update.fused_payload_update_owns_group_lookup &&
-	       sink_info.kind == ExecutionRegionSinkKind::HASH_AGGREGATE_UPDATE && !sink_info.groups.empty();
-}
-
 } // namespace duckdb

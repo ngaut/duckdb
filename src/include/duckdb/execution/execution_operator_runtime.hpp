@@ -290,14 +290,6 @@ struct ExecutionGroupedAggregateStateAddressState {
 	}
 	virtual void RequireAppendFinalCombine() {
 	}
-	virtual bool TryResolveNewGroups(DataChunk &input, const ExecutionRegionSinkInfo &sink_info, Vector &addresses,
-	                                 optional_ptr<ExecutionOperatorStageRecorder> recorder = nullptr) {
-		(void)input;
-		(void)sink_info;
-		(void)addresses;
-		(void)recorder;
-		return false;
-	}
 	virtual void RecordDirectStateAddressUpdates(idx_t count) {
 		(void)count;
 	}

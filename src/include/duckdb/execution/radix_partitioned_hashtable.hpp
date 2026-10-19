@@ -125,9 +125,6 @@ public:
 	bool TryEnableProvenUniqueAppend(ExecutionContext &context, OperatorSinkInput &input, DataChunk &groups,
 	                                 ExecutionGroupedAggregateAppendProof append_proof = {}) const;
 	void RequireAppendFinalCombine(ExecutionContext &context, OperatorSinkInput &input) const;
-	bool TryResolveNewGroupAddresses(ExecutionContext &context, DataChunk &chunk, OperatorSinkInput &input,
-	                                 const ExecutionRegionSinkInfo &sink_info, Vector &addresses_out,
-	                                 optional_ptr<ExecutionOperatorStageRecorder> recorder = nullptr) const;
 	void RecordDirectStateAddressUpdates(ExecutionContext &context, OperatorSinkInput &input, idx_t count) const;
 	void FinishStateUpdates(ExecutionContext &context, OperatorSinkInput &input) const;
 	void Combine(ExecutionContext &context, GlobalSinkState &gstate, LocalSinkState &lstate) const;

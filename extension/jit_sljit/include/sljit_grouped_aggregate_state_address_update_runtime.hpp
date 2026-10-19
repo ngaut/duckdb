@@ -138,27 +138,6 @@ static bool SljitTryReserveGroupedAggregateGroups(ExecutionRegionRuntime &runtim
 	return reserved;
 }
 
-static bool TryResolveDirectNewGroupedStateAddresses(ExecutionRegionRuntime &runtime,
-                                                     SljitRegionExecutionScratch &scratch, idx_t op_idx,
-                                                     SljitExecutableRegionOp &op, DataChunk &input,
-                                                     ExecutionGroupedAggregateStateAddressBinding &grouped_state,
-                                                     Vector &addresses, bool finish = true) {
-	auto stage_start = SljitRegionStageStart(runtime);
-	auto resolved =
-	    ExecuteSljitRegionRecordedOperation(runtime, op_idx, op.kind, "direct_new_grouped_state_addresses", stage_start,
-	                                        [&](optional_ptr<ExecutionOperatorStageRecorder> recorder) {
-		                                        return grouped_state.state->TryResolveNewGroups(
-		                                            input, op.aggregate_update.plan.sink_info, addresses, recorder);
-	                                        });
-	scratch.RecordDirectNewAggregateUpdateResult(op_idx, resolved);
-	RecordSljitRegionStageRuntimePath(
-	    runtime, op_idx, op.kind,
-	    resolved ? "direct_new_grouped_state_addresses" : "direct_new_grouped_state_addresses_miss", stage_start);
-	if (resolved) {
-	}
-	return resolved;
-}
-
 static bool TryExecuteDirectGroupedStateAddressPayloadUpdate(
     ExecutionRegionRuntime &runtime, SljitRegionExecutionScratch &scratch, idx_t op_idx, SljitExecutableRegionOp &op,
     DataChunk &input, const vector<const ExecutionPrimitiveAggregateUpdateLane *> &payload_lanes,
