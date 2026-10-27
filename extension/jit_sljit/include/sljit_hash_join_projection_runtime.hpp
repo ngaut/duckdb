@@ -242,7 +242,7 @@ static bool SljitTryExecuteHashJoinProbeDirectHashJoinBuild(
 		auto &match_selection = SljitBindHashJoinMatchSelection(state.output_proof, explicit_match_selection);
 		// The probe ran on join_input itself, so its output columns index that chunk
 		auto source = SljitBindHashJoinOutputSource(runtime, ops, scratch, hash_join_idx, join_input,
-		                                            state.output_proof, nullptr, DConstants::INVALID_INDEX);
+		                                            state.output_proof, nullptr);
 
 		DataChunk *sink_input = nullptr;
 		if (projection_idx == DConstants::INVALID_INDEX) {

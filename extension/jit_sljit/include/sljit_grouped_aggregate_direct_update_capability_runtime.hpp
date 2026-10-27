@@ -49,10 +49,13 @@ SljitCanExecuteGroupedPrimitiveAggregateUpdateShape(SljitExecutableRegionOp &op,
 		if (aggregate.child_count != 1 || aggregate.child_indices.size() != 1) {
 			return false;
 		}
-		auto &payload = aggregate_update.payloads[aggregate_idx].plan;
-		if (payload.kind != SljitNativeRegionExpressionKind::REFERENCE ||
-		    payload.source_index != aggregate.child_indices[0] || payload.source_index >= input.ColumnCount() ||
-		    input.data[payload.source_index].GetType().InternalType() != descriptor.input_type) {
+		auto &payload = aggregate_update.payloads[aggregate_idx];
+		if (payload.plan.kind != SljitNativeRegionExpressionKind::REFERENCE) {
+			return false;
+		}
+		const auto source_index = payload.InputColumn(payload.plan.source_index);
+		if (source_index != aggregate.child_indices[0] || source_index >= input.ColumnCount() ||
+		    input.data[source_index].GetType().InternalType() != descriptor.input_type) {
 			return false;
 		}
 	}
@@ -162,8 +165,7 @@ SljitCanPreaggregateInputVectorFusedPrimitivePayloads(SljitExecutableRegionOp &o
 	for (idx_t payload_idx = 0; payload_idx < sink_info.aggregates.size(); payload_idx++) {
 		auto &aggregate = sink_info.aggregates[payload_idx];
 		auto &descriptor = *reduction_lanes[payload_idx].descriptor;
-		if (!SljitPreaggregatedPrimitivePayloadSupported(
-		        descriptor.primitive_kind, descriptor.has_payload ? descriptor.input_type : PhysicalType::INVALID)) {
+		if (!SljitPreaggregatedGeneratedPayloadSupported(descriptor)) {
 			return false;
 		}
 		if (!descriptor.has_payload && aggregate.child_count != 0) {
@@ -240,8 +242,12 @@ static bool SljitCanExecuteDirectRowPointerPreaggregatedPrimitiveUpdate(
 	for (idx_t payload_idx = 0; payload_idx < sink_info.aggregates.size(); payload_idx++) {
 		auto &aggregate = sink_info.aggregates[payload_idx];
 		auto &descriptor = *reduction_lanes[payload_idx].descriptor;
-		if (!SljitPreaggregatedPrimitivePayloadSupported(
-		        descriptor.primitive_kind, descriptor.has_payload ? descriptor.input_type : PhysicalType::INVALID)) {
+		const bool supported = uses_generated_payload_preaggregation
+		                           ? SljitPreaggregatedGeneratedPayloadSupported(descriptor)
+		                           : SljitPreaggregatedPrimitivePayloadSupported(
+		                                 descriptor.primitive_kind,
+		                                 descriptor.has_payload ? descriptor.input_type : PhysicalType::INVALID);
+		if (!supported) {
 			return false;
 		}
 		if (!descriptor.has_payload) {

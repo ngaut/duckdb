@@ -142,14 +142,16 @@ private:
 				materialized_direct_payload_source_indices.push_back(DConstants::INVALID_INDEX);
 				continue;
 			}
-			auto &payload = payloads[payload_idx].plan;
-			if (payload.kind != SljitNativeRegionExpressionKind::REFERENCE ||
-			    payload.source_index >= input_types.size() ||
-			    input_types[payload.source_index] != payload.return_type ||
-			    payload.return_type.InternalType() != descriptor.input_type) {
+			auto &payload = payloads[payload_idx];
+			if (payload.plan.kind != SljitNativeRegionExpressionKind::REFERENCE) {
 				return false;
 			}
-			materialized_direct_payload_source_indices.push_back(payload.source_index);
+			const auto source_index = payload.InputColumn(payload.plan.source_index);
+			if (source_index >= input_types.size() || input_types[source_index] != payload.plan.return_type ||
+			    payload.plan.return_type.InternalType() != descriptor.input_type) {
+				return false;
+			}
+			materialized_direct_payload_source_indices.push_back(source_index);
 		}
 		return true;
 	}

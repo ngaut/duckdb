@@ -1,0 +1,142 @@
+# name: test/sql/jit/test_jit_hugeint_sum_errors.test
+# description: Full-width sums preserve checked addition across chunks, grouping, selections and fused lanes
+# group: [jit]
+
+statement ok
+LOAD jit_sljit
+
+statement ok
+SET jit_cbo_generated_stage_benefit=4096
+
+statement ok
+SET jit_cbo_materialization_elision_benefit=4096
+
+statement ok
+SET jit_cbo_native_operator_stage_benefit=4096
+
+statement ok
+SET jit_cbo_full_pipeline_benefit=4096
+
+statement ok
+SET jit_cbo_source_contract_scan_filter_penalty=0
+
+statement ok
+SET jit_cbo_startup_base_cost=0
+
+statement ok
+SET jit_cbo_startup_margin_basis_points=0
+
+# A chunk-local reduction must neither hide an overflow nor introduce one.
+statement ok
+CREATE TABLE ordered_hugeints AS
+SELECT i, (i // 4096)::INTEGER AS g,
+       CASE i WHEN 2047 THEN 170141183460469231731687303715884105727::HUGEINT
+              WHEN 2048 THEN 1 WHEN 2049 THEN -1 ELSE 0 END AS overflow_positive,
+       CASE i WHEN 2047 THEN '-170141183460469231731687303715884105728'::HUGEINT
+              WHEN 2048 THEN -1 WHEN 2049 THEN 1 ELSE 0 END AS overflow_negative,
+       CASE i WHEN 2047 THEN -1
+              WHEN 2048 THEN 170141183460469231731687303715884105727::HUGEINT
+              WHEN 2049 THEN 1 ELSE 0 END AS valid,
+       CASE WHEN i % 7 = 0 THEN NULL ELSE (i % 31 - 15)::HUGEINT END AS nullable
+FROM range(8192) t(i)
+
+statement ok
+CREATE TABLE decimal_overflow AS
+SELECT (i % 3)::INTEGER AS g, 99999999999999999999999999999999999999::DECIMAL(38,0) AS v
+FROM range(12) t(i)
+
+foreach threads 1 4
+
+statement ok
+SET threads={threads}
+
+foreach policy off auto
+
+statement ok
+SET jit_policy='{policy}'
+
+statement error
+SELECT sum(overflow_positive) FROM ordered_hugeints
+----
+Overflow
+
+statement error
+SELECT sum(overflow_negative) FROM ordered_hugeints
+----
+Overflow
+
+statement error
+SELECT sum(overflow_positive), sum(nullable), count(*) FROM ordered_hugeints
+----
+Overflow
+
+statement error
+SELECT sum(nullable), sum(overflow_negative), count(*) FROM ordered_hugeints
+----
+Overflow
+
+statement error
+SELECT sum(overflow_positive) FROM ordered_hugeints WHERE i >= 1000
+----
+Overflow
+
+statement error
+SELECT g, sum(overflow_positive), sum(nullable) FROM ordered_hugeints GROUP BY g
+----
+Overflow
+
+# VARCHAR keys exercise a regular hash table rather than a perfect hash table.
+statement error
+SELECT g::VARCHAR, sum(overflow_negative), count(*) FROM ordered_hugeints GROUP BY g::VARCHAR
+----
+Overflow
+
+statement error
+SELECT avg(overflow_positive) FROM ordered_hugeints
+----
+Overflow
+
+statement error
+SELECT sum(v) FROM decimal_overflow
+----
+Overflow
+
+statement error
+SELECT g, sum(v), count(*) FROM decimal_overflow GROUP BY g
+----
+Overflow
+
+query I
+SELECT sum(valid) FROM ordered_hugeints
+----
+170141183460469231731687303715884105727
+
+query III nosort valid_hugeint_fused_{threads}
+SELECT sum(valid), sum(nullable), count(*) FROM ordered_hugeints
+----
+
+query III rowsort valid_hugeint_perfect_{threads}
+SELECT g, sum(valid), sum(nullable) FROM ordered_hugeints GROUP BY g
+----
+
+query TII rowsort valid_hugeint_grouped_{threads}
+SELECT g::VARCHAR, sum(valid), sum(nullable) FROM ordered_hugeints GROUP BY g::VARCHAR
+----
+
+query II nosort selected_hugeint_{threads}
+SELECT sum(valid), sum(nullable) FROM ordered_hugeints WHERE i >= 1000
+----
+
+query II
+SELECT sum(NULL::HUGEINT), count(*) FROM ordered_hugeints
+----
+NULL	8192
+
+query II
+SELECT sum(valid), count(*) FROM ordered_hugeints WHERE i < 0
+----
+NULL	0
+
+endloop
+
+endloop

@@ -124,7 +124,7 @@ SljitBindSingleFusedPrimitiveAggregatePayloadUpdate(vector<SljitExecutableRegion
 		break;
 	case SljitNativeRegionExpressionKind::INTEGER_BINARY_REFERENCES:
 		bound.kind = SljitSingleFusedPrimitiveAggregatePayloadKind::INTEGER_BINARY_REFERENCES;
-		bound.right_source_index = plan.right_source_index;
+		bound.right_source_index = payload.InputColumn(plan.right_source_index);
 		bound.right_source_known_not_null = SljitInputSourceKnownNotNull(payload.input_source_not_null, 1);
 		break;
 	default:
@@ -134,7 +134,7 @@ SljitBindSingleFusedPrimitiveAggregatePayloadUpdate(vector<SljitExecutableRegion
 	bound.ready = true;
 	bound.function = function;
 	bound.lane = &lane;
-	bound.source_index = plan.source_index;
+	bound.source_index = payload.InputColumn(plan.source_index);
 	bound.integer_kind = plan.integer_kind;
 	bound.source_known_not_null = SljitInputSourceKnownNotNull(payload.input_source_not_null, 0);
 	return true;
@@ -263,13 +263,13 @@ static void SljitExecuteFusedPrimitiveAggregatePayloadUpdate(
 		case SljitNativeRegionExpressionKind::REFERENCE:
 			if (payload_descriptors[payload_idx].IsDoubleWord()) {
 				payload_sources.PrepareTypedExpressionSource(
-				    input, plan.source_index, payload_idx, execute_sel, count,
+				    input, payloads[payload_idx].InputColumn(plan.source_index), payload_idx, execute_sel, count,
 				    "SLJIT fused aggregate reference source is out of range",
 				    SljitInputSourceKnownNotNull(payloads[payload_idx].input_source_not_null, 0));
 			} else {
 				payload_sources.PrepareIntegerSource(
-				    input, plan.source_index, payload_idx, plan.integer_kind, execute_sel, count,
-				    "SLJIT fused aggregate reference source is out of range",
+				    input, payloads[payload_idx].InputColumn(plan.source_index), payload_idx, plan.integer_kind,
+				    execute_sel, count, "SLJIT fused aggregate reference source is out of range",
 				    SljitInputSourceKnownNotNull(payloads[payload_idx].input_source_not_null, 0));
 			}
 			if (payloads.size() == 1) {
@@ -280,8 +280,8 @@ static void SljitExecuteFusedPrimitiveAggregatePayloadUpdate(
 			break;
 		case SljitNativeRegionExpressionKind::INTEGER_BINARY_CONSTANT:
 			payload_sources.PrepareIntegerSource(
-			    input, plan.source_index, payload_idx, plan.integer_kind, execute_sel, count,
-			    "SLJIT fused aggregate binary source is out of range",
+			    input, payloads[payload_idx].InputColumn(plan.source_index), payload_idx, plan.integer_kind,
+			    execute_sel, count, "SLJIT fused aggregate binary source is out of range",
 			    SljitInputSourceKnownNotNull(payloads[payload_idx].input_source_not_null, 0));
 			constants[payload_idx] = plan.constant;
 			if (payloads.size() == 1) {
@@ -293,12 +293,12 @@ static void SljitExecuteFusedPrimitiveAggregatePayloadUpdate(
 			break;
 		case SljitNativeRegionExpressionKind::INTEGER_BINARY_REFERENCES:
 			payload_sources.PrepareIntegerSource(
-			    input, plan.source_index, payload_idx, plan.integer_kind, execute_sel, count,
-			    "SLJIT fused aggregate binary source is out of range",
+			    input, payloads[payload_idx].InputColumn(plan.source_index), payload_idx, plan.integer_kind,
+			    execute_sel, count, "SLJIT fused aggregate binary source is out of range",
 			    SljitInputSourceKnownNotNull(payloads[payload_idx].input_source_not_null, 0));
 			right_payload_sources.PrepareIntegerSource(
-			    input, plan.right_source_index, payload_idx, plan.integer_kind, execute_sel, count,
-			    "SLJIT fused aggregate binary source is out of range",
+			    input, payloads[payload_idx].InputColumn(plan.right_source_index), payload_idx, plan.integer_kind,
+			    execute_sel, count, "SLJIT fused aggregate binary source is out of range",
 			    SljitInputSourceKnownNotNull(payloads[payload_idx].input_source_not_null, 1));
 			if (payloads.size() == 1) {
 				single_source_data = payload_sources.DataArray()[0];
@@ -452,8 +452,8 @@ static void SljitExecuteFusedGroupedPrimitiveAggregatePayloadUpdate(
 		SljitValidateReferenceAggregatePayloadPlan(
 		    plan, lane.payload_type, "SLJIT fused grouped aggregate payload has unsupported expression kind",
 		    "SLJIT fused grouped aggregate primitive payload type mismatch");
-		const auto source_index =
-		    input_source_indices_override ? (*input_source_indices_override)[payload_idx] : plan.source_index;
+		const auto source_index = input_source_indices_override ? (*input_source_indices_override)[payload_idx]
+		                                                        : payloads[payload_idx].InputColumn(plan.source_index);
 		if (lane.kind == AggregatePrimitiveUpdateKind::COUNT) {
 			const auto known_not_null =
 			    input_source_indices_override

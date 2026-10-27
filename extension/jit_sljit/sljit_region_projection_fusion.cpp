@@ -86,9 +86,12 @@ static bool TryComposeNativeRoundTripProjection(const vector<SljitNativeRegionEx
 		                                               "compose-integral-compress-decompress");
 		return true;
 	}
+	// Only widening and then returning to the source type is lossless. A narrowing
+	// intermediate cast may throw even when the final type is identical to the input.
 	if (expr.kind == SljitNativeRegionExpressionKind::INTEGER_CAST &&
 	    source.kind == SljitNativeRegionExpressionKind::INTEGER_CAST && !expr.try_cast && !source.try_cast &&
 	    expr.cast_source_width == source.cast_target_width && expr.cast_target_width == source.cast_source_width &&
+	    GetTypeIdSize(source.return_type.InternalType()) >= GetTypeIdSize(expr.return_type.InternalType()) &&
 	    SljitSignedIntegerWidthMatchesType(expr.cast_target_width, expr.return_type)) {
 		result =
 		    SljitProjectionReferenceThroughSource(expr, source, render_diagnostics, "compose-integer-cast-roundtrip");

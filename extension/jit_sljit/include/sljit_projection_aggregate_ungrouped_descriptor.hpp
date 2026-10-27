@@ -22,9 +22,9 @@ static bool SljitTryMarkProjectionAggregateRequiredOutput(const SljitExecutableR
 	return true;
 }
 
-static bool SljitTryBuildUngroupedAggregateRequiredProjectionOutputs(
-    const SljitExecutableRegionOp &projection_op, const SljitExecutableRegionOp &aggregate_op,
-    vector<uint8_t> &required_projection_outputs, optional_ptr<vector<idx_t>> fused_payload_sources = nullptr) {
+static bool SljitTryBuildUngroupedAggregateRequiredProjectionOutputs(const SljitExecutableRegionOp &projection_op,
+                                                                     const SljitExecutableRegionOp &aggregate_op,
+                                                                     vector<uint8_t> &required_projection_outputs) {
 	if (projection_op.kind != SljitNativeRegionOpKind::PROJECTION ||
 	    aggregate_op.kind != SljitNativeRegionOpKind::AGGREGATE_UPDATE ||
 	    projection_op.projections.size() != projection_op.output_types.size()) {
@@ -57,9 +57,6 @@ static bool SljitTryBuildUngroupedAggregateRequiredProjectionOutputs(
 				return false;
 			}
 		}
-		if (fused_payload_sources) {
-			*fused_payload_sources = combined_sources;
-		}
 		return true;
 	}
 
@@ -74,9 +71,8 @@ static bool SljitTryBuildUngroupedAggregateRequiredProjectionOutputs(
 		if (aggregate.child_count != 1 || aggregate.child_types.size() != 1) {
 			return false;
 		}
-		if (!SljitTryAddExecutableExpressionSourceColumns(aggregate_update.payloads[payload_idx],
-		                                                  projection_op.projections.size(),
-		                                                  required_projection_outputs)) {
+		if (!SljitAddProjectionSourceColumns(aggregate_update.payloads[payload_idx].input_source_indices,
+		                                     projection_op.projections.size(), required_projection_outputs)) {
 			return false;
 		}
 	}
@@ -104,41 +100,21 @@ static bool SljitTryAddJoinProjectionAggregateRequiredInput(
 	return true;
 }
 
-static bool SljitTryBuildRemappedUngroupedAggregatePayloads(
-    const SljitExecutableAggregateUpdate &aggregate_update, const vector<ExecutionRegionAggregateInput> &aggregates,
-    const vector<idx_t> &projection_to_input, const vector<idx_t> &fused_payload_sources,
-    vector<SljitExecutableRegionExpression> &remapped_payloads) {
+static bool
+SljitTryBuildRemappedUngroupedAggregatePayloads(const SljitExecutableAggregateUpdate &aggregate_update,
+                                                const vector<idx_t> &projection_to_input,
+                                                vector<SljitExecutableRegionExpression> &remapped_payloads) {
 	remapped_payloads.clear();
 	remapped_payloads.reserve(aggregate_update.payloads.size());
-	for (auto &payload : aggregate_update.payloads) {
+	for (auto &source : aggregate_update.payloads) {
 		remapped_payloads.emplace_back();
-		SljitBuildBorrowedProjectionExpression(payload, remapped_payloads.back());
-	}
-	if (aggregate_update.payload_source_layout == SljitAggregatePayloadSourceLayout::FUSED_COMBINED) {
-		vector<idx_t> compact_sources;
-		compact_sources.reserve(fused_payload_sources.size());
-		for (auto source_idx : fused_payload_sources) {
-			if (source_idx >= projection_to_input.size() ||
-			    projection_to_input[source_idx] == DConstants::INVALID_INDEX) {
-				return false;
-			}
-			compact_sources.push_back(projection_to_input[source_idx]);
-		}
-		for (auto &payload : remapped_payloads) {
-			payload.input_source_indices = compact_sources;
-			payload.input_source_not_null = aggregate_update.combined_payload_source_not_null;
-		}
-		return true;
-	}
-
-	for (idx_t payload_idx = 0; payload_idx < remapped_payloads.size(); payload_idx++) {
-		auto &aggregate = aggregates[payload_idx];
-		auto &payload = remapped_payloads[payload_idx];
-		if (aggregate.primitive_update_kind == AggregatePrimitiveUpdateKind::COUNT_STAR) {
-			continue;
-		}
-		if (!SljitTryRemapExecutableExpressionInputs(projection_to_input, payload)) {
+		auto &payload = remapped_payloads.back();
+		SljitBuildBorrowedProjectionExpression(source, payload);
+		if (!SljitTryRemapSourceIndices(projection_to_input, payload.input_source_indices)) {
 			return false;
+		}
+		if (!payload.plan.expression_tree_source_indices.empty()) {
+			payload.plan.expression_tree_source_indices = payload.input_source_indices;
 		}
 	}
 	return true;
@@ -170,7 +146,7 @@ static void SljitBindHashJoinDirectUngroupedAggregateDescriptor(const ExecutionH
 		return;
 	}
 	idx_t aggregate_input_idx;
-	if (!SljitTryGetExecutableReferenceInputIndex(descriptor.remapped_payloads[0], aggregate_input_idx) ||
+	if (!SljitTryGetAggregatePayloadReferenceInputIndex(descriptor.remapped_payloads[0], aggregate_input_idx) ||
 	    aggregate_input_idx >= descriptor.input_sources.size()) {
 		return;
 	}
@@ -211,10 +187,8 @@ static bool SljitTryBuildProjectionUngroupedAggregateDescriptor(
     SljitJoinProjectionAggregateDescriptor &descriptor, optional_ptr<SljitExecutableRegionOp> producer_projection_op) {
 	auto &projection_op = descriptor.Projection();
 	vector<uint8_t> required_projection_outputs;
-	vector<idx_t> fused_payload_sources;
-	if (!SljitTryBuildUngroupedAggregateRequiredProjectionOutputs(
-	        projection_op, aggregate_op, required_projection_outputs,
-	        optional_ptr<vector<idx_t>>(&fused_payload_sources))) {
+	if (!SljitTryBuildUngroupedAggregateRequiredProjectionOutputs(projection_op, aggregate_op,
+	                                                              required_projection_outputs)) {
 		return descriptor.Block("ungrouped_payload_sources");
 	}
 	vector<idx_t> projection_to_input(projection_op.projections.size(), DConstants::INVALID_INDEX);
@@ -227,9 +201,8 @@ static bool SljitTryBuildProjectionUngroupedAggregateDescriptor(
 			return descriptor.Block("ungrouped_input_source");
 		}
 	}
-	if (!SljitTryBuildRemappedUngroupedAggregatePayloads(
-	        aggregate_op.aggregate_update, aggregate_op.aggregate_update.plan.sink_info.aggregates, projection_to_input,
-	        fused_payload_sources, descriptor.remapped_payloads)) {
+	if (!SljitTryBuildRemappedUngroupedAggregatePayloads(aggregate_op.aggregate_update, projection_to_input,
+	                                                     descriptor.remapped_payloads)) {
 		return descriptor.Block("ungrouped_payload_remap");
 	}
 	descriptor.payload_source_layout = aggregate_op.aggregate_update.payload_source_layout;

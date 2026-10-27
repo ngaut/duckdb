@@ -37,7 +37,7 @@ static bool SljitTryBuildAggregatePayloadSourceIndices(
 
 	for (idx_t payload_idx = 0; payload_idx < aggregates.size(); payload_idx++) {
 		auto &aggregate = aggregates[payload_idx];
-		auto &payload = aggregate_update.payloads[payload_idx].plan;
+		auto &payload = aggregate_update.payloads[payload_idx];
 		if (aggregate.primitive_update_kind == AggregatePrimitiveUpdateKind::COUNT_STAR) {
 			if (aggregate.child_count != 0) {
 				return set_blocker("count_star_payload");
@@ -53,8 +53,8 @@ static bool SljitTryBuildAggregatePayloadSourceIndices(
 		if (!check_direct_payload(aggregate, payload_idx)) {
 			return false;
 		}
-		if (payload.kind != SljitNativeRegionExpressionKind::REFERENCE ||
-		    payload.source_index != aggregate.payload_index) {
+		if (payload.plan.kind != SljitNativeRegionExpressionKind::REFERENCE ||
+		    payload.InputColumn(payload.plan.source_index) != aggregate.payload_index) {
 			return set_blocker(payload_reference_blocker);
 		}
 		if (!handle_direct_payload(aggregate, payload_idx)) {

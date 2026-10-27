@@ -19,18 +19,19 @@
 namespace duckdb {
 
 static bool SljitTryBuildHashJoinMappedProjection(
-    const vector<idx_t> &source_map, const ExecutionHashJoinProbeBinding &source_binding,
+    const SljitBatchLayout &source_layout, const ExecutionHashJoinProbeBinding &source_binding,
     SljitExecutableRegionOp &projection_op, SljitExecutableRegionOp &mapped_projection, optional_ptr<string> blocker,
     optional_ptr<const vector<uint8_t>> required_projection_outputs = nullptr) {
-	if (source_map.size() > source_binding.output_types.size()) {
+	if (source_layout.ColumnCount() > source_binding.output_types.size()) {
 		if (blocker) {
 			*blocker = "source_map_shape";
 		}
 		return false;
 	}
-	vector<idx_t> full_source_map = source_map;
+	vector<idx_t> full_source_map = source_layout.SourceColumns();
 	full_source_map.reserve(source_binding.output_types.size());
-	for (idx_t source_idx = source_map.size(); source_idx < source_binding.output_types.size(); source_idx++) {
+	for (idx_t source_idx = source_layout.ColumnCount(); source_idx < source_binding.output_types.size();
+	     source_idx++) {
 		full_source_map.push_back(source_idx);
 	}
 

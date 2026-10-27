@@ -59,12 +59,21 @@ static bool SljitPreaggregatedPrimitivePayloadSupported(AggregatePrimitiveUpdate
 	case AggregatePrimitiveUpdateKind::COUNT:
 		return true;
 	case AggregatePrimitiveUpdateKind::SUM_INT64:
-		return SljitPreaggregatedPrimitiveIntegerTypeSupported(type);
 	case AggregatePrimitiveUpdateKind::SUM_HUGEINT:
-		return SljitPreaggregatedPrimitiveIntegerTypeSupported(type) || type == PhysicalType::INT128;
+		// Reassociation is safe for narrow inputs, but can suppress or introduce
+		// intermediate overflow for full-width HUGEINT inputs. Those use ordered updates.
+		return SljitPreaggregatedPrimitiveIntegerTypeSupported(type);
 	default:
 		return false;
 	}
+}
+
+static bool SljitPreaggregatedGeneratedPayloadSupported(const SljitAggregatePayloadDescriptor &descriptor) {
+	// Generated narrow DECIMAL128 expressions have a proven machine-word value ABI,
+	// unlike a materialized INT128 vector. Preserve their wider-state reductions.
+	return (descriptor.primitive_kind == AggregatePrimitiveUpdateKind::SUM_HUGEINT && descriptor.IsMachineWord()) ||
+	       SljitPreaggregatedPrimitivePayloadSupported(
+	           descriptor.primitive_kind, descriptor.has_payload ? descriptor.input_type : PhysicalType::INVALID);
 }
 
 static bool SljitPreaggregationComparableInputVectorType(PhysicalType type) {
@@ -187,14 +196,6 @@ static bool SljitLoadPreaggregatedInt64Payload(SljitPreaggregatedPrimitivePayloa
 
 static bool SljitLoadPreaggregatedHugeintPayload(SljitPreaggregatedPrimitivePayloadSource &source, idx_t row_idx,
                                                  hugeint_t &result) {
-	auto source_idx = source.format.sel->get_index(row_idx);
-	if (!source.rows_all_valid && !source.format.validity.RowIsValid(source_idx)) {
-		return false;
-	}
-	if (source.type == PhysicalType::INT128) {
-		result = UnifiedVectorFormat::GetData<hugeint_t>(source.format)[source_idx];
-		return true;
-	}
 	int64_t value;
 	if (!SljitLoadPreaggregatedInt64Payload(source, row_idx, value)) {
 		return false;

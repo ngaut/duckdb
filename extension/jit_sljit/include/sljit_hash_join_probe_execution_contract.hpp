@@ -58,31 +58,17 @@ static bool SljitHashJoinProbePrefersDirectConsumerOutput(SljitHashJoinProbeOutp
 	return output_contract == SljitHashJoinProbeOutputContract::IDENTITY_PREFERRED_DIRECT_CONSUMER;
 }
 
-struct SljitHashJoinProbeExecutionContractView {
-	const SljitNativeHashJoinProbePlan *plan = nullptr;
-	const ExecutionRegionOperatorInfo *operator_info = nullptr;
-};
-
-static SljitHashJoinProbeExecutionContractView
-SljitBuildHashJoinProbeExecutionContractView(SljitExecutableRegionOp &op,
-                                             optional_ptr<const SljitHashJoinProbeInputRemap> input_remap,
-                                             SljitHashJoinProbeOutputContract output_contract) {
-	auto &plan = op.hash_join_probe.plan;
-	SljitHashJoinProbeExecutionContractView view;
-	view.plan = &plan;
-	view.operator_info = &plan.operator_info;
-	if (!input_remap || !input_remap->HasRemap()) {
-		return view;
+static const SljitNativeHashJoinProbePlan &
+SljitBindHashJoinProbeExecutionPlan(const SljitExecutableRegionOp &op,
+                                    optional_ptr<const SljitNativeHashJoinProbePlan> input_plan,
+                                    SljitHashJoinProbeOutputContract output_contract) {
+	if (!input_plan) {
+		return op.hash_join_probe.plan;
 	}
 	if (!SljitHashJoinProbeProducesSelectedView(output_contract)) {
-		throw InternalException("SLJIT prepared hash join probe remap requires selected-view execution");
+		throw InternalException("SLJIT prepared hash join probe plan requires selected-view execution");
 	}
-	if (!input_remap->prepared_plan) {
-		throw InternalException("SLJIT hash join probe remap was not prepared during primitive binding");
-	}
-	view.plan = input_remap->prepared_plan.get();
-	view.operator_info = &input_remap->prepared_plan->operator_info;
-	return view;
+	return *input_plan;
 }
 
 } // namespace duckdb

@@ -11,11 +11,9 @@
 namespace duckdb {
 
 static SljitSourceContractPlan
-SljitDuckDBScanFilteredSourceContractPlan(ExecutionRegionScanFilterMode mode = ExecutionRegionScanFilterMode::ALL,
-                                          idx_t low_cardinality_string_like_max_distinct_count = 0) {
+SljitDuckDBScanFilteredSourceContractPlan(ExecutionRegionScanFilterMode mode = ExecutionRegionScanFilterMode::ALL) {
 	SljitSourceContractPlan contract_plan;
 	contract_plan.scan_filter_mode = mode;
-	contract_plan.low_cardinality_string_like_max_distinct_count = low_cardinality_string_like_max_distinct_count;
 	return contract_plan;
 }
 
@@ -54,12 +52,9 @@ static SljitRegionNodePlan SljitNativeSourceNode(string reason, const ExecutionR
 }
 
 static SljitRegionNodePlan SljitStorageFilteredSourceNode(string reason, const ExecutionRegionNode &node,
-                                                          bool render_diagnostics,
-                                                          idx_t low_cardinality_string_like_max_distinct_count = 0) {
+                                                          bool render_diagnostics) {
 	auto result =
-	    SljitNativeSourceNode(std::move(reason), node, render_diagnostics,
-	                          SljitDuckDBScanFilteredSourceContractPlan(
-	                              ExecutionRegionScanFilterMode::ALL, low_cardinality_string_like_max_distinct_count));
+	    SljitNativeSourceNode(std::move(reason), node, render_diagnostics, SljitDuckDBScanFilteredSourceContractPlan());
 	PlanSljitStorageScanFilters(node, result.scan_filters, render_diagnostics);
 	if (render_diagnostics) {
 		result.reason += ";compiled_storage_filter_count=" + std::to_string(result.scan_filters.size());
@@ -161,62 +156,39 @@ static bool SljitSourceHasOnlyDirectBuildStorageFilters(const ExecutionRegionNod
 	return has_string_match || all_string_sets;
 }
 
-struct SljitStringFilterEvaluationFacts {
-	bool storage_sensitive = false;
-	bool has_like = false;
-
-	void Merge(const SljitStringFilterEvaluationFacts &other) {
-		storage_sensitive = storage_sensitive || other.storage_sensitive;
-		has_like = has_like || other.has_like;
-	}
-};
-
-static SljitStringFilterEvaluationFacts SljitStringFilterEvaluation(const ExecutionExpressionIR &expression) {
-	SljitStringFilterEvaluationFacts result;
+static bool SljitExpressionHasStringSearch(const ExecutionExpressionIR &expression) {
 	if (expression.kind == ExecutionExpressionIRKind::INTRINSIC &&
 	    (expression.intrinsic == ExecutionExpressionIntrinsicKind::STRING_CONTAINS ||
 	     expression.intrinsic == ExecutionExpressionIntrinsicKind::STRING_LIKE)) {
-		result.storage_sensitive = true;
-		result.has_like = expression.intrinsic == ExecutionExpressionIntrinsicKind::STRING_LIKE;
+		return true;
 	}
-	if (expression.left) {
-		result.Merge(SljitStringFilterEvaluation(*expression.left));
+	if (expression.left && SljitExpressionHasStringSearch(*expression.left)) {
+		return true;
 	}
-	if (expression.right) {
-		result.Merge(SljitStringFilterEvaluation(*expression.right));
+	if (expression.right && SljitExpressionHasStringSearch(*expression.right)) {
+		return true;
 	}
-	if (expression.else_node) {
-		result.Merge(SljitStringFilterEvaluation(*expression.else_node));
+	if (expression.else_node && SljitExpressionHasStringSearch(*expression.else_node)) {
+		return true;
 	}
 	for (auto &child : expression.children) {
-		if (child) {
-			result.Merge(SljitStringFilterEvaluation(*child));
+		if (child && SljitExpressionHasStringSearch(*child)) {
+			return true;
 		}
 	}
-	return result;
+	return false;
 }
 
-struct SljitStorageFilterEvaluationFacts {
-	bool benefits_from_storage = false;
-	idx_t low_cardinality_string_like_max_distinct_count = 0;
-};
-
-//! DuckDB storage evaluates a string filter on a low-cardinality column against its dictionary. That beats per-row
-//! generated evaluation for LIKE and CONTAINS anywhere. For other string filters it pays only on compressed storage,
-//! when every filter of the source is such a string filter (generated code has no other predicate to fuse them
-//! with, and storage fetches the remaining columns only for the rows that pass), and when the finalized dynamic
-//! filters are expected to keep at least half the rows (storage evaluates static filters on every row; a generated
-//! filter sees only the dynamic filters' survivors). An optional filter that only prunes zones evaluates no row on
-//! either side, so it counts for neither.
-static SljitStorageFilterEvaluationFacts
-SljitStorageFilterEvaluation(const ExecutionRegionNode &node, const ExecutionRegionTableScanContract &contract) {
-	SljitStorageFilterEvaluationFacts result;
+//! Source-local cost heuristic, not a dictionary-encoding capability or a whole-pipeline admission rule.
+static bool SljitPreferStorageFilters(const ExecutionRegionNode &node,
+                                      const ExecutionRegionTableScanContract &contract) {
 	if (contract.estimated_source_cardinality < STANDARD_VECTOR_SIZE) {
-		return result;
+		return false;
 	}
 	bool all_low_cardinality_string_filters =
 	    contract.compressed_storage &&
 	    node.source->estimated_source_cardinality * 2 >= contract.estimated_source_cardinality;
+	const auto distinct_count_limit = contract.estimated_source_cardinality / STANDARD_VECTOR_SIZE;
 	bool evaluated_filters = false;
 	for (auto &filter : node.source->filters) {
 		if (SljitSourceFilterIsConstantTrue(filter)) {
@@ -228,26 +200,16 @@ SljitStorageFilterEvaluation(const ExecutionRegionNode &node, const ExecutionReg
 		    filter.scan_column_index < contract.source_contract_input_distinct_counts.size() &&
 		    contract.source_contract_input_types[filter.scan_column_index].InternalType() == PhysicalType::VARCHAR &&
 		    contract.source_contract_input_distinct_counts[filter.scan_column_index] > 0 &&
-		    contract.source_contract_input_distinct_counts[filter.scan_column_index] <=
-		        contract.estimated_source_cardinality / STANDARD_VECTOR_SIZE;
+		    contract.source_contract_input_distinct_counts[filter.scan_column_index] <= distinct_count_limit;
 		all_low_cardinality_string_filters = all_low_cardinality_string_filters && low_cardinality_string_column;
 		if (!low_cardinality_string_column || !filter.expression || !filter.expression->root) {
 			continue;
 		}
-		auto string_filter = SljitStringFilterEvaluation(*filter.expression->root);
-		if (!string_filter.storage_sensitive) {
-			continue;
-		}
-		result.benefits_from_storage = true;
-		if (string_filter.has_like) {
-			result.low_cardinality_string_like_max_distinct_count =
-			    MaxValue(result.low_cardinality_string_like_max_distinct_count,
-			             contract.source_contract_input_distinct_counts[filter.scan_column_index]);
+		if (SljitExpressionHasStringSearch(*filter.expression->root)) {
+			return true;
 		}
 	}
-	result.benefits_from_storage =
-	    result.benefits_from_storage || (evaluated_filters && all_low_cardinality_string_filters);
-	return result;
+	return evaluated_filters && all_low_cardinality_string_filters;
 }
 
 static SljitRegionNodePlan SljitSourceBoundaryRequiresContract(const ExecutionRegionNode &node,
@@ -300,17 +262,14 @@ static SljitRegionNodePlan PlanSljitSourceContractNode(const ExecutionRegionNode
 	}
 	if (table_scan_contract.dynamic_filters && table_scan_contract.filter_pushdown) {
 		if (generated_filters_ready) {
-			const auto storage_filter_evaluation = SljitStorageFilterEvaluation(node, table_scan_contract);
-			if (storage_filter_evaluation.benefits_from_storage) {
+			if (SljitPreferStorageFilters(node, table_scan_contract)) {
 				string reason = "vectorized static and dynamic " + string(SljitSourceKindName(node)) +
 				                " filters;source-strategy=duckdb-scan-filtered-source-contract";
 				AppendSljitSourceFilterFacts(reason, node, table_scan_contract, false);
 				reason += ";source_strategy_reason=storage-sensitive-filter";
 				reason += ";source_contract_filter_pushdown=true";
 				reason += ";source_contract_dynamic_filters=true";
-				return SljitStorageFilteredSourceNode(
-				    std::move(reason), node, render_diagnostics,
-				    storage_filter_evaluation.low_cardinality_string_like_max_distinct_count);
+				return SljitStorageFilteredSourceNode(std::move(reason), node, render_diagnostics);
 			}
 			generated_filter_contract.scan_filter_mode =
 			    ExecutionRegionScanFilterMode::DYNAMIC_FILTERS_WITH_STATIC_PRUNING;
@@ -336,17 +295,14 @@ static SljitRegionNodePlan PlanSljitSourceContractNode(const ExecutionRegionNode
 		}
 		return SljitStorageFilteredSourceNode(std::move(reason), node, render_diagnostics);
 	}
-	const auto storage_filter_evaluation = generated_filters_ready && table_scan_contract.filter_pushdown
-	                                           ? SljitStorageFilterEvaluation(node, table_scan_contract)
-	                                           : SljitStorageFilterEvaluationFacts();
-	if (storage_filter_evaluation.benefits_from_storage) {
+	if (generated_filters_ready && table_scan_contract.filter_pushdown &&
+	    SljitPreferStorageFilters(node, table_scan_contract)) {
 		string reason = "vectorized " + string(SljitSourceKindName(node)) +
 		                " filters;source-strategy=duckdb-scan-filtered-source-contract";
 		AppendSljitSourceFilterFacts(reason, node, table_scan_contract, false);
 		reason += ";source_strategy_reason=storage-sensitive-filter";
 		reason += ";source_contract_filter_pushdown=true";
-		return SljitStorageFilteredSourceNode(std::move(reason), node, render_diagnostics,
-		                                      storage_filter_evaluation.low_cardinality_string_like_max_distinct_count);
+		return SljitStorageFilteredSourceNode(std::move(reason), node, render_diagnostics);
 	}
 
 	if (generated_filters_ready) {

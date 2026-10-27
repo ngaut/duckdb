@@ -143,8 +143,7 @@ static bool SljitTryBuildProjectionAggregateRequiredOutputs(const SljitExecutabl
 static bool SljitTryBuildMappedPostJoinProjectionAggregateDescriptor(
     vector<SljitExecutableRegionOp> &ops, SljitRegionExecutionScratch &scratch,
     SljitPostJoinProjectionStrategy &post_join_projection, idx_t aggregate_idx,
-    SljitJoinProjectionAggregateDescriptor &descriptor, const vector<idx_t> &output_column_map,
-    idx_t output_projection_idx = DConstants::INVALID_INDEX) {
+    SljitJoinProjectionAggregateDescriptor &descriptor, const SljitBatchLayout &output_layout) {
 	if (!scratch.HasOperatorBinding(post_join_projection.hash_join_idx)) {
 		return descriptor.Block("hash_join_binding");
 	}
@@ -162,7 +161,7 @@ static bool SljitTryBuildMappedPostJoinProjectionAggregateDescriptor(
 	}
 	auto mapped_projection = make_uniq<SljitExecutableRegionOp>();
 	string map_blocker;
-	if (!SljitTryBuildHashJoinMappedProjection(output_column_map, binding, *semantic_projection, *mapped_projection,
+	if (!SljitTryBuildHashJoinMappedProjection(output_layout, binding, *semantic_projection, *mapped_projection,
 	                                           optional_ptr<string>(&map_blocker),
 	                                           optional_ptr<const vector<uint8_t>>(&required_projection_outputs))) {
 		if (map_blocker.empty()) {
@@ -172,6 +171,7 @@ static bool SljitTryBuildMappedPostJoinProjectionAggregateDescriptor(
 	}
 	descriptor.OwnProjection(post_join_projection.final_projection_idx, std::move(*mapped_projection));
 	optional_ptr<SljitExecutableRegionOp> producer_projection_op;
+	const auto output_projection_idx = output_layout.ProducerIndex();
 	if (output_projection_idx != DConstants::INVALID_INDEX) {
 		if (output_projection_idx >= ops.size() ||
 		    ops[output_projection_idx].kind != SljitNativeRegionOpKind::PROJECTION) {
@@ -242,19 +242,18 @@ static void SljitApplyJoinProjectionGroupCastProofs(vector<ExecutionRowPointerGr
 static bool SljitTryBuildPostJoinProjectionAggregateDescriptor(
     vector<SljitExecutableRegionOp> &ops, SljitRegionExecutionScratch &scratch,
     SljitPostJoinProjectionStrategy &post_join_projection, idx_t aggregate_idx,
-    SljitJoinProjectionAggregateDescriptor &descriptor, optional_ptr<const vector<idx_t>> output_column_map = nullptr,
-    idx_t output_projection_idx = DConstants::INVALID_INDEX) {
+    SljitJoinProjectionAggregateDescriptor &descriptor, optional_ptr<const SljitBatchLayout> output_layout = nullptr) {
 	if (descriptor.Built()) {
-		if (!descriptor.ProducerOutputColumnMapMatches(output_column_map)) {
+		if (!descriptor.ProducerLayoutMatches(output_layout)) {
 			return descriptor.Block("producer_shape_changed");
 		}
 		return descriptor.Ready();
 	}
 	descriptor.ClearBuiltState();
-	descriptor.SetProducerOutputColumnMap(output_column_map);
-	if (output_column_map) {
-		return SljitTryBuildMappedPostJoinProjectionAggregateDescriptor(
-		    ops, scratch, post_join_projection, aggregate_idx, descriptor, *output_column_map, output_projection_idx);
+	descriptor.producer_layout = output_layout;
+	if (output_layout) {
+		return SljitTryBuildMappedPostJoinProjectionAggregateDescriptor(ops, scratch, post_join_projection,
+		                                                                aggregate_idx, descriptor, *output_layout);
 	}
 	return SljitTryBuildUnmappedPostJoinProjectionAggregateDescriptor(ops, scratch, post_join_projection, aggregate_idx,
 	                                                                  descriptor);
@@ -294,13 +293,11 @@ static bool SljitTryBuildSelectedJoinIdentityProjection(const ExecutionHashJoinP
 	return true;
 }
 
-static bool SljitTryBuildMappedSelectedJoinAggregateInputDescriptor(vector<SljitExecutableRegionOp> &ops,
-                                                                    SljitRegionExecutionScratch &scratch,
-                                                                    idx_t hash_join_idx, idx_t aggregate_idx,
-                                                                    SljitJoinProjectionAggregateDescriptor &descriptor,
-                                                                    optional_ptr<const vector<idx_t>> output_column_map,
-                                                                    idx_t output_projection_idx) {
-	if (!output_column_map) {
+static bool SljitTryBuildMappedSelectedJoinAggregateInputDescriptor(
+    vector<SljitExecutableRegionOp> &ops, SljitRegionExecutionScratch &scratch, idx_t hash_join_idx,
+    idx_t aggregate_idx, SljitJoinProjectionAggregateDescriptor &descriptor,
+    optional_ptr<const SljitBatchLayout> output_layout) {
+	if (!output_layout) {
 		return descriptor.Block("producer_output_map");
 	}
 	if (aggregate_idx >= ops.size() || !scratch.HasOperatorBinding(hash_join_idx)) {
@@ -314,6 +311,7 @@ static bool SljitTryBuildMappedSelectedJoinAggregateInputDescriptor(vector<Sljit
 	    binding.output_mode != ExecutionHashJoinProbeOutputMode::MATCHED_PROBE_AND_BUILD) {
 		return descriptor.Block("hash_join_shape");
 	}
+	const auto output_projection_idx = output_layout->ProducerIndex();
 	if (output_projection_idx == DConstants::INVALID_INDEX || output_projection_idx >= ops.size() ||
 	    ops[output_projection_idx].kind != SljitNativeRegionOpKind::PROJECTION) {
 		return descriptor.Block("producer_projection");
@@ -329,19 +327,18 @@ static bool SljitTryBuildMappedSelectedJoinAggregateInputDescriptor(vector<Sljit
 static bool SljitTryBuildSelectedJoinAggregateInputDescriptor(
     vector<SljitExecutableRegionOp> &ops, SljitRegionExecutionScratch &scratch, idx_t hash_join_idx,
     idx_t aggregate_idx, SljitJoinProjectionAggregateDescriptor &descriptor,
-    optional_ptr<const vector<idx_t>> output_column_map = nullptr,
-    idx_t output_projection_idx = DConstants::INVALID_INDEX) {
+    optional_ptr<const SljitBatchLayout> output_layout = nullptr) {
 	if (descriptor.Built()) {
-		if (!descriptor.ProducerOutputColumnMapMatches(output_column_map)) {
+		if (!descriptor.ProducerLayoutMatches(output_layout)) {
 			return descriptor.Block("producer_shape_changed");
 		}
 		return descriptor.Ready();
 	}
 	descriptor.ClearBuiltState();
-	descriptor.SetProducerOutputColumnMap(output_column_map);
-	if (output_column_map) {
-		return SljitTryBuildMappedSelectedJoinAggregateInputDescriptor(
-		    ops, scratch, hash_join_idx, aggregate_idx, descriptor, output_column_map, output_projection_idx);
+	descriptor.producer_layout = output_layout;
+	if (output_layout) {
+		return SljitTryBuildMappedSelectedJoinAggregateInputDescriptor(ops, scratch, hash_join_idx, aggregate_idx,
+		                                                               descriptor, output_layout);
 	}
 	if (aggregate_idx >= ops.size() || !scratch.HasOperatorBinding(hash_join_idx)) {
 		return descriptor.Block("operator_bounds");

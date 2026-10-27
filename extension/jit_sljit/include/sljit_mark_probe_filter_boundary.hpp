@@ -8,7 +8,6 @@
 
 #pragma once
 
-#include "sljit_hash_join_projection_source_runtime.hpp"
 #include "sljit_mark_probe_filter_mode.hpp"
 #include "sljit_region_executable.hpp"
 #include "sljit_region_runtime_trace.hpp"
@@ -18,13 +17,6 @@
 #include "duckdb/execution/execution_operator_runtime.hpp"
 
 namespace duckdb {
-
-enum class SljitMarkProbeFilterBoundaryMarkerMode : uint8_t {
-	OMIT_MARKER,
-	REFERENCE_TRUE,
-	REFERENCE_FALSE,
-	MATERIALIZE_FLAGS
-};
 
 struct SljitMarkProbeFilterBoundary {
 	SljitRuntimeBatchView input;
@@ -50,7 +42,6 @@ struct SljitMarkProbeFilterBoundaryResult {
 struct SljitBuiltMarkProbeFilterBoundary {
 	SljitMarkProbeFilterBoundary boundary;
 	SljitMarkProbeFilterBoundaryResult result;
-	bool built = false;
 
 	DataChunk &OutputChunk() const {
 		return result.OutputChunk();
@@ -308,36 +299,6 @@ static bool SljitTryBuildMarkProbeFilterBoundary(const ExecutionHashJoinProbeBin
 	return true;
 }
 
-static SljitMarkProbeFilterBoundaryMarkerMode SljitChooseMarkProbeFilterBoundaryMarkerMode(
-    const SljitExecutableRegionOp &hash_join_op, const SljitExecutableRegionOp &projection_op,
-    SljitMarkProbeFilterMode mark_filter_mode, bool allow_marker_omission = false) {
-	if (hash_join_op.output_types.empty()) {
-		throw InternalException("SLJIT MARK probe boundary has no marker output");
-	}
-	const auto marker_idx = hash_join_op.output_types.size() - 1;
-	const bool projection_reads_marker =
-	    SljitProjectionReferencesInputColumn(projection_op, hash_join_op.output_types.size(), marker_idx);
-	if (allow_marker_omission && !projection_reads_marker) {
-		return SljitMarkProbeFilterBoundaryMarkerMode::OMIT_MARKER;
-	}
-	const bool can_reference_marker_output =
-	    mark_filter_mode == SljitMarkProbeFilterMode::MATCHES || !projection_reads_marker;
-	return can_reference_marker_output ? SljitMarkProbeFilterBoundaryMarkerMode::REFERENCE_TRUE
-	                                   : SljitMarkProbeFilterBoundaryMarkerMode::MATERIALIZE_FLAGS;
-}
-
-static SljitMarkProbeFilterBoundaryMarkerMode
-SljitChooseMaterializedMarkProbeFilterBoundaryMarkerMode(SljitMarkProbeFilterMode mark_filter_mode) {
-	switch (mark_filter_mode) {
-	case SljitMarkProbeFilterMode::MATCHES:
-		return SljitMarkProbeFilterBoundaryMarkerMode::REFERENCE_TRUE;
-	case SljitMarkProbeFilterMode::NON_MATCHES:
-		return SljitMarkProbeFilterBoundaryMarkerMode::REFERENCE_FALSE;
-	default:
-		return SljitMarkProbeFilterBoundaryMarkerMode::MATERIALIZE_FLAGS;
-	}
-}
-
 static bool SljitTryBuildSelectedMarkProbeFilterBoundary(const ExecutionHashJoinProbeBinding &binding,
                                                          SljitMarkProbeFilterBoundary &boundary,
                                                          const SelectionVector &selection, idx_t selected_count,
@@ -391,10 +352,8 @@ static bool SljitTryBuildMarkProbeFilterBoundaryFromInput(SCRATCH &scratch, idx_
 	if (!scratch.HasOperatorBinding(hash_join_idx)) {
 		return false;
 	}
-	built_boundary.built =
-	    SljitTryBuildMarkProbeFilterBoundary(scratch.OperatorBinding(hash_join_idx).hash_join_probe,
-	                                         built_boundary.boundary, marker_mode, built_boundary.result);
-	return built_boundary.built;
+	return SljitTryBuildMarkProbeFilterBoundary(scratch.OperatorBinding(hash_join_idx).hash_join_probe,
+	                                            built_boundary.boundary, marker_mode, built_boundary.result);
 }
 
 template <class SCRATCH>
@@ -403,9 +362,6 @@ static void SljitSelectMarkProbeFilterProjectionBoundaryRows(ExecutionRegionRunt
                                                              SljitExecutableRegionOp &filter_op,
                                                              SljitMarkProbeFilterMode mark_filter_mode,
                                                              SljitBuiltMarkProbeFilterBoundary &built_boundary) {
-	if (!built_boundary.built) {
-		throw InternalException("SLJIT MARK probe projection boundary selection requires a built boundary");
-	}
 	auto selection_stage_start = SljitRegionStageStart(runtime);
 	auto &mark_selection = scratch.FilterSelection(filter_idx);
 	SljitSelectMarkProbeFilterBoundaryRows(scratch.OperatorBinding(hash_join_idx).hash_join_probe,

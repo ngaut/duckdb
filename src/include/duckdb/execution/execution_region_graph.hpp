@@ -111,8 +111,6 @@ struct ExecutionRegionGraph {
 
 DUCKDB_API unique_ptr<ExecutionRegionGraph> BuildExecutionRegionGraph(Pipeline &pipeline,
                                                                       bool render_diagnostics = false);
-DUCKDB_API idx_t GetExecutionRegionTableScanDistinctCount(const PhysicalOperator &op, ClientContext &context,
-                                                          idx_t source_input_index);
 DUCKDB_API string DescribeExecutionRegionGraphShape(const ExecutionRegionGraph &graph);
 
 } // namespace duckdb

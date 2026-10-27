@@ -72,11 +72,11 @@ SljitTryResolveMappedProducerProbeInput(const SljitJoinProjectionAggregateDescri
                                         optional_ptr<SljitExecutableRegionOp> producer_projection_op,
                                         idx_t probe_input_idx, const LogicalType *&source_type,
                                         optional_ptr<SljitExecutableRegionExpression> resolved_expr = nullptr) {
-	if (!producer_projection_op || !descriptor.has_producer_output_column_map) {
+	if (!producer_projection_op || !descriptor.producer_layout) {
 		return false;
 	}
-	for (idx_t output_idx = 0; output_idx < descriptor.producer_output_column_map.size(); output_idx++) {
-		const auto map_value = descriptor.producer_output_column_map[output_idx];
+	for (idx_t output_idx = 0; output_idx < descriptor.producer_layout->ColumnCount(); output_idx++) {
+		const auto map_value = descriptor.producer_layout->Column(output_idx).source_index;
 		// Pre-join projection maps are projection-output -> probe-input. Keep that
 		// coordinate system explicit: join-output ordinals are a different domain.
 		if (map_value == DConstants::INVALID_INDEX || map_value != probe_input_idx) {
@@ -117,7 +117,7 @@ static bool SljitTryAddJoinLHSInputAggregateInputFromProjection(
 	    !SljitProjectionIsSingleSourceReferenceLike(remapped_expr.plan)) {
 		return false;
 	}
-	if (descriptor.has_producer_output_column_map) {
+	if (descriptor.producer_layout) {
 		if (join_output_source_index >= binding.lhs_output_column_indices.size()) {
 			return false;
 		}
@@ -193,7 +193,7 @@ static bool SljitTryMapProducerGroupSource(
     optional_ptr<const vector<idx_t>> semantic_to_projection, const ExecutionRegionGroupInput &group,
     ExecutionRowPointerGroupKeySource &group_source, bool &mapped, string &blocker) {
 	mapped = false;
-	if (!producer_projection_op || !descriptor.has_producer_output_column_map ||
+	if (!producer_projection_op || !descriptor.producer_layout ||
 	    group_source.source_kind != ExecutionRowPointerGroupKeySourceKind::INPUT_VECTOR) {
 		return true;
 	}

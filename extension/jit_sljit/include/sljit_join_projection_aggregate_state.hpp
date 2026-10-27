@@ -9,6 +9,7 @@
 #pragma once
 
 #include "sljit_aggregate_payload_source_indices.hpp"
+#include "sljit_batch_layout.hpp"
 #include "sljit_runtime_batch_state.hpp"
 
 #include "duckdb/execution/execution_operator_runtime.hpp"
@@ -54,8 +55,8 @@ struct SljitJoinProjectionAggregateDescriptor {
 	SljitAggregatePayloadSourceLayout payload_source_layout = SljitAggregatePayloadSourceLayout::DIRECT_PER_LANE;
 	vector<SljitExecutableRegionExpression> remapped_payloads;
 	SljitHashJoinDirectUngroupedAggregateDescriptor direct_ungrouped_aggregate;
-	vector<idx_t> producer_output_column_map;
-	bool has_producer_output_column_map = false;
+	//! Borrowed from the immutable recipe, whose lifetime covers this local state.
+	optional_ptr<const SljitBatchLayout> producer_layout;
 	SljitDataChunkBatch input;
 
 	bool Built() const {
@@ -70,21 +71,8 @@ struct SljitJoinProjectionAggregateDescriptor {
 		return build_state.blocker;
 	}
 
-	bool ProducerOutputColumnMapMatches(optional_ptr<const vector<idx_t>> output_column_map) const {
-		if (!output_column_map) {
-			return !has_producer_output_column_map;
-		}
-		return has_producer_output_column_map && producer_output_column_map == *output_column_map;
-	}
-
-	void SetProducerOutputColumnMap(optional_ptr<const vector<idx_t>> output_column_map) {
-		producer_output_column_map.clear();
-		has_producer_output_column_map = false;
-		if (!output_column_map) {
-			return;
-		}
-		producer_output_column_map = *output_column_map;
-		has_producer_output_column_map = true;
+	bool ProducerLayoutMatches(optional_ptr<const SljitBatchLayout> layout) const {
+		return producer_layout.get() == layout.get();
 	}
 
 	void ClearProjectionState() {
@@ -104,8 +92,7 @@ struct SljitJoinProjectionAggregateDescriptor {
 
 	void ClearBuiltState() {
 		ClearProjectionState();
-		producer_output_column_map.clear();
-		has_producer_output_column_map = false;
+		producer_layout = nullptr;
 	}
 
 	bool Block(const char *blocker_p) {

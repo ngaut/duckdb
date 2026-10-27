@@ -28,18 +28,20 @@ struct SljitHashJoinOutputSource {
 	ExecutionHashJoinProbeOutputProof output_proof;
 };
 
-static SljitHashJoinOutputSource
-SljitBindHashJoinOutputSource(ExecutionRegionRuntime &runtime, vector<SljitExecutableRegionOp> &ops,
-                              SljitRegionExecutionScratch &scratch, idx_t hash_join_idx, DataChunk &join_input,
-                              ExecutionHashJoinProbeOutputProof output_proof,
-                              optional_ptr<const vector<idx_t>> output_column_map, idx_t output_projection_idx) {
+static SljitHashJoinOutputSource SljitBindHashJoinOutputSource(ExecutionRegionRuntime &runtime,
+                                                               vector<SljitExecutableRegionOp> &ops,
+                                                               SljitRegionExecutionScratch &scratch,
+                                                               idx_t hash_join_idx, DataChunk &join_input,
+                                                               ExecutionHashJoinProbeOutputProof output_proof,
+                                                               optional_ptr<const SljitBatchLayout> output_layout) {
 	if (hash_join_idx >= ops.size() || !scratch.HasOperatorBinding(hash_join_idx)) {
 		throw InternalException("SLJIT hash join output source requires a bound probe");
 	}
 	auto &probe_binding = scratch.OperatorBinding(hash_join_idx).hash_join_probe;
-	if (!output_column_map) {
+	if (!output_layout) {
 		return SljitHashJoinOutputSource {join_input, probe_binding, output_proof};
 	}
+	const auto output_projection_idx = output_layout->ProducerIndex();
 	if (output_projection_idx >= ops.size() || ops[output_projection_idx].kind != SljitNativeRegionOpKind::PROJECTION) {
 		throw InternalException("SLJIT hash join output source has no elided projection to execute");
 	}
@@ -81,8 +83,7 @@ static SljitHashJoinOutputSource SljitBindSelectedHashJoinOutputSource(Execution
                                                                        SljitRegionExecutionScratch &scratch,
                                                                        const SljitRuntimeHashJoinSelection &selected) {
 	return SljitBindHashJoinOutputSource(runtime, ops, scratch, selected.hash_join_idx, selected.SourceInput(),
-	                                     selected.output_proof, selected.OutputColumnMap(),
-	                                     selected.output_projection_idx);
+	                                     selected.output_proof, selected.OutputLayout());
 }
 
 } // namespace duckdb

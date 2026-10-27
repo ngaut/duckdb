@@ -41,7 +41,7 @@ physical pipeline
 - **Representations.** About ten structures describe one pipeline. Op plans
   embed every kind's sub-plan, operator and sink infos are deep-copied on a
   cache miss, and the artifact key is a rendered description that includes
-  estimates and blocker text.
+  some estimates and cast-error identity.
 - **Binding.** Backends re-check `ready` flags and layout facts per chunk.
 
 ## Principles
@@ -191,8 +191,8 @@ that re-lays rows out (a projection, a string-set preclassification, published
 preaggregated keys, a MARK marker omission, an elided projection) produces a
 new layout instead of reusing the old indices. Consumers address columns by
 slot through their input layout. A binding whose layout does not match the
-declared one fails at bind time, never as silent garbage. The 14 index spaces
-reduce to two — region-IR slots and the column positions of one layout — and
+declared one fails at bind time, never as silent garbage. The remaining index
+spaces reduce to two — region-IR slots and the column positions of one layout — and
 the remap helpers to the layout's slot lookup.
 
 **Sources fill batches.** The source contract fills a batch across storage
@@ -234,16 +234,38 @@ of aggregate terminals.
   class batch flush through their own updates, so no consumer reads a class
   column as the payload it replaced. The pending preaggregated group batch
   keeps published keys in a chunk of their own.
+- MARK boundaries and elided pre-join projections share `SljitBatchLayout`:
+  an immutable producer identity and ordered columns with source position,
+  source type and logical result type. Physical types derive from the logical
+  types; a type-changing column still requires the producer's checked
+  expression, never reinterpretation. Layout construction validates source
+  positions and types. These positions are producer-scoped, not yet global
+  region-IR slots.
+- A MARK boundary binds filter semantics, marker representation, probe strategy
+  and its layout during recipe construction. Omitting the marker produces a
+  new layout. LHS columns name their actual probe-input positions; the computed
+  marker has no input slot. Build-side emptiness and NULL state remain query-local facts.
+  Output buffers derive their type vector from the layout only at initialization.
+- An elided projection binds the probe primitive directly. Its layout resolves
+  key and residual positions into one immutable input plan, preserving checked
+  cast chains. There is no intermediate view descriptor, parallel positional
+  map, or cached compatibility flag. Recipe copies share the layout and plan;
+  selected batches borrow the layout for the recipe's lifetime. Aggregate
+  descriptor caches retain its identity instead of copying a map and comparing
+  it per batch. Query-specific plan facts still need the instance-slot split.
 - Expressions have two index spaces with one rule each. An executable
   predicate reads its sources through input slots (`input_source_indices`
-  maps slot to column); a scalar plan reads its source columns from the plan.
+  maps slot to column); an ordinary scalar projection still reads source
+  columns from its plan.
   Composition, semantic remapping and re-preparation start from the semantic
   plan, which reads input columns (`SljitCopySemanticExpressionPlan`); an
   executable expression is re-addressed in place, keeping its compiled code,
-  by `SljitTryRemapExecutableExpressionInputs`. Aggregate payloads still carry
-  a second convention: a fused payload's scalar source is a slot of the
-  combined sources, an unfused payload's is a column with the column repeated
-  in `input_source_indices`.
+  by `SljitTryRemapExecutableExpressionInputs`. Every executable aggregate
+  payload reads slots through `input_source_indices`, including scalar
+  references and binary operands. Re-addressing changes the input map, not the
+  expression's slots. `DIRECT_PER_LANE` and `FUSED_COMBINED` describe kernel
+  input-array layouts, not different meanings for expression indices. Semantic
+  aggregate plans retain column indices for composition and code generation.
 
 ## Plan representation and artifact identity
 
@@ -304,7 +326,7 @@ text, reasons, and blockers never enter. Descriptions are rendered on demand
 for diagnostics only.
 
 **Instance slots.** The instance holds a slot table indexed by artifact op:
-runtime-filter identities, dynamic-filter handles, prepared input remaps,
+runtime-filter identities, dynamic-filter handles, prepared input plans,
 cast-error identity (message, query location, source alias), and the
 stats-derived parameters (min/max, group domains, reserve counts) that code
 reads as runtime parameters. Only facts generated code bakes in as constants
@@ -427,6 +449,10 @@ share of a win is measurable.
 
 ### Current state
 
+The MARK boundary already executes a bound strategy. Its runtime dispatch
+does not revisit semantic eligibility; empty outputs are skipped by the
+shared probe drain before boundary materialization.
+
 The runtime cascades that try alternatives in order:
 
 | Cascade | Location | On total failure |
@@ -469,11 +495,18 @@ layout:
 
 Prune-only filters are not executed per vector. The vectorized path still owns
 the complete combined filter set, so a deferred entry preserves semantics.
-There is no selectivity percentage or workload-specific source selector;
-storage-sensitive low-cardinality string predicates and direct hash-build
-filters keep their storage recipe as a physical capability decision.
-Statistics may order predicates inside a generated filter; they never choose
-generated versus storage ownership.
+Source selection is workload-independent but still uses cost heuristics:
+estimated string-value reuse favors storage search predicates; ordinary string
+filters additionally consider compression eligibility, mixed-predicate fusion,
+and dynamic-filter survivors. These estimates do not prove that a column is
+dictionary encoded. Actual dictionary execution remains storage-owned.
+
+Selecting storage filters does not veto the accelerated runner. The selected
+lowering removes those filters from generated work, and the CBO prices the
+remaining projection, join, and aggregate stages. The physical precheck cannot
+reject that work based on the distinct count of a source predicate. Backend
+preferences for generated predicates apply only to filters remaining in the
+executable body, not to predicates already owned by storage.
 
 Moving a static predicate into a region is valid only when the retained source
 layout supplies every referenced column, evaluation is exception-free for all
@@ -511,7 +544,11 @@ membership before emitting a match.
 Aggregate recipes bind primitive state ABI, payload sources, group sources,
 nullability, and initialization semantics once. Ungrouped and grouped routes
 preserve DuckDB's behavior for empty input, NULL input, overflow,
-initialization, combine, and finalize. Group-key range facts belong to the
+initialization, combine, and finalize. Full-width HUGEINT inputs use checked,
+ordered state updates: chunk-local reduction or grouped preaggregation cannot
+reassociate them without changing intermediate overflow behavior. Narrow
+integer inputs and generated values proven to fit a machine word retain their
+wider-state reduction paths. Group-key range facts belong to the
 executable; proven signed narrowing removes per-chunk range scans, unknown
 ranges keep checked materialization. Pipeline-local preaggregation may hold a
 boundary group across yields, and publication is failure-atomic: raw
@@ -616,12 +653,11 @@ because M3-M5 shrink once layouts and instances exist.
    with their buffers kept alive instead of copied. Exit: the kernel's
    source-fetch batching rules are deleted; `join_exact_filter_build` and
    TPC-H are no slower.
-2. **Typed layouts.** Introduce `BatchLayout` per recipe edge; convert the
-   preaggregated group batch, the MARK boundary and elided projections to
-   explicit layouts; consumers resolve slots through layouts, and aggregate
-   payloads take the expressions' single slot convention. Exit: the remap
-   helpers of elided projections and the MARK boundary are gone; layout
-   mismatch fails at bind.
+2. **Typed layouts.** Extend bound layouts to every recipe edge, including the
+   preaggregated group batch, and give columns region-IR slot identities.
+   Consumers resolve slots through layouts; MARK and elided-projection layouts
+   already share one descriptor but still use producer-scoped positions.
+   Exit: remaining per-family remap helpers are gone; layout mismatch fails at bind.
 3. **One coalescer.** Replace per-step batch owners and per-site batching
    rules with the step coalescer and one byte-based rule. Exit: at most four
    owned batch kinds; no string deep copy decided by a step.
@@ -629,7 +665,7 @@ because M3-M5 shrink once layouts and instances exist.
 ### M2 — artifact identity and instances
 
 1. **Instance slots.** Move cast-error identity, stats-derived parameters, and
-   prepared remaps into the instance slot table; strip diagnostic fields from
+   prepared input plans into the instance slot table; strip diagnostic fields from
    shared infos. Exit: artifacts hold no query-local data, verified by a
    static check.
 2. **Structural key.** Encode the artifact plan canonically; drop estimates and

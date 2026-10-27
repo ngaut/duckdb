@@ -27,33 +27,20 @@ SljitPayloadReferenceExpressionTree(const SljitNativeRegionExpressionPlan &plan)
 	return result;
 }
 
-//! The input column a reference payload reads. A payload whose sources were gathered into input_source_indices (the
-//! fused update's combined sources) names its column by its slot there; a payload without them names the column
-static idx_t SljitFilteredPayloadReferenceColumn(const SljitExecutableRegionExpression &payload) {
-	const auto source_index = payload.plan.source_index;
-	if (payload.input_source_indices.empty()) {
-		return source_index;
-	}
-	return source_index < payload.input_source_indices.size() ? payload.input_source_indices[source_index]
-	                                                          : DConstants::INVALID_INDEX;
-}
-
 static bool NormalizeSljitFilteredAggregatePayloadExpression(SljitExecutableRegionExpression &payload,
                                                              vector<idx_t> &local_sources) {
 	if (payload.plan.expression_tree) {
-		local_sources = payload.input_source_indices.empty() ? payload.plan.expression_tree_source_indices
-		                                                     : payload.input_source_indices;
+		payload.plan.kind = SljitNativeRegionExpressionKind::TYPED_EXPRESSION_TREE;
+		local_sources = payload.input_source_indices;
 		return true;
 	}
 	if (payload.plan.kind != SljitNativeRegionExpressionKind::REFERENCE ||
-	    payload.plan.source_index == DConstants::INVALID_INDEX) {
+	    payload.plan.source_index >= payload.input_source_indices.size()) {
 		return false;
 	}
-	const auto source_column = SljitFilteredPayloadReferenceColumn(payload);
-	if (source_column == DConstants::INVALID_INDEX) {
-		return false;
-	}
+	const auto source_column = payload.InputColumn(payload.plan.source_index);
 	payload.plan.expression_tree = SljitPayloadReferenceExpressionTree(payload.plan);
+	payload.plan.kind = SljitNativeRegionExpressionKind::TYPED_EXPRESSION_TREE;
 	local_sources.clear();
 	local_sources.push_back(source_column);
 	payload.plan.expression_tree_source_indices = local_sources;
@@ -64,18 +51,14 @@ static bool NormalizeSljitFilteredAggregatePayloadExpression(SljitExecutableRegi
 static bool NormalizeSljitFilteredPerfectHashAggregatePayloadExpression(SljitExecutableRegionExpression &payload,
                                                                         vector<idx_t> &local_sources) {
 	if (payload.plan.kind == SljitNativeRegionExpressionKind::TYPED_EXPRESSION_TREE && payload.plan.expression_tree) {
-		local_sources = payload.input_source_indices.empty() ? payload.plan.expression_tree_source_indices
-		                                                     : payload.input_source_indices;
+		local_sources = payload.input_source_indices;
 		return true;
 	}
 	if (payload.plan.kind != SljitNativeRegionExpressionKind::REFERENCE ||
-	    payload.plan.source_index == DConstants::INVALID_INDEX) {
+	    payload.plan.source_index >= payload.input_source_indices.size()) {
 		return false;
 	}
-	const auto source_index = SljitFilteredPayloadReferenceColumn(payload);
-	if (source_index == DConstants::INVALID_INDEX) {
-		return false;
-	}
+	const auto source_index = payload.InputColumn(payload.plan.source_index);
 	payload.plan.expression_tree = SljitPayloadReferenceExpressionTree(payload.plan);
 	payload.plan.kind = SljitNativeRegionExpressionKind::TYPED_EXPRESSION_TREE;
 	local_sources.clear();

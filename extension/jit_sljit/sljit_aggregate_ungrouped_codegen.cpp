@@ -80,7 +80,6 @@ BuildSljitNativeUngroupedFusedPrimitiveAggregateUpdate(const vector<SljitNativeR
 	}
 
 	vector<sljit_sw> local_sum_offsets(payloads.size(), -1);
-	vector<sljit_sw> local_sum_upper_offsets(payloads.size(), -1);
 	vector<sljit_sw> saw_value_offsets(payloads.size(), -1);
 	bool has_sum_lane = false;
 	sljit_sw local_size = 0;
@@ -90,12 +89,13 @@ BuildSljitNativeUngroupedFusedPrimitiveAggregateUpdate(const vector<SljitNativeR
 			continue;
 		}
 		has_sum_lane = true;
+		// Full-width sums must update the persistent state in input order: chunk-local
+		// cancellation must not hide an overflow against a preceding chunk's sum.
+		if (kind == AggregatePrimitiveUpdateKind::SUM_HUGEINT) {
+			continue;
+		}
 		local_sum_offsets[payload_idx] = local_size;
 		local_size += NumericCast<sljit_sw>(sizeof(sljit_sw));
-		if (kind == AggregatePrimitiveUpdateKind::SUM_HUGEINT) {
-			local_sum_upper_offsets[payload_idx] = local_size;
-			local_size += NumericCast<sljit_sw>(sizeof(sljit_sw));
-		}
 		saw_value_offsets[payload_idx] = local_size;
 		local_size += NumericCast<sljit_sw>(sizeof(sljit_sw));
 	}
@@ -112,10 +112,6 @@ BuildSljitNativeUngroupedFusedPrimitiveAggregateUpdate(const vector<SljitNativeR
 			continue;
 		}
 		sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_MEM1(SLJIT_SP), local_sum_offsets[payload_idx], SLJIT_IMM, 0);
-		if (local_sum_upper_offsets[payload_idx] >= 0) {
-			sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_MEM1(SLJIT_SP), local_sum_upper_offsets[payload_idx], SLJIT_IMM,
-			               0);
-		}
 		sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_MEM1(SLJIT_SP), saw_value_offsets[payload_idx], SLJIT_IMM, 0);
 	}
 
@@ -143,9 +139,13 @@ BuildSljitNativeUngroupedFusedPrimitiveAggregateUpdate(const vector<SljitNativeR
 		if (descriptors[payload_idx].primitive_kind == AggregatePrimitiveUpdateKind::SUM_HUGEINT) {
 			EmitLoadFusedAggregateHugeintData(compiler, offsetof(SljitNativeVectorInput, source_data_array),
 			                                  payload_idx, SLJIT_R1, SLJIT_R2, SLJIT_R3);
-			EmitSljitAggregateAccumulateHugeint(compiler, local_sum_offsets[payload_idx],
-			                                    local_sum_upper_offsets[payload_idx], saw_value_offsets[payload_idx],
-			                                    SLJIT_R2, SLJIT_R3);
+			EmitLoadUngroupedAggregatePointer(compiler, offsetof(SljitNativeVectorInput, aggregate_hugeint_values),
+			                                  payload_idx, SLJIT_R0);
+			EmitSljitAccumulateHugeintWords(compiler, SLJIT_R0, offsetof(hugeint_t, lower), offsetof(hugeint_t, upper),
+			                                SLJIT_R2, SLJIT_R3);
+			EmitLoadUngroupedAggregatePointer(compiler, offsetof(SljitNativeVectorInput, aggregate_state_is_sets),
+			                                  payload_idx, SLJIT_R0);
+			sljit_emit_op1(compiler, SLJIT_MOV_U8, SLJIT_MEM1(SLJIT_R0), 0, SLJIT_IMM, 1);
 			auto payload_done = sljit_emit_jump(compiler, SLJIT_JUMP);
 			auto payload_invalid = sljit_emit_label(compiler);
 			for (auto invalid_jump : invalid_jumps) {
@@ -195,9 +195,7 @@ BuildSljitNativeUngroupedFusedPrimitiveAggregateUpdate(const vector<SljitNativeR
 		if (descriptors[payload_idx].primitive_kind == AggregatePrimitiveUpdateKind::COUNT_STAR) {
 			EmitUngroupedAggregateCommitCountStar(compiler, payload_idx);
 		} else if (descriptors[payload_idx].primitive_kind == AggregatePrimitiveUpdateKind::SUM_HUGEINT) {
-			EmitUngroupedAggregateCommitSumHugeint(compiler, payload_idx, local_sum_offsets[payload_idx],
-			                                       local_sum_upper_offsets[payload_idx],
-			                                       saw_value_offsets[payload_idx]);
+			EmitUngroupedAggregateAddRowCount(compiler, payload_idx, SLJIT_S2);
 		} else {
 			EmitUngroupedAggregateCommitSumInt64(compiler, payload_idx, local_sum_offsets[payload_idx],
 			                                     saw_value_offsets[payload_idx]);

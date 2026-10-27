@@ -120,10 +120,6 @@ static void SelectSljitSourceStages(const ExecutionRegionCandidate &candidate, i
 		}
 		lowering_plan.SelectStage(stage_idx, execution);
 	}
-	if (contract_plan.low_cardinality_string_like_max_distinct_count > 0) {
-		lowering_plan.AddBackendLowCardinalityStringPredicatePreference(
-		    contract_plan.low_cardinality_string_like_max_distinct_count);
-	}
 }
 
 static void SelectSljitNodeStages(const ExecutionRegionCandidate &candidate, idx_t node_idx,

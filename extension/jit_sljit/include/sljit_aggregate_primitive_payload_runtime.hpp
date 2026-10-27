@@ -78,10 +78,10 @@ static void SljitExecutePrimitiveAggregatePayloadUpdate(SljitExecutableRegionExp
 
 	switch (plan.kind) {
 	case SljitNativeRegionExpressionKind::REFERENCE:
-		if (plan.source_index >= input.ColumnCount()) {
+		if (payload.InputColumn(plan.source_index) >= input.ColumnCount()) {
 			throw InternalException("SLJIT aggregate primitive reference source is out of range");
 		}
-		input.data[plan.source_index].ToUnifiedFormat(source_format);
+		input.data[payload.InputColumn(plan.source_index)].ToUnifiedFormat(source_format);
 		if (lane.kind == AggregatePrimitiveUpdateKind::COUNT) {
 			native_input.source_data = nullptr;
 		} else {
@@ -96,10 +96,10 @@ static void SljitExecutePrimitiveAggregatePayloadUpdate(SljitExecutableRegionExp
 		        : SljitNormalizedSourceValidityData(source_format, native_input.source_sel, execute_sel, count);
 		break;
 	case SljitNativeRegionExpressionKind::INTEGER_BINARY_CONSTANT:
-		if (plan.source_index >= input.ColumnCount()) {
+		if (payload.InputColumn(plan.source_index) >= input.ColumnCount()) {
 			throw InternalException("SLJIT aggregate primitive binary source is out of range");
 		}
-		input.data[plan.source_index].ToUnifiedFormat(source_format);
+		input.data[payload.InputColumn(plan.source_index)].ToUnifiedFormat(source_format);
 		native_input.source_data = NativeIntegerSourceData(source_format, plan.integer_kind);
 		native_input.source_sel = SljitNormalizedSourceSelectionData(source_format);
 		native_input.source_validity =
@@ -109,11 +109,12 @@ static void SljitExecutePrimitiveAggregatePayloadUpdate(SljitExecutableRegionExp
 		native_input.constant = plan.constant;
 		break;
 	case SljitNativeRegionExpressionKind::INTEGER_BINARY_REFERENCES:
-		if (plan.source_index >= input.ColumnCount() || plan.right_source_index >= input.ColumnCount()) {
+		if (payload.InputColumn(plan.source_index) >= input.ColumnCount() ||
+		    payload.InputColumn(plan.right_source_index) >= input.ColumnCount()) {
 			throw InternalException("SLJIT aggregate primitive binary source is out of range");
 		}
-		input.data[plan.source_index].ToUnifiedFormat(source_format);
-		input.data[plan.right_source_index].ToUnifiedFormat(right_source_format);
+		input.data[payload.InputColumn(plan.source_index)].ToUnifiedFormat(source_format);
+		input.data[payload.InputColumn(plan.right_source_index)].ToUnifiedFormat(right_source_format);
 		native_input.source_data = NativeIntegerSourceData(source_format, plan.integer_kind);
 		native_input.source_sel = SljitNormalizedSourceSelectionData(source_format);
 		native_input.source_validity =
@@ -129,10 +130,10 @@ static void SljitExecutePrimitiveAggregatePayloadUpdate(SljitExecutableRegionExp
 		                                            count);
 		break;
 	case SljitNativeRegionExpressionKind::DOUBLE_BINARY_CONSTANT:
-		if (plan.source_index >= input.ColumnCount()) {
+		if (payload.InputColumn(plan.source_index) >= input.ColumnCount()) {
 			throw InternalException("SLJIT aggregate primitive double binary source is out of range");
 		}
-		input.data[plan.source_index].ToUnifiedFormat(source_format);
+		input.data[payload.InputColumn(plan.source_index)].ToUnifiedFormat(source_format);
 		native_input.source_data = source_format.data;
 		native_input.source_sel = SljitNormalizedSourceSelectionData(source_format);
 		native_input.source_validity =
@@ -143,11 +144,12 @@ static void SljitExecutePrimitiveAggregatePayloadUpdate(SljitExecutableRegionExp
 		native_input.source_double_scale = plan.double_source_scale;
 		break;
 	case SljitNativeRegionExpressionKind::DOUBLE_BINARY_REFERENCES:
-		if (plan.source_index >= input.ColumnCount() || plan.right_source_index >= input.ColumnCount()) {
+		if (payload.InputColumn(plan.source_index) >= input.ColumnCount() ||
+		    payload.InputColumn(plan.right_source_index) >= input.ColumnCount()) {
 			throw InternalException("SLJIT aggregate primitive double binary source is out of range");
 		}
-		input.data[plan.source_index].ToUnifiedFormat(source_format);
-		input.data[plan.right_source_index].ToUnifiedFormat(right_source_format);
+		input.data[payload.InputColumn(plan.source_index)].ToUnifiedFormat(source_format);
+		input.data[payload.InputColumn(plan.right_source_index)].ToUnifiedFormat(right_source_format);
 		native_input.source_data = source_format.data;
 		native_input.source_sel = SljitNormalizedSourceSelectionData(source_format);
 		native_input.source_validity =

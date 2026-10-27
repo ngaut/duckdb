@@ -392,30 +392,6 @@ static bool SljitDispatchPreaggregatedInt64PayloadType(PhysicalType payload_type
 	}
 }
 
-template <class PAYLOAD_DISPATCH>
-static bool SljitDispatchPreaggregatedHugeintPayloadType(PhysicalType payload_type, PAYLOAD_DISPATCH &dispatch) {
-	switch (payload_type) {
-	case PhysicalType::INT8:
-		return dispatch.template Execute<int8_t>();
-	case PhysicalType::INT16:
-		return dispatch.template Execute<int16_t>();
-	case PhysicalType::INT32:
-		return dispatch.template Execute<int32_t>();
-	case PhysicalType::INT64:
-		return dispatch.template Execute<int64_t>();
-	case PhysicalType::INT128:
-		return dispatch.template Execute<hugeint_t>();
-	case PhysicalType::UINT8:
-		return dispatch.template Execute<uint8_t>();
-	case PhysicalType::UINT16:
-		return dispatch.template Execute<uint16_t>();
-	case PhysicalType::UINT32:
-		return dispatch.template Execute<uint32_t>();
-	default:
-		return false;
-	}
-}
-
 template <template <class, bool> class SUM_ACCUMULATOR, class SINK>
 struct SljitPreaggregatedSingleLanePayloadAccumulatorDispatch {
 	const SljitPreaggregatedPrimitivePayloadSource &source;
@@ -462,7 +438,7 @@ static bool SljitSelectPreaggregatedSingleLaneAccumulator(
 	}
 	case AggregatePrimitiveUpdateKind::SUM_HUGEINT: {
 		SljitPreaggregatedSingleLanePayloadAccumulatorDispatch<HUGEINT_SUM_ACCUMULATOR, SINK> dispatch {*source, sink};
-		return SljitDispatchPreaggregatedHugeintPayloadType(source->type, dispatch);
+		return SljitDispatchPreaggregatedInt64PayloadType(source->type, dispatch);
 	}
 	default:
 		return false;

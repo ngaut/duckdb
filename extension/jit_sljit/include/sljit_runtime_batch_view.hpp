@@ -8,6 +8,8 @@
 
 #pragma once
 
+#include "sljit_batch_layout.hpp"
+
 #include "duckdb/common/constants.hpp"
 #include "duckdb/common/exception.hpp"
 #include "duckdb/common/optional_ptr.hpp"
@@ -23,14 +25,13 @@ struct SljitRuntimeHashJoinSelection {
 	const SelectionVector *match_selection = nullptr;
 	const SelectionVector *build_selection = nullptr;
 	Vector *row_pointers = nullptr;
-	const vector<idx_t> *output_column_map = nullptr;
+	optional_ptr<const SljitBatchLayout> output_layout = nullptr;
 	idx_t count = 0;
 	idx_t hash_join_idx = DConstants::INVALID_INDEX;
-	idx_t output_projection_idx = DConstants::INVALID_INDEX;
 	ExecutionHashJoinProbeOutputProof output_proof;
 
 	//! The chunk the probe ran on. Under an elided pre-join projection this is the projection's source, which the
-	//! probe's output indices address only through OutputColumnMap(); consumers that index the probe's output read
+	//! probe's output indices address only through OutputLayout(); consumers that index the probe's output read
 	//! SljitBindSelectedHashJoinOutputSource instead
 	DataChunk &SourceInput() const {
 		if (!chunk) {
@@ -60,8 +61,8 @@ struct SljitRuntimeHashJoinSelection {
 		return *row_pointers;
 	}
 
-	optional_ptr<const vector<idx_t>> OutputColumnMap() const {
-		return optional_ptr<const vector<idx_t>>(output_column_map);
+	optional_ptr<const SljitBatchLayout> OutputLayout() const {
+		return output_layout;
 	}
 
 	bool ExactSourceFilterMatches() const {
@@ -74,10 +75,9 @@ struct SljitRuntimeBatchView {
 	const SelectionVector *selection = nullptr;
 	const SelectionVector *hash_join_build_selection = nullptr;
 	Vector *hash_join_row_pointers = nullptr;
-	const vector<idx_t> *hash_join_output_column_map = nullptr;
+	optional_ptr<const SljitBatchLayout> hash_join_output_layout = nullptr;
 	idx_t count = 0;
 	idx_t hash_join_idx = DConstants::INVALID_INDEX;
-	idx_t hash_join_output_projection_idx = DConstants::INVALID_INDEX;
 	SljitRuntimeBatchOwnership ownership = SljitRuntimeBatchOwnership::MATERIALIZED_CHUNK;
 	ExecutionHashJoinProbeOutputProof hash_join_output_proof;
 
@@ -102,10 +102,9 @@ struct SljitRuntimeBatchView {
 		selected.match_selection = selection;
 		selected.build_selection = hash_join_build_selection;
 		selected.row_pointers = hash_join_row_pointers;
-		selected.output_column_map = hash_join_output_column_map;
+		selected.output_layout = hash_join_output_layout;
 		selected.count = count;
 		selected.hash_join_idx = hash_join_idx;
-		selected.output_projection_idx = hash_join_output_projection_idx;
 		selected.output_proof = hash_join_output_proof;
 		return true;
 	}
@@ -150,20 +149,20 @@ static const SelectionVector &SljitBindHashJoinMatchSelection(const ExecutionHas
 	                                                : explicit_match_selection;
 }
 
-static SljitRuntimeBatchView SljitRuntimeBatchViewFromHashJoinSelection(
-    DataChunk &join_input, const SelectionVector &match_selection, const SelectionVector &build_selection,
-    Vector &row_pointers, idx_t selected_count, idx_t hash_join_idx,
-    const ExecutionHashJoinProbeOutputProof &output_proof, const vector<idx_t> *hash_join_output_column_map = nullptr,
-    idx_t hash_join_output_projection_idx = DConstants::INVALID_INDEX) {
+static SljitRuntimeBatchView
+SljitRuntimeBatchViewFromHashJoinSelection(DataChunk &join_input, const SelectionVector &match_selection,
+                                           const SelectionVector &build_selection, Vector &row_pointers,
+                                           idx_t selected_count, idx_t hash_join_idx,
+                                           const ExecutionHashJoinProbeOutputProof &output_proof,
+                                           optional_ptr<const SljitBatchLayout> hash_join_output_layout = nullptr) {
 	SljitRuntimeBatchView view;
 	view.chunk = &join_input;
 	view.selection = &SljitBindHashJoinMatchSelection(output_proof, match_selection);
 	view.hash_join_build_selection = &build_selection;
 	view.hash_join_row_pointers = &row_pointers;
-	view.hash_join_output_column_map = hash_join_output_column_map;
+	view.hash_join_output_layout = hash_join_output_layout;
 	view.count = selected_count;
 	view.hash_join_idx = hash_join_idx;
-	view.hash_join_output_projection_idx = hash_join_output_projection_idx;
 	view.ownership = SljitRuntimeBatchOwnership::SELECTED_REFERENCE;
 	view.hash_join_output_proof = output_proof;
 	return view;

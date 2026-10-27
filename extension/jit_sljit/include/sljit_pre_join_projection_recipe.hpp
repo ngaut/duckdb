@@ -20,27 +20,16 @@ public:
 	                                    const vector<Value> &source_min_values_p,
 	                                    const vector<Value> &source_max_values_p);
 
-	bool TryBuildView(idx_t pre_join_projection_idx, idx_t hash_join_idx,
-	                  SljitPreJoinProjectionViewDescriptor &pre_join_view) const;
-
-	SljitFullPipelinePrimitiveSequence MakeHashJoinSelectionSequence(
-	    idx_t pre_join_projection_idx, idx_t hash_join_idx,
-	    optional_ptr<const SljitPreJoinProjectionViewDescriptor> pre_join_view = nullptr) const;
+	SljitFullPipelinePrimitiveSequence MakeHashJoinSelectionSequence(idx_t pre_join_projection_idx,
+	                                                                 idx_t hash_join_idx) const;
 
 	bool TryAppendElidedHashJoinProbeSelection(SljitFullPipelinePrimitiveSequence &sequence,
-	                                           idx_t pre_join_projection_idx, idx_t hash_join_idx) const;
-
-	bool TryAppendElidedHashJoinProbeSelection(SljitFullPipelinePrimitiveSequence &sequence,
-	                                           const SljitPreJoinProjectionViewDescriptor &pre_join_view,
-	                                           idx_t pre_join_projection_idx, idx_t hash_join_idx) const;
+	                                           idx_t pre_join_projection_idx, idx_t hash_join_idx,
+	                                           bool preserve_source_ordinals = false) const;
 
 private:
 	void AddMaterializedHashJoinSelection(SljitFullPipelinePrimitiveSequence &sequence, idx_t pre_join_projection_idx,
 	                                      idx_t hash_join_idx) const;
-
-	SljitHashJoinProbeSelectionPrimitive
-	BindElidedHashJoinProbeSelection(const SljitPreJoinProjectionViewDescriptor &pre_join_view,
-	                                 idx_t pre_join_projection_idx, idx_t hash_join_idx) const;
 };
 
 } // namespace duckdb

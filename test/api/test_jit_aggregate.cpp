@@ -1,13 +1,192 @@
 #include "test_jit_helpers.hpp"
 
 #include "sljit_aggregate_preaggregated_update_runtime.hpp"
+#include "sljit_aggregate_primitive_preaggregation_runtime.hpp"
 #include "sljit_codegen_capabilities.hpp"
+#include "sljit_executable_aggregate_codegen.hpp"
 #include "sljit_grouped_aggregate_input_vector_groups.hpp"
 #include "sljit_native_codegen.hpp"
 
 #include "duckdb/execution/aggregate_hashtable.hpp"
 
 using namespace duckdb;
+
+TEST_CASE("JIT preaggregation requires a bounded payload value ABI", "[api][jit]") {
+	SljitAggregatePayloadDescriptor descriptor;
+	descriptor.primitive_kind = AggregatePrimitiveUpdateKind::SUM_HUGEINT;
+	descriptor.has_payload = true;
+	descriptor.input_type = PhysicalType::INT128;
+	descriptor.value_abi = SljitAggregatePayloadValueABI::SIGNED_DOUBLE_WORD;
+	REQUIRE_FALSE(SljitPreaggregatedGeneratedPayloadSupported(descriptor));
+	REQUIRE_FALSE(SljitPreaggregatedPrimitivePayloadSupported(descriptor.primitive_kind, descriptor.input_type));
+	descriptor.value_abi = SljitAggregatePayloadValueABI::SIGNED_MACHINE_WORD;
+	REQUIRE(SljitPreaggregatedGeneratedPayloadSupported(descriptor));
+	// A generated narrow value does not make an arbitrary materialized INT128 input safe.
+	REQUIRE_FALSE(SljitPreaggregatedPrimitivePayloadSupported(descriptor.primitive_kind, descriptor.input_type));
+	REQUIRE(SljitPreaggregatedPrimitivePayloadSupported(descriptor.primitive_kind, PhysicalType::INT64));
+}
+
+TEST_CASE("JIT full-width sum kernels match checked HUGEINT addition", "[api][jit]") {
+	if (!SljitPrimitiveRunCodegenSupported()) {
+		return;
+	}
+	const auto minimum = NumericLimits<hugeint_t>::Minimum();
+	const auto maximum = NumericLimits<hugeint_t>::Maximum();
+	const vector<hugeint_t> values {minimum,
+	                                Hugeint::Add(minimum, 1),
+	                                hugeint_t(-1, 0),
+	                                hugeint_t(-1),
+	                                hugeint_t(0),
+	                                hugeint_t(1),
+	                                hugeint_t(0, NumericLimits<uint64_t>::Maximum()),
+	                                hugeint_t(1, 0),
+	                                Hugeint::Add(maximum, -1),
+	                                maximum};
+	for (bool grouped : {false, true}) {
+		SljitNativeAggregateUpdateFunction update = nullptr;
+		string error;
+		auto code = grouped ? BuildSljitNativeGroupedSumHugeint128Reference(update, error)
+		                    : BuildSljitNativeUngroupedSumHugeint128Reference(update, error);
+		INFO(error);
+		REQUIRE(code);
+		REQUIRE(update);
+		for (auto left : values) {
+			for (auto right : values) {
+				CAPTURE(grouped, left.ToString(), right.ToString());
+				struct State {
+					hugeint_t value;
+					bool is_set;
+				} state {left, true};
+				const uintptr_t address = reinterpret_cast<uintptr_t>(&state);
+				SljitNativeVectorInput input;
+				input.count = 1;
+				input.source_data = reinterpret_cast<const_data_ptr_t>(&right);
+				input.aggregate_hugeint_value = &state.value;
+				input.aggregate_state_is_set = &state.is_set;
+				input.aggregate_state_addresses = &address;
+				input.aggregate_state_value_offset = offsetof(State, value);
+				input.aggregate_state_is_set_offset = offsetof(State, is_set);
+				auto expected = left;
+				const bool valid = Hugeint::TryAddInPlace(expected, right);
+				update(&input);
+				REQUIRE(input.has_error == !valid);
+				REQUIRE(state.value == (valid ? expected : left));
+				if (!valid) {
+					REQUIRE(input.error);
+					REQUIRE_THROWS_AS(std::rethrow_exception(input.error), OutOfRangeException);
+				}
+			}
+		}
+	}
+}
+
+TEST_CASE("JIT executable aggregate scalar payloads use input slots", "[api][jit]") {
+	const vector<SljitNativeRegionExpressionKind> kinds {SljitNativeRegionExpressionKind::REFERENCE,
+	                                                     SljitNativeRegionExpressionKind::INTEGER_BINARY_CONSTANT,
+	                                                     SljitNativeRegionExpressionKind::INTEGER_BINARY_REFERENCES,
+	                                                     SljitNativeRegionExpressionKind::DOUBLE_BINARY_CONSTANT,
+	                                                     SljitNativeRegionExpressionKind::DOUBLE_BINARY_REFERENCES};
+	for (auto kind : kinds) {
+		for (idx_t right_column : {idx_t(2), idx_t(5)}) {
+			SljitNativeAggregateUpdatePlan semantic;
+			semantic.InitializeDirectPrimitivePayloads();
+			const bool binary = kind == SljitNativeRegionExpressionKind::INTEGER_BINARY_REFERENCES ||
+			                    kind == SljitNativeRegionExpressionKind::DOUBLE_BINARY_REFERENCES;
+			const bool is_double = kind == SljitNativeRegionExpressionKind::DOUBLE_BINARY_CONSTANT ||
+			                       kind == SljitNativeRegionExpressionKind::DOUBLE_BINARY_REFERENCES;
+			SljitNativeRegionExpressionPlan plan;
+			plan.kind = kind;
+			plan.return_type = is_double ? LogicalType::DOUBLE : LogicalType::INTEGER;
+			plan.source_index = 5;
+			plan.right_source_index = right_column;
+			semantic.payloads.push_back(std::move(plan));
+			ExecutionRegionAggregateInput aggregate;
+			aggregate.primitive_update_ready = true;
+			aggregate.primitive_update_kind =
+			    is_double ? AggregatePrimitiveUpdateKind::SUM_DOUBLE : AggregatePrimitiveUpdateKind::SUM_INT64;
+			aggregate.child_count = 1;
+			aggregate.child_types = {semantic.payloads[0].return_type};
+			aggregate.primitive_update_input_type = semantic.payloads[0].return_type.InternalType();
+			semantic.sink_info.aggregates.push_back(aggregate);
+
+			// COUNT(*) has no input slot, including alongside scalar payloads.
+			semantic.payloads.emplace_back();
+			semantic.payloads.back().kind = SljitNativeRegionExpressionKind::CONSTANT;
+			semantic.payloads.back().return_type = LogicalType::BIGINT;
+			ExecutionRegionAggregateInput count_star;
+			count_star.primitive_update_ready = true;
+			count_star.primitive_update_kind = AggregatePrimitiveUpdateKind::COUNT_STAR;
+			semantic.sink_info.aggregates.push_back(count_star);
+
+			SljitExecutableAggregateUpdate executable;
+			SljitBuildExecutableAggregateUpdateMetadata(semantic, executable,
+			                                            {false, false, true, false, false, false});
+			auto &payload = executable.payloads[0];
+			REQUIRE(payload.plan.source_index == 0);
+			REQUIRE(payload.InputColumn(payload.plan.source_index) == 5);
+			REQUIRE_FALSE(payload.input_source_not_null[0]);
+			if (binary) {
+				REQUIRE(payload.plan.right_source_index == 1);
+				REQUIRE(payload.input_source_indices == vector<idx_t> {5, right_column});
+				REQUIRE(payload.InputColumn(payload.plan.right_source_index) == right_column);
+				REQUIRE(payload.input_source_not_null[1] == (right_column == 2));
+			} else {
+				REQUIRE(payload.input_source_indices == vector<idx_t> {5});
+			}
+			REQUIRE(semantic.payloads[0].source_index == 5);
+			REQUIRE(semantic.payloads[0].right_source_index == right_column);
+			REQUIRE(executable.payloads[1].input_source_indices.empty());
+			REQUIRE(executable.payloads[1].input_source_not_null.empty());
+		}
+	}
+}
+
+TEST_CASE("JIT combined aggregate references and auxiliary trees share input slots", "[api][jit]") {
+	SljitNativeAggregateUpdatePlan semantic;
+	semantic.InitializeProjectionComposedPrimitivePayloads();
+	semantic.sink_info.kind = ExecutionRegionSinkKind::UNGROUPED_AGGREGATE_UPDATE;
+	for (idx_t column : {idx_t(5), idx_t(2)}) {
+		SljitNativeRegionExpressionPlan payload;
+		payload.kind = column == 5 ? SljitNativeRegionExpressionKind::TYPED_EXPRESSION_TREE
+		                           : SljitNativeRegionExpressionKind::REFERENCE;
+		payload.source_index = column;
+		payload.return_type = LogicalType::INTEGER;
+		payload.integer_kind = SljitNativeIntegerKind::INT32;
+		payload.expression_tree = make_uniq<ExecutionExpressionIR>();
+		payload.expression_tree->kind = ExecutionExpressionIRKind::REFERENCE;
+		payload.expression_tree->ref_index = 0;
+		payload.expression_tree->return_type = LogicalType::INTEGER;
+		payload.expression_tree->physical_type = PhysicalType::INT32;
+		payload.expression_tree->validity = ExecutionExpressionValidityKind::SOURCE;
+		payload.expression_tree->source = ExecutionExpressionSourceKind::VECTOR;
+		payload.expression_tree->exception_behavior = ExecutionExpressionExceptionKind::NONE;
+		payload.expression_tree_source_indices = {column};
+		semantic.payloads.push_back(std::move(payload));
+		ExecutionRegionAggregateInput aggregate;
+		aggregate.primitive_update_ready = true;
+		aggregate.primitive_update_kind = AggregatePrimitiveUpdateKind::SUM_INT64;
+		aggregate.primitive_update_input_type = PhysicalType::INT32;
+		aggregate.child_count = 1;
+		aggregate.child_types = {LogicalType::INTEGER};
+		semantic.sink_info.aggregates.push_back(aggregate);
+	}
+	const vector<bool> not_null {false, false, true, false, false, false};
+	SljitExecutableAggregateUpdate executable;
+	SljitBuildExecutableAggregateUpdateMetadata(semantic, executable, not_null);
+	string error;
+	REQUIRE(SljitBuildExecutableAggregateUpdatePayloadCode(semantic, executable, error, not_null, {}, {}));
+	INFO(error);
+	REQUIRE(executable.fused_payload_update.IsExecutable());
+	REQUIRE(executable.payload_source_layout == SljitAggregatePayloadSourceLayout::FUSED_COMBINED);
+	REQUIRE(executable.combined_payload_source_indices == vector<idx_t> {5, 2});
+	auto &reference = executable.payloads[1];
+	REQUIRE(reference.plan.source_index == 1);
+	REQUIRE(reference.plan.expression_tree->ref_index == reference.plan.source_index);
+	REQUIRE(reference.InputColumn(reference.plan.source_index) == 2);
+	REQUIRE(reference.input_source_not_null[reference.plan.source_index]);
+	REQUIRE(semantic.payloads[1].source_index == 2);
+	REQUIRE(semantic.payloads[1].expression_tree->ref_index == 0);
+}
 
 static void RequirePrimitiveRunGenericFallback(ExecutionRegionManager &manager) {
 	RequireJitEvent(

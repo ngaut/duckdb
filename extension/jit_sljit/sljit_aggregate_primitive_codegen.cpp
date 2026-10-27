@@ -72,14 +72,6 @@ void EmitSljitAggregateAccumulateHugeintInt64(struct sljit_compiler *compiler, s
 	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_MEM1(SLJIT_SP), saw_value_offset, SLJIT_IMM, 1);
 }
 
-void EmitSljitAggregateAccumulateHugeint(struct sljit_compiler *compiler, sljit_sw local_lower_offset,
-                                         sljit_sw local_upper_offset, sljit_sw saw_value_offset,
-                                         sljit_s32 lower_value_reg, sljit_s32 upper_value_reg) {
-	EmitSljitAccumulateHugeintWords(compiler, SLJIT_SP, local_lower_offset, local_upper_offset, lower_value_reg,
-	                                upper_value_reg);
-	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_MEM1(SLJIT_SP), saw_value_offset, SLJIT_IMM, 1);
-}
-
 void EmitLoadSljitHugeintReference(struct sljit_compiler *compiler, sljit_sw source_data_offset,
                                    sljit_s32 source_index_reg, sljit_s32 lower_target_reg, sljit_s32 upper_target_reg) {
 	sljit_emit_op1(compiler, SLJIT_MOV_P, SLJIT_R0, 0, SLJIT_MEM1(SLJIT_S0), source_data_offset);
@@ -89,15 +81,44 @@ void EmitLoadSljitHugeintReference(struct sljit_compiler *compiler, sljit_sw sou
 	sljit_emit_op1(compiler, SLJIT_MOV, upper_target_reg, 0, SLJIT_MEM1(SLJIT_R0), offsetof(hugeint_t, upper));
 }
 
+static void SLJIT_FUNC SljitNativeHugeintAdditionOverflow(SljitNativeVectorInput *input, const hugeint_t *left,
+                                                          uint64_t right_lower, int64_t right_upper) {
+	try {
+		Hugeint::Add(*left, hugeint_t(right_upper, right_lower));
+		throw InternalException("SLJIT HUGEINT overflow check disagrees with DuckDB");
+	} catch (...) {
+		input->has_error = true;
+		input->error = std::current_exception();
+	}
+}
+
 void EmitSljitAccumulateHugeintWords(struct sljit_compiler *compiler, sljit_s32 base_reg, sljit_sw lower_offset,
                                      sljit_sw upper_offset, sljit_s32 lower_value_reg, sljit_s32 upper_value_reg) {
+	D_ASSERT(lower_value_reg == SLJIT_R2 && upper_value_reg == SLJIT_R3);
+	D_ASSERT(base_reg != SLJIT_R1 && base_reg != SLJIT_R2 && base_reg != SLJIT_R3 && base_reg != SLJIT_R4);
+	D_ASSERT(upper_offset == lower_offset + sizeof(uint64_t));
 	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_R4, 0, SLJIT_MEM1(base_reg), lower_offset);
-	sljit_emit_op2(compiler, SLJIT_ADD | SLJIT_SET_CARRY, SLJIT_R4, 0, SLJIT_R4, 0, lower_value_reg, 0);
-	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_MEM1(base_reg), lower_offset, SLJIT_R4, 0);
-	sljit_emit_op_flags(compiler, SLJIT_MOV, lower_value_reg, 0, SLJIT_CARRY);
+	sljit_emit_op2(compiler, SLJIT_ADD | SLJIT_SET_CARRY, lower_value_reg, 0, SLJIT_R4, 0, lower_value_reg, 0);
+	sljit_emit_op_flags(compiler, SLJIT_MOV, SLJIT_R1, 0, SLJIT_CARRY);
 	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_R4, 0, SLJIT_MEM1(base_reg), upper_offset);
 	sljit_emit_op2(compiler, SLJIT_ADD, SLJIT_R4, 0, SLJIT_R4, 0, upper_value_reg, 0);
-	sljit_emit_op2(compiler, SLJIT_ADD, SLJIT_R4, 0, SLJIT_R4, 0, lower_value_reg, 0);
+	sljit_emit_op2(compiler, SLJIT_ADD, SLJIT_R4, 0, SLJIT_R4, 0, SLJIT_R1, 0);
+	// Signed addition overflows only when equal-sign operands produce the opposite sign.
+	sljit_emit_op2(compiler, SLJIT_XOR, SLJIT_R1, 0, SLJIT_MEM1(base_reg), upper_offset, upper_value_reg, 0);
+	auto opposite_signs = sljit_emit_cmp(compiler, SLJIT_SIG_LESS, SLJIT_R1, 0, SLJIT_IMM, 0);
+	sljit_emit_op2(compiler, SLJIT_XOR, SLJIT_R1, 0, SLJIT_R4, 0, upper_value_reg, 0);
+	auto same_result_sign = sljit_emit_cmp(compiler, SLJIT_SIG_GREATER_EQUAL, SLJIT_R1, 0, SLJIT_IMM, 0);
+	// Preserve the state until the check succeeds, and recover the overwritten right low word for DuckDB's error.
+	sljit_emit_op2(compiler, SLJIT_SUB, SLJIT_R2, 0, lower_value_reg, 0, SLJIT_MEM1(base_reg), lower_offset);
+	sljit_emit_op2(compiler, SLJIT_ADD, SLJIT_R1, 0, base_reg, 0, SLJIT_IMM, lower_offset);
+	sljit_emit_op1(compiler, SLJIT_MOV_P, SLJIT_R0, 0, SLJIT_S0, 0);
+	sljit_emit_icall(compiler, SLJIT_CALL, SLJIT_ARGS4V(P, P, W, W), SLJIT_IMM,
+	                 SLJIT_FUNC_ADDR(SljitNativeHugeintAdditionOverflow));
+	sljit_emit_return_void(compiler);
+	auto commit = sljit_emit_label(compiler);
+	sljit_set_label(opposite_signs, commit);
+	sljit_set_label(same_result_sign, commit);
+	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_MEM1(base_reg), lower_offset, lower_value_reg, 0);
 	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_MEM1(base_reg), upper_offset, SLJIT_R4, 0);
 }
 

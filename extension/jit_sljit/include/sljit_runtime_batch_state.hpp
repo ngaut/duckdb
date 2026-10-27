@@ -8,6 +8,8 @@
 
 #pragma once
 
+#include "sljit_batch_layout.hpp"
+
 #include "duckdb/common/allocator.hpp"
 #include "duckdb/common/types/data_chunk.hpp"
 
@@ -44,6 +46,12 @@ struct SljitDataChunkBatch {
 		}
 		chunk.Initialize(allocator, source.GetTypes());
 		initialized = true;
+	}
+
+	void Ensure(Allocator &allocator, const SljitBatchLayout &layout) {
+		if (!initialized) {
+			Ensure(allocator, layout.Types());
+		}
 	}
 
 	void Reset() {

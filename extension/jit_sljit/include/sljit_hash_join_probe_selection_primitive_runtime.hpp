@@ -64,18 +64,17 @@ public:
 			}
 		}
 		auto &join_output = scratch.TemporaryChunk(hash_join_idx);
-		const auto output_column_map = primitive.HasOutputColumnMap() ? &primitive.output_column_map : nullptr;
 		auto handle_output = [&](DataChunk &output, SljitHashJoinProbeDrainState &state) {
 			auto output_view = SljitRuntimeBatchViewFromHashJoinSelection(
 			    join_input, scratch.FilterSelection(hash_join_idx), scratch.HashJoinBuildSelection(hash_join_idx),
 			    scratch.HashJoinRowPointers(hash_join_idx), output.size(), hash_join_idx, state.output_proof,
-			    output_column_map, primitive.output_projection_idx);
+			    primitive.output_layout.get());
 			return execute_next_step(output_view);
 		};
 		return SljitDrainHashJoinProbeOutputsWithState(
 		    scratch, hash_join_idx, hash_join_op, join_input, join_output, execute_hash_join_probe, handle_output,
 		    primitive.source_key0_int64_to_int32_unchecked, SljitHashJoinProbeOutputContract::SELECTED_VIEW,
-		    optional_ptr<const SljitHashJoinProbeInputRemap>(&primitive.input_remap));
+		    optional_ptr<const SljitNativeHashJoinProbePlan>(primitive.input_plan.get()));
 	}
 
 private:

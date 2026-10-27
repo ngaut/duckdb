@@ -31,11 +31,11 @@ static bool TryReadProjectionSourceReferenceIndex(const SljitNativeRegionExpress
 	return true;
 }
 
-static bool SljitTryGetExecutableReferenceInputIndex(const SljitExecutableRegionExpression &expression,
-                                                     idx_t &input_index) {
+static bool SljitTryGetAggregatePayloadReferenceInputIndex(const SljitExecutableRegionExpression &expression,
+                                                           idx_t &input_index) {
 	auto &plan = expression.plan;
 	if (plan.kind == SljitNativeRegionExpressionKind::REFERENCE) {
-		input_index = plan.source_index;
+		input_index = expression.InputColumn(plan.source_index);
 		return true;
 	}
 	if (plan.kind != SljitNativeRegionExpressionKind::TYPED_EXPRESSION_TREE || !plan.expression_tree ||
@@ -44,12 +44,10 @@ static bool SljitTryGetExecutableReferenceInputIndex(const SljitExecutableRegion
 		return false;
 	}
 	const auto source_slot = plan.expression_tree->ref_index;
-	auto &source_indices =
-	    expression.input_source_indices.empty() ? plan.expression_tree_source_indices : expression.input_source_indices;
-	if (source_slot >= source_indices.size()) {
+	if (source_slot >= expression.input_source_indices.size()) {
 		return false;
 	}
-	input_index = source_indices[source_slot];
+	input_index = expression.InputColumn(source_slot);
 	return true;
 }
 

@@ -89,14 +89,11 @@ struct SljitPostJoinProjectionAggregateRuntimeState {
 			return result;
 		}
 		strategy_ptr->last_failure.clear();
-		const auto output_column_map = probe_primitive.HasOutputColumnMap()
-		                                   ? optional_ptr<const vector<idx_t>>(&probe_primitive.output_column_map)
-		                                   : optional_ptr<const vector<idx_t>>(nullptr);
 		auto &hash_join_op = ops[probe_primitive.hash_join_idx];
 		result = SljitTryExecuteHashJoinAggregateConsumer(
 		    runtime, runtime.ExecutionOperators(), ops, scratch, probe_primitive, hash_join_op, *strategy_ptr,
-		    join_input, post_join_projection, output_column_map, probe_primitive.output_projection_idx,
-		    probe_input_filter_idx, probe_input_filter_cache, shared_predicate_classification, execute_hash_join_probe);
+		    join_input, post_join_projection, probe_input_filter_idx, probe_input_filter_cache,
+		    shared_predicate_classification, execute_hash_join_probe);
 		return result;
 	}
 
@@ -111,8 +108,7 @@ struct SljitPostJoinProjectionAggregateRuntimeState {
 		join_output.SetChildCardinality(selected.count);
 		return ExecuteSelectedJoinOutput(runtime, result, ops, scratch, selected.SourceInput(), join_output,
 		                                 selected.MatchSelection(), selected.BuildSelection(), selected.RowPointers(),
-		                                 selected.output_proof, selected.OutputColumnMap(),
-		                                 selected.output_projection_idx);
+		                                 selected.output_proof, selected.OutputLayout());
 	}
 
 	bool ExecuteSelectedJoinOutput(ExecutionRegionRuntime &runtime, ExecutionRegionResult &result,
@@ -120,8 +116,7 @@ struct SljitPostJoinProjectionAggregateRuntimeState {
 	                               DataChunk &join_input, DataChunk &join_output,
 	                               const SelectionVector &match_selection, const SelectionVector &build_selection,
 	                               Vector &row_pointers, ExecutionHashJoinProbeOutputProof output_proof,
-	                               optional_ptr<const vector<idx_t>> output_column_map = nullptr,
-	                               idx_t output_projection_idx = DConstants::INVALID_INDEX) {
+	                               optional_ptr<const SljitBatchLayout> output_layout = nullptr) {
 		if (!prepared) {
 			throw InternalException("SLJIT post-join aggregate runtime state was not prepared");
 		}
@@ -134,12 +129,11 @@ struct SljitPostJoinProjectionAggregateRuntimeState {
 		if (!post_join_projection.HasProjectionChain()) {
 			if (SljitTryExecuteDirectJoinOutputAggregate(runtime, ops, scratch, direct_strategy, post_join_projection,
 			                                             join_input, match_selection, build_selection, row_pointers,
-			                                             join_output, output_proof, output_column_map,
-			                                             output_projection_idx)) {
+			                                             join_output, output_proof, output_layout)) {
 				return false;
 			}
 			auto source = SljitBindHashJoinOutputSource(runtime, ops, scratch, hash_join_idx, join_input, output_proof,
-			                                            output_column_map, output_projection_idx);
+			                                            output_layout);
 			if (!SljitMaterializeSelectionOnlyHashJoinProbeOutput(runtime, hash_join_idx, hash_join_op, source,
 			                                                      match_selection, build_selection, row_pointers,
 			                                                      join_output.size(), join_output)) {
@@ -150,13 +144,13 @@ struct SljitPostJoinProjectionAggregateRuntimeState {
 
 		auto aggregate_sink = MakeAggregateSink(runtime, result, ops, scratch);
 		auto &projected = scratch.TemporaryChunk(post_join_projection.final_projection_idx);
-		if (SljitTryExecuteDirectJoinOutputAggregate(
-		        runtime, ops, scratch, direct_strategy, post_join_projection, join_input, match_selection,
-		        build_selection, row_pointers, join_output, output_proof, output_column_map, output_projection_idx)) {
+		if (SljitTryExecuteDirectJoinOutputAggregate(runtime, ops, scratch, direct_strategy, post_join_projection,
+		                                             join_input, match_selection, build_selection, row_pointers,
+		                                             join_output, output_proof, output_layout)) {
 			return false;
 		}
 		auto source = SljitBindHashJoinOutputSource(runtime, ops, scratch, hash_join_idx, join_input, output_proof,
-		                                            output_column_map, output_projection_idx);
+		                                            output_layout);
 		if (!SljitMaterializeSelectionOnlyHashJoinProbeOutput(runtime, hash_join_idx, hash_join_op, source,
 		                                                      match_selection, build_selection, row_pointers,
 		                                                      join_output.size(), join_output)) {

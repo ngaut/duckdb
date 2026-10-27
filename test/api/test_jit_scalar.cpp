@@ -342,7 +342,7 @@ TEST_CASE("JIT lowers string predicates without aggregate sink dependence", "[ap
 	}
 }
 
-TEST_CASE("JIT CBO preserves vectorized low-cardinality string predicates", "[api][jit]") {
+TEST_CASE("JIT compiles downstream work after scan-owned low-cardinality string predicates", "[api][jit]") {
 	DuckDB db;
 	Connection con(db);
 	auto &manager = ExecutionRegionManager::Get(*con.context);
@@ -361,22 +361,22 @@ TEST_CASE("JIT CBO preserves vectorized low-cardinality string predicates", "[ap
 	REQUIRE_NO_FAIL(*result);
 	REQUIRE(result->GetValue(0, 0).ToString() == "1534500000");
 
-	bool found_vectorized_preference = false;
 	for (auto &event : manager.GetEvents()) {
-		REQUIRE_FALSE((IsCompiledSljitRegionEvent(event) && StringUtil::Contains(event.ir, "string_like")));
-		if (EventPhase(event) != "decision" || EventStatus(event) != "skipped" ||
-		    event.runner_cost.selection_reason != "rejected_vectorized_execution_preferred") {
-			continue;
-		}
-		found_vectorized_preference = true;
-		REQUIRE(StringUtil::Contains(event.reason, "backend_cost=low_cardinality_string_predicate:1"));
-		REQUIRE(StringUtil::Contains(event.reason, "low_cardinality_string_max_distinct:2"));
-		REQUIRE_FALSE(StringUtil::Contains(event.reason, "region-lowering-blocked"));
+		REQUIRE(event.runner_cost.selection_reason != "rejected_vectorized_execution_preferred");
 	}
-	REQUIRE(found_vectorized_preference);
+	RequireJitEvent(
+	    manager,
+	    [](const ExecutionRegionEvent &event) {
+		    return IsCompiledSljitRegionEvent(event) && event.candidate_traits.projection_count > 0;
+	    },
+	    [](const ExecutionRegionEvent &event) {
+		    RequireGeneratedMachineCodeRegion(event);
+		    RequireDuckDBScanFilteredSourceContract(event);
+		    REQUIRE(event.runner_cost.expression_cost == event.candidate_traits.expression_cost);
+	    });
 }
 
-TEST_CASE("JIT CBO rejects low-cardinality string predicates before region graph construction", "[api][jit]") {
+TEST_CASE("JIT scan precheck leaves downstream admission to the selected lowering", "[api][jit]") {
 	DuckDB db;
 	Connection con(db);
 	auto &manager = ExecutionRegionManager::Get(*con.context);
@@ -401,17 +401,18 @@ TEST_CASE("JIT CBO rejects low-cardinality string predicates before region graph
 	REQUIRE_NO_FAIL(*result);
 	REQUIRE(result->GetValue(0, 0).ToString() == reference->GetValue(0, 0).ToString());
 
+	for (auto &event : manager.GetEvents()) {
+		REQUIRE(event.runner_cost.selection_reason != "rejected_vectorized_execution_preferred");
+	}
 	RequireJitEvent(
 	    manager,
 	    [](const ExecutionRegionEvent &event) {
-		    return EventPhase(event) == "decision" && EventStatus(event) == "skipped" &&
-		           event.runner_cost.selection_reason == "rejected_vectorized_execution_preferred";
+		    return IsCompiledSljitRegionEvent(event) && event.candidate_traits.projection_count > 0;
 	    },
 	    [](const ExecutionRegionEvent &event) {
-		    REQUIRE(StringUtil::Contains(event.reason, "before region graph"));
-		    REQUIRE(event.stage_timings.graph_build_time_us == 0);
-		    REQUIRE(event.stage_timings.ir_lowering_time_us == 0);
-		    REQUIRE(event.stage_timings.backend_analysis_time_us == 0);
+		    RequireGeneratedMachineCodeRegion(event);
+		    RequireDuckDBScanFilteredSourceContract(event);
+		    REQUIRE(event.runner_cost.expression_cost == event.candidate_traits.expression_cost);
 	    });
 }
 

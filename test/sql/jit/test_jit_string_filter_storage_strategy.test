@@ -96,6 +96,61 @@ SELECT count(*) FROM duckdb_jit_events() WHERE reason LIKE '%source_strategy_rea
 ----
 0
 
+# Source selection uses an estimated reuse cost, not a dictionary-size capability.
+# The optional numeric IN filter is evaluated by its MARK join, not the generated string filter.
+foreach rows 50000 200000 2000000
+
+foreach domain 150 5000
+
+statement ok
+CREATE OR REPLACE TABLE categorical_inputs AS
+SELECT i AS id, 'brand-' || CAST(i % 25 AS VARCHAR) AS brand,
+       CASE WHEN i % 997 = 0 THEN NULL
+            ELSE 'category-kind-' || lpad(CAST(i % {domain} AS VARCHAR), 5, '0') END AS category,
+       (i % 50)::INTEGER AS bucket
+FROM range({rows}) t(i)
+
+statement ok
+CHECKPOINT
+
+foreach threads 1 4
+
+statement ok
+SET threads={threads}
+
+foreach policy off auto
+
+statement ok
+SET jit_policy='{policy}'
+
+statement ok
+SELECT * FROM duckdb_jit_clear_events()
+
+query II nosort dictionary_domain
+SELECT sum(id), count(*) FROM categorical_inputs
+WHERE brand <> 'brand-7' AND NOT prefix(category, 'category-kind-00003')
+  AND bucket IN (3, 9, 14, 19, 23, 36, 45, 49)
+----
+
+endloop
+
+reset label dictionary_domain
+
+query I
+SELECT (count(*) > 0) = ({domain} = 150 AND {rows} = 2000000) FROM duckdb_jit_events()
+WHERE reason LIKE '%source_strategy_reason=storage-sensitive-filter%'
+----
+true
+
+endloop
+
+endloop
+
+endloop
+
+statement ok
+SET threads=1
+
 # a long IN list becomes a MARK join plus an optional filter the scan only prunes zones with: it evaluates no row, so
 # the string filter still goes to storage
 statement ok

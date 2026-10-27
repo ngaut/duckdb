@@ -13,6 +13,8 @@
 
 namespace duckdb {
 
+class SljitBatchLayout;
+
 class ExecutionRegionRuntime;
 struct SljitDirectJoinOutputAggregateStrategy;
 struct SljitExecutableRegionOp;
@@ -27,7 +29,6 @@ bool SljitTryPrepareDirectJoinOutputAggregateDescriptor(ExecutionRegionRuntime &
                                                         optional_ptr<SljitDirectJoinOutputAggregateStrategy> strategy,
                                                         SljitPostJoinProjectionStrategy &post_join_projection,
                                                         idx_t row_count,
-                                                        optional_ptr<const vector<idx_t>> output_column_map = nullptr,
-                                                        idx_t output_projection_idx = DConstants::INVALID_INDEX);
+                                                        optional_ptr<const SljitBatchLayout> output_layout = nullptr);
 
 } // namespace duckdb

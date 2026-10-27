@@ -737,8 +737,7 @@ SljitHashJoinAggregateConsumerResult SljitTryExecuteHashJoinAggregateConsumer(
     ExecutionRegionRuntime &runtime, ExecutionOperatorRuntime &native_runtime, vector<SljitExecutableRegionOp> &ops,
     SljitRegionExecutionScratch &scratch, const SljitHashJoinProbeSelectionPrimitive &probe_primitive,
     SljitExecutableRegionOp &hash_join_op, SljitDirectJoinOutputAggregateStrategy &strategy, DataChunk &join_input,
-    SljitPostJoinProjectionStrategy &post_join_projection, optional_ptr<const vector<idx_t>> output_column_map,
-    idx_t output_projection_idx, idx_t probe_input_filter_idx,
+    SljitPostJoinProjectionStrategy &post_join_projection, idx_t probe_input_filter_idx,
     SljitHashJoinProbeInputFilterCache &probe_input_filter_cache,
     SljitSharedPerfectHashPredicateClassificationCache &shared_predicate_classification,
     SljitNativeRegionHashJoinProbeExecutor &execute_hash_join_probe) {
@@ -751,13 +750,12 @@ SljitHashJoinAggregateConsumerResult SljitTryExecuteHashJoinAggregateConsumer(
 		result.status = SljitHashJoinAggregateConsumerStatus::EMPTY;
 		return result;
 	}
-	auto contract_view = SljitBuildHashJoinProbeExecutionContractView(
-	    hash_join_op, optional_ptr<const SljitHashJoinProbeInputRemap>(&probe_primitive.input_remap),
+	auto &plan = SljitBindHashJoinProbeExecutionPlan(
+	    hash_join_op, optional_ptr<const SljitNativeHashJoinProbePlan>(probe_primitive.input_plan.get()),
 	    SljitHashJoinProbeOutputContract::IDENTITY_PREFERRED_DIRECT_CONSUMER);
-	auto &plan = *contract_view.plan;
 	auto &binding =
 	    SljitBindRecordedNativeOperator(runtime, native_runtime, scratch, hash_join_idx, hash_join_op, join_input,
-	                                    *contract_view.operator_info, "SLJIT direct hash join aggregate consumer");
+	                                    plan.operator_info, "SLJIT direct hash join aggregate consumer");
 	if (!binding.ready || !binding.hash_join_probe.ready) {
 		throw InternalException("SLJIT direct hash join aggregate consumer received an incomplete operator binding");
 	}
@@ -773,7 +771,7 @@ SljitHashJoinAggregateConsumerResult SljitTryExecuteHashJoinAggregateConsumer(
 	    plan.output_mode != ExecutionHashJoinProbeOutputMode::MATCHED_PROBE_AND_BUILD || plan.residual_predicate ||
 	    plan.mark_build_match || plan.mark_build_match_after_residual || plan.keys.size() != 1 ||
 	    plan.equality_key_count != 1 || probe.probe_key_input_indices.size() != plan.keys.size() ||
-	    (probe_input_filter_idx != DConstants::INVALID_INDEX && probe_primitive.HasOutputColumnMap())) {
+	    (probe_input_filter_idx != DConstants::INVALID_INDEX && bool(probe_primitive.output_layout))) {
 		return result;
 	}
 	SljitHashJoinProbeLayoutKind table_layout_kind = SljitHashJoinProbeLayoutKind::NO_CHAIN;
@@ -800,7 +798,7 @@ SljitHashJoinAggregateConsumerResult SljitTryExecuteHashJoinAggregateConsumer(
 	auto &probe_input = *filter_result.input;
 	if (!SljitTryPrepareDirectJoinOutputAggregateDescriptor(
 	        runtime, ops, scratch, optional_ptr<SljitDirectJoinOutputAggregateStrategy>(&strategy),
-	        post_join_projection, probe_input.size(), output_column_map, output_projection_idx)) {
+	        post_join_projection, probe_input.size(), probe_primitive.output_layout.get())) {
 		return result;
 	}
 	auto &aggregate_op = ops[strategy.aggregate_idx];
@@ -860,7 +858,7 @@ SljitHashJoinAggregateConsumerResult SljitTryExecuteHashJoinAggregateConsumer(
 		execute_hash_join_probe(scratch, hash_join_idx, hash_join_op, probe_input, join_output, state,
 		                        probe_primitive.source_key0_int64_to_int32_unchecked,
 		                        SljitHashJoinProbeOutputContract::IDENTITY_PREFERRED_DIRECT_CONSUMER,
-		                        optional_ptr<const SljitHashJoinProbeInputRemap>(&probe_primitive.input_remap));
+		                        optional_ptr<const SljitNativeHashJoinProbePlan>(probe_primitive.input_plan.get()));
 		if (!state.finished) {
 			return result;
 		}

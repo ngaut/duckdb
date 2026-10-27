@@ -28,7 +28,6 @@ struct SljitProjectionGraphLowering {
 
 struct SljitSourceContractPlan {
 	ExecutionRegionScanFilterMode scan_filter_mode = ExecutionRegionScanFilterMode::NONE;
-	idx_t low_cardinality_string_like_max_distinct_count = 0;
 	vector<LogicalType> source_contract_input_types;
 	vector<LogicalType> source_output_types;
 

@@ -305,7 +305,7 @@ static bool SljitTryPrepareRowPointerGroupedAggregateUpdate(
 	context.grouped_state = &grouped_state;
 	context.payload_lanes = &payload_lanes;
 	context.payload_scratch = &scratch.AggregatePayloadScratch(op_idx);
-	SljitTryReserveGroupedAggregateGroups(runtime, op_idx, op, grouped_state);
+	SljitTryReserveGroupedAggregateGroups(runtime, op_idx, op, grouped_state, count);
 	return true;
 }
 

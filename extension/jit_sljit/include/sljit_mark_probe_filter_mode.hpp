@@ -14,6 +14,15 @@ namespace duckdb {
 
 enum class SljitMarkProbeFilterMode : uint8_t { NONE, MATCHES, NON_MATCHES };
 
+enum class SljitMarkProbeFilterBoundaryMarkerMode : uint8_t {
+	OMIT_MARKER,
+	REFERENCE_TRUE,
+	REFERENCE_FALSE,
+	MATERIALIZE_FLAGS
+};
+
+enum class SljitMarkProbeFilterBoundaryStrategy : uint8_t { MATERIALIZE, FILTERED_SELECTION, FILTERED_MATERIALIZED };
+
 static SljitMarkProbeFilterMode SljitInvertMarkProbeFilterMode(SljitMarkProbeFilterMode mode) {
 	switch (mode) {
 	case SljitMarkProbeFilterMode::MATCHES:

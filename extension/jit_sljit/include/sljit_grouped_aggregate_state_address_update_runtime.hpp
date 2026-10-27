@@ -143,7 +143,9 @@ static bool TryExecuteDirectGroupedStateAddressPayloadUpdate(
     DataChunk &input, const vector<const ExecutionPrimitiveAggregateUpdateLane *> &payload_lanes,
     ExecutionGroupedAggregateStateAddressBinding &grouped_state, SljitAggregatePayloadAdapterScratch &payload_scratch,
     bool finish = true, optional_ptr<const ExecutionDenseGroupDomain> dense_domain = nullptr) {
-	SljitTryReserveGroupedAggregateGroups(runtime, op_idx, op, grouped_state);
+	// Pushed sources can lack a cardinality estimate. Direct checked updates need
+	// the same observed-batch reservation as preaggregated updates.
+	SljitTryReserveGroupedAggregateGroups(runtime, op_idx, op, grouped_state, input.size());
 	auto stage_start = SljitRegionStageStart(runtime);
 	auto &reduction_lanes = scratch.GroupedReductionLanes(op_idx, op.aggregate_update.plan.sink_info.aggregate_contract,
 	                                                      op.aggregate_update.payload_descriptors, payload_lanes);
@@ -175,7 +177,7 @@ static bool TryExecuteDirectProjectedGroupedStateAddressPayloadUpdate(
 	if (groups.size() != payload_input.size()) {
 		return false;
 	}
-	SljitTryReserveGroupedAggregateGroups(runtime, op_idx, op, grouped_state);
+	SljitTryReserveGroupedAggregateGroups(runtime, op_idx, op, grouped_state, groups.size());
 	auto stage_start = SljitRegionStageStart(runtime);
 	auto &reduction_lanes = scratch.GroupedReductionLanes(op_idx, op.aggregate_update.plan.sink_info.aggregate_contract,
 	                                                      op.aggregate_update.payload_descriptors, payload_lanes);

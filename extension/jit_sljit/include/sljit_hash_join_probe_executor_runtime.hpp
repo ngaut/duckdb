@@ -337,11 +337,10 @@ static void SljitExecuteNativeHashJoinProbe(
     SelectionVector *compact_match_selection, Vector *compact_row_pointers, SljitHashJoinProbeDrainState &state,
     bool source_key0_int64_to_int32_unchecked = false,
     SljitHashJoinProbeOutputContract output_contract = SljitHashJoinProbeOutputContract::MATERIALIZED_OUTPUT,
-    optional_ptr<const SljitHashJoinProbeInputRemap> input_remap = nullptr) {
-	auto contract_view = SljitBuildHashJoinProbeExecutionContractView(op, input_remap, output_contract);
-	auto &plan = *contract_view.plan;
+    optional_ptr<const SljitNativeHashJoinProbePlan> input_plan = nullptr) {
+	auto &plan = SljitBindHashJoinProbeExecutionPlan(op, input_plan, output_contract);
 	auto &binding = SljitBindRecordedNativeOperator(runtime, native_runtime, scratch, op_idx, op, input,
-	                                                *contract_view.operator_info, "SLJIT native hash join probe");
+	                                                plan.operator_info, "SLJIT native hash join probe");
 	if (!binding.ready || !binding.hash_join_probe.ready) {
 		throw InternalException("SLJIT native hash join probe received an incomplete operator binding");
 	}

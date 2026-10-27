@@ -43,6 +43,13 @@ struct SljitExecutableRegionExpression {
 	SljitCompiledFunction<SljitNativePredicateFunction> predicate_residual_dictionary;
 	idx_t predicate_residual_dictionary_source = DConstants::INVALID_INDEX;
 
+	//! Resolve a compiled input slot. Aggregate payloads, predicates and typed trees use this map;
+	//! ordinary scalar projections still name input columns directly in their semantic plan.
+	idx_t InputColumn(idx_t source_slot) const {
+		D_ASSERT(source_slot < input_source_indices.size());
+		return input_source_indices[source_slot];
+	}
+
 	bool HasSelectionKernel() const {
 		switch (plan.kind) {
 		case SljitNativeRegionExpressionKind::PREDICATE:
@@ -166,6 +173,7 @@ struct SljitExecutableOrderSink {
 	}
 };
 
+//! Kernel input-array layout, not an expression index convention: every executable payload reads input slots.
 enum class SljitAggregatePayloadSourceLayout : uint8_t { DIRECT_PER_LANE, FUSED_COMBINED };
 
 enum class SljitFilteredAggregateKernelKind : uint8_t { NONE, UNGROUPED_PAYLOAD, PERFECT_HASH_GROUPED };

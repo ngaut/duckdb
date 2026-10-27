@@ -112,7 +112,7 @@ static bool SljitTryBindPrimitiveAggregateStateSource(const SljitNativeAggregate
 		}
 		idx_t source_output_idx;
 		if (target.child_count != 1 || target.child_types.size() != 1 ||
-		    !SljitTryGetExecutableReferenceInputIndex(payload, source_output_idx)) {
+		    !SljitTryGetAggregatePayloadReferenceInputIndex(payload, source_output_idx)) {
 			return false;
 		}
 		optional_ptr<const ExecutionRegionPrimitiveAggregateStateLane> source_lane;

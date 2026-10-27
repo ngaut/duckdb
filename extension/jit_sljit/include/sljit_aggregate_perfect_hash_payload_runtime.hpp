@@ -178,7 +178,8 @@ static void SljitExecuteFusedPerfectHashGroupedPrimitiveAggregatePayloadUpdate(
 			    "SLJIT fused perfect-hash aggregate payload is unsupported",
 			    "SLJIT fused perfect-hash aggregate primitive payload type mismatch");
 		} else {
-			if (plan.kind != SljitNativeRegionExpressionKind::REFERENCE || plan.source_index >= input.ColumnCount()) {
+			if (plan.kind != SljitNativeRegionExpressionKind::REFERENCE ||
+			    payloads[payload_idx].InputColumn(plan.source_index) >= input.ColumnCount()) {
 				throw InternalException("SLJIT fused perfect-hash aggregate payload source is unsupported");
 			}
 			if (plan.return_type.InternalType() != lane.payload_type) {
@@ -189,8 +190,8 @@ static void SljitExecuteFusedPerfectHashGroupedPrimitiveAggregatePayloadUpdate(
 			continue;
 		}
 		payload_sources.PrepareIntegerSource(
-		    input, plan.source_index, payload_idx, plan.integer_kind, execute_sel, count,
-		    "SLJIT fused perfect-hash aggregate payload source is unsupported",
+		    input, payloads[payload_idx].InputColumn(plan.source_index), payload_idx, plan.integer_kind, execute_sel,
+		    count, "SLJIT fused perfect-hash aggregate payload source is unsupported",
 		    SljitInputSourceKnownNotNull(payloads[payload_idx].input_source_not_null, 0));
 	}
 

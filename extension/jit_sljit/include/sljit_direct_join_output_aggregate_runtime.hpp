@@ -152,8 +152,7 @@ static bool SljitTryExecuteDirectJoinOutputAggregate(
     SljitPostJoinProjectionStrategy &post_join_projection, DataChunk &join_input,
     const SelectionVector &match_selection, const SelectionVector &build_selection, Vector &row_pointers,
     DataChunk &join_output, ExecutionHashJoinProbeOutputProof output_proof = {},
-    optional_ptr<const vector<idx_t>> output_column_map = nullptr,
-    idx_t output_projection_idx = DConstants::INVALID_INDEX) {
+    optional_ptr<const SljitBatchLayout> output_layout = nullptr) {
 	if (!strategy_ptr || strategy_ptr->disabled) {
 		return false;
 	}
@@ -162,8 +161,7 @@ static bool SljitTryExecuteDirectJoinOutputAggregate(
 	strategy.last_failure.clear();
 	const bool has_projection_chain = post_join_projection.HasProjectionChain();
 	if (!SljitTryPrepareDirectJoinOutputAggregateDescriptor(runtime, ops, scratch, strategy_ptr, post_join_projection,
-	                                                        join_output.size(), output_column_map,
-	                                                        output_projection_idx)) {
+	                                                        join_output.size(), output_layout)) {
 		return false;
 	}
 	auto &aggregate_input = descriptor.input.chunk;

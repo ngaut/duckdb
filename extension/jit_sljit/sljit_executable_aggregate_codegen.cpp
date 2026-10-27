@@ -60,21 +60,23 @@ static bool TryBuildFusedAggregatePayloads(const SljitNativeAggregateUpdatePlan 
 			    AddSljitCombinedInputSource(executable_payload.plan.source_index, payloads.combined_sources,
 			                                combined_source_not_null, input_not_null, combined_source_min_values,
 			                                combined_source_max_values, input_min_values, input_max_values);
-			payloads.executable_payloads.push_back(std::move(executable_payload));
-			continue;
-		}
-		if (executable_payload.plan.kind != SljitNativeRegionExpressionKind::TYPED_EXPRESSION_TREE ||
-		    !executable_payload.plan.expression_tree) {
+		} else if (executable_payload.plan.kind != SljitNativeRegionExpressionKind::TYPED_EXPRESSION_TREE) {
 			return false;
 		}
-		vector<idx_t> local_sources = executable_payload.plan.expression_tree_source_indices;
-		if (local_sources.empty()) {
+		if (executable_payload.plan.expression_tree) {
+			// Scalar references can also carry a tree for filter fusion. Both representations must read
+			// the same combined slots before the original column map is replaced.
+			vector<idx_t> local_sources = executable_payload.plan.expression_tree_source_indices;
+			if (local_sources.empty()) {
+				return false;
+			}
+			RemapSljitExpressionTreeToCombinedInputs(*executable_payload.plan.expression_tree, local_sources,
+			                                         payloads.combined_sources, combined_source_not_null,
+			                                         input_not_null, combined_source_min_values,
+			                                         combined_source_max_values, input_min_values, input_max_values);
+		} else if (executable_payload.plan.kind == SljitNativeRegionExpressionKind::TYPED_EXPRESSION_TREE) {
 			return false;
 		}
-		RemapSljitExpressionTreeToCombinedInputs(*executable_payload.plan.expression_tree, local_sources,
-		                                         payloads.combined_sources, combined_source_not_null, input_not_null,
-		                                         combined_source_min_values, combined_source_max_values,
-		                                         input_min_values, input_max_values);
 		payloads.executable_payloads.push_back(std::move(executable_payload));
 	}
 	if (group_expressions && !SljitRemapGroupExpressionsToCombinedInputs(
@@ -207,8 +209,8 @@ static bool TryBuildGroupedFusedTypedExpressionAggregateUpdate(const SljitNative
 	return true;
 }
 
-static void PopulateSljitExecutableAggregatePayloadSourceFacts(SljitExecutableRegionExpression &payload,
-                                                               const vector<bool> &input_not_null) {
+static void PrepareSljitExecutableAggregatePayloadInputs(SljitExecutableRegionExpression &payload,
+                                                         const vector<bool> &input_not_null) {
 	auto &plan = payload.plan;
 	payload.input_source_indices.clear();
 	payload.input_source_not_null.clear();
@@ -218,6 +220,7 @@ static void PopulateSljitExecutableAggregatePayloadSourceFacts(SljitExecutableRe
 	case SljitNativeRegionExpressionKind::DOUBLE_BINARY_CONSTANT:
 		payload.input_source_indices.push_back(plan.source_index);
 		payload.input_source_not_null.push_back(SljitSourceKnownNotNull(&input_not_null, plan.source_index));
+		plan.source_index = 0;
 		return;
 	case SljitNativeRegionExpressionKind::INTEGER_BINARY_REFERENCES:
 	case SljitNativeRegionExpressionKind::DOUBLE_BINARY_REFERENCES:
@@ -225,6 +228,8 @@ static void PopulateSljitExecutableAggregatePayloadSourceFacts(SljitExecutableRe
 		payload.input_source_not_null.push_back(SljitSourceKnownNotNull(&input_not_null, plan.source_index));
 		payload.input_source_indices.push_back(plan.right_source_index);
 		payload.input_source_not_null.push_back(SljitSourceKnownNotNull(&input_not_null, plan.right_source_index));
+		plan.source_index = 0;
+		plan.right_source_index = 1;
 		return;
 	case SljitNativeRegionExpressionKind::TYPED_EXPRESSION_TREE:
 		payload.input_source_indices = plan.expression_tree_source_indices;
@@ -289,7 +294,7 @@ void SljitBuildExecutableAggregateUpdateMetadata(const SljitNativeAggregateUpdat
 	for (auto &payload : op.payloads) {
 		SljitExecutableRegionExpression executable_payload;
 		executable_payload.plan = payload.Copy(true, false);
-		PopulateSljitExecutableAggregatePayloadSourceFacts(executable_payload, input_not_null);
+		PrepareSljitExecutableAggregatePayloadInputs(executable_payload, input_not_null);
 		executable.payloads.push_back(std::move(executable_payload));
 	}
 }
