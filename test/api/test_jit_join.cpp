@@ -55,7 +55,7 @@ TEST_CASE("JIT hash join build selected ingress compiles only inside generated f
 		    StringUtil::Contains(EventGeneratedStageRuntimeBreakdown(event), "hash_join_build.hash_table_prepare")) {
 			found_build_runtime = true;
 			REQUIRE(EventJitRuntimeDelegationCounts(event).empty());
-			REQUIRE(StringUtil::Contains(EventJitRuntimeProofCounts(event), "generated_backend_work="));
+			REQUIRE(StringUtil::Contains(EventJitRuntimeProofCounts(event), "backend_owned_work="));
 			REQUIRE_FALSE(StringUtil::Contains(EventJitRuntimeProofCounts(event), "materialization_elision="));
 			REQUIRE(
 			    StringUtil::Contains(EventGeneratedStageRuntimeBreakdown(event), "hash_join_build.bind_sink_contract"));
@@ -141,7 +141,7 @@ TEST_CASE("JIT composes DuckDB string-set scans with direct hash build", "[api][
 		}
 		if (EventPhase(event) == "runtime" && EventStatus(event) == "executed" &&
 		    StringUtil::Contains(EventJitRuntimePathCounts(event), "hash_join_build.direct_source_ingress=") &&
-		    HasJitRuntimeProof(event, ExecutionRegionJitRuntimeProof::GENERATED_BACKEND_WORK)) {
+		    HasJitRuntimeProof(event, ExecutionRegionJitRuntimeProof::BACKEND_OWNED_WORK)) {
 			found_build_runtime = true;
 			REQUIRE(EventJitRuntimeDelegationCounts(event).empty());
 		}
@@ -235,7 +235,7 @@ TEST_CASE("JIT executes exact-filter probe to hash-build primitive sequences", "
 				found_primitive_runtime = true;
 				REQUIRE(StringUtil::Contains(EventJitRuntimePathCounts(event), "filter.selection.") ==
 				        expect_generated_source_filter);
-				REQUIRE(StringUtil::Contains(EventJitRuntimeProofCounts(event), "generated_backend_work="));
+				REQUIRE(StringUtil::Contains(EventJitRuntimeProofCounts(event), "backend_owned_work="));
 				REQUIRE(EventJitRuntimeDelegationCounts(event).empty());
 			}
 		}
@@ -294,7 +294,7 @@ TEST_CASE("JIT composes exact regular-prefix probes with projected hash builds",
 	    },
 	    [](const ExecutionRegionEvent &event) {
 		    REQUIRE(EventExecutionMode(event) == "native");
-		    REQUIRE(StringUtil::Contains(EventJitRuntimeProofCounts(event), "generated_backend_work="));
+		    REQUIRE(StringUtil::Contains(EventJitRuntimeProofCounts(event), "backend_owned_work="));
 		    REQUIRE(EventJitRuntimeDelegationCounts(event).empty());
 	    });
 }
@@ -393,7 +393,7 @@ TEST_CASE("JIT exact prefix membership elides only equivalent unique hash probes
 	    [](const ExecutionRegionEvent &event) {
 		    REQUIRE_FALSE(
 		        StringUtil::Contains(EventJitRuntimePathCounts(event), "hash_join_probe.regular_probe.all_valid"));
-		    REQUIRE(StringUtil::Contains(EventJitRuntimeProofCounts(event), "generated_backend_work="));
+		    REQUIRE(StringUtil::Contains(EventJitRuntimeProofCounts(event), "backend_owned_work="));
 	    });
 
 	ClearJitTrace(manager, true);
@@ -461,7 +461,7 @@ TEST_CASE("JIT carries exact prefix proof through selected output filters", "[ap
 	    },
 	    [](const ExecutionRegionEvent &event) {
 		    REQUIRE(EventExecutionMode(event) == "native");
-		    REQUIRE(StringUtil::Contains(EventJitRuntimeProofCounts(event), "generated_backend_work="));
+		    REQUIRE(StringUtil::Contains(EventJitRuntimeProofCounts(event), "backend_owned_work="));
 	    });
 
 	const string all_match_query = "SELECT count(*), sum(l.v + r.k) FROM jit_exact_selected_probe l "
@@ -530,7 +530,7 @@ TEST_CASE("JIT preserves source layout through generated filter projection repai
 		if (EventPhase(event) == "runtime" && EventStatus(event) == "executed" &&
 		    StringUtil::Contains(EventJitRuntimePathCounts(event), "hash_join_probe.")) {
 			found_source_join_runtime = true;
-			REQUIRE(StringUtil::Contains(EventJitRuntimeProofCounts(event), "generated_backend_work="));
+			REQUIRE(StringUtil::Contains(EventJitRuntimeProofCounts(event), "backend_owned_work="));
 		}
 	}
 	REQUIRE(found_compiled_source_join);

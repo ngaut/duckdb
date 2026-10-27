@@ -237,7 +237,8 @@ private:
 		auto &filter_selection = scratch.FilterSelection(primitive.filter_idx);
 		auto filter_stage_start = SljitRegionStageStart(runtime);
 		auto selected_count = SljitSelectFilter(filter_op, input_chunk, filter_selection,
-		                                        scratch.ExpressionAdapterScratch(primitive.filter_idx, 0));
+		                                        scratch.ExpressionAdapterScratch(primitive.filter_idx, 0), nullptr,
+		                                        input_chunk.size(), &runtime);
 		RecordSljitRegionStageRuntime(runtime, primitive.filter_idx, filter_op.kind, "selection", filter_stage_start);
 		if (selected_count == 0) {
 			return false;

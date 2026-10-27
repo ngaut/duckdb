@@ -32,7 +32,7 @@ static void SljitProjectProjectionStep(ExecutionRegionRuntime &runtime, SljitReg
 		                              projection_stage_start);
 		return;
 	}
-	SljitExecuteProjection(scratch, projection_idx, projection_op, input, output);
+	SljitExecuteProjection(runtime, scratch, projection_idx, projection_op, input, output);
 	RecordSljitRegionStageRuntime(runtime, projection_idx, projection_op.kind, "post_join_batch_projection",
 	                              projection_stage_start);
 }
@@ -60,6 +60,7 @@ struct SljitPostJoinProjectionAggregateRuntimeState {
 	             const vector<idx_t> &source_distinct_counts, const vector<Value> &source_min_values,
 	             const vector<Value> &source_max_values) {
 		post_join_projection = primitive.post_join_projection.MakeStrategy();
+		post_join_projection.aggregate_projection = primitive.projection.get();
 		direct_join_output_aggregate_strategy = make_uniq<SljitDirectJoinOutputAggregateStrategy>(
 		    primitive.aggregate_idx, source_distinct_counts, source_min_values, source_max_values);
 		prepared = true;

@@ -211,8 +211,7 @@ static bool SljitExecuteBoundGeneratedPrimitiveRunsIntoPending(
 	if (group_source.source->cast_kind == ExecutionRowPointerGroupKeyCastKind::INTEGRAL_COMPRESS) {
 		RecordSljitRegionRuntimePath(runtime, op.kind, "generated_primitive_group_cast.integral_compress", count);
 	}
-	runtime.RecordJitRuntimeProof(ExecutionRegionJitRuntimeProof::GENERATED_STAGE_WORK, count);
-	runtime.RecordJitRuntimeProof(ExecutionRegionJitRuntimeProof::GENERATED_BACKEND_WORK, count);
+	RecordSljitRegionGeneratedWork(runtime, op.kind, count);
 	if (finish &&
 	    !SljitFlushPendingPreaggregatedPrimitiveGroups(runtime, scratch, op_idx, op, pending, grouped_state)) {
 		throw InternalException("SLJIT generated primitive run update final flush failed");

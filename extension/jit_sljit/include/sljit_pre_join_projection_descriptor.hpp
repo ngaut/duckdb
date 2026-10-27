@@ -66,6 +66,10 @@ static bool SljitTryBindElidedHashJoinProbeSelection(const vector<SljitExecutabl
 	}
 	vector<SljitBatchLayoutColumn> columns;
 	columns.reserve(projection.projections.size());
+	bool source_layout_preserved = true;
+	for (idx_t op_idx = 0; op_idx < projection_idx; op_idx++) {
+		source_layout_preserved &= ops[op_idx].kind == SljitNativeRegionOpKind::FILTER;
+	}
 	for (idx_t output_idx = 0; output_idx < projection.projections.size(); output_idx++) {
 		const auto &expression = projection.projections[output_idx].plan;
 		if (expression.source_index >= projection.input_types.size() ||
@@ -82,6 +86,12 @@ static bool SljitTryBindElidedHashJoinProbeSelection(const vector<SljitExecutabl
 		           expression.cast_target_width != SljitNativeSignedIntegerWidth::INT32 ||
 		           source_type.InternalType() != PhysicalType::INT64 ||
 		           expression.return_type.InternalType() != PhysicalType::INT32) {
+			return false;
+		}
+		// Selection may discard any row, including before a probe key is read. Only defer a proven-total cast.
+		if (expression.kind != SljitNativeRegionExpressionKind::REFERENCE &&
+		    (!source_layout_preserved ||
+		     !SljitSourceRangeFitsInt32(expression.source_index, source_min_values, source_max_values))) {
 			return false;
 		}
 		columns.push_back({expression.source_index, source_type, expression.return_type});

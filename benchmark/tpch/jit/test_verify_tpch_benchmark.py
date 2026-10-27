@@ -56,8 +56,8 @@ class TestTypedRuntimeProofLedger(unittest.TestCase):
 
     def test_declared_requirement_accepts_matching_runtime_proof(self) -> None:
         rows = [
-            compiled_row("generated_backend_work", runner_cost_native_operator_work="4096"),
-            runtime_row("generated_backend_work=1"),
+            compiled_row("backend_owned_work", runner_cost_native_operator_work="4096"),
+            runtime_row("backend_owned_work=1"),
         ]
         verify_cbo_runtime_counter_contract(rows, require_runtime_proof=True)
 
@@ -87,6 +87,49 @@ class TestTypedRuntimeProofLedger(unittest.TestCase):
         rows = [compiled_row("unknown_proof"), runtime_row("unknown_proof=1")]
         with self.assertRaises(AssertionError):
             verify_cbo_runtime_counter_contract(rows, require_runtime_proof=True)
+
+    def test_stage_timers_cannot_prove_execution(self) -> None:
+        for proof in (
+            "accelerated_stage_work",
+            "backend_owned_work",
+            "generated_stage_work",
+        ):
+            row = runtime_row("")
+            row.update(
+                {
+                    "input_rows": "10",
+                    "generated_stage_count_breakdown": "native_sink_update=1",
+                }
+            )
+            with self.subTest(proof=proof), self.assertRaises(AssertionError):
+                verify_cbo_runtime_counter_contract([compiled_row(proof), row], require_runtime_proof=True)
+
+    def test_delegation_and_materialization_do_not_prove_generated_execution(
+        self,
+    ) -> None:
+        for proofs in (
+            "delegated_runtime_work=10",
+            "materialization_elision=10;backend_owned_work=10",
+        ):
+            with self.subTest(proofs=proofs), self.assertRaises(AssertionError):
+                verify_cbo_runtime_counter_contract(
+                    [compiled_row("generated_stage_work"), runtime_row(proofs)],
+                    require_runtime_proof=True,
+                )
+
+    def test_proof_requires_a_positive_exact_typed_counter(self) -> None:
+        for counter in (
+            "generated_stage_work=0",
+            "generated_stage_work=-1",
+            "generated_stage_work",
+            "generated_stage_work=invalid",
+            "native.generated_stage_work=1",
+        ):
+            with self.subTest(counter=counter), self.assertRaises(AssertionError):
+                verify_cbo_runtime_counter_contract(
+                    [compiled_row("generated_stage_work"), runtime_row(counter)],
+                    require_runtime_proof=True,
+                )
 
 
 if __name__ == "__main__":

@@ -4,9 +4,278 @@
 #include "sljit_hash_join_probe_execution_contract.hpp"
 #include "sljit_pre_join_projection_descriptor.hpp"
 #include "sljit_join_projection_aggregate_state.hpp"
+#include "sljit_join_projection_aggregate_input_binding.hpp"
+#include "sljit_projection_perfect_hash_aggregate_descriptor.hpp"
 #include "duckdb/execution/execution_region_telemetry.hpp"
 
 using namespace duckdb;
+
+namespace {
+class JitProofTestRuntime : public ExecutionRegionRuntime {
+public:
+	idx_t MaxChunks() const override {
+		return 1;
+	}
+	idx_t MaxThreads() const override {
+		return 1;
+	}
+	Allocator &GetAllocator() override {
+		return Allocator::DefaultAllocator();
+	}
+	ExecutionRegionLocalState &LocalState() override {
+		throw InternalException("unused proof-test local state");
+	}
+	SourceResultType FetchSourceContract(DataChunk *&) override {
+		throw InternalException("unused proof-test source");
+	}
+	SourceResultType FetchPrimitiveAggregateStateSourceContract(ExecutionAggregateStateScanBatch *&) override {
+		throw InternalException("unused proof-test aggregate source");
+	}
+	ExecutionOperatorRuntime &ExecutionOperators() override {
+		throw InternalException("unused proof-test operators");
+	}
+	bool TraceRuntime() const override {
+		return true;
+	}
+	void RecordGeneratedStageRuntime(ExecutionRegionStageId, int64_t, idx_t) override {
+		timings++;
+	}
+	void RecordJitRuntimeProof(ExecutionRegionJitRuntimeProof proof, idx_t count) override {
+		if (count > 0) {
+			proofs |= ExecutionRegionJitRuntimeProofBit(proof);
+		}
+	}
+	bool Has(ExecutionRegionJitRuntimeProof proof) const {
+		return ExecutionRegionJitRuntimeProofRequired(proofs, proof);
+	}
+
+	idx_t timings = 0;
+	ExecutionRegionJitRuntimeProofMask proofs = 0;
+};
+} // namespace
+
+TEST_CASE("JIT timers and delegation cannot manufacture execution proof", "[api][jit]") {
+	JitProofTestRuntime runtime;
+	auto start = SljitRegionStageStart(runtime);
+	RecordSljitRegionStageRuntimePath(runtime, 0, SljitNativeRegionOpKind::AGGREGATE_UPDATE, "native_sink_update",
+	                                  start);
+	RecordSljitRegionRuntimeDelegation(runtime, SljitNativeRegionOpKind::AGGREGATE_UPDATE, "native_sink_update", 10);
+	REQUIRE(runtime.timings == 1);
+	REQUIRE(runtime.Has(ExecutionRegionJitRuntimeProof::DELEGATED_RUNTIME_WORK));
+	REQUIRE_FALSE(runtime.Has(ExecutionRegionJitRuntimeProof::ACCELERATED_STAGE_WORK));
+	REQUIRE_FALSE(runtime.Has(ExecutionRegionJitRuntimeProof::BACKEND_OWNED_WORK));
+	REQUIRE_FALSE(runtime.Has(ExecutionRegionJitRuntimeProof::GENERATED_STAGE_WORK));
+	RecordSljitRegionMaterializationElision(runtime, SljitNativeRegionOpKind::HASH_JOIN_PROBE, "selected_view", 10);
+	REQUIRE(runtime.Has(ExecutionRegionJitRuntimeProof::ACCELERATED_STAGE_WORK));
+	REQUIRE(runtime.Has(ExecutionRegionJitRuntimeProof::BACKEND_OWNED_WORK));
+	REQUIRE(runtime.Has(ExecutionRegionJitRuntimeProof::MATERIALIZATION_ELISION));
+	REQUIRE_FALSE(runtime.Has(ExecutionRegionJitRuntimeProof::GENERATED_STAGE_WORK));
+	RecordSljitRegionGeneratedWork(runtime, SljitNativeRegionOpKind::HASH_JOIN_PROBE, 0);
+	REQUIRE_FALSE(runtime.Has(ExecutionRegionJitRuntimeProof::GENERATED_STAGE_WORK));
+}
+
+TEST_CASE("JIT join aggregate inputs own their schema and bound access", "[api][jit]") {
+	SljitExecutableRegionOp projection;
+	projection.kind = SljitNativeRegionOpKind::PROJECTION;
+	projection.output_types = {LogicalType::BIGINT, LogicalType::VARCHAR, LogicalType::INTEGER, LogicalType::BIGINT,
+	                           LogicalType::BIGINT};
+	projection.projections.resize(5);
+	for (idx_t idx = 0; idx < 5; idx++) {
+		auto &plan = projection.projections[idx].plan;
+		plan.kind = SljitNativeRegionExpressionKind::REFERENCE;
+		plan.return_type = projection.output_types[idx];
+		plan.source_index = idx == 1 ? 1 : 0;
+	}
+	auto &cast = projection.projections[2].plan;
+	cast.kind = SljitNativeRegionExpressionKind::INTEGER_CAST;
+	cast.cast_source_width = SljitNativeSignedIntegerWidth::INT64;
+	cast.cast_target_width = SljitNativeSignedIntegerWidth::INT32;
+	cast.cast_chain.source_type = LogicalType::BIGINT;
+	cast.cast_chain.steps.emplace_back();
+	cast.cast_chain.steps.back().target_type = LogicalType::INTEGER;
+	cast.cast_chain.steps.back().source_alias = "join_payload";
+	projection.projections[3].plan.source_index = 2;
+	auto &mixed = projection.projections[4].plan;
+	mixed.kind = SljitNativeRegionExpressionKind::INTEGER_BINARY_REFERENCES;
+	mixed.source_index = 0;
+	mixed.right_source_index = 2;
+
+	ExecutionHashJoinProbeBinding binding;
+	binding.layout_kind = ExecutionHashJoinProbeLayoutKind::REGULAR_HASH_TABLE;
+	binding.lhs_output_column_indices = {1, 0};
+	binding.rhs_output_column_count = 1;
+	binding.output_types = {LogicalType::BIGINT, LogicalType::VARCHAR, LogicalType::BIGINT};
+	const vector<LogicalType> input_types {LogicalType::VARCHAR, LogicalType::BIGINT};
+	vector<SljitExecutableRegionExpression> prepared;
+	idx_t owned_code_size = 0;
+	REQUIRE(SljitTryPrepareJoinAggregateInputs(binding.lhs_output_column_indices, binding.output_types, input_types,
+	                                           projection, nullptr, nullptr, prepared, owned_code_size));
+	SljitJoinProjectionAggregateDescriptor descriptor;
+	descriptor.BorrowProjection(projection);
+	for (idx_t idx = 0; idx < 5; idx++) {
+		SljitJoinProjectionAggregateInputSource source;
+		source.projection_idx = idx;
+		source.type = projection.output_types[idx];
+		descriptor.input_sources.push_back(std::move(source));
+	}
+	REQUIRE(SljitTryBindJoinProjectionAggregateInputs(binding, input_types, descriptor, prepared));
+	REQUIRE(descriptor.InputTypes() == projection.output_types);
+	REQUIRE(descriptor.input_sources[0].kind == SljitJoinProjectionAggregateInputKind::HASH_JOIN_LHS_INPUT);
+	REQUIRE(descriptor.input_sources[0].input_idx == 1);
+	REQUIRE(descriptor.input_sources[1].input_idx == 0);
+	REQUIRE(descriptor.input_sources[2].kind == SljitJoinProjectionAggregateInputKind::HASH_JOIN_LHS_EXPRESSION);
+	REQUIRE(descriptor.input_sources[2].expression->plan.source_index == 1);
+	REQUIRE(descriptor.input_sources[3].kind == SljitJoinProjectionAggregateInputKind::HASH_JOIN_RHS_INPUT);
+	REQUIRE(descriptor.input_sources[3].input_idx == 0);
+	REQUIRE(descriptor.input_sources[4].kind == SljitJoinProjectionAggregateInputKind::HASH_JOIN_MIXED_EXPRESSION);
+	REQUIRE(descriptor.input_sources[4].expression_sources.size() == 2);
+	REQUIRE(descriptor.input_sources[4].expression_sources[0].input_idx == 1);
+	REQUIRE(descriptor.input_sources[4].expression_sources[1].IsBuildInput());
+	REQUIRE(descriptor.input_sources[4].expression->plan.right_source_index == 1);
+	cast.cast_chain.steps.clear();
+	REQUIRE(descriptor.input_sources[2].expression->plan.cast_chain.steps[0].source_alias == "join_payload");
+	REQUIRE_THROWS(descriptor.input_sources[2].expression->plan.cast_chain.ThrowCastError(3000000000));
+	descriptor.EnsureInput(Allocator::DefaultAllocator());
+	REQUIRE(descriptor.input.chunk.GetTypes() == projection.output_types);
+
+	SljitJoinProjectionAggregateDescriptor sparse;
+	SljitJoinProjectionAggregateInputSource source;
+	source.kind = SljitJoinProjectionAggregateInputKind::HASH_JOIN_LHS_INPUT;
+	source.input_idx = 1;
+	source.type = LogicalType::BIGINT;
+	REQUIRE(SljitTryAssignJoinProjectionAggregateInputAt(sparse, projection, 3, std::move(source)));
+	REQUIRE(sparse.input_sources[0].kind == SljitJoinProjectionAggregateInputKind::UNUSED);
+	REQUIRE(sparse.InputTypes() ==
+	        vector<LogicalType> {LogicalType::BIGINT, LogicalType::VARCHAR, LogicalType::INTEGER, LogicalType::BIGINT});
+	SljitJoinProjectionAggregateInputSource conflict;
+	conflict.kind = SljitJoinProjectionAggregateInputKind::HASH_JOIN_LHS_INPUT;
+	conflict.input_idx = 1;
+	conflict.type = LogicalType::VARCHAR;
+	REQUIRE_FALSE(SljitTryAssignJoinProjectionAggregateInputAt(sparse, projection, 3, std::move(conflict)));
+	REQUIRE_FALSE(SljitTryBindJoinProjectionAggregateInputs(binding, {LogicalType::VARCHAR, LogicalType::INTEGER},
+	                                                        sparse, prepared));
+	REQUIRE(sparse.input_sources.empty());
+	REQUIRE_FALSE(sparse.Ready());
+	SljitJoinProjectionAggregateDescriptor count_star;
+	REQUIRE(SljitTryBindJoinProjectionAggregateInputs(binding, input_types, count_star, prepared));
+	count_star.EnsureInput(Allocator::DefaultAllocator());
+	REQUIRE(count_star.input.ColumnCount() == 0);
+	SljitJoinProjectionAggregateDescriptor unsupported_mixed;
+	unsupported_mixed.BorrowProjection(projection);
+	SljitJoinProjectionAggregateInputSource mixed_source;
+	mixed_source.projection_idx = 4;
+	mixed_source.type = LogicalType::BIGINT;
+	unsupported_mixed.input_sources.push_back(std::move(mixed_source));
+	binding.layout_kind = ExecutionHashJoinProbeLayoutKind::PERFECT_HASH_TABLE;
+	REQUIRE_FALSE(SljitTryBindJoinProjectionAggregateInputs(binding, input_types, unsupported_mixed, prepared));
+	REQUIRE(unsupported_mixed.Blocker() == "input_layout_mixed_storage");
+	REQUIRE(unsupported_mixed.input_sources.empty());
+}
+
+TEST_CASE("JIT join aggregate layout preserves reordered producer casts and aliases", "[api][jit]") {
+	const vector<LogicalType> input_types {LogicalType::BIGINT, LogicalType::VARCHAR};
+	SljitExecutableRegionOp producer;
+	producer.kind = SljitNativeRegionOpKind::PROJECTION;
+	producer.input_types = input_types;
+	producer.output_types = {LogicalType::VARCHAR, LogicalType::INTEGER, LogicalType::BIGINT};
+	producer.projections.resize(3);
+	for (idx_t idx = 0; idx < 3; idx++) {
+		auto &plan = producer.projections[idx].plan;
+		plan.kind = SljitNativeRegionExpressionKind::REFERENCE;
+		plan.return_type = producer.output_types[idx];
+		plan.source_index = idx == 0 ? 1 : 0;
+	}
+	auto &cast = producer.projections[1].plan;
+	cast.kind = SljitNativeRegionExpressionKind::INTEGER_CAST;
+	cast.cast_source_width = SljitNativeSignedIntegerWidth::INT64;
+	cast.cast_target_width = SljitNativeSignedIntegerWidth::INT32;
+	cast.cast_chain.source_type = LogicalType::BIGINT;
+	cast.cast_chain.steps.emplace_back();
+	cast.cast_chain.steps.back().target_type = LogicalType::INTEGER;
+	cast.cast_chain.steps.back().source_alias = "producer_key";
+	SljitBatchLayout layout(0, input_types,
+	                        {{1, LogicalType::VARCHAR, LogicalType::VARCHAR},
+	                         {0, LogicalType::BIGINT, LogicalType::INTEGER},
+	                         {0, LogicalType::BIGINT, LogicalType::BIGINT}});
+	ExecutionHashJoinProbeBinding binding;
+	binding.lhs_output_column_indices = {2, 1, 0};
+	binding.rhs_output_column_count = 1;
+	binding.output_types = {LogicalType::BIGINT, LogicalType::INTEGER, LogicalType::VARCHAR, LogicalType::BIGINT};
+	SljitExecutableRegionOp projection;
+	projection.kind = SljitNativeRegionOpKind::PROJECTION;
+	projection.output_types = binding.output_types;
+	projection.projections.resize(4);
+	SljitJoinProjectionAggregateDescriptor descriptor;
+	descriptor.producer_layout = &layout;
+	descriptor.BorrowProjection(projection);
+	for (idx_t idx = 0; idx < 4; idx++) {
+		auto &plan = projection.projections[idx].plan;
+		plan.kind = SljitNativeRegionExpressionKind::REFERENCE;
+		plan.source_index = idx;
+		plan.return_type = binding.output_types[idx];
+		SljitJoinProjectionAggregateInputSource source;
+		source.projection_idx = idx;
+		source.type = plan.return_type;
+		descriptor.input_sources.push_back(std::move(source));
+	}
+	vector<SljitExecutableRegionExpression> prepared;
+	idx_t owned_code_size = 0;
+	REQUIRE(SljitTryPrepareJoinAggregateInputs(binding.lhs_output_column_indices, binding.output_types, input_types,
+	                                           projection, &layout, &producer, prepared, owned_code_size));
+	REQUIRE(owned_code_size > 0);
+	REQUIRE(SljitTryBindJoinProjectionAggregateInputs(binding, input_types, descriptor, prepared));
+	REQUIRE(descriptor.input_sources[1].expression->vector.Function() == prepared[1].vector.Function());
+	SljitJoinProjectionAggregateDescriptor second;
+	SljitJoinProjectionAggregateInputSource second_cast;
+	second_cast.projection_idx = 1;
+	second_cast.type = LogicalType::INTEGER;
+	second.input_sources.push_back(std::move(second_cast));
+	REQUIRE(SljitTryBindJoinProjectionAggregateInputs(binding, input_types, second, prepared));
+	REQUIRE(second.input_sources[0].expression->vector.Function() == prepared[1].vector.Function());
+	REQUIRE(second.input_sources[0].adapter.get() != descriptor.input_sources[1].adapter.get());
+	REQUIRE(descriptor.input_sources[0].kind == SljitJoinProjectionAggregateInputKind::HASH_JOIN_LHS_INPUT);
+	REQUIRE(descriptor.input_sources[0].input_idx == 0);
+	REQUIRE_FALSE(descriptor.input_sources[0].adapter);
+	REQUIRE(descriptor.input_sources[1].kind == SljitJoinProjectionAggregateInputKind::HASH_JOIN_LHS_EXPRESSION);
+	REQUIRE(descriptor.input_sources[1].adapter);
+	REQUIRE(descriptor.input_sources[2].input_idx == 1);
+	REQUIRE(descriptor.input_sources[3].kind == SljitJoinProjectionAggregateInputKind::HASH_JOIN_RHS_INPUT);
+	REQUIRE(descriptor.input_sources[3].input_idx == 0);
+	REQUIRE_FALSE(descriptor.input_sources[3].adapter);
+	idx_t input_idx;
+	const LogicalType *source_type = nullptr;
+	SljitExecutableRegionExpression resolved;
+	REQUIRE(SljitTryResolveProducerProbeInput(descriptor, &producer, 2, input_idx, source_type, resolved));
+	REQUIRE(input_idx == 0);
+	REQUIRE(SljitProjectionIsSingleSourceReferenceLike(resolved.plan));
+	REQUIRE(SljitTryResolveProducerProbeInput(descriptor, &producer, 1, input_idx, source_type, resolved));
+	REQUIRE(resolved.plan.kind == SljitNativeRegionExpressionKind::INTEGER_CAST);
+
+	DataChunk input;
+	input.Initialize(Allocator::DefaultAllocator(), input_types);
+	input.data[0].SetValue(0, Value::BIGINT(42));
+	input.data[0].SetValue(1, Value(LogicalType::BIGINT));
+	input.SetChildCardinality(2);
+	Vector result(LogicalType::INTEGER);
+	auto &bound_cast = descriptor.input_sources[1];
+	JitProofTestRuntime runtime;
+	REQUIRE(SljitTryExecuteProjectionExpressionToBatch(*bound_cast.expression, input, result, 0, 2, nullptr,
+	                                                   *bound_cast.adapter, &runtime));
+	REQUIRE(runtime.Has(ExecutionRegionJitRuntimeProof::GENERATED_STAGE_WORK));
+	REQUIRE(runtime.Has(ExecutionRegionJitRuntimeProof::ACCELERATED_STAGE_WORK));
+	REQUIRE(result.GetValue(0) == Value::INTEGER(42));
+	REQUIRE(result.GetValue(1).IsNull());
+	input.data[0].SetValue(0, Value::BIGINT(3000000000));
+	REQUIRE_THROWS_AS(SljitTryExecuteProjectionExpressionToBatch(*bound_cast.expression, input, result, 0, 1, nullptr,
+	                                                             *bound_cast.adapter, &runtime),
+	                  ConversionException);
+	DuckDB db(nullptr);
+	Connection con(db);
+	REQUIRE_NO_FAIL(con.Query("SET jit_policy='off'"));
+	auto native = con.Query("SELECT CAST(x AS INTEGER) FROM (VALUES (42::BIGINT), (NULL::BIGINT)) t(x)");
+	REQUIRE(CHECK_COLUMN(native, 0, {Value::INTEGER(42), Value(LogicalType::INTEGER)}));
+	REQUIRE(con.Query("SELECT CAST(3000000000::BIGINT AS INTEGER)")->HasError());
+}
 
 TEST_CASE("JIT MARK boundary binds strategy and output layout once", "[api][jit]") {
 	vector<SljitExecutableRegionOp> ops(3);
@@ -177,11 +446,15 @@ TEST_CASE("JIT elided probes bind one typed layout and immutable input plan", "[
 	sources[1].type = LogicalType::INTEGER;
 
 	SljitHashJoinProbeSelectionPrimitive primitive;
-	REQUIRE(SljitTryBindElidedHashJoinProbeSelection(ops, 0, 1, {}, {}, primitive));
+	REQUIRE_FALSE(SljitTryBindElidedHashJoinProbeSelection(ops, 0, 1, {}, {}, primitive));
+	REQUIRE_FALSE(SljitTryBindElidedHashJoinProbeSelection(ops, 0, 1, {Value(), Value::BIGINT(0)},
+	                                                       {Value(), Value::BIGINT(3000000000)}, primitive));
+	REQUIRE(SljitTryBindElidedHashJoinProbeSelection(ops, 0, 1, {Value(), Value::BIGINT(0)},
+	                                                 {Value(), Value::BIGINT(40)}, primitive));
 	REQUIRE(primitive.input_plan);
 	REQUIRE(primitive.output_layout->ProducerIndex() == 0);
 	REQUIRE(primitive.output_layout->SourceColumns() == vector<idx_t> {1, 0});
-	REQUIRE_FALSE(primitive.source_key0_int64_to_int32_unchecked);
+	REQUIRE(primitive.source_key0_int64_to_int32_unchecked);
 	auto copy = primitive;
 	REQUIRE(copy.input_plan.get() == primitive.input_plan.get());
 	REQUIRE(copy.output_layout.get() == primitive.output_layout.get());
@@ -327,6 +600,9 @@ TEST_CASE("JIT recipe binders preserve the output recipe on admission failure", 
 
 TEST_CASE("JIT recipe publication validates explicit direct terminal ownership", "[api][jit]") {
 	vector<SljitExecutableRegionOp> ops;
+	ops.resize(6);
+	ops[3].kind = SljitNativeRegionOpKind::HASH_JOIN_PROBE;
+	ops[5].kind = SljitNativeRegionOpKind::AGGREGATE_UPDATE;
 	SljitFullPipelinePrimitiveSequence sequence;
 	sequence.Add(SljitFullPipelinePrimitiveStep::SourceFetch());
 	SljitHashJoinProbeSelectionPrimitive probe;

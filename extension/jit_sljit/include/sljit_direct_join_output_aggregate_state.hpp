@@ -68,9 +68,9 @@ struct SljitPendingRowPointerBatch {
 		return initialized ? columns.size() : 0;
 	}
 
-	void Ensure(Allocator &allocator, const vector<LogicalType> &descriptor_input_types) {
+	void Ensure(Allocator &allocator, const SljitJoinProjectionAggregateDescriptor &descriptor) {
 		if (!initialized) {
-			columns.Initialize(allocator, LAYOUT::ColumnTypes(descriptor_input_types));
+			columns.Initialize(allocator, LAYOUT::ColumnTypes(descriptor));
 			row_pointers.Initialize(VectorDataInitialization::UNINITIALIZED, STANDARD_VECTOR_SIZE);
 			FlatVector::SetSize(row_pointers, 0);
 			initialized = true;
@@ -95,14 +95,14 @@ struct SljitPendingRowPointerBatch {
 
 //! The descriptor's payload sources, as the aggregate input slots hold them
 struct SljitRowPointerPayloadLayout {
-	static vector<LogicalType> ColumnTypes(const vector<LogicalType> &descriptor_input_types) {
-		return descriptor_input_types;
+	static vector<LogicalType> ColumnTypes(const SljitJoinProjectionAggregateDescriptor &descriptor) {
+		return descriptor.InputTypes();
 	}
 };
 
 //! One class per row: whether the row's string matches the complementary sum's constants (NULL for a NULL string)
 struct SljitRowPointerStringSetClassLayout {
-	static vector<LogicalType> ColumnTypes(const vector<LogicalType> &) {
+	static vector<LogicalType> ColumnTypes(const SljitJoinProjectionAggregateDescriptor &) {
 		return {LogicalType::UTINYINT};
 	}
 };
@@ -121,9 +121,9 @@ struct SljitPendingInputVectorAggregateBatch {
 		return initialized ? input.size() : 0;
 	}
 
-	void Ensure(Allocator &allocator, const vector<LogicalType> &input_types) {
+	void Ensure(Allocator &allocator, const SljitJoinProjectionAggregateDescriptor &descriptor) {
 		if (!initialized) {
-			input.Initialize(allocator, input_types);
+			input.Initialize(allocator, descriptor.InputTypes());
 			initialized = true;
 		}
 	}

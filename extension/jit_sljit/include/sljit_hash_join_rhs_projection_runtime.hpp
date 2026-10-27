@@ -11,6 +11,7 @@
 #include "sljit_direct_projection_batch_runtime.hpp"
 #include "sljit_hash_join_projection_source_runtime.hpp"
 #include "sljit_hash_join_rhs_fixed_column_runtime.hpp"
+#include "sljit_join_projection_aggregate_state.hpp"
 #include "sljit_inline_string_decompress_projection_runtime.hpp"
 #include "sljit_projection_executor_runtime.hpp"
 #include "sljit_region_runtime_state.hpp"
@@ -88,181 +89,93 @@ static bool SljitTryMaterializeHashJoinRHSInlineStringDecompressProjectionToBatc
 	return true;
 }
 
-static bool SljitTryBuildHashJoinProjectionExpressionInput(
-    const ExecutionHashJoinProbeBinding &binding, const SljitExecutableRegionExpression &source_expr,
-    DataChunk &join_input, const SelectionVector &match_selection, Vector &row_pointers, idx_t count,
-    SljitExecutableRegionExpression &remapped_expr, DataChunk &expression_input, vector<Vector> &expression_sources) {
-	if (!binding.ready || !binding.hash_table ||
-	    binding.output_mode != ExecutionHashJoinProbeOutputMode::MATCHED_PROBE_AND_BUILD) {
+static bool SljitTryMaterializeBoundHashJoinRHSProjectionToBatch(
+    ExecutionRegionRuntime &runtime, const ExecutionHashJoinProbeBinding &binding,
+    const SljitJoinProjectionAggregateInputSource &source, const SelectionVector &build_selection, Vector &row_pointers,
+    Vector &target, idx_t current_size, idx_t count, bool &used_row_pointer_generated_source) {
+	used_row_pointer_generated_source = false;
+	if (!source.IsBuildInput() || !source.expression || source.input_idx >= binding.rhs_output_column_count) {
 		return false;
 	}
-	const auto lhs_column_count = binding.lhs_output_column_indices.size();
-	const auto join_output_column_count = lhs_column_count + binding.rhs_output_column_count;
-	if (join_output_column_count == 0) {
-		return false;
-	}
-
-	vector<uint8_t> referenced_columns;
-	if (!SljitTryCollectHashJoinProjectionExpressionSources(source_expr, join_output_column_count,
-	                                                        referenced_columns)) {
-		return false;
-	}
-	vector<idx_t> source_map(join_output_column_count, DConstants::INVALID_INDEX);
-	vector<LogicalType> expression_types;
-	expression_sources.clear();
-	expression_sources.reserve(join_output_column_count);
-	expression_types.reserve(join_output_column_count);
-
-	for (idx_t source_idx = 0; source_idx < join_output_column_count; source_idx++) {
-		if (!referenced_columns[source_idx]) {
-			continue;
+	auto &expression = *source.expression;
+	const auto rhs_idx = source.input_idx;
+	if (binding.layout_kind == ExecutionHashJoinProbeLayoutKind::REGULAR_HASH_TABLE) {
+		if (source.kind == SljitJoinProjectionAggregateInputKind::HASH_JOIN_RHS_INPUT) {
+			return SljitTryGatherHashJoinRHSReferenceProjectionToBatch(binding, expression.plan, rhs_idx, row_pointers,
+			                                                           target, current_size, count);
 		}
-		auto &source_type = binding.output_types[source_idx];
-		expression_types.push_back(source_type);
-		source_map[source_idx] = expression_sources.size();
-		expression_sources.emplace_back(source_type);
-		auto &source = expression_sources.back();
-		if (source_idx < lhs_column_count) {
-			const auto input_col = binding.lhs_output_column_indices[source_idx];
-			if (input_col >= join_input.ColumnCount() || join_input.data[input_col].GetType() != source_type) {
-				return false;
-			}
-			source.Slice(join_input.data[input_col], match_selection, count);
-			continue;
+		if (SljitTryMaterializeHashJoinRHSInlineStringDecompressProjectionToBatch(
+		        binding, expression.plan, rhs_idx, row_pointers, target, current_size, count)) {
+			used_row_pointer_generated_source = true;
+			return true;
 		}
-		const auto rhs_col_idx = source_idx - lhs_column_count;
-		if (rhs_col_idx >= binding.rhs_output_column_count) {
+	} else if (binding.layout_kind != ExecutionHashJoinProbeLayoutKind::PERFECT_HASH_TABLE) {
+		return false;
+	}
+	const auto output_idx = binding.lhs_output_column_indices.size() + rhs_idx;
+	if (output_idx >= binding.output_types.size()) {
+		return false;
+	}
+	const auto &type = binding.output_types[output_idx];
+	if (binding.layout_kind == ExecutionHashJoinProbeLayoutKind::PERFECT_HASH_TABLE) {
+		if (!binding.perfect_layout.ready || rhs_idx >= binding.perfect_layout.rhs_dictionary_buffers.size() ||
+		    rhs_idx >= binding.perfect_layout.rhs_output_types.size() ||
+		    type != binding.perfect_layout.rhs_output_types[rhs_idx]) {
 			return false;
 		}
-		SljitGatherHashJoinRHSColumn(binding, row_pointers, count, rhs_col_idx, source);
+		if (source.kind == SljitJoinProjectionAggregateInputKind::HASH_JOIN_RHS_INPUT) {
+			if (current_size != 0 || target.GetType() != type) {
+				return false;
+			}
+			target.Dictionary(binding.perfect_layout.rhs_dictionary_buffers[rhs_idx], build_selection, count);
+			return true;
+		}
 	}
-	if (expression_sources.empty()) {
-		return false;
+	Vector value(type);
+	if (binding.layout_kind == ExecutionHashJoinProbeLayoutKind::PERFECT_HASH_TABLE) {
+		value.Dictionary(binding.perfect_layout.rhs_dictionary_buffers[rhs_idx], build_selection, count);
+	} else {
+		SljitGatherHashJoinRHSColumn(binding, row_pointers, count, rhs_idx, value);
 	}
-
-	SljitBuildBorrowedProjectionExpression(source_expr, remapped_expr);
-	if (!SljitTryRemapExecutableExpressionInputs(source_map, remapped_expr)) {
-		return false;
-	}
-
-	expression_input.InitializeEmpty(expression_types);
-	for (idx_t source_idx = 0; source_idx < expression_sources.size(); source_idx++) {
-		expression_input.data[source_idx].Reference(expression_sources[source_idx]);
-	}
-	expression_input.SetChildCardinality(count);
-	return true;
-}
-
-static bool SljitTryMaterializeHashJoinComputedRHSProjectionToBatch(const ExecutionHashJoinProbeBinding &binding,
-                                                                    const SljitExecutableRegionExpression &source_expr,
-                                                                    Vector &row_pointers, DataChunk &batch,
-                                                                    idx_t output_idx, idx_t current_size, idx_t count,
-                                                                    SljitExpressionAdapterScratch &adapter_scratch,
-                                                                    bool &used_row_pointer_generated_source) {
-	used_row_pointer_generated_source = false;
-	SljitExecutableRegionExpression remapped_expr;
-	idx_t join_output_source_index;
-	if (!SljitTryBuildSingleSourceProjectionExpression(source_expr, remapped_expr, join_output_source_index)) {
-		return false;
-	}
-	const auto lhs_column_count = binding.lhs_output_column_indices.size();
-	if (join_output_source_index < lhs_column_count ||
-	    binding.output_mode != ExecutionHashJoinProbeOutputMode::MATCHED_PROBE_AND_BUILD) {
-		return false;
-	}
-	const auto rhs_col_idx = join_output_source_index - lhs_column_count;
-	if (rhs_col_idx >= binding.rhs_output_column_count || join_output_source_index >= binding.output_types.size()) {
-		return false;
-	}
-
-	auto &target = batch.data[output_idx];
-	if (SljitTryGatherHashJoinRHSReferenceProjectionToBatch(binding, remapped_expr.plan, rhs_col_idx, row_pointers,
-	                                                        target, current_size, count)) {
-		return true;
-	}
-	if (SljitTryMaterializeHashJoinRHSInlineStringDecompressProjectionToBatch(
-	        binding, remapped_expr.plan, rhs_col_idx, row_pointers, target, current_size, count)) {
-		used_row_pointer_generated_source = true;
-		return true;
-	}
-	if (!remapped_expr.vector.Function() && !remapped_expr.flat.Function()) {
-		return false;
-	}
-
-	auto &source_type = binding.output_types[join_output_source_index];
-	Vector gathered_source(source_type);
-	SljitGatherHashJoinRHSColumn(binding, row_pointers, count, rhs_col_idx, gathered_source);
-
-	DataChunk gathered_input;
-	gathered_input.InitializeEmpty(vector<LogicalType> {source_type});
-	gathered_input.data[0].Reference(gathered_source);
-	gathered_input.SetChildCardinality(count);
-	return SljitTryExecuteProjectionExpressionToBatch(remapped_expr, gathered_input, target, current_size, count,
-	                                                  nullptr, adapter_scratch);
-}
-
-static bool SljitTryMaterializePerfectHashJoinComputedRHSProjectionToBatch(
-    const ExecutionHashJoinProbeBinding &binding, const SljitExecutableRegionExpression &source_expr,
-    const SelectionVector &build_selection, DataChunk &batch, idx_t output_idx, idx_t current_size, idx_t count,
-    SljitExpressionAdapterScratch &adapter_scratch) {
-	if (!binding.ready || binding.layout_kind != ExecutionHashJoinProbeLayoutKind::PERFECT_HASH_TABLE ||
-	    !binding.perfect_layout.ready ||
-	    binding.output_mode != ExecutionHashJoinProbeOutputMode::MATCHED_PROBE_AND_BUILD) {
-		return false;
-	}
-
-	SljitExecutableRegionExpression remapped_expr;
-	idx_t join_output_source_index;
-	if (!SljitTryBuildSingleSourceProjectionExpression(source_expr, remapped_expr, join_output_source_index)) {
-		return false;
-	}
-	const auto lhs_column_count = binding.lhs_output_column_indices.size();
-	if (join_output_source_index < lhs_column_count || join_output_source_index >= binding.output_types.size()) {
-		return false;
-	}
-	const auto rhs_col_idx = join_output_source_index - lhs_column_count;
-	if (rhs_col_idx >= binding.perfect_layout.rhs_output_column_count ||
-	    rhs_col_idx >= binding.perfect_layout.rhs_dictionary_buffers.size() ||
-	    rhs_col_idx >= binding.perfect_layout.rhs_output_types.size()) {
-		return false;
-	}
-
-	auto &source_type = binding.perfect_layout.rhs_output_types[rhs_col_idx];
-	if (binding.output_types[join_output_source_index] != source_type) {
-		return false;
-	}
-	Vector source(source_type);
-	source.Dictionary(binding.perfect_layout.rhs_dictionary_buffers[rhs_col_idx], build_selection, count);
-
 	DataChunk input;
-	input.InitializeEmpty(vector<LogicalType> {source_type});
-	input.data[0].Reference(source);
+	input.InitializeEmpty(vector<LogicalType> {type});
+	input.data[0].Reference(value);
 	input.SetChildCardinality(count);
-	return SljitTryExecuteProjectionExpressionToBatch(remapped_expr, input, batch.data[output_idx], current_size, count,
-	                                                  nullptr, adapter_scratch);
+	D_ASSERT(source.adapter);
+	return SljitTryExecuteProjectionExpressionToBatch(expression, input, target, current_size, count, nullptr,
+	                                                  *source.adapter, &runtime);
 }
 
-static bool SljitTryMaterializeHashJoinMixedProjectionToBatch(
-    const ExecutionHashJoinProbeBinding &binding, const SljitExecutableRegionExpression &source_expr,
-    DataChunk &join_input, const SelectionVector &match_selection, Vector &row_pointers, DataChunk &batch,
-    idx_t output_idx, idx_t current_size, idx_t count, SljitExpressionAdapterScratch &adapter_scratch) {
-	auto &target = batch.data[output_idx];
-	if (target.GetVectorType() != VectorType::FLAT_VECTOR || target.GetType() != source_expr.plan.return_type ||
-	    !SljitDirectProjectionBatchSupportsType(target.GetType()) ||
-	    FlatVector::GetCapacity(target) < current_size + count) {
+static bool SljitTryMaterializeBoundHashJoinMixedProjectionToBatch(
+    ExecutionRegionRuntime &runtime, const ExecutionHashJoinProbeBinding &binding,
+    const SljitJoinProjectionAggregateInputSource &source, DataChunk &join_input,
+    const SelectionVector &match_selection, Vector &row_pointers, Vector &target, idx_t current_size, idx_t count,
+    SljitExpressionAdapterScratch &adapter_scratch) {
+	if (!source.expression || source.expression_sources.empty() ||
+	    binding.layout_kind != ExecutionHashJoinProbeLayoutKind::REGULAR_HASH_TABLE) {
 		return false;
 	}
-
-	SljitExecutableRegionExpression remapped_expr;
-	DataChunk expression_input;
-	vector<Vector> expression_sources;
-	if (!SljitTryBuildHashJoinProjectionExpressionInput(binding, source_expr, join_input, match_selection, row_pointers,
-	                                                    count, remapped_expr, expression_input, expression_sources)) {
-		return false;
+	vector<LogicalType> types;
+	for (const auto &input : source.expression_sources) {
+		types.push_back(input.type);
 	}
-
-	return SljitTryExecuteProjectionExpressionToBatch(remapped_expr, expression_input, target, current_size, count,
-	                                                  nullptr, adapter_scratch);
+	DataChunk input;
+	input.Initialize(Allocator::DefaultAllocator(), types);
+	for (idx_t column_idx = 0; column_idx < source.expression_sources.size(); column_idx++) {
+		const auto &column = source.expression_sources[column_idx];
+		if (column.kind == SljitJoinProjectionAggregateInputKind::HASH_JOIN_LHS_INPUT) {
+			if (column.input_idx >= join_input.ColumnCount() ||
+			    join_input.data[column.input_idx].GetType() != column.type) {
+				return false;
+			}
+			input.data[column_idx].Slice(join_input.data[column.input_idx], match_selection, count);
+		} else {
+			SljitGatherHashJoinRHSColumn(binding, row_pointers, count, column.input_idx, input.data[column_idx]);
+		}
+	}
+	input.SetChildCardinality(count);
+	return SljitTryExecuteProjectionExpressionToBatch(*source.expression, input, target, current_size, count, nullptr,
+	                                                  adapter_scratch, &runtime);
 }
 
 } // namespace duckdb

@@ -54,10 +54,12 @@ bool ExecutionRegionStageId::IsValid() const {
 
 const char *ExecutionRegionJitRuntimeProofName(ExecutionRegionJitRuntimeProof proof) {
 	switch (proof) {
+	case ExecutionRegionJitRuntimeProof::ACCELERATED_STAGE_WORK:
+		return "accelerated_stage_work";
+	case ExecutionRegionJitRuntimeProof::BACKEND_OWNED_WORK:
+		return "backend_owned_work";
 	case ExecutionRegionJitRuntimeProof::GENERATED_STAGE_WORK:
 		return "generated_stage_work";
-	case ExecutionRegionJitRuntimeProof::GENERATED_BACKEND_WORK:
-		return "generated_backend_work";
 	case ExecutionRegionJitRuntimeProof::MATERIALIZATION_ELISION:
 		return "materialization_elision";
 	case ExecutionRegionJitRuntimeProof::FULL_PIPELINE_OWNERSHIP:

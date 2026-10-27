@@ -213,15 +213,15 @@ static void SljitAppendPendingInputVectorAggregateBatch(ExecutionRegionRuntime &
                                                         bool source_key0_int64_to_int32_unchecked) {
 	auto &batch = strategy.pending_input_vector_batch;
 	batch.scratch = &scratch;
-	batch.Ensure(runtime.GetAllocator(), strategy.descriptor.input_types);
+	batch.Ensure(runtime.GetAllocator(), strategy.descriptor);
 	if (batch.Count() != 0 && batch.source_key0_int64_to_int32_unchecked != source_key0_int64_to_int32_unchecked) {
 		SljitFlushPendingInputVectorAggregateBatch(runtime, scratch, aggregate_idx, aggregate_op, strategy);
-		batch.Ensure(runtime.GetAllocator(), strategy.descriptor.input_types);
+		batch.Ensure(runtime.GetAllocator(), strategy.descriptor);
 	}
 	batch.source_key0_int64_to_int32_unchecked = source_key0_int64_to_int32_unchecked;
 	if (batch.Count() + aggregate_input.size() > STANDARD_VECTOR_SIZE) {
 		SljitFlushPendingInputVectorAggregateBatch(runtime, scratch, aggregate_idx, aggregate_op, strategy);
-		batch.Ensure(runtime.GetAllocator(), strategy.descriptor.input_types);
+		batch.Ensure(runtime.GetAllocator(), strategy.descriptor);
 		batch.source_key0_int64_to_int32_unchecked = source_key0_int64_to_int32_unchecked;
 	}
 	batch.input.Append(aggregate_input, VectorAppendMode::ERROR_ON_NO_SPACE);
@@ -239,7 +239,7 @@ static void SljitAppendPendingRowPointerBatch(ExecutionRegionRuntime &runtime, i
                                               Vector &row_pointers, bool source_key0_int64_to_int32_unchecked,
                                               APPEND_COLUMNS append_columns) {
 	batch.scratch = &scratch;
-	batch.Ensure(runtime.GetAllocator(), descriptor.input_types);
+	batch.Ensure(runtime.GetAllocator(), descriptor);
 	if (batch.Count() != 0 && (batch.source_key0_int64_to_int32_unchecked != source_key0_int64_to_int32_unchecked ||
 	                           batch.Count() + append_count > STANDARD_VECTOR_SIZE)) {
 		SljitFlushPendingRowPointerBatch(runtime, aggregate_idx, aggregate_op, descriptor, batch);

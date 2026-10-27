@@ -12,6 +12,7 @@
 #include "sljit_projection_source_runtime.hpp"
 #include "sljit_region_executable.hpp"
 #include "sljit_region_runtime_source.hpp"
+#include "sljit_region_runtime_trace.hpp"
 
 #include "duckdb/common/exception.hpp"
 #include "duckdb/common/types/hugeint.hpp"
@@ -25,7 +26,8 @@ namespace duckdb {
 template <class ADAPTER_SCRATCH>
 static void SljitExecuteProjectionExpression(SljitExecutableRegionExpression &expr, DataChunk &input, Vector &result,
                                              const SelectionVector *execute_sel, idx_t count,
-                                             ADAPTER_SCRATCH &adapter_scratch) {
+                                             ADAPTER_SCRATCH &adapter_scratch,
+                                             optional_ptr<ExecutionRegionRuntime> runtime) {
 	auto &plan = expr.plan;
 	if (plan.kind == SljitNativeRegionExpressionKind::REFERENCE) {
 		D_ASSERT(plan.source_index < input.ColumnCount());
@@ -54,6 +56,9 @@ static void SljitExecuteProjectionExpression(SljitExecutableRegionExpression &ex
 		                                     reinterpret_cast<data_ptr_t>(FlatVector::GetDataMutable<bool>(result)),
 		                                     result_validity.GetData(), nullptr, nullptr);
 		SljitExecuteNativeFunction(expr.predicate.Function(), native_input);
+		if (runtime) {
+			RecordSljitRegionGeneratedWork(*runtime, SljitNativeRegionOpKind::PROJECTION, count);
+		}
 		FlatVector::SetSize(result, count_t(count));
 		return;
 	}
@@ -77,6 +82,9 @@ static void SljitExecuteProjectionExpression(SljitExecutableRegionExpression &ex
 		native_input.result_validity = result_validity_data;
 		native_input.count = count;
 		SljitExecuteNativeFunction(expr.vector.Function(), native_input);
+		if (runtime) {
+			RecordSljitRegionGeneratedWork(*runtime, SljitNativeRegionOpKind::PROJECTION, count);
+		}
 		FlatVector::SetSize(result, count_t(count));
 		return;
 	}
@@ -318,6 +326,9 @@ static void SljitExecuteProjectionExpression(SljitExecutableRegionExpression &ex
 	                                                right_source_format.validity.CannotHaveNull()));
 	auto vector_function = use_flat_function ? expr.flat.Function() : expr.vector.Function();
 	SljitExecuteNativeFunction(vector_function, native_input);
+	if (runtime) {
+		RecordSljitRegionGeneratedWork(*runtime, SljitNativeRegionOpKind::PROJECTION, count);
+	}
 	FlatVector::SetSize(result, count_t(count));
 }
 

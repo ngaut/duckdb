@@ -71,12 +71,14 @@ static const char *SljitExecuteAllValidRegularHashJoinProbePath(OWNER &owner, Ex
 	const SljitAllValidHashJoinProbeFacts facts {can_use_chain_input, can_use_chain_input && !needs_chain_matcher};
 	for (auto &fast_path : SljitAllValidHashJoinProbeFastPaths(SELECTED)) {
 		if (fast_path.execute(plan, native_input, facts)) {
+			RecordSljitRegionBackendWork(runtime, native_input.count);
 			return SljitAllValidHashJoinProbeFastPathStage(fast_path, SELECTED);
 		}
 	}
 	auto key = SljitHashJoinProbeAllValidSpecializationKey::FromLayoutKind(SELECTED, native_input.layout_kind);
 	auto function = owner.EnsureAllValidRegularHashJoinProbeCode(runtime, hash_join_probe, key);
 	SljitExecuteNativeFunction(function, native_input);
+	RecordSljitRegionGeneratedWork(runtime, SljitNativeRegionOpKind::HASH_JOIN_PROBE, native_input.count);
 	return SljitGeneratedAllValidRegularHashJoinProbeStage(SELECTED);
 }
 
@@ -89,12 +91,14 @@ static const char *SljitExecuteAllValidRegularHashJoinMarkSelectionProbePath(
 	const SljitAllValidHashJoinProbeFacts facts {can_use_chain_input, can_use_chain_input && !needs_chain_matcher};
 	for (auto &fast_path : SljitAllValidHashJoinMarkSelectionProbeFastPaths(SELECTED)) {
 		if (fast_path.execute(plan, native_input, facts, mark_selection_mode)) {
+			RecordSljitRegionBackendWork(runtime, native_input.count);
 			return SljitAllValidHashJoinMarkSelectionProbeFastPathStage(fast_path, SELECTED, mark_selection_mode);
 		}
 	}
 	auto key = SljitHashJoinProbeAllValidSpecializationKey::FromLayoutKind(SELECTED, native_input.layout_kind);
 	auto function = owner.EnsureAllValidRegularHashJoinProbeCode(runtime, hash_join_probe, key, mark_selection_mode);
 	SljitExecuteNativeFunction(function, native_input);
+	RecordSljitRegionGeneratedWork(runtime, SljitNativeRegionOpKind::HASH_JOIN_PROBE, native_input.count);
 	return SljitGeneratedAllValidRegularHashJoinProbeStage(SELECTED, mark_selection_mode);
 }
 
@@ -124,6 +128,7 @@ static const char *SljitExecuteRegularHashJoinProbePath(
 	auto function =
 	    owner.EnsureRegularHashJoinProbeCode(runtime, hash_join_probe, uses_bloom_filter, mark_selection_mode);
 	SljitExecuteNativeFunction(function, native_input);
+	RecordSljitRegionGeneratedWork(runtime, SljitNativeRegionOpKind::HASH_JOIN_PROBE, native_input.count);
 	return SljitGeneratedRegularHashJoinProbeStage(uses_bloom_filter, mark_selection_mode);
 }
 

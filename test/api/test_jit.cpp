@@ -2890,9 +2890,9 @@ TEST_CASE("JIT CBO admits configured grouped aggregate work without synthetic fu
 	REQUIRE(profile.stateful_protocol_penalty == 0);
 	REQUIRE(profile.saved_work_per_batch == 4296);
 	REQUIRE(ExecutionRegionJitRuntimeProofRequired(profile.required_runtime_proofs,
-	                                               ExecutionRegionJitRuntimeProof::GENERATED_STAGE_WORK));
+	                                               ExecutionRegionJitRuntimeProof::ACCELERATED_STAGE_WORK));
 	REQUIRE(ExecutionRegionJitRuntimeProofRequired(profile.required_runtime_proofs,
-	                                               ExecutionRegionJitRuntimeProof::GENERATED_BACKEND_WORK));
+	                                               ExecutionRegionJitRuntimeProof::BACKEND_OWNED_WORK));
 	REQUIRE_FALSE(ExecutionRegionJitRuntimeProofRequired(profile.required_runtime_proofs,
 	                                                     ExecutionRegionJitRuntimeProof::FULL_PIPELINE_OWNERSHIP));
 	REQUIRE(profile.SelectedAcceleratedRunner());
@@ -2929,9 +2929,9 @@ TEST_CASE("JIT CBO charges selected hash-join generated filter materialization",
 	REQUIRE(profile.selected_hash_join_filter_materialization_penalty == 0);
 	REQUIRE(profile.saved_work_per_batch == 4096);
 	REQUIRE(ExecutionRegionJitRuntimeProofRequired(profile.required_runtime_proofs,
-	                                               ExecutionRegionJitRuntimeProof::GENERATED_STAGE_WORK));
+	                                               ExecutionRegionJitRuntimeProof::ACCELERATED_STAGE_WORK));
 	REQUIRE(ExecutionRegionJitRuntimeProofRequired(profile.required_runtime_proofs,
-	                                               ExecutionRegionJitRuntimeProof::GENERATED_BACKEND_WORK));
+	                                               ExecutionRegionJitRuntimeProof::BACKEND_OWNED_WORK));
 	REQUIRE(profile.SelectedAcceleratedRunner());
 }
 
@@ -4219,7 +4219,7 @@ TEST_CASE("JIT CBO uses finalized perfect-hash dynamic filter cardinality", "[ap
 		if (StringUtil::Contains(EventJitRuntimePathCounts(event),
 		                         "hash_join_probe.perfect_probe.exact_source_filter=")) {
 			saw_exact_perfect_filter_proof = true;
-			REQUIRE(StringUtil::Contains(EventJitRuntimeProofCounts(event), "generated_backend_work="));
+			REQUIRE(StringUtil::Contains(EventJitRuntimeProofCounts(event), "backend_owned_work="));
 			break;
 		}
 	}
@@ -4265,7 +4265,7 @@ TEST_CASE("JIT CBO uses finalized perfect-hash dynamic filter cardinality", "[ap
 		                                "hash_join_probe.perfect_probe.exact_source_filter=");
 	    },
 	    [](const ExecutionRegionEvent &event) {
-		    REQUIRE(StringUtil::Contains(EventJitRuntimeProofCounts(event), "generated_backend_work="));
+		    REQUIRE(StringUtil::Contains(EventJitRuntimeProofCounts(event), "backend_owned_work="));
 	    });
 }
 
@@ -4319,7 +4319,7 @@ TEST_CASE("JIT exact dynamic filters compose with bitpacked storage scans", "[ap
 		                                "hash_join_probe.perfect_probe.exact_source_filter=");
 	    },
 	    [](const ExecutionRegionEvent &event) {
-		    REQUIRE(StringUtil::Contains(EventJitRuntimeProofCounts(event), "generated_backend_work="));
+		    REQUIRE(StringUtil::Contains(EventJitRuntimeProofCounts(event), "backend_owned_work="));
 	    });
 
 	REQUIRE_NO_FAIL(con.Query("DETACH packed"));

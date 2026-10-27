@@ -96,29 +96,13 @@ static bool SljitTryResolveComplementarySumRHSField(const ExecutionHashJoinProbe
 		return false;
 	}
 	auto &input_source = descriptor.input_sources[classification.predicate_source_idx];
-	if (input_source.kind != SljitJoinProjectionAggregateInputKind::PROJECTION_OUTPUT ||
-	    input_source.projection_idx >= descriptor.Projection().projections.size()) {
-		blocker = "source_kind_" + to_string(static_cast<int>(input_source.kind)) + "_projection_" +
-		          to_string(input_source.projection_idx) + "_count_" +
-		          to_string(descriptor.Projection().projections.size());
+	if (!input_source.IsBuildInput() || !input_source.expression) {
+		blocker = "source_kind";
 		return false;
 	}
-	SljitExecutableRegionExpression predicate_projection;
-	idx_t join_output_source_idx;
-	if (!SljitTryBuildSingleSourceProjectionExpression(descriptor.Projection().projections[input_source.projection_idx],
-	                                                   predicate_projection, join_output_source_idx)) {
-		blocker =
-		    "projection_kind_" +
-		    to_string(static_cast<int>(descriptor.Projection().projections[input_source.projection_idx].plan.kind));
-		return false;
-	}
-	const auto lhs_column_count = binding.lhs_output_column_indices.size();
-	if (join_output_source_idx < lhs_column_count) {
-		blocker = "lhs_source_" + to_string(join_output_source_idx) + "_lhs_count_" + to_string(lhs_column_count);
-		return false;
-	}
-	if (!ExecutionGetHashJoinRHSFixedColumnSource(binding, join_output_source_idx - lhs_column_count, field.source)) {
-		blocker = "rhs_source_" + to_string(join_output_source_idx - lhs_column_count);
+	auto &predicate_projection = *input_source.expression;
+	if (!ExecutionGetHashJoinRHSFixedColumnSource(binding, input_source.input_idx, field.source)) {
+		blocker = "rhs_source_" + to_string(input_source.input_idx);
 		return false;
 	}
 	if (field.source.storage_kind != ExecutionHashJoinRHSFixedColumnStorageKind::ROW ||
@@ -154,27 +138,13 @@ static bool SljitTryResolveComplementarySumPerfectHashRHSOutput(
 		return false;
 	}
 	auto &input_source = descriptor.input_sources[classification.predicate_source_idx];
-	if (input_source.kind != SljitJoinProjectionAggregateInputKind::PROJECTION_OUTPUT ||
-	    input_source.projection_idx >= descriptor.Projection().projections.size()) {
-		blocker = "source_kind_" + to_string(static_cast<int>(input_source.kind)) + "_projection_" +
-		          to_string(input_source.projection_idx) + "_count_" +
-		          to_string(descriptor.Projection().projections.size());
+	if (!input_source.IsBuildInput() || !input_source.expression ||
+	    input_source.expression->plan.return_type.id() != LogicalTypeId::VARCHAR) {
+		blocker = "source_kind";
 		return false;
 	}
-	SljitExecutableRegionExpression predicate_projection;
-	idx_t join_output_source_idx;
-	if (!SljitTryBuildSingleSourceProjectionExpression(descriptor.Projection().projections[input_source.projection_idx],
-	                                                   predicate_projection, join_output_source_idx) ||
-	    predicate_projection.plan.return_type.id() != LogicalTypeId::VARCHAR) {
-		blocker = "projection";
-		return false;
-	}
-	const auto lhs_column_count = binding.lhs_output_column_indices.size();
-	if (join_output_source_idx < lhs_column_count) {
-		blocker = "lhs_source_" + to_string(join_output_source_idx) + "_lhs_count_" + to_string(lhs_column_count);
-		return false;
-	}
-	rhs_output_idx = join_output_source_idx - lhs_column_count;
+	auto &predicate_projection = *input_source.expression;
+	rhs_output_idx = input_source.input_idx;
 	if (rhs_output_idx >= binding.perfect_layout.rhs_output_types.size()) {
 		blocker = "rhs_type_bounds_" + to_string(rhs_output_idx) + "_" +
 		          to_string(binding.perfect_layout.rhs_output_types.size());

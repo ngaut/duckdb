@@ -113,7 +113,7 @@ public:
 				RecordSljitRegionStageRuntime(runtime, primitive.aggregate_idx, aggregate_op.kind,
 				                              "primitive_state_source_combine", combine_start);
 				runtime.RecordJitRuntimePath("source.hash_aggregate.primitive_state_combine", batch->Count());
-				runtime.RecordJitRuntimeProof(ExecutionRegionJitRuntimeProof::GENERATED_BACKEND_WORK, batch->Count());
+				RecordSljitRegionBackendWork(runtime, batch->Count());
 				runtime.RecordJitRuntimeProof(ExecutionRegionJitRuntimeProof::MATERIALIZATION_ELISION, batch->Count());
 				runtime.RecordJitRuntimeProof(ExecutionRegionJitRuntimeProof::FULL_PIPELINE_OWNERSHIP, batch->Count());
 				auto sink_result =

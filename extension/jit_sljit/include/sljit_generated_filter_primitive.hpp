@@ -58,9 +58,9 @@ static bool SljitExecuteGeneratedFilterPrimitive(ExecutionRegionRuntime &runtime
 	D_ASSERT(filter_op.filter && filter_op.filter->expression.HasSelectionKernel());
 	auto &filter_selection = scratch.FilterSelection(primitive.filter_idx);
 	auto filter_stage_start = SljitRegionStageStart(runtime);
-	auto selected_count =
-	    SljitSelectFilter(filter_op, source_chunk, filter_selection,
-	                      scratch.ExpressionAdapterScratch(primitive.filter_idx, 0), input.selection, input.count);
+	auto selected_count = SljitSelectFilter(filter_op, source_chunk, filter_selection,
+	                                        scratch.ExpressionAdapterScratch(primitive.filter_idx, 0), input.selection,
+	                                        input.count, &runtime);
 	RecordSljitRegionStageRuntime(runtime, primitive.filter_idx, filter_op.kind, "selection", filter_stage_start);
 	// Rows-weighted SIMD coverage: traces answer "how much filter input ran
 	// through the packed prefix" without a dedicated benchmark.
@@ -151,7 +151,8 @@ static bool SljitExecuteSelectedHashJoinGeneratedFilterPrimitive(
 	auto &filter_selection = scratch.FilterSelection(primitive.filter_idx);
 	auto selection_stage_start = SljitRegionStageStart(runtime);
 	auto selected_count = SljitSelectFilter(filter_op, filter_input, filter_selection,
-	                                        scratch.ExpressionAdapterScratch(primitive.filter_idx, 0));
+	                                        scratch.ExpressionAdapterScratch(primitive.filter_idx, 0), nullptr,
+	                                        filter_input.size(), &runtime);
 	RecordSljitRegionStageRuntime(runtime, primitive.filter_idx, filter_op.kind, "selected_hash_join_selection",
 	                              selection_stage_start);
 	if (selected_count == 0) {

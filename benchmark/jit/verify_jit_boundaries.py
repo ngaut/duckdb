@@ -253,7 +253,7 @@ def verify_backend_and_platform_abi() -> None:
             "class DUCKDB_API ExecutionRegionBackend",
             "EXECUTION_REGION_BACKEND_ABI_VERSION",
             "uint64_t backend_abi_version",
-            "EXECUTION_REGION_BACKEND_ABI_VERSION = 13",
+            "EXECUTION_REGION_BACKEND_ABI_VERSION = 14",
         ),
     )
     require_text(

@@ -10,6 +10,7 @@
 
 #include "sljit_aggregate_payload_source_indices.hpp"
 #include "sljit_batch_layout.hpp"
+#include "sljit_region_adapter_scratch.hpp"
 #include "sljit_runtime_batch_state.hpp"
 
 #include "duckdb/execution/execution_operator_runtime.hpp"
@@ -18,13 +19,30 @@ namespace duckdb {
 
 struct SljitRegionExecutionScratch;
 
-enum class SljitJoinProjectionAggregateInputKind : uint8_t { UNUSED, PROJECTION_OUTPUT, HASH_JOIN_LHS_INPUT };
+enum class SljitJoinProjectionAggregateInputKind : uint8_t {
+	UNUSED,
+	PROJECTION_OUTPUT, // Unbound; never published to execution.
+	HASH_JOIN_LHS_INPUT,
+	HASH_JOIN_RHS_INPUT,
+	HASH_JOIN_LHS_EXPRESSION,
+	HASH_JOIN_RHS_EXPRESSION,
+	HASH_JOIN_MIXED_EXPRESSION
+};
 
 struct SljitJoinProjectionAggregateInputSource {
 	SljitJoinProjectionAggregateInputKind kind = SljitJoinProjectionAggregateInputKind::PROJECTION_OUTPUT;
 	idx_t projection_idx = DConstants::INVALID_INDEX;
 	idx_t input_idx = DConstants::INVALID_INDEX;
 	LogicalType type;
+	unique_ptr<SljitExecutableRegionExpression> expression;
+	//! Query-local evaluation scratch; allocated only for a bound computed input.
+	unique_ptr<SljitExpressionAdapterScratch> adapter;
+	vector<SljitJoinProjectionAggregateInputSource> expression_sources;
+
+	bool IsBuildInput() const {
+		return kind == SljitJoinProjectionAggregateInputKind::HASH_JOIN_RHS_INPUT ||
+		       kind == SljitJoinProjectionAggregateInputKind::HASH_JOIN_RHS_EXPRESSION;
+	}
 };
 
 //! Immutable semantic terminal descriptor. It identifies a build-side payload;
@@ -44,11 +62,8 @@ struct SljitHashJoinDirectUngroupedAggregateDescriptor {
 struct SljitJoinProjectionAggregateDescriptor {
 	SljitDeferredBuildState build_state;
 	idx_t projection_idx = DConstants::INVALID_INDEX;
-	SljitExecutableRegionOp projection;
 	optional_ptr<SljitExecutableRegionOp> projection_ref;
-	vector<idx_t> output_to_projection;
 	vector<SljitJoinProjectionAggregateInputSource> input_sources;
-	vector<LogicalType> input_types;
 	vector<ExecutionRowPointerGroupKeySource> group_sources;
 	vector<idx_t> payload_source_indices;
 	vector<bool> payload_source_not_null;
@@ -77,11 +92,8 @@ struct SljitJoinProjectionAggregateDescriptor {
 
 	void ClearProjectionState() {
 		projection_idx = DConstants::INVALID_INDEX;
-		projection = SljitExecutableRegionOp();
 		projection_ref = nullptr;
-		output_to_projection.clear();
 		input_sources.clear();
-		input_types.clear();
 		group_sources.clear();
 		payload_source_indices.clear();
 		payload_source_not_null.clear();
@@ -113,18 +125,24 @@ struct SljitJoinProjectionAggregateDescriptor {
 		projection_ref = &projection_p;
 	}
 
-	void OwnProjection(idx_t projection_idx_p, SljitExecutableRegionOp &&projection_p) {
-		projection_idx = projection_idx_p;
-		projection = std::move(projection_p);
-		projection_ref = nullptr;
+	SljitExecutableRegionOp &Projection() {
+		D_ASSERT(projection_ref);
+		return *projection_ref;
 	}
 
-	SljitExecutableRegionOp &Projection() {
-		return projection_ref ? *projection_ref : projection;
+	vector<LogicalType> InputTypes() const {
+		vector<LogicalType> types;
+		types.reserve(input_sources.size());
+		for (const auto &source : input_sources) {
+			types.push_back(source.type);
+		}
+		return types;
 	}
 
 	void EnsureInput(Allocator &allocator) {
-		input.Ensure(allocator, input_types);
+		if (!input.Initialized()) {
+			input.Ensure(allocator, InputTypes());
+		}
 	}
 };
 

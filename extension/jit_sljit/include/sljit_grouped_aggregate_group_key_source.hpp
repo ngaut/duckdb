@@ -495,17 +495,7 @@ static bool SljitTryBuildProjectionOutputVectorGroupKeySource(const SljitExecuta
 	return true;
 }
 
-static bool SljitTryResolveProjectionSemanticIndex(SljitExecutableRegionOp &projection_op,
-                                                   optional_ptr<const vector<idx_t>> semantic_to_projection,
-                                                   idx_t semantic_idx, idx_t &projection_idx) {
-	if (semantic_to_projection) {
-		if (semantic_idx >= semantic_to_projection->size()) {
-			return false;
-		}
-		projection_idx = (*semantic_to_projection)[semantic_idx];
-	} else {
-		projection_idx = semantic_idx;
-	}
+static bool SljitProjectionHasOutput(const SljitExecutableRegionOp &projection_op, idx_t projection_idx) {
 	return projection_idx < projection_op.projections.size() && projection_idx < projection_op.output_types.size();
 }
 
@@ -532,7 +522,6 @@ static bool
 SljitTryBuildRowPointerGroupKeySources(const ExecutionHashJoinProbeBinding &binding,
                                        SljitExecutableRegionOp &projection_op, SljitExecutableRegionOp &aggregate_op,
                                        vector<ExecutionRowPointerGroupKeySource> &group_sources,
-                                       optional_ptr<const vector<idx_t>> semantic_to_projection = nullptr,
                                        optional_ptr<vector<uint8_t>> group_source_uses_projection_output = nullptr,
                                        optional_ptr<string> blocker = nullptr) {
 	auto &sink_info = aggregate_op.aggregate_update.plan.sink_info;
@@ -550,9 +539,8 @@ SljitTryBuildRowPointerGroupKeySources(const ExecutionHashJoinProbeBinding &bind
 	}
 	for (idx_t group_idx = 0; group_idx < sink_info.groups.size(); group_idx++) {
 		auto &group = sink_info.groups[group_idx];
-		idx_t projection_idx;
-		if (!SljitTryResolveProjectionSemanticIndex(projection_op, semantic_to_projection, group.input_index,
-		                                            projection_idx)) {
+		const auto projection_idx = group.input_index;
+		if (!SljitProjectionHasOutput(projection_op, projection_idx)) {
 			if (blocker) {
 				*blocker = "group" + to_string(group_idx) + "_projection_index";
 			}

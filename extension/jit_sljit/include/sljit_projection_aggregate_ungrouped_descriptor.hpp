@@ -214,7 +214,6 @@ static bool SljitTryBuildProjectionUngroupedAggregateDescriptor(
 		descriptor.payload_source_not_null = descriptor.remapped_payloads.front().input_source_not_null;
 	}
 	SljitBindHashJoinDirectUngroupedAggregateDescriptor(binding, aggregate_op, descriptor);
-	descriptor.MarkReady();
 	return true;
 }
 

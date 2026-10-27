@@ -32,6 +32,9 @@ void RecordSljitRegionStageRuntime(ExecutionRegionRuntime &runtime, idx_t op_idx
                                    const char *phase, std::chrono::steady_clock::time_point start);
 void RecordSljitRegionRuntimePath(ExecutionRegionRuntime &runtime, SljitNativeRegionOpKind kind, const char *path,
                                   idx_t count = 1);
+//! Explicit execution evidence. Call only after successful accelerated work, never for setup, a miss, or delegation.
+void RecordSljitRegionBackendWork(ExecutionRegionRuntime &runtime, idx_t count);
+void RecordSljitRegionGeneratedWork(ExecutionRegionRuntime &runtime, SljitNativeRegionOpKind kind, idx_t count);
 //! Record the descriptive path and the two typed proof categories required for
 //! a backend-owned materialization-elision path.
 void RecordSljitRegionMaterializationElision(ExecutionRegionRuntime &runtime, SljitNativeRegionOpKind kind,

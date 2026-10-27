@@ -25,8 +25,6 @@ static bool SljitEnsureJoinProjectionAggregateInputSlot(SljitJoinProjectionAggre
 		source.input_idx = DConstants::INVALID_INDEX;
 		source.type = projection_op.output_types[slot_idx];
 		descriptor.input_sources.push_back(std::move(source));
-		descriptor.output_to_projection.push_back(DConstants::INVALID_INDEX);
-		descriptor.input_types.push_back(projection_op.output_types[slot_idx]);
 	}
 	return true;
 }
@@ -39,73 +37,32 @@ static bool SljitProjectionInputSourceMatches(const SljitJoinProjectionAggregate
 
 static bool SljitTryAssignJoinProjectionAggregateInputAt(SljitJoinProjectionAggregateDescriptor &descriptor,
                                                          const SljitExecutableRegionOp &projection_op, idx_t input_idx,
-                                                         SljitJoinProjectionAggregateInputSource incoming_source,
-                                                         idx_t output_projection_idx) {
+                                                         SljitJoinProjectionAggregateInputSource incoming_source) {
 	if (!SljitEnsureJoinProjectionAggregateInputSlot(descriptor, projection_op, input_idx)) {
 		return false;
 	}
 	auto &existing_source = descriptor.input_sources[input_idx];
 	if (existing_source.kind != SljitJoinProjectionAggregateInputKind::UNUSED) {
-		return SljitProjectionInputSourceMatches(existing_source, incoming_source) &&
-		       descriptor.input_types[input_idx] == incoming_source.type &&
-		       descriptor.output_to_projection[input_idx] == output_projection_idx;
+		return SljitProjectionInputSourceMatches(existing_source, incoming_source);
 	}
-	auto input_type = incoming_source.type;
 	existing_source = std::move(incoming_source);
-	descriptor.output_to_projection[input_idx] = output_projection_idx;
-	descriptor.input_types[input_idx] = std::move(input_type);
 	return true;
 }
 
-static bool SljitTryResolveJoinLHSProjectionInputSource(const ExecutionHashJoinProbeBinding &binding,
-                                                        const SljitExecutableRegionOp &projection_op,
-                                                        idx_t projection_idx,
-                                                        SljitJoinProjectionAggregateInputSource &source) {
-	SljitExecutableRegionExpression remapped_expr;
-	idx_t join_output_source_index;
-	if (!SljitTryBuildSingleSourceProjectionExpression(projection_op.projections[projection_idx], remapped_expr,
-	                                                   join_output_source_index) ||
-	    !SljitProjectionIsSingleSourceReferenceLike(remapped_expr.plan) ||
-	    join_output_source_index >= binding.lhs_output_column_indices.size() ||
-	    join_output_source_index >= binding.output_types.size()) {
-		return false;
-	}
-	auto &output_type = projection_op.output_types[projection_idx];
-	if (remapped_expr.plan.return_type != output_type ||
-	    binding.output_types[join_output_source_index] != output_type) {
-		return false;
-	}
-	source = SljitJoinProjectionAggregateInputSource();
-	source.kind = SljitJoinProjectionAggregateInputKind::HASH_JOIN_LHS_INPUT;
-	source.projection_idx = DConstants::INVALID_INDEX;
-	source.input_idx = binding.lhs_output_column_indices[join_output_source_index];
-	source.type = output_type;
-	return true;
-}
-
-static bool SljitTrySetJoinProjectionAggregateInputAt(const ExecutionHashJoinProbeBinding &binding,
-                                                      SljitJoinProjectionAggregateDescriptor &descriptor,
+static bool SljitTrySetJoinProjectionAggregateInputAt(SljitJoinProjectionAggregateDescriptor &descriptor,
                                                       const SljitExecutableRegionOp &projection_op,
                                                       idx_t projection_idx, idx_t input_idx) {
 	if (projection_idx >= projection_op.projections.size() || projection_idx >= projection_op.output_types.size()) {
 		return false;
 	}
-	SljitJoinProjectionAggregateInputSource source;
-	idx_t output_projection_idx = DConstants::INVALID_INDEX;
-	if (!SljitTryResolveJoinLHSProjectionInputSource(binding, projection_op, projection_idx, source)) {
-		auto &projection = projection_op.projections[projection_idx];
-		auto &output_type = projection_op.output_types[projection_idx];
-		if (projection.plan.return_type != output_type) {
-			return false;
-		}
-		source.kind = SljitJoinProjectionAggregateInputKind::PROJECTION_OUTPUT;
-		source.projection_idx = projection_idx;
-		source.input_idx = DConstants::INVALID_INDEX;
-		source.type = output_type;
-		output_projection_idx = projection_idx;
+	const auto &output_type = projection_op.output_types[projection_idx];
+	if (projection_op.projections[projection_idx].plan.return_type != output_type) {
+		return false;
 	}
-	return SljitTryAssignJoinProjectionAggregateInputAt(descriptor, projection_op, input_idx, std::move(source),
-	                                                    output_projection_idx);
+	SljitJoinProjectionAggregateInputSource source;
+	source.projection_idx = projection_idx;
+	source.type = output_type;
+	return SljitTryAssignJoinProjectionAggregateInputAt(descriptor, projection_op, input_idx, std::move(source));
 }
 
 static bool SljitTryCollectPerfectHashGroupExpressionSources(const SljitExecutableAggregateUpdate &aggregate_update,
@@ -148,10 +105,8 @@ static bool SljitTryCollectPerfectHashGroupExpressionSources(const SljitExecutab
 	return true;
 }
 
-static bool SljitTryBuildProjectionPerfectHashAggregateDescriptor(
-    const ExecutionHashJoinProbeBinding &binding, SljitExecutableRegionOp &aggregate_op,
-    SljitJoinProjectionAggregateDescriptor &descriptor,
-    optional_ptr<const vector<idx_t>> semantic_to_projection = nullptr) {
+static bool SljitTryBuildProjectionPerfectHashAggregateDescriptor(SljitExecutableRegionOp &aggregate_op,
+                                                                  SljitJoinProjectionAggregateDescriptor &descriptor) {
 	auto &aggregate_update = aggregate_op.aggregate_update;
 	auto &sink_info = aggregate_update.plan.sink_info;
 	auto &projection_op = descriptor.Projection();
@@ -201,11 +156,9 @@ static bool SljitTryBuildProjectionPerfectHashAggregateDescriptor(
 		if (!required_semantic_inputs[semantic_idx]) {
 			continue;
 		}
-		idx_t projection_idx;
-		if (!SljitTryResolveProjectionSemanticIndex(projection_op, semantic_to_projection, semantic_idx,
-		                                            projection_idx) ||
-		    !SljitTrySetJoinProjectionAggregateInputAt(binding, descriptor, projection_op, projection_idx,
-		                                               semantic_idx)) {
+		const auto projection_idx = semantic_idx;
+		if (!SljitProjectionHasOutput(projection_op, projection_idx) ||
+		    !SljitTrySetJoinProjectionAggregateInputAt(descriptor, projection_op, projection_idx, semantic_idx)) {
 			return descriptor.Block("input_projection");
 		}
 	}
@@ -222,9 +175,8 @@ static bool SljitTryBuildProjectionPerfectHashAggregateDescriptor(
 		if (!SljitTryFindSingleProjectionPlanSource(group_expression, source_semantic_idx)) {
 			return descriptor.Block("input_group_source");
 		}
-		idx_t projection_idx;
-		if (!SljitTryResolveProjectionSemanticIndex(projection_op, semantic_to_projection, source_semantic_idx,
-		                                            projection_idx)) {
+		const auto projection_idx = source_semantic_idx;
+		if (!SljitProjectionHasOutput(projection_op, projection_idx)) {
 			return descriptor.Block("input_group_projection");
 		}
 		ExecutionRowPointerGroupKeySource group_source;
@@ -240,7 +192,6 @@ static bool SljitTryBuildProjectionPerfectHashAggregateDescriptor(
 	if (descriptor.input_sources.empty()) {
 		return descriptor.Block("input_sources");
 	}
-	descriptor.MarkReady();
 	return true;
 }
 

@@ -54,7 +54,7 @@ static SinkResultType SljitExecuteNativeOrderSink(ExecutionRegionRuntime &runtim
 	order_keys.Reset();
 	for (idx_t key_idx = 0; key_idx < op.order_sink.order_keys.size(); key_idx++) {
 		SljitExecuteProjectionExpression(op.order_sink.order_keys[key_idx], input, order_keys.data[key_idx], nullptr,
-		                                 input.size(), scratch.ExpressionAdapterScratch(op_idx, key_idx));
+		                                 input.size(), scratch.ExpressionAdapterScratch(op_idx, key_idx), &runtime);
 	}
 	order_keys.SetChildCardinality(input.size());
 	RecordSljitRegionStageRuntime(runtime, op_idx, op.kind, "key_projection", key_stage_start);

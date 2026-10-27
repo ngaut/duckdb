@@ -121,7 +121,8 @@ static bool TryDirectMaterializeFixedReference(const SljitExecutableRegionExpres
 
 static bool TryDirectMaterializeFixedGenerated(const SljitExecutableRegionExpression &expr, DataChunk &input,
                                                data_ptr_t target, idx_t source_offset, idx_t count, bool execute,
-                                               optional_ptr<SljitFixedDirectProjectionSourceCache> source_cache) {
+                                               optional_ptr<SljitFixedDirectProjectionSourceCache> source_cache,
+                                               optional_ptr<ExecutionRegionRuntime> runtime) {
 	if (!IsFixedDirectProjectionGeneratedExpression(expr)) {
 		return false;
 	}
@@ -177,16 +178,21 @@ static bool TryDirectMaterializeFixedGenerated(const SljitExecutableRegionExpres
 	native_input.has_error = false;
 	auto function = expr.flat.Function() ? expr.flat.Function() : expr.vector.Function();
 	SljitExecuteNativeFunction(function, native_input);
+	if (runtime) {
+		RecordSljitRegionGeneratedWork(*runtime, SljitNativeRegionOpKind::PROJECTION, count);
+	}
 	return true;
 }
 
 static bool TryDirectMaterializeFixedExpression(const SljitExecutableRegionExpression &expr, DataChunk &input,
                                                 data_ptr_t target, idx_t source_offset, idx_t count, bool execute,
-                                                optional_ptr<SljitFixedDirectProjectionSourceCache> source_cache) {
+                                                optional_ptr<SljitFixedDirectProjectionSourceCache> source_cache,
+                                                optional_ptr<ExecutionRegionRuntime> runtime) {
 	if (expr.plan.kind == SljitNativeRegionExpressionKind::REFERENCE) {
 		return TryDirectMaterializeFixedReference(expr, input, target, source_offset, count, execute, source_cache);
 	}
-	return TryDirectMaterializeFixedGenerated(expr, input, target, source_offset, count, execute, source_cache);
+	return TryDirectMaterializeFixedGenerated(expr, input, target, source_offset, count, execute, source_cache,
+	                                          runtime);
 }
 
 static bool SljitTryDirectMaterializeFixedProjection(
@@ -230,8 +236,8 @@ static bool SljitTryDirectMaterializeFixedProjection(
 			}
 			target = slice->targets[projection_idx];
 		}
-		if (!TryDirectMaterializeFixedExpression(projection, input, target, source_offset, count, execute,
-		                                         source_cache)) {
+		if (!TryDirectMaterializeFixedExpression(projection, input, target, source_offset, count, execute, source_cache,
+		                                         trace_runtime)) {
 			return false;
 		}
 		record_expression_runtime(projection, expression_stage_start);

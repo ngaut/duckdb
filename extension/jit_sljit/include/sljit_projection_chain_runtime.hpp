@@ -124,7 +124,7 @@ static bool SljitMaterializeProjectionChainStep(ExecutionRegionRuntime &runtime,
 		return false;
 	}
 	output.Reset();
-	SljitExecuteProjection(scratch, projection_idx, ops[projection_idx], *prepared.source_chunk, output,
+	SljitExecuteProjection(runtime, scratch, projection_idx, ops[projection_idx], *prepared.source_chunk, output,
 	                       prepared.selection, prepared.count);
 	return output.size() > 0;
 }
@@ -197,11 +197,11 @@ static bool SljitExecuteProjectionChainPrimitiveDirectHandoff(
 	}
 	if (!direct_materialized) {
 		if (synthetic_projection_scratch) {
-			SljitExecuteProjection(*synthetic_projection_scratch, primitive.final_projection_idx, bound_projection_op,
-			                       source_chunk, output, selection, count);
+			SljitExecuteProjection(runtime, *synthetic_projection_scratch, primitive.final_projection_idx,
+			                       bound_projection_op, source_chunk, output, selection, count);
 		} else {
-			SljitExecuteProjection(scratch, primitive.final_projection_idx, bound_projection_op, source_chunk, output,
-			                       selection, count);
+			SljitExecuteProjection(runtime, scratch, primitive.final_projection_idx, bound_projection_op, source_chunk,
+			                       output, selection, count);
 		}
 	}
 	return output.size() > 0 && execute_output_batch(output);
@@ -275,11 +275,11 @@ static bool SljitExecuteProjectionChainPrimitive(
 			auto &filtered = *filtered_ptr;
 			filtered.Reset();
 			if (synthetic_projection_scratch) {
-				SljitExecuteProjection(*synthetic_projection_scratch, primitive.final_projection_idx,
+				SljitExecuteProjection(runtime, *synthetic_projection_scratch, primitive.final_projection_idx,
 				                       bound_projection_op, source_chunk, filtered, selection, count);
 			} else {
-				SljitExecuteProjection(scratch, primitive.final_projection_idx, bound_projection_op, source_chunk,
-				                       filtered, selection, count);
+				SljitExecuteProjection(runtime, scratch, primitive.final_projection_idx, bound_projection_op,
+				                       source_chunk, filtered, selection, count);
 			}
 			if (!SljitTryFastAppendFixedAllValid(batch, filtered)) {
 				batch.Append(filtered);

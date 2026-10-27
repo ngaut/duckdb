@@ -125,8 +125,9 @@ static SljitHashJoinProbeInputFilterResult SljitTryExecuteHashJoinProbeInputFilt
 
 	auto &filter_selection = scratch.FilterSelection(filter_idx);
 	auto filter_stage_start = SljitRegionStageStart(runtime);
-	const auto selected_count = SljitSelectFilter(*cache.mapped_filter, input, filter_selection,
-	                                              scratch.ExpressionAdapterScratch(filter_idx, 0));
+	const auto selected_count =
+	    SljitSelectFilter(*cache.mapped_filter, input, filter_selection,
+	                      scratch.ExpressionAdapterScratch(filter_idx, 0), nullptr, input.size(), &runtime);
 	RecordSljitRegionStageRuntime(runtime, filter_idx, ops[filter_idx].kind, "probe_input_selection",
 	                              filter_stage_start);
 	if (selected_count == 0) {

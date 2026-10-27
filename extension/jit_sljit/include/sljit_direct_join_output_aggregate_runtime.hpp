@@ -78,6 +78,7 @@ static bool SljitTryExecuteDirectJoinOutputPerfectHashAggregateUpdate(
 	    payload_lanes, reduction_lanes, grouped_state.perfect_hash_layout, aggregate_input, nullptr,
 	    aggregate_input.size(), payload_scratch);
 	RecordSljitRegionStageRuntime(runtime, op_idx, op.kind, "primitive_payload_update_fused", payload_stage_start);
+	RecordSljitRegionGeneratedWork(runtime, op.kind, aggregate_input.size());
 	RecordSljitRegionMaterializationElision(runtime, op.kind, "join_output_perfect_hash_payload_update",
 	                                        aggregate_input.size());
 	RecordSljitRegionMaterializationElision(runtime, op.kind, "fused_payload_update_owns_perfect_hash_group_lookup",
@@ -174,7 +175,7 @@ static bool SljitTryExecuteDirectJoinOutputAggregate(
 	const auto aggregate_projection_idx = descriptor.projection_idx == DConstants::INVALID_INDEX
 	                                          ? post_join_projection.trace_projection_idx
 	                                          : descriptor.projection_idx;
-	if (descriptor.output_to_projection.empty()) {
+	if (descriptor.input_sources.empty()) {
 		aggregate_input.SetChildCardinality(join_output.size());
 	} else if (SljitTryReferenceHashJoinProjectionAggregateInputsToChunk(
 	               runtime, scratch, post_join_projection.hash_join_idx, aggregate_projection_idx,

@@ -29,14 +29,8 @@ bool SljitTryPrepareDirectJoinOutputAggregateDescriptor(
 	if (strategy.aggregate_idx >= ops.size()) {
 		throw InternalException("SLJIT direct join-output aggregate index is out of range");
 	}
-	const bool has_projection_chain = post_join_projection.HasProjectionChain();
-	const bool descriptor_ready =
-	    has_projection_chain
-	        ? SljitTryBuildPostJoinProjectionAggregateDescriptor(
-	              ops, scratch, post_join_projection, strategy.aggregate_idx, strategy.descriptor, output_layout)
-	        : SljitTryBuildSelectedJoinAggregateInputDescriptor(ops, scratch, post_join_projection.hash_join_idx,
-	                                                            strategy.aggregate_idx, strategy.descriptor,
-	                                                            output_layout);
+	const bool descriptor_ready = SljitTryBuildPostJoinProjectionAggregateDescriptor(
+	    ops, scratch, post_join_projection, strategy.aggregate_idx, strategy.descriptor, output_layout);
 	if (descriptor_ready) {
 		strategy.descriptor.EnsureInput(runtime.GetAllocator());
 		return true;

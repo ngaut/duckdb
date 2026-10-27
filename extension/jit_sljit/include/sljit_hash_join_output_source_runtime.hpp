@@ -48,7 +48,7 @@ static SljitHashJoinOutputSource SljitBindHashJoinOutputSource(ExecutionRegionRu
 	auto &projection_op = ops[output_projection_idx];
 	auto &projected_input = scratch.TemporaryChunk(output_projection_idx);
 	projected_input.Reset();
-	SljitExecuteProjection(scratch, output_projection_idx, projection_op, join_input, projected_input);
+	SljitExecuteProjection(runtime, scratch, output_projection_idx, projection_op, join_input, projected_input);
 
 	auto &hash_join_op = ops[hash_join_idx];
 	auto &output_binding = scratch.OutputOperatorBinding(hash_join_idx);

@@ -258,7 +258,7 @@ static void RequireMaterializationElisionRuntimeProof(const ExecutionRegionEvent
 	RequireNativeGeneratedRuntimeWork(event);
 	REQUIRE(event.jit_runtime.runtime_delegation_counts.empty());
 	REQUIRE(!event.jit_runtime.runtime_path_counts.empty());
-	REQUIRE(HasJitRuntimeProof(event, ExecutionRegionJitRuntimeProof::GENERATED_BACKEND_WORK));
+	REQUIRE(HasJitRuntimeProof(event, ExecutionRegionJitRuntimeProof::BACKEND_OWNED_WORK));
 	REQUIRE(HasJitRuntimeProof(event, ExecutionRegionJitRuntimeProof::MATERIALIZATION_ELISION));
 }
 

@@ -30,6 +30,10 @@ SljitRecordJoinProjectionAggregateDescriptorShape(ExecutionRegionRuntime &runtim
 		case SljitJoinProjectionAggregateInputKind::UNUSED:
 			break;
 		case SljitJoinProjectionAggregateInputKind::PROJECTION_OUTPUT:
+		case SljitJoinProjectionAggregateInputKind::HASH_JOIN_RHS_INPUT:
+		case SljitJoinProjectionAggregateInputKind::HASH_JOIN_LHS_EXPRESSION:
+		case SljitJoinProjectionAggregateInputKind::HASH_JOIN_RHS_EXPRESSION:
+		case SljitJoinProjectionAggregateInputKind::HASH_JOIN_MIXED_EXPRESSION:
 			RecordSljitRegionRuntimePath(runtime, kind, (input_prefix + "projection_output").c_str(), count);
 			break;
 		case SljitJoinProjectionAggregateInputKind::HASH_JOIN_LHS_INPUT:

@@ -47,7 +47,7 @@ struct SljitHashJoinBuildSinkRuntimeState {
 		auto sink_result = native_runtime.RecordSinkResult(sink_input->size(), build_result);
 		if (primitive.direct_source_ingress) {
 			RecordSljitRegionRuntimePath(runtime, sink_op.kind, "direct_source_ingress", sink_input->size());
-			runtime.RecordJitRuntimeProof(ExecutionRegionJitRuntimeProof::GENERATED_BACKEND_WORK, sink_input->size());
+			RecordSljitRegionBackendWork(runtime, sink_input->size());
 		}
 		if (SljitNativeSinkResultStopsExecution(runtime, sink_result, result)) {
 			return true;
@@ -130,7 +130,7 @@ private:
 		}
 		projected.Reset();
 		auto projection_stage_start = SljitRegionStageStart(runtime);
-		SljitExecuteProjection(scratch, projection_idx, projection_op, join_output, projected);
+		SljitExecuteProjection(runtime, scratch, projection_idx, projection_op, join_output, projected);
 		RecordSljitRegionStageRuntime(runtime, projection_idx, projection_op.kind, "hash_build_projection",
 		                              projection_stage_start);
 		RecordSljitRegionRuntimePath(runtime, hash_join_op.kind, "projected_hash_build_full_output", projected.size());

@@ -18,76 +18,6 @@
 #include "duckdb/execution/execution_operator_runtime.hpp"
 namespace duckdb {
 
-static bool SljitTryBuildHashJoinMappedProjection(
-    const SljitBatchLayout &source_layout, const ExecutionHashJoinProbeBinding &source_binding,
-    SljitExecutableRegionOp &projection_op, SljitExecutableRegionOp &mapped_projection, optional_ptr<string> blocker,
-    optional_ptr<const vector<uint8_t>> required_projection_outputs = nullptr) {
-	if (source_layout.ColumnCount() > source_binding.output_types.size()) {
-		if (blocker) {
-			*blocker = "source_map_shape";
-		}
-		return false;
-	}
-	vector<idx_t> full_source_map = source_layout.SourceColumns();
-	full_source_map.reserve(source_binding.output_types.size());
-	for (idx_t source_idx = source_layout.ColumnCount(); source_idx < source_binding.output_types.size();
-	     source_idx++) {
-		full_source_map.push_back(source_idx);
-	}
-
-	mapped_projection = SljitExecutableRegionOp();
-	mapped_projection.kind = SljitNativeRegionOpKind::PROJECTION;
-	mapped_projection.input_types = source_binding.output_types;
-	mapped_projection.output_types = projection_op.output_types;
-	mapped_projection.output_not_null = projection_op.output_not_null;
-	mapped_projection.projections.reserve(projection_op.projections.size());
-	for (idx_t projection_idx = 0; projection_idx < projection_op.projections.size(); projection_idx++) {
-		auto &projection = projection_op.projections[projection_idx];
-		auto mapped_plan = SljitCopySemanticExpressionPlan(projection);
-		if (required_projection_outputs) {
-			if (projection_idx >= required_projection_outputs->size()) {
-				if (blocker) {
-					*blocker = "required_projection_outputs";
-				}
-				mapped_projection.projections.clear();
-				return false;
-			}
-			if ((*required_projection_outputs)[projection_idx] == 0) {
-				SljitExecutableRegionExpression mapped_expression;
-				SljitBuildBorrowedProjectionExpression(projection, mapped_expression);
-				mapped_projection.projections.push_back(std::move(mapped_expression));
-				continue;
-			}
-		}
-		idx_t failed_source_index = DConstants::INVALID_INDEX;
-		if (!SljitTryRemapSemanticPlanSources(full_source_map, mapped_plan,
-		                                      optional_ptr<idx_t>(&failed_source_index))) {
-			if (blocker) {
-				const auto mapped_source_index = failed_source_index < full_source_map.size()
-				                                     ? full_source_map[failed_source_index]
-				                                     : DConstants::INVALID_INDEX;
-				*blocker = "remap_projection_sources_projection_" + std::to_string(projection_idx) + "_source_" +
-				           std::to_string(failed_source_index) + "_map_size_" + std::to_string(full_source_map.size()) +
-				           "_mapped_" + std::to_string(mapped_source_index);
-			}
-			mapped_projection.projections.clear();
-			return false;
-		}
-		SljitExecutableRegionExpression mapped_expression;
-		SljitPrepareExecutableRegionExpression(mapped_plan, mapped_expression);
-		string compile_error;
-		if (!SljitCompilePreparedExecutableRegionExpression(mapped_expression, false, compile_error)) {
-			if (blocker) {
-				*blocker = "compile_mapped_projection_" + std::to_string(projection_idx) + "_" + compile_error;
-			}
-			mapped_projection.projections.clear();
-			return false;
-		}
-		mapped_projection.projections.push_back(std::move(mapped_expression));
-	}
-	return mapped_projection.projections.size() == projection_op.projections.size();
-}
-
 static bool SljitTryCollectHashJoinProjectionExpressionSources(const SljitExecutableRegionExpression &expr,
                                                                idx_t input_column_count, vector<uint8_t> &referenced) {
 	referenced.assign(input_column_count, 0);
@@ -135,61 +65,6 @@ static bool SljitProjectionReferencesInputColumn(const SljitExecutableRegionOp &
 		}
 	}
 	return false;
-}
-
-static bool SljitTryMapHashJoinProbeLHSOutputColumn(const ExecutionHashJoinProbeBinding &binding, DataChunk &join_input,
-                                                    idx_t &source_index) {
-	if (source_index >= binding.lhs_output_column_indices.size()) {
-		return false;
-	}
-	auto input_col = binding.lhs_output_column_indices[source_index];
-	if (input_col >= join_input.ColumnCount()) {
-		return false;
-	}
-	source_index = input_col;
-	return true;
-}
-
-static bool SljitTryMapHashJoinProbeLHSOutputColumns(const ExecutionHashJoinProbeBinding &binding,
-                                                     DataChunk &join_input, vector<idx_t> &source_indices) {
-	for (auto &source_index : source_indices) {
-		if (!SljitTryMapHashJoinProbeLHSOutputColumn(binding, join_input, source_index)) {
-			return false;
-		}
-	}
-	return true;
-}
-
-static bool SljitTryMapHashJoinProbeLHSProjectionPlanSources(const ExecutionHashJoinProbeBinding &binding,
-                                                             DataChunk &join_input,
-                                                             SljitNativeRegionExpressionPlan &plan) {
-	auto map_source = [&](idx_t &source_index) {
-		return SljitTryMapHashJoinProbeLHSOutputColumn(binding, join_input, source_index);
-	};
-	auto map_sources = [&](vector<idx_t> &source_indices) {
-		return SljitTryMapHashJoinProbeLHSOutputColumns(binding, join_input, source_indices);
-	};
-	auto map_constant = [&](SljitNativeRegionExpressionPlan &) {
-		return true;
-	};
-	auto reject_predicate = [&](SljitNativeRegionExpressionPlan &) {
-		return false;
-	};
-	return SljitTryApplyProjectionPlanSources(plan, map_source, map_sources, map_constant, reject_predicate);
-}
-
-static bool SljitTryBuildHashJoinProbeLHSProjectionExpression(const ExecutionHashJoinProbeBinding &binding,
-                                                              DataChunk &join_input,
-                                                              const SljitExecutableRegionExpression &source,
-                                                              SljitExecutableRegionExpression &target) {
-	SljitBuildBorrowedProjectionExpression(source, target);
-	if (!SljitTryMapHashJoinProbeLHSProjectionPlanSources(binding, join_input, target.plan)) {
-		return false;
-	}
-	if (!target.input_source_indices.empty()) {
-		return SljitTryMapHashJoinProbeLHSOutputColumns(binding, join_input, target.input_source_indices);
-	}
-	return true;
 }
 
 static void SljitGatherHashJoinRHSColumn(const ExecutionHashJoinProbeBinding &binding, Vector &row_pointers,

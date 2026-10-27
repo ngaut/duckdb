@@ -9,6 +9,7 @@
 #pragma once
 
 #include "sljit_direct_projection_fixed_source_runtime.hpp"
+#include "sljit_region_runtime_trace.hpp"
 
 #include "duckdb/common/exception.hpp"
 
@@ -96,7 +97,8 @@ static void BindFlatFusedFixedProjectionTargets(SljitExecutableRegionOp &op, Dir
 }
 
 template <class PROJECTION_SCRATCH>
-static void RunFlatFusedFixedProjection(SljitExecutableRegionOp &op, idx_t count, PROJECTION_SCRATCH &adapter_scratch) {
+static void RunFlatFusedFixedProjection(ExecutionRegionRuntime &runtime, SljitExecutableRegionOp &op, idx_t count,
+                                        PROJECTION_SCRATCH &adapter_scratch) {
 	SljitNativeVectorInput native_input;
 	native_input.source_data_array = adapter_scratch.SourceDataArray();
 	native_input.right_source_data_array = adapter_scratch.RightSourceDataArray();
@@ -107,6 +109,7 @@ static void RunFlatFusedFixedProjection(SljitExecutableRegionOp &op, idx_t count
 	for (auto &projection : op.flat_fused_fixed_projections) {
 		native_input.error = nullptr;
 		SljitExecuteNativeFunction(projection.Function(), native_input);
+		RecordSljitRegionGeneratedWork(runtime, SljitNativeRegionOpKind::PROJECTION, count);
 	}
 }
 

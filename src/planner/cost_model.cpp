@@ -748,11 +748,11 @@ static void PhysicalRunnerComputeWorkComponents(const PhysicalRunnerCostInput &i
 static void PhysicalRunnerBuildRuntimeProofRequirements(PhysicalRunnerCostProfile &profile) {
 	if (profile.generated_stage_work > 0) {
 		profile.required_runtime_proofs |=
-		    ExecutionRegionJitRuntimeProofBit(ExecutionRegionJitRuntimeProof::GENERATED_STAGE_WORK);
+		    ExecutionRegionJitRuntimeProofBit(ExecutionRegionJitRuntimeProof::ACCELERATED_STAGE_WORK);
 	}
 	if (profile.generated_backend_stage_work > 0 || profile.native_operator_work > 0) {
 		profile.required_runtime_proofs |=
-		    ExecutionRegionJitRuntimeProofBit(ExecutionRegionJitRuntimeProof::GENERATED_BACKEND_WORK);
+		    ExecutionRegionJitRuntimeProofBit(ExecutionRegionJitRuntimeProof::BACKEND_OWNED_WORK);
 	}
 	if (profile.materialization_elision_work > 0) {
 		profile.required_runtime_proofs |=

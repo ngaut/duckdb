@@ -163,38 +163,19 @@ def row_contains_materialization_elision_violation(row: dict) -> str:
     return ""
 
 
-def row_runtime_proof_names(row: dict) -> set[str]:
-    return set(runtime_proof_names(row.get("jit_runtime_proof_counts", "")))
-
-
 def row_has_runtime_proof(row: dict, proof: str) -> bool:
-    return proof in row_runtime_proof_names(row)
-
-
-def counter_breakdown_has_positive_count(value: str) -> bool:
-    for entry in value.split(";"):
+    for entry in row.get("jit_runtime_proof_counts", "").split(";"):
         if "=" not in entry:
             continue
-        _, count = entry.rsplit("=", 1)
+        name, count = entry.rsplit("=", 1)
+        if name.strip() != proof:
+            continue
         try:
             if int(count) > 0:
                 return True
         except ValueError:
             continue
     return False
-
-
-def row_has_generated_stage_runtime(row: dict) -> bool:
-    return counter_breakdown_has_positive_count(row.get("generated_stage_count_breakdown", ""))
-
-
-def row_has_no_runtime_work(row: dict) -> bool:
-    return (
-        row_int(row, "input_rows") == 0
-        and row_int(row, "output_rows") == 0
-        and not row_has_generated_stage_runtime(row)
-        and not row.get("jit_runtime_delegation_counts", "")
-    )
 
 
 def selected_cbo_rows(rows: list[dict]) -> list[dict]:
@@ -230,11 +211,7 @@ def runtime_proof_requirements(row: dict) -> set[str]:
 
 
 def runtime_proof_requirement_satisfied(proof: str, runtime_rows: list[dict]) -> bool:
-    if proof == "generated_stage_work":
-        return any(
-            row_has_runtime_proof(row, proof) or row_has_generated_stage_runtime(row) for row in runtime_rows
-        ) or all(row_has_runtime_proof(row, "no_work") or row_has_no_runtime_work(row) for row in runtime_rows)
-    if proof == "generated_backend_work":
+    if proof in ("accelerated_stage_work", "backend_owned_work", "generated_stage_work"):
         if any(row_has_runtime_proof(row, proof) for row in runtime_rows):
             return True
         return all(

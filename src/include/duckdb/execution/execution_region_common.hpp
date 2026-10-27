@@ -200,12 +200,16 @@ enum class ExecutionRunnerKind : uint8_t { VECTORIZED, COMPILED_VECTORIZED, COMP
 enum class ExecutionRegionPolicyMode : uint8_t { AUTO, OFF };
 enum class ExecutionRegionResult : uint8_t { NOT_FINISHED, FINISHED, INTERRUPTED };
 enum class ExecutionRegionJitRuntimeProof : uint8_t {
-	GENERATED_STAGE_WORK,
-	GENERATED_BACKEND_WORK,
+	//! Executed accelerated work, either generated code or a precompiled backend kernel, never delegation or setup.
+	ACCELERATED_STAGE_WORK,
+	//! Backend-owned operator work; independent of whether the implementation is generated or precompiled.
+	BACKEND_OWNED_WORK,
 	MATERIALIZATION_ELISION,
 	FULL_PIPELINE_OWNERSHIP,
 	DELEGATED_RUNTIME_WORK,
 	NO_WORK,
+	//! A generated callable was actually invoked. Timers, paths, compiled handles and elision are not evidence.
+	GENERATED_STAGE_WORK,
 	COUNT
 };
 using ExecutionRegionJitRuntimeProofMask = uint32_t;

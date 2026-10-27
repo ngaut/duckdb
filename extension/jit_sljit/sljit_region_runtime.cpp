@@ -99,6 +99,16 @@ idx_t SljitNativeRegionKernel::CodeSize() const {
 	for (auto &scan_filter : artifact->scan_filters) {
 		result += scan_filter.CodeSize();
 	}
+	if (artifact->full_pipeline_recipe_plan.HasRecipe()) {
+		const auto &sequence = artifact->full_pipeline_recipe_plan.Recipe().primitive_sequence;
+		for (idx_t idx = 0; idx < sequence.Count(); idx++) {
+			const auto &step = sequence.Step(idx);
+			if (step.kind == SljitFullPipelinePrimitiveKind::POST_JOIN_PROJECTION_AGGREGATE_UPDATE &&
+			    step.post_join_projection_aggregate.projection) {
+				result += step.post_join_projection_aggregate.projection->owned_code_size;
+			}
+		}
+	}
 	return result;
 }
 

@@ -253,6 +253,16 @@ of aggregate terminals.
   selected batches borrow the layout for the recipe's lifetime. Aggregate
   descriptor caches retain its identity instead of copying a map and comparing
   it per batch. Query-specific plan facts still need the instance-slot split.
+- Join-to-aggregate inputs have one ordered slot descriptor: each slot owns its
+  logical type and bound probe reference, build reference, or expression access.
+  Sparse slots retain their declared type without a source. Input and pending
+  batches derive their schemas from these slots only when initialized.
+  Semantic join-output positions resolve through the producer's typed layout
+  during binding; checked producer expressions compose with the consumer instead
+  of being replaced by a physical index. Equality-key aliases use the semantic
+  probe key's producer-output position. There is no reverse lookup by physical
+  source, separate output-to-projection vector, or mapped/unmapped descriptor split.
+  Computed inputs own query-local expression scratch; references need none.
 - Expressions have two index spaces with one rule each. An executable
   predicate reads its sources through input slots (`input_source_indices`
   maps slot to column); an ordinary scalar projection still reads source
@@ -355,6 +365,11 @@ enums; reason text is derived from them.
   identity, and the kernel hands its identity bindings to each thread's
   scratch. Copies of the first query's diagnostic `fields`, `reason`, and `ir`
   still ride inside shared operator and sink infos.
+- Post-join aggregate recipes own their semantic projection and prepared
+  probe/build input expressions. Composition and any additional code generation
+  finish before artifact publication; their new code allocations count toward
+  artifact size. Execution-local descriptors borrow those callables and own
+  only bindings and mutable adapters, not another compiled projection.
 - The planner runs up to three times per pipeline: the initial build, a
   rebuild when the source contract is unsupported, and a readiness refresh
   once dependencies finalize. Recursive rescheduling does not re-plan.
@@ -388,7 +403,7 @@ these per operator and initializes every field before publishing `ready`.
 Storage-dependent RHS gathering is an exported core operation.
 
 Execution-region backends use DuckDB's version- and platform-matched C++
-extension contract plus an execution-region ABI version, currently 13. Any
+extension contract plus an execution-region ABI version, currently 14. Any
 backend-visible layout or virtual-interface change advances it; registration
 rejects other versions, and the boundary verifier pins the value.
 
@@ -464,14 +479,15 @@ The runtime cascades that try alternatives in order:
 | Probe path | `sljit_hash_join_probe_executor_runtime.hpp` | generated kernel |
 | Grouped bound update | `sljit_grouped_aggregate_direct_update_runtime.hpp` | generic path |
 | Projection chain | `sljit_projection_chain_runtime.hpp` | expression runtime |
-| Join projection aggregate inputs | `sljit_hash_join_projection_aggregate_input_runtime.hpp` | blocked |
 | Full-pipeline step | `sljit_native_pipeline_runtime.hpp` | throw |
 
 Most runtime descriptor work runs on the first chunk and is cached; a failure
 disables that strategy for the step, and adaptive strategies (row-pointer
 preaggregation, pending-run buffering) switch themselves off after a rejected
-batch, so falling through costs little time. The join projection aggregate
-inputs rebuild their expressions per chunk. The precompiled families are
+batch, so falling through costs little time. Join projection aggregate inputs
+dispatch bound access recipes: expression preparation and source mapping run
+once before the descriptor becomes ready. Capacity, selection, and current
+hash-table storage checks remain batch-dependent. The precompiled families are
 preaggregation (mostly C++, with generated-kernel call sites), complementary
 sums, all-valid probe templates, probe aggregate consumers, count-star
 preaggregation and string-set classification, all pure C++ apart from the
@@ -527,6 +543,13 @@ reads the unordered outcome from the rank, and a comparison of two values that
 may both be NaN compares their ranks. Generated conjunctions build the
 complete packed mask before classifying it, and packed operations are admitted
 by SLJIT's exact operation-and-width capability test.
+
+A projection may move past join selection only when it is total over its
+admitted input domain. The pre-join projection binder admits references and
+INT64-to-INT32 casts whose source range proves no conversion error. Unknown
+or wider ranges retain the generated projection before the join, including
+for non-key payloads and keys that a selection might never read. Source
+statistics apply only while preceding operators preserve that source layout.
 
 ### Hash joins
 
@@ -588,8 +611,15 @@ and compilation is not execution. A missing proof is a failure for every query
 the cost model selected, including queries that later fail compilation.
 Traced proof runs are separate from production timing.
 
-**Target:** runtime proof separates generated work from precompiled C++ work.
-**Current state:** `GENERATED_STAGE_WORK` is also recorded for C++ fast paths.
+The cost model requires `ACCELERATED_STAGE_WORK` and `BACKEND_OWNED_WORK`
+for the work it funds: either generated code or a precompiled backend kernel
+can implement acceleration. `GENERATED_STAGE_WORK` is separate, positive
+evidence from an actual generated-call boundary, not a claim inferred from
+the selected runner, allocated code, a timer, or materialization elision.
+Delegated native sinks and failed fast-path attempts do not earn accelerated
+work proof. Proof verification requires the declared typed evidence; timing
+buckets cannot substitute for it. The historical `generated_stage_*` timing
+and cost field names remain artifact-schema names, not machine-code counters.
 
 ## Performance contract
 
@@ -656,7 +686,8 @@ because M3-M5 shrink once layouts and instances exist.
 2. **Typed layouts.** Extend bound layouts to every recipe edge, including the
    preaggregated group batch, and give columns region-IR slot identities.
    Consumers resolve slots through layouts; MARK and elided-projection layouts
-   already share one descriptor but still use producer-scoped positions.
+   already share one descriptor, and join-to-aggregate inputs bind through that
+   producer layout. These still use producer-scoped positions.
    Exit: remaining per-family remap helpers are gone; layout mismatch fails at bind.
 3. **One coalescer.** Replace per-step batch owners and per-site batching
    rules with the step coalescer and one byte-based rule. Exit: at most four

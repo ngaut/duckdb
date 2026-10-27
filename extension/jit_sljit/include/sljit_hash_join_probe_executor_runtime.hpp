@@ -126,6 +126,7 @@ static void SljitExecutePerfectHashJoinProbe(
 
 	auto generated_stage_start = SljitRegionStageStart(runtime);
 	SljitExecuteNativeFunction(function, native_input);
+	RecordSljitRegionGeneratedWork(runtime, op.kind, input.size());
 	if (native_input.error) {
 		std::rethrow_exception(native_input.error);
 	}
@@ -154,8 +155,7 @@ static void SljitExecutePerfectHashJoinProbe(
 	                                  generated_stage_start);
 	if (exact_membership_filter) {
 		runtime.RecordJitRuntimePath("hash_join_probe.perfect_probe.exact_source_filter", native_input.selected_count);
-		runtime.RecordJitRuntimeProof(ExecutionRegionJitRuntimeProof::GENERATED_BACKEND_WORK,
-		                              native_input.selected_count);
+		RecordSljitRegionBackendWork(runtime, native_input.selected_count);
 	}
 	state.input_offset = native_input.input_offset;
 	state.resume_row_pointer = nullptr;
@@ -261,8 +261,7 @@ static void SljitExecuteRegularHashJoinProbe(
 		                                               native_input.selected_count == input.size());
 		output.SetChildCardinality(native_input.selected_count);
 		runtime.RecordJitRuntimePath("hash_join_probe.regular_probe.exact_source_filter", native_input.selected_count);
-		runtime.RecordJitRuntimeProof(ExecutionRegionJitRuntimeProof::GENERATED_BACKEND_WORK,
-		                              native_input.selected_count);
+		RecordSljitRegionBackendWork(runtime, native_input.selected_count);
 		return;
 	}
 	const auto mark_selection_mode = SljitHashJoinMarkSelectionModeForOutputContract(output_contract);

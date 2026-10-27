@@ -178,7 +178,7 @@ void SljitNativeRegionKernel::RecordExecutedFilterRows(ExecutionRegionRuntime &r
 	auto filter_rows = executed_filter_rows.exchange(0, std::memory_order_relaxed);
 	if (filter_rows > 0) {
 		runtime.RecordJitRuntimePath("source.storage_scan.compiled_filter", filter_rows);
-		runtime.RecordJitRuntimeProof(ExecutionRegionJitRuntimeProof::GENERATED_BACKEND_WORK, filter_rows);
+		RecordSljitRegionBackendWork(runtime, filter_rows);
 	}
 }
 

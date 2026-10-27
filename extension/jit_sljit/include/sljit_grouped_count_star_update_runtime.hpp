@@ -268,7 +268,7 @@ private:
 		preaggregated_groups.Reset();
 		SljitExecuteProjectionExpression(group_projection.projections[0], *prepared.source_chunk,
 		                                 preaggregated_groups.data[0], prepared.selection, prepared.count,
-		                                 projected_count_star_group_scratch);
+		                                 projected_count_star_group_scratch, &runtime);
 		preaggregated_groups.SetChildCardinality(prepared.count);
 		row_count_deltas.assign(prepared.count, 1);
 		RecordSljitRegionStageRuntime(runtime, aggregate_idx, aggregate_op.kind, "count_star_projected_row_groups",

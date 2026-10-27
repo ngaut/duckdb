@@ -12,6 +12,8 @@
 
 namespace duckdb {
 
+struct SljitJoinAggregateProjection;
+
 struct SljitPostJoinProjectionStrategy {
 	void Initialize(idx_t hash_join_idx_p, idx_t first_projection_idx_p, idx_t final_projection_idx_p) {
 		hash_join_idx = hash_join_idx_p;
@@ -35,6 +37,7 @@ struct SljitPostJoinProjectionStrategy {
 	idx_t first_projection_idx = DConstants::INVALID_INDEX;
 	idx_t final_projection_idx = DConstants::INVALID_INDEX;
 	idx_t trace_projection_idx = DConstants::INVALID_INDEX;
+	optional_ptr<SljitJoinAggregateProjection> aggregate_projection;
 };
 
 struct SljitPostJoinProjectionPrimitive {

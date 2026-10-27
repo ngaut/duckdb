@@ -46,7 +46,7 @@ string SljitRegionStageName(idx_t op_idx, SljitNativeRegionOpKind kind, const st
 	return SljitRegionStageName(op_idx, kind) + "." + phase;
 }
 
-static bool SljitRegionOpKindProvesGeneratedBackendWork(SljitNativeRegionOpKind kind) {
+static bool SljitRegionOpKindHasBackendWork(SljitNativeRegionOpKind kind) {
 	switch (kind) {
 	case SljitNativeRegionOpKind::HASH_JOIN_PROBE:
 	case SljitNativeRegionOpKind::HASH_JOIN_BUILD:
@@ -91,8 +91,27 @@ void RecordSljitRegionRuntimePath(ExecutionRegionRuntime &runtime, SljitNativeRe
 void RecordSljitRegionMaterializationElision(ExecutionRegionRuntime &runtime, SljitNativeRegionOpKind kind,
                                              const char *path, idx_t count) {
 	RecordSljitRegionRuntimePath(runtime, kind, path, count);
-	runtime.RecordJitRuntimeProof(ExecutionRegionJitRuntimeProof::GENERATED_BACKEND_WORK, count);
+	RecordSljitRegionBackendWork(runtime, count);
 	runtime.RecordJitRuntimeProof(ExecutionRegionJitRuntimeProof::MATERIALIZATION_ELISION, count);
+}
+
+void RecordSljitRegionBackendWork(ExecutionRegionRuntime &runtime, idx_t count) {
+	if (!runtime.TraceRuntime() || count == 0) {
+		return;
+	}
+	runtime.RecordJitRuntimeProof(ExecutionRegionJitRuntimeProof::ACCELERATED_STAGE_WORK, count);
+	runtime.RecordJitRuntimeProof(ExecutionRegionJitRuntimeProof::BACKEND_OWNED_WORK, count);
+}
+
+void RecordSljitRegionGeneratedWork(ExecutionRegionRuntime &runtime, SljitNativeRegionOpKind kind, idx_t count) {
+	if (!runtime.TraceRuntime() || count == 0) {
+		return;
+	}
+	runtime.RecordJitRuntimeProof(ExecutionRegionJitRuntimeProof::GENERATED_STAGE_WORK, count);
+	runtime.RecordJitRuntimeProof(ExecutionRegionJitRuntimeProof::ACCELERATED_STAGE_WORK, count);
+	if (SljitRegionOpKindHasBackendWork(kind)) {
+		runtime.RecordJitRuntimeProof(ExecutionRegionJitRuntimeProof::BACKEND_OWNED_WORK, count);
+	}
 }
 
 void RecordSljitRegionRuntimeDelegation(ExecutionRegionRuntime &runtime, SljitNativeRegionOpKind kind,
@@ -109,10 +128,6 @@ void RecordSljitRegionStageRuntimePath(ExecutionRegionRuntime &runtime, idx_t op
                                        const char *phase, std::chrono::steady_clock::time_point start) {
 	RecordSljitRegionStageRuntime(runtime, op_idx, kind, phase, start);
 	RecordSljitRegionRuntimePath(runtime, kind, phase);
-	runtime.RecordJitRuntimeProof(ExecutionRegionJitRuntimeProof::GENERATED_STAGE_WORK);
-	if (SljitRegionOpKindProvesGeneratedBackendWork(kind)) {
-		runtime.RecordJitRuntimeProof(ExecutionRegionJitRuntimeProof::GENERATED_BACKEND_WORK);
-	}
 }
 
 void RecordSljitRegionStageRuntimeWithSuffix(ExecutionRegionRuntime &runtime, idx_t op_idx,
