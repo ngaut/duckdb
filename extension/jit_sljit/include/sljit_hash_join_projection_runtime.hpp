@@ -17,19 +17,19 @@
 
 namespace duckdb {
 
-static bool SljitBuildHashJoinBuildRequiredInputColumns(const ExecutionRegionSinkInfo &sink_info, idx_t column_count,
-                                                        vector<uint8_t> &required_columns) {
-	if (sink_info.kind != ExecutionRegionSinkKind::HASH_JOIN_BUILD || !sink_info.hash_join_contract.present) {
+static bool SljitBuildHashJoinBuildRequiredInputColumns(const ExecutionRegionHashJoinInfo &sink_info,
+                                                        idx_t column_count, vector<uint8_t> &required_columns) {
+	if (!sink_info.contract.present) {
 		return false;
 	}
 	required_columns.assign(column_count, 0);
-	for (auto &key : sink_info.hash_join_keys) {
+	for (auto &key : sink_info.keys) {
 		if (!key.supported_reference || key.input_index >= column_count) {
 			return false;
 		}
 		required_columns[key.input_index] = 1;
 	}
-	auto &contract = sink_info.hash_join_contract;
+	auto &contract = sink_info.contract;
 	for (auto input_index : contract.payload_column_indices) {
 		if (input_index >= column_count) {
 			return false;
@@ -59,7 +59,7 @@ static bool SljitMaterializeSelectionOnlyHashJoinProbeOutput(
 		return false;
 	}
 	auto materialize_stage_start = SljitRegionStageStart(runtime);
-	SljitRegionStageRecorder recorder(runtime, hash_join_idx, hash_join_op.kind, "materialize_selection_output");
+	SljitRegionStageRecorder recorder(runtime, hash_join_idx, hash_join_op.Kind(), "materialize_selection_output");
 	if (binding.layout_kind == ExecutionHashJoinProbeLayoutKind::REGULAR_HASH_TABLE) {
 		ExecutionMaterializeHashJoinProbe(binding, join_input, row_pointers, match_selection, count, join_output,
 		                                  runtime.TraceRuntime() ? &recorder : nullptr, source.output_proof);
@@ -69,7 +69,7 @@ static bool SljitMaterializeSelectionOnlyHashJoinProbeOutput(
 	} else {
 		return false;
 	}
-	RecordSljitRegionStageRuntime(runtime, hash_join_idx, hash_join_op.kind, "materialize_selection_output",
+	RecordSljitRegionStageRuntime(runtime, hash_join_idx, hash_join_op.Kind(), "materialize_selection_output",
 	                              materialize_stage_start);
 	return true;
 }
@@ -89,7 +89,7 @@ static bool SljitTryMaterializeHashJoinRequiredSources(ExecutionRegionRuntime &r
 	auto &output_proof = source.output_proof;
 	auto stage_start = SljitRegionStageStart(runtime);
 	auto materialized = ExecuteSljitRegionRecordedOperation(
-	    runtime, hash_join_idx, hash_join_op.kind, "materialize_probe_required_sources", stage_start,
+	    runtime, hash_join_idx, hash_join_op.Kind(), "materialize_probe_required_sources", stage_start,
 	    [&](optional_ptr<ExecutionOperatorStageRecorder> recorder) {
 		    return ExecutionMaterializeHashJoinProbeProjectionSources(
 		        binding, join_input, row_pointers, match_selection, count, required_columns, sink_input, recorder,
@@ -98,7 +98,7 @@ static bool SljitTryMaterializeHashJoinRequiredSources(ExecutionRegionRuntime &r
 	if (!materialized) {
 		return false;
 	}
-	RecordSljitRegionStageRuntime(runtime, hash_join_idx, hash_join_op.kind, "materialize_probe_required_sources",
+	RecordSljitRegionStageRuntime(runtime, hash_join_idx, hash_join_op.Kind(), "materialize_probe_required_sources",
 	                              stage_start);
 	return true;
 }
@@ -108,8 +108,8 @@ static bool SljitTryMaterializeHashJoinRequiredProjectionViews(
     const SljitHashJoinOutputSource &source, const SelectionVector &match_selection,
     const SelectionVector &build_selection, Vector &row_pointers, idx_t count, const vector<uint8_t> &required_columns,
     DataChunk &projected) {
-	if (count == 0 || required_columns.size() != projection_op.projections.size() ||
-	    projected.ColumnCount() != projection_op.projections.size()) {
+	if (count == 0 || required_columns.size() != projection_op.Projections().size() ||
+	    projected.ColumnCount() != projection_op.Projections().size()) {
 		return false;
 	}
 	auto &binding = source.binding;
@@ -131,11 +131,11 @@ static bool SljitTryMaterializeHashJoinRequiredProjectionViews(
 	        : 0;
 	const auto join_output_column_count = lhs_column_count + rhs_column_count;
 	auto stage_start = SljitRegionStageStart(runtime);
-	for (idx_t projected_idx = 0; projected_idx < projection_op.projections.size(); projected_idx++) {
+	for (idx_t projected_idx = 0; projected_idx < projection_op.Projections().size(); projected_idx++) {
 		if (!required_columns[projected_idx]) {
 			continue;
 		}
-		auto &expr = projection_op.projections[projected_idx];
+		auto &expr = projection_op.Projections()[projected_idx];
 		idx_t join_output_source_index;
 		if (!SljitTryGetSingleSourceReferenceProjectionIndex(expr, join_output_source_index) ||
 		    join_output_source_index >= join_output_column_count) {
@@ -183,7 +183,7 @@ static bool SljitTryMaterializeHashJoinRequiredProjectionViews(
 		}
 	}
 	projected.SetChildCardinality(count);
-	RecordSljitRegionStageRuntime(runtime, projection_idx, projection_op.kind, "required_projection_views",
+	RecordSljitRegionStageRuntime(runtime, projection_idx, projection_op.Kind(), "required_projection_views",
 	                              stage_start);
 	return true;
 }
@@ -196,18 +196,18 @@ static bool SljitTryExecuteHashJoinProbeDirectHashJoinBuild(
     EXECUTE_HASH_JOIN_PROBE &&execute_hash_join_probe,
     EXECUTE_NATIVE_FULL_PIPELINE_FROM &&execute_native_full_pipeline_from,
     EXECUTE_NATIVE_HASH_JOIN_BUILD &&execute_native_hash_join_build) {
-	if (hash_join_op.hash_join_probe.plan.output_mode != ExecutionHashJoinProbeOutputMode::MATCHED_PROBE_AND_BUILD &&
-	    hash_join_op.hash_join_probe.plan.output_mode != ExecutionHashJoinProbeOutputMode::MATCHED_PROBE_ONLY) {
+	if (hash_join_op.HashJoinProbe().plan.output_mode != ExecutionHashJoinProbeOutputMode::MATCHED_PROBE_AND_BUILD &&
+	    hash_join_op.HashJoinProbe().plan.output_mode != ExecutionHashJoinProbeOutputMode::MATCHED_PROBE_ONLY) {
 		return false;
 	}
 
 	idx_t projection_idx = DConstants::INVALID_INDEX;
 	idx_t sink_idx = DConstants::INVALID_INDEX;
-	if (hash_join_idx + 1 < ops.size() && ops[hash_join_idx + 1].kind == SljitNativeRegionOpKind::HASH_JOIN_BUILD &&
+	if (hash_join_idx + 1 < ops.size() && ops[hash_join_idx + 1].Kind() == SljitNativeRegionOpKind::HASH_JOIN_BUILD &&
 	    hash_join_idx + 2 == ops.size()) {
 		sink_idx = hash_join_idx + 1;
-	} else if (hash_join_idx + 2 < ops.size() && ops[hash_join_idx + 1].kind == SljitNativeRegionOpKind::PROJECTION &&
-	           ops[hash_join_idx + 2].kind == SljitNativeRegionOpKind::HASH_JOIN_BUILD &&
+	} else if (hash_join_idx + 2 < ops.size() && ops[hash_join_idx + 1].Kind() == SljitNativeRegionOpKind::PROJECTION &&
+	           ops[hash_join_idx + 2].Kind() == SljitNativeRegionOpKind::HASH_JOIN_BUILD &&
 	           hash_join_idx + 3 == ops.size()) {
 		projection_idx = hash_join_idx + 1;
 		sink_idx = hash_join_idx + 2;
@@ -220,7 +220,7 @@ static bool SljitTryExecuteHashJoinProbeDirectHashJoinBuild(
 	                                   ? hash_join_op.output_types.size()
 	                                   : ops[projection_idx].output_types.size();
 	vector<uint8_t> required_columns;
-	if (!SljitBuildHashJoinBuildRequiredInputColumns(sink_op.hash_join_build.plan.sink_info, sink_input_column_count,
+	if (!SljitBuildHashJoinBuildRequiredInputColumns(sink_op.HashJoinBuild().plan.sink_info, sink_input_column_count,
 	                                                 required_columns)) {
 		return false;
 	}
@@ -250,7 +250,7 @@ static bool SljitTryExecuteHashJoinProbeDirectHashJoinBuild(
 			                                               match_selection, build_selection, row_pointers,
 			                                               join_output.size(), required_columns, join_output)) {
 				sink_input = &join_output;
-				RecordSljitRegionRuntimePath(runtime, hash_join_op.kind, "required_hash_build_sources",
+				RecordSljitRegionRuntimePath(runtime, hash_join_op.Kind(), "required_hash_build_sources",
 				                             join_output.size());
 			}
 		} else {
@@ -260,7 +260,7 @@ static bool SljitTryExecuteHashJoinProbeDirectHashJoinBuild(
 			                                                       match_selection, build_selection, row_pointers,
 			                                                       join_output.size(), required_columns, projected)) {
 				sink_input = &projected;
-				RecordSljitRegionRuntimePath(runtime, hash_join_op.kind, "projected_hash_build_views",
+				RecordSljitRegionRuntimePath(runtime, hash_join_op.Kind(), "projected_hash_build_views",
 				                             projected.size());
 			}
 		}
@@ -279,7 +279,7 @@ static bool SljitTryExecuteHashJoinProbeDirectHashJoinBuild(
 		if (SljitSinkResultStopsPipeline(sink_result)) {
 			return true;
 		}
-	} while (!SljitHashJoinProbeDrainFinished(hash_join_op.hash_join_probe.plan.output_mode, state));
+	} while (!SljitHashJoinProbeDrainFinished(hash_join_op.HashJoinProbe().plan.output_mode, state));
 	sink_result = SinkResultType::NEED_MORE_INPUT;
 	return true;
 }

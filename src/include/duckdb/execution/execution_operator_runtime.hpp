@@ -18,7 +18,6 @@
 
 namespace duckdb {
 
-class ColumnDataCollection;
 class DataChunk;
 class GlobalSinkState;
 class InterruptState;
@@ -26,7 +25,6 @@ class LocalSinkState;
 class Vector;
 class Allocator;
 class SelectionVector;
-struct ColumnDataScanState;
 struct ExecutionContext;
 struct OperatorSinkInput;
 struct PartitionedTupleDataAppendState;
@@ -127,7 +125,7 @@ struct ExecutionGroupedAggregateStateAddressState {
 		(void)recorder;
 		return false;
 	}
-	virtual bool TryUpdateNewGroups(DataChunk &input, const ExecutionRegionSinkInfo &sink_info,
+	virtual bool TryUpdateNewGroups(DataChunk &input, const ExecutionRegionAggregateSinkInfo &sink_info,
 	                                const vector<const ExecutionPrimitiveAggregateUpdateLane *> &lanes,
 	                                optional_ptr<ExecutionOperatorStageRecorder> recorder = nullptr,
 	                                optional_ptr<const ExecutionDenseGroupDomain> dense_domain = nullptr) {
@@ -138,12 +136,14 @@ struct ExecutionGroupedAggregateStateAddressState {
 		(void)dense_domain;
 		return false;
 	}
-	virtual bool TryUpdateNewGroupsWithPayloadInput(
-	    DataChunk &groups, DataChunk &payload_input, const vector<idx_t> &payload_source_indices,
-	    const ExecutionRegionSinkInfo &sink_info, const vector<const ExecutionPrimitiveAggregateUpdateLane *> &lanes,
-	    optional_ptr<ExecutionOperatorStageRecorder> recorder = nullptr,
-	    optional_ptr<Vector> precomputed_hashes = nullptr,
-	    optional_ptr<const ExecutionDenseGroupDomain> dense_domain = nullptr) {
+	virtual bool
+	TryUpdateNewGroupsWithPayloadInput(DataChunk &groups, DataChunk &payload_input,
+	                                   const vector<idx_t> &payload_source_indices,
+	                                   const ExecutionRegionAggregateSinkInfo &sink_info,
+	                                   const vector<const ExecutionPrimitiveAggregateUpdateLane *> &lanes,
+	                                   optional_ptr<ExecutionOperatorStageRecorder> recorder = nullptr,
+	                                   optional_ptr<Vector> precomputed_hashes = nullptr,
+	                                   optional_ptr<const ExecutionDenseGroupDomain> dense_domain = nullptr) {
 		(void)groups;
 		(void)payload_input;
 		(void)payload_source_indices;
@@ -154,7 +154,7 @@ struct ExecutionGroupedAggregateStateAddressState {
 		(void)dense_domain;
 		return false;
 	}
-	virtual bool TryAppendNewGroups(DataChunk &input, const ExecutionRegionSinkInfo &sink_info,
+	virtual bool TryAppendNewGroups(DataChunk &input, const ExecutionRegionAggregateSinkInfo &sink_info,
 	                                const vector<const ExecutionPrimitiveAggregateUpdateLane *> &lanes,
 	                                optional_ptr<ExecutionOperatorStageRecorder> recorder = nullptr,
 	                                optional_ptr<const ExecutionDenseGroupDomain> dense_domain = nullptr) {
@@ -166,7 +166,7 @@ struct ExecutionGroupedAggregateStateAddressState {
 		return false;
 	}
 	virtual bool TryUpdateNewGroupsWithSelectedStateAddresses(
-	    DataChunk &input, const ExecutionRegionSinkInfo &sink_info,
+	    DataChunk &input, const ExecutionRegionAggregateSinkInfo &sink_info,
 	    ExecutionGroupedAggregateStateSelectedAddressUpdateFunction update_function, void *update_state,
 	    optional_ptr<ExecutionOperatorStageRecorder> recorder = nullptr,
 	    optional_ptr<Vector> precomputed_hashes = nullptr,
@@ -181,7 +181,7 @@ struct ExecutionGroupedAggregateStateAddressState {
 		return false;
 	}
 	virtual bool TryUpdateGroupKeysWithSelectedStateAddresses(
-	    DataChunk &groups, const ExecutionRegionSinkInfo &sink_info,
+	    DataChunk &groups, const ExecutionRegionAggregateSinkInfo &sink_info,
 	    ExecutionGroupedAggregateStateSelectedAddressUpdateFunction update_function, void *update_state,
 	    optional_ptr<ExecutionOperatorStageRecorder> recorder = nullptr,
 	    optional_ptr<Vector> precomputed_hashes = nullptr,
@@ -198,7 +198,7 @@ struct ExecutionGroupedAggregateStateAddressState {
 	virtual bool
 	TryFindOrCreateRowPointerGroupStateTargets(DataChunk &payload_input, Vector &row_pointers, idx_t count,
 	                                           const vector<ExecutionRowPointerGroupKeySource> &group_sources,
-	                                           const ExecutionRegionSinkInfo &sink_info,
+	                                           const ExecutionRegionAggregateSinkInfo &sink_info,
 	                                           ExecutionGroupedAggregateStateTargetBatch &targets,
 	                                           optional_ptr<ExecutionOperatorStageRecorder> recorder = nullptr) {
 		(void)payload_input;
@@ -212,7 +212,7 @@ struct ExecutionGroupedAggregateStateAddressState {
 	}
 	virtual bool TryFindOrCreateInputVectorGroupStateTargets(
 	    DataChunk &payload_input, idx_t count, const vector<ExecutionRowPointerGroupKeySource> &group_sources,
-	    const ExecutionRegionSinkInfo &sink_info, ExecutionGroupedAggregateStateTargetBatch &targets,
+	    const ExecutionRegionAggregateSinkInfo &sink_info, ExecutionGroupedAggregateStateTargetBatch &targets,
 	    optional_ptr<ExecutionOperatorStageRecorder> recorder = nullptr,
 	    optional_ptr<const ExecutionDenseGroupDomain> dense_domain = nullptr) {
 		(void)payload_input;
@@ -226,7 +226,7 @@ struct ExecutionGroupedAggregateStateAddressState {
 	}
 	virtual bool TryUpdateInputVectorGroupCountOne(
 	    DataChunk &payload_input, idx_t count, const vector<ExecutionRowPointerGroupKeySource> &group_sources,
-	    const ExecutionRegionSinkInfo &sink_info, const ExecutionPrimitiveAggregateUpdateLane &lane,
+	    const ExecutionRegionAggregateSinkInfo &sink_info, const ExecutionPrimitiveAggregateUpdateLane &lane,
 	    optional_ptr<ExecutionOperatorStageRecorder> recorder = nullptr,
 	    optional_ptr<const ExecutionDenseGroupDomain> dense_domain = nullptr) {
 		(void)payload_input;
@@ -241,7 +241,7 @@ struct ExecutionGroupedAggregateStateAddressState {
 	virtual bool TryUpdateRowPointerGroupPayloads(DataChunk &payload_input, Vector &row_pointers, idx_t count,
 	                                              const vector<ExecutionRowPointerGroupKeySource> &group_sources,
 	                                              const vector<idx_t> &payload_source_indices,
-	                                              const ExecutionRegionSinkInfo &sink_info,
+	                                              const ExecutionRegionAggregateSinkInfo &sink_info,
 	                                              const vector<const ExecutionPrimitiveAggregateUpdateLane *> &lanes,
 	                                              optional_ptr<ExecutionOperatorStageRecorder> recorder = nullptr) {
 		(void)payload_input;
@@ -255,7 +255,7 @@ struct ExecutionGroupedAggregateStateAddressState {
 		return false;
 	}
 	virtual bool
-	TryAppendNewGroupsWithStateAddresses(DataChunk &input, const ExecutionRegionSinkInfo &sink_info,
+	TryAppendNewGroupsWithStateAddresses(DataChunk &input, const ExecutionRegionAggregateSinkInfo &sink_info,
 	                                     ExecutionGroupedAggregateStateAddressUpdateFunction update_function,
 	                                     void *update_state,
 	                                     optional_ptr<ExecutionOperatorStageRecorder> recorder = nullptr,
@@ -269,7 +269,7 @@ struct ExecutionGroupedAggregateStateAddressState {
 		return false;
 	}
 	virtual bool
-	TryAppendNewGroupKeysWithStateAddresses(DataChunk &groups, const ExecutionRegionSinkInfo &sink_info,
+	TryAppendNewGroupKeysWithStateAddresses(DataChunk &groups, const ExecutionRegionAggregateSinkInfo &sink_info,
 	                                        ExecutionGroupedAggregateStateAddressUpdateFunction update_function,
 	                                        void *update_state,
 	                                        optional_ptr<ExecutionOperatorStageRecorder> recorder = nullptr,
@@ -429,35 +429,6 @@ struct ExecutionHashJoinBuildBinding {
 	string blocker;
 };
 
-struct ExecutionNestedLoopJoinProbeBinding {
-	bool ready = false;
-	ExecutionRegionJoinType join_type = ExecutionRegionJoinType::INVALID;
-	vector<ExecutionRegionComparisonType> comparison_types;
-	vector<LogicalType> condition_types;
-	vector<LogicalType> output_types;
-	bool empty_build_side = false;
-	ColumnDataCollection *right_condition_data = nullptr;
-	ColumnDataCollection *right_payload_data = nullptr;
-	ColumnDataScanState *condition_scan_state = nullptr;
-	ColumnDataScanState *payload_scan_state = nullptr;
-	DataChunk *right_condition = nullptr;
-	DataChunk *right_payload = nullptr;
-	idx_t *left_tuple = nullptr;
-	idx_t *right_tuple = nullptr;
-	bool *fetch_next_left = nullptr;
-	bool *fetch_next_right = nullptr;
-	string blocker;
-};
-
-struct ExecutionNestedLoopJoinBuildBinding {
-	bool ready = false;
-	ColumnDataCollection *right_condition_data = nullptr;
-	ColumnDataCollection *right_payload_data = nullptr;
-	mutex *lock = nullptr;
-	vector<LogicalType> condition_types;
-	string blocker;
-};
-
 struct ExecutionAppendSinkBinding {
 	bool ready = false;
 	shared_ptr<ExecutionAppendSinkState> state;
@@ -490,7 +461,6 @@ struct ExecutionOperatorBinding {
 	bool ready = false;
 	ExecutionRegionOperatorContractKind kind = ExecutionRegionOperatorContractKind::NONE;
 	ExecutionHashJoinProbeBinding hash_join_probe;
-	ExecutionNestedLoopJoinProbeBinding nested_loop_join_probe;
 	string blocker;
 };
 
@@ -498,7 +468,6 @@ struct ExecutionSinkBinding {
 	bool ready = false;
 	ExecutionRegionSinkKind kind = ExecutionRegionSinkKind::NONE;
 	ExecutionHashJoinBuildBinding hash_join_build;
-	ExecutionNestedLoopJoinBuildBinding nested_loop_join_build;
 	ExecutionAppendSinkBinding append_sink;
 	ExecutionOrderedSinkBinding ordered_sink;
 	ExecutionDelimJoinSinkBinding delim_join_sink;
@@ -552,7 +521,7 @@ ExecutionMaterializeHashJoinResidualSources(const ExecutionHashJoinProbeBinding 
                                             optional_ptr<ExecutionOperatorStageRecorder> recorder = nullptr);
 
 DUCKDB_API bool ExecutionBindHashJoinBuild(ExecutionContext &context, OperatorSinkInput &input, DataChunk &chunk,
-                                           const ExecutionRegionSinkInfo &sink_info, ExecutionSinkBinding &binding);
+                                           const ExecutionRegionHashJoinInfo &sink_info, ExecutionSinkBinding &binding);
 
 DUCKDB_API void ExecutionHashJoinBuildReferenceKeys(const ExecutionHashJoinBuildBinding &binding, DataChunk &input);
 //! Records the build chunk's keys (join-filter min/max, perfect-hash build bounds) exactly as the native Sink does
@@ -574,7 +543,7 @@ DUCKDB_API SinkResultType ExecutionSinkAppend(const ExecutionAppendSinkBinding &
 DUCKDB_API SinkResultType ExecutionSinkOrdered(const ExecutionOrderedSinkBinding &binding, DataChunk &order_keys,
                                                DataChunk &payload);
 //! Validates the ordered-sink contract of an ORDER BY or TOP N sink; returns the blocker, empty when bindable.
-string ValidateExecutionOrderedSink(const ExecutionRegionSinkInfo &sink_info,
+string ValidateExecutionOrderedSink(const ExecutionRegionOrderSinkInfo &sink_info,
                                     ExecutionRegionOperatorKind expected_kind);
 
 } // namespace duckdb

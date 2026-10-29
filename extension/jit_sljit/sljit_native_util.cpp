@@ -42,17 +42,28 @@ string NativeUnsignedIntegerTypeName(SljitNativeUnsignedIntegerWidth width) {
 	}
 }
 
-void SljitIntegerCastChain::ThrowCastError(int64_t source_value) const {
+void SljitBoundIntegerCastChain::ThrowCastError(int64_t source_value) const {
+	if (!chain || !runtime) {
+		throw InternalException("SLJIT cast error has no execution binding");
+	}
+	chain->ThrowCastError(source_value, SljitCastErrorBindings(*runtime.get_mutable()));
+}
+
+void SljitIntegerCastChain::ThrowCastError(int64_t source_value, const vector<SljitCastErrorIdentity> &errors) const {
 	auto value = Value::BIGINT(source_value).DefaultCastAs(source_type);
 	for (auto &step : steps) {
 		string error;
 		auto result = value.DefaultTryCastAs(step.target_type, &error);
 		if (!result) {
-			// the message DuckDB's cast raises for its expression (HandleCastError::AssignError)
-			if (!step.source_alias.empty()) {
-				error += " when casting from source column " + step.source_alias;
+			if (step.error_binding >= errors.size()) {
+				throw InternalException("SLJIT cast error identity is not bound");
 			}
-			throw ConversionException(step.query_location, error);
+			auto &identity = errors[step.error_binding];
+			// the message DuckDB's cast raises for its expression (HandleCastError::AssignError)
+			if (!identity.source_alias.empty()) {
+				error += " when casting from source column " + identity.source_alias;
+			}
+			throw ConversionException(identity.query_location, error);
 		}
 		value = std::move(*result);
 	}

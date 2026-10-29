@@ -14,12 +14,12 @@
 namespace duckdb {
 
 static bool SljitCountStarFixedWidthProjectionInputSupported(const SljitExecutableRegionOp &projection_op) {
-	if (projection_op.kind != SljitNativeRegionOpKind::PROJECTION || projection_op.projections.size() != 1 ||
+	if (projection_op.Kind() != SljitNativeRegionOpKind::PROJECTION || projection_op.Projections().size() != 1 ||
 	    projection_op.output_types.size() != 1) {
 		return false;
 	}
 	idx_t source_index;
-	auto &projection = projection_op.projections[0].plan;
+	auto &projection = projection_op.Projections()[0].plan;
 	return TryReadProjectionSourceReferenceIndex(projection, source_index) &&
 	       source_index < projection_op.input_types.size() && projection.return_type == projection_op.output_types[0] &&
 	       projection_op.input_types[source_index] == projection_op.output_types[0] &&
@@ -47,11 +47,11 @@ static bool SljitStringCompressedCountStarProjectionTypeSupported(PhysicalType p
 static bool SljitTryReadStringCompressedCountStarProjectionInput(const SljitExecutableRegionOp &projection_op,
                                                                  SljitStringCompressedCountStarProjectionInput &input) {
 	input = SljitStringCompressedCountStarProjectionInput();
-	if (projection_op.kind != SljitNativeRegionOpKind::PROJECTION || projection_op.projections.size() != 1 ||
+	if (projection_op.Kind() != SljitNativeRegionOpKind::PROJECTION || projection_op.Projections().size() != 1 ||
 	    projection_op.output_types.size() != 1) {
 		return false;
 	}
-	auto &projection = projection_op.projections[0].plan;
+	auto &projection = projection_op.Projections()[0].plan;
 	if (projection.kind != SljitNativeRegionExpressionKind::STRING_COMPRESS ||
 	    projection.return_type != projection_op.output_types[0] ||
 	    projection.source_index >= projection_op.input_types.size() ||

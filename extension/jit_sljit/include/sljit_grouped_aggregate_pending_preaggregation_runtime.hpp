@@ -117,7 +117,7 @@ static bool SljitExecuteBoundGeneratedPrimitiveRunsIntoPending(
 				throw InternalException(
 				    "SLJIT generated primitive run update could not preserve its progression boundary");
 			}
-			RecordSljitRegionRuntimePath(runtime, op.kind, "pending_preaggregated_group_progression_boundary_flush");
+			RecordSljitRegionRuntimePath(runtime, op.Kind(), "pending_preaggregated_group_progression_boundary_flush");
 		}
 	}
 	const bool output_bound = shared_affine_output ? SljitBindGeneratedFusedAffinePrimitiveRunOutput<TARGET_TYPE>(
@@ -135,7 +135,7 @@ static bool SljitExecuteBoundGeneratedPrimitiveRunsIntoPending(
 	bool merge_existing_affine_group = false;
 	if (!pending.Empty()) {
 		if (SljitPendingPreaggregatedPrimitiveLastGroupMatches<TARGET_TYPE>(pending, first_key)) {
-			RecordSljitRegionRuntimePath(runtime, op.kind, "pending_preaggregated_group_boundary_merge");
+			RecordSljitRegionRuntimePath(runtime, op.Kind(), "pending_preaggregated_group_boundary_merge");
 			merge_existing_affine_group = shared_affine_output;
 		}
 	}
@@ -203,15 +203,16 @@ static bool SljitExecuteBoundGeneratedPrimitiveRunsIntoPending(
 			throw InternalException("SLJIT generated primitive run update lost its fixed output binding");
 		}
 	}
-	RecordSljitRegionStageRuntime(runtime, op_idx, op.kind, path_name, generated_start);
-	RecordSljitRegionRuntimePath(runtime, op.kind, path_name, count);
+	RecordSljitRegionStageRuntime(runtime, op_idx, op.Kind(), path_name, generated_start);
+	RecordSljitRegionRuntimePath(runtime, op.Kind(), path_name, count);
 	if (shared_payload_validity) {
-		RecordSljitRegionRuntimePath(runtime, op.kind, "generated_primitive_group_runs.shared_payload_validity", count);
+		RecordSljitRegionRuntimePath(runtime, op.Kind(), "generated_primitive_group_runs.shared_payload_validity",
+		                             count);
 	}
 	if (group_source.source->cast_kind == ExecutionRowPointerGroupKeyCastKind::INTEGRAL_COMPRESS) {
-		RecordSljitRegionRuntimePath(runtime, op.kind, "generated_primitive_group_cast.integral_compress", count);
+		RecordSljitRegionRuntimePath(runtime, op.Kind(), "generated_primitive_group_cast.integral_compress", count);
 	}
-	RecordSljitRegionGeneratedWork(runtime, op.kind, count);
+	RecordSljitRegionGeneratedWork(runtime, op.Kind(), count);
 	if (finish &&
 	    !SljitFlushPendingPreaggregatedPrimitiveGroups(runtime, scratch, op_idx, op, pending, grouped_state)) {
 		throw InternalException("SLJIT generated primitive run update final flush failed");
@@ -230,7 +231,7 @@ static bool TryExecuteGeneratedPrimitiveRunsIntoPending(
 	auto reject = [&](const char *blocker) {
 		if (runtime.TraceRuntime()) {
 			auto path = string("generated_pending_primitive_group_runs_miss.") + blocker;
-			RecordSljitRegionRuntimePath(runtime, op.kind, path.c_str(), count);
+			RecordSljitRegionRuntimePath(runtime, op.Kind(), path.c_str(), count);
 		}
 		return false;
 	};
@@ -239,7 +240,7 @@ static bool TryExecuteGeneratedPrimitiveRunsIntoPending(
 	bool shared_payload_validity = false;
 	const char *blocker = nullptr;
 	if (!SljitTryBindGeneratedPrimitiveRunSource(
-	        runtime, op.aggregate_update.primitive_run_update, group_source, payload_sources, payload_lanes, count,
+	        runtime, op.AggregateUpdate().primitive_run_update, group_source, payload_sources, payload_lanes, count,
 	        pending.generated_run_lane_inputs, native_input, function, shared_payload_validity, blocker)) {
 		return reject(blocker ? blocker : "binding");
 	}
@@ -262,7 +263,7 @@ static bool TryExecuteGeneratedFusedAffinePrimitiveRunsIntoPending(
 	auto reject = [&](const char *blocker) {
 		if (runtime.TraceRuntime()) {
 			auto path = string("generated_pending_fused_affine_primitive_group_runs_miss.") + blocker;
-			RecordSljitRegionRuntimePath(runtime, op.kind, path.c_str(), count);
+			RecordSljitRegionRuntimePath(runtime, op.Kind(), path.c_str(), count);
 		}
 		return false;
 	};
@@ -284,10 +285,10 @@ static bool TryExecuteGeneratedFusedAffinePrimitiveRunsIntoPending(
 	pending.scratch.shared_valid_counts_are_row_counts = valid_counts_are_row_counts;
 	if (runtime.TraceRuntime()) {
 		if (valid_counts_are_row_counts) {
-			RecordSljitRegionRuntimePath(runtime, op.kind, "generated_fused_affine.valid_count_row_alias", count);
+			RecordSljitRegionRuntimePath(runtime, op.Kind(), "generated_fused_affine.valid_count_row_alias", count);
 		}
-		if (op.aggregate_update.fused_affine_run_update.lanes_form_arithmetic_progression) {
-			RecordSljitRegionRuntimePath(runtime, op.kind, "generated_fused_affine.lane_progression", count);
+		if (op.AggregateUpdate().fused_affine_run_update.lanes_form_arithmetic_progression) {
+			RecordSljitRegionRuntimePath(runtime, op.Kind(), "generated_fused_affine.lane_progression", count);
 		}
 	}
 	if (!SljitExecuteBoundGeneratedPrimitiveRunsIntoPending<TARGET_TYPE>(
@@ -510,7 +511,7 @@ static bool TryPreaggregateInputVectorPrimitiveGroupsIntoPendingWithAccumulator(
 				accumulator.StartPendingGroup(active_group_idx);
 				pending.count++;
 			} else {
-				RecordSljitRegionRuntimePath(runtime, op.kind, "pending_preaggregated_group_boundary_merge");
+				RecordSljitRegionRuntimePath(runtime, op.Kind(), "pending_preaggregated_group_boundary_merge");
 				active_group_idx = pending.Count() - 1;
 			}
 			active_key = key;
@@ -603,7 +604,7 @@ static bool SljitReplayInputVectorPrimitiveGroupsIntoPending(
 					throw InternalException("SLJIT proven pending preaggregated group append failed");
 				}
 			} else {
-				RecordSljitRegionRuntimePath(runtime, op.kind, "pending_preaggregated_group_boundary_merge");
+				RecordSljitRegionRuntimePath(runtime, op.Kind(), "pending_preaggregated_group_boundary_merge");
 			}
 			active_key = key;
 			has_active_key = true;
@@ -687,7 +688,7 @@ SljitTryPreparePendingPrimitiveRunInput(ExecutionRegionRuntime &runtime, SljitEx
                                         SljitPreaggregatedInputVectorGroupKeySource &group_source,
                                         SljitPreaggregatedPrimitivePayloadLayout payload_layout, const char *&blocker) {
 	blocker = nullptr;
-	auto &sink_info = op.aggregate_update.plan.sink_info;
+	auto &sink_info = op.AggregateUpdate().plan.sink_info;
 	if (input.size() < 2 || sink_info.groups.size() != 1 || group_sources.size() != 1 ||
 	    sink_info.groups[0].type.InternalType() != group_sources[0].target_physical_type) {
 		blocker = "shape";
@@ -752,7 +753,7 @@ static bool TryPreaggregateInputVectorFusedAffinePrimitiveGroupsIntoPendingTempl
 	auto reject = [&](const char *blocker) {
 		if (runtime.TraceRuntime()) {
 			auto path = string("pending_fused_affine_primitive_group_runs_miss.") + blocker;
-			RecordSljitRegionRuntimePath(runtime, op.kind, path.c_str(), input.size());
+			RecordSljitRegionRuntimePath(runtime, op.Kind(), path.c_str(), input.size());
 		}
 		return false;
 	};
@@ -784,7 +785,7 @@ static bool TryPreaggregateInputVectorPrimitiveGroupsIntoPendingTemplated(
 	auto reject = [&](const char *blocker) {
 		if (runtime.TraceRuntime()) {
 			auto path = string("pending_primitive_group_runs_miss.") + blocker;
-			RecordSljitRegionRuntimePath(runtime, op.kind, path.c_str(), count);
+			RecordSljitRegionRuntimePath(runtime, op.Kind(), path.c_str(), count);
 		}
 		return false;
 	};
@@ -870,7 +871,7 @@ static bool TryPreaggregateInputVectorFusedAffinePrimitiveGroupsIntoPending(
     const vector<const ExecutionPrimitiveAggregateUpdateLane *> &payload_lanes,
     ExecutionGroupedAggregateStateAddressBinding &grouped_state, SljitPendingPreaggregatedPrimitiveGroupBatch &pending,
     bool finish) {
-	if (group_sources.size() != 1 || !op.aggregate_update.fused_affine_run_update.Ready()) {
+	if (group_sources.size() != 1 || !op.AggregateUpdate().fused_affine_run_update.Ready()) {
 		return false;
 	}
 	SljitPendingFusedAffinePreaggregationTargetDispatch dispatch {

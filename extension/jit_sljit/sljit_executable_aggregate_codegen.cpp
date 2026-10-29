@@ -103,7 +103,7 @@ static bool TryBuildUngroupedFusedAggregateUpdate(const SljitNativeAggregateUpda
                                                   SljitExecutableAggregateUpdate &executable, string &error,
                                                   const vector<bool> &input_not_null) {
 	if (!op.UsesPrimitivePayloads() || op.use_grouped_state_addresses ||
-	    op.sink_info.kind != ExecutionRegionSinkKind::UNGROUPED_AGGREGATE_UPDATE ||
+	    op.sink_info.Kind() != ExecutionRegionSinkKind::UNGROUPED_AGGREGATE_UPDATE ||
 	    op.payloads.size() != op.sink_info.aggregates.size()) {
 		return true;
 	}
@@ -154,7 +154,7 @@ static bool TryBuildPerfectHashGroupedFusedAggregateUpdate(const SljitNativeAggr
 	string fused_error;
 	auto fused_code = BuildSljitNativePerfectHashGroupedFusedAggregateUpdate(
 	    payloads.codegen_payloads, op.sink_info.aggregates, op.sink_info.groups, payloads.codegen_group_expressions,
-	    op.sink_info.aggregate_contract, payloads.combined_source_not_null, payloads.combined_source_min_values,
+	    op.sink_info.contract, payloads.combined_source_not_null, payloads.combined_source_min_values,
 	    payloads.combined_source_max_values, fused_function, fused_error);
 	auto compiled =
 	    SljitCompiledFunction<SljitNativeAggregateUpdateFunction>::TryCreate(std::move(fused_code), fused_function);
@@ -190,8 +190,7 @@ static bool TryBuildGroupedFusedTypedExpressionAggregateUpdate(const SljitNative
 	SljitNativeAggregateUpdateFunction fused_function = nullptr;
 	string fused_error;
 	auto fused_code = BuildSljitNativeGroupedFusedTypedExpressionAggregateUpdate(
-	    payloads.codegen_payloads, op.sink_info.aggregates, op.sink_info.aggregate_contract, fused_function,
-	    fused_error);
+	    payloads.codegen_payloads, op.sink_info.aggregates, op.sink_info.contract, fused_function, fused_error);
 	auto compiled =
 	    SljitCompiledFunction<SljitNativeAggregateUpdateFunction>::TryCreate(std::move(fused_code), fused_function);
 	if (compiled.IsExecutable()) {
@@ -268,8 +267,6 @@ void SljitBuildExecutableAggregateUpdateMetadata(const SljitNativeAggregateUpdat
                                                  const vector<bool> &input_not_null) {
 	executable.plan.sink_info = op.sink_info;
 	executable.plan.input_types = op.input_types;
-	executable.plan.estimated_input_count = op.estimated_input_count;
-	executable.plan.group_reserve = op.group_reserve;
 	executable.plan.payload_binding_state = op.payload_binding_state;
 	executable.plan.use_grouped_state_addresses = op.use_grouped_state_addresses;
 	executable.plan.use_perfect_hash_group_lookup = op.use_perfect_hash_group_lookup;
@@ -364,8 +361,8 @@ bool SljitBuildExecutableAggregateUpdatePayloadCode(const SljitNativeAggregateUp
 		SljitNativeAggregateUpdateFunction fused_function = nullptr;
 		string fused_error;
 		auto fused_code = BuildSljitNativePerfectHashGroupedFusedPrimitiveAggregateUpdate(
-		    op.payloads, op.sink_info.aggregates, op.sink_info.groups, op.group_expressions,
-		    op.sink_info.aggregate_contract, fused_function, fused_error);
+		    op.payloads, op.sink_info.aggregates, op.sink_info.groups, op.group_expressions, op.sink_info.contract,
+		    fused_function, fused_error);
 		auto compiled =
 		    SljitCompiledFunction<SljitNativeAggregateUpdateFunction>::TryCreate(std::move(fused_code), fused_function);
 		if (compiled.IsExecutable()) {
@@ -382,7 +379,7 @@ bool SljitBuildExecutableAggregateUpdatePayloadCode(const SljitNativeAggregateUp
 		SljitNativeAggregateUpdateFunction fused_function = nullptr;
 		string fused_error;
 		auto fused_code = BuildSljitNativeGroupedFusedPrimitiveAggregateUpdate(
-		    op.payloads, op.sink_info.aggregates, op.sink_info.aggregate_contract, fused_function, fused_error);
+		    op.payloads, op.sink_info.aggregates, op.sink_info.contract, fused_function, fused_error);
 		auto compiled =
 		    SljitCompiledFunction<SljitNativeAggregateUpdateFunction>::TryCreate(std::move(fused_code), fused_function);
 		if (compiled.IsExecutable()) {
@@ -603,7 +600,7 @@ void SljitPlanExecutablePrimitiveRunUpdate(const SljitNativeAggregateUpdatePlan 
                                            SljitExecutableAggregateUpdate &executable) {
 	SljitPlanExecutableFusedAffineRunUpdate(executable);
 	auto &sink = op.sink_info;
-	if (sink.kind != ExecutionRegionSinkKind::HASH_AGGREGATE_UPDATE || !op.UsesPrimitivePayloads() ||
+	if (sink.Kind() != ExecutionRegionSinkKind::HASH_AGGREGATE_UPDATE || !op.UsesPrimitivePayloads() ||
 	    !op.use_grouped_state_addresses || op.use_perfect_hash_group_lookup || sink.groups.size() != 1 ||
 	    sink.aggregates.empty() || sink.aggregates.size() != executable.payload_descriptors.size() ||
 	    !SljitPrimitiveRunCodegenSupported()) {
@@ -617,11 +614,11 @@ void SljitPlanExecutablePrimitiveRunUpdate(const SljitNativeAggregateUpdatePlan 
 	primitive_kinds.reserve(executable.payload_descriptors.size());
 	state_offsets.reserve(executable.payload_descriptors.size());
 	for (auto &descriptor : executable.payload_descriptors) {
-		if (!sink.aggregate_contract.grouped_state_layout_ready ||
-		    descriptor.aggregate_index >= sink.aggregate_contract.grouped_state_offsets.size()) {
+		if (!sink.contract.grouped_state_layout_ready ||
+		    descriptor.aggregate_index >= sink.contract.grouped_state_offsets.size()) {
 			return;
 		}
-		const auto state_offset = sink.aggregate_contract.grouped_state_offsets[descriptor.aggregate_index];
+		const auto state_offset = sink.contract.grouped_state_offsets[descriptor.aggregate_index];
 		if (state_offset == DConstants::INVALID_INDEX) {
 			return;
 		}
@@ -849,7 +846,7 @@ void SljitSelectExecutableAggregateDirectUpdatePlan(SljitExecutableAggregateUpda
 	auto &direct_update = executable.grouped_direct_update;
 	direct_update.Clear();
 	auto &plan = executable.plan;
-	if (plan.sink_info.kind != ExecutionRegionSinkKind::HASH_AGGREGATE_UPDATE || !plan.UsesPrimitivePayloads() ||
+	if (plan.sink_info.Kind() != ExecutionRegionSinkKind::HASH_AGGREGATE_UPDATE || !plan.UsesPrimitivePayloads() ||
 	    !plan.use_grouped_state_addresses || plan.use_perfect_hash_group_lookup ||
 	    executable.fused_payload_update_owns_group_lookup) {
 		return;

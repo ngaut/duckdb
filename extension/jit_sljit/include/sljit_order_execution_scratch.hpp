@@ -22,8 +22,8 @@ struct SljitOrderExecutionScratch {
 	}
 
 	void InitializeSink(Allocator &allocator, idx_t op_idx, const SljitExecutableRegionOp &op) {
-		SljitInitializeScratchChunk(allocator, op.order_sink.plan.key_types, key_chunks[op_idx]);
-		SljitInitializeScratchChunk(allocator, op.order_sink.plan.input_types, payload_chunks[op_idx]);
+		SljitInitializeScratchChunk(allocator, op.OrderSink().plan.key_types, key_chunks[op_idx]);
+		SljitInitializeScratchChunk(allocator, op.OrderSink().plan.input_types, payload_chunks[op_idx]);
 	}
 
 	DataChunk &KeyChunk(idx_t op_idx) {

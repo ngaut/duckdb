@@ -23,7 +23,7 @@ namespace duckdb {
 
 struct SljitProjectionChainSyntheticProjectionScratch {
 	void Ensure(const SljitExecutableRegionOp &projection_op) {
-		expression_adapter_scratch.resize(projection_op.projections.size());
+		expression_adapter_scratch.resize(projection_op.Projections().size());
 	}
 
 	SljitProjectionAdapterScratch &ProjectionScratch(idx_t op_idx) {
@@ -75,7 +75,7 @@ static bool SljitAppendProjectionChainOutputBatch(ExecutionRegionRuntime &runtim
 }
 
 static bool SljitProjectionHasVariableWidthOutput(const SljitExecutableRegionOp &projection_op) {
-	if (projection_op.kind != SljitNativeRegionOpKind::PROJECTION) {
+	if (projection_op.Kind() != SljitNativeRegionOpKind::PROJECTION) {
 		return false;
 	}
 	for (auto &type : projection_op.output_types) {
@@ -179,7 +179,7 @@ static bool SljitExecuteProjectionChainPrimitiveDirectHandoff(
 	if (SljitProjectionHasVariableWidthOutput(bound_projection_op) &&
 	    SljitTrySliceReferenceProjection(output, source_chunk, bound_projection_op, selection, count)) {
 		auto handoff_stage_start = SljitRegionStageStart(runtime);
-		RecordSljitRegionStageRuntime(runtime, primitive.final_projection_idx, bound_projection_op.kind,
+		RecordSljitRegionStageRuntime(runtime, primitive.final_projection_idx, bound_projection_op.Kind(),
 		                              "reference_view_handoff", handoff_stage_start);
 		return output.size() > 0 && execute_output_batch(output);
 	}
@@ -285,7 +285,7 @@ static bool SljitExecuteProjectionChainPrimitive(
 				batch.Append(filtered);
 			}
 		}
-		RecordSljitRegionStageRuntime(runtime, primitive.final_projection_idx, bound_projection_op.kind,
+		RecordSljitRegionStageRuntime(runtime, primitive.final_projection_idx, bound_projection_op.Kind(),
 		                              "projection_buffer_append", append_stage_start);
 	}
 	return batch.size() == STANDARD_VECTOR_SIZE && flush_output_batch();

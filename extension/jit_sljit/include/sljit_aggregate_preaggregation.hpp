@@ -28,7 +28,7 @@ static bool TryPreaggregateBoundedPrimitiveGroupsTemplated(
     const vector<const ExecutionPrimitiveAggregateUpdateLane *> &payload_lanes, DataChunk &compact_groups,
     SljitPreaggregatedPrimitiveAggregateScratch &scratch) {
 	const auto count = input.size();
-	auto &sink_info = op.aggregate_update.plan.sink_info;
+	auto &sink_info = op.AggregateUpdate().plan.sink_info;
 	if (count < 2 || sink_info.groups.size() != 1 || compact_groups.ColumnCount() != 1) {
 		return false;
 	}
@@ -103,7 +103,7 @@ static bool TryPreaggregateConsecutivePrimitiveGroupsTemplated(
     const vector<const ExecutionPrimitiveAggregateUpdateLane *> &payload_lanes, DataChunk &compact_groups,
     SljitPreaggregatedPrimitiveAggregateScratch &scratch) {
 	const auto count = input.size();
-	auto &sink_info = op.aggregate_update.plan.sink_info;
+	auto &sink_info = op.AggregateUpdate().plan.sink_info;
 	if (count < 2 || sink_info.groups.size() != 1 || compact_groups.ColumnCount() != 1) {
 		return false;
 	}
@@ -244,7 +244,7 @@ TryPreaggregateConsecutivePrimitiveGroups(SljitExecutableRegionOp &op, DataChunk
                                           const vector<const ExecutionPrimitiveAggregateUpdateLane *> &payload_lanes,
                                           DataChunk &compact_groups,
                                           SljitPreaggregatedPrimitiveAggregateScratch &scratch) {
-	auto &sink_info = op.aggregate_update.plan.sink_info;
+	auto &sink_info = op.AggregateUpdate().plan.sink_info;
 	if (sink_info.groups.size() != 1 || compact_groups.ColumnCount() != 1) {
 		return false;
 	}
@@ -419,7 +419,7 @@ static bool TryPreaggregateInputVectorPrimitiveGroupRunsTemplated(
     const vector<const ExecutionPrimitiveAggregateUpdateLane *> &payload_lanes,
     SljitPreaggregatedPrimitiveAggregateScratch &scratch, optional_ptr<DataChunk> run_group_keys, idx_t &group_count) {
 	const auto count = input.size();
-	auto &sink_info = op.aggregate_update.plan.sink_info;
+	auto &sink_info = op.AggregateUpdate().plan.sink_info;
 	group_count = 0;
 	if (count < 2 || sink_info.groups.size() != 1 || group_sources.size() != 1 ||
 	    sink_info.groups[0].type.InternalType() != group_sources[0].target_physical_type) {

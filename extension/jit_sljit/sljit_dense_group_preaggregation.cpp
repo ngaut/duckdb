@@ -150,7 +150,7 @@ bool TryPreaggregateDensePrimitiveGroups(SljitExecutableRegionOp &op, DataChunk 
                                          const vector<const ExecutionPrimitiveAggregateUpdateLane *> &payload_lanes,
                                          DataChunk &compact_groups,
                                          SljitPreaggregatedPrimitiveAggregateScratch &scratch) {
-	auto &sink_info = op.aggregate_update.plan.sink_info;
+	auto &sink_info = op.AggregateUpdate().plan.sink_info;
 	if (sink_info.groups.size() != 1) {
 		return false;
 	}
@@ -184,7 +184,7 @@ bool TryPreaggregateDenseFusedPrimitiveGroups(
     const vector<const ExecutionPrimitiveAggregateUpdateLane *> &payload_lanes, DataChunk &compact_groups,
     const vector<SljitGroupedReductionLaneBinding> &reduction_lanes,
     SljitPreaggregatedPrimitiveAggregateScratch &scratch, SljitAggregatePayloadAdapterScratch &payload_scratch) {
-	auto &aggregate_update = op.aggregate_update;
+	auto &aggregate_update = op.AggregateUpdate();
 	auto &sink_info = aggregate_update.plan.sink_info;
 	if (sink_info.groups.size() != 1) {
 		return false;
@@ -215,7 +215,7 @@ bool TryPreaggregateDenseFusedPrimitiveGroups(
 		scratch.fused_row_state_addresses[row_idx] = SljitFusedPreaggregatedPrimitiveStateAddress(scratch, group_idx);
 	}
 	SljitExecuteFusedGroupedPrimitiveAggregatePayloadUpdate(
-	    aggregate_update.payloads, aggregate_update.fused_payload_update.Function(), sink_info.aggregate_contract,
+	    aggregate_update.payloads, aggregate_update.fused_payload_update.Function(), sink_info.contract,
 	    aggregate_update.payload_descriptors, aggregate_update.payload_source_layout,
 	    aggregate_update.combined_payload_source_indices, aggregate_update.combined_payload_source_not_null,
 	    payload_lanes, reduction_lanes, input, scratch.fused_row_state_addresses.data(), nullptr, nullptr, false,

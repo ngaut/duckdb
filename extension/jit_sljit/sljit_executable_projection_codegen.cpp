@@ -107,12 +107,12 @@ static bool SljitCanUseFlatFusedFixedProjection(const SljitExecutableRegionExpre
 
 static bool TryPlanFlatFusedFixedProjection(SljitExecutableRegionOp &op, SljitNativeIntegerKind integer_kind,
                                             SljitDirectProjectionPlan &direct_plan) {
-	if (op.projections.size() < 2) {
+	if (op.Projections().size() < 2) {
 		return false;
 	}
 	vector<idx_t> projection_indices;
-	for (idx_t projection_idx = 0; projection_idx < op.projections.size(); projection_idx++) {
-		auto &projection = op.projections[projection_idx];
+	for (idx_t projection_idx = 0; projection_idx < op.Projections().size(); projection_idx++) {
+		auto &projection = op.Projections()[projection_idx];
 		if (SljitCanUseFlatFusedFixedProjection(projection, integer_kind)) {
 			projection_indices.push_back(projection_idx);
 		}
@@ -122,8 +122,8 @@ static bool TryPlanFlatFusedFixedProjection(SljitExecutableRegionOp &op, SljitNa
 	}
 	direct_plan = SljitDirectProjectionPlan();
 	direct_plan.projection_indices = projection_indices;
-	direct_plan.covers_all_projections = projection_indices.size() == op.projections.size();
-	if (!TryPlanSljitDirectProjectionSources(op.projections, direct_plan)) {
+	direct_plan.covers_all_projections = projection_indices.size() == op.Projections().size();
+	if (!TryPlanSljitDirectProjectionSources(op.Projections(), direct_plan)) {
 		return false;
 	}
 	return true;
@@ -134,7 +134,7 @@ static bool TryBuildFlatFusedFixedProjection(SljitExecutableRegionOp &op, string
 	    SljitNativeIntegerKind::INT32, SljitNativeIntegerKind::INT64, SljitNativeIntegerKind::DECIMAL64,
 	    SljitNativeIntegerKind::DATE};
 
-	auto projection_plans = BuildSljitProjectionPlans(op.projections);
+	auto projection_plans = BuildSljitProjectionPlans(op.Projections());
 	for (auto integer_kind : FIXED_FUSED_KINDS) {
 		SljitDirectProjectionPlan direct_plan;
 		if (!TryPlanFlatFusedFixedProjection(op, integer_kind, direct_plan)) {
@@ -152,8 +152,8 @@ static bool TryBuildFlatFusedFixedProjection(SljitExecutableRegionOp &op, string
 			error = fused_error;
 			return false;
 		}
-		op.flat_fused_fixed_projection_plans.push_back(std::move(direct_plan));
-		op.flat_fused_fixed_projections.emplace_back(std::move(code), function);
+		op.FlatFusedProjectionPlans().push_back(std::move(direct_plan));
+		op.FlatFusedProjections().emplace_back(std::move(code), function);
 	}
 	return true;
 }

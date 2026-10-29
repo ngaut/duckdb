@@ -356,7 +356,7 @@ private:
 		return !op.distinct_collection_info && HasSingleGroupingState();
 	}
 
-	bool CanFindRowPointerGroupStateTargets(const ExecutionRegionSinkInfo &sink_info) const {
+	bool CanFindRowPointerGroupStateTargets(const ExecutionRegionAggregateSinkInfo &sink_info) const {
 		(void)sink_info;
 		return CanUseSingleGroupingState();
 	}
@@ -399,7 +399,7 @@ public:
 		return single_grouping.grouping.table_data.ReserveGroups(context, single_grouping.input, group_count, recorder);
 	}
 
-	bool TryUpdateNewGroups(DataChunk &input, const ExecutionRegionSinkInfo &sink_info,
+	bool TryUpdateNewGroups(DataChunk &input, const ExecutionRegionAggregateSinkInfo &sink_info,
 	                        const vector<const ExecutionPrimitiveAggregateUpdateLane *> &lanes,
 	                        optional_ptr<ExecutionOperatorStageRecorder> recorder = nullptr,
 	                        optional_ptr<const ExecutionDenseGroupDomain> dense_domain = nullptr) override {
@@ -411,12 +411,14 @@ public:
 		    context, input, single_grouping.input, sink_info, lanes, recorder, dense_domain);
 	}
 
-	bool TryUpdateNewGroupsWithPayloadInput(
-	    DataChunk &groups, DataChunk &payload_input, const vector<idx_t> &payload_source_indices,
-	    const ExecutionRegionSinkInfo &sink_info, const vector<const ExecutionPrimitiveAggregateUpdateLane *> &lanes,
-	    optional_ptr<ExecutionOperatorStageRecorder> recorder = nullptr,
-	    optional_ptr<Vector> precomputed_hashes = nullptr,
-	    optional_ptr<const ExecutionDenseGroupDomain> dense_domain = nullptr) override {
+	bool
+	TryUpdateNewGroupsWithPayloadInput(DataChunk &groups, DataChunk &payload_input,
+	                                   const vector<idx_t> &payload_source_indices,
+	                                   const ExecutionRegionAggregateSinkInfo &sink_info,
+	                                   const vector<const ExecutionPrimitiveAggregateUpdateLane *> &lanes,
+	                                   optional_ptr<ExecutionOperatorStageRecorder> recorder = nullptr,
+	                                   optional_ptr<Vector> precomputed_hashes = nullptr,
+	                                   optional_ptr<const ExecutionDenseGroupDomain> dense_domain = nullptr) override {
 		if (!CanUseSingleGroupingState()) {
 			return false;
 		}
@@ -426,7 +428,7 @@ public:
 		    precomputed_hashes, dense_domain);
 	}
 
-	bool TryAppendNewGroups(DataChunk &input, const ExecutionRegionSinkInfo &sink_info,
+	bool TryAppendNewGroups(DataChunk &input, const ExecutionRegionAggregateSinkInfo &sink_info,
 	                        const vector<const ExecutionPrimitiveAggregateUpdateLane *> &lanes,
 	                        optional_ptr<ExecutionOperatorStageRecorder> recorder = nullptr,
 	                        optional_ptr<const ExecutionDenseGroupDomain> dense_domain = nullptr) override {
@@ -439,7 +441,7 @@ public:
 	}
 
 	bool TryUpdateNewGroupsWithSelectedStateAddresses(
-	    DataChunk &input, const ExecutionRegionSinkInfo &sink_info,
+	    DataChunk &input, const ExecutionRegionAggregateSinkInfo &sink_info,
 	    ExecutionGroupedAggregateStateSelectedAddressUpdateFunction update_function, void *update_state,
 	    optional_ptr<ExecutionOperatorStageRecorder> recorder = nullptr,
 	    optional_ptr<Vector> precomputed_hashes = nullptr,
@@ -454,7 +456,7 @@ public:
 	}
 
 	bool TryUpdateGroupKeysWithSelectedStateAddresses(
-	    DataChunk &groups, const ExecutionRegionSinkInfo &sink_info,
+	    DataChunk &groups, const ExecutionRegionAggregateSinkInfo &sink_info,
 	    ExecutionGroupedAggregateStateSelectedAddressUpdateFunction update_function, void *update_state,
 	    optional_ptr<ExecutionOperatorStageRecorder> recorder = nullptr,
 	    optional_ptr<Vector> precomputed_hashes = nullptr,
@@ -470,8 +472,8 @@ public:
 
 	bool TryFindOrCreateRowPointerGroupStateTargets(
 	    DataChunk &payload_input, Vector &row_pointers, idx_t count,
-	    const vector<ExecutionRowPointerGroupKeySource> &group_sources, const ExecutionRegionSinkInfo &sink_info,
-	    ExecutionGroupedAggregateStateTargetBatch &targets,
+	    const vector<ExecutionRowPointerGroupKeySource> &group_sources,
+	    const ExecutionRegionAggregateSinkInfo &sink_info, ExecutionGroupedAggregateStateTargetBatch &targets,
 	    optional_ptr<ExecutionOperatorStageRecorder> recorder = nullptr) override {
 		if (!CanFindRowPointerGroupStateTargets(sink_info)) {
 			return false;
@@ -484,7 +486,7 @@ public:
 
 	bool TryFindOrCreateInputVectorGroupStateTargets(
 	    DataChunk &payload_input, idx_t count, const vector<ExecutionRowPointerGroupKeySource> &group_sources,
-	    const ExecutionRegionSinkInfo &sink_info, ExecutionGroupedAggregateStateTargetBatch &targets,
+	    const ExecutionRegionAggregateSinkInfo &sink_info, ExecutionGroupedAggregateStateTargetBatch &targets,
 	    optional_ptr<ExecutionOperatorStageRecorder> recorder = nullptr,
 	    optional_ptr<const ExecutionDenseGroupDomain> dense_domain = nullptr) override {
 		if (!CanFindRowPointerGroupStateTargets(sink_info)) {
@@ -498,7 +500,7 @@ public:
 
 	bool TryUpdateInputVectorGroupCountOne(
 	    DataChunk &payload_input, idx_t count, const vector<ExecutionRowPointerGroupKeySource> &group_sources,
-	    const ExecutionRegionSinkInfo &sink_info, const ExecutionPrimitiveAggregateUpdateLane &lane,
+	    const ExecutionRegionAggregateSinkInfo &sink_info, const ExecutionPrimitiveAggregateUpdateLane &lane,
 	    optional_ptr<ExecutionOperatorStageRecorder> recorder = nullptr,
 	    optional_ptr<const ExecutionDenseGroupDomain> dense_domain = nullptr) override {
 		if (!CanUseSingleGroupingState()) {
@@ -513,7 +515,7 @@ public:
 	bool TryUpdateRowPointerGroupPayloads(DataChunk &payload_input, Vector &row_pointers, idx_t count,
 	                                      const vector<ExecutionRowPointerGroupKeySource> &group_sources,
 	                                      const vector<idx_t> &payload_source_indices,
-	                                      const ExecutionRegionSinkInfo &sink_info,
+	                                      const ExecutionRegionAggregateSinkInfo &sink_info,
 	                                      const vector<const ExecutionPrimitiveAggregateUpdateLane *> &lanes,
 	                                      optional_ptr<ExecutionOperatorStageRecorder> recorder = nullptr) override {
 		if (!CanUseSingleGroupingState()) {
@@ -526,7 +528,7 @@ public:
 	}
 
 	bool TryAppendNewGroupsWithStateAddresses(
-	    DataChunk &input, const ExecutionRegionSinkInfo &sink_info,
+	    DataChunk &input, const ExecutionRegionAggregateSinkInfo &sink_info,
 	    ExecutionGroupedAggregateStateAddressUpdateFunction update_function, void *update_state,
 	    optional_ptr<ExecutionOperatorStageRecorder> recorder = nullptr,
 	    optional_ptr<const ExecutionDenseGroupDomain> dense_domain = nullptr) override {
@@ -539,7 +541,7 @@ public:
 	}
 
 	bool TryAppendNewGroupKeysWithStateAddresses(
-	    DataChunk &groups, const ExecutionRegionSinkInfo &sink_info,
+	    DataChunk &groups, const ExecutionRegionAggregateSinkInfo &sink_info,
 	    ExecutionGroupedAggregateStateAddressUpdateFunction update_function, void *update_state,
 	    optional_ptr<ExecutionOperatorStageRecorder> recorder = nullptr,
 	    optional_ptr<const ExecutionDenseGroupDomain> dense_domain = nullptr) override {
@@ -586,9 +588,10 @@ private:
 };
 
 static ExecutionPrimitiveAggregateUpdateBinding
-BuildHashAggregatePrimitiveUpdateBinding(const PhysicalHashAggregate &op, const ExecutionRegionSinkInfo &sink_info) {
+BuildHashAggregatePrimitiveUpdateBinding(const PhysicalHashAggregate &op,
+                                         const ExecutionRegionAggregateSinkInfo &sink_info) {
 	ExecutionPrimitiveAggregateUpdateBinding result;
-	auto &contract = sink_info.aggregate_contract;
+	auto &contract = sink_info.contract;
 	if (!contract.grouped_state_layout_ready || contract.grouped_state_offsets.size() < sink_info.aggregates.size()) {
 		result.blocker = "hash-aggregate-primitive-update-grouped-state-layout";
 		return result;
@@ -661,11 +664,11 @@ BuildHashAggregatePrimitiveUpdateBinding(const PhysicalHashAggregate &op, const 
 	return result;
 }
 
-static string ValidateHashAggregateExecutionSink(const ExecutionRegionSinkInfo &sink_info) {
-	if (sink_info.kind != ExecutionRegionSinkKind::HASH_AGGREGATE_UPDATE) {
+static string ValidateHashAggregateExecutionSink(const ExecutionRegionAggregateSinkInfo &sink_info) {
+	if (sink_info.Kind() != ExecutionRegionSinkKind::HASH_AGGREGATE_UPDATE) {
 		return "hash-aggregate-runtime-kind-mismatch";
 	}
-	auto &contract = sink_info.aggregate_contract;
+	auto &contract = sink_info.contract;
 	if (contract.native_state_update_contract.status != ExecutionRegionStateContractStatus::READY) {
 		return contract.native_state_update_contract.blocker.empty() ? "hash-aggregate-state-update-contract-not-ready"
 		                                                             : contract.native_state_update_contract.blocker;
@@ -853,11 +856,12 @@ SinkResultType PhysicalHashAggregate::Sink(ExecutionContext &context, DataChunk 
 }
 
 bool PhysicalHashAggregate::BindExecutionSink(ExecutionContext &context, DataChunk &input,
-                                              OperatorSinkInput &sink_input, const ExecutionRegionSinkInfo &sink_info,
+                                              OperatorSinkInput &sink_input,
+                                              const ExecutionRegionAggregateSinkInfo &sink_info,
                                               ExecutionSinkBinding &binding) const {
 	(void)input;
 	binding = ExecutionSinkBinding();
-	binding.kind = sink_info.kind;
+	binding.kind = sink_info.Kind();
 	auto blocker = ValidateHashAggregateExecutionSink(sink_info);
 	if (!blocker.empty()) {
 		binding.blocker = blocker;
@@ -1091,16 +1095,15 @@ static bool TryGetDistinctCountFinalizeFastPath(const PhysicalHashAggregate &op,
 	return true;
 }
 
-static ExecutionRegionSinkInfo BuildDistinctCountFinalizeSinkInfo(idx_t aggregate_index,
-                                                                  const DistinctCountFinalizeFastPath &fast_path) {
-	ExecutionRegionSinkInfo result;
-	result.kind = ExecutionRegionSinkKind::HASH_AGGREGATE_UPDATE;
-	result.aggregate_contract.kind = ExecutionRegionAggregateOperatorKind::HASH;
-	result.aggregate_contract.aggregate_count = 1;
-	result.aggregate_contract.grouped_state_layout_ready = true;
-	result.aggregate_contract.native_grouped_state_contract.status = ExecutionRegionStateContractStatus::READY;
-	result.aggregate_contract.grouped_state_offsets.resize(aggregate_index + 1, DConstants::INVALID_INDEX);
-	result.aggregate_contract.grouped_state_offsets[aggregate_index] = fast_path.state_offset;
+static ExecutionRegionAggregateSinkInfo
+BuildDistinctCountFinalizeSinkInfo(idx_t aggregate_index, const DistinctCountFinalizeFastPath &fast_path) {
+	ExecutionRegionAggregateSinkInfo result;
+	result.contract.kind = ExecutionRegionAggregateOperatorKind::HASH;
+	result.contract.aggregate_count = 1;
+	result.contract.grouped_state_layout_ready = true;
+	result.contract.native_grouped_state_contract.status = ExecutionRegionStateContractStatus::READY;
+	result.contract.grouped_state_offsets.resize(aggregate_index + 1, DConstants::INVALID_INDEX);
+	result.contract.grouped_state_offsets[aggregate_index] = fast_path.state_offset;
 
 	ExecutionRegionAggregateInput aggregate;
 	aggregate.aggregate_index = aggregate_index;

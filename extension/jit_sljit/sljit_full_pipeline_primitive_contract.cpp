@@ -32,7 +32,7 @@ static bool SljitTryBuildJoinAggregateInputProjection(const vector<idx_t> &lhs_o
 			const auto producer_idx = lhs_output_columns[output_idx];
 			if (producer_layout) {
 				if (!producer || producer_idx >= producer_layout->ColumnCount() ||
-				    producer_idx >= producer->projections.size()) {
+				    producer_idx >= producer->Projections().size()) {
 					return false;
 				}
 				const auto &column = producer_layout->Column(producer_idx);
@@ -40,7 +40,7 @@ static bool SljitTryBuildJoinAggregateInputProjection(const vector<idx_t> &lhs_o
 				    input_types[column.source_index] != column.source_type || column.type != output_types[output_idx]) {
 					return false;
 				}
-				input = SljitCopySemanticExpressionPlan(producer->projections[producer_idx]);
+				input = SljitCopySemanticExpressionPlan(producer->Projections()[producer_idx]);
 				if (input.source_index != column.source_index || input.return_type != column.type) {
 					return false;
 				}
@@ -73,9 +73,9 @@ SljitPrepareJoinAggregateProjection(const vector<SljitExecutableRegionOp> &ops,
 	const auto &join = ops[post_join.hash_join_idx];
 	auto result = make_shared_ptr<SljitJoinAggregateProjection>();
 	auto &semantic = result->semantic;
-	semantic.kind = SljitNativeRegionOpKind::PROJECTION;
+	semantic.SetKind(SljitNativeRegionOpKind::PROJECTION);
 	if (!post_join.HasProjectionChain()) {
-		if (ops[primitive.aggregate_idx].aggregate_update.plan.input_types != join.output_types) {
+		if (ops[primitive.aggregate_idx].AggregateUpdate().plan.input_types != join.output_types) {
 			return nullptr;
 		}
 		semantic.input_types = join.output_types;
@@ -86,16 +86,16 @@ SljitPrepareJoinAggregateProjection(const vector<SljitExecutableRegionOp> &ops,
 			expression.plan.kind = SljitNativeRegionExpressionKind::REFERENCE;
 			expression.plan.source_index = idx;
 			expression.plan.return_type = join.output_types[idx];
-			semantic.projections.push_back(std::move(expression));
+			semantic.Projections().push_back(std::move(expression));
 		}
 	} else if (post_join.first_projection_idx == post_join.final_projection_idx) {
 		const auto &original = ops[post_join.first_projection_idx];
 		semantic.input_types = original.input_types;
 		semantic.output_types = original.output_types;
 		semantic.output_not_null = original.output_not_null;
-		for (const auto &expression : original.projections) {
-			semantic.projections.emplace_back();
-			SljitBuildBorrowedProjectionExpression(expression, semantic.projections.back());
+		for (const auto &expression : original.Projections()) {
+			semantic.Projections().emplace_back();
+			SljitBuildBorrowedProjectionExpression(expression, semantic.Projections().back());
 		}
 	} else {
 		if (!SljitBuildProjectionChainComposedProjection(ops, post_join.first_projection_idx,
@@ -116,9 +116,9 @@ SljitPrepareJoinAggregateProjection(const vector<SljitExecutableRegionOp> &ops,
 	if (layout) {
 		producer = &ops[layout->ProducerIndex()];
 	}
-	const auto &probe = join.hash_join_probe.plan;
+	const auto &probe = join.HashJoinProbe().plan;
 	const auto &input_types = producer ? producer->input_types : probe.input_types;
-	if (!SljitTryPrepareJoinAggregateInputs(probe.operator_info.hash_join_contract.lhs_output_column_indices,
+	if (!SljitTryPrepareJoinAggregateInputs(probe.operator_info.HashJoin().contract.lhs_output_column_indices,
 	                                        join.output_types, input_types, semantic, layout, producer, result->inputs,
 	                                        result->owned_code_size)) {
 		return nullptr;
@@ -151,10 +151,10 @@ bool SljitFullPipelineHasExactFilterProbeHashBuild(const vector<SljitExecutableR
 		return false;
 	}
 	const auto probe_idx = sequence.Step(count - 2).hash_join_probe_selection.hash_join_idx;
-	if (probe_idx >= ops.size() || ops[probe_idx].kind != SljitNativeRegionOpKind::HASH_JOIN_PROBE) {
+	if (probe_idx >= ops.size() || ops[probe_idx].Kind() != SljitNativeRegionOpKind::HASH_JOIN_PROBE) {
 		throw InternalException("SLJIT bound recipe references an invalid hash join probe");
 	}
-	auto &probe = ops[probe_idx].hash_join_probe.plan;
+	auto &probe = ops[probe_idx].HashJoinProbe().plan;
 	return probe.exact_source_filter_binding != DConstants::INVALID_INDEX && probe.keys.size() == 1 &&
 	       probe.equality_key_count == 1 && !probe.residual_predicate && !probe.mark_build_match &&
 	       probe.output_mode == ExecutionHashJoinProbeOutputMode::MATCHED_PROBE_AND_BUILD;
@@ -198,7 +198,7 @@ bool SljitTryPrepareJoinAggregateInputs(const vector<idx_t> &lhs_output_columns,
 	                                               producer, inputs, reference_sources)) {
 		return false;
 	}
-	for (const auto &original : projection.projections) {
+	for (const auto &original : projection.Projections()) {
 		SljitExecutableRegionExpression expression;
 		SljitBuildBorrowedProjectionExpression(original, expression);
 		if (!SljitTryRemapExecutableExpressionInputs(reference_sources, expression)) {
@@ -260,7 +260,8 @@ bool SljitNativeTailCanConsumeTail(const vector<SljitExecutableRegionOp> &ops, i
 		return false;
 	}
 	auto &tail = ops[tail_start_idx];
-	if (tail.kind == SljitNativeRegionOpKind::AGGREGATE_UPDATE && tail.aggregate_update.plan.UsesPrimitivePayloads()) {
+	if (tail.Kind() == SljitNativeRegionOpKind::AGGREGATE_UPDATE &&
+	    tail.AggregateUpdate().plan.UsesPrimitivePayloads()) {
 		return false;
 	}
 	// Intra-tail soundness: each op's declared input references (the single
@@ -280,8 +281,8 @@ bool SljitNativeTailCanConsumeTail(const vector<SljitExecutableRegionOp> &ops, i
 	// tail: matching types cannot tell (p_size * 3) % 1000 from the p_size it was computed from
 	for (idx_t op_idx = tail_start_idx; op_idx < ops.size(); op_idx++) {
 		auto &op = ops[op_idx];
-		if (op.kind == SljitNativeRegionOpKind::AGGREGATE_UPDATE &&
-		    op.aggregate_update.plan.PayloadsWereComposedThroughProjection()) {
+		if (op.Kind() == SljitNativeRegionOpKind::AGGREGATE_UPDATE &&
+		    op.AggregateUpdate().plan.PayloadsWereComposedThroughProjection()) {
 			return false;
 		}
 	}

@@ -34,18 +34,18 @@ struct SljitUngroupedAggregateUpdatePrimitive {
 
 static bool SljitCanBindUngroupedAggregateUpdatePrimitive(const vector<SljitExecutableRegionOp> &ops,
                                                           idx_t aggregate_idx) {
-	return aggregate_idx < ops.size() && ops[aggregate_idx].kind == SljitNativeRegionOpKind::AGGREGATE_UPDATE &&
-	       ops[aggregate_idx].aggregate_update.plan.sink_info.kind ==
+	return aggregate_idx < ops.size() && ops[aggregate_idx].Kind() == SljitNativeRegionOpKind::AGGREGATE_UPDATE &&
+	       ops[aggregate_idx].AggregateUpdate().plan.sink_info.Kind() ==
 	           ExecutionRegionSinkKind::UNGROUPED_AGGREGATE_UPDATE &&
-	       ops[aggregate_idx].aggregate_update.plan.UsesPrimitivePayloads() &&
-	       !SljitAggregateSinkHasDistinctState(ops[aggregate_idx].aggregate_update.plan.sink_info);
+	       ops[aggregate_idx].AggregateUpdate().plan.UsesPrimitivePayloads() &&
+	       !SljitAggregateSinkHasDistinctState(ops[aggregate_idx].AggregateUpdate().plan.sink_info);
 }
 
 static bool SljitCanBindFilteredUngroupedAggregateUpdatePrimitive(const vector<SljitExecutableRegionOp> &ops,
                                                                   idx_t filter_idx, idx_t aggregate_idx) {
-	return filter_idx < ops.size() && ops[filter_idx].kind == SljitNativeRegionOpKind::FILTER &&
+	return filter_idx < ops.size() && ops[filter_idx].Kind() == SljitNativeRegionOpKind::FILTER &&
 	       SljitCanBindUngroupedAggregateUpdatePrimitive(ops, aggregate_idx) &&
-	       ops[aggregate_idx].aggregate_update.filtered_update.IsExecutable();
+	       ops[aggregate_idx].AggregateUpdate().filtered_update.IsExecutable();
 }
 
 static bool SljitTryBindUngroupedAggregateUpdatePrimitive(const vector<SljitExecutableRegionOp> &ops,
@@ -120,9 +120,9 @@ static void SljitBindUngroupedPrimitiveAggregateUpdate(ExecutionOperatorRuntime 
 	if (bound.ready) {
 		return;
 	}
-	auto &sink_info = op.aggregate_update.plan.sink_info;
-	if (sink_info.kind != ExecutionRegionSinkKind::UNGROUPED_AGGREGATE_UPDATE ||
-	    !op.aggregate_update.plan.UsesPrimitivePayloads() || op.aggregate_update.plan.use_grouped_state_addresses) {
+	auto &sink_info = op.AggregateUpdate().plan.sink_info;
+	if (sink_info.Kind() != ExecutionRegionSinkKind::UNGROUPED_AGGREGATE_UPDATE ||
+	    !op.AggregateUpdate().plan.UsesPrimitivePayloads() || op.AggregateUpdate().plan.use_grouped_state_addresses) {
 		throw InternalException("SLJIT ungrouped primitive aggregate update received a non-ungrouped aggregate");
 	}
 	auto &binding = SljitBindNativeSink(native_runtime, scratch, op_idx, input, sink_info,
@@ -137,19 +137,19 @@ static void SljitBindUngroupedPrimitiveAggregateUpdate(ExecutionOperatorRuntime 
 		throw InternalException("SLJIT ungrouped aggregate primitive update binding failed: %s", blocker.c_str());
 	}
 	auto &aggregates = sink_info.aggregates;
-	if (aggregates.size() != op.aggregate_update.payloads.size()) {
+	if (aggregates.size() != op.AggregateUpdate().payloads.size()) {
 		throw InternalException("SLJIT ungrouped aggregate primitive payload count mismatch");
 	}
-	if (!op.aggregate_update.fused_payload_update.Function() &&
-	    aggregates.size() != op.aggregate_update.payload_updates.size()) {
+	if (!op.AggregateUpdate().fused_payload_update.Function() &&
+	    aggregates.size() != op.AggregateUpdate().payload_updates.size()) {
 		throw InternalException("SLJIT ungrouped aggregate primitive payload function count mismatch");
 	}
-	auto &payload_lanes = scratch.AggregatePayloadLanes(op_idx, op.aggregate_update.payload_descriptors, primitive);
+	auto &payload_lanes = scratch.AggregatePayloadLanes(op_idx, op.AggregateUpdate().payload_descriptors, primitive);
 	auto &payload_scratch = scratch.AggregatePayloadScratch(op_idx);
-	if (op.aggregate_update.fused_payload_update.Function()) {
+	if (op.AggregateUpdate().fused_payload_update.Function()) {
 		SljitBindSingleFusedPrimitiveAggregatePayloadUpdate(
-		    op.aggregate_update.payloads, op.aggregate_update.fused_payload_update.Function(),
-		    op.aggregate_update.payload_descriptors, payload_lanes, bound.single_fused_payload_update);
+		    op.AggregateUpdate().payloads, op.AggregateUpdate().fused_payload_update.Function(),
+		    op.AggregateUpdate().payload_descriptors, payload_lanes, bound.single_fused_payload_update);
 	}
 	bound.ready = true;
 	bound.op_idx = op_idx;
@@ -169,7 +169,7 @@ static void SljitBindRecordedUngroupedPrimitiveAggregateUpdate(ExecutionRegionRu
 	SljitBindUngroupedPrimitiveAggregateUpdate(native_runtime, scratch, op_idx, op, input, bound,
 	                                           optional_ptr<bool>(&sink_bound));
 	if (sink_bound) {
-		RecordSljitRegionStageRuntime(runtime, op_idx, op.kind, "bind_sink_contract", bind_stage_start);
+		RecordSljitRegionStageRuntime(runtime, op_idx, op.Kind(), "bind_sink_contract", bind_stage_start);
 	}
 }
 
@@ -186,21 +186,21 @@ SljitExecuteBoundUngroupedPrimitiveAggregateUpdate(ExecutionRegionRuntime &runti
 	auto &payload_lanes = *bound.payload_lanes;
 	auto &payload_scratch = *bound.payload_scratch;
 	const auto trace_runtime = runtime.TraceRuntime();
-	if (op.aggregate_update.fused_payload_update.Function()) {
+	if (op.AggregateUpdate().fused_payload_update.Function()) {
 		auto payload_stage_start =
 		    trace_runtime ? SljitRegionStageStart(runtime) : std::chrono::steady_clock::time_point();
 		if (!SljitExecuteBoundSingleFusedPrimitiveAggregatePayloadUpdate(bound.single_fused_payload_update, input,
 		                                                                 execute_sel, count, payload_scratch)) {
 			SljitExecuteFusedPrimitiveAggregatePayloadUpdate(
-			    op.aggregate_update.payloads, op.aggregate_update.fused_payload_update.Function(),
-			    op.aggregate_update.payload_descriptors, op.aggregate_update.payload_source_layout,
-			    op.aggregate_update.combined_payload_source_indices,
-			    op.aggregate_update.combined_payload_source_not_null, payload_lanes, input, execute_sel, count,
+			    op.AggregateUpdate().payloads, op.AggregateUpdate().fused_payload_update.Function(),
+			    op.AggregateUpdate().payload_descriptors, op.AggregateUpdate().payload_source_layout,
+			    op.AggregateUpdate().combined_payload_source_indices,
+			    op.AggregateUpdate().combined_payload_source_not_null, payload_lanes, input, execute_sel, count,
 			    payload_scratch);
 		}
 		if (trace_runtime) {
-			RecordSljitRegionMaterializationElision(runtime, op.kind, "fused_payload_update");
-			RecordSljitRegionStageRuntime(runtime, bound.op_idx, op.kind, "primitive_payload_update_fused",
+			RecordSljitRegionMaterializationElision(runtime, op.Kind(), "fused_payload_update");
+			RecordSljitRegionStageRuntime(runtime, bound.op_idx, op.Kind(), "primitive_payload_update_fused",
 			                              payload_stage_start);
 		}
 		return SinkResultType::NEED_MORE_INPUT;
@@ -215,16 +215,16 @@ SljitExecuteBoundUngroupedPrimitiveAggregateUpdate(ExecutionRegionRuntime &runti
 		auto payload_stage_start =
 		    trace_runtime ? SljitRegionStageStart(runtime) : std::chrono::steady_clock::time_point();
 		SljitExecutePrimitiveAggregatePayloadUpdate(
-		    op.aggregate_update.payloads[payload_idx], op.aggregate_update.payload_updates[payload_idx].Function(),
-		    *lane, op.aggregate_update.payload_descriptors[payload_idx], input, execute_sel, count,
+		    op.AggregateUpdate().payloads[payload_idx], op.AggregateUpdate().payload_updates[payload_idx].Function(),
+		    *lane, op.AggregateUpdate().payload_descriptors[payload_idx], input, execute_sel, count,
 		    scratch.ExpressionAdapterScratch(bound.op_idx, payload_idx));
 		if (trace_runtime) {
-			RecordSljitRegionStageRuntime(runtime, bound.op_idx, op.kind, "primitive_payload_update",
+			RecordSljitRegionStageRuntime(runtime, bound.op_idx, op.Kind(), "primitive_payload_update",
 			                              payload_stage_start);
 		}
 	}
 	if (trace_runtime) {
-		RecordSljitRegionMaterializationElision(runtime, op.kind, "primitive_payload_update", aggregates.size());
+		RecordSljitRegionMaterializationElision(runtime, op.Kind(), "primitive_payload_update", aggregates.size());
 	}
 	return SinkResultType::NEED_MORE_INPUT;
 }

@@ -37,32 +37,34 @@ struct SljitGroupedAggregateUpdatePrimitive {
 
 //! The grouped aggregate's fused perfect-hash kernel evaluates the filter in the pass that updates the groups
 static bool SljitGroupedAggregateHasFusedFilteredKernel(const SljitExecutableRegionOp &aggregate) {
-	return aggregate.kind == SljitNativeRegionOpKind::AGGREGATE_UPDATE &&
-	       aggregate.aggregate_update.plan.sink_info.kind == ExecutionRegionSinkKind::PERFECT_HASH_AGGREGATE_UPDATE &&
-	       aggregate.aggregate_update.filtered_update.IsExecutable() &&
-	       aggregate.aggregate_update.filtered_update.kind == SljitFilteredAggregateKernelKind::PERFECT_HASH_GROUPED;
+	return aggregate.Kind() == SljitNativeRegionOpKind::AGGREGATE_UPDATE &&
+	       aggregate.AggregateUpdate().plan.sink_info.Kind() ==
+	           ExecutionRegionSinkKind::PERFECT_HASH_AGGREGATE_UPDATE &&
+	       aggregate.AggregateUpdate().filtered_update.IsExecutable() &&
+	       aggregate.AggregateUpdate().filtered_update.kind == SljitFilteredAggregateKernelKind::PERFECT_HASH_GROUPED;
 }
 
 static bool SljitCanBindGroupedAggregateUpdatePrimitive(const vector<SljitExecutableRegionOp> &ops,
                                                         idx_t aggregate_idx) {
-	if (aggregate_idx >= ops.size() || ops[aggregate_idx].kind != SljitNativeRegionOpKind::AGGREGATE_UPDATE) {
+	if (aggregate_idx >= ops.size() || ops[aggregate_idx].Kind() != SljitNativeRegionOpKind::AGGREGATE_UPDATE) {
 		return false;
 	}
-	return ops[aggregate_idx].aggregate_update.plan.sink_info.kind == ExecutionRegionSinkKind::HASH_AGGREGATE_UPDATE ||
+	return ops[aggregate_idx].AggregateUpdate().plan.sink_info.Kind() ==
+	           ExecutionRegionSinkKind::HASH_AGGREGATE_UPDATE ||
 	       SljitGroupedAggregateHasFusedFilteredKernel(ops[aggregate_idx]);
 }
 
 static bool SljitGroupedAggregateUpdateCanUseCountStarPreaggregation(const SljitExecutableRegionOp &op) {
-	if (op.kind != SljitNativeRegionOpKind::AGGREGATE_UPDATE ||
-	    op.aggregate_update.plan.sink_info.kind != ExecutionRegionSinkKind::HASH_AGGREGATE_UPDATE ||
-	    !op.aggregate_update.plan.UsesPrimitivePayloads() || !op.aggregate_update.plan.use_grouped_state_addresses) {
+	if (op.Kind() != SljitNativeRegionOpKind::AGGREGATE_UPDATE ||
+	    op.AggregateUpdate().plan.sink_info.Kind() != ExecutionRegionSinkKind::HASH_AGGREGATE_UPDATE ||
+	    !op.AggregateUpdate().plan.UsesPrimitivePayloads() || !op.AggregateUpdate().plan.use_grouped_state_addresses) {
 		return false;
 	}
-	auto &sink_info = op.aggregate_update.plan.sink_info;
+	auto &sink_info = op.AggregateUpdate().plan.sink_info;
 	if (SljitAggregateSinkHasDistinctState(sink_info)) {
 		return false;
 	}
-	if (sink_info.groups.size() != 1 || sink_info.aggregates.size() != 1 || op.aggregate_update.payloads.size() != 1) {
+	if (sink_info.groups.size() != 1 || sink_info.aggregates.size() != 1 || op.AggregateUpdate().payloads.size() != 1) {
 		return false;
 	}
 	auto &aggregate = sink_info.aggregates[0];
@@ -70,16 +72,16 @@ static bool SljitGroupedAggregateUpdateCanUseCountStarPreaggregation(const Sljit
 }
 
 static bool SljitGroupedAggregateUpdateCanUseDirectPrimitivePayloadUpdate(const SljitExecutableRegionOp &op) {
-	if (op.kind != SljitNativeRegionOpKind::AGGREGATE_UPDATE ||
-	    op.aggregate_update.plan.sink_info.kind != ExecutionRegionSinkKind::HASH_AGGREGATE_UPDATE ||
-	    !op.aggregate_update.plan.UsesPrimitivePayloads()) {
+	if (op.Kind() != SljitNativeRegionOpKind::AGGREGATE_UPDATE ||
+	    op.AggregateUpdate().plan.sink_info.Kind() != ExecutionRegionSinkKind::HASH_AGGREGATE_UPDATE ||
+	    !op.AggregateUpdate().plan.UsesPrimitivePayloads()) {
 		return false;
 	}
-	auto &sink_info = op.aggregate_update.plan.sink_info;
+	auto &sink_info = op.AggregateUpdate().plan.sink_info;
 	if (SljitAggregateSinkHasDistinctState(sink_info)) {
 		return false;
 	}
-	return !sink_info.groups.empty() && sink_info.aggregates.size() == op.aggregate_update.payloads.size();
+	return !sink_info.groups.empty() && sink_info.aggregates.size() == op.AggregateUpdate().payloads.size();
 }
 
 //! A filtered grouped update executes through the fused kernel, or selects rows with the filter's compiled
@@ -88,12 +90,12 @@ static bool SljitGroupedAggregateUpdateCanUseDirectPrimitivePayloadUpdate(const 
 //! fused kernel has none).
 static bool SljitCanBindFilteredGroupedAggregateUpdatePrimitive(const vector<SljitExecutableRegionOp> &ops,
                                                                 idx_t filter_idx, idx_t aggregate_idx) {
-	if (filter_idx >= ops.size() || ops[filter_idx].kind != SljitNativeRegionOpKind::FILTER ||
+	if (filter_idx >= ops.size() || ops[filter_idx].Kind() != SljitNativeRegionOpKind::FILTER ||
 	    aggregate_idx >= ops.size()) {
 		return false;
 	}
 	auto &aggregate = ops[aggregate_idx];
-	auto &filter = ops[filter_idx].filter;
+	auto &filter = ops[filter_idx].Filter();
 	return SljitGroupedAggregateHasFusedFilteredKernel(aggregate) ||
 	       (filter && filter->expression.HasSelectionKernel() &&
 	        SljitGroupedAggregateUpdateCanUseDirectPrimitivePayloadUpdate(aggregate));

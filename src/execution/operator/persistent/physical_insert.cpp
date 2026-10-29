@@ -139,14 +139,14 @@ ExecutionContract PhysicalInsert::GetExecutionContract(ExecutionRegionOperatorSl
 	if (!info || return_chunk || parallel || action_type != OnConflictAction::THROW) {
 		return FinalizeExecutionContract(std::move(result));
 	}
-	result.sink.kind = ExecutionRegionSinkKind::MATERIALIZATION;
+	result.sink.SetKind(ExecutionRegionSinkKind::MATERIALIZATION);
 	result.sink.reason = "DuckDB materialization append sink contract";
 	result.sink.reason += ";operator=" + GetName();
 	result.sink.reason += ";output_columns=" + std::to_string(insert_types.size());
-	result.sink.native_sink_contract.status = ExecutionRegionStateContractStatus::READY;
-	result.sink.native_sink_contract.required_capability = "materialization-append-sink";
-	result.sink.native_sink_contract.contract_version = "v1";
-	result.sink.native_sink_contract.blocker.clear();
+	result.sink.Native().status = ExecutionRegionStateContractStatus::READY;
+	result.sink.Native().required_capability = "materialization-append-sink";
+	result.sink.Native().contract_version = "v1";
+	result.sink.Native().blocker.clear();
 	result.sink.reason += ";sink_contract_status=ready";
 	result.sink.reason += ";sink_required_capability=materialization-append-sink";
 	result.sink.reason += ";sink_contract_version=v1";
@@ -179,12 +179,15 @@ bool PhysicalInsert::BindExecutionSink(ExecutionContext &context, DataChunk &inp
                                        const ExecutionRegionSinkInfo &sink_info, ExecutionSinkBinding &binding) const {
 	(void)input;
 	binding = ExecutionSinkBinding();
-	binding.kind = sink_info.kind;
-	if (sink_info.kind != ExecutionRegionSinkKind::MATERIALIZATION ||
-	    sink_info.native_sink_contract.status != ExecutionRegionStateContractStatus::READY || !info || return_chunk ||
-	    parallel || action_type != OnConflictAction::THROW) {
-		binding.blocker = sink_info.native_sink_contract.blocker.empty() ? "materialization-append-sink-not-ready"
-		                                                                 : sink_info.native_sink_contract.blocker;
+	binding.kind = sink_info.Kind();
+	if (sink_info.Kind() != ExecutionRegionSinkKind::MATERIALIZATION) {
+		binding.blocker = "materialization-append-sink-kind-mismatch";
+		return false;
+	}
+	if (sink_info.Native().status != ExecutionRegionStateContractStatus::READY || !info || return_chunk || parallel ||
+	    action_type != OnConflictAction::THROW) {
+		binding.blocker =
+		    sink_info.Native().blocker.empty() ? "materialization-append-sink-not-ready" : sink_info.Native().blocker;
 		return false;
 	}
 	binding.ready = true;

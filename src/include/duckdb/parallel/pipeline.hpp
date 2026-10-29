@@ -227,11 +227,11 @@ private:
 	shared_ptr<GlobalSourceState> source_state DUCKDB_GUARDED_BY(source_state_lock);
 	//! Lock for resetting or inspecting the global source state pointer
 	annotated_mutex source_state_lock;
-	//! Query/pipeline-scoped compiled execution plan selected before source state captures scan filters.
+	//! Selected after dependencies finalize and before execution-local source state captures scan filters.
 	unique_ptr<ExecutionRegionPlan> execution_region_plan;
 	//! Distinguishes a built vectorized plan (nullptr) from a plan that has not been inspected yet.
 	bool execution_region_plan_built;
-	//! Protects execution region plan refreshes that can happen after stateful dependencies finish.
+	//! Serializes the first executor's preparation before other tasks bind the same plan.
 	mutex execution_region_plan_lock;
 	//! Selected runner for this pipeline. Vectorized execution is an explicit runner beside compiled regions.
 	ExecutionRunnerKind execution_runner;
@@ -291,7 +291,6 @@ private:
 	bool TryGetMaxThreads(idx_t &max_threads);
 	bool ScheduleParallel(shared_ptr<Event> &event);
 	void ScheduleExternalInputEvent(shared_ptr<Event> event);
-	void EnsureExecutionRegionPlanBuiltLocked();
 	void BuildExecutionRegionPlanLocked();
 	unique_ptr<GlobalSourceState> CreateGlobalSourceState(ClientContext &client,
 	                                                      const ExecutionRegionOpenRequest &open_request);

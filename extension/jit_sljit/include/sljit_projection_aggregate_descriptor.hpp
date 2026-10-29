@@ -38,25 +38,25 @@ static bool SljitTryBuildPreparedProjectionAggregateDescriptorFromProjection(
 	optional_ptr<SljitExecutableRegionOp> producer_projection_op;
 	if (descriptor.producer_layout) {
 		const auto producer_idx = descriptor.producer_layout->ProducerIndex();
-		if (producer_idx >= ops.size() || ops[producer_idx].kind != SljitNativeRegionOpKind::PROJECTION) {
+		if (producer_idx >= ops.size() || ops[producer_idx].Kind() != SljitNativeRegionOpKind::PROJECTION) {
 			return descriptor.Block("producer_projection");
 		}
 		producer_projection_op = &ops[producer_idx];
 	}
 	auto &aggregate_op = ops[aggregate_idx];
 	bool built;
-	if (aggregate_op.aggregate_update.plan.sink_info.kind == ExecutionRegionSinkKind::UNGROUPED_AGGREGATE_UPDATE) {
+	if (aggregate_op.AggregateUpdate().plan.sink_info.Kind() == ExecutionRegionSinkKind::UNGROUPED_AGGREGATE_UPDATE) {
 		built = SljitTryBuildProjectionUngroupedAggregateDescriptor(binding, aggregate_op, descriptor,
 		                                                            producer_projection_op);
-	} else if (aggregate_op.aggregate_update.plan.sink_info.kind ==
+	} else if (aggregate_op.AggregateUpdate().plan.sink_info.Kind() ==
 	           ExecutionRegionSinkKind::PERFECT_HASH_AGGREGATE_UPDATE) {
 		built = SljitTryBuildProjectionPerfectHashAggregateDescriptor(aggregate_op, descriptor);
 	} else {
-		built = SljitTryBuildProjectionRowPointerAggregateDescriptor(binding, ops[hash_join_idx].hash_join_probe.plan,
+		built = SljitTryBuildProjectionRowPointerAggregateDescriptor(binding, ops[hash_join_idx].HashJoinProbe().plan,
 		                                                             aggregate_op, descriptor, producer_projection_op);
 	}
 	const auto &input_types = producer_projection_op ? producer_projection_op->input_types
-	                                                 : ops[hash_join_idx].hash_join_probe.plan.input_types;
+	                                                 : ops[hash_join_idx].HashJoinProbe().plan.input_types;
 	if (!built || !SljitTryBindJoinProjectionAggregateInputs(binding, input_types, descriptor, prepared.inputs)) {
 		return false;
 	}

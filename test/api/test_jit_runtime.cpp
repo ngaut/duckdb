@@ -1,6 +1,8 @@
 #include "test_jit_helpers.hpp"
 
 #include "duckdb/common/vector/flat_vector.hpp"
+#include "duckdb/execution/execution_chunk_coalescer.hpp"
+#include "duckdb/execution/physical_operator.hpp"
 #include "duckdb/execution/execution_region_runtime.hpp"
 
 #include "sljit_native_runtime.hpp"
@@ -11,6 +13,293 @@
 #include <thread>
 
 using namespace duckdb;
+
+namespace {
+class RecordingChunkStep final : public ExecutionRegionChunkStep {
+public:
+	SinkResultType ExecuteChunk(DataChunk &input) override {
+		counts.push_back(input.size());
+		for (idx_t row = 0; row < input.size(); row++) {
+			vector<Value> values;
+			for (idx_t col = 0; col < input.ColumnCount(); col++) {
+				values.push_back(input.GetValue(col, row));
+			}
+			rows.push_back(std::move(values));
+		}
+		return stop ? SinkResultType::FINISHED : SinkResultType::NEED_MORE_INPUT;
+	}
+	void FlushChunks() override {
+		flush_count++;
+	}
+	void FinishChunks() override {
+		finish_count++;
+	}
+	vector<idx_t> counts;
+	vector<vector<Value>> rows;
+	idx_t flush_count = 0;
+	idx_t finish_count = 0;
+	bool stop = false;
+};
+} // namespace
+
+TEST_CASE("Core chunk coalescer retains selected long strings and nulls after source destruction", "[api][jit]") {
+	auto consumer = make_uniq<RecordingChunkStep>();
+	auto &record = *consumer;
+	ExecutionCoalescingChunkStep step(Allocator::DefaultAllocator(), std::move(consumer));
+	const string long_text(256, 'x');
+	for (idx_t batch = 0; batch < 2; batch++) {
+		DataChunk input;
+		input.Initialize(Allocator::DefaultAllocator(), {LogicalType::VARCHAR, LogicalType::BIGINT});
+		input.SetChildCardinality(3);
+		input.data[0].SetValue(0, Value(long_text + std::to_string(batch)));
+		input.data[0].SetValue(1, Value(LogicalType::VARCHAR));
+		input.data[0].SetValue(2, Value("unused"));
+		input.data[1].SetValue(0, Value::BIGINT(10 + batch));
+		input.data[1].SetValue(1, Value(LogicalType::BIGINT));
+		input.data[1].SetValue(2, Value::BIGINT(-1));
+		SelectionVector selected(2);
+		selected.set_index(0, 1);
+		selected.set_index(1, 0);
+		input.Slice(selected, 2);
+		REQUIRE(ExecutionChunkCoalescer::CanAppend(input));
+		REQUIRE(step.ExecuteChunk(input) == SinkResultType::NEED_MORE_INPUT);
+		REQUIRE(record.rows.empty());
+	}
+	step.FinishChunks();
+	REQUIRE(record.counts == vector<idx_t> {4});
+	REQUIRE(record.finish_count == 1);
+	for (idx_t batch = 0; batch < 2; batch++) {
+		REQUIRE(record.rows[batch * 2][0].IsNull());
+		REQUIRE(record.rows[batch * 2][1].IsNull());
+		REQUIRE(record.rows[batch * 2 + 1][0].GetValue<string>() == long_text + std::to_string(batch));
+		REQUIRE(record.rows[batch * 2 + 1][1].GetValue<int64_t>() == 10 + batch);
+	}
+}
+
+TEST_CASE("Core chunk coalescer owns strings borrowed from an advancing source", "[api][jit]") {
+	auto consumer = make_uniq<RecordingChunkStep>();
+	auto &record = *consumer;
+	ExecutionCoalescingChunkStep step(Allocator::DefaultAllocator(), std::move(consumer));
+	string borrowed(256, 'a');
+	DataChunk input;
+	input.Initialize(Allocator::DefaultAllocator(), {LogicalType::VARCHAR});
+	input.SetChildCardinality(2);
+	FlatVector::GetDataMutable<string_t>(input.data[0])[0] = string_t(borrowed.c_str(), borrowed.size());
+	REQUIRE_FALSE(input.data[0].Buffer().GetAuxiliaryData());
+	input.data[0].SetValue(1, Value(string(256, 'c')));
+	REQUIRE(input.data[0].Buffer().GetAuxiliaryData());
+	REQUIRE(step.ExecuteChunk(input) == SinkResultType::NEED_MORE_INPUT);
+	std::fill(borrowed.begin(), borrowed.end(), 'b');
+	step.FinishChunks();
+	REQUIRE(record.rows.size() == 2);
+	REQUIRE(record.rows[0][0].GetValue<string>() == string(256, 'a'));
+	REQUIRE(record.rows[1][0].GetValue<string>() == string(256, 'c'));
+}
+
+TEST_CASE("Core chunk coalescer flushes partitions and stops consuming after a finished sink", "[api][jit]") {
+	auto consumer = make_uniq<RecordingChunkStep>();
+	auto &record = *consumer;
+	ExecutionCoalescingChunkStep step(Allocator::DefaultAllocator(), std::move(consumer));
+	DataChunk input;
+	input.Initialize(Allocator::DefaultAllocator(), {LogicalType::INTEGER});
+	input.SetChildCardinality(1);
+	input.data[0].SetValue(0, Value::INTEGER(7));
+	REQUIRE(step.ExecuteChunk(input) == SinkResultType::NEED_MORE_INPUT);
+	step.FlushChunks();
+	REQUIRE(record.counts == vector<idx_t> {1});
+	REQUIRE(record.flush_count == 1);
+	input.data[0].SetValue(0, Value::INTEGER(9));
+	REQUIRE(step.ExecuteChunk(input) == SinkResultType::NEED_MORE_INPUT);
+	record.stop = true;
+	step.FlushChunks();
+	REQUIRE(record.counts == vector<idx_t> {1, 1});
+	REQUIRE(record.rows[0][0].GetValue<int32_t>() == 7);
+	REQUIRE(record.rows[1][0].GetValue<int32_t>() == 9);
+	REQUIRE(record.flush_count == 1);
+	REQUIRE(step.ExecuteChunk(input) == SinkResultType::FINISHED);
+	step.FinishChunks();
+	REQUIRE(record.rows.size() == 2);
+	REQUIRE(record.finish_count == 1);
+}
+
+TEST_CASE("Core chunk coalescer preserves full batches and flushes before capacity overflow", "[api][jit]") {
+	auto consumer = make_uniq<RecordingChunkStep>();
+	auto &record = *consumer;
+	ExecutionCoalescingChunkStep step(Allocator::DefaultAllocator(), std::move(consumer));
+	DataChunk input;
+	input.Initialize(Allocator::DefaultAllocator(), {LogicalType::BIGINT});
+	for (auto count : vector<idx_t> {STANDARD_VECTOR_SIZE, 3, STANDARD_VECTOR_SIZE - 1}) {
+		input.Reset();
+		input.data[0].Reference(Value::BIGINT(42), count_t(count));
+		input.CheckCardinality(count);
+		REQUIRE(step.ExecuteChunk(input) == SinkResultType::NEED_MORE_INPUT);
+	}
+	step.FinishChunks();
+	REQUIRE(record.counts == vector<idx_t> {STANDARD_VECTOR_SIZE, 3, STANDARD_VECTOR_SIZE - 1});
+	REQUIRE(record.rows.size() == STANDARD_VECTOR_SIZE * 2 + 2);
+	for (auto &row : record.rows) {
+		REQUIRE(row[0].GetValue<int64_t>() == 42);
+	}
+}
+
+TEST_CASE("JIT cached casts report the current query identity", "[api][jit]") {
+	JitTestDatabase test;
+	ConfigureSljitForCoverage(test.con, true, true, 10000);
+	REQUIRE_NO_FAIL(test.con.Query("CREATE TABLE cast_inputs AS SELECT "
+	                               "CASE WHEN i = 77777 THEN 40000 ELSE i % 30000 END::BIGINT AS k "
+	                               "FROM range(100000) t(i)"));
+	for (idx_t threads : {1, 4}) {
+		REQUIRE_NO_FAIL(test.con.Query("SET threads=" + to_string(threads)));
+		for (idx_t variant = 0; variant < 3; variant++) {
+			INFO("threads=" << threads << "; variant=" << variant);
+			auto alias = "column_" + to_string(variant);
+			auto query = string(variant * 10, ' ') + "SELECT " + alias + "::SMALLINT FROM (SELECT k AS " + alias +
+			             " FROM cast_inputs) t";
+			REQUIRE_NO_FAIL(test.con.Query("SET jit_policy='off'"));
+			auto expected = test.con.Query(query);
+			REQUIRE_FAIL(expected);
+			REQUIRE_NO_FAIL(test.con.Query("SET jit_policy='auto'"));
+			ClearJitTrace(test.manager, true);
+			auto actual = test.con.Query(query);
+			REQUIRE_FAIL(actual);
+			REQUIRE(actual->GetError() == expected->GetError());
+			RequireJitEvent(test.manager, [&](const ExecutionRegionEvent &event) {
+				return IsCompiledSljitRegionEvent(event) && EventPhase(event) == "compile" &&
+				       (variant == 0 || StringUtil::Contains(event.reason, "compiled artifact cache hit"));
+			});
+			RequireJitEvent(test.manager, [](const ExecutionRegionEvent &event) {
+				return event.backend_name == "sljit" && EventPhase(event) == "runtime" && EventStatus(event) == "error";
+			});
+		}
+	}
+	vector<unique_ptr<Connection>> connections;
+	vector<string> queries;
+	vector<string> expected_errors;
+	vector<string> actual_errors(3);
+	for (idx_t i = 0; i < 3; i++) {
+		auto con = make_uniq<Connection>(test.db);
+		ConfigureSljitForCoverage(*con, true, true, 10000);
+		auto alias = "concurrent_column_" + to_string(i);
+		queries.push_back(string(i * 7, ' ') + "SELECT " + alias +
+		                  "::SMALLINT FROM "
+		                  "(SELECT k AS " +
+		                  alias + " FROM cast_inputs) t");
+		REQUIRE_NO_FAIL(con->Query("SET jit_policy='off'"));
+		auto expected = con->Query(queries.back());
+		REQUIRE_FAIL(expected);
+		expected_errors.push_back(expected->GetError());
+		REQUIRE_NO_FAIL(con->Query("SET jit_policy='auto'"));
+		connections.push_back(std::move(con));
+	}
+	vector<std::thread> workers;
+	for (idx_t i = 0; i < connections.size(); i++) {
+		workers.emplace_back([&, i]() {
+			auto result = connections[i]->Query(queries[i]);
+			actual_errors[i] = result->HasError() ? result->GetError() : "unexpected success";
+		});
+	}
+	for (auto &worker : workers) {
+		worker.join();
+	}
+	REQUIRE(actual_errors == expected_errors);
+}
+
+TEST_CASE("JIT cached aggregates use current cardinality and match native results", "[api][jit]") {
+	auto require_equal = [](MaterializedQueryResult &actual, MaterializedQueryResult &expected) {
+		REQUIRE(actual.GetTypes() == expected.GetTypes());
+		REQUIRE(actual.RowCount() == expected.RowCount());
+		for (idx_t row = 0; row < actual.RowCount(); row++) {
+			for (idx_t col = 0; col < actual.ColumnCount(); col++) {
+				REQUIRE(actual.GetValue(col, row) == expected.GetValue(col, row));
+			}
+		}
+	};
+	JitTestDatabase test;
+	ConfigureSljitForCoverage(test.con, true, true, 10000);
+	REQUIRE_NO_FAIL(test.con.Query("SET perfect_ht_threshold=0"));
+	vector<string> queries;
+	vector<unique_ptr<MaterializedQueryResult>> expected;
+	for (idx_t variant = 0; variant < 2; variant++) {
+		INFO("variant=" << variant);
+		auto table = "aggregate_inputs_" + to_string(variant);
+		REQUIRE_NO_FAIL(test.con.Query("CREATE TABLE " + table +
+		                               " AS SELECT ((i % 5000) * 17)::BIGINT AS k, (i % 7)::BIGINT AS v "
+		                               "FROM range(" +
+		                               to_string(100000 * (variant + 1)) + ") t(i)"));
+		REQUIRE_NO_FAIL(test.con.Query("VACUUM " + table));
+		queries.push_back("SELECT k, sum(v) FROM " + table + " GROUP BY k ORDER BY k");
+		REQUIRE_NO_FAIL(test.con.Query("SET jit_policy='off'"));
+		expected.push_back(test.con.Query(queries.back()));
+		REQUIRE_NO_FAIL(*expected.back());
+		REQUIRE_NO_FAIL(test.con.Query("SET jit_policy='auto'"));
+		ClearJitTrace(test.manager, true);
+		auto actual = test.con.Query(queries.back());
+		REQUIRE_NO_FAIL(*actual);
+		require_equal(*actual, *expected.back());
+		RequireJitEvent(test.manager, [&](const ExecutionRegionEvent &event) {
+			return IsCompiledSljitRegionEvent(event) && EventPhase(event) == "compile" &&
+			       event.candidate_traits.sink_kind == ExecutionRegionSinkKind::HASH_AGGREGATE_UPDATE &&
+			       (variant == 0 || StringUtil::Contains(event.reason, "compiled artifact cache hit"));
+		});
+		RequireJitEvent(test.manager, [](const ExecutionRegionEvent &event) {
+			return event.backend_name == "sljit" && EventPhase(event) == "runtime" &&
+			       EventStatus(event) == "executed" && HasGeneratedAggregateUpdateStage(event);
+		});
+	}
+	vector<unique_ptr<Connection>> connections;
+	vector<unique_ptr<MaterializedQueryResult>> results(queries.size());
+	for (idx_t i = 0; i < queries.size(); i++) {
+		auto con = make_uniq<Connection>(test.db);
+		ConfigureSljitForCoverage(*con, true, true, 10000);
+		REQUIRE_NO_FAIL(con->Query("SET perfect_ht_threshold=0"));
+		connections.push_back(std::move(con));
+	}
+	vector<std::thread> workers;
+	for (idx_t i = 0; i < queries.size(); i++) {
+		workers.emplace_back([&, i]() { results[i] = connections[i]->Query(queries[i]); });
+	}
+	for (auto &worker : workers) {
+		worker.join();
+	}
+	for (idx_t i = 0; i < results.size(); i++) {
+		REQUIRE_NO_FAIL(*results[i]);
+		require_equal(*results[i], *expected[i]);
+	}
+}
+
+TEST_CASE("JIT operator contracts distinguish nested loops from hash joins", "[api][jit]") {
+	JitTestDatabase test;
+	ConfigureSljitForCoverage(test.con, true, true, 10000);
+	REQUIRE_NO_FAIL(test.con.Query("SET nested_loop_join_threshold=1000000"));
+	REQUIRE_NO_FAIL(test.con.Query("SET disabled_optimizers='join_order,build_side_probe_side'"));
+	REQUIRE_NO_FAIL(
+	    test.con.Query("CREATE TABLE contract_inputs AS SELECT i % 37 AS k, i AS v FROM range(20000) t(i)"));
+	REQUIRE_NO_FAIL(test.con.Query("CREATE TABLE contract_bounds AS SELECT i * 10 AS k FROM range(5) t(i)"));
+	const vector<string> queries {
+	    "SELECT count(*), sum(a.v) FROM contract_inputs a LEFT JOIN contract_bounds b ON a.k < b.k",
+	    "SELECT count(*), sum(a.v) FROM contract_inputs a JOIN contract_bounds b ON a.k = b.k",
+	    "SELECT count(*), sum(a.v) FROM contract_inputs a JOIN "
+	    "(SELECT x.k FROM contract_bounds x JOIN contract_bounds y ON x.k < y.k) b ON a.k = b.k"};
+	for (idx_t index = 0; index < queries.size(); index++) {
+		INFO(queries[index]);
+		auto plan = test.con.Query("EXPLAIN (FORMAT JSON) " + queries[index]);
+		REQUIRE_NO_FAIL(*plan);
+		auto plan_text = plan->GetValue(1, 0).ToString();
+		if (index != 1) {
+			REQUIRE(StringUtil::Contains(plan_text, "NESTED_LOOP_JOIN"));
+		}
+		if (index != 0) {
+			REQUIRE(StringUtil::Contains(plan_text, "HASH_JOIN"));
+		}
+		REQUIRE_NO_FAIL(test.con.Query("SET jit_policy='off'"));
+		auto expected = test.con.Query(queries[index]);
+		REQUIRE_NO_FAIL(*expected);
+		REQUIRE_NO_FAIL(test.con.Query("SET jit_policy='auto'"));
+		auto actual = test.con.Query(queries[index]);
+		REQUIRE_NO_FAIL(*actual);
+		REQUIRE(actual->Equals(*expected));
+	}
+}
 
 static bool ContainsSourceContractStageBreakdown(const string &value) {
 	return StringUtil::Contains(value, "source_contract.table_scan.") ||

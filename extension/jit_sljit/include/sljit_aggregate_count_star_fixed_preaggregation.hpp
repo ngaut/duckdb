@@ -345,12 +345,12 @@ static bool TryPreaggregateProjectedFixedWidthCountStarGroups(const SljitExecuta
                                                               DataChunk &input, const SelectionVector *execute_sel,
                                                               idx_t count, DataChunk &compact_groups,
                                                               vector<int64_t> &count_deltas) {
-	if (input.size() == 0 || projection_op.kind != SljitNativeRegionOpKind::PROJECTION ||
-	    projection_op.projections.size() != 1 || projection_op.output_types.size() != 1 ||
+	if (input.size() == 0 || projection_op.Kind() != SljitNativeRegionOpKind::PROJECTION ||
+	    projection_op.Projections().size() != 1 || projection_op.output_types.size() != 1 ||
 	    compact_groups.ColumnCount() != 1 || compact_groups.data[0].GetType() != projection_op.output_types[0]) {
 		return false;
 	}
-	auto &projection = projection_op.projections[0].plan;
+	auto &projection = projection_op.Projections()[0].plan;
 	idx_t source_index;
 	if (!TryReadProjectionSourceReferenceIndex(projection, source_index) || source_index >= input.ColumnCount() ||
 	    projection.return_type != projection_op.output_types[0] ||

@@ -324,16 +324,16 @@ private:
 	UngroupedAggregateLocalSinkState &local_state;
 };
 
-static string ValidateUngroupedAggregateExecutionSink(const ExecutionRegionSinkInfo &sink_info) {
-	if (sink_info.kind != ExecutionRegionSinkKind::UNGROUPED_AGGREGATE_UPDATE) {
+static string ValidateUngroupedAggregateExecutionSink(const ExecutionRegionAggregateSinkInfo &sink_info) {
+	if (sink_info.Kind() != ExecutionRegionSinkKind::UNGROUPED_AGGREGATE_UPDATE) {
 		return "ungrouped-aggregate-runtime-kind-mismatch";
 	}
-	auto &contract = sink_info.aggregate_contract.native_state_update_contract;
+	auto &contract = sink_info.contract.native_state_update_contract;
 	if (contract.status != ExecutionRegionStateContractStatus::READY) {
 		return contract.blocker.empty() ? "ungrouped-aggregate-state-update-contract-not-ready" : contract.blocker;
 	}
-	auto blocker = ExecutionRegionAggregateNativeStateUpdateBlocker(sink_info.aggregate_contract, sink_info.aggregates,
-	                                                                sink_info.groups);
+	auto blocker =
+	    ExecutionRegionAggregateNativeStateUpdateBlocker(sink_info.contract, sink_info.aggregates, sink_info.groups);
 	if (!blocker.empty()) {
 		return blocker;
 	}
@@ -343,7 +343,7 @@ static string ValidateUngroupedAggregateExecutionSink(const ExecutionRegionSinkI
 static ExecutionPrimitiveAggregateUpdateBinding
 BuildUngroupedAggregatePrimitiveUpdateBinding(const PhysicalUngroupedAggregate &op,
                                               UngroupedAggregateLocalSinkState &local_state,
-                                              const ExecutionRegionSinkInfo &sink_info) {
+                                              const ExecutionRegionAggregateSinkInfo &sink_info) {
 	ExecutionPrimitiveAggregateUpdateBinding result;
 	result.lanes.reserve(sink_info.aggregates.size());
 	for (auto &aggregate_info : sink_info.aggregates) {
@@ -504,12 +504,12 @@ SinkResultType PhysicalUngroupedAggregate::Sink(ExecutionContext &context, DataC
 
 bool PhysicalUngroupedAggregate::BindExecutionSink(ExecutionContext &context, DataChunk &input,
                                                    OperatorSinkInput &sink_input,
-                                                   const ExecutionRegionSinkInfo &sink_info,
+                                                   const ExecutionRegionAggregateSinkInfo &sink_info,
                                                    ExecutionSinkBinding &binding) const {
 	(void)context;
 	(void)input;
 	binding = ExecutionSinkBinding();
-	binding.kind = sink_info.kind;
+	binding.kind = sink_info.Kind();
 	auto blocker = ValidateUngroupedAggregateExecutionSink(sink_info);
 	if (!blocker.empty()) {
 		binding.blocker = blocker;

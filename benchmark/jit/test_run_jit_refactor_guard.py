@@ -285,6 +285,17 @@ class TestForcedJitSuite(unittest.TestCase):
 
 
 class TestDifferentialFuzz(unittest.TestCase):
+    def test_inconclusive_campaign_fails_the_guard(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            args = SimpleNamespace(duckdb=Path("duckdb"), level="unit", fuzz_queries=None)
+            result = subprocess.CompletedProcess(args=[], returncode=2, stdout="0 compared, 3 inconclusive", stderr="")
+            with (
+                mock.patch.object(guard, "ensure_fuzz_database", return_value=Path("fuzz.duckdb")),
+                mock.patch.object(guard, "run_command", return_value=result),
+            ):
+                with self.assertRaises(guard.GuardError):
+                    guard.run_differential_fuzz(args, Path(temporary))
+
     def test_every_referenced_column_gets_nulls_and_the_rest_survive(self) -> None:
         sql = guard.fuzz_database_sql()
         self.assertTrue(sql.startswith("CALL dbgen(sf=0.1);"))

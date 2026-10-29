@@ -39,14 +39,14 @@ unique_ptr<PhysicalOperator> PhysicalResultCollector::GetResultCollector(ClientC
 
 ExecutionContract PhysicalResultCollector::BuildExecutionResultCollectorSinkContract() const {
 	ExecutionContract result;
-	result.sink.kind = ExecutionRegionSinkKind::RESULT_COLLECTOR_SINK;
+	result.sink.SetKind(ExecutionRegionSinkKind::RESULT_COLLECTOR_SINK);
 	result.sink.reason = "DuckDB result collector execution sink contract";
 	result.sink.reason += ";operator=RESULT_COLLECTOR";
 	result.sink.reason += ";output_columns=" + std::to_string(types.size());
-	result.sink.native_sink_contract.status = ExecutionRegionStateContractStatus::READY;
-	result.sink.native_sink_contract.required_capability = "result-collector-execution-sink";
-	result.sink.native_sink_contract.contract_version = "v1";
-	result.sink.native_sink_contract.blocker.clear();
+	result.sink.Native().status = ExecutionRegionStateContractStatus::READY;
+	result.sink.Native().required_capability = "result-collector-execution-sink";
+	result.sink.Native().contract_version = "v1";
+	result.sink.Native().blocker.clear();
 	result.sink.reason += ";sink_contract_status=ready";
 	result.sink.reason += ";sink_required_capability=result-collector-execution-sink";
 	result.sink.reason += ";sink_contract_version=v1";

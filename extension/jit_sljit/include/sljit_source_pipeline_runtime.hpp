@@ -19,7 +19,6 @@
 #include "sljit_projection_chain_primitive_runtime.hpp"
 #include "sljit_region_runtime_state.hpp"
 #include "sljit_selected_hash_join_input_runtime.hpp"
-#include "sljit_source_fetch_primitive_runtime.hpp"
 
 namespace duckdb {
 
@@ -37,8 +36,7 @@ public:
 	      execute_hash_join_probe(execute_hash_join_probe_p),
 	      terminal_runtime(execute_native_full_pipeline_from_p, source_distinct_counts_p, source_min_values_p,
 	                       source_max_values_p, shared_predicate_classifications_p, terminal_state_p),
-	      scratch(scratch_p), selected_hash_join_inputs(runtime, ops, scratch), source_fetch(runtime),
-	      generated_filter(runtime, ops, scratch),
+	      scratch(scratch_p), selected_hash_join_inputs(runtime, ops, scratch), generated_filter(runtime, ops, scratch),
 	      hash_join_materialize(runtime, ops, scratch, selected_hash_join_inputs),
 	      hash_join_selection(runtime, ops, scratch, selected_hash_join_inputs),
 	      mark_probe_filter_boundary(runtime, ops, scratch, selected_hash_join_inputs),
@@ -56,10 +54,13 @@ public:
 	//! Chunk step: runs one source chunk, which the pipeline executor fetched and advanced the sink's batch for,
 	//! through the steps. Rows the steps batch wait for later chunks. Returns true when the pipeline stopped
 	bool ExecuteChunk(DataChunk &source_chunk) {
-		auto execute_next_step = [&](const SljitRuntimeBatchView &input) {
-			return ExecuteStep(1, input);
-		};
-		return source_fetch.Execute(source_chunk, execute_next_step);
+		if (source_chunk.size() == 0) {
+			return false;
+		}
+		if (runtime.TraceRuntime()) {
+			runtime.RecordJitRuntimeProof(ExecutionRegionJitRuntimeProof::FULL_PIPELINE_OWNERSHIP, source_chunk.size());
+		}
+		return ExecuteStep(1, SljitRuntimeBatchViewFromChunk(source_chunk));
 	}
 
 	//! Chunk step: every batched row and the terminal's state sink, because the sink moves to another partition or
@@ -84,8 +85,8 @@ public:
 		auto &aggregate_op = ops[primitive.aggregate_idx];
 		DataChunk binding_input;
 		auto &binding = SljitBindRecordedNativeSink(
-		    runtime, runtime.ExecutionOperators(), scratch, primitive.aggregate_idx, aggregate_op.kind, binding_input,
-		    aggregate_op.aggregate_update.plan.sink_info, "aggregate-update-runtime-binding-failed",
+		    runtime, runtime.ExecutionOperators(), scratch, primitive.aggregate_idx, aggregate_op.Kind(), binding_input,
+		    aggregate_op.AggregateUpdate().plan.sink_info, "aggregate-update-runtime-binding-failed",
 		    "SLJIT primitive aggregate-state source sink");
 		if (!binding.ready || !binding.aggregate_update.ready || !binding.aggregate_update.primitive.ready) {
 			throw InternalException("SLJIT primitive aggregate-state source sink binding is incomplete");
@@ -110,7 +111,7 @@ public:
 					throw InternalException("SLJIT primitive aggregate-state combine failed: %s",
 					                        blocker.empty() ? "unknown" : blocker.c_str());
 				}
-				RecordSljitRegionStageRuntime(runtime, primitive.aggregate_idx, aggregate_op.kind,
+				RecordSljitRegionStageRuntime(runtime, primitive.aggregate_idx, aggregate_op.Kind(),
 				                              "primitive_state_source_combine", combine_start);
 				runtime.RecordJitRuntimePath("source.hash_aggregate.primitive_state_combine", batch->Count());
 				RecordSljitRegionBackendWork(runtime, batch->Count());
@@ -253,12 +254,6 @@ private:
 	}
 
 	bool FlushRuntimeState() {
-		auto execute_next_step = [&](const SljitRuntimeBatchView &input) {
-			return ExecuteStep(1, input);
-		};
-		if (source_fetch.Flush(execute_next_step)) {
-			return true;
-		}
 		return FlushPendingBatch();
 	}
 
@@ -297,7 +292,6 @@ private:
 	SljitFullPipelineTerminalRuntime<EXECUTE_NATIVE_FULL_PIPELINE_FROM> terminal_runtime;
 	SljitRegionExecutionScratch &scratch;
 	SljitSelectedHashJoinInputRuntime selected_hash_join_inputs;
-	SljitSourceFetchPrimitiveRuntime source_fetch;
 	SljitGeneratedFilterPrimitiveRuntime generated_filter;
 	SljitHashJoinProbeMaterializePrimitiveRuntime hash_join_materialize;
 	SljitHashJoinProbeSelectionPrimitiveRuntime hash_join_selection;

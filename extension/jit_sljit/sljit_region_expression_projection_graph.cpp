@@ -32,18 +32,18 @@ static void AppendSljitNativeTempProjection(SljitProjectionGraphLowering &graph,
 	auto temp_type = expression.return_type;
 
 	SljitNativeRegionOpPlan temp_op;
-	temp_op.kind = SljitNativeRegionOpKind::PROJECTION;
+	temp_op.SetKind(SljitNativeRegionOpKind::PROJECTION);
 	temp_op.input_types = graph.current_types;
 	temp_op.output_types.reserve(graph.current_types.size() + 1);
-	temp_op.projections.reserve(graph.current_types.size() + 1);
+	temp_op.Projections().reserve(graph.current_types.size() + 1);
 	for (idx_t col_idx = 0; col_idx < graph.current_types.size(); col_idx++) {
 		auto ir = graph.render_diagnostics ? "ssa.pass#" + std::to_string(col_idx) : string();
 		temp_op.output_types.push_back(graph.current_types[col_idx]);
-		temp_op.projections.push_back(
+		temp_op.Projections().push_back(
 		    SljitNativeReferenceExpression(col_idx, graph.current_types[col_idx], std::move(ir), false));
 	}
 	temp_op.output_types.push_back(temp_type);
-	temp_op.projections.push_back(std::move(expression));
+	temp_op.Projections().push_back(std::move(expression));
 	graph.current_types.push_back(std::move(temp_type));
 	graph.native_ops.push_back(std::move(temp_op));
 }

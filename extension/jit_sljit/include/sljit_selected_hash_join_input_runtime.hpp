@@ -96,7 +96,8 @@ public:
 			auto &selected = selected_source.chunk;
 			selected.Reset();
 			selected.Slice(source, *input.selection, input.count);
-			RecordSljitRegionRuntimePath(runtime, ops[target_hash_join_idx].kind, "selected_source_view", input.count);
+			RecordSljitRegionRuntimePath(runtime, ops[target_hash_join_idx].Kind(), "selected_source_view",
+			                             input.count);
 			return selected;
 		}
 		return SljitBindMaterializedRuntimeBatchInput(input, context);
@@ -117,11 +118,8 @@ private:
 		auto &target_binding =
 		    SljitBindRecordedNativeOperator(runtime, runtime.ExecutionOperators(), scratch, target_hash_join_idx,
 		                                    target_hash_join_op, compact_input,
-		                                    target_hash_join_op.hash_join_probe.plan.operator_info, context)
+		                                    target_hash_join_op.HashJoinProbe().plan.operator_info, context)
 		        .hash_join_probe;
-		if (!target_binding.ready) {
-			throw InternalException(string(context) + " received an invalid target binding");
-		}
 		return target_binding;
 	}
 
@@ -173,7 +171,7 @@ private:
 		auto source = SljitBindSelectedHashJoinOutputSource(runtime, ops, scratch, selected);
 		auto view_stage_start = SljitRegionStageStart(runtime);
 		if (SljitTryBuildSelectedHashJoinOutputColumnViews(source, selected, referenced_columns, compact_input)) {
-			RecordSljitRegionStageRuntime(runtime, source_hash_join_idx, ops[source_hash_join_idx].kind, view_stage,
+			RecordSljitRegionStageRuntime(runtime, source_hash_join_idx, ops[source_hash_join_idx].Kind(), view_stage,
 			                              view_stage_start);
 			join_input = &compact_input;
 			return true;
@@ -182,20 +180,20 @@ private:
 		compact_input.Reset();
 		auto materialize_stage_start = SljitRegionStageStart(runtime);
 		auto materialized = ExecuteSljitRegionRecordedOperation(
-		    runtime, source_hash_join_idx, ops[source_hash_join_idx].kind, "selected_view_materialization",
+		    runtime, source_hash_join_idx, ops[source_hash_join_idx].Kind(), "selected_view_materialization",
 		    materialize_stage_start, [&](optional_ptr<ExecutionOperatorStageRecorder> recorder) {
 			    (void)recorder;
 			    return SljitTryMaterializeSelectedHashJoinOutputColumns(source, selected, referenced_columns,
 			                                                            compact_input);
 		    });
 		if (!materialized) {
-			RecordSljitRegionStageRuntime(runtime, source_hash_join_idx, ops[source_hash_join_idx].kind,
+			RecordSljitRegionStageRuntime(runtime, source_hash_join_idx, ops[source_hash_join_idx].Kind(),
 			                              "selected_view_materialization_miss", materialize_stage_start);
 			return false;
 		}
-		RecordSljitRegionStageRuntime(runtime, source_hash_join_idx, ops[source_hash_join_idx].kind,
+		RecordSljitRegionStageRuntime(runtime, source_hash_join_idx, ops[source_hash_join_idx].Kind(),
 		                              "selected_view_materialization", materialize_stage_start);
-		RecordSljitRegionRuntimeDelegation(runtime, ops[source_hash_join_idx].kind, "selected_view_materialization",
+		RecordSljitRegionRuntimeDelegation(runtime, ops[source_hash_join_idx].Kind(), "selected_view_materialization",
 		                                   compact_input.size());
 		join_input = &compact_input;
 		return true;

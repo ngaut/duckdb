@@ -37,17 +37,21 @@ static string DescribeSljitAggregateSinkInput(const ExecutionRegionAggregateInpu
 }
 
 static string ValidateSljitAggregateUpdateSink(const ExecutionRegionSinkInfo &sink) {
-	auto &contract = sink.aggregate_contract;
+	if (sink.Kind() != ExecutionRegionSinkKind::HASH_AGGREGATE_UPDATE &&
+	    sink.Kind() != ExecutionRegionSinkKind::PERFECT_HASH_AGGREGATE_UPDATE &&
+	    sink.Kind() != ExecutionRegionSinkKind::UNGROUPED_AGGREGATE_UPDATE) {
+		return "aggregate update sink kind mismatch";
+	}
+	if (sink.Kind() != sink.Aggregate().Kind()) {
+		return "aggregate update sink operator kind mismatch";
+	}
+	auto &contract = sink.Aggregate().contract;
 	if (contract.native_state_update_contract.status != ExecutionRegionStateContractStatus::READY) {
 		return SljitBlockerOrReason(contract.native_state_update_contract.blocker,
 		                            "aggregate native state-update contract is not ready");
 	}
-	if (sink.kind != ExecutionRegionSinkKind::HASH_AGGREGATE_UPDATE &&
-	    sink.kind != ExecutionRegionSinkKind::PERFECT_HASH_AGGREGATE_UPDATE &&
-	    sink.kind != ExecutionRegionSinkKind::UNGROUPED_AGGREGATE_UPDATE) {
-		return "aggregate update sink kind mismatch";
-	}
-	auto blocker = ExecutionRegionAggregateNativeStateUpdateBlocker(contract, sink.aggregates, sink.groups);
+	auto blocker = ExecutionRegionAggregateNativeStateUpdateBlocker(contract, sink.Aggregate().aggregates,
+	                                                                sink.Aggregate().groups);
 	if (!blocker.empty()) {
 		return blocker;
 	}
@@ -63,25 +67,25 @@ SljitRegionNodePlan PlanSljitAggregateUpdateSinkNode(const ExecutionRegionNode &
 		return SljitRegionBoundaryNode(std::move(blocker));
 	}
 	SljitNativeRegionOpPlan native_op;
-	native_op.kind = SljitNativeRegionOpKind::AGGREGATE_UPDATE;
-	native_op.aggregate_update.sink_info = *node.sink;
+	native_op.SetKind(SljitNativeRegionOpKind::AGGREGATE_UPDATE);
+	native_op.AggregateUpdate().sink_info = node.sink->Aggregate();
 	if (render_diagnostics) {
-		native_op.aggregate_update.ir = node.sink->ir;
+		native_op.AggregateUpdate().ir = node.sink->ir;
 	}
 
-	auto &contract = node.sink->aggregate_contract;
+	auto &contract = node.sink->Aggregate().contract;
 	string reason = "native aggregate update sink contract";
 	if (render_diagnostics) {
 		reason += ";requires=aggregate_update_runtime_binding";
 		if (!contract.native_state_update_contract.required_capability.empty()) {
 			reason += ";requires=" + contract.native_state_update_contract.required_capability;
 		}
-		reason += ";sink_kind=" + string(ExecutionRegionSinkKindToString(node.sink->kind));
+		reason += ";sink_kind=" + string(ExecutionRegionSinkKindToString(node.sink->Kind()));
 		reason += ";aggregate_operator_kind=" + string(ExecutionRegionAggregateOperatorKindToString(contract.kind));
 		reason += ";aggregate_count=" + std::to_string(contract.aggregate_count);
 		reason += ";group_count=" + std::to_string(contract.group_count);
 		reason += ";payload_type_count=" + std::to_string(contract.payload_type_count);
-		for (auto &aggregate : node.sink->aggregates) {
+		for (auto &aggregate : node.sink->Aggregate().aggregates) {
 			reason += ";aggregate" + std::to_string(aggregate.aggregate_index) + "_function=" + aggregate.function_name;
 			reason += ";";
 			reason += DescribeSljitAggregateSinkInput(aggregate);
@@ -98,10 +102,10 @@ SljitRegionNodePlan PlanSljitHashAggregateSinkNode(const ExecutionRegionNode &no
 	auto sink = PlanSljitAggregateUpdateSinkNode(node, render_diagnostics);
 	if (render_diagnostics && sink.kind == ExecutionRegionLoweringKind::NATIVE && SljitRegionNodeHasNativeOps(sink)) {
 		auto &native_op = SljitRegionNodeLastNativeOp(sink);
-		if (!native_op.aggregate_update.ir.empty()) {
-			native_op.aggregate_update.ir += ";";
+		if (!native_op.AggregateUpdate().ir.empty()) {
+			native_op.AggregateUpdate().ir += ";";
 		}
-		native_op.aggregate_update.ir += "grouped_state_lookup=native-state-address";
+		native_op.AggregateUpdate().ir += "grouped_state_lookup=native-state-address";
 		sink.reason += ";grouped_state_lookup=native-state-address";
 	}
 	return sink;

@@ -189,15 +189,26 @@ static bool ExecutionRegionProjectionListHasGeneratedExpression(
 }
 
 static bool ExecutionRegionGraphEntryHasGeneratedExpression(const ExecutionRegionOperatorEntry &entry) {
-	return entry.filter_expression ||
-	       ExecutionRegionProjectionListHasGeneratedExpression(entry.projection_expressions) ||
-	       ExecutionRegionSourceFiltersHaveGeneratedExpression(entry.source_payload.filters) ||
-	       ExecutionRegionAggregateInputsHaveGeneratedExpression(entry.source_payload.aggregates) ||
-	       ExecutionRegionGroupsHaveGeneratedExpression(entry.source_payload.groups) ||
-	       ExecutionRegionOrderKeysHaveGeneratedExpression(entry.source_payload.order_contract.order_keys) ||
-	       ExecutionRegionAggregateInputsHaveGeneratedExpression(entry.sink_payload.aggregates) ||
-	       ExecutionRegionGroupsHaveGeneratedExpression(entry.sink_payload.groups) ||
-	       ExecutionRegionOrderKeysHaveGeneratedExpression(entry.sink_payload.order_contract.order_keys);
+	if (entry.filter_expression || ExecutionRegionProjectionListHasGeneratedExpression(entry.projection_expressions) ||
+	    ExecutionRegionSourceFiltersHaveGeneratedExpression(entry.source_payload.filters) ||
+	    ExecutionRegionOrderKeysHaveGeneratedExpression(entry.source_payload.order_contract.order_keys)) {
+		return true;
+	}
+	auto &sink = entry.sink_payload;
+	switch (sink.Kind()) {
+	case ExecutionRegionSinkKind::HASH_AGGREGATE_UPDATE:
+	case ExecutionRegionSinkKind::PERFECT_HASH_AGGREGATE_UPDATE:
+	case ExecutionRegionSinkKind::UNGROUPED_AGGREGATE_UPDATE:
+		return ExecutionRegionAggregateInputsHaveGeneratedExpression(sink.Aggregate().aggregates) ||
+		       ExecutionRegionGroupsHaveGeneratedExpression(sink.Aggregate().groups);
+	case ExecutionRegionSinkKind::DELIM_JOIN_SINK:
+		return ExecutionRegionAggregateInputsHaveGeneratedExpression(sink.DelimJoin().distinct.aggregates) ||
+		       ExecutionRegionGroupsHaveGeneratedExpression(sink.DelimJoin().distinct.groups);
+	case ExecutionRegionSinkKind::SORT:
+		return ExecutionRegionOrderKeysHaveGeneratedExpression(sink.Order().contract.order_keys);
+	default:
+		return false;
+	}
 }
 
 static void SetExecutionRegionOperatorFacts(ExecutionRegionOperatorEntry &entry) {
@@ -591,7 +602,9 @@ unique_ptr<ExecutionRegionGraph> BuildExecutionRegionGraph(Pipeline &pipeline, b
 		case PhysicalOperatorType::LEFT_DELIM_JOIN:
 		case PhysicalOperatorType::RIGHT_DELIM_JOIN:
 			for (auto &entry : result->operators) {
-				entry.operator_payload.hash_join_contract.output_reaches_dictionary_narrowing_sink = true;
+				if (entry.operator_payload.Kind() == ExecutionRegionOperatorContractKind::HASH_JOIN_PROBE) {
+					entry.operator_payload.HashJoin().contract.output_reaches_dictionary_narrowing_sink = true;
+				}
 			}
 			break;
 		default:

@@ -69,7 +69,7 @@ private:
 				return true;
 			}
 			const auto hash_join_idx = step.hash_join_probe_materialize.hash_join_idx;
-			RecordSljitRegionRuntimePath(runtime, ops[hash_join_idx].kind, "direct_materialized_handoff",
+			RecordSljitRegionRuntimePath(runtime, ops[hash_join_idx].Kind(), "direct_materialized_handoff",
 			                             output.size());
 			return execute_output_batch(output);
 		}

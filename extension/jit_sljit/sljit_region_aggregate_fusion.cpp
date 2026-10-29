@@ -19,19 +19,19 @@ namespace duckdb {
 static bool TryUsePrimitiveReferenceAggregateUpdate(const vector<LogicalType> &input_types,
                                                     SljitNativeRegionOpPlan &aggregate_update,
                                                     bool render_diagnostics) {
-	if (aggregate_update.kind != SljitNativeRegionOpKind::AGGREGATE_UPDATE ||
-	    !aggregate_update.aggregate_update.CanInitializePrimitivePayloads()) {
+	if (aggregate_update.Kind() != SljitNativeRegionOpKind::AGGREGATE_UPDATE ||
+	    !aggregate_update.AggregateUpdate().CanInitializePrimitivePayloads()) {
 		return false;
 	}
-	auto &sink = aggregate_update.aggregate_update.sink_info;
+	auto &sink = aggregate_update.AggregateUpdate().sink_info;
 	if (sink.aggregates.empty()) {
 		return false;
 	}
 	const bool grouped_state =
-	    (sink.kind == ExecutionRegionSinkKind::HASH_AGGREGATE_UPDATE ||
-	     sink.kind == ExecutionRegionSinkKind::PERFECT_HASH_AGGREGATE_UPDATE) &&
-	    sink.aggregate_contract.native_grouped_state_contract.status == ExecutionRegionStateContractStatus::READY;
-	if (sink.kind != ExecutionRegionSinkKind::UNGROUPED_AGGREGATE_UPDATE && !grouped_state) {
+	    (sink.Kind() == ExecutionRegionSinkKind::HASH_AGGREGATE_UPDATE ||
+	     sink.Kind() == ExecutionRegionSinkKind::PERFECT_HASH_AGGREGATE_UPDATE) &&
+	    sink.contract.native_grouped_state_contract.status == ExecutionRegionStateContractStatus::READY;
+	if (sink.Kind() != ExecutionRegionSinkKind::UNGROUPED_AGGREGATE_UPDATE && !grouped_state) {
 		return false;
 	}
 
@@ -47,18 +47,18 @@ static bool TryUsePrimitiveReferenceAggregateUpdate(const vector<LogicalType> &i
 	}
 	const bool perfect_hash_group_lookup = grouped_state && SljitPerfectHashGroupLookupSupported(sink, payloads);
 
-	aggregate_update.aggregate_update.input_types = input_types;
-	aggregate_update.aggregate_update.payloads = std::move(payloads);
-	aggregate_update.aggregate_update.InitializeDirectPrimitivePayloads();
-	aggregate_update.aggregate_update.use_grouped_state_addresses = grouped_state;
-	aggregate_update.aggregate_update.use_perfect_hash_group_lookup = perfect_hash_group_lookup;
+	aggregate_update.AggregateUpdate().input_types = input_types;
+	aggregate_update.AggregateUpdate().payloads = std::move(payloads);
+	aggregate_update.AggregateUpdate().InitializeDirectPrimitivePayloads();
+	aggregate_update.AggregateUpdate().use_grouped_state_addresses = grouped_state;
+	aggregate_update.AggregateUpdate().use_perfect_hash_group_lookup = perfect_hash_group_lookup;
 	if (render_diagnostics) {
-		AppendSljitAggregateUpdateDiagnostic(aggregate_update.aggregate_update, "payload_update=generated-primitive");
-		if (aggregate_update.aggregate_update.use_perfect_hash_group_lookup) {
-			AppendSljitAggregateUpdateDiagnostic(aggregate_update.aggregate_update,
+		AppendSljitAggregateUpdateDiagnostic(aggregate_update.AggregateUpdate(), "payload_update=generated-primitive");
+		if (aggregate_update.AggregateUpdate().use_perfect_hash_group_lookup) {
+			AppendSljitAggregateUpdateDiagnostic(aggregate_update.AggregateUpdate(),
 			                                     "grouped_state_lookup=generated-perfect-hash");
-		} else if (aggregate_update.aggregate_update.use_grouped_state_addresses) {
-			AppendSljitAggregateUpdateDiagnostic(aggregate_update.aggregate_update,
+		} else if (aggregate_update.AggregateUpdate().use_grouped_state_addresses) {
+			AppendSljitAggregateUpdateDiagnostic(aggregate_update.AggregateUpdate(),
 			                                     "grouped_state_lookup=native-state-address");
 		}
 	}

@@ -11,7 +11,7 @@
 namespace duckdb {
 
 bool SljitFullPipelineOpIsAt(const vector<SljitExecutableRegionOp> &ops, idx_t op_idx, SljitNativeRegionOpKind kind) {
-	return op_idx < ops.size() && ops[op_idx].kind == kind;
+	return op_idx < ops.size() && ops[op_idx].Kind() == kind;
 }
 
 idx_t SljitFullPipelineSourcePrefixEnd(const vector<SljitExecutableRegionOp> &ops, idx_t limit) {
@@ -27,34 +27,34 @@ static bool SljitFullPipelineLastOpIsProjectionAggregateUpdate(const vector<Slji
 	if (ops.empty() || !SljitFullPipelineOpIsAt(ops, ops.size() - 1, SljitNativeRegionOpKind::AGGREGATE_UPDATE)) {
 		return false;
 	}
-	auto kind = ops.back().aggregate_update.plan.sink_info.kind;
+	auto kind = ops.back().AggregateUpdate().plan.sink_info.Kind();
 	if (kind == ExecutionRegionSinkKind::HASH_AGGREGATE_UPDATE ||
 	    kind == ExecutionRegionSinkKind::PERFECT_HASH_AGGREGATE_UPDATE) {
 		return true;
 	}
 	return kind == ExecutionRegionSinkKind::UNGROUPED_AGGREGATE_UPDATE &&
-	       ops.back().aggregate_update.plan.UsesPrimitivePayloads();
+	       ops.back().AggregateUpdate().plan.UsesPrimitivePayloads();
 }
 
 bool SljitFullPipelineHashJoinProbeIsMatchedProbeAndBuild(const vector<SljitExecutableRegionOp> &ops, idx_t op_idx) {
 	return SljitFullPipelineOpIsAt(ops, op_idx, SljitNativeRegionOpKind::HASH_JOIN_PROBE) &&
-	       ops[op_idx].hash_join_probe.plan.output_mode == ExecutionHashJoinProbeOutputMode::MATCHED_PROBE_AND_BUILD;
+	       ops[op_idx].HashJoinProbe().plan.output_mode == ExecutionHashJoinProbeOutputMode::MATCHED_PROBE_AND_BUILD;
 }
 
 static bool SljitFullPipelineOpIsUngroupedPrimitiveAggregateUpdate(const SljitExecutableRegionOp &op) {
-	return op.kind == SljitNativeRegionOpKind::AGGREGATE_UPDATE &&
-	       op.aggregate_update.plan.sink_info.kind == ExecutionRegionSinkKind::UNGROUPED_AGGREGATE_UPDATE &&
-	       op.aggregate_update.plan.UsesPrimitivePayloads();
+	return op.Kind() == SljitNativeRegionOpKind::AGGREGATE_UPDATE &&
+	       op.AggregateUpdate().plan.sink_info.Kind() == ExecutionRegionSinkKind::UNGROUPED_AGGREGATE_UPDATE &&
+	       op.AggregateUpdate().plan.UsesPrimitivePayloads();
 }
 
 bool SljitTryAnalyzeHashJoinBuildSink(const vector<SljitExecutableRegionOp> &ops, SljitHashJoinBuildSinkFacts &facts) {
 	facts = SljitHashJoinBuildSinkFacts();
-	if (ops.size() < 2 || ops.back().kind != SljitNativeRegionOpKind::HASH_JOIN_BUILD) {
+	if (ops.size() < 2 || ops.back().Kind() != SljitNativeRegionOpKind::HASH_JOIN_BUILD) {
 		return false;
 	}
 	facts.sink_idx = ops.size() - 1;
 	auto final_hash_join_idx = facts.sink_idx - 1;
-	if (ops[final_hash_join_idx].kind == SljitNativeRegionOpKind::PROJECTION) {
+	if (ops[final_hash_join_idx].Kind() == SljitNativeRegionOpKind::PROJECTION) {
 		facts.projection_idx = final_hash_join_idx;
 		if (final_hash_join_idx == 0) {
 			return false;
@@ -75,7 +75,7 @@ bool SljitTryAnalyzeHashJoinBuildSink(const vector<SljitExecutableRegionOp> &ops
 bool SljitTryAnalyzeSourceHashJoinBuildSink(const vector<SljitExecutableRegionOp> &ops,
                                             SljitSourceHashJoinBuildSinkFacts &facts) {
 	facts = SljitSourceHashJoinBuildSinkFacts();
-	if (ops.empty() || ops.back().kind != SljitNativeRegionOpKind::HASH_JOIN_BUILD) {
+	if (ops.empty() || ops.back().Kind() != SljitNativeRegionOpKind::HASH_JOIN_BUILD) {
 		return false;
 	}
 	const auto sink_idx = ops.size() - 1;
@@ -101,7 +101,7 @@ bool SljitTryAnalyzeSourceFilterAggregate(const vector<SljitExecutableRegionOp> 
 	facts = SljitSourceFilterAggregateFacts();
 	if (ops.size() != 2 || !SljitFullPipelineOpIsAt(ops, 0, SljitNativeRegionOpKind::FILTER) ||
 	    !SljitFullPipelineOpIsAt(ops, 1, SljitNativeRegionOpKind::AGGREGATE_UPDATE) ||
-	    !ops[1].aggregate_update.plan.UsesPrimitivePayloads()) {
+	    !ops[1].AggregateUpdate().plan.UsesPrimitivePayloads()) {
 		return false;
 	}
 	facts.filter_idx = 0;
@@ -131,7 +131,7 @@ bool SljitTryAnalyzeJoinFilterAggregate(const vector<SljitExecutableRegionOp> &o
 	if (!SljitFullPipelineOpIsAt(ops, hash_join_idx, SljitNativeRegionOpKind::HASH_JOIN_PROBE) ||
 	    !SljitFullPipelineOpIsAt(ops, filter_idx, SljitNativeRegionOpKind::FILTER) ||
 	    !SljitFullPipelineOpIsAt(ops, aggregate_idx, SljitNativeRegionOpKind::AGGREGATE_UPDATE) ||
-	    !ops[aggregate_idx].aggregate_update.plan.UsesPrimitivePayloads()) {
+	    !ops[aggregate_idx].AggregateUpdate().plan.UsesPrimitivePayloads()) {
 		return false;
 	}
 	if (SljitFullPipelineSourcePrefixEnd(ops, hash_join_idx) != hash_join_idx) {
@@ -233,7 +233,7 @@ bool SljitTryAnalyzeMarkFilterProjectionNativeTail(const vector<SljitExecutableR
 	    !SljitFullPipelineOpIsAt(ops, 2, SljitNativeRegionOpKind::PROJECTION)) {
 		return false;
 	}
-	if (ops[0].hash_join_probe.plan.output_mode != ExecutionHashJoinProbeOutputMode::MARK_PROBE ||
+	if (ops[0].HashJoinProbe().plan.output_mode != ExecutionHashJoinProbeOutputMode::MARK_PROBE ||
 	    !SljitIsMarkProbeMarkerFilter(ops[0], ops[1])) {
 		return false;
 	}
@@ -327,11 +327,11 @@ static bool SljitCollectExpressionSourceIndices(const SljitExecutableRegionExpre
 }
 
 static bool SljitProjectionPreservesSourceColumn(const SljitExecutableRegionOp &projection, idx_t source_idx) {
-	if (source_idx >= projection.projections.size() || source_idx >= projection.input_types.size() ||
+	if (source_idx >= projection.Projections().size() || source_idx >= projection.input_types.size() ||
 	    source_idx >= projection.output_types.size()) {
 		return false;
 	}
-	auto &plan = projection.projections[source_idx].plan;
+	auto &plan = projection.Projections()[source_idx].plan;
 	return plan.kind == SljitNativeRegionExpressionKind::REFERENCE && plan.source_index == source_idx &&
 	       plan.return_type == projection.input_types[source_idx] &&
 	       projection.output_types[source_idx] == projection.input_types[source_idx];
@@ -345,7 +345,7 @@ static bool SljitFilterCanRunBeforePreProjection(const vector<SljitExecutableReg
 	}
 	D_ASSERT(ops[filter_idx].filter);
 	vector<idx_t> filter_sources;
-	if (!SljitCollectExpressionSourceIndices(ops[filter_idx].filter->expression, filter_sources) ||
+	if (!SljitCollectExpressionSourceIndices(ops[filter_idx].Filter()->expression, filter_sources) ||
 	    filter_sources.empty()) {
 		return false;
 	}

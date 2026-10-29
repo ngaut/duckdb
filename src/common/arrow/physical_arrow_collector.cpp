@@ -33,7 +33,7 @@ unique_ptr<PhysicalOperator> PhysicalArrowCollector::Create(ClientContext &conte
 ExecutionContract PhysicalArrowCollector::GetExecutionContract(ExecutionRegionOperatorSlot slot,
                                                                bool render_diagnostics) const {
 	ExecutionContract result;
-	result.sink.kind = ExecutionRegionSinkKind::MATERIALIZATION;
+	result.sink.SetKind(ExecutionRegionSinkKind::MATERIALIZATION);
 	result.sink.reason = "DuckDB Arrow result collector native sink contract missing";
 	result.sink.reason += ";operator=RESULT_COLLECTOR";
 	result.sink.reason += ";output_columns=" + std::to_string(types.size());

@@ -18,6 +18,7 @@
 #include "duckdb/execution/operator/aggregate/ungrouped_aggregate_state.hpp"
 #include "duckdb/execution/operator/filter/physical_filter.hpp"
 #include "duckdb/execution/operator/join/perfect_hash_join_executor.hpp"
+#include "duckdb/execution/operator/join/physical_delim_join.hpp"
 #include "duckdb/execution/operator/projection/physical_projection.hpp"
 #include "duckdb/execution/operator/scan/physical_table_scan.hpp"
 #include "duckdb/function/aggregate/distributive_function_utils.hpp"
@@ -579,21 +580,6 @@ unique_ptr<JoinFilterGlobalState> JoinFilterPushdownInfo::GetGlobalState(ClientC
 	return result;
 }
 
-//! True iff the build subtree funnels multiple producer pipelines into one sink (UNION ALL, recursive CTE),
-//! breaking the "decide layout once on the first chunk" contract. Conservative: may over-exclude, never misses one.
-static bool BuildSideHasMultipleSources(const PhysicalOperator &op) {
-	if (op.type == PhysicalOperatorType::UNION || op.type == PhysicalOperatorType::RECURSIVE_CTE ||
-	    op.type == PhysicalOperatorType::RECURSIVE_KEY_CTE) {
-		return true;
-	}
-	for (const auto &child : op.children) {
-		if (BuildSideHasMultipleSources(child.get())) {
-			return true;
-		}
-	}
-	return false;
-}
-
 //! Synchronisation state for the first-chunk publication of the TupleDataLayout: the canonical layout
 //! shared by all per-thread JHTs, plus the per-column decision on whether to narrow the row-store slot.
 struct LayoutGate {
@@ -613,10 +599,10 @@ class HashJoinGlobalSinkState : public GlobalSinkState {
 public:
 	HashJoinGlobalSinkState(const PhysicalHashJoin &op_p, ClientContext &context_p)
 	    : context(context_p), op(op_p), num_threads(TaskScheduler::GetScheduler(context).NumberOfThreads()),
-	      temporary_memory_state(TemporaryMemoryManager::Get(context).Register(context)),
-	      initial_radix_bits(num_threads < 100 ? 4 : 5), finalized(false), active_local_states(0), total_size(0),
-	      max_partition_size(0), max_partition_count(0), probe_side_requirement(0), scanned_data(false) {
-		hash_table = op.InitializeHashTable(context, initial_radix_bits);
+	      temporary_memory_state(TemporaryMemoryManager::Get(context).Register(context)), finalized(false),
+	      active_local_states(0), total_size(0), max_partition_size(0), max_partition_count(0),
+	      probe_side_requirement(0), scanned_data(false) {
+		hash_table = op.InitializeHashTable(context, num_threads < 100 ? 4 : 5);
 
 		// For perfect hash join
 		perfect_join_executor = make_uniq<PerfectHashJoinExecutor>(op, *hash_table);
@@ -626,9 +612,6 @@ public:
 			perfect_join_bounds.Initialize(op.condition_types[0]);
 		}
 		can_use_perfect_hash = use_perfect_hash;
-		// A multi-source build side (UNION ALL / recursive CTE) feeds the sink from several producers,
-		// disqualifying dict-surviving. Computed once from the static plan; cannot change at runtime.
-		build_side_multi_source = BuildSideHasMultipleSources(op.children[1].get());
 		// For external hash join
 		external = Settings::Get<DebugForceExternalSetting>(context);
 		// Set probe types
@@ -651,6 +634,7 @@ public:
 
 	void ScheduleFinalize(Pipeline &pipeline, Event &event);
 	void InitializeProbeSpill();
+	void UpdateProbeSideRequirement();
 	//! First-chunk election: build the canonical layout (with per-column slot narrowing) and publish it.
 	//! Idempotent and safe to call concurrently; only the first thread runs the slow path.
 	void PublishLayoutIfFirst(class HashJoinLocalSinkState &lstate, DataChunk &payload_chunk);
@@ -701,6 +685,12 @@ public:
 	}
 
 public:
+	idx_t HashTableMemoryBudget() const {
+		const auto reservation = temporary_memory_state->GetReservation();
+		// A capped reservation may be smaller than the spill-buffer estimate. Zero streams one partition at a time.
+		return reservation > probe_side_requirement ? reservation - probe_side_requirement : 0;
+	}
+
 	ClientContext &context;
 	const PhysicalHashJoin &op;
 
@@ -708,8 +698,6 @@ public:
 	//! Temporary memory state for managing this operator's memory usage
 	unique_ptr<TemporaryMemoryState> temporary_memory_state;
 
-	//! Initial radix bits
-	const idx_t initial_radix_bits;
 	//! Global HT used by the join
 	unique_ptr<JoinHashTable> hash_table;
 	//! The perfect hash join executor (if any)
@@ -751,12 +739,56 @@ public:
 	//! True iff this join may use perfect-hash-join at Finalize. PHJ's FullScanHashTable reads payload at native
 	//! width, so it disables dict-surviving slot narrowing.
 	bool can_use_perfect_hash = false;
-	//! True iff the build subtree funnels multiple producer pipelines into this sink (UNION ALL /
-	//! recursive CTE); disables dict-surviving because the first-chunk layout election is unsound there.
-	bool build_side_multi_source = false;
-	//! True iff execution regions (JIT) are enabled for this query; disables dict-surviving because compiled
-	//! regions consume the canonical native-width row layout.
 };
+
+//! Prove stability for this output lane, not for unrelated columns or already-materialized ancestors.
+static bool OutputPreservesGlobalDictionary(const PhysicalOperator &op, idx_t column) {
+	if (column >= op.GetTypes().size()) {
+		return false;
+	}
+	switch (op.type) {
+	case PhysicalOperatorType::PROJECTION: {
+		const auto &expr = *op.Cast<PhysicalProjection>().select_list[column];
+		return expr.GetExpressionClass() == ExpressionClass::BOUND_REF &&
+		       OutputPreservesGlobalDictionary(op.children[0], expr.Cast<BoundReferenceExpression>().Index());
+	}
+	case PhysicalOperatorType::FILTER:
+	case PhysicalOperatorType::STREAMING_LIMIT:
+	case PhysicalOperatorType::STREAMING_SAMPLE:
+		return OutputPreservesGlobalDictionary(op.children[0], column);
+	case PhysicalOperatorType::LEFT_DELIM_JOIN:
+	case PhysicalOperatorType::RIGHT_DELIM_JOIN:
+		return OutputPreservesGlobalDictionary(op.Cast<PhysicalDelimJoin>().join, column);
+	case PhysicalOperatorType::HASH_JOIN: {
+		const auto &join = op.Cast<PhysicalHashJoin>();
+		if (!join.sink_state) {
+			return false;
+		}
+		const auto &state = join.sink_state->Cast<HashJoinGlobalSinkState>();
+		if (!state.finalized) {
+			return false;
+		}
+		const auto left_count = join.lhs_output_columns.col_types.size();
+		if (column < left_count) {
+			// Only probe lanes can become NULL-filled or be replayed flat from spill storage.
+			return !IsRightOuterJoin(join.join_type) && !state.external &&
+			       OutputPreservesGlobalDictionary(join.children[0], join.lhs_output_columns.col_idxs[column]);
+		}
+		const auto rhs_column = column - left_count;
+		// Finalized RHS producers own their dictionaries independently of their input encodings.
+		return rhs_column < join.rhs_output_columns.col_types.size() &&
+		       (state.perfect_join_executor || state.hash_table->RHSOutputIsGlobalDictionary(rhs_column));
+	}
+	case PhysicalOperatorType::NESTED_LOOP_JOIN: {
+		const auto &join = op.Cast<PhysicalJoin>();
+		return !IsRightOuterJoin(join.join_type) && column < op.children[0].get().GetTypes().size() &&
+		       OutputPreservesGlobalDictionary(op.children[0], column);
+	}
+	default:
+		// Materialization, multi-source streams and unknown transformations do not preserve this promise.
+		return false;
+	}
+}
 
 unique_ptr<JoinFilterLocalState> JoinFilterPushdownInfo::GetLocalState(JoinFilterGlobalState &gstate) const {
 	auto result = make_uniq<JoinFilterLocalState>();
@@ -853,16 +885,10 @@ static shared_ptr<TupleDataLayout> BuildJoinLayout(const vector<LogicalType> &co
 	return JoinHashTable::BuildRowLayout(cond_types, build_types, join_type, dict_index_width);
 }
 
-//! Join-level gate: shape-only eligibility checks, mirroring the dict-emission path plus a PHJ exclusion
-static bool CanUseDictSurvivingJoin(const PhysicalHashJoin &op, const JoinHashTable &ht, bool can_use_perfect_hash,
-                                    bool build_side_multi_source) {
+//! Join-level gather compatibility; publication proves dictionary stability separately for each payload column.
+static bool CanUseDictSurvivingJoin(const PhysicalHashJoin &op, const JoinHashTable &ht, bool can_use_perfect_hash) {
 	// external is safe here: the dictionary is an in-memory self-owned copy and the index is a plain row-store
 	// column, so a spill/repartition preserves both (unlike the pointer-embedding dict-emission/compressed-probe paths)
-	// a multi-source build can deliver a later chunk flat or as a different dictionary under the
-	// already-narrowed slot, so disqualify the whole join (see BuildSideHasMultipleSources)
-	if (build_side_multi_source) {
-		return false;
-	}
 	// SINGLE joins need FlatVector::SetNull on unmatched rows; dictionary vectors cannot supply it
 	if (ht.join_type == JoinType::SINGLE) {
 		return false;
@@ -980,14 +1006,16 @@ void HashJoinGlobalSinkState::PublishLayoutIfFirst(HashJoinLocalSinkState &lstat
 	const auto &build_types = lstate.hash_table->build_types;
 	layout_gate.dict_index_width.assign(build_types.size(), 0);
 
-	if (CanUseDictSurvivingJoin(op, *lstate.hash_table, can_use_perfect_hash, build_side_multi_source)) {
+	if (CanUseDictSurvivingJoin(op, *lstate.hash_table, can_use_perfect_hash)) {
 		// Per-column width decision lives on the JHT (GetDictSurvivingIndexWidth); feed it each arriving vector.
 		for (idx_t col = 0; col < build_types.size(); col++) {
 			if (col >= payload_chunk.ColumnCount()) {
 				continue;
 			}
-			layout_gate.dict_index_width[col] =
-			    lstate.hash_table->GetDictSurvivingIndexWidth(col, payload_chunk.data[col]);
+			const auto width = lstate.hash_table->GetDictSurvivingIndexWidth(col, payload_chunk.data[col]);
+			if (width && OutputPreservesGlobalDictionary(op.children[1], op.payload_columns.col_idxs[col])) {
+				layout_gate.dict_index_width[col] = width;
+			}
 		}
 	}
 
@@ -1158,13 +1186,9 @@ SinkResultType PhysicalHashJoin::Sink(ExecutionContext &context, DataChunk &chun
 	return SinkResultType::NEED_MORE_INPUT;
 }
 
-static bool BindExecutionHashJoinBuildColumns(const ExecutionRegionSinkInfo &sink_info, DataChunk &chunk,
+static bool BindExecutionHashJoinBuildColumns(const ExecutionRegionHashJoinInfo &sink_info, DataChunk &chunk,
                                               ExecutionHashJoinBuildBinding &build, string &blocker) {
-	auto &contract = sink_info.hash_join_contract;
-	if (sink_info.kind != ExecutionRegionSinkKind::HASH_JOIN_BUILD) {
-		blocker = "hash-join-build-native-runtime-wrong-sink-kind";
-		return false;
-	}
+	auto &contract = sink_info.contract;
 	if (!contract.present) {
 		blocker = "hash-join-build-native-runtime-missing-contract";
 		return false;
@@ -1179,11 +1203,11 @@ static bool BindExecutionHashJoinBuildColumns(const ExecutionRegionSinkInfo &sin
 		                                                    : contract.build_sink_shape_blocker;
 		return false;
 	}
-	if (sink_info.hash_join_keys.size() != contract.condition_count) {
+	if (sink_info.keys.size() != contract.condition_count) {
 		blocker = "hash-join-build-native-runtime-key-count-mismatch";
 		return false;
 	}
-	for (auto &key : sink_info.hash_join_keys) {
+	for (auto &key : sink_info.keys) {
 		if (!key.supported_reference) {
 			blocker = key.reason.empty() ? "hash-join-build-native-runtime-key-not-reference" : key.reason;
 			return false;
@@ -1212,10 +1236,10 @@ static bool BindExecutionHashJoinBuildColumns(const ExecutionRegionSinkInfo &sin
 }
 
 bool ExecutionBindHashJoinBuild(ExecutionContext &context, OperatorSinkInput &input, DataChunk &chunk,
-                                const ExecutionRegionSinkInfo &sink_info, ExecutionSinkBinding &binding) {
+                                const ExecutionRegionHashJoinInfo &sink_info, ExecutionSinkBinding &binding) {
 	(void)context;
 	binding = ExecutionSinkBinding();
-	binding.kind = sink_info.kind;
+	binding.kind = ExecutionRegionSinkKind::HASH_JOIN_BUILD;
 
 	auto &gstate = input.global_state.Cast<HashJoinGlobalSinkState>();
 	auto &lstate = input.local_state.Cast<HashJoinLocalSinkState>();
@@ -1496,6 +1520,12 @@ static idx_t GetPartitioningSpaceRequirement(ClientContext &context, const vecto
 	return num_threads * num_partitions * size_per_partition;
 }
 
+void HashJoinGlobalSinkState::UpdateProbeSideRequirement() {
+	// Estimate the same schema that ProbeSpill stores, including the hash column, before and after repartition.
+	probe_side_requirement =
+	    GetPartitioningSpaceRequirement(context, probe_types, hash_table->GetRadixBits(), num_threads);
+}
+
 void PhysicalHashJoin::PrepareFinalize(ClientContext &context, GlobalSinkState &global_state) const {
 	auto &gstate = global_state.Cast<HashJoinGlobalSinkState>();
 	// If no Sink chunk ever arrived, the layout was never published. Fall back to a default layout
@@ -1520,8 +1550,7 @@ void PhysicalHashJoin::PrepareFinalize(ClientContext &context, GlobalSinkState &
 
 	gstate.total_size =
 	    ht.GetTotalSize(gstate.local_hash_tables, gstate.max_partition_size, gstate.max_partition_count);
-	gstate.probe_side_requirement =
-	    GetPartitioningSpaceRequirement(context, children[0].get().GetTypes(), ht.GetRadixBits(), gstate.num_threads);
+	gstate.UpdateProbeSideRequirement();
 	const auto max_partition_ht_size =
 	    gstate.max_partition_size + gstate.hash_table->PointerTableSize(gstate.max_partition_count);
 	gstate.temporary_memory_state->SetMinimumReservation(max_partition_ht_size + gstate.probe_side_requirement);
@@ -1807,6 +1836,21 @@ private:
 	JoinHashTable &local_ht;
 };
 
+static idx_t RepartitionMemoryPerPartition(const vector<reference<JoinHashTable>> &local_hts, idx_t block_size) {
+	idx_t total_size = 0;
+	idx_t total_count = 0;
+	for (auto &local_ht : local_hts) {
+		auto &collection = local_ht.get().GetSinkCollection();
+		total_size += collection.SizeInBytes();
+		total_count += collection.Count();
+	}
+	const auto total_blocks = MaxValue<idx_t>((total_size + block_size - 1) / block_size, 1);
+	const auto count_per_block = MaxValue<idx_t>(total_count / total_blocks, 1);
+	const auto blocks_per_vector = MaxValue<idx_t>(STANDARD_VECTOR_SIZE / count_per_block, 2);
+	// Input and output pin states coexist while splitting one old partition.
+	return 2 * blocks_per_vector * block_size;
+}
+
 class HashJoinRepartitionEvent : public BasePipelineEvent {
 public:
 	HashJoinRepartitionEvent(Pipeline &pipeline_p, const PhysicalHashJoin &op_p, HashJoinGlobalSinkState &sink,
@@ -1820,25 +1864,15 @@ public:
 
 public:
 	void Schedule() override {
-		D_ASSERT(sink.hash_table->GetRadixBits() > sink.initial_radix_bits);
-		auto block_size = sink.hash_table->buffer_manager.GetBlockSize();
-
-		idx_t total_size = 0;
-		idx_t total_count = 0;
-		for (auto &local_ht : local_hts) {
-			auto &sink_collection = local_ht.get().GetSinkCollection();
-			total_size += sink_collection.SizeInBytes();
-			total_count += sink_collection.Count();
-		}
-		auto total_blocks = (total_size + block_size - 1) / block_size;
-		auto count_per_block = total_count / total_blocks;
-		auto blocks_per_vector = MaxValue<idx_t>(STANDARD_VECTOR_SIZE / count_per_block, 2);
-
-		// Assume 8 blocks per partition per thread (4 input, 4 output)
+		D_ASSERT(!local_hts.empty());
+		const auto radix_bits_before = local_hts[0].get().GetRadixBits();
+		D_ASSERT(sink.hash_table->GetRadixBits() > radix_bits_before);
+		const auto block_size = sink.hash_table->buffer_manager.GetBlockAllocSize();
 		auto partition_multiplier =
-		    RadixPartitioning::NumberOfPartitions(sink.hash_table->GetRadixBits() - sink.initial_radix_bits);
-		auto thread_memory = 2 * blocks_per_vector * partition_multiplier * block_size;
-		auto repartition_threads = MaxValue<idx_t>(sink.temporary_memory_state->GetReservation() / thread_memory, 1);
+		    RadixPartitioning::NumberOfPartitions(sink.hash_table->GetRadixBits() - radix_bits_before);
+		auto thread_memory = RepartitionMemoryPerPartition(local_hts, block_size) * partition_multiplier;
+		auto repartition_threads = sink.temporary_memory_state->GetReservation() / thread_memory;
+		D_ASSERT(repartition_threads > 0);
 
 		if (repartition_threads < local_hts.size()) {
 			// Limit the number of threads working on repartitioning based on our memory reservation
@@ -1871,17 +1905,14 @@ public:
 		vector<idx_t> partition_counts(num_partitions, 0);
 		sink.total_size = sink.hash_table->GetTotalSize(partition_sizes, partition_counts, sink.max_partition_size,
 		                                                sink.max_partition_count);
-		sink.probe_side_requirement =
-		    GetPartitioningSpaceRequirement(sink.context, op.types, sink.hash_table->GetRadixBits(), sink.num_threads);
+		sink.UpdateProbeSideRequirement();
 
 		sink.temporary_memory_state->SetMinimumReservation(sink.max_partition_size +
 		                                                   sink.hash_table->PointerTableSize(sink.max_partition_count) +
 		                                                   sink.probe_side_requirement);
 		sink.temporary_memory_state->UpdateReservation(executor.context);
 
-		D_ASSERT(sink.temporary_memory_state->GetReservation() >= sink.probe_side_requirement);
-		sink.hash_table->PrepareExternalFinalize(sink.temporary_memory_state->GetReservation() -
-		                                         sink.probe_side_requirement);
+		sink.hash_table->PrepareExternalFinalize(sink.HashTableMemoryBudget());
 		sink.ScheduleFinalize(*pipeline, *this);
 	}
 };
@@ -2491,12 +2522,13 @@ SinkFinalizeType PhysicalHashJoin::Finalize(Pipeline &pipeline, Event &event, Cl
 		const auto max_partition_ht_size = sink.max_partition_size + ht.PointerTableSize(sink.max_partition_count);
 		const auto very_very_skewed = // No point in repartitioning if it's this skewed
 		    static_cast<double>(max_partition_ht_size) >= 0.8 * static_cast<double>(sink.total_size);
+		const auto radix_bits_before = ht.GetRadixBits();
 		if (!very_very_skewed &&
-		    (max_partition_ht_size + sink.probe_side_requirement) > sink.temporary_memory_state->GetReservation()) {
+		    (max_partition_ht_size + sink.probe_side_requirement) > sink.temporary_memory_state->GetReservation() &&
+		    ht.SetRepartitionRadixBits(
+		        sink.temporary_memory_state->GetReservation(), sink.max_partition_size, sink.max_partition_count,
+		        RepartitionMemoryPerPartition(sink.local_hash_tables, ht.buffer_manager.GetBlockAllocSize()))) {
 			// We have to repartition
-			const auto radix_bits_before = ht.GetRadixBits();
-			ht.SetRepartitionRadixBits(sink.temporary_memory_state->GetReservation(), sink.max_partition_size,
-			                           sink.max_partition_count);
 			DUCKDB_LOG(context, PhysicalOperatorLogType, *this, "PhysicalHashJoin", "Repartition",
 			           {{"partitions_before", to_string(RadixPartitioning::NumberOfPartitions(radix_bits_before))},
 			            {"partitions_after", to_string(RadixPartitioning::NumberOfPartitions(ht.GetRadixBits()))}});
@@ -2515,9 +2547,7 @@ SinkFinalizeType PhysicalHashJoin::Finalize(Pipeline &pipeline, Event &event, Cl
 				                                 sink.global_filter_state.get());
 			}
 			ht.PrepareBloomFilterForFinalize();
-			D_ASSERT(sink.temporary_memory_state->GetReservation() >= sink.probe_side_requirement);
-			sink.hash_table->PrepareExternalFinalize(sink.temporary_memory_state->GetReservation() -
-			                                         sink.probe_side_requirement);
+			sink.hash_table->PrepareExternalFinalize(sink.HashTableMemoryBudget());
 			sink.ScheduleFinalize(pipeline, event);
 		}
 		sink.finalized = true;
@@ -2856,21 +2886,22 @@ PhysicalHashJoin::GetExecutionOperatorReadiness(ClientContext &context,
                                                 const ExecutionRegionOperatorInfo &operator_info) const {
 	(void)context;
 	auto invalid = [&](string blocker) {
-		return MakeExecutionHashJoinProbeReadiness(operator_info.kind, ExecutionOperatorReadinessStatus::INVALID,
+		return MakeExecutionHashJoinProbeReadiness(operator_info.Kind(), ExecutionOperatorReadinessStatus::INVALID,
 		                                           std::move(blocker));
 	};
 	auto not_ready = [&](string blocker) {
-		return MakeExecutionHashJoinProbeReadiness(operator_info.kind, ExecutionOperatorReadinessStatus::NOT_READY,
+		return MakeExecutionHashJoinProbeReadiness(operator_info.Kind(), ExecutionOperatorReadinessStatus::NOT_READY,
 		                                           std::move(blocker));
 	};
 	auto ready = [&]() {
-		return MakeExecutionHashJoinProbeReadiness(operator_info.kind, ExecutionOperatorReadinessStatus::READY, "none");
+		return MakeExecutionHashJoinProbeReadiness(operator_info.Kind(), ExecutionOperatorReadinessStatus::READY,
+		                                           "none");
 	};
 
-	if (operator_info.kind != ExecutionRegionOperatorContractKind::HASH_JOIN_PROBE) {
+	if (operator_info.Kind() != ExecutionRegionOperatorContractKind::HASH_JOIN_PROBE) {
 		return invalid("hash-join-native-readiness-wrong-operator-kind");
 	}
-	auto &contract = operator_info.hash_join_contract;
+	auto &contract = operator_info.HashJoin().contract;
 	if (!contract.present) {
 		return invalid("hash-join-native-readiness-missing-contract");
 	}
@@ -2883,10 +2914,10 @@ PhysicalHashJoin::GetExecutionOperatorReadiness(ClientContext &context,
 		return invalid(contract.native_probe_shape_blocker.empty() ? "hash-join-native-readiness-probe-shape-not-ready"
 		                                                           : contract.native_probe_shape_blocker);
 	}
-	if (operator_info.hash_join_keys.size() != contract.condition_count) {
+	if (operator_info.HashJoin().keys.size() != contract.condition_count) {
 		return invalid("hash-join-native-readiness-probe-key-count-mismatch");
 	}
-	for (auto &key : operator_info.hash_join_keys) {
+	for (auto &key : operator_info.HashJoin().keys) {
 		// Expression keys are computed by the backend ahead of the probe, which then binds them as references
 		if (!key.supported_reference && !key.expression_ready) {
 			return invalid(key.reason.empty() ? "hash-join-native-readiness-probe-key-not-reference" : key.reason);
@@ -2928,12 +2959,12 @@ ExecutionOperatorBindResult PhysicalHashJoin::BindExecutionOperator(ExecutionCon
 	(void)gstate;
 	(void)state_p;
 	binding = ExecutionOperatorBinding();
-	binding.kind = operator_info.kind;
-	if (operator_info.kind != ExecutionRegionOperatorContractKind::HASH_JOIN_PROBE) {
+	binding.kind = operator_info.Kind();
+	if (operator_info.Kind() != ExecutionRegionOperatorContractKind::HASH_JOIN_PROBE) {
 		binding.blocker = "hash-join-native-runtime-wrong-operator-kind";
 		return ExecutionOperatorBindResult::INVALID;
 	}
-	auto &contract = operator_info.hash_join_contract;
+	auto &contract = operator_info.HashJoin().contract;
 	if (!contract.present) {
 		binding.blocker = "hash-join-native-runtime-missing-contract";
 		return ExecutionOperatorBindResult::INVALID;
@@ -2949,13 +2980,13 @@ ExecutionOperatorBindResult PhysicalHashJoin::BindExecutionOperator(ExecutionCon
 		                                                              : contract.native_probe_shape_blocker;
 		return ExecutionOperatorBindResult::INVALID;
 	}
-	if (operator_info.hash_join_keys.size() != contract.condition_count) {
+	if (operator_info.HashJoin().keys.size() != contract.condition_count) {
 		binding.blocker = "hash-join-native-runtime-probe-key-count-mismatch";
 		return ExecutionOperatorBindResult::INVALID;
 	}
 	vector<idx_t> probe_key_input_indices;
-	probe_key_input_indices.reserve(operator_info.hash_join_keys.size());
-	for (auto &key : operator_info.hash_join_keys) {
+	probe_key_input_indices.reserve(operator_info.HashJoin().keys.size());
+	for (auto &key : operator_info.HashJoin().keys) {
 		if (!key.supported_reference) {
 			binding.blocker = key.reason.empty() ? "hash-join-native-runtime-probe-key-not-reference" : key.reason;
 			return ExecutionOperatorBindResult::INVALID;
@@ -3069,7 +3100,7 @@ ExecutionOperatorBindResult PhysicalHashJoin::BindExecutionOperator(ExecutionCon
 }
 
 bool PhysicalHashJoin::BindExecutionSink(ExecutionContext &context, DataChunk &input, OperatorSinkInput &sink_input,
-                                         const ExecutionRegionSinkInfo &sink_info,
+                                         const ExecutionRegionHashJoinInfo &sink_info,
                                          ExecutionSinkBinding &binding) const {
 	return ExecutionBindHashJoinBuild(context, sink_input, input, sink_info, binding);
 }
@@ -3955,9 +3986,7 @@ void HashJoinGlobalSourceState::PrepareBuild(HashJoinGlobalSinkState &sink) {
 	                                                                                    sink.probe_side_requirement);
 
 	// Try to put the next partitions in the block collection of the HT
-	D_ASSERT(!sink.external || sink.temporary_memory_state->GetReservation() >= sink.probe_side_requirement);
-	if (!sink.external ||
-	    !ht.PrepareExternalFinalize(sink.temporary_memory_state->GetReservation() - sink.probe_side_requirement)) {
+	if (!sink.external || !ht.PrepareExternalFinalize(sink.HashTableMemoryBudget())) {
 		global_stage = HashJoinSourceStage::DONE;
 		sink.temporary_memory_state->SetZero();
 		return;

@@ -1,0 +1,140 @@
+# name: test/sql/jit/test_jit_dictionary_outer_join_build.test
+# description: Dictionary build layouts require a uniform encoding across matched and unmatched producer paths
+# group: [jit]
+
+statement ok
+LOAD jit_sljit
+
+statement ok
+SET disabled_optimizers='join_order,build_side_probe_side'
+
+statement ok
+SET jit_cbo_generated_stage_benefit=4096
+
+statement ok
+SET jit_cbo_materialization_elision_benefit=4096
+
+statement ok
+SET jit_cbo_native_operator_stage_benefit=4096
+
+statement ok
+SET jit_cbo_full_pipeline_benefit=4096
+
+statement ok
+SET jit_cbo_startup_base_cost=0
+
+statement ok
+SET jit_cbo_startup_margin_basis_points=0
+
+statement ok
+CREATE TABLE dim AS SELECT i AS k, 'VALUE_' || i AS label, i::INTEGER AS value FROM range(5) t(i)
+
+statement ok
+CREATE TABLE fact AS SELECT i % 3 AS k FROM range(6000) t(i)
+
+statement ok
+CREATE TABLE probe AS SELECT i * 1000000 AS k FROM range(5) t(i)
+
+foreach threads 1 4
+
+statement ok
+SET threads={threads}
+
+foreach policy off auto
+
+statement ok
+SET jit_policy='{policy}'
+
+# The inner perfect-hash join emits global dictionaries. The RIGHT join also emits NULLs for its unmatched rows.
+query III
+SELECT count(*), count(b.label), sum(b.value)
+FROM probe p JOIN (
+    SELECT outer_dim.k * 1000000 AS k, a.label, a.value
+    FROM (SELECT f.k, d.label, d.value FROM fact f JOIN dim d ON f.k=d.k) a
+    RIGHT JOIN dim outer_dim ON a.k=outer_dim.k
+) b ON p.k=b.k
+----
+6002	6000	6000
+
+# A FULL join can emit unmatched rows from both sides with the same key.
+query III
+SELECT count(*), count(b.label), sum(b.value)
+FROM probe p JOIN (
+    SELECT coalesce(outer_dim.k, a.k) * 1000000 AS k, a.label, a.value
+    FROM (SELECT f.k, d.label, d.value FROM fact f JOIN dim d ON f.k=d.k) a
+    FULL JOIN dim outer_dim ON a.k=outer_dim.k AND a.k<>1
+) b ON p.k=b.k
+----
+6003	6000	6000
+
+# The mirrored LEFT join must not advertise a global dictionary for NULL-extended build payloads either.
+query III
+SELECT count(*), count(b.label), sum(b.value)
+FROM probe p JOIN (
+    SELECT outer_dim.k * 1000000 AS k, a.label, a.value
+    FROM dim outer_dim LEFT JOIN
+    (SELECT f.k, d.label, d.value FROM fact f JOIN dim d ON f.k=d.k) a ON a.k=outer_dim.k
+) b ON p.k=b.k
+----
+6002	6000	6000
+
+statement ok
+SET nested_loop_join_threshold=1000000
+
+query III
+SELECT count(*), count(b.label), sum(b.value)
+FROM probe p JOIN (
+    SELECT outer_dim.k * 1000000 AS k, a.label, a.value
+    FROM (SELECT f.k, d.label, d.value FROM fact f JOIN dim d ON f.k=d.k) a
+    RIGHT JOIN dim outer_dim ON a.k<outer_dim.k
+) b ON p.k=b.k
+----
+18001	18000	14000
+
+statement ok
+SET nested_loop_join_threshold=0
+
+statement ok
+SET merge_join_threshold=0
+
+query III
+SELECT count(*), count(b.label), sum(b.value)
+FROM probe p JOIN (
+    SELECT outer_dim.k * 1000000 AS k, a.label, a.value
+    FROM (SELECT f.k, d.label, d.value FROM fact f JOIN dim d ON f.k=d.k) a
+    RIGHT JOIN dim outer_dim ON a.k<outer_dim.k
+) b ON p.k=b.k
+----
+18001	18000	14000
+
+statement ok
+RESET nested_loop_join_threshold
+
+statement ok
+RESET merge_join_threshold
+
+# A disjunction uses the blockwise nested-loop join rather than the comparison-join implementation.
+query III
+SELECT count(*), count(b.label), sum(b.value)
+FROM probe p JOIN (
+    SELECT outer_dim.k * 1000000 AS k, a.label, a.value
+    FROM (SELECT f.k, d.label, d.value FROM fact f JOIN dim d ON f.k=d.k) a
+    RIGHT JOIN dim outer_dim ON a.k<outer_dim.k OR (a.k=outer_dim.k AND outer_dim.k%2=1)
+) b ON p.k=b.k
+----
+20001	20000	16000
+
+# Positional joins have an unmatched-row source too, without inheriting PhysicalJoin.
+query III
+SELECT count(*), count(b.label), sum(b.value)
+FROM range(6002) p(k) JOIN (
+    SELECT r.i * 1000000 AS k, a.label, a.value
+    FROM (SELECT d.label, d.value FROM fact f JOIN dim d ON f.k=d.k) a
+    POSITIONAL JOIN range(6002) r(i)
+) b ON p.k*1000000=b.k
+----
+6002	6000	6000
+
+endloop
+
+endloop

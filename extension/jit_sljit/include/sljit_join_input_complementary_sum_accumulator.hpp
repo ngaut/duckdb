@@ -276,7 +276,7 @@ bool SljitFlushJoinInputComplementarySumAccumulator(ExecutionRegionRuntime &runt
 		return false;
 	}
 	auto &payload_lanes = scratch.AggregatePayloadLanes(
-	    strategy.aggregate_idx, aggregate_op.aggregate_update.payload_descriptors, binding.aggregate_update.primitive);
+	    strategy.aggregate_idx, aggregate_op.AggregateUpdate().payload_descriptors, binding.aggregate_update.primitive);
 	auto &compact_groups = scratch.AggregatePreaggregatedGroups(strategy.aggregate_idx);
 	auto &preaggregate_scratch = scratch.AggregatePreaggregateScratch(strategy.aggregate_idx);
 	idx_t represented_row_count;
@@ -296,7 +296,7 @@ bool SljitFlushJoinInputComplementarySumAccumulator(ExecutionRegionRuntime &runt
 		return false;
 	}
 	RecordSljitRegionMaterializationElision(
-	    runtime, aggregate_op.kind, "join_input_pipeline_complementary_sum_accumulator_flush", represented_row_count);
+	    runtime, aggregate_op.Kind(), "join_input_pipeline_complementary_sum_accumulator_flush", represented_row_count);
 	accumulator->Reset();
 	return true;
 }

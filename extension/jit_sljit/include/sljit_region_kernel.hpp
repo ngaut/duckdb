@@ -21,9 +21,7 @@ namespace duckdb {
 struct SljitNativeRegionArtifact : public ExecutionRegionArtifact {
 	SljitNativeRegionArtifact(string backend_name, vector<SljitExecutableRegionOp> ops,
 	                          vector<SljitExecutableScanFilter> scan_filters,
-	                          ExecutionRegionScanFilterMode scan_filter_mode, vector<idx_t> source_distinct_counts,
-	                          vector<Value> source_min_values, vector<Value> source_max_values,
-	                          SljitFullPipelineRecipePlan recipe_plan);
+	                          ExecutionRegionScanFilterMode scan_filter_mode, SljitFullPipelineRecipePlan recipe_plan);
 
 	string backend_name;
 	//! Lazy code cells are synchronized and publish monotonically. The semantic
@@ -31,10 +29,17 @@ struct SljitNativeRegionArtifact : public ExecutionRegionArtifact {
 	mutable vector<SljitExecutableRegionOp> ops;
 	vector<SljitExecutableScanFilter> scan_filters;
 	ExecutionRegionScanFilterMode scan_filter_mode;
+	SljitFullPipelineRecipePlan full_pipeline_recipe_plan;
+};
+
+//! Values supplied by this execution, never retained by the database-local artifact cache.
+struct SljitRegionInstanceBindings {
+	vector<SljitAggregateInstanceParameters> aggregate_parameters;
+	vector<SljitCastErrorIdentity> cast_errors;
+	vector<shared_ptr<ExecutionRuntimeFilterIdentity>> exact_source_filters;
 	vector<idx_t> source_distinct_counts;
 	vector<Value> source_min_values;
 	vector<Value> source_max_values;
-	SljitFullPipelineRecipePlan full_pipeline_recipe_plan;
 };
 
 //! Concrete execution kernel used by the full-pipeline template owner. Keeping
@@ -42,8 +47,7 @@ struct SljitNativeRegionArtifact : public ExecutionRegionArtifact {
 //! and table-filter plumbing to compile independently.
 class SljitNativeRegionKernel : public ExecutionRegionKernel {
 public:
-	SljitNativeRegionKernel(shared_ptr<const SljitNativeRegionArtifact> artifact,
-	                        vector<shared_ptr<ExecutionRuntimeFilterIdentity>> exact_source_filter_bindings);
+	SljitNativeRegionKernel(shared_ptr<const SljitNativeRegionArtifact> artifact, SljitRegionInstanceBindings bindings);
 	~SljitNativeRegionKernel() override;
 
 	const string &BackendName() const override;
@@ -80,7 +84,7 @@ private:
 
 private:
 	shared_ptr<const SljitNativeRegionArtifact> artifact;
-	vector<shared_ptr<ExecutionRuntimeFilterIdentity>> exact_source_filter_bindings;
+	SljitRegionInstanceBindings bindings;
 	vector<SljitSharedPerfectHashPredicateClassificationCache> shared_predicate_classifications;
 	mutable atomic<idx_t> executed_filter_rows {0};
 };

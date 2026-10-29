@@ -64,7 +64,7 @@ struct SljitPostJoinProjectionPrimitive {
 
 static bool SljitCanBindPostJoinProjectionPrimitive(const vector<SljitExecutableRegionOp> &ops, idx_t hash_join_idx,
                                                     idx_t first_projection_idx, idx_t final_projection_idx) {
-	if (hash_join_idx >= ops.size() || ops[hash_join_idx].kind != SljitNativeRegionOpKind::HASH_JOIN_PROBE) {
+	if (hash_join_idx >= ops.size() || ops[hash_join_idx].Kind() != SljitNativeRegionOpKind::HASH_JOIN_PROBE) {
 		return false;
 	}
 	if (first_projection_idx == DConstants::INVALID_INDEX && final_projection_idx == DConstants::INVALID_INDEX) {
@@ -75,7 +75,7 @@ static bool SljitCanBindPostJoinProjectionPrimitive(const vector<SljitExecutable
 		return false;
 	}
 	for (idx_t projection_idx = first_projection_idx; projection_idx <= final_projection_idx; projection_idx++) {
-		if (ops[projection_idx].kind != SljitNativeRegionOpKind::PROJECTION) {
+		if (ops[projection_idx].Kind() != SljitNativeRegionOpKind::PROJECTION) {
 			return false;
 		}
 	}

@@ -23,12 +23,12 @@ static void SljitExecuteNativeHashJoinProbeWithScratch(
 	    kernel, runtime, native_runtime, scratch, hash_join_idx, hash_join_op, input, output,
 	    scratch.FilterSelection(hash_join_idx), scratch.HashJoinBuildSelection(hash_join_idx),
 	    scratch.HashJoinRowPointers(hash_join_idx), scratch.HashJoinSources(hash_join_idx),
-	    hash_join_op.hash_join_probe.plan.residual_predicate ? &scratch.HashJoinResidualChunk(hash_join_idx) : nullptr,
-	    hash_join_op.hash_join_probe.plan.residual_predicate ? &scratch.HashJoinResidualSelection(hash_join_idx)
+	    hash_join_op.HashJoinProbe().plan.residual_predicate ? &scratch.HashJoinResidualChunk(hash_join_idx) : nullptr,
+	    hash_join_op.HashJoinProbe().plan.residual_predicate ? &scratch.HashJoinResidualSelection(hash_join_idx)
 	                                                         : nullptr,
-	    hash_join_op.hash_join_probe.plan.residual_predicate ? &scratch.HashJoinResidualMatchSelection(hash_join_idx)
+	    hash_join_op.HashJoinProbe().plan.residual_predicate ? &scratch.HashJoinResidualMatchSelection(hash_join_idx)
 	                                                         : nullptr,
-	    hash_join_op.hash_join_probe.plan.residual_predicate ? &scratch.HashJoinResidualRowPointers(hash_join_idx)
+	    hash_join_op.HashJoinProbe().plan.residual_predicate ? &scratch.HashJoinResidualRowPointers(hash_join_idx)
 	                                                         : nullptr,
 	    state, source_key0_int64_to_int32_unchecked, output_contract, input_plan);
 }
@@ -44,7 +44,7 @@ static void SljitExecuteRecordedNativeHashJoinProbeWithScratch(
 	SljitExecuteNativeHashJoinProbeWithScratch(kernel, runtime, native_runtime, scratch, hash_join_idx, hash_join_op,
 	                                           input, output, state, source_key0_int64_to_int32_unchecked,
 	                                           output_contract, input_plan);
-	RecordSljitRegionStageRuntime(runtime, hash_join_idx, hash_join_op.kind, stage_start);
+	RecordSljitRegionStageRuntime(runtime, hash_join_idx, hash_join_op.Kind(), stage_start);
 }
 
 template <class OWNER>
@@ -117,7 +117,7 @@ static bool SljitDrainHashJoinProbeOutputsWithState(
 		if (output.size() != 0 && handle_output(output, state)) {
 			return true;
 		}
-	} while (!SljitHashJoinProbeDrainFinished(hash_join_op.hash_join_probe.plan.output_mode, state));
+	} while (!SljitHashJoinProbeDrainFinished(hash_join_op.HashJoinProbe().plan.output_mode, state));
 	return false;
 }
 

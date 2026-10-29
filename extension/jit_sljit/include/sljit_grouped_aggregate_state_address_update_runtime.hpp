@@ -37,11 +37,11 @@ SljitBuildGroupedStateAddressUpdateState(SljitExecutableRegionOp &op, DataChunk 
                                          SljitAggregatePayloadAdapterScratch &payload_scratch,
                                          optional_ptr<const vector<idx_t>> input_source_indices_override = nullptr,
                                          optional_ptr<const vector<bool>> input_source_not_null_override = nullptr) {
-	auto &aggregate_update = op.aggregate_update;
+	auto &aggregate_update = op.AggregateUpdate();
 	SljitGroupedStateAddressUpdateState update_state;
 	update_state.payloads = &aggregate_update.payloads;
 	update_state.function = aggregate_update.fused_payload_update.Function();
-	update_state.contract = &aggregate_update.plan.sink_info.aggregate_contract;
+	update_state.contract = &aggregate_update.plan.sink_info.contract;
 	update_state.payload_descriptors = &aggregate_update.payload_descriptors;
 	update_state.payload_source_layout = aggregate_update.payload_source_layout;
 	update_state.combined_payload_source_indices = &aggregate_update.combined_payload_source_indices;
@@ -103,36 +103,36 @@ static idx_t SljitDenseGroupDomainReserveCount(const ExecutionDenseGroupDomain &
 	return MinValue(domain_range, MaxValue(domain.distinct_count, max_distinct_reserve));
 }
 
-static bool SljitTryReserveGroupedAggregateGroups(ExecutionRegionRuntime &runtime, idx_t op_idx,
-                                                  SljitExecutableRegionOp &op,
+static bool SljitTryReserveGroupedAggregateGroups(ExecutionRegionRuntime &runtime, SljitRegionExecutionScratch &scratch,
+                                                  idx_t op_idx, SljitExecutableRegionOp &op,
                                                   ExecutionGroupedAggregateStateAddressBinding &grouped_state,
                                                   idx_t runtime_group_count = 0) {
 	if (!grouped_state.ready || !grouped_state.state) {
 		return false;
 	}
-	auto &reserve = op.aggregate_update.plan.group_reserve;
-	if (!reserve.CanReserve() && runtime_group_count == 0) {
+	const auto reserve = scratch.AggregateParameters(op_idx).group_reserve_count;
+	if (reserve == 0 && runtime_group_count == 0) {
 		return false;
 	}
 	if (!runtime.TryMarkOnce(ExecutionRegionRuntimeOnceFlag::AGGREGATE_GROUP_RESERVE, op_idx)) {
 		return false;
 	}
-	auto reserve_group_count = MaxValue<idx_t>(reserve.group_count, runtime_group_count);
-	if (op.aggregate_update.dense_group_domain.ready) {
+	auto reserve_group_count = MaxValue<idx_t>(reserve, runtime_group_count);
+	if (op.AggregateUpdate().dense_group_domain.ready) {
 		reserve_group_count =
-		    MaxValue(reserve_group_count, SljitDenseGroupDomainReserveCount(op.aggregate_update.dense_group_domain));
+		    MaxValue(reserve_group_count, SljitDenseGroupDomainReserveCount(op.AggregateUpdate().dense_group_domain));
 	}
 	const auto parallelism = MaxValue<idx_t>(runtime.MaxThreads(), 1);
 	reserve_group_count = reserve_group_count / parallelism + (reserve_group_count % parallelism != 0 ? 1 : 0);
 	reserve_group_count = MaxValue<idx_t>(reserve_group_count, STANDARD_VECTOR_SIZE);
-	RecordSljitRegionRuntimePath(runtime, op.kind, "grouped_aggregate_reserve_target", reserve_group_count);
+	RecordSljitRegionRuntimePath(runtime, op.Kind(), "grouped_aggregate_reserve_target", reserve_group_count);
 	auto reserve_stage_start = SljitRegionStageStart(runtime);
 	auto reserved = ExecuteSljitRegionRecordedOperation(
-	    runtime, op_idx, op.kind, "grouped_aggregate_reserve", reserve_stage_start,
+	    runtime, op_idx, op.Kind(), "grouped_aggregate_reserve", reserve_stage_start,
 	    [&](optional_ptr<ExecutionOperatorStageRecorder> recorder) {
 		    return grouped_state.state->ReserveGroups(reserve_group_count, recorder);
 	    });
-	RecordSljitRegionStageRuntimePath(runtime, op_idx, op.kind,
+	RecordSljitRegionStageRuntimePath(runtime, op_idx, op.Kind(),
 	                                  reserved ? "grouped_aggregate_reserve" : "grouped_aggregate_reserve_miss",
 	                                  reserve_stage_start);
 	return reserved;
@@ -145,24 +145,25 @@ static bool TryExecuteDirectGroupedStateAddressPayloadUpdate(
     bool finish = true, optional_ptr<const ExecutionDenseGroupDomain> dense_domain = nullptr) {
 	// Pushed sources can lack a cardinality estimate. Direct checked updates need
 	// the same observed-batch reservation as preaggregated updates.
-	SljitTryReserveGroupedAggregateGroups(runtime, op_idx, op, grouped_state, input.size());
+	SljitTryReserveGroupedAggregateGroups(runtime, scratch, op_idx, op, grouped_state, input.size());
 	auto stage_start = SljitRegionStageStart(runtime);
-	auto &reduction_lanes = scratch.GroupedReductionLanes(op_idx, op.aggregate_update.plan.sink_info.aggregate_contract,
-	                                                      op.aggregate_update.payload_descriptors, payload_lanes);
+	auto &reduction_lanes = scratch.GroupedReductionLanes(op_idx, op.AggregateUpdate().plan.sink_info.contract,
+	                                                      op.AggregateUpdate().payload_descriptors, payload_lanes);
 	auto update_state =
 	    SljitBuildGroupedStateAddressUpdateState(op, input, payload_lanes, reduction_lanes, payload_scratch);
 	const char *stage_name = "direct_new_grouped_primitive_payload_update";
 	const char *miss_stage_name = "direct_new_grouped_primitive_payload_update_miss";
 	auto updated = ExecuteSljitRegionRecordedOperation(
-	    runtime, op_idx, op.kind, stage_name, stage_start, [&](optional_ptr<ExecutionOperatorStageRecorder> recorder) {
+	    runtime, op_idx, op.Kind(), stage_name, stage_start,
+	    [&](optional_ptr<ExecutionOperatorStageRecorder> recorder) {
 		    return grouped_state.state->TryUpdateNewGroupsWithSelectedStateAddresses(
-		        input, op.aggregate_update.plan.sink_info, SljitExecuteGroupedSelectedStateAddressUpdate, &update_state,
-		        recorder, nullptr, dense_domain);
+		        input, op.AggregateUpdate().plan.sink_info, SljitExecuteGroupedSelectedStateAddressUpdate,
+		        &update_state, recorder, nullptr, dense_domain);
 	    });
 	scratch.RecordDirectNewAggregateUpdateResult(op_idx, updated);
-	RecordSljitRegionStageRuntimePath(runtime, op_idx, op.kind, updated ? stage_name : miss_stage_name, stage_start);
+	RecordSljitRegionStageRuntimePath(runtime, op_idx, op.Kind(), updated ? stage_name : miss_stage_name, stage_start);
 	if (updated) {
-		RecordSljitRegionMaterializationElision(runtime, op.kind, stage_name, input.size());
+		RecordSljitRegionMaterializationElision(runtime, op.Kind(), stage_name, input.size());
 	}
 	return updated;
 }
@@ -177,26 +178,27 @@ static bool TryExecuteDirectProjectedGroupedStateAddressPayloadUpdate(
 	if (groups.size() != payload_input.size()) {
 		return false;
 	}
-	SljitTryReserveGroupedAggregateGroups(runtime, op_idx, op, grouped_state, groups.size());
+	SljitTryReserveGroupedAggregateGroups(runtime, scratch, op_idx, op, grouped_state, groups.size());
 	auto stage_start = SljitRegionStageStart(runtime);
-	auto &reduction_lanes = scratch.GroupedReductionLanes(op_idx, op.aggregate_update.plan.sink_info.aggregate_contract,
-	                                                      op.aggregate_update.payload_descriptors, payload_lanes);
+	auto &reduction_lanes = scratch.GroupedReductionLanes(op_idx, op.AggregateUpdate().plan.sink_info.contract,
+	                                                      op.AggregateUpdate().payload_descriptors, payload_lanes);
 	auto update_state = SljitBuildGroupedStateAddressUpdateState(op, payload_input, payload_lanes, reduction_lanes,
 	                                                             payload_scratch, &payload_source_indices);
 	const char *stage_name = "direct_projected_group_payload_update";
 	const char *miss_stage_name = "direct_projected_group_payload_update_miss";
 	auto updated = ExecuteSljitRegionRecordedOperation(
-	    runtime, op_idx, op.kind, stage_name, stage_start, [&](optional_ptr<ExecutionOperatorStageRecorder> recorder) {
+	    runtime, op_idx, op.Kind(), stage_name, stage_start,
+	    [&](optional_ptr<ExecutionOperatorStageRecorder> recorder) {
 		    return grouped_state.state->TryUpdateGroupKeysWithSelectedStateAddresses(
-		        groups, op.aggregate_update.plan.sink_info, SljitExecuteGroupedSelectedStateAddressUpdate,
+		        groups, op.AggregateUpdate().plan.sink_info, SljitExecuteGroupedSelectedStateAddressUpdate,
 		        &update_state, recorder, precomputed_hashes, dense_domain);
 	    });
 	scratch.RecordDirectNewAggregateUpdateResult(op_idx, updated);
 	if (updated) {
-		RecordSljitRegionStageRuntime(runtime, op_idx, op.kind, stage_name, stage_start);
-		RecordSljitRegionMaterializationElision(runtime, op.kind, stage_name, payload_input.size());
+		RecordSljitRegionStageRuntime(runtime, op_idx, op.Kind(), stage_name, stage_start);
+		RecordSljitRegionMaterializationElision(runtime, op.Kind(), stage_name, payload_input.size());
 	} else {
-		RecordSljitRegionStageRuntimePath(runtime, op_idx, op.kind, miss_stage_name, stage_start);
+		RecordSljitRegionStageRuntimePath(runtime, op_idx, op.Kind(), miss_stage_name, stage_start);
 	}
 	return updated;
 }
@@ -210,21 +212,21 @@ static bool SljitPreaggregatedGroupedPrimitiveUpdateContractApplies(
     SljitPreaggregatedPrimitiveAggregateScratch &preaggregate_scratch,
     const vector<const ExecutionPrimitiveAggregateUpdateLane *> &payload_lanes,
     ExecutionGroupedAggregateStateAddressBinding &grouped_state) {
-	if (op.aggregate_update.plan.sink_info.kind != ExecutionRegionSinkKind::HASH_AGGREGATE_UPDATE ||
-	    !op.aggregate_update.plan.UsesPrimitivePayloads() || !op.aggregate_update.plan.use_grouped_state_addresses ||
+	if (op.AggregateUpdate().plan.sink_info.Kind() != ExecutionRegionSinkKind::HASH_AGGREGATE_UPDATE ||
+	    !op.AggregateUpdate().plan.UsesPrimitivePayloads() || !op.AggregateUpdate().plan.use_grouped_state_addresses ||
 	    !grouped_state.ready || !grouped_state.state) {
 		return false;
 	}
-	auto &sink_info = op.aggregate_update.plan.sink_info;
+	auto &sink_info = op.AggregateUpdate().plan.sink_info;
 	if (sink_info.groups.size() != group_column_count ||
-	    sink_info.aggregates.size() != op.aggregate_update.payloads.size() ||
-	    sink_info.aggregates.size() != op.aggregate_update.payload_descriptors.size() ||
+	    sink_info.aggregates.size() != op.AggregateUpdate().payloads.size() ||
+	    sink_info.aggregates.size() != op.AggregateUpdate().payload_descriptors.size() ||
 	    sink_info.aggregates.size() != payload_lanes.size() ||
 	    sink_info.aggregates.size() != preaggregate_scratch.payloads.size()) {
 		return false;
 	}
 	for (idx_t payload_idx = 0; payload_idx < sink_info.aggregates.size(); payload_idx++) {
-		if (op.aggregate_update.payload_descriptors[payload_idx].primitive_kind !=
+		if (op.AggregateUpdate().payload_descriptors[payload_idx].primitive_kind !=
 		    preaggregate_scratch.payloads[payload_idx].kind) {
 			return false;
 		}

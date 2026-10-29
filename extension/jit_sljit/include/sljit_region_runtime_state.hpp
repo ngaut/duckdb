@@ -52,9 +52,14 @@ SljitExactSourceFilterIdentity(const vector<shared_ptr<ExecutionRuntimeFilterIde
 
 struct SljitRegionExecutionScratch {
 	SljitRegionExecutionScratch(Allocator &allocator, const vector<SljitExecutableRegionOp> &ops,
-	                            vector<shared_ptr<ExecutionRuntimeFilterIdentity>> exact_source_filter_bindings_p)
-	    : exact_source_filter_bindings(std::move(exact_source_filter_bindings_p)) {
+	                            vector<shared_ptr<ExecutionRuntimeFilterIdentity>> exact_source_filter_bindings_p,
+	                            const vector<SljitAggregateInstanceParameters> &aggregate_parameters_p)
+	    : exact_source_filter_bindings(std::move(exact_source_filter_bindings_p)),
+	      aggregate_parameters(aggregate_parameters_p) {
 		const auto op_count = ops.size();
+		if (aggregate_parameters.size() != op_count) {
+			throw InternalException("SLJIT aggregate instance parameter count does not match its artifact");
+		}
 		temporary_chunks.resize(op_count);
 		distinct_groups.resize(op_count);
 		filter_selections.resize(op_count);
@@ -68,7 +73,7 @@ struct SljitRegionExecutionScratch {
 			auto &op = ops[op_idx];
 			InitializeExpressionAdapterScratch(op_idx, op);
 			InitializeOperatorScratch(allocator, op_idx, op);
-			if (OpIsSink(op.kind)) {
+			if (OpIsSink(op.Kind())) {
 				continue;
 			}
 			if (CanFuseFilterProjection(ops, op_idx)) {
@@ -82,6 +87,10 @@ struct SljitRegionExecutionScratch {
 	DataChunk &TemporaryChunk(idx_t op_idx) {
 		return SljitCheckedScratchPtr(temporary_chunks, op_idx,
 		                              "SLJIT full pipeline transform has no stage scratch chunk");
+	}
+
+	const SljitAggregateInstanceParameters &AggregateParameters(idx_t op_idx) const {
+		return aggregate_parameters[op_idx];
 	}
 
 	Vector &AggregateStateAddresses(idx_t op_idx) {
@@ -120,6 +129,10 @@ struct SljitRegionExecutionScratch {
 	AggregatePayloadLanes(idx_t op_idx, const vector<SljitAggregatePayloadDescriptor> &payload_descriptors,
 	                      const ExecutionPrimitiveAggregateUpdateBinding &primitive) {
 		return aggregate_scratch.PayloadLanes(op_idx, payload_descriptors, primitive);
+	}
+
+	optional_ptr<const ExecutionPrimitiveAggregateUpdateLane> AggregateCountOneLane(idx_t op_idx) const {
+		return aggregate_scratch.CountOneLane(op_idx);
 	}
 
 	const vector<SljitGroupedReductionLaneBinding> &
@@ -269,6 +282,7 @@ struct SljitRegionExecutionScratch {
 	}
 
 	vector<shared_ptr<ExecutionRuntimeFilterIdentity>> exact_source_filter_bindings;
+	const vector<SljitAggregateInstanceParameters> &aggregate_parameters;
 	vector<unique_ptr<DataChunk>> temporary_chunks;
 	vector<unique_ptr<SljitDistinctGroupScratch>> distinct_groups;
 	vector<unique_ptr<SelectionVector>> filter_selections;
@@ -280,7 +294,7 @@ struct SljitRegionExecutionScratch {
 	vector<vector<SljitExpressionAdapterScratch>> expression_adapter_scratch;
 
 	void InitializeOperatorScratch(Allocator &allocator, idx_t op_idx, const SljitExecutableRegionOp &op) {
-		switch (op.kind) {
+		switch (op.Kind()) {
 		case SljitNativeRegionOpKind::FILTER:
 			filter_selections[op_idx] = make_uniq<SelectionVector>(STANDARD_VECTOR_SIZE);
 			break;
@@ -304,21 +318,21 @@ struct SljitRegionExecutionScratch {
 
 	void InitializeExpressionAdapterScratch(idx_t op_idx, const SljitExecutableRegionOp &op) {
 		idx_t expression_count = 0;
-		switch (op.kind) {
+		switch (op.Kind()) {
 		case SljitNativeRegionOpKind::FILTER:
 			expression_count = 1;
 			break;
 		case SljitNativeRegionOpKind::PROJECTION:
-			expression_count = op.projections.size();
+			expression_count = op.Projections().size();
 			break;
 		case SljitNativeRegionOpKind::HASH_JOIN_PROBE:
-			expression_count = op.hash_join_probe.plan.residual_predicate ? 1 : 0;
+			expression_count = op.HashJoinProbe().plan.residual_predicate ? 1 : 0;
 			break;
 		case SljitNativeRegionOpKind::ORDER_SINK:
-			expression_count = op.order_sink.order_keys.size();
+			expression_count = op.OrderSink().order_keys.size();
 			break;
 		case SljitNativeRegionOpKind::AGGREGATE_UPDATE:
-			expression_count = op.aggregate_update.payloads.size();
+			expression_count = op.AggregateUpdate().payloads.size();
 			break;
 		default:
 			break;
@@ -339,8 +353,8 @@ struct SljitRegionExecutionScratch {
 	}
 
 	static bool CanFuseFilterProjection(const vector<SljitExecutableRegionOp> &ops, idx_t op_idx) {
-		return op_idx + 1 < ops.size() && ops[op_idx].kind == SljitNativeRegionOpKind::FILTER &&
-		       ops[op_idx + 1].kind == SljitNativeRegionOpKind::PROJECTION;
+		return op_idx + 1 < ops.size() && ops[op_idx].Kind() == SljitNativeRegionOpKind::FILTER &&
+		       ops[op_idx + 1].Kind() == SljitNativeRegionOpKind::PROJECTION;
 	}
 
 	void InitializeTemporaryChunk(Allocator &allocator, const vector<SljitExecutableRegionOp> &ops, idx_t op_idx) {

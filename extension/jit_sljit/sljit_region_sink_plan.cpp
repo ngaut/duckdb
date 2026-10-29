@@ -27,7 +27,7 @@ static string BuildSljitNativeSinkReason(const char *label, const char *runtime_
 		reason += ";requires=";
 		reason += runtime_binding;
 		AppendSljitRequiredCapability(reason, contract.required_capability);
-		reason += ";sink_kind=" + string(ExecutionRegionSinkKindToString(sink.kind));
+		reason += ";sink_kind=" + string(ExecutionRegionSinkKindToString(sink.Kind()));
 	}
 	return reason;
 }
@@ -37,13 +37,13 @@ static void AppendSljitSinkIR(string &reason, const ExecutionRegionSinkInfo &sin
 }
 
 static SljitRegionNodePlan PlanSljitAppendSinkNode(const ExecutionRegionNode &node, bool render_diagnostics) {
-	auto &contract = node.sink->native_sink_contract;
+	auto &contract = node.sink->Native();
 	if (contract.status != ExecutionRegionStateContractStatus::READY) {
 		return SljitBlockedContractBoundary(contract.blocker, "append sink contract is not ready");
 	}
 	SljitNativeRegionOpPlan native_op;
-	native_op.kind = SljitNativeRegionOpKind::APPEND_SINK;
-	native_op.append_sink.sink_info = *node.sink;
+	native_op.SetKind(SljitNativeRegionOpKind::APPEND_SINK);
+	native_op.AppendSink().sink_info = *node.sink;
 
 	auto reason = BuildSljitNativeSinkReason("append sink contract", "append_sink_runtime_binding", *node.sink,
 	                                         contract, render_diagnostics);
@@ -52,8 +52,8 @@ static SljitRegionNodePlan PlanSljitAppendSinkNode(const ExecutionRegionNode &no
 }
 
 static SljitRegionNodePlan PlanSljitOrderSinkNode(const ExecutionRegionNode &node, bool render_diagnostics) {
-	auto &contract = node.sink->native_sink_contract;
-	auto &order_contract = node.sink->order_contract;
+	auto &contract = node.sink->Native();
+	auto &order_contract = node.sink->Order().contract;
 	if (contract.status != ExecutionRegionStateContractStatus::READY) {
 		auto reason = SljitBlockerOrReason(contract.blocker, "ordered-sink-contract-not-ready");
 		if (order_contract.present) {
@@ -73,10 +73,10 @@ static SljitRegionNodePlan PlanSljitOrderSinkNode(const ExecutionRegionNode &nod
 	}
 
 	SljitNativeRegionOpPlan native_op;
-	native_op.kind = SljitNativeRegionOpKind::ORDER_SINK;
-	native_op.order_sink.sink_info = *node.sink;
-	native_op.order_sink.order_keys.reserve(order_contract.order_keys.size());
-	native_op.order_sink.key_types.reserve(order_contract.order_keys.size());
+	native_op.SetKind(SljitNativeRegionOpKind::ORDER_SINK);
+	native_op.OrderSink().sink_info = node.sink->Order();
+	native_op.OrderSink().order_keys.reserve(order_contract.order_keys.size());
+	native_op.OrderSink().key_types.reserve(order_contract.order_keys.size());
 	for (auto &key : order_contract.order_keys) {
 		SljitNativeRegionExpressionPlan key_plan;
 		string error;
@@ -90,15 +90,15 @@ static SljitRegionNodePlan PlanSljitOrderSinkNode(const ExecutionRegionNode &nod
 			}
 			return SljitRegionBoundaryNode(std::move(reason));
 		}
-		native_op.order_sink.key_types.push_back(key.type);
-		native_op.order_sink.order_keys.push_back(std::move(key_plan));
+		native_op.OrderSink().key_types.push_back(key.type);
+		native_op.OrderSink().order_keys.push_back(std::move(key_plan));
 	}
 
 	auto reason = BuildSljitNativeSinkReason("ordered sink contract", "ordered_sink_runtime_binding", *node.sink,
 	                                         contract, render_diagnostics);
 	if (render_diagnostics) {
 		reason += ";operator_kind=" + string(ExecutionRegionOperatorKindToString(order_contract.kind));
-		reason += ";order_keys=" + std::to_string(native_op.order_sink.order_keys.size());
+		reason += ";order_keys=" + std::to_string(native_op.OrderSink().order_keys.size());
 	}
 	AppendSljitSinkIR(reason, *node.sink, render_diagnostics);
 	return SljitNativeNode(std::move(native_op), std::move(reason));
@@ -106,18 +106,18 @@ static SljitRegionNodePlan PlanSljitOrderSinkNode(const ExecutionRegionNode &nod
 
 static void SetSljitNativeSinkInputTypes(SljitNativeRegionOpPlan &op, const vector<LogicalType> &input_types) {
 	op.output_types = input_types;
-	switch (op.kind) {
+	switch (op.Kind()) {
 	case SljitNativeRegionOpKind::HASH_JOIN_BUILD:
-		op.hash_join_build.input_types = input_types;
+		op.HashJoinBuild().input_types = input_types;
 		break;
 	case SljitNativeRegionOpKind::ORDER_SINK:
-		op.order_sink.input_types = input_types;
+		op.OrderSink().input_types = input_types;
 		break;
 	case SljitNativeRegionOpKind::APPEND_SINK:
-		op.append_sink.input_types = input_types;
+		op.AppendSink().input_types = input_types;
 		break;
 	case SljitNativeRegionOpKind::AGGREGATE_UPDATE:
-		op.aggregate_update.input_types = input_types;
+		op.AggregateUpdate().input_types = input_types;
 		break;
 	default:
 		break;
@@ -156,7 +156,7 @@ SljitRegionNodePlan PlanSljitSinkNode(const ExecutionRegionNode &node, const vec
 	}
 
 	SljitRegionNodePlan sink;
-	switch (node.sink->kind) {
+	switch (node.sink->Kind()) {
 	case ExecutionRegionSinkKind::HASH_JOIN_BUILD:
 		sink = PlanSljitHashJoinBuildSinkNode(node, render_diagnostics);
 		break;
@@ -195,7 +195,7 @@ SljitRegionNodePlan PlanSljitFullPipelineSinkNode(const ExecutionRegionNode &nod
 		}
 		return native_sink;
 	}
-	if (node.sink->kind == ExecutionRegionSinkKind::HASH_JOIN_BUILD) {
+	if (node.sink->Kind() == ExecutionRegionSinkKind::HASH_JOIN_BUILD) {
 		return SljitFullPipelineSinkBoundary(
 		    node, native_sink, "full pipeline hash join build sink requires native hash build primitive lowering",
 		    "hash-join-build-contract-boundary", render_diagnostics);

@@ -42,7 +42,8 @@ static SljitHashJoinOutputSource SljitBindHashJoinOutputSource(ExecutionRegionRu
 		return SljitHashJoinOutputSource {join_input, probe_binding, output_proof};
 	}
 	const auto output_projection_idx = output_layout->ProducerIndex();
-	if (output_projection_idx >= ops.size() || ops[output_projection_idx].kind != SljitNativeRegionOpKind::PROJECTION) {
+	if (output_projection_idx >= ops.size() ||
+	    ops[output_projection_idx].Kind() != SljitNativeRegionOpKind::PROJECTION) {
 		throw InternalException("SLJIT hash join output source has no elided projection to execute");
 	}
 	auto &projection_op = ops[output_projection_idx];
@@ -55,7 +56,7 @@ static SljitHashJoinOutputSource SljitBindHashJoinOutputSource(ExecutionRegionRu
 	if (!scratch.HasOutputOperatorBinding(hash_join_idx)) {
 		auto bind_result =
 		    runtime.ExecutionOperators().BindOperator(hash_join_op.operator_index, projected_input,
-		                                              hash_join_op.hash_join_probe.plan.operator_info, output_binding);
+		                                              hash_join_op.HashJoinProbe().plan.operator_info, output_binding);
 		if (bind_result != ExecutionOperatorBindResult::READY || !output_binding.hash_join_probe.ready) {
 			throw InternalException("SLJIT hash join output source could not bind the probe to its projected input: %s",
 			                        output_binding.blocker);

@@ -72,13 +72,13 @@ bool SljitTryBuildFilteredAggregateUpdate(SljitExecutableRegionOp &filter_op, Sl
                                           string &error, const vector<bool> &input_not_null,
                                           const vector<Value> &input_min_values,
                                           const vector<Value> &input_max_values) {
-	if (filter_op.kind != SljitNativeRegionOpKind::FILTER ||
-	    aggregate_op.kind != SljitNativeRegionOpKind::AGGREGATE_UPDATE) {
+	if (filter_op.Kind() != SljitNativeRegionOpKind::FILTER ||
+	    aggregate_op.Kind() != SljitNativeRegionOpKind::AGGREGATE_UPDATE) {
 		return true;
 	}
-	D_ASSERT(filter_op.filter);
-	auto &filter = filter_op.filter->expression;
-	auto &aggregate_update = aggregate_op.aggregate_update;
+	D_ASSERT(filter_op.Filter());
+	auto &filter = filter_op.Filter()->expression;
+	auto &aggregate_update = aggregate_op.AggregateUpdate();
 	if (aggregate_update.filtered_update.IsExecutable() || !aggregate_update.plan.UsesPrimitivePayloads() ||
 	    aggregate_update.payloads.empty() ||
 	    aggregate_update.payloads.size() != aggregate_update.plan.sink_info.aggregates.size()) {
@@ -89,7 +89,7 @@ bool SljitTryBuildFilteredAggregateUpdate(SljitExecutableRegionOp &filter_op, Sl
 	}
 
 	if (aggregate_update.plan.use_perfect_hash_group_lookup &&
-	    aggregate_update.plan.sink_info.kind == ExecutionRegionSinkKind::PERFECT_HASH_AGGREGATE_UPDATE) {
+	    aggregate_update.plan.sink_info.Kind() == ExecutionRegionSinkKind::PERFECT_HASH_AGGREGATE_UPDATE) {
 		SljitExecutableFilteredAggregateUpdate filtered_update;
 		filtered_update.filter.plan = filter.plan.Copy(true, false);
 		filtered_update.payloads.reserve(aggregate_update.payloads.size());
@@ -164,9 +164,8 @@ bool SljitTryBuildFilteredAggregateUpdate(SljitExecutableRegionOp &filter_op, Sl
 		string filtered_error;
 		auto code = BuildSljitNativeFilteredPerfectHashGroupedFusedAggregateUpdate(
 		    *filtered_update.filter.plan.expression_tree, codegen_payloads, aggregate_update.plan.sink_info.aggregates,
-		    aggregate_update.plan.sink_info.groups, codegen_group_expressions,
-		    aggregate_update.plan.sink_info.aggregate_contract, combined_source_not_null, combined_source_min_values,
-		    combined_source_max_values, function, filtered_error);
+		    aggregate_update.plan.sink_info.groups, codegen_group_expressions, aggregate_update.plan.sink_info.contract,
+		    combined_source_not_null, combined_source_min_values, combined_source_max_values, function, filtered_error);
 		auto compiled = SljitCompiledFunction<SljitNativeAggregateUpdateFunction>::TryCreate(std::move(code), function);
 		if (compiled.IsExecutable()) {
 			filtered_update.compiled = std::move(compiled);
@@ -182,7 +181,7 @@ bool SljitTryBuildFilteredAggregateUpdate(SljitExecutableRegionOp &filter_op, Sl
 	}
 
 	if (aggregate_update.plan.use_grouped_state_addresses ||
-	    aggregate_update.plan.sink_info.kind != ExecutionRegionSinkKind::UNGROUPED_AGGREGATE_UPDATE) {
+	    aggregate_update.plan.sink_info.Kind() != ExecutionRegionSinkKind::UNGROUPED_AGGREGATE_UPDATE) {
 		return true;
 	}
 	for (idx_t payload_idx = 0; payload_idx < aggregate_update.payloads.size(); payload_idx++) {

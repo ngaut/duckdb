@@ -18,22 +18,22 @@ static bool SljitTryBuildCountStarGroupProjection(const SljitExecutableRegionOp 
                                                   const SljitExecutableRegionOp &aggregate_op,
                                                   SljitExecutableRegionOp &group_projection) {
 	if (!SljitGroupedAggregateUpdateCanUseCountStarPreaggregation(aggregate_op) ||
-	    projection_op.kind != SljitNativeRegionOpKind::PROJECTION) {
+	    projection_op.Kind() != SljitNativeRegionOpKind::PROJECTION) {
 		return false;
 	}
-	auto &sink_info = aggregate_op.aggregate_update.plan.sink_info;
+	auto &sink_info = aggregate_op.AggregateUpdate().plan.sink_info;
 	if (sink_info.groups.size() != 1) {
 		return false;
 	}
 	auto &group = sink_info.groups[0];
-	if (group.input_index >= projection_op.projections.size() ||
+	if (group.input_index >= projection_op.Projections().size() ||
 	    group.input_index >= projection_op.output_types.size() ||
 	    projection_op.output_types[group.input_index] != group.type) {
 		return false;
 	}
 
 	group_projection = SljitExecutableRegionOp();
-	group_projection.kind = SljitNativeRegionOpKind::PROJECTION;
+	group_projection.SetKind(SljitNativeRegionOpKind::PROJECTION);
 	group_projection.operator_index = projection_op.operator_index;
 	group_projection.input_types = projection_op.input_types;
 	group_projection.output_types.push_back(projection_op.output_types[group.input_index]);
@@ -42,13 +42,13 @@ static bool SljitTryBuildCountStarGroupProjection(const SljitExecutableRegionOp 
 	}
 	auto group_expression = make_uniq<SljitExecutableRegionExpression>();
 	SljitPrepareExecutableRegionExpression(
-	    SljitCopySemanticExpressionPlan(projection_op.projections[group.input_index]), *group_expression, nullptr,
+	    SljitCopySemanticExpressionPlan(projection_op.Projections()[group.input_index]), *group_expression, nullptr,
 	    true);
 	string compile_error;
 	if (!SljitCompilePreparedExecutableRegionExpression(*group_expression, false, compile_error)) {
 		return false;
 	}
-	group_projection.projections.push_back(std::move(*group_expression));
+	group_projection.Projections().push_back(std::move(*group_expression));
 	return true;
 }
 
@@ -166,7 +166,7 @@ static bool SljitCanBindGroupedAggregateUpdatePrimitive(const vector<SljitExecut
 		switch (primitive.strategy) {
 		case SljitGroupedAggregateUpdateStrategyKind::COUNT_STAR_PREAGGREGATION:
 			return primitive.projected_count_star_group_projection &&
-			       primitive.projected_count_star_group_projection->kind == SljitNativeRegionOpKind::PROJECTION &&
+			       primitive.projected_count_star_group_projection->Kind() == SljitNativeRegionOpKind::PROJECTION &&
 			       SljitGroupedAggregateUpdateCanUseCountStarPreaggregation(ops[primitive.aggregate_idx]) &&
 			       SljitCountStarProjectionInputSupported(*primitive.projected_count_star_group_projection);
 		case SljitGroupedAggregateUpdateStrategyKind::DIRECT_PRIMITIVE_PAYLOAD_UPDATE:

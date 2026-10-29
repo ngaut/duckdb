@@ -140,7 +140,9 @@ enum class SljitBoundGroupedAggregateStrategy : uint8_t {
 };
 
 struct SljitBoundGroupedPrimitiveAggregateUpdate {
-	bool ready = false;
+	bool IsBound() const {
+		return strategy != SljitBoundGroupedAggregateStrategy::UNBOUND;
+	}
 	idx_t op_idx = DConstants::INVALID_INDEX;
 	optional_ptr<SljitExecutableRegionOp> op;
 	optional_ptr<const vector<SljitAggregatePayloadDescriptor>> payload_descriptors;
@@ -161,6 +163,7 @@ struct SljitAggregateOperatorScratch {
 	SljitAggregatePayloadAdapterScratch payload_scratch;
 	vector<const ExecutionPrimitiveAggregateUpdateLane *> payload_lanes;
 	bool payload_lanes_ready = false;
+	optional_ptr<const ExecutionPrimitiveAggregateUpdateLane> count_one_lane;
 	vector<SljitGroupedReductionLaneBinding> grouped_reduction_lanes;
 	bool grouped_reduction_lanes_ready = false;
 	SljitDirectAggregateUpdateTracker direct_new {8};
@@ -241,7 +244,18 @@ struct SljitAggregateUpdateScratchState {
 			lanes[payload_idx] = lane;
 		}
 		state.payload_lanes_ready = true;
+		if (lanes.size() == 1 && SljitAggregatePayloadDescriptorMatchesLane(payload_descriptors[0], *lanes[0]) &&
+		    (lanes[0]->kind == AggregatePrimitiveUpdateKind::COUNT ||
+		     lanes[0]->kind == AggregatePrimitiveUpdateKind::COUNT_STAR)) {
+			state.count_one_lane = lanes[0];
+		}
 		return lanes;
+	}
+
+	optional_ptr<const ExecutionPrimitiveAggregateUpdateLane> CountOneLane(idx_t op_idx) const {
+		auto &state = Operator(op_idx);
+		D_ASSERT(state.payload_lanes_ready);
+		return state.count_one_lane;
 	}
 
 	const vector<SljitGroupedReductionLaneBinding> &
@@ -289,13 +303,13 @@ struct SljitAggregateUpdateScratchState {
 			throw InternalException("SLJIT aggregate update scratch initialized more than once");
 		}
 		operators[op_idx] = make_uniq<SljitAggregateOperatorScratch>();
-		if (!op.aggregate_update.plan.use_grouped_state_addresses) {
+		if (!op.AggregateUpdate().plan.use_grouped_state_addresses) {
 			return;
 		}
 		auto &state = *operators[op_idx];
 		state.state_addresses = make_uniq<Vector>(LogicalType::POINTER);
 		state.preaggregated_row_pointers = make_uniq<Vector>(LogicalType::POINTER);
-		auto &groups = op.aggregate_update.plan.sink_info.groups;
+		auto &groups = op.AggregateUpdate().plan.sink_info.groups;
 		if (groups.empty()) {
 			return;
 		}

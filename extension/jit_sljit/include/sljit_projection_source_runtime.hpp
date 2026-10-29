@@ -254,10 +254,10 @@ static bool SljitAddProjectionOutputSourceColumns(const SljitExecutableRegionOp 
 	if (skip_projection && projection_idx < skip_projection->size() && (*skip_projection)[projection_idx]) {
 		return true;
 	}
-	if (projection_idx >= projection_op.projections.size()) {
+	if (projection_idx >= projection_op.Projections().size()) {
 		return false;
 	}
-	return SljitTryAddExecutableExpressionSourceColumns(projection_op.projections[projection_idx], input_column_count,
+	return SljitTryAddExecutableExpressionSourceColumns(projection_op.Projections()[projection_idx], input_column_count,
 	                                                    referenced);
 }
 
@@ -265,7 +265,7 @@ static bool SljitBuildProjectionSourceColumnSet(const SljitExecutableRegionOp &p
                                                 optional_ptr<const vector<idx_t>> output_to_projection,
                                                 optional_ptr<const vector<uint8_t>> skip_projection,
                                                 vector<uint8_t> &referenced) {
-	if (projection_op.kind != SljitNativeRegionOpKind::PROJECTION || input_column_count == 0) {
+	if (projection_op.Kind() != SljitNativeRegionOpKind::PROJECTION || input_column_count == 0) {
 		return false;
 	}
 	referenced.assign(input_column_count, 0);
@@ -279,7 +279,7 @@ static bool SljitBuildProjectionSourceColumnSet(const SljitExecutableRegionOp &p
 		return true;
 	}
 
-	for (idx_t projection_idx = 0; projection_idx < projection_op.projections.size(); projection_idx++) {
+	for (idx_t projection_idx = 0; projection_idx < projection_op.Projections().size(); projection_idx++) {
 		if (!SljitAddProjectionOutputSourceColumns(projection_op, input_column_count, projection_idx, skip_projection,
 		                                           referenced)) {
 			return false;

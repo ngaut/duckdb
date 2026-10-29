@@ -48,9 +48,9 @@ struct SljitMarkProbeFilterBoundaryPrimitive {
 
 static bool SljitCanBindHashJoinProbeMaterializePrimitive(const vector<SljitExecutableRegionOp> &ops,
                                                           idx_t hash_join_idx) {
-	return hash_join_idx < ops.size() && ops[hash_join_idx].kind == SljitNativeRegionOpKind::HASH_JOIN_PROBE &&
-	       ops[hash_join_idx].hash_join_probe.plan.output_mode != ExecutionHashJoinProbeOutputMode::NONE &&
-	       ops[hash_join_idx].hash_join_probe.plan.output_mode != ExecutionHashJoinProbeOutputMode::MARK_BUILD_ONLY;
+	return hash_join_idx < ops.size() && ops[hash_join_idx].Kind() == SljitNativeRegionOpKind::HASH_JOIN_PROBE &&
+	       ops[hash_join_idx].HashJoinProbe().plan.output_mode != ExecutionHashJoinProbeOutputMode::NONE &&
+	       ops[hash_join_idx].HashJoinProbe().plan.output_mode != ExecutionHashJoinProbeOutputMode::MARK_BUILD_ONLY;
 }
 
 static bool SljitTryBindHashJoinProbeMaterializePrimitive(const vector<SljitExecutableRegionOp> &ops,
@@ -69,10 +69,10 @@ static bool SljitTryBindHashJoinProbeMaterializePrimitive(const vector<SljitExec
 
 static bool SljitCanBindHashJoinProbeSelectionPrimitive(const vector<SljitExecutableRegionOp> &ops,
                                                         idx_t hash_join_idx) {
-	return hash_join_idx < ops.size() && ops[hash_join_idx].kind == SljitNativeRegionOpKind::HASH_JOIN_PROBE &&
-	       (ops[hash_join_idx].hash_join_probe.plan.output_mode ==
+	return hash_join_idx < ops.size() && ops[hash_join_idx].Kind() == SljitNativeRegionOpKind::HASH_JOIN_PROBE &&
+	       (ops[hash_join_idx].HashJoinProbe().plan.output_mode ==
 	            ExecutionHashJoinProbeOutputMode::MATCHED_PROBE_AND_BUILD ||
-	        ops[hash_join_idx].hash_join_probe.plan.output_mode ==
+	        ops[hash_join_idx].HashJoinProbe().plan.output_mode ==
 	            ExecutionHashJoinProbeOutputMode::MATCHED_PROBE_ONLY);
 }
 
@@ -91,12 +91,11 @@ static bool SljitTryBindHashJoinProbeSelectionPrimitive(const vector<SljitExecut
 
 static bool SljitCanBindHashJoinBuildSinkPrimitive(const vector<SljitExecutableRegionOp> &ops, idx_t sink_idx,
                                                    idx_t projection_idx = DConstants::INVALID_INDEX) {
-	if (sink_idx >= ops.size() || ops[sink_idx].kind != SljitNativeRegionOpKind::HASH_JOIN_BUILD ||
-	    ops[sink_idx].hash_join_build.plan.sink_info.kind != ExecutionRegionSinkKind::HASH_JOIN_BUILD) {
+	if (sink_idx >= ops.size() || ops[sink_idx].Kind() != SljitNativeRegionOpKind::HASH_JOIN_BUILD) {
 		return false;
 	}
 	return projection_idx == DConstants::INVALID_INDEX ||
-	       (projection_idx < ops.size() && ops[projection_idx].kind == SljitNativeRegionOpKind::PROJECTION);
+	       (projection_idx < ops.size() && ops[projection_idx].Kind() == SljitNativeRegionOpKind::PROJECTION);
 }
 
 static bool SljitTryBindHashJoinBuildSinkPrimitive(const vector<SljitExecutableRegionOp> &ops, idx_t sink_idx,
@@ -114,9 +113,9 @@ static bool SljitTryBindHashJoinBuildSinkPrimitive(const vector<SljitExecutableR
 static bool SljitCanBindMarkProbeFilterBoundaryPrimitive(const vector<SljitExecutableRegionOp> &ops,
                                                          idx_t hash_join_idx, idx_t filter_idx) {
 	return hash_join_idx < ops.size() && filter_idx < ops.size() &&
-	       ops[hash_join_idx].kind == SljitNativeRegionOpKind::HASH_JOIN_PROBE &&
-	       ops[filter_idx].kind == SljitNativeRegionOpKind::FILTER &&
-	       ops[hash_join_idx].hash_join_probe.plan.output_mode == ExecutionHashJoinProbeOutputMode::MARK_PROBE;
+	       ops[hash_join_idx].Kind() == SljitNativeRegionOpKind::HASH_JOIN_PROBE &&
+	       ops[filter_idx].Kind() == SljitNativeRegionOpKind::FILTER &&
+	       ops[hash_join_idx].HashJoinProbe().plan.output_mode == ExecutionHashJoinProbeOutputMode::MARK_PROBE;
 }
 
 bool SljitTryBindMarkProbeFilterBoundaryPrimitive(const vector<SljitExecutableRegionOp> &ops, idx_t hash_join_idx,

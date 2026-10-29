@@ -40,45 +40,43 @@ static bool SljitNativeHashJoinProbeGeneratesDeferredCode(const SljitNativeHashJ
 }
 
 static bool SljitNativeRegionOpGeneratesMachineCode(const SljitNativeRegionOpPlan &op) {
-	switch (op.kind) {
+	switch (op.Kind()) {
 	case SljitNativeRegionOpKind::FILTER:
-		return SljitNativeRegionExpressionGeneratesCode(op.filter);
+		return SljitNativeRegionExpressionGeneratesCode(op.Filter());
 	case SljitNativeRegionOpKind::PROJECTION:
-		return SljitNativeRegionExpressionsGenerateCode(op.projections);
+		return SljitNativeRegionExpressionsGenerateCode(op.Projections());
 	case SljitNativeRegionOpKind::HASH_JOIN_PROBE:
-		return SljitNativeHashJoinProbeGeneratesDeferredCode(op.hash_join_probe) ||
-		       (op.hash_join_probe.residual_predicate &&
-		        SljitNativeRegionExpressionGeneratesCode(op.hash_join_probe.residual_filter));
+		return SljitNativeHashJoinProbeGeneratesDeferredCode(op.HashJoinProbe()) ||
+		       (op.HashJoinProbe().residual_predicate &&
+		        SljitNativeRegionExpressionGeneratesCode(op.HashJoinProbe().residual_filter));
 	case SljitNativeRegionOpKind::HASH_JOIN_BUILD:
 		return false;
 	case SljitNativeRegionOpKind::ORDER_SINK:
-		return SljitNativeRegionExpressionsGenerateCode(op.order_sink.order_keys);
+		return SljitNativeRegionExpressionsGenerateCode(op.OrderSink().order_keys);
 	case SljitNativeRegionOpKind::AGGREGATE_UPDATE:
-		return op.aggregate_update.UsesPrimitivePayloads();
+		return op.AggregateUpdate().UsesPrimitivePayloads();
 	default:
 		return false;
 	}
 }
 
 static bool SljitNativeRegionOpIsNativeSink(const SljitNativeRegionOpPlan &op) {
-	switch (op.kind) {
+	switch (op.Kind()) {
 	case SljitNativeRegionOpKind::HASH_JOIN_BUILD:
-		return op.hash_join_build.sink_info.kind == ExecutionRegionSinkKind::HASH_JOIN_BUILD &&
-		       op.hash_join_build.sink_info.hash_join_contract.native_build_contract.status ==
-		           ExecutionRegionStateContractStatus::READY;
+		return op.HashJoinBuild().sink_info.contract.native_build_contract.status ==
+		       ExecutionRegionStateContractStatus::READY;
 	case SljitNativeRegionOpKind::APPEND_SINK:
-		return (op.append_sink.sink_info.kind == ExecutionRegionSinkKind::RESULT_COLLECTOR_SINK ||
-		        op.append_sink.sink_info.kind == ExecutionRegionSinkKind::MATERIALIZATION) &&
-		       op.append_sink.sink_info.native_sink_contract.status == ExecutionRegionStateContractStatus::READY;
+		return (op.AppendSink().sink_info.Kind() == ExecutionRegionSinkKind::RESULT_COLLECTOR_SINK ||
+		        op.AppendSink().sink_info.Kind() == ExecutionRegionSinkKind::MATERIALIZATION) &&
+		       op.AppendSink().sink_info.Native().status == ExecutionRegionStateContractStatus::READY;
 	case SljitNativeRegionOpKind::ORDER_SINK:
-		return op.order_sink.sink_info.kind == ExecutionRegionSinkKind::SORT &&
-		       op.order_sink.sink_info.native_sink_contract.status == ExecutionRegionStateContractStatus::READY;
+		return op.OrderSink().sink_info.native_contract.status == ExecutionRegionStateContractStatus::READY;
 	case SljitNativeRegionOpKind::AGGREGATE_UPDATE: {
-		auto &sink = op.aggregate_update.sink_info;
-		return (sink.kind == ExecutionRegionSinkKind::HASH_AGGREGATE_UPDATE ||
-		        sink.kind == ExecutionRegionSinkKind::PERFECT_HASH_AGGREGATE_UPDATE ||
-		        sink.kind == ExecutionRegionSinkKind::UNGROUPED_AGGREGATE_UPDATE) &&
-		       sink.aggregate_contract.native_state_update_contract.status == ExecutionRegionStateContractStatus::READY;
+		auto &sink = op.AggregateUpdate().sink_info;
+		return (sink.Kind() == ExecutionRegionSinkKind::HASH_AGGREGATE_UPDATE ||
+		        sink.Kind() == ExecutionRegionSinkKind::PERFECT_HASH_AGGREGATE_UPDATE ||
+		        sink.Kind() == ExecutionRegionSinkKind::UNGROUPED_AGGREGATE_UPDATE) &&
+		       sink.contract.native_state_update_contract.status == ExecutionRegionStateContractStatus::READY;
 	}
 	default:
 		return false;
@@ -86,14 +84,14 @@ static bool SljitNativeRegionOpIsNativeSink(const SljitNativeRegionOpPlan &op) {
 }
 
 static string SljitNativeRegionOpBoundaryBlocker(const SljitNativeRegionOpPlan &op) {
-	if (op.kind == SljitNativeRegionOpKind::FILTER || op.kind == SljitNativeRegionOpKind::PROJECTION) {
+	if (op.Kind() == SljitNativeRegionOpKind::FILTER || op.Kind() == SljitNativeRegionOpKind::PROJECTION) {
 		return string();
 	}
-	if (op.kind == SljitNativeRegionOpKind::HASH_JOIN_PROBE) {
+	if (op.Kind() == SljitNativeRegionOpKind::HASH_JOIN_PROBE) {
 		return string();
 	}
-	if (op.kind == SljitNativeRegionOpKind::AGGREGATE_UPDATE) {
-		if (op.aggregate_update.UsesPrimitivePayloads()) {
+	if (op.Kind() == SljitNativeRegionOpKind::AGGREGATE_UPDATE) {
+		if (op.AggregateUpdate().UsesPrimitivePayloads()) {
 			return string();
 		}
 		if (SljitNativeRegionOpIsNativeSink(op)) {
@@ -105,7 +103,7 @@ static string SljitNativeRegionOpBoundaryBlocker(const SljitNativeRegionOpPlan &
 		return string();
 	}
 	return "operator-contract-blocker:unsupported-operator-boundary;stage=" +
-	       string(SljitNativeRegionOpKindName(op.kind));
+	       string(SljitNativeRegionOpKindName(op.Kind()));
 }
 
 static bool SljitRegionPlanBooleanType(const LogicalType &type) {
@@ -158,15 +156,15 @@ static bool SljitRegionPlanExpressionTreeReferencesMarker(const ExecutionExpress
 
 static bool SljitRegionPlanFilterReferencesMarkProbeMarker(const SljitNativeRegionOpPlan &hash_join_op,
                                                            const SljitNativeRegionOpPlan &filter_op) {
-	if (hash_join_op.output_types.empty() || filter_op.kind != SljitNativeRegionOpKind::FILTER) {
+	if (hash_join_op.output_types.empty() || filter_op.Kind() != SljitNativeRegionOpKind::FILTER) {
 		return false;
 	}
 	const auto marker_index = hash_join_op.output_types.size() - 1;
 	if (!SljitRegionPlanBooleanType(hash_join_op.output_types[marker_index]) ||
-	    !SljitRegionPlanBooleanType(filter_op.filter.return_type)) {
+	    !SljitRegionPlanBooleanType(filter_op.Filter().return_type)) {
 		return false;
 	}
-	auto &filter = filter_op.filter;
+	auto &filter = filter_op.Filter();
 	switch (filter.kind) {
 	case SljitNativeRegionExpressionKind::REFERENCE:
 		return filter.source_index == marker_index;
@@ -182,11 +180,11 @@ static bool SljitRegionPlanFilterReferencesMarkProbeMarker(const SljitNativeRegi
 }
 
 static bool SljitRegionPlanHasWeakMarkFilterProbe(const vector<SljitNativeRegionOpPlan> &ops, idx_t op_idx) {
-	if (op_idx + 1 >= ops.size() || ops[op_idx].kind != SljitNativeRegionOpKind::HASH_JOIN_PROBE) {
+	if (op_idx + 1 >= ops.size() || ops[op_idx].Kind() != SljitNativeRegionOpKind::HASH_JOIN_PROBE) {
 		return false;
 	}
 	auto &hash_join_op = ops[op_idx];
-	auto &plan = hash_join_op.hash_join_probe;
+	auto &plan = hash_join_op.HashJoinProbe();
 	if (plan.output_mode != ExecutionHashJoinProbeOutputMode::MARK_PROBE || plan.perfect_hash_probe ||
 	    plan.residual_predicate || plan.equality_key_count <= 1) {
 		return false;
@@ -195,12 +193,12 @@ static bool SljitRegionPlanHasWeakMarkFilterProbe(const vector<SljitNativeRegion
 }
 
 static bool SljitRegionPlanHasDirectSourceHashBuild(const vector<SljitNativeRegionOpPlan> &ops) {
-	if (ops.empty() || ops.back().kind != SljitNativeRegionOpKind::HASH_JOIN_BUILD) {
+	if (ops.empty() || ops.back().Kind() != SljitNativeRegionOpKind::HASH_JOIN_BUILD) {
 		return false;
 	}
 	for (idx_t op_idx = 0; op_idx + 1 < ops.size(); op_idx++) {
-		if (ops[op_idx].kind != SljitNativeRegionOpKind::FILTER &&
-		    ops[op_idx].kind != SljitNativeRegionOpKind::PROJECTION) {
+		if (ops[op_idx].Kind() != SljitNativeRegionOpKind::FILTER &&
+		    ops[op_idx].Kind() != SljitNativeRegionOpKind::PROJECTION) {
 			return false;
 		}
 	}
@@ -231,14 +229,14 @@ static bool SljitRegionPlanHasWeakStringSetSourceHashBuild(const vector<SljitNat
 	bool has_filter = false;
 	for (idx_t op_idx = 0; op_idx + 1 < ops.size(); op_idx++) {
 		auto &op = ops[op_idx];
-		if (op.kind == SljitNativeRegionOpKind::FILTER) {
+		if (op.Kind() == SljitNativeRegionOpKind::FILTER) {
 			has_filter = true;
-			if (op.filter.kind != SljitNativeRegionExpressionKind::PREDICATE || !op.filter.predicate ||
-			    !SljitPredicateContainsOnlyStringSets(*op.filter.predicate)) {
+			if (op.Filter().kind != SljitNativeRegionExpressionKind::PREDICATE || !op.Filter().predicate ||
+			    !SljitPredicateContainsOnlyStringSets(*op.Filter().predicate)) {
 				return false;
 			}
-		} else if (op.kind == SljitNativeRegionOpKind::PROJECTION &&
-		           SljitNativeRegionExpressionsGenerateCode(op.projections)) {
+		} else if (op.Kind() == SljitNativeRegionOpKind::PROJECTION &&
+		           SljitNativeRegionExpressionsGenerateCode(op.Projections())) {
 			return false;
 		}
 	}
@@ -289,23 +287,23 @@ static bool SljitRegionPlanAggregateHasOnlyReferencePayloads(const SljitNativeAg
 }
 
 static bool SljitRegionPlanHasReferenceOnlyStringPerfectHashAggregate(const vector<SljitNativeRegionOpPlan> &ops) {
-	if (ops.empty() || ops.back().kind != SljitNativeRegionOpKind::AGGREGATE_UPDATE) {
+	if (ops.empty() || ops.back().Kind() != SljitNativeRegionOpKind::AGGREGATE_UPDATE) {
 		return false;
 	}
 	for (idx_t op_idx = 0; op_idx + 1 < ops.size(); op_idx++) {
 		auto &op = ops[op_idx];
-		if (op.kind != SljitNativeRegionOpKind::PROJECTION ||
-		    !SljitRegionPlanExpressionsArePerfectHashReferenceGlue(op.projections)) {
+		if (op.Kind() != SljitNativeRegionOpKind::PROJECTION ||
+		    !SljitRegionPlanExpressionsArePerfectHashReferenceGlue(op.Projections())) {
 			return false;
 		}
 	}
-	auto &aggregate = ops.back().aggregate_update;
+	auto &aggregate = ops.back().AggregateUpdate();
 	bool has_string_group_compression = false;
 	for (auto &group_expression : aggregate.group_expressions) {
 		has_string_group_compression =
 		    has_string_group_compression || group_expression.kind == SljitNativeRegionExpressionKind::STRING_COMPRESS;
 	}
-	return aggregate.sink_info.aggregate_contract.kind == ExecutionRegionAggregateOperatorKind::PERFECT_HASH &&
+	return aggregate.sink_info.contract.kind == ExecutionRegionAggregateOperatorKind::PERFECT_HASH &&
 	       aggregate.use_perfect_hash_group_lookup && has_string_group_compression &&
 	       SljitRegionPlanExpressionsArePerfectHashReferenceGlue(aggregate.group_expressions) &&
 	       SljitRegionPlanAggregateHasOnlyReferencePayloads(aggregate);
@@ -321,12 +319,26 @@ void DisableSljitRegionFlatNullableFastPath(SljitNativeRegionPlan &region) {
 		}
 	};
 	for (auto &op : region.ops) {
-		set_expression(op.filter);
-		set_expression(op.hash_join_probe.residual_filter);
-		set_expressions(op.order_sink.order_keys);
-		set_expressions(op.aggregate_update.payloads);
-		set_expressions(op.aggregate_update.group_expressions);
-		set_expressions(op.projections);
+		switch (op.Kind()) {
+		case SljitNativeRegionOpKind::FILTER:
+			set_expression(op.Filter());
+			break;
+		case SljitNativeRegionOpKind::HASH_JOIN_PROBE:
+			set_expression(op.HashJoinProbe().residual_filter);
+			break;
+		case SljitNativeRegionOpKind::ORDER_SINK:
+			set_expressions(op.OrderSink().order_keys);
+			break;
+		case SljitNativeRegionOpKind::AGGREGATE_UPDATE:
+			set_expressions(op.AggregateUpdate().payloads);
+			set_expressions(op.AggregateUpdate().group_expressions);
+			break;
+		case SljitNativeRegionOpKind::PROJECTION:
+			set_expressions(op.Projections());
+			break;
+		default:
+			break;
+		}
 	}
 }
 
@@ -367,17 +379,17 @@ void AddSljitNativeRegionCapabilityFacts(ExecutionRegionLoweringPlan &lowering_p
 		if (SljitRegionPlanHasWeakMarkFilterProbe(native_region.ops, op_idx)) {
 			lowering_plan.AddBackendWeakAcceleratedWorkCapability();
 		}
-		switch (op.kind) {
+		switch (op.Kind()) {
 		case SljitNativeRegionOpKind::HASH_JOIN_PROBE:
 			lowering_plan.AddBackendHashJoinProbeCapability(
-			    op.hash_join_probe.perfect_hash_probe, op.hash_join_probe.residual_predicate,
-			    op.hash_join_probe.equality_key_count, op.hash_join_probe.keys.size());
-			for (auto &key : op.hash_join_probe.keys) {
+			    op.HashJoinProbe().perfect_hash_probe, op.HashJoinProbe().residual_predicate,
+			    op.HashJoinProbe().equality_key_count, op.HashJoinProbe().keys.size());
+			for (auto &key : op.HashJoinProbe().keys) {
 				lowering_plan.AddBackendJoinKeyTypeCapability(key.key_type);
 			}
 			break;
 		case SljitNativeRegionOpKind::HASH_JOIN_BUILD:
-			for (auto &key : op.hash_join_build.sink_info.hash_join_keys) {
+			for (auto &key : op.HashJoinBuild().sink_info.keys) {
 				lowering_plan.AddBackendJoinKeyTypeCapability(key.type);
 			}
 			lowering_plan.AddBackendHashJoinBuildCapability();
@@ -386,7 +398,7 @@ void AddSljitNativeRegionCapabilityFacts(ExecutionRegionLoweringPlan &lowering_p
 			}
 			break;
 		case SljitNativeRegionOpKind::AGGREGATE_UPDATE: {
-			auto &aggregate_update = op.aggregate_update;
+			auto &aggregate_update = op.AggregateUpdate();
 			for (auto &group : aggregate_update.sink_info.groups) {
 				lowering_plan.AddBackendGroupKeyTypeCapability(group.type);
 			}
@@ -394,7 +406,7 @@ void AddSljitNativeRegionCapabilityFacts(ExecutionRegionLoweringPlan &lowering_p
 				lowering_plan.AddBackendPayloadTypeCapability(payload.return_type);
 			}
 			lowering_plan.AddBackendAggregateUpdateCapability(
-			    aggregate_update.sink_info.aggregate_contract.kind, aggregate_update.UsesPrimitivePayloads(),
+			    aggregate_update.sink_info.contract.kind, aggregate_update.UsesPrimitivePayloads(),
 			    aggregate_update.use_grouped_state_addresses, aggregate_update.use_perfect_hash_group_lookup);
 			break;
 		}

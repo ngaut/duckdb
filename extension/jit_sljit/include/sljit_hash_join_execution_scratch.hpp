@@ -32,14 +32,14 @@ struct SljitHashJoinExecutionScratch {
 	void InitializeProbe(Allocator &allocator, idx_t op_idx, const SljitExecutableRegionOp &op) {
 		build_selections[op_idx] = make_uniq<SelectionVector>(STANDARD_VECTOR_SIZE);
 		row_pointers[op_idx] = make_uniq<Vector>(LogicalType::POINTER);
-		sources[op_idx].Resize(op.hash_join_probe.plan.keys.size());
-		if (!op.hash_join_probe.plan.residual_predicate) {
+		sources[op_idx].Resize(op.HashJoinProbe().plan.keys.size());
+		if (!op.HashJoinProbe().plan.residual_predicate) {
 			return;
 		}
 		residual_selections[op_idx] = make_uniq<SelectionVector>(STANDARD_VECTOR_SIZE);
 		residual_match_selections[op_idx] = make_uniq<SelectionVector>(STANDARD_VECTOR_SIZE);
 		residual_row_pointers[op_idx] = make_uniq<Vector>(LogicalType::POINTER);
-		SljitInitializeScratchChunk(allocator, op.hash_join_probe.plan.residual_source_types, residual_chunks[op_idx]);
+		SljitInitializeScratchChunk(allocator, op.HashJoinProbe().plan.residual_source_types, residual_chunks[op_idx]);
 	}
 
 	void InitializeBuild(idx_t op_idx) {

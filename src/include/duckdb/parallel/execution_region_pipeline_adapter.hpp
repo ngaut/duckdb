@@ -59,6 +59,9 @@ public:
 	                                         const ExecutionRegionOperatorInfo &operator_info,
 	                                         ExecutionOperatorBinding &binding);
 	bool BindSink(DataChunk &input, const ExecutionRegionSinkInfo &sink_info, ExecutionSinkBinding &binding);
+	bool BindSink(DataChunk &input, const ExecutionRegionAggregateSinkInfo &sink_info, ExecutionSinkBinding &binding);
+	bool BindSink(DataChunk &input, const ExecutionRegionHashJoinInfo &sink_info, ExecutionSinkBinding &binding);
+	bool BindSink(DataChunk &input, const ExecutionRegionOrderSinkInfo &sink_info, ExecutionSinkBinding &binding);
 	//! Appends a compiled kernel's output chunk to the Sink. Once the Sink blocks, the executor owns that chunk and
 	//! every later one: it sinks them in order before its loop continues or the pipeline finalizes. The chunk the
 	//! Sink blocked on retries as is, because a blocked Sink may already hold it
@@ -68,6 +71,9 @@ public:
 	PipelineExecuteResult FlushAndFinalizeAfterCompiledFinish(idx_t max_chunks, string &runtime_reason);
 
 private:
+	template <class SINK_INFO>
+	bool BindSinkInternal(DataChunk &input, const SINK_INFO &sink_info, ExecutionRegionSinkKind kind,
+	                      ExecutionSinkBinding &binding);
 	SinkResultType SinkCoalescedChunk();
 
 private:

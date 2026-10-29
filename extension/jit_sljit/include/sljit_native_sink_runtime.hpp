@@ -21,20 +21,20 @@ static SinkResultType SljitExecuteNativeHashJoinBuild(ExecutionRegionRuntime &ru
                                                       SljitExecutableRegionOp &op, DataChunk &input,
                                                       DataChunk &source_chunk, Vector &hash_values,
                                                       SelectionVector &build_sel) {
-	auto &binding = SljitBindRecordedNativeSink(runtime, native_runtime, scratch, op_idx, op.kind, input,
-	                                            op.hash_join_build.plan.sink_info,
+	auto &binding = SljitBindRecordedNativeSink(runtime, native_runtime, scratch, op_idx, op.Kind(), input,
+	                                            op.HashJoinBuild().plan.sink_info,
 	                                            "hash-join-build-runtime-binding-failed", "SLJIT hash join build sink");
 	if (!binding.ready || !binding.hash_join_build.ready) {
 		throw InternalException("SLJIT hash join build sink binding did not return a ready build state");
 	}
-	return SljitExecuteNativeHashJoinBuildUpdate(runtime, op_idx, op.kind, binding.hash_join_build, input, source_chunk,
-	                                             hash_values, build_sel);
+	return SljitExecuteNativeHashJoinBuildUpdate(runtime, op_idx, op.Kind(), binding.hash_join_build, input,
+	                                             source_chunk, hash_values, build_sel);
 }
 
 static SinkResultType SljitExecuteNativeAppendSink(ExecutionOperatorRuntime &native_runtime,
                                                    SljitRegionExecutionScratch &scratch, idx_t op_idx,
                                                    SljitExecutableRegionOp &op, DataChunk &input) {
-	auto &binding = SljitBindNativeSink(native_runtime, scratch, op_idx, input, op.append_sink.plan.sink_info,
+	auto &binding = SljitBindNativeSink(native_runtime, scratch, op_idx, input, op.AppendSink().plan.sink_info,
 	                                    "append-sink-runtime-binding-failed", "SLJIT append sink");
 	if (!binding.ready || !binding.append_sink.ready) {
 		throw InternalException("SLJIT append sink binding did not return a ready append state");
@@ -47,20 +47,20 @@ static SinkResultType SljitExecuteNativeOrderSink(ExecutionRegionRuntime &runtim
                                                   SljitRegionExecutionScratch &scratch, idx_t op_idx,
                                                   SljitExecutableRegionOp &op, DataChunk &input, DataChunk &order_keys,
                                                   DataChunk &payload) {
-	if (op.order_sink.order_keys.size() != order_keys.ColumnCount()) {
+	if (op.OrderSink().order_keys.size() != order_keys.ColumnCount()) {
 		throw InternalException("SLJIT ordered sink key expression count mismatch");
 	}
 	auto key_stage_start = SljitRegionStageStart(runtime);
 	order_keys.Reset();
-	for (idx_t key_idx = 0; key_idx < op.order_sink.order_keys.size(); key_idx++) {
-		SljitExecuteProjectionExpression(op.order_sink.order_keys[key_idx], input, order_keys.data[key_idx], nullptr,
+	for (idx_t key_idx = 0; key_idx < op.OrderSink().order_keys.size(); key_idx++) {
+		SljitExecuteProjectionExpression(op.OrderSink().order_keys[key_idx], input, order_keys.data[key_idx], nullptr,
 		                                 input.size(), scratch.ExpressionAdapterScratch(op_idx, key_idx), &runtime);
 	}
 	order_keys.SetChildCardinality(input.size());
-	RecordSljitRegionStageRuntime(runtime, op_idx, op.kind, "key_projection", key_stage_start);
+	RecordSljitRegionStageRuntime(runtime, op_idx, op.Kind(), "key_projection", key_stage_start);
 
 	auto sink_stage_start = SljitRegionStageStart(runtime);
-	auto &binding = SljitBindNativeSink(native_runtime, scratch, op_idx, input, op.order_sink.plan.sink_info,
+	auto &binding = SljitBindNativeSink(native_runtime, scratch, op_idx, input, op.OrderSink().plan.sink_info,
 	                                    "ordered-sink-runtime-binding-failed", "SLJIT ordered sink");
 	if (!binding.ready || !binding.ordered_sink.ready) {
 		throw InternalException("SLJIT ordered sink binding did not return a ready ordered sink state");
@@ -68,7 +68,7 @@ static SinkResultType SljitExecuteNativeOrderSink(ExecutionRegionRuntime &runtim
 	payload.Reset();
 	payload.Reference(input);
 	auto result = ExecutionSinkOrdered(binding.ordered_sink, order_keys, payload);
-	RecordSljitRegionStageRuntime(runtime, op_idx, op.kind, "sink_update", sink_stage_start);
+	RecordSljitRegionStageRuntime(runtime, op_idx, op.Kind(), "sink_update", sink_stage_start);
 	return result;
 }
 
@@ -77,7 +77,7 @@ static bool SljitTryExecuteNativeTerminalNonAggregateSink(ExecutionRegionRuntime
                                                           SljitRegionExecutionScratch &scratch, idx_t op_idx,
                                                           SljitExecutableRegionOp &op, DataChunk &input,
                                                           bool is_final_operator, SinkResultType &sink_result) {
-	switch (op.kind) {
+	switch (op.Kind()) {
 	case SljitNativeRegionOpKind::HASH_JOIN_BUILD:
 		if (!is_final_operator) {
 			throw InternalException("SLJIT hash join build sink must be the final full pipeline operator");
@@ -99,7 +99,7 @@ static bool SljitTryExecuteNativeTerminalNonAggregateSink(ExecutionRegionRuntime
 		}
 		auto stage_start = SljitRegionStageStart(runtime);
 		sink_result = SljitExecuteNativeAppendSink(native_runtime, scratch, op_idx, op, input);
-		RecordSljitRegionStageRuntime(runtime, op_idx, op.kind, stage_start);
+		RecordSljitRegionStageRuntime(runtime, op_idx, op.Kind(), stage_start);
 		return true;
 	}
 	case SljitNativeRegionOpKind::AGGREGATE_UPDATE:
@@ -117,7 +117,7 @@ static bool SljitTryExecuteNativeTerminalSink(ExecutionRegionRuntime &runtime, E
 	                                                  is_final_operator, sink_result)) {
 		return true;
 	}
-	if (op.kind != SljitNativeRegionOpKind::AGGREGATE_UPDATE) {
+	if (op.Kind() != SljitNativeRegionOpKind::AGGREGATE_UPDATE) {
 		return false;
 	}
 	if (!is_final_operator) {
@@ -141,7 +141,7 @@ static bool SljitTryExecuteNativeTailTerminalSink(ExecutionRegionRuntime &runtim
 	                                                  is_final_operator, sink_result)) {
 		return true;
 	}
-	if (op.kind != SljitNativeRegionOpKind::AGGREGATE_UPDATE) {
+	if (op.Kind() != SljitNativeRegionOpKind::AGGREGATE_UPDATE) {
 		return false;
 	}
 	if (!is_final_operator) {

@@ -30,6 +30,12 @@ public:
 	                                                        const ExecutionRegionOperatorInfo &operator_info) = 0;
 	virtual bool BindSink(DataChunk &input, const ExecutionRegionSinkInfo &sink_info,
 	                      ExecutionSinkBinding &binding) = 0;
+	virtual bool BindSink(DataChunk &input, const ExecutionRegionAggregateSinkInfo &sink_info,
+	                      ExecutionSinkBinding &binding) = 0;
+	virtual bool BindSink(DataChunk &input, const ExecutionRegionHashJoinInfo &sink_info,
+	                      ExecutionSinkBinding &binding) = 0;
+	virtual bool BindSink(DataChunk &input, const ExecutionRegionOrderSinkInfo &sink_info,
+	                      ExecutionSinkBinding &binding) = 0;
 	//! Appends a chunk to the pipeline's append sink. Once the sink blocks, this chunk and every later one queue in
 	//! the executor, which sinks them in order when the sink wakes it; a step therefore finishes the source chunk it
 	//! is processing and returns, never with output in flight. Returns NEED_MORE_INPUT or FINISHED, never BLOCKED.

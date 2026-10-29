@@ -38,7 +38,7 @@ static string BuildSljitNativeRegionShape(const SljitNativeRegionPlan &region) {
 		if (op_idx > 0) {
 			result += "-";
 		}
-		result += SljitNativeRegionOpKindName(region.ops[op_idx].kind);
+		result += SljitNativeRegionOpKindName(region.ops[op_idx].Kind());
 	}
 	return result.empty() ? "empty" : result;
 }
@@ -50,15 +50,6 @@ static string DescribeSljitLogicalTypes(const vector<LogicalType> &types) {
 			result += "|";
 		}
 		result += types[type_idx].ToString();
-	}
-	return result;
-}
-
-static string DescribeSljitLogicalTypesSemantic(const vector<LogicalType> &types) {
-	string result;
-	for (auto &type : types) {
-		auto value = type.ToString();
-		result += std::to_string(value.size()) + ":" + value + ";";
 	}
 	return result;
 }
@@ -163,93 +154,77 @@ void AppendSljitHashJoinProbeMarkOffsets(string &result, const char *name, const
 	result += ",pointer_offset=" + std::to_string(probe.pointer_offset);
 }
 
-static string DescribeNativeRegionInternal(const SljitNativeRegionPlan &region, const string &mode, bool semantic) {
+string DescribeNativeRegion(const SljitNativeRegionPlan &region, const string &mode) {
 	string result = "sljit.region " + mode;
 	for (idx_t op_idx = 0; op_idx < region.ops.size(); op_idx++) {
 		auto &op = region.ops[op_idx];
 		result += ";op" + std::to_string(op_idx) + "=";
-		switch (op.kind) {
+		switch (op.Kind()) {
 		case SljitNativeRegionOpKind::FILTER:
-			result += "filter(" +
-			          (semantic ? DescribeNativeRegionExpressionSemantic(op.filter)
-			                    : DescribeNativeRegionExpression(op.filter)) +
-			          ")";
+			result += "filter(" + DescribeNativeRegionExpression(op.Filter()) + ")";
 			break;
 		case SljitNativeRegionOpKind::PROJECTION:
-			result += "projection(" +
-			          (semantic ? DescribeNativeRegionExpressionListSemantic(op.projections)
-			                    : DescribeNativeRegionExpressionList(op.projections)) +
-			          ")";
+			result += "projection(" + DescribeNativeRegionExpressionList(op.Projections()) + ")";
 			break;
 		case SljitNativeRegionOpKind::HASH_JOIN_PROBE:
 			result +=
-			    "hash_join_probe(hash_keys=" + std::to_string(op.hash_join_probe.equality_key_count) + ",conditions=";
-			result += DescribeSljitHashJoinProbeKeys(op.hash_join_probe.keys, ",");
-			if (op.hash_join_probe.mark_build_match) {
-				AppendSljitHashJoinProbeMarkOffsets(result, "mark_build_match", op.hash_join_probe);
+			    "hash_join_probe(hash_keys=" + std::to_string(op.HashJoinProbe().equality_key_count) + ",conditions=";
+			result += DescribeSljitHashJoinProbeKeys(op.HashJoinProbe().keys, ",");
+			if (op.HashJoinProbe().mark_build_match) {
+				AppendSljitHashJoinProbeMarkOffsets(result, "mark_build_match", op.HashJoinProbe());
 			}
-			if (op.hash_join_probe.mark_build_match_after_residual) {
-				AppendSljitHashJoinProbeMarkOffsets(result, "mark_build_match_after_residual", op.hash_join_probe);
+			if (op.HashJoinProbe().mark_build_match_after_residual) {
+				AppendSljitHashJoinProbeMarkOffsets(result, "mark_build_match_after_residual", op.HashJoinProbe());
 			}
-			if (op.hash_join_probe.perfect_hash_probe) {
+			if (op.HashJoinProbe().perfect_hash_probe) {
 				result += ",perfect_hash_probe_shape=native";
 			}
-			result += op.hash_join_probe.exact_source_filter_binding != DConstants::INVALID_INDEX
+			result += op.HashJoinProbe().exact_source_filter_binding != DConstants::INVALID_INDEX
 			              ? ",exact_source_filter_proof=true"
 			              : ",exact_source_filter_proof=false";
-			result += ",output_mode=" + string(SljitHashJoinProbeOutputModeToString(op.hash_join_probe.output_mode));
-			if (op.hash_join_probe.residual_predicate) {
+			result += ",output_mode=" + string(SljitHashJoinProbeOutputModeToString(op.HashJoinProbe().output_mode));
+			if (op.HashJoinProbe().residual_predicate) {
 				result += ",residual_predicate=true";
-				result += ",residual=" +
-				          (semantic ? DescribeNativeRegionExpressionSemantic(op.hash_join_probe.residual_filter)
-				                    : DescribeNativeRegionExpression(op.hash_join_probe.residual_filter));
+				result += ",residual=" + DescribeNativeRegionExpression(op.HashJoinProbe().residual_filter);
 			}
 			result += ")";
 			break;
 		case SljitNativeRegionOpKind::HASH_JOIN_BUILD:
 			result += "hash_join_build(keys=";
-			result += std::to_string(op.hash_join_build.sink_info.hash_join_keys.size());
-			result += ";payload_columns=" + std::to_string(op.hash_join_build.input_types.size());
+			result += std::to_string(op.HashJoinBuild().sink_info.keys.size());
+			result += ";payload_columns=" + std::to_string(op.HashJoinBuild().input_types.size());
 			result += ";execution=primitive-protocol-build";
 			result += ")";
 			break;
 		case SljitNativeRegionOpKind::APPEND_SINK:
 			result += "append_sink(columns=";
-			result += std::to_string(op.append_sink.input_types.size());
+			result += std::to_string(op.AppendSink().input_types.size());
 			result += ")";
 			break;
 		case SljitNativeRegionOpKind::AGGREGATE_UPDATE:
 			result += "aggregate_update(kind=";
-			result += string(
-			    ExecutionRegionAggregateOperatorKindToString(op.aggregate_update.sink_info.aggregate_contract.kind));
-			result += ";columns=" + std::to_string(op.aggregate_update.input_types.size());
-			result += ";input_types=[" +
-			          (semantic ? DescribeSljitLogicalTypesSemantic(op.aggregate_update.input_types)
-			                    : DescribeSljitLogicalTypes(op.aggregate_update.input_types)) +
-			          "]";
-			result += ";groups=" + std::to_string(op.aggregate_update.sink_info.groups.size());
-			result += ";aggregates=" + std::to_string(op.aggregate_update.sink_info.aggregates.size());
-			if (!semantic && !op.aggregate_update.ir.empty()) {
-				result += ";diagnostics=" + op.aggregate_update.ir;
+			result +=
+			    string(ExecutionRegionAggregateOperatorKindToString(op.AggregateUpdate().sink_info.contract.kind));
+			result += ";columns=" + std::to_string(op.AggregateUpdate().input_types.size());
+			result += ";input_types=[" + DescribeSljitLogicalTypes(op.AggregateUpdate().input_types) + "]";
+			result += ";groups=" + std::to_string(op.AggregateUpdate().sink_info.groups.size());
+			result += ";aggregates=" + std::to_string(op.AggregateUpdate().sink_info.aggregates.size());
+			if (!op.AggregateUpdate().ir.empty()) {
+				result += ";diagnostics=" + op.AggregateUpdate().ir;
 			}
-			if (op.aggregate_update.UsesPrimitivePayloads()) {
+			if (op.AggregateUpdate().UsesPrimitivePayloads()) {
 				result += ";payload_update=generated-primitive";
-				result += op.aggregate_update.PayloadsWereComposedThroughProjection()
+				result += op.AggregateUpdate().PayloadsWereComposedThroughProjection()
 				              ? ";payload_binding=projection-composed"
 				              : ";payload_binding=direct";
-				result += ";primitive_payloads=" +
-				          (semantic ? DescribeNativeRegionExpressionListSemantic(op.aggregate_update.payloads)
-				                    : DescribeNativeRegionExpressionList(op.aggregate_update.payloads));
-				if (op.aggregate_update.use_perfect_hash_group_lookup) {
+				result += ";primitive_payloads=" + DescribeNativeRegionExpressionList(op.AggregateUpdate().payloads);
+				if (op.AggregateUpdate().use_perfect_hash_group_lookup) {
 					result += ";grouped_state_lookup=generated-perfect-hash";
-					if (!op.aggregate_update.group_expressions.empty()) {
-						result +=
-						    ";group_expressions=" +
-						    (semantic
-						         ? DescribeNativeRegionExpressionListSemantic(op.aggregate_update.group_expressions)
-						         : DescribeNativeRegionExpressionList(op.aggregate_update.group_expressions));
+					if (!op.AggregateUpdate().group_expressions.empty()) {
+						result += ";group_expressions=" +
+						          DescribeNativeRegionExpressionList(op.AggregateUpdate().group_expressions);
 					}
-				} else if (op.aggregate_update.use_grouped_state_addresses) {
+				} else if (op.AggregateUpdate().use_grouped_state_addresses) {
 					result += ";grouped_state_lookup=native-state-address";
 				}
 			} else {
@@ -258,130 +233,17 @@ static string DescribeNativeRegionInternal(const SljitNativeRegionPlan &region, 
 			result += ")";
 			break;
 		case SljitNativeRegionOpKind::ORDER_SINK:
+			result += "ordered_sink(keys=" + DescribeNativeRegionExpressionList(op.OrderSink().order_keys);
+			result += ";payload_columns=" + std::to_string(op.OrderSink().input_types.size());
 			result +=
-			    "ordered_sink(keys=" + (semantic ? DescribeNativeRegionExpressionListSemantic(op.order_sink.order_keys)
-			                                     : DescribeNativeRegionExpressionList(op.order_sink.order_keys));
-			result += ";payload_columns=" + std::to_string(op.order_sink.input_types.size());
-			result += ";operator_kind=" +
-			          string(ExecutionRegionOperatorKindToString(op.order_sink.sink_info.order_contract.kind));
+			    ";operator_kind=" + string(ExecutionRegionOperatorKindToString(op.OrderSink().sink_info.contract.kind));
 			result += ")";
 			break;
 		default:
 			result += "unknown";
 			break;
 		}
-		if (semantic) {
-			result += "<operator_index=" + std::to_string(op.operator_index);
-			result += ",input_types=[" + DescribeSljitLogicalTypesSemantic(op.input_types) + "]";
-			result += ",output_types=[" + DescribeSljitLogicalTypesSemantic(op.output_types) + "]>";
-		}
 	}
-	return result;
-}
-
-string DescribeNativeRegion(const SljitNativeRegionPlan &region, const string &mode) {
-	return DescribeNativeRegionInternal(region, mode, false);
-}
-
-static void AppendSljitArtifactKeyField(string &result, const string &name, const string &value) {
-	result += name;
-	result += "=" + std::to_string(value.size()) + ":";
-	result += value;
-	result += ";";
-}
-
-string BuildSljitRegionArtifactSemanticKey(const ExecutionRegionCandidate &candidate,
-                                           const SljitNativeRegionPlan &region) {
-	string result = "sljit-artifact-v4";
-	AppendSljitArtifactKeyField(result, "shape", candidate.shape);
-	AppendSljitArtifactKeyField(result, "features", candidate.signature.feature_shape);
-	AppendSljitArtifactKeyField(result, "contract", candidate.signature.contract_shape);
-	result += ";scan_filter_mode=" + std::to_string(static_cast<uint8_t>(region.scan_filter_mode));
-	AppendSljitArtifactKeyField(result, "source_types", DescribeSljitLogicalTypesSemantic(region.source_output_types));
-	result += "source_not_null_count=" + std::to_string(region.source_not_null.size()) + ";";
-	for (idx_t source_idx = 0; source_idx < region.source_not_null.size(); source_idx++) {
-		result += "source_not_null" + std::to_string(source_idx) + "=";
-		result += region.source_not_null[source_idx] ? "1;" : "0;";
-	}
-	result += "scan_filter_count=" + std::to_string(region.scan_filters.size()) + ";";
-	for (idx_t filter_idx = 0; filter_idx < region.scan_filters.size(); filter_idx++) {
-		auto &scan_filter = region.scan_filters[filter_idx];
-		auto field_prefix = "scan_filter" + std::to_string(filter_idx);
-		result += field_prefix + "_index=" + std::to_string(scan_filter.filter_index) + ";";
-		AppendSljitArtifactKeyField(result, field_prefix + "_type", scan_filter.input_type.ToString());
-		result += field_prefix + (scan_filter.input_not_null ? "_not_null=1;" : "_not_null=0;");
-		AppendSljitArtifactKeyField(result, field_prefix + "_expression",
-		                            DescribeNativeRegionExpressionSemantic(scan_filter.filter));
-	}
-	AppendSljitArtifactKeyField(result, "region", DescribeNativeRegionInternal(region, "semantic", true));
-	// Generated code bakes in operator and sink contract facts (perfect-hash group minima and bit widths, state
-	// layouts, hash table offsets), so an artifact is shared only between identical contracts
-	AppendSljitArtifactKeyField(
-	    result, "aggregate_state_source",
-	    region.aggregate_state_source.function_name + ";" +
-	        DescribeExecutionRegionStateScanContract(region.aggregate_state_source.state_scan_contract));
-	for (idx_t op_idx = 0; op_idx < region.ops.size(); op_idx++) {
-		auto &op = region.ops[op_idx];
-		auto field_prefix = "op" + std::to_string(op_idx);
-		switch (op.kind) {
-		case SljitNativeRegionOpKind::HASH_JOIN_PROBE:
-			AppendSljitArtifactKeyField(result, field_prefix + "_operator",
-			                            DescribeExecutionRegionOperatorContract(op.hash_join_probe.operator_info));
-			break;
-		case SljitNativeRegionOpKind::HASH_JOIN_BUILD:
-			AppendSljitArtifactKeyField(result, field_prefix + "_sink",
-			                            DescribeExecutionRegionSinkContract(op.hash_join_build.sink_info));
-			break;
-		case SljitNativeRegionOpKind::APPEND_SINK:
-			AppendSljitArtifactKeyField(result, field_prefix + "_sink",
-			                            DescribeExecutionRegionSinkContract(op.append_sink.sink_info));
-			break;
-		case SljitNativeRegionOpKind::ORDER_SINK:
-			AppendSljitArtifactKeyField(result, field_prefix + "_sink",
-			                            DescribeExecutionRegionSinkContract(op.order_sink.sink_info));
-			break;
-		case SljitNativeRegionOpKind::AGGREGATE_UPDATE:
-			AppendSljitArtifactKeyField(result, field_prefix + "_sink",
-			                            DescribeExecutionRegionSinkContract(op.aggregate_update.sink_info));
-			result += field_prefix +
-			          "_estimated_input_count=" + std::to_string(op.aggregate_update.estimated_input_count) + ";";
-			break;
-		default:
-			break;
-		}
-	}
-	return result;
-}
-
-static void AppendSljitArtifactBindingCounts(string &result, const string &name, const vector<idx_t> &values) {
-	result += name + "_count=" + std::to_string(values.size()) + ";";
-	for (idx_t value_idx = 0; value_idx < values.size(); value_idx++) {
-		result += name + std::to_string(value_idx) + "=" + std::to_string(values[value_idx]) + ";";
-	}
-}
-
-static void AppendSljitArtifactBindingValues(string &result, const string &name, const vector<Value> &values) {
-	result += name + "_count=" + std::to_string(values.size()) + ";";
-	for (idx_t value_idx = 0; value_idx < values.size(); value_idx++) {
-		auto field_name = name + std::to_string(value_idx);
-		AppendSljitArtifactKeyField(result, field_name + "_type", values[value_idx].type().ToString());
-		AppendSljitArtifactKeyField(result, field_name + "_value", values[value_idx].ToSQLString());
-	}
-}
-
-string ComposeSljitRegionArtifactCacheKey(const string &semantic_key, const string &binding_key) {
-	string result = "sljit-cache-v1";
-	result += ";semantic=" + std::to_string(semantic_key.size()) + ":" + semantic_key;
-	result += ";binding=" + std::to_string(binding_key.size()) + ":" + binding_key;
-	return result;
-}
-
-string BuildSljitRegionArtifactBindingKey(const SljitNativeRegionPlan &region) {
-	string result = "sljit-binding-v2;";
-	AppendSljitArtifactBindingCounts(result, "distinct", region.source_distinct_counts);
-	AppendSljitArtifactBindingCounts(result, "reserve", region.source_distinct_reserve_counts);
-	AppendSljitArtifactBindingValues(result, "min", region.source_min_values);
-	AppendSljitArtifactBindingValues(result, "max", region.source_max_values);
 	return result;
 }
 

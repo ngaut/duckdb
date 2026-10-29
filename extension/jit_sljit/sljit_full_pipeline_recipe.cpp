@@ -45,11 +45,11 @@ static bool SljitExpressionsAreReferenceLike(const vector<SljitExecutableRegionE
 static bool SljitProjectedAggregateInputIsReferenceLike(const vector<SljitExecutableRegionOp> &ops,
                                                         const SljitFullPipelineProjectionAggregateShape &shape) {
 	if (shape.ProjectionCount() == 0 ||
-	    !SljitExpressionsAreReferenceLike(ops[shape.aggregate_idx].aggregate_update.payloads)) {
+	    !SljitExpressionsAreReferenceLike(ops[shape.aggregate_idx].AggregateUpdate().payloads)) {
 		return false;
 	}
 	for (idx_t op_idx = shape.first_projection_idx; op_idx <= shape.final_projection_idx; op_idx++) {
-		if (!SljitExpressionsAreReferenceLike(ops[op_idx].projections)) {
+		if (!SljitExpressionsAreReferenceLike(ops[op_idx].Projections())) {
 			return false;
 		}
 	}
@@ -87,8 +87,8 @@ static bool SljitTryBindPrimitiveAggregateStateSource(const SljitNativeAggregate
 		return false;
 	}
 	auto &aggregate_op = ops[facts.aggregate_idx];
-	auto &sink_aggregates = aggregate_op.aggregate_update.plan.sink_info.aggregates;
-	auto &payloads = aggregate_op.aggregate_update.payloads;
+	auto &sink_aggregates = aggregate_op.AggregateUpdate().plan.sink_info.aggregates;
+	auto &payloads = aggregate_op.AggregateUpdate().payloads;
 	if (sink_aggregates.empty() || sink_aggregates.size() != payloads.size()) {
 		return false;
 	}

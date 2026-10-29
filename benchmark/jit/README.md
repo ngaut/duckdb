@@ -42,7 +42,11 @@ TPC-H SQL suites with the JIT forced on (`test/configs/jit_cbo_correctness.json`
 
 `benchmark/jit/jit_differential_fuzz.py` compares random TPC-H queries under
 `jit_policy='off'` against the default and forced JIT, including the errors
-off raises; `--replay` re-checks an earlier report's findings.
+off raises. Reports contain a coverage summary and all failing or inconclusive
+queries; `--replay` re-checks those records. A pass requires every requested
+query to be compared under both JIT policies. An unusable native reference or
+JIT out-of-memory result is inconclusive, not a pass. Exit codes are 0 for a
+complete pass, 1 for findings, and 2 for incomplete coverage or invalid arguments.
 
 The guard runs a fixed-seed campaign at the unit level (120 queries, so every
 pre-commit) and the full level (300 queries). It builds and caches a TPC-H
@@ -56,7 +60,7 @@ signed HUGEINT, DECIMAL(38,6), BOOLEAN and TIMESTAMP. Predicates over several
 columns also appear as values (select lists, group keys, aggregate
 arguments), where the input slots a compiled predicate reads differ from its
 columns. The guard rebuilds the database when the binary cannot read it or it
-lacks a derived column, and fails on any finding. Against a database without the
+lacks a derived column, and fails on findings or incomplete coverage. Against a database without the
 derived columns (a plain TPC-H database), the fuzzer leaves them out. `--fuzz-queries`
 changes the campaign size; `--skip-fuzz` skips it and, like the other skips,
 forfeits the pre-commit receipt. Longer campaigns over larger scale factors

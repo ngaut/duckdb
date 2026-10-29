@@ -50,9 +50,9 @@ static bool SljitTryReferenceHashJoinProjectionAggregateInputsToChunk(
 		}
 	}
 	result.SetChildCardinality(count);
-	RecordSljitRegionStageRuntime(runtime, projection_idx, projection_op.kind,
+	RecordSljitRegionStageRuntime(runtime, projection_idx, projection_op.Kind(),
 	                              "projection_aggregate_reference_payload_view", stage_start);
-	RecordSljitRegionRuntimePath(runtime, projection_op.kind, "projection_aggregate.reference_payload_view", count);
+	RecordSljitRegionRuntimePath(runtime, projection_op.Kind(), "projection_aggregate.reference_payload_view", count);
 	return true;
 }
 
@@ -122,7 +122,7 @@ static bool SljitTryMaterializeHashJoinProjectionAggregateInputsToChunk(
 				return block("rhs_projection");
 			}
 			if (generated_source) {
-				RecordSljitRegionRuntimePath(runtime, projection_op.kind, "rhs_row_pointer_generated_projection",
+				RecordSljitRegionRuntimePath(runtime, projection_op.Kind(), "rhs_row_pointer_generated_projection",
 				                             count);
 			}
 		} else if (source.kind == SljitJoinProjectionAggregateInputKind::HASH_JOIN_LHS_EXPRESSION) {
@@ -148,16 +148,17 @@ static bool SljitTryMaterializeHashJoinProjectionAggregateInputsToChunk(
 	}
 	result.SetChildCardinality(current_size + count);
 	if (referenced_direct_input) {
-		RecordSljitRegionStageRuntime(runtime, projection_idx, projection_op.kind,
+		RecordSljitRegionStageRuntime(runtime, projection_idx, projection_op.Kind(),
 		                              "projection_aggregate_reference_payload_view", stage_start);
-		RecordSljitRegionRuntimePath(runtime, projection_op.kind, "projection_aggregate.reference_payload_view", count);
+		RecordSljitRegionRuntimePath(runtime, projection_op.Kind(), "projection_aggregate.reference_payload_view",
+		                             count);
 	}
 	if (materialized_reference) {
-		RecordSljitRegionStageRuntime(runtime, projection_idx, projection_op.kind, "post_join_reference_projection",
+		RecordSljitRegionStageRuntime(runtime, projection_idx, projection_op.Kind(), "post_join_reference_projection",
 		                              stage_start);
 	}
 	if (materialized_computed) {
-		RecordSljitRegionStageRuntime(runtime, projection_idx, projection_op.kind, "post_join_computed_projection",
+		RecordSljitRegionStageRuntime(runtime, projection_idx, projection_op.Kind(), "post_join_computed_projection",
 		                              stage_start);
 	}
 	return true;

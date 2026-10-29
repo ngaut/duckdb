@@ -23,8 +23,8 @@ SljitExecutePrimitiveAggregateUpdate(ExecutionRegionRuntime &runtime, ExecutionO
 	if (count == DConstants::INVALID_INDEX) {
 		count = input.size();
 	}
-	auto &sink_info = op.aggregate_update.plan.sink_info;
-	if (SljitGroupedPrimitiveAggregateSinkKind(sink_info.kind)) {
+	auto &sink_info = op.AggregateUpdate().plan.sink_info;
+	if (SljitGroupedPrimitiveAggregateSinkKind(sink_info.Kind())) {
 		auto &bound = scratch.AggregateBoundGroupedUpdate(op_idx);
 		SljitBindRecordedGroupedPrimitiveAggregateUpdate(runtime, native_runtime, scratch, op_idx, op, input, bound);
 		return SljitExecuteBoundGroupedPrimitiveAggregateUpdate(runtime, scratch, bound, input, execute_sel, count,
@@ -112,7 +112,7 @@ static SinkResultType SljitExecuteDuckDBAggregateUpdate(ExecutionRegionRuntime &
 	}
 	const bool sink_was_bound = scratch.HasSinkBinding(op_idx);
 	auto &binding = SljitBindRecordedNativeSink(
-	    runtime, native_runtime, scratch, op_idx, op.kind, input, op.aggregate_update.plan.sink_info,
+	    runtime, native_runtime, scratch, op_idx, op.Kind(), input, op.AggregateUpdate().plan.sink_info,
 	    "aggregate-update-runtime-binding-failed", "SLJIT aggregate update sink");
 	if (!binding.ready || !binding.aggregate_update.ready) {
 		throw InternalException("SLJIT aggregate update sink binding did not return a ready aggregate state");
@@ -129,11 +129,11 @@ static SinkResultType SljitExecuteDuckDBAggregateUpdate(ExecutionRegionRuntime &
 	}
 	auto aggregate_stage_start = SljitRegionStageStart(runtime);
 	auto sink_input = &input;
-	if (op.aggregate_update.distinct_group_domain_size != 0) {
-		auto &distinct_groups = scratch.DistinctGroups(op_idx, op.aggregate_update.distinct_group_domain_size);
+	if (op.AggregateUpdate().distinct_group_domain_size != 0) {
+		auto &distinct_groups = scratch.DistinctGroups(op_idx, op.AggregateUpdate().distinct_group_domain_size);
 		idx_t new_count;
-		if (SljitSelectNewDistinctGroups(op.aggregate_update, input, distinct_groups, new_count)) {
-			RecordSljitRegionRuntimePath(runtime, op.kind, "native_sink_update.repeated_groups_dropped",
+		if (SljitSelectNewDistinctGroups(op.AggregateUpdate(), input, distinct_groups, new_count)) {
+			RecordSljitRegionRuntimePath(runtime, op.Kind(), "native_sink_update.repeated_groups_dropped",
 			                             input.size() - new_count);
 			if (new_count == 0) {
 				return SinkResultType::NEED_MORE_INPUT;
@@ -148,9 +148,9 @@ static SinkResultType SljitExecuteDuckDBAggregateUpdate(ExecutionRegionRuntime &
 		}
 	}
 	auto sink_result = binding.aggregate_update.state->Sink(*sink_input);
-	RecordSljitRegionStageRuntimePath(runtime, op_idx, op.kind, "native_sink_update", aggregate_stage_start);
-	RecordSljitRegionRuntimePath(runtime, op.kind, "native_sink_update", input.size());
-	RecordSljitRegionRuntimeDelegation(runtime, op.kind, "native_sink_update", input.size());
+	RecordSljitRegionStageRuntimePath(runtime, op_idx, op.Kind(), "native_sink_update", aggregate_stage_start);
+	RecordSljitRegionRuntimePath(runtime, op.Kind(), "native_sink_update", input.size());
+	RecordSljitRegionRuntimeDelegation(runtime, op.Kind(), "native_sink_update", input.size());
 	return sink_result;
 }
 
@@ -161,7 +161,7 @@ static SinkResultType SljitExecuteNativePipelineAggregateUpdate(
 	if (count == DConstants::INVALID_INDEX) {
 		count = input.size();
 	}
-	if (op.aggregate_update.plan.UsesPrimitivePayloads()) {
+	if (op.AggregateUpdate().plan.UsesPrimitivePayloads()) {
 		return SljitExecutePrimitiveAggregateUpdate(runtime, native_runtime, scratch, op_idx, op, input, execute_sel,
 		                                            count, defer_grouped_finish);
 	}

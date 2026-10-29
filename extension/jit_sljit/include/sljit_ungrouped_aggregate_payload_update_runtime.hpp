@@ -21,13 +21,13 @@ static SinkResultType SljitExecuteNativeUngroupedAggregateUpdateWithPayloads(
     vector<SljitExecutableRegionExpression> &payloads, SljitAggregatePayloadSourceLayout payload_source_layout,
     const vector<idx_t> &combined_payload_source_indices, const vector<bool> &combined_payload_source_not_null,
     const char *stage_name, const char *runtime_path) {
-	auto &sink_info = op.aggregate_update.plan.sink_info;
-	if (sink_info.kind != ExecutionRegionSinkKind::UNGROUPED_AGGREGATE_UPDATE ||
-	    !op.aggregate_update.plan.UsesPrimitivePayloads() || op.aggregate_update.plan.use_grouped_state_addresses) {
+	auto &sink_info = op.AggregateUpdate().plan.sink_info;
+	if (sink_info.Kind() != ExecutionRegionSinkKind::UNGROUPED_AGGREGATE_UPDATE ||
+	    !op.AggregateUpdate().plan.UsesPrimitivePayloads() || op.AggregateUpdate().plan.use_grouped_state_addresses) {
 		throw InternalException("SLJIT ungrouped aggregate direct update received a non-ungrouped aggregate");
 	}
 	auto &binding =
-	    SljitBindRecordedNativeSink(runtime, native_runtime, scratch, op_idx, op.kind, payload_input, sink_info,
+	    SljitBindRecordedNativeSink(runtime, native_runtime, scratch, op_idx, op.Kind(), payload_input, sink_info,
 	                                "aggregate-update-runtime-binding-failed", "SLJIT aggregate update sink");
 	if (!binding.ready || !binding.aggregate_update.ready || !binding.aggregate_update.primitive.ready) {
 		throw InternalException("SLJIT ungrouped aggregate direct update sink binding is incomplete");
@@ -36,23 +36,23 @@ static SinkResultType SljitExecuteNativeUngroupedAggregateUpdateWithPayloads(
 	if (aggregates.size() != payloads.size()) {
 		throw InternalException("SLJIT ungrouped aggregate direct update payload count mismatch");
 	}
-	if (!op.aggregate_update.fused_payload_update.Function() &&
-	    aggregates.size() != op.aggregate_update.payload_updates.size()) {
+	if (!op.AggregateUpdate().fused_payload_update.Function() &&
+	    aggregates.size() != op.AggregateUpdate().payload_updates.size()) {
 		throw InternalException("SLJIT ungrouped aggregate direct update payload function count mismatch");
 	}
-	auto &payload_lanes = scratch.AggregatePayloadLanes(op_idx, op.aggregate_update.payload_descriptors,
+	auto &payload_lanes = scratch.AggregatePayloadLanes(op_idx, op.AggregateUpdate().payload_descriptors,
 	                                                    binding.aggregate_update.primitive);
 	if (payload_lanes.size() != aggregates.size()) {
 		throw InternalException("SLJIT ungrouped aggregate direct update primitive lane count mismatch");
 	}
 	auto &payload_scratch = scratch.AggregatePayloadScratch(op_idx);
-	if (op.aggregate_update.fused_payload_update.Function()) {
+	if (op.AggregateUpdate().fused_payload_update.Function()) {
 		auto payload_stage_start = SljitRegionStageStart(runtime);
 		SljitExecuteFusedPrimitiveAggregatePayloadUpdate(
-		    payloads, op.aggregate_update.fused_payload_update.Function(), op.aggregate_update.payload_descriptors,
+		    payloads, op.AggregateUpdate().fused_payload_update.Function(), op.AggregateUpdate().payload_descriptors,
 		    payload_source_layout, combined_payload_source_indices, combined_payload_source_not_null, payload_lanes,
 		    payload_input, nullptr, payload_input.size(), payload_scratch);
-		RecordSljitRegionStageRuntime(runtime, op_idx, op.kind, stage_name, payload_stage_start);
+		RecordSljitRegionStageRuntime(runtime, op_idx, op.Kind(), stage_name, payload_stage_start);
 	} else {
 		for (idx_t payload_idx = 0; payload_idx < aggregates.size(); payload_idx++) {
 			auto lane = payload_lanes[payload_idx];
@@ -61,14 +61,14 @@ static SinkResultType SljitExecuteNativeUngroupedAggregateUpdateWithPayloads(
 			}
 			auto payload_stage_start = SljitRegionStageStart(runtime);
 			SljitExecutePrimitiveAggregatePayloadUpdate(
-			    payloads[payload_idx], op.aggregate_update.payload_updates[payload_idx].Function(), *lane,
-			    op.aggregate_update.payload_descriptors[payload_idx], payload_input, nullptr, payload_input.size(),
+			    payloads[payload_idx], op.AggregateUpdate().payload_updates[payload_idx].Function(), *lane,
+			    op.AggregateUpdate().payload_descriptors[payload_idx], payload_input, nullptr, payload_input.size(),
 			    scratch.ExpressionAdapterScratch(op_idx, payload_idx));
-			RecordSljitRegionStageRuntime(runtime, op_idx, op.kind, stage_name, payload_stage_start);
+			RecordSljitRegionStageRuntime(runtime, op_idx, op.Kind(), stage_name, payload_stage_start);
 		}
 	}
-	RecordSljitRegionMaterializationElision(runtime, op.kind, runtime_path, payload_input.size());
-	RecordSljitRegionGeneratedWork(runtime, op.kind, payload_input.size());
+	RecordSljitRegionMaterializationElision(runtime, op.Kind(), runtime_path, payload_input.size());
+	RecordSljitRegionGeneratedWork(runtime, op.Kind(), payload_input.size());
 	return native_runtime.RecordSinkResult(payload_input.size(), SinkResultType::NEED_MORE_INPUT);
 }
 

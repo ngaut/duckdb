@@ -68,20 +68,17 @@ private:
 	SljitExpressionAdapterScratch expression_scratch;
 };
 
-SljitNativeRegionArtifact::SljitNativeRegionArtifact(
-    string backend_name_p, vector<SljitExecutableRegionOp> ops_p, vector<SljitExecutableScanFilter> scan_filters_p,
-    ExecutionRegionScanFilterMode scan_filter_mode_p, vector<idx_t> source_distinct_counts_p,
-    vector<Value> source_min_values_p, vector<Value> source_max_values_p, SljitFullPipelineRecipePlan recipe_plan_p)
+SljitNativeRegionArtifact::SljitNativeRegionArtifact(string backend_name_p, vector<SljitExecutableRegionOp> ops_p,
+                                                     vector<SljitExecutableScanFilter> scan_filters_p,
+                                                     ExecutionRegionScanFilterMode scan_filter_mode_p,
+                                                     SljitFullPipelineRecipePlan recipe_plan_p)
     : backend_name(std::move(backend_name_p)), ops(std::move(ops_p)), scan_filters(std::move(scan_filters_p)),
-      scan_filter_mode(scan_filter_mode_p), source_distinct_counts(std::move(source_distinct_counts_p)),
-      source_min_values(std::move(source_min_values_p)), source_max_values(std::move(source_max_values_p)),
-      full_pipeline_recipe_plan(std::move(recipe_plan_p)) {
+      scan_filter_mode(scan_filter_mode_p), full_pipeline_recipe_plan(std::move(recipe_plan_p)) {
 }
 
-SljitNativeRegionKernel::SljitNativeRegionKernel(
-    shared_ptr<const SljitNativeRegionArtifact> artifact_p,
-    vector<shared_ptr<ExecutionRuntimeFilterIdentity>> exact_source_filter_bindings_p)
-    : artifact(std::move(artifact_p)), exact_source_filter_bindings(std::move(exact_source_filter_bindings_p)),
+SljitNativeRegionKernel::SljitNativeRegionKernel(shared_ptr<const SljitNativeRegionArtifact> artifact_p,
+                                                 SljitRegionInstanceBindings bindings_p)
+    : artifact(std::move(artifact_p)), bindings(std::move(bindings_p)),
       shared_predicate_classifications(artifact->ops.size()) {
 }
 
@@ -147,16 +144,15 @@ bool SljitNativeRegionKernel::HasExecutableBody() const {
 
 const shared_ptr<ExecutionRuntimeFilterIdentity> &
 SljitNativeRegionKernel::ExactSourceFilterIdentity(idx_t binding) const {
-	return SljitExactSourceFilterIdentity(exact_source_filter_bindings, binding);
+	return SljitExactSourceFilterIdentity(bindings.exact_source_filters, binding);
 }
 
 shared_ptr<const ExecutionRegionArtifact> CreateSljitNativeRegionArtifact(string backend_name,
                                                                           SljitExecutableRegion &&region,
                                                                           SljitFullPipelineRecipePlan recipe_plan) {
-	return make_shared_ptr<SljitNativeRegionArtifact>(
-	    std::move(backend_name), std::move(region.ops), std::move(region.scan_filters), region.scan_filter_mode,
-	    std::move(region.source_distinct_counts), std::move(region.source_min_values),
-	    std::move(region.source_max_values), std::move(recipe_plan));
+	return make_shared_ptr<SljitNativeRegionArtifact>(std::move(backend_name), std::move(region.ops),
+	                                                  std::move(region.scan_filters), region.scan_filter_mode,
+	                                                  std::move(recipe_plan));
 }
 
 unique_ptr<ExecutionRegionKernel>
@@ -171,22 +167,28 @@ InstantiateSljitNativeRegionArtifact(const shared_ptr<const ExecutionRegionArtif
 	if (!sljit_plan || !sljit_plan->native_region) {
 		return nullptr;
 	}
-	vector<shared_ptr<ExecutionRuntimeFilterIdentity>> exact_source_filter_bindings(sljit_artifact->ops.size());
+	SljitRegionInstanceBindings bindings;
+	bindings.aggregate_parameters = BuildSljitAggregateInstanceParameters(*sljit_plan->native_region);
+	bindings.cast_errors = sljit_plan->native_region->cast_errors;
+	bindings.exact_source_filters.resize(sljit_artifact->ops.size());
+	bindings.source_distinct_counts = sljit_plan->native_region->source_distinct_counts;
+	bindings.source_min_values = sljit_plan->native_region->source_min_values;
+	bindings.source_max_values = sljit_plan->native_region->source_max_values;
 	for (auto &current_op : sljit_plan->native_region->ops) {
-		if (current_op.kind != SljitNativeRegionOpKind::HASH_JOIN_PROBE) {
+		if (current_op.Kind() != SljitNativeRegionOpKind::HASH_JOIN_PROBE) {
 			continue;
 		}
-		auto binding = current_op.hash_join_probe.exact_source_filter_binding;
+		auto binding = current_op.HashJoinProbe().exact_source_filter_binding;
 		if (binding == DConstants::INVALID_INDEX) {
 			continue;
 		}
-		if (binding >= exact_source_filter_bindings.size() ||
-		    !current_op.hash_join_probe.exact_source_filter_identity) {
+		if (binding >= bindings.exact_source_filters.size() ||
+		    !current_op.HashJoinProbe().exact_source_filter_identity) {
 			return nullptr;
 		}
-		exact_source_filter_bindings[binding] = current_op.hash_join_probe.exact_source_filter_identity;
+		bindings.exact_source_filters[binding] = current_op.HashJoinProbe().exact_source_filter_identity;
 	}
-	return make_uniq<SljitNativeRegionKernel>(std::move(sljit_artifact), std::move(exact_source_filter_bindings));
+	return make_uniq<SljitNativeRegionKernel>(std::move(sljit_artifact), std::move(bindings));
 }
 
 } // namespace duckdb

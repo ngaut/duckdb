@@ -270,7 +270,7 @@ static bool TryPreaggregateInputVectorPrimitiveGroupRunsFastTemplated(
     const vector<idx_t> &payload_source_indices,
     const vector<const ExecutionPrimitiveAggregateUpdateLane *> &payload_lanes,
     SljitPreaggregatedPrimitiveAggregateScratch &scratch, optional_ptr<DataChunk> run_group_keys, idx_t &group_count) {
-	auto &sink_info = op.aggregate_update.plan.sink_info;
+	auto &sink_info = op.AggregateUpdate().plan.sink_info;
 	if (input.size() < 2 || sink_info.groups.size() != 1 || group_sources.size() != 1 ||
 	    sink_info.groups[0].type.InternalType() != group_sources[0].target_physical_type) {
 		return false;
@@ -388,7 +388,7 @@ static bool TryPreaggregateInputVectorFusedAffinePrimitiveGroupRunsWithSelection
     const vector<idx_t> &payload_source_indices,
     const vector<const ExecutionPrimitiveAggregateUpdateLane *> &payload_lanes,
     SljitPreaggregatedPrimitiveAggregateScratch &scratch, optional_ptr<DataChunk> run_group_keys, idx_t &group_count) {
-	auto &run_update = op.aggregate_update.fused_affine_run_update;
+	auto &run_update = op.AggregateUpdate().fused_affine_run_update;
 	const auto count = input.size();
 	if (!run_update.Ready() || run_update.lanes.size() != payload_lanes.size() ||
 	    run_update.source_position >= payload_source_indices.size()) {
@@ -477,10 +477,10 @@ static bool TryPreaggregateInputVectorFusedPrimitiveGroupRunsWithSelection(
 		return false;
 	}
 	SljitExecuteFusedGroupedPrimitiveAggregatePayloadUpdate(
-	    op.aggregate_update.payloads, op.aggregate_update.fused_payload_update.Function(),
-	    op.aggregate_update.plan.sink_info.aggregate_contract, op.aggregate_update.payload_descriptors,
-	    op.aggregate_update.payload_source_layout, op.aggregate_update.combined_payload_source_indices,
-	    op.aggregate_update.combined_payload_source_not_null, payload_lanes, reduction_lanes, input,
+	    op.AggregateUpdate().payloads, op.AggregateUpdate().fused_payload_update.Function(),
+	    op.AggregateUpdate().plan.sink_info.contract, op.AggregateUpdate().payload_descriptors,
+	    op.AggregateUpdate().payload_source_layout, op.AggregateUpdate().combined_payload_source_indices,
+	    op.AggregateUpdate().combined_payload_source_not_null, payload_lanes, reduction_lanes, input,
 	    scratch.fused_row_state_addresses.data(), nullptr, nullptr, false, count, payload_scratch,
 	    optional_ptr<const vector<idx_t>>(&payload_source_indices));
 	if (!SljitExtractFusedPreaggregatedPrimitiveDeltas(scratch, payload_lanes, group_count)) {
@@ -536,7 +536,7 @@ static bool TryPreaggregateInputVectorFusedPrimitiveGroupRunsFastTemplated(
     const vector<SljitGroupedReductionLaneBinding> &reduction_lanes,
     SljitPreaggregatedPrimitiveAggregateScratch &scratch, SljitAggregatePayloadAdapterScratch &payload_scratch,
     optional_ptr<DataChunk> run_group_keys, idx_t &group_count) {
-	auto &sink_info = op.aggregate_update.plan.sink_info;
+	auto &sink_info = op.AggregateUpdate().plan.sink_info;
 	group_count = 0;
 	if (input.size() < 2 || sink_info.groups.size() != 1 || group_sources.size() != 1 ||
 	    sink_info.groups[0].type.InternalType() != group_sources[0].target_physical_type) {

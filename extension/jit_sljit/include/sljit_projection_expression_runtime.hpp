@@ -312,7 +312,7 @@ static void SljitExecuteProjectionExpression(SljitExecutableRegionExpression &ex
 	native_input.selected_count = 0;
 	native_input.error_message =
 	    plan.kind == SljitNativeRegionExpressionKind::ERROR_GUARDED_REFERENCE ? plan.error_message.c_str() : nullptr;
-	native_input.cast_chain = &plan.cast_chain;
+	native_input.cast_chain = {&plan.cast_chain, runtime.get()};
 	native_input.overflow_value = 0;
 	native_input.string_decompress_source_size = plan.string_decompress_source_size;
 	native_input.active_source_index = 0;

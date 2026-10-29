@@ -31,9 +31,9 @@ static void SljitMaterializeLeftHashJoinProbeUnmatchedOutput(ExecutionRegionRunt
                                                              SelectionVector &match_selection,
                                                              SljitHashJoinProbeDrainState &state) {
 	auto materialize_stage_start = SljitRegionStageStart(runtime);
-	SljitRegionStageRecorder recorder(runtime, op_idx, op.kind, "materialize_left_unmatched");
+	SljitRegionStageRecorder recorder(runtime, op_idx, op.Kind(), "materialize_left_unmatched");
 	SljitMaterializeLeftHashJoinProbeUnmatched(probe, input, output, match_selection, state, &recorder);
-	RecordSljitRegionStageRuntime(runtime, op_idx, op.kind, "materialize_left_unmatched", materialize_stage_start);
+	RecordSljitRegionStageRuntime(runtime, op_idx, op.Kind(), "materialize_left_unmatched", materialize_stage_start);
 }
 
 static void SljitExecuteMarkProbeNoTrueNonMatches(ExecutionRegionRuntime &runtime, SljitExecutableRegionOp &op,
@@ -43,7 +43,7 @@ static void SljitExecuteMarkProbeNoTrueNonMatches(ExecutionRegionRuntime &runtim
 	state.resume_row_pointer = nullptr;
 	state.finished = true;
 	state.output_proof.Reset();
-	RecordSljitRegionRuntimePath(runtime, op.kind, "mark_nonmatch_empty_due_to_build_null");
+	RecordSljitRegionRuntimePath(runtime, op.Kind(), "mark_nonmatch_empty_due_to_build_null");
 	runtime.RecordJitRuntimeProof(ExecutionRegionJitRuntimeProof::NO_WORK);
 	output.Reset();
 }
@@ -54,9 +54,9 @@ static void SljitExecuteEmptyHashJoinProbe(
     Vector &row_pointers, SljitHashJoinProbeDrainState &state,
     SljitHashJoinProbeOutputContract output_contract = SljitHashJoinProbeOutputContract::MATERIALIZED_OUTPUT) {
 	state.finished = true;
-	RecordSljitRegionRuntimePath(runtime, op.kind, "empty_build_side");
+	RecordSljitRegionRuntimePath(runtime, op.Kind(), "empty_build_side");
 	runtime.RecordJitRuntimeProof(ExecutionRegionJitRuntimeProof::NO_WORK);
-	switch (op.hash_join_probe.plan.output_mode) {
+	switch (op.HashJoinProbe().plan.output_mode) {
 	case ExecutionHashJoinProbeOutputMode::LEFT_PROBE_AND_BUILD:
 		return SljitMaterializeLeftHashJoinProbeUnmatchedOutput(runtime, op_idx, op, probe, input, output,
 		                                                        match_selection, state);
@@ -82,9 +82,9 @@ static void SljitExecuteEmptyHashJoinProbe(
 			break;
 		}
 		auto materialize_stage_start = SljitRegionStageStart(runtime);
-		SljitRegionStageRecorder recorder(runtime, op_idx, op.kind, "materialize_output");
+		SljitRegionStageRecorder recorder(runtime, op_idx, op.Kind(), "materialize_output");
 		ExecutionMaterializeHashJoinProbe(probe, input, row_pointers, match_selection, input.size(), output, &recorder);
-		RecordSljitRegionStageRuntime(runtime, op_idx, op.kind, "materialize_output", materialize_stage_start);
+		RecordSljitRegionStageRuntime(runtime, op_idx, op.Kind(), "materialize_output", materialize_stage_start);
 	} break;
 	case ExecutionHashJoinProbeOutputMode::MATCHED_PROBE_AND_BUILD:
 	case ExecutionHashJoinProbeOutputMode::MATCHED_PROBE_ONLY:
@@ -111,22 +111,23 @@ static void SljitExecutePerfectHashJoinProbe(
 	if (exact_source_filter_identity) {
 		runtime.RecordJitRuntimePath("hash_join_probe.perfect_probe.exact_source_filter_candidate");
 	}
-	auto &key = SljitValidatePerfectHashJoinProbeExecutionLayout(plan, probe, input);
+	auto &key = plan.keys[0];
 	const bool prefer_identity_selection = SljitHashJoinProbePrefersIdentitySelection(output_contract);
 	const bool direct_consumer_output =
 	    SljitHashJoinProbePrefersDirectConsumerOutput(output_contract) &&
 	    SljitCanDerivePerfectHashBuildSelectionFromIdentity(key, probe.perfect_layout, input);
-	auto function = owner.EnsurePerfectHashJoinProbeCode(runtime, op.hash_join_probe, prefer_identity_selection,
+	auto function = owner.EnsurePerfectHashJoinProbeCode(runtime, op.HashJoinProbe(), prefer_identity_selection,
 	                                                     direct_consumer_output);
 	SljitPreparedPerfectHashJoinProbeInput prepared_input;
 	SljitPreparePerfectHashJoinProbeInput(key, probe.perfect_layout, input, match_selection, build_selection, state,
 	                                      source_key0_int64_to_int32_unchecked, prepared_input);
 	auto &native_input = prepared_input.native_input;
+	native_input.source_key0_cast.runtime = &runtime;
 	const auto initial_input_offset = native_input.input_offset;
 
 	auto generated_stage_start = SljitRegionStageStart(runtime);
 	SljitExecuteNativeFunction(function, native_input);
-	RecordSljitRegionGeneratedWork(runtime, op.kind, input.size());
+	RecordSljitRegionGeneratedWork(runtime, op.Kind(), input.size());
 	if (native_input.error) {
 		std::rethrow_exception(native_input.error);
 	}
@@ -138,7 +139,7 @@ static void SljitExecutePerfectHashJoinProbe(
 		native_input.input_offset = initial_input_offset;
 		native_input.selected_count = 0;
 		native_input.finished = false;
-		auto compact_function = owner.EnsurePerfectHashJoinProbeCode(runtime, op.hash_join_probe, false);
+		auto compact_function = owner.EnsurePerfectHashJoinProbeCode(runtime, op.HashJoinProbe(), false);
 		SljitExecuteNativeFunction(compact_function, native_input);
 		if (native_input.error) {
 			std::rethrow_exception(native_input.error);
@@ -151,7 +152,7 @@ static void SljitExecutePerfectHashJoinProbe(
 			runtime.RecordJitRuntimePath("hash_join_probe.perfect_probe.build_selection_elided", input.size());
 		}
 	}
-	RecordSljitRegionStageRuntimePath(runtime, op_idx, op.kind, SljitGeneratedPerfectHashJoinProbeStage(),
+	RecordSljitRegionStageRuntimePath(runtime, op_idx, op.Kind(), SljitGeneratedPerfectHashJoinProbeStage(),
 	                                  generated_stage_start);
 	if (exact_membership_filter) {
 		runtime.RecordJitRuntimePath("hash_join_probe.perfect_probe.exact_source_filter", native_input.selected_count);
@@ -172,10 +173,10 @@ static void SljitExecutePerfectHashJoinProbe(
 		return;
 	}
 	auto materialize_stage_start = SljitRegionStageStart(runtime);
-	SljitRegionStageRecorder recorder(runtime, op_idx, op.kind, "materialize_output");
+	SljitRegionStageRecorder recorder(runtime, op_idx, op.Kind(), "materialize_output");
 	ExecutionMaterializePerfectHashJoinProbe(probe, input, match_selection, build_selection,
 	                                         native_input.selected_count, output, &recorder);
-	RecordSljitRegionStageRuntime(runtime, op_idx, op.kind, "materialize_output", materialize_stage_start);
+	RecordSljitRegionStageRuntime(runtime, op_idx, op.Kind(), "materialize_output", materialize_stage_start);
 }
 
 struct SljitExactRegularHashJoinMembershipFilterDispatch {
@@ -243,7 +244,7 @@ static void SljitExecuteRegularHashJoinProbe(
 		runtime.RecordJitRuntimePath("hash_join_probe.regular_probe.exact_source_filter_candidate");
 	}
 	auto prepared_input = SljitPrepareRegularHashJoinProbeInput(
-	    runtime, op_idx, op.kind, plan, layout, input, match_selection, row_pointers, source_scratch, state,
+	    runtime, op_idx, op.Kind(), plan, layout, input, match_selection, row_pointers, source_scratch, state,
 	    table_layout_kind, source_key0_int64_to_int32_unchecked, layout.stored_keys_have_null, probe.use_bloom_filter);
 	auto &native_input = prepared_input.native_input;
 	if (SljitRegularProbeAnsweredByExactSourceFilter(exact_source_filter_identity, probe, plan) &&
@@ -268,29 +269,29 @@ static void SljitExecuteRegularHashJoinProbe(
 
 	auto generated_stage_start = SljitRegionStageStart(runtime);
 	const auto executed_probe_stage =
-	    SljitExecuteRegularHashJoinProbePath(owner, runtime, prepared_input.input_kind, op.hash_join_probe, plan,
+	    SljitExecuteRegularHashJoinProbePath(owner, runtime, prepared_input.input_kind, op.HashJoinProbe(), plan,
 	                                         layout.needs_chain_matcher, native_input, mark_selection_mode);
 	if (native_input.error) {
 		std::rethrow_exception(native_input.error);
 	}
-	RecordSljitRegionStageRuntimePath(runtime, op_idx, op.kind, executed_probe_stage, generated_stage_start);
+	RecordSljitRegionStageRuntimePath(runtime, op_idx, op.Kind(), executed_probe_stage, generated_stage_start);
 	state.input_offset = native_input.input_offset;
 	state.resume_row_pointer = native_input.resume_row_pointer;
 	state.finished = native_input.finished;
 	auto selected_count = native_input.selected_count;
 	if (plan.residual_predicate) {
 		auto residual_stage_start = SljitRegionStageStart(runtime);
-		SljitRegionStageRecorder residual_recorder(runtime, op_idx, op.kind, "residual_predicate");
+		SljitRegionStageRecorder residual_recorder(runtime, op_idx, op.Kind(), "residual_predicate");
 		auto &residual_scratch = scratch.ExpressionAdapterScratch(op_idx, 0);
 		selected_count = SljitApplyNativeHashJoinResidualPredicate(
 		    runtime, op, probe, input, row_pointers, match_selection, selected_count, residual_chunk,
 		    residual_selection, compact_match_selection, compact_row_pointers, &residual_scratch, &residual_recorder);
-		RecordSljitRegionStageRuntime(runtime, op_idx, op.kind, "residual_predicate", residual_stage_start);
+		RecordSljitRegionStageRuntime(runtime, op_idx, op.Kind(), "residual_predicate", residual_stage_start);
 	}
 	if (left_probe_output && selected_count != 0) {
 		auto mark_stage_start = SljitRegionStageStart(runtime);
 		SljitMarkLeftHashJoinProbeMatches(state, match_selection, selected_count);
-		RecordSljitRegionStageRuntime(runtime, op_idx, op.kind, "mark_left_matches", mark_stage_start);
+		RecordSljitRegionStageRuntime(runtime, op_idx, op.Kind(), "mark_left_matches", mark_stage_start);
 	}
 	if (plan.ResidualDecidesProbeRows()) {
 		selected_count = SljitKeepFirstHashJoinProbeMatches(state, match_selection, row_pointers, selected_count);
@@ -298,7 +299,7 @@ static void SljitExecuteRegularHashJoinProbe(
 	if (plan.mark_build_match_after_residual) {
 		auto mark_build_stage_start = SljitRegionStageStart(runtime);
 		SljitMarkHashJoinBuildMatchesAfterResidual(plan, row_pointers, selected_count);
-		RecordSljitRegionStageRuntime(runtime, op_idx, op.kind, "mark_build_matches", mark_build_stage_start);
+		RecordSljitRegionStageRuntime(runtime, op_idx, op.Kind(), "mark_build_matches", mark_build_stage_start);
 	}
 	state.output_proof.source_key0_int64_to_int32 = selected_count != 0 && native_input.source_key0_int64_to_int32;
 	if (plan.output_mode == ExecutionHashJoinProbeOutputMode::MARK_BUILD_ONLY) {
@@ -322,9 +323,9 @@ static void SljitExecuteRegularHashJoinProbe(
 		return;
 	}
 	auto materialize_stage_start = SljitRegionStageStart(runtime);
-	SljitRegionStageRecorder recorder(runtime, op_idx, op.kind, "materialize_output");
+	SljitRegionStageRecorder recorder(runtime, op_idx, op.Kind(), "materialize_output");
 	ExecutionMaterializeHashJoinProbe(probe, input, row_pointers, match_selection, selected_count, output, &recorder);
-	RecordSljitRegionStageRuntime(runtime, op_idx, op.kind, "materialize_output", materialize_stage_start);
+	RecordSljitRegionStageRuntime(runtime, op_idx, op.Kind(), "materialize_output", materialize_stage_start);
 }
 
 template <class OWNER>
@@ -339,15 +340,9 @@ static void SljitExecuteNativeHashJoinProbe(
     optional_ptr<const SljitNativeHashJoinProbePlan> input_plan = nullptr) {
 	auto &plan = SljitBindHashJoinProbeExecutionPlan(op, input_plan, output_contract);
 	auto &binding = SljitBindRecordedNativeOperator(runtime, native_runtime, scratch, op_idx, op, input,
-	                                                plan.operator_info, "SLJIT native hash join probe");
-	if (!binding.ready || !binding.hash_join_probe.ready) {
-		throw InternalException("SLJIT native hash join probe received an incomplete operator binding");
-	}
+	                                                plan.operator_info, "SLJIT native hash join probe", &plan);
 	auto &probe = binding.hash_join_probe;
 	auto &exact_source_filter_identity = owner.ExactSourceFilterIdentity(plan.exact_source_filter_binding);
-	if (plan.output_mode == ExecutionHashJoinProbeOutputMode::NONE || probe.output_mode != plan.output_mode) {
-		throw InternalException("SLJIT native hash join probe output mode mismatch");
-	}
 	const bool left_probe_output = SljitIsLeftHashJoinProbeOutputMode(plan.output_mode);
 	if (left_probe_output || plan.ResidualDecidesProbeRows()) {
 		SljitInitializeHashJoinProbeFoundMatch(state, input.size());
@@ -355,9 +350,6 @@ static void SljitExecuteNativeHashJoinProbe(
 	if (left_probe_output && state.finished && !state.left_unmatched_emitted) {
 		return SljitMaterializeLeftHashJoinProbeUnmatchedOutput(runtime, op_idx, op, probe, input, output,
 		                                                        match_selection, state);
-	}
-	if (probe.probe_key_input_indices.size() != plan.keys.size()) {
-		throw InternalException("SLJIT native hash join probe key binding count mismatch");
 	}
 	state.output_proof.Reset();
 	if (SljitHashJoinProbeOutputIsFilteredMarkNonMatches(output_contract)) {

@@ -173,7 +173,7 @@ static bool TryDirectMaterializeFixedGenerated(const SljitExecutableRegionExpres
 	native_input.constants = plan.constants.data();
 	native_input.constant = plan.constant;
 	native_input.result_data = target;
-	native_input.cast_chain = &plan.cast_chain;
+	native_input.cast_chain = {&plan.cast_chain, runtime.get()};
 	native_input.count = count;
 	native_input.has_error = false;
 	auto function = expr.flat.Function() ? expr.flat.Function() : expr.vector.Function();
@@ -200,7 +200,7 @@ static bool SljitTryDirectMaterializeFixedProjection(
     optional_ptr<SljitFixedDirectProjectionSourceCache> source_cache = nullptr,
     optional_ptr<vector<uint8_t>> skip_projection = nullptr,
     optional_ptr<ExecutionRegionRuntime> trace_runtime = nullptr, idx_t trace_op_idx = DConstants::INVALID_INDEX) {
-	if (op.kind != SljitNativeRegionOpKind::PROJECTION || op.projections.empty()) {
+	if (op.Kind() != SljitNativeRegionOpKind::PROJECTION || op.Projections().empty()) {
 		return false;
 	}
 	const bool execute = slice != nullptr;
@@ -213,15 +213,15 @@ static bool SljitTryDirectMaterializeFixedProjection(
 		if (!trace_expressions) {
 			return;
 		}
-		RecordSljitRegionStageRuntime(*trace_runtime, trace_op_idx, op.kind,
+		RecordSljitRegionStageRuntime(*trace_runtime, trace_op_idx, op.Kind(),
 		                              SljitFixedProjectionExpressionTracePhase(projection.plan),
 		                              expression_stage_start);
 	};
-	for (idx_t projection_idx = 0; projection_idx < op.projections.size(); projection_idx++) {
+	for (idx_t projection_idx = 0; projection_idx < op.Projections().size(); projection_idx++) {
 		if (skip_projection && projection_idx < skip_projection->size() && (*skip_projection)[projection_idx]) {
 			continue;
 		}
-		auto &projection = op.projections[projection_idx];
+		auto &projection = op.Projections()[projection_idx];
 		auto expression_stage_start =
 		    trace_expressions ? SljitRegionStageStart(*trace_runtime) : std::chrono::steady_clock::time_point();
 		if (TryBindDirectAppendSourceProjection(projection, input, slice, projection_idx, source_offset, count,
@@ -231,7 +231,7 @@ static bool SljitTryDirectMaterializeFixedProjection(
 		}
 		data_ptr_t target = nullptr;
 		if (execute) {
-			if (slice->targets.size() != op.projections.size()) {
+			if (slice->targets.size() != op.Projections().size()) {
 				throw InternalException("SLJIT fixed direct projection target count mismatch");
 			}
 			target = slice->targets[projection_idx];

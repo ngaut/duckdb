@@ -1,5 +1,7 @@
 import re
 import sys
+import json
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -141,6 +143,77 @@ class ClassifyTest(unittest.TestCase):
         self.assertEqual(classify(off, RunResult(1, "Conversion Error: Could not convert 'x' to INT32", 0.1)), "error")
         reworded = RunResult(1, "Out of Range Error: Overflow in multiplication of DECIMAL", 0.1)
         self.assertEqual(classify(off, reworded), "ok")
+
+
+class CampaignTest(unittest.TestCase):
+    def run_campaign(self, runs, queries=1, replay=None):
+        with tempfile.TemporaryDirectory() as directory:
+            report = Path(directory) / "report.json"
+            argv = ["--database", "unused.duckdb", "--queries", str(queries), "--workers", "1", "--report", str(report)]
+            if replay is not None:
+                earlier = Path(directory) / "replay.json"
+                earlier.write_text(json.dumps(replay))
+                argv += ["--replay", str(earlier), "--threads", "1"]
+            with (
+                mock.patch.object(jit_differential_fuzz, "database_columns", return_value=set()),
+                mock.patch.object(jit_differential_fuzz, "restrict_schema"),
+                mock.patch.object(jit_differential_fuzz.QueryGenerator, "query", return_value="SELECT 1"),
+                mock.patch.object(jit_differential_fuzz, "run_query", side_effect=runs),
+            ):
+                status = jit_differential_fuzz.main(argv)
+            return status, json.loads(report.read_text())
+
+    def test_unusable_native_reference_is_inconclusive_and_replayable(self):
+        for result in (
+            RunResult(-1, "TIMEOUT", 0),
+            RunResult(1, "Out of Memory Error: x", 0),
+            RunResult(-11, "", 0),
+            RunResult(1, "unrecognized process failure", 0),
+        ):
+            with self.subTest(result=result):
+                status, report = self.run_campaign([result])
+                self.assertEqual(status, 2)
+                self.assertEqual(report["summary"], {"attempted": 1, "compared": 0, "inconclusive": 1, "findings": 0})
+                self.assertEqual(report["records"][0]["sql"], "SELECT 1")
+                self.assertTrue(report["records"][0]["reference_failure"])
+                ok = RunResult(0, "1", 0)
+                status, replay = self.run_campaign([ok] * 3, replay=report)
+                self.assertEqual(status, 0)
+                self.assertEqual(replay["summary"]["attempted"], 1)
+
+    def test_jit_oom_and_partial_coverage_cannot_pass(self):
+        ok = RunResult(0, "1", 0)
+        for runs in ([ok, RunResult(1, "Out of Memory Error: x", 0), ok], [RunResult(-1, "TIMEOUT", 0), ok, ok, ok]):
+            status, report = self.run_campaign(runs, queries=1 if len(runs) == 3 else 2)
+            self.assertEqual(status, 2)
+            self.assertEqual(report["summary"]["inconclusive"], 1)
+            self.assertEqual(len(report["records"]), 1)
+
+    def test_mismatch_takes_precedence_over_inconclusive(self):
+        ok = RunResult(0, "1", 0)
+        status, report = self.run_campaign([ok, RunResult(0, "2", 0), RunResult(1, "Out of Memory Error: x", 0)])
+        self.assertEqual(status, 1)
+        self.assertEqual(report["summary"]["findings"], 1)
+
+    def test_results_and_expected_errors_both_count_as_comparisons(self):
+        for result in (RunResult(0, "1", 0), RunResult(1, "Out of Range Error: x", 0)):
+            status, report = self.run_campaign([result] * 3)
+            self.assertEqual(status, 0)
+            self.assertEqual(report["summary"], {"attempted": 1, "compared": 1, "inconclusive": 0, "findings": 0})
+            self.assertEqual(report["records"], [])
+
+    def test_empty_campaigns_are_rejected(self):
+        with self.assertRaises(SystemExit):
+            self.run_campaign([], queries=0)
+        with self.assertRaises(SystemExit):
+            self.run_campaign([], replay={"records": []})
+
+    def test_native_internal_error_is_preserved_before_its_stack_trace(self):
+        error = "INTERNAL Error: assertion failed"
+        status, report = self.run_campaign([RunResult(1, error + "\n" + "stack frame\n" * 100, 0)])
+        self.assertEqual(status, 2)
+        self.assertEqual(report["records"][0]["off"], error)
+        self.assertEqual(report["records"][0]["off_returncode"], 1)
 
 
 if __name__ == "__main__":

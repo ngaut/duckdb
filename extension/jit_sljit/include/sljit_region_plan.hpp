@@ -12,6 +12,8 @@
 
 #include "duckdb/execution/execution_region_backend.hpp"
 
+#include <variant>
+
 namespace duckdb {
 
 enum class SljitNativeRegionOpKind : uint8_t {
@@ -159,7 +161,7 @@ struct SljitNativeHashJoinProbePlan {
 	vector<LogicalType> residual_source_types;
 	vector<bool> residual_source_not_null;
 	SljitNativeRegionExpressionPlan residual_filter;
-	ExecutionRegionOperatorInfo operator_info;
+	ExecutionRegionOperatorInfo operator_info {ExecutionRegionOperatorContractKind::HASH_JOIN_PROBE};
 
 	//! A probe-only (SEMI) row is decided by its first key match unless the residual predicate can still reject that
 	//! match: then the probe enumerates every key match and keeps each row's first match that passes the residual
@@ -171,29 +173,25 @@ struct SljitNativeHashJoinProbePlan {
 };
 
 struct SljitNativeHashJoinBuildPlan {
-	ExecutionRegionSinkInfo sink_info;
+	ExecutionRegionHashJoinInfo sink_info;
 	vector<LogicalType> input_types;
 };
 
 struct SljitNativeAppendSinkPlan {
-	ExecutionRegionSinkInfo sink_info;
+	ExecutionRegionSinkInfo sink_info {ExecutionRegionSinkKind::RESULT_COLLECTOR_SINK};
 	vector<LogicalType> input_types;
 };
 
 struct SljitNativeOrderSinkPlan {
-	ExecutionRegionSinkInfo sink_info;
+	ExecutionRegionOrderSinkInfo sink_info;
 	vector<SljitNativeRegionExpressionPlan> order_keys;
 	vector<LogicalType> input_types;
 	vector<LogicalType> key_types;
 };
 
-struct SljitAggregateGroupReservePlan {
-	bool has_group_count = false;
-	idx_t group_count = 0;
-
-	bool CanReserve() const {
-		return has_group_count && group_count > 0;
-	}
+struct SljitAggregateInstanceParameters {
+	idx_t estimated_input_count = 0;
+	idx_t group_reserve_count = 0;
 };
 
 enum class SljitAggregatePayloadBindingState : uint8_t {
@@ -203,7 +201,7 @@ enum class SljitAggregatePayloadBindingState : uint8_t {
 };
 
 struct SljitNativeAggregateUpdatePlan {
-	ExecutionRegionSinkInfo sink_info;
+	ExecutionRegionAggregateSinkInfo sink_info {ExecutionRegionAggregateOperatorKind::UNGROUPED};
 	//! The layout the region graph FEEDS this aggregate (compiled updates bind
 	//! against it). NOT the delegated physical sink's expectation: delegation
 	//! dereferences sink_info's reference declarations, which can differ when
@@ -213,8 +211,6 @@ struct SljitNativeAggregateUpdatePlan {
 	vector<LogicalType> input_types;
 	vector<SljitNativeRegionExpressionPlan> payloads;
 	vector<SljitNativeRegionExpressionPlan> group_expressions;
-	idx_t estimated_input_count = 0;
-	SljitAggregateGroupReservePlan group_reserve;
 	SljitAggregatePayloadBindingState payload_binding_state = SljitAggregatePayloadBindingState::UNBOUND;
 	bool use_grouped_state_addresses = false;
 	bool use_perfect_hash_group_lookup = false;
@@ -248,18 +244,96 @@ struct SljitNativeAggregateUpdatePlan {
 	}
 };
 
-struct SljitNativeRegionOpPlan {
-	SljitNativeRegionOpKind kind;
+class SljitNativeRegionOpPlan {
+public:
+	explicit SljitNativeRegionOpPlan(SljitNativeRegionOpKind kind = SljitNativeRegionOpKind::FILTER) {
+		SetKind(kind);
+	}
+
+	SljitNativeRegionOpKind Kind() const {
+		return static_cast<SljitNativeRegionOpKind>(payload.index());
+	}
+	void SetKind(SljitNativeRegionOpKind kind) {
+		switch (kind) {
+		case SljitNativeRegionOpKind::FILTER:
+			payload.emplace<SljitNativeRegionExpressionPlan>();
+			return;
+		case SljitNativeRegionOpKind::PROJECTION:
+			payload.emplace<vector<SljitNativeRegionExpressionPlan>>();
+			return;
+		case SljitNativeRegionOpKind::HASH_JOIN_PROBE:
+			payload.emplace<SljitNativeHashJoinProbePlan>();
+			return;
+		case SljitNativeRegionOpKind::HASH_JOIN_BUILD:
+			payload.emplace<SljitNativeHashJoinBuildPlan>();
+			return;
+		case SljitNativeRegionOpKind::ORDER_SINK:
+			payload.emplace<SljitNativeOrderSinkPlan>();
+			return;
+		case SljitNativeRegionOpKind::APPEND_SINK:
+			payload.emplace<SljitNativeAppendSinkPlan>();
+			return;
+		case SljitNativeRegionOpKind::AGGREGATE_UPDATE:
+			payload.emplace<SljitNativeAggregateUpdatePlan>();
+			return;
+		}
+		throw InternalException("Unknown SLJIT native operator plan kind");
+	}
+
+	SljitNativeRegionExpressionPlan &Filter() {
+		return std::get<SljitNativeRegionExpressionPlan>(payload);
+	}
+	const SljitNativeRegionExpressionPlan &Filter() const {
+		return std::get<SljitNativeRegionExpressionPlan>(payload);
+	}
+	vector<SljitNativeRegionExpressionPlan> &Projections() {
+		return std::get<vector<SljitNativeRegionExpressionPlan>>(payload);
+	}
+	const vector<SljitNativeRegionExpressionPlan> &Projections() const {
+		return std::get<vector<SljitNativeRegionExpressionPlan>>(payload);
+	}
+	SljitNativeHashJoinProbePlan &HashJoinProbe() {
+		return std::get<SljitNativeHashJoinProbePlan>(payload);
+	}
+	const SljitNativeHashJoinProbePlan &HashJoinProbe() const {
+		return std::get<SljitNativeHashJoinProbePlan>(payload);
+	}
+	SljitNativeHashJoinBuildPlan &HashJoinBuild() {
+		return std::get<SljitNativeHashJoinBuildPlan>(payload);
+	}
+	const SljitNativeHashJoinBuildPlan &HashJoinBuild() const {
+		return std::get<SljitNativeHashJoinBuildPlan>(payload);
+	}
+	SljitNativeOrderSinkPlan &OrderSink() {
+		return std::get<SljitNativeOrderSinkPlan>(payload);
+	}
+	const SljitNativeOrderSinkPlan &OrderSink() const {
+		return std::get<SljitNativeOrderSinkPlan>(payload);
+	}
+	SljitNativeAppendSinkPlan &AppendSink() {
+		return std::get<SljitNativeAppendSinkPlan>(payload);
+	}
+	const SljitNativeAppendSinkPlan &AppendSink() const {
+		return std::get<SljitNativeAppendSinkPlan>(payload);
+	}
+	SljitNativeAggregateUpdatePlan &AggregateUpdate() {
+		return std::get<SljitNativeAggregateUpdatePlan>(payload);
+	}
+	const SljitNativeAggregateUpdatePlan &AggregateUpdate() const {
+		return std::get<SljitNativeAggregateUpdatePlan>(payload);
+	}
+
 	idx_t operator_index = DConstants::INVALID_INDEX;
+	//! Lowering-only estimate; executable plans never retain it.
+	idx_t estimated_input_count = 0;
 	vector<LogicalType> input_types;
 	vector<LogicalType> output_types;
-	SljitNativeRegionExpressionPlan filter;
-	SljitNativeHashJoinProbePlan hash_join_probe;
-	SljitNativeHashJoinBuildPlan hash_join_build;
-	SljitNativeAppendSinkPlan append_sink;
-	SljitNativeOrderSinkPlan order_sink;
-	SljitNativeAggregateUpdatePlan aggregate_update;
-	vector<SljitNativeRegionExpressionPlan> projections;
+
+private:
+	std::variant<SljitNativeRegionExpressionPlan, vector<SljitNativeRegionExpressionPlan>, SljitNativeHashJoinProbePlan,
+	             SljitNativeHashJoinBuildPlan, SljitNativeOrderSinkPlan, SljitNativeAppendSinkPlan,
+	             SljitNativeAggregateUpdatePlan>
+	    payload;
 };
 
 struct SljitNativeAggregateStateSourcePlan {
@@ -268,6 +342,7 @@ struct SljitNativeAggregateStateSourcePlan {
 };
 
 struct SljitNativeRegionPlan {
+	vector<SljitCastErrorIdentity> cast_errors;
 	vector<SljitNativeRegionOpPlan> ops;
 	vector<SljitNativeScanFilterPlan> scan_filters;
 	SljitNativeAggregateStateSourcePlan aggregate_state_source;
@@ -285,9 +360,11 @@ struct SljitNativeRegionPlan {
 };
 
 string DescribeNativeRegion(const SljitNativeRegionPlan &region, const string &mode);
+void BindSljitRegionInstanceSlots(SljitNativeRegionPlan &region);
+void BindSljitCastErrorSlots(SljitIntegerCastChain &chain, vector<SljitCastErrorIdentity> &errors);
+vector<SljitAggregateInstanceParameters> BuildSljitAggregateInstanceParameters(const SljitNativeRegionPlan &region);
 string DescribeNativeRegionShape(const SljitNativeRegionPlan &region);
-string BuildSljitRegionArtifactSemanticKey(const ExecutionRegionCandidate &candidate,
-                                           const SljitNativeRegionPlan &region);
+string BuildSljitRegionArtifactSemanticKey(const SljitNativeRegionPlan &region);
 string BuildSljitRegionArtifactBindingKey(const SljitNativeRegionPlan &region);
 string ComposeSljitRegionArtifactCacheKey(const string &semantic_key, const string &binding_key);
 
@@ -297,7 +374,7 @@ struct SljitRegionBackendPlan : public ExecutionRegionBackendPlan {
 		if (!native_region) {
 			throw InternalException("SLJIT backend plan has no native region to key its artifact on");
 		}
-		return ComposeSljitRegionArtifactCacheKey(BuildSljitRegionArtifactSemanticKey(candidate, *native_region),
+		return ComposeSljitRegionArtifactCacheKey(BuildSljitRegionArtifactSemanticKey(*native_region),
 		                                          BuildSljitRegionArtifactBindingKey(*native_region));
 	}
 

@@ -19,7 +19,7 @@
 namespace duckdb {
 
 static inline void SLJIT_FUNC SljitNativeHashJoinInt64ToInt32CastError(std::exception_ptr *error,
-                                                                       const SljitIntegerCastChain *cast,
+                                                                       const SljitBoundIntegerCastChain *cast,
                                                                        int64_t value) {
 	try {
 		cast->ThrowCastError(value);
@@ -34,7 +34,7 @@ static inline void EmitCallHashJoinInt64ToInt32CastError(struct sljit_compiler *
                                                          sljit_sw cast_offset, sljit_s32 value_reg) {
 	// the value moves first: it may sit in R0 or R1
 	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_R2, 0, value_reg, 0);
-	sljit_emit_op1(compiler, SLJIT_MOV_P, SLJIT_R1, 0, SLJIT_MEM1(SLJIT_S0), cast_offset);
+	sljit_emit_op2(compiler, SLJIT_ADD, SLJIT_R1, 0, SLJIT_S0, 0, SLJIT_IMM, cast_offset);
 	sljit_emit_op2(compiler, SLJIT_ADD, SLJIT_R0, 0, SLJIT_S0, 0, SLJIT_IMM, error_offset);
 	sljit_emit_icall(compiler, SLJIT_CALL, SLJIT_ARGS3V(P, P, W), SLJIT_IMM,
 	                 SLJIT_FUNC_ADDR(SljitNativeHashJoinInt64ToInt32CastError));

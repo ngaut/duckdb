@@ -124,8 +124,8 @@ static vector<Value> BuildSljitProjectionOutputRanges(const SljitNativeRegionOpP
                                                       const vector<Value> &input_min_values,
                                                       const vector<Value> &input_max_values, bool min_values) {
 	vector<Value> result;
-	result.reserve(op.projections.size());
-	for (auto &projection : op.projections) {
+	result.reserve(op.Projections().size());
+	for (auto &projection : op.Projections()) {
 		Value min_value;
 		Value max_value;
 		if (!SljitExpressionRangeValues(projection, input_min_values, input_max_values, min_value, max_value)) {
@@ -180,7 +180,7 @@ static vector<Value> BuildSljitHashJoinProbeOutputRanges(const SljitNativeRegion
                                                          const vector<Value> &input_values) {
 	vector<Value> result;
 	result.reserve(op.output_types.size());
-	auto &contract = op.hash_join_probe.operator_info.hash_join_contract;
+	auto &contract = op.HashJoinProbe().operator_info.HashJoin().contract;
 	if (contract.present) {
 		for (idx_t output_idx = 0; output_idx < contract.lhs_output_column_indices.size(); output_idx++) {
 			auto input_idx = contract.lhs_output_column_indices[output_idx];
@@ -199,7 +199,7 @@ static vector<Value> BuildSljitHashJoinProbeOutputRanges(const SljitNativeRegion
 		result.resize(op.output_types.size());
 	}
 	if (!contract.present ||
-	    op.hash_join_probe.output_mode != ExecutionHashJoinProbeOutputMode::MATCHED_PROBE_AND_BUILD) {
+	    op.HashJoinProbe().output_mode != ExecutionHashJoinProbeOutputMode::MATCHED_PROBE_AND_BUILD) {
 		return result;
 	}
 	const auto rhs_output_offset = contract.lhs_output_column_indices.size();
@@ -296,7 +296,7 @@ void SljitSpecializeAggregatePayloadRanges(SljitNativeAggregateUpdatePlan &aggre
 
 void SljitUpdateExecutableCurrentRanges(const SljitNativeRegionOpPlan &op, vector<Value> &current_min_values,
                                         vector<Value> &current_max_values) {
-	switch (op.kind) {
+	switch (op.Kind()) {
 	case SljitNativeRegionOpKind::FILTER:
 		return;
 	case SljitNativeRegionOpKind::PROJECTION: {

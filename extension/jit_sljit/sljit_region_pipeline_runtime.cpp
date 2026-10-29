@@ -56,15 +56,23 @@ static void RecordSljitLazyHashJoinProbeCodegen(ExecutionRegionRuntime &runtime,
 class SljitNativeRegionLocalState : public ExecutionRegionLocalState {
 public:
 	SljitNativeRegionLocalState(Allocator &allocator, const vector<SljitExecutableRegionOp> &ops,
-	                            vector<shared_ptr<ExecutionRuntimeFilterIdentity>> exact_source_filter_bindings)
-	    : scratch(allocator, ops, std::move(exact_source_filter_bindings)) {
+	                            vector<shared_ptr<ExecutionRuntimeFilterIdentity>> exact_source_filter_bindings,
+	                            const vector<SljitAggregateInstanceParameters> &aggregate_parameters,
+	                            const vector<SljitCastErrorIdentity> &cast_errors_p)
+	    : scratch(allocator, ops, std::move(exact_source_filter_bindings), aggregate_parameters),
+	      cast_errors(cast_errors_p) {
 	}
 
 	SljitRegionExecutionScratch scratch;
 	// Mutable terminal strategies and staged fallible group transforms stay below
 	// this execution-local boundary.
 	SljitFullPipelineTerminalRuntimeState terminal;
+	const vector<SljitCastErrorIdentity> &cast_errors;
 };
+
+const vector<SljitCastErrorIdentity> &SljitCastErrorBindings(ExecutionRegionRuntime &runtime) {
+	return runtime.LocalState().Cast<SljitNativeRegionLocalState>().cast_errors;
+}
 
 template <class FUNCTION, class BUILD>
 FUNCTION SljitNativeRegionKernel::EnsureLazyHashJoinProbeCode(ExecutionRegionRuntime &runtime,
@@ -135,7 +143,8 @@ SljitNativeRegularHashJoinProbeFunction SljitNativeRegionKernel::EnsureAllValidR
 }
 
 unique_ptr<ExecutionRegionLocalState> SljitNativeRegionKernel::CreateLocalState(Allocator &allocator) const {
-	return make_uniq<SljitNativeRegionLocalState>(allocator, artifact->ops, exact_source_filter_bindings);
+	return make_uniq<SljitNativeRegionLocalState>(allocator, artifact->ops, bindings.exact_source_filters,
+	                                              bindings.aggregate_parameters, bindings.cast_errors);
 }
 
 bool SljitNativeRegionKernel::SupportsChunkStep() const {
@@ -147,11 +156,11 @@ bool SljitNativeRegionKernel::SupportsChunkStep() const {
 //! flight
 bool SljitNativeRegionKernel::EntryReady(ExecutionRegionRuntime &runtime, string &blocker) {
 	for (auto &op : artifact->ops) {
-		if (op.kind != SljitNativeRegionOpKind::HASH_JOIN_PROBE) {
+		if (op.Kind() != SljitNativeRegionOpKind::HASH_JOIN_PROBE) {
 			continue;
 		}
 		auto readiness =
-		    runtime.ExecutionOperators().GetOperatorReadiness(op.operator_index, op.hash_join_probe.plan.operator_info);
+		    runtime.ExecutionOperators().GetOperatorReadiness(op.operator_index, op.HashJoinProbe().plan.operator_info);
 		if (readiness.status == ExecutionOperatorReadinessStatus::NOT_READY) {
 			blocker = readiness.blocker.empty() ? string("native operator not ready") : readiness.blocker;
 			return false;
@@ -169,8 +178,8 @@ unique_ptr<ExecutionRegionChunkStep> SljitNativeRegionKernel::CreateChunkStep(Ex
 		                                                                    local_state.scratch);
 	}
 	return make_uniq<SljitPrimitiveRecipeChunkStep<SljitNativeRegionKernel>>(
-	    *this, runtime, artifact->ops, recipe_plan.Recipe(), artifact->source_distinct_counts,
-	    artifact->source_min_values, artifact->source_max_values, shared_predicate_classifications, local_state.scratch,
+	    *this, runtime, artifact->ops, recipe_plan.Recipe(), bindings.source_distinct_counts,
+	    bindings.source_min_values, bindings.source_max_values, shared_predicate_classifications, local_state.scratch,
 	    local_state.terminal);
 }
 
@@ -185,8 +194,8 @@ void SljitNativeRegionKernel::RecordExecutedFilterRows(ExecutionRegionRuntime &r
 bool SljitNativeRegionKernel::TryExecuteFullPipeline(ExecutionRegionRuntime &runtime, ExecutionRegionResult &result) {
 	auto &local_state = runtime.LocalState().Cast<SljitNativeRegionLocalState>();
 	auto executed = SljitTryExecuteAggregateStateSourceRecipe(
-	    *this, runtime, result, artifact->ops, artifact->source_distinct_counts, artifact->source_min_values,
-	    artifact->source_max_values, artifact->full_pipeline_recipe_plan, shared_predicate_classifications,
+	    *this, runtime, result, artifact->ops, bindings.source_distinct_counts, bindings.source_min_values,
+	    bindings.source_max_values, artifact->full_pipeline_recipe_plan, shared_predicate_classifications,
 	    local_state.scratch, local_state.terminal);
 	RecordExecutedFilterRows(runtime);
 	return executed;

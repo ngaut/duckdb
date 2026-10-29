@@ -22,7 +22,6 @@ struct ExecutionRegionPlan {
 	ExecutionRegionOpenRequest source_open_request;
 	unique_ptr<ExecutionRegionKernel> kernel;
 	ExecutionRunnerKind selected_runner = ExecutionRunnerKind::VECTORIZED;
-	bool operator_readiness_refresh = false;
 
 	bool HasExecutableFullPipeline() const;
 	void SelectRunner(ExecutionRunnerKind runner);
@@ -31,9 +30,6 @@ struct ExecutionRegionPlan {
 	}
 	optional_ptr<ExecutionRegionKernel> GetExecutableFullPipelineKernel();
 	optional_ptr<const ExecutionRegionKernel> GetExecutableFullPipelineKernel() const;
-	bool RequiresOperatorReadinessRefresh() const {
-		return operator_readiness_refresh && !HasExecutableFullPipeline();
-	}
 	bool RequiresSourceContract() const {
 		return source_open_request.UsesSourceContract();
 	}

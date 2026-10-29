@@ -25,6 +25,8 @@ struct ExecutionExpressionIR {
 	QueryLocation query_location;
 	//! The alias of the expression a cast casts, which DuckDB's cast error names
 	string cast_source_alias;
+	//! Backend instance slot, assigned after lowering and preserved through expression composition.
+	idx_t cast_error_binding = DConstants::INVALID_INDEX;
 	Value constant;
 	idx_t ref_index = 0;
 	ExecutionExpressionUnaryOp unary_op = ExecutionExpressionUnaryOp::NOT;

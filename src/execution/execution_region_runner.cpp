@@ -1,4 +1,5 @@
 #include "duckdb/execution/execution_region_runner.hpp"
+#include "duckdb/execution/execution_chunk_coalescer.hpp"
 
 #include "duckdb/common/exception.hpp"
 #include "duckdb/execution/execution_region_runtime.hpp"
@@ -305,6 +306,22 @@ public:
 		ValidateSink();
 		return pipeline.BindSink(input, sink_info, binding);
 	}
+	bool BindSink(DataChunk &input, const ExecutionRegionAggregateSinkInfo &sink_info,
+	              ExecutionSinkBinding &binding) override {
+		ValidateSink();
+		return pipeline.BindSink(input, sink_info, binding);
+	}
+
+	bool BindSink(DataChunk &input, const ExecutionRegionHashJoinInfo &sink_info,
+	              ExecutionSinkBinding &binding) override {
+		ValidateSink();
+		return pipeline.BindSink(input, sink_info, binding);
+	}
+	bool BindSink(DataChunk &input, const ExecutionRegionOrderSinkInfo &sink_info,
+	              ExecutionSinkBinding &binding) override {
+		ValidateSink();
+		return pipeline.BindSink(input, sink_info, binding);
+	}
 
 	SinkResultType AppendSink(const ExecutionAppendSinkBinding &binding, DataChunk &chunk) override {
 		ValidateSink();
@@ -446,7 +463,7 @@ static optional_ptr<CompiledRegionRuntime> BindCompiledStep(ExecutionRegionPipel
 		DeferCompiledEntry(pipeline, kernel, blocker, trace_runtime, trace_start);
 		return nullptr;
 	}
-	auto step = kernel.CreateChunkStep(*runtime);
+	auto step = make_uniq<ExecutionCoalescingChunkStep>(pipeline.GetAllocator(), kernel.CreateChunkStep(*runtime));
 	optional_ptr<CompiledRegionRuntime> bound_runtime = runtime.get();
 	pipeline.BindCompiledStep(kernel, std::move(runtime), std::move(step));
 	pipeline.AddProfilingAnnotation("jit", "compiled full-pipeline kernel (" + kernel.BackendName() + ")", true);

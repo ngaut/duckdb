@@ -755,10 +755,7 @@ SljitHashJoinAggregateConsumerResult SljitTryExecuteHashJoinAggregateConsumer(
 	    SljitHashJoinProbeOutputContract::IDENTITY_PREFERRED_DIRECT_CONSUMER);
 	auto &binding =
 	    SljitBindRecordedNativeOperator(runtime, native_runtime, scratch, hash_join_idx, hash_join_op, join_input,
-	                                    plan.operator_info, "SLJIT direct hash join aggregate consumer");
-	if (!binding.ready || !binding.hash_join_probe.ready) {
-		throw InternalException("SLJIT direct hash join aggregate consumer received an incomplete operator binding");
-	}
+	                                    plan.operator_info, "SLJIT direct hash join aggregate consumer", &plan);
 	auto &probe = binding.hash_join_probe;
 	const bool regular_hash_join = probe.layout_kind == ExecutionHashJoinProbeLayoutKind::REGULAR_HASH_TABLE;
 	const bool perfect_hash_join = probe.layout_kind == ExecutionHashJoinProbeLayoutKind::PERFECT_HASH_TABLE;
@@ -812,7 +809,7 @@ SljitHashJoinAggregateConsumerResult SljitTryExecuteHashJoinAggregateConsumer(
 		// a single-payload ungrouped aggregate folds each build match into its state inside the probe loop
 		SljitHashJoinProbeDrainState direct_state;
 		auto direct_input = SljitPrepareRegularHashJoinProbeInput(
-		    runtime, hash_join_idx, hash_join_op.kind, plan, probe.table_layout, probe_input,
+		    runtime, hash_join_idx, hash_join_op.Kind(), plan, probe.table_layout, probe_input,
 		    scratch.FilterSelection(hash_join_idx), scratch.HashJoinRowPointers(hash_join_idx),
 		    scratch.HashJoinSources(hash_join_idx), direct_state, table_layout_kind,
 		    probe_primitive.source_key0_int64_to_int32_unchecked, rhs_keys_have_null, probe.use_bloom_filter);
@@ -898,14 +895,14 @@ SljitHashJoinAggregateConsumerResult SljitTryExecuteHashJoinAggregateConsumer(
 			SljitPerfectHashMaterializedBuildIndex build_index(scratch.HashJoinBuildSelection(hash_join_idx));
 			executed = execute_consumer(build_index);
 		}
-		RecordSljitRegionStageRuntime(runtime, hash_join_idx, hash_join_op.kind,
+		RecordSljitRegionStageRuntime(runtime, hash_join_idx, hash_join_op.Kind(),
 		                              "perfect_direct_aggregate_consumer_accumulate", accumulate_start);
 		if (!executed) {
 			return result;
 		}
 		result.matched_count = join_output.size();
 		runtime.RecordJitRuntimePath("hash_join_probe.perfect_probe.direct_aggregate_consumer", result.matched_count);
-		RecordSljitRegionMaterializationElision(runtime, aggregate_op.kind,
+		RecordSljitRegionMaterializationElision(runtime, aggregate_op.Kind(),
 		                                        "join_input_perfect_hash_probe_consumer_complementary_sum",
 		                                        result.matched_count);
 		result.status = SljitHashJoinAggregateConsumerStatus::EXECUTED;
@@ -915,7 +912,7 @@ SljitHashJoinAggregateConsumerResult SljitTryExecuteHashJoinAggregateConsumer(
 	auto &layout = probe.table_layout;
 	SljitHashJoinProbeDrainState state;
 	auto prepared_input = SljitPrepareRegularHashJoinProbeInput(
-	    runtime, hash_join_idx, hash_join_op.kind, plan, layout, probe_input, scratch.FilterSelection(hash_join_idx),
+	    runtime, hash_join_idx, hash_join_op.Kind(), plan, layout, probe_input, scratch.FilterSelection(hash_join_idx),
 	    scratch.HashJoinRowPointers(hash_join_idx), scratch.HashJoinSources(hash_join_idx), state, table_layout_kind,
 	    probe_primitive.source_key0_int64_to_int32_unchecked, rhs_keys_have_null, probe.use_bloom_filter);
 	if (prepared_input.input_kind == SljitHashJoinProbeInputKind::GENERIC) {
@@ -928,12 +925,12 @@ SljitHashJoinAggregateConsumerResult SljitTryExecuteHashJoinAggregateConsumer(
 	const bool executed =
 	    selected
 	        ? SljitTryExecuteComplementarySumProbeConsumer<true>(
-	              runtime, hash_join_idx, hash_join_op.kind, plan, native_input, strategy,
+	              runtime, hash_join_idx, hash_join_op.Kind(), plan, native_input, strategy,
 	              probe_input.data[complementary_plan.join_input_group_column_idx], prepared_aggregate.group_source,
 	              complementary_plan.predicate_field, complementary_plan.classification, flush_accumulator,
 	              result.matched_count, used_unchecked_narrowing)
 	        : SljitTryExecuteComplementarySumProbeConsumer<false>(
-	              runtime, hash_join_idx, hash_join_op.kind, plan, native_input, strategy,
+	              runtime, hash_join_idx, hash_join_op.Kind(), plan, native_input, strategy,
 	              probe_input.data[complementary_plan.join_input_group_column_idx], prepared_aggregate.group_source,
 	              complementary_plan.predicate_field, complementary_plan.classification, flush_accumulator,
 	              result.matched_count, used_unchecked_narrowing);
@@ -945,7 +942,7 @@ SljitHashJoinAggregateConsumerResult SljitTryExecuteHashJoinAggregateConsumer(
 	}
 	runtime.RecordHashJoinProbeLayout(SljitHashJoinProbeLayoutName(probe.layout_kind));
 	RecordSljitRegionStageRuntimePath(
-	    runtime, hash_join_idx, hash_join_op.kind,
+	    runtime, hash_join_idx, hash_join_op.Kind(),
 	    selected
 	        ? (used_unchecked_narrowing
 	               ? "regular_probe.all_valid.selected.single_key.unchecked_int64_to_int32.no_chain.direct_aggregate_"
@@ -955,9 +952,9 @@ SljitHashJoinAggregateConsumerResult SljitTryExecuteHashJoinAggregateConsumer(
 	                                      "direct_aggregate_consumer"
 	                                    : "regular_probe.all_valid.flat.single_key.no_chain.direct_aggregate_consumer"),
 	    probe_start);
-	RecordSljitRegionMaterializationElision(runtime, aggregate_op.kind, "join_input_probe_consumer_complementary_sum",
+	RecordSljitRegionMaterializationElision(runtime, aggregate_op.Kind(), "join_input_probe_consumer_complementary_sum",
 	                                        result.matched_count);
-	RecordSljitRegionMaterializationElision(runtime, aggregate_op.kind,
+	RecordSljitRegionMaterializationElision(runtime, aggregate_op.Kind(),
 	                                        "join_input_row_pointer_preaggregated_complementary_sum_update",
 	                                        result.matched_count);
 	result.status = SljitHashJoinAggregateConsumerStatus::EXECUTED;

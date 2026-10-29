@@ -22,7 +22,8 @@ struct SljitGeneratedFilterPrimitive {
 };
 
 static bool SljitCanBindGeneratedFilterPrimitive(const vector<SljitExecutableRegionOp> &ops, idx_t filter_idx) {
-	return filter_idx < ops.size() && ops[filter_idx].kind == SljitNativeRegionOpKind::FILTER && ops[filter_idx].filter;
+	return filter_idx < ops.size() && ops[filter_idx].Kind() == SljitNativeRegionOpKind::FILTER &&
+	       ops[filter_idx].Filter();
 }
 
 static bool SljitTryBindGeneratedFilterPrimitive(const vector<SljitExecutableRegionOp> &ops, idx_t filter_idx,
@@ -61,12 +62,12 @@ static bool SljitExecuteGeneratedFilterPrimitive(ExecutionRegionRuntime &runtime
 	auto selected_count = SljitSelectFilter(filter_op, source_chunk, filter_selection,
 	                                        scratch.ExpressionAdapterScratch(primitive.filter_idx, 0), input.selection,
 	                                        input.count, &runtime);
-	RecordSljitRegionStageRuntime(runtime, primitive.filter_idx, filter_op.kind, "selection", filter_stage_start);
+	RecordSljitRegionStageRuntime(runtime, primitive.filter_idx, filter_op.Kind(), "selection", filter_stage_start);
 	// Rows-weighted SIMD coverage: traces answer "how much filter input ran
 	// through the packed prefix" without a dedicated benchmark.
-	RecordSljitRegionRuntimePath(runtime, filter_op.kind,
-	                             filter_op.filter->expression.predicate_partial_simd ? "selection.partial_simd"
-	                                                                                 : "selection.scalar",
+	RecordSljitRegionRuntimePath(runtime, filter_op.Kind(),
+	                             filter_op.Filter()->expression.predicate_partial_simd ? "selection.partial_simd"
+	                                                                                   : "selection.scalar",
 	                             input.count);
 	if (selected_count == 0) {
 		return false;
@@ -124,7 +125,7 @@ static bool SljitExecuteSelectedHashJoinGeneratedFilterPrimitive(
 
 	vector<uint8_t> referenced_columns;
 	D_ASSERT(filter_op.filter);
-	if (!SljitTryCollectHashJoinProjectionExpressionSources(filter_op.filter->expression, output_types.size(),
+	if (!SljitTryCollectHashJoinProjectionExpressionSources(filter_op.Filter()->expression, output_types.size(),
 	                                                        referenced_columns)) {
 		throw InternalException("SLJIT selected hash-join filter could not collect filter sources");
 	}
@@ -133,19 +134,19 @@ static bool SljitExecuteSelectedHashJoinGeneratedFilterPrimitive(
 	filter_input.Reset();
 	auto materialize_stage_start = SljitRegionStageStart(runtime);
 	auto materialized = ExecuteSljitRegionRecordedOperation(
-	    runtime, selected.hash_join_idx, ops[selected.hash_join_idx].kind, "selected_view_materialization",
+	    runtime, selected.hash_join_idx, ops[selected.hash_join_idx].Kind(), "selected_view_materialization",
 	    materialize_stage_start, [&](optional_ptr<ExecutionOperatorStageRecorder> recorder) {
 		    (void)recorder;
 		    return SljitTryMaterializeSelectedHashJoinOutputColumns(source, selected, referenced_columns, filter_input);
 	    });
 	if (!materialized) {
-		RecordSljitRegionStageRuntime(runtime, selected.hash_join_idx, ops[selected.hash_join_idx].kind,
+		RecordSljitRegionStageRuntime(runtime, selected.hash_join_idx, ops[selected.hash_join_idx].Kind(),
 		                              "selected_view_materialization_miss", materialize_stage_start);
 		throw InternalException("SLJIT selected hash-join filter could not materialize filter input");
 	}
-	RecordSljitRegionStageRuntime(runtime, selected.hash_join_idx, ops[selected.hash_join_idx].kind,
+	RecordSljitRegionStageRuntime(runtime, selected.hash_join_idx, ops[selected.hash_join_idx].Kind(),
 	                              "selected_view_materialization", materialize_stage_start);
-	RecordSljitRegionRuntimeDelegation(runtime, ops[selected.hash_join_idx].kind, "selected_view_materialization",
+	RecordSljitRegionRuntimeDelegation(runtime, ops[selected.hash_join_idx].Kind(), "selected_view_materialization",
 	                                   filter_input.size());
 
 	auto &filter_selection = scratch.FilterSelection(primitive.filter_idx);
@@ -153,7 +154,7 @@ static bool SljitExecuteSelectedHashJoinGeneratedFilterPrimitive(
 	auto selected_count = SljitSelectFilter(filter_op, filter_input, filter_selection,
 	                                        scratch.ExpressionAdapterScratch(primitive.filter_idx, 0), nullptr,
 	                                        filter_input.size(), &runtime);
-	RecordSljitRegionStageRuntime(runtime, primitive.filter_idx, filter_op.kind, "selected_hash_join_selection",
+	RecordSljitRegionStageRuntime(runtime, primitive.filter_idx, filter_op.Kind(), "selected_hash_join_selection",
 	                              selection_stage_start);
 	if (selected_count == 0) {
 		return false;

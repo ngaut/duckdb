@@ -352,22 +352,22 @@ bool SljitPrepareAndCompileExecutableRegionExpression(const SljitNativeRegionExp
 
 void SljitPrepareExecutableFilter(const SljitNativeRegionExpressionPlan &plan, SljitExecutableRegionOp &filter_op,
                                   const vector<bool> *input_not_null, bool copy_auxiliary_expression_tree) {
-	D_ASSERT(filter_op.kind == SljitNativeRegionOpKind::FILTER);
+	D_ASSERT(filter_op.Kind() == SljitNativeRegionOpKind::FILTER);
 	auto executable_filter = make_uniq<SljitExecutableFilter>();
 	SljitPrepareExecutableRegionExpression(plan, executable_filter->expression, input_not_null,
 	                                       copy_auxiliary_expression_tree);
-	filter_op.filter = std::move(executable_filter);
+	filter_op.Filter() = std::move(executable_filter);
 }
 
 bool SljitCompilePreparedExecutableFilter(SljitExecutableRegionOp &filter_op, string &error) {
-	D_ASSERT(filter_op.kind == SljitNativeRegionOpKind::FILTER);
-	D_ASSERT(filter_op.filter);
-	if (!SljitCompilePreparedExecutableRegionExpression(filter_op.filter->expression, true, error)) {
+	D_ASSERT(filter_op.Kind() == SljitNativeRegionOpKind::FILTER);
+	D_ASSERT(filter_op.Filter());
+	if (!SljitCompilePreparedExecutableRegionExpression(filter_op.Filter()->expression, true, error)) {
 		return false;
 	}
-	if (filter_op.filter->expression.plan.predicate) {
-		TryBuildSljitNativeStringLikeBatchPlan(*filter_op.filter->expression.plan.predicate,
-		                                       filter_op.filter->batch_select);
+	if (filter_op.Filter()->expression.plan.predicate) {
+		TryBuildSljitNativeStringLikeBatchPlan(*filter_op.Filter()->expression.plan.predicate,
+		                                       filter_op.Filter()->batch_select);
 	}
 	return true;
 }

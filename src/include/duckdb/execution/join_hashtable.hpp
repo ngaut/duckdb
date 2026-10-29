@@ -660,9 +660,9 @@ public:
 	                   idx_t &max_partition_size, idx_t &max_partition_count) const;
 	//! Get the remaining size of the unbuilt partitions
 	idx_t GetRemainingSize() const;
-	//! Sets number of radix bits according to the max ht size
-	void SetRepartitionRadixBits(const idx_t max_ht_size, const idx_t max_partition_size,
-	                             const idx_t max_partition_count);
+	//! Select a finer partitioning within the reservation and one repartition task's workspace. False if none fits.
+	bool SetRepartitionRadixBits(idx_t reservation, idx_t max_partition_size, idx_t max_partition_count,
+	                             idx_t partition_memory);
 	//! Initialized "current_partitions" and "completed_partitions"
 	void InitializePartitionMasks();
 	//! How many partitions are currently active

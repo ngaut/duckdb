@@ -21,14 +21,14 @@ static bool SljitTryAddJoinProjectionAggregateInput(SljitJoinProjectionAggregate
                                                     vector<idx_t> &projection_to_input, idx_t projection_idx,
                                                     idx_t &input_idx) {
 	auto &projection_op = descriptor.Projection();
-	if (projection_idx >= projection_op.projections.size() || projection_idx >= projection_op.output_types.size()) {
+	if (projection_idx >= projection_op.Projections().size() || projection_idx >= projection_op.output_types.size()) {
 		return false;
 	}
 	if (projection_to_input[projection_idx] != DConstants::INVALID_INDEX) {
 		input_idx = projection_to_input[projection_idx];
 		return true;
 	}
-	auto &projection = projection_op.projections[projection_idx];
+	auto &projection = projection_op.Projections()[projection_idx];
 	auto &output_type = projection_op.output_types[projection_idx];
 	if (projection.plan.return_type != output_type) {
 		return false;
@@ -71,14 +71,14 @@ static bool SljitTryResolveProducerProbeInput(const SljitJoinProjectionAggregate
                                               SljitExecutableRegionExpression &producer_expr) {
 	if (!producer_projection_op || !descriptor.producer_layout ||
 	    producer_output_idx >= descriptor.producer_layout->ColumnCount() ||
-	    producer_output_idx >= producer_projection_op->projections.size() ||
+	    producer_output_idx >= producer_projection_op->Projections().size() ||
 	    producer_output_idx >= producer_projection_op->output_types.size()) {
 		return false;
 	}
 	const auto &column = descriptor.producer_layout->Column(producer_output_idx);
 	idx_t source_idx;
 	if (!column.HasSource() ||
-	    !SljitTryBuildSingleSourceProjectionExpression(producer_projection_op->projections[producer_output_idx],
+	    !SljitTryBuildSingleSourceProjectionExpression(producer_projection_op->Projections()[producer_output_idx],
 	                                                   producer_expr, source_idx) ||
 	    source_idx != column.source_index || source_idx >= producer_projection_op->input_types.size() ||
 	    producer_projection_op->input_types[source_idx] != column.source_type ||
@@ -95,12 +95,12 @@ static bool SljitTryAddJoinLHSInputAggregateInputFromProjection(
     const ExecutionHashJoinProbeBinding &binding, SljitJoinProjectionAggregateDescriptor &descriptor,
     SljitExecutableRegionOp &projection_op, idx_t projection_idx, idx_t &input_idx,
     optional_ptr<SljitExecutableRegionOp> producer_projection_op = nullptr) {
-	if (projection_idx >= projection_op.projections.size() || projection_idx >= projection_op.output_types.size()) {
+	if (projection_idx >= projection_op.Projections().size() || projection_idx >= projection_op.output_types.size()) {
 		return false;
 	}
 	SljitExecutableRegionExpression remapped_expr;
 	idx_t join_output_source_index;
-	if (!SljitTryBuildSingleSourceProjectionExpression(projection_op.projections[projection_idx], remapped_expr,
+	if (!SljitTryBuildSingleSourceProjectionExpression(projection_op.Projections()[projection_idx], remapped_expr,
 	                                                   join_output_source_index) ||
 	    !SljitProjectionIsSingleSourceReferenceLike(remapped_expr.plan)) {
 		return false;
@@ -150,12 +150,12 @@ static bool SljitProjectionOutputKnownNotNull(SljitExecutableRegionOp &projectio
 static bool SljitProjectionReferencesAllValidHashJoinRHSColumn(const ExecutionHashJoinProbeBinding &binding,
                                                                SljitExecutableRegionOp &projection_op,
                                                                idx_t projection_idx) {
-	if (projection_idx >= projection_op.projections.size()) {
+	if (projection_idx >= projection_op.Projections().size()) {
 		return false;
 	}
 	SljitExecutableRegionExpression remapped_expr;
 	idx_t join_output_source_index;
-	if (!SljitTryBuildSingleSourceProjectionExpression(projection_op.projections[projection_idx], remapped_expr,
+	if (!SljitTryBuildSingleSourceProjectionExpression(projection_op.Projections()[projection_idx], remapped_expr,
 	                                                   join_output_source_index) ||
 	    !SljitProjectionIsSingleSourceReferenceLike(remapped_expr.plan)) {
 		return false;
@@ -192,7 +192,7 @@ static bool SljitTryMapProducerGroupSource(
 	}
 	SljitExecutableRegionExpression remapped_expr;
 	idx_t join_output_source_index;
-	if (!SljitTryBuildSingleSourceProjectionExpression(projection_op.projections[projection_idx], remapped_expr,
+	if (!SljitTryBuildSingleSourceProjectionExpression(projection_op.Projections()[projection_idx], remapped_expr,
 	                                                   join_output_source_index)) {
 		blocker = "producer_group_projection_source";
 		return false;
@@ -258,10 +258,10 @@ static bool SljitTryBuildProjectionRowPointerAggregateDescriptor(
     const ExecutionHashJoinProbeBinding &binding, const SljitNativeHashJoinProbePlan &probe_plan,
     SljitExecutableRegionOp &aggregate_op, SljitJoinProjectionAggregateDescriptor &descriptor,
     optional_ptr<SljitExecutableRegionOp> producer_projection_op = nullptr) {
-	auto &aggregate_update = aggregate_op.aggregate_update;
+	auto &aggregate_update = aggregate_op.AggregateUpdate();
 	auto &sink_info = aggregate_update.plan.sink_info;
 	auto &projection_op = descriptor.Projection();
-	if (sink_info.kind != ExecutionRegionSinkKind::HASH_AGGREGATE_UPDATE || sink_info.groups.empty() ||
+	if (sink_info.Kind() != ExecutionRegionSinkKind::HASH_AGGREGATE_UPDATE || sink_info.groups.empty() ||
 	    !aggregate_update.plan.UsesPrimitivePayloads() || !aggregate_update.plan.use_grouped_state_addresses ||
 	    aggregate_update.plan.use_perfect_hash_group_lookup ||
 	    aggregate_update.fused_payload_update_owns_group_lookup ||
@@ -294,7 +294,7 @@ static bool SljitTryBuildProjectionRowPointerAggregateDescriptor(
 		}
 	}
 
-	vector<idx_t> projection_to_input(projection_op.projections.size(), DConstants::INVALID_INDEX);
+	vector<idx_t> projection_to_input(projection_op.Projections().size(), DConstants::INVALID_INDEX);
 	for (idx_t group_idx = 0; group_idx < sink_info.groups.size(); group_idx++) {
 		auto &group = sink_info.groups[group_idx];
 		auto &group_source = descriptor.group_sources[group_idx];

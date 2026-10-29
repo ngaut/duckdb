@@ -172,15 +172,15 @@ bool PhysicalLeftDelimJoin::BindExecutionSink(ExecutionContext &context, DataChu
                                               OperatorSinkInput &sink_input, const ExecutionRegionSinkInfo &sink_info,
                                               ExecutionSinkBinding &binding) const {
 	binding = ExecutionSinkBinding();
-	binding.kind = sink_info.kind;
-	if (sink_info.kind != ExecutionRegionSinkKind::DELIM_JOIN_SINK) {
+	binding.kind = sink_info.Kind();
+	if (sink_info.Kind() != ExecutionRegionSinkKind::DELIM_JOIN_SINK) {
 		binding.blocker =
-		    "left-delim-join-sink-kind-mismatch;kind=" + string(ExecutionRegionSinkKindToString(sink_info.kind));
+		    "left-delim-join-sink-kind-mismatch;kind=" + string(ExecutionRegionSinkKindToString(sink_info.Kind()));
 		return false;
 	}
-	if (sink_info.native_sink_contract.status != ExecutionRegionStateContractStatus::READY) {
-		binding.blocker = sink_info.native_sink_contract.blocker.empty() ? "left-delim-join-sink-contract-not-ready"
-		                                                                 : sink_info.native_sink_contract.blocker;
+	if (sink_info.Native().status != ExecutionRegionStateContractStatus::READY) {
+		binding.blocker =
+		    sink_info.Native().blocker.empty() ? "left-delim-join-sink-contract-not-ready" : sink_info.Native().blocker;
 		return false;
 	}
 	auto &lstate = sink_input.local_state.Cast<LeftDelimJoinLocalState>();

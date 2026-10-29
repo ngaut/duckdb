@@ -37,6 +37,8 @@ set(JIT_SLJIT_EXTENSION_FILES
     sljit_aggregate_ungrouped_typed_codegen.cpp
     sljit_aggregate_ungrouped_typed_payload_codegen.cpp
     sljit_arithmetic_overflow_codegen.cpp
+    sljit_artifact_key.cpp
+    sljit_region_instance_slots.cpp
     sljit_backend.cpp
     sljit_codegen_util.cpp
     sljit_dense_group_preaggregation.cpp

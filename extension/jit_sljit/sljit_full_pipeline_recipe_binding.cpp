@@ -30,7 +30,7 @@ SljitFullPipelineRecipePlan SljitFullPipelineRecipeBinding::MakeNativeOnlyPlan()
 	string runtime_path = "full_pipeline.recipe.native_only";
 	for (auto &op : ops) {
 		runtime_path += ".";
-		runtime_path += SljitNativeRegionOpKindName(op.kind);
+		runtime_path += SljitNativeRegionOpKindName(op.Kind());
 	}
 	return SljitMakeFullPipelineNativeOnlyPlan(std::move(runtime_path));
 }
@@ -166,7 +166,7 @@ bool SljitFullPipelineRecipeBinding::TryAddSourcePrefixSteps(SljitFullPipelinePr
                                                              idx_t prefix_end) const {
 	idx_t op_idx = 0;
 	while (op_idx < prefix_end) {
-		if (ops[op_idx].kind == SljitNativeRegionOpKind::FILTER) {
+		if (ops[op_idx].Kind() == SljitNativeRegionOpKind::FILTER) {
 			SljitGeneratedFilterPrimitive generated_filter;
 			if (!SljitTryBindGeneratedFilterPrimitive(ops, op_idx, generated_filter)) {
 				return false;
@@ -178,7 +178,7 @@ bool SljitFullPipelineRecipeBinding::TryAddSourcePrefixSteps(SljitFullPipelinePr
 		// Consecutive projections run as one chain.
 		auto final_projection_idx = op_idx;
 		while (final_projection_idx + 1 < prefix_end &&
-		       ops[final_projection_idx + 1].kind == SljitNativeRegionOpKind::PROJECTION) {
+		       ops[final_projection_idx + 1].Kind() == SljitNativeRegionOpKind::PROJECTION) {
 			final_projection_idx++;
 		}
 		SljitProjectionChainPrimitive projection;

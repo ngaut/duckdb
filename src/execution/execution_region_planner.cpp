@@ -498,7 +498,7 @@ static unique_ptr<ExecutionRegionPlan> KeepExecutableExecutionRegionPlan(unique_
 	if (!plan) {
 		return nullptr;
 	}
-	if (plan->HasExecutableFullPipeline() || plan->RequiresOperatorReadinessRefresh()) {
+	if (plan->HasExecutableFullPipeline()) {
 		return plan;
 	}
 	return nullptr;
@@ -759,7 +759,6 @@ unique_ptr<ExecutionRegionPlan> ExecutionRegionPlanner::Build(ClientContext &con
 		string finalized_cardinality_reason;
 		if (ExecutionRegionCandidateNeedsFinalizedSourceCardinality(lowered_region, candidate,
 		                                                            finalized_cardinality_reason)) {
-			plan->operator_readiness_refresh = true;
 			if (should_record_decision_telemetry) {
 				auto decision_time_us = decision_recorder.ClaimCandidateDecisionTime(candidate_trace);
 				record_decision_event(
@@ -891,9 +890,6 @@ unique_ptr<ExecutionRegionPlan> ExecutionRegionPlanner::Build(ClientContext &con
 		auto readiness_decision =
 		    ValidateExecutionRegionNativeOperatorReadiness(context, pipeline, lowered_region, candidate);
 		if (!readiness_decision.ready) {
-			if (readiness_decision.status == ExecutionRegionCompileStatus::SKIPPED) {
-				plan->operator_readiness_refresh = true;
-			}
 			if (should_record_decision_telemetry) {
 				auto decision_time_us = decision_recorder.ClaimCandidateDecisionTime(candidate_trace);
 				auto reason = ExecutionRegionLoweringEventReason(lowering_plan, should_record_detailed_telemetry) + ";";

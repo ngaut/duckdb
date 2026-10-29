@@ -280,7 +280,8 @@ static SljitRegionNodePlan PlanSljitSourceContractNode(const ExecutionRegionNode
 			reason += ";source_contract_dynamic_filters=true";
 			reason += ";source_contract_input_layout=true";
 			if (render_diagnostics && !generated_filter_ops.empty()) {
-				reason += ";generated_source_filter=" + DescribeNativeRegionExpression(generated_filter_ops[0].filter);
+				reason +=
+				    ";generated_source_filter=" + DescribeNativeRegionExpression(generated_filter_ops[0].Filter());
 			}
 			return SljitNativeSourceNode(std::move(reason), node, render_diagnostics,
 			                             std::move(generated_filter_contract), std::move(generated_filter_ops));
@@ -317,7 +318,7 @@ static SljitRegionNodePlan PlanSljitSourceContractNode(const ExecutionRegionNode
 		              : ";source_contract_filter_pushdown=false";
 		reason += ";source_contract_input_layout=true";
 		if (render_diagnostics && !generated_filter_ops.empty()) {
-			reason += ";generated_source_filter=" + DescribeNativeRegionExpression(generated_filter_ops[0].filter);
+			reason += ";generated_source_filter=" + DescribeNativeRegionExpression(generated_filter_ops[0].Filter());
 		}
 		return SljitNativeSourceNode(std::move(reason), node, render_diagnostics, std::move(generated_filter_contract),
 		                             std::move(generated_filter_ops));

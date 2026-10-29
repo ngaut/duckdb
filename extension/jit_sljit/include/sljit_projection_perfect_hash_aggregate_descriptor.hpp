@@ -52,11 +52,11 @@ static bool SljitTryAssignJoinProjectionAggregateInputAt(SljitJoinProjectionAggr
 static bool SljitTrySetJoinProjectionAggregateInputAt(SljitJoinProjectionAggregateDescriptor &descriptor,
                                                       const SljitExecutableRegionOp &projection_op,
                                                       idx_t projection_idx, idx_t input_idx) {
-	if (projection_idx >= projection_op.projections.size() || projection_idx >= projection_op.output_types.size()) {
+	if (projection_idx >= projection_op.Projections().size() || projection_idx >= projection_op.output_types.size()) {
 		return false;
 	}
 	const auto &output_type = projection_op.output_types[projection_idx];
-	if (projection_op.projections[projection_idx].plan.return_type != output_type) {
+	if (projection_op.Projections()[projection_idx].plan.return_type != output_type) {
 		return false;
 	}
 	SljitJoinProjectionAggregateInputSource source;
@@ -107,17 +107,17 @@ static bool SljitTryCollectPerfectHashGroupExpressionSources(const SljitExecutab
 
 static bool SljitTryBuildProjectionPerfectHashAggregateDescriptor(SljitExecutableRegionOp &aggregate_op,
                                                                   SljitJoinProjectionAggregateDescriptor &descriptor) {
-	auto &aggregate_update = aggregate_op.aggregate_update;
+	auto &aggregate_update = aggregate_op.AggregateUpdate();
 	auto &sink_info = aggregate_update.plan.sink_info;
 	auto &projection_op = descriptor.Projection();
-	if (sink_info.kind != ExecutionRegionSinkKind::PERFECT_HASH_AGGREGATE_UPDATE || sink_info.groups.empty() ||
+	if (sink_info.Kind() != ExecutionRegionSinkKind::PERFECT_HASH_AGGREGATE_UPDATE || sink_info.groups.empty() ||
 	    !aggregate_update.plan.UsesPrimitivePayloads() || !aggregate_update.plan.use_perfect_hash_group_lookup ||
 	    !aggregate_update.fused_payload_update_owns_group_lookup || !aggregate_update.fused_payload_update.Function() ||
 	    aggregate_update.payloads.size() != sink_info.aggregates.size() ||
-	    projection_op.projections.size() != projection_op.output_types.size()) {
+	    projection_op.Projections().size() != projection_op.output_types.size()) {
 		return descriptor.Block("aggregate_shape");
 	}
-	vector<uint8_t> required_semantic_inputs(projection_op.projections.size(), 0);
+	vector<uint8_t> required_semantic_inputs(projection_op.Projections().size(), 0);
 	if (!SljitTryCollectPerfectHashGroupExpressionSources(aggregate_update, sink_info.groups,
 	                                                      required_semantic_inputs)) {
 		return descriptor.Block("group_sources");

@@ -496,7 +496,7 @@ static bool SljitTryBuildProjectionOutputVectorGroupKeySource(const SljitExecuta
 }
 
 static bool SljitProjectionHasOutput(const SljitExecutableRegionOp &projection_op, idx_t projection_idx) {
-	return projection_idx < projection_op.projections.size() && projection_idx < projection_op.output_types.size();
+	return projection_idx < projection_op.Projections().size() && projection_idx < projection_op.output_types.size();
 }
 
 static bool SljitTryBuildSingleRowPointerGroupKeySource(const ExecutionHashJoinProbeBinding &binding,
@@ -505,11 +505,11 @@ static bool SljitTryBuildSingleRowPointerGroupKeySource(const ExecutionHashJoinP
                                                         ExecutionRowPointerGroupKeySource &group_source,
                                                         bool &uses_projection_output) {
 	uses_projection_output = false;
-	if (SljitTryBuildRowPointerGroupKeySource(binding, projection_op.projections[projection_idx], group,
+	if (SljitTryBuildRowPointerGroupKeySource(binding, projection_op.Projections()[projection_idx], group,
 	                                          group_source)) {
 		return true;
 	}
-	if (SljitTryBuildHashJoinOutputVectorGroupKeySource(binding, projection_op.projections[projection_idx], group,
+	if (SljitTryBuildHashJoinOutputVectorGroupKeySource(binding, projection_op.Projections()[projection_idx], group,
 	                                                    group_source) ||
 	    SljitTryBuildProjectionOutputVectorGroupKeySource(projection_op, projection_idx, group, group_source)) {
 		uses_projection_output = true;
@@ -524,8 +524,8 @@ SljitTryBuildRowPointerGroupKeySources(const ExecutionHashJoinProbeBinding &bind
                                        vector<ExecutionRowPointerGroupKeySource> &group_sources,
                                        optional_ptr<vector<uint8_t>> group_source_uses_projection_output = nullptr,
                                        optional_ptr<string> blocker = nullptr) {
-	auto &sink_info = aggregate_op.aggregate_update.plan.sink_info;
-	if (sink_info.kind != ExecutionRegionSinkKind::HASH_AGGREGATE_UPDATE || sink_info.groups.empty()) {
+	auto &sink_info = aggregate_op.AggregateUpdate().plan.sink_info;
+	if (sink_info.Kind() != ExecutionRegionSinkKind::HASH_AGGREGATE_UPDATE || sink_info.groups.empty()) {
 		if (blocker) {
 			*blocker = "aggregate_shape";
 		}

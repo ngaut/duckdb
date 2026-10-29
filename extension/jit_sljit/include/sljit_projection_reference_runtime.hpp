@@ -16,16 +16,16 @@ namespace duckdb {
 static bool SljitTryAppendReferenceProjectionToBatch(DataChunk &batch, DataChunk &input,
                                                      const SljitExecutableRegionOp &projection_op,
                                                      const SelectionVector &selection, idx_t count) {
-	if (projection_op.kind != SljitNativeRegionOpKind::PROJECTION ||
-	    projection_op.projections.size() != batch.ColumnCount()) {
+	if (projection_op.Kind() != SljitNativeRegionOpKind::PROJECTION ||
+	    projection_op.Projections().size() != batch.ColumnCount()) {
 		return false;
 	}
 	const auto current_size = batch.size();
 	if (current_size + count > STANDARD_VECTOR_SIZE) {
 		return false;
 	}
-	for (idx_t projection_idx = 0; projection_idx < projection_op.projections.size(); projection_idx++) {
-		auto &projection = projection_op.projections[projection_idx].plan;
+	for (idx_t projection_idx = 0; projection_idx < projection_op.Projections().size(); projection_idx++) {
+		auto &projection = projection_op.Projections()[projection_idx].plan;
 		if (projection.kind != SljitNativeRegionExpressionKind::REFERENCE ||
 		    projection.source_index >= input.ColumnCount()) {
 			return false;
@@ -37,8 +37,8 @@ static bool SljitTryAppendReferenceProjectionToBatch(DataChunk &batch, DataChunk
 			return false;
 		}
 	}
-	for (idx_t projection_idx = 0; projection_idx < projection_op.projections.size(); projection_idx++) {
-		auto &projection = projection_op.projections[projection_idx].plan;
+	for (idx_t projection_idx = 0; projection_idx < projection_op.Projections().size(); projection_idx++) {
+		auto &projection = projection_op.Projections()[projection_idx].plan;
 		batch.data[projection_idx].Append(input.data[projection.source_index], selection, count);
 	}
 	batch.CheckCardinality(current_size + count);
@@ -47,12 +47,12 @@ static bool SljitTryAppendReferenceProjectionToBatch(DataChunk &batch, DataChunk
 
 static bool SljitTryReferenceProjection(DataChunk &output, DataChunk &input,
                                         const SljitExecutableRegionOp &projection_op) {
-	if (projection_op.kind != SljitNativeRegionOpKind::PROJECTION ||
-	    projection_op.projections.size() != output.ColumnCount()) {
+	if (projection_op.Kind() != SljitNativeRegionOpKind::PROJECTION ||
+	    projection_op.Projections().size() != output.ColumnCount()) {
 		return false;
 	}
-	for (idx_t projection_idx = 0; projection_idx < projection_op.projections.size(); projection_idx++) {
-		auto &projection = projection_op.projections[projection_idx].plan;
+	for (idx_t projection_idx = 0; projection_idx < projection_op.Projections().size(); projection_idx++) {
+		auto &projection = projection_op.Projections()[projection_idx].plan;
 		if (projection.kind != SljitNativeRegionExpressionKind::REFERENCE ||
 		    projection.source_index >= input.ColumnCount()) {
 			return false;
@@ -62,8 +62,8 @@ static bool SljitTryReferenceProjection(DataChunk &output, DataChunk &input,
 			return false;
 		}
 	}
-	for (idx_t projection_idx = 0; projection_idx < projection_op.projections.size(); projection_idx++) {
-		auto &projection = projection_op.projections[projection_idx].plan;
+	for (idx_t projection_idx = 0; projection_idx < projection_op.Projections().size(); projection_idx++) {
+		auto &projection = projection_op.Projections()[projection_idx].plan;
 		output.data[projection_idx].Reference(input.data[projection.source_index]);
 	}
 	output.SetChildCardinality(input.size());
@@ -73,12 +73,12 @@ static bool SljitTryReferenceProjection(DataChunk &output, DataChunk &input,
 static bool SljitTrySliceReferenceProjection(DataChunk &output, DataChunk &input,
                                              const SljitExecutableRegionOp &projection_op,
                                              const SelectionVector *selection, idx_t count) {
-	if (projection_op.kind != SljitNativeRegionOpKind::PROJECTION ||
-	    projection_op.projections.size() != output.ColumnCount() || count > input.size()) {
+	if (projection_op.Kind() != SljitNativeRegionOpKind::PROJECTION ||
+	    projection_op.Projections().size() != output.ColumnCount() || count > input.size()) {
 		return false;
 	}
-	for (idx_t projection_idx = 0; projection_idx < projection_op.projections.size(); projection_idx++) {
-		auto &projection = projection_op.projections[projection_idx];
+	for (idx_t projection_idx = 0; projection_idx < projection_op.Projections().size(); projection_idx++) {
+		auto &projection = projection_op.Projections()[projection_idx];
 		idx_t source_index;
 		if (!SljitTryGetSingleSourceReferenceProjectionIndex(projection, source_index) ||
 		    source_index >= input.ColumnCount()) {
@@ -91,10 +91,10 @@ static bool SljitTrySliceReferenceProjection(DataChunk &output, DataChunk &input
 			return false;
 		}
 	}
-	for (idx_t projection_idx = 0; projection_idx < projection_op.projections.size(); projection_idx++) {
+	for (idx_t projection_idx = 0; projection_idx < projection_op.Projections().size(); projection_idx++) {
 		idx_t source_index;
 		auto source_found =
-		    SljitTryGetSingleSourceReferenceProjectionIndex(projection_op.projections[projection_idx], source_index);
+		    SljitTryGetSingleSourceReferenceProjectionIndex(projection_op.Projections()[projection_idx], source_index);
 		D_ASSERT(source_found);
 		if (selection) {
 			output.data[projection_idx].Slice(input.data[source_index], *selection, count);

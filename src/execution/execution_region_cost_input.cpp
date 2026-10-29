@@ -676,7 +676,7 @@ static bool TryAccumulateExecutionRegionPhysicalOperatorCost(const PhysicalOpera
 	if (slot == ExecutionRegionPhysicalPipelineSlot::SINK) {
 		sink_contract = op.GetExecutionContract(ExecutionRegionOperatorSlot::SINK, false);
 		traits.sink_present = true;
-		traits.sink_kind = sink_contract.sink.kind;
+		traits.sink_kind = sink_contract.sink.Kind();
 	}
 	switch (op.type) {
 	case PhysicalOperatorType::TABLE_SCAN:
@@ -715,7 +715,7 @@ static bool TryAccumulateExecutionRegionPhysicalOperatorCost(const PhysicalOpera
 			// native contract stage inside the region (the generated prefix feeds it
 			// through the native sink binding), matching the candidate stage model.
 			// Only an unready contract forms a boundary.
-			if (sink.aggregate_contract.native_state_update_contract.status ==
+			if (sink.Aggregate().contract.native_state_update_contract.status ==
 			    ExecutionRegionStateContractStatus::READY) {
 				AddExecutionRegionNativeAggregateStage(input, false);
 				return true;
@@ -746,7 +746,7 @@ static bool TryAccumulateExecutionRegionPhysicalOperatorCost(const PhysicalOpera
 		if (!ExecutionRegionAggregateUpdateGeneratesBody(sink)) {
 			// Same shape as the ungrouped case: a READY native-state-update sink is a
 			// native contract stage the generated prefix can feed, not a boundary.
-			if (sink.aggregate_contract.native_state_update_contract.status ==
+			if (sink.Aggregate().contract.native_state_update_contract.status ==
 			    ExecutionRegionStateContractStatus::READY) {
 				AddExecutionRegionNativeAggregateStage(input, true);
 				return true;
@@ -784,7 +784,7 @@ static bool TryAccumulateExecutionRegionPhysicalOperatorCost(const PhysicalOpera
 		if (!ExecutionRegionAggregateUpdateGeneratesBody(sink)) {
 			// Same shape as the ungrouped case: a READY native-state-update sink is a
 			// native contract stage the generated prefix can feed, not a boundary.
-			if (sink.aggregate_contract.native_state_update_contract.status ==
+			if (sink.Aggregate().contract.native_state_update_contract.status ==
 			    ExecutionRegionStateContractStatus::READY) {
 				AddExecutionRegionNativeAggregateStage(input, true);
 				return true;

@@ -40,7 +40,7 @@ public:
 			return execute_output_view(filtered_input);
 		}
 		if (input.selection) {
-			RecordSljitRegionRuntimePath(runtime, ops[step.generated_filter.filter_idx].kind,
+			RecordSljitRegionRuntimePath(runtime, ops[step.generated_filter.filter_idx].Kind(),
 			                             "selected_input_zero_copy", input.count);
 		}
 		if (!SljitExecuteGeneratedFilterPrimitive(runtime, scratch, ops, step.generated_filter, input,

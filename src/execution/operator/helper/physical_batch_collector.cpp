@@ -35,11 +35,14 @@ bool PhysicalBatchCollector::BindExecutionSink(ExecutionContext &context, DataCh
 	(void)context;
 	(void)input;
 	binding = ExecutionSinkBinding();
-	binding.kind = sink_info.kind;
-	if (sink_info.kind != ExecutionRegionSinkKind::RESULT_COLLECTOR_SINK ||
-	    sink_info.native_sink_contract.status != ExecutionRegionStateContractStatus::READY) {
-		binding.blocker = sink_info.native_sink_contract.blocker.empty() ? "result-collector-sink-contract-not-ready"
-		                                                                 : sink_info.native_sink_contract.blocker;
+	binding.kind = sink_info.Kind();
+	if (sink_info.Kind() != ExecutionRegionSinkKind::RESULT_COLLECTOR_SINK) {
+		binding.blocker = "result-collector-sink-kind-mismatch";
+		return false;
+	}
+	if (sink_info.Native().status != ExecutionRegionStateContractStatus::READY) {
+		binding.blocker = sink_info.Native().blocker.empty() ? "result-collector-sink-contract-not-ready"
+		                                                     : sink_info.Native().blocker;
 		return false;
 	}
 	auto &state = sink_input.local_state.Cast<BatchCollectorLocalState>();

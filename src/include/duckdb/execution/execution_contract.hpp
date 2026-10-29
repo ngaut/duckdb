@@ -65,11 +65,8 @@ struct ExecutionSourceContract {
 	ExecutionRegionTableScanContract table_scan_contract;
 	ExecutionRegionHashJoinContract hash_join_contract;
 	ExecutionRegionNestedLoopJoinContract nested_loop_join_contract;
-	ExecutionRegionAggregateContract aggregate_contract;
 	ExecutionRegionOrderContract order_contract;
-	vector<ExecutionRegionAggregateInput> aggregates;
 	vector<ExecutionRegionHashJoinKeyInput> hash_join_keys;
-	vector<ExecutionRegionGroupInput> groups;
 	ExecutionSourceProtocolContract source_contract;
 	ExecutionRegionNativeStateScanContract native_state_scan_contract;
 	string reason;
@@ -103,10 +100,10 @@ struct ExecutionContract {
 		return source.kind != ExecutionRegionSourceKind::NONE;
 	}
 	bool HasOperator() const {
-		return operator_info.kind != ExecutionRegionOperatorContractKind::NONE;
+		return operator_info.Kind() != ExecutionRegionOperatorContractKind::NONE;
 	}
 	bool HasSink() const {
-		return sink.kind != ExecutionRegionSinkKind::NONE;
+		return sink.Kind() != ExecutionRegionSinkKind::NONE;
 	}
 };
 

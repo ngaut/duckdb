@@ -122,11 +122,11 @@ static bool RadixPrimitiveAggregatePayloadIsFlatAllValid(DataChunk &chunk,
 	return RadixPrimitiveAggregatePayloadSourceIsFlatAllValid(chunk, aggregate.child_indices[0], lane, payload);
 }
 
-static bool RadixValidatePrimitiveAggregateUpdate(const ExecutionRegionSinkInfo &sink_info,
+static bool RadixValidatePrimitiveAggregateUpdate(const ExecutionRegionAggregateSinkInfo &sink_info,
                                                   const vector<const ExecutionPrimitiveAggregateUpdateLane *> &lanes,
                                                   DataChunk &chunk, vector<RadixPrimitiveAggregatePayload> &payloads) {
-	if (sink_info.kind != ExecutionRegionSinkKind::HASH_AGGREGATE_UPDATE ||
-	    sink_info.aggregates.size() != lanes.size() || !sink_info.aggregate_contract.grouped_state_layout_ready) {
+	if (sink_info.Kind() != ExecutionRegionSinkKind::HASH_AGGREGATE_UPDATE ||
+	    sink_info.aggregates.size() != lanes.size() || !sink_info.contract.grouped_state_layout_ready) {
 		return false;
 	}
 	payloads.clear();
@@ -135,8 +135,8 @@ static bool RadixValidatePrimitiveAggregateUpdate(const ExecutionRegionSinkInfo 
 		auto &aggregate = sink_info.aggregates[aggregate_idx];
 		auto lane = lanes[aggregate_idx];
 		if (!lane || !lane->ready || lane->aggregate_index != aggregate.aggregate_index ||
-		    aggregate.aggregate_index >= sink_info.aggregate_contract.grouped_state_offsets.size() ||
-		    lane->state_offset != sink_info.aggregate_contract.grouped_state_offsets[aggregate.aggregate_index] ||
+		    aggregate.aggregate_index >= sink_info.contract.grouped_state_offsets.size() ||
+		    lane->state_offset != sink_info.contract.grouped_state_offsets[aggregate.aggregate_index] ||
 		    lane->state_value_offset != aggregate.primitive_update_state_value_offset ||
 		    lane->state_is_set_offset != aggregate.primitive_update_state_is_set_offset) {
 			return false;
@@ -177,12 +177,12 @@ static bool RadixValidatePrimitiveAggregateUpdate(const ExecutionRegionSinkInfo 
 }
 
 static bool RadixValidatePrimitiveAggregateUpdateWithPayloadInput(
-    const ExecutionRegionSinkInfo &sink_info, const vector<const ExecutionPrimitiveAggregateUpdateLane *> &lanes,
-    DataChunk &payload_input, const vector<idx_t> &payload_source_indices,
-    vector<RadixPrimitiveAggregatePayload> &payloads) {
-	if (sink_info.kind != ExecutionRegionSinkKind::HASH_AGGREGATE_UPDATE ||
+    const ExecutionRegionAggregateSinkInfo &sink_info,
+    const vector<const ExecutionPrimitiveAggregateUpdateLane *> &lanes, DataChunk &payload_input,
+    const vector<idx_t> &payload_source_indices, vector<RadixPrimitiveAggregatePayload> &payloads) {
+	if (sink_info.Kind() != ExecutionRegionSinkKind::HASH_AGGREGATE_UPDATE ||
 	    sink_info.aggregates.size() != lanes.size() || sink_info.aggregates.size() != payload_source_indices.size() ||
-	    !sink_info.aggregate_contract.grouped_state_layout_ready) {
+	    !sink_info.contract.grouped_state_layout_ready) {
 		return false;
 	}
 	payloads.clear();
@@ -191,8 +191,8 @@ static bool RadixValidatePrimitiveAggregateUpdateWithPayloadInput(
 		auto &aggregate = sink_info.aggregates[aggregate_idx];
 		auto lane = lanes[aggregate_idx];
 		if (!lane || !lane->ready || lane->aggregate_index != aggregate.aggregate_index ||
-		    aggregate.aggregate_index >= sink_info.aggregate_contract.grouped_state_offsets.size() ||
-		    lane->state_offset != sink_info.aggregate_contract.grouped_state_offsets[aggregate.aggregate_index] ||
+		    aggregate.aggregate_index >= sink_info.contract.grouped_state_offsets.size() ||
+		    lane->state_offset != sink_info.contract.grouped_state_offsets[aggregate.aggregate_index] ||
 		    lane->state_value_offset != aggregate.primitive_update_state_value_offset ||
 		    lane->state_is_set_offset != aggregate.primitive_update_state_is_set_offset) {
 			return false;
@@ -234,30 +234,30 @@ static bool RadixValidatePrimitiveAggregateUpdateWithPayloadInput(
 }
 
 static bool
-RadixValidateStateAddressCallbackUpdate(const ExecutionRegionSinkInfo &sink_info,
+RadixValidateStateAddressCallbackUpdate(const ExecutionRegionAggregateSinkInfo &sink_info,
                                         ExecutionGroupedAggregateStateAddressUpdateFunction update_function) {
-	return update_function && sink_info.kind == ExecutionRegionSinkKind::HASH_AGGREGATE_UPDATE &&
-	       sink_info.aggregate_contract.grouped_state_layout_ready;
+	return update_function && sink_info.Kind() == ExecutionRegionSinkKind::HASH_AGGREGATE_UPDATE &&
+	       sink_info.contract.grouped_state_layout_ready;
 }
 
 static bool
-RadixValidateStateAddressCallbackUpdate(const ExecutionRegionSinkInfo &sink_info,
+RadixValidateStateAddressCallbackUpdate(const ExecutionRegionAggregateSinkInfo &sink_info,
                                         ExecutionGroupedAggregateStateSelectedAddressUpdateFunction update_function) {
-	return update_function && sink_info.kind == ExecutionRegionSinkKind::HASH_AGGREGATE_UPDATE &&
-	       sink_info.aggregate_contract.grouped_state_layout_ready;
+	return update_function && sink_info.Kind() == ExecutionRegionSinkKind::HASH_AGGREGATE_UPDATE &&
+	       sink_info.contract.grouped_state_layout_ready;
 }
 
-static bool RadixValidateStateTargetLookup(const ExecutionRegionSinkInfo &sink_info) {
-	return sink_info.kind == ExecutionRegionSinkKind::HASH_AGGREGATE_UPDATE &&
-	       sink_info.aggregate_contract.grouped_state_layout_ready;
+static bool RadixValidateStateTargetLookup(const ExecutionRegionAggregateSinkInfo &sink_info) {
+	return sink_info.Kind() == ExecutionRegionSinkKind::HASH_AGGREGATE_UPDATE &&
+	       sink_info.contract.grouped_state_layout_ready;
 }
 
-static bool RadixValidateInputVectorGroupCountOne(const ExecutionRegionSinkInfo &sink_info,
+static bool RadixValidateInputVectorGroupCountOne(const ExecutionRegionAggregateSinkInfo &sink_info,
                                                   const ExecutionPrimitiveAggregateUpdateLane &lane) {
-	if (sink_info.kind != ExecutionRegionSinkKind::HASH_AGGREGATE_UPDATE || sink_info.aggregates.size() != 1 ||
-	    !sink_info.aggregate_contract.grouped_state_layout_ready || !lane.ready || lane.aggregate_index != 0 ||
-	    sink_info.aggregate_contract.grouped_state_offsets.empty() ||
-	    lane.state_offset != sink_info.aggregate_contract.grouped_state_offsets[0] || lane.state_size == 0 ||
+	if (sink_info.Kind() != ExecutionRegionSinkKind::HASH_AGGREGATE_UPDATE || sink_info.aggregates.size() != 1 ||
+	    !sink_info.contract.grouped_state_layout_ready || !lane.ready || lane.aggregate_index != 0 ||
+	    sink_info.contract.grouped_state_offsets.empty() ||
+	    lane.state_offset != sink_info.contract.grouped_state_offsets[0] || lane.state_size == 0 ||
 	    lane.state_value_offset + sizeof(int64_t) > lane.state_size) {
 		return false;
 	}
@@ -1503,7 +1503,8 @@ bool RadixPartitionedHashTable::ReserveGroups(ExecutionContext &context, Operato
 }
 
 bool RadixPartitionedHashTable::TryUpdateNewPrimitiveGroups(
-    ExecutionContext &context, DataChunk &chunk, OperatorSinkInput &input, const ExecutionRegionSinkInfo &sink_info,
+    ExecutionContext &context, DataChunk &chunk, OperatorSinkInput &input,
+    const ExecutionRegionAggregateSinkInfo &sink_info,
     const vector<const ExecutionPrimitiveAggregateUpdateLane *> &lanes,
     optional_ptr<ExecutionOperatorStageRecorder> recorder,
     optional_ptr<const ExecutionDenseGroupDomain> dense_domain) const {
@@ -1541,7 +1542,7 @@ bool RadixPartitionedHashTable::TryUpdateNewPrimitiveGroups(
 
 bool RadixPartitionedHashTable::TryUpdateNewPrimitiveGroupsWithPayloadInput(
     ExecutionContext &context, DataChunk &groups, DataChunk &payload_input, const vector<idx_t> &payload_source_indices,
-    OperatorSinkInput &input, const ExecutionRegionSinkInfo &sink_info,
+    OperatorSinkInput &input, const ExecutionRegionAggregateSinkInfo &sink_info,
     const vector<const ExecutionPrimitiveAggregateUpdateLane *> &lanes,
     optional_ptr<ExecutionOperatorStageRecorder> recorder, optional_ptr<Vector> precomputed_hashes,
     optional_ptr<const ExecutionDenseGroupDomain> dense_domain) const {
@@ -1589,7 +1590,8 @@ bool RadixPartitionedHashTable::TryUpdateNewPrimitiveGroupsWithPayloadInput(
 }
 
 bool RadixPartitionedHashTable::TryAppendNewPrimitiveGroups(
-    ExecutionContext &context, DataChunk &chunk, OperatorSinkInput &input, const ExecutionRegionSinkInfo &sink_info,
+    ExecutionContext &context, DataChunk &chunk, OperatorSinkInput &input,
+    const ExecutionRegionAggregateSinkInfo &sink_info,
     const vector<const ExecutionPrimitiveAggregateUpdateLane *> &lanes,
     optional_ptr<ExecutionOperatorStageRecorder> recorder,
     optional_ptr<const ExecutionDenseGroupDomain> dense_domain) const {
@@ -1627,7 +1629,8 @@ bool RadixPartitionedHashTable::TryAppendNewPrimitiveGroups(
 }
 
 bool RadixPartitionedHashTable::TryUpdateNewGroupsWithSelectedStateAddresses(
-    ExecutionContext &context, DataChunk &chunk, OperatorSinkInput &input, const ExecutionRegionSinkInfo &sink_info,
+    ExecutionContext &context, DataChunk &chunk, OperatorSinkInput &input,
+    const ExecutionRegionAggregateSinkInfo &sink_info,
     ExecutionGroupedAggregateStateSelectedAddressUpdateFunction update_function, void *update_state,
     optional_ptr<ExecutionOperatorStageRecorder> recorder, optional_ptr<Vector> precomputed_hashes,
     optional_ptr<const ExecutionDenseGroupDomain> dense_domain) const {
@@ -1667,7 +1670,8 @@ bool RadixPartitionedHashTable::TryUpdateNewGroupsWithSelectedStateAddresses(
 }
 
 bool RadixPartitionedHashTable::TryUpdateGroupKeysWithSelectedStateAddresses(
-    ExecutionContext &context, DataChunk &groups, OperatorSinkInput &input, const ExecutionRegionSinkInfo &sink_info,
+    ExecutionContext &context, DataChunk &groups, OperatorSinkInput &input,
+    const ExecutionRegionAggregateSinkInfo &sink_info,
     ExecutionGroupedAggregateStateSelectedAddressUpdateFunction update_function, void *update_state,
     optional_ptr<ExecutionOperatorStageRecorder> recorder, optional_ptr<Vector> precomputed_hashes,
     optional_ptr<const ExecutionDenseGroupDomain> dense_domain) const {
@@ -1706,7 +1710,7 @@ bool RadixPartitionedHashTable::TryUpdateGroupKeysWithSelectedStateAddresses(
 
 bool RadixPartitionedHashTable::TryFindOrCreateRowPointerGroupStateTargets(
     ExecutionContext &context, DataChunk &payload_input, Vector &row_pointers, idx_t count, OperatorSinkInput &input,
-    const vector<ExecutionRowPointerGroupKeySource> &group_sources, const ExecutionRegionSinkInfo &sink_info,
+    const vector<ExecutionRowPointerGroupKeySource> &group_sources, const ExecutionRegionAggregateSinkInfo &sink_info,
     ExecutionGroupedAggregateStateTargetBatch &targets, optional_ptr<ExecutionOperatorStageRecorder> recorder) const {
 	targets.Reset();
 	if (!RadixValidateStateTargetLookup(sink_info) || payload_input.size() != count) {
@@ -1730,7 +1734,7 @@ bool RadixPartitionedHashTable::TryFindOrCreateRowPointerGroupStateTargets(
 
 bool RadixPartitionedHashTable::TryFindOrCreateInputVectorGroupStateTargets(
     ExecutionContext &context, DataChunk &payload_input, idx_t count, OperatorSinkInput &input,
-    const vector<ExecutionRowPointerGroupKeySource> &group_sources, const ExecutionRegionSinkInfo &sink_info,
+    const vector<ExecutionRowPointerGroupKeySource> &group_sources, const ExecutionRegionAggregateSinkInfo &sink_info,
     ExecutionGroupedAggregateStateTargetBatch &targets, optional_ptr<ExecutionOperatorStageRecorder> recorder,
     optional_ptr<const ExecutionDenseGroupDomain> dense_domain) const {
 	targets.Reset();
@@ -1755,7 +1759,7 @@ bool RadixPartitionedHashTable::TryFindOrCreateInputVectorGroupStateTargets(
 
 bool RadixPartitionedHashTable::TryUpdateInputVectorGroupCountOne(
     ExecutionContext &context, DataChunk &payload_input, idx_t count, OperatorSinkInput &input,
-    const vector<ExecutionRowPointerGroupKeySource> &group_sources, const ExecutionRegionSinkInfo &sink_info,
+    const vector<ExecutionRowPointerGroupKeySource> &group_sources, const ExecutionRegionAggregateSinkInfo &sink_info,
     const ExecutionPrimitiveAggregateUpdateLane &lane, optional_ptr<ExecutionOperatorStageRecorder> recorder,
     optional_ptr<const ExecutionDenseGroupDomain> dense_domain) const {
 	if (payload_input.size() != count || !RadixValidateInputVectorGroupCountOne(sink_info, lane)) {
@@ -1782,7 +1786,7 @@ bool RadixPartitionedHashTable::TryUpdateInputVectorGroupCountOne(
 bool RadixPartitionedHashTable::TryUpdateRowPointerGroupPrimitivePayloads(
     ExecutionContext &context, DataChunk &payload_input, Vector &row_pointers, idx_t count,
     const vector<ExecutionRowPointerGroupKeySource> &group_sources, const vector<idx_t> &payload_source_indices,
-    OperatorSinkInput &input, const ExecutionRegionSinkInfo &sink_info,
+    OperatorSinkInput &input, const ExecutionRegionAggregateSinkInfo &sink_info,
     const vector<const ExecutionPrimitiveAggregateUpdateLane *> &lanes,
     optional_ptr<ExecutionOperatorStageRecorder> recorder) const {
 	if (payload_input.size() != count) {
@@ -1818,7 +1822,8 @@ bool RadixPartitionedHashTable::TryUpdateRowPointerGroupPrimitivePayloads(
 }
 
 bool RadixPartitionedHashTable::TryAppendNewGroupsWithStateAddresses(
-    ExecutionContext &context, DataChunk &chunk, OperatorSinkInput &input, const ExecutionRegionSinkInfo &sink_info,
+    ExecutionContext &context, DataChunk &chunk, OperatorSinkInput &input,
+    const ExecutionRegionAggregateSinkInfo &sink_info,
     ExecutionGroupedAggregateStateAddressUpdateFunction update_function, void *update_state,
     optional_ptr<ExecutionOperatorStageRecorder> recorder,
     optional_ptr<const ExecutionDenseGroupDomain> dense_domain) const {
@@ -1852,7 +1857,8 @@ bool RadixPartitionedHashTable::TryAppendNewGroupsWithStateAddresses(
 }
 
 bool RadixPartitionedHashTable::TryAppendNewGroupKeysWithStateAddresses(
-    ExecutionContext &context, DataChunk &groups, OperatorSinkInput &input, const ExecutionRegionSinkInfo &sink_info,
+    ExecutionContext &context, DataChunk &groups, OperatorSinkInput &input,
+    const ExecutionRegionAggregateSinkInfo &sink_info,
     ExecutionGroupedAggregateStateAddressUpdateFunction update_function, void *update_state,
     optional_ptr<ExecutionOperatorStageRecorder> recorder,
     optional_ptr<const ExecutionDenseGroupDomain> dense_domain) const {

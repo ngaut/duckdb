@@ -3178,24 +3178,31 @@ void JoinHashTable::Unpartition() {
 	data_collection = sink_collection->GetUnpartitioned();
 }
 
-void JoinHashTable::SetRepartitionRadixBits(const idx_t max_ht_size, const idx_t max_partition_size,
-                                            const idx_t max_partition_count) {
-	D_ASSERT(max_partition_size + PointerTableSize(max_partition_count) > max_ht_size);
-
+bool JoinHashTable::SetRepartitionRadixBits(idx_t reservation, idx_t max_partition_size, idx_t max_partition_count,
+                                            idx_t partition_memory) {
+	D_ASSERT(partition_memory > 0);
 	const auto max_added_bits = RadixPartitioning::MAX_RADIX_BITS - radix_bits;
-	idx_t added_bits = 1;
-	for (; added_bits < max_added_bits; added_bits++) {
-		double partition_multiplier = static_cast<double>(RadixPartitioning::NumberOfPartitions(added_bits));
+	idx_t added_bits = 0;
+	for (idx_t candidate_bits = 1; candidate_bits <= max_added_bits; candidate_bits++) {
+		const auto fanout = RadixPartitioning::NumberOfPartitions(candidate_bits);
+		if (partition_memory > reservation / fanout) {
+			break;
+		}
+		added_bits = candidate_bits;
+		double partition_multiplier = static_cast<double>(fanout);
 
 		auto new_estimated_size = static_cast<double>(max_partition_size) / partition_multiplier;
 		auto new_estimated_count = static_cast<double>(max_partition_count) / partition_multiplier;
 		auto new_estimated_ht_size =
 		    new_estimated_size + static_cast<double>(PointerTableSize(LossyNumericCast<idx_t>(new_estimated_count)));
 
-		if (new_estimated_ht_size <= static_cast<double>(max_ht_size) / 4) {
-			// Aim for an estimated partition size of max_ht_size / 4
+		if (new_estimated_ht_size <= static_cast<double>(reservation) / 4) {
+			// Leave the existing headroom for probing; its conservative estimate may exceed the reservation.
 			break;
 		}
+	}
+	if (added_bits == 0) {
+		return false;
 	}
 	radix_bits += added_bits;
 	sink_collection = make_uniq<RadixPartitionedTupleData>(buffer_manager, layout_ptr, MemoryTag::HASH_TABLE,
@@ -3203,6 +3210,7 @@ void JoinHashTable::SetRepartitionRadixBits(const idx_t max_ht_size, const idx_t
 
 	// Need to initialize again after changing the number of bits
 	InitializePartitionMasks();
+	return true;
 }
 
 void JoinHashTable::InitializePartitionMasks() {

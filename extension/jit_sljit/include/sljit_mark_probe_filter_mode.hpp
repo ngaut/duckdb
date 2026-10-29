@@ -112,10 +112,10 @@ static SljitMarkProbeFilterMode SljitReadBooleanMarkerFilterMode(const SljitExec
 static SljitMarkProbeFilterMode SljitMarkProbeMarkerFilterMode(const SljitExecutableRegionOp &hash_join_op,
                                                                const SljitExecutableRegionOp &filter_op) {
 	if (hash_join_op.output_types.empty() || hash_join_op.output_types.back().id() != LogicalTypeId::BOOLEAN ||
-	    filter_op.kind != SljitNativeRegionOpKind::FILTER || !filter_op.filter) {
+	    filter_op.Kind() != SljitNativeRegionOpKind::FILTER || !filter_op.Filter()) {
 		return SljitMarkProbeFilterMode::NONE;
 	}
-	return SljitReadBooleanMarkerFilterMode(filter_op.filter->expression, hash_join_op.output_types.size() - 1);
+	return SljitReadBooleanMarkerFilterMode(filter_op.Filter()->expression, hash_join_op.output_types.size() - 1);
 }
 
 static bool SljitIsMarkProbeMarkerFilter(const SljitExecutableRegionOp &hash_join_op,

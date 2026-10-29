@@ -144,7 +144,6 @@ TEST_CASE("JIT executable aggregate scalar payloads use input slots", "[api][jit
 TEST_CASE("JIT combined aggregate references and auxiliary trees share input slots", "[api][jit]") {
 	SljitNativeAggregateUpdatePlan semantic;
 	semantic.InitializeProjectionComposedPrimitivePayloads();
-	semantic.sink_info.kind = ExecutionRegionSinkKind::UNGROUPED_AGGREGATE_UPDATE;
 	for (idx_t column : {idx_t(5), idx_t(2)}) {
 		SljitNativeRegionExpressionPlan payload;
 		payload.kind = column == 5 ? SljitNativeRegionExpressionKind::TYPED_EXPRESSION_TREE

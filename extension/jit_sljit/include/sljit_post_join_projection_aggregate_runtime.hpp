@@ -28,12 +28,12 @@ static void SljitProjectProjectionStep(ExecutionRegionRuntime &runtime, SljitReg
 	output.Reset();
 	auto projection_stage_start = SljitRegionStageStart(runtime);
 	if (SljitTryReferenceProjection(output, input, projection_op)) {
-		RecordSljitRegionStageRuntime(runtime, projection_idx, projection_op.kind, "post_join_reference_projection",
+		RecordSljitRegionStageRuntime(runtime, projection_idx, projection_op.Kind(), "post_join_reference_projection",
 		                              projection_stage_start);
 		return;
 	}
 	SljitExecuteProjection(runtime, scratch, projection_idx, projection_op, input, output);
-	RecordSljitRegionStageRuntime(runtime, projection_idx, projection_op.kind, "post_join_batch_projection",
+	RecordSljitRegionStageRuntime(runtime, projection_idx, projection_op.Kind(), "post_join_batch_projection",
 	                              projection_stage_start);
 }
 

@@ -33,14 +33,14 @@ InsertionOrderPreservingMap<string> PhysicalDelimJoin::ParamsToString() const {
 static string DelimJoinNativeContractBlocker(const ExecutionContract &distinct_contract,
                                              optional_ptr<const ExecutionContract> join_contract,
                                              PhysicalOperatorType type) {
-	if (distinct_contract.sink.kind != ExecutionRegionSinkKind::HASH_AGGREGATE_UPDATE) {
+	if (distinct_contract.sink.Kind() != ExecutionRegionSinkKind::HASH_AGGREGATE_UPDATE) {
 		return "delim-join-distinct-sink-contract-kind-mismatch;distinct_sink_kind=" +
-		       string(ExecutionRegionSinkKindToString(distinct_contract.sink.kind));
+		       string(ExecutionRegionSinkKindToString(distinct_contract.sink.Kind()));
 	}
-	if (!distinct_contract.sink.aggregates.empty()) {
+	if (!distinct_contract.sink.Aggregate().aggregates.empty()) {
 		return "delim-join-distinct-sink-has-aggregate-payloads";
 	}
-	auto &distinct_update = distinct_contract.sink.aggregate_contract.native_state_update_contract;
+	auto &distinct_update = distinct_contract.sink.Aggregate().contract.native_state_update_contract;
 	if (distinct_update.status != ExecutionRegionStateContractStatus::READY) {
 		return distinct_update.blocker.empty() ? "delim-join-distinct-aggregate-update-contract-not-ready"
 		                                       : distinct_update.blocker;
@@ -51,11 +51,11 @@ static string DelimJoinNativeContractBlocker(const ExecutionContract &distinct_c
 	if (!join_contract) {
 		return "delim-join-right-build-contract-missing";
 	}
-	if (join_contract->sink.kind != ExecutionRegionSinkKind::HASH_JOIN_BUILD) {
+	if (join_contract->sink.Kind() != ExecutionRegionSinkKind::HASH_JOIN_BUILD) {
 		return "delim-join-right-build-contract-kind-mismatch;join_sink_kind=" +
-		       string(ExecutionRegionSinkKindToString(join_contract->sink.kind));
+		       string(ExecutionRegionSinkKindToString(join_contract->sink.Kind()));
 	}
-	auto &join_native = join_contract->sink.hash_join_contract.native_build_contract;
+	auto &join_native = join_contract->sink.HashJoin().contract.native_build_contract;
 	if (join_native.status != ExecutionRegionStateContractStatus::READY) {
 		return join_native.blocker.empty() ? "delim-join-right-build-contract-not-ready" : join_native.blocker;
 	}
@@ -77,7 +77,14 @@ ExecutionContract PhysicalDelimJoin::GetExecutionContract(ExecutionRegionOperato
 	auto blocker = DelimJoinNativeContractBlocker(distinct_contract, join_contract_ptr, type);
 	const bool ready = blocker.empty();
 
-	result.sink.kind = ExecutionRegionSinkKind::DELIM_JOIN_SINK;
+	result.sink.SetKind(ExecutionRegionSinkKind::DELIM_JOIN_SINK);
+	auto &payload = result.sink.DelimJoin();
+	if (distinct_contract.sink.Kind() == ExecutionRegionSinkKind::HASH_AGGREGATE_UPDATE) {
+		payload.distinct = std::move(distinct_contract.sink.Aggregate());
+	}
+	if (join_contract && join_contract->sink.Kind() == ExecutionRegionSinkKind::HASH_JOIN_BUILD) {
+		payload.build = std::move(join_contract->sink.HashJoin());
+	}
 	result.sink.reason = "DuckDB delimiter join execution sink contract";
 	result.sink.reason += ";operator=" + GetName();
 	result.sink.reason += ";side=" + string(type == PhysicalOperatorType::LEFT_DELIM_JOIN ? "left" : "right");
@@ -85,32 +92,25 @@ ExecutionContract PhysicalDelimJoin::GetExecutionContract(ExecutionRegionOperato
 	result.sink.reason += ";output_columns=" + std::to_string(types.size());
 	result.sink.reason += ";delim_scans=" + std::to_string(delim_scans.size());
 	result.sink.reason += ";delim_index=" + (delim_idx.IsValid() ? std::to_string(delim_idx.GetIndex()) : "invalid");
-	result.sink.reason += ";distinct_sink_kind=" + string(ExecutionRegionSinkKindToString(distinct_contract.sink.kind));
-	result.sink.reason += ";distinct_aggregate_update_status=" +
-	                      string(ExecutionRegionStateContractStatusToString(
-	                          distinct_contract.sink.aggregate_contract.native_state_update_contract.status));
+	result.sink.reason +=
+	    ";distinct_sink_kind=" + string(ExecutionRegionSinkKindToString(distinct_contract.sink.Kind()));
+	result.sink.reason +=
+	    ";distinct_aggregate_update_status=" + string(ExecutionRegionStateContractStatusToString(
+	                                               payload.distinct.contract.native_state_update_contract.status));
 	if (join_contract) {
-		result.sink.reason += ";join_sink_kind=" + string(ExecutionRegionSinkKindToString(join_contract->sink.kind));
+		result.sink.reason += ";join_sink_kind=" + string(ExecutionRegionSinkKindToString(join_contract->sink.Kind()));
 		result.sink.reason +=
-		    ";join_build_contract_status=" + string(ExecutionRegionStateContractStatusToString(
-		                                         join_contract->sink.hash_join_contract.native_build_contract.status));
+		    ";join_build_contract_status=" +
+		    string(ExecutionRegionStateContractStatusToString(payload.build.contract.native_build_contract.status));
 	} else {
 		result.sink.reason += ";join_sink_kind=none";
 	}
 
-	result.sink.aggregate_contract = distinct_contract.sink.aggregate_contract;
-	result.sink.aggregates = distinct_contract.sink.aggregates;
-	result.sink.groups = distinct_contract.sink.groups;
-	if (join_contract) {
-		result.sink.hash_join_contract = join_contract->sink.hash_join_contract;
-		result.sink.hash_join_keys = join_contract->sink.hash_join_keys;
-	}
-
-	result.sink.native_sink_contract.status =
+	result.sink.Native().status =
 	    ready ? ExecutionRegionStateContractStatus::READY : ExecutionRegionStateContractStatus::BLOCKED;
-	result.sink.native_sink_contract.required_capability = "delim-join-execution-sink";
-	result.sink.native_sink_contract.contract_version = "v1";
-	result.sink.native_sink_contract.blocker = blocker;
+	result.sink.Native().required_capability = "delim-join-execution-sink";
+	result.sink.Native().contract_version = "v1";
+	result.sink.Native().blocker = blocker;
 	result.sink.reason += ready ? ";sink_contract_status=ready" : ";sink_contract_status=blocked";
 	result.sink.reason += ";sink_required_capability=delim-join-execution-sink";
 	result.sink.reason += ";sink_contract_version=v1";

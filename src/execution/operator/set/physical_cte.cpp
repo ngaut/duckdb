@@ -372,23 +372,23 @@ SinkNextBatchType PhysicalCTE::UpdateMinBatchIndex(ExecutionContext &, OperatorS
 
 ExecutionContract PhysicalCTE::GetExecutionContract(ExecutionRegionOperatorSlot slot, bool render_diagnostics) const {
 	ExecutionContract result;
-	result.sink.kind = ExecutionRegionSinkKind::MATERIALIZATION;
+	result.sink.SetKind(ExecutionRegionSinkKind::MATERIALIZATION);
 	result.sink.reason = "DuckDB materialization append sink contract";
 	result.sink.reason += ";operator=CTE";
 	result.sink.reason += ";output_columns=" + std::to_string(types.size());
 	if (exchange && pipeline_selection_state == CTEPipelineSelectionState::UNRESOLVED) {
 		// Until consumer selection resolves, the sink does not know whether it materializes, fans out, or both
-		result.sink.native_sink_contract.status = ExecutionRegionStateContractStatus::BLOCKED;
-		result.sink.native_sink_contract.required_capability = "materialization-append-sink";
-		result.sink.native_sink_contract.contract_version = "v1";
-		result.sink.native_sink_contract.blocker = "cte-unresolved-exchange-sink";
+		result.sink.Native().status = ExecutionRegionStateContractStatus::BLOCKED;
+		result.sink.Native().required_capability = "materialization-append-sink";
+		result.sink.Native().contract_version = "v1";
+		result.sink.Native().blocker = "cte-unresolved-exchange-sink";
 		result.sink.reason += ";sink_contract_status=blocked;sink_contract_blocker=cte-unresolved-exchange-sink";
 		return FinalizeExecutionContract(std::move(result));
 	}
-	result.sink.native_sink_contract.status = ExecutionRegionStateContractStatus::READY;
-	result.sink.native_sink_contract.required_capability = "materialization-append-sink";
-	result.sink.native_sink_contract.contract_version = "v1";
-	result.sink.native_sink_contract.blocker.clear();
+	result.sink.Native().status = ExecutionRegionStateContractStatus::READY;
+	result.sink.Native().required_capability = "materialization-append-sink";
+	result.sink.Native().contract_version = "v1";
+	result.sink.Native().blocker.clear();
 	result.sink.reason += ";sink_contract_status=ready";
 	result.sink.reason += ";sink_required_capability=materialization-append-sink";
 	result.sink.reason += ";sink_contract_version=v1";
@@ -399,11 +399,14 @@ bool PhysicalCTE::BindExecutionSink(ExecutionContext &context, DataChunk &input,
                                     const ExecutionRegionSinkInfo &sink_info, ExecutionSinkBinding &binding) const {
 	(void)input;
 	binding = ExecutionSinkBinding();
-	binding.kind = sink_info.kind;
-	if (sink_info.kind != ExecutionRegionSinkKind::MATERIALIZATION ||
-	    sink_info.native_sink_contract.status != ExecutionRegionStateContractStatus::READY) {
-		binding.blocker = sink_info.native_sink_contract.blocker.empty() ? "materialization-append-sink-not-ready"
-		                                                                 : sink_info.native_sink_contract.blocker;
+	binding.kind = sink_info.Kind();
+	if (sink_info.Kind() != ExecutionRegionSinkKind::MATERIALIZATION) {
+		binding.blocker = "materialization-append-sink-kind-mismatch";
+		return false;
+	}
+	if (sink_info.Native().status != ExecutionRegionStateContractStatus::READY) {
+		binding.blocker =
+		    sink_info.Native().blocker.empty() ? "materialization-append-sink-not-ready" : sink_info.Native().blocker;
 		return false;
 	}
 	binding.ready = true;

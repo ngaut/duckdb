@@ -1,0 +1,115 @@
+# name: test/sql/jit/test_jit_dictionary_lane_provenance.test
+# description: Dictionary admission follows individual output lanes and finalized dictionary producers
+# group: [jit]
+
+statement ok
+LOAD jit_sljit
+
+statement ok
+SET jit_policy='off'
+
+statement ok
+SET disabled_optimizers='join_order,build_side_probe_side,statistics_propagation,join_filter_pushdown'
+
+statement ok
+CREATE TABLE dim AS SELECT i k, 'VALUE_' || i label FROM range(5) t(i)
+
+statement ok
+CREATE TABLE fact AS SELECT i * 1000000 id, i % 5 k FROM range(6000) t(i)
+
+statement ok
+CREATE TABLE probe AS SELECT id FROM fact
+
+statement ok
+CREATE VIEW rhs_chain AS SELECT b.* FROM
+(SELECT * FROM probe WHERE id % 2000000=0) q RIGHT JOIN
+(SELECT f.id,d.label FROM fact f JOIN dim d ON f.k=d.k) b ON q.id=b.id
+
+# The dictionary is created after the outer join; that join is not part of the dictionary's provenance.
+statement ok
+CREATE VIEW fresh_chain AS SELECT a.id,d.label FROM
+(SELECT f.* FROM probe q RIGHT JOIN fact f ON q.id=f.id) a JOIN dim d ON a.k=d.k
+
+# A fresh RHS dictionary also remains uniform across multiple probe pipelines.
+statement ok
+CREATE VIEW union_chain AS SELECT a.id,d.label FROM
+(SELECT * FROM fact WHERE id%2000000=0 UNION ALL SELECT * FROM fact WHERE id%2000000<>0) a
+JOIN dim d ON a.k=d.k
+
+# In-memory probe lanes can forward the same dictionary through another INNER join.
+statement ok
+CREATE VIEW probe_chain AS SELECT a.id,a.label FROM
+(SELECT f.id,d.label FROM fact f JOIN dim d ON f.k=d.k) a JOIN probe q ON a.id=q.id
+
+statement ok
+SET jit_cbo_startup_base_cost=0
+
+statement ok
+SET jit_cbo_generated_stage_benefit=4096
+
+statement ok
+SET jit_cbo_native_operator_stage_benefit=4096
+
+statement ok
+SET jit_dump_ir=true
+
+statement ok
+SET jit_event_log_size=10000
+
+foreach threads 1 4
+
+statement ok
+SET threads={threads}
+
+foreach policy off auto
+
+statement ok
+SET jit_policy='{policy}'
+
+foreach source rhs_chain fresh_chain union_chain probe_chain
+
+statement ok
+SELECT * FROM duckdb_jit_clear_events()
+
+# Projection reorders the columns and the filter keeps the dictionary entry intact.
+query II
+SELECT b.label,count(*) FROM probe p JOIN
+(SELECT label,id FROM {source} WHERE id>=0) b ON p.id=b.id GROUP BY 1 ORDER BY 1
+----
+VALUE_0	1200
+VALUE_1	1200
+VALUE_2	1200
+VALUE_3	1200
+VALUE_4	1200
+
+# Scope the assertion to the downstream INNER join, not the upstream RIGHT join's own narrowed slot.
+query I
+SELECT '{policy}'='off' OR count(*)>0 FROM duckdb_jit_events()
+WHERE regexp_matches(ir,'hash_join_contract<join_type=inner,[^>]*hash_join_dict_index_widths=\[1\]')
+----
+true
+
+endloop
+
+statement ok
+SELECT * FROM duckdb_jit_clear_events()
+
+# Both labels reach the same sink. Only the NULL-extended probe label loses the dictionary promise.
+query III
+SELECT count(*),count(b.probe_label),count(b.build_label) FROM probe p JOIN (
+ SELECT r.id,l.label probe_label,r.label build_label
+ FROM (SELECT f.id,d.label FROM fact f JOIN dim d ON f.k=d.k WHERE f.id%2000000=0) l
+ RIGHT JOIN (SELECT f.id,d.label FROM fact f JOIN dim d ON f.k=d.k) r ON l.id=r.id
+) b ON p.id=b.id
+----
+6000	3000	6000
+
+query I
+SELECT '{policy}'='off' OR count(*)>0 FROM duckdb_jit_events()
+WHERE regexp_matches(ir,'hash_join_contract<join_type=inner,[^>]*hash_join_dict_index_widths=\[0\|1\]')
+----
+true
+
+endloop
+
+endloop

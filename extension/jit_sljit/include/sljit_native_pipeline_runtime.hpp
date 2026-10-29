@@ -46,7 +46,7 @@ struct SljitNativePipelineGroupedFinishState {
 			if (SljitSinkResultStopsPipeline(sink_result)) {
 				return true;
 			}
-			RecordSljitRegionRuntimePath(runtime, op.kind, "pending_grouped_aggregate_update_flush", batch.size());
+			RecordSljitRegionRuntimePath(runtime, op.Kind(), "pending_grouped_aggregate_update_flush", batch.size());
 			return false;
 		};
 		auto flush_batch = [&]() {
@@ -70,9 +70,9 @@ private:
 	vector<SljitExecutableRegionOp> &ops;
 
 	static bool CanBatchTerminalAggregateUpdate(SljitExecutableRegionOp &op, DataChunk &input) {
-		if (input.size() == 0 || op.kind != SljitNativeRegionOpKind::AGGREGATE_UPDATE ||
-		    op.aggregate_update.plan.sink_info.kind != ExecutionRegionSinkKind::HASH_AGGREGATE_UPDATE ||
-		    !op.aggregate_update.plan.use_grouped_state_addresses) {
+		if (input.size() == 0 || op.Kind() != SljitNativeRegionOpKind::AGGREGATE_UPDATE ||
+		    op.AggregateUpdate().plan.sink_info.Kind() != ExecutionRegionSinkKind::HASH_AGGREGATE_UPDATE ||
+		    !op.AggregateUpdate().plan.use_grouped_state_addresses) {
 			return false;
 		}
 		for (auto &type : input.GetTypes()) {
@@ -106,7 +106,7 @@ private:
 			if (SljitSinkResultStopsPipeline(result)) {
 				return true;
 			}
-			RecordSljitRegionRuntimePath(runtime, op.kind, "pending_grouped_aggregate_update_flush", batch.size());
+			RecordSljitRegionRuntimePath(runtime, op.Kind(), "pending_grouped_aggregate_update_flush", batch.size());
 			return false;
 		};
 		SljitFlushDataChunkBatch(pending_aggregate_update.chunk, execute_batch);
@@ -115,9 +115,9 @@ private:
 };
 
 static bool SljitNativePipelineAggregateCanDeferGroupedFinish(const SljitExecutableRegionOp &op) {
-	return op.kind == SljitNativeRegionOpKind::AGGREGATE_UPDATE &&
-	       op.aggregate_update.plan.sink_info.kind == ExecutionRegionSinkKind::HASH_AGGREGATE_UPDATE &&
-	       op.aggregate_update.plan.use_grouped_state_addresses;
+	return op.Kind() == SljitNativeRegionOpKind::AGGREGATE_UPDATE &&
+	       op.AggregateUpdate().plan.sink_info.Kind() == ExecutionRegionSinkKind::HASH_AGGREGATE_UPDATE &&
+	       op.AggregateUpdate().plan.use_grouped_state_addresses;
 }
 
 struct SljitNativePipelineTerminalPolicy {
@@ -238,7 +238,7 @@ SljitDrainNativeHashJoinProbe(KERNEL &kernel, ExecutionRegionRuntime &runtime, v
 		auto stage_start = SljitRegionStageStart(runtime);
 		SljitExecuteNativeHashJoinProbeWithScratch(kernel, runtime, native_runtime, scratch, op_idx, op, input, output,
 		                                           state);
-		RecordSljitRegionStageRuntime(runtime, op_idx, op.kind, stage_start);
+		RecordSljitRegionStageRuntime(runtime, op_idx, op.Kind(), stage_start);
 		if (output.size() == 0) {
 			continue;
 		}
@@ -247,7 +247,7 @@ SljitDrainNativeHashJoinProbe(KERNEL &kernel, ExecutionRegionRuntime &runtime, v
 		if (SljitSinkResultStopsPipeline(sink_result)) {
 			return sink_result;
 		}
-	} while (!SljitHashJoinProbeDrainFinished(op.hash_join_probe.plan.output_mode, state));
+	} while (!SljitHashJoinProbeDrainFinished(op.HashJoinProbe().plan.output_mode, state));
 	return SinkResultType::NEED_MORE_INPUT;
 }
 
@@ -295,7 +295,7 @@ SljitExecuteNativeFullPipelineFrom(KERNEL &kernel, ExecutionRegionRuntime &runti
 			}
 			continue;
 		}
-		switch (op.kind) {
+		switch (op.Kind()) {
 		case SljitNativeRegionOpKind::HASH_JOIN_PROBE: {
 			auto &output = scratch.TemporaryChunk(op_idx);
 			output.Reset();

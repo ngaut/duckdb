@@ -52,10 +52,10 @@ static bool SljitTryCollectHashJoinProjectionExpressionSources(const SljitExecut
 
 static bool SljitProjectionReferencesInputColumn(const SljitExecutableRegionOp &projection_op, idx_t input_column_count,
                                                  idx_t column_idx) {
-	if (projection_op.kind != SljitNativeRegionOpKind::PROJECTION) {
+	if (projection_op.Kind() != SljitNativeRegionOpKind::PROJECTION) {
 		return true;
 	}
-	for (auto &projection : projection_op.projections) {
+	for (auto &projection : projection_op.Projections()) {
 		vector<uint8_t> referenced;
 		if (!SljitTryCollectHashJoinProjectionExpressionSources(projection, input_column_count, referenced)) {
 			return true;

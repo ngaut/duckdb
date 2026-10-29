@@ -31,8 +31,8 @@ static void SljitExecuteProjection(ExecutionRegionRuntime &runtime, SCRATCH &scr
 		RecordSljitRegionBackendWork(runtime, count);
 		return;
 	}
-	for (idx_t col_idx = 0; col_idx < op.projections.size(); col_idx++) {
-		SljitExecuteProjectionExpression(op.projections[col_idx], input, output.data[col_idx], execute_sel, count,
+	for (idx_t col_idx = 0; col_idx < op.Projections().size(); col_idx++) {
+		SljitExecuteProjectionExpression(op.Projections()[col_idx], input, output.data[col_idx], execute_sel, count,
 		                                 scratch.ExpressionAdapterScratch(op_idx, col_idx), &runtime);
 	}
 	output.SetChildCardinality(count);
@@ -56,8 +56,8 @@ static void SljitExecuteFilterProjection(SCRATCH &scratch, SljitExecutableRegion
 }
 
 static bool SljitCanExecuteFilterProjection(const vector<SljitExecutableRegionOp> &ops, idx_t op_idx) {
-	return op_idx + 1 < ops.size() && ops[op_idx].kind == SljitNativeRegionOpKind::FILTER &&
-	       ops[op_idx + 1].kind == SljitNativeRegionOpKind::PROJECTION;
+	return op_idx + 1 < ops.size() && ops[op_idx].Kind() == SljitNativeRegionOpKind::FILTER &&
+	       ops[op_idx + 1].Kind() == SljitNativeRegionOpKind::PROJECTION;
 }
 
 template <class SCRATCH>
@@ -72,7 +72,7 @@ static bool SljitTryExecuteFullPipelineFilterProjection(ExecutionRegionRuntime &
 	auto stage_start = SljitRegionStageStart(runtime);
 	SljitExecuteFilterProjection(scratch, ops[op_idx], ops[op_idx + 1], op_idx + 1, *current, output,
 	                             scratch.FilterSelection(op_idx), runtime);
-	RecordSljitRegionStageRuntimeWithSuffix(runtime, op_idx, ops[op_idx].kind, "+projection", stage_start);
+	RecordSljitRegionStageRuntimeWithSuffix(runtime, op_idx, ops[op_idx].Kind(), "+projection", stage_start);
 	current = &output;
 	op_idx++;
 	needs_more_input = current->size() == 0;
@@ -83,21 +83,21 @@ template <class SCRATCH>
 static bool SljitTryExecuteFullPipelineSingleOperatorTransform(ExecutionRegionRuntime &runtime, SCRATCH &scratch,
                                                                idx_t op_idx, SljitExecutableRegionOp &op,
                                                                DataChunk *&current, bool &needs_more_input) {
-	if (op.kind != SljitNativeRegionOpKind::FILTER && op.kind != SljitNativeRegionOpKind::PROJECTION) {
+	if (op.Kind() != SljitNativeRegionOpKind::FILTER && op.Kind() != SljitNativeRegionOpKind::PROJECTION) {
 		return false;
 	}
 
 	auto &output = scratch.TemporaryChunk(op_idx);
 	output.Reset();
-	if (op.kind == SljitNativeRegionOpKind::FILTER) {
+	if (op.Kind() == SljitNativeRegionOpKind::FILTER) {
 		auto stage_start = SljitRegionStageStart(runtime);
 		SljitExecuteFilter(op, *current, output, scratch.FilterSelection(op_idx),
 		                   scratch.ExpressionAdapterScratch(op_idx, 0), &runtime);
-		RecordSljitRegionStageRuntime(runtime, op_idx, op.kind, stage_start);
+		RecordSljitRegionStageRuntime(runtime, op_idx, op.Kind(), stage_start);
 	} else {
 		auto stage_start = SljitRegionStageStart(runtime);
 		SljitExecuteProjection(runtime, scratch, op_idx, op, *current, output);
-		RecordSljitRegionStageRuntime(runtime, op_idx, op.kind, stage_start);
+		RecordSljitRegionStageRuntime(runtime, op_idx, op.Kind(), stage_start);
 	}
 	current = &output;
 	needs_more_input = current->size() == 0;
@@ -168,7 +168,7 @@ static void SljitExecuteProjectionExpressionsToBatch(ExecutionRegionRuntime &run
                                                      const vector<idx_t> &projection_to_output) {
 	const auto current_size = batch.size();
 	const auto count = input.size();
-	for (idx_t projected_idx = 0; projected_idx < projection_op.projections.size(); projected_idx++) {
+	for (idx_t projected_idx = 0; projected_idx < projection_op.Projections().size(); projected_idx++) {
 		if (projected_idx < skip_projection.size() && skip_projection[projected_idx]) {
 			continue;
 		}
@@ -178,7 +178,7 @@ static void SljitExecuteProjectionExpressionsToBatch(ExecutionRegionRuntime &run
 		}
 		const auto output_idx = projection_to_output[projected_idx];
 		auto &target = batch.data[output_idx];
-		auto &projection = projection_op.projections[projected_idx];
+		auto &projection = projection_op.Projections()[projected_idx];
 		SljitExecuteProjectionExpressionToFlatBatchTarget(
 		    projection, input, target, current_size, count, nullptr,
 		    scratch.ExpressionAdapterScratch(projection_idx, projected_idx), &runtime);

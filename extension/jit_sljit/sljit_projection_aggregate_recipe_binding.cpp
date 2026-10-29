@@ -138,7 +138,7 @@ bool SljitProjectionAggregateRecipeBinding::CanBindMarkFilterBoundary(
 		return false;
 	}
 	return facts.mark_filter_idx == hash_join_idx + 1 &&
-	       ops[hash_join_idx].hash_join_probe.plan.output_mode == ExecutionHashJoinProbeOutputMode::MARK_PROBE &&
+	       ops[hash_join_idx].HashJoinProbe().plan.output_mode == ExecutionHashJoinProbeOutputMode::MARK_PROBE &&
 	       SljitIsMarkProbeMarkerFilter(ops[hash_join_idx], ops[facts.mark_filter_idx]);
 }
 
@@ -348,12 +348,12 @@ bool SljitTryBindMarkProbeFilterBoundaryPrimitive(const vector<SljitExecutableRe
 	}
 	const bool has_projection = downstream_projection_idx != DConstants::INVALID_INDEX;
 	if (has_projection && (downstream_projection_idx >= ops.size() ||
-	                       ops[downstream_projection_idx].kind != SljitNativeRegionOpKind::PROJECTION)) {
+	                       ops[downstream_projection_idx].Kind() != SljitNativeRegionOpKind::PROJECTION)) {
 		return false;
 	}
 	const auto &join = ops[hash_join_idx];
-	const auto &input_types = join.hash_join_probe.plan.input_types;
-	const auto &lhs_columns = join.hash_join_probe.plan.operator_info.hash_join_contract.lhs_output_column_indices;
+	const auto &input_types = join.HashJoinProbe().plan.input_types;
+	const auto &lhs_columns = join.HashJoinProbe().plan.operator_info.HashJoin().contract.lhs_output_column_indices;
 	if (join.output_types.size() != lhs_columns.size() + 1 || !SljitIsBooleanType(join.output_types.back())) {
 		return false;
 	}
@@ -380,7 +380,7 @@ bool SljitTryBindMarkProbeFilterBoundaryPrimitive(const vector<SljitExecutableRe
 	}
 	const bool omit_marker = candidate.marker_mode == SljitMarkProbeFilterBoundaryMarkerMode::OMIT_MARKER;
 	if ((omit_marker || materialize_filter_selection) && candidate.filter_mode != SljitMarkProbeFilterMode::NONE &&
-	    !join.hash_join_probe.plan.perfect_hash_probe && !join.hash_join_probe.plan.residual_predicate) {
+	    !join.HashJoinProbe().plan.perfect_hash_probe && !join.HashJoinProbe().plan.residual_predicate) {
 		candidate.strategy = materialize_filter_selection ? SljitMarkProbeFilterBoundaryStrategy::FILTERED_MATERIALIZED
 		                                                  : SljitMarkProbeFilterBoundaryStrategy::FILTERED_SELECTION;
 	}

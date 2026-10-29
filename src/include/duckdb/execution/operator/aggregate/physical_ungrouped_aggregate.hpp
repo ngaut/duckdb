@@ -52,7 +52,8 @@ public:
 	SinkFinalizeType Finalize(Pipeline &pipeline, Event &event, ClientContext &context,
 	                          OperatorSinkFinalizeInput &input) const override;
 	bool BindExecutionSink(ExecutionContext &context, DataChunk &input, OperatorSinkInput &sink_input,
-	                       const ExecutionRegionSinkInfo &sink_info, ExecutionSinkBinding &binding) const override;
+	                       const ExecutionRegionAggregateSinkInfo &sink_info,
+	                       ExecutionSinkBinding &binding) const override;
 
 	unique_ptr<LocalSinkState> GetLocalSinkState(ExecutionContext &context) const override;
 	unique_ptr<GlobalSinkState> GetGlobalSinkState(ClientContext &context) const override;

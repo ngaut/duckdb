@@ -214,11 +214,8 @@ BuildExecutionRegionSourceInfo(const ExecutionSourceContract &descriptor, Execut
 	result->table_scan_contract = descriptor.table_scan_contract;
 	result->hash_join_contract = descriptor.hash_join_contract;
 	result->nested_loop_join_contract = descriptor.nested_loop_join_contract;
-	result->aggregate_contract = descriptor.aggregate_contract;
 	result->order_contract = descriptor.order_contract;
-	result->aggregates = descriptor.aggregates;
 	result->hash_join_keys = descriptor.hash_join_keys;
-	result->groups = descriptor.groups;
 	result->source_contract = descriptor.source_contract;
 	result->native_state_scan_contract = descriptor.native_state_scan_contract;
 	result->reason = descriptor.reason;
@@ -534,16 +531,16 @@ string ExecutionRegionAggregateNativeStateUpdateBlocker(const ExecutionRegionAgg
 }
 
 static bool ExecutionRegionSinkIsAggregateUpdate(const ExecutionRegionSinkInfo &sink) {
-	return sink.kind == ExecutionRegionSinkKind::HASH_AGGREGATE_UPDATE ||
-	       sink.kind == ExecutionRegionSinkKind::PERFECT_HASH_AGGREGATE_UPDATE ||
-	       sink.kind == ExecutionRegionSinkKind::UNGROUPED_AGGREGATE_UPDATE;
+	return sink.Kind() == ExecutionRegionSinkKind::HASH_AGGREGATE_UPDATE ||
+	       sink.Kind() == ExecutionRegionSinkKind::PERFECT_HASH_AGGREGATE_UPDATE ||
+	       sink.Kind() == ExecutionRegionSinkKind::UNGROUPED_AGGREGATE_UPDATE;
 }
 
 bool ExecutionRegionAggregateUpdateGeneratesBody(const ExecutionRegionSinkInfo &sink) {
 	if (!ExecutionRegionSinkIsAggregateUpdate(sink)) {
 		return false;
 	}
-	auto &contract = sink.aggregate_contract;
+	auto &contract = sink.Aggregate().contract;
 	if (contract.distinct_aggregate_count != 0 || contract.distinct_table_count != 0 ||
 	    contract.distinct_child_count != 0 || contract.distinct_filter_count != 0) {
 		return false;
@@ -551,13 +548,15 @@ bool ExecutionRegionAggregateUpdateGeneratesBody(const ExecutionRegionSinkInfo &
 	if (contract.native_state_update_contract.status != ExecutionRegionStateContractStatus::READY) {
 		return false;
 	}
-	if (!ExecutionRegionAggregateNativeStateUpdateBlocker(contract, sink.aggregates, sink.groups).empty()) {
+	if (!ExecutionRegionAggregateNativeStateUpdateBlocker(contract, sink.Aggregate().aggregates,
+	                                                      sink.Aggregate().groups)
+	         .empty()) {
 		return false;
 	}
-	if (sink.aggregates.empty()) {
+	if (sink.Aggregate().aggregates.empty()) {
 		return false;
 	}
-	for (auto &aggregate : sink.aggregates) {
+	for (auto &aggregate : sink.Aggregate().aggregates) {
 		if (!aggregate.primitive_update_ready) {
 			return false;
 		}
@@ -566,8 +565,8 @@ bool ExecutionRegionAggregateUpdateGeneratesBody(const ExecutionRegionSinkInfo &
 }
 
 bool ExecutionRegionAggregateLookupGeneratesBody(const ExecutionRegionSinkInfo &sink) {
-	return sink.kind == ExecutionRegionSinkKind::PERFECT_HASH_AGGREGATE_UPDATE &&
-	       sink.aggregate_contract.native_grouped_state_contract.status == ExecutionRegionStateContractStatus::READY;
+	return sink.Kind() == ExecutionRegionSinkKind::PERFECT_HASH_AGGREGATE_UPDATE &&
+	       sink.Aggregate().contract.native_grouped_state_contract.status == ExecutionRegionStateContractStatus::READY;
 }
 
 static ExecutionRegionSourceKind InferExecutionRegionSourceKind(const ExecutionRegionNode &node) {
@@ -630,15 +629,17 @@ static void AccumulateExecutionRegionSourceTraits(const ExecutionRegionNode &nod
 
 static bool ExecutionRegionNodeIsMarkHashJoinProbe(const ExecutionRegionNode &node) {
 	return node.kind == ExecutionRegionNodeKind::OPERATOR && node.operator_info &&
-	       node.operator_info->hash_join_contract.present &&
-	       node.operator_info->hash_join_contract.native_probe_output_mode ==
+	       node.operator_info->Kind() == ExecutionRegionOperatorContractKind::HASH_JOIN_PROBE &&
+	       node.operator_info->HashJoin().contract.present &&
+	       node.operator_info->HashJoin().contract.native_probe_output_mode ==
 	           ExecutionHashJoinProbeOutputMode::MARK_PROBE;
 }
 
 static bool ExecutionRegionNodeProducesMatchedHashJoinSelection(const ExecutionRegionNode &node) {
 	return node.kind == ExecutionRegionNodeKind::OPERATOR && node.operator_info &&
-	       node.operator_info->hash_join_contract.present &&
-	       node.operator_info->hash_join_contract.native_probe_output_mode ==
+	       node.operator_info->Kind() == ExecutionRegionOperatorContractKind::HASH_JOIN_PROBE &&
+	       node.operator_info->HashJoin().contract.present &&
+	       node.operator_info->HashJoin().contract.native_probe_output_mode ==
 	           ExecutionHashJoinProbeOutputMode::MATCHED_PROBE_AND_BUILD;
 }
 
@@ -687,14 +688,17 @@ static ExecutionRegionCandidateTraits BuildExecutionRegionCandidateTraits(const 
 			break;
 		case ExecutionRegionNodeKind::SINK:
 			traits.sink_present = true;
-			traits.sink_kind = node.sink ? node.sink->kind : ExecutionRegionSinkKind::NONE;
+			traits.sink_kind = node.sink ? node.sink->Kind() : ExecutionRegionSinkKind::NONE;
 			if (traits.sink_kind == ExecutionRegionSinkKind::HASH_AGGREGATE_UPDATE ||
 			    traits.sink_kind == ExecutionRegionSinkKind::PERFECT_HASH_AGGREGATE_UPDATE) {
 				traits.grouped_aggregate_estimated_cardinality = node.estimated_cardinality;
 			}
 			if (node.sink) {
-				if (node.sink->aggregate_contract.present) {
-					traits.aggregate_count += node.sink->aggregate_contract.aggregate_count;
+				if (ExecutionRegionSinkIsAggregateUpdate(*node.sink) && node.sink->Aggregate().contract.present) {
+					traits.aggregate_count += node.sink->Aggregate().contract.aggregate_count;
+				} else if (node.sink->Kind() == ExecutionRegionSinkKind::DELIM_JOIN_SINK &&
+				           node.sink->DelimJoin().distinct.contract.present) {
+					traits.aggregate_count += node.sink->DelimJoin().distinct.contract.aggregate_count;
 				}
 				if (ExecutionRegionAggregateUpdateGeneratesBody(*node.sink)) {
 					traits.generated_aggregate_update_count++;
@@ -747,9 +751,11 @@ static ExecutionRegionCandidateTraits BuildExecutionRegionCandidateTraits(const 
 			if (PreviousExecutionRegionNodeProducesMatchedHashJoinSelection(region_ir, node_idx)) {
 				traits.selected_hash_join_view_materialization_count++;
 			}
-			if (node.operator_info && node.operator_info->hash_join_contract.present) {
+			if (node.operator_info &&
+			    node.operator_info->Kind() == ExecutionRegionOperatorContractKind::HASH_JOIN_PROBE &&
+			    node.operator_info->HashJoin().contract.present) {
 				traits.hash_join_operator_count++;
-				if (node.operator_info->hash_join_contract.native_probe_output_mode ==
+				if (node.operator_info->HashJoin().contract.native_probe_output_mode ==
 				    ExecutionHashJoinProbeOutputMode::LEFT_PROBE_AND_BUILD) {
 					traits.materialized_hash_join_output_count++;
 				}
@@ -769,10 +775,11 @@ static bool ExecutionRegionNodeCannotExpandInput(const ExecutionRegionNode &node
 		return true;
 	}
 	if (node.kind != ExecutionRegionNodeKind::OPERATOR || !node.operator_info ||
-	    !node.operator_info->hash_join_contract.present) {
+	    node.operator_info->Kind() != ExecutionRegionOperatorContractKind::HASH_JOIN_PROBE ||
+	    !node.operator_info->HashJoin().contract.present) {
 		return false;
 	}
-	auto &join = node.operator_info->hash_join_contract;
+	auto &join = node.operator_info->HashJoin().contract;
 	return join.perfect_hash_probe_shape_ready || join.join_type == ExecutionRegionJoinType::SEMI ||
 	       join.join_type == ExecutionRegionJoinType::ANTI || join.join_type == ExecutionRegionJoinType::MARK;
 }

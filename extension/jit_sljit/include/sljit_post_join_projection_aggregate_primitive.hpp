@@ -14,10 +14,10 @@
 namespace duckdb {
 
 static bool SljitAggregateUpdateHasDedicatedCompiledBackend(const SljitExecutableRegionOp &op) {
-	if (op.kind != SljitNativeRegionOpKind::AGGREGATE_UPDATE) {
+	if (op.Kind() != SljitNativeRegionOpKind::AGGREGATE_UPDATE) {
 		return false;
 	}
-	return op.aggregate_update.plan.UsesPrimitivePayloads();
+	return op.AggregateUpdate().plan.UsesPrimitivePayloads();
 }
 
 struct SljitPostJoinProjectionAggregatePrimitive {

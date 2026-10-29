@@ -204,9 +204,9 @@ private:
 
 static ExecutionPrimitiveAggregateUpdateBinding
 BuildPerfectHashAggregatePrimitiveUpdateBinding(const PhysicalPerfectHashAggregate &op,
-                                                const ExecutionRegionSinkInfo &sink_info) {
+                                                const ExecutionRegionAggregateSinkInfo &sink_info) {
 	ExecutionPrimitiveAggregateUpdateBinding result;
-	auto &contract = sink_info.aggregate_contract;
+	auto &contract = sink_info.contract;
 	if (!contract.grouped_state_layout_ready || contract.grouped_state_offsets.size() < sink_info.aggregates.size()) {
 		result.blocker = "perfect-hash-aggregate-primitive-update-grouped-state-layout";
 		return result;
@@ -278,11 +278,11 @@ BuildPerfectHashAggregatePrimitiveUpdateBinding(const PhysicalPerfectHashAggrega
 	return result;
 }
 
-static string ValidatePerfectHashAggregateExecutionSink(const ExecutionRegionSinkInfo &sink_info) {
-	if (sink_info.kind != ExecutionRegionSinkKind::PERFECT_HASH_AGGREGATE_UPDATE) {
+static string ValidatePerfectHashAggregateExecutionSink(const ExecutionRegionAggregateSinkInfo &sink_info) {
+	if (sink_info.Kind() != ExecutionRegionSinkKind::PERFECT_HASH_AGGREGATE_UPDATE) {
 		return "perfect-hash-aggregate-runtime-kind-mismatch";
 	}
-	auto &contract = sink_info.aggregate_contract;
+	auto &contract = sink_info.contract;
 	if (contract.native_state_update_contract.status != ExecutionRegionStateContractStatus::READY) {
 		return contract.native_state_update_contract.blocker.empty()
 		           ? "perfect-hash-aggregate-state-update-contract-not-ready"
@@ -343,11 +343,11 @@ SinkResultType PhysicalPerfectHashAggregate::Sink(ExecutionContext &context, Dat
 
 bool PhysicalPerfectHashAggregate::BindExecutionSink(ExecutionContext &context, DataChunk &input,
                                                      OperatorSinkInput &sink_input,
-                                                     const ExecutionRegionSinkInfo &sink_info,
+                                                     const ExecutionRegionAggregateSinkInfo &sink_info,
                                                      ExecutionSinkBinding &binding) const {
 	(void)input;
 	binding = ExecutionSinkBinding();
-	binding.kind = sink_info.kind;
+	binding.kind = sink_info.Kind();
 	auto blocker = ValidatePerfectHashAggregateExecutionSink(sink_info);
 	if (!blocker.empty()) {
 		binding.blocker = blocker;

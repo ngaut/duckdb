@@ -24,14 +24,14 @@ static idx_t SljitApplyNativeHashJoinResidualPredicate(
     DataChunk &input, Vector &row_pointers, SelectionVector &match_selection, idx_t count, DataChunk *residual_chunk,
     SelectionVector *residual_selection, SelectionVector *compact_match_selection, Vector *compact_row_pointers,
     SljitExpressionAdapterScratch *adapter_scratch, optional_ptr<ExecutionOperatorStageRecorder> recorder) {
-	if (!op.hash_join_probe.plan.residual_predicate) {
+	if (!op.HashJoinProbe().plan.residual_predicate) {
 		return count;
 	}
 	if (!residual_chunk || !residual_selection || !compact_match_selection || !compact_row_pointers ||
 	    !adapter_scratch) {
 		throw InternalException("SLJIT native hash join residual predicate requires residual scratch state");
 	}
-	auto &residual_filter = op.hash_join_probe.residual_filter;
+	auto &residual_filter = op.HashJoinProbe().residual_filter;
 	if (count == 0) {
 		return 0;
 	}
@@ -159,7 +159,7 @@ static SljitPreparedRegularHashJoinProbeInput SljitPrepareRegularHashJoinProbeIn
 	native_input.source_validity = source_validity_array;
 	native_input.source_key0_int64_to_int32 = source_key0_int64_to_int32;
 	native_input.source_key0_int64_to_int32_unchecked = source_key0_int64_to_int32 && allow_unchecked_int64_to_int32;
-	native_input.source_key0_cast = source_key0_int64_to_int32 ? &plan.keys[0].source_cast : nullptr;
+	native_input.source_key0_cast = {source_key0_int64_to_int32 ? &plan.keys[0].source_cast : nullptr, &runtime};
 	native_input.count = input.size();
 	native_input.entries = layout.entries.words;
 	native_input.bitmask = layout.entries.bitmask;

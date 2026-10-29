@@ -21,13 +21,13 @@ static bool
 SljitCanExecuteGroupedPrimitiveAggregateUpdateShape(SljitExecutableRegionOp &op, DataChunk &input,
                                                     const vector<SljitGroupedReductionLaneBinding> &reduction_lanes,
                                                     const SelectionVector *execute_sel, idx_t count) {
-	auto &aggregate_update = op.aggregate_update;
+	auto &aggregate_update = op.AggregateUpdate();
 	auto &plan = aggregate_update.plan;
 	auto &sink_info = plan.sink_info;
 	if (execute_sel != nullptr || count != input.size() || !plan.UsesPrimitivePayloads() ||
 	    !plan.use_grouped_state_addresses || plan.use_perfect_hash_group_lookup ||
 	    aggregate_update.fused_payload_update_owns_group_lookup ||
-	    sink_info.kind != ExecutionRegionSinkKind::HASH_AGGREGATE_UPDATE ||
+	    sink_info.Kind() != ExecutionRegionSinkKind::HASH_AGGREGATE_UPDATE ||
 	    sink_info.aggregates.size() != aggregate_update.payloads.size() ||
 	    sink_info.aggregates.size() != aggregate_update.payload_descriptors.size() ||
 	    sink_info.aggregates.size() != reduction_lanes.size()) {
@@ -83,12 +83,12 @@ static bool SljitCanExecutePreaggregatedGroupedPrimitiveAggregateUpdate(
 	    !SljitCanExecuteGroupedPrimitiveAggregateUpdateShape(op, input, reduction_lanes, execute_sel, count)) {
 		return false;
 	}
-	auto &sink_info = op.aggregate_update.plan.sink_info;
+	auto &sink_info = op.AggregateUpdate().plan.sink_info;
 	if (sink_info.groups.size() != 1 || sink_info.groups[0].input_index >= input.ColumnCount()) {
 		return false;
 	}
 	for (idx_t payload_idx = 0; payload_idx < sink_info.aggregates.size(); payload_idx++) {
-		auto &descriptor = op.aggregate_update.payload_descriptors[payload_idx];
+		auto &descriptor = op.AggregateUpdate().payload_descriptors[payload_idx];
 		auto payload_type = descriptor.has_payload ? descriptor.input_type : PhysicalType::INVALID;
 		if (!SljitPreaggregatedPrimitivePayloadSupported(descriptor.primitive_kind, payload_type)) {
 			return false;
@@ -100,13 +100,13 @@ static bool SljitCanExecutePreaggregatedGroupedPrimitiveAggregateUpdate(
 static bool SljitCanExecuteDirectGroupedStateAddressPayloadUpdate(
     SljitRegionExecutionScratch &scratch, idx_t op_idx, SljitExecutableRegionOp &op, DataChunk &input,
     const vector<SljitGroupedReductionLaneBinding> &reduction_lanes, const SelectionVector *execute_sel, idx_t count) {
-	auto &aggregate_update = op.aggregate_update;
+	auto &aggregate_update = op.AggregateUpdate();
 	auto &plan = aggregate_update.plan;
 	auto &sink_info = plan.sink_info;
 	if (scratch.DirectNewAggregateUpdateDisabled(op_idx) || execute_sel != nullptr || count != input.size() ||
 	    !plan.UsesPrimitivePayloads() || !plan.use_grouped_state_addresses || plan.use_perfect_hash_group_lookup ||
 	    aggregate_update.fused_payload_update_owns_group_lookup || !aggregate_update.fused_payload_update.Function() ||
-	    sink_info.kind != ExecutionRegionSinkKind::HASH_AGGREGATE_UPDATE ||
+	    sink_info.Kind() != ExecutionRegionSinkKind::HASH_AGGREGATE_UPDATE ||
 	    sink_info.aggregates.size() != aggregate_update.payloads.size() ||
 	    sink_info.aggregates.size() != reduction_lanes.size() || !SljitGroupedReductionLanesReady(reduction_lanes)) {
 		return false;
@@ -146,10 +146,10 @@ static bool
 SljitCanPreaggregateInputVectorFusedPrimitivePayloads(SljitExecutableRegionOp &op, DataChunk &input,
                                                       const vector<idx_t> &payload_source_indices,
                                                       const vector<SljitGroupedReductionLaneBinding> &reduction_lanes) {
-	auto &aggregate_update = op.aggregate_update;
+	auto &aggregate_update = op.AggregateUpdate();
 	auto &sink_info = aggregate_update.plan.sink_info;
 	if (!aggregate_update.fused_payload_update.Function() || aggregate_update.fused_payload_update_owns_group_lookup ||
-	    sink_info.kind != ExecutionRegionSinkKind::HASH_AGGREGATE_UPDATE ||
+	    sink_info.Kind() != ExecutionRegionSinkKind::HASH_AGGREGATE_UPDATE ||
 	    !aggregate_update.plan.UsesPrimitivePayloads() || !aggregate_update.plan.use_grouped_state_addresses ||
 	    aggregate_update.plan.use_perfect_hash_group_lookup ||
 	    sink_info.aggregates.size() != aggregate_update.payloads.size() ||
@@ -210,14 +210,14 @@ static bool SljitCanExecuteDirectRowPointerPreaggregatedPrimitiveUpdate(
     const vector<SljitGroupedReductionLaneBinding> &reduction_lanes, idx_t count,
     bool &uses_generated_payload_preaggregation) {
 	uses_generated_payload_preaggregation = false;
-	auto &aggregate_update = op.aggregate_update;
+	auto &aggregate_update = op.AggregateUpdate();
 	auto &plan = aggregate_update.plan;
 	auto &sink_info = plan.sink_info;
 	if (scratch.DirectNewAggregateUpdateDisabled(op_idx) || count != payload_input.size() || count < 2 ||
 	    row_pointers.GetVectorType() != VectorType::FLAT_VECTOR || !plan.UsesPrimitivePayloads() ||
 	    !plan.use_grouped_state_addresses || plan.use_perfect_hash_group_lookup ||
 	    aggregate_update.fused_payload_update_owns_group_lookup ||
-	    sink_info.kind != ExecutionRegionSinkKind::HASH_AGGREGATE_UPDATE ||
+	    sink_info.Kind() != ExecutionRegionSinkKind::HASH_AGGREGATE_UPDATE ||
 	    sink_info.groups.size() != group_sources.size() ||
 	    sink_info.aggregates.size() != aggregate_update.payloads.size() ||
 	    sink_info.aggregates.size() != aggregate_update.payload_descriptors.size() ||
@@ -268,7 +268,7 @@ static bool SljitCanExecuteDirectRowPointerPreaggregatedPrimitiveUpdate(
 				return false;
 			}
 		} else {
-			if (op.aggregate_update.payloads[payload_idx].plan.return_type.InternalType() != descriptor.input_type) {
+			if (op.AggregateUpdate().payloads[payload_idx].plan.return_type.InternalType() != descriptor.input_type) {
 				return false;
 			}
 		}

@@ -367,7 +367,7 @@ static void SljitSelectMarkProbeFilterProjectionBoundaryRows(ExecutionRegionRunt
 	SljitSelectMarkProbeFilterBoundaryRows(scratch.OperatorBinding(hash_join_idx).hash_join_probe,
 	                                       built_boundary.boundary, mark_filter_mode, mark_selection,
 	                                       built_boundary.result);
-	RecordSljitRegionStageRuntimePath(runtime, filter_idx, filter_op.kind,
+	RecordSljitRegionStageRuntimePath(runtime, filter_idx, filter_op.Kind(),
 	                                  SljitMarkProbeFilterSelectionPath(mark_filter_mode), selection_stage_start);
 }
 

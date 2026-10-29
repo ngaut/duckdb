@@ -95,7 +95,7 @@ static void SljitRecordDirectJoinOutputAggregateProjectionUnsupported(
 		return;
 	}
 	auto path = string(SljitDirectJoinOutputAggregateUnsupportedPrefix(post_join_projection)) + reason;
-	RecordSljitRegionRuntimePath(runtime, ops[post_join_projection.trace_projection_idx].kind, path.c_str(), count);
+	RecordSljitRegionRuntimePath(runtime, ops[post_join_projection.trace_projection_idx].Kind(), path.c_str(), count);
 }
 
 } // namespace duckdb

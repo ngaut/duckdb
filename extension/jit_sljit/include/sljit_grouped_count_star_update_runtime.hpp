@@ -37,17 +37,17 @@ static bool TryBuildCountStarGroupedAggregateUpdateDescriptor(
     SljitRegionExecutionScratch &scratch, idx_t op_idx, SljitExecutableRegionOp &op, DataChunk &bind_groups,
     ExecutionSinkBinding &binding, SljitCountStarGroupedAggregateUpdateDescriptor &descriptor) {
 	descriptor = SljitCountStarGroupedAggregateUpdateDescriptor();
-	if (op.aggregate_update.plan.sink_info.kind != ExecutionRegionSinkKind::HASH_AGGREGATE_UPDATE ||
-	    !op.aggregate_update.plan.UsesPrimitivePayloads() || !op.aggregate_update.plan.use_grouped_state_addresses) {
+	if (op.AggregateUpdate().plan.sink_info.Kind() != ExecutionRegionSinkKind::HASH_AGGREGATE_UPDATE ||
+	    !op.AggregateUpdate().plan.UsesPrimitivePayloads() || !op.AggregateUpdate().plan.use_grouped_state_addresses) {
 		return false;
 	}
-	auto &sink_info = op.aggregate_update.plan.sink_info;
+	auto &sink_info = op.AggregateUpdate().plan.sink_info;
 	if (sink_info.groups.size() != bind_groups.ColumnCount() || sink_info.aggregates.size() != 1 ||
-	    op.aggregate_update.payloads.size() != 1 || op.aggregate_update.payload_descriptors.size() != 1) {
+	    op.AggregateUpdate().payloads.size() != 1 || op.AggregateUpdate().payload_descriptors.size() != 1) {
 		return false;
 	}
 	auto &aggregate = sink_info.aggregates[0];
-	auto &payload_descriptor = op.aggregate_update.payload_descriptors[0];
+	auto &payload_descriptor = op.AggregateUpdate().payload_descriptors[0];
 	if (aggregate.child_count != 0 || payload_descriptor.primitive_kind != AggregatePrimitiveUpdateKind::COUNT_STAR) {
 		return false;
 	}
@@ -55,14 +55,14 @@ static bool TryBuildCountStarGroupedAggregateUpdateDescriptor(
 	    !binding.aggregate_update.grouped_state.ready || !binding.aggregate_update.grouped_state.state) {
 		return false;
 	}
-	auto &payload_lanes = scratch.AggregatePayloadLanes(op_idx, op.aggregate_update.payload_descriptors,
+	auto &payload_lanes = scratch.AggregatePayloadLanes(op_idx, op.AggregateUpdate().payload_descriptors,
 	                                                    binding.aggregate_update.primitive);
 	if (payload_lanes.size() != 1 || !payload_lanes[0]) {
 		return false;
 	}
 	auto lane = payload_lanes[0];
 	SljitGroupedReductionLaneBinding reduction_lane;
-	if (!SljitTryBindGroupedReductionLane(sink_info.aggregate_contract, payload_descriptor, lane, reduction_lane) ||
+	if (!SljitTryBindGroupedReductionLane(sink_info.contract, payload_descriptor, lane, reduction_lane) ||
 	    reduction_lane.descriptor->primitive_kind != AggregatePrimitiveUpdateKind::COUNT_STAR) {
 		return false;
 	}
@@ -77,9 +77,9 @@ static bool SljitTryPrepareCountStarGroupedAggregateUpdate(ExecutionRegionRuntim
                                                            SljitRegionExecutionScratch &scratch, idx_t op_idx,
                                                            SljitExecutableRegionOp &op, DataChunk &bind_groups,
                                                            SljitCountStarGroupedAggregateUpdateDescriptor &descriptor) {
-	auto &sink_info = op.aggregate_update.plan.sink_info;
+	auto &sink_info = op.AggregateUpdate().plan.sink_info;
 	auto &binding =
-	    SljitBindRecordedNativeSink(runtime, native_runtime, scratch, op_idx, op.kind, bind_groups, sink_info,
+	    SljitBindRecordedNativeSink(runtime, native_runtime, scratch, op_idx, op.Kind(), bind_groups, sink_info,
 	                                "aggregate-update-runtime-binding-failed", "SLJIT aggregate update sink");
 	return TryBuildCountStarGroupedAggregateUpdateDescriptor(scratch, op_idx, op, bind_groups, binding, descriptor);
 }
@@ -100,20 +100,20 @@ static bool TryExecutePreparedPreaggregatedCountStarGroupedAggregateUpdate(
 	const bool finish = !defer_grouped_finish;
 	auto stage_start = SljitRegionStageStart(runtime);
 	auto updated = ExecuteSljitRegionRecordedOperation(
-	    runtime, op_idx, op.kind, "direct_preaggregated_count_star_update", stage_start,
+	    runtime, op_idx, op.Kind(), "direct_preaggregated_count_star_update", stage_start,
 	    [&](optional_ptr<ExecutionOperatorStageRecorder> recorder) {
 		    return grouped_state.state->TryUpdateGroupKeysWithSelectedStateAddresses(
-		        compact_groups, op.aggregate_update.plan.sink_info, ExecuteSljitPreaggregatedCountStarUpdate,
+		        compact_groups, op.AggregateUpdate().plan.sink_info, ExecuteSljitPreaggregatedCountStarUpdate,
 		        &update_state, recorder);
 	    });
-	RecordSljitRegionStageRuntimePath(runtime, op_idx, op.kind,
+	RecordSljitRegionStageRuntimePath(runtime, op_idx, op.Kind(),
 	                                  updated ? "direct_preaggregated_count_star_update"
 	                                          : "direct_preaggregated_count_star_update_miss",
 	                                  stage_start);
 	if (!updated) {
 		return false;
 	}
-	RecordSljitRegionMaterializationElision(runtime, op.kind, "direct_preaggregated_count_star_update",
+	RecordSljitRegionMaterializationElision(runtime, op.Kind(), "direct_preaggregated_count_star_update",
 	                                        preaggregated_row_count);
 	return true;
 }
@@ -126,7 +126,7 @@ public:
 			return false;
 		}
 		auto &aggregate_op = ops[primitive.aggregate_idx];
-		auto &sink_info = aggregate_op.aggregate_update.plan.sink_info;
+		auto &sink_info = aggregate_op.AggregateUpdate().plan.sink_info;
 		group_types.clear();
 		group_types.reserve(sink_info.groups.size());
 		for (auto &group : sink_info.groups) {
@@ -142,7 +142,7 @@ public:
 		if (primitive.input_kind == SljitGroupedAggregateUpdateInputKind::PROJECTED_INPUT) {
 			projected_count_star_group_projection = primitive.projected_count_star_group_projection;
 			if (!projected_count_star_group_projection ||
-			    projected_count_star_group_projection->kind != SljitNativeRegionOpKind::PROJECTION ||
+			    projected_count_star_group_projection->Kind() != SljitNativeRegionOpKind::PROJECTION ||
 			    !SljitCountStarProjectionInputSupported(*projected_count_star_group_projection)) {
 				return false;
 			}
@@ -196,18 +196,18 @@ private:
 	                                                  SljitExecutableRegionOp &aggregate_op, DataChunk &input) {
 		auto preaggregate_stage_start = SljitRegionStageStart(runtime);
 		if (TryPreaggregateFixedWidthCountStarGroups(input, preaggregated_groups, preaggregated_count_deltas)) {
-			RecordSljitRegionStageRuntime(runtime, aggregate_idx, aggregate_op.kind,
+			RecordSljitRegionStageRuntime(runtime, aggregate_idx, aggregate_op.Kind(),
 			                              "primitive_grouped_preaggregate_count_star_groups", preaggregate_stage_start);
 			if (!AccumulatePreaggregatedCountStar(runtime, scratch, aggregate_idx, aggregate_op, preaggregated_groups,
 			                                      preaggregated_count_deltas, input.size())) {
 				return false;
 			}
-			RecordSljitRegionMaterializationElision(runtime, aggregate_op.kind,
+			RecordSljitRegionMaterializationElision(runtime, aggregate_op.Kind(),
 			                                        "primitive_grouped_preaggregated_count_star_update", input.size());
 			return true;
 		}
 		row_count_deltas.assign(input.size(), 1);
-		RecordSljitRegionStageRuntime(runtime, aggregate_idx, aggregate_op.kind,
+		RecordSljitRegionStageRuntime(runtime, aggregate_idx, aggregate_op.Kind(),
 		                              "primitive_grouped_count_star_row_deltas", preaggregate_stage_start);
 		if (!FlushPendingPreaggregatedCountStar(runtime, scratch, aggregate_idx, aggregate_op)) {
 			return false;
@@ -216,7 +216,7 @@ private:
 		                            input.size())) {
 			return false;
 		}
-		RecordSljitRegionMaterializationElision(runtime, aggregate_op.kind, "primitive_grouped_count_star_row_update",
+		RecordSljitRegionMaterializationElision(runtime, aggregate_op.Kind(), "primitive_grouped_count_star_row_update",
 		                                        input.size());
 		return true;
 	}
@@ -253,7 +253,7 @@ private:
 		if (SljitTryPreaggregateProjectedCountStarGroups(group_projection, *prepared.source_chunk, prepared.selection,
 		                                                 prepared.count, preaggregated_groups,
 		                                                 preaggregated_count_deltas)) {
-			RecordSljitRegionStageRuntime(runtime, aggregate_idx, aggregate_op.kind,
+			RecordSljitRegionStageRuntime(runtime, aggregate_idx, aggregate_op.Kind(),
 			                              "primitive_projected_preaggregate_count_star_groups",
 			                              preaggregate_stage_start);
 			if (!AccumulatePreaggregatedCountStar(runtime, scratch, aggregate_idx, aggregate_op, preaggregated_groups,
@@ -261,17 +261,17 @@ private:
 				return false;
 			}
 			RecordSljitRegionMaterializationElision(
-			    runtime, aggregate_op.kind, "primitive_projected_preaggregated_count_star_update", prepared.count);
+			    runtime, aggregate_op.Kind(), "primitive_projected_preaggregated_count_star_update", prepared.count);
 			return true;
 		}
 
 		preaggregated_groups.Reset();
-		SljitExecuteProjectionExpression(group_projection.projections[0], *prepared.source_chunk,
+		SljitExecuteProjectionExpression(group_projection.Projections()[0], *prepared.source_chunk,
 		                                 preaggregated_groups.data[0], prepared.selection, prepared.count,
 		                                 projected_count_star_group_scratch, &runtime);
 		preaggregated_groups.SetChildCardinality(prepared.count);
 		row_count_deltas.assign(prepared.count, 1);
-		RecordSljitRegionStageRuntime(runtime, aggregate_idx, aggregate_op.kind, "count_star_projected_row_groups",
+		RecordSljitRegionStageRuntime(runtime, aggregate_idx, aggregate_op.Kind(), "count_star_projected_row_groups",
 		                              preaggregate_stage_start);
 		if (!FlushPendingPreaggregatedCountStar(runtime, scratch, aggregate_idx, aggregate_op)) {
 			return false;
@@ -280,7 +280,7 @@ private:
 		                            row_count_deltas, prepared.count)) {
 			return false;
 		}
-		RecordSljitRegionMaterializationElision(runtime, aggregate_op.kind, "count_star_projected_row_update",
+		RecordSljitRegionMaterializationElision(runtime, aggregate_op.Kind(), "count_star_projected_row_update",
 		                                        prepared.count);
 		return true;
 	}
@@ -323,8 +323,9 @@ private:
 		pending_preaggregated_count_deltas.clear();
 		pending_preaggregated_row_count = 0;
 		if (updated) {
-			RecordSljitRegionMaterializationElision(
-			    runtime, aggregate_op.kind, "primitive_pending_preaggregated_count_star_flush", represented_row_count);
+			RecordSljitRegionMaterializationElision(runtime, aggregate_op.Kind(),
+			                                        "primitive_pending_preaggregated_count_star_flush",
+			                                        represented_row_count);
 		}
 		return updated;
 	}
@@ -371,7 +372,7 @@ private:
 		pending_row_count_deltas.clear();
 		pending_row_count = 0;
 		if (updated) {
-			RecordSljitRegionMaterializationElision(runtime, aggregate_op.kind,
+			RecordSljitRegionMaterializationElision(runtime, aggregate_op.Kind(),
 			                                        "primitive_pending_count_star_row_flush", represented_row_count);
 		}
 		return updated;

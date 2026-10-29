@@ -93,7 +93,7 @@ public:
 	                                                  const ExecutionRegionOperatorInfo &operator_info,
 	                                                  ExecutionOperatorBinding &binding) const override;
 	bool BindExecutionSink(ExecutionContext &context, DataChunk &input, OperatorSinkInput &sink_input,
-	                       const ExecutionRegionSinkInfo &sink_info, ExecutionSinkBinding &binding) const override;
+	                       const ExecutionRegionHashJoinInfo &sink_info, ExecutionSinkBinding &binding) const override;
 
 	bool ParallelOperator() const override {
 		return true;

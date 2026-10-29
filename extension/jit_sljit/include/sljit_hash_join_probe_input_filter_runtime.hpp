@@ -60,7 +60,7 @@ static bool SljitTryBuildHashJoinProbeInputMappedFilter(const ExecutionHashJoinP
                                                         const vector<LogicalType> &input_types,
                                                         SljitExecutableRegionOp &filter_op,
                                                         SljitExecutableRegionOp &mapped_filter, string &blocker) {
-	if (filter_op.kind != SljitNativeRegionOpKind::FILTER ||
+	if (filter_op.Kind() != SljitNativeRegionOpKind::FILTER ||
 	    binding.output_types.size() < binding.lhs_output_column_indices.size()) {
 		blocker = "filter_shape";
 		return false;
@@ -75,15 +75,15 @@ static bool SljitTryBuildHashJoinProbeInputMappedFilter(const ExecutionHashJoinP
 		source_map[output_idx] = input_idx;
 	}
 
-	D_ASSERT(filter_op.filter);
-	auto mapped_plan = SljitCopySemanticExpressionPlan(filter_op.filter->expression);
+	D_ASSERT(filter_op.Filter());
+	auto mapped_plan = SljitCopySemanticExpressionPlan(filter_op.Filter()->expression);
 	idx_t failed_source_index = DConstants::INVALID_INDEX;
 	if (!SljitTryRemapSemanticPlanSources(source_map, mapped_plan, optional_ptr<idx_t>(&failed_source_index))) {
 		blocker = "non_probe_source_" + std::to_string(failed_source_index);
 		return false;
 	}
 	mapped_filter = SljitExecutableRegionOp();
-	mapped_filter.kind = SljitNativeRegionOpKind::FILTER;
+	mapped_filter.SetKind(SljitNativeRegionOpKind::FILTER);
 	mapped_filter.input_types = input_types;
 	mapped_filter.output_types = input_types;
 	string compile_error;
@@ -128,7 +128,7 @@ static SljitHashJoinProbeInputFilterResult SljitTryExecuteHashJoinProbeInputFilt
 	const auto selected_count =
 	    SljitSelectFilter(*cache.mapped_filter, input, filter_selection,
 	                      scratch.ExpressionAdapterScratch(filter_idx, 0), nullptr, input.size(), &runtime);
-	RecordSljitRegionStageRuntime(runtime, filter_idx, ops[filter_idx].kind, "probe_input_selection",
+	RecordSljitRegionStageRuntime(runtime, filter_idx, ops[filter_idx].Kind(), "probe_input_selection",
 	                              filter_stage_start);
 	if (selected_count == 0) {
 		result.status = SljitHashJoinProbeInputFilterStatus::EMPTY;

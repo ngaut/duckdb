@@ -139,15 +139,15 @@ bool PhysicalRightDelimJoin::BindExecutionSink(ExecutionContext &context, DataCh
                                                OperatorSinkInput &sink_input, const ExecutionRegionSinkInfo &sink_info,
                                                ExecutionSinkBinding &binding) const {
 	binding = ExecutionSinkBinding();
-	binding.kind = sink_info.kind;
-	if (sink_info.kind != ExecutionRegionSinkKind::DELIM_JOIN_SINK) {
+	binding.kind = sink_info.Kind();
+	if (sink_info.Kind() != ExecutionRegionSinkKind::DELIM_JOIN_SINK) {
 		binding.blocker =
-		    "right-delim-join-sink-kind-mismatch;kind=" + string(ExecutionRegionSinkKindToString(sink_info.kind));
+		    "right-delim-join-sink-kind-mismatch;kind=" + string(ExecutionRegionSinkKindToString(sink_info.Kind()));
 		return false;
 	}
-	if (sink_info.native_sink_contract.status != ExecutionRegionStateContractStatus::READY) {
-		binding.blocker = sink_info.native_sink_contract.blocker.empty() ? "right-delim-join-sink-contract-not-ready"
-		                                                                 : sink_info.native_sink_contract.blocker;
+	if (sink_info.Native().status != ExecutionRegionStateContractStatus::READY) {
+		binding.blocker = sink_info.Native().blocker.empty() ? "right-delim-join-sink-contract-not-ready"
+		                                                     : sink_info.Native().blocker;
 		return false;
 	}
 	auto &lstate = sink_input.local_state.Cast<RightDelimJoinLocalState>();
@@ -160,8 +160,7 @@ bool PhysicalRightDelimJoin::BindExecutionSink(ExecutionContext &context, DataCh
 		return false;
 	}
 
-	ExecutionRegionSinkInfo join_info = sink_info;
-	join_info.kind = ExecutionRegionSinkKind::HASH_JOIN_BUILD;
+	const auto &join_info = sink_info.DelimJoin().build;
 	OperatorSinkInput join_sink_input {*join.sink_state, *lstate.join_state, sink_input.interrupt_state};
 	ExecutionSinkBinding join_binding;
 	if (!join.BindExecutionSink(context, input, join_sink_input, join_info, join_binding) || !join_binding.ready ||

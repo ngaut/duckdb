@@ -29,24 +29,24 @@ static bool TryPrepareFlatFusedFixedProjectionSources(SljitExecutableRegionOp &o
                                                       idx_t source_offset, idx_t count,
                                                       optional_ptr<SljitFixedDirectProjectionSourceCache> source_cache,
                                                       PROJECTION_SCRATCH &adapter_scratch) {
-	if (op.flat_fused_fixed_projection_plans.empty() ||
-	    op.flat_fused_fixed_projection_plans.size() != op.flat_fused_fixed_projections.size()) {
+	if (op.FlatFusedProjectionPlans().empty() ||
+	    op.FlatFusedProjectionPlans().size() != op.FlatFusedProjections().size()) {
 		return false;
 	}
-	adapter_scratch.Prepare(op.projections.size(), true);
-	for (idx_t plan_idx = 0; plan_idx < op.flat_fused_fixed_projection_plans.size(); plan_idx++) {
-		if (!op.flat_fused_fixed_projections[plan_idx].Function()) {
+	adapter_scratch.Prepare(op.Projections().size(), true);
+	for (idx_t plan_idx = 0; plan_idx < op.FlatFusedProjectionPlans().size(); plan_idx++) {
+		if (!op.FlatFusedProjections()[plan_idx].Function()) {
 			return false;
 		}
-		auto &direct_plan = op.flat_fused_fixed_projection_plans[plan_idx];
+		auto &direct_plan = op.FlatFusedProjectionPlans()[plan_idx];
 		if (direct_plan.sources.empty()) {
 			return false;
 		}
 		for (auto &source : direct_plan.sources) {
-			if (source.projection_index >= op.projections.size()) {
+			if (source.projection_index >= op.Projections().size()) {
 				throw InternalException("SLJIT fixed fused direct projection source is out of range");
 			}
-			auto &plan = op.projections[source.projection_index].plan;
+			auto &plan = op.Projections()[source.projection_index].plan;
 			UnifiedVectorFormat local_source_format;
 			UnifiedVectorFormat *source_format;
 			if (!PrepareFixedDirectProjectionSource(input, source.input_index, source_offset, count, source_cache,
@@ -59,7 +59,7 @@ static bool TryPrepareFlatFusedFixedProjectionSources(SljitExecutableRegionOp &o
 			adapter_scratch.SetSourceData(source.projection_index, source.right_source, source_pointer);
 		}
 		for (auto projection_idx : direct_plan.projection_indices) {
-			auto &expr = op.projections[projection_idx];
+			auto &expr = op.Projections()[projection_idx];
 			auto &plan = expr.plan;
 			if (plan.kind != SljitNativeRegionExpressionKind::INTEGER_BINARY_CONSTANT &&
 			    plan.kind != SljitNativeRegionExpressionKind::INTEGER_BINARY_REFERENCES) {
@@ -82,10 +82,10 @@ static bool TryPrepareFlatFusedFixedProjectionSources(SljitExecutableRegionOp &o
 template <class PROJECTION_SCRATCH>
 static void BindFlatFusedFixedProjectionTargets(SljitExecutableRegionOp &op, DirectAppendSlice &slice,
                                                 PROJECTION_SCRATCH &adapter_scratch) {
-	if (slice.targets.size() != op.projections.size()) {
+	if (slice.targets.size() != op.Projections().size()) {
 		throw InternalException("SLJIT fixed fused direct projection target count mismatch");
 	}
-	for (auto &direct_plan : op.flat_fused_fixed_projection_plans) {
+	for (auto &direct_plan : op.FlatFusedProjectionPlans()) {
 		for (auto projection_idx : direct_plan.projection_indices) {
 			auto target = slice.targets[projection_idx];
 			if (!target) {
@@ -106,7 +106,7 @@ static void RunFlatFusedFixedProjection(ExecutionRegionRuntime &runtime, SljitEx
 	native_input.constants = adapter_scratch.integer_constants.data();
 	native_input.count = count;
 	native_input.has_error = false;
-	for (auto &projection : op.flat_fused_fixed_projections) {
+	for (auto &projection : op.FlatFusedProjections()) {
 		native_input.error = nullptr;
 		SljitExecuteNativeFunction(projection.Function(), native_input);
 		RecordSljitRegionGeneratedWork(runtime, SljitNativeRegionOpKind::PROJECTION, count);

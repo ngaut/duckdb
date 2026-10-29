@@ -15,6 +15,7 @@ add_library_unity(
   column_binding_resolver.cpp
   expression_executor.cpp
   expression_executor_state.cpp
+  execution_chunk_coalescer.cpp
   execution_region_artifact_cache.cpp
   execution_region_backend.cpp
   execution_region_cost_input.cpp

@@ -15,14 +15,14 @@ public:
 ExecutionContract PhysicalExplainAnalyze::GetExecutionContract(ExecutionRegionOperatorSlot slot,
                                                                bool render_diagnostics) const {
 	ExecutionContract result;
-	result.sink.kind = ExecutionRegionSinkKind::MATERIALIZATION;
+	result.sink.SetKind(ExecutionRegionSinkKind::MATERIALIZATION);
 	result.sink.reason = "DuckDB explain analyze materialization sink contract";
 	result.sink.reason += ";operator=EXPLAIN_ANALYZE";
 	result.sink.reason += ";input_columns=" + std::to_string(children.empty() ? 0 : children[0].get().types.size());
-	result.sink.native_sink_contract.status = ExecutionRegionStateContractStatus::READY;
-	result.sink.native_sink_contract.required_capability = "materialization-append-sink";
-	result.sink.native_sink_contract.contract_version = "v1";
-	result.sink.native_sink_contract.blocker.clear();
+	result.sink.Native().status = ExecutionRegionStateContractStatus::READY;
+	result.sink.Native().required_capability = "materialization-append-sink";
+	result.sink.Native().contract_version = "v1";
+	result.sink.Native().blocker.clear();
 	result.sink.reason += ";sink_contract_status=ready";
 	result.sink.reason += ";sink_required_capability=materialization-append-sink";
 	result.sink.reason += ";sink_contract_version=v1";
@@ -44,11 +44,14 @@ bool PhysicalExplainAnalyze::BindExecutionSink(ExecutionContext &context, DataCh
 	(void)input;
 	(void)sink_input;
 	binding = ExecutionSinkBinding();
-	binding.kind = sink_info.kind;
-	if (sink_info.kind != ExecutionRegionSinkKind::MATERIALIZATION ||
-	    sink_info.native_sink_contract.status != ExecutionRegionStateContractStatus::READY) {
-		binding.blocker = sink_info.native_sink_contract.blocker.empty() ? "explain-analyze-sink-contract-not-ready"
-		                                                                 : sink_info.native_sink_contract.blocker;
+	binding.kind = sink_info.Kind();
+	if (sink_info.Kind() != ExecutionRegionSinkKind::MATERIALIZATION) {
+		binding.blocker = "explain-analyze-sink-kind-mismatch";
+		return false;
+	}
+	if (sink_info.Native().status != ExecutionRegionStateContractStatus::READY) {
+		binding.blocker =
+		    sink_info.Native().blocker.empty() ? "explain-analyze-sink-contract-not-ready" : sink_info.Native().blocker;
 		return false;
 	}
 	binding.ready = true;

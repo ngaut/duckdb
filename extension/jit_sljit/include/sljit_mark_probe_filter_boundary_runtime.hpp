@@ -60,7 +60,7 @@ public:
 				const bool materialize =
 				    primitive.strategy == SljitMarkProbeFilterBoundaryStrategy::FILTERED_MATERIALIZED;
 				RecordSljitRegionRuntimePath(
-				    runtime, filter_op.kind,
+				    runtime, filter_op.Kind(),
 				    mark_filter_mode == SljitMarkProbeFilterMode::MATCHES
 				        ? (materialize ? "mark_probe_match_materialized" : "mark_probe_match_selection")
 				        : (materialize ? "mark_probe_nonmatch_materialized" : "mark_probe_nonmatch_selection"),

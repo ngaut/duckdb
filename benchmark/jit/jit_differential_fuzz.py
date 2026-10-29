@@ -802,45 +802,54 @@ def error_signature(output: str) -> str | None:
     return None
 
 
-def classify(off: RunResult, run: RunResult) -> str:
+def execution_failure(run: RunResult) -> str | None:
     if run.output == "TIMEOUT":
         return "timeout"
     if "INTERNAL Error" in run.output or "FATAL" in run.output or run.returncode < 0:
         return "crash"
+    if "Out of Memory Error" in run.output:
+        return "oom"
+    if run.returncode != 0 and error_signature(run.output) is None:
+        return "process_error"
+    return None
+
+
+def classify(off: RunResult, run: RunResult) -> str:
+    failure = execution_failure(run)
+    if failure:
+        return failure
     off_error = error_signature(off.output)
     if off_error is not None:
         # a query off rejects must fail the same way with the JIT; succeeding means a check was skipped
         run_error = error_signature(run.output)
         if run_error == off_error:
             return "ok"
-        if run_error is not None and "Out of Memory Error" in run.output:
-            return "oom"
         return "error" if run_error is not None else "mismatch"
+    if run.returncode != off.returncode:
+        return "error"
     if run.output != off.output:
-        if "Out of Memory Error" in run.output:
-            # near a memory limit either run may fail to fit; a result that differs is what marks a JIT bug
-            return "oom"
         return "error" if "Error" in run.output else "mismatch"
     return "ok"
 
 
+def output_excerpt(output: str) -> str:
+    return next((line for line in output.splitlines() if "Error" in line), output[-600:])
+
+
 def check(args: argparse.Namespace, index: int, sql: str, threads: int) -> dict:
     off = run_query(args.duckdb, args.database, args.settings + CONFIGS["off"], threads, sql, args.timeout)
-    record = {"index": index, "threads": threads, "sql": sql, "off": off.output[-300:], "results": {}}
-    if (
-        off.output == "TIMEOUT"
-        or off.returncode < 0
-        or any(marker in off.output for marker in ("INTERNAL Error", "FATAL", "Out of Memory Error"))
-    ):
-        record["invalid"] = True
+    record = {"index": index, "threads": threads, "sql": sql, "off": output_excerpt(off.output), "results": {}}
+    failure = execution_failure(off)
+    if failure:
+        record["reference_failure"] = failure
+        record["off_returncode"] = off.returncode
         return record
     for name in ("default", "forced"):
         run = run_query(args.duckdb, args.database, args.settings + CONFIGS[name], threads, sql, args.timeout)
         verdict = classify(off, run)
         record["results"][name] = verdict
         if verdict != "ok":
-            errors = [line for line in run.output.splitlines() if "Error" in line]
-            record.setdefault("outputs", {})[name] = errors[0] if errors else run.output[-600:]
+            record.setdefault("outputs", {})[name] = output_excerpt(run.output)
     return record
 
 
@@ -853,7 +862,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--threads", type=int, default=4)
     parser.add_argument("--workers", type=int, default=3)
     parser.add_argument("--timeout", type=int, default=120)
-    parser.add_argument("--report", type=Path, help="JSON report of every non-ok query")
+    parser.add_argument("--report", type=Path, help="JSON coverage summary and every non-ok query")
     parser.add_argument(
         "--settings",
         default="",
@@ -861,36 +870,51 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument("--replay", type=Path, help="re-check an earlier report's queries at one and --threads threads")
     args = parser.parse_args(argv)
+    for name in ("queries", "threads", "workers", "timeout"):
+        if getattr(args, name) <= 0:
+            parser.error(f"--{name} must be positive")
 
     restrict_schema(database_columns(args.duckdb, args.database))
     if args.replay:
         earlier = json.loads(args.replay.read_text(encoding="utf-8"))
-        jobs = [(record["index"], record["sql"], threads) for record in earlier for threads in (1, args.threads)]
+        jobs = [
+            (record["index"], record["sql"], threads)
+            for record in earlier["records"]
+            for threads in dict.fromkeys((1, args.threads))
+        ]
     else:
         generator = QueryGenerator(args.seed)
         jobs = [(index, generator.query(), 1 if index % 4 == 0 else args.threads) for index in range(args.queries)]
-    findings, invalid, ooms, done = [], 0, 0, 0
+    if not jobs:
+        parser.error("replay contains no queries")
+    records = []
+    summary = {"attempted": 0, "compared": 0, "inconclusive": 0, "findings": 0}
     with concurrent.futures.ThreadPoolExecutor(max_workers=args.workers) as pool:
         futures = [pool.submit(check, args, index, sql, threads) for index, sql, threads in jobs]
         for future in concurrent.futures.as_completed(futures):
             record = future.result()
-            done += 1
-            if record.get("invalid"):
-                invalid += 1
-                continue
-            ooms += sum(verdict == "oom" for verdict in record["results"].values())
+            summary["attempted"] += 1
+            incomplete = bool(record.get("reference_failure")) or any(
+                verdict in ("oom", "timeout", "crash", "process_error") for verdict in record["results"].values()
+            )
+            summary["inconclusive"] += incomplete
+            summary["compared"] += not incomplete
             bad = {name: verdict for name, verdict in record["results"].items() if verdict not in ("ok", "oom")}
-            if bad:
-                findings.append(record)
-                print(f"[{done}/{len(jobs)}] q{record['index']} t{record['threads']} {bad}", flush=True)
-    findings.sort(key=lambda record: (record["index"], record["threads"]))
+            summary["findings"] += bool(bad)
+            if bad or incomplete:
+                records.append(record)
+                reason = record.get("reference_failure") or record["results"]
+                print(
+                    f"[{summary['attempted']}/{len(jobs)}] q{record['index']} t{record['threads']} {reason}", flush=True
+                )
+    records.sort(key=lambda record: (record["index"], record["threads"]))
     print(
-        f"checked {len(jobs) - invalid} queries ({invalid} invalid, {ooms} JIT runs out of memory), "
-        f"{len(findings)} with findings"
+        f"attempted {summary['attempted']} queries, compared {summary['compared']}, "
+        f"{summary['inconclusive']} inconclusive, {summary['findings']} with findings"
     )
     if args.report:
-        args.report.write_text(json.dumps(findings, indent=2) + "\n", encoding="utf-8")
-    return 1 if findings else 0
+        args.report.write_text(json.dumps({"summary": summary, "records": records}, indent=2) + "\n", encoding="utf-8")
+    return 1 if summary["findings"] else 2 if summary["inconclusive"] else 0
 
 
 if __name__ == "__main__":

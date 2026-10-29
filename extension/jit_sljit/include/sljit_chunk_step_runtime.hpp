@@ -12,7 +12,6 @@
 
 #include "sljit_hash_join_probe_drain_runtime.hpp"
 #include "sljit_native_pipeline_runtime.hpp"
-#include "sljit_source_fetch_primitive_runtime.hpp"
 #include "sljit_source_pipeline_runtime.hpp"
 
 namespace duckdb {
@@ -72,19 +71,20 @@ private:
 	SljitFullPipelinePrimitiveSequenceBatchExecutor<NativeTailExecutor, HashJoinProbeExecutor> executor;
 };
 
-//! A recipe of native operators only, bound to one pipeline executor. Small source chunks (a selective scan filter)
-//! batch before the operators run, so they pay the per-chunk operator and sink cost once per batch
+//! Native-contract operators consume the core runner's source batches.
 template <class KERNEL>
 class SljitNativeOnlyChunkStep final : public ExecutionRegionChunkStep {
 public:
 	SljitNativeOnlyChunkStep(KERNEL &kernel_p, ExecutionRegionRuntime &runtime_p, vector<SljitExecutableRegionOp> &ops,
 	                         SljitRegionExecutionScratch &scratch_p)
-	    : kernel(kernel_p), runtime(runtime_p), scratch(scratch_p), native(kernel_p, runtime_p, ops),
-	      source_fetch(runtime_p) {
+	    : kernel(kernel_p), runtime(runtime_p), scratch(scratch_p), native(kernel_p, runtime_p, ops) {
 	}
 
 	SinkResultType ExecuteChunk(DataChunk &input) override {
-		return SljitChunkStepResult(source_fetch.Execute(input, ExecuteBatchFunction()), result);
+		if (runtime.TraceRuntime()) {
+			runtime.RecordJitRuntimeProof(ExecutionRegionJitRuntimeProof::FULL_PIPELINE_OWNERSHIP, input.size());
+		}
+		return SljitChunkStepResult(ExecuteBatchFunction()(SljitRuntimeBatchViewFromChunk(input)), result);
 	}
 
 	void FlushChunks() override {
@@ -110,9 +110,6 @@ private:
 	}
 
 	bool Flush() {
-		if (source_fetch.Flush(ExecuteBatchFunction())) {
-			return true;
-		}
 		native.Finalize(scratch);
 		return false;
 	}
@@ -123,7 +120,6 @@ private:
 	SljitRegionExecutionScratch &scratch;
 	ExecutionRegionResult result = ExecutionRegionResult::NOT_FINISHED;
 	SljitNativePipelineExecutor<KERNEL, SljitNativePipelineTerminalPolicy> native;
-	SljitSourceFetchPrimitiveRuntime source_fetch;
 };
 
 } // namespace duckdb

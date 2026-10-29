@@ -15,7 +15,7 @@ namespace duckdb {
 static bool SljitTryMarkProjectionAggregateRequiredOutput(const SljitExecutableRegionOp &projection_op,
                                                           idx_t projection_idx,
                                                           vector<uint8_t> &required_projection_outputs) {
-	if (projection_idx >= projection_op.projections.size() || projection_idx >= required_projection_outputs.size()) {
+	if (projection_idx >= projection_op.Projections().size() || projection_idx >= required_projection_outputs.size()) {
 		return false;
 	}
 	required_projection_outputs[projection_idx] = 1;
@@ -25,14 +25,14 @@ static bool SljitTryMarkProjectionAggregateRequiredOutput(const SljitExecutableR
 static bool SljitTryBuildUngroupedAggregateRequiredProjectionOutputs(const SljitExecutableRegionOp &projection_op,
                                                                      const SljitExecutableRegionOp &aggregate_op,
                                                                      vector<uint8_t> &required_projection_outputs) {
-	if (projection_op.kind != SljitNativeRegionOpKind::PROJECTION ||
-	    aggregate_op.kind != SljitNativeRegionOpKind::AGGREGATE_UPDATE ||
-	    projection_op.projections.size() != projection_op.output_types.size()) {
+	if (projection_op.Kind() != SljitNativeRegionOpKind::PROJECTION ||
+	    aggregate_op.Kind() != SljitNativeRegionOpKind::AGGREGATE_UPDATE ||
+	    projection_op.Projections().size() != projection_op.output_types.size()) {
 		return false;
 	}
-	auto &aggregate_update = aggregate_op.aggregate_update;
+	auto &aggregate_update = aggregate_op.AggregateUpdate();
 	auto &sink_info = aggregate_update.plan.sink_info;
-	if (sink_info.kind != ExecutionRegionSinkKind::UNGROUPED_AGGREGATE_UPDATE || !sink_info.groups.empty() ||
+	if (sink_info.Kind() != ExecutionRegionSinkKind::UNGROUPED_AGGREGATE_UPDATE || !sink_info.groups.empty() ||
 	    !aggregate_update.plan.UsesPrimitivePayloads() || aggregate_update.plan.use_grouped_state_addresses ||
 	    aggregate_update.plan.use_perfect_hash_group_lookup ||
 	    aggregate_update.payloads.size() != sink_info.aggregates.size()) {
@@ -43,7 +43,7 @@ static bool SljitTryBuildUngroupedAggregateRequiredProjectionOutputs(const Sljit
 		return false;
 	}
 
-	required_projection_outputs.assign(projection_op.projections.size(), 0);
+	required_projection_outputs.assign(projection_op.Projections().size(), 0);
 	if (aggregate_update.fused_payload_update.Function() &&
 	    aggregate_update.payload_source_layout == SljitAggregatePayloadSourceLayout::FUSED_COMBINED) {
 		if (aggregate_update.combined_payload_source_not_null.size() !=
@@ -72,7 +72,7 @@ static bool SljitTryBuildUngroupedAggregateRequiredProjectionOutputs(const Sljit
 			return false;
 		}
 		if (!SljitAddProjectionSourceColumns(aggregate_update.payloads[payload_idx].input_source_indices,
-		                                     projection_op.projections.size(), required_projection_outputs)) {
+		                                     projection_op.Projections().size(), required_projection_outputs)) {
 			return false;
 		}
 	}
@@ -125,10 +125,10 @@ static void SljitBindHashJoinDirectUngroupedAggregateDescriptor(const ExecutionH
                                                                 SljitJoinProjectionAggregateDescriptor &descriptor) {
 	auto &direct = descriptor.direct_ungrouped_aggregate;
 	direct = SljitHashJoinDirectUngroupedAggregateDescriptor();
-	auto &aggregate_update = aggregate_op.aggregate_update;
+	auto &aggregate_update = aggregate_op.AggregateUpdate();
 	auto &sink_info = aggregate_update.plan.sink_info;
 	if (binding.output_mode != ExecutionHashJoinProbeOutputMode::MATCHED_PROBE_AND_BUILD ||
-	    sink_info.kind != ExecutionRegionSinkKind::UNGROUPED_AGGREGATE_UPDATE || !sink_info.groups.empty() ||
+	    sink_info.Kind() != ExecutionRegionSinkKind::UNGROUPED_AGGREGATE_UPDATE || !sink_info.groups.empty() ||
 	    !aggregate_update.plan.UsesPrimitivePayloads() || aggregate_update.plan.use_grouped_state_addresses ||
 	    sink_info.aggregates.size() != 1 || aggregate_update.payload_descriptors.size() != 1 ||
 	    descriptor.remapped_payloads.size() != 1) {
@@ -152,12 +152,12 @@ static void SljitBindHashJoinDirectUngroupedAggregateDescriptor(const ExecutionH
 	}
 	auto &input_source = descriptor.input_sources[aggregate_input_idx];
 	if (input_source.kind != SljitJoinProjectionAggregateInputKind::PROJECTION_OUTPUT ||
-	    input_source.projection_idx >= descriptor.Projection().projections.size()) {
+	    input_source.projection_idx >= descriptor.Projection().Projections().size()) {
 		return;
 	}
 	idx_t join_output_idx;
 	if (!SljitTryGetSingleSourceReferenceProjectionIndex(
-	        descriptor.Projection().projections[input_source.projection_idx], join_output_idx)) {
+	        descriptor.Projection().Projections()[input_source.projection_idx], join_output_idx)) {
 		return;
 	}
 	const auto lhs_column_count = binding.lhs_output_column_indices.size();
@@ -191,7 +191,7 @@ static bool SljitTryBuildProjectionUngroupedAggregateDescriptor(
 	                                                              required_projection_outputs)) {
 		return descriptor.Block("ungrouped_payload_sources");
 	}
-	vector<idx_t> projection_to_input(projection_op.projections.size(), DConstants::INVALID_INDEX);
+	vector<idx_t> projection_to_input(projection_op.Projections().size(), DConstants::INVALID_INDEX);
 	for (idx_t projection_idx = 0; projection_idx < required_projection_outputs.size(); projection_idx++) {
 		if (!required_projection_outputs[projection_idx]) {
 			continue;
@@ -201,11 +201,11 @@ static bool SljitTryBuildProjectionUngroupedAggregateDescriptor(
 			return descriptor.Block("ungrouped_input_source");
 		}
 	}
-	if (!SljitTryBuildRemappedUngroupedAggregatePayloads(aggregate_op.aggregate_update, projection_to_input,
+	if (!SljitTryBuildRemappedUngroupedAggregatePayloads(aggregate_op.AggregateUpdate(), projection_to_input,
 	                                                     descriptor.remapped_payloads)) {
 		return descriptor.Block("ungrouped_payload_remap");
 	}
-	descriptor.payload_source_layout = aggregate_op.aggregate_update.payload_source_layout;
+	descriptor.payload_source_layout = aggregate_op.AggregateUpdate().payload_source_layout;
 	if (descriptor.payload_source_layout == SljitAggregatePayloadSourceLayout::FUSED_COMBINED) {
 		if (descriptor.remapped_payloads.empty()) {
 			return descriptor.Block("ungrouped_payload_sources");

@@ -4,6 +4,7 @@
 #include "sljit_platform.hpp"
 #include "sljit_region_plan.hpp"
 #include "sljit_region_plan_internal.hpp"
+#include "sljit_region_executable.hpp"
 #include "sljit_register_layout.hpp"
 #include "sljit_typed_expression_simd_codegen.hpp"
 
@@ -636,13 +637,11 @@ TEST_CASE("SLJIT artifact cache keys include compile-affecting bindings", "[api]
 	first_double.double_constant = 1.0000001;
 	auto second_double = first_double.Copy();
 	second_double.double_constant = 1.0000002;
-	REQUIRE(DescribeNativeRegionExpressionSemantic(first_double) !=
-	        DescribeNativeRegionExpressionSemantic(second_double));
+	REQUIRE(BuildSljitExpressionArtifactKey(first_double) != BuildSljitExpressionArtifactKey(second_double));
 
 	first_double.double_constant = 0.0;
 	second_double.double_constant = -0.0;
-	REQUIRE(DescribeNativeRegionExpressionSemantic(first_double) !=
-	        DescribeNativeRegionExpressionSemantic(second_double));
+	REQUIRE(BuildSljitExpressionArtifactKey(first_double) != BuildSljitExpressionArtifactKey(second_double));
 
 	SljitNativeRegionExpressionPlan first_predicate;
 	first_predicate.kind = SljitNativeRegionExpressionKind::PREDICATE;
@@ -651,8 +650,438 @@ TEST_CASE("SLJIT artifact cache keys include compile-affecting bindings", "[api]
 	first_predicate.predicate->double_constant = 1.0000001;
 	auto second_predicate = first_predicate.Copy();
 	second_predicate.predicate->double_constant = 1.0000002;
-	REQUIRE(DescribeNativeRegionExpressionSemantic(first_predicate) !=
-	        DescribeNativeRegionExpressionSemantic(second_predicate));
+	REQUIRE(BuildSljitExpressionArtifactKey(first_predicate) != BuildSljitExpressionArtifactKey(second_predicate));
+}
+
+TEST_CASE("SLJIT operator descriptors own exactly one kind payload", "[api][jit]") {
+	const vector<SljitNativeRegionOpKind> kinds {
+	    SljitNativeRegionOpKind::FILTER,          SljitNativeRegionOpKind::PROJECTION,
+	    SljitNativeRegionOpKind::HASH_JOIN_PROBE, SljitNativeRegionOpKind::HASH_JOIN_BUILD,
+	    SljitNativeRegionOpKind::ORDER_SINK,      SljitNativeRegionOpKind::APPEND_SINK,
+	    SljitNativeRegionOpKind::AGGREGATE_UPDATE};
+	for (auto kind : kinds) {
+		SljitNativeRegionOpPlan native(kind);
+		SljitExecutableRegionOp executable(kind);
+		REQUIRE(native.Kind() == kind);
+		REQUIRE(executable.Kind() == kind);
+		if (kind != SljitNativeRegionOpKind::PROJECTION) {
+			REQUIRE_THROWS_AS(native.Projections(), std::bad_variant_access);
+			REQUIRE_THROWS_AS(executable.Projections(), std::bad_variant_access);
+		}
+		native.SetKind(SljitNativeRegionOpKind::PROJECTION);
+		executable.SetKind(SljitNativeRegionOpKind::PROJECTION);
+		native.Projections().emplace_back();
+		executable.Projections().emplace_back();
+		auto moved_native = std::move(native);
+		auto moved_executable = std::move(executable);
+		REQUIRE(moved_native.Projections().size() == 1);
+		REQUIRE(moved_executable.Projections().size() == 1);
+		moved_native.SetKind(SljitNativeRegionOpKind::HASH_JOIN_BUILD);
+		moved_executable.SetKind(SljitNativeRegionOpKind::HASH_JOIN_BUILD);
+		REQUIRE(moved_executable.CodeSize() == 0);
+		REQUIRE_FALSE(moved_executable.HasExecutableBody());
+	}
+	INFO("native descriptor bytes=" << sizeof(SljitNativeRegionOpPlan));
+	INFO("executable descriptor bytes=" << sizeof(SljitExecutableRegionOp));
+	REQUIRE(sizeof(SljitNativeRegionOpPlan) < sizeof(SljitNativeHashJoinProbePlan) +
+	                                              sizeof(SljitNativeAggregateUpdatePlan) +
+	                                              sizeof(SljitNativeOrderSinkPlan));
+	REQUIRE(sizeof(SljitExecutableRegionOp) < sizeof(SljitExecutableHashJoinProbe) +
+	                                              sizeof(SljitExecutableAggregateUpdate) +
+	                                              sizeof(SljitExecutableOrderSink));
+}
+
+TEST_CASE("SLJIT aggregate plans own only aggregate sink metadata", "[api][jit]") {
+	INFO("aggregate plan bytes=" << sizeof(SljitNativeAggregateUpdatePlan));
+	INFO("aggregate sink bytes=" << sizeof(ExecutionRegionAggregateSinkInfo));
+	REQUIRE(sizeof(decltype(SljitNativeAggregateUpdatePlan::sink_info)) == sizeof(ExecutionRegionAggregateSinkInfo));
+	SljitNativeAggregateUpdatePlan plan;
+	REQUIRE(plan.sink_info.Kind() == ExecutionRegionSinkKind::UNGROUPED_AGGREGATE_UPDATE);
+	plan.sink_info.contract.kind = ExecutionRegionAggregateOperatorKind::HASH;
+	REQUIRE(plan.sink_info.Kind() == ExecutionRegionSinkKind::HASH_AGGREGATE_UPDATE);
+	plan.sink_info.groups.emplace_back();
+	plan.sink_info.groups[0].input_index = 7;
+	auto copy = plan.sink_info;
+	plan.sink_info.groups[0].input_index = 9;
+	plan.sink_info.contract.kind = ExecutionRegionAggregateOperatorKind::PERFECT_HASH;
+	REQUIRE(plan.sink_info.Kind() == ExecutionRegionSinkKind::PERFECT_HASH_AGGREGATE_UPDATE);
+	REQUIRE(copy.Kind() == ExecutionRegionSinkKind::HASH_AGGREGATE_UPDATE);
+	REQUIRE(copy.groups[0].input_index == 7);
+}
+
+TEST_CASE("SLJIT hash-build and ordered plans own only their family metadata", "[api][jit]") {
+	REQUIRE(sizeof(decltype(SljitNativeHashJoinBuildPlan::sink_info)) == sizeof(ExecutionRegionHashJoinInfo));
+	REQUIRE(sizeof(decltype(SljitNativeOrderSinkPlan::sink_info)) == sizeof(ExecutionRegionOrderSinkInfo));
+	REQUIRE(sizeof(SljitNativeHashJoinBuildPlan) < sizeof(ExecutionRegionSinkInfo));
+	REQUIRE(sizeof(SljitNativeOrderSinkPlan) < sizeof(ExecutionRegionSinkInfo));
+	SljitNativeRegionPlan plan;
+	plan.ops.emplace_back(SljitNativeRegionOpKind::HASH_JOIN_BUILD);
+	plan.ops[0].HashJoinBuild().sink_info.keys.emplace_back();
+	auto key = BuildSljitRegionArtifactSemanticKey(plan);
+	plan.ops[0].HashJoinBuild().sink_info.keys[0].input_index = 7;
+	REQUIRE(BuildSljitRegionArtifactSemanticKey(plan) != key);
+	plan.ops[0].SetKind(SljitNativeRegionOpKind::ORDER_SINK);
+	key = BuildSljitRegionArtifactSemanticKey(plan);
+	plan.ops[0].OrderSink().sink_info.contract.limit = 7;
+	REQUIRE(BuildSljitRegionArtifactSemanticKey(plan) != key);
+}
+
+TEST_CASE("SLJIT hash-build lowering rejects mismatched sink families", "[api][jit]") {
+	ExecutionRegionNode node;
+	for (bool diagnostics : {false, true}) {
+		REQUIRE(PlanSljitHashJoinBuildSinkNode(node, diagnostics).kind == ExecutionRegionLoweringKind::BOUNDARY);
+		for (auto kind : {ExecutionRegionSinkKind::NONE, ExecutionRegionSinkKind::NESTED_LOOP_JOIN_BUILD,
+		                  ExecutionRegionSinkKind::SORT, ExecutionRegionSinkKind::RESULT_COLLECTOR_SINK,
+		                  ExecutionRegionSinkKind::MATERIALIZATION, ExecutionRegionSinkKind::DELIM_JOIN_SINK,
+		                  ExecutionRegionSinkKind::HASH_AGGREGATE_UPDATE}) {
+			node.sink = make_uniq<ExecutionRegionSinkInfo>(kind);
+			REQUIRE(PlanSljitHashJoinBuildSinkNode(node, diagnostics).kind == ExecutionRegionLoweringKind::BOUNDARY);
+		}
+		node.sink.reset();
+	}
+}
+
+TEST_CASE("SLJIT aggregate lowering rejects mismatched sink families", "[api][jit]") {
+	ExecutionRegionNode node;
+	for (bool diagnostics : {false, true}) {
+		REQUIRE(PlanSljitAggregateUpdateSinkNode(node, diagnostics).kind == ExecutionRegionLoweringKind::BOUNDARY);
+		for (auto kind : {ExecutionRegionSinkKind::NONE, ExecutionRegionSinkKind::HASH_JOIN_BUILD,
+		                  ExecutionRegionSinkKind::NESTED_LOOP_JOIN_BUILD, ExecutionRegionSinkKind::SORT,
+		                  ExecutionRegionSinkKind::RESULT_COLLECTOR_SINK, ExecutionRegionSinkKind::MATERIALIZATION,
+		                  ExecutionRegionSinkKind::DELIM_JOIN_SINK}) {
+			node.sink = make_uniq<ExecutionRegionSinkInfo>(kind);
+			auto lowered = PlanSljitAggregateUpdateSinkNode(node, diagnostics);
+			REQUIRE(lowered.kind == ExecutionRegionLoweringKind::BOUNDARY);
+			REQUIRE(lowered.reason == "aggregate update sink kind mismatch");
+		}
+		for (auto kind :
+		     {ExecutionRegionSinkKind::HASH_AGGREGATE_UPDATE, ExecutionRegionSinkKind::PERFECT_HASH_AGGREGATE_UPDATE,
+		      ExecutionRegionSinkKind::UNGROUPED_AGGREGATE_UPDATE}) {
+			node.sink = make_uniq<ExecutionRegionSinkInfo>(kind);
+			auto &aggregate = node.sink->Aggregate();
+			REQUIRE(aggregate.Kind() == kind);
+			auto &contract = aggregate.contract;
+			contract.present = true;
+			contract.native_state_update_contract.status = ExecutionRegionStateContractStatus::READY;
+			contract.native_grouped_state_contract.status = ExecutionRegionStateContractStatus::READY;
+			REQUIRE(PlanSljitAggregateUpdateSinkNode(node, diagnostics).kind == ExecutionRegionLoweringKind::NATIVE);
+			auto expected_kind = contract.kind;
+			for (auto operator_kind :
+			     {ExecutionRegionAggregateOperatorKind::NONE, ExecutionRegionAggregateOperatorKind::HASH,
+			      ExecutionRegionAggregateOperatorKind::PERFECT_HASH,
+			      ExecutionRegionAggregateOperatorKind::UNGROUPED}) {
+				if (operator_kind == expected_kind) {
+					continue;
+				}
+				contract.kind = operator_kind;
+				auto lowered = PlanSljitAggregateUpdateSinkNode(node, diagnostics);
+				REQUIRE(lowered.kind == ExecutionRegionLoweringKind::BOUNDARY);
+				REQUIRE(lowered.reason == "aggregate update sink operator kind mismatch");
+			}
+		}
+		node.sink.reset();
+	}
+}
+
+TEST_CASE("Execution sink contracts exclude unrelated families", "[api][jit]") {
+	INFO("sink contract bytes=" << sizeof(ExecutionRegionSinkInfo));
+	REQUIRE(sizeof(ExecutionRegionSinkInfo) < sizeof(ExecutionRegionHashJoinContract) +
+	                                              sizeof(ExecutionRegionAggregateContract) +
+	                                              sizeof(ExecutionRegionNestedLoopJoinContract));
+	ExecutionRegionSinkInfo sink;
+	REQUIRE(sink.Kind() == ExecutionRegionSinkKind::NONE);
+	REQUIRE(DescribeExecutionRegionSinkContract(sink) == "sink<kind=none>");
+	REQUIRE_THROWS_AS(sink.HashJoin(), std::bad_variant_access);
+	REQUIRE_THROWS_AS(sink.Aggregate(), std::bad_variant_access);
+	REQUIRE_THROWS_AS(sink.Native(), std::bad_variant_access);
+	sink.SetKind(ExecutionRegionSinkKind::HASH_JOIN_BUILD);
+	REQUIRE(sink.Kind() == ExecutionRegionSinkKind::HASH_JOIN_BUILD);
+	sink.HashJoin().contract.present = true;
+	sink.HashJoin().keys.emplace_back();
+	sink.HashJoin().keys[0].input_index = 7;
+	auto hash_copy = sink;
+	sink.HashJoin().keys[0].input_index = 9;
+	REQUIRE(hash_copy.HashJoin().keys[0].input_index == 7);
+	REQUIRE_THROWS_AS(sink.Aggregate(), std::bad_variant_access);
+	for (auto kind :
+	     {ExecutionRegionSinkKind::HASH_AGGREGATE_UPDATE, ExecutionRegionSinkKind::PERFECT_HASH_AGGREGATE_UPDATE,
+	      ExecutionRegionSinkKind::UNGROUPED_AGGREGATE_UPDATE}) {
+		sink.SetKind(kind);
+		REQUIRE(sink.Kind() == kind);
+		REQUIRE(sink.Aggregate().aggregates.empty());
+		sink.Aggregate().contract.present = true;
+		sink.Aggregate().aggregates.emplace_back();
+		sink.Aggregate().aggregates[0].aggregate_index = 4;
+		auto aggregate_copy = sink;
+		sink.Aggregate().aggregates[0].aggregate_index = 8;
+		REQUIRE(aggregate_copy.Aggregate().aggregates[0].aggregate_index == 4);
+		REQUIRE_THROWS_AS(sink.HashJoin(), std::bad_variant_access);
+		REQUIRE_THROWS_AS(sink.Native(), std::bad_variant_access);
+		REQUIRE_FALSE(StringUtil::Contains(DescribeExecutionRegionSinkContract(sink), "hash_join_contract<"));
+	}
+	sink.SetKind(ExecutionRegionSinkKind::NESTED_LOOP_JOIN_BUILD);
+	REQUIRE(sink.Kind() == ExecutionRegionSinkKind::NESTED_LOOP_JOIN_BUILD);
+	sink.NestedLoopJoin().present = true;
+	REQUIRE(StringUtil::Contains(DescribeExecutionRegionSinkContract(sink), "nested_loop_join_contract<"));
+	for (auto kind : {ExecutionRegionSinkKind::RESULT_COLLECTOR_SINK, ExecutionRegionSinkKind::MATERIALIZATION,
+	                  ExecutionRegionSinkKind::SORT, ExecutionRegionSinkKind::DELIM_JOIN_SINK}) {
+		sink.SetKind(kind);
+		REQUIRE(sink.Kind() == kind);
+		REQUIRE(sink.Native().status == ExecutionRegionStateContractStatus::NONE);
+		sink.Native().status = ExecutionRegionStateContractStatus::READY;
+		REQUIRE_FALSE(DescribeExecutionRegionSinkContract(sink).empty());
+		REQUIRE_THROWS_AS(sink.Aggregate(), std::bad_variant_access);
+		REQUIRE_THROWS_AS(sink.HashJoin(), std::bad_variant_access);
+	}
+	sink.DelimJoin().distinct.groups.emplace_back();
+	sink.DelimJoin().distinct.groups[0].input_index = 3;
+	sink.DelimJoin().build = hash_copy.HashJoin();
+	auto delim_copy = sink;
+	sink.DelimJoin().distinct.groups[0].input_index = 5;
+	REQUIRE(delim_copy.DelimJoin().distinct.groups[0].input_index == 3);
+	ExecutionRegionSinkInfo build(ExecutionRegionSinkKind::HASH_JOIN_BUILD);
+	build.HashJoin() = sink.DelimJoin().build;
+	REQUIRE(build.HashJoin().keys[0].input_index == 7);
+	REQUIRE_THROWS_AS(build.DelimJoin(), std::bad_variant_access);
+	sink.SetKind(ExecutionRegionSinkKind::SORT);
+	sink.Order().contract.present = true;
+	auto moved = std::move(sink);
+	REQUIRE(moved.Kind() == ExecutionRegionSinkKind::SORT);
+	REQUIRE(moved.Order().contract.present);
+	moved.SetKind(ExecutionRegionSinkKind::NONE);
+	REQUIRE_THROWS_AS(moved.Order(), std::bad_variant_access);
+	for (auto kind :
+	     {ExecutionRegionSinkKind::NONE, ExecutionRegionSinkKind::HASH_JOIN_BUILD, ExecutionRegionSinkKind::SORT,
+	      ExecutionRegionSinkKind::NESTED_LOOP_JOIN_BUILD, ExecutionRegionSinkKind::DELIM_JOIN_SINK,
+	      ExecutionRegionSinkKind::HASH_AGGREGATE_UPDATE, ExecutionRegionSinkKind::PERFECT_HASH_AGGREGATE_UPDATE,
+	      ExecutionRegionSinkKind::UNGROUPED_AGGREGATE_UPDATE}) {
+		SljitNativeRegionPlan unsupported;
+		unsupported.ops.emplace_back(SljitNativeRegionOpKind::APPEND_SINK);
+		unsupported.ops[0].AppendSink().sink_info.SetKind(kind);
+		REQUIRE_THROWS_AS(BuildSljitRegionArtifactSemanticKey(unsupported), InternalException);
+		REQUIRE_THROWS_AS(BindSljitRegionInstanceSlots(unsupported), InternalException);
+	}
+}
+
+TEST_CASE("Execution operator contracts store only one family payload", "[api][jit]") {
+	INFO("operator contract bytes=" << sizeof(ExecutionRegionOperatorInfo));
+	INFO("hash join contract bytes=" << sizeof(ExecutionRegionHashJoinContract));
+	INFO("nested loop contract bytes=" << sizeof(ExecutionRegionNestedLoopJoinContract));
+	REQUIRE(sizeof(ExecutionRegionOperatorInfo) <
+	        sizeof(ExecutionRegionHashJoinContract) + sizeof(ExecutionRegionNestedLoopJoinContract));
+	ExecutionRegionOperatorInfo info;
+	REQUIRE(info.Kind() == ExecutionRegionOperatorContractKind::NONE);
+	REQUIRE_THROWS_AS(info.HashJoin(), std::bad_variant_access);
+	REQUIRE_THROWS_AS(info.NestedLoopJoin(), std::bad_variant_access);
+	REQUIRE(DescribeExecutionRegionOperatorContract(info) == "operator<kind=none>");
+	info.SetKind(ExecutionRegionOperatorContractKind::HASH_JOIN_PROBE);
+	REQUIRE(info.Kind() == ExecutionRegionOperatorContractKind::HASH_JOIN_PROBE);
+	info.HashJoin().contract.present = true;
+	info.HashJoin().contract.condition_count = 2;
+	info.HashJoin().keys.emplace_back();
+	info.HashJoin().keys[0].input_index = 7;
+	auto hash_copy = info;
+	info.HashJoin().keys[0].input_index = 9;
+	REQUIRE(hash_copy.HashJoin().keys[0].input_index == 7);
+	REQUIRE_THROWS_AS(info.NestedLoopJoin(), std::bad_variant_access);
+	auto hash_description = DescribeExecutionRegionOperatorContract(info);
+	REQUIRE(StringUtil::Contains(hash_description, "hash_join_contract<"));
+	REQUIRE_FALSE(StringUtil::Contains(hash_description, "nested_loop_join_contract<"));
+	info.SetKind(ExecutionRegionOperatorContractKind::NESTED_LOOP_JOIN_PROBE);
+	REQUIRE(info.Kind() == ExecutionRegionOperatorContractKind::NESTED_LOOP_JOIN_PROBE);
+	REQUIRE_THROWS_AS(info.HashJoin(), std::bad_variant_access);
+	REQUIRE(info.NestedLoopJoin().conditions.empty());
+	info.NestedLoopJoin().present = true;
+	info.NestedLoopJoin().conditions.emplace_back();
+	info.NestedLoopJoin().conditions[0].condition_index = 3;
+	auto nested_copy = info;
+	info.NestedLoopJoin().conditions[0].condition_index = 5;
+	REQUIRE(nested_copy.NestedLoopJoin().conditions[0].condition_index == 3);
+	auto nested_description = DescribeExecutionRegionOperatorContract(info);
+	REQUIRE(StringUtil::Contains(nested_description, "nested_loop_join_contract<"));
+	REQUIRE_FALSE(StringUtil::Contains(nested_description, ",hash_join_contract<"));
+	auto moved = std::move(info);
+	REQUIRE(moved.Kind() == ExecutionRegionOperatorContractKind::NESTED_LOOP_JOIN_PROBE);
+	REQUIRE(moved.NestedLoopJoin().conditions[0].condition_index == 5);
+	moved.SetKind(ExecutionRegionOperatorContractKind::HASH_JOIN_PROBE);
+	REQUIRE(moved.HashJoin().keys.empty());
+	REQUIRE_FALSE(moved.HashJoin().contract.present);
+	moved.SetKind(ExecutionRegionOperatorContractKind::NONE);
+	REQUIRE(moved.Kind() == ExecutionRegionOperatorContractKind::NONE);
+	REQUIRE_THROWS_AS(moved.HashJoin(), std::bad_variant_access);
+}
+
+TEST_CASE("SLJIT artifact identity is structural and excludes nested diagnostics", "[api][jit]") {
+	SljitNativeRegionPlan region;
+	SljitNativeRegionOpPlan aggregate;
+	aggregate.SetKind(SljitNativeRegionOpKind::AGGREGATE_UPDATE);
+	aggregate.AggregateUpdate().sink_info.contract.kind = ExecutionRegionAggregateOperatorKind::HASH;
+	region.ops.push_back(std::move(aggregate));
+	auto initial = BuildSljitRegionArtifactSemanticKey(region);
+	auto &sink = region.ops[0].AggregateUpdate().sink_info;
+	region.ops[0].AggregateUpdate().ir = "rendered IR";
+	sink.contract.native_grouped_state_contract.blocker = "nested diagnostic";
+	sink.contract.native_state_update_contract.blocker = "sink diagnostic";
+	region.aggregate_state_source.state_scan_contract.blocker = "source diagnostic";
+	region.aggregate_state_source.state_scan_contract.primitive_aggregate_batch_blocker = "lane diagnostic";
+	REQUIRE(initial == BuildSljitRegionArtifactSemanticKey(region));
+	sink.contract.grouped_state_offsets.push_back(16);
+	REQUIRE(initial != BuildSljitRegionArtifactSemanticKey(region));
+	sink.contract.grouped_state_offsets.clear();
+	REQUIRE(initial == BuildSljitRegionArtifactSemanticKey(region));
+	sink.contract.kind = ExecutionRegionAggregateOperatorKind::PERFECT_HASH;
+	REQUIRE(initial != BuildSljitRegionArtifactSemanticKey(region));
+	sink.contract.kind = ExecutionRegionAggregateOperatorKind::UNGROUPED;
+	REQUIRE(initial != BuildSljitRegionArtifactSemanticKey(region));
+	sink.contract.kind = ExecutionRegionAggregateOperatorKind::NONE;
+	REQUIRE_THROWS_AS(BuildSljitRegionArtifactSemanticKey(region), InternalException);
+	sink.contract.kind = ExecutionRegionAggregateOperatorKind::HASH;
+	region.ops[0].estimated_input_count = 512;
+	REQUIRE(initial == BuildSljitRegionArtifactSemanticKey(region));
+
+	SljitNativeRegionPlan join_region;
+	SljitNativeRegionOpPlan join;
+	join.SetKind(SljitNativeRegionOpKind::HASH_JOIN_PROBE);
+	join_region.ops.push_back(std::move(join));
+	auto join_key = BuildSljitRegionArtifactSemanticKey(join_region);
+	join_region.ops[0].HashJoinProbe().operator_info.HashJoin().contract.output_reaches_dictionary_narrowing_sink =
+	    true;
+	REQUIRE(join_key != BuildSljitRegionArtifactSemanticKey(join_region));
+	join_region.ops[0].HashJoinProbe().operator_info.SetKind(
+	    ExecutionRegionOperatorContractKind::NESTED_LOOP_JOIN_PROBE);
+	REQUIRE_THROWS_AS(BuildSljitRegionArtifactSemanticKey(join_region), InternalException);
+}
+
+TEST_CASE("SLJIT runtime aggregate estimates do not partition the artifact cache", "[api][jit]") {
+	SljitNativeRegionPlan region;
+	region.ops.emplace_back(SljitNativeRegionOpKind::AGGREGATE_UPDATE);
+	region.ops[0].estimated_input_count = 10000;
+	region.source_distinct_counts = {32};
+	region.source_distinct_reserve_counts = {64};
+	region.source_min_values = {Value::BIGINT(0)};
+	region.source_max_values = {Value::BIGINT(31)};
+	auto key = [&]() {
+		return ComposeSljitRegionArtifactCacheKey(BuildSljitRegionArtifactSemanticKey(region),
+		                                          BuildSljitRegionArtifactBindingKey(region));
+	};
+	auto initial = key();
+	region.ops[0].estimated_input_count = 20000;
+	CHECK(bool(initial == key()));
+	region.source_distinct_reserve_counts = {128};
+	CHECK(bool(initial == key()));
+	region.source_max_values = {Value::BIGINT(63)};
+	CHECK(bool(initial != key()));
+}
+
+TEST_CASE("SLJIT aggregate instance parameters preserve reservation policy and column mapping", "[api][jit]") {
+	SljitNativeRegionPlan region;
+	region.source_distinct_counts = {3, 5};
+	region.source_distinct_reserve_counts = {3, 5};
+	region.ops.emplace_back(SljitNativeRegionOpKind::PROJECTION);
+	for (idx_t index : {1, 0}) {
+		SljitNativeRegionExpressionPlan expression;
+		expression.kind = SljitNativeRegionExpressionKind::REFERENCE;
+		expression.return_type = LogicalType::BIGINT;
+		expression.source_index = index;
+		region.ops[0].Projections().push_back(std::move(expression));
+	}
+	region.ops.emplace_back(SljitNativeRegionOpKind::AGGREGATE_UPDATE);
+	auto &aggregate = region.ops.back();
+	aggregate.estimated_input_count = 100;
+	auto &sink = aggregate.AggregateUpdate().sink_info;
+	sink.contract.kind = ExecutionRegionAggregateOperatorKind::HASH;
+	ExecutionRegionGroupInput group;
+	group.supported_reference = true;
+	group.input_index = 0;
+	group.type = LogicalType::BIGINT;
+	sink.groups.push_back(group);
+	auto first = BuildSljitAggregateInstanceParameters(region);
+	REQUIRE(first.size() == region.ops.size());
+	REQUIRE(first[0].estimated_input_count == 0);
+	REQUIRE(first[0].group_reserve_count == 0);
+	REQUIRE(first[1].estimated_input_count == 100);
+	REQUIRE(first[1].group_reserve_count == 5);
+	aggregate.estimated_input_count = 5;
+	auto second = BuildSljitAggregateInstanceParameters(region);
+	REQUIRE(second[1].estimated_input_count == 5);
+	REQUIRE(second[1].group_reserve_count == 0);
+	REQUIRE(first[1].estimated_input_count == 100);
+	REQUIRE(first[1].group_reserve_count == 5);
+	aggregate.estimated_input_count = 0;
+	REQUIRE(BuildSljitAggregateInstanceParameters(region)[1].group_reserve_count == 5);
+	group.input_index = 1;
+	sink.groups.push_back(group);
+	REQUIRE(BuildSljitAggregateInstanceParameters(region)[1].group_reserve_count == 15);
+	region.source_distinct_reserve_counts = {NumericLimits<idx_t>::Maximum(), 2};
+	REQUIRE(BuildSljitAggregateInstanceParameters(region)[1].group_reserve_count == 0);
+	region.source_distinct_reserve_counts = {3, 0};
+	REQUIRE(BuildSljitAggregateInstanceParameters(region)[1].group_reserve_count == 0);
+	region.source_distinct_reserve_counts.clear();
+	REQUIRE(BuildSljitAggregateInstanceParameters(region)[1].group_reserve_count == 0);
+	region.source_distinct_reserve_counts = {3, 5};
+	sink.groups[0].supported_reference = false;
+	REQUIRE(BuildSljitAggregateInstanceParameters(region)[1].group_reserve_count == 0);
+	sink.groups[0].supported_reference = true;
+	sink.contract.kind = ExecutionRegionAggregateOperatorKind::PERFECT_HASH;
+	REQUIRE(BuildSljitAggregateInstanceParameters(region)[1].group_reserve_count == 0);
+}
+
+TEST_CASE("SLJIT expression identity preserves binary values and cast binding structure", "[api][jit]") {
+	SljitNativeRegionExpressionPlan expression;
+	expression.kind = SljitNativeRegionExpressionKind::CONSTANT;
+	expression.return_type = LogicalType::DOUBLE;
+	expression.constant_value = Value::DOUBLE(0.0);
+	auto key = BuildSljitExpressionArtifactKey(expression);
+	expression.constant_value = Value::DOUBLE(-0.0);
+	REQUIRE(key != BuildSljitExpressionArtifactKey(expression));
+	expression.ir = "diagnostics do not change identity";
+	auto diagnostic_key = BuildSljitExpressionArtifactKey(expression);
+	expression.ir.clear();
+	REQUIRE(diagnostic_key == BuildSljitExpressionArtifactKey(expression));
+	expression.cast_chain.source_type = LogicalType::BIGINT;
+	expression.cast_chain.steps.push_back({LogicalType::INTEGER, QueryLocation(), "first"});
+	vector<SljitCastErrorIdentity> errors;
+	BindSljitCastErrorSlots(expression.cast_chain, errors);
+	auto cast_key = BuildSljitExpressionArtifactKey(expression);
+	errors[0].source_alias = "second";
+	REQUIRE(cast_key == BuildSljitExpressionArtifactKey(expression));
+	expression.cast_chain.steps[0].error_binding = 1;
+	REQUIRE(cast_key != BuildSljitExpressionArtifactKey(expression));
+}
+
+TEST_CASE("SLJIT instance slots remove cast identities from shared plans", "[api][jit]") {
+	auto make_region = [](const string &alias, idx_t position) {
+		SljitNativeRegionPlan region;
+		SljitNativeRegionOpPlan projection(SljitNativeRegionOpKind::PROJECTION);
+		projection.Projections().emplace_back();
+		auto &expression = projection.Projections().back();
+		expression.cast_chain.source_type = LogicalType::BIGINT;
+		expression.cast_chain.steps.push_back({LogicalType::INTEGER, QueryLocation(position, 5), alias});
+		expression.expression_tree = make_uniq<ExecutionExpressionIR>();
+		expression.expression_tree->kind = ExecutionExpressionIRKind::CAST;
+		expression.expression_tree->query_location = QueryLocation(position, 5);
+		expression.expression_tree->cast_source_alias = alias;
+		region.ops.push_back(std::move(projection));
+		BindSljitRegionInstanceSlots(region);
+		return region;
+	};
+	auto first = make_region("first_column", 7);
+	auto second = make_region("second_column", 101);
+	REQUIRE(BuildSljitRegionArtifactSemanticKey(first) == BuildSljitRegionArtifactSemanticKey(second));
+	REQUIRE(first.cast_errors.size() == 2);
+	REQUIRE(second.cast_errors[0].source_alias == "second_column");
+	REQUIRE(second.cast_errors[0].query_location.offset == 101);
+	auto &expression = first.ops[0].Projections()[0];
+	REQUIRE(expression.cast_chain.steps[0].source_alias.empty());
+	REQUIRE_FALSE(expression.cast_chain.steps[0].query_location.IsValid());
+	REQUIRE(expression.expression_tree->cast_source_alias.empty());
+	REQUIRE_FALSE(expression.expression_tree->query_location.IsValid());
+	auto copy = expression.Copy();
+	REQUIRE(copy.expression_tree->cast_error_binding == expression.expression_tree->cast_error_binding);
+	auto key = BuildSljitRegionArtifactSemanticKey(first);
+	BindSljitRegionInstanceSlots(first);
+	REQUIRE(first.cast_errors.size() == 2);
+	REQUIRE(BuildSljitRegionArtifactSemanticKey(first) == key);
 }
 
 TEST_CASE("Execution region manager registers and selects database-local backends", "[api][jit]") {

@@ -40,17 +40,17 @@ static bool SljitTryExecuteHashJoinDirectUngroupedAggregateConsumer(
 	aggregate_input.Reset();
 	aggregate_input.SetChildCardinality(probe_input.size());
 	auto &sink_binding = SljitBindRecordedNativeSink(
-	    runtime, native_runtime, scratch, strategy.aggregate_idx, aggregate_op.kind, aggregate_input,
-	    aggregate_op.aggregate_update.plan.sink_info, "aggregate-update-runtime-binding-failed",
+	    runtime, native_runtime, scratch, strategy.aggregate_idx, aggregate_op.Kind(), aggregate_input,
+	    aggregate_op.AggregateUpdate().plan.sink_info, "aggregate-update-runtime-binding-failed",
 	    "SLJIT direct hash-join ungrouped aggregate consumer");
 	if (!sink_binding.ready || !sink_binding.aggregate_update.ready || !sink_binding.aggregate_update.primitive.ready) {
 		throw InternalException("SLJIT direct hash-join ungrouped aggregate sink binding is incomplete");
 	}
 	auto &payload_lanes =
-	    scratch.AggregatePayloadLanes(strategy.aggregate_idx, aggregate_op.aggregate_update.payload_descriptors,
+	    scratch.AggregatePayloadLanes(strategy.aggregate_idx, aggregate_op.AggregateUpdate().payload_descriptors,
 	                                  sink_binding.aggregate_update.primitive);
 	if (payload_lanes.size() != 1 || !payload_lanes[0] ||
-	    !SljitAggregatePayloadDescriptorMatchesLane(aggregate_op.aggregate_update.payload_descriptors[0],
+	    !SljitAggregatePayloadDescriptorMatchesLane(aggregate_op.AggregateUpdate().payload_descriptors[0],
 	                                                *payload_lanes[0])) {
 		throw InternalException("SLJIT direct hash-join ungrouped aggregate primitive lane is incomplete");
 	}
@@ -98,11 +98,11 @@ static bool SljitTryExecuteHashJoinDirectUngroupedAggregateConsumer(
 		throw InternalException("SLJIT direct hash-join ungrouped aggregate sink unexpectedly blocked");
 	}
 	RecordSljitRegionStageRuntimePath(
-	    runtime, hash_join_idx, hash_join_op.kind,
+	    runtime, hash_join_idx, hash_join_op.Kind(),
 	    selected ? "regular_probe.all_valid.selected.single_key.no_chain.direct_ungrouped_aggregate_consumer"
 	             : "regular_probe.all_valid.flat.single_key.no_chain.direct_ungrouped_aggregate_consumer",
 	    probe_start);
-	RecordSljitRegionMaterializationElision(runtime, aggregate_op.kind,
+	RecordSljitRegionMaterializationElision(runtime, aggregate_op.Kind(),
 	                                        "join_output_probe_consumer_ungrouped_aggregate", matched_count);
 	const char *source_path = "join_output_probe_consumer_ungrouped_aggregate.source_none";
 	if (plan.primitive_kind != AggregatePrimitiveUpdateKind::COUNT_STAR) {
@@ -110,7 +110,7 @@ static bool SljitTryExecuteHashJoinDirectUngroupedAggregateConsumer(
 		                  ? "join_output_probe_consumer_ungrouped_aggregate.dictionary_source"
 		                  : "join_output_probe_consumer_ungrouped_aggregate.row_source";
 	}
-	RecordSljitRegionRuntimePath(runtime, aggregate_op.kind, source_path, matched_count);
+	RecordSljitRegionRuntimePath(runtime, aggregate_op.Kind(), source_path, matched_count);
 	return true;
 }
 

@@ -4,10 +4,10 @@ namespace duckdb {
 
 static SljitRegionNodePlan PlanSljitHashJoinBuildSinkNodeInternal(const ExecutionRegionNode &node,
                                                                   bool render_diagnostics) {
-	if (!node.sink) {
+	if (!node.sink || node.sink->Kind() != ExecutionRegionSinkKind::HASH_JOIN_BUILD) {
 		return SljitRegionBoundaryNode("hash join sink is missing native sink IR");
 	}
-	auto &contract = node.sink->hash_join_contract;
+	auto &contract = node.sink->HashJoin().contract;
 	if (!contract.present) {
 		return SljitRegionBoundaryNode("hash join build native lowering requires hash join contract IR");
 	}
@@ -20,8 +20,8 @@ static SljitRegionNodePlan PlanSljitHashJoinBuildSinkNodeInternal(const Executio
 		                                    "hash join build native sink shape is not ready");
 	}
 	SljitNativeRegionOpPlan native_op;
-	native_op.kind = SljitNativeRegionOpKind::HASH_JOIN_BUILD;
-	native_op.hash_join_build.sink_info = *node.sink;
+	native_op.SetKind(SljitNativeRegionOpKind::HASH_JOIN_BUILD);
+	native_op.HashJoinBuild().sink_info = node.sink->HashJoin();
 
 	string reason = "native hash join build contract";
 	if (render_diagnostics) {
@@ -48,8 +48,9 @@ SljitRegionNodePlan PlanSljitHashJoinBuildSinkNode(const ExecutionRegionNode &no
 		return result;
 	}
 	const bool contract_ready =
-	    node.sink && node.sink->hash_join_contract.present &&
-	    node.sink->hash_join_contract.native_build_contract.status == ExecutionRegionStateContractStatus::READY;
+	    node.sink && node.sink->Kind() == ExecutionRegionSinkKind::HASH_JOIN_BUILD &&
+	    node.sink->HashJoin().contract.present &&
+	    node.sink->HashJoin().contract.native_build_contract.status == ExecutionRegionStateContractStatus::READY;
 	result.fusion_blocker = contract_ready ? "sink-contract-blocker:hash-join-build-native-lowering;" + result.reason
 	                                       : "sink-contract-blocker:hash-join-build-contract-missing";
 	return result;

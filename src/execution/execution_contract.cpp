@@ -564,30 +564,30 @@ static bool ExecutionHashJoinProbeIsExecutableWork(const ExecutionRegionHashJoin
 static ExecutionCompiledStageContract
 BuildExecutionCompiledOperatorStage(const ExecutionRegionOperatorInfo &operator_info) {
 	ExecutionCompiledStageContract stage;
-	switch (operator_info.kind) {
+	switch (operator_info.Kind()) {
 	case ExecutionRegionOperatorContractKind::HASH_JOIN_PROBE:
 		stage.stage = ExecutionRegionStageKind::HASH_JOIN_PROBE;
 		stage.operation = ExecutionCompiledContractKind::HASH_JOIN_PROBE_CURSOR;
 		stage.execution =
-		    operator_info.hash_join_contract.native_probe_contract.status == ExecutionRegionStateContractStatus::READY
+		    operator_info.HashJoin().contract.native_probe_contract.status == ExecutionRegionStateContractStatus::READY
 		        ? ExecutionRegionStageExecutionKind::NATIVE_CONTRACT
 		        : ExecutionRegionStageExecutionKind::MISSING_CONTRACT;
 		stage.drain = ExecutionCompiledDrainKind::ZERO_OR_MANY_OUTPUT;
-		stage.executable_work = ExecutionHashJoinProbeIsExecutableWork(operator_info.hash_join_contract);
-		stage.required_capability = operator_info.hash_join_contract.native_probe_contract.required_capability;
-		stage.blocker = operator_info.hash_join_contract.native_probe_contract.blocker;
+		stage.executable_work = ExecutionHashJoinProbeIsExecutableWork(operator_info.HashJoin().contract);
+		stage.required_capability = operator_info.HashJoin().contract.native_probe_contract.required_capability;
+		stage.blocker = operator_info.HashJoin().contract.native_probe_contract.blocker;
 		break;
 	case ExecutionRegionOperatorContractKind::NESTED_LOOP_JOIN_PROBE:
 		stage.stage = ExecutionRegionStageKind::NESTED_LOOP_JOIN_PROBE;
 		stage.operation = ExecutionCompiledContractKind::NESTED_LOOP_JOIN_PROBE_CURSOR;
-		stage.execution = operator_info.nested_loop_join_contract.native_probe_contract.status ==
-		                          ExecutionRegionStateContractStatus::READY
-		                      ? ExecutionRegionStageExecutionKind::NATIVE_CONTRACT
-		                      : ExecutionRegionStageExecutionKind::MISSING_CONTRACT;
+		stage.execution =
+		    operator_info.NestedLoopJoin().native_probe_contract.status == ExecutionRegionStateContractStatus::READY
+		        ? ExecutionRegionStageExecutionKind::NATIVE_CONTRACT
+		        : ExecutionRegionStageExecutionKind::MISSING_CONTRACT;
 		stage.drain = ExecutionCompiledDrainKind::ZERO_OR_MANY_OUTPUT;
 		stage.executable_work = false;
-		stage.required_capability = operator_info.nested_loop_join_contract.native_probe_contract.required_capability;
-		stage.blocker = operator_info.nested_loop_join_contract.native_probe_contract.blocker;
+		stage.required_capability = operator_info.NestedLoopJoin().native_probe_contract.required_capability;
+		stage.blocker = operator_info.NestedLoopJoin().native_probe_contract.blocker;
 		break;
 	default:
 		stage.stage = ExecutionRegionStageKind::OPERATOR_BOUNDARY;
@@ -600,7 +600,7 @@ BuildExecutionCompiledOperatorStage(const ExecutionRegionOperatorInfo &operator_
 }
 
 static bool ExecutionCompiledSinkIsExecutableWork(const ExecutionRegionSinkInfo &sink) {
-	switch (sink.kind) {
+	switch (sink.Kind()) {
 	case ExecutionRegionSinkKind::HASH_JOIN_BUILD:
 	case ExecutionRegionSinkKind::HASH_AGGREGATE_UPDATE:
 	case ExecutionRegionSinkKind::PERFECT_HASH_AGGREGATE_UPDATE:
@@ -612,28 +612,28 @@ static bool ExecutionCompiledSinkIsExecutableWork(const ExecutionRegionSinkInfo 
 }
 
 static ExecutionRegionStateContractStatus ExecutionCompiledSinkStatus(const ExecutionRegionSinkInfo &sink) {
-	switch (sink.kind) {
+	switch (sink.Kind()) {
 	case ExecutionRegionSinkKind::HASH_JOIN_BUILD:
-		return sink.hash_join_contract.native_build_contract.status;
+		return sink.HashJoin().contract.native_build_contract.status;
 	case ExecutionRegionSinkKind::NESTED_LOOP_JOIN_BUILD:
-		return sink.nested_loop_join_contract.native_build_contract.status;
+		return sink.NestedLoopJoin().native_build_contract.status;
 	case ExecutionRegionSinkKind::HASH_AGGREGATE_UPDATE:
 	case ExecutionRegionSinkKind::PERFECT_HASH_AGGREGATE_UPDATE:
-		return sink.aggregate_contract.native_state_update_contract.status;
+		return sink.Aggregate().contract.native_state_update_contract.status;
 	case ExecutionRegionSinkKind::UNGROUPED_AGGREGATE_UPDATE:
-		return sink.aggregate_contract.native_state_update_contract.status;
+		return sink.Aggregate().contract.native_state_update_contract.status;
 	case ExecutionRegionSinkKind::RESULT_COLLECTOR_SINK:
 	case ExecutionRegionSinkKind::MATERIALIZATION:
 	case ExecutionRegionSinkKind::SORT:
 	case ExecutionRegionSinkKind::DELIM_JOIN_SINK:
-		return sink.native_sink_contract.status;
+		return sink.Native().status;
 	default:
 		return ExecutionRegionStateContractStatus::MISSING;
 	}
 }
 
 static ExecutionCompiledContractKind ExecutionCompiledSinkOperation(const ExecutionRegionSinkInfo &sink) {
-	switch (sink.kind) {
+	switch (sink.Kind()) {
 	case ExecutionRegionSinkKind::HASH_JOIN_BUILD:
 		return ExecutionCompiledContractKind::HASH_JOIN_BUILD;
 	case ExecutionRegionSinkKind::NESTED_LOOP_JOIN_BUILD:
@@ -654,7 +654,7 @@ static ExecutionCompiledContractKind ExecutionCompiledSinkOperation(const Execut
 }
 
 static ExecutionRegionStageKind ExecutionCompiledSinkStage(const ExecutionRegionSinkInfo &sink) {
-	switch (sink.kind) {
+	switch (sink.Kind()) {
 	case ExecutionRegionSinkKind::HASH_JOIN_BUILD:
 		return ExecutionRegionStageKind::HASH_JOIN_BUILD;
 	case ExecutionRegionSinkKind::NESTED_LOOP_JOIN_BUILD:
@@ -686,27 +686,28 @@ static ExecutionCompiledStageContract BuildExecutionCompiledSinkStage(const Exec
 	                      : ExecutionRegionStageExecutionKind::MISSING_CONTRACT;
 	stage.drain = ExecutionCompiledDrainKind::NONE;
 	stage.executable_work = ExecutionCompiledSinkIsExecutableWork(sink);
-	if (sink.kind == ExecutionRegionSinkKind::HASH_JOIN_BUILD) {
-		stage.required_capability = sink.hash_join_contract.native_build_contract.required_capability;
-		stage.blocker = sink.hash_join_contract.native_build_contract.blocker;
-	} else if (sink.kind == ExecutionRegionSinkKind::NESTED_LOOP_JOIN_BUILD) {
-		stage.required_capability = sink.nested_loop_join_contract.native_build_contract.required_capability;
-		stage.blocker = sink.nested_loop_join_contract.native_build_contract.blocker;
-	} else if (sink.kind == ExecutionRegionSinkKind::HASH_AGGREGATE_UPDATE ||
-	           sink.kind == ExecutionRegionSinkKind::PERFECT_HASH_AGGREGATE_UPDATE) {
-		stage.required_capability = sink.aggregate_contract.native_state_update_contract.required_capability;
-		stage.blocker = sink.aggregate_contract.native_state_update_contract.blocker;
-	} else if (sink.kind == ExecutionRegionSinkKind::UNGROUPED_AGGREGATE_UPDATE) {
-		stage.required_capability = sink.aggregate_contract.native_state_update_contract.required_capability;
-		stage.blocker = sink.aggregate_contract.native_state_update_contract.blocker;
-	} else if (sink.kind == ExecutionRegionSinkKind::RESULT_COLLECTOR_SINK ||
-	           sink.kind == ExecutionRegionSinkKind::MATERIALIZATION ||
-	           sink.kind == ExecutionRegionSinkKind::DELIM_JOIN_SINK) {
-		stage.required_capability = sink.native_sink_contract.required_capability;
-		stage.blocker = sink.native_sink_contract.blocker;
-	} else if (sink.native_sink_contract.status != ExecutionRegionStateContractStatus::NONE) {
-		stage.required_capability = sink.native_sink_contract.required_capability;
-		stage.blocker = sink.native_sink_contract.blocker;
+	if (sink.Kind() == ExecutionRegionSinkKind::HASH_JOIN_BUILD) {
+		stage.required_capability = sink.HashJoin().contract.native_build_contract.required_capability;
+		stage.blocker = sink.HashJoin().contract.native_build_contract.blocker;
+	} else if (sink.Kind() == ExecutionRegionSinkKind::NESTED_LOOP_JOIN_BUILD) {
+		stage.required_capability = sink.NestedLoopJoin().native_build_contract.required_capability;
+		stage.blocker = sink.NestedLoopJoin().native_build_contract.blocker;
+	} else if (sink.Kind() == ExecutionRegionSinkKind::HASH_AGGREGATE_UPDATE ||
+	           sink.Kind() == ExecutionRegionSinkKind::PERFECT_HASH_AGGREGATE_UPDATE) {
+		stage.required_capability = sink.Aggregate().contract.native_state_update_contract.required_capability;
+		stage.blocker = sink.Aggregate().contract.native_state_update_contract.blocker;
+	} else if (sink.Kind() == ExecutionRegionSinkKind::UNGROUPED_AGGREGATE_UPDATE) {
+		stage.required_capability = sink.Aggregate().contract.native_state_update_contract.required_capability;
+		stage.blocker = sink.Aggregate().contract.native_state_update_contract.blocker;
+	} else if (sink.Kind() == ExecutionRegionSinkKind::RESULT_COLLECTOR_SINK ||
+	           sink.Kind() == ExecutionRegionSinkKind::MATERIALIZATION ||
+	           sink.Kind() == ExecutionRegionSinkKind::DELIM_JOIN_SINK) {
+		stage.required_capability = sink.Native().required_capability;
+		stage.blocker = sink.Native().blocker;
+	} else if (sink.Kind() == ExecutionRegionSinkKind::SORT &&
+	           sink.Native().status != ExecutionRegionStateContractStatus::NONE) {
+		stage.required_capability = sink.Native().required_capability;
+		stage.blocker = sink.Native().blocker;
 	} else {
 		stage.required_capability = "sink-cursor";
 		stage.blocker = "sink-cursor-contract-missing";
@@ -1527,7 +1528,7 @@ static ExecutionContract BuildExecutionContractSortStateContracts(
 	result.source.returned_column_count = output_column_count;
 	result.source.reason = result.source_boundary_reason;
 
-	result.sink.kind = ExecutionRegionSinkKind::SORT;
+	result.sink.SetKind(ExecutionRegionSinkKind::SORT);
 	result.sink.reason = "DuckDB ordered sink contract";
 	result.sink.reason += ";operator=" + PhysicalOperatorToString(type);
 	result.sink.reason += ";order_count=" + std::to_string(order_contract.order_count);
@@ -1535,16 +1536,15 @@ static ExecutionContract BuildExecutionContractSortStateContracts(
 	result.sink.reason += ";output_columns=" + std::to_string(output_column_count);
 	result.sink.reason += ";order_keys_ready=" + ExecutionContractBool(order_contract.all_order_keys_ready);
 	result.sink.reason += ";order_key_blocker=" + order_contract.order_key_blocker;
-	result.sink.native_sink_contract = BuildExecutionContractNativeOperatorContract(
+	result.sink.Native() = BuildExecutionContractNativeOperatorContract(
 	    "order-native-sink-update", BuildExecutionContractOrderSinkBlocker(order_contract));
 	if (order_contract.all_order_keys_ready) {
-		MarkExecutionContractNativeOperatorContractReady(result.sink.native_sink_contract);
+		MarkExecutionContractNativeOperatorContractReady(result.sink.Native());
 	} else {
-		MarkExecutionContractNativeOperatorContractBlocked(result.sink.native_sink_contract,
-		                                                   order_contract.order_key_blocker);
+		MarkExecutionContractNativeOperatorContractBlocked(result.sink.Native(), order_contract.order_key_blocker);
 	}
-	result.sink.order_contract = std::move(order_contract);
-	AppendExecutionContractNativeOperatorReason(result.sink.reason, result.sink.native_sink_contract, "sink");
+	result.sink.Order().contract = std::move(order_contract);
+	AppendExecutionContractNativeOperatorReason(result.sink.reason, result.sink.Native(), "sink");
 	return result;
 }
 
@@ -2358,22 +2358,22 @@ ExecutionContract PhysicalHashJoin::GetExecutionContract(ExecutionRegionOperator
 		break;
 	}
 	case ExecutionRegionOperatorSlot::OPERATOR:
-		result.operator_info.kind = ExecutionRegionOperatorContractKind::HASH_JOIN_PROBE;
+		result.operator_info.SetKind(ExecutionRegionOperatorContractKind::HASH_JOIN_PROBE);
 		if (render_diagnostics) {
 			result.operator_info.reason = BuildExecutionContractHashJoinBoundaryReason(
 			    *this, contract, "DuckDB hash join probe operator contract boundary");
 		}
-		result.operator_info.hash_join_contract = std::move(contract);
-		result.operator_info.hash_join_keys = BuildExecutionContractHashJoinProbeKeyInputs(*this);
+		result.operator_info.HashJoin().contract = std::move(contract);
+		result.operator_info.HashJoin().keys = BuildExecutionContractHashJoinProbeKeyInputs(*this);
 		break;
 	case ExecutionRegionOperatorSlot::SINK:
-		result.sink.kind = ExecutionRegionSinkKind::HASH_JOIN_BUILD;
+		result.sink.SetKind(ExecutionRegionSinkKind::HASH_JOIN_BUILD);
 		if (render_diagnostics) {
 			result.sink.reason =
 			    BuildExecutionContractHashJoinBoundaryReason(*this, contract, "DuckDB hash join build sink contract");
 		}
-		result.sink.hash_join_contract = std::move(contract);
-		result.sink.hash_join_keys = BuildExecutionContractHashJoinBuildKeyInputs(*this);
+		result.sink.HashJoin().contract = std::move(contract);
+		result.sink.HashJoin().keys = BuildExecutionContractHashJoinBuildKeyInputs(*this);
 		break;
 	default:
 		break;
@@ -2407,20 +2407,20 @@ ExecutionContract PhysicalNestedLoopJoin::GetExecutionContract(ExecutionRegionOp
 		result.source.nested_loop_join_contract = std::move(contract);
 		break;
 	case ExecutionRegionOperatorSlot::OPERATOR:
-		result.operator_info.kind = ExecutionRegionOperatorContractKind::NESTED_LOOP_JOIN_PROBE;
+		result.operator_info.SetKind(ExecutionRegionOperatorContractKind::NESTED_LOOP_JOIN_PROBE);
 		if (render_diagnostics) {
 			result.operator_info.reason = BuildExecutionContractNestedLoopJoinBoundaryReason(
 			    *this, contract, "DuckDB nested loop join probe operator contract");
 		}
-		result.operator_info.nested_loop_join_contract = std::move(contract);
+		result.operator_info.NestedLoopJoin() = std::move(contract);
 		break;
 	case ExecutionRegionOperatorSlot::SINK:
-		result.sink.kind = ExecutionRegionSinkKind::NESTED_LOOP_JOIN_BUILD;
+		result.sink.SetKind(ExecutionRegionSinkKind::NESTED_LOOP_JOIN_BUILD);
 		if (render_diagnostics) {
 			result.sink.reason = BuildExecutionContractNestedLoopJoinBoundaryReason(
 			    *this, contract, "DuckDB nested loop join build sink contract");
 		}
-		result.sink.nested_loop_join_contract = std::move(contract);
+		result.sink.NestedLoopJoin() = std::move(contract);
 		break;
 	default:
 		break;
@@ -2499,16 +2499,16 @@ ExecutionContract PhysicalHashAggregate::GetExecutionContract(ExecutionRegionOpe
 		result.source.reason = result.source_boundary_reason;
 		ApplyExecutionContractFinalizedSourceCardinality(result, FinalizedSourceCardinality());
 	} else if (slot == ExecutionRegionOperatorSlot::SINK) {
-		result.sink.kind = ExecutionRegionSinkKind::HASH_AGGREGATE_UPDATE;
+		result.sink.SetKind(ExecutionRegionSinkKind::HASH_AGGREGATE_UPDATE);
 		if (render_diagnostics) {
 			result.sink.reason =
 			    BuildExecutionContractHashAggregateBoundaryReason(*this, "DuckDB hash aggregate sink update contract");
 		}
 		AppendExecutionContractNativeOperatorReason(result.sink.reason, contract.native_state_update_contract,
 		                                            "aggregate_state_update");
-		result.sink.aggregate_contract = std::move(contract);
-		result.sink.aggregates = std::move(sink_aggregates);
-		result.sink.groups = std::move(sink_groups);
+		result.sink.Aggregate().contract = std::move(contract);
+		result.sink.Aggregate().aggregates = std::move(sink_aggregates);
+		result.sink.Aggregate().groups = std::move(sink_groups);
 	}
 	return FinalizeExecutionContract(std::move(result));
 }
@@ -2545,16 +2545,16 @@ ExecutionContract PhysicalPerfectHashAggregate::GetExecutionContract(ExecutionRe
 		result.source.reason = result.source_boundary_reason;
 		ApplyExecutionContractFinalizedSourceCardinality(result, FinalizedSourceCardinality());
 	} else if (slot == ExecutionRegionOperatorSlot::SINK) {
-		result.sink.kind = ExecutionRegionSinkKind::PERFECT_HASH_AGGREGATE_UPDATE;
+		result.sink.SetKind(ExecutionRegionSinkKind::PERFECT_HASH_AGGREGATE_UPDATE);
 		if (render_diagnostics) {
 			result.sink.reason = BuildExecutionContractPerfectHashAggregateBoundaryReason(
 			    *this, "DuckDB perfect hash aggregate sink update contract");
 		}
 		AppendExecutionContractNativeOperatorReason(result.sink.reason, contract.native_state_update_contract,
 		                                            "aggregate_state_update");
-		result.sink.aggregate_contract = std::move(contract);
-		result.sink.aggregates = std::move(sink_aggregates);
-		result.sink.groups = std::move(sink_groups);
+		result.sink.Aggregate().contract = std::move(contract);
+		result.sink.Aggregate().aggregates = std::move(sink_aggregates);
+		result.sink.Aggregate().groups = std::move(sink_groups);
 	}
 	return FinalizeExecutionContract(std::move(result));
 }
@@ -2590,16 +2590,16 @@ ExecutionContract PhysicalUngroupedAggregate::GetExecutionContract(ExecutionRegi
 		result.source.returned_column_count = GetTypes().size();
 		result.source.reason = result.source_boundary_reason;
 	} else if (slot == ExecutionRegionOperatorSlot::SINK) {
-		result.sink.kind = ExecutionRegionSinkKind::UNGROUPED_AGGREGATE_UPDATE;
+		result.sink.SetKind(ExecutionRegionSinkKind::UNGROUPED_AGGREGATE_UPDATE);
 		if (render_diagnostics) {
 			result.sink.reason = BuildExecutionContractUngroupedAggregateBoundaryReason(
 			    *this, "DuckDB ungrouped aggregate payload update contract");
 		}
 		AppendExecutionContractNativeOperatorReason(result.sink.reason, contract.native_state_update_contract,
 		                                            "aggregate_state_update");
-		result.sink.aggregate_contract = std::move(contract);
-		result.sink.aggregates = std::move(sink_aggregates);
-		result.sink.groups = std::move(sink_groups);
+		result.sink.Aggregate().contract = std::move(contract);
+		result.sink.Aggregate().aggregates = std::move(sink_aggregates);
+		result.sink.Aggregate().groups = std::move(sink_groups);
 	}
 	return FinalizeExecutionContract(std::move(result));
 }

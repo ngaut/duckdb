@@ -179,29 +179,51 @@ static string DescribeExecutionSourceProtocolContractShape(const ExecutionRegion
 }
 
 static string DescribeExecutionRegionOperatorContractShape(const ExecutionRegionOperatorInfo &op) {
-	if (op.hash_join_contract.present) {
-		return "op(" + DescribeExecutionRegionHashJoinContractShape(op.hash_join_contract) + ")";
+	if (op.Kind() == ExecutionRegionOperatorContractKind::HASH_JOIN_PROBE && op.HashJoin().contract.present) {
+		return "op(" + DescribeExecutionRegionHashJoinContractShape(op.HashJoin().contract) + ")";
 	}
-	if (op.nested_loop_join_contract.present) {
-		return "op(" + DescribeExecutionRegionNestedLoopJoinContractShape(op.nested_loop_join_contract) + ")";
+	if (op.Kind() == ExecutionRegionOperatorContractKind::NESTED_LOOP_JOIN_PROBE && op.NestedLoopJoin().present) {
+		return "op(" + DescribeExecutionRegionNestedLoopJoinContractShape(op.NestedLoopJoin()) + ")";
 	}
-	return "op(kind=" + string(ExecutionRegionOperatorContractKindToString(op.kind)) + ")";
+	return "op(kind=" + string(ExecutionRegionOperatorContractKindToString(op.Kind())) + ")";
 }
 
 static string DescribeExecutionRegionSinkContractShape(const ExecutionRegionSinkInfo &sink) {
-	if (sink.hash_join_contract.present) {
-		return "sink(" + DescribeExecutionRegionHashJoinContractShape(sink.hash_join_contract) + ")";
+	switch (sink.Kind()) {
+	case ExecutionRegionSinkKind::HASH_JOIN_BUILD:
+		if (sink.HashJoin().contract.present) {
+			return "sink(" + DescribeExecutionRegionHashJoinContractShape(sink.HashJoin().contract) + ")";
+		}
+		break;
+	case ExecutionRegionSinkKind::NESTED_LOOP_JOIN_BUILD:
+		if (sink.NestedLoopJoin().present) {
+			return "sink(" + DescribeExecutionRegionNestedLoopJoinContractShape(sink.NestedLoopJoin()) + ")";
+		}
+		break;
+	case ExecutionRegionSinkKind::HASH_AGGREGATE_UPDATE:
+	case ExecutionRegionSinkKind::PERFECT_HASH_AGGREGATE_UPDATE:
+	case ExecutionRegionSinkKind::UNGROUPED_AGGREGATE_UPDATE:
+		if (sink.Aggregate().contract.present) {
+			return "sink(" + DescribeExecutionRegionAggregateContractShape(sink.Aggregate().contract) + ")";
+		}
+		break;
+	case ExecutionRegionSinkKind::SORT:
+		if (sink.Order().contract.present) {
+			return "sink(" + DescribeExecutionRegionOrderContractShape(sink.Order().contract) + ")";
+		}
+		break;
+	case ExecutionRegionSinkKind::DELIM_JOIN_SINK:
+		if (sink.DelimJoin().build.contract.present) {
+			return "sink(" + DescribeExecutionRegionHashJoinContractShape(sink.DelimJoin().build.contract) + ")";
+		}
+		if (sink.DelimJoin().distinct.contract.present) {
+			return "sink(" + DescribeExecutionRegionAggregateContractShape(sink.DelimJoin().distinct.contract) + ")";
+		}
+		break;
+	default:
+		break;
 	}
-	if (sink.nested_loop_join_contract.present) {
-		return "sink(" + DescribeExecutionRegionNestedLoopJoinContractShape(sink.nested_loop_join_contract) + ")";
-	}
-	if (sink.aggregate_contract.present) {
-		return "sink(" + DescribeExecutionRegionAggregateContractShape(sink.aggregate_contract) + ")";
-	}
-	if (sink.order_contract.present) {
-		return "sink(" + DescribeExecutionRegionOrderContractShape(sink.order_contract) + ")";
-	}
-	return "sink(kind=" + string(ExecutionRegionSinkKindToString(sink.kind)) + ")";
+	return "sink(kind=" + string(ExecutionRegionSinkKindToString(sink.Kind())) + ")";
 }
 
 string DescribeExecutionRegionPipelineShape(const ExecutionRegionIR &region_ir) {
@@ -269,7 +291,7 @@ static string GetExecutionRegionSinkSignatureFeature(const ExecutionRegionNode &
 	if (!node.sink) {
 		return ExecutionRegionOperatorKindSignatureSegment(node.operator_kind) + "-sink";
 	}
-	switch (node.sink->kind) {
+	switch (node.sink->Kind()) {
 	case ExecutionRegionSinkKind::RESULT_COLLECTOR_SINK:
 		return "result-collector-sink";
 	case ExecutionRegionSinkKind::HASH_JOIN_BUILD:

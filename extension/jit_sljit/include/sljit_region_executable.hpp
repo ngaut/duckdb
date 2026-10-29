@@ -382,8 +382,106 @@ struct SljitDirectProjectionPlan {
 	bool covers_all_projections = false;
 };
 
+struct SljitExecutableProjection {
+	vector<SljitExecutableRegionExpression> expressions;
+	vector<SljitDirectProjectionPlan> flat_plans;
+	vector<SljitCompiledFunction<SljitNativeVectorFunction>> flat_functions;
+};
+
 struct SljitExecutableRegionOp {
-	SljitNativeRegionOpKind kind;
+	explicit SljitExecutableRegionOp(SljitNativeRegionOpKind kind = SljitNativeRegionOpKind::FILTER) {
+		SetKind(kind);
+	}
+	SljitNativeRegionOpKind Kind() const {
+		return static_cast<SljitNativeRegionOpKind>(payload.index());
+	}
+	void SetKind(SljitNativeRegionOpKind kind) {
+		switch (kind) {
+		case SljitNativeRegionOpKind::FILTER:
+			payload.emplace<unique_ptr<SljitExecutableFilter>>();
+			return;
+		case SljitNativeRegionOpKind::PROJECTION:
+			payload.emplace<SljitExecutableProjection>();
+			return;
+		case SljitNativeRegionOpKind::HASH_JOIN_PROBE:
+			payload.emplace<SljitExecutableHashJoinProbe>();
+			return;
+		case SljitNativeRegionOpKind::HASH_JOIN_BUILD:
+			payload.emplace<SljitExecutableHashJoinBuild>();
+			return;
+		case SljitNativeRegionOpKind::ORDER_SINK:
+			payload.emplace<SljitExecutableOrderSink>();
+			return;
+		case SljitNativeRegionOpKind::APPEND_SINK:
+			payload.emplace<SljitExecutableAppendSink>();
+			return;
+		case SljitNativeRegionOpKind::AGGREGATE_UPDATE:
+			payload.emplace<SljitExecutableAggregateUpdate>();
+			return;
+		}
+		throw InternalException("Unknown SLJIT executable operator kind");
+	}
+	unique_ptr<SljitExecutableFilter> &Filter() {
+		return std::get<unique_ptr<SljitExecutableFilter>>(payload);
+	}
+	const unique_ptr<SljitExecutableFilter> &Filter() const {
+		return std::get<unique_ptr<SljitExecutableFilter>>(payload);
+	}
+	SljitExecutableProjection &Projection() {
+		return std::get<SljitExecutableProjection>(payload);
+	}
+	const SljitExecutableProjection &Projection() const {
+		return std::get<SljitExecutableProjection>(payload);
+	}
+	SljitExecutableHashJoinProbe &HashJoinProbe() {
+		return std::get<SljitExecutableHashJoinProbe>(payload);
+	}
+	const SljitExecutableHashJoinProbe &HashJoinProbe() const {
+		return std::get<SljitExecutableHashJoinProbe>(payload);
+	}
+	SljitExecutableHashJoinBuild &HashJoinBuild() {
+		return std::get<SljitExecutableHashJoinBuild>(payload);
+	}
+	const SljitExecutableHashJoinBuild &HashJoinBuild() const {
+		return std::get<SljitExecutableHashJoinBuild>(payload);
+	}
+	SljitExecutableOrderSink &OrderSink() {
+		return std::get<SljitExecutableOrderSink>(payload);
+	}
+	const SljitExecutableOrderSink &OrderSink() const {
+		return std::get<SljitExecutableOrderSink>(payload);
+	}
+	SljitExecutableAppendSink &AppendSink() {
+		return std::get<SljitExecutableAppendSink>(payload);
+	}
+	const SljitExecutableAppendSink &AppendSink() const {
+		return std::get<SljitExecutableAppendSink>(payload);
+	}
+	SljitExecutableAggregateUpdate &AggregateUpdate() {
+		return std::get<SljitExecutableAggregateUpdate>(payload);
+	}
+	const SljitExecutableAggregateUpdate &AggregateUpdate() const {
+		return std::get<SljitExecutableAggregateUpdate>(payload);
+	}
+	vector<SljitExecutableRegionExpression> &Projections() {
+		return Projection().expressions;
+	}
+	const vector<SljitExecutableRegionExpression> &Projections() const {
+		return Projection().expressions;
+	}
+	vector<SljitDirectProjectionPlan> &FlatFusedProjectionPlans() {
+		return Projection().flat_plans;
+	}
+	const vector<SljitDirectProjectionPlan> &FlatFusedProjectionPlans() const {
+		return Projection().flat_plans;
+	}
+	vector<SljitCompiledFunction<SljitNativeVectorFunction>> &FlatFusedProjections() {
+		return Projection().flat_functions;
+	}
+	const vector<SljitCompiledFunction<SljitNativeVectorFunction>> &FlatFusedProjections() const {
+		return Projection().flat_functions;
+	}
+
 	idx_t operator_index = DConstants::INVALID_INDEX;
 	vector<LogicalType> input_types;
 	vector<bool> input_not_null;
@@ -391,36 +489,29 @@ struct SljitExecutableRegionOp {
 	vector<Value> input_max_values;
 	vector<LogicalType> output_types;
 	vector<bool> output_not_null;
-	unique_ptr<SljitExecutableFilter> filter;
-	SljitExecutableHashJoinProbe hash_join_probe;
-	SljitExecutableHashJoinBuild hash_join_build;
-	SljitExecutableAppendSink append_sink;
-	SljitExecutableOrderSink order_sink;
-	SljitExecutableAggregateUpdate aggregate_update;
-	vector<SljitExecutableRegionExpression> projections;
-	vector<SljitDirectProjectionPlan> flat_fused_fixed_projection_plans;
-	vector<SljitCompiledFunction<SljitNativeVectorFunction>> flat_fused_fixed_projections;
 
 	idx_t CodeSize() const {
 		idx_t result = 0;
-		if (kind == SljitNativeRegionOpKind::FILTER) {
-			D_ASSERT(filter);
-			result += filter->CodeSize();
+		if (Kind() == SljitNativeRegionOpKind::FILTER) {
+			D_ASSERT(Filter());
+			result += Filter()->CodeSize();
 		}
-		if (kind == SljitNativeRegionOpKind::HASH_JOIN_PROBE) {
-			result += hash_join_probe.CodeSize();
+		if (Kind() == SljitNativeRegionOpKind::HASH_JOIN_PROBE) {
+			result += HashJoinProbe().CodeSize();
 		}
-		if (kind == SljitNativeRegionOpKind::ORDER_SINK) {
-			result += order_sink.CodeSize();
+		if (Kind() == SljitNativeRegionOpKind::ORDER_SINK) {
+			result += OrderSink().CodeSize();
 		}
-		if (kind == SljitNativeRegionOpKind::AGGREGATE_UPDATE) {
-			result += aggregate_update.CodeSize();
+		if (Kind() == SljitNativeRegionOpKind::AGGREGATE_UPDATE) {
+			result += AggregateUpdate().CodeSize();
 		}
-		for (auto &projection : flat_fused_fixed_projections) {
-			result += projection.CodeSize();
-		}
-		for (auto &projection : projections) {
-			result += projection.CodeSize();
+		if (Kind() == SljitNativeRegionOpKind::PROJECTION) {
+			for (auto &projection : FlatFusedProjections()) {
+				result += projection.CodeSize();
+			}
+			for (auto &projection : Projections()) {
+				result += projection.CodeSize();
+			}
 		}
 		return result;
 	}
@@ -465,12 +556,12 @@ struct SljitExecutableRegionOp {
 				constraints.references.emplace_back(col_idx, types[col_idx]);
 			}
 		};
-		switch (kind) {
+		switch (Kind()) {
 		case SljitNativeRegionOpKind::AGGREGATE_UPDATE: {
 			// The delegated sink dereferences exactly the contract's declared
 			// references; fused input transforms are invisible to delegation, so
 			// these are the truth regardless of any declared dense layout.
-			auto &sink_info = aggregate_update.plan.sink_info;
+			auto &sink_info = AggregateUpdate().plan.sink_info;
 			for (auto &group : sink_info.groups) {
 				if (!group.supported_reference) {
 					continue;
@@ -491,13 +582,13 @@ struct SljitExecutableRegionOp {
 			return constraints;
 		}
 		case SljitNativeRegionOpKind::APPEND_SINK:
-			dense(append_sink.plan.input_types);
+			dense(AppendSink().plan.input_types);
 			return constraints;
 		case SljitNativeRegionOpKind::ORDER_SINK:
-			dense(order_sink.plan.input_types);
+			dense(OrderSink().plan.input_types);
 			return constraints;
 		case SljitNativeRegionOpKind::HASH_JOIN_BUILD:
-			dense(hash_join_build.plan.input_types);
+			dense(HashJoinBuild().plan.input_types);
 			return constraints;
 		default:
 			dense(input_types);
@@ -509,12 +600,18 @@ struct SljitExecutableRegionOp {
 		if (CodeSize() > 0) {
 			return true;
 		}
-		if (kind == SljitNativeRegionOpKind::HASH_JOIN_PROBE) {
-			return hash_join_probe.HasDeferredCodegen();
+		if (Kind() == SljitNativeRegionOpKind::HASH_JOIN_PROBE) {
+			return HashJoinProbe().HasDeferredCodegen();
 		}
-		return kind == SljitNativeRegionOpKind::AGGREGATE_UPDATE &&
-		       aggregate_update.primitive_run_update.HasDeferredCodegen();
+		return Kind() == SljitNativeRegionOpKind::AGGREGATE_UPDATE &&
+		       AggregateUpdate().primitive_run_update.HasDeferredCodegen();
 	}
+
+private:
+	std::variant<unique_ptr<SljitExecutableFilter>, SljitExecutableProjection, SljitExecutableHashJoinProbe,
+	             SljitExecutableHashJoinBuild, SljitExecutableOrderSink, SljitExecutableAppendSink,
+	             SljitExecutableAggregateUpdate>
+	    payload;
 };
 
 struct SljitExecutableRegion {

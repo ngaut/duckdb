@@ -736,17 +736,9 @@ string DescribeExecutionRegionSourceInfo(const ExecutionRegionSourceInfo &source
 	AppendExecutionRegionDescription(result, DescribeExecutionRegionHashJoinContract(source.hash_join_contract));
 	AppendExecutionRegionDescription(result,
 	                                 DescribeExecutionRegionNestedLoopJoinContract(source.nested_loop_join_contract));
-	AppendExecutionRegionDescription(result,
-	                                 DescribeExecutionRegionAggregateContract(source.aggregate_contract, false));
 	AppendExecutionRegionDescription(result, DescribeExecutionRegionOrderContract(source.order_contract));
-	if (!source.aggregates.empty()) {
-		result += ",aggregates=" + DescribeExecutionRegionAggregateInputs(source.aggregates);
-	}
 	if (!source.hash_join_keys.empty()) {
 		result += ",hash_join_keys=" + DescribeExecutionRegionHashJoinKeyInputs(source.hash_join_keys);
-	}
-	if (!source.groups.empty()) {
-		result += ",groups=" + DescribeExecutionRegionGroupInputs(source.groups);
 	}
 	result += ">";
 	for (auto &filter : source.filters) {
@@ -758,15 +750,24 @@ string DescribeExecutionRegionSourceInfo(const ExecutionRegionSourceInfo &source
 
 static string DescribeExecutionRegionOperatorInfo(const ExecutionRegionOperatorInfo &operator_info,
                                                   bool include_diagnostic_fields = true) {
-	string result = "operator<kind=" + string(ExecutionRegionOperatorContractKindToString(operator_info.kind));
+	string result = "operator<kind=" + string(ExecutionRegionOperatorContractKindToString(operator_info.Kind()));
 	if (include_diagnostic_fields) {
 		result += ",fields=" + DescribeExecutionRegionContractFields(operator_info.fields);
 	}
-	AppendExecutionRegionDescription(result, DescribeExecutionRegionHashJoinContract(operator_info.hash_join_contract));
-	AppendExecutionRegionDescription(
-	    result, DescribeExecutionRegionNestedLoopJoinContract(operator_info.nested_loop_join_contract));
-	if (!operator_info.hash_join_keys.empty()) {
-		result += ",hash_join_keys=" + DescribeExecutionRegionHashJoinKeyInputs(operator_info.hash_join_keys);
+	switch (operator_info.Kind()) {
+	case ExecutionRegionOperatorContractKind::HASH_JOIN_PROBE:
+		AppendExecutionRegionDescription(result,
+		                                 DescribeExecutionRegionHashJoinContract(operator_info.HashJoin().contract));
+		if (!operator_info.HashJoin().keys.empty()) {
+			result += ",hash_join_keys=" + DescribeExecutionRegionHashJoinKeyInputs(operator_info.HashJoin().keys);
+		}
+		break;
+	case ExecutionRegionOperatorContractKind::NESTED_LOOP_JOIN_PROBE:
+		AppendExecutionRegionDescription(result,
+		                                 DescribeExecutionRegionNestedLoopJoinContract(operator_info.NestedLoopJoin()));
+		break;
+	case ExecutionRegionOperatorContractKind::NONE:
+		break;
 	}
 	result += ">";
 	return result;
@@ -774,25 +775,51 @@ static string DescribeExecutionRegionOperatorInfo(const ExecutionRegionOperatorI
 
 static string DescribeExecutionRegionSinkInfo(const ExecutionRegionSinkInfo &sink,
                                               bool include_diagnostic_fields = true) {
-	string result = "sink<kind=" + string(ExecutionRegionSinkKindToString(sink.kind));
+	string result = "sink<kind=" + string(ExecutionRegionSinkKindToString(sink.Kind()));
 	if (include_diagnostic_fields) {
 		result += ",fields=" + DescribeExecutionRegionContractFields(sink.fields);
 	}
-	AppendExecutionRegionDescription(result,
-	                                 DescribeExecutionRegionNativeOperatorContract(sink.native_sink_contract, "sink"));
-	AppendExecutionRegionDescription(result, DescribeExecutionRegionHashJoinContract(sink.hash_join_contract));
-	AppendExecutionRegionDescription(result,
-	                                 DescribeExecutionRegionNestedLoopJoinContract(sink.nested_loop_join_contract));
-	AppendExecutionRegionDescription(result, DescribeExecutionRegionAggregateContract(sink.aggregate_contract, true));
-	AppendExecutionRegionDescription(result, DescribeExecutionRegionOrderContract(sink.order_contract));
-	if (!sink.aggregates.empty()) {
-		result += ",aggregates=" + DescribeExecutionRegionAggregateInputs(sink.aggregates);
-	}
-	if (!sink.hash_join_keys.empty()) {
-		result += ",hash_join_keys=" + DescribeExecutionRegionHashJoinKeyInputs(sink.hash_join_keys);
-	}
-	if (!sink.groups.empty()) {
-		result += ",groups=" + DescribeExecutionRegionGroupInputs(sink.groups);
+	auto append_hash_join = [&](const ExecutionRegionHashJoinInfo &join) {
+		AppendExecutionRegionDescription(result, DescribeExecutionRegionHashJoinContract(join.contract));
+		if (!join.keys.empty()) {
+			result += ",hash_join_keys=" + DescribeExecutionRegionHashJoinKeyInputs(join.keys);
+		}
+	};
+	auto append_aggregate = [&](const ExecutionRegionAggregateSinkInfo &aggregate) {
+		AppendExecutionRegionDescription(result, DescribeExecutionRegionAggregateContract(aggregate.contract, true));
+		if (!aggregate.aggregates.empty()) {
+			result += ",aggregates=" + DescribeExecutionRegionAggregateInputs(aggregate.aggregates);
+		}
+		if (!aggregate.groups.empty()) {
+			result += ",groups=" + DescribeExecutionRegionGroupInputs(aggregate.groups);
+		}
+	};
+	switch (sink.Kind()) {
+	case ExecutionRegionSinkKind::HASH_JOIN_BUILD:
+		append_hash_join(sink.HashJoin());
+		break;
+	case ExecutionRegionSinkKind::NESTED_LOOP_JOIN_BUILD:
+		AppendExecutionRegionDescription(result, DescribeExecutionRegionNestedLoopJoinContract(sink.NestedLoopJoin()));
+		break;
+	case ExecutionRegionSinkKind::HASH_AGGREGATE_UPDATE:
+	case ExecutionRegionSinkKind::PERFECT_HASH_AGGREGATE_UPDATE:
+	case ExecutionRegionSinkKind::UNGROUPED_AGGREGATE_UPDATE:
+		append_aggregate(sink.Aggregate());
+		break;
+	case ExecutionRegionSinkKind::DELIM_JOIN_SINK:
+		append_hash_join(sink.DelimJoin().build);
+		append_aggregate(sink.DelimJoin().distinct);
+		DUCKDB_EXPLICIT_FALLTHROUGH;
+	case ExecutionRegionSinkKind::RESULT_COLLECTOR_SINK:
+	case ExecutionRegionSinkKind::MATERIALIZATION:
+	case ExecutionRegionSinkKind::SORT:
+		AppendExecutionRegionDescription(result, DescribeExecutionRegionNativeOperatorContract(sink.Native(), "sink"));
+		if (sink.Kind() == ExecutionRegionSinkKind::SORT) {
+			AppendExecutionRegionDescription(result, DescribeExecutionRegionOrderContract(sink.Order().contract));
+		}
+		break;
+	case ExecutionRegionSinkKind::NONE:
+		break;
 	}
 	result += ">";
 	return result;

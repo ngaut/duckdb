@@ -7,6 +7,7 @@
 #include "duckdb/common/string_util.hpp"
 #include "duckdb/common/vector/dictionary_vector.hpp"
 #include "duckdb/execution/execution_operator_runtime.hpp"
+#include "duckdb/execution/execution_chunk_coalescer.hpp"
 #include "duckdb/function/table/table_scan.hpp"
 #include "duckdb/planner/expression/bound_conjunction_expression.hpp"
 #include "duckdb/planner/filter/expression_filter.hpp"
@@ -228,8 +229,7 @@ PhysicalTableScan::PhysicalTableScan(PhysicalPlan &physical_plan, vector<Logical
 
 class TableScanGlobalSourceState : public GlobalSourceState {
 public:
-	TableScanGlobalSourceState(ClientContext &context, const PhysicalTableScan &op,
-	                           const ExecutionRegionOpenRequest &open_request) {
+	TableScanGlobalSourceState(ClientContext &context, const PhysicalTableScan &op) {
 		physical_table_scan_execution_strategy = Settings::Get<DebugPhysicalTableScanExecutionStrategySetting>(context);
 
 		if (op.dynamic_filters && op.dynamic_filters->HasFilters()) {
@@ -245,19 +245,6 @@ public:
 			if (global_state) {
 				max_threads = global_state->MaxThreads();
 			}
-			auto execution_filters = filters;
-			if (open_request.UsesDynamicFiltersWithStaticPruning()) {
-				execution_source_residual_filters =
-				    op.dynamic_filters ? op.dynamic_filters->GetFinalTableFilters(op, nullptr) : nullptr;
-				if (!execution_source_residual_filters || !execution_source_residual_filters->HasFilters()) {
-					throw InternalException(
-					    "mixed execution-region scan filtering requires a non-empty dynamic residual filter set");
-				}
-			}
-			execution_source_config = BuildTableScanExecutionSourceConfig(op, execution_filters, open_request);
-			execution_source_config.residual_filters = execution_source_residual_filters.get();
-			InitializeExecutionSourceContractTableScanGlobalState(context, op, execution_source_config,
-			                                                      execution_source_contract, global_state.get());
 		} else {
 			max_threads = 1;
 		}
@@ -362,13 +349,28 @@ unique_ptr<LocalSourceState> PhysicalTableScan::GetLocalSourceState(ExecutionCon
 }
 
 unique_ptr<GlobalSourceState> PhysicalTableScan::GetGlobalSourceState(ClientContext &context) const {
-	ExecutionRegionOpenRequest open_request;
-	return make_uniq<TableScanGlobalSourceState>(context, *this, open_request);
+	return make_uniq<TableScanGlobalSourceState>(context, *this);
 }
 
-unique_ptr<GlobalSourceState>
-PhysicalTableScan::GetGlobalSourceState(ClientContext &context, const ExecutionRegionOpenRequest &open_request) const {
-	return make_uniq<TableScanGlobalSourceState>(context, *this, open_request);
+void PhysicalTableScan::ConfigureExecutionSourceState(ClientContext &context, GlobalSourceState &gstate,
+                                                      const ExecutionRegionOpenRequest &open_request) const {
+	auto &state = gstate.Cast<TableScanGlobalSourceState>();
+	if (state.execution_source_contract.storage) {
+		throw InternalException("Table scan execution contract configured more than once");
+	}
+	if (open_request.UsesDynamicFiltersWithStaticPruning()) {
+		state.execution_source_residual_filters =
+		    dynamic_filters ? dynamic_filters->GetFinalTableFilters(*this, nullptr) : nullptr;
+		if (!state.execution_source_residual_filters || !state.execution_source_residual_filters->HasFilters()) {
+			throw InternalException(
+			    "mixed execution-region scan filtering requires a non-empty dynamic residual filter set");
+		}
+	}
+	state.execution_source_config =
+	    BuildTableScanExecutionSourceConfig(*this, state.GetTableFilters(*this), open_request);
+	state.execution_source_config.residual_filters = state.execution_source_residual_filters.get();
+	InitializeExecutionSourceContractTableScanGlobalState(context, *this, state.execution_source_config,
+	                                                      state.execution_source_contract, state.global_state.get());
 }
 
 bool PhysicalTableScan::SupportsExecutionSourceContract(const ExecutionRegionOpenRequest &open_request) const {
@@ -383,127 +385,6 @@ static idx_t GetExecutionSourceContractTableScanBatchIndex(const TableScanState 
 		return scan_state.table_state.batch_index + scan_state.local_state.batch_index;
 	}
 	return 0;
-}
-
-//! A storage vector with at least this many rows passes into a region uncopied
-static constexpr idx_t SOURCE_CONTRACT_BATCH_ROWS = STANDARD_VECTOR_SIZE / 2;
-
-//! Whether a vector can be copied into a batch: copying must cost only fixed-width bytes (a string column is judged by
-//! its first valid value, since long-text columns are long throughout and inlined strings copy as their string_t), and
-//! must not flatten an encoding a consumer keeps: a storage dictionary (it has an id, or is global) or an FSST vector.
-//! A dictionary the scan made by selecting rows of its own vector carries nothing worth keeping
-static bool SourceContractVectorCanBatch(DataChunk &vector) {
-	for (auto &column : vector.data) {
-		switch (column.GetVectorType()) {
-		case VectorType::FLAT_VECTOR:
-		case VectorType::CONSTANT_VECTOR:
-		case VectorType::SEQUENCE_VECTOR:
-			break;
-		case VectorType::DICTIONARY_VECTOR:
-			if (DictionaryVector::IsGlobalDictionary(column) || !DictionaryVector::DictionaryId(column).empty()) {
-				return false;
-			}
-			break;
-		default:
-			return false;
-		}
-		const auto physical_type = column.GetType().InternalType();
-		if (TypeIsConstantSize(physical_type)) {
-			continue;
-		}
-		if (physical_type != PhysicalType::VARCHAR) {
-			return false;
-		}
-		UnifiedVectorFormat format;
-		column.ToUnifiedFormat(vector.size(), format);
-		auto data = UnifiedVectorFormat::GetData<string_t>(format);
-		for (idx_t row_idx = 0; row_idx < vector.size(); row_idx++) {
-			const auto idx = format.sel->get_index(row_idx);
-			if (format.validity.RowIsValid(idx)) {
-				if (!data[idx].IsInlined()) {
-					return false;
-				}
-				break;
-			}
-		}
-	}
-	return true;
-}
-
-//! The values of an all-valid fixed-width column a scan returned: flat, or a dictionary the scan made by selecting
-//! rows of its own flat vector. Null when the column is neither, or may hold NULLs
-static const_data_ptr_t SourceContractAllValidFixedWidthData(Vector &column, optional_ptr<const SelectionVector> &sel) {
-	if (!TypeIsConstantSize(column.GetType().InternalType())) {
-		return nullptr;
-	}
-	sel = nullptr;
-	reference<Vector> flat(column);
-	if (column.GetVectorType() == VectorType::DICTIONARY_VECTOR) {
-		sel = &DictionaryVector::SelVector(column);
-		flat = DictionaryVector::Child(column);
-	}
-	if (flat.get().GetVectorType() != VectorType::FLAT_VECTOR || !FlatVector::Validity(flat.get()).CannotHaveNull()) {
-		return nullptr;
-	}
-	return FlatVector::GetData(flat.get());
-}
-
-template <idx_t TYPE_SIZE>
-static void GatherSourceContractValues(data_ptr_t target, const_data_ptr_t source, const SelectionVector &sel,
-                                       idx_t count) {
-	for (idx_t row_idx = 0; row_idx < count; row_idx++) {
-		memcpy(target + row_idx * TYPE_SIZE, source + sel.get_index(row_idx) * TYPE_SIZE, TYPE_SIZE);
-	}
-}
-
-static void GatherSourceContractValues(data_ptr_t target, const_data_ptr_t source, const SelectionVector &sel,
-                                       idx_t count, idx_t type_size) {
-	switch (type_size) {
-	case 1:
-		return GatherSourceContractValues<1>(target, source, sel, count);
-	case 2:
-		return GatherSourceContractValues<2>(target, source, sel, count);
-	case 4:
-		return GatherSourceContractValues<4>(target, source, sel, count);
-	case 8:
-		return GatherSourceContractValues<8>(target, source, sel, count);
-	case 16:
-		return GatherSourceContractValues<16>(target, source, sel, count);
-	default:
-		for (idx_t row_idx = 0; row_idx < count; row_idx++) {
-			memcpy(target + row_idx * type_size, source + sel.get_index(row_idx) * type_size, type_size);
-		}
-	}
-}
-
-//! Appends a scanned vector to the chunk being filled. All-valid fixed-width columns copy their bytes directly, as
-//! almost every selective scan's columns are; anything else takes the general append
-static void AppendSourceContractVector(DataChunk &chunk, DataChunk &vector) {
-	const auto offset = chunk.size();
-	const auto count = vector.size();
-	bool direct = true;
-	for (idx_t col_idx = 0; col_idx < vector.ColumnCount() && direct; col_idx++) {
-		optional_ptr<const SelectionVector> sel;
-		direct = SourceContractAllValidFixedWidthData(vector.data[col_idx], sel) &&
-		         chunk.data[col_idx].GetVectorType() == VectorType::FLAT_VECTOR &&
-		         FlatVector::Validity(chunk.data[col_idx]).CannotHaveNull();
-	}
-	if (!direct) {
-		chunk.Append(vector);
-		return;
-	}
-	for (idx_t col_idx = 0; col_idx < vector.ColumnCount(); col_idx++) {
-		optional_ptr<const SelectionVector> sel;
-		auto source = SourceContractAllValidFixedWidthData(vector.data[col_idx], sel);
-		const auto type_size = GetTypeIdSize(vector.data[col_idx].GetType().InternalType());
-		auto target = FlatVector::GetDataMutable(chunk.data[col_idx]) + offset * type_size;
-		if (sel) {
-			GatherSourceContractValues(target, source, *sel, count, type_size);
-		} else {
-			memcpy(target, source, count * type_size);
-		}
-	}
-	chunk.SetChildCardinality(offset + count);
 }
 
 SourceResultType PhysicalTableScan::GetExecutionSourceContractDataInternal(ExecutionContext &context, DataChunk &chunk,
@@ -571,7 +452,8 @@ SourceResultType PhysicalTableScan::GetExecutionSourceContractDataInternal(Execu
 			if (chunk.size() + vector.size() > STANDARD_VECTOR_SIZE) {
 				return SourceResultType::HAVE_MORE_OUTPUT;
 			}
-			if (vector.size() >= SOURCE_CONTRACT_BATCH_ROWS || !SourceContractVectorCanBatch(vector)) {
+			if (vector.size() >= ExecutionChunkCoalescer::MIN_PASSTHROUGH_ROWS ||
+			    !ExecutionChunkCoalescer::CanAppend(vector)) {
 				if (chunk.size() > 0) {
 					return SourceResultType::HAVE_MORE_OUTPUT;
 				}
@@ -581,7 +463,7 @@ SourceResultType PhysicalTableScan::GetExecutionSourceContractDataInternal(Execu
 			}
 			{
 				ExecutionOperatorStageTimer timer(input.stage_recorder, "source_contract.table_scan.batch_append");
-				AppendSourceContractVector(chunk, vector);
+				ExecutionChunkCoalescer::Append(chunk, vector);
 			}
 			l_state.execution_source_contract_vector_pending = false;
 		}

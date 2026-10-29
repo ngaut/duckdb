@@ -29,8 +29,8 @@ struct SljitNativeTailDelegationRuntimeState {
 		}
 		const auto tail_start_idx = primitive.native_tail_start_idx;
 		auto &tail_op = ops[tail_start_idx];
-		RecordSljitRegionRuntimePath(runtime, tail_op.kind, "native_tail_delegation", input.count);
-		RecordSljitRegionRuntimeDelegation(runtime, tail_op.kind, "native_tail_delegation", input.count);
+		RecordSljitRegionRuntimePath(runtime, tail_op.Kind(), "native_tail_delegation", input.count);
+		RecordSljitRegionRuntimeDelegation(runtime, tail_op.Kind(), "native_tail_delegation", input.count);
 		auto &chunk = SljitBindMaterializedRuntimeBatchInput(input, "SLJIT native tail delegation");
 		auto sink_result = execute_native_full_pipeline_from(scratch, tail_start_idx, chunk);
 		auto stopped = SljitNativeSinkResultStopsExecution(runtime, sink_result, result);

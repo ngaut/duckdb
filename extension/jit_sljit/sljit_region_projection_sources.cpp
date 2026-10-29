@@ -248,6 +248,7 @@ static unique_ptr<ExecutionExpressionIR> MakeSljitTreeCastChain(const SljitNativ
 		                                         : ExecutionExpressionExceptionKind::CAST;
 		cast->query_location = step.query_location;
 		cast->cast_source_alias = step.source_alias;
+		cast->cast_error_binding = step.error_binding;
 		cast->try_cast = expr.try_cast;
 		cast->left = std::move(result);
 		result = std::move(cast);

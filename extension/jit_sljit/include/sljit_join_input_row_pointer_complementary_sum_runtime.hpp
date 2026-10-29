@@ -598,15 +598,15 @@ static bool SljitTryPrepareJoinInputComplementarySumUpdate(
 	aggregate_input.Reset();
 	aggregate_input.SetChildCardinality(count);
 	auto &sink_binding = SljitBindRecordedNativeSink(
-	    runtime, native_runtime, scratch, strategy.aggregate_idx, aggregate_op.kind, aggregate_input,
-	    aggregate_op.aggregate_update.plan.sink_info, "aggregate-update-runtime-binding-failed",
+	    runtime, native_runtime, scratch, strategy.aggregate_idx, aggregate_op.Kind(), aggregate_input,
+	    aggregate_op.AggregateUpdate().plan.sink_info, "aggregate-update-runtime-binding-failed",
 	    "SLJIT join-input complementary aggregate update");
 	if (!sink_binding.ready || !sink_binding.aggregate_update.ready || !sink_binding.aggregate_update.primitive.ready ||
 	    !sink_binding.aggregate_update.grouped_state.ready || !sink_binding.aggregate_update.grouped_state.state) {
 		return block("sink_binding");
 	}
 	auto &payload_lanes =
-	    scratch.AggregatePayloadLanes(strategy.aggregate_idx, aggregate_op.aggregate_update.payload_descriptors,
+	    scratch.AggregatePayloadLanes(strategy.aggregate_idx, aggregate_op.AggregateUpdate().payload_descriptors,
 	                                  sink_binding.aggregate_update.primitive);
 	SljitStringSetComplementarySumUpdateState update_state;
 	if (!SljitTryBindStringSetComplementarySumLanes(aggregate_op, payload_lanes, plan.classification, update_state)) {

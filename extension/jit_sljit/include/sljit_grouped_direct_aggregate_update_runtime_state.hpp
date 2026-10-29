@@ -81,11 +81,11 @@ private:
 	                                         const SljitGroupedAggregateUpdatePrimitive &primitive,
 	                                         const SljitRuntimeBatchView &input) {
 		if (primitive.input_kind == SljitGroupedAggregateUpdateInputKind::PROJECTED_INPUT) {
-			RecordSljitRegionRuntimePath(runtime, ops[primitive.aggregate_idx].kind, "grouped_direct_projected_input",
+			RecordSljitRegionRuntimePath(runtime, ops[primitive.aggregate_idx].Kind(), "grouped_direct_projected_input",
 			                             input.count);
 			return ExecuteProjectedDirectPrimitivePayloadUpdate(runtime, ops, scratch, primitive, input);
 		}
-		RecordSljitRegionRuntimePath(runtime, ops[primitive.aggregate_idx].kind, "grouped_direct_materialized_input",
+		RecordSljitRegionRuntimePath(runtime, ops[primitive.aggregate_idx].Kind(), "grouped_direct_materialized_input",
 		                             input.count);
 		auto &input_chunk = SljitBindRuntimeBatchInput(input, "SLJIT grouped aggregate direct update");
 		auto &aggregate_op = ops[primitive.aggregate_idx];
@@ -112,13 +112,13 @@ private:
 	}
 
 	bool PrepareMaterializedDirectDescriptor(SljitExecutableRegionOp &op) {
-		if (op.kind != SljitNativeRegionOpKind::AGGREGATE_UPDATE) {
+		if (op.Kind() != SljitNativeRegionOpKind::AGGREGATE_UPDATE) {
 			return false;
 		}
-		auto &sink_info = op.aggregate_update.plan.sink_info;
-		auto &input_types = op.aggregate_update.plan.input_types;
-		auto &payload_descriptors = op.aggregate_update.payload_descriptors;
-		auto &payloads = op.aggregate_update.payloads;
+		auto &sink_info = op.AggregateUpdate().plan.sink_info;
+		auto &input_types = op.AggregateUpdate().plan.input_types;
+		auto &payload_descriptors = op.AggregateUpdate().payload_descriptors;
+		auto &payloads = op.AggregateUpdate().payloads;
 		if (sink_info.groups.empty() || payload_descriptors.empty() || payload_descriptors.size() != payloads.size()) {
 			return false;
 		}
@@ -170,7 +170,7 @@ private:
 		        runtime, scratch, op_idx, op, input, materialized_direct_group_sources,
 		        materialized_direct_payload_source_indices, *bound.payload_lanes, *bound.grouped_state,
 		        direct_preaggregated_batch, false)) {
-			RecordSljitRegionMaterializationElision(runtime, op.kind,
+			RecordSljitRegionMaterializationElision(runtime, op.Kind(),
 			                                        "direct_materialized_pending_preaggregated_grouped_update", count);
 			return true;
 		}
@@ -215,21 +215,21 @@ private:
 			}
 			auto stage_start = SljitRegionStageStart(runtime);
 			SljitExecuteFusedPerfectHashGroupedPrimitiveAggregatePayloadUpdate(
-			    aggregate_op.aggregate_update.filtered_update.payloads,
-			    aggregate_op.aggregate_update.filtered_update.compiled.Function(),
-			    aggregate_op.aggregate_update.plan.sink_info.groups,
-			    aggregate_op.aggregate_update.plan.group_expressions,
-			    aggregate_op.aggregate_update.group_source_not_null,
-			    aggregate_op.aggregate_update.plan.sink_info.aggregate_contract,
-			    aggregate_op.aggregate_update.payload_descriptors,
-			    aggregate_op.aggregate_update.filtered_update.payload_source_layout,
-			    aggregate_op.aggregate_update.filtered_update.input_source_indices,
-			    aggregate_op.aggregate_update.filtered_update.input_source_not_null, *bound.payload_lanes,
+			    aggregate_op.AggregateUpdate().filtered_update.payloads,
+			    aggregate_op.AggregateUpdate().filtered_update.compiled.Function(),
+			    aggregate_op.AggregateUpdate().plan.sink_info.groups,
+			    aggregate_op.AggregateUpdate().plan.group_expressions,
+			    aggregate_op.AggregateUpdate().group_source_not_null,
+			    aggregate_op.AggregateUpdate().plan.sink_info.contract,
+			    aggregate_op.AggregateUpdate().payload_descriptors,
+			    aggregate_op.AggregateUpdate().filtered_update.payload_source_layout,
+			    aggregate_op.AggregateUpdate().filtered_update.input_source_indices,
+			    aggregate_op.AggregateUpdate().filtered_update.input_source_not_null, *bound.payload_lanes,
 			    *bound.reduction_lanes, bound.grouped_state->perfect_hash_layout, input_chunk, nullptr,
 			    input_chunk.size(), *bound.payload_scratch);
-			RecordSljitRegionStageRuntime(runtime, primitive.aggregate_idx, aggregate_op.kind,
+			RecordSljitRegionStageRuntime(runtime, primitive.aggregate_idx, aggregate_op.Kind(),
 			                              "filtered_perfect_hash_update", stage_start);
-			RecordSljitRegionMaterializationElision(runtime, aggregate_op.kind, "filtered_perfect_hash_update",
+			RecordSljitRegionMaterializationElision(runtime, aggregate_op.Kind(), "filtered_perfect_hash_update",
 			                                        input_chunk.size());
 			return false;
 		}
@@ -239,7 +239,7 @@ private:
 		auto selected_count = SljitSelectFilter(filter_op, input_chunk, filter_selection,
 		                                        scratch.ExpressionAdapterScratch(primitive.filter_idx, 0), nullptr,
 		                                        input_chunk.size(), &runtime);
-		RecordSljitRegionStageRuntime(runtime, primitive.filter_idx, filter_op.kind, "selection", filter_stage_start);
+		RecordSljitRegionStageRuntime(runtime, primitive.filter_idx, filter_op.Kind(), "selection", filter_stage_start);
 		if (selected_count == 0) {
 			return false;
 		}
@@ -285,11 +285,11 @@ private:
 		auto &group_sources = PrepareProjectedDirectGroupSources(aggregate_op, *source_input);
 		if (TryExecuteProjectedDirectSourceInputPayloadUpdate(runtime, ops, scratch, primitive, *source_input,
 		                                                      group_sources)) {
-			RecordSljitRegionStageRuntime(runtime, primitive.aggregate_idx, aggregate_op.kind,
+			RecordSljitRegionStageRuntime(runtime, primitive.aggregate_idx, aggregate_op.Kind(),
 			                              "projected_source_input_grouped_update", stage_start);
 			return false;
 		}
-		RecordSljitRegionStageRuntime(runtime, primitive.aggregate_idx, aggregate_op.kind,
+		RecordSljitRegionStageRuntime(runtime, primitive.aggregate_idx, aggregate_op.Kind(),
 		                              "projected_source_input_grouped_update_miss", stage_start);
 		const auto failure_reason =
 		    projected_direct_failure_reason.empty() ? "unknown" : projected_direct_failure_reason.c_str();
@@ -328,7 +328,7 @@ private:
 	vector<ExecutionRowPointerGroupKeySource> &PrepareProjectedDirectGroupSources(SljitExecutableRegionOp &aggregate_op,
 	                                                                              DataChunk &source_input) {
 		projected_direct_group_sources = projected_direct_update->group_sources;
-		SljitApplyExecutableIntegralGroupKeyRangeProofs(aggregate_op.aggregate_update.integral_group_key_ranges,
+		SljitApplyExecutableIntegralGroupKeyRangeProofs(aggregate_op.AggregateUpdate().integral_group_key_ranges,
 		                                                projected_direct_group_sources);
 		SljitApplyInputVectorGroupBatchCastProofs(source_input, projected_direct_group_sources, source_input.size());
 		return projected_direct_group_sources;
@@ -346,8 +346,8 @@ private:
 		auto &aggregate_op = ops[primitive.aggregate_idx];
 		auto &native_runtime = runtime.ExecutionOperators();
 		optional_ptr<const ExecutionDenseGroupDomain> dense_domain;
-		if (aggregate_op.aggregate_update.dense_group_domain.ready) {
-			dense_domain = &aggregate_op.aggregate_update.dense_group_domain;
+		if (aggregate_op.AggregateUpdate().dense_group_domain.ready) {
+			dense_domain = &aggregate_op.AggregateUpdate().dense_group_domain;
 		}
 		string failure_reason;
 		if (!SljitTryExecuteNativeInputVectorGroupedAggregateUpdate(
@@ -358,11 +358,11 @@ private:
 		        optional_ptr<const vector<bool>>(&projected_direct_update->payload_source_not_null))) {
 			auto unsupported = string("projected_source_input_grouped_update_unsupported.") +
 			                   (failure_reason.empty() ? "unknown" : failure_reason);
-			RecordSljitRegionRuntimePath(runtime, aggregate_op.kind, unsupported.c_str(), source_input.size());
+			RecordSljitRegionRuntimePath(runtime, aggregate_op.Kind(), unsupported.c_str(), source_input.size());
 			projected_direct_failure_reason = failure_reason.empty() ? "unknown" : failure_reason;
 			return false;
 		}
-		RecordSljitRegionMaterializationElision(runtime, aggregate_op.kind, "projected_source_input_grouped_update",
+		RecordSljitRegionMaterializationElision(runtime, aggregate_op.Kind(), "projected_source_input_grouped_update",
 		                                        source_input.size());
 		return true;
 	}

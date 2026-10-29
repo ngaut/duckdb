@@ -63,7 +63,7 @@ SljitBindHashJoinProbeExecutionPlan(const SljitExecutableRegionOp &op,
                                     optional_ptr<const SljitNativeHashJoinProbePlan> input_plan,
                                     SljitHashJoinProbeOutputContract output_contract) {
 	if (!input_plan) {
-		return op.hash_join_probe.plan;
+		return op.HashJoinProbe().plan;
 	}
 	if (!SljitHashJoinProbeProducesSelectedView(output_contract)) {
 		throw InternalException("SLJIT prepared hash join probe plan requires selected-view execution");

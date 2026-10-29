@@ -13,6 +13,8 @@
 #include "duckdb/common/enums/order_type.hpp"
 #include "duckdb/common/types/value.hpp"
 
+#include <variant>
+
 namespace duckdb {
 
 static constexpr idx_t HIGH_COST_GENERATED_PROJECTION_EXPRESSION_COST = 1000;
@@ -354,40 +356,227 @@ struct ExecutionRegionSourceInfo {
 	ExecutionRegionTableScanContract table_scan_contract;
 	ExecutionRegionHashJoinContract hash_join_contract;
 	ExecutionRegionNestedLoopJoinContract nested_loop_join_contract;
-	ExecutionRegionAggregateContract aggregate_contract;
 	ExecutionRegionOrderContract order_contract;
-	vector<ExecutionRegionAggregateInput> aggregates;
 	vector<ExecutionRegionHashJoinKeyInput> hash_join_keys;
-	vector<ExecutionRegionGroupInput> groups;
 	ExecutionSourceProtocolContract source_contract;
 	ExecutionRegionNativeStateScanContract native_state_scan_contract;
 	string reason;
 	string ir;
 };
 
-struct ExecutionRegionOperatorInfo {
-	ExecutionRegionOperatorContractKind kind = ExecutionRegionOperatorContractKind::NONE;
-	vector<ExecutionRegionContractField> fields;
-	ExecutionRegionHashJoinContract hash_join_contract;
-	vector<ExecutionRegionHashJoinKeyInput> hash_join_keys;
-	ExecutionRegionNestedLoopJoinContract nested_loop_join_contract;
-	string reason;
-	string ir;
+struct ExecutionRegionHashJoinInfo {
+	ExecutionRegionHashJoinContract contract;
+	vector<ExecutionRegionHashJoinKeyInput> keys;
 };
 
-struct ExecutionRegionSinkInfo {
-	ExecutionRegionSinkKind kind = ExecutionRegionSinkKind::NONE;
+class ExecutionRegionOperatorInfo {
+public:
+	explicit ExecutionRegionOperatorInfo(
+	    ExecutionRegionOperatorContractKind kind = ExecutionRegionOperatorContractKind::NONE) {
+		SetKind(kind);
+	}
+
+	ExecutionRegionOperatorContractKind Kind() const {
+		return static_cast<ExecutionRegionOperatorContractKind>(payload.index());
+	}
+
+	void SetKind(ExecutionRegionOperatorContractKind kind) {
+		switch (kind) {
+		case ExecutionRegionOperatorContractKind::NONE:
+			payload.emplace<std::monostate>();
+			return;
+		case ExecutionRegionOperatorContractKind::HASH_JOIN_PROBE:
+			payload.emplace<ExecutionRegionHashJoinInfo>();
+			return;
+		case ExecutionRegionOperatorContractKind::NESTED_LOOP_JOIN_PROBE:
+			payload.emplace<ExecutionRegionNestedLoopJoinContract>();
+			return;
+		}
+		throw InternalException("Unknown execution-region operator contract kind");
+	}
+
+	ExecutionRegionHashJoinInfo &HashJoin() {
+		return std::get<ExecutionRegionHashJoinInfo>(payload);
+	}
+	const ExecutionRegionHashJoinInfo &HashJoin() const {
+		return std::get<ExecutionRegionHashJoinInfo>(payload);
+	}
+	ExecutionRegionNestedLoopJoinContract &NestedLoopJoin() {
+		return std::get<ExecutionRegionNestedLoopJoinContract>(payload);
+	}
+	const ExecutionRegionNestedLoopJoinContract &NestedLoopJoin() const {
+		return std::get<ExecutionRegionNestedLoopJoinContract>(payload);
+	}
+
 	vector<ExecutionRegionContractField> fields;
-	ExecutionRegionNativeOperatorContract native_sink_contract;
-	ExecutionRegionHashJoinContract hash_join_contract;
-	ExecutionRegionNestedLoopJoinContract nested_loop_join_contract;
-	ExecutionRegionAggregateContract aggregate_contract;
-	ExecutionRegionOrderContract order_contract;
-	vector<ExecutionRegionAggregateInput> aggregates;
-	vector<ExecutionRegionHashJoinKeyInput> hash_join_keys;
-	vector<ExecutionRegionGroupInput> groups;
 	string reason;
 	string ir;
+
+private:
+	std::variant<std::monostate, ExecutionRegionHashJoinInfo, ExecutionRegionNestedLoopJoinContract> payload;
+};
+
+struct ExecutionRegionAggregateSinkInfo {
+	explicit ExecutionRegionAggregateSinkInfo(
+	    ExecutionRegionAggregateOperatorKind kind = ExecutionRegionAggregateOperatorKind::NONE) {
+		contract.kind = kind;
+	}
+
+	ExecutionRegionSinkKind Kind() const {
+		switch (contract.kind) {
+		case ExecutionRegionAggregateOperatorKind::HASH:
+			return ExecutionRegionSinkKind::HASH_AGGREGATE_UPDATE;
+		case ExecutionRegionAggregateOperatorKind::PERFECT_HASH:
+			return ExecutionRegionSinkKind::PERFECT_HASH_AGGREGATE_UPDATE;
+		case ExecutionRegionAggregateOperatorKind::UNGROUPED:
+			return ExecutionRegionSinkKind::UNGROUPED_AGGREGATE_UPDATE;
+		case ExecutionRegionAggregateOperatorKind::NONE:
+			return ExecutionRegionSinkKind::NONE;
+		}
+		throw InternalException("Unknown execution-region aggregate contract kind");
+	}
+
+	ExecutionRegionAggregateContract contract;
+	vector<ExecutionRegionAggregateInput> aggregates;
+	vector<ExecutionRegionGroupInput> groups;
+};
+
+struct ExecutionRegionOrderSinkInfo {
+	ExecutionRegionNativeOperatorContract native_contract;
+	ExecutionRegionOrderContract contract;
+};
+
+struct ExecutionRegionDelimJoinSinkInfo {
+	ExecutionRegionNativeOperatorContract native_contract;
+	ExecutionRegionAggregateSinkInfo distinct;
+	ExecutionRegionHashJoinInfo build;
+};
+
+class ExecutionRegionSinkInfo {
+public:
+	explicit ExecutionRegionSinkInfo(ExecutionRegionSinkKind kind = ExecutionRegionSinkKind::NONE) {
+		SetKind(kind);
+	}
+
+	ExecutionRegionSinkKind Kind() const {
+		return static_cast<ExecutionRegionSinkKind>(payload.index());
+	}
+
+	void SetKind(ExecutionRegionSinkKind kind) {
+		switch (kind) {
+		case ExecutionRegionSinkKind::NONE:
+			payload.emplace<0>();
+			return;
+		case ExecutionRegionSinkKind::HASH_JOIN_BUILD:
+			payload.emplace<1>();
+			return;
+		case ExecutionRegionSinkKind::NESTED_LOOP_JOIN_BUILD:
+			payload.emplace<2>();
+			return;
+		case ExecutionRegionSinkKind::HASH_AGGREGATE_UPDATE:
+			payload.emplace<3>(ExecutionRegionAggregateOperatorKind::HASH);
+			return;
+		case ExecutionRegionSinkKind::PERFECT_HASH_AGGREGATE_UPDATE:
+			payload.emplace<4>(ExecutionRegionAggregateOperatorKind::PERFECT_HASH);
+			return;
+		case ExecutionRegionSinkKind::UNGROUPED_AGGREGATE_UPDATE:
+			payload.emplace<5>(ExecutionRegionAggregateOperatorKind::UNGROUPED);
+			return;
+		case ExecutionRegionSinkKind::RESULT_COLLECTOR_SINK:
+			payload.emplace<6>();
+			return;
+		case ExecutionRegionSinkKind::SORT:
+			payload.emplace<7>();
+			return;
+		case ExecutionRegionSinkKind::MATERIALIZATION:
+			payload.emplace<8>();
+			return;
+		case ExecutionRegionSinkKind::DELIM_JOIN_SINK:
+			payload.emplace<9>();
+			return;
+		}
+		throw InternalException("Unknown execution-region sink contract kind");
+	}
+
+	ExecutionRegionHashJoinInfo &HashJoin() {
+		return std::get<1>(payload);
+	}
+	const ExecutionRegionHashJoinInfo &HashJoin() const {
+		return std::get<1>(payload);
+	}
+	ExecutionRegionNestedLoopJoinContract &NestedLoopJoin() {
+		return std::get<2>(payload);
+	}
+	const ExecutionRegionNestedLoopJoinContract &NestedLoopJoin() const {
+		return std::get<2>(payload);
+	}
+	ExecutionRegionAggregateSinkInfo &Aggregate() {
+		switch (Kind()) {
+		case ExecutionRegionSinkKind::HASH_AGGREGATE_UPDATE:
+			return std::get<3>(payload);
+		case ExecutionRegionSinkKind::PERFECT_HASH_AGGREGATE_UPDATE:
+			return std::get<4>(payload);
+		default:
+			return std::get<5>(payload);
+		}
+	}
+	const ExecutionRegionAggregateSinkInfo &Aggregate() const {
+		switch (Kind()) {
+		case ExecutionRegionSinkKind::HASH_AGGREGATE_UPDATE:
+			return std::get<3>(payload);
+		case ExecutionRegionSinkKind::PERFECT_HASH_AGGREGATE_UPDATE:
+			return std::get<4>(payload);
+		default:
+			return std::get<5>(payload);
+		}
+	}
+	ExecutionRegionOrderSinkInfo &Order() {
+		return std::get<7>(payload);
+	}
+	const ExecutionRegionOrderSinkInfo &Order() const {
+		return std::get<7>(payload);
+	}
+	ExecutionRegionDelimJoinSinkInfo &DelimJoin() {
+		return std::get<9>(payload);
+	}
+	const ExecutionRegionDelimJoinSinkInfo &DelimJoin() const {
+		return std::get<9>(payload);
+	}
+	ExecutionRegionNativeOperatorContract &Native() {
+		switch (Kind()) {
+		case ExecutionRegionSinkKind::RESULT_COLLECTOR_SINK:
+			return std::get<6>(payload);
+		case ExecutionRegionSinkKind::SORT:
+			return Order().native_contract;
+		case ExecutionRegionSinkKind::DELIM_JOIN_SINK:
+			return DelimJoin().native_contract;
+		default:
+			return std::get<8>(payload);
+		}
+	}
+	const ExecutionRegionNativeOperatorContract &Native() const {
+		switch (Kind()) {
+		case ExecutionRegionSinkKind::RESULT_COLLECTOR_SINK:
+			return std::get<6>(payload);
+		case ExecutionRegionSinkKind::SORT:
+			return Order().native_contract;
+		case ExecutionRegionSinkKind::DELIM_JOIN_SINK:
+			return DelimJoin().native_contract;
+		default:
+			return std::get<8>(payload);
+		}
+	}
+
+	vector<ExecutionRegionContractField> fields;
+	string reason;
+	string ir;
+
+private:
+	std::variant<std::monostate, ExecutionRegionHashJoinInfo, ExecutionRegionNestedLoopJoinContract,
+	             ExecutionRegionAggregateSinkInfo, ExecutionRegionAggregateSinkInfo, ExecutionRegionAggregateSinkInfo,
+	             ExecutionRegionNativeOperatorContract, ExecutionRegionOrderSinkInfo,
+	             ExecutionRegionNativeOperatorContract, ExecutionRegionDelimJoinSinkInfo>
+	    payload;
 };
 
 struct ExecutionRegionCandidateTraits {

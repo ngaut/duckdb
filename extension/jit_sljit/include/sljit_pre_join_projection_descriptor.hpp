@@ -60,18 +60,18 @@ static bool SljitTryBindElidedHashJoinProbeSelection(const vector<SljitExecutabl
 		return false;
 	}
 	const auto &projection = ops[projection_idx];
-	if (projection.kind != SljitNativeRegionOpKind::PROJECTION || projection.projections.empty() ||
-	    projection.projections.size() != projection.output_types.size()) {
+	if (projection.Kind() != SljitNativeRegionOpKind::PROJECTION || projection.Projections().empty() ||
+	    projection.Projections().size() != projection.output_types.size()) {
 		return false;
 	}
 	vector<SljitBatchLayoutColumn> columns;
-	columns.reserve(projection.projections.size());
+	columns.reserve(projection.Projections().size());
 	bool source_layout_preserved = true;
 	for (idx_t op_idx = 0; op_idx < projection_idx; op_idx++) {
-		source_layout_preserved &= ops[op_idx].kind == SljitNativeRegionOpKind::FILTER;
+		source_layout_preserved &= ops[op_idx].Kind() == SljitNativeRegionOpKind::FILTER;
 	}
-	for (idx_t output_idx = 0; output_idx < projection.projections.size(); output_idx++) {
-		const auto &expression = projection.projections[output_idx].plan;
+	for (idx_t output_idx = 0; output_idx < projection.Projections().size(); output_idx++) {
+		const auto &expression = projection.Projections()[output_idx].plan;
 		if (expression.source_index >= projection.input_types.size() ||
 		    expression.return_type != projection.output_types[output_idx]) {
 			return false;
@@ -97,7 +97,7 @@ static bool SljitTryBindElidedHashJoinProbeSelection(const vector<SljitExecutabl
 		columns.push_back({expression.source_index, source_type, expression.return_type});
 	}
 
-	const auto &join = ops[hash_join_idx].hash_join_probe.plan;
+	const auto &join = ops[hash_join_idx].HashJoinProbe().plan;
 	bool needs_input_plan = join.residual_predicate;
 	for (idx_t key_idx = 0; key_idx < join.keys.size(); key_idx++) {
 		const auto &key = join.keys[key_idx];
@@ -115,12 +115,12 @@ static bool SljitTryBindElidedHashJoinProbeSelection(const vector<SljitExecutabl
 		} else if (key.key_input_index != 0 ||
 		           !SljitHashJoinKeyCanUseInt64SourceForInt32Key(key_idx, key.key_kind,
 		                                                         column.source_type.InternalType()) ||
-		           projection.projections[key.key_input_index].plan.cast_chain.steps.empty()) {
+		           projection.Projections()[key.key_input_index].plan.cast_chain.steps.empty()) {
 			return false;
 		}
 		needs_input_plan |= key.key_input_index != column.source_index || column.source_type != column.type;
 	}
-	const auto &residual_sources = join.operator_info.hash_join_contract.residual_sources;
+	const auto &residual_sources = join.operator_info.HashJoin().contract.residual_sources;
 	if (join.residual_predicate) {
 		for (const auto &source : residual_sources) {
 			if (source.source_index >= residual_sources.size()) {
@@ -150,7 +150,7 @@ static bool SljitTryBindElidedHashJoinProbeSelection(const vector<SljitExecutabl
 		    SljitSourceRangeFitsInt32(key0.source_index, source_min_values, source_max_values);
 	}
 	if (needs_input_plan) {
-		if (join.operator_info.hash_join_keys.size() != join.keys.size()) {
+		if (join.operator_info.HashJoin().keys.size() != join.keys.size()) {
 			return false;
 		}
 		auto input_plan = make_shared_ptr<SljitNativeHashJoinProbePlan>(join.Copy(false));
@@ -159,13 +159,13 @@ static bool SljitTryBindElidedHashJoinProbeSelection(const vector<SljitExecutabl
 			auto &key = input_plan->keys[key_idx];
 			const auto &column = layout.Column(key.key_input_index);
 			if (column.source_type != column.type) {
-				key.source_cast = projection.projections[key.key_input_index].plan.cast_chain;
+				key.source_cast = projection.Projections()[key.key_input_index].plan.cast_chain;
 			}
 			key.key_input_index = column.source_index;
-			input_plan->operator_info.hash_join_keys[key_idx].input_index = column.source_index;
+			input_plan->operator_info.HashJoin().keys[key_idx].input_index = column.source_index;
 		}
 		if (join.residual_predicate) {
-			for (auto &source : input_plan->operator_info.hash_join_contract.residual_sources) {
+			for (auto &source : input_plan->operator_info.HashJoin().contract.residual_sources) {
 				if (source.kind == ExecutionHashJoinResidualSourceKind::PROBE) {
 					source.input_index = layout.Column(source.input_index).source_index;
 				}
@@ -186,15 +186,15 @@ static bool SljitHashJoinSourceKey0RangeFitsInt32(const vector<SljitExecutableRe
 	// The source ranges bound the probe key only while the probe reads the source layout: selection-only filters
 	// may precede it, any other operator changes the layout.
 	for (idx_t op_idx = 0; op_idx < hash_join_idx; op_idx++) {
-		if (ops[op_idx].kind != SljitNativeRegionOpKind::FILTER) {
+		if (ops[op_idx].Kind() != SljitNativeRegionOpKind::FILTER) {
 			return false;
 		}
 	}
 	auto &join_op = ops[hash_join_idx];
-	if (join_op.kind != SljitNativeRegionOpKind::HASH_JOIN_PROBE) {
+	if (join_op.Kind() != SljitNativeRegionOpKind::HASH_JOIN_PROBE) {
 		return false;
 	}
-	auto &join = join_op.hash_join_probe.plan;
+	auto &join = join_op.HashJoinProbe().plan;
 	if (join.keys.empty()) {
 		return false;
 	}

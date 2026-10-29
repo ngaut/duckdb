@@ -20,7 +20,7 @@ static SinkResultType SljitExecuteNativeFilteredAggregateUpdate(ExecutionRegionR
                                                                 SljitRegionExecutionScratch &scratch, idx_t op_idx,
                                                                 SljitExecutableRegionOp &op, DataChunk &input) {
 	auto &binding = SljitBindRecordedNativeSink(
-	    runtime, native_runtime, scratch, op_idx, op.kind, input, op.aggregate_update.plan.sink_info,
+	    runtime, native_runtime, scratch, op_idx, op.Kind(), input, op.AggregateUpdate().plan.sink_info,
 	    "aggregate-update-runtime-binding-failed", "SLJIT aggregate update sink");
 	if (!binding.ready || !binding.aggregate_update.ready) {
 		throw InternalException("SLJIT aggregate update sink binding did not return a ready aggregate state");
@@ -30,23 +30,23 @@ static SinkResultType SljitExecuteNativeFilteredAggregateUpdate(ExecutionRegionR
 		auto blocker = primitive.blocker.empty() ? "aggregate-primitive-binding-missing" : primitive.blocker;
 		throw InternalException("SLJIT aggregate primitive update binding failed: %s", blocker.c_str());
 	}
-	auto &aggregates = op.aggregate_update.plan.sink_info.aggregates;
-	if (aggregates.empty() || aggregates.size() != op.aggregate_update.payloads.size()) {
+	auto &aggregates = op.AggregateUpdate().plan.sink_info.aggregates;
+	if (aggregates.empty() || aggregates.size() != op.AggregateUpdate().payloads.size()) {
 		throw InternalException("SLJIT filtered aggregate update requires matching primitive aggregate lanes");
 	}
-	auto &payload_lanes = scratch.AggregatePayloadLanes(op_idx, op.aggregate_update.payload_descriptors, primitive);
+	auto &payload_lanes = scratch.AggregatePayloadLanes(op_idx, op.AggregateUpdate().payload_descriptors, primitive);
 	if (payload_lanes.size() != aggregates.size()) {
 		throw InternalException("SLJIT filtered aggregate primitive lane count mismatch");
 	}
 
 	auto aggregate_stage_start = SljitRegionStageStart(runtime);
 	auto &payload_scratch = scratch.AggregatePayloadScratch(op_idx);
-	SljitExecuteFilteredPrimitiveAggregateUpdate(op.aggregate_update.filtered_update,
-	                                             op.aggregate_update.payload_descriptors, payload_lanes, input,
+	SljitExecuteFilteredPrimitiveAggregateUpdate(op.AggregateUpdate().filtered_update,
+	                                             op.AggregateUpdate().payload_descriptors, payload_lanes, input,
 	                                             input.size(), payload_scratch);
-	RecordSljitRegionGeneratedWork(runtime, op.kind, input.size());
-	RecordSljitRegionStageRuntimePath(runtime, op_idx, op.kind, "filtered_primitive_update", aggregate_stage_start);
-	RecordSljitRegionMaterializationElision(runtime, op.kind, "filtered_primitive_update", input.size());
+	RecordSljitRegionGeneratedWork(runtime, op.Kind(), input.size());
+	RecordSljitRegionStageRuntimePath(runtime, op_idx, op.Kind(), "filtered_primitive_update", aggregate_stage_start);
+	RecordSljitRegionMaterializationElision(runtime, op.Kind(), "filtered_primitive_update", input.size());
 	return SinkResultType::NEED_MORE_INPUT;
 }
 

@@ -26,7 +26,7 @@ struct SljitProjectedInputGroupedAggregateDescriptor {
 	vector<LogicalType> input_types;
 
 	bool Ready() const {
-		return projection.kind == SljitNativeRegionOpKind::PROJECTION && !group_sources.empty() &&
+		return projection.Kind() == SljitNativeRegionOpKind::PROJECTION && !group_sources.empty() &&
 		       !payload_source_indices.empty() && payload_source_not_null.size() == payload_source_indices.size();
 	}
 };
@@ -119,13 +119,13 @@ static bool SljitTryReadProjectedInputVariableReference(const SljitExecutableReg
 static bool SljitTryBuildAffineProjectedInputGroupSource(const SljitExecutableRegionOp &projection_op,
                                                          const ExecutionRegionGroupInput &group,
                                                          ExecutionRowPointerGroupKeySource &group_source) {
-	if (group.input_index >= projection_op.projections.size() ||
+	if (group.input_index >= projection_op.Projections().size() ||
 	    group.input_index >= projection_op.output_types.size() ||
 	    projection_op.output_types[group.input_index] != group.type ||
 	    !SljitProjectedInputSignedAffineGroupType(group.type)) {
 		return false;
 	}
-	auto &plan = projection_op.projections[group.input_index].plan;
+	auto &plan = projection_op.Projections()[group.input_index].plan;
 	auto expression_tree = CopySljitExpressionPlanAsInputTree(plan);
 	if (plan.return_type != group.type || !expression_tree || expression_tree->return_type != group.type ||
 	    projection_op.input_min_values.size() != projection_op.input_types.size() ||
@@ -235,20 +235,20 @@ static bool SljitTryBuildProjectedInputGroupSource(const SljitExecutableRegionOp
 		}
 		return false;
 	};
-	if (group.input_index >= projection_op.projections.size() ||
+	if (group.input_index >= projection_op.Projections().size() ||
 	    group.input_index >= projection_op.output_types.size() ||
 	    projection_op.output_types[group.input_index].InternalType() != group.type.InternalType()) {
 		return block("projection");
 	}
 	SljitExecutableRegionExpression remapped_expr;
 	idx_t source_idx;
-	if (!SljitTryBuildSingleSourceProjectionExpression(projection_op.projections[group.input_index], remapped_expr,
+	if (!SljitTryBuildSingleSourceProjectionExpression(projection_op.Projections()[group.input_index], remapped_expr,
 	                                                   source_idx)) {
 		if (SljitTryBuildAffineProjectedInputGroupSource(projection_op, group, group_source)) {
 			return true;
 		}
 		return block("group_equivalence_kind_" +
-		             to_string(static_cast<int>(projection_op.projections[group.input_index].plan.kind)));
+		             to_string(static_cast<int>(projection_op.Projections()[group.input_index].plan.kind)));
 	}
 	if (source_idx >= projection_op.input_types.size()) {
 		return block("source_bounds_" + to_string(source_idx) + "_inputs_" +
@@ -272,11 +272,11 @@ static bool SljitTryBuildProjectedInputGroupSource(const SljitExecutableRegionOp
 
 static bool SljitTryResolveProjectedInputPayloadSource(const SljitExecutableRegionOp &projection_op,
                                                        idx_t projection_idx, idx_t &source_idx, bool &source_not_null) {
-	if (projection_idx >= projection_op.projections.size() || projection_idx >= projection_op.output_types.size()) {
+	if (projection_idx >= projection_op.Projections().size() || projection_idx >= projection_op.output_types.size()) {
 		return false;
 	}
 	SljitExecutableRegionExpression remapped_expr;
-	if (!SljitTryBuildSingleSourceProjectionExpression(projection_op.projections[projection_idx], remapped_expr,
+	if (!SljitTryBuildSingleSourceProjectionExpression(projection_op.Projections()[projection_idx], remapped_expr,
 	                                                   source_idx) ||
 	    source_idx >= projection_op.input_types.size() ||
 	    !SljitProjectionIsSingleSourceReferenceLike(remapped_expr.plan)) {
@@ -292,8 +292,8 @@ static bool SljitTryBindProjectedInputPayloadOutput(const SljitExecutableRegionO
 	if (SljitTryResolveProjectedInputPayloadSource(projection_op, projection_idx, source_idx, source_not_null)) {
 		return true;
 	}
-	if (projection_idx >= projection_op.projections.size() || projection_idx >= projection_op.output_types.size() ||
-	    projection_op.projections[projection_idx].plan.return_type != projection_op.output_types[projection_idx]) {
+	if (projection_idx >= projection_op.Projections().size() || projection_idx >= projection_op.output_types.size() ||
+	    projection_op.Projections()[projection_idx].plan.return_type != projection_op.output_types[projection_idx]) {
 		return false;
 	}
 	source_idx = DConstants::INVALID_INDEX;
@@ -311,13 +311,13 @@ static bool SljitTryBuildProjectedInputGroupedAggregateDescriptor(
 		return false;
 	};
 	if (!SljitCanBindProjectionChainPrimitive(ops, first_projection_idx, final_projection_idx) ||
-	    aggregate_idx >= ops.size() || ops[aggregate_idx].kind != SljitNativeRegionOpKind::AGGREGATE_UPDATE) {
+	    aggregate_idx >= ops.size() || ops[aggregate_idx].Kind() != SljitNativeRegionOpKind::AGGREGATE_UPDATE) {
 		return block("shape");
 	}
 	auto &aggregate_op = ops[aggregate_idx];
-	auto &aggregate_update = aggregate_op.aggregate_update;
+	auto &aggregate_update = aggregate_op.AggregateUpdate();
 	auto &sink_info = aggregate_update.plan.sink_info;
-	if (sink_info.kind != ExecutionRegionSinkKind::HASH_AGGREGATE_UPDATE || sink_info.groups.empty() ||
+	if (sink_info.Kind() != ExecutionRegionSinkKind::HASH_AGGREGATE_UPDATE || sink_info.groups.empty() ||
 	    !aggregate_update.plan.UsesPrimitivePayloads() || !aggregate_update.plan.use_grouped_state_addresses ||
 	    aggregate_update.plan.use_perfect_hash_group_lookup ||
 	    aggregate_update.fused_payload_update_owns_group_lookup ||

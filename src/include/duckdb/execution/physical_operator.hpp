@@ -114,6 +114,13 @@ public:
 	                                                          ExecutionOperatorBinding &binding) const;
 	virtual bool BindExecutionSink(ExecutionContext &context, DataChunk &input, OperatorSinkInput &sink_input,
 	                               const ExecutionRegionSinkInfo &sink_info, ExecutionSinkBinding &binding) const;
+	virtual bool BindExecutionSink(ExecutionContext &context, DataChunk &input, OperatorSinkInput &sink_input,
+	                               const ExecutionRegionAggregateSinkInfo &sink_info,
+	                               ExecutionSinkBinding &binding) const;
+	virtual bool BindExecutionSink(ExecutionContext &context, DataChunk &input, OperatorSinkInput &sink_input,
+	                               const ExecutionRegionHashJoinInfo &sink_info, ExecutionSinkBinding &binding) const;
+	virtual bool BindExecutionSink(ExecutionContext &context, DataChunk &input, OperatorSinkInput &sink_input,
+	                               const ExecutionRegionOrderSinkInfo &sink_info, ExecutionSinkBinding &binding) const;
 	virtual OperatorResultType Execute(ExecutionContext &context, DataChunk &input, DataChunk &chunk,
 	                                   GlobalOperatorState &gstate, OperatorState &state) const;
 	virtual OperatorFinalizeResultType FinalExecute(ExecutionContext &context, DataChunk &chunk,
@@ -156,8 +163,10 @@ public:
 	virtual unique_ptr<GlobalSourceState> GetGlobalSourceState(ClientContext &context) const;
 	virtual unique_ptr<GlobalSourceState> GetGlobalSourceState(ClientContext &context,
 	                                                           const OperatorPartitionInfo &partition_info) const;
-	virtual unique_ptr<GlobalSourceState> GetGlobalSourceState(ClientContext &context,
-	                                                           const ExecutionRegionOpenRequest &open_request) const;
+	//! Configure the selected execution contract once, after dependencies finalize and before local states exist.
+	//! The native source cursor stays owned by gstate: configuring execution must not reopen or consume it.
+	virtual void ConfigureExecutionSourceState(ClientContext &context, GlobalSourceState &gstate,
+	                                           const ExecutionRegionOpenRequest &open_request) const;
 	virtual bool SupportsExecutionSourceContract(const ExecutionRegionOpenRequest &open_request) const;
 	virtual bool
 	SupportsExecutionPrimitiveAggregateStateSourceContract(const ExecutionRegionOpenRequest &open_request) const;

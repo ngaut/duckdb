@@ -74,24 +74,21 @@ private:
 	InterruptState &interrupt_state;
 };
 
-string ValidateExecutionOrderedSink(const ExecutionRegionSinkInfo &sink_info,
+string ValidateExecutionOrderedSink(const ExecutionRegionOrderSinkInfo &sink_info,
                                     ExecutionRegionOperatorKind expected_kind) {
-	if (sink_info.kind != ExecutionRegionSinkKind::SORT) {
-		return "ordered-sink-runtime-kind-mismatch";
+	if (sink_info.native_contract.status != ExecutionRegionStateContractStatus::READY) {
+		return sink_info.native_contract.blocker.empty() ? "ordered-sink-contract-not-ready"
+		                                                 : sink_info.native_contract.blocker;
 	}
-	if (sink_info.native_sink_contract.status != ExecutionRegionStateContractStatus::READY) {
-		return sink_info.native_sink_contract.blocker.empty() ? "ordered-sink-contract-not-ready"
-		                                                      : sink_info.native_sink_contract.blocker;
-	}
-	if (!sink_info.order_contract.present) {
+	if (!sink_info.contract.present) {
 		return "ordered-sink-runtime-missing-order-contract";
 	}
-	if (sink_info.order_contract.kind != expected_kind) {
+	if (sink_info.contract.kind != expected_kind) {
 		return "ordered-sink-runtime-operator-kind-mismatch";
 	}
-	if (!sink_info.order_contract.all_order_keys_ready) {
-		return sink_info.order_contract.order_key_blocker.empty() ? "ordered-sink-runtime-order-key-not-ready"
-		                                                          : sink_info.order_contract.order_key_blocker;
+	if (!sink_info.contract.all_order_keys_ready) {
+		return sink_info.contract.order_key_blocker.empty() ? "ordered-sink-runtime-order-key-not-ready"
+		                                                    : sink_info.contract.order_key_blocker;
 	}
 	return string();
 }
@@ -111,10 +108,11 @@ SinkResultType ExecutionSinkOrdered(const ExecutionOrderedSinkBinding &binding, 
 }
 
 bool PhysicalOrder::BindExecutionSink(ExecutionContext &context, DataChunk &input, OperatorSinkInput &sink_input,
-                                      const ExecutionRegionSinkInfo &sink_info, ExecutionSinkBinding &binding) const {
+                                      const ExecutionRegionOrderSinkInfo &sink_info,
+                                      ExecutionSinkBinding &binding) const {
 	(void)input;
 	binding = ExecutionSinkBinding();
-	binding.kind = sink_info.kind;
+	binding.kind = ExecutionRegionSinkKind::SORT;
 	auto blocker = ValidateExecutionOrderedSink(sink_info, ExecutionRegionOperatorKind::ORDER_BY);
 	if (!blocker.empty()) {
 		binding.blocker = blocker;
@@ -131,11 +129,11 @@ bool PhysicalOrder::BindExecutionSink(ExecutionContext &context, DataChunk &inpu
 	binding.ordered_sink.ready = true;
 	binding.ordered_sink.state = make_shared_ptr<OrderExecutionRegionSinkState>(
 	    context, gstate.sort, *gstate.state, *lstate.state, sink_input.interrupt_state);
-	binding.ordered_sink.order_key_types.reserve(sink_info.order_contract.order_keys.size());
-	for (auto &key : sink_info.order_contract.order_keys) {
+	binding.ordered_sink.order_key_types.reserve(sink_info.contract.order_keys.size());
+	for (auto &key : sink_info.contract.order_keys) {
 		binding.ordered_sink.order_key_types.push_back(key.type);
 	}
-	binding.ordered_sink.payload_types = sink_info.order_contract.payload_types;
+	binding.ordered_sink.payload_types = sink_info.contract.payload_types;
 	binding.ordered_sink.blocker.clear();
 	binding.blocker.clear();
 	return true;

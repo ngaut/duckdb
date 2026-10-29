@@ -572,11 +572,12 @@ private:
 };
 
 bool PhysicalTopN::BindExecutionSink(ExecutionContext &context, DataChunk &input, OperatorSinkInput &sink_input,
-                                     const ExecutionRegionSinkInfo &sink_info, ExecutionSinkBinding &binding) const {
+                                     const ExecutionRegionOrderSinkInfo &sink_info,
+                                     ExecutionSinkBinding &binding) const {
 	(void)context;
 	(void)input;
 	binding = ExecutionSinkBinding();
-	binding.kind = sink_info.kind;
+	binding.kind = ExecutionRegionSinkKind::SORT;
 	auto blocker = ValidateExecutionOrderedSink(sink_info, ExecutionRegionOperatorKind::TOP_N);
 	if (!blocker.empty()) {
 		binding.blocker = blocker;
@@ -589,11 +590,11 @@ bool PhysicalTopN::BindExecutionSink(ExecutionContext &context, DataChunk &input
 	binding.ready = true;
 	binding.ordered_sink.ready = true;
 	binding.ordered_sink.state = make_shared_ptr<TopNExecutionRegionSinkState>(gstate, lstate);
-	binding.ordered_sink.order_key_types.reserve(sink_info.order_contract.order_keys.size());
-	for (auto &key : sink_info.order_contract.order_keys) {
+	binding.ordered_sink.order_key_types.reserve(sink_info.contract.order_keys.size());
+	for (auto &key : sink_info.contract.order_keys) {
 		binding.ordered_sink.order_key_types.push_back(key.type);
 	}
-	binding.ordered_sink.payload_types = sink_info.order_contract.payload_types;
+	binding.ordered_sink.payload_types = sink_info.contract.payload_types;
 	binding.ordered_sink.blocker.clear();
 	binding.blocker.clear();
 	return true;

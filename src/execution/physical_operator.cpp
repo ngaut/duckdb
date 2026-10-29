@@ -111,7 +111,7 @@ PhysicalOperator::GetExecutionOperatorReadiness(ClientContext &context,
                                                 const ExecutionRegionOperatorInfo &operator_info) const {
 	(void)context;
 	ExecutionOperatorReadiness readiness;
-	readiness.kind = operator_info.kind;
+	readiness.kind = operator_info.Kind();
 	readiness.blocker = "execution-operator-readiness-unsupported;operator=" + GetName();
 	return readiness;
 }
@@ -125,7 +125,7 @@ ExecutionOperatorBindResult PhysicalOperator::BindExecutionOperator(ExecutionCon
 	(void)gstate;
 	(void)state;
 	binding.ready = false;
-	binding.kind = operator_info.kind;
+	binding.kind = operator_info.Kind();
 	binding.blocker = "execution-operator-binding-unsupported;operator=" + GetName();
 	return ExecutionOperatorBindResult::INVALID;
 }
@@ -137,14 +137,51 @@ bool PhysicalOperator::BindExecutionSink(ExecutionContext &context, DataChunk &i
 	(void)input;
 	(void)sink_input;
 	binding = ExecutionSinkBinding();
-	binding.kind = sink_info.kind;
-	if (sink_info.native_sink_contract.status != ExecutionRegionStateContractStatus::READY) {
-		binding.blocker = sink_info.native_sink_contract.blocker.empty()
+	binding.kind = sink_info.Kind();
+	switch (sink_info.Kind()) {
+	case ExecutionRegionSinkKind::RESULT_COLLECTOR_SINK:
+	case ExecutionRegionSinkKind::MATERIALIZATION:
+	case ExecutionRegionSinkKind::SORT:
+	case ExecutionRegionSinkKind::DELIM_JOIN_SINK:
+		break;
+	default:
+		binding.blocker = "native-operator-sink-contract-not-ready;operator=" + GetName();
+		return false;
+	}
+	if (sink_info.Native().status != ExecutionRegionStateContractStatus::READY) {
+		binding.blocker = sink_info.Native().blocker.empty()
 		                      ? "native-operator-sink-contract-not-ready;operator=" + GetName()
-		                      : sink_info.native_sink_contract.blocker;
+		                      : sink_info.Native().blocker;
 		return false;
 	}
 	binding.blocker = "execution-sink-contract-unsupported;operator=" + GetName();
+	return false;
+}
+
+bool PhysicalOperator::BindExecutionSink(ExecutionContext &context, DataChunk &input, OperatorSinkInput &sink_input,
+                                         const ExecutionRegionAggregateSinkInfo &sink_info,
+                                         ExecutionSinkBinding &binding) const {
+	binding = ExecutionSinkBinding();
+	binding.kind = sink_info.Kind();
+	binding.blocker = "execution-aggregate-sink-contract-unsupported;operator=" + GetName();
+	return false;
+}
+
+bool PhysicalOperator::BindExecutionSink(ExecutionContext &context, DataChunk &input, OperatorSinkInput &sink_input,
+                                         const ExecutionRegionHashJoinInfo &sink_info,
+                                         ExecutionSinkBinding &binding) const {
+	binding = ExecutionSinkBinding();
+	binding.kind = ExecutionRegionSinkKind::HASH_JOIN_BUILD;
+	binding.blocker = "execution-hash-join-build-contract-unsupported;operator=" + GetName();
+	return false;
+}
+
+bool PhysicalOperator::BindExecutionSink(ExecutionContext &context, DataChunk &input, OperatorSinkInput &sink_input,
+                                         const ExecutionRegionOrderSinkInfo &sink_info,
+                                         ExecutionSinkBinding &binding) const {
+	binding = ExecutionSinkBinding();
+	binding.kind = ExecutionRegionSinkKind::SORT;
+	binding.blocker = "execution-order-sink-contract-unsupported;operator=" + GetName();
 	return false;
 }
 
@@ -182,10 +219,8 @@ PhysicalOperator::GetGlobalSourceState(ClientContext &context, const OperatorPar
 	return GetGlobalSourceState(context);
 }
 
-unique_ptr<GlobalSourceState>
-PhysicalOperator::GetGlobalSourceState(ClientContext &context, const ExecutionRegionOpenRequest &open_request) const {
-	(void)open_request;
-	return GetGlobalSourceState(context);
+void PhysicalOperator::ConfigureExecutionSourceState(ClientContext &context, GlobalSourceState &gstate,
+                                                     const ExecutionRegionOpenRequest &open_request) const {
 }
 
 bool PhysicalOperator::SupportsExecutionSourceContract(const ExecutionRegionOpenRequest &open_request) const {

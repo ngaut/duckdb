@@ -93,29 +93,29 @@ static bool SljitPrimitiveAggregatePayloadSupported(SljitNativeRegionExpressionP
 	}
 }
 
-static bool SljitAggregateUpdateUsesGeneratedPerfectHashLookup(const ExecutionRegionSinkInfo &sink) {
-	return sink.kind == ExecutionRegionSinkKind::PERFECT_HASH_AGGREGATE_UPDATE &&
-	       sink.aggregate_contract.native_grouped_state_contract.status == ExecutionRegionStateContractStatus::READY;
+static bool SljitAggregateUpdateUsesGeneratedPerfectHashLookup(const ExecutionRegionAggregateSinkInfo &sink) {
+	return sink.Kind() == ExecutionRegionSinkKind::PERFECT_HASH_AGGREGATE_UPDATE &&
+	       sink.contract.native_grouped_state_contract.status == ExecutionRegionStateContractStatus::READY;
 }
 
 static bool
-SljitGroupedStateAddressPrimitivePayloadsSupported(const ExecutionRegionSinkInfo &sink,
+SljitGroupedStateAddressPrimitivePayloadsSupported(const ExecutionRegionAggregateSinkInfo &sink,
                                                    const vector<SljitNativeRegionExpressionPlan> &payloads) {
 	if (payloads.empty() || payloads.size() != sink.aggregates.size()) {
 		return false;
 	}
 	for (idx_t payload_idx = 0; payload_idx < payloads.size(); payload_idx++) {
 		if (!SljitFusedGroupedPrimitiveAggregatePayloadSupported(payloads[payload_idx], sink.aggregates[payload_idx],
-		                                                         sink.aggregate_contract)) {
+		                                                         sink.contract)) {
 			return false;
 		}
 	}
 	return true;
 }
 
-static bool SljitGroupedStateAddressTypedPayloadsSupported(const ExecutionRegionSinkInfo &sink,
+static bool SljitGroupedStateAddressTypedPayloadsSupported(const ExecutionRegionAggregateSinkInfo &sink,
                                                            const vector<SljitNativeRegionExpressionPlan> &payloads) {
-	auto &contract = sink.aggregate_contract;
+	auto &contract = sink.contract;
 	if (!contract.grouped_state_layout_ready || payloads.empty() || payloads.size() != sink.aggregates.size()) {
 		return false;
 	}
@@ -143,11 +143,11 @@ static bool SljitGroupedStateAddressTypedPayloadsSupported(const ExecutionRegion
 	return has_typed_payload;
 }
 
-static bool SljitGroupedStateAddressPayloadsSupported(const ExecutionRegionSinkInfo &sink,
+static bool SljitGroupedStateAddressPayloadsSupported(const ExecutionRegionAggregateSinkInfo &sink,
                                                       const vector<SljitNativeRegionExpressionPlan> &payloads) {
-	auto &contract = sink.aggregate_contract;
-	if ((sink.kind != ExecutionRegionSinkKind::HASH_AGGREGATE_UPDATE &&
-	     sink.kind != ExecutionRegionSinkKind::PERFECT_HASH_AGGREGATE_UPDATE) ||
+	auto &contract = sink.contract;
+	if ((sink.Kind() != ExecutionRegionSinkKind::HASH_AGGREGATE_UPDATE &&
+	     sink.Kind() != ExecutionRegionSinkKind::PERFECT_HASH_AGGREGATE_UPDATE) ||
 	    contract.native_grouped_state_contract.status != ExecutionRegionStateContractStatus::READY ||
 	    !contract.grouped_state_layout_ready) {
 		return false;
@@ -157,7 +157,7 @@ static bool SljitGroupedStateAddressPayloadsSupported(const ExecutionRegionSinkI
 }
 
 static bool SljitPrimitiveAggregatePayloadsContainNonReference(const vector<SljitNativeRegionExpressionPlan> &payloads,
-                                                               const ExecutionRegionSinkInfo &sink) {
+                                                               const ExecutionRegionAggregateSinkInfo &sink) {
 	if (payloads.size() != sink.aggregates.size()) {
 		return false;
 	}
@@ -212,7 +212,7 @@ static bool TrySimplifySljitExpressionTreeReferencePayload(SljitNativeRegionExpr
 }
 
 static bool TryNormalizeGroupedAggregatePayloads(vector<SljitNativeRegionExpressionPlan> &payloads,
-                                                 const ExecutionRegionSinkInfo &sink, bool render_diagnostics,
+                                                 const ExecutionRegionAggregateSinkInfo &sink, bool render_diagnostics,
                                                  const char *reference_reason, const char *typed_reason) {
 	if (!SljitPrimitiveAggregatePayloadsContainNonReference(payloads, sink)) {
 		return true;
@@ -258,7 +258,8 @@ static bool TryNormalizeGroupedAggregatePayloads(vector<SljitNativeRegionExpress
 }
 
 static bool TryNormalizePerfectHashAggregatePayloads(vector<SljitNativeRegionExpressionPlan> &payloads,
-                                                     const ExecutionRegionSinkInfo &sink, bool render_diagnostics) {
+                                                     const ExecutionRegionAggregateSinkInfo &sink,
+                                                     bool render_diagnostics) {
 	if (!SljitAggregateUpdateUsesGeneratedPerfectHashLookup(sink)) {
 		return true;
 	}
@@ -267,7 +268,8 @@ static bool TryNormalizePerfectHashAggregatePayloads(vector<SljitNativeRegionExp
 }
 
 static bool TryNormalizeGroupedTypedAggregatePayloads(vector<SljitNativeRegionExpressionPlan> &payloads,
-                                                      const ExecutionRegionSinkInfo &sink, bool render_diagnostics) {
+                                                      const ExecutionRegionAggregateSinkInfo &sink,
+                                                      bool render_diagnostics) {
 	return TryNormalizeGroupedAggregatePayloads(payloads, sink, render_diagnostics, "grouped-reference-payload",
 	                                            "grouped-typed-payload");
 }
@@ -300,10 +302,10 @@ static bool TryBuildSljitPrimitiveReferencePayload(const vector<LogicalType> &in
 }
 
 static bool SljitPerfectHashGroupLookupSupported(
-    const ExecutionRegionSinkInfo &sink, const vector<SljitNativeRegionExpressionPlan> &payloads,
+    const ExecutionRegionAggregateSinkInfo &sink, const vector<SljitNativeRegionExpressionPlan> &payloads,
     optional_ptr<const vector<SljitNativeRegionExpressionPlan>> group_expressions = nullptr) {
-	auto &contract = sink.aggregate_contract;
-	if (sink.kind != ExecutionRegionSinkKind::PERFECT_HASH_AGGREGATE_UPDATE ||
+	auto &contract = sink.contract;
+	if (sink.Kind() != ExecutionRegionSinkKind::PERFECT_HASH_AGGREGATE_UPDATE ||
 	    contract.kind != ExecutionRegionAggregateOperatorKind::PERFECT_HASH || !contract.grouped_state_layout_ready ||
 	    payloads.empty() || payloads.size() != sink.aggregates.size() ||
 	    contract.perfect_required_bits_total >= 8 * sizeof(idx_t)) {

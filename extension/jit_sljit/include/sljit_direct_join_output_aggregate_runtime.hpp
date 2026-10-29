@@ -25,12 +25,12 @@ namespace duckdb {
 static bool SljitTryExecuteDirectJoinOutputPerfectHashAggregateUpdate(
     ExecutionRegionRuntime &runtime, ExecutionOperatorRuntime &native_runtime, SljitRegionExecutionScratch &scratch,
     idx_t op_idx, SljitExecutableRegionOp &op, DataChunk &aggregate_input, optional_ptr<string> failure_reason) {
-	auto &aggregate_update = op.aggregate_update;
+	auto &aggregate_update = op.AggregateUpdate();
 	auto &plan = aggregate_update.plan;
 	auto &sink_info = plan.sink_info;
 	if (!aggregate_update.fused_payload_update.Function() || !aggregate_update.fused_payload_update_owns_group_lookup ||
 	    !plan.UsesPrimitivePayloads() || !plan.use_perfect_hash_group_lookup ||
-	    sink_info.kind != ExecutionRegionSinkKind::PERFECT_HASH_AGGREGATE_UPDATE ||
+	    sink_info.Kind() != ExecutionRegionSinkKind::PERFECT_HASH_AGGREGATE_UPDATE ||
 	    sink_info.aggregates.size() != aggregate_update.payloads.size()) {
 		return false;
 	}
@@ -40,7 +40,7 @@ static bool SljitTryExecuteDirectJoinOutputPerfectHashAggregateUpdate(
 		}
 		return false;
 	}
-	auto &binding = SljitBindRecordedNativeSink(runtime, native_runtime, scratch, op_idx, op.kind, aggregate_input,
+	auto &binding = SljitBindRecordedNativeSink(runtime, native_runtime, scratch, op_idx, op.Kind(), aggregate_input,
 	                                            sink_info, "aggregate-update-runtime-binding-failed",
 	                                            "SLJIT direct join-output perfect-hash aggregate update");
 	if (!binding.ready || !binding.aggregate_update.ready || !binding.aggregate_update.primitive.ready) {
@@ -67,21 +67,21 @@ static bool SljitTryExecuteDirectJoinOutputPerfectHashAggregateUpdate(
 		return false;
 	}
 	auto &payload_scratch = scratch.AggregatePayloadScratch(op_idx);
-	auto &reduction_lanes = scratch.GroupedReductionLanes(op_idx, sink_info.aggregate_contract,
-	                                                      aggregate_update.payload_descriptors, payload_lanes);
+	auto &reduction_lanes =
+	    scratch.GroupedReductionLanes(op_idx, sink_info.contract, aggregate_update.payload_descriptors, payload_lanes);
 	auto payload_stage_start = SljitRegionStageStart(runtime);
 	SljitExecuteFusedPerfectHashGroupedPrimitiveAggregatePayloadUpdate(
 	    aggregate_update.payloads, aggregate_update.fused_payload_update.Function(), sink_info.groups,
-	    plan.group_expressions, aggregate_update.group_source_not_null, sink_info.aggregate_contract,
+	    plan.group_expressions, aggregate_update.group_source_not_null, sink_info.contract,
 	    aggregate_update.payload_descriptors, aggregate_update.payload_source_layout,
 	    aggregate_update.combined_payload_source_indices, aggregate_update.combined_payload_source_not_null,
 	    payload_lanes, reduction_lanes, grouped_state.perfect_hash_layout, aggregate_input, nullptr,
 	    aggregate_input.size(), payload_scratch);
-	RecordSljitRegionStageRuntime(runtime, op_idx, op.kind, "primitive_payload_update_fused", payload_stage_start);
-	RecordSljitRegionGeneratedWork(runtime, op.kind, aggregate_input.size());
-	RecordSljitRegionMaterializationElision(runtime, op.kind, "join_output_perfect_hash_payload_update",
+	RecordSljitRegionStageRuntime(runtime, op_idx, op.Kind(), "primitive_payload_update_fused", payload_stage_start);
+	RecordSljitRegionGeneratedWork(runtime, op.Kind(), aggregate_input.size());
+	RecordSljitRegionMaterializationElision(runtime, op.Kind(), "join_output_perfect_hash_payload_update",
 	                                        aggregate_input.size());
-	RecordSljitRegionMaterializationElision(runtime, op.kind, "fused_payload_update_owns_perfect_hash_group_lookup",
+	RecordSljitRegionMaterializationElision(runtime, op.Kind(), "fused_payload_update_owns_perfect_hash_group_lookup",
 	                                        aggregate_input.size());
 	return true;
 }
@@ -90,10 +90,10 @@ static bool SljitDirectJoinOutputAggregatePayloadSourcesValid(const SljitJoinPro
                                                               const SljitExecutableRegionOp &aggregate_op,
                                                               DataChunk &aggregate_input,
                                                               optional_ptr<string> failure_reason) {
-	auto &aggregate_update = aggregate_op.aggregate_update;
-	auto &sink_info = aggregate_op.aggregate_update.plan.sink_info;
-	if (sink_info.kind != ExecutionRegionSinkKind::HASH_AGGREGATE_UPDATE &&
-	    sink_info.kind != ExecutionRegionSinkKind::PERFECT_HASH_AGGREGATE_UPDATE) {
+	auto &aggregate_update = aggregate_op.AggregateUpdate();
+	auto &sink_info = aggregate_op.AggregateUpdate().plan.sink_info;
+	if (sink_info.Kind() != ExecutionRegionSinkKind::HASH_AGGREGATE_UPDATE &&
+	    sink_info.Kind() != ExecutionRegionSinkKind::PERFECT_HASH_AGGREGATE_UPDATE) {
 		return true;
 	}
 	if (descriptor.payload_source_layout == SljitAggregatePayloadSourceLayout::FUSED_COMBINED) {
@@ -203,8 +203,8 @@ static bool SljitTryExecuteDirectJoinOutputAggregate(
 		SljitFlushDirectJoinOutputAggregate(runtime, ops, strategy_ptr);
 		return false;
 	}
-	auto &sink_info = aggregate_op.aggregate_update.plan.sink_info;
-	if (sink_info.kind == ExecutionRegionSinkKind::UNGROUPED_AGGREGATE_UPDATE) {
+	auto &sink_info = aggregate_op.AggregateUpdate().plan.sink_info;
+	if (sink_info.Kind() == ExecutionRegionSinkKind::UNGROUPED_AGGREGATE_UPDATE) {
 		if (descriptor.remapped_payloads.size() != sink_info.aggregates.size()) {
 			SljitRecordDirectJoinOutputAggregateProjectionUnsupported(runtime, ops, post_join_projection,
 			                                                          "ungrouped_payloads", join_output.size());
@@ -216,7 +216,7 @@ static bool SljitTryExecuteDirectJoinOutputAggregate(
 		    descriptor.remapped_payloads, descriptor.payload_source_layout, descriptor.payload_source_indices,
 		    descriptor.payload_source_not_null, "join_output_ungrouped_payload_update",
 		    "join_output_ungrouped_payload_update");
-		RecordSljitRegionMaterializationElision(runtime, aggregate_op.kind, "join_output_ungrouped_update",
+		RecordSljitRegionMaterializationElision(runtime, aggregate_op.Kind(), "join_output_ungrouped_update",
 		                                        aggregate_input.size());
 		return true;
 	}
@@ -234,7 +234,7 @@ static bool SljitTryExecuteDirectJoinOutputAggregate(
 	auto batch_group_sources = descriptor.group_sources;
 	SljitApplyInputVectorGroupBatchCastProofs(aggregate_input, batch_group_sources, aggregate_input.size());
 	SljitApplyRowPointerGroupBatchCastProofs(row_pointers, batch_group_sources, aggregate_input.size());
-	SljitRecordJoinProjectionAggregateDescriptorShape(runtime, aggregate_op.kind, descriptor, batch_group_sources,
+	SljitRecordJoinProjectionAggregateDescriptorShape(runtime, aggregate_op.Kind(), descriptor, batch_group_sources,
 	                                                  join_output.size());
 	string perfect_hash_failure;
 	if (SljitTryExecuteDirectJoinOutputPerfectHashAggregateUpdate(runtime, runtime.ExecutionOperators(), scratch,

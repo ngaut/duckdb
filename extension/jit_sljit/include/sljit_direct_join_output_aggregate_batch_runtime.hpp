@@ -94,7 +94,7 @@ static void SljitFlushPendingRowPointerBatch(ExecutionRegionRuntime &runtime, id
 	                                              batch_group_sources)) {
 		throw InternalException("SLJIT batched direct row-pointer aggregate update failed");
 	}
-	RecordSljitRegionMaterializationElision(runtime, aggregate_op.kind,
+	RecordSljitRegionMaterializationElision(runtime, aggregate_op.Kind(),
 	                                        "projection_aggregate.row_pointer_grouped_update", pending_count);
 	batch.Reset();
 }
@@ -123,7 +123,7 @@ static void SljitFlushPendingInputVectorAggregateBatch(ExecutionRegionRuntime &r
 	optional_ptr<const ExecutionDenseGroupDomain> dense_domain_ptr;
 	if (SljitTryBuildDirectJoinOutputAggregateDenseDomain(strategy, strategy.descriptor, dense_domain)) {
 		dense_domain_ptr = &dense_domain;
-		RecordSljitRegionRuntimePath(runtime, aggregate_op.kind, "projection_aggregate.dense_group_domain",
+		RecordSljitRegionRuntimePath(runtime, aggregate_op.Kind(), "projection_aggregate.dense_group_domain",
 		                             pending_count);
 	}
 	string input_vector_failure;
@@ -140,7 +140,7 @@ static void SljitFlushPendingInputVectorAggregateBatch(ExecutionRegionRuntime &r
 		throw InternalException("SLJIT batched direct input-vector aggregate update failed: %s",
 		                        input_vector_failure.empty() ? "unknown" : input_vector_failure.c_str());
 	}
-	RecordSljitRegionMaterializationElision(runtime, aggregate_op.kind,
+	RecordSljitRegionMaterializationElision(runtime, aggregate_op.Kind(),
 	                                        "projection_aggregate.input_vector_grouped_update", pending_count);
 	batch.Reset();
 }

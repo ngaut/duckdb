@@ -55,7 +55,6 @@ PipelineTask::PipelineTask(Pipeline &pipeline_p, shared_ptr<Event> event_p)
 
 TaskExecutionResult PipelineTask::ExecuteTask(TaskExecutionMode mode) {
 	if (!pipeline_executor) {
-		pipeline.PrepareExecutionRegionPlanForExecution();
 		pipeline_executor = make_uniq<PipelineExecutor>(pipeline.GetClientContext(), pipeline, reserved_batch_index);
 	}
 
@@ -443,14 +442,10 @@ void Pipeline::ResetForReschedule(bool reset_sink) {
 	auto source_state = GetSourceState();
 	auto partition_info = sink ? sink->RequiredPartitionInfo() : OperatorPartitionInfo::NoPartitionInfo();
 	if (allow_reuse && source_state && source_state->SupportsReuse()) {
-		// The execution-region plan is pipeline-scoped. Reusable source state changes
-		// the active input, not the pipeline shape or compiled artifact ownership.
-		// A plan that was waiting for operator readiness is refreshed exactly once by
-		// PrepareExecutionRegionPlanForExecution after dependencies are ready.
+		// Reusable source state changes the active input, not the pipeline shape or compiled artifact ownership.
 		source_state->Reset(client);
 	} else {
 		lock_guard<mutex> guard(execution_region_plan_lock);
-		EnsureExecutionRegionPlanBuiltLocked();
 		InitializeSourceStateFromExecutionRegionPlanLocked(client);
 	}
 	if (partition_info.AnyRequired()) {
@@ -466,7 +461,6 @@ void Pipeline::ResetSource(bool force) {
 	auto source_state = GetSourceState();
 	if (force || !source_state) {
 		lock_guard<mutex> guard(execution_region_plan_lock);
-		EnsureExecutionRegionPlanBuiltLocked();
 		InitializeSourceStateFromExecutionRegionPlanLocked(GetClientContext());
 	}
 }
@@ -483,10 +477,6 @@ void Pipeline::PrepareExternalInput() {
 		return;
 	}
 	ResetSinkAndOperators();
-	{
-		lock_guard<mutex> plan_guard(execution_region_plan_lock);
-		EnsureExecutionRegionPlanBuiltLocked();
-	}
 	initialized = true;
 }
 
@@ -621,12 +611,6 @@ void Pipeline::CompleteExternalInput() {
 	}
 }
 
-void Pipeline::EnsureExecutionRegionPlanBuiltLocked() {
-	if (!execution_region_plan_built) {
-		BuildExecutionRegionPlanLocked();
-	}
-}
-
 void Pipeline::InvalidateExecutionRegionPlan() {
 	// A plan built for the other input mode is stale: rebuild it for the mode the pipeline now executes in.
 	lock_guard<mutex> guard(execution_region_plan_lock);
@@ -653,15 +637,12 @@ void Pipeline::BuildExecutionRegionPlanLocked() {
 unique_ptr<GlobalSourceState> Pipeline::CreateGlobalSourceState(ClientContext &client,
                                                                 const ExecutionRegionOpenRequest &open_request) {
 	D_ASSERT(source);
-	if (open_request.UsesSourceContract() || open_request.UsesScanFilters()) {
-		// The execution region asks the source for a non-native mode (source contract and/or scan-filter
-		// ownership); only the region-aware overload can honor it.
-		return source->GetGlobalSourceState(client, open_request);
-	}
-	// A native source mode: use the partition-aware overload so sinks requiring batch indexes get the
-	// source's partitioned state.
 	auto partition_info = sink ? sink->RequiredPartitionInfo() : OperatorPartitionInfo::NoPartitionInfo();
-	return source->GetGlobalSourceState(client, partition_info);
+	auto state = source->GetGlobalSourceState(client, partition_info);
+	if (open_request.UsesSourceContract() || open_request.UsesScanFilters()) {
+		source->ConfigureExecutionSourceState(client, *state, open_request);
+	}
+	return state;
 }
 
 void Pipeline::InitializeSourceStateFromExecutionRegionPlanLocked(ClientContext &client) {
@@ -676,26 +657,28 @@ void Pipeline::InitializeSourceStateFromExecutionRegionPlanLocked(ClientContext 
 		return;
 	}
 
-	BuildExecutionRegionPlanLocked();
-	open_request = GetExecutionRegionOpenRequest(execution_region_plan);
-	SetSourceState(ToSharedSourceState(CreateGlobalSourceState(client, open_request)));
-	if (open_request.UsesSourceContract() && !source->SupportsExecutionSourceContract(open_request)) {
-		throw InternalException("Execution region source contract remained selected after source initialization made "
-		                        "the source contract unsupported");
-	}
+	throw InternalException("Execution region source contract changed after execution preparation");
 }
 
 bool Pipeline::PrepareExecutionRegionPlanForExecution() {
 	lock_guard<mutex> guard(execution_region_plan_lock);
-	if (!execution_region_plan || !execution_region_plan->RequiresOperatorReadinessRefresh()) {
+	if (execution_region_plan_built) {
 		return false;
 	}
+	// Executor construction happens after dependencies finalize. Analyze their actual state once, before any
+	// local source state captures the selected scan layout and filter provider.
 	BuildExecutionRegionPlanLocked();
-	InitializeSourceStateFromExecutionRegionPlanLocked(GetClientContext());
-	if (execution_region_plan) {
-		execution_region_plan->operator_readiness_refresh = false;
+	if (execution_region_plan && (execution_region_plan->OpenRequest().UsesSourceContract() ||
+	                              execution_region_plan->OpenRequest().UsesScanFilters())) {
+		if (!IsExternalInput()) {
+			auto source_state = GetSourceState();
+			D_ASSERT(source_state);
+			source->ConfigureExecutionSourceState(GetClientContext(), *source_state,
+			                                      execution_region_plan->OpenRequest());
+		}
+		return true;
 	}
-	return true;
+	return false;
 }
 
 void Pipeline::Ready() {

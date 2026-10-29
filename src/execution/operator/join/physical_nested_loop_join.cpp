@@ -283,57 +283,6 @@ SinkResultType PhysicalNestedLoopJoin::Sink(ExecutionContext &context, DataChunk
 	return SinkResultType::NEED_MORE_INPUT;
 }
 
-bool PhysicalNestedLoopJoin::BindExecutionSink(ExecutionContext &context, DataChunk &input,
-                                               OperatorSinkInput &sink_input, const ExecutionRegionSinkInfo &sink_info,
-                                               ExecutionSinkBinding &binding) const {
-	(void)context;
-	binding = ExecutionSinkBinding();
-	binding.kind = sink_info.kind;
-	if (sink_info.kind != ExecutionRegionSinkKind::NESTED_LOOP_JOIN_BUILD) {
-		binding.blocker = "nested-loop-join-build-native-runtime-wrong-sink-kind";
-		return false;
-	}
-	auto &contract = sink_info.nested_loop_join_contract;
-	if (!contract.present) {
-		binding.blocker = "nested-loop-join-build-native-runtime-missing-contract";
-		return false;
-	}
-	if (contract.native_build_contract.status != ExecutionRegionStateContractStatus::READY) {
-		binding.blocker = contract.native_build_contract.blocker.empty()
-		                      ? "nested-loop-join-build-native-runtime-contract-not-ready"
-		                      : contract.native_build_contract.blocker;
-		return false;
-	}
-	if (!contract.build_sink_shape_ready) {
-		binding.blocker = contract.build_sink_shape_blocker.empty()
-		                      ? "nested-loop-join-build-native-runtime-shape-not-ready"
-		                      : contract.build_sink_shape_blocker;
-		return false;
-	}
-
-	auto &gstate = sink_input.global_state.Cast<NestedLoopJoinGlobalState>();
-	auto &lstate = sink_input.local_state.Cast<NestedLoopJoinLocalState>();
-	auto &build = binding.nested_loop_join_build;
-	if (contract.condition_types.size() != lstate.right_condition.ColumnCount()) {
-		binding.blocker = "nested-loop-join-build-native-runtime-condition-count-mismatch";
-		return false;
-	}
-	if (input.ColumnCount() != children[1].get().GetTypes().size()) {
-		binding.blocker = "nested-loop-join-build-native-runtime-payload-count-mismatch";
-		return false;
-	}
-
-	binding.ready = true;
-	binding.blocker.clear();
-	build.ready = true;
-	build.right_condition_data = &gstate.right_condition_data;
-	build.right_payload_data = &gstate.right_payload_data;
-	build.lock = &gstate.nj_lock;
-	build.condition_types = contract.condition_types;
-	build.blocker.clear();
-	return true;
-}
-
 SinkCombineResultType PhysicalNestedLoopJoin::Combine(ExecutionContext &context,
                                                       OperatorSinkCombineInput &input) const {
 	auto &gstate = input.global_state.Cast<NestedLoopJoinGlobalState>();
@@ -465,22 +414,22 @@ PhysicalNestedLoopJoin::GetExecutionOperatorReadiness(ClientContext &context,
                                                       const ExecutionRegionOperatorInfo &operator_info) const {
 	(void)context;
 	auto invalid = [&](string blocker) {
-		return MakeExecutionNestedLoopJoinProbeReadiness(operator_info.kind, ExecutionOperatorReadinessStatus::INVALID,
-		                                                 std::move(blocker));
+		return MakeExecutionNestedLoopJoinProbeReadiness(operator_info.Kind(),
+		                                                 ExecutionOperatorReadinessStatus::INVALID, std::move(blocker));
 	};
 	auto not_ready = [&](string blocker) {
 		return MakeExecutionNestedLoopJoinProbeReadiness(
-		    operator_info.kind, ExecutionOperatorReadinessStatus::NOT_READY, std::move(blocker));
+		    operator_info.Kind(), ExecutionOperatorReadinessStatus::NOT_READY, std::move(blocker));
 	};
 	auto ready = [&]() {
-		return MakeExecutionNestedLoopJoinProbeReadiness(operator_info.kind, ExecutionOperatorReadinessStatus::READY,
+		return MakeExecutionNestedLoopJoinProbeReadiness(operator_info.Kind(), ExecutionOperatorReadinessStatus::READY,
 		                                                 "none");
 	};
 
-	if (operator_info.kind != ExecutionRegionOperatorContractKind::NESTED_LOOP_JOIN_PROBE) {
+	if (operator_info.Kind() != ExecutionRegionOperatorContractKind::NESTED_LOOP_JOIN_PROBE) {
 		return invalid("nested-loop-join-native-readiness-wrong-operator-kind");
 	}
-	auto &contract = operator_info.nested_loop_join_contract;
+	auto &contract = operator_info.NestedLoopJoin();
 	if (!contract.present) {
 		return invalid("nested-loop-join-native-readiness-missing-contract");
 	}
@@ -502,77 +451,6 @@ PhysicalNestedLoopJoin::GetExecutionOperatorReadiness(ClientContext &context,
 		return invalid("nested-loop-join-native-readiness-condition-payload-count-mismatch");
 	}
 	return ready();
-}
-
-ExecutionOperatorBindResult
-PhysicalNestedLoopJoin::BindExecutionOperator(ExecutionContext &context, DataChunk &input, GlobalOperatorState &gstate,
-                                              OperatorState &state_p, const ExecutionRegionOperatorInfo &operator_info,
-                                              ExecutionOperatorBinding &binding) const {
-	(void)context;
-	(void)gstate;
-	binding = ExecutionOperatorBinding();
-	binding.kind = operator_info.kind;
-	if (operator_info.kind != ExecutionRegionOperatorContractKind::NESTED_LOOP_JOIN_PROBE) {
-		binding.blocker = "nested-loop-join-probe-native-runtime-wrong-operator-kind";
-		return ExecutionOperatorBindResult::INVALID;
-	}
-	auto &contract = operator_info.nested_loop_join_contract;
-	if (!contract.present) {
-		binding.blocker = "nested-loop-join-probe-native-runtime-missing-contract";
-		return ExecutionOperatorBindResult::INVALID;
-	}
-	if (contract.native_probe_contract.status != ExecutionRegionStateContractStatus::READY) {
-		binding.blocker = contract.native_probe_contract.blocker.empty()
-		                      ? "nested-loop-join-probe-native-runtime-contract-not-ready"
-		                      : contract.native_probe_contract.blocker;
-		return ExecutionOperatorBindResult::INVALID;
-	}
-	if (!contract.native_probe_shape_ready) {
-		binding.blocker = contract.native_probe_shape_blocker.empty()
-		                      ? "nested-loop-join-probe-native-runtime-shape-not-ready"
-		                      : contract.native_probe_shape_blocker;
-		return ExecutionOperatorBindResult::INVALID;
-	}
-	if (!sink_state) {
-		binding.blocker = "nested-loop-join-probe-native-runtime-missing-sink-state";
-		return ExecutionOperatorBindResult::DEFERRED;
-	}
-	auto &sink = sink_state->Cast<NestedLoopJoinGlobalState>();
-	if (sink.right_condition_data.Count() != sink.right_payload_data.Count()) {
-		binding.blocker = "nested-loop-join-probe-native-runtime-condition-payload-count-mismatch";
-		return ExecutionOperatorBindResult::INVALID;
-	}
-	if (contract.condition_types.size() != conditions.size()) {
-		binding.blocker = "nested-loop-join-probe-native-runtime-condition-contract-mismatch";
-		return ExecutionOperatorBindResult::INVALID;
-	}
-	if (input.ColumnCount() != contract.lhs_input_types.size()) {
-		binding.blocker = "nested-loop-join-probe-native-runtime-input-width-mismatch";
-		return ExecutionOperatorBindResult::INVALID;
-	}
-
-	auto &state = state_p.Cast<PhysicalNestedLoopJoinState>();
-	binding.ready = true;
-	binding.blocker.clear();
-	auto &probe = binding.nested_loop_join_probe;
-	probe.ready = true;
-	probe.join_type = contract.join_type;
-	probe.comparison_types = contract.comparison_types;
-	probe.condition_types = contract.condition_types;
-	probe.output_types = contract.output_types;
-	probe.empty_build_side = sink.right_payload_data.Count() == 0;
-	probe.right_condition_data = &sink.right_condition_data;
-	probe.right_payload_data = &sink.right_payload_data;
-	probe.condition_scan_state = &state.condition_scan_state;
-	probe.payload_scan_state = &state.payload_scan_state;
-	probe.right_condition = &state.right_condition;
-	probe.right_payload = &state.right_payload;
-	probe.left_tuple = &state.left_tuple;
-	probe.right_tuple = &state.right_tuple;
-	probe.fetch_next_left = &state.fetch_next_left;
-	probe.fetch_next_right = &state.fetch_next_right;
-	probe.blocker.clear();
-	return ExecutionOperatorBindResult::READY;
 }
 
 OperatorResultType PhysicalNestedLoopJoin::ExecuteInternal(ExecutionContext &context, DataChunk &input,

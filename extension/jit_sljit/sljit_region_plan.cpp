@@ -44,8 +44,9 @@ static void AddSljitLowCardinalityStringPredicatePreferences(const SljitNativeRe
 	auto current_max_values = region.source_max_values;
 	for (auto &op : region.ops) {
 		idx_t distinct_count;
-		if (op.kind == SljitNativeRegionOpKind::FILTER && op.filter.predicate &&
-		    SljitPredicateHasLowCardinalityStringLike(*op.filter.predicate, current_distinct_counts, distinct_count)) {
+		if (op.Kind() == SljitNativeRegionOpKind::FILTER && op.Filter().predicate &&
+		    SljitPredicateHasLowCardinalityStringLike(*op.Filter().predicate, current_distinct_counts,
+		                                              distinct_count)) {
 			lowering_plan.AddBackendLowCardinalityStringPredicatePreference(distinct_count);
 		}
 		SljitUpdateExecutableCurrentDistinctCounts(op, current_distinct_counts, current_min_values, current_max_values);
@@ -54,12 +55,12 @@ static void AddSljitLowCardinalityStringPredicatePreferences(const SljitNativeRe
 }
 
 static bool IsIdentityProjection(const SljitNativeRegionOpPlan &op, const vector<LogicalType> &input_types) {
-	if (op.kind != SljitNativeRegionOpKind::PROJECTION || op.projections.size() != input_types.size() ||
+	if (op.Kind() != SljitNativeRegionOpKind::PROJECTION || op.Projections().size() != input_types.size() ||
 	    op.output_types.size() != input_types.size()) {
 		return false;
 	}
 	for (idx_t col_idx = 0; col_idx < input_types.size(); col_idx++) {
-		auto &projection = op.projections[col_idx];
+		auto &projection = op.Projections()[col_idx];
 		if (projection.kind != SljitNativeRegionExpressionKind::REFERENCE || projection.source_index != col_idx ||
 		    projection.return_type != input_types[col_idx] || op.output_types[col_idx] != input_types[col_idx]) {
 			return false;
@@ -185,7 +186,7 @@ static SljitRegionNodePlan PlanSljitRegionNode(const ExecutionRegionNode &node, 
 	case ExecutionRegionNodeKind::PROJECTION:
 		return PlanSljitProjectionNode(node, input_types, render_diagnostics);
 	case ExecutionRegionNodeKind::OPERATOR:
-		if (node.operator_info && node.operator_info->kind == ExecutionRegionOperatorContractKind::HASH_JOIN_PROBE) {
+		if (node.operator_info && node.operator_info->Kind() == ExecutionRegionOperatorContractKind::HASH_JOIN_PROBE) {
 			return PlanSljitHashJoinProbeOperatorNode(node, input_types, input_not_null, render_diagnostics);
 		}
 		return SljitNodeBlockerBoundary(node, "operator contract boundary has no SLJIT native contract");
@@ -205,28 +206,14 @@ static idx_t SljitEstimatedNodeInputCardinality(const ExecutionRegionIR &region_
 	return candidate.estimated_cardinality;
 }
 
-static void ApplySljitAggregateUpdateInputEstimate(SljitRegionNodePlan &node_plan, idx_t estimated_input_count) {
+static void ApplySljitAggregateUpdateInputEstimate(vector<SljitNativeRegionOpPlan> &ops, idx_t estimated_input_count) {
 	if (estimated_input_count == 0) {
 		return;
 	}
-	for (auto &op : node_plan.native_ops) {
-		if (op.kind == SljitNativeRegionOpKind::AGGREGATE_UPDATE &&
-		    op.aggregate_update.sink_info.kind == ExecutionRegionSinkKind::HASH_AGGREGATE_UPDATE) {
-			op.aggregate_update.estimated_input_count =
-			    MaxValue(op.aggregate_update.estimated_input_count, estimated_input_count);
-		}
-	}
-}
-
-static void ApplySljitAggregateUpdateInputEstimate(SljitNativeRegionPlan &region, idx_t estimated_input_count) {
-	if (estimated_input_count == 0) {
-		return;
-	}
-	for (auto &op : region.ops) {
-		if (op.kind == SljitNativeRegionOpKind::AGGREGATE_UPDATE &&
-		    op.aggregate_update.sink_info.kind == ExecutionRegionSinkKind::HASH_AGGREGATE_UPDATE) {
-			op.aggregate_update.estimated_input_count =
-			    MaxValue(op.aggregate_update.estimated_input_count, estimated_input_count);
+	for (auto &op : ops) {
+		if (op.Kind() == SljitNativeRegionOpKind::AGGREGATE_UPDATE &&
+		    op.AggregateUpdate().sink_info.Kind() == ExecutionRegionSinkKind::HASH_AGGREGATE_UPDATE) {
+			op.estimated_input_count = MaxValue(op.estimated_input_count, estimated_input_count);
 		}
 	}
 }
@@ -235,8 +222,8 @@ static void SpecializeSljitNativeRegionAggregatePayloadRanges(SljitNativeRegionP
 	auto current_min_values = region.source_min_values;
 	auto current_max_values = region.source_max_values;
 	for (auto &op : region.ops) {
-		if (op.kind == SljitNativeRegionOpKind::AGGREGATE_UPDATE) {
-			SljitSpecializeAggregatePayloadRanges(op.aggregate_update, current_min_values, current_max_values);
+		if (op.Kind() == SljitNativeRegionOpKind::AGGREGATE_UPDATE) {
+			SljitSpecializeAggregatePayloadRanges(op.AggregateUpdate(), current_min_values, current_max_values);
 		}
 		SljitUpdateExecutableCurrentRanges(op, current_min_values, current_max_values);
 	}
@@ -272,12 +259,12 @@ struct SljitRegionLoweringCursor {
 
 	void ApplyExactFilterProof(SljitRegionNodePlan &node_plan) const {
 		for (auto &op : node_plan.native_ops) {
-			if (op.kind != SljitNativeRegionOpKind::HASH_JOIN_PROBE || op.hash_join_probe.keys.size() != 1) {
+			if (op.Kind() != SljitNativeRegionOpKind::HASH_JOIN_PROBE || op.HashJoinProbe().keys.size() != 1) {
 				continue;
 			}
-			auto source_index = op.hash_join_probe.keys[0].key_input_index;
+			auto source_index = op.HashJoinProbe().keys[0].key_input_index;
 			if (source_index < current_exact_filter_identities.size()) {
-				op.hash_join_probe.exact_source_filter_identity = current_exact_filter_identities[source_index];
+				op.HashJoinProbe().exact_source_filter_identity = current_exact_filter_identities[source_index];
 			}
 		}
 	}
@@ -366,13 +353,13 @@ struct SljitRegionLoweringCursor {
 
 private:
 	void UpdateExactFilterProofs(const SljitNativeRegionOpPlan &op) {
-		if (op.kind == SljitNativeRegionOpKind::FILTER) {
+		if (op.Kind() == SljitNativeRegionOpKind::FILTER) {
 			return;
 		}
-		if (op.kind == SljitNativeRegionOpKind::PROJECTION) {
-			vector<shared_ptr<ExecutionRuntimeFilterIdentity>> projected(op.projections.size());
-			for (idx_t output_idx = 0; output_idx < op.projections.size(); output_idx++) {
-				auto &projection = op.projections[output_idx];
+		if (op.Kind() == SljitNativeRegionOpKind::PROJECTION) {
+			vector<shared_ptr<ExecutionRuntimeFilterIdentity>> projected(op.Projections().size());
+			for (idx_t output_idx = 0; output_idx < op.Projections().size(); output_idx++) {
+				auto &projection = op.Projections()[output_idx];
 				if (projection.kind == SljitNativeRegionExpressionKind::REFERENCE &&
 				    projection.source_index < current_exact_filter_identities.size()) {
 					projected[output_idx] = current_exact_filter_identities[projection.source_index];
@@ -441,7 +428,7 @@ ExecutionRegionLoweringPlan BuildSljitRegionPlan(const ExecutionRegionIR &region
 		}
 		if (node.kind == ExecutionRegionNodeKind::SINK) {
 			auto node_plan = PlanSljitFullPipelineSinkNode(node, cursor.InputTypes(), render_diagnostics);
-			ApplySljitAggregateUpdateInputEstimate(node_plan,
+			ApplySljitAggregateUpdateInputEstimate(node_plan.native_ops,
 			                                       SljitEstimatedNodeInputCardinality(region_ir, candidate, node_idx));
 			AddSljitLoweredNode(lowering_plan, node, node_plan);
 			if (node_plan.kind == ExecutionRegionLoweringKind::NATIVE && SljitRegionNodeHasNativeOps(node_plan)) {
@@ -468,7 +455,7 @@ ExecutionRegionLoweringPlan BuildSljitRegionPlan(const ExecutionRegionIR &region
 	if (cursor.CanFuse() && !native_region.ops.empty()) {
 		FuseAdjacentNativeProjections(native_region, render_diagnostics);
 		FusePrimitiveAggregateUpdates(native_region, native_region.source_output_types, render_diagnostics);
-		ApplySljitAggregateUpdateInputEstimate(native_region, candidate.estimated_cardinality);
+		ApplySljitAggregateUpdateInputEstimate(native_region.ops, candidate.estimated_cardinality);
 		SpecializeSljitNativeRegionAggregatePayloadRanges(native_region);
 		if (candidate.estimated_cardinality < SLJIT_FLAT_NULLABLE_FAST_PATH_MIN_CARDINALITY) {
 			DisableSljitRegionFlatNullableFastPath(native_region);
@@ -493,12 +480,13 @@ ExecutionRegionLoweringPlan BuildSljitRegionPlan(const ExecutionRegionIR &region
 			}
 			for (idx_t op_idx = 0; op_idx < native_region.ops.size(); op_idx++) {
 				auto &op = native_region.ops[op_idx];
-				if (op.kind == SljitNativeRegionOpKind::HASH_JOIN_PROBE &&
-				    op.hash_join_probe.exact_source_filter_identity) {
-					op.hash_join_probe.exact_source_filter_binding = op_idx;
+				if (op.Kind() == SljitNativeRegionOpKind::HASH_JOIN_PROBE &&
+				    op.HashJoinProbe().exact_source_filter_identity) {
+					op.HashJoinProbe().exact_source_filter_binding = op_idx;
 				}
 			}
 			auto backend_plan = make_shared_ptr<SljitRegionBackendPlan>();
+			BindSljitRegionInstanceSlots(native_region);
 			backend_plan->native_region = make_uniq<SljitNativeRegionPlan>(std::move(native_region));
 			lowering_plan.backend_plan = std::move(backend_plan);
 			lowering_plan.SetCompiledExecutionMode(ExecutionRegionExecutionMode::NATIVE);

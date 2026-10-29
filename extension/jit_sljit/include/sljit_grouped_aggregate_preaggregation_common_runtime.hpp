@@ -175,8 +175,8 @@ static bool SljitTryBindGeneratedFusedAffinePrimitiveRunSource(
     SljitNativePrimitiveRunFunction &function, const char *&blocker) {
 	blocker = nullptr;
 	function = nullptr;
-	auto &primitive_run_update = op.aggregate_update.primitive_run_update;
-	auto &affine_run_update = op.aggregate_update.fused_affine_run_update;
+	auto &primitive_run_update = op.AggregateUpdate().primitive_run_update;
+	auto &affine_run_update = op.AggregateUpdate().fused_affine_run_update;
 	if (!affine_run_update.Ready() || affine_run_update.primitive_kind != AggregatePrimitiveUpdateKind::SUM_INT64) {
 		blocker = "code";
 		return false;

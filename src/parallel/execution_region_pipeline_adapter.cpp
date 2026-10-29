@@ -119,7 +119,7 @@ ExecutionRegionPipelineAdapter::GetOperatorReadiness(idx_t operator_index,
 	auto &operators = executor.pipeline.GetIntermediateOperators();
 	if (operator_index >= operators.size()) {
 		ExecutionOperatorReadiness readiness;
-		readiness.kind = operator_info.kind;
+		readiness.kind = operator_info.Kind();
 		readiness.blocker = "execution-operator-runtime-index-out-of-range";
 		return readiness;
 	}
@@ -157,7 +157,7 @@ ExecutionRegionPipelineAdapter::BindOperator(idx_t operator_index, DataChunk &in
                                              const ExecutionRegionOperatorInfo &operator_info,
                                              ExecutionOperatorBinding &binding) {
 	binding = ExecutionOperatorBinding();
-	binding.kind = operator_info.kind;
+	binding.kind = operator_info.Kind();
 	auto &operators = executor.pipeline.GetIntermediateOperators();
 	if (operator_index >= operators.size()) {
 		binding.blocker = "execution-operator-runtime-index-out-of-range";
@@ -176,10 +176,11 @@ ExecutionRegionPipelineAdapter::BindOperator(idx_t operator_index, DataChunk &in
 	                                *executor.intermediate_states[operator_index], operator_info, binding);
 }
 
-bool ExecutionRegionPipelineAdapter::BindSink(DataChunk &input, const ExecutionRegionSinkInfo &sink_info,
-                                              ExecutionSinkBinding &binding) {
+template <class SINK_INFO>
+bool ExecutionRegionPipelineAdapter::BindSinkInternal(DataChunk &input, const SINK_INFO &sink_info,
+                                                      ExecutionRegionSinkKind kind, ExecutionSinkBinding &binding) {
 	binding = ExecutionSinkBinding();
-	binding.kind = sink_info.kind;
+	binding.kind = kind;
 	auto sink = executor.pipeline.GetSink();
 	if (!sink) {
 		throw InternalException("compiled region runtime cannot sink without a pipeline sink");
@@ -189,6 +190,26 @@ bool ExecutionRegionPipelineAdapter::BindSink(DataChunk &input, const ExecutionR
 	}
 	OperatorSinkInput sink_input {*sink->sink_state, *executor.local_sink_state, executor.interrupt_state};
 	return sink->BindExecutionSink(executor.context, input, sink_input, sink_info, binding);
+}
+
+bool ExecutionRegionPipelineAdapter::BindSink(DataChunk &input, const ExecutionRegionSinkInfo &sink_info,
+                                              ExecutionSinkBinding &binding) {
+	return BindSinkInternal(input, sink_info, sink_info.Kind(), binding);
+}
+
+bool ExecutionRegionPipelineAdapter::BindSink(DataChunk &input, const ExecutionRegionAggregateSinkInfo &sink_info,
+                                              ExecutionSinkBinding &binding) {
+	return BindSinkInternal(input, sink_info, sink_info.Kind(), binding);
+}
+
+bool ExecutionRegionPipelineAdapter::BindSink(DataChunk &input, const ExecutionRegionHashJoinInfo &sink_info,
+                                              ExecutionSinkBinding &binding) {
+	return BindSinkInternal(input, sink_info, ExecutionRegionSinkKind::HASH_JOIN_BUILD, binding);
+}
+
+bool ExecutionRegionPipelineAdapter::BindSink(DataChunk &input, const ExecutionRegionOrderSinkInfo &sink_info,
+                                              ExecutionSinkBinding &binding) {
+	return BindSinkInternal(input, sink_info, ExecutionRegionSinkKind::SORT, binding);
 }
 
 //! The rows the core holds for a kernel sink through the operator's Sink, as the retry of a blocked chunk does

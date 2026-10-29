@@ -73,8 +73,8 @@ public:
 	unique_ptr<LocalSourceState> GetLocalSourceState(ExecutionContext &context,
 	                                                 GlobalSourceState &gstate) const override;
 	unique_ptr<GlobalSourceState> GetGlobalSourceState(ClientContext &context) const override;
-	unique_ptr<GlobalSourceState> GetGlobalSourceState(ClientContext &context,
-	                                                   const ExecutionRegionOpenRequest &open_request) const override;
+	void ConfigureExecutionSourceState(ClientContext &context, GlobalSourceState &gstate,
+	                                   const ExecutionRegionOpenRequest &open_request) const override;
 	bool SupportsExecutionSourceContract(const ExecutionRegionOpenRequest &open_request) const override;
 	SourceResultType GetDataInternal(ExecutionContext &context, DataChunk &chunk,
 	                                 OperatorSourceInput &input) const override;

@@ -259,22 +259,22 @@ bool TryComposeNativeSemanticProjection(const vector<SljitNativeRegionExpression
 
 static bool TryFuseAdjacentNativeProjection(SljitNativeRegionOpPlan &left, const SljitNativeRegionOpPlan &right,
                                             bool render_diagnostics) {
-	if (left.kind != SljitNativeRegionOpKind::PROJECTION || right.kind != SljitNativeRegionOpKind::PROJECTION) {
+	if (left.Kind() != SljitNativeRegionOpKind::PROJECTION || right.Kind() != SljitNativeRegionOpKind::PROJECTION) {
 		return false;
 	}
 	if (!right.input_types.empty() && right.input_types != left.output_types) {
 		return false;
 	}
 	vector<SljitNativeRegionExpressionPlan> projections;
-	projections.reserve(right.projections.size());
-	for (auto &projection : right.projections) {
+	projections.reserve(right.Projections().size());
+	for (auto &projection : right.Projections()) {
 		SljitNativeRegionExpressionPlan composed;
-		if (!TryComposeNativeProjection(left.projections, projection, composed, render_diagnostics)) {
+		if (!TryComposeNativeProjection(left.Projections(), projection, composed, render_diagnostics)) {
 			return false;
 		}
 		projections.push_back(std::move(composed));
 	}
-	left.projections = std::move(projections);
+	left.Projections() = std::move(projections);
 	left.output_types = right.output_types;
 	return true;
 }

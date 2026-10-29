@@ -263,7 +263,7 @@ static bool SljitPreparedPrimitivePayloadSourceSupportsLane(DataChunk &input,
 struct SljitPreaggregatedPrimitivePayloadSources {
 	bool Prepare(SljitExecutableRegionOp &op, DataChunk &input,
 	             const vector<const ExecutionPrimitiveAggregateUpdateLane *> &payload_lanes) {
-		auto &aggregates = op.aggregate_update.plan.sink_info.aggregates;
+		auto &aggregates = op.AggregateUpdate().plan.sink_info.aggregates;
 		if (payload_lanes.size() != aggregates.size()) {
 			return false;
 		}

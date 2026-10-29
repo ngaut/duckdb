@@ -28,9 +28,9 @@ physical pipeline
 
 ## Where the structure falls short of the principles
 
-- **Time.** Precompiled C++ fast paths and DuckDB's storage scan inside
-  kernels account for more execution time than generated machine code; most
-  wins come from fused C++ and avoided operator overhead.
+- **Execution ownership.** Several backend fast paths run precompiled C++
+  rather than generated machine code. Their placement still needs qualification
+  against equivalent native execution.
 - **Data layer.** Rows move between steps through many batch, pending and view
   types and are translated across many index spaces by per-family remap
   helpers. Index-space confusion is the dominant wrong-result class: a layout
@@ -38,10 +38,10 @@ physical pipeline
   error.
 - **Strategy catalog.** Runtime cascades try strategies in order per call and
   re-check facts already known at bind time.
-- **Representations.** About ten structures describe one pipeline. Op plans
-  embed every kind's sub-plan, operator and sink infos are deep-copied on a
-  cache miss, and the artifact key is a rendered description that includes
-  some estimates and cast-error identity.
+- **Representations.** Several structures describe one pipeline. Op plans now
+  hold one kind's payload, but large core contracts inside those payloads are
+  still deep-copied on a cache miss. The structural artifact key retains some
+  estimates and statistics until runtime-only consumers use instance bindings.
 - **Binding.** Backends re-check `ready` flags and layout facts per chunk.
 
 ## Principles
@@ -203,26 +203,23 @@ kernel therefore never re-batches source rows, and the per-vector source work
 (dictionary slices, chunk resets, fetch dispatch) disappears.
 
 **One coalescer.** Rows are coalesced between steps in exactly one place, with
-one rule based on the bytes a copy would move. The 19 owned batch instances
-reduce to the source batch, the step coalescer, and the typed pending states
-of aggregate terminals.
+one rule based on the bytes a copy would move. Owned batches reduce to the
+source batch, the step coalescer, and the typed pending states of aggregate
+terminals.
 
 ### Current state
 
-- The table scan's source contract copies the kept rows of successive storage
-  vectors into one chunk until it holds half a vector, within one scan
-  assignment and under the batch index its rows were scanned with. Fixed-width
-  filtered columns of a region source are copied flat. A vector that keeps most
-  rows, has out-of-line strings, or carries a storage dictionary or FSST vector
-  passes through uncopied, so sparse pipelines over dictionary-compressed
-  string columns see small chunks; their time goes to the storage scan's
-  per-vector work, which batching does not remove. Strings are copied, not
-  referenced.
-- Other sources hand over their chunks as produced;
-  `SljitSourceFetchPrimitiveRuntime` copies chunks under 1024 rows into
-  `source_contract_batch`, except chunks whose strings are out of line
-  (`SljitChunkHasOutOfLineValues`).
-- Batching rules are spread over `ShouldBatchSourceContractChunk`,
+- `ExecutionChunkCoalescer` owns the source compaction policy. The table scan
+  uses it to fill a chunk within one scan assignment, amortizing storage fetch
+  calls. `ExecutionCoalescingChunkStep` buffers remaining partial source chunks
+  at the executor's partition boundary. Backends own no source-fetch buffer.
+  Full batches, storage dictionaries and FSST encodings pass through unchanged;
+  selected fixed-width values are gathered, and buffered strings use the native
+  owning copy. A vector's auxiliary heap does not prove ownership of every
+  string, so the coalescer never infers lifetime from its presence. Partition
+  changes flush buffered rows before advancing, and a finished sink consumes no
+  further rows.
+- Downstream batching rules still exist in
   `SljitChunkHasOutOfLineValues`, `SljitAppendChunkToInitializedBatch`,
   `SljitProjectionHasVariableWidthOutput`, `CanBatchTerminalAggregateUpdate`,
   the pending row-pointer and input-vector batches, the pending preaggregated
@@ -325,8 +322,8 @@ of aggregate terminals.
 lowering produces an artifact plan of kind-tagged op descriptors (each op
 holds only its own kind's data, within a size budget of about 1 KB), plus the
 instance facts. Plans move from stage to stage; nothing deep-copies operator
-or sink infos. A pipeline plans once; a readiness refresh updates instance
-facts without re-planning.
+or sink infos. A pipeline plans once after dependencies finalize, before any
+local source state captures the selected layout and filter provider.
 
 **Structural identity.** The artifact key is a canonical binary encoding of the
 artifact plan, written by each descriptor from the same fields its code
@@ -337,7 +334,7 @@ for diagnostics only.
 
 **Instance slots.** The instance holds a slot table indexed by artifact op:
 runtime-filter identities, dynamic-filter handles, prepared input plans,
-cast-error identity (message, query location, source alias), and the
+cast-error identity (query location and source alias), and the
 stats-derived parameters (min/max, group domains, reserve counts) that code
 reads as runtime parameters. Only facts generated code bakes in as constants
 belong to the key. Two queries that differ only in literals' positions,
@@ -349,30 +346,55 @@ enums; reason text is derived from them.
 
 ### Current state
 
-- About 10 structures describe one pipeline: the execution contract, region
+- Several structures describe one pipeline: the execution contract, region
   graph, region IR, candidate with stage plan, lowering plan, native region
   plan, executable region, artifact, cached artifact, kernel, local state, and
   chunk step.
-- The key joins a semantic key (`BuildSljitRegionArtifactSemanticKey`:
-  candidate shape, contract shape, source facts and the semantic rendering of
-  the native region) with a binding key of the statistics generated code bakes
-  in (`BuildSljitRegionArtifactBindingKey`). The semantic part still carries
-  the aggregate update's estimated input count, the cardinality-gated
-  `emit_flat_nullable_fast_path`, and cast-error identity (message, query
-  location, source alias).
+- `sljit_artifact_key.cpp` encodes typed plan fields and contracts with binary
+  serialization. Neither candidate descriptions nor diagnostic renderers,
+  reasons or nested blockers participate. Binary values preserve signed zero.
+  The key retains statistics used to specialize code and recipes, plus
+  `emit_flat_nullable_fast_path`, which changes generated code. Aggregate input
+  estimates and reservation estimates are instance parameters, not key inputs.
+  Cast aliases and SQL positions are not key inputs: structural error slots are
+  bound to the current execution instead. Semantic error-message literals remain
+  part of expression identity.
+- Semantic and executable operator descriptors each own one kind-tagged payload;
+  the payload tag is their only kind authority. Inactive operator families are
+  neither constructed nor copied. Core operator contracts also hold exactly one
+  hash-join or nested-loop payload; the tag determines their kind, and diagnostics
+  and trait analysis inspect only that family. Sink contracts use the same
+  tagged ownership; delimiter sinks explicitly compose distinct aggregation
+  and hash-build payloads. Sources carry no unused aggregate-update payload.
+  Backend aggregate, hash-build and ordered-sink plans own their typed family
+  payload directly, including through runtime binding and artifact-key encoding.
+  Probe and append plans still retain broad operator/sink contracts.
+  Broad source contracts and large individual payloads still prevent meeting
+  the smaller descriptor budget.
 - Runtime-filter identities stay out of the artifact: the probe plan
   records a binding slot, `SljitNativeHashJoinProbePlan::Copy` drops the
   identity, and the kernel hands its identity bindings to each thread's
-  scratch. Copies of the first query's diagnostic `fields`, `reason`, and `ir`
-  still ride inside shared operator and sink infos.
+  scratch. Source statistics used by runtime strategies also live in
+  `SljitRegionInstanceBindings`, not the shared artifact's source metadata.
+  Aggregate input estimates and group-reservation targets are bound once per
+  instance, including on cache hits. Each thread borrows immutable parameters
+  through its scratch; batch code performs no virtual parameter lookup. The
+  reserve-count policy and dense-preaggregation economics remain unchanged.
+  Lowering also extracts cast-error identities into those bindings and clears
+  diagnostic `fields`, `reason`, and `ir` from shared operator/sink infos and
+  expression fragments. Cast slot IDs survive expression copying, remapping,
+  and join/aggregate composition. Error reporting resolves the slot only on the
+  cold error path; generated loops do not look up query metadata.
 - Post-join aggregate recipes own their semantic projection and prepared
   probe/build input expressions. Composition and any additional code generation
   finish before artifact publication; their new code allocations count toward
   artifact size. Execution-local descriptors borrow those callables and own
   only bindings and mutable adapters, not another compiled projection.
-- The planner runs up to three times per pipeline: the initial build, a
-  rebuild when the source contract is unsupported, and a readiness refresh
-  once dependencies finalize. Recursive rescheduling does not re-plan.
+- Planning runs once at executor preparation, after dependencies finalize.
+  `ConfigureExecutionSourceState` configures the existing native source before
+  local state creation; it must not reopen or consume a stateful source.
+  Recursive rescheduling reuses the plan and configures newly created source
+  state when necessary. Changing a pipeline's input mode invalidates its plan.
 - Strings decide behavior in two places: the source function names
   `"seq_scan"` and `"hash_aggregate_scan"` gate statistics and recipe
   binding, and contract `*_ready` flags are set from empty blocker strings.
@@ -392,6 +414,28 @@ builder, so zero-copy offsets cannot drift. The table accessor reports typed
 states (`READY`, `EMPTY`, `NOT_FINALIZED`, `POINTER_TABLE_MISSING`);
 diagnostic strings derive from those states.
 
+Dictionary-slot narrowing is a one-time, per-column core layout decision shared
+by native and compiled execution. Admission follows reference projections,
+selection-preserving operators and join output mappings to finalized producers.
+Probe lanes that can be NULL-extended or replayed flat from spill cannot narrow;
+stable RHS dictionaries remain eligible independently of other output lanes.
+A finalized perfect-hash or global-dictionary RHS producer establishes a new
+dictionary promise, so unrelated ancestors cannot invalidate it. Materialized,
+multi-source and unknown lanes require a new producer proof. A consuming table's
+own spill and repartition preserve its pinned dictionaries and narrow indices.
+
+External hash joins distinguish build-round memory from repartition workspace.
+Each build round uses reservation minus probe-buffer requirements, clamped at zero.
+A single probe-buffer estimate uses the actual spill schema, including its hash
+column, before and after repartition; join-output types do not define this cost.
+A capped reservation cannot wrap into an unlimited budget; the existing external
+finalizer makes progress with one nonempty partition when none fit the budget.
+Repartition sizing retains its reservation-based partition-size target but caps
+fan-out by the workspace needed to split an old partition. Selection and task
+scheduling share that workspace calculation and use the actual old radix width,
+including after recursive reuse. No split is scheduled when even one task cannot
+fit; a zero build-round budget never requests maximum fan-out.
+
 The entry view is an array of `uint64_t` words with published pointer and salt
 masks; the bloom view is a word array plus bitmask using the shared bloom-mask
 primitive. Backend code never names `ht_entry_t`, `BloomFilter`, or
@@ -403,7 +447,7 @@ these per operator and initializes every field before publishing `ready`.
 Storage-dependent RHS gathering is an exported core operation.
 
 Execution-region backends use DuckDB's version- and platform-matched C++
-extension contract plus an execution-region ABI version, currently 14. Any
+extension contract plus an execution-region ABI version, currently 20. Any
 backend-visible layout or virtual-interface change advances it; registration
 rejects other versions, and the boundary verifier pins the value.
 
@@ -434,10 +478,14 @@ are explicit monotone transitions recorded once, driven by observed counts.
   layout. `ExecutionBindHashJoinBuild`
   mutates the local sink's payload chunk and append state; aggregate binds
   allocate state adaptors.
-- Runtimes re-check `ready`, `output_mode`, key counts, and payload-source
-  types on every call (row-pointer update, input-vector update, perfect-hash
-  join output, complementary sums, the probe aggregate consumer, the probe
-  executor); the perfect probe layout is validated on every chunk.
+- The native probe bind validates readiness, output mode, key count and the
+  regular or perfect layout once, using the selected input plan. Grouped
+  primitive updates publish one bound strategy after validating their state;
+  count-one lane compatibility is cached with the payload lanes. Selections,
+  nullability, actual count-one values and checked-cast proofs remain batch facts.
+- Other consumers still re-check binding facts (row-pointer and input-vector
+  updates, perfect-hash output, complementary sums and aggregate consumer
+  eligibility). Their strategies and typed binding views remain to be unified.
 
 ## Strategy selection and the fast-path catalog
 
@@ -586,6 +634,12 @@ keys with DuckDB's hash and equality, under which every NaN is one value and
 -0.0 equals 0.0. A backend merges rows only under that equality; keys it cannot
 prove equal go to core's lookup, never into a group of their own.
 
+Compiled aggregate plans, binding, and grouped-state updates carry only
+`ExecutionRegionAggregateSinkInfo`, not the general sink union. Its operator
+kind comes from the aggregate contract. Lowering checks the general IR's sink
+tag against that contract before extracting the payload. Instance binding and
+artifact identity traverse only the aggregate's inputs and groups.
+
 Grouped-state publication uses the semantic sink contract: core records each
 aggregate's state offset, the executable copies offsets and primitive kinds
 into its plan, and the backend's call ABI carries only core-owned state
@@ -678,11 +732,9 @@ because M3-M5 shrink once layouts and instances exist.
 
 ### M1 — data layer
 
-1. **Source batches.** Every source fills batches across its vectors with
-   compacted survivors, as the table scan does, and strings are referenced
-   with their buffers kept alive instead of copied. Exit: the kernel's
-   source-fetch batching rules are deleted; `join_exact_filter_build` and
-   TPC-H are no slower.
+1. **Source batches.** Qualify the core-owned compaction policy on generic
+   workloads and TPC-H without moving any performance floor. Preserve storage
+   fetch amortization and encoded-vector passthrough while extending coverage.
 2. **Typed layouts.** Extend bound layouts to every recipe edge, including the
    preaggregated group batch, and give columns region-IR slot identities.
    Consumers resolve slots through layouts; MARK and elided-projection layouts
@@ -695,18 +747,18 @@ because M3-M5 shrink once layouts and instances exist.
 
 ### M2 — artifact identity and instances
 
-1. **Instance slots.** Move cast-error identity, stats-derived parameters, and
-   prepared input plans into the instance slot table; strip diagnostic fields from
-   shared infos. Exit: artifacts hold no query-local data, verified by a
-   static check.
-2. **Structural key.** Encode the artifact plan canonically; drop estimates and
-   text from the key; render descriptions only for diagnostics. Exit: queries
+1. **Instance slots.** Move remaining stats-derived runtime parameters into the
+   instance slot table, separating them from code-generation decisions. Audit
+   prepared input plans for remaining execution-local inputs. Exit: artifacts
+   hold no query-local data, verified by a static check.
+2. **Structural key.** Move remaining runtime-only inputs to instance slots,
+   then remove those inputs from the canonical key. Exit: queries
    that differ only in literal positions, estimates, or statistics within one
    compiled shape hit the same artifact; no description rendering on the
    planning path.
-3. **Kind-tagged plans.** Replace composed op plans with kind-tagged
-   descriptors and move plans between stages. Exit: op descriptors within
-   budget; planning cost per query measured and reduced.
+3. **Compact plans.** Narrow the probe and append contract payloads
+   inside backend descriptors and move plans between stages. Exit: op
+   descriptors within budget; planning cost per query measured and reduced.
 4. **Typed status.** Contract readiness flags are derived from blocker
    strings; replace them with typed status and blocker enums. Exit: no
    behavior reads a reason or blocker string.
@@ -752,8 +804,8 @@ observed cardinalities to the adaptive transitions instead of re-planning.
 - Variable-width expression coverage is narrower than fixed-width coverage.
 - Unsupported aggregate layouts, DISTINCT shapes, and join modes remain
   native.
-- No backend consumes the nested-loop join binding core exports, so a
-  pipeline containing a nested-loop join stays native past it.
+- Nested-loop joins are native execution boundaries. Their semantic IR remains
+  available to planning, but core exports no unused compiled-runtime binding.
 - A region's table-scan source reads storage synchronously: it schedules no
   async read-ahead or prefetch tasks, which native scans do for cold data
   (the storage prefetch tests fail with the JIT forced on for that reason).

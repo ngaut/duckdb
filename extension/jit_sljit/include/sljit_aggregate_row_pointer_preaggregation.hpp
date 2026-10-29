@@ -150,7 +150,7 @@ static bool SljitTryPreaggregateRowPointerFusedPrimitiveGroups(
 	failure_reason = "shape";
 	const auto count = payload_input.size();
 	if (count < 2 || row_pointers.GetVectorType() != VectorType::FLAT_VECTOR ||
-	    !op.aggregate_update.fused_payload_update.Function()) {
+	    !op.AggregateUpdate().fused_payload_update.Function()) {
 		return false;
 	}
 
@@ -182,10 +182,10 @@ static bool SljitTryPreaggregateRowPointerFusedPrimitiveGroups(
 	}
 
 	SljitExecuteFusedGroupedPrimitiveAggregatePayloadUpdate(
-	    op.aggregate_update.payloads, op.aggregate_update.fused_payload_update.Function(),
-	    op.aggregate_update.plan.sink_info.aggregate_contract, op.aggregate_update.payload_descriptors,
-	    op.aggregate_update.payload_source_layout, op.aggregate_update.combined_payload_source_indices,
-	    op.aggregate_update.combined_payload_source_not_null, payload_lanes, reduction_lanes, payload_input,
+	    op.AggregateUpdate().payloads, op.AggregateUpdate().fused_payload_update.Function(),
+	    op.AggregateUpdate().plan.sink_info.contract, op.AggregateUpdate().payload_descriptors,
+	    op.AggregateUpdate().payload_source_layout, op.AggregateUpdate().combined_payload_source_indices,
+	    op.AggregateUpdate().combined_payload_source_not_null, payload_lanes, reduction_lanes, payload_input,
 	    scratch.fused_row_state_addresses.data(), nullptr, nullptr, false, count, payload_scratch,
 	    optional_ptr<const vector<idx_t>>(&payload_source_indices));
 

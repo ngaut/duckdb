@@ -19,12 +19,12 @@ bool TryPartiallyFuseNativeProjectionIntoPerfectHashAggregateUpdate(const vector
                                                                     SljitNativeRegionOpPlan &projection,
                                                                     SljitNativeRegionOpPlan &aggregate_update,
                                                                     bool render_diagnostics) {
-	if (projection.kind != SljitNativeRegionOpKind::PROJECTION ||
-	    aggregate_update.kind != SljitNativeRegionOpKind::AGGREGATE_UPDATE) {
+	if (projection.Kind() != SljitNativeRegionOpKind::PROJECTION ||
+	    aggregate_update.Kind() != SljitNativeRegionOpKind::AGGREGATE_UPDATE) {
 		return false;
 	}
-	auto &sink = aggregate_update.aggregate_update.sink_info;
-	if (!aggregate_update.aggregate_update.CanInitializePrimitivePayloads()) {
+	auto &sink = aggregate_update.AggregateUpdate().sink_info;
+	if (!aggregate_update.AggregateUpdate().CanInitializePrimitivePayloads()) {
 		return false;
 	}
 	if (!SljitAggregateUpdateUsesGeneratedPerfectHashLookup(sink) || sink.aggregates.empty() || sink.groups.empty()) {
@@ -33,7 +33,7 @@ bool TryPartiallyFuseNativeProjectionIntoPerfectHashAggregateUpdate(const vector
 
 	idx_t group_projection_count = 0;
 	for (auto &group : sink.groups) {
-		if (!group.supported_reference || group.input_index >= projection.projections.size()) {
+		if (!group.supported_reference || group.input_index >= projection.Projections().size()) {
 			return false;
 		}
 		group_projection_count = MaxValue<idx_t>(group_projection_count, group.input_index + 1);
@@ -50,10 +50,10 @@ bool TryPartiallyFuseNativeProjectionIntoPerfectHashAggregateUpdate(const vector
 			payloads.push_back(std::move(payload));
 			continue;
 		}
-		if (aggregate.child_count != 1 || aggregate.payload_index >= projection.projections.size()) {
+		if (aggregate.child_count != 1 || aggregate.payload_index >= projection.Projections().size()) {
 			return false;
 		}
-		auto payload = projection.projections[aggregate.payload_index].Copy();
+		auto payload = projection.Projections()[aggregate.payload_index].Copy();
 		if (!SljitPrimitiveAggregatePayloadSupported(payload, aggregate, true)) {
 			return false;
 		}
@@ -64,7 +64,7 @@ bool TryPartiallyFuseNativeProjectionIntoPerfectHashAggregateUpdate(const vector
 	rewritten_projections.reserve(group_projection_count + input_types.size());
 	rewritten_types.reserve(group_projection_count + input_types.size());
 	for (idx_t projection_idx = 0; projection_idx < group_projection_count; projection_idx++) {
-		rewritten_projections.push_back(projection.projections[projection_idx].Copy());
+		rewritten_projections.push_back(projection.Projections()[projection_idx].Copy());
 		rewritten_types.push_back(projection.output_types[projection_idx]);
 	}
 	if (!RewriteSljitDirectPayloadSourcesThroughPartialProjection(input_types, payloads, rewritten_projections,
@@ -79,26 +79,26 @@ bool TryPartiallyFuseNativeProjectionIntoPerfectHashAggregateUpdate(const vector
 		return false;
 	}
 	const bool fused_payload_projection = SljitPrimitiveAggregatePayloadsContainNonReference(payloads, sink);
-	const bool shrank_projection = rewritten_projections.size() < projection.projections.size();
+	const bool shrank_projection = rewritten_projections.size() < projection.Projections().size();
 	if (!fused_payload_projection && !shrank_projection) {
 		return false;
 	}
 
-	projection.projections = std::move(rewritten_projections);
+	projection.Projections() = std::move(rewritten_projections);
 	projection.output_types = std::move(rewritten_types);
-	aggregate_update.aggregate_update.input_types = projection.output_types;
-	aggregate_update.aggregate_update.payloads = std::move(payloads);
-	aggregate_update.aggregate_update.InitializeProjectionComposedPrimitivePayloads();
-	aggregate_update.aggregate_update.use_grouped_state_addresses = true;
-	aggregate_update.aggregate_update.use_perfect_hash_group_lookup = use_perfect_hash_group_lookup;
+	aggregate_update.AggregateUpdate().input_types = projection.output_types;
+	aggregate_update.AggregateUpdate().payloads = std::move(payloads);
+	aggregate_update.AggregateUpdate().InitializeProjectionComposedPrimitivePayloads();
+	aggregate_update.AggregateUpdate().use_grouped_state_addresses = true;
+	aggregate_update.AggregateUpdate().use_perfect_hash_group_lookup = use_perfect_hash_group_lookup;
 	if (render_diagnostics) {
-		AppendSljitAggregateUpdateDiagnostic(aggregate_update.aggregate_update,
+		AppendSljitAggregateUpdateDiagnostic(aggregate_update.AggregateUpdate(),
 		                                     "primitive_payload_projection_partially_composed=true");
-		if (aggregate_update.aggregate_update.use_perfect_hash_group_lookup) {
-			AppendSljitAggregateUpdateDiagnostic(aggregate_update.aggregate_update,
+		if (aggregate_update.AggregateUpdate().use_perfect_hash_group_lookup) {
+			AppendSljitAggregateUpdateDiagnostic(aggregate_update.AggregateUpdate(),
 			                                     "grouped_state_lookup=generated-perfect-hash");
 		} else {
-			AppendSljitAggregateUpdateDiagnostic(aggregate_update.aggregate_update,
+			AppendSljitAggregateUpdateDiagnostic(aggregate_update.AggregateUpdate(),
 			                                     "grouped_state_lookup=native-state-address");
 		}
 	}
@@ -109,23 +109,24 @@ bool TryPartiallyFuseNativeProjectionIntoRegularHashAggregateUpdate(const vector
                                                                     SljitNativeRegionOpPlan &projection,
                                                                     SljitNativeRegionOpPlan &aggregate_update,
                                                                     bool render_diagnostics) {
-	if (projection.kind != SljitNativeRegionOpKind::PROJECTION ||
-	    aggregate_update.kind != SljitNativeRegionOpKind::AGGREGATE_UPDATE) {
+	if (projection.Kind() != SljitNativeRegionOpKind::PROJECTION ||
+	    aggregate_update.Kind() != SljitNativeRegionOpKind::AGGREGATE_UPDATE) {
 		return false;
 	}
-	auto &sink = aggregate_update.aggregate_update.sink_info;
-	if (!aggregate_update.aggregate_update.CanInitializePrimitivePayloads()) {
+	auto &sink = aggregate_update.AggregateUpdate().sink_info;
+	if (!aggregate_update.AggregateUpdate().CanInitializePrimitivePayloads()) {
 		return false;
 	}
-	if (sink.kind != ExecutionRegionSinkKind::HASH_AGGREGATE_UPDATE || sink.aggregates.empty() || sink.groups.empty() ||
-	    sink.aggregate_contract.native_grouped_state_contract.status != ExecutionRegionStateContractStatus::READY ||
-	    !sink.aggregate_contract.grouped_state_layout_ready) {
+	if (sink.Kind() != ExecutionRegionSinkKind::HASH_AGGREGATE_UPDATE || sink.aggregates.empty() ||
+	    sink.groups.empty() ||
+	    sink.contract.native_grouped_state_contract.status != ExecutionRegionStateContractStatus::READY ||
+	    !sink.contract.grouped_state_layout_ready) {
 		return false;
 	}
 
 	idx_t group_projection_count = 0;
 	for (auto &group : sink.groups) {
-		if (!group.supported_reference || group.input_index >= projection.projections.size()) {
+		if (!group.supported_reference || group.input_index >= projection.Projections().size()) {
 			return false;
 		}
 		group_projection_count = MaxValue<idx_t>(group_projection_count, group.input_index + 1);
@@ -142,10 +143,10 @@ bool TryPartiallyFuseNativeProjectionIntoRegularHashAggregateUpdate(const vector
 			payloads.push_back(std::move(payload));
 			continue;
 		}
-		if (aggregate.child_count != 1 || aggregate.payload_index >= projection.projections.size()) {
+		if (aggregate.child_count != 1 || aggregate.payload_index >= projection.Projections().size()) {
 			return false;
 		}
-		auto payload = projection.projections[aggregate.payload_index].Copy();
+		auto payload = projection.Projections()[aggregate.payload_index].Copy();
 		if (payload.kind == SljitNativeRegionExpressionKind::REFERENCE) {
 			if (!SljitPrimitiveAggregatePayloadSupported(payload, aggregate, true)) {
 				return false;
@@ -164,7 +165,7 @@ bool TryPartiallyFuseNativeProjectionIntoRegularHashAggregateUpdate(const vector
 	rewritten_projections.reserve(group_projection_count + input_types.size());
 	rewritten_types.reserve(group_projection_count + input_types.size());
 	for (idx_t projection_idx = 0; projection_idx < group_projection_count; projection_idx++) {
-		rewritten_projections.push_back(projection.projections[projection_idx].Copy());
+		rewritten_projections.push_back(projection.Projections()[projection_idx].Copy());
 		rewritten_types.push_back(projection.output_types[projection_idx]);
 	}
 	if (!RewriteSljitDirectPayloadSourcesThroughPartialProjection(input_types, payloads, rewritten_projections,
@@ -181,17 +182,17 @@ bool TryPartiallyFuseNativeProjectionIntoRegularHashAggregateUpdate(const vector
 		return false;
 	}
 
-	projection.projections = std::move(rewritten_projections);
+	projection.Projections() = std::move(rewritten_projections);
 	projection.output_types = std::move(rewritten_types);
-	aggregate_update.aggregate_update.input_types = projection.output_types;
-	aggregate_update.aggregate_update.payloads = std::move(payloads);
-	aggregate_update.aggregate_update.InitializeProjectionComposedPrimitivePayloads();
-	aggregate_update.aggregate_update.use_grouped_state_addresses = true;
-	aggregate_update.aggregate_update.use_perfect_hash_group_lookup = false;
+	aggregate_update.AggregateUpdate().input_types = projection.output_types;
+	aggregate_update.AggregateUpdate().payloads = std::move(payloads);
+	aggregate_update.AggregateUpdate().InitializeProjectionComposedPrimitivePayloads();
+	aggregate_update.AggregateUpdate().use_grouped_state_addresses = true;
+	aggregate_update.AggregateUpdate().use_perfect_hash_group_lookup = false;
 	if (render_diagnostics) {
-		AppendSljitAggregateUpdateDiagnostic(aggregate_update.aggregate_update,
+		AppendSljitAggregateUpdateDiagnostic(aggregate_update.AggregateUpdate(),
 		                                     "primitive_payload_projection_partially_composed=true");
-		AppendSljitAggregateUpdateDiagnostic(aggregate_update.aggregate_update,
+		AppendSljitAggregateUpdateDiagnostic(aggregate_update.AggregateUpdate(),
 		                                     "grouped_state_lookup=native-state-address");
 	}
 	return true;

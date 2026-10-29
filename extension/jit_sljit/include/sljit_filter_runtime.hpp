@@ -307,8 +307,8 @@ static idx_t SljitSelectFilter(SljitExecutableRegionOp &op, DataChunk &input, Se
 	if (count == DConstants::INVALID_INDEX) {
 		count = input.size();
 	}
-	D_ASSERT(op.filter);
-	auto &filter = *op.filter;
+	D_ASSERT(op.Filter());
+	auto &filter = *op.Filter();
 	if (filter.batch_select) {
 		const auto &batch_select = *filter.batch_select;
 		const auto local_source_index = batch_select.source_index;

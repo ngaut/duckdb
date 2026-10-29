@@ -454,9 +454,9 @@ static string BuildMetalProjectionSource(const MetalProjectionStage &projection)
 }
 
 static bool IsMetalAppendSink(const ExecutionRegionSinkInfo &sink) {
-    return (sink.kind == ExecutionRegionSinkKind::MATERIALIZATION ||
-            sink.kind == ExecutionRegionSinkKind::RESULT_COLLECTOR_SINK) &&
-           sink.native_sink_contract.status == ExecutionRegionStateContractStatus::READY;
+    return (sink.Kind() == ExecutionRegionSinkKind::MATERIALIZATION ||
+            sink.Kind() == ExecutionRegionSinkKind::RESULT_COLLECTOR_SINK) &&
+           sink.Native().status == ExecutionRegionStateContractStatus::READY;
 }
 
 static bool BuildMetalProjectionStage(const ExecutionRegionNode &node, const vector<LogicalType> &input_types,
@@ -514,7 +514,7 @@ static string MetalRegionIR(const MetalRegionBackendPlan &plan) {
     string result = "metal_region<projection_expressions=" + std::to_string(plan.projection.expressions.size());
     result += ",input_columns=" + std::to_string(plan.projection.input_types.size());
     result += ",output_columns=" + std::to_string(plan.projection.output_types.size());
-    result += ",sink=" + string(ExecutionRegionSinkKindToString(plan.sink_info.kind));
+    result += ",sink=" + string(ExecutionRegionSinkKindToString(plan.sink_info.Kind()));
     result += ">";
     return result;
 }
@@ -702,7 +702,7 @@ class MetalProjectionKernel : public ExecutionRegionKernel {
     };
 
     bool ShouldBatchSourceChunks() const {
-        return sink_info.kind == ExecutionRegionSinkKind::MATERIALIZATION;
+        return sink_info.Kind() == ExecutionRegionSinkKind::MATERIALIZATION;
     }
 
     //! The projection bound to one pipeline executor: source chunks gather into one Metal dispatch of up to

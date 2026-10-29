@@ -111,8 +111,7 @@ const char *SljitHashJoinProbeOutputModeToString(ExecutionHashJoinProbeOutputMod
 const char *SljitHashJoinComparisonToString(ExecutionRegionComparisonType comparison_type);
 string DescribeNativeRegionExpression(const SljitNativeRegionExpressionPlan &expr);
 string DescribeNativeRegionExpressionList(const vector<SljitNativeRegionExpressionPlan> &expressions);
-string DescribeNativeRegionExpressionSemantic(const SljitNativeRegionExpressionPlan &expr);
-string DescribeNativeRegionExpressionListSemantic(const vector<SljitNativeRegionExpressionPlan> &expressions);
+string BuildSljitExpressionArtifactKey(const SljitNativeRegionExpressionPlan &expr);
 string DescribeSljitHashJoinProbeKeys(const vector<SljitNativeHashJoinProbeKeyPlan> &keys, const char *separator);
 void AppendSljitHashJoinProbeMarkOffsets(string &result, const char *name, const SljitNativeHashJoinProbePlan &probe);
 

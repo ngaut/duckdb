@@ -25,14 +25,14 @@ SljitRegionNodePlan PlanSljitFilterNode(const ExecutionRegionNode &node, bool re
 	}
 
 	SljitNativeRegionOpPlan native_op;
-	native_op.kind = SljitNativeRegionOpKind::FILTER;
+	native_op.SetKind(SljitNativeRegionOpKind::FILTER);
 	native_op.output_types = node.output_types;
 	string error;
-	if (!TryLowerNativeRegionExpression(*node.filter, true, native_op.filter, error, render_diagnostics)) {
+	if (!TryLowerNativeRegionExpression(*node.filter, true, native_op.Filter(), error, render_diagnostics)) {
 		return SljitUnsupportedExpressionBoundaryNode(error);
 	}
 
-	auto reason = "generated typed predicate filter;expr=" + DescribeNativeRegionExpression(native_op.filter);
+	auto reason = "generated typed predicate filter;expr=" + DescribeNativeRegionExpression(native_op.Filter());
 	return SljitNativeNode(std::move(native_op), std::move(reason));
 }
 
@@ -40,7 +40,7 @@ static bool TryPlanDirectSljitProjection(const ExecutionRegionNode &node, SljitN
                                          const vector<LogicalType> &input_types, string &error,
                                          bool render_diagnostics) {
 	native_op = SljitNativeRegionOpPlan();
-	native_op.kind = SljitNativeRegionOpKind::PROJECTION;
+	native_op.SetKind(SljitNativeRegionOpKind::PROJECTION);
 	native_op.input_types = input_types;
 	native_op.output_types = node.output_types;
 	for (auto &expression : node.projections) {
@@ -48,7 +48,7 @@ static bool TryPlanDirectSljitProjection(const ExecutionRegionNode &node, SljitN
 		if (!TryLowerNativeRegionExpression(*expression, false, native_expression, error, render_diagnostics)) {
 			return false;
 		}
-		native_op.projections.push_back(std::move(native_expression));
+		native_op.Projections().push_back(std::move(native_expression));
 	}
 	return true;
 }
@@ -80,10 +80,10 @@ static bool TryPlanExpandedSljitProjection(const ExecutionRegionNode &node, cons
 	}
 
 	SljitNativeRegionOpPlan final_op;
-	final_op.kind = SljitNativeRegionOpKind::PROJECTION;
+	final_op.SetKind(SljitNativeRegionOpKind::PROJECTION);
 	final_op.input_types = graph.current_types;
 	final_op.output_types = node.output_types;
-	final_op.projections = std::move(final_projections);
+	final_op.Projections() = std::move(final_projections);
 	graph.native_ops.push_back(std::move(final_op));
 	native_ops = std::move(graph.native_ops);
 	return true;

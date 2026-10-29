@@ -105,8 +105,8 @@ static vector<idx_t> BuildSljitProjectionOutputDistinctCounts(const SljitNativeR
                                                               const vector<Value> &input_min_values,
                                                               const vector<Value> &input_max_values) {
 	vector<idx_t> result;
-	result.reserve(op.projections.size());
-	for (auto &projection : op.projections) {
+	result.reserve(op.Projections().size());
+	for (auto &projection : op.Projections()) {
 		result.push_back(
 		    SljitExpressionDistinctCount(projection, input_distinct_counts, input_min_values, input_max_values));
 	}
@@ -117,7 +117,7 @@ static vector<idx_t> BuildSljitHashJoinProbeOutputDistinctCounts(const SljitNati
                                                                  const vector<idx_t> &input_distinct_counts) {
 	vector<idx_t> result;
 	result.reserve(op.output_types.size());
-	auto &contract = op.hash_join_probe.operator_info.hash_join_contract;
+	auto &contract = op.HashJoinProbe().operator_info.HashJoin().contract;
 	if (contract.present) {
 		for (auto input_idx : contract.lhs_output_column_indices) {
 			result.push_back(input_idx < input_distinct_counts.size() ? input_distinct_counts[input_idx] : 0);
@@ -133,7 +133,7 @@ static vector<idx_t> BuildSljitHashJoinProbeOutputDistinctCounts(const SljitNati
 }
 
 static bool SljitHashJoinProbeMayDuplicateProbeRows(const SljitNativeRegionOpPlan &op) {
-	auto &contract = op.hash_join_probe.operator_info.hash_join_contract;
+	auto &contract = op.HashJoinProbe().operator_info.HashJoin().contract;
 	if (!contract.present) {
 		return false;
 	}
@@ -162,9 +162,9 @@ bool SljitTryGetHashJoinRHSOutputConditionIndex(const ExecutionRegionHashJoinCon
 }
 
 bool SljitTryGetHashJoinProbeKeyInputIndex(const SljitNativeRegionOpPlan &op, idx_t condition_idx, idx_t &input_idx) {
-	auto &contract = op.hash_join_probe.operator_info.hash_join_contract;
-	if (condition_idx < op.hash_join_probe.keys.size()) {
-		input_idx = op.hash_join_probe.keys[condition_idx].key_input_index;
+	auto &contract = op.HashJoinProbe().operator_info.HashJoin().contract;
+	if (condition_idx < op.HashJoinProbe().keys.size()) {
+		input_idx = op.HashJoinProbe().keys[condition_idx].key_input_index;
 		return true;
 	}
 	if (condition_idx < contract.lhs_probe_column_indices.size()) {
@@ -179,7 +179,7 @@ BuildSljitHashJoinProbeOutputDistinctReserveCounts(const SljitNativeRegionOpPlan
                                                    const vector<idx_t> &input_distinct_reserve_counts,
                                                    const vector<idx_t> &input_distinct_counts) {
 	auto result = BuildSljitHashJoinProbeOutputDistinctCounts(op, input_distinct_reserve_counts);
-	auto &contract = op.hash_join_probe.operator_info.hash_join_contract;
+	auto &contract = op.HashJoinProbe().operator_info.HashJoin().contract;
 	if (!contract.present) {
 		return result;
 	}
@@ -193,7 +193,7 @@ BuildSljitHashJoinProbeOutputDistinctReserveCounts(const SljitNativeRegionOpPlan
 			result[output_idx] = input_idx < input_distinct_counts.size() ? input_distinct_counts[input_idx] : 0;
 		}
 	}
-	if (op.hash_join_probe.output_mode != ExecutionHashJoinProbeOutputMode::MATCHED_PROBE_AND_BUILD) {
+	if (op.HashJoinProbe().output_mode != ExecutionHashJoinProbeOutputMode::MATCHED_PROBE_AND_BUILD) {
 		return result;
 	}
 	const auto rhs_output_offset = contract.lhs_output_column_indices.size();
@@ -234,8 +234,8 @@ static bool SljitExpressionResultNotNull(const SljitNativeRegionExpressionPlan &
 static vector<bool> BuildSljitProjectionOutputNotNull(const SljitNativeRegionOpPlan &op,
                                                       const vector<bool> &input_not_null) {
 	vector<bool> result;
-	result.reserve(op.projections.size());
-	for (auto &projection : op.projections) {
+	result.reserve(op.Projections().size());
+	for (auto &projection : op.Projections()) {
 		result.push_back(SljitExpressionResultNotNull(projection, input_not_null));
 	}
 	return result;
@@ -245,7 +245,7 @@ static vector<bool> BuildSljitHashJoinProbeOutputNotNull(const SljitNativeRegion
                                                          const vector<bool> &input_not_null) {
 	vector<bool> result;
 	result.reserve(op.output_types.size());
-	auto &contract = op.hash_join_probe.operator_info.hash_join_contract;
+	auto &contract = op.HashJoinProbe().operator_info.HashJoin().contract;
 	if (contract.present) {
 		for (auto input_idx : contract.lhs_output_column_indices) {
 			result.push_back(input_idx < input_not_null.size() && input_not_null[input_idx]);
@@ -261,7 +261,7 @@ static vector<bool> BuildSljitHashJoinProbeOutputNotNull(const SljitNativeRegion
 }
 
 vector<bool> SljitBuildExecutableOutputNotNull(const SljitNativeRegionOpPlan &op, const vector<bool> &input_not_null) {
-	switch (op.kind) {
+	switch (op.Kind()) {
 	case SljitNativeRegionOpKind::FILTER:
 		return input_not_null;
 	case SljitNativeRegionOpKind::PROJECTION:
@@ -281,7 +281,7 @@ void SljitUpdateExecutableCurrentDistinctCounts(const SljitNativeRegionOpPlan &o
                                                 vector<idx_t> &current_distinct_counts,
                                                 const vector<Value> &current_min_values,
                                                 const vector<Value> &current_max_values) {
-	switch (op.kind) {
+	switch (op.Kind()) {
 	case SljitNativeRegionOpKind::FILTER:
 		return;
 	case SljitNativeRegionOpKind::PROJECTION:
@@ -302,7 +302,7 @@ void SljitUpdateExecutableCurrentDistinctReserveCounts(const SljitNativeRegionOp
                                                        const vector<idx_t> &current_distinct_counts,
                                                        const vector<Value> &current_min_values,
                                                        const vector<Value> &current_max_values) {
-	switch (op.kind) {
+	switch (op.Kind()) {
 	case SljitNativeRegionOpKind::FILTER:
 		return;
 	case SljitNativeRegionOpKind::PROJECTION:

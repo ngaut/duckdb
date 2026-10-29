@@ -12,8 +12,8 @@
 
 namespace duckdb {
 
-static bool SljitAggregateSinkHasDistinctState(const ExecutionRegionSinkInfo &sink_info) {
-	auto &contract = sink_info.aggregate_contract;
+static bool SljitAggregateSinkHasDistinctState(const ExecutionRegionAggregateSinkInfo &sink_info) {
+	auto &contract = sink_info.contract;
 	if (contract.distinct_aggregate_count != 0 || contract.distinct_table_count != 0 ||
 	    contract.distinct_child_count != 0 || contract.distinct_filter_count != 0) {
 		return true;

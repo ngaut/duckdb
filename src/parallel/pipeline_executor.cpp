@@ -42,6 +42,7 @@ bool PipelineExecutor::TryDebugBlock(int &debug_counter, const InterruptState &i
 
 PipelineExecutor::PipelineExecutor(ClientContext &context_p, Pipeline &pipeline_p, optional_idx reserved_batch_index)
     : pipeline(pipeline_p), thread(context_p), context(context_p, thread, &pipeline_p) {
+	pipeline.PrepareExecutionRegionPlanForExecution();
 	if (pipeline.sink) {
 		local_sink_state = pipeline.sink->GetLocalSinkState(context);
 		required_partition_info = pipeline.sink->RequiredPartitionInfo();
@@ -89,7 +90,6 @@ PipelineExecutor::PipelineExecutor(ClientContext &context_p, Pipeline &pipeline_
 	InitializeChunk(final_chunk);
 	if (pipeline.IsExternalInput()) {
 		// The producer's pushes run this pipeline, and no runner entry precedes them: the chunk step binds here
-		pipeline.PrepareExecutionRegionPlanForExecution();
 		ExecutionRegionPipelineAdapter region_pipeline(*this);
 		CompiledVectorizedRunner::BindPushedInputStep(region_pipeline);
 	}

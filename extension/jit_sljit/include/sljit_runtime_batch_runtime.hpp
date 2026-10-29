@@ -195,7 +195,7 @@ static bool SljitAppendChunkToInitializedBatch(ExecutionRegionRuntime &runtime, 
 		batch.Append(chunk);
 	}
 	if (trace_append) {
-		RecordSljitRegionStageRuntime(runtime, trace_op_idx, trace_op->kind, append_phase, append_stage_start);
+		RecordSljitRegionStageRuntime(runtime, trace_op_idx, trace_op->Kind(), append_phase, append_stage_start);
 	}
 	if (batch.size() == STANDARD_VECTOR_SIZE) {
 		if (flush_batch()) {

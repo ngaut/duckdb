@@ -31,10 +31,10 @@ static bool SljitHashJoinMatchPredicateSupported(ExecutionRegionComparisonType c
 static SljitRegionNodePlan PlanSljitHashJoinProbeOperatorNodeInternal(
     const ExecutionRegionNode &node, const vector<ExecutionRegionHashJoinKeyInput> &probe_keys,
     const vector<LogicalType> &input_types, const vector<bool> &input_not_null, bool render_diagnostics) {
-	if (!node.operator_info) {
+	if (!node.operator_info || node.operator_info->Kind() != ExecutionRegionOperatorContractKind::HASH_JOIN_PROBE) {
 		return SljitRegionBoundaryNode("hash join probe operator is missing typed operator IR");
 	}
-	auto &contract = node.operator_info->hash_join_contract;
+	auto &contract = node.operator_info->HashJoin().contract;
 	if (!contract.present) {
 		return SljitRegionBoundaryNode("hash join probe native lowering requires hash join contract IR");
 	}
@@ -101,31 +101,31 @@ static SljitRegionNodePlan PlanSljitHashJoinProbeOperatorNodeInternal(
 	}
 
 	SljitNativeRegionOpPlan native_op;
-	native_op.kind = SljitNativeRegionOpKind::HASH_JOIN_PROBE;
+	native_op.SetKind(SljitNativeRegionOpKind::HASH_JOIN_PROBE);
 	native_op.operator_index = node.operator_index;
 	native_op.output_types = node.output_types;
-	native_op.hash_join_probe.operator_index = node.operator_index;
-	native_op.hash_join_probe.input_types = input_types;
-	native_op.hash_join_probe.keys = std::move(keys);
-	native_op.hash_join_probe.equality_key_count = contract.equality_condition_count;
-	native_op.hash_join_probe.found_match_offset = contract.tuple_size;
-	native_op.hash_join_probe.pointer_offset = contract.pointer_offset;
-	native_op.hash_join_probe.output_mode = contract.native_probe_output_mode;
-	native_op.hash_join_probe.operator_info = *node.operator_info;
-	native_op.hash_join_probe.operator_info.hash_join_keys = probe_keys;
+	native_op.HashJoinProbe().operator_index = node.operator_index;
+	native_op.HashJoinProbe().input_types = input_types;
+	native_op.HashJoinProbe().keys = std::move(keys);
+	native_op.HashJoinProbe().equality_key_count = contract.equality_condition_count;
+	native_op.HashJoinProbe().found_match_offset = contract.tuple_size;
+	native_op.HashJoinProbe().pointer_offset = contract.pointer_offset;
+	native_op.HashJoinProbe().output_mode = contract.native_probe_output_mode;
+	native_op.HashJoinProbe().operator_info = *node.operator_info;
+	native_op.HashJoinProbe().operator_info.HashJoin().keys = probe_keys;
 	if (contract.perfect_hash_probe_shape_ready) {
-		if (native_op.hash_join_probe.keys.size() != 1 || native_op.hash_join_probe.equality_key_count != 1) {
+		if (native_op.HashJoinProbe().keys.size() != 1 || native_op.HashJoinProbe().equality_key_count != 1) {
 			return SljitRegionBoundaryNode("perfect hash join probe native lowering requires one equality key");
 		}
-		auto perfect_key_kind = native_op.hash_join_probe.keys[0].key_kind;
+		auto perfect_key_kind = native_op.HashJoinProbe().keys[0].key_kind;
 		if (perfect_key_kind == SljitNativeHashJoinKeyKind::STRING) {
 			return SljitRegionBoundaryNode("perfect hash join probe native lowering requires an integer key");
 		}
-		if (native_op.hash_join_probe.output_mode != ExecutionHashJoinProbeOutputMode::MATCHED_PROBE_AND_BUILD &&
-		    native_op.hash_join_probe.output_mode != ExecutionHashJoinProbeOutputMode::MATCHED_PROBE_ONLY) {
+		if (native_op.HashJoinProbe().output_mode != ExecutionHashJoinProbeOutputMode::MATCHED_PROBE_AND_BUILD &&
+		    native_op.HashJoinProbe().output_mode != ExecutionHashJoinProbeOutputMode::MATCHED_PROBE_ONLY) {
 			return SljitRegionBoundaryNode("perfect hash join probe native lowering requires inner output mode");
 		}
-		native_op.hash_join_probe.perfect_hash_probe = true;
+		native_op.HashJoinProbe().perfect_hash_probe = true;
 	}
 	if (contract.residual_predicate || contract.residual_info) {
 		// A generated mark probe decides each row (or build row) at its first key match, which a residual predicate
@@ -146,34 +146,34 @@ static SljitRegionNodePlan PlanSljitHashJoinProbeOperatorNodeInternal(
 			return SljitRegionBoundaryNode("hash join probe native lowering has unsupported residual predicate;" +
 			                               residual_error);
 		}
-		native_op.hash_join_probe.residual_predicate = true;
-		native_op.hash_join_probe.residual_filter = std::move(residual_filter);
-		native_op.hash_join_probe.residual_source_types.resize(contract.residual_sources.size());
-		native_op.hash_join_probe.residual_source_not_null.resize(contract.residual_sources.size(), false);
+		native_op.HashJoinProbe().residual_predicate = true;
+		native_op.HashJoinProbe().residual_filter = std::move(residual_filter);
+		native_op.HashJoinProbe().residual_source_types.resize(contract.residual_sources.size());
+		native_op.HashJoinProbe().residual_source_not_null.resize(contract.residual_sources.size(), false);
 		for (auto &source : contract.residual_sources) {
-			if (source.source_index >= native_op.hash_join_probe.residual_source_types.size()) {
+			if (source.source_index >= native_op.HashJoinProbe().residual_source_types.size()) {
 				return SljitRegionBoundaryNode("hash join probe native lowering residual source index is out of range");
 			}
 			if (source.kind == ExecutionHashJoinResidualSourceKind::PROBE && source.input_index >= input_types.size()) {
 				return SljitRegionBoundaryNode(
 				    "hash join probe native lowering residual probe source is outside operator input");
 			}
-			native_op.hash_join_probe.residual_source_types[source.source_index] = source.type;
-			native_op.hash_join_probe.residual_source_not_null[source.source_index] = source.not_null;
+			native_op.HashJoinProbe().residual_source_types[source.source_index] = source.type;
+			native_op.HashJoinProbe().residual_source_not_null[source.source_index] = source.not_null;
 		}
 	}
 	auto mark_build_match = ExecutionRegionJoinTypePropagatesBuildSide(contract.join_type);
-	native_op.hash_join_probe.mark_build_match = mark_build_match && !native_op.hash_join_probe.residual_predicate;
-	native_op.hash_join_probe.mark_build_match_after_residual =
-	    mark_build_match && native_op.hash_join_probe.residual_predicate;
+	native_op.HashJoinProbe().mark_build_match = mark_build_match && !native_op.HashJoinProbe().residual_predicate;
+	native_op.HashJoinProbe().mark_build_match_after_residual =
+	    mark_build_match && native_op.HashJoinProbe().residual_predicate;
 
 	string reason = "generated native hash join probe";
 	if (render_diagnostics) {
 		reason += ";requires=native_operator_runtime_binding;requires=native_hash_join_table_layout;"
 		          "native-hash-join-probe-executable=ready;native_probe_shape_ready=true";
-		reason += ";native_probe_key0_input=" + std::to_string(native_op.hash_join_probe.keys[0].key_input_index);
+		reason += ";native_probe_key0_input=" + std::to_string(native_op.HashJoinProbe().keys[0].key_input_index);
 		reason += ";native_probe_output_mode=" +
-		          string(SljitHashJoinProbeOutputModeToString(native_op.hash_join_probe.output_mode));
+		          string(SljitHashJoinProbeOutputModeToString(native_op.HashJoinProbe().output_mode));
 	}
 	AppendSljitReasonPart(reason, node.operator_info->ir, render_diagnostics);
 	return SljitNativeNode(std::move(native_op), std::move(reason));
@@ -213,10 +213,10 @@ static bool TryPlanSljitHashJoinProbeKeyProjection(const ExecutionRegionNode &no
 SljitRegionNodePlan PlanSljitHashJoinProbeOperatorNode(const ExecutionRegionNode &node,
                                                        const vector<LogicalType> &input_types,
                                                        const vector<bool> &input_not_null, bool render_diagnostics) {
-	if (!node.operator_info) {
+	if (!node.operator_info || node.operator_info->Kind() != ExecutionRegionOperatorContractKind::HASH_JOIN_PROBE) {
 		return SljitRegionBoundaryNode("hash join probe operator is missing typed operator IR");
 	}
-	auto probe_keys = node.operator_info->hash_join_keys;
+	auto probe_keys = node.operator_info->HashJoin().keys;
 	auto probe_input_types = input_types;
 	auto probe_input_not_null = input_not_null;
 	SljitRegionNodePlan key_projection;
@@ -246,8 +246,8 @@ SljitRegionNodePlan PlanSljitHashJoinProbeOperatorNode(const ExecutionRegionNode
 		}
 		return result;
 	}
-	const bool contract_ready = node.operator_info && node.operator_info->hash_join_contract.present &&
-	                            node.operator_info->hash_join_contract.native_probe_contract.status ==
+	const bool contract_ready = node.operator_info && node.operator_info->HashJoin().contract.present &&
+	                            node.operator_info->HashJoin().contract.native_probe_contract.status ==
 	                                ExecutionRegionStateContractStatus::READY;
 	result.fusion_blocker = contract_ready
 	                            ? "operator-contract-blocker:hash-join-probe-native-lowering-missing;" + result.reason

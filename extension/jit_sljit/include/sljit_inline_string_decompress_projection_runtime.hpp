@@ -67,12 +67,12 @@ static bool SljitTryFastDecodeInlineCompressedString16(Vector &source, idx_t cou
 
 static bool SljitTryFastInlineStringDecompressProjection(SljitExecutableRegionOp &op, DataChunk &input,
                                                          DataChunk &output, idx_t count) {
-	if (op.kind != SljitNativeRegionOpKind::PROJECTION || op.projections.size() != output.ColumnCount()) {
+	if (op.Kind() != SljitNativeRegionOpKind::PROJECTION || op.Projections().size() != output.ColumnCount()) {
 		return false;
 	}
 	bool has_fast_decompress = false;
-	for (idx_t projection_idx = 0; projection_idx < op.projections.size(); projection_idx++) {
-		auto &plan = op.projections[projection_idx].plan;
+	for (idx_t projection_idx = 0; projection_idx < op.Projections().size(); projection_idx++) {
+		auto &plan = op.Projections()[projection_idx].plan;
 		if (plan.kind == SljitNativeRegionExpressionKind::REFERENCE) {
 			if (plan.source_index >= input.ColumnCount() ||
 			    plan.return_type != input.data[plan.source_index].GetType() ||
@@ -94,8 +94,8 @@ static bool SljitTryFastInlineStringDecompressProjection(SljitExecutableRegionOp
 		return false;
 	}
 
-	for (idx_t projection_idx = 0; projection_idx < op.projections.size(); projection_idx++) {
-		auto &plan = op.projections[projection_idx].plan;
+	for (idx_t projection_idx = 0; projection_idx < op.Projections().size(); projection_idx++) {
+		auto &plan = op.Projections()[projection_idx].plan;
 		if (plan.kind == SljitNativeRegionExpressionKind::REFERENCE) {
 			output.data[projection_idx].Reference(input.data[plan.source_index]);
 			continue;

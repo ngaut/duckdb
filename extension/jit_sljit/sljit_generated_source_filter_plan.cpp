@@ -367,11 +367,11 @@ static bool TryPlanSljitGeneratedSourceFilter(const ExecutionRegionNode &node,
 		expression.ir = "duckdb.expr typed-vector-ir;" + DescribeExecutionExpressionIR(*expression.root);
 	}
 	native_op = SljitNativeRegionOpPlan();
-	native_op.kind = SljitNativeRegionOpKind::FILTER;
+	native_op.SetKind(SljitNativeRegionOpKind::FILTER);
 	native_op.operator_index = node.operator_index;
 	native_op.input_types = source_input_types;
 	native_op.output_types = source_input_types;
-	if (!TryLowerNativeRegionExpression(expression, true, native_op.filter, error, render_diagnostics)) {
+	if (!TryLowerNativeRegionExpression(expression, true, native_op.Filter(), error, render_diagnostics)) {
 		return false;
 	}
 	return true;
@@ -402,18 +402,18 @@ static bool TryPlanSljitSourceProjectionRepair(const ExecutionRegionNode &node,
 		return false;
 	}
 	native_op = SljitNativeRegionOpPlan();
-	native_op.kind = SljitNativeRegionOpKind::PROJECTION;
+	native_op.SetKind(SljitNativeRegionOpKind::PROJECTION);
 	native_op.operator_index = node.operator_index;
 	native_op.input_types = source_input_types;
 	native_op.output_types = node.output_types;
-	native_op.projections.reserve(projection_map.size());
+	native_op.Projections().reserve(projection_map.size());
 	for (idx_t output_idx = 0; output_idx < projection_map.size(); output_idx++) {
 		auto input_idx = projection_map[output_idx];
 		if (input_idx >= source_input_types.size() || source_input_types[input_idx] != node.output_types[output_idx]) {
 			error = "source projection repair map is incompatible with source input layout";
 			return false;
 		}
-		native_op.projections.push_back(
+		native_op.Projections().push_back(
 		    SljitNativeReferenceExpression(input_idx, node.output_types[output_idx], string(), true));
 	}
 	return true;

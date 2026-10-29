@@ -39,11 +39,11 @@ static bool SljitDirectProjectionBatchSupportsType(const LogicalType &type) {
 
 static bool SljitSelectedProjectionHasGeneratedExpression(const SljitExecutableRegionOp &projection_op,
                                                           const vector<uint8_t> &skip_projection) {
-	for (idx_t projection_idx = 0; projection_idx < projection_op.projections.size(); projection_idx++) {
+	for (idx_t projection_idx = 0; projection_idx < projection_op.Projections().size(); projection_idx++) {
 		if (projection_idx < skip_projection.size() && skip_projection[projection_idx]) {
 			continue;
 		}
-		if (projection_op.projections[projection_idx].plan.kind != SljitNativeRegionExpressionKind::REFERENCE) {
+		if (projection_op.Projections()[projection_idx].plan.kind != SljitNativeRegionExpressionKind::REFERENCE) {
 			return true;
 		}
 	}
@@ -54,7 +54,7 @@ static bool SljitPrepareDirectProjectionBatchTargets(
     DataChunk &batch, SljitExecutableRegionOp &projection_op, optional_ptr<const vector<idx_t>> output_to_projection,
     DirectAppendSlice &slice, vector<uint8_t> &skip_projection, vector<idx_t> &projection_to_output,
     optional_ptr<const vector<uint8_t>> initial_skip_projection = nullptr) {
-	if (projection_op.kind != SljitNativeRegionOpKind::PROJECTION || projection_op.projections.empty()) {
+	if (projection_op.Kind() != SljitNativeRegionOpKind::PROJECTION || projection_op.Projections().empty()) {
 		return false;
 	}
 	const auto current_size = batch.size();
@@ -63,14 +63,14 @@ static bool SljitPrepareDirectProjectionBatchTargets(
 		return false;
 	}
 
-	const auto output_count = output_to_projection ? output_to_projection->size() : projection_op.projections.size();
+	const auto output_count = output_to_projection ? output_to_projection->size() : projection_op.Projections().size();
 	if (batch.ColumnCount() != output_count) {
 		return false;
 	}
-	slice.targets.assign(projection_op.projections.size(), nullptr);
-	slice.sources.assign(projection_op.projections.size(), DirectAppendColumnSource());
-	skip_projection.assign(projection_op.projections.size(), output_to_projection ? 1 : 0);
-	projection_to_output.assign(projection_op.projections.size(), DConstants::INVALID_INDEX);
+	slice.targets.assign(projection_op.Projections().size(), nullptr);
+	slice.sources.assign(projection_op.Projections().size(), DirectAppendColumnSource());
+	skip_projection.assign(projection_op.Projections().size(), output_to_projection ? 1 : 0);
+	projection_to_output.assign(projection_op.Projections().size(), DConstants::INVALID_INDEX);
 	if (initial_skip_projection) {
 		if (initial_skip_projection->size() > skip_projection.size()) {
 			return false;
@@ -84,14 +84,14 @@ static bool SljitPrepareDirectProjectionBatchTargets(
 
 	for (idx_t output_idx = 0; output_idx < output_count; output_idx++) {
 		const auto projection_idx = output_to_projection ? (*output_to_projection)[output_idx] : output_idx;
-		if (projection_idx >= projection_op.projections.size() || slice.targets[projection_idx]) {
+		if (projection_idx >= projection_op.Projections().size() || slice.targets[projection_idx]) {
 			return false;
 		}
 		if (projection_idx < skip_projection.size() && skip_projection[projection_idx]) {
 			continue;
 		}
 		auto &target = batch.data[output_idx];
-		auto &projection = projection_op.projections[projection_idx].plan;
+		auto &projection = projection_op.Projections()[projection_idx].plan;
 		if (target.GetVectorType() != VectorType::FLAT_VECTOR || target.GetType() != projection.return_type ||
 		    !DirectAppendSupportsFixedSizeType(target.GetType()) || FlatVector::GetCapacity(target) < target_size) {
 			return false;
@@ -112,7 +112,7 @@ static void SljitRecordDirectProjectionBatchMaterialization(ExecutionRegionRunti
                                                             bool remapped_projection, idx_t count,
                                                             std::chrono::steady_clock::time_point stage_start) {
 	RecordSljitRegionStageRuntime(
-	    runtime, projection_idx, projection_op.kind,
+	    runtime, projection_idx, projection_op.Kind(),
 	    remapped_projection ? "post_join_remap_batch_projection" : "post_join_batch_projection", stage_start);
 }
 
@@ -122,7 +122,7 @@ static void SljitHashDirectProjectionBatch(ExecutionRegionRuntime &runtime, idx_
 	auto hash_start = SljitRegionStageStart(runtime);
 	batch.Hash(hashes);
 	RecordSljitRegionStageRuntime(
-	    runtime, projection_idx, projection_op.kind,
+	    runtime, projection_idx, projection_op.Kind(),
 	    remapped_projection ? "post_join_remap_batch_projection_hash" : "post_join_batch_projection_hash", hash_start);
 }
 
@@ -157,10 +157,10 @@ static void SljitFinishDirectProjectionBatchTargets(DataChunk &batch, idx_t targ
 
 static bool SljitFlatFusedFixedProjectionTargetsAreBound(SljitExecutableRegionOp &projection_op,
                                                          DirectAppendSlice &slice) {
-	if (slice.targets.size() != projection_op.projections.size()) {
+	if (slice.targets.size() != projection_op.Projections().size()) {
 		return false;
 	}
-	for (auto &direct_plan : projection_op.flat_fused_fixed_projection_plans) {
+	for (auto &direct_plan : projection_op.FlatFusedProjectionPlans()) {
 		for (auto projection_idx : direct_plan.projection_indices) {
 			if (projection_idx >= slice.targets.size() || !slice.targets[projection_idx]) {
 				return false;
