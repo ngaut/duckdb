@@ -1,8 +1,9 @@
 # name: test/sql/jit/test_jit_join_shape_sweep.test_slow
 # description: Plain join, DISTINCT and GROUP BY shapes over TPC-H SF1 at the default cost model: compiled results
+# group: [jit]
+
 #              match jit_policy='off'. TPC-H's own queries never reached the elided pre-join projection path that seven
 #              of these crashed on
-# group: [jit]
 
 require tpch
 

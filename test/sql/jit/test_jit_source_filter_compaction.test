@@ -1,8 +1,9 @@
 # name: test/sql/jit/test_jit_source_filter_compaction.test
 # description: A region source copies the rows a scan filter keeps out of each fixed-width filtered column into flat
+# group: [jit]
+
 #              vectors, while variable-width filtered columns stay sliced: join filters on keys of every fixed width,
 #              IN filters, deleted rows, string filters, uncompressed and compressed storage match the vectorized plan
-# group: [jit]
 
 load {TEST_DIR}/jit_source_filter_compaction.db
 

@@ -1,7 +1,8 @@
 # name: test/sql/jit/test_jit_native_tail_composed_aggregate.test_slow
 # description: An aggregate whose payloads absorbed the projection ahead of it reads that projection's input; a native
-#              tail, which hands DuckDB's aggregate sink the layout the ops before it produce, cannot run it
 # group: [jit]
+
+#              tail, which hands DuckDB's aggregate sink the layout the ops before it produce, cannot run it
 
 require tpch
 
@@ -35,20 +36,20 @@ SET jit_cbo_startup_margin_basis_points=0
 foreach threads 1 4
 
 statement ok
-SET threads=${threads}
+SET threads={threads}
 
 foreach policy off auto
 
 statement ok
-SET jit_policy='${policy}'
+SET jit_policy='{policy}'
 
 # NOT IN plans a MARK join, which the native tail runs; the projection computing the payload is absorbed by the aggregate
-query I nosort not_in_payload_expression_${threads}
+query I nosort not_in_payload_expression_{threads}
 SELECT sum((p_size * 3) % 1000) FROM part
 WHERE p_brand = 'Brand#24' AND p_partkey NOT IN (SELECT o_custkey FROM orders WHERE o_totalprice < 2000)
 ----
 
-query III nosort not_in_grouped_${threads}
+query III nosort not_in_grouped_{threads}
 SELECT count(*), sum(s), sum(n) FROM (
     SELECT p_retailprice + 1, sum((p_size * 3) % 1000) AS s, count(*) AS n FROM part
     WHERE p_brand = 'Brand#24' AND p_partkey NOT IN (SELECT o_custkey FROM orders WHERE o_totalprice < 2000)

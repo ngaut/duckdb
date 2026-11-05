@@ -6,7 +6,7 @@
 # the rows that pass, so a checkpointed table keeps the filter in the scan. An uncompressed in-memory table, a source
 # that also filters on a number, and a source whose dynamic join filter discards rows keep generated filters.
 
-load __TEST_DIR__/jit_string_filter_storage.db
+load {TEST_DIR}/jit_string_filter_storage.db
 
 statement ok
 LOAD jit_sljit

@@ -52,12 +52,12 @@ FROM range(100000) t(i)
 foreach threads 1 4
 
 statement ok
-SET threads=${threads}
+SET threads={threads}
 
 foreach policy off auto
 
 statement ok
-SET jit_policy='${policy}'
+SET jit_policy='{policy}'
 
 statement error
 SELECT sum(a * 2) FROM ov

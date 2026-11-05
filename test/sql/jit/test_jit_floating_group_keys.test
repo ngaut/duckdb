@@ -1,9 +1,10 @@
 # name: test/sql/jit/test_jit_floating_group_keys.test
 # description: Floating-point group keys are equal by value, not by bits: -0.0 equals 0.0 and every NaN equals every
+# group: [jit]
+
 #              other. A compiled region hands them to core's grouped-state lookups like any other key, and core hashes
 #              and matches them with DuckDB's hash and equality instead of declining them or comparing them with C++'s
 #              == (either failed the query with an internal error)
-# group: [jit]
 
 require tpch
 

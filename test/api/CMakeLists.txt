@@ -120,7 +120,8 @@ if(DUCKDB_EXTENSION_TPCDS_SHOULD_LINK)
 endif()
 
 add_library(test_api OBJECT ${TEST_API_OBJECTS})
-target_include_directories(test_api PRIVATE ../../third_party/sljit/sljit_src ../../extension/jit_sljit/include)
+target_include_directories(test_api PRIVATE ../../third_party/sljit/sljit_src
+                                            ../../extension/jit_sljit/include)
 set(UNITTEST_OBJECT_FILES
     ${UNITTEST_OBJECT_FILES} $<TARGET_OBJECTS:test_api>
     PARENT_SCOPE)

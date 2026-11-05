@@ -1,9 +1,10 @@
 # name: test/sql/jit/test_jit_source_contract_batches.test
 # description: A region source fills each chunk with the few rows a storage vector yields (after a selective join
+# group: [jit]
+
 #              filter or deletions) from many vectors. A chunk never spans two scan assignments and carries the batch
 #              index its rows were scanned under, so insertion order holds across row groups, transaction-local rows
 #              and deleted rows; vectors with long or compressed strings pass through uncopied
-# group: [jit]
 
 load {TEST_DIR}/jit_source_contract_batches.db
 

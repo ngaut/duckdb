@@ -46,47 +46,47 @@ foreach policy off auto
 statement ok
 SET jit_policy='{policy}'
 
-query IIIIII nosort scalar_slots_${threads}
+query IIIIII nosort scalar_slots_{threads}
 SELECT sum(c), count(*), sum(a), sum(b + 7), sum(a - b), count(b) FROM inputs
 ----
 
-query RRRR nosort double_slots_${threads}
+query RRRR nosort double_slots_{threads}
 SELECT sum(e), sum(d + 7), sum(e - d), sum(d * d) FROM inputs WHERE a > 2
 ----
 
-query IIIII nosort combined_slots_${threads}
+query IIIII nosort combined_slots_{threads}
 SELECT sum(c), sum(a * b + a), sum(CASE WHEN b > 50 THEN c ELSE a END), sum(b), count(*) FROM inputs WHERE a > 2
 ----
 
-query IIIIII rowsort perfect_slots_${threads}
+query IIIIII rowsort perfect_slots_{threads}
 SELECT g, sum(c), sum(a), sum(b), count(b), count(*) FROM inputs GROUP BY g
 ----
 
-query IIIII rowsort perfect_combined_slots_${threads}
+query IIIII rowsort perfect_combined_slots_{threads}
 SELECT g, sum(c), sum(a * b + a), sum(b), count(*) FROM inputs WHERE a > 2 GROUP BY g
 ----
 
-query IIIIII rowsort sparse_slots_${threads}
+query IIIIII rowsort sparse_slots_{threads}
 SELECT id % 30001, sum(c), sum(a), sum(b), count(b), count(*) FROM inputs GROUP BY id % 30001
 ----
 
-query IIIII rowsort sparse_combined_slots_${threads}
+query IIIII rowsort sparse_combined_slots_{threads}
 SELECT id % 30001, sum(c), sum(a * b + a), sum(b), count(*) FROM inputs WHERE a > 2 GROUP BY id % 30001
 ----
 
-query IIIIII nosort join_scalar_slots_${threads}
+query IIIIII nosort join_scalar_slots_{threads}
 SELECT sum(i.c), sum(d.value), sum(i.a), sum(i.b + 7), count(i.b), count(*) FROM inputs i JOIN dimension d USING (id)
 ----
 
-query IIIII nosort join_combined_slots_${threads}
+query IIIII nosort join_combined_slots_{threads}
 SELECT sum(i.c), sum(i.a * d.value + i.b), sum(i.b), sum(d.value), count(*) FROM inputs i JOIN dimension d USING (id) WHERE i.a > 2
 ----
 
-query IIIII rowsort join_grouped_slots_${threads}
+query IIIII rowsort join_grouped_slots_{threads}
 SELECT i.g, sum(i.c), sum(d.value), sum(i.b), count(*) FROM inputs i JOIN dimension d USING (id) GROUP BY i.g
 ----
 
-query IIII nosort empty_slots_${threads}
+query IIII nosort empty_slots_{threads}
 SELECT sum(c), sum(a - b), count(b), count(*) FROM inputs WHERE a < 0
 ----
 

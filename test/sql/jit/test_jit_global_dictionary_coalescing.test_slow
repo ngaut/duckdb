@@ -1,8 +1,9 @@
 # name: test/sql/jit/test_jit_global_dictionary_coalescing.test_slow
 # description: A compiled step coalesces small chunks before its sink; chunks whose columns carry a global dictionary
+# group: [jit]
+
 #              reach the sink as they are, so a downstream caching operator that accumulated the dictionary's indices
 #              never sees that column change representation (TPC-H SF1 with NULLs, a CTE read twice)
-# group: [jit]
 
 require tpch
 
@@ -27,14 +28,14 @@ CREATE OR REPLACE TABLE partsupp AS SELECT CASE WHEN hash(rowid, 0) % 10 = 0 THE
 foreach threads 1 4
 
 statement ok
-SET threads=${threads}
+SET threads={threads}
 
 foreach policy off auto
 
 statement ok
-SET jit_policy='${policy}'
+SET jit_policy='{policy}'
 
-query II nosort cte_read_twice_${threads}
+query II nosort cte_read_twice_{threads}
 WITH c(c0, c1) AS MATERIALIZED (SELECT t1.p_container, t2.l_receiptdate FROM part t1 JOIN lineitem t2 ON t1.p_partkey = t2.l_partkey JOIN orders t3 ON t2.l_orderkey = t3.o_orderkey JOIN partsupp t4 ON t2.l_partkey = t4.ps_partkey AND t2.l_suppkey = t4.ps_suppkey WHERE t2.l_shipdate < DATE '1995-01-06' AND t2.l_suppkey < 84000 AND t2.l_partkey % 8 = 1) SELECT count(*) AS n, sum(hash(f0, f1)) AS h FROM (SELECT c0, c1 FROM c UNION ALL SELECT c0, c1 FROM c WHERE c0 IS NOT NULL) AS q(f0, f1)
 ----
 

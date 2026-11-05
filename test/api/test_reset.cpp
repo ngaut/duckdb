@@ -210,7 +210,7 @@ bool OptionIsExcludedFromTest(const string &name) {
 	    "force_variant_shredding",
 	    "index_scan_max_count",
 	    "index_scan_percentage",
-	    "jit_backend", // valid values depend on registered JIT backends
+	    "jit_backend",        // valid values depend on registered JIT backends
 	    "lock_configuration", // cant change this while db is running
 	    "log_query_path",
 	    "max_execution_time",

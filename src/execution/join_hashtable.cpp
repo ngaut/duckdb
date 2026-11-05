@@ -1916,27 +1916,23 @@ bool JoinHashTable::TryProbeInt64PairNoChain(ScanStructure &scan_structure, Data
 	idx_t match_count;
 	if (key0_physical_type == PhysicalType::INT64) {
 		if (key1_physical_type == PhysicalType::INT64) {
-			match_count =
-			    ProbeInt64PairNoChainLoop<int64_t, int64_t>(key0_format, key1_format, entries, bitmask, bucket_shift,
-			                                                key0_offset, key1_offset, use_salt, scan_structure.count,
-			                                                consumer);
+			match_count = ProbeInt64PairNoChainLoop<int64_t, int64_t>(key0_format, key1_format, entries, bitmask,
+			                                                          bucket_shift, key0_offset, key1_offset, use_salt,
+			                                                          scan_structure.count, consumer);
 		} else {
-			match_count =
-			    ProbeInt64PairNoChainLoop<int64_t, uint64_t>(key0_format, key1_format, entries, bitmask, bucket_shift,
-			                                                 key0_offset, key1_offset, use_salt, scan_structure.count,
-			                                                 consumer);
+			match_count = ProbeInt64PairNoChainLoop<int64_t, uint64_t>(key0_format, key1_format, entries, bitmask,
+			                                                           bucket_shift, key0_offset, key1_offset, use_salt,
+			                                                           scan_structure.count, consumer);
 		}
 	} else {
 		if (key1_physical_type == PhysicalType::INT64) {
-			match_count =
-			    ProbeInt64PairNoChainLoop<uint64_t, int64_t>(key0_format, key1_format, entries, bitmask, bucket_shift,
-			                                                 key0_offset, key1_offset, use_salt, scan_structure.count,
-			                                                 consumer);
+			match_count = ProbeInt64PairNoChainLoop<uint64_t, int64_t>(key0_format, key1_format, entries, bitmask,
+			                                                           bucket_shift, key0_offset, key1_offset, use_salt,
+			                                                           scan_structure.count, consumer);
 		} else {
-			match_count =
-			    ProbeInt64PairNoChainLoop<uint64_t, uint64_t>(key0_format, key1_format, entries, bitmask, bucket_shift,
-			                                                  key0_offset, key1_offset, use_salt, scan_structure.count,
-			                                                  consumer);
+			match_count = ProbeInt64PairNoChainLoop<uint64_t, uint64_t>(key0_format, key1_format, entries, bitmask,
+			                                                            bucket_shift, key0_offset, key1_offset,
+			                                                            use_salt, scan_structure.count, consumer);
 		}
 	}
 	scan_structure.count = match_count;

@@ -1,12 +1,13 @@
 # name: test/sql/jit/test_jit_elided_pre_join_projection_output.test_slow
 # description: A probe that runs on the source of an elided pre-join projection (struct fields, a key cast to
+# group: [jit]
+
 #              INTEGER) and whose output a fallback materializes: the fallback reads the projection's output, not the
 #              source chunk the probe ran on (TPC-H Q17 over struct views)
-# group: [jit]
 
 require tpch
 
-load __TEST_DIR__/jit_elided_pre_join_projection_output.db
+load {TEST_DIR}/jit_elided_pre_join_projection_output.db
 
 statement ok
 LOAD jit_sljit

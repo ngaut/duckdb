@@ -13,11 +13,9 @@ namespace duckdb {
 
 //! Leaves the expression value in R2. Returns whether the value can be NULL: R3 then holds its validity, and the
 //! caller branches on it once the registers the evaluation borrows (S4 holds the source selections) are restored.
-static bool
-EmitSljitPerfectHashExpressionTreeValue(const SljitPerfectHashFusedUpdateEmitContext &context,
-                                        const ExecutionExpressionIR &expression, bool fast_path, bool all_valid,
-                                        bool no_source_selection,
-                                        const vector<SljitTypedExpressionTreeDataPointerHoist> *data_hoists) {
+static bool EmitSljitPerfectHashExpressionTreeValue(
+    const SljitPerfectHashFusedUpdateEmitContext &context, const ExecutionExpressionIR &expression, bool fast_path,
+    bool all_valid, bool no_source_selection, const vector<SljitTypedExpressionTreeDataPointerHoist> *data_hoists) {
 	auto compiler = context.compiler;
 	if (fast_path) {
 		idx_t spill_index = 0;
