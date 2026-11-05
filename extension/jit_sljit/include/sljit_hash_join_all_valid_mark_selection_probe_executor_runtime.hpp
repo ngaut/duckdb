@@ -20,6 +20,7 @@ static void ExecuteAllValidHashJoinChainMarkSelectionProbe(SljitNativeRegularHas
 	const auto key_sel = SELECTED ? input.source_sel[0] : nullptr;
 	const auto entries = input.entries;
 	const auto bitmask = input.bitmask;
+	const auto bucket_shift = input.bucket_shift;
 	const auto count = input.count;
 	const auto prefetch_offset = matcher.PrefetchOffset();
 	const SljitHashJoinEntryDecoder entry_decoder(input);
@@ -28,7 +29,7 @@ static void ExecuteAllValidHashJoinChainMarkSelectionProbe(SljitNativeRegularHas
 		const auto source_idx = SELECTED ? key_sel[row_idx] : UnsafeNumericCast<sel_t>(row_idx);
 		const Row key_row = matcher.Load(source_idx);
 		const auto hash = matcher.BuildHash(key_row);
-		const auto ht_offset = UnsafeNumericCast<idx_t>(hash & bitmask);
+		const auto ht_offset = UnsafeNumericCast<idx_t>((hash >> bucket_shift) & bitmask);
 		auto row_location = SljitHashJoinFindFirstChainPointer<USE_SALT, HAS_BLOOM>(
 		    input, entry_decoder, entries, hash, ht_offset, prefetch_offset,
 		    [&](data_ptr_t candidate) { return matcher.MatchesFirst(key_row, candidate); });
@@ -95,6 +96,7 @@ static void ExecuteAllValidHashJoinChainMarkSelectionExistenceProbe(SljitNativeR
 	const auto key_sel = SELECTED ? input.source_sel[0] : nullptr;
 	const auto entries = input.entries;
 	const auto bitmask = input.bitmask;
+	const auto bucket_shift = input.bucket_shift;
 	const auto count = input.count;
 	const auto prefetch_offset = matcher.PrefetchOffset();
 	const SljitHashJoinEntryDecoder entry_decoder(input);
@@ -103,7 +105,7 @@ static void ExecuteAllValidHashJoinChainMarkSelectionExistenceProbe(SljitNativeR
 		const auto source_idx = SELECTED ? key_sel[row_idx] : UnsafeNumericCast<sel_t>(row_idx);
 		const Row key_row = matcher.Load(source_idx);
 		const auto hash = matcher.BuildHash(key_row);
-		const auto ht_offset = UnsafeNumericCast<idx_t>(hash & bitmask);
+		const auto ht_offset = UnsafeNumericCast<idx_t>((hash >> bucket_shift) & bitmask);
 		auto row_location = SljitHashJoinFindFirstChainPointer<USE_SALT, HAS_BLOOM>(
 		    input, entry_decoder, entries, hash, ht_offset, prefetch_offset,
 		    [&](data_ptr_t candidate) { return matcher.MatchesFirst(key_row, candidate); });
@@ -142,6 +144,7 @@ static void ExecuteAllValidHashJoinNoChainMarkSelectionProbe(SljitNativeRegularH
 	const uint64_t *__restrict entries = input.entries;
 	const sel_t *__restrict key_sel = SELECTED ? input.source_sel[0] : nullptr;
 	const auto bitmask = input.bitmask;
+	const auto bucket_shift = input.bucket_shift;
 	const auto count = input.count;
 	const SljitHashJoinEntryDecoder entry_decoder(input);
 
@@ -149,7 +152,7 @@ static void ExecuteAllValidHashJoinNoChainMarkSelectionProbe(SljitNativeRegularH
 		const auto source_idx = SELECTED ? key_sel[row_idx] : UnsafeNumericCast<sel_t>(row_idx);
 		const Row key_row = matcher.Load(source_idx);
 		const auto hash = matcher.BuildHash(key_row);
-		auto ht_offset = UnsafeNumericCast<idx_t>(hash & bitmask);
+		auto ht_offset = UnsafeNumericCast<idx_t>((hash >> bucket_shift) & bitmask);
 		bool matched = false;
 		if (SljitBloomFilterMayContainTemplated<HAS_BLOOM>(input, hash)) {
 			hash_t salt = 0;

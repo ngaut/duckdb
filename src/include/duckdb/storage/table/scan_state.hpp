@@ -80,8 +80,6 @@ struct IndexScanState {
 	}
 };
 
-typedef unordered_map<block_id_t, BufferHandle> buffer_handle_set_t;
-
 struct PushedDownExpressionState {
 public:
 	explicit PushedDownExpressionState(ClientContext &context) : executor(context) {
@@ -135,6 +133,8 @@ struct ColumnScanState {
 	unique_ptr<PushedDownExpressionState> expression_state;
 	//! Whether or not updates should be allowed
 	UpdateScanType update_scan_type = UpdateScanType::STANDARD;
+	//! Whether scans and selects copy strings into the result instead of pointing into the scanned blocks
+	StringScanType string_scan_type = StringScanType::STANDARD;
 
 public:
 	void PushDownCast(const LogicalType &original_type, const LogicalType &cast_type);
@@ -149,6 +149,8 @@ public:
 	void NextInternal(idx_t count);
 	//! Returns the current row position in the segment
 	idx_t GetPositionInSegment() const;
+	//! Releases the segment scan states (and the blocks they pin), including those of the child states
+	void ReleasePins();
 };
 
 enum class FetchType {
@@ -162,14 +164,10 @@ struct ColumnFetchState {
 	FetchType fetch_type = FetchType::TRANSACTIONAL_FETCH;
 	//! The query context for this fetch
 	QueryContext context;
-	//! The set of pinned block handles for this set of fetches
-	buffer_handle_set_t handles;
 	//! Any child states of the fetch
 	vector<unique_ptr<ColumnFetchState>> child_states;
 	//! The current row group we are fetching from
 	optional_ptr<SegmentNode<RowGroup>> row_group;
-
-	BufferHandle &GetOrInsertHandle(ColumnSegment &segment);
 };
 
 struct ScanFilter {
@@ -301,8 +299,6 @@ public:
 	explicit CollectionScanState(TableScanState &parent_p);
 	//! The query context for this scan
 	QueryContext context;
-	//! The current row_group we are scanning
-	optional_ptr<SegmentNode<RowGroup>> row_group;
 	//! The vector index within the row_group
 	idx_t vector_index;
 	//! The maximum row within the row group
@@ -327,8 +323,6 @@ public:
 	//! Whether the column scans of the current assignment still have to be initialized
 	bool column_scans_pending = false;
 
-	RandomEngine random;
-
 	//! The amount of tuples considered by a scan, before applying filters
 	idx_t rows_scanned = 0;
 
@@ -342,7 +336,10 @@ public:
 	const vector<StorageIndex> &GetColumnIds();
 	ScanFilterInfo &GetFilterInfo();
 	ScanSamplingInfo &GetSamplingInfo();
+	RandomEngine &GetRandomEngine();
 	TableScanOptions &GetOptions();
+	optional_ptr<SegmentNode<RowGroup>> GetRowGroup() const;
+	void SetRowGroup(optional_ptr<SegmentNode<RowGroup>> row_group);
 	optional_ptr<SegmentNode<RowGroup>> GetNextRowGroup(SegmentNode<RowGroup> &row_group) const;
 	optional_ptr<SegmentNode<RowGroup>> GetNextRowGroup(SegmentLock &l, SegmentNode<RowGroup> &row_group) const;
 	optional_ptr<SegmentNode<RowGroup>> GetRootSegment() const;
@@ -358,13 +355,22 @@ public:
 	void InitializeColumnScans();
 	//! Processes the vector prepared by PrepareScanIO
 	void ProcessPreparedScan(DuckTransaction &transaction, DataChunk &result);
+	//! Drops the prepared row group and returns false when the current filters prune it
+	bool RecheckPreparedRowGroup();
+	//! Releases the row group and the blocks the column scans pin, the next assignment initializes them again
+	void ReleasePins();
 
 private:
 	//! Registers the remaining assignment's scan I/O, returning the async tasks that execute it
 	vector<unique_ptr<AsyncTask>> RegisterAssignmentIO();
 
 private:
+	//! The segment node is the traversal cursor, while the shared pointer pins its replaceable payload
+	optional_ptr<SegmentNode<RowGroup>> row_group;
+	shared_ptr<RowGroup> pinned_row_group;
 	TableScanState &parent;
+	//! The random engine for system sampling
+	unique_ptr<RandomEngine> random;
 };
 
 struct ScanSamplingInfo {
@@ -381,7 +387,7 @@ struct ScanSamplingInfo {
 };
 
 struct TableScanOptions {
-	//! Fetch rows one-at-a-time instead of using the regular scans.
+	//! Read the rows of scans through the fetch by row id instead of scanning them
 	bool force_fetch_row = false;
 	//! Copy the rows a filter keeps out of each fixed-width filtered column into flat vectors instead of slicing the
 	//! scanned vector, for a consumer that copies or reads every row it receives: a slice allocates a dictionary
@@ -426,6 +432,8 @@ public:
 	void InitializeColumnScans();
 	//! Rows scanned from persistent and transaction-local storage
 	idx_t RowsScanned() const;
+	//! Releases what the scans of both storages pin, for a state that is kept around between assignments
+	void ReleasePins();
 
 private:
 	void InitializeSampling(optional_ptr<SampleOptions> table_sampling, idx_t estimated_table_row_count);
@@ -448,7 +456,8 @@ struct ParallelCollectionScanState {
 	idx_t vector_index;
 	idx_t max_row;
 	idx_t batch_index;
-	atomic<idx_t> processed_rows;
+	//! Rows of assignments that were skipped entirely (e.g. by zonemaps) without being handed out
+	atomic<idx_t> skipped_rows;
 	optional_idx row_number_base;
 	mutex lock;
 

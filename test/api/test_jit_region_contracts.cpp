@@ -759,7 +759,7 @@ TEST_CASE("JIT table-function sources use the generic source contract", "[api][j
 	ClearJitTrace(manager);
 	auto result = con.Query("SELECT sum(i * 31 + (i % 97)) FROM range(100000) AS t(i)");
 	REQUIRE_NO_FAIL(*result);
-	REQUIRE(result->GetValue(0, 0).ToString() == "155003249685");
+	REQUIRE(result->Collection().GetValue(0, 0).ToString() == "155003249685");
 
 	bool found_source_contract = false;
 	bool found_runtime = false;
@@ -865,7 +865,7 @@ TEST_CASE("JIT aggregate state scans are native source contracts", "[api][jit]")
 	ClearJitTrace(manager);
 	auto ungrouped = con.Query("SELECT s FROM (SELECT count(*) AS s FROM range(1000) AS t(i)) g WHERE s >= 0");
 	REQUIRE_NO_FAIL(*ungrouped);
-	REQUIRE(ungrouped->GetValue(0, 0).ToString() == "1000");
+	REQUIRE(ungrouped->Collection().GetValue(0, 0).ToString() == "1000");
 
 	bool found_ungrouped_scan = false;
 	for (auto &event : manager.GetEvents()) {

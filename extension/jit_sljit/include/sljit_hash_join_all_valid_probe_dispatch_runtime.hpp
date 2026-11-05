@@ -50,6 +50,7 @@ static bool TryExecuteAllValidUint64PairNoChainProbeFastest(const SljitNativeHas
 	}
 	const uint64_t *__restrict entries = input.entries;
 	const auto bitmask = input.bitmask;
+	const auto bucket_shift = input.bucket_shift;
 	const auto key0_offset = plan.keys[0].key_layout_offset;
 	const auto key1_offset = plan.keys[1].key_layout_offset;
 	data_ptr_t *__restrict row_pointers = input.row_pointers;
@@ -63,7 +64,7 @@ static bool TryExecuteAllValidUint64PairNoChainProbeFastest(const SljitNativeHas
 		auto key0 = key0_data[source_idx];
 		auto key1 = key1_data[source_idx];
 		auto ht_offset = UnsafeNumericCast<idx_t>(
-		    SljitHashJoinCombineHashScalar(Hash<uint64_t>(key0), Hash<uint64_t>(key1)) & bitmask);
+		    (SljitHashJoinCombineHashScalar(Hash<uint64_t>(key0), Hash<uint64_t>(key1)) >> bucket_shift) & bitmask);
 		while (true) {
 			const auto next_row_idx = row_idx + 1;
 			const bool has_next = next_row_idx < count;
@@ -74,8 +75,9 @@ static bool TryExecuteAllValidUint64PairNoChainProbeFastest(const SljitNativeHas
 				const auto next_source_idx = SELECTED ? key_sel[next_row_idx] : UnsafeNumericCast<sel_t>(next_row_idx);
 				next_key0 = key0_data[next_source_idx];
 				next_key1 = key1_data[next_source_idx];
-				next_ht_offset = UnsafeNumericCast<idx_t>(
-				    SljitHashJoinCombineHashScalar(Hash<uint64_t>(next_key0), Hash<uint64_t>(next_key1)) & bitmask);
+				const auto next_hash =
+				    SljitHashJoinCombineHashScalar(Hash<uint64_t>(next_key0), Hash<uint64_t>(next_key1));
+				next_ht_offset = UnsafeNumericCast<idx_t>((next_hash >> bucket_shift) & bitmask);
 				SljitPrefetchHashJoinEntry(entries, next_ht_offset);
 			}
 
@@ -126,6 +128,7 @@ static void ExecuteAllValidUncheckedInt64ToInt32SingleKeyNoChainProbe(const Slji
 	}
 	const uint64_t *__restrict entries = input.entries;
 	const auto bitmask = input.bitmask;
+	const auto bucket_shift = input.bucket_shift;
 	const auto key_offset = plan.keys[0].key_layout_offset;
 	data_ptr_t *__restrict row_pointers = input.row_pointers;
 	sel_t *__restrict match_sel = input.match_sel;
@@ -137,7 +140,7 @@ static void ExecuteAllValidUncheckedInt64ToInt32SingleKeyNoChainProbe(const Slji
 		auto source_idx = SELECTED ? key_sel[row_idx] : UnsafeNumericCast<sel_t>(row_idx);
 		auto key = UnsafeNumericCast<int32_t>(key_data[source_idx]);
 		auto hash = Hash<int32_t>(key);
-		auto ht_offset = UnsafeNumericCast<idx_t>(hash & bitmask);
+		auto ht_offset = UnsafeNumericCast<idx_t>((hash >> bucket_shift) & bitmask);
 
 		while (true) {
 			const auto next_row_idx = row_idx + 1;
@@ -149,7 +152,7 @@ static void ExecuteAllValidUncheckedInt64ToInt32SingleKeyNoChainProbe(const Slji
 				const auto next_source_idx = SELECTED ? key_sel[next_row_idx] : UnsafeNumericCast<sel_t>(next_row_idx);
 				next_key = UnsafeNumericCast<int32_t>(key_data[next_source_idx]);
 				next_hash = Hash<int32_t>(next_key);
-				next_ht_offset = UnsafeNumericCast<idx_t>(next_hash & bitmask);
+				next_ht_offset = UnsafeNumericCast<idx_t>((next_hash >> bucket_shift) & bitmask);
 				SljitPrefetchHashJoinEntry(entries, next_ht_offset);
 			}
 

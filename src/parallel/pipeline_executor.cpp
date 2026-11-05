@@ -11,6 +11,7 @@
 #include "duckdb/parallel/execution_region_pipeline_adapter.hpp"
 
 #include "duckdb/main/settings.hpp"
+#include "duckdb/parallel/progress_verifier.hpp"
 
 #include <chrono>
 
@@ -74,7 +75,7 @@ PipelineExecutor::PipelineExecutor(ClientContext &context_p, Pipeline &pipeline_
 		auto &current_operator = pipeline.operators[i].get();
 
 		auto chunk = make_uniq<DataChunk>();
-		chunk->Initialize(BufferAllocator::Get(context.client), prev_operator.GetTypes());
+		prev_operator.InitializeOutputChunk(BufferAllocator::Get(context.client), *chunk);
 		intermediate_chunks.push_back(std::move(chunk));
 
 		auto op_state = current_operator.GetOperatorState(context);
@@ -132,6 +133,7 @@ void PipelineExecutor::Reset() {
 	compiled_step_finished = false;
 	execution_region_local_state.reset();
 	execution_region_local_state_kernel = nullptr;
+	unsampled_progress_rows = 0;
 	while (!in_process_operators.empty()) {
 		in_process_operators.pop();
 	}
@@ -930,6 +932,12 @@ PipelineExecuteResult PipelineExecutor::PushFinalize() {
 	finalized = true;
 	NotifySourceFinished();
 
+	SampleProgress();
+	auto progress_verifier = pipeline.executor.GetProgressVerifier();
+	if (progress_verifier && !exhausted_source && !pipeline.IsExternalInput()) {
+		progress_verifier->OnEarlyExit(pipeline);
+	}
+
 	// If source was not exhausted (e.g. LIMIT stopped the pipeline), collect exact metrics now
 	if (!source_profiling_finalized && local_source_state && global_source_state) {
 		context.thread.profiler.FinishSource(*pipeline.source, *global_source_state, *local_source_state);
@@ -1075,6 +1083,8 @@ PipelineExecutor::SourceFetchResult PipelineExecutor::FetchFromSource(DataChunk 
 	D_ASSERT(!pipeline.IsExternalInput());
 	D_ASSERT(global_source_state);
 	D_ASSERT(local_source_state);
+	// the previous chunk has been pushed through the pipeline
+	SampleProgress();
 	StartOperator(*pipeline.source);
 
 	OperatorSourceInput source_input = {*global_source_state, *local_source_state, interrupt_state};
@@ -1097,6 +1107,9 @@ PipelineExecutor::SourceFetchResult PipelineExecutor::FetchFromSource(DataChunk 
 	}
 	EndOperator(*pipeline.source, &result);
 
+	if (pipeline.executor.GetProgressVerifier()) {
+		unsampled_progress_rows = result.size();
+	}
 	return fetch_result;
 }
 
@@ -1121,6 +1134,8 @@ SourceResultType PipelineExecutor::FetchFromCompiledSourceContract(SupportsSourc
 	D_ASSERT(global_source_state);
 	D_ASSERT(local_source_state);
 	source_cursor_state = SourceCursorState::COMPILED_CONTRACT;
+	// the previous chunk has been pushed through the pipeline
+	SampleProgress();
 	auto stage_start = metrics ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point();
 	if (source_chunk) {
 		source_chunk->Reset();
@@ -1165,6 +1180,9 @@ SourceResultType PipelineExecutor::FetchFromCompiledSourceContract(SupportsSourc
 	if (metrics) {
 		metrics->end_operator_runtime_time_us += PipelineExecutorElapsedMicros(stage_start);
 	}
+	if (pipeline.executor.GetProgressVerifier() && source_chunk) {
+		unsampled_progress_rows = source_chunk->size();
+	}
 	return res;
 }
 
@@ -1182,7 +1200,7 @@ SourceResultType PipelineExecutor::FetchFromSourceContract(DataChunk *&result,
 SourceResultType
 PipelineExecutor::FetchFromPrimitiveAggregateStateSourceContract(ExecutionAggregateStateScanBatch *&result,
                                                                  ExecutionRegionSourceContractMetrics *metrics) {
-	return FetchFromCompiledSourceContract(
+	auto res = FetchFromCompiledSourceContract(
 	    &PhysicalOperator::SupportsExecutionPrimitiveAggregateStateSourceContract, metrics, nullptr,
 	    [&](OperatorSourceInput &source_input) {
 		    result = nullptr;
@@ -1191,6 +1209,10 @@ PipelineExecutor::FetchFromPrimitiveAggregateStateSourceContract(ExecutionAggreg
 		    D_ASSERT(res != SourceResultType::BLOCKED || !result || result->Count() == 0);
 		    return res;
 	    });
+	if (pipeline.executor.GetProgressVerifier() && result) {
+		unsampled_progress_rows = result->Count();
+	}
+	return res;
 }
 
 bool PipelineExecutor::TryMarkExecutionRegionRuntimeOnceFlag(ExecutionRegionRuntimeOnceFlag flag, idx_t index) {
@@ -1209,7 +1231,19 @@ bool PipelineExecutor::TryMarkExecutionRegionRuntimeOnceFlag(ExecutionRegionRunt
 	return true;
 }
 
+void PipelineExecutor::SampleProgress() {
+	auto progress_verifier = pipeline.executor.GetProgressVerifier();
+	if (!progress_verifier || unsampled_progress_rows == 0) {
+		return;
+	}
+	progress_verifier->OnSourceChunk(pipeline, unsampled_progress_rows);
+	unsampled_progress_rows = 0;
+}
+
 void PipelineExecutor::InitializeChunk(DataChunk &chunk) {
+	// final_chunk also receives copies (EnqueueSinkChunk, SinkRemainingChunks) of the output a compiled kernel
+	// appended after its sink blocked, so it owns a buffer for every column instead of only the columns the last
+	// operator computes
 	auto &last_op = pipeline.operators.empty() ? *pipeline.source : pipeline.operators.back().get();
 	chunk.Initialize(BufferAllocator::Get(context.client), last_op.GetTypes());
 }

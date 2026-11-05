@@ -1247,7 +1247,7 @@ TEST_CASE("Execution region core rejects backend stage execution mutation", "[ap
 	REQUIRE_NO_FAIL(test.con.Query("SET enable_jit=false"));
 	auto result = test.con.Query("SELECT sum(j) FROM jit_stage_mutation_output");
 	REQUIRE_NO_FAIL(*result);
-	REQUIRE(result->GetValue(0, 0).ToString() == "5000050000");
+	REQUIRE(result->Collection().GetValue(0, 0).ToString() == "5000050000");
 }
 
 TEST_CASE("JIT CBO can select a GPU physical runner when GPU benefit wins", "[api][jit]") {
@@ -1309,7 +1309,7 @@ TEST_CASE("JIT prepared executions reuse immutable compiled artifacts", "[api][j
 	ClearJitTrace(manager, true);
 	auto first = con.Query("EXECUTE jit_artifact_cache");
 	REQUIRE_NO_FAIL(*first);
-	REQUIRE(first->GetValue(0, 0).ToString() == "500006500000");
+	REQUIRE(first->Collection().GetValue(0, 0).ToString() == "500006500000");
 	bool found_initial_compile = false;
 	for (auto &event : manager.GetEvents()) {
 		if (!IsCompiledSljitRegionEvent(event) || EventPhase(event) != "compile") {
@@ -1326,7 +1326,7 @@ TEST_CASE("JIT prepared executions reuse immutable compiled artifacts", "[api][j
 	ClearJitTrace(manager, true);
 	auto second = con.Query("EXECUTE jit_artifact_cache");
 	REQUIRE_NO_FAIL(*second);
-	REQUIRE(second->GetValue(0, 0).ToString() == first->GetValue(0, 0).ToString());
+	REQUIRE(second->Collection().GetValue(0, 0).ToString() == first->Collection().GetValue(0, 0).ToString());
 	bool found_cached_compile = false;
 	for (auto &event : manager.GetEvents()) {
 		if (!IsCompiledSljitRegionEvent(event) || EventPhase(event) != "compile") {
@@ -1358,7 +1358,7 @@ TEST_CASE("JIT artifact cache separates refreshed source bindings after DML", "[
 
 	auto first = con.Query("EXECUTE jit_prepared_cast");
 	REQUIRE_NO_FAIL(*first);
-	REQUIRE(first->GetValue(0, 0).GetValue<int64_t>() == 4999950000LL);
+	REQUIRE(first->Collection().GetValue(0, 0).GetValue<int64_t>() == 4999950000LL);
 
 	REQUIRE_NO_FAIL(con.Query("INSERT INTO jit_prepared_cast_source VALUES (2147483648)"));
 	ClearJitTrace(manager, true);
@@ -1384,12 +1384,12 @@ TEST_CASE("JIT prepared artifact reuse preserves parameter-dependent semantics",
 	ClearJitTrace(manager, true);
 	auto first = con.Query("EXECUTE jit_parameter_artifact(7)");
 	REQUIRE_NO_FAIL(*first);
-	REQUIRE(first->GetValue(0, 0).ToString() == "5000650000");
+	REQUIRE(first->Collection().GetValue(0, 0).ToString() == "5000650000");
 
 	ClearJitTrace(manager, true);
 	auto second = con.Query("EXECUTE jit_parameter_artifact(7)");
 	REQUIRE_NO_FAIL(*second);
-	REQUIRE(second->GetValue(0, 0).ToString() == first->GetValue(0, 0).ToString());
+	REQUIRE(second->Collection().GetValue(0, 0).ToString() == first->Collection().GetValue(0, 0).ToString());
 	RequireJitEvent(manager, [](const ExecutionRegionEvent &event) {
 		return IsCompiledSljitRegionEvent(event) && EventPhase(event) == "compile" &&
 		       StringUtil::Contains(event.reason, "compiled artifact cache hit");
@@ -1398,7 +1398,7 @@ TEST_CASE("JIT prepared artifact reuse preserves parameter-dependent semantics",
 	ClearJitTrace(manager, true);
 	auto third = con.Query("EXECUTE jit_parameter_artifact(9)");
 	REQUIRE_NO_FAIL(*third);
-	REQUIRE(third->GetValue(0, 0).ToString() == "5000850000");
+	REQUIRE(third->Collection().GetValue(0, 0).ToString() == "5000850000");
 	RequireJitEvent(manager, [](const ExecutionRegionEvent &event) {
 		return IsCompiledSljitRegionEvent(event) && EventPhase(event) == "compile" &&
 		       StringUtil::Contains(event.reason, "compiled artifact cache hit");
@@ -1424,7 +1424,7 @@ TEST_CASE("JIT prepared artifact reuse refreshes exact runtime-filter identity",
 
 	auto first = con.Query("EXECUTE jit_prepared_filter");
 	REQUIRE_NO_FAIL(*first);
-	REQUIRE(first->GetValue(0, 0).GetValue<int64_t>() == 1000);
+	REQUIRE(first->Collection().GetValue(0, 0).GetValue<int64_t>() == 1000);
 	auto exact_filter_executed = [](const ExecutionRegionEvent &event) {
 		if (EventPhase(event) != "runtime" || EventStatus(event) != "executed") {
 			return false;
@@ -1437,7 +1437,7 @@ TEST_CASE("JIT prepared artifact reuse refreshes exact runtime-filter identity",
 	ClearJitTrace(manager, true);
 	auto second = con.Query("EXECUTE jit_prepared_filter");
 	REQUIRE_NO_FAIL(*second);
-	REQUIRE(second->GetValue(0, 0).GetValue<int64_t>() == 1000);
+	REQUIRE(second->Collection().GetValue(0, 0).GetValue<int64_t>() == 1000);
 	RequireJitEvent(manager, [](const ExecutionRegionEvent &event) {
 		return IsCompiledSljitRegionEvent(event) && EventPhase(event) == "compile" &&
 		       StringUtil::Contains(event.reason, "compiled artifact cache hit");
@@ -1448,7 +1448,7 @@ TEST_CASE("JIT prepared artifact reuse refreshes exact runtime-filter identity",
 	ClearJitTrace(manager, true);
 	auto after_insert = con.Query("EXECUTE jit_prepared_filter");
 	REQUIRE_NO_FAIL(*after_insert);
-	REQUIRE(after_insert->GetValue(0, 0).GetValue<int64_t>() == 1001);
+	REQUIRE(after_insert->Collection().GetValue(0, 0).GetValue<int64_t>() == 1001);
 	RequireJitEvent(manager, [](const ExecutionRegionEvent &event) {
 		return IsCompiledSljitRegionEvent(event) && EventPhase(event) == "compile" &&
 		       StringUtil::Contains(event.reason, "compiled artifact cache hit");
@@ -1478,8 +1478,8 @@ TEST_CASE("JIT auto policy runs supported projections on Apple Metal GPU", "[api
 
 	auto result = con.Query("SELECT count(*), sum(j) FROM jit_metal_auto_output");
 	REQUIRE_NO_FAIL(*result);
-	REQUIRE(result->GetValue(0, 0).GetValue<int64_t>() == 100000);
-	REQUIRE(result->GetValue(1, 0).GetValue<int64_t>() == 5000650000LL);
+	REQUIRE(result->Collection().GetValue(0, 0).GetValue<int64_t>() == 100000);
+	REQUIRE(result->Collection().GetValue(1, 0).GetValue<int64_t>() == 5000650000LL);
 
 	RequireJitEvent(
 	    manager,
@@ -1548,8 +1548,8 @@ TEST_CASE("JIT Metal never claims filtered source rows it does not execute", "[a
 
 	auto result = con.Query("SELECT count(*), sum(j) FROM jit_metal_filtered_output");
 	REQUIRE_NO_FAIL(*result);
-	REQUIRE(result->GetValue(0, 0).GetValue<int64_t>() == 10);
-	REQUIRE(result->GetValue(1, 0).GetValue<int64_t>() == 115);
+	REQUIRE(result->Collection().GetValue(0, 0).GetValue<int64_t>() == 10);
+	REQUIRE(result->Collection().GetValue(1, 0).GetValue<int64_t>() == 115);
 	auto difference = con.Query("SELECT * FROM (FROM jit_metal_filtered_baseline EXCEPT ALL "
 	                            "FROM jit_metal_filtered_output) "
 	                            "UNION ALL SELECT * FROM (FROM jit_metal_filtered_output EXCEPT ALL "
@@ -1580,8 +1580,8 @@ TEST_CASE("JIT Metal projection supports FLOAT arithmetic", "[api][jit][metal]")
 
 	auto result = con.Query("SELECT count(*), sum(y)::DOUBLE FROM jit_metal_float_output");
 	REQUIRE_NO_FAIL(*result);
-	REQUIRE(result->GetValue(0, 0).GetValue<int64_t>() == 100000);
-	REQUIRE(result->GetValue(1, 0).GetValue<double>() == 2500325000.0);
+	REQUIRE(result->Collection().GetValue(0, 0).GetValue<int64_t>() == 100000);
+	REQUIRE(result->Collection().GetValue(1, 0).GetValue<double>() == 2500325000.0);
 
 	RequireJitEvent(
 	    manager,
@@ -1620,8 +1620,8 @@ TEST_CASE("JIT Metal projection linearizes deep FLOAT expression trees", "[api][
 
 	auto result = con.Query("SELECT count(*), count(y) FROM jit_metal_deep_float_output");
 	REQUIRE_NO_FAIL(*result);
-	REQUIRE(result->GetValue(0, 0).GetValue<int64_t>() == 10000);
-	REQUIRE(result->GetValue(1, 0).GetValue<int64_t>() == 10000);
+	REQUIRE(result->Collection().GetValue(0, 0).GetValue<int64_t>() == 10000);
+	REQUIRE(result->Collection().GetValue(1, 0).GetValue<int64_t>() == 10000);
 
 	RequireExecutedMetalProjection(manager, 10000);
 }
@@ -1647,8 +1647,8 @@ TEST_CASE("JIT Metal projection supports INT64-backed DECIMAL add/subtract", "[a
 
 	auto result = con.Query("SELECT count(*), sum(y) FROM jit_metal_decimal_output");
 	REQUIRE_NO_FAIL(*result);
-	REQUIRE(result->GetValue(0, 0).GetValue<int64_t>() == 100000);
-	REQUIRE(result->GetValue(1, 0).ToString() == "5000675000.00");
+	REQUIRE(result->Collection().GetValue(0, 0).GetValue<int64_t>() == 100000);
+	REQUIRE(result->Collection().GetValue(1, 0).ToString() == "5000675000.00");
 
 	RequireExecutedMetalProjection(manager, 100000);
 }
@@ -1677,9 +1677,9 @@ TEST_CASE("JIT Metal step dispatches once per row group and keeps insertion orde
 	auto result = con.Query("SELECT count(*), sum(j), count(*) FILTER (WHERE previous >= j) FROM "
 	                        "(SELECT j, lag(j) OVER (ORDER BY rowid) AS previous FROM jit_metal_row_groups_output)");
 	REQUIRE_NO_FAIL(*result);
-	REQUIRE(result->GetValue(0, 0).GetValue<int64_t>() == 983040);
-	REQUIRE(result->GetValue(1, 0).GetValue<hugeint_t>() == hugeint_t(483190210560LL));
-	REQUIRE(result->GetValue(2, 0).GetValue<int64_t>() == 0);
+	REQUIRE(result->Collection().GetValue(0, 0).GetValue<int64_t>() == 983040);
+	REQUIRE(result->Collection().GetValue(1, 0).GetValue<hugeint_t>() == hugeint_t(483190210560LL));
+	REQUIRE(result->Collection().GetValue(2, 0).GetValue<int64_t>() == 0);
 
 	idx_t output_rows = 0;
 	idx_t dispatches = 0;
@@ -2079,8 +2079,8 @@ TEST_CASE("JIT backend owns generated source-filter aggregate terminals", "[api]
 	ClearJitTrace(manager, true);
 	auto result = con.Query(query);
 	REQUIRE_NO_FAIL(*result);
-	REQUIRE(result->GetValue(0, 0).ToString() == reference->GetValue(0, 0).ToString());
-	REQUIRE(result->GetValue(1, 0).ToString() == reference->GetValue(1, 0).ToString());
+	REQUIRE(result->Collection().GetValue(0, 0).ToString() == reference->Collection().GetValue(0, 0).ToString());
+	REQUIRE(result->Collection().GetValue(1, 0).ToString() == reference->Collection().GetValue(1, 0).ToString());
 	vector<idx_t> generated_filter_kernel_ids;
 	for (auto &event : manager.GetEvents()) {
 		if (!IsCompiledSljitRegionEvent(event) ||
@@ -2177,13 +2177,7 @@ TEST_CASE("JIT selected scan-filtered grouped aggregate uses direct grouped prim
 	ClearJitTrace(manager, true);
 	auto result = con.Query(query);
 	REQUIRE_NO_FAIL(*result);
-	REQUIRE(result->RowCount() == reference->RowCount());
-	REQUIRE(result->ColumnCount() == reference->ColumnCount());
-	for (idx_t row_idx = 0; row_idx < result->RowCount(); row_idx++) {
-		for (idx_t col_idx = 0; col_idx < result->ColumnCount(); col_idx++) {
-			REQUIRE(result->GetValue(col_idx, row_idx).ToString() == reference->GetValue(col_idx, row_idx).ToString());
-		}
-	}
+	RequireSameResultValues(*result, *reference);
 
 	vector<idx_t> scan_filtered_kernel_ids;
 	for (auto &event : manager.GetEvents()) {
@@ -2232,13 +2226,7 @@ TEST_CASE("JIT keeps generated-safe grouped aggregate filters in generated sourc
 	ClearJitTrace(manager, true);
 	auto result = con.Query(query);
 	REQUIRE_NO_FAIL(*result);
-	REQUIRE(result->RowCount() == reference->RowCount());
-	REQUIRE(result->ColumnCount() == reference->ColumnCount());
-	for (idx_t row_idx = 0; row_idx < result->RowCount(); row_idx++) {
-		for (idx_t col_idx = 0; col_idx < result->ColumnCount(); col_idx++) {
-			REQUIRE(result->GetValue(col_idx, row_idx).ToString() == reference->GetValue(col_idx, row_idx).ToString());
-		}
-	}
+	RequireSameResultValues(*result, *reference);
 
 	bool found_generated_grouped_filter = false;
 	for (auto &event : manager.GetEvents()) {
@@ -2285,13 +2273,7 @@ TEST_CASE("JIT materialization-elision runtime proves projected aggregate owners
 	ClearJitTrace(manager, true);
 	auto result = con.Query(query);
 	REQUIRE_NO_FAIL(*result);
-	REQUIRE(result->RowCount() == reference->RowCount());
-	REQUIRE(result->ColumnCount() == reference->ColumnCount());
-	for (idx_t row_idx = 0; row_idx < result->RowCount(); row_idx++) {
-		for (idx_t col_idx = 0; col_idx < result->ColumnCount(); col_idx++) {
-			REQUIRE(result->GetValue(col_idx, row_idx).ToString() == reference->GetValue(col_idx, row_idx).ToString());
-		}
-	}
+	RequireSameResultValues(*result, *reference);
 
 	auto materialization_elision_kernel_ids =
 	    RequireSljitMaterializationElisionCboKernelIds(manager, ExecutionRegionSinkKind::HASH_AGGREGATE_UPDATE);
@@ -2328,13 +2310,7 @@ TEST_CASE("JIT projected source grouped aggregate preserves dense key semantics"
 	ClearJitTrace(manager, true);
 	auto result = con.Query(query);
 	REQUIRE_NO_FAIL(*result);
-	REQUIRE(result->RowCount() == reference->RowCount());
-	REQUIRE(result->ColumnCount() == reference->ColumnCount());
-	for (idx_t row_idx = 0; row_idx < result->RowCount(); row_idx++) {
-		for (idx_t col_idx = 0; col_idx < result->ColumnCount(); col_idx++) {
-			REQUIRE(result->GetValue(col_idx, row_idx).ToString() == reference->GetValue(col_idx, row_idx).ToString());
-		}
-	}
+	RequireSameResultValues(*result, *reference);
 
 	auto materialization_elision_kernel_ids =
 	    RequireSljitMaterializationElisionCboKernelIds(manager, ExecutionRegionSinkKind::HASH_AGGREGATE_UPDATE);
@@ -2377,13 +2353,7 @@ TEST_CASE("JIT projected source grouped aggregate supports substring group keys 
 	ClearJitTrace(manager, true);
 	auto result = con.Query(query);
 	REQUIRE_NO_FAIL(*result);
-	REQUIRE(result->RowCount() == reference->RowCount());
-	REQUIRE(result->ColumnCount() == reference->ColumnCount());
-	for (idx_t row_idx = 0; row_idx < result->RowCount(); row_idx++) {
-		for (idx_t col_idx = 0; col_idx < result->ColumnCount(); col_idx++) {
-			REQUIRE(result->GetValue(col_idx, row_idx).ToString() == reference->GetValue(col_idx, row_idx).ToString());
-		}
-	}
+	RequireSameResultValues(*result, *reference);
 
 	auto materialization_elision_kernel_ids =
 	    RequireSljitMaterializationElisionCboKernelIds(manager, ExecutionRegionSinkKind::HASH_AGGREGATE_UPDATE);
@@ -2420,13 +2390,7 @@ TEST_CASE("JIT projected source grouped aggregate handles sparse projected group
 	ClearJitTrace(manager, true);
 	auto result = con.Query(query);
 	REQUIRE_NO_FAIL(*result);
-	REQUIRE(result->RowCount() == reference->RowCount());
-	REQUIRE(result->ColumnCount() == reference->ColumnCount());
-	for (idx_t row_idx = 0; row_idx < result->RowCount(); row_idx++) {
-		for (idx_t col_idx = 0; col_idx < result->ColumnCount(); col_idx++) {
-			REQUIRE(result->GetValue(col_idx, row_idx).ToString() == reference->GetValue(col_idx, row_idx).ToString());
-		}
-	}
+	RequireSameResultValues(*result, *reference);
 
 	auto materialization_elision_kernel_ids =
 	    RequireSljitMaterializationElisionCboKernelIds(manager, ExecutionRegionSinkKind::HASH_AGGREGATE_UPDATE);
@@ -3716,11 +3680,11 @@ TEST_CASE("SLJIT native projection handles many FLOAT expressions sharing source
 	auto check = con.Query("SELECT count(*), count(a), count(h), sum(a)::DOUBLE, sum(h)::DOUBLE "
 	                       "FROM jit_many_float_projection_output");
 	REQUIRE_NO_FAIL(*check);
-	REQUIRE(check->GetValue(0, 0).GetValue<int64_t>() == 100000);
-	REQUIRE(check->GetValue(1, 0).GetValue<int64_t>() == 100000);
-	REQUIRE(check->GetValue(2, 0).GetValue<int64_t>() == 100000);
-	REQUIRE(check->GetValue(3, 0).GetValue<double>() == Approx(5000050000.0));
-	REQUIRE(check->GetValue(4, 0).GetValue<double>() == Approx(2500875000.0));
+	REQUIRE(check->Collection().GetValue(0, 0).GetValue<int64_t>() == 100000);
+	REQUIRE(check->Collection().GetValue(1, 0).GetValue<int64_t>() == 100000);
+	REQUIRE(check->Collection().GetValue(2, 0).GetValue<int64_t>() == 100000);
+	REQUIRE(check->Collection().GetValue(3, 0).GetValue<double>() == Approx(5000050000.0));
+	REQUIRE(check->Collection().GetValue(4, 0).GetValue<double>() == Approx(2500875000.0));
 
 	RequireJitEvent(
 	    manager,
@@ -3775,11 +3739,11 @@ TEST_CASE("SLJIT direct FLOAT materialization crosses row group boundaries", "[a
 	auto check = con.Query("SELECT count(*), count(a), count(h), sum(a)::DOUBLE, sum(h)::DOUBLE "
 	                       "FROM rg.jit_direct_append_rollover_output");
 	REQUIRE_NO_FAIL(*check);
-	REQUIRE(check->GetValue(0, 0).GetValue<int64_t>() == 10000);
-	REQUIRE(check->GetValue(1, 0).GetValue<int64_t>() == 10000);
-	REQUIRE(check->GetValue(2, 0).GetValue<int64_t>() == 10000);
-	REQUIRE(check->GetValue(3, 0).GetValue<double>() == Approx(50005000.0));
-	REQUIRE(check->GetValue(4, 0).GetValue<double>() == Approx(25087500.0));
+	REQUIRE(check->Collection().GetValue(0, 0).GetValue<int64_t>() == 10000);
+	REQUIRE(check->Collection().GetValue(1, 0).GetValue<int64_t>() == 10000);
+	REQUIRE(check->Collection().GetValue(2, 0).GetValue<int64_t>() == 10000);
+	REQUIRE(check->Collection().GetValue(3, 0).GetValue<double>() == Approx(50005000.0));
+	REQUIRE(check->Collection().GetValue(4, 0).GetValue<double>() == Approx(25087500.0));
 
 	RequireJitEvent(
 	    manager,
@@ -3815,10 +3779,10 @@ TEST_CASE("SLJIT native integer projection elides proven overflow checks", "[api
 	auto check = con.Query("SELECT count(*), sum(a2)::BIGINT, sum(ac)::BIGINT, sum(b2)::BIGINT "
 	                       "FROM jit_integer_no_overflow_output");
 	REQUIRE_NO_FAIL(*check);
-	REQUIRE(check->GetValue(0, 0).GetValue<int64_t>() == 10000);
-	REQUIRE(check->GetValue(1, 0).GetValue<int64_t>() == 5005000);
-	REQUIRE(check->GetValue(2, 0).GetValue<int64_t>() == 7490000);
-	REQUIRE(check->GetValue(3, 0).GetValue<int64_t>() == 50015000);
+	REQUIRE(check->Collection().GetValue(0, 0).GetValue<int64_t>() == 10000);
+	REQUIRE(check->Collection().GetValue(1, 0).GetValue<int64_t>() == 5005000);
+	REQUIRE(check->Collection().GetValue(2, 0).GetValue<int64_t>() == 7490000);
+	REQUIRE(check->Collection().GetValue(3, 0).GetValue<int64_t>() == 50015000);
 
 	RequireJitEvent(
 	    manager,
@@ -3893,7 +3857,7 @@ TEST_CASE("SLJIT native integer flat arithmetic handles SIMD-width tails", "[api
 	                       "OR bz <> 0 "
 	                       "OR am <> ((i % 1000)::INTEGER * (i % 1000)::INTEGER)");
 	REQUIRE_NO_FAIL(*check);
-	REQUIRE(check->GetValue(0, 0).GetValue<int64_t>() == 0);
+	REQUIRE(check->Collection().GetValue(0, 0).GetValue<int64_t>() == 0);
 
 	RequireJitEvent(
 	    manager,
@@ -3962,7 +3926,7 @@ TEST_CASE("SLJIT native floating flat arithmetic handles SIMD-width tails", "[ap
 	                       " WHERE abs(out.v - (src.d / src.e)) > 1e-12)");
 	REQUIRE_NO_FAIL(*check);
 	for (idx_t col = 0; col < 4; col++) {
-		REQUIRE(check->GetValue(col, 0).GetValue<int64_t>() == 0);
+		REQUIRE(check->Collection().GetValue(col, 0).GetValue<int64_t>() == 0);
 	}
 	REQUIRE_NO_FAIL(con.Query("SET enable_jit=true"));
 
@@ -4022,7 +3986,7 @@ TEST_CASE("SLJIT fixed direct append fuses mixed INTEGER and BIGINT groups", "[a
 	                       "OR bd <> (i + (i * 2)) "
 	                       "OR dt <> DATE '1992-01-01' + ((i % 365)::INTEGER)");
 	REQUIRE_NO_FAIL(*check);
-	REQUIRE(check->GetValue(0, 0).GetValue<int64_t>() == 0);
+	REQUIRE(check->Collection().GetValue(0, 0).GetValue<int64_t>() == 0);
 
 	RequireJitEvent(
 	    manager,
@@ -4066,7 +4030,7 @@ TEST_CASE("SLJIT fixed direct append fuses DECIMAL64 groups with checks", "[api]
 	                       "OR ddiff <> (((i * 3) % 100000)::DECIMAL(15,2) - "
 	                       "(i % 100000)::DECIMAL(15,2))");
 	REQUIRE_NO_FAIL(*check);
-	REQUIRE(check->GetValue(0, 0).GetValue<int64_t>() == 0);
+	REQUIRE(check->Collection().GetValue(0, 0).GetValue<int64_t>() == 0);
 
 	RequireJitEvent(
 	    manager,
@@ -4168,7 +4132,7 @@ TEST_CASE("SLJIT fixed direct append fuses DATE arithmetic groups with checks", 
 	                       "OR o.dtoff_r <> i.dt + i.off "
 	                       "OR o.dt <> i.dt");
 	REQUIRE_NO_FAIL(*check);
-	REQUIRE(check->GetValue(0, 0).GetValue<int64_t>() == 0);
+	REQUIRE(check->Collection().GetValue(0, 0).GetValue<int64_t>() == 0);
 
 	RequireJitEvent(
 	    manager,
@@ -4292,13 +4256,13 @@ TEST_CASE("SLJIT direct fixed-width materialization handles INTEGER BIGINT DECIM
 	                       "sum(CASE WHEN flag THEN 1 ELSE 0 END)::BIGINT "
 	                       "FROM rg.jit_direct_fixed_output");
 	REQUIRE_NO_FAIL(*check);
-	REQUIRE(check->GetValue(0, 0).GetValue<int64_t>() == 10000);
-	REQUIRE(check->GetValue(1, 0).GetValue<int64_t>() == 5005000);
-	REQUIRE(check->GetValue(2, 0).GetValue<int64_t>() == 49965000);
-	REQUIRE(check->GetValue(3, 0).ToString() == "50007500.00");
-	REQUIRE(check->GetValue(4, 0).ToString() == "1992-01-01");
-	REQUIRE(check->GetValue(5, 0).ToString() == "1992-12-30");
-	REQUIRE(check->GetValue(6, 0).GetValue<int64_t>() == 5000);
+	REQUIRE(check->Collection().GetValue(0, 0).GetValue<int64_t>() == 10000);
+	REQUIRE(check->Collection().GetValue(1, 0).GetValue<int64_t>() == 5005000);
+	REQUIRE(check->Collection().GetValue(2, 0).GetValue<int64_t>() == 49965000);
+	REQUIRE(check->Collection().GetValue(3, 0).ToString() == "50007500.00");
+	REQUIRE(check->Collection().GetValue(4, 0).ToString() == "1992-01-01");
+	REQUIRE(check->Collection().GetValue(5, 0).ToString() == "1992-12-30");
+	REQUIRE(check->Collection().GetValue(6, 0).GetValue<int64_t>() == 5000);
 
 	RequireJitEvent(
 	    manager,
@@ -4354,13 +4318,13 @@ TEST_CASE("SLJIT direct append source-appends VARCHAR with fixed projections", "
 	                       "FROM rg.jit_direct_varchar_output o "
 	                       "JOIN rg.jit_direct_varchar_input i USING (id)");
 	REQUIRE_NO_FAIL(*check);
-	REQUIRE(check->GetValue(0, 0).GetValue<int64_t>() == 10000);
-	REQUIRE(check->GetValue(1, 0).GetValue<int64_t>() == 10000);
-	REQUIRE(check->GetValue(2, 0).GetValue<int64_t>() == 11);
-	REQUIRE(check->GetValue(3, 0).GetValue<int64_t>() > 512);
-	REQUIRE(check->GetValue(4, 0).GetValue<int64_t>() == 5005000);
-	REQUIRE(check->GetValue(5, 0).GetValue<int64_t>() == 49965000);
-	REQUIRE(check->GetValue(6, 0).ToString() == "50007500.00");
+	REQUIRE(check->Collection().GetValue(0, 0).GetValue<int64_t>() == 10000);
+	REQUIRE(check->Collection().GetValue(1, 0).GetValue<int64_t>() == 10000);
+	REQUIRE(check->Collection().GetValue(2, 0).GetValue<int64_t>() == 11);
+	REQUIRE(check->Collection().GetValue(3, 0).GetValue<int64_t>() > 512);
+	REQUIRE(check->Collection().GetValue(4, 0).GetValue<int64_t>() == 5005000);
+	REQUIRE(check->Collection().GetValue(5, 0).GetValue<int64_t>() == 49965000);
+	REQUIRE(check->Collection().GetValue(6, 0).ToString() == "50007500.00");
 
 	RequireJitEvent(
 	    manager,
@@ -4395,9 +4359,9 @@ TEST_CASE("SLJIT direct fixed-width materialization rolls over column segments w
 	auto check = con.Query("SELECT count(*), sum(a1)::BIGINT, sum(b2)::BIGINT "
 	                       "FROM jit_direct_segment_rollover_output");
 	REQUIRE_NO_FAIL(*check);
-	REQUIRE(check->GetValue(0, 0).GetValue<int64_t>() == 100000);
-	REQUIRE(check->GetValue(1, 0).GetValue<int64_t>() == 5000050000);
-	REQUIRE(check->GetValue(2, 0).GetValue<int64_t>() == 14999650000);
+	REQUIRE(check->Collection().GetValue(0, 0).GetValue<int64_t>() == 100000);
+	REQUIRE(check->Collection().GetValue(1, 0).GetValue<int64_t>() == 5000050000);
+	REQUIRE(check->Collection().GetValue(2, 0).GetValue<int64_t>() == 14999650000);
 
 	RequireJitEvent(
 	    manager,
@@ -4564,7 +4528,7 @@ TEST_CASE("JIT generated work class does not label source-filter compute as proj
 
 	auto count = con.Query("SELECT count(*) FROM jit_source_filter_class_output");
 	REQUIRE_NO_FAIL(*count);
-	REQUIRE(count->GetValue(0, 0).ToString() == "4991");
+	REQUIRE(count->Collection().GetValue(0, 0).ToString() == "4991");
 
 	RequireJitEvent(
 	    manager,
@@ -4591,7 +4555,7 @@ TEST_CASE("JIT auto planner rejects tiny aggregate pipeline in pipeline CBO", "[
 	ClearJitTrace(manager, true);
 	auto result = con.Query("SELECT sum(i + 1) FROM jit_auto_fast_cost_input WHERE i > 10");
 	REQUIRE_NO_FAIL(*result);
-	REQUIRE(result->GetValue(0, 0).ToString() == "2014");
+	REQUIRE(result->Collection().GetValue(0, 0).ToString() == "2014");
 
 	RequireJitEvent(
 	    manager,
@@ -4642,7 +4606,7 @@ TEST_CASE("JIT CBO uses finalized perfect-hash dynamic filter cardinality", "[ap
 	                        "JOIN jit_dynamic_filter_dim1 d1 USING (k1) "
 	                        "JOIN jit_dynamic_filter_dim2 d2 USING (k2)");
 	REQUIRE_NO_FAIL(*result);
-	REQUIRE(result->GetValue(0, 0).GetValue<int64_t>() == 150499000);
+	REQUIRE(result->Collection().GetValue(0, 0).GetValue<int64_t>() == 150499000);
 	bool saw_exact_perfect_filter_proof = false;
 	for (auto &event : manager.GetEvents()) {
 		if (StringUtil::Contains(EventJitRuntimePathCounts(event),
@@ -4685,7 +4649,7 @@ TEST_CASE("JIT CBO uses finalized perfect-hash dynamic filter cardinality", "[ap
 	                   "JOIN jit_dynamic_filter_dim1 d1 USING (k1) "
 	                   "WHERE contains(f.tag, 'keep')");
 	REQUIRE_NO_FAIL(*result);
-	REQUIRE(result->GetValue(0, 0).GetValue<int64_t>() == 21521500);
+	REQUIRE(result->Collection().GetValue(0, 0).GetValue<int64_t>() == 21521500);
 	RequireJitEvent(
 	    manager,
 	    [](const ExecutionRegionEvent &event) {
@@ -4720,13 +4684,13 @@ TEST_CASE("JIT exact dynamic filters compose with bitpacked storage scans", "[ap
 	auto storage = con.Query("SELECT count(*) FROM pragma_storage_info('packed.fact') "
 	                         "WHERE column_name = 'k' AND compression = 'BitPacking'");
 	REQUIRE_NO_FAIL(*storage);
-	REQUIRE(storage->GetValue(0, 0).GetValue<int64_t>() > 0);
+	REQUIRE(storage->Collection().GetValue(0, 0).GetValue<int64_t>() > 0);
 
 	ClearJitTrace(manager, true);
 	auto result = con.Query("SELECT sum(f.payload) FROM packed.fact f JOIN packed.dim d USING(k) "
 	                        "WHERE f.k BETWEEN 120 AND 180");
 	REQUIRE_NO_FAIL(*result);
-	REQUIRE(result->GetValue(0, 0).GetValue<int64_t>() == 18336600);
+	REQUIRE(result->Collection().GetValue(0, 0).GetValue<int64_t>() == 18336600);
 
 	int64_t mixed_expected = 0;
 	for (int64_t i = 0; i < 200000; i++) {
@@ -4738,7 +4702,7 @@ TEST_CASE("JIT exact dynamic filters compose with bitpacked storage scans", "[ap
 	result = con.Query("SELECT sum(f.payload) FROM packed.fact f JOIN packed.dim d USING(k) "
 	                   "WHERE f.k BETWEEN 120 AND 180 AND contains(f.tag, 'keep')");
 	REQUIRE_NO_FAIL(*result);
-	REQUIRE(result->GetValue(0, 0).GetValue<int64_t>() == mixed_expected);
+	REQUIRE(result->Collection().GetValue(0, 0).GetValue<int64_t>() == mixed_expected);
 
 	RequireJitEvent(
 	    manager,
@@ -4784,11 +4748,11 @@ TEST_CASE("JIT Bloom dynamic filters preserve bitpacked scan semantics", "[api][
 	auto storage = con.Query("SELECT count(*) FROM pragma_storage_info('packed.fact_big') "
 	                         "WHERE column_name = 'k' AND compression = 'BitPacking'");
 	REQUIRE_NO_FAIL(*storage);
-	REQUIRE(storage->GetValue(0, 0).GetValue<int64_t>() > 0);
+	REQUIRE(storage->Collection().GetValue(0, 0).GetValue<int64_t>() > 0);
 	storage = con.Query("SELECT count(*) FROM pragma_storage_info('packed.fact_int') "
 	                    "WHERE column_name = 'k' AND compression = 'BitPacking'");
 	REQUIRE_NO_FAIL(*storage);
-	REQUIRE(storage->GetValue(0, 0).GetValue<int64_t>() > 0);
+	REQUIRE(storage->Collection().GetValue(0, 0).GetValue<int64_t>() > 0);
 
 	const string exact_query = "SELECT count(*) FROM packed.fact_big f JOIN packed.dim d ON f.k = d.k";
 	const string null_equal_query =
@@ -4798,19 +4762,19 @@ TEST_CASE("JIT Bloom dynamic filters preserve bitpacked scan semantics", "[api][
 	REQUIRE_NO_FAIL(con.Query("SET jit_policy='off'"));
 	auto exact_reference = con.Query(exact_query);
 	REQUIRE_NO_FAIL(*exact_reference);
-	REQUIRE(exact_reference->GetValue(0, 0).GetValue<int64_t>() == 232427);
+	REQUIRE(exact_reference->Collection().GetValue(0, 0).GetValue<int64_t>() == 232427);
 	auto null_equal_reference = con.Query(null_equal_query);
 	REQUIRE_NO_FAIL(*null_equal_reference);
-	REQUIRE(null_equal_reference->GetValue(0, 0).GetValue<int64_t>() == 235151);
+	REQUIRE(null_equal_reference->Collection().GetValue(0, 0).GetValue<int64_t>() == 235151);
 	auto cast_reference = con.Query(cast_query);
 	REQUIRE_NO_FAIL(*cast_reference);
-	REQUIRE(cast_reference->GetValue(0, 0).GetValue<int64_t>() == 232426);
+	REQUIRE(cast_reference->Collection().GetValue(0, 0).GetValue<int64_t>() == 232426);
 
 	REQUIRE_NO_FAIL(con.Query("SET jit_policy='auto'"));
 	ClearJitTrace(manager, true);
 	auto exact_result = con.Query(exact_query);
 	REQUIRE_NO_FAIL(*exact_result);
-	REQUIRE(exact_result->GetValue(0, 0) == exact_reference->GetValue(0, 0));
+	REQUIRE(exact_result->Collection().GetValue(0, 0) == exact_reference->Collection().GetValue(0, 0));
 	RequireJitEvent(manager, [](const ExecutionRegionEvent &event) {
 		return EventPhase(event) == "runtime" && EventStatus(event) == "executed" &&
 		       StringUtil::Contains(EventJitRuntimePathCounts(event),
@@ -4819,14 +4783,14 @@ TEST_CASE("JIT Bloom dynamic filters preserve bitpacked scan semantics", "[api][
 	ClearJitTrace(manager, true);
 	auto null_equal_result = con.Query(null_equal_query);
 	REQUIRE_NO_FAIL(*null_equal_result);
-	REQUIRE(null_equal_result->GetValue(0, 0) == null_equal_reference->GetValue(0, 0));
+	REQUIRE(null_equal_result->Collection().GetValue(0, 0) == null_equal_reference->Collection().GetValue(0, 0));
 	RequireJitEvent(manager, [](const ExecutionRegionEvent &event) {
 		return EventPhase(event) == "runtime" && EventStatus(event) == "executed" &&
 		       StringUtil::Contains(EventJitRuntimePathCounts(event), "hash_join_probe.regular_probe.generated=");
 	});
 	auto cast_result = con.Query(cast_query);
 	REQUIRE_NO_FAIL(*cast_result);
-	REQUIRE(cast_result->GetValue(0, 0) == cast_reference->GetValue(0, 0));
+	REQUIRE(cast_result->Collection().GetValue(0, 0) == cast_reference->Collection().GetValue(0, 0));
 
 	REQUIRE_NO_FAIL(con.Query("DETACH packed"));
 	TestDeleteFile(db_path);
@@ -4852,7 +4816,7 @@ TEST_CASE("JIT CBO carries finalized dynamic filter cardinality through regular 
 	auto result = con.Query("SELECT count(*) FROM jit_regular_dynamic_filter_fact f "
 	                        "SEMI JOIN jit_regular_dynamic_filter_dim d USING (k)");
 	REQUIRE_NO_FAIL(*result);
-	REQUIRE(result->GetValue(0, 0).GetValue<int64_t>() == 1);
+	REQUIRE(result->Collection().GetValue(0, 0).GetValue<int64_t>() == 1);
 
 	RequireJitEvent(
 	    manager,
@@ -4889,7 +4853,7 @@ TEST_CASE("JIT CBO preserves empty finalized dynamic filter cardinality", "[api]
 	    "SEMI JOIN (SELECT CASE WHEN random()>=0 THEN 100000::BIGINT ELSE 0::BIGINT END AS k FROM range(1)) h "
 	    "USING (k)");
 	REQUIRE_NO_FAIL(*result);
-	REQUIRE(result->GetValue(0, 0).GetValue<int64_t>() == 0);
+	REQUIRE(result->Collection().GetValue(0, 0).GetValue<int64_t>() == 0);
 
 	RequireJitEvent(
 	    manager,
@@ -4922,7 +4886,7 @@ TEST_CASE("JIT auto planner does not enter region graph when pipeline has no cos
 	ClearJitTrace(manager, true);
 	auto result = con.Query("SELECT count(*) FROM jit_auto_no_cost_left l JOIN jit_auto_no_cost_right r USING (i)");
 	REQUIRE_NO_FAIL(*result);
-	REQUIRE(result->GetValue(0, 0).ToString() == "64");
+	REQUIRE(result->Collection().GetValue(0, 0).ToString() == "64");
 
 	REQUIRE(manager.GetEvents().empty());
 }
@@ -4939,7 +4903,7 @@ TEST_CASE("JIT diagnostic tracing records generic table-function source ownershi
 	ClearJitTrace(manager, true);
 	auto result = con.Query("SELECT sum(i * 2) FROM range(1000) tbl(i)");
 	REQUIRE_NO_FAIL(*result);
-	REQUIRE(result->GetValue(0, 0).ToString() == "999000");
+	REQUIRE(result->Collection().GetValue(0, 0).ToString() == "999000");
 
 	RequireJitEvent(
 	    manager,
@@ -4976,7 +4940,7 @@ TEST_CASE("JIT auto planner costs generated aggregate updates as generated backe
 	ClearJitTrace(manager, true);
 	auto result = con.Query("SELECT sum(i) FROM jit_auto_default_aggregate_input");
 	REQUIRE_NO_FAIL(*result);
-	REQUIRE(result->GetValue(0, 0).ToString() == "2000000");
+	REQUIRE(result->Collection().GetValue(0, 0).ToString() == "2000000");
 
 	RequireJitEvent(
 	    manager,
@@ -5057,7 +5021,7 @@ TEST_CASE("JIT auto compiles branchy native expressions", "[api][jit]") {
 	                          expression + " AS v FROM jit_auto_branchy_expression_input"));
 	auto result = con.Query("SELECT sum(v) FROM jit_auto_branchy_expression_output");
 	REQUIRE_NO_FAIL(*result);
-	REQUIRE(result->GetValue(0, 0).ToString() == reference->GetValue(0, 0).ToString());
+	REQUIRE(result->Collection().GetValue(0, 0).ToString() == reference->Collection().GetValue(0, 0).ToString());
 
 	RequireJitEvent(
 	    manager, [](const ExecutionRegionEvent &event) { return IsCompiledSljitRegionEvent(event); },
@@ -5087,7 +5051,7 @@ TEST_CASE("JIT auto policy selects high-work ungrouped aggregate updates through
 	ClearJitTrace(manager, true);
 	auto result = con.Query("SELECT sum(" + expression + ") FROM jit_auto_aggregate_cbo_input");
 	REQUIRE_NO_FAIL(*result);
-	REQUIRE(result->GetValue(0, 0).ToString() == "19750163000000");
+	REQUIRE(result->Collection().GetValue(0, 0).ToString() == "19750163000000");
 
 	RequireJitEvent(
 	    manager,

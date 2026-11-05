@@ -39,12 +39,14 @@ add_library_unity(
   execution_region_ir.cpp
   execution_region_telemetry_log.cpp
   execution_region_types.cpp
+  ie_join_union.cpp
   join_hashtable.cpp
   mark_join_row_comparison.cpp
   perfect_aggregate_hashtable.cpp
   physical_operator.cpp
   physical_plan_generator.cpp
   row_id_deduplicator.cpp
+  radix_ht_adaptivity.cpp
   radix_partitioned_hashtable.cpp)
 set(ALL_OBJECT_FILES
     ${ALL_OBJECT_FILES} $<TARGET_OBJECTS:duckdb_execution>

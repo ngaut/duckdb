@@ -1,9 +1,8 @@
 #include "duckdb/execution/index/art/art.hpp"
+#include "duckdb/common/helper.hpp"
 #include "duckdb/main/attached_database.hpp"
 
 #include "duckdb/common/types/conflict_manager.hpp"
-#include "duckdb/common/unordered_map.hpp"
-#include "duckdb/common/vector_operations/vector_operations.hpp"
 #include "duckdb/execution/expression_executor.hpp"
 #include "duckdb/execution/index/art/art_builder.hpp"
 #include "duckdb/execution/index/art/art_key.hpp"
@@ -21,14 +20,21 @@
 #include "duckdb/optimizer/matcher/expression_matcher.hpp"
 #include "duckdb/planner/expression/bound_between_expression.hpp"
 #include "duckdb/planner/expression/bound_comparison_expression.hpp"
+#include "duckdb/planner/expression/bound_conjunction_expression.hpp"
 #include "duckdb/planner/expression/bound_function_expression.hpp"
 #include "duckdb/planner/expression/bound_constant_expression.hpp"
 #include "duckdb/storage/arena_allocator.hpp"
+#include "duckdb/storage/index_storage_info.hpp"
 #include "duckdb/storage/metadata/metadata_reader.hpp"
+#include "duckdb/storage/storage_info.hpp"
 #include "duckdb/execution/index/index_lock.hpp"
 #include "duckdb/storage/table/scan_state.hpp"
 #include "duckdb/storage/table_io_manager.hpp"
 #include "duckdb/storage/storage_manager.hpp"
+#include "duckdb/storage/checkpoint/table_index_writer.hpp"
+#include "duckdb/storage/partial_block_manager.hpp"
+#include "duckdb/storage/table/table_index_list.hpp"
+#include <utility>
 
 namespace duckdb {
 
@@ -87,9 +93,7 @@ static idx_t GetNode256LeafSegmentSize(const IndexStorageInfo &info, StorageVers
 
 ART::ART(const Identifier &name, const IndexConstraintType index_constraint_type, const vector<column_t> &column_ids,
          TableIOManager &table_io_manager, const vector<unique_ptr<Expression>> &unbound_expressions,
-         AttachedDatabase &db,
-         const shared_ptr<array<unsafe_unique_ptr<FixedSizeAllocator>, ALLOCATOR_COUNT>> &allocators_ptr,
-         const IndexStorageInfo &info)
+         AttachedDatabase &db, const shared_ptr<AllocatorArray> &allocators_ptr, const IndexStorageInfo &info)
     : BoundIndex(name, ART::TYPE_NAME, index_constraint_type, column_ids, table_io_manager, unbound_expressions, db),
       allocators(allocators_ptr), owns_data(false) {
 	// FIXME: Use the new byte representation function to support nested types.
@@ -123,7 +127,7 @@ ART::ART(const Identifier &name, const IndexConstraintType index_constraint_type
 		auto &block_manager = table_io_manager.GetIndexBlockManager();
 		const auto leaf256_size = GetNode256LeafSegmentSize(info, db.GetStorageManager().GetStorageVersion());
 
-		array<unsafe_unique_ptr<FixedSizeAllocator>, ALLOCATOR_COUNT> allocator_array = {
+		AllocatorArray allocator_array = {
 		    make_unsafe_uniq<FixedSizeAllocator>(prefix_size, block_manager),
 		    make_unsafe_uniq<FixedSizeAllocator>(sizeof(Leaf), block_manager),
 		    make_unsafe_uniq<FixedSizeAllocator>(sizeof(Node4), block_manager),
@@ -134,8 +138,7 @@ ART::ART(const Identifier &name, const IndexConstraintType index_constraint_type
 		    make_unsafe_uniq<FixedSizeAllocator>(sizeof(Node15Leaf), block_manager),
 		    make_unsafe_uniq<FixedSizeAllocator>(leaf256_size, block_manager),
 		};
-		allocators =
-		    make_shared_ptr<array<unsafe_unique_ptr<FixedSizeAllocator>, ALLOCATOR_COUNT>>(std::move(allocator_array));
+		allocators = make_shared_ptr<AllocatorArray>(std::move(allocator_array));
 	}
 
 	if (!info.IsValid()) {
@@ -167,6 +170,22 @@ ART::ART(const Identifier &name, const IndexConstraintType index_constraint_type
 	}
 }
 
+ART::ART(const ART &src, shared_ptr<AllocatorArray> allocators_ptr)
+    : BoundIndex(src.name, ART::TYPE_NAME, src.index_constraint_type, src.column_ids, src.table_io_manager,
+                 src.unbound_expressions, src.db),
+      root_ptr(src.root_ptr), allocators(std::move(allocators_ptr)), owns_data(true),
+      storage_version(src.storage_version), prefix_count(src.prefix_count) {
+	D_ASSERT(allocators);
+}
+
+uint8_t ART::GetAllocatorCount(const ARTSerializationFormat format) {
+	if (format == ARTSerializationFormat::V1_0_0) {
+		return DEPRECATED_ALLOCATOR_COUNT;
+	}
+
+	return ALLOCATOR_COUNT;
+}
+
 //===--------------------------------------------------------------------===//
 // Initialize Scans
 //===--------------------------------------------------------------------===//
@@ -192,11 +211,9 @@ static unique_ptr<IndexScanState> InitializeScanTwoPredicates(const Value &low_v
 	return std::move(result);
 }
 
-unique_ptr<IndexScanState> ART::TryInitializeScan(const Expression &expr, const Expression &filter_expr) const {
-	Value low_value, high_value, equal_value;
-	ExpressionType low_comparison_type = ExpressionType::INVALID, high_comparison_type = ExpressionType::INVALID;
-
-	// Try to find a matching index for any of the filter expressions.
+//! Matches a comparison between the index expression and a non-NULL constant.
+static bool TryMatchComparison(const Expression &expr, const Expression &filter_expr, ExpressionType &comparison_type,
+                               Value &constant_value) {
 	ComparisonExpressionMatcher matcher;
 
 	// Match on a comparison type.
@@ -208,44 +225,41 @@ unique_ptr<IndexScanState> ART::TryInitializeScan(const Expression &expr, const 
 	matcher.policy = SetMatcher::Policy::UNORDERED;
 
 	vector<reference<Expression>> bindings;
-	auto filter_match =
-	    matcher.Match(const_cast<Expression &>(filter_expr), bindings); // NOLINT: Match does not alter the expr.
-	if (filter_match) {
-		// This is a range or equality comparison with a constant value, so we can use the index.
-		// 		bindings[0] = the expression
-		// 		bindings[1] = the index expression
-		// 		bindings[2] = the constant
-		auto &comparison = bindings[0].get().Cast<BoundFunctionExpression>();
-		auto constant_value = bindings[2].get().Cast<BoundConstantExpression>().GetValue();
-		auto comparison_type = comparison.GetExpressionType();
+	if (!matcher.Match(const_cast<Expression &>(filter_expr), bindings)) { // NOLINT: Match does not alter the expr.
+		return false;
+	}
+	// 		bindings[0] = the expression
+	// 		bindings[1] = the index expression
+	// 		bindings[2] = the constant
+	auto &comparison = bindings[0].get().Cast<BoundFunctionExpression>();
+	constant_value = bindings[2].get().Cast<BoundConstantExpression>().GetValue();
+	comparison_type = comparison.GetExpressionType();
 
-		auto &left = BoundComparisonExpression::Left(comparison);
-		if (left.GetExpressionType() == ExpressionType::VALUE_CONSTANT) {
-			// The expression is on the right side, we flip the comparison expression.
-			comparison_type = FlipComparisonExpression(comparison_type);
-		}
+	auto &left = BoundComparisonExpression::Left(comparison);
+	if (left.GetExpressionType() == ExpressionType::VALUE_CONSTANT) {
+		// The expression is on the right side, we flip the comparison expression.
+		comparison_type = FlipComparisonExpression(comparison_type);
+	}
+	if (comparison_type == ExpressionType::COMPARE_NOT_DISTINCT_FROM) {
+		// Table filters discard NULL and false alike, so IS NOT DISTINCT FROM a
+		// non-NULL constant selects the same rows as equality.
+		comparison_type = ExpressionType::COMPARE_EQUAL;
+	}
+	// NULL is not indexed.
+	return !constant_value.IsNull();
+}
 
-		if (comparison_type == ExpressionType::COMPARE_NOT_DISTINCT_FROM) {
-			// Table filters discard NULL and false alike, so IS NOT DISTINCT FROM a
-			// non-NULL constant selects the same rows as equality. NULL is not indexed.
-			if (constant_value.IsNull()) {
-				return nullptr;
-			}
-			equal_value = constant_value;
-		} else if (comparison_type == ExpressionType::COMPARE_EQUAL) {
-			// An equality value overrides any other bounds.
-			equal_value = constant_value;
-		} else if (comparison_type == ExpressionType::COMPARE_GREATERTHANOREQUALTO ||
-		           comparison_type == ExpressionType::COMPARE_GREATERTHAN) {
-			// This is a lower bound.
-			low_value = constant_value;
-			low_comparison_type = comparison_type;
-		} else {
-			// This is an upper bound.
-			high_value = constant_value;
-			high_comparison_type = comparison_type;
-		}
-	} else if (filter_expr.GetExpressionType() == ExpressionType::COMPARE_BETWEEN) {
+static bool IsLowerBound(const ExpressionType comparison_type) {
+	return comparison_type == ExpressionType::COMPARE_GREATERTHAN ||
+	       comparison_type == ExpressionType::COMPARE_GREATERTHANOREQUALTO;
+}
+
+unique_ptr<IndexScanState> ART::TryInitializeScan(const Expression &expr, const Expression &filter_expr) const {
+	Value low_value, high_value;
+	ExpressionType low_comparison_type = ExpressionType::INVALID;
+	ExpressionType high_comparison_type = ExpressionType::INVALID;
+
+	if (filter_expr.GetExpressionType() == ExpressionType::COMPARE_BETWEEN) {
 		auto &between = filter_expr.Cast<BoundFunctionExpression>();
 		auto &input = BoundBetweenExpression::Input(between);
 		if (!input.Equals(expr)) {
@@ -269,20 +283,49 @@ unique_ptr<IndexScanState> ART::TryInitializeScan(const Expression &expr, const 
 		high_value = (upper_bound.Cast<BoundConstantExpression>()).GetValue();
 		high_comparison_type =
 		    upper_inclusive ? ExpressionType::COMPARE_LESSTHANOREQUALTO : ExpressionType::COMPARE_LESSTHAN;
+	} else {
+		// A rewritten BETWEEN arrives as (lower bound) AND (upper bound).
+		// The index scan result is not filtered again, so the comparisons must cover the filter exactly.
+		vector<reference<const Expression>> comparisons;
+		if (filter_expr.GetExpressionType() == ExpressionType::CONJUNCTION_AND) {
+			for (auto &child : filter_expr.Cast<BoundConjunctionExpression>().GetChildren()) {
+				comparisons.push_back(*child);
+			}
+		} else {
+			comparisons.push_back(filter_expr);
+		}
+		if (comparisons.size() > 2) {
+			return nullptr;
+		}
+		for (auto &comparison : comparisons) {
+			ExpressionType comparison_type;
+			Value constant_value;
+			if (!TryMatchComparison(expr, comparison.get(), comparison_type, constant_value)) {
+				return nullptr;
+			}
+			if (comparison_type == ExpressionType::COMPARE_EQUAL) {
+				if (comparisons.size() != 1) {
+					return nullptr;
+				}
+				return InitializeScanSinglePredicate(constant_value, ExpressionType::COMPARE_EQUAL);
+			}
+			auto is_lower = IsLowerBound(comparison_type);
+			auto &bound_value = is_lower ? low_value : high_value;
+			auto &bound_comparison_type = is_lower ? low_comparison_type : high_comparison_type;
+			if (!bound_value.IsNull()) {
+				// Two bounds on the same side.
+				return nullptr;
+			}
+			bound_value = constant_value;
+			bound_comparison_type = comparison_type;
+		}
 	}
-	// FIXME: add another if...else... to match rewritten BETWEEN,
-	// i.e., WHERE i BETWEEN 50 AND 1502 is rewritten to CONJUNCTION_AND.
-
 	// We cannot use an index scan.
-	if (equal_value.IsNull() && low_value.IsNull() && high_value.IsNull()) {
+	if (low_value.IsNull() && high_value.IsNull()) {
 		return nullptr;
 	}
 
 	// Initialize the index scan state and return it.
-	if (!equal_value.IsNull()) {
-		// Equality predicate.
-		return InitializeScanSinglePredicate(equal_value, ExpressionType::COMPARE_EQUAL);
-	}
 	if (!low_value.IsNull() && !high_value.IsNull()) {
 		// Two-sided predicate.
 		return InitializeScanTwoPredicates(low_value, low_comparison_type, high_value, high_comparison_type);
@@ -680,6 +723,15 @@ void ART::ResetStorage(IndexLock &index_lock) {
 	root_ptr.Clear();
 }
 
+void ART::DisownStorage(IndexLock &index_lock) {
+	index_lock.AssertHeld(*this);
+	D_ASSERT(owns_data);
+	for (auto &allocator : *allocators) {
+		allocator->DisownBuffers();
+	}
+	root_ptr.Clear();
+}
+
 idx_t ART::TryDelete(IndexLock &state, DataChunk &entries, Vector &row_ids, optional_ptr<SelectionVector> deleted_sel,
                      optional_ptr<SelectionVector> non_deleted_sel) {
 	state.AssertHeld(*this);
@@ -904,8 +956,8 @@ ARTSearchResult ART::ScanRange(ARTIndexScanState &scan_state, RowIdVectorOutput 
 
 	auto upper_bound = ARTKey::CreateKey(arena_allocator, scan_state.values[1], storage_version);
 
-	bool left_equal = scan_state.expressions[0] == ExpressionType ::COMPARE_GREATERTHANOREQUALTO;
-	bool right_equal = scan_state.expressions[1] == ExpressionType ::COMPARE_LESSTHANOREQUALTO;
+	bool left_equal = scan_state.expressions[0] == ExpressionType::COMPARE_GREATERTHANOREQUALTO;
+	bool right_equal = scan_state.expressions[1] == ExpressionType::COMPARE_LESSTHANOREQUALTO;
 	return SearchCloseRange(key, upper_bound, left_equal, right_equal, row_ids);
 }
 
@@ -1109,26 +1161,21 @@ void ART::TransformToDeprecated() {
 	}
 }
 
-IndexStorageInfo ART::PrepareSerialize(const case_insensitive_map_t<Value> &options, const bool v1_0_0_storage) {
-	if (v1_0_0_storage) {
+IndexStorageInfo ART::PrepareSerialize(const ARTSerializationFormat target_format) {
+	if (target_format == ARTSerializationFormat::V1_0_0) {
 		TransformToDeprecated();
 	}
 
 	IndexStorageInfo info(name);
 	info.root = root_ptr.Get();
-	info.options = options;
 
 	// It never hurts to serialize the storage version, even to older formats
 	if (storage_version != StorageVersion::INVALID) {
 		info.options["storage_version"] = Value::UBIGINT(static_cast<uint64_t>(storage_version));
 	}
 
-	for (auto &allocator : *allocators) {
-		allocator->RemoveEmptyBuffers();
-	}
-
 #ifdef DEBUG
-	if (v1_0_0_storage) {
+	if (target_format == ARTSerializationFormat::V1_0_0) {
 		D_ASSERT((*allocators)[NodePtr::GetAllocatorIdx(NType::NODE_7_LEAF)]->Empty());
 		D_ASSERT((*allocators)[NodePtr::GetAllocatorIdx(NType::NODE_15_LEAF)]->Empty());
 		D_ASSERT((*allocators)[NodePtr::GetAllocatorIdx(NType::NODE_256_LEAF)]->Empty());
@@ -1140,33 +1187,43 @@ IndexStorageInfo ART::PrepareSerialize(const case_insensitive_map_t<Value> &opti
 	return info;
 }
 
-IndexStorageInfo ART::SerializeToDisk(QueryContext context, const case_insensitive_map_t<Value> &options) {
-	IndexLock guard(*this);
-
-	// If the storage format uses deprecated leaf storage,
-	// then we need to transform all nested leaves before serialization.
-	auto v1_0_0_option = options.find("v1_0_0_storage");
-	bool v1_0_0_storage = v1_0_0_option == options.end() || v1_0_0_option->second != Value(false);
-	auto info = PrepareSerialize(options, v1_0_0_storage);
-	auto allocator_count = v1_0_0_storage ? DEPRECATED_ALLOCATOR_COUNT : ALLOCATOR_COUNT;
-
-	// Store the data on disk as partial blocks and set the block ids.
-	WritePartialBlocks(context, v1_0_0_storage);
-
-	for (idx_t i = 0; i < allocator_count; i++) {
-		info.allocator_infos.push_back((*allocators)[i]->GetInfo());
+ARTSerializationFormat ART::GetSerializationFormat(const StorageVersion storage_version) {
+	if (StorageManager::IsPriorToVersion(StorageVersion::V1_2_0, storage_version)) {
+		return ARTSerializationFormat::V1_0_0;
 	}
 
-	return info;
+	return ARTSerializationFormat::CURRENT;
 }
 
-IndexStorageInfo ART::SerializeToWAL(const case_insensitive_map_t<Value> &options) {
+IndexCheckpointResult ART::Checkpoint(PartialBlockManager &partial_block_manager, const StorageVersion version) {
+	const auto target_format = GetSerializationFormat(version);
+	// This may mutate the live ART into a deprecated representation, but we accept this to prevent double copying.
+	auto storage_info = PrepareSerialize(target_format);
+
+	const auto new_allocators = make_shared_ptr<AllocatorArray>();
+	const auto allocator_count = GetAllocatorCount(target_format);
+
+	// We allocate all allocators, but serialize in accordance with the target format.
+	for (idx_t i = 0; i < ALLOCATOR_COUNT; i++) {
+		auto &new_allocator = (*new_allocators)[i];
+
+		new_allocator = (*allocators)[i]->Persist(partial_block_manager);
+
+		if (i < allocator_count) {
+			storage_info.allocator_infos.push_back(new_allocator->GetInfo());
+		}
+	}
+
+	auto shadow = unique_ptr<ART>(new ART(*this, new_allocators));
+	return {make_shared_ptr<IndexStorageInfo>(std::move(storage_info)), std::move(shadow)};
+}
+
+IndexStorageInfo ART::SerializeToWAL(const StorageVersion target_version) {
 	// If the storage format uses deprecated leaf storage,
 	// then we need to transform all nested leaves before serialization.
-	auto v1_0_0_option = options.find("v1_0_0_storage");
-	bool v1_0_0_storage = v1_0_0_option == options.end() || v1_0_0_option->second != Value(false);
-	auto info = PrepareSerialize(options, v1_0_0_storage);
-	auto allocator_count = v1_0_0_storage ? DEPRECATED_ALLOCATOR_COUNT : ALLOCATOR_COUNT;
+	const auto target_format = GetSerializationFormat(target_version);
+	auto info = PrepareSerialize(target_format);
+	const auto allocator_count = GetAllocatorCount(target_format);
 
 	// Set the correct allocation sizes and get the map containing all buffers.
 	for (idx_t i = 0; i < allocator_count; i++) {
@@ -1175,20 +1232,10 @@ IndexStorageInfo ART::SerializeToWAL(const case_insensitive_map_t<Value> &option
 
 	for (idx_t i = 0; i < allocator_count; i++) {
 		info.allocator_infos.push_back((*allocators)[i]->GetInfo());
+		D_ASSERT(info.buffers[i].size() == info.allocator_infos[i].buffer_ids.size());
 	}
 
 	return info;
-}
-
-void ART::WritePartialBlocks(QueryContext context, const bool v1_0_0_storage) {
-	auto &block_manager = table_io_manager.GetIndexBlockManager();
-	PartialBlockManager partial_block_manager(context, block_manager, PartialBlockType::FULL_CHECKPOINT);
-
-	idx_t allocator_count = v1_0_0_storage ? DEPRECATED_ALLOCATOR_COUNT : ALLOCATOR_COUNT;
-	for (idx_t i = 0; i < allocator_count; i++) {
-		(*allocators)[i]->SerializeBuffers(partial_block_manager);
-	}
-	partial_block_manager.FlushPartialBlocks();
 }
 
 void ART::InitAllocators(const IndexStorageInfo &info) {

@@ -3,6 +3,7 @@
 #include "duckdb/common/bit_utils.hpp"
 #include "duckdb/logging/logger.hpp"
 #include "duckdb/main/client_context.hpp"
+#include "duckdb/parallel/event.hpp"
 #include "duckdb/parallel/pipeline.hpp"
 #include "duckdb/parallel/pipeline_executor.hpp"
 
@@ -196,6 +197,12 @@ void RecursiveCTEEpochMetrics::RecordDistinctGrouping(idx_t candidate_rows, idx_
 	distinct_grouping_work_ns.fetch_add(elapsed_ns);
 }
 
+void RecursiveCTEEpochMetrics::RecordPipelineWorkers(idx_t workers) {
+	auto current = max_pipeline_workers.load();
+	while (current < workers && !max_pipeline_workers.compare_exchange_weak(current, workers)) {
+	}
+}
+
 void RecursiveCTEEpochMetrics::RecordPipelineExecution(RecursiveCTEPipelineMetricType metric_type, idx_t elapsed_ns) {
 	switch (metric_type) {
 	case RecursiveCTEPipelineMetricType::RECURSIVE:
@@ -211,7 +218,7 @@ void RecursiveCTEEpochMetrics::RecordPipelineExecution(RecursiveCTEPipelineMetri
 }
 
 RecursiveCTEMetrics::RecursiveCTEMetrics(ClientContext &context, const PhysicalRecursiveCTE &op_p)
-    : logger(context.logger),
+    : logger(context.services->GetLoggerPtr()),
       enabled(logger && logger->ShouldLog(PhysicalOperatorLogType::NAME, PhysicalOperatorLogType::LEVEL)) {
 	if (enabled) {
 		identity = make_uniq<RecursiveCTELogIdentity>(op_p.type, op_p.NextMetricsInvocation());
@@ -355,6 +362,7 @@ void RecursiveCTEMetrics::LogEpochSummary(const RecursiveCTEEpochMetrics &epoch_
 	     {"frontier_rows_max", to_string(epoch_metrics.frontier_rows.maximum)},
 	     {"workers_p50_upper_bound", to_string(epoch_metrics.workers.MedianUpperBound())},
 	     {"workers_max", to_string(epoch_metrics.workers.maximum)},
+	     {"max_pipeline_workers", to_string(epoch_metrics.max_pipeline_workers.load())},
 	     {"tasks_p50_upper_bound", to_string(epoch_metrics.tasks.MedianUpperBound())},
 	     {"tasks_max", to_string(epoch_metrics.tasks.maximum)},
 	     {"elapsed_us_p50_upper_bound", to_string(epoch_metrics.elapsed_us.MedianUpperBound())},
@@ -400,6 +408,16 @@ void RecursiveCTEMetrics::LogEpochSummary(const RecursiveCTEEpochMetrics &epoch_
 	     {"invariant_build_execute_work_ns", to_string(epoch_metrics.invariant_build_execute_work_ns.load())},
 	     {"invariant_cte_materialization_execute_work_ns",
 	      to_string(epoch_metrics.invariant_cte_materialization_execute_work_ns.load())}});
+}
+
+RecursiveCTEEpochProgress::RecursiveCTEEpochProgress() {
+}
+
+RecursiveCTEEpochProgress::~RecursiveCTEEpochProgress() {
+}
+
+void RecursiveCTEEpochProgress::Reset() {
+	*this = RecursiveCTEEpochProgress();
 }
 
 RecursiveCTESchedulerState::RecursiveCTESchedulerState(shared_ptr<RecursiveExecutorPool> executor_pool_p,

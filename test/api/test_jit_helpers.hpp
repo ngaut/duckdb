@@ -19,6 +19,21 @@ static constexpr const char *JIT_HASH_JOIN_PROBE_EXECUTABLE_REASON = "generated 
 static constexpr const char *JIT_HASH_JOIN_BUILD_PROTOCOL_REASON =
     "hash_join_build_native<execution=primitive-protocol-build";
 
+//! Compares two results cell by cell through their string renderings. Rows are materialized once per result: a
+//! collection's own GetValue materializes every row on each call.
+static void RequireSameResultValues(QueryResult &result, QueryResult &reference) {
+	REQUIRE(result.RowCount() == reference.RowCount());
+	REQUIRE(result.ColumnCount() == reference.ColumnCount());
+	auto result_rows = result.Collection().GetRows();
+	auto reference_rows = reference.Collection().GetRows();
+	for (idx_t row_idx = 0; row_idx < result.RowCount(); row_idx++) {
+		for (idx_t col_idx = 0; col_idx < result.ColumnCount(); col_idx++) {
+			REQUIRE(result_rows.GetValue(col_idx, row_idx).ToString() ==
+			        reference_rows.GetValue(col_idx, row_idx).ToString());
+		}
+	}
+}
+
 static string EventPhase(const ExecutionRegionEvent &event) {
 	return ExecutionRegionEventPhaseToString(event.phase_kind);
 }

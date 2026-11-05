@@ -113,15 +113,11 @@ shared_ptr<TupleDataLayout> JoinHashTable::BuildRowLayout(const vector<LogicalTy
 }
 
 void JoinHashTable::FinishInitWithLayout(shared_ptr<TupleDataLayout> published_layout,
-                                         vector<uint8_t> dict_index_width_p) {
+                                         shared_ptr<const DictSurvivingInfo> dict_info_p) {
 	D_ASSERT(!layout_ptr);
 	layout_ptr = std::move(published_layout);
-	if (dict_index_width_p.empty()) {
-		dict_index_width.assign(build_types.size(), 0);
-	} else {
-		D_ASSERT(dict_index_width_p.size() == build_types.size());
-		dict_index_width = std::move(dict_index_width_p);
-	}
+	D_ASSERT(!dict_info_p || dict_info_p->columns.size() == build_types.size());
+	dict_info = std::move(dict_info_p);
 
 	// Initialize the row matcher that are used for filtering during the probing only if there are non-equality preds
 	if (!non_equality_predicates.empty()) {
@@ -138,6 +134,8 @@ void JoinHashTable::FinishInitWithLayout(shared_ptr<TupleDataLayout> published_l
 	}
 
 	chains_longer_than_one.store(false, std::memory_order_relaxed);
+	// a fresh matcher: Initialize appends, and a recursive CTE iteration publishes the layout again
+	row_matcher_build = RowMatcher();
 	row_matcher_build.Initialize(true, *layout_ptr, equality_predicates);
 
 	const auto &offsets = layout_ptr->GetOffsets();
@@ -147,8 +145,8 @@ void JoinHashTable::FinishInitWithLayout(shared_ptr<TupleDataLayout> published_l
 #ifdef DEBUG
 	// The published layout must be the canonical row layout that the execution-region contract exports to native
 	// backends, including dict-surviving narrowed slots (zero-copy offsets are stable by construction).
-	auto canonical =
-	    BuildExecutionHashJoinRowLayout(condition_types, build_types, PropagatesBuildSide(join_type), dict_index_width);
+	auto canonical = BuildExecutionHashJoinRowLayout(condition_types, build_types, PropagatesBuildSide(join_type),
+	                                                 DictSurvivingInfo::IndexWidths(dict_info, build_types.size()));
 	D_ASSERT(canonical.layout->GetTypes() == layout_ptr->GetTypes());
 	D_ASSERT(canonical.tuple_size == tuple_size && canonical.pointer_offset == pointer_offset &&
 	         canonical.entry_size == entry_size);
@@ -161,9 +159,6 @@ void JoinHashTable::FinishInitWithLayout(shared_ptr<TupleDataLayout> published_l
 
 	dead_end = make_unsafe_uniq_array_uninitialized<data_t>(layout_ptr->GetRowWidth());
 	memset(dead_end.get(), 0, layout_ptr->GetRowWidth());
-
-	// indexed parallel to build_types / payload columns (not to output_columns)
-	dict_registry.assign(build_types.size(), nullptr);
 }
 
 JoinHashTable::~JoinHashTable() {
@@ -201,31 +196,16 @@ void JoinHashTable::Merge(JoinHashTable &other) {
 		}
 	}
 
-	if (bloom_filter.IsInitialized() && other.bloom_filter.IsInitialized()) {
-		bloom_filter.Merge(other.bloom_filter);
-	}
+	// every thread-local table shares this operator's filter - a different one here would mean its rows
+	// never reached the filter that gets published
+	D_ASSERT(!other.bloom_filter || bloom_filter.get() == other.bloom_filter.get());
 
 	sink_collection->Combine(*other.sink_collection);
 
-	// Reconcile per-column pinned dictionary entries. For global dictionary producers every thread pins the
-	// same buffer_ptr, so this is normally a no-op or a "take theirs" adoption.
-	if (dict_registry.size() < other.dict_registry.size()) {
-		dict_registry.resize(other.dict_registry.size(), nullptr);
-	}
-	for (idx_t col = 0; col < other.dict_registry.size(); col++) {
-		if (!other.dict_registry[col]) {
-			continue;
-		}
-		if (!dict_registry[col]) {
-			dict_registry[col] = std::move(other.dict_registry[col]);
-		} else {
-			// Both threads pinned the same upstream entry, so ids match by construction; a mismatch is a producer bug.
-			D_ASSERT(dict_registry[col]->id == other.dict_registry[col]->id);
-		}
-	}
+	// dict_info is the descriptor shared by every per-thread JHT of this join; there is nothing to reconcile
 }
 
-static void ApplyBitmaskAndGetSaltBuild(Vector &hashes_v, Vector &salt_v, const idx_t &bitmask) {
+static void ApplyBitmaskAndGetSaltBuild(Vector &hashes_v, Vector &salt_v, const idx_t &bitmask, idx_t shift) {
 	const idx_t count = hashes_v.size();
 	if (hashes_v.GetVectorType() == VectorType::CONSTANT_VECTOR) {
 		auto &hash = *ConstantVector::GetData<hash_t>(hashes_v);
@@ -234,7 +214,7 @@ static void ApplyBitmaskAndGetSaltBuild(Vector &hashes_v, Vector &salt_v, const 
 		*ConstantVector::GetData<hash_t>(salt_v) = hash & ht_entry_t::SALT_MASK;
 		salt_v.Flatten();
 
-		hash = hash & bitmask;
+		hash = (hash >> shift) & bitmask;
 		hashes_v.Flatten();
 	} else {
 		hashes_v.Flatten();
@@ -245,7 +225,7 @@ static void ApplyBitmaskAndGetSaltBuild(Vector &hashes_v, Vector &salt_v, const 
 		for (idx_t i = 0; i < count; i++) {
 			const auto hash = hashes[i];
 			salt_data[i] = hash & ht_entry_t::SALT_MASK;
-			hashes[i] = hash & bitmask;
+			hashes[i] = (hash >> shift) & bitmask;
 		}
 	}
 }
@@ -267,6 +247,9 @@ static idx_t ProbeForPointersFlatInternal(JoinHashTable::ProbeState &state, Join
 
 	idx_t keys_to_compare_count = 0;
 	for (idx_t i = 0; i < count; i++) {
+		// rows ahead of i are still unprobed, so their dense hashes have not been overwritten yet
+		PrefetchHashTableEntry(i, count,
+		                       [&](idx_t next_idx) { return &entries_ptr[hashes_dense[next_idx] & bitmask]; });
 		auto row_hash = hashes_dense[i];
 		auto row_ht_offset = row_hash & bitmask;
 
@@ -315,6 +298,9 @@ static idx_t ProbeForPointersSelectedInternal(JoinHashTable::ProbeState &state, 
 
 	idx_t keys_to_compare_count = 0;
 	for (idx_t i = 0; i < count; i++) {
+		// rows ahead of i are still unprobed, so their dense hashes have not been overwritten yet
+		PrefetchHashTableEntry(i, count,
+		                       [&](idx_t next_idx) { return &entries_ptr[hashes_dense[next_idx] & bitmask]; });
 		auto row_hash = hashes_dense[i];
 		auto row_ht_offset = row_hash & bitmask;
 
@@ -528,17 +514,22 @@ static void GetRowPointersInternal(DataChunk &keys, TupleDataChunkState &key_sta
                                    Vector &hashes_v, optional_ptr<const SelectionVector> row_sel, idx_t &count,
                                    JoinHashTable &ht, unsafe_optional_ptr<ht_entry_t> entries,
                                    Vector &pointers_result_v, SelectionVector &match_sel, bool has_row_sel) {
-	// densify hashes: If there is no sel, flatten the hashes, else densify via UnifiedVectorFormat
-	if (has_row_sel) {
+	// Densify original hashes, mapping resident buckets once. Retries below already contain offsets and salt.
+	const auto input_count = count;
+	const auto bucket_shift = ht.GetBucketShift();
+	const auto bitmask = ht.bitmask;
+	if (has_row_sel || bucket_shift) {
 		auto hashes_unified = hashes_v.Values<hash_t>();
-		auto hashes_dense = FlatVector::Writer<idx_t>(state.hashes_dense_v, count);
+		auto hashes_dense = FlatVector::Writer<idx_t>(state.hashes_dense_v, input_count);
 
-		for (idx_t i = 0; i < count; i++) {
-			const auto row_index = row_sel->get_index(i);
-			hashes_dense.WriteValue(hashes_unified[row_index].GetValue());
+		for (idx_t i = 0; i < input_count; i++) {
+			const auto row_index = has_row_sel ? row_sel->get_index(i) : i;
+			const auto hash = hashes_unified[row_index].GetValue();
+			hashes_dense.WriteValue(bucket_shift ? (hash & ht_entry_t::SALT_MASK) | ((hash >> bucket_shift) & bitmask)
+			                                     : hash);
 		}
 	} else {
-		VectorOperations::Copy(hashes_v, state.hashes_dense_v, count, 0, 0);
+		VectorOperations::Copy(hashes_v, state.hashes_dense_v, input_count, 0, 0);
 	}
 
 	GetRowPointersFromDenseHashesInternal<USE_SALTS>(keys, key_state, state, row_sel, count, ht, entries,
@@ -566,6 +557,7 @@ bool JoinHashTable::GetExecutionHashJoinTableLayout(ExecutionHashJoinTableLayout
 	layout.found_match_column_present = PropagatesBuildSide(join_type);
 	layout.entries.capacity = capacity == DConstants::INVALID_INDEX ? 0 : capacity;
 	layout.entries.bitmask = bitmask == DConstants::INVALID_INDEX ? 0 : bitmask;
+	layout.entries.bucket_shift = bucket_shift;
 	layout.entries.pointer_mask = ht_entry_t::POINTER_MASK;
 	layout.entries.salt_mask = ht_entry_t::SALT_MASK;
 	if (ht_entry_t::POINTER_MASK == NumericLimits<uint64_t>::Maximum() && ht_entry_t::SALT_MASK == 0) {
@@ -576,9 +568,14 @@ bool JoinHashTable::GetExecutionHashJoinTableLayout(ExecutionHashJoinTableLayout
 	}
 	layout.entries.words = hash_map.get() ? reinterpret_cast<const uint64_t *>(hash_map.get()) : nullptr;
 	layout.entries.aux_next_ptrs = aux_next_ptrs_data;
-	if (bloom_filter.IsInitialized()) {
-		layout.bloom_filter.words = bloom_filter.Data();
-		layout.bloom_filter.bitmask = bloom_filter.Bitmask();
+	{
+		lock_guard<mutex> guard(bloom_filter_lock);
+		// only a sealed filter covers the complete build side; an unsealed one would reject matching probe rows, and a
+		// saturated one rejects too little to pay for the hashing
+		if (bloom_filter && bloom_filter->IsSealed() && bloom_filter->IsUseful()) {
+			layout.bloom_filter.words = bloom_filter->Data();
+			layout.bloom_filter.bitmask = bloom_filter->Bitmask();
+		}
 	}
 	PrefixRangeLookupData prefix_lookup;
 	// the prefix-range filter is always keyed on the first join condition's type
@@ -634,6 +631,14 @@ void JoinHashTable::GetRowPointersWithDenseHashes(DataChunk &keys, TupleDataChun
 	// Dense probing writes hashes by row index. Hashing a constant vector preserves its vector type, so establish
 	// the flat-vector invariant once at the dense probe boundary instead of requiring every hash producer to do so.
 	state.hashes_dense_v.Flatten();
+	if (bucket_shift) {
+		// map the original hashes to resident buckets once, keeping the salt bits (see GetRowPointersInternal)
+		auto hashes_dense = FlatVector::GetDataMutable<hash_t>(state.hashes_dense_v);
+		for (idx_t i = 0; i < count; i++) {
+			const auto hash = hashes_dense[i];
+			hashes_dense[i] = (hash & ht_entry_t::SALT_MASK) | ((hash >> bucket_shift) & bitmask);
+		}
+	}
 	auto entries = GetEntries();
 	if (UseSalt()) {
 		GetRowPointersFromDenseHashesFlatInternal<true>(keys, key_state, state, count, *this, entries,
@@ -806,8 +811,9 @@ uint8_t JoinHashTable::GetDictSurvivingIndexWidth(idx_t build_col_idx, const Vec
 	if (!dict_size.IsValid()) {
 		return 0;
 	}
-	// only narrow when strictly smaller than the native slot (never regress; e.g. INTEGER over a D<=256 dict)
-	const uint8_t index_width = DictIndexWidth(dict_size.GetIndex());
+	// only narrow when strictly smaller than the native slot (never regress; e.g. INTEGER over a D<=255 dict).
+	// One extra slot is reserved for the NULL index that encodes NULL-only chunks (see CreateDictSurvivingColumn).
+	const uint8_t index_width = DictIndexWidth(dict_size.GetIndex() + 1);
 	const auto native_bytes = GetTypeIdSize(type.InternalType());
 	if (index_width >= native_bytes) {
 		return 0;
@@ -815,34 +821,78 @@ uint8_t JoinHashTable::GetDictSurvivingIndexWidth(idx_t build_col_idx, const Vec
 	return index_width;
 }
 
-void JoinHashTable::PinDictSurvivingColumn(idx_t build_col_idx, const Vector &incoming, uint8_t index_width) {
-	// Slot was narrowed on the first chunk; there is no fallback for a non-dict later chunk. Throw, not D_ASSERT:
-	// the Cast<DictionaryBuffer> below is UB in release on a non-dict vector, scattering foreign bytes as indices.
-	if (incoming.GetVectorType() != VectorType::DICTIONARY_VECTOR || DictionaryVector::DictionaryId(incoming).empty() ||
-	    !DictionaryVector::IsGlobalDictionary(incoming)) {
-		throw InternalException("dict-surviving join: narrowed column %llu received a "
-		                        "non-global-dictionary chunk; build pipeline is not single-source",
-		                        static_cast<uint64_t>(build_col_idx));
+vector<uint8_t> DictSurvivingInfo::IndexWidths(optional_ptr<const DictSurvivingInfo> info, idx_t column_count) {
+	vector<uint8_t> result(column_count, 0);
+	if (info) {
+		D_ASSERT(info->columns.size() == column_count);
+		for (idx_t col = 0; col < column_count; col++) {
+			result[col] = info->columns[col].index_width;
+		}
 	}
-	const auto &entry = incoming.Buffer().Cast<DictionaryBuffer>().GetEntry();
-	if (dict_registry[build_col_idx]) {
-		// Subsequent chunks wrap the same entry, so ids match by construction; a mismatch is a producer bug.
-		D_ASSERT(dict_registry[build_col_idx]->id == entry.id);
-		return;
+	return result;
+}
+
+LogicalType DictSurvivingInfo::IndexType(uint8_t index_width) {
+	switch (index_width) {
+	case sizeof(uint8_t):
+		return LogicalType::UTINYINT;
+	case sizeof(uint16_t):
+		return LogicalType::USMALLINT;
+	default:
+		D_ASSERT(index_width == sizeof(uint32_t));
+		return LogicalType::UINTEGER;
 	}
+}
+
+DictSurvivingColumn JoinHashTable::CreateDictSurvivingColumn(const Vector &incoming, uint8_t index_width) {
+	D_ASSERT(index_width != 0);
+	D_ASSERT(incoming.GetVectorType() == VectorType::DICTIONARY_VECTOR);
+	D_ASSERT(DictionaryVector::IsGlobalDictionary(incoming));
 	// The upstream child is a zero-copy gather: its long strings point into the producer's row-store heap, recycled
-	// before we gather on probe. Deep-copy into a self-owned entry so it outlives them.
-	const auto &upstream_child = entry.data;
-	const auto child_count = upstream_child.size();
-	// child_count fits index_width by construction (publisher sized the width to this dict). Assert so a producer
-	// that grows the child past it fails loudly instead of truncating in the UnsafeNumericCast.
-	D_ASSERT(child_count <= (idx_t(1) << (8 * index_width)));
-	auto owned_entry = DictionaryVector::CreateReusableGlobalDictionary(upstream_child.GetType(), child_count);
-	if (child_count > 0) {
-		VectorOperations::Copy(upstream_child, owned_entry->data, child_count, 0, 0);
+	// before we gather on probe. Deep-copy into a self-owned entry so it outlives them, and append one NULL slot at
+	// index upstream_count: NULL-only chunks (the unmatched-build scan of an upstream FULL/RIGHT join fills the probe
+	// columns with NULL) are stored as that index, so the regular dictionary gather reconstructs them.
+	const auto &upstream_child = DictionaryVector::Child(incoming);
+	const auto upstream_count = upstream_child.size();
+	// GetDictSurvivingIndexWidth sized the width to upstream_count + 1
+	D_ASSERT(upstream_count < (idx_t(1) << (8 * index_width)));
+	DictSurvivingColumn column;
+	column.index_width = index_width;
+	// CreateReusableGlobalDictionary assigns a fresh id: this is a different dictionary than the upstream one (one
+	// more slot), so a downstream consumer must not treat the two as interchangeable.
+	column.entry = DictionaryVector::CreateReusableGlobalDictionary(upstream_child.GetType(), upstream_count + 1);
+	if (upstream_count > 0) {
+		VectorOperations::Copy(upstream_child, column.entry->data, upstream_count, 0, 0);
 	}
-	owned_entry->id = entry.id;
-	dict_registry[build_col_idx] = std::move(owned_entry);
+	FlatVector::SetNull(column.entry->data, upstream_count, true);
+	column.upstream_id = DictionaryVector::DictionaryId(incoming);
+	return column;
+}
+
+Vector JoinHashTable::EncodeDictSurvivingColumn(const DictSurvivingColumn &column, idx_t build_col_idx,
+                                                const Vector &incoming, idx_t count) {
+	if (incoming.GetVectorType() == VectorType::DICTIONARY_VECTOR) {
+		// Slot was narrowed against one specific upstream dictionary; a different one would scatter foreign indices.
+		if (DictionaryVector::DictionaryId(incoming) != column.upstream_id) {
+			throw InternalException("dict-surviving join: narrowed column %llu received a chunk with an unexpected "
+			                        "dictionary; build pipeline is not single-source",
+			                        static_cast<uint64_t>(build_col_idx));
+		}
+		// Indices are < upstream size by construction, and the publisher sized the width to upstream size + 1
+		return ScatterDictIndices(column.index_width, DictionaryVector::SelVector(incoming), count,
+		                          buffer_manager.GetBufferAllocator());
+	}
+	if (!VectorOperations::HasNotNull(incoming)) {
+		// e.g. the unmatched-build scan of an upstream FULL/RIGHT join: every row stores the reserved NULL index
+		const auto null_index =
+		    Value::Numeric(DictSurvivingInfo::IndexType(column.index_width), NumericCast<int64_t>(column.NullIndex()));
+		return Vector(null_index, count_t(count));
+	}
+	// There is no fallback for values that are not in the pinned dictionary. Throw, not D_ASSERT: storing the
+	// native bytes into a narrowed slot would corrupt the row store.
+	throw InternalException("dict-surviving join: narrowed column %llu received a non-dictionary chunk with "
+	                        "values; build pipeline is not single-source",
+	                        static_cast<uint64_t>(build_col_idx));
 }
 
 static bool MarkJoinNullRows(const UnifiedVectorFormat &format, idx_t count,
@@ -927,16 +977,15 @@ idx_t JoinHashTable::PrepareBuildChunk(PartitionedTupleDataAppendState &append_s
 	D_ASSERT(build_types.size() == payload.ColumnCount());
 	for (idx_t i = 0; i < payload.ColumnCount(); i++) {
 		auto &incoming = payload.data[i];
-		const uint8_t index_width = i < dict_index_width.size() ? dict_index_width[i] : 0;
-		if (index_width == 0) {
+		auto dict_column = GetDictSurvivingColumn(i);
+		if (!dict_column) {
 			source_chunk.data[col_offset + i].Reference(incoming);
 			continue;
 		}
-		// Narrowed column: pin the dictionary, then scatter its sel indices at the chosen width in place of the value.
+		// Narrowed column: store dictionary indices (or the reserved NULL index) at the chosen width, not the value.
 		// The source chunk shares ownership of the index vector until the append completes.
-		PinDictSurvivingColumn(i, incoming, index_width);
-		source_chunk.data[col_offset + i].Reference(ScatterDictIndices(
-		    index_width, DictionaryVector::SelVector(incoming), payload.size(), buffer_manager.GetBufferAllocator()));
+		source_chunk.data[col_offset + i].Reference(
+		    EncodeDictSurvivingColumn(*dict_column, i, incoming, payload.size()));
 	}
 	col_offset += payload.ColumnCount();
 	if (PropagatesBuildSide(join_type)) {
@@ -969,8 +1018,8 @@ void JoinHashTable::HashBuildChunk(PartitionedTupleDataAppendState &append_state
 	// hash the keys and obtain an entry in the list
 	// note that we only hash the keys used in the equality comparison
 	Hash(keys, build_selection, build_count, hash_values);
-	if (bloom_filter.IsInitialized()) {
-		bloom_filter.InsertHashes(hash_values);
+	if (bloom_filter) {
+		bloom_filter->InsertHashes(hash_values, build_selection, build_count);
 	}
 
 	// Re-reference and ToUnifiedFormat the hash column after computing it
@@ -1122,6 +1171,7 @@ static inline void InsertMatchesAndIncrementMisses(unsafe_optional_ptr<atomic<ht
 		}
 		const auto key_match_sel = state.key_match_sel.data();
 		const auto keys_to_compare_sel = state.keys_to_compare_sel.data();
+		const auto pointer_offset = ht.pointer_offset;
 		for (idx_t i = 0; i < key_match_count; i++) {
 			const auto need_compare_idx = key_match_sel[i];
 			const auto entry_index = keys_to_compare_sel[need_compare_idx];
@@ -1131,7 +1181,7 @@ static inline void InsertMatchesAndIncrementMisses(unsafe_optional_ptr<atomic<ht
 			const auto row_ptr_to_insert = lhs_row_locations[entry_index];
 
 			const auto salt = hash_salts[entry_index];
-			InsertRowToMatchingEntry<PARALLEL>(entry, row_ptr_to_insert, salt, ht.pointer_offset);
+			InsertRowToMatchingEntry<PARALLEL>(entry, row_ptr_to_insert, salt, pointer_offset);
 		}
 	}
 
@@ -1158,9 +1208,13 @@ static idx_t InsertHashesLoopProbe(unsafe_optional_ptr<atomic<ht_entry_t>> entri
 	auto *__restrict entries_ptr = entries.get();
 	auto *__restrict rhs_row_locations = FlatVector::GetDataMutable<data_ptr_t>(state.rhs_row_locations);
 	auto *__restrict keys_to_compare_sel = state.keys_to_compare_sel.data();
+	const auto pointer_offset = ht.pointer_offset;
 
 	idx_t salt_match_count = 0;
 	for (idx_t i = 0; i < remaining_count; i++) {
+		PrefetchHashTableEntry(i, remaining_count, [&](idx_t next_idx) {
+			return &entries_ptr[ht_offsets[HAS_SEL ? remaining_sel_read[next_idx] : next_idx]];
+		});
 		const idx_t row_index = HAS_SEL ? remaining_sel_read[i] : i;
 		auto &ht_offset = ht_offsets[row_index];
 		const auto salt = hash_salts[row_index];
@@ -1190,7 +1244,7 @@ static idx_t InsertHashesLoopProbe(unsafe_optional_ptr<atomic<ht_entry_t>> entri
 			auto &atomic_entry = entries_ptr[ht_offset];
 			const auto row_ptr_to_insert = lhs_row_locations[row_index];
 			const auto potential_collided_ptr =
-			    InsertRowToKnownEmptyEntry<PARALLEL>(atomic_entry, row_ptr_to_insert, salt, ht.pointer_offset);
+			    InsertRowToKnownEmptyEntry<PARALLEL>(atomic_entry, row_ptr_to_insert, salt, pointer_offset);
 
 			if (PARALLEL) {
 				// if the insertion was not successful, the entry was occupied in the meantime, so we have to
@@ -1216,7 +1270,7 @@ static void InsertHashesLoop(unsafe_optional_ptr<atomic<ht_entry_t>> entries, Ve
                              JoinHashTable::InsertState &state, const TupleDataCollection &data_collection,
                              JoinHashTable &ht) {
 	D_ASSERT(hashes_v.GetType().id() == LogicalType::HASH);
-	ApplyBitmaskAndGetSaltBuild(hashes_v, state.salt_v, ht.bitmask);
+	ApplyBitmaskAndGetSaltBuild(hashes_v, state.salt_v, ht.bitmask, ht.GetBucketShift());
 	const idx_t count = hashes_v.size();
 
 	const auto &layout = data_collection.GetLayout();
@@ -1298,9 +1352,9 @@ static void InsertHashesLoop(unsafe_optional_ptr<atomic<ht_entry_t>> entries, Ve
 
 void JoinHashTable::InsertHashes(Vector &hashes_v, TupleDataChunkState &chunk_state, InsertState &insert_state,
                                  bool parallel) {
-	// Insert Hashes into the BF
-	if (bloom_filter.IsInitialized()) {
-		bloom_filter.InsertHashes(hashes_v);
+	// a sealed filter was accumulated during Sink and is already complete; only a finalize-built one fills here
+	if (bloom_filter && !bloom_filter->IsSealed()) {
+		bloom_filter->InsertHashes(hashes_v);
 	}
 	auto atomic_entries = GetAtomicEntries();
 	auto &row_locations = chunk_state.row_locations;
@@ -1358,7 +1412,7 @@ void JoinHashTable::MergePrefixRangeBuildState(PrefixRangeFilter::BuildState &st
 	prefix_range_filter->MergeBuildState(state);
 }
 
-void JoinHashTable::AllocatePointerTable() {
+void JoinHashTable::AllocatePointerTable(bool use_radix_layout) {
 	capacity = PointerTableCapacity(Count());
 	D_ASSERT(IsPowerOfTwo(capacity));
 
@@ -1367,9 +1421,10 @@ void JoinHashTable::AllocatePointerTable() {
 		throw InternalException("Hashtable capacity exceeds 48-bit limit (2^48 - 1)");
 	}
 
-	if (should_build_bloom_filter && !bloom_filter.IsInitialized()) {
-		bloom_filter_init_count = MaxValue<idx_t>(Count(), 1);
-		bloom_filter.Initialize(context, bloom_filter_init_count);
+	if (should_build_bloom_filter && (!bloom_filter || bloom_filter->IsSealed())) {
+		// (re)create the finalize-built filter now that the actual build count is known
+		bloom_filter = recycled_bloom_filter ? std::move(recycled_bloom_filter) : make_shared_ptr<BloomFilter>();
+		bloom_filter->Initialize(context, MaxValue<idx_t>(Count(), 1));
 	}
 
 	if (hash_map.get()) {
@@ -1377,58 +1432,40 @@ void JoinHashTable::AllocatePointerTable() {
 		auto current_capacity = hash_map.GetSize() / sizeof(ht_entry_t);
 		if (capacity > current_capacity) {
 			// Need more space
-			hash_map = buffer_manager.GetBufferAllocator().Allocate(capacity * sizeof(ht_entry_t));
+			hash_map = buffer_manager.GetBufferAllocator().AllocateHuge(capacity * sizeof(ht_entry_t));
 		} else {
 			// Just use the current hash map
 			capacity = current_capacity;
 		}
 	} else {
 		// Allocate a hash map
-		hash_map = buffer_manager.GetBufferAllocator().Allocate(capacity * sizeof(ht_entry_t));
+		hash_map = buffer_manager.GetBufferAllocator().AllocateHuge(capacity * sizeof(ht_entry_t));
 	}
 	D_ASSERT(hash_map.GetSize() == capacity * sizeof(ht_entry_t));
 
 	bitmask = capacity - 1;
+	const auto capacity_bits = RadixPartitioning::RadixBitsOfPowerOfTwo(capacity);
+	bucket_shift =
+	    use_radix_layout && radix_bits > 0 && capacity_bits >= radix_bits ? RadixPartitioning::Shift(capacity_bits) : 0;
 
 	DUCKDB_LOG(context, PhysicalOperatorLogType, op, "JoinHashTable", "Build",
 	           {{"rows", to_string(data_collection->Count())},
 	            {"size", to_string(data_collection->SizeInBytes() + hash_map.GetSize())}});
 }
 
-void JoinHashTable::PrepareBloomFilterForFinalize() {
-	if (!should_build_bloom_filter) {
-		return;
-	}
-
-	// Finalize scans every build tuple and inserts its hash into the bloom filter.
-	// Make sure any existing filter has enough sectors for the actual build count.
-	const auto build_count = Count();
-	const auto actual_init_count = MaxValue<idx_t>(build_count, 1);
-	if (bloom_filter.IsInitialized()) {
-		const auto current_sectors = BloomFilter::GetNumberOfSectors(bloom_filter_init_count);
-		const auto required_sectors = BloomFilter::GetNumberOfSectors(actual_init_count);
-		if (current_sectors >= required_sectors) {
-			return;
-		}
-	}
-
-	bloom_filter.Reset();
-	bloom_filter_init_count = actual_init_count;
-	bloom_filter.Initialize(context, bloom_filter_init_count);
-}
-
 void JoinHashTable::EnsureBloomFilterForProbe() {
 	lock_guard<mutex> guard(bloom_filter_lock);
-	if (bloom_filter.IsInitialized()) {
+	// a sealed filter covers the complete build side, whether it was accumulated during Sink or built in finalize
+	if (bloom_filter && bloom_filter->IsSealed()) {
 		return;
 	}
 	if (!finalized || !hash_map.get() || Count() == 0) {
 		return;
 	}
 
-	bloom_filter_init_count = Count();
-	bloom_filter.Initialize(context, bloom_filter_init_count);
-
+	// The row slot that held the hash stores the chain pointer once the table is finalized, so rehash the stored keys.
+	auto filter = make_shared_ptr<BloomFilter>();
+	filter->Initialize(context, Count());
 	DataChunk keys;
 	TupleDataChunkState key_state;
 	data_collection->InitializeChunk(keys, equality_predicate_columns);
@@ -1453,15 +1490,17 @@ void JoinHashTable::EnsureBloomFilterForProbe() {
 		data_collection->Gather(row_location_vector, sel, count, equality_predicate_columns, keys, sel,
 		                        key_state.cached_cast_vectors);
 		Hash(keys, sel, count, hashes);
-		bloom_filter.InsertHashes(hashes);
+		filter->InsertHashes(hashes, sel, count);
 	} while (iterator.Next());
-	bloom_filter.Finalize();
+	filter->Seal(context);
+	// Publish the complete filter only: GetExecutionHashJoinTableLayout reads it under the same lock
+	bloom_filter = std::move(filter);
 }
 
 void JoinHashTable::MarkFinalized() {
-	if (bloom_filter.IsInitialized()) {
-		bloom_filter.Finalize();
-	}
+	// The bloom filter is sealed where it becomes complete: after Sink when Sink accumulated it, after the finalize
+	// tasks when finalize built it. An unsealed filter covers only part of the build side and stays unexposed (see
+	// GetExecutionHashJoinTableLayout), so it must not be sealed here.
 	finalized = true;
 }
 
@@ -1816,8 +1855,8 @@ private:
 template <class K0, class K1, class CONSUMER>
 static idx_t ProbeInt64PairNoChainLoop(const UnifiedVectorFormat &key0_format, const UnifiedVectorFormat &key1_format,
                                        const ht_entry_t *__restrict entries, const idx_t bitmask,
-                                       const idx_t key0_offset, const idx_t key1_offset, const bool use_salt,
-                                       const idx_t count, CONSUMER &consumer) {
+                                       const idx_t bucket_shift, const idx_t key0_offset, const idx_t key1_offset,
+                                       const bool use_salt, const idx_t count, CONSUMER &consumer) {
 	const auto *__restrict key0_data = UnifiedVectorFormat::GetData<K0>(key0_format);
 	const auto *__restrict key1_data = UnifiedVectorFormat::GetData<K1>(key1_format);
 	const auto &key0_sel = *key0_format.sel;
@@ -1827,7 +1866,7 @@ static idx_t ProbeInt64PairNoChainLoop(const UnifiedVectorFormat &key0_format, c
 		const auto key0 = key0_data[key0_sel.get_index(row_idx)];
 		const auto key1 = key1_data[key1_sel.get_index(row_idx)];
 		const auto hash = CombineHashScalar(duckdb::Hash<K0>(key0), duckdb::Hash<K1>(key1));
-		auto ht_offset = hash & bitmask;
+		auto ht_offset = (hash >> bucket_shift) & bitmask;
 		const auto salt = hash & ht_entry_t::SALT_MASK;
 
 		while (true) {
@@ -1878,22 +1917,26 @@ bool JoinHashTable::TryProbeInt64PairNoChain(ScanStructure &scan_structure, Data
 	if (key0_physical_type == PhysicalType::INT64) {
 		if (key1_physical_type == PhysicalType::INT64) {
 			match_count =
-			    ProbeInt64PairNoChainLoop<int64_t, int64_t>(key0_format, key1_format, entries, bitmask, key0_offset,
-			                                                key1_offset, use_salt, scan_structure.count, consumer);
+			    ProbeInt64PairNoChainLoop<int64_t, int64_t>(key0_format, key1_format, entries, bitmask, bucket_shift,
+			                                                key0_offset, key1_offset, use_salt, scan_structure.count,
+			                                                consumer);
 		} else {
 			match_count =
-			    ProbeInt64PairNoChainLoop<int64_t, uint64_t>(key0_format, key1_format, entries, bitmask, key0_offset,
-			                                                 key1_offset, use_salt, scan_structure.count, consumer);
+			    ProbeInt64PairNoChainLoop<int64_t, uint64_t>(key0_format, key1_format, entries, bitmask, bucket_shift,
+			                                                 key0_offset, key1_offset, use_salt, scan_structure.count,
+			                                                 consumer);
 		}
 	} else {
 		if (key1_physical_type == PhysicalType::INT64) {
 			match_count =
-			    ProbeInt64PairNoChainLoop<uint64_t, int64_t>(key0_format, key1_format, entries, bitmask, key0_offset,
-			                                                 key1_offset, use_salt, scan_structure.count, consumer);
+			    ProbeInt64PairNoChainLoop<uint64_t, int64_t>(key0_format, key1_format, entries, bitmask, bucket_shift,
+			                                                 key0_offset, key1_offset, use_salt, scan_structure.count,
+			                                                 consumer);
 		} else {
 			match_count =
-			    ProbeInt64PairNoChainLoop<uint64_t, uint64_t>(key0_format, key1_format, entries, bitmask, key0_offset,
-			                                                  key1_offset, use_salt, scan_structure.count, consumer);
+			    ProbeInt64PairNoChainLoop<uint64_t, uint64_t>(key0_format, key1_format, entries, bitmask, bucket_shift,
+			                                                  key0_offset, key1_offset, use_salt, scan_structure.count,
+			                                                  consumer);
 		}
 	}
 	scan_structure.count = match_count;
@@ -2188,10 +2231,7 @@ static idx_t DictSurvivingPayloadIndex(const JoinHashTable &ht, idx_t layout_col
 		return DConstants::INVALID_INDEX;
 	}
 	const auto payload_idx = layout_col_idx - cond_count;
-	if (payload_idx < ht.dict_registry.size() && ht.dict_registry[payload_idx]) {
-		return payload_idx;
-	}
-	return DConstants::INVALID_INDEX;
+	return ht.GetDictSurvivingColumn(payload_idx) ? payload_idx : DConstants::INVALID_INDEX;
 }
 
 static bool CanGatherRHSColumnFlat(const LogicalType &type) {
@@ -2286,7 +2326,7 @@ bool JoinHashTable::RHSOutputIsGlobalDictionary(idx_t rhs_output_idx) const {
 		return rhs_output_idx < dict_arrays.size() && dict_arrays[rhs_output_idx] &&
 		       dict_arrays[rhs_output_idx]->global_dictionary;
 	}
-	// a dict-surviving slot re-emits its pinned entry, which is a global dictionary
+	// a dict-surviving slot re-emits its owned entry, which is a global dictionary
 	return DictSurvivingPayloadIndex(*this, output_columns[rhs_output_idx]) != DConstants::INVALID_INDEX;
 }
 
@@ -2361,7 +2401,9 @@ bool JoinHashTable::TryGetRHSFixedColumnSource(idx_t rhs_output_idx,
 	source.layout_column_idx = output_col_idx;
 	source.layout_column_count = layout_ptr->ColumnCount();
 	if (dict_payload_idx != DConstants::INVALID_INDEX) {
-		auto &dictionary = dict_registry[dict_payload_idx]->data;
+		// the owned dictionary carries one trailing NULL slot, so its validity is exported with it
+		auto &dict_column = *GetDictSurvivingColumn(dict_payload_idx);
+		auto &dictionary = dict_column.entry->data;
 		if (dictionary.GetVectorType() != VectorType::FLAT_VECTOR || dictionary.GetType() != type) {
 			source.blocker = "hash-join-rhs-source-dictionary-shape";
 			return false;
@@ -2369,7 +2411,7 @@ bool JoinHashTable::TryGetRHSFixedColumnSource(idx_t rhs_output_idx,
 		auto &validity = FlatVector::Validity(dictionary);
 		source.storage_kind = ExecutionHashJoinRHSFixedColumnStorageKind::DICTIONARY;
 		source.dictionary_index_offset = layout_offsets[output_col_idx];
-		source.dictionary_index_width = dict_index_width[dict_payload_idx];
+		source.dictionary_index_width = dict_column.index_width;
 		source.dictionary_data = FlatVector::GetData(dictionary);
 		source.dictionary_validity = validity.CannotHaveNull() ? nullptr : validity.GetData();
 		source.dictionary_count = dictionary.size();
@@ -2427,12 +2469,13 @@ void JoinHashTable::GatherRHSColumn(Vector &row_ptrs, const SelectionVector &ptr
 	const auto output_col_idx = output_columns[rhs_output_idx];
 	const auto payload_idx = DictSurvivingPayloadIndex(*this, output_col_idx);
 	if (payload_idx != DConstants::INVALID_INDEX) {
-		// Pinned column: re-emit the upstream dictionary, reading the dict index at the width chosen at
+		// Narrowed column: re-emit its owned dictionary, reading the dict index at the width chosen at
 		// layout-publication time.
+		auto &dict_column = *GetDictSurvivingColumn(payload_idx);
 		SelectionVector build_sel_vec(count);
-		LoadDictIndices(dict_index_width[payload_idx], FlatVector::GetData<data_ptr_t>(row_ptrs), ptr_sel, count,
+		LoadDictIndices(dict_column.index_width, FlatVector::GetData<data_ptr_t>(row_ptrs), ptr_sel, count,
 		                layout_ptr->GetOffsets()[output_col_idx], build_sel_vec);
-		result.Dictionary(dict_registry[payload_idx], build_sel_vec, count);
+		result.Dictionary(dict_column.entry, build_sel_vec, count);
 		return;
 	}
 	D_ASSERT(result.GetType() == layout_ptr->GetTypes()[output_col_idx]);
@@ -2580,13 +2623,14 @@ void ScanStructure::NextSemiOrAntiJoin(DataChunk &keys, DataChunk &probe_data, D
 
 	// create the selection vector from the matches that were found
 	SelectionVector sel(STANDARD_VECTOR_SIZE);
-	idx_t result_count = 0;
-	for (idx_t i = 0; i < keys.size(); i++) {
-		if (found_match[i] == MATCH) {
-			// part of the result
-			sel.set_index(result_count++, i);
-		}
+	optional<array_ptr<sel_t>> true_sel, false_sel;
+	if (MATCH) {
+		true_sel = array_ptr<sel_t>(sel.data(), sel.Capacity());
+	} else {
+		false_sel = array_ptr<sel_t>(sel.data(), sel.Capacity());
 	}
+	auto true_count = SelectionVector::SelectFromBoolean(found_match.get(), nullptr, keys.size(), true_sel, false_sel);
+	auto result_count = MATCH ? true_count : keys.size() - true_count;
 	// construct the final result
 	if (result_count > 0) {
 		// extract only OUTPUT columns from probe_data
@@ -2976,14 +3020,10 @@ void ScanStructure::NextUniqueLeftJoin(DataChunk &keys, DataChunk &probe_data, D
 	D_ASSERT(this->count == 0);
 
 	// Build result_sel from found_match so we know which positions to gather RHS data from.
-	// Use a predicated increment to avoid branch mispredictions.
-	idx_t result_count = 0;
 	SelectionVector result_sel(STANDARD_VECTOR_SIZE);
 	const idx_t probe_size = probe_data.size();
-	for (idx_t j = 0; j < probe_size; j++) {
-		result_sel.set_index(result_count, j);
-		result_count += found_match[j];
-	}
+	auto result_count = SelectionVector::SelectFromBoolean(found_match.get(), nullptr, probe_size,
+	                                                       array_ptr<sel_t>(result_sel.data(), result_sel.Capacity()));
 
 	// Reference the columns of the left side from the result (zero-copy).
 	D_ASSERT(ht.lhs_output_in_probe.size() > 0);
@@ -3036,20 +3076,22 @@ void JoinHashTable::ScanFullOuter(JoinHTScanState &state, Vector &addresses, Dat
 	const auto row_locations = iterator.GetRowLocations();
 	do {
 		const auto count = iterator.GetCurrentChunkCount();
-		for (idx_t i = state.offset_in_chunk; i < count; i++) {
-			auto found_match = Load<bool>(row_locations[i] + tuple_size);
-			if (found_match == match_propagation_value) {
-				key_locations[found_entries++] = row_locations[i];
-				if (found_entries == STANDARD_VECTOR_SIZE) {
-					state.offset_in_chunk = i + 1;
-					break;
-				}
+		idx_t i = state.offset_in_chunk;
+		while (i < count && found_entries < STANDARD_VECTOR_SIZE) {
+			// Leave room for a scratch write even when every scanned row matches.
+			const auto end = MinValue(count, i + STANDARD_VECTOR_SIZE - found_entries);
+			for (; i < end; i++) {
+				const auto row = row_locations[i];
+				key_locations[found_entries] = row;
+				found_entries += Load<bool>(row + tuple_size) == match_propagation_value;
 			}
 		}
 		if (found_entries == STANDARD_VECTOR_SIZE) {
+			state.offset_in_chunk = i;
 			break;
 		}
 		state.offset_in_chunk = 0;
+		state.chunks_done++;
 	} while (iterator.Next());
 
 	// now gather from the found rows
@@ -3069,6 +3111,8 @@ void JoinHashTable::ScanFullOuter(JoinHTScanState &state, Vector &addresses, Dat
 
 	// gather the values from the RHS
 	GatherRHS(addresses, sel_vector, found_entries, result, left_column_count);
+	// the result may have no columns, so set the count explicitly
+	result.SetChildCardinality(found_entries);
 }
 
 idx_t JoinHashTable::FillWithHTOffsets(JoinHTScanState &state, Vector &addresses) {
@@ -3178,14 +3222,14 @@ void JoinHashTable::Unpartition() {
 	data_collection = sink_collection->GetUnpartitioned();
 }
 
-bool JoinHashTable::SetRepartitionRadixBits(idx_t reservation, idx_t max_partition_size, idx_t max_partition_count,
+bool JoinHashTable::SetRepartitionRadixBits(idx_t max_ht_size, idx_t max_partition_size, idx_t max_partition_count,
                                             idx_t partition_memory) {
 	D_ASSERT(partition_memory > 0);
 	const auto max_added_bits = RadixPartitioning::MAX_RADIX_BITS - radix_bits;
 	idx_t added_bits = 0;
 	for (idx_t candidate_bits = 1; candidate_bits <= max_added_bits; candidate_bits++) {
 		const auto fanout = RadixPartitioning::NumberOfPartitions(candidate_bits);
-		if (partition_memory > reservation / fanout) {
+		if (partition_memory > max_ht_size / fanout) {
 			break;
 		}
 		added_bits = candidate_bits;
@@ -3196,8 +3240,8 @@ bool JoinHashTable::SetRepartitionRadixBits(idx_t reservation, idx_t max_partiti
 		auto new_estimated_ht_size =
 		    new_estimated_size + static_cast<double>(PointerTableSize(LossyNumericCast<idx_t>(new_estimated_count)));
 
-		if (new_estimated_ht_size <= static_cast<double>(reservation) / 4) {
-			// Leave the existing headroom for probing; its conservative estimate may exceed the reservation.
+		if (new_estimated_ht_size <= static_cast<double>(max_ht_size) / 4) {
+			// Aim for an estimated partition size of max_ht_size / 4
 			break;
 		}
 	}
@@ -3250,6 +3294,7 @@ void JoinHashTable::Repartition(JoinHashTable &global_ht) {
 }
 
 void JoinHashTable::Reset() {
+	bucket_shift = 0;
 	data_collection->Reset();
 	hash_map.Reset();
 	current_partitions.SetAllInvalid(RadixPartitioning::NumberOfPartitions(radix_bits));
@@ -3282,32 +3327,34 @@ static void ResetMarkJoinInfo(JoinHashTable &ht) {
 }
 
 void JoinHashTable::ResetForNewIterationSinglePartition() {
+	// Always use a single partition (radix_bits=0) to avoid per-iteration overhead of resetting
+	// and re-creating many radix partitions when only one thread builds the hash table. This also
+	// keeps an unpublished shell consistent with the global radix bits when it is recycled.
+	radix_bits = 0;
+	InitializePartitionMasks();
 	if (!layout_ptr) {
 		// layout was never published (no Sink chunk last iteration); the next first chunk will publish
 		return;
 	}
-	data_collection->Reset();
-	// Always use a single partition (radix_bits=0) to avoid per-iteration overhead of resetting
-	// and re-creating many radix partitions when only one thread builds the hash table.
-	if (radix_bits != 0) {
-		radix_bits = 0;
-		sink_collection = make_uniq<RadixPartitionedTupleData>(buffer_manager, layout_ptr, MemoryTag::HASH_TABLE,
-		                                                       idx_t(0), layout_ptr->ColumnCount() - 1, context);
-	} else {
-		sink_collection->Reset();
-	}
-	InitializePartitionMasks();
+	// Return to the unpublished state (see FinishInitWithLayout): the next iteration's first chunk publishes the
+	// layout afresh. The rerun build is the same operator, but it may deliver a different dictionary (e.g. a
+	// nextval() in its build side), a dictionary of another size, or none at all, so a narrowed slot and the
+	// dictionary it indexes into cannot be carried over.
+	layout_ptr.reset();
+	dict_info.reset();
+	data_collection.reset();
+	sink_collection.reset();
 	capacity = DConstants::INVALID_INDEX;
 	bitmask = DConstants::INVALID_INDEX;
+	bucket_shift = 0;
 	finalized = false;
 	has_filtered_null = false;
 	has_stored_null = false;
 	chains_longer_than_one.store(false, std::memory_order_relaxed);
 	total_probe_matches = 0;
 	load_factor = DEFAULT_LOAD_FACTOR;
+	bloom_filter.reset();
 	should_build_bloom_filter = false;
-	bloom_filter.Reset();
-	bloom_filter_init_count = 0;
 	prefix_range_filter.reset();
 	should_build_prefix_range_filter = false;
 	ResetMarkJoinInfo(*this);
@@ -3317,10 +3364,6 @@ void JoinHashTable::ResetForNewIterationSinglePartition() {
 	aux_next_ptrs.Reset();
 	aux_next_ptrs_data = nullptr;
 	use_dict_emission = false;
-	// Drop pinned upstream dictionary entries; the next iteration's first chunk re-pins
-	for (auto &entry : dict_registry) {
-		entry.reset();
-	}
 }
 
 bool JoinHashTable::PrepareExternalFinalize(const idx_t max_ht_size) {
@@ -3516,10 +3559,8 @@ bool JoinHashTable::CanUseDictionaryEmission(const PhysicalHashJoin &op, bool ex
 	}
 	// mutually exclusive with the dict-surviving path: that path narrows the payload slot to a 1/2/4-byte
 	// index, while NEXT_PTR embedding here overwrites a different field and assumes payload bytes are intact.
-	for (const auto &entry : dict_registry) {
-		if (entry) {
-			return false;
-		}
+	if (HasDictSurvivingColumns()) {
+		return false;
 	}
 	// SINGLE joins need FlatVector::SetNull for unmatched rows; dictionary vectors cannot supply it
 	if (join_type == JoinType::SINGLE) {

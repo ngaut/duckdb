@@ -21,6 +21,17 @@ void SLJIT_FUNC SljitNativeRuntimeError(SljitNativeVectorInput *input) {
 	}
 }
 
+void SLJIT_FUNC SljitNativePerfectHashGroupOutOfRange(SljitNativeVectorInput *input, sljit_uw group,
+                                                      sljit_uw total_groups) {
+	try {
+		throw DataCorruptionException("Perfect hash aggregate: aggregate group %llu exceeded total groups %llu.",
+		                              static_cast<uint64_t>(group), static_cast<uint64_t>(total_groups));
+	} catch (...) {
+		input->has_error = true;
+		input->error = std::current_exception();
+	}
+}
+
 void EmitLoadLogicalIndex(struct sljit_compiler *compiler, sljit_s32 target) {
 	sljit_emit_op1(compiler, SLJIT_MOV_P, SLJIT_R0, 0, SLJIT_MEM1(SLJIT_S0),
 	               offsetof(SljitNativeVectorInput, execute_sel));

@@ -30,6 +30,8 @@ import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from benchmark_common import duckdb_shell_environment
+
 ROOT = Path(__file__).resolve().parents[2]
 
 FORCED_SETTINGS = (
@@ -754,6 +756,7 @@ def database_columns(duckdb: Path, database: Path) -> set[tuple[str, str]]:
         text=True,
         capture_output=True,
         check=True,
+        env=duckdb_shell_environment(),
     )
     return {tuple(line.split(",", 1)) for line in result.stdout.splitlines() if line}
 
@@ -785,7 +788,14 @@ def run_query(duckdb: Path, database: Path, settings: str, threads: int, sql: st
     )
     start = time.monotonic()
     try:
-        result = subprocess.run([str(duckdb)], input=script, capture_output=True, text=True, timeout=timeout)
+        result = subprocess.run(
+            [str(duckdb)],
+            input=script,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            env=duckdb_shell_environment(),
+        )
         output = (result.stdout + result.stderr).strip()
         return RunResult(result.returncode, output, time.monotonic() - start)
     except subprocess.TimeoutExpired:

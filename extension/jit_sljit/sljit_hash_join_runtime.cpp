@@ -252,6 +252,9 @@ SljitValidateRegularHashJoinProbeExecutionLayout(const SljitNativeHashJoinProbeP
 	if (layout.entries.capacity == 0 || layout.entries.bitmask != layout.entries.capacity - 1) {
 		throw InternalException("SLJIT native hash join probe received an invalid entry-table capacity");
 	}
+	if (layout.entries.bucket_shift >= sizeof(hash_t) * 8) {
+		throw InternalException("SLJIT native hash join probe received an invalid bucket shift");
+	}
 	if (layout.entries.pointer_mask == 0 || (layout.entries.pointer_mask & layout.entries.salt_mask) != 0 ||
 	    (layout.entries.pointer_mask | layout.entries.salt_mask) != NumericLimits<uint64_t>::Maximum()) {
 		throw InternalException("SLJIT native hash join probe received incompatible entry-word masks");

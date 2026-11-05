@@ -24,6 +24,7 @@ static void ExecuteAllValidHashJoinChainProbe(const SljitNativeHashJoinProbePlan
 	const auto key_sel = SELECTED ? input.source_sel[0] : nullptr;
 	const auto entries = input.entries;
 	const auto bitmask = input.bitmask;
+	const auto bucket_shift = input.bucket_shift;
 	const auto count = input.count;
 	const auto prefetch_offset = matcher.PrefetchOffset();
 	const SljitHashJoinEntryDecoder entry_decoder(input);
@@ -48,14 +49,14 @@ static void ExecuteAllValidHashJoinChainProbe(const SljitNativeHashJoinProbePlan
 			const auto source_idx = SELECTED ? key_sel[row_idx] : UnsafeNumericCast<sel_t>(row_idx);
 			key_row = matcher.Load(source_idx);
 			hash = matcher.BuildHash(key_row);
-			ht_offset = UnsafeNumericCast<idx_t>(hash & bitmask);
+			ht_offset = UnsafeNumericCast<idx_t>((hash >> bucket_shift) & bitmask);
 		}
 		const auto next_row_idx = row_idx + 1;
 		if (next_row_idx < count) {
 			const auto next_source_idx = SELECTED ? key_sel[next_row_idx] : UnsafeNumericCast<sel_t>(next_row_idx);
 			prefetched_key_row = matcher.Load(next_source_idx);
 			prefetched_hash = matcher.BuildHash(prefetched_key_row);
-			prefetched_ht_offset = UnsafeNumericCast<idx_t>(prefetched_hash & bitmask);
+			prefetched_ht_offset = UnsafeNumericCast<idx_t>((prefetched_hash >> bucket_shift) & bitmask);
 			SljitPrefetchHashJoinEntry(entries, prefetched_ht_offset);
 			has_prefetched_row = true;
 		}
@@ -142,6 +143,7 @@ static void ExecuteAllValidHashJoinNoChainProbe(SljitNativeRegularHashJoinProbeI
 		key_sel = input.source_sel[0];
 	}
 	const auto bitmask = input.bitmask;
+	const auto bucket_shift = input.bucket_shift;
 	const auto count = input.count;
 	const SljitHashJoinEntryDecoder entry_decoder(input);
 
@@ -154,7 +156,7 @@ static void ExecuteAllValidHashJoinNoChainProbe(SljitNativeRegularHashJoinProbeI
 		auto source_idx = SELECTED ? key_sel[row_idx] : UnsafeNumericCast<sel_t>(row_idx);
 		auto key_row = matcher.Load(source_idx);
 		auto hash = matcher.BuildHash(key_row);
-		auto ht_offset = UnsafeNumericCast<idx_t>(hash & bitmask);
+		auto ht_offset = UnsafeNumericCast<idx_t>((hash >> bucket_shift) & bitmask);
 
 		while (true) {
 			const auto next_row_idx = row_idx + 1;
@@ -166,7 +168,7 @@ static void ExecuteAllValidHashJoinNoChainProbe(SljitNativeRegularHashJoinProbeI
 				const auto next_source_idx = SELECTED ? key_sel[next_row_idx] : UnsafeNumericCast<sel_t>(next_row_idx);
 				next_key_row = matcher.Load(next_source_idx);
 				next_hash = matcher.BuildHash(next_key_row);
-				next_ht_offset = UnsafeNumericCast<idx_t>(next_hash & bitmask);
+				next_ht_offset = UnsafeNumericCast<idx_t>((next_hash >> bucket_shift) & bitmask);
 				SljitPrefetchHashJoinEntry(entries, next_ht_offset);
 			}
 

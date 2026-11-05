@@ -1,0 +1,77 @@
+# name: test/sql/jit/test_jit_radix_layout_probe.test
+# description: Compiled probes address the radix-aligned buckets of a parallel in-memory hash join build
+# group: [jit]
+
+statement ok
+LOAD jit_sljit
+
+statement ok
+SET threads=4
+
+# A build large enough to finalize in parallel with radix bits lays its buckets out by the high hash bits. Sparse
+# keys keep the joins off the perfect-hash path.
+statement ok
+CREATE TABLE build AS SELECT i * 7919 AS k, i % 97 AS v, (i % 1000)::VARCHAR || '_' || (i // 1000)::VARCHAR AS s,
+ i % 3 AS k2 FROM range(2000000) t(i)
+
+statement ok
+CREATE TABLE probe AS SELECT ((i * 7) % 2500000) * 7919 AS k, ((i * 7) % 2500000) % 3 AS k2, i % 10 AS f,
+ (((i * 7) % 2500000) % 1000)::VARCHAR || '_' || (((i * 7) % 2500000) // 1000)::VARCHAR AS s FROM range(3000000) t(i)
+
+foreach policy off auto
+
+statement ok
+SET jit_policy='{policy}'
+
+statement ok
+SET jit_cbo_startup_base_cost=CASE WHEN '{policy}'='auto' THEN 0 ELSE 10000 END
+
+statement ok
+SET jit_cbo_generated_stage_benefit=4096
+
+statement ok
+SET jit_cbo_native_operator_stage_benefit=4096
+
+statement ok
+SET jit_cbo_full_pipeline_benefit=4096
+
+statement ok
+SET jit_event_log_size=10000
+
+statement ok
+SELECT * FROM duckdb_jit_clear_events()
+
+query III nosort radix_inner
+SELECT count(*), sum(b.v), sum(p.k) FROM probe p JOIN build b ON p.k = b.k
+----
+
+query II nosort radix_selected
+SELECT count(*), sum(b.v) FROM probe p JOIN build b ON p.k = b.k WHERE p.f < 8
+----
+
+query II nosort radix_two_keys
+SELECT count(*), sum(b.v) FROM probe p JOIN build b ON p.k = b.k AND p.k2 = b.k2
+----
+
+query I nosort radix_semi
+SELECT count(*) FROM probe WHERE k IN (SELECT k FROM build)
+----
+
+query I nosort radix_anti
+SELECT count(*) FROM probe WHERE k NOT IN (SELECT k FROM build)
+----
+
+query II nosort radix_mark
+SELECT count(*), sum(CASE WHEN k IN (SELECT k FROM build) THEN 1 ELSE 0 END) FROM probe
+----
+
+query II nosort radix_string
+SELECT count(*), sum(b.v) FROM probe p JOIN build b ON p.s = b.s
+----
+
+query I
+SELECT '{policy}'='off' OR count(*) > 0 FROM duckdb_jit_events() WHERE status='compiled'
+----
+true
+
+endloop

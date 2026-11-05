@@ -53,7 +53,7 @@ static bool SljitPrimitiveAggregatePayloadSupported(SljitNativeRegionExpressionP
 		return false;
 	}
 	if (descriptor.primitive_kind == AggregatePrimitiveUpdateKind::SUM_HUGEINT) {
-		if (grouped_state && payload.kind == SljitNativeRegionExpressionKind::REFERENCE) {
+		if (payload.kind == SljitNativeRegionExpressionKind::REFERENCE) {
 			payload.integer_kind = aggregate_payload_kind;
 			return true;
 		}

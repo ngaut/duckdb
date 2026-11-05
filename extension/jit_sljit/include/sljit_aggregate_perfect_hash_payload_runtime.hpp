@@ -248,7 +248,6 @@ static void SljitExecuteFusedPerfectHashGroupedPrimitiveAggregatePayloadUpdate(
 	native_input.perfect_hash_total_groups = layout.total_groups;
 	native_input.perfect_hash_tuple_size = layout.tuple_size;
 	native_input.perfect_hash_aggregate_state_offset = layout.aggregate_state_offset;
-	native_input.error_message = "Perfect hash aggregate group exceeded total groups; source statistics may be corrupt";
 	native_input.count = count;
 	native_input.has_error = false;
 	SljitExecuteNativeAggregatePayloadFunction(function, native_input);

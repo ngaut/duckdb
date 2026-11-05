@@ -6,7 +6,14 @@ for execution-region JIT. The architecture contract and the remaining work are i
 
 ## Fast verification
 
-Build with the repository-required thread count:
+Configure the build once with the TPC-H extension linked into the binary; the
+guard, the gates and the `[jit]` tests load it:
+
+```sh
+GEN=ninja BUILD_TPCH=1 LINK_CORE_EXTENSIONS=1 CMAKE_BUILD_PARALLEL_LEVEL=12 make reldebug
+```
+
+Later builds use the repository-required thread count:
 
 ```sh
 cmake --build build/reldebug --config RelWithDebInfo -j12

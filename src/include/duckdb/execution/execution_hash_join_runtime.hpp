@@ -55,7 +55,9 @@ static inline const char *ExecutionHashJoinTableLayoutBlocker(ExecutionHashJoinT
 struct ExecutionHashJoinEntryView {
 	const uint64_t *words = nullptr;
 	idx_t capacity = 0;
+	//! A probe hash starts at bucket (hash >> bucket_shift) & bitmask
 	uint64_t bitmask = 0;
+	uint64_t bucket_shift = 0;
 	ExecutionHashJoinEntryEncoding encoding = ExecutionHashJoinEntryEncoding::MASKS;
 	uint64_t pointer_mask = 0;
 	uint64_t salt_mask = 0;

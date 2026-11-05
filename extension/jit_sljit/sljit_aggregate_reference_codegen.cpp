@@ -44,6 +44,41 @@ BuildSljitNativeUngroupedSumInt64Reference(SljitNativeIntegerKind kind, SljitNat
 }
 
 unique_ptr<ExecutionRegionCodeHandle>
+BuildSljitNativeUngroupedSumHugeintReference(SljitNativeIntegerKind kind, SljitNativeAggregateUpdateFunction &function,
+                                             string &error) {
+	auto compiler = sljit_create_compiler(nullptr);
+	if (!compiler) {
+		error = "failed to create SLJIT compiler";
+		return nullptr;
+	}
+
+	auto data_scale = NativeIntegerDataScale(kind);
+	auto load_op = NativeIntegerLoadOp(kind);
+
+	sljit_emit_enter(compiler, 0, SLJIT_ARGS1V(P), 5, 5, 0);
+	EmitInitSljitNativeVectorLoop(compiler);
+	EmitSljitAggregateAddRowCount(compiler, SLJIT_S2);
+
+	auto done = EmitSljitAggregateSelectedSourceLoop(compiler, [&]() {
+		EmitLoadSljitNativeFixedWidthValue(compiler, offsetof(SljitNativeVectorInput, source_data), SLJIT_R1, load_op,
+		                                   data_scale, SLJIT_R2);
+		sljit_emit_op2(compiler, SLJIT_ASHR, SLJIT_R3, 0, SLJIT_R2, 0, SLJIT_IMM, 63);
+		sljit_emit_op1(compiler, SLJIT_MOV_P, SLJIT_R0, 0, SLJIT_MEM1(SLJIT_S0),
+		               offsetof(SljitNativeVectorInput, aggregate_hugeint_value));
+		EmitSljitAccumulateHugeintWords(compiler, SLJIT_R0, offsetof(hugeint_t, lower), offsetof(hugeint_t, upper),
+		                                SLJIT_R2, SLJIT_R3);
+		sljit_emit_op1(compiler, SLJIT_MOV_P, SLJIT_R0, 0, SLJIT_MEM1(SLJIT_S0),
+		               offsetof(SljitNativeVectorInput, aggregate_state_is_set));
+		sljit_emit_op1(compiler, SLJIT_MOV_U8, SLJIT_MEM1(SLJIT_R0), 0, SLJIT_IMM, 1);
+	});
+
+	sljit_set_label(done, sljit_emit_label(compiler));
+	sljit_emit_return_void(compiler);
+
+	return FinishSljitCode(compiler, function, error);
+}
+
+unique_ptr<ExecutionRegionCodeHandle>
 BuildSljitNativeUngroupedSumHugeint128Reference(SljitNativeAggregateUpdateFunction &function, string &error) {
 	auto compiler = sljit_create_compiler(nullptr);
 	if (!compiler) {

@@ -425,20 +425,24 @@ multi-source and unknown lanes require a new producer proof. A consuming table's
 own spill and repartition preserve its pinned dictionaries and narrow indices.
 
 External hash joins distinguish build-round memory from repartition workspace.
-Each build round uses reservation minus probe-buffer requirements, clamped at zero.
+Each build round and repartition sizing use the reservation minus probe-buffer
+requirements, clamped at zero.
 A single probe-buffer estimate uses the actual spill schema, including its hash
 column, before and after repartition; join-output types do not define this cost.
 A capped reservation cannot wrap into an unlimited budget; the existing external
 finalizer makes progress with one nonempty partition when none fit the budget.
-Repartition sizing retains its reservation-based partition-size target but caps
+Repartition sizing targets a quarter of that budget per partition but caps
 fan-out by the workspace needed to split an old partition. Selection and task
 scheduling share that workspace calculation and use the actual old radix width,
 including after recursive reuse. No split is scheduled when even one task cannot
 fit; a zero build-round budget never requests maximum fan-out.
 
 The entry view is an array of `uint64_t` words with published pointer and salt
-masks; the bloom view is a word array plus bitmask using the shared bloom-mask
-primitive. Backend code never names `ht_entry_t`, `BloomFilter`, or
+masks and a bucket shift: a probe hash starts at bucket
+`(hash >> bucket_shift) & bitmask`, so a parallel in-memory build can align its
+buckets with its radix partitions. The bloom view is a word array plus bitmask
+using the shared bloom-mask primitive, published only for a sealed filter that
+still rejects enough to pay for hashing. Backend code never names `ht_entry_t`, `BloomFilter`, or
 `JoinHashTable`, and never dereferences the opaque hash-table handle a probe
 binding may carry. `ExecutionHashJoinRHSFixedColumnSource` is the boundary for
 fixed build-side columns, either `ROW` (row-layout offset plus validity) or
@@ -447,7 +451,7 @@ these per operator and initializes every field before publishing `ready`.
 Storage-dependent RHS gathering is an exported core operation.
 
 Execution-region backends use DuckDB's version- and platform-matched C++
-extension contract plus an execution-region ABI version, currently 20. Any
+extension contract plus an execution-region ABI version, currently 21. Any
 backend-visible layout or virtual-interface change advances it; registration
 rejects other versions, and the boundary verifier pins the value.
 

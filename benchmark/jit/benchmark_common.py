@@ -4,6 +4,7 @@
 
 import csv
 import json
+import os
 import re
 import subprocess
 import tempfile
@@ -121,6 +122,12 @@ def jit_setup_sql(
     return "\n".join(statements) + "\n"
 
 
+def duckdb_shell_environment() -> dict[str, str]:
+    """The environment the harness runs the shell in. An AI agent's environment variables switch the shell to agent
+    mode, which changes how it prints results and errors; the harness reads it as a plain script runner."""
+    return {**os.environ, "DUCKDB_AGENT_MODE": "0"}
+
+
 def run_duckdb(duckdb: Path, db_path: Path, sql: str, label: str) -> subprocess.CompletedProcess:
     result = subprocess.run(
         [str(duckdb), str(db_path)],
@@ -128,6 +135,7 @@ def run_duckdb(duckdb: Path, db_path: Path, sql: str, label: str) -> subprocess.
         text=True,
         capture_output=True,
         check=False,
+        env=duckdb_shell_environment(),
     )
     if result.returncode != 0:
         raise RuntimeError(
@@ -261,7 +269,7 @@ class BenchmarkScript:
             (
                 self.open_database,
                 setup_sql,
-                ".timer on",
+                ".timer on 6",
                 f"CREATE OR REPLACE TABLE {table_name} AS\n{query_sql};",
                 ".timer off",
             )

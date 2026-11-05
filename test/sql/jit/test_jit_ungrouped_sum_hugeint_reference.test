@@ -1,0 +1,67 @@
+# name: test/sql/jit/test_jit_ungrouped_sum_hugeint_reference.test
+# description: Ungrouped integer sums with a HUGEINT state read their input column directly
+# group: [jit]
+
+statement ok
+LOAD jit_sljit
+
+statement ok
+SET threads=1
+
+statement ok
+CREATE TABLE vals AS SELECT CASE WHEN i % 7 = 0 THEN NULL ELSE 9223372036854775807 - i END::BIGINT AS v,
+ (-9223372036854775807 + i)::BIGINT AS n, (i % 5)::INTEGER AS w FROM range(100000) t(i)
+
+foreach policy off auto
+
+statement ok
+SET jit_policy='{policy}'
+
+statement ok
+SET jit_cbo_startup_base_cost=CASE WHEN '{policy}'='auto' THEN 0 ELSE 10000 END
+
+statement ok
+SET jit_cbo_generated_stage_benefit=4096
+
+statement ok
+SET jit_cbo_native_operator_stage_benefit=4096
+
+statement ok
+SET jit_event_log_size=10000
+
+statement ok
+SELECT * FROM duckdb_jit_clear_events()
+
+# sum(i + 7) becomes sum(i) + 7 * count(i), so the sum reads the scanned column itself
+query II
+SELECT sum(i + 7), sum(i) FROM range(1000000) tbl(i)
+----
+500006500000	499999500000
+
+# Totals beyond BIGINT in both directions, with NULL inputs
+query IIII
+SELECT sum(v), count(v), sum(n), count(*) FROM vals
+----
+790572110766965967835483	85714	-922337203685472580750000	100000
+
+query I
+SELECT sum(v) FROM vals WHERE w < 3
+----
+474339577111364838850967
+
+query III
+SELECT sum(w), sum(w::TINYINT), sum(w::SMALLINT) FROM vals
+----
+200000	200000	200000
+
+query I
+SELECT '{policy}'='off' OR count(*) > 0 FROM duckdb_jit_events() WHERE status='compiled'
+----
+true
+
+query I
+SELECT count(*) FROM duckdb_jit_events() WHERE status IN ('error', 'failed')
+----
+0
+
+endloop

@@ -65,8 +65,10 @@ bool SljitBuildExecutableAggregateUpdateFallbackPayloadCode(const SljitNativeAgg
 			} else {
 				if (primitive_kind == AggregatePrimitiveUpdateKind::SUM_INT64) {
 					code = BuildSljitNativeUngroupedSumInt64Reference(payload.integer_kind, function, error);
-				} else if (primitive_kind == AggregatePrimitiveUpdateKind::SUM_HUGEINT && descriptor.IsDoubleWord()) {
-					code = BuildSljitNativeUngroupedSumHugeint128Reference(function, error);
+				} else if (primitive_kind == AggregatePrimitiveUpdateKind::SUM_HUGEINT) {
+					code = descriptor.IsDoubleWord()
+					           ? BuildSljitNativeUngroupedSumHugeint128Reference(function, error)
+					           : BuildSljitNativeUngroupedSumHugeintReference(payload.integer_kind, function, error);
 				} else if (primitive_kind == AggregatePrimitiveUpdateKind::SUM_DOUBLE) {
 					code = BuildSljitNativeUngroupedSumDoubleReference(payload.double_source_kind, function, error);
 				} else if (primitive_kind == AggregatePrimitiveUpdateKind::COUNT) {

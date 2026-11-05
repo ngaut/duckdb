@@ -51,8 +51,8 @@ static bool ExecutionCastIsExactDecimalWidening(const LogicalType &source, const
 	     !ExecutionExpressionIsUnsignedIntegerType(source))) {
 		return false;
 	}
-	uint8_t source_width;
-	uint8_t source_scale;
+	uint32_t source_width;
+	uint32_t source_scale;
 	if (!source.GetDecimalProperties(source_width, source_scale)) {
 		return false;
 	}
@@ -507,6 +507,54 @@ NormalizeExecutionExpressionArithmeticIdentity(unique_ptr<ExecutionExpressionIR>
 	return node;
 }
 
+static unique_ptr<ExecutionExpressionIR> BuildExecutionComparisonIR(ExecutionExpressionBinaryOp op,
+                                                                    unique_ptr<ExecutionExpressionIR> left,
+                                                                    unique_ptr<ExecutionExpressionIR> right) {
+	auto node = make_uniq<ExecutionExpressionIR>();
+	node->kind = ExecutionExpressionIRKind::BINARY;
+	node->return_type = LogicalType::BOOLEAN;
+	node->binary_op = op;
+	node->left = std::move(left);
+	node->right = std::move(right);
+	return node;
+}
+
+//! A BETWEEN lowers as the two comparisons it abbreviates, except a column between two constants: that range form
+//! is what the dedicated range predicates read.
+static unique_ptr<ExecutionExpressionIR> NormalizeExecutionExpressionBetween(unique_ptr<ExecutionExpressionIR> node) {
+	D_ASSERT(node);
+	if (node->kind != ExecutionExpressionIRKind::BETWEEN ||
+	    (node->children[0]->kind == ExecutionExpressionIRKind::REFERENCE &&
+	     node->children[1]->kind == ExecutionExpressionIRKind::CONSTANT &&
+	     node->children[2]->kind == ExecutionExpressionIRKind::CONSTANT)) {
+		return node;
+	}
+	auto &input = node->children[0];
+	auto lower =
+	    BuildExecutionComparisonIR(node->lower_inclusive ? ExecutionExpressionBinaryOp::COMPARE_GREATERTHANOREQUALTO
+	                                                     : ExecutionExpressionBinaryOp::COMPARE_GREATERTHAN,
+	                               input->Copy(), std::move(node->children[1]));
+	auto upper =
+	    BuildExecutionComparisonIR(node->upper_inclusive ? ExecutionExpressionBinaryOp::COMPARE_LESSTHANOREQUALTO
+	                                                     : ExecutionExpressionBinaryOp::COMPARE_LESSTHAN,
+	                               std::move(input), std::move(node->children[2]));
+	auto range = make_uniq<ExecutionExpressionIR>();
+	range->kind = ExecutionExpressionIRKind::CONJUNCTION;
+	range->return_type = LogicalType::BOOLEAN;
+	range->conjunction_op = ExecutionExpressionConjunctionOp::AND;
+	range->children.push_back(std::move(lower));
+	range->children.push_back(std::move(upper));
+	if (!node->not_between) {
+		return range;
+	}
+	auto negated = make_uniq<ExecutionExpressionIR>();
+	negated->kind = ExecutionExpressionIRKind::UNARY;
+	negated->return_type = LogicalType::BOOLEAN;
+	negated->unary_op = ExecutionExpressionUnaryOp::NOT;
+	negated->left = std::move(range);
+	return negated;
+}
+
 static unique_ptr<ExecutionExpressionIR> NormalizeExecutionExpressionIR(unique_ptr<ExecutionExpressionIR> node) {
 	if (!node) {
 		return nullptr;
@@ -535,7 +583,7 @@ static unique_ptr<ExecutionExpressionIR> NormalizeExecutionExpressionIR(unique_p
 		}
 	}
 	node = NormalizeExecutionExpressionArithmeticIdentity(std::move(node));
-	return node;
+	return NormalizeExecutionExpressionBetween(std::move(node));
 }
 
 static ExecutionExpressionValidityKind GetExecutionExpressionValidity(const ExecutionExpressionIR &node) {

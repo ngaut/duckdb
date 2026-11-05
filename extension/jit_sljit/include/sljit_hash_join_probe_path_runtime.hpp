@@ -163,6 +163,7 @@ static SljitPreparedRegularHashJoinProbeInput SljitPrepareRegularHashJoinProbeIn
 	native_input.count = input.size();
 	native_input.entries = layout.entries.words;
 	native_input.bitmask = layout.entries.bitmask;
+	native_input.bucket_shift = layout.entries.bucket_shift;
 	native_input.pointer_mask = layout.entries.pointer_mask;
 	native_input.layout_kind = table_layout_kind;
 	native_input.rhs_keys_have_validity = rhs_keys_have_null;

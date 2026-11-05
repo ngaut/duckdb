@@ -38,6 +38,7 @@ void DuckCleanupInfo::Cleanup() {
 	for (auto &transaction : transactions) {
 		if (transaction->awaiting_cleanup) {
 			transaction->Cleanup(lowest_visibility_bound);
+			transaction->awaiting_cleanup = false;
 		}
 	}
 }
@@ -50,6 +51,7 @@ DuckTransactionManager::DuckTransactionManager(AttachedDatabase &db) : Transacti
 	// the first timestamp a real transaction can draw: one past the bootstrap stamp, which is also
 	// the bound the system transaction reads at
 	current_start_timestamp = SYSTEM_TRANSACTION_TIMESTAMP + 1;
+	last_commit = SYSTEM_TRANSACTION_TIMESTAMP;
 	// transaction ID starts very high:
 	// it should be much higher than the current start timestamp
 	// if transaction_id < start_timestamp for any set of active transactions
@@ -323,18 +325,25 @@ void DuckTransactionManager::WaitForDurability() {
 void DuckTransactionManager::CleanupTransactions() {
 	lock_guard<mutex> c_lock(cleanup_lock);
 	while (true) {
-		unique_ptr<DuckCleanupInfo> top_cleanup_info;
+		DuckCleanupInfo *top_cleanup_info = nullptr;
 		{
 			lock_guard<mutex> q_lock(cleanup_queue_lock);
 			if (cleanup_queue.empty()) {
 				// all transactions have been cleaned up - done
 				return;
 			}
-			top_cleanup_info = std::move(cleanup_queue.front());
-			cleanup_queue.pop();
+			top_cleanup_info = cleanup_queue.front().get();
 		}
-		if (top_cleanup_info) {
+		try {
 			top_cleanup_info->Cleanup();
+		} catch (FatalException &) {
+			throw;
+		} catch (std::exception &) {
+			return;
+		}
+		{
+			lock_guard<mutex> q_lock(cleanup_queue_lock);
+			cleanup_queue.pop();
 		}
 	}
 }
@@ -547,6 +556,10 @@ ErrorData DuckTransactionManager::CommitTransaction(ClientContext &context, Tran
 		lock.reset();
 	}
 
+	// A failed commit rolls back inline, queueing teardowns as RollbackTransaction does. Drain here too,
+	// so the call that fills the queue is the one that empties it.
+	DatabaseManager::Get(db.GetDatabase()).DrainPendingTeardowns();
+
 	// now perform a checkpoint if (1) we are able to checkpoint, and (2) the WAL has reached sufficient size to
 	// checkpoint
 	if (checkpoint_decision.can_checkpoint) {
@@ -590,6 +603,10 @@ void DuckTransactionManager::RollbackTransaction(Transaction &transaction_p) {
 	}
 
 	CleanupTransactions();
+
+	// Run external-resource teardowns the rollback queued (see RollbackState): they execute SQL, so
+	// they can only run here, after the transaction lock is released.
+	DatabaseManager::Get(db.GetDatabase()).DrainPendingTeardowns();
 
 	if (error.HasError()) {
 		throw FatalException("Failed to rollback transaction. Cannot continue operation.\nError: %s", error.Message());

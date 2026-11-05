@@ -103,7 +103,10 @@ static unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativePerfectHashGroupedF
 		sljit_set_label(jump, range_error_label);
 	}
 	sljit_emit_op1(compiler, SLJIT_MOV_P, SLJIT_R0, 0, SLJIT_S0, 0);
-	sljit_emit_icall(compiler, SLJIT_CALL, SLJIT_ARGS1V(P), SLJIT_IMM, SLJIT_FUNC_ADDR(SljitNativeRuntimeError));
+	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_R1, 0, SLJIT_S4, 0);
+	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_R2, 0, SLJIT_IMM, NumericCast<sljit_sw>(perfect_hash_group_count));
+	sljit_emit_icall(compiler, SLJIT_CALL, SLJIT_ARGS3V(P, W, W), SLJIT_IMM,
+	                 SLJIT_FUNC_ADDR(SljitNativePerfectHashGroupOutOfRange));
 	sljit_emit_return_void(compiler);
 
 	return FinishSljitCode(compiler, function, error);

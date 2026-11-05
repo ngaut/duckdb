@@ -51,15 +51,17 @@ SELECT max(k::{width}::BIGINT) FROM cast_probe
 ----
 out of range
 
-statement error
+# The build keys' range filter reaches the probe scan through the casts, also through a projection, so the
+# out-of-range row is filtered before the cast runs
+query I
 SELECT count(*) FROM cast_probe p JOIN cast_build b ON p.k::{width}::BIGINT = b.k
 ----
-out of range
+9999
 
-statement error
+query I
 SELECT count(*) FROM (SELECT k::{width} AS n FROM cast_probe) p JOIN cast_build b ON p.n::BIGINT = b.k
 ----
-out of range
+9999
 
 # TRY_CAST outside a throwing inner cast must not suppress the inner exception.
 statement error

@@ -117,6 +117,9 @@ BuildSljitNativeUngroupedSumInt64Reference(SljitNativeIntegerKind kind, SljitNat
 unique_ptr<ExecutionRegionCodeHandle>
 BuildSljitNativeUngroupedSumHugeint128Reference(SljitNativeAggregateUpdateFunction &function, string &error);
 unique_ptr<ExecutionRegionCodeHandle>
+BuildSljitNativeUngroupedSumHugeintReference(SljitNativeIntegerKind kind, SljitNativeAggregateUpdateFunction &function,
+                                             string &error);
+unique_ptr<ExecutionRegionCodeHandle>
 BuildSljitNativeUngroupedSumDoubleReference(SljitNativeDoubleSourceKind kind,
                                             SljitNativeAggregateUpdateFunction &function, string &error);
 unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativeUngroupedCountStar(SljitNativeAggregateUpdateFunction &function,

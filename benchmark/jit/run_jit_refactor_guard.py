@@ -12,7 +12,7 @@ import sys
 from datetime import datetime
 from pathlib import Path
 
-from benchmark_common import PRODUCTION_CANDIDATE_REPEATS, PRODUCTION_REPEAT_CHOICES
+from benchmark_common import PRODUCTION_CANDIDATE_REPEATS, PRODUCTION_REPEAT_CHOICES, duckdb_shell_environment
 from benchmark_host import HostQuiescenceError, require_host_quiescence, wait_for_host_quiescence
 from jit_differential_fuzz import DERIVED_COLUMNS as FUZZ_DERIVED_COLUMNS
 from jit_differential_fuzz import SCHEMA as FUZZ_SCHEMA
@@ -127,6 +127,7 @@ def run_command(
         stdout=subprocess.PIPE if capture else None,
         stderr=subprocess.PIPE if capture else None,
         check=False,
+        env=duckdb_shell_environment(),
     )
     if check and result.returncode != 0:
         if capture:
@@ -519,6 +520,7 @@ def fuzz_database_is_current(args: argparse.Namespace, database: Path) -> bool:
         text=True,
         capture_output=True,
         check=False,
+        env=duckdb_shell_environment(),
     )
     return result.returncode == 0 and result.stdout.strip() == "true"
 

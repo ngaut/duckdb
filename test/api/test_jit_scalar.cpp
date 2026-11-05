@@ -122,10 +122,10 @@ TEST_CASE("JIT lowers date year intrinsic as native scalar projection", "[api][j
 	auto result = con.Query("SELECT year(d) AS y FROM jit_date_year_native");
 	REQUIRE_NO_FAIL(*result);
 	REQUIRE(result->RowCount() == 4);
-	REQUIRE(result->GetValue(0, 0).GetValue<int64_t>() == 1992);
-	REQUIRE(result->GetValue(0, 1).GetValue<int64_t>() == -1);
-	REQUIRE(result->GetValue(0, 2).IsNull());
-	REQUIRE(result->GetValue(0, 3).IsNull());
+	REQUIRE(result->Collection().GetValue(0, 0).GetValue<int64_t>() == 1992);
+	REQUIRE(result->Collection().GetValue(0, 1).GetValue<int64_t>() == -1);
+	REQUIRE(result->Collection().GetValue(0, 2).IsNull());
+	REQUIRE(result->Collection().GetValue(0, 3).IsNull());
 
 	RequireNativeSljitIr(manager, "date_year", [&](const ExecutionRegionEvent &event) {
 		REQUIRE(event.has_candidate);
@@ -147,7 +147,7 @@ TEST_CASE("JIT lowers compressed scalar intrinsics as native projections", "[api
 	auto ints = con.Query("SELECT y FROM jit_compress_native ORDER BY y NULLS LAST");
 	REQUIRE_NO_FAIL(*ints);
 	REQUIRE(ints->RowCount() == 11);
-	REQUIRE(ints->GetValue(0, 10).IsNull());
+	REQUIRE(ints->Collection().GetValue(0, 10).IsNull());
 	RequireNoUnsupportedReason(manager, "__internal_decompress_integral");
 	RequireNativeSljitIr(manager, "integral_decompress");
 }
@@ -178,28 +178,28 @@ TEST_CASE("JIT lowers fixed-prefix substring as native scalar projection", "[api
 	auto result = con.Query("SELECT c, total FROM jit_string_substring_projection_out WHERE prefix = '13'");
 	REQUIRE_NO_FAIL(*result);
 	REQUIRE(result->RowCount() == 1);
-	REQUIRE(result->GetValue(0, 0).GetValue<int64_t>() == 2);
-	REQUIRE(result->GetValue(1, 0).ToString() == "12.50");
+	REQUIRE(result->Collection().GetValue(0, 0).GetValue<int64_t>() == 2);
+	REQUIRE(result->Collection().GetValue(1, 0).ToString() == "12.50");
 	result = con.Query("SELECT c, total FROM jit_string_substring_projection_out WHERE prefix = '漢字'");
 	REQUIRE_NO_FAIL(*result);
 	REQUIRE(result->RowCount() == 1);
-	REQUIRE(result->GetValue(0, 0).GetValue<int64_t>() == 1);
-	REQUIRE(result->GetValue(1, 0).ToString() == "7.00");
+	REQUIRE(result->Collection().GetValue(0, 0).GetValue<int64_t>() == 1);
+	REQUIRE(result->Collection().GetValue(1, 0).ToString() == "7.00");
 	result = con.Query("SELECT c, total FROM jit_string_substring_projection_out WHERE prefix = '漢a'");
 	REQUIRE_NO_FAIL(*result);
 	REQUIRE(result->RowCount() == 1);
-	REQUIRE(result->GetValue(0, 0).GetValue<int64_t>() == 1);
-	REQUIRE(result->GetValue(1, 0).ToString() == "11.00");
+	REQUIRE(result->Collection().GetValue(0, 0).GetValue<int64_t>() == 1);
+	REQUIRE(result->Collection().GetValue(1, 0).ToString() == "11.00");
 	result = con.Query("SELECT c, total FROM jit_string_substring_projection_out WHERE prefix = 'éa'");
 	REQUIRE_NO_FAIL(*result);
 	REQUIRE(result->RowCount() == 1);
-	REQUIRE(result->GetValue(0, 0).GetValue<int64_t>() == 1);
-	REQUIRE(result->GetValue(1, 0).ToString() == "13.00");
+	REQUIRE(result->Collection().GetValue(0, 0).GetValue<int64_t>() == 1);
+	REQUIRE(result->Collection().GetValue(1, 0).ToString() == "13.00");
 	result = con.Query("SELECT c, total FROM jit_string_substring_projection_out WHERE prefix IS NULL");
 	REQUIRE_NO_FAIL(*result);
 	REQUIRE(result->RowCount() == 1);
-	REQUIRE(result->GetValue(0, 0).GetValue<int64_t>() == 1);
-	REQUIRE(result->GetValue(1, 0).ToString() == "17.00");
+	REQUIRE(result->Collection().GetValue(0, 0).GetValue<int64_t>() == 1);
+	REQUIRE(result->Collection().GetValue(1, 0).ToString() == "17.00");
 
 	RequireNativeSljitIr(manager, "native:string-substring:prefix=2", [](const ExecutionRegionEvent &event) {
 		REQUIRE(event.candidate_traits.projection_count > 0);
@@ -276,10 +276,10 @@ TEST_CASE("JIT lowers string predicates without aggregate sink dependence", "[ap
 	ClearJitTrace(manager, true);
 	result = con.Query("SELECT count(*) FROM jit_sparse_not_like WHERE s NOT LIKE '%special%requests%'");
 	REQUIRE_NO_FAIL(*result);
-	REQUIRE(result->GetValue(0, 0).GetValue<int64_t>() == 9900);
+	REQUIRE(result->Collection().GetValue(0, 0).GetValue<int64_t>() == 9900);
 	result = con.Query("SELECT count(*) FROM jit_sparse_not_like WHERE s NOT LIKE '%never%present%'");
 	REQUIRE_NO_FAIL(*result);
-	REQUIRE(result->GetValue(0, 0).GetValue<int64_t>() == 10000);
+	REQUIRE(result->Collection().GetValue(0, 0).GetValue<int64_t>() == 10000);
 	RequireNativeSljitIr(manager, "string_like");
 
 	REQUIRE_NO_FAIL(con.Query("SET disabled_optimizers='in_clause'"));
@@ -303,12 +303,12 @@ TEST_CASE("JIT lowers string predicates without aggregate sink dependence", "[ap
 	                   "       count(*) FILTER (WHERE not_in_hit IS NULL) "
 	                   "FROM jit_string_projected_predicates");
 	REQUIRE_NO_FAIL(*result);
-	REQUIRE(result->GetValue(0, 0).GetValue<int64_t>() == 1);
-	REQUIRE(result->GetValue(1, 0).GetValue<int64_t>() == 1);
-	REQUIRE(result->GetValue(2, 0).GetValue<int64_t>() == 3);
-	REQUIRE(result->GetValue(3, 0).GetValue<int64_t>() == 2);
-	REQUIRE(result->GetValue(4, 0).GetValue<int64_t>() == 0);
-	REQUIRE(result->GetValue(5, 0).GetValue<int64_t>() == 2);
+	REQUIRE(result->Collection().GetValue(0, 0).GetValue<int64_t>() == 1);
+	REQUIRE(result->Collection().GetValue(1, 0).GetValue<int64_t>() == 1);
+	REQUIRE(result->Collection().GetValue(2, 0).GetValue<int64_t>() == 3);
+	REQUIRE(result->Collection().GetValue(3, 0).GetValue<int64_t>() == 2);
+	REQUIRE(result->Collection().GetValue(4, 0).GetValue<int64_t>() == 0);
+	REQUIRE(result->Collection().GetValue(5, 0).GetValue<int64_t>() == 2);
 	RequireNativeSljitIr(manager, "string_like", [](const ExecutionRegionEvent &event) {
 		REQUIRE(event.candidate_traits.projection_count > 0);
 	});
@@ -359,7 +359,7 @@ TEST_CASE("JIT compiles downstream work after scan-owned low-cardinality string 
 	auto result = con.Query("SELECT sum(i * 31) FROM jit_low_cardinality_like "
 	                        "WHERE s NOT LIKE '%special%requests%'");
 	REQUIRE_NO_FAIL(*result);
-	REQUIRE(result->GetValue(0, 0).ToString() == "1534500000");
+	REQUIRE(result->Collection().GetValue(0, 0).ToString() == "1534500000");
 
 	for (auto &event : manager.GetEvents()) {
 		REQUIRE(event.runner_cost.selection_reason != "rejected_vectorized_execution_preferred");
@@ -399,7 +399,7 @@ TEST_CASE("JIT scan precheck leaves downstream admission to the selected lowerin
 	auto result = con.Query("SELECT sum(i * 31) FROM jit_low_cardinality_like_precheck "
 	                        "WHERE s NOT LIKE '%special%requests%'");
 	REQUIRE_NO_FAIL(*result);
-	REQUIRE(result->GetValue(0, 0).ToString() == reference->GetValue(0, 0).ToString());
+	REQUIRE(result->Collection().GetValue(0, 0).ToString() == reference->Collection().GetValue(0, 0).ToString());
 
 	for (auto &event : manager.GetEvents()) {
 		REQUIRE(event.runner_cost.selection_reason != "rejected_vectorized_execution_preferred");
@@ -491,7 +491,7 @@ TEST_CASE("JIT CASE branch fast path respects selected hash join sources", "[api
 	ClearJitTrace(manager, true);
 	auto actual = con.Query(aggregate_sql);
 	REQUIRE_NO_FAIL(*actual);
-	REQUIRE(actual->GetValue(0, 0).ToString() == expected->GetValue(0, 0).ToString());
+	REQUIRE(actual->Collection().GetValue(0, 0).ToString() == expected->Collection().GetValue(0, 0).ToString());
 
 	RequireJitEvent(
 	    manager,
@@ -555,7 +555,7 @@ TEST_CASE("JIT owns retained full-layout table scan filters as generated source 
 	ClearJitTrace(manager, true);
 	auto result = con.Query("SELECT sum(i) FROM jit_generated_source_filter WHERE i > 10");
 	REQUIRE_NO_FAIL(*result);
-	REQUIRE(result->GetValue(0, 0).ToString() == "49994945");
+	REQUIRE(result->Collection().GetValue(0, 0).ToString() == "49994945");
 
 	RequireJitEvent(
 	    manager,
@@ -587,7 +587,7 @@ TEST_CASE("JIT owns proven-safe modulo table scan filters as generated source fi
 	ClearJitTrace(manager, true);
 	auto actual = con.Query(query);
 	REQUIRE_NO_FAIL(*actual);
-	REQUIRE(actual->GetValue(0, 0) == expected->GetValue(0, 0));
+	REQUIRE(actual->Collection().GetValue(0, 0) == expected->Collection().GetValue(0, 0));
 
 	RequireJitEvent(
 	    manager,
@@ -655,7 +655,7 @@ TEST_CASE("JIT owns pruned table scan filters through source input layout", "[ap
 	ClearJitTrace(manager, true);
 	auto result = con.Query("SELECT sum(i) FROM jit_generated_pruned_source_filter WHERE d <= DATE '1998-01-05'");
 	REQUIRE_NO_FAIL(*result);
-	REQUIRE(result->GetValue(0, 0).ToString() == "24985000");
+	REQUIRE(result->Collection().GetValue(0, 0).ToString() == "24985000");
 
 	RequireJitEvent(
 	    manager,
@@ -681,7 +681,7 @@ TEST_CASE("JIT generated source filters retain zonemap pruning without storage r
 	ClearJitTrace(manager, true);
 	auto result = con.Query("SELECT sum(i) FROM jit_generated_row_group_pruning WHERE i < 10");
 	REQUIRE_NO_FAIL(*result);
-	REQUIRE(result->GetValue(0, 0).ToString() == "45");
+	REQUIRE(result->Collection().GetValue(0, 0).ToString() == "45");
 
 	RequireJitEvent(
 	    manager,
@@ -711,7 +711,7 @@ TEST_CASE("JIT owns date range source filters through source input layout", "[ap
 	auto result = con.Query("SELECT sum(i) FROM jit_generated_date_range_source_filter "
 	                        "WHERE d >= DATE '1995-09-10' AND d < DATE '1995-09-20'");
 	REQUIRE_NO_FAIL(*result);
-	REQUIRE(result->GetValue(0, 0).ToString() == "33411690");
+	REQUIRE(result->Collection().GetValue(0, 0).ToString() == "33411690");
 
 	RequireJitEvent(
 	    manager,
@@ -737,7 +737,7 @@ TEST_CASE("JIT orders generated source filters by generic predicate cost", "[api
 	auto result = con.Query("SELECT count(*) FROM jit_ordered_source_filter "
 	                        "WHERE s IN ('MAIL', 'SHIP') AND d < DATE '1995-01-01' AND i > 10");
 	REQUIRE_NO_FAIL(*result);
-	REQUIRE(result->GetValue(0, 0).ToString() == "165");
+	REQUIRE(result->Collection().GetValue(0, 0).ToString() == "165");
 
 	RequireJitEvent(
 	    manager,
@@ -781,8 +781,8 @@ TEST_CASE("JIT partially vectorizes mixed generated source predicates", "[api][j
 	auto result = con.Query("SELECT count(*), sum(i) FROM jit_partial_simd_source_filter "
 	                        "WHERE d < DATE '1995-01-01' AND i > 10 AND s IN ('MAIL', 'SHIP')");
 	REQUIRE_NO_FAIL(*result);
-	REQUIRE(result->GetValue(0, 0).GetValue<int64_t>() == 151);
-	REQUIRE(result->GetValue(1, 0).GetValue<int64_t>() == 627858);
+	REQUIRE(result->Collection().GetValue(0, 0).GetValue<int64_t>() == 151);
+	REQUIRE(result->Collection().GetValue(1, 0).GetValue<int64_t>() == 627858);
 
 	RequireJitEvent(
 	    manager,
@@ -843,8 +843,8 @@ TEST_CASE("JIT preserves ordered sink partitions for sparse generated source fil
 	                          "WHERE region = 'EUROPE'"));
 	auto result = con.Query("SELECT count(*), sum(i) FROM jit_sparse_parallel_source_filter_output");
 	REQUIRE_NO_FAIL(*result);
-	REQUIRE(result->GetValue(0, 0).GetValue<int64_t>() == 100);
-	REQUIRE(result->GetValue(1, 0).GetValue<int64_t>() == 49500100);
+	REQUIRE(result->Collection().GetValue(0, 0).GetValue<int64_t>() == 100);
+	REQUIRE(result->Collection().GetValue(1, 0).GetValue<int64_t>() == 49500100);
 
 	RequireJitEvent(
 	    manager,
@@ -857,7 +857,7 @@ TEST_CASE("JIT preserves ordered sink partitions for sparse generated source fil
 	auto order = con.Query("SELECT count(*) FROM (SELECT i, lag(i) OVER (ORDER BY rowid) AS previous "
 	                       "FROM jit_sparse_parallel_source_filter_output) WHERE previous >= i");
 	REQUIRE_NO_FAIL(*order);
-	REQUIRE(order->GetValue(0, 0).GetValue<int64_t>() == 0);
+	REQUIRE(order->Collection().GetValue(0, 0).GetValue<int64_t>() == 0);
 }
 
 TEST_CASE("JIT auto planner cost skips source-only string filters", "[api][jit]") {
@@ -878,7 +878,7 @@ TEST_CASE("JIT auto planner cost skips source-only string filters", "[api][jit]"
 	                          "WHERE s NOT LIKE '%special%requests%'"));
 	auto result = con.Query("SELECT count(*) FROM jit_auto_string_source_filtered");
 	REQUIRE_NO_FAIL(*result);
-	REQUIRE(result->GetValue(0, 0).GetValue<int64_t>() == 900000);
+	REQUIRE(result->Collection().GetValue(0, 0).GetValue<int64_t>() == 900000);
 
 	bool found_source_string_filter_decision = false;
 	for (auto &event : manager.GetEvents()) {
@@ -920,8 +920,8 @@ TEST_CASE("JIT auto preserves cheap source string equality filters under aggress
 	REQUIRE_NO_FAIL(*result);
 	result = con.Query("SELECT count(*), sum(id) FROM jit_auto_string_equality_output");
 	REQUIRE_NO_FAIL(*result);
-	REQUIRE(result->GetValue(0, 0).GetValue<int64_t>() == 2500);
-	REQUIRE(result->GetValue(1, 0).GetValue<int64_t>() == 12497500);
+	REQUIRE(result->Collection().GetValue(0, 0).GetValue<int64_t>() == 2500);
+	REQUIRE(result->Collection().GetValue(1, 0).GetValue<int64_t>() == 12497500);
 
 	RequireJitEvent(
 	    manager,
@@ -993,13 +993,13 @@ TEST_CASE("JIT lowers scalar casts and arithmetic as generated code", "[api][jit
 	                        "FROM jit_cast_arithmetic WHERE i < 5 ORDER BY i");
 	REQUIRE_NO_FAIL(*result);
 	REQUIRE(result->RowCount() == 5);
-	REQUIRE(result->GetValue(0, 4).GetValue<uint8_t>() == 4);
-	REQUIRE(result->GetValue(1, 4).GetValue<double>() == 11.0);
-	REQUIRE(result->GetValue(2, 4).GetValue<double>() == 3.0);
-	REQUIRE(result->GetValue(3, 4).GetValue<double>() == 5.0);
-	REQUIRE(result->GetValue(4, 4).GetValue<double>() == 30.0);
-	REQUIRE(result->GetValue(5, 4).GetValue<double>() == 2.5);
-	REQUIRE(result->GetValue(6, 4).GetValue<double>() == 5.0 / 6.0);
+	REQUIRE(result->Collection().GetValue(0, 4).GetValue<uint8_t>() == 4);
+	REQUIRE(result->Collection().GetValue(1, 4).GetValue<double>() == 11.0);
+	REQUIRE(result->Collection().GetValue(2, 4).GetValue<double>() == 3.0);
+	REQUIRE(result->Collection().GetValue(3, 4).GetValue<double>() == 5.0);
+	REQUIRE(result->Collection().GetValue(4, 4).GetValue<double>() == 30.0);
+	REQUIRE(result->Collection().GetValue(5, 4).GetValue<double>() == 2.5);
+	REQUIRE(result->Collection().GetValue(6, 4).GetValue<double>() == 5.0 / 6.0);
 
 	RequireNativeSljitIr(manager, "signed-to-unsigned-cast");
 	RequireNativeSljitIr(manager, "double-add-references");
@@ -1032,11 +1032,11 @@ TEST_CASE("JIT lowers casted numeric double division as generated code", "[api][
 	result = con.Query("SELECT ratio FROM jit_casted_double_division_result ORDER BY id");
 	REQUIRE_NO_FAIL(*result);
 	REQUIRE(result->RowCount() == 5);
-	REQUIRE(result->GetValue(0, 0).GetValue<double>() == 25.0);
-	REQUIRE(result->GetValue(0, 1).GetValue<double>() == 2.5);
-	REQUIRE(result->GetValue(0, 2).IsNull());
-	REQUIRE(result->GetValue(0, 3).IsNull());
-	REQUIRE(std::isinf(result->GetValue(0, 4).GetValue<double>()));
+	REQUIRE(result->Collection().GetValue(0, 0).GetValue<double>() == 25.0);
+	REQUIRE(result->Collection().GetValue(0, 1).GetValue<double>() == 2.5);
+	REQUIRE(result->Collection().GetValue(0, 2).IsNull());
+	REQUIRE(result->Collection().GetValue(0, 3).IsNull());
+	REQUIRE(std::isinf(result->Collection().GetValue(0, 4).GetValue<double>()));
 
 	RequireNativeSljitIr(manager, "double-divide-references", [](const ExecutionRegionEvent &event) {
 		REQUIRE(StringUtil::Contains(event.ir, "logical=DECIMAL(38,2),physical=INT128"));
@@ -1052,11 +1052,11 @@ TEST_CASE("JIT lowers casted numeric double division as generated code", "[api][
 	result = con.Query("SELECT ratio FROM jit_casted_double_constant_division_result ORDER BY id");
 	REQUIRE_NO_FAIL(*result);
 	REQUIRE(result->RowCount() == 5);
-	REQUIRE(result->GetValue(0, 0).GetValue<double>() == 100.0 / 7.0);
-	REQUIRE(result->GetValue(0, 1).GetValue<double>() == 12.5 / 7.0);
-	REQUIRE(result->GetValue(0, 2).IsNull());
-	REQUIRE(result->GetValue(0, 3).GetValue<double>() == 1.0);
-	REQUIRE(result->GetValue(0, 4).GetValue<double>() == 8.0 / 7.0);
+	REQUIRE(result->Collection().GetValue(0, 0).GetValue<double>() == 100.0 / 7.0);
+	REQUIRE(result->Collection().GetValue(0, 1).GetValue<double>() == 12.5 / 7.0);
+	REQUIRE(result->Collection().GetValue(0, 2).IsNull());
+	REQUIRE(result->Collection().GetValue(0, 3).GetValue<double>() == 1.0);
+	REQUIRE(result->Collection().GetValue(0, 4).GetValue<double>() == 8.0 / 7.0);
 
 	RequireNativeSljitIr(manager, "double-divide-constant", [](const ExecutionRegionEvent &event) {
 		REQUIRE(StringUtil::Contains(event.ir, "logical=DECIMAL(38,2),physical=INT128"));
@@ -1085,7 +1085,7 @@ TEST_CASE("JIT lowers casted numeric double comparison predicates as generated c
 	                        "ORDER BY id");
 	REQUIRE_NO_FAIL(*result);
 	REQUIRE(result->RowCount() == 1);
-	REQUIRE(result->GetValue(0, 0).GetValue<int32_t>() == 1);
+	REQUIRE(result->Collection().GetValue(0, 0).GetValue<int32_t>() == 1);
 	RequireNativeSljitIr(manager, "native:boolean-predicate", [](const ExecutionRegionEvent &event) {
 		REQUIRE(StringUtil::Contains(event.ir, "compare_less_than"));
 		REQUIRE(StringUtil::Contains(event.ir, "logical=DECIMAL(15,2),physical=INT64"));
@@ -1099,8 +1099,8 @@ TEST_CASE("JIT lowers casted numeric double comparison predicates as generated c
 	                   "ORDER BY id");
 	REQUIRE_NO_FAIL(*result);
 	REQUIRE(result->RowCount() == 2);
-	REQUIRE(result->GetValue(0, 0).GetValue<int32_t>() == 1);
-	REQUIRE(result->GetValue(0, 1).GetValue<int32_t>() == 2);
+	REQUIRE(result->Collection().GetValue(0, 0).GetValue<int32_t>() == 1);
+	REQUIRE(result->Collection().GetValue(0, 1).GetValue<int32_t>() == 2);
 	RequireNativeSljitIr(manager, "native:boolean-predicate", [](const ExecutionRegionEvent &event) {
 		REQUIRE(StringUtil::Contains(event.ir, "compare_greater_than_or_equal"));
 		REQUIRE(StringUtil::Contains(event.ir, "logical=DECIMAL(38,2),physical=INT128"));
@@ -1133,8 +1133,8 @@ TEST_CASE("JIT lowers decimal arithmetic comparison predicates as generated code
 	                        "ORDER BY id");
 	REQUIRE_NO_FAIL(*result);
 	REQUIRE(result->RowCount() == 2);
-	REQUIRE(result->GetValue(0, 0).GetValue<int32_t>() == 1);
-	REQUIRE(result->GetValue(0, 1).GetValue<int32_t>() == 5);
+	REQUIRE(result->Collection().GetValue(0, 0).GetValue<int32_t>() == 1);
+	REQUIRE(result->Collection().GetValue(0, 1).GetValue<int32_t>() == 5);
 	RequireNativeSljitIr(manager, "native:typed-expression-tree", [](const ExecutionRegionEvent &event) {
 		// The same-scale widening cast (c -> DECIMAL(14,2)) is lowered inside the generated tree instead of forcing
 		// the whole compound-arithmetic predicate to delegate to native.
@@ -1162,11 +1162,11 @@ TEST_CASE("JIT lowers integer modulo-by-constant with magic-multiply strength re
 	auto result = con.Query("SELECT id FROM jit_modulo_predicate WHERE a % 7 = 0 ORDER BY id");
 	REQUIRE_NO_FAIL(*result);
 	REQUIRE(result->RowCount() == 5);
-	REQUIRE(result->GetValue(0, 0).GetValue<int32_t>() == 1);
-	REQUIRE(result->GetValue(0, 1).GetValue<int32_t>() == 2);
-	REQUIRE(result->GetValue(0, 2).GetValue<int32_t>() == 3);
-	REQUIRE(result->GetValue(0, 3).GetValue<int32_t>() == 4);
-	REQUIRE(result->GetValue(0, 4).GetValue<int32_t>() == 7);
+	REQUIRE(result->Collection().GetValue(0, 0).GetValue<int32_t>() == 1);
+	REQUIRE(result->Collection().GetValue(0, 1).GetValue<int32_t>() == 2);
+	REQUIRE(result->Collection().GetValue(0, 2).GetValue<int32_t>() == 3);
+	REQUIRE(result->Collection().GetValue(0, 3).GetValue<int32_t>() == 4);
+	REQUIRE(result->Collection().GetValue(0, 4).GetValue<int32_t>() == 7);
 	RequireNativeSljitIr(manager, "native:typed-expression-tree", [](const ExecutionRegionEvent &event) {
 		REQUIRE_FALSE(StringUtil::Contains(event.reason, "sljit-expression-lowering-unsupported"));
 	});
@@ -1182,8 +1182,8 @@ TEST_CASE("JIT lowers integer modulo-by-constant with magic-multiply strength re
 	ClearJitTrace(manager, true);
 	auto selector_result = con.Query(selector_query);
 	REQUIRE_NO_FAIL(*selector_result);
-	REQUIRE(selector_result->GetValue(0, 0) == selector_reference->GetValue(0, 0));
-	REQUIRE(selector_result->GetValue(1, 0) == selector_reference->GetValue(1, 0));
+	REQUIRE(selector_result->Collection().GetValue(0, 0) == selector_reference->Collection().GetValue(0, 0));
+	REQUIRE(selector_result->Collection().GetValue(1, 0) == selector_reference->Collection().GetValue(1, 0));
 	RequireNativeSljitIr(manager, "native:typed-expression-tree", [](const ExecutionRegionEvent &event) {
 		REQUIRE_FALSE(StringUtil::Contains(event.reason, "sljit-expression-lowering-unsupported"));
 	});
@@ -1203,9 +1203,9 @@ TEST_CASE("JIT lowers integer modulo-by-constant with magic-multiply strength re
 	result = con.Query("SELECT id, a // 4 AS q FROM jit_modulo_predicate WHERE a IS NOT NULL ORDER BY id");
 	REQUIRE_NO_FAIL(*result);
 	REQUIRE(result->RowCount() == 6);
-	REQUIRE(result->GetValue(1, 0).GetValue<int64_t>() == 3);  // 14 // 4
-	REQUIRE(result->GetValue(1, 1).GetValue<int64_t>() == -3); // -14 // 4 truncates toward zero
-	REQUIRE(result->GetValue(1, 3).GetValue<int64_t>() == -1); // -7 // 4
+	REQUIRE(result->Collection().GetValue(1, 0).GetValue<int64_t>() == 3);  // 14 // 4
+	REQUIRE(result->Collection().GetValue(1, 1).GetValue<int64_t>() == -3); // -14 // 4 truncates toward zero
+	REQUIRE(result->Collection().GetValue(1, 3).GetValue<int64_t>() == -1); // -7 // 4
 	RequireNativeSljitIr(manager, "native:typed-expression-tree", [](const ExecutionRegionEvent &event) {
 		REQUIRE_FALSE(StringUtil::Contains(event.reason, "sljit-expression-lowering-unsupported"));
 	});
@@ -1216,7 +1216,7 @@ TEST_CASE("JIT lowers integer modulo-by-constant with magic-multiply strength re
 	result = con.Query("SELECT id FROM jit_modulo_variable WHERE d <> 0 AND a % d = 0 ORDER BY id");
 	REQUIRE_NO_FAIL(*result);
 	REQUIRE(result->RowCount() == 1);
-	REQUIRE(result->GetValue(0, 0).GetValue<int32_t>() == 1);
+	REQUIRE(result->Collection().GetValue(0, 0).GetValue<int32_t>() == 1);
 }
 
 TEST_CASE("JIT lowers int-times-decimal arithmetic through a scale-zero cast", "[api][jit]") {
@@ -1238,7 +1238,7 @@ TEST_CASE("JIT lowers int-times-decimal arithmetic through a scale-zero cast", "
 	auto result = con.Query("SELECT id FROM jit_int_decimal WHERE qty * price > 6.00 ORDER BY id");
 	REQUIRE_NO_FAIL(*result);
 	REQUIRE(result->RowCount() == 1);
-	REQUIRE(result->GetValue(0, 0).GetValue<int32_t>() == 1);
+	REQUIRE(result->Collection().GetValue(0, 0).GetValue<int32_t>() == 1);
 	RequireNativeSljitIr(manager, "native:typed-expression-tree", [](const ExecutionRegionEvent &event) {
 		REQUIRE(StringUtil::Contains(event.ir, "cast:DECIMAL"));
 		REQUIRE_FALSE(StringUtil::Contains(event.reason, "sljit-expression-lowering-unsupported"));

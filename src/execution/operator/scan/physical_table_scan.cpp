@@ -16,7 +16,7 @@
 #include "duckdb/main/database.hpp"
 #include "duckdb/execution/physical_table_scan_enum.hpp"
 #include "duckdb/main/settings.hpp"
-#include "duckdb/planner/filter/expression_filter.hpp"
+#include "duckdb/parallel/pipeline.hpp"
 #include "duckdb/storage/storage_index.hpp"
 #include "duckdb/storage/table/scan_state.hpp"
 
@@ -213,12 +213,13 @@ InitializeExecutionSourceContractTableScanGlobalState(ClientContext &context, co
 	storage.InitializeParallelScan(context, contract_state.parallel_state, op.column_ids);
 }
 
-PhysicalTableScan::PhysicalTableScan(PhysicalPlan &physical_plan, vector<LogicalType> types, TableFunction function_p,
-                                     unique_ptr<FunctionData> bind_data_p, vector<LogicalType> returned_types_p,
-                                     vector<ColumnIndex> column_ids_p, vector<idx_t> projection_ids_p,
-                                     vector<string> names_p, unique_ptr<TableFilterSet> table_filters_p,
-                                     idx_t estimated_cardinality, ExtraOperatorInfo extra_info,
-                                     vector<Value> parameters_p, virtual_column_map_t virtual_columns_p)
+PhysicalTableScan::PhysicalTableScan(PhysicalPlan &physical_plan, vector<LogicalType> types,
+                                     BoundTableFunction function_p, unique_ptr<FunctionData> bind_data_p,
+                                     vector<LogicalType> returned_types_p, vector<ColumnIndex> column_ids_p,
+                                     vector<idx_t> projection_ids_p, vector<string> names_p,
+                                     unique_ptr<TableFilterSet> table_filters_p, idx_t estimated_cardinality,
+                                     ExtraOperatorInfo extra_info, vector<Value> parameters_p,
+                                     virtual_column_map_t virtual_columns_p)
     : PhysicalOperator(physical_plan, PhysicalOperatorType::TABLE_SCAN, std::move(types), estimated_cardinality),
 
       function(std::move(function_p)), bind_data(std::move(bind_data_p)), returned_types(std::move(returned_types_p)),
@@ -263,13 +264,13 @@ public:
 
 	idx_t max_threads = 0;
 	PhysicalTableScanExecutionStrategy physical_table_scan_execution_strategy;
+	//! Combined dynamic table filters - before global_state, which references them during teardown
+	unique_ptr<TableFilterSet> table_filters;
+	//! Scan-owned residual subset when generated code owns static filters - before global_state for the same reason
+	unique_ptr<TableFilterSet> execution_source_residual_filters;
 	unique_ptr<GlobalTableFunctionState> global_state;
 	bool in_out_final = false;
 	DataChunk input_chunk;
-	//! Combined table filters, if we have dynamic filters
-	unique_ptr<TableFilterSet> table_filters;
-	//! Scan-owned residual subset when generated code owns static filters.
-	unique_ptr<TableFilterSet> execution_source_residual_filters;
 	TableScanExecutionSourceConfig execution_source_config;
 	TableScanExecutionSourceContractGlobalState execution_source_contract;
 
@@ -378,10 +379,10 @@ bool PhysicalTableScan::SupportsExecutionSourceContract(const ExecutionRegionOpe
 }
 
 static idx_t GetExecutionSourceContractTableScanBatchIndex(const TableScanState &scan_state) {
-	if (scan_state.table_state.row_group) {
+	if (scan_state.table_state.GetRowGroup()) {
 		return scan_state.table_state.batch_index;
 	}
-	if (scan_state.local_state.row_group) {
+	if (scan_state.local_state.GetRowGroup()) {
 		return scan_state.table_state.batch_index + scan_state.local_state.batch_index;
 	}
 	return 0;
@@ -585,7 +586,7 @@ SourceResultType PhysicalTableScan::GetDataInternal(ExecutionContext &context, D
 					return SourceResultType::BLOCKED;
 				}
 			}
-			data.async_result.ExecuteTasksSynchronously();
+			data.async_result.ExecuteTasksSynchronously(context.client);
 			return SourceResultType::HAVE_MORE_OUTPUT;
 		}
 		return AsyncResult::GetSourceResultType(output_async_result, chunk.size());
@@ -659,7 +660,8 @@ OperatorPartitionData PhysicalTableScan::GetPartitionData(ExecutionContext &cont
 }
 
 string PhysicalTableScan::GetName() const {
-	return StringUtil::Upper(function.name + (function.extra_info.empty() ? "" : " " + function.extra_info));
+	auto &extra_info = function.GetExtraInfo();
+	return StringUtil::Upper(function.GetName().GetIdentifierName() + (extra_info.empty() ? "" : " " + extra_info));
 }
 
 void AddProjectionNames(const ColumnIndex &index, const string &name, const LogicalType &type, string &result) {
@@ -700,7 +702,7 @@ string PhysicalTableScan::GetFilterInfo(const TableFilterSet &filter_set) const 
 	for (auto &f : filter_set) {
 		auto filter_idx = f.GetIndex();
 		auto &filter = f.Filter().Cast<ExpressionFilter>();
-		if (filter_idx < names.size()) {
+		if (filter_idx < column_ids.size()) {
 			if (!first_item) {
 				filters_info += "\n";
 			}
@@ -732,7 +734,7 @@ InsertionOrderPreservingMap<string> PhysicalTableScan::ParamsToString() const {
 			result[it.first] = it.second;
 		}
 	} else {
-		result["Function"] = StringUtil::Upper(function.name.GetIdentifierName());
+		result["Function"] = StringUtil::Upper(function.GetName().GetIdentifierName());
 	}
 	if (function.projection_pushdown) {
 		string projections;

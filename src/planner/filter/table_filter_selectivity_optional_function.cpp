@@ -33,7 +33,7 @@ void FilterSelectivityState::Update(idx_t accepted, idx_t processed) {
 		tuples_accepted = 0;
 		tuples_processed = 0;
 		status = Status::ACTIVE;
-	} else if (vectors_processed >= n_vectors_to_check) {
+	} else if (status == Status::ACTIVE && vectors_processed >= n_vectors_to_check) {
 		// pause the filter if we processed enough vectors and the selectivity is too high
 		if (GetSelectivity() >= selectivity_threshold) {
 			status = Status::PAUSED_DUE_TO_HIGH_SELECTIVITY;
@@ -144,10 +144,10 @@ static idx_t SelectivityOptionalFilterSelect(DataChunk &args, ExpressionState &s
 		return SetAllTrueSelection(count, sel, true_sel, false_sel);
 	}
 
-	SelectionVector temp_true(count);
-	auto result_true_sel = (!true_sel || (sel && true_sel.get() == sel.get())) ? &temp_true : true_sel.get();
-	auto approved_count = local_state.executor.SelectExpression(args, *result_true_sel);
-	approved_count = TranslateSelection(count, sel, *result_true_sel, approved_count, true_sel, false_sel);
+	SelectionVector temp_true;
+	auto &result_true_sel = GetFilterResultSelection(count, sel, true_sel, temp_true);
+	auto approved_count = local_state.executor.SelectExpression(args, result_true_sel);
+	approved_count = TranslateSelection(count, sel, result_true_sel, approved_count, true_sel, false_sel);
 	local_state.Update(approved_count, count);
 	return approved_count;
 }

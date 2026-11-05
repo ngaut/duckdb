@@ -167,7 +167,7 @@ static vector<LogicalType> BuildExecutionContractTableScanSourceInputTypes(const
 static vector<bool> BuildExecutionContractTableScanSourceInputNotNull(const PhysicalTableScan &scan) {
 	vector<bool> result;
 	result.assign(scan.column_ids.size(), false);
-	if (StringUtil::Lower(scan.function.name.GetIdentifierName()) != "seq_scan" || !scan.bind_data) {
+	if (StringUtil::Lower(scan.function.GetName().GetIdentifierName()) != "seq_scan" || !scan.bind_data) {
 		return result;
 	}
 	auto &bind_data = scan.bind_data->Cast<TableScanBindData>();
@@ -304,7 +304,7 @@ static void AppendExecutionContractNativeOperatorReason(string &reason,
 
 ExecutionSourceContractCapability GetExecutionSourceContractCapability(const PhysicalTableScan &scan) {
 	ExecutionSourceContractCapability result;
-	auto function_name = StringUtil::Lower(scan.function.name.GetIdentifierName());
+	auto function_name = StringUtil::Lower(scan.function.GetName().GetIdentifierName());
 	result.kind = function_name == "seq_scan" ? ExecutionRegionSourceKind::DUCKDB_TABLE_SCAN
 	                                          : ExecutionRegionSourceKind::TABLE_FUNCTION_SCAN;
 	if (!scan.function.function && !scan.function.in_out_function) {
@@ -1823,7 +1823,7 @@ static string BuildExecutionContractPerfectHashAggregateBoundaryReason(const Phy
 	result += ";aggregate_return_types=" + BuildExecutionContractAggregateReturnTypeList(aggregate.aggregates);
 	result += ";aggregate_child_counts=" + BuildExecutionContractAggregateChildCountList(aggregate.aggregates);
 	result += ";aggregate_types=" + BuildExecutionContractAggregateTypeList(aggregate.aggregates);
-	result += ";aggregate_filter_count=" + std::to_string(aggregate.filter_indexes.size());
+	result += ";aggregate_filter_count=" + std::to_string(aggregate.filter_columns.size());
 	result +=
 	    ";aggregate_order_count=" + std::to_string(CountExecutionContractAggregateOrderModifiers(aggregate.aggregates));
 	result += ";payload_type_count=" + std::to_string(aggregate.payload_types.size());
@@ -1857,7 +1857,7 @@ BuildExecutionContractPerfectHashAggregateContract(const PhysicalPerfectHashAggr
 	AddExecutionContractAggregateContractCommon(result, aggregate.aggregates);
 	result.group_count = aggregate.groups.size();
 	result.group_types = aggregate.group_types;
-	result.aggregate_filter_count = aggregate.filter_indexes.size();
+	result.aggregate_filter_count = aggregate.filter_columns.size();
 	result.payload_type_count = aggregate.payload_types.size();
 	result.payload_types = aggregate.payload_types;
 	result.perfect_required_bits_count = aggregate.required_bits.size();
@@ -1938,7 +1938,7 @@ static bool ExecutionContractTableStorageCompresses(const PhysicalTableScan &sca
 static ExecutionRegionTableScanContract BuildExecutionContractTableScanContract(const PhysicalTableScan &scan) {
 	ExecutionRegionTableScanContract result;
 	result.present = true;
-	result.function_name = StringUtil::Lower(scan.function.name.GetIdentifierName());
+	result.function_name = StringUtil::Lower(scan.function.GetName().GetIdentifierName());
 	result.estimated_source_cardinality = GetExecutionRegionTableScanSourceCardinality(scan);
 	result.source_contract_input_types = BuildExecutionContractTableScanSourceInputTypes(scan);
 	result.source_contract_input_not_null = BuildExecutionContractTableScanSourceInputNotNull(scan);

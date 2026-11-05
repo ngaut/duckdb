@@ -36,6 +36,8 @@ public:
 public:
 	// Source interface
 	bool SupportsExecutionSourceContract(const ExecutionRegionOpenRequest &open_request) const override;
+	unique_ptr<GlobalSourceState> GetGlobalSourceState(ClientContext &context) const override;
+	ProgressData GetProgress(ClientContext &context, GlobalSourceState &gstate) const override;
 	SourceResultType GetDataInternal(ExecutionContext &context, DataChunk &chunk,
 	                                 OperatorSourceInput &input) const override;
 	SourceResultType GetExecutionSourceContractDataInternal(ExecutionContext &context, DataChunk &chunk,

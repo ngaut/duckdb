@@ -85,6 +85,9 @@ EmitRegularHashJoinProbeHash(struct sljit_compiler *compiler, const SljitNativeH
 	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_R1, 0, SLJIT_R3, 0);
 	EmitLoadHashJoinPointerMask(compiler, SLJIT_R4, pointer_mask_reg);
 	sljit_emit_op2(compiler, SLJIT_OR, SLJIT_R3, 0, SLJIT_R3, 0, SLJIT_R4, 0);
+	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_R4, 0, SLJIT_MEM1(SLJIT_S0),
+	               offsetof(SljitNativeRegularHashJoinProbeInput, bucket_shift));
+	sljit_emit_op2(compiler, SLJIT_LSHR, SLJIT_R1, 0, SLJIT_R1, 0, SLJIT_R4, 0);
 	EmitApplyHashJoinBitmask(compiler, SLJIT_R1, SLJIT_R4, bitmask_reg);
 	return jumps;
 }

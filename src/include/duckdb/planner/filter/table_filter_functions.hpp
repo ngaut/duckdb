@@ -11,6 +11,7 @@
 #include "duckdb/common/bswap.hpp"
 #include "duckdb/common/common.hpp"
 #include "duckdb/common/hash_bloom_filter.hpp"
+#include "duckdb/common/mutex.hpp"
 #include "duckdb/common/optional_ptr.hpp"
 #include "duckdb/common/enums/expression_type.hpp"
 #include "duckdb/common/enums/filter_propagate_result.hpp"
@@ -72,28 +73,37 @@ struct TableFilterFunctions {
 };
 
 //! Runtime bloom-filter state used by join pushdown and internal tablefilter functions.
+//! A filter is first built (Initialize, then InsertHashes) and afterwards sealed. Only a sealed filter
+//! describes a complete key set, so only a sealed filter may be looked up or handed to a scan.
 class BloomFilter {
 public:
 	BloomFilter() = default;
 	void Initialize(ClientContext &context_p, idx_t number_of_rows);
 
-	void InsertHashes(const Vector &hashes_v) const;
+	//! VectorOperations::Hash writes at the source row positions, so the hashes to insert are the ones sel
+	//! points at rather than the first count entries
+	void InsertHashes(const Vector &hashes_v, const SelectionVector &sel, idx_t count);
+	//! Inserts every hash the vector carries
+	void InsertHashes(const Vector &hashes_v);
 	idx_t LookupHashes(const Vector &hashes_v, SelectionVector &result_sel, idx_t count) const;
 	//! result_sel contains local positions into sel rather than source row ids.
 	idx_t LookupHashes(const Vector &hashes_v, const SelectionVector &sel, SelectionVector &result_sel,
 	                   idx_t count) const;
 
-	void InsertOne(hash_t hash) const;
+	void InsertOne(hash_t hash);
+	//! A sealed filter is immutable, so lookups read the sectors without atomics.
 	inline bool LookupOne(hash_t hash) const {
 		D_ASSERT(initialized);
-		D_ASSERT(finalized);
+		D_ASSERT(sealed);
 		const auto bf_offset = hash & bitmask;
 		const auto mask = BloomFilter::GetMask(hash);
 		return (bf[bf_offset] & mask) == mask;
 	}
-	void Merge(const BloomFilter &other);
-	void Finalize();
-	void Reset();
+	//! Folds the filter down to the smallest size that still meets the target false positive rate, releases the
+	//! memory that folding freed up, and marks the filter complete.
+	void Seal(ClientContext &context);
+	//! Whether a lookup batch of count probes is large enough, over a filter large enough, to prefetch sectors
+	bool ShouldPrefetch(idx_t count) const;
 
 	static inline uint64_t GetMask(hash_t hash) {
 		return HashBloomFilterMask(hash);
@@ -101,6 +111,21 @@ public:
 
 	bool IsInitialized() const {
 		return initialized;
+	}
+	bool IsSealed() const {
+		return sealed;
+	}
+	//! Whether the sealed filter still rejects enough for pushing it into a scan to pay off
+	bool IsUseful() const {
+		D_ASSERT(sealed);
+		return useful;
+	}
+	bool IsPublished() const {
+		return published;
+	}
+	//! Marks the filter as handed to a probe-side consumer: it must stay immutable afterwards
+	void MarkPublished() {
+		published = true;
 	}
 
 	const uint64_t *Data() const {
@@ -114,22 +139,35 @@ public:
 	static idx_t GetNumberOfSectors(idx_t number_of_rows);
 
 private:
+	//! Halves the filter until only new_num_sectors sectors remain. Bit-exact with a filter that was built at
+	//! the smaller size from the start, because the sector index is the low bits of the hash and the bits set
+	//! within a sector are taken from the high bits.
+	void Fold(idx_t new_num_sectors);
+	//! Fraction of bits that are set, over the sectors currently in use
+	double Density() const;
+
+private:
 	idx_t num_sectors;
+	//! Sector capacity of buf_, so an unpublished filter can be reused across recursive iterations
+	idx_t allocated_sectors = 0;
 	uint64_t bitmask; // num_sectors - 1 -> used to get the sector offset
 
 	bool initialized = false;
-	bool finalized = false;
+	bool sealed = false;
+	bool useful = false;
+	bool published = false;
 	AllocatedData buf_;
 	uint64_t *bf;
 };
 
 //! FunctionData for bloom filter internal function
 struct BloomFilterFunctionData : public FunctionData {
-	BloomFilterFunctionData(optional_ptr<BloomFilter> filter_p, bool filters_null_values_p,
+	BloomFilterFunctionData(shared_ptr<const BloomFilter> filter_p, bool filters_null_values_p,
 	                        const string &key_column_name_p, const LogicalType &key_type_p);
 
 	//! Selectivity policy is owned by the selectivity-optional wrapper; the primitive only implements matching.
-	optional_ptr<BloomFilter> filter;
+	//! Published filters are shared and immutable: the hash table may drop its own reference at any time
+	shared_ptr<const BloomFilter> filter;
 	bool filters_null_values;
 	string key_column_name;
 	LogicalType key_type;
@@ -212,9 +250,9 @@ struct DynamicFilterData {
 public:
 	DynamicFilterData(ExpressionType comparison_type, Value constant);
 
-	mutex lock;
+	mutable annotated_shared_mutex lock;
 	ExpressionType comparison_type;
-	Value constant;
+	Value constant DUCKDB_GUARDED_BY(lock);
 	atomic<bool> initialized = {false};
 
 	unique_ptr<Expression> ToExpression(const Expression &column) const;

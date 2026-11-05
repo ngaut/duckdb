@@ -486,6 +486,7 @@ struct SljitNativeRegularHashJoinProbeInput {
 	idx_t count = 0;
 	const uint64_t *entries = nullptr;
 	uint64_t bitmask = 0;
+	uint64_t bucket_shift = 0;
 	uint64_t pointer_mask = 0;
 	SljitHashJoinProbeLayoutKind layout_kind = SljitHashJoinProbeLayoutKind::NO_CHAIN;
 	bool rhs_keys_have_validity = false;

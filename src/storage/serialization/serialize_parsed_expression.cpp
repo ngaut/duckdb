@@ -95,6 +95,7 @@ unique_ptr<ParsedExpression> ParsedExpression::Deserialize(Deserializer &deseria
 	result->alias = std::move(alias);
 	result->query_location = query_location;
 	result->query_location.length = query_location_length;
+	result->VerifyDeserialized();
 	return result;
 }
 
@@ -214,6 +215,7 @@ unique_ptr<ParsedExpression> LambdaExpression::Deserialize(Deserializer &deseria
 	deserializer.ReadPropertyWithDefault<unique_ptr<ParsedExpression>>(200, "lhs", result->lhs);
 	deserializer.ReadPropertyWithDefault<unique_ptr<ParsedExpression>>(201, "expr", result->expr);
 	deserializer.ReadPropertyWithExplicitDefault<LambdaSyntaxType>(202, "syntax_type", result->syntax_type, LambdaSyntaxType::SINGLE_ARROW_STORAGE);
+	result->FinalizeDeserialization(deserializer);
 	return std::move(result);
 }
 
@@ -227,17 +229,6 @@ unique_ptr<ParsedExpression> LambdaRefExpression::Deserialize(Deserializer &dese
 	auto lambda_idx = deserializer.ReadPropertyWithDefault<idx_t>(200, "lambda_idx");
 	auto column_name = deserializer.ReadPropertyWithDefault<Identifier>(201, "column_name");
 	auto result = duckdb::unique_ptr<LambdaRefExpression>(new LambdaRefExpression(lambda_idx, std::move(column_name)));
-	return std::move(result);
-}
-
-void OperatorExpression::Serialize(Serializer &serializer) const {
-	ParsedExpression::Serialize(serializer);
-	serializer.WritePropertyWithDefault<vector<unique_ptr<ParsedExpression>>>(200, "children", children);
-}
-
-unique_ptr<ParsedExpression> OperatorExpression::Deserialize(Deserializer &deserializer) {
-	auto result = duckdb::unique_ptr<OperatorExpression>(new OperatorExpression(deserializer.Get<ExpressionType>()));
-	deserializer.ReadPropertyWithDefault<vector<unique_ptr<ParsedExpression>>>(200, "children", result->children);
 	return std::move(result);
 }
 

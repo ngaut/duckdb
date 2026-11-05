@@ -17,7 +17,7 @@ string StringCompressFunctionName(const LogicalType &result_type) {
 template <class RESULT_TYPE>
 void StringCompressFunction(DataChunk &args, ExpressionState &state, Vector &result) {
 	UnaryExecutor::Execute<string_t, RESULT_TYPE>(
-	    args.data[0], result, StringCompressValue<RESULT_TYPE>,
+	    args.data[0], result, [](const string_t &input) { return StringCompressValue<RESULT_TYPE>(input); },
 #if defined(D_ASSERT_IS_ENABLED)
 	    FunctionErrors::CAN_THROW_RUNTIME_ERROR); // Can only throw a runtime error when assertions are enabled
 #else
@@ -238,6 +238,16 @@ ScalarFunction InternalCompressStringUhugeintFun::GetFunction() {
 
 ScalarFunctionSet InternalDecompressStringFun::GetFunctions() {
 	return GetStringDecompressFunctionSet();
+}
+
+CMExpressionType CMUtils::GetStringType(const BoundScalarFunction &function) {
+	if (function.GetDeserializeCallback() == CMStringCompressDeserialize) {
+		return CMExpressionType::COMPRESS;
+	}
+	if (function.GetDeserializeCallback() == CMStringDecompressDeserialize) {
+		return CMExpressionType::DECOMPRESS;
+	}
+	return CMExpressionType::NONE;
 }
 
 } // namespace duckdb

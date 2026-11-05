@@ -1,4 +1,6 @@
 #include "duckdb/execution/aggregate_hashtable.hpp"
+
+#include "duckdb/common/error_data.hpp"
 #include "duckdb/main/client_context.hpp"
 #include "duckdb/storage/buffer_manager.hpp"
 
@@ -370,11 +372,11 @@ GroupedAggregateHashTable::GroupedAggregateHashTable(ClientContext &context_p, A
                                                      idx_t initial_capacity, idx_t radix_bits,
                                                      TupleDataValidityType group_validity)
     : BaseAggregateHashTable(context_p, allocator, aggregate_objects_p, std::move(payload_types_p)), context(context_p),
-      radix_bits(radix_bits), count(0), capacity(0), sink_count(0), skip_lookups(false), enable_hll(false),
-      aggregate_allocator(make_shared_ptr<ArenaAllocator>(allocator)), state(*aggregate_allocator),
-      skip_lookups_require_final_combine(false), proven_unique_append_key_type(PhysicalType::INVALID),
-      proven_unique_append_has_last_key(false), proven_unique_append_last_signed_key(0),
-      proven_unique_append_last_unsigned_key(0), proven_unique_append_ranges_coalesced(false) {
+      radix_bits(radix_bits), count(0), capacity(0), aggregate_allocator(make_shared_ptr<ArenaAllocator>(allocator)),
+      state(*aggregate_allocator), skip_lookups_require_final_combine(false),
+      proven_unique_append_key_type(PhysicalType::INVALID), proven_unique_append_has_last_key(false),
+      proven_unique_append_last_signed_key(0), proven_unique_append_last_unsigned_key(0),
+      proven_unique_append_ranges_coalesced(false) {
 	state.owner = this;
 	state.initialized = true;
 	clustered_state.all_clustered = AllAggregatesClustered(aggregate_objects_p);
@@ -414,6 +416,7 @@ GroupedAggregateHashTable::GroupedAggregateHashTable(ClientContext &context_p, A
 }
 
 void GroupedAggregateHashTable::InitializePartitionedData() {
+	tuple_size_cache.count.SetInvalid();
 	if (!partitioned_data ||
 	    RadixPartitioning::RadixBitsOfPowerOfTwo(partitioned_data->PartitionCount()) != radix_bits) {
 		D_ASSERT(!partitioned_data || partitioned_data->Count() == 0);
@@ -432,6 +435,7 @@ void GroupedAggregateHashTable::InitializePartitionedData() {
 }
 
 void GroupedAggregateHashTable::InitializeUnpartitionedData() {
+	tuple_size_cache.count.SetInvalid();
 	if (!unpartitioned_data) {
 		unpartitioned_data = make_uniq<RadixPartitionedTupleData>(buffer_manager, layout_ptr, MemoryTag::HASH_TABLE,
 		                                                          0ULL, layout_ptr->ColumnCount() - 1, context);
@@ -464,26 +468,37 @@ const PartitionedTupleData &GroupedAggregateHashTable::GetPartitionedData() cons
 	return *partitioned_data;
 }
 
+idx_t GroupedAggregateHashTable::GetSizeInBytes() const {
+	const auto materialized_count = GetMaterializedCount();
+	if (!tuple_size_cache.count.IsValid() || tuple_size_cache.count.GetIndex() != materialized_count) {
+		tuple_size_cache.size = partitioned_data->GetAllocatedSizeInBytes() +
+		                        (unpartitioned_data ? unpartitioned_data->GetAllocatedSizeInBytes() : 0);
+		tuple_size_cache.count = materialized_count;
+	}
+	return tuple_size_cache.size + aggregate_allocator->AllocationSize() + hash_map.GetSize();
+}
+
 unique_ptr<PartitionedTupleData> GroupedAggregateHashTable::AcquirePartitionedData() {
 	dense_single_field_target_cache.Disable();
 	row_pointer_descriptor_target_cache.Reset();
 	// The dictionary group cache stores row pointers; acquiring the data hands those rows
 	// to a collection that may copy them, so the cache must not survive.
 	state.compressed_group_state.dictionary_id = string();
+	// Release destination pins before copying the buffered rows.
+	partitioned_data->FlushAppendState(state.partitioned_append_state);
+	partitioned_data->Unpin();
 	const bool needs_unpartitioned_data = radix_bits >= UNPARTITIONED_RADIX_BITS_THRESHOLD || unpartitioned_data;
 	if (unpartitioned_data) {
 		// Flush/unpin unpartitioned data and append to partitioned data
 		unpartitioned_data->FlushAppendState(state.unpartitioned_append_state);
 		unpartitioned_data->Unpin();
 		unpartitioned_data->Repartition(context, *partitioned_data);
+		// Release scratch metadata along with the rows transferred to partitioned_data.
+		unpartitioned_data.reset();
 	}
 	if (needs_unpartitioned_data) {
 		InitializeUnpartitionedData();
 	}
-
-	// Flush/unpin partitioned data
-	partitioned_data->FlushAppendState(state.partitioned_append_state);
-	partitioned_data->Unpin();
 
 	// Return and re-initialize
 	auto result = std::move(partitioned_data);
@@ -506,6 +521,10 @@ void GroupedAggregateHashTable::Abandon() {
 	dense_single_field_target_cache.Reset();
 	row_pointer_descriptor_target_cache.Reset();
 	const bool needs_unpartitioned_data = radix_bits >= UNPARTITIONED_RADIX_BITS_THRESHOLD || unpartitioned_data;
+	if (needs_unpartitioned_data) {
+		partitioned_data->FlushAppendState(state.partitioned_append_state);
+		partitioned_data->Unpin();
+	}
 	if (unpartitioned_data) {
 		// Flush/unpin unpartitioned data and append to partitioned data
 		unpartitioned_data->FlushAppendState(state.unpartitioned_append_state);
@@ -519,6 +538,7 @@ void GroupedAggregateHashTable::Abandon() {
 	// Start over
 	ClearPointerTable();
 	count = 0;
+	adaptivity.BeginCycle();
 
 	// Resetting the id ensures the dict state is reset properly when needed
 	state.compressed_group_state.dictionary_id = string();
@@ -537,7 +557,12 @@ shared_ptr<ArenaAllocator> GroupedAggregateHashTable::GetAggregateAllocator() {
 }
 
 GroupedAggregateHashTable::~GroupedAggregateHashTable() {
-	Destroy();
+	// destroying the states pins their blocks, which can fail when the table is torn down after an out-of-memory
+	// error - a destructor cannot throw, so the states leak in that case
+	try {
+		Destroy();
+	} catch (...) { // NOLINT
+	}
 }
 
 void GroupedAggregateHashTable::Destroy() {
@@ -558,16 +583,27 @@ void GroupedAggregateHashTable::DestroyAggregateData(PartitionedTupleData &data,
                                                      PartitionedTupleDataAppendState &append_state) {
 	// Call the destructor for each of the aggregates
 	data.FlushAppendState(append_state);
+	ErrorData first_error;
 	for (auto &data_collection : data.GetPartitions()) {
 		if (data_collection->Count() == 0) {
 			continue;
 		}
-		TupleDataChunkIterator iterator(*data_collection, TupleDataPinProperties::DESTROY_AFTER_DONE, false);
-		auto &row_locations = iterator.GetChunkState().row_locations;
-		do {
-			RowOperations::DestroyStates(state.row_state, *layout_ptr, row_locations);
-		} while (iterator.Next());
+		try {
+			TupleDataChunkIterator iterator(*data_collection, TupleDataPinProperties::DESTROY_AFTER_DONE, false);
+			auto &row_locations = iterator.GetChunkState().row_locations;
+			do {
+				RowOperations::DestroyStates(state.row_state, *layout_ptr, row_locations);
+			} while (iterator.Next());
+		} catch (std::exception &ex) {
+			// keep releasing the other partitions, freeing their memory may let their states be destroyed
+			if (!first_error.HasError()) {
+				first_error = ErrorData(ex);
+			}
+		}
 		data_collection->Reset();
+	}
+	if (first_error.HasError()) {
+		first_error.Throw();
 	}
 }
 
@@ -610,7 +646,7 @@ idx_t GroupedAggregateHashTable::ApplyBitMask(hash_t hash) const {
 
 void GroupedAggregateHashTable::Verify() {
 #ifdef DEBUG
-	if (skip_lookups) {
+	if (adaptivity.LookupsSkipped()) {
 		return;
 	}
 	idx_t total_count = 0;
@@ -639,12 +675,8 @@ idx_t GroupedAggregateHashTable::GetRadixBits() const {
 	return radix_bits;
 }
 
-idx_t GroupedAggregateHashTable::GetSinkCount() const {
-	return sink_count;
-}
-
 void GroupedAggregateHashTable::RecordSinkCount(idx_t count) {
-	sink_count += count;
+	adaptivity.AddInput(count);
 }
 
 idx_t GroupedAggregateHashTable::GetMaterializedCount() const {
@@ -656,18 +688,27 @@ idx_t GroupedAggregateHashTable::GetMaterializedCount() const {
 }
 
 void GroupedAggregateHashTable::SkipLookups(bool require_final_combine) {
-	skip_lookups = true;
+	adaptivity.SkipLookups();
 	skip_lookups_require_final_combine = skip_lookups_require_final_combine || require_final_combine;
-	enable_hll = false;
+	if (!require_final_combine) {
+		// A proven-unique stream has no duplicates to estimate, and resuming lookups would void its proof
+		adaptivity.EnableHLL(false);
+	}
 	dense_single_field_target_cache.Disable();
 }
 
-bool GroupedAggregateHashTable::LookupsSkipped() const {
-	return skip_lookups;
+void GroupedAggregateHashTable::ResumeLookups() {
+	D_ASSERT(Count() == 0);
+	if (adaptivity.LookupsSkipped()) {
+		// The rows appended while lookups were skipped stay materialized behind the fresh pointer table. They can
+		// duplicate future groups, which makes the final combine mandatory and voids any uniqueness proof.
+		epochs_require_final_combine = true;
+	}
+	adaptivity.ResumeLookups();
 }
 
 void GroupedAggregateHashTable::RequireFinalCombine() {
-	if (skip_lookups) {
+	if (adaptivity.LookupsSkipped()) {
 		skip_lookups_require_final_combine = true;
 	}
 }
@@ -843,7 +884,8 @@ static bool AggregateTryContinueProvenUniqueAppendTyped(DataChunk &groups, Physi
 
 bool GroupedAggregateHashTable::TryContinueProvenUniqueAppend(DataChunk &groups,
                                                               ExecutionGroupedAggregateAppendProof append_proof) {
-	if (skip_lookups_require_final_combine || (sink_count != 0 && !skip_lookups) || groups.ColumnCount() != 1) {
+	if (skip_lookups_require_final_combine || (adaptivity.GetSinkCount() != 0 && !adaptivity.LookupsSkipped()) ||
+	    groups.ColumnCount() != 1) {
 		return false;
 	}
 	const auto key_type = groups.data[0].GetType().InternalType();
@@ -910,31 +952,29 @@ bool GroupedAggregateHashTable::TryContinueProvenUniqueAppend(DataChunk &groups,
 		RequireFinalCombine();
 		return false;
 	}
-	if (!skip_lookups) {
+	if (!adaptivity.LookupsSkipped()) {
 		SkipLookups(false);
 	}
 	return true;
 }
 
 bool GroupedAggregateHashTable::LookupsSkippedRequireFinalCombine() const {
-	return (skip_lookups && skip_lookups_require_final_combine) || epochs_require_final_combine;
+	return (adaptivity.LookupsSkipped() && skip_lookups_require_final_combine) || epochs_require_final_combine;
 }
 
 void GroupedAggregateHashTable::EnsureLookupEpoch() {
-	if (!skip_lookups) {
+	if (!adaptivity.LookupsSkipped()) {
 		return;
 	}
 	// Adaptive appends left rows the pointer table does not cover, so lookups may only
-	// run against a fresh epoch. The abandoned epochs can duplicate future groups,
-	// which makes the final combine mandatory and voids any uniqueness proof.
+	// run against a fresh epoch.
 	Abandon();
-	skip_lookups = false;
-	epochs_require_final_combine = true;
+	ResumeLookups();
 }
 
 optional_ptr<const vector<GroupedAggregateProvenUniqueRange>>
 GroupedAggregateHashTable::GetProvenUniqueAppendRanges() const {
-	if (!skip_lookups || skip_lookups_require_final_combine || epochs_require_final_combine ||
+	if (!adaptivity.LookupsSkipped() || skip_lookups_require_final_combine || epochs_require_final_combine ||
 	    !proven_unique_append_has_last_key || proven_unique_append_ranges.empty()) {
 		return nullptr;
 	}
@@ -942,16 +982,14 @@ GroupedAggregateHashTable::GetProvenUniqueAppendRanges() const {
 }
 
 void GroupedAggregateHashTable::EnableHLL(bool enable) {
-	enable_hll = enable;
+	D_ASSERT(!enable || adaptivity.HLLEnabled() || GetMaterializedCount() == 0);
+	adaptivity.EnableHLL(enable);
 }
 
-bool GroupedAggregateHashTable::HLLEnabled() const {
-	return enable_hll;
-}
-
-idx_t GroupedAggregateHashTable::GetHLLUpperBound() const {
-	D_ASSERT(enable_hll);
-	return LossyNumericCast<idx_t>((1 + HyperLogLog::GetErrorRate()) * static_cast<double>(hll.Count()));
+void GroupedAggregateHashTable::ObserveNewGroupHashes(idx_t new_group_count) {
+	D_ASSERT(adaptivity.HLLEnabled());
+	// Lookup hits were observed when their groups were inserted: only the new groups add to the sketch
+	adaptivity.ObserveHashes(state.hashes.Values<hash_t>(), state.new_groups, new_group_count);
 }
 
 void GroupedAggregateHashTable::Resize(idx_t size) {
@@ -970,9 +1008,14 @@ void GroupedAggregateHashTable::Resize(idx_t size) {
 		epochs_require_final_combine = true;
 		Abandon();
 	}
+	D_ASSERT(Count() == 0 || Count() == GetMaterializedCount());
+	if (Count() == 0 && size == capacity && hash_map.GetSize() == size * sizeof(ht_entry_t)) {
+		return;
+	}
 
+	auto new_hash_map = buffer_manager.GetBufferAllocator().AllocateHuge(size * sizeof(ht_entry_t));
 	capacity = size;
-	hash_map = buffer_manager.GetBufferAllocator().Allocate(capacity * sizeof(ht_entry_t));
+	hash_map = std::move(new_hash_map);
 	entries = reinterpret_cast<ht_entry_t *>(hash_map.get());
 	ClearPointerTable();
 	bitmask = capacity - 1;
@@ -988,7 +1031,7 @@ void GroupedAggregateHashTable::Resize(idx_t size) {
 }
 
 bool GroupedAggregateHashTable::ReserveGroups(idx_t group_count) {
-	if (skip_lookups) {
+	if (adaptivity.LookupsSkipped()) {
 		return false;
 	}
 	if (group_count <= Count()) {
@@ -1026,7 +1069,8 @@ void GroupedAggregateHashTable::ReinsertTuples(PartitionedTupleData &data) {
 		TupleDataChunkIterator iterator(*data_collection, TupleDataPinProperties::ALREADY_PINNED, false);
 		const auto row_locations = iterator.GetRowLocations();
 		do {
-			for (idx_t i = 0; i < iterator.GetCurrentChunkCount(); i++) {
+			const auto row_count = iterator.GetCurrentChunkCount();
+			for (idx_t i = 0; i < row_count; i++) {
 				const auto &row_location = row_locations[i];
 				const auto hash = Load<hash_t>(row_location + hash_offset);
 				const auto salt = ht_entry_t::ExtractSalt(hash);
@@ -1077,7 +1121,7 @@ idx_t GroupedAggregateHashTable::AddChunk(DataChunk &groups, DataChunk &payload,
 		return 0;
 	}
 
-	sink_count += groups.size();
+	adaptivity.AddInput(groups.size());
 	groups.Hash(state.hashes);
 	const auto new_group_count = FindOrCreateGroups(groups, state.hashes, state.addresses, state.new_groups);
 	before_update(state.addresses, state.new_groups, new_group_count);
@@ -1099,7 +1143,7 @@ idx_t GroupedAggregateHashTable::AddChunkAndGetNewGroups(DataChunk &groups, Data
 		return 0;
 	}
 
-	sink_count += groups.size();
+	adaptivity.AddInput(groups.size());
 	groups.Hash(state.hashes);
 	const auto new_group_count = FindOrCreateGroups(groups, state.hashes, state.addresses, state.new_groups);
 	auto source_addresses = FlatVector::GetData<data_ptr_t>(state.addresses);
@@ -1348,7 +1392,7 @@ optional_idx GroupedAggregateHashTable::TryResolveCompressedGroups(DataChunk &gr
 }
 
 idx_t GroupedAggregateHashTable::AddChunk(DataChunk &groups, DataChunk &payload, const unsafe_vector<idx_t> &filter) {
-	sink_count += groups.size();
+	adaptivity.AddInput(groups.size());
 
 	// check if we can use an optimized path that utilizes compressed vectors
 	auto result = TryAddCompressedGroups(groups, payload, filter);
@@ -1363,7 +1407,7 @@ idx_t GroupedAggregateHashTable::AddChunk(DataChunk &groups, DataChunk &payload,
 
 bool GroupedAggregateHashTable::UpdateAggregatesClustered(DataChunk &payload, const unsafe_vector<idx_t> &filter,
                                                           idx_t count, bool ht_offsets_valid) {
-	if (skip_lookups) {
+	if (adaptivity.LookupsSkipped()) {
 		return false;
 	}
 	if (sizeof(uintptr_t) < sizeof(uint64_t)) {
@@ -1408,6 +1452,8 @@ bool GroupedAggregateHashTable::UpdateAggregatesClustered(DataChunk &payload, co
 
 void GroupedAggregateHashTable::UpdateAggregates(DataChunk &payload, const unsafe_vector<idx_t> &filter, idx_t count,
                                                  bool ht_offsets_valid) {
+	// evaluate every aggregate filter once for this chunk
+	filter_set.ApplyFilters(payload, filter);
 	if (UpdateAggregatesClustered(payload, filter, count, ht_offsets_valid)) {
 		Verify();
 		return;
@@ -1428,7 +1474,7 @@ void GroupedAggregateHashTable::UpdateAggregates(DataChunk &payload, const unsaf
 
 		if (aggr.aggr_type != AggregateType::DISTINCT && aggr.filter) {
 			RowOperations::UpdateFilteredStates(state.row_state, filter_set.GetFilterData(i), aggr, state.addresses,
-			                                    payload, payload_idx);
+			                                    payload_idx);
 		} else {
 			RowOperations::UpdateStates(state.row_state, aggr, state.addresses, payload, payload_idx);
 		}
@@ -1491,6 +1537,10 @@ static void GroupedAggregateHashTableInnerLoop(ht_entry_t *const entries, const 
                                                idx_t &empty_count, idx_t &compare_count) {
 	// For each remaining entry, figure out whether or not it belongs to a full or empty group
 	for (idx_t i = 0; i < remaining_entries; i++) {
+		PrefetchHashTableEntry(i, remaining_entries, [&](idx_t next_idx) {
+			const auto next_index = HAS_SEL ? sel_vector->get_index_unsafe(next_idx) : next_idx;
+			return &entries[ht_offsets[next_index]];
+		});
 		const auto index = HAS_SEL ? sel_vector->get_index_unsafe(i) : i;
 		const auto salt = hash_salts[index];
 		auto &ht_offset = ht_offsets[index];
@@ -1525,7 +1575,8 @@ static void GroupedAggregateHashTableInnerLoop(ht_entry_t *const entries, const 
 // so the append needs no capacity.
 idx_t GroupedAggregateHashTable::AppendGroupsSkippingLookups(DataChunk &groups, Vector &group_hashes_v,
                                                              Vector &addresses_v,
-                                                             optional_ptr<ExecutionOperatorStageRecorder> recorder) {
+                                                             optional_ptr<ExecutionOperatorStageRecorder> recorder,
+                                                             optional_ptr<TupleDataChunkState> source_rows) {
 	auto append_start = AggregateTraceStart(recorder);
 	RequireFinalCombine();
 	const auto chunk_size = groups.size();
@@ -1537,10 +1588,17 @@ idx_t GroupedAggregateHashTable::AppendGroupsSkippingLookups(DataChunk &groups, 
 	}
 	state.group_chunk.data[groups.ColumnCount()].Reference(group_hashes_v);
 	TupleDataCollection::ToUnifiedFormat(state.partitioned_append_state.chunk_state, state.group_chunk);
-	partitioned_data->AppendUnified(state.partitioned_append_state, state.group_chunk,
-	                                *FlatVector::IncrementalSelectionVector(), chunk_size);
-	RowOperations::InitializeStates(*layout_ptr, state.partitioned_append_state.chunk_state.row_locations,
-	                                *FlatVector::IncrementalSelectionVector(), chunk_size);
+	if (adaptivity.HLLEnabled()) {
+		adaptivity.ObserveHashes(group_hashes_v);
+	}
+	if (source_rows) {
+		partitioned_data->Append(state.partitioned_append_state, *source_rows, chunk_size);
+	} else {
+		partitioned_data->AppendUnified(state.partitioned_append_state, state.group_chunk,
+		                                *FlatVector::IncrementalSelectionVector(), chunk_size);
+		RowOperations::InitializeStates(*layout_ptr, state.partitioned_append_state.chunk_state.row_locations,
+		                                *FlatVector::IncrementalSelectionVector(), chunk_size);
+	}
 
 	addresses_v.Flatten();
 	const auto addresses = FlatVector::GetDataMutable<data_ptr_t>(addresses_v);
@@ -1556,9 +1614,13 @@ idx_t GroupedAggregateHashTable::AppendGroupsSkippingLookups(DataChunk &groups, 
 	return chunk_size;
 }
 
+#if defined(__GNUC__)
+__attribute__((aligned(128)))
+#endif
 idx_t GroupedAggregateHashTable::FindOrCreateGroupsInternal(DataChunk &groups, Vector &group_hashes_v,
                                                             Vector &addresses_v, SelectionVector &new_groups_out,
-                                                            optional_ptr<ExecutionOperatorStageRecorder> recorder) {
+                                                            optional_ptr<ExecutionOperatorStageRecorder> recorder,
+                                                            optional_ptr<TupleDataChunkState> source_rows) {
 	D_ASSERT(state.initialized && state.owner.get() == this);
 	D_ASSERT(groups.ColumnCount() + 1 == layout_ptr->ColumnCount());
 	D_ASSERT(group_hashes_v.GetType() == LogicalType::HASH);
@@ -1566,8 +1628,8 @@ idx_t GroupedAggregateHashTable::FindOrCreateGroupsInternal(DataChunk &groups, V
 	D_ASSERT(state.ht_offsets.GetType() == LogicalType::UBIGINT);
 	D_ASSERT(addresses_v.GetType() == LogicalType::POINTER);
 	D_ASSERT(state.hash_salts.GetType() == LogicalType::HASH);
-	if (skip_lookups) {
-		return AppendGroupsSkippingLookups(groups, group_hashes_v, addresses_v, recorder);
+	if (adaptivity.LookupsSkipped()) {
+		return AppendGroupsSkippingLookups(groups, group_hashes_v, addresses_v, recorder, source_rows);
 	}
 
 	// Need to fit the entire vector, and resize at threshold
@@ -1598,12 +1660,6 @@ idx_t GroupedAggregateHashTable::FindOrCreateGroupsInternal(DataChunk &groups, V
 	TupleDataCollection::ToUnifiedFormat(state.partitioned_append_state.chunk_state, state.group_chunk);
 	RecordAggregateTraceStage(recorder, "find_or_create.group_format", group_format_start);
 
-	if (enable_hll) {
-		auto hll_start = AggregateTraceStart(recorder);
-		hll.Update(group_hashes_v);
-		RecordAggregateTraceStage(recorder, "find_or_create.hll", hll_start);
-	}
-
 	const auto hashes = group_hashes_v.Values<hash_t>();
 
 	addresses_v.Flatten();
@@ -1614,16 +1670,11 @@ idx_t GroupedAggregateHashTable::FindOrCreateGroupsInternal(DataChunk &groups, V
 	const auto ht_offsets = FlatVector::GetDataMutable<uint64_t>(state.ht_offsets);
 	const auto hash_salts = FlatVector::GetDataMutable<hash_t>(state.hash_salts);
 
-	// We also compute the occupied count, which is essentially useless.
-	// However, this loop is branchless, while the main lookup loop below is not.
-	// So, by doing the lookups here, we better amortize cache misses.
 	auto compute_offsets_start = AggregateTraceStart(recorder);
-	idx_t occupied_count = 0;
 	for (idx_t r = 0; r < chunk_size; r++) {
 		const auto &hash = hashes[r].GetValue();
 		auto &ht_offset = ht_offsets[r];
 		ht_offset = ApplyBitMask(hash);
-		occupied_count += entries[ht_offset].IsOccupied(); // Lookup
 		D_ASSERT(ht_offset == hash % capacity);
 		hash_salts[r] = ht_entry_t::ExtractSalt(hash);
 	}
@@ -1654,13 +1705,6 @@ idx_t GroupedAggregateHashTable::FindOrCreateGroupsInternal(DataChunk &groups, V
 		RecordAggregateTraceStage(recorder, "find_or_create.probe", probe_start);
 		new_group_count += new_entry_count;
 
-		if (DUCKDB_UNLIKELY(occupied_count > new_entry_count + need_compare_count)) {
-			// We use the useless occupied_count we summed above here so the variable is used,
-			// and the compiler cannot optimize away the vectorized lookups above. This should never be triggered.
-			throw InternalException("Internal validation failed in GroupedAggregateHashTable");
-		}
-		occupied_count = 0; // Have to set to 0 for next iterations
-
 		if (new_entry_count != 0) {
 			// Append everything that belongs to an empty group
 			auto append_start = AggregateTraceStart(recorder);
@@ -1675,9 +1719,13 @@ idx_t GroupedAggregateHashTable::FindOrCreateGroupsInternal(DataChunk &groups, V
 				data = partitioned_data.get();
 				append_state = &state.partitioned_append_state;
 			}
-			data->AppendUnified(*append_state, state.group_chunk, empty_vector, new_entry_count);
-			RowOperations::InitializeStates(*layout_ptr, append_state->chunk_state.row_locations,
-			                                *FlatVector::IncrementalSelectionVector(), new_entry_count);
+			if (source_rows) {
+				data->Append(*append_state, *source_rows, new_entry_count, empty_vector);
+			} else {
+				data->AppendUnified(*append_state, state.group_chunk, empty_vector, new_entry_count);
+				RowOperations::InitializeStates(*layout_ptr, append_state->chunk_state.row_locations,
+				                                *FlatVector::IncrementalSelectionVector(), new_entry_count);
+			}
 
 			// Set the entry pointers in the 1st part of the HT now that the data has been appended
 			const auto row_locations = FlatVector::GetData<data_ptr_t>(append_state->chunk_state.row_locations);
@@ -1727,6 +1775,16 @@ idx_t GroupedAggregateHashTable::FindOrCreateGroupsInternal(DataChunk &groups, V
 		throw InternalException("Maximum outer iteration count reached in GroupedAggregateHashTable");
 	}
 
+	if (adaptivity.HLLEnabled() && new_group_count > 0) {
+		auto hll_start = AggregateTraceStart(recorder);
+		if (new_group_count == chunk_size) {
+			adaptivity.ObserveHashes(group_hashes_v);
+		} else {
+			adaptivity.ObserveHashes(hashes, new_groups_out, new_group_count);
+		}
+		RecordAggregateTraceStage(recorder, "find_or_create.hll", hll_start);
+	}
+
 	FlatVector::SetSize(addresses_v, chunk_size);
 	count += new_group_count;
 	return new_group_count;
@@ -1746,7 +1804,8 @@ bool GroupedAggregateHashTable::TryResolveExistingGroupsFastInternal(
 	if (!addresses_out && !selected_update_function) {
 		return false;
 	}
-	if (skip_lookups || enable_hll || count == 0 || !entries || group_count == 0 ||
+	// Only existing groups are resolved here: the HLL observed them when they were inserted
+	if (adaptivity.LookupsSkipped() || count == 0 || !entries || group_count == 0 ||
 	    group_count > AGGREGATE_MAX_FAST_GROUPS || group_hashes.GetVectorType() != VectorType::FLAT_VECTOR) {
 		return false;
 	}
@@ -1853,7 +1912,7 @@ void GroupedAggregateHashTable::FindOrCreateGroups(DataChunk &groups, Vector &ad
 idx_t GroupedAggregateHashTable::FindOrCreateGroupAddresses(DataChunk &groups, Vector &addresses_out,
                                                             optional_ptr<ExecutionOperatorStageRecorder> recorder) {
 	EnsureLookupEpoch();
-	sink_count += groups.size();
+	adaptivity.AddInput(groups.size());
 	auto compressed_start = AggregateTraceStart(recorder);
 	auto compressed_result = TryResolveCompressedGroups(groups, addresses_out);
 	RecordAggregateTraceStage(recorder, "find_or_create.compressed_lookup", compressed_start);
@@ -1896,7 +1955,7 @@ bool GroupedAggregateHashTable::TryFindExistingGroupsSelectedStateUpdateFast(
 		RecordAggregateTraceStage(recorder, "find_existing_selected.fast_existing_miss", fast_existing_start);
 		return false;
 	}
-	sink_count += groups.size();
+	adaptivity.AddInput(groups.size());
 	RecordAggregateTraceStage(recorder, "find_existing_selected.fast_existing_update", fast_existing_start);
 	return true;
 }
@@ -2244,7 +2303,8 @@ bool GroupedAggregateHashTable::TryFindOrCreateSingleFieldGroupsDenseTemplated(
 	    AggregateDenseDomainCanRearm(dense_domain, layout_ptr->GetTypes()[0].InternalType())) {
 		dense_single_field_target_cache.Reset();
 	}
-	if (skip_lookups || !entries || groups.ColumnCount() != 1 || dense_single_field_target_cache.disabled) {
+	if (adaptivity.LookupsSkipped() || !entries || groups.ColumnCount() != 1 ||
+	    dense_single_field_target_cache.disabled) {
 		return record_miss("find_or_create_dense_miss.state");
 	}
 	const auto &layout_types = layout_ptr->GetTypes();
@@ -2348,16 +2408,7 @@ bool GroupedAggregateHashTable::TryFindOrCreateSingleFieldGroupsDenseTemplated(
 			cache.Disable();
 			return false;
 		}
-		T value;
-		hash_t hash;
-		bool hash_ready = false;
 		const auto source_idx = AggregateFastGroupSourceIndex(sources, 0, row_idx);
-		if (enable_hll) {
-			value = Load<T>(sources.source_data[0] + source_idx * sizeof(T));
-			hash = Hash(value);
-			hashes[row_idx] = hash;
-			hash_ready = true;
-		}
 		const auto cached_address = cache.GetAddress(key);
 		if (cached_address != 0) {
 			emit_existing_state(reinterpret_cast<data_ptr_t>(cached_address), row_idx);
@@ -2369,11 +2420,9 @@ bool GroupedAggregateHashTable::TryFindOrCreateSingleFieldGroupsDenseTemplated(
 			continue;
 		}
 
-		if (!hash_ready) {
-			value = Load<T>(sources.source_data[0] + source_idx * sizeof(T));
-			hash = Hash(value);
-			hashes[row_idx] = hash;
-		}
+		const auto value = Load<T>(sources.source_data[0] + source_idx * sizeof(T));
+		const auto hash = Hash(value);
+		hashes[row_idx] = hash;
 		const auto salt = ht_entry_t::ExtractSalt(hash);
 		auto ht_offset = ApplyBitMask(hash);
 
@@ -2408,9 +2457,9 @@ bool GroupedAggregateHashTable::TryFindOrCreateSingleFieldGroupsDenseTemplated(
 	}
 	RecordAggregateTraceStage(recorder, "find_or_create_dense.probe", probe_start);
 
-	if (enable_hll) {
+	if (adaptivity.HLLEnabled() && new_group_count > 0) {
 		auto hll_start = AggregateTraceStart(recorder);
-		hll.Update(state.hashes);
+		ObserveNewGroupHashes(new_group_count);
 		RecordAggregateTraceStage(recorder, "find_or_create_dense.hll", hll_start);
 	}
 
@@ -2426,7 +2475,7 @@ bool GroupedAggregateHashTable::TryFindOrCreateSingleFieldGroupsDenseTemplated(
 			                         selected_update_state);
 			RecordAggregateTraceStage(recorder, "find_or_create_dense.selected_existing_update", update_start);
 		}
-		sink_count += chunk_size;
+		adaptivity.AddInput(chunk_size);
 		return true;
 	}
 
@@ -2499,7 +2548,7 @@ bool GroupedAggregateHashTable::TryFindOrCreateSingleFieldGroupsDenseTemplated(
 		FlatVector::SetSize(*addresses_out, count_t(chunk_size));
 	}
 	count += new_group_count;
-	sink_count += chunk_size;
+	adaptivity.AddInput(chunk_size);
 	RecordAggregateTraceStage(recorder, "find_or_create_dense.append_new_groups", append_start);
 	return true;
 }
@@ -2571,7 +2620,7 @@ bool GroupedAggregateHashTable::TryFindOrCreateGroupsFastInternal(
 	}
 	auto &addresses = addresses_out ? *addresses_out : state.addresses;
 	FindOrCreateGroups(groups, *group_hashes, addresses, state.new_groups, recorder);
-	sink_count += chunk_size;
+	adaptivity.AddInput(chunk_size);
 	if (selected_update_function) {
 		auto update_start = AggregateTraceStart(recorder);
 		selected_update_function(FlatVector::GetData<uintptr_t>(addresses), nullptr, nullptr, chunk_size,
@@ -4707,7 +4756,7 @@ bool GroupedAggregateHashTable::TryFindOrCreateSingleInputVectorGroupsDenseTempl
 	    AggregateDenseDomainCanRearm(dense_domain, source.target_physical_type)) {
 		dense_single_field_target_cache.Reset();
 	}
-	if (enable_hll || skip_lookups || !entries || dense_single_field_target_cache.disabled ||
+	if (adaptivity.LookupsSkipped() || !entries || dense_single_field_target_cache.disabled ||
 	    payload_input.size() != count) {
 		return false;
 	}
@@ -4978,6 +5027,11 @@ bool GroupedAggregateHashTable::TryFindOrCreateSingleInputVectorGroupsDenseTempl
 		}
 	}
 	RecordAggregateTraceStage(recorder, "find_or_create_input_vector_dense.probe", probe_start);
+	if (adaptivity.HLLEnabled() && new_group_count > 0) {
+		auto hll_start = AggregateTraceStart(recorder);
+		ObserveNewGroupHashes(new_group_count);
+		RecordAggregateTraceStage(recorder, "find_or_create_input_vector_dense.hll", hll_start);
+	}
 
 	if (new_group_count == 0) {
 		update_count_one_states();
@@ -4987,7 +5041,7 @@ bool GroupedAggregateHashTable::TryFindOrCreateSingleInputVectorGroupsDenseTempl
 			RecordAggregateTraceStage(recorder, "find_or_create_input_vector_dense.emit_existing_targets",
 			                          target_start);
 		}
-		sink_count += count;
+		adaptivity.AddInput(count);
 		return true;
 	}
 
@@ -5049,7 +5103,7 @@ bool GroupedAggregateHashTable::TryFindOrCreateSingleInputVectorGroupsDenseTempl
 		RecordAggregateTraceStage(recorder, "find_or_create_input_vector_dense.emit_targets", target_start);
 	}
 	this->count += new_group_count;
-	sink_count += count;
+	adaptivity.AddInput(count);
 	RecordAggregateTraceStage(recorder, "find_or_create_input_vector_dense.append_new_groups", append_start);
 	return true;
 }
@@ -5297,7 +5351,7 @@ bool GroupedAggregateHashTable::TryFindOrCreateRowPointerSingleFieldGroupStateTa
     Vector &row_pointers, idx_t count, const vector<ExecutionRowPointerGroupKeySource> &group_sources,
     const ExecutionRowPointerGroupKeySource &source, ExecutionGroupedAggregateStateTargetBatch &targets,
     optional_ptr<ExecutionOperatorStageRecorder> recorder) {
-	if (enable_hll || !entries || skip_lookups || dense_single_field_target_cache.disabled) {
+	if (!entries || adaptivity.LookupsSkipped() || dense_single_field_target_cache.disabled) {
 		return false;
 	}
 	if (count > STANDARD_VECTOR_SIZE) {
@@ -5426,13 +5480,18 @@ bool GroupedAggregateHashTable::TryFindOrCreateRowPointerSingleFieldGroupStateTa
 		}
 	}
 	RecordAggregateTraceStage(recorder, "find_or_create_row_pointer_single_field_dense.probe", probe_start);
+	if (adaptivity.HLLEnabled() && new_group_count > 0) {
+		auto hll_start = AggregateTraceStart(recorder);
+		ObserveNewGroupHashes(new_group_count);
+		RecordAggregateTraceStage(recorder, "find_or_create_row_pointer_single_field_dense.hll", hll_start);
+	}
 
 	if (new_group_count == 0) {
 		auto target_start = AggregateTraceStart(recorder);
 		targets.InputOrder().Set(selected_addresses, nullptr, count);
 		RecordAggregateTraceStage(recorder, "find_or_create_row_pointer_single_field_dense.emit_existing_targets",
 		                          target_start);
-		sink_count += count;
+		adaptivity.AddInput(count);
 		return true;
 	}
 
@@ -5494,7 +5553,7 @@ bool GroupedAggregateHashTable::TryFindOrCreateRowPointerSingleFieldGroupStateTa
 	targets.InputOrder().Set(selected_addresses, nullptr, count);
 	RecordAggregateTraceStage(recorder, "find_or_create_row_pointer_single_field_dense.emit_targets", target_start);
 	this->count += new_group_count;
-	sink_count += count;
+	adaptivity.AddInput(count);
 	RecordAggregateTraceStage(recorder, "find_or_create_row_pointer_single_field_dense.append_new_groups",
 	                          append_start);
 	return true;
@@ -5672,9 +5731,9 @@ bool GroupedAggregateHashTable::TryFindOrCreateSingleFieldGroupStateTargetsDirec
 		}
 	}
 	RecordAggregateTraceStage(recorder, source.StageName("probe"), probe_start);
-	if (enable_hll) {
+	if (adaptivity.HLLEnabled()) {
 		auto hll_start = AggregateTraceStart(recorder);
-		hll.Update(state.hashes);
+		adaptivity.ObserveHashes(state.hashes);
 		RecordAggregateTraceStage(recorder, source.StageName("hll"), hll_start);
 	}
 
@@ -5682,7 +5741,7 @@ bool GroupedAggregateHashTable::TryFindOrCreateSingleFieldGroupStateTargetsDirec
 		auto target_start = AggregateTraceStart(recorder);
 		targets.InputOrder().Set(selected_addresses, nullptr, count);
 		RecordAggregateTraceStage(recorder, source.StageName("emit_existing_targets"), target_start);
-		sink_count += count;
+		adaptivity.AddInput(count);
 		return true;
 	}
 
@@ -5732,7 +5791,7 @@ bool GroupedAggregateHashTable::TryFindOrCreateSingleFieldGroupStateTargetsDirec
 	targets.InputOrder().Set(selected_addresses, nullptr, count);
 	RecordAggregateTraceStage(recorder, source.StageName("emit_targets"), target_start);
 	this->count += new_group_count;
-	sink_count += count;
+	adaptivity.AddInput(count);
 	RecordAggregateTraceStage(recorder, source.StageName("append_new_groups"), append_start);
 	return true;
 }
@@ -5749,7 +5808,7 @@ bool GroupedAggregateHashTable::TryFindOrCreateRowPointerSingleFieldGroupStateTa
 	if (count == 0) {
 		return true;
 	}
-	if (payload_input.size() != count || skip_lookups || !entries) {
+	if (payload_input.size() != count || adaptivity.LookupsSkipped() || !entries) {
 		return false;
 	}
 
@@ -5860,7 +5919,7 @@ bool GroupedAggregateHashTable::TryFindOrCreateDescriptorGroupStateTargetsDirect
 	if (count == 0) {
 		return true;
 	}
-	if (payload_input.size() != count || skip_lookups || !entries) {
+	if (payload_input.size() != count || adaptivity.LookupsSkipped() || !entries) {
 		return false;
 	}
 
@@ -5942,7 +6001,7 @@ bool GroupedAggregateHashTable::TryFindOrCreateDescriptorGroupStateTargetsDirect
 		auto selected_addresses = FlatVector::GetDataMutable<uintptr_t>(state.addresses);
 		memcpy(selected_addresses, cached_addresses.data(), count * sizeof(uintptr_t));
 		targets.InputOrder().Set(selected_addresses, nullptr, count);
-		sink_count += count - miss_count;
+		adaptivity.AddInput(count - miss_count);
 		RecordAggregateTraceStage(recorder, "find_or_create_descriptor.row_pointer_target_cache", cache_start);
 		return true;
 	};
@@ -5958,9 +6017,9 @@ bool GroupedAggregateHashTable::TryFindOrCreateDescriptorGroupStateTargetsDirect
 	RecordAggregateTraceStage(recorder, "find_or_create_descriptor.hash", hash_start);
 	const auto hashes = FlatVector::GetData<hash_t>(state.hashes);
 	const auto descriptor_sources_are_all_valid = AggregateDescriptorSourcesAreAllValid(group_sources);
-	if (enable_hll) {
+	if (adaptivity.HLLEnabled()) {
 		auto hll_start = AggregateTraceStart(recorder);
-		hll.Update(state.hashes);
+		adaptivity.ObserveHashes(state.hashes);
 		RecordAggregateTraceStage(recorder, "find_or_create_descriptor.hll", hll_start);
 	}
 
@@ -6117,7 +6176,7 @@ bool GroupedAggregateHashTable::TryFindOrCreateDescriptorGroupStateTargetsDirect
 		targets.InputOrder().Set(selected_addresses, nullptr, count);
 		cache_targets(sources.row_pointers, count, targets);
 		RecordAggregateTraceStage(recorder, "find_or_create_descriptor.emit_existing_targets", target_start);
-		sink_count += count;
+		adaptivity.AddInput(count);
 		return true;
 	}
 
@@ -6186,7 +6245,7 @@ bool GroupedAggregateHashTable::TryFindOrCreateDescriptorGroupStateTargetsDirect
 	cache_targets(sources.row_pointers, count, targets);
 	RecordAggregateTraceStage(recorder, "find_or_create_descriptor.emit_targets", target_start);
 	this->count += new_group_count;
-	sink_count += count;
+	adaptivity.AddInput(count);
 	RecordAggregateTraceStage(recorder, "find_or_create_descriptor.append_new_groups", append_start);
 	return true;
 }
@@ -6249,7 +6308,7 @@ bool GroupedAggregateHashTable::TryFindOrCreateRowPointerGroupStateTargetsFast(
 	    !AggregateDescriptorGroupKeySourcesSupported(group_sources, layout_ptr->GetTypes())) {
 		return false;
 	}
-	if (skip_lookups || !entries) {
+	if (adaptivity.LookupsSkipped() || !entries) {
 		return TryFindOrCreateRowPointerGroupStateTargetsMaterialized(payload_input, row_pointers, count, group_sources,
 		                                                              targets, recorder);
 	}
@@ -6302,7 +6361,7 @@ bool GroupedAggregateHashTable::TryFindOrCreateInputVectorGroupStateTargetsFast(
 	groups->Hash(state.hashes);
 	RecordAggregateTraceStage(recorder, "find_or_create_input_vector.hash", hash_start);
 	FindOrCreateGroups(*groups, state.hashes, state.addresses, state.new_groups, recorder);
-	sink_count += count;
+	adaptivity.AddInput(count);
 	targets.InputOrder().Set(FlatVector::GetData<uintptr_t>(state.addresses), nullptr, count);
 	return true;
 }
@@ -6316,8 +6375,8 @@ bool GroupedAggregateHashTable::TryUpdateSingleInputVectorGroupCountOneFast(
 	}
 	if (payload_input.size() != count ||
 	    !AggregateDescriptorGroupKeySourcesSupported(group_sources, layout_ptr->GetTypes()) ||
-	    !AggregateInputVectorDescriptorSourcesCanProbeDirect(payload_input, group_sources) || skip_lookups ||
-	    !entries) {
+	    !AggregateInputVectorDescriptorSourcesCanProbeDirect(payload_input, group_sources) ||
+	    adaptivity.LookupsSkipped() || !entries) {
 		return false;
 	}
 	return TryUpdateSingleInputVectorGroupCountOneDense(payload_input, count, group_sources, lane, recorder,
@@ -6342,7 +6401,7 @@ bool GroupedAggregateHashTable::TryAppendNewGroupsFastInternal(
 		RecordAggregateTraceStage(recorder, "find_new.unsupported_state", AggregateTraceStart(recorder));
 		return false;
 	}
-	const bool append_only = skip_lookups;
+	const bool append_only = adaptivity.LookupsSkipped();
 	if (!AggregateFastAppendNewGroupsSupported(groups)) {
 		RecordAggregateTraceStage(recorder, "find_new.unsupported_groups", AggregateTraceStart(recorder));
 		return false;
@@ -6449,9 +6508,9 @@ bool GroupedAggregateHashTable::TryAppendNewGroupsFastInternal(
 		}
 		RecordAggregateTraceStage(recorder, "find_new.mark_empty", mark_start);
 	}
-	if (enable_hll) {
+	if (adaptivity.HLLEnabled()) {
 		auto hll_start = AggregateTraceStart(recorder);
-		hll.Update(state.hashes);
+		adaptivity.ObserveHashes(state.hashes);
 		RecordAggregateTraceStage(recorder, "find_new.hll", hll_start);
 	}
 
@@ -6506,7 +6565,7 @@ bool GroupedAggregateHashTable::TryAppendNewGroupsFastInternal(
 		FlatVector::SetSize(*addresses_out, chunk_size);
 	}
 	count += chunk_size;
-	sink_count += chunk_size;
+	adaptivity.AddInput(chunk_size);
 	RecordAggregateTraceStage(recorder, "find_new.append_new_groups", append_start);
 
 	if (address_update_function) {
@@ -6705,7 +6764,7 @@ void GroupedAggregateHashTable::Combine(GroupedAggregateHashTable &other) {
 	}
 }
 
-void GroupedAggregateHashTable::Combine(TupleDataCollection &other_data, optional_ptr<atomic<double>> progress) {
+void GroupedAggregateHashTable::Combine(TupleDataCollection &other_data, optional_ptr<atomic<idx_t>> combined_chunks) {
 	// Combined groups are unknown to the dense target cache; a later dense append
 	// consulting a cached range that lacks them would recreate an existing group.
 	// Phase ordering makes that unreachable today; disabling makes it impossible.
@@ -6720,20 +6779,48 @@ void GroupedAggregateHashTable::Combine(TupleDataCollection &other_data, optiona
 
 	FlushMoveState fm_state(other_data);
 
-	idx_t chunk_idx = 0;
-	const auto chunk_count = other_data.ChunkCount();
 	while (fm_state.Scan()) {
 		// Check for interrupts with each chunk
 		context.InterruptCheck();
-		FindOrCreateGroups(fm_state.groups, fm_state.hashes, fm_state.group_addresses, fm_state.new_groups_sel);
-		RowOperations::CombineStates(state.row_state, *layout_ptr, fm_state.scan_state.chunk_state.row_locations,
-		                             fm_state.group_addresses);
-		if (layout_ptr->HasDestructor()) {
-			RowOperations::DestroyStates(state.row_state, *layout_ptr, fm_state.scan_state.chunk_state.row_locations);
+		auto &source_rows = fm_state.scan_state.chunk_state;
+		const auto chunk_count = fm_state.groups.size();
+		if (!layout_ptr->AllConstant()) {
+			other_data.FindHeapPointers(source_rows, chunk_count);
+		}
+		const auto new_count = FindOrCreateGroupsInternal(fm_state.groups, fm_state.hashes, fm_state.group_addresses,
+		                                                  fm_state.new_groups_sel, nullptr, source_rows);
+		if (new_count != chunk_count) {
+			auto &sources = source_rows.row_locations;
+			auto &targets = fm_state.group_addresses;
+			if (new_count != 0) {
+				// Newly copied states need no combination or destruction.
+				auto target_pointers = FlatVector::ScatterWriter<data_ptr_t>(targets);
+				for (idx_t i = 0; i < new_count; i++) {
+					target_pointers[fm_state.new_groups_sel.get_index_unsafe(i)] = nullptr;
+				}
+
+				const auto combine_count = chunk_count - new_count;
+				const auto source_values = sources.Values<data_ptr_t>();
+				const auto target_values = targets.Values<data_ptr_t>();
+				auto source_writer = FlatVector::Writer<data_ptr_t>(sources, combine_count);
+				auto target_writer = FlatVector::Writer<data_ptr_t>(targets, combine_count);
+				// Compact forwards so unread pointers are never overwritten.
+				for (idx_t i = 0; i < chunk_count; i++) {
+					const auto target = target_values[i].GetValue();
+					if (target) {
+						source_writer.WriteValue(source_values[i].GetValue());
+						target_writer.WriteValue(target);
+					}
+				}
+			}
+			RowOperations::CombineStates(state.row_state, *layout_ptr, sources, targets);
+			if (layout_ptr->HasDestructor()) {
+				RowOperations::DestroyStates(state.row_state, *layout_ptr, sources);
+			}
 		}
 
-		if (progress) {
-			*progress = static_cast<double>(++chunk_idx) / static_cast<double>(chunk_count);
+		if (combined_chunks) {
+			combined_chunks->fetch_add(1, std::memory_order_relaxed);
 		}
 	}
 
@@ -6785,6 +6872,7 @@ bool GroupedAggregateHashTable::Scan(AggregateHTScanState &scan_state, DataChunk
 }
 
 void GroupedAggregateHashTable::ResetForNewIteration(idx_t radix_bits_p) {
+	tuple_size_cache.count.SetInvalid();
 	// Save the previous iteration's group count before destroying aggregate states.
 	// This lets us size the pointer table based on actual prior data rather than the
 	// global sink capacity, which is typically much larger than recursive iteration sizes.
@@ -6826,8 +6914,7 @@ void GroupedAggregateHashTable::ResetForNewIteration(idx_t radix_bits_p) {
 	}
 
 	count = 0;
-	sink_count = 0;
-	skip_lookups = false;
+	adaptivity.Reset();
 	skip_lookups_require_final_combine = false;
 	epochs_require_final_combine = false;
 	proven_unique_append_key_type = PhysicalType::INVALID;
@@ -6836,8 +6923,6 @@ void GroupedAggregateHashTable::ResetForNewIteration(idx_t radix_bits_p) {
 	proven_unique_append_last_unsigned_key = 0;
 	proven_unique_append_ranges.clear();
 	proven_unique_append_ranges_coalesced = false;
-	enable_hll = false;
-	hll = HyperLogLog();
 	state.compressed_group_state.dictionary_id = string();
 
 	// Compute effective capacity based on the previous iteration's actual group count.

@@ -460,6 +460,9 @@ bool TryGetSignedNumericRange(ExpressionFilterState &state, const LogicalType &t
 	return true;
 }
 
+// The table filter functions are registered for (de)serialization only - TableFilterFunctions::Bind rejects
+// ordinary binding - so they are constructed and specialized for the column type here rather than resolved
+// through the catalog, and carry no catalog or schema name.
 static unique_ptr<Expression> CreateSingleArgumentFunctionExpression(const ScalarFunction &function,
                                                                      const LogicalType &target_type,
                                                                      unique_ptr<FunctionData> bind_data) {
@@ -514,7 +517,7 @@ void TableFilterFunctionSerialize(Serializer &serializer, const optional_ptr<Fun
 unique_ptr<FunctionData> TableFilterFunctionDeserialize(Deserializer &deserializer, BoundScalarFunction &function) {
 	auto key_type = function.GetArguments().empty() ? LogicalType::ANY : function.GetArguments()[0];
 	if (function.GetName() == BloomFilterScalarFun::NAME) {
-		return make_uniq<BloomFilterFunctionData>(nullptr, false, string(), key_type);
+		return make_uniq<BloomFilterFunctionData>(shared_ptr<const BloomFilter>(), false, string(), key_type);
 	}
 	if (function.GetName() == PrefixRangeScalarFun::NAME) {
 		return make_uniq<PrefixRangeFunctionData>(nullptr, true, string(), key_type);
@@ -522,7 +525,7 @@ unique_ptr<FunctionData> TableFilterFunctionDeserialize(Deserializer &deserializ
 	if (function.GetName() == DynamicFilterScalarFun::NAME) {
 		return make_uniq<DynamicFilterFunctionData>(nullptr);
 	}
-	throw InternalException("Unsupported table filter function \"%s\" during deserialization", function.GetName());
+	throw InternalException("Unsupported table filter function %s during deserialization", function.GetName());
 }
 
 } // namespace duckdb

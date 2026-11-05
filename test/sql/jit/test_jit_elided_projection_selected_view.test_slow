@@ -31,14 +31,17 @@ SET threads=${threads}
 statement ok
 SET jit_policy='off'
 
+# Each query joins in its own statement: one statement would share the join as a common subplan.
 statement ok
 CREATE OR REPLACE TABLE expected AS
 SELECT 'distinct_build' AS q, (SELECT count(*) FROM (SELECT DISTINCT ck FROM l JOIN o ON lk = ok))::VARCHAR AS k,
        NULL::BIGINT AS v
-UNION ALL
-SELECT 'distinct_per_probe', flag, count(DISTINCT pri) FROM l JOIN o ON lk = ok GROUP BY flag
-UNION ALL
-SELECT 'max_per_probe', ln::VARCHAR, max(ck) FROM l JOIN o ON lk = ok GROUP BY ln
+
+statement ok
+INSERT INTO expected SELECT 'distinct_per_probe', flag, count(DISTINCT pri) FROM l JOIN o ON lk = ok GROUP BY flag
+
+statement ok
+INSERT INTO expected SELECT 'max_per_probe', ln::VARCHAR, max(ck) FROM l JOIN o ON lk = ok GROUP BY ln
 
 statement ok
 SET jit_policy='auto'
@@ -50,10 +53,12 @@ statement ok
 CREATE OR REPLACE TABLE actual AS
 SELECT 'distinct_build' AS q, (SELECT count(*) FROM (SELECT DISTINCT ck FROM l JOIN o ON lk = ok))::VARCHAR AS k,
        NULL::BIGINT AS v
-UNION ALL
-SELECT 'distinct_per_probe', flag, count(DISTINCT pri) FROM l JOIN o ON lk = ok GROUP BY flag
-UNION ALL
-SELECT 'max_per_probe', ln::VARCHAR, max(ck) FROM l JOIN o ON lk = ok GROUP BY ln
+
+statement ok
+INSERT INTO actual SELECT 'distinct_per_probe', flag, count(DISTINCT pri) FROM l JOIN o ON lk = ok GROUP BY flag
+
+statement ok
+INSERT INTO actual SELECT 'max_per_probe', ln::VARCHAR, max(ck) FROM l JOIN o ON lk = ok GROUP BY ln
 
 query II
 SELECT (SELECT count(*) FROM expected),

@@ -11,11 +11,11 @@
 #include "duckdb/common/row_operations/row_matcher.hpp"
 #include "duckdb/common/types/row/partitioned_tuple_data.hpp"
 #include "duckdb/execution/base_aggregate_hashtable.hpp"
+#include "duckdb/execution/aggregate_ht_adaptivity_state.hpp"
 #include "duckdb/execution/execution_aggregate_runtime.hpp"
 #include "duckdb/execution/ht_entry.hpp"
 #include "duckdb/storage/arena_allocator.hpp"
 #include "duckdb/common/row_operations/row_operations.hpp"
-#include "duckdb/common/types/hyperloglog.hpp"
 #include "duckdb/common/clustered_aggregate.hpp"
 #include "duckdb/common/atomic.hpp"
 
@@ -196,6 +196,8 @@ public:
 	                                              optional_ptr<const ExecutionDenseGroupDomain> dense_domain = nullptr);
 
 	const PartitionedTupleData &GetPartitionedData() const;
+	//! Retained tuple blocks, allocator metadata, aggregate arena, and pointer table
+	idx_t GetSizeInBytes() const;
 	unique_ptr<PartitionedTupleData> AcquirePartitionedData();
 	//! Transfers append-only rows without radix repartitioning. This succeeds only while all materialized rows are in
 	//! the deferred unpartitioned collection owned by a still-valid uniqueness proof.
@@ -204,7 +206,7 @@ public:
 	void Repartition();
 	shared_ptr<ArenaAllocator> GetAggregateAllocator();
 
-	//! Resize the HT to the specified size. Must be larger than the current size.
+	//! Resize an empty HT, or grow an HT with no abandoned groups.
 	void Resize(idx_t size);
 	//! Resize the HT so the requested total group count and one append vector fit the load-factor threshold.
 	bool ReserveGroups(idx_t group_count);
@@ -216,17 +218,19 @@ public:
 	void SetRadixBits(idx_t radix_bits);
 	//! Get the radix bits for this HT
 	idx_t GetRadixBits() const;
-	//! Get the total number of tuples sunk into this HT
-	idx_t GetSinkCount() const;
 	//! Record state-address updates that bypass group lookup but still consume sink input
 	void RecordSinkCount(idx_t count);
 	//! Get the total number of tuples materialized currently in this HT
 	idx_t GetMaterializedCount() const;
-	//! Skips lookups from here on out. Statistical admission requires final combination; a proven-unique
-	//! stream may defer that requirement until its proof fails.
+	//! Read-only adaptivity observations; mutations follow the HT's lifecycle.
+	const AggregateHTAdaptivityState &GetAdaptivityState() const {
+		return adaptivity;
+	}
+	//! Skip lookups until resuming at an empty pointer table. Statistical admission requires final combination; a
+	//! proven-unique stream may defer that requirement until its proof fails.
 	void SkipLookups(bool require_final_combine = true);
-	//! Whether the pointer table has stopped owning group lookup for the current stream.
-	bool LookupsSkipped() const;
+	//! Resume lookups after abandoning the previous pointer table.
+	void ResumeLookups();
 	//! Permanently require final combination for the current append-only stream.
 	void RequireFinalCombine();
 	//! Continue a producer-proven fixed-width strictly increasing stream. This HT validates the published endpoints
@@ -239,16 +243,13 @@ public:
 	void EnsureLookupEpoch();
 	//! Return bounded local covering intervals when the append-only uniqueness proof is still intact.
 	optional_ptr<const vector<GroupedAggregateProvenUniqueRange>> GetProvenUniqueAppendRanges() const;
-	//! Enable/disable HLL
+	//! Enable/disable HLL; a fresh sketch must start before inserting groups
 	void EnableHLL(bool enable);
-	//! Whether HLL is enabled
-	bool HLLEnabled() const;
-	//! Get HLL count
-	idx_t GetHLLUpperBound() const;
 
 	//! Executes the filter(if any) and update the aggregates
 	void Combine(GroupedAggregateHashTable &other);
-	void Combine(TupleDataCollection &other_data, optional_ptr<atomic<double>> progress = nullptr);
+	//! Combines the data into this HT - combined_chunks (if set) is incremented for every combined chunk
+	void Combine(TupleDataCollection &other_data, optional_ptr<atomic<idx_t>> combined_chunks = nullptr);
 	//! Reset the HT for a new execution while reusing internal allocations where possible
 	void ResetForNewIteration(idx_t radix_bits);
 
@@ -289,6 +290,12 @@ private:
 	//! The data of the HT
 	unique_ptr<PartitionedTupleData> partitioned_data;
 	unique_ptr<PartitionedTupleData> unpartitioned_data;
+	//! Cache tuple allocations while the materialized groups and their storage stay unchanged.
+	struct TupleSizeCache {
+		optional_idx count;
+		idx_t size = 0;
+	};
+	mutable TupleSizeCache tuple_size_cache;
 
 	//! Predicates for matching groups (always ExpressionType::COMPARE_EQUAL)
 	vector<ExpressionType> predicates;
@@ -298,21 +305,14 @@ private:
 	//! The capacity of the HT. This can be increased using GroupedAggregateHashTable::Resize
 	idx_t capacity;
 	//! The hash map (pointer table) of the HT: allocated data and pointer into it
-	AllocatedData hash_map;
+	HugeAllocation hash_map;
 	ht_entry_t *entries;
 	//! Offset of the hash column in the rows
 	idx_t hash_offset;
 	//! Bitmask for getting relevant bits from the hashes to determine the position
 	hash_t bitmask;
 
-	//! How many tuples went into this HT (before de-duplication)
-	idx_t sink_count;
-	//! If true, we just append, skipping HT lookups
-	bool skip_lookups;
-	//! Whether to enable HLL counting the hashes
-	bool enable_hll;
-	//! The associated HLL
-	HyperLogLog hll;
+	AggregateHTAdaptivityState adaptivity;
 
 	//! The active arena allocator used by the aggregates for their internal state
 	shared_ptr<ArenaAllocator> aggregate_allocator;
@@ -437,6 +437,8 @@ private:
 	AggregateHTAppendTarget PrepareAppendTarget(DataChunk &groups, idx_t group_count, bool defer_partitioning = false);
 	//! Apply bitmask to get the entry in the HT
 	inline idx_t ApplyBitMask(hash_t hash) const;
+	//! Feed the hashes (in state.hashes) of the first new_group_count groups in state.new_groups to the HLL
+	void ObserveNewGroupHashes(idx_t new_group_count);
 	//! Reinserts tuples (triggered by Resize)
 	void ReinsertTuples(PartitionedTupleData &data);
 
@@ -447,10 +449,11 @@ private:
 
 	//! Does the actual group matching / creation
 	idx_t AppendGroupsSkippingLookups(DataChunk &groups, Vector &group_hashes, Vector &addresses,
-	                                  optional_ptr<ExecutionOperatorStageRecorder> recorder);
+	                                  optional_ptr<ExecutionOperatorStageRecorder> recorder,
+	                                  optional_ptr<TupleDataChunkState> source_rows);
 	idx_t FindOrCreateGroupsInternal(DataChunk &groups, Vector &group_hashes, Vector &addresses,
-	                                 SelectionVector &new_groups,
-	                                 optional_ptr<ExecutionOperatorStageRecorder> recorder);
+	                                 SelectionVector &new_groups, optional_ptr<ExecutionOperatorStageRecorder> recorder,
+	                                 optional_ptr<TupleDataChunkState> source_rows = nullptr);
 	bool TryResolveExistingGroupsFast(DataChunk &groups, Vector &group_hashes, Vector &addresses);
 	bool TryResolveExistingGroupsFastInternal(
 	    DataChunk &groups, Vector &group_hashes, optional_ptr<Vector> addresses_out,

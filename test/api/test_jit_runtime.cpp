@@ -1,4 +1,5 @@
 #include "test_jit_helpers.hpp"
+#include "duckdb/main/query_result_stream.hpp"
 
 #include "duckdb/common/vector/flat_vector.hpp"
 #include "duckdb/execution/execution_chunk_coalescer.hpp"
@@ -205,12 +206,14 @@ TEST_CASE("JIT cached casts report the current query identity", "[api][jit]") {
 }
 
 TEST_CASE("JIT cached aggregates use current cardinality and match native results", "[api][jit]") {
-	auto require_equal = [](MaterializedQueryResult &actual, MaterializedQueryResult &expected) {
+	auto require_equal = [](QueryResult &actual, QueryResult &expected) {
 		REQUIRE(actual.GetTypes() == expected.GetTypes());
 		REQUIRE(actual.RowCount() == expected.RowCount());
+		auto actual_rows = actual.Collection().GetRows();
+		auto expected_rows = expected.Collection().GetRows();
 		for (idx_t row = 0; row < actual.RowCount(); row++) {
 			for (idx_t col = 0; col < actual.ColumnCount(); col++) {
-				REQUIRE(actual.GetValue(col, row) == expected.GetValue(col, row));
+				REQUIRE(actual_rows.GetValue(col, row) == expected_rows.GetValue(col, row));
 			}
 		}
 	};
@@ -218,7 +221,7 @@ TEST_CASE("JIT cached aggregates use current cardinality and match native result
 	ConfigureSljitForCoverage(test.con, true, true, 10000);
 	REQUIRE_NO_FAIL(test.con.Query("SET perfect_ht_threshold=0"));
 	vector<string> queries;
-	vector<unique_ptr<MaterializedQueryResult>> expected;
+	vector<unique_ptr<QueryResult>> expected;
 	for (idx_t variant = 0; variant < 2; variant++) {
 		INFO("variant=" << variant);
 		auto table = "aggregate_inputs_" + to_string(variant);
@@ -247,7 +250,7 @@ TEST_CASE("JIT cached aggregates use current cardinality and match native result
 		});
 	}
 	vector<unique_ptr<Connection>> connections;
-	vector<unique_ptr<MaterializedQueryResult>> results(queries.size());
+	vector<unique_ptr<QueryResult>> results(queries.size());
 	for (idx_t i = 0; i < queries.size(); i++) {
 		auto con = make_uniq<Connection>(test.db);
 		ConfigureSljitForCoverage(*con, true, true, 10000);
@@ -284,7 +287,7 @@ TEST_CASE("JIT operator contracts distinguish nested loops from hash joins", "[a
 		INFO(queries[index]);
 		auto plan = test.con.Query("EXPLAIN (FORMAT JSON) " + queries[index]);
 		REQUIRE_NO_FAIL(*plan);
-		auto plan_text = plan->GetValue(1, 0).ToString();
+		auto plan_text = plan->Collection().GetValue(1, 0).ToString();
 		if (index != 1) {
 			REQUIRE(StringUtil::Contains(plan_text, "NESTED_LOOP_JOIN"));
 		}
@@ -497,7 +500,7 @@ TEST_CASE("Recursive rescheduling reuses the pipeline execution-region plan", "[
 	                        ") SELECT sum(value) FROM counter");
 	REQUIRE_NO_FAIL(*result);
 	REQUIRE(result->RowCount() == 1);
-	REQUIRE(result->GetValue(0, 0).ToString() == "500500");
+	REQUIRE(result->Collection().GetValue(0, 0).ToString() == "500500");
 
 	// Decision telemetry is emitted while the pipeline plan is built. It must
 	// stay proportional to the fixed pipeline graph, not to 1,000 recursive
@@ -520,8 +523,8 @@ TEST_CASE("JIT full pipeline uses explicit append sink contract", "[api][jit]") 
 	auto result = con.Query("SELECT i + 1 AS j FROM jit_native_result_collector WHERE i > 500");
 	REQUIRE_NO_FAIL(*result);
 	REQUIRE(result->RowCount() == 499);
-	REQUIRE(result->GetValue(0, 0).GetValue<int64_t>() == 502);
-	REQUIRE(result->GetValue(0, 498).GetValue<int64_t>() == 1000);
+	REQUIRE(result->Collection().GetValue(0, 0).GetValue<int64_t>() == 502);
+	REQUIRE(result->Collection().GetValue(0, 498).GetValue<int64_t>() == 1000);
 
 	bool found_compiled_result_collector = false;
 	bool found_runtime_result_collector = false;
@@ -567,12 +570,11 @@ TEST_CASE("JIT blocked append sink transfers retry ownership to the core executo
 	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_blocked_append_sink AS "
 	                          "SELECT i::BIGINT AS i FROM range(160000) tbl(i)"));
 	ConfigureSljitForCoverageSettings(con, true, true, 10000, 4);
-	REQUIRE_NO_FAIL(con.Query("SET streaming_buffer_size='16KB'"));
+	REQUIRE_NO_FAIL(con.Query("SET max_streaming_buffer_size='16KB'"));
 
 	ClearJitTrace(manager);
-	auto result = con.SendQuery("SELECT i * 3 + 7 AS v FROM jit_blocked_append_sink");
-	REQUIRE_NO_FAIL(*result);
-	REQUIRE(result->GetResultType() == QueryResultType::STREAM_RESULT);
+	auto result = make_uniq<QueryResultStream<>>(con.Submit("SELECT i * 3 + 7 AS v FROM jit_blocked_append_sink"));
+	REQUIRE(!result->HasError());
 
 	vector<bool> seen(160000, false);
 	idx_t row_count = 0;
@@ -593,7 +595,8 @@ TEST_CASE("JIT blocked append sink transfers retry ownership to the core executo
 			row_count++;
 		}
 	}
-	REQUIRE_NO_FAIL(*result);
+	INFO(result->GetError());
+	REQUIRE(!result->HasError());
 	REQUIRE(row_count == seen.size());
 	for (auto present : seen) {
 		REQUIRE(present);
@@ -626,7 +629,7 @@ TEST_CASE("JIT blocked append sink keeps the rest of a fanning-out hash join pro
 	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_blocked_fanout_build AS "
 	                          "SELECT i::BIGINT AS j, (i % 4)::BIGINT AS k FROM range(400) tbl(i)"));
 	ConfigureSljitForCoverageSettings(con, true, true, 10000, 1);
-	REQUIRE_NO_FAIL(con.Query("SET streaming_buffer_size='16KB'"));
+	REQUIRE_NO_FAIL(con.Query("SET max_streaming_buffer_size='16KB'"));
 
 	struct StreamFingerprint {
 		idx_t rows = 0;
@@ -635,9 +638,8 @@ TEST_CASE("JIT blocked append sink keeps the rest of a fanning-out hash join pro
 	};
 	auto stream = [&](const string &sql) {
 		StreamFingerprint fingerprint;
-		auto result = con.SendQuery(sql);
-		REQUIRE_NO_FAIL(*result);
-		REQUIRE(result->GetResultType() == QueryResultType::STREAM_RESULT);
+		auto result = make_uniq<QueryResultStream<>>(con.Submit(sql));
+		REQUIRE(!result->HasError());
 		while (true) {
 			auto chunk = result->Fetch();
 			if (!chunk) {
@@ -652,7 +654,8 @@ TEST_CASE("JIT blocked append sink keeps the rest of a fanning-out hash join pro
 				fingerprint.weighted += hugeint_t(i) * hugeint_t(1000003) + hugeint_t(j);
 			}
 		}
-		REQUIRE_NO_FAIL(*result);
+		INFO(result->GetError());
+		REQUIRE(!result->HasError());
 		return fingerprint;
 	};
 
@@ -706,16 +709,16 @@ TEST_CASE("JIT chunk step sinks the rows it holds at the end into a blocked stre
 	                   "GROUP BY nation, o_year ORDER BY nation, o_year DESC";
 	auto stream = [&]() {
 		vector<string> rows;
-		auto result = con.SendQuery(sql);
-		REQUIRE_NO_FAIL(*result);
-		REQUIRE(result->GetResultType() == QueryResultType::STREAM_RESULT);
+		auto result = make_uniq<QueryResultStream<>>(con.Submit(sql));
+		REQUIRE(!result->HasError());
 		while (auto chunk = result->Fetch()) {
 			for (idx_t row_idx = 0; row_idx < chunk->size(); row_idx++) {
 				rows.push_back(chunk->GetValue(0, row_idx).ToString() + "|" + chunk->GetValue(1, row_idx).ToString() +
 				               "|" + chunk->GetValue(2, row_idx).ToString());
 			}
 		}
-		REQUIRE_NO_FAIL(*result);
+		INFO(result->GetError());
+		REQUIRE(!result->HasError());
 		return rows;
 	};
 	REQUIRE_NO_FAIL(con.Query("SET jit_policy='off'"));
@@ -750,7 +753,7 @@ TEST_CASE("JIT full pipeline uses append sink contract for CTE materialization",
 	                        ") SELECT sum(a.j) FROM cte a JOIN cte b USING (j)");
 	REQUIRE_NO_FAIL(*result);
 	REQUIRE(result->RowCount() == 1);
-	REQUIRE(result->GetValue(0, 0).GetValue<int64_t>() == 374749);
+	REQUIRE(result->Collection().GetValue(0, 0).GetValue<int64_t>() == 374749);
 
 	bool found_compiled_materialization = false;
 	for (auto &event : manager.GetEvents()) {
@@ -792,7 +795,7 @@ TEST_CASE("JIT full pipeline uses ordered sink native contract when order keys g
 		auto result = con.Query(sql);
 		REQUIRE_NO_FAIL(*result);
 		REQUIRE(result->RowCount() == expected_rows);
-		REQUIRE(result->GetValue(0, 0).GetValue<int64_t>() == expected_first);
+		REQUIRE(result->Collection().GetValue(0, 0).GetValue<int64_t>() == expected_first);
 
 		bool found_ordered_sink_contract = false;
 		bool found_ordered_sink_runtime_breakdown = false;
@@ -951,7 +954,7 @@ TEST_CASE("JIT auto keeps count distinct on regular aggregate keys", "[api][jit]
 		                      "     EXCEPT ALL SELECT * FROM jit_distinct_regular_key_expected)"
 		                      ") diff");
 		REQUIRE_NO_FAIL(*diff);
-		REQUIRE(diff->GetValue(0, 0).GetValue<int64_t>() == 0);
+		REQUIRE(diff->Collection().GetValue(0, 0).GetValue<int64_t>() == 0);
 
 		for (auto &event : manager.GetEvents()) {
 			REQUIRE_FALSE(StringUtil::Contains(event.ir, "distinct_count_pointer"));
@@ -1074,7 +1077,7 @@ TEST_CASE("JIT composes dynamic scan filters with generated static filters", "[a
 	ClearJitTrace(manager, true);
 	auto actual = con.Query(query);
 	REQUIRE_NO_FAIL(*actual);
-	REQUIRE(actual->GetValue(0, 0) == expected->GetValue(0, 0));
+	REQUIRE(actual->Collection().GetValue(0, 0) == expected->Collection().GetValue(0, 0));
 
 	RequireJitEvent(
 	    manager,
@@ -1135,14 +1138,14 @@ TEST_CASE("EXPLAIN ANALYZE exposes compact execution region profile", "[api][jit
 
 	auto trace_setting = con.Query("SELECT current_setting('jit_trace_runtime')");
 	REQUIRE_NO_FAIL(*trace_setting);
-	REQUIRE(trace_setting->GetValue(0, 0).ToString() == "false");
+	REQUIRE(trace_setting->Collection().GetValue(0, 0).ToString() == "false");
 
 	ClearJitTrace(manager, true);
 	auto result = con.Query("EXPLAIN ANALYZE "
 	                        "SELECT sum(i * g) FROM jit_explain_analyze_input");
 	REQUIRE_NO_FAIL(*result);
 	REQUIRE(result->RowCount() == 1);
-	auto condensed_plan = result->GetValue(1, 0).GetValue<string>();
+	auto condensed_plan = result->Collection().GetValue(1, 0).GetValue<string>();
 	// Default rendering is condensed: one line per decision and per kernel, and
 	// the operator tree is annotated with the compiled-region attribution.
 	REQUIRE(StringUtil::Contains(condensed_plan, "JIT_EXECUTION_REGIONS"));
@@ -1162,7 +1165,7 @@ TEST_CASE("EXPLAIN ANALYZE exposes compact execution region profile", "[api][jit
 	                   "SELECT sum(i * g) FROM jit_explain_analyze_input");
 	REQUIRE_NO_FAIL(*result);
 	REQUIRE(result->RowCount() == 1);
-	auto analyzed_plan = result->GetValue(1, 0).GetValue<string>();
+	auto analyzed_plan = result->Collection().GetValue(1, 0).GetValue<string>();
 	REQUIRE(StringUtil::Contains(analyzed_plan, "JIT_EXECUTION_REGIONS"));
 	REQUIRE(StringUtil::Contains(analyzed_plan, "policy=auto"));
 	REQUIRE(StringUtil::Contains(analyzed_plan, "selected_backend=sljit"));
@@ -1190,7 +1193,7 @@ TEST_CASE("EXPLAIN ANALYZE exposes compact execution region profile", "[api][jit
 	                   "SELECT sum(i * g) FROM jit_explain_analyze_input");
 	REQUIRE_NO_FAIL(*result);
 	REQUIRE(result->RowCount() == 1);
-	analyzed_plan = result->GetValue(1, 0).GetValue<string>();
+	analyzed_plan = result->Collection().GetValue(1, 0).GetValue<string>();
 	REQUIRE(StringUtil::Contains(analyzed_plan, "\"execution_regions\""));
 	REQUIRE(StringUtil::Contains(analyzed_plan, "\"compiled_regions\": 1"));
 	REQUIRE(StringUtil::Contains(analyzed_plan, "\"runtime_regions\": 1"));
@@ -1254,7 +1257,7 @@ TEST_CASE("EXPLAIN ANALYZE exposes compact execution region profile", "[api][jit
 	REQUIRE_NO_FAIL(*result);
 	REQUIRE(result->RowCount() == 1);
 	REQUIRE(manager.GetEvents().empty());
-	analyzed_plan = result->GetValue(1, 0).GetValue<string>();
+	analyzed_plan = result->Collection().GetValue(1, 0).GetValue<string>();
 	REQUIRE(StringUtil::Contains(analyzed_plan, "\"execution_regions\""));
 	REQUIRE(StringUtil::Contains(analyzed_plan, "\"compiled_regions\": 1"));
 	REQUIRE(StringUtil::Contains(analyzed_plan, "\"events\""));
@@ -1265,7 +1268,7 @@ TEST_CASE("EXPLAIN ANALYZE exposes compact execution region profile", "[api][jit
 	                   "SELECT sum(i * g) FROM jit_explain_analyze_input");
 	REQUIRE_NO_FAIL(*result);
 	REQUIRE(result->RowCount() == 1);
-	analyzed_plan = result->GetValue(1, 0).GetValue<string>();
+	analyzed_plan = result->Collection().GetValue(1, 0).GetValue<string>();
 	REQUIRE(StringUtil::Contains(analyzed_plan, "\"execution_regions\""));
 	REQUIRE(StringUtil::Contains(analyzed_plan, "\"compiled_regions\": 0"));
 	REQUIRE(StringUtil::Contains(analyzed_plan, "\"disabled_decisions\""));
@@ -1278,7 +1281,7 @@ TEST_CASE("EXPLAIN ANALYZE exposes compact execution region profile", "[api][jit
 	                   "SELECT sum(i * g) FROM jit_explain_analyze_input");
 	REQUIRE_NO_FAIL(*result);
 	REQUIRE(result->RowCount() == 1);
-	analyzed_plan = result->GetValue(1, 0).GetValue<string>();
+	analyzed_plan = result->Collection().GetValue(1, 0).GetValue<string>();
 	REQUIRE(StringUtil::Contains(analyzed_plan, "\"execution_regions\""));
 	REQUIRE(StringUtil::Contains(analyzed_plan, "\"compiled_regions\""));
 	REQUIRE(StringUtil::Contains(analyzed_plan, "\"decision_time_us\""));
@@ -1287,7 +1290,7 @@ TEST_CASE("EXPLAIN ANALYZE exposes compact execution region profile", "[api][jit
 
 	trace_setting = con.Query("SELECT current_setting('jit_trace_runtime')");
 	REQUIRE_NO_FAIL(*trace_setting);
-	REQUIRE(trace_setting->GetValue(0, 0).ToString() == "false");
+	REQUIRE(trace_setting->Collection().GetValue(0, 0).ToString() == "false");
 }
 
 TEST_CASE("EXPLAIN ANALYZE exposes grouped hash aggregate native state-address lookup", "[api][jit]") {
@@ -1303,7 +1306,7 @@ TEST_CASE("EXPLAIN ANALYZE exposes grouped hash aggregate native state-address l
 	                        "SELECT k, sum(v) FROM jit_explain_grouped_lookup GROUP BY k");
 	REQUIRE_NO_FAIL(*result);
 	REQUIRE(result->RowCount() == 1);
-	auto analyzed_plan = result->GetValue(1, 0).GetValue<string>();
+	auto analyzed_plan = result->Collection().GetValue(1, 0).GetValue<string>();
 	REQUIRE(StringUtil::Contains(analyzed_plan, "\"compiled_regions\": 1"));
 	REQUIRE(StringUtil::Contains(analyzed_plan, "\"runtime_regions\": 1"));
 	REQUIRE(StringUtil::Contains(analyzed_plan, "\"status\": \"compiled\""));
@@ -1331,7 +1334,7 @@ TEST_CASE("EXPLAIN ANALYZE reports compact aggregate auto vectorized-selection f
 	                        "FROM jit_explain_auto_aggregate_blocker");
 	REQUIRE_NO_FAIL(*result);
 	REQUIRE(result->RowCount() == 1);
-	auto analyzed_plan = result->GetValue(1, 0).GetValue<string>();
+	auto analyzed_plan = result->Collection().GetValue(1, 0).GetValue<string>();
 	REQUIRE(StringUtil::Contains(analyzed_plan, "\"execution_regions\""));
 	REQUIRE(StringUtil::Contains(analyzed_plan, "\"compiled_regions\""));
 	REQUIRE(StringUtil::Contains(analyzed_plan, "\"events\""));
@@ -1345,7 +1348,7 @@ TEST_CASE("EXPLAIN ANALYZE reports compact aggregate auto vectorized-selection f
 	                   "FROM jit_explain_auto_aggregate_blocker");
 	REQUIRE_NO_FAIL(*result);
 	REQUIRE(result->RowCount() == 1);
-	analyzed_plan = result->GetValue(1, 0).GetValue<string>();
+	analyzed_plan = result->Collection().GetValue(1, 0).GetValue<string>();
 	REQUIRE(StringUtil::Contains(analyzed_plan, "CBO_PIPELINE"));
 	REQUIRE(StringUtil::Contains(analyzed_plan, "runner=vectorized"));
 	REQUIRE(StringUtil::Contains(analyzed_plan, "net_benefit="));
@@ -1358,7 +1361,7 @@ TEST_CASE("EXPLAIN ANALYZE reports compact aggregate auto vectorized-selection f
 	                   "(((b - c + d) * 23) - ((a - d) * 29))) AS BIGINT)) "
 	                   "FROM jit_explain_auto_aggregate_blocker");
 	REQUIRE_NO_FAIL(*result);
-	analyzed_plan = result->GetValue(1, 0).GetValue<string>();
+	analyzed_plan = result->Collection().GetValue(1, 0).GetValue<string>();
 	REQUIRE(StringUtil::Contains(analyzed_plan, "selected=false"));
 	REQUIRE(StringUtil::Contains(analyzed_plan, "benefit="));
 	REQUIRE(StringUtil::Contains(analyzed_plan, "required="));
@@ -1372,7 +1375,7 @@ TEST_CASE("EXPLAIN ANALYZE reports compact aggregate auto vectorized-selection f
 	result = con.Query("EXPLAIN ANALYZE "
 	                   "SELECT sum(a + b) FROM jit_explain_auto_aggregate_blocker");
 	REQUIRE_NO_FAIL(*result);
-	analyzed_plan = result->GetValue(1, 0).GetValue<string>();
+	analyzed_plan = result->Collection().GetValue(1, 0).GetValue<string>();
 	REQUIRE(!StringUtil::Contains(analyzed_plan, "compiled full-pipeline"));
 	REQUIRE_NO_FAIL(con.Query("SET jit_policy='auto'"));
 }

@@ -162,6 +162,9 @@ void EmitSljitAggregateCommitSumState(struct sljit_compiler *compiler, SljitNati
 double SLJIT_FUNC SljitNativeHugeintToDouble(uint64_t lower, int64_t upper);
 void SLJIT_FUNC SljitNativeAggregateHugeintCommit(SljitNativeVectorInput *input);
 void SLJIT_FUNC SljitNativeRuntimeError(SljitNativeVectorInput *input);
+//! Raises DuckDB's error for a perfect-hash group id at or beyond the table's group count
+void SLJIT_FUNC SljitNativePerfectHashGroupOutOfRange(SljitNativeVectorInput *input, sljit_uw group,
+                                                      sljit_uw total_groups);
 sljit_s32 NativeDoubleBinaryOp(SljitNativeDoubleBinaryOp op, bool single_precision = false);
 bool NativeDoubleSourceHasDecimalScale(SljitNativeDoubleSourceKind kind);
 bool NativeDoubleSourceUsesHelper(SljitNativeDoubleSourceKind kind);

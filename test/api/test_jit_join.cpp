@@ -26,7 +26,7 @@ TEST_CASE("JIT hash join build selected ingress compiles only inside generated f
 	                        "JOIN (SELECT " +
 	                        rhs_key + " AS x FROM jit_hash_build_r WHERE j > 10) b ON a.i=b.x");
 	REQUIRE_NO_FAIL(*result);
-	REQUIRE(result->GetValue(0, 0).GetValue<int64_t>() == 9989);
+	REQUIRE(result->Collection().GetValue(0, 0).GetValue<int64_t>() == 9989);
 
 	bool found_build_compile = false;
 	bool found_build_runtime = false;
@@ -94,7 +94,7 @@ TEST_CASE("JIT CBO does not charge generated hash-build sink protocol before bac
 	auto result = con.Query("SELECT count(*) FROM jit_hash_build_cbo_l l "
 	                        "JOIN (SELECT k + 1 AS x FROM jit_hash_build_cbo_r WHERE k > 10) r ON l.k = r.x");
 	REQUIRE_NO_FAIL(*result);
-	REQUIRE(result->GetValue(0, 0).ToString() == "9988");
+	REQUIRE(result->Collection().GetValue(0, 0).ToString() == "9988");
 
 	for (auto &event : manager.GetEvents()) {
 		if (EventPhase(event) != "decision" || !event.runner_cost.present ||
@@ -124,7 +124,7 @@ TEST_CASE("JIT composes DuckDB string-set scans with direct hash build", "[api][
 	auto result = con.Query("SELECT count(*) FROM jit_string_build_l l "
 	                        "JOIN (SELECT k FROM jit_string_build_r WHERE region IN ('EUROPE', 'ASIA')) r USING (k)");
 	REQUIRE_NO_FAIL(*result);
-	REQUIRE(result->GetValue(0, 0).ToString() == "2500");
+	REQUIRE(result->Collection().GetValue(0, 0).ToString() == "2500");
 
 	bool found_build_compile = false;
 	bool found_build_runtime = false;
@@ -168,7 +168,7 @@ TEST_CASE("JIT composes mixed storage filters with direct hash build", "[api][ji
 	                        "JOIN (SELECT k FROM jit_mixed_build_r "
 	                        "      WHERE bucket = 0 AND suffix(kind, 'BRASS')) r USING (k)");
 	REQUIRE_NO_FAIL(*result);
-	REQUIRE(result->GetValue(0, 0).ToString() == "500");
+	REQUIRE(result->Collection().GetValue(0, 0).ToString() == "500");
 
 	bool found_build_compile = false;
 	for (auto &event : manager.GetEvents()) {
@@ -216,7 +216,7 @@ TEST_CASE("JIT executes exact-filter probe to hash-build primitive sequences", "
 		                        " d USING (filter_key)"
 		                        ") selected USING (join_key)");
 		REQUIRE_NO_FAIL(*result);
-		REQUIRE(result->GetValue(0, 0).ToString() == "2000");
+		REQUIRE(result->Collection().GetValue(0, 0).ToString() == "2000");
 
 		bool found_primitive_compile = false;
 		bool found_primitive_runtime = false;
@@ -278,7 +278,7 @@ TEST_CASE("JIT composes exact regular-prefix probes with projected hash builds",
 	ClearJitTrace(manager, true);
 	auto result = con.Query(query);
 	REQUIRE_NO_FAIL(*result);
-	REQUIRE(result->GetValue(0, 0).ToString() == reference->GetValue(0, 0).ToString());
+	REQUIRE(result->Collection().GetValue(0, 0).ToString() == reference->Collection().GetValue(0, 0).ToString());
 
 	RequireJitEvent(
 	    manager,
@@ -328,7 +328,7 @@ TEST_CASE("JIT join ungrouped aggregates over row and dictionary RHS storage mat
 		REQUIRE_NO_FAIL(con.Query("SET jit_policy='auto'"));
 		auto result = con.Query(query);
 		REQUIRE_NO_FAIL(*result);
-		REQUIRE(result->GetValue(0, 0).ToString() == reference->GetValue(0, 0).ToString());
+		REQUIRE(result->Collection().GetValue(0, 0).ToString() == reference->Collection().GetValue(0, 0).ToString());
 	};
 
 	verify("SELECT sum(selected.payload) FROM jit_direct_rhs_aggregate_row_probe probe JOIN ("
@@ -368,14 +368,14 @@ TEST_CASE("JIT exact prefix membership elides only equivalent unique hash probes
 	REQUIRE_NO_FAIL(con.Query("SET jit_policy='off'"));
 	auto reference = con.Query(equivalent_key_query);
 	REQUIRE_NO_FAIL(*reference);
-	REQUIRE(reference->GetValue(0, 0).ToString() == "4096");
+	REQUIRE(reference->Collection().GetValue(0, 0).ToString() == "4096");
 
 	REQUIRE_NO_FAIL(con.Query("SET jit_policy='auto'"));
 	ClearJitTrace(manager, true);
 	auto result = con.Query(equivalent_key_query);
 	REQUIRE_NO_FAIL(*result);
-	REQUIRE(result->GetValue(0, 0).ToString() == reference->GetValue(0, 0).ToString());
-	REQUIRE(result->GetValue(1, 0).ToString() == reference->GetValue(1, 0).ToString());
+	REQUIRE(result->Collection().GetValue(0, 0).ToString() == reference->Collection().GetValue(0, 0).ToString());
+	REQUIRE(result->Collection().GetValue(1, 0).ToString() == reference->Collection().GetValue(1, 0).ToString());
 	string observed_runtime_paths;
 	for (auto &event : manager.GetEvents()) {
 		if (EventPhase(event) == "runtime") {
@@ -400,7 +400,7 @@ TEST_CASE("JIT exact prefix membership elides only equivalent unique hash probes
 	auto payload_result = con.Query("SELECT count(*), sum(r.payload) FROM jit_exact_prefix_probe l "
 	                                "JOIN jit_exact_prefix_unique r ON l.k = r.k");
 	REQUIRE_NO_FAIL(*payload_result);
-	REQUIRE(payload_result->GetValue(0, 0).ToString() == "4096");
+	REQUIRE(payload_result->Collection().GetValue(0, 0).ToString() == "4096");
 	for (auto &event : manager.GetEvents()) {
 		if (EventPhase(event) == "runtime") {
 			REQUIRE_FALSE(StringUtil::Contains(EventJitRuntimePathCounts(event),
@@ -415,7 +415,7 @@ TEST_CASE("JIT exact prefix membership elides only equivalent unique hash probes
 	auto duplicate_result = con.Query("SELECT count(*) FROM jit_exact_prefix_probe l "
 	                                  "JOIN jit_exact_prefix_duplicates r ON l.k = r.k");
 	REQUIRE_NO_FAIL(*duplicate_result);
-	REQUIRE(duplicate_result->GetValue(0, 0).ToString() == "8192");
+	REQUIRE(duplicate_result->Collection().GetValue(0, 0).ToString() == "8192");
 	for (auto &event : manager.GetEvents()) {
 		if (EventPhase(event) == "runtime") {
 			REQUIRE_FALSE(StringUtil::Contains(EventJitRuntimePathCounts(event),
@@ -448,8 +448,8 @@ TEST_CASE("JIT carries exact prefix proof through selected output filters", "[ap
 	ClearJitTrace(manager, true);
 	auto result = con.Query(query);
 	REQUIRE_NO_FAIL(*result);
-	REQUIRE(result->GetValue(0, 0).ToString() == reference->GetValue(0, 0).ToString());
-	REQUIRE(result->GetValue(1, 0).ToString() == reference->GetValue(1, 0).ToString());
+	REQUIRE(result->Collection().GetValue(0, 0).ToString() == reference->Collection().GetValue(0, 0).ToString());
+	REQUIRE(result->Collection().GetValue(1, 0).ToString() == reference->Collection().GetValue(1, 0).ToString());
 	RequireJitEvent(
 	    manager,
 	    [](const ExecutionRegionEvent &event) {
@@ -469,14 +469,16 @@ TEST_CASE("JIT carries exact prefix proof through selected output filters", "[ap
 	REQUIRE_NO_FAIL(con.Query("SET jit_policy='off'"));
 	auto all_match_reference = con.Query(all_match_query);
 	REQUIRE_NO_FAIL(*all_match_reference);
-	REQUIRE(all_match_reference->GetValue(0, 0).ToString() == "4096");
+	REQUIRE(all_match_reference->Collection().GetValue(0, 0).ToString() == "4096");
 
 	REQUIRE_NO_FAIL(con.Query("SET jit_policy='auto'"));
 	ClearJitTrace(manager, true);
 	auto all_match_result = con.Query(all_match_query);
 	REQUIRE_NO_FAIL(*all_match_result);
-	REQUIRE(all_match_result->GetValue(0, 0).ToString() == all_match_reference->GetValue(0, 0).ToString());
-	REQUIRE(all_match_result->GetValue(1, 0).ToString() == all_match_reference->GetValue(1, 0).ToString());
+	REQUIRE(all_match_result->Collection().GetValue(0, 0).ToString() ==
+	        all_match_reference->Collection().GetValue(0, 0).ToString());
+	REQUIRE(all_match_result->Collection().GetValue(1, 0).ToString() ==
+	        all_match_reference->Collection().GetValue(1, 0).ToString());
 	RequireJitEvent(manager, [](const ExecutionRegionEvent &event) {
 		const auto paths = EventJitRuntimePathCounts(event);
 		const auto stages = EventGeneratedStageRuntimeBreakdown(event);
@@ -515,7 +517,7 @@ TEST_CASE("JIT preserves source layout through generated filter projection repai
 	ClearJitTrace(manager, true);
 	auto result = con.Query(query);
 	REQUIRE_NO_FAIL(*result);
-	REQUIRE(result->GetValue(0, 0).ToString() == reference->GetValue(0, 0).ToString());
+	REQUIRE(result->Collection().GetValue(0, 0).ToString() == reference->Collection().GetValue(0, 0).ToString());
 
 	bool found_compiled_source_join = false;
 	bool found_source_join_runtime = false;
@@ -566,7 +568,7 @@ TEST_CASE("JIT hash join build sink consumes selected probe output without nativ
 	                        "JOIN jit_probe_build_c c ON b.x = c.x "
 	                        "WHERE a.k > 10");
 	REQUIRE_NO_FAIL(*result);
-	REQUIRE(result->GetValue(0, 0).GetValue<int64_t>() == 4085);
+	REQUIRE(result->Collection().GetValue(0, 0).GetValue<int64_t>() == 4085);
 
 	RequireJitEvent(
 	    manager,
@@ -610,7 +612,7 @@ TEST_CASE("JIT primitive sequence composes projection filter projection before h
 	                        " AS x FROM jit_preproject_filter_r) t WHERE k > 10) b "
 	                        "ON l.k = b.x");
 	REQUIRE_NO_FAIL(*result);
-	REQUIRE(result->GetValue(0, 0).GetValue<int64_t>() == 4085);
+	REQUIRE(result->Collection().GetValue(0, 0).GetValue<int64_t>() == 4085);
 
 	RequireJitEvent(
 	    manager,
@@ -646,7 +648,7 @@ TEST_CASE("JIT composes selected source filters before hash build without delega
 	    con.Query("SELECT sum(r.v) FROM jit_selected_build_l l "
 	              "JOIN (SELECT * FROM jit_selected_build_r WHERE k > 10 AND k < 4090 AND v < w) r USING (k)");
 	REQUIRE_NO_FAIL(*result);
-	REQUIRE(result->GetValue(0, 0).GetValue<int64_t>() == 8361950);
+	REQUIRE(result->Collection().GetValue(0, 0).GetValue<int64_t>() == 8361950);
 
 	RequireJitEvent(
 	    manager,
@@ -675,7 +677,7 @@ TEST_CASE("JIT CBO does not skip low-value hash-build sink pipelines before back
 	auto result = con.Query("SELECT sum(f.i + d.payload) FROM jit_hash_bodyless_fact f "
 	                        "JOIN jit_hash_bodyless_dim d ON f.g = d.g WHERE f.i % 3 = 0");
 	REQUIRE_NO_FAIL(*result);
-	REQUIRE(result->GetValue(0, 0).ToString() == "4935358");
+	REQUIRE(result->Collection().GetValue(0, 0).ToString() == "4935358");
 
 	for (auto &event : manager.GetEvents()) {
 		if (EventPhase(event) != "decision" || !event.runner_cost.present ||
@@ -708,7 +710,7 @@ TEST_CASE("JIT CBO does not cost nested-loop join protocol as native join work",
 	ClearJitTrace(manager, true);
 	auto result = con.Query("SELECT count(*) FROM jit_nested_cost_l l JOIN jit_nested_cost_r r ON l.i < r.j");
 	REQUIRE_NO_FAIL(*result);
-	REQUIRE(result->GetValue(0, 0).ToString() == "2016");
+	REQUIRE(result->Collection().GetValue(0, 0).ToString() == "2016");
 
 	bool found_nested_loop_physical_cbo = false;
 	for (auto &event : manager.GetEvents()) {
@@ -738,7 +740,7 @@ TEST_CASE("JIT auto costs hash join regions through planner cost selection", "[a
 	                        "JOIN jit_auto_hash_join_r r ON l.k=r.k WHERE l.k BETWEEN 10 AND 9990");
 	REQUIRE_NO_FAIL(*result);
 	REQUIRE(result->RowCount() == 1);
-	REQUIRE_FALSE(result->GetValue(0, 0).IsNull());
+	REQUIRE_FALSE(result->Collection().GetValue(0, 0).IsNull());
 
 	bool found_hash_join_decision = false;
 	bool found_costed_hash_join_probe = false;
@@ -789,9 +791,9 @@ TEST_CASE("JIT hash join probe generates native probe with append sink", "[api][
 	                        "JOIN jit_hash_probe_r r ON l.k=r.k");
 	REQUIRE_NO_FAIL(*result);
 	REQUIRE(result->RowCount() == 65536);
-	REQUIRE(result->GetValue(0, 0).GetValue<int64_t>() == 1);
-	REQUIRE(result->GetValue(1, 0).GetValue<int64_t>() == 0);
-	REQUIRE(result->GetValue(2, 0).GetValue<int64_t>() == 0);
+	REQUIRE(result->Collection().GetValue(0, 0).GetValue<int64_t>() == 1);
+	REQUIRE(result->Collection().GetValue(1, 0).GetValue<int64_t>() == 0);
+	REQUIRE(result->Collection().GetValue(2, 0).GetValue<int64_t>() == 0);
 
 	bool found_probe = false;
 	bool found_runtime = false;
@@ -839,7 +841,7 @@ TEST_CASE("JIT hash join probe generates native probe with append sink", "[api][
 	                         "JOIN jit_hash_probe_r r ON l.k=r.k");
 	REQUIRE_NO_FAIL(*explain);
 	REQUIRE(explain->RowCount() == 1);
-	auto analyzed_plan = explain->GetValue(1, 0).GetValue<string>();
+	auto analyzed_plan = explain->Collection().GetValue(1, 0).GetValue<string>();
 	REQUIRE(StringUtil::Contains(analyzed_plan, "\"events\""));
 	REQUIRE(StringUtil::Contains(analyzed_plan, "\"hash_join_probe_layout\""));
 	REQUIRE(StringUtil::Contains(analyzed_plan, "\"jit_runtime_path_counts\""));
@@ -872,7 +874,7 @@ TEST_CASE("JIT hash join lazy code is published once across parallel pipeline ex
 	auto result = con.Query("SELECT sum(l.v + r.w) FROM jit_parallel_lazy_probe_l l "
 	                        "JOIN jit_parallel_lazy_probe_r r ON l.k=r.k");
 	REQUIRE_NO_FAIL(*result);
-	REQUIRE(result->GetValue(0, 0) == expected->GetValue(0, 0));
+	REQUIRE(result->Collection().GetValue(0, 0) == expected->Collection().GetValue(0, 0));
 
 	idx_t runtime_event_count = 0;
 	idx_t lazy_codegen_event_count = 0;
@@ -922,13 +924,7 @@ TEST_CASE("JIT hash join probe preserves selected reference source view", "[api]
 	ClearJitTrace(manager);
 	auto result = con.Query(query);
 	REQUIRE_NO_FAIL(*result);
-	REQUIRE(result->RowCount() == reference->RowCount());
-	REQUIRE(result->ColumnCount() == reference->ColumnCount());
-	for (idx_t row_idx = 0; row_idx < result->RowCount(); row_idx++) {
-		for (idx_t col_idx = 0; col_idx < result->ColumnCount(); col_idx++) {
-			REQUIRE(result->GetValue(col_idx, row_idx).ToString() == reference->GetValue(col_idx, row_idx).ToString());
-		}
-	}
+	RequireSameResultValues(*result, *reference);
 
 	RequireJitEvent(
 	    manager,
@@ -976,7 +972,7 @@ TEST_CASE("JIT hash join filter ungrouped aggregate avoids final join materializ
 	REQUIRE_NO_FAIL(*result);
 	REQUIRE(result->RowCount() == reference->RowCount());
 	REQUIRE(result->ColumnCount() == reference->ColumnCount());
-	REQUIRE(result->GetValue(0, 0).ToString() == reference->GetValue(0, 0).ToString());
+	REQUIRE(result->Collection().GetValue(0, 0).ToString() == reference->Collection().GetValue(0, 0).ToString());
 
 	RequireJitEvent(
 	    manager,
@@ -1074,7 +1070,7 @@ TEST_CASE("JIT perfect hash join materializes selection-only output before post-
 	                      "   EXCEPT SELECT * FROM jit_perfect_post_join_output)"
 	                      ") diff");
 	REQUIRE_NO_FAIL(*diff);
-	REQUIRE(diff->GetValue(0, 0).GetValue<int64_t>() == 0);
+	REQUIRE(diff->Collection().GetValue(0, 0).GetValue<int64_t>() == 0);
 
 	RequireJitEvent(
 	    manager,
@@ -1128,7 +1124,7 @@ TEST_CASE("JIT perfect hash join grouped aggregate direct-projects input-vector 
 	                      "   EXCEPT SELECT * FROM jit_perfect_direct_agg_output)"
 	                      ") diff");
 	REQUIRE_NO_FAIL(*diff);
-	REQUIRE(diff->GetValue(0, 0).GetValue<int64_t>() == 0);
+	REQUIRE(diff->Collection().GetValue(0, 0).GetValue<int64_t>() == 0);
 
 	RequireJitEvent(
 	    manager,
@@ -1179,7 +1175,7 @@ TEST_CASE("JIT perfect hash join grouped aggregate composes cast-chain input-vec
 	                      "   EXCEPT SELECT * FROM jit_perfect_cast_direct_agg_output)"
 	                      ") diff");
 	REQUIRE_NO_FAIL(*diff);
-	REQUIRE(diff->GetValue(0, 0).GetValue<int64_t>() == 0);
+	REQUIRE(diff->Collection().GetValue(0, 0).GetValue<int64_t>() == 0);
 
 	RequireJitEvent(
 	    manager,
@@ -1236,13 +1232,7 @@ TEST_CASE("JIT perfect hash probe directly consumes complementary string aggrega
 	ClearJitTrace(manager, true);
 	auto result = con.Query(query);
 	REQUIRE_NO_FAIL(*result);
-	REQUIRE(result->RowCount() == reference->RowCount());
-	REQUIRE(result->ColumnCount() == reference->ColumnCount());
-	for (idx_t row_idx = 0; row_idx < result->RowCount(); row_idx++) {
-		for (idx_t col_idx = 0; col_idx < result->ColumnCount(); col_idx++) {
-			REQUIRE(result->GetValue(col_idx, row_idx).ToString() == reference->GetValue(col_idx, row_idx).ToString());
-		}
-	}
+	RequireSameResultValues(*result, *reference);
 
 	RequireJitEvent(
 	    manager,
@@ -1298,14 +1288,7 @@ TEST_CASE("JIT perfect hash probe directly consumes complementary string aggrega
 	ClearJitTrace(manager, true);
 	auto compact_result = con.Query(compact_query);
 	REQUIRE_NO_FAIL(*compact_result);
-	REQUIRE(compact_result->RowCount() == compact_reference->RowCount());
-	REQUIRE(compact_result->ColumnCount() == compact_reference->ColumnCount());
-	for (idx_t row_idx = 0; row_idx < compact_result->RowCount(); row_idx++) {
-		for (idx_t col_idx = 0; col_idx < compact_result->ColumnCount(); col_idx++) {
-			REQUIRE(compact_result->GetValue(col_idx, row_idx).ToString() ==
-			        compact_reference->GetValue(col_idx, row_idx).ToString());
-		}
-	}
+	RequireSameResultValues(*compact_result, *compact_reference);
 	RequireJitEvent(
 	    manager,
 	    [](const ExecutionRegionEvent &event) {
@@ -1353,14 +1336,7 @@ TEST_CASE("JIT perfect hash probe directly consumes complementary string aggrega
 	ClearJitTrace(manager, true);
 	auto tail_result = con.Query(tail_query);
 	REQUIRE_NO_FAIL(*tail_result);
-	REQUIRE(tail_result->RowCount() == tail_reference->RowCount());
-	REQUIRE(tail_result->ColumnCount() == tail_reference->ColumnCount());
-	for (idx_t row_idx = 0; row_idx < tail_result->RowCount(); row_idx++) {
-		for (idx_t col_idx = 0; col_idx < tail_result->ColumnCount(); col_idx++) {
-			REQUIRE(tail_result->GetValue(col_idx, row_idx).ToString() ==
-			        tail_reference->GetValue(col_idx, row_idx).ToString());
-		}
-	}
+	RequireSameResultValues(*tail_result, *tail_reference);
 	RequireJitEvent(
 	    manager,
 	    [](const ExecutionRegionEvent &event) {
@@ -1398,14 +1374,7 @@ TEST_CASE("JIT perfect hash probe directly consumes complementary string aggrega
 	ClearJitTrace(manager, true);
 	auto nullable_result = con.Query(nullable_query);
 	REQUIRE_NO_FAIL(*nullable_result);
-	REQUIRE(nullable_result->RowCount() == nullable_reference->RowCount());
-	REQUIRE(nullable_result->ColumnCount() == nullable_reference->ColumnCount());
-	for (idx_t row_idx = 0; row_idx < nullable_result->RowCount(); row_idx++) {
-		for (idx_t col_idx = 0; col_idx < nullable_result->ColumnCount(); col_idx++) {
-			REQUIRE(nullable_result->GetValue(col_idx, row_idx).ToString() ==
-			        nullable_reference->GetValue(col_idx, row_idx).ToString());
-		}
-	}
+	RequireSameResultValues(*nullable_result, *nullable_reference);
 	RequireJitEvent(
 	    manager,
 	    [](const ExecutionRegionEvent &event) {
@@ -1475,7 +1444,7 @@ TEST_CASE("JIT hash join grouped aggregate proves probe-key casts from matched b
 	                      "   EXCEPT SELECT * FROM jit_matched_key_proof_output)"
 	                      ") diff");
 	REQUIRE_NO_FAIL(*diff);
-	REQUIRE(diff->GetValue(0, 0).GetValue<int64_t>() == 0);
+	REQUIRE(diff->Collection().GetValue(0, 0).GetValue<int64_t>() == 0);
 
 	RequireJitEvent(
 	    manager,
@@ -1531,7 +1500,7 @@ TEST_CASE("JIT row-pointer aggregate accepts identity-cast build-side group keys
 	                      "   EXCEPT SELECT * FROM jit_identity_group_output)"
 	                      ") diff");
 	REQUIRE_NO_FAIL(*diff);
-	REQUIRE(diff->GetValue(0, 0).GetValue<int64_t>() == 0);
+	REQUIRE(diff->Collection().GetValue(0, 0).GetValue<int64_t>() == 0);
 
 	RequireJitEvent(
 	    manager,
@@ -1578,13 +1547,7 @@ TEST_CASE("JIT join grouped aggregate direct-projects probe-side grouped keys", 
 	ClearJitTrace(manager, true);
 	auto result = con.Query(query);
 	REQUIRE_NO_FAIL(*result);
-	REQUIRE(result->RowCount() == reference->RowCount());
-	REQUIRE(result->ColumnCount() == reference->ColumnCount());
-	for (idx_t row_idx = 0; row_idx < result->RowCount(); row_idx++) {
-		for (idx_t col_idx = 0; col_idx < result->ColumnCount(); col_idx++) {
-			REQUIRE(result->GetValue(col_idx, row_idx).ToString() == reference->GetValue(col_idx, row_idx).ToString());
-		}
-	}
+	RequireSameResultValues(*result, *reference);
 
 	RequireJitEvent(
 	    manager,
@@ -1630,13 +1593,7 @@ TEST_CASE("JIT join grouped aggregate direct-projects split probe-side keys", "[
 	ClearJitTrace(manager, true);
 	auto result = con.Query(query);
 	REQUIRE_NO_FAIL(*result);
-	REQUIRE(result->RowCount() == reference->RowCount());
-	REQUIRE(result->ColumnCount() == reference->ColumnCount());
-	for (idx_t row_idx = 0; row_idx < result->RowCount(); row_idx++) {
-		for (idx_t col_idx = 0; col_idx < result->ColumnCount(); col_idx++) {
-			REQUIRE(result->GetValue(col_idx, row_idx).ToString() == reference->GetValue(col_idx, row_idx).ToString());
-		}
-	}
+	RequireSameResultValues(*result, *reference);
 
 	RequireJitEvent(
 	    manager,
@@ -1690,13 +1647,7 @@ TEST_CASE("JIT join grouped aggregate direct-projects RHS keys", "[api][jit]") {
 	ClearJitTrace(manager, true);
 	auto result = con.Query(query);
 	REQUIRE_NO_FAIL(*result);
-	REQUIRE(result->RowCount() == reference->RowCount());
-	REQUIRE(result->ColumnCount() == reference->ColumnCount());
-	for (idx_t row_idx = 0; row_idx < result->RowCount(); row_idx++) {
-		for (idx_t col_idx = 0; col_idx < result->ColumnCount(); col_idx++) {
-			REQUIRE(result->GetValue(col_idx, row_idx).ToString() == reference->GetValue(col_idx, row_idx).ToString());
-		}
-	}
+	RequireSameResultValues(*result, *reference);
 
 	RequireJitEvent(
 	    manager,
@@ -1747,13 +1698,7 @@ TEST_CASE("JIT row-pointer grouped aggregate separates groups sharing a constant
 	ClearJitTrace(manager, true);
 	auto result = con.Query(query);
 	REQUIRE_NO_FAIL(*result);
-	REQUIRE(result->RowCount() == reference->RowCount());
-	REQUIRE(result->ColumnCount() == reference->ColumnCount());
-	for (idx_t row_idx = 0; row_idx < result->RowCount(); row_idx++) {
-		for (idx_t col_idx = 0; col_idx < result->ColumnCount(); col_idx++) {
-			REQUIRE(result->GetValue(col_idx, row_idx).ToString() == reference->GetValue(col_idx, row_idx).ToString());
-		}
-	}
+	RequireSameResultValues(*result, *reference);
 
 	RequireJitEvent(
 	    manager,
@@ -1802,13 +1747,7 @@ TEST_CASE("JIT row-pointer grouped aggregate preaggregates consecutive descripto
 	ClearJitTrace(manager, true);
 	auto result = con.Query(query);
 	REQUIRE_NO_FAIL(*result);
-	REQUIRE(result->RowCount() == reference->RowCount());
-	REQUIRE(result->ColumnCount() == reference->ColumnCount());
-	for (idx_t row_idx = 0; row_idx < result->RowCount(); row_idx++) {
-		for (idx_t col_idx = 0; col_idx < result->ColumnCount(); col_idx++) {
-			REQUIRE(result->GetValue(col_idx, row_idx).ToString() == reference->GetValue(col_idx, row_idx).ToString());
-		}
-	}
+	RequireSameResultValues(*result, *reference);
 
 	RequireJitEvent(
 	    manager,
@@ -1859,13 +1798,7 @@ TEST_CASE("JIT row-pointer grouped aggregate preaggregates mixed input-vector de
 	ClearJitTrace(manager, true);
 	auto result = con.Query(query);
 	REQUIRE_NO_FAIL(*result);
-	REQUIRE(result->RowCount() == reference->RowCount());
-	REQUIRE(result->ColumnCount() == reference->ColumnCount());
-	for (idx_t row_idx = 0; row_idx < result->RowCount(); row_idx++) {
-		for (idx_t col_idx = 0; col_idx < result->ColumnCount(); col_idx++) {
-			REQUIRE(result->GetValue(col_idx, row_idx).ToString() == reference->GetValue(col_idx, row_idx).ToString());
-		}
-	}
+	RequireSameResultValues(*result, *reference);
 
 	RequireJitEvent(
 	    manager,
@@ -1922,13 +1855,7 @@ TEST_CASE("JIT fuses selected transformed groups into the hash probe consumer", 
 	ClearJitTrace(manager, true);
 	auto result = con.Query(query);
 	REQUIRE_NO_FAIL(*result);
-	REQUIRE(result->RowCount() == reference->RowCount());
-	REQUIRE(result->ColumnCount() == reference->ColumnCount());
-	for (idx_t row_idx = 0; row_idx < result->RowCount(); row_idx++) {
-		for (idx_t col_idx = 0; col_idx < result->ColumnCount(); col_idx++) {
-			REQUIRE(result->GetValue(col_idx, row_idx).ToString() == reference->GetValue(col_idx, row_idx).ToString());
-		}
-	}
+	RequireSameResultValues(*result, *reference);
 
 	RequireJitEvent(
 	    manager,
@@ -1998,13 +1925,7 @@ TEST_CASE("JIT adaptively hashes wide compressed complementary groups", "[api][j
 	ClearJitTrace(manager, true);
 	auto result = con.Query(query);
 	REQUIRE_NO_FAIL(*result);
-	REQUIRE(result->RowCount() == reference->RowCount());
-	REQUIRE(result->ColumnCount() == reference->ColumnCount());
-	for (idx_t row_idx = 0; row_idx < result->RowCount(); row_idx++) {
-		for (idx_t col_idx = 0; col_idx < result->ColumnCount(); col_idx++) {
-			REQUIRE(result->GetValue(col_idx, row_idx).ToString() == reference->GetValue(col_idx, row_idx).ToString());
-		}
-	}
+	RequireSameResultValues(*result, *reference);
 
 	RequireJitEvent(
 	    manager,
@@ -2062,13 +1983,7 @@ TEST_CASE("JIT preaggregates probe groups with compressed build-side complementa
 	ClearJitTrace(manager, true);
 	auto result = con.Query(query);
 	REQUIRE_NO_FAIL(*result);
-	REQUIRE(result->RowCount() == reference->RowCount());
-	REQUIRE(result->ColumnCount() == reference->ColumnCount());
-	for (idx_t row_idx = 0; row_idx < result->RowCount(); row_idx++) {
-		for (idx_t col_idx = 0; col_idx < result->ColumnCount(); col_idx++) {
-			REQUIRE(result->GetValue(col_idx, row_idx).ToString() == reference->GetValue(col_idx, row_idx).ToString());
-		}
-	}
+	RequireSameResultValues(*result, *reference);
 
 	RequireJitEvent(
 	    manager,
@@ -2114,7 +2029,7 @@ TEST_CASE("JIT probes selected BIGINT keys through proven INTEGER narrowing", "[
 	                          "UNION ALL SELECT 3::BIGINT, 'MAIL'"));
 	auto in_range_non_match = con.Query("SELECT count(*) FROM narrowing.jit_narrowing_probe WHERE orderkey=3");
 	REQUIRE_NO_FAIL(*in_range_non_match);
-	REQUIRE(in_range_non_match->GetValue(0, 0).ToString() == "1");
+	REQUIRE(in_range_non_match->Collection().GetValue(0, 0).ToString() == "1");
 	REQUIRE_NO_FAIL(con.Query("CHECKPOINT narrowing"));
 	REQUIRE_NO_FAIL(con.Query("DETACH narrowing"));
 	REQUIRE_NO_FAIL(con.Query("ATTACH " + SQLString(db_path) + " AS narrowing"));
@@ -2141,9 +2056,11 @@ TEST_CASE("JIT probes selected BIGINT keys through proven INTEGER narrowing", "[
 	REQUIRE_NO_FAIL(*result);
 	REQUIRE(result->RowCount() == reference->RowCount());
 	REQUIRE(result->ColumnCount() == reference->ColumnCount());
+	auto result_rows = result->Collection().GetRows();
+	auto reference_rows = reference->Collection().GetRows();
 	for (idx_t row_idx = 0; row_idx < result->RowCount(); row_idx++) {
 		for (idx_t col_idx = 0; col_idx < result->ColumnCount(); col_idx++) {
-			REQUIRE(result->GetValue(col_idx, row_idx) == reference->GetValue(col_idx, row_idx));
+			REQUIRE(result_rows.GetValue(col_idx, row_idx) == reference_rows.GetValue(col_idx, row_idx));
 		}
 	}
 	string observed_runtime_paths;
@@ -2183,8 +2100,8 @@ TEST_CASE("JIT probes selected BIGINT keys through proven INTEGER narrowing", "[
 	ClearJitTrace(manager, true);
 	auto flat_result = con.Query(flat_query);
 	REQUIRE_NO_FAIL(*flat_result);
-	REQUIRE(flat_result->GetValue(0, 0) == flat_reference->GetValue(0, 0));
-	REQUIRE(flat_result->GetValue(1, 0) == flat_reference->GetValue(1, 0));
+	REQUIRE(flat_result->Collection().GetValue(0, 0) == flat_reference->Collection().GetValue(0, 0));
+	REQUIRE(flat_result->Collection().GetValue(1, 0) == flat_reference->Collection().GetValue(1, 0));
 	RequireJitEvent(
 	    manager,
 	    [](const ExecutionRegionEvent &event) {
@@ -2210,12 +2127,12 @@ TEST_CASE("JIT probes selected BIGINT keys through proven INTEGER narrowing", "[
 	REQUIRE_NO_FAIL(con.Query("SET jit_policy='off'"));
 	auto range_reference = con.Query(range_query);
 	REQUIRE_NO_FAIL(*range_reference);
-	REQUIRE(range_reference->GetValue(0, 0).ToString() == "2");
+	REQUIRE(range_reference->Collection().GetValue(0, 0).ToString() == "2");
 	ConfigureSljitForCoverageSettings(con, true, true, 10000);
 	ClearJitTrace(manager, true);
 	auto range_result = con.Query(range_query);
 	REQUIRE_NO_FAIL(*range_result);
-	REQUIRE(range_result->GetValue(0, 0) == range_reference->GetValue(0, 0));
+	REQUIRE(range_result->Collection().GetValue(0, 0) == range_reference->Collection().GetValue(0, 0));
 	bool found_native_regular_probe = false;
 	bool found_unchecked_narrowing = false;
 	for (auto &event : manager.GetEvents()) {
@@ -2269,13 +2186,7 @@ TEST_CASE("JIT join grouped aggregate direct-projects variable-width RHS keys", 
 	ClearJitTrace(manager, true);
 	auto result = con.Query(query);
 	REQUIRE_NO_FAIL(*result);
-	REQUIRE(result->RowCount() == reference->RowCount());
-	REQUIRE(result->ColumnCount() == reference->ColumnCount());
-	for (idx_t row_idx = 0; row_idx < result->RowCount(); row_idx++) {
-		for (idx_t col_idx = 0; col_idx < result->ColumnCount(); col_idx++) {
-			REQUIRE(result->GetValue(col_idx, row_idx).ToString() == reference->GetValue(col_idx, row_idx).ToString());
-		}
-	}
+	RequireSameResultValues(*result, *reference);
 
 	RequireJitEvent(
 	    manager,
@@ -2347,10 +2258,10 @@ TEST_CASE("JIT mapped join casts feed dense grouped counts", "[api][jit]") {
 	auto shape = con.Query("SELECT count(*), min(order_count), max(order_count), sum(order_count) "
 	                       "FROM jit_mapped_dense_output");
 	REQUIRE_NO_FAIL(*shape);
-	REQUIRE(shape->GetValue(0, 0).ToString() == "150000");
-	REQUIRE(shape->GetValue(1, 0).ToString() == "0");
-	REQUIRE(shape->GetValue(2, 0).ToString() == "3");
-	REQUIRE(shape->GetValue(3, 0).ToString() == "300000");
+	REQUIRE(shape->Collection().GetValue(0, 0).ToString() == "150000");
+	REQUIRE(shape->Collection().GetValue(1, 0).ToString() == "0");
+	REQUIRE(shape->Collection().GetValue(2, 0).ToString() == "3");
+	REQUIRE(shape->Collection().GetValue(3, 0).ToString() == "300000");
 	auto difference = con.Query("SELECT count(*) FROM ("
 	                            "  (SELECT * FROM jit_mapped_dense_output EXCEPT ALL "
 	                            "   SELECT * FROM jit_mapped_dense_reference) UNION ALL "
@@ -2358,7 +2269,7 @@ TEST_CASE("JIT mapped join casts feed dense grouped counts", "[api][jit]") {
 	                            "   SELECT * FROM jit_mapped_dense_output)"
 	                            ") differences");
 	REQUIRE_NO_FAIL(*difference);
-	REQUIRE(difference->GetValue(0, 0).ToString() == "0");
+	REQUIRE(difference->Collection().GetValue(0, 0).ToString() == "0");
 
 	RequireJitEvent(
 	    manager,
@@ -2387,9 +2298,9 @@ TEST_CASE("JIT mapped join casts feed dense grouped counts", "[api][jit]") {
 	auto nullable_shape = con.Query("SELECT count(*), count(customer_id), sum(order_count) "
 	                                "FROM jit_mapped_dense_nullable_output");
 	REQUIRE_NO_FAIL(*nullable_shape);
-	REQUIRE(nullable_shape->GetValue(0, 0).ToString() == "150001");
-	REQUIRE(nullable_shape->GetValue(1, 0).ToString() == "150000");
-	REQUIRE(nullable_shape->GetValue(2, 0).ToString() == "300000");
+	REQUIRE(nullable_shape->Collection().GetValue(0, 0).ToString() == "150001");
+	REQUIRE(nullable_shape->Collection().GetValue(1, 0).ToString() == "150000");
+	REQUIRE(nullable_shape->Collection().GetValue(2, 0).ToString() == "300000");
 	RequireJitEvent(
 	    manager,
 	    [](const ExecutionRegionEvent &event) {
@@ -2454,13 +2365,7 @@ TEST_CASE("JIT two-join grouped aggregate composes mixed VARCHAR projection chai
 	ClearJitTrace(manager, true);
 	auto result = con.Query(query);
 	REQUIRE_NO_FAIL(*result);
-	REQUIRE(result->RowCount() == reference->RowCount());
-	REQUIRE(result->ColumnCount() == reference->ColumnCount());
-	for (idx_t row_idx = 0; row_idx < result->RowCount(); row_idx++) {
-		for (idx_t col_idx = 0; col_idx < result->ColumnCount(); col_idx++) {
-			REQUIRE(result->GetValue(col_idx, row_idx).ToString() == reference->GetValue(col_idx, row_idx).ToString());
-		}
-	}
+	RequireSameResultValues(*result, *reference);
 
 	RequireComposedJoinProjectionAggregateEvent(manager);
 	RequireSelectedHashJoinViewMaterializationHasNoElisionCredit(manager);
@@ -2497,13 +2402,7 @@ TEST_CASE("JIT row-pointer grouped aggregate probes compressed string keys as si
 	ClearJitTrace(manager, true);
 	auto result = con.Query(query);
 	REQUIRE_NO_FAIL(*result);
-	REQUIRE(result->RowCount() == reference->RowCount());
-	REQUIRE(result->ColumnCount() == reference->ColumnCount());
-	for (idx_t row_idx = 0; row_idx < result->RowCount(); row_idx++) {
-		for (idx_t col_idx = 0; col_idx < result->ColumnCount(); col_idx++) {
-			REQUIRE(result->GetValue(col_idx, row_idx).ToString() == reference->GetValue(col_idx, row_idx).ToString());
-		}
-	}
+	RequireSameResultValues(*result, *reference);
 
 	RequireJitEvent(
 	    manager,
@@ -2577,13 +2476,7 @@ TEST_CASE("JIT two-join grouped aggregate uses selected projection aggregate bac
 	ClearJitTrace(manager, true);
 	auto result = con.Query(query);
 	REQUIRE_NO_FAIL(*result);
-	REQUIRE(result->RowCount() == reference->RowCount());
-	REQUIRE(result->ColumnCount() == reference->ColumnCount());
-	for (idx_t row_idx = 0; row_idx < result->RowCount(); row_idx++) {
-		for (idx_t col_idx = 0; col_idx < result->ColumnCount(); col_idx++) {
-			REQUIRE(result->GetValue(col_idx, row_idx).ToString() == reference->GetValue(col_idx, row_idx).ToString());
-		}
-	}
+	RequireSameResultValues(*result, *reference);
 
 	RequireComposedJoinProjectionAggregateEvent(manager);
 }
@@ -2642,13 +2535,7 @@ TEST_CASE("JIT two-join aggregate composes second-join projection chain", "[api]
 	ClearJitTrace(manager, true);
 	auto result = con.Query(query);
 	REQUIRE_NO_FAIL(*result);
-	REQUIRE(result->RowCount() == reference->RowCount());
-	REQUIRE(result->ColumnCount() == reference->ColumnCount());
-	for (idx_t row_idx = 0; row_idx < result->RowCount(); row_idx++) {
-		for (idx_t col_idx = 0; col_idx < result->ColumnCount(); col_idx++) {
-			REQUIRE(result->GetValue(col_idx, row_idx).ToString() == reference->GetValue(col_idx, row_idx).ToString());
-		}
-	}
+	RequireSameResultValues(*result, *reference);
 
 	RequireComposedJoinProjectionAggregateEvent(manager);
 }
@@ -2704,13 +2591,7 @@ TEST_CASE("JIT multi-join aggregate composes generic join-prefix projection chai
 	ClearJitTrace(manager, true);
 	auto result = con.Query(query);
 	REQUIRE_NO_FAIL(*result);
-	REQUIRE(result->RowCount() == reference->RowCount());
-	REQUIRE(result->ColumnCount() == reference->ColumnCount());
-	for (idx_t row_idx = 0; row_idx < result->RowCount(); row_idx++) {
-		for (idx_t col_idx = 0; col_idx < result->ColumnCount(); col_idx++) {
-			REQUIRE(result->GetValue(col_idx, row_idx).ToString() == reference->GetValue(col_idx, row_idx).ToString());
-		}
-	}
+	RequireSameResultValues(*result, *reference);
 
 	RequireJitEvent(
 	    manager,
@@ -2760,13 +2641,7 @@ TEST_CASE("JIT single mark filter aggregate uses projected source grouped update
 	ClearJitTrace(manager, true);
 	auto result = con.Query(query);
 	REQUIRE_NO_FAIL(*result);
-	REQUIRE(result->RowCount() == reference->RowCount());
-	REQUIRE(result->ColumnCount() == reference->ColumnCount());
-	for (idx_t row_idx = 0; row_idx < result->RowCount(); row_idx++) {
-		for (idx_t col_idx = 0; col_idx < result->ColumnCount(); col_idx++) {
-			REQUIRE(result->GetValue(col_idx, row_idx).ToString() == reference->GetValue(col_idx, row_idx).ToString());
-		}
-	}
+	RequireSameResultValues(*result, *reference);
 
 	RequireJitEvent(
 	    manager,
@@ -2819,13 +2694,7 @@ TEST_CASE("JIT mark match filter emits LHS selected boundary", "[api][jit]") {
 	ClearJitTrace(manager, true);
 	auto result = con.Query(query);
 	REQUIRE_NO_FAIL(*result);
-	REQUIRE(result->RowCount() == reference->RowCount());
-	REQUIRE(result->ColumnCount() == reference->ColumnCount());
-	for (idx_t row_idx = 0; row_idx < result->RowCount(); row_idx++) {
-		for (idx_t col_idx = 0; col_idx < result->ColumnCount(); col_idx++) {
-			REQUIRE(result->GetValue(col_idx, row_idx).ToString() == reference->GetValue(col_idx, row_idx).ToString());
-		}
-	}
+	RequireSameResultValues(*result, *reference);
 
 	RequireJitEvent(
 	    manager,
@@ -2883,13 +2752,7 @@ TEST_CASE("JIT mark match count-star preaggregates compressed string groups", "[
 	ClearJitTrace(manager, true);
 	auto result = con.Query(query);
 	REQUIRE_NO_FAIL(*result);
-	REQUIRE(result->RowCount() == reference->RowCount());
-	REQUIRE(result->ColumnCount() == reference->ColumnCount());
-	for (idx_t row_idx = 0; row_idx < result->RowCount(); row_idx++) {
-		for (idx_t col_idx = 0; col_idx < result->ColumnCount(); col_idx++) {
-			REQUIRE(result->GetValue(col_idx, row_idx).ToString() == reference->GetValue(col_idx, row_idx).ToString());
-		}
-	}
+	RequireSameResultValues(*result, *reference);
 
 	RequireJitEvent(
 	    manager,
@@ -2945,13 +2808,7 @@ TEST_CASE("JIT mark filter aggregate uses grouped primitive selected view", "[ap
 	ClearJitTrace(manager, true);
 	auto result = con.Query(query);
 	REQUIRE_NO_FAIL(*result);
-	REQUIRE(result->RowCount() == reference->RowCount());
-	REQUIRE(result->ColumnCount() == reference->ColumnCount());
-	for (idx_t row_idx = 0; row_idx < result->RowCount(); row_idx++) {
-		for (idx_t col_idx = 0; col_idx < result->ColumnCount(); col_idx++) {
-			REQUIRE(result->GetValue(col_idx, row_idx).ToString() == reference->GetValue(col_idx, row_idx).ToString());
-		}
-	}
+	RequireSameResultValues(*result, *reference);
 
 	RequireJitEvent(
 	    manager,
@@ -3021,7 +2878,7 @@ TEST_CASE("JIT mark filter projection preserves selected nonmatches", "[api][jit
 	                      "     EXCEPT ALL SELECT * FROM jit_mark_selected_projection_expected)"
 	                      ") diff");
 	REQUIRE_NO_FAIL(*diff);
-	REQUIRE(diff->GetValue(0, 0).GetValue<int64_t>() == 0);
+	REQUIRE(diff->Collection().GetValue(0, 0).GetValue<int64_t>() == 0);
 }
 
 TEST_CASE("JIT mark filter reference aggregate slices selected projection", "[api][jit]") {
@@ -3071,7 +2928,7 @@ TEST_CASE("JIT mark filter reference aggregate slices selected projection", "[ap
 	                      "     EXCEPT ALL SELECT * FROM jit_mark_reference_expected)"
 	                      ") diff");
 	REQUIRE_NO_FAIL(*diff);
-	REQUIRE(diff->GetValue(0, 0).GetValue<int64_t>() == 0);
+	REQUIRE(diff->Collection().GetValue(0, 0).GetValue<int64_t>() == 0);
 }
 
 TEST_CASE("JIT two-projection between-join chain composes primitive boundaries", "[api][jit]") {
@@ -3133,13 +2990,7 @@ TEST_CASE("JIT two-projection between-join chain composes primitive boundaries",
 	ClearJitTrace(manager, true);
 	auto result = con.Query(query);
 	REQUIRE_NO_FAIL(*result);
-	REQUIRE(result->RowCount() == reference->RowCount());
-	REQUIRE(result->ColumnCount() == reference->ColumnCount());
-	for (idx_t row_idx = 0; row_idx < result->RowCount(); row_idx++) {
-		for (idx_t col_idx = 0; col_idx < result->ColumnCount(); col_idx++) {
-			REQUIRE(result->GetValue(col_idx, row_idx).ToString() == reference->GetValue(col_idx, row_idx).ToString());
-		}
-	}
+	RequireSameResultValues(*result, *reference);
 
 	RequireComposedJoinProjectionAggregateEvent(manager);
 }
@@ -3162,14 +3013,14 @@ TEST_CASE("JIT hash join pair probe preserves bloom-filtered sparse misses", "[a
 	REQUIRE_NO_FAIL(con.Query("SET jit_policy='off'"));
 	auto reference = con.Query(query);
 	REQUIRE_NO_FAIL(*reference);
-	REQUIRE(reference->GetValue(0, 0).ToString() == "4096");
+	REQUIRE(reference->Collection().GetValue(0, 0).ToString() == "4096");
 
 	REQUIRE_NO_FAIL(con.Query("SET jit_policy='auto'"));
 	ClearJitTrace(manager);
 	auto result = con.Query(query);
 	REQUIRE_NO_FAIL(*result);
-	REQUIRE(result->GetValue(0, 0).ToString() == reference->GetValue(0, 0).ToString());
-	REQUIRE(result->GetValue(1, 0).ToString() == reference->GetValue(1, 0).ToString());
+	REQUIRE(result->Collection().GetValue(0, 0).ToString() == reference->Collection().GetValue(0, 0).ToString());
+	REQUIRE(result->Collection().GetValue(1, 0).ToString() == reference->Collection().GetValue(1, 0).ToString());
 
 	RequireJitEvent(
 	    manager,
@@ -3209,13 +3060,7 @@ TEST_CASE("JIT hash join probe consumes generated-filter selected reference inpu
 	ClearJitTrace(manager);
 	auto result = con.Query(query);
 	REQUIRE_NO_FAIL(*result);
-	REQUIRE(result->RowCount() == reference->RowCount());
-	REQUIRE(result->ColumnCount() == reference->ColumnCount());
-	for (idx_t row_idx = 0; row_idx < result->RowCount(); row_idx++) {
-		for (idx_t col_idx = 0; col_idx < result->ColumnCount(); col_idx++) {
-			REQUIRE(result->GetValue(col_idx, row_idx).ToString() == reference->GetValue(col_idx, row_idx).ToString());
-		}
-	}
+	RequireSameResultValues(*result, *reference);
 
 	RequireJitEvent(
 	    manager,
@@ -3259,8 +3104,8 @@ TEST_CASE("JIT selected hash join generated filter remaps pre-join projection so
 	ClearJitTrace(manager, true);
 	auto result = con.Query(query);
 	REQUIRE_NO_FAIL(*result);
-	REQUIRE(result->GetValue(0, 0).ToString() == reference->GetValue(0, 0).ToString());
-	REQUIRE(result->GetValue(1, 0).ToString() == reference->GetValue(1, 0).ToString());
+	REQUIRE(result->Collection().GetValue(0, 0).ToString() == reference->Collection().GetValue(0, 0).ToString());
+	REQUIRE(result->Collection().GetValue(1, 0).ToString() == reference->Collection().GetValue(1, 0).ToString());
 
 	RequireJitEvent(
 	    manager,
@@ -3293,14 +3138,14 @@ TEST_CASE("JIT hash join chain probe preserves bloom-filtered sparse misses", "[
 	REQUIRE_NO_FAIL(con.Query("SET jit_policy='off'"));
 	auto reference = con.Query(query);
 	REQUIRE_NO_FAIL(*reference);
-	REQUIRE(reference->GetValue(0, 0).ToString() == "256");
+	REQUIRE(reference->Collection().GetValue(0, 0).ToString() == "256");
 
 	REQUIRE_NO_FAIL(con.Query("SET jit_policy='auto'"));
 	ClearJitTrace(manager);
 	auto result = con.Query(query);
 	REQUIRE_NO_FAIL(*result);
-	REQUIRE(result->GetValue(0, 0).ToString() == reference->GetValue(0, 0).ToString());
-	REQUIRE(result->GetValue(1, 0).ToString() == reference->GetValue(1, 0).ToString());
+	REQUIRE(result->Collection().GetValue(0, 0).ToString() == reference->Collection().GetValue(0, 0).ToString());
+	REQUIRE(result->Collection().GetValue(1, 0).ToString() == reference->Collection().GetValue(1, 0).ToString());
 
 	RequireJitEvent(
 	    manager,
@@ -3338,8 +3183,8 @@ TEST_CASE("SLJIT regular hash join preserves wide integral probe sources", "[api
 	ClearJitTrace(manager, true);
 	auto result = con.Query(query);
 	REQUIRE_NO_FAIL(*result);
-	REQUIRE(result->GetValue(0, 0).ToString() == reference->GetValue(0, 0).ToString());
-	REQUIRE(result->GetValue(1, 0).ToString() == reference->GetValue(1, 0).ToString());
+	REQUIRE(result->Collection().GetValue(0, 0).ToString() == reference->Collection().GetValue(0, 0).ToString());
+	REQUIRE(result->Collection().GetValue(1, 0).ToString() == reference->Collection().GetValue(1, 0).ToString());
 
 	RequireJitEvent(
 	    manager,
@@ -3388,8 +3233,8 @@ TEST_CASE("SLJIT perfect hash join preserves signed and unsigned wide keys", "[a
 		ClearJitTrace(manager, true);
 		auto result = con.Query(query);
 		REQUIRE_NO_FAIL(*result);
-		REQUIRE(result->GetValue(0, 0).ToString() == reference->GetValue(0, 0).ToString());
-		REQUIRE(result->GetValue(1, 0).ToString() == reference->GetValue(1, 0).ToString());
+		REQUIRE(result->Collection().GetValue(0, 0).ToString() == reference->Collection().GetValue(0, 0).ToString());
+		REQUIRE(result->Collection().GetValue(1, 0).ToString() == reference->Collection().GetValue(1, 0).ToString());
 
 		bool found_wide_perfect_probe = false;
 		for (auto &event : manager.GetEvents()) {

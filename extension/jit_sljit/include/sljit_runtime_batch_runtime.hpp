@@ -149,7 +149,7 @@ static bool SljitChunkHasOutOfLineValues(DataChunk &chunk) {
 			return true;
 		}
 		UnifiedVectorFormat format;
-		vector.ToUnifiedFormat(chunk.size(), format);
+		vector.ToUnifiedFormat(format);
 		auto data = UnifiedVectorFormat::GetData<string_t>(format);
 		for (idx_t row_idx = 0; row_idx < chunk.size(); row_idx++) {
 			const auto idx = format.sel->get_index(row_idx);
