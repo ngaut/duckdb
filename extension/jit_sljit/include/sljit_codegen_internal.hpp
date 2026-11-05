@@ -33,13 +33,46 @@ struct SljitTypedExpressionTreeSlot {
 	sljit_sw valid_offset;
 };
 
-struct SljitTypedExpressionTreeDataPointerHoist {
-	idx_t source_index = 0;
-	sljit_s32 data_reg = 0;
+//! An sljit operand pair: a register, a stack slot, or an immediate. A chunk-local value a kernel loop carries from
+//! row to row lives in a register, or a stack slot when the kernel has none free: a register never waits on the
+//! store-to-load round trip a stack slot adds to every row.
+struct SljitOperand {
+	sljit_s32 operand;
+	sljit_sw operand_w;
+
+	static SljitOperand Register(sljit_s32 reg) {
+		return {reg, 0};
+	}
+	static SljitOperand Stack(sljit_sw offset) {
+		return {SLJIT_MEM1(SLJIT_SP), offset};
+	}
+	static SljitOperand Immediate(int64_t value) {
+		return {SLJIT_IMM, NumericCast<sljit_sw>(value)};
+	}
 };
 
-bool TryGetSljitTypedExpressionTreeDataPointerHoist(const vector<SljitTypedExpressionTreeDataPointerHoist> *data_hoists,
-                                                    idx_t source_index, sljit_s32 &data_reg);
+//! A loop-invariant operand a fast loop reads instead of rebuilding it for every row: a source's data pointer held in a
+//! register, or a wide constant held in a stack slot (an arm64 64-bit immediate takes up to four instructions; the
+//! slot is one load)
+struct SljitTypedExpressionTreeLoopHoist {
+	//! the source whose data pointer this holds; INVALID_INDEX for a constant
+	idx_t source_index = DConstants::INVALID_INDEX;
+	int64_t constant = 0;
+	SljitOperand location = SljitOperand::Register(0);
+};
+
+bool TryGetSljitTypedExpressionTreeSourceDataHoist(const vector<SljitTypedExpressionTreeLoopHoist> *data_hoists,
+                                                   idx_t source_index, sljit_s32 &data_reg);
+//! The hoisted slot of a constant, or the constant as an immediate
+SljitOperand SljitTypedExpressionTreeConstantOperand(const vector<SljitTypedExpressionTreeLoopHoist> *hoists,
+                                                     int64_t value);
+//! Gives each wide constant the fast emitters of these expressions use a stack slot past local_size
+void AppendSljitTypedExpressionTreeConstantHoists(const vector<reference<const ExecutionExpressionIR>> &expressions,
+                                                  vector<SljitTypedExpressionTreeLoopHoist> &hoists,
+                                                  sljit_sw &local_size);
+//! Stores the hoisted constants into their slots; data pointers are loaded by the kernel that owns their sources
+void EmitSljitTypedExpressionTreeConstantHoists(struct sljit_compiler *compiler,
+                                                const vector<SljitTypedExpressionTreeLoopHoist> &hoists);
 enum class SljitTypedExpressionTreeFastIndexMode : uint8_t { FLAT, LOGICAL, SELECTED };
 
 SljitTypedExpressionTreeSlot AllocateSljitTypedExpressionTreeSlot(idx_t &slot_index);
@@ -50,11 +83,27 @@ void EmitCopySljitTypedExpressionTreeSlot(struct sljit_compiler *compiler, const
 void EmitStoreSljitTypedExpressionTreeBool(struct sljit_compiler *compiler, const SljitTypedExpressionTreeSlot &slot,
                                            bool value);
 int64_t SljitTypedExpressionTreeConstantValue(const ExecutionExpressionIR &node);
+//! The multiplier of the signed magic-number reduction of division by a constant divisor >= 2
+int64_t SljitSignedDivisionMultiplier(int64_t divisor);
+//! The unsigned divisibility test by a constant divisor >= 2 [Granlund and Montgomery]: u is a multiple of the divisor
+//! exactly when rotate_right(u * inverse, shift) <= limit, where inverse is the inverse of the divisor's odd part
+//! modulo 2^64, shift its count of trailing zero bits, and limit floor((2^64 - 1) / divisor)
+struct SljitRemainderTestConstants {
+	int64_t inverse;
+	idx_t shift;
+	int64_t limit;
+};
+SljitRemainderTestConstants ComputeSljitRemainderTestConstants(int64_t divisor);
+//! `n % d = c` or `n % d <> c` for a constant divisor d >= 2 and a constant 0 <= c < d, which a predicate jump tests
+//! by divisibility instead of computing the remainder
+bool SljitTypedExpressionTreeIsRemainderTest(const ExecutionExpressionIR &node);
 void EmitSljitTypedExpressionTreeModulo(struct sljit_compiler *compiler, int64_t divisor,
-                                        SljitNativeIntegerKind binary_kind, sljit_s32 n_reg, sljit_s32 result_reg);
+                                        SljitNativeIntegerKind binary_kind, sljit_s32 n_reg, sljit_s32 result_reg,
+                                        const vector<SljitTypedExpressionTreeLoopHoist> *hoists = nullptr);
 void EmitSljitTypedExpressionTreeIntegerDivide(struct sljit_compiler *compiler, int64_t divisor,
                                                SljitNativeIntegerKind binary_kind, sljit_s32 n_reg,
-                                               sljit_s32 result_reg);
+                                               sljit_s32 result_reg,
+                                               const vector<SljitTypedExpressionTreeLoopHoist> *hoists = nullptr);
 SljitIntegerOverflowChecks SljitTypedExpressionTreeOverflowChecks(const ExecutionExpressionIR &node);
 void SetSljitJumpLabels(const vector<sljit_jump *> &jumps, sljit_label *label);
 void EmitSljitTypedExpressionTreeInvalidResult(struct sljit_compiler *compiler,
@@ -65,14 +114,13 @@ void EmitLoadSljitTypedExpressionTreeFastSourceIndex(struct sljit_compiler *comp
 SljitTypedExpressionTreeSlot EmitSljitTypedExpressionTreeStringPrefix(struct sljit_compiler *compiler,
                                                                       const ExecutionExpressionIR &node,
                                                                       idx_t &slot_index);
-void EmitSljitTypedExpressionTreeFastStringPrefixReg(
-    struct sljit_compiler *compiler, const ExecutionExpressionIR &node,
-    SljitTypedExpressionTreeFastIndexMode index_mode,
-    const vector<SljitTypedExpressionTreeDataPointerHoist> *data_hoists);
-void EmitSljitTypedExpressionTreeFastStringCompareReg(
-    struct sljit_compiler *compiler, const ExecutionExpressionIR &node,
-    SljitTypedExpressionTreeFastIndexMode index_mode,
-    const vector<SljitTypedExpressionTreeDataPointerHoist> *data_hoists);
+void EmitSljitTypedExpressionTreeFastStringPrefixReg(struct sljit_compiler *compiler, const ExecutionExpressionIR &node,
+                                                     SljitTypedExpressionTreeFastIndexMode index_mode,
+                                                     const vector<SljitTypedExpressionTreeLoopHoist> *data_hoists);
+void EmitSljitTypedExpressionTreeFastStringCompareReg(struct sljit_compiler *compiler,
+                                                      const ExecutionExpressionIR &node,
+                                                      SljitTypedExpressionTreeFastIndexMode index_mode,
+                                                      const vector<SljitTypedExpressionTreeLoopHoist> *data_hoists);
 vector<sljit_jump *> EmitSljitTypedExpressionTreeStringPrefixJumpIfTrue(struct sljit_compiler *compiler,
                                                                         const ExecutionExpressionIR &node);
 vector<sljit_jump *> EmitSljitTypedExpressionTreeStringCompareJumpIfTrue(struct sljit_compiler *compiler,
@@ -143,24 +191,10 @@ sljit_jump *EmitJumpIfSljitExpressionTreeFlatSourceNull(struct sljit_compiler *c
 vector<sljit_jump *> EmitSljitArithmeticOverflowStubs(struct sljit_compiler *compiler,
                                                       const vector<SljitArithmeticOverflowSite> &overflows);
 
-//! A chunk-local value a kernel loop carries from row to row: a register, or a stack slot when the kernel has none
-//! free. A register never waits on the store-to-load round trip a stack slot adds to every row.
-struct SljitLoopLocal {
-	sljit_s32 operand;
-	sljit_sw operand_w;
-
-	static SljitLoopLocal Register(sljit_s32 reg) {
-		return {reg, 0};
-	}
-	static SljitLoopLocal Stack(sljit_sw offset) {
-		return {SLJIT_MEM1(SLJIT_SP), offset};
-	}
-};
-
-void EmitSljitAggregateAccumulateInt64(struct sljit_compiler *compiler, const SljitLoopLocal &sum,
-                                       const SljitLoopLocal &saw_value, sljit_s32 value_reg);
-void EmitSljitAggregateCommitInt64(struct sljit_compiler *compiler, const SljitLoopLocal &sum,
-                                   const SljitLoopLocal &saw_value);
+void EmitSljitAggregateAccumulateInt64(struct sljit_compiler *compiler, const SljitOperand &sum,
+                                       const SljitOperand &saw_value, sljit_s32 value_reg);
+void EmitSljitAggregateCommitInt64(struct sljit_compiler *compiler, const SljitOperand &sum,
+                                   const SljitOperand &saw_value);
 void EmitSljitAggregateAccumulateHugeintInt64(struct sljit_compiler *compiler, sljit_sw local_lower_offset,
                                               sljit_sw local_upper_offset, sljit_sw saw_value_offset,
                                               sljit_s32 value_reg);
@@ -192,17 +226,22 @@ SljitTypedExpressionTreeSlot EmitSljitTypedExpressionTreeValue(struct sljit_comp
                                                                const ExecutionExpressionIR &node, idx_t &slot_index,
                                                                vector<SljitArithmeticOverflowSite> &overflows,
                                                                const vector<idx_t> *known_valid_sources = nullptr);
-void EmitSljitTypedExpressionTreeFastValueReg(
-    struct sljit_compiler *compiler, const ExecutionExpressionIR &node, idx_t &spill_index,
-    vector<SljitArithmeticOverflowSite> &overflows,
-    const vector<SljitTypedExpressionTreeDataPointerHoist> *data_hoists = nullptr);
+void EmitSljitTypedExpressionTreeFastValueReg(struct sljit_compiler *compiler, const ExecutionExpressionIR &node,
+                                              idx_t &spill_index, vector<SljitArithmeticOverflowSite> &overflows,
+                                              const vector<SljitTypedExpressionTreeLoopHoist> *data_hoists = nullptr);
+//! Emits a flat-row predicate as jumps taken when it is true: a comparison jumps on its own flags instead of
+//! materializing a boolean, and a remainder test checks divisibility
+vector<sljit_jump *>
+EmitSljitTypedExpressionTreeFastJumpsIfTrue(struct sljit_compiler *compiler, const ExecutionExpressionIR &node,
+                                            idx_t &spill_index, vector<SljitArithmeticOverflowSite> &overflows,
+                                            const vector<SljitTypedExpressionTreeLoopHoist> *data_hoists = nullptr);
 void EmitSljitTypedExpressionTreeSelectedFastValueReg(
     struct sljit_compiler *compiler, const ExecutionExpressionIR &node, idx_t &spill_index,
     vector<SljitArithmeticOverflowSite> &overflows,
-    const vector<SljitTypedExpressionTreeDataPointerHoist> *data_hoists = nullptr);
+    const vector<SljitTypedExpressionTreeLoopHoist> *data_hoists = nullptr);
 void EmitSljitTypedExpressionTreeLogicalFastValueReg(
     struct sljit_compiler *compiler, const ExecutionExpressionIR &node, idx_t &spill_index,
     vector<SljitArithmeticOverflowSite> &overflows,
-    const vector<SljitTypedExpressionTreeDataPointerHoist> *data_hoists = nullptr);
+    const vector<SljitTypedExpressionTreeLoopHoist> *data_hoists = nullptr);
 
 } // namespace duckdb

@@ -233,7 +233,7 @@ bool BuildSljitFusedAggregateCodegenPlan(const vector<SljitNativeRegionExpressio
 static void EmitSljitSharedPayloadExpression(struct sljit_compiler *compiler, const ExecutionExpressionIR &expression,
                                              SljitAggregateExpressionIndexMode index_mode,
                                              vector<SljitArithmeticOverflowSite> &overflows,
-                                             const vector<SljitTypedExpressionTreeDataPointerHoist> *data_hoists,
+                                             const vector<SljitTypedExpressionTreeLoopHoist> *data_hoists,
                                              bool restore_selected_source_array) {
 	idx_t spill_index = 0;
 	switch (index_mode) {
@@ -261,7 +261,7 @@ void EmitSljitSharedBinaryPayloadBase(struct sljit_compiler *compiler, const Slj
                                       sljit_s32 shared_value_reg, sljit_sw shared_value_offset,
                                       SljitAggregateExpressionIndexMode index_mode,
                                       vector<SljitArithmeticOverflowSite> &overflows,
-                                      const vector<SljitTypedExpressionTreeDataPointerHoist> *data_hoists,
+                                      const vector<SljitTypedExpressionTreeLoopHoist> *data_hoists,
                                       bool restore_selected_source_array) {
 	D_ASSERT(plan.Enabled());
 	EmitSljitSharedPayloadExpression(compiler, *plan.base, index_mode, overflows, data_hoists,
@@ -277,7 +277,7 @@ void EmitSljitSharedBinaryPayloadLane(struct sljit_compiler *compiler, const Slj
                                       sljit_s32 shared_value_reg, sljit_sw shared_value_offset,
                                       SljitAggregateExpressionIndexMode index_mode,
                                       vector<SljitArithmeticOverflowSite> &overflows,
-                                      const vector<SljitTypedExpressionTreeDataPointerHoist> *data_hoists,
+                                      const vector<SljitTypedExpressionTreeLoopHoist> *data_hoists,
                                       bool restore_selected_source_array) {
 	D_ASSERT(lane.matched);
 	if (lane.use_base_directly) {

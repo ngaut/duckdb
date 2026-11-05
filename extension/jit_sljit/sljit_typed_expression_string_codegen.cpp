@@ -41,16 +41,17 @@ static void EmitLoadSljitTypedExpressionTreeStringForPrefix(struct sljit_compile
 	sljit_set_label(have_data, sljit_emit_label(compiler));
 }
 
-static void EmitLoadSljitTypedExpressionTreeFastStringForPrefix(
-    struct sljit_compiler *compiler, idx_t source_index, SljitTypedExpressionTreeFastIndexMode index_mode,
-    const vector<SljitTypedExpressionTreeDataPointerHoist> *data_hoists) {
+static void
+EmitLoadSljitTypedExpressionTreeFastStringForPrefix(struct sljit_compiler *compiler, idx_t source_index,
+                                                    SljitTypedExpressionTreeFastIndexMode index_mode,
+                                                    const vector<SljitTypedExpressionTreeLoopHoist> *data_hoists) {
 	static_assert(sizeof(string_t) == 16, "SLJIT typed expression-tree string prefix expects DuckDB string_t ABI size");
 	static constexpr sljit_sw STRING_T_SHIFT = 4;
 	static constexpr sljit_sw STRING_LENGTH_OFFSET = 0;
 
 	EmitLoadSljitTypedExpressionTreeFastSourceIndex(compiler, source_index, SLJIT_R1, index_mode);
 	sljit_s32 data_reg;
-	if (TryGetSljitTypedExpressionTreeDataPointerHoist(data_hoists, source_index, data_reg)) {
+	if (TryGetSljitTypedExpressionTreeSourceDataHoist(data_hoists, source_index, data_reg)) {
 		sljit_emit_op1(compiler, SLJIT_MOV_P, SLJIT_R0, 0, data_reg, 0);
 	} else {
 		sljit_emit_op1(compiler, SLJIT_MOV_P, SLJIT_R0, 0, SLJIT_MEM1(SLJIT_S5),
@@ -198,10 +199,9 @@ SljitTypedExpressionTreeSlot EmitSljitTypedExpressionTreeStringPrefix(struct slj
 	return result_slot;
 }
 
-void EmitSljitTypedExpressionTreeFastStringPrefixReg(
-    struct sljit_compiler *compiler, const ExecutionExpressionIR &node,
-    SljitTypedExpressionTreeFastIndexMode index_mode,
-    const vector<SljitTypedExpressionTreeDataPointerHoist> *data_hoists) {
+void EmitSljitTypedExpressionTreeFastStringPrefixReg(struct sljit_compiler *compiler, const ExecutionExpressionIR &node,
+                                                     SljitTypedExpressionTreeFastIndexMode index_mode,
+                                                     const vector<SljitTypedExpressionTreeLoopHoist> *data_hoists) {
 	idx_t source_index;
 	string prefix;
 	if (!TryReadSljitTypedExpressionTreeStringPrefixConstant(node, source_index, prefix)) {
@@ -214,10 +214,10 @@ void EmitSljitTypedExpressionTreeFastStringPrefixReg(
 	EmitSljitTypedExpressionTreeFastStringBoolReg(compiler, false_jumps, true);
 }
 
-void EmitSljitTypedExpressionTreeFastStringCompareReg(
-    struct sljit_compiler *compiler, const ExecutionExpressionIR &node,
-    SljitTypedExpressionTreeFastIndexMode index_mode,
-    const vector<SljitTypedExpressionTreeDataPointerHoist> *data_hoists) {
+void EmitSljitTypedExpressionTreeFastStringCompareReg(struct sljit_compiler *compiler,
+                                                      const ExecutionExpressionIR &node,
+                                                      SljitTypedExpressionTreeFastIndexMode index_mode,
+                                                      const vector<SljitTypedExpressionTreeLoopHoist> *data_hoists) {
 	idx_t source_index;
 	string constant;
 	bool compare_equal;

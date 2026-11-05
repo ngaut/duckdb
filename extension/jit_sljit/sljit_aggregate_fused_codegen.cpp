@@ -93,10 +93,10 @@ sljit_jump *EmitLoadFusedAggregateReferenceValue(struct sljit_compiler *compiler
                                                  const SljitNativeRegionExpressionPlan &payload,
                                                  bool use_source_selection, bool check_validity,
                                                  sljit_s32 direct_index_reg,
-                                                 const vector<SljitTypedExpressionTreeDataPointerHoist> *data_hoists) {
+                                                 const vector<SljitTypedExpressionTreeLoopHoist> *data_hoists) {
 	if (!use_source_selection && !check_validity) {
 		sljit_s32 data_reg;
-		if (TryGetSljitTypedExpressionTreeDataPointerHoist(data_hoists, payload.source_index, data_reg)) {
+		if (TryGetSljitTypedExpressionTreeSourceDataHoist(data_hoists, payload.source_index, data_reg)) {
 			sljit_emit_op1(compiler, NativeIntegerLoadOp(payload.integer_kind), SLJIT_R2, 0,
 			               SLJIT_MEM2(data_reg, direct_index_reg), NativeIntegerDataScale(payload.integer_kind));
 			return nullptr;
@@ -120,7 +120,7 @@ sljit_jump *EmitLoadFusedAggregateReferenceValue(struct sljit_compiler *compiler
 		    compiler, offsetof(SljitNativeVectorInput, source_validity_array), payload.source_index, SLJIT_R1);
 	}
 	sljit_s32 data_reg;
-	if (TryGetSljitTypedExpressionTreeDataPointerHoist(data_hoists, payload.source_index, data_reg)) {
+	if (TryGetSljitTypedExpressionTreeSourceDataHoist(data_hoists, payload.source_index, data_reg)) {
 		sljit_emit_op1(compiler, NativeIntegerLoadOp(payload.integer_kind), SLJIT_R2, 0, SLJIT_MEM2(data_reg, SLJIT_R1),
 		               NativeIntegerDataScale(payload.integer_kind));
 	} else {

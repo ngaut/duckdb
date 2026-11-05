@@ -76,7 +76,7 @@ BuildSljitNativeUngroupedFusedAggregateUpdate(const vector<SljitNativeRegionExpr
 	EmitInitSljitNativeVectorSourceArrays(compiler);
 	if (hoist_source_data_pointers) {
 		for (auto &hoist : source_data_hoists) {
-			sljit_emit_op1(compiler, SLJIT_MOV_P, hoist.data_reg, 0, SLJIT_MEM1(SLJIT_S5),
+			sljit_emit_op1(compiler, SLJIT_MOV_P, hoist.location.operand, 0, SLJIT_MEM1(SLJIT_S5),
 			               SljitPointerArrayOffset(hoist.source_index));
 		}
 	}
@@ -86,7 +86,7 @@ BuildSljitNativeUngroupedFusedAggregateUpdate(const vector<SljitNativeRegionExpr
 		}
 		for (idx_t hoist_idx = source_data_hoists.size(); hoist_idx < fast_source_data_hoists.size(); hoist_idx++) {
 			auto &hoist = fast_source_data_hoists[hoist_idx];
-			sljit_emit_op1(compiler, SLJIT_MOV_P, hoist.data_reg, 0, SLJIT_MEM1(SLJIT_S5),
+			sljit_emit_op1(compiler, SLJIT_MOV_P, hoist.location.operand, 0, SLJIT_MEM1(SLJIT_S5),
 			               SljitPointerArrayOffset(hoist.source_index));
 		}
 	};

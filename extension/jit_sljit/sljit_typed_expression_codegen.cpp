@@ -57,6 +57,27 @@ static SljitSignedDivisionMagic ComputeSljitSignedDivisionMagic(int64_t d) {
 	return magic;
 }
 
+int64_t SljitSignedDivisionMultiplier(int64_t divisor) {
+	return ComputeSljitSignedDivisionMagic(divisor).multiplier;
+}
+
+SljitRemainderTestConstants ComputeSljitRemainderTestConstants(int64_t divisor) {
+	D_ASSERT(divisor >= 2);
+	const auto divisor_bits = static_cast<uint64_t>(divisor);
+	SljitRemainderTestConstants result;
+	result.shift = CountZeros<uint64_t>::Trailing(divisor_bits);
+	// Newton's iteration doubles the correct low bits of an odd number's inverse modulo 2^64; an odd number is its own
+	// inverse modulo 8, so five steps reach 64 bits
+	const uint64_t odd = divisor_bits >> result.shift;
+	uint64_t inverse = odd;
+	for (idx_t step = 0; step < 5; step++) {
+		inverse *= 2 - odd * inverse;
+	}
+	result.inverse = static_cast<int64_t>(inverse);
+	result.limit = static_cast<int64_t>(NumericLimits<uint64_t>::Maximum() / divisor_bits);
+	return result;
+}
+
 // ARM64 SMULH: target = the high 64 bits of the signed 128-bit product left * right
 static void EmitSljitArm64SignedMultiplyHigh(struct sljit_compiler *compiler, sljit_s32 target, sljit_s32 left,
                                              sljit_s32 right) {
@@ -71,9 +92,11 @@ static void EmitSljitArm64SignedMultiplyHigh(struct sljit_compiler *compiler, sl
 // Computes the truncated-toward-zero quotient n_reg / divisor (a compile-time constant >= 2) into SLJIT_R1 with signed
 // magic-multiply strength reduction. R0/R1 are op0 scratch and must be dead here; n_reg must not be R0/R1 and is only
 // read.
-static void EmitSljitSignedConstantDivideQuotient(struct sljit_compiler *compiler, int64_t divisor, sljit_s32 n_reg) {
+static void EmitSljitSignedConstantDivideQuotient(struct sljit_compiler *compiler, int64_t divisor, sljit_s32 n_reg,
+                                                  const vector<SljitTypedExpressionTreeLoopHoist> *hoists) {
 	auto magic = ComputeSljitSignedDivisionMagic(divisor);
-	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_R1, 0, SLJIT_IMM, NumericCast<sljit_sw>(magic.multiplier));
+	auto multiplier = SljitTypedExpressionTreeConstantOperand(hoists, magic.multiplier);
+	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_R1, 0, multiplier.operand, multiplier.operand_w);
 	if (GetSljitTargetCapabilities().IsArm64()) {
 		// only the high half is needed; sljit's double-width multiply would also compute the low half and discard it
 		EmitSljitArm64SignedMultiplyHigh(compiler, SLJIT_R1, n_reg, SLJIT_R1);
@@ -94,8 +117,9 @@ static void EmitSljitSignedConstantDivideQuotient(struct sljit_compiler *compile
 
 // Emits result_reg = n_reg % divisor. n_reg is only read until the final store, so result_reg may alias n_reg.
 void EmitSljitTypedExpressionTreeModulo(struct sljit_compiler *compiler, int64_t divisor,
-                                        SljitNativeIntegerKind binary_kind, sljit_s32 n_reg, sljit_s32 result_reg) {
-	EmitSljitSignedConstantDivideQuotient(compiler, divisor, n_reg);
+                                        SljitNativeIntegerKind binary_kind, sljit_s32 n_reg, sljit_s32 result_reg,
+                                        const vector<SljitTypedExpressionTreeLoopHoist> *hoists) {
+	EmitSljitSignedConstantDivideQuotient(compiler, divisor, n_reg, hoists);
 	// R0 = quotient * divisor (it cannot overflow: its magnitude is at most n's); a divisor one off a power of two
 	// shifts and adds instead of occupying a multiplier
 	const auto divisor_bits = static_cast<uint64_t>(divisor);
@@ -117,8 +141,9 @@ void EmitSljitTypedExpressionTreeModulo(struct sljit_compiler *compiler, int64_t
 // Emits result_reg = n_reg / divisor (truncating), matching DuckDB integer division ("//") semantics.
 void EmitSljitTypedExpressionTreeIntegerDivide(struct sljit_compiler *compiler, int64_t divisor,
                                                SljitNativeIntegerKind binary_kind, sljit_s32 n_reg,
-                                               sljit_s32 result_reg) {
-	EmitSljitSignedConstantDivideQuotient(compiler, divisor, n_reg);
+                                               sljit_s32 result_reg,
+                                               const vector<SljitTypedExpressionTreeLoopHoist> *hoists) {
+	EmitSljitSignedConstantDivideQuotient(compiler, divisor, n_reg, hoists);
 	sljit_emit_op1(compiler, SLJIT_MOV, result_reg, 0, SLJIT_R1, 0);
 	if (binary_kind == SljitNativeIntegerKind::INT32) {
 		sljit_emit_op1(compiler, SLJIT_MOV_S32, result_reg, 0, result_reg, 0);

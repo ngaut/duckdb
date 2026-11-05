@@ -13,9 +13,10 @@ namespace duckdb {
 
 //! Leaves the expression value in R2. Returns whether the value can be NULL: R3 then holds its validity, and the
 //! caller branches on it once the registers the evaluation borrows (S4 holds the source selections) are restored.
-static bool EmitSljitPerfectHashExpressionTreeValue(
-    const SljitPerfectHashFusedUpdateEmitContext &context, const ExecutionExpressionIR &expression, bool fast_path,
-    bool all_valid, bool no_source_selection, const vector<SljitTypedExpressionTreeDataPointerHoist> *data_hoists) {
+static bool EmitSljitPerfectHashExpressionTreeValue(const SljitPerfectHashFusedUpdateEmitContext &context,
+                                                    const ExecutionExpressionIR &expression, bool fast_path,
+                                                    bool all_valid, bool no_source_selection,
+                                                    const vector<SljitTypedExpressionTreeLoopHoist> *data_hoists) {
 	auto compiler = context.compiler;
 	if (fast_path) {
 		idx_t spill_index = 0;
@@ -52,7 +53,7 @@ static sljit_jump *EmitSljitPerfectHashJumpIfExpressionNull(struct sljit_compile
 vector<sljit_jump *>
 EmitSljitPerfectHashPredicateSkipJumps(const SljitPerfectHashFusedUpdateEmitContext &context, bool fast_path,
                                        bool all_valid, bool no_source_selection,
-                                       const vector<SljitTypedExpressionTreeDataPointerHoist> *predicate_data_hoists) {
+                                       const vector<SljitTypedExpressionTreeLoopHoist> *predicate_data_hoists) {
 	vector<sljit_jump *> result;
 	if (!context.predicate) {
 		return result;

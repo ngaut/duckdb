@@ -10,15 +10,11 @@ void EmitSljitUngroupedTypedConditionalSharedFastPayload(
     const vector<ExecutionRegionAggregateInput> &aggregates, const vector<sljit_sw> &local_sum_offsets,
     const vector<sljit_sw> &local_sum_upper_offsets, const vector<sljit_sw> &saw_value_offsets,
     sljit_sw shared_fast_value_offset, bool use_conditional_hugeint_register_accumulators, bool selected,
-    vector<SljitArithmeticOverflowSite> &overflows,
-    const vector<SljitTypedExpressionTreeDataPointerHoist> *data_hoists);
-void EmitSljitUngroupedTypedFastPayloads(struct sljit_compiler *compiler,
-                                         const vector<SljitNativeRegionExpressionPlan> &payloads,
-                                         const vector<ExecutionRegionAggregateInput> &aggregates,
-                                         const vector<sljit_sw> &local_sum_offsets,
-                                         const vector<sljit_sw> &local_sum_upper_offsets,
-                                         const vector<sljit_sw> &saw_value_offsets, bool selected,
-                                         vector<SljitArithmeticOverflowSite> &overflows,
-                                         const vector<SljitTypedExpressionTreeDataPointerHoist> *data_hoists);
+    vector<SljitArithmeticOverflowSite> &overflows, const vector<SljitTypedExpressionTreeLoopHoist> *data_hoists);
+void EmitSljitUngroupedTypedFastPayloads(
+    struct sljit_compiler *compiler, const vector<SljitNativeRegionExpressionPlan> &payloads,
+    const vector<ExecutionRegionAggregateInput> &aggregates, const vector<sljit_sw> &local_sum_offsets,
+    const vector<sljit_sw> &local_sum_upper_offsets, const vector<sljit_sw> &saw_value_offsets, bool selected,
+    vector<SljitArithmeticOverflowSite> &overflows, const vector<SljitTypedExpressionTreeLoopHoist> *data_hoists);
 
 } // namespace duckdb

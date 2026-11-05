@@ -71,10 +71,10 @@ bool TryBuildSljitPerfectHashGroupPlans(const vector<ExecutionRegionGroupInput> 
                                         vector<SljitPerfectHashGroupPlan> &result,
                                         bool allow_typed_expression_tree = false);
 bool SljitCanPrecomputePerfectHashStringGroupOffset(const vector<SljitPerfectHashGroupPlan> &groups);
-vector<SljitTypedExpressionTreeDataPointerHoist>
+vector<SljitTypedExpressionTreeLoopHoist>
 BuildSljitPerfectHashSourceDataPointerHoists(const vector<SljitNativeRegionExpressionPlan> &payloads,
                                              idx_t max_hoists = 2, bool include_fast_validity_reg = false);
-vector<SljitTypedExpressionTreeDataPointerHoist>
+vector<SljitTypedExpressionTreeLoopHoist>
 BuildSljitPerfectHashSpareFastSourceDataPointerHoists(const vector<SljitNativeRegionExpressionPlan> &payloads);
 void EmitSljitPerfectHashSetOutputGroup(struct sljit_compiler *compiler, sljit_s32 group_index_reg);
 void EmitSljitPerfectHashStatePointer(struct sljit_compiler *compiler, sljit_s32 group_index_reg, sljit_s32 target_reg);

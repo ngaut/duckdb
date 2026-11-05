@@ -603,6 +603,17 @@ may both be NaN compares their ranks. Generated conjunctions build the
 complete packed mask before classifying it, and packed operations are admitted
 by SLJIT's exact operation-and-width capability test.
 
+A scalar filter loop branches on the predicate's own flags instead of
+materializing a boolean, keeps rejected rows on the fall-through path to a
+bottom-tested latch, and runs matching rows' payloads out of line. Division and
+modulo by a constant divisor of at least 2 use a magic-number multiply; a
+predicate `n % d = c` (or `<>`) with `0 <= c < d` tests divisibility instead:
+`n >= c` and `d | n - c` for `c > 0`, `d | |n|` for `c = 0`, by multiplying by
+the inverse of `d`'s odd part, rotating out its power of two, and comparing
+against `floor((2^64 - 1) / d)`. Loop-invariant operands live outside the row
+loop: hot sources' data pointers in registers, and wide constants (magic
+multipliers, inverses, limits) in stack slots stored once per chunk.
+
 A projection may move past join selection only when it is total over its
 admitted input domain. The pre-join projection binder admits references and
 INT64-to-INT32 casts whose source range proves no conversion error. Unknown

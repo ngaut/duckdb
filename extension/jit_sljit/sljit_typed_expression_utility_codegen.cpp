@@ -79,18 +79,103 @@ SljitIntegerOverflowChecks SljitTypedExpressionTreeOverflowChecks(const Executio
 	return checks;
 }
 
-bool TryGetSljitTypedExpressionTreeDataPointerHoist(const vector<SljitTypedExpressionTreeDataPointerHoist> *data_hoists,
-                                                    idx_t source_index, sljit_s32 &data_reg) {
+bool TryGetSljitTypedExpressionTreeSourceDataHoist(const vector<SljitTypedExpressionTreeLoopHoist> *data_hoists,
+                                                   idx_t source_index, sljit_s32 &data_reg) {
 	if (!data_hoists) {
 		return false;
 	}
 	for (auto &hoist : *data_hoists) {
 		if (hoist.source_index == source_index) {
-			data_reg = hoist.data_reg;
+			data_reg = hoist.location.operand;
 			return true;
 		}
 	}
 	return false;
+}
+
+SljitOperand SljitTypedExpressionTreeConstantOperand(const vector<SljitTypedExpressionTreeLoopHoist> *hoists,
+                                                     int64_t value) {
+	if (hoists) {
+		for (auto &hoist : *hoists) {
+			if (hoist.source_index == DConstants::INVALID_INDEX && hoist.constant == value) {
+				return hoist.location;
+			}
+		}
+	}
+	return SljitOperand::Immediate(value);
+}
+
+bool SljitTypedExpressionTreeIsRemainderTest(const ExecutionExpressionIR &node) {
+	if (node.kind != ExecutionExpressionIRKind::BINARY ||
+	    (node.binary_op != ExecutionExpressionBinaryOp::COMPARE_EQUAL &&
+	     node.binary_op != ExecutionExpressionBinaryOp::COMPARE_NOTEQUAL) ||
+	    !node.left || !node.right) {
+		return false;
+	}
+	auto &modulo = *node.left;
+	if (modulo.binary_op != ExecutionExpressionBinaryOp::MODULO ||
+	    !SljitTypedExpressionTreeConstantDivisorReductionSupported(modulo) ||
+	    node.right->kind != ExecutionExpressionIRKind::CONSTANT || node.right->constant.IsNull()) {
+		return false;
+	}
+	const auto remainder = SljitTypedExpressionTreeConstantValue(*node.right);
+	return remainder >= 0 && remainder < SljitTypedExpressionTreeConstantValue(*modulo.right);
+}
+
+static void AddSljitTypedExpressionTreeConstantHoist(int64_t value, vector<SljitTypedExpressionTreeLoopHoist> &hoists,
+                                                     sljit_sw &local_size) {
+	for (auto &hoist : hoists) {
+		if (hoist.source_index == DConstants::INVALID_INDEX && hoist.constant == value) {
+			return;
+		}
+	}
+	SljitTypedExpressionTreeLoopHoist hoist;
+	hoist.constant = value;
+	hoist.location = SljitOperand::Stack(local_size);
+	local_size += NumericCast<sljit_sw>(sizeof(sljit_sw));
+	hoists.push_back(hoist);
+}
+
+static void CollectSljitTypedExpressionTreeConstantHoists(const ExecutionExpressionIR &node,
+                                                          vector<SljitTypedExpressionTreeLoopHoist> &hoists,
+                                                          sljit_sw &local_size) {
+	if (SljitTypedExpressionTreeIsRemainderTest(node)) {
+		auto constants = ComputeSljitRemainderTestConstants(SljitTypedExpressionTreeConstantValue(*node.left->right));
+		AddSljitTypedExpressionTreeConstantHoist(constants.inverse, hoists, local_size);
+		AddSljitTypedExpressionTreeConstantHoist(constants.limit, hoists, local_size);
+	}
+	if (SljitTypedExpressionTreeConstantDivisorReductionSupported(node)) {
+		AddSljitTypedExpressionTreeConstantHoist(
+		    SljitSignedDivisionMultiplier(SljitTypedExpressionTreeConstantValue(*node.right)), hoists, local_size);
+	}
+	for (auto child : {node.left.get(), node.right.get(), node.else_node.get()}) {
+		if (child) {
+			CollectSljitTypedExpressionTreeConstantHoists(*child, hoists, local_size);
+		}
+	}
+	for (auto &child : node.children) {
+		if (child) {
+			CollectSljitTypedExpressionTreeConstantHoists(*child, hoists, local_size);
+		}
+	}
+}
+
+void AppendSljitTypedExpressionTreeConstantHoists(const vector<reference<const ExecutionExpressionIR>> &expressions,
+                                                  vector<SljitTypedExpressionTreeLoopHoist> &hoists,
+                                                  sljit_sw &local_size) {
+	for (auto &expression : expressions) {
+		CollectSljitTypedExpressionTreeConstantHoists(expression.get(), hoists, local_size);
+	}
+}
+
+void EmitSljitTypedExpressionTreeConstantHoists(struct sljit_compiler *compiler,
+                                                const vector<SljitTypedExpressionTreeLoopHoist> &hoists) {
+	for (auto &hoist : hoists) {
+		if (hoist.source_index == DConstants::INVALID_INDEX) {
+			sljit_emit_op1(compiler, SLJIT_MOV, hoist.location.operand, hoist.location.operand_w, SLJIT_IMM,
+			               NumericCast<sljit_sw>(hoist.constant));
+		}
+	}
 }
 
 void EmitLoadSljitTypedExpressionTreeFastSourceIndex(struct sljit_compiler *compiler, idx_t source_index,

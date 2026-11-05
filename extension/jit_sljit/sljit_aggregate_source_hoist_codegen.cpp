@@ -61,10 +61,10 @@ BuildSljitAggregateSourceUseCounts(const vector<SljitNativeRegionExpressionPlan>
 	return source_uses;
 }
 
-static vector<SljitTypedExpressionTreeDataPointerHoist>
+static vector<SljitTypedExpressionTreeLoopHoist>
 BuildSljitSourceDataPointerHoists(vector<pair<idx_t, idx_t>> source_uses, const vector<sljit_s32> &data_regs,
                                   idx_t min_use_count) {
-	vector<SljitTypedExpressionTreeDataPointerHoist> result;
+	vector<SljitTypedExpressionTreeLoopHoist> result;
 	if (data_regs.empty()) {
 		return result;
 	}
@@ -72,21 +72,21 @@ BuildSljitSourceDataPointerHoists(vector<pair<idx_t, idx_t>> source_uses, const 
 		if (entry.second < min_use_count || result.size() >= data_regs.size()) {
 			break;
 		}
-		SljitTypedExpressionTreeDataPointerHoist hoist;
+		SljitTypedExpressionTreeLoopHoist hoist;
 		hoist.source_index = entry.first;
-		hoist.data_reg = data_regs[result.size()];
+		hoist.location = SljitOperand::Register(data_regs[result.size()]);
 		result.push_back(hoist);
 	}
 	return result;
 }
 
-vector<SljitTypedExpressionTreeDataPointerHoist>
+vector<SljitTypedExpressionTreeLoopHoist>
 BuildSljitAggregateSourceDataPointerHoists(const vector<SljitNativeRegionExpressionPlan> &payloads,
                                            const vector<sljit_s32> &data_regs, idx_t min_use_count) {
 	return BuildSljitSourceDataPointerHoists(BuildSljitAggregateSourceUseCounts(payloads), data_regs, min_use_count);
 }
 
-vector<SljitTypedExpressionTreeDataPointerHoist>
+vector<SljitTypedExpressionTreeLoopHoist>
 BuildSljitExpressionSourceDataPointerHoists(const vector<reference<const ExecutionExpressionIR>> &expressions,
                                             const vector<sljit_s32> &data_regs, idx_t min_use_count) {
 	vector<pair<idx_t, idx_t>> source_uses;

@@ -31,7 +31,7 @@ void EmitLoadFusedAggregateDoubleData(struct sljit_compiler *compiler, sljit_sw 
 sljit_jump *
 EmitLoadFusedAggregateReferenceValue(struct sljit_compiler *compiler, const SljitNativeRegionExpressionPlan &payload,
                                      bool use_source_selection, bool check_validity, sljit_s32 direct_index_reg,
-                                     const vector<SljitTypedExpressionTreeDataPointerHoist> *data_hoists = nullptr);
+                                     const vector<SljitTypedExpressionTreeLoopHoist> *data_hoists = nullptr);
 
 bool SljitAggregateTypedPayloadPlanSupported(const SljitTypedExpressionTreePlan &payload_plan,
                                              const SljitAggregatePayloadDescriptor &descriptor);

@@ -33,7 +33,7 @@ static vector<sljit_s32> BuildSljitUngroupedAggregateSourceDataPointerRegs(idx_t
 	return result;
 }
 
-static vector<SljitTypedExpressionTreeDataPointerHoist>
+static vector<SljitTypedExpressionTreeLoopHoist>
 BuildSljitUngroupedAggregateSourceDataPointerHoists(const vector<SljitNativeRegionExpressionPlan> &payloads,
                                                     idx_t max_hoists, bool include_fast_spare_reg,
                                                     idx_t min_use_count) {

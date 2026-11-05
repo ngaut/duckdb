@@ -18,8 +18,8 @@ struct SljitUngroupedFusedAggregateUpdatePlan {
 	vector<sljit_sw> local_sum_offsets;
 	vector<sljit_sw> local_sum_upper_offsets;
 	vector<sljit_sw> saw_value_offsets;
-	vector<SljitTypedExpressionTreeDataPointerHoist> source_data_hoists;
-	vector<SljitTypedExpressionTreeDataPointerHoist> fast_source_data_hoists;
+	vector<SljitTypedExpressionTreeLoopHoist> source_data_hoists;
+	vector<SljitTypedExpressionTreeLoopHoist> fast_source_data_hoists;
 	sljit_sw local_size = 0;
 	sljit_sw shared_fast_value_offset = -1;
 	sljit_sw register_accumulator_used_offset = -1;

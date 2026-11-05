@@ -55,7 +55,7 @@ static unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativePerfectHashGroupedF
 	EmitInitSljitNativeVectorSourceArrays(compiler);
 	if (hoist_source_data_pointers) {
 		for (auto &hoist : source_data_hoists) {
-			sljit_emit_op1(compiler, SLJIT_MOV_P, hoist.data_reg, 0, SLJIT_MEM1(SLJIT_S5),
+			sljit_emit_op1(compiler, SLJIT_MOV_P, hoist.location.operand, 0, SLJIT_MEM1(SLJIT_S5),
 			               SljitPointerArrayOffset(hoist.source_index));
 		}
 	}

@@ -185,7 +185,7 @@ unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativeFilteredUngroupedFusedPrim
 
 	// The scalar loops hold the most used sources' data pointers in registers instead of loading them from the
 	// source array for every reference of every row
-	vector<SljitTypedExpressionTreeDataPointerHoist> data_hoists;
+	vector<SljitTypedExpressionTreeLoopHoist> data_hoists;
 	const auto &registers = GetSljitUngroupedAggregateRegisterLayout();
 	if (registers.has_source_data_hoists) {
 		vector<reference<const ExecutionExpressionIR>> expressions {predicate};
@@ -198,10 +198,20 @@ unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativeFilteredUngroupedFusedPrim
 		data_hoists = BuildSljitExpressionSourceDataPointerHoists(
 		    expressions, {registers.source_data[0], registers.source_data[1]}, 1);
 	}
+	const bool hoists_source_data = !data_hoists.empty();
+	{
+		vector<reference<const ExecutionExpressionIR>> expressions {predicate};
+		for (auto &payload : payloads) {
+			if (payload.expression_tree) {
+				expressions.push_back(*payload.expression_tree);
+			}
+		}
+		AppendSljitTypedExpressionTreeConstantHoists(expressions, data_hoists, local_size);
+	}
 	const auto hoists = data_hoists.empty() ? nullptr : &data_hoists;
 	sljit_emit_enter(compiler, 0, SLJIT_ARGS1V(P), simd_scratches,
-	                 hoists ? registers.source_data_saved_register_count
-	                        : GetSljitNativeVectorRegisterLayout().saved_register_count,
+	                 hoists_source_data ? registers.source_data_saved_register_count
+	                                    : GetSljitNativeVectorRegisterLayout().saved_register_count,
 	                 local_size);
 	EmitInitSljitNativeVectorLoop(compiler);
 	for (idx_t payload_idx = 0; payload_idx < payloads.size(); payload_idx++) {
@@ -217,12 +227,16 @@ unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativeFilteredUngroupedFusedPrim
 	}
 	EmitInitSljitNativeVectorSourceArrays(compiler);
 	for (auto &hoist : data_hoists) {
-		sljit_emit_op1(compiler, SLJIT_MOV_P, hoist.data_reg, 0, SLJIT_MEM1(SLJIT_S5),
-		               SljitPointerArrayOffset(hoist.source_index));
+		if (hoist.source_index != DConstants::INVALID_INDEX) {
+			sljit_emit_op1(compiler, SLJIT_MOV_P, hoist.location.operand, 0, SLJIT_MEM1(SLJIT_S5),
+			               SljitPointerArrayOffset(hoist.source_index));
+		}
 	}
+	EmitSljitTypedExpressionTreeConstantHoists(compiler, data_hoists);
 
 	vector<SljitArithmeticOverflowSite> overflows;
 	struct sljit_jump *fast_done = nullptr;
+	struct sljit_jump *fast_loop_exit = nullptr;
 	struct sljit_jump *selected_fast_done = nullptr;
 	struct sljit_jump *nullable_simd_done = nullptr;
 	if (codegen_plan.fast_path_supported) {
@@ -265,14 +279,20 @@ unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativeFilteredUngroupedFusedPrim
 			EmitSljitTypedExpressionTreeSimdCountLoop(compiler, predicate, simd_plan, local_count_offsets[0],
 			                                          simd_mask_offset);
 		}
-		auto fast_loop = sljit_emit_label(compiler);
+		// A rejected row falls through to the bottom-tested latch, so it takes only the back-edge branch; matching
+		// rows run the payload updates out of line.
 		fast_done = sljit_emit_cmp(compiler, SLJIT_GREATER_EQUAL, SLJIT_S1, 0, SLJIT_S2, 0);
+		auto fast_loop = sljit_emit_label(compiler);
 		idx_t predicate_spill_index = 0;
-		EmitSljitTypedExpressionTreeFastValueReg(compiler, predicate, predicate_spill_index, overflows, hoists);
-		auto predicate_false = sljit_emit_cmp(compiler, SLJIT_EQUAL, SLJIT_R2, 0, SLJIT_IMM, 0);
+		auto predicate_true =
+		    EmitSljitTypedExpressionTreeFastJumpsIfTrue(compiler, predicate, predicate_spill_index, overflows, hoists);
+		auto fast_latch = sljit_emit_label(compiler);
+		sljit_emit_op2(compiler, SLJIT_ADD, SLJIT_S1, 0, SLJIT_S1, 0, SLJIT_IMM, 1);
+		sljit_set_label(sljit_emit_cmp(compiler, SLJIT_LESS, SLJIT_S1, 0, SLJIT_S2, 0), fast_loop);
+		fast_loop_exit = sljit_emit_jump(compiler, SLJIT_JUMP);
+		SetSljitJumpLabels(predicate_true, sljit_emit_label(compiler));
 		emit_payload_updates();
-		sljit_set_label(predicate_false, sljit_emit_label(compiler));
-		EmitNextSljitNativeVectorLoop(compiler, fast_loop);
+		sljit_set_label(sljit_emit_jump(compiler, SLJIT_JUMP), fast_latch);
 
 		sljit_set_label(use_generic_loop, sljit_emit_label(compiler));
 
@@ -400,6 +420,7 @@ unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativeFilteredUngroupedFusedPrim
 	auto done_label = sljit_emit_label(compiler);
 	if (fast_done) {
 		sljit_set_label(fast_done, done_label);
+		sljit_set_label(fast_loop_exit, done_label);
 	}
 	if (selected_fast_done) {
 		sljit_set_label(selected_fast_done, done_label);

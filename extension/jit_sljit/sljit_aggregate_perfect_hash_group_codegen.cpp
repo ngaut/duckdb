@@ -36,7 +36,7 @@ static vector<sljit_s32> BuildSljitPerfectHashSourceDataPointerRegs(idx_t max_ho
 	return result;
 }
 
-vector<SljitTypedExpressionTreeDataPointerHoist>
+vector<SljitTypedExpressionTreeLoopHoist>
 BuildSljitPerfectHashSourceDataPointerHoists(const vector<SljitNativeRegionExpressionPlan> &payloads, idx_t max_hoists,
                                              bool include_fast_validity_reg) {
 	auto regs = BuildSljitPerfectHashSourceDataPointerRegs(max_hoists, include_fast_validity_reg);
@@ -49,7 +49,7 @@ BuildSljitPerfectHashSourceDataPointerHoists(const vector<SljitNativeRegionExpre
 	return BuildSljitAggregateSourceDataPointerHoists(payloads, regs, 1);
 }
 
-vector<SljitTypedExpressionTreeDataPointerHoist>
+vector<SljitTypedExpressionTreeLoopHoist>
 BuildSljitPerfectHashSpareFastSourceDataPointerHoists(const vector<SljitNativeRegionExpressionPlan> &payloads) {
 	vector<sljit_s32> regs;
 	if (GetSljitPerfectHashRegisterLayout().has_group_data) {

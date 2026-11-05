@@ -29,7 +29,7 @@ struct SljitPerfectHashUpdateLoopOptions {
 	bool predicate_fast_path = false;
 	bool all_valid = false;
 	bool no_source_selection = false;
-	const vector<SljitTypedExpressionTreeDataPointerHoist> *predicate_data_hoists = nullptr;
+	const vector<SljitTypedExpressionTreeLoopHoist> *predicate_data_hoists = nullptr;
 	bool load_fast_group_data_array_base = false;
 	bool load_fast_group_dictionary_runtime_array_base = false;
 	SljitPerfectHashGroupLookupOptions group_lookup;
@@ -97,7 +97,7 @@ static void EmitSljitPerfectHashFastSourceDataHoists(struct sljit_compiler *comp
 	for (idx_t hoist_idx = update_plan.source_data_hoists.size();
 	     hoist_idx < update_plan.fast_source_data_hoists.size(); hoist_idx++) {
 		auto &hoist = update_plan.fast_source_data_hoists[hoist_idx];
-		sljit_emit_op1(compiler, SLJIT_MOV_P, hoist.data_reg, 0, SLJIT_MEM1(SLJIT_S5),
+		sljit_emit_op1(compiler, SLJIT_MOV_P, hoist.location.operand, 0, SLJIT_MEM1(SLJIT_S5),
 		               SljitPointerArrayOffset(hoist.source_index));
 	}
 }
@@ -105,9 +105,9 @@ static void EmitSljitPerfectHashFastSourceDataHoists(struct sljit_compiler *comp
 static SljitPerfectHashGroupLookupOptions
 SljitPerfectHashDirectGroupLookupOptions(const SljitPerfectHashFusedUpdateEmitContext &context,
                                          bool use_fast_group_data_array_base);
-static SljitPerfectHashPayloadUpdateOptions SljitPerfectHashPayloadUpdateOptionsForLoop(
-    bool fast_path, bool all_valid, bool no_source_selection,
-    const vector<SljitTypedExpressionTreeDataPointerHoist> *payload_data_hoists);
+static SljitPerfectHashPayloadUpdateOptions
+SljitPerfectHashPayloadUpdateOptionsForLoop(bool fast_path, bool all_valid, bool no_source_selection,
+                                            const vector<SljitTypedExpressionTreeLoopHoist> *payload_data_hoists);
 
 static SljitPerfectHashGroupLookupOptions
 SljitPerfectHashDirectGroupLookupOptions(const SljitPerfectHashFusedUpdateEmitContext &context,
@@ -128,9 +128,9 @@ SljitPerfectHashSelectedGroupLookupOptions(const SljitPerfectHashFusedUpdateEmit
 	return result;
 }
 
-static SljitPerfectHashPayloadUpdateOptions SljitPerfectHashPayloadUpdateOptionsForLoop(
-    bool fast_path, bool all_valid, bool no_source_selection,
-    const vector<SljitTypedExpressionTreeDataPointerHoist> *payload_data_hoists) {
+static SljitPerfectHashPayloadUpdateOptions
+SljitPerfectHashPayloadUpdateOptionsForLoop(bool fast_path, bool all_valid, bool no_source_selection,
+                                            const vector<SljitTypedExpressionTreeLoopHoist> *payload_data_hoists) {
 	SljitPerfectHashPayloadUpdateOptions result;
 	result.fast_path = fast_path;
 	result.all_valid = all_valid;
@@ -141,7 +141,7 @@ static SljitPerfectHashPayloadUpdateOptions SljitPerfectHashPayloadUpdateOptions
 
 static SljitPerfectHashUpdateLoopOptions
 SljitPerfectHashDictionaryGroupLoopOptions(const SljitPerfectHashFusedUpdateEmitContext &context,
-                                           const vector<SljitTypedExpressionTreeDataPointerHoist> *data_hoists,
+                                           const vector<SljitTypedExpressionTreeLoopHoist> *data_hoists,
                                            bool payload_uses_common_selection) {
 	SljitPerfectHashUpdateLoopOptions result;
 	result.reset_index = true;
@@ -167,7 +167,7 @@ SljitPerfectHashDictionaryGroupLoopOptions(const SljitPerfectHashFusedUpdateEmit
 static void EmitSljitPerfectHashSimdLaneRowUpdate(const SljitPerfectHashFusedUpdateEmitContext &context,
                                                   SljitPerfectHashGroupLookupOptions lookup,
                                                   const SljitPerfectHashPayloadUpdateOptions &payload_update,
-                                                  const vector<SljitTypedExpressionTreeDataPointerHoist> *data_hoists,
+                                                  const vector<SljitTypedExpressionTreeLoopHoist> *data_hoists,
                                                   void (*emit_hoisted_array_base)(struct sljit_compiler *)) {
 	EmitLoadFusedAggregateExecuteIndex(context.compiler, true);
 	if (emit_hoisted_array_base) {
@@ -179,10 +179,9 @@ static void EmitSljitPerfectHashSimdLaneRowUpdate(const SljitPerfectHashFusedUpd
 	EmitSljitPerfectHashRowUpdate(context, lookup, payload_update, false);
 }
 
-static sljit_jump *
-EmitSljitPerfectHashFlatFastLoop(const SljitPerfectHashFusedUpdateEmitContext &context,
-                                 const SljitPerfectHashFusedUpdatePlan &update_plan,
-                                 const vector<SljitTypedExpressionTreeDataPointerHoist> *fast_data_hoists) {
+static sljit_jump *EmitSljitPerfectHashFlatFastLoop(const SljitPerfectHashFusedUpdateEmitContext &context,
+                                                    const SljitPerfectHashFusedUpdatePlan &update_plan,
+                                                    const vector<SljitTypedExpressionTreeLoopHoist> *fast_data_hoists) {
 	auto compiler = context.compiler;
 	if (update_plan.predicate_simd_plan.supported) {
 		EmitSljitTypedExpressionTreeSimdHybridFilterLoop(
@@ -214,9 +213,10 @@ EmitSljitPerfectHashFlatFastLoop(const SljitPerfectHashFusedUpdateEmitContext &c
 	return fast_done;
 }
 
-static sljit_jump *EmitSljitPerfectHashFlatPayloadDictionaryGroupLoop(
-    const SljitPerfectHashFusedUpdateEmitContext &context, const SljitPerfectHashFusedUpdatePlan &update_plan,
-    const vector<SljitTypedExpressionTreeDataPointerHoist> *data_hoists) {
+static sljit_jump *
+EmitSljitPerfectHashFlatPayloadDictionaryGroupLoop(const SljitPerfectHashFusedUpdateEmitContext &context,
+                                                   const SljitPerfectHashFusedUpdatePlan &update_plan,
+                                                   const vector<SljitTypedExpressionTreeLoopHoist> *data_hoists) {
 	auto compiler = context.compiler;
 	EmitSljitPerfectHashGroupSelectionArrayBase(compiler);
 	auto loop_options = SljitPerfectHashDictionaryGroupLoopOptions(context, data_hoists, false);
@@ -240,7 +240,7 @@ static sljit_jump *EmitSljitPerfectHashFlatPayloadDictionaryGroupLoop(
 
 static sljit_jump *EmitSljitPerfectHashFlatPayloadSelectedGroupLoop(
     const SljitPerfectHashFusedUpdateEmitContext &context, const SljitPerfectHashFusedUpdatePlan &update_plan,
-    const vector<SljitTypedExpressionTreeDataPointerHoist> *data_hoists, bool use_group_data_array_base_reg) {
+    const vector<SljitTypedExpressionTreeLoopHoist> *data_hoists, bool use_group_data_array_base_reg) {
 	auto compiler = context.compiler;
 	EmitSljitPerfectHashGroupSelectionArrayBase(compiler);
 	SljitPerfectHashUpdateLoopOptions loop_options;

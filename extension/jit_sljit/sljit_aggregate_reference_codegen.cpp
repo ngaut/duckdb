@@ -20,8 +20,8 @@ BuildSljitNativeUngroupedSumInt64Reference(SljitNativeIntegerKind kind, SljitNat
 
 	auto data_scale = NativeIntegerDataScale(kind);
 	auto load_op = NativeIntegerLoadOp(kind);
-	const auto sum = SljitLoopLocal::Register(SLJIT_S3);
-	const auto saw_value = SljitLoopLocal::Register(SLJIT_S4);
+	const auto sum = SljitOperand::Register(SLJIT_S3);
+	const auto saw_value = SljitOperand::Register(SLJIT_S4);
 
 	sljit_emit_enter(compiler, 0, SLJIT_ARGS1V(P), SLJIT_ALL_VALID_SOURCE_LOOP_SCRATCHES, 5, 0);
 	EmitInitSljitNativeVectorLoop(compiler);

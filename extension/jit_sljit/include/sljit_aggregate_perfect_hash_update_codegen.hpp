@@ -52,14 +52,14 @@ struct SljitPerfectHashGroupLookupOptions {
 	sljit_s32 group_sel_array_base_reg = 0;
 	sljit_s32 group_data_array_base_reg_override = 0;
 	sljit_s32 group_dictionary_runtime_array_base_reg = 0;
-	const vector<SljitTypedExpressionTreeDataPointerHoist> *expression_data_hoists = nullptr;
+	const vector<SljitTypedExpressionTreeLoopHoist> *expression_data_hoists = nullptr;
 };
 
 struct SljitPerfectHashPayloadUpdateOptions {
 	bool fast_path = false;
 	bool all_valid = false;
 	bool no_source_selection = false;
-	const vector<SljitTypedExpressionTreeDataPointerHoist> *payload_data_hoists = nullptr;
+	const vector<SljitTypedExpressionTreeLoopHoist> *payload_data_hoists = nullptr;
 };
 
 struct SljitPerfectHashFusedUpdatePlan {
@@ -68,8 +68,8 @@ struct SljitPerfectHashFusedUpdatePlan {
 	SljitDensePerfectHashAggregateReductionPlan dense_reduction_plan;
 	SljitDeferredPerfectHashFlagPlan deferred_flag_plan;
 	SljitTypedExpressionTreeSimdPlan predicate_simd_plan;
-	vector<SljitTypedExpressionTreeDataPointerHoist> source_data_hoists;
-	vector<SljitTypedExpressionTreeDataPointerHoist> fast_source_data_hoists;
+	vector<SljitTypedExpressionTreeLoopHoist> source_data_hoists;
+	vector<SljitTypedExpressionTreeLoopHoist> fast_source_data_hoists;
 	idx_t perfect_hash_group_count = 0;
 	sljit_sw local_size = 0;
 	sljit_sw state_pointer_offset = -1;
@@ -104,7 +104,7 @@ void EmitSljitPerfectHashPayloadUpdates(const SljitPerfectHashFusedUpdateEmitCon
 vector<sljit_jump *>
 EmitSljitPerfectHashPredicateSkipJumps(const SljitPerfectHashFusedUpdateEmitContext &context, bool fast_path,
                                        bool all_valid, bool no_source_selection,
-                                       const vector<SljitTypedExpressionTreeDataPointerHoist> *predicate_data_hoists);
+                                       const vector<SljitTypedExpressionTreeLoopHoist> *predicate_data_hoists);
 void EmitSljitPerfectHashPredicateSkipLabel(struct sljit_compiler *compiler,
                                             const vector<sljit_jump *> &predicate_skip_jumps);
 void EmitLoadSljitCommonSelectedSourceIndex(struct sljit_compiler *compiler);
