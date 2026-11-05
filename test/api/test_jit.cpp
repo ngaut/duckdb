@@ -1304,12 +1304,12 @@ TEST_CASE("JIT prepared executions reuse immutable compiled artifacts", "[api][j
 	ConfigureSljitForCoverage(con, false, true, 10000);
 	REQUIRE_NO_FAIL(con.Query("SET threads=1"));
 	REQUIRE_NO_FAIL(con.Query("PREPARE jit_artifact_cache AS "
-	                          "SELECT sum(i + 7) FROM range(1000000) tbl(i)"));
+	                          "SELECT sum(i * 7) FROM range(1000000) tbl(i)"));
 
 	ClearJitTrace(manager, true);
 	auto first = con.Query("EXECUTE jit_artifact_cache");
 	REQUIRE_NO_FAIL(*first);
-	REQUIRE(first->Collection().GetValue(0, 0).ToString() == "500006500000");
+	REQUIRE(first->Collection().GetValue(0, 0).ToString() == "3499996500000");
 	bool found_initial_compile = false;
 	for (auto &event : manager.GetEvents()) {
 		if (!IsCompiledSljitRegionEvent(event) || EventPhase(event) != "compile") {
@@ -1379,12 +1379,12 @@ TEST_CASE("JIT prepared artifact reuse preserves parameter-dependent semantics",
 	ConfigureSljitForCoverage(con, true, true, 10000);
 	REQUIRE_NO_FAIL(con.Query("SET threads=1"));
 	REQUIRE_NO_FAIL(con.Query("PREPARE jit_parameter_artifact AS "
-	                          "SELECT sum(i + $1) FROM range(100000) tbl(i)"));
+	                          "SELECT sum(i * $1) FROM range(100000) tbl(i)"));
 
 	ClearJitTrace(manager, true);
 	auto first = con.Query("EXECUTE jit_parameter_artifact(7)");
 	REQUIRE_NO_FAIL(*first);
-	REQUIRE(first->Collection().GetValue(0, 0).ToString() == "5000650000");
+	REQUIRE(first->Collection().GetValue(0, 0).ToString() == "34999650000");
 
 	ClearJitTrace(manager, true);
 	auto second = con.Query("EXECUTE jit_parameter_artifact(7)");
@@ -1398,10 +1398,11 @@ TEST_CASE("JIT prepared artifact reuse preserves parameter-dependent semantics",
 	ClearJitTrace(manager, true);
 	auto third = con.Query("EXECUTE jit_parameter_artifact(9)");
 	REQUIRE_NO_FAIL(*third);
-	REQUIRE(third->Collection().GetValue(0, 0).ToString() == "5000850000");
+	REQUIRE(third->Collection().GetValue(0, 0).ToString() == "44999550000");
+	// the parameter is a generated constant, so a new value compiles its own artifact
 	RequireJitEvent(manager, [](const ExecutionRegionEvent &event) {
 		return IsCompiledSljitRegionEvent(event) && EventPhase(event) == "compile" &&
-		       StringUtil::Contains(event.reason, "compiled artifact cache hit");
+		       !StringUtil::Contains(event.reason, "compiled artifact cache hit");
 	});
 }
 
@@ -4927,7 +4928,8 @@ TEST_CASE("JIT diagnostic tracing records generic table-function source ownershi
 	}
 }
 
-TEST_CASE("JIT auto planner costs generated aggregate updates as generated backend work", "[api][jit]") {
+TEST_CASE("JIT auto planner leaves bare ungrouped aggregates native and costs fused ones as generated work",
+          "[api][jit]") {
 	JitTestDatabase test;
 	auto &con = test.con;
 	auto &manager = test.manager;
@@ -4938,10 +4940,19 @@ TEST_CASE("JIT auto planner costs generated aggregate updates as generated backe
 	REQUIRE_NO_FAIL(con.Query("CREATE TEMP TABLE jit_auto_default_aggregate_input AS "
 	                          "SELECT (i % 5)::BIGINT AS i FROM range(1000000) tbl(i)"));
 
+	// a bare ungrouped update does exactly the native update's work: nothing is left to fuse
 	ClearJitTrace(manager, true);
-	auto result = con.Query("SELECT sum(i) FROM jit_auto_default_aggregate_input");
+	auto bare = con.Query("SELECT sum(i), count(*), min(i) FROM jit_auto_default_aggregate_input");
+	REQUIRE_NO_FAIL(*bare);
+	REQUIRE(bare->Collection().GetValue(0, 0).ToString() == "2000000");
+	for (auto &event : manager.GetEvents()) {
+		REQUIRE_FALSE(IsCompiledSljitRegionEvent(event));
+	}
+
+	ClearJitTrace(manager, true);
+	auto result = con.Query("SELECT sum(i * 3) FROM jit_auto_default_aggregate_input");
 	REQUIRE_NO_FAIL(*result);
-	REQUIRE(result->Collection().GetValue(0, 0).ToString() == "2000000");
+	REQUIRE(result->Collection().GetValue(0, 0).ToString() == "6000000");
 
 	RequireJitEvent(
 	    manager,

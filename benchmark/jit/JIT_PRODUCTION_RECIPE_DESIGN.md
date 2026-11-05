@@ -133,7 +133,11 @@ runtime cardinality never feeds the decision; adaptive choices live in kernels
 (see Binding contract). A complete grouped-lookup replacement is thread-local,
 so parallel admission needs evidence that it amortizes: an estimated 2x group
 reduction, or a single grouping key, whose runtime run sample hands batches
-without runs to the native sink.
+without runs to the native sink. A grouped aggregate counts as generated
+compute because its generated body replaces native group lookups. An ungrouped
+aggregate does not: a bare `sum(col)` or `count(*)` does exactly the native
+vectorized update's work, so only the filters, projections, and probes it
+fuses with make a pipeline generated work.
 
 ## Execution model: chunk steps
 

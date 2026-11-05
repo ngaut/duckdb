@@ -926,8 +926,9 @@ TEST_CASE("JIT aggregate sinks expose ready native state-update contracts", "[ap
 	REQUIRE_NO_FAIL(con.Query("CREATE TEMP TABLE jit_region_aggregate_boundary AS "
 	                          "SELECT i::BIGINT AS i FROM range(1000) tbl(i)"));
 
+	// the computed lane is the generated work the reference lane fuses with
 	ClearJitTrace(manager);
-	auto result = con.Query("SELECT sum(i) FROM jit_region_aggregate_boundary");
+	auto result = con.Query("SELECT sum(i), sum(i * 3) FROM jit_region_aggregate_boundary");
 	REQUIRE_NO_FAIL(*result);
 
 	bool found_aggregate_update = false;

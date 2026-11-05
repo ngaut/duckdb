@@ -155,7 +155,7 @@ static ExecutionRegionStageCostFact GetExecutionRegionStageCostFact(const Execut
 
 static bool ExecutionRegionCandidateHasGeneratedFilterOrOperatorWork(const ExecutionRegionCandidateTraits &traits) {
 	return traits.source_filter_expression_count > 0 || traits.filter_count > 0 ||
-	       traits.hash_join_operator_count > 0 || traits.aggregate_count > 0;
+	       traits.hash_join_operator_count > 0 || traits.grouped_aggregate_count > 0;
 }
 
 static bool ExecutionRegionCandidateHasGeneratedProjectionWork(const ExecutionRegionCandidateTraits &traits) {
@@ -703,9 +703,6 @@ static bool TryAccumulateExecutionRegionPhysicalOperatorCost(const PhysicalOpera
 		auto &aggregate = op.Cast<PhysicalUngroupedAggregate>();
 		AddExecutionRegionGeneratedExpressionWork(input,
 		                                          ExecutionRegionPhysicalAggregateListCost(aggregate.aggregates));
-		if (slot != ExecutionRegionPhysicalPipelineSlot::SOURCE) {
-			traits.aggregate_count++;
-		}
 		if (slot != ExecutionRegionPhysicalPipelineSlot::SINK) {
 			AddExecutionRegionNativeAggregateStage(input, false);
 			return true;
@@ -738,7 +735,7 @@ static bool TryAccumulateExecutionRegionPhysicalOperatorCost(const PhysicalOpera
 		expression_cost += ExecutionRegionPhysicalAggregateListCost(aggregate.grouped_aggregate_data.aggregates);
 		AddExecutionRegionGeneratedExpressionWork(input, expression_cost);
 		if (slot != ExecutionRegionPhysicalPipelineSlot::SOURCE) {
-			traits.aggregate_count++;
+			traits.grouped_aggregate_count++;
 		}
 		if (slot != ExecutionRegionPhysicalPipelineSlot::SINK) {
 			AddExecutionRegionNativeAggregateStage(input, true);
@@ -776,7 +773,7 @@ static bool TryAccumulateExecutionRegionPhysicalOperatorCost(const PhysicalOpera
 		expression_cost += ExecutionRegionPhysicalAggregateListCost(aggregate.aggregates);
 		AddExecutionRegionGeneratedExpressionWork(input, expression_cost);
 		if (slot != ExecutionRegionPhysicalPipelineSlot::SOURCE) {
-			traits.aggregate_count++;
+			traits.grouped_aggregate_count++;
 		}
 		if (slot != ExecutionRegionPhysicalPipelineSlot::SINK) {
 			AddExecutionRegionNativeAggregateStage(input, true);

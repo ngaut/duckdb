@@ -617,7 +617,7 @@ TEST_CASE("JIT keeps unproven modulo divisors in DuckDB scan filters", "[api][ji
 	                          "SELECT i::BIGINT AS i FROM range(10003) tbl(i)"));
 
 	// Integer modulo by zero raises an error; the DuckDB scan filter must keep raising it under JIT.
-	const string query = "SELECT sum(i) FROM jit_unproven_modulo_source_filter WHERE i % 0 = 3";
+	const string query = "SELECT sum(i * 3) FROM jit_unproven_modulo_source_filter WHERE i % 0 = 3";
 	REQUIRE_NO_FAIL(con.Query("SET jit_policy='off'"));
 	auto expected = con.Query(query);
 	REQUIRE_FAIL(expected);

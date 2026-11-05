@@ -51,7 +51,7 @@ SET jit_policy='off'
 
 statement ok
 CREATE OR REPLACE TABLE expected AS
-SELECT 'direct' AS q, count(*)::HUGEINT AS c, sum(j)::HUGEINT AS s
+SELECT 'direct' AS q, count(*)::HUGEINT AS c, sum(j * 3)::HUGEINT AS s
 FROM (WITH c AS MATERIALIZED (SELECT i + 1 AS j, m FROM t WHERE m < 300) SELECT * FROM c)
 UNION ALL
 SELECT 'delim', count(*), sum(price * 100)::HUGEINT
@@ -66,7 +66,7 @@ SELECT * FROM duckdb_jit_clear_events()
 
 statement ok
 CREATE OR REPLACE TABLE actual AS
-SELECT 'direct' AS q, count(*)::HUGEINT AS c, sum(j)::HUGEINT AS s
+SELECT 'direct' AS q, count(*)::HUGEINT AS c, sum(j * 3)::HUGEINT AS s
 FROM (WITH c AS MATERIALIZED (SELECT i + 1 AS j, m FROM t WHERE m < 300) SELECT * FROM c)
 UNION ALL
 SELECT 'delim', count(*), sum(price * 100)::HUGEINT

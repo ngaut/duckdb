@@ -949,7 +949,7 @@ static string DescribeExecutionRegionCandidateTraits(const ExecutionRegionCandid
 	result += ",projections=" + std::to_string(traits.projection_count);
 	result += ",operators=" + std::to_string(traits.operator_count);
 	result += ",hash_join_operators=" + std::to_string(traits.hash_join_operator_count);
-	result += ",aggregates=" + std::to_string(traits.aggregate_count);
+	result += ",grouped_aggregates=" + std::to_string(traits.grouped_aggregate_count);
 	result += ",mark_probe_filters=" + std::to_string(traits.mark_probe_filter_count);
 	result += ",selected_hash_join_filter_materializations=" +
 	          std::to_string(traits.selected_hash_join_filter_materialization_count);

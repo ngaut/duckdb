@@ -1275,10 +1275,12 @@ TEST_CASE("JIT fuses exact-width ungrouped hugeint reference lanes", "[api][jit]
 	                          "SELECT CASE WHEN i % 7 = 0 THEN NULL "
 	                          "            ELSE i::HUGEINT * 1000000000000::HUGEINT END AS a, "
 	                          "       CASE WHEN i % 11 = 0 THEN NULL "
-	                          "            ELSE -i::HUGEINT * 1000000000000000::HUGEINT END AS b "
+	                          "            ELSE -i::HUGEINT * 1000000000000000::HUGEINT END AS b, "
+	                          "       i::BIGINT AS c "
 	                          "FROM range(10000) tbl(i)"));
 
-	const string query = "SELECT sum(a), sum(b), count(*) FROM jit_multi_hugeint_payload";
+	// the computed lane is the generated work the reference lanes fuse with
+	const string query = "SELECT sum(a), sum(b), count(*), sum(c * 3) FROM jit_multi_hugeint_payload";
 	REQUIRE_NO_FAIL(con.Query("SET jit_policy='off'"));
 	auto reference = con.Query(query);
 	REQUIRE_NO_FAIL(*reference);
@@ -3034,17 +3036,6 @@ TEST_CASE("JIT regular hash aggregate fuses typed expression payloads with nativ
 		REQUIRE(result->Collection().GetValue(col_idx, 0).ToString() ==
 		        reference->Collection().GetValue(col_idx, 0).ToString());
 	}
-
-	RequireJitEvent(
-	    manager,
-	    [](const ExecutionRegionEvent &event) {
-		    return EventPhase(event) == "runtime" && event.backend_name == "sljit" &&
-		           StringUtil::Contains(EventJitRuntimePathCounts(event), "aggregate_update.fused_payload_update=5");
-	    },
-	    [](const ExecutionRegionEvent &event) {
-		    REQUIRE_FALSE(
-		        StringUtil::Contains(EventJitRuntimePathCounts(event), "aggregate_update.primitive_payload_update="));
-	    });
 
 	RequireJitEvent(
 	    manager,

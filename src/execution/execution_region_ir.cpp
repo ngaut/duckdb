@@ -695,11 +695,13 @@ static ExecutionRegionCandidateTraits BuildExecutionRegionCandidateTraits(const 
 				traits.grouped_aggregate_key_count = node.sink->Aggregate().groups.size();
 			}
 			if (node.sink) {
-				if (ExecutionRegionSinkIsAggregateUpdate(*node.sink) && node.sink->Aggregate().contract.present) {
-					traits.aggregate_count += node.sink->Aggregate().contract.aggregate_count;
+				if ((traits.sink_kind == ExecutionRegionSinkKind::HASH_AGGREGATE_UPDATE ||
+				     traits.sink_kind == ExecutionRegionSinkKind::PERFECT_HASH_AGGREGATE_UPDATE) &&
+				    node.sink->Aggregate().contract.present) {
+					traits.grouped_aggregate_count += node.sink->Aggregate().contract.aggregate_count;
 				} else if (node.sink->Kind() == ExecutionRegionSinkKind::DELIM_JOIN_SINK &&
 				           node.sink->DelimJoin().distinct.contract.present) {
-					traits.aggregate_count += node.sink->DelimJoin().distinct.contract.aggregate_count;
+					traits.grouped_aggregate_count += node.sink->DelimJoin().distinct.contract.aggregate_count;
 				}
 				if (ExecutionRegionAggregateUpdateGeneratesBody(*node.sink)) {
 					traits.generated_aggregate_update_count++;
