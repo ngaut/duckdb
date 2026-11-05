@@ -23,16 +23,30 @@ BuildSljitNativeUngroupedSumInt64IntegerBinaryConstant(SljitNativeIntegerKind ki
 
 	auto data_scale = NativeIntegerDataScale(kind);
 	auto load_op = NativeIntegerLoadOp(kind);
-	const auto local_sum_offset = NumericCast<sljit_sw>(0);
-	const auto saw_value_offset = NumericCast<sljit_sw>(sizeof(sljit_sw));
-	const auto local_size = saw_value_offset + NumericCast<sljit_sw>(sizeof(sljit_sw));
+	const auto sum = SljitLoopLocal::Register(SLJIT_S3);
+	const auto saw_value = SljitLoopLocal::Register(SLJIT_S4);
 
-	sljit_emit_enter(compiler, 0, SLJIT_ARGS1V(P), 5, 5, local_size);
+	sljit_emit_enter(compiler, 0, SLJIT_ARGS1V(P), SLJIT_ALL_VALID_SOURCE_LOOP_SCRATCHES, 5, 0);
 	EmitInitSljitNativeVectorLoop(compiler);
-	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_MEM1(SLJIT_SP), local_sum_offset, SLJIT_IMM, 0);
-	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_MEM1(SLJIT_SP), saw_value_offset, SLJIT_IMM, 0);
+	sljit_emit_op1(compiler, SLJIT_MOV, sum.operand, sum.operand_w, SLJIT_IMM, 0);
 
 	vector<SljitArithmeticOverflowSite> overflows;
+	// The all-valid loop keeps the constant where the saw-value flag lives: every row of the source contributes
+	sljit_emit_op1(compiler, SLJIT_MOV, saw_value.operand, saw_value.operand_w, SLJIT_MEM1(SLJIT_S0),
+	               offsetof(SljitNativeVectorInput, constant));
+	auto all_valid = EmitSljitAggregateAllValidSelectedSourceLoop(compiler, [&]() {
+		sljit_emit_op1(compiler, load_op, SLJIT_R2, 0, SLJIT_MEM2(SLJIT_R7, SLJIT_R1), data_scale);
+		sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_R3, 0, saw_value.operand, saw_value.operand_w);
+		EmitSljitCheckedIntegerBinaryOp(compiler, kind, op, SLJIT_R4, constant_on_left ? SLJIT_R3 : SLJIT_R2,
+		                                constant_on_left ? SLJIT_R2 : SLJIT_R3, checks, overflows);
+		sljit_emit_op2(compiler, SLJIT_ADD, sum.operand, sum.operand_w, sum.operand, sum.operand_w, SLJIT_R4, 0);
+	});
+	sljit_set_label(all_valid.second, sljit_emit_label(compiler));
+	sljit_emit_op2u(compiler, SLJIT_SUB | SLJIT_SET_Z, SLJIT_S2, 0, SLJIT_IMM, 0);
+	sljit_emit_op_flags(compiler, SLJIT_MOV, saw_value.operand, saw_value.operand_w, SLJIT_NOT_EQUAL);
+	auto all_valid_done = sljit_emit_jump(compiler, SLJIT_JUMP);
+	sljit_set_label(all_valid.first, sljit_emit_label(compiler));
+	sljit_emit_op1(compiler, SLJIT_MOV, saw_value.operand, saw_value.operand_w, SLJIT_IMM, 0);
 	auto done = EmitSljitAggregateSelectedSourceLoop(compiler, [&]() {
 		EmitLoadSljitNativeFixedWidthValue(compiler, offsetof(SljitNativeVectorInput, source_data), SLJIT_R1, load_op,
 		                                   data_scale, SLJIT_R2);
@@ -40,7 +54,7 @@ BuildSljitNativeUngroupedSumInt64IntegerBinaryConstant(SljitNativeIntegerKind ki
 		               offsetof(SljitNativeVectorInput, constant));
 		EmitSljitCheckedIntegerBinaryOp(compiler, kind, op, SLJIT_R4, constant_on_left ? SLJIT_R3 : SLJIT_R2,
 		                                constant_on_left ? SLJIT_R2 : SLJIT_R3, checks, overflows);
-		EmitSljitAggregateAccumulateInt64(compiler, local_sum_offset, saw_value_offset, SLJIT_R4);
+		EmitSljitAggregateAccumulateInt64(compiler, sum, saw_value, SLJIT_R4);
 	});
 
 	// an overflowing chunk records its error and skips the commit
@@ -48,7 +62,8 @@ BuildSljitNativeUngroupedSumInt64IntegerBinaryConstant(SljitNativeIntegerKind ki
 
 	auto done_label = sljit_emit_label(compiler);
 	sljit_set_label(done, done_label);
-	EmitSljitAggregateCommitInt64(compiler, local_sum_offset, saw_value_offset);
+	sljit_set_label(all_valid_done, done_label);
+	EmitSljitAggregateCommitInt64(compiler, sum, saw_value);
 	SetSljitJumpLabels(overflow_done, sljit_emit_label(compiler));
 	sljit_emit_return_void(compiler);
 
@@ -125,7 +140,8 @@ BuildSljitNativeUngroupedSumInt64IntegerBinaryReferences(SljitNativeIntegerKind 
 		EmitLoadSljitNativeFixedWidthValue(compiler, offsetof(SljitNativeVectorInput, right_source_data), SLJIT_S4,
 		                                   load_op, data_scale, SLJIT_R3);
 		EmitSljitCheckedIntegerBinaryOp(compiler, kind, op, SLJIT_R4, SLJIT_R2, SLJIT_R3, checks, overflows);
-		EmitSljitAggregateAccumulateInt64(compiler, local_sum_offset, saw_value_offset, SLJIT_R4);
+		EmitSljitAggregateAccumulateInt64(compiler, SljitLoopLocal::Stack(local_sum_offset),
+		                                  SljitLoopLocal::Stack(saw_value_offset), SLJIT_R4);
 	});
 
 	// an overflowing chunk records its error and skips the commit
@@ -136,7 +152,8 @@ BuildSljitNativeUngroupedSumInt64IntegerBinaryReferences(SljitNativeIntegerKind 
 		sljit_set_label(fast_commit_done, done_label);
 	}
 	sljit_set_label(done, done_label);
-	EmitSljitAggregateCommitInt64(compiler, local_sum_offset, saw_value_offset);
+	EmitSljitAggregateCommitInt64(compiler, SljitLoopLocal::Stack(local_sum_offset),
+	                              SljitLoopLocal::Stack(saw_value_offset));
 	SetSljitJumpLabels(overflow_done, sljit_emit_label(compiler));
 	sljit_emit_return_void(compiler);
 

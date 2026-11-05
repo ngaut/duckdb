@@ -72,7 +72,8 @@ void EmitUngroupedAggregateAccumulate(struct sljit_compiler *compiler, Aggregate
 		EmitSljitAggregateAccumulateHugeintInt64(compiler, local_lower_offset, local_upper_offset, saw_value_offset,
 		                                         value_reg);
 	} else {
-		EmitSljitAggregateAccumulateInt64(compiler, local_lower_offset, saw_value_offset, value_reg);
+		EmitSljitAggregateAccumulateInt64(compiler, SljitLoopLocal::Stack(local_lower_offset),
+		                                  SljitLoopLocal::Stack(saw_value_offset), value_reg);
 	}
 }
 

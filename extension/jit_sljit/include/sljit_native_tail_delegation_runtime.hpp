@@ -22,12 +22,10 @@ struct SljitNativeTailDelegationRuntimeState {
 	}
 
 	bool Execute(ExecutionRegionRuntime &runtime, ExecutionRegionResult &result, vector<SljitExecutableRegionOp> &ops,
-	             SljitRegionExecutionScratch &scratch, const SljitFullPipelinePrimitiveStep &primitive,
-	             const SljitRuntimeBatchView &input) {
+	             SljitRegionExecutionScratch &scratch, idx_t tail_start_idx, const SljitRuntimeBatchView &input) {
 		if (input.count == 0) {
 			return false;
 		}
-		const auto tail_start_idx = primitive.native_tail_start_idx;
 		auto &tail_op = ops[tail_start_idx];
 		RecordSljitRegionRuntimePath(runtime, tail_op.Kind(), "native_tail_delegation", input.count);
 		RecordSljitRegionRuntimeDelegation(runtime, tail_op.Kind(), "native_tail_delegation", input.count);

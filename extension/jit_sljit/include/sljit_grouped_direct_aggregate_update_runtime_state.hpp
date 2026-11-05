@@ -75,6 +75,35 @@ public:
 		return false;
 	}
 
+	//! Group runs are what the generated update wins on: without them DuckDB's vectorized sink is faster than any
+	//! generated lookup. Once the run sample finds none, the remaining batches take the native pipeline.
+	bool DelegatesToNativePipeline(const SljitGroupedAggregateUpdatePrimitive &primitive) const {
+		return primitive.strategy == SljitGroupedAggregateUpdateStrategyKind::DIRECT_PRIMITIVE_PAYLOAD_UPDATE &&
+		       direct_preaggregated_batch.run_strategy == SljitPendingRunStrategy::BUFFERED;
+	}
+
+	//! The operator the step's input batch feeds: the elided projection chain, or the aggregate itself
+	static idx_t NativePipelineStart(const SljitGroupedAggregateUpdatePrimitive &primitive) {
+		return primitive.input_kind == SljitGroupedAggregateUpdateInputKind::PROJECTED_INPUT
+		           ? primitive.first_projection_idx
+		           : primitive.aggregate_idx;
+	}
+
+	//! Groups the sample batch left pending, or claimed as unique appends, must reach the table before the native sink
+	//! looks groups up in it.
+	void BeginNativePipelineDelegation(ExecutionRegionRuntime &runtime, vector<SljitExecutableRegionOp> &ops,
+	                                   SljitRegionExecutionScratch &scratch,
+	                                   const SljitGroupedAggregateUpdatePrimitive &primitive) {
+		if (!FlushDirectPreaggregatedBatch(runtime, ops, scratch, primitive)) {
+			throw InternalException("SLJIT direct preaggregated grouped update flush failed");
+		}
+		if (direct_preaggregated_batch.proven_unique_append_active) {
+			auto &binding = scratch.SinkBinding(primitive.aggregate_idx);
+			SljitInvalidateProvenUniqueAppendContract(runtime, ops[primitive.aggregate_idx], direct_preaggregated_batch,
+			                                          binding.aggregate_update.grouped_state);
+		}
+	}
+
 private:
 	bool ExecuteDirectPrimitivePayloadUpdate(ExecutionRegionRuntime &runtime, ExecutionRegionResult &result,
 	                                         vector<SljitExecutableRegionOp> &ops, SljitRegionExecutionScratch &scratch,

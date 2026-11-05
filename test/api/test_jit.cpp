@@ -2154,9 +2154,10 @@ TEST_CASE("JIT selected scan-filtered grouped aggregate uses direct grouped prim
 	REQUIRE_NO_FAIL(con.Query("SET jit_cbo_materialization_elision_benefit=1048576"));
 	REQUIRE_NO_FAIL(con.Query("SET jit_cbo_native_operator_stage_benefit=1048576"));
 	REQUIRE_NO_FAIL(con.Query("SET perfect_ht_threshold=0"));
+	// Group runs are what lets the generated update own the lookup; without them the pipeline runs natively
 	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_scan_filtered_grouped_aggregate AS "
 	                          "SELECT i::BIGINT AS id, "
-	                          "       CAST(i % 1024 AS INTEGER) AS group_id, "
+	                          "       CAST((i // 64) % 1024 AS INTEGER) AS group_id, "
 	                          "       CAST((i % 100) AS DOUBLE) + 0.25 AS x, "
 	                          "       CAST(((i * 3) % 200) AS DOUBLE) + 0.5 AS y, "
 	                          "       CASE WHEN i % 7 = 0 THEN 'OTHER' ELSE 'EUROPE' END AS region "
@@ -2253,7 +2254,7 @@ TEST_CASE("JIT materialization-elision runtime proves projected aggregate owners
 	REQUIRE_NO_FAIL(con.Query("SET jit_cbo_native_operator_stage_benefit=1048576"));
 	REQUIRE_NO_FAIL(con.Query("SET perfect_ht_threshold=0"));
 	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_projected_grouped_aggregate_input AS "
-	                          "SELECT (i % 4096)::BIGINT AS g, "
+	                          "SELECT ((i // 64) % 4096)::BIGINT AS g, "
 	                          "       CASE WHEN i % 11 = 0 THEN NULL ELSE i::BIGINT END AS v "
 	                          "FROM range(262144) tbl(i)"));
 
@@ -2291,7 +2292,7 @@ TEST_CASE("JIT projected source grouped aggregate preserves dense key semantics"
 	REQUIRE_NO_FAIL(con.Query("SET jit_cbo_native_operator_stage_benefit=1048576"));
 	REQUIRE_NO_FAIL(con.Query("SET perfect_ht_threshold=0"));
 	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_projected_grouped_sum_input AS "
-	                          "SELECT (i % 1024)::BIGINT AS g, (i % 17)::BIGINT AS v "
+	                          "SELECT ((i // 64) % 1024)::BIGINT AS g, (i % 17)::BIGINT AS v "
 	                          "FROM range(65536) tbl(i)"));
 
 	const string query = "SELECT k32, sum(v) AS s "

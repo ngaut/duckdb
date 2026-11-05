@@ -143,10 +143,24 @@ sljit_jump *EmitJumpIfSljitExpressionTreeFlatSourceNull(struct sljit_compiler *c
 vector<sljit_jump *> EmitSljitArithmeticOverflowStubs(struct sljit_compiler *compiler,
                                                       const vector<SljitArithmeticOverflowSite> &overflows);
 
-void EmitSljitAggregateAccumulateInt64(struct sljit_compiler *compiler, sljit_sw local_sum_offset,
-                                       sljit_sw saw_value_offset, sljit_s32 value_reg);
-void EmitSljitAggregateCommitInt64(struct sljit_compiler *compiler, sljit_sw local_sum_offset,
-                                   sljit_sw saw_value_offset);
+//! A chunk-local value a kernel loop carries from row to row: a register, or a stack slot when the kernel has none
+//! free. A register never waits on the store-to-load round trip a stack slot adds to every row.
+struct SljitLoopLocal {
+	sljit_s32 operand;
+	sljit_sw operand_w;
+
+	static SljitLoopLocal Register(sljit_s32 reg) {
+		return {reg, 0};
+	}
+	static SljitLoopLocal Stack(sljit_sw offset) {
+		return {SLJIT_MEM1(SLJIT_SP), offset};
+	}
+};
+
+void EmitSljitAggregateAccumulateInt64(struct sljit_compiler *compiler, const SljitLoopLocal &sum,
+                                       const SljitLoopLocal &saw_value, sljit_s32 value_reg);
+void EmitSljitAggregateCommitInt64(struct sljit_compiler *compiler, const SljitLoopLocal &sum,
+                                   const SljitLoopLocal &saw_value);
 void EmitSljitAggregateAccumulateHugeintInt64(struct sljit_compiler *compiler, sljit_sw local_lower_offset,
                                               sljit_sw local_upper_offset, sljit_sw saw_value_offset,
                                               sljit_s32 value_reg);

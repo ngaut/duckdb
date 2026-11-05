@@ -1466,14 +1466,15 @@ TEST_CASE("JIT generic grouped primitive aggregate payload lanes use native stat
 	auto &manager = ExecutionRegionManager::Get(*con.context);
 
 	ConfigureSljitForCoverage(con, true, true, 10000);
+	// NULL keys keep the run sample from deciding, so the generic grouped update owns every batch
 	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_grouped_multi_aggregate_payload AS "
-	                          "SELECT i::BIGINT AS k, i::BIGINT AS v "
+	                          "SELECT CASE WHEN i % 5 = 0 THEN NULL ELSE i::BIGINT END AS k, i::BIGINT AS v "
 	                          "FROM range(200000) tbl(i)"));
 
 	ClearJitTrace(manager, true);
 	auto result = con.Query("SELECT k, sum(v), count(*) FROM jit_grouped_multi_aggregate_payload GROUP BY k");
 	REQUIRE_NO_FAIL(*result);
-	REQUIRE(result->RowCount() == 200000);
+	REQUIRE(result->RowCount() == 160001);
 
 	bool found_hash_state_address_update = false;
 	for (auto &event : manager.GetEvents()) {
@@ -4191,14 +4192,50 @@ TEST_CASE("JIT perfect hash aggregate fuses computed smallint group expressions"
 	    });
 }
 
+TEST_CASE("JIT grouped aggregate without group runs runs the pipeline natively", "[api][jit]") {
+	for (idx_t threads : {idx_t(1), idx_t(4)}) {
+		DuckDB db;
+		Connection con(db);
+		auto &manager = ExecutionRegionManager::Get(*con.context);
+
+		ConfigureSljitForCoverage(con, false, true, 10000, threads);
+		REQUIRE_NO_FAIL(con.Query("SET threads=" + to_string(threads)));
+		REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_grouped_no_runs AS "
+		                          "SELECT ((i * 7919) % 4096)::BIGINT AS k, (i % 97)::INTEGER AS v, i % 10 AS f "
+		                          "FROM range(300000) tbl(i)"));
+		for (auto &query : {string("SELECT k, sum(v), count(*) FROM jit_grouped_no_runs GROUP BY k ORDER BY k"),
+		                    string("SELECT k, sum(v) FROM jit_grouped_no_runs WHERE f < 9 GROUP BY k ORDER BY k")}) {
+			REQUIRE_NO_FAIL(con.Query("SET jit_policy='off'"));
+			auto reference = con.Query(query);
+			REQUIRE_NO_FAIL(*reference);
+			REQUIRE_NO_FAIL(con.Query("SET jit_policy='auto'"));
+			ClearJitTrace(manager, true);
+			auto result = con.Query(query);
+			REQUIRE_NO_FAIL(*result);
+			RequireSameResultValues(*result, *reference);
+
+			bool delegated = false;
+			for (auto &event : manager.GetEvents()) {
+				if (StringUtil::Contains(EventJitRuntimePathCounts(event),
+				                         "pending_primitive_group_runs_miss.economics=")) {
+					delegated = true;
+					REQUIRE(StringUtil::Contains(EventJitRuntimeDelegationCounts(event), "native_tail_delegation="));
+				}
+			}
+			REQUIRE(delegated);
+		}
+	}
+}
+
 TEST_CASE("JIT hash aggregate cast-only keys use native state addresses", "[api][jit]") {
 	DuckDB db;
 	Connection con(db);
 	auto &manager = ExecutionRegionManager::Get(*con.context);
 
 	ConfigureSljitForCoverage(con, true, true, 10000);
+	// Group runs are what lets the generated update own the lookup; without them the pipeline runs natively
 	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_hash_aggregate_cast_projection AS "
-	                          "SELECT i::BIGINT AS k, CAST(i % 100 AS DECIMAL(15,2)) AS v "
+	                          "SELECT (i // 4)::BIGINT AS k, CAST(i % 100 AS DECIMAL(15,2)) AS v "
 	                          "FROM range(100000) tbl(i)"));
 
 	ClearJitTrace(manager, true);
@@ -4207,7 +4244,7 @@ TEST_CASE("JIT hash aggregate cast-only keys use native state addresses", "[api]
 	                        "      FROM jit_hash_aggregate_cast_projection) t "
 	                        "GROUP BY cast_key");
 	REQUIRE_NO_FAIL(*result);
-	REQUIRE(result->RowCount() == 100000);
+	REQUIRE(result->RowCount() == 25000);
 
 	bool found_hash_state_address_update = false;
 	for (auto &event : manager.GetEvents()) {

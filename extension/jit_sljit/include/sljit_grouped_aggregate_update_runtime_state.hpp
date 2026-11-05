@@ -53,6 +53,16 @@ struct SljitGroupedAggregateUpdateRuntimeState {
 		return count_star_preaggregation.Flush(runtime, ops, scratch, primitive);
 	}
 
+	bool DelegatesToNativePipeline(const SljitGroupedAggregateUpdatePrimitive &primitive) const {
+		return direct_payload_update.DelegatesToNativePipeline(primitive);
+	}
+
+	void BeginNativePipelineDelegation(ExecutionRegionRuntime &runtime, vector<SljitExecutableRegionOp> &ops,
+	                                   SljitRegionExecutionScratch &scratch,
+	                                   const SljitGroupedAggregateUpdatePrimitive &primitive) {
+		direct_payload_update.BeginNativePipelineDelegation(runtime, ops, scratch, primitive);
+	}
+
 private:
 	SljitGroupedCountStarPreaggregationRuntimeState count_star_preaggregation;
 	SljitGroupedDirectPrimitivePayloadUpdateRuntimeState direct_payload_update;

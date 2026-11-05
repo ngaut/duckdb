@@ -28,6 +28,8 @@ struct SljitFullPipelineTerminalRuntimeState {
 	SljitGroupedAggregateUpdateRuntimeState grouped_aggregate_update;
 	SljitPostJoinProjectionAggregateRuntimeState post_join_projection_aggregate;
 	SljitHashJoinBuildSinkRuntimeState hash_join_build_sink;
+	bool grouped_aggregate_native_pipeline = false;
+	SljitDataChunkBatch grouped_aggregate_native_pipeline_input;
 };
 
 template <class EXECUTE_NATIVE_FULL_PIPELINE_FROM>
@@ -98,7 +100,8 @@ public:
 		case SljitFullPipelinePrimitiveKind::HASH_JOIN_BUILD_SINK:
 			return ExecuteHashJoinBuildSink(runtime, result, ops, scratch, terminal_step, input);
 		case SljitFullPipelinePrimitiveKind::NATIVE_TAIL_DELEGATION:
-			return native_tail_delegation.Execute(runtime, result, ops, scratch, terminal_step, input);
+			return native_tail_delegation.Execute(runtime, result, ops, scratch, terminal_step.native_tail_start_idx,
+			                                      input);
 		default:
 			throw InternalException("SLJIT primitive sequence contains an unsupported terminal primitive");
 		}
@@ -120,6 +123,35 @@ public:
 		    contract.probe_input_filter_idx);
 	}
 
+	//! A grouped aggregate terminal without group runs to win on hands the pipeline to the native operators: source
+	//! chunks start at the first operator, and batches the steps still hold start at the operator they feed.
+	bool DelegatesToNativePipeline(const SljitFullPipelinePrimitiveStep &terminal_step) const {
+		return terminal_step.kind == SljitFullPipelinePrimitiveKind::GROUPED_AGGREGATE_UPDATE &&
+		       state.grouped_aggregate_update.DelegatesToNativePipeline(terminal_step.grouped_aggregate_update);
+	}
+
+	bool ExecuteNativePipeline(ExecutionRegionRuntime &runtime, ExecutionRegionResult &result,
+	                           vector<SljitExecutableRegionOp> &ops, SljitRegionExecutionScratch &scratch,
+	                           const SljitFullPipelinePrimitiveStep &terminal_step, idx_t start_idx,
+	                           const SljitRuntimeBatchView &input) {
+		D_ASSERT(DelegatesToNativePipeline(terminal_step));
+		if (!state.grouped_aggregate_native_pipeline) {
+			state.grouped_aggregate_update.BeginNativePipelineDelegation(runtime, ops, scratch,
+			                                                             terminal_step.grouped_aggregate_update);
+			state.grouped_aggregate_native_pipeline = true;
+		}
+		if (!input.selection) {
+			return native_tail_delegation.Execute(runtime, result, ops, scratch, start_idx, input);
+		}
+		auto &chunk = SljitBindRuntimeBatchInput(input, "SLJIT grouped aggregate native pipeline");
+		auto &selected = state.grouped_aggregate_native_pipeline_input;
+		selected.Ensure(runtime.GetAllocator(), chunk.GetTypes());
+		selected.chunk.Reset();
+		selected.chunk.Slice(chunk, *input.selection, input.count);
+		return native_tail_delegation.Execute(runtime, result, ops, scratch, start_idx,
+		                                      SljitRuntimeBatchViewFromChunk(selected.chunk));
+	}
+
 	bool Flush(ExecutionRegionRuntime &runtime, ExecutionRegionResult &result, vector<SljitExecutableRegionOp> &ops,
 	           SljitRegionExecutionScratch &scratch, const SljitFullPipelinePrimitiveStep &terminal_step) {
 		switch (terminal_step.kind) {
@@ -127,6 +159,9 @@ public:
 			return state.ungrouped_aggregate_update.Flush(runtime, ops, scratch,
 			                                              terminal_step.ungrouped_aggregate_update);
 		case SljitFullPipelinePrimitiveKind::GROUPED_AGGREGATE_UPDATE:
+			if (state.grouped_aggregate_native_pipeline) {
+				native_tail_delegation.Finalize(scratch);
+			}
 			return state.grouped_aggregate_update.Flush(runtime, ops, scratch, terminal_step.grouped_aggregate_update);
 		case SljitFullPipelinePrimitiveKind::POST_JOIN_PROJECTION_AGGREGATE_UPDATE:
 			return state.post_join_projection_aggregate.Flush(runtime, result, ops, scratch);
@@ -145,8 +180,14 @@ private:
 	                                   vector<SljitExecutableRegionOp> &ops, SljitRegionExecutionScratch &scratch,
 	                                   const SljitFullPipelinePrimitiveStep &terminal_step,
 	                                   const SljitRuntimeBatchView &input) {
-		return state.grouped_aggregate_update.Execute(runtime, result, ops, scratch,
-		                                              terminal_step.grouped_aggregate_update, input);
+		auto &primitive = terminal_step.grouped_aggregate_update;
+		// a probe's output view holds build-side row pointers only the generated steps read
+		if (DelegatesToNativePipeline(terminal_step) && !input.HasHashJoinSelection()) {
+			return ExecuteNativePipeline(
+			    runtime, result, ops, scratch, terminal_step,
+			    SljitGroupedDirectPrimitivePayloadUpdateRuntimeState::NativePipelineStart(primitive), input);
+		}
+		return state.grouped_aggregate_update.Execute(runtime, result, ops, scratch, primitive, input);
 	}
 
 	bool ExecuteHashJoinBuildSink(ExecutionRegionRuntime &runtime, ExecutionRegionResult &result,

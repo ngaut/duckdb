@@ -94,6 +94,14 @@ static bool PhysicalRunnerHasEstimatedGroupedReduction(const PhysicalRunnerCostI
 	       input.grouped_aggregate_estimated_cardinality <= input.source_contract_input_cardinality / 2;
 }
 
+//! A complete grouped-lookup replacement is thread-local by contract, so parallel execution needs evidence that it
+//! amortizes. A single-key replacement carries its own: the runtime samples the key stream for group runs and hands
+//! the pipeline to the native sink when there are none. Other shapes rely on an estimated reduction.
+static bool PhysicalRunnerHasParallelGroupedLookupReplacementProof(const PhysicalRunnerCostInput &input) {
+	return PhysicalRunnerHasGeneratedGroupedLookupReplacementProof(input) &&
+	       (input.grouped_aggregate_key_count == 1 || PhysicalRunnerHasEstimatedGroupedReduction(input));
+}
+
 static bool PhysicalRunnerHasGeneratedJoinGroupedFusionProof(const PhysicalRunnerCostInput &input) {
 	return input.native_hash_join_build_sink_count == 0 && input.native_join_stage_count > 0 &&
 	       input.native_grouped_state_address_lookup_count > 0 && input.generated_backend_stage_count >= 2 &&
@@ -104,7 +112,7 @@ static bool PhysicalRunnerHasGeneratedJoinGroupedFusionProof(const PhysicalRunne
 static bool PhysicalRunnerLargeLowWorkGroupedUpdate(const PhysicalRunnerCostInput &input,
                                                     const PhysicalRunnerSharedCostInputs &shared) {
 	const auto has_amortization_proof =
-	    (shared.vectorized_parallelism > 1 ? PhysicalRunnerHasEstimatedGroupedReduction(input)
+	    (shared.vectorized_parallelism > 1 ? PhysicalRunnerHasParallelGroupedLookupReplacementProof(input)
 	                                       : PhysicalRunnerHasGeneratedGroupedLookupReplacementProof(input)) ||
 	    PhysicalRunnerHasGeneratedJoinGroupedFusionProof(input);
 	const auto has_native_grouped_lookup = input.native_grouped_state_address_lookup_count > 0;
@@ -141,9 +149,8 @@ static bool PhysicalRunnerCanAmortizeNativeGroupedStateAddressLookup(const Physi
 		}
 		return true;
 	}
-	// A complete grouped-lookup replacement is thread-local by contract. The planner cannot assume that
-	// runtime local ranges will be disjoint, so only cost it as a full replacement in serial execution.
-	return (shared.vectorized_parallelism == 1 && PhysicalRunnerHasGeneratedGroupedLookupReplacementProof(input)) ||
+	return (shared.vectorized_parallelism > 1 ? PhysicalRunnerHasParallelGroupedLookupReplacementProof(input)
+	                                          : PhysicalRunnerHasGeneratedGroupedLookupReplacementProof(input)) ||
 	       input.generated_stage_count > input.native_grouped_state_address_lookup_count * 2;
 }
 

@@ -34,6 +34,7 @@ struct PhysicalRunnerCostInput {
 	idx_t generated_grouped_aggregate_stage_count = 0;
 	idx_t native_grouped_state_address_lookup_count = 0;
 	idx_t grouped_aggregate_estimated_cardinality = 0;
+	idx_t grouped_aggregate_key_count = 0;
 	idx_t materialization_elision_count = 0;
 	idx_t selected_hash_join_filter_materialization_count = 0;
 	idx_t native_join_stage_count = 0;

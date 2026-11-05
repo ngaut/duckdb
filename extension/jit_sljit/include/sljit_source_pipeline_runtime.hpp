@@ -57,6 +57,10 @@ public:
 		if (source_chunk.size() == 0) {
 			return false;
 		}
+		if (terminal_runtime.DelegatesToNativePipeline(TerminalStep())) {
+			return terminal_runtime.ExecuteNativePipeline(runtime, result, ops, scratch, TerminalStep(), 0,
+			                                              SljitRuntimeBatchViewFromChunk(source_chunk));
+		}
 		if (runtime.TraceRuntime()) {
 			runtime.RecordJitRuntimeProof(ExecutionRegionJitRuntimeProof::FULL_PIPELINE_OWNERSHIP, source_chunk.size());
 		}

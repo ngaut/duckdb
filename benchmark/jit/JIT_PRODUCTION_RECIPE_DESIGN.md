@@ -130,7 +130,10 @@ selection, `ExecutionRegionGraphMayHaveCostedAcceleration`, the cost-only
 runner, and the post-analysis runner), all reaching
 `DuckDBCostModel::SelectPhysicalRunner` with different inputs. Observed
 runtime cardinality never feeds the decision; adaptive choices live in kernels
-(see Binding contract).
+(see Binding contract). A complete grouped-lookup replacement is thread-local,
+so parallel admission needs evidence that it amortizes: an estimated 2x group
+reduction, or a single grouping key, whose runtime run sample hands batches
+without runs to the native sink.
 
 ## Execution model: chunk steps
 
@@ -638,6 +641,14 @@ keys with DuckDB's hash and equality, under which every NaN is one value and
 -0.0 equals 0.0. A backend merges rows only under that equality; keys it cannot
 prove equal go to core's lookup, never into a group of their own.
 
+A generated grouped update owns group lookup only where it beats DuckDB's
+vectorized sink: a bounded perfect-hash domain, or group runs in the key stream.
+A single-key direct update samples its first batch for runs; when the sample
+finds none, the step flushes what the sample buffered, ends any proven-unique
+append claim, and from then on hands every batch to the native pipeline from
+the operator it feeds (whole source chunks start at the first operator), whose
+terminal is DuckDB's own aggregate sink.
+
 Compiled aggregate plans, binding, and grouped-state updates carry only
 `ExecutionRegionAggregateSinkInfo`, not the general sink union. Its operator
 kind comes from the aggregate contract. Lowering checks the general IR's sink
@@ -814,7 +825,9 @@ observed cardinalities to the adaptive transitions instead of re-planning.
   async read-ahead or prefetch tasks, which native scans do for cold data
   (the storage prefetch tests fail with the JIT forced on for that reason).
 - Multi-key, selected, and non-flat grouped inputs require an explicit proven
-  route before generated run ownership expands.
+  route before generated run ownership expands. Their generated lookups have no
+  run sample, so batches without runs stay on the generated lookup, which is
+  slower than DuckDB's vectorized sink on random-order keys.
 - Native source and sink protocols remain native unless an exported execution
   contract makes composition safe.
 - Native-only selection is valid capability analysis, not a failed recipe and

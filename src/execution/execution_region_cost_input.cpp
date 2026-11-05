@@ -311,6 +311,7 @@ PhysicalRunnerCostInput BuildExecutionRegionCandidateCostInput(const ExecutionRe
 	input.generated_grouped_aggregate_stage_count = cost_facts.generated_grouped_aggregate_stage_count;
 	input.native_grouped_state_address_lookup_count = cost_facts.native_grouped_state_address_lookup_count;
 	input.grouped_aggregate_estimated_cardinality = candidate.traits.grouped_aggregate_estimated_cardinality;
+	input.grouped_aggregate_key_count = candidate.traits.grouped_aggregate_key_count;
 	input.materialization_elision_count = cost_facts.materialization_elision_count;
 	input.full_pipeline = cost_facts.may_anchor_compiled_body;
 	input.selected_hash_join_filter_materialization_count =
@@ -731,6 +732,7 @@ static bool TryAccumulateExecutionRegionPhysicalOperatorCost(const PhysicalOpera
 		auto &aggregate = op.Cast<PhysicalHashAggregate>();
 		if (slot == ExecutionRegionPhysicalPipelineSlot::SINK) {
 			input.grouped_aggregate_estimated_cardinality = aggregate.estimated_cardinality;
+			input.grouped_aggregate_key_count = aggregate.grouped_aggregate_data.groups.size();
 		}
 		auto expression_cost = ExecutionRegionPhysicalExpressionListCost(aggregate.grouped_aggregate_data.groups);
 		expression_cost += ExecutionRegionPhysicalAggregateListCost(aggregate.grouped_aggregate_data.aggregates);

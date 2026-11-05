@@ -175,8 +175,8 @@ BuildSljitNativeUngroupedFusedPrimitiveAggregateUpdate(const vector<SljitNativeR
 			                                SLJIT_R3, payload.OverflowChecks(), overflows);
 			value_reg = SLJIT_R4;
 		}
-		EmitSljitAggregateAccumulateInt64(compiler, local_sum_offsets[payload_idx], saw_value_offsets[payload_idx],
-		                                  value_reg);
+		EmitSljitAggregateAccumulateInt64(compiler, SljitLoopLocal::Stack(local_sum_offsets[payload_idx]),
+		                                  SljitLoopLocal::Stack(saw_value_offsets[payload_idx]), value_reg);
 		auto payload_done = sljit_emit_jump(compiler, SLJIT_JUMP);
 		auto payload_invalid = sljit_emit_label(compiler);
 		for (auto invalid_jump : invalid_jumps) {

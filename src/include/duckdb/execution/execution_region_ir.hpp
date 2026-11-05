@@ -602,6 +602,7 @@ struct ExecutionRegionCandidateTraits {
 	idx_t generated_aggregate_update_count = 0;
 	idx_t generated_aggregate_lookup_count = 0;
 	idx_t grouped_aggregate_estimated_cardinality = 0;
+	idx_t grouped_aggregate_key_count = 0;
 	idx_t arithmetic_projection_count = 0;
 	idx_t high_cost_projection_count = 0;
 	idx_t reference_projection_count = 0;
