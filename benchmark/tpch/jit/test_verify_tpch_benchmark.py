@@ -117,6 +117,28 @@ class TestTypedRuntimeProofLedger(unittest.TestCase):
                     require_runtime_proof=True,
                 )
 
+    def test_materialization_elision_accepts_only_the_declared_native_pipeline_handoff(self) -> None:
+        def handoff_row(handed_off: str, delegations: str) -> dict[str, str]:
+            row = runtime_row("materialization_elision=87;backend_owned_work=87;delegated_runtime_work=20")
+            row["jit_runtime_path_counts"] = handed_off
+            row["jit_runtime_delegation_counts"] = delegations
+            return row
+
+        delegations = "projection.native_tail_delegation=10;aggregate_update.native_sink_update=10"
+        verify_cbo_runtime_counter_contract(
+            [
+                compiled_row("materialization_elision"),
+                handoff_row("aggregate_update.no_group_runs_native_pipeline=10", delegations),
+            ],
+            require_runtime_proof=True,
+        )
+        for handed_off in ("", "aggregate_update.no_group_runs_native_pipeline=9", "no_group_runs_native_pipeline=10"):
+            with self.subTest(handed_off=handed_off), self.assertRaises(AssertionError):
+                verify_cbo_runtime_counter_contract(
+                    [compiled_row("materialization_elision"), handoff_row(handed_off, delegations)],
+                    require_runtime_proof=True,
+                )
+
     def test_proof_requires_a_positive_exact_typed_counter(self) -> None:
         for counter in (
             "generated_stage_work=0",

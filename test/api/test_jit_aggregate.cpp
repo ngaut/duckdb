@@ -4211,6 +4211,8 @@ TEST_CASE("JIT grouped aggregate without group runs runs the pipeline natively",
 				                         "pending_primitive_group_runs_miss.economics=")) {
 					delegated = true;
 					REQUIRE(StringUtil::Contains(EventJitRuntimeDelegationCounts(event), "native_tail_delegation="));
+					REQUIRE(StringUtil::Contains(EventJitRuntimePathCounts(event),
+					                             "aggregate_update.no_group_runs_native_pipeline="));
 				}
 			}
 			REQUIRE(delegated);

@@ -35,6 +35,9 @@ MATERIALIZATION_ELISION_FORBIDDEN_RUNTIME_PATTERNS = (
     ("materialization", re.compile(r"materialization", re.IGNORECASE)),
     ("buffer append", re.compile(r"buffer_append", re.IGNORECASE)),
 )
+# A single-key grouped update whose run sample finds no group runs hands the pipeline to DuckDB's operators by
+# design; the kernel records the rows it handed off under this path, and every delegation it reports serves them.
+NO_GROUP_RUNS_NATIVE_PIPELINE_PATH = "aggregate_update.no_group_runs_native_pipeline"
 RUNTIME_PROOF_FIELDS = (
     "source_stage_count_breakdown",
     "source_stage_runtime_breakdown",
@@ -153,6 +156,27 @@ def runtime_proof_names(value: str) -> list[str]:
     return names
 
 
+def runtime_counts(value: str) -> dict[str, int]:
+    counts = {}
+    for entry in value.split(";"):
+        if "=" not in entry:
+            continue
+        name, count = entry.rsplit("=", 1)
+        try:
+            counts[name.strip()] = counts.get(name.strip(), 0) + int(count)
+        except ValueError:
+            continue
+    return counts
+
+
+def row_has_undeclared_delegation(row: dict) -> bool:
+    delegations = runtime_counts(row.get("jit_runtime_delegation_counts", ""))
+    if not delegations:
+        return False
+    handed_off = runtime_counts(row.get("jit_runtime_path_counts", "")).get(NO_GROUP_RUNS_NATIVE_PIPELINE_PATH, 0)
+    return any(count > handed_off for count in delegations.values())
+
+
 def row_contains_materialization_elision_violation(row: dict) -> str:
     for field in RUNTIME_PROOF_FIELDS:
         proof_names = set(runtime_proof_names(row.get(field, "")))
@@ -233,7 +257,7 @@ def runtime_proof_requirement_satisfied(proof: str, runtime_rows: list[dict]) ->
                 f"{violation}: {row}",
             )
             require(
-                not row.get("jit_runtime_delegation_counts", ""),
+                not row_has_undeclared_delegation(row),
                 f"counters.csv: materialization-elision kernel delegated runtime work: {row}",
             )
         return any(row_has_runtime_proof(row, proof) and row_int(row, "invocation_count") > 0 for row in runtime_rows)

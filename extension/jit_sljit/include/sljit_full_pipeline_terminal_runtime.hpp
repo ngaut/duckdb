@@ -135,6 +135,9 @@ public:
 	                           const SljitFullPipelinePrimitiveStep &terminal_step, idx_t start_idx,
 	                           const SljitRuntimeBatchView &input) {
 		D_ASSERT(DelegatesToNativePipeline(terminal_step));
+		// The declared handoff: every delegation that follows serves the rows recorded here
+		RecordSljitRegionRuntimePath(runtime, ops[terminal_step.grouped_aggregate_update.aggregate_idx].Kind(),
+		                             "no_group_runs_native_pipeline", input.count);
 		if (!state.grouped_aggregate_native_pipeline) {
 			state.grouped_aggregate_update.BeginNativePipelineDelegation(runtime, ops, scratch,
 			                                                             terminal_step.grouped_aggregate_update);

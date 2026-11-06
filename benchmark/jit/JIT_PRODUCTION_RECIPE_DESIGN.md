@@ -677,7 +677,9 @@ A single-key direct update samples its first batch for runs; when the sample
 finds none, the step flushes what the sample buffered, ends any proven-unique
 append claim, and from then on hands every batch to the native pipeline from
 the operator it feeds (whole source chunks start at the first operator), whose
-terminal is DuckDB's own aggregate sink.
+terminal is DuckDB's own aggregate sink. The step records the rows it hands off
+as `no_group_runs_native_pipeline`; that handoff is the only delegation a
+materialization-elision kernel may report, and no delegation may exceed it.
 
 Compiled aggregate plans, binding, and grouped-state updates carry only
 `ExecutionRegionAggregateSinkInfo`, not the general sink union. Its operator
