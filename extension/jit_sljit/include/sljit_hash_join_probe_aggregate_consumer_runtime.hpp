@@ -554,6 +554,82 @@ static bool SljitTryExecutePerfectHashInlineStringKnownGroupConsumer(
 	return true;
 }
 
+//! A dictionary group vector resolves each dictionary entry its rows reference to an accumulator group once, so a row
+//! costs a dictionary-index load instead of a string transform and a group lookup. Every referenced entry is proven
+//! convertible and fits the accumulator before any group is created: a declined vector leaves no state behind, and no
+//! group is ever created without a row.
+template <class GROUP_TYPE, class PREDICATE_MATCHER, class BUILD_INDEX, class FLUSH_ACCUMULATOR>
+static bool SljitTryExecutePerfectHashDictionaryStringGroupConsumer(
+    SljitDirectJoinOutputAggregateStrategy &strategy, Vector &group_input, const SelectionVector &match_selection,
+    const BUILD_INDEX &build_index, const ExecutionRowPointerGroupKeySource &group_source,
+    PREDICATE_MATCHER &predicate_matcher, FLUSH_ACCUMULATOR &flush_accumulator, idx_t count) {
+	if (group_source.cast_kind != ExecutionRowPointerGroupKeyCastKind::STRING_COMPRESS ||
+	    group_source.source_physical_type != PhysicalType::VARCHAR ||
+	    group_input.GetVectorType() != VectorType::DICTIONARY_VECTOR || count > STANDARD_VECTOR_SIZE) {
+		return false;
+	}
+	const auto dictionary_size = DictionaryVector::DictionarySize(group_input);
+	if (!dictionary_size.IsValid() || dictionary_size.GetIndex() > STANDARD_VECTOR_SIZE) {
+		return false;
+	}
+	auto &entry_selection = DictionaryVector::SelVector(group_input);
+	UnifiedVectorFormat dictionary_format;
+	DictionaryVector::Child(group_input).ToUnifiedFormat(dictionary_size.GetIndex(), dictionary_format);
+	auto dictionary_data = UnifiedVectorFormat::GetData<string_t>(dictionary_format);
+
+	static constexpr uint16_t UNREFERENCED = NumericLimits<uint16_t>::Maximum();
+	static_assert(SLJIT_JOIN_INPUT_COMPLEMENTARY_ACCUMULATOR_MAX_GROUPS < UNREFERENCED,
+	              "a dictionary entry's group index must fit its uint16_t slot");
+	std::array<uint16_t, STANDARD_VECTOR_SIZE> entry_groups;
+	std::fill_n(entry_groups.begin(), dictionary_size.GetIndex(), UNREFERENCED);
+	std::array<sel_t, STANDARD_VECTOR_SIZE> referenced_entries;
+	idx_t referenced_count = 0;
+	SljitSelectedInputGroupStringCompress<GROUP_TYPE> convert;
+	for (idx_t match_idx = 0; match_idx < count; match_idx++) {
+		const auto entry = entry_selection.get_index(match_selection.get_index(match_idx));
+		if (entry_groups[entry] != UNREFERENCED) {
+			continue;
+		}
+		const auto source_idx = dictionary_format.sel->get_index(entry);
+		if (dictionary_format.validity.RowIsValid(source_idx) && !convert.CanConvert(dictionary_data[source_idx])) {
+			return false;
+		}
+		entry_groups[entry] = 0;
+		referenced_entries[referenced_count++] = UnsafeNumericCast<sel_t>(entry);
+	}
+	auto &accumulator = SljitGetJoinInputComplementarySumAccumulator<GROUP_TYPE, true>(strategy);
+	if (referenced_count > SLJIT_JOIN_INPUT_COMPLEMENTARY_ACCUMULATOR_MAX_GROUPS) {
+		return false;
+	}
+	if (accumulator.Count() + referenced_count > SLJIT_JOIN_INPUT_COMPLEMENTARY_ACCUMULATOR_MAX_GROUPS &&
+	    !flush_accumulator()) {
+		throw InternalException("SLJIT direct perfect probe accumulator overflow flush failed");
+	}
+	for (idx_t referenced_idx = 0; referenced_idx < referenced_count; referenced_idx++) {
+		const auto entry = referenced_entries[referenced_idx];
+		const auto source_idx = dictionary_format.sel->get_index(entry);
+		const bool valid = dictionary_format.validity.RowIsValid(source_idx);
+		GROUP_TYPE key {};
+		if (valid) {
+			convert.ConvertPreflighted(dictionary_data[source_idx], key);
+		}
+		idx_t group_idx;
+		bool created;
+		if (!accumulator.groups.FindOrCreate(valid, key, group_idx, created)) {
+			throw InternalException("SLJIT direct perfect probe accumulator full after reserving dictionary groups");
+		}
+		entry_groups[entry] = UnsafeNumericCast<uint16_t>(group_idx);
+	}
+	for (idx_t match_idx = 0; match_idx < count; match_idx++) {
+		const auto group_idx = entry_groups[entry_selection.get_index(match_selection.get_index(match_idx))];
+		auto *counts = predicate_matcher.MatchAllValid(build_index.Get(match_idx))
+		                   ? accumulator.matching_counts.data()
+		                   : accumulator.non_matching_counts.data();
+		counts[group_idx]++;
+	}
+	return true;
+}
+
 template <bool PREDICATE_ALL_VALID, class PREDICATE_MATCHER, class FLUSH_ACCUMULATOR, class BUILD_INDEX>
 struct SljitPerfectHashComplementarySumProbeConsumerGroupDispatch {
 	SljitDirectJoinOutputAggregateStrategy &strategy;
@@ -568,6 +644,7 @@ struct SljitPerfectHashComplementarySumProbeConsumerGroupDispatch {
 	bool &used_one_or_two_known_groups;
 	bool &used_inline_string_known_groups;
 	bool &used_inline_string_identity_selection;
+	bool &used_dictionary_groups;
 
 	template <class GROUP_TYPE>
 	bool Execute() {
@@ -577,6 +654,15 @@ struct SljitPerfectHashComplementarySumProbeConsumerGroupDispatch {
 			        used_inline_string_identity_selection)) {
 				used_one_or_two_known_groups = true;
 				used_inline_string_known_groups = true;
+				return true;
+			}
+		}
+		// one or two inline groups compare their storage signatures directly; more groups resolve per dictionary entry
+		if constexpr (PREDICATE_ALL_VALID) {
+			if (SljitTryExecutePerfectHashDictionaryStringGroupConsumer<GROUP_TYPE>(
+			        strategy, group_input, match_selection, build_index, group_source, predicate_matcher,
+			        flush_accumulator, count)) {
+				used_dictionary_groups = true;
 				return true;
 			}
 		}
@@ -623,7 +709,7 @@ static bool SljitExecutePerfectHashComplementarySumProbeConsumer(
     const BUILD_INDEX &build_index, const ExecutionRowPointerGroupKeySource &group_source,
     PREDICATE_MATCHER &predicate_matcher, idx_t count, bool source_key0_int64_to_int32_unchecked,
     FLUSH_ACCUMULATOR &flush_accumulator, bool &used_one_or_two_known_groups, bool &used_inline_string_known_groups,
-    bool &used_inline_string_identity_selection) {
+    bool &used_inline_string_identity_selection, bool &used_dictionary_groups) {
 	SljitPerfectHashComplementarySumProbeConsumerGroupDispatch<PREDICATE_ALL_VALID, PREDICATE_MATCHER,
 	                                                           FLUSH_ACCUMULATOR, BUILD_INDEX>
 	    dispatch {strategy,
@@ -637,7 +723,8 @@ static bool SljitExecutePerfectHashComplementarySumProbeConsumer(
 	              flush_accumulator,
 	              used_one_or_two_known_groups,
 	              used_inline_string_known_groups,
-	              used_inline_string_identity_selection};
+	              used_inline_string_identity_selection,
+	              used_dictionary_groups};
 	return SljitDispatchPreaggregatedInputVectorGroupTargetType(group_source.target_physical_type, dispatch);
 }
 
@@ -657,6 +744,7 @@ static bool SljitTryExecutePerfectHashComplementarySumProbeConsumer(
 	bool used_one_or_two_known_groups = false;
 	bool used_inline_string_known_groups = false;
 	bool used_inline_string_identity_selection = false;
+	bool used_dictionary_groups = false;
 	auto execute = [&](auto &active_predicate_matcher) {
 		if (active_predicate_matcher.AllValid()) {
 			runtime.RecordJitRuntimePath("hash_join_probe.perfect_probe.direct_aggregate_consumer.all_valid_rhs",
@@ -664,7 +752,11 @@ static bool SljitTryExecutePerfectHashComplementarySumProbeConsumer(
 			const bool executed = SljitExecutePerfectHashComplementarySumProbeConsumer<true>(
 			    strategy, group_input, match_selection, build_index, group_source, active_predicate_matcher, count,
 			    source_key0_int64_to_int32_unchecked, flush_accumulator, used_one_or_two_known_groups,
-			    used_inline_string_known_groups, used_inline_string_identity_selection);
+			    used_inline_string_known_groups, used_inline_string_identity_selection, used_dictionary_groups);
+			if (used_dictionary_groups) {
+				runtime.RecordJitRuntimePath(
+				    "hash_join_probe.perfect_probe.direct_aggregate_consumer.dictionary_groups", count);
+			}
 			if (used_inline_string_known_groups) {
 				runtime.RecordJitRuntimePath(
 				    "hash_join_probe.perfect_probe.direct_aggregate_consumer.inline_string_known_groups", count);
@@ -683,7 +775,7 @@ static bool SljitTryExecutePerfectHashComplementarySumProbeConsumer(
 		return SljitExecutePerfectHashComplementarySumProbeConsumer<false>(
 		    strategy, group_input, match_selection, build_index, group_source, active_predicate_matcher, count,
 		    source_key0_int64_to_int32_unchecked, flush_accumulator, used_one_or_two_known_groups,
-		    used_inline_string_known_groups, used_inline_string_identity_selection);
+		    used_inline_string_known_groups, used_inline_string_identity_selection, used_dictionary_groups);
 	};
 	if (predicate_field.compressed_size == sizeof(uhugeint_t) &&
 	    FlatVector::Validity(predicate_dictionary).CannotHaveNull()) {

@@ -181,9 +181,13 @@ internal error. `jit_debug_force_entry_defer` exercises the entry deferral.
 - A primitive may borrow scratch only until the next scratch mutation; a
   continuation that outlives the call owns or copies its state.
 - A consumer states the physical representation it accepts. A generic loader
-  may dispatch every representation; a row-layout, compressed-row,
-  row-pointer, or complementary consumer rejects dictionary storage. Silent
-  interpretation of one representation as another is forbidden.
+  may dispatch every representation; a row-layout, compressed-row, or
+  row-pointer consumer rejects dictionary storage. The complementary join
+  consumer accepts a dictionary group vector explicitly: it resolves each
+  referenced entry to its group once per vector, after proving every entry
+  convertible and the groups within the accumulator, so a declined vector
+  leaves no state. Silent interpretation of one representation as another is
+  forbidden.
 - Fast-path caches key their validity on stable identities — dictionary ids,
   value keys, epochs — never on reusable addresses, and every event that
   relocates rows disables caches holding row addresses.
