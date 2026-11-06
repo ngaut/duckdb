@@ -67,8 +67,8 @@ CompressedStringScanState::~CompressedStringScanState() {
 	delete reinterpret_cast<duckdb_fsst_decoder_t *>(decoder);
 }
 
-string_t CompressedStringScanState::FetchStringFromDict(Vector &result, uint32_t dict_offset, idx_t dict_idx,
-                                                        StringScanType string_scan_type) {
+string_t CompressedStringScanState::FetchStringFromDict(VectorStringBuffer &result_strings, uint32_t dict_offset,
+                                                        idx_t dict_idx, StringScanType string_scan_type) {
 	D_ASSERT(dict_idx < layout.dict_count);
 	if (dict_idx == 0) {
 		return string_t(nullptr, 0);
@@ -90,13 +90,12 @@ string_t CompressedStringScanState::FetchStringFromDict(Vector &result, uint32_t
 		if (all_values_inlined) {
 			return FSSTPrimitives::DecompressInlinedValue(decoder, str_ptr, string_len);
 		} else {
-			return FSSTPrimitives::DecompressValue(decoder, StringVector::GetStringAllocator(result), str_ptr,
-			                                       string_len);
+			return FSSTPrimitives::DecompressValue(decoder, result_strings.GetStringAllocator(), str_ptr, string_len);
 		}
 	}
 	default:
 		if (string_scan_type == StringScanType::COPY_STRINGS) {
-			return StringVector::AddStringOrBlob(result, string_t(str_ptr, string_len));
+			return result_strings.GetHeap().AddBlob(string_t(str_ptr, string_len));
 		}
 		// FIXME: the Vector doesn't seem to take ownership of the non-inlined string data???
 		return string_t(str_ptr, string_len);
@@ -259,11 +258,12 @@ bool CompressedStringScanState::EnsureDictionary() {
 	D_ASSERT(layout.dict_count >= 1);
 	validity.SetInvalid(0);
 
+	auto &dict_strings = StringVector::GetStringBuffer(dict_data);
 	uint32_t offset = 0;
 	for (uint32_t i = 0; i < layout.dict_count; i++) {
 		//! We can uncompress during fetching, we need the length of the string inside the dictionary
 		auto string_len = string_lengths[i];
-		dict_child_data[i] = FetchStringFromDict(dict_data, offset, i);
+		dict_child_data[i] = FetchStringFromDict(dict_strings, offset, i);
 		offset += string_len;
 	}
 	return true;
@@ -368,6 +368,8 @@ void CompressedStringScanState::Select(Vector &result, idx_t result_offset, idx_
 
 	auto result_data = FlatVector::Writer<string_t>(result, sel_count, result_offset);
 	if (string_scan_type == StringScanType::COPY_STRINGS) {
+		// Resolved once per scan rather than per string, after the writer prepared the result's buffer
+		auto &result_strings = StringVector::GetStringBuffer(result);
 		// a select of many rows unpacks every length up front and computes all offsets on its first step back
 		const bool few_rows = sel_count < BitpackingPrimitives::BITPACKING_ALGORITHM_GROUP_SIZE;
 		if (!few_rows) {
@@ -379,7 +381,7 @@ void CompressedStringScanState::Select(Vector &result, idx_t result_offset, idx_
 				result_data.WriteNull();
 				continue;
 			}
-			result_data.WriteStringRef(FetchStringFromDict(result, GetStringOffset(string_number, few_rows),
+			result_data.WriteStringRef(FetchStringFromDict(result_strings, GetStringOffset(string_number, few_rows),
 			                                               string_number, StringScanType::COPY_STRINGS));
 		}
 	} else if (EnsureDictionary()) {
@@ -396,6 +398,7 @@ void CompressedStringScanState::Select(Vector &result, idx_t result_offset, idx_
 		}
 	} else {
 		LoadStringLengths();
+		auto &result_strings = StringVector::GetStringBuffer(result);
 		for (idx_t i = 0; i < sel_count; i++) {
 			// Lookup dict offset in index buffer
 			auto string_number = selvec.get_index(start_offset + sel.get_index(i));
@@ -409,7 +412,7 @@ void CompressedStringScanState::Select(Vector &result, idx_t result_offset, idx_
 			for (; decompress_position < string_number; decompress_position++) {
 				decompress_offset += string_lengths[decompress_position];
 			}
-			result_data.WriteStringRef(FetchStringFromDict(result, decompress_offset, string_number));
+			result_data.WriteStringRef(FetchStringFromDict(result_strings, decompress_offset, string_number));
 		}
 	}
 }

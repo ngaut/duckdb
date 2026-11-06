@@ -59,8 +59,9 @@ public:
 
 private:
 	static SegmentLayout ReadLayout(const BufferHandle &handle, const ColumnSegment &segment);
-	//! With COPY_STRINGS the string is owned by the result instead of pointing into the block
-	string_t FetchStringFromDict(Vector &result, uint32_t dict_offset, idx_t dict_idx,
+	//! Decompressed strings, and with COPY_STRINGS every string, are owned by the result's string buffer instead of
+	//! pointing into the block
+	string_t FetchStringFromDict(VectorStringBuffer &result_strings, uint32_t dict_offset, idx_t dict_idx,
 	                             StringScanType string_scan_type = StringScanType::STANDARD);
 	//! Builds the dictionary on first use, returns false if this scan has no dictionary
 	bool EnsureDictionary();
