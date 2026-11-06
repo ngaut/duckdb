@@ -1,0 +1,74 @@
+# name: test/sql/join/inner/test_join_perfect_hash_parallel_build.test
+# description: Perfect hash tables filled by parallel finalize tasks keep payloads, NULLs, holes and duplicate fallback
+# group: [inner]
+
+statement ok
+SET threads=4;
+
+statement ok
+PRAGMA verify_parallelism;
+
+# Keep the right table on the build side, so that every join below builds a perfect hash table
+statement ok
+SET disabled_optimizers='join_order,build_side_probe_side';
+
+statement ok
+CREATE TABLE probe AS SELECT (i % 400000)::BIGINT AS k, i AS p FROM range(800000) t(i);
+
+# Dense build: every payload type width, NULL payloads in every validity word, inline and heap strings
+statement ok
+CREATE TABLE dense AS
+SELECT i::BIGINT AS k,
+       CASE WHEN i % 7 = 0 THEN NULL ELSE (i % 100)::TINYINT END AS v1,
+       CASE WHEN i % 11 = 0 THEN NULL ELSE (i % 30000)::SMALLINT END AS v2,
+       CASE WHEN i % 13 = 0 THEN NULL ELSE i::INTEGER END AS v4,
+       CASE WHEN i % 17 = 0 THEN NULL ELSE i * 3 END AS v8,
+       CASE WHEN i % 19 = 0 THEN NULL ELSE i::HUGEINT * 1000000000000 END AS v16,
+       CASE WHEN i % 23 = 0 THEN NULL WHEN i % 2 = 0 THEN 's' || i ELSE 'a long non-inlined string ' || i END AS s
+FROM range(400000) t(i);
+
+query IIIIIIII
+SELECT count(*) FILTER (WHERE v1 IS DISTINCT FROM CASE WHEN k % 7 = 0 THEN NULL ELSE (k % 100)::TINYINT END
+                           OR v2 IS DISTINCT FROM CASE WHEN k % 11 = 0 THEN NULL ELSE (k % 30000)::SMALLINT END
+                           OR v4 IS DISTINCT FROM CASE WHEN k % 13 = 0 THEN NULL ELSE k::INTEGER END
+                           OR v8 IS DISTINCT FROM CASE WHEN k % 17 = 0 THEN NULL ELSE k * 3 END
+                           OR v16 IS DISTINCT FROM CASE WHEN k % 19 = 0 THEN NULL ELSE k::HUGEINT * 1000000000000 END
+                           OR s IS DISTINCT FROM CASE WHEN k % 23 = 0 THEN NULL WHEN k % 2 = 0 THEN 's' || k
+                                                      ELSE 'a long non-inlined string ' || k END),
+       count(*), count(v1), count(v2), count(v4), count(v8), count(v16), count(s)
+FROM probe JOIN dense USING (k);
+----
+0	800000	685714	727272	738460	752940	757894	765216
+
+# Sparse build: probes into holes find no match
+statement ok
+CREATE TABLE sparse AS SELECT (i * 3)::BIGINT AS k, 'v' || i AS s FROM range(130000) t(i);
+
+query II
+SELECT count(*), count(DISTINCT s) FROM probe JOIN sparse USING (k);
+----
+260000	130000
+
+query I
+SELECT count(*) FROM probe JOIN sparse USING (k) WHERE s <> 'v' || (k // 3);
+----
+0
+
+# A duplicate key whose rows land in different fill tasks falls back to the regular hash join
+statement ok
+CREATE TABLE duplicate AS
+SELECT CASE WHEN i = 399990 THEN 3 ELSE i END::BIGINT AS k, i AS b FROM range(400000) t(i);
+
+query III
+SELECT count(*), count(DISTINCT b), sum(b) FILTER (WHERE k = 3) FROM probe JOIN duplicate USING (k);
+----
+800000	400000	799986
+
+# NULL build keys are dropped from the table
+statement ok
+CREATE TABLE null_keys AS SELECT CASE WHEN i % 5 = 0 THEN NULL ELSE i END::BIGINT AS k, i AS b FROM range(400000) t(i);
+
+query II
+SELECT count(*), count(*) FILTER (WHERE k <> b) FROM probe JOIN null_keys USING (k);
+----
+640000	0

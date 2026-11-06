@@ -1381,16 +1381,24 @@ void JoinHashTable::BuildPrefixRangeFilter() {
 	}
 
 	auto prefix_range_state = InitializePrefixRangeBuildState();
-	TupleDataChunkIterator iterator(*data_collection, TupleDataPinProperties::KEEP_EVERYTHING_PINNED, 0,
-	                                data_collection->ChunkCount(), false);
+	InsertPrefixRange(0, data_collection->ChunkCount(), *prefix_range_state, false);
+	MergePrefixRangeBuildState(*prefix_range_state);
+}
+
+void JoinHashTable::InsertPrefixRange(idx_t chunk_begin, idx_t chunk_end, PrefixRangeFilter::BuildState &state,
+                                      bool parallel) {
+	if (chunk_begin == chunk_end) {
+		return;
+	}
+	TupleDataChunkIterator iterator(*data_collection, TupleDataPinProperties::KEEP_EVERYTHING_PINNED, chunk_begin,
+	                                chunk_end, false);
 	do {
 		const auto count = iterator.GetCurrentChunkCount();
 		if (count == 0) {
 			continue;
 		}
-		InsertPrefixRangeChunk(iterator.GetChunkState(), count, *prefix_range_state);
+		InsertPrefixRangeChunk(iterator.GetChunkState(), count, state, parallel);
 	} while (iterator.Next());
-	MergePrefixRangeBuildState(*prefix_range_state);
 }
 
 void JoinHashTable::InsertPrefixRangeChunk(TupleDataChunkState &chunk_state, idx_t count,

@@ -828,7 +828,7 @@ public:
 
 	//! Coordinates first-chunk publication of the TupleDataLayout across parallel sinks.
 	LayoutGate layout_gate;
-	//! True iff this join may use perfect-hash-join at Finalize. PHJ's FullScanHashTable reads payload at native
+	//! True iff this join may use perfect-hash-join at Finalize. PHJ's FillPerfectHashTable reads payload at native
 	//! width, so it disables dict-surviving slot narrowing.
 	bool can_use_perfect_hash = false;
 };
@@ -1004,7 +1004,7 @@ static bool CanUseDictSurvivingJoin(const PhysicalHashJoin &op, const JoinHashTa
 	if (op.rhs_output_columns.col_types.empty()) {
 		return false;
 	}
-	// PHJ's FullScanHashTable reads payload from the row store at native width; a narrowed slot would corrupt it.
+	// PHJ's FillPerfectHashTable reads payload from the row store at native width; a narrowed slot would corrupt it.
 	if (can_use_perfect_hash) {
 		return false;
 	}
@@ -1663,6 +1663,44 @@ struct PrefixRangeBuildLane {
 	idx_t task_count = 0;
 };
 
+//! Prefix-range build states replicated across the tasks of one finalize event, merged once every task is done.
+class PrefixRangeBuildLanes {
+public:
+	void Initialize(JoinHashTable &ht, idx_t task_count) {
+		if (!ht.ShouldBuildPrefixRangeFilter() || task_count == 0) {
+			return;
+		}
+		// Bound replicated PRF state independently of the number of radix partitions.
+		static constexpr idx_t MAX_PREFIX_RANGE_BUILD_MEMORY = 16ULL * 1024ULL * 1024ULL;
+		const auto state_size = ht.GetPrefixRangeBuildStateSize();
+		D_ASSERT(state_size > 0);
+		const auto lanes_within_budget = MaxValue<idx_t>(MAX_PREFIX_RANGE_BUILD_MEMORY / state_size, 1);
+		const auto lane_count = MinValue<idx_t>(task_count, lanes_within_budget);
+		lanes.reserve(lane_count);
+		for (idx_t lane_idx = 0; lane_idx < lane_count; lane_idx++) {
+			lanes.push_back(make_uniq<PrefixRangeBuildLane>(ht.InitializePrefixRangeBuildState()));
+		}
+	}
+
+	optional_ptr<PrefixRangeBuildLane> Assign(idx_t task_idx) {
+		if (lanes.empty()) {
+			return nullptr;
+		}
+		auto &lane = *lanes[task_idx % lanes.size()];
+		lane.task_count++;
+		return lane;
+	}
+
+	void Merge(JoinHashTable &ht) {
+		for (auto &lane : lanes) {
+			ht.MergePrefixRangeBuildState(*lane->state);
+		}
+	}
+
+private:
+	vector<unique_ptr<PrefixRangeBuildLane>> lanes;
+};
+
 struct JoinBuildRange {
 	idx_t begin;
 	idx_t end;
@@ -1878,29 +1916,21 @@ public:
 		}
 
 		const auto tasks = MinValue<idx_t>(queue->Count(), sink.num_threads);
-		InitializePrefixRangeLanes(ht, tasks);
+		prefix_range_lanes.Initialize(ht, tasks);
 		vector<shared_ptr<Task>> finalize_tasks;
 		finalize_tasks.reserve(tasks);
 		for (idx_t task_idx = 0; task_idx < tasks; task_idx++) {
-			optional_ptr<PrefixRangeBuildLane> lane;
-			if (!prefix_range_lanes.empty()) {
-				lane = *prefix_range_lanes[task_idx % prefix_range_lanes.size()];
-				lane->task_count++;
-			}
-			finalize_tasks.push_back(make_uniq<HashJoinFinalizeTask>(sink, shared_from_this(), *queue, parallel, lane));
+			finalize_tasks.push_back(make_uniq<HashJoinFinalizeTask>(sink, shared_from_this(), *queue, parallel,
+			                                                         prefix_range_lanes.Assign(task_idx)));
 		}
 		return finalize_tasks;
 	}
 
 	void ExecuteDirectly() {
 		auto &ht = *sink.hash_table;
-		InitializePrefixRangeLanes(ht, 1);
-		optional_ptr<PrefixRangeBuildLane> lane;
-		if (!prefix_range_lanes.empty()) {
-			lane = *prefix_range_lanes[0];
-			lane->task_count = 1;
-		}
-		ExecuteHashJoinFinalizeTask(sink, {0, ht.GetDataCollection().ChunkCount()}, false, lane);
+		prefix_range_lanes.Initialize(ht, 1);
+		ExecuteHashJoinFinalizeTask(sink, {0, ht.GetDataCollection().ChunkCount()}, false,
+		                            prefix_range_lanes.Assign(0));
 		FinishTasks();
 	}
 
@@ -1916,9 +1946,7 @@ public:
 
 private:
 	void FinishTasks() {
-		for (auto &lane : prefix_range_lanes) {
-			sink.hash_table->MergePrefixRangeBuildState(*lane->state);
-		}
+		prefix_range_lanes.Merge(*sink.hash_table);
 		sink.hash_table->GetDataCollection().VerifyEverythingPinned();
 
 		// Both finalize paths finish writing the chains before reaching here,
@@ -1937,23 +1965,7 @@ private:
 		sink.hash_table->MarkFinalized();
 	}
 
-	void InitializePrefixRangeLanes(JoinHashTable &ht, idx_t task_count) {
-		if (!ht.ShouldBuildPrefixRangeFilter() || task_count == 0) {
-			return;
-		}
-		// Bound replicated PRF state independently of the number of radix partitions.
-		static constexpr idx_t MAX_PREFIX_RANGE_BUILD_MEMORY = 16ULL * 1024ULL * 1024ULL;
-		const auto state_size = ht.GetPrefixRangeBuildStateSize();
-		D_ASSERT(state_size > 0);
-		const auto lanes_within_budget = MaxValue<idx_t>(MAX_PREFIX_RANGE_BUILD_MEMORY / state_size, 1);
-		const auto lane_count = MinValue<idx_t>(task_count, lanes_within_budget);
-		prefix_range_lanes.reserve(lane_count);
-		for (idx_t lane_idx = 0; lane_idx < lane_count; lane_idx++) {
-			prefix_range_lanes.push_back(make_uniq<PrefixRangeBuildLane>(ht.InitializePrefixRangeBuildState()));
-		}
-	}
-
-	vector<unique_ptr<PrefixRangeBuildLane>> prefix_range_lanes;
+	PrefixRangeBuildLanes prefix_range_lanes;
 	unique_ptr<JoinBuildQueue> queue;
 };
 
@@ -1976,6 +1988,146 @@ void HashJoinGlobalSinkState::ScheduleFinalize(Pipeline &pipeline, Event &event)
 	auto new_finalize_event = make_shared_ptr<HashJoinFinalizeEvent>(pipeline, *this);
 	new_init_event->InsertEvent(std::move(new_finalize_event));
 }
+
+//! Runs one finalize step over the build chunk ranges of a shared queue.
+class HashJoinChunkRangeTask : public ExecutorTask {
+public:
+	using execute_range_t = std::function<void(const JoinBuildRange &range)>;
+
+	HashJoinChunkRangeTask(HashJoinGlobalSinkState &sink_p, shared_ptr<Event> event, JoinBuildQueue &queue_p,
+	                       string task_type_p, execute_range_t execute_range_p)
+	    : ExecutorTask(sink_p.context, std::move(event), sink_p.op), sink(sink_p), queue(queue_p),
+	      task_type(std::move(task_type_p)), execute_range(std::move(execute_range_p)) {
+	}
+
+	TaskExecutionResult ExecuteTask(TaskExecutionMode mode) override {
+		const auto start = queue.StartShard();
+		idx_t pass = 0;
+		JoinBuildRange range;
+		while (queue.Next(start, pass, range)) {
+			sink.context.InterruptCheck();
+			execute_range(range);
+		}
+		event->FinishTask();
+		return TaskExecutionResult::TASK_FINISHED;
+	}
+
+	string TaskType() const override {
+		return task_type;
+	}
+
+private:
+	HashJoinGlobalSinkState &sink;
+	JoinBuildQueue &queue;
+	string task_type;
+	execute_range_t execute_range;
+};
+
+static unique_ptr<JoinBuildQueue> CreateHashJoinChunkRangeQueue(const HashJoinGlobalSinkState &sink) {
+	static constexpr idx_t CHUNKS_PER_TASK = 64;
+	auto queue = make_uniq<JoinBuildQueue>(1);
+	const auto chunk_count = sink.hash_table->GetDataCollection().ChunkCount();
+	for (idx_t begin = 0; begin < chunk_count; begin += CHUNKS_PER_TASK) {
+		queue->Add(0, begin, MinValue(begin + CHUNKS_PER_TASK, chunk_count));
+	}
+	return queue;
+}
+
+//! Builds the prefix-range filter of a finalized perfect hash table from the build chunks.
+class HashJoinPrefixRangeEvent : public BasePipelineEvent {
+public:
+	HashJoinPrefixRangeEvent(Pipeline &pipeline_p, HashJoinGlobalSinkState &sink)
+	    : BasePipelineEvent(pipeline_p), sink(sink) {
+	}
+
+	HashJoinGlobalSinkState &sink;
+
+public:
+	void Schedule() override {
+		auto &ht = *sink.hash_table;
+		queue = CreateHashJoinChunkRangeQueue(sink);
+		const auto tasks = MinValue<idx_t>(queue->Count(), sink.num_threads);
+		lanes.Initialize(ht, tasks);
+		vector<shared_ptr<Task>> prefix_range_tasks;
+		for (idx_t task_idx = 0; task_idx < tasks; task_idx++) {
+			auto lane = lanes.Assign(task_idx);
+			D_ASSERT(lane);
+			prefix_range_tasks.push_back(make_uniq<HashJoinChunkRangeTask>(
+			    sink, shared_from_this(), *queue, "HashJoinPrefixRangeTask", [this, lane](const JoinBuildRange &range) {
+				    sink.hash_table->InsertPrefixRange(range.begin, range.end, *lane->state, lane->task_count > 1);
+			    }));
+		}
+		SetTasks(std::move(prefix_range_tasks));
+	}
+
+	void FinishEvent() override {
+		lanes.Merge(*sink.hash_table);
+		PublishDeferredRuntimeFilters(sink.context, *sink.hash_table, *sink.global_filter_state);
+	}
+
+private:
+	PrefixRangeBuildLanes lanes;
+	unique_ptr<JoinBuildQueue> queue;
+};
+
+//! Completes the finalize of a filled perfect hash table: a duplicate build key falls back to the regular hash join,
+//! otherwise the runtime filters are registered with the knowledge that the probe uses the perfect hash table.
+static void CompletePerfectHashJoinFinalize(Pipeline &pipeline, Event &event, HashJoinGlobalSinkState &sink,
+                                            unique_ptr<DataChunk> filter_min_max, bool parallel) {
+	auto &op = sink.op;
+	auto &ht = *sink.hash_table;
+	const auto use_perfect_hash = sink.perfect_join_executor->FinalizePerfectHashTable();
+	if (!use_perfect_hash) {
+		sink.perfect_join_executor.reset();
+	}
+	if (filter_min_max) {
+		op.filter_pushdown->FinalizeFilters(sink.context, op, std::move(filter_min_max), &ht, !use_perfect_hash, true,
+		                                    sink.global_filter_state.get());
+		if (use_perfect_hash) {
+			if (parallel && ht.ShouldBuildPrefixRangeFilter()) {
+				event.InsertEvent(make_shared_ptr<HashJoinPrefixRangeEvent>(pipeline, sink));
+			} else {
+				ht.BuildPrefixRangeFilter();
+				PublishDeferredRuntimeFilters(sink.context, ht, *sink.global_filter_state);
+			}
+		}
+	}
+	if (!use_perfect_hash) {
+		sink.ScheduleFinalize(pipeline, event);
+	}
+}
+
+//! Fills the perfect hash table from disjoint build chunk ranges.
+class PerfectHashJoinFillEvent : public BasePipelineEvent {
+public:
+	PerfectHashJoinFillEvent(Pipeline &pipeline_p, HashJoinGlobalSinkState &sink, unique_ptr<DataChunk> filter_min_max)
+	    : BasePipelineEvent(pipeline_p), sink(sink), filter_min_max(std::move(filter_min_max)) {
+	}
+
+	HashJoinGlobalSinkState &sink;
+
+public:
+	void Schedule() override {
+		queue = CreateHashJoinChunkRangeQueue(sink);
+		const auto tasks = MinValue<idx_t>(queue->Count(), sink.num_threads);
+		vector<shared_ptr<Task>> fill_tasks;
+		for (idx_t task_idx = 0; task_idx < tasks; task_idx++) {
+			fill_tasks.push_back(make_uniq<HashJoinChunkRangeTask>(
+			    sink, shared_from_this(), *queue, "PerfectHashJoinFillTask", [this](const JoinBuildRange &range) {
+				    sink.perfect_join_executor->FillPerfectHashTable(range.begin, range.end);
+			    }));
+		}
+		SetTasks(std::move(fill_tasks));
+	}
+
+	void FinishEvent() override {
+		CompletePerfectHashJoinFinalize(*pipeline, *this, sink, std::move(filter_min_max), true);
+	}
+
+private:
+	unique_ptr<DataChunk> filter_min_max;
+	unique_ptr<JoinBuildQueue> queue;
+};
 
 void HashJoinGlobalSinkState::InitializeProbeSpill() {
 	annotated_lock_guard<annotated_mutex> guard(lock);
@@ -2782,30 +2934,27 @@ SinkFinalizeType PhysicalHashJoin::Finalize(Pipeline &pipeline, Event &event, Cl
 
 	// check for possible perfect hash table
 	auto use_perfect_hash = sink.perfect_join_executor->CanDoPerfectHashJoin(*this, min, max);
-	// PHJ's FullScanHashTable reads payload at native width; if any slot was narrowed it would crash. Runtime
+	// PHJ's FillPerfectHashTable reads payload at native width; if any slot was narrowed it would crash. Runtime
 	// min/max from filter pushdown can re-enable PHJ here, so re-check after dict-surviving may have narrowed.
 	if (use_perfect_hash && sink.DictSurvivingActive()) {
 		use_perfect_hash = false;
 	}
 	if (use_perfect_hash) {
-		use_perfect_hash = sink.perfect_join_executor->BuildPerfectHashTable();
-	}
-
-	if (!use_perfect_hash) {
-		sink.perfect_join_executor.reset();
-	}
-
-	if (filter_min_max) {
-		filter_pushdown->FinalizeFilters(context, *this, std::move(filter_min_max), &ht, !use_perfect_hash, true,
-		                                 sink.global_filter_state.get());
-		if (use_perfect_hash) {
-			ht.BuildPrefixRangeFilter();
-			PublishDeferredRuntimeFilters(context, ht, *sink.global_filter_state);
+		// A duplicate build key, found while filling, still falls back to the regular hash join
+		sink.perfect_join_executor->InitializePerfectHashTable();
+		if (FinalizeSingleThreaded(sink, false)) {
+			sink.perfect_join_executor->FillPerfectHashTable(0, ht.GetDataCollection().ChunkCount());
+			CompletePerfectHashJoinFinalize(pipeline, event, sink, std::move(filter_min_max), false);
+		} else {
+			event.InsertEvent(make_shared_ptr<PerfectHashJoinFillEvent>(pipeline, sink, std::move(filter_min_max)));
 		}
-	}
-
-	// In case of a large build side or duplicates, use regular hash join
-	if (!use_perfect_hash) {
+	} else {
+		// A large build side uses the regular hash join
+		sink.perfect_join_executor.reset();
+		if (filter_min_max) {
+			filter_pushdown->FinalizeFilters(context, *this, std::move(filter_min_max), &ht, true, true,
+			                                 sink.global_filter_state.get());
+		}
 		sink.ScheduleFinalize(pipeline, event);
 	}
 	sink.finalized = true;

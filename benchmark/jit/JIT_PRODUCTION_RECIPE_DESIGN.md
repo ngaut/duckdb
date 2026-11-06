@@ -460,6 +460,10 @@ fixed build-side columns, either `ROW` (row-layout offset plus validity) or
 `DICTIONARY` (index offset, data, validity, count); core resolves and caches
 these per operator and initializes every field before publishing `ready`.
 Storage-dependent RHS gathering is an exported core operation.
+A perfect-hash build fills its table from disjoint build-chunk ranges in
+parallel and builds its prefix-range filter the same way; a payload column
+without NULL values keeps an absent validity mask, the no-NULL proof that
+all-valid RHS consumers read.
 
 Execution-region backends use DuckDB's version- and platform-matched C++
 extension contract plus an execution-region ABI version, currently 21. Any

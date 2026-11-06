@@ -746,6 +746,8 @@ public:
 	idx_t GetPrefixRangeBuildStateSize() const;
 	void InsertPrefixRangeChunk(TupleDataChunkState &chunk_state, idx_t count, PrefixRangeFilter::BuildState &state,
 	                            bool parallel = false);
+	//! Insert the keys of the build chunks [chunk_begin, chunk_end) into a prefix-range build state.
+	void InsertPrefixRange(idx_t chunk_begin, idx_t chunk_end, PrefixRangeFilter::BuildState &state, bool parallel);
 	void MergePrefixRangeBuildState(PrefixRangeFilter::BuildState &state);
 
 	//! Get total size of HT if all partitions would be built

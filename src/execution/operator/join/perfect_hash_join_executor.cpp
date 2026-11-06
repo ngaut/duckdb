@@ -165,20 +165,186 @@ bool PerfectHashJoinExecutor::CanDoPerfectHashJoin(const PhysicalHashJoin &op, c
 //===--------------------------------------------------------------------===//
 // Build
 //===--------------------------------------------------------------------===//
-bool PerfectHashJoinExecutor::BuildPerfectHashTable() {
-	// First, allocate memory for each build column
+void PerfectHashJoinExecutor::InitializePerfectHashTable() {
 	const auto build_size = perfect_join_statistics.build_range + 1;
+	perfect_hash_table.clear();
 	for (const auto &type : join.rhs_output_columns.col_types) {
 		// PHJ keeps each entry alive for the operator's lifetime and wraps it in every emitted chunk
 		perfect_hash_table.emplace_back(DictionaryVector::CreateReusableGlobalDictionary(type, build_size));
+		// Fill tasks clear the bits of NULL values concurrently, so the mask must exist before they start
+		FlatVector::ValidityMutable(perfect_hash_table.back()->data).SetAllValid(build_size);
 	}
-
-	// and for duplicate_checking
 	bitmap_build_idx.Initialize(build_size);
 	bitmap_build_idx.SetAllInvalid(build_size);
+	unique_keys = 0;
+	has_duplicate_key = false;
+}
 
-	// Now fill columns with build data
-	return FullScanHashTable();
+template <typename T>
+bool PerfectHashJoinExecutor::TemplatedClaimBuildSlots(const Vector &keys, idx_t count, SelectionVector &slot_sel,
+                                                       SelectionVector &row_sel, idx_t &claimed) {
+	const auto min_value = perfect_join_statistics.build_min.GetValueUnsafe<T>();
+	const auto max_value = perfect_join_statistics.build_max.GetValueUnsafe<T>();
+	const auto entries = FlatVector::GetData<T>(keys);
+	const auto occupied = bitmap_build_idx.GetData();
+	claimed = 0;
+	for (idx_t i = 0; i < count; i++) {
+		const auto key = entries[i];
+		if (key < min_value || max_value < key) {
+			continue;
+		}
+		const auto slot = UnsafeNumericCast<idx_t>(key - min_value);
+		const auto bit = validity_t(1) << (slot % ValidityMask::BITS_PER_VALUE);
+		auto &word = *reinterpret_cast<atomic<validity_t> *>(&occupied[slot / ValidityMask::BITS_PER_VALUE]);
+		if (word.fetch_or(bit, std::memory_order_relaxed) & bit) {
+			return false;
+		}
+		slot_sel.set_index(claimed, slot);
+		row_sel.set_index(claimed++, i);
+	}
+	return true;
+}
+
+bool PerfectHashJoinExecutor::ClaimBuildSlots(const Vector &keys, idx_t count, SelectionVector &slot_sel,
+                                              SelectionVector &row_sel, idx_t &claimed) {
+	switch (keys.GetType().InternalType()) {
+	case PhysicalType::INT8:
+		return TemplatedClaimBuildSlots<int8_t>(keys, count, slot_sel, row_sel, claimed);
+	case PhysicalType::INT16:
+		return TemplatedClaimBuildSlots<int16_t>(keys, count, slot_sel, row_sel, claimed);
+	case PhysicalType::INT32:
+		return TemplatedClaimBuildSlots<int32_t>(keys, count, slot_sel, row_sel, claimed);
+	case PhysicalType::INT64:
+		return TemplatedClaimBuildSlots<int64_t>(keys, count, slot_sel, row_sel, claimed);
+	case PhysicalType::INT128:
+		return TemplatedClaimBuildSlots<hugeint_t>(keys, count, slot_sel, row_sel, claimed);
+	case PhysicalType::UINT8:
+		return TemplatedClaimBuildSlots<uint8_t>(keys, count, slot_sel, row_sel, claimed);
+	case PhysicalType::UINT16:
+		return TemplatedClaimBuildSlots<uint16_t>(keys, count, slot_sel, row_sel, claimed);
+	case PhysicalType::UINT32:
+		return TemplatedClaimBuildSlots<uint32_t>(keys, count, slot_sel, row_sel, claimed);
+	case PhysicalType::UINT64:
+		return TemplatedClaimBuildSlots<uint64_t>(keys, count, slot_sel, row_sel, claimed);
+	case PhysicalType::UINT128:
+		return TemplatedClaimBuildSlots<uhugeint_t>(keys, count, slot_sel, row_sel, claimed);
+	default:
+		throw NotImplementedException("Type not supported for perfect hash join");
+	}
+}
+
+template <idx_t WIDTH>
+struct PerfectHashPayloadValue {
+	uint8_t bytes[WIDTH];
+};
+
+template <class T>
+static void ScatterPerfectHashPayloadValues(const Vector &source, const SelectionVector &slot_sel, idx_t count,
+                                            Vector &target) {
+	const auto source_data = reinterpret_cast<const T *>(FlatVector::GetData(source));
+	const auto target_data = reinterpret_cast<T *>(FlatVector::GetDataMutable(target));
+	for (idx_t i = 0; i < count; i++) {
+		target_data[slot_sel.get_index(i)] = source_data[i];
+	}
+}
+
+//! Moves a chunk-local gathered payload column into its claimed table slots. Every slot has exactly one writer, but
+//! NULL bits of neighbouring slots share validity words with other fill tasks.
+static void ScatterPerfectHashPayload(const Vector &source, const SelectionVector &slot_sel, idx_t count,
+                                      Vector &target) {
+	switch (GetTypeIdSize(source.GetType().InternalType())) {
+	case 1:
+		ScatterPerfectHashPayloadValues<uint8_t>(source, slot_sel, count, target);
+		break;
+	case 2:
+		ScatterPerfectHashPayloadValues<uint16_t>(source, slot_sel, count, target);
+		break;
+	case 4:
+		ScatterPerfectHashPayloadValues<uint32_t>(source, slot_sel, count, target);
+		break;
+	case 8:
+		ScatterPerfectHashPayloadValues<uint64_t>(source, slot_sel, count, target);
+		break;
+	case 16:
+		ScatterPerfectHashPayloadValues<PerfectHashPayloadValue<16>>(source, slot_sel, count, target);
+		break;
+	default:
+		throw InternalException("Unsupported perfect hash join payload width");
+	}
+	const auto &source_validity = FlatVector::Validity(source);
+	if (source_validity.CannotHaveNull()) {
+		return;
+	}
+	const auto target_validity = FlatVector::ValidityMutable(target).GetData();
+	for (idx_t i = 0; i < count; i++) {
+		if (source_validity.RowIsValid(i)) {
+			continue;
+		}
+		const auto slot = slot_sel.get_index(i);
+		auto &word = *reinterpret_cast<atomic<validity_t> *>(&target_validity[slot / ValidityMask::BITS_PER_VALUE]);
+		word.fetch_and(~(validity_t(1) << (slot % ValidityMask::BITS_PER_VALUE)), std::memory_order_relaxed);
+	}
+}
+
+void PerfectHashJoinExecutor::FillPerfectHashTable(idx_t chunk_begin, idx_t chunk_end) {
+	if (chunk_begin == chunk_end || has_duplicate_key.load(std::memory_order_relaxed)) {
+		return;
+	}
+	auto &data_collection = ht.GetDataCollection();
+	Vector keys(GetKeyType());
+	vector<unique_ptr<Vector>> payload;
+	for (const auto &type : join.rhs_output_columns.col_types) {
+		payload.push_back(make_uniq<Vector>(type));
+	}
+	SelectionVector slot_sel(STANDARD_VECTOR_SIZE);
+	SelectionVector row_sel(STANDARD_VECTOR_SIZE);
+	const auto &incremental = *FlatVector::IncrementalSelectionVector();
+	idx_t claimed_keys = 0;
+	TupleDataChunkIterator iterator(data_collection, TupleDataPinProperties::KEEP_EVERYTHING_PINNED, chunk_begin,
+	                                chunk_end, false);
+	do {
+		const auto count = iterator.GetCurrentChunkCount();
+		if (count == 0) {
+			continue;
+		}
+		auto &row_locations = iterator.GetChunkState().row_locations;
+		data_collection.Gather(row_locations, incremental, count, 0, keys, incremental, nullptr);
+		idx_t claimed;
+		if (!ClaimBuildSlots(keys, count, slot_sel, row_sel, claimed)) {
+			has_duplicate_key = true;
+			return;
+		}
+		claimed_keys += claimed;
+		for (idx_t i = 0; i < payload.size(); i++) {
+			auto &column = *payload[i];
+			FlatVector::ValidityMutable(column).Reset();
+			data_collection.Gather(row_locations, row_sel, claimed, ht.output_columns[i], column, incremental, nullptr);
+			ScatterPerfectHashPayload(column, slot_sel, claimed, perfect_hash_table[i]->data);
+		}
+	} while (iterator.Next());
+	unique_keys += claimed_keys;
+}
+
+bool PerfectHashJoinExecutor::FinalizePerfectHashTable() {
+	if (has_duplicate_key) {
+		return false;
+	}
+	ht.GetDataCollection().VerifyEverythingPinned();
+	const auto build_size = perfect_join_statistics.build_range + 1;
+	if (unique_keys == build_size && !ht.has_filtered_null) {
+		perfect_join_statistics.is_build_dense = true;
+		bitmap_build_idx.Reset(build_size); // All valid
+	}
+	for (auto &entry : perfect_hash_table) {
+		auto &validity = FlatVector::ValidityMutable(entry->data);
+		// A column without NULL values keeps the representation that proves it to consumers
+		if (validity.CheckAllValid(build_size)) {
+			validity.Reset(build_size);
+		}
+		// Empty slots are NULL, so that the emitted dictionary vectors make sense
+		validity.Combine(bitmap_build_idx, build_size);
+	}
+	return PublishExecutionPerfectHashJoinMembershipLayout();
 }
 
 static bool PerfectHashJoinValueBits(const Value &value, PhysicalType physical_type, uint64_t &bits) {
@@ -265,107 +431,6 @@ bool PerfectHashJoinExecutor::GetExecutionPerfectHashJoinTableLayout(
 	layout.rhs_output_column_count = perfect_hash_table.size();
 	layout.rhs_output_types = join.rhs_output_columns.col_types;
 	layout.rhs_dictionary_buffers = perfect_hash_table;
-	return true;
-}
-
-bool PerfectHashJoinExecutor::FullScanHashTable() {
-	auto &data_collection = ht.GetDataCollection();
-
-	// TODO: In a parallel finalize: One should exclusively lock and each thread should do one part of the code below.
-	Vector tuples_addresses(LogicalType::POINTER, ht.Count()); // allocate space for all the tuples
-	Vector build_vector(GetKeyType(), ht.Count());
-	auto key_count = ht.ScanKeyColumn(tuples_addresses, build_vector, 0);
-
-	// Now fill the selection vector using the build keys and create a sequential vector
-	// TODO: add check for fast pass when probe is part of build domain
-	SelectionVector sel_build(key_count + 1);
-	SelectionVector sel_tuples(key_count + 1);
-	bool success = FillSelectionVectorSwitchBuild(build_vector, sel_build, sel_tuples, key_count);
-
-	// early out
-	if (!success) {
-		return false;
-	}
-
-	const auto build_size = perfect_join_statistics.build_range + 1;
-	if (unique_keys == build_size && !ht.has_filtered_null) {
-		perfect_join_statistics.is_build_dense = true;
-		bitmap_build_idx.Reset(build_size); // All valid
-	}
-	key_count = unique_keys; // do not consider keys out of the range
-
-	// Full scan the remaining build columns and fill the perfect hash table
-	for (idx_t i = 0; i < join.rhs_output_columns.col_types.size(); i++) {
-		auto &vector = perfect_hash_table[i]->data;
-		const auto output_col_idx = ht.output_columns[i];
-		D_ASSERT(vector.GetType() == ht.layout_ptr->GetTypes()[output_col_idx]);
-		auto &col_mask = FlatVector::ValidityMutable(vector);
-		col_mask.Reset(build_size);
-		data_collection.Gather(tuples_addresses, sel_tuples, key_count, output_col_idx, vector, sel_build, nullptr);
-		// This ensures the empty entries are set to NULL, so that the emitted dictionary vectors make sense
-		col_mask.Combine(bitmap_build_idx, build_size);
-	}
-
-	if (!PublishExecutionPerfectHashJoinMembershipLayout()) {
-		return false;
-	}
-
-	return true;
-}
-
-bool PerfectHashJoinExecutor::FillSelectionVectorSwitchBuild(const Vector &source, SelectionVector &sel_vec,
-                                                             SelectionVector &seq_sel_vec, idx_t count) {
-	switch (source.GetType().InternalType()) {
-	case PhysicalType::INT8:
-		return TemplatedFillSelectionVectorBuild<int8_t>(source, sel_vec, seq_sel_vec, count);
-	case PhysicalType::INT16:
-		return TemplatedFillSelectionVectorBuild<int16_t>(source, sel_vec, seq_sel_vec, count);
-	case PhysicalType::INT32:
-		return TemplatedFillSelectionVectorBuild<int32_t>(source, sel_vec, seq_sel_vec, count);
-	case PhysicalType::INT64:
-		return TemplatedFillSelectionVectorBuild<int64_t>(source, sel_vec, seq_sel_vec, count);
-	case PhysicalType::INT128:
-		return TemplatedFillSelectionVectorBuild<hugeint_t>(source, sel_vec, seq_sel_vec, count);
-	case PhysicalType::UINT8:
-		return TemplatedFillSelectionVectorBuild<uint8_t>(source, sel_vec, seq_sel_vec, count);
-	case PhysicalType::UINT16:
-		return TemplatedFillSelectionVectorBuild<uint16_t>(source, sel_vec, seq_sel_vec, count);
-	case PhysicalType::UINT32:
-		return TemplatedFillSelectionVectorBuild<uint32_t>(source, sel_vec, seq_sel_vec, count);
-	case PhysicalType::UINT64:
-		return TemplatedFillSelectionVectorBuild<uint64_t>(source, sel_vec, seq_sel_vec, count);
-	case PhysicalType::UINT128:
-		return TemplatedFillSelectionVectorBuild<uhugeint_t>(source, sel_vec, seq_sel_vec, count);
-	default:
-		throw NotImplementedException("Type not supported for perfect hash join");
-	}
-}
-
-template <typename T>
-bool PerfectHashJoinExecutor::TemplatedFillSelectionVectorBuild(const Vector &source, SelectionVector &sel_vec,
-                                                                SelectionVector &seq_sel_vec, idx_t count) {
-	if (perfect_join_statistics.build_min.IsNull() || perfect_join_statistics.build_max.IsNull()) {
-		return false;
-	}
-	auto min_value = perfect_join_statistics.build_min.GetValueUnsafe<T>();
-	auto max_value = perfect_join_statistics.build_max.GetValueUnsafe<T>();
-	auto entries = source.Values<T>();
-	// generate the selection vector
-	for (idx_t i = 0, sel_idx = 0; i < count; ++i) {
-		auto input_value = entries.GetValueUnsafe(i);
-		// add index to selection vector if value in the range
-		if (min_value <= input_value && input_value <= max_value) {
-			auto idx = UnsafeNumericCast<idx_t>(input_value - min_value); // subtract min value to get the idx position
-			sel_vec.set_index(sel_idx, idx);
-			if (bitmap_build_idx.RowIsValidUnsafe(idx)) {
-				return false;
-			} else {
-				bitmap_build_idx.SetValidUnsafe(idx);
-				unique_keys++;
-			}
-			seq_sel_vec.set_index(sel_idx++, i);
-		}
-	}
 	return true;
 }
 
