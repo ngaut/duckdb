@@ -173,9 +173,10 @@ unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativeFilteredUngroupedFusedPrim
 		simd_mask_offset = (local_size + 15) & ~sljit_sw(15);
 		local_size = simd_mask_offset + 24;
 		// Constants (predicate + payload, an over-estimate if they share values),
-		// all-ones, lane bits, peak live temporaries, and loop state. The single
-		// non-SUM register is either COUNT's accumulator or ARM64 hybrid mask reducer.
-		auto accumulators = simd_is_sum ? idx_t(2) : idx_t(1);
+		// all-ones, lane bits, peak live temporaries, and loop state. SUM and COUNT
+		// keep two accumulator sets (count + sum, or count); the hybrid loop keeps
+		// its ARM64 mask reducer.
+		auto accumulators = simd_is_sum ? idx_t(4) : simd_is_hybrid ? idx_t(1) : idx_t(2);
 		auto vector_regs = simd_plan.constant_count + simd_payload_plan.constant_count +
 		                   (simd_plan.needs_all_ones ? 1 : 0) + accumulators + simd_plan.max_live_temps +
 		                   simd_payload_plan.max_live_temps + (simd_is_sum ? idx_t(1) : idx_t(0)) +
@@ -268,16 +269,16 @@ unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativeFilteredUngroupedFusedPrim
 			// the scalar fast loop below finishes the < lanes remainder.
 			EmitSljitTypedExpressionTreeSimdSumLoop(compiler, predicate, *payloads[0].expression_tree, simd_plan,
 			                                        local_sum_offsets[0], local_count_offsets[0], saw_value_offsets[0],
-			                                        simd_mask_offset);
+			                                        simd_mask_offset, nullptr, hoists);
 		} else if (simd_is_hybrid) {
 			// Packed predicate mask; the payload updates stay scalar per matching lane.
 			EmitSljitTypedExpressionTreeSimdHybridFilterLoop(compiler, predicate, simd_plan, simd_mask_offset,
-			                                                 emit_payload_updates);
+			                                                 emit_payload_updates, nullptr, hoists);
 		} else if (simd_plan.supported) {
 			// Count full lane groups with packed SIMD; S1 is left at the tail start
 			// and the scalar fast loop below finishes the < lanes remainder.
 			EmitSljitTypedExpressionTreeSimdCountLoop(compiler, predicate, simd_plan, local_count_offsets[0],
-			                                          simd_mask_offset);
+			                                          simd_mask_offset, nullptr, hoists);
 		}
 		// Both outcomes end in their own bottom-tested latch: a rejected row falls through to one and takes only the
 		// back-edge branch, a matching row jumps to its payload updates and the other.
@@ -308,15 +309,15 @@ unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativeFilteredUngroupedFusedPrim
 			auto skip_nullable_simd = sljit_emit_cmp(compiler, SLJIT_EQUAL, SLJIT_R0, 0, SLJIT_IMM, 0);
 			sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_S1, 0, SLJIT_IMM, 0);
 			if (simd_is_sum) {
-				EmitSljitTypedExpressionTreeSimdSumLoop(compiler, predicate, *payloads[0].expression_tree, simd_plan,
-				                                        local_sum_offsets[0], local_count_offsets[0],
-				                                        saw_value_offsets[0], simd_mask_offset, &simd_validity_refs);
+				EmitSljitTypedExpressionTreeSimdSumLoop(
+				    compiler, predicate, *payloads[0].expression_tree, simd_plan, local_sum_offsets[0],
+				    local_count_offsets[0], saw_value_offsets[0], simd_mask_offset, &simd_validity_refs, hoists);
 			} else if (simd_is_hybrid) {
 				EmitSljitTypedExpressionTreeSimdHybridFilterLoop(compiler, predicate, simd_plan, simd_mask_offset,
-				                                                 emit_payload_updates, &simd_validity_refs);
+				                                                 emit_payload_updates, &simd_validity_refs, hoists);
 			} else {
 				EmitSljitTypedExpressionTreeSimdCountLoop(compiler, predicate, simd_plan, local_count_offsets[0],
-				                                          simd_mask_offset, &simd_validity_refs);
+				                                          simd_mask_offset, &simd_validity_refs, hoists);
 			}
 			// Scalar tail for the remaining < lanes rows: skip any row with a NULL
 			// referenced source, then run the shared predicate + payload blocks.

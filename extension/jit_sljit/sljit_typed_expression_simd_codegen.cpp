@@ -793,6 +793,57 @@ void EmitSljitSimdInitLaneBits(struct sljit_compiler *compiler, SljitSimdEmitCon
 	EmitSljitSimdLoadLaneBits(compiler, ctx, lanes, scratch_offset);
 }
 
+// Packed loops run while a whole lane group remains. The entry guard skips the loop and the bottom-tested latch takes
+// one branch per group, instead of a forward exit test plus a back jump on every group.
+struct SljitSimdLaneLoop {
+	struct sljit_label *body;
+	struct sljit_jump *skip;
+};
+
+static SljitSimdLaneLoop EmitSljitSimdLaneLoopEntry(struct sljit_compiler *compiler, sljit_s32 lanes) {
+	sljit_emit_op2(compiler, SLJIT_ADD, SLJIT_R0, 0, SLJIT_S1, 0, SLJIT_IMM, lanes);
+	auto skip = sljit_emit_cmp(compiler, SLJIT_GREATER, SLJIT_R0, 0, SLJIT_S2, 0);
+	return {sljit_emit_label(compiler), skip};
+}
+
+// S1 already names the first row of the next group.
+static void EmitSljitSimdLaneLoopLatch(struct sljit_compiler *compiler, const SljitSimdLaneLoop &loop,
+                                       sljit_s32 lanes) {
+	sljit_emit_op2(compiler, SLJIT_ADD, SLJIT_R0, 0, SLJIT_S1, 0, SLJIT_IMM, lanes);
+	sljit_set_label(sljit_emit_cmp(compiler, SLJIT_LESS_EQUAL, SLJIT_R0, 0, SLJIT_S2, 0), loop.body);
+	sljit_set_label(loop.skip, sljit_emit_label(compiler));
+}
+
+// Two lane groups per iteration accumulate into independent register sets: one accumulator chain would bound the
+// loop at its latency instead of its throughput. At most one whole group is left for the guarded single group.
+static void EmitSljitSimdPairedLaneLoop(struct sljit_compiler *compiler, sljit_s32 lanes,
+                                        const std::function<void(idx_t accumulator_set)> &emit_group) {
+	auto emit_step = [&](idx_t accumulator_set) {
+		emit_group(accumulator_set);
+		sljit_emit_op2(compiler, SLJIT_ADD, SLJIT_S1, 0, SLJIT_S1, 0, SLJIT_IMM, lanes);
+	};
+	auto pair_loop = EmitSljitSimdLaneLoopEntry(compiler, 2 * lanes);
+	emit_step(0);
+	emit_step(1);
+	EmitSljitSimdLaneLoopLatch(compiler, pair_loop, 2 * lanes);
+	auto single_group = EmitSljitSimdLaneLoopEntry(compiler, lanes);
+	emit_step(0);
+	sljit_set_label(single_group.skip, sljit_emit_label(compiler));
+}
+
+// Source data pointers the caller's fast loop already holds in saved registers serve the packed loop too.
+static void UseSljitSimdSourceDataHoists(SljitSimdEmitContext &ctx,
+                                         const vector<SljitTypedExpressionTreeLoopHoist> *hoists) {
+	if (!hoists) {
+		return;
+	}
+	for (auto &hoist : *hoists) {
+		if (hoist.source_index != DConstants::INVALID_INDEX) {
+			ctx.source_data_reg[hoist.source_index] = hoist.location.operand;
+		}
+	}
+}
+
 // Reload the loop-invariant vector registers (broadcast constants, all-ones, lane bits) into the registers they
 // already own. Vector registers are caller-saved in every ABI SLJIT targets, so code that calls into C between two
 // packed groups (a matching-row callback with a helper call) leaves them undefined.
@@ -980,10 +1031,7 @@ void EmitSljitTypedExpressionTreeSimdSelectLoop(struct sljit_compiler *compiler,
 	}
 
 	// S1 is the flat row base (already 0 after the loop-init helper).
-	auto simd_loop = sljit_emit_label(compiler);
-	// Exit the packed loop when fewer than `lanes` rows remain: R0 = S1 + lanes; if R0 > S2 stop.
-	sljit_emit_op2(compiler, SLJIT_ADD, SLJIT_R0, 0, SLJIT_S1, 0, SLJIT_IMM, plan.lanes);
-	auto simd_done = sljit_emit_cmp(compiler, SLJIT_GREATER, SLJIT_R0, 0, SLJIT_S2, 0);
+	auto simd_loop = EmitSljitSimdLaneLoopEntry(compiler, plan.lanes);
 
 	auto mask = EmitSljitSimdMask(compiler, root, ctx);
 	if (validity_refs) {
@@ -1051,9 +1099,7 @@ void EmitSljitTypedExpressionTreeSimdSelectLoop(struct sljit_compiler *compiler,
 	sljit_set_label(mixed_lanes_appended, append_done);
 
 	sljit_emit_op2(compiler, SLJIT_ADD, SLJIT_S1, 0, SLJIT_S1, 0, SLJIT_IMM, plan.lanes);
-	auto repeat = sljit_emit_jump(compiler, SLJIT_JUMP);
-	sljit_set_label(repeat, simd_loop);
-	sljit_set_label(simd_done, sljit_emit_label(compiler));
+	EmitSljitSimdLaneLoopLatch(compiler, simd_loop, plan.lanes);
 	// The scalar tail uses the eager append helper. If a partial group remains,
 	// materialize a still-deferred prefix before handing control back to it.
 	auto no_scalar_tail = sljit_emit_cmp(compiler, SLJIT_GREATER_EQUAL, SLJIT_S1, 0, SLJIT_S2, 0);
@@ -1083,12 +1129,14 @@ void EmitSljitTypedExpressionTreeSimdSumLoop(struct sljit_compiler *compiler, co
                                              const ExecutionExpressionIR &payload,
                                              const SljitTypedExpressionTreeSimdPlan &plan, sljit_sw sum_offset,
                                              sljit_sw count_offset, sljit_sw saw_value_offset, sljit_sw scratch_offset,
-                                             const vector<idx_t> *validity_refs) {
+                                             const vector<idx_t> *validity_refs,
+                                             const vector<SljitTypedExpressionTreeLoopHoist> *hoists) {
 	// plan is the predicate plan; the packed path requires a 32-bit (4-lane) predicate.
 	SljitSimdEmitContext ctx;
 	ctx.simd_type = plan.simd_type;
 	ctx.scale = plan.elem_scale;
 	ctx.mixed = plan.mixed_width;
+	UseSljitSimdSourceDataHoists(ctx, hoists);
 	auto sum_type = SLJIT_SIMD_REG_128 | SLJIT_SIMD_ELEM_64;
 
 	// Predicate and payload constants share one broadcast map (deduplicated by value).
@@ -1102,42 +1150,45 @@ void EmitSljitTypedExpressionTreeSimdSumLoop(struct sljit_compiler *compiler, co
 	if (validity_refs) {
 		EmitSljitSimdInitLaneBits(compiler, ctx, plan.lanes, scratch_offset);
 	}
-	auto count_acc = ctx.next_temp++;
-	auto sum_acc = ctx.next_temp++;
+	sljit_s32 count_accs[2];
+	sljit_s32 sum_accs[2];
 	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_R0, 0, SLJIT_IMM, 0);
-	sljit_emit_simd_replicate(compiler, ctx.simd_type, SLJIT_VR(count_acc), SLJIT_R0, 0);
-	sljit_emit_simd_replicate(compiler, sum_type, SLJIT_VR(sum_acc), SLJIT_R0, 0);
-
-	auto simd_loop = sljit_emit_label(compiler);
-	sljit_emit_op2(compiler, SLJIT_ADD, SLJIT_R0, 0, SLJIT_S1, 0, SLJIT_IMM, plan.lanes);
-	auto simd_done = sljit_emit_cmp(compiler, SLJIT_GREATER, SLJIT_R0, 0, SLJIT_S2, 0);
-
-	auto mask = EmitSljitSimdMask(compiler, predicate, ctx);
-	if (validity_refs) {
-		EmitSljitSimdValidityAnd(compiler, ctx, *validity_refs, plan.lanes, mask.reg);
+	for (idx_t set = 0; set < 2; set++) {
+		count_accs[set] = ctx.next_temp++;
+		sum_accs[set] = ctx.next_temp++;
+		sljit_emit_simd_replicate(compiler, ctx.simd_type, SLJIT_VR(count_accs[set]), SLJIT_R0, 0);
+		sljit_emit_simd_replicate(compiler, sum_type, SLJIT_VR(sum_accs[set]), SLJIT_R0, 0);
 	}
-	// Compute the int32 payload value (column load or arithmetic) and mask it: masked
-	// lanes are 0 where the predicate is false.
-	auto payload_val = EmitSljitSimdMask(compiler, payload, ctx);
-	if (!payload_val.is_temp) {
-		// A bare constant payload shares a persistent register; copy before the in-place AND.
-		auto reg = AllocSimdTemp(ctx);
-		sljit_emit_simd_mov(compiler, ctx.simd_type, SLJIT_VR(reg), SLJIT_VR(payload_val.reg), 0);
-		payload_val = {reg, true};
-	}
-	EmitSljitSimdOp2(compiler, ctx.simd_type | SLJIT_SIMD_OP2_AND, SLJIT_VR(payload_val.reg), SLJIT_VR(payload_val.reg),
-	                 SLJIT_VR(mask.reg), 0);
-	// sum_acc.2d += widened pairwise sum of masked.4s ; count_acc -= mask
-	EmitSljitSimdSadalp2d4s(compiler, sum_acc, payload_val.reg);
-	EmitSljitSimdOp2(compiler, ctx.simd_type | SLJIT_SIMD_OP2_SUB, SLJIT_VR(count_acc), SLJIT_VR(count_acc),
-	                 SLJIT_VR(mask.reg), 0);
-	FreeSimdValue(ctx, payload_val);
-	FreeSimdValue(ctx, mask);
 
-	sljit_emit_op2(compiler, SLJIT_ADD, SLJIT_S1, 0, SLJIT_S1, 0, SLJIT_IMM, plan.lanes);
-	auto repeat = sljit_emit_jump(compiler, SLJIT_JUMP);
-	sljit_set_label(repeat, simd_loop);
-	sljit_set_label(simd_done, sljit_emit_label(compiler));
+	EmitSljitSimdPairedLaneLoop(compiler, plan.lanes, [&](idx_t set) {
+		auto mask = EmitSljitSimdMask(compiler, predicate, ctx);
+		if (validity_refs) {
+			EmitSljitSimdValidityAnd(compiler, ctx, *validity_refs, plan.lanes, mask.reg);
+		}
+		// Compute the int32 payload value (column load or arithmetic) and mask it: masked
+		// lanes are 0 where the predicate is false.
+		auto payload_val = EmitSljitSimdMask(compiler, payload, ctx);
+		if (!payload_val.is_temp) {
+			// A bare constant payload shares a persistent register; copy before the in-place AND.
+			auto reg = AllocSimdTemp(ctx);
+			sljit_emit_simd_mov(compiler, ctx.simd_type, SLJIT_VR(reg), SLJIT_VR(payload_val.reg), 0);
+			payload_val = {reg, true};
+		}
+		EmitSljitSimdOp2(compiler, ctx.simd_type | SLJIT_SIMD_OP2_AND, SLJIT_VR(payload_val.reg),
+		                 SLJIT_VR(payload_val.reg), SLJIT_VR(mask.reg), 0);
+		// sum_acc.2d += widened pairwise sum of masked.4s ; count_acc -= mask
+		EmitSljitSimdSadalp2d4s(compiler, sum_accs[set], payload_val.reg);
+		EmitSljitSimdOp2(compiler, ctx.simd_type | SLJIT_SIMD_OP2_SUB, SLJIT_VR(count_accs[set]),
+		                 SLJIT_VR(count_accs[set]), SLJIT_VR(mask.reg), 0);
+		FreeSimdValue(ctx, payload_val);
+		FreeSimdValue(ctx, mask);
+	});
+	auto count_acc = count_accs[0];
+	auto sum_acc = sum_accs[0];
+	EmitSljitSimdOp2(compiler, ctx.simd_type | SLJIT_SIMD_OP2_ADD, SLJIT_VR(count_acc), SLJIT_VR(count_acc),
+	                 SLJIT_VR(count_accs[1]), 0);
+	EmitSljitSimdOp2(compiler, sum_type | SLJIT_SIMD_OP2_ADD, SLJIT_VR(sum_acc), SLJIT_VR(sum_acc),
+	                 SLJIT_VR(sum_accs[1]), 0);
 
 	// Horizontal count: sum the 4 int32 lanes of count_acc into R2 (this group's matches).
 	sljit_emit_simd_mov(compiler, ctx.simd_type | SLJIT_SIMD_STORE, SLJIT_VR(count_acc), SLJIT_MEM1(SLJIT_SP),
@@ -1167,11 +1218,13 @@ void EmitSljitTypedExpressionTreeSimdSumLoop(struct sljit_compiler *compiler, co
 
 void EmitSljitTypedExpressionTreeSimdCountLoop(struct sljit_compiler *compiler, const ExecutionExpressionIR &root,
                                                const SljitTypedExpressionTreeSimdPlan &plan, sljit_sw count_offset,
-                                               sljit_sw mask_offset, const vector<idx_t> *validity_refs) {
+                                               sljit_sw mask_offset, const vector<idx_t> *validity_refs,
+                                               const vector<SljitTypedExpressionTreeLoopHoist> *hoists) {
 	SljitSimdEmitContext ctx;
 	ctx.simd_type = plan.simd_type;
 	ctx.scale = plan.elem_scale;
 	ctx.mixed = plan.mixed_width;
+	UseSljitSimdSourceDataHoists(ctx, hoists);
 
 	EmitSljitSimdBroadcastConstants(compiler, root, ctx);
 	if (plan.needs_all_ones) {
@@ -1182,28 +1235,27 @@ void EmitSljitTypedExpressionTreeSimdCountLoop(struct sljit_compiler *compiler, 
 	if (validity_refs) {
 		EmitSljitSimdInitLaneBits(compiler, ctx, plan.lanes, mask_offset);
 	}
-	// Per-lane match accumulator: acc[i] += 1 for every matching row in lane i.
-	auto acc = ctx.next_temp++;
+	// Per-lane match accumulators: acc[i] += 1 for every matching row in lane i.
+	sljit_s32 accs[2];
 	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_R0, 0, SLJIT_IMM, 0);
-	sljit_emit_simd_replicate(compiler, ctx.simd_type, SLJIT_VR(acc), SLJIT_R0, 0);
+	for (auto &acc : accs) {
+		acc = ctx.next_temp++;
+		sljit_emit_simd_replicate(compiler, ctx.simd_type, SLJIT_VR(acc), SLJIT_R0, 0);
+	}
 
 	// S1 is the flat row base (0 on entry).
-	auto simd_loop = sljit_emit_label(compiler);
-	sljit_emit_op2(compiler, SLJIT_ADD, SLJIT_R0, 0, SLJIT_S1, 0, SLJIT_IMM, plan.lanes);
-	auto simd_done = sljit_emit_cmp(compiler, SLJIT_GREATER, SLJIT_R0, 0, SLJIT_S2, 0);
-
-	auto mask = EmitSljitSimdMask(compiler, root, ctx);
-	if (validity_refs) {
-		EmitSljitSimdValidityAnd(compiler, ctx, *validity_refs, plan.lanes, mask.reg);
-	}
-	// mask lanes are all-ones (=-1) where true; acc -= mask adds 1 per matching lane.
-	EmitSljitSimdOp2(compiler, ctx.simd_type | SLJIT_SIMD_OP2_SUB, SLJIT_VR(acc), SLJIT_VR(acc), SLJIT_VR(mask.reg), 0);
-	FreeSimdValue(ctx, mask);
-
-	sljit_emit_op2(compiler, SLJIT_ADD, SLJIT_S1, 0, SLJIT_S1, 0, SLJIT_IMM, plan.lanes);
-	auto repeat = sljit_emit_jump(compiler, SLJIT_JUMP);
-	sljit_set_label(repeat, simd_loop);
-	sljit_set_label(simd_done, sljit_emit_label(compiler));
+	EmitSljitSimdPairedLaneLoop(compiler, plan.lanes, [&](idx_t set) {
+		auto mask = EmitSljitSimdMask(compiler, root, ctx);
+		if (validity_refs) {
+			EmitSljitSimdValidityAnd(compiler, ctx, *validity_refs, plan.lanes, mask.reg);
+		}
+		// mask lanes are all-ones (=-1) where true; acc -= mask adds 1 per matching lane.
+		EmitSljitSimdOp2(compiler, ctx.simd_type | SLJIT_SIMD_OP2_SUB, SLJIT_VR(accs[set]), SLJIT_VR(accs[set]),
+		                 SLJIT_VR(mask.reg), 0);
+		FreeSimdValue(ctx, mask);
+	});
+	auto acc = accs[0];
+	EmitSljitSimdOp2(compiler, ctx.simd_type | SLJIT_SIMD_OP2_ADD, SLJIT_VR(acc), SLJIT_VR(acc), SLJIT_VR(accs[1]), 0);
 
 	// Horizontal-sum the lane accumulators into the running count slot.
 	sljit_emit_simd_mov(compiler, ctx.simd_type | SLJIT_SIMD_STORE, SLJIT_VR(acc), SLJIT_MEM1(SLJIT_SP), mask_offset);
@@ -1217,16 +1269,15 @@ void EmitSljitTypedExpressionTreeSimdCountLoop(struct sljit_compiler *compiler, 
 	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_MEM1(SLJIT_SP), count_offset, SLJIT_R2, 0);
 }
 
-void EmitSljitTypedExpressionTreeSimdHybridFilterLoop(struct sljit_compiler *compiler,
-                                                      const ExecutionExpressionIR &predicate,
-                                                      const SljitTypedExpressionTreeSimdPlan &plan,
-                                                      sljit_sw mask_offset,
-                                                      const std::function<void()> &emit_matching_row,
-                                                      const vector<idx_t> *validity_refs) {
+void EmitSljitTypedExpressionTreeSimdHybridFilterLoop(
+    struct sljit_compiler *compiler, const ExecutionExpressionIR &predicate,
+    const SljitTypedExpressionTreeSimdPlan &plan, sljit_sw mask_offset, const std::function<void()> &emit_matching_row,
+    const vector<idx_t> *validity_refs, const vector<SljitTypedExpressionTreeLoopHoist> *hoists) {
 	SljitSimdEmitContext ctx;
 	ctx.simd_type = plan.simd_type;
 	ctx.scale = plan.elem_scale;
 	ctx.mixed = plan.mixed_width;
+	UseSljitSimdSourceDataHoists(ctx, hoists);
 
 	EmitSljitSimdBroadcastConstants(compiler, predicate, ctx);
 	if (plan.needs_all_ones) {
@@ -1242,9 +1293,7 @@ void EmitSljitTypedExpressionTreeSimdHybridFilterLoop(struct sljit_compiler *com
 	const auto mask_reduce_reg = GetSljitTargetCapabilities().IsArm64() ? ctx.next_temp++ : 0;
 
 	// S1 is the flat row base (0 on entry).
-	auto simd_loop = sljit_emit_label(compiler);
-	sljit_emit_op2(compiler, SLJIT_ADD, SLJIT_R0, 0, SLJIT_S1, 0, SLJIT_IMM, plan.lanes);
-	auto simd_done = sljit_emit_cmp(compiler, SLJIT_GREATER, SLJIT_R0, 0, SLJIT_S2, 0);
+	auto simd_loop = EmitSljitSimdLaneLoopEntry(compiler, plan.lanes);
 
 	// Keep packed conjunction evaluation branchless. Classifying intermediate
 	// masks serializes the vector pipeline and costs more than the comparisons it
@@ -1311,9 +1360,7 @@ void EmitSljitTypedExpressionTreeSimdHybridFilterLoop(struct sljit_compiler *com
 	sljit_set_label(group_done, advance_done);
 	sljit_set_label(empty_done, advance_done);
 	sljit_set_label(mixed_done, advance_done);
-	auto repeat = sljit_emit_jump(compiler, SLJIT_JUMP);
-	sljit_set_label(repeat, simd_loop);
-	sljit_set_label(simd_done, sljit_emit_label(compiler));
+	EmitSljitSimdLaneLoopLatch(compiler, simd_loop, plan.lanes);
 }
 
 } // namespace duckdb

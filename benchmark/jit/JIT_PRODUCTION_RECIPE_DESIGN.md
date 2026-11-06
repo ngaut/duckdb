@@ -623,7 +623,11 @@ predicate `n % d = c` (or `<>`) with `0 <= c < d` tests divisibility instead:
 the inverse of `d`'s odd part, rotating out its power of two, and comparing
 against `floor((2^64 - 1) / d)`. Loop-invariant operands live outside the row
 loop: hot sources' data pointers in registers, and wide constants (magic
-multipliers, inverses, limits) in stack slots stored once per chunk.
+multipliers, inverses, limits) in stack slots stored once per chunk. Packed
+loops take the same data-pointer registers and the same bottom-tested latch,
+one branch per lane group. Packed SUM and COUNT run two lane groups per
+iteration into independent accumulators, since one accumulator chain bounds the
+loop at its latency; one guarded group and the scalar tail finish the vector.
 
 A projection may move past join selection only when it is total over its
 admitted input domain. The pre-join projection binder admits references and

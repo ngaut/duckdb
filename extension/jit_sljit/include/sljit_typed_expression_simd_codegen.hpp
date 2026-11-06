@@ -18,6 +18,8 @@
 
 namespace duckdb {
 
+struct SljitTypedExpressionTreeLoopHoist;
+
 struct SljitTypedExpressionTreeSimdPlan {
 	bool supported = false;
 	sljit_s32 simd_type = 0;  // SLJIT_SIMD_REG_128 | SLJIT_SIMD_ELEM_32/64
@@ -81,7 +83,8 @@ void EmitStoreSljitTypedExpressionTreeTrueSelection(struct sljit_compiler *compi
 // 16-aligned scratch slot in the local frame.
 void EmitSljitTypedExpressionTreeSimdCountLoop(struct sljit_compiler *compiler, const ExecutionExpressionIR &root,
                                                const SljitTypedExpressionTreeSimdPlan &plan, sljit_sw count_offset,
-                                               sljit_sw mask_offset, const vector<idx_t> *validity_refs = nullptr);
+                                               sljit_sw mask_offset, const vector<idx_t> *validity_refs = nullptr,
+                                               const vector<SljitTypedExpressionTreeLoopHoist> *hoists = nullptr);
 
 // Plan for a pure integer value expression (references, constants, add/sub/mul) at a
 // required element width; used to gate SUM payloads (which must be values, not masks).
@@ -99,7 +102,8 @@ void EmitSljitTypedExpressionTreeSimdSumLoop(struct sljit_compiler *compiler, co
                                              const ExecutionExpressionIR &payload,
                                              const SljitTypedExpressionTreeSimdPlan &plan, sljit_sw sum_offset,
                                              sljit_sw count_offset, sljit_sw saw_value_offset, sljit_sw scratch_offset,
-                                             const vector<idx_t> *validity_refs = nullptr);
+                                             const vector<idx_t> *validity_refs = nullptr,
+                                             const vector<SljitTypedExpressionTreeLoopHoist> *hoists = nullptr);
 
 // Emits the hybrid packed-mask filter loop: the predicate mask for `lanes` rows is
 // computed with packed SIMD, then `emit_matching_row` is invoked once per lane to
@@ -113,11 +117,9 @@ void EmitSljitTypedExpressionTreeSimdSumLoop(struct sljit_compiler *compiler, co
 // and the caller's scalar fast loop handles the tail. `mask_offset` is a 24-byte,
 // 16-aligned scratch block: the first 16 bytes retain nullable lane bits and the
 // final word holds the mixed mask.
-void EmitSljitTypedExpressionTreeSimdHybridFilterLoop(struct sljit_compiler *compiler,
-                                                      const ExecutionExpressionIR &predicate,
-                                                      const SljitTypedExpressionTreeSimdPlan &plan,
-                                                      sljit_sw mask_offset,
-                                                      const std::function<void()> &emit_matching_row,
-                                                      const vector<idx_t> *validity_refs = nullptr);
+void EmitSljitTypedExpressionTreeSimdHybridFilterLoop(
+    struct sljit_compiler *compiler, const ExecutionExpressionIR &predicate,
+    const SljitTypedExpressionTreeSimdPlan &plan, sljit_sw mask_offset, const std::function<void()> &emit_matching_row,
+    const vector<idx_t> *validity_refs = nullptr, const vector<SljitTypedExpressionTreeLoopHoist> *hoists = nullptr);
 
 } // namespace duckdb
