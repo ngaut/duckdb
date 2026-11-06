@@ -256,8 +256,9 @@ struct SljitNativePredicate {
 	SljitNativeDoubleSourceKind double_source_kind = SljitNativeDoubleSourceKind::DOUBLE;
 	SljitNativeDoubleSourceKind double_right_source_kind = SljitNativeDoubleSourceKind::DOUBLE;
 	double double_constant = 0;
-	double double_source_scale = 1;
-	double double_right_source_scale = 1;
+	//! the scale of a decimal double source, 0 for any other source kind
+	uint32_t double_source_decimal_scale = 0;
+	uint32_t double_right_source_decimal_scale = 0;
 	SljitNativeIntegerCompareOp compare_op = SljitNativeIntegerCompareOp::EQUAL;
 	SljitNativeNullCheckOp null_check_op = SljitNativeNullCheckOp::IS_NULL;
 	vector<int64_t> constants;
@@ -329,6 +330,19 @@ struct SljitIntegerOverflowChecks {
 	int64_t result_max = 0;
 };
 
+//! A decimal source's scale and the power of ten its fast-path conversion divides by. DuckDB converts a decimal to
+//! DOUBLE as `raw / 10^scale` only when the raw value is exactly representable (|raw| <= 2^53) and 10^scale is exact
+//! (scale <= 22); every other value takes its correctly rounded decimal conversion.
+struct SljitNativeDecimalSourceScale {
+	double factor = 1;
+	uint64_t scale = 0;
+};
+
+SljitNativeDecimalSourceScale SljitNativeDecimalSourceScaleFor(uint32_t scale);
+//! DuckDB's own DECIMAL -> DOUBLE cast of a raw decimal value
+double SljitNativeDecimalToDouble(int64_t value, uint32_t scale);
+double SljitNativeDecimalToDouble(hugeint_t value, uint32_t scale);
+
 struct SljitNativeVectorInput {
 	const_data_ptr_t source_data = nullptr;
 	const_data_ptr_t right_source_data = nullptr;
@@ -352,8 +366,8 @@ struct SljitNativeVectorInput {
 	const int64_t *constants = nullptr;
 	int64_t constant = 0;
 	double double_constant = 0;
-	double source_double_scale = 1;
-	double right_source_double_scale = 1;
+	SljitNativeDecimalSourceScale source_decimal;
+	SljitNativeDecimalSourceScale right_source_decimal;
 	data_ptr_t result_data = nullptr;
 	Vector *result_vector = nullptr;
 	validity_t *result_validity = nullptr;

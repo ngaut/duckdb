@@ -80,16 +80,9 @@ static bool IsNativeFloatSource(SljitNativeDoubleSourceKind kind) {
 	return kind == SljitNativeDoubleSourceKind::FLOAT;
 }
 
-static double NativeDecimalScaleFactor(const LogicalType &type) {
-	D_ASSERT(type.id() == LogicalTypeId::DECIMAL);
-	auto scale = DecimalType::GetScale(type);
-	D_ASSERT(scale < Hugeint::CACHED_POWERS_OF_TEN);
-	return Hugeint::Cast<double>(Hugeint::POWERS_OF_TEN[scale]);
-}
-
 static bool TryReadNativeDoubleReference(const ExecutionExpressionIR &node, SljitNativeDoubleSourceKind &source_kind,
-                                         idx_t &source_index, double &source_scale) {
-	source_scale = 1;
+                                         idx_t &source_index, uint32_t &decimal_scale) {
+	decimal_scale = 0;
 	if (node.kind == ExecutionExpressionIRKind::REFERENCE && IsNativeFloatNode(node)) {
 		source_kind = SljitNativeDoubleSourceKind::FLOAT;
 		source_index = node.ref_index;
@@ -120,12 +113,12 @@ static bool TryReadNativeDoubleReference(const ExecutionExpressionIR &node, Slji
 	}
 	if (source.return_type.id() == LogicalTypeId::DECIMAL && source.physical_type == PhysicalType::INT64) {
 		source_kind = SljitNativeDoubleSourceKind::DECIMAL64_TO_DOUBLE;
-		source_scale = NativeDecimalScaleFactor(source.return_type);
+		decimal_scale = DecimalType::GetScale(source.return_type);
 		return true;
 	}
 	if (source.return_type.id() == LogicalTypeId::DECIMAL && source.physical_type == PhysicalType::INT128) {
 		source_kind = SljitNativeDoubleSourceKind::DECIMAL128_TO_DOUBLE;
-		source_scale = NativeDecimalScaleFactor(source.return_type);
+		decimal_scale = DecimalType::GetScale(source.return_type);
 		return true;
 	}
 	return false;
@@ -152,8 +145,8 @@ static bool TryReadNativeDoubleConstant(const ExecutionExpressionIR &constant, d
 static bool TryReadNativeDoubleReferenceConstant(const ExecutionExpressionIR &candidate,
                                                  const ExecutionExpressionIR &constant,
                                                  SljitNativeDoubleSourceKind &source_kind, idx_t &source_index,
-                                                 double &source_scale, double &constant_value) {
-	if (!TryReadNativeDoubleReference(candidate, source_kind, source_index, source_scale)) {
+                                                 uint32_t &decimal_scale, double &constant_value) {
+	if (!TryReadNativeDoubleReference(candidate, source_kind, source_index, decimal_scale)) {
 		return false;
 	}
 	bool constant_is_null;
@@ -168,12 +161,12 @@ static bool TryReadNativeDoubleReferenceConstant(const ExecutionExpressionIR &ca
 
 bool TryReadNativeDoubleBinaryConstant(const ExecutionExpressionIR &root, SljitNativeDoubleBinaryOp &native_op,
                                        SljitNativeDoubleSourceKind &source_kind, idx_t &source_index,
-                                       double &source_scale, double &constant_value, bool &constant_on_left) {
+                                       uint32_t &decimal_scale, double &constant_value, bool &constant_on_left) {
 	if (root.kind != ExecutionExpressionIRKind::BINARY || !IsNativeFloatingNode(root) || !root.left || !root.right ||
 	    !TryGetNativeDoubleBinaryOp(root.binary_op, native_op)) {
 		return false;
 	}
-	if (TryReadNativeDoubleReferenceConstant(*root.left, *root.right, source_kind, source_index, source_scale,
+	if (TryReadNativeDoubleReferenceConstant(*root.left, *root.right, source_kind, source_index, decimal_scale,
 	                                         constant_value)) {
 		constant_on_left = false;
 		if (native_op == SljitNativeDoubleBinaryOp::DIVIDE && constant_value == 0.0) {
@@ -181,7 +174,7 @@ bool TryReadNativeDoubleBinaryConstant(const ExecutionExpressionIR &root, SljitN
 		}
 		return true;
 	}
-	if (!TryReadNativeDoubleReferenceConstant(*root.right, *root.left, source_kind, source_index, source_scale,
+	if (!TryReadNativeDoubleReferenceConstant(*root.right, *root.left, source_kind, source_index, decimal_scale,
 	                                          constant_value)) {
 		return false;
 	}
@@ -193,13 +186,13 @@ bool TryReadNativeDoubleBinaryConstant(const ExecutionExpressionIR &root, SljitN
 }
 
 bool TryReadNativeDoubleBinaryReferences(const ExecutionExpressionIR &root, SljitNativeDoubleBinaryOp &native_op,
-                                         SljitNativeDoubleSourceKind &left_kind, idx_t &left_index, double &left_scale,
-                                         SljitNativeDoubleSourceKind &right_kind, idx_t &right_index,
-                                         double &right_scale) {
+                                         SljitNativeDoubleSourceKind &left_kind, idx_t &left_index,
+                                         uint32_t &left_decimal_scale, SljitNativeDoubleSourceKind &right_kind,
+                                         idx_t &right_index, uint32_t &right_decimal_scale) {
 	if (root.kind != ExecutionExpressionIRKind::BINARY || !IsNativeFloatingNode(root) || !root.left || !root.right ||
 	    !TryGetNativeDoubleBinaryOp(root.binary_op, native_op) ||
-	    !TryReadNativeDoubleReference(*root.left, left_kind, left_index, left_scale) ||
-	    !TryReadNativeDoubleReference(*root.right, right_kind, right_index, right_scale)) {
+	    !TryReadNativeDoubleReference(*root.left, left_kind, left_index, left_decimal_scale) ||
+	    !TryReadNativeDoubleReference(*root.right, right_kind, right_index, right_decimal_scale)) {
 		return false;
 	}
 	if (IsNativeFloatSource(left_kind) != IsNativeFloatSource(right_kind)) {
@@ -210,17 +203,17 @@ bool TryReadNativeDoubleBinaryReferences(const ExecutionExpressionIR &root, Slji
 
 bool TryReadNativeDoubleCompareConstant(const ExecutionExpressionIR &root, SljitNativeIntegerCompareOp &compare_op,
                                         SljitNativeDoubleSourceKind &source_kind, idx_t &source_index,
-                                        double &source_scale, double &constant_value, bool &constant_on_left) {
+                                        uint32_t &decimal_scale, double &constant_value, bool &constant_on_left) {
 	if (root.kind != ExecutionExpressionIRKind::BINARY || root.return_type.id() != LogicalTypeId::BOOLEAN ||
 	    !root.left || !root.right || !TryGetNativeIntegerCompareOp(root.binary_op, compare_op)) {
 		return false;
 	}
-	if (TryReadNativeDoubleReferenceConstant(*root.left, *root.right, source_kind, source_index, source_scale,
+	if (TryReadNativeDoubleReferenceConstant(*root.left, *root.right, source_kind, source_index, decimal_scale,
 	                                         constant_value)) {
 		constant_on_left = false;
 		return true;
 	}
-	if (!TryReadNativeDoubleReferenceConstant(*root.right, *root.left, source_kind, source_index, source_scale,
+	if (!TryReadNativeDoubleReferenceConstant(*root.right, *root.left, source_kind, source_index, decimal_scale,
 	                                          constant_value)) {
 		return false;
 	}
@@ -229,13 +222,13 @@ bool TryReadNativeDoubleCompareConstant(const ExecutionExpressionIR &root, Sljit
 }
 
 bool TryReadNativeDoubleCompareReferences(const ExecutionExpressionIR &root, SljitNativeIntegerCompareOp &compare_op,
-                                          SljitNativeDoubleSourceKind &left_kind, idx_t &left_index, double &left_scale,
-                                          SljitNativeDoubleSourceKind &right_kind, idx_t &right_index,
-                                          double &right_scale) {
+                                          SljitNativeDoubleSourceKind &left_kind, idx_t &left_index,
+                                          uint32_t &left_decimal_scale, SljitNativeDoubleSourceKind &right_kind,
+                                          idx_t &right_index, uint32_t &right_decimal_scale) {
 	if (root.kind != ExecutionExpressionIRKind::BINARY || root.return_type.id() != LogicalTypeId::BOOLEAN ||
 	    !root.left || !root.right || !TryGetNativeIntegerCompareOp(root.binary_op, compare_op) ||
-	    !TryReadNativeDoubleReference(*root.left, left_kind, left_index, left_scale) ||
-	    !TryReadNativeDoubleReference(*root.right, right_kind, right_index, right_scale)) {
+	    !TryReadNativeDoubleReference(*root.left, left_kind, left_index, left_decimal_scale) ||
+	    !TryReadNativeDoubleReference(*root.right, right_kind, right_index, right_decimal_scale)) {
 		return false;
 	}
 	if (IsNativeFloatSource(left_kind) != IsNativeFloatSource(right_kind)) {

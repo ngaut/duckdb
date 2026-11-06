@@ -86,8 +86,9 @@ struct SljitNativeRegionExpressionPlan {
 	SljitNativeDoubleBinaryOp double_binary_op = SljitNativeDoubleBinaryOp::DIVIDE;
 	SljitNativeDoubleSourceKind double_source_kind = SljitNativeDoubleSourceKind::DOUBLE;
 	SljitNativeDoubleSourceKind double_right_source_kind = SljitNativeDoubleSourceKind::DOUBLE;
-	double double_source_scale = 1;
-	double double_right_source_scale = 1;
+	//! the scale of a decimal double source, 0 for any other source kind
+	uint32_t double_source_decimal_scale = 0;
+	uint32_t double_right_source_decimal_scale = 0;
 	SljitNativeIntegerCompareOp compare_op = SljitNativeIntegerCompareOp::EQUAL;
 	SljitNativeSignedIntegerWidth cast_source_width = SljitNativeSignedIntegerWidth::INT32;
 	SljitNativeSignedIntegerWidth right_cast_source_width = SljitNativeSignedIntegerWidth::INT32;

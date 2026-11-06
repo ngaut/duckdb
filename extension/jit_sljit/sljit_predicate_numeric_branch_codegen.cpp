@@ -90,7 +90,7 @@ bool TryEmitSljitNumericPredicateBranches(struct sljit_compiler *compiler, const
 		AppendPredicateSourceNullJump(compiler, result, predicate.source_index, SLJIT_R1, source_not_null,
 		                              sources_all_valid);
 		EmitLoadPredicateDoubleOperand(compiler, predicate.double_source_kind, predicate.source_index, SLJIT_R1,
-		                               predicate.double_source_scale, SLJIT_FR0);
+		                               predicate.double_source_decimal_scale, SLJIT_FR0);
 		if (single_precision) {
 			sljit_emit_fset32(compiler, SLJIT_FR1, static_cast<sljit_f32>(predicate.double_constant));
 		} else {
@@ -113,11 +113,11 @@ bool TryEmitSljitNumericPredicateBranches(struct sljit_compiler *compiler, const
 		if (NativeDoubleSourceUsesHelper(predicate.double_source_kind) ||
 		    NativeDoubleSourceUsesHelper(predicate.double_right_source_kind)) {
 			EmitLoadPredicateDoubleOperand(compiler, predicate.double_source_kind, predicate.source_index, SLJIT_R1,
-			                               predicate.double_source_scale, SLJIT_FR0);
+			                               predicate.double_source_decimal_scale, SLJIT_FR0);
 			sljit_emit_fmem(compiler, SLJIT_MOV_F64 | SLJIT_MEM_STORE | SLJIT_MEM_ALIGNED_32, SLJIT_FR0,
 			                SLJIT_MEM1(SLJIT_SP), LEFT_SPILL_OFFSET);
 			EmitLoadPredicateDoubleOperand(compiler, predicate.double_right_source_kind, predicate.right_source_index,
-			                               SLJIT_S4, predicate.double_right_source_scale, SLJIT_FR0);
+			                               SLJIT_S4, predicate.double_right_source_decimal_scale, SLJIT_FR0);
 			sljit_emit_fmem(compiler, SLJIT_MOV_F64 | SLJIT_MEM_STORE | SLJIT_MEM_ALIGNED_32, SLJIT_FR0,
 			                SLJIT_MEM1(SLJIT_SP), RIGHT_SPILL_OFFSET);
 			sljit_emit_fmem(compiler, SLJIT_MOV_F64 | SLJIT_MEM_ALIGNED_32, SLJIT_FR0, SLJIT_MEM1(SLJIT_SP),
@@ -126,9 +126,9 @@ bool TryEmitSljitNumericPredicateBranches(struct sljit_compiler *compiler, const
 			                RIGHT_SPILL_OFFSET);
 		} else {
 			EmitLoadPredicateDoubleOperand(compiler, predicate.double_source_kind, predicate.source_index, SLJIT_R1,
-			                               predicate.double_source_scale, SLJIT_FR0);
+			                               predicate.double_source_decimal_scale, SLJIT_FR0);
 			EmitLoadPredicateDoubleOperand(compiler, predicate.double_right_source_kind, predicate.right_source_index,
-			                               SLJIT_S4, predicate.double_right_source_scale, SLJIT_FR1);
+			                               SLJIT_S4, predicate.double_right_source_decimal_scale, SLJIT_FR1);
 		}
 		EmitSljitDoubleCompareBranches(compiler, predicate.compare_op, single_precision, false, result);
 		return true;

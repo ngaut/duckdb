@@ -103,8 +103,8 @@ static bool TryBuildNativePredicateInternal(const ExecutionExpressionIR &root,
 	idx_t right_source_index;
 	SljitNativeDoubleSourceKind double_source_kind;
 	SljitNativeDoubleSourceKind double_right_source_kind;
-	double double_source_scale;
-	double double_right_source_scale;
+	uint32_t double_source_decimal_scale;
+	uint32_t double_right_source_decimal_scale;
 	double double_constant;
 	uint64_t int128_lower;
 	int64_t int128_upper;
@@ -125,16 +125,17 @@ static bool TryBuildNativePredicateInternal(const ExecutionExpressionIR &root,
 		predicate = std::move(result);
 		return true;
 	}
-	if (TryReadNativeDoubleCompareReferences(root, compare_op, double_source_kind, source_index, double_source_scale,
-	                                         double_right_source_kind, right_source_index, double_right_source_scale)) {
+	if (TryReadNativeDoubleCompareReferences(root, compare_op, double_source_kind, source_index,
+	                                         double_source_decimal_scale, double_right_source_kind, right_source_index,
+	                                         double_right_source_decimal_scale)) {
 		result->kind = SljitNativePredicateKind::DOUBLE_COMPARE_REFERENCES;
 		result->compare_op = compare_op;
 		result->source_index = source_index;
 		result->right_source_index = right_source_index;
 		result->double_source_kind = double_source_kind;
 		result->double_right_source_kind = double_right_source_kind;
-		result->double_source_scale = double_source_scale;
-		result->double_right_source_scale = double_right_source_scale;
+		result->double_source_decimal_scale = double_source_decimal_scale;
+		result->double_right_source_decimal_scale = double_right_source_decimal_scale;
 		predicate = std::move(result);
 		return true;
 	}
@@ -151,13 +152,13 @@ static bool TryBuildNativePredicateInternal(const ExecutionExpressionIR &root,
 		predicate = std::move(result);
 		return true;
 	}
-	if (TryReadNativeDoubleCompareConstant(root, compare_op, double_source_kind, source_index, double_source_scale,
-	                                       double_constant, constant_on_left)) {
+	if (TryReadNativeDoubleCompareConstant(root, compare_op, double_source_kind, source_index,
+	                                       double_source_decimal_scale, double_constant, constant_on_left)) {
 		result->kind = SljitNativePredicateKind::DOUBLE_COMPARE_CONSTANT;
 		result->compare_op = compare_op;
 		result->source_index = source_index;
 		result->double_source_kind = double_source_kind;
-		result->double_source_scale = double_source_scale;
+		result->double_source_decimal_scale = double_source_decimal_scale;
 		result->double_constant = double_constant;
 		result->constant_on_left = constant_on_left;
 		predicate = std::move(result);

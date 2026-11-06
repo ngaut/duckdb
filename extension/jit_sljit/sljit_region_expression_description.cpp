@@ -124,7 +124,7 @@ static string DescribeNativeRegionExpressionInternal(const SljitNativeRegionExpr
 		         (expr.try_cast ? ":try" : ":throwing");
 		break;
 	case SljitNativeRegionExpressionKind::DECIMAL64_TO_DOUBLE:
-		result = "native:decimal64-to-double:scale=" + std::to_string(expr.double_constant);
+		result = "native:decimal64-to-double:scale=" + std::to_string(expr.double_source_decimal_scale);
 		break;
 	case SljitNativeRegionExpressionKind::DECIMAL128_SCALE_UP:
 		result = "native:decimal128-scale-up:factor=" + std::to_string(expr.constant);

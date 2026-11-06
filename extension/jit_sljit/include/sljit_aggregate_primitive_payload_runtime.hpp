@@ -141,7 +141,7 @@ static void SljitExecutePrimitiveAggregatePayloadUpdate(SljitExecutableRegionExp
 		        ? nullptr
 		        : SljitNormalizedSourceValidityData(source_format, native_input.source_sel, execute_sel, count);
 		native_input.double_constant = plan.double_constant;
-		native_input.source_double_scale = plan.double_source_scale;
+		native_input.source_decimal = SljitNativeDecimalSourceScaleFor(plan.double_source_decimal_scale);
 		break;
 	case SljitNativeRegionExpressionKind::DOUBLE_BINARY_REFERENCES:
 		if (payload.InputColumn(plan.source_index) >= input.ColumnCount() ||
@@ -163,8 +163,8 @@ static void SljitExecutePrimitiveAggregatePayloadUpdate(SljitExecutableRegionExp
 		        ? nullptr
 		        : SljitNormalizedSourceValidityData(right_source_format, native_input.right_source_sel, execute_sel,
 		                                            count);
-		native_input.source_double_scale = plan.double_source_scale;
-		native_input.right_source_double_scale = plan.double_right_source_scale;
+		native_input.source_decimal = SljitNativeDecimalSourceScaleFor(plan.double_source_decimal_scale);
+		native_input.right_source_decimal = SljitNativeDecimalSourceScaleFor(plan.double_right_source_decimal_scale);
 		break;
 	case SljitNativeRegionExpressionKind::TYPED_EXPRESSION_TREE: {
 		if (!plan.expression_tree) {

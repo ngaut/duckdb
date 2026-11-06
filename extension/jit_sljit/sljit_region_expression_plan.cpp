@@ -64,32 +64,32 @@ bool TryReadNativeRegionExpression(const ExecutionExpressionIR &root, bool requi
 	SljitNativeDoubleBinaryOp double_binary_op;
 	SljitNativeDoubleSourceKind double_source_kind;
 	SljitNativeDoubleSourceKind double_right_source_kind;
-	double double_source_scale;
-	double double_right_source_scale;
+	uint32_t double_source_decimal_scale;
+	uint32_t double_right_source_decimal_scale;
 	double double_constant;
 	idx_t source_index;
 	idx_t right_source_index;
 	bool constant_on_left;
 	if (TryReadNativeDoubleBinaryReferences(root, double_binary_op, double_source_kind, source_index,
-	                                        double_source_scale, double_right_source_kind, right_source_index,
-	                                        double_right_source_scale)) {
+	                                        double_source_decimal_scale, double_right_source_kind, right_source_index,
+	                                        double_right_source_decimal_scale)) {
 		expr.kind = SljitNativeRegionExpressionKind::DOUBLE_BINARY_REFERENCES;
 		expr.double_binary_op = double_binary_op;
 		expr.double_source_kind = double_source_kind;
 		expr.double_right_source_kind = double_right_source_kind;
-		expr.double_source_scale = double_source_scale;
-		expr.double_right_source_scale = double_right_source_scale;
+		expr.double_source_decimal_scale = double_source_decimal_scale;
+		expr.double_right_source_decimal_scale = double_right_source_decimal_scale;
 		expr.return_type = root.return_type;
 		expr.source_index = source_index;
 		expr.right_source_index = right_source_index;
 		return true;
 	}
-	if (TryReadNativeDoubleBinaryConstant(root, double_binary_op, double_source_kind, source_index, double_source_scale,
-	                                      double_constant, constant_on_left)) {
+	if (TryReadNativeDoubleBinaryConstant(root, double_binary_op, double_source_kind, source_index,
+	                                      double_source_decimal_scale, double_constant, constant_on_left)) {
 		expr.kind = SljitNativeRegionExpressionKind::DOUBLE_BINARY_CONSTANT;
 		expr.double_binary_op = double_binary_op;
 		expr.double_source_kind = double_source_kind;
-		expr.double_source_scale = double_source_scale;
+		expr.double_source_decimal_scale = double_source_decimal_scale;
 		expr.return_type = root.return_type;
 		expr.source_index = source_index;
 		expr.double_constant = double_constant;

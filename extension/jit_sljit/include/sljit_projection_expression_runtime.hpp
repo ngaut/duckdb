@@ -106,7 +106,8 @@ static void SljitExecuteProjectionExpression(SljitExecutableRegionExpression &ex
 				result_validity.SetInvalid(row_idx);
 				continue;
 			}
-			result_data[row_idx] = static_cast<double>(source_data[source_idx]) / plan.double_constant;
+			result_data[row_idx] =
+			    SljitNativeDecimalToDouble(source_data[source_idx], plan.double_source_decimal_scale);
 		}
 		FlatVector::SetSize(result, count_t(count));
 		return;
@@ -271,8 +272,8 @@ static void SljitExecuteProjectionExpression(SljitExecutableRegionExpression &ex
 	native_input.constant =
 	    plan.kind == SljitNativeRegionExpressionKind::ERROR_GUARDED_REFERENCE ? plan.guard_constant : plan.constant;
 	native_input.double_constant = plan.double_constant;
-	native_input.source_double_scale = plan.double_source_scale;
-	native_input.right_source_double_scale = plan.double_right_source_scale;
+	native_input.source_decimal = SljitNativeDecimalSourceScaleFor(plan.double_source_decimal_scale);
+	native_input.right_source_decimal = SljitNativeDecimalSourceScaleFor(plan.double_right_source_decimal_scale);
 	if (plan.kind == SljitNativeRegionExpressionKind::INTEGER_CAST) {
 		native_input.result_data = NativeSignedIntegerResultData(result, plan.cast_target_width);
 	} else if (plan.kind == SljitNativeRegionExpressionKind::SIGNED_TO_UNSIGNED_INTEGER_CAST) {

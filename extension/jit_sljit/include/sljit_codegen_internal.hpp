@@ -208,6 +208,8 @@ void EmitSljitAggregateCommitSumState(struct sljit_compiler *compiler, SljitNati
                                       sljit_sw saw_value_offset);
 
 double SLJIT_FUNC SljitNativeHugeintToDouble(uint64_t lower, int64_t upper);
+double SLJIT_FUNC SljitNativeDecimal64ToDoubleCall(int64_t value, uint64_t scale);
+double SLJIT_FUNC SljitNativeDecimal128ToDoubleCall(uint64_t lower, int64_t upper, uint64_t scale);
 void SLJIT_FUNC SljitNativeAggregateHugeintCommit(SljitNativeVectorInput *input);
 void SLJIT_FUNC SljitNativeRuntimeError(SljitNativeVectorInput *input);
 //! Raises DuckDB's error for a perfect-hash group id at or beyond the table's group count
@@ -216,8 +218,15 @@ void SLJIT_FUNC SljitNativePerfectHashGroupOutOfRange(SljitNativeVectorInput *in
 sljit_s32 NativeDoubleBinaryOp(SljitNativeDoubleBinaryOp op, bool single_precision = false);
 bool NativeDoubleSourceHasDecimalScale(SljitNativeDoubleSourceKind kind);
 bool NativeDoubleSourceUsesHelper(SljitNativeDoubleSourceKind kind);
+//! value_reg (not R0/R1) holds a raw DECIMAL64 value; R0/R1 are scratch and a slow conversion clobbers every scratch
+void EmitSljitDecimal64ToDouble(struct sljit_compiler *compiler, sljit_s32 value_reg, const SljitOperand &factor,
+                                const SljitOperand &scale, sljit_s32 target);
+//! R0/R1 hold a raw DECIMAL128 value's lower and upper words
+void EmitSljitDecimal128ToDouble(struct sljit_compiler *compiler, const SljitOperand &scale, sljit_s32 target);
+//! Loads a double operand; a decimal source converts exactly as DuckDB casts it, so its loader may call a helper.
+//! decimal_offset is the input's SljitNativeDecimalSourceScale for that source.
 void EmitLoadNativeDoubleOperand(struct sljit_compiler *compiler, SljitNativeDoubleSourceKind kind,
-                                 sljit_sw data_offset, sljit_s32 index_reg, sljit_sw scale_offset, sljit_s32 target,
+                                 sljit_sw data_offset, sljit_s32 index_reg, sljit_sw decimal_offset, sljit_s32 target,
                                  bool single_precision = false);
 sljit_s32 NativeIntegerLowerBoundFailureJump(SljitNativeIntegerKind kind, bool inclusive);
 sljit_s32 NativeIntegerUpperBoundFailureJump(SljitNativeIntegerKind kind, bool inclusive);

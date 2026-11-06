@@ -111,8 +111,8 @@ static string BuildSljitPredicateSemanticKey(const SljitNativePredicate &predica
 	key.Field("double_source_kind", static_cast<uint8_t>(predicate.double_source_kind));
 	key.Field("double_right_source_kind", static_cast<uint8_t>(predicate.double_right_source_kind));
 	key.Field("double_constant", predicate.double_constant);
-	key.Field("double_source_scale", predicate.double_source_scale);
-	key.Field("double_right_source_scale", predicate.double_right_source_scale);
+	key.Field("double_source_decimal_scale", predicate.double_source_decimal_scale);
+	key.Field("double_right_source_decimal_scale", predicate.double_right_source_decimal_scale);
 	key.Field("compare", static_cast<uint8_t>(predicate.compare_op));
 	key.Field("null_check", static_cast<uint8_t>(predicate.null_check_op));
 	key.Field("constant_count", predicate.constants.size());
@@ -174,8 +174,8 @@ string BuildSljitExpressionArtifactKey(const SljitNativeRegionExpressionPlan &ex
 	key.Field("double_binary", static_cast<uint8_t>(expr.double_binary_op));
 	key.Field("double_source_kind", static_cast<uint8_t>(expr.double_source_kind));
 	key.Field("double_right_source_kind", static_cast<uint8_t>(expr.double_right_source_kind));
-	key.Field("double_source_scale", expr.double_source_scale);
-	key.Field("double_right_source_scale", expr.double_right_source_scale);
+	key.Field("double_source_decimal_scale", expr.double_source_decimal_scale);
+	key.Field("double_right_source_decimal_scale", expr.double_right_source_decimal_scale);
 	key.Field("compare", static_cast<uint8_t>(expr.compare_op));
 	key.Field("cast_source", static_cast<uint8_t>(expr.cast_source_width));
 	key.Field("right_cast_source", static_cast<uint8_t>(expr.right_cast_source_width));

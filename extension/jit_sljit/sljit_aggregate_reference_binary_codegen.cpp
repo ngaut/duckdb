@@ -181,7 +181,7 @@ BuildSljitNativeUngroupedSumDoubleDoubleBinaryConstant(SljitNativeDoubleBinaryOp
 
 	auto done = EmitSljitAggregateSelectedSourceLoop(compiler, [&]() {
 		EmitLoadNativeDoubleOperand(compiler, source_kind, offsetof(SljitNativeVectorInput, source_data), SLJIT_R1,
-		                            offsetof(SljitNativeVectorInput, source_double_scale), SLJIT_FR0);
+		                            offsetof(SljitNativeVectorInput, source_decimal), SLJIT_FR0);
 		sljit_emit_fmem(compiler, SLJIT_MOV_F64 | SLJIT_MEM_ALIGNED_32, SLJIT_FR1, SLJIT_MEM1(SLJIT_S0),
 		                offsetof(SljitNativeVectorInput, double_constant));
 		if (constant_on_left) {
@@ -224,12 +224,11 @@ unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativeUngroupedSumDoubleDoubleBi
 	auto done = EmitSljitAggregateTwoSourceLoop(compiler, [&]() {
 		if (needs_helper_spill) {
 			EmitLoadNativeDoubleOperand(compiler, left_kind, offsetof(SljitNativeVectorInput, source_data), SLJIT_S3,
-			                            offsetof(SljitNativeVectorInput, source_double_scale), SLJIT_FR0);
+			                            offsetof(SljitNativeVectorInput, source_decimal), SLJIT_FR0);
 			sljit_emit_fmem(compiler, SLJIT_MOV_F64 | SLJIT_MEM_STORE | SLJIT_MEM_ALIGNED_32, SLJIT_FR0,
 			                SLJIT_MEM1(SLJIT_SP), left_spill_offset);
 			EmitLoadNativeDoubleOperand(compiler, right_kind, offsetof(SljitNativeVectorInput, right_source_data),
-			                            SLJIT_S4, offsetof(SljitNativeVectorInput, right_source_double_scale),
-			                            SLJIT_FR0);
+			                            SLJIT_S4, offsetof(SljitNativeVectorInput, right_source_decimal), SLJIT_FR0);
 			sljit_emit_fmem(compiler, SLJIT_MOV_F64 | SLJIT_MEM_STORE | SLJIT_MEM_ALIGNED_32, SLJIT_FR0,
 			                SLJIT_MEM1(SLJIT_SP), right_spill_offset);
 			sljit_emit_fmem(compiler, SLJIT_MOV_F64 | SLJIT_MEM_ALIGNED_32, SLJIT_FR0, SLJIT_MEM1(SLJIT_SP),
@@ -238,10 +237,9 @@ unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativeUngroupedSumDoubleDoubleBi
 			                right_spill_offset);
 		} else {
 			EmitLoadNativeDoubleOperand(compiler, left_kind, offsetof(SljitNativeVectorInput, source_data), SLJIT_S3,
-			                            offsetof(SljitNativeVectorInput, source_double_scale), SLJIT_FR0);
+			                            offsetof(SljitNativeVectorInput, source_decimal), SLJIT_FR0);
 			EmitLoadNativeDoubleOperand(compiler, right_kind, offsetof(SljitNativeVectorInput, right_source_data),
-			                            SLJIT_S4, offsetof(SljitNativeVectorInput, right_source_double_scale),
-			                            SLJIT_FR1);
+			                            SLJIT_S4, offsetof(SljitNativeVectorInput, right_source_decimal), SLJIT_FR1);
 		}
 		sljit_emit_fop2(compiler, binary_op, SLJIT_FR0, 0, SLJIT_FR0, 0, SLJIT_FR1, 0);
 		EmitSljitAggregateAccumulateDouble(compiler, local_sum_offset, saw_value_offset, SLJIT_FR0);

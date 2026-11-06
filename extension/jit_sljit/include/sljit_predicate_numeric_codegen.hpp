@@ -20,21 +20,14 @@ struct SljitPredicateBranches;
 static void EmitLoadPredicateSourceData(struct sljit_compiler *compiler, idx_t source_index, sljit_s32 target,
                                         sljit_s32 index_reg, sljit_sw data_scale, sljit_s32 load_op);
 
-static void EmitScalePredicateDoubleOperand(struct sljit_compiler *compiler, SljitNativeDoubleSourceKind kind,
-                                            double scale, sljit_s32 target) {
-	if (!NativeDoubleSourceHasDecimalScale(kind)) {
-		return;
-	}
-	sljit_emit_fset64(compiler, SLJIT_FR2, scale);
-	sljit_emit_fop2(compiler, SLJIT_DIV_F64, target, 0, target, 0, SLJIT_FR2, 0);
-}
-
 static bool PredicateDoubleSourceIsSinglePrecision(SljitNativeDoubleSourceKind kind) {
 	return kind == SljitNativeDoubleSourceKind::FLOAT;
 }
 
 static void EmitLoadPredicateDoubleOperand(struct sljit_compiler *compiler, SljitNativeDoubleSourceKind kind,
-                                           idx_t source_index, sljit_s32 index_reg, double scale, sljit_s32 target) {
+                                           idx_t source_index, sljit_s32 index_reg, uint32_t decimal_scale,
+                                           sljit_s32 target) {
+	const auto decimal = SljitNativeDecimalSourceScaleFor(decimal_scale);
 	sljit_emit_op1(compiler, SLJIT_MOV_P, SLJIT_R0, 0, SLJIT_MEM1(SLJIT_S0),
 	               offsetof(SljitNativePredicateInput, source_data));
 	sljit_emit_op1(compiler, SLJIT_MOV_P, SLJIT_R0, 0, SLJIT_MEM1(SLJIT_R0), SljitPointerArrayOffset(source_index));
@@ -46,10 +39,14 @@ static void EmitLoadPredicateDoubleOperand(struct sljit_compiler *compiler, Slji
 		sljit_emit_fmem(compiler, SLJIT_MOV_F64 | SLJIT_MEM_ALIGNED_32, target, SLJIT_MEM2(SLJIT_R0, index_reg), 3);
 		return;
 	case SljitNativeDoubleSourceKind::INT64_TO_DOUBLE:
-	case SljitNativeDoubleSourceKind::DECIMAL64_TO_DOUBLE:
 		sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_R2, 0, SLJIT_MEM2(SLJIT_R0, index_reg), 3);
 		sljit_emit_fop1(compiler, SLJIT_CONV_F64_FROM_SW, target, 0, SLJIT_R2, 0);
-		EmitScalePredicateDoubleOperand(compiler, kind, scale, target);
+		return;
+	case SljitNativeDoubleSourceKind::DECIMAL64_TO_DOUBLE:
+		sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_R2, 0, SLJIT_MEM2(SLJIT_R0, index_reg), 3);
+		sljit_emit_fset64(compiler, SLJIT_FR2, decimal.factor);
+		EmitSljitDecimal64ToDouble(compiler, SLJIT_R2, SljitOperand::Register(SLJIT_FR2),
+		                           SljitOperand::Immediate(NumericCast<int64_t>(decimal.scale)), target);
 		return;
 	case SljitNativeDoubleSourceKind::INT128_TO_DOUBLE:
 	case SljitNativeDoubleSourceKind::DECIMAL128_TO_DOUBLE:
@@ -59,10 +56,13 @@ static void EmitLoadPredicateDoubleOperand(struct sljit_compiler *compiler, Slji
 		               NumericCast<sljit_sw>(offsetof(hugeint_t, lower)));
 		sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_R1, 0, SLJIT_MEM1(SLJIT_R2),
 		               NumericCast<sljit_sw>(offsetof(hugeint_t, upper)));
+		if (kind == SljitNativeDoubleSourceKind::DECIMAL128_TO_DOUBLE) {
+			EmitSljitDecimal128ToDouble(compiler, SljitOperand::Immediate(NumericCast<int64_t>(decimal.scale)), target);
+			return;
+		}
 		sljit_emit_icall(compiler, SLJIT_CALL, SLJIT_ARGS2(F64, W, W), SLJIT_IMM,
 		                 SLJIT_FUNC_ADDR(SljitNativeHugeintToDouble));
 		sljit_emit_fop1(compiler, SLJIT_MOV_F64, target, 0, SLJIT_RETURN_FREG, 0);
-		EmitScalePredicateDoubleOperand(compiler, kind, scale, target);
 		return;
 	default:
 		throw InternalException("Unknown SLJIT native predicate double source kind");

@@ -35,11 +35,11 @@ bool TryReadNativeIntegerBinaryReferences(const ExecutionExpressionIR &root, Slj
                                           idx_t &right_source_index);
 bool TryReadNativeDoubleBinaryConstant(const ExecutionExpressionIR &root, SljitNativeDoubleBinaryOp &native_op,
                                        SljitNativeDoubleSourceKind &source_kind, idx_t &source_index,
-                                       double &source_scale, double &constant_value, bool &constant_on_left);
+                                       uint32_t &decimal_scale, double &constant_value, bool &constant_on_left);
 bool TryReadNativeDoubleBinaryReferences(const ExecutionExpressionIR &root, SljitNativeDoubleBinaryOp &native_op,
                                          SljitNativeDoubleSourceKind &left_kind, idx_t &left_source_index,
-                                         double &left_scale, SljitNativeDoubleSourceKind &right_kind,
-                                         idx_t &right_source_index, double &right_scale);
+                                         uint32_t &left_decimal_scale, SljitNativeDoubleSourceKind &right_kind,
+                                         idx_t &right_source_index, uint32_t &right_decimal_scale);
 bool TryReadNativeDecimal64BinaryReferences(const ExecutionExpressionIR &root, SljitNativeIntegerBinaryOp &native_op,
                                             idx_t &left_source_index, idx_t &right_source_index, int64_t &result_min,
                                             int64_t &result_max);

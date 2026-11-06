@@ -165,7 +165,7 @@ static bool TryReadNativeDecimal128WideningMultiply(const ExecutionExpressionIR 
 }
 
 static bool TryReadNativeDecimal64ToDouble(const ExecutionExpressionIR &root, idx_t &source_index,
-                                           double &scale_factor) {
+                                           uint32_t &decimal_scale) {
 	if (root.kind != ExecutionExpressionIRKind::CAST || root.try_cast || !root.left ||
 	    root.return_type.id() != LogicalTypeId::DOUBLE || root.return_type.InternalType() != PhysicalType::DOUBLE ||
 	    root.left->kind != ExecutionExpressionIRKind::REFERENCE ||
@@ -173,13 +173,8 @@ static bool TryReadNativeDecimal64ToDouble(const ExecutionExpressionIR &root, id
 	    root.left->return_type.InternalType() != PhysicalType::INT64) {
 		return false;
 	}
-	auto source_scale = DecimalType::GetScale(root.left->return_type);
-	double factor = 1;
-	for (idx_t scale_idx = 0; scale_idx < source_scale; scale_idx++) {
-		factor *= 10;
-	}
 	source_index = root.left->ref_index;
-	scale_factor = factor;
+	decimal_scale = DecimalType::GetScale(root.left->return_type);
 	return true;
 }
 
@@ -260,12 +255,12 @@ bool TryReadNativeScalarIntrinsicRegionExpression(const ExecutionExpressionIR &r
 		return true;
 	}
 
-	double double_scale;
-	if (TryReadNativeDecimal64ToDouble(root, source_index, double_scale)) {
+	uint32_t decimal_scale;
+	if (TryReadNativeDecimal64ToDouble(root, source_index, decimal_scale)) {
 		expr.kind = SljitNativeRegionExpressionKind::DECIMAL64_TO_DOUBLE;
 		expr.return_type = root.return_type;
 		expr.source_index = source_index;
-		expr.double_constant = double_scale;
+		expr.double_source_decimal_scale = decimal_scale;
 		return true;
 	}
 

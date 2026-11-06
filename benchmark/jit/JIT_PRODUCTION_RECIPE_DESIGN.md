@@ -599,7 +599,10 @@ operation re-runs DuckDB's own operator so the error and operands match.
 Floating-point comparisons follow DuckDB's order, not IEEE's: a NaN ranks above
 every other value and equals every other NaN, so a comparison against a number
 reads the unordered outcome from the rank, and a comparison of two values that
-may both be NaN compares their ranks. Generated conjunctions build the
+may both be NaN compares their ranks. A decimal converts to DOUBLE as DuckDB
+casts it: `raw / 10^scale` only while the raw value is exact in a double
+(`|raw| <= 2^53`) and `10^scale` is exact (scale at most 22), DuckDB's own
+correctly rounded decimal conversion otherwise. Generated conjunctions build the
 complete packed mask before classifying it, and packed operations are admitted
 by SLJIT's exact operation-and-width capability test.
 

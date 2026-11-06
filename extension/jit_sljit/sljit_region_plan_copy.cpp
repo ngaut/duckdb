@@ -27,8 +27,8 @@ unique_ptr<SljitNativePredicate> SljitNativePredicate::Copy() const {
 	result->double_source_kind = double_source_kind;
 	result->double_right_source_kind = double_right_source_kind;
 	result->double_constant = double_constant;
-	result->double_source_scale = double_source_scale;
-	result->double_right_source_scale = double_right_source_scale;
+	result->double_source_decimal_scale = double_source_decimal_scale;
+	result->double_right_source_decimal_scale = double_right_source_decimal_scale;
 	result->compare_op = compare_op;
 	result->null_check_op = null_check_op;
 	result->constants = constants;
@@ -74,8 +74,8 @@ SljitNativeRegionExpressionPlan SljitNativeRegionExpressionPlan::Copy(bool copy_
 	result.double_binary_op = double_binary_op;
 	result.double_source_kind = double_source_kind;
 	result.double_right_source_kind = double_right_source_kind;
-	result.double_source_scale = double_source_scale;
-	result.double_right_source_scale = double_right_source_scale;
+	result.double_source_decimal_scale = double_source_decimal_scale;
+	result.double_right_source_decimal_scale = double_right_source_decimal_scale;
 	result.compare_op = compare_op;
 	result.cast_source_width = cast_source_width;
 	result.right_cast_source_width = right_cast_source_width;
