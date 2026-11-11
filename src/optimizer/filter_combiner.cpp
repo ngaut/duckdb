@@ -677,18 +677,33 @@ FilterPushdownResult FilterCombiner::TryPushdownLikeFilter(TableFilterSet &table
 	return FilterPushdownResult::PUSHED_DOWN_PARTIALLY;
 }
 
-static bool TryPushdownDenseInFilter(TableFilterSet &table_filters, const BoundColumnRefExpression &column,
-                                     vector<Value> &values) {
-	if (values.empty() || !FilterCombiner::IsDenseRange(values)) {
-		return false;
+//! Pushes `column IN (values)` into the scan. Consecutive integers become a range and a short list of strings stays
+//! exact, which storage evaluates once per dictionary entry; any other list only prunes zone maps and stays above the
+//! scan as well.
+static FilterPushdownResult PushdownInValues(TableFilterSet &table_filters, const BoundColumnRefExpression &column,
+                                             vector<Value> values) {
+	D_ASSERT(!values.empty());
+	auto column_index = column.Binding().column_index;
+	auto &type = column.GetReturnType();
+	if (FilterCombiner::IsDenseRange(values)) {
+		// IsDenseRange sorts the values and only accepts consecutive integers.
+		auto lower_bound =
+		    CreateComparisonExpression(column, ExpressionType::COMPARE_GREATERTHANOREQUALTO, values.front());
+		auto upper_bound =
+		    CreateComparisonExpression(column, ExpressionType::COMPARE_LESSTHANOREQUALTO, std::move(values.back()));
+		table_filters.PushFilter(column_index, make_uniq<ExpressionFilter>(std::move(lower_bound)));
+		table_filters.PushFilter(column_index, make_uniq<ExpressionFilter>(std::move(upper_bound)));
+		return FilterPushdownResult::PUSHED_DOWN_FULLY;
 	}
-	// IsDenseRange sorts the values and only accepts consecutive integers.
-	auto lower_bound = CreateComparisonExpression(column, ExpressionType::COMPARE_GREATERTHANOREQUALTO, values.front());
-	auto upper_bound =
-	    CreateComparisonExpression(column, ExpressionType::COMPARE_LESSTHANOREQUALTO, std::move(values.back()));
-	table_filters.PushFilter(column.Binding().column_index, make_uniq<ExpressionFilter>(std::move(lower_bound)));
-	table_filters.PushFilter(column.Binding().column_index, make_uniq<ExpressionFilter>(std::move(upper_bound)));
-	return true;
+	const bool exact =
+	    type.id() == LogicalTypeId::VARCHAR && values.size() < InClauseRewriter::IN_CLAUSE_REWRITE_THRESHOLD;
+	auto in_expr = ExpressionFilter::CreateInExpression(CreateFilterTargetExpression(column), std::move(values));
+	if (exact) {
+		table_filters.PushFilter(column_index, make_uniq<ExpressionFilter>(std::move(in_expr)));
+		return FilterPushdownResult::PUSHED_DOWN_FULLY;
+	}
+	table_filters.PushFilter(column_index, CreateOptionalExpressionFilter(std::move(in_expr), type));
+	return FilterPushdownResult::PUSHED_DOWN_PARTIALLY;
 }
 
 FilterPushdownResult FilterCombiner::TryPushdownInFilter(TableFilterSet &table_filters,
@@ -734,28 +749,13 @@ FilterPushdownResult FilterCombiner::TryPushdownInFilter(TableFilterSet &table_f
 		return FilterPushdownResult::PUSHED_DOWN_FULLY;
 	}
 
-	//! Check if values are consecutive, if yes transform them to >= <= (only for integers)
-	// e.g. if we have x IN (1, 2, 3, 4, 5) we transform this into x >= 1 AND x <= 5
 	vector<Value> in_list;
 	for (idx_t i = 1; i < func.GetChildren().size(); i++) {
 		auto &const_value_expr = func.GetChildren()[i]->Cast<BoundConstantExpression>();
 		D_ASSERT(!const_value_expr.GetValue().IsNull());
 		in_list.push_back(const_value_expr.GetValue());
 	}
-	if (type.id() == LogicalTypeId::VARCHAR && in_list.size() < InClauseRewriter::IN_CLAUSE_REWRITE_THRESHOLD) {
-		auto in_expr = ExpressionFilter::CreateInExpression(CreateFilterTargetExpression(*func.GetChildren()[0]),
-		                                                    std::move(in_list));
-		table_filters.PushFilter(proj_index, make_uniq<ExpressionFilter>(std::move(in_expr)));
-		return FilterPushdownResult::PUSHED_DOWN_FULLY;
-	}
-	if (TryPushdownDenseInFilter(table_filters, column_ref, in_list)) {
-		return FilterPushdownResult::PUSHED_DOWN_FULLY;
-	}
-	// if this is not a dense range we can push an optional filter for zone-map pruning
-	auto in_expr =
-	    ExpressionFilter::CreateInExpression(CreateFilterTargetExpression(*func.GetChildren()[0]), std::move(in_list));
-	table_filters.PushFilter(proj_index, CreateOptionalExpressionFilter(std::move(in_expr), type));
-	return FilterPushdownResult::PUSHED_DOWN_PARTIALLY;
+	return PushdownInValues(table_filters, column_ref, std::move(in_list));
 }
 
 FilterPushdownResult FilterCombiner::TryPushdownOrClause(TableFilterSet &table_filters,
@@ -838,14 +838,8 @@ FilterPushdownResult FilterCombiner::TryPushdownOrClause(TableFilterSet &table_f
 		}
 	}
 	if (only_equalities && equality_column) {
-		if (TryPushdownDenseInFilter(table_filters, *equality_column, equality_values)) {
-			return FilterPushdownResult::PUSHED_DOWN_FULLY;
-		}
-		// Push the same filter as for `col IN (...)`, which index scans can use.
-		auto in_expr = ExpressionFilter::CreateInExpression(CreateFilterTargetExpression(*equality_column),
-		                                                    std::move(equality_values));
-		table_filters.PushFilter(proj_id, CreateOptionalExpressionFilter(std::move(in_expr), col_type));
-		return FilterPushdownResult::PUSHED_DOWN_PARTIALLY;
+		// an OR of equalities is `col IN (...)`
+		return PushdownInValues(table_filters, *equality_column, std::move(equality_values));
 	}
 	table_filters.PushFilter(proj_id, CreateOptionalExpressionFilter(std::move(conj_filter), col_type));
 	return FilterPushdownResult::PUSHED_DOWN_PARTIALLY;

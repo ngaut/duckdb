@@ -69,10 +69,21 @@ explain select * from t1 where a in (1);
 ----
 physical_plan	<!REGEX>:.*optional.*
 
+# an OR of string equalities is a short string IN list, which the scan evaluates exactly
 query II
 explain select b from t1 where b = 'foo9' or b = 'foo10';
 ----
-physical_plan	<REGEX>:.*optional.*
+physical_plan	<REGEX>:.*Filters: b IN \('foo9', 'foo10'\).*
+
+query II
+explain select b from t1 where b = 'foo9' or b = 'foo10';
+----
+physical_plan	<!REGEX>:.*optional.*
+
+query I
+select count(*) from t1 where b = 'foo9' or b = 'foo10';
+----
+18000
 
 # two different row groups can be propagated here.
 query I

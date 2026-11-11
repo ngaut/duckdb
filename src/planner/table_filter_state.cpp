@@ -9,6 +9,7 @@
 #include "duckdb/planner/expression/bound_conjunction_expression.hpp"
 #include "duckdb/planner/expression/bound_constant_expression.hpp"
 #include "duckdb/planner/expression/bound_function_expression.hpp"
+#include "duckdb/planner/expression/bound_operator_expression.hpp"
 #include "duckdb/planner/expression/bound_reference_expression.hpp"
 #include "duckdb/planner/filter/expression_filter.hpp"
 #include "duckdb/planner/filter/table_filter_functions.hpp"
@@ -611,6 +612,29 @@ static unique_ptr<ExpressionFilterExecutor> TryCreateComparisonExecutor(const Bo
 	return make_uniq<ComparisonFilterExecutor>(comparison_type, constant->GetValue());
 }
 
+//! `column IN (constants)` selects the rows that equal any of the constants, which is an OR of equalities
+static unique_ptr<ExpressionFilterExecutor> TryCreateInExecutor(const BoundOperatorExpression &in_expr) {
+	auto &children = in_expr.GetChildren();
+	if (children.size() < 2 || !IsColumnReferenceExpression(*children[0])) {
+		return nullptr;
+	}
+	const auto column_type = children[0]->GetReturnType().InternalType();
+	if (!IsSupportedComparisonType(column_type)) {
+		return nullptr;
+	}
+	vector<unique_ptr<ExpressionFilterExecutor>> equalities;
+	for (idx_t child_idx = 1; child_idx < children.size(); child_idx++) {
+		auto &child = *children[child_idx];
+		if (child.GetExpressionClass() != ExpressionClass::BOUND_CONSTANT ||
+		    child.GetReturnType().InternalType() != column_type) {
+			return nullptr;
+		}
+		equalities.push_back(make_uniq<ComparisonFilterExecutor>(ExpressionType::COMPARE_EQUAL,
+		                                                         child.Cast<BoundConstantExpression>().GetValue()));
+	}
+	return make_uniq<ConjunctionOrFilterExecutor>(std::move(equalities));
+}
+
 static unique_ptr<ExpressionFilterExecutor> TryCreateFunctionExecutor(const BoundFunctionExpression &func,
                                                                       bool inside_selectivity_optional) {
 	if (!inside_selectivity_optional && func.GetChildren().size() == 2 &&
@@ -658,6 +682,11 @@ static unique_ptr<ExpressionFilterExecutor> TryCreateFastExecutor(const Expressi
 	switch (expression.GetExpressionClass()) {
 	case ExpressionClass::BOUND_FUNCTION:
 		return TryCreateFunctionExecutor(expression.Cast<BoundFunctionExpression>(), inside_selectivity_optional);
+	case ExpressionClass::BOUND_OPERATOR:
+		if (expression.GetExpressionType() != ExpressionType::COMPARE_IN) {
+			return nullptr;
+		}
+		return TryCreateInExecutor(expression.Cast<BoundOperatorExpression>());
 	case ExpressionClass::BOUND_CONJUNCTION: {
 		if (expression.GetExpressionType() != ExpressionType::CONJUNCTION_AND &&
 		    expression.GetExpressionType() != ExpressionType::CONJUNCTION_OR) {

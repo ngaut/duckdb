@@ -1,0 +1,70 @@
+# name: test/sql/filter/string_in_scan_filter.test
+# description: A string IN or equality filter in the scan matches the rows of every string layout
+# group: [filter]
+
+# A dictionary-compressed segment evaluates the filter once per dictionary entry. Each string appears twice, so the
+# dictionary of a segment holds tens of thousands of entries, more than a vector, and is filtered in vector-sized
+# slices; an uncompressed segment evaluates the filter per vector. The strings mix inlined and out-of-line values with a
+# shared prefix, the constants include ones no row holds and ones far into a dictionary, and one row in 17 is NULL.
+
+load __TEST_DIR__/string_in_scan_filter.db
+
+foreach compression uncompressed fsst dict_fsst
+
+statement ok
+PRAGMA force_compression='{compression}'
+
+statement ok
+CREATE OR REPLACE TABLE strings AS
+SELECT i, CASE WHEN i % 17 = 0 THEN NULL
+               WHEN i % 3 = 0 THEN 'value-' || (i % 5)
+               ELSE 'unique-' || (i // 2) || CASE WHEN (i // 2) % 2 = 0 THEN '-with-a-long-tail' ELSE '' END END AS s
+FROM range(100000) t(i)
+
+statement ok
+CHECKPOINT
+
+# a reopened database scans the checkpointed segments
+restart
+
+foreach threads 1 4
+
+statement ok
+SET threads={threads}
+
+query II
+EXPLAIN SELECT count(*) FROM strings WHERE s IN ('value-1', 'unique-7', 'unique-49998-with-a-long-tail', 'unique-8', '')
+----
+physical_plan	<REGEX>:.*Filters:.*s IN.*
+
+query II
+SELECT count(*), sum(i) FROM strings WHERE s IN ('value-1', 'unique-7', 'unique-49998-with-a-long-tail', 'unique-8', '')
+----
+6277	313894506
+
+# an OR of equalities is the same IN list
+query II
+SELECT count(*), sum(i) FROM strings
+WHERE s = 'value-1' OR s = 'unique-7' OR s = 'unique-49998-with-a-long-tail' OR s = 'unique-8' OR s = ''
+----
+6277	313894506
+
+query II
+SELECT count(*), sum(i) FROM strings WHERE s = 'unique-49998-with-a-long-tail'
+----
+1	99997
+
+query II
+SELECT count(*), sum(i) FROM strings WHERE s IN ('value-1', 'value-2')
+----
+12549	627508998
+
+# a filter on another column selects the rows the string filter sees
+query II
+SELECT count(*), sum(i) FROM strings WHERE i > 50000 AND s IN ('value-1', 'unique-30001', 'unique-49998-with-a-long-tail')
+----
+3140	235525872
+
+endloop
+
+endloop

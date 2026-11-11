@@ -460,61 +460,18 @@ static idx_t ExecuteExpressionFilterSelection(SelectionVector &sel, Vector &vect
 	if (approved_tuple_count == 0) {
 		return 0;
 	}
+	D_ASSERT(scan_count <= STANDARD_VECTOR_SIZE);
 	SelectionVector result_sel(approved_tuple_count);
-	if (scan_count > STANDARD_VECTOR_SIZE) {
-		// scan count is > vector size - split up the vector into multiple chunks
-		idx_t offset = 0;
-		idx_t result_offset = 0;
-		idx_t current_sel_offset = 0;
-		SelectionVector current_sel(approved_tuple_count);
-		while (offset < scan_count) {
-			idx_t chunk_count = MinValue<idx_t>(STANDARD_VECTOR_SIZE, scan_count - offset);
-			idx_t chunk_end = offset + chunk_count;
-			DataChunk chunk;
-			chunk.data.emplace_back(vector, offset, chunk_end);
-
-			// construct the relevant selection vector for the current chunk (offset ... offset + chunk_count)
-			idx_t current_count = 0;
-			for (; current_sel_offset < approved_tuple_count; current_sel_offset++) {
-				auto sel_index = sel.get_index(current_sel_offset);
-				if (sel_index >= chunk_end) {
-					// exhausted the chunk
-					break;
-				}
-				if (sel_index < offset) {
-					throw InternalException("sel_index < offset in expression filter");
-				}
-				current_sel.set_index(current_count++, sel_index - offset);
-			}
-			if (current_count == 0) {
-				// no matching tuples in this chunk
-				offset += chunk_count;
-				continue;
-			}
-			auto current_result_data = result_sel.data() + result_offset;
-			SelectionVector current_result_sel(current_result_data, result_sel.Capacity() - result_offset);
-			idx_t new_matches = executor.SelectExpression(chunk, current_result_sel, current_sel, current_count);
-			// increment all matches by the offset
-			for (idx_t i = 0; i < new_matches; i++) {
-				current_result_data[i] += offset;
-			}
-			result_offset += new_matches;
-			offset += chunk_count;
-		}
-		approved_tuple_count = result_offset;
-	} else {
-		// standard case: we can handle everything at once - run the expression once
-		DataChunk chunk;
-		chunk.data.emplace_back(Vector::Ref(vector));
-		chunk.SetChildCardinality(scan_count);
-		SelectionVector identity_sel;
-		optional_ptr<SelectionVector> current_sel = sel.IsSet() ? &sel : nullptr;
-		if (!sel.IsSet() && (vector.GetType().IsNested() || approved_tuple_count != scan_count)) {
-			identity_sel = SelectionVector::Incremental(approved_tuple_count);
-			current_sel = &identity_sel;
-		}
-		approved_tuple_count = executor.SelectExpression(chunk, result_sel, current_sel, approved_tuple_count);
+	DataChunk chunk;
+	chunk.data.emplace_back(Vector::Ref(vector));
+	chunk.SetChildCardinality(scan_count);
+	SelectionVector identity_sel;
+	optional_ptr<SelectionVector> current_sel = sel.IsSet() ? &sel : nullptr;
+	if (!sel.IsSet() && (vector.GetType().IsNested() || approved_tuple_count != scan_count)) {
+		identity_sel = SelectionVector::Incremental(approved_tuple_count);
+		current_sel = &identity_sel;
 	}
+	approved_tuple_count = executor.SelectExpression(chunk, result_sel, current_sel, approved_tuple_count);
 	sel.Initialize(result_sel);
 	return approved_tuple_count;
 }
@@ -1162,9 +1119,8 @@ idx_t ColumnSegment::FilterSelection(SelectionVector &sel, Vector &vector, Unifi
 	return FilterSelection(sel, vector, filter_state, scan_count, approved_tuple_count);
 }
 
-idx_t ColumnSegment::FilterSelection(SelectionVector &sel, Vector &vector, TableFilterState &filter_state,
-                                     idx_t scan_count, idx_t &approved_tuple_count) {
-	auto &state = filter_state.Cast<ExpressionFilterState>();
+static idx_t FilterVectorSelection(SelectionVector &sel, Vector &vector, ExpressionFilterState &state, idx_t scan_count,
+                                   idx_t &approved_tuple_count) {
 	// native storage fast paths first, then a backend-compiled kernel, then the generic fast executor and finally the
 	// canonical expression executor
 	if (TryFastSignedNumericRangeFilter(sel, vector, state, approved_tuple_count)) {
@@ -1183,11 +1139,50 @@ idx_t ColumnSegment::FilterSelection(SelectionVector &sel, Vector &vector, Table
 			return approved_tuple_count;
 		}
 	}
-	if (state.fast_executor && scan_count <= STANDARD_VECTOR_SIZE) {
+	if (state.fast_executor) {
 		return state.fast_executor->FilterSelection(sel, vector, scan_count, approved_tuple_count);
 	}
 	D_ASSERT(state.executor);
 	return ExecuteExpressionFilterSelection(sel, vector, *state.executor, scan_count, approved_tuple_count);
+}
+
+idx_t ColumnSegment::FilterSelection(SelectionVector &sel, Vector &vector, TableFilterState &filter_state,
+                                     idx_t scan_count, idx_t &approved_tuple_count) {
+	auto &state = filter_state.Cast<ExpressionFilterState>();
+	if (scan_count <= STANDARD_VECTOR_SIZE) {
+		return FilterVectorSelection(sel, vector, state, scan_count, approved_tuple_count);
+	}
+	// a larger input, such as the dictionary of a whole segment, is filtered one vector-sized slice at a time
+	SelectionVector result_sel(approved_tuple_count);
+	SelectionVector slice_input_sel(STANDARD_VECTOR_SIZE);
+	idx_t result_count = 0;
+	idx_t sel_offset = 0;
+	for (idx_t offset = 0; offset < scan_count && sel_offset < approved_tuple_count; offset += STANDARD_VECTOR_SIZE) {
+		const auto slice_end = MinValue<idx_t>(offset + STANDARD_VECTOR_SIZE, scan_count);
+		idx_t slice_count = 0;
+		for (; sel_offset < approved_tuple_count; sel_offset++) {
+			const auto row_idx = sel.get_index(sel_offset);
+			if (row_idx >= slice_end) {
+				break;
+			}
+			if (row_idx < offset) {
+				throw InternalException("filter selection is not sorted");
+			}
+			slice_input_sel.set_index(slice_count++, row_idx - offset);
+		}
+		if (slice_count == 0) {
+			continue;
+		}
+		Vector slice(vector, offset, slice_end);
+		SelectionVector slice_sel(slice_input_sel);
+		FilterVectorSelection(slice_sel, slice, state, slice_end - offset, slice_count);
+		for (idx_t i = 0; i < slice_count; i++) {
+			result_sel.set_index(result_count++, slice_sel.get_index(i) + offset);
+		}
+	}
+	sel.Initialize(result_sel);
+	approved_tuple_count = result_count;
+	return result_count;
 }
 
 const CompressionFunction &ColumnSegment::GetCompressionFunction() {
