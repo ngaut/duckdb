@@ -127,7 +127,7 @@ static bool SljitTryMaterializeBoundHashJoinRHSProjectionToBatch(
 			if (current_size != 0 || target.GetType() != type) {
 				return false;
 			}
-			target.Dictionary(binding.perfect_layout.rhs_dictionary_buffers[rhs_idx], build_selection, count);
+			target.Dictionary(ExecutionHashJoinPerfectRHSDictionary(binding, rhs_idx), build_selection, count);
 			return true;
 		}
 	}

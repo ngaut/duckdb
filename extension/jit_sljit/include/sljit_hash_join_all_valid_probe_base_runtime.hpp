@@ -70,7 +70,7 @@ static inline uint64_t SljitBloomFilterMask(hash_t hash) {
 }
 
 static inline bool SljitBloomFilterMayContainKnownPresent(const uint64_t *bits, uint64_t bitmask, hash_t hash) {
-	const auto slot = bits[hash & bitmask];
+	const auto slot = bits[HashBloomFilterSector(hash, bitmask)];
 	const auto mask = SljitBloomFilterMask(hash);
 	return (slot & mask) == mask;
 }

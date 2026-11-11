@@ -21,6 +21,7 @@
 #include "duckdb/main/attached_database.hpp"
 #include "duckdb/main/capi/extension_api.hpp"
 #include "duckdb/main/client_context.hpp"
+#include "duckdb/main/context.hpp"
 #include "duckdb/main/connection_manager.hpp"
 #include "duckdb/main/database_file_opener.hpp"
 #include "duckdb/main/database_file_path_manager.hpp"
@@ -89,6 +90,7 @@ DatabaseInstance::DatabaseInstance() : db_validity(*this) {
 	invoke_capi_v2 = nullptr;
 	parser_cache = make_uniq<ParserCache>();
 	execution_region_manager = make_uniq<ExecutionRegionManager>(*this);
+	services = make_uniq<Context>(*this);
 }
 
 ParserCache &DatabaseInstance::GetParserCache() {
@@ -186,7 +188,7 @@ DBConfig &DBConfig::GetConfig(DatabaseInstance &db) {
 }
 
 ClientConfig &ClientConfig::GetConfig(ClientContext &context) {
-	return context.services->GetClientConfig();
+	return context.GetContext().GetClientConfig();
 }
 
 DBConfig &DBConfig::Get(AttachedDatabase &db) {
@@ -198,7 +200,7 @@ const DBConfig &DBConfig::GetConfig(const DatabaseInstance &db) {
 }
 
 const ClientConfig &ClientConfig::GetConfig(const ClientContext &context) {
-	return context.services->GetClientConfig();
+	return context.GetContext().GetClientConfig();
 }
 
 TransactionManager &TransactionManager::Get(AttachedDatabase &db) {
@@ -616,9 +618,10 @@ void DatabaseInstance::Configure(DBConfig &new_config, const char *database_path
 	if (new_config.buffer_pool) {
 		config.buffer_pool = std::move(new_config.buffer_pool);
 	} else {
-		config.buffer_pool = make_shared_ptr<BufferPool>(*config.block_allocator, config.options.maximum_memory,
-		                                                 config.options.buffer_manager_track_eviction_timestamps,
-		                                                 config.options.allocator_bulk_deallocation_flush_threshold);
+		config.buffer_pool =
+		    make_shared_ptr<BufferPool>(*config.block_allocator, config.options.maximum_memory,
+		                                Settings::Get<BufferManagerTrackEvictionTimestampsSetting>(config),
+		                                config.options.allocator_bulk_deallocation_flush_threshold);
 	}
 	config.db_cache_entry = std::move(new_config.db_cache_entry);
 	config.path_manager = std::move(new_config.path_manager);

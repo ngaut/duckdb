@@ -100,9 +100,9 @@ static inline struct sljit_jump *EmitJumpIfRegularHashJoinBloomMiss(struct sljit
 	sljit_emit_op1(compiler, SLJIT_MOV_P, bits_reg, 0, SLJIT_MEM1(SLJIT_S0),
 	               offsetof(SljitNativeRegularHashJoinProbeInput, bloom_filter_bits));
 	auto no_bloom = sljit_emit_cmp(compiler, SLJIT_EQUAL, bits_reg, 0, SLJIT_IMM, 0);
-	sljit_emit_op1(compiler, SLJIT_MOV, slot_reg, 0, SLJIT_MEM1(SLJIT_S0),
+	sljit_emit_op2(compiler, SLJIT_LSHR, slot_reg, 0, hash_reg, 0, SLJIT_IMM, HashBloomFilterConstants::SECTOR_SHIFT);
+	sljit_emit_op2(compiler, SLJIT_AND, slot_reg, 0, slot_reg, 0, SLJIT_MEM1(SLJIT_S0),
 	               offsetof(SljitNativeRegularHashJoinProbeInput, bloom_filter_bitmask));
-	sljit_emit_op2(compiler, SLJIT_AND, slot_reg, 0, slot_reg, 0, hash_reg, 0);
 	sljit_emit_op1(compiler, SLJIT_MOV, slot_reg, 0, SLJIT_MEM2(bits_reg, slot_reg), 3);
 	EmitBloomFilterMask(compiler, hash_reg, mask_reg, scratch);
 	sljit_emit_op2(compiler, SLJIT_AND, scratch, 0, slot_reg, 0, mask_reg, 0);

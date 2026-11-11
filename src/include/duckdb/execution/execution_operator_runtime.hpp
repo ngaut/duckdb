@@ -19,6 +19,7 @@
 namespace duckdb {
 
 class DataChunk;
+class DictionaryOwnershipCache;
 class GlobalSinkState;
 class InterruptState;
 class LocalSinkState;
@@ -395,6 +396,9 @@ struct ExecutionHashJoinProbeBinding {
 	vector<LogicalType> rhs_condition_types;
 	vector<idx_t> lhs_output_column_indices;
 	idx_t rhs_output_column_count = 0;
+	//! This binding's own references to the dictionaries its RHS output columns emit, so emitting a chunk never
+	//! touches a reference count shared with other threads
+	shared_ptr<DictionaryOwnershipCache> rhs_dictionary_owners;
 	//! Operator-lifetime physical sources resolved once by core. Backends may
 	//! inspect these immutable views but never dereference hash_table.
 	vector<ExecutionHashJoinRHSFixedColumnSource> rhs_fixed_column_sources;
@@ -483,6 +487,10 @@ DUCKDB_API void ExecutionMaterializeHashJoinProbe(const ExecutionHashJoinProbeBi
 
 //! Builds the bloom filter a probe binding requested and publishes it in the binding's table layout
 DUCKDB_API void ExecutionUseHashJoinProbeBloomFilter(ExecutionHashJoinProbeBinding &binding);
+//! The binding's own reference to the perfect-hash dictionary of an RHS output column; dictionary vectors the
+//! binding's thread emits wrap this entry
+DUCKDB_API const buffer_ptr<DictionaryEntry> &
+ExecutionHashJoinPerfectRHSDictionary(const ExecutionHashJoinProbeBinding &binding, idx_t rhs_output_idx);
 
 DUCKDB_API bool ExecutionTryDirectGatherHashJoinRHSFixedColumn(const ExecutionHashJoinProbeBinding &binding,
                                                                Vector &row_pointers, idx_t count, idx_t rhs_output_idx,

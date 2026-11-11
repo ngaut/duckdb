@@ -167,7 +167,7 @@ void ScanFilterInfo::InitializeResidualFilterMetadata(ClientContext &context, Ta
 			                                ? column_ids[projection_index].GetPrimaryIndex()
 			                                : projection_index);
 		}
-		adaptive_filter->SetLogger(context.services->GetLoggerPtr(), "", AdaptiveFilterSource::INITIAL,
+		adaptive_filter->SetLogger(context.GetContext().GetLoggerPtr(), "", AdaptiveFilterSource::INITIAL,
 		                           filter_identities);
 	}
 	column_has_filter.reserve(column_ids.size());
@@ -515,8 +515,7 @@ bool CollectionScanState::RecheckPreparedRowGroup() {
 	if (!row_group || prepared_vector.prepare_state == VectorPrepareState::NONE) {
 		return true;
 	}
-	if (pinned_row_group->CheckZonemap(Context::TryGetClientContext(context.GetServices()), GetFilterInfo(),
-	                                   row_group->GetRowStart())) {
+	if (pinned_row_group->CheckZonemap(context.GetClientContext(), GetFilterInfo(), row_group->GetRowStart())) {
 		return true;
 	}
 	// the prepared vector was counted as scanned when it was prepared, it is never decoded

@@ -665,7 +665,7 @@ class HashJoinGlobalSinkState : public GlobalSinkState {
 public:
 	HashJoinGlobalSinkState(const PhysicalHashJoin &op_p, ClientContext &context_p)
 	    : context(context_p), op(op_p), num_threads(TaskScheduler::GetScheduler(context).NumberOfThreads()),
-	      temporary_memory_state(TemporaryMemoryManager::Get(context.Services()).Register(context.Services())),
+	      temporary_memory_state(TemporaryMemoryManager::Get(context.GetContext()).Register(context.GetContext())),
 	      finalized(false), active_local_states(0), total_size(0), max_partition_size(0), max_partition_count(0),
 	      probe_side_requirement(0), scanned_data(false) {
 		// Start with sixteen partitions; a repartition derives its fanout from the local tables' radix bits
@@ -675,7 +675,7 @@ public:
 		                                    GetBuildSpaceRequirement(context, *hash_table, num_threads));
 		temporary_memory_state->SetMinimumReservation(minimum_reservation);
 		temporary_memory_state->SetRemainingSize(minimum_reservation);
-		temporary_memory_state->UpdateReservation(context.Services());
+		temporary_memory_state->UpdateReservation(context.GetContext());
 
 		// Set probe types
 		probe_types = op.children[0].get().GetTypes();
@@ -1545,22 +1545,28 @@ SinkCombineResultType PhysicalHashJoin::Combine(ExecutionContext &context, Opera
 // Finalize
 //===--------------------------------------------------------------------===//
 
-static constexpr idx_t PARALLEL_CONSTRUCT_THRESHOLD = 1048576;
-static constexpr double SKEW_SINGLE_THREADED_THRESHOLD = 0.33;
+struct HashJoinBuildConfig {
+	static constexpr idx_t PARALLEL_CONSTRUCT_THRESHOLD = 1048576;
+	static constexpr idx_t SMALL_PARALLEL_CONSTRUCT_THRESHOLD = 65536;
+	static constexpr idx_t SMALL_PARALLEL_MIN_THREADS = 4;
+	static constexpr double SKEW_SINGLE_THREADED_THRESHOLD = 0.33;
+	static constexpr double SMALL_BUILD_SKEW_THRESHOLD = 0.20;
+};
 
 //! If the data is very skewed (many of the exact same key), our finalize will become slow,
 //! due to completely slamming the same atomic using compare-and-swaps.
 //! We can detect this because we partition the data, and go for a single-threaded finalize instead.
-static bool KeysAreSkewed(const HashJoinGlobalSinkState &sink) {
+static bool KeysAreSkewed(const HashJoinGlobalSinkState &sink,
+                          double threshold = HashJoinBuildConfig::SKEW_SINGLE_THREADED_THRESHOLD) {
 	const auto max_partition_ht_size =
 	    sink.max_partition_size + sink.hash_table->PointerTableSize(sink.max_partition_count);
 	const auto skew = static_cast<double>(max_partition_ht_size) / static_cast<double>(sink.total_size);
-	return skew > SKEW_SINGLE_THREADED_THRESHOLD;
+	return skew > threshold;
 }
 
 //! If we have only one thread, always finalize single-threaded. Otherwise, we finalize in parallel if we
-//! have more than 1M rows or if we want to verify parallelism.
-static bool FinalizeSingleThreaded(const HashJoinGlobalSinkState &sink, const bool consider_skew) {
+//! have at least 1M rows, an unskewed medium input with enough threads, or want to verify parallelism.
+static bool FinalizeSingleThreaded(const HashJoinGlobalSinkState &sink) {
 	// if only one thread, finalize single-threaded
 	const auto num_threads = NumericCast<idx_t>(sink.num_threads);
 	if (num_threads == 1) {
@@ -1572,14 +1578,15 @@ static bool FinalizeSingleThreaded(const HashJoinGlobalSinkState &sink, const bo
 		return false;
 	}
 
-	// finalize single-threaded if we have less than 1M rows
 	const auto &ht = *sink.hash_table;
-	const bool ht_is_small = ht.Count() < PARALLEL_CONSTRUCT_THRESHOLD;
-
-	if (consider_skew) {
-		return ht_is_small || KeysAreSkewed(sink);
+	if (ht.Count() >= HashJoinBuildConfig::PARALLEL_CONSTRUCT_THRESHOLD) {
+		return false;
 	}
-	return ht_is_small;
+	if (num_threads < HashJoinBuildConfig::SMALL_PARALLEL_MIN_THREADS ||
+	    ht.Count() < HashJoinBuildConfig::SMALL_PARALLEL_CONSTRUCT_THRESHOLD) {
+		return true;
+	}
+	return KeysAreSkewed(sink, HashJoinBuildConfig::SMALL_BUILD_SKEW_THRESHOLD);
 }
 
 static idx_t GetTupleWidth(const vector<LogicalType> &types, bool &all_constant) {
@@ -1896,7 +1903,7 @@ public:
 	vector<shared_ptr<Task>> GetTasks() {
 		auto &ht = *sink.hash_table;
 		auto &data_collection = ht.GetDataCollection();
-		const bool parallel = !FinalizeSingleThreaded(sink, false) && ht.GetRadixBits() != 0;
+		const bool parallel = !FinalizeSingleThreaded(sink) && ht.GetRadixBits() != 0;
 		const auto partitions = RadixPartitioning::NumberOfPartitions(ht.GetRadixBits());
 		queue = make_uniq<JoinBuildQueue>(partitions);
 		if (!parallel) {
@@ -1974,10 +1981,10 @@ void HashJoinGlobalSinkState::ScheduleFinalize(Pipeline &pipeline, Event &event)
 		hash_table->MarkFinalized();
 		return;
 	}
-	hash_table->AllocatePointerTable(!external && !FinalizeSingleThreaded(*this, false));
+	hash_table->AllocatePointerTable(!external && !FinalizeSingleThreaded(*this));
 
 	auto new_init_event = make_shared_ptr<HashJoinTableInitEvent>(pipeline, *this);
-	if (FinalizeSingleThreaded(*this, false)) {
+	if (FinalizeSingleThreaded(*this)) {
 		new_init_event->ExecuteDirectly();
 		auto new_finalize_event = make_shared_ptr<HashJoinFinalizeEvent>(pipeline, *this);
 		new_finalize_event->ExecuteDirectly();
@@ -2250,7 +2257,7 @@ public:
 		sink.temporary_memory_state->SetMinimumReservation(sink.max_partition_size +
 		                                                   sink.hash_table->PointerTableSize(sink.max_partition_count) +
 		                                                   sink.probe_side_requirement);
-		sink.temporary_memory_state->UpdateReservation(executor.context.Services());
+		sink.temporary_memory_state->UpdateReservation(executor.context.GetContext());
 
 		FinalizeExternalRuntimeFilters(sink.context, op, sink);
 
@@ -2845,7 +2852,7 @@ SinkFinalizeType PhysicalHashJoin::Finalize(Pipeline &pipeline, Event &event, Cl
 	// the filter covers the whole build side once Sink is done
 	ht.SealBloomFilter();
 
-	sink.temporary_memory_state->UpdateReservation(context.Services());
+	sink.temporary_memory_state->UpdateReservation(context.GetContext());
 	sink.external = sink.temporary_memory_state->GetReservation() < sink.total_size;
 	if (sink.external) {
 		// For external join we reduce the load factor, this may even prevent the external join altogether
@@ -2859,7 +2866,7 @@ SinkFinalizeType PhysicalHashJoin::Finalize(Pipeline &pipeline, Event &event, Cl
 		if (temp_total_size < sink.temporary_memory_state->GetReservation()) {
 			// We prevented the external join by reducing the load factor. Update the state accordingly
 			sink.temporary_memory_state->SetMinimumReservation(temp_total_size);
-			sink.temporary_memory_state->SetRemainingSizeAndUpdateReservation(context.Services(), temp_total_size);
+			sink.temporary_memory_state->SetRemainingSizeAndUpdateReservation(context.GetContext(), temp_total_size);
 
 			sink.total_size = temp_total_size;
 			sink.max_partition_size = temp_max_partition_size;
@@ -2942,7 +2949,7 @@ SinkFinalizeType PhysicalHashJoin::Finalize(Pipeline &pipeline, Event &event, Cl
 	if (use_perfect_hash) {
 		// A duplicate build key, found while filling, still falls back to the regular hash join
 		sink.perfect_join_executor->InitializePerfectHashTable();
-		if (FinalizeSingleThreaded(sink, false)) {
+		if (FinalizeSingleThreaded(sink)) {
 			sink.perfect_join_executor->FillPerfectHashTable(0, ht.GetDataCollection().ChunkCount());
 			CompletePerfectHashJoinFinalize(pipeline, event, sink, std::move(filter_min_max), false);
 		} else {
@@ -3017,6 +3024,10 @@ public:
 
 public:
 	void Finalize(const PhysicalOperator &op, ExecutionContext &context) override {
+		scan_structure.dictionary_gather_state.Reset();
+		if (perfect_hash_join_state) {
+			perfect_hash_join_state->Finalize(op, context);
+		}
 		context.thread.profiler.Flush(op);
 	}
 
@@ -3414,6 +3425,8 @@ ExecutionOperatorBindResult PhysicalHashJoin::BindExecutionOperator(ExecutionCon
 	binding.hash_join_probe.rhs_condition_types = contract.rhs_condition_types;
 	binding.hash_join_probe.lhs_output_column_indices = contract.lhs_output_column_indices;
 	binding.hash_join_probe.rhs_output_column_count = contract.rhs_output_column_count;
+	binding.hash_join_probe.rhs_dictionary_owners =
+	    make_shared_ptr<DictionaryOwnershipCache>(contract.rhs_output_column_count);
 	binding.hash_join_probe.rhs_fixed_column_sources.resize(contract.rhs_output_column_count);
 	if (!perfect_hash_layout && !resolution.empty_build_side &&
 	    contract.native_probe_output_mode == ExecutionHashJoinProbeOutputMode::MATCHED_PROBE_AND_BUILD) {
@@ -3731,10 +3744,18 @@ void ExecutionMaterializeHashJoinProbe(const ExecutionHashJoinProbeBinding &bind
 			}
 		} else {
 			binding.hash_table->GatherRHS(row_pointers, *FlatVector::IncrementalSelectionVector(), count, result,
-			                              rhs_offset);
+			                              rhs_offset, *binding.rhs_dictionary_owners);
 		}
 	}
 	result.SetChildCardinality(count);
+}
+
+const buffer_ptr<DictionaryEntry> &ExecutionHashJoinPerfectRHSDictionary(const ExecutionHashJoinProbeBinding &binding,
+                                                                         idx_t rhs_output_idx) {
+	D_ASSERT(binding.layout_kind == ExecutionHashJoinProbeLayoutKind::PERFECT_HASH_TABLE);
+	D_ASSERT(rhs_output_idx < binding.perfect_layout.rhs_dictionary_buffers.size());
+	return binding.rhs_dictionary_owners->GetEntry(rhs_output_idx,
+	                                               binding.perfect_layout.rhs_dictionary_buffers[rhs_output_idx]);
 }
 
 void ExecutionUseHashJoinProbeBloomFilter(ExecutionHashJoinProbeBinding &binding) {
@@ -3788,7 +3809,7 @@ void ExecutionGatherHashJoinRHSColumn(const ExecutionHashJoinProbeBinding &bindi
 		throw InternalException("execution native hash join RHS gather type mismatch");
 	}
 	binding.hash_table->GatherRHSColumn(row_pointers, *FlatVector::IncrementalSelectionVector(), count, rhs_output_idx,
-	                                    result);
+	                                    result, *binding.rhs_dictionary_owners);
 }
 
 bool ExecutionGetHashJoinRHSFixedColumnSource(const ExecutionHashJoinProbeBinding &binding, idx_t rhs_output_idx,
@@ -3890,15 +3911,16 @@ bool ExecutionMaterializeHashJoinProbeProjectionSources(const ExecutionHashJoinP
 					}
 				} else {
 					binding.hash_table->GatherRHSColumn(row_pointers, *FlatVector::IncrementalSelectionVector(), count,
-					                                    rhs_col_idx, result.data[output_col_idx]);
+					                                    rhs_col_idx, result.data[output_col_idx],
+					                                    *binding.rhs_dictionary_owners);
 				}
 			} else {
 				auto &result_vector = result.data[output_col_idx];
 				if (result_vector.GetType() != binding.perfect_layout.rhs_output_types[rhs_col_idx]) {
 					throw InternalException("execution native perfect hash join projection-source RHS type mismatch");
 				}
-				result_vector.Dictionary(binding.perfect_layout.rhs_dictionary_buffers[rhs_col_idx], *perfect_build_sel,
-				                         count);
+				result_vector.Dictionary(ExecutionHashJoinPerfectRHSDictionary(binding, rhs_col_idx),
+				                         *perfect_build_sel, count);
 			}
 		}
 	}
@@ -3953,7 +3975,7 @@ void ExecutionMaterializePerfectHashJoinProbe(const ExecutionHashJoinProbeBindin
 			if (result_vector.GetType() != binding.perfect_layout.rhs_output_types[rhs_col_idx]) {
 				throw InternalException("execution native perfect hash join RHS output type mismatch");
 			}
-			result_vector.Dictionary(binding.perfect_layout.rhs_dictionary_buffers[rhs_col_idx], build_sel, count);
+			result_vector.Dictionary(ExecutionHashJoinPerfectRHSDictionary(binding, rhs_col_idx), build_sel, count);
 		}
 	}
 	result.SetChildCardinality(count);
@@ -4355,7 +4377,7 @@ void HashJoinGlobalSourceState::PrepareBuild(HashJoinGlobalSinkState &sink) {
 
 	// Update remaining size
 	sink.temporary_memory_state->SetRemainingSizeAndUpdateReservation(
-	    sink.context.Services(), ht.GetRemainingSize() + sink.probe_side_requirement);
+	    sink.context.GetContext(), ht.GetRemainingSize() + sink.probe_side_requirement);
 
 	// Try to put the next partitions in the block collection of the HT
 	if (!sink.external || !ht.PrepareExternalFinalize(sink.GetMaxExternalHTSize())) {
@@ -4580,8 +4602,9 @@ void HashJoinLocalSourceState::ExternalScanHT(HashJoinGlobalSinkState &sink, Has
 	D_ASSERT(local_stage == HashJoinSourceStage::SCAN_HT);
 
 	if (!full_outer_scan_state) {
-		full_outer_scan_state = make_uniq<JoinHTScanState>(sink.hash_table->GetDataCollection(),
-		                                                   full_outer_chunk_idx_from, full_outer_chunk_idx_to);
+		full_outer_scan_state =
+		    make_uniq<JoinHTScanState>(sink.hash_table->GetDataCollection(), full_outer_chunk_idx_from,
+		                               full_outer_chunk_idx_to, sink.hash_table->output_columns.size());
 		full_outer_chunks_reported = 0;
 	}
 	sink.hash_table->ScanFullOuter(*full_outer_scan_state, addresses, chunk);

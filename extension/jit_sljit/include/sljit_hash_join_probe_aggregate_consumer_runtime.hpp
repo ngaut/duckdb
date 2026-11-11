@@ -574,7 +574,7 @@ static bool SljitTryExecutePerfectHashDictionaryStringGroupConsumer(
 	}
 	auto &entry_selection = DictionaryVector::SelVector(group_input);
 	UnifiedVectorFormat dictionary_format;
-	DictionaryVector::Child(group_input).ToUnifiedFormat(dictionary_size.GetIndex(), dictionary_format);
+	DictionaryVector::Child(group_input).ToUnifiedFormat(dictionary_format);
 	auto dictionary_data = UnifiedVectorFormat::GetData<string_t>(dictionary_format);
 
 	static constexpr uint16_t UNREFERENCED = NumericLimits<uint16_t>::Maximum();

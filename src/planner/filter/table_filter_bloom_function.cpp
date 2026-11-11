@@ -33,9 +33,12 @@ static constexpr idx_t MIN_NUM_BITS = 512;
 static constexpr idx_t LOG_SECTOR_SIZE = 6; // a sector is 64 bits, log2(64) = 6
 static constexpr idx_t N_BITS = 4;          // the number of bits HashBloomFilterMask sets per hash
 static constexpr idx_t BITS_PER_SECTOR = 1ULL << LOG_SECTOR_SIZE;
+static constexpr idx_t SECTOR_HASH_SHIFT = HashBloomFilterConstants::SECTOR_SHIFT;
 
 //! A sector is one entry of the bit array, so the two have to agree on how wide it is
 static_assert(BITS_PER_SECTOR == sizeof(uint64_t) * 8, "a bloom filter sector must be exactly one array entry");
+static_assert(MAX_NUM_SECTORS <= (1ULL << SECTOR_HASH_SHIFT) && N_BITS * 8 <= SECTOR_HASH_SHIFT,
+              "sector and within-sector bits must use separate hash halves");
 
 //! A filter is sized from a cardinality estimate, so never let it claim more than this share of the memory budget
 static constexpr idx_t MAX_MEMORY_FRACTION = 64;
@@ -152,6 +155,10 @@ bool BloomFilter::ShouldPrefetch(idx_t count) const {
 	return count >= MIN_PREFETCH_COUNT && num_sectors * sizeof(uint64_t) >= MIN_PREFETCH_BYTES;
 }
 
+static inline idx_t GetBloomSectorIndex(const hash_t hash, const uint64_t bitmask) {
+	return HashBloomFilterSector(hash, bitmask);
+}
+
 void BloomFilter::InsertHashes(const Vector &hashes_v, const SelectionVector &sel, const idx_t count) {
 	D_ASSERT(hashes_v.GetType() == LogicalType::HASH);
 	if (count == 0) {
@@ -194,7 +201,8 @@ idx_t BloomFilter::LookupHashes(const Vector &hashes_v, SelectionVector &result_
 		result_sel.set_index(found_count, i);
 		found_count += LookupOne(hashes[i]);
 		if (prefetch) {
-			PrefetchHashTableEntry(i, count, [&](idx_t next_idx) { return &bf[hashes[next_idx] & bitmask]; });
+			PrefetchHashTableEntry(i, count,
+			                       [&](idx_t next_idx) { return &bf[GetBloomSectorIndex(hashes[next_idx], bitmask)]; });
 		}
 	}
 	return found_count;
@@ -212,8 +220,9 @@ idx_t BloomFilter::LookupHashes(const Vector &hashes_v, const SelectionVector &s
 		result_sel.set_index(found_count, i);
 		found_count += LookupOne(hashes[sel.get_index_unsafe(i)]);
 		if (prefetch) {
-			PrefetchHashTableEntry(
-			    i, count, [&](idx_t next_idx) { return &bf[hashes[sel.get_index_unsafe(next_idx)] & bitmask]; });
+			PrefetchHashTableEntry(i, count, [&](idx_t next_idx) {
+				return &bf[GetBloomSectorIndex(hashes[sel.get_index_unsafe(next_idx)], bitmask)];
+			});
 		}
 	}
 	return found_count;
@@ -222,7 +231,7 @@ idx_t BloomFilter::LookupHashes(const Vector &hashes_v, const SelectionVector &s
 inline void BloomFilter::InsertOne(const hash_t hash) {
 	D_ASSERT(initialized);
 	D_ASSERT(!sealed);
-	const uint64_t bf_offset = hash & bitmask;
+	const auto bf_offset = GetBloomSectorIndex(hash, bitmask);
 	const uint64_t mask = BloomFilter::GetMask(hash);
 	atomic<uint64_t> &slot = *reinterpret_cast<atomic<uint64_t> *>(&bf[bf_offset]);
 

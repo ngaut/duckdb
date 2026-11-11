@@ -95,7 +95,7 @@ public:
 	inline bool LookupOne(hash_t hash) const {
 		D_ASSERT(initialized);
 		D_ASSERT(sealed);
-		const auto bf_offset = hash & bitmask;
+		const auto bf_offset = HashBloomFilterSector(hash, bitmask);
 		const auto mask = BloomFilter::GetMask(hash);
 		return (bf[bf_offset] & mask) == mask;
 	}

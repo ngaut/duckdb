@@ -12,18 +12,19 @@
 namespace duckdb {
 
 struct HashBloomFilterConstants {
-#if DUCKDB_IS_BIG_ENDIAN
-	static constexpr uint8_t SHIFT_0 = 24;
-	static constexpr uint8_t SHIFT_1 = 16;
-	static constexpr uint8_t SHIFT_2 = 8;
-	static constexpr uint8_t SHIFT_3 = 0;
-#else
-	static constexpr uint8_t SHIFT_0 = 32;
-	static constexpr uint8_t SHIFT_1 = 40;
-	static constexpr uint8_t SHIFT_2 = 48;
-	static constexpr uint8_t SHIFT_3 = 56;
-#endif
+	//! The sector comes from the high hash half, which also drives radix partitioning, so the keys of one hash
+	//! partition share sectors; the bits within the sector come from the low half
+	static constexpr uint8_t SECTOR_SHIFT = 32;
+	static constexpr uint8_t SHIFT_0 = 0;
+	static constexpr uint8_t SHIFT_1 = 8;
+	static constexpr uint8_t SHIFT_2 = 16;
+	static constexpr uint8_t SHIFT_3 = 24;
 };
+
+//! Returns the sector of DuckDB's hash Bloom filters a hash falls in, given the filter's sector bitmask.
+static inline uint64_t HashBloomFilterSector(hash_t hash, uint64_t bitmask) {
+	return (hash >> HashBloomFilterConstants::SECTOR_SHIFT) & bitmask;
+}
 
 //! Returns the four-bit mask used by DuckDB's hash Bloom filters.
 //!
