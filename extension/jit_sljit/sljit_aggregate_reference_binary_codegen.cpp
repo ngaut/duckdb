@@ -34,18 +34,17 @@ BuildSljitNativeUngroupedSumInt64IntegerBinaryConstant(SljitNativeIntegerKind ki
 	// The all-valid loop keeps the constant where the saw-value flag lives: every row of the source contributes
 	sljit_emit_op1(compiler, SLJIT_MOV, saw_value.operand, saw_value.operand_w, SLJIT_MEM1(SLJIT_S0),
 	               offsetof(SljitNativeVectorInput, constant));
-	auto all_valid = EmitSljitAggregateAllValidSelectedSourceLoop(compiler, [&]() {
+	auto has_validity = EmitSljitAggregateAllValidSelectedSourceLoop(compiler, [&]() {
 		sljit_emit_op1(compiler, load_op, SLJIT_R2, 0, SLJIT_MEM2(SLJIT_R7, SLJIT_R1), data_scale);
 		sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_R3, 0, saw_value.operand, saw_value.operand_w);
 		EmitSljitCheckedIntegerBinaryOp(compiler, kind, op, SLJIT_R4, constant_on_left ? SLJIT_R3 : SLJIT_R2,
 		                                constant_on_left ? SLJIT_R2 : SLJIT_R3, checks, overflows);
 		sljit_emit_op2(compiler, SLJIT_ADD, sum.operand, sum.operand_w, sum.operand, sum.operand_w, SLJIT_R4, 0);
 	});
-	sljit_set_label(all_valid.second, sljit_emit_label(compiler));
 	sljit_emit_op2u(compiler, SLJIT_SUB | SLJIT_SET_Z, SLJIT_S2, 0, SLJIT_IMM, 0);
 	sljit_emit_op_flags(compiler, SLJIT_MOV, saw_value.operand, saw_value.operand_w, SLJIT_NOT_EQUAL);
 	auto all_valid_done = sljit_emit_jump(compiler, SLJIT_JUMP);
-	sljit_set_label(all_valid.first, sljit_emit_label(compiler));
+	sljit_set_label(has_validity, sljit_emit_label(compiler));
 	sljit_emit_op1(compiler, SLJIT_MOV, saw_value.operand, saw_value.operand_w, SLJIT_IMM, 0);
 	auto done = EmitSljitAggregateSelectedSourceLoop(compiler, [&]() {
 		EmitLoadSljitNativeFixedWidthValue(compiler, offsetof(SljitNativeVectorInput, source_data), SLJIT_R1, load_op,

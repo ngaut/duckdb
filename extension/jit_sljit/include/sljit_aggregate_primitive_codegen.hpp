@@ -10,8 +10,6 @@
 
 #include "sljit_codegen_internal.hpp"
 
-#include <utility>
-
 namespace duckdb {
 
 void EmitSljitGroupedAggregateStatePointer(struct sljit_compiler *compiler, sljit_s32 logical_index, sljit_s32 target);
@@ -20,13 +18,14 @@ void EmitSljitGroupedAggregateStatePointer(struct sljit_compiler *compiler, slji
 //! enters with SLJIT_ALL_VALID_SOURCE_LOOP_SCRATCHES scratch registers.
 static constexpr sljit_s32 SLJIT_ALL_VALID_SOURCE_LOOP_SCRATCHES = 8;
 
-//! The selected-source loop for a source without a validity mask: the execute and source selections and the source
-//! data pointer stay in R5-R7 rather than being reloaded from the input for every row, and no row is skipped.
-//! emit_row receives the source row index in R1 and the data pointer in R7. A source with a validity mask jumps to
-//! the returned generic jump instead; the second jump leaves the loop when it is done.
+//! The selected-source loop for a source without a validity mask: no row is skipped, and the execute and source
+//! selections the input has are chosen once, before the rows, so the loop body is straight-line code with one branch
+//! per row. emit_row receives the source row index in R1 and the data pointer in R7; it is emitted once for each
+//! combination of selections. A source with a validity mask jumps to the returned jump instead; the loops fall through
+//! when they are done.
 template <class EMIT_ROW>
-static inline std::pair<sljit_jump *, sljit_jump *>
-EmitSljitAggregateAllValidSelectedSourceLoop(struct sljit_compiler *compiler, EMIT_ROW &&emit_row) {
+static inline sljit_jump *EmitSljitAggregateAllValidSelectedSourceLoop(struct sljit_compiler *compiler,
+                                                                       EMIT_ROW &&emit_row) {
 	sljit_emit_op1(compiler, SLJIT_MOV_P, SLJIT_R0, 0, SLJIT_MEM1(SLJIT_S0),
 	               offsetof(SljitNativeVectorInput, source_validity));
 	auto generic = sljit_emit_cmp(compiler, SLJIT_NOT_EQUAL, SLJIT_R0, 0, SLJIT_IMM, 0);
@@ -37,18 +36,37 @@ EmitSljitAggregateAllValidSelectedSourceLoop(struct sljit_compiler *compiler, EM
 	sljit_emit_op1(compiler, SLJIT_MOV_P, SLJIT_R7, 0, SLJIT_MEM1(SLJIT_S0),
 	               offsetof(SljitNativeVectorInput, source_data));
 
-	auto loop = sljit_emit_label(compiler);
-	auto done = sljit_emit_cmp(compiler, SLJIT_GREATER_EQUAL, SLJIT_S1, 0, SLJIT_S2, 0);
-	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_R1, 0, SLJIT_S1, 0);
+	vector<sljit_jump *> done_jumps;
+	auto emit_loop = [&](bool execute_sel, bool source_sel) {
+		done_jumps.push_back(sljit_emit_cmp(compiler, SLJIT_GREATER_EQUAL, SLJIT_S1, 0, SLJIT_S2, 0));
+		auto loop = sljit_emit_label(compiler);
+		sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_R1, 0, SLJIT_S1, 0);
+		if (execute_sel) {
+			sljit_emit_op1(compiler, SLJIT_MOV_U32, SLJIT_R1, 0, SLJIT_MEM2(SLJIT_R5, SLJIT_R1), 2);
+		}
+		if (source_sel) {
+			sljit_emit_op1(compiler, SLJIT_MOV_U32, SLJIT_R1, 0, SLJIT_MEM2(SLJIT_R6, SLJIT_R1), 2);
+		}
+		emit_row();
+		sljit_emit_op2(compiler, SLJIT_ADD, SLJIT_S1, 0, SLJIT_S1, 0, SLJIT_IMM, 1);
+		sljit_set_label(sljit_emit_cmp(compiler, SLJIT_LESS, SLJIT_S1, 0, SLJIT_S2, 0), loop);
+		done_jumps.push_back(sljit_emit_jump(compiler, SLJIT_JUMP));
+	};
 	auto no_execute_sel = sljit_emit_cmp(compiler, SLJIT_EQUAL, SLJIT_R5, 0, SLJIT_IMM, 0);
-	sljit_emit_op1(compiler, SLJIT_MOV_U32, SLJIT_R1, 0, SLJIT_MEM2(SLJIT_R5, SLJIT_R1), 2);
+	auto execute_sel_only = sljit_emit_cmp(compiler, SLJIT_EQUAL, SLJIT_R6, 0, SLJIT_IMM, 0);
+	emit_loop(true, true);
+	sljit_set_label(execute_sel_only, sljit_emit_label(compiler));
+	emit_loop(true, false);
 	sljit_set_label(no_execute_sel, sljit_emit_label(compiler));
-	auto no_source_sel = sljit_emit_cmp(compiler, SLJIT_EQUAL, SLJIT_R6, 0, SLJIT_IMM, 0);
-	sljit_emit_op1(compiler, SLJIT_MOV_U32, SLJIT_R1, 0, SLJIT_MEM2(SLJIT_R6, SLJIT_R1), 2);
-	sljit_set_label(no_source_sel, sljit_emit_label(compiler));
-	emit_row();
-	EmitNextSljitNativeVectorLoop(compiler, loop);
-	return {generic, done};
+	auto no_selection = sljit_emit_cmp(compiler, SLJIT_EQUAL, SLJIT_R6, 0, SLJIT_IMM, 0);
+	emit_loop(false, true);
+	sljit_set_label(no_selection, sljit_emit_label(compiler));
+	emit_loop(false, false);
+	auto done = sljit_emit_label(compiler);
+	for (auto jump : done_jumps) {
+		sljit_set_label(jump, done);
+	}
+	return generic;
 }
 
 template <class EMIT_ROW>

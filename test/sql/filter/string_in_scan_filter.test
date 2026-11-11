@@ -7,7 +7,7 @@
 # slices; an uncompressed segment evaluates the filter per vector. The strings mix inlined and out-of-line values with a
 # shared prefix, the constants include ones no row holds and ones far into a dictionary, and one row in 17 is NULL.
 
-load __TEST_DIR__/string_in_scan_filter.db
+load {TEST_DIR}/string_in_scan_filter.db
 
 foreach compression uncompressed fsst dict_fsst
 

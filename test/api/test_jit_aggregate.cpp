@@ -80,6 +80,70 @@ TEST_CASE("JIT full-width sum kernels match checked HUGEINT addition", "[api][ji
 	}
 }
 
+TEST_CASE("JIT ungrouped single sums read rows through every selection a vector carries", "[api][jit]") {
+	if (!SljitPrimitiveRunCodegenSupported()) {
+		return;
+	}
+	const int64_t values[] = {3, -5, 7, 11, -13, 17, 19, 23};
+	const sel_t execute_sel[] = {6, 1, 4, 0};
+	const sel_t source_sel[] = {7, 5, 3, 2, 1, 0, 6, 4};
+	// source row 5 is NULL
+	const validity_t validity[] = {~(validity_t(1) << 5)};
+	constexpr int64_t multiplier = 31;
+
+	string error;
+	SljitNativeAggregateUpdateFunction reference_update = nullptr;
+	auto reference_code =
+	    BuildSljitNativeUngroupedSumInt64Reference(SljitNativeIntegerKind::INT64, reference_update, error);
+	REQUIRE(reference_code);
+	SljitNativeAggregateUpdateFunction product_update = nullptr;
+	auto product_code = BuildSljitNativeUngroupedSumInt64IntegerBinaryConstant(
+	    SljitNativeIntegerKind::INT64, SljitNativeIntegerBinaryOp::MULTIPLY, false, SljitIntegerOverflowChecks(),
+	    product_update, error);
+	REQUIRE(product_code);
+
+	for (bool has_execute_sel : {false, true}) {
+		for (bool has_source_sel : {false, true}) {
+			for (bool has_validity : {false, true}) {
+				CAPTURE(has_execute_sel, has_source_sel, has_validity);
+				const idx_t count = has_execute_sel ? 4 : 8;
+				int64_t expected = 0;
+				bool expected_is_set = false;
+				for (idx_t i = 0; i < count; i++) {
+					const idx_t logical = has_execute_sel ? execute_sel[i] : i;
+					const idx_t source = has_source_sel ? source_sel[logical] : logical;
+					if (has_validity && source == 5) {
+						continue;
+					}
+					expected += values[source];
+					expected_is_set = true;
+				}
+				for (bool product : {false, true}) {
+					CAPTURE(product);
+					int64_t sum = 0;
+					bool is_set = false;
+					idx_t row_count = 0;
+					SljitNativeVectorInput input;
+					input.count = count;
+					input.execute_sel = has_execute_sel ? execute_sel : nullptr;
+					input.source_sel = has_source_sel ? source_sel : nullptr;
+					input.source_validity = has_validity ? validity : nullptr;
+					input.source_data = const_data_ptr_cast(values);
+					input.constant = multiplier;
+					input.aggregate_int64_value = &sum;
+					input.aggregate_state_is_set = &is_set;
+					input.aggregate_row_count = &row_count;
+					(product ? product_update : reference_update)(&input);
+					REQUIRE_FALSE(input.has_error);
+					REQUIRE(sum == (product ? expected * multiplier : expected));
+					REQUIRE(is_set == expected_is_set);
+					REQUIRE(row_count == count);
+				}
+			}
+		}
+	}
+}
+
 TEST_CASE("JIT executable aggregate scalar payloads use input slots", "[api][jit]") {
 	const vector<SljitNativeRegionExpressionKind> kinds {SljitNativeRegionExpressionKind::REFERENCE,
 	                                                     SljitNativeRegionExpressionKind::INTEGER_BINARY_CONSTANT,

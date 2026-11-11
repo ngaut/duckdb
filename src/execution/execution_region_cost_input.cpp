@@ -344,6 +344,15 @@ PhysicalRunnerCostInput BuildExecutionRegionCandidateCostInput(const ExecutionRe
 	auto selected_traits = candidate.traits;
 	selected_traits.source_filter_expression_count = selected_source_filter_cost.count;
 	input.generated_work_class = ClassifyExecutionRegionGeneratedWork(selected_traits);
+	// the candidate credits a generated aggregate update with eliding the chunk its source filter produces; when the
+	// selected lowering leaves that filter to storage and generates no other filter or value, the update reads the
+	// scan's own output and elides nothing
+	const bool storage_keeps_source_filters = selected_source_filter_cost.count < candidate_generated_source_filters;
+	if (storage_keeps_source_filters &&
+	    (input.generated_work_class == PhysicalRunnerGeneratedWorkClass::NONE ||
+	     input.generated_work_class == PhysicalRunnerGeneratedWorkClass::PROJECTION_GLUE)) {
+		input.materialization_elision_count = 0;
+	}
 	input.has_accelerated_work = input.generated_stage_count > 0 || input.generated_backend_stage_count > 0 ||
 	                             input.native_join_stage_count > 0 || input.native_aggregate_stage_count > 0;
 	input.uses_scan_filters = lowering_plan.UsesResidualScanFilters();

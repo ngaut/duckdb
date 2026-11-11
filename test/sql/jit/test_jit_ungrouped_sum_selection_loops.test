@@ -1,0 +1,104 @@
+# name: test/sql/jit/test_jit_ungrouped_sum_selection_loops.test
+# description: An ungrouped sum reads its rows through whichever selections a vector carries, and a bare sum or count over a scan whose filter storage evaluates has nothing to compile
+# group: [jit]
+
+require jit_sljit
+
+load {TEST_DIR}/jit_ungrouped_sum_selection_loops.db
+
+statement ok
+CREATE TABLE comments AS
+SELECT i AS id,
+       CASE WHEN i % 100 = 0 THEN 'ordinary package with special shipping requests included'
+            ELSE 'ordinary shipping package comment with several common words' END AS comment,
+       CASE WHEN i % 13 = 0 THEN NULL ELSE i END AS nullable_id
+FROM range(4000000) t(i)
+
+statement ok
+CHECKPOINT
+
+statement ok
+SET jit_trace_decisions=true
+
+statement ok
+SET jit_event_log_size=10000
+
+# a sum of one computed value reads rows without a selection, through the scan's string filter, through the scan's
+# string and numeric filters, with NULLs, and from two sources
+foreach threads 1 4
+
+statement ok
+SET threads={threads}
+
+foreach policy off auto
+
+statement ok
+SET jit_policy='{policy}'
+
+query I nosort flat
+SELECT sum(id * 31) FROM comments
+----
+
+query I nosort storage_filtered
+SELECT sum(id * 31) FROM comments WHERE comment NOT LIKE '%special%requests%'
+----
+
+query I nosort both_filtered
+SELECT sum(id * 31) FROM comments WHERE comment NOT LIKE '%special%requests%' AND id % 7 <> 0
+----
+
+query I nosort nullable
+SELECT sum(nullable_id * 31) FROM comments WHERE comment NOT LIKE '%special%requests%'
+----
+
+query I nosort two_sources
+SELECT sum(id + nullable_id) FROM comments WHERE comment NOT LIKE '%special%requests%'
+----
+
+endloop
+
+endloop
+
+reset label flat
+
+reset label storage_filtered
+
+reset label both_filtered
+
+reset label nullable
+
+reset label two_sources
+
+statement ok
+SET threads=1
+
+statement ok
+SET jit_policy='auto'
+
+# the scan evaluates the string filter once per dictionary entry: a bare count or sum after it reads the scan's own
+# output, which the native update reads the same way
+statement ok
+SELECT * FROM duckdb_jit_clear_events()
+
+statement ok
+SELECT count(*) FROM comments WHERE comment NOT LIKE '%special%requests%'
+
+statement ok
+SELECT sum(id) FROM comments WHERE comment NOT LIKE '%special%requests%'
+
+query I
+SELECT count(*) FROM duckdb_jit_events() WHERE phase = 'compile' AND status = 'compiled'
+----
+0
+
+# a computed value is generated work the update fuses with
+statement ok
+SELECT * FROM duckdb_jit_clear_events()
+
+statement ok
+SELECT sum(id * 31) FROM comments WHERE comment NOT LIKE '%special%requests%'
+
+query I
+SELECT count(*) FROM duckdb_jit_events() WHERE phase = 'compile' AND status = 'compiled'
+----
+1
