@@ -593,14 +593,14 @@ struct ExecutionRegionCandidateTraits {
 	idx_t projection_count = 0;
 	idx_t operator_count = 0;
 	idx_t hash_join_operator_count = 0;
-	//! A grouped aggregate's generated body replaces native group lookup work; an ungrouped aggregate does the
-	//! native update's work and only gains from the filters, projections and probes it fuses with
-	idx_t grouped_aggregate_count = 0;
 	idx_t mark_probe_filter_count = 0;
 	idx_t selected_hash_join_filter_materialization_count = 0;
 	idx_t selected_hash_join_view_materialization_count = 0;
 	//! Hash join probes whose output is materialized (a LEFT probe must emit its unmatched rows)
 	idx_t materialized_hash_join_output_count = 0;
+	//! Aggregate sinks whose update the generated body performs. A grouped one replaces native group lookup work; an
+	//! ungrouped one does the native update's work and only gains from the filters, projections and probes it fuses
+	//! with. A sink whose update stays native is native work.
 	idx_t generated_aggregate_update_count = 0;
 	idx_t generated_aggregate_lookup_count = 0;
 	idx_t grouped_aggregate_estimated_cardinality = 0;

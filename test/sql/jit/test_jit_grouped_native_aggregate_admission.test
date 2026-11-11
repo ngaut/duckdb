@@ -1,0 +1,151 @@
+# name: test/sql/jit/test_jit_grouped_native_aggregate_admission.test
+# description: A grouped aggregate whose update stays native fuses behind generated work and is not generated work itself
+# group: [jit]
+
+require jit_sljit
+
+statement ok
+SET jit_cbo_generated_stage_benefit=4096
+
+statement ok
+SET jit_cbo_materialization_elision_benefit=4096
+
+statement ok
+SET jit_cbo_native_operator_stage_benefit=4096
+
+statement ok
+SET jit_cbo_full_pipeline_benefit=4096
+
+statement ok
+SET jit_cbo_source_contract_scan_filter_penalty=0
+
+statement ok
+SET jit_cbo_startup_base_cost=0
+
+statement ok
+SET jit_cbo_startup_margin_basis_points=0
+
+statement ok
+SET jit_trace_decisions=true
+
+statement ok
+SET jit_trace_runtime=true
+
+statement ok
+SET jit_event_log_size=10000
+
+# every double is a multiple of 0.25, so its sums are exact in any order
+statement ok
+CREATE TABLE inputs AS
+SELECT i AS id, (i % 7)::INTEGER AS small_key, ((i * 2654435761) % 100003)::BIGINT AS wide_key,
+       CASE WHEN i % 13 = 0 THEN NULL ELSE (i % 1000) * 0.25::DOUBLE END AS d,
+       CASE WHEN i % 11 = 0 THEN NULL ELSE (i % 1000)::INTEGER END AS n,
+       ((i % 100000) / 100.0)::DECIMAL(12,2) AS m,
+       (i % 100)::INTEGER AS f
+FROM range(200000) t(i)
+
+foreach key small_key wide_key
+
+foreach threads 1 4
+
+statement ok
+SET threads={threads}
+
+foreach policy off auto
+
+statement ok
+SET jit_policy='{policy}'
+
+query IIIIII nosort bare
+SELECT {key}, avg(d), min(d), max(n), avg(m), avg(n) FROM inputs GROUP BY {key} ORDER BY 1
+----
+
+query IIIIII nosort filtered
+SELECT {key}, avg(d), min(d), max(n), avg(m), avg(n) FROM inputs WHERE f < 10 GROUP BY {key} ORDER BY 1
+----
+
+# an aggregate with its own ORDER BY sorts in the native sink
+query IIII nosort ordered
+SELECT {key}, avg(d ORDER BY n DESC), first(n ORDER BY id), list(n ORDER BY id DESC)[1:3]
+FROM inputs WHERE f < 10 GROUP BY {key} ORDER BY 1
+----
+
+endloop
+
+endloop
+
+reset label bare
+
+reset label filtered
+
+reset label ordered
+
+statement ok
+SET threads=1
+
+# the native sink looks the groups up and updates them: nothing is left to generate
+statement ok
+SELECT * FROM duckdb_jit_clear_events()
+
+statement ok
+SELECT {key}, avg(d), min(d), max(n), avg(m), avg(n) FROM inputs GROUP BY {key} ORDER BY 1
+
+query I
+SELECT count(*) FROM duckdb_jit_events() WHERE phase = 'compile'
+----
+0
+
+# a generated filter hands the rows it keeps to the native sink; avg depends on its input order only in the
+# ungrouped sink, which promises it
+statement ok
+SELECT * FROM duckdb_jit_clear_events()
+
+statement ok
+SELECT {key}, avg(d), min(d), max(n), avg(m), avg(n) FROM inputs WHERE f < 10 GROUP BY {key} ORDER BY 1
+
+query I
+SELECT count(*) FROM duckdb_jit_events()
+WHERE phase = 'compile' AND runner_cost_native_grouped_aggregate_stage_count = 1
+  AND runner_cost_generated_grouped_aggregate_stage_count = 0
+----
+1
+
+query I
+SELECT count(*) FROM duckdb_jit_events()
+WHERE phase = 'runtime' AND jit_runtime_path_counts LIKE '%aggregate_update.native_tail_delegation=20000;%'
+----
+1
+
+endloop
+
+# the ungrouped sink promises its aggregates the pipeline's order: an order-dependent one stays native
+foreach policy off auto
+
+statement ok
+SET jit_policy='{policy}'
+
+statement ok
+SELECT * FROM duckdb_jit_clear_events()
+
+query IIII nosort ungrouped
+SELECT first(n), last(n), avg(d), list(n)[1:3] FROM inputs WHERE f < 10
+----
+
+endloop
+
+query I
+SELECT count(*) FROM duckdb_jit_events()
+WHERE phase = 'runtime' AND jit_runtime_path_counts LIKE '%aggregate_update.%'
+----
+0
+
+query IIIIII
+SELECT small_key, avg(d), min(d), max(n), avg(m), avg(n) FROM inputs WHERE f < 10 GROUP BY small_key ORDER BY 1
+----
+0	114.26971190295679	0.0	909	499.3197584879244	455.09626492106275
+1	113.24147404319818	0.0	909	499.6450734779566	453.03772132409546
+2	113.0562926459439	0.0	909	499.4449265220434	454.96150885296385
+3	113.38339021615472	0.0	909	499.7702415120756	456.75317674239506
+4	113.62959802806219	0.0	909	499.57002100105007	454.44166345783594
+5	113.85261760242793	0.0	909	499.545	452.9395456295726
+6	114.05650360257869	0.0	909	499.51997899894997	454.0373364126251

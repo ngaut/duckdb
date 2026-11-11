@@ -155,7 +155,9 @@ static ExecutionRegionStageCostFact GetExecutionRegionStageCostFact(const Execut
 
 static bool ExecutionRegionCandidateHasGeneratedFilterOrOperatorWork(const ExecutionRegionCandidateTraits &traits) {
 	return traits.source_filter_expression_count > 0 || traits.filter_count > 0 ||
-	       traits.hash_join_operator_count > 0 || traits.grouped_aggregate_count > 0;
+	       traits.hash_join_operator_count > 0 ||
+	       (ExecutionRegionSinkKindIsGroupedAggregateUpdate(traits.sink_kind) &&
+	        traits.generated_aggregate_update_count > 0);
 }
 
 static bool ExecutionRegionCandidateHasGeneratedProjectionWork(const ExecutionRegionCandidateTraits &traits) {
@@ -448,7 +450,6 @@ struct ExecutionRegionPhysicalPipelineCostFacts {
 	ExecutionRegionCandidateTraits traits;
 	bool exact_source_cardinality_bounds_pipeline = true;
 	bool native_sink_boundary = false;
-	idx_t generated_aggregate_update_count = 0;
 };
 
 static bool ExecutionRegionPhysicalExpressionIsReference(const Expression &expression) {
@@ -722,7 +723,7 @@ static bool TryAccumulateExecutionRegionPhysicalOperatorCost(const PhysicalOpera
 			return true;
 		}
 		AddExecutionRegionGeneratedBodyStage(input);
-		facts.generated_aggregate_update_count++;
+		traits.generated_aggregate_update_count++;
 		return true;
 	}
 	case PhysicalOperatorType::HASH_GROUP_BY: {
@@ -734,9 +735,6 @@ static bool TryAccumulateExecutionRegionPhysicalOperatorCost(const PhysicalOpera
 		auto expression_cost = ExecutionRegionPhysicalExpressionListCost(aggregate.grouped_aggregate_data.groups);
 		expression_cost += ExecutionRegionPhysicalAggregateListCost(aggregate.grouped_aggregate_data.aggregates);
 		AddExecutionRegionGeneratedExpressionWork(input, expression_cost);
-		if (slot != ExecutionRegionPhysicalPipelineSlot::SOURCE) {
-			traits.grouped_aggregate_count++;
-		}
 		if (slot != ExecutionRegionPhysicalPipelineSlot::SINK) {
 			AddExecutionRegionNativeAggregateStage(input, true);
 			return true;
@@ -761,7 +759,7 @@ static bool TryAccumulateExecutionRegionPhysicalOperatorCost(const PhysicalOpera
 		} else {
 			input.native_grouped_state_address_lookup_count++;
 		}
-		facts.generated_aggregate_update_count++;
+		traits.generated_aggregate_update_count++;
 		return true;
 	}
 	case PhysicalOperatorType::PERFECT_HASH_GROUP_BY: {
@@ -772,9 +770,6 @@ static bool TryAccumulateExecutionRegionPhysicalOperatorCost(const PhysicalOpera
 		auto expression_cost = ExecutionRegionPhysicalExpressionListCost(aggregate.groups);
 		expression_cost += ExecutionRegionPhysicalAggregateListCost(aggregate.aggregates);
 		AddExecutionRegionGeneratedExpressionWork(input, expression_cost);
-		if (slot != ExecutionRegionPhysicalPipelineSlot::SOURCE) {
-			traits.grouped_aggregate_count++;
-		}
 		if (slot != ExecutionRegionPhysicalPipelineSlot::SINK) {
 			AddExecutionRegionNativeAggregateStage(input, true);
 			return true;
@@ -799,7 +794,7 @@ static bool TryAccumulateExecutionRegionPhysicalOperatorCost(const PhysicalOpera
 		} else {
 			input.native_grouped_state_address_lookup_count++;
 		}
-		facts.generated_aggregate_update_count++;
+		traits.generated_aggregate_update_count++;
 		return true;
 	}
 	case PhysicalOperatorType::HASH_JOIN:
@@ -889,10 +884,10 @@ static void FinalizeExecutionRegionPhysicalPipelineCostInput(Pipeline &pipeline,
 	    cost_input.generated_backend_stage_count > 0 && facts.traits.source_filter_count > 0 &&
 	    facts.traits.projection_count > 0;
 	const bool generated_projection_aggregate =
-	    facts.generated_aggregate_update_count > 0 && facts.traits.projection_count > 0;
+	    facts.traits.generated_aggregate_update_count > 0 && facts.traits.projection_count > 0;
 	// A probe that materializes its output (a LEFT probe emits unmatched rows) leaves nothing to elide downstream.
 	if (facts.traits.materialized_hash_join_output_count == 0 &&
-	    ((facts.generated_aggregate_update_count > 0 &&
+	    ((facts.traits.generated_aggregate_update_count > 0 &&
 	      (facts.traits.filter_count > 0 || facts.traits.source_filter_expression_count > 0)) ||
 	     generated_filtered_reduction || generated_projection_aggregate)) {
 		cost_input.materialization_elision_count = 1;

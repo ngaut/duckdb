@@ -450,9 +450,16 @@ static ExecutionRegionNode BuildExecutionRegionOperatorNode(string label, const 
 	return node;
 }
 
-static bool ExecutionRegionOrderDependencyCoveredByPrimitiveUpdate(const ExecutionRegionAggregateInput &aggregate) {
-	return aggregate.primitive_update_ready &&
-	       aggregate.primitive_update_kind == AggregatePrimitiveUpdateKind::SUM_DOUBLE;
+//! Whether the sink promises the aggregate its input in pipeline order. Only the ungrouped aggregate sink does
+//! (PhysicalUngroupedAggregate::SinkOrderDependent); the grouped sinks take their input in any order. A primitive
+//! double sum owns its rounding.
+static bool ExecutionRegionAggregateRequiresInputOrder(const ExecutionRegionAggregateContract &contract,
+                                                       const ExecutionRegionAggregateInput &aggregate) {
+	if (contract.kind != ExecutionRegionAggregateOperatorKind::UNGROUPED || !aggregate.order_dependent) {
+		return false;
+	}
+	return !aggregate.primitive_update_ready ||
+	       aggregate.primitive_update_kind != AggregatePrimitiveUpdateKind::SUM_DOUBLE;
 }
 
 string ExecutionRegionAggregateNativeStateUpdateBlocker(const ExecutionRegionAggregateContract &contract,
@@ -512,8 +519,7 @@ string ExecutionRegionAggregateNativeStateUpdateBlocker(const ExecutionRegionAgg
 		if (aggregate.has_filter) {
 			return "aggregate-state-update-filtered-aggregate";
 		}
-		if (aggregate.has_order_bys ||
-		    (aggregate.order_dependent && !ExecutionRegionOrderDependencyCoveredByPrimitiveUpdate(aggregate))) {
+		if (aggregate.has_order_bys || ExecutionRegionAggregateRequiresInputOrder(contract, aggregate)) {
 			return "aggregate-state-update-ordered-aggregate";
 		}
 		if (!aggregate.has_state_update) {
@@ -565,8 +571,9 @@ bool ExecutionRegionAggregateUpdateGeneratesBody(const ExecutionRegionSinkInfo &
 }
 
 bool ExecutionRegionAggregateLookupGeneratesBody(const ExecutionRegionSinkInfo &sink) {
+	// the generated lookup addresses the states the generated update writes; a native update does its own lookup
 	return sink.Kind() == ExecutionRegionSinkKind::PERFECT_HASH_AGGREGATE_UPDATE &&
-	       sink.Aggregate().contract.native_grouped_state_contract.status == ExecutionRegionStateContractStatus::READY;
+	       ExecutionRegionAggregateUpdateGeneratesBody(sink);
 }
 
 static ExecutionRegionSourceKind InferExecutionRegionSourceKind(const ExecutionRegionNode &node) {
@@ -695,14 +702,6 @@ static ExecutionRegionCandidateTraits BuildExecutionRegionCandidateTraits(const 
 				traits.grouped_aggregate_key_count = node.sink->Aggregate().groups.size();
 			}
 			if (node.sink) {
-				if ((traits.sink_kind == ExecutionRegionSinkKind::HASH_AGGREGATE_UPDATE ||
-				     traits.sink_kind == ExecutionRegionSinkKind::PERFECT_HASH_AGGREGATE_UPDATE) &&
-				    node.sink->Aggregate().contract.present) {
-					traits.grouped_aggregate_count += node.sink->Aggregate().contract.aggregate_count;
-				} else if (node.sink->Kind() == ExecutionRegionSinkKind::DELIM_JOIN_SINK &&
-				           node.sink->DelimJoin().distinct.contract.present) {
-					traits.grouped_aggregate_count += node.sink->DelimJoin().distinct.contract.aggregate_count;
-				}
 				if (ExecutionRegionAggregateUpdateGeneratesBody(*node.sink)) {
 					traits.generated_aggregate_update_count++;
 				}

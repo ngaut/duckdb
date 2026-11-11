@@ -134,10 +134,12 @@ runtime cardinality never feeds the decision; adaptive choices live in kernels
 so parallel admission needs evidence that it amortizes: an estimated 2x group
 reduction, or a single grouping key, whose runtime run sample hands batches
 without runs to the native sink. A grouped aggregate counts as generated
-compute because its generated body replaces native group lookups. An ungrouped
-aggregate does not: a bare `sum(col)` or `count(*)` does exactly the native
-vectorized update's work, so only the filters, projections, and probes it
-fuses with make a pipeline generated work.
+compute when the generated body performs its update, because that body
+replaces native group lookups. Any other aggregate does not: a grouped one
+whose update stays native (`min`, `max`, `avg`) is the native sink's work, and
+a bare `sum(col)` or `count(*)` does exactly the native vectorized update's
+work, so only the filters, projections, and probes it fuses with make such a
+pipeline generated work.
 
 ## Execution model: chunk steps
 
@@ -726,37 +728,39 @@ and cost field names remain artifact-schema names, not machine-code counters.
 
 Correctness and performance are both required:
 
-- compiled routes must beat native execution by their workload-specific floor;
-- native-selected routes must remain within an independent raw slowdown limit;
-- a regression cannot pass because `jit_policy=off` slowed by the same amount;
-- paired or normalized ratios are secondary noise evidence only;
-- one-thread and parallel floors stay separate when scheduling changes the
+- the JIT must beat native execution by the workload's floor: the ratio of
+  the cost of `jit_policy='off'` to the cost of the JIT;
+- the JIT's cost must stay under the workload's ceiling, so a regression
+  cannot pass because `jit_policy='off'` slowed by the same amount;
+- a workload the cost model leaves to the native engine has a floor too: it
+  bounds what the decision itself may cost;
+- one-thread and parallel thresholds stay separate when scheduling changes the
   demonstrated margin;
-- checked-in floors are one-way ratchets: a gap is closed in the code or the
-  environment, never by lowering a floor.
+- checked-in floors and ceilings are one-way ratchets: a gap is closed in the
+  code or the environment, never by loosening a threshold.
 
-A verified performance improvement and its regression baseline are one change.
-Tighten the checked-in floor or promote the accepted comparison artifact in the
-same increment; otherwise the gate still accepts the slower performance the
-implementation replaced. Moving a fast path into a native operator (principle
-6) speeds up `jit_policy='off'` as well; such a move is measured against the
-same floors.
+A verified performance improvement and its thresholds are one change. Tighten
+the checked-in floor and ceiling in the same increment; otherwise the gate
+still accepts the slower performance the implementation replaced. Moving a
+fast path into a native operator (principle 6) speeds up `jit_policy='off'` as
+well; such a move is measured against the same floors.
 
-Benchmark commands, repetition counts, artifact schemas, host admission,
-baseline locations, and promotion mechanics are operational policy, owned by
+The workloads and their thresholds are `benchmark/jit/workloads.py`. How cost
+is measured, the commands, and the artifacts are operational policy, owned by
 `benchmark/jit/README.md` and the gate scripts it names.
 
 ## Verification
 
 Commands for every gate live in `benchmark/jit/README.md`. Every change passes
-focused tests first, then the static architecture checks, the JIT correctness
-suite, the differential fuzz campaign, the generic one-thread and parallel
-workloads, and the affected TPC-H scale factors.
+focused tests first, then the guard: the static architecture checks, the JIT
+correctness suite, the differential fuzz campaign, the SQL suites with the JIT
+forced on, and the generic one-thread, generic parallel and TPC-H performance
+gates.
 
-- **Differential first.** The refactor guard runs a fixed-seed campaign of
-  random queries over a NULL-injected TPC-H schema at every pre-commit;
-  longer campaigns over larger scale factors catch size-dependent classes
-  such as key compression. A value domain the schema lacks and a query shape
+- **Differential first.** The guard runs a fixed-seed campaign of random
+  queries over a NULL-injected TPC-H schema at every pre-commit; longer
+  campaigns over larger scale factors catch size-dependent classes such as
+  key compression. A value domain the schema lacks and a query shape
   the generator never builds are untested classes, so the fuzz database
   derives the types TPC-H never stores (FLOAT and DOUBLE with NaN, infinities
   and both zeros; narrow signed and unsigned integers at both ends of their
