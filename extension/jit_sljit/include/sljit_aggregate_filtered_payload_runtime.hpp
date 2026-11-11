@@ -13,6 +13,32 @@
 
 namespace duckdb {
 
+//! The matches of a string comparison for each entry of the dictionary its source is in this batch, when that
+//! dictionary is no larger than the batch and is the data the kernel indexes; nullptr otherwise
+static const uint8_t *SljitStringCompareDictionaryMatches(DataChunk &input, idx_t column_index,
+                                                          const_data_ptr_t source_data, const string &constant,
+                                                          idx_t count, vector<uint8_t> &matches) {
+	auto &source = input.data[column_index];
+	if (source.GetVectorType() != VectorType::DICTIONARY_VECTOR) {
+		return nullptr;
+	}
+	auto dictionary_size = DictionaryVector::DictionarySize(source);
+	auto &dictionary = DictionaryVector::Child(source);
+	if (!dictionary_size.IsValid() || dictionary_size.GetIndex() > count ||
+	    dictionary.GetVectorType() != VectorType::FLAT_VECTOR ||
+	    const_data_ptr_cast(FlatVector::GetData<string_t>(dictionary)) != source_data) {
+		return nullptr;
+	}
+	auto entries = FlatVector::GetData<string_t>(dictionary);
+	const string_t constant_value(constant);
+	matches.resize(dictionary_size.GetIndex());
+	for (idx_t entry_idx = 0; entry_idx < matches.size(); entry_idx++) {
+		// a NULL entry's match is never read: a row with a NULL takes the kernel's generic path
+		matches[entry_idx] = string_t::StringComparisonOperators::Equals(entries[entry_idx], constant_value);
+	}
+	return matches.data();
+}
+
 static void
 SljitExecuteFilteredPrimitiveAggregateUpdate(SljitExecutableFilteredAggregateUpdate &filtered_update,
                                              const vector<SljitAggregatePayloadDescriptor> &payload_descriptors,
@@ -59,6 +85,19 @@ SljitExecuteFilteredPrimitiveAggregateUpdate(SljitExecutableFilteredAggregateUpd
 
 	SljitNativeVectorInput native_input;
 	SljitBindFusedAggregatePayloadSources(native_input, payload_sources, nullptr);
+	if (!filtered_update.string_compares.empty()) {
+		auto &storage = adapter_scratch.string_match_storage;
+		auto &matches = adapter_scratch.string_matches;
+		storage.resize(filtered_update.string_compares.size());
+		matches.resize(filtered_update.string_compares.size());
+		for (idx_t compare_idx = 0; compare_idx < matches.size(); compare_idx++) {
+			auto &compare = filtered_update.string_compares[compare_idx];
+			matches[compare_idx] = SljitStringCompareDictionaryMatches(
+			    input, filtered_update.input_source_indices[compare.source],
+			    payload_sources.DataArray()[compare.source], compare.constant, count, storage[compare_idx]);
+		}
+		native_input.string_matches = matches.data();
+	}
 	native_input.aggregate_int64_values = aggregate_int64_values.data();
 	native_input.aggregate_hugeint_values = aggregate_hugeint_values.data();
 	native_input.aggregate_state_is_sets = aggregate_state_is_sets.data();

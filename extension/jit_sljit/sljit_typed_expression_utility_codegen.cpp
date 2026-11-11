@@ -13,6 +13,8 @@
 #include "duckdb/common/helper.hpp"
 #include "duckdb/common/types/hugeint.hpp"
 
+#include <array>
+
 namespace duckdb {
 
 SljitTypedExpressionTreeSlot AllocateSljitTypedExpressionTreeSlot(idx_t &slot_index) {
@@ -97,7 +99,8 @@ SljitOperand SljitTypedExpressionTreeConstantOperand(const vector<SljitTypedExpr
                                                      int64_t value) {
 	if (hoists) {
 		for (auto &hoist : *hoists) {
-			if (hoist.source_index == DConstants::INVALID_INDEX && hoist.constant == value) {
+			if (hoist.source_index == DConstants::INVALID_INDEX && !hoist.string_compare &&
+			    hoist.selection_source == DConstants::INVALID_INDEX && hoist.constant == value) {
 				return hoist.location;
 			}
 		}
@@ -125,7 +128,8 @@ bool SljitTypedExpressionTreeIsRemainderTest(const ExecutionExpressionIR &node) 
 static void AddSljitTypedExpressionTreeConstantHoist(int64_t value, vector<SljitTypedExpressionTreeLoopHoist> &hoists,
                                                      sljit_sw &local_size) {
 	for (auto &hoist : hoists) {
-		if (hoist.source_index == DConstants::INVALID_INDEX && hoist.constant == value) {
+		if (hoist.source_index == DConstants::INVALID_INDEX && !hoist.string_compare &&
+		    hoist.selection_source == DConstants::INVALID_INDEX && hoist.constant == value) {
 			return;
 		}
 	}
@@ -168,19 +172,137 @@ void AppendSljitTypedExpressionTreeConstantHoists(const vector<reference<const E
 	}
 }
 
-void EmitSljitTypedExpressionTreeConstantHoists(struct sljit_compiler *compiler,
-                                                const vector<SljitTypedExpressionTreeLoopHoist> &hoists) {
-	for (auto &hoist : hoists) {
-		if (hoist.source_index == DConstants::INVALID_INDEX) {
-			sljit_emit_op1(compiler, SLJIT_MOV, hoist.location.operand, hoist.location.operand_w, SLJIT_IMM,
-			               NumericCast<sljit_sw>(hoist.constant));
+static void CollectSljitTypedExpressionTreeStringCompares(const ExecutionExpressionIR &node,
+                                                          vector<reference<const ExecutionExpressionIR>> &result) {
+	idx_t source_index;
+	string constant;
+	bool compare_equal;
+	if (TryReadSljitTypedExpressionTreeStringCompareConstant(node, source_index, constant, compare_equal)) {
+		result.push_back(node);
+		return;
+	}
+	for (auto child : {node.left.get(), node.right.get(), node.else_node.get()}) {
+		if (child) {
+			CollectSljitTypedExpressionTreeStringCompares(*child, result);
+		}
+	}
+	for (auto &child : node.children) {
+		if (child) {
+			CollectSljitTypedExpressionTreeStringCompares(*child, result);
 		}
 	}
 }
 
+vector<reference<const ExecutionExpressionIR>>
+CollectSljitTypedExpressionTreeStringCompares(const vector<reference<const ExecutionExpressionIR>> &expressions) {
+	vector<reference<const ExecutionExpressionIR>> result;
+	for (auto &expression : expressions) {
+		CollectSljitTypedExpressionTreeStringCompares(expression.get(), result);
+	}
+	return result;
+}
+
+//! The selection of a source without one: row i of a vector reads entry i
+static const sel_t *SljitIdentitySelection() {
+	static const auto identity = []() {
+		std::array<sel_t, STANDARD_VECTOR_SIZE> result;
+		for (idx_t row_idx = 0; row_idx < result.size(); row_idx++) {
+			result[row_idx] = NumericCast<sel_t>(row_idx);
+		}
+		return result;
+	}();
+	return identity.data();
+}
+
+void AppendSljitTypedExpressionTreeSelectionHoists(const vector<idx_t> &sources,
+                                                   vector<SljitTypedExpressionTreeLoopHoist> &hoists,
+                                                   sljit_sw &local_size) {
+	for (auto source_index : sources) {
+		SljitTypedExpressionTreeLoopHoist hoist;
+		hoist.selection_source = source_index;
+		hoist.location = SljitOperand::Stack(local_size);
+		local_size += NumericCast<sljit_sw>(sizeof(sljit_sw));
+		hoists.push_back(hoist);
+	}
+}
+
+void AppendSljitTypedExpressionTreeStringCompareHoists(
+    const vector<reference<const ExecutionExpressionIR>> &expressions,
+    vector<SljitTypedExpressionTreeLoopHoist> &hoists, sljit_sw &local_size) {
+	auto compares = CollectSljitTypedExpressionTreeStringCompares(expressions);
+	for (idx_t compare_idx = 0; compare_idx < compares.size(); compare_idx++) {
+		SljitTypedExpressionTreeLoopHoist hoist;
+		hoist.string_compare = &compares[compare_idx].get();
+		hoist.string_compare_index = compare_idx;
+		hoist.location = SljitOperand::Stack(local_size);
+		local_size += NumericCast<sljit_sw>(sizeof(sljit_sw));
+		hoists.push_back(hoist);
+	}
+}
+
+const SljitTypedExpressionTreeLoopHoist *
+FindSljitTypedExpressionTreeStringCompareHoist(const vector<SljitTypedExpressionTreeLoopHoist> *hoists,
+                                               const ExecutionExpressionIR &node) {
+	if (!hoists) {
+		return nullptr;
+	}
+	for (auto &hoist : *hoists) {
+		if (hoist.string_compare == &node) {
+			return &hoist;
+		}
+	}
+	return nullptr;
+}
+
+void EmitSljitTypedExpressionTreeConstantHoists(struct sljit_compiler *compiler,
+                                                const vector<SljitTypedExpressionTreeLoopHoist> &hoists) {
+	vector<reference<const SljitTypedExpressionTreeLoopHoist>> string_compares;
+	for (auto &hoist : hoists) {
+		if (hoist.selection_source != DConstants::INVALID_INDEX) {
+			// as EmitLoadSljitExpressionTreeSourceIndex resolves it: the source's own selection, else the common one,
+			// else the identity
+			sljit_emit_op1(compiler, SLJIT_MOV_P, SLJIT_R1, 0, SLJIT_IMM,
+			               reinterpret_cast<sljit_sw>(SljitIdentitySelection()));
+			sljit_emit_op1(compiler, SLJIT_MOV_P, SLJIT_R0, 0, SLJIT_S4, 0);
+			auto no_selection_array = sljit_emit_cmp(compiler, SLJIT_EQUAL, SLJIT_R0, 0, SLJIT_IMM, 0);
+			sljit_emit_op1(compiler, SLJIT_MOV_P, SLJIT_R0, 0, SLJIT_MEM1(SLJIT_R0),
+			               SljitPointerArrayOffset(hoist.selection_source));
+			auto own_selection = sljit_emit_cmp(compiler, SLJIT_NOT_EQUAL, SLJIT_R0, 0, SLJIT_IMM, 0);
+			sljit_set_label(no_selection_array, sljit_emit_label(compiler));
+			sljit_emit_op1(compiler, SLJIT_MOV_P, SLJIT_R0, 0, SLJIT_MEM1(SLJIT_S0),
+			               offsetof(SljitNativeVectorInput, source_common_sel));
+			auto no_common_selection = sljit_emit_cmp(compiler, SLJIT_EQUAL, SLJIT_R0, 0, SLJIT_IMM, 0);
+			sljit_set_label(own_selection, sljit_emit_label(compiler));
+			sljit_emit_op1(compiler, SLJIT_MOV_P, SLJIT_R1, 0, SLJIT_R0, 0);
+			sljit_set_label(no_common_selection, sljit_emit_label(compiler));
+			sljit_emit_op1(compiler, SLJIT_MOV_P, hoist.location.operand, hoist.location.operand_w, SLJIT_R1, 0);
+		} else if (hoist.string_compare) {
+			string_compares.push_back(hoist);
+		} else if (hoist.source_index == DConstants::INVALID_INDEX) {
+			sljit_emit_op1(compiler, SLJIT_MOV, hoist.location.operand, hoist.location.operand_w, SLJIT_IMM,
+			               NumericCast<sljit_sw>(hoist.constant));
+		}
+	}
+	if (string_compares.empty()) {
+		return;
+	}
+	// a batch without matches for a comparison (its source is no small dictionary) compares its rows
+	sljit_emit_op1(compiler, SLJIT_MOV_P, SLJIT_R0, 0, SLJIT_MEM1(SLJIT_S0),
+	               offsetof(SljitNativeVectorInput, string_matches));
+	for (auto &hoist_ref : string_compares) {
+		auto &hoist = hoist_ref.get();
+		sljit_emit_op1(compiler, SLJIT_MOV_P, SLJIT_R1, 0, SLJIT_IMM, 0);
+		auto no_matches = sljit_emit_cmp(compiler, SLJIT_EQUAL, SLJIT_R0, 0, SLJIT_IMM, 0);
+		sljit_emit_op1(compiler, SLJIT_MOV_P, SLJIT_R1, 0, SLJIT_MEM1(SLJIT_R0),
+		               SljitPointerArrayOffset(hoist.string_compare_index));
+		sljit_set_label(no_matches, sljit_emit_label(compiler));
+		sljit_emit_op1(compiler, SLJIT_MOV_P, hoist.location.operand, hoist.location.operand_w, SLJIT_R1, 0);
+	}
+}
+
 void EmitLoadSljitTypedExpressionTreeFastSourceIndex(struct sljit_compiler *compiler, idx_t source_index,
-                                                     sljit_s32 target,
-                                                     SljitTypedExpressionTreeFastIndexMode index_mode) {
+                                                     sljit_s32 target, SljitTypedExpressionTreeFastIndexMode index_mode,
+                                                     const vector<SljitTypedExpressionTreeLoopHoist> *hoists) {
 	if (index_mode == SljitTypedExpressionTreeFastIndexMode::FLAT) {
 		sljit_emit_op1(compiler, SLJIT_MOV, target, 0, SLJIT_S1, 0);
 		return;
@@ -188,6 +310,15 @@ void EmitLoadSljitTypedExpressionTreeFastSourceIndex(struct sljit_compiler *comp
 	if (index_mode == SljitTypedExpressionTreeFastIndexMode::LOGICAL) {
 		sljit_emit_op1(compiler, SLJIT_MOV, target, 0, SLJIT_S3, 0);
 		return;
+	}
+	if (hoists) {
+		for (auto &hoist : *hoists) {
+			if (hoist.selection_source == source_index) {
+				sljit_emit_op1(compiler, SLJIT_MOV_P, target, 0, hoist.location.operand, hoist.location.operand_w);
+				sljit_emit_op1(compiler, SLJIT_MOV_U32, target, 0, SLJIT_MEM2(target, SLJIT_S3), 2);
+				return;
+			}
+		}
 	}
 	EmitLoadSljitExpressionTreeSourceIndex(compiler, source_index, target);
 }

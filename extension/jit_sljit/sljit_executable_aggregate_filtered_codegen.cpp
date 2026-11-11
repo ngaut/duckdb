@@ -11,6 +11,8 @@
 #include "sljit_executable_aggregate_payload_sources.hpp"
 #include "sljit_native_codegen.hpp"
 #include "sljit_native_util.hpp"
+#include "sljit_codegen_internal.hpp"
+#include "sljit_typed_expression_plan.hpp"
 
 namespace duckdb {
 
@@ -238,6 +240,21 @@ bool SljitTryBuildFilteredAggregateUpdate(SljitExecutableRegionOp &filter_op, Sl
 		codegen_payloads.push_back(payload.plan.Copy(true, false));
 	}
 
+	{
+		vector<reference<const ExecutionExpressionIR>> expressions {*filtered_update.filter.plan.expression_tree};
+		for (auto &payload : codegen_payloads) {
+			if (payload.expression_tree) {
+				expressions.push_back(*payload.expression_tree);
+			}
+		}
+		for (auto &compare : CollectSljitTypedExpressionTreeStringCompares(expressions)) {
+			SljitStringCompareMatches matches;
+			bool compare_equal;
+			TryReadSljitTypedExpressionTreeStringCompareConstant(compare.get(), matches.source, matches.constant,
+			                                                     compare_equal);
+			filtered_update.string_compares.push_back(std::move(matches));
+		}
+	}
 	SljitNativeAggregateUpdateFunction function = nullptr;
 	string filtered_error;
 	auto code = BuildSljitNativeFilteredUngroupedFusedPrimitiveAggregateUpdate(

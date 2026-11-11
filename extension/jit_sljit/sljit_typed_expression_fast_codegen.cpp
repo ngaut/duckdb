@@ -44,7 +44,7 @@ static void EmitSljitTypedExpressionTreeFastLeafReg(struct sljit_compiler *compi
 		index_reg = SLJIT_S3;
 		break;
 	case SljitTypedExpressionTreeFastIndexMode::SELECTED:
-		EmitLoadSljitTypedExpressionTreeFastSourceIndex(compiler, node.ref_index, SLJIT_R1, index_mode);
+		EmitLoadSljitTypedExpressionTreeFastSourceIndex(compiler, node.ref_index, SLJIT_R1, index_mode, data_hoists);
 		break;
 	}
 	sljit_s32 data_reg;

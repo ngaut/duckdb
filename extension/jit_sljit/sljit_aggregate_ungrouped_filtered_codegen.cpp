@@ -227,6 +227,12 @@ unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativeFilteredUngroupedFusedPrim
 			}
 		}
 		AppendSljitTypedExpressionTreeConstantHoists(expressions, data_hoists, local_size);
+		AppendSljitTypedExpressionTreeStringCompareHoists(expressions, data_hoists, local_size);
+		vector<idx_t> sources;
+		for (auto &expression : expressions) {
+			CollectSljitTypedExpressionTreeReferences(expression.get(), sources);
+		}
+		AppendSljitTypedExpressionTreeSelectionHoists(sources, data_hoists, local_size);
 	}
 	const auto hoists = data_hoists.empty() ? nullptr : &data_hoists;
 	sljit_emit_enter(compiler, 0, SLJIT_ARGS1V(P), simd_scratches,
@@ -505,7 +511,17 @@ unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativeFilteredUngroupedFusedPrim
 		EmitLoadSljitExpressionTreeLogicalIndex(compiler);
 		vector<sljit_jump *> selected_null_jumps;
 		for (auto source_index : row_source_refs) {
-			selected_null_jumps.push_back(EmitJumpIfSljitExpressionTreeSourceNull(compiler, source_index));
+			// the hoisted selection resolves the row's source index without touching the validity pointer in R0
+			EmitLoadSljitNativeSourceValidity(compiler, source_index, SLJIT_R0);
+			auto source_all_valid = sljit_emit_cmp(compiler, SLJIT_EQUAL, SLJIT_R0, 0, SLJIT_IMM, 0);
+			EmitLoadSljitTypedExpressionTreeFastSourceIndex(compiler, source_index, SLJIT_R1,
+			                                                SljitTypedExpressionTreeFastIndexMode::SELECTED, hoists);
+			sljit_emit_op2(compiler, SLJIT_LSHR, SLJIT_R2, 0, SLJIT_R1, 0, SLJIT_IMM, 6);
+			sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_R2, 0, SLJIT_MEM2(SLJIT_R0, SLJIT_R2), 3);
+			sljit_emit_op2(compiler, SLJIT_MLSHR, SLJIT_R2, 0, SLJIT_R2, 0, SLJIT_R1, 0);
+			sljit_emit_op2u(compiler, SLJIT_AND | SLJIT_SET_Z, SLJIT_R2, 0, SLJIT_IMM, 1);
+			selected_null_jumps.push_back(sljit_emit_jump(compiler, SLJIT_ZERO));
+			sljit_set_label(source_all_valid, sljit_emit_label(compiler));
 		}
 		emit_selected_fast_row();
 		auto selected_hybrid_row_done = sljit_emit_jump(compiler, SLJIT_JUMP);

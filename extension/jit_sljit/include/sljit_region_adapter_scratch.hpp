@@ -41,6 +41,7 @@ struct SljitAggregatePayloadAdapterScratch {
 
 	void PrepareFiltered(idx_t source_count, idx_t payload_count) {
 		PrepareExpressionSources(source_count);
+		string_matches.clear();
 		aggregate_int64_values.assign(payload_count, nullptr);
 		aggregate_hugeint_values.assign(payload_count, nullptr);
 		aggregate_state_is_sets.assign(payload_count, nullptr);
@@ -99,6 +100,9 @@ struct SljitAggregatePayloadAdapterScratch {
 	vector<bool *> aggregate_state_is_sets;
 	vector<idx_t *> aggregate_row_counts;
 	vector<int64_t> constants;
+	//! per string comparison of a filtered kernel, its dictionary's matches and the pointer the kernel reads
+	vector<vector<uint8_t>> string_match_storage;
+	vector<const uint8_t *> string_matches;
 };
 
 struct SljitProjectionAdapterScratch {

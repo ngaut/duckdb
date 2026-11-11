@@ -49,7 +49,7 @@ EmitLoadSljitTypedExpressionTreeFastStringForPrefix(struct sljit_compiler *compi
 	static constexpr sljit_sw STRING_T_SHIFT = 4;
 	static constexpr sljit_sw STRING_LENGTH_OFFSET = 0;
 
-	EmitLoadSljitTypedExpressionTreeFastSourceIndex(compiler, source_index, SLJIT_R1, index_mode);
+	EmitLoadSljitTypedExpressionTreeFastSourceIndex(compiler, source_index, SLJIT_R1, index_mode, data_hoists);
 	sljit_s32 data_reg;
 	if (TryGetSljitTypedExpressionTreeSourceDataHoist(data_hoists, source_index, data_reg)) {
 		sljit_emit_op1(compiler, SLJIT_MOV_P, SLJIT_R0, 0, data_reg, 0);
@@ -225,10 +225,27 @@ void EmitSljitTypedExpressionTreeFastStringCompareReg(struct sljit_compiler *com
 		throw InternalException("Unsupported SLJIT typed expression-tree fast string comparison");
 	}
 
+	// a dictionary source's row index is its dictionary entry, whose match the batch computed once
+	sljit_jump *matched = nullptr;
+	if (auto matches = FindSljitTypedExpressionTreeStringCompareHoist(data_hoists, node)) {
+		// loading the source index uses R0, so the matches pointer is loaded after it
+		EmitLoadSljitTypedExpressionTreeFastSourceIndex(compiler, source_index, SLJIT_R1, index_mode, data_hoists);
+		sljit_emit_op1(compiler, SLJIT_MOV_P, SLJIT_R0, 0, matches->location.operand, matches->location.operand_w);
+		auto compare_rows = sljit_emit_cmp(compiler, SLJIT_EQUAL, SLJIT_R0, 0, SLJIT_IMM, 0);
+		sljit_emit_op1(compiler, SLJIT_MOV_U8, SLJIT_R2, 0, SLJIT_MEM2(SLJIT_R0, SLJIT_R1), 0);
+		if (!compare_equal) {
+			sljit_emit_op2(compiler, SLJIT_XOR, SLJIT_R2, 0, SLJIT_R2, 0, SLJIT_IMM, 1);
+		}
+		matched = sljit_emit_jump(compiler, SLJIT_JUMP);
+		sljit_set_label(compare_rows, sljit_emit_label(compiler));
+	}
 	vector<sljit_jump *> equal_false_jumps;
 	EmitLoadSljitTypedExpressionTreeFastStringForPrefix(compiler, source_index, index_mode, data_hoists);
 	EmitSljitTypedExpressionTreeFastStringEqualFalseBranches(compiler, constant, equal_false_jumps);
 	EmitSljitTypedExpressionTreeFastStringBoolReg(compiler, equal_false_jumps, compare_equal);
+	if (matched) {
+		sljit_set_label(matched, sljit_emit_label(compiler));
+	}
 }
 
 vector<sljit_jump *> EmitSljitTypedExpressionTreeStringPrefixJumpIfTrue(struct sljit_compiler *compiler,

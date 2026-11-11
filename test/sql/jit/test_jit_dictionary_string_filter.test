@@ -1,0 +1,117 @@
+# name: test/sql/jit/test_jit_dictionary_string_filter.test
+# description: A compiled filter comparing a dictionary-compressed string with a constant reads each row's dictionary entry
+# group: [jit]
+
+# A batch that brings a string column as a dictionary vector compares each dictionary entry with the constant once and
+# reads a row's match through its selection; each source's selection is resolved once per batch. The columns mix a
+# dictionary string with and without NULLs and a flat number with NULLs; the comparisons are = and <>, alone and under
+# AND and OR.
+
+require jit_sljit
+
+load {TEST_DIR}/jit_dictionary_string_filter.db
+
+statement ok
+CREATE TABLE statuses AS
+SELECT i AS id,
+       (i % 1000)::INTEGER AS amount,
+       CASE WHEN i % 13 = 0 THEN NULL ELSE (i % 700)::INTEGER END AS nullable_amount,
+       CASE WHEN i % 7 = 0 THEN 'ACTIVE' WHEN i % 11 = 0 THEN 'PENDING' ELSE 'ARCHIVED' END AS status,
+       CASE WHEN i % 29 = 0 THEN NULL WHEN i % 7 = 0 THEN 'ACTIVE' WHEN i % 11 = 0 THEN 'PENDING'
+            ELSE 'ARCHIVED with a long tail' END AS nullable_status
+FROM range(300000) t(i)
+
+statement ok
+CHECKPOINT
+
+# a reopened database scans the checkpointed dictionaries
+restart
+
+statement ok
+SET jit_cbo_generated_stage_benefit=4096
+
+statement ok
+SET jit_cbo_materialization_elision_benefit=4096
+
+statement ok
+SET jit_cbo_native_operator_stage_benefit=4096
+
+statement ok
+SET jit_cbo_full_pipeline_benefit=4096
+
+statement ok
+SET jit_cbo_source_contract_scan_filter_penalty=0
+
+statement ok
+SET jit_cbo_startup_base_cost=0
+
+statement ok
+SET jit_cbo_startup_margin_basis_points=0
+
+foreach threads 1 4
+
+statement ok
+SET threads={threads}
+
+foreach policy off auto
+
+statement ok
+SET jit_policy='{policy}'
+
+query II nosort equal_or_number
+SELECT count(*), sum(amount) FROM statuses WHERE status = 'ACTIVE' OR amount = 7
+----
+
+query II nosort not_equal_and_number
+SELECT count(*), sum(amount) FROM statuses WHERE status <> 'ACTIVE' AND amount > 5
+----
+
+query II nosort nullable_equal_or_nullable_number
+SELECT count(*), sum(nullable_amount) FROM statuses WHERE nullable_status = 'PENDING' OR nullable_amount = 7
+----
+
+query II nosort nullable_not_equal_and_number
+SELECT count(*), sum(amount) FROM statuses WHERE nullable_status <> 'ARCHIVED with a long tail' AND amount % 3 = 1
+----
+
+query II nosort two_strings
+SELECT count(*), sum(amount) FROM statuses WHERE status = 'PENDING' OR nullable_status = 'ACTIVE'
+----
+
+endloop
+
+endloop
+
+reset label equal_or_number
+
+reset label not_equal_and_number
+
+reset label nullable_equal_or_nullable_number
+
+reset label nullable_not_equal_and_number
+
+reset label two_strings
+
+# the filters compile
+statement ok
+SET threads=1
+
+statement ok
+SET jit_trace_decisions=true
+
+statement ok
+SET jit_event_log_size=10000
+
+statement ok
+SELECT * FROM duckdb_jit_clear_events()
+
+statement ok
+SELECT count(*), sum(amount) FROM statuses WHERE status = 'ACTIVE' OR amount = 7
+
+statement ok
+SELECT count(*), sum(nullable_amount) FROM statuses WHERE nullable_status = 'PENDING' OR nullable_amount = 7
+
+query I
+SELECT count(*) FROM duckdb_jit_events() WHERE phase = 'compile' AND status = 'compiled'
+----
+2

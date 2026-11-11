@@ -364,6 +364,9 @@ struct SljitNativeVectorInput {
 	const validity_t **right_source_validity_array = nullptr;
 	const validity_t **group_validity_array = nullptr;
 	const int64_t *constants = nullptr;
+	//! per string comparison with a constant, the match of each entry of the dictionary its source is (nonzero when
+	//! the entry equals the constant), or nullptr where the rows are compared one by one
+	const uint8_t *const *string_matches = nullptr;
 	int64_t constant = 0;
 	double double_constant = 0;
 	SljitNativeDecimalSourceScale source_decimal;

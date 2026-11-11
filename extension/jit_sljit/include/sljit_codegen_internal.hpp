@@ -55,9 +55,15 @@ struct SljitOperand {
 //! register, or a wide constant held in a stack slot (an arm64 64-bit immediate takes up to four instructions; the
 //! slot is one load)
 struct SljitTypedExpressionTreeLoopHoist {
-	//! the source whose data pointer this holds; INVALID_INDEX for a constant
+	//! the source whose data pointer this holds; INVALID_INDEX for a constant or a string comparison's matches
 	idx_t source_index = DConstants::INVALID_INDEX;
 	int64_t constant = 0;
+	//! a string comparison with a constant whose per-dictionary-entry matches this holds (the batch's
+	//! SljitNativeVectorInput::string_matches[string_compare_index]), or nullptr
+	const ExecutionExpressionIR *string_compare = nullptr;
+	idx_t string_compare_index = 0;
+	//! a source whose selection this holds for the batch: its own, the common one, or the identity
+	idx_t selection_source = DConstants::INVALID_INDEX;
 	SljitOperand location = SljitOperand::Register(0);
 };
 
@@ -70,7 +76,23 @@ SljitOperand SljitTypedExpressionTreeConstantOperand(const vector<SljitTypedExpr
 void AppendSljitTypedExpressionTreeConstantHoists(const vector<reference<const ExecutionExpressionIR>> &expressions,
                                                   vector<SljitTypedExpressionTreeLoopHoist> &hoists,
                                                   sljit_sw &local_size);
-//! Stores the hoisted constants into their slots; data pointers are loaded by the kernel that owns their sources
+//! The comparisons of a string source with a constant in these expressions, in the order their matches are numbered
+vector<reference<const ExecutionExpressionIR>>
+CollectSljitTypedExpressionTreeStringCompares(const vector<reference<const ExecutionExpressionIR>> &expressions);
+//! Gives each string comparison with a constant a stack slot past local_size for the matches of its dictionary
+void AppendSljitTypedExpressionTreeStringCompareHoists(
+    const vector<reference<const ExecutionExpressionIR>> &expressions,
+    vector<SljitTypedExpressionTreeLoopHoist> &hoists, sljit_sw &local_size);
+//! Gives each source a stack slot past local_size for the selection a selected row reads it through
+void AppendSljitTypedExpressionTreeSelectionHoists(const vector<idx_t> &sources,
+                                                   vector<SljitTypedExpressionTreeLoopHoist> &hoists,
+                                                   sljit_sw &local_size);
+//! The hoist of a string comparison's matches, or nullptr
+const SljitTypedExpressionTreeLoopHoist *
+FindSljitTypedExpressionTreeStringCompareHoist(const vector<SljitTypedExpressionTreeLoopHoist> *hoists,
+                                               const ExecutionExpressionIR &node);
+//! Stores the hoisted constants and string matches into their slots; data pointers are loaded by the kernel that
+//! owns their sources
 void EmitSljitTypedExpressionTreeConstantHoists(struct sljit_compiler *compiler,
                                                 const vector<SljitTypedExpressionTreeLoopHoist> &hoists);
 enum class SljitTypedExpressionTreeFastIndexMode : uint8_t { FLAT, LOGICAL, SELECTED };
@@ -109,8 +131,8 @@ void SetSljitJumpLabels(const vector<sljit_jump *> &jumps, sljit_label *label);
 void EmitSljitTypedExpressionTreeInvalidResult(struct sljit_compiler *compiler,
                                                const SljitTypedExpressionTreeSlot &slot);
 void EmitLoadSljitTypedExpressionTreeFastSourceIndex(struct sljit_compiler *compiler, idx_t source_index,
-                                                     sljit_s32 target,
-                                                     SljitTypedExpressionTreeFastIndexMode index_mode);
+                                                     sljit_s32 target, SljitTypedExpressionTreeFastIndexMode index_mode,
+                                                     const vector<SljitTypedExpressionTreeLoopHoist> *hoists);
 SljitTypedExpressionTreeSlot EmitSljitTypedExpressionTreeStringPrefix(struct sljit_compiler *compiler,
                                                                       const ExecutionExpressionIR &node,
                                                                       idx_t &slot_index);
