@@ -13,6 +13,8 @@
 
 #include "sljitLir.h"
 
+#include <algorithm>
+
 namespace duckdb {
 
 struct SljitFilteredFusedPrimitiveAggregateCodegenPlan {
@@ -153,18 +155,31 @@ unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativeFilteredUngroupedFusedPrim
 		}
 	}
 	// The nullable variant runs the same packed loops with a lane-expanded validity
-	// mask ANDead in; the row-skip semantics require an AND-only predicate and cover
-	// payload references only when there is a single payload (or none for count(*)).
+	// mask ANDead in, skipping every row with a NULL in a masked source. An AND-only
+	// predicate rejects a row with a NULL source, so the skip is exact for the
+	// predicate's sources, for a single payload's own sources (a sum ignores NULLs),
+	// and for any payload that reads only the predicate's sources.
 	vector<idx_t> simd_validity_refs;
 	bool simd_nullable_ok = false;
-	if (simd_plan.supported && simd_plan.nullable_capable && payloads.size() == 1) {
+	if (simd_plan.supported && simd_plan.nullable_capable) {
 		simd_validity_refs = simd_plan.source_refs;
-		auto kind = codegen_plan.payload_descriptors[0].primitive_kind;
-		if (kind == AggregatePrimitiveUpdateKind::COUNT_STAR) {
-			simd_nullable_ok = true;
-		} else if (payloads[0].expression_tree) {
-			CollectSljitTypedExpressionTreeReferences(*payloads[0].expression_tree, simd_validity_refs);
-			simd_nullable_ok = true;
+		simd_nullable_ok = true;
+		for (idx_t payload_idx = 0; payload_idx < payloads.size(); payload_idx++) {
+			if (codegen_plan.payload_descriptors[payload_idx].primitive_kind ==
+			    AggregatePrimitiveUpdateKind::COUNT_STAR) {
+				continue;
+			}
+			vector<idx_t> payload_refs;
+			CollectSljitTypedExpressionTreeReferences(*payloads[payload_idx].expression_tree, payload_refs);
+			for (auto source_index : payload_refs) {
+				const bool predicate_source = std::find(simd_plan.source_refs.begin(), simd_plan.source_refs.end(),
+				                                        source_index) != simd_plan.source_refs.end();
+				if (payloads.size() == 1) {
+					AddSljitTypedKnownValidSource(simd_validity_refs, source_index);
+				} else if (!predicate_source) {
+					simd_nullable_ok = false;
+				}
+			}
 		}
 	}
 	sljit_sw simd_mask_offset = 0;
@@ -183,6 +198,10 @@ unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativeFilteredUngroupedFusedPrim
 		                   (simd_nullable_ok ? idx_t(2) : idx_t(0));
 		simd_scratches = 5 | SLJIT_ENTER_VECTOR(NumericCast<sljit_s32>(vector_regs));
 	}
+
+	// A flat batch with NULLs ANDs the validity of every source the rows read into one mask before its rows
+	const sljit_sw combined_validity_offset = local_size;
+	local_size += NumericCast<sljit_sw>(STANDARD_VECTOR_SIZE / ValidityMask::BITS_PER_VALUE * sizeof(validity_t));
 
 	// The scalar loops hold the most used sources' data pointers in registers instead of loading them from the
 	// source array for every reference of every row
@@ -236,10 +255,55 @@ unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativeFilteredUngroupedFusedPrim
 	EmitSljitTypedExpressionTreeConstantHoists(compiler, data_hoists);
 
 	vector<SljitArithmeticOverflowSite> overflows;
+	// One row evaluated with SQL's three-valued logic, each value and its validity in a stack slot: a NULL predicate
+	// rejects the row and a NULL payload adds nothing
+	auto emit_generic_row = [&]() {
+		EmitLoadSljitExpressionTreeLogicalIndex(compiler);
+		vector<sljit_jump *> row_skip_jumps;
+		idx_t predicate_slot_index = 0;
+		auto predicate_slot = EmitSljitTypedExpressionTreeValue(compiler, predicate, predicate_slot_index, overflows);
+		sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_R3, 0, SLJIT_MEM1(SLJIT_SP), predicate_slot.valid_offset);
+		row_skip_jumps.push_back(sljit_emit_cmp(compiler, SLJIT_EQUAL, SLJIT_R3, 0, SLJIT_IMM, 0));
+		sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_R2, 0, SLJIT_MEM1(SLJIT_SP), predicate_slot.value_offset);
+		row_skip_jumps.push_back(sljit_emit_cmp(compiler, SLJIT_EQUAL, SLJIT_R2, 0, SLJIT_IMM, 0));
+
+		for (idx_t payload_idx = 0; payload_idx < payloads.size(); payload_idx++) {
+			auto kind = codegen_plan.payload_descriptors[payload_idx].primitive_kind;
+			if (kind == AggregatePrimitiveUpdateKind::COUNT_STAR) {
+				EmitSljitAggregateIncrementLocalCount(compiler, local_count_offsets[payload_idx]);
+				continue;
+			}
+			vector<sljit_jump *> payload_skip_jumps;
+			idx_t payload_slot_index = 0;
+			auto payload_slot = EmitSljitTypedExpressionTreeValue(compiler, *payloads[payload_idx].expression_tree,
+			                                                      payload_slot_index, overflows);
+			sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_R3, 0, SLJIT_MEM1(SLJIT_SP), payload_slot.valid_offset);
+			payload_skip_jumps.push_back(sljit_emit_cmp(compiler, SLJIT_EQUAL, SLJIT_R3, 0, SLJIT_IMM, 0));
+			sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_R2, 0, SLJIT_MEM1(SLJIT_SP), payload_slot.value_offset);
+			EmitUngroupedAggregateAccumulate(compiler, kind, local_sum_offsets[payload_idx],
+			                                 local_sum_upper_offsets[payload_idx], saw_value_offsets[payload_idx],
+			                                 SLJIT_R2);
+			EmitSljitAggregateIncrementLocalCount(compiler, local_count_offsets[payload_idx]);
+			auto payload_done = sljit_emit_jump(compiler, SLJIT_JUMP);
+			auto payload_skip_label = sljit_emit_label(compiler);
+			for (auto payload_skip : payload_skip_jumps) {
+				sljit_set_label(payload_skip, payload_skip_label);
+			}
+			sljit_set_label(payload_done, sljit_emit_label(compiler));
+		}
+		auto row_done = sljit_emit_jump(compiler, SLJIT_JUMP);
+		auto row_skip_label = sljit_emit_label(compiler);
+		for (auto row_skip : row_skip_jumps) {
+			sljit_set_label(row_skip, row_skip_label);
+		}
+		sljit_set_label(row_done, sljit_emit_label(compiler));
+	};
+
 	struct sljit_jump *fast_done = nullptr;
 	vector<sljit_jump *> fast_loop_exits;
 	struct sljit_jump *selected_fast_done = nullptr;
 	struct sljit_jump *nullable_simd_done = nullptr;
+	struct sljit_jump *hybrid_done = nullptr;
 	if (codegen_plan.fast_path_supported) {
 		sljit_emit_op1(compiler, SLJIT_MOV_U8, SLJIT_R0, 0, SLJIT_MEM1(SLJIT_S0),
 		               offsetof(SljitNativeVectorInput, expression_tree_flat_all_valid));
@@ -340,6 +404,64 @@ unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativeFilteredUngroupedFusedPrim
 			sljit_set_label(nullable_tail_done, sljit_emit_label(compiler));
 			nullable_simd_done = sljit_emit_jump(compiler, SLJIT_JUMP);
 			sljit_set_label(skip_nullable_simd, sljit_emit_label(compiler));
+		} else {
+			// A flat batch with NULLs runs a row whose sources are all valid on the fast path and only a row with a
+			// NULL on the generic path
+			vector<idx_t> source_refs;
+			CollectSljitTypedExpressionTreeReferences(predicate, source_refs);
+			for (idx_t payload_idx = 0; payload_idx < payloads.size(); payload_idx++) {
+				if (codegen_plan.payload_descriptors[payload_idx].primitive_kind !=
+				    AggregatePrimitiveUpdateKind::COUNT_STAR) {
+					CollectSljitTypedExpressionTreeReferences(*payloads[payload_idx].expression_tree, source_refs);
+				}
+			}
+			sljit_emit_op1(compiler, SLJIT_MOV_U8, SLJIT_R0, 0, SLJIT_MEM1(SLJIT_S0),
+			               offsetof(SljitNativeVectorInput, expression_tree_flat_no_selection));
+			vector<sljit_jump *> skip_hybrid;
+			skip_hybrid.push_back(sljit_emit_cmp(compiler, SLJIT_EQUAL, SLJIT_R0, 0, SLJIT_IMM, 0));
+			skip_hybrid.push_back(sljit_emit_cmp(compiler, SLJIT_GREATER, SLJIT_S2, 0, SLJIT_IMM,
+			                                     NumericCast<sljit_sw>(STANDARD_VECTOR_SIZE)));
+			// combined[word] = the AND of every source's validity word; a source without a mask is all valid
+			sljit_get_local_base(compiler, SLJIT_R3, 0, combined_validity_offset);
+			sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_R1, 0, SLJIT_IMM, 0);
+			auto combine_loop = sljit_emit_label(compiler);
+			sljit_emit_op2(compiler, SLJIT_ADD, SLJIT_R4, 0, SLJIT_S2, 0, SLJIT_IMM, ValidityMask::BITS_PER_VALUE - 1);
+			sljit_emit_op2(compiler, SLJIT_LSHR, SLJIT_R4, 0, SLJIT_R4, 0, SLJIT_IMM, 6);
+			auto combine_done = sljit_emit_cmp(compiler, SLJIT_GREATER_EQUAL, SLJIT_R1, 0, SLJIT_R4, 0);
+			sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_R2, 0, SLJIT_IMM, -1);
+			for (auto source_index : source_refs) {
+				EmitLoadSljitNativeSourceValidity(compiler, source_index, SLJIT_R0);
+				auto source_all_valid = sljit_emit_cmp(compiler, SLJIT_EQUAL, SLJIT_R0, 0, SLJIT_IMM, 0);
+				sljit_emit_op2(compiler, SLJIT_AND, SLJIT_R2, 0, SLJIT_R2, 0, SLJIT_MEM2(SLJIT_R0, SLJIT_R1), 3);
+				sljit_set_label(source_all_valid, sljit_emit_label(compiler));
+			}
+			sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_MEM2(SLJIT_R3, SLJIT_R1), 3, SLJIT_R2, 0);
+			sljit_emit_op2(compiler, SLJIT_ADD, SLJIT_R1, 0, SLJIT_R1, 0, SLJIT_IMM, 1);
+			sljit_set_label(sljit_emit_jump(compiler, SLJIT_JUMP), combine_loop);
+			sljit_set_label(combine_done, sljit_emit_label(compiler));
+
+			sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_S1, 0, SLJIT_IMM, 0);
+			auto hybrid_loop = sljit_emit_label(compiler);
+			hybrid_done = sljit_emit_cmp(compiler, SLJIT_GREATER_EQUAL, SLJIT_S1, 0, SLJIT_S2, 0);
+			sljit_get_local_base(compiler, SLJIT_R3, 0, combined_validity_offset);
+			sljit_emit_op2(compiler, SLJIT_LSHR, SLJIT_R0, 0, SLJIT_S1, 0, SLJIT_IMM, 6);
+			sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_R0, 0, SLJIT_MEM2(SLJIT_R3, SLJIT_R0), 3);
+			// the shift takes the row's bit within its word
+			sljit_emit_op2(compiler, SLJIT_MLSHR, SLJIT_R0, 0, SLJIT_R0, 0, SLJIT_S1, 0);
+			sljit_emit_op2u(compiler, SLJIT_AND | SLJIT_SET_Z, SLJIT_R0, 0, SLJIT_IMM, 1);
+			vector<sljit_jump *> source_null_jumps {sljit_emit_jump(compiler, SLJIT_ZERO)};
+			idx_t hybrid_spill_index = 0;
+			EmitSljitTypedExpressionTreeFastValueReg(compiler, predicate, hybrid_spill_index, overflows, hoists);
+			auto hybrid_predicate_false = sljit_emit_cmp(compiler, SLJIT_EQUAL, SLJIT_R2, 0, SLJIT_IMM, 0);
+			emit_payload_updates();
+			auto hybrid_row_done = sljit_emit_jump(compiler, SLJIT_JUMP);
+			SetSljitJumpLabels(source_null_jumps, sljit_emit_label(compiler));
+			emit_generic_row();
+			auto hybrid_next = sljit_emit_label(compiler);
+			sljit_set_label(hybrid_predicate_false, hybrid_next);
+			sljit_set_label(hybrid_row_done, hybrid_next);
+			EmitNextSljitNativeVectorLoop(compiler, hybrid_loop);
+			SetSljitJumpLabels(skip_hybrid, sljit_emit_label(compiler));
 		}
 
 		sljit_emit_op1(compiler, SLJIT_MOV_U8, SLJIT_R0, 0, SLJIT_MEM1(SLJIT_S0),
@@ -376,46 +498,7 @@ unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativeFilteredUngroupedFusedPrim
 
 	auto loop = sljit_emit_label(compiler);
 	auto done = sljit_emit_cmp(compiler, SLJIT_GREATER_EQUAL, SLJIT_S1, 0, SLJIT_S2, 0);
-	EmitLoadSljitExpressionTreeLogicalIndex(compiler);
-
-	vector<sljit_jump *> row_skip_jumps;
-	idx_t predicate_slot_index = 0;
-	auto predicate_slot = EmitSljitTypedExpressionTreeValue(compiler, predicate, predicate_slot_index, overflows);
-	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_R3, 0, SLJIT_MEM1(SLJIT_SP), predicate_slot.valid_offset);
-	row_skip_jumps.push_back(sljit_emit_cmp(compiler, SLJIT_EQUAL, SLJIT_R3, 0, SLJIT_IMM, 0));
-	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_R2, 0, SLJIT_MEM1(SLJIT_SP), predicate_slot.value_offset);
-	row_skip_jumps.push_back(sljit_emit_cmp(compiler, SLJIT_EQUAL, SLJIT_R2, 0, SLJIT_IMM, 0));
-
-	for (idx_t payload_idx = 0; payload_idx < payloads.size(); payload_idx++) {
-		auto kind = codegen_plan.payload_descriptors[payload_idx].primitive_kind;
-		if (kind == AggregatePrimitiveUpdateKind::COUNT_STAR) {
-			EmitSljitAggregateIncrementLocalCount(compiler, local_count_offsets[payload_idx]);
-			continue;
-		}
-		vector<sljit_jump *> payload_skip_jumps;
-		idx_t payload_slot_index = 0;
-		auto payload_slot = EmitSljitTypedExpressionTreeValue(compiler, *payloads[payload_idx].expression_tree,
-		                                                      payload_slot_index, overflows);
-		sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_R3, 0, SLJIT_MEM1(SLJIT_SP), payload_slot.valid_offset);
-		payload_skip_jumps.push_back(sljit_emit_cmp(compiler, SLJIT_EQUAL, SLJIT_R3, 0, SLJIT_IMM, 0));
-		sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_R2, 0, SLJIT_MEM1(SLJIT_SP), payload_slot.value_offset);
-		EmitUngroupedAggregateAccumulate(compiler, kind, local_sum_offsets[payload_idx],
-		                                 local_sum_upper_offsets[payload_idx], saw_value_offsets[payload_idx],
-		                                 SLJIT_R2);
-		EmitSljitAggregateIncrementLocalCount(compiler, local_count_offsets[payload_idx]);
-		auto payload_done = sljit_emit_jump(compiler, SLJIT_JUMP);
-		auto payload_skip_label = sljit_emit_label(compiler);
-		for (auto payload_skip : payload_skip_jumps) {
-			sljit_set_label(payload_skip, payload_skip_label);
-		}
-		sljit_set_label(payload_done, sljit_emit_label(compiler));
-	}
-	auto row_done = sljit_emit_jump(compiler, SLJIT_JUMP);
-	auto row_skip_label = sljit_emit_label(compiler);
-	for (auto row_skip : row_skip_jumps) {
-		sljit_set_label(row_skip, row_skip_label);
-	}
-	sljit_set_label(row_done, sljit_emit_label(compiler));
+	emit_generic_row();
 	EmitNextSljitNativeVectorLoop(compiler, loop);
 
 	auto helper_done = EmitSljitArithmeticOverflowStubs(compiler, overflows);
@@ -430,6 +513,9 @@ unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativeFilteredUngroupedFusedPrim
 	}
 	if (nullable_simd_done) {
 		sljit_set_label(nullable_simd_done, done_label);
+	}
+	if (hybrid_done) {
+		sljit_set_label(hybrid_done, done_label);
 	}
 	sljit_set_label(done, done_label);
 	for (idx_t payload_idx = 0; payload_idx < payloads.size(); payload_idx++) {

@@ -332,6 +332,15 @@ bool SljitTypedExpressionTreeFastPathSupported(const ExecutionExpressionIR &node
 	if (node.kind == ExecutionExpressionIRKind::CONSTANT && node.constant.IsNull()) {
 		return false;
 	}
+	{
+		// the fast emitters compare a string source with a constant in place; the string itself is no fast value
+		idx_t source_index;
+		string constant;
+		bool compare_equal;
+		if (TryReadSljitTypedExpressionTreeStringCompareConstant(node, source_index, constant, compare_equal)) {
+			return true;
+		}
+	}
 	if (node.left && !SljitTypedExpressionTreeFastPathSupported(*node.left)) {
 		return false;
 	}

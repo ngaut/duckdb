@@ -78,3 +78,40 @@ TEST_CASE("Constant slices keep a single physical validity entry", "[vector_buff
 		}
 	}
 }
+
+TEST_CASE("Validity checks look at exactly the first count rows", "[vector_buffer]") {
+	constexpr idx_t capacity = 3 * ValidityMask::BITS_PER_VALUE + 9;
+	// no row, one row, the edges of an entry, a row in a later entry, the last row
+	const duckdb::vector<duckdb::vector<idx_t>> flipped_rows {{}, {0}, {63}, {64}, {130}, {capacity - 1}, {5, 70, 140}};
+	for (auto &rows : flipped_rows) {
+		for (bool flip : {false, true}) {
+			ValidityMask mask(capacity);
+			mask.Initialize(capacity);
+			if (flip) {
+				mask.SetAllInvalid(capacity);
+			}
+			for (auto row : rows) {
+				if (flip) {
+					mask.SetValid(row);
+				} else {
+					mask.SetInvalid(row);
+				}
+			}
+			for (idx_t count = 0; count <= capacity; count++) {
+				bool all_valid = true;
+				bool all_invalid = true;
+				for (idx_t row = 0; row < count; row++) {
+					all_valid = all_valid && mask.RowIsValid(row);
+					all_invalid = all_invalid && !mask.RowIsValid(row);
+				}
+				CAPTURE(flip, count);
+				REQUIRE(mask.CheckAllValid(count) == all_valid);
+				REQUIRE(mask.CheckAllInvalid(count) == all_invalid);
+			}
+		}
+	}
+	ValidityMask unallocated(capacity);
+	REQUIRE(unallocated.CheckAllValid(capacity));
+	REQUIRE_FALSE(unallocated.CheckAllInvalid(capacity));
+	REQUIRE(unallocated.CheckAllInvalid(0));
+}

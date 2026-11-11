@@ -90,10 +90,26 @@ public:
 		return CannotHaveNull();
 	}
 	inline bool CheckAllValid(idx_t count) const {
-		return CountValid(count) == count;
+		return CheckAllRows(count, true);
 	}
 	inline bool CheckAllInvalid(idx_t count) const {
-		return CountValid(count) == 0;
+		return CheckAllRows(count, false);
+	}
+	//! Whether each of the first count rows has the given validity: one comparison per entry, stopping at the first
+	//! entry that differs (CountValid instead counts every set bit)
+	inline bool CheckAllRows(idx_t count, bool valid) const {
+		if (CannotHaveNull() || count == 0) {
+			return valid || count == 0;
+		}
+		for (idx_t entry_idx = 0; entry_idx * BITS_PER_VALUE < count; entry_idx++) {
+			const idx_t remaining = count - entry_idx * BITS_PER_VALUE;
+			const idx_t rows = remaining < BITS_PER_VALUE ? remaining : BITS_PER_VALUE;
+			const V mask = ValidityBuffer::MAX_ENTRY >> (BITS_PER_VALUE - rows);
+			if ((GetValidityEntryUnsafe(entry_idx) & mask) != (valid ? mask : V(0))) {
+				return false;
+			}
+		}
+		return true;
 	}
 
 	inline bool CheckAllValid(idx_t to, idx_t from) const {

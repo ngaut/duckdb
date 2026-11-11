@@ -1,0 +1,127 @@
+# name: test/sql/jit/test_jit_nullable_filter_rows.test
+# description: A compiled filter over columns with NULLs evaluates SQL's three-valued logic on every row
+# group: [jit]
+
+# A batch with NULLs runs a row whose sources are all valid on the fast path and only a row with a NULL on the generic
+# path; an AND-only predicate skips every row with a NULL in a source it or the sums read. The predicates mix AND, OR,
+# NOT and IS NULL, a sum may read a column the predicate does not, and NULLs are rare, dense or in every row.
+
+require jit_sljit
+
+statement ok
+SET jit_cbo_generated_stage_benefit=4096
+
+statement ok
+SET jit_cbo_materialization_elision_benefit=4096
+
+statement ok
+SET jit_cbo_native_operator_stage_benefit=4096
+
+statement ok
+SET jit_cbo_full_pipeline_benefit=4096
+
+statement ok
+SET jit_cbo_source_contract_scan_filter_penalty=0
+
+statement ok
+SET jit_cbo_startup_base_cost=0
+
+statement ok
+SET jit_cbo_startup_margin_basis_points=0
+
+statement ok
+CREATE TABLE nullable_rows AS
+SELECT (i % 13)::INTEGER AS k,
+       CASE WHEN i % 29 = 0 THEN NULL ELSE (i % 1000)::INTEGER END AS a,
+       CASE WHEN i % 7 = 0 THEN NULL ELSE (i % 500)::INTEGER END AS b,
+       CASE WHEN i % 10 <> 0 THEN NULL ELSE (i % 300)::INTEGER END AS dense,
+       NULL::INTEGER AS empty,
+       CASE WHEN i % 31 = 0 THEN NULL WHEN i % 3 = 0 THEN 'ACTIVE' ELSE 'ARCHIVED' END AS s
+FROM range(200000) t(i)
+
+foreach threads 1 4
+
+statement ok
+SET threads={threads}
+
+foreach policy off auto
+
+statement ok
+SET jit_policy='{policy}'
+
+query II nosort or_nullable
+SELECT count(*), sum(a) FROM nullable_rows WHERE k = 3 OR a = 7
+----
+
+query II nosort and_nullable
+SELECT count(*), sum(a) FROM nullable_rows WHERE k <> 3 AND a * 3 > 900
+----
+
+# the sum reads b, which the predicate does not: a row with a NULL b still counts
+query III nosort and_other_payload
+SELECT count(*), sum(b), sum(a) FROM nullable_rows WHERE k <> 3 AND a * 3 > 900
+----
+
+query II nosort not_nullable
+SELECT count(*), sum(b) FROM nullable_rows WHERE NOT (a = 7) OR k = 1
+----
+
+query II nosort is_null
+SELECT count(*), sum(k) FROM nullable_rows WHERE a IS NULL OR k = 2
+----
+
+query II nosort dense_nulls
+SELECT count(*), sum(dense) FROM nullable_rows WHERE dense > 100 OR k = 5
+----
+
+query II nosort all_null
+SELECT count(*), sum(empty) FROM nullable_rows WHERE empty = 1 OR k = 6
+----
+
+query II nosort string_nullable
+SELECT count(*), sum(a) FROM nullable_rows WHERE s = 'ACTIVE' OR a = 7
+----
+
+endloop
+
+endloop
+
+reset label or_nullable
+
+reset label and_nullable
+
+reset label and_other_payload
+
+reset label not_nullable
+
+reset label is_null
+
+reset label dense_nulls
+
+reset label all_null
+
+reset label string_nullable
+
+# the filters compile
+statement ok
+SET threads=1
+
+statement ok
+SET jit_trace_decisions=true
+
+statement ok
+SET jit_event_log_size=10000
+
+statement ok
+SELECT * FROM duckdb_jit_clear_events()
+
+statement ok
+SELECT count(*), sum(a) FROM nullable_rows WHERE k = 3 OR a = 7
+
+statement ok
+SELECT count(*), sum(b), sum(a) FROM nullable_rows WHERE k <> 3 AND a * 3 > 900
+
+query I
+SELECT count(*) FROM duckdb_jit_events() WHERE phase = 'compile' AND status = 'compiled'
+----
+2
