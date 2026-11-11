@@ -13,6 +13,7 @@ from __future__ import annotations
 import ctypes
 import ctypes.util
 import functools
+import math
 import statistics
 import sys
 from dataclasses import dataclass
@@ -103,12 +104,22 @@ class ProcessUsage:
 
 def work_cycles(runs: list[ProcessUsage]) -> int:
     """Performance-core cycles one run of the repeated work takes: the median instruction count of the runs at the
-    cycles per instruction the performance cores needed for the work across all of them."""
-    performance_core_instructions = sum(run.performance_core_instructions for run in runs)
+    cycles per instruction the performance cores needed for the work in the middle half of the runs, ranked by that
+    rate. A run the host stalls (its memory paged out, its caches flushed) retires the same instructions at a rate
+    several times slower; ranking leaves it out instead of letting it dominate the pooled rate."""
+
+    def cycles_per_instruction(run: ProcessUsage) -> float:
+        if run.performance_core_instructions == 0:
+            return math.inf
+        return run.performance_core_cycles / run.performance_core_instructions
+
+    ranked = sorted(runs, key=cycles_per_instruction)
+    middle = ranked[len(ranked) // 4 : math.ceil(len(ranked) * 3 / 4)]
+    performance_core_instructions = sum(run.performance_core_instructions for run in middle)
     if performance_core_instructions == 0:
         raise RuntimeError("the host ran none of the measured work on a performance core")
-    cycles_per_instruction = sum(run.performance_core_cycles for run in runs) / performance_core_instructions
-    return round(statistics.median(run.instructions for run in runs) * cycles_per_instruction)
+    rate = sum(run.performance_core_cycles for run in middle) / performance_core_instructions
+    return round(statistics.median(run.instructions for run in runs) * rate)
 
 
 @functools.cache

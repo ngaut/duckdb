@@ -118,12 +118,15 @@ kernel's per-process counters (`process_usage.py`, macOS):
 
 ```text
 cost = median over samples (instructions retired)
-       x performance-core cycles / performance-core instructions, summed over the samples
+       x performance-core cycles / performance-core instructions, summed over the
+         middle half of the samples ranked by that rate
 ```
 
 That is the cycles the query takes when every thread runs on a performance
 core. The instruction count does not depend on the host, and the cycles per
-instruction come only from the cores the scheduler does not slow down.
+instruction come only from the cores the scheduler does not slow down. A sample
+the host stalls retires the same instructions several times slower; ranking
+leaves it out of the rate instead of letting it dominate the sum.
 
 A workload passes when:
 

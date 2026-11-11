@@ -24,6 +24,13 @@ class WorkCyclesTest(unittest.TestCase):
         # 1600 cycles for 2000 performance-core instructions, and a median of 1200 instructions
         self.assertEqual(work_cycles(runs), 960)
 
+    def test_a_stalled_run_does_not_change_the_work(self) -> None:
+        steady = [ProcessUsage(0, 1000, 1000, 500 + delta) for delta in (-10, 0, 10, 20)]
+        # the host stalled one run: the same instructions took five times the cycles
+        stalled = ProcessUsage(0, 1000, 1000, 2500)
+        # the middle three runs take 0.50, 0.51 and 0.52 cycles per instruction
+        self.assertEqual(work_cycles(steady + [stalled]), 510)
+
     def test_time_spent_waiting_for_a_core_does_not_change_the_work(self) -> None:
         quiet = ProcessUsage(1_000, 1000, 1000, 400)
         busy = ProcessUsage(9_000_000, 1000, 1000, 400)
