@@ -14,8 +14,11 @@ process, so a crash that invalidates the database cannot poison the next query. 
 order-independent fingerprint (row count and the sum of row hashes); generated queries use exact types only and give
 every LIMIT a total order, so any difference is a JIT bug.
 
-    python3 benchmark/jit/jit_differential_fuzz.py --database tpch_sf1.duckdb --queries 300 --seed 1 --report r.json
-    python3 benchmark/jit/jit_differential_fuzz.py --database tpch_sf1.duckdb --replay r.json
+The campaign builds its database: TPC-H with the derived columns below, in which every column the generator references
+is NULL in one row of NULL_EVERY.
+
+    python3 benchmark/jit/jit_differential_fuzz.py --queries 300 --seed 1 --report r.json
+    python3 benchmark/jit/jit_differential_fuzz.py --replay r.json
 """
 
 from __future__ import annotations
@@ -26,11 +29,12 @@ import json
 import random
 import subprocess
 import sys
+import tempfile
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from benchmark_common import duckdb_shell_environment
+from duckdb_shell import create_database, duckdb_shell_environment
 
 ROOT = Path(__file__).resolve().parents[2]
 
@@ -163,6 +167,7 @@ DERIVED_COLUMNS: dict[str, dict[str, str]] = {
         "WHEN 3 THEN '-inf'::DOUBLE ELSE CAST(s_acctbal AS DOUBLE) END",
     },
 }
+NULL_EVERY = 16
 
 # foreign-key edges: (table, columns, referenced table, columns)
 EDGES = [
@@ -749,23 +754,18 @@ class QueryGenerator:
         )
 
 
-def database_columns(duckdb: Path, database: Path) -> set[tuple[str, str]]:
-    result = subprocess.run(
-        [str(duckdb), "-readonly", "-noheader", "-csv", str(database)],
-        input="SELECT table_name, column_name FROM duckdb_columns();\n",
-        text=True,
-        capture_output=True,
-        check=True,
-        env=duckdb_shell_environment(),
-    )
-    return {tuple(line.split(",", 1)) for line in result.stdout.splitlines() if line}
-
-
-def restrict_schema(columns: set[tuple[str, str]]) -> None:
-    """Columns the database lacks, such as the derived columns in a plain TPC-H database, are never generated"""
-    for table, table_columns in SCHEMA.items():
-        for name in [name for name in table_columns if (table, name) not in columns]:
-            del table_columns[name]
+def database_sql(scale_factor: float) -> str:
+    statements = [f"CALL dbgen(sf={scale_factor});"]
+    for table, columns in DERIVED_COLUMNS.items():
+        derived = ", ".join(f"{expression} AS {column}" for column, expression in columns.items())
+        statements.append(f"CREATE OR REPLACE TABLE {table} AS SELECT *, {derived} FROM {table};")
+    for table, columns in SCHEMA.items():
+        replacements = ", ".join(
+            f"CASE WHEN hash(rowid, '{column}') % {NULL_EVERY} = 0 THEN NULL ELSE {column} END AS {column}"
+            for column in columns
+        )
+        statements.append(f"CREATE OR REPLACE TABLE {table} AS SELECT * REPLACE ({replacements}) FROM {table};")
+    return "\n".join(statements)
 
 
 def fingerprint(sql: str, width: int) -> str:
@@ -866,7 +866,7 @@ def check(args: argparse.Namespace, index: int, sql: str, threads: int) -> dict:
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--duckdb", type=Path, default=ROOT / "build" / "reldebug" / "duckdb")
-    parser.add_argument("--database", type=Path, required=True, help="TPC-H database (CALL dbgen(sf=1))")
+    parser.add_argument("--scale-factor", type=float, default=0.1, help="TPC-H scale factor of the database")
     parser.add_argument("--queries", type=int, default=200)
     parser.add_argument("--seed", type=int, default=1)
     parser.add_argument("--threads", type=int, default=4)
@@ -880,11 +880,10 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument("--replay", type=Path, help="re-check an earlier report's queries at one and --threads threads")
     args = parser.parse_args(argv)
-    for name in ("queries", "threads", "workers", "timeout"):
+    for name in ("scale_factor", "queries", "threads", "workers", "timeout"):
         if getattr(args, name) <= 0:
             parser.error(f"--{name} must be positive")
 
-    restrict_schema(database_columns(args.duckdb, args.database))
     if args.replay:
         earlier = json.loads(args.replay.read_text(encoding="utf-8"))
         jobs = [
@@ -899,7 +898,12 @@ def main(argv: list[str] | None = None) -> int:
         parser.error("replay contains no queries")
     records = []
     summary = {"attempted": 0, "compared": 0, "inconclusive": 0, "findings": 0}
-    with concurrent.futures.ThreadPoolExecutor(max_workers=args.workers) as pool:
+    with (
+        tempfile.TemporaryDirectory(prefix="duckdb_jit_fuzz_") as directory,
+        concurrent.futures.ThreadPoolExecutor(max_workers=args.workers) as pool,
+    ):
+        args.database = Path(directory) / "tpch.duckdb"
+        create_database(args.duckdb, args.database, database_sql(args.scale_factor))
         futures = [pool.submit(check, args, index, sql, threads) for index, sql, threads in jobs]
         for future in concurrent.futures.as_completed(futures):
             record = future.result()

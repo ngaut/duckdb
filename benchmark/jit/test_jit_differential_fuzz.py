@@ -7,7 +7,6 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-import copy
 from unittest import mock
 
 import jit_differential_fuzz
@@ -50,20 +49,6 @@ class QueryGeneratorTest(unittest.TestCase):
         comparisons = [m for sql in queries for m in re.finditer(r"\b(t\d+)\.(\w+) (?:<|>|<=|>=|=|<>) \1\.(\w+)", sql)]
         self.assertTrue(comparisons)
         self.assertTrue(any(SCHEMA["lineitem"].get(m.group(2)) == "date" for m in comparisons))
-
-    def test_columns_the_database_lacks_are_never_generated(self) -> None:
-        schema = copy.deepcopy(SCHEMA)
-        present = {(table, name) for table, columns in schema.items() for name in columns}
-        present -= {(table, name) for table, columns in DERIVED_COLUMNS.items() for name in columns}
-        with mock.patch.object(jit_differential_fuzz, "SCHEMA", schema):
-            jit_differential_fuzz.restrict_schema(present)
-            self.assertEqual({(table, name) for table, columns in schema.items() for name in columns}, present)
-            generator = QueryGenerator(9)
-            queries = [generator.query() for _ in range(300)]
-        for sql in queries:
-            for columns in DERIVED_COLUMNS.values():
-                for name in columns:
-                    self.assertNotIn(name, sql)
 
     def test_edges_name_schema_columns(self) -> None:
         for left, left_columns, right, right_columns in EDGES:
@@ -125,6 +110,26 @@ class QueryGeneratorTest(unittest.TestCase):
         self.assertGreater(seen, 0)
 
 
+class DatabaseTest(unittest.TestCase):
+    def test_every_referenced_column_gets_nulls(self) -> None:
+        sql = jit_differential_fuzz.database_sql(0.1)
+        self.assertTrue(sql.startswith("CALL dbgen(sf=0.1);"))
+        for table, columns in SCHEMA.items():
+            self.assertIn(f"CREATE OR REPLACE TABLE {table} AS SELECT * REPLACE (", sql)
+            for column in columns:
+                self.assertIn(f"THEN NULL ELSE {column} END AS {column}", sql)
+
+    def test_derived_columns_exist_before_they_get_nulls(self) -> None:
+        sql = jit_differential_fuzz.database_sql(0.1)
+        for table, columns in DERIVED_COLUMNS.items():
+            derive = sql.index(f"CREATE OR REPLACE TABLE {table} AS SELECT *, ")
+            nulls = sql.index(f"CREATE OR REPLACE TABLE {table} AS SELECT * REPLACE (")
+            self.assertLess(derive, nulls)
+            for column, expression in columns.items():
+                self.assertIn(f"{expression} AS {column}", sql)
+                self.assertIn(column, SCHEMA[table])
+
+
 class ClassifyTest(unittest.TestCase):
     def test_verdicts(self) -> None:
         off = RunResult(0, "n,h\n1,2", 0.1)
@@ -149,14 +154,13 @@ class CampaignTest(unittest.TestCase):
     def run_campaign(self, runs, queries=1, replay=None):
         with tempfile.TemporaryDirectory() as directory:
             report = Path(directory) / "report.json"
-            argv = ["--database", "unused.duckdb", "--queries", str(queries), "--workers", "1", "--report", str(report)]
+            argv = ["--queries", str(queries), "--workers", "1", "--report", str(report)]
             if replay is not None:
                 earlier = Path(directory) / "replay.json"
                 earlier.write_text(json.dumps(replay))
                 argv += ["--replay", str(earlier), "--threads", "1"]
             with (
-                mock.patch.object(jit_differential_fuzz, "database_columns", return_value=set()),
-                mock.patch.object(jit_differential_fuzz, "restrict_schema"),
+                mock.patch.object(jit_differential_fuzz, "create_database"),
                 mock.patch.object(jit_differential_fuzz.QueryGenerator, "query", return_value="SELECT 1"),
                 mock.patch.object(jit_differential_fuzz, "run_query", side_effect=runs),
             ):

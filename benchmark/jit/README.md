@@ -1,10 +1,9 @@
 # DuckDB JIT Verification
 
-This directory contains architecture, correctness, and performance guardrails
-for execution-region JIT. The architecture contract and the remaining work are in
-`benchmark/jit/JIT_PRODUCTION_RECIPE_DESIGN.md`.
+This directory holds the checks an execution-region JIT change must pass. The
+architecture contract is `benchmark/jit/JIT_PRODUCTION_RECIPE_DESIGN.md`.
 
-## Fast verification
+## Build
 
 Configure the build once with the TPC-H extension linked into the binary; the
 guard, the gates and the `[jit]` tests load it:
@@ -16,188 +15,153 @@ GEN=ninja BUILD_TPCH=1 LINK_CORE_EXTENSIONS=1 CMAKE_BUILD_PARALLEL_LEVEL=12 make
 Later builds use the repository-required thread count:
 
 ```sh
-cmake --build build/reldebug --config RelWithDebInfo -j12
+cmake --build build/reldebug -j12
 ```
 
-Run static boundary checks and the same Python verification used by the
-refactor guard:
+## The guard
 
 ```sh
-python3 benchmark/jit/verify_jit_boundaries.py
-python3 scripts/generate_settings.py --check
-python3 scripts/generate_metrics.py --check
-python3 -m unittest discover -s benchmark/jit -p 'test_*.py'
-python3 -m unittest discover -s benchmark/tpch/jit -p 'test_*.py'
+python3 benchmark/jit/run_jit_refactor_guard.py unit
+python3 benchmark/jit/run_jit_refactor_guard.py full
 ```
 
-Run JIT correctness:
+The guard runs its checks in order and stops at the first that fails. It has
+no options: a level is the same checks for every change.
+
+`unit` runs:
+
+1. the build;
+2. the architecture boundaries (`verify_jit_boundaries.py`);
+3. the generated settings and metrics (`scripts/generate_*.py --check`);
+4. the harness's own tests (`test_*.py` in this directory);
+5. the JIT unit suite (`build/reldebug/test/unittest "[jit]"`);
+6. a fixed-seed differential fuzz campaign.
+
+`full` runs the same checks with a longer campaign, and then:
+
+7. the JIT, join, subquery, aggregate, CTE and TPC-H SQL suites with the JIT
+   forced on (`test/configs/jit_cbo_correctness.json`); the default unittest
+   runner does not load the JIT backend, so this is where compiled kernels
+   meet the general plan shapes;
+8. the performance gates: `generic` on one and on four threads, `tpch` on one.
+
+### Git hooks
 
 ```sh
-build/reldebug/test/unittest "[jit]"
+git config core.hooksPath benchmark/jit/git_hooks
 ```
 
-The slow TPC-H sqllogictests are outside the default suite; run them with the
-guard's opt-in step when a change touches scan or filter paths:
+The pre-commit hook runs the `unit` level. A `full` guard that passes records
+the git tree of the files it verified, as they are on disk, in the repository's
+git directory. The pre-push hook pushes `HEAD` when that record is the tree of
+`HEAD`, and otherwise runs the `full` level first. A change to any file that
+git does not ignore is a different tree, so a record never covers a later
+change.
 
-```sh
-python3 benchmark/jit/run_jit_refactor_guard.py --slow-suite
-```
+## Differential fuzz
 
-The guard's full level also runs the JIT, join, subquery, aggregate, CTE and
-TPC-H SQL suites with the JIT forced on (`test/configs/jit_cbo_correctness.json`);
-`--forced-jit-suite` runs them at any level.
+`jit_differential_fuzz.py` generates seeded random queries over the TPC-H
+schema and runs each with the JIT off, at the default cost model and with
+compilation forced, at one and at several threads. It compares the results,
+including the errors the native engine raises.
 
-`benchmark/jit/jit_differential_fuzz.py` compares random TPC-H queries under
-`jit_policy='off'` against the default and forced JIT, including the errors
-off raises. Reports contain a coverage summary and all failing or inconclusive
-queries; `--replay` re-checks those records. A pass requires every requested
-query to be compared under both JIT policies. An unusable native reference or
-JIT out-of-memory result is inconclusive, not a pass. Exit codes are 0 for a
-complete pass, 1 for findings, and 2 for incomplete coverage or invalid arguments.
-
-The guard runs a fixed-seed campaign at the unit level (120 queries, so every
-pre-commit) and the full level (300 queries). It builds and caches a TPC-H
-SF0.1 database in `benchmark/jit/local_baselines/databases/` in which every
+The campaign builds its own database: TPC-H at `--scale-factor` in which every
 column the generator references is NULL in one row of sixteen. TPC-H has no
 floating-point column, so the database adds FLOAT and DOUBLE columns derived
 from TPC-H ones that mix in both NaN signs, both infinities and both zeros,
-and likewise derives the types TPC-H never stores: TINYINT, UTINYINT,
-SMALLINT and USMALLINT at both ends of their ranges, UBIGINT above BIGINT,
-signed HUGEINT, DECIMAL(38,6), BOOLEAN and TIMESTAMP. Predicates over several
-columns also appear as values (select lists, group keys, aggregate
-arguments), where the input slots a compiled predicate reads differ from its
-columns. The guard rebuilds the database when the binary cannot read it or it
-lacks a derived column, and fails on findings or incomplete coverage. Against a database without the
-derived columns (a plain TPC-H database), the fuzzer leaves them out. `--fuzz-queries`
-changes the campaign size; `--skip-fuzz` skips it and, like the other skips,
-forfeits the pre-commit receipt. Longer campaigns over larger scale factors
-remain a manual step:
+and likewise derives the types TPC-H never stores: TINYINT, UTINYINT, SMALLINT
+and USMALLINT at both ends of their ranges, UBIGINT above BIGINT, signed
+HUGEINT, DECIMAL(38,6), BOOLEAN and TIMESTAMP. Predicates over several columns
+also appear as values (select lists, group keys, aggregate arguments), where
+the input slots a compiled predicate reads differ from its columns.
 
 ```sh
-python3 benchmark/jit/jit_differential_fuzz.py --database tpch_sf1.duckdb \
-  --queries 3000 --seed 7 --report fuzz.json
+python3 benchmark/jit/jit_differential_fuzz.py --queries 3000 --seed 7 --scale-factor 1 --report report.json
+python3 benchmark/jit/jit_differential_fuzz.py --replay report.json
 ```
 
-## Generic production workloads
+A report holds a coverage summary and every failing or inconclusive query;
+`--replay` re-checks those. A pass requires every requested query to be
+compared under both JIT policies: an unusable native reference or a JIT
+out-of-memory result is inconclusive, not a pass. The exit code is 0 for a
+complete pass, 1 for findings and 2 for incomplete coverage.
 
-The generic matrix covers expression, filter, nullable, persistent scan,
-grouped aggregate, DISTINCT, numeric join, string join, selected-view, and
-parallel workload classes. Workload definitions, thread-specific speedup
-floors, accepted raw-runtime baselines, and derived noise ceilings are the
-source of truth in `benchmark/jit/generic_benchmark.py`.
-
-Candidate runs use five alternating repetitions:
+## Performance gate
 
 ```sh
-python3 benchmark/jit/generic_benchmark.py \
-  --duckdb build/reldebug/duckdb --threads 1 --repeats 5
-python3 benchmark/jit/generic_benchmark.py \
-  --duckdb build/reldebug/duckdb --threads 4 --repeats 5
+python3 benchmark/jit/performance_gate.py generic --threads 1
+python3 benchmark/jit/performance_gate.py generic --threads 4
+python3 benchmark/jit/performance_gate.py tpch --threads 1
+python3 benchmark/jit/performance_gate.py tpch --threads 1 --workloads q06 q18 --out-dir gate_q06_q18
 ```
 
-Use ten repetitions only for deliberate promotion or explicit noise
-qualification:
+A suite is a list of workloads in `workloads.py`; a workload is one query and
+its checked-in thresholds per thread count. `generic` covers the plan shapes
+the JIT compiles, each on a fixture its `setup_sql` builds; `tpch` is the 22
+TPC-H queries at scale factor 10.
 
-```sh
-python3 benchmark/jit/generic_benchmark.py \
-  --duckdb build/reldebug/duckdb --threads 1 --repeats 10
-python3 benchmark/jit/generic_benchmark.py \
-  --duckdb build/reldebug/duckdb --threads 4 --repeats 10
+### What a run does
+
+Every sample is a fresh shell on a read-only fixture database. The shell first
+runs the query on the native engine, which loads the fixture into the buffer
+pool and produces the result the sample must reproduce. It then runs the query
+under the sampled policy; only that statement is measured. The policies
+alternate in which is sampled first. After the timed samples, one more JIT
+sample traces the runtime for the counter checks.
+
+### Cost
+
+Wall time measures the host as much as the query: other processes lower the
+clock of the performance cores, push the query's threads onto efficiency cores
+and make them wait for a core. The gate measures the work instead, from the
+kernel's per-process counters (`process_usage.py`, macOS):
+
+```text
+cost = median over samples (instructions retired)
+       x performance-core cycles / performance-core instructions, summed over the samples
 ```
 
-Production samples disable runtime tracing. A failed five-repeat candidate is
-reported as-is; the runner does not schedule an automatic larger retry. Each
-speedup sample is the `off/auto` ratio from the same alternating repeat, and
-the raw JIT-auto median is checked independently. The matrix shell reopens the
-checkpointed fixture database before every sample, so each sample starts from
-fresh database state in one process.
+That is the cycles the query takes when every thread runs on a performance
+core. The instruction count does not depend on the host, and the cycles per
+instruction come only from the cores the scheduler does not slow down.
 
-## TPC-H regression gate
+A workload passes when:
 
-The standalone gate builds, measures, verifies result artifacts, compares
-against accepted raw-runtime and speedup contracts, and runs a separate traced
-proof pass for every compiled or accelerated-runner-selected query. It uses the
-same single-process measurement lifecycle as the generic matrix.
+- every sample's result equals the native engine's;
+- the native samples record no JIT counters, and the JIT samples compile
+  without error and compile a region exactly when the workload says they do;
+- the traced sample executes a compiled region, takes the runtime paths the
+  workload requires, and satisfies the counter contract (`counter_contract.py`):
+  a runner the cost model selected either reports why it did not compile or
+  records, at runtime, every proof of the work the model credited to it;
+- `cost(off) / cost(auto)` is at least the workload's floor;
+- `cost(auto)` is at most the workload's ceiling.
 
-SF10 uses the default accepted state:
+Floors and ceilings are one-way ratchets: a verified improvement raises the
+floor and lowers the ceiling in the same change, and nothing loosens them.
 
-```sh
-python3 benchmark/tpch/jit/run_tpch_regression_gate.py \
-  --queries all --repeats 5
-```
+### Limits of the metric
 
-SF1 uses its own state:
+- Competing CPU load does not move the cost. Competing memory traffic does: a
+  process that saturates the memory bus or faults pages heavily raises the
+  cycles per instruction of both policies. The speedup absorbs most of it and
+  the ceilings allow for the rest; a ceiling that fails while the host is
+  swapping or copying memory is the host's failure, and the fix is to rerun.
+- Cost is the sum of the work of all threads. On several threads it does not
+  see a query that keeps fewer cores busy, so a change that serializes a
+  pipeline can hold its floor and still take longer. `summary.csv` reports the
+  median wall time of both policies for that reason; compare them on a quiet
+  host when a change touches scheduling or a parallel sink.
 
-```sh
-python3 benchmark/tpch/jit/run_tpch_regression_gate.py \
-  --queries all --scale-factor 1 --repeats 5 \
-  --baseline-state benchmark/tpch/jit/local_baselines/tpch_refactor_guard_sf1_state.json
-```
+### Artifacts
 
-Promotion requires a complete 22-query, ten-repeat production artifact:
+The gate writes to `--out-dir` (a new temporary directory by default):
 
-```sh
-python3 benchmark/tpch/jit/run_tpch_regression_gate.py \
-  --queries all --promote-baseline
-```
+- `runs.csv`: one row per sample with its wall time, runnable time,
+  instructions, performance-core instructions and cycles, correctness diff and
+  region counts;
+- `summary.csv`: one row per workload with both costs, the speedup, the
+  thresholds and the median wall times;
+- `counters.json`: the `duckdb_jit_counters()` rows of every sample.
 
-The default SF10 state is
-`benchmark/tpch/jit/local_baselines/tpch_refactor_guard_state.json`. Accepted
-state and artifacts are local and ignored by Git. State paths are relative, so
-moving the checkout does not invalidate them. Disposable candidates remain
-under `benchmark/tpch/jit/tmp/`.
-
-The gate keeps a validated immutable scale-factor-keyed template under the
-ignored `local_baselines/databases/` directory. An exclusive process lock
-protects template creation, stale locks recover automatically, and an invalid
-template is regenerated atomically. Each invocation benchmarks a private
-working clone, so correctness tables cannot mutate the template or serialize
-independent gates. macOS and Linux use filesystem copy-on-write when available;
-other filesystems fall back to a normal copy. Use `--no-database-cache` only
-when dbgen itself must be exercised.
-
-## Refactor guard
-
-The combined guard selects work from the changed paths and composes static,
-correctness, generic, and TPC-H checks:
-
-```sh
-python3 benchmark/jit/run_jit_refactor_guard.py
-```
-
-Install repository-local Git hooks with:
-
-```sh
-python3 benchmark/jit/install_refactor_guard_hooks.py
-```
-
-Pre-commit validates the staged tree and writes a receipt for its Git tree.
-Pre-push reuses a matching receipt and adds required production performance
-gates. A missing or stale receipt causes the complete guard to run. TPC-H runs
-before the generic matrix so its comparison is not preheated by an unrelated
-sustained workload.
-
-Successful production verification writes a second exact-tree receipt. A
-normal push reuses it without rerunning benchmarks. If starting `git push`
-itself activates macOS security scanning, prequalify while the host is quiet:
-
-```sh
-benchmark/jit/git_hooks/pre-push
-git push
-```
-
-The first command performs the same production guard and publishes the receipt;
-the second only verifies that the current Git tree still matches it.
-
-Measurement admission rejects a busy host before setup, rechecks at each
-measurement boundary, and invalidates any run where load appears mid-sample;
-macOS security scanners have an independent single-core ceiling. The
-architecture invariants behind the gate are in the "Performance contract"
-section of `JIT_PRODUCTION_RECIPE_DESIGN.md`; this README and the scripts are
-the source of truth for operational policy.
-
-The combined guard forwards baseline configuration unchanged. The TPC-H gate
-alone resolves and validates the accepted baseline contract.
-
-Benchmark scratch output is disposable. Accepted baselines are the only timing
-artifacts with durable regression meaning.
+The exit code is 1 when any workload fails.

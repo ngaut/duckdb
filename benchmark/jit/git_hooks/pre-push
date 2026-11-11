@@ -1,40 +1,17 @@
 #!/bin/sh
 set -eu
 
-ROOT="$(git rev-parse --show-toplevel)"
-cd "$ROOT"
+cd "$(git rev-parse --show-toplevel)"
+receipt="$(git rev-parse --git-path jit_guard_verified_tree)"
 
-RECEIPT="$ROOT/benchmark/jit/local_baselines/pre_commit_verified_tree"
-PERFORMANCE_RECEIPT="$ROOT/benchmark/jit/local_baselines/pre_push_verified_tree"
-CURRENT_TREE="$(git rev-parse 'HEAD^{tree}')"
-VERIFIED_TREE=""
-if [ -f "$RECEIPT" ]; then
-    VERIFIED_TREE="$(sed -n '1p' "$RECEIPT")"
-fi
+head_is_verified() {
+    [ -f "$receipt" ] && [ "$(cat "$receipt")" = "$(git rev-parse 'HEAD^{tree}')" ]
+}
 
-PERFORMANCE_VERIFIED_TREE=""
-if [ -f "$PERFORMANCE_RECEIPT" ]; then
-    PERFORMANCE_VERIFIED_TREE="$(sed -n '1p' "$PERFORMANCE_RECEIPT")"
+if ! head_is_verified; then
+    python3 benchmark/jit/run_jit_refactor_guard.py full
+    if ! head_is_verified; then
+        echo "error: the full guard verified the worktree, which is not the tree of HEAD" >&2
+        exit 1
+    fi
 fi
-if [ "$PERFORMANCE_VERIFIED_TREE" = "$CURRENT_TREE" ]; then
-    echo "pre-push reusing production performance verification for tree $CURRENT_TREE"
-    exit 0
-fi
-
-if [ "$VERIFIED_TREE" = "$CURRENT_TREE" ]; then
-    echo "pre-push reusing pre-commit verification for tree $CURRENT_TREE"
-    exec python3 benchmark/jit/run_jit_refactor_guard.py \
-        --level auto \
-        --change-set branch \
-        --no-build \
-        --skip-architecture \
-        --skip-python \
-        --skip-unit \
-        --performance-receipt "$PERFORMANCE_RECEIPT"
-fi
-
-echo "pre-push has no matching pre-commit receipt; running the complete guard"
-exec python3 benchmark/jit/run_jit_refactor_guard.py \
-    --level auto \
-    --change-set branch \
-    --performance-receipt "$PERFORMANCE_RECEIPT"
