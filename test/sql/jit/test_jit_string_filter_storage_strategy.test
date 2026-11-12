@@ -1,10 +1,12 @@
 # name: test/sql/jit/test_jit_string_filter_storage_strategy.test
-# description: A source whose filters are all low-cardinality string filters leaves them to compressed storage
+# description: A source with a low-cardinality string filter leaves its filters to compressed storage
 # group: [jit]
 
 # Compressed storage evaluates a string filter against the column's dictionary and fetches the other columns only for
-# the rows that pass, so a checkpointed table keeps the filter in the scan. An uncompressed in-memory table, a source
-# that also filters on a number, and a source whose dynamic join filter discards rows keep generated filters.
+# the rows that pass, so a checkpointed table keeps the filter in the scan, also beside a numeric filter a generated
+# filter would read row by row. An uncompressed in-memory table, a source whose generated filter masks rows with packed
+# numeric comparisons before the string filter, and a source whose dynamic join filter discards rows keep generated
+# filters.
 
 load {TEST_DIR}/jit_string_filter_storage.db
 
@@ -55,6 +57,12 @@ SELECT (i % 150000)::BIGINT AS order_id,
 FROM range(600000) t(i)
 
 statement ok
+CREATE TABLE parcels AS
+SELECT i::BIGINT AS order_id, (i % 365)::INTEGER AS day, (i % 1000)::INTEGER AS weight,
+       CASE i % 3 WHEN 0 THEN 'MAIL' WHEN 1 THEN 'SHIP' ELSE 'RAIL' END AS ship_mode
+FROM range(600000) t(i)
+
+statement ok
 CHECKPOINT
 
 statement ok
@@ -76,7 +84,7 @@ SELECT count(*) > 0 FROM duckdb_jit_events() WHERE reason LIKE '%source_strategy
 ----
 true
 
-# a numeric filter on the same source leaves generated code something to fuse the string filter with
+# a numeric comparison beside the string filter still leaves the rows to storage
 statement ok
 SELECT * FROM duckdb_jit_clear_events()
 
@@ -92,11 +100,32 @@ MAIL	72000	108000
 SHIP	72000	108000
 
 query I
+SELECT count(*) > 0 FROM duckdb_jit_events() WHERE reason LIKE '%source_strategy_reason=storage-sensitive-filter%'
+----
+true
+
+# numeric comparisons that lead the filter run as a packed mask, which leaves the string filter only the rows it keeps
+statement ok
+SELECT * FROM duckdb_jit_clear_events()
+
+query I
+SELECT sum(order_id * 31 + weight) FROM parcels
+WHERE day >= 90 AND day < 270 AND weight >= 200 AND ship_mode IN ('MAIL', 'SHIP')
+----
+1468045508280
+
+query I
 SELECT count(*) FROM duckdb_jit_events() WHERE reason LIKE '%source_strategy_reason=storage-sensitive-filter%'
 ----
 0
 
-# Source selection uses an estimated reuse cost, not a dictionary-size capability.
+query I
+SELECT count(*) FROM duckdb_jit_events() WHERE phase = 'compile' AND status = 'compiled'
+----
+1
+
+# Source selection uses an estimated reuse cost, not a dictionary-size capability: the 25 brands are few enough to
+# reuse once a source has more than 50000 rows, whatever the category domain.
 # The optional numeric IN filter is evaluated by its MARK join, not the generated string filter.
 foreach rows 50000 200000 2000000
 
@@ -137,7 +166,7 @@ endloop
 reset label dictionary_domain
 
 query I
-SELECT (count(*) > 0) = ({domain} = 150 AND {rows} = 2000000) FROM duckdb_jit_events()
+SELECT (count(*) > 0) = ({rows} > 50000) FROM duckdb_jit_events()
 WHERE reason LIKE '%source_strategy_reason=storage-sensitive-filter%'
 ----
 true

@@ -8,6 +8,9 @@
 
 #include "sljit_region_plan_internal.hpp"
 
+#include "sljit_native_predicate_simd_plan.hpp"
+#include "sljit_register_layout.hpp"
+
 namespace duckdb {
 
 static SljitSourceContractPlan
@@ -179,37 +182,53 @@ static bool SljitExpressionHasStringSearch(const ExecutionExpressionIR &expressi
 	return false;
 }
 
-//! Source-local cost heuristic, not a dictionary-encoding capability or a whole-pipeline admission rule.
-static bool SljitPreferStorageFilters(const ExecutionRegionNode &node,
-                                      const ExecutionRegionTableScanContract &contract) {
+//! Whether the generated filter (the first generated op; a projection repair may follow it) masks rows with packed
+//! SIMD before it reads anything row by row
+static bool SljitGeneratedFilterHasPackedPrefix(const vector<SljitNativeRegionOpPlan> &generated_filter_ops) {
+	if (generated_filter_ops.empty() || !GetSljitNativeVectorRegisterLayout().HasOptionalInvariant()) {
+		return false;
+	}
+	auto &filter = generated_filter_ops[0].Filter();
+	return filter.kind == SljitNativeRegionExpressionKind::PREDICATE && filter.predicate && filter.expression_tree &&
+	       TryPlanSljitNativePredicatePartialSimd(*filter.expression_tree, filter.predicate->source_not_null).supported;
+}
+
+//! Source-local cost heuristic, not a dictionary-encoding capability or a whole-pipeline admission rule. Compressed
+//! storage evaluates a filter on a low-cardinality string column once per dictionary entry and scans the other
+//! filtered columns only for the rows it keeps. A generated filter reads that column row by row through the
+//! dictionary selection, which only pays when a packed SIMD prefix discards rows first. So storage keeps the
+//! filters when one of them searches such a column, or when one reads such a column, the storage compresses, the
+//! filters keep at least half the rows (a generated filter only sees the dynamic filters' survivors), and the
+//! generated filter has no packed prefix.
+static bool SljitPreferStorageFilters(const ExecutionRegionNode &node, const ExecutionRegionTableScanContract &contract,
+                                      const vector<SljitNativeRegionOpPlan> &generated_filter_ops) {
 	if (contract.estimated_source_cardinality < STANDARD_VECTOR_SIZE) {
 		return false;
 	}
-	bool all_low_cardinality_string_filters =
+	const bool row_by_row_string_filter =
 	    contract.compressed_storage &&
-	    node.source->estimated_source_cardinality * 2 >= contract.estimated_source_cardinality;
+	    node.source->estimated_source_cardinality * 2 >= contract.estimated_source_cardinality &&
+	    !SljitGeneratedFilterHasPackedPrefix(generated_filter_ops);
 	const auto distinct_count_limit = contract.estimated_source_cardinality / STANDARD_VECTOR_SIZE;
-	bool evaluated_filters = false;
 	for (auto &filter : node.source->filters) {
 		if (SljitSourceFilterIsConstantTrue(filter)) {
 			continue;
 		}
-		evaluated_filters = true;
 		const bool low_cardinality_string_column =
 		    filter.scan_column_index < contract.source_contract_input_types.size() &&
 		    filter.scan_column_index < contract.source_contract_input_distinct_counts.size() &&
 		    contract.source_contract_input_types[filter.scan_column_index].InternalType() == PhysicalType::VARCHAR &&
 		    contract.source_contract_input_distinct_counts[filter.scan_column_index] > 0 &&
 		    contract.source_contract_input_distinct_counts[filter.scan_column_index] <= distinct_count_limit;
-		all_low_cardinality_string_filters = all_low_cardinality_string_filters && low_cardinality_string_column;
-		if (!low_cardinality_string_column || !filter.expression || !filter.expression->root) {
+		if (!low_cardinality_string_column) {
 			continue;
 		}
-		if (SljitExpressionHasStringSearch(*filter.expression->root)) {
+		if (row_by_row_string_filter || (filter.expression && filter.expression->root &&
+		                                 SljitExpressionHasStringSearch(*filter.expression->root))) {
 			return true;
 		}
 	}
-	return evaluated_filters && all_low_cardinality_string_filters;
+	return false;
 }
 
 static SljitRegionNodePlan SljitSourceBoundaryRequiresContract(const ExecutionRegionNode &node,
@@ -262,7 +281,7 @@ static SljitRegionNodePlan PlanSljitSourceContractNode(const ExecutionRegionNode
 	}
 	if (table_scan_contract.dynamic_filters && table_scan_contract.filter_pushdown) {
 		if (generated_filters_ready) {
-			if (SljitPreferStorageFilters(node, table_scan_contract)) {
+			if (SljitPreferStorageFilters(node, table_scan_contract, generated_filter_ops)) {
 				string reason = "vectorized static and dynamic " + string(SljitSourceKindName(node)) +
 				                " filters;source-strategy=duckdb-scan-filtered-source-contract";
 				AppendSljitSourceFilterFacts(reason, node, table_scan_contract, false);
@@ -297,7 +316,7 @@ static SljitRegionNodePlan PlanSljitSourceContractNode(const ExecutionRegionNode
 		return SljitStorageFilteredSourceNode(std::move(reason), node, render_diagnostics);
 	}
 	if (generated_filters_ready && table_scan_contract.filter_pushdown &&
-	    SljitPreferStorageFilters(node, table_scan_contract)) {
+	    SljitPreferStorageFilters(node, table_scan_contract, generated_filter_ops)) {
 		string reason = "vectorized " + string(SljitSourceKindName(node)) +
 		                " filters;source-strategy=duckdb-scan-filtered-source-contract";
 		AppendSljitSourceFilterFacts(reason, node, table_scan_contract, false);
