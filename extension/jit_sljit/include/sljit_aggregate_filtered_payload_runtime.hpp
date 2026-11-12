@@ -13,28 +13,37 @@
 
 namespace duckdb {
 
-//! The matches of a string comparison for each entry of the dictionary its source is in this batch, when that
-//! dictionary is no larger than the batch and is the data the kernel indexes; nullptr otherwise
-static const uint8_t *SljitStringCompareDictionaryMatches(DataChunk &input, idx_t column_index,
-                                                          const_data_ptr_t source_data, const string &constant,
-                                                          idx_t count, vector<uint8_t> &matches) {
-	auto &source = input.data[column_index];
+//! Whether a batch compares a string source once per entry of its dictionary: the source is a dictionary vector whose
+//! dictionary is flat and no larger than the batch
+static bool SljitStringCompareHasDictionary(const Vector &source, idx_t count) {
 	if (source.GetVectorType() != VectorType::DICTIONARY_VECTOR) {
-		return nullptr;
+		return false;
 	}
 	auto dictionary_size = DictionaryVector::DictionarySize(source);
-	auto &dictionary = DictionaryVector::Child(source);
-	if (!dictionary_size.IsValid() || dictionary_size.GetIndex() > count ||
-	    dictionary.GetVectorType() != VectorType::FLAT_VECTOR ||
-	    const_data_ptr_cast(FlatVector::GetData<string_t>(dictionary)) != source_data) {
+	return dictionary_size.IsValid() && dictionary_size.GetIndex() <= count &&
+	       DictionaryVector::Child(source).GetVectorType() == VectorType::FLAT_VECTOR;
+}
+
+//! A string comparison's result for each entry of its source's dictionary in this batch, FALSE for a NULL entry, when
+//! the batch compares that source per entry and its dictionary is the data the kernel indexes; nullptr otherwise
+static const uint8_t *SljitStringCompareDictionaryMatches(const Vector &source, const_data_ptr_t source_data,
+                                                          const SljitStringCompareMatches &compare, idx_t count,
+                                                          vector<uint8_t> &matches) {
+	if (!SljitStringCompareHasDictionary(source, count)) {
 		return nullptr;
 	}
+	auto &dictionary = DictionaryVector::Child(source);
 	auto entries = FlatVector::GetData<string_t>(dictionary);
-	const string_t constant_value(constant);
-	matches.resize(dictionary_size.GetIndex());
+	if (const_data_ptr_cast(entries) != source_data) {
+		return nullptr;
+	}
+	auto &validity = FlatVector::Validity(dictionary);
+	const string_t constant(compare.constant);
+	matches.resize(DictionaryVector::DictionarySize(source).GetIndex());
 	for (idx_t entry_idx = 0; entry_idx < matches.size(); entry_idx++) {
-		// a NULL entry's match is never read: a row with a NULL takes the kernel's generic path
-		matches[entry_idx] = string_t::StringComparisonOperators::Equals(entries[entry_idx], constant_value);
+		matches[entry_idx] =
+		    validity.RowIsValid(entry_idx) &&
+		    string_t::StringComparisonOperators::Equals(entries[entry_idx], constant) == compare.compare_equal;
 	}
 	return matches.data();
 }
@@ -78,10 +87,23 @@ SljitExecuteFilteredPrimitiveAggregateUpdate(SljitExecutableFilteredAggregateUpd
 		                                   "SLJIT filtered aggregate primitive lane is incomplete: %s");
 	}
 
+	// A source the filter reads only through string comparisons that a batch computes per dictionary entry needs no
+	// look at its rows' validity: its NULL entries compare FALSE, which decides the filter as NULL would. It is
+	// prepared as valid, so its NULLs leave the batch on the fast path, and its validity is restored for the rows other
+	// sources' NULLs send to the generic path.
+	auto &source_indices = filtered_update.input_source_indices;
+	auto &compared_valid = adapter_scratch.string_compared_valid_sources;
+	compared_valid = filtered_update.input_source_not_null;
+	compared_valid.resize(source_indices.size(), false);
+	for (idx_t source_idx = 0; source_idx < filtered_update.string_compare_only_sources.size(); source_idx++) {
+		compared_valid[source_idx] = compared_valid[source_idx] ||
+		                             (filtered_update.string_compare_only_sources[source_idx] &&
+		                              SljitStringCompareHasDictionary(input.data[source_indices[source_idx]], count));
+	}
 	auto &payload_sources = adapter_scratch.payload_sources;
-	SljitPrepareFusedAggregatePayloadSources(
-	    input, filtered_update.input_source_indices, nullptr, count, payload_sources,
-	    "SLJIT filtered aggregate expression-tree source is out of range", &filtered_update.input_source_not_null);
+	SljitPrepareFusedAggregatePayloadSources(input, source_indices, nullptr, count, payload_sources,
+	                                         "SLJIT filtered aggregate expression-tree source is out of range",
+	                                         &compared_valid);
 
 	SljitNativeVectorInput native_input;
 	SljitBindFusedAggregatePayloadSources(native_input, payload_sources, nullptr);
@@ -92,9 +114,19 @@ SljitExecuteFilteredPrimitiveAggregateUpdate(SljitExecutableFilteredAggregateUpd
 		matches.resize(filtered_update.string_compares.size());
 		for (idx_t compare_idx = 0; compare_idx < matches.size(); compare_idx++) {
 			auto &compare = filtered_update.string_compares[compare_idx];
+			auto &source = input.data[source_indices[compare.source]];
 			matches[compare_idx] = SljitStringCompareDictionaryMatches(
-			    input, filtered_update.input_source_indices[compare.source],
-			    payload_sources.DataArray()[compare.source], compare.constant, count, storage[compare_idx]);
+			    source, payload_sources.DataArray()[compare.source], compare, count, storage[compare_idx]);
+			if (compare.source >= filtered_update.string_compare_only_sources.size() ||
+			    !filtered_update.string_compare_only_sources[compare.source] ||
+			    !SljitStringCompareHasDictionary(source, count)) {
+				continue;
+			}
+			if (!matches[compare_idx]) {
+				throw InternalException("SLJIT filtered aggregate compared a dictionary source without its results");
+			}
+			auto &validity = FlatVector::Validity(DictionaryVector::Child(source));
+			payload_sources.SetValidity(compare.source, validity.CannotHaveNull() ? nullptr : validity.GetData());
 		}
 		native_input.string_matches = matches.data();
 	}

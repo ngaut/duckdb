@@ -41,6 +41,7 @@ public:
 	bool PrepareConstantSource(DataChunk &input, idx_t input_index, idx_t source_idx, const_data_ptr_t source_data,
 	                           idx_t count, const char *out_of_range_error, bool source_known_not_null = false);
 	void SetData(idx_t source_idx, const_data_ptr_t source_data);
+	void SetValidity(idx_t source_idx, const validity_t *source_validity);
 	void FinishSource(idx_t source_idx, const SelectionVector *execute_sel, idx_t count,
 	                  bool source_known_not_null = false);
 	void PrepareTypedExpressionSource(DataChunk &input, idx_t input_index, idx_t source_idx,

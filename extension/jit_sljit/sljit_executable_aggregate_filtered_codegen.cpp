@@ -249,10 +249,15 @@ bool SljitTryBuildFilteredAggregateUpdate(SljitExecutableRegionOp &filter_op, Sl
 		}
 		for (auto &compare : CollectSljitTypedExpressionTreeStringCompares(expressions)) {
 			SljitStringCompareMatches matches;
-			bool compare_equal;
 			TryReadSljitTypedExpressionTreeStringCompareConstant(compare.get(), matches.source, matches.constant,
-			                                                     compare_equal);
+			                                                     matches.compare_equal);
 			filtered_update.string_compares.push_back(std::move(matches));
+		}
+		filtered_update.string_compare_only_sources.assign(combined_sources.size(), false);
+		vector<reference<const ExecutionExpressionIR>> payload_expressions(expressions.begin() + 1, expressions.end());
+		for (auto source_index : CollectSljitTypedExpressionTreeStringCompareOnlySources(
+		         *filtered_update.filter.plan.expression_tree, payload_expressions)) {
+			filtered_update.string_compare_only_sources[source_index] = true;
 		}
 	}
 	SljitNativeAggregateUpdateFunction function = nullptr;

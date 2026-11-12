@@ -13,6 +13,7 @@
 #include "duckdb/common/helper.hpp"
 #include "duckdb/common/types/hugeint.hpp"
 
+#include <algorithm>
 #include <array>
 
 namespace duckdb {
@@ -198,6 +199,44 @@ CollectSljitTypedExpressionTreeStringCompares(const vector<reference<const Execu
 	vector<reference<const ExecutionExpressionIR>> result;
 	for (auto &expression : expressions) {
 		CollectSljitTypedExpressionTreeStringCompares(expression.get(), result);
+	}
+	return result;
+}
+
+//! Splits the sources a node reads into those it reads at a string comparison reached only through AND and OR, and the
+//! rest
+static void CollectSljitTypedExpressionTreeStringCompareReads(const ExecutionExpressionIR &node,
+                                                              vector<idx_t> &compared, vector<idx_t> &other) {
+	idx_t source_index;
+	string constant;
+	bool compare_equal;
+	if (TryReadSljitTypedExpressionTreeStringCompareConstant(node, source_index, constant, compare_equal)) {
+		compared.push_back(source_index);
+		return;
+	}
+	if (node.kind != ExecutionExpressionIRKind::CONJUNCTION) {
+		CollectSljitTypedExpressionTreeReferences(node, other);
+		return;
+	}
+	for (auto &child : node.children) {
+		CollectSljitTypedExpressionTreeStringCompareReads(*child, compared, other);
+	}
+}
+
+vector<idx_t> CollectSljitTypedExpressionTreeStringCompareOnlySources(
+    const ExecutionExpressionIR &predicate, const vector<reference<const ExecutionExpressionIR>> &payloads) {
+	vector<idx_t> compared;
+	vector<idx_t> other;
+	CollectSljitTypedExpressionTreeStringCompareReads(predicate, compared, other);
+	for (auto &payload : payloads) {
+		CollectSljitTypedExpressionTreeReferences(payload.get(), other);
+	}
+	vector<idx_t> result;
+	for (auto source_index : compared) {
+		if (std::find(other.begin(), other.end(), source_index) == other.end() &&
+		    std::find(result.begin(), result.end(), source_index) == result.end()) {
+			result.push_back(source_index);
+		}
 	}
 	return result;
 }

@@ -287,6 +287,11 @@ void SljitSourceVectorScratch::SetData(idx_t source_idx, const_data_ptr_t source
 	data[source_idx] = source_data;
 }
 
+void SljitSourceVectorScratch::SetValidity(idx_t source_idx, const validity_t *source_validity) {
+	CheckSourceIndex(source_idx);
+	validity[source_idx] = source_validity;
+}
+
 void SljitSourceVectorScratch::FinishSource(idx_t source_idx, const SelectionVector *execute_sel, idx_t count,
                                             bool source_known_not_null) {
 	CheckSourceIndex(source_idx);

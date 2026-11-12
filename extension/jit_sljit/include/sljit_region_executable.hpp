@@ -178,10 +178,11 @@ enum class SljitAggregatePayloadSourceLayout : uint8_t { DIRECT_PER_LANE, FUSED_
 
 enum class SljitFilteredAggregateKernelKind : uint8_t { NONE, UNGROUPED_PAYLOAD, PERFECT_HASH_GROUPED };
 
-//! A comparison of a string source with a constant, whose matches a batch computes once per dictionary entry
+//! A comparison of a string source with a constant, whose result a batch computes once per dictionary entry
 struct SljitStringCompareMatches {
 	idx_t source = DConstants::INVALID_INDEX;
 	string constant;
+	bool compare_equal = true;
 };
 
 struct SljitExecutableFilteredAggregateUpdate {
@@ -191,6 +192,9 @@ struct SljitExecutableFilteredAggregateUpdate {
 	vector<bool> input_source_not_null;
 	//! numbered as the compiled kernel numbers SljitNativeVectorInput::string_matches
 	vector<SljitStringCompareMatches> string_compares;
+	//! the input sources the filter reads only through string_compares that a NULL row decides as FALSE would, and no
+	//! payload reads: a batch with their dictionary results reads no other row of them on its fast path
+	vector<bool> string_compare_only_sources;
 	SljitCompiledFunction<SljitNativeAggregateUpdateFunction> compiled;
 	SljitFilteredAggregateKernelKind kind = SljitFilteredAggregateKernelKind::NONE;
 	SljitAggregatePayloadSourceLayout payload_source_layout = SljitAggregatePayloadSourceLayout::DIRECT_PER_LANE;

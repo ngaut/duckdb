@@ -100,9 +100,11 @@ struct SljitAggregatePayloadAdapterScratch {
 	vector<bool *> aggregate_state_is_sets;
 	vector<idx_t *> aggregate_row_counts;
 	vector<int64_t> constants;
-	//! per string comparison of a filtered kernel, its dictionary's matches and the pointer the kernel reads
+	//! per string comparison of a filtered kernel, its dictionary's results and the pointer the kernel reads
 	vector<vector<uint8_t>> string_match_storage;
 	vector<const uint8_t *> string_matches;
+	//! per input source of a filtered kernel, whether the batch prepares it as valid
+	vector<bool> string_compared_valid_sources;
 };
 
 struct SljitProjectionAdapterScratch {

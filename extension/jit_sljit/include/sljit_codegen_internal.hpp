@@ -58,8 +58,8 @@ struct SljitTypedExpressionTreeLoopHoist {
 	//! the source whose data pointer this holds; INVALID_INDEX for a constant or a string comparison's matches
 	idx_t source_index = DConstants::INVALID_INDEX;
 	int64_t constant = 0;
-	//! a string comparison with a constant whose per-dictionary-entry matches this holds (the batch's
-	//! SljitNativeVectorInput::string_matches[string_compare_index]), or nullptr
+	//! a string comparison with a constant whose result for each dictionary entry this holds (the batch's
+	//! SljitNativeVectorInput::string_matches[string_compare_index]: FALSE for a NULL entry), or nullptr
 	const ExecutionExpressionIR *string_compare = nullptr;
 	idx_t string_compare_index = 0;
 	//! a source whose selection this holds for the batch: its own, the common one, or the identity
@@ -79,6 +79,11 @@ void AppendSljitTypedExpressionTreeConstantHoists(const vector<reference<const E
 //! The comparisons of a string source with a constant in these expressions, in the order their matches are numbered
 vector<reference<const ExecutionExpressionIR>>
 CollectSljitTypedExpressionTreeStringCompares(const vector<reference<const ExecutionExpressionIR>> &expressions);
+//! The sources a predicate reads only through comparisons with a constant whose ancestors are all AND or OR, and no
+//! payload reads: at such a comparison, a NULL row decides the predicate as FALSE would
+vector<idx_t>
+CollectSljitTypedExpressionTreeStringCompareOnlySources(const ExecutionExpressionIR &predicate,
+                                                        const vector<reference<const ExecutionExpressionIR>> &payloads);
 //! Gives each string comparison with a constant a stack slot past local_size for the matches of its dictionary
 void AppendSljitTypedExpressionTreeStringCompareHoists(
     const vector<reference<const ExecutionExpressionIR>> &expressions,

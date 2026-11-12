@@ -3,9 +3,10 @@
 # group: [jit]
 
 # A batch that brings a string column as a dictionary vector compares each dictionary entry with the constant once and
-# reads a row's match through its selection; each source's selection is resolved once per batch. The columns mix a
-# dictionary string with and without NULLs and a flat number with NULLs; the comparisons are = and <>, alone and under
-# AND and OR.
+# reads a row's result through its selection; each source's selection is resolved once per batch. A NULL entry
+# compares FALSE: a column the filter reads only through such comparisons under AND and OR keeps its NULL rows on the
+# fast path, while NOT and IS NULL read its validity. The columns mix a dictionary string with and without NULLs and a
+# flat number with NULLs; the comparisons are = and <>, alone and under AND, OR and NOT.
 
 require jit_sljit
 
@@ -78,6 +79,34 @@ query II nosort two_strings
 SELECT count(*), sum(amount) FROM statuses WHERE status = 'PENDING' OR nullable_status = 'ACTIVE'
 ----
 
+# a NULL row is not unequal to the constant
+query II nosort nullable_not_equal_or_number
+SELECT count(*), sum(amount) FROM statuses WHERE nullable_status <> 'ARCHIVED with a long tail' OR amount = 7
+----
+
+query II nosort nullable_not_equal_or_nullable_number
+SELECT count(*), sum(nullable_amount) FROM statuses
+WHERE nullable_status <> 'ACTIVE' OR nullable_amount = 7
+----
+
+# NOT turns a NULL comparison into NULL, not into TRUE, and COALESCE replaces it
+query II nosort not_nullable_equal_or_number
+SELECT count(*), sum(amount) FROM statuses WHERE NOT (nullable_status = 'ACTIVE' AND amount > 500) OR amount = 7
+----
+
+query II nosort coalesce_nullable_equal_or_number
+SELECT count(*), sum(amount) FROM statuses WHERE coalesce(nullable_status = 'ACTIVE', true) OR amount = 7
+----
+
+query II nosort case_nullable_equal
+SELECT count(*), sum(amount) FROM statuses
+WHERE CASE WHEN nullable_status <> 'PENDING' THEN amount ELSE 1 END > 900
+----
+
+query II nosort nullable_is_null_or_equal
+SELECT count(*), sum(amount) FROM statuses WHERE nullable_status IS NULL OR nullable_status = 'PENDING' OR amount = 3
+----
+
 endloop
 
 endloop
@@ -91,6 +120,18 @@ reset label nullable_equal_or_nullable_number
 reset label nullable_not_equal_and_number
 
 reset label two_strings
+
+reset label nullable_not_equal_or_number
+
+reset label nullable_not_equal_or_nullable_number
+
+reset label not_nullable_equal_or_number
+
+reset label coalesce_nullable_equal_or_number
+
+reset label case_nullable_equal
+
+reset label nullable_is_null_or_equal
 
 # the filters compile
 statement ok
@@ -111,7 +152,16 @@ SELECT count(*), sum(amount) FROM statuses WHERE status = 'ACTIVE' OR amount = 7
 statement ok
 SELECT count(*), sum(nullable_amount) FROM statuses WHERE nullable_status = 'PENDING' OR nullable_amount = 7
 
+statement ok
+SELECT count(*), sum(amount) FROM statuses WHERE nullable_status <> 'ARCHIVED with a long tail' OR amount = 7
+
+statement ok
+SELECT count(*), sum(amount) FROM statuses WHERE NOT (nullable_status = 'ACTIVE' AND amount > 500) OR amount = 7
+
+statement ok
+SELECT count(*), sum(amount) FROM statuses WHERE coalesce(nullable_status = 'ACTIVE', true) OR amount = 7
+
 query I
 SELECT count(*) FROM duckdb_jit_events() WHERE phase = 'compile' AND status = 'compiled'
 ----
-2
+5
