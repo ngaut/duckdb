@@ -16,12 +16,20 @@
 
 #include "duckdb/common/exception.hpp"
 #include "duckdb/common/types/hugeint.hpp"
+#include "duckdb/common/vector/dictionary_vector.hpp"
 #include "duckdb/common/vector/flat_vector.hpp"
 #include "duckdb/common/vector/string_vector.hpp"
+#include "duckdb/common/vector_operations/vector_operations.hpp"
 #include "duckdb/common/vector/unified_vector_format.hpp"
 #include "duckdb/function/scalar/string_common.hpp"
 
 namespace duckdb {
+
+template <class ADAPTER_SCRATCH>
+static bool SljitTryExecuteProjectionExpressionOverDictionary(SljitExecutableRegionExpression &expr, DataChunk &input,
+                                                              Vector &result, const SelectionVector *execute_sel,
+                                                              idx_t count, ADAPTER_SCRATCH &adapter_scratch,
+                                                              optional_ptr<ExecutionRegionRuntime> runtime);
 
 template <class ADAPTER_SCRATCH>
 static void SljitExecuteProjectionExpression(SljitExecutableRegionExpression &expr, DataChunk &input, Vector &result,
@@ -42,6 +50,10 @@ static void SljitExecuteProjectionExpression(SljitExecutableRegionExpression &ex
 		result.Reference(plan.constant_value, count_t(count));
 		result.Flatten();
 		FlatVector::SetSize(result, count_t(count));
+		return;
+	}
+	if (SljitTryExecuteProjectionExpressionOverDictionary(expr, input, result, execute_sel, count, adapter_scratch,
+	                                                      runtime)) {
 		return;
 	}
 	if (plan.kind == SljitNativeRegionExpressionKind::PREDICATE) {
@@ -331,6 +343,82 @@ static void SljitExecuteProjectionExpression(SljitExecutableRegionExpression &ex
 		RecordSljitRegionGeneratedWork(*runtime, SljitNativeRegionOpKind::PROJECTION, count);
 	}
 	FlatVector::SetSize(result, count_t(count));
+}
+
+//! The input column an executable expression reads when it reads exactly one
+static bool SljitTryFindSingleExecutableExpressionSource(const SljitExecutableRegionExpression &expr,
+                                                         idx_t &source_index) {
+	if (expr.input_source_indices.empty()) {
+		return SljitTryFindSingleProjectionPlanSource(expr.plan, source_index);
+	}
+	source_index = expr.input_source_indices[0];
+	for (auto input_index : expr.input_source_indices) {
+		if (input_index != source_index) {
+			return false;
+		}
+	}
+	return true;
+}
+
+//! Like DuckDB's dictionary function execution: an expression that cannot throw and reads one storage-dictionary
+//! column runs once per dictionary entry, and its result stays a dictionary over the input's selection, which the
+//! consumers (dictionary group lookups, dictionary filters) keep exploiting.
+template <class ADAPTER_SCRATCH>
+static bool SljitTryExecuteProjectionExpressionOverDictionary(SljitExecutableRegionExpression &expr, DataChunk &input,
+                                                              Vector &result, const SelectionVector *execute_sel,
+                                                              idx_t count, ADAPTER_SCRATCH &adapter_scratch,
+                                                              optional_ptr<ExecutionRegionRuntime> runtime) {
+	static constexpr idx_t MAX_DICTIONARY_SIZE = 20000;
+	idx_t source_index;
+	if (!expr.plan.cannot_throw || result.GetType().InternalType() == PhysicalType::STRUCT ||
+	    !SljitTryFindSingleExecutableExpressionSource(expr, source_index) || source_index >= input.ColumnCount()) {
+		return false;
+	}
+	auto &source = input.data[source_index];
+	if (source.GetVectorType() != VectorType::DICTIONARY_VECTOR) {
+		return false;
+	}
+	const auto dictionary_size = DictionaryVector::DictionarySize(source);
+	const auto &dictionary_id = DictionaryVector::DictionaryId(source);
+	if (!dictionary_size.IsValid() || dictionary_id.empty() || dictionary_size.GetIndex() >= MAX_DICTIONARY_SIZE) {
+		return false;
+	}
+	const auto entry_count = dictionary_size.GetIndex();
+	if (!adapter_scratch.dictionary_result || adapter_scratch.dictionary_result_source_id != dictionary_id) {
+		// a dictionary larger than a vector pays off only for full batches, which selective filters do not deliver
+		if (entry_count > STANDARD_VECTOR_SIZE && count * 2 <= STANDARD_VECTOR_SIZE) {
+			return false;
+		}
+		auto dictionary = DictionaryVector::CreateReusableDictionary(result.GetType(), entry_count);
+		DataChunk entries;
+		entries.InitializeEmpty(input.GetTypes());
+		for (idx_t offset = 0; offset < entry_count; offset += STANDARD_VECTOR_SIZE) {
+			const auto entry_batch = MinValue<idx_t>(entry_count - offset, STANDARD_VECTOR_SIZE);
+			Vector entry_source(DictionaryVector::Child(source), offset, offset + entry_batch);
+			entries.data[source_index].Reference(entry_source);
+			entries.SetChildCardinality(entry_batch);
+			Vector entry_result(result.GetType());
+			SljitExecuteProjectionExpression(expr, entries, entry_result, nullptr, entry_batch, adapter_scratch,
+			                                 runtime);
+			VectorOperations::Copy(entry_result, dictionary->data, entry_batch, 0, offset);
+		}
+		adapter_scratch.dictionary_result = std::move(dictionary);
+		adapter_scratch.dictionary_result_source_id = dictionary_id;
+	}
+	if (runtime) {
+		RecordSljitRegionRuntimePath(*runtime, SljitNativeRegionOpKind::PROJECTION, "dictionary_expression", count);
+	}
+	auto &source_selection = DictionaryVector::SelVector(source);
+	if (!execute_sel) {
+		result.Dictionary(adapter_scratch.dictionary_result, source_selection, count);
+		return true;
+	}
+	SelectionVector selection(count);
+	for (idx_t row_idx = 0; row_idx < count; row_idx++) {
+		selection.set_index(row_idx, source_selection.get_index(execute_sel->get_index(row_idx)));
+	}
+	result.Dictionary(adapter_scratch.dictionary_result, selection, count);
+	return true;
 }
 
 } // namespace duckdb

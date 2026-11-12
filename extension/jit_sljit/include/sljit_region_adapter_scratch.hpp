@@ -168,6 +168,9 @@ struct SljitExpressionAdapterScratch {
 	SljitNativePredicateSourceAdapter predicate_sources;
 	SljitSourceVectorScratch sources;
 	bool source_can_have_null = false;
+	//! The expression's results over the entries of the storage dictionary named by dictionary_result_source_id
+	buffer_ptr<DictionaryEntry> dictionary_result;
+	string dictionary_result_source_id;
 };
 
 } // namespace duckdb

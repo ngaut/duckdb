@@ -231,6 +231,24 @@ bool TryReadNativeRegionExpression(const ExecutionExpressionIR &root, bool requi
 	return TryBuildSljitNativeTypedExpressionTreePlan(root, expr);
 }
 
+static bool SljitExpressionIRCannotThrow(const ExecutionExpressionIR &node) {
+	if (node.exception_behavior != ExecutionExpressionExceptionKind::NONE &&
+	    node.exception_behavior != ExecutionExpressionExceptionKind::NULL_ON_CAST_ERROR) {
+		return false;
+	}
+	for (auto child : {node.left.get(), node.right.get(), node.else_node.get()}) {
+		if (child && !SljitExpressionIRCannotThrow(*child)) {
+			return false;
+		}
+	}
+	for (auto &child : node.children) {
+		if (!SljitExpressionIRCannotThrow(*child)) {
+			return false;
+		}
+	}
+	return true;
+}
+
 bool TryLowerNativeRegionExpression(const ExecutionExpressionFragment &fragment, bool require_boolean,
                                     SljitNativeRegionExpressionPlan &expr, string &error, bool render_diagnostics) {
 	if (!fragment.root) {
@@ -261,6 +279,7 @@ bool TryLowerNativeRegionExpression(const ExecutionExpressionFragment &fragment,
 			expr.expression_tree_source_indices = std::move(expression_tree.expression_tree_source_indices);
 		}
 	}
+	expr.cannot_throw = SljitExpressionIRCannotThrow(*fragment.root);
 	if (render_diagnostics) {
 		expr.ir = fragment.ir;
 	}

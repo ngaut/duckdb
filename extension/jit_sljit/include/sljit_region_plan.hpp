@@ -131,6 +131,8 @@ struct SljitNativeRegionExpressionPlan {
 	vector<idx_t> expression_tree_source_indices;
 	bool references_region_input = true;
 	bool emit_flat_nullable_fast_path = true;
+	//! No input value makes the expression raise an error, so it may run over values no row selects
+	bool cannot_throw = false;
 	string ir;
 
 	SljitNativeRegionExpressionPlan Copy(bool copy_auxiliary_expression_tree = true, bool copy_ir = true) const;

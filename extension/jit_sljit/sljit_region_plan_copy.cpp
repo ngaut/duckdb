@@ -115,6 +115,7 @@ SljitNativeRegionExpressionPlan SljitNativeRegionExpressionPlan::Copy(bool copy_
 	}
 	result.references_region_input = references_region_input;
 	result.emit_flat_nullable_fast_path = emit_flat_nullable_fast_path;
+	result.cannot_throw = cannot_throw;
 	if (copy_ir) {
 		result.ir = ir;
 	}
