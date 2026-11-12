@@ -26,6 +26,7 @@ public:
 	SinkResultType ExecuteChunk(DataChunk &input) override;
 	void FlushChunks() override;
 	void FinishChunks() override;
+	optional_ptr<DataChunk> ContinuesNatively(DataChunk &input) override;
 
 private:
 	SinkResultType FlushBuffered();

@@ -180,6 +180,9 @@ private:
 	unique_ptr<ExecutionRegionChunkStep> compiled_step;
 	//! Whether the chunk step sank the rows it held once the source was exhausted
 	bool compiled_step_finished = false;
+	//! The chunk the operator chain runs once the chunk step handed the pipeline to it: the step still fetches the
+	//! source, and the operators, their flushes and the sink are DuckDB's own
+	optional_ptr<DataChunk> compiled_step_native_input;
 
 	//! This flag is set when the pipeline gets interrupted by NextBatch -> NextBatch should be called again and the
 	//! source_chunk should be sent through the pipeline

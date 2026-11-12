@@ -516,4 +516,17 @@ static void RequireNoUnsupportedReason(ExecutionRegionManager &manager, const st
 	}
 }
 
+//! The compiled region handed its pipeline to DuckDB's operators and updated no aggregate state itself
+static void RequireNativeContinuation(ExecutionRegionManager &manager) {
+	RequireJitEvent(
+	    manager,
+	    [](const ExecutionRegionEvent &event) {
+		    return EventPhase(event) == "runtime" &&
+		           StringUtil::Contains(EventJitRuntimePathCounts(event), "source.native_continuation=");
+	    },
+	    [](const ExecutionRegionEvent &event) {
+		    REQUIRE_FALSE(StringUtil::Contains(EventJitRuntimePathCounts(event), "aggregate_update."));
+	    });
+}
+
 } // namespace

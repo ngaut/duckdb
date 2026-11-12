@@ -44,6 +44,11 @@ public:
 	      direct_aggregate_consumer_dispatch(terminal_state_p.direct_aggregate_consumer_dispatch) {
 	}
 
+	//! Chunk step: whether the terminal leaves the pipeline to DuckDB's operators, decided on the first source chunk
+	bool HandsOverToNative(DataChunk &source_chunk) {
+		return terminal_runtime.HandsOverToNative(ops, TerminalStep(), source_chunk);
+	}
+
 	//! Chunk step: binds the terminal once, before the executor hands over the first chunk
 	void PrepareChunks() {
 		if (!terminal_runtime.Prepare(runtime, ops, scratch, TerminalStep())) {

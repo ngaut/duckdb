@@ -226,7 +226,7 @@ TEST_CASE("JIT cached aggregates use current cardinality and match native result
 		INFO("variant=" << variant);
 		auto table = "aggregate_inputs_" + to_string(variant);
 		REQUIRE_NO_FAIL(test.con.Query("CREATE TABLE " + table +
-		                               " AS SELECT ((i % 5000) * 17)::BIGINT AS k, (i % 7)::BIGINT AS v "
+		                               " AS SELECT (((i // 8) % 5000) * 17)::BIGINT AS k, (i % 7)::BIGINT AS v "
 		                               "FROM range(" +
 		                               to_string(100000 * (variant + 1)) + ") t(i)"));
 		REQUIRE_NO_FAIL(test.con.Query("VACUUM " + table));

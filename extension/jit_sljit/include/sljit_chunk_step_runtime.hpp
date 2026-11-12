@@ -11,6 +11,7 @@
 #include "duckdb/execution/execution_region_kernel.hpp"
 
 #include "sljit_hash_join_probe_drain_runtime.hpp"
+#include "sljit_native_continuation_runtime.hpp"
 #include "sljit_native_pipeline_runtime.hpp"
 #include "sljit_source_pipeline_runtime.hpp"
 
@@ -41,12 +42,29 @@ public:
 	    const SljitFullPipelineRecipe &recipe, const vector<idx_t> &source_distinct_counts,
 	    const vector<Value> &source_min_values, const vector<Value> &source_max_values,
 	    vector<SljitSharedPerfectHashPredicateClassificationCache> &shared_predicate_classifications,
-	    SljitRegionExecutionScratch &scratch, SljitFullPipelineTerminalRuntimeState &terminal_state)
+	    SljitRegionExecutionScratch &scratch, SljitFullPipelineTerminalRuntimeState &terminal_state,
+	    optional_ptr<vector<SljitExecutableRegionOp>> native_continuation_source_ops)
 	    : kernel(kernel_p), runtime(runtime_p), native_tail(kernel_p, runtime_p, ops),
 	      hash_join_probe(SljitMakeRecordedHashJoinProbeCallback(kernel_p, runtime_p, runtime_p.ExecutionOperators())),
 	      executor(runtime_p, result, ops, recipe, native_tail, hash_join_probe, source_distinct_counts,
 	               source_min_values, source_max_values, shared_predicate_classifications, scratch, terminal_state) {
 		executor.PrepareChunks();
+		if (native_continuation_source_ops) {
+			native_continuation = make_uniq<SljitNativeContinuation>(*native_continuation_source_ops);
+		}
+	}
+
+	optional_ptr<DataChunk> ContinuesNatively(DataChunk &input) override {
+		if (!native_continuation_decided) {
+			native_continuation_decided = true;
+			if (native_continuation && !executor.HandsOverToNative(input)) {
+				native_continuation.reset();
+			}
+		}
+		if (!native_continuation) {
+			return nullptr;
+		}
+		return &native_continuation->Prepare(runtime, input);
 	}
 
 	SinkResultType ExecuteChunk(DataChunk &input) override {
@@ -69,6 +87,8 @@ private:
 	NativeTailExecutor native_tail;
 	HashJoinProbeExecutor hash_join_probe;
 	SljitFullPipelinePrimitiveSequenceBatchExecutor<NativeTailExecutor, HashJoinProbeExecutor> executor;
+	unique_ptr<SljitNativeContinuation> native_continuation;
+	bool native_continuation_decided = false;
 };
 
 //! Native-contract operators consume the core runner's source batches.
@@ -76,8 +96,20 @@ template <class KERNEL>
 class SljitNativeOnlyChunkStep final : public ExecutionRegionChunkStep {
 public:
 	SljitNativeOnlyChunkStep(KERNEL &kernel_p, ExecutionRegionRuntime &runtime_p, vector<SljitExecutableRegionOp> &ops,
-	                         SljitRegionExecutionScratch &scratch_p)
+	                         SljitRegionExecutionScratch &scratch_p,
+	                         optional_ptr<vector<SljitExecutableRegionOp>> native_continuation_source_ops)
 	    : kernel(kernel_p), runtime(runtime_p), scratch(scratch_p), native(kernel_p, runtime_p, ops) {
+		// without a recipe no generated step updates a hash aggregate: DuckDB's operators run the whole pipeline
+		if (native_continuation_source_ops) {
+			native_continuation = make_uniq<SljitNativeContinuation>(*native_continuation_source_ops);
+		}
+	}
+
+	optional_ptr<DataChunk> ContinuesNatively(DataChunk &input) override {
+		if (!native_continuation) {
+			return nullptr;
+		}
+		return &native_continuation->Prepare(runtime, input);
 	}
 
 	SinkResultType ExecuteChunk(DataChunk &input) override {
@@ -120,6 +152,7 @@ private:
 	SljitRegionExecutionScratch &scratch;
 	ExecutionRegionResult result = ExecutionRegionResult::NOT_FINISHED;
 	SljitNativePipelineExecutor<KERNEL, SljitNativePipelineTerminalPolicy> native;
+	unique_ptr<SljitNativeContinuation> native_continuation;
 };
 
 } // namespace duckdb

@@ -110,6 +110,11 @@ ExecutionCoalescingChunkStep::ExecutionCoalescingChunkStep(Allocator &allocator_
 	}
 }
 
+optional_ptr<DataChunk> ExecutionCoalescingChunkStep::ContinuesNatively(DataChunk &input) {
+	// the consumer decides on the first chunk, before anything is buffered
+	return consumer->ContinuesNatively(input);
+}
+
 SinkResultType ExecutionCoalescingChunkStep::FlushBuffered() {
 	if (!finished && buffered.size()) {
 		finished = consumer->ExecuteChunk(buffered) == SinkResultType::FINISHED;

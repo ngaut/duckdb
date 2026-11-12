@@ -172,15 +172,19 @@ bool SljitNativeRegionKernel::EntryReady(ExecutionRegionRuntime &runtime, string
 unique_ptr<ExecutionRegionChunkStep> SljitNativeRegionKernel::CreateChunkStep(ExecutionRegionRuntime &runtime) {
 	auto &local_state = runtime.LocalState().Cast<SljitNativeRegionLocalState>();
 	auto &recipe_plan = artifact->full_pipeline_recipe_plan;
+	auto native_continuation_source_ops =
+	    artifact->native_continuation_ready
+	        ? optional_ptr<vector<SljitExecutableRegionOp>>(&artifact->native_continuation_source_ops)
+	        : nullptr;
 	if (!recipe_plan.HasRecipe()) {
 		runtime.RecordJitRuntimePath(recipe_plan.NativeOnlyRuntimePath().c_str());
-		return make_uniq<SljitNativeOnlyChunkStep<SljitNativeRegionKernel>>(*this, runtime, artifact->ops,
-		                                                                    local_state.scratch);
+		return make_uniq<SljitNativeOnlyChunkStep<SljitNativeRegionKernel>>(
+		    *this, runtime, artifact->ops, local_state.scratch, native_continuation_source_ops);
 	}
 	return make_uniq<SljitPrimitiveRecipeChunkStep<SljitNativeRegionKernel>>(
 	    *this, runtime, artifact->ops, recipe_plan.Recipe(), bindings.source_distinct_counts,
 	    bindings.source_min_values, bindings.source_max_values, shared_predicate_classifications, local_state.scratch,
-	    local_state.terminal);
+	    local_state.terminal, native_continuation_source_ops);
 }
 
 void SljitNativeRegionKernel::RecordExecutedFilterRows(ExecutionRegionRuntime &runtime) const {

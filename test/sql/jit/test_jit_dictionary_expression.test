@@ -2,10 +2,10 @@
 # description: A compiled expression of one storage-dictionary column runs once per dictionary entry
 # group: [jit]
 
-# The compressed group key of a short string column is a compiled projection. Over a storage dictionary it runs once
-# per entry and stays a dictionary over the rows' selection: with and without a filter selection, with NULL entries,
-# for dictionaries larger than a vector, across row groups whose dictionaries differ, and against an in-memory copy
-# whose columns are flat.
+# A compiled projection of one string column runs once per entry of a storage dictionary and stays a dictionary over
+# the rows' selection: with and without a filter selection, with NULL entries, for dictionaries larger than a vector,
+# across row groups whose dictionaries differ, and against an in-memory copy whose columns are flat. The grouped
+# queries over the same columns hand their pipeline to DuckDB's operators and must agree with them.
 
 load {TEST_DIR}/jit_dictionary_expression.db
 
@@ -106,6 +106,44 @@ SELECT count(*), sum(c), sum(h), min(v), max(v) FROM (SELECT v, count(*) AS c, s
 ----
 1500	90000	13500045000	v0	v998
 
+statement ok
+CREATE OR REPLACE TEMP TABLE ps AS SELECT substring(s, 1, 2) AS p, id FROM r WHERE k < 700
+
+query III
+SELECT p, count(*), sum(id) FROM ps GROUP BY p ORDER BY p NULLS FIRST
+----
+NULL	23334	3499944111
+AI	23334	3500145090
+FO	23333	3499978790
+MA	23334	3500178099
+RA	23333	3499911790
+RE	46666	7000089222
+SH	23334	3500112099
+TR	23332	3499745799
+
+statement ok
+CREATE OR REPLACE TEMP TABLE pv AS SELECT substring(v, 1, 3) AS p, id FROM r WHERE k < 900
+
+query IIIII
+SELECT count(*), count(DISTINCT p), sum(id), min(p), max(p) FROM pv
+----
+270000	100	40499835000	v0	v99
+
+statement ok
+CREATE OR REPLACE TEMP TABLE pa AS SELECT substring(s, 1, 3) AS p FROM r
+
+query II
+SELECT p, count(*) FROM pa GROUP BY p ORDER BY p NULLS FIRST
+----
+NULL	33334
+AIR	33333
+FOB	33333
+MAI	33334
+RAI	33333
+REG	66666
+SHI	33334
+TRU	33333
+
 query III
 SELECT s, count(*), sum(id) FROM r_flat WHERE k < 700 GROUP BY s ORDER BY s NULLS FIRST
 ----
@@ -152,6 +190,44 @@ SELECT count(*), sum(c), sum(h), min(v), max(v) FROM (SELECT v, count(*) AS c, s
 ----
 1500	90000	13500045000	v0	v998
 
+statement ok
+CREATE OR REPLACE TEMP TABLE ps AS SELECT substring(s, 1, 2) AS p, id FROM r_flat WHERE k < 700
+
+query III
+SELECT p, count(*), sum(id) FROM ps GROUP BY p ORDER BY p NULLS FIRST
+----
+NULL	23334	3499944111
+AI	23334	3500145090
+FO	23333	3499978790
+MA	23334	3500178099
+RA	23333	3499911790
+RE	46666	7000089222
+SH	23334	3500112099
+TR	23332	3499745799
+
+statement ok
+CREATE OR REPLACE TEMP TABLE pv AS SELECT substring(v, 1, 3) AS p, id FROM r_flat WHERE k < 900
+
+query IIIII
+SELECT count(*), count(DISTINCT p), sum(id), min(p), max(p) FROM pv
+----
+270000	100	40499835000	v0	v99
+
+statement ok
+CREATE OR REPLACE TEMP TABLE pa AS SELECT substring(s, 1, 3) AS p FROM r_flat
+
+query II
+SELECT p, count(*) FROM pa GROUP BY p ORDER BY p NULLS FIRST
+----
+NULL	33334
+AIR	33333
+FOB	33333
+MAI	33334
+RAI	33333
+REG	66666
+SHI	33334
+TRU	33333
+
 endloop
 
 endloop
@@ -168,17 +244,8 @@ SET jit_trace_runtime=true
 statement ok
 SELECT * FROM duckdb_jit_clear_events()
 
-query III
-SELECT s, count(*), sum(id) FROM r WHERE k < 700 GROUP BY s ORDER BY s NULLS FIRST
-----
-NULL	23334	3499944111
-AIR	23334	3500145090
-FOB	23333	3499978790
-MAIL	23334	3500178099
-RAIL	23333	3499911790
-REG AIR	46666	7000089222
-SHIP	23334	3500112099
-TRUCK	23332	3499745799
+statement ok
+CREATE OR REPLACE TEMP TABLE ps AS SELECT substring(s, 1, 2) AS p, id FROM r WHERE k < 700
 
 query I
 SELECT count(*) > 0 FROM duckdb_jit_events()
@@ -189,10 +256,8 @@ true
 statement ok
 SELECT * FROM duckdb_jit_clear_events()
 
-query IIIII
-SELECT count(*), sum(c), sum(h), min(v), max(v) FROM (SELECT v, count(*) AS c, sum(id) AS h FROM r WHERE k < 900 GROUP BY v)
-----
-4500	270000	40499835000	v0	v999
+statement ok
+CREATE OR REPLACE TEMP TABLE pv AS SELECT substring(v, 1, 3) AS p, id FROM r WHERE k < 900
 
 query I
 SELECT count(*) > 0 FROM duckdb_jit_events()

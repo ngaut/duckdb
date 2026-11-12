@@ -2711,7 +2711,8 @@ TEST_CASE("JIT mark match filter emits LHS selected boundary", "[api][jit]") {
 	    });
 }
 
-TEST_CASE("JIT mark match count-star preaggregates compressed string groups", "[api][jit]") {
+TEST_CASE("JIT mark match count-star over compressed string groups hands its pipeline to DuckDB's operators",
+          "[api][jit]") {
 	DuckDB db;
 	Connection con(db);
 	auto &manager = ExecutionRegionManager::Get(*con.context);
@@ -2754,28 +2755,11 @@ TEST_CASE("JIT mark match count-star preaggregates compressed string groups", "[
 	REQUIRE_NO_FAIL(*result);
 	RequireSameResultValues(*result, *reference);
 
-	RequireJitEvent(
-	    manager,
-	    [](const ExecutionRegionEvent &event) {
-		    const auto stages = EventGeneratedStageCountBreakdown(event);
-		    return EventPhase(event) == "runtime" && EventStatus(event) == "executed" &&
-		           EventExecutionMode(event) == "native" && StringUtil::Contains(stages, "mark_match") &&
-		           HasJitFilterRuntimePath(event) && HasJitAggregateUpdatePath(event);
-	    },
-	    [](const ExecutionRegionEvent &event) {
-		    RequireGeneratedAggregateUpdateRuntimeOwnership(event);
-		    REQUIRE(StringUtil::Contains(EventGeneratedStageCountBreakdown(event),
-		                                 "primitive_projected_preaggregate_count_star_groups"));
-		    REQUIRE(StringUtil::Contains(EventJitRuntimePathCounts(event),
-		                                 "aggregate_update.primitive_projected_preaggregated_count_star_update"));
-		    REQUIRE(StringUtil::Contains(EventJitRuntimePathCounts(event),
-		                                 "aggregate_update.primitive_pending_preaggregated_count_star_flush"));
-		    REQUIRE(EventJitRuntimeDelegationCounts(event).empty());
-	    });
-	RequireAllSljitMaterializationElisionRuntimeProof(manager);
+	RequireNativeContinuation(manager);
 }
 
-TEST_CASE("JIT mark filter aggregate uses grouped primitive selected view", "[api][jit]") {
+TEST_CASE("JIT mark filter aggregate over string groups without runs hands its pipeline to DuckDB's operators",
+          "[api][jit]") {
 	DuckDB db;
 	Connection con(db);
 	auto &manager = ExecutionRegionManager::Get(*con.context);
@@ -2810,21 +2794,7 @@ TEST_CASE("JIT mark filter aggregate uses grouped primitive selected view", "[ap
 	REQUIRE_NO_FAIL(*result);
 	RequireSameResultValues(*result, *reference);
 
-	RequireJitEvent(
-	    manager,
-	    [](const ExecutionRegionEvent &event) {
-		    const auto stages = EventGeneratedStageCountBreakdown(event);
-		    return EventPhase(event) == "runtime" && EventStatus(event) == "executed" &&
-		           EventExecutionMode(event) == "native" && StringUtil::Contains(stages, "mark_nonmatch") &&
-		           HasJitFilterRuntimePath(event) && HasJitAggregateUpdatePath(event);
-	    },
-	    [](const ExecutionRegionEvent &event) {
-		    RequireGeneratedAggregateUpdateRuntimeOwnership(event);
-		    REQUIRE(StringUtil::Contains(EventGeneratedStageCountBreakdown(event), "mark_nonmatch"));
-		    REQUIRE(HasJitFilterRuntimePath(event));
-		    REQUIRE(EventJitRuntimeDelegationCounts(event).empty());
-	    });
-	RequireAllSljitMaterializationElisionRuntimeProof(manager);
+	RequireNativeContinuation(manager);
 }
 
 TEST_CASE("JIT mark filter projection preserves selected nonmatches", "[api][jit]") {

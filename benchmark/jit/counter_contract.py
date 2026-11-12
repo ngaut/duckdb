@@ -92,7 +92,9 @@ def has_undeclared_delegation(row: dict) -> bool:
 
 def proof_failure(proof: str, runtime_rows: list[dict]) -> str:
     """Why the runtime rows of a kernel do not prove the work, or nothing when they do. A kernel that received no
-    work owes no proof of it."""
+    work, or handed its pipeline to DuckDB's operators before its own saw a row, owes no proof of it."""
+    if all(has_proof(row, "native_continuation") for row in runtime_rows):
+        return ""
     proved = any(has_proof(row, proof) for row in runtime_rows)
     idle = all(has_proof(row, "no_work") for row in runtime_rows)
     if proof in STAGE_WORK_PROOFS:

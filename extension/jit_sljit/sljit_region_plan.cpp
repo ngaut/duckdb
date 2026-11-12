@@ -386,6 +386,26 @@ private:
 	bool can_fuse = true;
 };
 
+//! A source node lowers to filters and a layout repair only
+static SljitNativeRegionOpPlan CopySljitSourceOpPlan(const SljitNativeRegionOpPlan &op) {
+	SljitNativeRegionOpPlan result(op.Kind());
+	result.operator_index = op.operator_index;
+	result.input_types = op.input_types;
+	result.output_types = op.output_types;
+	switch (op.Kind()) {
+	case SljitNativeRegionOpKind::FILTER:
+		result.Filter() = op.Filter().Copy();
+		return result;
+	case SljitNativeRegionOpKind::PROJECTION:
+		for (auto &projection : op.Projections()) {
+			result.Projections().push_back(projection.Copy());
+		}
+		return result;
+	default:
+		throw InternalException("SLJIT source node lowered to an operator other than a filter or projection");
+	}
+}
+
 ExecutionRegionLoweringPlan BuildSljitRegionPlan(const ExecutionRegionIR &region_ir,
                                                  const ExecutionRegionCandidate &candidate, bool render_diagnostics) {
 	ExecutionRegionLoweringPlan lowering_plan;
@@ -419,6 +439,9 @@ ExecutionRegionLoweringPlan BuildSljitRegionPlan(const ExecutionRegionIR &region
 					    BuildSljitSourceMaxValuesForContractPlan(*node.source, node_plan.source_contract);
 					source_not_null = BuildSljitSourceNotNullForContractPlan(*node.source, node_plan.source_contract);
 					native_region.source_not_null = source_not_null;
+				}
+				for (auto &op : node_plan.native_ops) {
+					native_region.native_continuation_source_ops.push_back(CopySljitSourceOpPlan(op));
 				}
 				cursor.AcceptSource(node, node_plan, std::move(source_not_null));
 			} else {

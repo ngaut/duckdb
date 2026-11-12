@@ -679,6 +679,67 @@ struct SljitPendingPreaggregationKeyDispatch {
 	}
 };
 
+//! Decides once per region, from its first batch and before any row reaches the table, whether the region
+//! preaggregates group runs: a key the runs cannot replay, a NULL key or a sample without runs hands every batch to
+//! DuckDB's sink instead. A region never does both, because the generated and the native updates need not keep the
+//! aggregate states alike.
+template <class TARGET_TYPE>
+static void
+SljitDecidePendingPrimitiveRunStrategyTemplated(SljitExecutableRegionOp &op, DataChunk &input,
+                                                const vector<ExecutionRowPointerGroupKeySource> &group_sources,
+                                                SljitPendingPreaggregatedPrimitiveGroupBatch &pending) {
+	D_ASSERT(pending.run_strategy == SljitPendingRunStrategy::UNDECIDED);
+	pending.run_strategy = SljitPendingRunStrategy::BUFFERED;
+	auto &sink_info = op.AggregateUpdate().plan.sink_info;
+	if (input.size() < 2 || sink_info.groups.size() != 1 || group_sources.size() != 1 ||
+	    sink_info.groups[0].type.InternalType() != group_sources[0].target_physical_type ||
+	    !SljitPreaggregatedInputVectorGroupKeyCastReplayable(group_sources[0])) {
+		return;
+	}
+	SljitPreaggregatedInputVectorGroupKeySource group_source;
+	if (!SljitPreparePreaggregatedInputVectorGroupKeySource(input, group_sources[0], group_source) ||
+	    !SljitPreaggregatedInputVectorGroupRowsAllValid(group_source)) {
+		return;
+	}
+	auto load_key = [&](idx_t row_idx, TARGET_TYPE &key) {
+		return SljitLoadPreaggregatedInputVectorGroupKey(group_source, row_idx, key);
+	};
+	bool profitable_runs;
+	if (SljitTryInputVectorHasProfitablePrimitiveRuns<TARGET_TYPE>(input.size(), load_key, profitable_runs) &&
+	    profitable_runs) {
+		pending.run_strategy = SljitPendingRunStrategy::STREAMING;
+	}
+}
+
+struct SljitPendingRunStrategyDecisionDispatch {
+	SljitExecutableRegionOp &op;
+	DataChunk &input;
+	const vector<ExecutionRowPointerGroupKeySource> &group_sources;
+	SljitPendingPreaggregatedPrimitiveGroupBatch &pending;
+
+	template <class TARGET_TYPE>
+	bool Execute() {
+		SljitDecidePendingPrimitiveRunStrategyTemplated<TARGET_TYPE>(op, input, group_sources, pending);
+		return true;
+	}
+};
+
+static void SljitDecidePendingPrimitiveRunStrategy(SljitExecutableRegionOp &op, DataChunk &input,
+                                                   const vector<ExecutionRowPointerGroupKeySource> &group_sources,
+                                                   SljitPendingPreaggregatedPrimitiveGroupBatch &pending) {
+	if (pending.run_strategy != SljitPendingRunStrategy::UNDECIDED) {
+		return;
+	}
+	if (group_sources.size() == 1) {
+		SljitPendingRunStrategyDecisionDispatch dispatch {op, input, group_sources, pending};
+		SljitDispatchPreaggregatedInputVectorGroupTargetType(SljitGroupKeyEquivalencePhysicalType(group_sources[0]),
+		                                                     dispatch);
+	}
+	if (pending.run_strategy == SljitPendingRunStrategy::UNDECIDED) {
+		pending.run_strategy = SljitPendingRunStrategy::BUFFERED;
+	}
+}
+
 template <class TARGET_TYPE>
 static bool
 SljitTryPreparePendingPrimitiveRunInput(ExecutionRegionRuntime &runtime, SljitExecutableRegionOp &op, DataChunk &input,
@@ -718,22 +779,10 @@ SljitTryPreparePendingPrimitiveRunInput(ExecutionRegionRuntime &runtime, SljitEx
 		blocker = "group_output";
 		return false;
 	}
-	if (pending.run_strategy == SljitPendingRunStrategy::UNDECIDED) {
-		auto load_key = [&](idx_t row_idx, TARGET_TYPE &key) {
-			return SljitLoadPreaggregatedInputVectorGroupKey(group_source, row_idx, key);
-		};
-		bool profitable_pending_runs;
-		if (!SljitTryInputVectorHasProfitablePrimitiveRuns<TARGET_TYPE>(input.size(), load_key,
-		                                                                profitable_pending_runs)) {
-			blocker = "sample";
-			return false;
-		}
-		pending.run_strategy =
-		    profitable_pending_runs ? SljitPendingRunStrategy::STREAMING : SljitPendingRunStrategy::BUFFERED;
-		if (!profitable_pending_runs) {
-			blocker = "economics";
-			return false;
-		}
+	SljitDecidePendingPrimitiveRunStrategy(op, input, group_sources, pending);
+	if (pending.run_strategy != SljitPendingRunStrategy::STREAMING) {
+		blocker = "economics";
+		return false;
 	}
 	if (!pending.EnsureFixedScratch(payload_lanes, payload_layout)) {
 		blocker = "scratch";

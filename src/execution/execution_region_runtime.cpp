@@ -68,6 +68,8 @@ const char *ExecutionRegionJitRuntimeProofName(ExecutionRegionJitRuntimeProof pr
 		return "delegated_runtime_work";
 	case ExecutionRegionJitRuntimeProof::NO_WORK:
 		return "no_work";
+	case ExecutionRegionJitRuntimeProof::NATIVE_CONTINUATION:
+		return "native_continuation";
 	default:
 		throw InternalException("unknown JIT runtime proof");
 	}

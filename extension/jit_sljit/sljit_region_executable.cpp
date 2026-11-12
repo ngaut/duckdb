@@ -188,6 +188,55 @@ static bool SljitCanBuildFilteredAggregateUpdate(const vector<SljitNativeRegionO
 	return ops[op_idx - 1].Kind() == SljitNativeRegionOpKind::FILTER;
 }
 
+//! A hash aggregate the region updates hands its pipeline to DuckDB's operators unless generated group runs or an
+//! index over a bounded key domain update it
+static bool SljitRegionMayContinueNatively(const SljitNativeRegionPlan &region) {
+	if (region.ops.empty() || region.ops.back().Kind() != SljitNativeRegionOpKind::AGGREGATE_UPDATE) {
+		return false;
+	}
+	return region.ops.back().AggregateUpdate().sink_info.Kind() == ExecutionRegionSinkKind::HASH_AGGREGATE_UPDATE;
+}
+
+static bool SljitAggregateUpdateCountsRowsOnly(const SljitExecutableAggregateUpdate &aggregate_update) {
+	auto &aggregates = aggregate_update.plan.sink_info.aggregates;
+	for (auto &aggregate : aggregates) {
+		if (aggregate.primitive_update_kind != AggregatePrimitiveUpdateKind::COUNT_STAR) {
+			return false;
+		}
+	}
+	return !aggregates.empty();
+}
+
+//! Counting the rows of a dense key domain, or marking the groups of a small one already sunk, indexes an array,
+//! which no hash table lookup matches: such a region keeps its pipeline
+static bool SljitAggregateUpdateIndexesBoundedDomain(const SljitExecutableRegionOp &op) {
+	auto &aggregate_update = op.AggregateUpdate();
+	return (aggregate_update.dense_group_domain.ready && SljitAggregateUpdateCountsRowsOnly(aggregate_update)) ||
+	       aggregate_update.distinct_group_domain_size != 0;
+}
+
+static bool BuildSljitNativeContinuationSourceOps(const SljitNativeRegionPlan &region,
+                                                  SljitExecutableRegion &executable, string &error) {
+	auto current_not_null = region.source_not_null;
+	auto current_min_values = region.source_min_values;
+	auto current_max_values = region.source_max_values;
+	for (auto &op : region.native_continuation_source_ops) {
+		SljitExecutableRegionOp executable_op;
+		if (!BuildExecutableRegionOp(op, executable_op, error, current_not_null, current_min_values, current_max_values,
+		                             false)) {
+			return false;
+		}
+		if (op.Kind() == SljitNativeRegionOpKind::FILTER && !executable_op.Filter()->expression.HasSelectionKernel() &&
+		    !SljitCompilePreparedExecutableFilter(executable_op, error)) {
+			return false;
+		}
+		executable.native_continuation_source_ops.push_back(std::move(executable_op));
+		SljitUpdateExecutableCurrentNotNull(op, current_not_null);
+		SljitUpdateExecutableCurrentRanges(op, current_min_values, current_max_values);
+	}
+	return true;
+}
+
 bool BuildSljitExecutableRegion(const SljitNativeRegionPlan &region, SljitExecutableRegion &executable,
                                 SljitFullPipelineRecipePlan &recipe_plan, string &error) {
 	executable.scan_filter_mode = region.scan_filter_mode;
@@ -250,6 +299,13 @@ bool BuildSljitExecutableRegion(const SljitNativeRegionPlan &region, SljitExecut
 		SljitUpdateExecutableCurrentNotNull(op, current_not_null);
 		SljitUpdateExecutableCurrentDistinctCounts(op, current_distinct_counts, current_min_values, current_max_values);
 		SljitUpdateExecutableCurrentRanges(op, current_min_values, current_max_values);
+	}
+
+	if (SljitRegionMayContinueNatively(region) && !SljitAggregateUpdateIndexesBoundedDomain(executable.ops.back())) {
+		if (!BuildSljitNativeContinuationSourceOps(region, executable, error)) {
+			return false;
+		}
+		executable.native_continuation_ready = true;
 	}
 
 	// Recipe binding is the executable ownership boundary. A fused aggregate step

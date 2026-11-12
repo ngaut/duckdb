@@ -208,6 +208,8 @@ enum class ExecutionRegionJitRuntimeProof : uint8_t {
 	FULL_PIPELINE_OWNERSHIP,
 	DELEGATED_RUNTIME_WORK,
 	NO_WORK,
+	//! The kernel handed its pipeline to DuckDB's own operators before any of its operators saw a row
+	NATIVE_CONTINUATION,
 	//! A generated callable was actually invoked. Timers, paths, compiled handles and elision are not evidence.
 	GENERATED_STAGE_WORK,
 	COUNT

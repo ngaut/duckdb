@@ -75,8 +75,42 @@ public:
 		return false;
 	}
 
-	//! Group runs are what the generated update wins on: without them DuckDB's vectorized sink is faster than any
-	//! generated lookup. Once the run sample finds none, the remaining batches take the native pipeline.
+	//! Group runs are what the generated update wins on: without them DuckDB's sink is faster than any lookup the
+	//! region could do. The first batch decides, before any row reaches the table, and a region without runs hands
+	//! every batch to the native pipeline.
+	void DecideRunStrategy(vector<SljitExecutableRegionOp> &ops, const SljitGroupedAggregateUpdatePrimitive &primitive,
+	                       const SljitRuntimeBatchView &input) {
+		if (primitive.strategy != SljitGroupedAggregateUpdateStrategyKind::DIRECT_PRIMITIVE_PAYLOAD_UPDATE ||
+		    direct_preaggregated_batch.run_strategy != SljitPendingRunStrategy::UNDECIDED ||
+		    input.HasHashJoinSelection()) {
+			return;
+		}
+		auto &aggregate_op = ops[primitive.aggregate_idx];
+		auto &chunk = SljitBindRuntimeBatchInput(input, "SLJIT grouped aggregate run decision");
+		DataChunk selected;
+		DataChunk *decision_input = &chunk;
+		if (input.selection) {
+			selected.Initialize(Allocator::DefaultAllocator(), chunk.GetTypes(), input.count);
+			chunk.Copy(selected, *input.selection, input.count);
+			decision_input = &selected;
+		}
+		if (primitive.input_kind == SljitGroupedAggregateUpdateInputKind::PROJECTED_INPUT) {
+			if (!projected_direct_update || !projected_direct_update->Ready() ||
+			    !ProjectedDirectSourceInputMatches(*decision_input)) {
+				return;
+			}
+			SljitDecideInputVectorPrimitiveRunStrategy(
+			    aggregate_op, *decision_input, PrepareProjectedDirectGroupSources(aggregate_op, *decision_input),
+			    direct_preaggregated_batch);
+			return;
+		}
+		if (materialized_direct_descriptor_ready) {
+			SljitDecideInputVectorPrimitiveRunStrategy(aggregate_op, *decision_input, materialized_direct_group_sources,
+			                                           direct_preaggregated_batch);
+		}
+	}
+
+	//! A region without group runs hands its batches to the native pipeline.
 	bool DelegatesToNativePipeline(const SljitGroupedAggregateUpdatePrimitive &primitive) const {
 		return primitive.strategy == SljitGroupedAggregateUpdateStrategyKind::DIRECT_PRIMITIVE_PAYLOAD_UPDATE &&
 		       direct_preaggregated_batch.run_strategy == SljitPendingRunStrategy::BUFFERED;

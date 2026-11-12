@@ -362,6 +362,9 @@ struct SljitNativeRegionPlan {
 	vector<Value> source_min_values;
 	vector<Value> source_max_values;
 	vector<bool> source_not_null;
+	//! The source's own filters and layout repair, unfused: they turn a fetched source chunk into the chunk DuckDB's
+	//! scan would have produced, which the pipeline's own operators take once the region hands its pipeline over
+	vector<SljitNativeRegionOpPlan> native_continuation_source_ops;
 
 	bool UsesScanFilters() const {
 		return scan_filter_mode != ExecutionRegionScanFilterMode::NONE;

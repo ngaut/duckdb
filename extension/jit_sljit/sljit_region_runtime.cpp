@@ -71,9 +71,13 @@ private:
 SljitNativeRegionArtifact::SljitNativeRegionArtifact(string backend_name_p, vector<SljitExecutableRegionOp> ops_p,
                                                      vector<SljitExecutableScanFilter> scan_filters_p,
                                                      ExecutionRegionScanFilterMode scan_filter_mode_p,
-                                                     SljitFullPipelineRecipePlan recipe_plan_p)
+                                                     SljitFullPipelineRecipePlan recipe_plan_p,
+                                                     vector<SljitExecutableRegionOp> native_continuation_source_ops_p,
+                                                     bool native_continuation_ready_p)
     : backend_name(std::move(backend_name_p)), ops(std::move(ops_p)), scan_filters(std::move(scan_filters_p)),
-      scan_filter_mode(scan_filter_mode_p), full_pipeline_recipe_plan(std::move(recipe_plan_p)) {
+      scan_filter_mode(scan_filter_mode_p), full_pipeline_recipe_plan(std::move(recipe_plan_p)),
+      native_continuation_source_ops(std::move(native_continuation_source_ops_p)),
+      native_continuation_ready(native_continuation_ready_p) {
 }
 
 SljitNativeRegionKernel::SljitNativeRegionKernel(shared_ptr<const SljitNativeRegionArtifact> artifact_p,
@@ -150,9 +154,9 @@ SljitNativeRegionKernel::ExactSourceFilterIdentity(idx_t binding) const {
 shared_ptr<const ExecutionRegionArtifact> CreateSljitNativeRegionArtifact(string backend_name,
                                                                           SljitExecutableRegion &&region,
                                                                           SljitFullPipelineRecipePlan recipe_plan) {
-	return make_shared_ptr<SljitNativeRegionArtifact>(std::move(backend_name), std::move(region.ops),
-	                                                  std::move(region.scan_filters), region.scan_filter_mode,
-	                                                  std::move(recipe_plan));
+	return make_shared_ptr<SljitNativeRegionArtifact>(
+	    std::move(backend_name), std::move(region.ops), std::move(region.scan_filters), region.scan_filter_mode,
+	    std::move(recipe_plan), std::move(region.native_continuation_source_ops), region.native_continuation_ready);
 }
 
 unique_ptr<ExecutionRegionKernel>

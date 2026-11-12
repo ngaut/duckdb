@@ -131,6 +131,10 @@ class SelectedRunnerTest(unittest.TestCase):
                     "no runtime proof of generated_stage_work",
                 )
 
+    def test_a_kernel_that_handed_its_pipeline_over_owes_no_proof(self) -> None:
+        self.assert_holds([selected_row("generated_stage_work"), runtime_row("native_continuation=2048")])
+        self.assert_holds([selected_row("materialization_elision"), runtime_row("native_continuation=2048")])
+
     def test_a_kernel_that_received_no_work_owes_no_proof_of_it(self) -> None:
         self.assert_holds([selected_row("generated_stage_work"), runtime_row("no_work=1")])
         self.assert_holds([selected_row("full_pipeline_ownership"), runtime_row("no_work=1")])

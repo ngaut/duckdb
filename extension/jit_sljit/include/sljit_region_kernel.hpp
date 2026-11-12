@@ -21,7 +21,9 @@ namespace duckdb {
 struct SljitNativeRegionArtifact : public ExecutionRegionArtifact {
 	SljitNativeRegionArtifact(string backend_name, vector<SljitExecutableRegionOp> ops,
 	                          vector<SljitExecutableScanFilter> scan_filters,
-	                          ExecutionRegionScanFilterMode scan_filter_mode, SljitFullPipelineRecipePlan recipe_plan);
+	                          ExecutionRegionScanFilterMode scan_filter_mode, SljitFullPipelineRecipePlan recipe_plan,
+	                          vector<SljitExecutableRegionOp> native_continuation_source_ops,
+	                          bool native_continuation_ready);
 
 	string backend_name;
 	//! Lazy code cells are synchronized and publish monotonically. The semantic
@@ -30,6 +32,9 @@ struct SljitNativeRegionArtifact : public ExecutionRegionArtifact {
 	vector<SljitExecutableScanFilter> scan_filters;
 	ExecutionRegionScanFilterMode scan_filter_mode;
 	SljitFullPipelineRecipePlan full_pipeline_recipe_plan;
+	//! Turn a fetched source chunk into the native scan's output once the region hands its pipeline over
+	mutable vector<SljitExecutableRegionOp> native_continuation_source_ops;
+	bool native_continuation_ready;
 };
 
 //! Values supplied by this execution, never retained by the database-local artifact cache.

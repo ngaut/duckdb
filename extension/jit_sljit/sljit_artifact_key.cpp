@@ -626,7 +626,7 @@ static string BuildOpKey(const SljitNativeRegionOpPlan &op) {
 
 string BuildSljitRegionArtifactSemanticKey(const SljitNativeRegionPlan &region) {
 	SljitArtifactKeyWriter key;
-	key.Field("schema", "sljit-artifact-v9");
+	key.Field("schema", "sljit-artifact-v10");
 	key.Field("cast_error_count", region.cast_errors.size());
 	key.Field("scan_filter_mode", region.scan_filter_mode);
 	key.Field("source_types", region.source_output_types);
@@ -643,6 +643,10 @@ string BuildSljitRegionArtifactSemanticKey(const SljitNativeRegionPlan &region) 
 	key.Field("op_count", region.ops.size());
 	for (auto &op : region.ops) {
 		key.Field("op", BuildOpKey(op));
+	}
+	key.Field("native_continuation_source_op_count", region.native_continuation_source_ops.size());
+	for (auto &op : region.native_continuation_source_ops) {
+		key.Field("native_continuation_source_op", BuildOpKey(op));
 	}
 	return key.Take();
 }

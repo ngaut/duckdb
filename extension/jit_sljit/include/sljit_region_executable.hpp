@@ -628,6 +628,9 @@ private:
 
 struct SljitExecutableRegion {
 	vector<SljitExecutableRegionOp> ops;
+	//! Compiled for a region that may hand its pipeline to DuckDB's operators: see SljitNativeRegionPlan
+	vector<SljitExecutableRegionOp> native_continuation_source_ops;
+	bool native_continuation_ready = false;
 	vector<SljitExecutableScanFilter> scan_filters;
 	SljitNativeAggregateStateSourcePlan aggregate_state_source;
 	ExecutionRegionScanFilterMode scan_filter_mode = ExecutionRegionScanFilterMode::NONE;

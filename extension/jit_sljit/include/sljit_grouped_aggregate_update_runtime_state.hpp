@@ -53,6 +53,11 @@ struct SljitGroupedAggregateUpdateRuntimeState {
 		return count_star_preaggregation.Flush(runtime, ops, scratch, primitive);
 	}
 
+	void DecideRunStrategy(vector<SljitExecutableRegionOp> &ops, const SljitGroupedAggregateUpdatePrimitive &primitive,
+	                       const SljitRuntimeBatchView &input) {
+		direct_payload_update.DecideRunStrategy(ops, primitive, input);
+	}
+
 	bool DelegatesToNativePipeline(const SljitGroupedAggregateUpdatePrimitive &primitive) const {
 		return direct_payload_update.DelegatesToNativePipeline(primitive);
 	}

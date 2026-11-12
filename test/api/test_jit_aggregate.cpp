@@ -1526,13 +1526,13 @@ TEST_CASE("JIT perfect hash aggregate composes date-year group projection into f
 	    });
 }
 
-TEST_CASE("JIT generic grouped primitive aggregate payload lanes use native state addresses", "[api][jit]") {
+TEST_CASE("JIT hands a hash aggregate with NULL group keys to DuckDB's operators", "[api][jit]") {
 	DuckDB db;
 	Connection con(db);
 	auto &manager = ExecutionRegionManager::Get(*con.context);
 
 	ConfigureSljitForCoverage(con, true, true, 10000);
-	// NULL keys keep the run sample from deciding, so the generic grouped update owns every batch
+	// NULL keys rule out generated group runs: the compiled region hands its pipeline over on the first chunk
 	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_grouped_multi_aggregate_payload AS "
 	                          "SELECT CASE WHEN i % 5 = 0 THEN NULL ELSE i::BIGINT END AS k, i::BIGINT AS v "
 	                          "FROM range(200000) tbl(i)"));
@@ -1556,27 +1556,7 @@ TEST_CASE("JIT generic grouped primitive aggregate payload lanes use native stat
 	}
 	REQUIRE(found_hash_state_address_update);
 
-	bool found_direct_runtime = false;
-	idx_t grouped_sink_bind_count = 0;
-	for (auto &event : manager.GetEvents()) {
-		if (!IsGeneratedAggregateUpdateRuntime(event)) {
-			continue;
-		}
-		found_direct_runtime = true;
-		idx_t event_grouped_sink_bind_count = 0;
-		for (auto &stage : event.generated_stage_runtime) {
-			if (StringUtil::Contains(stage.stage.name, "aggregate_update.bind_sink_contract")) {
-				event_grouped_sink_bind_count += stage.count;
-			}
-		}
-		grouped_sink_bind_count += event_grouped_sink_bind_count;
-		REQUIRE(event_grouped_sink_bind_count <= 1);
-		RequireGeneratedAggregateUpdateRuntimeOwnership(event);
-		REQUIRE_FALSE(StringUtil::Contains(EventJitRuntimePathCounts(event),
-		                                   "aggregate_update.fused_payload_update_with_grouped_state_addresses="));
-	}
-	REQUIRE(found_direct_runtime);
-	REQUIRE(grouped_sink_bind_count > 0);
+	RequireNativeContinuation(manager);
 }
 
 TEST_CASE("Grouped aggregate dense lookup supports nullable all-valid group layouts", "[api][jit]") {
@@ -1803,7 +1783,7 @@ TEST_CASE("Grouped aggregate input-vector targets rebuild dense cache from exist
 	REQUIRE(ht.Count() == 3);
 }
 
-TEST_CASE("JIT regular hash aggregate updates mixed preaggregated groups directly", "[api][jit]") {
+TEST_CASE("JIT hands a hash aggregate over string keys without group runs to DuckDB's operators", "[api][jit]") {
 	DuckDB db;
 	Connection con(db);
 	auto &manager = ExecutionRegionManager::Get(*con.context);
@@ -1837,12 +1817,7 @@ TEST_CASE("JIT regular hash aggregate updates mixed preaggregated groups directl
 	    },
 	    [](const ExecutionRegionEvent &event) { RequireGeneratedMachineCodeRegion(event); });
 
-	RequireJitEvent(
-	    manager,
-	    [](const ExecutionRegionEvent &event) {
-		    return IsGeneratedAggregateUpdateRuntime(event) && HasGeneratedAggregateUpdateStage(event);
-	    },
-	    [](const ExecutionRegionEvent &event) { RequireGeneratedAggregateUpdateRuntimeOwnership(event); });
+	RequireNativeContinuation(manager);
 }
 
 TEST_CASE("JIT projected grouped primitive updates existing groups directly", "[api][jit]") {
@@ -1854,7 +1829,7 @@ TEST_CASE("JIT projected grouped primitive updates existing groups directly", "[
 	REQUIRE_NO_FAIL(con.Query("PRAGMA threads=1"));
 	REQUIRE_NO_FAIL(con.Query("SET perfect_ht_threshold=0"));
 	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_preaggregated_existing_grouped_update AS "
-	                          "SELECT ((i // 2) % 2)::INTEGER AS k, "
+	                          "SELECT ((i // 64) % 2)::INTEGER AS k, "
 	                          "       (i % 2 = 0)::INTEGER AS high_payload, "
 	                          "       (i % 2 <> 0)::INTEGER AS low_payload "
 	                          "FROM range(200000) tbl(i)"));
@@ -1878,7 +1853,7 @@ TEST_CASE("JIT projected grouped primitive updates existing groups directly", "[
 	    [](const ExecutionRegionEvent &event) { RequireGeneratedAggregateUpdateRuntimeOwnership(event); });
 }
 
-TEST_CASE("JIT preaggregated grouped aggregate avoids source-row reserve", "[api][jit]") {
+TEST_CASE("JIT pipeline without a recipe hands its hash aggregate to DuckDB's operators", "[api][jit]") {
 	DuckDB db;
 	Connection con(db);
 	auto &manager = ExecutionRegionManager::Get(*con.context);
@@ -1916,25 +1891,7 @@ TEST_CASE("JIT preaggregated grouped aggregate avoids source-row reserve", "[api
 	                      ") diff");
 	REQUIRE_NO_FAIL(*diff);
 	REQUIRE(diff->Collection().GetValue(0, 0).GetValue<int64_t>() == 0);
-
-	RequireJitEvent(
-	    manager,
-	    [](const ExecutionRegionEvent &event) {
-		    if (EventPhase(event) != "runtime" || event.backend_name != "sljit") {
-			    return false;
-		    }
-		    return StringUtil::Contains(EventJitRuntimePathCounts(event),
-		                                "aggregate_update.grouped_aggregate_reserve_target=");
-	    },
-	    [](const ExecutionRegionEvent &event) {
-		    const auto runtime_paths = EventJitRuntimePathCounts(event);
-		    const auto stage_counts = EventGeneratedStageCountBreakdown(event);
-		    REQUIRE(StringUtil::Contains(runtime_paths, "aggregate_update.grouped_aggregate_reserve_target="));
-		    REQUIRE_FALSE(
-		        StringUtil::Contains(runtime_paths, "aggregate_update.grouped_aggregate_reserve_target=200000"));
-		    REQUIRE(StringUtil::Contains(runtime_paths, "aggregate_update.grouped_aggregate_reserve=1"));
-		    REQUIRE_FALSE(StringUtil::Contains(stage_counts, "grouped_aggregate_reserve.reserve_groups.resize="));
-	    });
+	RequireNativeContinuation(manager);
 }
 
 TEST_CASE("JIT join-expanded unique group keys reserve input-vector aggregate groups", "[api][jit]") {
@@ -2281,19 +2238,13 @@ TEST_CASE("JIT unordered grouped input does not generate unused run kernels", "[
 		return;
 	}
 
-	bool rejected_by_runtime_economics = false;
 	idx_t lazy_codegen_code_size = 0;
 	for (auto &event : manager.GetEvents()) {
-		if (EventPhase(event) != "runtime" || event.backend_name != "sljit") {
-			continue;
+		if (EventPhase(event) == "runtime" && event.backend_name == "sljit") {
+			lazy_codegen_code_size += event.jit_runtime.lazy_codegen.code_size;
 		}
-		const auto runtime_paths = EventJitRuntimePathCounts(event);
-		rejected_by_runtime_economics =
-		    rejected_by_runtime_economics ||
-		    StringUtil::Contains(runtime_paths, "aggregate_update.pending_primitive_group_runs_miss.economics=");
-		lazy_codegen_code_size += event.jit_runtime.lazy_codegen.code_size;
 	}
-	REQUIRE(rejected_by_runtime_economics);
+	RequireNativeContinuation(manager);
 	REQUIRE(lazy_codegen_code_size == 0);
 }
 
@@ -2805,17 +2756,8 @@ TEST_CASE("JIT affine grouped projections preserve nullable invariant semantics"
 	}
 	INFO("nullable affine group runtime paths:\n" + observed_runtime_paths);
 
-	RequireJitEvent(manager, [](const ExecutionRegionEvent &event) {
-		if (EventPhase(event) != "runtime" || event.backend_name != "sljit") {
-			return false;
-		}
-		const auto runtime_paths = EventJitRuntimePathCounts(event);
-		return StringUtil::Contains(runtime_paths, "aggregate_update.grouped_direct_projected_input=32768") &&
-		       StringUtil::Contains(runtime_paths,
-		                            "aggregate_update.pending_primitive_group_runs_miss.group_prepare=32768") &&
-		       !StringUtil::Contains(runtime_paths, "pending_group_output_transform.add_constant") &&
-		       !StringUtil::Contains(runtime_paths, "aggregate_update.grouped_direct_materialized_input");
-	});
+	// the nullable offset keeps the affine key from forming group runs: DuckDB's operators run the pipeline
+	RequireNativeContinuation(manager);
 }
 
 TEST_CASE("JIT large projected grouped sums admit cross-batch run preaggregation", "[api][jit]") {
@@ -2953,8 +2895,8 @@ TEST_CASE("JIT high-uniqueness grouped append reconciles late duplicates", "[api
 	REQUIRE_NO_FAIL(con.Query("PRAGMA threads=1"));
 	REQUIRE_NO_FAIL(con.Query("SET perfect_ht_threshold=0"));
 	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_late_duplicate_groups AS "
-	                          "SELECT (i // 2)::BIGINT AS group_id, 1::BIGINT AS value "
-	                          "FROM range(300000) tbl(i) "
+	                          "SELECT (i // 16)::BIGINT AS group_id, 1::BIGINT AS value "
+	                          "FROM range(2400000) tbl(i) "
 	                          "UNION ALL SELECT 42::BIGINT, 5::BIGINT"));
 
 	const string query = "SELECT group_id, sum(value) AS total "
@@ -2970,9 +2912,9 @@ TEST_CASE("JIT high-uniqueness grouped append reconciles late duplicates", "[api
 	                       "FROM jit_late_duplicate_output");
 	REQUIRE_NO_FAIL(*shape);
 	REQUIRE(shape->Collection().GetValue(0, 0).ToString() == "150000");
-	REQUIRE(shape->Collection().GetValue(1, 0).ToString() == "2");
-	REQUIRE(shape->Collection().GetValue(2, 0).ToString() == "7");
-	REQUIRE(shape->Collection().GetValue(3, 0).ToString() == "7");
+	REQUIRE(shape->Collection().GetValue(1, 0).ToString() == "16");
+	REQUIRE(shape->Collection().GetValue(2, 0).ToString() == "21");
+	REQUIRE(shape->Collection().GetValue(3, 0).ToString() == "21");
 	auto difference = con.Query("SELECT count(*) FROM ("
 	                            "  (SELECT * FROM jit_late_duplicate_output EXCEPT ALL "
 	                            "   SELECT * FROM jit_late_duplicate_reference) UNION ALL "
@@ -3121,9 +3063,7 @@ TEST_CASE("JIT regular hash aggregate fuses typed expression payloads with nativ
 		    REQUIRE_FALSE(StringUtil::Contains(event.ir, "primitive_payloads=native:reference"));
 	    });
 
-	RequireJitEvent(
-	    manager, [](const ExecutionRegionEvent &event) { return IsGeneratedAggregateUpdateRuntime(event); },
-	    [](const ExecutionRegionEvent &event) { RequireGeneratedAggregateUpdateRuntimeOwnership(event); });
+	RequireNativeContinuation(manager);
 }
 
 TEST_CASE("JIT regular hash aggregate fuses typed expression payloads for existing groups", "[api][jit]") {
@@ -3298,15 +3238,7 @@ TEST_CASE("JIT grouped aggregate consumes rewritten payloads through generated u
 		    REQUIRE(StringUtil::Contains(event.ir, "columns=3"));
 	    });
 
-	bool found_generated_update = false;
-	for (auto &event : manager.GetEvents()) {
-		if (!IsGeneratedAggregateUpdateRuntime(event)) {
-			continue;
-		}
-		RequireGeneratedAggregateUpdateRuntimeOwnership(event);
-		found_generated_update = true;
-	}
-	REQUIRE(found_generated_update);
+	RequireNativeContinuation(manager);
 }
 
 TEST_CASE("JIT regular hash aggregate fuses INT32 CASE payloads into hugeint grouped reducers", "[api][jit]") {
@@ -3359,9 +3291,7 @@ TEST_CASE("JIT regular hash aggregate fuses INT32 CASE payloads into hugeint gro
 		    REQUIRE_FALSE(StringUtil::Contains(event.ir, "primitive_payloads=native:reference"));
 	    });
 
-	RequireJitEvent(
-	    manager, [](const ExecutionRegionEvent &event) { return IsGeneratedAggregateUpdateRuntime(event); },
-	    [](const ExecutionRegionEvent &event) { RequireGeneratedAggregateUpdateRuntimeOwnership(event); });
+	RequireNativeContinuation(manager);
 }
 
 TEST_CASE("JIT grouped aggregate uses native state addresses under high cardinality", "[api][jit]") {
@@ -4272,18 +4202,7 @@ TEST_CASE("JIT grouped aggregate without group runs runs the pipeline natively",
 			auto result = con.Query(query);
 			REQUIRE_NO_FAIL(*result);
 			RequireSameResultValues(*result, *reference);
-
-			bool delegated = false;
-			for (auto &event : manager.GetEvents()) {
-				if (StringUtil::Contains(EventJitRuntimePathCounts(event),
-				                         "pending_primitive_group_runs_miss.economics=")) {
-					delegated = true;
-					REQUIRE(StringUtil::Contains(EventJitRuntimeDelegationCounts(event), "native_tail_delegation="));
-					REQUIRE(StringUtil::Contains(EventJitRuntimePathCounts(event),
-					                             "aggregate_update.no_group_runs_native_pipeline="));
-				}
-			}
-			REQUIRE(delegated);
+			RequireNativeContinuation(manager);
 		}
 	}
 }
