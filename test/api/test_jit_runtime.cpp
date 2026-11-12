@@ -595,8 +595,9 @@ TEST_CASE("JIT blocked append sink transfers retry ownership to the core executo
 			row_count++;
 		}
 	}
-	INFO(result->GetError());
-	REQUIRE(!result->HasError());
+	if (result->HasError()) {
+		FAIL(result->GetError());
+	}
 	REQUIRE(row_count == seen.size());
 	for (auto present : seen) {
 		REQUIRE(present);
@@ -654,8 +655,9 @@ TEST_CASE("JIT blocked append sink keeps the rest of a fanning-out hash join pro
 				fingerprint.weighted += hugeint_t(i) * hugeint_t(1000003) + hugeint_t(j);
 			}
 		}
-		INFO(result->GetError());
-		REQUIRE(!result->HasError());
+		if (result->HasError()) {
+			FAIL(result->GetError());
+		}
 		return fingerprint;
 	};
 
@@ -717,8 +719,9 @@ TEST_CASE("JIT chunk step sinks the rows it holds at the end into a blocked stre
 				               "|" + chunk->GetValue(2, row_idx).ToString());
 			}
 		}
-		INFO(result->GetError());
-		REQUIRE(!result->HasError());
+		if (result->HasError()) {
+			FAIL(result->GetError());
+		}
 		return rows;
 	};
 	REQUIRE_NO_FAIL(con.Query("SET jit_policy='off'"));

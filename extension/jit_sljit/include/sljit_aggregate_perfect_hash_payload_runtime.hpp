@@ -21,8 +21,8 @@ static bool SljitTryPreparePerfectHashStringDictionaryContributions(
     const sel_t *group_selection, SljitPerfectHashDictionaryGroupCache &cache,
     SljitPerfectHashDictionaryGroupRuntime &runtime) {
 	static constexpr idx_t MAX_DICTIONARY_SIZE = 20000;
-	if (group_expression.kind != SljitNativeRegionExpressionKind::STRING_COMPRESS ||
-	    group_expression.string_compress_target_size != sizeof(uint8_t)) {
+	if (!SljitPerfectHashGroupKeyCachesDictionaryContributions(group_expression.kind,
+	                                                           group_expression.string_compress_target_size)) {
 		return false;
 	}
 	if (group_source.GetVectorType() != VectorType::DICTIONARY_VECTOR ||

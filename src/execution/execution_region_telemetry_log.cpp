@@ -1,5 +1,6 @@
 #include "duckdb/execution/execution_region_telemetry.hpp"
 
+#include "duckdb/common/operator/add.hpp"
 #include "duckdb/execution/execution_region_runtime.hpp"
 #include "duckdb/main/client_context.hpp"
 
@@ -98,8 +99,12 @@ static void AccumulateExecutionRegionRunnerCostTotals(ExecutionRegionRunnerCostT
 		return;
 	}
 	target.present = true;
+	// Cost fields saturate at the int64 limits, so their totals do too
 	const auto accumulate_field = [](const char *, const int64_t &source_value, int64_t &target_value) {
-		target_value += source_value;
+		int64_t sum;
+		target_value = TryAddOperator::Operation(target_value, source_value, sum)
+		                   ? sum
+		                   : (source_value > 0 ? NumericLimits<int64_t>::Maximum() : NumericLimits<int64_t>::Minimum());
 	};
 	ForEachPhysicalRunnerCostShapeField(source, target, accumulate_field);
 	ForEachPhysicalRunnerCostWorkField(source, target, accumulate_field);

@@ -115,9 +115,8 @@ static bool AggregateFastExistingValueMatches(const_data_ptr_t source_data, cons
                                               PhysicalType type, idx_t source_idx, idx_t layout_offset,
                                               idx_t value_size) {
 	if (type == PhysicalType::VARCHAR) {
-		const auto source_values = reinterpret_cast<const string_t *>(source_data);
-		const auto row_value = Load<string_t>(row_data + layout_offset);
-		return source_values[source_idx] == row_value;
+		return Load<string_t>(source_data + source_idx * sizeof(string_t)) ==
+		       Load<string_t>(row_data + layout_offset);
 	}
 	return memcmp(source_data + source_idx * value_size, row_data + layout_offset, value_size) == 0;
 }
@@ -125,8 +124,8 @@ static bool AggregateFastExistingValueMatches(const_data_ptr_t source_data, cons
 static bool AggregateFastSourceValuesMatch(const_data_ptr_t source_data, PhysicalType type, idx_t left_idx,
                                            idx_t right_idx, idx_t value_size) {
 	if (type == PhysicalType::VARCHAR) {
-		const auto source_values = reinterpret_cast<const string_t *>(source_data);
-		return source_values[left_idx] == source_values[right_idx];
+		return Load<string_t>(source_data + left_idx * sizeof(string_t)) ==
+		       Load<string_t>(source_data + right_idx * sizeof(string_t));
 	}
 	return memcmp(source_data + left_idx * value_size, source_data + right_idx * value_size, value_size) == 0;
 }
@@ -337,32 +336,36 @@ idx_t GroupedAggregateHashTable::AggregateDenseSingleFieldTargetCache::KeyOffset
 	return key - base_key;
 }
 
+// An entry holds a row address, or a pending new group's index tagged with the top bit, which no user-space row
+// address sets
+static constexpr uintptr_t DENSE_TARGET_PENDING_TAG = uintptr_t(1) << (sizeof(uintptr_t) * 8 - 1);
+
 uintptr_t GroupedAggregateHashTable::AggregateDenseSingleFieldTargetCache::GetAddress(idx_t key) const {
 	const auto entry = addresses[KeyOffset(key)];
-	return (entry & 1) == 0 ? entry : 0;
+	return (entry & DENSE_TARGET_PENDING_TAG) == 0 ? entry : 0;
 }
 
 idx_t GroupedAggregateHashTable::AggregateDenseSingleFieldTargetCache::GetPendingNewGroup(idx_t key) const {
 	const auto entry = addresses[KeyOffset(key)];
-	return (entry & 1) != 0 ? entry >> 1 : DConstants::INVALID_INDEX;
+	return (entry & DENSE_TARGET_PENDING_TAG) != 0 ? entry & ~DENSE_TARGET_PENDING_TAG : DConstants::INVALID_INDEX;
 }
 
 void GroupedAggregateHashTable::AggregateDenseSingleFieldTargetCache::SetAddress(idx_t key, uintptr_t address) {
-	D_ASSERT((address & 1) == 0);
+	D_ASSERT((address & DENSE_TARGET_PENDING_TAG) == 0);
 	addresses[KeyOffset(key)] = address;
 }
 
 void GroupedAggregateHashTable::AggregateDenseSingleFieldTargetCache::SetPendingNewGroup(idx_t key, idx_t group_idx) {
 	auto &entry = addresses[KeyOffset(key)];
 	if (group_idx == DConstants::INVALID_INDEX) {
-		if ((entry & 1) != 0) {
+		if ((entry & DENSE_TARGET_PENDING_TAG) != 0) {
 			entry = 0;
 		}
 		return;
 	}
 	D_ASSERT(entry == 0);
-	D_ASSERT(group_idx <= (NumericLimits<uintptr_t>::Maximum() >> 1));
-	entry = (group_idx << 1) | 1;
+	D_ASSERT((group_idx & DENSE_TARGET_PENDING_TAG) == 0);
+	entry = group_idx | DENSE_TARGET_PENDING_TAG;
 }
 
 GroupedAggregateHashTable::GroupedAggregateHashTable(ClientContext &context_p, Allocator &allocator,
@@ -392,10 +395,6 @@ GroupedAggregateHashTable::GroupedAggregateHashTable(ClientContext &context_p, A
 	layout->Initialize(std::move(group_types_p), std::move(aggregate_objects_p), group_validity,
 	                   TupleDataNestednessType::TOP_LEVEL_LAYOUT, trailing_region_width);
 	layout_ptr = std::move(layout);
-	if ((layout_ptr->GetRowWidth() & 1) != 0) {
-		// Pending dense-cache entries use the low pointer bit. Odd row strides cannot preserve that invariant.
-		dense_single_field_target_cache.Disable();
-	}
 	hash_offset = layout_ptr->GetOffsets()[layout_ptr->ColumnCount() - 1];
 
 	// Partitioned data and pointer table
@@ -3371,9 +3370,9 @@ static bool AggregateDescriptorRawSourceValuesMatch(const_data_ptr_t left_data, 
 
 static bool AggregateDescriptorRawStringValuesMatch(const_data_ptr_t left_data, idx_t left_idx,
                                                     const_data_ptr_t right_data, idx_t right_idx) {
-	const auto left_values = reinterpret_cast<const string_t *>(left_data);
-	const auto right_values = reinterpret_cast<const string_t *>(right_data);
-	return left_values[left_idx] == right_values[right_idx];
+	// Row-pointer sources sit at unaligned row offsets
+	return Load<string_t>(left_data + left_idx * sizeof(string_t)) ==
+	       Load<string_t>(right_data + right_idx * sizeof(string_t));
 }
 
 static bool AggregateDescriptorRawSourceValuesMatch(const_data_ptr_t left_data, idx_t left_idx,
@@ -3422,9 +3421,7 @@ static bool AggregateDescriptorRawSourceValueMatchesStored(const_data_ptr_t sour
 
 static bool AggregateDescriptorRawStringValueMatchesStored(const_data_ptr_t source_data, idx_t source_idx,
                                                            data_ptr_t row_location, idx_t layout_offset) {
-	const auto source_values = reinterpret_cast<const string_t *>(source_data);
-	const auto row_value = Load<string_t>(row_location + layout_offset);
-	return source_values[source_idx] == row_value;
+	return Load<string_t>(source_data + source_idx * sizeof(string_t)) == Load<string_t>(row_location + layout_offset);
 }
 
 static bool AggregateDescriptorRawSourceValueMatchesStored(const_data_ptr_t source_data, idx_t source_idx,
@@ -4827,16 +4824,17 @@ bool GroupedAggregateHashTable::TryFindOrCreateSingleInputVectorGroupsDenseTempl
 	if (!cache.Configure(source.target_physical_type, layout_offset)) {
 		return false;
 	}
+	// A NULL or out-of-domain key does not load; the batch then declines
 	auto dense_value_and_key = [&](idx_t row_idx, T &value, idx_t &key) {
-		const auto loaded =
-		    load_target_value(row_idx, value) && AggregateDescriptorDenseKeyFromTargetValue<T>(value, key);
-		D_ASSERT(loaded);
-		return loaded;
+		return load_target_value(row_idx, value) && AggregateDescriptorDenseKeyFromTargetValue<T>(value, key);
 	};
+	// The key of a row that already loaded
 	auto dense_key = [&](idx_t row_idx) {
 		T value;
 		idx_t key;
-		dense_value_and_key(row_idx, value, key);
+		const auto loaded = dense_value_and_key(row_idx, value, key);
+		D_ASSERT(loaded);
+		(void)loaded;
 		return key;
 	};
 	const auto cache_was_empty = cache.addresses.empty();

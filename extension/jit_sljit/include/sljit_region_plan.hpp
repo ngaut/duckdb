@@ -56,6 +56,12 @@ enum class SljitNativeRegionExpressionKind : uint8_t {
 
 struct SljitNativeRegionExpressionPlan;
 
+//! The group keys whose per-dictionary-entry contributions the perfect-hash update caches: one-byte compressed strings
+inline bool SljitPerfectHashGroupKeyCachesDictionaryContributions(SljitNativeRegionExpressionKind kind,
+                                                                  idx_t string_compress_target_size) {
+	return kind == SljitNativeRegionExpressionKind::STRING_COMPRESS && string_compress_target_size == sizeof(uint8_t);
+}
+
 struct SljitNativeHashJoinProbeKeyPlan {
 	idx_t key_input_index = DConstants::INVALID_INDEX;
 	idx_t key_layout_offset = 0;

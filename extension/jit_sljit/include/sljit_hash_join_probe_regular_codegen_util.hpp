@@ -116,12 +116,13 @@ static inline void EmitLoadHashJoinSourceKey(struct sljit_compiler *compiler, id
 	sljit_set_label(done, sljit_emit_label(compiler));
 }
 
+// Build rows store their keys unaligned, so both strings are loaded byte-wise
 static inline sljit_uw SLJIT_FUNC SljitHashJoinStringKeyHash(const string_t *value) {
-	return Hash(*value);
+	return Hash(Load<string_t>(const_data_ptr_cast(value)));
 }
 
 static inline sljit_sw SLJIT_FUNC SljitHashJoinStringKeysEqual(const string_t *source, const string_t *row) {
-	return *source == *row;
+	return Load<string_t>(const_data_ptr_cast(source)) == Load<string_t>(const_data_ptr_cast(row));
 }
 
 //! Points `address` at the string_t of the probe row's key; `offset` must not hold the source data pointer

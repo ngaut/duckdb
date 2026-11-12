@@ -56,7 +56,7 @@ static bool SljitExecuteGeneratedFilterPrimitive(ExecutionRegionRuntime &runtime
 	}
 
 	auto &filter_op = ops[primitive.filter_idx];
-	D_ASSERT(filter_op.filter && filter_op.filter->expression.HasSelectionKernel());
+	D_ASSERT(filter_op.Filter() && filter_op.Filter()->expression.HasSelectionKernel());
 	auto &filter_selection = scratch.FilterSelection(primitive.filter_idx);
 	auto filter_stage_start = SljitRegionStageStart(runtime);
 	auto selected_count = SljitSelectFilter(filter_op, source_chunk, filter_selection,
@@ -124,7 +124,7 @@ static bool SljitExecuteSelectedHashJoinGeneratedFilterPrimitive(
 	auto &filter_op = ops[primitive.filter_idx];
 
 	vector<uint8_t> referenced_columns;
-	D_ASSERT(filter_op.filter);
+	D_ASSERT(filter_op.Filter());
 	if (!SljitTryCollectHashJoinProjectionExpressionSources(filter_op.Filter()->expression, output_types.size(),
 	                                                        referenced_columns)) {
 		throw InternalException("SLJIT selected hash-join filter could not collect filter sources");
