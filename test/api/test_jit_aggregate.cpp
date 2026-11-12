@@ -2478,6 +2478,10 @@ TEST_CASE("JIT parallel sorted grouped sums reconcile only overlapping dense run
 	auto &manager = ExecutionRegionManager::Get(*con.context);
 
 	ConfigureSljitForCoverage(con, true, true, 20000, 4);
+	// The four pipeline tasks take turns on the client thread, so every local state owns scanned row groups no
+	// matter how the OS schedules worker threads.
+	REQUIRE_NO_FAIL(con.Query("SET external_threads=4"));
+	REQUIRE_NO_FAIL(con.Query("SET scheduler_process_partial=true"));
 	REQUIRE_NO_FAIL(con.Query("SET perfect_ht_threshold=0"));
 	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_parallel_sorted_grouped_sum AS "
 	                          "SELECT (i // 3)::BIGINT AS disjoint_group_id, "
