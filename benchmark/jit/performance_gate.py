@@ -23,9 +23,9 @@ from pathlib import Path
 from counter_contract import counter_contract_failures, number
 from duckdb_shell import DuckDBShell, Measurement, create_database, duckdb_shell_quote, repo_root
 from process_usage import work_cycles
-from workloads import GENERIC_WORKLOADS, TPCH_WORKLOADS
+from workloads import ENCODINGS_WORKLOADS, GENERIC_WORKLOADS, TPCH_WORKLOADS
 
-SUITES = {"generic": GENERIC_WORKLOADS, "tpch": TPCH_WORKLOADS}
+SUITES = {"generic": GENERIC_WORKLOADS, "encodings": ENCODINGS_WORKLOADS, "tpch": TPCH_WORKLOADS}
 TRACED = "traced"
 CORRECTNESS_SQL = (
     "SELECT (SELECT count(*) FROM (SELECT * FROM result EXCEPT ALL SELECT * FROM expected))"
@@ -146,7 +146,8 @@ def summary_row(workload: dict, threads: int, samples: list[Sample]) -> dict:
     }
 
 
-def workload_failures(workload: dict, summary: dict, samples: list[Sample]) -> list[str]:
+def workload_failures(workload: dict, threads: int, summary: dict, samples: list[Sample]) -> list[str]:
+    compiled = workload["compiled"][threads]
     failures = []
     for sample in samples:
         label = f"{sample.policy} repeat {sample.repeat}"
@@ -158,10 +159,10 @@ def workload_failures(workload: dict, summary: dict, samples: list[Sample]) -> l
             continue
         if sample.regions("error") != 0:
             failures.append(f"{label}: JIT compile errors")
-        if (sample.regions("compiled") > 0) != workload["compiled"]:
+        if (sample.regions("compiled") > 0) != compiled:
             failures.append(f"{label}: compiled {sample.regions('compiled')} regions")
     traced = samples[-1]
-    if workload["compiled"] and traced.regions("executed") == 0:
+    if compiled and traced.regions("executed") == 0:
         failures.append("the traced run executed no compiled region")
     for path in workload.get("required_runtime_paths", ()):
         if not any(path in row["jit_runtime_path_counts"] for row in traced.counters):
@@ -190,8 +191,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--out-dir", type=Path, help="where to write runs.csv, summary.csv and counters.json")
     parser.add_argument("--duckdb", type=Path, default=repo_root() / "build" / "reldebug" / "duckdb")
     args = parser.parse_args(argv)
-    names = args.workloads or [workload["name"] for workload in SUITES[args.suite]]
+    # a suite runs the workloads qualified for the thread count; a named workload must be qualified
+    names = args.workloads or [workload["name"] for workload in SUITES[args.suite] if args.threads in workload["floor"]]
     workloads = {workload["name"]: workload for workload in SUITES[args.suite]}
+    if not names:
+        parser.error(f"no {args.suite} workloads are qualified on {args.threads} threads")
     unknown = [name for name in names if name not in workloads]
     if unknown:
         parser.error(f"unknown {args.suite} workloads: {', '.join(unknown)}")
@@ -218,7 +222,7 @@ def main(argv: list[str] | None = None) -> int:
                 create_database(args.duckdb, database, setup_sql)
             samples = run_workload(args.duckdb, database, workload, args.threads, args.repeats)
             summary = summary_row(workload, args.threads, samples)
-            workload_failed = workload_failures(workload, summary, samples)
+            workload_failed = workload_failures(workload, args.threads, summary, samples)
             runs.extend(run_row(workload, sample) for sample in samples)
             summaries.append(summary)
             counters.extend(

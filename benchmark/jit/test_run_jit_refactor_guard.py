@@ -25,7 +25,7 @@ class ChecksTest(unittest.TestCase):
         self.assertEqual(full[: len(unit)], unit)
         self.assertEqual(unit[0], "build")
 
-    def test_only_the_full_guard_runs_the_forced_jit_suites_and_the_performance_gates(self) -> None:
+    def test_only_the_full_guard_runs_the_forced_suites_the_assertion_build_and_the_performance_gates(self) -> None:
         unit = {check.name for check in checks("unit")}
         full = {check.name for check in checks("full")} - unit
         self.assertEqual(
@@ -33,12 +33,15 @@ class ChecksTest(unittest.TestCase):
             {
                 "generic performance gate on 1 threads",
                 "generic performance gate on 4 threads",
+                "encodings performance gate on 1 threads",
+                "encodings performance gate on 4 threads",
                 "tpch performance gate on 1 threads",
             },
         )
         self.assertEqual(
             {name for name in full if "performance gate" not in name},
-            {f"forced JIT suite {suite}" for suite in guard.FORCED_JIT_SUITES},
+            {f"forced JIT suite {suite}" for suite in guard.FORCED_JIT_SUITES}
+            | {"assertion build", "assertion JIT unit suite"},
         )
 
     def test_the_full_guard_runs_the_longer_fuzz_campaign(self) -> None:

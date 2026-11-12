@@ -4,7 +4,8 @@
 #
 #   unit  builds, then checks the architecture boundaries, the generated sources, the harness's own tests, the JIT
 #         unit suite and a differential fuzz campaign
-#   full  runs a longer campaign, then the SQL suites with the JIT forced on and the performance gates
+#   full  runs a longer campaign, then the SQL suites with the JIT forced on, the JIT unit suite in the assertion build
+#         and the performance gates
 #
 # A full guard that passes records the git tree of the files it verified. The pre-push hook pushes a commit only when
 # that is the commit's tree.
@@ -25,6 +26,10 @@ from duckdb_shell import duckdb_shell_environment, repo_root
 ROOT = repo_root()
 BUILD = ROOT / "build" / "reldebug"
 UNITTEST = str(BUILD / "test" / "unittest")
+# Assertions, ASan and UBSan only run in this build; checking it keeps the debug-only code compiling and catches
+# undefined behavior the release build tolerates.
+ASSERTION_BUILD = ROOT / "build" / "relassert"
+ASSERTION_UNITTEST = str(ASSERTION_BUILD / "test" / "unittest")
 # Hand-written tests cover the shapes they were written for; the differential generator finds the others. A fixed seed
 # makes a campaign's findings reproducible.
 FUZZ_SEED = 20261018
@@ -41,7 +46,7 @@ FORCED_JIT_SUITES = (
     "test/sql/cte/*",
     "test/sql/tpch/*",
 )
-PERFORMANCE_GATES = (("generic", 1), ("generic", 4), ("tpch", 1))
+PERFORMANCE_GATES = (("generic", 1), ("generic", 4), ("encodings", 1), ("encodings", 4), ("tpch", 1))
 
 
 @dataclass(frozen=True)
@@ -84,6 +89,8 @@ def checks(level: str) -> list[Check]:
             Check(f"forced JIT suite {suite}", (UNITTEST, "--test-config", FORCED_JIT_CONFIG, suite))
             for suite in FORCED_JIT_SUITES
         ),
+        Check("assertion build", ("cmake", "--build", str(ASSERTION_BUILD), "-j12"), reports_progress=True),
+        Check("assertion JIT unit suite", (ASSERTION_UNITTEST, "[jit]")),
         *(
             Check(
                 f"{suite} performance gate on {threads} threads",

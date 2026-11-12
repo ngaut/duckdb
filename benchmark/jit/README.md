@@ -12,6 +12,12 @@ guard, the gates and the `[jit]` tests load it:
 GEN=ninja BUILD_TPCH=1 LINK_CORE_EXTENSIONS=1 CMAKE_BUILD_PARALLEL_LEVEL=12 make reldebug
 ```
 
+The full guard also checks the assertion build (assertions, ASan and UBSan), configured the same way:
+
+```sh
+GEN=ninja BUILD_TPCH=1 LINK_CORE_EXTENSIONS=1 CMAKE_BUILD_PARALLEL_LEVEL=12 make relassert
+```
+
 Later builds use the repository-required thread count:
 
 ```sh
@@ -43,7 +49,9 @@ no options: a level is the same checks for every change.
    forced on (`test/configs/jit_cbo_correctness.json`); the default unittest
    runner does not load the JIT backend, so this is where compiled kernels
    meet the general plan shapes;
-8. the performance gates: `generic` on one and on four threads, `tpch` on one.
+8. the assertion build and its JIT unit suite (`build/relassert/test/unittest "[jit]"`), which runs the
+   debug-only checks and stops at the first undefined behavior;
+9. the performance gates: `generic` and `encodings` on one and on four threads, `tpch` on one.
 
 ### Git hooks
 
@@ -91,14 +99,21 @@ complete pass, 1 for findings and 2 for incomplete coverage.
 ```sh
 python3 benchmark/jit/performance_gate.py generic --threads 1
 python3 benchmark/jit/performance_gate.py generic --threads 4
+python3 benchmark/jit/performance_gate.py encodings --threads 1
+python3 benchmark/jit/performance_gate.py encodings --threads 4
 python3 benchmark/jit/performance_gate.py tpch --threads 1
 python3 benchmark/jit/performance_gate.py tpch --threads 1 --workloads q06 q18 --out-dir gate_q06_q18
 ```
 
 A suite is a list of workloads in `workloads.py`; a workload is one query and
-its checked-in thresholds per thread count. `generic` covers the plan shapes
-the JIT compiles, each on a fixture its `setup_sql` builds; `tpch` is the 22
-TPC-H queries at scale factor 10.
+its checked-in thresholds per thread count: the least speedup, the most JIT
+cost and whether the JIT compiles it. A suite run covers the workloads that
+have thresholds for the requested thread count. `generic` covers the plan shapes
+the JIT compiles, each on a fixture its `setup_sql` builds; `encodings` runs
+plain analytical queries over the column encodings real tables have (NULLs,
+dictionary-compressed strings, narrow integers, decimals, doubles, a joined
+dimension, randomly ordered keys), including shapes the JIT must decline;
+`tpch` is the 22 TPC-H queries at scale factor 10.
 
 ### What a run does
 
@@ -132,7 +147,8 @@ A workload passes when:
 
 - every sample's result equals the native engine's;
 - the native samples record no JIT counters, and the JIT samples compile
-  without error and compile a region exactly when the workload says they do;
+  without error and compile a region exactly when the workload says they do
+  on that thread count;
 - the traced sample executes a compiled region, takes the runtime paths the
   workload requires, and satisfies the counter contract (`counter_contract.py`):
   a runner the cost model selected either reports why it did not compile or

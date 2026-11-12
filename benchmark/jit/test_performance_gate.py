@@ -21,7 +21,7 @@ WORKLOAD = {
     "sql": "SELECT 42",
     "floor": {1: 1.5},
     "ceiling": {1: 1100},
-    "compiled": True,
+    "compiled": {1: True},
 }
 
 
@@ -61,7 +61,7 @@ def samples(off: int = 2000, auto: int = 1000, compiled: bool = True, traced: li
 
 
 def failures(workload: dict, measured: list[Sample]) -> list[str]:
-    return workload_failures(workload, summary_row(workload, 1, measured), measured)
+    return workload_failures(workload, 1, summary_row(workload, 1, measured), measured)
 
 
 class SummaryTest(unittest.TestCase):
@@ -99,7 +99,7 @@ class WorkloadFailuresTest(unittest.TestCase):
         measured = samples()
         measured[1] = sample("auto", 1, 1000, [])
         self.assert_fails(WORKLOAD, measured, "auto repeat 1: compiled 0 regions")
-        native = {**WORKLOAD, "compiled": False, "floor": {1: 0.96}}
+        native = {**WORKLOAD, "compiled": {1: False}, "floor": {1: 0.96}}
         self.assertEqual(failures(native, samples(compiled=False, traced=[])), [])
         measured = samples(compiled=False, traced=[])
         measured[2] = sample("auto", 2, 1000, [counter_row("compiled")])
@@ -159,17 +159,29 @@ class ArgumentsTest(unittest.TestCase):
         )
 
     def test_a_thread_count_without_thresholds_is_rejected(self) -> None:
-        self.assertIn("no thresholds on 4 threads for: q01", self.rejected("tpch", "--threads", "4"))
+        self.assertIn("no tpch workloads are qualified on 4 threads", self.rejected("tpch", "--threads", "4"))
+        self.assertIn(
+            "no thresholds on 4 threads for: decimal_grouped",
+            self.rejected("encodings", "--threads", "4", "--workloads", "decimal_grouped"),
+        )
+
+    def test_a_suite_runs_the_workloads_qualified_for_the_thread_count(self) -> None:
+        qualified = parse_args(["encodings", "--threads", "4"]).workloads
+        self.assertTrue(qualified)
+        self.assertTrue(all(4 in workload["floor"] for workload in qualified))
+        self.assertLess(len(qualified), len(SUITES["encodings"]))
 
 
 class WorkloadsTest(unittest.TestCase):
-    def test_every_workload_has_a_floor_and_a_ceiling_per_thread_count(self) -> None:
-        for suite, threads in (("generic", {1, 4}), ("tpch", {1})):
+    def test_every_workload_has_its_thresholds_on_the_same_thread_counts(self) -> None:
+        for suite, threads in (("generic", {1, 4}), ("encodings", {1, 4}), ("tpch", {1})):
             for workload in SUITES[suite]:
                 with self.subTest(workload=workload["name"]):
-                    self.assertEqual(set(workload["floor"]), threads)
-                    self.assertEqual(set(workload["ceiling"]), threads)
-                    self.assertIsInstance(workload["compiled"], bool)
+                    qualified = set(workload["floor"])
+                    self.assertTrue(qualified and qualified <= threads)
+                    self.assertEqual(set(workload["ceiling"]), qualified)
+                    self.assertEqual(set(workload["compiled"]), qualified)
+                    self.assertTrue(all(isinstance(compiled, bool) for compiled in workload["compiled"].values()))
 
     def test_workload_names_are_unique(self) -> None:
         for suite, workloads in SUITES.items():

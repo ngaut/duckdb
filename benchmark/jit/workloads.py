@@ -3,9 +3,9 @@
 # The workloads of the JIT performance gate and their checked-in thresholds.
 #
 # A workload is one query. Per thread count it is qualified for, `floor` is the least speedup of the JIT over the
-# native engine and `ceiling` the most performance-core cycles the JIT may take (see process_usage.py). A workload
-# with `setup_sql` reads the tables that SQL creates; workloads that share a fixture are adjacent and use the same
-# SQL.
+# native engine, `ceiling` the most performance-core cycles the JIT may take (see process_usage.py) and `compiled`
+# whether the JIT compiles a region for it. A workload with `setup_sql` reads the tables that SQL creates; workloads
+# that share a fixture are adjacent and use the same SQL.
 
 from __future__ import annotations
 
@@ -64,14 +64,14 @@ GENERIC_WORKLOADS = (
         "sql": "SELECT sum(i * 31 + (i % 97)) AS value FROM range(50000000) tbl(i)",
         "floor": {1: 2.86, 4: 2.82},
         "ceiling": {1: 290_163_600, 4: 299_300_000},
-        "compiled": True,
+        "compiled": {1: True, 4: True},
     },
     {
         "name": "range_filter",
         "sql": "SELECT sum(i * 31 + (i % 97)) AS value FROM range(50000000) tbl(i) WHERE i % 7 = 3",
         "floor": {1: 2.52, 4: 2.52},
         "ceiling": {1: 155_300_000, 4: 155_600_000},
-        "compiled": True,
+        "compiled": {1: True, 4: True},
     },
     {
         "name": "range_case",
@@ -81,7 +81,7 @@ GENERIC_WORKLOADS = (
         ),
         "floor": {1: 3.47, 4: 3.48},
         "ceiling": {1: 378_000_000, 4: 376_800_000},
-        "compiled": True,
+        "compiled": {1: True, 4: True},
     },
     {
         "name": "range_multi_aggregate",
@@ -92,7 +92,7 @@ GENERIC_WORKLOADS = (
         ),
         "floor": {1: 3.03, 4: 3.06},
         "ceiling": {1: 434_400_000, 4: 432_300_000},
-        "compiled": True,
+        "compiled": {1: True, 4: True},
     },
     {
         "name": "join_range",
@@ -102,7 +102,7 @@ GENERIC_WORKLOADS = (
         ),
         "floor": {1: 1.02, 4: 1.05},
         "ceiling": {1: 43_700_000, 4: 44_000_000},
-        "compiled": True,
+        "compiled": {1: True, 4: True},
     },
     {
         "name": "scan_expr",
@@ -110,7 +110,7 @@ GENERIC_WORKLOADS = (
         "sql": "SELECT sum(i * 31 + (i % 97)) AS value FROM __jit_generic_input",
         "floor": {1: 1.23, 4: 1.23},
         "ceiling": {1: 99_800_000, 4: 103_000_000},
-        "compiled": True,
+        "compiled": {1: True, 4: True},
     },
     {
         "name": "grouped_scan",
@@ -118,7 +118,7 @@ GENERIC_WORKLOADS = (
         "sql": "SELECT i % 1000 AS key, sum(i * 31) AS value FROM __jit_generic_input GROUP BY key ORDER BY key",
         "floor": {1: 1.15, 4: 1.06},
         "ceiling": {1: 200_100_000, 4: 205_000_000},
-        "compiled": True,
+        "compiled": {1: True, 4: True},
     },
     {
         "name": "scan_filter",
@@ -128,7 +128,7 @@ GENERIC_WORKLOADS = (
         # filter runs fused with the aggregate instead of as a vectorized filter.
         "floor": {1: 1.97, 4: 1.99},
         "ceiling": {1: 147_100_000, 4: 150_500_000},
-        "compiled": True,
+        "compiled": {1: True, 4: True},
     },
     {
         "name": "scan_mixed_numeric_string_filter",
@@ -148,7 +148,7 @@ GENERIC_WORKLOADS = (
         ),
         "floor": {1: 1.25, 4: 1.32},
         "ceiling": {1: 61_200_000, 4: 63_100_000},
-        "compiled": True,
+        "compiled": {1: True, 4: True},
     },
     {
         "name": "scan_like_fragments",
@@ -168,7 +168,7 @@ GENERIC_WORKLOADS = (
         # compaction and paired vector scans with an overlapping tail.
         "floor": {1: 1.55, 4: 1.52},
         "ceiling": {1: 300_318_120, 4: 300_200_000},
-        "compiled": True,
+        "compiled": {1: True, 4: True},
     },
     {
         "name": "scan_low_cardinality_like",
@@ -189,7 +189,7 @@ GENERIC_WORKLOADS = (
         # filter nothing to save: the floor bounds what compiling this shape may cost.
         "floor": {1: 0.96, 4: 0.96},
         "ceiling": {1: 146_500_000, 4: 150_000_000},
-        "compiled": True,
+        "compiled": {1: True, 4: True},
     },
     {
         "name": "scan_compare_columns",
@@ -202,7 +202,7 @@ GENERIC_WORKLOADS = (
         "sql": ("SELECT sum(a) AS value FROM __jit_generic_compare_input " "WHERE a < b"),
         "floor": {1: 1.37, 4: 1.38},
         "ceiling": {1: 89_200_000, 4: 91_500_000},
-        "compiled": True,
+        "compiled": {1: True, 4: True},
     },
     {
         "name": "scan_nullable",
@@ -217,7 +217,7 @@ GENERIC_WORKLOADS = (
         ),
         "floor": {1: 2.17, 4: 2.12},
         "ceiling": {1: 189_800_000, 4: 191_900_000},
-        "compiled": True,
+        "compiled": {1: True, 4: True},
     },
     {
         "name": "scan_nullable_multi",
@@ -234,7 +234,7 @@ GENERIC_WORKLOADS = (
         ),
         "floor": {1: 1.46, 4: 1.47},
         "ceiling": {1: 333_400_000, 4: 338_200_000},
-        "compiled": True,
+        "compiled": {1: True, 4: True},
     },
     {
         "name": "grouped_dense_multi_aggregate",
@@ -250,7 +250,7 @@ GENERIC_WORKLOADS = (
         ),
         "floor": {1: 1.80, 4: 1.66},
         "ceiling": {1: 245_600_000, 4: 255_600_000},
-        "compiled": True,
+        "compiled": {1: True, 4: True},
     },
     {
         "name": "grouped_non_null_string_multi_aggregate",
@@ -277,7 +277,7 @@ GENERIC_WORKLOADS = (
         ),
         "floor": {1: 1.64, 4: 1.64},
         "ceiling": {1: 161_700_000, 4: 165_700_000},
-        "compiled": True,
+        "compiled": {1: True, 4: True},
     },
     {
         "name": "grouped_non_null_string_reference_aggregate",
@@ -303,7 +303,7 @@ GENERIC_WORKLOADS = (
         # the CBO keeps this shape vectorized.
         "floor": {1: 0.96, 4: 0.96},
         "ceiling": {1: 159_200_000, 4: 162_300_000},
-        "compiled": False,
+        "compiled": {1: False, 4: False},
     },
     {
         "name": "grouped_selective_multi_aggregate",
@@ -318,7 +318,7 @@ GENERIC_WORKLOADS = (
         ),
         "floor": {1: 1.72, 4: 1.72},
         "ceiling": {1: 142_700_000, 4: 147_300_000},
-        "compiled": True,
+        "compiled": {1: True, 4: True},
     },
     {
         "name": "grouped_selective_conjunction_multi_aggregate",
@@ -334,7 +334,7 @@ GENERIC_WORKLOADS = (
         ),
         "floor": {1: 1.61, 4: 1.58},
         "ceiling": {1: 127_800_000, 4: 135_200_000},
-        "compiled": True,
+        "compiled": {1: True, 4: True},
     },
     {
         "name": "grouped_selective_three_way_conjunction_multi_aggregate",
@@ -352,7 +352,7 @@ GENERIC_WORKLOADS = (
         ),
         "floor": {1: 1.59, 4: 1.60},
         "ceiling": {1: 119_100_000, 4: 122_700_000},
-        "compiled": True,
+        "compiled": {1: True, 4: True},
     },
     {
         "name": "grouped_sorted_runs",
@@ -365,7 +365,7 @@ GENERIC_WORKLOADS = (
         ),
         "floor": {1: 3.36, 4: 3.85},
         "ceiling": {1: 94_200_000, 4: 103_700_000},
-        "compiled": True,
+        "compiled": {1: True, 4: True},
     },
     {
         "name": "grouped_affine_sorted_runs",
@@ -378,7 +378,7 @@ GENERIC_WORKLOADS = (
         ),
         "floor": {1: 2.87, 4: 3.26},
         "ceiling": {1: 112_100_000, 4: 123_700_000},
-        "compiled": True,
+        "compiled": {1: True, 4: True},
     },
     {
         "name": "grouped_sparse_sorted_runs",
@@ -396,7 +396,7 @@ GENERIC_WORKLOADS = (
         # keep parallel finalization from rehashing.
         "floor": {1: 3.41, 4: 3.80},
         "ceiling": {1: 96_900_000, 4: 104_400_000},
-        "compiled": True,
+        "compiled": {1: True, 4: True},
     },
     {
         "name": "grouped_nullable_sorted_runs",
@@ -410,7 +410,7 @@ GENERIC_WORKLOADS = (
         ),
         "floor": {1: 2.20, 4: 2.69},
         "ceiling": {1: 154_900_000, 4: 163_600_000},
-        "compiled": True,
+        "compiled": {1: True, 4: True},
     },
     {
         "name": "grouped_wide_sorted_runs",
@@ -428,7 +428,7 @@ GENERIC_WORKLOADS = (
         # and capacity-abandon work once uniqueness is proven.
         "floor": {1: 6.59, 4: 6.20},
         "ceiling": {1: 260_700_000, 4: 294_200_000},
-        "compiled": True,
+        "compiled": {1: True, 4: True},
     },
     {
         "name": "grouped_distinct",
@@ -447,7 +447,7 @@ GENERIC_WORKLOADS = (
         ),
         "floor": {1: 1.40, 4: 1.93},
         "ceiling": {1: 56_600_000, 4: 98_700_000},
-        "compiled": True,
+        "compiled": {1: True, 4: True},
     },
     {
         "name": "join_exact_filter_build",
@@ -473,7 +473,7 @@ GENERIC_WORKLOADS = (
         # is bound once and holds no owning materialization state.
         "floor": {1: 1.35, 4: 1.26},
         "ceiling": {1: 26_100_000, 4: 30_100_000},
-        "compiled": True,
+        "compiled": {1: True, 4: True},
         "required_runtime_paths": (
             "hash_join_probe.regular_probe.all_valid.flat.single_key.no_chain." "direct_ungrouped_aggregate_consumer=",
             "aggregate_update.join_output_probe_consumer_ungrouped_aggregate.dictionary_source=",
@@ -500,7 +500,7 @@ GENERIC_WORKLOADS = (
         # groups accumulate at their ordinal without rebinding selections.
         "floor": {1: 1.31, 4: 1.25},
         "ceiling": {1: 226_500_000, 4: 238_100_000},
-        "compiled": True,
+        "compiled": {1: True, 4: True},
         # This is a physical storage contract, not a query-specific shortcut:
         # wide values are compared as their immutable packed representation.
         "required_runtime_paths": (
@@ -527,8 +527,193 @@ GENERIC_WORKLOADS = (
         # lookup even when persisted NDV statistics underestimate the domain.
         "floor": {1: 1.32, 4: 1.36},
         "ceiling": {1: 226_400_000, 4: 241_700_000},
-        "compiled": True,
+        "compiled": {1: True, 4: True},
     },
+)
+
+# Columns as real tables store them: NULLs, dictionary-compressed strings, narrow integers, decimals and doubles, a
+# small dimension table to join, and randomly ordered grouping keys.
+ENCODINGS_SETUP_SQL = (
+    "CREATE OR REPLACE TABLE __jit_encodings_facts AS "
+    "SELECT i AS id, i % 97 AS g, (i * 7919) % 1000 AS k, "
+    "CASE WHEN i % 13 = 0 THEN NULL ELSE i % 10007 END AS n, "
+    "(i % 100000)::DECIMAL(15,2) AS price, ((i % 50)::DECIMAL(4,2)) / 100 AS disc, "
+    "DATE '1992-01-01' + (i % 2500)::INTEGER AS dt, "
+    "['AIR','MAIL','SHIP','RAIL','TRUCK','FOB','REG AIR'][(i % 7) + 1] AS mode, "
+    "'cust#' || (i % 50000)::VARCHAR AS name, "
+    "(i % 1000)::DOUBLE / 3 AS dbl, (i % 127)::TINYINT AS ti, (i % 30000)::SMALLINT AS si, "
+    "hash(i) % 65536 AS rk, hash(i * 3) % 64 AS ra "
+    "FROM range(8000000) tbl(i); "
+    "CREATE OR REPLACE TABLE __jit_encodings_dim AS "
+    "SELECT i AS k, 'dim' || i::VARCHAR AS label, CASE WHEN i % 5 = 0 THEN NULL ELSE i % 37 END AS nk, "
+    "i % 3 AS cat FROM range(1000) tbl(i);"
+)
+
+# name -> (sql, whether the JIT compiles it per thread count it is qualified for). Workloads that sum doubles are
+# qualified on one thread only: the native engine adds doubles in a thread-dependent order, which rounding the result
+# cannot fully hide.
+ENCODINGS_QUERIES = {
+    "decimal_double_product": (
+        "SELECT round(sum(price * (1 - disc)), -3) FROM __jit_encodings_facts WHERE disc > 0.05",
+        {1: True},
+    ),
+    "decimal_grouped": (
+        "SELECT g, round(sum(price * (1 - disc)), -2), round(avg(price), 4) FROM __jit_encodings_facts GROUP BY g",
+        {1: True},
+    ),
+    "date_range": (
+        "SELECT sum(price) FROM __jit_encodings_facts WHERE dt >= DATE '1994-01-01' AND dt < DATE '1995-01-01'",
+        {1: True, 4: True},
+    ),
+    "date_year_groups": (
+        "SELECT year(dt), count(*) FROM __jit_encodings_facts GROUP BY ALL",
+        {1: True, 4: True},
+    ),
+    "dictionary_case": (
+        "SELECT sum(CASE WHEN mode = 'AIR' THEN price ELSE 0 END), sum(price) FROM __jit_encodings_facts",
+        {1: True, 4: True},
+    ),
+    "dictionary_contains": (
+        "SELECT count(*) FROM __jit_encodings_facts WHERE name LIKE '%99%'",
+        {1: True, 4: True},
+    ),
+    "dictionary_groups": (
+        "SELECT mode, sum(id) FROM __jit_encodings_facts GROUP BY mode",
+        {1: True, 4: True},
+    ),
+    "dictionary_groups_filtered": (
+        "SELECT mode, count(*) FROM __jit_encodings_facts WHERE k < 500 GROUP BY mode",
+        {1: True, 4: True},
+    ),
+    "nullable_groups": (
+        "SELECT g, sum(n), count(n) FROM __jit_encodings_facts GROUP BY g",
+        {1: True, 4: True},
+    ),
+    "nullable_min_max": (
+        "SELECT min(n), max(n) FROM __jit_encodings_facts WHERE k > 100",
+        {1: True, 4: False},
+    ),
+    "narrow_integers": (
+        "SELECT sum(ti::INTEGER * si) FROM __jit_encodings_facts WHERE ti > 10",
+        {1: True, 4: True},
+    ),
+    "double_filter": (
+        "SELECT round(sum(dbl * 2), -2) FROM __jit_encodings_facts WHERE dbl > 100.5",
+        {1: True},
+    ),
+    "dimension_join": (
+        "SELECT sum(f.id) FROM __jit_encodings_facts f JOIN __jit_encodings_dim d ON f.k = d.k WHERE d.cat = 1",
+        {1: True, 4: True},
+    ),
+    "dimension_string_groups": (
+        "SELECT d.label, sum(f.price) FROM __jit_encodings_facts f JOIN __jit_encodings_dim d ON f.k = d.k GROUP BY d.label",
+        {1: True, 4: True},
+    ),
+    "semi_join": (
+        "SELECT count(*) FROM __jit_encodings_facts WHERE k IN (SELECT k FROM __jit_encodings_dim WHERE cat = 2)",
+        {1: True, 4: True},
+    ),
+    "anti_join": (
+        "SELECT count(*) FROM __jit_encodings_facts WHERE k NOT IN (SELECT k FROM __jit_encodings_dim WHERE cat = 2)",
+        {1: True, 4: True},
+    ),
+    "integer_in_list": (
+        "SELECT sum(id) FROM __jit_encodings_facts WHERE g IN (1, 5, 17, 33, 90)",
+        {1: True, 4: True},
+    ),
+    "dictionary_or_nullable": (
+        "SELECT count(*) FROM __jit_encodings_facts WHERE mode = 'AIR' OR n < 50",
+        {1: True, 4: True},
+    ),
+    "nullable_coalesce": (
+        "SELECT sum(coalesce(n, 0) + k) FROM __jit_encodings_facts",
+        {1: True, 4: True},
+    ),
+    "modulo_groups": (
+        "SELECT k % 10, sum(id) FROM __jit_encodings_facts WHERE g < 50 GROUP BY 1",
+        {1: True, 4: True},
+    ),
+    "distinct_count": (
+        "SELECT count(DISTINCT g) FROM __jit_encodings_facts WHERE k < 900",
+        {1: True, 4: False},
+    ),
+    "filtered_top_n": (
+        "SELECT id, price FROM __jit_encodings_facts WHERE k = 7 ORDER BY price DESC, id LIMIT 10",
+        {1: False, 4: False},
+    ),
+    "dictionary_prefix": (
+        "SELECT count(*) FROM __jit_encodings_facts WHERE name LIKE 'cust#12%'",
+        {1: False, 4: False},
+    ),
+    "integer_case": (
+        "SELECT sum(CASE WHEN k < 300 THEN id ELSE -id END) FROM __jit_encodings_facts",
+        {1: False, 4: False},
+    ),
+    "narrow_between": (
+        "SELECT sum(id) FROM __jit_encodings_facts WHERE si BETWEEN 100 AND 2000",
+        {1: False, 4: False},
+    ),
+    "nullable_key_join": (
+        "SELECT count(*) FROM __jit_encodings_facts f JOIN __jit_encodings_dim d ON f.g = d.nk",
+        {1: False, 4: False},
+    ),
+    "random_key_groups": (
+        "SELECT rk, sum(id) FROM __jit_encodings_facts GROUP BY rk",
+        {1: False, 4: False},
+    ),
+    "random_key_counts": (
+        "SELECT rk, count(*) FROM __jit_encodings_facts GROUP BY rk",
+        {1: False, 4: False},
+    ),
+    "random_multi_key_groups": (
+        "SELECT ra, rk, sum(id) FROM __jit_encodings_facts GROUP BY ra, rk",
+        {1: False, 4: False},
+    ),
+}
+
+# name -> (floor, ceiling) per thread count
+ENCODINGS_THRESHOLDS = {
+    "decimal_double_product": ({1: 0.59}, {1: 258_400_000}),
+    "decimal_grouped": ({1: 0.58}, {1: 320_000_000}),
+    "date_range": ({1: 1.11, 4: 1.09}, {1: 35_900_000, 4: 37_800_000}),
+    "date_year_groups": ({1: 1.07, 4: 1.06}, {1: 115_700_000, 4: 117_600_000}),
+    "dictionary_case": ({1: 0.53, 4: 0.55}, {1: 102_200_000, 4: 105_400_000}),
+    "dictionary_contains": ({1: 0.66, 4: 0.67}, {1: 539_400_000, 4: 537_700_000}),
+    "dictionary_groups": ({1: 0.35, 4: 0.38}, {1: 217_600_000, 4: 219_300_000}),
+    "dictionary_groups_filtered": ({1: 0.52, 4: 0.51}, {1: 164_400_000, 4: 169_500_000}),
+    "nullable_groups": ({1: 0.58, 4: 0.64}, {1: 128_200_000, 4: 125_900_000}),
+    "nullable_min_max": ({1: 0.84, 4: 0.88}, {1: 137_900_000, 4: 133_000_000}),
+    "narrow_integers": ({1: 0.47, 4: 0.47}, {1: 172_900_000, 4: 174_600_000}),
+    "double_filter": ({1: 0.57}, {1: 115_100_000}),
+    "dimension_join": ({1: 0.77, 4: 0.76}, {1: 75_400_000, 4: 76_200_000}),
+    "dimension_string_groups": ({1: 0.31, 4: 0.31}, {1: 277_900_000, 4: 284_300_000}),
+    "semi_join": ({1: 0.87, 4: 0.87}, {1: 73_900_000, 4: 75_100_000}),
+    "anti_join": ({1: 1.37, 4: 1.36}, {1: 57_800_000, 4: 59_200_000}),
+    "integer_in_list": ({1: 1.23, 4: 1.23}, {1: 57_500_000, 4: 60_100_000}),
+    "dictionary_or_nullable": ({1: 0.73, 4: 0.74}, {1: 99_300_000, 4: 99_100_000}),
+    "nullable_coalesce": ({1: 1.34, 4: 1.28}, {1: 61_900_000, 4: 61_700_000}),
+    "modulo_groups": ({1: 1.11, 4: 1.08}, {1: 102_100_000, 4: 103_000_000}),
+    "distinct_count": ({1: 1.06, 4: 0.88}, {1: 91_900_000, 4: 108_600_000}),
+    "filtered_top_n": ({1: 0.81, 4: 0.87}, {1: 55_100_000, 4: 53_500_000}),
+    "dictionary_prefix": ({1: 0.88, 4: 0.89}, {1: 466_400_000, 4: 460_800_000}),
+    "integer_case": ({1: 0.87, 4: 0.88}, {1: 76_400_000, 4: 79_300_000}),
+    "narrow_between": ({1: 0.86, 4: 0.86}, {1: 23_500_000, 4: 24_700_000}),
+    "nullable_key_join": ({1: 0.89, 4: 0.89}, {1: 570_500_000, 4: 574_000_000}),
+    "random_key_groups": ({1: 0.89, 4: 0.89}, {1: 234_900_000, 4: 422_100_000}),
+    "random_key_counts": ({1: 0.89, 4: 0.89}, {1: 202_000_000, 4: 399_100_000}),
+    "random_multi_key_groups": ({1: 0.89, 4: 0.89}, {1: 997_500_000, 4: 1_255_600_000}),
+}
+
+ENCODINGS_WORKLOADS = tuple(
+    {
+        "name": name,
+        "setup_sql": ENCODINGS_SETUP_SQL,
+        "sql": sql,
+        "floor": ENCODINGS_THRESHOLDS[name][0],
+        "ceiling": ENCODINGS_THRESHOLDS[name][1],
+        "compiled": compiled,
+    }
+    for name, (sql, compiled) in ENCODINGS_QUERIES.items()
 )
 
 # TPC-H at scale factor 10: query -> (floor, ceiling) on one thread
@@ -565,7 +750,7 @@ TPCH_WORKLOADS = tuple(
         "sql": (TPCH_QUERY_DIRECTORY / f"q{query}.sql").read_text(encoding="utf-8").strip().rstrip(";"),
         "floor": {1: floor},
         "ceiling": {1: ceiling},
-        "compiled": True,
+        "compiled": {1: True},
     }
     for query, (floor, ceiling) in TPCH_THRESHOLDS.items()
 )
