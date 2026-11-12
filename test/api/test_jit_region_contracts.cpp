@@ -354,7 +354,7 @@ TEST_CASE("JIT join aggregate layout preserves reordered producer casts and alia
 	auto &bound_cast = descriptor.input_sources[1];
 	auto artifact = make_shared_ptr<SljitNativeRegionArtifact>(
 	    "sljit", vector<SljitExecutableRegionOp>(), vector<SljitExecutableScanFilter>(),
-	    ExecutionRegionScanFilterMode::NONE, SljitFullPipelineRecipePlan(), vector<SljitExecutableRegionOp>(), false);
+	    ExecutionRegionScanFilterMode::NONE, SljitFullPipelineRecipePlan(), nullptr);
 	SljitNativeRegionKernel kernel(std::move(artifact), std::move(instance_bindings));
 	auto local_state = kernel.CreateLocalState(Allocator::DefaultAllocator());
 	JitProofTestRuntime runtime;

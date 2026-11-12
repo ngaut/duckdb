@@ -1026,7 +1026,7 @@ TEST_CASE("JIT widening decimal products feed exact hugeint aggregate states", "
 
 	ConfigureSljitForCoverage(con, true, true, 10000);
 	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_wide_decimal_product AS "
-	                          "SELECT (i % 10000)::INTEGER AS g, "
+	                          "SELECT ((i // 20) % 10000)::INTEGER AS g, "
 	                          "CASE WHEN i % 17 = 0 THEN NULL "
 	                          "     ELSE CAST((i % 2001) - 1000 AS DECIMAL(15,2)) END AS d, "
 	                          "CASE WHEN i % 19 = 0 THEN NULL "
@@ -2934,7 +2934,7 @@ TEST_CASE("JIT high-uniqueness grouped append reconciles late duplicates", "[api
 	REQUIRE(StringUtil::Contains(observed_runtime_paths, "proven_unique_append.final_combine_required"));
 }
 
-TEST_CASE("JIT count-star grouped aggregate uses row-delta backend for high-cardinality batches", "[api][jit]") {
+TEST_CASE("JIT count-star grouped aggregate over unique keys hands its pipeline to DuckDB's operators", "[api][jit]") {
 	DuckDB db;
 	Connection con(db);
 	auto &manager = ExecutionRegionManager::Get(*con.context);
@@ -2964,22 +2964,10 @@ TEST_CASE("JIT count-star grouped aggregate uses row-delta backend for high-card
 		REQUIRE(result_rows.GetValue(1, row_idx).ToString() == "1");
 	}
 
-	RequireJitEvent(
-	    manager,
-	    [](const ExecutionRegionEvent &event) {
-		    if (EventPhase(event) != "runtime" || event.backend_name != "sljit") {
-			    return false;
-		    }
-		    return StringUtil::Contains(EventJitRuntimePathCounts(event),
-		                                "aggregate_update.primitive_grouped_count_star_row_update=");
-	    },
-	    [](const ExecutionRegionEvent &event) {
-		    REQUIRE(StringUtil::Contains(EventJitRuntimePathCounts(event),
-		                                 "aggregate_update.primitive_grouped_count_star_row_update=2048"));
-	    });
+	RequireNativeContinuation(manager);
 }
 
-TEST_CASE("JIT regular hash aggregate appends new groups directly", "[api][jit]") {
+TEST_CASE("JIT regular hash aggregate over unique keys hands its pipeline to DuckDB's operators", "[api][jit]") {
 	DuckDB db;
 	Connection con(db);
 	auto &manager = ExecutionRegionManager::Get(*con.context);
@@ -3003,13 +2991,7 @@ TEST_CASE("JIT regular hash aggregate appends new groups directly", "[api][jit]"
 	REQUIRE_NO_FAIL(*result);
 	RequireSameResultValues(*result, *reference);
 
-	RequireJitEvent(
-	    manager,
-	    [](const ExecutionRegionEvent &event) {
-		    return IsGeneratedAggregateUpdateRuntime(event) &&
-		           StringUtil::Contains(EventGeneratedStageCountBreakdown(event), "append_new_groups=");
-	    },
-	    [](const ExecutionRegionEvent &event) { RequireGeneratedAggregateUpdateRuntimeOwnership(event); });
+	RequireNativeContinuation(manager);
 }
 
 TEST_CASE("JIT regular hash aggregate fuses typed expression payloads with native state addresses", "[api][jit]") {
@@ -3114,13 +3096,7 @@ TEST_CASE("JIT regular hash aggregate fuses typed expression payloads for existi
 		    REQUIRE_FALSE(StringUtil::Contains(event.ir, "primitive_payloads=native:reference"));
 	    });
 
-	RequireJitEvent(
-	    manager, [](const ExecutionRegionEvent &event) { return IsGeneratedAggregateUpdateRuntime(event); },
-	    [](const ExecutionRegionEvent &event) {
-		    RequireGeneratedAggregateUpdateRuntimeOwnership(event);
-		    REQUIRE_FALSE(StringUtil::Contains(EventGeneratedStageCountBreakdown(event),
-		                                       "aggregate_update.resolve_grouped_state_addresses="));
-	    });
+	RequireNativeContinuation(manager);
 }
 
 TEST_CASE("JIT fused join payloads update compressed group keys through input-vector lookups", "[api][jit]") {

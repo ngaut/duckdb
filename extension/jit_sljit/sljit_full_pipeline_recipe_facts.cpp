@@ -8,6 +8,8 @@
 
 #include "sljit_full_pipeline_recipe_facts.hpp"
 
+#include "sljit_projection_source_runtime.hpp"
+
 namespace duckdb {
 
 bool SljitFullPipelineOpIsAt(const vector<SljitExecutableRegionOp> &ops, idx_t op_idx, SljitNativeRegionOpKind kind) {
@@ -266,64 +268,6 @@ bool SljitTryAnalyzeGeneratedFilterProjectionNativeTail(const vector<SljitExecut
 	facts.projection_idx = 1;
 	facts.tail_start_idx = 2;
 	return true;
-}
-
-static void SljitAddUniqueExpressionSource(vector<idx_t> &sources, idx_t source_idx) {
-	for (auto existing : sources) {
-		if (existing == source_idx) {
-			return;
-		}
-	}
-	sources.push_back(source_idx);
-}
-
-static bool SljitCollectExpressionSourceIndices(const SljitExecutableRegionExpression &expr, vector<idx_t> &sources) {
-	if (!expr.input_source_indices.empty()) {
-		for (auto source_idx : expr.input_source_indices) {
-			SljitAddUniqueExpressionSource(sources, source_idx);
-		}
-		return true;
-	}
-	auto &plan = expr.plan;
-	if (!plan.expression_tree_source_indices.empty()) {
-		for (auto source_idx : plan.expression_tree_source_indices) {
-			SljitAddUniqueExpressionSource(sources, source_idx);
-		}
-		return true;
-	}
-	switch (plan.kind) {
-	case SljitNativeRegionExpressionKind::CONSTANT:
-		return true;
-	case SljitNativeRegionExpressionKind::REFERENCE:
-	case SljitNativeRegionExpressionKind::INTEGER_BINARY_CONSTANT:
-	case SljitNativeRegionExpressionKind::DOUBLE_BINARY_CONSTANT:
-	case SljitNativeRegionExpressionKind::INTEGER_COMPARE_CONSTANT:
-	case SljitNativeRegionExpressionKind::INTEGER_CAST:
-	case SljitNativeRegionExpressionKind::SIGNED_TO_UNSIGNED_INTEGER_CAST:
-	case SljitNativeRegionExpressionKind::INTEGER_IN_LIST:
-	case SljitNativeRegionExpressionKind::INTEGER_BETWEEN:
-	case SljitNativeRegionExpressionKind::DECIMAL64_TO_DOUBLE:
-	case SljitNativeRegionExpressionKind::DECIMAL128_SCALE_UP:
-	case SljitNativeRegionExpressionKind::INTEGRAL_COMPRESS:
-	case SljitNativeRegionExpressionKind::INTEGRAL_DECOMPRESS:
-	case SljitNativeRegionExpressionKind::STRING_COMPRESS:
-	case SljitNativeRegionExpressionKind::STRING_DECOMPRESS:
-	case SljitNativeRegionExpressionKind::STRING_SUBSTRING:
-	case SljitNativeRegionExpressionKind::DATE_YEAR:
-	case SljitNativeRegionExpressionKind::ERROR_GUARDED_REFERENCE:
-	case SljitNativeRegionExpressionKind::NULL_CHECK:
-		SljitAddUniqueExpressionSource(sources, plan.source_index);
-		return true;
-	case SljitNativeRegionExpressionKind::INTEGER_BINARY_REFERENCES:
-	case SljitNativeRegionExpressionKind::DOUBLE_BINARY_REFERENCES:
-	case SljitNativeRegionExpressionKind::INTEGER_COMPARE_REFERENCES:
-	case SljitNativeRegionExpressionKind::DECIMAL128_WIDENING_MULTIPLY:
-		SljitAddUniqueExpressionSource(sources, plan.source_index);
-		SljitAddUniqueExpressionSource(sources, plan.right_source_index);
-		return true;
-	default:
-		return false;
-	}
 }
 
 static bool SljitProjectionPreservesSourceColumn(const SljitExecutableRegionOp &projection, idx_t source_idx) {

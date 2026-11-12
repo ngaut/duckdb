@@ -1,9 +1,8 @@
 # name: test/sql/jit/test_jit_pushed_input_q11.test_slow
-# description: TPC-H Q11's CTE feeds a grouped direct consumer that runs as a compiled chunk step on pushed input; its
+# description: TPC-H Q11's CTE feeds a grouped aggregate whose compiled chunk step runs on pushed input; its keys
 # group: [jit]
 
-#              step reserves groups per pushing thread, which a pipeline without a source state of its own must size
-#              from the threads that push into it
+#              repeat in no runs, so the step hands the pipeline to DuckDB's operators on the first pushed chunk
 
 require tpch
 
@@ -82,6 +81,6 @@ query I
 SELECT count(*) > 0 FROM duckdb_jit_events()
 WHERE phase = 'runtime' AND reason = 'full pipeline kernel executed on pushed input'
   AND pipeline_shape LIKE '%sink:sink:HASH_GROUP_BY%'
-  AND jit_runtime_path_counts LIKE '%grouped_aggregate_reserve_target=%'
+  AND jit_runtime_path_counts LIKE '%source.native_continuation=%'
 ----
 true

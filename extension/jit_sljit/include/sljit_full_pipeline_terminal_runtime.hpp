@@ -61,8 +61,7 @@ public:
 			                                                    terminal_step.ungrouped_aggregate_update);
 			break;
 		case SljitFullPipelinePrimitiveKind::GROUPED_AGGREGATE_UPDATE:
-			prepared =
-			    state.grouped_aggregate_update.Prepare(runtime, ops, scratch, terminal_step.grouped_aggregate_update);
+			prepared = state.grouped_aggregate_update.Prepare(ops, terminal_step.grouped_aggregate_update);
 			break;
 		case SljitFullPipelinePrimitiveKind::POST_JOIN_PROJECTION_AGGREGATE_UPDATE:
 			state.post_join_projection_aggregate.Prepare(ops, terminal_step.post_join_projection_aggregate,
@@ -132,9 +131,11 @@ public:
 
 	//! A hash aggregate terminal leaves the whole pipeline to DuckDB's operators unless generated group runs update
 	//! it: decided on the first source chunk, before any step saw a row, so one writer owns the aggregate states.
-	//! Counting rows per group has no generated update; a primitive update samples the chunk for group runs
-	bool HandsOverToNative(vector<SljitExecutableRegionOp> &ops, const SljitFullPipelinePrimitiveStep &terminal_step,
-	                       DataChunk &source_chunk) {
+	//! Counting rows into a dense key domain keeps the pipeline; otherwise the chunk's sample of the group key decides,
+	//! and a key it cannot sample leaves the decision to the update's own batches
+	bool HandsOverToNative(vector<SljitExecutableRegionOp> &ops, SljitRegionExecutionScratch &scratch,
+	                       const SljitFullPipelinePrimitiveStep &terminal_step, DataChunk &source_chunk,
+	                       const SljitExecutableNativeContinuation &continuation) {
 		if (terminal_step.kind != SljitFullPipelinePrimitiveKind::GROUPED_AGGREGATE_UPDATE) {
 			return false;
 		}
@@ -143,19 +144,15 @@ public:
 		    ExecutionRegionSinkKind::HASH_AGGREGATE_UPDATE) {
 			return false;
 		}
-		switch (primitive.strategy) {
-		case SljitGroupedAggregateUpdateStrategyKind::COUNT_STAR_PREAGGREGATION:
-			return true;
-		case SljitGroupedAggregateUpdateStrategyKind::DIRECT_PRIMITIVE_PAYLOAD_UPDATE:
-			if (primitive.input_kind != SljitGroupedAggregateUpdateInputKind::PROJECTED_INPUT) {
-				return false;
-			}
-			state.grouped_aggregate_update.DecideRunStrategy(ops, primitive,
-			                                                 SljitRuntimeBatchViewFromChunk(source_chunk));
-			return DelegatesToNativePipeline(terminal_step);
-		default:
+		idx_t dense_range;
+		if (continuation.counts_rows_only &&
+		    SljitPendingDenseSingleLaneProfitable(
+		        scratch.AggregateParameters(primitive.aggregate_idx).estimated_input_count,
+		        ops[primitive.aggregate_idx].AggregateUpdate().dense_group_domain, dense_range)) {
 			return false;
 		}
+		return state.grouped_aggregate_update.SampleSourceGroupRuns(
+		           ops, primitive, source_chunk, continuation.group_key_source_column) == SljitSourceGroupRuns::ABSENT;
 	}
 
 	bool ExecuteNativePipeline(ExecutionRegionRuntime &runtime, ExecutionRegionResult &result,

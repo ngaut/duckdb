@@ -375,7 +375,6 @@ def verify_runtime_abi_ownership() -> None:
             "extension/jit_sljit/include/sljit_grouped_reduction_lane.hpp",
             "extension/jit_sljit/include/sljit_grouped_aggregate_direct_update_capability_runtime.hpp",
             "extension/jit_sljit/include/sljit_grouped_aggregate_preaggregated_update_runtime.hpp",
-            "extension/jit_sljit/include/sljit_grouped_count_star_update_runtime.hpp",
             "extension/jit_sljit/include/sljit_string_set_complementary_sum_runtime.hpp",
             "extension/jit_sljit/sljit_aggregate_perfect_hash_commit_codegen.cpp",
         ),

@@ -11,6 +11,7 @@
 #include "sljit_filter_runtime.hpp"
 #include "sljit_full_pipeline_runtime.hpp"
 #include "sljit_grouped_aggregate_input_vector_update_runtime.hpp"
+#include "sljit_grouped_aggregate_preaggregation_common_runtime.hpp"
 #include "sljit_grouped_aggregate_update_primitive.hpp"
 #include "sljit_grouped_primitive_aggregate_update_runtime.hpp"
 #include "sljit_pending_preaggregated_group_batch_runtime.hpp"
@@ -19,6 +20,8 @@
 #include "sljit_runtime_batch_view.hpp"
 
 namespace duckdb {
+
+enum class SljitSourceGroupRuns : uint8_t { ABSENT, PRESENT, UNKNOWN };
 
 class SljitGroupedDirectPrimitivePayloadUpdateRuntimeState {
 public:
@@ -75,42 +78,44 @@ public:
 		return false;
 	}
 
-	//! Group runs are what the generated update wins on: without them DuckDB's sink is faster than any lookup the
-	//! region could do. The first batch decides, before any row reaches the table, and a region without runs hands
-	//! every batch to the native pipeline.
-	void DecideRunStrategy(vector<SljitExecutableRegionOp> &ops, const SljitGroupedAggregateUpdatePrimitive &primitive,
-	                       const SljitRuntimeBatchView &input) {
-		if (primitive.strategy != SljitGroupedAggregateUpdateStrategyKind::DIRECT_PRIMITIVE_PAYLOAD_UPDATE ||
-		    direct_preaggregated_batch.run_strategy != SljitPendingRunStrategy::UNDECIDED ||
-		    input.HasHashJoinSelection()) {
-			return;
+	//! What the first source chunk says about group runs the generated update would preaggregate. A projected input
+	//! read straight from the chunk samples the key the update reads; any other samples the source column the key
+	//! keeps distinct, when there is one
+	SljitSourceGroupRuns SampleSourceGroupRuns(vector<SljitExecutableRegionOp> &ops,
+	                                           const SljitGroupedAggregateUpdatePrimitive &primitive,
+	                                           DataChunk &source_chunk, idx_t group_key_source_column) {
+		if (primitive.strategy != SljitGroupedAggregateUpdateStrategyKind::DIRECT_PRIMITIVE_PAYLOAD_UPDATE) {
+			return SljitSourceGroupRuns::ABSENT;
 		}
 		auto &aggregate_op = ops[primitive.aggregate_idx];
-		auto &chunk = SljitBindRuntimeBatchInput(input, "SLJIT grouped aggregate run decision");
-		DataChunk selected;
-		DataChunk *decision_input = &chunk;
-		if (input.selection) {
-			selected.Initialize(Allocator::DefaultAllocator(), chunk.GetTypes(), input.count);
-			chunk.Copy(selected, *input.selection, input.count);
-			decision_input = &selected;
-		}
 		if (primitive.input_kind == SljitGroupedAggregateUpdateInputKind::PROJECTED_INPUT) {
-			if (!projected_direct_update || !projected_direct_update->Ready() ||
-			    !ProjectedDirectSourceInputMatches(*decision_input)) {
-				return;
+			if (!projected_direct_update) {
+				return SljitSourceGroupRuns::ABSENT;
 			}
-			SljitDecideInputVectorPrimitiveRunStrategy(
-			    aggregate_op, *decision_input, PrepareProjectedDirectGroupSources(aggregate_op, *decision_input),
-			    direct_preaggregated_batch);
-			return;
+			if (ProjectedDirectSourceInputMatches(source_chunk)) {
+				auto &group_sources = PrepareProjectedDirectGroupSources(aggregate_op, source_chunk);
+				return SljitPendingPrimitiveRunsSupported(aggregate_op, group_sources) &&
+				               SljitInputVectorGroupKeyHasProfitableRuns(source_chunk, group_sources[0])
+				           ? SljitSourceGroupRuns::PRESENT
+				           : SljitSourceGroupRuns::ABSENT;
+			}
+			if (!SljitPendingPrimitiveRunKeyShapeSupported(aggregate_op, projected_direct_update->group_sources)) {
+				return SljitSourceGroupRuns::ABSENT;
+			}
+		} else if (!materialized_direct_descriptor_ready ||
+		           !SljitPendingPrimitiveRunKeyShapeSupported(aggregate_op, materialized_direct_group_sources)) {
+			return SljitSourceGroupRuns::ABSENT;
 		}
-		if (materialized_direct_descriptor_ready) {
-			SljitDecideInputVectorPrimitiveRunStrategy(aggregate_op, *decision_input, materialized_direct_group_sources,
-			                                           direct_preaggregated_batch);
+		if (group_key_source_column >= source_chunk.ColumnCount()) {
+			return SljitSourceGroupRuns::UNKNOWN;
 		}
+		return SljitVectorHasProfitableRuns(source_chunk.data[group_key_source_column], source_chunk.size())
+		           ? SljitSourceGroupRuns::PRESENT
+		           : SljitSourceGroupRuns::ABSENT;
 	}
 
-	//! A region without group runs hands its batches to the native pipeline.
+	//! Group runs are what the generated update wins on: without them DuckDB's vectorized sink is faster than any
+	//! generated lookup. Once the run sample finds none, the remaining batches take the native pipeline.
 	bool DelegatesToNativePipeline(const SljitGroupedAggregateUpdatePrimitive &primitive) const {
 		return primitive.strategy == SljitGroupedAggregateUpdateStrategyKind::DIRECT_PRIMITIVE_PAYLOAD_UPDATE &&
 		       direct_preaggregated_batch.run_strategy == SljitPendingRunStrategy::BUFFERED;

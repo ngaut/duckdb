@@ -15,6 +15,31 @@
 namespace duckdb {
 
 static constexpr idx_t SLJIT_PRIMITIVE_RUN_MIN_COMPRESSION = 3;
+static constexpr idx_t SLJIT_PRIMITIVE_RUN_SAMPLE_SIZE = 64;
+
+//! Transitions measure the distance between run starts without charging the sample's partial leading and trailing
+//! runs as complete groups
+static bool SljitPrimitiveRunsProfitable(idx_t transition_count, idx_t sample_count) {
+	return transition_count == 0 || transition_count * SLJIT_PRIMITIVE_RUN_MIN_COMPRESSION <= sample_count - 1;
+}
+
+//! Whether the first rows of a column repeat in runs the generated update preaggregates
+static bool SljitVectorHasProfitableRuns(Vector &vector, idx_t count) {
+	const auto sample_count = MinValue<idx_t>(count, SLJIT_PRIMITIVE_RUN_SAMPLE_SIZE);
+	if (sample_count < 2) {
+		return false;
+	}
+	auto previous = vector.GetValue(0);
+	idx_t transition_count = 0;
+	for (idx_t row_idx = 1; row_idx < sample_count; row_idx++) {
+		auto value = vector.GetValue(row_idx);
+		if (!Value::NotDistinctFrom(value, previous)) {
+			transition_count++;
+		}
+		previous = std::move(value);
+	}
+	return SljitPrimitiveRunsProfitable(transition_count, sample_count);
+}
 
 template <class TARGET_TYPE, class LOAD_KEY>
 static bool SljitTryInputVectorHasProfitablePrimitiveRuns(idx_t count, LOAD_KEY &&load_key, bool &profitable) {
@@ -26,7 +51,7 @@ static bool SljitTryInputVectorHasProfitablePrimitiveRuns(idx_t count, LOAD_KEY 
 	if (!load_key(0, previous_key)) {
 		return false;
 	}
-	const auto sample_count = MinValue<idx_t>(count, 64);
+	const auto sample_count = MinValue<idx_t>(count, SLJIT_PRIMITIVE_RUN_SAMPLE_SIZE);
 	idx_t transition_count = 0;
 	for (idx_t row_idx = 1; row_idx < sample_count; row_idx++) {
 		TARGET_TYPE key;
@@ -38,9 +63,7 @@ static bool SljitTryInputVectorHasProfitablePrimitiveRuns(idx_t count, LOAD_KEY 
 		}
 		previous_key = key;
 	}
-	// Transitions measure the distance between run starts without charging the
-	// sample's partial leading and trailing runs as complete groups.
-	profitable = transition_count == 0 || transition_count * SLJIT_PRIMITIVE_RUN_MIN_COMPRESSION <= sample_count - 1;
+	profitable = SljitPrimitiveRunsProfitable(transition_count, sample_count);
 	return true;
 }
 
@@ -364,6 +387,49 @@ static bool SljitPreaggregatedInputVectorGroupKeyCastReplayable(const ExecutionR
 	default:
 		return false;
 	}
+}
+
+//! Whether the generated update preaggregates runs of a key of this shape: a single key stored as its source reads
+static bool SljitPendingPrimitiveRunKeyShapeSupported(const SljitExecutableRegionOp &op,
+                                                      const vector<ExecutionRowPointerGroupKeySource> &group_sources) {
+	auto &sink_info = op.AggregateUpdate().plan.sink_info;
+	return sink_info.groups.size() == 1 && group_sources.size() == 1 &&
+	       sink_info.groups[0].type.InternalType() == group_sources[0].target_physical_type;
+}
+
+//! Whether the generated update preaggregates runs of the group key: a single key whose cast the runs replay
+static bool SljitPendingPrimitiveRunsSupported(const SljitExecutableRegionOp &op,
+                                               const vector<ExecutionRowPointerGroupKeySource> &group_sources) {
+	return SljitPendingPrimitiveRunKeyShapeSupported(op, group_sources) &&
+	       SljitPreaggregatedInputVectorGroupKeyCastReplayable(group_sources[0]);
+}
+
+struct SljitInputVectorGroupKeyRunSample {
+	DataChunk &input;
+	const ExecutionRowPointerGroupKeySource &source;
+	bool profitable = false;
+
+	template <class TARGET_TYPE>
+	bool Execute() {
+		SljitPreaggregatedInputVectorGroupKeySource group_source;
+		if (!SljitPreparePreaggregatedInputVectorGroupKeySource(input, source, group_source) ||
+		    !SljitPreaggregatedInputVectorGroupRowsAllValid(group_source)) {
+			return true;
+		}
+		auto load_key = [&](idx_t row_idx, TARGET_TYPE &key) {
+			return SljitLoadPreaggregatedInputVectorGroupKey(group_source, row_idx, key);
+		};
+		return SljitTryInputVectorHasProfitablePrimitiveRuns<TARGET_TYPE>(input.size(), load_key, profitable);
+	}
+};
+
+//! Whether the key the generated update reads from the input repeats in runs: a key it cannot read, or a NULL key,
+//! repeats in none it preaggregates
+static bool SljitInputVectorGroupKeyHasProfitableRuns(DataChunk &input,
+                                                      const ExecutionRowPointerGroupKeySource &source) {
+	SljitInputVectorGroupKeyRunSample sample {input, source};
+	return SljitDispatchPreaggregatedInputVectorGroupTargetType(SljitGroupKeyEquivalencePhysicalType(source), sample) &&
+	       sample.profitable;
 }
 
 static bool SljitPrepareReplayablePreaggregatedInputVectorGroupKeySource(

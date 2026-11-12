@@ -18,11 +18,6 @@
 
 namespace duckdb {
 
-struct SljitPreaggregatedCountStarUpdateState {
-	const ExecutionPrimitiveAggregateUpdateLane *lane = nullptr;
-	const int64_t *counts = nullptr;
-};
-
 struct SljitPrimitiveCountOneUpdateState {
 	const ExecutionPrimitiveAggregateUpdateLane *lane = nullptr;
 };
@@ -33,23 +28,6 @@ static inline idx_t SljitSelectedGroupedStateAddressIndex(const sel_t *address_s
 		return address_sel[row_idx];
 	}
 	return execute_sel ? idx : row_idx;
-}
-
-static void ExecuteSljitPreaggregatedCountStarUpdate(const uintptr_t *addresses, const sel_t *address_sel,
-                                                     const sel_t *execute_sel, idx_t count, void *state_p) {
-	auto &state = *reinterpret_cast<SljitPreaggregatedCountStarUpdateState *>(state_p);
-	if (!addresses || !state.lane || !state.counts || !state.lane->ready ||
-	    state.lane->kind != AggregatePrimitiveUpdateKind::COUNT_STAR || state.lane->state_size == 0) {
-		throw InternalException("SLJIT preaggregated count-star grouped update state is incomplete");
-	}
-	for (idx_t idx = 0; idx < count; idx++) {
-		const auto row_idx = execute_sel ? execute_sel[idx] : idx;
-		const auto address_idx = SljitSelectedGroupedStateAddressIndex(address_sel, execute_sel, idx, row_idx);
-		auto state_address = reinterpret_cast<data_ptr_t>(addresses[address_idx]);
-		auto state_base = state_address + state.lane->state_offset;
-		auto count_ptr = reinterpret_cast<int64_t *>(state_base + state.lane->state_value_offset);
-		*count_ptr += state.counts[row_idx];
-	}
 }
 
 static void ExecuteSljitPrimitiveCountOneUpdate(const uintptr_t *addresses, const sel_t *address_sel,

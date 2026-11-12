@@ -6,6 +6,7 @@
 #include "sljit_executable_stats.hpp"
 #include "sljit_full_pipeline_recipe.hpp"
 #include "sljit_join_probe_codegen.hpp"
+#include "sljit_projection_source_runtime.hpp"
 
 #include "duckdb/common/limits.hpp"
 #include "duckdb/execution/execution_aggregate_runtime.hpp"
@@ -197,26 +198,87 @@ static bool SljitRegionMayContinueNatively(const SljitNativeRegionPlan &region) 
 	return region.ops.back().AggregateUpdate().sink_info.Kind() == ExecutionRegionSinkKind::HASH_AGGREGATE_UPDATE;
 }
 
-static bool SljitAggregateUpdateCountsRowsOnly(const SljitExecutableAggregateUpdate &aggregate_update) {
-	auto &aggregates = aggregate_update.plan.sink_info.aggregates;
-	for (auto &aggregate : aggregates) {
-		if (aggregate.primitive_update_kind != AggregatePrimitiveUpdateKind::COUNT_STAR) {
+//! Marking the groups of a small domain already sunk indexes a bitmap, which no hash table lookup matches: such a
+//! region keeps its pipeline
+static bool SljitAggregateUpdateIndexesBoundedDomain(const SljitExecutableRegionOp &op) {
+	return op.AggregateUpdate().distinct_group_domain_size != 0;
+}
+
+//! Whether a projection keeps distinct inputs distinct, so its input has the group runs its output has
+static bool SljitProjectionPreservesDistinctness(const SljitNativeRegionExpressionPlan &plan) {
+	switch (plan.kind) {
+	case SljitNativeRegionExpressionKind::REFERENCE:
+	case SljitNativeRegionExpressionKind::ERROR_GUARDED_REFERENCE:
+	case SljitNativeRegionExpressionKind::INTEGER_CAST:
+	case SljitNativeRegionExpressionKind::SIGNED_TO_UNSIGNED_INTEGER_CAST:
+	case SljitNativeRegionExpressionKind::DECIMAL128_SCALE_UP:
+	case SljitNativeRegionExpressionKind::INTEGRAL_COMPRESS:
+	case SljitNativeRegionExpressionKind::INTEGRAL_DECOMPRESS:
+	case SljitNativeRegionExpressionKind::STRING_COMPRESS:
+	case SljitNativeRegionExpressionKind::STRING_DECOMPRESS:
+		return true;
+	case SljitNativeRegionExpressionKind::INTEGER_BINARY_CONSTANT:
+		return plan.binary_op == SljitNativeIntegerBinaryOp::ADD ||
+		       plan.binary_op == SljitNativeIntegerBinaryOp::SUBTRACT;
+	case SljitNativeRegionExpressionKind::TYPED_EXPRESSION_TREE:
+		return plan.expression_tree && plan.expression_tree->kind == ExecutionExpressionIRKind::REFERENCE;
+	default:
+		return false;
+	}
+}
+
+//! Follows a column back through filters, projections that keep one input column's values distinct and a join
+//! probe's probe-side output
+static bool SljitTraceColumnToOpInput(const SljitExecutableRegionOp &op, idx_t &column) {
+	switch (op.Kind()) {
+	case SljitNativeRegionOpKind::FILTER:
+		return true;
+	case SljitNativeRegionOpKind::PROJECTION: {
+		vector<idx_t> sources;
+		if (column >= op.Projections().size() || !SljitProjectionPreservesDistinctness(op.Projections()[column].plan) ||
+		    !SljitCollectExpressionSourceIndices(op.Projections()[column], sources) || sources.size() != 1) {
 			return false;
 		}
+		column = sources[0];
+		return true;
 	}
-	return !aggregates.empty();
+	case SljitNativeRegionOpKind::HASH_JOIN_PROBE: {
+		auto &contract = op.HashJoinProbe().plan.operator_info.HashJoin().contract;
+		if (!contract.present || column >= contract.lhs_output_column_indices.size()) {
+			return false;
+		}
+		column = contract.lhs_output_column_indices[column];
+		return true;
+	}
+	default:
+		return false;
+	}
 }
 
-//! Counting the rows of a dense key domain, or marking the groups of a small one already sunk, indexes an array,
-//! which no hash table lookup matches: such a region keeps its pipeline
-static bool SljitAggregateUpdateIndexesBoundedDomain(const SljitExecutableRegionOp &op) {
-	auto &aggregate_update = op.AggregateUpdate();
-	return (aggregate_update.dense_group_domain.ready && SljitAggregateUpdateCountsRowsOnly(aggregate_update)) ||
-	       aggregate_update.distinct_group_domain_size != 0;
+//! The fetched source chunk's column the hash aggregate's single group key derives from
+static idx_t SljitTraceGroupKeySourceColumn(const vector<SljitExecutableRegionOp> &ops,
+                                            const vector<SljitExecutableRegionOp> &source_ops) {
+	auto &groups = ops.back().AggregateUpdate().plan.sink_info.groups;
+	if (groups.size() != 1) {
+		return DConstants::INVALID_INDEX;
+	}
+	auto column = groups[0].input_index;
+	for (idx_t op_idx = ops.size() - 1; op_idx > 0; op_idx--) {
+		if (!SljitTraceColumnToOpInput(ops[op_idx - 1], column)) {
+			return DConstants::INVALID_INDEX;
+		}
+	}
+	for (idx_t op_idx = source_ops.size(); op_idx > 0; op_idx--) {
+		if (!SljitTraceColumnToOpInput(source_ops[op_idx - 1], column)) {
+			return DConstants::INVALID_INDEX;
+		}
+	}
+	return column;
 }
 
-static bool BuildSljitNativeContinuationSourceOps(const SljitNativeRegionPlan &region,
-                                                  SljitExecutableRegion &executable, string &error) {
+static bool BuildSljitNativeContinuation(const SljitNativeRegionPlan &region, SljitExecutableRegion &executable,
+                                         string &error) {
+	auto continuation = make_uniq<SljitExecutableNativeContinuation>();
 	auto current_not_null = region.source_not_null;
 	auto current_min_values = region.source_min_values;
 	auto current_max_values = region.source_max_values;
@@ -230,10 +292,16 @@ static bool BuildSljitNativeContinuationSourceOps(const SljitNativeRegionPlan &r
 		    !SljitCompilePreparedExecutableFilter(executable_op, error)) {
 			return false;
 		}
-		executable.native_continuation_source_ops.push_back(std::move(executable_op));
+		continuation->source_ops.push_back(std::move(executable_op));
 		SljitUpdateExecutableCurrentNotNull(op, current_not_null);
 		SljitUpdateExecutableCurrentRanges(op, current_min_values, current_max_values);
 	}
+	continuation->group_key_source_column = SljitTraceGroupKeySourceColumn(executable.ops, continuation->source_ops);
+	auto &aggregates = executable.ops.back().AggregateUpdate().plan.sink_info.aggregates;
+	continuation->counts_rows_only =
+	    aggregates.size() == 1 && (aggregates[0].primitive_update_kind == AggregatePrimitiveUpdateKind::COUNT ||
+	                               aggregates[0].primitive_update_kind == AggregatePrimitiveUpdateKind::COUNT_STAR);
+	executable.native_continuation = std::move(continuation);
 	return true;
 }
 
@@ -302,10 +370,9 @@ bool BuildSljitExecutableRegion(const SljitNativeRegionPlan &region, SljitExecut
 	}
 
 	if (SljitRegionMayContinueNatively(region) && !SljitAggregateUpdateIndexesBoundedDomain(executable.ops.back())) {
-		if (!BuildSljitNativeContinuationSourceOps(region, executable, error)) {
+		if (!BuildSljitNativeContinuation(region, executable, error)) {
 			return false;
 		}
-		executable.native_continuation_ready = true;
 	}
 
 	// Recipe binding is the executable ownership boundary. A fused aggregate step

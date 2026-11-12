@@ -626,11 +626,21 @@ private:
 	    payload;
 };
 
+//! What a region that may hand its pipeline to DuckDB's operators needs to decide and to continue natively
+struct SljitExecutableNativeContinuation {
+	//! Turn a fetched source chunk into the native scan's output: the source's own filters and layout repair
+	vector<SljitExecutableRegionOp> source_ops;
+	//! The fetched chunk's column the hash aggregate's single group key derives from, sampled for group runs; invalid
+	//! when the key does not derive from one source column
+	idx_t group_key_source_column = DConstants::INVALID_INDEX;
+	//! The hash aggregate only counts rows: a single COUNT or COUNT(*)
+	bool counts_rows_only = false;
+};
+
 struct SljitExecutableRegion {
 	vector<SljitExecutableRegionOp> ops;
-	//! Compiled for a region that may hand its pipeline to DuckDB's operators: see SljitNativeRegionPlan
-	vector<SljitExecutableRegionOp> native_continuation_source_ops;
-	bool native_continuation_ready = false;
+	//! Present for a region that may hand its pipeline to DuckDB's operators
+	unique_ptr<SljitExecutableNativeContinuation> native_continuation;
 	vector<SljitExecutableScanFilter> scan_filters;
 	SljitNativeAggregateStateSourcePlan aggregate_state_source;
 	ExecutionRegionScanFilterMode scan_filter_mode = ExecutionRegionScanFilterMode::NONE;

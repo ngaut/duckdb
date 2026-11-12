@@ -36,12 +36,6 @@ bool SljitTryPreaggregateInputVectorFusedAffinePrimitiveGroupsIntoPending(
 	    pending, finish);
 }
 
-void SljitDecideInputVectorPrimitiveRunStrategy(SljitExecutableRegionOp &op, DataChunk &input,
-                                                const vector<ExecutionRowPointerGroupKeySource> &group_sources,
-                                                SljitPendingPreaggregatedPrimitiveGroupBatch &pending) {
-	SljitDecidePendingPrimitiveRunStrategy(op, input, group_sources, pending);
-}
-
 bool SljitTryPreaggregateInputVectorPrimitiveGroupsIntoPending(
     ExecutionRegionRuntime &runtime, SljitRegionExecutionScratch &scratch, idx_t op_idx, SljitExecutableRegionOp &op,
     DataChunk &input, const vector<ExecutionRowPointerGroupKeySource> &group_sources,

@@ -14,21 +14,63 @@
 
 namespace duckdb {
 
-static bool TryReadProjectionSourceReferenceIndex(const SljitNativeRegionExpressionPlan &projection,
-                                                  idx_t &source_index) {
-	if (projection.kind == SljitNativeRegionExpressionKind::REFERENCE) {
-		source_index = projection.source_index;
+static void SljitAddUniqueExpressionSource(vector<idx_t> &sources, idx_t source_idx) {
+	for (auto existing : sources) {
+		if (existing == source_idx) {
+			return;
+		}
+	}
+	sources.push_back(source_idx);
+}
+
+//! The input columns an expression reads; false when its kind does not say
+static bool SljitCollectExpressionSourceIndices(const SljitExecutableRegionExpression &expr, vector<idx_t> &sources) {
+	if (!expr.input_source_indices.empty()) {
+		for (auto source_idx : expr.input_source_indices) {
+			SljitAddUniqueExpressionSource(sources, source_idx);
+		}
 		return true;
 	}
-	if (projection.kind != SljitNativeRegionExpressionKind::TYPED_EXPRESSION_TREE) {
+	auto &plan = expr.plan;
+	if (!plan.expression_tree_source_indices.empty()) {
+		for (auto source_idx : plan.expression_tree_source_indices) {
+			SljitAddUniqueExpressionSource(sources, source_idx);
+		}
+		return true;
+	}
+	switch (plan.kind) {
+	case SljitNativeRegionExpressionKind::CONSTANT:
+		return true;
+	case SljitNativeRegionExpressionKind::REFERENCE:
+	case SljitNativeRegionExpressionKind::INTEGER_BINARY_CONSTANT:
+	case SljitNativeRegionExpressionKind::DOUBLE_BINARY_CONSTANT:
+	case SljitNativeRegionExpressionKind::INTEGER_COMPARE_CONSTANT:
+	case SljitNativeRegionExpressionKind::INTEGER_CAST:
+	case SljitNativeRegionExpressionKind::SIGNED_TO_UNSIGNED_INTEGER_CAST:
+	case SljitNativeRegionExpressionKind::INTEGER_IN_LIST:
+	case SljitNativeRegionExpressionKind::INTEGER_BETWEEN:
+	case SljitNativeRegionExpressionKind::DECIMAL64_TO_DOUBLE:
+	case SljitNativeRegionExpressionKind::DECIMAL128_SCALE_UP:
+	case SljitNativeRegionExpressionKind::INTEGRAL_COMPRESS:
+	case SljitNativeRegionExpressionKind::INTEGRAL_DECOMPRESS:
+	case SljitNativeRegionExpressionKind::STRING_COMPRESS:
+	case SljitNativeRegionExpressionKind::STRING_DECOMPRESS:
+	case SljitNativeRegionExpressionKind::STRING_SUBSTRING:
+	case SljitNativeRegionExpressionKind::DATE_YEAR:
+	case SljitNativeRegionExpressionKind::ERROR_GUARDED_REFERENCE:
+	case SljitNativeRegionExpressionKind::NULL_CHECK:
+		SljitAddUniqueExpressionSource(sources, plan.source_index);
+		return true;
+	case SljitNativeRegionExpressionKind::INTEGER_BINARY_REFERENCES:
+	case SljitNativeRegionExpressionKind::DOUBLE_BINARY_REFERENCES:
+	case SljitNativeRegionExpressionKind::INTEGER_COMPARE_REFERENCES:
+	case SljitNativeRegionExpressionKind::DECIMAL128_WIDENING_MULTIPLY:
+		SljitAddUniqueExpressionSource(sources, plan.source_index);
+		SljitAddUniqueExpressionSource(sources, plan.right_source_index);
+		return true;
+	default:
 		return false;
 	}
-	if (!projection.expression_tree || projection.expression_tree->kind != ExecutionExpressionIRKind::REFERENCE ||
-	    projection.expression_tree->ref_index >= projection.expression_tree_source_indices.size()) {
-		return false;
-	}
-	source_index = projection.expression_tree_source_indices[projection.expression_tree->ref_index];
-	return true;
 }
 
 static bool SljitTryGetAggregatePayloadReferenceInputIndex(const SljitExecutableRegionExpression &expression,

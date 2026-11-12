@@ -43,21 +43,21 @@ public:
 	    const vector<Value> &source_min_values, const vector<Value> &source_max_values,
 	    vector<SljitSharedPerfectHashPredicateClassificationCache> &shared_predicate_classifications,
 	    SljitRegionExecutionScratch &scratch, SljitFullPipelineTerminalRuntimeState &terminal_state,
-	    optional_ptr<vector<SljitExecutableRegionOp>> native_continuation_source_ops)
+	    optional_ptr<SljitExecutableNativeContinuation> native_continuation_plan)
 	    : kernel(kernel_p), runtime(runtime_p), native_tail(kernel_p, runtime_p, ops),
 	      hash_join_probe(SljitMakeRecordedHashJoinProbeCallback(kernel_p, runtime_p, runtime_p.ExecutionOperators())),
 	      executor(runtime_p, result, ops, recipe, native_tail, hash_join_probe, source_distinct_counts,
 	               source_min_values, source_max_values, shared_predicate_classifications, scratch, terminal_state) {
 		executor.PrepareChunks();
-		if (native_continuation_source_ops) {
-			native_continuation = make_uniq<SljitNativeContinuation>(*native_continuation_source_ops);
+		if (native_continuation_plan) {
+			native_continuation = make_uniq<SljitNativeContinuation>(*native_continuation_plan);
 		}
 	}
 
 	optional_ptr<DataChunk> ContinuesNatively(DataChunk &input) override {
 		if (!native_continuation_decided) {
 			native_continuation_decided = true;
-			if (native_continuation && !executor.HandsOverToNative(input)) {
+			if (native_continuation && !executor.HandsOverToNative(input, native_continuation->Plan())) {
 				native_continuation.reset();
 			}
 		}
@@ -97,11 +97,11 @@ class SljitNativeOnlyChunkStep final : public ExecutionRegionChunkStep {
 public:
 	SljitNativeOnlyChunkStep(KERNEL &kernel_p, ExecutionRegionRuntime &runtime_p, vector<SljitExecutableRegionOp> &ops,
 	                         SljitRegionExecutionScratch &scratch_p,
-	                         optional_ptr<vector<SljitExecutableRegionOp>> native_continuation_source_ops)
+	                         optional_ptr<SljitExecutableNativeContinuation> native_continuation_plan)
 	    : kernel(kernel_p), runtime(runtime_p), scratch(scratch_p), native(kernel_p, runtime_p, ops) {
 		// without a recipe no generated step updates a hash aggregate: DuckDB's operators run the whole pipeline
-		if (native_continuation_source_ops) {
-			native_continuation = make_uniq<SljitNativeContinuation>(*native_continuation_source_ops);
+		if (native_continuation_plan) {
+			native_continuation = make_uniq<SljitNativeContinuation>(*native_continuation_plan);
 		}
 	}
 

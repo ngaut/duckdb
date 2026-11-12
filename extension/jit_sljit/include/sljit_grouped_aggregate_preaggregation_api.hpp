@@ -45,11 +45,6 @@ bool SljitTryPreaggregateInputVectorFusedAffinePrimitiveGroupsIntoPending(
     ExecutionGroupedAggregateStateAddressBinding &grouped_state, SljitPendingPreaggregatedPrimitiveGroupBatch &pending,
     bool finish);
 
-//! Decides once, before the region's first batch reaches the table, whether it preaggregates group runs
-void SljitDecideInputVectorPrimitiveRunStrategy(SljitExecutableRegionOp &op, DataChunk &input,
-                                                const vector<ExecutionRowPointerGroupKeySource> &group_sources,
-                                                SljitPendingPreaggregatedPrimitiveGroupBatch &pending);
-
 bool SljitTryPreaggregateInputVectorPrimitiveGroupsIntoPending(
     ExecutionRegionRuntime &runtime, SljitRegionExecutionScratch &scratch, idx_t op_idx, SljitExecutableRegionOp &op,
     DataChunk &input, const vector<ExecutionRowPointerGroupKeySource> &group_sources,

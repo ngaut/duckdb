@@ -19,7 +19,8 @@ namespace duckdb {
 //! with the source's own filters and layout repair, once the region handed its pipeline to DuckDB's operators
 class SljitNativeContinuation {
 public:
-	explicit SljitNativeContinuation(vector<SljitExecutableRegionOp> &ops_p) : ops(ops_p), adapters(ops_p.size()) {
+	explicit SljitNativeContinuation(SljitExecutableNativeContinuation &plan_p)
+	    : plan(plan_p), ops(plan_p.source_ops), adapters(ops.size()) {
 		for (idx_t op_idx = 0; op_idx < ops.size(); op_idx++) {
 			auto &op = ops[op_idx];
 			adapters[op_idx].resize(op.Kind() == SljitNativeRegionOpKind::PROJECTION ? op.Projections().size() : 1);
@@ -53,6 +54,10 @@ public:
 		return current.get();
 	}
 
+	const SljitExecutableNativeContinuation &Plan() const {
+		return plan;
+	}
+
 	SljitExpressionAdapterScratch &ExpressionAdapterScratch(idx_t op_idx, idx_t col_idx) {
 		return adapters[op_idx][col_idx];
 	}
@@ -70,6 +75,7 @@ private:
 	}
 
 private:
+	SljitExecutableNativeContinuation &plan;
 	vector<SljitExecutableRegionOp> &ops;
 	vector<vector<SljitExpressionAdapterScratch>> adapters;
 	vector<unique_ptr<DataChunk>> outputs;

@@ -17,7 +17,6 @@ struct SljitProjectedInputGroupedAggregateDescriptor;
 
 enum class SljitGroupedAggregateUpdateStrategyKind : uint8_t {
 	INVALID,
-	COUNT_STAR_PREAGGREGATION,
 	DIRECT_PRIMITIVE_PAYLOAD_UPDATE,
 	FILTERED_PRIMITIVE_PAYLOAD_UPDATE
 };
@@ -31,7 +30,6 @@ struct SljitGroupedAggregateUpdatePrimitive {
 	idx_t final_projection_idx = DConstants::INVALID_INDEX;
 	SljitGroupedAggregateUpdateStrategyKind strategy = SljitGroupedAggregateUpdateStrategyKind::INVALID;
 	SljitGroupedAggregateUpdateInputKind input_kind = SljitGroupedAggregateUpdateInputKind::MATERIALIZED;
-	shared_ptr<SljitExecutableRegionOp> projected_count_star_group_projection;
 	shared_ptr<SljitProjectedInputGroupedAggregateDescriptor> projected_direct_update;
 };
 
@@ -52,23 +50,6 @@ static bool SljitCanBindGroupedAggregateUpdatePrimitive(const vector<SljitExecut
 	return ops[aggregate_idx].AggregateUpdate().plan.sink_info.Kind() ==
 	           ExecutionRegionSinkKind::HASH_AGGREGATE_UPDATE ||
 	       SljitGroupedAggregateHasFusedFilteredKernel(ops[aggregate_idx]);
-}
-
-static bool SljitGroupedAggregateUpdateCanUseCountStarPreaggregation(const SljitExecutableRegionOp &op) {
-	if (op.Kind() != SljitNativeRegionOpKind::AGGREGATE_UPDATE ||
-	    op.AggregateUpdate().plan.sink_info.Kind() != ExecutionRegionSinkKind::HASH_AGGREGATE_UPDATE ||
-	    !op.AggregateUpdate().plan.UsesPrimitivePayloads() || !op.AggregateUpdate().plan.use_grouped_state_addresses) {
-		return false;
-	}
-	auto &sink_info = op.AggregateUpdate().plan.sink_info;
-	if (SljitAggregateSinkHasDistinctState(sink_info)) {
-		return false;
-	}
-	if (sink_info.groups.size() != 1 || sink_info.aggregates.size() != 1 || op.AggregateUpdate().payloads.size() != 1) {
-		return false;
-	}
-	auto &aggregate = sink_info.aggregates[0];
-	return aggregate.child_count == 0 && aggregate.primitive_update_kind == AggregatePrimitiveUpdateKind::COUNT_STAR;
 }
 
 static bool SljitGroupedAggregateUpdateCanUseDirectPrimitivePayloadUpdate(const SljitExecutableRegionOp &op) {
@@ -103,9 +84,6 @@ static bool SljitCanBindFilteredGroupedAggregateUpdatePrimitive(const vector<Slj
 
 static SljitGroupedAggregateUpdateStrategyKind
 SljitChooseGroupedAggregateUpdateStrategy(const SljitExecutableRegionOp &op) {
-	if (SljitGroupedAggregateUpdateCanUseCountStarPreaggregation(op)) {
-		return SljitGroupedAggregateUpdateStrategyKind::COUNT_STAR_PREAGGREGATION;
-	}
 	if (SljitGroupedAggregateUpdateCanUseDirectPrimitivePayloadUpdate(op)) {
 		return SljitGroupedAggregateUpdateStrategyKind::DIRECT_PRIMITIVE_PAYLOAD_UPDATE;
 	}

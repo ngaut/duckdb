@@ -2851,7 +2851,7 @@ TEST_CASE("JIT mark filter projection preserves selected nonmatches", "[api][jit
 	REQUIRE(diff->Collection().GetValue(0, 0).GetValue<int64_t>() == 0);
 }
 
-TEST_CASE("JIT mark filter reference aggregate slices selected projection", "[api][jit]") {
+TEST_CASE("JIT mark filter count-star over unique keys hands its pipeline to DuckDB's operators", "[api][jit]") {
 	DuckDB db;
 	Connection con(db);
 	auto &manager = ExecutionRegionManager::Get(*con.context);
@@ -2881,13 +2881,7 @@ TEST_CASE("JIT mark filter reference aggregate slices selected projection", "[ap
 	ClearJitTrace(manager, true);
 	REQUIRE_NO_FAIL(con.Query("CREATE TEMP TABLE jit_mark_reference_actual AS " + query));
 
-	RequireJitEvent(
-	    manager,
-	    [](const ExecutionRegionEvent &event) {
-		    return EventPhase(event) == "runtime" && EventStatus(event) == "executed" &&
-		           EventExecutionMode(event) == "native" && HasJitAggregateUpdatePath(event);
-	    },
-	    [](const ExecutionRegionEvent &event) { RequireGeneratedAggregateUpdateRuntimeOwnership(event); });
+	RequireNativeContinuation(manager);
 
 	REQUIRE_NO_FAIL(con.Query("SET jit_policy='off'"));
 	auto diff = con.Query("SELECT count(*) FROM ("
