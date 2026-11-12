@@ -1128,8 +1128,8 @@ static void EmitSljitSimdSadalp2d4s(struct sljit_compiler *compiler, sljit_s32 d
 void EmitSljitTypedExpressionTreeSimdSumLoop(struct sljit_compiler *compiler, const ExecutionExpressionIR &predicate,
                                              const ExecutionExpressionIR &payload,
                                              const SljitTypedExpressionTreeSimdPlan &plan, sljit_sw sum_offset,
-                                             sljit_sw count_offset, sljit_sw saw_value_offset, sljit_sw scratch_offset,
-                                             const vector<idx_t> *validity_refs,
+                                             const vector<sljit_sw> &count_offsets, sljit_sw saw_value_offset,
+                                             sljit_sw scratch_offset, const vector<idx_t> *validity_refs,
                                              const vector<SljitTypedExpressionTreeLoopHoist> *hoists) {
 	// plan is the predicate plan; the packed path requires a 32-bit (4-lane) predicate.
 	SljitSimdEmitContext ctx;
@@ -1190,17 +1190,18 @@ void EmitSljitTypedExpressionTreeSimdSumLoop(struct sljit_compiler *compiler, co
 	EmitSljitSimdOp2(compiler, sum_type | SLJIT_SIMD_OP2_ADD, SLJIT_VR(sum_acc), SLJIT_VR(sum_acc),
 	                 SLJIT_VR(sum_accs[1]), 0);
 
-	// Horizontal count: sum the 4 int32 lanes of count_acc into R2 (this group's matches).
+	// Horizontal count: sum the 4 int32 lanes of count_acc into R2 (the span's matches) and add it to every count.
 	sljit_emit_simd_mov(compiler, ctx.simd_type | SLJIT_SIMD_STORE, SLJIT_VR(count_acc), SLJIT_MEM1(SLJIT_SP),
 	                    scratch_offset);
-	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_R2, 0, SLJIT_MEM1(SLJIT_SP), count_offset);
-	sljit_emit_op1(compiler, SLJIT_MOV_S32, SLJIT_R3, 0, SLJIT_MEM1(SLJIT_SP), scratch_offset);
-	sljit_emit_op2(compiler, SLJIT_ADD, SLJIT_R2, 0, SLJIT_R2, 0, SLJIT_R3, 0);
+	sljit_emit_op1(compiler, SLJIT_MOV_S32, SLJIT_R2, 0, SLJIT_MEM1(SLJIT_SP), scratch_offset);
 	for (sljit_s32 lane = 1; lane < 4; lane++) {
 		sljit_emit_op1(compiler, SLJIT_MOV_S32, SLJIT_R3, 0, SLJIT_MEM1(SLJIT_SP), scratch_offset + lane * 4);
 		sljit_emit_op2(compiler, SLJIT_ADD, SLJIT_R2, 0, SLJIT_R2, 0, SLJIT_R3, 0);
 	}
-	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_MEM1(SLJIT_SP), count_offset, SLJIT_R2, 0);
+	for (auto count_offset : count_offsets) {
+		sljit_emit_op2(compiler, SLJIT_ADD, SLJIT_MEM1(SLJIT_SP), count_offset, SLJIT_MEM1(SLJIT_SP), count_offset,
+		               SLJIT_R2, 0);
+	}
 	// If this SIMD span matched any row, mark the aggregate state as set (sum != NULL).
 	auto no_match = sljit_emit_cmp(compiler, SLJIT_EQUAL, SLJIT_R2, 0, SLJIT_IMM, 0);
 	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_MEM1(SLJIT_SP), saw_value_offset, SLJIT_IMM, 1);

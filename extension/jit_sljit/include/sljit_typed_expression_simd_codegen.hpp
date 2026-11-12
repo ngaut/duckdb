@@ -93,7 +93,8 @@ SljitTypedExpressionTreeSimdPlan TryPlanSljitTypedExpressionTreeSimdValue(const 
 
 // Emits the packed-lane SUM(payload) filter loop: for a 4-lane int32 predicate and a
 // 32-bit column payload, accumulates the masked payload (widened to int64) and the
-// match count, then folds both into sum_offset / count_offset and sets the aggregate
+// match count, then folds the sum into sum_offset and the count into every slot of
+// count_offsets (the sum's own count and any COUNT(*) beside it) and sets the aggregate
 // "seen a value" flag at saw_value_offset. Assumes the flat all-valid context
 // (S1 = 0 on entry, S2 = count, S5 = source_data_array). Advances S1 to the last full
 // lane group; the caller's scalar fast loop handles the < lanes tail. scratch_offset
@@ -101,8 +102,8 @@ SljitTypedExpressionTreeSimdPlan TryPlanSljitTypedExpressionTreeSimdValue(const 
 void EmitSljitTypedExpressionTreeSimdSumLoop(struct sljit_compiler *compiler, const ExecutionExpressionIR &predicate,
                                              const ExecutionExpressionIR &payload,
                                              const SljitTypedExpressionTreeSimdPlan &plan, sljit_sw sum_offset,
-                                             sljit_sw count_offset, sljit_sw saw_value_offset, sljit_sw scratch_offset,
-                                             const vector<idx_t> *validity_refs = nullptr,
+                                             const vector<sljit_sw> &count_offsets, sljit_sw saw_value_offset,
+                                             sljit_sw scratch_offset, const vector<idx_t> *validity_refs = nullptr,
                                              const vector<SljitTypedExpressionTreeLoopHoist> *hoists = nullptr);
 
 // Emits the hybrid packed-mask filter loop: the predicate mask for `lanes` rows is

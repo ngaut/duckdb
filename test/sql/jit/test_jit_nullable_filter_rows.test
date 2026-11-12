@@ -3,8 +3,10 @@
 # group: [jit]
 
 # A batch with NULLs runs a row whose sources are all valid on the fast path and only a row with a NULL on the generic
-# path; an AND-only predicate skips every row with a NULL in a source it or the sums read. The predicates mix AND, OR,
-# NOT and IS NULL, a sum may read a column the predicate does not, and NULLs are rare, dense or in every row.
+# path; an AND-only predicate skips every row with a NULL in a source it or the sums read. A packed sum beside COUNT(*)
+# counts its matching lanes into every count, so a NULL it skips must be one the predicate rejects. The predicates mix
+# AND, OR, NOT and IS NULL, a sum may read a column the predicate does not, NULLs are rare, dense or in every row, and
+# the row count leaves a tail shorter than a lane group.
 
 require jit_sljit
 
@@ -37,7 +39,7 @@ SELECT (i % 13)::INTEGER AS k,
        CASE WHEN i % 10 <> 0 THEN NULL ELSE (i % 300)::INTEGER END AS dense,
        NULL::INTEGER AS empty,
        CASE WHEN i % 31 = 0 THEN NULL WHEN i % 3 = 0 THEN 'ACTIVE' ELSE 'ARCHIVED' END AS s
-FROM range(200000) t(i)
+FROM range(200003) t(i)
 
 foreach threads 1 4
 
@@ -82,6 +84,15 @@ query II nosort string_nullable
 SELECT count(*), sum(a) FROM nullable_rows WHERE s = 'ACTIVE' OR a = 7
 ----
 
+query II nosort count_beside_packed_sum
+SELECT count(*), sum(a) FROM nullable_rows WHERE k <> 3 AND a > 5
+----
+
+# the sum reads b, which the predicate does not: COUNT(*) still counts a row with a NULL b
+query II nosort count_beside_other_payload_sum
+SELECT count(*), sum(b) FROM nullable_rows WHERE k <> 3 AND a > 100
+----
+
 endloop
 
 endloop
@@ -101,6 +112,10 @@ reset label dense_nulls
 reset label all_null
 
 reset label string_nullable
+
+reset label count_beside_packed_sum
+
+reset label count_beside_other_payload_sum
 
 # the filters compile
 statement ok

@@ -119,29 +119,38 @@ unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativeFilteredUngroupedFusedPrim
 		local_size += NumericCast<sljit_sw>(sizeof(sljit_sw));
 	}
 
-	// Packed-lane COUNT(*) filter: applies when the sole aggregate is COUNT(*),
-	// the flat all-valid fast path is available, and the predicate is SIMD-
-	// profitable. Counts full lane groups with SIMD; the scalar fast loop below
-	// handles the < lanes tail.
+	// Packed-lane filters, when the flat all-valid fast path is available and the predicate packs: the sole
+	// aggregate COUNT(*) counts full lane groups, and one SUM beside any COUNT(*) sums and counts them; the scalar
+	// fast loop below handles the < lanes tail.
 	SljitTypedExpressionTreeSimdPlan simd_plan;
 	SljitTypedExpressionTreeSimdPlan simd_payload_plan;
 	bool simd_is_sum = false;
 	bool simd_is_hybrid = false;
-	if (payloads.size() == 1 && codegen_plan.fast_path_supported) {
-		auto kind = codegen_plan.payload_descriptors[0].primitive_kind;
-		if (kind == AggregatePrimitiveUpdateKind::COUNT_STAR) {
-			simd_plan = TryPlanSljitTypedExpressionTreeSimd(predicate);
-		} else if (kind == AggregatePrimitiveUpdateKind::SUM_INT64 && payloads[0].expression_tree) {
-			auto predicate_plan = TryPlanSljitTypedExpressionTreeSimd(predicate);
-			// SADALP widens int32->int64, so the packed SUM path needs a 4-lane int32
-			// predicate and a 4-lane int32 value payload; it is ARM64-only.
-			if (GetSljitTargetCapabilities().IsArm64()) {
-				auto payload_plan = TryPlanSljitTypedExpressionTreeSimdValue(*payloads[0].expression_tree, 2);
-				if (predicate_plan.supported && predicate_plan.elem_scale == 2 && payload_plan.supported) {
-					simd_plan = predicate_plan;
-					simd_payload_plan = payload_plan;
-					simd_is_sum = true;
-				}
+	idx_t sum_payload_idx = DConstants::INVALID_INDEX;
+	idx_t sum_payload_count = 0;
+	vector<sljit_sw> simd_count_offsets;
+	for (idx_t payload_idx = 0; payload_idx < payloads.size(); payload_idx++) {
+		if (codegen_plan.payload_descriptors[payload_idx].primitive_kind != AggregatePrimitiveUpdateKind::COUNT_STAR) {
+			sum_payload_idx = payload_idx;
+			sum_payload_count++;
+		}
+		simd_count_offsets.push_back(local_count_offsets[payload_idx]);
+	}
+	if (payloads.size() == 1 && sum_payload_count == 0 && codegen_plan.fast_path_supported) {
+		simd_plan = TryPlanSljitTypedExpressionTreeSimd(predicate);
+	} else if (sum_payload_count == 1 && codegen_plan.fast_path_supported &&
+	           codegen_plan.payload_descriptors[sum_payload_idx].primitive_kind ==
+	               AggregatePrimitiveUpdateKind::SUM_INT64 &&
+	           payloads[sum_payload_idx].expression_tree) {
+		auto predicate_plan = TryPlanSljitTypedExpressionTreeSimd(predicate);
+		// SADALP widens int32->int64, so the packed SUM path needs a 4-lane int32
+		// predicate and a 4-lane int32 value payload; it is ARM64-only.
+		if (GetSljitTargetCapabilities().IsArm64()) {
+			auto payload_plan = TryPlanSljitTypedExpressionTreeSimdValue(*payloads[sum_payload_idx].expression_tree, 2);
+			if (predicate_plan.supported && predicate_plan.elem_scale == 2 && payload_plan.supported) {
+				simd_plan = predicate_plan;
+				simd_payload_plan = payload_plan;
+				simd_is_sum = true;
 			}
 		}
 	}
@@ -346,9 +355,10 @@ unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativeFilteredUngroupedFusedPrim
 		if (simd_is_sum) {
 			// Sum full lane groups with packed SIMD (masked payload widened via SADALP);
 			// the scalar fast loop below finishes the < lanes remainder.
-			EmitSljitTypedExpressionTreeSimdSumLoop(compiler, predicate, *payloads[0].expression_tree, simd_plan,
-			                                        local_sum_offsets[0], local_count_offsets[0], saw_value_offsets[0],
-			                                        simd_mask_offset, nullptr, hoists);
+			EmitSljitTypedExpressionTreeSimdSumLoop(compiler, predicate, *payloads[sum_payload_idx].expression_tree,
+			                                        simd_plan, local_sum_offsets[sum_payload_idx], simd_count_offsets,
+			                                        saw_value_offsets[sum_payload_idx], simd_mask_offset, nullptr,
+			                                        hoists);
 		} else if (simd_is_hybrid) {
 			// Packed predicate mask; the payload updates stay scalar per matching lane.
 			EmitSljitTypedExpressionTreeSimdHybridFilterLoop(compiler, predicate, simd_plan, simd_mask_offset,
@@ -388,9 +398,10 @@ unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativeFilteredUngroupedFusedPrim
 			auto skip_nullable_simd = sljit_emit_cmp(compiler, SLJIT_EQUAL, SLJIT_R0, 0, SLJIT_IMM, 0);
 			sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_S1, 0, SLJIT_IMM, 0);
 			if (simd_is_sum) {
-				EmitSljitTypedExpressionTreeSimdSumLoop(
-				    compiler, predicate, *payloads[0].expression_tree, simd_plan, local_sum_offsets[0],
-				    local_count_offsets[0], saw_value_offsets[0], simd_mask_offset, &simd_validity_refs, hoists);
+				EmitSljitTypedExpressionTreeSimdSumLoop(compiler, predicate, *payloads[sum_payload_idx].expression_tree,
+				                                        simd_plan, local_sum_offsets[sum_payload_idx],
+				                                        simd_count_offsets, saw_value_offsets[sum_payload_idx],
+				                                        simd_mask_offset, &simd_validity_refs, hoists);
 			} else if (simd_is_hybrid) {
 				EmitSljitTypedExpressionTreeSimdHybridFilterLoop(compiler, predicate, simd_plan, simd_mask_offset,
 				                                                 emit_payload_updates, &simd_validity_refs, hoists);
