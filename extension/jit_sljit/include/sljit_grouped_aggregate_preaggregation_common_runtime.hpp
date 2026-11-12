@@ -44,8 +44,9 @@ static bool SljitTryInputVectorHasProfitablePrimitiveRuns(idx_t count, LOAD_KEY 
 	return true;
 }
 
-static bool
-SljitPreaggregatedInputVectorGroupRowsAllValid(const SljitPreaggregatedInputVectorGroupKeySource &group_source) {
+static bool SljitPreaggregatedInputVectorGroupRowsAllValid(SljitPreaggregatedInputVectorGroupKeySource &group_source) {
+	group_source.rows_all_valid =
+	    group_source.rows_all_valid || SljitPreaggregatedFormatRowsAllValid(group_source.format, group_source.count);
 	return group_source.rows_all_valid;
 }
 
@@ -347,9 +348,9 @@ SljitPrimitiveAggregateLanesReplayable(const vector<const ExecutionPrimitiveAggr
 	return true;
 }
 
-static bool
-SljitPreaggregatedInputVectorGroupKeyCastReplayable(SljitPreaggregatedInputVectorGroupKeySource &group_source) {
-	auto &source = *group_source.source;
+// Whether run preaggregation can replay the key's cast; a property of the source, so it is checked before the batch's
+// key is prepared.
+static bool SljitPreaggregatedInputVectorGroupKeyCastReplayable(const ExecutionRowPointerGroupKeySource &source) {
 	switch (source.cast_kind) {
 	case ExecutionRowPointerGroupKeyCastKind::NONE:
 		return source.HasOutputTransform() || source.source_physical_type == source.target_physical_type;
@@ -365,9 +366,12 @@ SljitPreaggregatedInputVectorGroupKeyCastReplayable(SljitPreaggregatedInputVecto
 	}
 }
 
-static bool SljitPreaggregatedInputVectorGroupKeyReplayable(SljitPreaggregatedInputVectorGroupKeySource &group_source) {
-	return SljitPreaggregatedInputVectorGroupRowsAllValid(group_source) &&
-	       SljitPreaggregatedInputVectorGroupKeyCastReplayable(group_source);
+static bool SljitPrepareReplayablePreaggregatedInputVectorGroupKeySource(
+    DataChunk &input, const ExecutionRowPointerGroupKeySource &source,
+    SljitPreaggregatedInputVectorGroupKeySource &group_source) {
+	return SljitPreaggregatedInputVectorGroupKeyCastReplayable(source) &&
+	       SljitPreparePreaggregatedInputVectorGroupKeySource(input, source, group_source) &&
+	       SljitPreaggregatedInputVectorGroupRowsAllValid(group_source);
 }
 
 template <class PAYLOAD_DISPATCH>

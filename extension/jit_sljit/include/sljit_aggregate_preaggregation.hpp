@@ -262,6 +262,9 @@ TryPreaggregateConsecutivePrimitiveGroups(SljitExecutableRegionOp &op, DataChunk
 struct SljitPreaggregatedInputVectorGroupKeySource {
 	const ExecutionRowPointerGroupKeySource *source = nullptr;
 	UnifiedVectorFormat format;
+	idx_t count = 0;
+	//! Proven when the source or its validity mask cannot hold NULL; the full-batch proof is only taken on demand,
+	//! because run sampling rejects most batches after a few rows
 	bool rows_all_valid = false;
 };
 
@@ -292,7 +295,8 @@ static bool SljitPreparePreaggregatedInputVectorGroupKeySource(DataChunk &input,
 	}
 	prepared.source = &source;
 	input.data[source.input_vector_index].ToUnifiedFormat(prepared.format);
-	prepared.rows_all_valid = source.all_valid || SljitPreaggregatedFormatRowsAllValid(prepared.format, input.size());
+	prepared.count = input.size();
+	prepared.rows_all_valid = source.all_valid || prepared.format.validity.CannotHaveNull();
 	if (source.HasOutputTransform()) {
 		if (source.output_transform_kind != ExecutionGroupKeyOutputTransformKind::ADD_CONSTANT) {
 			return false;

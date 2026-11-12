@@ -420,8 +420,7 @@ static bool SljitTryAccumulatePendingDenseSingleLaneGroupsTemplated(
 		return reject("economics");
 	}
 	SljitPreaggregatedInputVectorGroupKeySource group_source;
-	if (!SljitPreparePreaggregatedInputVectorGroupKeySource(input, group_sources[0], group_source) ||
-	    !SljitPreaggregatedInputVectorGroupKeyReplayable(group_source)) {
+	if (!SljitPrepareReplayablePreaggregatedInputVectorGroupKeySource(input, group_sources[0], group_source)) {
 		return reject("source");
 	}
 	if (pending.dense_single_lane_initialized) {

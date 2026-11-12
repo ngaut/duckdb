@@ -694,16 +694,16 @@ SljitTryPreparePendingPrimitiveRunInput(ExecutionRegionRuntime &runtime, SljitEx
 		blocker = "shape";
 		return false;
 	}
+	if (!SljitPreaggregatedInputVectorGroupKeyCastReplayable(group_sources[0])) {
+		blocker = "group_cast";
+		return false;
+	}
 	if (!SljitPreparePreaggregatedInputVectorGroupKeySource(input, group_sources[0], group_source)) {
 		blocker = "group_prepare";
 		return false;
 	}
 	if (!SljitPreaggregatedInputVectorGroupRowsAllValid(group_source)) {
 		blocker = "group_null";
-		return false;
-	}
-	if (!SljitPreaggregatedInputVectorGroupKeyCastReplayable(group_source)) {
-		blocker = "group_cast";
 		return false;
 	}
 	if (pending.run_strategy == SljitPendingRunStrategy::BUFFERED) {

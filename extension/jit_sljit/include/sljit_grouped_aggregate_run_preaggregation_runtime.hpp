@@ -276,8 +276,7 @@ static bool TryPreaggregateInputVectorPrimitiveGroupRunsFastTemplated(
 		return false;
 	}
 	SljitPreaggregatedInputVectorGroupKeySource group_source;
-	if (!SljitPreparePreaggregatedInputVectorGroupKeySource(input, group_sources[0], group_source) ||
-	    !SljitPreaggregatedInputVectorGroupKeyReplayable(group_source)) {
+	if (!SljitPrepareReplayablePreaggregatedInputVectorGroupKeySource(input, group_sources[0], group_source)) {
 		return false;
 	}
 	SljitPreaggregatedPrimitivePayloadSources payload_sources;
@@ -543,8 +542,7 @@ static bool TryPreaggregateInputVectorFusedPrimitiveGroupRunsFastTemplated(
 		return false;
 	}
 	SljitPreaggregatedInputVectorGroupKeySource group_source;
-	if (!SljitPreparePreaggregatedInputVectorGroupKeySource(input, group_sources[0], group_source) ||
-	    !SljitPreaggregatedInputVectorGroupKeyReplayable(group_source)) {
+	if (!SljitPrepareReplayablePreaggregatedInputVectorGroupKeySource(input, group_sources[0], group_source)) {
 		return false;
 	}
 	SljitFusedRunPreaggregationKeyDispatch dispatch {
