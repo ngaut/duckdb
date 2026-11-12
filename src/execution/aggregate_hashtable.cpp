@@ -115,8 +115,7 @@ static bool AggregateFastExistingValueMatches(const_data_ptr_t source_data, cons
                                               PhysicalType type, idx_t source_idx, idx_t layout_offset,
                                               idx_t value_size) {
 	if (type == PhysicalType::VARCHAR) {
-		return Load<string_t>(source_data + source_idx * sizeof(string_t)) ==
-		       Load<string_t>(row_data + layout_offset);
+		return Load<string_t>(source_data + source_idx * sizeof(string_t)) == Load<string_t>(row_data + layout_offset);
 	}
 	return memcmp(source_data + source_idx * value_size, row_data + layout_offset, value_size) == 0;
 }
