@@ -1718,7 +1718,8 @@ TEST_CASE("JIT CBO rejects native operator stages without generated stage credit
 	REQUIRE(profile.admission_class == "none");
 	REQUIRE(profile.native_operator_work == 0);
 	REQUIRE(profile.saved_work_per_batch == 0);
-	REQUIRE(profile.selection_reason == "rejected_native_operator_work_uncosted");
+	// a native aggregate runs in DuckDB's sink: it is no operator work the backend can own
+	REQUIRE(profile.selection_reason == "rejected_no_costed_acceleration");
 	REQUIRE_FALSE(profile.SelectedAcceleratedRunner());
 
 	input.native_aggregate_stage_count = 0;
@@ -1812,7 +1813,7 @@ TEST_CASE("JIT CBO only scores native protocol work after generated admission", 
 	REQUIRE(profile.native_operator_work == 0);
 	REQUIRE(profile.stateful_protocol_penalty == 0);
 	REQUIRE(profile.saved_work_per_batch == 0);
-	REQUIRE(profile.selection_reason == "rejected_native_operator_work_uncosted");
+	REQUIRE(profile.selection_reason == "rejected_no_costed_acceleration");
 	REQUIRE_FALSE(profile.SelectedAcceleratedRunner());
 
 	input.native_join_stage_count = 1;
@@ -1876,9 +1877,9 @@ TEST_CASE("JIT CBO scores native-stage fusion uniformly after generated admissio
 	auto profile = DuckDBCostModel::SelectPhysicalRunner(input, parameters);
 	REQUIRE(profile.rows == int64_t(input.estimated_cardinality));
 	REQUIRE(profile.admission_class == "generated_native_fusion");
-	REQUIRE(profile.native_operator_work == 5120);
+	REQUIRE(profile.native_operator_work == 4096);
 	REQUIRE(profile.stateful_protocol_penalty == 2880);
-	REQUIRE(profile.saved_work_per_batch == 2456);
+	REQUIRE(profile.saved_work_per_batch == 1432);
 	REQUIRE(profile.SelectedAcceleratedRunner());
 
 	input.estimated_cardinality = 1346398;
@@ -1908,9 +1909,9 @@ TEST_CASE("JIT CBO scores native-stage fusion uniformly after generated admissio
 	profile = DuckDBCostModel::SelectPhysicalRunner(input, parameters);
 	REQUIRE(profile.rows == int64_t(input.estimated_cardinality));
 	REQUIRE(profile.admission_class == "generated_native_fusion");
-	REQUIRE(profile.native_operator_work == 2048);
+	REQUIRE(profile.native_operator_work == 1024);
 	REQUIRE(profile.stateful_protocol_penalty == 720);
-	REQUIRE(profile.saved_work_per_batch == 1374);
+	REQUIRE(profile.saved_work_per_batch == 350);
 	REQUIRE(profile.SelectedAcceleratedRunner());
 }
 
@@ -1935,7 +1936,7 @@ TEST_CASE("JIT CBO charges grouped aggregate fusion against parallel vectorized 
 	high_grouped_native_stage_shape.has_accelerated_work = true;
 
 	auto profile = DuckDBCostModel::SelectPhysicalRunner(high_grouped_native_stage_shape, parameters);
-	REQUIRE(profile.saved_work_per_batch == 3724);
+	REQUIRE(profile.saved_work_per_batch == 652);
 	REQUIRE(profile.SelectedAcceleratedRunner());
 
 	parameters.vectorized_parallelism = 12;
@@ -2851,7 +2852,7 @@ TEST_CASE("JIT CBO trusts padded finalized dynamic-filter estimates", "[api][jit
 	input.estimated_cardinality++;
 	profile = DuckDBCostModel::SelectPhysicalRunner(input, parameters);
 	REQUIRE(profile.generated_backend_stage_work > 0);
-	REQUIRE(profile.native_operator_work == 3 * int64_t(parameters.compiled_vectorized.native_operator_stage_benefit));
+	REQUIRE(profile.native_operator_work == 2 * int64_t(parameters.compiled_vectorized.native_operator_stage_benefit));
 	REQUIRE(profile.SelectedAcceleratedRunner());
 
 	input.estimated_cardinality = STANDARD_VECTOR_SIZE * 4;
@@ -3261,7 +3262,8 @@ TEST_CASE("JIT CBO requires backend ownership before funding stateful native sou
 	REQUIRE(profile.SelectedAcceleratedRunner());
 }
 
-TEST_CASE("JIT CBO admits configured grouped aggregate work without synthetic full-pipeline penalty", "[api][jit]") {
+TEST_CASE("JIT CBO admits generated work beside a native grouped aggregate without crediting the aggregate",
+          "[api][jit]") {
 	PhysicalRunnerCostInput input;
 	input.estimated_cardinality = 2048;
 	input.expression_cost = 100;
@@ -3280,21 +3282,23 @@ TEST_CASE("JIT CBO admits configured grouped aggregate work without synthetic fu
 	auto profile = DuckDBCostModel::SelectPhysicalRunner(input, parameters);
 	REQUIRE(profile.generated_expression_work == 100);
 	REQUIRE(profile.generated_stage_work == 100);
-	REQUIRE(profile.native_operator_work == 4096);
+	REQUIRE(profile.native_operator_work == 0);
 	REQUIRE(profile.full_pipeline_work == 0);
 	REQUIRE(profile.stateful_protocol_penalty == 0);
-	REQUIRE(profile.saved_work_per_batch == 4296);
+	REQUIRE(profile.saved_work_per_batch == 200);
+	REQUIRE(profile.admission_class == "generated");
 	REQUIRE(ExecutionRegionJitRuntimeProofRequired(profile.required_runtime_proofs,
 	                                               ExecutionRegionJitRuntimeProof::ACCELERATED_STAGE_WORK));
-	REQUIRE(ExecutionRegionJitRuntimeProofRequired(profile.required_runtime_proofs,
-	                                               ExecutionRegionJitRuntimeProof::BACKEND_OWNED_WORK));
+	// the aggregate runs in DuckDB's sink, so no backend-owned work is promised
+	REQUIRE_FALSE(ExecutionRegionJitRuntimeProofRequired(profile.required_runtime_proofs,
+	                                                     ExecutionRegionJitRuntimeProof::BACKEND_OWNED_WORK));
 	REQUIRE_FALSE(ExecutionRegionJitRuntimeProofRequired(profile.required_runtime_proofs,
 	                                                     ExecutionRegionJitRuntimeProof::FULL_PIPELINE_OWNERSHIP));
 	REQUIRE(profile.SelectedAcceleratedRunner());
 
 	input.expression_cost = 10000;
 	profile = DuckDBCostModel::SelectPhysicalRunner(input, parameters);
-	REQUIRE(profile.saved_work_per_batch == 24096);
+	REQUIRE(profile.saved_work_per_batch == 20000);
 	REQUIRE(profile.SelectedAcceleratedRunner());
 }
 

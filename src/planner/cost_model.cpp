@@ -320,8 +320,9 @@ static PhysicalRunnerShapeFacts PhysicalRunnerBuildShapeFacts(const PhysicalRunn
 	facts.source_contract_input_rows = SaturatingCostCast(input.source_contract_input_cardinality);
 	facts.source_contract_input_batches = PhysicalRunnerBatches(facts.source_contract_input_rows);
 	facts.source_contract_output_cardinality_unknown = input.source_contract_output_cardinality_unknown;
-	facts.native_operator_stage_count =
-	    input.native_join_stage_count + input.native_aggregate_stage_count + input.native_sort_stage_count;
+	// A native aggregate stage runs in DuckDB's own sink, which the backend never owns (a generated update counts as a
+	// generated stage instead): only joins and sorts are native operator work the runtime can prove
+	facts.native_operator_stage_count = input.native_join_stage_count + input.native_sort_stage_count;
 	facts.has_generated_compute_work = input.generated_work_class != PhysicalRunnerGeneratedWorkClass::NONE &&
 	                                   input.generated_work_class != PhysicalRunnerGeneratedWorkClass::PROJECTION_GLUE;
 	facts.no_native_sort = input.native_sort_stage_count == 0;
@@ -680,12 +681,8 @@ static void PhysicalRunnerComputeWorkComponents(const PhysicalRunnerCostInput &i
 	D_ASSERT(input.generated_backend_stage_count >= input.generated_grouped_aggregate_stage_count);
 	if (PhysicalRunnerNativeOperatorBenefitPays(input, evaluation, admission)) {
 		const auto native_operator_stage_benefit = SaturatingCostCast(evaluation.axis.native_operator_stage_benefit);
-		auto native_operator_stage_count = facts.native_operator_stage_count;
-		if (PhysicalRunnerSmallFinalizedDynamicNativeAggregateTail(input)) {
-			native_operator_stage_count -= input.native_aggregate_stage_count;
-		}
 		profile.native_operator_work =
-		    MultiplyCost(SaturatingCostCast(native_operator_stage_count), native_operator_stage_benefit);
+		    MultiplyCost(SaturatingCostCast(facts.native_operator_stage_count), native_operator_stage_benefit);
 	}
 	if (PhysicalRunnerMaterializationElisionBenefitCanPay(input, evaluation)) {
 		profile.materialization_elision_work =
