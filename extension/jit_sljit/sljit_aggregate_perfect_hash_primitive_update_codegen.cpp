@@ -52,87 +52,107 @@ unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativePerfectHashGroupedFusedPri
 	sljit_emit_enter(compiler, 0, SLJIT_ARGS1V(P), 5 | SLJIT_ENTER_FLOAT(2), 5, 0);
 	EmitInitSljitNativeVectorLoop(compiler);
 
-	auto loop = sljit_emit_label(compiler);
-	auto done = sljit_emit_cmp(compiler, SLJIT_GREATER_EQUAL, SLJIT_S1, 0, SLJIT_S2, 0);
-	EmitLoadFusedAggregateExecuteIndex(compiler);
-	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_S4, 0, SLJIT_IMM, 0);
-	for (idx_t group_idx = 0; group_idx < group_plans.size(); group_idx++) {
-		auto &group = group_plans[group_idx];
-		EmitLoadFusedAggregateGroupSourceIndex(compiler, group_idx, SLJIT_R1);
-		auto group_is_null = EmitFusedAggregateJumpIfGroupValidityNull(compiler, group_idx, SLJIT_R1);
-		EmitLoadFusedAggregateGroupData(compiler, group_idx, group, SLJIT_R1, SLJIT_R2, false, SLJIT_R0);
-		if (group.minimum != 0) {
-			sljit_emit_op2(compiler, SLJIT_SUB, SLJIT_R2, 0, SLJIT_R2, 0, SLJIT_IMM,
-			               NumericCast<sljit_sw>(group.minimum));
+	// One row loop per input shape: flat inputs (no execute, group or payload selection) read every input at the row's
+	// position; any other chunk resolves each input's selection per row
+	auto emit_row_loop = [&](bool flat) {
+		auto loop = sljit_emit_label(compiler);
+		auto done = sljit_emit_cmp(compiler, SLJIT_GREATER_EQUAL, SLJIT_S1, 0, SLJIT_S2, 0);
+		EmitLoadFusedAggregateExecuteIndex(compiler, flat);
+		sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_S4, 0, SLJIT_IMM, 0);
+		for (idx_t group_idx = 0; group_idx < group_plans.size(); group_idx++) {
+			auto &group = group_plans[group_idx];
+			EmitLoadFusedAggregateGroupSourceIndex(compiler, group_idx, SLJIT_R1,
+			                                       flat ? SljitFusedAggregateGroupIndexMode::LOGICAL
+			                                            : SljitFusedAggregateGroupIndexMode::SELECTED_NULLABLE);
+			auto group_is_null = EmitFusedAggregateJumpIfGroupValidityNull(compiler, group_idx, SLJIT_R1);
+			EmitLoadFusedAggregateGroupData(compiler, group_idx, group, SLJIT_R1, SLJIT_R2, false, SLJIT_R0);
+			if (group.minimum != 0) {
+				sljit_emit_op2(compiler, SLJIT_SUB, SLJIT_R2, 0, SLJIT_R2, 0, SLJIT_IMM,
+				               NumericCast<sljit_sw>(group.minimum));
+			}
+			sljit_emit_op2(compiler, SLJIT_ADD, SLJIT_R2, 0, SLJIT_R2, 0, SLJIT_IMM, 1);
+			if (group.shift != 0) {
+				sljit_emit_op2(compiler, SLJIT_SHL, SLJIT_R2, 0, SLJIT_R2, 0, SLJIT_IMM,
+				               NumericCast<sljit_sw>(group.shift));
+			}
+			sljit_emit_op2(compiler, SLJIT_ADD, SLJIT_S4, 0, SLJIT_S4, 0, SLJIT_R2, 0);
+			auto group_done = sljit_emit_jump(compiler, SLJIT_JUMP);
+			auto group_null_label = sljit_emit_label(compiler);
+			sljit_set_label(group_is_null, group_null_label);
+			sljit_set_label(group_done, sljit_emit_label(compiler));
 		}
-		sljit_emit_op2(compiler, SLJIT_ADD, SLJIT_R2, 0, SLJIT_R2, 0, SLJIT_IMM, 1);
-		if (group.shift != 0) {
-			sljit_emit_op2(compiler, SLJIT_SHL, SLJIT_R2, 0, SLJIT_R2, 0, SLJIT_IMM,
-			               NumericCast<sljit_sw>(group.shift));
-		}
-		sljit_emit_op2(compiler, SLJIT_ADD, SLJIT_S4, 0, SLJIT_S4, 0, SLJIT_R2, 0);
-		auto group_done = sljit_emit_jump(compiler, SLJIT_JUMP);
-		auto group_null_label = sljit_emit_label(compiler);
-		sljit_set_label(group_is_null, group_null_label);
-		sljit_set_label(group_done, sljit_emit_label(compiler));
-	}
-	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_R0, 0, SLJIT_MEM1(SLJIT_S0),
-	               offsetof(SljitNativeVectorInput, perfect_hash_total_groups));
-	group_out_of_range.push_back(sljit_emit_cmp(compiler, SLJIT_GREATER_EQUAL, SLJIT_S4, 0, SLJIT_R0, 0));
-	EmitSljitPerfectHashSetOutputGroup(compiler, SLJIT_S4);
-	EmitSljitPerfectHashStatePointer(compiler, SLJIT_S4, SLJIT_S4);
+		sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_R0, 0, SLJIT_MEM1(SLJIT_S0),
+		               offsetof(SljitNativeVectorInput, perfect_hash_total_groups));
+		group_out_of_range.push_back(sljit_emit_cmp(compiler, SLJIT_GREATER_EQUAL, SLJIT_S4, 0, SLJIT_R0, 0));
+		EmitSljitPerfectHashSetOutputGroup(compiler, SLJIT_S4);
+		EmitSljitPerfectHashStatePointer(compiler, SLJIT_S4, SLJIT_S4);
 
-	for (idx_t payload_idx = 0; payload_idx < payloads.size(); payload_idx++) {
-		auto &descriptor = descriptors[payload_idx];
-		const auto state_offset = contract.grouped_state_offsets[descriptor.aggregate_index];
-		if (descriptor.primitive_kind == AggregatePrimitiveUpdateKind::COUNT_STAR) {
-			EmitSljitGroupedAggregateIncrementInt64Immediate(compiler, SLJIT_S4, state_offset,
-			                                                 descriptor.state_value_offset);
-			continue;
-		}
-		auto &payload = payloads[payload_idx];
-		EmitLoadFusedAggregateSourceIndex(compiler, offsetof(SljitNativeVectorInput, source_sel_array), payload_idx,
-		                                  SLJIT_R1, true);
-		auto source_is_null = EmitFusedAggregateJumpIfValidityNull(
-		    compiler, offsetof(SljitNativeVectorInput, source_validity_array), payload_idx, SLJIT_R1);
-		if (descriptor.primitive_kind == AggregatePrimitiveUpdateKind::COUNT) {
-			EmitSljitGroupedAggregateIncrementInt64Immediate(compiler, SLJIT_S4, state_offset,
-			                                                 descriptor.state_value_offset);
-		} else if (descriptor.primitive_kind == AggregatePrimitiveUpdateKind::SUM_INT64) {
-			EmitLoadFusedAggregateIntegerData(compiler, offsetof(SljitNativeVectorInput, source_data_array),
-			                                  payload_idx, payload.integer_kind, SLJIT_R1, SLJIT_R2);
-			EmitSljitGroupedAggregateAccumulateInt64Immediate(compiler, SLJIT_S4, state_offset,
-			                                                  descriptor.state_value_offset,
-			                                                  descriptor.state_is_set_offset, SLJIT_R2);
-		} else if (descriptor.primitive_kind == AggregatePrimitiveUpdateKind::SUM_HUGEINT) {
-			if (descriptor.IsDoubleWord()) {
-				EmitLoadFusedAggregateHugeintData(compiler, offsetof(SljitNativeVectorInput, source_data_array),
-				                                  payload_idx, SLJIT_R1, SLJIT_R2, SLJIT_R3);
-				EmitSljitGroupedAggregateAccumulateHugeintValueImmediate(
-				    compiler, SLJIT_S4, state_offset, descriptor.state_value_offset, descriptor.state_is_set_offset,
-				    SLJIT_R2, SLJIT_R3);
+		for (idx_t payload_idx = 0; payload_idx < payloads.size(); payload_idx++) {
+			auto &descriptor = descriptors[payload_idx];
+			const auto state_offset = contract.grouped_state_offsets[descriptor.aggregate_index];
+			if (descriptor.primitive_kind == AggregatePrimitiveUpdateKind::COUNT_STAR) {
+				EmitSljitGroupedAggregateIncrementInt64Immediate(compiler, SLJIT_S4, state_offset,
+				                                                 descriptor.state_value_offset);
+				continue;
+			}
+			auto &payload = payloads[payload_idx];
+			if (flat) {
+				sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_R1, 0, SLJIT_S3, 0);
 			} else {
+				EmitLoadFusedAggregateSourceIndex(compiler, offsetof(SljitNativeVectorInput, source_sel_array),
+				                                  payload_idx, SLJIT_R1, true);
+			}
+			auto source_is_null = EmitFusedAggregateJumpIfValidityNull(
+			    compiler, offsetof(SljitNativeVectorInput, source_validity_array), payload_idx, SLJIT_R1);
+			if (descriptor.primitive_kind == AggregatePrimitiveUpdateKind::COUNT) {
+				EmitSljitGroupedAggregateIncrementInt64Immediate(compiler, SLJIT_S4, state_offset,
+				                                                 descriptor.state_value_offset);
+			} else if (descriptor.primitive_kind == AggregatePrimitiveUpdateKind::SUM_INT64) {
 				EmitLoadFusedAggregateIntegerData(compiler, offsetof(SljitNativeVectorInput, source_data_array),
 				                                  payload_idx, payload.integer_kind, SLJIT_R1, SLJIT_R2);
-				EmitSljitGroupedAggregateAccumulateHugeintImmediate(compiler, SLJIT_S4, state_offset,
-				                                                    descriptor.state_value_offset,
-				                                                    descriptor.state_is_set_offset, SLJIT_R2);
+				EmitSljitGroupedAggregateAccumulateInt64Immediate(compiler, SLJIT_S4, state_offset,
+				                                                  descriptor.state_value_offset,
+				                                                  descriptor.state_is_set_offset, SLJIT_R2);
+			} else if (descriptor.primitive_kind == AggregatePrimitiveUpdateKind::SUM_HUGEINT) {
+				if (descriptor.IsDoubleWord()) {
+					EmitLoadFusedAggregateHugeintData(compiler, offsetof(SljitNativeVectorInput, source_data_array),
+					                                  payload_idx, SLJIT_R1, SLJIT_R2, SLJIT_R3);
+					EmitSljitGroupedAggregateAccumulateHugeintValueImmediate(
+					    compiler, SLJIT_S4, state_offset, descriptor.state_value_offset, descriptor.state_is_set_offset,
+					    SLJIT_R2, SLJIT_R3);
+				} else {
+					EmitLoadFusedAggregateIntegerData(compiler, offsetof(SljitNativeVectorInput, source_data_array),
+					                                  payload_idx, payload.integer_kind, SLJIT_R1, SLJIT_R2);
+					EmitSljitGroupedAggregateAccumulateHugeintImmediate(compiler, SLJIT_S4, state_offset,
+					                                                    descriptor.state_value_offset,
+					                                                    descriptor.state_is_set_offset, SLJIT_R2);
+				}
+			} else {
+				EmitLoadFusedAggregateDoubleData(compiler, offsetof(SljitNativeVectorInput, source_data_array),
+				                                 payload_idx, SLJIT_R1, SLJIT_FR0);
+				EmitSljitGroupedAggregateAccumulateDoubleImmediate(compiler, SLJIT_S4, state_offset,
+				                                                   descriptor.state_value_offset,
+				                                                   descriptor.state_is_set_offset, SLJIT_FR0);
 			}
-		} else {
-			EmitLoadFusedAggregateDoubleData(compiler, offsetof(SljitNativeVectorInput, source_data_array), payload_idx,
-			                                 SLJIT_R1, SLJIT_FR0);
-			EmitSljitGroupedAggregateAccumulateDoubleImmediate(compiler, SLJIT_S4, state_offset,
-			                                                   descriptor.state_value_offset,
-			                                                   descriptor.state_is_set_offset, SLJIT_FR0);
+			auto payload_done = sljit_emit_jump(compiler, SLJIT_JUMP);
+			auto payload_invalid = sljit_emit_label(compiler);
+			sljit_set_label(source_is_null, payload_invalid);
+			sljit_set_label(payload_done, sljit_emit_label(compiler));
 		}
-		auto payload_done = sljit_emit_jump(compiler, SLJIT_JUMP);
-		auto payload_invalid = sljit_emit_label(compiler);
-		sljit_set_label(source_is_null, payload_invalid);
-		sljit_set_label(payload_done, sljit_emit_label(compiler));
-	}
-	EmitNextSljitNativeVectorLoop(compiler, loop);
+		EmitNextSljitNativeVectorLoop(compiler, loop);
+		return done;
+	};
 
-	sljit_set_label(done, sljit_emit_label(compiler));
+	sljit_emit_op1(compiler, SLJIT_MOV_U8, SLJIT_R0, 0, SLJIT_MEM1(SLJIT_S0),
+	               offsetof(SljitNativeVectorInput, perfect_hash_inputs_flat_no_selection));
+	auto inputs_selected = sljit_emit_cmp(compiler, SLJIT_EQUAL, SLJIT_R0, 0, SLJIT_IMM, 0);
+	auto flat_done = emit_row_loop(true);
+	sljit_set_label(inputs_selected, sljit_emit_label(compiler));
+	auto selected_done = emit_row_loop(false);
+
+	auto done_label = sljit_emit_label(compiler);
+	sljit_set_label(flat_done, done_label);
+	sljit_set_label(selected_done, done_label);
 	sljit_emit_return_void(compiler);
 
 	auto range_error_label = sljit_emit_label(compiler);

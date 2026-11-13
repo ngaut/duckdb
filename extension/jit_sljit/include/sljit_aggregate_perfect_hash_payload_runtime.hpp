@@ -233,16 +233,14 @@ static void SljitExecuteFusedPerfectHashGroupedPrimitiveAggregatePayloadUpdate(
 	    uses_combined_payload_sources ? group_sources.SelectionArray() : group_sources.SelectionArrayOrNull();
 	native_input.group_validity_array =
 	    uses_combined_payload_sources ? group_sources.ValidityArray() : group_sources.ValidityArrayOrNull();
-	if (uses_combined_payload_sources) {
-		native_input.expression_tree_flat_no_selection = payload_flat_no_selection;
-		native_input.expression_tree_flat_all_valid = payload_flat_all_valid;
-		native_input.expression_tree_all_valid = payload_all_valid;
-		native_input.perfect_hash_group_flat_all_valid = group_flat_all_valid;
-		native_input.perfect_hash_group_all_valid = group_all_valid;
-		native_input.perfect_hash_inputs_flat_no_selection = payload_flat_no_selection && group_flat_no_selection;
-		native_input.perfect_hash_inputs_all_valid = payload_all_valid && group_all_valid;
-		native_input.group_selection_all_present = group_selection_all_present;
-	}
+	native_input.expression_tree_flat_no_selection = payload_flat_no_selection;
+	native_input.expression_tree_flat_all_valid = payload_flat_all_valid;
+	native_input.expression_tree_all_valid = payload_all_valid;
+	native_input.perfect_hash_group_flat_all_valid = group_flat_all_valid;
+	native_input.perfect_hash_group_all_valid = group_all_valid;
+	native_input.perfect_hash_inputs_flat_no_selection = payload_flat_no_selection && group_flat_no_selection;
+	native_input.perfect_hash_inputs_all_valid = payload_all_valid && group_all_valid;
+	native_input.group_selection_all_present = group_selection_all_present;
 	native_input.perfect_hash_state_data = layout.data;
 	native_input.perfect_hash_group_is_set = layout.group_is_set;
 	native_input.perfect_hash_total_groups = layout.total_groups;

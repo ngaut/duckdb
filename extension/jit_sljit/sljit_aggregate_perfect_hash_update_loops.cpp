@@ -298,6 +298,7 @@ void EmitSljitPerfectHashFusedUpdateLoops(const SljitPerfectHashFusedUpdateEmitC
 	struct sljit_jump *common_selected_group_present_fast_done = nullptr;
 	struct sljit_jump *common_selected_fast_done = nullptr;
 	struct sljit_jump *selected_fast_done = nullptr;
+	struct sljit_jump *flat_nullable_done = nullptr;
 	struct sljit_jump *use_nullable_group_loop = nullptr;
 	struct sljit_jump *use_partially_selected_group_loop = nullptr;
 
@@ -414,6 +415,25 @@ void EmitSljitPerfectHashFusedUpdateLoops(const SljitPerfectHashFusedUpdateEmitC
 		sljit_set_label(use_generic_selected_loop, generic_selected_loop_label);
 		sljit_set_label(use_nullable_group_loop, generic_selected_loop_label);
 		sljit_set_label(use_partially_selected_group_loop, generic_selected_loop_label);
+
+		// Flat inputs with nullable group keys or payloads: every input is read at the row's position, and validity
+		// is checked as in the generic loop. Group flags are set per row: a group whose payloads were all NULL keeps
+		// its states unset.
+		sljit_emit_op1(compiler, SLJIT_MOV_U8, SLJIT_R0, 0, SLJIT_MEM1(SLJIT_S0),
+		               offsetof(SljitNativeVectorInput, perfect_hash_inputs_flat_no_selection));
+		auto inputs_selected = sljit_emit_cmp(compiler, SLJIT_EQUAL, SLJIT_R0, 0, SLJIT_IMM, 0);
+		loop_options = SljitPerfectHashUpdateLoopOptions();
+		loop_options.reset_index = true;
+		loop_options.direct_logical_index = true;
+		loop_options.no_source_selection = true;
+		loop_options.predicate_data_hoists = data_hoists;
+		loop_options.group_lookup.check_group_validity = true;
+		loop_options.group_lookup.materialize_state_pointer = !update_plan.dense_reduction_plan.Ready();
+		loop_options.group_lookup.direct_group_index = true;
+		loop_options.payload_update = SljitPerfectHashPayloadUpdateOptionsForLoop(false, false, true, data_hoists);
+		flat_nullable_done = EmitSljitPerfectHashUpdateLoop(context, loop_options);
+		auto generic_label = sljit_emit_label(compiler);
+		sljit_set_label(inputs_selected, generic_label);
 		sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_S1, 0, SLJIT_IMM, 0);
 	}
 
@@ -450,6 +470,9 @@ void EmitSljitPerfectHashFusedUpdateLoops(const SljitPerfectHashFusedUpdateEmitC
 	}
 	if (selected_fast_done) {
 		sljit_set_label(selected_fast_done, done_label);
+	}
+	if (flat_nullable_done) {
+		sljit_set_label(flat_nullable_done, done_label);
 	}
 	sljit_set_label(done, done_label);
 }
