@@ -485,6 +485,8 @@ struct SljitNativePredicateInput {
 	idx_t selected_count = 0;
 	idx_t count = 0;
 	bool sources_all_valid = false;
+	//! neither the rows (execute_sel) nor any source (source_sel) carries a selection
+	bool rows_flat = false;
 	//! A partial-SIMD predicate whose residual reads one dictionary source: the residual's result for each dictionary
 	//! entry (1 passes; false and NULL do not), indexed through that source's selection; nullptr evaluates the residual
 	//! row by row

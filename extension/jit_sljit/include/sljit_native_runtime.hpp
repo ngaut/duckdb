@@ -31,6 +31,8 @@ struct SljitNativePredicateSourceAdapter {
 	const validity_t **ValidityArray();
 	idx_t SourceCount() const;
 	bool SourcesAllValid() const;
+	//! No source carries a selection
+	bool SourcesFlat() const;
 	//! After Prepare: the residual run over the dictionary of the source in source_slot, one result per entry, which
 	//! the selection predicate looks rows up in; nullptr when that source is not a dictionary over a flat vector at
 	//! most an eighth the size of the chunk (each entry costs a residual evaluation, as each row reaching the
@@ -44,6 +46,7 @@ private:
 	vector<const sel_t *> source_sel;
 	vector<const validity_t *> source_validity;
 	bool sources_all_valid = false;
+	bool sources_flat = false;
 	vector<uint8_t> residual_dictionary;
 	vector<validity_t> residual_dictionary_validity;
 	vector<const_data_ptr_t> residual_dictionary_data;
@@ -65,6 +68,7 @@ static SljitNativePredicateInput SljitPrepareNativePredicateInput(ADAPTER_SCRATC
 	native_input.source_sel = predicate_sources.SelectionArray();
 	native_input.source_validity = predicate_sources.ValidityArray();
 	native_input.sources_all_valid = predicate_sources.SourcesAllValid();
+	native_input.rows_flat = !execute_sel && predicate_sources.SourcesFlat();
 	native_input.execute_sel = execute_sel ? execute_sel->data() : nullptr;
 	native_input.result_data = result_data;
 	native_input.result_validity = result_validity;

@@ -19,30 +19,30 @@ namespace duckdb {
 
 bool TryEmitSljitStringPredicateBranches(struct sljit_compiler *compiler, const SljitNativePredicate &predicate,
                                          vector<shared_ptr<void>> &owned_data, const vector<bool> &source_not_null,
-                                         bool sources_all_valid, SljitPredicateBranches &result) {
+                                         const SljitPredicateRowShape &row, SljitPredicateBranches &result) {
 	switch (predicate.kind) {
 	case SljitNativePredicateKind::STRING_EQUAL_CONSTANT:
-		EmitLoadPredicateStringForMatch(compiler, predicate.source_index, result, source_not_null, sources_all_valid);
+		EmitLoadPredicateStringForMatch(compiler, predicate.source_index, result, source_not_null, row);
 		EmitStringEqualBranches(compiler, predicate.string_constant, result);
 		return true;
 	case SljitNativePredicateKind::STRING_IN_LIST_CONSTANT:
-		EmitLoadPredicateStringForMatch(compiler, predicate.source_index, result, source_not_null, sources_all_valid);
+		EmitLoadPredicateStringForMatch(compiler, predicate.source_index, result, source_not_null, row);
 		EmitStringInListBranches(compiler, predicate, result, owned_data);
 		return true;
 	case SljitNativePredicateKind::STRING_PREFIX_CONSTANT:
-		EmitLoadPredicateStringForMatch(compiler, predicate.source_index, result, source_not_null, sources_all_valid);
+		EmitLoadPredicateStringForMatch(compiler, predicate.source_index, result, source_not_null, row);
 		EmitStringPrefixBranches(compiler, predicate.string_constant, result);
 		return true;
 	case SljitNativePredicateKind::STRING_SUFFIX_CONSTANT:
-		EmitLoadPredicateStringForMatch(compiler, predicate.source_index, result, source_not_null, sources_all_valid);
+		EmitLoadPredicateStringForMatch(compiler, predicate.source_index, result, source_not_null, row);
 		EmitStringSuffixBranches(compiler, predicate.string_constant, result);
 		return true;
 	case SljitNativePredicateKind::STRING_CONTAINS_CONSTANT:
-		EmitLoadPredicateStringForMatch(compiler, predicate.source_index, result, source_not_null, sources_all_valid);
+		EmitLoadPredicateStringForMatch(compiler, predicate.source_index, result, source_not_null, row);
 		EmitStringContainsBranches(compiler, predicate.string_constant, result);
 		return true;
 	case SljitNativePredicateKind::STRING_LIKE_CONSTANT: {
-		EmitLoadPredicateStringForMatch(compiler, predicate.source_index, result, source_not_null, sources_all_valid);
+		EmitLoadPredicateStringForMatch(compiler, predicate.source_index, result, source_not_null, row);
 		auto pattern = AddStringConstantCodeData(owned_data, predicate.string_constant);
 		sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_R0, 0, SLJIT_R4, 0);
 		sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_R1, 0, SLJIT_R2, 0);
@@ -62,9 +62,8 @@ bool TryEmitSljitStringPredicateBranches(struct sljit_compiler *compiler, const 
 		static constexpr sljit_sw STRING_INLINE_PREFIX_OFFSET = sizeof(uint32_t);
 		const auto substring_length = predicate.substring_length;
 		const auto inline_length = std::min<idx_t>(substring_length, string_t::PREFIX_LENGTH);
-		EmitLoadPredicateSourceIndex(compiler, predicate.source_index, SLJIT_S3, SLJIT_R1);
-		AppendPredicateSourceNullJump(compiler, result, predicate.source_index, SLJIT_R1, source_not_null,
-		                              sources_all_valid);
+		EmitLoadPredicateSourceIndex(compiler, predicate.source_index, SLJIT_S3, SLJIT_R1, row);
+		AppendPredicateSourceNullJump(compiler, result, predicate.source_index, SLJIT_R1, source_not_null, row);
 		EmitLoadPredicateStringPointer(compiler, predicate.source_index, SLJIT_R0, SLJIT_R1);
 		sljit_emit_op1(compiler, SLJIT_MOV_U32, SLJIT_R2, 0, SLJIT_MEM1(SLJIT_R0), STRING_LENGTH_OFFSET);
 		result.false_jumps.push_back(

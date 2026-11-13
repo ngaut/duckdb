@@ -23,10 +23,10 @@ struct SljitPredicateBranches;
 
 static void SetPredicateJumpLabels(const vector<sljit_jump *> &jumps, sljit_label *label);
 static void EmitLoadPredicateSourceIndex(struct sljit_compiler *compiler, idx_t source_index, sljit_s32 logical_index,
-                                         sljit_s32 target);
+                                         sljit_s32 target, const SljitPredicateRowShape &row);
 static void AppendPredicateSourceNullJump(struct sljit_compiler *compiler, SljitPredicateBranches &result,
                                           idx_t source_index, sljit_s32 index_reg, const vector<bool> &source_not_null,
-                                          bool sources_all_valid);
+                                          const SljitPredicateRowShape &row);
 
 static void EmitLoadPredicateStringPointer(struct sljit_compiler *compiler, idx_t source_index, sljit_s32 target,
                                            sljit_s32 index_reg) {
@@ -54,11 +54,11 @@ static void EmitLoadPredicateStringDataPointer(struct sljit_compiler *compiler, 
 
 static void EmitLoadPredicateStringForMatch(struct sljit_compiler *compiler, idx_t source_index,
                                             SljitPredicateBranches &result, const vector<bool> &source_not_null,
-                                            bool sources_all_valid) {
+                                            const SljitPredicateRowShape &row) {
 	static_assert(sizeof(string_t) == 16, "SLJIT string match expects DuckDB string_t ABI size");
 	static constexpr sljit_sw STRING_LENGTH_OFFSET = 0;
-	EmitLoadPredicateSourceIndex(compiler, source_index, SLJIT_S3, SLJIT_R1);
-	AppendPredicateSourceNullJump(compiler, result, source_index, SLJIT_R1, source_not_null, sources_all_valid);
+	EmitLoadPredicateSourceIndex(compiler, source_index, SLJIT_S3, SLJIT_R1, row);
+	AppendPredicateSourceNullJump(compiler, result, source_index, SLJIT_R1, source_not_null, row);
 	EmitLoadPredicateStringPointer(compiler, source_index, SLJIT_R0, SLJIT_R1);
 	sljit_emit_op1(compiler, SLJIT_MOV_U32, SLJIT_R2, 0, SLJIT_MEM1(SLJIT_R0), STRING_LENGTH_OFFSET);
 	EmitLoadPredicateStringDataPointer(compiler, SLJIT_R0, SLJIT_R2, SLJIT_R4);

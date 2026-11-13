@@ -44,16 +44,15 @@ static void EmitSljitDoubleCompareBranches(struct sljit_compiler *compiler, Slji
 }
 
 bool TryEmitSljitNumericPredicateBranches(struct sljit_compiler *compiler, const SljitNativePredicate &predicate,
-                                          const vector<bool> &source_not_null, bool sources_all_valid,
+                                          const vector<bool> &source_not_null, const SljitPredicateRowShape &row,
                                           SljitPredicateBranches &result) {
 	switch (predicate.kind) {
 	case SljitNativePredicateKind::INTEGER_COMPARE_CONSTANT: {
 		auto data_scale = NativeIntegerDataScale(predicate.integer_kind);
 		auto load_op = NativeIntegerLoadOp(predicate.integer_kind);
 		auto compare_type = NativeIntegerCompareJumpType(predicate.integer_kind, predicate.compare_op);
-		EmitLoadPredicateSourceIndex(compiler, predicate.source_index, SLJIT_S3, SLJIT_R1);
-		AppendPredicateSourceNullJump(compiler, result, predicate.source_index, SLJIT_R1, source_not_null,
-		                              sources_all_valid);
+		EmitLoadPredicateSourceIndex(compiler, predicate.source_index, SLJIT_S3, SLJIT_R1, row);
+		AppendPredicateSourceNullJump(compiler, result, predicate.source_index, SLJIT_R1, source_not_null, row);
 		EmitLoadPredicateSourceData(compiler, predicate.source_index, SLJIT_R2, SLJIT_R1, data_scale, load_op);
 		if (predicate.constant_on_left) {
 			result.true_jumps.push_back(sljit_emit_cmp(compiler, compare_type, SLJIT_IMM,
@@ -69,12 +68,10 @@ bool TryEmitSljitNumericPredicateBranches(struct sljit_compiler *compiler, const
 		auto data_scale = NativeIntegerDataScale(predicate.integer_kind);
 		auto load_op = NativeIntegerLoadOp(predicate.integer_kind);
 		auto compare_type = NativeIntegerCompareJumpType(predicate.integer_kind, predicate.compare_op);
-		EmitLoadPredicateSourceIndex(compiler, predicate.source_index, SLJIT_S3, SLJIT_R1);
-		EmitLoadPredicateSourceIndex(compiler, predicate.right_source_index, SLJIT_S3, SLJIT_S4);
-		AppendPredicateSourceNullJump(compiler, result, predicate.source_index, SLJIT_R1, source_not_null,
-		                              sources_all_valid);
-		AppendPredicateSourceNullJump(compiler, result, predicate.right_source_index, SLJIT_S4, source_not_null,
-		                              sources_all_valid);
+		EmitLoadPredicateSourceIndex(compiler, predicate.source_index, SLJIT_S3, SLJIT_R1, row);
+		EmitLoadPredicateSourceIndex(compiler, predicate.right_source_index, SLJIT_S3, SLJIT_S4, row);
+		AppendPredicateSourceNullJump(compiler, result, predicate.source_index, SLJIT_R1, source_not_null, row);
+		AppendPredicateSourceNullJump(compiler, result, predicate.right_source_index, SLJIT_S4, source_not_null, row);
 		EmitLoadPredicateSourceData(compiler, predicate.source_index, SLJIT_R2, SLJIT_R1, data_scale, load_op);
 		EmitLoadPredicateSourceData(compiler, predicate.right_source_index, SLJIT_R3, SLJIT_S4, data_scale, load_op);
 		result.true_jumps.push_back(sljit_emit_cmp(compiler, compare_type, SLJIT_R2, 0, SLJIT_R3, 0));
@@ -86,9 +83,8 @@ bool TryEmitSljitNumericPredicateBranches(struct sljit_compiler *compiler, const
 		// the value is the left operand
 		auto compare_op =
 		    predicate.constant_on_left ? FlipNativeIntegerCompareOp(predicate.compare_op) : predicate.compare_op;
-		EmitLoadPredicateSourceIndex(compiler, predicate.source_index, SLJIT_S3, SLJIT_R1);
-		AppendPredicateSourceNullJump(compiler, result, predicate.source_index, SLJIT_R1, source_not_null,
-		                              sources_all_valid);
+		EmitLoadPredicateSourceIndex(compiler, predicate.source_index, SLJIT_S3, SLJIT_R1, row);
+		AppendPredicateSourceNullJump(compiler, result, predicate.source_index, SLJIT_R1, source_not_null, row);
 		EmitLoadPredicateDoubleOperand(compiler, predicate.double_source_kind, predicate.source_index, SLJIT_R1,
 		                               predicate.double_source_decimal_scale, SLJIT_FR0);
 		if (single_precision) {
@@ -104,12 +100,10 @@ bool TryEmitSljitNumericPredicateBranches(struct sljit_compiler *compiler, const
 		static constexpr sljit_sw LEFT_SPILL_OFFSET = SLJIT_SELECT_LOCAL_SIZE;
 		static constexpr sljit_sw RIGHT_SPILL_OFFSET = SLJIT_SELECT_LOCAL_SIZE + sizeof(double);
 		auto single_precision = PredicateDoubleSourceIsSinglePrecision(predicate.double_source_kind);
-		EmitLoadPredicateSourceIndex(compiler, predicate.source_index, SLJIT_S3, SLJIT_R1);
-		EmitLoadPredicateSourceIndex(compiler, predicate.right_source_index, SLJIT_S3, SLJIT_S4);
-		AppendPredicateSourceNullJump(compiler, result, predicate.source_index, SLJIT_R1, source_not_null,
-		                              sources_all_valid);
-		AppendPredicateSourceNullJump(compiler, result, predicate.right_source_index, SLJIT_S4, source_not_null,
-		                              sources_all_valid);
+		EmitLoadPredicateSourceIndex(compiler, predicate.source_index, SLJIT_S3, SLJIT_R1, row);
+		EmitLoadPredicateSourceIndex(compiler, predicate.right_source_index, SLJIT_S3, SLJIT_S4, row);
+		AppendPredicateSourceNullJump(compiler, result, predicate.source_index, SLJIT_R1, source_not_null, row);
+		AppendPredicateSourceNullJump(compiler, result, predicate.right_source_index, SLJIT_S4, source_not_null, row);
 		if (NativeDoubleSourceUsesHelper(predicate.double_source_kind) ||
 		    NativeDoubleSourceUsesHelper(predicate.double_right_source_kind)) {
 			EmitLoadPredicateDoubleOperand(compiler, predicate.double_source_kind, predicate.source_index, SLJIT_R1,
@@ -136,9 +130,8 @@ bool TryEmitSljitNumericPredicateBranches(struct sljit_compiler *compiler, const
 	case SljitNativePredicateKind::INT128_COMPARE_CONSTANT: {
 		auto compare_op =
 		    predicate.constant_on_left ? FlipNativeIntegerCompareOp(predicate.compare_op) : predicate.compare_op;
-		EmitLoadPredicateSourceIndex(compiler, predicate.source_index, SLJIT_S3, SLJIT_R1);
-		AppendPredicateSourceNullJump(compiler, result, predicate.source_index, SLJIT_R1, source_not_null,
-		                              sources_all_valid);
+		EmitLoadPredicateSourceIndex(compiler, predicate.source_index, SLJIT_S3, SLJIT_R1, row);
+		AppendPredicateSourceNullJump(compiler, result, predicate.source_index, SLJIT_R1, source_not_null, row);
 		EmitLoadPredicateInt128SourceWord(compiler, predicate.source_index, SLJIT_R2, SLJIT_R1,
 		                                  offsetof(hugeint_t, lower), SLJIT_R4);
 		EmitLoadPredicateInt128SourceWord(compiler, predicate.source_index, SLJIT_R3, SLJIT_R1,
@@ -149,12 +142,10 @@ bool TryEmitSljitNumericPredicateBranches(struct sljit_compiler *compiler, const
 		return true;
 	}
 	case SljitNativePredicateKind::INT128_COMPARE_REFERENCES:
-		EmitLoadPredicateSourceIndex(compiler, predicate.source_index, SLJIT_S3, SLJIT_R1);
-		EmitLoadPredicateSourceIndex(compiler, predicate.right_source_index, SLJIT_S3, SLJIT_S4);
-		AppendPredicateSourceNullJump(compiler, result, predicate.source_index, SLJIT_R1, source_not_null,
-		                              sources_all_valid);
-		AppendPredicateSourceNullJump(compiler, result, predicate.right_source_index, SLJIT_S4, source_not_null,
-		                              sources_all_valid);
+		EmitLoadPredicateSourceIndex(compiler, predicate.source_index, SLJIT_S3, SLJIT_R1, row);
+		EmitLoadPredicateSourceIndex(compiler, predicate.right_source_index, SLJIT_S3, SLJIT_S4, row);
+		AppendPredicateSourceNullJump(compiler, result, predicate.source_index, SLJIT_R1, source_not_null, row);
+		AppendPredicateSourceNullJump(compiler, result, predicate.right_source_index, SLJIT_S4, source_not_null, row);
 		EmitLoadPredicateInt128SourceWord(compiler, predicate.source_index, SLJIT_R2, SLJIT_R1,
 		                                  offsetof(hugeint_t, lower), SLJIT_R4);
 		EmitLoadPredicateInt128SourceWord(compiler, predicate.source_index, SLJIT_R3, SLJIT_R1,
@@ -169,9 +160,8 @@ bool TryEmitSljitNumericPredicateBranches(struct sljit_compiler *compiler, const
 	case SljitNativePredicateKind::INTEGER_IN_LIST: {
 		auto data_scale = NativeIntegerDataScale(predicate.integer_kind);
 		auto load_op = NativeIntegerLoadOp(predicate.integer_kind);
-		EmitLoadPredicateSourceIndex(compiler, predicate.source_index, SLJIT_S3, SLJIT_R1);
-		AppendPredicateSourceNullJump(compiler, result, predicate.source_index, SLJIT_R1, source_not_null,
-		                              sources_all_valid);
+		EmitLoadPredicateSourceIndex(compiler, predicate.source_index, SLJIT_S3, SLJIT_R1, row);
+		AppendPredicateSourceNullJump(compiler, result, predicate.source_index, SLJIT_R1, source_not_null, row);
 		EmitLoadPredicateSourceData(compiler, predicate.source_index, SLJIT_R2, SLJIT_R1, data_scale, load_op);
 		for (auto constant : predicate.constants) {
 			auto match = sljit_emit_cmp(compiler, SLJIT_EQUAL, SLJIT_R2, 0, SLJIT_IMM, NumericCast<sljit_sw>(constant));
@@ -195,9 +185,8 @@ bool TryEmitSljitNumericPredicateBranches(struct sljit_compiler *compiler, const
 		auto load_op = NativeIntegerLoadOp(predicate.integer_kind);
 		auto lower_failure = NativeIntegerLowerBoundFailureJump(predicate.integer_kind, predicate.lower_inclusive);
 		auto upper_failure = NativeIntegerUpperBoundFailureJump(predicate.integer_kind, predicate.upper_inclusive);
-		EmitLoadPredicateSourceIndex(compiler, predicate.source_index, SLJIT_S3, SLJIT_R1);
-		AppendPredicateSourceNullJump(compiler, result, predicate.source_index, SLJIT_R1, source_not_null,
-		                              sources_all_valid);
+		EmitLoadPredicateSourceIndex(compiler, predicate.source_index, SLJIT_S3, SLJIT_R1, row);
+		AppendPredicateSourceNullJump(compiler, result, predicate.source_index, SLJIT_R1, source_not_null, row);
 		EmitLoadPredicateSourceData(compiler, predicate.source_index, SLJIT_R2, SLJIT_R1, data_scale, load_op);
 		auto lower_failed =
 		    sljit_emit_cmp(compiler, lower_failure, SLJIT_R2, 0, SLJIT_IMM, NumericCast<sljit_sw>(predicate.lower));

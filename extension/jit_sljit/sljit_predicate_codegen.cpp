@@ -91,7 +91,8 @@ static void EmitSljitPartialSimdResidualRow(struct sljit_compiler *compiler, con
 	// their own selections and validity, which the ordinary predicate emitter
 	// resolves from S3 without any TPCH-specific assumptions.
 	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_S3, 0, SLJIT_S1, 0);
-	auto branches = EmitSljitPredicateBranches(compiler, residual, owned_data, residual.source_not_null, false);
+	auto branches =
+	    EmitSljitPredicateBranches(compiler, residual, owned_data, residual.source_not_null, SljitPredicateRowShape());
 
 	auto matched = sljit_emit_label(compiler);
 	SetPredicateJumpLabels(branches.true_jumps, matched);
@@ -117,13 +118,16 @@ static void EmitSljitPartialSimdDictionaryResidualRow(struct sljit_compiler *com
 
 static sljit_jump *EmitSljitNativePredicateLoop(struct sljit_compiler *compiler, const SljitNativePredicate &predicate,
                                                 bool materialize_result, vector<shared_ptr<void>> &owned_data,
-                                                bool sources_all_valid) {
+                                                const SljitPredicateRowShape &row) {
+	if (!materialize_result) {
+		sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_PREDICATE_SELECTED_COUNT, 0, SLJIT_MEM1(SLJIT_SP),
+		               SLJIT_SELECT_TRUE_COUNT_OFFSET);
+	}
 	auto loop = sljit_emit_label(compiler);
-	auto done = sljit_emit_cmp(compiler, SLJIT_GREATER_EQUAL, SLJIT_S1, 0, SLJIT_S2, 0);
-	EmitLoadPredicateLogicalIndex(compiler, SLJIT_S3);
+	auto rows_done = sljit_emit_cmp(compiler, SLJIT_GREATER_EQUAL, SLJIT_S1, 0, SLJIT_S2, 0);
+	EmitLoadPredicateLogicalIndex(compiler, SLJIT_S3, row);
 
-	auto branches =
-	    EmitSljitPredicateBranches(compiler, predicate, owned_data, predicate.source_not_null, sources_all_valid);
+	auto branches = EmitSljitPredicateBranches(compiler, predicate, owned_data, predicate.source_not_null, row);
 	auto false_label = sljit_emit_label(compiler);
 	SetPredicateJumpLabels(branches.false_jumps, false_label);
 	if (materialize_result) {
@@ -163,7 +167,45 @@ static sljit_jump *EmitSljitNativePredicateLoop(struct sljit_compiler *compiler,
 	sljit_emit_op2(compiler, SLJIT_ADD, SLJIT_S1, 0, SLJIT_S1, 0, SLJIT_IMM, 1);
 	auto repeat = sljit_emit_jump(compiler, SLJIT_JUMP);
 	sljit_set_label(repeat, loop);
-	return done;
+	sljit_set_label(rows_done, sljit_emit_label(compiler));
+	if (!materialize_result) {
+		sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_MEM1(SLJIT_SP), SLJIT_SELECT_TRUE_COUNT_OFFSET,
+		               SLJIT_PREDICATE_SELECTED_COUNT, 0);
+	}
+	return sljit_emit_jump(compiler, SLJIT_JUMP);
+}
+
+//! Emits the row loop once per row shape a chunk can have, most specific first; a chunk enters the first loop whose
+//! shape it has
+static void EmitSljitNativePredicateRowLoops(struct sljit_compiler *compiler, const SljitNativePredicate &predicate,
+                                             bool materialize_result, vector<shared_ptr<void>> &owned_data,
+                                             vector<sljit_jump *> &done_jumps) {
+	const bool validity_shapes = SljitPredicateUsesSourceValidity(predicate, predicate.source_not_null);
+	for (const bool flat : {true, false}) {
+		for (const bool sources_all_valid : {true, false}) {
+			if (sources_all_valid && !validity_shapes) {
+				continue;
+			}
+			SljitPredicateRowShape row;
+			row.flat = flat;
+			row.sources_all_valid = sources_all_valid;
+			vector<sljit_jump *> other_shape;
+			if (row.flat) {
+				sljit_emit_op1(compiler, SLJIT_MOV_U8, SLJIT_R0, 0, SLJIT_MEM1(SLJIT_S0),
+				               offsetof(SljitNativePredicateInput, rows_flat));
+				other_shape.push_back(sljit_emit_cmp(compiler, SLJIT_EQUAL, SLJIT_R0, 0, SLJIT_IMM, 0));
+			}
+			if (row.sources_all_valid) {
+				sljit_emit_op1(compiler, SLJIT_MOV_U8, SLJIT_R0, 0, SLJIT_MEM1(SLJIT_S0),
+				               offsetof(SljitNativePredicateInput, sources_all_valid));
+				other_shape.push_back(sljit_emit_cmp(compiler, SLJIT_EQUAL, SLJIT_R0, 0, SLJIT_IMM, 0));
+			}
+			EmitResetPredicateLoopState(compiler, materialize_result);
+			done_jumps.push_back(
+			    EmitSljitNativePredicateLoop(compiler, predicate, materialize_result, owned_data, row));
+			SetPredicateJumpLabels(other_shape, sljit_emit_label(compiler));
+		}
+	}
 }
 
 unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativePredicate(const SljitNativePredicate &predicate,
@@ -193,7 +235,7 @@ unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativePredicate(const SljitNativ
 	}
 	sljit_sw simd_mask_offset = 0;
 	sljit_s32 scratches = 5 | SLJIT_ENTER_FLOAT(3);
-	sljit_s32 saved_registers = 5;
+	sljit_s32 saved_registers = SLJIT_PREDICATE_SAVED_REGISTERS;
 	if (partial_simd.supported) {
 		simd_mask_offset = (local_size + 15) & ~sljit_sw(15);
 		local_size = simd_mask_offset + 24;
@@ -205,9 +247,10 @@ unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativePredicate(const SljitNativ
 			vector_register_count++;
 		}
 		scratches |= SLJIT_ENTER_VECTOR(NumericCast<sljit_s32>(vector_register_count));
-		saved_registers = partial_simd.HasResidualDictionary()
-		                      ? GetSljitPredicateDictionaryResidualRegisterLayout().saved_register_count
-		                      : native_registers.saved_register_count;
+		saved_registers = MaxValue(SLJIT_PREDICATE_SAVED_REGISTERS,
+		                           partial_simd.HasResidualDictionary()
+		                               ? GetSljitPredicateDictionaryResidualRegisterLayout().saved_register_count
+		                               : native_registers.saved_register_count);
 	}
 	sljit_emit_enter(compiler, 0, SLJIT_ARGS1V(P), scratches, saved_registers, local_size);
 	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_S2, 0, SLJIT_MEM1(SLJIT_S0), offsetof(SljitNativePredicateInput, count));
@@ -250,22 +293,11 @@ unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativePredicate(const SljitNativ
 		}
 		// Fewer than one packed group remains. Preserve the running append count and
 		// evaluate the complete predicate for this bounded tail.
-		done_jumps.push_back(EmitSljitNativePredicateLoop(compiler, predicate, false, owned_data, false));
+		done_jumps.push_back(
+		    EmitSljitNativePredicateLoop(compiler, predicate, false, owned_data, SljitPredicateRowShape()));
 		SetPredicateJumpLabels(fallback_jumps, sljit_emit_label(compiler));
 	}
-	if (SljitPredicateUsesSourceValidity(predicate, predicate.source_not_null)) {
-		sljit_emit_op1(compiler, SLJIT_MOV_U8, SLJIT_R0, 0, SLJIT_MEM1(SLJIT_S0),
-		               offsetof(SljitNativePredicateInput, sources_all_valid));
-		auto generic_loop = sljit_emit_cmp(compiler, SLJIT_EQUAL, SLJIT_R0, 0, SLJIT_IMM, 0);
-		EmitResetPredicateLoopState(compiler, materialize_result);
-		done_jumps.push_back(EmitSljitNativePredicateLoop(compiler, predicate, materialize_result, owned_data, true));
-		sljit_set_label(generic_loop, sljit_emit_label(compiler));
-		EmitResetPredicateLoopState(compiler, materialize_result);
-		done_jumps.push_back(EmitSljitNativePredicateLoop(compiler, predicate, materialize_result, owned_data, false));
-	} else {
-		EmitResetPredicateLoopState(compiler, materialize_result);
-		done_jumps.push_back(EmitSljitNativePredicateLoop(compiler, predicate, materialize_result, owned_data, false));
-	}
+	EmitSljitNativePredicateRowLoops(compiler, predicate, materialize_result, owned_data, done_jumps);
 
 	auto done_label = sljit_emit_label(compiler);
 	SetPredicateJumpLabels(done_jumps, done_label);

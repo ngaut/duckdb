@@ -125,6 +125,7 @@ void SljitNativePredicateSourceAdapter::Reset() {
 	source_sel.clear();
 	source_validity.clear();
 	sources_all_valid = false;
+	sources_flat = false;
 }
 
 void SljitNativePredicateSourceAdapter::Prepare(DataChunk *input, const vector<idx_t> &input_source_indices) {
@@ -145,6 +146,7 @@ void SljitNativePredicateSourceAdapter::Prepare(DataChunk *input, const vector<i
 	source_sel.assign(source_count, nullptr);
 	source_validity.assign(source_count, nullptr);
 	sources_all_valid = true;
+	sources_flat = true;
 	for (idx_t source_idx = 0; source_idx < source_count; source_idx++) {
 		auto column_idx = input_source_indices[source_idx];
 		if (column_idx >= input->ColumnCount()) {
@@ -158,6 +160,7 @@ void SljitNativePredicateSourceAdapter::Prepare(DataChunk *input, const vector<i
 		                                  ? nullptr
 		                                  : formats[source_idx].validity.GetData();
 		sources_all_valid = sources_all_valid && source_validity[source_idx] == nullptr;
+		sources_flat = sources_flat && !sel;
 	}
 }
 
@@ -201,6 +204,7 @@ const uint8_t *SljitNativePredicateSourceAdapter::ResidualDictionary(DataChunk &
 	dictionary_input.source_sel = residual_dictionary_sel.data();
 	dictionary_input.source_validity = residual_dictionary_source_validity.data();
 	dictionary_input.sources_all_valid = entries_all_valid;
+	dictionary_input.rows_flat = true;
 	dictionary_input.result_data = residual_dictionary.data();
 	dictionary_input.result_validity = residual_dictionary_validity.data();
 	dictionary_input.count = entries;
@@ -226,6 +230,10 @@ idx_t SljitNativePredicateSourceAdapter::SourceCount() const {
 
 bool SljitNativePredicateSourceAdapter::SourcesAllValid() const {
 	return sources_all_valid;
+}
+
+bool SljitNativePredicateSourceAdapter::SourcesFlat() const {
+	return sources_flat;
 }
 
 } // namespace duckdb

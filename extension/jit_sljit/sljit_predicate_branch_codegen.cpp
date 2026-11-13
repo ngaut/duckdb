@@ -15,17 +15,16 @@ namespace duckdb {
 SljitPredicateBranches EmitSljitPredicateBranches(struct sljit_compiler *compiler,
                                                   const SljitNativePredicate &predicate,
                                                   vector<shared_ptr<void>> &owned_data,
-                                                  const vector<bool> &source_not_null, bool sources_all_valid) {
+                                                  const vector<bool> &source_not_null,
+                                                  const SljitPredicateRowShape &row) {
 	SljitPredicateBranches result;
-	if (TryEmitSljitStructuralPredicateBranches(compiler, predicate, owned_data, source_not_null, sources_all_valid,
-	                                            result)) {
+	if (TryEmitSljitStructuralPredicateBranches(compiler, predicate, owned_data, source_not_null, row, result)) {
 		return result;
 	}
-	if (TryEmitSljitNumericPredicateBranches(compiler, predicate, source_not_null, sources_all_valid, result)) {
+	if (TryEmitSljitNumericPredicateBranches(compiler, predicate, source_not_null, row, result)) {
 		return result;
 	}
-	if (TryEmitSljitStringPredicateBranches(compiler, predicate, owned_data, source_not_null, sources_all_valid,
-	                                        result)) {
+	if (TryEmitSljitStringPredicateBranches(compiler, predicate, owned_data, source_not_null, row, result)) {
 		return result;
 	}
 	throw InternalException("Unknown SLJIT native predicate kind");

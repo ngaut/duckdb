@@ -181,6 +181,14 @@ enum class SljitNativeAggregateSumStateKind : uint8_t { INT64, HUGEINT };
 static constexpr sljit_sw SLJIT_DATE_NEGATIVE_INFINITY_DAYS = -2147483647;
 static constexpr sljit_sw SLJIT_DATE_POSITIVE_INFINITY_DAYS = 2147483647;
 static constexpr sljit_sw SLJIT_SELECT_TRUE_COUNT_OFFSET = 0;
+
+//! What a generated predicate's row loop knows about its chunk, checked once before the loop
+struct SljitPredicateRowShape {
+	//! no source has a validity mask
+	bool sources_all_valid = false;
+	//! neither the rows nor any source carries a selection: a row's logical and source indices are its position
+	bool flat = false;
+};
 static constexpr sljit_sw SLJIT_SELECT_RESULT_INDEX_OFFSET = sizeof(sljit_sw);
 static constexpr sljit_sw SLJIT_SELECT_LOCAL_SIZE = 2 * sizeof(sljit_sw);
 
