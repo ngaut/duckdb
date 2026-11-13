@@ -480,8 +480,8 @@ struct SljitNativePredicateInput {
 	const sel_t *execute_sel = nullptr;
 	data_ptr_t result_data = nullptr;
 	validity_t *result_validity = nullptr;
+	//! the matching rows' logical indices, when the predicate selects instead of materializing a result
 	sel_t *true_sel = nullptr;
-	sel_t *false_sel = nullptr;
 	idx_t selected_count = 0;
 	idx_t count = 0;
 	bool sources_all_valid = false;

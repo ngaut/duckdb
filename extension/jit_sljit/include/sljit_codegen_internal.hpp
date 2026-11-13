@@ -262,6 +262,11 @@ void EmitSljitDecimal64ToDouble(struct sljit_compiler *compiler, sljit_s32 value
                                 const SljitOperand &scale, sljit_s32 target);
 //! R0/R1 hold a raw DECIMAL128 value's lower and upper words
 void EmitSljitDecimal128ToDouble(struct sljit_compiler *compiler, const SljitOperand &scale, sljit_s32 target);
+//! Loads the operand at base_reg[index_reg] of a source that converts without a helper call
+//! (!NativeDoubleSourceUsesHelper); clobbers R2
+void EmitLoadNativeDoubleOperandAt(struct sljit_compiler *compiler, SljitNativeDoubleSourceKind kind,
+                                   sljit_s32 base_reg, sljit_s32 index_reg, sljit_s32 target,
+                                   bool single_precision = false);
 //! Loads a double operand; a decimal source converts exactly as DuckDB casts it, so its loader may call a helper.
 //! decimal_offset is the input's SljitNativeDecimalSourceScale for that source.
 void EmitLoadNativeDoubleOperand(struct sljit_compiler *compiler, SljitNativeDoubleSourceKind kind,

@@ -55,11 +55,10 @@ private:
 };
 
 template <class ADAPTER_SCRATCH>
-static SljitNativePredicateInput SljitPrepareNativePredicateInput(ADAPTER_SCRATCH &adapter_scratch, DataChunk &input,
-                                                                  const vector<idx_t> &source_indices,
-                                                                  const SelectionVector *execute_sel, idx_t count,
-                                                                  data_ptr_t result_data, validity_t *result_validity,
-                                                                  sel_t *true_sel, sel_t *false_sel) {
+static SljitNativePredicateInput
+SljitPrepareNativePredicateInput(ADAPTER_SCRATCH &adapter_scratch, DataChunk &input,
+                                 const vector<idx_t> &source_indices, const SelectionVector *execute_sel, idx_t count,
+                                 data_ptr_t result_data, validity_t *result_validity, sel_t *true_sel) {
 	auto &predicate_sources = adapter_scratch.predicate_sources;
 	predicate_sources.Prepare(&input, source_indices);
 
@@ -73,7 +72,6 @@ static SljitNativePredicateInput SljitPrepareNativePredicateInput(ADAPTER_SCRATC
 	native_input.result_data = result_data;
 	native_input.result_validity = result_validity;
 	native_input.true_sel = true_sel;
-	native_input.false_sel = false_sel;
 	native_input.selected_count = 0;
 	native_input.count = count;
 	return native_input;

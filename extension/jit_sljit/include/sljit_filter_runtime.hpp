@@ -248,7 +248,7 @@ static idx_t SljitSelectExpression(const SljitExecutableRegionExpression &expres
 		}
 		auto native_input =
 		    SljitPrepareNativePredicateInput(adapter_scratch, input, expression.input_source_indices, execute_sel,
-		                                     count, nullptr, nullptr, filter_selection.data(), nullptr);
+		                                     count, nullptr, nullptr, filter_selection.data());
 		if (expression.predicate_residual_dictionary.Function() && !execute_sel) {
 			native_input.residual_dictionary = adapter_scratch.predicate_sources.ResidualDictionary(
 			    input, expression.input_source_indices, expression.predicate_residual_dictionary_source,

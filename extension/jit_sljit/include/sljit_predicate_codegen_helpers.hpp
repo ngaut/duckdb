@@ -134,24 +134,14 @@ static void EmitLoadPredicateSourceData(struct sljit_compiler *compiler, idx_t s
 static constexpr sljit_s32 SLJIT_PREDICATE_SELECTED_COUNT = SLJIT_S5;
 static constexpr sljit_s32 SLJIT_PREDICATE_SAVED_REGISTERS = 6;
 
-//! The row loop holds the row's logical index in S3
+//! Appends the row's logical index, which the row loop holds in S3, to the selection a selecting predicate always
+//! receives
 static void EmitPredicateStoreTrueSelection(struct sljit_compiler *compiler) {
 	sljit_emit_op1(compiler, SLJIT_MOV_P, SLJIT_R0, 0, SLJIT_MEM1(SLJIT_S0),
 	               offsetof(SljitNativePredicateInput, true_sel));
-	auto no_true_sel = sljit_emit_cmp(compiler, SLJIT_EQUAL, SLJIT_R0, 0, SLJIT_IMM, 0);
 	sljit_emit_op1(compiler, SLJIT_MOV_U32, SLJIT_MEM2(SLJIT_R0, SLJIT_PREDICATE_SELECTED_COUNT), 2, SLJIT_S3, 0);
-	sljit_set_label(no_true_sel, sljit_emit_label(compiler));
 	sljit_emit_op2(compiler, SLJIT_ADD, SLJIT_PREDICATE_SELECTED_COUNT, 0, SLJIT_PREDICATE_SELECTED_COUNT, 0, SLJIT_IMM,
 	               1);
-}
-
-static void EmitPredicateStoreFalseSelection(struct sljit_compiler *compiler) {
-	sljit_emit_op2(compiler, SLJIT_SUB, SLJIT_R2, 0, SLJIT_S1, 0, SLJIT_PREDICATE_SELECTED_COUNT, 0);
-	sljit_emit_op1(compiler, SLJIT_MOV_P, SLJIT_R0, 0, SLJIT_MEM1(SLJIT_S0),
-	               offsetof(SljitNativePredicateInput, false_sel));
-	auto no_false_sel = sljit_emit_cmp(compiler, SLJIT_EQUAL, SLJIT_R0, 0, SLJIT_IMM, 0);
-	sljit_emit_op1(compiler, SLJIT_MOV_U32, SLJIT_MEM2(SLJIT_R0, SLJIT_R2), 2, SLJIT_S3, 0);
-	sljit_set_label(no_false_sel, sljit_emit_label(compiler));
 }
 
 static void EmitStorePredicateResultInvalid(struct sljit_compiler *compiler) {

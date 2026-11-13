@@ -19,7 +19,8 @@ SET threads=1
 
 statement ok
 CREATE TABLE facts AS
-SELECT (i % 97)::INTEGER AS g, (i % 100000)::DECIMAL(15,2) AS price, (i * 0.37)::DOUBLE / 7 AS dbl
+SELECT (i % 97)::INTEGER AS g, (i % 100000)::DECIMAL(15,2) AS price, (i * 0.37)::DOUBLE / 7 AS dbl,
+       CASE WHEN i % 5 = 0 THEN NULL ELSE (i * 0.11)::DOUBLE / 3 END AS nd, i AS id
 FROM range(400000) tbl(i)
 
 foreach policy off auto
@@ -32,6 +33,10 @@ CREATE OR REPLACE TABLE r_{policy} AS
 SELECT 'filtered' AS q, sum(dbl * 3) AS a, avg(dbl) AS b, sum(price::DOUBLE * 1.5) AS c FROM facts WHERE g < 50
 UNION ALL
 SELECT 'plain', sum(dbl), avg(dbl * 3), sum(dbl * dbl) FROM facts
+UNION ALL
+SELECT 'nullable', sum(nd), avg(nd * 2), sum(id::DOUBLE * 0.5) FROM facts WHERE g < 70
+UNION ALL
+SELECT 'all_null', sum(nd), sum(nd * 2), sum(dbl) FROM facts WHERE id % 5 = 0 AND g < 3
 
 endloop
 
@@ -40,3 +45,8 @@ SELECT count(*) FROM ((SELECT * FROM r_off EXCEPT ALL SELECT * FROM r_auto)
                       UNION ALL (SELECT * FROM r_auto EXCEPT ALL SELECT * FROM r_off))
 ----
 0
+
+query III
+SELECT a IS NULL, b IS NULL, c IS NULL FROM r_auto WHERE q = 'all_null'
+----
+true	true	false

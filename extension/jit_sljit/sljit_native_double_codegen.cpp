@@ -108,6 +108,25 @@ void EmitSljitDecimal128ToDouble(struct sljit_compiler *compiler, const SljitOpe
 	sljit_emit_fop1(compiler, SLJIT_MOV_F64, target, 0, SLJIT_RETURN_FREG, 0);
 }
 
+void EmitLoadNativeDoubleOperandAt(struct sljit_compiler *compiler, SljitNativeDoubleSourceKind kind,
+                                   sljit_s32 base_reg, sljit_s32 index_reg, sljit_s32 target, bool single_precision) {
+	switch (kind) {
+	case SljitNativeDoubleSourceKind::FLOAT:
+		sljit_emit_fmem(compiler, SLJIT_MOV_F32 | SLJIT_MEM_ALIGNED_16, target, SLJIT_MEM2(base_reg, index_reg), 2);
+		return;
+	case SljitNativeDoubleSourceKind::DOUBLE:
+		sljit_emit_fmem(compiler, SLJIT_MOV_F64 | SLJIT_MEM_ALIGNED_32, target, SLJIT_MEM2(base_reg, index_reg), 3);
+		return;
+	case SljitNativeDoubleSourceKind::INT64_TO_DOUBLE:
+		sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_R2, 0, SLJIT_MEM2(base_reg, index_reg), 3);
+		sljit_emit_fop1(compiler, single_precision ? SLJIT_CONV_F32_FROM_SW : SLJIT_CONV_F64_FROM_SW, target, 0,
+		                SLJIT_R2, 0);
+		return;
+	default:
+		throw InternalException("SLJIT double source that converts through a helper loaded from a base register");
+	}
+}
+
 void EmitLoadNativeDoubleOperand(struct sljit_compiler *compiler, SljitNativeDoubleSourceKind kind,
                                  sljit_sw data_offset, sljit_s32 index_reg, sljit_sw decimal_offset, sljit_s32 target,
                                  bool single_precision) {
@@ -118,15 +137,9 @@ void EmitLoadNativeDoubleOperand(struct sljit_compiler *compiler, SljitNativeDou
 	sljit_emit_op1(compiler, SLJIT_MOV_P, SLJIT_R0, 0, SLJIT_MEM1(SLJIT_S0), data_offset);
 	switch (kind) {
 	case SljitNativeDoubleSourceKind::FLOAT:
-		sljit_emit_fmem(compiler, SLJIT_MOV_F32 | SLJIT_MEM_ALIGNED_16, target, SLJIT_MEM2(SLJIT_R0, index_reg), 2);
-		return;
 	case SljitNativeDoubleSourceKind::DOUBLE:
-		sljit_emit_fmem(compiler, SLJIT_MOV_F64 | SLJIT_MEM_ALIGNED_32, target, SLJIT_MEM2(SLJIT_R0, index_reg), 3);
-		return;
 	case SljitNativeDoubleSourceKind::INT64_TO_DOUBLE:
-		sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_R2, 0, SLJIT_MEM2(SLJIT_R0, index_reg), 3);
-		sljit_emit_fop1(compiler, single_precision ? SLJIT_CONV_F32_FROM_SW : SLJIT_CONV_F64_FROM_SW, target, 0,
-		                SLJIT_R2, 0);
+		EmitLoadNativeDoubleOperandAt(compiler, kind, SLJIT_R0, index_reg, target, single_precision);
 		return;
 	case SljitNativeDoubleSourceKind::DECIMAL64_TO_DOUBLE:
 		D_ASSERT(!single_precision);

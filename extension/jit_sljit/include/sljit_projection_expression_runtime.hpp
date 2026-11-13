@@ -64,10 +64,9 @@ static void SljitExecuteProjectionExpression(SljitExecutableRegionExpression &ex
 		result_validity.EnsureWritable();
 		result_validity.SetAllValid(count);
 
-		auto native_input =
-		    SljitPrepareNativePredicateInput(adapter_scratch, input, expr.input_source_indices, execute_sel, count,
-		                                     reinterpret_cast<data_ptr_t>(FlatVector::GetDataMutable<bool>(result)),
-		                                     result_validity.GetData(), nullptr, nullptr);
+		auto native_input = SljitPrepareNativePredicateInput(
+		    adapter_scratch, input, expr.input_source_indices, execute_sel, count,
+		    reinterpret_cast<data_ptr_t>(FlatVector::GetDataMutable<bool>(result)), result_validity.GetData(), nullptr);
 		SljitExecuteNativeFunction(expr.predicate.Function(), native_input);
 		if (runtime) {
 			RecordSljitRegionGeneratedWork(*runtime, SljitNativeRegionOpKind::PROJECTION, count);

@@ -163,40 +163,12 @@ unique_ptr<ExecutionRegionCodeHandle>
 BuildSljitNativeUngroupedSumDoubleDoubleBinaryConstant(SljitNativeDoubleBinaryOp op,
                                                        SljitNativeDoubleSourceKind source_kind, bool constant_on_left,
                                                        SljitNativeAggregateUpdateFunction &function, string &error) {
-	auto compiler = sljit_create_compiler(nullptr);
-	if (!compiler) {
-		error = "failed to create SLJIT compiler";
-		return nullptr;
-	}
-	auto binary_op = NativeDoubleBinaryOp(op);
-	const auto local_sum_offset = NumericCast<sljit_sw>(0);
-	const auto saw_value_offset = NumericCast<sljit_sw>(sizeof(double));
-	const auto local_size = saw_value_offset + NumericCast<sljit_sw>(sizeof(sljit_sw));
-
-	sljit_emit_enter(compiler, 0, SLJIT_ARGS1V(P), 5 | SLJIT_ENTER_FLOAT(2), 5, local_size);
-	EmitInitSljitNativeVectorLoop(compiler);
-	EmitSljitLoadDoubleStateLocal(compiler, local_sum_offset);
-	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_MEM1(SLJIT_SP), saw_value_offset, SLJIT_IMM, 0);
-
-	auto done = EmitSljitAggregateSelectedSourceLoop(compiler, [&]() {
-		EmitLoadNativeDoubleOperand(compiler, source_kind, offsetof(SljitNativeVectorInput, source_data), SLJIT_R1,
-		                            offsetof(SljitNativeVectorInput, source_decimal), SLJIT_FR0);
-		sljit_emit_fmem(compiler, SLJIT_MOV_F64 | SLJIT_MEM_ALIGNED_32, SLJIT_FR1, SLJIT_MEM1(SLJIT_S0),
-		                offsetof(SljitNativeVectorInput, double_constant));
-		if (constant_on_left) {
-			sljit_emit_fop2(compiler, binary_op, SLJIT_FR0, 0, SLJIT_FR1, 0, SLJIT_FR0, 0);
-		} else {
-			sljit_emit_fop2(compiler, binary_op, SLJIT_FR0, 0, SLJIT_FR0, 0, SLJIT_FR1, 0);
-		}
-		EmitSljitAggregateAccumulateDouble(compiler, local_sum_offset, saw_value_offset, SLJIT_FR0);
-	});
-
-	auto done_label = sljit_emit_label(compiler);
-	sljit_set_label(done, done_label);
-	EmitSljitAggregateCommitDouble(compiler, local_sum_offset, saw_value_offset);
-	sljit_emit_return_void(compiler);
-
-	return FinishSljitCode(compiler, function, error);
+	SljitUngroupedDoubleSumValue value;
+	value.kind = source_kind;
+	value.combines_constant = true;
+	value.binary_op = NativeDoubleBinaryOp(op);
+	value.constant_on_left = constant_on_left;
+	return BuildSljitNativeUngroupedSumDouble(value, function, error);
 }
 
 unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativeUngroupedSumDoubleDoubleBinaryReferences(

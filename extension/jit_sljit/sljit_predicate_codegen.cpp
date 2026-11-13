@@ -30,12 +30,6 @@ static vector<sljit_jump *> EmitSljitPartialSimdFallbackChecks(struct sljit_comp
 	sljit_emit_op1(compiler, SLJIT_MOV_P, SLJIT_R0, 0, SLJIT_MEM1(SLJIT_S0),
 	               offsetof(SljitNativePredicateInput, execute_sel));
 	fallback_jumps.push_back(sljit_emit_cmp(compiler, SLJIT_NOT_EQUAL, SLJIT_R0, 0, SLJIT_IMM, 0));
-	sljit_emit_op1(compiler, SLJIT_MOV_P, SLJIT_R0, 0, SLJIT_MEM1(SLJIT_S0),
-	               offsetof(SljitNativePredicateInput, false_sel));
-	fallback_jumps.push_back(sljit_emit_cmp(compiler, SLJIT_NOT_EQUAL, SLJIT_R0, 0, SLJIT_IMM, 0));
-	sljit_emit_op1(compiler, SLJIT_MOV_P, SLJIT_R0, 0, SLJIT_MEM1(SLJIT_S0),
-	               offsetof(SljitNativePredicateInput, true_sel));
-	fallback_jumps.push_back(sljit_emit_cmp(compiler, SLJIT_EQUAL, SLJIT_R0, 0, SLJIT_IMM, 0));
 	// Four complete groups amortize constants, mask classification, and residual
 	// dispatch. Smaller batches retain the existing scalar kernel.
 	fallback_jumps.push_back(
@@ -128,42 +122,33 @@ static sljit_jump *EmitSljitNativePredicateLoop(struct sljit_compiler *compiler,
 	EmitLoadPredicateLogicalIndex(compiler, SLJIT_S3, row);
 
 	auto branches = EmitSljitPredicateBranches(compiler, predicate, owned_data, predicate.source_not_null, row);
-	auto false_label = sljit_emit_label(compiler);
-	SetPredicateJumpLabels(branches.false_jumps, false_label);
+	vector<sljit_jump *> next_row;
 	if (materialize_result) {
+		SetPredicateJumpLabels(branches.false_jumps, sljit_emit_label(compiler));
 		sljit_emit_op1(compiler, SLJIT_MOV_P, SLJIT_R0, 0, SLJIT_MEM1(SLJIT_S0),
 		               offsetof(SljitNativePredicateInput, result_data));
 		sljit_emit_op1(compiler, SLJIT_MOV_U8, SLJIT_MEM2(SLJIT_R0, SLJIT_S1), 0, SLJIT_IMM, 0);
-	} else {
-		EmitPredicateStoreFalseSelection(compiler);
-	}
-	auto next_after_false = sljit_emit_jump(compiler, SLJIT_JUMP);
+		next_row.push_back(sljit_emit_jump(compiler, SLJIT_JUMP));
 
-	auto true_label = sljit_emit_label(compiler);
-	SetPredicateJumpLabels(branches.true_jumps, true_label);
-	if (materialize_result) {
+		SetPredicateJumpLabels(branches.true_jumps, sljit_emit_label(compiler));
 		sljit_emit_op1(compiler, SLJIT_MOV_P, SLJIT_R0, 0, SLJIT_MEM1(SLJIT_S0),
 		               offsetof(SljitNativePredicateInput, result_data));
 		sljit_emit_op1(compiler, SLJIT_MOV_U8, SLJIT_MEM2(SLJIT_R0, SLJIT_S1), 0, SLJIT_IMM, 1);
-	} else {
-		EmitPredicateStoreTrueSelection(compiler);
-	}
-	auto next_after_true = sljit_emit_jump(compiler, SLJIT_JUMP);
+		next_row.push_back(sljit_emit_jump(compiler, SLJIT_JUMP));
 
-	auto null_label = sljit_emit_label(compiler);
-	SetPredicateJumpLabels(branches.null_jumps, null_label);
-	if (materialize_result) {
+		SetPredicateJumpLabels(branches.null_jumps, sljit_emit_label(compiler));
 		EmitStorePredicateResultInvalid(compiler);
 		sljit_emit_op1(compiler, SLJIT_MOV_P, SLJIT_R0, 0, SLJIT_MEM1(SLJIT_S0),
 		               offsetof(SljitNativePredicateInput, result_data));
 		sljit_emit_op1(compiler, SLJIT_MOV_U8, SLJIT_MEM2(SLJIT_R0, SLJIT_S1), 0, SLJIT_IMM, 0);
 	} else {
-		EmitPredicateStoreFalseSelection(compiler);
+		// a rejected row, false or NULL, appends nothing; a match appends and falls into the next row
+		next_row = std::move(branches.false_jumps);
+		next_row.insert(next_row.end(), branches.null_jumps.begin(), branches.null_jumps.end());
+		SetPredicateJumpLabels(branches.true_jumps, sljit_emit_label(compiler));
+		EmitPredicateStoreTrueSelection(compiler);
 	}
-
-	auto next_label = sljit_emit_label(compiler);
-	sljit_set_label(next_after_false, next_label);
-	sljit_set_label(next_after_true, next_label);
+	SetPredicateJumpLabels(next_row, sljit_emit_label(compiler));
 	sljit_emit_op2(compiler, SLJIT_ADD, SLJIT_S1, 0, SLJIT_S1, 0, SLJIT_IMM, 1);
 	auto repeat = sljit_emit_jump(compiler, SLJIT_JUMP);
 	sljit_set_label(repeat, loop);

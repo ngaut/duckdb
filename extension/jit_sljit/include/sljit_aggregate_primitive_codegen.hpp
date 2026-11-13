@@ -204,6 +204,16 @@ void EmitSljitAccumulateHugeintWords(struct sljit_compiler *compiler, sljit_s32 
                                      sljit_sw upper_offset, sljit_s32 lower_value_reg, sljit_s32 upper_value_reg);
 void EmitSljitAggregateAccumulateDouble(struct sljit_compiler *compiler, sljit_sw local_sum_offset,
                                         sljit_sw saw_value_offset, sljit_s32 value_freg);
+//! The value an ungrouped double sum adds per row: its source, or its source combined with a constant
+struct SljitUngroupedDoubleSumValue {
+	SljitNativeDoubleSourceKind kind = SljitNativeDoubleSourceKind::DOUBLE;
+	bool combines_constant = false;
+	sljit_s32 binary_op = 0;
+	bool constant_on_left = false;
+};
+unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativeUngroupedSumDouble(const SljitUngroupedDoubleSumValue &value,
+                                                                         SljitNativeAggregateUpdateFunction &function,
+                                                                         string &error);
 void EmitSljitAggregateCommitDouble(struct sljit_compiler *compiler, sljit_sw local_sum_offset,
                                     sljit_sw saw_value_offset);
 
