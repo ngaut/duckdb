@@ -277,8 +277,15 @@ SljitTypedExpressionTreeSlot EmitSljitTypedExpressionTreeValue(struct sljit_comp
 void EmitSljitTypedExpressionTreeFastValueReg(struct sljit_compiler *compiler, const ExecutionExpressionIR &node,
                                               idx_t &spill_index, vector<SljitArithmeticOverflowSite> &overflows,
                                               const vector<SljitTypedExpressionTreeLoopHoist> *data_hoists = nullptr);
-//! Emits a flat-row predicate as jumps taken when it is true: a comparison jumps on its own flags instead of
-//! materializing a boolean, and a remainder test checks divisibility
+//! Emits a predicate over rows without NULLs as jumps taken when it evaluates to `when`; control falls through
+//! otherwise. A comparison jumps on its own flags and a conjunction short-circuits on the child that decides it, so no
+//! boolean is materialized; a flat-row remainder test checks divisibility
+vector<sljit_jump *>
+EmitSljitTypedExpressionTreeFastJumps(struct sljit_compiler *compiler, const ExecutionExpressionIR &node, bool when,
+                                      idx_t &spill_index, vector<SljitArithmeticOverflowSite> &overflows,
+                                      SljitTypedExpressionTreeFastIndexMode index_mode,
+                                      const vector<SljitTypedExpressionTreeLoopHoist> *data_hoists);
+//! EmitSljitTypedExpressionTreeFastJumps over flat rows, taken when the predicate is true
 vector<sljit_jump *>
 EmitSljitTypedExpressionTreeFastJumpsIfTrue(struct sljit_compiler *compiler, const ExecutionExpressionIR &node,
                                             idx_t &spill_index, vector<SljitArithmeticOverflowSite> &overflows,

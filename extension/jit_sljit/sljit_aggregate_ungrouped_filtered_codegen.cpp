@@ -418,11 +418,12 @@ unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativeFilteredUngroupedFusedPrim
 				tail_null_jumps.push_back(EmitJumpIfSljitExpressionTreeFlatSourceNull(compiler, source_index));
 			}
 			idx_t nullable_tail_spill_index = 0;
-			EmitSljitTypedExpressionTreeFastValueReg(compiler, predicate, nullable_tail_spill_index, overflows, hoists);
-			auto nullable_tail_false = sljit_emit_cmp(compiler, SLJIT_EQUAL, SLJIT_R2, 0, SLJIT_IMM, 0);
+			auto nullable_tail_false =
+			    EmitSljitTypedExpressionTreeFastJumps(compiler, predicate, false, nullable_tail_spill_index, overflows,
+			                                          SljitTypedExpressionTreeFastIndexMode::FLAT, hoists);
 			emit_payload_updates();
 			auto nullable_tail_skip = sljit_emit_label(compiler);
-			sljit_set_label(nullable_tail_false, nullable_tail_skip);
+			SetSljitJumpLabels(nullable_tail_false, nullable_tail_skip);
 			for (auto null_jump : tail_null_jumps) {
 				sljit_set_label(null_jump, nullable_tail_skip);
 			}
@@ -469,14 +470,15 @@ unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativeFilteredUngroupedFusedPrim
 			sljit_emit_op2u(compiler, SLJIT_AND | SLJIT_SET_Z, SLJIT_R0, 0, SLJIT_IMM, 1);
 			vector<sljit_jump *> source_null_jumps {sljit_emit_jump(compiler, SLJIT_ZERO)};
 			idx_t hybrid_spill_index = 0;
-			EmitSljitTypedExpressionTreeFastValueReg(compiler, predicate, hybrid_spill_index, overflows, hoists);
-			auto hybrid_predicate_false = sljit_emit_cmp(compiler, SLJIT_EQUAL, SLJIT_R2, 0, SLJIT_IMM, 0);
+			auto hybrid_predicate_false =
+			    EmitSljitTypedExpressionTreeFastJumps(compiler, predicate, false, hybrid_spill_index, overflows,
+			                                          SljitTypedExpressionTreeFastIndexMode::FLAT, hoists);
 			emit_payload_updates();
 			auto hybrid_row_done = sljit_emit_jump(compiler, SLJIT_JUMP);
 			SetSljitJumpLabels(source_null_jumps, sljit_emit_label(compiler));
 			emit_generic_row();
 			auto hybrid_next = sljit_emit_label(compiler);
-			sljit_set_label(hybrid_predicate_false, hybrid_next);
+			SetSljitJumpLabels(hybrid_predicate_false, hybrid_next);
 			sljit_set_label(hybrid_row_done, hybrid_next);
 			EmitNextSljitNativeVectorLoop(compiler, hybrid_loop);
 			SetSljitJumpLabels(skip_hybrid, sljit_emit_label(compiler));
@@ -491,9 +493,9 @@ unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativeFilteredUngroupedFusedPrim
 		EmitLoadSljitExpressionTreeLogicalIndex(compiler);
 		auto emit_selected_fast_row = [&]() {
 			idx_t selected_predicate_spill_index = 0;
-			EmitSljitTypedExpressionTreeSelectedFastValueReg(compiler, predicate, selected_predicate_spill_index,
-			                                                 overflows, hoists);
-			auto selected_predicate_false = sljit_emit_cmp(compiler, SLJIT_EQUAL, SLJIT_R2, 0, SLJIT_IMM, 0);
+			auto selected_predicate_false = EmitSljitTypedExpressionTreeFastJumps(
+			    compiler, predicate, false, selected_predicate_spill_index, overflows,
+			    SljitTypedExpressionTreeFastIndexMode::SELECTED, hoists);
 			for (idx_t payload_idx = 0; payload_idx < payloads.size(); payload_idx++) {
 				auto kind = codegen_plan.payload_descriptors[payload_idx].primitive_kind;
 				if (kind == AggregatePrimitiveUpdateKind::COUNT_STAR) {
@@ -508,7 +510,7 @@ unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativeFilteredUngroupedFusedPrim
 				                                 SLJIT_R2);
 				EmitSljitAggregateIncrementLocalCount(compiler, local_count_offsets[payload_idx]);
 			}
-			sljit_set_label(selected_predicate_false, sljit_emit_label(compiler));
+			SetSljitJumpLabels(selected_predicate_false, sljit_emit_label(compiler));
 		};
 		emit_selected_fast_row();
 		EmitNextSljitNativeVectorLoop(compiler, selected_fast_loop);
