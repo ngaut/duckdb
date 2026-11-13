@@ -15,6 +15,7 @@
 #include "sljit_region_runtime_trace.hpp"
 
 #include "duckdb/common/exception.hpp"
+#include "duckdb/common/types/cast_helpers.hpp"
 #include "duckdb/common/types/hugeint.hpp"
 #include "duckdb/common/vector/dictionary_vector.hpp"
 #include "duckdb/common/vector/flat_vector.hpp"
@@ -111,6 +112,10 @@ static void SljitExecuteProjectionExpression(SljitExecutableRegionExpression &ex
 
 		auto source_data = UnifiedVectorFormat::GetData<int64_t>(source_format);
 		auto result_data = FlatVector::GetDataMutable<double>(result);
+		// DuckDB's cast: a value exact in a double divides by the exact 10^scale, any other takes the exact conversion
+		const auto scale = plan.double_source_decimal_scale;
+		const auto factor = NumericHelper::DOUBLE_POWERS_OF_TEN[scale];
+		const int64_t exact_limit = int64_t(1) << 53;
 		for (idx_t row_idx = 0; row_idx < count; row_idx++) {
 			auto input_idx = execute_sel ? execute_sel->get_index(row_idx) : row_idx;
 			auto source_idx = source_format.sel ? source_format.sel->get_index(input_idx) : input_idx;
@@ -118,8 +123,10 @@ static void SljitExecuteProjectionExpression(SljitExecutableRegionExpression &ex
 				result_validity.SetInvalid(row_idx);
 				continue;
 			}
-			result_data[row_idx] =
-			    SljitNativeDecimalToDouble(source_data[source_idx], plan.double_source_decimal_scale);
+			const auto value = source_data[source_idx];
+			result_data[row_idx] = scale == 0 || (value >= -exact_limit && value <= exact_limit)
+			                           ? double(value) / factor
+			                           : SljitNativeDecimalToDouble(value, scale);
 		}
 		FlatVector::SetSize(result, count_t(count));
 		return;

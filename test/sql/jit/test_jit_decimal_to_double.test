@@ -78,3 +78,52 @@ SELECT count(*) FROM ((SELECT * FROM r_off EXCEPT ALL SELECT * FROM r_auto)
                       UNION ALL (SELECT * FROM r_auto EXCEPT ALL SELECT * FROM r_off))
 ----
 0
+
+# a grouped payload whose aggregate the region leaves to DuckDB's sink converts its decimal operand in the region's
+# projection: beyond 2^53 that conversion is DuckDB's exact one too
+statement ok
+SET jit_trace_runtime=true
+
+statement ok
+SET jit_event_log_size=10000
+
+statement ok
+SET jit_cbo_generated_stage_benefit=4096
+
+statement ok
+SET jit_cbo_native_operator_stage_benefit=4096
+
+statement ok
+SET jit_cbo_full_pipeline_benefit=4096
+
+statement ok
+SET jit_cbo_materialization_elision_benefit=4096
+
+statement ok
+SET jit_cbo_source_contract_scan_filter_penalty=0
+
+statement ok
+SET threads=1
+
+foreach policy off auto
+
+statement ok
+SET jit_policy='{policy}'
+
+statement ok
+CREATE OR REPLACE TABLE p_{policy} AS
+SELECT k AS a, sum(d64 * (1 - k::DOUBLE / 100)) AS b, avg(d64) AS c FROM d GROUP BY ALL
+
+endloop
+
+query I
+SELECT count(*) FROM ((SELECT * FROM p_off EXCEPT ALL SELECT * FROM p_auto)
+                      UNION ALL (SELECT * FROM p_auto EXCEPT ALL SELECT * FROM p_off))
+----
+0
+
+query I
+SELECT count(*) > 0 FROM duckdb_jit_events()
+WHERE phase = 'runtime' AND jit_runtime_path_counts LIKE '%aggregate_update.native_tail_delegation=%'
+----
+true
