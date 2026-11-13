@@ -175,7 +175,7 @@ BuildSljitNativeUngroupedSumDoubleDoubleBinaryConstant(SljitNativeDoubleBinaryOp
 
 	sljit_emit_enter(compiler, 0, SLJIT_ARGS1V(P), 5 | SLJIT_ENTER_FLOAT(2), 5, local_size);
 	EmitInitSljitNativeVectorLoop(compiler);
-	EmitSljitStoreZeroDoubleLocal(compiler, local_sum_offset);
+	EmitSljitLoadDoubleStateLocal(compiler, local_sum_offset);
 	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_MEM1(SLJIT_SP), saw_value_offset, SLJIT_IMM, 0);
 
 	auto done = EmitSljitAggregateSelectedSourceLoop(compiler, [&]() {
@@ -217,7 +217,7 @@ unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativeUngroupedSumDoubleDoubleBi
 
 	sljit_emit_enter(compiler, 0, SLJIT_ARGS1V(P), 5 | SLJIT_ENTER_FLOAT(2), 5, local_size);
 	EmitInitSljitNativeVectorLoop(compiler);
-	EmitSljitStoreZeroDoubleLocal(compiler, local_sum_offset);
+	EmitSljitLoadDoubleStateLocal(compiler, local_sum_offset);
 	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_MEM1(SLJIT_SP), saw_value_offset, SLJIT_IMM, 0);
 
 	auto done = EmitSljitAggregateTwoSourceLoop(compiler, [&]() {

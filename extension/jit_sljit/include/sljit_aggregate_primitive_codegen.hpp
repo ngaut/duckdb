@@ -197,7 +197,7 @@ void EmitSljitGroupedAggregateAccumulateDoubleImmediate(struct sljit_compiler *c
                                                         idx_t state_offset, idx_t value_offset,
                                                         idx_t state_is_set_offset, sljit_s32 value_freg);
 
-void EmitSljitStoreZeroDoubleLocal(struct sljit_compiler *compiler, sljit_sw local_sum_offset);
+void EmitSljitLoadDoubleStateLocal(struct sljit_compiler *compiler, sljit_sw local_sum_offset);
 void EmitLoadSljitHugeintReference(struct sljit_compiler *compiler, sljit_sw source_data_offset,
                                    sljit_s32 source_index_reg, sljit_s32 lower_target_reg, sljit_s32 upper_target_reg);
 void EmitSljitAccumulateHugeintWords(struct sljit_compiler *compiler, sljit_s32 base_reg, sljit_sw lower_offset,
