@@ -193,13 +193,16 @@ static bool SljitGeneratedFilterHasPackedPrefix(const vector<SljitNativeRegionOp
 	       TryPlanSljitNativePredicatePartialSimd(*filter.expression_tree, filter.predicate->source_not_null).supported;
 }
 
+//! Rows per distinct value from which a string column repeats its values enough for storage to search its entries
+static constexpr idx_t REPEATED_STRING_ROWS_PER_VALUE = 16;
+
 //! Source-local cost heuristic, not a dictionary-encoding capability or a whole-pipeline admission rule. Compressed
 //! storage evaluates a filter on a low-cardinality string column once per dictionary entry and scans the other
 //! filtered columns only for the rows it keeps. A generated filter reads that column row by row through the
 //! dictionary selection, which only pays when a packed SIMD prefix discards rows first. So storage keeps the
-//! filters when one of them searches such a column, or when one reads such a column, the storage compresses, the
-//! filters keep at least half the rows (a generated filter only sees the dynamic filters' survivors), and the
-//! generated filter has no packed prefix.
+//! filters when one of them searches a compressed string column that repeats its values, or searches a
+//! low-cardinality one, or when one reads such a column, the storage compresses, the filters keep at least half the
+//! rows (a generated filter only sees the dynamic filters' survivors), and the generated filter has no packed prefix.
 static bool SljitPreferStorageFilters(const ExecutionRegionNode &node, const ExecutionRegionTableScanContract &contract,
                                       const vector<SljitNativeRegionOpPlan> &generated_filter_ops) {
 	if (contract.estimated_source_cardinality < STANDARD_VECTOR_SIZE) {
@@ -214,13 +217,22 @@ static bool SljitPreferStorageFilters(const ExecutionRegionNode &node, const Exe
 		if (SljitSourceFilterIsConstantTrue(filter)) {
 			continue;
 		}
-		const bool low_cardinality_string_column =
+		const bool string_column =
 		    filter.scan_column_index < contract.source_contract_input_types.size() &&
 		    filter.scan_column_index < contract.source_contract_input_distinct_counts.size() &&
 		    contract.source_contract_input_types[filter.scan_column_index].InternalType() == PhysicalType::VARCHAR &&
-		    contract.source_contract_input_distinct_counts[filter.scan_column_index] > 0 &&
-		    contract.source_contract_input_distinct_counts[filter.scan_column_index] <= distinct_count_limit;
-		if (!low_cardinality_string_column) {
+		    contract.source_contract_input_distinct_counts[filter.scan_column_index] > 0;
+		if (!string_column) {
+			continue;
+		}
+		const auto distinct_count = contract.source_contract_input_distinct_counts[filter.scan_column_index];
+		// a search over a column that repeats its values runs on the entries compressed storage keeps of them
+		if (contract.compressed_storage &&
+		    distinct_count * REPEATED_STRING_ROWS_PER_VALUE <= contract.estimated_source_cardinality &&
+		    filter.expression && filter.expression->root && SljitExpressionHasStringSearch(*filter.expression->root)) {
+			return true;
+		}
+		if (distinct_count > distinct_count_limit) {
 			continue;
 		}
 		if (row_by_row_string_filter || (filter.expression && filter.expression->root &&

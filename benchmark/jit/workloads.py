@@ -575,7 +575,7 @@ ENCODINGS_QUERIES = {
     ),
     "dictionary_contains": (
         "SELECT count(*) FROM __jit_encodings_facts WHERE name LIKE '%99%'",
-        {1: True, 4: True},
+        {1: False, 4: False},
     ),
     "dictionary_groups": (
         "SELECT mode, sum(id) FROM __jit_encodings_facts GROUP BY mode",

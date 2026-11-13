@@ -1,6 +1,8 @@
 # name: test/sql/jit/test_jit_string_filter_storage_strategy.test
-# description: A source with a low-cardinality string filter leaves its filters to compressed storage
+# description: A source with a low-cardinality string filter, or a search over a string column that repeats its
 # group: [jit]
+
+#              values, leaves its filters to compressed storage
 
 # Compressed storage evaluates a string filter against the column's dictionary and fetches the other columns only for
 # the rows that pass, so a checkpointed table keeps the filter in the scan, also beside a numeric filter a generated
@@ -248,6 +250,42 @@ GROUP BY s.ship_mode ORDER BY s.ship_mode
 ----
 MAIL	80000	120000
 SHIP	80000	120000
+
+query I
+SELECT count(*) FROM duckdb_jit_events() WHERE reason LIKE '%source_strategy_reason=storage-sensitive-filter%'
+----
+0
+
+# A search over a compressed string column that repeats its values runs on the entries storage keeps of them, even
+# with far more distinct values than a low-cardinality column; a column of distinct strings keeps the generated search
+statement ok
+CREATE TABLE named AS
+SELECT i::BIGINT AS id, 'cust#' || CAST(i % 5000 AS VARCHAR) AS repeated_name, 'unique-' || CAST(i AS VARCHAR) AS unique_name
+FROM range(300000) t(i)
+
+statement ok
+CHECKPOINT
+
+statement ok
+SELECT * FROM duckdb_jit_clear_events()
+
+query I
+SELECT count(*) FROM named WHERE repeated_name LIKE '%99%'
+----
+5700
+
+query I
+SELECT count(*) > 0 FROM duckdb_jit_events() WHERE reason LIKE '%source_strategy_reason=storage-sensitive-filter%'
+----
+true
+
+statement ok
+SELECT * FROM duckdb_jit_clear_events()
+
+query I
+SELECT count(*) FROM named WHERE unique_name LIKE '%99%'
+----
+11073
 
 query I
 SELECT count(*) FROM duckdb_jit_events() WHERE reason LIKE '%source_strategy_reason=storage-sensitive-filter%'
