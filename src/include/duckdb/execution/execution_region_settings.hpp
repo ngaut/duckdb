@@ -21,6 +21,7 @@ public:
 	static bool DebugForceEntryDefer(ClientContext &context);
 	static bool TraceDecisions(ClientContext &context);
 	static bool TraceRuntime(ClientContext &context);
+	static bool MeasureNativeLegs(ClientContext &context);
 	static bool TraceVectorizedBaseline(ClientContext &context);
 	static bool ShouldRecordDetailedTelemetry(ClientContext &context);
 	static bool ShouldRecordDecisionTelemetry(ClientContext &context);

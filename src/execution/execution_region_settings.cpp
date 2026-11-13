@@ -27,6 +27,10 @@ bool ExecutionRegionSettings::TraceRuntime(ClientContext &context) {
 	return Settings::Get<JitTraceRuntimeSetting>(context) || context.QueryProfilerIsExplainAnalyze();
 }
 
+bool ExecutionRegionSettings::MeasureNativeLegs(ClientContext &context) {
+	return Settings::Get<JitMeasureNativeLegsSetting>(context);
+}
+
 bool ExecutionRegionSettings::TraceVectorizedBaseline(ClientContext &context) {
 	return Settings::Get<JitTraceVectorizedBaselineSetting>(context);
 }

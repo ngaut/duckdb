@@ -333,6 +333,8 @@ static void ConfigureSljitSettings(Connection &con, const string &policy = "auto
 	REQUIRE_NO_FAIL(con.Query("SET enable_jit=true"));
 	REQUIRE_NO_FAIL(con.Query("SET jit_backend='sljit'"));
 	REQUIRE_NO_FAIL(con.Query("SET jit_policy='" + policy + "'"));
+	// a test that asserts the region's own paths must not depend on which path a timing measurement chose
+	REQUIRE_NO_FAIL(con.Query("SET jit_measure_native_legs=false"));
 	if (dump_ir) {
 		REQUIRE_NO_FAIL(con.Query("SET jit_dump_ir=true"));
 	}

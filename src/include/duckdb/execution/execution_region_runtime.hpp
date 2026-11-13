@@ -118,6 +118,8 @@ public:
 	virtual SourceResultType FetchPrimitiveAggregateStateSourceContract(ExecutionAggregateStateScanBatch *&result) = 0;
 	virtual ExecutionOperatorRuntime &ExecutionOperators() = 0;
 	virtual bool TraceRuntime() const = 0;
+	//! Whether a step that may alternate its chunks with DuckDB's operators measures which is faster
+	virtual bool MeasureNativeLegs() const = 0;
 	virtual void RecordGeneratedStageRuntime(ExecutionRegionStageId stage, int64_t runtime_time_us,
 	                                         idx_t count = 1) = 0;
 	virtual void RecordHashJoinProbeLayout(const char *layout);

@@ -196,7 +196,9 @@ static bool SljitRegionMayContinueNatively(const SljitNativeRegionPlan &region) 
 	if (region.ops.empty() || region.ops.back().Kind() != SljitNativeRegionOpKind::AGGREGATE_UPDATE) {
 		return false;
 	}
-	return region.ops.back().AggregateUpdate().sink_info.Kind() == ExecutionRegionSinkKind::HASH_AGGREGATE_UPDATE;
+	auto &sink_info = region.ops.back().AggregateUpdate().sink_info;
+	return sink_info.Kind() == ExecutionRegionSinkKind::HASH_AGGREGATE_UPDATE ||
+	       SljitUngroupedAggregateSinkAdmitsNativeChunks(sink_info);
 }
 
 //! A sum over a string set beside the sum over its complement accumulates the few known groups of its key in a local
@@ -333,6 +335,8 @@ static bool BuildSljitNativeContinuation(const SljitNativeRegionPlan &region, Sl
 		SljitUpdateExecutableCurrentRanges(op, current_min_values, current_max_values);
 	}
 	continuation->group_key_source_column = SljitTraceGroupKeySourceColumn(executable.ops, continuation->source_ops);
+	continuation->measured =
+	    SljitUngroupedAggregateSinkAdmitsNativeChunks(executable.ops.back().AggregateUpdate().plan.sink_info);
 	auto &aggregates = executable.ops.back().AggregateUpdate().plan.sink_info.aggregates;
 	continuation->counts_rows_only =
 	    aggregates.size() == 1 && (aggregates[0].primitive_update_kind == AggregatePrimitiveUpdateKind::COUNT ||

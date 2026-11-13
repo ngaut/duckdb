@@ -39,6 +39,10 @@ jit_trace_runtime	false
 statement ok
 LOAD jit_sljit
 
+# runtime path assertions must not depend on which path a timing measurement chose
+statement ok
+SET jit_measure_native_legs=false
+
 statement ok
 SET jit_event_log_size=4096
 

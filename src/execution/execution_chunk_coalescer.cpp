@@ -111,8 +111,13 @@ ExecutionCoalescingChunkStep::ExecutionCoalescingChunkStep(Allocator &allocator_
 }
 
 optional_ptr<DataChunk> ExecutionCoalescingChunkStep::ContinuesNatively(DataChunk &input) {
-	// the consumer decides on the first chunk, before anything is buffered
-	return consumer->ContinuesNatively(input);
+	auto native_input = consumer->ContinuesNatively(input);
+	if (native_input && buffered.size()) {
+		// rows buffered from earlier chunks reach the consumer before DuckDB's operators take this one
+		FlushBuffered();
+		consumer->FlushChunks();
+	}
+	return native_input;
 }
 
 SinkResultType ExecutionCoalescingChunkStep::FlushBuffered() {

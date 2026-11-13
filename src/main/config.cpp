@@ -232,6 +232,7 @@ static const ConfigurationOption internal_options[] = {
     DUCKDB_SETTING(JitDebugForceEntryDeferSetting),
     DUCKDB_SETTING(JitDumpIrSetting),
     DUCKDB_SETTING_CALLBACK(JitEventLogSizeSetting),
+    DUCKDB_SETTING(JitMeasureNativeLegsSetting),
     DUCKDB_SETTING_CALLBACK(JitPolicySetting),
     DUCKDB_SETTING(JitTraceDecisionsSetting),
     DUCKDB_SETTING(JitTraceRuntimeSetting),

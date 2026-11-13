@@ -52,8 +52,8 @@ public:
 	//! The source is exhausted: every row the step still holds reaches the sink
 	virtual void FinishChunks() = 0;
 	//! The chunk DuckDB's own operator chain takes in place of a source chunk once the step hands the pipeline to
-	//! it, or null while the step runs the chunks itself. The step decides on the first chunk, before any of its
-	//! operators saw a row, and keeps the decision; after handing over it holds no rows
+	//! it, or null while the step runs the chunks itself. A step whose sink keeps its state apart from its own
+	//! batches may alternate chunk by chunk; it hands over only after flushing every row it held
 	virtual optional_ptr<DataChunk> ContinuesNatively(DataChunk &input);
 };
 

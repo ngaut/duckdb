@@ -63,6 +63,9 @@ public:
 	ExecutionOperatorRuntime &ExecutionOperators() override {
 		throw InternalException("unused proof-test operators");
 	}
+	bool MeasureNativeLegs() const override {
+		return false;
+	}
 	bool TraceRuntime() const override {
 		return true;
 	}

@@ -635,6 +635,8 @@ struct SljitExecutableNativeContinuation {
 	idx_t group_key_source_column = DConstants::INVALID_INDEX;
 	//! The hash aggregate only counts rows: a single COUNT or COUNT(*)
 	bool counts_rows_only = false;
+	//! The region's chunks and DuckDB's may alternate into the sink: which is faster is measured, not decided
+	bool measured = false;
 };
 
 struct SljitExecutableRegion {

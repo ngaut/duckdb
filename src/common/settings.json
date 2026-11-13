@@ -1321,6 +1321,13 @@
         ]
     },
     {
+        "name": "jit_measure_native_legs",
+        "description": "Whether a compiled pipeline whose sink takes chunks from DuckDB's operators too measures both on its first chunks and keeps the faster",
+        "type": "BOOLEAN",
+        "default_scope": "local",
+        "default_value": "true"
+    },
+    {
         "name": "jit_policy",
         "description": "Execution-region execution policy: auto runs only CBO-selected compiled-vectorized regions, off disables compiled-vectorized execution",
         "type": "VARCHAR",

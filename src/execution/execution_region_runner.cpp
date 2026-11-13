@@ -163,7 +163,8 @@ public:
 	CompiledRegionRuntime(ExecutionRegionPipelineAdapter &pipeline_p, ExecutionRegionKernel &kernel_p,
 	                      ExecutionRegionLocalState &local_state_p, idx_t max_chunks_p, bool trace_runtime_p)
 	    : pipeline(pipeline_p), kernel(kernel_p), local_state(local_state_p), max_chunks(max_chunks_p),
-	      trace_runtime(trace_runtime_p) {
+	      trace_runtime(trace_runtime_p),
+	      measure_native_legs(ExecutionRegionSettings::MeasureNativeLegs(pipeline_p.GetClientContext())) {
 	}
 
 	idx_t MaxChunks() const override {
@@ -188,6 +189,10 @@ public:
 
 	bool TraceRuntime() const override {
 		return trace_runtime;
+	}
+
+	bool MeasureNativeLegs() const override {
+		return measure_native_legs;
 	}
 
 	void RecordGeneratedStageRuntime(ExecutionRegionStageId stage, int64_t runtime_time_us, idx_t count) override {
@@ -402,6 +407,7 @@ private:
 	ExecutionRegionLocalState &local_state;
 	idx_t max_chunks;
 	bool trace_runtime;
+	bool measure_native_legs;
 	idx_t source_contract_output_rows = 0;
 	idx_t source_contract_invocation_count = 0;
 	int64_t source_contract_runtime_time_us = 0;

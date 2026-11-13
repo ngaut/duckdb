@@ -2281,6 +2281,19 @@ struct JitEventLogSizeSetting {
 	static void OnSet(SettingCallbackInfo &info, Value &input);
 };
 
+struct JitMeasureNativeLegsSetting {
+	using RETURN_TYPE = bool;
+	static constexpr const char *Name = "jit_measure_native_legs";
+	static constexpr const char *Description = "Whether a compiled pipeline whose sink takes chunks from DuckDB's "
+	                                           "operators too measures both on its first chunks and keeps the faster";
+	static constexpr const char *InputType = "BOOLEAN";
+	static constexpr bool IsDebug = false;
+	static constexpr bool IsDeprecated = false;
+	static constexpr const char *DefaultValue = "true";
+	static constexpr SettingScopeTarget Scope = SettingScopeTarget::LOCAL_DEFAULT;
+	static constexpr idx_t SettingIndex = NEXT_SETTING_INDEX();
+};
+
 struct JitPolicySetting {
 	using RETURN_TYPE = string;
 	static constexpr const char *Name = "jit_policy";

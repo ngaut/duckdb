@@ -132,6 +132,7 @@ void PipelineExecutor::Reset() {
 	compiled_step_kernel = nullptr;
 	compiled_step_finished = false;
 	compiled_step_native_input = nullptr;
+	compiled_step_continued_natively = false;
 	execution_region_local_state.reset();
 	execution_region_local_state_kernel = nullptr;
 	unsampled_progress_rows = 0;
@@ -784,6 +785,7 @@ OperatorResultType PipelineExecutor::PushSourceChunk(DataChunk &input, Execution
 	}
 	compiled_step_native_input = compiled_step->ContinuesNatively(input);
 	if (compiled_step_native_input) {
+		compiled_step_continued_natively = true;
 		return ExecutePushInternal(*compiled_step_native_input, chunk_budget);
 	}
 	if (compiled_step->ExecuteChunk(input) == SinkResultType::FINISHED) {
@@ -891,7 +893,8 @@ PipelineExecuteResult PipelineExecutor::FlushAndFinalize(ExecutionBudget &chunk_
 		}
 	}
 	if (!done_flushing) {
-		auto flush_completed = (compiled_step && !compiled_step_native_input) || TryFlushCachingOperators(chunk_budget);
+		auto flush_completed =
+		    (compiled_step && !compiled_step_continued_natively) || TryFlushCachingOperators(chunk_budget);
 		if (!flush_completed) {
 			if (remaining_sink_chunk) {
 				return PipelineExecuteResult::INTERRUPTED;

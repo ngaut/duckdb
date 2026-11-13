@@ -47,24 +47,16 @@ public:
 	    : kernel(kernel_p), runtime(runtime_p), native_tail(kernel_p, runtime_p, ops),
 	      hash_join_probe(SljitMakeRecordedHashJoinProbeCallback(kernel_p, runtime_p, runtime_p.ExecutionOperators())),
 	      executor(runtime_p, result, ops, recipe, native_tail, hash_join_probe, source_distinct_counts,
-	               source_min_values, source_max_values, shared_predicate_classifications, scratch, terminal_state) {
+	               source_min_values, source_max_values, shared_predicate_classifications, scratch, terminal_state),
+	      native_continuation(runtime_p, native_continuation_plan) {
 		executor.PrepareChunks();
-		if (native_continuation_plan) {
-			native_continuation = make_uniq<SljitNativeContinuation>(*native_continuation_plan);
-		}
 	}
 
 	optional_ptr<DataChunk> ContinuesNatively(DataChunk &input) override {
-		if (!native_continuation_decided) {
-			native_continuation_decided = true;
-			if (native_continuation && !executor.HandsOverToNative(input, native_continuation->Plan())) {
-				native_continuation.reset();
-			}
-		}
-		if (!native_continuation) {
-			return nullptr;
-		}
-		return &native_continuation->Prepare(runtime, input);
+		return native_continuation.ContinuesNatively(
+		    input,
+		    [&](const SljitExecutableNativeContinuation &plan) { return executor.HandsOverToNative(input, plan); },
+		    [&]() { SljitChunkStepResult(executor.FlushChunks(), result); });
 	}
 
 	SinkResultType ExecuteChunk(DataChunk &input) override {
@@ -87,8 +79,7 @@ private:
 	NativeTailExecutor native_tail;
 	HashJoinProbeExecutor hash_join_probe;
 	SljitFullPipelinePrimitiveSequenceBatchExecutor<NativeTailExecutor, HashJoinProbeExecutor> executor;
-	unique_ptr<SljitNativeContinuation> native_continuation;
-	bool native_continuation_decided = false;
+	SljitNativeContinuationDecision native_continuation;
 };
 
 //! Native-contract operators consume the core runner's source batches.
@@ -98,18 +89,15 @@ public:
 	SljitNativeOnlyChunkStep(KERNEL &kernel_p, ExecutionRegionRuntime &runtime_p, vector<SljitExecutableRegionOp> &ops,
 	                         SljitRegionExecutionScratch &scratch_p,
 	                         optional_ptr<SljitExecutableNativeContinuation> native_continuation_plan)
-	    : kernel(kernel_p), runtime(runtime_p), scratch(scratch_p), native(kernel_p, runtime_p, ops) {
-		// without a recipe no generated step updates a hash aggregate: DuckDB's operators run the whole pipeline
-		if (native_continuation_plan) {
-			native_continuation = make_uniq<SljitNativeContinuation>(*native_continuation_plan);
-		}
+	    : kernel(kernel_p), runtime(runtime_p), scratch(scratch_p), native(kernel_p, runtime_p, ops),
+	      native_continuation(runtime_p, native_continuation_plan) {
 	}
 
+	//! Without a recipe no generated step updates a hash aggregate: DuckDB's operators run the whole pipeline
 	optional_ptr<DataChunk> ContinuesNatively(DataChunk &input) override {
-		if (!native_continuation) {
-			return nullptr;
-		}
-		return &native_continuation->Prepare(runtime, input);
+		return native_continuation.ContinuesNatively(
+		    input, [](const SljitExecutableNativeContinuation &) { return true; },
+		    [&]() { SljitChunkStepResult(Flush(), result); });
 	}
 
 	SinkResultType ExecuteChunk(DataChunk &input) override {
@@ -152,7 +140,7 @@ private:
 	SljitRegionExecutionScratch &scratch;
 	ExecutionRegionResult result = ExecutionRegionResult::NOT_FINISHED;
 	SljitNativePipelineExecutor<KERNEL, SljitNativePipelineTerminalPolicy> native;
-	unique_ptr<SljitNativeContinuation> native_continuation;
+	SljitNativeContinuationDecision native_continuation;
 };
 
 } // namespace duckdb
