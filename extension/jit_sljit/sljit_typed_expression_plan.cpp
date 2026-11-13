@@ -144,6 +144,17 @@ static bool SljitTypedExpressionTreeInt64CastLogic(const ExecutionExpressionIR &
 	       SljitTypedExpressionTreeIsIntegerNode(*node.left) && SljitTypedExpressionTreeIsSupported(*node.left);
 }
 
+bool SljitTypedExpressionTreeIsNarrowSignedReference(const ExecutionExpressionIR &node) {
+	return node.kind == ExecutionExpressionIRKind::REFERENCE && node.return_type.IsIntegral() &&
+	       (node.physical_type == PhysicalType::INT8 || node.physical_type == PhysicalType::INT16);
+}
+
+bool SljitTypedExpressionTreeIsNarrowSourceWideningCast(const ExecutionExpressionIR &node) {
+	return node.kind == ExecutionExpressionIRKind::CAST && SljitTypedExpressionTreeCastExceptionBehaviorIsSafe(node) &&
+	       SljitTypedExpressionTreeIsIntegerNode(node) && node.left &&
+	       SljitTypedExpressionTreeIsNarrowSignedReference(*node.left);
+}
+
 static bool SljitTypedExpressionTreeDecimal64WideningCastLogic(const ExecutionExpressionIR &node) {
 	if (node.kind != ExecutionExpressionIRKind::CAST || !SljitTypedExpressionTreeCastExceptionBehaviorIsSafe(node) ||
 	    !node.left) {
@@ -180,7 +191,8 @@ static bool SljitTypedExpressionTreeNarrowDecimal128CastLogic(const ExecutionExp
 }
 
 bool SljitTypedExpressionTreeValueCastSupported(const ExecutionExpressionIR &node) {
-	return SljitTypedExpressionTreeInt64CastLogic(node) || SljitTypedExpressionTreeDecimal64WideningCastLogic(node) ||
+	return SljitTypedExpressionTreeInt64CastLogic(node) || SljitTypedExpressionTreeIsNarrowSourceWideningCast(node) ||
+	       SljitTypedExpressionTreeDecimal64WideningCastLogic(node) ||
 	       SljitTypedExpressionTreeInt32ToDecimal64ScaleZeroCastLogic(node) ||
 	       SljitTypedExpressionTreeNarrowDecimal128CastLogic(node);
 }
@@ -331,6 +343,9 @@ bool SljitTypedExpressionTreeFastPathSupported(const ExecutionExpressionIR &node
 	}
 	if (node.kind == ExecutionExpressionIRKind::CONSTANT && node.constant.IsNull()) {
 		return false;
+	}
+	if (SljitTypedExpressionTreeIsNarrowSourceWideningCast(node)) {
+		return true;
 	}
 	{
 		// the fast emitters compare a string source with a constant in place; the string itself is no fast value

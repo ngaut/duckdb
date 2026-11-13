@@ -158,6 +158,18 @@ static void EmitSljitTypedExpressionTreeConstant(struct sljit_compiler *compiler
 	EmitStoreSljitTypedExpressionTreeSlot(compiler, slot, SLJIT_R2, SLJIT_R3);
 }
 
+void GetSljitTypedExpressionTreeNarrowSourceLoad(const ExecutionExpressionIR &reference, sljit_s32 &load_op,
+                                                 sljit_sw &scale) {
+	D_ASSERT(SljitTypedExpressionTreeIsNarrowSignedReference(reference));
+	if (reference.physical_type == PhysicalType::INT8) {
+		load_op = SLJIT_MOV_S8;
+		scale = 0;
+	} else {
+		load_op = SLJIT_MOV_S16;
+		scale = 1;
+	}
+}
+
 static void EmitSljitTypedExpressionTreeReference(struct sljit_compiler *compiler, const ExecutionExpressionIR &node,
                                                   const SljitTypedExpressionTreeSlot &slot,
                                                   const vector<idx_t> *known_valid_sources) {
@@ -180,11 +192,18 @@ static void EmitSljitTypedExpressionTreeReference(struct sljit_compiler *compile
 		sljit_set_label(validity_done, sljit_emit_label(compiler));
 	}
 
-	auto source_kind = SljitTypedExpressionTreeIntegerKind(node);
+	sljit_s32 load_op;
+	sljit_sw scale;
+	if (SljitTypedExpressionTreeIsNarrowSignedReference(node)) {
+		GetSljitTypedExpressionTreeNarrowSourceLoad(node, load_op, scale);
+	} else {
+		auto source_kind = SljitTypedExpressionTreeIntegerKind(node);
+		load_op = NativeIntegerLoadOp(source_kind);
+		scale = NativeIntegerDataScale(source_kind);
+	}
 	sljit_emit_op1(compiler, SLJIT_MOV_P, SLJIT_R0, 0, SLJIT_MEM1(SLJIT_S5),
 	               NumericCast<sljit_sw>(node.ref_index * sizeof(const_data_ptr_t)));
-	sljit_emit_op1(compiler, NativeIntegerLoadOp(source_kind), SLJIT_R2, 0, SLJIT_MEM2(SLJIT_R0, SLJIT_R1),
-	               NativeIntegerDataScale(source_kind));
+	sljit_emit_op1(compiler, load_op, SLJIT_R2, 0, SLJIT_MEM2(SLJIT_R0, SLJIT_R1), scale);
 	EmitStoreSljitTypedExpressionTreeSlot(compiler, slot, SLJIT_R2, SLJIT_R3);
 }
 

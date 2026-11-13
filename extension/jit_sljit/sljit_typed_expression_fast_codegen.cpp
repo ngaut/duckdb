@@ -33,7 +33,6 @@ static void EmitSljitTypedExpressionTreeFastLeafReg(struct sljit_compiler *compi
 		return;
 	}
 	D_ASSERT(node.kind == ExecutionExpressionIRKind::REFERENCE);
-	auto source_kind = SljitTypedExpressionTreeIntegerKind(node);
 	// a flat or logical row reads at the loop's own index register; a selected row first resolves its source index
 	sljit_s32 index_reg = SLJIT_R1;
 	switch (index_mode) {
@@ -53,8 +52,16 @@ static void EmitSljitTypedExpressionTreeFastLeafReg(struct sljit_compiler *compi
 		sljit_emit_op1(compiler, SLJIT_MOV_P, data_reg, 0, SLJIT_MEM1(SLJIT_S5),
 		               NumericCast<sljit_sw>(node.ref_index * sizeof(const_data_ptr_t)));
 	}
-	sljit_emit_op1(compiler, NativeIntegerLoadOp(source_kind), target, 0, SLJIT_MEM2(data_reg, index_reg),
-	               NativeIntegerDataScale(source_kind));
+	sljit_s32 load_op;
+	sljit_sw scale;
+	if (SljitTypedExpressionTreeIsNarrowSignedReference(node)) {
+		GetSljitTypedExpressionTreeNarrowSourceLoad(node, load_op, scale);
+	} else {
+		auto source_kind = SljitTypedExpressionTreeIntegerKind(node);
+		load_op = NativeIntegerLoadOp(source_kind);
+		scale = NativeIntegerDataScale(source_kind);
+	}
+	sljit_emit_op1(compiler, load_op, target, 0, SLJIT_MEM2(data_reg, index_reg), scale);
 }
 
 //! A comparison, modulo or division reads a constant right operand as an immediate, so it never takes a register

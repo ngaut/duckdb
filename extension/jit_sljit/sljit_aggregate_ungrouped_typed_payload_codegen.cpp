@@ -66,11 +66,19 @@ void EmitSljitUngroupedTypedConditionalSharedFastPayload(
 	sljit_set_label(conditional_done, sljit_emit_label(compiler));
 }
 
+void GetSljitUngroupedAggregateAccumulatorPair(idx_t pair, sljit_s32 &lower, sljit_s32 &upper) {
+	const auto &registers = GetSljitUngroupedAggregateRegisterLayout();
+	D_ASSERT(registers.has_conditional_hugeint_accumulators && pair < 2);
+	lower = pair == 0 ? registers.shared_lower : registers.conditional_lower;
+	upper = pair == 0 ? registers.shared_upper : registers.conditional_upper;
+}
+
 void EmitSljitUngroupedTypedFastPayloads(
     struct sljit_compiler *compiler, const vector<SljitNativeRegionExpressionPlan> &payloads,
     const vector<ExecutionRegionAggregateInput> &aggregates, const vector<sljit_sw> &local_sum_offsets,
-    const vector<sljit_sw> &local_sum_upper_offsets, const vector<sljit_sw> &saw_value_offsets, bool selected,
-    vector<SljitArithmeticOverflowSite> &overflows, const vector<SljitTypedExpressionTreeLoopHoist> *data_hoists) {
+    const vector<sljit_sw> &local_sum_upper_offsets, const vector<sljit_sw> &saw_value_offsets,
+    const vector<idx_t> &register_accumulator_pairs, bool selected, vector<SljitArithmeticOverflowSite> &overflows,
+    const vector<SljitTypedExpressionTreeLoopHoist> *data_hoists) {
 	for (idx_t payload_idx = 0; payload_idx < payloads.size(); payload_idx++) {
 		auto kind = aggregates[payload_idx].primitive_update_kind;
 		if (kind == AggregatePrimitiveUpdateKind::COUNT_STAR) {
@@ -83,9 +91,21 @@ void EmitSljitUngroupedTypedFastPayloads(
 			EmitSljitUngroupedTypedFastPayloadValueReg(compiler, *payloads[payload_idx].expression_tree, selected,
 			                                           overflows, data_hoists);
 		}
-		EmitUngroupedAggregateAccumulate(compiler, kind, local_sum_offsets[payload_idx],
-		                                 local_sum_upper_offsets[payload_idx], saw_value_offsets[payload_idx],
-		                                 SLJIT_R2);
+		const auto pair = register_accumulator_pairs[payload_idx];
+		if (pair == DConstants::INVALID_INDEX) {
+			EmitUngroupedAggregateAccumulate(compiler, kind, local_sum_offsets[payload_idx],
+			                                 local_sum_upper_offsets[payload_idx], saw_value_offsets[payload_idx],
+			                                 SLJIT_R2);
+			continue;
+		}
+		sljit_s32 lower;
+		sljit_s32 upper;
+		GetSljitUngroupedAggregateAccumulatorPair(pair, lower, upper);
+		if (kind == AggregatePrimitiveUpdateKind::SUM_HUGEINT) {
+			EmitUngroupedAggregateAccumulateHugeintInt64Regs(compiler, lower, upper, SLJIT_R2);
+		} else {
+			sljit_emit_op2(compiler, SLJIT_ADD, lower, 0, lower, 0, SLJIT_R2, 0);
+		}
 	}
 }
 

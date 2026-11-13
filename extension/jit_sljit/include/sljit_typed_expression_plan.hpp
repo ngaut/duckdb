@@ -45,6 +45,10 @@ bool TryGetSljitTypedExpressionTreeNarrowDecimal128Bound(const ExecutionExpressi
 bool SljitTypedExpressionTreeIsNarrowDecimal128Node(const ExecutionExpressionIR &node);
 bool SljitTypedExpressionTreeIsValueNode(const ExecutionExpressionIR &node);
 bool SljitTypedExpressionTreeIsIntegerNode(const ExecutionExpressionIR &node);
+//! A signed integer column narrower than the tree's arithmetic: read only through a cast that widens it
+bool SljitTypedExpressionTreeIsNarrowSignedReference(const ExecutionExpressionIR &node);
+//! A cast widening a narrow signed integer column to INT32 or INT64: a sign-extending load of the column
+bool SljitTypedExpressionTreeIsNarrowSourceWideningCast(const ExecutionExpressionIR &node);
 bool SljitTypedExpressionTreeSameIntegerKind(const ExecutionExpressionIR &left, const ExecutionExpressionIR &right);
 bool SljitTypedExpressionTreeSameValueKind(const ExecutionExpressionIR &left, const ExecutionExpressionIR &right);
 bool TryReadSljitTypedExpressionTreeStringPrefixConstant(const ExecutionExpressionIR &node, idx_t &source_index,

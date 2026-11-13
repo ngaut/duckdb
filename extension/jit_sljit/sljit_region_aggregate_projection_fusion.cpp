@@ -9,6 +9,7 @@
 #include "sljit_region_aggregate_projection_fusion.hpp"
 
 #include "sljit_region_aggregate_payload_fusion.hpp"
+#include "sljit_projection_composition.hpp"
 #include "sljit_region_aggregate_projection_rewrite.hpp"
 #include "sljit_typed_expression_plan.hpp"
 
@@ -373,7 +374,7 @@ bool TryComposePrimitiveAggregatePayloadsThroughProjection(const vector<LogicalT
 			continue;
 		}
 		SljitNativeRegionExpressionPlan composed;
-		if (!TryComposeNativeProjection(projection.Projections(), payload, composed, render_diagnostics)) {
+		if (!TryComposeNativeSemanticProjection(projection.Projections(), payload, composed, render_diagnostics)) {
 			return false;
 		}
 		if (!SljitPrimitiveAggregatePayloadCanEraseProjection(composed)) {

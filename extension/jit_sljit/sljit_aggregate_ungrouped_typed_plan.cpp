@@ -66,7 +66,33 @@ bool TryBuildSljitUngroupedFusedAggregateUpdatePlan(const vector<SljitNativeRegi
 	        AggregatePrimitiveUpdateKind::SUM_HUGEINT &&
 	    aggregates[result.codegen_plan.conditional_lane].primitive_update_kind ==
 	        AggregatePrimitiveUpdateKind::SUM_HUGEINT;
+	result.register_accumulator_pairs.assign(payloads.size(), DConstants::INVALID_INDEX);
 	if (result.use_conditional_hugeint_register_accumulators) {
+		result.register_accumulator_pairs[result.codegen_plan.shared_lane] = 0;
+		result.register_accumulator_pairs[result.codegen_plan.conditional_lane] = 1;
+	} else if (registers.has_conditional_hugeint_accumulators && result.codegen_plan.fast_path_supported &&
+	           !result.codegen_plan.conditional_shared_payload) {
+		// the fast loops add every row: a running sum kept in registers saves a stack round trip per row
+		idx_t next_pair = 0;
+		for (idx_t payload_idx = 0; payload_idx < payloads.size(); payload_idx++) {
+			auto kind = aggregates[payload_idx].primitive_update_kind;
+			if (kind == AggregatePrimitiveUpdateKind::COUNT_STAR) {
+				continue;
+			}
+			if ((kind != AggregatePrimitiveUpdateKind::SUM_INT64 &&
+			     kind != AggregatePrimitiveUpdateKind::SUM_HUGEINT) ||
+			    next_pair == 2) {
+				result.register_accumulator_pairs.assign(payloads.size(), DConstants::INVALID_INDEX);
+				break;
+			}
+			result.register_accumulator_pairs[payload_idx] = next_pair++;
+		}
+	}
+	bool uses_register_accumulators = false;
+	for (auto pair : result.register_accumulator_pairs) {
+		uses_register_accumulators = uses_register_accumulators || pair != DConstants::INVALID_INDEX;
+	}
+	if (uses_register_accumulators) {
 		result.register_accumulator_used_offset = result.local_size;
 		result.local_size += NumericCast<sljit_sw>(sizeof(sljit_sw));
 	}
@@ -97,7 +123,7 @@ bool TryBuildSljitUngroupedFusedAggregateUpdatePlan(const vector<SljitNativeRegi
 	result.saved_register_count = result.hoist_source_data_pointers || result.hoist_fast_source_data_pointers
 	                                  ? registers.source_data_saved_register_count
 	                                  : GetSljitNativeVectorRegisterLayout().saved_register_count;
-	if (result.use_conditional_hugeint_register_accumulators) {
+	if (uses_register_accumulators) {
 		result.saved_register_count = registers.conditional_hugeint_saved_register_count;
 	}
 	return true;

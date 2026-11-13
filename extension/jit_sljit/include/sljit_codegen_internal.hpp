@@ -98,6 +98,10 @@ FindSljitTypedExpressionTreeStringCompareHoist(const vector<SljitTypedExpression
                                                const ExecutionExpressionIR &node);
 //! Stores the hoisted constants and string matches into their slots; data pointers are loaded by the kernel that
 //! owns their sources
+//! The sign-extending load of a narrow signed integer column, and its element scale
+void GetSljitTypedExpressionTreeNarrowSourceLoad(const ExecutionExpressionIR &reference, sljit_s32 &load_op,
+                                                 sljit_sw &scale);
+
 void EmitSljitTypedExpressionTreeConstantHoists(struct sljit_compiler *compiler,
                                                 const vector<SljitTypedExpressionTreeLoopHoist> &hoists);
 enum class SljitTypedExpressionTreeFastIndexMode : uint8_t { FLAT, LOGICAL, SELECTED };

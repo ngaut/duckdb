@@ -65,7 +65,8 @@ BuildSljitNativeUngroupedFusedAggregateUpdate(const vector<SljitNativeRegionExpr
 		}
 		sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_MEM1(SLJIT_SP), saw_value_offsets[payload_idx], SLJIT_IMM, 0);
 	}
-	if (use_conditional_hugeint_register_accumulators) {
+	const bool uses_register_accumulators = register_accumulator_used_offset >= 0;
+	if (uses_register_accumulators) {
 		const auto &registers = GetSljitUngroupedAggregateRegisterLayout();
 		sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_MEM1(SLJIT_SP), register_accumulator_used_offset, SLJIT_IMM, 0);
 		sljit_emit_op1(compiler, SLJIT_MOV, registers.shared_lower, 0, SLJIT_IMM, 0);
@@ -102,7 +103,7 @@ BuildSljitNativeUngroupedFusedAggregateUpdate(const vector<SljitNativeRegionExpr
 		auto use_generic_loop = sljit_emit_cmp(compiler, SLJIT_EQUAL, SLJIT_R0, 0, SLJIT_IMM, 0);
 
 		emit_fast_source_data_hoists();
-		if (use_conditional_hugeint_register_accumulators) {
+		if (uses_register_accumulators) {
 			sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_MEM1(SLJIT_SP), register_accumulator_used_offset, SLJIT_IMM, 1);
 		}
 		auto fast_loop = sljit_emit_label(compiler);
@@ -113,9 +114,9 @@ BuildSljitNativeUngroupedFusedAggregateUpdate(const vector<SljitNativeRegionExpr
 			    shared_fast_value_offset, use_conditional_hugeint_register_accumulators, false, overflows,
 			    fast_data_hoists);
 		} else {
-			EmitSljitUngroupedTypedFastPayloads(compiler, payloads, aggregates, local_sum_offsets,
-			                                    local_sum_upper_offsets, saw_value_offsets, false, overflows,
-			                                    fast_data_hoists);
+			EmitSljitUngroupedTypedFastPayloads(
+			    compiler, payloads, aggregates, local_sum_offsets, local_sum_upper_offsets, saw_value_offsets,
+			    update_plan.register_accumulator_pairs, false, overflows, fast_data_hoists);
 		}
 		EmitNextSljitNativeVectorLoop(compiler, fast_loop);
 
@@ -125,7 +126,7 @@ BuildSljitNativeUngroupedFusedAggregateUpdate(const vector<SljitNativeRegionExpr
 		auto use_generic_selected_loop = sljit_emit_cmp(compiler, SLJIT_EQUAL, SLJIT_R0, 0, SLJIT_IMM, 0);
 		sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_S1, 0, SLJIT_IMM, 0);
 		emit_fast_source_data_hoists();
-		if (use_conditional_hugeint_register_accumulators) {
+		if (uses_register_accumulators) {
 			sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_MEM1(SLJIT_SP), register_accumulator_used_offset, SLJIT_IMM, 1);
 		}
 		auto selected_fast_loop = sljit_emit_label(compiler);
@@ -137,9 +138,9 @@ BuildSljitNativeUngroupedFusedAggregateUpdate(const vector<SljitNativeRegionExpr
 			    shared_fast_value_offset, use_conditional_hugeint_register_accumulators, true, overflows,
 			    fast_data_hoists);
 		} else {
-			EmitSljitUngroupedTypedFastPayloads(compiler, payloads, aggregates, local_sum_offsets,
-			                                    local_sum_upper_offsets, saw_value_offsets, true, overflows,
-			                                    fast_data_hoists);
+			EmitSljitUngroupedTypedFastPayloads(
+			    compiler, payloads, aggregates, local_sum_offsets, local_sum_upper_offsets, saw_value_offsets,
+			    update_plan.register_accumulator_pairs, true, overflows, fast_data_hoists);
 		}
 		EmitNextSljitNativeVectorLoop(compiler, selected_fast_loop);
 
@@ -285,26 +286,29 @@ BuildSljitNativeUngroupedFusedAggregateUpdate(const vector<SljitNativeRegionExpr
 		sljit_set_label(hybrid_done, done_label);
 	}
 	sljit_set_label(done, done_label);
-	if (use_conditional_hugeint_register_accumulators) {
-		auto shared_lane = codegen_plan.shared_lane;
-		auto conditional_lane = codegen_plan.conditional_lane;
-		const auto &registers = GetSljitUngroupedAggregateRegisterLayout();
+	if (uses_register_accumulators) {
+		// a fast loop ran every row of the chunk: its registers hold the sums, and a value was seen unless it was empty
 		sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_R0, 0, SLJIT_MEM1(SLJIT_SP), register_accumulator_used_offset);
 		auto no_register_accumulator = sljit_emit_cmp(compiler, SLJIT_EQUAL, SLJIT_R0, 0, SLJIT_IMM, 0);
-		sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_MEM1(SLJIT_SP), local_sum_offsets[shared_lane],
-		               registers.shared_lower, 0);
-		sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_MEM1(SLJIT_SP), local_sum_upper_offsets[shared_lane],
-		               registers.shared_upper, 0);
-		sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_MEM1(SLJIT_SP), local_sum_offsets[conditional_lane],
-		               registers.conditional_lower, 0);
-		sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_MEM1(SLJIT_SP), local_sum_upper_offsets[conditional_lane],
-		               registers.conditional_upper, 0);
 		sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_R0, 0, SLJIT_IMM, 0);
 		auto empty_input = sljit_emit_cmp(compiler, SLJIT_EQUAL, SLJIT_S2, 0, SLJIT_IMM, 0);
 		sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_R0, 0, SLJIT_IMM, 1);
 		sljit_set_label(empty_input, sljit_emit_label(compiler));
-		sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_MEM1(SLJIT_SP), saw_value_offsets[shared_lane], SLJIT_R0, 0);
-		sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_MEM1(SLJIT_SP), saw_value_offsets[conditional_lane], SLJIT_R0, 0);
+		for (idx_t payload_idx = 0; payload_idx < payloads.size(); payload_idx++) {
+			const auto pair = update_plan.register_accumulator_pairs[payload_idx];
+			if (pair == DConstants::INVALID_INDEX) {
+				continue;
+			}
+			sljit_s32 lower;
+			sljit_s32 upper;
+			GetSljitUngroupedAggregateAccumulatorPair(pair, lower, upper);
+			sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_MEM1(SLJIT_SP), local_sum_offsets[payload_idx], lower, 0);
+			if (local_sum_upper_offsets[payload_idx] >= 0) {
+				sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_MEM1(SLJIT_SP), local_sum_upper_offsets[payload_idx], upper,
+				               0);
+			}
+			sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_MEM1(SLJIT_SP), saw_value_offsets[payload_idx], SLJIT_R0, 0);
+		}
 		sljit_set_label(no_register_accumulator, sljit_emit_label(compiler));
 	}
 	for (idx_t payload_idx = 0; payload_idx < payloads.size(); payload_idx++) {
