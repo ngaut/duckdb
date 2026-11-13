@@ -136,23 +136,36 @@ public:
 	bool HandsOverToNative(vector<SljitExecutableRegionOp> &ops, SljitRegionExecutionScratch &scratch,
 	                       const SljitFullPipelinePrimitiveStep &terminal_step, DataChunk &source_chunk,
 	                       const SljitExecutableNativeContinuation &continuation) {
-		if (terminal_step.kind != SljitFullPipelinePrimitiveKind::GROUPED_AGGREGATE_UPDATE) {
+		idx_t aggregate_idx;
+		switch (terminal_step.kind) {
+		case SljitFullPipelinePrimitiveKind::GROUPED_AGGREGATE_UPDATE:
+			aggregate_idx = terminal_step.grouped_aggregate_update.aggregate_idx;
+			break;
+		case SljitFullPipelinePrimitiveKind::POST_JOIN_PROJECTION_AGGREGATE_UPDATE:
+			aggregate_idx = terminal_step.post_join_projection_aggregate.aggregate_idx;
+			break;
+		default:
 			return false;
 		}
-		auto &primitive = terminal_step.grouped_aggregate_update;
-		if (ops[primitive.aggregate_idx].AggregateUpdate().plan.sink_info.Kind() !=
-		    ExecutionRegionSinkKind::HASH_AGGREGATE_UPDATE) {
+		auto &aggregate_update = ops[aggregate_idx].AggregateUpdate();
+		if (aggregate_update.plan.sink_info.Kind() != ExecutionRegionSinkKind::HASH_AGGREGATE_UPDATE) {
 			return false;
 		}
 		idx_t dense_range;
 		if (continuation.counts_rows_only &&
-		    SljitPendingDenseSingleLaneProfitable(
-		        scratch.AggregateParameters(primitive.aggregate_idx).estimated_input_count,
-		        ops[primitive.aggregate_idx].AggregateUpdate().dense_group_domain, dense_range)) {
+		    SljitPendingDenseSingleLaneProfitable(scratch.AggregateParameters(aggregate_idx).estimated_input_count,
+		                                          aggregate_update.dense_group_domain, dense_range)) {
 			return false;
 		}
-		return state.grouped_aggregate_update.SampleSourceGroupRuns(
-		           ops, primitive, source_chunk, continuation.group_key_source_column) == SljitSourceGroupRuns::ABSENT;
+		if (terminal_step.kind == SljitFullPipelinePrimitiveKind::GROUPED_AGGREGATE_UPDATE) {
+			return state.grouped_aggregate_update.SampleSourceGroupRuns(
+			           ops, terminal_step.grouped_aggregate_update, source_chunk,
+			           continuation.group_key_source_column) == SljitSourceGroupRuns::ABSENT;
+		}
+		// a join's output preaggregates runs of a single key, which the probe's source column carries
+		const auto column = continuation.group_key_source_column;
+		return aggregate_update.plan.sink_info.groups.size() == 1 && column < source_chunk.ColumnCount() &&
+		       !SljitVectorHasProfitableRuns(source_chunk.data[column], source_chunk.size());
 	}
 
 	bool ExecuteNativePipeline(ExecutionRegionRuntime &runtime, ExecutionRegionResult &result,

@@ -2,9 +2,9 @@
 # description: Floating-point group keys are equal by value, not by bits: -0.0 equals 0.0 and every NaN equals every
 # group: [jit]
 
-#              other. A compiled region hands them to core's grouped-state lookups like any other key, and core hashes
-#              and matches them with DuckDB's hash and equality instead of declining them or comparing them with C++'s
-#              == (either failed the query with an internal error)
+#              other. A compiled region hands them to core's grouped-state lookups like any other key, or hands a key
+#              without runs to DuckDB's operators; either way DuckDB's hash and equality match them, never C++'s ==
+#              (which failed the query with an internal error)
 
 require tpch
 
@@ -100,7 +100,8 @@ CREATE OR REPLACE TABLE actual AS SELECT * FROM {query}
 
 query I
 SELECT count(*) > 0 FROM duckdb_jit_events()
-WHERE phase = 'runtime' AND generated_stage_count_breakdown LIKE '%find_or_create_input_vector.group_keys=%'
+WHERE phase = 'runtime' AND (generated_stage_count_breakdown LIKE '%find_or_create_input_vector.group_keys=%'
+                              OR jit_runtime_path_counts LIKE '%source.native_continuation=%')
 ----
 true
 

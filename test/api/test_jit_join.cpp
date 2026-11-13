@@ -907,7 +907,7 @@ TEST_CASE("JIT hash join probe preserves selected reference source view", "[api]
 	REQUIRE_NO_FAIL(con.Query("SET jit_cbo_startup_base_cost=0"));
 	REQUIRE_NO_FAIL(con.Query("SET jit_cbo_startup_margin_basis_points=0"));
 	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_hash_selected_probe_l AS "
-	                          "SELECT ((i % 10000) * 1000003)::BIGINT AS k, i::BIGINT AS v, "
+	                          "SELECT (((i // 8) % 10000) * 1000003)::BIGINT AS k, i::BIGINT AS v, "
 	                          "DATE '1992-01-01' + (i % 2000)::INTEGER AS d FROM range(65536) tbl(i)"));
 	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_hash_selected_probe_r AS "
 	                          "SELECT (i * 1000003)::BIGINT AS k, (i * 3)::BIGINT AS w FROM range(10000) tbl(i)"));
@@ -1089,7 +1089,8 @@ TEST_CASE("JIT perfect hash join materializes selection-only output before post-
 	    });
 }
 
-TEST_CASE("JIT perfect hash join grouped aggregate direct-projects input-vector keys", "[api][jit]") {
+TEST_CASE("JIT perfect hash join grouped aggregate over input-vector keys without runs hands its pipeline over",
+          "[api][jit]") {
 	DuckDB db;
 	Connection con(db);
 	auto &manager = ExecutionRegionManager::Get(*con.context);
@@ -1125,22 +1126,11 @@ TEST_CASE("JIT perfect hash join grouped aggregate direct-projects input-vector 
 	                      ") diff");
 	REQUIRE_NO_FAIL(*diff);
 	REQUIRE(diff->Collection().GetValue(0, 0).GetValue<int64_t>() == 0);
-
-	RequireJitEvent(
-	    manager,
-	    [](const ExecutionRegionEvent &event) {
-		    return EventPhase(event) == "runtime" && EventStatus(event) == "executed" &&
-		           EventExecutionMode(event) == "native" &&
-		           event.jit_runtime.hash_join_probe_layout == "perfect_hash_table" &&
-		           HasJitAggregateUpdatePath(event) && HasHashJoinProbeRuntimePath(event);
-	    },
-	    [](const ExecutionRegionEvent &event) {
-		    REQUIRE(event.jit_runtime.hash_join_probe_layout == "perfect_hash_table");
-		    RequireHashProbeAggregateUpdateRuntimeOwnership(event);
-	    });
+	RequireNativeContinuation(manager);
 }
 
-TEST_CASE("JIT perfect hash join grouped aggregate composes cast-chain input-vector keys", "[api][jit]") {
+TEST_CASE("JIT perfect hash join grouped aggregate over cast-chain keys without runs hands its pipeline over",
+          "[api][jit]") {
 	DuckDB db;
 	Connection con(db);
 	auto &manager = ExecutionRegionManager::Get(*con.context);
@@ -1176,19 +1166,7 @@ TEST_CASE("JIT perfect hash join grouped aggregate composes cast-chain input-vec
 	                      ") diff");
 	REQUIRE_NO_FAIL(*diff);
 	REQUIRE(diff->Collection().GetValue(0, 0).GetValue<int64_t>() == 0);
-
-	RequireJitEvent(
-	    manager,
-	    [](const ExecutionRegionEvent &event) {
-		    return EventPhase(event) == "runtime" && EventStatus(event) == "executed" &&
-		           EventExecutionMode(event) == "native" &&
-		           event.jit_runtime.hash_join_probe_layout == "perfect_hash_table" &&
-		           HasJitAggregateUpdatePath(event) && HasHashJoinProbeRuntimePath(event);
-	    },
-	    [](const ExecutionRegionEvent &event) {
-		    REQUIRE(event.jit_runtime.hash_join_probe_layout == "perfect_hash_table");
-		    RequireHashProbeAggregateUpdateRuntimeOwnership(event);
-	    });
+	RequireNativeContinuation(manager);
 }
 
 TEST_CASE("JIT perfect hash probe directly consumes complementary string aggregates", "[api][jit]") {
@@ -1515,7 +1493,7 @@ TEST_CASE("JIT row-pointer aggregate accepts identity-cast build-side group keys
 	    });
 }
 
-TEST_CASE("JIT join grouped aggregate direct-projects probe-side grouped keys", "[api][jit]") {
+TEST_CASE("JIT join grouped aggregate over probe-side keys without runs hands its pipeline over", "[api][jit]") {
 	DuckDB db;
 	Connection con(db);
 	auto &manager = ExecutionRegionManager::Get(*con.context);
@@ -1548,21 +1526,10 @@ TEST_CASE("JIT join grouped aggregate direct-projects probe-side grouped keys", 
 	auto result = con.Query(query);
 	REQUIRE_NO_FAIL(*result);
 	RequireSameResultValues(*result, *reference);
-
-	RequireJitEvent(
-	    manager,
-	    [](const ExecutionRegionEvent &event) {
-		    return EventPhase(event) == "runtime" && EventStatus(event) == "executed" &&
-		           EventExecutionMode(event) == "native" && HasJitAggregateUpdatePath(event) &&
-		           HasHashJoinProbeRuntimePath(event);
-	    },
-	    [](const ExecutionRegionEvent &event) {
-		    REQUIRE(event.jit_runtime.hash_join_probe_layout == "regular_hash_table");
-		    RequireHashProbeAggregateUpdateRuntimeOwnership(event);
-	    });
+	RequireNativeContinuation(manager);
 }
 
-TEST_CASE("JIT join grouped aggregate direct-projects split probe-side keys", "[api][jit]") {
+TEST_CASE("JIT join grouped aggregate over split probe-side keys without runs hands its pipeline over", "[api][jit]") {
 	DuckDB db;
 	Connection con(db);
 	auto &manager = ExecutionRegionManager::Get(*con.context);
@@ -1594,18 +1561,7 @@ TEST_CASE("JIT join grouped aggregate direct-projects split probe-side keys", "[
 	auto result = con.Query(query);
 	REQUIRE_NO_FAIL(*result);
 	RequireSameResultValues(*result, *reference);
-
-	RequireJitEvent(
-	    manager,
-	    [](const ExecutionRegionEvent &event) {
-		    return EventPhase(event) == "runtime" && EventStatus(event) == "executed" &&
-		           EventExecutionMode(event) == "native" && HasJitAggregateUpdatePath(event) &&
-		           HasHashJoinProbeRuntimePath(event);
-	    },
-	    [](const ExecutionRegionEvent &event) {
-		    REQUIRE(event.jit_runtime.hash_join_probe_layout == "regular_hash_table");
-		    RequireHashProbeAggregateUpdateRuntimeOwnership(event);
-	    });
+	RequireNativeContinuation(manager);
 }
 
 TEST_CASE("JIT join grouped aggregate direct-projects RHS keys", "[api][jit]") {
@@ -2152,7 +2108,8 @@ TEST_CASE("JIT probes selected BIGINT keys through proven INTEGER narrowing", "[
 	TestDeleteFile(db_path + ".wal");
 }
 
-TEST_CASE("JIT join grouped aggregate direct-projects variable-width RHS keys", "[api][jit]") {
+TEST_CASE("JIT join grouped aggregate over variable-width RHS keys without runs hands its pipeline over",
+          "[api][jit]") {
 	DuckDB db;
 	Connection con(db);
 	auto &manager = ExecutionRegionManager::Get(*con.context);
@@ -2187,18 +2144,7 @@ TEST_CASE("JIT join grouped aggregate direct-projects variable-width RHS keys", 
 	auto result = con.Query(query);
 	REQUIRE_NO_FAIL(*result);
 	RequireSameResultValues(*result, *reference);
-
-	RequireJitEvent(
-	    manager,
-	    [](const ExecutionRegionEvent &event) {
-		    return EventPhase(event) == "runtime" && EventStatus(event) == "executed" &&
-		           EventExecutionMode(event) == "native" && HasJitAggregateUpdatePath(event) &&
-		           HasHashJoinProbeRuntimePath(event);
-	    },
-	    [](const ExecutionRegionEvent &event) {
-		    REQUIRE(event.jit_runtime.hash_join_probe_layout == "regular_hash_table");
-		    RequireHashProbeAggregateUpdateRuntimeOwnership(event);
-	    });
+	RequireNativeContinuation(manager);
 }
 
 static void RequireComposedJoinProjectionAggregateEvent(ExecutionRegionManager &manager) {
@@ -2227,7 +2173,8 @@ static void RequireSelectedHashJoinViewMaterializationHasNoElisionCredit(Executi
 	REQUIRE(found);
 }
 
-TEST_CASE("JIT mapped join casts feed dense grouped counts", "[api][jit]") {
+TEST_CASE("JIT mapped join counts over a key domain the input does not outnumber hand their pipeline over",
+          "[api][jit]") {
 	DuckDB db;
 	Connection con(db);
 	auto &manager = ExecutionRegionManager::Get(*con.context);
@@ -2271,27 +2218,6 @@ TEST_CASE("JIT mapped join casts feed dense grouped counts", "[api][jit]") {
 	REQUIRE_NO_FAIL(*difference);
 	REQUIRE(difference->Collection().GetValue(0, 0).ToString() == "0");
 
-	RequireJitEvent(
-	    manager,
-	    [](const ExecutionRegionEvent &event) {
-		    if (EventPhase(event) != "runtime" || event.backend_name != "sljit") {
-			    return false;
-		    }
-		    const auto runtime_paths = EventJitRuntimePathCounts(event);
-		    return StringUtil::Contains(
-		               runtime_paths,
-		               "aggregate_update.projection_aggregate.group.input_vector_cast_key0_unchecked=300000") &&
-		           StringUtil::Contains(runtime_paths,
-		                                "aggregate_update.pending_dense_single_lane_grouped_update=300000") &&
-		           StringUtil::Contains(runtime_paths,
-		                                "aggregate_update.pending_dense_single_lane_grouped_update_flush=300000") &&
-		           !StringUtil::Contains(runtime_paths, "producer_group_output_map");
-	    },
-	    [](const ExecutionRegionEvent &event) {
-		    REQUIRE(StringUtil::Contains(EventJitRuntimePathCounts(event), "hash_join_probe.regular_probe.all_valid."));
-		    RequireHashProbeAggregateUpdateRuntimeOwnership(event);
-	    });
-
 	REQUIRE_NO_FAIL(con.Query("INSERT INTO jit_mapped_dense_customer VALUES (NULL)"));
 	ClearJitTrace(manager, true);
 	REQUIRE_NO_FAIL(con.Query("CREATE TEMP TABLE jit_mapped_dense_nullable_output AS " + query));
@@ -2301,19 +2227,7 @@ TEST_CASE("JIT mapped join casts feed dense grouped counts", "[api][jit]") {
 	REQUIRE(nullable_shape->Collection().GetValue(0, 0).ToString() == "150001");
 	REQUIRE(nullable_shape->Collection().GetValue(1, 0).ToString() == "150000");
 	REQUIRE(nullable_shape->Collection().GetValue(2, 0).ToString() == "300000");
-	RequireJitEvent(
-	    manager,
-	    [](const ExecutionRegionEvent &event) {
-		    const auto paths = EventJitRuntimePathCounts(event);
-		    return EventPhase(event) == "runtime" && EventStatus(event) == "executed" &&
-		           EventExecutionMode(event) == "native" &&
-		           StringUtil::Contains(paths, "hash_join_probe.regular_probe.generated=");
-	    },
-	    [](const ExecutionRegionEvent &event) {
-		    REQUIRE_FALSE(
-		        StringUtil::Contains(EventJitRuntimePathCounts(event), "hash_join_probe.regular_probe.all_valid."));
-		    RequireHashProbeAggregateUpdateRuntimeOwnership(event);
-	    });
+	RequireNativeContinuation(manager);
 }
 
 TEST_CASE("JIT two-join grouped aggregate composes mixed VARCHAR projection chain", "[api][jit]") {
@@ -2371,7 +2285,8 @@ TEST_CASE("JIT two-join grouped aggregate composes mixed VARCHAR projection chai
 	RequireSelectedHashJoinViewMaterializationHasNoElisionCredit(manager);
 }
 
-TEST_CASE("JIT row-pointer grouped aggregate probes compressed string keys as single fields", "[api][jit]") {
+TEST_CASE("JIT row-pointer grouped aggregate over compressed string keys without runs hands its pipeline over",
+          "[api][jit]") {
 	DuckDB db;
 	Connection con(db);
 	auto &manager = ExecutionRegionManager::Get(*con.context);
@@ -2403,15 +2318,7 @@ TEST_CASE("JIT row-pointer grouped aggregate probes compressed string keys as si
 	auto result = con.Query(query);
 	REQUIRE_NO_FAIL(*result);
 	RequireSameResultValues(*result, *reference);
-
-	RequireJitEvent(
-	    manager,
-	    [](const ExecutionRegionEvent &event) {
-		    return EventPhase(event) == "runtime" && EventStatus(event) == "executed" &&
-		           EventExecutionMode(event) == "native" && HasJitAggregateUpdatePath(event) &&
-		           HasHashJoinProbeRuntimePath(event);
-	    },
-	    [](const ExecutionRegionEvent &event) { RequireHashProbeAggregateUpdateRuntimeOwnership(event); });
+	RequireNativeContinuation(manager);
 }
 
 TEST_CASE("JIT two-join grouped aggregate uses selected projection aggregate backend", "[api][jit]") {
@@ -2540,7 +2447,7 @@ TEST_CASE("JIT two-join aggregate composes second-join projection chain", "[api]
 	RequireComposedJoinProjectionAggregateEvent(manager);
 }
 
-TEST_CASE("JIT multi-join aggregate composes generic join-prefix projection chain", "[api][jit]") {
+TEST_CASE("JIT multi-join aggregate over build-side keys without runs hands its pipeline over", "[api][jit]") {
 	DuckDB db;
 	Connection con(db);
 	auto &manager = ExecutionRegionManager::Get(*con.context);
@@ -2592,20 +2499,7 @@ TEST_CASE("JIT multi-join aggregate composes generic join-prefix projection chai
 	auto result = con.Query(query);
 	REQUIRE_NO_FAIL(*result);
 	RequireSameResultValues(*result, *reference);
-
-	RequireJitEvent(
-	    manager,
-	    [](const ExecutionRegionEvent &event) {
-		    return EventPhase(event) == "runtime" && EventStatus(event) == "executed" &&
-		           EventExecutionMode(event) == "native" && HasJitAggregateUpdatePath(event) &&
-		           HasHashJoinProbeRuntimePath(event) &&
-		           GeneratedOperatorStageEntryCount(event, "hash_join_probe") >= 3;
-	    },
-	    [](const ExecutionRegionEvent &event) {
-		    RequireHashProbeAggregateUpdateRuntimeOwnership(event);
-		    REQUIRE(GeneratedOperatorStageExecutionCount(event, "hash_join_probe") > 0);
-		    REQUIRE(HasGeneratedAggregateUpdateStage(event));
-	    });
+	RequireNativeContinuation(manager);
 }
 
 TEST_CASE("JIT single mark filter aggregate uses projected source grouped update", "[api][jit]") {
@@ -3006,7 +2900,7 @@ TEST_CASE("JIT hash join probe consumes generated-filter selected reference inpu
 	ConfigureSljitForCoverage(con, true, true, 10000);
 	REQUIRE_NO_FAIL(con.Query("SET disabled_optimizers='filter_pushdown'"));
 	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_hash_full_vector_selected_l AS "
-	                          "SELECT ((i % 10000) * 1000003)::BIGINT AS k, i::BIGINT AS v, "
+	                          "SELECT (((i // 8) % 10000) * 1000003)::BIGINT AS k, i::BIGINT AS v, "
 	                          "DATE '1992-01-01' + (i % 2000)::INTEGER AS d FROM range(65536) tbl(i)"));
 	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_hash_full_vector_selected_r AS "
 	                          "SELECT (i * 1000003)::BIGINT AS k, (i * 3)::BIGINT AS w "

@@ -3099,7 +3099,7 @@ TEST_CASE("JIT regular hash aggregate fuses typed expression payloads for existi
 	RequireNativeContinuation(manager);
 }
 
-TEST_CASE("JIT fused join payloads update compressed group keys through input-vector lookups", "[api][jit]") {
+TEST_CASE("JIT fused join payloads over compressed group keys without runs hand their pipeline over", "[api][jit]") {
 	DuckDB db;
 	Connection con(db);
 	auto &manager = ExecutionRegionManager::Get(*con.context);
@@ -3146,27 +3146,7 @@ TEST_CASE("JIT fused join payloads update compressed group keys through input-ve
 	    },
 	    [](const ExecutionRegionEvent &event) { RequireGeneratedMachineCodeRegion(event); });
 
-	// The compressed region_name key is looked up straight from the join output vector: the descriptor lookup
-	// never misses, so no group key is materialized for a fallback update.
-	string observed_runtime_paths;
-	bool input_vector_grouped_update = false;
-	bool descriptor_lookup_miss = false;
-	for (auto &event : manager.GetEvents()) {
-		if (EventPhase(event) != "runtime" || event.backend_name != "sljit") {
-			continue;
-		}
-		const auto runtime_paths = EventJitRuntimePathCounts(event);
-		observed_runtime_paths += runtime_paths + "\n";
-		input_vector_grouped_update =
-		    input_vector_grouped_update ||
-		    StringUtil::Contains(runtime_paths, "aggregate_update.projection_aggregate.input_vector_grouped_update=");
-		descriptor_lookup_miss =
-		    descriptor_lookup_miss ||
-		    StringUtil::Contains(runtime_paths, "aggregate_update.direct_input_vector_group_payload_update_miss=");
-	}
-	INFO("fused join payload runtime paths:\n" + observed_runtime_paths);
-	REQUIRE(input_vector_grouped_update);
-	REQUIRE_FALSE(descriptor_lookup_miss);
+	RequireNativeContinuation(manager);
 }
 
 TEST_CASE("JIT grouped aggregate consumes rewritten payloads through generated update", "[api][jit]") {

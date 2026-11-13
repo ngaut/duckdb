@@ -7,6 +7,7 @@
 #include "sljit_full_pipeline_recipe.hpp"
 #include "sljit_join_probe_codegen.hpp"
 #include "sljit_projection_source_runtime.hpp"
+#include "sljit_string_set_case_projection_runtime.hpp"
 
 #include "duckdb/common/limits.hpp"
 #include "duckdb/execution/execution_aggregate_runtime.hpp"
@@ -198,10 +199,34 @@ static bool SljitRegionMayContinueNatively(const SljitNativeRegionPlan &region) 
 	return region.ops.back().AggregateUpdate().sink_info.Kind() == ExecutionRegionSinkKind::HASH_AGGREGATE_UPDATE;
 }
 
-//! Marking the groups of a small domain already sunk indexes a bitmap, which no hash table lookup matches: such a
-//! region keeps its pipeline
+//! A sum over a string set beside the sum over its complement accumulates the few known groups of its key in a local
+//! table
+static bool SljitAggregateUpdateIsStringSetComplementarySum(const SljitExecutableAggregateUpdate &aggregate_update) {
+	auto &payloads = aggregate_update.payloads;
+	if (payloads.size() != 2) {
+		return false;
+	}
+	const auto source_count = payloads[0].plan.expression_tree_source_indices.size();
+	for (idx_t reference_index = 0; reference_index < source_count; reference_index++) {
+		for (idx_t matching = 0; matching < 2; matching++) {
+			std::array<string, 2> matching_constants;
+			std::array<string, 2> non_matching_constants;
+			if (SljitTryReadStringSetCaseExpression(payloads[matching], reference_index, true, matching_constants) &&
+			    SljitTryReadStringSetCaseExpression(payloads[1 - matching], reference_index, false,
+			                                        non_matching_constants) &&
+			    SljitSameStringConstantSet(matching_constants, non_matching_constants)) {
+				return true;
+			}
+		}
+	}
+	return false;
+}
+
+//! Marking the groups of a small domain already sunk indexes a bitmap, and a string-set complementary sum indexes its
+//! known groups, which no hash table lookup matches: such a region keeps its pipeline
 static bool SljitAggregateUpdateIndexesBoundedDomain(const SljitExecutableRegionOp &op) {
-	return op.AggregateUpdate().distinct_group_domain_size != 0;
+	return op.AggregateUpdate().distinct_group_domain_size != 0 ||
+	       SljitAggregateUpdateIsStringSetComplementarySum(op.AggregateUpdate());
 }
 
 //! Whether a projection keeps distinct inputs distinct, so its input has the group runs its output has
@@ -243,11 +268,22 @@ static bool SljitTraceColumnToOpInput(const SljitExecutableRegionOp &op, idx_t &
 		return true;
 	}
 	case SljitNativeRegionOpKind::HASH_JOIN_PROBE: {
-		auto &contract = op.HashJoinProbe().plan.operator_info.HashJoin().contract;
-		if (!contract.present || column >= contract.lhs_output_column_indices.size()) {
+		auto &probe = op.HashJoinProbe().plan;
+		auto &contract = probe.operator_info.HashJoin().contract;
+		if (!contract.present) {
 			return false;
 		}
-		column = contract.lhs_output_column_indices[column];
+		if (column < contract.lhs_output_column_indices.size()) {
+			column = contract.lhs_output_column_indices[column];
+			return true;
+		}
+		// a build-side column is a function of the single equality key that found its row: its runs follow the
+		// probe key's
+		if (probe.output_mode != ExecutionHashJoinProbeOutputMode::MATCHED_PROBE_AND_BUILD ||
+		    contract.equality_condition_count != 1 || contract.condition_count != 1 || probe.keys.size() != 1) {
+			return false;
+		}
+		column = probe.keys[0].key_input_index;
 		return true;
 	}
 	default:
