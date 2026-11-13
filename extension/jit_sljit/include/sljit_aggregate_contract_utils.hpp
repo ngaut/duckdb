@@ -26,9 +26,10 @@ static bool SljitAggregateSinkHasDistinctState(const ExecutionRegionAggregateSin
 	return false;
 }
 
-//! An aggregate whose states add up regardless of which rows each update saw, in any order, and which the region
-//! updates in DuckDB's own states: an ungrouped aggregate, or a perfect-hash one whose table the region writes. Chunks
-//! DuckDB's operators sink and chunks the region updates may alternate
+//! An aggregate the region updates in DuckDB's own states, without distinct or sorted inputs: an ungrouped aggregate,
+//! or a perfect-hash one whose table the region writes. Chunks DuckDB's operators sink and chunks the region updates
+//! may alternate; the region sinks every row it holds before DuckDB's operators take a chunk, so rows reach the
+//! states in source order, as an order-dependent aggregate needs
 static bool SljitAggregateSinkAdmitsNativeChunks(const ExecutionRegionAggregateSinkInfo &sink_info) {
 	if ((sink_info.Kind() != ExecutionRegionSinkKind::UNGROUPED_AGGREGATE_UPDATE &&
 	     sink_info.Kind() != ExecutionRegionSinkKind::PERFECT_HASH_AGGREGATE_UPDATE) ||
@@ -36,7 +37,7 @@ static bool SljitAggregateSinkAdmitsNativeChunks(const ExecutionRegionAggregateS
 		return false;
 	}
 	for (auto &aggregate : sink_info.aggregates) {
-		if (aggregate.order_dependent || aggregate.has_order_bys) {
+		if (aggregate.has_order_bys) {
 			return false;
 		}
 	}
