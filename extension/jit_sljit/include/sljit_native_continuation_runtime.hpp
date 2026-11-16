@@ -12,6 +12,7 @@
 #include "sljit_projection_executor_runtime.hpp"
 #include "sljit_region_adapter_scratch.hpp"
 #include "sljit_region_executable.hpp"
+#include "sljit_runtime_batch_runtime.hpp"
 
 namespace duckdb {
 
@@ -104,8 +105,17 @@ public:
 				const auto count = current.get().size();
 				const auto selected =
 				    SljitSelectFilter(op, current.get(), selection, adapters[op_idx][0], nullptr, count, &runtime);
-				if (selected != count) {
+				if (selected == count) {
+					continue;
+				}
+				// Gathering costs every kept row while a slice costs the same for any count: a filter that keeps at
+				// most half of the rows hands them over gathered
+				if (selected * 2 > count) {
 					current.get().Slice(selection, selected);
+				} else {
+					auto &output = Output(runtime, op_idx);
+					Compact(current.get(), selected, output);
+					current = output;
 				}
 				continue;
 			}
@@ -131,6 +141,29 @@ public:
 	}
 
 private:
+	//! The rows the filter selected, as DuckDB's scan hands a region source the rows its filters keep: a flat
+	//! fixed-width column holds just those rows, any other column keeps its entries under the selection
+	void Compact(DataChunk &input, idx_t selected, DataChunk &output) {
+		output.Reset();
+		for (idx_t col_idx = 0; col_idx < input.ColumnCount(); col_idx++) {
+			auto &source = input.data[col_idx];
+			auto &target = output.data[col_idx];
+			const auto physical_type = source.GetType().InternalType();
+			if (source.GetVectorType() != VectorType::FLAT_VECTOR || !TypeIsConstantSize(physical_type)) {
+				target.Slice(source, selection, selected);
+			} else if (FlatVector::Validity(source).AllValid()) {
+				UnifiedVectorFormat source_format;
+				source.ToUnifiedFormat(source_format);
+				source_format.sel = &selection;
+				SljitCopyFixedWidthUnifiedAllValid(source_format, FlatVector::GetDataMutable(target), selected,
+				                                   GetTypeIdSize(physical_type));
+			} else {
+				VectorOperations::Copy(source, target, selection, selected, 0, 0);
+			}
+		}
+		output.SetChildCardinality(selected);
+	}
+
 	DataChunk &Output(ExecutionRegionRuntime &runtime, idx_t op_idx) {
 		if (outputs.size() <= op_idx) {
 			outputs.resize(op_idx + 1);
