@@ -39,7 +39,8 @@ protected:
 	                            idx_t final_projection_idx) const;
 
 	//! The generated step that runs op `op_idx` on its own
-	bool TryMakeGeneratedOperatorStep(idx_t op_idx, SljitFullPipelinePrimitiveStep &step) const;
+	//! The generated step computing ops [op_idx, next_op_idx)
+	bool TryMakeGeneratedOperatorStep(idx_t op_idx, SljitFullPipelinePrimitiveStep &step, idx_t &next_op_idx) const;
 	bool NativeTailInputLayoutMatches(const SljitFullPipelinePrimitiveSequence &sequence, idx_t tail_start_idx) const;
 	//! The generated step that updates sink op `op_idx`
 	bool TryMakeGeneratedSinkStep(idx_t op_idx, SljitFullPipelinePrimitiveStep &step) const;

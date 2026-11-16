@@ -35,28 +35,6 @@ SljitFullPipelineRecipeBinding::MakePrimitiveRecipePlan(SljitFullPipelineRecipe 
 	return SljitMakeFullPipelinePrimitiveRecipePlan(std::move(recipe));
 }
 
-bool SljitFullPipelineRecipeBinding::TryMakeProjectionFilterProjectionNativeTailRecipe(
-    const SljitProjectionFilterProjectionNativeTailFacts &facts, SljitFullPipelineRecipe &recipe) const {
-	SljitGeneratedFilterPrimitive generated_filter;
-	SljitProjectionChainPrimitive pre_projection;
-	SljitProjectionChainPrimitive projection;
-	if (!SljitTryBindGeneratedFilterPrimitive(ops, facts.filter_idx, generated_filter) ||
-	    !SljitTryBindProjectionChainPrimitive(ops, facts.pre_projection_idx, pre_projection) ||
-	    !SljitTryBindProjectionChainPrimitive(ops, facts.projection_idx, projection)) {
-		return false;
-	}
-	auto sequence = MakeSourceSequence();
-	if (facts.filter_can_run_before_pre_projection) {
-		sequence.Add(SljitFullPipelinePrimitiveStep::GeneratedFilter(generated_filter));
-		sequence.Add(SljitFullPipelinePrimitiveStep::ProjectionChain(pre_projection));
-	} else {
-		sequence.Add(SljitFullPipelinePrimitiveStep::ProjectionChain(pre_projection));
-		sequence.Add(SljitFullPipelinePrimitiveStep::GeneratedFilter(generated_filter));
-	}
-	sequence.Add(SljitFullPipelinePrimitiveStep::ProjectionChain(projection));
-	return TryMakeNativeTailRecipe(std::move(sequence), facts.tail_start_idx, recipe);
-}
-
 bool SljitFullPipelineRecipeBinding::TryMakeJoinFilterAggregateRecipe(const SljitJoinFilterAggregateFacts &facts,
                                                                       SljitFullPipelineRecipe &recipe) const {
 	SljitFullPipelinePrimitiveStep probe_step;
@@ -88,20 +66,6 @@ bool SljitFullPipelineRecipeBinding::TryMakeJoinFilterAggregateRecipe(const Slji
 	    probe_step_idx, sequence.Count() - 1, facts.hash_join_idx, facts.aggregate_idx, facts.filter_idx);
 	recipe = MakePrimitiveSequence(std::move(sequence), direct_consumer);
 	return true;
-}
-
-bool SljitFullPipelineRecipeBinding::TryMakeGeneratedFilterProjectionNativeTailRecipe(
-    const SljitGeneratedFilterProjectionNativeTailFacts &facts, SljitFullPipelineRecipe &recipe) const {
-	SljitGeneratedFilterPrimitive generated_filter;
-	SljitProjectionChainPrimitive projection;
-	if (!SljitTryBindGeneratedFilterPrimitive(ops, facts.filter_idx, generated_filter) ||
-	    !SljitTryBindProjectionChainPrimitive(ops, facts.projection_idx, projection)) {
-		return false;
-	}
-	auto sequence = MakeSourceSequence();
-	sequence.Add(SljitFullPipelinePrimitiveStep::GeneratedFilter(generated_filter));
-	sequence.Add(SljitFullPipelinePrimitiveStep::ProjectionChain(projection));
-	return TryMakeNativeTailRecipe(std::move(sequence), facts.tail_start_idx, recipe);
 }
 
 bool SljitFullPipelineRecipeBinding::TryAddSourcePrefixSteps(SljitFullPipelinePrimitiveSequence &sequence,

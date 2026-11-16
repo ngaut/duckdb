@@ -23,19 +23,6 @@ SljitProjectionAggregateRecipeBinding::SljitProjectionAggregateRecipeBinding(
     : SljitFullPipelineRecipeSequenceBuilder(ops_p, source_output_types_p, source_min_values_p, source_max_values_p) {
 }
 
-bool SljitProjectionAggregateRecipeBinding::TryMakeMarkFilterProjectionNativeTailRecipe(
-    const SljitMarkFilterProjectionNativeTailFacts &facts, SljitFullPipelineRecipe &recipe) const {
-	SljitFullPipelinePrimitiveStep boundary_step;
-	if (!TryMakeMarkProbeFilterBoundaryStep(facts.hash_join_idx, facts.filter_idx, true, facts.first_projection_idx,
-	                                        false, boundary_step)) {
-		return false;
-	}
-	auto sequence = MakeSourceSequence();
-	sequence.Add(std::move(boundary_step));
-	return TryMakeProjectionNativeTailRecipe(std::move(sequence), facts.first_projection_idx,
-	                                         facts.final_projection_idx, facts.tail_start_idx, recipe);
-}
-
 bool SljitProjectionAggregateRecipeBinding::TryMakeSourceProjectionAggregateTailRecipe(
     const SljitFullPipelineProjectionAggregateShape &shape, const SljitProjectionAggregatePrefixFacts &facts,
     SljitFullPipelineRecipe &recipe) const {

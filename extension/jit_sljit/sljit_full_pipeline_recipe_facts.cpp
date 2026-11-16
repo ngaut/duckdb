@@ -43,12 +43,6 @@ bool SljitFullPipelineHashJoinProbeIsMatchedProbeAndBuild(const vector<SljitExec
 	       ops[op_idx].HashJoinProbe().plan.output_mode == ExecutionHashJoinProbeOutputMode::MATCHED_PROBE_AND_BUILD;
 }
 
-static bool SljitFullPipelineOpIsUngroupedPrimitiveAggregateUpdate(const SljitExecutableRegionOp &op) {
-	return op.Kind() == SljitNativeRegionOpKind::AGGREGATE_UPDATE &&
-	       op.AggregateUpdate().plan.sink_info.Kind() == ExecutionRegionSinkKind::UNGROUPED_AGGREGATE_UPDATE &&
-	       op.AggregateUpdate().plan.UsesPrimitivePayloads();
-}
-
 bool SljitTryAnalyzeHashJoinBuildSink(const vector<SljitExecutableRegionOp> &ops, SljitHashJoinBuildSinkFacts &facts) {
 	facts = SljitHashJoinBuildSinkFacts();
 	if (ops.size() < 2 || ops.back().Kind() != SljitNativeRegionOpKind::HASH_JOIN_BUILD) {
@@ -187,97 +181,6 @@ bool SljitTryAnalyzeProjectionAggregatePlan(const vector<SljitExecutableRegionOp
 	if (!SljitTryAnalyzeProjectionAggregatePrefix(ops, plan.shape, plan.prefix)) {
 		return false;
 	}
-	return true;
-}
-
-bool SljitTryAnalyzeMarkFilterProjectionNativeTail(const vector<SljitExecutableRegionOp> &ops,
-                                                   SljitMarkFilterProjectionNativeTailFacts &facts) {
-	facts = SljitMarkFilterProjectionNativeTailFacts();
-	if (ops.size() < 4 || !SljitFullPipelineOpIsAt(ops, 0, SljitNativeRegionOpKind::HASH_JOIN_PROBE) ||
-	    !SljitFullPipelineOpIsAt(ops, 1, SljitNativeRegionOpKind::FILTER) ||
-	    !SljitFullPipelineOpIsAt(ops, 2, SljitNativeRegionOpKind::PROJECTION)) {
-		return false;
-	}
-	if (ops[0].HashJoinProbe().plan.output_mode != ExecutionHashJoinProbeOutputMode::MARK_PROBE ||
-	    !SljitIsMarkProbeMarkerFilter(ops[0], ops[1])) {
-		return false;
-	}
-
-	idx_t tail_start_idx = 2;
-	while (tail_start_idx < ops.size() &&
-	       SljitFullPipelineOpIsAt(ops, tail_start_idx, SljitNativeRegionOpKind::PROJECTION)) {
-		tail_start_idx++;
-	}
-	if (tail_start_idx <= 2 || tail_start_idx >= ops.size()) {
-		return false;
-	}
-
-	facts.hash_join_idx = 0;
-	facts.filter_idx = 1;
-	facts.first_projection_idx = 2;
-	facts.final_projection_idx = tail_start_idx - 1;
-	facts.tail_start_idx = tail_start_idx;
-	return true;
-}
-
-bool SljitTryAnalyzeGeneratedFilterProjectionNativeTail(const vector<SljitExecutableRegionOp> &ops,
-                                                        SljitGeneratedFilterProjectionNativeTailFacts &facts) {
-	facts = SljitGeneratedFilterProjectionNativeTailFacts();
-	if (ops.size() <= 2 || !SljitFullPipelineOpIsAt(ops, 0, SljitNativeRegionOpKind::FILTER) ||
-	    !SljitFullPipelineOpIsAt(ops, 1, SljitNativeRegionOpKind::PROJECTION)) {
-		return false;
-	}
-	facts.filter_idx = 0;
-	facts.projection_idx = 1;
-	facts.tail_start_idx = 2;
-	return true;
-}
-
-static bool SljitProjectionPreservesSourceColumn(const SljitExecutableRegionOp &projection, idx_t source_idx) {
-	if (source_idx >= projection.Projections().size() || source_idx >= projection.input_types.size() ||
-	    source_idx >= projection.output_types.size()) {
-		return false;
-	}
-	auto &plan = projection.Projections()[source_idx].plan;
-	return plan.kind == SljitNativeRegionExpressionKind::REFERENCE && plan.source_index == source_idx &&
-	       plan.return_type == projection.input_types[source_idx] &&
-	       projection.output_types[source_idx] == projection.input_types[source_idx];
-}
-
-static bool SljitFilterCanRunBeforePreProjection(const vector<SljitExecutableRegionOp> &ops, idx_t pre_projection_idx,
-                                                 idx_t filter_idx) {
-	if (!SljitFullPipelineOpIsAt(ops, pre_projection_idx, SljitNativeRegionOpKind::PROJECTION) ||
-	    !SljitFullPipelineOpIsAt(ops, filter_idx, SljitNativeRegionOpKind::FILTER)) {
-		return false;
-	}
-	D_ASSERT(ops[filter_idx].Filter());
-	vector<idx_t> filter_sources;
-	if (!SljitCollectExpressionSourceIndices(ops[filter_idx].Filter()->expression, filter_sources) ||
-	    filter_sources.empty()) {
-		return false;
-	}
-	for (auto source_idx : filter_sources) {
-		if (!SljitProjectionPreservesSourceColumn(ops[pre_projection_idx], source_idx)) {
-			return false;
-		}
-	}
-	return true;
-}
-
-bool SljitTryAnalyzeProjectionFilterProjectionNativeTail(const vector<SljitExecutableRegionOp> &ops,
-                                                         SljitProjectionFilterProjectionNativeTailFacts &facts) {
-	facts = SljitProjectionFilterProjectionNativeTailFacts();
-	if (ops.size() <= 3 || !SljitFullPipelineOpIsAt(ops, 0, SljitNativeRegionOpKind::PROJECTION) ||
-	    !SljitFullPipelineOpIsAt(ops, 1, SljitNativeRegionOpKind::FILTER) ||
-	    !SljitFullPipelineOpIsAt(ops, 2, SljitNativeRegionOpKind::PROJECTION)) {
-		return false;
-	}
-	facts.pre_projection_idx = 0;
-	facts.filter_idx = 1;
-	facts.projection_idx = 2;
-	facts.tail_start_idx = 3;
-	facts.filter_can_run_before_pre_projection =
-	    SljitFilterCanRunBeforePreProjection(ops, facts.pre_projection_idx, facts.filter_idx);
 	return true;
 }
 

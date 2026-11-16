@@ -215,8 +215,7 @@ private:
 		static const SljitFullPipelineRecipeRegistryEntry registry[] = {
 		    {&SljitFullPipelineRecipeBuilder::TryBuildJoinFilterAggregateRecipe},
 		    {&SljitFullPipelineRecipeBuilder::TryBuildHashJoinBuildSinkRecipe},
-		    {&SljitFullPipelineRecipeBuilder::TryBuildProjectionAggregateRecipe},
-		    {&SljitFullPipelineRecipeBuilder::TryBuildNativeTailRecipe}};
+		    {&SljitFullPipelineRecipeBuilder::TryBuildProjectionAggregateRecipe}};
 		count = sizeof(registry) / sizeof(registry[0]);
 		return registry;
 	}
@@ -258,22 +257,6 @@ private:
 			return false;
 		}
 		return false;
-	}
-
-	bool TryBuildNativeTailRecipe(SljitFullPipelineRecipe &recipe) const {
-		SljitMarkFilterProjectionNativeTailFacts mark_filter;
-		if (SljitTryAnalyzeMarkFilterProjectionNativeTail(ops, mark_filter) &&
-		    binding.ProjectionAggregateRecipes().TryMakeMarkFilterProjectionNativeTailRecipe(mark_filter, recipe)) {
-			return true;
-		}
-		SljitGeneratedFilterProjectionNativeTailFacts generated_filter;
-		if (SljitTryAnalyzeGeneratedFilterProjectionNativeTail(ops, generated_filter) &&
-		    binding.TryMakeGeneratedFilterProjectionNativeTailRecipe(generated_filter, recipe)) {
-			return true;
-		}
-		SljitProjectionFilterProjectionNativeTailFacts projection_filter;
-		return SljitTryAnalyzeProjectionFilterProjectionNativeTail(ops, projection_filter) &&
-		       binding.TryMakeProjectionFilterProjectionNativeTailRecipe(projection_filter, recipe);
 	}
 
 private:

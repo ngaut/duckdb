@@ -26,14 +26,8 @@ public:
 
 	SljitFullPipelineRecipePlan MakePrimitiveRecipePlan(SljitFullPipelineRecipe recipe) const;
 
-	bool TryMakeProjectionFilterProjectionNativeTailRecipe(const SljitProjectionFilterProjectionNativeTailFacts &facts,
-	                                                       SljitFullPipelineRecipe &recipe) const;
-
 	bool TryMakeJoinFilterAggregateRecipe(const SljitJoinFilterAggregateFacts &facts,
 	                                      SljitFullPipelineRecipe &recipe) const;
-
-	bool TryMakeGeneratedFilterProjectionNativeTailRecipe(const SljitGeneratedFilterProjectionNativeTailFacts &facts,
-	                                                      SljitFullPipelineRecipe &recipe) const;
 
 	bool TryMakeHashJoinBuildSinkRecipe(const SljitHashJoinBuildSinkFacts &facts,
 	                                    SljitFullPipelineRecipe &recipe) const;

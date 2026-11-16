@@ -25,9 +25,6 @@ public:
 	                                      const vector<Value> &source_min_values_p,
 	                                      const vector<Value> &source_max_values_p);
 
-	bool TryMakeMarkFilterProjectionNativeTailRecipe(const SljitMarkFilterProjectionNativeTailFacts &facts,
-	                                                 SljitFullPipelineRecipe &recipe) const;
-
 	bool TryMakeSourceProjectionAggregateTailRecipe(const SljitFullPipelineProjectionAggregateShape &shape,
 	                                                const SljitProjectionAggregatePrefixFacts &facts,
 	                                                SljitFullPipelineRecipe &recipe) const;

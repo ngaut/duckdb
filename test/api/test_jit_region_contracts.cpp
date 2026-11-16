@@ -667,18 +667,7 @@ TEST_CASE("JIT recipe binders preserve the output recipe on admission failure", 
 	REQUIRE_FALSE(binding.TryMakeHashJoinBuildSinkRecipe(hash_join_build, recipe));
 	require_unchanged();
 
-	SljitGeneratedFilterProjectionNativeTailFacts generated_filter_tail;
-	REQUIRE_FALSE(binding.TryMakeGeneratedFilterProjectionNativeTailRecipe(generated_filter_tail, recipe));
-	require_unchanged();
-
-	SljitProjectionFilterProjectionNativeTailFacts projection_filter_tail;
-	REQUIRE_FALSE(binding.TryMakeProjectionFilterProjectionNativeTailRecipe(projection_filter_tail, recipe));
-	require_unchanged();
-
 	auto &projection_aggregate = binding.ProjectionAggregateRecipes();
-	SljitMarkFilterProjectionNativeTailFacts mark_filter_tail;
-	REQUIRE_FALSE(projection_aggregate.TryMakeMarkFilterProjectionNativeTailRecipe(mark_filter_tail, recipe));
-	require_unchanged();
 
 	SljitFullPipelineProjectionAggregateShape projection_aggregate_shape;
 	SljitProjectionAggregatePrefixFacts projection_aggregate_prefix;

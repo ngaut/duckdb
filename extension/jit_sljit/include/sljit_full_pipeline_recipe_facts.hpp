@@ -125,28 +125,6 @@ struct SljitProjectionAggregatePlanFacts {
 	}
 };
 
-struct SljitMarkFilterProjectionNativeTailFacts {
-	idx_t hash_join_idx = DConstants::INVALID_INDEX;
-	idx_t filter_idx = DConstants::INVALID_INDEX;
-	idx_t first_projection_idx = DConstants::INVALID_INDEX;
-	idx_t final_projection_idx = DConstants::INVALID_INDEX;
-	idx_t tail_start_idx = DConstants::INVALID_INDEX;
-};
-
-struct SljitGeneratedFilterProjectionNativeTailFacts {
-	idx_t filter_idx = DConstants::INVALID_INDEX;
-	idx_t projection_idx = DConstants::INVALID_INDEX;
-	idx_t tail_start_idx = DConstants::INVALID_INDEX;
-};
-
-struct SljitProjectionFilterProjectionNativeTailFacts {
-	idx_t pre_projection_idx = DConstants::INVALID_INDEX;
-	idx_t filter_idx = DConstants::INVALID_INDEX;
-	idx_t projection_idx = DConstants::INVALID_INDEX;
-	idx_t tail_start_idx = DConstants::INVALID_INDEX;
-	bool filter_can_run_before_pre_projection = false;
-};
-
 bool SljitFullPipelineOpIsAt(const vector<SljitExecutableRegionOp> &ops, idx_t op_idx, SljitNativeRegionOpKind kind);
 //! The source prefix is the longest run of ops in [0, limit) that only select rows (FILTER) or compute columns
 //! (PROJECTION) ahead of the recipe's first operator; recipes bind it as generated-filter and projection-chain steps.
@@ -159,11 +137,5 @@ bool SljitTryAnalyzeJoinFilterAggregate(const vector<SljitExecutableRegionOp> &o
                                         SljitJoinFilterAggregateFacts &facts);
 bool SljitTryAnalyzeProjectionAggregatePlan(const vector<SljitExecutableRegionOp> &ops,
                                             SljitProjectionAggregatePlanFacts &plan);
-bool SljitTryAnalyzeMarkFilterProjectionNativeTail(const vector<SljitExecutableRegionOp> &ops,
-                                                   SljitMarkFilterProjectionNativeTailFacts &facts);
-bool SljitTryAnalyzeGeneratedFilterProjectionNativeTail(const vector<SljitExecutableRegionOp> &ops,
-                                                        SljitGeneratedFilterProjectionNativeTailFacts &facts);
-bool SljitTryAnalyzeProjectionFilterProjectionNativeTail(const vector<SljitExecutableRegionOp> &ops,
-                                                         SljitProjectionFilterProjectionNativeTailFacts &facts);
 
 } // namespace duckdb

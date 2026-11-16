@@ -97,7 +97,9 @@ bool SljitFullPipelineRecipeSequenceBuilder::NativeTailInputLayoutMatches(
 }
 
 bool SljitFullPipelineRecipeSequenceBuilder::TryMakeGeneratedOperatorStep(idx_t op_idx,
-                                                                          SljitFullPipelinePrimitiveStep &step) const {
+                                                                          SljitFullPipelinePrimitiveStep &step,
+                                                                          idx_t &next_op_idx) const {
+	next_op_idx = op_idx + 1;
 	switch (ops[op_idx].Kind()) {
 	case SljitNativeRegionOpKind::FILTER: {
 		SljitGeneratedFilterPrimitive filter;
@@ -115,8 +117,26 @@ bool SljitFullPipelineRecipeSequenceBuilder::TryMakeGeneratedOperatorStep(idx_t 
 		step = SljitFullPipelinePrimitiveStep::ProjectionChain(projection);
 		return true;
 	}
-	case SljitNativeRegionOpKind::HASH_JOIN_PROBE:
+	case SljitNativeRegionOpKind::HASH_JOIN_PROBE: {
+		// A filter on a MARK probe's marker selects in the probe's own pass
+		const auto filter_idx = op_idx + 1;
+		if (filter_idx < ops.size() && ops[filter_idx].Kind() == SljitNativeRegionOpKind::FILTER &&
+		    ops[op_idx].HashJoinProbe().plan.output_mode == ExecutionHashJoinProbeOutputMode::MARK_PROBE &&
+		    SljitIsMarkProbeMarkerFilter(ops[op_idx], ops[filter_idx])) {
+			const auto projection_idx =
+			    filter_idx + 1 < ops.size() && ops[filter_idx + 1].Kind() == SljitNativeRegionOpKind::PROJECTION
+			        ? filter_idx + 1
+			        : DConstants::INVALID_INDEX;
+			SljitMarkProbeFilterBoundaryPrimitive boundary;
+			if (SljitTryBindMarkProbeFilterBoundaryPrimitive(ops, op_idx, filter_idx, true, projection_idx, false,
+			                                                 boundary)) {
+				step = SljitFullPipelinePrimitiveStep::MarkProbeFilterBoundary(boundary);
+				next_op_idx = filter_idx + 1;
+				return true;
+			}
+		}
 		return TryMakeHashJoinProbeMaterializeStep(op_idx, step);
+	}
 	default:
 		return false;
 	}
@@ -205,10 +225,14 @@ bool SljitFullPipelineRecipeSequenceBuilder::TryMakeNativeTailRecipe(SljitFullPi
 			hand_over_idx = op_idx;
 		}
 		SljitFullPipelinePrimitiveStep step;
-		if (sequence.Count() + 1 >= SLJIT_FULL_PIPELINE_MAX_PRIMITIVES || !TryMakeGeneratedOperatorStep(op_idx, step)) {
+		idx_t next_op_idx;
+		if (sequence.Count() + 1 >= SLJIT_FULL_PIPELINE_MAX_PRIMITIVES ||
+		    !TryMakeGeneratedOperatorStep(op_idx, step, next_op_idx)) {
 			break;
 		}
 		sequence.Add(std::move(step));
+		// a step computing several ops leaves no operator boundary between them
+		op_idx = next_op_idx - 1;
 	}
 	if (hand_over_idx == DConstants::INVALID_INDEX) {
 		return false;
