@@ -43,6 +43,9 @@ protected:
 	bool NativeTailInputLayoutMatches(const SljitFullPipelinePrimitiveSequence &sequence, idx_t tail_start_idx) const;
 	//! The generated step that updates sink op `op_idx`
 	bool TryMakeGeneratedSinkStep(idx_t op_idx, SljitFullPipelinePrimitiveStep &step) const;
+	//! The aggregate sink after filter `filter_idx`, evaluating the filter in the pass that updates the states
+	bool TryMakeFilteredSinkStep(idx_t filter_idx, SljitFullPipelinePrimitiveStep &step) const;
+	static bool StepHandsOverWholeChunks(const SljitFullPipelinePrimitiveStep &step);
 	bool TryMakeNativeTailRecipe(SljitFullPipelinePrimitiveSequence sequence, idx_t tail_start_idx,
 	                             SljitFullPipelineRecipe &recipe) const;
 

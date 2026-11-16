@@ -29,11 +29,6 @@ public:
 	bool TryMakeProjectionFilterProjectionNativeTailRecipe(const SljitProjectionFilterProjectionNativeTailFacts &facts,
 	                                                       SljitFullPipelineRecipe &recipe) const;
 
-	SljitFullPipelineRecipe MakeSourceUngroupedAggregateRecipe(const SljitSourceUngroupedAggregateFacts &facts) const;
-
-	bool TryMakeSourceFilterAggregateRecipe(const SljitSourceFilterAggregateFacts &facts,
-	                                        SljitFullPipelineRecipe &recipe) const;
-
 	bool TryMakeJoinFilterAggregateRecipe(const SljitJoinFilterAggregateFacts &facts,
 	                                      SljitFullPipelineRecipe &recipe) const;
 

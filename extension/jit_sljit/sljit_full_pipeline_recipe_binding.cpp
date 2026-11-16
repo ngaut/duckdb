@@ -57,59 +57,6 @@ bool SljitFullPipelineRecipeBinding::TryMakeProjectionFilterProjectionNativeTail
 	return TryMakeNativeTailRecipe(std::move(sequence), facts.tail_start_idx, recipe);
 }
 
-SljitFullPipelineRecipe SljitFullPipelineRecipeBinding::MakeSourceUngroupedAggregateRecipe(
-    const SljitSourceUngroupedAggregateFacts &facts) const {
-	auto sequence = MakeSourceSequence();
-	auto aggregate_update = SljitBindUngroupedAggregateUpdatePrimitive(ops, facts.aggregate_idx);
-	sequence.Add(SljitFullPipelinePrimitiveStep::UngroupedAggregateUpdate(aggregate_update));
-	return MakePrimitiveSequence(std::move(sequence));
-}
-
-bool SljitFullPipelineRecipeBinding::TryMakeSourceFilterAggregateRecipe(const SljitSourceFilterAggregateFacts &facts,
-                                                                        SljitFullPipelineRecipe &recipe) const {
-	SljitUngroupedAggregateUpdatePrimitive filtered_ungrouped;
-	SljitUngroupedAggregateUpdatePrimitive ungrouped;
-	SljitGroupedAggregateUpdatePrimitive filtered_grouped;
-	SljitGroupedAggregateUpdatePrimitive grouped;
-	SljitGeneratedFilterPrimitive generated_filter;
-	const auto can_bind_filtered_ungrouped = SljitTryBindFilteredUngroupedAggregateUpdatePrimitive(
-	    ops, facts.filter_idx, facts.aggregate_idx, filtered_ungrouped);
-	const auto can_bind_ungrouped = SljitTryBindUngroupedAggregateUpdatePrimitive(ops, facts.aggregate_idx, ungrouped);
-	const auto can_bind_filtered_grouped = SljitTryBindFilteredGroupedAggregateUpdatePrimitive(
-	    ops, facts.filter_idx, facts.aggregate_idx, filtered_grouped);
-	const auto has_dedicated_grouped_backend =
-	    SljitTryBindGroupedAggregateUpdatePrimitive(ops, facts.aggregate_idx, grouped);
-	const auto can_bind_generated_filter =
-	    SljitTryBindGeneratedFilterPrimitive(ops, facts.filter_idx, generated_filter);
-	if (!can_bind_filtered_ungrouped && !can_bind_ungrouped && !can_bind_filtered_grouped &&
-	    !has_dedicated_grouped_backend) {
-		return false;
-	}
-
-	auto sequence = MakeSourceSequence();
-	if (can_bind_filtered_ungrouped) {
-		sequence.Add(SljitFullPipelinePrimitiveStep::UngroupedAggregateUpdate(filtered_ungrouped));
-	} else if (can_bind_filtered_grouped) {
-		sequence.Add(SljitFullPipelinePrimitiveStep::GroupedAggregateUpdate(filtered_grouped));
-	} else {
-		if (!can_bind_generated_filter) {
-			return false;
-		}
-		sequence.Add(SljitFullPipelinePrimitiveStep::GeneratedFilter(generated_filter));
-		SljitGroupedAggregateUpdatePrimitive selected_grouped;
-		if (can_bind_ungrouped) {
-			sequence.Add(SljitFullPipelinePrimitiveStep::UngroupedAggregateUpdate(ungrouped));
-		} else if (SljitTryBindSelectedInputGroupedAggregateUpdatePrimitive(ops, facts.aggregate_idx,
-		                                                                    selected_grouped)) {
-			sequence.Add(SljitFullPipelinePrimitiveStep::GroupedAggregateUpdate(selected_grouped));
-		} else {
-			return false;
-		}
-	}
-	recipe = MakePrimitiveSequence(std::move(sequence));
-	return true;
-}
-
 bool SljitFullPipelineRecipeBinding::TryMakeJoinFilterAggregateRecipe(const SljitJoinFilterAggregateFacts &facts,
                                                                       SljitFullPipelineRecipe &recipe) const {
 	SljitFullPipelinePrimitiveStep probe_step;

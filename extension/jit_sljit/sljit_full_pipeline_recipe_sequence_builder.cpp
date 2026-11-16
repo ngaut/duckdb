@@ -150,6 +150,40 @@ bool SljitFullPipelineRecipeSequenceBuilder::TryMakeGeneratedSinkStep(idx_t op_i
 	return true;
 }
 
+//! A filtered sink evaluates its filter over every row of the chunk it gets: the step before it must hand over whole
+//! chunks rather than a selection of their rows
+bool SljitFullPipelineRecipeSequenceBuilder::StepHandsOverWholeChunks(const SljitFullPipelinePrimitiveStep &step) {
+	switch (step.kind) {
+	case SljitFullPipelinePrimitiveKind::GENERATED_FILTER:
+	case SljitFullPipelinePrimitiveKind::HASH_JOIN_PROBE_SELECTION:
+	case SljitFullPipelinePrimitiveKind::MARK_PROBE_FILTER_BOUNDARY:
+		return false;
+	default:
+		return true;
+	}
+}
+
+bool SljitFullPipelineRecipeSequenceBuilder::TryMakeFilteredSinkStep(idx_t filter_idx,
+                                                                     SljitFullPipelinePrimitiveStep &step) const {
+	const auto aggregate_idx = filter_idx + 1;
+	if (aggregate_idx >= ops.size() || ops[filter_idx].Kind() != SljitNativeRegionOpKind::FILTER ||
+	    ops[aggregate_idx].Kind() != SljitNativeRegionOpKind::AGGREGATE_UPDATE ||
+	    !ops[aggregate_idx].AggregateUpdate().plan.UsesPrimitivePayloads()) {
+		return false;
+	}
+	SljitUngroupedAggregateUpdatePrimitive ungrouped;
+	if (SljitTryBindFilteredUngroupedAggregateUpdatePrimitive(ops, filter_idx, aggregate_idx, ungrouped)) {
+		step = SljitFullPipelinePrimitiveStep::UngroupedAggregateUpdate(ungrouped);
+		return true;
+	}
+	SljitGroupedAggregateUpdatePrimitive grouped;
+	if (SljitTryBindFilteredGroupedAggregateUpdatePrimitive(ops, filter_idx, aggregate_idx, grouped)) {
+		step = SljitFullPipelinePrimitiveStep::GroupedAggregateUpdate(grouped);
+		return true;
+	}
+	return false;
+}
+
 //! Generated steps carry the rows from `tail_start_idx` on as far as they bind, into the sink when generated code
 //! updates it; otherwise DuckDB's operators take them over at the furthest op they can take them at
 bool SljitFullPipelineRecipeSequenceBuilder::TryMakeNativeTailRecipe(SljitFullPipelinePrimitiveSequence sequence,
@@ -159,7 +193,9 @@ bool SljitFullPipelineRecipeSequenceBuilder::TryMakeNativeTailRecipe(SljitFullPi
 	auto hand_over_idx = DConstants::INVALID_INDEX;
 	for (auto op_idx = tail_start_idx; op_idx < ops.size(); op_idx++) {
 		SljitFullPipelinePrimitiveStep sink_step;
-		if (op_idx + 1 == ops.size() && TryMakeGeneratedSinkStep(op_idx, sink_step)) {
+		if ((op_idx + 1 == ops.size() && TryMakeGeneratedSinkStep(op_idx, sink_step)) ||
+		    (op_idx + 2 == ops.size() && StepHandsOverWholeChunks(sequence.Step(sequence.Count() - 1)) &&
+		     TryMakeFilteredSinkStep(op_idx, sink_step))) {
 			sequence.Add(std::move(sink_step));
 			recipe = MakePrimitiveSequence(std::move(sequence));
 			return true;

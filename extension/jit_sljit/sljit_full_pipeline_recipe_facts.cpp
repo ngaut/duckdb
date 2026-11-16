@@ -74,29 +74,6 @@ bool SljitTryAnalyzeHashJoinBuildSink(const vector<SljitExecutableRegionOp> &ops
 	return true;
 }
 
-bool SljitTryAnalyzeSourceUngroupedAggregate(const vector<SljitExecutableRegionOp> &ops,
-                                             SljitSourceUngroupedAggregateFacts &facts) {
-	facts = SljitSourceUngroupedAggregateFacts();
-	if (ops.size() != 1 || !SljitFullPipelineOpIsUngroupedPrimitiveAggregateUpdate(ops[0])) {
-		return false;
-	}
-	facts.aggregate_idx = 0;
-	return true;
-}
-
-bool SljitTryAnalyzeSourceFilterAggregate(const vector<SljitExecutableRegionOp> &ops,
-                                          SljitSourceFilterAggregateFacts &facts) {
-	facts = SljitSourceFilterAggregateFacts();
-	if (ops.size() != 2 || !SljitFullPipelineOpIsAt(ops, 0, SljitNativeRegionOpKind::FILTER) ||
-	    !SljitFullPipelineOpIsAt(ops, 1, SljitNativeRegionOpKind::AGGREGATE_UPDATE) ||
-	    !ops[1].AggregateUpdate().plan.UsesPrimitivePayloads()) {
-		return false;
-	}
-	facts.filter_idx = 0;
-	facts.aggregate_idx = 1;
-	return true;
-}
-
 bool SljitTryAnalyzeJoinFilterAggregate(const vector<SljitExecutableRegionOp> &ops,
                                         SljitJoinFilterAggregateFacts &facts) {
 	facts = SljitJoinFilterAggregateFacts();

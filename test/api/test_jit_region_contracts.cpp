@@ -659,10 +659,6 @@ TEST_CASE("JIT recipe binders preserve the output recipe on admission failure", 
 		REQUIRE(recipe.direct_aggregate_consumer.aggregate_idx == 37);
 	};
 
-	SljitSourceFilterAggregateFacts source_filter_aggregate;
-	REQUIRE_FALSE(binding.TryMakeSourceFilterAggregateRecipe(source_filter_aggregate, recipe));
-	require_unchanged();
-
 	SljitJoinFilterAggregateFacts join_filter_aggregate;
 	REQUIRE_FALSE(binding.TryMakeJoinFilterAggregateRecipe(join_filter_aggregate, recipe));
 	require_unchanged();

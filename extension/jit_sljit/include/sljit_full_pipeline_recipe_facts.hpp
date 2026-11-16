@@ -26,15 +26,6 @@ struct SljitHashJoinBuildSinkFacts {
 	}
 };
 
-struct SljitSourceUngroupedAggregateFacts {
-	idx_t aggregate_idx = DConstants::INVALID_INDEX;
-};
-
-struct SljitSourceFilterAggregateFacts {
-	idx_t filter_idx = DConstants::INVALID_INDEX;
-	idx_t aggregate_idx = DConstants::INVALID_INDEX;
-};
-
 //! ops [0, hash_join_idx) form the source prefix (see SljitFullPipelineSourcePrefixEnd).
 struct SljitJoinFilterAggregateFacts {
 	idx_t hash_join_idx = DConstants::INVALID_INDEX;
@@ -164,10 +155,6 @@ idx_t SljitFullPipelineSourcePrefixEnd(const vector<SljitExecutableRegionOp> &op
 bool SljitFullPipelineHashJoinProbeIsMatchedProbeAndBuild(const vector<SljitExecutableRegionOp> &ops, idx_t op_idx);
 
 bool SljitTryAnalyzeHashJoinBuildSink(const vector<SljitExecutableRegionOp> &ops, SljitHashJoinBuildSinkFacts &facts);
-bool SljitTryAnalyzeSourceUngroupedAggregate(const vector<SljitExecutableRegionOp> &ops,
-                                             SljitSourceUngroupedAggregateFacts &facts);
-bool SljitTryAnalyzeSourceFilterAggregate(const vector<SljitExecutableRegionOp> &ops,
-                                          SljitSourceFilterAggregateFacts &facts);
 bool SljitTryAnalyzeJoinFilterAggregate(const vector<SljitExecutableRegionOp> &ops,
                                         SljitJoinFilterAggregateFacts &facts);
 bool SljitTryAnalyzeProjectionAggregatePlan(const vector<SljitExecutableRegionOp> &ops,

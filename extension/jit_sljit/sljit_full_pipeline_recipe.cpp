@@ -79,14 +79,13 @@ static idx_t SljitPrimitiveAggregateStateSemanticBytes(AggregatePrimitiveUpdateK
 }
 
 static bool SljitTryBindPrimitiveAggregateStateSource(const SljitNativeAggregateStateSourcePlan &source,
-                                                      const vector<SljitExecutableRegionOp> &ops,
-                                                      const SljitSourceUngroupedAggregateFacts &facts,
+                                                      const vector<SljitExecutableRegionOp> &ops, idx_t aggregate_idx,
                                                       vector<ExecutionAggregateStateCombineLane> &lanes) {
 	if (source.function_name != "hash_aggregate_scan" || !source.state_scan_contract.primitive_aggregate_batch_ready ||
-	    facts.aggregate_idx >= ops.size()) {
+	    aggregate_idx >= ops.size()) {
 		return false;
 	}
-	auto &aggregate_op = ops[facts.aggregate_idx];
+	auto &aggregate_op = ops[aggregate_idx];
 	auto &sink_aggregates = aggregate_op.AggregateUpdate().plan.sink_info.aggregates;
 	auto &payloads = aggregate_op.AggregateUpdate().payloads;
 	if (sink_aggregates.empty() || sink_aggregates.size() != payloads.size()) {
@@ -181,18 +180,31 @@ public:
 		SljitFullPipelineRecipe recipe;
 		idx_t count;
 		auto registry = RecipeRegistry(count);
-		for (idx_t entry_idx = 0; entry_idx < count; entry_idx++) {
-			if ((this->*registry[entry_idx].try_build)(recipe)) {
-				return binding.MakePrimitiveRecipePlan(std::move(recipe));
-			}
+		bool bound = false;
+		for (idx_t entry_idx = 0; !bound && entry_idx < count; entry_idx++) {
+			bound = (this->*registry[entry_idx].try_build)(recipe);
 		}
-		if (binding.TryMakeOperatorHandOverRecipe(recipe)) {
-			return binding.MakePrimitiveRecipePlan(std::move(recipe));
+		if (!bound && !binding.TryMakeOperatorHandOverRecipe(recipe)) {
+			return SljitFullPipelineRecipePlan();
 		}
-		return SljitFullPipelineRecipePlan();
+		BindPrimitiveAggregateStateSource(recipe);
+		return binding.MakePrimitiveRecipePlan(std::move(recipe));
 	}
 
 private:
+	//! An ungrouped aggregate fed straight by an aggregate-state scan combines the scanned states instead of rows
+	void BindPrimitiveAggregateStateSource(SljitFullPipelineRecipe &recipe) const {
+		auto &sequence = recipe.primitive_sequence;
+		if (sequence.Count() != 2 || sequence.Step(0).kind != SljitFullPipelinePrimitiveKind::SOURCE_FETCH ||
+		    sequence.Step(1).kind != SljitFullPipelinePrimitiveKind::UNGROUPED_AGGREGATE_UPDATE ||
+		    sequence.Step(1).ungrouped_aggregate_update.filter_idx != DConstants::INVALID_INDEX) {
+			return;
+		}
+		SljitTryBindPrimitiveAggregateStateSource(source, ops,
+		                                          sequence.Step(1).ungrouped_aggregate_update.aggregate_idx,
+		                                          recipe.primitive_aggregate_state_source_lanes);
+	}
+
 	using TryBuildRecipeFunction = bool (SljitFullPipelineRecipeBuilder::*)(SljitFullPipelineRecipe &) const;
 
 	struct SljitFullPipelineRecipeRegistryEntry {
@@ -201,30 +213,12 @@ private:
 
 	static const SljitFullPipelineRecipeRegistryEntry *RecipeRegistry(idx_t &count) {
 		static const SljitFullPipelineRecipeRegistryEntry registry[] = {
-		    {&SljitFullPipelineRecipeBuilder::TryBuildSourceUngroupedAggregateRecipe},
-		    {&SljitFullPipelineRecipeBuilder::TryBuildSourceFilterAggregateRecipe},
 		    {&SljitFullPipelineRecipeBuilder::TryBuildJoinFilterAggregateRecipe},
 		    {&SljitFullPipelineRecipeBuilder::TryBuildHashJoinBuildSinkRecipe},
 		    {&SljitFullPipelineRecipeBuilder::TryBuildProjectionAggregateRecipe},
 		    {&SljitFullPipelineRecipeBuilder::TryBuildNativeTailRecipe}};
 		count = sizeof(registry) / sizeof(registry[0]);
 		return registry;
-	}
-
-	bool TryBuildSourceUngroupedAggregateRecipe(SljitFullPipelineRecipe &recipe) const {
-		SljitSourceUngroupedAggregateFacts facts;
-		if (!SljitTryAnalyzeSourceUngroupedAggregate(ops, facts)) {
-			return false;
-		}
-		recipe = binding.MakeSourceUngroupedAggregateRecipe(facts);
-		SljitTryBindPrimitiveAggregateStateSource(source, ops, facts, recipe.primitive_aggregate_state_source_lanes);
-		return true;
-	}
-
-	bool TryBuildSourceFilterAggregateRecipe(SljitFullPipelineRecipe &recipe) const {
-		SljitSourceFilterAggregateFacts facts;
-		return SljitTryAnalyzeSourceFilterAggregate(ops, facts) &&
-		       binding.TryMakeSourceFilterAggregateRecipe(facts, recipe);
 	}
 
 	bool TryBuildJoinFilterAggregateRecipe(SljitFullPipelineRecipe &recipe) const {
