@@ -183,56 +183,6 @@ ExecutionContract PhysicalResultSink::GetExecutionContract(ExecutionRegionOperat
 	return BuildExecutionResultCollectorSinkContract();
 }
 
-//! The append-sink terminal of a compiled region. It holds the executor-owned sink states, which outlive the
-//! binding: the executor drops its region-local state (and with it this binding) whenever it resets them
-class ResultSinkExecutionRegionSinkState : public ExecutionAppendSinkState {
-public:
-	ResultSinkExecutionRegionSinkState(const PhysicalResultSink &op_p, ExecutionContext &context_p,
-	                                   GlobalSinkState &global_state_p, LocalSinkState &local_state_p,
-	                                   InterruptState &interrupt_state_p)
-	    : op(op_p), context(context_p), global_state(global_state_p), local_state(local_state_p),
-	      interrupt_state(interrupt_state_p) {
-	}
-
-	SinkResultType Append(DataChunk &input) override {
-		// A BLOCKED append leaves the chunk to the core retry, which re-delivers it through the same Sink:
-		// a deposited chunk is acknowledged there without being appended twice
-		OperatorSinkInput sink_input {global_state, local_state, interrupt_state};
-		return op.Sink(context, input, sink_input);
-	}
-
-private:
-	const PhysicalResultSink &op;
-	ExecutionContext &context;
-	GlobalSinkState &global_state;
-	LocalSinkState &local_state;
-	InterruptState &interrupt_state;
-};
-
-bool PhysicalResultSink::BindExecutionSink(ExecutionContext &context, DataChunk &input, OperatorSinkInput &sink_input,
-                                           const ExecutionRegionSinkInfo &sink_info,
-                                           ExecutionSinkBinding &binding) const {
-	(void)input;
-	binding = ExecutionSinkBinding();
-	binding.kind = sink_info.Kind();
-	if (sink_info.Kind() != ExecutionRegionSinkKind::RESULT_COLLECTOR_SINK) {
-		binding.blocker = "result-collector-sink-kind-mismatch";
-		return false;
-	}
-	if (sink_info.Native().status != ExecutionRegionStateContractStatus::READY) {
-		binding.blocker = sink_info.Native().blocker.empty() ? "result-collector-sink-contract-not-ready"
-		                                                     : sink_info.Native().blocker;
-		return false;
-	}
-	binding.ready = true;
-	binding.append_sink.ready = true;
-	binding.append_sink.state = make_shared_ptr<ResultSinkExecutionRegionSinkState>(
-	    *this, context, sink_input.global_state, sink_input.local_state, sink_input.interrupt_state);
-	binding.append_sink.blocker.clear();
-	binding.blocker.clear();
-	return true;
-}
-
 SinkCombineResultType PhysicalResultSink::Combine(ExecutionContext &context, OperatorSinkCombineInput &input) const {
 	auto &gstate = input.global_state.Cast<ResultSinkGlobalState>();
 	auto &lstate = input.local_state.Cast<ResultSinkLocalState>();

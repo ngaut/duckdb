@@ -380,18 +380,6 @@ static string BuildContractKey(const ExecutionRegionAggregateContract &contract)
 	return key.Take();
 }
 
-static string BuildContractKey(const ExecutionRegionOrderKeyInput &contract) {
-	SljitArtifactKeyWriter key;
-	key.Field("key_index", contract.key_index);
-	key.Field("type", contract.type);
-	key.Field("physical_type", contract.physical_type);
-	key.Field("order_type", contract.order_type);
-	key.Field("null_order", contract.null_order);
-	key.Field("expression_ready", contract.expression_ready);
-	key.Field("expression", BuildContractKey(contract.expression));
-	return key.Take();
-}
-
 static string BuildContractKey(const ExecutionRegionOrderContract &contract) {
 	SljitArtifactKeyWriter key;
 	key.Field("present", contract.present);
@@ -406,11 +394,6 @@ static string BuildContractKey(const ExecutionRegionOrderContract &contract) {
 	key.Field("offset", contract.offset);
 	key.Field("dynamic_filter", contract.dynamic_filter);
 	key.Field("is_index_sort", contract.is_index_sort);
-	key.Field("all_order_keys_ready", contract.all_order_keys_ready);
-	key.Field("order_keys_count", contract.order_keys.size());
-	for (auto &entry : contract.order_keys) {
-		key.Field("order_keys_entry", BuildContractKey(entry));
-	}
 	return key.Take();
 }
 

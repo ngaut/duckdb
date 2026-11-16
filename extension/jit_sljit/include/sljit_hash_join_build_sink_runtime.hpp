@@ -44,11 +44,9 @@ struct SljitHashJoinBuildSinkRuntimeState {
 		                                                    *sink_input, scratch.HashJoinBuildSourceChunk(sink_idx),
 		                                                    scratch.HashJoinBuildHashValues(sink_idx),
 		                                                    scratch.HashJoinBuildSelection(sink_idx));
+		// the region's build protocol ingests the rows: backend-owned work whichever steps produced them
+		RecordSljitRegionBackendWork(runtime, sink_input->size());
 		auto sink_result = native_runtime.RecordSinkResult(sink_input->size(), build_result);
-		if (primitive.direct_source_ingress) {
-			RecordSljitRegionRuntimePath(runtime, sink_op.Kind(), "direct_source_ingress", sink_input->size());
-			RecordSljitRegionBackendWork(runtime, sink_input->size());
-		}
 		if (SljitNativeSinkResultStopsExecution(runtime, sink_result, result)) {
 			return true;
 		}

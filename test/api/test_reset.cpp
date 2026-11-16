@@ -150,6 +150,7 @@ OptionValueSet GetValueForOption(const string &name, const LogicalType &type) {
 	    {"debug_verify_statement", {"copy_statement"}},
 	    {"enable_caching_operators", {false}},
 	    {"enable_jit", {false}},
+	    {"jit_measure_native_legs", {false}},
 	    {"jit_policy", {"off"}},
 	    {"jit_trace_decisions", {true}},
 	    {"jit_trace_runtime", {true}},

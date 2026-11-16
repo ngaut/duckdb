@@ -555,8 +555,7 @@ static ExecutionCompiledStageContract BuildExecutionCompiledSourceStage(const Ex
 	return stage;
 }
 
-//! A probe that only marks build rows hands nothing to the operators after it: DuckDB's operators own it
-static bool ExecutionHashJoinProbeIsExecutableWork(const ExecutionRegionHashJoinContract &contract) {
+bool ExecutionHashJoinProbeIsExecutableWork(const ExecutionRegionHashJoinContract &contract) {
 	return contract.native_probe_contract.status == ExecutionRegionStateContractStatus::READY &&
 	       contract.equality_condition_count > 0 && contract.equality_condition_count <= contract.condition_count &&
 	       contract.native_probe_output_mode != ExecutionHashJoinProbeOutputMode::NONE &&
@@ -1437,37 +1436,6 @@ static ExecutionRegionOperatorKind ExecutionContractOrderOperatorKind(PhysicalOp
 	}
 }
 
-static ExecutionRegionOrderKeyInput BuildExecutionContractOrderKeyInput(const BoundOrderByNode &order, idx_t key_index,
-                                                                        string &first_blocker) {
-	ExecutionRegionOrderKeyInput result;
-	result.key_index = key_index;
-	result.type = order.expression->GetReturnType();
-	result.physical_type = result.type.InternalType();
-	result.order_type = order.type;
-	result.null_order = order.null_order;
-	result.reason = "order-key";
-	result.reason += ";key_index=" + std::to_string(key_index);
-	result.reason += ";type=" + result.type.ToString();
-	result.reason += ";physical_type=" + TypeIdToString(result.physical_type);
-	result.reason += ";order_type=" + EnumUtil::ToString(result.order_type);
-	result.reason += ";null_order=" + EnumUtil::ToString(result.null_order);
-	auto expression = TryLowerExecutionExpression(*order.expression, key_index, ExecutionExpressionIRMode::COMPACT);
-	if (!expression || !expression->root) {
-		result.expression_blocker =
-		    "order-native-key-expression;" + DescribeExecutionExpressionLoweringFailure(*order.expression);
-		if (first_blocker.empty()) {
-			first_blocker = result.expression_blocker;
-		}
-		result.reason += ";expression_ready=false;expression_blocker=" + result.expression_blocker;
-		return result;
-	}
-	result.expression = std::move(*expression);
-	result.expression_ready = true;
-	result.expression_blocker.clear();
-	result.reason += ";expression_ready=true";
-	return result;
-}
-
 static ExecutionRegionOrderContract BuildExecutionContractOrderContract(PhysicalOperatorType type,
                                                                         const vector<BoundOrderByNode> &orders,
                                                                         const vector<LogicalType> &payload_types,
@@ -1487,21 +1455,7 @@ static ExecutionRegionOrderContract BuildExecutionContractOrderContract(Physical
 	result.offset = has_limit ? offset : 0;
 	result.dynamic_filter = dynamic_filter;
 	result.is_index_sort = is_index_sort;
-	string first_blocker;
-	result.order_keys.reserve(orders.size());
-	for (idx_t key_idx = 0; key_idx < orders.size(); key_idx++) {
-		result.order_keys.push_back(BuildExecutionContractOrderKeyInput(orders[key_idx], key_idx, first_blocker));
-	}
-	result.all_order_keys_ready = first_blocker.empty();
-	result.order_key_blocker = result.all_order_keys_ready ? string() : first_blocker;
 	return result;
-}
-
-static string BuildExecutionContractOrderSinkBlocker(const ExecutionRegionOrderContract &contract) {
-	if (!contract.all_order_keys_ready) {
-		return contract.order_key_blocker;
-	}
-	return string();
 }
 
 static ExecutionContract BuildExecutionContractSortStateContracts(
@@ -1536,15 +1490,9 @@ static ExecutionContract BuildExecutionContractSortStateContracts(
 	result.sink.reason += ";order_count=" + std::to_string(order_contract.order_count);
 	result.sink.reason += ";projection_count=" + std::to_string(order_contract.projection_count);
 	result.sink.reason += ";output_columns=" + std::to_string(output_column_count);
-	result.sink.reason += ";order_keys_ready=" + ExecutionContractBool(order_contract.all_order_keys_ready);
-	result.sink.reason += ";order_key_blocker=" + order_contract.order_key_blocker;
-	result.sink.Native() = BuildExecutionContractNativeOperatorContract(
-	    "order-native-sink-update", BuildExecutionContractOrderSinkBlocker(order_contract));
-	if (order_contract.all_order_keys_ready) {
-		MarkExecutionContractNativeOperatorContractReady(result.sink.Native());
-	} else {
-		MarkExecutionContractNativeOperatorContractBlocked(result.sink.Native(), order_contract.order_key_blocker);
-	}
+	// DuckDB's sort computes the keys of the rows a region hands it
+	result.sink.Native() = BuildExecutionContractNativeOperatorContract("order-native-sink-update", string());
+	MarkExecutionContractNativeOperatorContractReady(result.sink.Native());
 	result.sink.Order().contract = std::move(order_contract);
 	AppendExecutionContractNativeOperatorReason(result.sink.reason, result.sink.Native(), "sink");
 	return result;

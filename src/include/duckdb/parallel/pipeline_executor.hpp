@@ -247,8 +247,11 @@ private:
 	//! that operator's input types, to completion: every output chunk sinks, or queues once the sink blocked. Counts
 	//! the rows that reach the sink into sink_rows
 	SinkResultType PushCompiledStepOperators(idx_t operator_index, DataChunk &chunk, idx_t &sink_rows);
-	//! Sinks a compiled kernel's chunk behind the coalesced and queued ones, queueing it once the sink blocked
+	//! Sinks a compiled kernel's chunk behind the coalesced and queued ones, queueing it once the sink blocked; small
+	//! chunks coalesce first
 	SinkResultType SinkCompiledStepChunk(DataChunk &chunk);
+	//! Sinks the coalesced rows, queueing them once the sink blocked
+	SinkResultType SinkCoalescedChunk();
 	PipelineExecuteResult PushInputChunk(DataChunk &input, ExecutionBudget &chunk_budget, PipelineInputChunkMode mode);
 	PipelineExecuteResult FlushAndFinalize(ExecutionBudget &chunk_budget);
 	//! Pushes a chunk through the pipeline and returns a single result chunk

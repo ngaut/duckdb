@@ -347,10 +347,10 @@ bool SljitNativeRegionHasExecutableBodyGap(const SljitNativeRegionPlan &region, 
 		}
 		generates_machine_code = generates_machine_code || SljitNativeRegionOpGeneratesMachineCode(op);
 	}
-	if (!generates_machine_code) {
-		if (region.UsesScanFilters() && SljitRegionPlanHasDirectSourceHashBuild(region.ops)) {
-			return false;
-		}
+	// DuckDB's scan runs the region's compiled filters only when the region owns all of its scan filters
+	const bool compiles_scan_filters =
+	    region.scan_filter_mode == ExecutionRegionScanFilterMode::ALL && !region.scan_filters.empty();
+	if (!generates_machine_code && !compiles_scan_filters) {
 		blocker = "SLJIT native region emits no generated machine code";
 		return true;
 	}

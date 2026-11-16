@@ -186,25 +186,6 @@ bool SljitFullPipelineRecipeBinding::TryAddSourcePrefixSteps(SljitFullPipelinePr
 	return true;
 }
 
-bool SljitFullPipelineRecipeBinding::TryMakeSourceHashJoinBuildSinkRecipe(
-    const SljitSourceHashJoinBuildSinkFacts &facts, SljitFullPipelineRecipe &recipe) const {
-	if (facts.sink_idx >= ops.size() || facts.sink_idx != ops.size() - 1) {
-		return false;
-	}
-	auto sequence = MakeSourceSequence();
-	if (!TryAddSourcePrefixSteps(sequence, facts.sink_idx)) {
-		return false;
-	}
-	SljitHashJoinBuildSinkPrimitive sink;
-	if (!SljitTryBindHashJoinBuildSinkPrimitive(ops, facts.sink_idx, DConstants::INVALID_INDEX, sink)) {
-		return false;
-	}
-	sink.direct_source_ingress = true;
-	sequence.Add(SljitFullPipelinePrimitiveStep::HashJoinBuildSink(sink));
-	recipe = MakePrimitiveSequence(std::move(sequence));
-	return true;
-}
-
 bool SljitFullPipelineRecipeBinding::TryMakeHashJoinBuildSinkRecipe(const SljitHashJoinBuildSinkFacts &facts,
                                                                     SljitFullPipelineRecipe &recipe) const {
 	if (facts.first_hash_join_idx > facts.final_hash_join_idx) {

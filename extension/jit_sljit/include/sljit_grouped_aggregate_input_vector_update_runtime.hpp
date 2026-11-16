@@ -28,8 +28,7 @@ static bool TryExecuteDirectInputVectorGroupedTargetPayloadUpdate(
     const vector<const ExecutionPrimitiveAggregateUpdateLane *> &payload_lanes,
     const vector<SljitGroupedReductionLaneBinding> &reduction_lanes,
     ExecutionGroupedAggregateStateAddressBinding &grouped_state, SljitAggregatePayloadAdapterScratch &payload_scratch,
-    bool finish, bool reserve_from_input_count = true,
-    optional_ptr<const ExecutionDenseGroupDomain> dense_domain = nullptr) {
+    bool finish, bool reserve_from_input_count = true) {
 	if (reserve_from_input_count) {
 		SljitTryReserveGroupedAggregateGroups(runtime, scratch, op_idx, op, grouped_state, payload_input.size());
 	}
@@ -38,13 +37,13 @@ static bool TryExecuteDirectInputVectorGroupedTargetPayloadUpdate(
 	const char *lookup_stage_name = "direct_input_vector_group_payload_update";
 	const char *lookup_miss_stage_name = "direct_input_vector_group_payload_update_miss";
 	ExecutionGroupedAggregateStateTargetBatch targets;
-	auto updated = ExecuteSljitRegionRecordedOperation(
-	    runtime, op_idx, op.Kind(), lookup_stage_name, lookup_start,
-	    [&](optional_ptr<ExecutionOperatorStageRecorder> recorder) {
-		    return grouped_state.state->TryFindOrCreateInputVectorGroupStateTargets(
-		        payload_input, payload_input.size(), group_sources, op.AggregateUpdate().plan.sink_info, targets,
-		        recorder, dense_domain);
-	    });
+	auto updated =
+	    ExecuteSljitRegionRecordedOperation(runtime, op_idx, op.Kind(), lookup_stage_name, lookup_start,
+	                                        [&](optional_ptr<ExecutionOperatorStageRecorder> recorder) {
+		                                        return grouped_state.state->TryFindOrCreateInputVectorGroupStateTargets(
+		                                            payload_input, payload_input.size(), group_sources,
+		                                            op.AggregateUpdate().plan.sink_info, targets, recorder);
+	                                        });
 	scratch.RecordDirectNewAggregateUpdateResult(op_idx, updated);
 	if (!updated) {
 		RecordSljitRegionStageRuntimePath(runtime, op_idx, op.Kind(), lookup_miss_stage_name, lookup_start);
@@ -202,7 +201,7 @@ static bool SljitTryExecuteInputVectorGroupedAggregateUpdate(
 		if (TryExecuteDirectInputVectorGroupedTargetPayloadUpdate(
 		        runtime, scratch, op_idx, op, payload_input, group_sources, payload_source_indices,
 		        payload_source_not_null, payload_lanes, reduction_lanes, grouped_state, payload_scratch, finish,
-		        !pending_preaggregated_groups, dense_domain)) {
+		        !pending_preaggregated_groups)) {
 			end_proven_unique_append();
 			RecordSljitRegionMaterializationElision(
 			    runtime, op.Kind(), "direct_input_vector_dense_target_grouped_update", payload_input.size());
@@ -258,7 +257,7 @@ static bool SljitTryExecuteInputVectorGroupedAggregateUpdate(
 		    runtime, op_idx, op.Kind(), "input_vector_group_targets.count_one_lookup", stage_start,
 		    [&](optional_ptr<ExecutionOperatorStageRecorder> recorder) {
 			    return grouped_state.state->TryFindOrCreateInputVectorGroupStateTargets(
-			        payload_input, payload_input.size(), group_sources, sink_info, targets, recorder, dense_domain);
+			        payload_input, payload_input.size(), group_sources, sink_info, targets, recorder);
 		    });
 		scratch.RecordDirectNewAggregateUpdateResult(op_idx, updated);
 		RecordSljitRegionStageRuntimePath(runtime, op_idx, op.Kind(),
@@ -292,8 +291,7 @@ static bool SljitTryExecuteInputVectorGroupedAggregateUpdate(
 		}
 		updated = TryExecuteDirectInputVectorGroupedTargetPayloadUpdate(
 		    runtime, scratch, op_idx, op, payload_input, group_sources, payload_source_indices, payload_source_not_null,
-		    payload_lanes, reduction_lanes, grouped_state, payload_scratch, finish, !pending_preaggregated_groups,
-		    dense_domain);
+		    payload_lanes, reduction_lanes, grouped_state, payload_scratch, finish, !pending_preaggregated_groups);
 		if (updated) {
 			return true;
 		}
@@ -317,7 +315,7 @@ static bool SljitTryExecuteInputVectorGroupedAggregateUpdate(
 	                                                          nullptr, payload_input.size())) {
 		updated = TryExecuteDirectProjectedGroupedStateAddressPayloadUpdate(
 		    runtime, scratch, op_idx, op, *groups, payload_input, payload_source_indices, payload_lanes, grouped_state,
-		    payload_scratch, finish, nullptr, dense_domain);
+		    payload_scratch, finish);
 		if (updated) {
 			return true;
 		}
@@ -332,8 +330,7 @@ static bool SljitTryExecuteInputVectorGroupedAggregateUpdate(
 		    runtime, op_idx, op.Kind(), "direct_projected_group_payload_input_update", stage_start,
 		    [&](optional_ptr<ExecutionOperatorStageRecorder> recorder) {
 			    return grouped_state.state->TryUpdateNewGroupsWithPayloadInput(
-			        *groups, payload_input, payload_source_indices, sink_info, payload_lanes, recorder, nullptr,
-			        dense_domain);
+			        *groups, payload_input, payload_source_indices, sink_info, payload_lanes, recorder, nullptr);
 		    });
 		if (updated) {
 			RecordSljitRegionStageRuntime(runtime, op_idx, op.Kind(), "direct_projected_group_payload_input_update",

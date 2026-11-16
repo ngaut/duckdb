@@ -282,32 +282,6 @@ public:
 	}
 };
 
-//! The append-sink terminal of a compiled region. Appends run the native Sink, so the exchange push (streaming and
-//! hybrid modes), the materialized append and the blocked-push retry protocol stay identical to the native path: a
-//! push that blocks while direct consumers drain is retried by the core, which owns the kernel's later output.
-//! It holds the executor-owned sink states, which outlive the binding: the executor drops its region-local state
-//! (and with it this binding) whenever it resets them
-class CTEExecutionRegionSinkState : public ExecutionAppendSinkState {
-public:
-	CTEExecutionRegionSinkState(const PhysicalCTE &op_p, ExecutionContext &context_p, GlobalSinkState &global_state_p,
-	                            LocalSinkState &local_state_p, InterruptState &interrupt_state_p)
-	    : op(op_p), context(context_p), global_state(global_state_p), local_state(local_state_p),
-	      interrupt_state(interrupt_state_p) {
-	}
-
-	SinkResultType Append(DataChunk &input) override {
-		OperatorSinkInput sink_input {global_state, local_state, interrupt_state};
-		return op.Sink(context, input, sink_input);
-	}
-
-private:
-	const PhysicalCTE &op;
-	ExecutionContext &context;
-	GlobalSinkState &global_state;
-	LocalSinkState &local_state;
-	InterruptState &interrupt_state;
-};
-
 unique_ptr<GlobalSinkState> PhysicalCTE::GetGlobalSinkState(ClientContext &context) const {
 	return make_uniq<CTEGlobalState>(context, *this);
 }
@@ -395,29 +369,6 @@ ExecutionContract PhysicalCTE::GetExecutionContract(ExecutionRegionOperatorSlot 
 	result.sink.reason += ";sink_required_capability=materialization-append-sink";
 	result.sink.reason += ";sink_contract_version=v1";
 	return FinalizeExecutionContract(std::move(result));
-}
-
-bool PhysicalCTE::BindExecutionSink(ExecutionContext &context, DataChunk &input, OperatorSinkInput &sink_input,
-                                    const ExecutionRegionSinkInfo &sink_info, ExecutionSinkBinding &binding) const {
-	(void)input;
-	binding = ExecutionSinkBinding();
-	binding.kind = sink_info.Kind();
-	if (sink_info.Kind() != ExecutionRegionSinkKind::MATERIALIZATION) {
-		binding.blocker = "materialization-append-sink-kind-mismatch";
-		return false;
-	}
-	if (sink_info.Native().status != ExecutionRegionStateContractStatus::READY) {
-		binding.blocker =
-		    sink_info.Native().blocker.empty() ? "materialization-append-sink-not-ready" : sink_info.Native().blocker;
-		return false;
-	}
-	binding.ready = true;
-	binding.append_sink.ready = true;
-	binding.append_sink.state = make_shared_ptr<CTEExecutionRegionSinkState>(
-	    *this, context, sink_input.global_state, sink_input.local_state, sink_input.interrupt_state);
-	binding.append_sink.blocker.clear();
-	binding.blocker.clear();
-	return true;
 }
 
 SinkCombineResultType PhysicalCTE::Combine(ExecutionContext &context, OperatorSinkCombineInput &input) const {

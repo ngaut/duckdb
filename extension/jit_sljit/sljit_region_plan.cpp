@@ -322,7 +322,8 @@ struct SljitRegionLoweringCursor {
 		}
 		auto output_types = SljitRegionNodeHasNativeOps(node_plan) ? SljitRegionNodeLastNativeOp(node_plan).output_types
 		                                                           : std::move(source_output_types);
-		// the source's filters and layout repair turn the fetched chunk into the scan's output
+		// The source lowering repairs the fetched layout whenever its projection map is not the identity, so the source
+		// produces the scan's output exactly when its types are the scan's
 		operator_layout = output_types == node.output_types;
 		AppendIfFusing(node_plan);
 		current_types = std::move(output_types);
@@ -350,11 +351,14 @@ struct SljitRegionLoweringCursor {
 		    IsIdentityProjection(node_plan.native_ops[0], current_types)) {
 			return;
 		}
+		// An operator lowers to ops whose last one declares the operator's output
+		if (SljitRegionNodeLastNativeOp(node_plan).output_types != node.output_types) {
+			throw InternalException("SLJIT lowered an operator to ops that do not produce its output");
+		}
 		node_plan.native_ops[0].input_is_operator_input = operator_layout;
-		// A projection computes its operator's output whatever layout it reads; filters and joins keep the layout
-		// they read, extended by the build columns
-		operator_layout = (operator_layout || node.kind == ExecutionRegionNodeKind::PROJECTION) &&
-		                  SljitRegionNodeLastNativeOp(node_plan).output_types == node.output_types;
+		// A projection computes its operator's output from whatever layout it reads; a filter or a join computes its
+		// operator's output only from its operator's input
+		operator_layout = operator_layout || node.kind == ExecutionRegionNodeKind::PROJECTION;
 		for (auto &op : node_plan.native_ops) {
 			SljitUpdateExecutableCurrentNotNull(op, current_not_null);
 			UpdateExactFilterProofs(op);

@@ -4,6 +4,7 @@
 #include "sljit_dense_group_domain.hpp"
 #include "sljit_executable_expression_codegen.hpp"
 #include "sljit_executable_stats.hpp"
+#include "sljit_full_pipeline_primitive_contract.hpp"
 #include "sljit_full_pipeline_recipe.hpp"
 #include "sljit_join_probe_codegen.hpp"
 #include "sljit_projection_source_runtime.hpp"
@@ -351,10 +352,8 @@ bool BuildSljitExecutableRegion(const SljitNativeRegionPlan &region, SljitExecut
 		filter_op.input_types.push_back(scan_filter.input_type);
 		filter_op.output_types = filter_op.input_types;
 		vector<bool> input_not_null {scan_filter.input_not_null};
-		string scan_filter_error;
-		if (!SljitPrepareAndCompileExecutableFilter(scan_filter.filter, filter_op, scan_filter_error, &input_not_null,
-		                                            true)) {
-			continue;
+		if (!SljitPrepareAndCompileExecutableFilter(scan_filter.filter, filter_op, error, &input_not_null, true)) {
+			return false;
 		}
 		SljitExecutableScanFilter executable_filter;
 		executable_filter.filter_index = scan_filter.filter_index;
@@ -417,10 +416,6 @@ bool BuildSljitExecutableRegion(const SljitNativeRegionPlan &region, SljitExecut
 		error = "SLJIT region binds no recipe: no op hands DuckDB's operators what they take";
 		return false;
 	}
-	if (!recipe_plan.Recipe().RunsGeneratedStep() && executable.scan_filters.empty()) {
-		error = "SLJIT region runs no generated code: its recipe hands the source's rows to DuckDB's operators";
-		return false;
-	}
 	for (idx_t op_idx = 0; op_idx < executable.ops.size(); op_idx++) {
 		auto &op = executable.ops[op_idx];
 		if (op.Kind() != SljitNativeRegionOpKind::FILTER || !op.Filter() ||
@@ -433,6 +428,11 @@ bool BuildSljitExecutableRegion(const SljitNativeRegionPlan &region, SljitExecut
 		if (!SljitCompilePreparedExecutableFilter(op, error)) {
 			return false;
 		}
+	}
+	if (!SljitRegionRunsGeneratedCode(executable.ops, recipe_plan.Recipe(), executable.scan_filter_mode,
+	                                  executable.scan_filters)) {
+		error = "SLJIT region runs no generated code: DuckDB's pipeline runs it";
+		return false;
 	}
 	return true;
 }

@@ -1,0 +1,136 @@
+# name: test/sql/jit/test_jit_operator_handoff.test
+# description: Generated steps hand their rows to DuckDB's own operators at an operator boundary
+# group: [jit]
+
+# Past the steps a recipe can carry, DuckDB's operators take the rows at the operator they feed: a join that fans
+# out returns more output than one chunk, and the sink gathers the small chunks a selective region produces. Every
+# result must match DuckDB's.
+
+statement ok
+LOAD jit_sljit
+
+statement ok
+SET jit_measure_native_legs=false
+
+statement ok
+SET jit_trace_runtime=true
+
+statement ok
+SET jit_cbo_generated_stage_benefit=4096
+
+statement ok
+SET jit_cbo_materialization_elision_benefit=4096
+
+statement ok
+SET jit_cbo_native_operator_stage_benefit=4096
+
+statement ok
+SET jit_cbo_full_pipeline_benefit=4096
+
+statement ok
+SET jit_cbo_source_contract_scan_filter_penalty=0
+
+statement ok
+SET jit_cbo_startup_base_cost=0
+
+statement ok
+SET jit_cbo_startup_margin_basis_points=0
+
+statement ok
+SET jit_event_log_size=10000
+
+# the joins probe in query order, so one pipeline carries all sixteen probes
+statement ok
+SET disabled_optimizers='join_order,build_side_probe_side'
+
+statement ok
+CREATE TABLE l AS SELECT i::BIGINT AS k, (i * 7 % 1000)::BIGINT AS v FROM range(300000) t(i)
+
+statement ok
+CREATE TABLE d1 AS SELECT i::BIGINT AS k1 FROM range(1000) t(i)
+
+statement ok
+CREATE TABLE d2 AS SELECT i::BIGINT AS k2 FROM range(1000) t(i)
+
+statement ok
+CREATE TABLE d3 AS SELECT i::BIGINT AS k3 FROM range(1000) t(i)
+
+statement ok
+CREATE TABLE d4 AS SELECT i::BIGINT AS k4 FROM range(1000) t(i)
+
+statement ok
+CREATE TABLE d5 AS SELECT i::BIGINT AS k5 FROM range(1000) t(i)
+
+statement ok
+CREATE TABLE d6 AS SELECT i::BIGINT AS k6 FROM range(1000) t(i)
+
+statement ok
+CREATE TABLE d7 AS SELECT i::BIGINT AS k7 FROM range(1000) t(i)
+
+statement ok
+CREATE TABLE d8 AS SELECT i::BIGINT AS k8 FROM range(1000) t(i)
+
+statement ok
+CREATE TABLE d9 AS SELECT i::BIGINT AS k9 FROM range(1000) t(i)
+
+statement ok
+CREATE TABLE d10 AS SELECT i::BIGINT AS k10 FROM range(1000) t(i)
+
+statement ok
+CREATE TABLE d11 AS SELECT i::BIGINT AS k11 FROM range(1000) t(i)
+
+statement ok
+CREATE TABLE d12 AS SELECT i::BIGINT AS k12 FROM range(1000) t(i)
+
+statement ok
+CREATE TABLE d13 AS SELECT i::BIGINT AS k13 FROM range(1000) t(i)
+
+statement ok
+CREATE TABLE d14 AS SELECT i::BIGINT AS k14 FROM range(1000) t(i)
+
+statement ok
+CREATE TABLE d15 AS SELECT i::BIGINT AS k15 FROM range(1000) t(i)
+
+# ten build rows per key: every probe chunk fans out past one output chunk
+statement ok
+CREATE TABLE fan AS SELECT (i % 100)::BIGINT AS kf, i::BIGINT AS w FROM range(1000) t(i)
+
+foreach threads 1 4
+
+statement ok
+SET threads={threads}
+
+foreach policy off auto
+
+statement ok
+SET jit_policy='{policy}'
+
+query II
+SELECT count(*), sum(l.v + fan.w) FROM l JOIN d1 ON l.k % 1000 = d1.k1 JOIN d2 ON l.k % 1000 = d2.k2 JOIN d3 ON l.k % 1000 = d3.k3 JOIN d4 ON l.k % 1000 = d4.k4 JOIN d5 ON l.k % 1000 = d5.k5 JOIN d6 ON l.k % 1000 = d6.k6 JOIN d7 ON l.k % 1000 = d7.k7 JOIN d8 ON l.k % 1000 = d8.k8 JOIN d9 ON l.k % 1000 = d9.k9 JOIN d10 ON l.k % 1000 = d10.k10 JOIN d11 ON l.k % 1000 = d11.k11 JOIN d12 ON l.k % 1000 = d12.k12 JOIN d13 ON l.k % 1000 = d13.k13 JOIN d14 ON l.k % 1000 = d14.k14 JOIN d15 ON l.k % 1000 = d15.k15 JOIN fan ON l.k % 100 = fan.kf WHERE (l.v * 3) % 7 > 2
+----
+1713000	1716426000
+
+# a selective filter leaves a few rows per chunk for the sink
+statement ok
+CREATE OR REPLACE TABLE selected AS SELECT k, v * 3 + 1 AS x FROM l WHERE k % 1000 = 7
+
+query III
+SELECT count(*), sum(k), sum(x) FROM selected
+----
+300	44852100	44400
+
+endloop
+
+endloop
+
+query I
+SELECT count(*) > 0 FROM duckdb_jit_events()
+WHERE phase = 'runtime' AND jit_runtime_path_counts LIKE '%projection.native_tail_delegation=%'
+----
+true
+
+query I
+SELECT count(*) > 0 FROM duckdb_jit_events()
+WHERE phase = 'runtime' AND jit_runtime_path_counts LIKE '%append_sink.native_tail_delegation=%'
+----
+true

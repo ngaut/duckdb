@@ -248,18 +248,6 @@ struct ExecutionRegionAggregateContract {
 	ExecutionRegionNativeOperatorContract native_state_update_contract;
 };
 
-struct ExecutionRegionOrderKeyInput {
-	idx_t key_index = 0;
-	LogicalType type;
-	PhysicalType physical_type = PhysicalType::INVALID;
-	OrderType order_type = OrderType::INVALID;
-	OrderByNullType null_order = OrderByNullType::INVALID;
-	bool expression_ready = false;
-	ExecutionExpressionFragment expression;
-	string expression_blocker;
-	string reason;
-};
-
 struct ExecutionRegionOrderContract {
 	bool present = false;
 	ExecutionRegionOperatorKind kind = ExecutionRegionOperatorKind::GENERIC;
@@ -273,9 +261,6 @@ struct ExecutionRegionOrderContract {
 	idx_t offset = 0;
 	bool dynamic_filter = false;
 	bool is_index_sort = false;
-	bool all_order_keys_ready = false;
-	string order_key_blocker;
-	vector<ExecutionRegionOrderKeyInput> order_keys;
 };
 
 struct ExecutionRegionAggregateInput {

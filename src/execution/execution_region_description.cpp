@@ -447,40 +447,6 @@ static string DescribeExecutionRegionAggregateContract(const ExecutionRegionAggr
 	return result;
 }
 
-static string DescribeExecutionRegionOrderKeyInput(const ExecutionRegionOrderKeyInput &key) {
-	string result = "order_key";
-	result += std::to_string(key.key_index);
-	result += "<type=" + key.type.ToString();
-	result += ",physical_type=" + TypeIdToString(key.physical_type);
-	result += ",order_type=" + EnumUtil::ToString(key.order_type);
-	result += ",null_order=" + EnumUtil::ToString(key.null_order);
-	result += ",expression_ready=" + ExecutionRegionBool(key.expression_ready);
-	result += ",expression_blocker=" + key.expression_blocker;
-	if (key.expression_ready) {
-		auto expression_ir = DescribeExecutionRegionExpressionFragmentIR(key.expression);
-		if (!expression_ir.empty()) {
-			result += ",expression_ir=(" + expression_ir + ")";
-		}
-	}
-	if (!key.reason.empty()) {
-		result += ",reason=" + key.reason;
-	}
-	result += ">";
-	return result;
-}
-
-static string DescribeExecutionRegionOrderKeyInputs(const vector<ExecutionRegionOrderKeyInput> &keys) {
-	string result = "[";
-	for (idx_t key_idx = 0; key_idx < keys.size(); key_idx++) {
-		if (key_idx > 0) {
-			result += "|";
-		}
-		result += DescribeExecutionRegionOrderKeyInput(keys[key_idx]);
-	}
-	result += "]";
-	return result;
-}
-
 static string DescribeExecutionRegionOrderContract(const ExecutionRegionOrderContract &contract) {
 	if (!contract.present) {
 		return string();
@@ -497,9 +463,6 @@ static string DescribeExecutionRegionOrderContract(const ExecutionRegionOrderCon
 	result += ",offset=" + std::to_string(contract.offset);
 	result += ",dynamic_filter=" + ExecutionRegionBool(contract.dynamic_filter);
 	result += ",is_index_sort=" + ExecutionRegionBool(contract.is_index_sort);
-	result += ",all_order_keys_ready=" + ExecutionRegionBool(contract.all_order_keys_ready);
-	result += ",order_key_blocker=" + contract.order_key_blocker;
-	result += ",order_keys=" + DescribeExecutionRegionOrderKeyInputs(contract.order_keys);
 	result += ">";
 	return result;
 }

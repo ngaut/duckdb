@@ -39,8 +39,6 @@ public:
 
 	bool TryMakeGeneratedFilterProjectionNativeTailRecipe(const SljitGeneratedFilterProjectionNativeTailFacts &facts,
 	                                                      SljitFullPipelineRecipe &recipe) const;
-	bool TryMakeSourceHashJoinBuildSinkRecipe(const SljitSourceHashJoinBuildSinkFacts &facts,
-	                                          SljitFullPipelineRecipe &recipe) const;
 
 	bool TryMakeHashJoinBuildSinkRecipe(const SljitHashJoinBuildSinkFacts &facts,
 	                                    SljitFullPipelineRecipe &recipe) const;

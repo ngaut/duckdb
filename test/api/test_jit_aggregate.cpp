@@ -1620,8 +1620,8 @@ TEST_CASE("Grouped aggregate input-vector group targets use descriptor lookup di
 
 	ExecutionGroupedAggregateStateTargetBatch targets;
 	vector<uintptr_t> address_by_key(group_count, 0);
-	REQUIRE(ht.TryFindOrCreateInputVectorGroupStateTargetsFast(payload_input, payload_input.size(), group_sources,
-	                                                           targets));
+	REQUIRE(
+	    ht.TryFindOrCreateInputVectorGroupStateTargets(payload_input, payload_input.size(), group_sources, targets));
 	verify_targets(payload_input, targets, address_by_key, false);
 	REQUIRE(ht.Count() == group_count);
 
@@ -1638,13 +1638,13 @@ TEST_CASE("Grouped aggregate input-vector group targets use descriptor lookup di
 	selected_payload_input.SetChildCardinality(selected_count);
 
 	targets.Reset();
-	REQUIRE(ht.TryFindOrCreateInputVectorGroupStateTargetsFast(selected_payload_input, selected_payload_input.size(),
-	                                                           group_sources, targets));
+	REQUIRE(ht.TryFindOrCreateInputVectorGroupStateTargets(selected_payload_input, selected_payload_input.size(),
+	                                                       group_sources, targets));
 	verify_targets(selected_payload_input, targets, address_by_key, true);
 	REQUIRE(ht.Count() == group_count);
 }
 
-TEST_CASE("Grouped aggregate input-vector targets rebuild dense cache from existing groups", "[api][jit]") {
+TEST_CASE("Grouped aggregate input-vector targets find existing groups and create new ones", "[api][jit]") {
 	DuckDB db;
 	Connection con(db);
 	auto &allocator = Allocator::Get(*con.context);
@@ -1676,19 +1676,12 @@ TEST_CASE("Grouped aggregate input-vector targets rebuild dense cache from exist
 	FlatVector::SetSize(payload_input.data[0], 3);
 	payload_input.SetChildCardinality(3);
 
-	ExecutionDenseGroupDomain dense_domain;
-	dense_domain.ready = true;
-	dense_domain.physical_type = PhysicalType::INT32;
-	dense_domain.min_key = 0;
-	dense_domain.max_key = 2;
-	dense_domain.distinct_count = 3;
-
 	vector<ExecutionRowPointerGroupKeySource> group_sources;
 	group_sources.push_back(BuildBigintToIntegerInputVectorGroupSource());
 
 	ExecutionGroupedAggregateStateTargetBatch targets;
-	REQUIRE(ht.TryFindOrCreateInputVectorGroupStateTargetsFast(payload_input, payload_input.size(), group_sources,
-	                                                           targets, nullptr, &dense_domain));
+	REQUIRE(
+	    ht.TryFindOrCreateInputVectorGroupStateTargets(payload_input, payload_input.size(), group_sources, targets));
 	auto &span = targets.InputOrder();
 	REQUIRE(span.addresses);
 	REQUIRE(span.count == 3);

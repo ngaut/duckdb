@@ -86,23 +86,10 @@ struct SljitFullPipelineRecipe {
 	SljitFullPipelinePrimitiveSequence primitive_sequence;
 	SljitHashJoinDirectAggregateConsumerContract direct_aggregate_consumer;
 	vector<ExecutionAggregateStateCombineLane> primitive_aggregate_state_source_lanes;
-	bool has_scan_filter_executable_body = false;
 	vector<idx_t> fused_filter_owners;
 
 	bool UsesPrimitiveAggregateStateSource() const {
 		return !primitive_aggregate_state_source_lanes.empty();
-	}
-
-	//! Whether a step runs generated code, rather than only fetching the source and handing it to DuckDB's operators
-	bool RunsGeneratedStep() const {
-		for (idx_t step_idx = 0; step_idx < primitive_sequence.Count(); step_idx++) {
-			auto kind = primitive_sequence.Step(step_idx).kind;
-			if (kind != SljitFullPipelinePrimitiveKind::SOURCE_FETCH &&
-			    kind != SljitFullPipelinePrimitiveKind::NATIVE_TAIL_DELEGATION) {
-				return true;
-			}
-		}
-		return false;
 	}
 
 	bool OwnsFusedFilter(idx_t filter_idx) const {

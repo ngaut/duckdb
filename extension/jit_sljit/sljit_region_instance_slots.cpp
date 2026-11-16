@@ -135,13 +135,6 @@ static void BindSink(ExecutionRegionHashJoinInfo &sink, vector<SljitCastErrorIde
 	BindHashJoin(sink.contract, sink.keys, errors);
 }
 
-static void BindSink(ExecutionRegionOrderSinkInfo &sink, vector<SljitCastErrorIdentity> &errors) {
-	for (auto &key : sink.contract.order_keys) {
-		key.reason.clear();
-		BindFragment(key.expression, errors);
-	}
-}
-
 static void BindSink(ExecutionRegionSinkInfo &sink, vector<SljitCastErrorIdentity> &errors) {
 	sink.fields.clear();
 	sink.reason.clear();
@@ -197,7 +190,6 @@ void BindSljitRegionInstanceSlots(SljitNativeRegionPlan &region) {
 			BindSink(op.AppendSink().sink_info, errors);
 			break;
 		case SljitNativeRegionOpKind::ORDER_SINK:
-			BindSink(op.OrderSink().sink_info, errors);
 			break;
 		case SljitNativeRegionOpKind::AGGREGATE_UPDATE:
 			BindSink(op.AggregateUpdate().sink_info, errors);

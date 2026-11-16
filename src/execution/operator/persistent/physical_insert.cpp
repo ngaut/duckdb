@@ -153,52 +153,6 @@ ExecutionContract PhysicalInsert::GetExecutionContract(ExecutionRegionOperatorSl
 	return FinalizeExecutionContract(std::move(result));
 }
 
-class InsertExecutionRegionSinkState : public ExecutionAppendSinkState {
-public:
-	InsertExecutionRegionSinkState(const PhysicalInsert &op_p, ExecutionContext &context_p,
-	                               GlobalSinkState &global_state_p, LocalSinkState &local_state_p,
-	                               InterruptState &interrupt_state_p)
-	    : op(op_p), context(context_p), global_state(global_state_p), local_state(local_state_p),
-	      interrupt_state(interrupt_state_p) {
-	}
-
-	SinkResultType Append(DataChunk &input) override {
-		OperatorSinkInput sink_input {global_state, local_state, interrupt_state};
-		return op.Sink(context, input, sink_input);
-	}
-
-private:
-	const PhysicalInsert &op;
-	ExecutionContext &context;
-	GlobalSinkState &global_state;
-	LocalSinkState &local_state;
-	InterruptState &interrupt_state;
-};
-
-bool PhysicalInsert::BindExecutionSink(ExecutionContext &context, DataChunk &input, OperatorSinkInput &sink_input,
-                                       const ExecutionRegionSinkInfo &sink_info, ExecutionSinkBinding &binding) const {
-	(void)input;
-	binding = ExecutionSinkBinding();
-	binding.kind = sink_info.Kind();
-	if (sink_info.Kind() != ExecutionRegionSinkKind::MATERIALIZATION) {
-		binding.blocker = "materialization-append-sink-kind-mismatch";
-		return false;
-	}
-	if (sink_info.Native().status != ExecutionRegionStateContractStatus::READY || !info || return_chunk || parallel ||
-	    action_type != OnConflictAction::THROW) {
-		binding.blocker =
-		    sink_info.Native().blocker.empty() ? "materialization-append-sink-not-ready" : sink_info.Native().blocker;
-		return false;
-	}
-	binding.ready = true;
-	binding.append_sink.ready = true;
-	binding.append_sink.state = make_shared_ptr<InsertExecutionRegionSinkState>(
-	    *this, context, sink_input.global_state, sink_input.local_state, sink_input.interrupt_state);
-	binding.append_sink.blocker.clear();
-	binding.blocker.clear();
-	return true;
-}
-
 bool AllConflictsMeetCondition(DataChunk &result) {
 	result.Flatten();
 	auto data = FlatVector::GetData<bool>(result.data[0]);

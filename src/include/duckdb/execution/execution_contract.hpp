@@ -108,6 +108,9 @@ struct ExecutionContract {
 };
 
 DUCKDB_API ExecutionContract FinalizeExecutionContract(ExecutionContract descriptor);
+//! Whether a region's probe hands rows to the operators after it; a probe that only marks build rows hands nothing
+//! on, and DuckDB's operators own it
+DUCKDB_API bool ExecutionHashJoinProbeIsExecutableWork(const ExecutionRegionHashJoinContract &contract);
 DUCKDB_API vector<ExecutionRegionContractField> BuildExecutionContractFields(const string &reason);
 
 } // namespace duckdb

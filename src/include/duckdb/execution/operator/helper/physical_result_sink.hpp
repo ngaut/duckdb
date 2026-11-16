@@ -44,8 +44,6 @@ public:
 	ExecutionContract GetExecutionContract(ExecutionRegionOperatorSlot slot, bool render_diagnostics) const override;
 	//! Binds the execution-region append-sink terminal to this sink. Appends run the native Sink, so a
 	//! compiled region observes the same lifetime decision, batch ordering and park/deposit protocol
-	bool BindExecutionSink(ExecutionContext &context, DataChunk &input, OperatorSinkInput &sink_input,
-	                       const ExecutionRegionSinkInfo &sink_info, ExecutionSinkBinding &binding) const override;
 
 	unique_ptr<LocalSinkState> GetLocalSinkState(ExecutionContext &context) const override;
 	unique_ptr<GlobalSinkState> GetGlobalSinkState(ClientContext &context) const override;

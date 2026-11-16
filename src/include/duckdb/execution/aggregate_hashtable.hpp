@@ -130,10 +130,15 @@ public:
 	idx_t AddChunkAndGetNewGroups(DataChunk &groups, DataChunk &payload, AggregateType filter,
 	                              Vector &new_group_addresses, SelectionVector &new_groups_out);
 	optional_idx TryAddCompressedGroups(DataChunk &groups, DataChunk &payload, const unsafe_vector<idx_t> &filter);
-	optional_idx TryAddDictionaryGroups(DataChunk &groups, DataChunk &payload, const unsafe_vector<idx_t> &filter);
-	optional_idx TryAddConstantGroups(DataChunk &groups, DataChunk &payload, const unsafe_vector<idx_t> &filter);
-	optional_idx TryResolveDictionaryGroups(DataChunk &groups, Vector &addresses_out, idx_t address_offset = 0);
-	optional_idx TryResolveConstantGroups(DataChunk &groups, Vector &addresses_out, idx_t address_offset = 0);
+	//! Resolves the rows of constant or dictionary groups, offset by address_offset, from one lookup per distinct
+	//! value; an invalid result leaves the groups to the regular lookup
+	optional_idx TryResolveCompressedGroups(DataChunk &groups, Vector &addresses_out, idx_t address_offset);
+	optional_idx TryResolveDictionaryGroups(DataChunk &groups, Vector &addresses_out, idx_t address_offset);
+	optional_idx TryResolveConstantGroups(DataChunk &groups, Vector &addresses_out, idx_t address_offset);
+	//! Finds or creates the rows of the groups for a caller that updates their states itself: the input counts toward
+	//! the table's adaptivity as AddChunk's does, and compressed groups take AddChunk's per-distinct-value lookup.
+	//! group_hashes, when given, are the groups' hashes
+	void FindOrCreateGroupRows(DataChunk &groups, Vector &addresses_out, optional_ptr<Vector> group_hashes = nullptr);
 
 	//! Fetch the aggregates for specific groups from the HT and place them in the result
 	void FetchAggregates(DataChunk &groups, DataChunk &result);
@@ -160,16 +165,14 @@ public:
 	//! Gathers group values from arbitrary row-start addresses.
 	void GatherGroups(AggregateHTLookupState &state, Vector &addresses, const SelectionVector &groups,
 	                  idx_t group_count, DataChunk &result) const;
-	bool
-	TryFindOrCreateRowPointerGroupStateTargetsFast(DataChunk &payload_input, Vector &row_pointers, idx_t count,
-	                                               const vector<ExecutionRowPointerGroupKeySource> &group_sources,
-	                                               ExecutionGroupedAggregateStateTargetBatch &targets,
-	                                               optional_ptr<ExecutionOperatorStageRecorder> recorder = nullptr);
-	bool TryFindOrCreateInputVectorGroupStateTargetsFast(
-	    DataChunk &payload_input, idx_t count, const vector<ExecutionRowPointerGroupKeySource> &group_sources,
-	    ExecutionGroupedAggregateStateTargetBatch &targets,
-	    optional_ptr<ExecutionOperatorStageRecorder> recorder = nullptr,
-	    optional_ptr<const ExecutionDenseGroupDomain> dense_domain = nullptr);
+	bool TryFindOrCreateRowPointerGroupStateTargets(DataChunk &payload_input, Vector &row_pointers, idx_t count,
+	                                                const vector<ExecutionRowPointerGroupKeySource> &group_sources,
+	                                                ExecutionGroupedAggregateStateTargetBatch &targets,
+	                                                optional_ptr<ExecutionOperatorStageRecorder> recorder = nullptr);
+	bool TryFindOrCreateInputVectorGroupStateTargets(DataChunk &payload_input, idx_t count,
+	                                                 const vector<ExecutionRowPointerGroupKeySource> &group_sources,
+	                                                 ExecutionGroupedAggregateStateTargetBatch &targets,
+	                                                 optional_ptr<ExecutionOperatorStageRecorder> recorder = nullptr);
 	bool TryAppendNewGroupsWithStateAddressesFast(DataChunk &groups,
 	                                              ExecutionGroupedAggregateStateAddressUpdateFunction update_function,
 	                                              void *update_state,
@@ -219,9 +222,6 @@ public:
 	bool TryContinueProvenUniqueAppend(DataChunk &groups, ExecutionGroupedAggregateAppendProof append_proof = {});
 	//! Whether append-only rows require final duplicate reconciliation.
 	bool LookupsSkippedRequireFinalCombine() const;
-	//! Start a fresh lookup epoch if adaptive appends left the pointer table behind the
-	//! materialized rows: abandon the appended epochs and resume pointer-table ownership.
-	void EnsureLookupEpoch();
 	//! Return bounded local covering intervals when the append-only uniqueness proof is still intact.
 	optional_ptr<const vector<GroupedAggregateProvenUniqueRange>> GetProvenUniqueAppendRanges() const;
 	//! Enable/disable HLL; a fresh sketch must start before inserting groups
@@ -437,10 +437,6 @@ private:
 	idx_t FindOrCreateGroupsInternal(DataChunk &groups, Vector &group_hashes, Vector &addresses,
 	                                 SelectionVector &new_groups, optional_ptr<ExecutionOperatorStageRecorder> recorder,
 	                                 optional_ptr<TupleDataChunkState> source_rows = nullptr);
-	bool TryFindOrCreateRowPointerGroupStateTargetsMaterialized(
-	    DataChunk &payload_input, Vector &row_pointers, idx_t count,
-	    const vector<ExecutionRowPointerGroupKeySource> &group_sources,
-	    ExecutionGroupedAggregateStateTargetBatch &targets, optional_ptr<ExecutionOperatorStageRecorder> recorder);
 	bool TryAppendNewGroupsFastInternal(DataChunk &groups, optional_ptr<Vector> addresses_out,
 	                                    ExecutionGroupedAggregateStateAddressUpdateFunction address_update_function,
 	                                    void *address_update_state,

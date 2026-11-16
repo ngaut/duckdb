@@ -142,7 +142,7 @@ static bool TryExecuteDirectGroupedStateAddressPayloadUpdate(
     ExecutionRegionRuntime &runtime, SljitRegionExecutionScratch &scratch, idx_t op_idx, SljitExecutableRegionOp &op,
     DataChunk &input, const vector<const ExecutionPrimitiveAggregateUpdateLane *> &payload_lanes,
     ExecutionGroupedAggregateStateAddressBinding &grouped_state, SljitAggregatePayloadAdapterScratch &payload_scratch,
-    bool finish = true, optional_ptr<const ExecutionDenseGroupDomain> dense_domain = nullptr) {
+    bool finish = true) {
 	// Pushed sources can lack a cardinality estimate. Direct checked updates need
 	// the same observed-batch reservation as preaggregated updates.
 	SljitTryReserveGroupedAggregateGroups(runtime, scratch, op_idx, op, grouped_state, input.size());
@@ -158,7 +158,7 @@ static bool TryExecuteDirectGroupedStateAddressPayloadUpdate(
 	    [&](optional_ptr<ExecutionOperatorStageRecorder> recorder) {
 		    return grouped_state.state->TryUpdateNewGroupsWithSelectedStateAddresses(
 		        input, op.AggregateUpdate().plan.sink_info, SljitExecuteGroupedSelectedStateAddressUpdate,
-		        &update_state, recorder, nullptr, dense_domain);
+		        &update_state, recorder, nullptr);
 	    });
 	scratch.RecordDirectNewAggregateUpdateResult(op_idx, updated);
 	RecordSljitRegionStageRuntimePath(runtime, op_idx, op.Kind(), updated ? stage_name : miss_stage_name, stage_start);
@@ -173,8 +173,7 @@ static bool TryExecuteDirectProjectedGroupedStateAddressPayloadUpdate(
     DataChunk &groups, DataChunk &payload_input, const vector<idx_t> &payload_source_indices,
     const vector<const ExecutionPrimitiveAggregateUpdateLane *> &payload_lanes,
     ExecutionGroupedAggregateStateAddressBinding &grouped_state, SljitAggregatePayloadAdapterScratch &payload_scratch,
-    bool finish = true, optional_ptr<Vector> precomputed_hashes = nullptr,
-    optional_ptr<const ExecutionDenseGroupDomain> dense_domain = nullptr) {
+    bool finish = true, optional_ptr<Vector> precomputed_hashes = nullptr) {
 	if (groups.size() != payload_input.size()) {
 		return false;
 	}
@@ -191,7 +190,7 @@ static bool TryExecuteDirectProjectedGroupedStateAddressPayloadUpdate(
 	    [&](optional_ptr<ExecutionOperatorStageRecorder> recorder) {
 		    return grouped_state.state->TryUpdateGroupKeysWithSelectedStateAddresses(
 		        groups, op.AggregateUpdate().plan.sink_info, SljitExecuteGroupedSelectedStateAddressUpdate,
-		        &update_state, recorder, precomputed_hashes, dense_domain);
+		        &update_state, recorder, precomputed_hashes);
 	    });
 	scratch.RecordDirectNewAggregateUpdateResult(op_idx, updated);
 	if (updated) {

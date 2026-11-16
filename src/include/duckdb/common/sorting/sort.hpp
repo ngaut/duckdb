@@ -13,7 +13,6 @@
 #include "duckdb/execution/physical_operator_states.hpp"
 #include "duckdb/execution/progress_data.hpp"
 #include "duckdb/common/sorting/sort_projection_column.hpp"
-#include "duckdb/function/create_sort_key.hpp"
 #include "duckdb/planner/bound_result_modifier.hpp"
 
 namespace duckdb {
@@ -62,7 +61,6 @@ private:
 	unique_ptr<Expression> create_sort_key;
 	unique_ptr<Expression> decode_sort_key;
 	shared_ptr<TupleDataLayout> key_layout;
-	vector<OrderModifiers> key_modifiers;
 
 	//! Projection map and payload layout (columns that also appear as key eliminated)
 	vector<idx_t> payload_projection_map;
@@ -82,8 +80,6 @@ public:
 	unique_ptr<LocalSinkState> GetLocalSinkState(ExecutionContext &context) const;
 	unique_ptr<GlobalSinkState> GetGlobalSinkState(ClientContext &context) const;
 	SinkResultType Sink(ExecutionContext &context, DataChunk &chunk, OperatorSinkInput &input) const;
-	SinkResultType SinkPreparedOrderKeys(ExecutionContext &context, DataChunk &order_keys, DataChunk &payload,
-	                                     OperatorSinkInput &input) const;
 	SinkCombineResultType Combine(ExecutionContext &context, OperatorSinkCombineInput &input) const;
 	SinkFinalizeType Finalize(ClientContext &context, OperatorSinkFinalizeInput &input) const;
 	ProgressData GetSinkProgress(ClientContext &context, GlobalSinkState &gstate,

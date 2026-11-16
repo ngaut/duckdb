@@ -131,34 +131,6 @@ ExecutionOperatorBindResult PhysicalOperator::BindExecutionOperator(ExecutionCon
 }
 
 bool PhysicalOperator::BindExecutionSink(ExecutionContext &context, DataChunk &input, OperatorSinkInput &sink_input,
-                                         const ExecutionRegionSinkInfo &sink_info,
-                                         ExecutionSinkBinding &binding) const {
-	(void)context;
-	(void)input;
-	(void)sink_input;
-	binding = ExecutionSinkBinding();
-	binding.kind = sink_info.Kind();
-	switch (sink_info.Kind()) {
-	case ExecutionRegionSinkKind::RESULT_COLLECTOR_SINK:
-	case ExecutionRegionSinkKind::MATERIALIZATION:
-	case ExecutionRegionSinkKind::SORT:
-	case ExecutionRegionSinkKind::DELIM_JOIN_SINK:
-		break;
-	default:
-		binding.blocker = "native-operator-sink-contract-not-ready;operator=" + GetName();
-		return false;
-	}
-	if (sink_info.Native().status != ExecutionRegionStateContractStatus::READY) {
-		binding.blocker = sink_info.Native().blocker.empty()
-		                      ? "native-operator-sink-contract-not-ready;operator=" + GetName()
-		                      : sink_info.Native().blocker;
-		return false;
-	}
-	binding.blocker = "execution-sink-contract-unsupported;operator=" + GetName();
-	return false;
-}
-
-bool PhysicalOperator::BindExecutionSink(ExecutionContext &context, DataChunk &input, OperatorSinkInput &sink_input,
                                          const ExecutionRegionAggregateSinkInfo &sink_info,
                                          ExecutionSinkBinding &binding) const {
 	binding = ExecutionSinkBinding();
@@ -173,15 +145,6 @@ bool PhysicalOperator::BindExecutionSink(ExecutionContext &context, DataChunk &i
 	binding = ExecutionSinkBinding();
 	binding.kind = ExecutionRegionSinkKind::HASH_JOIN_BUILD;
 	binding.blocker = "execution-hash-join-build-contract-unsupported;operator=" + GetName();
-	return false;
-}
-
-bool PhysicalOperator::BindExecutionSink(ExecutionContext &context, DataChunk &input, OperatorSinkInput &sink_input,
-                                         const ExecutionRegionOrderSinkInfo &sink_info,
-                                         ExecutionSinkBinding &binding) const {
-	binding = ExecutionSinkBinding();
-	binding.kind = ExecutionRegionSinkKind::SORT;
-	binding.blocker = "execution-order-sink-contract-unsupported;operator=" + GetName();
 	return false;
 }
 

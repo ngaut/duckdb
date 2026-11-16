@@ -55,15 +55,7 @@ static SljitRegionNodePlan PlanSljitOrderSinkNode(const ExecutionRegionNode &nod
 	auto &contract = node.sink->Native();
 	auto &order_contract = node.sink->Order().contract;
 	if (contract.status != ExecutionRegionStateContractStatus::READY) {
-		auto reason = SljitBlockerOrReason(contract.blocker, "ordered-sink-contract-not-ready");
-		if (order_contract.present) {
-			reason += ";ordered-sink-contract-present";
-			reason += order_contract.all_order_keys_ready ? ";order_keys_ready=true" : ";order_keys_ready=false";
-			if (!order_contract.order_key_blocker.empty()) {
-				reason += ";order_key_blocker=" + order_contract.order_key_blocker;
-			}
-		}
-		return SljitRegionBoundaryNode(reason);
+		return SljitRegionBoundaryNode(SljitBlockerOrReason(contract.blocker, "ordered-sink-contract-not-ready"));
 	}
 	if (!order_contract.present) {
 		return SljitRegionBoundaryNode("ordered-sink-contract-missing");

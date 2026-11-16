@@ -29,7 +29,6 @@ struct SljitHashJoinProbeSelectionPrimitive {
 struct SljitHashJoinBuildSinkPrimitive {
 	idx_t sink_idx = DConstants::INVALID_INDEX;
 	idx_t projection_idx = DConstants::INVALID_INDEX;
-	bool direct_source_ingress = false;
 
 	bool HasProjection() const {
 		return projection_idx != DConstants::INVALID_INDEX;

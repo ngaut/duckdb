@@ -29,39 +29,6 @@ ExecutionContract PhysicalExplainAnalyze::GetExecutionContract(ExecutionRegionOp
 	return FinalizeExecutionContract(std::move(result));
 }
 
-class ExplainAnalyzeExecutionRegionSinkState : public ExecutionAppendSinkState {
-public:
-	SinkResultType Append(DataChunk &input) override {
-		(void)input;
-		return SinkResultType::NEED_MORE_INPUT;
-	}
-};
-
-bool PhysicalExplainAnalyze::BindExecutionSink(ExecutionContext &context, DataChunk &input,
-                                               OperatorSinkInput &sink_input, const ExecutionRegionSinkInfo &sink_info,
-                                               ExecutionSinkBinding &binding) const {
-	(void)context;
-	(void)input;
-	(void)sink_input;
-	binding = ExecutionSinkBinding();
-	binding.kind = sink_info.Kind();
-	if (sink_info.Kind() != ExecutionRegionSinkKind::MATERIALIZATION) {
-		binding.blocker = "explain-analyze-sink-kind-mismatch";
-		return false;
-	}
-	if (sink_info.Native().status != ExecutionRegionStateContractStatus::READY) {
-		binding.blocker =
-		    sink_info.Native().blocker.empty() ? "explain-analyze-sink-contract-not-ready" : sink_info.Native().blocker;
-		return false;
-	}
-	binding.ready = true;
-	binding.append_sink.ready = true;
-	binding.append_sink.state = make_shared_ptr<ExplainAnalyzeExecutionRegionSinkState>();
-	binding.append_sink.blocker.clear();
-	binding.blocker.clear();
-	return true;
-}
-
 SinkResultType PhysicalExplainAnalyze::Sink(ExecutionContext &context, DataChunk &chunk,
                                             OperatorSinkInput &input) const {
 	return SinkResultType::NEED_MORE_INPUT;

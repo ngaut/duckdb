@@ -127,14 +127,10 @@ public:
 	                                                          const ExecutionRegionOperatorInfo &operator_info,
 	                                                          ExecutionOperatorBinding &binding) const;
 	virtual bool BindExecutionSink(ExecutionContext &context, DataChunk &input, OperatorSinkInput &sink_input,
-	                               const ExecutionRegionSinkInfo &sink_info, ExecutionSinkBinding &binding) const;
-	virtual bool BindExecutionSink(ExecutionContext &context, DataChunk &input, OperatorSinkInput &sink_input,
 	                               const ExecutionRegionAggregateSinkInfo &sink_info,
 	                               ExecutionSinkBinding &binding) const;
 	virtual bool BindExecutionSink(ExecutionContext &context, DataChunk &input, OperatorSinkInput &sink_input,
 	                               const ExecutionRegionHashJoinInfo &sink_info, ExecutionSinkBinding &binding) const;
-	virtual bool BindExecutionSink(ExecutionContext &context, DataChunk &input, OperatorSinkInput &sink_input,
-	                               const ExecutionRegionOrderSinkInfo &sink_info, ExecutionSinkBinding &binding) const;
 	virtual OperatorResultType Execute(ExecutionContext &context, DataChunk &input, DataChunk &chunk,
 	                                   GlobalOperatorState &gstate, OperatorState &state) const;
 	virtual OperatorFinalizeResultType FinalExecute(ExecutionContext &context, DataChunk &chunk,

@@ -827,9 +827,6 @@ TEST_CASE("JIT generated projections hand their rows to DuckDB's sort", "[api][j
 				REQUIRE(has_ordered_sink_trace);
 				REQUIRE(StringUtil::Contains(event.ir, "sink<kind=sort"));
 				REQUIRE(StringUtil::Contains(event.ir, "order_contract<operator_kind=" + expected_order_kind));
-				REQUIRE(StringUtil::Contains(event.ir, "order_keys=[order_key0"));
-				REQUIRE(StringUtil::Contains(event.ir, "expression_ready=true"));
-				REQUIRE(StringUtil::Contains(event.ir, "expression_ir=(duckdb.expr typed-vector-ir"));
 				REQUIRE(event.candidate_traits.HasSink());
 			}
 		}

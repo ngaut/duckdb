@@ -7,6 +7,7 @@
 
 #include "execution_region_cost_input.hpp"
 
+#include "duckdb/execution/execution_contract.hpp"
 #include "duckdb/execution/execution_region_ir.hpp"
 #include "duckdb/execution/execution_region_graph.hpp"
 #include "duckdb/execution/execution_region_lowering.hpp"
@@ -811,8 +812,9 @@ static bool TryAccumulateExecutionRegionPhysicalOperatorCost(const PhysicalOpera
 			facts.exact_source_cardinality_bounds_pipeline = false;
 			traits.operator_count++;
 			traits.hash_join_operator_count++;
-			// a probe that only marks build rows hands nothing on: DuckDB's operators own it
-			if (op.Cast<PhysicalHashJoin>().join_type != JoinType::RIGHT_SEMI) {
+			auto contract = op.GetExecutionContract(ExecutionRegionOperatorSlot::OPERATOR, false);
+			if (contract.operator_info.Kind() == ExecutionRegionOperatorContractKind::HASH_JOIN_PROBE &&
+			    ExecutionHashJoinProbeIsExecutableWork(contract.operator_info.HashJoin().contract)) {
 				input.native_join_stage_count++;
 			}
 		}

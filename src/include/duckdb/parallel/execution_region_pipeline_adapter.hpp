@@ -58,16 +58,11 @@ public:
 	ExecutionOperatorBindResult BindOperator(idx_t operator_index, DataChunk &input,
 	                                         const ExecutionRegionOperatorInfo &operator_info,
 	                                         ExecutionOperatorBinding &binding);
-	bool BindSink(DataChunk &input, const ExecutionRegionSinkInfo &sink_info, ExecutionSinkBinding &binding);
 	bool BindSink(DataChunk &input, const ExecutionRegionAggregateSinkInfo &sink_info, ExecutionSinkBinding &binding);
 	bool BindSink(DataChunk &input, const ExecutionRegionHashJoinInfo &sink_info, ExecutionSinkBinding &binding);
-	bool BindSink(DataChunk &input, const ExecutionRegionOrderSinkInfo &sink_info, ExecutionSinkBinding &binding);
-	//! Appends a compiled kernel's output chunk to the Sink. Once the Sink blocks, the executor owns that chunk and
-	//! every later one: it sinks them in order before its loop continues or the pipeline finalizes. The chunk the
-	//! Sink blocked on retries as is, because a blocked Sink may already hold it
-	SinkResultType AppendSink(const ExecutionAppendSinkBinding &binding, DataChunk &chunk);
-	//! Runs DuckDB's operators from `operator_index` on (INVALID_INDEX: the sink) over a compiled kernel's chunk,
-	//! sinking as AppendSink does; counts the rows that reach the sink into sink_rows
+	//! Runs DuckDB's operators from `operator_index` on (INVALID_INDEX: the sink) over a compiled kernel's chunk. Once
+	//! the Sink blocks, the executor owns every later output chunk: it sinks them in order before its loop continues
+	//! or the pipeline finalizes. Counts the rows that reach the sink into sink_rows
 	SinkResultType PushOperators(idx_t operator_index, DataChunk &chunk, idx_t &sink_rows);
 	void FinishProcessing();
 	bool TryMarkRuntimeOnce(ExecutionRegionRuntimeOnceFlag flag, idx_t index);
@@ -77,7 +72,6 @@ private:
 	template <class SINK_INFO>
 	bool BindSinkInternal(DataChunk &input, const SINK_INFO &sink_info, ExecutionRegionSinkKind kind,
 	                      ExecutionSinkBinding &binding);
-	SinkResultType SinkCoalescedChunk();
 
 private:
 	PipelineExecutor &executor;

@@ -26,11 +26,6 @@ struct SljitHashJoinBuildSinkFacts {
 	}
 };
 
-//! ops [0, sink_idx) form the source prefix (see SljitFullPipelineSourcePrefixEnd).
-struct SljitSourceHashJoinBuildSinkFacts {
-	idx_t sink_idx = DConstants::INVALID_INDEX;
-};
-
 struct SljitSourceUngroupedAggregateFacts {
 	idx_t aggregate_idx = DConstants::INVALID_INDEX;
 };
@@ -169,8 +164,6 @@ idx_t SljitFullPipelineSourcePrefixEnd(const vector<SljitExecutableRegionOp> &op
 bool SljitFullPipelineHashJoinProbeIsMatchedProbeAndBuild(const vector<SljitExecutableRegionOp> &ops, idx_t op_idx);
 
 bool SljitTryAnalyzeHashJoinBuildSink(const vector<SljitExecutableRegionOp> &ops, SljitHashJoinBuildSinkFacts &facts);
-bool SljitTryAnalyzeSourceHashJoinBuildSink(const vector<SljitExecutableRegionOp> &ops,
-                                            SljitSourceHashJoinBuildSinkFacts &facts);
 bool SljitTryAnalyzeSourceUngroupedAggregate(const vector<SljitExecutableRegionOp> &ops,
                                              SljitSourceUngroupedAggregateFacts &facts);
 bool SljitTryAnalyzeSourceFilterAggregate(const vector<SljitExecutableRegionOp> &ops,

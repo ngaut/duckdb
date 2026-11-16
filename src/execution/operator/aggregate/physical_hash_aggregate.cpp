@@ -401,31 +401,28 @@ public:
 
 	bool TryUpdateNewGroups(DataChunk &input, const ExecutionRegionAggregateSinkInfo &sink_info,
 	                        const vector<const ExecutionPrimitiveAggregateUpdateLane *> &lanes,
-	                        optional_ptr<ExecutionOperatorStageRecorder> recorder = nullptr,
-	                        optional_ptr<const ExecutionDenseGroupDomain> dense_domain = nullptr) override {
+	                        optional_ptr<ExecutionOperatorStageRecorder> recorder = nullptr) override {
 		if (!CanUseSingleGroupingState()) {
 			return false;
 		}
 		auto single_grouping = GetSingleGroupingSinkState();
-		return single_grouping.grouping.table_data.TryUpdateNewPrimitiveGroups(
-		    context, input, single_grouping.input, sink_info, lanes, recorder, dense_domain);
+		return single_grouping.grouping.table_data.TryUpdateNewPrimitiveGroups(context, input, single_grouping.input,
+		                                                                       sink_info, lanes, recorder);
 	}
 
-	bool
-	TryUpdateNewGroupsWithPayloadInput(DataChunk &groups, DataChunk &payload_input,
-	                                   const vector<idx_t> &payload_source_indices,
-	                                   const ExecutionRegionAggregateSinkInfo &sink_info,
-	                                   const vector<const ExecutionPrimitiveAggregateUpdateLane *> &lanes,
-	                                   optional_ptr<ExecutionOperatorStageRecorder> recorder = nullptr,
-	                                   optional_ptr<Vector> precomputed_hashes = nullptr,
-	                                   optional_ptr<const ExecutionDenseGroupDomain> dense_domain = nullptr) override {
+	bool TryUpdateNewGroupsWithPayloadInput(DataChunk &groups, DataChunk &payload_input,
+	                                        const vector<idx_t> &payload_source_indices,
+	                                        const ExecutionRegionAggregateSinkInfo &sink_info,
+	                                        const vector<const ExecutionPrimitiveAggregateUpdateLane *> &lanes,
+	                                        optional_ptr<ExecutionOperatorStageRecorder> recorder = nullptr,
+	                                        optional_ptr<Vector> precomputed_hashes = nullptr) override {
 		if (!CanUseSingleGroupingState()) {
 			return false;
 		}
 		auto single_grouping = GetSingleGroupingSinkState();
 		return single_grouping.grouping.table_data.TryUpdateNewPrimitiveGroupsWithPayloadInput(
 		    context, groups, payload_input, payload_source_indices, single_grouping.input, sink_info, lanes, recorder,
-		    precomputed_hashes, dense_domain);
+		    precomputed_hashes);
 	}
 
 	bool TryAppendNewGroups(DataChunk &input, const ExecutionRegionAggregateSinkInfo &sink_info,
@@ -444,30 +441,28 @@ public:
 	    DataChunk &input, const ExecutionRegionAggregateSinkInfo &sink_info,
 	    ExecutionGroupedAggregateStateSelectedAddressUpdateFunction update_function, void *update_state,
 	    optional_ptr<ExecutionOperatorStageRecorder> recorder = nullptr,
-	    optional_ptr<Vector> precomputed_hashes = nullptr,
-	    optional_ptr<const ExecutionDenseGroupDomain> dense_domain = nullptr) override {
+	    optional_ptr<Vector> precomputed_hashes = nullptr) override {
 		if (!CanUseSingleGroupingState()) {
 			return false;
 		}
 		auto single_grouping = GetSingleGroupingSinkState();
 		return single_grouping.grouping.table_data.TryUpdateNewGroupsWithSelectedStateAddresses(
 		    context, input, single_grouping.input, sink_info, update_function, update_state, recorder,
-		    precomputed_hashes, dense_domain);
+		    precomputed_hashes);
 	}
 
 	bool TryUpdateGroupKeysWithSelectedStateAddresses(
 	    DataChunk &groups, const ExecutionRegionAggregateSinkInfo &sink_info,
 	    ExecutionGroupedAggregateStateSelectedAddressUpdateFunction update_function, void *update_state,
 	    optional_ptr<ExecutionOperatorStageRecorder> recorder = nullptr,
-	    optional_ptr<Vector> precomputed_hashes = nullptr,
-	    optional_ptr<const ExecutionDenseGroupDomain> dense_domain = nullptr) override {
+	    optional_ptr<Vector> precomputed_hashes = nullptr) override {
 		if (!CanUseSingleGroupingState()) {
 			return false;
 		}
 		auto single_grouping = GetSingleGroupingSinkState();
 		return single_grouping.grouping.table_data.TryUpdateGroupKeysWithSelectedStateAddresses(
 		    context, groups, single_grouping.input, sink_info, update_function, update_state, recorder,
-		    precomputed_hashes, dense_domain);
+		    precomputed_hashes);
 	}
 
 	bool TryFindOrCreateRowPointerGroupStateTargets(
@@ -487,15 +482,13 @@ public:
 	bool TryFindOrCreateInputVectorGroupStateTargets(
 	    DataChunk &payload_input, idx_t count, const vector<ExecutionRowPointerGroupKeySource> &group_sources,
 	    const ExecutionRegionAggregateSinkInfo &sink_info, ExecutionGroupedAggregateStateTargetBatch &targets,
-	    optional_ptr<ExecutionOperatorStageRecorder> recorder = nullptr,
-	    optional_ptr<const ExecutionDenseGroupDomain> dense_domain = nullptr) override {
+	    optional_ptr<ExecutionOperatorStageRecorder> recorder = nullptr) override {
 		if (!CanFindRowPointerGroupStateTargets(sink_info)) {
 			return false;
 		}
 		auto single_grouping = GetSingleGroupingSinkState();
 		return single_grouping.grouping.table_data.TryFindOrCreateInputVectorGroupStateTargets(
-		    context, payload_input, count, single_grouping.input, group_sources, sink_info, targets, recorder,
-		    dense_domain);
+		    context, payload_input, count, single_grouping.input, group_sources, sink_info, targets, recorder);
 	}
 
 	bool TryUpdateRowPointerGroupPayloads(DataChunk &payload_input, Vector &row_pointers, idx_t count,

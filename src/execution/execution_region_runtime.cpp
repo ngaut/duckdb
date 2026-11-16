@@ -226,13 +226,6 @@ ExecutionPrimitiveAggregateUpdateBinding::FindLane(idx_t aggregate_index) const 
 	return nullptr;
 }
 
-SinkResultType ExecutionSinkAppend(const ExecutionAppendSinkBinding &binding, DataChunk &input) {
-	if (!binding.ready || !binding.state) {
-		throw InternalException("execution append sink binding is incomplete");
-	}
-	return binding.state->Append(input);
-}
-
 ExecutionOperatorRuntime::~ExecutionOperatorRuntime() {
 }
 

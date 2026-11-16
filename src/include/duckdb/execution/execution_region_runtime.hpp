@@ -28,23 +28,17 @@ public:
 	//! this at entry so not-ready runtime states defer before anything is fetched.
 	virtual ExecutionOperatorReadiness GetOperatorReadiness(idx_t operator_index,
 	                                                        const ExecutionRegionOperatorInfo &operator_info) = 0;
-	virtual bool BindSink(DataChunk &input, const ExecutionRegionSinkInfo &sink_info,
-	                      ExecutionSinkBinding &binding) = 0;
 	virtual bool BindSink(DataChunk &input, const ExecutionRegionAggregateSinkInfo &sink_info,
 	                      ExecutionSinkBinding &binding) = 0;
 	virtual bool BindSink(DataChunk &input, const ExecutionRegionHashJoinInfo &sink_info,
 	                      ExecutionSinkBinding &binding) = 0;
-	virtual bool BindSink(DataChunk &input, const ExecutionRegionOrderSinkInfo &sink_info,
-	                      ExecutionSinkBinding &binding) = 0;
-	//! Appends a chunk to the pipeline's append sink. Once the sink blocks, this chunk and every later one queue in
-	//! the executor, which sinks them in order when the sink wakes it; a step therefore finishes the source chunk it
-	//! is processing and returns, never with output in flight. Returns NEED_MORE_INPUT or FINISHED, never BLOCKED.
-	virtual SinkResultType AppendSink(const ExecutionAppendSinkBinding &binding, DataChunk &chunk) = 0;
 	//! Runs DuckDB's own operators, from the pipeline's intermediate operator `operator_index` on (INVALID_INDEX: none,
-	//! the chunk is the sink's input), over a chunk shaped as that operator's input, and sinks all they produce. A
-	//! blocked sink queues as for AppendSink. Returns NEED_MORE_INPUT or FINISHED, never BLOCKED.
+	//! the chunk is the sink's input), over a chunk shaped as that operator's input, and sinks all they produce. Once
+	//! the sink blocks, every later output chunk queues in the executor, which sinks them in order when the sink wakes
+	//! it; a step therefore finishes the source chunk it is processing and returns, never with output in flight.
+	//! Returns NEED_MORE_INPUT or FINISHED, never BLOCKED.
 	virtual SinkResultType PushOperators(idx_t operator_index, DataChunk &chunk) = 0;
-	//! Records the result of a sink update; only AppendSink handles a sink that blocks.
+	//! Records the result of an update through a sink binding, whose sink never blocks
 	virtual SinkResultType RecordSinkResult(idx_t input_rows, SinkResultType sink_result) = 0;
 };
 

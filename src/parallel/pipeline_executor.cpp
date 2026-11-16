@@ -1,5 +1,7 @@
 #include "duckdb/parallel/pipeline_executor.hpp"
 
+#include "duckdb/execution/physical_operator.hpp"
+
 #include "duckdb/common/limits.hpp"
 #include "duckdb/common/types/column/column_data_collection.hpp"
 #include "duckdb/common/mutex.hpp"
@@ -836,29 +838,74 @@ void PipelineExecutor::QueueCoalescedSinkChunk() {
 	coalesced_sink_chunk.Reset();
 }
 
-SinkResultType PipelineExecutor::SinkCompiledStepChunk(DataChunk &chunk) {
-	OperatorSinkInput sink_input {*pipeline.sink->sink_state, *local_sink_state, interrupt_state};
-	if (!remaining_sink_chunk && coalesced_sink_chunk_initialized && coalesced_sink_chunk.size() > 0) {
-		// the rows a compiled kernel held back for the sink go first
-		StartOperator(*pipeline.sink);
-		auto result = Sink(coalesced_sink_chunk, sink_input);
-		EndOperator(*pipeline.sink, nullptr);
-		if (result == SinkResultType::BLOCKED) {
-			EnqueueSinkChunk(coalesced_sink_chunk);
-		}
-		coalesced_sink_chunk.Reset();
-		if (result == SinkResultType::FINISHED) {
-			FinishProcessing();
-			return result;
+//! A column that carries a global dictionary keeps that dictionary for the producer's lifetime: downstream caching
+//! operators accumulate its indices and treat a change of identity as a producer bug. Coalescing flattens, so such
+//! rows reach the sink as they are.
+static bool ChunkCarriesGlobalDictionary(const DataChunk &chunk) {
+	for (idx_t col_idx = 0; col_idx < chunk.ColumnCount(); col_idx++) {
+		if (DictionaryVector::IsGlobalDictionary(chunk.data[col_idx])) {
+			return true;
 		}
 	}
-	QueueCoalescedSinkChunk();
+	return false;
+}
+
+SinkResultType PipelineExecutor::SinkCoalescedChunk() {
+	if (!coalesced_sink_chunk_initialized || coalesced_sink_chunk.size() == 0) {
+		return SinkResultType::NEED_MORE_INPUT;
+	}
+	OperatorSinkInput sink_input {*pipeline.sink->sink_state, *local_sink_state, interrupt_state};
+	StartOperator(*pipeline.sink);
+	auto result = Sink(coalesced_sink_chunk, sink_input);
+	EndOperator(*pipeline.sink, nullptr);
+	if (result == SinkResultType::BLOCKED) {
+		// a blocked sink may already hold the chunk: it retries as is
+		EnqueueSinkChunk(coalesced_sink_chunk);
+		result = SinkResultType::NEED_MORE_INPUT;
+	}
+	coalesced_sink_chunk.Reset();
+	if (result == SinkResultType::FINISHED) {
+		FinishProcessing();
+	}
+	return result;
+}
+
+SinkResultType PipelineExecutor::SinkCompiledStepChunk(DataChunk &chunk) {
 	if (remaining_sink_chunk) {
 		EnqueueSinkChunk(chunk);
 		return SinkResultType::NEED_MORE_INPUT;
 	}
+	// Small chunks gather into one, as DuckDB's caching operators gather them, unless the sink tracks the batch each
+	// row came from
+	const bool coalesce = chunk.size() <= CachingPhysicalOperator::CACHE_THRESHOLD &&
+	                      !required_partition_info.AnyRequired() && !ChunkCarriesGlobalDictionary(chunk);
+	if (coalesce) {
+		if (!coalesced_sink_chunk_initialized) {
+			InitializeChunk(coalesced_sink_chunk);
+			coalesced_sink_chunk_initialized = true;
+		}
+		if (coalesced_sink_chunk.size() + chunk.size() <= STANDARD_VECTOR_SIZE) {
+			coalesced_sink_chunk.Append(chunk);
+			return SinkResultType::NEED_MORE_INPUT;
+		}
+	}
+	// The chunk does not join the coalesced rows: they sink first
+	auto result = SinkCoalescedChunk();
+	if (result == SinkResultType::FINISHED) {
+		return result;
+	}
+	if (remaining_sink_chunk) {
+		// The coalesced rows blocked the sink: the chunk queues behind them
+		EnqueueSinkChunk(chunk);
+		return SinkResultType::NEED_MORE_INPUT;
+	}
+	if (coalesce) {
+		coalesced_sink_chunk.Append(chunk);
+		return SinkResultType::NEED_MORE_INPUT;
+	}
+	OperatorSinkInput sink_input {*pipeline.sink->sink_state, *local_sink_state, interrupt_state};
 	StartOperator(*pipeline.sink);
-	auto result = Sink(chunk, sink_input);
+	result = Sink(chunk, sink_input);
 	EndOperator(*pipeline.sink, nullptr);
 	if (result == SinkResultType::BLOCKED) {
 		// a blocked sink may already hold the chunk: it retries as is

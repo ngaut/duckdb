@@ -307,10 +307,6 @@ public:
 		return pipeline.GetOperatorReadiness(operator_index, operator_info);
 	}
 
-	bool BindSink(DataChunk &input, const ExecutionRegionSinkInfo &sink_info, ExecutionSinkBinding &binding) override {
-		ValidateSink();
-		return pipeline.BindSink(input, sink_info, binding);
-	}
 	bool BindSink(DataChunk &input, const ExecutionRegionAggregateSinkInfo &sink_info,
 	              ExecutionSinkBinding &binding) override {
 		ValidateSink();
@@ -321,16 +317,6 @@ public:
 	              ExecutionSinkBinding &binding) override {
 		ValidateSink();
 		return pipeline.BindSink(input, sink_info, binding);
-	}
-	bool BindSink(DataChunk &input, const ExecutionRegionOrderSinkInfo &sink_info,
-	              ExecutionSinkBinding &binding) override {
-		ValidateSink();
-		return pipeline.BindSink(input, sink_info, binding);
-	}
-
-	SinkResultType AppendSink(const ExecutionAppendSinkBinding &binding, DataChunk &chunk) override {
-		ValidateSink();
-		return pipeline.AppendSink(binding, chunk);
 	}
 
 	SinkResultType PushOperators(idx_t operator_index, DataChunk &chunk) override {

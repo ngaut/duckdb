@@ -143,24 +143,6 @@ bool SljitFullPipelinePrimitiveIsTerminal(SljitFullPipelinePrimitiveKind kind) {
 	       kind == SljitFullPipelinePrimitiveKind::NATIVE_TAIL_DELEGATION;
 }
 
-bool SljitFullPipelineHasExactFilterProbeHashBuild(const vector<SljitExecutableRegionOp> &ops,
-                                                   const SljitFullPipelinePrimitiveSequence &sequence) {
-	// Steps ahead of the final probe only shape its input: the exact probe feeding the build is the work either way.
-	const auto count = sequence.Count();
-	if (count < 3 || sequence.Step(count - 2).kind != SljitFullPipelinePrimitiveKind::HASH_JOIN_PROBE_SELECTION ||
-	    sequence.Step(count - 1).kind != SljitFullPipelinePrimitiveKind::HASH_JOIN_BUILD_SINK) {
-		return false;
-	}
-	const auto probe_idx = sequence.Step(count - 2).hash_join_probe_selection.hash_join_idx;
-	if (probe_idx >= ops.size() || ops[probe_idx].Kind() != SljitNativeRegionOpKind::HASH_JOIN_PROBE) {
-		throw InternalException("SLJIT bound recipe references an invalid hash join probe");
-	}
-	auto &probe = ops[probe_idx].HashJoinProbe().plan;
-	return probe.exact_source_filter_binding != DConstants::INVALID_INDEX && probe.keys.size() == 1 &&
-	       probe.equality_key_count == 1 && !probe.residual_predicate && !probe.mark_build_match &&
-	       probe.output_mode == ExecutionHashJoinProbeOutputMode::MATCHED_PROBE_AND_BUILD;
-}
-
 void SljitCollectFusedFilterOwner(const vector<SljitExecutableRegionOp> &ops,
                                   const SljitFullPipelinePrimitiveStep &step, vector<idx_t> &owners) {
 	// A filtered aggregate step owns its filter; it must be one its binder admits, so the step can execute it
@@ -244,14 +226,10 @@ SljitFinalizeFullPipelinePrimitiveRecipe(const vector<SljitExecutableRegionOp> &
 		terminal.post_join_projection_aggregate.projection =
 		    SljitPrepareJoinAggregateProjection(ops, primitive_sequence, terminal.post_join_projection_aggregate);
 	}
-	const bool direct_source_hash_build = terminal.kind == SljitFullPipelinePrimitiveKind::HASH_JOIN_BUILD_SINK &&
-	                                      terminal.hash_join_build_sink.direct_source_ingress;
 
 	SljitFullPipelineRecipe recipe;
 	recipe.primitive_sequence = std::move(primitive_sequence);
 	recipe.direct_aggregate_consumer = direct_aggregate_consumer;
-	recipe.has_scan_filter_executable_body =
-	    direct_source_hash_build || SljitFullPipelineHasExactFilterProbeHashBuild(ops, recipe.primitive_sequence);
 	recipe.fused_filter_owners = std::move(fused_filter_owners);
 	return recipe;
 }
@@ -266,6 +244,85 @@ static bool SljitRegionOpIsSink(const SljitExecutableRegionOp &op) {
 	default:
 		return false;
 	}
+}
+
+static bool SljitOpsRunGeneratedCode(const vector<SljitExecutableRegionOp> &ops, idx_t first_op_idx,
+                                     idx_t final_op_idx) {
+	for (auto op_idx = first_op_idx; op_idx <= final_op_idx && op_idx < ops.size(); op_idx++) {
+		if (ops[op_idx].HasExecutableBody()) {
+			return true;
+		}
+	}
+	return false;
+}
+
+static bool SljitOpRunsGeneratedCode(const vector<SljitExecutableRegionOp> &ops, idx_t op_idx) {
+	return SljitOpsRunGeneratedCode(ops, op_idx, op_idx);
+}
+
+static bool SljitStepRunsGeneratedCode(const vector<SljitExecutableRegionOp> &ops,
+                                       const SljitFullPipelinePrimitiveStep &step) {
+	switch (step.kind) {
+	case SljitFullPipelinePrimitiveKind::SOURCE_FETCH:
+	case SljitFullPipelinePrimitiveKind::NATIVE_TAIL_DELEGATION:
+		return false;
+	case SljitFullPipelinePrimitiveKind::GENERATED_FILTER:
+		return SljitOpRunsGeneratedCode(ops, step.generated_filter.filter_idx);
+	case SljitFullPipelinePrimitiveKind::HASH_JOIN_PROBE_MATERIALIZE:
+		return SljitOpRunsGeneratedCode(ops, step.hash_join_probe_materialize.hash_join_idx);
+	case SljitFullPipelinePrimitiveKind::HASH_JOIN_PROBE_SELECTION:
+		return SljitOpRunsGeneratedCode(ops, step.hash_join_probe_selection.hash_join_idx);
+	case SljitFullPipelinePrimitiveKind::MARK_PROBE_FILTER_BOUNDARY:
+		return SljitOpRunsGeneratedCode(ops, step.mark_probe_filter_boundary.hash_join_idx) ||
+		       SljitOpRunsGeneratedCode(ops, step.mark_probe_filter_boundary.filter_idx);
+	case SljitFullPipelinePrimitiveKind::PROJECTION_CHAIN: {
+		auto &chain = step.projection_chain;
+		return SljitOpsRunGeneratedCode(ops, chain.first_projection_idx, chain.final_projection_idx) ||
+		       (chain.HasBoundComposedProjection() && chain.bound_composed_projection->HasExecutableBody());
+	}
+	case SljitFullPipelinePrimitiveKind::POST_JOIN_PROJECTION_AGGREGATE_UPDATE: {
+		auto &primitive = step.post_join_projection_aggregate;
+		auto &projection = primitive.post_join_projection;
+		return SljitOpRunsGeneratedCode(ops, projection.hash_join_idx) ||
+		       SljitOpsRunGeneratedCode(ops, projection.first_projection_idx, projection.final_projection_idx) ||
+		       SljitOpRunsGeneratedCode(ops, primitive.aggregate_idx);
+	}
+	case SljitFullPipelinePrimitiveKind::UNGROUPED_AGGREGATE_UPDATE:
+		return SljitOpRunsGeneratedCode(ops, step.ungrouped_aggregate_update.aggregate_idx) ||
+		       SljitOpRunsGeneratedCode(ops, step.ungrouped_aggregate_update.filter_idx);
+	case SljitFullPipelinePrimitiveKind::GROUPED_AGGREGATE_UPDATE: {
+		auto &primitive = step.grouped_aggregate_update;
+		return SljitOpRunsGeneratedCode(ops, primitive.aggregate_idx) ||
+		       SljitOpRunsGeneratedCode(ops, primitive.filter_idx) ||
+		       SljitOpsRunGeneratedCode(ops, primitive.first_projection_idx, primitive.final_projection_idx);
+	}
+	case SljitFullPipelinePrimitiveKind::HASH_JOIN_BUILD_SINK:
+		return SljitOpRunsGeneratedCode(ops, step.hash_join_build_sink.projection_idx);
+	case SljitFullPipelinePrimitiveKind::PRIMITIVE_AGGREGATE_UPDATE:
+		return SljitOpRunsGeneratedCode(ops, step.primitive_aggregate_idx);
+	default:
+		throw InternalException("SLJIT recipe has an unknown primitive step");
+	}
+}
+
+bool SljitRegionRunsGeneratedCode(const vector<SljitExecutableRegionOp> &ops, const SljitFullPipelineRecipe &recipe,
+                                  ExecutionRegionScanFilterMode scan_filter_mode,
+                                  const vector<SljitExecutableScanFilter> &scan_filters) {
+	for (idx_t step_idx = 0; step_idx < recipe.primitive_sequence.Count(); step_idx++) {
+		if (SljitStepRunsGeneratedCode(ops, recipe.primitive_sequence.Step(step_idx))) {
+			return true;
+		}
+	}
+	// DuckDB's scan runs the compiled filters only when the region owns all of its scan filters
+	if (scan_filter_mode != ExecutionRegionScanFilterMode::ALL) {
+		return false;
+	}
+	for (auto &scan_filter : scan_filters) {
+		if (scan_filter.CodeSize() > 0) {
+			return true;
+		}
+	}
+	return false;
 }
 
 idx_t SljitNativeTailOperatorIndex(const vector<SljitExecutableRegionOp> &ops, idx_t tail_start_idx) {

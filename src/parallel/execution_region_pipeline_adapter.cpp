@@ -192,11 +192,6 @@ bool ExecutionRegionPipelineAdapter::BindSinkInternal(DataChunk &input, const SI
 	return sink->BindExecutionSink(executor.context, input, sink_input, sink_info, binding);
 }
 
-bool ExecutionRegionPipelineAdapter::BindSink(DataChunk &input, const ExecutionRegionSinkInfo &sink_info,
-                                              ExecutionSinkBinding &binding) {
-	return BindSinkInternal(input, sink_info, sink_info.Kind(), binding);
-}
-
 bool ExecutionRegionPipelineAdapter::BindSink(DataChunk &input, const ExecutionRegionAggregateSinkInfo &sink_info,
                                               ExecutionSinkBinding &binding) {
 	return BindSinkInternal(input, sink_info, sink_info.Kind(), binding);
@@ -205,86 +200,6 @@ bool ExecutionRegionPipelineAdapter::BindSink(DataChunk &input, const ExecutionR
 bool ExecutionRegionPipelineAdapter::BindSink(DataChunk &input, const ExecutionRegionHashJoinInfo &sink_info,
                                               ExecutionSinkBinding &binding) {
 	return BindSinkInternal(input, sink_info, ExecutionRegionSinkKind::HASH_JOIN_BUILD, binding);
-}
-
-bool ExecutionRegionPipelineAdapter::BindSink(DataChunk &input, const ExecutionRegionOrderSinkInfo &sink_info,
-                                              ExecutionSinkBinding &binding) {
-	return BindSinkInternal(input, sink_info, ExecutionRegionSinkKind::SORT, binding);
-}
-
-//! The rows the core holds for a kernel sink through the operator's Sink, as the retry of a blocked chunk does
-SinkResultType ExecutionRegionPipelineAdapter::SinkCoalescedChunk() {
-	auto &coalesced = executor.coalesced_sink_chunk;
-	if (!executor.coalesced_sink_chunk_initialized || coalesced.size() == 0) {
-		return SinkResultType::NEED_MORE_INPUT;
-	}
-	OperatorSinkInput sink_input {*executor.pipeline.GetSink()->sink_state, *executor.local_sink_state,
-	                              executor.interrupt_state};
-	auto result = executor.Sink(coalesced, sink_input);
-	if (result == SinkResultType::BLOCKED) {
-		executor.EnqueueSinkChunk(coalesced);
-		result = SinkResultType::NEED_MORE_INPUT;
-	}
-	coalesced.Reset();
-	return result;
-}
-
-//! A column that carries a global dictionary keeps that dictionary for the producer's lifetime: downstream caching
-//! operators accumulate its indices and treat a change of identity as a producer bug. Coalescing flattens, so such
-//! rows reach the sink as they are.
-static bool ChunkCarriesGlobalDictionary(const DataChunk &chunk) {
-	for (idx_t col_idx = 0; col_idx < chunk.ColumnCount(); col_idx++) {
-		if (DictionaryVector::IsGlobalDictionary(chunk.data[col_idx])) {
-			return true;
-		}
-	}
-	return false;
-}
-
-SinkResultType ExecutionRegionPipelineAdapter::AppendSink(const ExecutionAppendSinkBinding &binding, DataChunk &chunk) {
-	if (executor.remaining_sink_chunk) {
-		executor.EnqueueSinkChunk(chunk);
-		return SinkResultType::NEED_MORE_INPUT;
-	}
-	auto &coalesced = executor.coalesced_sink_chunk;
-	const bool coalesce = chunk.size() <= CachingPhysicalOperator::CACHE_THRESHOLD &&
-	                      !executor.required_partition_info.AnyRequired() && !ChunkCarriesGlobalDictionary(chunk);
-	if (coalesce) {
-		if (!executor.coalesced_sink_chunk_initialized) {
-			coalesced.Initialize(GetAllocator(), executor.final_chunk.GetTypes());
-			executor.coalesced_sink_chunk_initialized = true;
-		}
-		if (coalesced.size() + chunk.size() <= STANDARD_VECTOR_SIZE) {
-			coalesced.Append(chunk);
-			return SinkResultType::NEED_MORE_INPUT;
-		}
-	}
-	// The chunk does not join the coalesced rows: they sink first
-	auto result = SinkCoalescedChunk();
-	if (result == SinkResultType::FINISHED) {
-		return result;
-	}
-	if (executor.remaining_sink_chunk) {
-		// The coalesced rows blocked the Sink: the chunk queues behind them
-		executor.EnqueueSinkChunk(chunk);
-		return SinkResultType::NEED_MORE_INPUT;
-	}
-	if (coalesce) {
-		coalesced.Append(chunk);
-		return SinkResultType::NEED_MORE_INPUT;
-	}
-#ifdef DUCKDB_DEBUG_ASYNC_SINK_SOURCE
-	result = executor.TryDebugBlock(executor.debug_blocked_sink_count, executor.interrupt_state)
-	             ? SinkResultType::BLOCKED
-	             : ExecutionSinkAppend(binding, chunk);
-#else
-	result = ExecutionSinkAppend(binding, chunk);
-#endif
-	if (result != SinkResultType::BLOCKED) {
-		return result;
-	}
-	executor.EnqueueSinkChunk(chunk);
-	return SinkResultType::NEED_MORE_INPUT;
 }
 
 SinkResultType ExecutionRegionPipelineAdapter::PushOperators(idx_t operator_index, DataChunk &chunk, idx_t &sink_rows) {

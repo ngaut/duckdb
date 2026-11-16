@@ -160,15 +160,6 @@ static bool ExecutionRegionGroupsHaveGeneratedExpression(const vector<ExecutionR
 	return false;
 }
 
-static bool ExecutionRegionOrderKeysHaveGeneratedExpression(const vector<ExecutionRegionOrderKeyInput> &order_keys) {
-	for (auto &order_key : order_keys) {
-		if (order_key.expression_ready) {
-			return true;
-		}
-	}
-	return false;
-}
-
 static bool ExecutionRegionSourceFiltersHaveGeneratedExpression(const vector<ExecutionSourceFilterContract> &filters) {
 	for (auto &filter : filters) {
 		if (filter.expression) {
@@ -190,8 +181,7 @@ static bool ExecutionRegionProjectionListHasGeneratedExpression(
 
 static bool ExecutionRegionGraphEntryHasGeneratedExpression(const ExecutionRegionOperatorEntry &entry) {
 	if (entry.filter_expression || ExecutionRegionProjectionListHasGeneratedExpression(entry.projection_expressions) ||
-	    ExecutionRegionSourceFiltersHaveGeneratedExpression(entry.source_payload.filters) ||
-	    ExecutionRegionOrderKeysHaveGeneratedExpression(entry.source_payload.order_contract.order_keys)) {
+	    ExecutionRegionSourceFiltersHaveGeneratedExpression(entry.source_payload.filters)) {
 		return true;
 	}
 	auto &sink = entry.sink_payload;
@@ -204,8 +194,6 @@ static bool ExecutionRegionGraphEntryHasGeneratedExpression(const ExecutionRegio
 	case ExecutionRegionSinkKind::DELIM_JOIN_SINK:
 		return ExecutionRegionAggregateInputsHaveGeneratedExpression(sink.DelimJoin().distinct.aggregates) ||
 		       ExecutionRegionGroupsHaveGeneratedExpression(sink.DelimJoin().distinct.groups);
-	case ExecutionRegionSinkKind::SORT:
-		return ExecutionRegionOrderKeysHaveGeneratedExpression(sink.Order().contract.order_keys);
 	default:
 		return false;
 	}

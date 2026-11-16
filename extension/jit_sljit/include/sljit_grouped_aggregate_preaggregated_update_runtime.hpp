@@ -102,8 +102,7 @@ static bool TryExecutePreaggregatedGroupedPrimitiveAggregateUpdate(
 	    runtime, op_idx, op.Kind(), "preaggregated_grouped_primitive_update", stage_start,
 	    [&](optional_ptr<ExecutionOperatorStageRecorder> recorder) {
 		    return grouped_state.state->TryUpdateGroupKeysWithSelectedStateAddresses(
-		        compact_groups, sink_info, ExecuteSljitPreaggregatedPrimitiveUpdate, &update_state, recorder, nullptr,
-		        dense_domain);
+		        compact_groups, sink_info, ExecuteSljitPreaggregatedPrimitiveUpdate, &update_state, recorder, nullptr);
 	    });
 	scratch.RecordDirectNewAggregateUpdateResult(op_idx, updated);
 	RecordSljitRegionStageRuntimePath(runtime, op_idx, op.Kind(),

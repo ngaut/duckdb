@@ -74,20 +74,6 @@ bool SljitTryAnalyzeHashJoinBuildSink(const vector<SljitExecutableRegionOp> &ops
 	return true;
 }
 
-bool SljitTryAnalyzeSourceHashJoinBuildSink(const vector<SljitExecutableRegionOp> &ops,
-                                            SljitSourceHashJoinBuildSinkFacts &facts) {
-	facts = SljitSourceHashJoinBuildSinkFacts();
-	if (ops.empty() || ops.back().Kind() != SljitNativeRegionOpKind::HASH_JOIN_BUILD) {
-		return false;
-	}
-	const auto sink_idx = ops.size() - 1;
-	if (SljitFullPipelineSourcePrefixEnd(ops, sink_idx) != sink_idx) {
-		return false;
-	}
-	facts.sink_idx = sink_idx;
-	return true;
-}
-
 bool SljitTryAnalyzeSourceUngroupedAggregate(const vector<SljitExecutableRegionOp> &ops,
                                              SljitSourceUngroupedAggregateFacts &facts) {
 	facts = SljitSourceUngroupedAggregateFacts();

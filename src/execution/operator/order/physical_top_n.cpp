@@ -123,8 +123,6 @@ public:
 
 public:
 	void Sink(DataChunk &input, optional_ptr<TopNBoundaryValue> boundary_value = nullptr);
-	void SinkPreparedOrderKeys(DataChunk &order_keys, DataChunk &payload,
-	                           optional_ptr<TopNBoundaryValue> boundary_value = nullptr);
 	void Combine(TopNHeap &other);
 	void Reduce();
 	void Finalize();
@@ -134,8 +132,6 @@ public:
 	idx_t OutputCount() const;
 
 	bool CheckBoundaryValues(DataChunk &sort_chunk, DataChunk &payload, TopNBoundaryValue &boundary_val);
-	//! Shared tail of Sink and SinkPreparedOrderKeys once sort_chunk holds the order keys of payload
-	void SinkSortChunk(DataChunk &payload, optional_ptr<TopNBoundaryValue> global_boundary);
 	void AddSmallHeap(DataChunk &input, const Vector &sort_keys_vec);
 	void AddLargeHeap(DataChunk &input, const Vector &sort_keys_vec);
 
@@ -362,6 +358,8 @@ bool TopNHeap::CheckBoundaryValues(DataChunk &sort_chunk, DataChunk &payload, To
 }
 
 void TopNHeap::Sink(DataChunk &input, optional_ptr<TopNBoundaryValue> global_boundary) {
+	static constexpr idx_t SMALL_HEAP_THRESHOLD = 100;
+
 	if (heap_size == 0) {
 		// LIMIT 0 without OFFSET - the heap can never hold any entry, so there is nothing to do
 		return;
@@ -370,30 +368,10 @@ void TopNHeap::Sink(DataChunk &input, optional_ptr<TopNBoundaryValue> global_bou
 	// compute the ordering values for the new chunk
 	sort_chunk.Reset();
 	executor.Execute(input, sort_chunk);
-	SinkSortChunk(input, global_boundary);
-}
-
-void TopNHeap::SinkPreparedOrderKeys(DataChunk &order_keys, DataChunk &payload,
-                                     optional_ptr<TopNBoundaryValue> global_boundary) {
-	if (order_keys.ColumnCount() != orders.size()) {
-		throw InternalException("Prepared TopN order-key count mismatch");
-	}
-	if (order_keys.size() != payload.size()) {
-		throw InternalException("Prepared TopN order-key and payload cardinality mismatch");
-	}
-	if (heap_size == 0) {
-		return;
-	}
-	sort_chunk.Reference(order_keys);
-	SinkSortChunk(payload, global_boundary);
-}
-
-void TopNHeap::SinkSortChunk(DataChunk &payload, optional_ptr<TopNBoundaryValue> global_boundary) {
-	static constexpr idx_t SMALL_HEAP_THRESHOLD = 100;
 
 	if (global_boundary) {
 		// if we have a global boundary value check which rows pass before doing anything
-		if (!CheckBoundaryValues(sort_chunk, payload, *global_boundary)) {
+		if (!CheckBoundaryValues(sort_chunk, input, *global_boundary)) {
 			// nothing in this chunk can be in the final result
 			return;
 		}
@@ -405,9 +383,9 @@ void TopNHeap::SinkSortChunk(DataChunk &payload, optional_ptr<TopNBoundaryValue>
 	CreateSortKeyHelpers::CreateSortKey(sort_chunk, modifiers, sort_keys_vec);
 
 	if (heap_size <= SMALL_HEAP_THRESHOLD) {
-		AddSmallHeap(payload, sort_keys_vec);
+		AddSmallHeap(input, sort_keys_vec);
 	} else {
-		AddLargeHeap(payload, sort_keys_vec);
+		AddLargeHeap(input, sort_keys_vec);
 	}
 
 	// if we modified the heap we might be able to update the global boundary
@@ -557,52 +535,6 @@ SinkResultType PhysicalTopN::Sink(ExecutionContext &context, DataChunk &chunk, O
 	sink.heap.Sink(chunk, &gstate.boundary_value);
 	sink.heap.Reduce();
 	return SinkResultType::NEED_MORE_INPUT;
-}
-
-class TopNExecutionRegionSinkState : public ExecutionOrderedSinkState {
-public:
-	TopNExecutionRegionSinkState(TopNGlobalSinkState &global_state_p, TopNLocalSinkState &local_state_p)
-	    : global_state(global_state_p), local_state(local_state_p) {
-	}
-
-	SinkResultType Sink(DataChunk &order_keys, DataChunk &payload) override {
-		local_state.heap.SinkPreparedOrderKeys(order_keys, payload, &global_state.boundary_value);
-		local_state.heap.Reduce();
-		return SinkResultType::NEED_MORE_INPUT;
-	}
-
-private:
-	TopNGlobalSinkState &global_state;
-	TopNLocalSinkState &local_state;
-};
-
-bool PhysicalTopN::BindExecutionSink(ExecutionContext &context, DataChunk &input, OperatorSinkInput &sink_input,
-                                     const ExecutionRegionOrderSinkInfo &sink_info,
-                                     ExecutionSinkBinding &binding) const {
-	(void)context;
-	(void)input;
-	binding = ExecutionSinkBinding();
-	binding.kind = ExecutionRegionSinkKind::SORT;
-	auto blocker = ValidateExecutionOrderedSink(sink_info, ExecutionRegionOperatorKind::TOP_N);
-	if (!blocker.empty()) {
-		binding.blocker = blocker;
-		binding.ordered_sink.blocker = blocker;
-		return false;
-	}
-
-	auto &gstate = sink_input.global_state.Cast<TopNGlobalSinkState>();
-	auto &lstate = sink_input.local_state.Cast<TopNLocalSinkState>();
-	binding.ready = true;
-	binding.ordered_sink.ready = true;
-	binding.ordered_sink.state = make_shared_ptr<TopNExecutionRegionSinkState>(gstate, lstate);
-	binding.ordered_sink.order_key_types.reserve(sink_info.contract.order_keys.size());
-	for (auto &key : sink_info.contract.order_keys) {
-		binding.ordered_sink.order_key_types.push_back(key.type);
-	}
-	binding.ordered_sink.payload_types = sink_info.contract.payload_types;
-	binding.ordered_sink.blocker.clear();
-	binding.blocker.clear();
-	return true;
 }
 
 //===--------------------------------------------------------------------===//

@@ -157,7 +157,6 @@ static string DescribeExecutionRegionOrderContractShape(const ExecutionRegionOrd
 	}
 	result += ",dynamic_filter=" + ExecutionRegionSignatureBool(contract.dynamic_filter);
 	result += ",index_sort=" + ExecutionRegionSignatureBool(contract.is_index_sort);
-	result += ",keys_ready=" + ExecutionRegionSignatureBool(contract.all_order_keys_ready);
 	result += ")";
 	return result;
 }

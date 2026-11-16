@@ -956,16 +956,6 @@ bool GroupedAggregateHashTable::LookupsSkippedRequireFinalCombine() const {
 	return (adaptivity.LookupsSkipped() && skip_lookups_require_final_combine) || epochs_require_final_combine;
 }
 
-void GroupedAggregateHashTable::EnsureLookupEpoch() {
-	if (!adaptivity.LookupsSkipped()) {
-		return;
-	}
-	// Adaptive appends left rows the pointer table does not cover, so lookups may only
-	// run against a fresh epoch.
-	Abandon();
-	ResumeLookups();
-}
-
 optional_ptr<const vector<GroupedAggregateProvenUniqueRange>>
 GroupedAggregateHashTable::GetProvenUniqueAppendRanges() const {
 	if (!adaptivity.LookupsSkipped() || skip_lookups_require_final_combine || epochs_require_final_combine ||
@@ -997,7 +987,7 @@ void GroupedAggregateHashTable::Resize(idx_t size) {
 	// be used to grow the table: it would reinsert abandoned rows, oversubscribe the
 	// new table, and leave the probe loop unable to terminate. Start a fresh, larger
 	// epoch instead. The retained rows stay materialized and the final combine merges
-	// them, exactly as it does for the epoch EnsureLookupEpoch abandons.
+	// them.
 	if (Count() != 0 && Count() != GetMaterializedCount()) {
 		epochs_require_final_combine = true;
 		Abandon();
@@ -1158,22 +1148,6 @@ GroupedAggregateHashTable::AggregateCompressedGroupState::AggregateCompressedGro
     : hashes(LogicalType::HASH), unique_group_pointers(LogicalType::POINTER), unique_entries(STANDARD_VECTOR_SIZE) {
 }
 
-optional_idx GroupedAggregateHashTable::TryAddDictionaryGroups(DataChunk &groups, DataChunk &payload,
-                                                               const unsafe_vector<idx_t> &filter) {
-	auto result = TryResolveDictionaryGroups(groups, state.addresses, layout_ptr->GetAggrOffset());
-	if (!result.IsValid()) {
-		return result;
-	}
-	auto &aggregates = layout_ptr->GetAggregates();
-	if (aggregates.empty()) {
-		return result;
-	}
-
-	// ht_offsets are only valid for unique entries, not the full payload
-	UpdateAggregates(payload, filter, groups.size(), false);
-	return result;
-}
-
 optional_idx GroupedAggregateHashTable::TryResolveDictionaryGroups(DataChunk &groups, Vector &addresses_out,
                                                                    idx_t address_offset) {
 	static constexpr idx_t MAX_DICTIONARY_SIZE_THRESHOLD = 20000;
@@ -1293,23 +1267,6 @@ optional_idx GroupedAggregateHashTable::TryResolveDictionaryGroups(DataChunk &gr
 	return new_group_count;
 }
 
-optional_idx GroupedAggregateHashTable::TryAddConstantGroups(DataChunk &groups, DataChunk &payload,
-                                                             const unsafe_vector<idx_t> &filter) {
-	auto result = TryResolveConstantGroups(groups, state.addresses, layout_ptr->GetAggrOffset());
-	if (!result.IsValid()) {
-		return result;
-	}
-	auto &aggregates = layout_ptr->GetAggregates();
-	if (aggregates.empty()) {
-		state.addresses.SetVectorType(VectorType::FLAT_VECTOR);
-		return result;
-	}
-
-	UpdateAggregates(payload, filter, groups.size(), false);
-	state.addresses.SetVectorType(VectorType::FLAT_VECTOR);
-	return result;
-}
-
 optional_idx GroupedAggregateHashTable::TryResolveConstantGroups(DataChunk &groups, Vector &addresses_out,
                                                                  idx_t address_offset) {
 #ifndef DEBUG
@@ -1359,17 +1316,45 @@ optional_idx GroupedAggregateHashTable::TryResolveConstantGroups(DataChunk &grou
 	return new_group_count;
 }
 
-optional_idx GroupedAggregateHashTable::TryAddCompressedGroups(DataChunk &groups, DataChunk &payload,
-                                                               const unsafe_vector<idx_t> &filter) {
+optional_idx GroupedAggregateHashTable::TryResolveCompressedGroups(DataChunk &groups, Vector &addresses_out,
+                                                                   idx_t address_offset) {
 	// all groups must be compressed
 	if (groups.AllConstant()) {
-		return TryAddConstantGroups(groups, payload, filter);
+		return TryResolveConstantGroups(groups, addresses_out, address_offset);
 	}
 	if (groups.ColumnCount() == 1 && groups.data[0].GetVectorType() == VectorType::DICTIONARY_VECTOR &&
 	    groups.data[0].GetType().InternalType() != PhysicalType::STRUCT) {
-		return TryAddDictionaryGroups(groups, payload, filter);
+		return TryResolveDictionaryGroups(groups, addresses_out, address_offset);
 	}
 	return optional_idx();
+}
+
+optional_idx GroupedAggregateHashTable::TryAddCompressedGroups(DataChunk &groups, DataChunk &payload,
+                                                               const unsafe_vector<idx_t> &filter) {
+	auto result = TryResolveCompressedGroups(groups, state.addresses, layout_ptr->GetAggrOffset());
+	if (!result.IsValid()) {
+		return result;
+	}
+	if (!layout_ptr->GetAggregates().empty()) {
+		// ht_offsets are only valid for unique entries, not the full payload
+		UpdateAggregates(payload, filter, groups.size(), false);
+	}
+	state.addresses.SetVectorType(VectorType::FLAT_VECTOR);
+	return result;
+}
+
+void GroupedAggregateHashTable::FindOrCreateGroupRows(DataChunk &groups, Vector &addresses_out,
+                                                      optional_ptr<Vector> group_hashes) {
+	adaptivity.AddInput(groups.size());
+	if (TryResolveCompressedGroups(groups, addresses_out, 0).IsValid()) {
+		addresses_out.Flatten();
+		return;
+	}
+	if (!group_hashes) {
+		groups.Hash(state.hashes);
+		group_hashes = &state.hashes;
+	}
+	FindOrCreateGroups(groups, *group_hashes, addresses_out, state.new_groups);
 }
 
 idx_t GroupedAggregateHashTable::AddChunk(DataChunk &groups, DataChunk &payload, const unsafe_vector<idx_t> &filter) {
@@ -3647,7 +3632,7 @@ static bool AggregateFillDescriptorGroupChunk(Allocator &allocator, DataChunk &p
 	                                         groups);
 }
 
-bool GroupedAggregateHashTable::TryFindOrCreateRowPointerGroupStateTargetsMaterialized(
+bool GroupedAggregateHashTable::TryFindOrCreateRowPointerGroupStateTargets(
     DataChunk &payload_input, Vector &row_pointers, idx_t count,
     const vector<ExecutionRowPointerGroupKeySource> &group_sources, ExecutionGroupedAggregateStateTargetBatch &targets,
     optional_ptr<ExecutionOperatorStageRecorder> recorder) {
@@ -3658,7 +3643,8 @@ bool GroupedAggregateHashTable::TryFindOrCreateRowPointerGroupStateTargetsMateri
 	if (count == 0) {
 		return true;
 	}
-	if (payload_input.size() != count) {
+	if (payload_input.size() != count ||
+	    !AggregateDescriptorGroupKeySourcesSupported(group_sources, layout_ptr->GetTypes())) {
 		return false;
 	}
 
@@ -3671,53 +3657,24 @@ bool GroupedAggregateHashTable::TryFindOrCreateRowPointerGroupStateTargetsMateri
 	RecordAggregateTraceStage(recorder, "find_or_create_descriptor_keys.fill", fill_start);
 
 	auto lookup_start = AggregateTraceStart(recorder);
-	FindOrCreateGroups(state.descriptor_group_chunk, state.addresses);
+	FindOrCreateGroupRows(state.descriptor_group_chunk, state.addresses);
 	RecordAggregateTraceStage(recorder, "find_or_create_descriptor_keys.lookup_addresses", lookup_start);
-
-	auto target_start = AggregateTraceStart(recorder);
-	state.addresses.Flatten();
 	targets.InputOrder().Set(FlatVector::GetData<uintptr_t>(state.addresses), nullptr, count);
-	RecordAggregateTraceStage(recorder, "find_or_create_descriptor_keys.emit_targets", target_start);
 	return true;
 }
 
-bool GroupedAggregateHashTable::TryFindOrCreateRowPointerGroupStateTargetsFast(
-    DataChunk &payload_input, Vector &row_pointers, idx_t count,
-    const vector<ExecutionRowPointerGroupKeySource> &group_sources, ExecutionGroupedAggregateStateTargetBatch &targets,
-    optional_ptr<ExecutionOperatorStageRecorder> recorder) {
-	EnsureLookupEpoch();
-	targets.Reset();
-	if (row_pointers.GetVectorType() != VectorType::FLAT_VECTOR) {
-		return false;
-	}
-	if (count == 0) {
-		return true;
-	}
-	if (payload_input.size() != count ||
-	    !AggregateDescriptorGroupKeySourcesSupported(group_sources, layout_ptr->GetTypes())) {
-		return false;
-	}
-	return TryFindOrCreateRowPointerGroupStateTargetsMaterialized(payload_input, row_pointers, count, group_sources,
-	                                                              targets, recorder);
-}
-
-bool GroupedAggregateHashTable::TryFindOrCreateInputVectorGroupStateTargetsFast(
+bool GroupedAggregateHashTable::TryFindOrCreateInputVectorGroupStateTargets(
     DataChunk &payload_input, idx_t count, const vector<ExecutionRowPointerGroupKeySource> &group_sources,
-    ExecutionGroupedAggregateStateTargetBatch &targets, optional_ptr<ExecutionOperatorStageRecorder> recorder,
-    optional_ptr<const ExecutionDenseGroupDomain> dense_domain) {
-	// Like the row-pointer lookup: a JIT lookup re-enables lookups instead of declining, because batched callers
-	// cannot replay their already-consumed input.
-	EnsureLookupEpoch();
+    ExecutionGroupedAggregateStateTargetBatch &targets, optional_ptr<ExecutionOperatorStageRecorder> recorder) {
 	targets.Reset();
 	if (count == 0) {
 		return true;
 	}
 	if (payload_input.size() != count ||
 	    !AggregateDescriptorGroupKeySourcesSupported(group_sources, layout_ptr->GetTypes()) ||
-	    !AggregateInputVectorDescriptorSourcesCanMaterialize(payload_input, group_sources) || !entries) {
+	    !AggregateInputVectorDescriptorSourcesCanMaterialize(payload_input, group_sources)) {
 		return false;
 	}
-	// DuckDB's vectorized lookup amortizes the pointer-table misses that dominate once the groups outgrow the cache
 	auto keys_start = AggregateTraceStart(recorder);
 	auto groups =
 	    AggregatePrepareInputVectorGroupChunk(allocator, payload_input, count, group_sources, layout_ptr->GetTypes(),
@@ -3726,11 +3683,9 @@ bool GroupedAggregateHashTable::TryFindOrCreateInputVectorGroupStateTargetsFast(
 	if (!groups) {
 		return false;
 	}
-	auto hash_start = AggregateTraceStart(recorder);
-	groups->Hash(state.hashes);
-	RecordAggregateTraceStage(recorder, "find_or_create_input_vector.hash", hash_start);
-	FindOrCreateGroups(*groups, state.hashes, state.addresses, state.new_groups, recorder);
-	adaptivity.AddInput(count);
+	auto lookup_start = AggregateTraceStart(recorder);
+	FindOrCreateGroupRows(*groups, state.addresses);
+	RecordAggregateTraceStage(recorder, "find_or_create_input_vector.lookup_addresses", lookup_start);
 	targets.InputOrder().Set(FlatVector::GetData<uintptr_t>(state.addresses), nullptr, count);
 	return true;
 }

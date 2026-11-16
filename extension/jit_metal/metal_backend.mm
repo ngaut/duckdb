@@ -689,7 +689,6 @@ class MetalProjectionKernel : public ExecutionRegionKernel {
         }
 
         DataChunk output;
-        ExecutionSinkBinding sink_binding;
         vector<ScopedMetalObject> input_buffers;
         vector<ScopedMetalObject> output_buffers;
         ScopedMetalObject count_buffer;
@@ -698,7 +697,6 @@ class MetalProjectionKernel : public ExecutionRegionKernel {
         idx_t buffer_capacity = 0;
         idx_t batch_rows = 0;
         idx_t batch_chunks = 0;
-        bool sink_bound = false;
     };
 
     bool ShouldBatchSourceChunks() const {
@@ -871,21 +869,6 @@ class MetalProjectionKernel : public ExecutionRegionKernel {
         scratch.batch_chunks++;
     }
 
-    void BindSinkIfNeeded(ExecutionRegionRuntime &runtime, MetalProjectionScratch &scratch) const {
-        auto &native_runtime = runtime.ExecutionOperators();
-        if (!scratch.sink_bound) {
-            if (!native_runtime.BindSink(scratch.output, sink_info, scratch.sink_binding)) {
-                auto blocker = scratch.sink_binding.blocker.empty() ? "metal-append-sink-binding-failed"
-                                                                    : scratch.sink_binding.blocker;
-                throw InternalException("Metal append sink binding failed: %s", blocker);
-            }
-            if (!scratch.sink_binding.ready || !scratch.sink_binding.append_sink.ready) {
-                throw InternalException("Metal append sink binding did not return a ready append state");
-            }
-            scratch.sink_bound = true;
-        }
-    }
-
     SinkResultType SinkProjectionBatch(ExecutionRegionRuntime &runtime, MetalProjectionScratch &scratch) const {
         if (scratch.batch_rows == 0) {
             return SinkResultType::NEED_MORE_INPUT;
@@ -897,7 +880,6 @@ class MetalProjectionKernel : public ExecutionRegionKernel {
     }
 
     SinkResultType SinkProjectionOutput(ExecutionRegionRuntime &runtime, MetalProjectionScratch &scratch) const {
-        BindSinkIfNeeded(runtime, scratch);
         idx_t row_offset = 0;
         auto &native_runtime = runtime.ExecutionOperators();
         for (idx_t chunk_idx = 0; chunk_idx < scratch.chunk_sizes.size(); chunk_idx++) {
@@ -907,10 +889,10 @@ class MetalProjectionKernel : public ExecutionRegionKernel {
                 CopyMetalBufferToOutputColumn(scratch, col_idx, row_offset, count);
             }
             scratch.output.SetChildCardinality(count);
-            auto sink_result = native_runtime.AppendSink(scratch.sink_binding.append_sink, scratch.output);
-            auto recorded_result = native_runtime.RecordSinkResult(count, sink_result);
-            if (recorded_result != SinkResultType::NEED_MORE_INPUT) {
-                return recorded_result;
+            // DuckDB's sink takes the rows as its pipeline would hand them over
+            auto sink_result = native_runtime.PushOperators(DConstants::INVALID_INDEX, scratch.output);
+            if (sink_result != SinkResultType::NEED_MORE_INPUT) {
+                return sink_result;
             }
             row_offset += count;
         }

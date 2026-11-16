@@ -9,6 +9,7 @@
 #include "sljit_region_kernel.hpp"
 
 #include "sljit_filter_runtime.hpp"
+#include "sljit_full_pipeline_primitive_contract.hpp"
 
 #include "duckdb/common/allocator.hpp"
 #include "duckdb/execution/execution_region_backend.hpp"
@@ -133,14 +134,9 @@ unique_ptr<TableFilterKernelState> SljitNativeRegionKernel::CreateTableFilterKer
 }
 
 bool SljitNativeRegionKernel::HasExecutableBody() const {
-	for (auto &op : artifact->ops) {
-		if (op.HasExecutableBody()) {
-			return true;
-		}
-	}
-	return artifact->scan_filter_mode != ExecutionRegionScanFilterMode::NONE &&
-	       artifact->full_pipeline_recipe_plan.HasRecipe() &&
-	       artifact->full_pipeline_recipe_plan.Recipe().has_scan_filter_executable_body;
+	return artifact->full_pipeline_recipe_plan.HasRecipe() &&
+	       SljitRegionRunsGeneratedCode(artifact->ops, artifact->full_pipeline_recipe_plan.Recipe(),
+	                                    artifact->scan_filter_mode, artifact->scan_filters);
 }
 
 const shared_ptr<ExecutionRuntimeFilterIdentity> &
