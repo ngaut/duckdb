@@ -1152,7 +1152,7 @@ static bool TryFinalizeDistinctCountFastPath(ExecutionContext &context, const Ha
 	}
 
 	Vector addresses(LogicalType::POINTER);
-	grouping_data.table_data.ResolveStateAddresses(context, group_chunk, sink_input, addresses, nullptr, true);
+	grouping_data.table_data.ResolveStateAddresses(context, group_chunk, sink_input, addresses);
 	addresses.Flatten();
 	auto state_addresses = FlatVector::GetData<uintptr_t>(addresses);
 

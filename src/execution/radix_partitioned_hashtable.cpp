@@ -278,6 +278,16 @@ static const uintptr_t *RadixStateAddressSpan(Vector &addresses) {
 	return FlatVector::GetData<uintptr_t>(addresses);
 }
 
+//! Finds or creates the groups with DuckDB's own lookup, then updates their states through the callback
+static void
+RadixFindOrCreateGroupsAndUpdate(GroupedAggregateHashTable &ht, DataChunk &groups, Vector &addresses,
+                                 ExecutionGroupedAggregateStateSelectedAddressUpdateFunction update_function,
+                                 void *update_state) {
+	ht.FindOrCreateGroups(groups, addresses);
+	addresses.Flatten();
+	update_function(RadixStateAddressSpan(addresses), nullptr, nullptr, groups.size(), update_state);
+}
+
 struct RadixPrimitiveGroupUpdateState {
 	const vector<const ExecutionPrimitiveAggregateUpdateLane *> *lanes = nullptr;
 	const vector<RadixPrimitiveAggregatePayload> *payloads = nullptr;
@@ -1303,8 +1313,7 @@ void RadixPartitionedHashTable::Sink(ExecutionContext &context, DataChunk &chunk
 
 void RadixPartitionedHashTable::ResolveStateAddresses(ExecutionContext &context, DataChunk &chunk,
                                                       OperatorSinkInput &input, Vector &addresses_out,
-                                                      optional_ptr<ExecutionOperatorStageRecorder> recorder,
-                                                      bool prefer_fast_lookup) const {
+                                                      optional_ptr<ExecutionOperatorStageRecorder> recorder) const {
 	auto &lstate = input.local_state.Cast<RadixHTLocalSinkState>();
 	auto prepare_start = RadixTraceStart(recorder);
 	auto &ht = PrepareRadixHTSinkState(context, *this, input);
@@ -1315,10 +1324,7 @@ void RadixPartitionedHashTable::ResolveStateAddresses(ExecutionContext &context,
 	PopulateGroupChunk(group_chunk, chunk);
 	RecordRadixTraceStage(recorder, "populate_group_chunk", populate_start);
 
-	if (!prefer_fast_lookup || !ht.GetLayout().AllConstant() ||
-	    !ht.TryFindOrCreateGroupAddressesFast(group_chunk, addresses_out, recorder)) {
-		ht.FindOrCreateGroupAddresses(group_chunk, addresses_out, recorder);
-	}
+	ht.FindOrCreateGroups(group_chunk, addresses_out);
 }
 
 bool RadixPartitionedHashTable::ReserveGroups(ExecutionContext &context, OperatorSinkInput &input, idx_t group_count,
@@ -1363,14 +1369,9 @@ bool RadixPartitionedHashTable::TryUpdateNewPrimitiveGroups(
 	update_state.lanes = &lanes;
 	update_state.payloads = &payloads;
 	auto append_start = RadixTraceStart(recorder);
-	if (!ht.TryFindOrCreateGroupsSelectedStateUpdateFast(group_chunk, RadixUpdatePrimitiveGroupSelected, &update_state,
-	                                                     recorder, nullptr, dense_domain)) {
-		RecordRadixTraceStage(recorder, "direct_new.append_miss", append_start);
-		return false;
-	}
+	RadixFindOrCreateGroupsAndUpdate(ht, group_chunk, lstate.existing_group_addresses,
+	                                 RadixUpdatePrimitiveGroupSelected, &update_state);
 	RecordRadixTraceStage(recorder, "direct_new.append", append_start);
-	auto update_marker_start = RadixTraceStart(recorder);
-	RecordRadixTraceStage(recorder, "direct_new.primitive_update", update_marker_start);
 
 	scope.Arm();
 	return true;
@@ -1400,26 +1401,11 @@ bool RadixPartitionedHashTable::TryUpdateNewPrimitiveGroupsWithPayloadInput(
 	update_state.lanes = &lanes;
 	update_state.payloads = &payloads;
 
-	auto existing_start = RadixTraceStart(recorder);
-	if (ht.TryFindExistingGroupsSelectedStateUpdateFast(groups, RadixUpdatePrimitiveGroupSelected, &update_state,
-	                                                    recorder, precomputed_hashes)) {
-		RecordRadixTraceStage(recorder, "direct_existing_split_payload.update", existing_start);
-		auto update_marker_start = RadixTraceStart(recorder);
-		RecordRadixTraceStage(recorder, "direct_existing_split_payload.primitive_update", update_marker_start);
-		scope.Arm();
-		return true;
-	}
-	RecordRadixTraceStage(recorder, "direct_existing_split_payload.miss", existing_start);
-
 	auto append_start = RadixTraceStart(recorder);
-	if (!ht.TryFindOrCreateGroupsSelectedStateUpdateFast(groups, RadixUpdatePrimitiveGroupSelected, &update_state,
-	                                                     recorder, precomputed_hashes, dense_domain)) {
-		RecordRadixTraceStage(recorder, "direct_new_split_payload.append_miss", append_start);
-		return false;
-	}
+	RadixFindOrCreateGroupsAndUpdate(ht, groups,
+	                                 input.local_state.Cast<RadixHTLocalSinkState>().existing_group_addresses,
+	                                 RadixUpdatePrimitiveGroupSelected, &update_state);
 	RecordRadixTraceStage(recorder, "direct_new_split_payload.append", append_start);
-	auto update_marker_start = RadixTraceStart(recorder);
-	RecordRadixTraceStage(recorder, "direct_new_split_payload.primitive_update", update_marker_start);
 
 	scope.Arm();
 	return true;
@@ -1484,20 +1470,7 @@ bool RadixPartitionedHashTable::TryUpdateNewGroupsWithSelectedStateAddresses(
 	RecordRadixTraceStage(recorder, "direct_new_selected_state.populate_group_chunk", populate_start);
 
 	auto append_start = RadixTraceStart(recorder);
-	if (!ht.TryFindOrCreateGroupsSelectedStateUpdateFast(group_chunk, update_function, update_state, recorder,
-	                                                     precomputed_hashes, dense_domain)) {
-		RecordRadixTraceStage(recorder, "direct_new_selected_state.append_miss", append_start);
-		auto generic_lookup_start = RadixTraceStart(recorder);
-		ht.FindOrCreateGroupAddresses(group_chunk, lstate.existing_group_addresses, recorder);
-		RecordRadixTraceStage(recorder, "direct_new_selected_state.generic_lookup", generic_lookup_start);
-		auto generic_update_start = RadixTraceStart(recorder);
-		lstate.existing_group_addresses.Flatten();
-		update_function(RadixStateAddressSpan(lstate.existing_group_addresses), nullptr, nullptr, group_chunk.size(),
-		                update_state);
-		RecordRadixTraceStage(recorder, "direct_new_selected_state.generic_update", generic_update_start);
-		scope.Arm();
-		return true;
-	}
+	RadixFindOrCreateGroupsAndUpdate(ht, group_chunk, lstate.existing_group_addresses, update_function, update_state);
 	RecordRadixTraceStage(recorder, "direct_new_selected_state.append_update", append_start);
 
 	scope.Arm();
@@ -1520,26 +1493,9 @@ bool RadixPartitionedHashTable::TryUpdateGroupKeysWithSelectedStateAddresses(
 	auto &lstate = scope.LState();
 
 	auto append_start = RadixTraceStart(recorder);
-	if (!ht.TryFindOrCreateGroupsSelectedStateUpdateFast(groups, update_function, update_state, recorder,
-	                                                     precomputed_hashes, dense_domain)) {
-		RecordRadixTraceStage(recorder, "direct_group_keys_selected_state.append_miss", append_start);
-		auto generic_lookup_start = RadixTraceStart(recorder);
-		ht.FindOrCreateGroupAddresses(groups, lstate.existing_group_addresses, recorder);
-		RecordRadixTraceStage(recorder, "direct_group_keys_selected_state.generic_lookup", generic_lookup_start);
-		auto generic_update_start = RadixTraceStart(recorder);
-		lstate.existing_group_addresses.Flatten();
-		update_function(RadixStateAddressSpan(lstate.existing_group_addresses), nullptr, nullptr, groups.size(),
-		                update_state);
-		RecordRadixTraceStage(recorder, "direct_group_keys_selected_state.generic_update", generic_update_start);
-		scope.Arm();
-		return true;
-	}
+	RadixFindOrCreateGroupsAndUpdate(ht, groups, lstate.existing_group_addresses, update_function, update_state);
 	RecordRadixTraceStage(recorder, "direct_group_keys_selected_state.append_update", append_start);
-
-	{
-		auto &lstate = input.local_state.Cast<RadixHTLocalSinkState>();
-		scope.Arm();
-	}
+	scope.Arm();
 	return true;
 }
 

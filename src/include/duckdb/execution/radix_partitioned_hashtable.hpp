@@ -56,8 +56,8 @@ public:
 	void Sink(ExecutionContext &context, DataChunk &chunk, OperatorSinkInput &input, DataChunk &aggregate_input_chunk,
 	          const unsafe_vector<idx_t> &filter) const;
 	void ResolveStateAddresses(ExecutionContext &context, DataChunk &chunk, OperatorSinkInput &input,
-	                           Vector &addresses_out, optional_ptr<ExecutionOperatorStageRecorder> recorder = nullptr,
-	                           bool prefer_fast_lookup = false) const;
+	                           Vector &addresses_out,
+	                           optional_ptr<ExecutionOperatorStageRecorder> recorder = nullptr) const;
 	bool ReserveGroups(ExecutionContext &context, OperatorSinkInput &input, idx_t group_count,
 	                   optional_ptr<ExecutionOperatorStageRecorder> recorder = nullptr) const;
 	bool TryUpdateNewPrimitiveGroups(ExecutionContext &context, DataChunk &chunk, OperatorSinkInput &input,
