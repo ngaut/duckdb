@@ -81,6 +81,12 @@ SljitFullPipelinePrimitiveStep::HashJoinBuildSink(const SljitHashJoinBuildSinkPr
 	return step;
 }
 
+SljitFullPipelinePrimitiveStep SljitFullPipelinePrimitiveStep::PrimitiveAggregateUpdate(idx_t aggregate_idx) {
+	auto step = Make(SljitFullPipelinePrimitiveKind::PRIMITIVE_AGGREGATE_UPDATE);
+	step.primitive_aggregate_idx = aggregate_idx;
+	return step;
+}
+
 SljitFullPipelinePrimitiveStep SljitFullPipelinePrimitiveStep::NativeTailDelegation(idx_t tail_start_idx) {
 	auto step = Make(SljitFullPipelinePrimitiveKind::NATIVE_TAIL_DELEGATION);
 	step.native_tail_start_idx = tail_start_idx;

@@ -139,6 +139,7 @@ bool SljitFullPipelinePrimitiveIsTerminal(SljitFullPipelinePrimitiveKind kind) {
 	       kind == SljitFullPipelinePrimitiveKind::UNGROUPED_AGGREGATE_UPDATE ||
 	       kind == SljitFullPipelinePrimitiveKind::GROUPED_AGGREGATE_UPDATE ||
 	       kind == SljitFullPipelinePrimitiveKind::HASH_JOIN_BUILD_SINK ||
+	       kind == SljitFullPipelinePrimitiveKind::PRIMITIVE_AGGREGATE_UPDATE ||
 	       kind == SljitFullPipelinePrimitiveKind::NATIVE_TAIL_DELEGATION;
 }
 
@@ -255,38 +256,32 @@ SljitFinalizeFullPipelinePrimitiveRecipe(const vector<SljitExecutableRegionOp> &
 	return recipe;
 }
 
+static bool SljitRegionOpIsSink(const SljitExecutableRegionOp &op) {
+	switch (op.Kind()) {
+	case SljitNativeRegionOpKind::HASH_JOIN_BUILD:
+	case SljitNativeRegionOpKind::ORDER_SINK:
+	case SljitNativeRegionOpKind::APPEND_SINK:
+	case SljitNativeRegionOpKind::AGGREGATE_UPDATE:
+		return true;
+	default:
+		return false;
+	}
+}
+
+idx_t SljitNativeTailOperatorIndex(const vector<SljitExecutableRegionOp> &ops, idx_t tail_start_idx) {
+	return ops[tail_start_idx].operator_index;
+}
+
 bool SljitNativeTailCanConsumeTail(const vector<SljitExecutableRegionOp> &ops, idx_t tail_start_idx) {
 	if (tail_start_idx >= ops.size()) {
 		return false;
 	}
 	auto &tail = ops[tail_start_idx];
-	if (tail.Kind() == SljitNativeRegionOpKind::AGGREGATE_UPDATE &&
-	    tail.AggregateUpdate().plan.UsesPrimitivePayloads()) {
+	if (!tail.input_is_operator_input) {
 		return false;
 	}
-	// Intra-tail soundness: each op's declared input references (the single
-	// authority for what its execution dereferences) must be satisfied by the
-	// previous op's output layout. Fused input transforms are invisible to
-	// delegation, so an unsatisfied reference means the tail must be refused.
-	for (idx_t op_idx = tail_start_idx + 1; op_idx < ops.size(); op_idx++) {
-		if (ops[op_idx - 1].output_types.empty()) {
-			continue;
-		}
-		if (!ops[op_idx].DeclaredInputConstraints().SatisfiedBy(ops[op_idx - 1].output_types)) {
-			return false;
-		}
-	}
-	// The tail hands DuckDB's aggregate sink the layout the ops before it produce. An aggregate whose payloads absorbed
-	// a projection reads that projection's input instead of its output, and the absorbed expressions are gone from the
-	// tail: matching types cannot tell (p_size * 3) % 1000 from the p_size it was computed from
-	for (idx_t op_idx = tail_start_idx; op_idx < ops.size(); op_idx++) {
-		auto &op = ops[op_idx];
-		if (op.Kind() == SljitNativeRegionOpKind::AGGREGATE_UPDATE &&
-		    op.AggregateUpdate().plan.PayloadsWereComposedThroughProjection()) {
-			return false;
-		}
-	}
-	return true;
+	return SljitRegionOpIsSink(tail) ? tail_start_idx + 1 == ops.size()
+	                                 : tail.operator_index != DConstants::INVALID_INDEX;
 }
 
 } // namespace duckdb

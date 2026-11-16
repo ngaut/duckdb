@@ -555,10 +555,12 @@ static ExecutionCompiledStageContract BuildExecutionCompiledSourceStage(const Ex
 	return stage;
 }
 
+//! A probe that only marks build rows hands nothing to the operators after it: DuckDB's operators own it
 static bool ExecutionHashJoinProbeIsExecutableWork(const ExecutionRegionHashJoinContract &contract) {
 	return contract.native_probe_contract.status == ExecutionRegionStateContractStatus::READY &&
 	       contract.equality_condition_count > 0 && contract.equality_condition_count <= contract.condition_count &&
-	       contract.native_probe_output_mode != ExecutionHashJoinProbeOutputMode::NONE;
+	       contract.native_probe_output_mode != ExecutionHashJoinProbeOutputMode::NONE &&
+	       contract.native_probe_output_mode != ExecutionHashJoinProbeOutputMode::MARK_BUILD_ONLY;
 }
 
 static ExecutionCompiledStageContract

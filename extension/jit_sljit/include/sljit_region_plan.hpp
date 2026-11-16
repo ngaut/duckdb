@@ -193,9 +193,7 @@ struct SljitNativeAppendSinkPlan {
 
 struct SljitNativeOrderSinkPlan {
 	ExecutionRegionOrderSinkInfo sink_info;
-	vector<SljitNativeRegionExpressionPlan> order_keys;
 	vector<LogicalType> input_types;
-	vector<LogicalType> key_types;
 };
 
 struct SljitAggregateInstanceParameters {
@@ -332,7 +330,11 @@ public:
 		return std::get<SljitNativeAggregateUpdatePlan>(payload);
 	}
 
+	//! The first pipeline operator the op computes; INVALID_INDEX for the source's ops and a sink computing none
 	idx_t operator_index = DConstants::INVALID_INDEX;
+	//! The first op lowered from its operator, fed exactly what DuckDB's operator takes: DuckDB's operators can take
+	//! the region's rows over here
+	bool input_is_operator_input = false;
 	//! Lowering-only estimate; executable plans never retain it.
 	idx_t estimated_input_count = 0;
 	vector<LogicalType> input_types;

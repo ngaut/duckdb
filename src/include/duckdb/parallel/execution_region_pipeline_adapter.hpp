@@ -66,6 +66,9 @@ public:
 	//! every later one: it sinks them in order before its loop continues or the pipeline finalizes. The chunk the
 	//! Sink blocked on retries as is, because a blocked Sink may already hold it
 	SinkResultType AppendSink(const ExecutionAppendSinkBinding &binding, DataChunk &chunk);
+	//! Runs DuckDB's operators from `operator_index` on (INVALID_INDEX: the sink) over a compiled kernel's chunk,
+	//! sinking as AppendSink does; counts the rows that reach the sink into sink_rows
+	SinkResultType PushOperators(idx_t operator_index, DataChunk &chunk, idx_t &sink_rows);
 	void FinishProcessing();
 	bool TryMarkRuntimeOnce(ExecutionRegionRuntimeOnceFlag flag, idx_t index);
 	PipelineExecuteResult FlushAndFinalizeAfterCompiledFinish(idx_t max_chunks, string &runtime_reason);

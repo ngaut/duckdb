@@ -605,9 +605,7 @@ static string BuildOpKey(const SljitNativeRegionOpPlan &op) {
 		break;
 	case SljitNativeRegionOpKind::ORDER_SINK:
 		key.Field("sink", BuildContractKey(op.OrderSink().sink_info));
-		key.Field("order_keys", BuildExpressionListKey(op.OrderSink().order_keys));
 		key.Field("order_input_types", op.OrderSink().input_types);
-		key.Field("key_types", op.OrderSink().key_types);
 		break;
 	case SljitNativeRegionOpKind::AGGREGATE_UPDATE: {
 		auto &aggregate = op.AggregateUpdate();

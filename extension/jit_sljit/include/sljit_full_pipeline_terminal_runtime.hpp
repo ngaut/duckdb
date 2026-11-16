@@ -29,21 +29,18 @@ struct SljitFullPipelineTerminalRuntimeState {
 	SljitPostJoinProjectionAggregateRuntimeState post_join_projection_aggregate;
 	SljitHashJoinBuildSinkRuntimeState hash_join_build_sink;
 	bool grouped_aggregate_native_pipeline = false;
-	SljitDataChunkBatch grouped_aggregate_native_pipeline_input;
 };
 
-template <class EXECUTE_NATIVE_FULL_PIPELINE_FROM>
 class SljitFullPipelineTerminalRuntime {
 public:
 	SljitFullPipelineTerminalRuntime(
-	    EXECUTE_NATIVE_FULL_PIPELINE_FROM &execute_native_full_pipeline_from_p,
 	    const vector<idx_t> &source_distinct_counts_p, const vector<Value> &source_min_values_p,
 	    const vector<Value> &source_max_values_p,
 	    vector<SljitSharedPerfectHashPredicateClassificationCache> &shared_predicate_classifications_p,
 	    SljitFullPipelineTerminalRuntimeState &state_p)
 	    : source_distinct_counts(source_distinct_counts_p), source_min_values(source_min_values_p),
 	      source_max_values(source_max_values_p), shared_predicate_classifications(shared_predicate_classifications_p),
-	      state(state_p), native_tail_delegation(execute_native_full_pipeline_from_p) {
+	      state(state_p) {
 	}
 
 	bool Prepare(ExecutionRegionRuntime &runtime, vector<SljitExecutableRegionOp> &ops,
@@ -71,6 +68,7 @@ public:
 		case SljitFullPipelinePrimitiveKind::HASH_JOIN_BUILD_SINK:
 			prepared = true;
 			break;
+		case SljitFullPipelinePrimitiveKind::PRIMITIVE_AGGREGATE_UPDATE:
 		case SljitFullPipelinePrimitiveKind::NATIVE_TAIL_DELEGATION:
 			prepared = true;
 			break;
@@ -98,6 +96,9 @@ public:
 			                                                    terminal_step.post_join_projection_aggregate, input);
 		case SljitFullPipelinePrimitiveKind::HASH_JOIN_BUILD_SINK:
 			return ExecuteHashJoinBuildSink(runtime, result, ops, scratch, terminal_step, input);
+		case SljitFullPipelinePrimitiveKind::PRIMITIVE_AGGREGATE_UPDATE:
+			return ExecutePrimitiveAggregateUpdate(runtime, result, ops, scratch, terminal_step.primitive_aggregate_idx,
+			                                       input);
 		case SljitFullPipelinePrimitiveKind::NATIVE_TAIL_DELEGATION:
 			return native_tail_delegation.Execute(runtime, result, ops, scratch, terminal_step.native_tail_start_idx,
 			                                      input);
@@ -181,16 +182,7 @@ public:
 			                                                             terminal_step.grouped_aggregate_update);
 			state.grouped_aggregate_native_pipeline = true;
 		}
-		if (!input.selection) {
-			return native_tail_delegation.Execute(runtime, result, ops, scratch, start_idx, input);
-		}
-		auto &chunk = SljitBindRuntimeBatchInput(input, "SLJIT grouped aggregate native pipeline");
-		auto &selected = state.grouped_aggregate_native_pipeline_input;
-		selected.Ensure(runtime.GetAllocator(), chunk.GetTypes());
-		selected.chunk.Reset();
-		selected.chunk.Slice(chunk, *input.selection, input.count);
-		return native_tail_delegation.Execute(runtime, result, ops, scratch, start_idx,
-		                                      SljitRuntimeBatchViewFromChunk(selected.chunk));
+		return native_tail_delegation.Execute(runtime, result, ops, scratch, start_idx, input);
 	}
 
 	bool Flush(ExecutionRegionRuntime &runtime, ExecutionRegionResult &result, vector<SljitExecutableRegionOp> &ops,
@@ -200,16 +192,12 @@ public:
 			return state.ungrouped_aggregate_update.Flush(runtime, ops, scratch,
 			                                              terminal_step.ungrouped_aggregate_update);
 		case SljitFullPipelinePrimitiveKind::GROUPED_AGGREGATE_UPDATE:
-			if (state.grouped_aggregate_native_pipeline) {
-				native_tail_delegation.Finalize(scratch);
-			}
 			return state.grouped_aggregate_update.Flush(runtime, ops, scratch, terminal_step.grouped_aggregate_update);
 		case SljitFullPipelinePrimitiveKind::POST_JOIN_PROJECTION_AGGREGATE_UPDATE:
 			return state.post_join_projection_aggregate.Flush(runtime, result, ops, scratch);
 		case SljitFullPipelinePrimitiveKind::HASH_JOIN_BUILD_SINK:
-			return false;
+		case SljitFullPipelinePrimitiveKind::PRIMITIVE_AGGREGATE_UPDATE:
 		case SljitFullPipelinePrimitiveKind::NATIVE_TAIL_DELEGATION:
-			native_tail_delegation.Finalize(scratch);
 			return false;
 		default:
 			throw InternalException("SLJIT primitive sequence has an unsupported terminal flush primitive");
@@ -231,6 +219,24 @@ private:
 		return state.grouped_aggregate_update.Execute(runtime, result, ops, scratch, primitive, input);
 	}
 
+	//! The aggregate's generated payload update, through the state layout its sink kind exposes
+	bool ExecutePrimitiveAggregateUpdate(ExecutionRegionRuntime &runtime, ExecutionRegionResult &result,
+	                                     vector<SljitExecutableRegionOp> &ops, SljitRegionExecutionScratch &scratch,
+	                                     idx_t aggregate_idx, const SljitRuntimeBatchView &input) {
+		if (input.count == 0) {
+			return false;
+		}
+		if (input.HasHashJoinSelection()) {
+			throw InternalException("SLJIT primitive aggregate update received a hash join selection view");
+		}
+		auto &chunk = SljitBindRuntimeBatchInput(input, "SLJIT primitive aggregate update");
+		auto &native_runtime = runtime.ExecutionOperators();
+		auto sink_result = SljitExecutePrimitiveAggregateUpdate(
+		    runtime, native_runtime, scratch, aggregate_idx, ops[aggregate_idx], chunk, input.selection, input.count);
+		sink_result = native_runtime.RecordSinkResult(input.count, sink_result);
+		return SljitNativeSinkResultStopsExecution(runtime, sink_result, result);
+	}
+
 	bool ExecuteHashJoinBuildSink(ExecutionRegionRuntime &runtime, ExecutionRegionResult &result,
 	                              vector<SljitExecutableRegionOp> &ops, SljitRegionExecutionScratch &scratch,
 	                              const SljitFullPipelinePrimitiveStep &terminal_step,
@@ -244,7 +250,7 @@ private:
 	const vector<Value> &source_max_values;
 	vector<SljitSharedPerfectHashPredicateClassificationCache> &shared_predicate_classifications;
 	SljitFullPipelineTerminalRuntimeState &state;
-	SljitNativeTailDelegationRuntimeState<EXECUTE_NATIVE_FULL_PIPELINE_FROM> native_tail_delegation;
+	SljitNativeTailDelegationRuntimeState native_tail_delegation;
 };
 
 } // namespace duckdb

@@ -326,17 +326,4 @@ static idx_t SljitSelectFilter(SljitExecutableRegionOp &op, DataChunk &input, Se
 	                             runtime);
 }
 
-template <class ADAPTER_SCRATCH>
-static void SljitExecuteFilter(SljitExecutableRegionOp &op, DataChunk &input, DataChunk &output,
-                               SelectionVector &filter_selection, ADAPTER_SCRATCH &adapter_scratch,
-                               optional_ptr<ExecutionRegionRuntime> runtime = nullptr) {
-	auto selected_count =
-	    SljitSelectFilter(op, input, filter_selection, adapter_scratch, nullptr, input.size(), runtime);
-	if (selected_count == input.size()) {
-		output.Reference(input);
-	} else if (selected_count > 0) {
-		output.Slice(input, filter_selection, selected_count);
-	}
-}
-
 } // namespace duckdb

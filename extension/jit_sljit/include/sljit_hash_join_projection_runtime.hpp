@@ -39,16 +39,6 @@ static bool SljitBuildHashJoinBuildRequiredInputColumns(const ExecutionRegionHas
 	return true;
 }
 
-static bool SljitRequiredColumnsAreStrictSubset(const vector<uint8_t> &required_columns) {
-	bool has_required = false;
-	bool has_dead = false;
-	for (auto required : required_columns) {
-		has_required = has_required || required;
-		has_dead = has_dead || !required;
-	}
-	return has_required && has_dead;
-}
-
 static bool SljitMaterializeSelectionOnlyHashJoinProbeOutput(
     ExecutionRegionRuntime &runtime, idx_t hash_join_idx, SljitExecutableRegionOp &hash_join_op,
     const SljitHashJoinOutputSource &source, const SelectionVector &match_selection,
@@ -185,102 +175,6 @@ static bool SljitTryMaterializeHashJoinRequiredProjectionViews(
 	projected.SetChildCardinality(count);
 	RecordSljitRegionStageRuntime(runtime, projection_idx, projection_op.Kind(), "required_projection_views",
 	                              stage_start);
-	return true;
-}
-
-template <class EXECUTE_HASH_JOIN_PROBE, class EXECUTE_NATIVE_FULL_PIPELINE_FROM, class EXECUTE_NATIVE_HASH_JOIN_BUILD>
-static bool SljitTryExecuteHashJoinProbeDirectHashJoinBuild(
-    ExecutionRegionRuntime &runtime, ExecutionOperatorRuntime &native_runtime, vector<SljitExecutableRegionOp> &ops,
-    SljitRegionExecutionScratch &scratch, idx_t hash_join_idx, SljitExecutableRegionOp &hash_join_op,
-    DataChunk &join_input, DataChunk &join_output, SinkResultType &sink_result,
-    EXECUTE_HASH_JOIN_PROBE &&execute_hash_join_probe,
-    EXECUTE_NATIVE_FULL_PIPELINE_FROM &&execute_native_full_pipeline_from,
-    EXECUTE_NATIVE_HASH_JOIN_BUILD &&execute_native_hash_join_build) {
-	if (hash_join_op.HashJoinProbe().plan.output_mode != ExecutionHashJoinProbeOutputMode::MATCHED_PROBE_AND_BUILD &&
-	    hash_join_op.HashJoinProbe().plan.output_mode != ExecutionHashJoinProbeOutputMode::MATCHED_PROBE_ONLY) {
-		return false;
-	}
-
-	idx_t projection_idx = DConstants::INVALID_INDEX;
-	idx_t sink_idx = DConstants::INVALID_INDEX;
-	if (hash_join_idx + 1 < ops.size() && ops[hash_join_idx + 1].Kind() == SljitNativeRegionOpKind::HASH_JOIN_BUILD &&
-	    hash_join_idx + 2 == ops.size()) {
-		sink_idx = hash_join_idx + 1;
-	} else if (hash_join_idx + 2 < ops.size() && ops[hash_join_idx + 1].Kind() == SljitNativeRegionOpKind::PROJECTION &&
-	           ops[hash_join_idx + 2].Kind() == SljitNativeRegionOpKind::HASH_JOIN_BUILD &&
-	           hash_join_idx + 3 == ops.size()) {
-		projection_idx = hash_join_idx + 1;
-		sink_idx = hash_join_idx + 2;
-	} else {
-		return false;
-	}
-
-	auto &sink_op = ops[sink_idx];
-	auto sink_input_column_count = projection_idx == DConstants::INVALID_INDEX
-	                                   ? hash_join_op.output_types.size()
-	                                   : ops[projection_idx].output_types.size();
-	vector<uint8_t> required_columns;
-	if (!SljitBuildHashJoinBuildRequiredInputColumns(sink_op.HashJoinBuild().plan.sink_info, sink_input_column_count,
-	                                                 required_columns)) {
-		return false;
-	}
-	if (projection_idx == DConstants::INVALID_INDEX && !SljitRequiredColumnsAreStrictSubset(required_columns)) {
-		return false;
-	}
-
-	SljitHashJoinProbeDrainState state;
-	auto &explicit_match_selection = scratch.FilterSelection(hash_join_idx);
-	auto &build_selection = scratch.HashJoinBuildSelection(hash_join_idx);
-	auto &row_pointers = scratch.HashJoinRowPointers(hash_join_idx);
-	do {
-		join_output.Reset();
-		execute_hash_join_probe(hash_join_idx, hash_join_op, join_input, join_output, state, false,
-		                        SljitHashJoinProbeOutputContract::SELECTED_VIEW);
-		if (join_output.size() == 0) {
-			continue;
-		}
-		auto &match_selection = SljitBindHashJoinMatchSelection(state.output_proof, explicit_match_selection);
-		// The probe ran on join_input itself, so its output columns index that chunk
-		auto source = SljitBindHashJoinOutputSource(runtime, ops, scratch, hash_join_idx, join_input,
-		                                            state.output_proof, nullptr);
-
-		DataChunk *sink_input = nullptr;
-		if (projection_idx == DConstants::INVALID_INDEX) {
-			if (SljitTryMaterializeHashJoinRequiredSources(runtime, hash_join_idx, hash_join_op, source,
-			                                               match_selection, build_selection, row_pointers,
-			                                               join_output.size(), required_columns, join_output)) {
-				sink_input = &join_output;
-				RecordSljitRegionRuntimePath(runtime, hash_join_op.Kind(), "required_hash_build_sources",
-				                             join_output.size());
-			}
-		} else {
-			auto &projected = scratch.TemporaryChunk(projection_idx);
-			projected.Reset();
-			if (SljitTryMaterializeHashJoinRequiredProjectionViews(runtime, projection_idx, ops[projection_idx], source,
-			                                                       match_selection, build_selection, row_pointers,
-			                                                       join_output.size(), required_columns, projected)) {
-				sink_input = &projected;
-				RecordSljitRegionRuntimePath(runtime, hash_join_op.Kind(), "projected_hash_build_views",
-				                             projected.size());
-			}
-		}
-
-		if (!sink_input) {
-			if (!SljitMaterializeSelectionOnlyHashJoinProbeOutput(runtime, hash_join_idx, hash_join_op, source,
-			                                                      match_selection, build_selection, row_pointers,
-			                                                      join_output.size(), join_output)) {
-				return false;
-			}
-			sink_result = execute_native_full_pipeline_from(hash_join_idx + 1, join_output);
-		} else {
-			auto build_result = execute_native_hash_join_build(sink_idx, sink_op, *sink_input);
-			sink_result = native_runtime.RecordSinkResult(sink_input->size(), build_result);
-		}
-		if (SljitSinkResultStopsPipeline(sink_result)) {
-			return true;
-		}
-	} while (!SljitHashJoinProbeDrainFinished(hash_join_op.HashJoinProbe().plan.output_mode, state));
-	sink_result = SinkResultType::NEED_MORE_INPUT;
 	return true;
 }
 

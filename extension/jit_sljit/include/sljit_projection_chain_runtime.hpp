@@ -124,8 +124,10 @@ static bool SljitMaterializeProjectionChainStep(ExecutionRegionRuntime &runtime,
 		return false;
 	}
 	output.Reset();
+	auto stage_start = SljitRegionStageStart(runtime);
 	SljitExecuteProjection(runtime, scratch, projection_idx, ops[projection_idx], *prepared.source_chunk, output,
 	                       prepared.selection, prepared.count);
+	RecordSljitRegionStageRuntime(runtime, projection_idx, ops[projection_idx].Kind(), stage_start);
 	return output.size() > 0;
 }
 
@@ -184,26 +186,16 @@ static bool SljitExecuteProjectionChainPrimitiveDirectHandoff(
 		return output.size() > 0 && execute_output_batch(output);
 	}
 
-	bool direct_materialized = false;
-	if (!selection && count == source_chunk.size()) {
-		if (synthetic_projection_scratch) {
-			direct_materialized = SljitTryDirectMaterializeFixedProjectionToBatch(
-			    runtime, *synthetic_projection_scratch, primitive.final_projection_idx, bound_projection_op,
-			    source_chunk, output);
-		} else {
-			direct_materialized = SljitTryDirectMaterializeFixedProjectionToBatch(
-			    runtime, scratch, primitive.final_projection_idx, bound_projection_op, source_chunk, output);
-		}
+	// The consumer takes the chunk as is: a reference column stays a reference rather than a copy
+	auto stage_start = SljitRegionStageStart(runtime);
+	if (synthetic_projection_scratch) {
+		SljitExecuteProjection(runtime, *synthetic_projection_scratch, primitive.final_projection_idx,
+		                       bound_projection_op, source_chunk, output, selection, count);
+	} else {
+		SljitExecuteProjection(runtime, scratch, primitive.final_projection_idx, bound_projection_op, source_chunk,
+		                       output, selection, count);
 	}
-	if (!direct_materialized) {
-		if (synthetic_projection_scratch) {
-			SljitExecuteProjection(runtime, *synthetic_projection_scratch, primitive.final_projection_idx,
-			                       bound_projection_op, source_chunk, output, selection, count);
-		} else {
-			SljitExecuteProjection(runtime, scratch, primitive.final_projection_idx, bound_projection_op, source_chunk,
-			                       output, selection, count);
-		}
-	}
+	RecordSljitRegionStageRuntime(runtime, primitive.final_projection_idx, bound_projection_op.Kind(), stage_start);
 	return output.size() > 0 && execute_output_batch(output);
 }
 

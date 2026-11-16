@@ -186,7 +186,10 @@ public:
 				return binding.MakePrimitiveRecipePlan(std::move(recipe));
 			}
 		}
-		return binding.MakeNativeOnlyPlan();
+		if (binding.TryMakeOperatorHandOverRecipe(recipe)) {
+			return binding.MakePrimitiveRecipePlan(std::move(recipe));
+		}
+		return SljitFullPipelineRecipePlan();
 	}
 
 private:

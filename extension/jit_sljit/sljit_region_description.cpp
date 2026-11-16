@@ -233,8 +233,7 @@ string DescribeNativeRegion(const SljitNativeRegionPlan &region, const string &m
 			result += ")";
 			break;
 		case SljitNativeRegionOpKind::ORDER_SINK:
-			result += "ordered_sink(keys=" + DescribeNativeRegionExpressionList(op.OrderSink().order_keys);
-			result += ";payload_columns=" + std::to_string(op.OrderSink().input_types.size());
+			result += "ordered_sink(payload_columns=" + std::to_string(op.OrderSink().input_types.size());
 			result +=
 			    ";operator_kind=" + string(ExecutionRegionOperatorKindToString(op.OrderSink().sink_info.contract.kind));
 			result += ")";

@@ -51,8 +51,6 @@ static bool SljitNativeRegionOpGeneratesMachineCode(const SljitNativeRegionOpPla
 		        SljitNativeRegionExpressionGeneratesCode(op.HashJoinProbe().residual_filter));
 	case SljitNativeRegionOpKind::HASH_JOIN_BUILD:
 		return false;
-	case SljitNativeRegionOpKind::ORDER_SINK:
-		return SljitNativeRegionExpressionsGenerateCode(op.OrderSink().order_keys);
 	case SljitNativeRegionOpKind::AGGREGATE_UPDATE:
 		return op.AggregateUpdate().UsesPrimitivePayloads();
 	default:
@@ -325,9 +323,6 @@ void DisableSljitRegionFlatNullableFastPath(SljitNativeRegionPlan &region) {
 			break;
 		case SljitNativeRegionOpKind::HASH_JOIN_PROBE:
 			set_expression(op.HashJoinProbe().residual_filter);
-			break;
-		case SljitNativeRegionOpKind::ORDER_SINK:
-			set_expressions(op.OrderSink().order_keys);
 			break;
 		case SljitNativeRegionOpKind::AGGREGATE_UPDATE:
 			set_expressions(op.AggregateUpdate().payloads);

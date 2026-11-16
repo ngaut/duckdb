@@ -93,6 +93,18 @@ struct SljitFullPipelineRecipe {
 		return !primitive_aggregate_state_source_lanes.empty();
 	}
 
+	//! Whether a step runs generated code, rather than only fetching the source and handing it to DuckDB's operators
+	bool RunsGeneratedStep() const {
+		for (idx_t step_idx = 0; step_idx < primitive_sequence.Count(); step_idx++) {
+			auto kind = primitive_sequence.Step(step_idx).kind;
+			if (kind != SljitFullPipelinePrimitiveKind::SOURCE_FETCH &&
+			    kind != SljitFullPipelinePrimitiveKind::NATIVE_TAIL_DELEGATION) {
+				return true;
+			}
+		}
+		return false;
+	}
+
 	bool OwnsFusedFilter(idx_t filter_idx) const {
 		for (auto owned_filter_idx : fused_filter_owners) {
 			if (owned_filter_idx == filter_idx) {
@@ -103,7 +115,7 @@ struct SljitFullPipelineRecipe {
 	}
 };
 
-enum class SljitFullPipelineRecipePlanKind : uint8_t { INVALID, PRIMITIVE_RECIPE, NATIVE_ONLY };
+enum class SljitFullPipelineRecipePlanKind : uint8_t { INVALID, PRIMITIVE_RECIPE };
 
 class SljitFullPipelineRecipePlan {
 public:
@@ -122,42 +134,23 @@ public:
 		return recipe;
 	}
 
-	const string &NativeOnlyRuntimePath() const {
-		D_ASSERT(kind == SljitFullPipelineRecipePlanKind::NATIVE_ONLY);
-		return native_only_runtime_path;
-	}
-
 	//! Whether the recipe runs one source chunk at a time inside the pipeline executor's loop. The aggregate-state
 	//! source recipe fetches aggregate-state batches, not chunks, so it keeps its own loop
 	bool SupportsChunkStep() const {
-		return kind == SljitFullPipelineRecipePlanKind::NATIVE_ONLY ||
-		       (kind == SljitFullPipelineRecipePlanKind::PRIMITIVE_RECIPE &&
-		        !recipe.UsesPrimitiveAggregateStateSource());
+		return HasRecipe() && !recipe.UsesPrimitiveAggregateStateSource();
 	}
 
 private:
 	friend SljitFullPipelineRecipePlan SljitMakeFullPipelinePrimitiveRecipePlan(SljitFullPipelineRecipe recipe);
-	friend SljitFullPipelineRecipePlan SljitMakeFullPipelineNativeOnlyPlan(string runtime_path);
 
 	SljitFullPipelineRecipePlanKind kind = SljitFullPipelineRecipePlanKind::INVALID;
 	SljitFullPipelineRecipe recipe;
-	string native_only_runtime_path;
 };
 
 inline SljitFullPipelineRecipePlan SljitMakeFullPipelinePrimitiveRecipePlan(SljitFullPipelineRecipe recipe) {
 	SljitFullPipelineRecipePlan plan;
 	plan.kind = SljitFullPipelineRecipePlanKind::PRIMITIVE_RECIPE;
 	plan.recipe = std::move(recipe);
-	return plan;
-}
-
-inline SljitFullPipelineRecipePlan SljitMakeFullPipelineNativeOnlyPlan(string runtime_path) {
-	if (runtime_path.empty()) {
-		throw InternalException("SLJIT native-only recipe plan requires a runtime path");
-	}
-	SljitFullPipelineRecipePlan plan;
-	plan.kind = SljitFullPipelineRecipePlanKind::NATIVE_ONLY;
-	plan.native_only_runtime_path = std::move(runtime_path);
 	return plan;
 }
 

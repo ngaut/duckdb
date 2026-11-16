@@ -9,6 +9,7 @@
 #pragma once
 
 #include "sljit_filter_runtime.hpp"
+#include "sljit_full_pipeline_primitive_contract.hpp"
 #include "sljit_full_pipeline_runtime.hpp"
 #include "sljit_grouped_aggregate_input_vector_update_runtime.hpp"
 #include "sljit_grouped_aggregate_preaggregation_common_runtime.hpp"
@@ -26,6 +27,7 @@ enum class SljitSourceGroupRuns : uint8_t { ABSENT, PRESENT, UNKNOWN };
 class SljitGroupedDirectPrimitivePayloadUpdateRuntimeState {
 public:
 	bool Prepare(vector<SljitExecutableRegionOp> &ops, const SljitGroupedAggregateUpdatePrimitive &primitive) {
+		native_pipeline_takes_input = SljitNativeTailCanConsumeTail(ops, NativePipelineStart(primitive));
 		materialized_direct_descriptor_ready = false;
 		materialized_direct_group_sources.clear();
 		materialized_direct_payload_source_indices.clear();
@@ -115,9 +117,11 @@ public:
 	}
 
 	//! Group runs are what the generated update wins on: without them DuckDB's vectorized sink is faster than any
-	//! generated lookup. Once the run sample finds none, the remaining batches take the native pipeline.
+	//! generated lookup. Once the run sample finds none, the remaining batches take DuckDB's operators, when they can
+	//! take the batches where they stand.
 	bool DelegatesToNativePipeline(const SljitGroupedAggregateUpdatePrimitive &primitive) const {
-		return primitive.strategy == SljitGroupedAggregateUpdateStrategyKind::DIRECT_PRIMITIVE_PAYLOAD_UPDATE &&
+		return native_pipeline_takes_input &&
+		       primitive.strategy == SljitGroupedAggregateUpdateStrategyKind::DIRECT_PRIMITIVE_PAYLOAD_UPDATE &&
 		       direct_preaggregated_batch.run_strategy == SljitPendingRunStrategy::BUFFERED;
 	}
 
@@ -459,6 +463,7 @@ private:
 	shared_ptr<SljitProjectedInputGroupedAggregateDescriptor> projected_direct_update;
 	SljitDataChunkBatch projected_direct_selected_input;
 	SljitPendingPreaggregatedPrimitiveGroupBatch direct_preaggregated_batch;
+	bool native_pipeline_takes_input = false;
 	bool materialized_direct_descriptor_ready = false;
 	vector<ExecutionRowPointerGroupKeySource> materialized_direct_group_sources;
 	vector<idx_t> materialized_direct_payload_source_indices;

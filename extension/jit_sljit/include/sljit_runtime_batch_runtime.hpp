@@ -136,29 +136,10 @@ static bool SljitTryFastAppendFixedAllValid(DataChunk &target, DataChunk &source
 	return true;
 }
 
-//! Whether appending the chunk to a batch copies bytes beyond its vectors: strings too long to inline in their
-//! string_t, which batching copies one by one into a fresh heap, and nested values. A string column is judged by its
-//! first valid value: the answer only picks the cheaper path, and long-text columns are long throughout
-static bool SljitChunkHasOutOfLineValues(DataChunk &chunk) {
-	for (auto &vector : chunk.data) {
-		const auto physical_type = vector.GetType().InternalType();
-		if (TypeIsConstantSize(physical_type)) {
-			continue;
-		}
-		if (physical_type != PhysicalType::VARCHAR) {
+static bool SljitChunkCarriesGlobalDictionary(const DataChunk &chunk) {
+	for (idx_t col_idx = 0; col_idx < chunk.ColumnCount(); col_idx++) {
+		if (DictionaryVector::IsGlobalDictionary(chunk.data[col_idx])) {
 			return true;
-		}
-		UnifiedVectorFormat format;
-		vector.ToUnifiedFormat(format);
-		auto data = UnifiedVectorFormat::GetData<string_t>(format);
-		for (idx_t row_idx = 0; row_idx < chunk.size(); row_idx++) {
-			const auto idx = format.sel->get_index(row_idx);
-			if (format.validity.RowIsValid(idx)) {
-				if (!data[idx].IsInlined()) {
-					return true;
-				}
-				break;
-			}
 		}
 	}
 	return false;
@@ -172,7 +153,8 @@ static bool SljitAppendChunkToInitializedBatch(ExecutionRegionRuntime &runtime, 
 	if (chunk.size() == 0) {
 		return false;
 	}
-	if (batch.ColumnCount() != chunk.ColumnCount()) {
+	// Appending flattens: a column carrying a global dictionary keeps it for a dictionary-narrowing hash join build
+	if (batch.ColumnCount() != chunk.ColumnCount() || SljitChunkCarriesGlobalDictionary(chunk)) {
 		if (flush_batch()) {
 			return true;
 		}

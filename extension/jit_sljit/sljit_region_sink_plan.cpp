@@ -68,37 +68,16 @@ static SljitRegionNodePlan PlanSljitOrderSinkNode(const ExecutionRegionNode &nod
 	if (!order_contract.present) {
 		return SljitRegionBoundaryNode("ordered-sink-contract-missing");
 	}
-	if (!order_contract.all_order_keys_ready) {
-		return SljitBlockedContractBoundary(order_contract.order_key_blocker, "ordered-sink-order-keys-not-ready");
-	}
 
+	// DuckDB's sort computes its keys: the region hands it the rows
 	SljitNativeRegionOpPlan native_op;
 	native_op.SetKind(SljitNativeRegionOpKind::ORDER_SINK);
 	native_op.OrderSink().sink_info = node.sink->Order();
-	native_op.OrderSink().order_keys.reserve(order_contract.order_keys.size());
-	native_op.OrderSink().key_types.reserve(order_contract.order_keys.size());
-	for (auto &key : order_contract.order_keys) {
-		SljitNativeRegionExpressionPlan key_plan;
-		string error;
-		if (!TryLowerNativeRegionExpression(key.expression, false, key_plan, error, render_diagnostics)) {
-			string reason = "ordered-sink-order-key-native-lowering-unsupported";
-			if (!error.empty()) {
-				reason += ";" + error;
-			}
-			if (!key.reason.empty()) {
-				reason += ";order_key_blocker=" + key.reason;
-			}
-			return SljitRegionBoundaryNode(std::move(reason));
-		}
-		native_op.OrderSink().key_types.push_back(key.type);
-		native_op.OrderSink().order_keys.push_back(std::move(key_plan));
-	}
 
 	auto reason = BuildSljitNativeSinkReason("ordered sink contract", "ordered_sink_runtime_binding", *node.sink,
 	                                         contract, render_diagnostics);
 	if (render_diagnostics) {
 		reason += ";operator_kind=" + string(ExecutionRegionOperatorKindToString(order_contract.kind));
-		reason += ";order_keys=" + std::to_string(native_op.OrderSink().order_keys.size());
 	}
 	AppendSljitSinkIR(reason, *node.sink, render_diagnostics);
 	return SljitNativeNode(std::move(native_op), std::move(reason));

@@ -20,7 +20,9 @@ public:
 	                               const vector<LogicalType> &source_output_types_p,
 	                               const vector<Value> &source_min_values_p, const vector<Value> &source_max_values_p);
 
-	SljitFullPipelineRecipePlan MakeNativeOnlyPlan() const;
+	//! Generated steps run the region's ops from the source on as far as they bind, into the sink when generated code
+	//! updates it; otherwise DuckDB's operators take the rows over after them
+	bool TryMakeOperatorHandOverRecipe(SljitFullPipelineRecipe &recipe) const;
 
 	SljitFullPipelineRecipePlan MakePrimitiveRecipePlan(SljitFullPipelineRecipe recipe) const;
 

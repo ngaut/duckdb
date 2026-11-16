@@ -96,17 +96,89 @@ bool SljitFullPipelineRecipeSequenceBuilder::NativeTailInputLayoutMatches(
 	return ops[tail_start_idx].DeclaredInputConstraints().SatisfiedBy(*view_types);
 }
 
+bool SljitFullPipelineRecipeSequenceBuilder::TryMakeGeneratedOperatorStep(idx_t op_idx,
+                                                                          SljitFullPipelinePrimitiveStep &step) const {
+	switch (ops[op_idx].Kind()) {
+	case SljitNativeRegionOpKind::FILTER: {
+		SljitGeneratedFilterPrimitive filter;
+		if (!SljitTryBindGeneratedFilterPrimitive(ops, op_idx, filter)) {
+			return false;
+		}
+		step = SljitFullPipelinePrimitiveStep::GeneratedFilter(filter);
+		return true;
+	}
+	case SljitNativeRegionOpKind::PROJECTION: {
+		SljitProjectionChainPrimitive projection;
+		if (!SljitTryBindProjectionChainPrimitive(ops, op_idx, projection)) {
+			return false;
+		}
+		step = SljitFullPipelinePrimitiveStep::ProjectionChain(projection);
+		return true;
+	}
+	case SljitNativeRegionOpKind::HASH_JOIN_PROBE:
+		return TryMakeHashJoinProbeMaterializeStep(op_idx, step);
+	default:
+		return false;
+	}
+}
+
+bool SljitFullPipelineRecipeSequenceBuilder::TryMakeGeneratedSinkStep(idx_t op_idx,
+                                                                      SljitFullPipelinePrimitiveStep &step) const {
+	auto &op = ops[op_idx];
+	if (op.Kind() == SljitNativeRegionOpKind::HASH_JOIN_BUILD) {
+		SljitHashJoinBuildSinkPrimitive sink;
+		if (!SljitTryBindHashJoinBuildSinkPrimitive(ops, op_idx, DConstants::INVALID_INDEX, sink)) {
+			return false;
+		}
+		step = SljitFullPipelinePrimitiveStep::HashJoinBuildSink(sink);
+		return true;
+	}
+	if (op.Kind() != SljitNativeRegionOpKind::AGGREGATE_UPDATE || !op.AggregateUpdate().plan.UsesPrimitivePayloads()) {
+		return false;
+	}
+	SljitUngroupedAggregateUpdatePrimitive ungrouped;
+	if (SljitTryBindUngroupedAggregateUpdatePrimitive(ops, op_idx, ungrouped)) {
+		step = SljitFullPipelinePrimitiveStep::UngroupedAggregateUpdate(ungrouped);
+		return true;
+	}
+	SljitGroupedAggregateUpdatePrimitive grouped;
+	if (SljitTryBindGroupedAggregateUpdatePrimitive(ops, op_idx, grouped)) {
+		step = SljitFullPipelinePrimitiveStep::GroupedAggregateUpdate(grouped);
+		return true;
+	}
+	step = SljitFullPipelinePrimitiveStep::PrimitiveAggregateUpdate(op_idx);
+	return true;
+}
+
+//! Generated steps carry the rows from `tail_start_idx` on as far as they bind, into the sink when generated code
+//! updates it; otherwise DuckDB's operators take them over at the furthest op they can take them at
 bool SljitFullPipelineRecipeSequenceBuilder::TryMakeNativeTailRecipe(SljitFullPipelinePrimitiveSequence sequence,
                                                                      idx_t tail_start_idx,
                                                                      SljitFullPipelineRecipe &recipe) const {
-	if (tail_start_idx >= ops.size() || !SljitNativeTailCanConsumeTail(ops, tail_start_idx)) {
+	SljitFullPipelinePrimitiveSequence handed_over;
+	auto hand_over_idx = DConstants::INVALID_INDEX;
+	for (auto op_idx = tail_start_idx; op_idx < ops.size(); op_idx++) {
+		SljitFullPipelinePrimitiveStep sink_step;
+		if (op_idx + 1 == ops.size() && TryMakeGeneratedSinkStep(op_idx, sink_step)) {
+			sequence.Add(std::move(sink_step));
+			recipe = MakePrimitiveSequence(std::move(sequence));
+			return true;
+		}
+		if (SljitNativeTailCanConsumeTail(ops, op_idx) && NativeTailInputLayoutMatches(sequence, op_idx)) {
+			handed_over = sequence;
+			hand_over_idx = op_idx;
+		}
+		SljitFullPipelinePrimitiveStep step;
+		if (sequence.Count() + 1 >= SLJIT_FULL_PIPELINE_MAX_PRIMITIVES || !TryMakeGeneratedOperatorStep(op_idx, step)) {
+			break;
+		}
+		sequence.Add(std::move(step));
+	}
+	if (hand_over_idx == DConstants::INVALID_INDEX) {
 		return false;
 	}
-	if (!NativeTailInputLayoutMatches(sequence, tail_start_idx)) {
-		return false;
-	}
-	sequence.Add(SljitFullPipelinePrimitiveStep::NativeTailDelegation(tail_start_idx));
-	recipe = MakePrimitiveSequence(std::move(sequence));
+	handed_over.Add(SljitFullPipelinePrimitiveStep::NativeTailDelegation(hand_over_idx));
+	recipe = MakePrimitiveSequence(std::move(handed_over));
 	return true;
 }
 

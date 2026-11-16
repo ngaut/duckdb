@@ -287,6 +287,10 @@ SinkResultType ExecutionRegionPipelineAdapter::AppendSink(const ExecutionAppendS
 	return SinkResultType::NEED_MORE_INPUT;
 }
 
+SinkResultType ExecutionRegionPipelineAdapter::PushOperators(idx_t operator_index, DataChunk &chunk, idx_t &sink_rows) {
+	return executor.PushCompiledStepOperators(operator_index, chunk, sink_rows);
+}
+
 void ExecutionRegionPipelineAdapter::FinishProcessing() {
 	executor.FinishProcessing();
 }

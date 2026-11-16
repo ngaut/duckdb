@@ -20,6 +20,7 @@ static bool BuildExecutableRegionOp(const SljitNativeRegionOpPlan &op, SljitExec
                                     bool defer_filter_codegen) {
 	executable.SetKind(op.Kind());
 	executable.operator_index = op.operator_index;
+	executable.input_is_operator_input = op.input_is_operator_input;
 	executable.input_types = op.input_types;
 	executable.input_not_null = input_not_null;
 	executable.input_min_values = input_min_values;
@@ -47,16 +48,6 @@ static bool BuildExecutableRegionOp(const SljitNativeRegionOpPlan &op, SljitExec
 	case SljitNativeRegionOpKind::ORDER_SINK:
 		executable.OrderSink().plan.sink_info = op.OrderSink().sink_info;
 		executable.OrderSink().plan.input_types = op.OrderSink().input_types;
-		executable.OrderSink().plan.key_types = op.OrderSink().key_types;
-		executable.OrderSink().order_keys.reserve(op.OrderSink().order_keys.size());
-		for (auto &order_key : op.OrderSink().order_keys) {
-			SljitExecutableRegionExpression executable_order_key;
-			if (!SljitPrepareAndCompileExecutableRegionExpression(order_key, false, executable_order_key, error,
-			                                                      &input_not_null)) {
-				return false;
-			}
-			executable.OrderSink().order_keys.push_back(std::move(executable_order_key));
-		}
 		return true;
 	case SljitNativeRegionOpKind::APPEND_SINK:
 		executable.AppendSink().plan.sink_info = op.AppendSink().sink_info;
@@ -416,13 +407,20 @@ bool BuildSljitExecutableRegion(const SljitNativeRegionPlan &region, SljitExecut
 	}
 
 	// Recipe binding is the executable ownership boundary. A fused aggregate step
-	// owns the predicate named by that step; every other recipe (including native tail) and
-	// native-only execution needs the standalone selector. Bind once with prepared
-	// filters, publish only the selectors that recipe cannot own, then move the
-	// same final plan into the kernel.
+	// owns the predicate named by that step; every other recipe needs the standalone
+	// selector. Bind once with prepared filters, publish only the selectors that recipe
+	// cannot own, then move the same final plan into the kernel.
 	recipe_plan = BuildSljitFullPipelineRecipePlan(executable.ops, executable.aggregate_state_source,
 	                                               executable.source_output_types, executable.source_min_values,
 	                                               executable.source_max_values);
+	if (!recipe_plan.HasRecipe()) {
+		error = "SLJIT region binds no recipe: no op hands DuckDB's operators what they take";
+		return false;
+	}
+	if (!recipe_plan.Recipe().RunsGeneratedStep() && executable.scan_filters.empty()) {
+		error = "SLJIT region runs no generated code: its recipe hands the source's rows to DuckDB's operators";
+		return false;
+	}
 	for (idx_t op_idx = 0; op_idx < executable.ops.size(); op_idx++) {
 		auto &op = executable.ops[op_idx];
 		if (op.Kind() != SljitNativeRegionOpKind::FILTER || !op.Filter() ||

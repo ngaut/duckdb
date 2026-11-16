@@ -69,7 +69,7 @@ SELECT i * 2 + 1 FROM t
 
 query I
 SELECT count(*) > 0 FROM duckdb_jit_events() WHERE phase='runtime' AND status='executed' AND reason='full pipeline kernel executed' AND pipeline_shape LIKE '%RESULT_COLLECTOR%'
-  AND jit_runtime_path_counts LIKE '%full_pipeline.recipe.native_only%'
+  AND jit_runtime_path_counts LIKE '%append_sink.native_tail_delegation%'
 ----
 true
 

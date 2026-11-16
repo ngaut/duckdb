@@ -198,7 +198,6 @@ void BindSljitRegionInstanceSlots(SljitNativeRegionPlan &region) {
 			break;
 		case SljitNativeRegionOpKind::ORDER_SINK:
 			BindSink(op.OrderSink().sink_info, errors);
-			BindExpressions(op.OrderSink().order_keys, errors);
 			break;
 		case SljitNativeRegionOpKind::AGGREGATE_UPDATE:
 			BindSink(op.AggregateUpdate().sink_info, errors);

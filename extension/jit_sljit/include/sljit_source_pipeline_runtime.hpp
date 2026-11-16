@@ -22,20 +22,20 @@
 
 namespace duckdb {
 
-template <class EXECUTE_NATIVE_FULL_PIPELINE_FROM, class EXECUTE_HASH_JOIN_PROBE>
+template <class EXECUTE_HASH_JOIN_PROBE>
 class SljitFullPipelinePrimitiveSequenceBatchExecutor {
 public:
 	SljitFullPipelinePrimitiveSequenceBatchExecutor(
 	    ExecutionRegionRuntime &runtime_p, ExecutionRegionResult &result_p, vector<SljitExecutableRegionOp> &ops_p,
-	    const SljitFullPipelineRecipe &recipe_p, EXECUTE_NATIVE_FULL_PIPELINE_FROM &execute_native_full_pipeline_from_p,
-	    EXECUTE_HASH_JOIN_PROBE &execute_hash_join_probe_p, const vector<idx_t> &source_distinct_counts_p,
-	    const vector<Value> &source_min_values_p, const vector<Value> &source_max_values_p,
+	    const SljitFullPipelineRecipe &recipe_p, EXECUTE_HASH_JOIN_PROBE &execute_hash_join_probe_p,
+	    const vector<idx_t> &source_distinct_counts_p, const vector<Value> &source_min_values_p,
+	    const vector<Value> &source_max_values_p,
 	    vector<SljitSharedPerfectHashPredicateClassificationCache> &shared_predicate_classifications_p,
 	    SljitRegionExecutionScratch &scratch_p, SljitFullPipelineTerminalRuntimeState &terminal_state_p)
 	    : runtime(runtime_p), result(result_p), ops(ops_p), recipe(recipe_p),
 	      execute_hash_join_probe(execute_hash_join_probe_p),
-	      terminal_runtime(execute_native_full_pipeline_from_p, source_distinct_counts_p, source_min_values_p,
-	                       source_max_values_p, shared_predicate_classifications_p, terminal_state_p),
+	      terminal_runtime(source_distinct_counts_p, source_min_values_p, source_max_values_p,
+	                       shared_predicate_classifications_p, terminal_state_p),
 	      scratch(scratch_p), selected_hash_join_inputs(runtime, ops, scratch), generated_filter(runtime, ops, scratch),
 	      hash_join_materialize(runtime, ops, scratch, selected_hash_join_inputs),
 	      hash_join_selection(runtime, ops, scratch, selected_hash_join_inputs),
@@ -61,10 +61,6 @@ public:
 	bool ExecuteChunk(DataChunk &source_chunk) {
 		if (source_chunk.size() == 0) {
 			return false;
-		}
-		if (terminal_runtime.DelegatesToNativePipeline(TerminalStep())) {
-			return terminal_runtime.ExecuteNativePipeline(runtime, result, ops, scratch, TerminalStep(), 0,
-			                                              SljitRuntimeBatchViewFromChunk(source_chunk));
 		}
 		if (runtime.TraceRuntime()) {
 			runtime.RecordJitRuntimeProof(ExecutionRegionJitRuntimeProof::FULL_PIPELINE_OWNERSHIP, source_chunk.size());
@@ -204,9 +200,12 @@ private:
 		                                     execute_output_batch);
 	}
 
+	//! DuckDB's operators take each output chunk as their own pipeline would produce it: batching would flatten the
+	//! global dictionaries a dictionary-narrowing hash join build requires
 	bool HashJoinMaterializeCanDirectHandoffTo(const SljitFullPipelinePrimitiveStep &step) const {
 		return step.kind == SljitFullPipelinePrimitiveKind::HASH_JOIN_PROBE_MATERIALIZE ||
-		       step.kind == SljitFullPipelinePrimitiveKind::HASH_JOIN_PROBE_SELECTION;
+		       step.kind == SljitFullPipelinePrimitiveKind::HASH_JOIN_PROBE_SELECTION ||
+		       step.kind == SljitFullPipelinePrimitiveKind::NATIVE_TAIL_DELEGATION;
 	}
 
 	bool ExecuteHashJoinProbeSelection(idx_t step_idx, const SljitFullPipelinePrimitiveStep &step,
@@ -256,6 +255,8 @@ private:
 		case SljitFullPipelinePrimitiveKind::UNGROUPED_AGGREGATE_UPDATE:
 		case SljitFullPipelinePrimitiveKind::GROUPED_AGGREGATE_UPDATE:
 		case SljitFullPipelinePrimitiveKind::HASH_JOIN_BUILD_SINK:
+		case SljitFullPipelinePrimitiveKind::PRIMITIVE_AGGREGATE_UPDATE:
+		case SljitFullPipelinePrimitiveKind::NATIVE_TAIL_DELEGATION:
 			return true;
 		default:
 			return false;
@@ -298,7 +299,7 @@ private:
 	vector<SljitExecutableRegionOp> &ops;
 	const SljitFullPipelineRecipe &recipe;
 	EXECUTE_HASH_JOIN_PROBE &execute_hash_join_probe;
-	SljitFullPipelineTerminalRuntime<EXECUTE_NATIVE_FULL_PIPELINE_FROM> terminal_runtime;
+	SljitFullPipelineTerminalRuntime terminal_runtime;
 	SljitRegionExecutionScratch &scratch;
 	SljitSelectedHashJoinInputRuntime selected_hash_join_inputs;
 	SljitGeneratedFilterPrimitiveRuntime generated_filter;

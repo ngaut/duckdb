@@ -38,7 +38,11 @@ protected:
 	void AddProjectionChainStep(SljitFullPipelinePrimitiveSequence &sequence, idx_t first_projection_idx,
 	                            idx_t final_projection_idx) const;
 
+	//! The generated step that runs op `op_idx` on its own
+	bool TryMakeGeneratedOperatorStep(idx_t op_idx, SljitFullPipelinePrimitiveStep &step) const;
 	bool NativeTailInputLayoutMatches(const SljitFullPipelinePrimitiveSequence &sequence, idx_t tail_start_idx) const;
+	//! The generated step that updates sink op `op_idx`
+	bool TryMakeGeneratedSinkStep(idx_t op_idx, SljitFullPipelinePrimitiveStep &step) const;
 	bool TryMakeNativeTailRecipe(SljitFullPipelinePrimitiveSequence sequence, idx_t tail_start_idx,
 	                             SljitFullPipelineRecipe &recipe) const;
 

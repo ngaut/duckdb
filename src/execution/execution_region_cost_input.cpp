@@ -811,7 +811,10 @@ static bool TryAccumulateExecutionRegionPhysicalOperatorCost(const PhysicalOpera
 			facts.exact_source_cardinality_bounds_pipeline = false;
 			traits.operator_count++;
 			traits.hash_join_operator_count++;
-			input.native_join_stage_count++;
+			// a probe that only marks build rows hands nothing on: DuckDB's operators own it
+			if (op.Cast<PhysicalHashJoin>().join_type != JoinType::RIGHT_SEMI) {
+				input.native_join_stage_count++;
+			}
 		}
 		return true;
 	case PhysicalOperatorType::NESTED_LOOP_JOIN:

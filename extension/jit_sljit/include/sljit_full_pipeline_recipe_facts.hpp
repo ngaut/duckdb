@@ -94,15 +94,6 @@ struct SljitProjectionAggregatePrefixFacts {
 		return join_idx < JoinCount() && joins[join_idx].HasInputProjection();
 	}
 
-	bool HasAnyJoinInputProjection() const {
-		for (auto &join : joins) {
-			if (join.HasInputProjection()) {
-				return true;
-			}
-		}
-		return false;
-	}
-
 	idx_t JoinInputProjectionIdx(idx_t join_idx) const {
 		if (!HasJoinInputProjection(join_idx)) {
 			return DConstants::INVALID_INDEX;

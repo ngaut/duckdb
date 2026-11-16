@@ -65,6 +65,12 @@ static bool TryUsePrimitiveReferenceAggregateUpdate(const vector<LogicalType> &i
 	return true;
 }
 
+//! An aggregate that absorbed the projection before it reads that projection's input, and computes its operator too
+static void SljitAbsorbProjectionInput(const SljitNativeRegionOpPlan &projection, SljitNativeRegionOpPlan &aggregate) {
+	aggregate.input_is_operator_input = projection.input_is_operator_input;
+	aggregate.operator_index = projection.operator_index;
+}
+
 void FusePrimitiveAggregateUpdates(SljitNativeRegionPlan &region, const vector<LogicalType> &region_input_types,
                                    bool render_diagnostics) {
 	bool changed;
@@ -76,6 +82,7 @@ void FusePrimitiveAggregateUpdates(SljitNativeRegionPlan &region, const vector<L
 			auto &op = region.ops[op_idx];
 			auto &next = region.ops[op_idx + 1];
 			if (TryComposePrimitiveAggregatePayloadsThroughProjection(input_types, op, next, render_diagnostics)) {
+				SljitAbsorbProjectionInput(op, next);
 				region.ops.erase(region.ops.begin() + NumericCast<int64_t>(op_idx));
 				changed = true;
 				op_idx = 0;
@@ -83,6 +90,7 @@ void FusePrimitiveAggregateUpdates(SljitNativeRegionPlan &region, const vector<L
 				continue;
 			}
 			if (TryFuseNativeProjectionIntoPerfectHashAggregateUpdate(input_types, op, next, render_diagnostics)) {
+				SljitAbsorbProjectionInput(op, next);
 				region.ops.erase(region.ops.begin() + NumericCast<int64_t>(op_idx));
 				changed = true;
 				op_idx = 0;
@@ -90,6 +98,7 @@ void FusePrimitiveAggregateUpdates(SljitNativeRegionPlan &region, const vector<L
 				continue;
 			}
 			if (TryFuseNativeProjectionIntoPrimitiveAggregateUpdate(input_types, op, next, render_diagnostics)) {
+				SljitAbsorbProjectionInput(op, next);
 				region.ops.erase(region.ops.begin() + NumericCast<int64_t>(op_idx));
 				changed = true;
 				op_idx = 0;
@@ -98,6 +107,7 @@ void FusePrimitiveAggregateUpdates(SljitNativeRegionPlan &region, const vector<L
 			}
 			if (TryPartiallyFuseNativeProjectionIntoPerfectHashAggregateUpdate(input_types, op, next,
 			                                                                   render_diagnostics)) {
+				next.input_is_operator_input = false;
 				changed = true;
 				input_types = op.output_types;
 				op_idx++;
@@ -105,6 +115,7 @@ void FusePrimitiveAggregateUpdates(SljitNativeRegionPlan &region, const vector<L
 			}
 			if (TryPartiallyFuseNativeProjectionIntoRegularHashAggregateUpdate(input_types, op, next,
 			                                                                   render_diagnostics)) {
+				next.input_is_operator_input = false;
 				changed = true;
 				input_types = op.output_types;
 				op_idx++;

@@ -780,7 +780,7 @@ TEST_CASE("JIT full pipeline uses append sink contract for CTE materialization",
 	REQUIRE(found_compiled_materialization);
 }
 
-TEST_CASE("JIT full pipeline uses ordered sink native contract when order keys generate code", "[api][jit]") {
+TEST_CASE("JIT generated projections hand their rows to DuckDB's sort", "[api][jit]") {
 	DuckDB db;
 	Connection con(db);
 	auto &context = *con.context;
@@ -803,9 +803,10 @@ TEST_CASE("JIT full pipeline uses ordered sink native contract when order keys g
 		bool found_ordered_sink_contract = false;
 		bool found_ordered_sink_runtime_breakdown = false;
 		for (auto &event : manager.GetEvents()) {
+			// the region computes the projections; DuckDB's sort computes its keys and sorts
 			if (EventPhase(event) == "runtime" && EventStatus(event) == "executed" &&
-			    StringUtil::Contains(EventGeneratedStageRuntimeBreakdown(event), "order_sink.key_projection=") &&
-			    StringUtil::Contains(EventGeneratedStageRuntimeBreakdown(event), "order_sink.sink_update=")) {
+			    StringUtil::Contains(EventGeneratedStageRuntimeBreakdown(event), "projection=") &&
+			    StringUtil::Contains(EventJitRuntimePathCounts(event), "order_sink.native_tail_delegation=")) {
 				found_ordered_sink_runtime_breakdown = true;
 			}
 			if (!IsSljitRegionEvent(event) || !event.has_candidate) {
@@ -1094,16 +1095,17 @@ TEST_CASE("JIT composes dynamic scan filters with generated static filters", "[a
 		    RequireMixedSourceFilterContract(event);
 		    RequireGeneratedMachineCodeRegion(event);
 	    });
+	// Without group runs to win on, the hash aggregate leaves the pipeline after the region's composed source filters
+	// to DuckDB's operators
 	RequireJitEvent(
 	    manager,
 	    [](const ExecutionRegionEvent &event) {
 		    return IsSljitRegionEvent(event) && EventPhase(event) == "runtime" && EventStatus(event) == "executed" &&
 		           event.selected_uses_scan_filters && event.source_contract_output_rows > 0 &&
-		           HasJitRuntimePathPrefix(event, "filter.") && HasJitRuntimePathPrefix(event, "hash_join_probe.");
+		           HasJitRuntimePathPrefix(event, "source.native_continuation");
 	    },
 	    [](const ExecutionRegionEvent &event) {
-		    REQUIRE(HasJitRuntimePathPrefix(event, "filter."));
-		    REQUIRE(HasJitRuntimePathPrefix(event, "hash_join_probe."));
+		    REQUIRE(HasJitRuntimeProof(event, ExecutionRegionJitRuntimeProof::NATIVE_CONTINUATION));
 	    });
 }
 

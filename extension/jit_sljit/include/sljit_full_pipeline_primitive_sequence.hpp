@@ -32,6 +32,7 @@ enum class SljitFullPipelinePrimitiveKind : uint8_t {
 	UNGROUPED_AGGREGATE_UPDATE,
 	GROUPED_AGGREGATE_UPDATE,
 	HASH_JOIN_BUILD_SINK,
+	PRIMITIVE_AGGREGATE_UPDATE,
 	NATIVE_TAIL_DELEGATION
 };
 
@@ -48,6 +49,8 @@ struct SljitFullPipelinePrimitiveStep {
 	SljitUngroupedAggregateUpdatePrimitive ungrouped_aggregate_update;
 	SljitGroupedAggregateUpdatePrimitive grouped_aggregate_update;
 	SljitHashJoinBuildSinkPrimitive hash_join_build_sink;
+	//! The aggregate a PRIMITIVE_AGGREGATE_UPDATE step updates through its generated payload update
+	idx_t primitive_aggregate_idx = DConstants::INVALID_INDEX;
 	idx_t native_tail_start_idx = DConstants::INVALID_INDEX;
 
 	static SljitFullPipelinePrimitiveStep SourceFetch();
@@ -64,6 +67,7 @@ struct SljitFullPipelinePrimitiveStep {
 	UngroupedAggregateUpdate(const SljitUngroupedAggregateUpdatePrimitive &primitive);
 	static SljitFullPipelinePrimitiveStep GroupedAggregateUpdate(const SljitGroupedAggregateUpdatePrimitive &primitive);
 	static SljitFullPipelinePrimitiveStep HashJoinBuildSink(const SljitHashJoinBuildSinkPrimitive &primitive);
+	static SljitFullPipelinePrimitiveStep PrimitiveAggregateUpdate(idx_t aggregate_idx);
 	static SljitFullPipelinePrimitiveStep NativeTailDelegation(idx_t tail_start_idx);
 
 private:

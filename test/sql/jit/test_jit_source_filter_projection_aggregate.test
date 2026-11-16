@@ -175,7 +175,7 @@ SELECT count(*) FROM ((SELECT * FROM expected EXCEPT ALL SELECT * FROM actual)
 
 endloop
 
-# The filtered count aggregate runs through the fused source-filter recipe instead of the native-only fallback.
+# The filtered count aggregate runs its generated filter in the region.
 statement ok
 SET threads=1
 
@@ -188,6 +188,5 @@ CREATE OR REPLACE TABLE actual AS SELECT k + 1 AS kk, count(*) AS n FROM src WHE
 query I
 SELECT count(*) > 0 FROM duckdb_jit_events()
 WHERE phase = 'runtime' AND jit_runtime_path_counts LIKE '%filter.selection%'
-  AND jit_runtime_path_counts NOT LIKE '%recipe.native_only%'
 ----
 true

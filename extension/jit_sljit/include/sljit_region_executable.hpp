@@ -162,15 +162,6 @@ struct SljitExecutableAppendSink {
 
 struct SljitExecutableOrderSink {
 	SljitNativeOrderSinkPlan plan;
-	vector<SljitExecutableRegionExpression> order_keys;
-
-	idx_t CodeSize() const {
-		idx_t result = 0;
-		for (auto &order_key : order_keys) {
-			result += order_key.CodeSize();
-		}
-		return result;
-	}
 };
 
 //! Kernel input-array layout, not an expression index convention: every executable payload reads input slots.
@@ -495,6 +486,9 @@ struct SljitExecutableRegionOp {
 	}
 
 	idx_t operator_index = DConstants::INVALID_INDEX;
+	//! The first op lowered from its operator, fed exactly what DuckDB's operator takes: DuckDB's operators can take
+	//! the region's rows over here
+	bool input_is_operator_input = false;
 	vector<LogicalType> input_types;
 	vector<bool> input_not_null;
 	vector<Value> input_min_values;
@@ -510,9 +504,6 @@ struct SljitExecutableRegionOp {
 		}
 		if (Kind() == SljitNativeRegionOpKind::HASH_JOIN_PROBE) {
 			result += HashJoinProbe().CodeSize();
-		}
-		if (Kind() == SljitNativeRegionOpKind::ORDER_SINK) {
-			result += OrderSink().CodeSize();
 		}
 		if (Kind() == SljitNativeRegionOpKind::AGGREGATE_UPDATE) {
 			result += AggregateUpdate().CodeSize();

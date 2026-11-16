@@ -12,7 +12,6 @@
 
 #include "sljit_hash_join_probe_drain_runtime.hpp"
 #include "sljit_native_continuation_runtime.hpp"
-#include "sljit_native_pipeline_runtime.hpp"
 #include "sljit_source_pipeline_runtime.hpp"
 
 namespace duckdb {
@@ -33,7 +32,6 @@ static SinkResultType SljitChunkStepResult(bool stopped, ExecutionRegionResult r
 //! binding
 template <class KERNEL>
 class SljitPrimitiveRecipeChunkStep final : public ExecutionRegionChunkStep {
-	using NativeTailExecutor = SljitNativePipelineExecutor<KERNEL, SljitNativeTailDelegationTerminalPolicy>;
 	using HashJoinProbeExecutor = SljitRecordedHashJoinProbeCallback<KERNEL>;
 
 public:
@@ -44,10 +42,10 @@ public:
 	    vector<SljitSharedPerfectHashPredicateClassificationCache> &shared_predicate_classifications,
 	    SljitRegionExecutionScratch &scratch, SljitFullPipelineTerminalRuntimeState &terminal_state,
 	    optional_ptr<SljitExecutableNativeContinuation> native_continuation_plan)
-	    : kernel(kernel_p), runtime(runtime_p), native_tail(kernel_p, runtime_p, ops),
+	    : kernel(kernel_p), runtime(runtime_p),
 	      hash_join_probe(SljitMakeRecordedHashJoinProbeCallback(kernel_p, runtime_p, runtime_p.ExecutionOperators())),
-	      executor(runtime_p, result, ops, recipe, native_tail, hash_join_probe, source_distinct_counts,
-	               source_min_values, source_max_values, shared_predicate_classifications, scratch, terminal_state),
+	      executor(runtime_p, result, ops, recipe, hash_join_probe, source_distinct_counts, source_min_values,
+	               source_max_values, shared_predicate_classifications, scratch, terminal_state),
 	      native_continuation(runtime_p, native_continuation_plan) {
 		executor.PrepareChunks();
 	}
@@ -76,70 +74,8 @@ private:
 	KERNEL &kernel;
 	ExecutionRegionRuntime &runtime;
 	ExecutionRegionResult result = ExecutionRegionResult::NOT_FINISHED;
-	NativeTailExecutor native_tail;
 	HashJoinProbeExecutor hash_join_probe;
-	SljitFullPipelinePrimitiveSequenceBatchExecutor<NativeTailExecutor, HashJoinProbeExecutor> executor;
-	SljitNativeContinuationDecision native_continuation;
-};
-
-//! Native-contract operators consume the core runner's source batches.
-template <class KERNEL>
-class SljitNativeOnlyChunkStep final : public ExecutionRegionChunkStep {
-public:
-	SljitNativeOnlyChunkStep(KERNEL &kernel_p, ExecutionRegionRuntime &runtime_p, vector<SljitExecutableRegionOp> &ops,
-	                         SljitRegionExecutionScratch &scratch_p,
-	                         optional_ptr<SljitExecutableNativeContinuation> native_continuation_plan)
-	    : kernel(kernel_p), runtime(runtime_p), scratch(scratch_p), native(kernel_p, runtime_p, ops),
-	      native_continuation(runtime_p, native_continuation_plan) {
-	}
-
-	//! Without a recipe no generated step updates a hash aggregate: DuckDB's operators run the whole pipeline
-	optional_ptr<DataChunk> ContinuesNatively(DataChunk &input) override {
-		return native_continuation.ContinuesNatively(
-		    input, [](const SljitExecutableNativeContinuation &) { return true; },
-		    [&]() { SljitChunkStepResult(Flush(), result); });
-	}
-
-	SinkResultType ExecuteChunk(DataChunk &input) override {
-		if (runtime.TraceRuntime()) {
-			runtime.RecordJitRuntimeProof(ExecutionRegionJitRuntimeProof::FULL_PIPELINE_OWNERSHIP, input.size());
-		}
-		return SljitChunkStepResult(ExecuteBatchFunction()(SljitRuntimeBatchViewFromChunk(input)), result);
-	}
-
-	void FlushChunks() override {
-		SljitChunkStepResult(Flush(), result);
-	}
-
-	void FinishChunks() override {
-		SljitChunkStepResult(Flush(), result);
-		kernel.RecordExecutedFilterRows(runtime);
-	}
-
-private:
-	auto ExecuteBatchFunction() {
-		return [this](const SljitRuntimeBatchView &input) {
-			auto &batch = SljitBindMaterializedRuntimeBatchInput(input, "SLJIT native-only source batch");
-			auto sink_result = native(scratch, batch);
-			if (SljitNativeSinkResultStopsExecution(runtime, sink_result, result)) {
-				native.Finalize(scratch);
-				return true;
-			}
-			return false;
-		};
-	}
-
-	bool Flush() {
-		native.Finalize(scratch);
-		return false;
-	}
-
-private:
-	KERNEL &kernel;
-	ExecutionRegionRuntime &runtime;
-	SljitRegionExecutionScratch &scratch;
-	ExecutionRegionResult result = ExecutionRegionResult::NOT_FINISHED;
-	SljitNativePipelineExecutor<KERNEL, SljitNativePipelineTerminalPolicy> native;
+	SljitFullPipelinePrimitiveSequenceBatchExecutor<HashJoinProbeExecutor> executor;
 	SljitNativeContinuationDecision native_continuation;
 };
 

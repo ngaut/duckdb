@@ -13,7 +13,6 @@
 #include "sljit_hash_join_runtime.hpp"
 #include "sljit_join_drain_state.hpp"
 #include "sljit_native_runtime.hpp"
-#include "sljit_order_execution_scratch.hpp"
 #include "sljit_region_adapter_scratch.hpp"
 #include "sljit_region_execution_scratch_helpers.hpp"
 #include "sljit_region_executable.hpp"
@@ -65,7 +64,6 @@ struct SljitRegionExecutionScratch {
 		filter_selections.resize(op_count);
 		binding_scratch.Resize(op_count);
 		hash_join_scratch.Resize(op_count);
-		order_scratch.Resize(op_count);
 		aggregate_scratch.Resize(op_count);
 		projection_adapter_scratch.resize(op_count);
 		expression_adapter_scratch.resize(op_count);
@@ -178,11 +176,6 @@ struct SljitRegionExecutionScratch {
 		return SljitCheckedScratchSlot(projection_adapter_scratch, op_idx, "SLJIT projection has no adapter scratch");
 	}
 
-	void ResetDistinctGroups(idx_t op_idx) {
-		D_ASSERT(op_idx < distinct_groups.size());
-		distinct_groups[op_idx].reset();
-	}
-
 	SljitDistinctGroupScratch &DistinctGroups(idx_t op_idx, idx_t domain_size) {
 		D_ASSERT(op_idx < distinct_groups.size());
 		auto &result = distinct_groups[op_idx];
@@ -273,14 +266,6 @@ struct SljitRegionExecutionScratch {
 		return hash_join_scratch.Sources(op_idx);
 	}
 
-	DataChunk &OrderKeyChunk(idx_t op_idx) {
-		return order_scratch.KeyChunk(op_idx);
-	}
-
-	DataChunk &OrderPayloadChunk(idx_t op_idx) {
-		return order_scratch.PayloadChunk(op_idx);
-	}
-
 	vector<shared_ptr<ExecutionRuntimeFilterIdentity>> exact_source_filter_bindings;
 	const vector<SljitAggregateInstanceParameters> &aggregate_parameters;
 	vector<unique_ptr<DataChunk>> temporary_chunks;
@@ -288,7 +273,6 @@ struct SljitRegionExecutionScratch {
 	vector<unique_ptr<SelectionVector>> filter_selections;
 	SljitBindingExecutionScratch binding_scratch;
 	SljitHashJoinExecutionScratch hash_join_scratch;
-	SljitOrderExecutionScratch order_scratch;
 	SljitAggregateUpdateScratchState aggregate_scratch;
 	vector<SljitProjectionAdapterScratch> projection_adapter_scratch;
 	vector<vector<SljitExpressionAdapterScratch>> expression_adapter_scratch;
@@ -304,9 +288,6 @@ struct SljitRegionExecutionScratch {
 			break;
 		case SljitNativeRegionOpKind::HASH_JOIN_BUILD:
 			hash_join_scratch.InitializeBuild(op_idx);
-			break;
-		case SljitNativeRegionOpKind::ORDER_SINK:
-			order_scratch.InitializeSink(allocator, op_idx, op);
 			break;
 		case SljitNativeRegionOpKind::AGGREGATE_UPDATE:
 			aggregate_scratch.Initialize(allocator, op_idx, op);
@@ -327,9 +308,6 @@ struct SljitRegionExecutionScratch {
 			break;
 		case SljitNativeRegionOpKind::HASH_JOIN_PROBE:
 			expression_count = op.HashJoinProbe().plan.residual_predicate ? 1 : 0;
-			break;
-		case SljitNativeRegionOpKind::ORDER_SINK:
-			expression_count = op.OrderSink().order_keys.size();
 			break;
 		case SljitNativeRegionOpKind::AGGREGATE_UPDATE:
 			expression_count = op.AggregateUpdate().payloads.size();

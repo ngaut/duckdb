@@ -836,6 +836,91 @@ void PipelineExecutor::QueueCoalescedSinkChunk() {
 	coalesced_sink_chunk.Reset();
 }
 
+SinkResultType PipelineExecutor::SinkCompiledStepChunk(DataChunk &chunk) {
+	OperatorSinkInput sink_input {*pipeline.sink->sink_state, *local_sink_state, interrupt_state};
+	if (!remaining_sink_chunk && coalesced_sink_chunk_initialized && coalesced_sink_chunk.size() > 0) {
+		// the rows a compiled kernel held back for the sink go first
+		StartOperator(*pipeline.sink);
+		auto result = Sink(coalesced_sink_chunk, sink_input);
+		EndOperator(*pipeline.sink, nullptr);
+		if (result == SinkResultType::BLOCKED) {
+			EnqueueSinkChunk(coalesced_sink_chunk);
+		}
+		coalesced_sink_chunk.Reset();
+		if (result == SinkResultType::FINISHED) {
+			FinishProcessing();
+			return result;
+		}
+	}
+	QueueCoalescedSinkChunk();
+	if (remaining_sink_chunk) {
+		EnqueueSinkChunk(chunk);
+		return SinkResultType::NEED_MORE_INPUT;
+	}
+	StartOperator(*pipeline.sink);
+	auto result = Sink(chunk, sink_input);
+	EndOperator(*pipeline.sink, nullptr);
+	if (result == SinkResultType::BLOCKED) {
+		// a blocked sink may already hold the chunk: it retries as is
+		EnqueueSinkChunk(chunk);
+		return SinkResultType::NEED_MORE_INPUT;
+	}
+	if (result == SinkResultType::FINISHED) {
+		FinishProcessing();
+	}
+	return result;
+}
+
+SinkResultType PipelineExecutor::PushCompiledStepOperators(idx_t operator_index, DataChunk &chunk, idx_t &sink_rows) {
+	D_ASSERT(in_process_operators.empty());
+	const auto first = operator_index == DConstants::INVALID_INDEX ? pipeline.operators.size() : operator_index;
+	if (first > pipeline.operators.size()) {
+		throw InternalException("compiled step pushes a chunk into an operator its pipeline does not have");
+	}
+	auto &input_types = first == 0 ? pipeline.source->GetTypes() : pipeline.operators[first - 1].get().GetTypes();
+	bool types_match = chunk.ColumnCount() == input_types.size();
+	for (idx_t col_idx = 0; types_match && col_idx < input_types.size(); col_idx++) {
+		types_match = chunk.data[col_idx].GetType() == input_types[col_idx];
+	}
+	if (!types_match) {
+		string pushed;
+		string expected;
+		for (auto &type : chunk.GetTypes()) {
+			pushed += (pushed.empty() ? "" : ",") + type.ToString();
+		}
+		for (auto &type : input_types) {
+			expected += (expected.empty() ? "" : ",") + type.ToString();
+		}
+		throw InternalException("compiled step pushes a chunk of types [%s] into operator %llu, which takes [%s]",
+		                        pushed, first, expected);
+	}
+	compiled_step_continued_natively = true;
+	if (chunk.size() == 0) {
+		return SinkResultType::NEED_MORE_INPUT;
+	}
+	if (first == pipeline.operators.size()) {
+		sink_rows += chunk.size();
+		return SinkCompiledStepChunk(chunk);
+	}
+	if (compiled_step_operator_output.ColumnCount() == 0) {
+		InitializeChunk(compiled_step_operator_output);
+	}
+	OperatorResultType result;
+	do {
+		compiled_step_operator_output.Reset();
+		result = Execute(chunk, compiled_step_operator_output, first);
+		if (result == OperatorResultType::FINISHED) {
+			return SinkResultType::FINISHED;
+		}
+		sink_rows += compiled_step_operator_output.size();
+		if (compiled_step_operator_output.size() > 0 &&
+		    SinkCompiledStepChunk(compiled_step_operator_output) == SinkResultType::FINISHED) {
+			return SinkResultType::FINISHED;
+		}
+	} while (result == OperatorResultType::HAVE_MORE_OUTPUT);
+	return SinkResultType::NEED_MORE_INPUT;
+}
+
 PipelineExecuteResult PipelineExecutor::PushInputChunk(DataChunk &input, ExecutionBudget &chunk_budget,
                                                        PipelineInputChunkMode mode) {
 	if (remaining_sink_chunk) {

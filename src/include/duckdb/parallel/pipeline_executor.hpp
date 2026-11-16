@@ -185,6 +185,8 @@ private:
 	optional_ptr<DataChunk> compiled_step_native_input;
 	//! Whether DuckDB's operators ran any chunk of the compiled step: their caching operators then flush at the end
 	bool compiled_step_continued_natively = false;
+	//! The output of DuckDB's operators that a compiled step's chunk entered mid-pipeline
+	DataChunk compiled_step_operator_output;
 
 	//! This flag is set when the pipeline gets interrupted by NextBatch -> NextBatch should be called again and the
 	//! source_chunk should be sent through the pipeline
@@ -241,6 +243,12 @@ private:
 	void EnqueueSinkChunk(DataChunk &chunk);
 	//! Moves the coalesced rows of a compiled kernel into the sink queue, ahead of anything queued after them
 	void QueueCoalescedSinkChunk();
+	//! Runs the operators from `operator_index` on (INVALID_INDEX: the sink) over a compiled kernel's chunk, which has
+	//! that operator's input types, to completion: every output chunk sinks, or queues once the sink blocked. Counts
+	//! the rows that reach the sink into sink_rows
+	SinkResultType PushCompiledStepOperators(idx_t operator_index, DataChunk &chunk, idx_t &sink_rows);
+	//! Sinks a compiled kernel's chunk behind the coalesced and queued ones, queueing it once the sink blocked
+	SinkResultType SinkCompiledStepChunk(DataChunk &chunk);
 	PipelineExecuteResult PushInputChunk(DataChunk &input, ExecutionBudget &chunk_budget, PipelineInputChunkMode mode);
 	PipelineExecuteResult FlushAndFinalize(ExecutionBudget &chunk_budget);
 	//! Pushes a chunk through the pipeline and returns a single result chunk

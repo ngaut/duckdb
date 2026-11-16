@@ -333,6 +333,13 @@ public:
 		return pipeline.AppendSink(binding, chunk);
 	}
 
+	SinkResultType PushOperators(idx_t operator_index, DataChunk &chunk) override {
+		ValidateSink();
+		auto result = pipeline.PushOperators(operator_index, chunk, sink_input_rows);
+		sink_finished = sink_finished || result == SinkResultType::FINISHED;
+		return result;
+	}
+
 	SinkResultType RecordSinkResult(idx_t input_rows, SinkResultType sink_result) override {
 		ValidateSink();
 		if (sink_result == SinkResultType::BLOCKED) {

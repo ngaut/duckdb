@@ -94,14 +94,6 @@ SljitMakeRecordedHashJoinProbeCallback(OWNER &owner, ExecutionRegionRuntime &run
 	return {owner, runtime, native_runtime, nullptr};
 }
 
-template <class OWNER>
-static SljitRecordedHashJoinProbeCallback<OWNER>
-SljitMakeFixedScratchRecordedHashJoinProbeCallback(OWNER &owner, ExecutionRegionRuntime &runtime,
-                                                   ExecutionOperatorRuntime &native_runtime,
-                                                   SljitRegionExecutionScratch &scratch) {
-	return {owner, runtime, native_runtime, optional_ptr<SljitRegionExecutionScratch>(&scratch)};
-}
-
 template <class SCRATCH, class EXECUTE_HASH_JOIN_PROBE, class HANDLE_OUTPUT>
 static bool SljitDrainHashJoinProbeOutputsWithState(
     SCRATCH &scratch, idx_t hash_join_idx, SljitExecutableRegionOp &hash_join_op, DataChunk &input, DataChunk &output,

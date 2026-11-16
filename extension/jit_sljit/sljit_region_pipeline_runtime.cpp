@@ -173,11 +173,6 @@ unique_ptr<ExecutionRegionChunkStep> SljitNativeRegionKernel::CreateChunkStep(Ex
 	auto &local_state = runtime.LocalState().Cast<SljitNativeRegionLocalState>();
 	auto &recipe_plan = artifact->full_pipeline_recipe_plan;
 	auto native_continuation = optional_ptr<SljitExecutableNativeContinuation>(artifact->native_continuation.get());
-	if (!recipe_plan.HasRecipe()) {
-		runtime.RecordJitRuntimePath(recipe_plan.NativeOnlyRuntimePath().c_str());
-		return make_uniq<SljitNativeOnlyChunkStep<SljitNativeRegionKernel>>(*this, runtime, artifact->ops,
-		                                                                    local_state.scratch, native_continuation);
-	}
 	return make_uniq<SljitPrimitiveRecipeChunkStep<SljitNativeRegionKernel>>(
 	    *this, runtime, artifact->ops, recipe_plan.Recipe(), bindings.source_distinct_counts,
 	    bindings.source_min_values, bindings.source_max_values, shared_predicate_classifications, local_state.scratch,

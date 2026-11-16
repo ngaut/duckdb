@@ -735,10 +735,10 @@ TEST_CASE("JIT recipe publication validates explicit direct terminal ownership",
 	partial_contract.probe_step_idx = 1;
 	REQUIRE_THROWS(SljitFinalizeFullPipelinePrimitiveRecipe(ops, sequence, partial_contract));
 
-	auto native_only_plan = SljitMakeFullPipelineNativeOnlyPlan("full_pipeline.recipe.native_only.test");
-	REQUIRE(native_only_plan.Kind() == SljitFullPipelineRecipePlanKind::NATIVE_ONLY);
-	REQUIRE_FALSE(native_only_plan.HasRecipe());
-	REQUIRE_THROWS(SljitMakeFullPipelineNativeOnlyPlan(string()));
+	SljitFullPipelineRecipePlan unbound_plan;
+	REQUIRE(unbound_plan.Kind() == SljitFullPipelineRecipePlanKind::INVALID);
+	REQUIRE_FALSE(unbound_plan.HasRecipe());
+	REQUIRE_FALSE(unbound_plan.SupportsChunkStep());
 }
 
 TEST_CASE("JIT primitive steps keep operator ownership in typed payloads", "[api][jit]") {

@@ -275,6 +275,7 @@ struct SljitRegionLoweringCursor {
 
 	void BreakAtBoundary(const vector<LogicalType> &boundary_output_types) {
 		can_fuse = false;
+		operator_layout = false;
 		current_types = boundary_output_types;
 		current_not_null.assign(current_types.size(), false);
 		current_exact_filter_identities.assign(current_types.size(), nullptr);
@@ -321,6 +322,8 @@ struct SljitRegionLoweringCursor {
 		}
 		auto output_types = SljitRegionNodeHasNativeOps(node_plan) ? SljitRegionNodeLastNativeOp(node_plan).output_types
 		                                                           : std::move(source_output_types);
+		// the source's filters and layout repair turn the fetched chunk into the scan's output
+		operator_layout = output_types == node.output_types;
 		AppendIfFusing(node_plan);
 		current_types = std::move(output_types);
 		current_not_null = std::move(source_not_null);
@@ -329,12 +332,17 @@ struct SljitRegionLoweringCursor {
 	void AcceptSink(SljitRegionNodePlan &node_plan) {
 		D_ASSERT(node_plan.kind == ExecutionRegionLoweringKind::NATIVE);
 		D_ASSERT(SljitRegionNodeHasNativeOps(node_plan));
+		node_plan.native_ops[0].input_is_operator_input = operator_layout;
 		AppendIfFusing(node_plan);
 	}
 
 	void AcceptOperator(const ExecutionRegionNode &node, SljitRegionNodePlan &node_plan) {
 		D_ASSERT(node_plan.kind == ExecutionRegionLoweringKind::NATIVE);
 		D_ASSERT(SljitRegionNodeHasNativeOps(node_plan));
+		// every op lowered from the operator carries its index: where DuckDB's operators can take over
+		for (auto &op : node_plan.native_ops) {
+			op.operator_index = node.operator_index;
+		}
 		if (current_types.empty()) {
 			current_types = node.output_types;
 		}
@@ -342,6 +350,11 @@ struct SljitRegionLoweringCursor {
 		    IsIdentityProjection(node_plan.native_ops[0], current_types)) {
 			return;
 		}
+		node_plan.native_ops[0].input_is_operator_input = operator_layout;
+		// A projection computes its operator's output whatever layout it reads; filters and joins keep the layout
+		// they read, extended by the build columns
+		operator_layout = (operator_layout || node.kind == ExecutionRegionNodeKind::PROJECTION) &&
+		                  SljitRegionNodeLastNativeOp(node_plan).output_types == node.output_types;
 		for (auto &op : node_plan.native_ops) {
 			SljitUpdateExecutableCurrentNotNull(op, current_not_null);
 			UpdateExactFilterProofs(op);
@@ -384,6 +397,8 @@ private:
 	vector<shared_ptr<ExecutionRuntimeFilterIdentity>> current_exact_filter_identities;
 	SljitNativeRegionPlan &native_region;
 	bool can_fuse = true;
+	//! The ops so far produce exactly what DuckDB's last accepted operator produces
+	bool operator_layout = false;
 };
 
 //! A source node lowers to filters and a layout repair only

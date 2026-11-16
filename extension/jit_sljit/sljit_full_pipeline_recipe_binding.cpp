@@ -26,13 +26,8 @@ SljitFullPipelineRecipeBinding::SljitFullPipelineRecipeBinding(const vector<Slji
       projection_aggregate_recipes(ops_p, source_output_types_p, source_min_values_p, source_max_values_p) {
 }
 
-SljitFullPipelineRecipePlan SljitFullPipelineRecipeBinding::MakeNativeOnlyPlan() const {
-	string runtime_path = "full_pipeline.recipe.native_only";
-	for (auto &op : ops) {
-		runtime_path += ".";
-		runtime_path += SljitNativeRegionOpKindName(op.Kind());
-	}
-	return SljitMakeFullPipelineNativeOnlyPlan(std::move(runtime_path));
+bool SljitFullPipelineRecipeBinding::TryMakeOperatorHandOverRecipe(SljitFullPipelineRecipe &recipe) const {
+	return TryMakeNativeTailRecipe(MakeSourceSequence(), 0, recipe);
 }
 
 SljitFullPipelineRecipePlan
