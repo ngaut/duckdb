@@ -21,41 +21,6 @@ namespace duckdb {
 
 static constexpr idx_t SLJIT_PRIMITIVE_STATE_SOURCE_MIN_SEMANTIC_BYTES = 128;
 
-// References, constants and casts of them cost nothing to fuse into the aggregate input.
-static bool SljitExpressionIsReferenceLike(const ExecutionExpressionIR &node) {
-	if (node.kind == ExecutionExpressionIRKind::REFERENCE || node.kind == ExecutionExpressionIRKind::CONSTANT) {
-		return true;
-	}
-	return node.kind == ExecutionExpressionIRKind::CAST && node.left && !node.right &&
-	       SljitExpressionIsReferenceLike(*node.left);
-}
-
-static bool SljitExpressionsAreReferenceLike(const vector<SljitExecutableRegionExpression> &expressions) {
-	for (auto &expression : expressions) {
-		auto tree = CopySljitExpressionPlanAsInputTree(expression.plan);
-		if (!tree || !SljitExpressionIsReferenceLike(*tree)) {
-			return false;
-		}
-	}
-	return true;
-}
-
-// Whether the aggregate input -- its projections and the payload expressions it absorbed -- only references or casts
-// source columns.
-static bool SljitProjectedAggregateInputIsReferenceLike(const vector<SljitExecutableRegionOp> &ops,
-                                                        const SljitFullPipelineProjectionAggregateShape &shape) {
-	if (shape.ProjectionCount() == 0 ||
-	    !SljitExpressionsAreReferenceLike(ops[shape.aggregate_idx].AggregateUpdate().payloads)) {
-		return false;
-	}
-	for (idx_t op_idx = shape.first_projection_idx; op_idx <= shape.final_projection_idx; op_idx++) {
-		if (!SljitExpressionsAreReferenceLike(ops[op_idx].Projections())) {
-			return false;
-		}
-	}
-	return true;
-}
-
 static bool SljitPrimitiveAggregateStateKindsCanCombine(AggregatePrimitiveUpdateKind source,
                                                         AggregatePrimitiveUpdateKind target) {
 	switch (target) {
@@ -228,29 +193,14 @@ private:
 		return true;
 	}
 
+	//! A join's probe feeding the aggregate through its post-join projections updates the states from the probe's
+	//! matches without materializing the join output
 	bool TryBuildProjectionAggregateRecipe(SljitFullPipelineRecipe &recipe) const {
 		SljitProjectionAggregatePlanFacts plan;
-		if (!SljitTryAnalyzeProjectionAggregatePlan(ops, plan)) {
-			return false;
-		}
-		auto &recipes = binding.ProjectionAggregateRecipes();
-		switch (plan.prefix.Kind()) {
-		case SljitProjectionAggregatePrefixKind::SOURCE:
-			// Behind a source filter, fusing the projections into the aggregate input only pays off while it references
-			// or casts columns; computed expressions are cheaper through the native tail's generated filter-projection.
-			if (plan.prefix.HasSourceFilter() && !SljitProjectedAggregateInputIsReferenceLike(ops, plan.shape)) {
-				return false;
-			}
-			return recipes.TryMakeSourceProjectionAggregateTailRecipe(plan.shape, plan.prefix, recipe);
-		case SljitProjectionAggregatePrefixKind::JOIN_PREFIX:
-			return recipes.TryMakeMarkFilterProjectionAggregateRecipe(plan.shape, plan.prefix, recipe) ||
-			       recipes.TryMakeMarkFilterNativeTailRecipe(plan.prefix, recipe) ||
-			       recipes.TryMakeJoinDirectProjectionAggregateRecipe(plan.shape, plan.prefix, recipe) ||
-			       recipes.TryMakeJoinProjectionAggregateTailRecipe(plan.shape, plan.prefix, recipe);
-		case SljitProjectionAggregatePrefixKind::INVALID:
-			return false;
-		}
-		return false;
+		return SljitTryAnalyzeProjectionAggregatePlan(ops, plan) &&
+		       plan.prefix.Kind() == SljitProjectionAggregatePrefixKind::JOIN_PREFIX &&
+		       binding.ProjectionAggregateRecipes().TryMakeJoinDirectProjectionAggregateRecipe(plan.shape, plan.prefix,
+		                                                                                       recipe);
 	}
 
 private:

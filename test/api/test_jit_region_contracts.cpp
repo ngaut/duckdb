@@ -667,20 +667,8 @@ TEST_CASE("JIT recipe binders preserve the output recipe on admission failure", 
 
 	SljitFullPipelineProjectionAggregateShape projection_aggregate_shape;
 	SljitProjectionAggregatePrefixFacts projection_aggregate_prefix;
-	REQUIRE_FALSE(projection_aggregate.TryMakeSourceProjectionAggregateTailRecipe(projection_aggregate_shape,
-	                                                                              projection_aggregate_prefix, recipe));
-	require_unchanged();
-
 	REQUIRE_FALSE(projection_aggregate.TryMakeJoinDirectProjectionAggregateRecipe(projection_aggregate_shape,
 	                                                                              projection_aggregate_prefix, recipe));
-	require_unchanged();
-	REQUIRE_FALSE(projection_aggregate.TryMakeJoinProjectionAggregateTailRecipe(projection_aggregate_shape,
-	                                                                            projection_aggregate_prefix, recipe));
-	require_unchanged();
-	REQUIRE_FALSE(projection_aggregate.TryMakeMarkFilterProjectionAggregateRecipe(projection_aggregate_shape,
-	                                                                              projection_aggregate_prefix, recipe));
-	require_unchanged();
-	REQUIRE_FALSE(projection_aggregate.TryMakeMarkFilterNativeTailRecipe(projection_aggregate_prefix, recipe));
 	require_unchanged();
 }
 

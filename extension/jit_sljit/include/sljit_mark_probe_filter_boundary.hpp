@@ -83,8 +83,10 @@ static idx_t SljitSelectMarkProbeNonMatches(const ExecutionHashJoinProbeBinding 
 		return 0;
 	}
 
+	// A NULL key marks NULL against a build side with rows; against an empty build side every row is a non-match
+	// marked false, a NULL key included
 	vector<UnifiedVectorFormat> nullable_key_formats;
-	for (idx_t key_idx = 0; key_idx < binding.probe_key_input_indices.size(); key_idx++) {
+	for (idx_t key_idx = 0; !binding.empty_build_side && key_idx < binding.probe_key_input_indices.size(); key_idx++) {
 		if (key_idx >= binding.condition_null_values_are_equal.size()) {
 			throw InternalException("SLJIT MARK probe key NULL contract is incomplete");
 		}
