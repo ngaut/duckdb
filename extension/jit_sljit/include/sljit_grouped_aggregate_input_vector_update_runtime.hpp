@@ -252,26 +252,6 @@ static bool SljitTryExecuteInputVectorGroupedAggregateUpdate(
 
 	bool updated = false;
 	if (!has_group_output_transform && count_one_update_ready) {
-		if (dense_domain && dense_domain->ready) {
-			auto fused_start = SljitRegionStageStart(runtime);
-			updated = ExecuteSljitRegionRecordedOperation(
-			    runtime, op_idx, op.Kind(), "input_vector_group_count_one.fused_lookup_update", fused_start,
-			    [&](optional_ptr<ExecutionOperatorStageRecorder> recorder) {
-				    return grouped_state.state->TryUpdateInputVectorGroupCountOne(
-				        payload_input, payload_input.size(), group_sources, sink_info, *count_one_update.lane, recorder,
-				        dense_domain);
-			    });
-			scratch.RecordDirectNewAggregateUpdateResult(op_idx, updated);
-			RecordSljitRegionStageRuntimePath(runtime, op_idx, op.Kind(),
-			                                  updated ? "input_vector_group_count_one.fused_lookup_update"
-			                                          : "input_vector_group_count_one.fused_lookup_update_miss",
-			                                  fused_start);
-			if (updated) {
-				RecordSljitRegionMaterializationElision(
-				    runtime, op.Kind(), "input_vector_group_count_one.fused_lookup_update", payload_input.size());
-				return true;
-			}
-		}
 		auto stage_start = SljitRegionStageStart(runtime);
 		ExecutionGroupedAggregateStateTargetBatch targets;
 		updated = ExecuteSljitRegionRecordedOperation(

@@ -103,13 +103,6 @@ public:
 	    const ExecutionRegionAggregateSinkInfo &sink_info, ExecutionGroupedAggregateStateTargetBatch &targets,
 	    optional_ptr<ExecutionOperatorStageRecorder> recorder = nullptr,
 	    optional_ptr<const ExecutionDenseGroupDomain> dense_domain = nullptr) const;
-	bool TryUpdateInputVectorGroupCountOne(ExecutionContext &context, DataChunk &payload_input, idx_t count,
-	                                       OperatorSinkInput &input,
-	                                       const vector<ExecutionRowPointerGroupKeySource> &group_sources,
-	                                       const ExecutionRegionAggregateSinkInfo &sink_info,
-	                                       const ExecutionPrimitiveAggregateUpdateLane &lane,
-	                                       optional_ptr<ExecutionOperatorStageRecorder> recorder = nullptr,
-	                                       optional_ptr<const ExecutionDenseGroupDomain> dense_domain = nullptr) const;
 	bool TryUpdateRowPointerGroupPrimitivePayloads(
 	    ExecutionContext &context, DataChunk &payload_input, Vector &row_pointers, idx_t count,
 	    const vector<ExecutionRowPointerGroupKeySource> &group_sources, const vector<idx_t> &payload_source_indices,

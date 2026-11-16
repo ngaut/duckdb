@@ -498,20 +498,6 @@ public:
 		    dense_domain);
 	}
 
-	bool TryUpdateInputVectorGroupCountOne(
-	    DataChunk &payload_input, idx_t count, const vector<ExecutionRowPointerGroupKeySource> &group_sources,
-	    const ExecutionRegionAggregateSinkInfo &sink_info, const ExecutionPrimitiveAggregateUpdateLane &lane,
-	    optional_ptr<ExecutionOperatorStageRecorder> recorder = nullptr,
-	    optional_ptr<const ExecutionDenseGroupDomain> dense_domain = nullptr) override {
-		if (!CanUseSingleGroupingState()) {
-			return false;
-		}
-		auto single_grouping = GetSingleGroupingSinkState();
-		return single_grouping.grouping.table_data.TryUpdateInputVectorGroupCountOne(
-		    context, payload_input, count, single_grouping.input, group_sources, sink_info, lane, recorder,
-		    dense_domain);
-	}
-
 	bool TryUpdateRowPointerGroupPayloads(DataChunk &payload_input, Vector &row_pointers, idx_t count,
 	                                      const vector<ExecutionRowPointerGroupKeySource> &group_sources,
 	                                      const vector<idx_t> &payload_source_indices,

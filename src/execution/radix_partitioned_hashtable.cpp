@@ -1548,32 +1548,6 @@ bool RadixPartitionedHashTable::TryFindOrCreateInputVectorGroupStateTargets(
 	return true;
 }
 
-bool RadixPartitionedHashTable::TryUpdateInputVectorGroupCountOne(
-    ExecutionContext &context, DataChunk &payload_input, idx_t count, OperatorSinkInput &input,
-    const vector<ExecutionRowPointerGroupKeySource> &group_sources, const ExecutionRegionAggregateSinkInfo &sink_info,
-    const ExecutionPrimitiveAggregateUpdateLane &lane, optional_ptr<ExecutionOperatorStageRecorder> recorder,
-    optional_ptr<const ExecutionDenseGroupDomain> dense_domain) const {
-	if (payload_input.size() != count || !RadixValidateInputVectorGroupCountOne(sink_info, lane)) {
-		return false;
-	}
-
-	RadixSinkEntryScope scope(context, *this, input, recorder, "direct_input_vector_count_one.prepare_sink_state",
-	                          "direct_input_vector_count_one.finish_sink_state");
-	auto &ht = scope.HT();
-	auto &lstate = scope.LState();
-
-	auto update_start = RadixTraceStart(recorder);
-	if (!ht.TryUpdateSingleInputVectorGroupCountOneFast(payload_input, count, group_sources, lane, recorder,
-	                                                    dense_domain)) {
-		RecordRadixTraceStage(recorder, "direct_input_vector_count_one.update_miss", update_start);
-		return false;
-	}
-	RecordRadixTraceStage(recorder, "direct_input_vector_count_one.lookup_update", update_start);
-
-	scope.Arm();
-	return true;
-}
-
 bool RadixPartitionedHashTable::TryUpdateRowPointerGroupPrimitivePayloads(
     ExecutionContext &context, DataChunk &payload_input, Vector &row_pointers, idx_t count,
     const vector<ExecutionRowPointerGroupKeySource> &group_sources, const vector<idx_t> &payload_source_indices,

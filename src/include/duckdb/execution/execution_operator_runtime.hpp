@@ -225,20 +225,6 @@ struct ExecutionGroupedAggregateStateAddressState {
 		(void)dense_domain;
 		return false;
 	}
-	virtual bool TryUpdateInputVectorGroupCountOne(
-	    DataChunk &payload_input, idx_t count, const vector<ExecutionRowPointerGroupKeySource> &group_sources,
-	    const ExecutionRegionAggregateSinkInfo &sink_info, const ExecutionPrimitiveAggregateUpdateLane &lane,
-	    optional_ptr<ExecutionOperatorStageRecorder> recorder = nullptr,
-	    optional_ptr<const ExecutionDenseGroupDomain> dense_domain = nullptr) {
-		(void)payload_input;
-		(void)count;
-		(void)group_sources;
-		(void)sink_info;
-		(void)lane;
-		(void)recorder;
-		(void)dense_domain;
-		return false;
-	}
 	virtual bool TryUpdateRowPointerGroupPayloads(DataChunk &payload_input, Vector &row_pointers, idx_t count,
 	                                              const vector<ExecutionRowPointerGroupKeySource> &group_sources,
 	                                              const vector<idx_t> &payload_source_indices,
