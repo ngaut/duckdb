@@ -97,34 +97,4 @@ bool SljitFullPipelineRecipeBinding::TryAddSourcePrefixSteps(SljitFullPipelinePr
 	return true;
 }
 
-bool SljitFullPipelineRecipeBinding::TryMakeHashJoinBuildSinkRecipe(const SljitHashJoinBuildSinkFacts &facts,
-                                                                    SljitFullPipelineRecipe &recipe) const {
-	if (facts.first_hash_join_idx > facts.final_hash_join_idx) {
-		return false;
-	}
-	SljitHashJoinBuildSinkPrimitive sink;
-	if (!SljitTryBindHashJoinBuildSinkPrimitive(ops, facts.sink_idx, facts.projection_idx, sink)) {
-		return false;
-	}
-	auto sequence = MakeSourceSequence();
-	if (!TryAddSourcePrefixSteps(sequence, facts.first_hash_join_idx)) {
-		return false;
-	}
-	for (idx_t hash_join_idx = facts.first_hash_join_idx; hash_join_idx < facts.final_hash_join_idx; hash_join_idx++) {
-		SljitFullPipelinePrimitiveStep probe_step;
-		if (!TryMakeHashJoinProbeMaterializeStep(hash_join_idx, probe_step)) {
-			return false;
-		}
-		sequence.Add(std::move(probe_step));
-	}
-	SljitFullPipelinePrimitiveStep selection_step;
-	if (!TryMakeHashJoinProbeSelectionStep(facts.final_hash_join_idx, selection_step)) {
-		return false;
-	}
-	sequence.Add(std::move(selection_step));
-	sequence.Add(SljitFullPipelinePrimitiveStep::HashJoinBuildSink(sink));
-	recipe = MakePrimitiveSequence(std::move(sequence));
-	return true;
-}
-
 } // namespace duckdb

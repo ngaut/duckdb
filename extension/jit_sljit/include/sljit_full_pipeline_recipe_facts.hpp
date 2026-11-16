@@ -14,18 +14,6 @@
 
 namespace duckdb {
 
-//! ops [0, first_hash_join_idx) form the source prefix (see SljitFullPipelineSourcePrefixEnd).
-struct SljitHashJoinBuildSinkFacts {
-	idx_t first_hash_join_idx = DConstants::INVALID_INDEX;
-	idx_t final_hash_join_idx = DConstants::INVALID_INDEX;
-	idx_t projection_idx = DConstants::INVALID_INDEX;
-	idx_t sink_idx = DConstants::INVALID_INDEX;
-
-	bool HasProjection() const {
-		return projection_idx != DConstants::INVALID_INDEX;
-	}
-};
-
 //! ops [0, hash_join_idx) form the source prefix (see SljitFullPipelineSourcePrefixEnd).
 struct SljitJoinFilterAggregateFacts {
 	idx_t hash_join_idx = DConstants::INVALID_INDEX;
@@ -132,7 +120,6 @@ bool SljitFullPipelineOpIsAt(const vector<SljitExecutableRegionOp> &ops, idx_t o
 idx_t SljitFullPipelineSourcePrefixEnd(const vector<SljitExecutableRegionOp> &ops, idx_t limit);
 bool SljitFullPipelineHashJoinProbeIsMatchedProbeAndBuild(const vector<SljitExecutableRegionOp> &ops, idx_t op_idx);
 
-bool SljitTryAnalyzeHashJoinBuildSink(const vector<SljitExecutableRegionOp> &ops, SljitHashJoinBuildSinkFacts &facts);
 bool SljitTryAnalyzeJoinFilterAggregate(const vector<SljitExecutableRegionOp> &ops,
                                         SljitJoinFilterAggregateFacts &facts);
 bool SljitTryAnalyzeProjectionAggregatePlan(const vector<SljitExecutableRegionOp> &ops,

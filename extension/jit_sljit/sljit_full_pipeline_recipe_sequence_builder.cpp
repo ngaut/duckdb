@@ -170,6 +170,30 @@ bool SljitFullPipelineRecipeSequenceBuilder::TryMakeGeneratedSinkStep(idx_t op_i
 	return true;
 }
 
+//! A probe feeding the region's hash join build, through at most one projection, hands the build its selected rows:
+//! the build reads the probe's output columns where they stand instead of a materialized join chunk
+bool SljitFullPipelineRecipeSequenceBuilder::TryMakeSelectedBuildSinkSteps(
+    idx_t probe_idx, SljitFullPipelinePrimitiveStep &probe_step, SljitFullPipelinePrimitiveStep &sink_step) const {
+	const auto build_idx = ops.size() - 1;
+	if (probe_idx >= build_idx || ops[probe_idx].Kind() != SljitNativeRegionOpKind::HASH_JOIN_PROBE ||
+	    ops[build_idx].Kind() != SljitNativeRegionOpKind::HASH_JOIN_BUILD) {
+		return false;
+	}
+	auto projection_idx = DConstants::INVALID_INDEX;
+	if (probe_idx + 2 == build_idx) {
+		projection_idx = probe_idx + 1;
+	} else if (probe_idx + 1 != build_idx) {
+		return false;
+	}
+	SljitHashJoinBuildSinkPrimitive sink;
+	if (!SljitTryBindHashJoinBuildSinkPrimitive(ops, build_idx, projection_idx, sink) ||
+	    !TryMakeHashJoinProbeSelectionStep(probe_idx, probe_step)) {
+		return false;
+	}
+	sink_step = SljitFullPipelinePrimitiveStep::HashJoinBuildSink(sink);
+	return true;
+}
+
 //! A filtered sink evaluates its filter over every row of the chunk it gets: the step before it must hand over whole
 //! chunks rather than a selection of their rows
 bool SljitFullPipelineRecipeSequenceBuilder::StepHandsOverWholeChunks(const SljitFullPipelinePrimitiveStep &step) {
@@ -213,6 +237,14 @@ bool SljitFullPipelineRecipeSequenceBuilder::TryMakeNativeTailRecipe(SljitFullPi
 	auto hand_over_idx = DConstants::INVALID_INDEX;
 	for (auto op_idx = tail_start_idx; op_idx < ops.size(); op_idx++) {
 		SljitFullPipelinePrimitiveStep sink_step;
+		SljitFullPipelinePrimitiveStep probe_step;
+		if (sequence.Count() + 2 <= SLJIT_FULL_PIPELINE_MAX_PRIMITIVES &&
+		    TryMakeSelectedBuildSinkSteps(op_idx, probe_step, sink_step)) {
+			sequence.Add(std::move(probe_step));
+			sequence.Add(std::move(sink_step));
+			recipe = MakePrimitiveSequence(std::move(sequence));
+			return true;
+		}
 		if ((op_idx + 1 == ops.size() && TryMakeGeneratedSinkStep(op_idx, sink_step)) ||
 		    (op_idx + 2 == ops.size() && StepHandsOverWholeChunks(sequence.Step(sequence.Count() - 1)) &&
 		     TryMakeFilteredSinkStep(op_idx, sink_step))) {

@@ -29,9 +29,6 @@ public:
 	bool TryMakeJoinFilterAggregateRecipe(const SljitJoinFilterAggregateFacts &facts,
 	                                      SljitFullPipelineRecipe &recipe) const;
 
-	bool TryMakeHashJoinBuildSinkRecipe(const SljitHashJoinBuildSinkFacts &facts,
-	                                    SljitFullPipelineRecipe &recipe) const;
-
 	const SljitProjectionAggregateRecipeBinding &ProjectionAggregateRecipes() const {
 		return projection_aggregate_recipes;
 	}

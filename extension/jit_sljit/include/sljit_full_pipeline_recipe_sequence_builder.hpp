@@ -47,6 +47,8 @@ protected:
 	//! The aggregate sink after filter `filter_idx`, evaluating the filter in the pass that updates the states
 	bool TryMakeFilteredSinkStep(idx_t filter_idx, SljitFullPipelinePrimitiveStep &step) const;
 	static bool StepHandsOverWholeChunks(const SljitFullPipelinePrimitiveStep &step);
+	bool TryMakeSelectedBuildSinkSteps(idx_t probe_idx, SljitFullPipelinePrimitiveStep &probe_step,
+	                                   SljitFullPipelinePrimitiveStep &sink_step) const;
 	bool TryMakeNativeTailRecipe(SljitFullPipelinePrimitiveSequence sequence, idx_t tail_start_idx,
 	                             SljitFullPipelineRecipe &recipe) const;
 

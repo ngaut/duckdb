@@ -43,31 +43,6 @@ bool SljitFullPipelineHashJoinProbeIsMatchedProbeAndBuild(const vector<SljitExec
 	       ops[op_idx].HashJoinProbe().plan.output_mode == ExecutionHashJoinProbeOutputMode::MATCHED_PROBE_AND_BUILD;
 }
 
-bool SljitTryAnalyzeHashJoinBuildSink(const vector<SljitExecutableRegionOp> &ops, SljitHashJoinBuildSinkFacts &facts) {
-	facts = SljitHashJoinBuildSinkFacts();
-	if (ops.size() < 2 || ops.back().Kind() != SljitNativeRegionOpKind::HASH_JOIN_BUILD) {
-		return false;
-	}
-	facts.sink_idx = ops.size() - 1;
-	auto final_hash_join_idx = facts.sink_idx - 1;
-	if (ops[final_hash_join_idx].Kind() == SljitNativeRegionOpKind::PROJECTION) {
-		facts.projection_idx = final_hash_join_idx;
-		if (final_hash_join_idx == 0) {
-			return false;
-		}
-		final_hash_join_idx--;
-	}
-	const auto first_hash_join_idx = SljitFullPipelineSourcePrefixEnd(ops, final_hash_join_idx);
-	for (idx_t hash_join_idx = first_hash_join_idx; hash_join_idx <= final_hash_join_idx; hash_join_idx++) {
-		if (!SljitFullPipelineOpIsAt(ops, hash_join_idx, SljitNativeRegionOpKind::HASH_JOIN_PROBE)) {
-			return false;
-		}
-	}
-	facts.first_hash_join_idx = first_hash_join_idx;
-	facts.final_hash_join_idx = final_hash_join_idx;
-	return true;
-}
-
 bool SljitTryAnalyzeJoinFilterAggregate(const vector<SljitExecutableRegionOp> &ops,
                                         SljitJoinFilterAggregateFacts &facts) {
 	facts = SljitJoinFilterAggregateFacts();

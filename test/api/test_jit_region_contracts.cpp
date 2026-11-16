@@ -663,10 +663,6 @@ TEST_CASE("JIT recipe binders preserve the output recipe on admission failure", 
 	REQUIRE_FALSE(binding.TryMakeJoinFilterAggregateRecipe(join_filter_aggregate, recipe));
 	require_unchanged();
 
-	SljitHashJoinBuildSinkFacts hash_join_build;
-	REQUIRE_FALSE(binding.TryMakeHashJoinBuildSinkRecipe(hash_join_build, recipe));
-	require_unchanged();
-
 	auto &projection_aggregate = binding.ProjectionAggregateRecipes();
 
 	SljitFullPipelineProjectionAggregateShape projection_aggregate_shape;

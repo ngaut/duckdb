@@ -214,7 +214,6 @@ private:
 	static const SljitFullPipelineRecipeRegistryEntry *RecipeRegistry(idx_t &count) {
 		static const SljitFullPipelineRecipeRegistryEntry registry[] = {
 		    {&SljitFullPipelineRecipeBuilder::TryBuildJoinFilterAggregateRecipe},
-		    {&SljitFullPipelineRecipeBuilder::TryBuildHashJoinBuildSinkRecipe},
 		    {&SljitFullPipelineRecipeBuilder::TryBuildProjectionAggregateRecipe}};
 		count = sizeof(registry) / sizeof(registry[0]);
 		return registry;
@@ -227,11 +226,6 @@ private:
 			return false;
 		}
 		return true;
-	}
-
-	bool TryBuildHashJoinBuildSinkRecipe(SljitFullPipelineRecipe &recipe) const {
-		SljitHashJoinBuildSinkFacts facts;
-		return SljitTryAnalyzeHashJoinBuildSink(ops, facts) && binding.TryMakeHashJoinBuildSinkRecipe(facts, recipe);
 	}
 
 	bool TryBuildProjectionAggregateRecipe(SljitFullPipelineRecipe &recipe) const {
