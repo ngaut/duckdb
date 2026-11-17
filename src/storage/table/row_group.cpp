@@ -1083,7 +1083,7 @@ void RowGroup::ProcessPreparedScan(ScanOptions options, CollectionScanState &sta
 		const bool selection_is_identity =
 		    !has_sample_selection && count == max_count && approved_tuple_count == max_count;
 		if (has_filters && !selection_is_identity) {
-			const bool compact = state.GetOptions().compact_filtered_vectors;
+			const bool compact = approved_tuple_count < state.GetOptions().compact_filtered_vectors_below;
 			if (compact) {
 				if (state.filter_compaction.ColumnCount() == 0) {
 					// The filter list is fixed for the lifetime of the scan: only its fixed-width columns get a vector

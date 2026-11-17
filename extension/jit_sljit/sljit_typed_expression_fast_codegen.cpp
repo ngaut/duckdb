@@ -14,8 +14,11 @@
 
 namespace duckdb {
 
+//! A value one instruction produces: a constant, or a column's load (a narrow signed column's sign-extending load is
+//! its widening cast too)
 static bool SljitTypedExpressionTreeFastIsLeaf(const ExecutionExpressionIR &node) {
-	return node.kind == ExecutionExpressionIRKind::CONSTANT || node.kind == ExecutionExpressionIRKind::REFERENCE;
+	return node.kind == ExecutionExpressionIRKind::CONSTANT || node.kind == ExecutionExpressionIRKind::REFERENCE ||
+	       SljitTypedExpressionTreeIsNarrowSourceWideningCast(node);
 }
 
 static void
@@ -24,9 +27,10 @@ EmitSljitTypedExpressionTreeFastValueRegInternal(struct sljit_compiler *compiler
                                                  SljitTypedExpressionTreeFastIndexMode index_mode,
                                                  const vector<SljitTypedExpressionTreeLoopHoist> *data_hoists);
 
-static void EmitSljitTypedExpressionTreeFastLeafReg(struct sljit_compiler *compiler, const ExecutionExpressionIR &node,
+static void EmitSljitTypedExpressionTreeFastLeafReg(struct sljit_compiler *compiler, const ExecutionExpressionIR &leaf,
                                                     sljit_s32 target, SljitTypedExpressionTreeFastIndexMode index_mode,
                                                     const vector<SljitTypedExpressionTreeLoopHoist> *data_hoists) {
+	const auto &node = leaf.kind == ExecutionExpressionIRKind::CAST ? *leaf.left : leaf;
 	if (node.kind == ExecutionExpressionIRKind::CONSTANT) {
 		sljit_emit_op1(compiler, SLJIT_MOV, target, 0, SLJIT_IMM,
 		               NumericCast<sljit_sw>(SljitTypedExpressionTreeConstantValue(node)));

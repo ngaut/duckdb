@@ -61,7 +61,7 @@ bool TryBuildSljitUngroupedFusedAggregateUpdatePlan(const vector<SljitNativeRegi
 		result.local_size += NumericCast<sljit_sw>(sizeof(sljit_sw));
 	}
 	result.use_conditional_hugeint_register_accumulators =
-	    registers.has_conditional_hugeint_accumulators && result.codegen_plan.conditional_shared_payload &&
+	    registers.has_register_accumulators && result.codegen_plan.conditional_shared_payload &&
 	    aggregates[result.codegen_plan.shared_lane].primitive_update_kind ==
 	        AggregatePrimitiveUpdateKind::SUM_HUGEINT &&
 	    aggregates[result.codegen_plan.conditional_lane].primitive_update_kind ==
@@ -70,7 +70,7 @@ bool TryBuildSljitUngroupedFusedAggregateUpdatePlan(const vector<SljitNativeRegi
 	if (result.use_conditional_hugeint_register_accumulators) {
 		result.register_accumulator_pairs[result.codegen_plan.shared_lane] = 0;
 		result.register_accumulator_pairs[result.codegen_plan.conditional_lane] = 1;
-	} else if (registers.has_conditional_hugeint_accumulators && result.codegen_plan.fast_path_supported &&
+	} else if (registers.has_register_accumulators && result.codegen_plan.fast_path_supported &&
 	           !result.codegen_plan.conditional_shared_payload) {
 		// the fast loops add every row: a running sum kept in registers saves a stack round trip per row
 		idx_t next_pair = 0;
@@ -118,13 +118,23 @@ bool TryBuildSljitUngroupedFusedAggregateUpdatePlan(const vector<SljitNativeRegi
 	if (result.fast_source_data_hoists.size() < result.source_data_hoists.size()) {
 		result.fast_source_data_hoists = result.source_data_hoists;
 	}
+	if (result.codegen_plan.fast_path_supported) {
+		// a selected fast loop reads each source through the selection its batch resolves once
+		vector<idx_t> sources;
+		for (auto &payload : payloads) {
+			if (payload.expression_tree) {
+				CollectSljitTypedExpressionTreeReferences(*payload.expression_tree, sources);
+			}
+		}
+		AppendSljitTypedExpressionTreeSelectionHoists(sources, result.fast_source_data_hoists, result.local_size);
+		result.logical_selection_offset = result.local_size;
+		result.local_size += NumericCast<sljit_sw>(sizeof(sljit_sw));
+	}
 	result.hoist_source_data_pointers = !result.source_data_hoists.empty();
 	result.hoist_fast_source_data_pointers = !result.fast_source_data_hoists.empty();
-	result.saved_register_count = result.hoist_source_data_pointers || result.hoist_fast_source_data_pointers
-	                                  ? registers.source_data_saved_register_count
-	                                  : GetSljitNativeVectorRegisterLayout().saved_register_count;
+	result.saved_register_count = registers.source_data_saved_register_count;
 	if (uses_register_accumulators) {
-		result.saved_register_count = registers.conditional_hugeint_saved_register_count;
+		result.scratch_register_count = registers.accumulator_scratch_register_count;
 	}
 	return true;
 }

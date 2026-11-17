@@ -23,11 +23,14 @@ struct SljitUngroupedFusedAggregateUpdatePlan {
 	sljit_sw local_size = 0;
 	sljit_sw shared_fast_value_offset = -1;
 	sljit_sw register_accumulator_used_offset = -1;
+	//! The stack slot of the selection a selected fast loop reads its logical rows through
+	sljit_sw logical_selection_offset = -1;
 	bool use_conditional_hugeint_register_accumulators = false;
 	//! The register pair each payload's fast loops accumulate into, or invalid when it accumulates on the stack
 	vector<idx_t> register_accumulator_pairs;
 	bool hoist_source_data_pointers = false;
 	bool hoist_fast_source_data_pointers = false;
+	sljit_s32 scratch_register_count = 5;
 	sljit_s32 saved_register_count = 0;
 };
 

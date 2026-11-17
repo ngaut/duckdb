@@ -389,10 +389,11 @@ struct ScanSamplingInfo {
 struct TableScanOptions {
 	//! Read the rows of scans through the fetch by row id instead of scanning them
 	bool force_fetch_row = false;
-	//! Copy the rows a filter keeps out of each fixed-width filtered column into flat vectors instead of slicing the
-	//! scanned vector, for a consumer that copies or reads every row it receives: a slice allocates a dictionary
-	//! that is freed again when the chunk is reset
-	bool compact_filtered_vectors = false;
+	//! A vector whose filters keep fewer rows than this has the kept rows of each fixed-width filtered column copied
+	//! into a flat vector instead of the scanned vector being sliced, for a consumer that copies so small a vector
+	//! anyway: a slice allocates a dictionary that is freed again when the chunk is reset. A vector keeping more is
+	//! sliced, every column through the one selection
+	idx_t compact_filtered_vectors_below = 0;
 };
 
 class TableScanState {

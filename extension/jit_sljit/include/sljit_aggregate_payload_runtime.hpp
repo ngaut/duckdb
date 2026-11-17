@@ -62,6 +62,13 @@ static void SljitExecuteFusedCombinedSourceAggregatePayloadUpdate(
 	SljitNativeVectorInput native_input;
 	native_input.execute_sel = execute_sel ? execute_sel->data() : nullptr;
 	SljitBindFusedAggregatePayloadSources(native_input, payload_sources, execute_sel);
+	// an ungrouped update writes nothing per row: the selection every source shares selects its logical rows
+	if (native_input.source_common_sel) {
+		native_input.execute_sel = native_input.source_common_sel;
+		native_input.source_common_sel = nullptr;
+	}
+	native_input.expression_tree_logical_all_valid =
+	    !payload_sources.HasAnySelection() && native_input.expression_tree_all_valid;
 	native_input.aggregate_int64_values = aggregate_int64_values.data();
 	native_input.aggregate_hugeint_values = aggregate_hugeint_values.data();
 	native_input.aggregate_state_is_sets = aggregate_state_is_sets.data();

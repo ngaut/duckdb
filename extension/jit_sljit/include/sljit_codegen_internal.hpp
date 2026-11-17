@@ -104,6 +104,11 @@ void GetSljitTypedExpressionTreeNarrowSourceLoad(const ExecutionExpressionIR &re
 
 void EmitSljitTypedExpressionTreeConstantHoists(struct sljit_compiler *compiler,
                                                 const vector<SljitTypedExpressionTreeLoopHoist> &hoists);
+//! Stores into the stack slot the selection a batch's logical rows are read through: its execute selection, else the
+//! identity
+void EmitSljitLogicalSelectionHoist(struct sljit_compiler *compiler, sljit_sw slot_offset);
+//! SLJIT_S3 = the logical row of loop row SLJIT_S1, through the selection EmitSljitLogicalSelectionHoist stored
+void EmitLoadSljitHoistedLogicalIndex(struct sljit_compiler *compiler, sljit_sw slot_offset);
 enum class SljitTypedExpressionTreeFastIndexMode : uint8_t { FLAT, LOGICAL, SELECTED };
 
 SljitTypedExpressionTreeSlot AllocateSljitTypedExpressionTreeSlot(idx_t &slot_index);

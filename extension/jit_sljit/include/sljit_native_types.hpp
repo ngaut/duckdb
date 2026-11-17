@@ -419,6 +419,9 @@ struct SljitNativeVectorInput {
 	idx_t perfect_hash_tuple_size = 0;
 	idx_t perfect_hash_aggregate_state_offset = 0;
 	bool has_error = false;
+	//! No source has a selection of its own: every one reads the logical row, and no row is NULL. It sits in the
+	//! padding before error: a field that moves the hot fields above costs the generated loops cycles
+	bool expression_tree_logical_all_valid = false;
 	std::exception_ptr error;
 };
 

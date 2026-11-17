@@ -339,8 +339,9 @@ private:
 		}
 		execution_source_contract_scan_state.options.force_fetch_row =
 		    Settings::Get<DebugForceFetchRowSetting>(context.client);
-		// Every region source copies the chunks it batches and reads the rest flat
-		execution_source_contract_scan_state.options.compact_filtered_vectors = true;
+		// A region source copies the vectors it batches: their filtered columns are copied by the scan already
+		execution_source_contract_scan_state.options.compact_filtered_vectors_below =
+		    ExecutionChunkCoalescer::MIN_PASSTHROUGH_ROWS;
 	}
 };
 

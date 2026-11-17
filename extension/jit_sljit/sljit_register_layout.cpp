@@ -60,23 +60,22 @@ static SljitUngroupedAggregateRegisterLayout BuildSljitUngroupedAggregateRegiste
 	SljitUngroupedAggregateRegisterLayout result;
 	const auto &capabilities = GetSljitTargetCapabilities();
 	result.source_data_saved_register_count = GetSljitNativeVectorRegisterLayout().saved_register_count;
-	result.conditional_hugeint_saved_register_count = result.source_data_saved_register_count;
 	if (capabilities.registers.SupportsLayout(5, 10)) {
 		result.has_source_data_hoists = true;
 		result.source_data_saved_register_count = 10;
-		result.conditional_hugeint_saved_register_count = 10;
 		result.source_data[0] = SljitSavedRegisterAt(8);
 		result.source_data[1] = SljitSavedRegisterAt(9);
 		result.fast_source_data = SljitSavedRegisterAt(6);
 	}
-	if (capabilities.registers.SupportsLayout(5, 14)) {
-		result.has_conditional_hugeint_accumulators = true;
-		result.conditional_hugeint_saved_register_count = 14;
-		result.shared_lower = SljitSavedRegisterAt(10);
-		result.shared_upper = SljitSavedRegisterAt(11);
-		result.conditional_lower = SljitSavedRegisterAt(12);
-		result.conditional_upper = SljitSavedRegisterAt(13);
-		result.conditional_payload = SljitSavedRegisterAt(7);
+	constexpr sljit_s32 accumulator_scratch_register_count = 10;
+	if (capabilities.registers.CanEnter(accumulator_scratch_register_count, result.source_data_saved_register_count)) {
+		result.has_register_accumulators = true;
+		result.accumulator_scratch_register_count = accumulator_scratch_register_count;
+		result.shared_lower = SLJIT_R5;
+		result.shared_upper = SLJIT_R6;
+		result.conditional_lower = SLJIT_R7;
+		result.conditional_upper = SLJIT_R8;
+		result.conditional_payload = SLJIT_R9;
 	}
 	return result;
 }

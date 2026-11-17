@@ -253,6 +253,20 @@ static const sel_t *SljitIdentitySelection() {
 	return identity.data();
 }
 
+void EmitSljitLogicalSelectionHoist(struct sljit_compiler *compiler, sljit_sw slot_offset) {
+	sljit_emit_op1(compiler, SLJIT_MOV_P, SLJIT_R0, 0, SLJIT_MEM1(SLJIT_S0),
+	               offsetof(SljitNativeVectorInput, execute_sel));
+	auto has_execute_selection = sljit_emit_cmp(compiler, SLJIT_NOT_EQUAL, SLJIT_R0, 0, SLJIT_IMM, 0);
+	sljit_emit_op1(compiler, SLJIT_MOV_P, SLJIT_R0, 0, SLJIT_IMM, reinterpret_cast<sljit_sw>(SljitIdentitySelection()));
+	sljit_set_label(has_execute_selection, sljit_emit_label(compiler));
+	sljit_emit_op1(compiler, SLJIT_MOV_P, SLJIT_MEM1(SLJIT_SP), slot_offset, SLJIT_R0, 0);
+}
+
+void EmitLoadSljitHoistedLogicalIndex(struct sljit_compiler *compiler, sljit_sw slot_offset) {
+	sljit_emit_op1(compiler, SLJIT_MOV_P, SLJIT_R0, 0, SLJIT_MEM1(SLJIT_SP), slot_offset);
+	sljit_emit_op1(compiler, SLJIT_MOV_U32, SLJIT_S3, 0, SLJIT_MEM2(SLJIT_R0, SLJIT_S1), 2);
+}
+
 void AppendSljitTypedExpressionTreeSelectionHoists(const vector<idx_t> &sources,
                                                    vector<SljitTypedExpressionTreeLoopHoist> &hoists,
                                                    sljit_sw &local_size) {

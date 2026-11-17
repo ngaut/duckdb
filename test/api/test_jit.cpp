@@ -409,7 +409,12 @@ TEST_CASE("SLJIT backend requires an addressable native-vector register ABI", "[
 
 		const auto &ungrouped = GetSljitUngroupedAggregateRegisterLayout();
 		CHECK(ungrouped.has_source_data_hoists == capabilities.registers.SupportsLayout(5, 10));
-		CHECK(ungrouped.has_conditional_hugeint_accumulators == capabilities.registers.SupportsLayout(5, 14));
+		CHECK(ungrouped.has_register_accumulators ==
+		      capabilities.registers.CanEnter(10, ungrouped.source_data_saved_register_count));
+		if (ungrouped.has_register_accumulators) {
+			CHECK(ungrouped.accumulator_scratch_register_count == 10);
+			CHECK(ungrouped.conditional_payload == SLJIT_R9);
+		}
 
 		const auto &primitive_run = GetSljitPrimitiveRunRegisterLayout();
 		CHECK(primitive_run.supported == capabilities.SupportsPrimitiveRunRegisterABI());
