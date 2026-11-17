@@ -264,7 +264,7 @@ bool SljitTryBuildFilteredAggregateUpdate(SljitExecutableRegionOp &filter_op, Sl
 	string filtered_error;
 	auto code = BuildSljitNativeFilteredUngroupedFusedPrimitiveAggregateUpdate(
 	    *filtered_update.filter.plan.expression_tree, codegen_payloads, aggregate_update.plan.sink_info.aggregates,
-	    function, filtered_error);
+	    function, filtered_update.fast_null_rows, filtered_error);
 	auto compiled = SljitCompiledFunction<SljitNativeAggregateUpdateFunction>::TryCreate(std::move(code), function);
 	if (compiled.IsExecutable()) {
 		filtered_update.compiled = std::move(compiled);

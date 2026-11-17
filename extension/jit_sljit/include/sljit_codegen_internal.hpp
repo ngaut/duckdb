@@ -147,6 +147,10 @@ void EmitSljitTypedExpressionTreeInvalidResult(struct sljit_compiler *compiler,
 void EmitLoadSljitTypedExpressionTreeFastSourceIndex(struct sljit_compiler *compiler, idx_t source_index,
                                                      sljit_s32 target, SljitTypedExpressionTreeFastIndexMode index_mode,
                                                      const vector<SljitTypedExpressionTreeLoopHoist> *hoists);
+//! Jumps when the source's row, read as index_mode reads it, is NULL. Clobbers R0-R2.
+sljit_jump *EmitJumpIfSljitTypedExpressionTreeFastSourceNull(struct sljit_compiler *compiler, idx_t source_index,
+                                                             SljitTypedExpressionTreeFastIndexMode index_mode,
+                                                             const vector<SljitTypedExpressionTreeLoopHoist> *hoists);
 SljitTypedExpressionTreeSlot EmitSljitTypedExpressionTreeStringPrefix(struct sljit_compiler *compiler,
                                                                       const ExecutionExpressionIR &node,
                                                                       idx_t &slot_index);
@@ -295,6 +299,12 @@ EmitSljitTypedExpressionTreeFastJumps(struct sljit_compiler *compiler, const Exe
                                       idx_t &spill_index, vector<SljitArithmeticOverflowSite> &overflows,
                                       SljitTypedExpressionTreeFastIndexMode index_mode,
                                       const vector<SljitTypedExpressionTreeLoopHoist> *data_hoists);
+//! EmitSljitTypedExpressionTreeFastJumps over rows that may hold NULLs, for a predicate that decides NULL as FALSE
+//! (SljitTypedExpressionTreeNullDecidesFalse): each leaf first checks its sources and counts as FALSE on a NULL
+vector<sljit_jump *> EmitSljitTypedExpressionTreeNullableFastJumps(
+    struct sljit_compiler *compiler, const ExecutionExpressionIR &node, bool when, idx_t &spill_index,
+    vector<SljitArithmeticOverflowSite> &overflows, SljitTypedExpressionTreeFastIndexMode index_mode,
+    const vector<SljitTypedExpressionTreeLoopHoist> *data_hoists);
 //! EmitSljitTypedExpressionTreeFastJumps over flat rows, taken when the predicate is true
 vector<sljit_jump *>
 EmitSljitTypedExpressionTreeFastJumpsIfTrue(struct sljit_compiler *compiler, const ExecutionExpressionIR &node,

@@ -361,31 +361,22 @@ unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativeTypedExpressionTreeSelect(
 		nullable_simd_done = sljit_emit_jump(compiler, SLJIT_JUMP);
 		sljit_set_label(skip_nullable_simd, sljit_emit_label(compiler));
 	}
+	// Flat batches with NULLs, for a predicate that decides NULL as FALSE: each leaf checks its own sources
 	struct sljit_jump *flat_nullable_done = nullptr;
-	struct sljit_jump *use_generic_loop = nullptr;
-	if (fast_path.precheck_nulls_supported) {
+	if (fast_path.fast_path_supported && emit_flat_nullable_fast_path && !nullable_simd_done &&
+	    SljitTypedExpressionTreeNullDecidesFalse(root)) {
 		sljit_emit_op1(compiler, SLJIT_MOV_U8, SLJIT_R0, 0, SLJIT_MEM1(SLJIT_S0),
 		               offsetof(SljitNativeVectorInput, expression_tree_flat_no_selection));
-		use_generic_loop = sljit_emit_cmp(compiler, SLJIT_EQUAL, SLJIT_R0, 0, SLJIT_IMM, 0);
+		auto use_generic_loop = sljit_emit_cmp(compiler, SLJIT_EQUAL, SLJIT_R0, 0, SLJIT_IMM, 0);
 		sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_S1, 0, SLJIT_IMM, 0);
 		auto flat_nullable_loop = sljit_emit_label(compiler);
 		flat_nullable_done = sljit_emit_cmp(compiler, SLJIT_GREATER_EQUAL, SLJIT_S1, 0, SLJIT_S2, 0);
-		vector<sljit_jump *> source_null_jumps;
-		for (auto source_index : fast_path.source_refs) {
-			source_null_jumps.push_back(EmitJumpIfSljitExpressionTreeFlatSourceNull(compiler, source_index));
-		}
 		idx_t flat_nullable_spill_index = 0;
 		auto flat_nullable_false =
-		    EmitSljitTypedExpressionTreeFastJumps(compiler, root, false, flat_nullable_spill_index, overflows,
-		                                          SljitTypedExpressionTreeFastIndexMode::FLAT, nullptr);
+		    EmitSljitTypedExpressionTreeNullableFastJumps(compiler, root, false, flat_nullable_spill_index, overflows,
+		                                                  SljitTypedExpressionTreeFastIndexMode::FLAT, nullptr);
 		EmitStoreSljitTypedExpressionTreeTrueSelection(compiler, SLJIT_S1);
 		SetSljitJumpLabels(flat_nullable_false, sljit_emit_label(compiler));
-		auto flat_nullable_next = sljit_emit_jump(compiler, SLJIT_JUMP);
-		auto flat_nullable_invalid = sljit_emit_label(compiler);
-		for (auto source_null_jump : source_null_jumps) {
-			sljit_set_label(source_null_jump, flat_nullable_invalid);
-		}
-		sljit_set_label(flat_nullable_next, sljit_emit_label(compiler));
 		sljit_emit_op2(compiler, SLJIT_ADD, SLJIT_S1, 0, SLJIT_S1, 0, SLJIT_IMM, 1);
 		auto flat_nullable_repeat = sljit_emit_jump(compiler, SLJIT_JUMP);
 		sljit_set_label(flat_nullable_repeat, flat_nullable_loop);

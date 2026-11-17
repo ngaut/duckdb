@@ -110,7 +110,7 @@ BuildSljitNativeUngroupedSumHugeintTypedExpressionTree(const ExecutionExpression
 unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativeFilteredUngroupedFusedPrimitiveAggregateUpdate(
     const ExecutionExpressionIR &predicate, const vector<SljitNativeRegionExpressionPlan> &payloads,
     const vector<ExecutionRegionAggregateInput> &aggregates, SljitNativeAggregateUpdateFunction &function,
-    string &error);
+    bool &fast_null_rows, string &error);
 unique_ptr<ExecutionRegionCodeHandle>
 BuildSljitNativeUngroupedSumInt64Reference(SljitNativeIntegerKind kind, SljitNativeAggregateUpdateFunction &function,
                                            string &error);

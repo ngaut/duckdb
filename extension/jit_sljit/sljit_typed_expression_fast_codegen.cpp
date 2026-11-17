@@ -415,31 +415,11 @@ EmitSljitTypedExpressionTreeFastRemainderTestJumps(struct sljit_compiler *compil
 	return different;
 }
 
-vector<sljit_jump *>
-EmitSljitTypedExpressionTreeFastJumps(struct sljit_compiler *compiler, const ExecutionExpressionIR &node, bool when,
-                                      idx_t &spill_index, vector<SljitArithmeticOverflowSite> &overflows,
-                                      SljitTypedExpressionTreeFastIndexMode index_mode,
-                                      const vector<SljitTypedExpressionTreeLoopHoist> *data_hoists) {
-	if (node.kind == ExecutionExpressionIRKind::CONJUNCTION && !node.children.empty()) {
-		// the outcome one child decides alone: true for OR, false for AND
-		const bool decisive = node.conjunction_op == ExecutionExpressionConjunctionOp::OR;
-		vector<sljit_jump *> decided;
-		const auto last = node.children.size() - 1;
-		for (idx_t child_idx = 0; child_idx < last; child_idx++) {
-			auto child = EmitSljitTypedExpressionTreeFastJumps(compiler, *node.children[child_idx], decisive,
-			                                                   spill_index, overflows, index_mode, data_hoists);
-			decided.insert(decided.end(), child.begin(), child.end());
-		}
-		// every child before the last left the outcome open: the last child's outcome is the conjunction's
-		auto result = EmitSljitTypedExpressionTreeFastJumps(compiler, *node.children[last], when, spill_index,
-		                                                    overflows, index_mode, data_hoists);
-		if (when == decisive) {
-			result.insert(result.end(), decided.begin(), decided.end());
-		} else {
-			SetSljitJumpLabels(decided, sljit_emit_label(compiler));
-		}
-		return result;
-	}
+static vector<sljit_jump *>
+EmitSljitTypedExpressionTreeFastLeafJumps(struct sljit_compiler *compiler, const ExecutionExpressionIR &node, bool when,
+                                          idx_t &spill_index, vector<SljitArithmeticOverflowSite> &overflows,
+                                          SljitTypedExpressionTreeFastIndexMode index_mode,
+                                          const vector<SljitTypedExpressionTreeLoopHoist> *data_hoists) {
 	if (index_mode == SljitTypedExpressionTreeFastIndexMode::FLAT && SljitTypedExpressionTreeIsRemainderTest(node)) {
 		auto true_jumps =
 		    EmitSljitTypedExpressionTreeFastRemainderTestJumps(compiler, node, spill_index, overflows, data_hoists);
@@ -461,6 +441,71 @@ EmitSljitTypedExpressionTreeFastJumps(struct sljit_compiler *compiler, const Exe
 	}
 	EmitSljitTypedExpressionTreeFastValueRegInternal(compiler, node, spill_index, overflows, index_mode, data_hoists);
 	return {sljit_emit_cmp(compiler, when ? SLJIT_NOT_EQUAL : SLJIT_EQUAL, SLJIT_R2, 0, SLJIT_IMM, 0)};
+}
+
+static vector<sljit_jump *> EmitSljitTypedExpressionTreeFastJumpsInternal(
+    struct sljit_compiler *compiler, const ExecutionExpressionIR &node, bool when, idx_t &spill_index,
+    vector<SljitArithmeticOverflowSite> &overflows, SljitTypedExpressionTreeFastIndexMode index_mode,
+    const vector<SljitTypedExpressionTreeLoopHoist> *data_hoists, bool null_rows) {
+	if (node.kind == ExecutionExpressionIRKind::CONJUNCTION && !node.children.empty()) {
+		// the outcome one child decides alone: true for OR, false for AND
+		const bool decisive = node.conjunction_op == ExecutionExpressionConjunctionOp::OR;
+		vector<sljit_jump *> decided;
+		const auto last = node.children.size() - 1;
+		for (idx_t child_idx = 0; child_idx < last; child_idx++) {
+			auto child = EmitSljitTypedExpressionTreeFastJumpsInternal(compiler, *node.children[child_idx], decisive,
+			                                                           spill_index, overflows, index_mode, data_hoists,
+			                                                           null_rows);
+			decided.insert(decided.end(), child.begin(), child.end());
+		}
+		// every child before the last left the outcome open: the last child's outcome is the conjunction's
+		auto result = EmitSljitTypedExpressionTreeFastJumpsInternal(compiler, *node.children[last], when, spill_index,
+		                                                            overflows, index_mode, data_hoists, null_rows);
+		if (when == decisive) {
+			result.insert(result.end(), decided.begin(), decided.end());
+		} else {
+			SetSljitJumpLabels(decided, sljit_emit_label(compiler));
+		}
+		return result;
+	}
+	if (!null_rows) {
+		return EmitSljitTypedExpressionTreeFastLeafJumps(compiler, node, when, spill_index, overflows, index_mode,
+		                                                 data_hoists);
+	}
+	// a null-strict leaf with a NULL source is NULL, which the AND and OR above it decide as FALSE
+	vector<idx_t> sources;
+	CollectSljitTypedExpressionTreeReferences(node, sources);
+	vector<sljit_jump *> null_jumps;
+	for (auto source_index : sources) {
+		null_jumps.push_back(
+		    EmitJumpIfSljitTypedExpressionTreeFastSourceNull(compiler, source_index, index_mode, data_hoists));
+	}
+	auto result = EmitSljitTypedExpressionTreeFastLeafJumps(compiler, node, when, spill_index, overflows, index_mode,
+	                                                        data_hoists);
+	if (when) {
+		SetSljitJumpLabels(null_jumps, sljit_emit_label(compiler));
+	} else {
+		result.insert(result.end(), null_jumps.begin(), null_jumps.end());
+	}
+	return result;
+}
+
+vector<sljit_jump *>
+EmitSljitTypedExpressionTreeFastJumps(struct sljit_compiler *compiler, const ExecutionExpressionIR &node, bool when,
+                                      idx_t &spill_index, vector<SljitArithmeticOverflowSite> &overflows,
+                                      SljitTypedExpressionTreeFastIndexMode index_mode,
+                                      const vector<SljitTypedExpressionTreeLoopHoist> *data_hoists) {
+	return EmitSljitTypedExpressionTreeFastJumpsInternal(compiler, node, when, spill_index, overflows, index_mode,
+	                                                     data_hoists, false);
+}
+
+vector<sljit_jump *> EmitSljitTypedExpressionTreeNullableFastJumps(
+    struct sljit_compiler *compiler, const ExecutionExpressionIR &node, bool when, idx_t &spill_index,
+    vector<SljitArithmeticOverflowSite> &overflows, SljitTypedExpressionTreeFastIndexMode index_mode,
+    const vector<SljitTypedExpressionTreeLoopHoist> *data_hoists) {
+	D_ASSERT(SljitTypedExpressionTreeNullDecidesFalse(node));
+	return EmitSljitTypedExpressionTreeFastJumpsInternal(compiler, node, when, spill_index, overflows, index_mode,
+	                                                     data_hoists, true);
 }
 
 vector<sljit_jump *>

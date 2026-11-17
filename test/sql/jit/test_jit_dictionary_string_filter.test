@@ -5,7 +5,8 @@
 # A batch that brings a string column as a dictionary vector compares each dictionary entry with the constant once and
 # reads a row's result through its selection; each source's selection is resolved once per batch. A NULL entry
 # compares FALSE: a column the filter reads only through such comparisons under AND and OR keeps its NULL rows on the
-# fast path, while NOT and IS NULL read its validity. The columns mix a dictionary string with and without NULLs and a
+# fast path, while NOT and IS NULL read its validity. A filter whose leaves meet only at AND and OR checks the other
+# columns' NULLs at each leaf on the fast path too. The columns mix a dictionary string with and without NULLs and a
 # flat number with NULLs; the comparisons are = and <>, alone and under AND, OR and NOT.
 
 require jit_sljit
@@ -111,6 +112,15 @@ query II nosort nullable_is_null_or_equal
 SELECT count(*), sum(amount) FROM statuses WHERE nullable_status IS NULL OR nullable_status = 'PENDING' OR amount = 3
 ----
 
+query II nosort nested_nullable_leaves
+SELECT count(*), sum(nullable_amount + amount) FROM statuses
+WHERE (nullable_amount > 600 AND amount < 900) OR nullable_status = 'ACTIVE'
+----
+
+query II nosort other_nullable_payload
+SELECT count(*), sum(nullable_amount) FROM statuses WHERE nullable_status = 'PENDING' OR amount = 7
+----
+
 endloop
 
 endloop
@@ -136,6 +146,10 @@ reset label coalesce_nullable_equal_or_number
 reset label case_nullable_equal
 
 reset label nullable_is_null_or_equal
+
+reset label nested_nullable_leaves
+
+reset label other_nullable_payload
 
 # the filters compile
 statement ok

@@ -2,8 +2,10 @@
 # description: A compiled filter over columns with NULLs evaluates SQL's three-valued logic on every row
 # group: [jit]
 
-# A batch with NULLs runs a row whose sources are all valid on the fast path and only a row with a NULL on the generic
-# path; an AND-only predicate skips every row with a NULL in a source it or the sums read. A packed sum beside COUNT(*)
+# A predicate whose null-strict leaves meet only at AND and OR runs a batch with NULLs on its fast loop: a leaf with a
+# NULL source counts as FALSE and a sum skips a row with a NULL source. Any other predicate runs a row whose sources are
+# all valid on the fast path and only a row with a NULL on the generic path; an AND-only predicate skips every row with
+# a NULL in a source it or the sums read. A packed sum beside COUNT(*)
 # counts its matching lanes into every count, so a NULL it skips must be one the predicate rejects. The predicates mix
 # AND, OR, NOT and IS NULL, a sum may read a column the predicate does not, NULLs are rare, dense or in every row, and
 # the row count leaves a tail shorter than a lane group.
@@ -44,6 +46,9 @@ SELECT (i % 13)::INTEGER AS k,
        NULL::INTEGER AS empty,
        CASE WHEN i % 31 = 0 THEN NULL WHEN i % 3 = 0 THEN 'ACTIVE' ELSE 'ARCHIVED' END AS s
 FROM range(200003) t(i)
+
+statement ok
+CREATE TABLE nullable_dim AS SELECT i::INTEGER AS k, i * 10 AS v FROM range(13) t(i)
 
 foreach threads 1 4
 
@@ -97,6 +102,24 @@ query II nosort count_beside_other_payload_sum
 SELECT count(*), sum(b) FROM nullable_rows WHERE k <> 3 AND a > 100
 ----
 
+query III nosort nested_nullable_leaves
+SELECT count(*), sum(a - b), sum(dense) FROM nullable_rows WHERE (a > 900 AND b < 100) OR dense = 0 OR k = 4
+----
+
+query II nosort two_source_leaf
+SELECT count(*), sum(b) FROM nullable_rows WHERE a + b < 50 OR k = 4
+----
+
+query II nosort other_payload_under_or
+SELECT count(*), sum(dense * 2) FROM nullable_rows WHERE a = 7 OR k = 9
+----
+
+# the filter selects the rows a join probes
+query III nosort filter_before_join
+SELECT count(*), sum(d.v), sum(r.a) FROM nullable_rows r JOIN nullable_dim d ON r.k = d.k
+WHERE (r.a + r.b < 30 AND r.k > 2) OR r.b = 499
+----
+
 endloop
 
 endloop
@@ -120,6 +143,14 @@ reset label string_nullable
 reset label count_beside_packed_sum
 
 reset label count_beside_other_payload_sum
+
+reset label nested_nullable_leaves
+
+reset label two_source_leaf
+
+reset label other_payload_under_or
+
+reset label filter_before_join
 
 # the filters compile
 statement ok

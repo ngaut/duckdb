@@ -376,6 +376,23 @@ void EmitLoadSljitTypedExpressionTreeFastSourceIndex(struct sljit_compiler *comp
 	EmitLoadSljitExpressionTreeSourceIndex(compiler, source_index, target);
 }
 
+sljit_jump *EmitJumpIfSljitTypedExpressionTreeFastSourceNull(struct sljit_compiler *compiler, idx_t source_index,
+                                                             SljitTypedExpressionTreeFastIndexMode index_mode,
+                                                             const vector<SljitTypedExpressionTreeLoopHoist> *hoists) {
+	// the index first: resolving a selection without a hoist clobbers R0
+	EmitLoadSljitTypedExpressionTreeFastSourceIndex(compiler, source_index, SLJIT_R1, index_mode, hoists);
+	EmitLoadSljitNativeSourceValidity(compiler, source_index, SLJIT_R0);
+	auto source_all_valid = sljit_emit_cmp(compiler, SLJIT_EQUAL, SLJIT_R0, 0, SLJIT_IMM, 0);
+	sljit_emit_op2(compiler, SLJIT_LSHR, SLJIT_R2, 0, SLJIT_R1, 0, SLJIT_IMM, 6);
+	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_R2, 0, SLJIT_MEM2(SLJIT_R0, SLJIT_R2), 3);
+	// the shift takes the row's bit within its word
+	sljit_emit_op2(compiler, SLJIT_MLSHR, SLJIT_R2, 0, SLJIT_R2, 0, SLJIT_R1, 0);
+	sljit_emit_op2u(compiler, SLJIT_AND | SLJIT_SET_Z, SLJIT_R2, 0, SLJIT_IMM, 1);
+	auto source_is_null = sljit_emit_jump(compiler, SLJIT_ZERO);
+	sljit_set_label(source_all_valid, sljit_emit_label(compiler));
+	return source_is_null;
+}
+
 void SetSljitJumpLabels(const vector<sljit_jump *> &jumps, sljit_label *label) {
 	for (auto jump : jumps) {
 		sljit_set_label(jump, label);

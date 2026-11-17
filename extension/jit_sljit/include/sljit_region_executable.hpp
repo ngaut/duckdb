@@ -186,6 +186,9 @@ struct SljitExecutableFilteredAggregateUpdate {
 	//! the input sources the filter reads only through string_compares that a NULL row decides as FALSE would, and no
 	//! payload reads: a batch with their dictionary results reads no other row of them on its fast path
 	vector<bool> string_compare_only_sources;
+	//! The kernel runs rows with NULLs on its fast loops, which check each source a leaf reads: a string_compare_only
+	//! source's match results decide its NULL rows, so it keeps no validity
+	bool fast_null_rows = false;
 	SljitCompiledFunction<SljitNativeAggregateUpdateFunction> compiled;
 	SljitFilteredAggregateKernelKind kind = SljitFilteredAggregateKernelKind::NONE;
 	SljitAggregatePayloadSourceLayout payload_source_layout = SljitAggregatePayloadSourceLayout::DIRECT_PER_LANE;

@@ -89,8 +89,8 @@ SljitExecuteFilteredPrimitiveAggregateUpdate(SljitExecutableFilteredAggregateUpd
 
 	// A source the filter reads only through string comparisons that a batch computes per dictionary entry needs no
 	// look at its rows' validity: its NULL entries compare FALSE, which decides the filter as NULL would. It is
-	// prepared as valid, so its NULLs leave the batch on the fast path, and its validity is restored for the rows other
-	// sources' NULLs send to the generic path.
+	// prepared as valid, so its NULLs leave the batch on the fast path. Its validity is restored for the rows other
+	// sources' NULLs send to the generic path, unless the kernel runs those rows on its fast loops too.
 	auto &source_indices = filtered_update.input_source_indices;
 	auto &compared_valid = adapter_scratch.string_compared_valid_sources;
 	compared_valid = filtered_update.input_source_not_null;
@@ -117,7 +117,8 @@ SljitExecuteFilteredPrimitiveAggregateUpdate(SljitExecutableFilteredAggregateUpd
 			auto &source = input.data[source_indices[compare.source]];
 			matches[compare_idx] = SljitStringCompareDictionaryMatches(
 			    source, payload_sources.DataArray()[compare.source], compare, count, storage[compare_idx]);
-			if (compare.source >= filtered_update.string_compare_only_sources.size() ||
+			if (filtered_update.fast_null_rows ||
+			    compare.source >= filtered_update.string_compare_only_sources.size() ||
 			    !filtered_update.string_compare_only_sources[compare.source] ||
 			    !SljitStringCompareHasDictionary(source, count)) {
 				continue;
