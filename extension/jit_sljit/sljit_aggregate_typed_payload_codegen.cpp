@@ -11,11 +11,19 @@ namespace duckdb {
 static bool BuildSljitFusedAggregatePayloadPlan(const SljitNativeRegionExpressionPlan &payload,
                                                 const ExecutionRegionAggregateInput &aggregate,
                                                 SljitTypedExpressionTreePlan &payload_plan,
-                                                SljitAggregatePayloadDescriptor &descriptor) {
+                                                SljitAggregatePayloadDescriptor &descriptor, bool count_payloads) {
 	if (!SljitTryBindAggregatePayloadDescriptor(payload, aggregate, descriptor)) {
 		return false;
 	}
 	if (!descriptor.has_payload) {
+		return true;
+	}
+	if (descriptor.primitive_kind == AggregatePrimitiveUpdateKind::COUNT) {
+		if (!count_payloads || payload.kind != SljitNativeRegionExpressionKind::REFERENCE) {
+			return false;
+		}
+		payload_plan.supported = true;
+		payload_plan.fast_path.fast_path_supported = true;
 		return true;
 	}
 	if (descriptor.primitive_kind != AggregatePrimitiveUpdateKind::SUM_INT64 &&
@@ -112,7 +120,7 @@ static void TryBuildSljitSharedBinaryPayloadPlanForBase(const vector<SljitNative
 	candidate.lanes.resize(payloads.size());
 	idx_t matched_count = 0;
 	for (idx_t payload_idx = 0; payload_idx < payloads.size(); payload_idx++) {
-		if (descriptors[payload_idx].primitive_kind == AggregatePrimitiveUpdateKind::COUNT_STAR) {
+		if (!descriptors[payload_idx].ReadsValue()) {
 			continue;
 		}
 		auto &payload = payloads[payload_idx];
@@ -178,7 +186,7 @@ void TryBuildSljitSharedBinaryPayloadPlan(const vector<SljitNativeRegionExpressi
 		return;
 	}
 	for (idx_t payload_idx = 0; payload_idx < payloads.size(); payload_idx++) {
-		if (descriptors[payload_idx].primitive_kind == AggregatePrimitiveUpdateKind::COUNT_STAR) {
+		if (!descriptors[payload_idx].ReadsValue()) {
 			continue;
 		}
 		auto &payload = payloads[payload_idx];
@@ -196,7 +204,7 @@ void TryBuildSljitSharedBinaryPayloadPlan(const vector<SljitNativeRegionExpressi
 
 bool BuildSljitFusedAggregateCodegenPlan(const vector<SljitNativeRegionExpressionPlan> &payloads,
                                          const vector<ExecutionRegionAggregateInput> &aggregates,
-                                         SljitFusedAggregateCodegenPlan &codegen_plan) {
+                                         SljitFusedAggregateCodegenPlan &codegen_plan, bool count_payloads) {
 	if (payloads.size() != aggregates.size() || payloads.empty()) {
 		return false;
 	}
@@ -208,7 +216,7 @@ bool BuildSljitFusedAggregateCodegenPlan(const vector<SljitNativeRegionExpressio
 	for (idx_t payload_idx = 0; payload_idx < payloads.size(); payload_idx++) {
 		if (!BuildSljitFusedAggregatePayloadPlan(payloads[payload_idx], aggregates[payload_idx],
 		                                         codegen_plan.payloads[payload_idx],
-		                                         codegen_plan.payload_descriptors[payload_idx])) {
+		                                         codegen_plan.payload_descriptors[payload_idx], count_payloads)) {
 			return false;
 		}
 		if (codegen_plan.payload_descriptors[payload_idx].primitive_kind == AggregatePrimitiveUpdateKind::COUNT_STAR) {

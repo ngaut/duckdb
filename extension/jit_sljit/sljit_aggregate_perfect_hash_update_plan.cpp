@@ -24,6 +24,27 @@ SljitPerfectHashGroupExpressionsUseTypedTree(const vector<SljitNativeRegionExpre
 	return false;
 }
 
+static bool SljitPerfectHashNullCheckedLoopSupported(const ExecutionExpressionIR *predicate,
+                                                     const vector<SljitNativeRegionExpressionPlan> &payloads,
+                                                     const SljitPerfectHashFusedUpdatePlan &plan) {
+	if (!plan.codegen_plan.fast_path_supported ||
+	    (predicate && !SljitTypedExpressionTreeNullDecidesFalse(*predicate))) {
+		return false;
+	}
+	for (auto &group_plan : plan.group_plans) {
+		if (group_plan.expression_kind == SljitNativeRegionExpressionKind::TYPED_EXPRESSION_TREE) {
+			return false;
+		}
+	}
+	for (auto &payload : payloads) {
+		if (payload.kind == SljitNativeRegionExpressionKind::TYPED_EXPRESSION_TREE &&
+		    !SljitTypedExpressionTreeIsNullStrict(*payload.expression_tree)) {
+			return false;
+		}
+	}
+	return true;
+}
+
 bool TryBuildSljitPerfectHashFusedUpdatePlan(
     const ExecutionExpressionIR *predicate, const vector<SljitNativeRegionExpressionPlan> &payloads,
     const vector<ExecutionRegionAggregateInput> &aggregates, const vector<ExecutionRegionGroupInput> &groups,
@@ -36,7 +57,7 @@ bool TryBuildSljitPerfectHashFusedUpdatePlan(
 	if (!TryBuildSljitPerfectHashGroupPlans(groups, group_expressions, contract, result.group_plans,
 	                                        typed_group_expressions) ||
 	    result.group_plans.empty() || !contract.grouped_state_layout_ready ||
-	    !BuildSljitFusedAggregateCodegenPlan(payloads, aggregates, result.codegen_plan)) {
+	    !BuildSljitFusedAggregateCodegenPlan(payloads, aggregates, result.codegen_plan, true)) {
 		error = "unsupported fused perfect-hash aggregate payload shape";
 		return false;
 	}
@@ -73,7 +94,7 @@ bool TryBuildSljitPerfectHashFusedUpdatePlan(
 	}
 	result.perfect_hash_group_count = idx_t(1) << contract.perfect_required_bits_total;
 	for (idx_t payload_idx = 0; payload_idx < payloads.size(); payload_idx++) {
-		if (!SljitFusedGroupedAggregatePayloadSupported(payloads[payload_idx], aggregates[payload_idx], contract)) {
+		if (!SljitPerfectHashAggregatePayloadSupported(payloads[payload_idx], aggregates[payload_idx], contract)) {
 			error = "unsupported fused perfect-hash aggregate payload shape";
 			return false;
 		}
@@ -107,6 +128,7 @@ bool TryBuildSljitPerfectHashFusedUpdatePlan(
 			result.scratch_register_count = 5 | SLJIT_ENTER_VECTOR(NumericCast<sljit_s32>(vector_register_count));
 		}
 	}
+	result.null_checked_loop = SljitPerfectHashNullCheckedLoopSupported(predicate, payloads, result);
 	auto payloads_not_null = BuildSljitAggregatePayloadNotNull(payloads, aggregates, source_not_null);
 	auto batch_lower_never_overflows =
 	    BuildSljitDensePerfectHashLowerNeverOverflows(payloads, aggregates, source_min_values, source_max_values);

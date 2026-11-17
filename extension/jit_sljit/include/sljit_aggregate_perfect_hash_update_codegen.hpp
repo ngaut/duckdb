@@ -59,6 +59,10 @@ struct SljitPerfectHashPayloadUpdateOptions {
 	bool fast_path = false;
 	bool all_valid = false;
 	bool no_source_selection = false;
+	//! Flat rows whose payload sources may be NULL (SljitPerfectHashFusedUpdatePlan::null_checked_loop): a payload
+	//! skips its update when one of its sources is NULL. The source validity array must be in the native vector
+	//! layout's optional invariant register.
+	bool null_rows = false;
 	const vector<SljitTypedExpressionTreeLoopHoist> *payload_data_hoists = nullptr;
 };
 
@@ -76,6 +80,9 @@ struct SljitPerfectHashFusedUpdatePlan {
 	sljit_sw group_index_offset = -1;
 	sljit_sw binary_shared_value_offset = -1;
 	sljit_sw predicate_simd_mask_offset = -1;
+	//! Flat batches whose payload sources hold NULLs run a fast loop: every payload and the predicate are null-strict
+	//! (a payload skips its update on a NULL source, the predicate decides NULL as FALSE) and every group is a column
+	bool null_checked_loop = false;
 	bool hoist_source_data_pointers = false;
 	bool hoist_group_data_pointers = false;
 	bool hoist_fast_source_data_pointers = false;

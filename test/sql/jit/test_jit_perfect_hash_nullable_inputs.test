@@ -2,7 +2,7 @@
 # description: Perfect-hash aggregates over flat chunks with NULL payloads and NULL group keys: a group whose payloads
 # group: [jit]
 
-#              are all NULL keeps NULL sums, and NULL keys form their own group
+#              are all NULL keeps NULL sums and zero counts, and NULL keys form their own group
 
 statement ok
 LOAD jit_sljit
@@ -21,7 +21,11 @@ CREATE TABLE facts AS
 SELECT (i % 97)::INTEGER AS g, CASE WHEN i % 13 = 0 THEN NULL ELSE (i % 50)::INTEGER END AS gn,
        CASE WHEN i % 7 = 0 OR i % 97 = 5 THEN NULL ELSE i % 10007 END AS n,
        CASE WHEN i % 11 = 0 THEN NULL ELSE (i % 1000)::DOUBLE / 4 END AS d,
-       CASE WHEN i % 3 = 0 THEN NULL ELSE i::HUGEINT * 1000000000000 END AS h
+       CASE WHEN i % 3 = 0 THEN NULL ELSE i::HUGEINT * 1000000000000 END AS h,
+       (CASE WHEN i % 97 = 5 THEN 8 ELSE i % 8 END)::INTEGER AS small,
+       CASE WHEN i % 17 = 0 THEN NULL ELSE 'v' || (i % 23)::VARCHAR END AS s,
+       (CASE WHEN i < 150000 THEN i % 97 ELSE i % 90 END)::INTEGER AS half_key,
+       CASE WHEN i < 150000 AND (i % 7 = 0 OR i % 97 = 95) THEN NULL ELSE i % 1000 END AS half_n
 FROM range(300000) tbl(i)
 
 foreach threads 1 4
@@ -47,6 +51,22 @@ UNION ALL
 SELECT 'null_keys', gn, sum(n), count(n), 0 FROM facts GROUP BY gn
 UNION ALL
 SELECT 'computed_key', n % 5, sum(n), count(*), 0 FROM facts GROUP BY n % 5
+UNION ALL
+SELECT 'computed_key_count', g % 7 + 1, sum(n), count(d), count(*) FROM facts GROUP BY g % 7 + 1
+UNION ALL
+SELECT 'small_groups', small, sum(n), count(n), count(*) FROM facts GROUP BY small
+UNION ALL
+SELECT 'filter_or', g, sum(n), count(n), count(*) FROM facts WHERE n < 5000 OR d < 100 GROUP BY g
+UNION ALL
+SELECT 'filter_is_null', g, sum(n), count(n), count(*) FROM facts WHERE n IS NULL OR g < 3 GROUP BY g
+UNION ALL
+SELECT 'typed_payload', g, sum(n * 2 + 1), count(n), count(s) FROM facts GROUP BY g
+UNION ALL
+SELECT 'string_count', g, count(s), count(*), 0 FROM facts GROUP BY g
+UNION ALL
+SELECT 'shared_base', g, sum(half_n * 3), count(half_n), 0 FROM facts GROUP BY g
+UNION ALL
+SELECT 'half_valid', half_key, sum(half_n), count(half_n), count(*) FROM facts GROUP BY half_key
 
 endloop
 
@@ -61,5 +81,16 @@ query II
 SELECT a IS NULL, b FROM r_auto WHERE q = 'sum_count' AND k = 5
 ----
 true	0
+
+query II
+SELECT a IS NULL, b FROM r_auto WHERE q = 'small_groups' AND k = 8
+----
+true	0
+
+# group 95 appears only in the first half, always with a NULL payload; the second half has no NULLs
+query III
+SELECT a IS NULL, b, c FROM r_auto WHERE q = 'half_valid' AND k = 95
+----
+true	0	1546.0
 
 endloop

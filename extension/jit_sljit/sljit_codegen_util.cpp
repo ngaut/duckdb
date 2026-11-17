@@ -185,6 +185,34 @@ sljit_s32 SljitCompareConditionSetFlags(sljit_s32 condition) {
 	return condition <= SLJIT_NOT_EQUAL ? SLJIT_SET_Z : SLJIT_SET(condition & ~1);
 }
 
+void EmitLoadSljitValidityWord(struct sljit_compiler *compiler, sljit_s32 validity_reg, sljit_s32 index_reg,
+                               sljit_s32 word_reg) {
+	D_ASSERT(word_reg != validity_reg && word_reg != index_reg && validity_reg != index_reg);
+	sljit_emit_op2(compiler, SLJIT_LSHR, word_reg, 0, index_reg, 0, SLJIT_IMM, 6);
+	sljit_emit_op1(compiler, SLJIT_MOV, word_reg, 0, SLJIT_MEM2(validity_reg, word_reg), 3);
+}
+
+struct sljit_jump *EmitJumpIfSljitValidityWordBitClear(struct sljit_compiler *compiler, sljit_s32 word_reg,
+                                                       sljit_s32 index_reg) {
+	// the shift takes the row's bit within its word
+	sljit_emit_op2(compiler, SLJIT_MLSHR, word_reg, 0, word_reg, 0, index_reg, 0);
+	sljit_emit_op2u(compiler, SLJIT_AND | SLJIT_SET_Z, word_reg, 0, SLJIT_IMM, 1);
+	return sljit_emit_jump(compiler, SLJIT_ZERO);
+}
+
+struct sljit_jump *EmitJumpIfSljitValidityBitClear(struct sljit_compiler *compiler, sljit_s32 validity_reg,
+                                                   sljit_s32 index_reg, sljit_s32 word_reg) {
+	EmitLoadSljitValidityWord(compiler, validity_reg, index_reg, word_reg);
+	return EmitJumpIfSljitValidityWordBitClear(compiler, word_reg, index_reg);
+}
+
+void EmitLoadSljitValidityBit(struct sljit_compiler *compiler, sljit_s32 validity_reg, sljit_s32 index_reg,
+                              sljit_s32 target_reg) {
+	EmitLoadSljitValidityWord(compiler, validity_reg, index_reg, target_reg);
+	sljit_emit_op2(compiler, SLJIT_MLSHR, target_reg, 0, target_reg, 0, index_reg, 0);
+	sljit_emit_op2(compiler, SLJIT_AND, target_reg, 0, target_reg, 0, SLJIT_IMM, 1);
+}
+
 sljit_sw NativeSignedIntegerDataScale(SljitNativeSignedIntegerWidth width) {
 	switch (width) {
 	case SljitNativeSignedIntegerWidth::INT8:

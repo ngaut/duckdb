@@ -29,6 +29,11 @@ struct SljitAggregatePayloadDescriptor {
 	idx_t state_is_set_offset = 0;
 	bool has_payload = false;
 
+	//! Whether the update reads the payload's value: COUNT(*) reads no payload, COUNT of a column only its validity
+	bool ReadsValue() const {
+		return has_payload && value_abi != SljitAggregatePayloadValueABI::VALIDITY_ONLY;
+	}
+
 	bool IsMachineWord() const {
 		return value_abi == SljitAggregatePayloadValueABI::SIGNED_MACHINE_WORD;
 	}

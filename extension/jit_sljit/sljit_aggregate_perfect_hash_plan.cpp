@@ -137,6 +137,7 @@ bool TryBuildSljitDensePerfectHashAggregateReductionPlan(const vector<ExecutionR
 		    aggregate_idx < batch_lower_never_overflows.size() && batch_lower_never_overflows[aggregate_idx];
 		switch (aggregates[aggregate_idx].primitive_update_kind) {
 		case AggregatePrimitiveUpdateKind::COUNT_STAR:
+		case AggregatePrimitiveUpdateKind::COUNT:
 			lane.count_offset = AllocateSljitLocalPerfectHashReductionField(row_size);
 			break;
 		case AggregatePrimitiveUpdateKind::SUM_INT64:
@@ -180,6 +181,7 @@ bool TryBuildSljitDeferredPerfectHashFlagPlan(const vector<ExecutionRegionAggreg
 	for (auto &aggregate : aggregates) {
 		switch (aggregate.primitive_update_kind) {
 		case AggregatePrimitiveUpdateKind::COUNT_STAR:
+		case AggregatePrimitiveUpdateKind::COUNT:
 		case AggregatePrimitiveUpdateKind::SUM_INT64:
 		case AggregatePrimitiveUpdateKind::SUM_HUGEINT:
 			break;

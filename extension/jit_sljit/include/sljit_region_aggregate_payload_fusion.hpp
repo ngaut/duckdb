@@ -337,12 +337,11 @@ static bool SljitPerfectHashGroupLookupSupported(
 	}
 
 	SljitFusedAggregateCodegenPlan codegen_plan;
-	if (!BuildSljitFusedAggregateCodegenPlan(payloads, sink.aggregates, codegen_plan)) {
+	if (!BuildSljitFusedAggregateCodegenPlan(payloads, sink.aggregates, codegen_plan, true)) {
 		return false;
 	}
 	for (idx_t payload_idx = 0; payload_idx < payloads.size(); payload_idx++) {
-		if (!SljitFusedGroupedAggregatePayloadSupported(payloads[payload_idx], sink.aggregates[payload_idx],
-		                                                contract)) {
+		if (!SljitPerfectHashAggregatePayloadSupported(payloads[payload_idx], sink.aggregates[payload_idx], contract)) {
 			return false;
 		}
 	}

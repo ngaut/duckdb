@@ -46,7 +46,7 @@ bool TryBuildSljitUngroupedFusedAggregateUpdatePlan(const vector<SljitNativeRegi
                                                     SljitUngroupedFusedAggregateUpdatePlan &result, string &error) {
 	result = SljitUngroupedFusedAggregateUpdatePlan();
 	const auto &registers = GetSljitUngroupedAggregateRegisterLayout();
-	if (!BuildSljitFusedAggregateCodegenPlan(payloads, aggregates, result.codegen_plan)) {
+	if (!BuildSljitFusedAggregateCodegenPlan(payloads, aggregates, result.codegen_plan, false)) {
 		error = "unsupported fused aggregate payload shape";
 		return false;
 	}

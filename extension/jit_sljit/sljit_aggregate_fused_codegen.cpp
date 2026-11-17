@@ -50,12 +50,7 @@ struct sljit_jump *EmitFusedAggregateJumpIfValidityNull(struct sljit_compiler *c
 	auto source_all_valid_array = sljit_emit_cmp(compiler, SLJIT_EQUAL, SLJIT_R0, 0, SLJIT_IMM, 0);
 	sljit_emit_op1(compiler, SLJIT_MOV_P, SLJIT_R0, 0, SLJIT_MEM1(SLJIT_R0), SljitPointerArrayOffset(lane_idx));
 	auto source_all_valid = sljit_emit_cmp(compiler, SLJIT_EQUAL, SLJIT_R0, 0, SLJIT_IMM, 0);
-	sljit_emit_op2(compiler, SLJIT_LSHR, SLJIT_R2, 0, index_reg, 0, SLJIT_IMM, 6);
-	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_R3, 0, SLJIT_MEM2(SLJIT_R0, SLJIT_R2), 3);
-	sljit_emit_op2(compiler, SLJIT_AND, SLJIT_R2, 0, index_reg, 0, SLJIT_IMM, 63);
-	sljit_emit_op2(compiler, SLJIT_SHL, SLJIT_R4, 0, SLJIT_IMM, 1, SLJIT_R2, 0);
-	sljit_emit_op2(compiler, SLJIT_AND | SLJIT_SET_Z, SLJIT_R4, 0, SLJIT_R4, 0, SLJIT_R3, 0);
-	auto source_is_null = sljit_emit_jump(compiler, SLJIT_EQUAL);
+	auto source_is_null = EmitJumpIfSljitValidityBitClear(compiler, SLJIT_R0, index_reg, SLJIT_R2);
 	auto all_valid = sljit_emit_label(compiler);
 	sljit_set_label(source_all_valid_array, all_valid);
 	sljit_set_label(source_all_valid, all_valid);
@@ -89,6 +84,19 @@ void EmitLoadFusedAggregateDoubleData(struct sljit_compiler *compiler, sljit_sw 
 	sljit_emit_fmem(compiler, SLJIT_MOV_F64 | SLJIT_MEM_ALIGNED_32, target_freg, SLJIT_MEM2(SLJIT_R0, index_reg), 3);
 }
 
+sljit_jump *EmitJumpIfFusedAggregateReferenceNull(struct sljit_compiler *compiler,
+                                                  const SljitNativeRegionExpressionPlan &payload,
+                                                  bool use_source_selection, sljit_s32 direct_index_reg) {
+	if (use_source_selection) {
+		EmitLoadFusedAggregateSourceIndex(compiler, offsetof(SljitNativeVectorInput, source_sel_array),
+		                                  payload.source_index, SLJIT_R1, true);
+	} else {
+		sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_R1, 0, direct_index_reg, 0);
+	}
+	return EmitFusedAggregateJumpIfValidityNull(compiler, offsetof(SljitNativeVectorInput, source_validity_array),
+	                                            payload.source_index, SLJIT_R1);
+}
+
 sljit_jump *EmitLoadFusedAggregateReferenceValue(struct sljit_compiler *compiler,
                                                  const SljitNativeRegionExpressionPlan &payload,
                                                  bool use_source_selection, bool check_validity,
@@ -108,16 +116,15 @@ sljit_jump *EmitLoadFusedAggregateReferenceValue(struct sljit_compiler *compiler
 		               SLJIT_MEM2(SLJIT_R0, direct_index_reg), NativeIntegerDataScale(payload.integer_kind));
 		return nullptr;
 	}
-	if (use_source_selection) {
+	sljit_jump *source_is_null = nullptr;
+	if (check_validity) {
+		source_is_null =
+		    EmitJumpIfFusedAggregateReferenceNull(compiler, payload, use_source_selection, direct_index_reg);
+	} else if (use_source_selection) {
 		EmitLoadFusedAggregateSourceIndex(compiler, offsetof(SljitNativeVectorInput, source_sel_array),
 		                                  payload.source_index, SLJIT_R1, true);
 	} else {
 		sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_R1, 0, direct_index_reg, 0);
-	}
-	sljit_jump *source_is_null = nullptr;
-	if (check_validity) {
-		source_is_null = EmitFusedAggregateJumpIfValidityNull(
-		    compiler, offsetof(SljitNativeVectorInput, source_validity_array), payload.source_index, SLJIT_R1);
 	}
 	sljit_s32 data_reg;
 	if (TryGetSljitTypedExpressionTreeSourceDataHoist(data_hoists, payload.source_index, data_reg)) {
@@ -190,6 +197,18 @@ bool SljitFusedGroupedAggregatePayloadSupported(const SljitNativeRegionExpressio
 	return payload.kind == SljitNativeRegionExpressionKind::REFERENCE ||
 	       (payload.kind == SljitNativeRegionExpressionKind::TYPED_EXPRESSION_TREE &&
 	        payload.expression_tree != nullptr);
+}
+
+bool SljitPerfectHashAggregatePayloadSupported(const SljitNativeRegionExpressionPlan &payload,
+                                               const ExecutionRegionAggregateInput &aggregate,
+                                               const ExecutionRegionAggregateContract &contract) {
+	SljitAggregatePayloadDescriptor descriptor;
+	if (aggregate.aggregate_index < contract.grouped_state_offsets.size() &&
+	    SljitTryBindAggregatePayloadDescriptor(payload, aggregate, descriptor) &&
+	    descriptor.primitive_kind == AggregatePrimitiveUpdateKind::COUNT) {
+		return payload.kind == SljitNativeRegionExpressionKind::REFERENCE;
+	}
+	return SljitFusedGroupedAggregatePayloadSupported(payload, aggregate, contract);
 }
 
 } // namespace duckdb

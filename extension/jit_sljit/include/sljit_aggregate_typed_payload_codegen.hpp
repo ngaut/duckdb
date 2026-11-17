@@ -52,9 +52,10 @@ bool SljitExpressionIRStructurallyEqual(const ExecutionExpressionIR &left, const
 void TryBuildSljitSharedBinaryPayloadPlan(const vector<SljitNativeRegionExpressionPlan> &payloads,
                                           const vector<SljitAggregatePayloadDescriptor> &descriptors,
                                           SljitSharedBinaryPayloadPlan &result);
+//! count_payloads admits COUNT of a column: a payload that updates its state from its source's validity alone
 bool BuildSljitFusedAggregateCodegenPlan(const vector<SljitNativeRegionExpressionPlan> &payloads,
                                          const vector<ExecutionRegionAggregateInput> &aggregates,
-                                         SljitFusedAggregateCodegenPlan &codegen_plan);
+                                         SljitFusedAggregateCodegenPlan &codegen_plan, bool count_payloads);
 void EmitSljitSharedBinaryPayloadBase(struct sljit_compiler *compiler, const SljitSharedBinaryPayloadPlan &plan,
                                       sljit_s32 shared_value_reg, sljit_sw shared_value_offset,
                                       SljitAggregateExpressionIndexMode index_mode,

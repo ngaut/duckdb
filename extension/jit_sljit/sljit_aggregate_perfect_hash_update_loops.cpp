@@ -213,6 +213,38 @@ static sljit_jump *EmitSljitPerfectHashFlatFastLoop(const SljitPerfectHashFusedU
 	return fast_done;
 }
 
+// Flat rows with valid group keys whose payload sources may be NULL. Group and state flags are set per row: a state
+// whose payloads were all NULL keeps its flag unset.
+static sljit_jump *EmitSljitPerfectHashNullCheckedLoop(const SljitPerfectHashFusedUpdateEmitContext &context,
+                                                       const vector<SljitTypedExpressionTreeLoopHoist> *data_hoists) {
+	auto compiler = context.compiler;
+	const auto &registers = GetSljitNativeVectorRegisterLayout();
+	if (registers.HasOptionalInvariant()) {
+		// the source validity array: the fast loops may keep a source data pointer in this register
+		sljit_emit_op1(compiler, SLJIT_MOV_P, registers.optional_invariant, 0, SLJIT_MEM1(SLJIT_S0),
+		               offsetof(SljitNativeVectorInput, source_validity_array));
+	}
+	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_S1, 0, SLJIT_IMM, 0);
+	auto loop = sljit_emit_label(compiler);
+	auto done = sljit_emit_cmp(compiler, SLJIT_GREATER_EQUAL, SLJIT_S1, 0, SLJIT_S2, 0);
+	EmitLoadFusedAggregateExecuteIndex(compiler, true);
+	vector<sljit_jump *> predicate_false;
+	if (context.predicate) {
+		idx_t spill_index = 0;
+		predicate_false = EmitSljitTypedExpressionTreeNullableFastJumps(
+		    compiler, *context.predicate, false, spill_index, context.overflows,
+		    SljitTypedExpressionTreeFastIndexMode::FLAT, data_hoists);
+	}
+	auto lookup = SljitPerfectHashDirectGroupLookupOptions(context, false);
+	lookup.defer_flags = false;
+	auto payload_update = SljitPerfectHashPayloadUpdateOptionsForLoop(true, false, false, data_hoists);
+	payload_update.null_rows = true;
+	EmitSljitPerfectHashRowUpdate(context, lookup, payload_update, false);
+	EmitSljitPerfectHashPredicateSkipLabel(compiler, predicate_false);
+	EmitNextSljitNativeVectorLoop(compiler, loop);
+	return done;
+}
+
 //! The dictionary loops run only when every group key caches dictionary contributions; other plans omit them
 static bool SljitPerfectHashGroupsCacheDictionaryContributions(const vector<SljitPerfectHashGroupPlan> &groups) {
 	for (auto &group : groups) {
@@ -298,6 +330,7 @@ void EmitSljitPerfectHashFusedUpdateLoops(const SljitPerfectHashFusedUpdateEmitC
 	struct sljit_jump *common_selected_group_present_fast_done = nullptr;
 	struct sljit_jump *common_selected_fast_done = nullptr;
 	struct sljit_jump *selected_fast_done = nullptr;
+	struct sljit_jump *null_checked_done = nullptr;
 	struct sljit_jump *flat_nullable_done = nullptr;
 	struct sljit_jump *use_nullable_group_loop = nullptr;
 	struct sljit_jump *use_partially_selected_group_loop = nullptr;
@@ -422,6 +455,13 @@ void EmitSljitPerfectHashFusedUpdateLoops(const SljitPerfectHashFusedUpdateEmitC
 		sljit_emit_op1(compiler, SLJIT_MOV_U8, SLJIT_R0, 0, SLJIT_MEM1(SLJIT_S0),
 		               offsetof(SljitNativeVectorInput, perfect_hash_inputs_flat_no_selection));
 		auto inputs_selected = sljit_emit_cmp(compiler, SLJIT_EQUAL, SLJIT_R0, 0, SLJIT_IMM, 0);
+		if (update_plan.null_checked_loop) {
+			sljit_emit_op1(compiler, SLJIT_MOV_U8, SLJIT_R0, 0, SLJIT_MEM1(SLJIT_S0),
+			               offsetof(SljitNativeVectorInput, perfect_hash_group_all_valid));
+			auto groups_nullable = sljit_emit_cmp(compiler, SLJIT_EQUAL, SLJIT_R0, 0, SLJIT_IMM, 0);
+			null_checked_done = EmitSljitPerfectHashNullCheckedLoop(context, data_hoists);
+			sljit_set_label(groups_nullable, sljit_emit_label(compiler));
+		}
 		loop_options = SljitPerfectHashUpdateLoopOptions();
 		loop_options.reset_index = true;
 		loop_options.direct_logical_index = true;
@@ -470,6 +510,9 @@ void EmitSljitPerfectHashFusedUpdateLoops(const SljitPerfectHashFusedUpdateEmitC
 	}
 	if (selected_fast_done) {
 		sljit_set_label(selected_fast_done, done_label);
+	}
+	if (null_checked_done) {
+		sljit_set_label(null_checked_done, done_label);
 	}
 	if (flat_nullable_done) {
 		sljit_set_label(flat_nullable_done, done_label);

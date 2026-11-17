@@ -2,6 +2,7 @@
 
 #include "sljit_aggregate_fused_codegen.hpp"
 #include "sljit_aggregate_primitive_codegen.hpp"
+#include "sljit_codegen_internal.hpp"
 #include "sljit_codegen_util.hpp"
 
 #include "duckdb/common/types/cast_helpers.hpp"
@@ -290,10 +291,44 @@ void EmitSljitPerfectHashPayloadUpdates(const SljitPerfectHashFusedUpdateEmitCon
 		                                 context.binary_shared_value_offset, shared_index_mode, context.overflows,
 		                                 options.payload_data_hoists, selected_shared_payload);
 	}
+	// Rows with NULLs: consecutive payloads that read the same sources skip their updates on one test of them
+	vector<idx_t> null_checked_sources;
+	vector<sljit_jump *> source_null_jumps;
+	auto end_null_checked_run = [&]() {
+		SetSljitJumpLabels(source_null_jumps, sljit_emit_label(compiler));
+		source_null_jumps.clear();
+		null_checked_sources.clear();
+	};
 	for (idx_t payload_idx = 0; payload_idx < payloads.size(); payload_idx++) {
 		auto &descriptor = descriptors[payload_idx];
 		const auto state_offset = contract.grouped_state_offsets[descriptor.aggregate_index];
-		if (descriptor.primitive_kind == AggregatePrimitiveUpdateKind::COUNT_STAR) {
+		if (options.null_rows) {
+			vector<idx_t> sources;
+			if (descriptor.has_payload) {
+				if (payloads[payload_idx].kind == SljitNativeRegionExpressionKind::REFERENCE) {
+					sources.push_back(payloads[payload_idx].source_index);
+				} else {
+					D_ASSERT(SljitTypedExpressionTreeIsNullStrict(*payloads[payload_idx].expression_tree));
+					CollectSljitTypedExpressionTreeReferences(*payloads[payload_idx].expression_tree, sources);
+				}
+			}
+			if (sources != null_checked_sources || sources.empty()) {
+				end_null_checked_run();
+				for (auto source_index : sources) {
+					source_null_jumps.push_back(EmitJumpIfSljitTypedExpressionTreeFastSourceNull(
+					    compiler, source_index, SljitTypedExpressionTreeFastIndexMode::FLAT,
+					    options.payload_data_hoists));
+				}
+				null_checked_sources = std::move(sources);
+			}
+		}
+		if (!descriptor.ReadsValue()) {
+			// COUNT(*), or COUNT of a column whose rows the loop has not already proven valid
+			sljit_jump *source_is_null = nullptr;
+			if (descriptor.has_payload && !options.all_valid && !options.null_rows) {
+				source_is_null = EmitJumpIfFusedAggregateReferenceNull(
+				    compiler, payloads[payload_idx], !options.fast_path && !options.no_source_selection, SLJIT_S3);
+			}
 			if (use_reduction) {
 				if (context.reduction_state_reg == SLJIT_S4) {
 					sljit_emit_op1(compiler, SLJIT_MOV_P, SLJIT_S4, 0, SLJIT_MEM1(SLJIT_SP),
@@ -301,16 +336,12 @@ void EmitSljitPerfectHashPayloadUpdates(const SljitPerfectHashFusedUpdateEmitCon
 				}
 				EmitSljitDensePerfectHashIncrementCount(compiler, dense_reduction_plan.lanes[payload_idx],
 				                                        context.reduction_state_reg);
-				continue;
-			}
-			EmitSljitPerfectHashPayloadStatePointer(context);
-			if (deferred_flag_plan.enabled && options.all_valid) {
-				EmitSljitGroupedAggregateIncrementInt64ImmediateDirect(compiler, context.state_pointer_reg,
-				                                                       state_offset, descriptor.state_value_offset);
 			} else {
+				EmitSljitPerfectHashPayloadStatePointer(context);
 				EmitSljitGroupedAggregateIncrementInt64Immediate(compiler, context.state_pointer_reg, state_offset,
 				                                                 descriptor.state_value_offset);
 			}
+			EmitSljitPerfectHashPayloadInvalidContinuation(compiler, source_is_null);
 			continue;
 		}
 
@@ -323,8 +354,8 @@ void EmitSljitPerfectHashPayloadUpdates(const SljitPerfectHashFusedUpdateEmitCon
 			                                 selected_shared_payload && state_clobbers_selected_source_array);
 		} else if (payloads[payload_idx].kind == SljitNativeRegionExpressionKind::REFERENCE) {
 			payload_invalid = EmitLoadFusedAggregateReferenceValue(
-			    compiler, payloads[payload_idx], !options.fast_path && !options.no_source_selection, !options.all_valid,
-			    SLJIT_S3, options.payload_data_hoists);
+			    compiler, payloads[payload_idx], !options.fast_path && !options.no_source_selection,
+			    !options.all_valid && !options.null_rows, SLJIT_S3, options.payload_data_hoists);
 		} else {
 			const auto payload_may_be_null = EmitSljitPerfectHashExpressionTreeValue(
 			    context, *payloads[payload_idx].expression_tree, options.fast_path, options.all_valid,
@@ -363,6 +394,7 @@ void EmitSljitPerfectHashPayloadUpdates(const SljitPerfectHashFusedUpdateEmitCon
 		}
 		EmitSljitPerfectHashPayloadInvalidContinuation(compiler, payload_invalid);
 	}
+	end_null_checked_run();
 }
 
 void EmitLoadSljitCommonSelectedSourceIndex(struct sljit_compiler *compiler) {

@@ -40,13 +40,7 @@ sljit_jump *EmitJumpIfSljitExpressionTreeSourceNull(struct sljit_compiler *compi
 	auto source_all_valid = sljit_emit_cmp(compiler, SLJIT_EQUAL, SLJIT_R0, 0, SLJIT_IMM, 0);
 	sljit_emit_op1(compiler, SLJIT_MOV_P, SLJIT_R4, 0, SLJIT_R0, 0);
 	EmitLoadSljitExpressionTreeSourceIndex(compiler, source_index, SLJIT_R1);
-	sljit_emit_op1(compiler, SLJIT_MOV_P, SLJIT_R0, 0, SLJIT_R4, 0);
-	sljit_emit_op2(compiler, SLJIT_LSHR, SLJIT_R2, 0, SLJIT_R1, 0, SLJIT_IMM, 6);
-	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_R3, 0, SLJIT_MEM2(SLJIT_R0, SLJIT_R2), 3);
-	sljit_emit_op2(compiler, SLJIT_AND, SLJIT_R2, 0, SLJIT_R1, 0, SLJIT_IMM, 63);
-	sljit_emit_op2(compiler, SLJIT_SHL, SLJIT_R4, 0, SLJIT_IMM, 1, SLJIT_R2, 0);
-	sljit_emit_op2(compiler, SLJIT_AND | SLJIT_SET_Z, SLJIT_R4, 0, SLJIT_R4, 0, SLJIT_R3, 0);
-	auto source_is_null = sljit_emit_jump(compiler, SLJIT_EQUAL);
+	auto source_is_null = EmitJumpIfSljitValidityBitClear(compiler, SLJIT_R4, SLJIT_R1, SLJIT_R2);
 	sljit_set_label(source_all_valid, sljit_emit_label(compiler));
 	return source_is_null;
 }
@@ -54,12 +48,7 @@ sljit_jump *EmitJumpIfSljitExpressionTreeSourceNull(struct sljit_compiler *compi
 sljit_jump *EmitJumpIfSljitExpressionTreeFlatSourceNull(struct sljit_compiler *compiler, idx_t source_index) {
 	EmitLoadSljitNativeSourceValidity(compiler, source_index, SLJIT_R0);
 	auto source_all_valid = sljit_emit_cmp(compiler, SLJIT_EQUAL, SLJIT_R0, 0, SLJIT_IMM, 0);
-	sljit_emit_op2(compiler, SLJIT_LSHR, SLJIT_R2, 0, SLJIT_S1, 0, SLJIT_IMM, 6);
-	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_R3, 0, SLJIT_MEM2(SLJIT_R0, SLJIT_R2), 3);
-	sljit_emit_op2(compiler, SLJIT_AND, SLJIT_R2, 0, SLJIT_S1, 0, SLJIT_IMM, 63);
-	sljit_emit_op2(compiler, SLJIT_SHL, SLJIT_R4, 0, SLJIT_IMM, 1, SLJIT_R2, 0);
-	sljit_emit_op2(compiler, SLJIT_AND | SLJIT_SET_Z, SLJIT_R4, 0, SLJIT_R4, 0, SLJIT_R3, 0);
-	auto source_is_null = sljit_emit_jump(compiler, SLJIT_EQUAL);
+	auto source_is_null = EmitJumpIfSljitValidityBitClear(compiler, SLJIT_R0, SLJIT_S1, SLJIT_R2);
 	sljit_set_label(source_all_valid, sljit_emit_label(compiler));
 	return source_is_null;
 }

@@ -508,12 +508,8 @@ unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativeFilteredUngroupedFusedPrim
 			auto hybrid_loop = sljit_emit_label(compiler);
 			hybrid_done = sljit_emit_cmp(compiler, SLJIT_GREATER_EQUAL, SLJIT_S1, 0, SLJIT_S2, 0);
 			sljit_get_local_base(compiler, SLJIT_R3, 0, combined_validity_offset);
-			sljit_emit_op2(compiler, SLJIT_LSHR, SLJIT_R0, 0, SLJIT_S1, 0, SLJIT_IMM, 6);
-			sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_R0, 0, SLJIT_MEM2(SLJIT_R3, SLJIT_R0), 3);
-			// the shift takes the row's bit within its word
-			sljit_emit_op2(compiler, SLJIT_MLSHR, SLJIT_R0, 0, SLJIT_R0, 0, SLJIT_S1, 0);
-			sljit_emit_op2u(compiler, SLJIT_AND | SLJIT_SET_Z, SLJIT_R0, 0, SLJIT_IMM, 1);
-			vector<sljit_jump *> source_null_jumps {sljit_emit_jump(compiler, SLJIT_ZERO)};
+			vector<sljit_jump *> source_null_jumps {
+			    EmitJumpIfSljitValidityBitClear(compiler, SLJIT_R3, SLJIT_S1, SLJIT_R0)};
 			idx_t hybrid_spill_index = 0;
 			auto hybrid_predicate_false =
 			    EmitSljitTypedExpressionTreeFastJumps(compiler, predicate, false, hybrid_spill_index, overflows,

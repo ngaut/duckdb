@@ -179,8 +179,6 @@ void EmitSljitGroupedAggregateAccumulateInt64ImmediateNoStateSet(struct sljit_co
                                                                  sljit_s32 value_reg);
 void EmitSljitGroupedAggregateIncrementInt64Immediate(struct sljit_compiler *compiler, sljit_s32 base_reg,
                                                       idx_t state_offset, idx_t value_offset);
-void EmitSljitGroupedAggregateIncrementInt64ImmediateDirect(struct sljit_compiler *compiler, sljit_s32 base_reg,
-                                                            idx_t state_offset, idx_t value_offset);
 void EmitSljitAccumulateHugeintUpperIfNeeded(struct sljit_compiler *compiler, sljit_s32 base_reg, sljit_sw upper_offset,
                                              sljit_s32 upper_value_reg, sljit_s32 carry_reg);
 void EmitSljitGroupedAggregateAccumulateHugeintImmediate(struct sljit_compiler *compiler, sljit_s32 base_reg,

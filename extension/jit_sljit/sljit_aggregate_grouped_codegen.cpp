@@ -82,8 +82,8 @@ unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativeGroupedFusedPrimitiveAggre
 		for (idx_t payload_idx = 0; payload_idx < payloads.size(); payload_idx++) {
 			auto &descriptor = descriptors[payload_idx];
 			const auto state_offset = contract.grouped_state_offsets[descriptor.aggregate_index];
-			EmitSljitGroupedAggregateIncrementInt64ImmediateDirect(compiler, SLJIT_S4, state_offset,
-			                                                       descriptor.state_value_offset);
+			EmitSljitGroupedAggregateIncrementInt64Immediate(compiler, SLJIT_S4, state_offset,
+			                                                 descriptor.state_value_offset);
 		}
 		EmitNextSljitNativeVectorLoop(compiler, fast_loop);
 

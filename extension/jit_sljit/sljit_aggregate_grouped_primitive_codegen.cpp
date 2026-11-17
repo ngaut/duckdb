@@ -121,21 +121,15 @@ void EmitSljitGroupedAggregateValuePointerImmediate(struct sljit_compiler *compi
 
 void EmitSljitGroupedAggregateSetStateIsSetImmediate(struct sljit_compiler *compiler, sljit_s32 base_reg,
                                                      idx_t state_offset, idx_t state_is_set_offset) {
-	sljit_emit_op1(compiler, SLJIT_MOV_P, SLJIT_R0, 0, base_reg, 0);
-	const auto offset = NumericCast<sljit_sw>(state_offset + state_is_set_offset);
-	if (offset != 0) {
-		sljit_emit_op2(compiler, SLJIT_ADD, SLJIT_R0, 0, SLJIT_R0, 0, SLJIT_IMM, offset);
-	}
-	sljit_emit_op1(compiler, SLJIT_MOV_U8, SLJIT_MEM1(SLJIT_R0), 0, SLJIT_IMM, 1);
+	sljit_emit_op1(compiler, SLJIT_MOV_U8, SLJIT_MEM1(base_reg),
+	               NumericCast<sljit_sw>(state_offset + state_is_set_offset), SLJIT_IMM, 1);
 }
 
 void EmitSljitGroupedAggregateAccumulateInt64Immediate(struct sljit_compiler *compiler, sljit_s32 base_reg,
                                                        idx_t state_offset, idx_t value_offset,
                                                        idx_t state_is_set_offset, sljit_s32 value_reg) {
-	EmitSljitGroupedAggregateValuePointerImmediate(compiler, base_reg, state_offset, value_offset);
-	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_R3, 0, SLJIT_MEM1(SLJIT_R0), 0);
-	sljit_emit_op2(compiler, SLJIT_ADD, SLJIT_R3, 0, SLJIT_R3, 0, value_reg, 0);
-	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_MEM1(SLJIT_R0), 0, SLJIT_R3, 0);
+	EmitSljitGroupedAggregateAccumulateInt64ImmediateNoStateSet(compiler, base_reg, state_offset, value_offset,
+	                                                            value_reg);
 	EmitSljitGroupedAggregateSetStateIsSetImmediate(compiler, base_reg, state_offset, state_is_set_offset);
 }
 
@@ -150,14 +144,6 @@ void EmitSljitGroupedAggregateAccumulateInt64ImmediateNoStateSet(struct sljit_co
 
 void EmitSljitGroupedAggregateIncrementInt64Immediate(struct sljit_compiler *compiler, sljit_s32 base_reg,
                                                       idx_t state_offset, idx_t value_offset) {
-	EmitSljitGroupedAggregateValuePointerImmediate(compiler, base_reg, state_offset, value_offset);
-	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_R3, 0, SLJIT_MEM1(SLJIT_R0), 0);
-	sljit_emit_op2(compiler, SLJIT_ADD, SLJIT_R3, 0, SLJIT_R3, 0, SLJIT_IMM, 1);
-	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_MEM1(SLJIT_R0), 0, SLJIT_R3, 0);
-}
-
-void EmitSljitGroupedAggregateIncrementInt64ImmediateDirect(struct sljit_compiler *compiler, sljit_s32 base_reg,
-                                                            idx_t state_offset, idx_t value_offset) {
 	const auto offset = NumericCast<sljit_sw>(state_offset + value_offset);
 	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_R3, 0, SLJIT_MEM1(base_reg), offset);
 	sljit_emit_op2(compiler, SLJIT_ADD, SLJIT_R3, 0, SLJIT_R3, 0, SLJIT_IMM, 1);
@@ -178,13 +164,8 @@ void EmitSljitAccumulateHugeintUpperIfNeeded(struct sljit_compiler *compiler, sl
 void EmitSljitGroupedAggregateAccumulateHugeintImmediate(struct sljit_compiler *compiler, sljit_s32 base_reg,
                                                          idx_t state_offset, idx_t value_offset,
                                                          idx_t state_is_set_offset, sljit_s32 value_reg) {
-	EmitSljitGroupedAggregateValuePointerImmediate(compiler, base_reg, state_offset, value_offset);
-	sljit_emit_op2(compiler, SLJIT_ASHR, SLJIT_R4, 0, value_reg, 0, SLJIT_IMM, 63);
-	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_R3, 0, SLJIT_MEM1(SLJIT_R0), offsetof(hugeint_t, lower));
-	sljit_emit_op2(compiler, SLJIT_ADD | SLJIT_SET_CARRY, SLJIT_R3, 0, SLJIT_R3, 0, value_reg, 0);
-	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_MEM1(SLJIT_R0), offsetof(hugeint_t, lower), SLJIT_R3, 0);
-	sljit_emit_op_flags(compiler, SLJIT_MOV, SLJIT_R1, 0, SLJIT_CARRY);
-	EmitSljitAccumulateHugeintUpperIfNeeded(compiler, SLJIT_R0, offsetof(hugeint_t, upper), SLJIT_R4, SLJIT_R1);
+	EmitSljitGroupedAggregateAccumulateHugeintImmediateNoStateSet(compiler, base_reg, state_offset, value_offset,
+	                                                              value_reg);
 	EmitSljitGroupedAggregateSetStateIsSetImmediate(compiler, base_reg, state_offset, state_is_set_offset);
 }
 
@@ -192,9 +173,10 @@ void EmitSljitGroupedAggregateAccumulateHugeintValueImmediate(struct sljit_compi
                                                               idx_t state_offset, idx_t value_offset,
                                                               idx_t state_is_set_offset, sljit_s32 lower_value_reg,
                                                               sljit_s32 upper_value_reg) {
-	EmitSljitGroupedAggregateValuePointerImmediate(compiler, base_reg, state_offset, value_offset);
-	EmitSljitAccumulateHugeintWords(compiler, SLJIT_R0, offsetof(hugeint_t, lower), offsetof(hugeint_t, upper),
-	                                lower_value_reg, upper_value_reg);
+	const auto offset = NumericCast<sljit_sw>(state_offset + value_offset);
+	EmitSljitAccumulateHugeintWords(compiler, base_reg, offset + NumericCast<sljit_sw>(offsetof(hugeint_t, lower)),
+	                                offset + NumericCast<sljit_sw>(offsetof(hugeint_t, upper)), lower_value_reg,
+	                                upper_value_reg);
 	EmitSljitGroupedAggregateSetStateIsSetImmediate(compiler, base_reg, state_offset, state_is_set_offset);
 }
 

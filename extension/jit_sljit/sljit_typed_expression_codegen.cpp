@@ -178,18 +178,8 @@ static void EmitSljitTypedExpressionTreeReference(struct sljit_compiler *compile
 	if (!SljitTypedExpressionTreeSourceKnownValid(known_valid_sources, node.ref_index)) {
 		EmitLoadSljitNativeSourceValidity(compiler, node.ref_index, SLJIT_R0);
 		auto source_all_valid = sljit_emit_cmp(compiler, SLJIT_EQUAL, SLJIT_R0, 0, SLJIT_IMM, 0);
-		sljit_emit_op1(compiler, SLJIT_MOV_P, SLJIT_R4, 0, SLJIT_R0, 0);
-		sljit_emit_op2(compiler, SLJIT_LSHR, SLJIT_R2, 0, SLJIT_R1, 0, SLJIT_IMM, 6);
-		sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_R0, 0, SLJIT_MEM2(SLJIT_R4, SLJIT_R2), 3);
-		sljit_emit_op2(compiler, SLJIT_AND, SLJIT_R2, 0, SLJIT_R1, 0, SLJIT_IMM, 63);
-		sljit_emit_op2(compiler, SLJIT_SHL, SLJIT_R4, 0, SLJIT_IMM, 1, SLJIT_R2, 0);
-		sljit_emit_op2(compiler, SLJIT_AND | SLJIT_SET_Z, SLJIT_R4, 0, SLJIT_R4, 0, SLJIT_R0, 0);
-		auto source_valid = sljit_emit_jump(compiler, SLJIT_NOT_EQUAL);
-		sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_R3, 0, SLJIT_IMM, 0);
-		auto validity_done = sljit_emit_jump(compiler, SLJIT_JUMP);
-		sljit_set_label(source_valid, sljit_emit_label(compiler));
+		EmitLoadSljitValidityBit(compiler, SLJIT_R0, SLJIT_R1, SLJIT_R3);
 		sljit_set_label(source_all_valid, sljit_emit_label(compiler));
-		sljit_set_label(validity_done, sljit_emit_label(compiler));
 	}
 
 	sljit_s32 load_op;

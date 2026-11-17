@@ -145,6 +145,10 @@ static void EmitSljitPerfectHashCommitPayloads(struct sljit_compiler *compiler,
 			EmitSljitPerfectHashCommitCount(compiler, lane, state_reg, local_state_reg, state_offset,
 			                                descriptor.state_value_offset, true);
 			break;
+		case AggregatePrimitiveUpdateKind::COUNT:
+			EmitSljitPerfectHashCommitCount(compiler, lane, state_reg, local_state_reg, state_offset,
+			                                descriptor.state_value_offset, false);
+			break;
 		case AggregatePrimitiveUpdateKind::SUM_INT64:
 			EmitSljitPerfectHashCommitInt64(compiler, lane, state_reg, local_state_reg, state_offset,
 			                                descriptor.state_value_offset, descriptor.state_is_set_offset,
@@ -207,7 +211,8 @@ void EmitSljitDeferredPerfectHashFlagsCommit(struct sljit_compiler *compiler,
 	    compiler, deferred_plan.group_count, deferred_plan.group_seen_offset, -1, [&]() {
 		    for (idx_t payload_idx = 0; payload_idx < payload_descriptors.size(); payload_idx++) {
 			    auto &descriptor = payload_descriptors[payload_idx];
-			    if (descriptor.primitive_kind == AggregatePrimitiveUpdateKind::COUNT_STAR) {
+			    if (descriptor.primitive_kind == AggregatePrimitiveUpdateKind::COUNT_STAR ||
+			        descriptor.primitive_kind == AggregatePrimitiveUpdateKind::COUNT) {
 				    continue;
 			    }
 			    const auto state_offset = contract.grouped_state_offsets[descriptor.aggregate_index];

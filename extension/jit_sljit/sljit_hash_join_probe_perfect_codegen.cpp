@@ -206,12 +206,7 @@ BuildSljitWidePerfectHashJoinProbe(struct sljit_compiler *compiler, bool unsigne
 	sljit_emit_op1(compiler, SLJIT_MOV_P, SLJIT_R3, 0, SLJIT_MEM1(SLJIT_S0),
 	               offsetof(SljitNativePerfectHashJoinProbeInput, perfect_validity));
 	auto all_valid = sljit_emit_cmp(compiler, SLJIT_EQUAL, SLJIT_R3, 0, SLJIT_IMM, 0);
-	sljit_emit_op2(compiler, SLJIT_LSHR, SLJIT_R4, 0, SLJIT_R0, 0, SLJIT_IMM, 6);
-	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_R4, 0, SLJIT_MEM2(SLJIT_R3, SLJIT_R4), 3);
-	sljit_emit_op2(compiler, SLJIT_AND, SLJIT_R3, 0, SLJIT_R0, 0, SLJIT_IMM, 63);
-	sljit_emit_op2(compiler, SLJIT_SHL, SLJIT_R3, 0, SLJIT_IMM, 1, SLJIT_R3, 0);
-	sljit_emit_op2(compiler, SLJIT_AND | SLJIT_SET_Z, SLJIT_R3, 0, SLJIT_R3, 0, SLJIT_R4, 0);
-	auto value_missing = sljit_emit_jump(compiler, SLJIT_EQUAL);
+	auto value_missing = EmitJumpIfSljitValidityBitClear(compiler, SLJIT_R3, SLJIT_R0, SLJIT_R4);
 	sljit_set_label(all_valid, sljit_emit_label(compiler));
 
 	if (config.emit_build_selection) {
@@ -336,8 +331,7 @@ BuildSljitPerfectHashJoinProbe(const SljitNativeHashJoinProbePlan &plan,
 		sljit_emit_op2(compiler, SLJIT_SUB, SLJIT_R0, 0, SLJIT_R0, 0, registers.minimum, 0);
 
 		all_valid = sljit_emit_cmp(compiler, SLJIT_EQUAL, registers.perfect_validity, 0, SLJIT_IMM, 0);
-		sljit_emit_op2(compiler, SLJIT_LSHR, SLJIT_R3, 0, SLJIT_R0, 0, SLJIT_IMM, 6);
-		sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_R3, 0, SLJIT_MEM2(registers.perfect_validity, SLJIT_R3), 3);
+		EmitLoadSljitValidityWord(compiler, registers.perfect_validity, SLJIT_R0, SLJIT_R3);
 	} else {
 		sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_R2, 0, SLJIT_MEM1(SLJIT_S0),
 		               offsetof(SljitNativePerfectHashJoinProbeInput, perfect_min));
@@ -350,13 +344,9 @@ BuildSljitPerfectHashJoinProbe(const SljitNativeHashJoinProbePlan &plan,
 		sljit_emit_op1(compiler, SLJIT_MOV_P, SLJIT_R2, 0, SLJIT_MEM1(SLJIT_S0),
 		               offsetof(SljitNativePerfectHashJoinProbeInput, perfect_validity));
 		all_valid = sljit_emit_cmp(compiler, SLJIT_EQUAL, SLJIT_R2, 0, SLJIT_IMM, 0);
-		sljit_emit_op2(compiler, SLJIT_LSHR, SLJIT_R3, 0, SLJIT_R0, 0, SLJIT_IMM, 6);
-		sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_R3, 0, SLJIT_MEM2(SLJIT_R2, SLJIT_R3), 3);
+		EmitLoadSljitValidityWord(compiler, SLJIT_R2, SLJIT_R0, SLJIT_R3);
 	}
-	sljit_emit_op2(compiler, SLJIT_AND, SLJIT_R4, 0, SLJIT_R0, 0, SLJIT_IMM, 63);
-	sljit_emit_op2(compiler, SLJIT_SHL, SLJIT_R4, 0, SLJIT_IMM, 1, SLJIT_R4, 0);
-	sljit_emit_op2(compiler, SLJIT_AND | SLJIT_SET_Z, SLJIT_R4, 0, SLJIT_R4, 0, SLJIT_R3, 0);
-	auto value_missing = sljit_emit_jump(compiler, SLJIT_EQUAL);
+	auto value_missing = EmitJumpIfSljitValidityWordBitClear(compiler, SLJIT_R3, SLJIT_R0);
 	sljit_set_label(all_valid, sljit_emit_label(compiler));
 
 	if (config.emit_build_selection) {
