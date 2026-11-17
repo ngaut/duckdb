@@ -1,0 +1,69 @@
+# name: test/sql/jit/test_jit_filtered_sum_register_accumulators.test
+# description: A filtered ungrouped aggregate keeps running sums and counts in registers on its fast loops
+# group: [jit]
+
+# Sums wide enough to carry into the upper word of a HUGEINT, negative values, payload mixes that fit the registers and
+# ones that do not, and batches with NULLs all give the native results.
+
+require jit_sljit
+
+statement ok
+SET jit_measure_native_legs=false
+
+statement ok
+SET jit_cbo_startup_base_cost=0
+
+statement ok
+SET jit_cbo_startup_margin_basis_points=0
+
+statement ok
+CREATE TABLE wide AS
+SELECT i AS id, (i % 1000)::INTEGER AS k,
+       ((i % 1000) * 4611686018427387 - 2305843009213693952)::BIGINT AS big,
+       (i % 97 - 48)::BIGINT AS small,
+       (i % 13)::INTEGER AS narrow,
+       CASE WHEN i % 11 = 0 THEN NULL ELSE i * 1000003 END AS nullable_big
+FROM range(500000) t(i)
+
+foreach threads 1 4
+
+statement ok
+SET threads={threads}
+
+foreach policy off auto
+
+statement ok
+SET jit_policy='{policy}'
+
+statement ok
+CREATE OR REPLACE TABLE r_{policy} AS
+SELECT 'hugeint_carry' AS q, sum(big)::HUGEINT AS a, count(*)::HUGEINT AS b, 0::HUGEINT AS c, 0::HUGEINT AS d
+FROM wide WHERE k < 700
+UNION ALL
+SELECT 'negative', sum(small), count(*), sum(narrow), 0 FROM wide WHERE k >= 300
+UNION ALL
+SELECT 'fits', sum(small), sum(narrow), count(*), 0 FROM wide WHERE k % 3 = 1
+UNION ALL
+SELECT 'spills', sum(big), sum(small), sum(narrow), count(*) FROM wide WHERE k < 900
+UNION ALL
+SELECT 'nullable', sum(nullable_big), count(*), 0, 0 FROM wide WHERE k < 400 OR id % 7 = 3
+UNION ALL
+SELECT 'nullable_filter', sum(big), count(*), 0, 0 FROM wide WHERE nullable_big < 200000000000
+UNION ALL
+SELECT 'empty', sum(big), count(*), 0, 0 FROM wide WHERE k > 5000
+
+endloop
+
+query I
+SELECT count(*) FROM ((SELECT * FROM r_off EXCEPT ALL SELECT * FROM r_auto)
+                      UNION ALL (SELECT * FROM r_auto EXCEPT ALL SELECT * FROM r_off))
+----
+0
+
+# no row passes: the sum stays NULL
+query I
+SELECT a IS NULL FROM r_auto WHERE q = 'empty'
+----
+true
+
+endloop
