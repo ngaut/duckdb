@@ -114,6 +114,27 @@ query II nosort other_payload_under_or
 SELECT count(*), sum(dense * 2) FROM nullable_rows WHERE a = 7 OR k = 9
 ----
 
+# a NULL row's leftover value passes these comparisons: the row must still be rejected
+query II nosort leftover_passes_and
+SELECT count(*), sum(b) FROM nullable_rows WHERE a < 5 AND k <> 2
+----
+
+query II nosort leftover_passes_or
+SELECT count(*), sum(a) FROM nullable_rows WHERE dense < 10 OR k = 11
+----
+
+query II nosort leftover_passes_all_null
+SELECT count(*), sum(k) FROM nullable_rows WHERE empty < 1 OR k = 6
+----
+
+query III nosort leftover_passes_groups
+SELECT k, count(*), sum(a) FROM nullable_rows WHERE b < 3 GROUP BY k ORDER BY k
+----
+
+query II nosort leftover_passes_rows
+SELECT a, b FROM nullable_rows WHERE b <= 1 OR a <= 3 ORDER BY a, b
+----
+
 # the filter selects the rows a join probes
 query III nosort filter_before_join
 SELECT count(*), sum(d.v), sum(r.a) FROM nullable_rows r JOIN nullable_dim d ON r.k = d.k
@@ -151,6 +172,16 @@ reset label two_source_leaf
 reset label other_payload_under_or
 
 reset label filter_before_join
+
+reset label leftover_passes_and
+
+reset label leftover_passes_or
+
+reset label leftover_passes_all_null
+
+reset label leftover_passes_groups
+
+reset label leftover_passes_rows
 
 # the filters compile
 statement ok

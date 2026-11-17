@@ -121,6 +121,15 @@ query II nosort other_nullable_payload
 SELECT count(*), sum(nullable_amount) FROM statuses WHERE nullable_status = 'PENDING' OR amount = 7
 ----
 
+# a NULL row's leftover value passes the numeric comparisons: the row must still be rejected
+query II nosort leftover_passes_beside_string
+SELECT count(*), sum(amount) FROM statuses WHERE nullable_amount < 3 OR nullable_status = 'PENDING'
+----
+
+query II nosort leftover_passes_under_and
+SELECT count(*), sum(amount) FROM statuses WHERE (nullable_amount <= 2 AND amount < 900) OR nullable_status = 'ACTIVE'
+----
+
 endloop
 
 endloop
@@ -150,6 +159,10 @@ reset label nullable_is_null_or_equal
 reset label nested_nullable_leaves
 
 reset label other_nullable_payload
+
+reset label leftover_passes_beside_string
+
+reset label leftover_passes_under_and
 
 # the filters compile
 statement ok

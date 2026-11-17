@@ -475,11 +475,28 @@ static vector<sljit_jump *> EmitSljitTypedExpressionTreeFastJumpsInternal(
 	// a null-strict leaf with a NULL source is NULL, which the AND and OR above it decide as FALSE
 	vector<idx_t> sources;
 	CollectSljitTypedExpressionTreeReferences(node, sources);
-	vector<sljit_jump *> null_jumps;
-	for (auto source_index : sources) {
-		null_jumps.push_back(
-		    EmitJumpIfSljitTypedExpressionTreeFastSourceNull(compiler, source_index, index_mode, data_hoists));
+	auto emit_null_jumps = [&]() {
+		vector<sljit_jump *> null_jumps;
+		for (auto source_index : sources) {
+			null_jumps.push_back(
+			    EmitJumpIfSljitTypedExpressionTreeFastSourceNull(compiler, source_index, index_mode, data_hoists));
+		}
+		return null_jumps;
+	};
+	if (SljitTypedExpressionTreeEvaluatesAnyBits(node)) {
+		// a NULL row's leftover value decides FALSE rightly, so only a row the leaf accepts tests its sources
+		auto rejected = EmitSljitTypedExpressionTreeFastLeafJumps(compiler, node, false, spill_index, overflows,
+		                                                          index_mode, data_hoists);
+		auto null_jumps = emit_null_jumps();
+		rejected.insert(rejected.end(), null_jumps.begin(), null_jumps.end());
+		if (!when) {
+			return rejected;
+		}
+		vector<sljit_jump *> accepted {sljit_emit_jump(compiler, SLJIT_JUMP)};
+		SetSljitJumpLabels(rejected, sljit_emit_label(compiler));
+		return accepted;
 	}
+	auto null_jumps = emit_null_jumps();
 	auto result = EmitSljitTypedExpressionTreeFastLeafJumps(compiler, node, when, spill_index, overflows, index_mode,
 	                                                        data_hoists);
 	if (when) {

@@ -432,6 +432,52 @@ bool SljitTypedExpressionTreeIsNullStrict(const ExecutionExpressionIR &node) {
 	return true;
 }
 
+bool SljitTypedExpressionTreeEvaluatesAnyBits(const ExecutionExpressionIR &node) {
+	switch (node.kind) {
+	case ExecutionExpressionIRKind::CONSTANT:
+		return true;
+	case ExecutionExpressionIRKind::REFERENCE:
+		return node.return_type.InternalType() != PhysicalType::VARCHAR;
+	case ExecutionExpressionIRKind::CONJUNCTION:
+		break;
+	case ExecutionExpressionIRKind::UNARY:
+		if (node.unary_op == ExecutionExpressionUnaryOp::NEGATE && node.arithmetic_overflow_check) {
+			return false;
+		}
+		break;
+	case ExecutionExpressionIRKind::BINARY:
+		switch (node.binary_op) {
+		case ExecutionExpressionBinaryOp::DIVIDE:
+		case ExecutionExpressionBinaryOp::INTEGER_DIVIDE:
+		case ExecutionExpressionBinaryOp::MODULO:
+			return false;
+		case ExecutionExpressionBinaryOp::ADD:
+		case ExecutionExpressionBinaryOp::SUBTRACT:
+		case ExecutionExpressionBinaryOp::MULTIPLY:
+			if (node.arithmetic_overflow_check) {
+				return false;
+			}
+			break;
+		default:
+			break;
+		}
+		break;
+	default:
+		return false;
+	}
+	for (auto child : {node.left.get(), node.right.get(), node.else_node.get()}) {
+		if (child && !SljitTypedExpressionTreeEvaluatesAnyBits(*child)) {
+			return false;
+		}
+	}
+	for (auto &child : node.children) {
+		if (!SljitTypedExpressionTreeEvaluatesAnyBits(*child)) {
+			return false;
+		}
+	}
+	return true;
+}
+
 bool SljitTypedExpressionTreeNullDecidesFalse(const ExecutionExpressionIR &predicate) {
 	if (predicate.kind != ExecutionExpressionIRKind::CONJUNCTION) {
 		return SljitTypedExpressionTreeIsNullStrict(predicate);

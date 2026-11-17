@@ -362,24 +362,36 @@ unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativeTypedExpressionTreeSelect(
 		sljit_set_label(skip_nullable_simd, sljit_emit_label(compiler));
 	}
 	// Flat batches with NULLs, for a predicate that decides NULL as FALSE: each leaf checks its own sources
-	struct sljit_jump *flat_nullable_done = nullptr;
+	vector<sljit_jump *> flat_nullable_exits;
 	if (fast_path.fast_path_supported && emit_flat_nullable_fast_path && !nullable_simd_done &&
 	    SljitTypedExpressionTreeNullDecidesFalse(root)) {
 		sljit_emit_op1(compiler, SLJIT_MOV_U8, SLJIT_R0, 0, SLJIT_MEM1(SLJIT_S0),
 		               offsetof(SljitNativeVectorInput, expression_tree_flat_no_selection));
 		auto use_generic_loop = sljit_emit_cmp(compiler, SLJIT_EQUAL, SLJIT_R0, 0, SLJIT_IMM, 0);
 		sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_S1, 0, SLJIT_IMM, 0);
+		flat_nullable_exits.push_back(sljit_emit_cmp(compiler, SLJIT_GREATER_EQUAL, SLJIT_S1, 0, SLJIT_S2, 0));
 		auto flat_nullable_loop = sljit_emit_label(compiler);
-		flat_nullable_done = sljit_emit_cmp(compiler, SLJIT_GREATER_EQUAL, SLJIT_S1, 0, SLJIT_S2, 0);
+		auto emit_latch = [&]() {
+			sljit_emit_op2(compiler, SLJIT_ADD, SLJIT_S1, 0, SLJIT_S1, 0, SLJIT_IMM, 1);
+			sljit_set_label(sljit_emit_cmp(compiler, SLJIT_LESS, SLJIT_S1, 0, SLJIT_S2, 0), flat_nullable_loop);
+			flat_nullable_exits.push_back(sljit_emit_jump(compiler, SLJIT_JUMP));
+		};
+		if (SljitTypedExpressionTreeEvaluatesAnyBits(root)) {
+			// Forcing a NULL leaf FALSE only lowers an AND/OR predicate, so a row the predicate rejects on the
+			// leftover values of its NULLs is rejected: it falls through to the back-edge, and only a row it accepts
+			// tests its NULLs, out of line
+			idx_t raw_spill_index = 0;
+			auto raw_true = EmitSljitTypedExpressionTreeFastJumpsIfTrue(compiler, root, raw_spill_index, overflows);
+			emit_latch();
+			SetSljitJumpLabels(raw_true, sljit_emit_label(compiler));
+		}
 		idx_t flat_nullable_spill_index = 0;
 		auto flat_nullable_false =
 		    EmitSljitTypedExpressionTreeNullableFastJumps(compiler, root, false, flat_nullable_spill_index, overflows,
 		                                                  SljitTypedExpressionTreeFastIndexMode::FLAT, nullptr);
 		EmitStoreSljitTypedExpressionTreeTrueSelection(compiler, SLJIT_S1);
 		SetSljitJumpLabels(flat_nullable_false, sljit_emit_label(compiler));
-		sljit_emit_op2(compiler, SLJIT_ADD, SLJIT_S1, 0, SLJIT_S1, 0, SLJIT_IMM, 1);
-		auto flat_nullable_repeat = sljit_emit_jump(compiler, SLJIT_JUMP);
-		sljit_set_label(flat_nullable_repeat, flat_nullable_loop);
+		emit_latch();
 		sljit_set_label(use_generic_loop, sljit_emit_label(compiler));
 	}
 
@@ -408,9 +420,7 @@ unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativeTypedExpressionTreeSelect(
 	if (fast_done) {
 		sljit_set_label(fast_done, done_label);
 	}
-	if (flat_nullable_done) {
-		sljit_set_label(flat_nullable_done, done_label);
-	}
+	SetSljitJumpLabels(flat_nullable_exits, done_label);
 	if (nullable_simd_done) {
 		sljit_set_label(nullable_simd_done, done_label);
 	}

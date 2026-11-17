@@ -63,6 +63,9 @@ bool SljitTypedExpressionTreeFastPathSupported(const ExecutionExpressionIR &node
 bool SljitTypedExpressionTreeCanPrecheckNulls(const ExecutionExpressionIR &node);
 //! A NULL in any source the node reads makes it NULL
 bool SljitTypedExpressionTreeIsNullStrict(const ExecutionExpressionIR &node);
+//! Whether the expression can run on whatever bits its sources hold, such as the leftover value of a NULL row: it reads
+//! no string and neither divides nor checks for overflow, so it never faults or raises an error
+bool SljitTypedExpressionTreeEvaluatesAnyBits(const ExecutionExpressionIR &node);
 //! The predicate's leaves are null-strict and meet only at AND and OR, which are monotone: a leaf with a NULL source
 //! can be decided as FALSE without changing which rows the predicate accepts (a NULL that a TRUE row reads is outvoted
 //! for every value it could take)
