@@ -26,15 +26,4 @@ struct SljitPostJoinProjectionAggregatePrimitive {
 	shared_ptr<SljitJoinAggregateProjection> projection;
 };
 
-static bool
-SljitCanBindPostJoinProjectionAggregatePrimitive(const vector<SljitExecutableRegionOp> &ops,
-                                                 const SljitPostJoinProjectionAggregatePrimitive &primitive) {
-	auto &post_join_projection = primitive.post_join_projection;
-	return SljitCanBindPostJoinProjectionPrimitive(ops, post_join_projection.hash_join_idx,
-	                                               post_join_projection.first_projection_idx,
-	                                               post_join_projection.final_projection_idx) &&
-	       primitive.aggregate_idx < ops.size() &&
-	       SljitAggregateUpdateHasDedicatedCompiledBackend(ops[primitive.aggregate_idx]);
-}
-
 } // namespace duckdb

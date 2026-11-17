@@ -37,15 +37,6 @@ static bool SljitTryBindGeneratedFilterPrimitive(const vector<SljitExecutableReg
 	return true;
 }
 
-static SljitGeneratedFilterPrimitive SljitBindGeneratedFilterPrimitive(const vector<SljitExecutableRegionOp> &ops,
-                                                                       idx_t filter_idx) {
-	SljitGeneratedFilterPrimitive primitive;
-	if (!SljitTryBindGeneratedFilterPrimitive(ops, filter_idx, primitive)) {
-		throw InternalException("SLJIT generated filter primitive cannot bind requested operator");
-	}
-	return primitive;
-}
-
 static bool SljitExecuteGeneratedFilterPrimitive(ExecutionRegionRuntime &runtime, SljitRegionExecutionScratch &scratch,
                                                  vector<SljitExecutableRegionOp> &ops,
                                                  const SljitGeneratedFilterPrimitive &primitive,

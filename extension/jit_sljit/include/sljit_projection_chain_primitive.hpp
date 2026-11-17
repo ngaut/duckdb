@@ -77,35 +77,6 @@ static bool SljitTryBindProjectionChainPrimitive(const vector<SljitExecutableReg
 	return SljitTryBindProjectionChainPrimitive(ops, projection_idx, projection_idx, primitive);
 }
 
-static SljitProjectionChainPrimitive SljitBindProjectionChainPrimitive(const vector<SljitExecutableRegionOp> &ops,
-                                                                       idx_t first_projection_idx,
-                                                                       idx_t final_projection_idx) {
-	SljitProjectionChainPrimitive primitive;
-	if (!SljitTryBindProjectionChainPrimitive(ops, first_projection_idx, final_projection_idx, primitive)) {
-		throw InternalException("SLJIT projection-chain primitive cannot bind requested operator");
-	}
-	return primitive;
-}
-
-static SljitProjectionChainPrimitive
-SljitBindProjectionChainPrimitive(const vector<SljitExecutableRegionOp> &ops, idx_t projection_idx,
-                                  shared_ptr<SljitExecutableRegionOp> bound_projection) {
-	if (!SljitCanBindProjectionChainPrimitive(ops, projection_idx) || !bound_projection ||
-	    bound_projection->Kind() != SljitNativeRegionOpKind::PROJECTION) {
-		throw InternalException("SLJIT projection-chain primitive cannot bind requested projection override");
-	}
-	SljitProjectionChainPrimitive primitive;
-	primitive.first_projection_idx = projection_idx;
-	primitive.final_projection_idx = projection_idx;
-	primitive.bound_composed_projection = std::move(bound_projection);
-	return primitive;
-}
-
-static SljitProjectionChainPrimitive SljitBindProjectionChainPrimitive(const vector<SljitExecutableRegionOp> &ops,
-                                                                       idx_t projection_idx) {
-	return SljitBindProjectionChainPrimitive(ops, projection_idx, projection_idx);
-}
-
 static bool SljitBuildProjectionChainSemanticProjection(const vector<SljitExecutableRegionOp> &ops,
                                                         idx_t first_projection_idx, idx_t final_projection_idx,
                                                         SljitExecutableRegionOp &composed_projection,

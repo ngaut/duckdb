@@ -14,6 +14,8 @@
 
 namespace duckdb {
 
+//! Builds a region's recipe: generated steps run the region's ops from the source on as far as they bind, into the
+//! sink when generated code updates it; otherwise DuckDB's operators take the rows over after them
 class SljitFullPipelineRecipeSequenceBuilder {
 public:
 	SljitFullPipelineRecipeSequenceBuilder(const vector<SljitExecutableRegionOp> &ops_p,
@@ -21,24 +23,14 @@ public:
 	                                       const vector<Value> &source_min_values_p,
 	                                       const vector<Value> &source_max_values_p);
 
-protected:
+	bool TryMakeRecipe(SljitFullPipelineRecipe &recipe) const;
+
+private:
 	SljitFullPipelineRecipe
 	MakePrimitiveSequence(SljitFullPipelinePrimitiveSequence sequence,
 	                      SljitHashJoinDirectAggregateConsumerContract direct_aggregate_consumer = {}) const;
-
 	SljitFullPipelinePrimitiveSequence MakeSourceSequence() const;
 
-	SljitFullPipelinePrimitiveStep MakeProjectionChainStep(idx_t projection_idx) const;
-
-	SljitFullPipelinePrimitiveStep MakeProjectionChainStep(idx_t first_projection_idx,
-	                                                       idx_t final_projection_idx) const;
-
-	void AddProjectionChainStep(SljitFullPipelinePrimitiveSequence &sequence, idx_t projection_idx) const;
-
-	void AddProjectionChainStep(SljitFullPipelinePrimitiveSequence &sequence, idx_t first_projection_idx,
-	                            idx_t final_projection_idx) const;
-
-	//! The generated step that runs op `op_idx` on its own
 	//! The generated step computing ops [op_idx, next_op_idx)
 	bool TryMakeGeneratedOperatorStep(const SljitFullPipelinePrimitiveSequence &sequence, idx_t op_idx,
 	                                  SljitFullPipelinePrimitiveStep &step, idx_t &next_op_idx) const;
@@ -50,20 +42,18 @@ protected:
 	static bool StepHandsOverWholeChunks(const SljitFullPipelinePrimitiveStep &step);
 	bool TryMakeProjectedSinkSteps(idx_t first_projection_idx, const SljitFullPipelinePrimitiveSequence &sequence,
 	                               vector<SljitFullPipelinePrimitiveStep> &steps) const;
+	bool TryMakeDirectAggregateSinkSteps(idx_t op_idx, const SljitFullPipelinePrimitiveSequence &sequence,
+	                                     vector<SljitFullPipelinePrimitiveStep> &steps,
+	                                     SljitHashJoinDirectAggregateConsumerContract &direct_consumer) const;
 	bool TryMakeSelectedBuildSinkSteps(idx_t probe_idx, SljitFullPipelinePrimitiveStep &probe_step,
 	                                   SljitFullPipelinePrimitiveStep &sink_step) const;
 	bool TryMakeNativeTailRecipe(SljitFullPipelinePrimitiveSequence sequence, idx_t tail_start_idx,
 	                             SljitFullPipelineRecipe &recipe) const;
 
-	SljitFullPipelinePrimitiveStep MakeHashJoinProbeMaterializeStep(idx_t hash_join_idx) const;
 	bool TryMakeHashJoinProbeMaterializeStep(idx_t hash_join_idx, SljitFullPipelinePrimitiveStep &step) const;
-
-	SljitFullPipelinePrimitiveStep MakeHashJoinProbeSelectionStep(idx_t hash_join_idx) const;
 	bool TryMakeHashJoinProbeSelectionStep(idx_t hash_join_idx, SljitFullPipelinePrimitiveStep &step) const;
 
-	SljitFullPipelinePrimitiveStep MakeHashJoinProbeProjectionInputStep(idx_t hash_join_idx) const;
-
-protected:
+private:
 	const vector<SljitExecutableRegionOp> &ops;
 	const vector<LogicalType> &source_output_types;
 	const vector<Value> &source_min_values;

@@ -2147,20 +2147,6 @@ TEST_CASE("JIT join grouped aggregate over variable-width RHS keys without runs 
 	RequireNativeContinuation(manager);
 }
 
-static void RequireComposedJoinProjectionAggregateEvent(ExecutionRegionManager &manager) {
-	RequireJitEvent(
-	    manager,
-	    [](const ExecutionRegionEvent &event) {
-		    return EventPhase(event) == "runtime" && EventStatus(event) == "executed" &&
-		           EventExecutionMode(event) == "native" && HasJitAggregateUpdatePath(event) &&
-		           HasHashJoinProbeRuntimePath(event);
-	    },
-	    [](const ExecutionRegionEvent &event) {
-		    RequireHashProbeAggregateUpdateRuntimeOwnership(event);
-		    REQUIRE(HasGeneratedAggregateUpdateStage(event));
-	    });
-}
-
 static void RequireSelectedHashJoinViewMaterializationHasNoElisionCredit(ExecutionRegionManager &manager) {
 	bool found = false;
 	for (auto &event : manager.GetEvents()) {
@@ -2230,7 +2216,8 @@ TEST_CASE("JIT mapped join counts over a key domain the input does not outnumber
 	RequireNativeContinuation(manager);
 }
 
-TEST_CASE("JIT two-join grouped aggregate composes mixed VARCHAR projection chain", "[api][jit]") {
+TEST_CASE("JIT two-join grouped aggregate over a mixed VARCHAR projection chain hands its pipeline over",
+          "[api][jit]") {
 	DuckDB db;
 	Connection con(db);
 	auto &manager = ExecutionRegionManager::Get(*con.context);
@@ -2281,7 +2268,7 @@ TEST_CASE("JIT two-join grouped aggregate composes mixed VARCHAR projection chai
 	REQUIRE_NO_FAIL(*result);
 	RequireSameResultValues(*result, *reference);
 
-	RequireComposedJoinProjectionAggregateEvent(manager);
+	RequireNativeContinuation(manager);
 	RequireSelectedHashJoinViewMaterializationHasNoElisionCredit(manager);
 }
 
@@ -2321,7 +2308,7 @@ TEST_CASE("JIT row-pointer grouped aggregate over compressed string keys without
 	RequireNativeContinuation(manager);
 }
 
-TEST_CASE("JIT two-join grouped aggregate uses selected projection aggregate backend", "[api][jit]") {
+TEST_CASE("JIT two-join grouped aggregate hands its pipeline over", "[api][jit]") {
 	DuckDB db;
 	Connection con(db);
 	auto &manager = ExecutionRegionManager::Get(*con.context);
@@ -2385,10 +2372,10 @@ TEST_CASE("JIT two-join grouped aggregate uses selected projection aggregate bac
 	REQUIRE_NO_FAIL(*result);
 	RequireSameResultValues(*result, *reference);
 
-	RequireComposedJoinProjectionAggregateEvent(manager);
+	RequireNativeContinuation(manager);
 }
 
-TEST_CASE("JIT two-join aggregate composes second-join projection chain", "[api][jit]") {
+TEST_CASE("JIT two-join aggregate over a second-join projection chain hands its pipeline over", "[api][jit]") {
 	DuckDB db;
 	Connection con(db);
 	auto &manager = ExecutionRegionManager::Get(*con.context);
@@ -2444,7 +2431,7 @@ TEST_CASE("JIT two-join aggregate composes second-join projection chain", "[api]
 	REQUIRE_NO_FAIL(*result);
 	RequireSameResultValues(*result, *reference);
 
-	RequireComposedJoinProjectionAggregateEvent(manager);
+	RequireNativeContinuation(manager);
 }
 
 TEST_CASE("JIT multi-join aggregate over build-side keys without runs hands its pipeline over", "[api][jit]") {
@@ -2789,7 +2776,7 @@ TEST_CASE("JIT mark filter count-star over unique keys hands its pipeline to Duc
 	REQUIRE(diff->Collection().GetValue(0, 0).GetValue<int64_t>() == 0);
 }
 
-TEST_CASE("JIT two-projection between-join chain composes primitive boundaries", "[api][jit]") {
+TEST_CASE("JIT two-projection between-join chain hands its pipeline over", "[api][jit]") {
 	DuckDB db;
 	Connection con(db);
 	auto &manager = ExecutionRegionManager::Get(*con.context);
@@ -2850,7 +2837,7 @@ TEST_CASE("JIT two-projection between-join chain composes primitive boundaries",
 	REQUIRE_NO_FAIL(*result);
 	RequireSameResultValues(*result, *reference);
 
-	RequireComposedJoinProjectionAggregateEvent(manager);
+	RequireNativeContinuation(manager);
 }
 
 TEST_CASE("JIT hash join pair probe preserves bloom-filtered sparse misses", "[api][jit]") {

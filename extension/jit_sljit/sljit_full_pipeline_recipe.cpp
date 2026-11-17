@@ -11,8 +11,7 @@
 #include "duckdb/common/constants.hpp"
 
 #include "sljit_expression_plan_tree.hpp"
-#include "sljit_full_pipeline_recipe_binding.hpp"
-#include "sljit_full_pipeline_recipe_facts.hpp"
+#include "sljit_full_pipeline_recipe_sequence_builder.hpp"
 #include "sljit_projection_source_runtime.hpp"
 
 #include <utility>
@@ -137,23 +136,16 @@ public:
 	                               const SljitNativeAggregateStateSourcePlan &source_p,
 	                               const vector<LogicalType> &source_output_types_p,
 	                               const vector<Value> &source_min_values_p, const vector<Value> &source_max_values_p)
-	    : ops(ops_p), source(source_p),
-	      binding(ops_p, source_output_types_p, source_min_values_p, source_max_values_p) {
+	    : ops(ops_p), source(source_p), walker(ops_p, source_output_types_p, source_min_values_p, source_max_values_p) {
 	}
 
 	SljitFullPipelineRecipePlan Build() const {
 		SljitFullPipelineRecipe recipe;
-		idx_t count;
-		auto registry = RecipeRegistry(count);
-		bool bound = false;
-		for (idx_t entry_idx = 0; !bound && entry_idx < count; entry_idx++) {
-			bound = (this->*registry[entry_idx].try_build)(recipe);
-		}
-		if (!bound && !binding.TryMakeOperatorHandOverRecipe(recipe)) {
+		if (!walker.TryMakeRecipe(recipe)) {
 			return SljitFullPipelineRecipePlan();
 		}
 		BindPrimitiveAggregateStateSource(recipe);
-		return binding.MakePrimitiveRecipePlan(std::move(recipe));
+		return SljitMakeFullPipelinePrimitiveRecipePlan(std::move(recipe));
 	}
 
 private:
@@ -170,43 +162,10 @@ private:
 		                                          recipe.primitive_aggregate_state_source_lanes);
 	}
 
-	using TryBuildRecipeFunction = bool (SljitFullPipelineRecipeBuilder::*)(SljitFullPipelineRecipe &) const;
-
-	struct SljitFullPipelineRecipeRegistryEntry {
-		TryBuildRecipeFunction try_build;
-	};
-
-	static const SljitFullPipelineRecipeRegistryEntry *RecipeRegistry(idx_t &count) {
-		static const SljitFullPipelineRecipeRegistryEntry registry[] = {
-		    {&SljitFullPipelineRecipeBuilder::TryBuildJoinFilterAggregateRecipe},
-		    {&SljitFullPipelineRecipeBuilder::TryBuildProjectionAggregateRecipe}};
-		count = sizeof(registry) / sizeof(registry[0]);
-		return registry;
-	}
-
-	bool TryBuildJoinFilterAggregateRecipe(SljitFullPipelineRecipe &recipe) const {
-		SljitJoinFilterAggregateFacts facts;
-		if (!SljitTryAnalyzeJoinFilterAggregate(ops, facts) ||
-		    !binding.TryMakeJoinFilterAggregateRecipe(facts, recipe)) {
-			return false;
-		}
-		return true;
-	}
-
-	//! A join's probe feeding the aggregate through its post-join projections updates the states from the probe's
-	//! matches without materializing the join output
-	bool TryBuildProjectionAggregateRecipe(SljitFullPipelineRecipe &recipe) const {
-		SljitProjectionAggregatePlanFacts plan;
-		return SljitTryAnalyzeProjectionAggregatePlan(ops, plan) &&
-		       plan.prefix.Kind() == SljitProjectionAggregatePrefixKind::JOIN_PREFIX &&
-		       binding.ProjectionAggregateRecipes().TryMakeJoinDirectProjectionAggregateRecipe(plan.shape, plan.prefix,
-		                                                                                       recipe);
-	}
-
 private:
 	const vector<SljitExecutableRegionOp> &ops;
 	const SljitNativeAggregateStateSourcePlan &source;
-	SljitFullPipelineRecipeBinding binding;
+	SljitFullPipelineRecipeSequenceBuilder walker;
 };
 
 SljitFullPipelineRecipePlan BuildSljitFullPipelineRecipePlan(const vector<SljitExecutableRegionOp> &ops,

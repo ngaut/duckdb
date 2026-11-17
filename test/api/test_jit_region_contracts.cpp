@@ -1,6 +1,6 @@
 #include "test_jit_helpers.hpp"
 #include "sljit_full_pipeline_primitive_contract.hpp"
-#include "sljit_full_pipeline_recipe_binding.hpp"
+#include "sljit_full_pipeline_recipe_sequence_builder.hpp"
 #include "sljit_hash_join_probe_execution_contract.hpp"
 #include "sljit_pre_join_projection_descriptor.hpp"
 #include "sljit_join_projection_aggregate_state.hpp"
@@ -636,12 +636,12 @@ TEST_CASE("JIT execution suppression follows nested context scopes", "[api][jit]
 	REQUIRE_FALSE(second.context->IsCompiledExecutionSuppressed());
 }
 
-TEST_CASE("JIT recipe binders preserve the output recipe on admission failure", "[api][jit]") {
+TEST_CASE("JIT recipe walker preserves the output recipe on admission failure", "[api][jit]") {
 	vector<SljitExecutableRegionOp> ops;
 	vector<LogicalType> source_output_types;
 	vector<Value> source_min_values;
 	vector<Value> source_max_values;
-	SljitFullPipelineRecipeBinding binding(ops, source_output_types, source_min_values, source_max_values);
+	SljitFullPipelineRecipeSequenceBuilder walker(ops, source_output_types, source_min_values, source_max_values);
 
 	SljitFullPipelineRecipe recipe;
 	recipe.direct_aggregate_consumer.probe_step_idx = 17;
@@ -659,16 +659,7 @@ TEST_CASE("JIT recipe binders preserve the output recipe on admission failure", 
 		REQUIRE(recipe.direct_aggregate_consumer.aggregate_idx == 37);
 	};
 
-	SljitJoinFilterAggregateFacts join_filter_aggregate;
-	REQUIRE_FALSE(binding.TryMakeJoinFilterAggregateRecipe(join_filter_aggregate, recipe));
-	require_unchanged();
-
-	auto &projection_aggregate = binding.ProjectionAggregateRecipes();
-
-	SljitFullPipelineProjectionAggregateShape projection_aggregate_shape;
-	SljitProjectionAggregatePrefixFacts projection_aggregate_prefix;
-	REQUIRE_FALSE(projection_aggregate.TryMakeJoinDirectProjectionAggregateRecipe(projection_aggregate_shape,
-	                                                                              projection_aggregate_prefix, recipe));
+	REQUIRE_FALSE(walker.TryMakeRecipe(recipe));
 	require_unchanged();
 }
 

@@ -10,6 +10,8 @@
 
 #include "sljit_expression_plan_tree.hpp"
 #include "sljit_full_pipeline_primitive_contract.hpp"
+#include "sljit_hash_join_projection_source_runtime.hpp"
+#include "sljit_post_join_projection_aggregate_primitive.hpp"
 #include "sljit_projected_grouped_aggregate_update_primitive.hpp"
 #include "sljit_pre_join_projection_descriptor.hpp"
 
@@ -34,30 +36,6 @@ SljitFullPipelinePrimitiveSequence SljitFullPipelineRecipeSequenceBuilder::MakeS
 	SljitFullPipelinePrimitiveSequence sequence;
 	sequence.Add(SljitFullPipelinePrimitiveStep::SourceFetch());
 	return sequence;
-}
-
-SljitFullPipelinePrimitiveStep
-SljitFullPipelineRecipeSequenceBuilder::MakeProjectionChainStep(idx_t projection_idx) const {
-	auto projection = SljitBindProjectionChainPrimitive(ops, projection_idx);
-	return SljitFullPipelinePrimitiveStep::ProjectionChain(projection);
-}
-
-SljitFullPipelinePrimitiveStep
-SljitFullPipelineRecipeSequenceBuilder::MakeProjectionChainStep(idx_t first_projection_idx,
-                                                                idx_t final_projection_idx) const {
-	auto projection = SljitBindProjectionChainPrimitive(ops, first_projection_idx, final_projection_idx);
-	return SljitFullPipelinePrimitiveStep::ProjectionChain(projection);
-}
-
-void SljitFullPipelineRecipeSequenceBuilder::AddProjectionChainStep(SljitFullPipelinePrimitiveSequence &sequence,
-                                                                    idx_t projection_idx) const {
-	sequence.Add(MakeProjectionChainStep(projection_idx));
-}
-
-void SljitFullPipelineRecipeSequenceBuilder::AddProjectionChainStep(SljitFullPipelinePrimitiveSequence &sequence,
-                                                                    idx_t first_projection_idx,
-                                                                    idx_t final_projection_idx) const {
-	sequence.Add(MakeProjectionChainStep(first_projection_idx, final_projection_idx));
 }
 
 //! The tail consumes the recipe's materialized view by bound column index, so
@@ -286,6 +264,80 @@ bool SljitFullPipelineRecipeSequenceBuilder::TryMakeProjectedSinkSteps(
 	return false;
 }
 
+//! Whether a step of the sequence runs a join
+static bool SljitSequenceRunsJoin(const SljitFullPipelinePrimitiveSequence &sequence) {
+	for (idx_t step_idx = 0; step_idx < sequence.Count(); step_idx++) {
+		switch (sequence.Step(step_idx).kind) {
+		case SljitFullPipelinePrimitiveKind::HASH_JOIN_PROBE_MATERIALIZE:
+		case SljitFullPipelinePrimitiveKind::HASH_JOIN_PROBE_SELECTION:
+		case SljitFullPipelinePrimitiveKind::MARK_PROBE_FILTER_BOUNDARY:
+			return true;
+		default:
+			break;
+		}
+	}
+	return false;
+}
+
+//! A probe whose matches reach the region's aggregate through at most a filter and projections updates the states
+//! from its matches: the probe at `op_idx`, or the probe after the key projection at `op_idx` folded into it
+bool SljitFullPipelineRecipeSequenceBuilder::TryMakeDirectAggregateSinkSteps(
+    idx_t op_idx, const SljitFullPipelinePrimitiveSequence &sequence, vector<SljitFullPipelinePrimitiveStep> &steps,
+    SljitHashJoinDirectAggregateConsumerContract &direct_consumer) const {
+	const auto aggregate_idx = ops.size() - 1;
+	// the aggregate reads the probe's input as the region's source rows, which the source statistics describe
+	if (op_idx >= aggregate_idx || !SljitAggregateUpdateHasDedicatedCompiledBackend(ops[aggregate_idx]) ||
+	    SljitSequenceRunsJoin(sequence)) {
+		return false;
+	}
+	auto probe_idx = op_idx;
+	SljitFullPipelinePrimitiveStep probe_step;
+	if (ops[op_idx].Kind() == SljitNativeRegionOpKind::PROJECTION) {
+		probe_idx = op_idx + 1;
+		SljitHashJoinProbeSelectionPrimitive selection;
+		// The folded probe's rows reach a filter only materialized. Behind a selection the folded probe reads the
+		// source columns through it, which needs the projection to keep the source column ordinals
+		if (probe_idx >= aggregate_idx || ops[probe_idx].Kind() != SljitNativeRegionOpKind::HASH_JOIN_PROBE ||
+		    ops[probe_idx + 1].Kind() == SljitNativeRegionOpKind::FILTER ||
+		    !SljitTryBindElidedHashJoinProbeSelection(ops, op_idx, probe_idx, source_min_values, source_max_values,
+		                                              selection) ||
+		    (!StepHandsOverWholeChunks(sequence.Step(sequence.Count() - 1)) &&
+		     !selection.output_layout->PreservesSourceColumnOrdinals())) {
+			return false;
+		}
+		probe_step = SljitFullPipelinePrimitiveStep::HashJoinProbeSelection(selection);
+	} else if (ops[op_idx].Kind() != SljitNativeRegionOpKind::HASH_JOIN_PROBE ||
+	           !TryMakeHashJoinProbeSelectionStep(op_idx, probe_step)) {
+		return false;
+	}
+	auto first_projection_idx = probe_idx + 1;
+	auto filter_idx = DConstants::INVALID_INDEX;
+	SljitGeneratedFilterPrimitive filter;
+	if (first_projection_idx < aggregate_idx && ops[first_projection_idx].Kind() == SljitNativeRegionOpKind::FILTER) {
+		filter_idx = first_projection_idx++;
+		if (!SljitTryBindGeneratedFilterPrimitive(ops, filter_idx, filter)) {
+			return false;
+		}
+	}
+	SljitPostJoinProjectionAggregatePrimitive aggregate;
+	aggregate.aggregate_idx = aggregate_idx;
+	const bool has_projection = first_projection_idx < aggregate_idx;
+	if (!SljitTryBindPostJoinProjectionPrimitive(
+	        ops, probe_idx, has_projection ? first_projection_idx : DConstants::INVALID_INDEX,
+	        has_projection ? aggregate_idx - 1 : DConstants::INVALID_INDEX, aggregate.post_join_projection)) {
+		return false;
+	}
+	const auto probe_step_idx = sequence.Count();
+	steps.push_back(std::move(probe_step));
+	if (filter_idx != DConstants::INVALID_INDEX) {
+		steps.push_back(SljitFullPipelinePrimitiveStep::GeneratedFilter(filter));
+	}
+	steps.push_back(SljitFullPipelinePrimitiveStep::PostJoinProjectionAggregateUpdate(aggregate));
+	direct_consumer = SljitMakeHashJoinDirectAggregateConsumerContract(
+	    probe_step_idx, probe_step_idx + steps.size() - 1, probe_idx, aggregate_idx, filter_idx);
+	return true;
+}
+
 //! A probe feeding the region's hash join build, through at most one projection, hands the build its selected rows:
 //! the build reads the probe's output columns where they stand instead of a materialized join chunk
 bool SljitFullPipelineRecipeSequenceBuilder::TryMakeSelectedBuildSinkSteps(
@@ -344,6 +396,10 @@ bool SljitFullPipelineRecipeSequenceBuilder::TryMakeFilteredSinkStep(idx_t filte
 	return false;
 }
 
+bool SljitFullPipelineRecipeSequenceBuilder::TryMakeRecipe(SljitFullPipelineRecipe &recipe) const {
+	return TryMakeNativeTailRecipe(MakeSourceSequence(), 0, recipe);
+}
+
 //! Generated steps carry the rows from `tail_start_idx` on as far as they bind, into the sink when generated code
 //! updates it; otherwise DuckDB's operators take them over at the furthest op they can take them at
 bool SljitFullPipelineRecipeSequenceBuilder::TryMakeNativeTailRecipe(SljitFullPipelinePrimitiveSequence sequence,
@@ -355,6 +411,15 @@ bool SljitFullPipelineRecipeSequenceBuilder::TryMakeNativeTailRecipe(SljitFullPi
 		SljitFullPipelinePrimitiveStep sink_step;
 		SljitFullPipelinePrimitiveStep probe_step;
 		vector<SljitFullPipelinePrimitiveStep> projected_sink_steps;
+		SljitHashJoinDirectAggregateConsumerContract direct_consumer;
+		if (sequence.Count() + 3 <= SLJIT_FULL_PIPELINE_MAX_PRIMITIVES &&
+		    TryMakeDirectAggregateSinkSteps(op_idx, sequence, projected_sink_steps, direct_consumer)) {
+			for (auto &direct_step : projected_sink_steps) {
+				sequence.Add(std::move(direct_step));
+			}
+			recipe = MakePrimitiveSequence(std::move(sequence), direct_consumer);
+			return true;
+		}
 		if (sequence.Count() + 2 <= SLJIT_FULL_PIPELINE_MAX_PRIMITIVES &&
 		    TryMakeProjectedSinkSteps(op_idx, sequence, projected_sink_steps)) {
 			for (auto &projected_step : projected_sink_steps) {
@@ -420,15 +485,6 @@ bool SljitFullPipelineRecipeSequenceBuilder::TryMakeNativeTailRecipe(SljitFullPi
 	return true;
 }
 
-SljitFullPipelinePrimitiveStep
-SljitFullPipelineRecipeSequenceBuilder::MakeHashJoinProbeMaterializeStep(idx_t hash_join_idx) const {
-	SljitFullPipelinePrimitiveStep step;
-	if (!TryMakeHashJoinProbeMaterializeStep(hash_join_idx, step)) {
-		throw InternalException("SLJIT hash join materialize primitive cannot bind requested operator");
-	}
-	return step;
-}
-
 bool SljitFullPipelineRecipeSequenceBuilder::TryMakeHashJoinProbeMaterializeStep(
     idx_t hash_join_idx, SljitFullPipelinePrimitiveStep &step) const {
 	const auto source_key0_int64_to_int32_unchecked =
@@ -440,15 +496,6 @@ bool SljitFullPipelineRecipeSequenceBuilder::TryMakeHashJoinProbeMaterializeStep
 	}
 	step = SljitFullPipelinePrimitiveStep::HashJoinProbeMaterialize(primitive);
 	return true;
-}
-
-SljitFullPipelinePrimitiveStep
-SljitFullPipelineRecipeSequenceBuilder::MakeHashJoinProbeSelectionStep(idx_t hash_join_idx) const {
-	SljitFullPipelinePrimitiveStep step;
-	if (!TryMakeHashJoinProbeSelectionStep(hash_join_idx, step)) {
-		throw InternalException("SLJIT hash join selection primitive cannot bind requested operator");
-	}
-	return step;
 }
 
 bool SljitFullPipelineRecipeSequenceBuilder::TryMakeHashJoinProbeSelectionStep(
@@ -464,12 +511,68 @@ bool SljitFullPipelineRecipeSequenceBuilder::TryMakeHashJoinProbeSelectionStep(
 	return true;
 }
 
-SljitFullPipelinePrimitiveStep
-SljitFullPipelineRecipeSequenceBuilder::MakeHashJoinProbeProjectionInputStep(idx_t hash_join_idx) const {
-	if (SljitCanBindHashJoinProbeSelectionPrimitive(ops, hash_join_idx)) {
-		return MakeHashJoinProbeSelectionStep(hash_join_idx);
+bool SljitTryBindMarkProbeFilterBoundaryPrimitive(const vector<SljitExecutableRegionOp> &ops, idx_t hash_join_idx,
+                                                  idx_t filter_idx, bool apply_filter_selection,
+                                                  idx_t downstream_projection_idx, bool materialize_filter_selection,
+                                                  SljitMarkProbeFilterBoundaryPrimitive &primitive) {
+	if (!SljitCanBindMarkProbeFilterBoundaryPrimitive(ops, hash_join_idx, filter_idx) ||
+	    (materialize_filter_selection && !apply_filter_selection)) {
+		return false;
 	}
-	return MakeHashJoinProbeMaterializeStep(hash_join_idx);
+	const bool has_projection = downstream_projection_idx != DConstants::INVALID_INDEX;
+	if (has_projection && (downstream_projection_idx >= ops.size() ||
+	                       ops[downstream_projection_idx].Kind() != SljitNativeRegionOpKind::PROJECTION)) {
+		return false;
+	}
+	const auto &join = ops[hash_join_idx];
+	const auto &input_types = join.HashJoinProbe().plan.input_types;
+	const auto &lhs_columns = join.HashJoinProbe().plan.operator_info.HashJoin().contract.lhs_output_column_indices;
+	if (join.output_types.size() != lhs_columns.size() + 1 || !SljitIsBooleanType(join.output_types.back())) {
+		return false;
+	}
+	SljitMarkProbeFilterBoundaryPrimitive candidate;
+	candidate.hash_join_idx = hash_join_idx;
+	candidate.filter_idx = filter_idx;
+	candidate.apply_filter_selection = apply_filter_selection;
+	candidate.filter_mode = SljitMarkProbeMarkerFilterMode(join, ops[filter_idx]);
+	if (apply_filter_selection && candidate.filter_mode == SljitMarkProbeFilterMode::NONE) {
+		return false;
+	}
+	if (has_projection) {
+		const bool reads_marker = SljitProjectionReferencesInputColumn(
+		    ops[downstream_projection_idx], join.output_types.size(), join.output_types.size() - 1);
+		if (apply_filter_selection && !materialize_filter_selection && !reads_marker) {
+			candidate.marker_mode = SljitMarkProbeFilterBoundaryMarkerMode::OMIT_MARKER;
+		} else if (candidate.filter_mode == SljitMarkProbeFilterMode::MATCHES || !reads_marker) {
+			candidate.marker_mode = SljitMarkProbeFilterBoundaryMarkerMode::REFERENCE_TRUE;
+		}
+	} else if (materialize_filter_selection) {
+		candidate.marker_mode = candidate.filter_mode == SljitMarkProbeFilterMode::MATCHES
+		                            ? SljitMarkProbeFilterBoundaryMarkerMode::REFERENCE_TRUE
+		                            : SljitMarkProbeFilterBoundaryMarkerMode::REFERENCE_FALSE;
+	}
+	const bool omit_marker = candidate.marker_mode == SljitMarkProbeFilterBoundaryMarkerMode::OMIT_MARKER;
+	if ((omit_marker || materialize_filter_selection) && candidate.filter_mode != SljitMarkProbeFilterMode::NONE &&
+	    !join.HashJoinProbe().plan.perfect_hash_probe && !join.HashJoinProbe().plan.residual_predicate) {
+		candidate.strategy = materialize_filter_selection ? SljitMarkProbeFilterBoundaryStrategy::FILTERED_MATERIALIZED
+		                                                  : SljitMarkProbeFilterBoundaryStrategy::FILTERED_SELECTION;
+	}
+	vector<SljitBatchLayoutColumn> columns;
+	const auto column_count = join.output_types.size() - (omit_marker ? 1 : 0);
+	columns.reserve(column_count);
+	for (idx_t column_idx = 0; column_idx < lhs_columns.size(); column_idx++) {
+		const auto input_idx = lhs_columns[column_idx];
+		if (input_idx >= input_types.size() || input_types[input_idx] != join.output_types[column_idx]) {
+			return false;
+		}
+		columns.push_back({input_idx, input_types[input_idx], join.output_types[column_idx]});
+	}
+	if (!omit_marker) {
+		columns.push_back({DConstants::INVALID_INDEX, LogicalType(), LogicalType::BOOLEAN});
+	}
+	candidate.output_layout = make_shared_ptr<SljitBatchLayout>(hash_join_idx, input_types, std::move(columns));
+	primitive = std::move(candidate);
+	return true;
 }
 
 } // namespace duckdb
