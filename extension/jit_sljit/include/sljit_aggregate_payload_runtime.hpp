@@ -98,14 +98,18 @@ struct SljitBoundSingleFusedPrimitiveAggregatePayloadUpdate {
 	bool right_source_known_not_null = false;
 };
 
+//! A single sum compiled per lane reads its source through the single-source fields of the native input; code compiled
+//! over combined sources reads the source arrays
 static bool
 SljitBindSingleFusedPrimitiveAggregatePayloadUpdate(vector<SljitExecutableRegionExpression> &payloads,
                                                     SljitNativeAggregateUpdateFunction function,
+                                                    SljitAggregatePayloadSourceLayout payload_source_layout,
                                                     const vector<SljitAggregatePayloadDescriptor> &payload_descriptors,
                                                     const vector<const ExecutionPrimitiveAggregateUpdateLane *> &lanes,
                                                     SljitBoundSingleFusedPrimitiveAggregatePayloadUpdate &bound) {
 	bound = SljitBoundSingleFusedPrimitiveAggregatePayloadUpdate();
-	if (!function || payloads.size() != 1 || payload_descriptors.size() != 1) {
+	if (!function || payload_source_layout != SljitAggregatePayloadSourceLayout::DIRECT_PER_LANE ||
+	    payloads.size() != 1 || payload_descriptors.size() != 1) {
 		return false;
 	}
 	auto &payload = payloads[0];
@@ -195,7 +199,9 @@ static bool SljitTryExecuteSingleFusedPrimitiveAggregatePayloadUpdate(
     const vector<const ExecutionPrimitiveAggregateUpdateLane *> &lanes, DataChunk &input,
     const SelectionVector *execute_sel, idx_t count, SljitAggregatePayloadAdapterScratch &adapter_scratch) {
 	SljitBoundSingleFusedPrimitiveAggregatePayloadUpdate bound;
-	if (!SljitBindSingleFusedPrimitiveAggregatePayloadUpdate(payloads, function, payload_descriptors, lanes, bound)) {
+	if (!SljitBindSingleFusedPrimitiveAggregatePayloadUpdate(payloads, function,
+	                                                         SljitAggregatePayloadSourceLayout::DIRECT_PER_LANE,
+	                                                         payload_descriptors, lanes, bound)) {
 		return false;
 	}
 	return SljitExecuteBoundSingleFusedPrimitiveAggregatePayloadUpdate(bound, input, execute_sel, count,

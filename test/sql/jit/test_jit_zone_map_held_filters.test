@@ -1,0 +1,159 @@
+# name: test/sql/jit/test_jit_zone_map_held_filters.test
+# description: Chunks whose zone maps prove the source's generated filters skip them in the region and in DuckDB's operators
+# group: [jit]
+
+# A sorted key makes whole row groups pass a range filter: their chunks skip the generated filter, the rest evaluate it.
+# Row groups with NULLs, updated rows or rows only the transaction sees never count as proven.
+
+require jit_sljit
+
+statement ok
+SET jit_cbo_startup_base_cost=0
+
+statement ok
+SET jit_cbo_startup_margin_basis_points=0
+
+statement ok
+SET jit_trace_runtime=true
+
+statement ok
+SET jit_event_log_size=100000
+
+statement ok
+CREATE TABLE sorted AS
+SELECT i AS id, (i % 1000)::INTEGER AS k, (i % 97 - 48)::BIGINT AS v,
+       CASE WHEN i >= 245760 AND i < 368640 AND i % 7 = 0 THEN NULL ELSE i END AS n
+FROM range(737280) t(i)
+
+statement ok
+CREATE TABLE dims AS SELECT i AS k, (i % 5)::INTEGER AS bucket FROM range(1000) t(i)
+
+foreach legs false true
+
+statement ok
+SET jit_measure_native_legs={legs}
+
+foreach threads 1 4
+
+statement ok
+SET threads={threads}
+
+foreach policy off auto
+
+statement ok
+SET jit_policy='{policy}'
+
+statement ok
+CREATE OR REPLACE TABLE r_{policy} AS
+SELECT 'sum' AS q, sum(id)::HUGEINT AS a, count(*)::HUGEINT AS b, 0::HUGEINT AS c
+FROM sorted WHERE id < 300000
+UNION ALL
+SELECT 'two_payloads', sum(v), count(*), sum(k) FROM sorted WHERE id < 500000
+UNION ALL
+SELECT 'range', sum(v), count(*), 0 FROM sorted WHERE id >= 100000 AND id < 650000
+UNION ALL
+SELECT 'beside_row_filter', sum(v), count(*), 0 FROM sorted WHERE id < 500000 AND v + k >= 10
+UNION ALL
+SELECT 'beside_unproven', sum(v), count(*), 0 FROM sorted WHERE id < 500000 AND k < 500
+UNION ALL
+SELECT 'nullable_filter', sum(v), count(*), count(n) FROM sorted WHERE n < 600000
+UNION ALL
+SELECT 'nullable_payload', sum(n), count(n), count(*) FROM sorted WHERE id < 400000
+UNION ALL
+SELECT 'join', sum(s.v), count(*), sum(d.bucket) FROM sorted s JOIN dims d ON s.k = d.k WHERE s.id < 500000
+
+statement ok
+CREATE OR REPLACE TABLE g_{policy} AS
+SELECT k, sum(v)::HUGEINT AS a, count(*)::HUGEINT AS b FROM sorted WHERE id < 500000 GROUP BY k
+
+statement ok
+CREATE OR REPLACE TABLE p_{policy} AS
+SELECT id, v + k AS w FROM sorted WHERE id >= 200000 AND id < 400000
+
+endloop
+
+query I
+SELECT count(*) FROM ((SELECT * FROM r_off EXCEPT ALL SELECT * FROM r_auto)
+                      UNION ALL (SELECT * FROM r_auto EXCEPT ALL SELECT * FROM r_off))
+----
+0
+
+query I
+SELECT count(*) FROM ((SELECT * FROM g_off EXCEPT ALL SELECT * FROM g_auto)
+                      UNION ALL (SELECT * FROM g_auto EXCEPT ALL SELECT * FROM g_off))
+----
+0
+
+query I
+SELECT count(*) FROM ((SELECT * FROM p_off EXCEPT ALL SELECT * FROM p_auto)
+                      UNION ALL (SELECT * FROM p_auto EXCEPT ALL SELECT * FROM p_off))
+----
+0
+
+endloop
+
+endloop
+
+# the zone maps proved the filter for whole row groups
+query I
+SELECT count(*) > 0 FROM duckdb_jit_events()
+WHERE phase = 'runtime' AND jit_runtime_path_counts LIKE '%source.storage_scan.zone_maps_hold_filter%'
+----
+true
+
+# an update widens the row group's statistics past the filter: its rows are filtered again
+statement ok
+UPDATE sorted SET id = 900000 WHERE id = 1000
+
+# rows only this transaction sees
+statement ok
+BEGIN
+
+statement ok
+INSERT INTO sorted SELECT 800000 + i, (i % 1000)::INTEGER, 1000, i FROM range(150000) t(i)
+
+statement ok
+INSERT INTO sorted SELECT i, (i % 1000)::INTEGER, 1, i FROM range(5) t(i)
+
+foreach legs false true
+
+statement ok
+SET jit_measure_native_legs={legs}
+
+foreach threads 1 4
+
+statement ok
+SET threads={threads}
+
+foreach policy off auto
+
+statement ok
+SET jit_policy='{policy}'
+
+statement ok
+CREATE OR REPLACE TEMP TABLE u_{policy} AS
+SELECT 'updated' AS q, sum(id)::HUGEINT AS a, count(*)::HUGEINT AS b FROM sorted WHERE id < 300000
+UNION ALL
+SELECT 'local', sum(v), count(*) FROM sorted WHERE id >= 800000 AND id < 900000
+UNION ALL
+SELECT 'local_mixed', sum(v), count(*) FROM sorted WHERE id < 850000
+
+endloop
+
+query I
+SELECT count(*) FROM ((SELECT * FROM u_off EXCEPT ALL SELECT * FROM u_auto)
+                      UNION ALL (SELECT * FROM u_auto EXCEPT ALL SELECT * FROM u_off))
+----
+0
+
+endloop
+
+endloop
+
+query II
+SELECT a, b FROM u_auto WHERE q = 'updated'
+----
+44999849010	300004
+
+statement ok
+ROLLBACK

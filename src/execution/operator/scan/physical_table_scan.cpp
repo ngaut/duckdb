@@ -303,6 +303,8 @@ public:
 	//! The storage vector a region source scanned last; it waits here when it does not fit the chunk being filled
 	DataChunk execution_source_contract_vector;
 	bool execution_source_contract_vector_pending = false;
+	//! Whether the zone maps of the vector's row group prove each table filter for every row
+	bool execution_source_contract_vector_filters_hold = false;
 	//! The batch index of the rows in the chunk a region source returns. The scan state moves past an assignment's
 	//! end before the chunk is returned, so the index is taken when each vector is scanned
 	idx_t execution_source_contract_batch_index = 0;
@@ -435,6 +437,12 @@ SourceResultType PhysicalTableScan::GetExecutionSourceContractDataInternal(Execu
 		vector.Initialize(context.client, chunk.GetTypes());
 	}
 
+	// the chunk's rows hold the table filters when every vector it takes holds them
+	input.table_filters_hold = true;
+	auto take_vector = [&]() {
+		input.table_filters_hold = input.table_filters_hold && l_state.execution_source_contract_vector_filters_hold;
+		l_state.execution_source_contract_vector_pending = false;
+	};
 	do {
 		// A selective filter leaves a few rows of each storage vector: they are copied into one chunk until the next
 		// vector would not fit, so the region runs per full batch rather than per vector. The chunk never spans two
@@ -448,6 +456,8 @@ SourceResultType PhysicalTableScan::GetExecutionSourceContractDataInternal(Execu
 					break;
 				}
 				l_state.execution_source_contract_vector_pending = true;
+				l_state.execution_source_contract_vector_filters_hold =
+				    scan_state.GetFilterInfo().AllFiltersAlwaysTrue();
 				l_state.execution_source_contract_batch_index =
 				    GetExecutionSourceContractTableScanBatchIndex(scan_state);
 			}
@@ -460,14 +470,14 @@ SourceResultType PhysicalTableScan::GetExecutionSourceContractDataInternal(Execu
 					return SourceResultType::HAVE_MORE_OUTPUT;
 				}
 				chunk.Reference(vector);
-				l_state.execution_source_contract_vector_pending = false;
+				take_vector();
 				return SourceResultType::HAVE_MORE_OUTPUT;
 			}
 			{
 				ExecutionOperatorStageTimer timer(input.stage_recorder, "source_contract.table_scan.batch_append");
 				ExecutionChunkCoalescer::Append(chunk, vector);
 			}
-			l_state.execution_source_contract_vector_pending = false;
+			take_vector();
 		}
 		if (chunk.size() > 0) {
 			return SourceResultType::HAVE_MORE_OUTPUT;

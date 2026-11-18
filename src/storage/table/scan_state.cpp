@@ -200,6 +200,18 @@ bool ScanFilterInfo::HasFilters() const {
 	return always_true_filters < GetResidualFilterList().size();
 }
 
+bool ScanFilterInfo::AllFiltersAlwaysTrue() const {
+	if (pruning_filter_list.empty()) {
+		return false;
+	}
+	for (auto &filter : pruning_filter_list) {
+		if (!filter.always_true) {
+			return false;
+		}
+	}
+	return true;
+}
+
 bool ScanFilterInfo::ExecutesResidualFilters() const {
 	return execute_residual_filters;
 }

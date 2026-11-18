@@ -12,6 +12,7 @@
 #include "duckdb/parallel/interrupt.hpp"
 #include "duckdb/parallel/pipeline.hpp"
 #include "duckdb/parallel/pipeline_execution.hpp"
+#include "duckdb/execution/execution_region_kernel.hpp"
 #include "duckdb/execution/execution_region_runtime.hpp"
 #include "duckdb/execution/physical_operator.hpp"
 #include "duckdb/parallel/thread_context.hpp"
@@ -129,6 +130,8 @@ private:
 	DataChunk final_chunk;
 	//! The source chunk of the pipeline loop while a compiled chunk step is bound.
 	DataChunk execution_source_input_chunk;
+	//! What the source contract proved about every row of the source chunk it fetched last
+	ExecutionSourceChunkProof execution_source_chunk_proof;
 	std::array<vector<bool>, EXECUTION_REGION_RUNTIME_ONCE_FLAG_COUNT> execution_region_runtime_once_flags;
 	unique_ptr<ExecutionRegionLocalState> execution_region_local_state;
 	optional_ptr<const ExecutionRegionKernel> execution_region_local_state_kernel;

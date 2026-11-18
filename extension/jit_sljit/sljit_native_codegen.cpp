@@ -147,4 +147,10 @@ void EmitNextSljitNativeVectorLoop(struct sljit_compiler *compiler, sljit_label 
 	sljit_set_label(repeat, loop);
 }
 
+sljit_jump *EmitSljitNativeVectorLatch(struct sljit_compiler *compiler, sljit_label *loop) {
+	sljit_emit_op2(compiler, SLJIT_ADD, SLJIT_S1, 0, SLJIT_S1, 0, SLJIT_IMM, 1);
+	sljit_set_label(sljit_emit_cmp(compiler, SLJIT_LESS, SLJIT_S1, 0, SLJIT_S2, 0), loop);
+	return sljit_emit_jump(compiler, SLJIT_JUMP);
+}
+
 } // namespace duckdb

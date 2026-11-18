@@ -24,6 +24,8 @@ enum class SljitFullPipelinePrimitiveKind : uint8_t {
 	INVALID,
 	SOURCE_FETCH,
 	GENERATED_FILTER,
+	//! A generated filter on a chunk whose source proves it for every row: the rows pass as they are
+	HELD_FILTER,
 	HASH_JOIN_PROBE_MATERIALIZE,
 	HASH_JOIN_PROBE_SELECTION,
 	MARK_PROBE_FILTER_BOUNDARY,
@@ -55,6 +57,7 @@ struct SljitFullPipelinePrimitiveStep {
 
 	static SljitFullPipelinePrimitiveStep SourceFetch();
 	static SljitFullPipelinePrimitiveStep GeneratedFilter(const SljitGeneratedFilterPrimitive &primitive);
+	static SljitFullPipelinePrimitiveStep HeldFilter(const SljitGeneratedFilterPrimitive &primitive);
 	static SljitFullPipelinePrimitiveStep
 	HashJoinProbeMaterialize(const SljitHashJoinProbeMaterializePrimitive &primitive);
 	static SljitFullPipelinePrimitiveStep HashJoinProbeSelection(const SljitHashJoinProbeSelectionPrimitive &primitive);

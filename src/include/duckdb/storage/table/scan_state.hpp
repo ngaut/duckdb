@@ -228,6 +228,9 @@ public:
 
 	//! Whether or not there is a filter we need to execute for this column currently
 	bool ColumnHasFilters(idx_t col_idx);
+	//! Whether no filter needs a row-level check in the current row group: its zone maps prove each filter for every
+	//! row, or the filter only prunes
+	bool AllFiltersAlwaysTrue() const;
 
 	//! Resets any SetFilterAlwaysTrue flags
 	void CheckAllFilters();

@@ -149,7 +149,8 @@ static void SljitBindUngroupedPrimitiveAggregateUpdate(ExecutionOperatorRuntime 
 	if (op.AggregateUpdate().fused_payload_update.Function()) {
 		SljitBindSingleFusedPrimitiveAggregatePayloadUpdate(
 		    op.AggregateUpdate().payloads, op.AggregateUpdate().fused_payload_update.Function(),
-		    op.AggregateUpdate().payload_descriptors, payload_lanes, bound.single_fused_payload_update);
+		    op.AggregateUpdate().payload_source_layout, op.AggregateUpdate().payload_descriptors, payload_lanes,
+		    bound.single_fused_payload_update);
 	}
 	bound.ready = true;
 	bound.op_idx = op_idx;

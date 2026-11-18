@@ -715,7 +715,7 @@ class MetalProjectionKernel : public ExecutionRegionKernel {
             kernel.EnsureMetalBuffers(scratch, max_batch_chunks * STANDARD_VECTOR_SIZE);
         }
 
-        SinkResultType ExecuteChunk(DataChunk &input) override {
+        SinkResultType ExecuteChunk(DataChunk &input, ExecutionSourceChunkProof) override {
             if (input.size() == 0) {
                 return SinkResultType::NEED_MORE_INPUT;
             }

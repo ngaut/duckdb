@@ -17,6 +17,7 @@ SljitFullPipelineRecipePlan BuildSljitFullPipelineRecipePlan(const vector<SljitE
                                                              const SljitNativeAggregateStateSourcePlan &source,
                                                              const vector<LogicalType> &source_output_types,
                                                              const vector<Value> &source_min_values,
-                                                             const vector<Value> &source_max_values);
+                                                             const vector<Value> &source_max_values,
+                                                             idx_t source_filter_idx);
 
 } // namespace duckdb

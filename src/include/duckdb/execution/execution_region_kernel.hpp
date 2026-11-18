@@ -37,6 +37,17 @@ public:
 	}
 };
 
+//! What the source proves about every row of a chunk it hands a chunk step
+struct ExecutionSourceChunkProof {
+	//! The zone maps of the row groups the rows come from prove each table filter for every row: the filters need no
+	//! row-level check
+	bool table_filters_hold = false;
+
+	ExecutionSourceChunkProof Merge(const ExecutionSourceChunkProof &other) const {
+		return {table_filters_hold && other.table_filters_hold};
+	}
+};
+
 //! A chunk-step kernel bound to one pipeline executor: the executor's loop hands it every source chunk, and it keeps
 //! between chunks the rows its operators batch
 class DUCKDB_API ExecutionRegionChunkStep {
@@ -45,7 +56,7 @@ public:
 
 	//! Runs one source chunk through the compiled operators. Output the sink blocks on queues in the executor, so the
 	//! chunk always runs to completion. Returns FINISHED once the sink needs no more input, else NEED_MORE_INPUT
-	virtual SinkResultType ExecuteChunk(DataChunk &input) = 0;
+	virtual SinkResultType ExecuteChunk(DataChunk &input, ExecutionSourceChunkProof proof) = 0;
 	//! The next chunk moves a partitioned sink to another partition: every row the step holds sinks first, under the
 	//! partition it belongs to
 	virtual void FlushChunks() = 0;
@@ -54,7 +65,7 @@ public:
 	//! The chunk DuckDB's own operator chain takes in place of a source chunk once the step hands the pipeline to
 	//! it, or null while the step runs the chunks itself. A step whose sink keeps its state apart from its own
 	//! batches may alternate chunk by chunk; it hands over only after flushing every row it held
-	virtual optional_ptr<DataChunk> ContinuesNatively(DataChunk &input);
+	virtual optional_ptr<DataChunk> ContinuesNatively(DataChunk &input, ExecutionSourceChunkProof proof);
 };
 
 class DUCKDB_API ExecutionRegionCodeHandle {

@@ -84,6 +84,10 @@ SljitValidateHashJoinDirectAggregateConsumerContract(const SljitFullPipelinePrim
 
 struct SljitFullPipelineRecipe {
 	SljitFullPipelinePrimitiveSequence primitive_sequence;
+	//! The steps for a source chunk whose zone maps prove the source's generated filter for every row: the filter's
+	//! step passes the rows as they are and a sink that fused the filter updates unfiltered. Empty when no step
+	//! evaluates the source's filter
+	SljitFullPipelinePrimitiveSequence filters_hold_sequence;
 	SljitHashJoinDirectAggregateConsumerContract direct_aggregate_consumer;
 	vector<ExecutionAggregateStateCombineLane> primitive_aggregate_state_source_lanes;
 	vector<idx_t> fused_filter_owners;

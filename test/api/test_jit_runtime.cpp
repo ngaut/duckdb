@@ -18,8 +18,9 @@ using namespace duckdb;
 namespace {
 class RecordingChunkStep final : public ExecutionRegionChunkStep {
 public:
-	SinkResultType ExecuteChunk(DataChunk &input) override {
+	SinkResultType ExecuteChunk(DataChunk &input, ExecutionSourceChunkProof proof) override {
 		counts.push_back(input.size());
+		proofs.push_back(proof.table_filters_hold);
 		for (idx_t row = 0; row < input.size(); row++) {
 			vector<Value> values;
 			for (idx_t col = 0; col < input.ColumnCount(); col++) {
@@ -36,6 +37,7 @@ public:
 		finish_count++;
 	}
 	vector<idx_t> counts;
+	vector<bool> proofs;
 	vector<vector<Value>> rows;
 	idx_t flush_count = 0;
 	idx_t finish_count = 0;
@@ -63,7 +65,7 @@ TEST_CASE("Core chunk coalescer retains selected long strings and nulls after so
 		selected.set_index(1, 0);
 		input.Slice(selected, 2);
 		REQUIRE(ExecutionChunkCoalescer::CanAppend(input));
-		REQUIRE(step.ExecuteChunk(input) == SinkResultType::NEED_MORE_INPUT);
+		REQUIRE(step.ExecuteChunk(input, ExecutionSourceChunkProof()) == SinkResultType::NEED_MORE_INPUT);
 		REQUIRE(record.rows.empty());
 	}
 	step.FinishChunks();
@@ -89,7 +91,7 @@ TEST_CASE("Core chunk coalescer owns strings borrowed from an advancing source",
 	REQUIRE_FALSE(input.data[0].Buffer().GetAuxiliaryData());
 	input.data[0].SetValue(1, Value(string(256, 'c')));
 	REQUIRE(input.data[0].Buffer().GetAuxiliaryData());
-	REQUIRE(step.ExecuteChunk(input) == SinkResultType::NEED_MORE_INPUT);
+	REQUIRE(step.ExecuteChunk(input, ExecutionSourceChunkProof()) == SinkResultType::NEED_MORE_INPUT);
 	std::fill(borrowed.begin(), borrowed.end(), 'b');
 	step.FinishChunks();
 	REQUIRE(record.rows.size() == 2);
@@ -105,22 +107,51 @@ TEST_CASE("Core chunk coalescer flushes partitions and stops consuming after a f
 	input.Initialize(Allocator::DefaultAllocator(), {LogicalType::INTEGER});
 	input.SetChildCardinality(1);
 	input.data[0].SetValue(0, Value::INTEGER(7));
-	REQUIRE(step.ExecuteChunk(input) == SinkResultType::NEED_MORE_INPUT);
+	REQUIRE(step.ExecuteChunk(input, ExecutionSourceChunkProof()) == SinkResultType::NEED_MORE_INPUT);
 	step.FlushChunks();
 	REQUIRE(record.counts == vector<idx_t> {1});
 	REQUIRE(record.flush_count == 1);
 	input.data[0].SetValue(0, Value::INTEGER(9));
-	REQUIRE(step.ExecuteChunk(input) == SinkResultType::NEED_MORE_INPUT);
+	REQUIRE(step.ExecuteChunk(input, ExecutionSourceChunkProof()) == SinkResultType::NEED_MORE_INPUT);
 	record.stop = true;
 	step.FlushChunks();
 	REQUIRE(record.counts == vector<idx_t> {1, 1});
 	REQUIRE(record.rows[0][0].GetValue<int32_t>() == 7);
 	REQUIRE(record.rows[1][0].GetValue<int32_t>() == 9);
 	REQUIRE(record.flush_count == 1);
-	REQUIRE(step.ExecuteChunk(input) == SinkResultType::FINISHED);
+	REQUIRE(step.ExecuteChunk(input, ExecutionSourceChunkProof()) == SinkResultType::FINISHED);
 	step.FinishChunks();
 	REQUIRE(record.rows.size() == 2);
 	REQUIRE(record.finish_count == 1);
+}
+
+TEST_CASE("Core chunk coalescer proves for a buffered batch only what every chunk in it proved", "[api][jit]") {
+	auto consumer = make_uniq<RecordingChunkStep>();
+	auto &record = *consumer;
+	ExecutionCoalescingChunkStep step(Allocator::DefaultAllocator(), std::move(consumer));
+	DataChunk input;
+	input.Initialize(Allocator::DefaultAllocator(), {LogicalType::BIGINT});
+	auto run = [&](idx_t count, bool filters_hold) {
+		input.Reset();
+		input.data[0].Reference(Value::BIGINT(1), count_t(count));
+		input.CheckCardinality(count);
+		ExecutionSourceChunkProof proof;
+		proof.table_filters_hold = filters_hold;
+		REQUIRE(step.ExecuteChunk(input, proof) == SinkResultType::NEED_MORE_INPUT);
+	};
+	run(3, true);
+	run(4, true);
+	step.FlushChunks();
+	run(3, true);
+	run(4, false);
+	step.FlushChunks();
+	run(3, false);
+	run(4, true);
+	step.FlushChunks();
+	run(STANDARD_VECTOR_SIZE, true);
+	step.FinishChunks();
+	REQUIRE(record.counts == vector<idx_t> {7, 7, 7, STANDARD_VECTOR_SIZE});
+	REQUIRE(record.proofs == vector<bool> {true, false, false, true});
 }
 
 TEST_CASE("Core chunk coalescer preserves full batches and flushes before capacity overflow", "[api][jit]") {
@@ -133,7 +164,7 @@ TEST_CASE("Core chunk coalescer preserves full batches and flushes before capaci
 		input.Reset();
 		input.data[0].Reference(Value::BIGINT(42), count_t(count));
 		input.CheckCardinality(count);
-		REQUIRE(step.ExecuteChunk(input) == SinkResultType::NEED_MORE_INPUT);
+		REQUIRE(step.ExecuteChunk(input, ExecutionSourceChunkProof()) == SinkResultType::NEED_MORE_INPUT);
 	}
 	step.FinishChunks();
 	REQUIRE(record.counts == vector<idx_t> {STANDARD_VECTOR_SIZE, 3, STANDARD_VECTOR_SIZE - 1});

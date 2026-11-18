@@ -110,8 +110,9 @@ ExecutionCoalescingChunkStep::ExecutionCoalescingChunkStep(Allocator &allocator_
 	}
 }
 
-optional_ptr<DataChunk> ExecutionCoalescingChunkStep::ContinuesNatively(DataChunk &input) {
-	auto native_input = consumer->ContinuesNatively(input);
+optional_ptr<DataChunk> ExecutionCoalescingChunkStep::ContinuesNatively(DataChunk &input,
+                                                                        ExecutionSourceChunkProof proof) {
+	auto native_input = consumer->ContinuesNatively(input, proof);
 	if (native_input && buffered.size()) {
 		// rows buffered from earlier chunks reach the consumer before DuckDB's operators take this one
 		FlushBuffered();
@@ -122,13 +123,13 @@ optional_ptr<DataChunk> ExecutionCoalescingChunkStep::ContinuesNatively(DataChun
 
 SinkResultType ExecutionCoalescingChunkStep::FlushBuffered() {
 	if (!finished && buffered.size()) {
-		finished = consumer->ExecuteChunk(buffered) == SinkResultType::FINISHED;
+		finished = consumer->ExecuteChunk(buffered, buffered_proof) == SinkResultType::FINISHED;
 		buffered.Reset();
 	}
 	return finished ? SinkResultType::FINISHED : SinkResultType::NEED_MORE_INPUT;
 }
 
-SinkResultType ExecutionCoalescingChunkStep::ExecuteChunk(DataChunk &input) {
+SinkResultType ExecutionCoalescingChunkStep::ExecuteChunk(DataChunk &input, ExecutionSourceChunkProof proof) {
 	if (finished) {
 		return SinkResultType::FINISHED;
 	}
@@ -136,27 +137,28 @@ SinkResultType ExecutionCoalescingChunkStep::ExecuteChunk(DataChunk &input) {
 		return SinkResultType::NEED_MORE_INPUT;
 	}
 	if (!buffered.size() && input.size() >= ExecutionChunkCoalescer::MIN_PASSTHROUGH_ROWS) {
-		finished = consumer->ExecuteChunk(input) == SinkResultType::FINISHED;
+		finished = consumer->ExecuteChunk(input, proof) == SinkResultType::FINISHED;
 		return finished ? SinkResultType::FINISHED : SinkResultType::NEED_MORE_INPUT;
 	}
 	if (!ExecutionChunkCoalescer::CanAppend(input)) {
 		if (FlushBuffered() == SinkResultType::FINISHED) {
 			return SinkResultType::FINISHED;
 		}
-		finished = consumer->ExecuteChunk(input) == SinkResultType::FINISHED;
+		finished = consumer->ExecuteChunk(input, proof) == SinkResultType::FINISHED;
 		return finished ? SinkResultType::FINISHED : SinkResultType::NEED_MORE_INPUT;
 	}
 	if (buffered.size() + input.size() > STANDARD_VECTOR_SIZE && FlushBuffered() == SinkResultType::FINISHED) {
 		return SinkResultType::FINISHED;
 	}
 	if (!buffered.size() && input.size() >= ExecutionChunkCoalescer::MIN_PASSTHROUGH_ROWS) {
-		finished = consumer->ExecuteChunk(input) == SinkResultType::FINISHED;
+		finished = consumer->ExecuteChunk(input, proof) == SinkResultType::FINISHED;
 		return finished ? SinkResultType::FINISHED : SinkResultType::NEED_MORE_INPUT;
 	}
 	if (!initialized) {
 		buffered.Initialize(allocator, input.GetTypes());
 		initialized = true;
 	}
+	buffered_proof = buffered.size() ? buffered_proof.Merge(proof) : proof;
 	ExecutionChunkCoalescer::Append(buffered, input);
 	return buffered.size() == STANDARD_VECTOR_SIZE ? FlushBuffered() : SinkResultType::NEED_MORE_INPUT;
 }

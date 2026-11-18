@@ -32,7 +32,7 @@ public:
 	    const vector<Value> &source_max_values_p,
 	    vector<SljitSharedPerfectHashPredicateClassificationCache> &shared_predicate_classifications_p,
 	    SljitRegionExecutionScratch &scratch_p, SljitFullPipelineTerminalRuntimeState &terminal_state_p)
-	    : runtime(runtime_p), result(result_p), ops(ops_p), recipe(recipe_p),
+	    : runtime(runtime_p), result(result_p), ops(ops_p), recipe(recipe_p), sequence(&recipe_p.primitive_sequence),
 	      execute_hash_join_probe(execute_hash_join_probe_p),
 	      terminal_runtime(source_distinct_counts_p, source_min_values_p, source_max_values_p,
 	                       shared_predicate_classifications_p, terminal_state_p),
@@ -57,20 +57,27 @@ public:
 	}
 
 	//! Chunk step: runs one source chunk, which the pipeline executor fetched and advanced the sink's batch for,
-	//! through the steps. Rows the steps batch wait for later chunks. Returns true when the pipeline stopped
-	bool ExecuteChunk(DataChunk &source_chunk) {
+	//! through the steps. Rows the steps batch wait for later chunks. Returns true when the pipeline stopped. A chunk
+	//! whose zone maps prove the source's filter for every row takes the steps that skip it
+	bool ExecuteChunk(DataChunk &source_chunk, bool source_filters_hold) {
 		if (source_chunk.size() == 0) {
 			return false;
 		}
 		if (runtime.TraceRuntime()) {
 			runtime.RecordJitRuntimeProof(ExecutionRegionJitRuntimeProof::FULL_PIPELINE_OWNERSHIP, source_chunk.size());
 		}
+		const auto skips_source_filter = source_filters_hold && recipe.filters_hold_sequence.Count() > 0;
+		if (skips_source_filter && runtime.TraceRuntime()) {
+			runtime.RecordJitRuntimePath("source.storage_scan.zone_maps_hold_filter", source_chunk.size());
+		}
+		sequence = skips_source_filter ? &recipe.filters_hold_sequence : &recipe.primitive_sequence;
 		return ExecuteStep(1, SljitRuntimeBatchViewFromChunk(source_chunk));
 	}
 
 	//! Chunk step: every batched row and the terminal's state sink, because the sink moves to another partition or
-	//! the source is exhausted
+	//! the source is exhausted. The steps after the source's filter are the same in both step lists
 	bool FlushChunks() {
+		sequence = &recipe.primitive_sequence;
 		return FlushRuntimeState();
 	}
 
@@ -141,20 +148,22 @@ private:
 	}
 
 	bool IsTerminalStep(idx_t step_idx) const {
-		return step_idx + 1 == recipe.primitive_sequence.Count();
+		return step_idx + 1 == sequence->Count();
 	}
 
 	bool ExecuteStep(idx_t step_idx, const SljitRuntimeBatchView &input) {
-		if (step_idx >= recipe.primitive_sequence.Count()) {
+		if (step_idx >= sequence->Count()) {
 			throw InternalException("SLJIT primitive sequence reached the end without a consumer");
 		}
-		auto &step = recipe.primitive_sequence.Step(step_idx);
+		auto &step = sequence->Step(step_idx);
 		if (IsTerminalStep(step_idx)) {
 			return ExecuteTerminalStep(step, input);
 		}
 		switch (step.kind) {
 		case SljitFullPipelinePrimitiveKind::GENERATED_FILTER:
 			return ExecuteGeneratedFilter(step_idx, step, input);
+		case SljitFullPipelinePrimitiveKind::HELD_FILTER:
+			return ExecuteStep(step_idx + 1, input);
 		case SljitFullPipelinePrimitiveKind::HASH_JOIN_PROBE_MATERIALIZE:
 			return ExecuteHashJoinProbeMaterialize(step_idx, step, input);
 		case SljitFullPipelinePrimitiveKind::HASH_JOIN_PROBE_SELECTION:
@@ -194,8 +203,7 @@ private:
 		auto execute_output_batch = [&](DataChunk &batch) -> bool {
 			return ExecuteMaterializedBatch(next_step_idx, batch);
 		};
-		const auto direct_handoff =
-		    HashJoinMaterializeCanDirectHandoffTo(recipe.primitive_sequence.Step(next_step_idx));
+		const auto direct_handoff = HashJoinMaterializeCanDirectHandoffTo(sequence->Step(next_step_idx));
 		return hash_join_materialize.Execute(step_idx, step, input, direct_handoff, execute_hash_join_probe,
 		                                     execute_output_batch);
 	}
@@ -222,7 +230,7 @@ private:
 		                                       const SljitHashJoinProbeSelectionPrimitive &probe_primitive,
 		                                       DataChunk &join_input, auto &probe_executor) {
 			D_ASSERT(contract.probe_step_idx == step_idx);
-			D_ASSERT(contract.terminal_step_idx + 1 == recipe.primitive_sequence.Count());
+			D_ASSERT(contract.terminal_step_idx + 1 == sequence->Count());
 			return terminal_runtime.TryExecuteHashJoinProbeConsumer(runtime, ops, scratch, contract, probe_primitive,
 			                                                        join_input, probe_executor);
 		};
@@ -245,8 +253,8 @@ private:
 		auto execute_output_batch = [&](DataChunk &batch) -> bool {
 			return ExecuteMaterializedBatch(next_step_idx, batch);
 		};
-		const auto direct_handoff = IsTerminalStep(next_step_idx) &&
-		                            ProjectionChainCanDirectHandoffTo(recipe.primitive_sequence.Step(next_step_idx));
+		const auto direct_handoff =
+		    IsTerminalStep(next_step_idx) && ProjectionChainCanDirectHandoffTo(sequence->Step(next_step_idx));
 		return projection_chain.Execute(step_idx, step, input, direct_handoff, execute_output_batch);
 	}
 
@@ -298,6 +306,8 @@ private:
 	ExecutionRegionResult &result;
 	vector<SljitExecutableRegionOp> &ops;
 	const SljitFullPipelineRecipe &recipe;
+	//! The steps the current source chunk runs: the recipe's, or those that skip the source's filter
+	const SljitFullPipelinePrimitiveSequence *sequence;
 	EXECUTE_HASH_JOIN_PROBE &execute_hash_join_probe;
 	SljitFullPipelineTerminalRuntime terminal_runtime;
 	SljitRegionExecutionScratch &scratch;

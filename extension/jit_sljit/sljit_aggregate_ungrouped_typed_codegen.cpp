@@ -104,8 +104,8 @@ BuildSljitNativeUngroupedFusedAggregateUpdate(const vector<SljitNativeRegionExpr
 		if (uses_register_accumulators) {
 			sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_MEM1(SLJIT_SP), register_accumulator_used_offset, SLJIT_IMM, 1);
 		}
-		auto fast_loop = sljit_emit_label(compiler);
 		fast_dones.push_back(sljit_emit_cmp(compiler, SLJIT_GREATER_EQUAL, SLJIT_S1, 0, SLJIT_S2, 0));
+		auto fast_loop = sljit_emit_label(compiler);
 		if (index_mode != SljitAggregateExpressionIndexMode::FLAT) {
 			EmitLoadSljitHoistedLogicalIndex(compiler, update_plan.logical_selection_offset);
 		}
@@ -119,7 +119,7 @@ BuildSljitNativeUngroupedFusedAggregateUpdate(const vector<SljitNativeRegionExpr
 			    compiler, payloads, aggregates, local_sum_offsets, local_sum_upper_offsets, saw_value_offsets,
 			    update_plan.register_accumulator_pairs, index_mode, overflows, fast_data_hoists);
 		}
-		EmitNextSljitNativeVectorLoop(compiler, fast_loop);
+		fast_dones.push_back(EmitSljitNativeVectorLatch(compiler, fast_loop));
 	};
 	struct sljit_jump *hybrid_done = nullptr;
 	struct sljit_jump *done = nullptr;

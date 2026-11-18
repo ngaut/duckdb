@@ -135,8 +135,10 @@ public:
 	SljitFullPipelineRecipeBuilder(const vector<SljitExecutableRegionOp> &ops_p,
 	                               const SljitNativeAggregateStateSourcePlan &source_p,
 	                               const vector<LogicalType> &source_output_types_p,
-	                               const vector<Value> &source_min_values_p, const vector<Value> &source_max_values_p)
-	    : ops(ops_p), source(source_p), walker(ops_p, source_output_types_p, source_min_values_p, source_max_values_p) {
+	                               const vector<Value> &source_min_values_p, const vector<Value> &source_max_values_p,
+	                               idx_t source_filter_idx_p)
+	    : ops(ops_p), source(source_p), source_filter_idx(source_filter_idx_p),
+	      walker(ops_p, source_output_types_p, source_min_values_p, source_max_values_p) {
 	}
 
 	SljitFullPipelineRecipePlan Build() const {
@@ -145,10 +147,42 @@ public:
 			return SljitFullPipelineRecipePlan();
 		}
 		BindPrimitiveAggregateStateSource(recipe);
+		BindFiltersHoldSequence(recipe);
 		return SljitMakeFullPipelinePrimitiveRecipePlan(std::move(recipe));
 	}
 
 private:
+	//! A chunk whose zone maps prove the source's filter needs no step to evaluate it: its generated filter passes the
+	//! rows on, and an ungrouped sink that fused it runs its unfiltered update, whose code the filter's implications
+	//! (non-NULL inputs, narrowed ranges) still hold for
+	void BindFiltersHoldSequence(SljitFullPipelineRecipe &recipe) const {
+		if (source_filter_idx == DConstants::INVALID_INDEX) {
+			return;
+		}
+		auto sequence = recipe.primitive_sequence;
+		bool evaluates_source_filter = false;
+		for (idx_t step_idx = 0; step_idx < sequence.Count(); step_idx++) {
+			auto &step = sequence.Step(step_idx);
+			if (step.kind == SljitFullPipelinePrimitiveKind::GENERATED_FILTER &&
+			    step.generated_filter.filter_idx == source_filter_idx) {
+				step = SljitFullPipelinePrimitiveStep::HeldFilter(step.generated_filter);
+				evaluates_source_filter = true;
+				continue;
+			}
+			SljitUngroupedAggregateUpdatePrimitive unfiltered;
+			if (step.kind == SljitFullPipelinePrimitiveKind::UNGROUPED_AGGREGATE_UPDATE &&
+			    step.ungrouped_aggregate_update.filter_idx == source_filter_idx &&
+			    SljitTryBindUngroupedAggregateUpdatePrimitive(ops, step.ungrouped_aggregate_update.aggregate_idx,
+			                                                  unfiltered)) {
+				step = SljitFullPipelinePrimitiveStep::UngroupedAggregateUpdate(unfiltered);
+				evaluates_source_filter = true;
+			}
+		}
+		if (evaluates_source_filter) {
+			recipe.filters_hold_sequence = std::move(sequence);
+		}
+	}
+
 	//! An ungrouped aggregate fed straight by an aggregate-state scan combines the scanned states instead of rows
 	void BindPrimitiveAggregateStateSource(SljitFullPipelineRecipe &recipe) const {
 		auto &sequence = recipe.primitive_sequence;
@@ -165,6 +199,8 @@ private:
 private:
 	const vector<SljitExecutableRegionOp> &ops;
 	const SljitNativeAggregateStateSourcePlan &source;
+	//! The op evaluating the source's table filters, or INVALID_INDEX when storage evaluates them
+	idx_t source_filter_idx;
 	SljitFullPipelineRecipeSequenceBuilder walker;
 };
 
@@ -172,8 +208,10 @@ SljitFullPipelineRecipePlan BuildSljitFullPipelineRecipePlan(const vector<SljitE
                                                              const SljitNativeAggregateStateSourcePlan &source,
                                                              const vector<LogicalType> &source_output_types,
                                                              const vector<Value> &source_min_values,
-                                                             const vector<Value> &source_max_values) {
-	return SljitFullPipelineRecipeBuilder(ops, source, source_output_types, source_min_values, source_max_values)
+                                                             const vector<Value> &source_max_values,
+                                                             idx_t source_filter_idx) {
+	return SljitFullPipelineRecipeBuilder(ops, source, source_output_types, source_min_values, source_max_values,
+	                                      source_filter_idx)
 	    .Build();
 }
 

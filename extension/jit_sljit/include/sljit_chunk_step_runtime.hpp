@@ -50,15 +50,15 @@ public:
 		executor.PrepareChunks();
 	}
 
-	optional_ptr<DataChunk> ContinuesNatively(DataChunk &input) override {
+	optional_ptr<DataChunk> ContinuesNatively(DataChunk &input, ExecutionSourceChunkProof proof) override {
 		return native_continuation.ContinuesNatively(
-		    input,
+		    input, proof.table_filters_hold,
 		    [&](const SljitExecutableNativeContinuation &plan) { return executor.HandsOverToNative(input, plan); },
 		    [&]() { SljitChunkStepResult(executor.FlushChunks(), result); });
 	}
 
-	SinkResultType ExecuteChunk(DataChunk &input) override {
-		return SljitChunkStepResult(executor.ExecuteChunk(input), result);
+	SinkResultType ExecuteChunk(DataChunk &input, ExecutionSourceChunkProof proof) override {
+		return SljitChunkStepResult(executor.ExecuteChunk(input, proof.table_filters_hold), result);
 	}
 
 	void FlushChunks() override {

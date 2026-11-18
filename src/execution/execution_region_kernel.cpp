@@ -116,7 +116,7 @@ unique_ptr<ExecutionRegionChunkStep> ExecutionRegionKernel::CreateChunkStep(Exec
 ExecutionRegionChunkStep::~ExecutionRegionChunkStep() {
 }
 
-optional_ptr<DataChunk> ExecutionRegionChunkStep::ContinuesNatively(DataChunk &input) {
+optional_ptr<DataChunk> ExecutionRegionChunkStep::ContinuesNatively(DataChunk &input, ExecutionSourceChunkProof proof) {
 	return nullptr;
 }
 

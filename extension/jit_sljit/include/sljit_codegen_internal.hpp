@@ -214,6 +214,9 @@ void EmitInitSljitNativeVectorSourceArrays(struct sljit_compiler *compiler);
 void EmitInitSljitNativeExpressionVectorLoop(struct sljit_compiler *compiler);
 void EmitLoadSljitNativeSourceValidity(struct sljit_compiler *compiler, idx_t source_index, sljit_s32 target);
 void EmitNextSljitNativeVectorLoop(struct sljit_compiler *compiler, struct sljit_label *loop);
+//! A bottom-tested latch: steps the row and repeats the loop while rows remain, so each row takes one branch; returns
+//! the exit jump
+struct sljit_jump *EmitSljitNativeVectorLatch(struct sljit_compiler *compiler, struct sljit_label *loop);
 void EmitLoadLogicalIndex(struct sljit_compiler *compiler, sljit_s32 target);
 void EmitLoadSourceIndex(struct sljit_compiler *compiler, sljit_sw sel_offset, sljit_s32 logical_index,
                          sljit_s32 target);

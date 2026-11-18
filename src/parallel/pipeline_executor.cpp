@@ -785,12 +785,12 @@ OperatorResultType PipelineExecutor::PushSourceChunk(DataChunk &input, Execution
 	if (!compiled_step) {
 		return ExecutePushInternal(input, chunk_budget);
 	}
-	compiled_step_native_input = compiled_step->ContinuesNatively(input);
+	compiled_step_native_input = compiled_step->ContinuesNatively(input, execution_source_chunk_proof);
 	if (compiled_step_native_input) {
 		compiled_step_continued_natively = true;
 		return ExecutePushInternal(*compiled_step_native_input, chunk_budget);
 	}
-	if (compiled_step->ExecuteChunk(input) == SinkResultType::FINISHED) {
+	if (compiled_step->ExecuteChunk(input, execution_source_chunk_proof) == SinkResultType::FINISHED) {
 		return OperatorResultType::FINISHED;
 	}
 	// The sink blocked while the step appended: the loop yields with the output queued until it wakes
@@ -1298,6 +1298,7 @@ SourceResultType PipelineExecutor::FetchFromCompiledSourceContract(SupportsSourc
 
 	stage_start = metrics ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point();
 	auto res = fetch(source_input);
+	execution_source_chunk_proof.table_filters_hold = source_input.table_filters_hold;
 	if (source_input.batch_index_state == SourceBatchIndexState::ADVANCED) {
 		throw InternalException(
 		    "execution region source contract fetch cannot carry a batch-index advance without data");

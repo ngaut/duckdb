@@ -318,6 +318,12 @@ bool SljitBuildExecutableAggregateUpdatePayloadCode(const SljitNativeAggregateUp
                                                     const vector<bool> &input_not_null,
                                                     const vector<Value> &input_min_values,
                                                     const vector<Value> &input_max_values) {
+	if (!TryBuildUngroupedFusedAggregateUpdate(op, executable, error, input_not_null)) {
+		return false;
+	}
+	if (executable.fused_payload_update.Function()) {
+		return true;
+	}
 	if (op.UsesPrimitivePayloads() && !op.use_grouped_state_addresses && !op.payloads.empty()) {
 		SljitNativeAggregateUpdateFunction fused_function = nullptr;
 		string fused_error;
@@ -333,12 +339,6 @@ bool SljitBuildExecutableAggregateUpdatePayloadCode(const SljitNativeAggregateUp
 			error = fused_error;
 			return false;
 		}
-	}
-	if (!TryBuildUngroupedFusedAggregateUpdate(op, executable, error, input_not_null)) {
-		return false;
-	}
-	if (executable.fused_payload_update.Function()) {
-		return true;
 	}
 	if (!TryBuildPerfectHashGroupedFusedAggregateUpdate(op, executable, error, input_not_null, input_min_values,
 	                                                    input_max_values)) {

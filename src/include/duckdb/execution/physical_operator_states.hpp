@@ -213,6 +213,8 @@ struct OperatorSourceInput {
 	InterruptState &interrupt_state;
 	SourceBatchIndexState batch_index_state = SourceBatchIndexState::UNCHANGED;
 	optional_ptr<ExecutionOperatorStageRecorder> stage_recorder;
+	//! Set by a source contract scan whose zone maps prove each table filter for every row of the chunk it returned
+	bool table_filters_hold = false;
 };
 
 struct OperatorSinkCombineInput {

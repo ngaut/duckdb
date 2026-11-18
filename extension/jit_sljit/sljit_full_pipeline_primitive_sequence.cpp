@@ -26,6 +26,13 @@ SljitFullPipelinePrimitiveStep::GeneratedFilter(const SljitGeneratedFilterPrimit
 }
 
 SljitFullPipelinePrimitiveStep
+SljitFullPipelinePrimitiveStep::HeldFilter(const SljitGeneratedFilterPrimitive &primitive) {
+	auto step = Make(SljitFullPipelinePrimitiveKind::HELD_FILTER);
+	step.generated_filter = primitive;
+	return step;
+}
+
+SljitFullPipelinePrimitiveStep
 SljitFullPipelinePrimitiveStep::HashJoinProbeMaterialize(const SljitHashJoinProbeMaterializePrimitive &primitive) {
 	auto step = Make(SljitFullPipelinePrimitiveKind::HASH_JOIN_PROBE_MATERIALIZE);
 	step.hash_join_probe_materialize = primitive;

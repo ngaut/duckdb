@@ -337,6 +337,19 @@ static bool BuildSljitNativeContinuation(const SljitNativeRegionPlan &region, Sl
 	return true;
 }
 
+//! The op evaluating the scan's table filters: a source whose filters are generated lowers them to the region's first
+//! op
+static idx_t SljitSourceFilterOpIndex(const SljitExecutableRegion &executable) {
+	if (executable.scan_filter_mode != ExecutionRegionScanFilterMode::STATIC_PRUNING_ONLY &&
+	    executable.scan_filter_mode != ExecutionRegionScanFilterMode::DYNAMIC_FILTERS_WITH_STATIC_PRUNING) {
+		return DConstants::INVALID_INDEX;
+	}
+	if (executable.ops.empty() || executable.ops[0].Kind() != SljitNativeRegionOpKind::FILTER) {
+		throw InternalException("SLJIT region with generated source filters does not start with their filter");
+	}
+	return 0;
+}
+
 bool BuildSljitExecutableRegion(const SljitNativeRegionPlan &region, SljitExecutableRegion &executable,
                                 SljitFullPipelineRecipePlan &recipe_plan, string &error) {
 	executable.scan_filter_mode = region.scan_filter_mode;
@@ -411,7 +424,7 @@ bool BuildSljitExecutableRegion(const SljitNativeRegionPlan &region, SljitExecut
 	// cannot own, then move the same final plan into the kernel.
 	recipe_plan = BuildSljitFullPipelineRecipePlan(executable.ops, executable.aggregate_state_source,
 	                                               executable.source_output_types, executable.source_min_values,
-	                                               executable.source_max_values);
+	                                               executable.source_max_values, SljitSourceFilterOpIndex(executable));
 	if (!recipe_plan.HasRecipe()) {
 		error = "SLJIT region binds no recipe: no op hands DuckDB's operators what they take";
 		return false;
