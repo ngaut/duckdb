@@ -1,0 +1,81 @@
+# name: test/sql/storage/compression/bitpacking/bitpacking_range_filter.test
+# description: Range filters over bitpacked signed integers keep the rows and values uncompressed storage keeps
+# group: [bitpacking]
+
+# The first filter of a vector checks every row of it: bounds may be one-sided, closed, a single value or empty, values
+# may sit at the type's limits, and segments may end inside a bitpacking group.
+
+require block_size 262144
+
+load {TEST_DIR}/test_bitpacking_range_filter.db
+
+# the scan evaluates the filters itself
+statement ok
+SET jit_policy='off'
+
+foreach compression bitpacking uncompressed
+
+statement ok
+PRAGMA force_compression = '{compression}'
+
+statement ok
+CREATE TABLE t_{compression} AS
+SELECT (i % 50 - 25)::TINYINT AS a,
+       (i * 37 % 4001 - 2000)::SMALLINT AS b,
+       (i * 7919 % 2000003 - 1000000)::INTEGER AS c,
+       (i // 7)::INTEGER AS e,
+       (9223372036854775807 - (i * 7919 % 1000))::BIGINT AS g,
+       (-9223372036854775808 + (i * 7919 % 1000))::BIGINT AS h
+FROM range(1234567) t(i)
+
+statement ok
+CHECKPOINT
+
+endloop
+
+# the scans read the stored segments, not the rows this process appended
+restart
+
+# the scan evaluates the filters itself
+statement ok
+SET jit_policy='off'
+
+foreach compression bitpacking uncompressed
+
+statement ok
+CREATE TABLE r_{compression} AS
+SELECT 'tinyint_lower' AS q, count(*)::HUGEINT AS n, sum(a)::HUGEINT AS s, sum(c)::HUGEINT AS o
+FROM t_{compression} WHERE a > -10
+UNION ALL SELECT 'tinyint_upper', count(*), sum(a), sum(b) FROM t_{compression} WHERE a <= 3
+UNION ALL SELECT 'tinyint_point', count(*), sum(a), sum(e) FROM t_{compression} WHERE a = -25
+UNION ALL SELECT 'smallint_closed', count(*), sum(b), sum(c) FROM t_{compression} WHERE b BETWEEN -100 AND 1500
+UNION ALL SELECT 'integer_point', count(*), sum(c), sum(e) FROM t_{compression} WHERE c = -992081
+UNION ALL SELECT 'integer_closed', count(*), sum(c), sum(a) FROM t_{compression} WHERE c >= -5000 AND c < 700000
+UNION ALL SELECT 'integer_empty', count(*), sum(c), sum(a) FROM t_{compression} WHERE c > 5 AND c < 3
+UNION ALL SELECT 'delta_lower', count(*), sum(e), sum(a) FROM t_{compression} WHERE e >= 176000
+UNION ALL SELECT 'delta_upper', count(*), sum(e), sum(b) FROM t_{compression} WHERE e < 1000
+UNION ALL SELECT 'bigint_max', count(*), sum(g), sum(e) FROM t_{compression} WHERE g >= 9223372036854775807
+UNION ALL SELECT 'bigint_near_max', count(*), sum(g), sum(e) FROM t_{compression} WHERE g > 9223372036854775000
+UNION ALL SELECT 'bigint_min', count(*), sum(h), sum(e) FROM t_{compression} WHERE h <= -9223372036854775808
+UNION ALL SELECT 'bigint_near_min', count(*), sum(h), sum(e) FROM t_{compression} WHERE h < -9223372036854775500
+UNION ALL SELECT 'two_filters', count(*), sum(c), sum(a) FROM t_{compression} WHERE a = 7 AND c > 0
+
+endloop
+
+query I
+SELECT count(*) FROM pragma_storage_info('t_bitpacking')
+WHERE segment_type IN ('TINYINT', 'SMALLINT', 'INTEGER', 'BIGINT') AND compression NOT IN ('BitPacking', 'Constant')
+----
+0
+
+query I
+SELECT count(*) FROM ((SELECT * FROM r_bitpacking EXCEPT ALL SELECT * FROM r_uncompressed)
+                      UNION ALL (SELECT * FROM r_uncompressed EXCEPT ALL SELECT * FROM r_bitpacking))
+----
+0
+
+# every filter keeps some rows but the empty one
+query I
+SELECT string_agg(q, ',' ORDER BY q) FROM r_bitpacking WHERE n = 0
+----
+integer_empty

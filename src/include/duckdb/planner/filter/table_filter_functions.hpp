@@ -54,6 +54,15 @@ struct SignedNumericRangeFilterData {
 	bool has_upper = false;
 	int64_t lower = 0;
 	int64_t upper = 0;
+
+	//! A non-empty range as an offset window: v is inside when uint64_t(int64_t(v)) - OffsetBase() <= OffsetSpan(),
+	//! one compare and no branch on which bounds exist
+	uint64_t OffsetBase() const {
+		return has_lower ? static_cast<uint64_t>(lower) : uint64_t(1) << 63;
+	}
+	uint64_t OffsetSpan() const {
+		return (has_upper ? static_cast<uint64_t>(upper) : (uint64_t(1) << 63) - 1) - OffsetBase();
+	}
 };
 
 bool IsSignedNumericRangePhysicalType(PhysicalType physical_type);
