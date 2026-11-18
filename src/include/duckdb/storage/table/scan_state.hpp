@@ -354,6 +354,23 @@ public:
 	} deferred;
 	//! Receives the selected rows of the deferred columns before they move to the rows' positions
 	DataChunk deferred_selection;
+	//! Per column: whether reading only a consumer's selected rows costs less than reading the vector whole. The
+	//! cost depends on the column's encoding, so the first reads time both ways in turn
+	struct DeferredColumnReads {
+		idx_t timed = 0;
+		int64_t selected_nanos = 0;
+		int64_t whole_nanos = 0;
+
+		static constexpr idx_t TIMED_READS = 16;
+
+		bool Decided() const {
+			return timed >= TIMED_READS;
+		}
+		bool ReadsSelected() const {
+			return Decided() ? selected_nanos < whole_nanos : timed % 2 == 0;
+		}
+	};
+	vector<DeferredColumnReads> deferred_reads;
 
 public:
 	void Initialize(const QueryContext &context_p, const vector<LogicalType> &types);

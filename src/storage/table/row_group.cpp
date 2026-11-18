@@ -1,4 +1,6 @@
 #include "duckdb/storage/table/row_group.hpp"
+
+#include <chrono>
 #include "duckdb/main/client_context.hpp"
 #include "duckdb/parallel/async_result.hpp"
 #include "duckdb/transaction/commit_state.hpp"
@@ -1173,13 +1175,14 @@ void RowGroup::ReadDeferredColumns(CollectionScanState &state, TransactionData t
 	D_ASSERT(deferred.row_group.get() == this);
 	D_ASSERT(chunk.size() == deferred.count);
 	const auto &column_ids = state.GetColumnIds();
-	// a few selected rows cost less read one by one than decoded with the whole vector
-	const bool reads_selected = sel && 2 * count <= deferred.count;
-	if (reads_selected) {
+	// at most half of the rows can cost less read one by one than decoded with the whole vector
+	const bool few_selected = sel && 2 * count <= deferred.count;
+	if (few_selected) {
 		if (state.deferred_selection.ColumnCount() == 0) {
 			auto deferrable = state.GetOptions().deferred_columns;
 			deferrable.resize(chunk.ColumnCount(), false);
 			state.deferred_selection.Initialize(Allocator::DefaultAllocator(), chunk.GetTypes(), deferrable);
+			state.deferred_reads.resize(chunk.ColumnCount());
 		}
 		state.deferred_selection.Reset();
 	}
@@ -1187,14 +1190,28 @@ void RowGroup::ReadDeferredColumns(CollectionScanState &state, TransactionData t
 		auto &col_data = GetColumn(column_ids[col]);
 		auto &column_scan = state.column_scans[col];
 		auto &target = chunk.data[col];
-		if (!reads_selected) {
+		if (!few_selected) {
 			col_data.Scan(transaction, deferred.vector_index, column_scan, target, deferred.count);
 			continue;
 		}
-		auto &selected = state.deferred_selection.data[col];
-		SelectionVector rows(*sel);
-		col_data.Select(transaction, deferred.vector_index, column_scan, selected, rows, count);
-		ScatterSelectedRows(selected, target, *sel, count);
+		auto &reads = state.deferred_reads[col];
+		const bool timed = !reads.Decided();
+		const bool reads_selected = reads.ReadsSelected();
+		const auto start = timed ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point();
+		if (reads_selected) {
+			auto &selected = state.deferred_selection.data[col];
+			SelectionVector rows(*sel);
+			col_data.Select(transaction, deferred.vector_index, column_scan, selected, rows, count);
+			ScatterSelectedRows(selected, target, *sel, count);
+		} else {
+			col_data.Scan(transaction, deferred.vector_index, column_scan, target, deferred.count);
+		}
+		if (timed) {
+			const auto nanos =
+			    std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - start).count();
+			(reads_selected ? reads.selected_nanos : reads.whole_nanos) += nanos;
+			reads.timed++;
+		}
 	}
 	deferred.row_group = nullptr;
 	deferred.columns.clear();
