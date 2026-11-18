@@ -1,10 +1,11 @@
 # name: test/sql/jit/test_jit_vector_probes.test
-# description: A scan whose filters a region evaluates drops the vectors none of whose rows can pass them
+# description: A scan whose filters a region evaluates reads only the rows of a vector that can pass them
 # group: [jit]
 
-# Matches come in runs of 1000 rows, so most vectors hold none: the scan reads the filtered columns first and skips
-# the rest of such a vector. Vectors with deleted rows, NULLs, several filters, sampling, joins and rows only the
-# transaction sees must keep exactly the rows DuckDB's own scan keeps.
+# Matches come in runs of 1000 rows, so most vectors hold none: the scan reads the filtered columns first, skips the
+# rest of such a vector and reads the other columns of a vector only around its matches. Vectors with deleted rows,
+# NULLs, several filters, sampling, joins, updates and rows only the transaction sees must keep exactly the rows
+# DuckDB's own scan keeps.
 
 require jit_sljit
 
@@ -25,6 +26,10 @@ SELECT i AS id,
        (i // 4096)::INTEGER AS c,
        (i // 150000)::INTEGER AS z
 FROM range(600000) t(i)
+
+# no deleted rows: the other columns are read only around the matches
+statement ok
+CREATE TABLE clean AS SELECT *, 'row' || (id % 1009)::VARCHAR AS s FROM runs
 
 statement ok
 CREATE TABLE dims AS SELECT i AS k, (i % 3)::INTEGER AS bucket FROM range(13) t(i)
@@ -82,6 +87,25 @@ UNION ALL
 SELECT 'key_range_join', sum(r.v), count(*), sum(e.w) FROM runs r JOIN keys e ON r.c = e.c WHERE r.n < 9000
 
 statement ok
+CREATE MACRO probe_c() AS TABLE
+SELECT 'int' AS q, sum(v)::HUGEINT AS a, count(*)::HUGEINT AS b, sum(id)::HUGEINT AS c FROM clean WHERE n < 300
+UNION ALL
+SELECT 'rowid', sum(rowid), count(*), sum(v) FROM clean WHERE n BETWEEN 4000 AND 4100
+UNION ALL
+SELECT 'string', sum(hash(s) % 1000), count(*), sum(strlen(s)) FROM clean WHERE d BETWEEN DATE '2004-03-01' AND DATE '2004-03-20'
+UNION ALL
+SELECT 'nullable', sum(v), count(*), count(nn) FROM clean WHERE nn < 300
+UNION ALL
+SELECT 'two_filters', sum(v), count(*), sum(id) FROM clean WHERE n < 3000 AND t64 < -400
+UNION ALL
+SELECT 'constant_runs_and_filter', sum(v), count(*), sum(id) FROM clean WHERE n < 5000 AND z = 3
+
+# every column of a row comes from the same row
+statement ok
+CREATE MACRO probe_cp() AS TABLE
+SELECT rowid AS r, id, v + k AS w, s, nn FROM clean WHERE n < 200 AND t64 < 0
+
+statement ok
 CREATE MACRO probe_g() AS TABLE
 SELECT k, sum(v)::HUGEINT AS a, count(*)::HUGEINT AS b FROM runs WHERE n < 1000 GROUP BY k
 
@@ -108,6 +132,12 @@ CREATE OR REPLACE TEMP TABLE g_{policy} AS FROM probe_g()
 statement ok
 CREATE OR REPLACE TEMP TABLE p_{policy} AS FROM probe_p()
 
+statement ok
+CREATE OR REPLACE TEMP TABLE c_{policy} AS FROM probe_c()
+
+statement ok
+CREATE OR REPLACE TEMP TABLE cp_{policy} AS FROM probe_cp()
+
 endloop
 
 query I
@@ -128,6 +158,18 @@ SELECT count(*) FROM ((SELECT * FROM p_off EXCEPT ALL SELECT * FROM p_auto)
 ----
 0
 
+query I
+SELECT count(*) FROM ((SELECT * FROM c_off EXCEPT ALL SELECT * FROM c_auto)
+                      UNION ALL (SELECT * FROM c_auto EXCEPT ALL SELECT * FROM c_off))
+----
+0
+
+query I
+SELECT count(*) FROM ((SELECT * FROM cp_off EXCEPT ALL SELECT * FROM cp_auto)
+                      UNION ALL (SELECT * FROM cp_auto EXCEPT ALL SELECT * FROM cp_off))
+----
+0
+
 endloop
 
 # the second pass runs over rows only this transaction sees, beside updated and deleted ones
@@ -143,6 +185,13 @@ UPDATE runs SET n = 1 WHERE id BETWEEN 1500 AND 1510
 
 statement ok
 DELETE FROM runs WHERE id % 1000 = 999
+
+# an updated column is read whole: its updates are merged by their position in the vector
+statement ok
+UPDATE clean SET v = v + 1000, s = 'updated' WHERE id BETWEEN 48500 AND 48510 OR id BETWEEN 300100 AND 300110
+
+statement ok
+UPDATE clean SET n = 1 WHERE id BETWEEN 5000 AND 5003
 
 foreach threads 1 4
 
@@ -163,6 +212,12 @@ CREATE OR REPLACE TEMP TABLE g_{policy} AS FROM probe_g()
 statement ok
 CREATE OR REPLACE TEMP TABLE p_{policy} AS FROM probe_p()
 
+statement ok
+CREATE OR REPLACE TEMP TABLE c_{policy} AS FROM probe_c()
+
+statement ok
+CREATE OR REPLACE TEMP TABLE cp_{policy} AS FROM probe_cp()
+
 endloop
 
 query I
@@ -180,6 +235,18 @@ SELECT count(*) FROM ((SELECT * FROM g_off EXCEPT ALL SELECT * FROM g_auto)
 query I
 SELECT count(*) FROM ((SELECT * FROM p_off EXCEPT ALL SELECT * FROM p_auto)
                       UNION ALL (SELECT * FROM p_auto EXCEPT ALL SELECT * FROM p_off))
+----
+0
+
+query I
+SELECT count(*) FROM ((SELECT * FROM c_off EXCEPT ALL SELECT * FROM c_auto)
+                      UNION ALL (SELECT * FROM c_auto EXCEPT ALL SELECT * FROM c_off))
+----
+0
+
+query I
+SELECT count(*) FROM ((SELECT * FROM cp_off EXCEPT ALL SELECT * FROM cp_auto)
+                      UNION ALL (SELECT * FROM cp_auto EXCEPT ALL SELECT * FROM cp_off))
 ----
 0
 

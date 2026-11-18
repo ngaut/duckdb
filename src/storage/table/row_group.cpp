@@ -1004,53 +1004,93 @@ static bool CompactsFilteredVector(const Vector &filtered) {
 	return TypeIsConstantSize(filtered.GetType().InternalType());
 }
 
+//! The rows [begin, end) of a vector that may pass the probes read so far; begin == end when none can
+struct ProbedRows {
+	idx_t begin;
+	idx_t end;
+};
+
+//! Narrow the rows to whole 64-row blocks, counted from rows.begin, that hold a value in the range
 template <class T>
-static bool AnyValueInRange(const Vector &vector, idx_t count, uint64_t base, uint64_t span) {
+static ProbedRows RowsInRange(const Vector &vector, ProbedRows rows, uint64_t base, uint64_t span) {
+	static constexpr idx_t BLOCK_SIZE = 64;
 	const auto data = FlatVector::GetData<T>(vector);
-	for (idx_t start = 0; start < count; start += 64) {
-		const auto end = MinValue<idx_t>(start + 64, count);
+	auto block_holds_row = [&](idx_t start) {
+		const auto end = MinValue<idx_t>(start + BLOCK_SIZE, rows.end);
 		bool any = false;
 		for (idx_t i = start; i < end; i++) {
 			any |= static_cast<uint64_t>(static_cast<int64_t>(data[i])) - base <= span;
 		}
-		if (any) {
-			return true;
-		}
+		return any;
+	};
+	auto first = rows.begin;
+	while (first < rows.end && !block_holds_row(first)) {
+		first += BLOCK_SIZE;
 	}
-	return false;
+	if (first >= rows.end) {
+		return {rows.end, rows.end};
+	}
+	// the scan from the back stops at the first block at the latest
+	auto last = first + (rows.end - 1 - first) / BLOCK_SIZE * BLOCK_SIZE;
+	while (!block_holds_row(last)) {
+		last -= BLOCK_SIZE;
+	}
+	return {first, MinValue<idx_t>(last + BLOCK_SIZE, rows.end)};
 }
 
-//! Whether a row of a probed column's vector can pass its filter. The values of NULL rows are compared as they are
-//! stored: one that falls into the range keeps a vector its consumer filters anyway.
-static bool VectorMayPassFilter(const ScanFilter &filter, const Vector &vector, idx_t count) {
+//! Narrow the rows to those of a probed column's vector that can pass its filter. The values of NULL rows are compared
+//! as they are stored: one that falls into the range keeps rows their consumer filters anyway.
+static ProbedRows RowsMayPassFilter(const ScanFilter &filter, const Vector &vector, ProbedRows rows) {
 	SignedNumericRangeFilterData range;
 	const bool has_range =
 	    TryGetSignedNumericRange(filter.filter_state->Cast<ExpressionFilterState>(), vector.GetType(), range);
 	D_ASSERT(has_range);
 	(void)has_range;
+	const ProbedRows none {rows.end, rows.end};
 	if (range.empty) {
-		return false;
+		return none;
 	}
 	const auto vector_type = vector.GetVectorType();
-	if (vector_type == VectorType::CONSTANT_VECTOR) {
-		count = 1;
-	} else if (vector_type != VectorType::FLAT_VECTOR) {
-		return true;
+	if (vector_type != VectorType::FLAT_VECTOR && vector_type != VectorType::CONSTANT_VECTOR) {
+		return rows;
 	}
+	// a constant vector's one value decides all of its rows
+	const bool constant = vector_type == VectorType::CONSTANT_VECTOR;
+	const ProbedRows probed = constant ? ProbedRows {0, 1} : rows;
 	const auto base = range.OffsetBase();
 	const auto span = range.OffsetSpan();
+	ProbedRows result;
 	switch (vector.GetType().InternalType()) {
 	case PhysicalType::INT8:
-		return AnyValueInRange<int8_t>(vector, count, base, span);
+		result = RowsInRange<int8_t>(vector, probed, base, span);
+		break;
 	case PhysicalType::INT16:
-		return AnyValueInRange<int16_t>(vector, count, base, span);
+		result = RowsInRange<int16_t>(vector, probed, base, span);
+		break;
 	case PhysicalType::INT32:
-		return AnyValueInRange<int32_t>(vector, count, base, span);
+		result = RowsInRange<int32_t>(vector, probed, base, span);
+		break;
 	case PhysicalType::INT64:
-		return AnyValueInRange<int64_t>(vector, count, base, span);
+		result = RowsInRange<int64_t>(vector, probed, base, span);
+		break;
 	default:
-		return true;
+		return rows;
 	}
+	if (constant) {
+		return result.begin == result.end ? none : rows;
+	}
+	return result;
+}
+
+//! A column scan merges a vector's updates by their position in the vector: only columns without updates can be read
+//! from a row inside it
+bool RowGroup::ReadsProbedRowsOnly(const vector<StorageIndex> &column_ids, const ScanFilterInfo &filter_info) const {
+	for (idx_t i = 0; i < column_ids.size(); i++) {
+		if (!filter_info.ColumnIsProbed(i) && GetColumn(column_ids[i]).HasUpdates()) {
+			return false;
+		}
+	}
+	return true;
 }
 
 void RowGroup::ProcessPreparedScan(ScanOptions options, CollectionScanState &state, DataChunk &result) {
@@ -1065,15 +1105,20 @@ void RowGroup::ProcessPreparedScan(ScanOptions options, CollectionScanState &sta
 	idx_t sample_count = prepared.sample_count;
 	auto &sample_sel = prepared.sample_sel;
 
-	// the probed columns are read whole first: a vector none of whose rows can pass a probe is dropped unread
+	// The probed columns are read whole first: a vector none of whose rows can pass a probe is dropped unread, and only
+	// the rows that can pass all of them are read from the other columns
 	auto &probe_filters = filter_info.GetVectorProbeFilters(result);
+	ProbedRows probed_rows {0, max_count};
 	for (idx_t probe_idx = 0; probe_idx < probe_filters.size(); probe_idx++) {
 		auto &filter = filter_info.GetPruningFilterList()[probe_filters[probe_idx]];
 		const auto i = filter.scan_column_index.GetIndex();
 		state.column_scans[i].update_scan_type = options.update_type;
 		GetColumn(column_ids[i])
 		    .Scan(transaction, state.vector_index, state.column_scans[i], result.data[i], max_count);
-		if (filter.IsAlwaysTrue() || VectorMayPassFilter(filter, result.data[i], max_count)) {
+		if (!filter.IsAlwaysTrue()) {
+			probed_rows = RowsMayPassFilter(filter, result.data[i], probed_rows);
+		}
+		if (probed_rows.begin < probed_rows.end) {
 			continue;
 		}
 		for (idx_t col_idx = 0; col_idx < column_ids.size(); col_idx++) {
@@ -1094,14 +1139,28 @@ void RowGroup::ProcessPreparedScan(ScanOptions options, CollectionScanState &sta
 	bool has_filters = filter_info.HasFilters();
 	if (count == max_count && !has_filters) {
 		// scan all vectors completely: full scan without deletions or table filters
+		const bool reads_probed_rows = (probed_rows.begin != 0 || probed_rows.end != max_count) &&
+		                               !has_sample_selection && ReadsProbedRowsOnly(column_ids, filter_info);
 		for (idx_t i = 0; i < column_ids.size(); i++) {
-			if (!filter_info.ColumnIsProbed(i)) {
+			if (filter_info.ColumnIsProbed(i)) {
+				if (reads_probed_rows) {
+					result.data[i].Slice(result.data[i], probed_rows.begin, probed_rows.end);
+				}
+			} else {
 				const auto &column = column_ids[i];
 				auto &col_data = GetColumn(column);
-				state.column_scans[i].update_scan_type = options.update_type;
-				// pass max_count explicitly, concurrent inserts can grow the column past the count captured at scan
-				// init
-				col_data.Scan(transaction, state.vector_index, state.column_scans[i], result.data[i], max_count);
+				auto &column_scan = state.column_scans[i];
+				column_scan.update_scan_type = options.update_type;
+				if (reads_probed_rows) {
+					col_data.Skip(column_scan, probed_rows.begin);
+					col_data.Scan(transaction, state.vector_index, column_scan, result.data[i],
+					              probed_rows.end - probed_rows.begin);
+					col_data.Skip(column_scan, max_count - probed_rows.end);
+				} else {
+					// pass max_count explicitly, concurrent inserts can grow the column past the count captured at
+					// scan init
+					col_data.Scan(transaction, state.vector_index, column_scan, result.data[i], max_count);
+				}
 			}
 			if (has_sample_selection) {
 				result.data[i].Slice(sample_sel, sample_count);
@@ -1109,6 +1168,8 @@ void RowGroup::ProcessPreparedScan(ScanOptions options, CollectionScanState &sta
 		}
 		if (has_sample_selection) {
 			count = sample_count;
+		} else if (reads_probed_rows) {
+			count = probed_rows.end - probed_rows.begin;
 		}
 	} else {
 		// partial scan: we have deletions or table filters

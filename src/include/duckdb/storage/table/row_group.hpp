@@ -209,6 +209,8 @@ public:
 	bool PrepareScan(ScanOptions options, CollectionScanState &state);
 	//! Processes the vector prepared by PrepareScan, clearing the prepared state when the vector is finished
 	void ProcessPreparedScan(ScanOptions options, CollectionScanState &state, DataChunk &result);
+	//! Whether the columns other than the probed ones can be read from a row inside the vector
+	bool ReadsProbedRowsOnly(const vector<StorageIndex> &column_ids, const ScanFilterInfo &filter_info) const;
 
 	idx_t GetSelVector(ScanOptions options, idx_t vector_idx, SelectionVector &sel_vector, idx_t max_count);
 
