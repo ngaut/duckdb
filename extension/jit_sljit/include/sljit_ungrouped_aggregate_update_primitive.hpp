@@ -196,7 +196,8 @@ SljitExecuteBoundUngroupedPrimitiveAggregateUpdate(ExecutionRegionRuntime &runti
 			    op.AggregateUpdate().payloads, op.AggregateUpdate().fused_payload_update.Function(),
 			    op.AggregateUpdate().payload_descriptors, op.AggregateUpdate().payload_source_layout,
 			    op.AggregateUpdate().combined_payload_source_indices,
-			    op.AggregateUpdate().combined_payload_source_not_null, payload_lanes, input, execute_sel, count,
+			    op.AggregateUpdate().combined_payload_source_not_null,
+			    op.AggregateUpdate().combined_payload_string_compares, payload_lanes, input, execute_sel, count,
 			    payload_scratch);
 		}
 		if (trace_runtime) {

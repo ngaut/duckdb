@@ -50,8 +50,9 @@ static SinkResultType SljitExecuteNativeUngroupedAggregateUpdateWithPayloads(
 		auto payload_stage_start = SljitRegionStageStart(runtime);
 		SljitExecuteFusedPrimitiveAggregatePayloadUpdate(
 		    payloads, op.AggregateUpdate().fused_payload_update.Function(), op.AggregateUpdate().payload_descriptors,
-		    payload_source_layout, combined_payload_source_indices, combined_payload_source_not_null, payload_lanes,
-		    payload_input, nullptr, payload_input.size(), payload_scratch);
+		    payload_source_layout, combined_payload_source_indices, combined_payload_source_not_null,
+		    op.AggregateUpdate().combined_payload_string_compares, payload_lanes, payload_input, nullptr,
+		    payload_input.size(), payload_scratch);
 		RecordSljitRegionStageRuntime(runtime, op_idx, op.Kind(), stage_name, payload_stage_start);
 	} else {
 		for (idx_t payload_idx = 0; payload_idx < aggregates.size(); payload_idx++) {

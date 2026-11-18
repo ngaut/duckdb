@@ -186,10 +186,6 @@ unique_ptr<ExecutionRegionCodeHandle>
 BuildSljitNativeUngroupedFusedPrimitiveAggregateUpdate(const vector<SljitNativeRegionExpressionPlan> &payloads,
                                                        const vector<ExecutionRegionAggregateInput> &aggregates,
                                                        SljitNativeAggregateUpdateFunction &function, string &error);
-unique_ptr<ExecutionRegionCodeHandle>
-BuildSljitNativeUngroupedFusedAggregateUpdate(const vector<SljitNativeRegionExpressionPlan> &payloads,
-                                              const vector<ExecutionRegionAggregateInput> &aggregates,
-                                              SljitNativeAggregateUpdateFunction &function, string &error);
 unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativeGroupedFusedPrimitiveAggregateUpdate(
     const vector<SljitNativeRegionExpressionPlan> &payloads, const vector<ExecutionRegionAggregateInput> &aggregates,
     const ExecutionRegionAggregateContract &contract, SljitNativeAggregateUpdateFunction &function, string &error);

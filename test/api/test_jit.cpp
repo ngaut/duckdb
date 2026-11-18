@@ -413,7 +413,6 @@ TEST_CASE("SLJIT backend requires an addressable native-vector register ABI", "[
 		      capabilities.registers.CanEnter(10, ungrouped.source_data_saved_register_count));
 		if (ungrouped.has_register_accumulators) {
 			CHECK(ungrouped.accumulator_scratch_register_count == 10);
-			CHECK(ungrouped.conditional_payload == SLJIT_R9);
 		}
 
 		const auto &primitive_run = GetSljitPrimitiveRunRegisterLayout();

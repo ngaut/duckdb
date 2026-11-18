@@ -420,6 +420,13 @@ EmitSljitTypedExpressionTreeFastLeafJumps(struct sljit_compiler *compiler, const
                                           idx_t &spill_index, vector<SljitArithmeticOverflowSite> &overflows,
                                           SljitTypedExpressionTreeFastIndexMode index_mode,
                                           const vector<SljitTypedExpressionTreeLoopHoist> *data_hoists) {
+	if (node.kind == ExecutionExpressionIRKind::CONSTANT) {
+		// a constant decides every row alike: the jump is unconditional or absent
+		if ((SljitTypedExpressionTreeConstantValue(node) != 0) != when) {
+			return {};
+		}
+		return {sljit_emit_jump(compiler, SLJIT_JUMP)};
+	}
 	if (index_mode == SljitTypedExpressionTreeFastIndexMode::FLAT && SljitTypedExpressionTreeIsRemainderTest(node)) {
 		auto true_jumps =
 		    EmitSljitTypedExpressionTreeFastRemainderTestJumps(compiler, node, spill_index, overflows, data_hoists);

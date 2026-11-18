@@ -203,23 +203,35 @@ CollectSljitTypedExpressionTreeStringCompares(const vector<reference<const Execu
 	return result;
 }
 
-//! Splits the sources a node reads into those it reads at a string comparison reached only through AND and OR, and the
-//! rest
+//! Splits the sources a node reads into those it reads at a string comparison whose NULL result decides as FALSE
+//! would, and the rest. A filter decides NULL as FALSE, and so does a CASE condition; AND and OR pass that on to their
+//! children.
 static void CollectSljitTypedExpressionTreeStringCompareReads(const ExecutionExpressionIR &node,
-                                                              vector<idx_t> &compared, vector<idx_t> &other) {
+                                                              bool null_decides_false, vector<idx_t> &compared,
+                                                              vector<idx_t> &other) {
 	idx_t source_index;
 	string constant;
 	bool compare_equal;
-	if (TryReadSljitTypedExpressionTreeStringCompareConstant(node, source_index, constant, compare_equal)) {
+	if (null_decides_false &&
+	    TryReadSljitTypedExpressionTreeStringCompareConstant(node, source_index, constant, compare_equal)) {
 		compared.push_back(source_index);
 		return;
 	}
-	if (node.kind != ExecutionExpressionIRKind::CONJUNCTION) {
-		CollectSljitTypedExpressionTreeReferences(node, other);
+	if (node.kind == ExecutionExpressionIRKind::REFERENCE) {
+		other.push_back(node.ref_index);
 		return;
 	}
-	for (auto &child : node.children) {
-		CollectSljitTypedExpressionTreeStringCompareReads(*child, compared, other);
+	const bool children_decide_false = node.kind == ExecutionExpressionIRKind::CONJUNCTION && null_decides_false;
+	for (idx_t child_idx = 0; child_idx < node.children.size(); child_idx++) {
+		// the even children of a CASE are its conditions
+		const bool condition = node.kind == ExecutionExpressionIRKind::CASE && child_idx % 2 == 0;
+		CollectSljitTypedExpressionTreeStringCompareReads(*node.children[child_idx], children_decide_false || condition,
+		                                                  compared, other);
+	}
+	for (auto child : {node.left.get(), node.right.get(), node.else_node.get()}) {
+		if (child) {
+			CollectSljitTypedExpressionTreeStringCompareReads(*child, false, compared, other);
+		}
 	}
 }
 
@@ -227,9 +239,9 @@ vector<idx_t> CollectSljitTypedExpressionTreeStringCompareOnlySources(
     const ExecutionExpressionIR &predicate, const vector<reference<const ExecutionExpressionIR>> &payloads) {
 	vector<idx_t> compared;
 	vector<idx_t> other;
-	CollectSljitTypedExpressionTreeStringCompareReads(predicate, compared, other);
+	CollectSljitTypedExpressionTreeStringCompareReads(predicate, true, compared, other);
 	for (auto &payload : payloads) {
-		CollectSljitTypedExpressionTreeReferences(payload.get(), other);
+		CollectSljitTypedExpressionTreeStringCompareReads(payload.get(), false, compared, other);
 	}
 	vector<idx_t> result;
 	for (auto source_index : compared) {

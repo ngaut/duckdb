@@ -1,0 +1,125 @@
+# name: test/sql/jit/test_jit_ungrouped_case_dictionary.test
+# description: An unfiltered ungrouped aggregate runs the filtered aggregate kernel over every row, comparing a dictionary string once per entry
+# group: [jit]
+
+# A CASE condition decides NULL as FALSE, as a filter does: a column read only through string comparisons there,
+# under AND and OR, keeps its NULL rows on the fast path, while NOT, IS NULL and coalesce read its validity, and so
+# does any other read of the column. The aggregates run on whole chunks and on the rows a join probe or a filter the
+# kernel does not take selects, reading flat sources at the selected row and dictionaries through their selections.
+
+require jit_sljit
+
+statement ok
+SET jit_measure_native_legs=false
+
+load {TEST_DIR}/jit_ungrouped_case_dictionary.db
+
+statement ok
+CREATE TABLE facts AS
+SELECT i AS id,
+       (i % 1000)::INTEGER AS amount,
+       CASE WHEN i % 17 = 0 THEN NULL ELSE (i % 900)::BIGINT END AS nullable_amount,
+       ((i % 100000) / 100)::DECIMAL(15, 2) AS price,
+       CASE i % 7 WHEN 0 THEN 'AIR' WHEN 1 THEN 'MAIL' WHEN 2 THEN 'SHIP' WHEN 3 THEN 'RAIL' WHEN 4 THEN 'TRUCK'
+            WHEN 5 THEN 'FOB' ELSE 'REG AIR' END AS mode,
+       CASE WHEN i % 23 = 0 OR (i // 2048) % 5 = 3 THEN NULL WHEN i % 3 = 0 THEN 'F' WHEN i % 3 = 1 THEN 'O'
+            ELSE 'P with a long tail' END AS status,
+       (i % 50)::INTEGER AS k
+FROM range(600000) t(i)
+
+statement ok
+CREATE TABLE dim AS SELECT i AS k, i % 4 AS cat FROM range(50) t(i)
+
+statement ok
+CHECKPOINT
+
+# a reopened database scans the checkpointed dictionaries
+restart
+
+statement ok
+SET jit_measure_native_legs=false
+
+statement ok
+SET jit_cbo_startup_base_cost=0
+
+statement ok
+SET jit_cbo_startup_margin_basis_points=0
+
+statement ok
+CREATE MACRO case_sums() AS TABLE
+SELECT 'case' AS q, sum(CASE WHEN mode = 'AIR' THEN price ELSE 0 END)::HUGEINT AS a, sum(price)::HUGEINT AS b,
+       count(*)::HUGEINT AS c
+FROM facts
+UNION ALL
+SELECT 'nullable_case', sum(CASE WHEN status = 'F' THEN amount ELSE 0 END), sum(amount), count(*) FROM facts
+UNION ALL
+SELECT 'not_equal', sum(CASE WHEN status <> 'O' THEN amount ELSE -amount END), sum(id), count(*) FROM facts
+UNION ALL
+SELECT 'or', sum(CASE WHEN status = 'F' OR mode = 'SHIP' THEN amount ELSE 1 END), 0, count(*) FROM facts
+UNION ALL
+SELECT 'and_number', sum(CASE WHEN status = 'O' AND amount < 300 THEN amount ELSE 2 END),
+       sum(nullable_amount), count(nullable_amount)
+FROM facts
+UNION ALL
+SELECT 'not', sum(CASE WHEN NOT (status = 'F' AND mode = 'AIR') THEN amount ELSE 3 END), 0, count(*) FROM facts
+UNION ALL
+SELECT 'is_null', sum(CASE WHEN (status = 'F') IS NULL THEN amount ELSE 4 END), 0, count(*) FROM facts
+UNION ALL
+SELECT 'coalesce', sum(CASE WHEN coalesce(status = 'O', true) THEN amount ELSE 5 END), 0, count(*) FROM facts
+UNION ALL
+SELECT 'nested', sum(CASE WHEN status = 'F' THEN amount WHEN status = 'O' THEN 2 * amount ELSE 7 END),
+       sum(CASE WHEN mode <> 'RAIL' THEN nullable_amount ELSE 0 END), count(*)
+FROM facts
+UNION ALL
+SELECT 'value_read', sum(CASE WHEN status = 'F' THEN amount ELSE 0 END), count(status), count(*) FROM facts
+UNION ALL
+SELECT 'number_case', sum(CASE WHEN amount < 500 THEN id ELSE 0 END), sum(id), count(*) FROM facts
+
+statement ok
+CREATE MACRO joined_sums() AS TABLE
+SELECT 'join' AS q, sum(CASE WHEN f.status = 'F' THEN f.amount ELSE 0 END)::HUGEINT AS a,
+       sum(f.amount)::HUGEINT AS b, count(*)::HUGEINT AS c
+FROM facts f JOIN dim d ON f.k = d.k WHERE d.cat = 1
+UNION ALL
+SELECT 'join_flat', sum(CASE WHEN f.amount < 300 THEN f.id ELSE 0 END), sum(f.id), count(*)
+FROM facts f JOIN dim d ON f.k = d.k WHERE d.cat <> 2
+UNION ALL
+SELECT 'like', sum(CASE WHEN status = 'F' THEN amount ELSE 0 END), sum(amount), count(*)
+FROM facts WHERE status LIKE '%tail%' OR amount < 10
+UNION ALL
+SELECT 'like_flat', sum(CASE WHEN amount < 300 THEN id ELSE 0 END), sum(id), count(*)
+FROM facts WHERE status LIKE '%tail%' OR amount < 10
+UNION ALL
+SELECT 'semi', sum(CASE WHEN status = 'F' THEN amount ELSE 0 END), sum(amount), count(*)
+FROM facts WHERE k IN (SELECT k FROM dim WHERE cat = 1)
+UNION ALL
+SELECT 'semi_flat', sum(CASE WHEN amount < 300 THEN id ELSE 0 END), sum(id), count(*)
+FROM facts WHERE k IN (SELECT k FROM dim WHERE cat = 1)
+
+foreach threads 1 4
+
+statement ok
+SET threads={threads}
+
+foreach policy off auto
+
+statement ok
+SET jit_policy='{policy}'
+
+statement ok
+CREATE OR REPLACE TEMP TABLE r_{policy} AS FROM case_sums() UNION ALL FROM joined_sums()
+
+endloop
+
+query I
+SELECT count(*) FROM ((SELECT * FROM r_off EXCEPT ALL SELECT * FROM r_auto)
+                      UNION ALL (SELECT * FROM r_auto EXCEPT ALL SELECT * FROM r_off))
+----
+0
+
+query I
+SELECT count(*) FROM r_auto
+----
+17
+
+endloop

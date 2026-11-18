@@ -99,41 +99,6 @@ static bool TryBuildFusedAggregatePayloads(const SljitNativeAggregateUpdatePlan 
 	return true;
 }
 
-static bool TryBuildUngroupedFusedAggregateUpdate(const SljitNativeAggregateUpdatePlan &op,
-                                                  SljitExecutableAggregateUpdate &executable, string &error,
-                                                  const vector<bool> &input_not_null) {
-	if (!op.UsesPrimitivePayloads() || op.use_grouped_state_addresses ||
-	    op.sink_info.Kind() != ExecutionRegionSinkKind::UNGROUPED_AGGREGATE_UPDATE ||
-	    op.payloads.size() != op.sink_info.aggregates.size()) {
-		return true;
-	}
-
-	SljitFusedAggregatePayloads payloads;
-	if (!TryBuildFusedAggregatePayloads(op, payloads, &input_not_null)) {
-		return true;
-	}
-
-	SljitNativeAggregateUpdateFunction fused_function = nullptr;
-	string fused_error;
-	auto fused_code = BuildSljitNativeUngroupedFusedAggregateUpdate(payloads.codegen_payloads, op.sink_info.aggregates,
-	                                                                fused_function, fused_error);
-	auto compiled =
-	    SljitCompiledFunction<SljitNativeAggregateUpdateFunction>::TryCreate(std::move(fused_code), fused_function);
-	if (compiled.IsExecutable()) {
-		executable.payloads = std::move(payloads.executable_payloads);
-		executable.fused_payload_update = std::move(compiled);
-		executable.payload_source_layout = SljitAggregatePayloadSourceLayout::FUSED_COMBINED;
-		executable.combined_payload_source_indices = std::move(payloads.combined_sources);
-		executable.combined_payload_source_not_null = std::move(payloads.combined_source_not_null);
-		return true;
-	}
-	if (!fused_error.empty() && fused_error.rfind("unsupported", 0) != 0) {
-		error = fused_error;
-		return false;
-	}
-	return true;
-}
-
 static bool TryBuildPerfectHashGroupedFusedAggregateUpdate(const SljitNativeAggregateUpdatePlan &op,
                                                            SljitExecutableAggregateUpdate &executable, string &error,
                                                            const vector<bool> &input_not_null,
@@ -318,7 +283,7 @@ bool SljitBuildExecutableAggregateUpdatePayloadCode(const SljitNativeAggregateUp
                                                     const vector<bool> &input_not_null,
                                                     const vector<Value> &input_min_values,
                                                     const vector<Value> &input_max_values) {
-	if (!TryBuildUngroupedFusedAggregateUpdate(op, executable, error, input_not_null)) {
+	if (!SljitTryBuildUngroupedAggregateKernel(executable, error, input_not_null)) {
 		return false;
 	}
 	if (executable.fused_payload_update.Function()) {

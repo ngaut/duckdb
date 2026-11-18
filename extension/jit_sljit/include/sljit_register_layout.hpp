@@ -43,12 +43,6 @@ struct SljitUngroupedAggregateRegisterLayout {
 	sljit_s32 source_data_saved_register_count = 0;
 	sljit_s32 accumulator_scratch_register_count = 0;
 	sljit_s32 source_data[2] = {0, 0};
-	sljit_s32 fast_source_data = 0;
-	sljit_s32 shared_lower = 0;
-	sljit_s32 shared_upper = 0;
-	sljit_s32 conditional_lower = 0;
-	sljit_s32 conditional_upper = 0;
-	sljit_s32 conditional_payload = 0;
 };
 
 struct SljitPrimitiveRunRegisterLayout {

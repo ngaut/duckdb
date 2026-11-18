@@ -65,17 +65,11 @@ static SljitUngroupedAggregateRegisterLayout BuildSljitUngroupedAggregateRegiste
 		result.source_data_saved_register_count = 10;
 		result.source_data[0] = SljitSavedRegisterAt(8);
 		result.source_data[1] = SljitSavedRegisterAt(9);
-		result.fast_source_data = SljitSavedRegisterAt(6);
 	}
 	constexpr sljit_s32 accumulator_scratch_register_count = 10;
 	if (capabilities.registers.CanEnter(accumulator_scratch_register_count, result.source_data_saved_register_count)) {
 		result.has_register_accumulators = true;
 		result.accumulator_scratch_register_count = accumulator_scratch_register_count;
-		result.shared_lower = SLJIT_R5;
-		result.shared_upper = SLJIT_R6;
-		result.conditional_lower = SLJIT_R7;
-		result.conditional_upper = SLJIT_R8;
-		result.conditional_payload = SLJIT_R9;
 	}
 	return result;
 }

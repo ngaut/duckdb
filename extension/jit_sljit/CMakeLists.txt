@@ -33,9 +33,6 @@ set(JIT_SLJIT_EXTENSION_FILES
     sljit_aggregate_ungrouped_codegen.cpp
     sljit_aggregate_ungrouped_filtered_codegen.cpp
     sljit_aggregate_ungrouped_shared_codegen.cpp
-    sljit_aggregate_ungrouped_typed_plan.cpp
-    sljit_aggregate_ungrouped_typed_codegen.cpp
-    sljit_aggregate_ungrouped_typed_payload_codegen.cpp
     sljit_arithmetic_overflow_codegen.cpp
     sljit_artifact_key.cpp
     sljit_region_instance_slots.cpp

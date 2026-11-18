@@ -16,6 +16,9 @@ namespace duckdb {
 bool SljitTryBuildFilteredAggregateUpdate(SljitExecutableRegionOp &filter_op, SljitExecutableRegionOp &aggregate_op,
                                           string &error, const vector<bool> &input_not_null,
                                           const vector<Value> &input_min_values, const vector<Value> &input_max_values);
+//! An ungrouped aggregate's own kernel: the filtered aggregate kernel over every row
+bool SljitTryBuildUngroupedAggregateKernel(SljitExecutableAggregateUpdate &aggregate_update, string &error,
+                                           const vector<bool> &input_not_null);
 void SljitBuildExecutableAggregateUpdateMetadata(const SljitNativeAggregateUpdatePlan &op,
                                                  SljitExecutableAggregateUpdate &executable,
                                                  const vector<bool> &input_not_null);

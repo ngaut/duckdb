@@ -242,11 +242,13 @@ TEST_CASE("JIT combined aggregate references and auxiliary trees share input slo
 	REQUIRE(executable.fused_payload_update.IsExecutable());
 	REQUIRE(executable.payload_source_layout == SljitAggregatePayloadSourceLayout::FUSED_COMBINED);
 	REQUIRE(executable.combined_payload_source_indices == vector<idx_t> {5, 2});
+	// the reference reads its column through the slot the combined sources give it
 	auto &reference = executable.payloads[1];
-	REQUIRE(reference.plan.source_index == 1);
-	REQUIRE(reference.plan.expression_tree->ref_index == reference.plan.source_index);
-	REQUIRE(reference.InputColumn(reference.plan.source_index) == 2);
-	REQUIRE(reference.input_source_not_null[reference.plan.source_index]);
+	REQUIRE(reference.plan.expression_tree->kind == ExecutionExpressionIRKind::REFERENCE);
+	const auto slot = reference.plan.expression_tree->ref_index;
+	REQUIRE(slot == 1);
+	REQUIRE(reference.InputColumn(slot) == 2);
+	REQUIRE(reference.input_source_not_null[slot]);
 	REQUIRE(semantic.payloads[1].source_index == 2);
 	REQUIRE(semantic.payloads[1].expression_tree->ref_index == 0);
 }

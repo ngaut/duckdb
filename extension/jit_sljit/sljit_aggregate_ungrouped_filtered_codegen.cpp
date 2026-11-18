@@ -247,27 +247,32 @@ unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativeFilteredUngroupedFusedPrim
 	local_size += NumericCast<sljit_sw>(sizeof(sljit_sw));
 	const auto hoists = data_hoists.empty() ? nullptr : &data_hoists;
 	// The loops that call no helper keep each payload's running sum and count in scratch registers past the five
-	// every emitter uses: a stack slot per row would chain each row's update on the previous row's store
+	// every emitter uses: a stack slot per row would chain each row's update on the previous row's store. A loop that
+	// adds every row it accepts to every payload counts the rows once for all of them; a loop that skips a payload's
+	// NULL values counts each payload's own.
 	struct AccumulatorRegisters {
 		sljit_s32 count = 0;
 		sljit_s32 lower = 0;
 		sljit_s32 upper = 0;
 	};
-	vector<AccumulatorRegisters> accumulator_registers(payloads.size());
-	bool register_accumulators = registers.has_register_accumulators && codegen_plan.fast_path_supported;
-	{
+	struct AccumulatorLayout {
+		vector<AccumulatorRegisters> payloads;
+		bool shared_count = false;
+		bool fits = false;
+	};
+	auto plan_accumulator_layout = [&](bool shared_count) {
+		AccumulatorLayout layout;
+		layout.shared_count = shared_count;
+		layout.payloads.resize(payloads.size());
+		if (!registers.has_register_accumulators || !codegen_plan.fast_path_supported) {
+			return layout;
+		}
 		sljit_s32 next_register = 5;
-		for (idx_t payload_idx = 0; payload_idx < payloads.size() && register_accumulators; payload_idx++) {
+		const sljit_s32 shared = shared_count ? SLJIT_R(next_register++) : 0;
+		for (idx_t payload_idx = 0; payload_idx < payloads.size(); payload_idx++) {
 			auto kind = codegen_plan.payload_descriptors[payload_idx].primitive_kind;
-			const sljit_s32 needed = kind == AggregatePrimitiveUpdateKind::COUNT_STAR    ? 1
-			                         : kind == AggregatePrimitiveUpdateKind::SUM_HUGEINT ? 3
-			                                                                             : 2;
-			if (next_register + needed > registers.accumulator_scratch_register_count) {
-				register_accumulators = false;
-				break;
-			}
-			auto &accumulator = accumulator_registers[payload_idx];
-			accumulator.count = SLJIT_R(next_register++);
+			auto &accumulator = layout.payloads[payload_idx];
+			accumulator.count = shared_count ? shared : SLJIT_R(next_register++);
 			if (kind != AggregatePrimitiveUpdateKind::COUNT_STAR) {
 				accumulator.lower = SLJIT_R(next_register++);
 			}
@@ -275,7 +280,12 @@ unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativeFilteredUngroupedFusedPrim
 				accumulator.upper = SLJIT_R(next_register++);
 			}
 		}
-	}
+		layout.fits = next_register <= registers.accumulator_scratch_register_count;
+		return layout;
+	};
+	const auto row_accumulators = plan_accumulator_layout(true);
+	const auto null_row_accumulators = plan_accumulator_layout(false);
+	const bool register_accumulators = row_accumulators.fits || null_row_accumulators.fits;
 	if (register_accumulators) {
 		simd_scratches = (simd_scratches & ~sljit_s32(0xff)) | registers.accumulator_scratch_register_count;
 	}
@@ -305,38 +315,47 @@ unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativeFilteredUngroupedFusedPrim
 	EmitSljitTypedExpressionTreeConstantHoists(compiler, data_hoists);
 
 	vector<SljitArithmeticOverflowSite> overflows;
-	// Whether the loop being emitted keeps the accumulators in registers: it zeroes them on entry and adds them into
-	// the stack slots on every exit (end_register_accumulators)
-	bool accumulate_in_registers = false;
+	// The registers the loop being emitted keeps its accumulators in, or none: it zeroes them on entry and adds them
+	// into the stack slots on every exit (end_register_accumulators)
+	optional_ptr<const AccumulatorLayout> accumulators;
 	auto emit_count = [&](idx_t payload_idx) {
-		if (accumulate_in_registers) {
-			auto count = accumulator_registers[payload_idx].count;
-			sljit_emit_op2(compiler, SLJIT_ADD, count, 0, count, 0, SLJIT_IMM, 1);
-		} else {
+		if (!accumulators) {
 			EmitSljitAggregateIncrementLocalCount(compiler, local_count_offsets[payload_idx]);
+		} else if (!accumulators->shared_count) {
+			auto count = accumulators->payloads[payload_idx].count;
+			sljit_emit_op2(compiler, SLJIT_ADD, count, 0, count, 0, SLJIT_IMM, 1);
+		}
+	};
+	// a row the loop accepts: a shared count counts it for every payload
+	auto emit_row_accepted = [&]() {
+		if (accumulators && accumulators->shared_count && !payloads.empty()) {
+			auto count = accumulators->payloads[0].count;
+			sljit_emit_op2(compiler, SLJIT_ADD, count, 0, count, 0, SLJIT_IMM, 1);
 		}
 	};
 	// adds the value in R2 to the payload's sum and counts it
 	auto emit_accumulate = [&](idx_t payload_idx) {
 		auto kind = codegen_plan.payload_descriptors[payload_idx].primitive_kind;
-		auto &accumulator = accumulator_registers[payload_idx];
-		if (!accumulate_in_registers) {
+		if (!accumulators) {
 			EmitUngroupedAggregateAccumulate(compiler, kind, local_sum_offsets[payload_idx],
 			                                 local_sum_upper_offsets[payload_idx], saw_value_offsets[payload_idx],
 			                                 SLJIT_R2);
 		} else if (kind == AggregatePrimitiveUpdateKind::SUM_HUGEINT) {
+			auto &accumulator = accumulators->payloads[payload_idx];
 			EmitUngroupedAggregateAccumulateHugeintInt64Regs(compiler, accumulator.lower, accumulator.upper, SLJIT_R2);
 		} else {
+			auto &accumulator = accumulators->payloads[payload_idx];
 			sljit_emit_op2(compiler, SLJIT_ADD, accumulator.lower, 0, accumulator.lower, 0, SLJIT_R2, 0);
 		}
 		emit_count(payload_idx);
 	};
-	auto begin_register_accumulators = [&]() {
-		if (!register_accumulators) {
+	auto begin_register_accumulators = [&](bool null_rows) {
+		auto &layout = null_rows ? null_row_accumulators : row_accumulators;
+		if (!layout.fits) {
 			return;
 		}
-		accumulate_in_registers = true;
-		for (auto &accumulator : accumulator_registers) {
+		accumulators = &layout;
+		for (auto &accumulator : layout.payloads) {
 			for (auto reg : {accumulator.count, accumulator.lower, accumulator.upper}) {
 				if (reg) {
 					sljit_emit_op1(compiler, SLJIT_MOV, reg, 0, SLJIT_IMM, 0);
@@ -347,14 +366,15 @@ unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativeFilteredUngroupedFusedPrim
 	// the loop's exits add its registers into the stack slots, then leave through the returned jump
 	vector<sljit_jump *> register_flush_exits;
 	auto end_register_accumulators = [&](const vector<sljit_jump *> &exits) {
-		if (!accumulate_in_registers) {
+		if (!accumulators) {
 			register_flush_exits.insert(register_flush_exits.end(), exits.begin(), exits.end());
 			return;
 		}
-		accumulate_in_registers = false;
+		auto &layout = *accumulators;
+		accumulators = nullptr;
 		SetSljitJumpLabels(exits, sljit_emit_label(compiler));
 		for (idx_t payload_idx = 0; payload_idx < payloads.size(); payload_idx++) {
-			auto &accumulator = accumulator_registers[payload_idx];
+			auto &accumulator = layout.payloads[payload_idx];
 			sljit_emit_op2(compiler, SLJIT_ADD, SLJIT_MEM1(SLJIT_SP), local_count_offsets[payload_idx],
 			               SLJIT_MEM1(SLJIT_SP), local_count_offsets[payload_idx], accumulator.count, 0);
 			if (!accumulator.lower) {
@@ -449,18 +469,18 @@ unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativeFilteredUngroupedFusedPrim
 	struct sljit_jump *fast_done = nullptr;
 	vector<sljit_jump *> fast_loop_exits;
 	struct sljit_jump *selected_fast_done = nullptr;
-	struct sljit_jump *hybrid_done = nullptr;
 	struct sljit_jump *selected_hybrid_done = nullptr;
 	vector<sljit_jump *> null_checked_exits;
 	if (codegen_plan.fast_path_supported) {
 		sljit_emit_op1(compiler, SLJIT_MOV_U8, SLJIT_R0, 0, SLJIT_MEM1(SLJIT_S0),
 		               offsetof(SljitNativeVectorInput, expression_tree_flat_all_valid));
 		auto use_generic_loop = sljit_emit_cmp(compiler, SLJIT_EQUAL, SLJIT_R0, 0, SLJIT_IMM, 0);
-		begin_register_accumulators();
+		begin_register_accumulators(false);
 
 		// The scalar per-row payload updates, shared by the scalar fast loop and the
 		// hybrid packed-mask loop (which runs them once per matching lane).
 		auto emit_row_payload_updates = [&](bool null_rows) {
+			emit_row_accepted();
 			for (idx_t payload_idx = 0; payload_idx < payloads.size(); payload_idx++) {
 				auto kind = codegen_plan.payload_descriptors[payload_idx].primitive_kind;
 				if (kind == AggregatePrimitiveUpdateKind::COUNT_STAR) {
@@ -528,7 +548,7 @@ unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativeFilteredUngroupedFusedPrim
 			sljit_emit_op1(compiler, SLJIT_MOV_U8, SLJIT_R0, 0, SLJIT_MEM1(SLJIT_S0),
 			               offsetof(SljitNativeVectorInput, expression_tree_flat_no_selection));
 			auto skip_nullable_simd = sljit_emit_cmp(compiler, SLJIT_EQUAL, SLJIT_R0, 0, SLJIT_IMM, 0);
-			begin_register_accumulators();
+			begin_register_accumulators(false);
 			sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_S1, 0, SLJIT_IMM, 0);
 			if (simd_is_sum) {
 				EmitSljitTypedExpressionTreeSimdSumLoop(compiler, predicate, *payloads[sum_payload_idx].expression_tree,
@@ -567,7 +587,7 @@ unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativeFilteredUngroupedFusedPrim
 			sljit_emit_op1(compiler, SLJIT_MOV_U8, SLJIT_R0, 0, SLJIT_MEM1(SLJIT_S0),
 			               offsetof(SljitNativeVectorInput, expression_tree_flat_no_selection));
 			auto skip_flat_nullable = sljit_emit_cmp(compiler, SLJIT_EQUAL, SLJIT_R0, 0, SLJIT_IMM, 0);
-			begin_register_accumulators();
+			begin_register_accumulators(true);
 			sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_S1, 0, SLJIT_IMM, 0);
 			null_checked_exits.push_back(sljit_emit_cmp(compiler, SLJIT_GREATER_EQUAL, SLJIT_S1, 0, SLJIT_S2, 0));
 			auto flat_nullable_loop = sljit_emit_label(compiler);
@@ -623,9 +643,11 @@ unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativeFilteredUngroupedFusedPrim
 			sljit_set_label(sljit_emit_jump(compiler, SLJIT_JUMP), combine_loop);
 			sljit_set_label(combine_done, sljit_emit_label(compiler));
 
+			// the fast rows add to the registers, a row with a NULL adds to the stack slots on the generic path
+			begin_register_accumulators(false);
 			sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_S1, 0, SLJIT_IMM, 0);
 			auto hybrid_loop = sljit_emit_label(compiler);
-			hybrid_done = sljit_emit_cmp(compiler, SLJIT_GREATER_EQUAL, SLJIT_S1, 0, SLJIT_S2, 0);
+			auto hybrid_done = sljit_emit_cmp(compiler, SLJIT_GREATER_EQUAL, SLJIT_S1, 0, SLJIT_S2, 0);
 			sljit_get_local_base(compiler, SLJIT_R3, 0, combined_validity_offset);
 			vector<sljit_jump *> source_null_jumps {
 			    EmitJumpIfSljitValidityBitClear(compiler, SLJIT_R3, SLJIT_S1, SLJIT_R0)};
@@ -641,28 +663,21 @@ unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativeFilteredUngroupedFusedPrim
 			SetSljitJumpLabels(hybrid_predicate_false, hybrid_next);
 			sljit_set_label(hybrid_row_done, hybrid_next);
 			EmitNextSljitNativeVectorLoop(compiler, hybrid_loop);
+			end_register_accumulators({hybrid_done});
 			SetSljitJumpLabels(skip_hybrid, sljit_emit_label(compiler));
 		}
 
-		EmitSljitLogicalSelectionHoist(compiler, logical_selection_offset);
-		sljit_emit_op1(compiler, SLJIT_MOV_U8, SLJIT_R0, 0, SLJIT_MEM1(SLJIT_S0),
-		               offsetof(SljitNativeVectorInput, expression_tree_all_valid));
-		auto use_generic_selected_loop = sljit_emit_cmp(compiler, SLJIT_EQUAL, SLJIT_R0, 0, SLJIT_IMM, 0);
-		begin_register_accumulators();
-		sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_S1, 0, SLJIT_IMM, 0);
-		auto selected_fast_loop = sljit_emit_label(compiler);
-		selected_fast_done = sljit_emit_cmp(compiler, SLJIT_GREATER_EQUAL, SLJIT_S1, 0, SLJIT_S2, 0);
-		EmitLoadSljitHoistedLogicalIndex(compiler, logical_selection_offset);
-		auto emit_selected_fast_row = [&](bool null_rows) {
+		// A row read through the batch's selection: at its logical row when no source has a selection of its own
+		// (logical), or through the selection hoisted for each source (selected)
+		auto emit_selected_fast_row = [&](SljitTypedExpressionTreeFastIndexMode index_mode, bool null_rows) {
 			idx_t selected_predicate_spill_index = 0;
 			auto selected_predicate_false =
 			    null_rows
 			        ? EmitSljitTypedExpressionTreeNullableFastJumps(
-			              compiler, predicate, false, selected_predicate_spill_index, overflows,
-			              SljitTypedExpressionTreeFastIndexMode::SELECTED, hoists)
+			              compiler, predicate, false, selected_predicate_spill_index, overflows, index_mode, hoists)
 			        : EmitSljitTypedExpressionTreeFastJumps(compiler, predicate, false, selected_predicate_spill_index,
-			                                                overflows, SljitTypedExpressionTreeFastIndexMode::SELECTED,
-			                                                hoists);
+			                                                overflows, index_mode, hoists);
+			emit_row_accepted();
 			for (idx_t payload_idx = 0; payload_idx < payloads.size(); payload_idx++) {
 				auto kind = codegen_plan.payload_descriptors[payload_idx].primitive_kind;
 				if (kind == AggregatePrimitiveUpdateKind::COUNT_STAR) {
@@ -671,39 +686,65 @@ unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativeFilteredUngroupedFusedPrim
 				}
 				vector<sljit_jump *> null_jumps;
 				if (null_rows) {
-					null_jumps = emit_payload_null_jumps(payload_idx, SljitTypedExpressionTreeFastIndexMode::SELECTED);
+					null_jumps = emit_payload_null_jumps(payload_idx, index_mode);
 				}
 				idx_t payload_spill_index = 0;
-				EmitSljitTypedExpressionTreeSelectedFastValueReg(compiler, *payloads[payload_idx].expression_tree,
-				                                                 payload_spill_index, overflows, hoists);
+				if (index_mode == SljitTypedExpressionTreeFastIndexMode::LOGICAL) {
+					EmitSljitTypedExpressionTreeLogicalFastValueReg(compiler, *payloads[payload_idx].expression_tree,
+					                                                payload_spill_index, overflows, hoists);
+				} else {
+					EmitSljitTypedExpressionTreeSelectedFastValueReg(compiler, *payloads[payload_idx].expression_tree,
+					                                                 payload_spill_index, overflows, hoists);
+				}
 				emit_accumulate(payload_idx);
 				SetSljitJumpLabels(null_jumps, sljit_emit_label(compiler));
 			}
 			SetSljitJumpLabels(selected_predicate_false, sljit_emit_label(compiler));
 		};
-		emit_selected_fast_row(false);
+
+		EmitSljitLogicalSelectionHoist(compiler, logical_selection_offset);
+		sljit_emit_op1(compiler, SLJIT_MOV_U8, SLJIT_R0, 0, SLJIT_MEM1(SLJIT_S0),
+		               offsetof(SljitNativeVectorInput, expression_tree_logical_all_valid));
+		auto not_logical = sljit_emit_cmp(compiler, SLJIT_EQUAL, SLJIT_R0, 0, SLJIT_IMM, 0);
+		begin_register_accumulators(false);
+		sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_S1, 0, SLJIT_IMM, 0);
+		auto logical_fast_loop = sljit_emit_label(compiler);
+		auto logical_fast_done = sljit_emit_cmp(compiler, SLJIT_GREATER_EQUAL, SLJIT_S1, 0, SLJIT_S2, 0);
+		EmitLoadSljitHoistedLogicalIndex(compiler, logical_selection_offset);
+		emit_selected_fast_row(SljitTypedExpressionTreeFastIndexMode::LOGICAL, false);
+		EmitNextSljitNativeVectorLoop(compiler, logical_fast_loop);
+		end_register_accumulators({logical_fast_done});
+
+		sljit_set_label(not_logical, sljit_emit_label(compiler));
+		sljit_emit_op1(compiler, SLJIT_MOV_U8, SLJIT_R0, 0, SLJIT_MEM1(SLJIT_S0),
+		               offsetof(SljitNativeVectorInput, expression_tree_all_valid));
+		auto use_generic_selected_loop = sljit_emit_cmp(compiler, SLJIT_EQUAL, SLJIT_R0, 0, SLJIT_IMM, 0);
+		begin_register_accumulators(false);
+		sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_S1, 0, SLJIT_IMM, 0);
+		auto selected_fast_loop = sljit_emit_label(compiler);
+		selected_fast_done = sljit_emit_cmp(compiler, SLJIT_GREATER_EQUAL, SLJIT_S1, 0, SLJIT_S2, 0);
+		EmitLoadSljitHoistedLogicalIndex(compiler, logical_selection_offset);
+		emit_selected_fast_row(SljitTypedExpressionTreeFastIndexMode::SELECTED, false);
 		EmitNextSljitNativeVectorLoop(compiler, selected_fast_loop);
 		end_register_accumulators({selected_fast_done});
 
 		// A selected batch with NULLs runs a row whose sources are all valid on the selected fast path and only a
 		// row with a NULL on the generic path
 		sljit_set_label(use_generic_selected_loop, sljit_emit_label(compiler));
-		if (null_checked) {
-			begin_register_accumulators();
-		}
+		begin_register_accumulators(null_checked);
 		sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_S1, 0, SLJIT_IMM, 0);
 		auto selected_hybrid_loop = sljit_emit_label(compiler);
 		selected_hybrid_done = sljit_emit_cmp(compiler, SLJIT_GREATER_EQUAL, SLJIT_S1, 0, SLJIT_S2, 0);
 		EmitLoadSljitHoistedLogicalIndex(compiler, logical_selection_offset);
 		if (null_checked) {
-			emit_selected_fast_row(true);
+			emit_selected_fast_row(SljitTypedExpressionTreeFastIndexMode::SELECTED, true);
 		} else {
 			vector<sljit_jump *> selected_null_jumps;
 			for (auto source_index : row_source_refs) {
 				selected_null_jumps.push_back(EmitJumpIfSljitTypedExpressionTreeFastSourceNull(
 				    compiler, source_index, SljitTypedExpressionTreeFastIndexMode::SELECTED, hoists));
 			}
-			emit_selected_fast_row(false);
+			emit_selected_fast_row(SljitTypedExpressionTreeFastIndexMode::SELECTED, false);
 			auto selected_hybrid_row_done = sljit_emit_jump(compiler, SLJIT_JUMP);
 			SetSljitJumpLabels(selected_null_jumps, sljit_emit_label(compiler));
 			emit_generic_row();
@@ -722,9 +763,6 @@ unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativeFilteredUngroupedFusedPrim
 
 	auto done_label = sljit_emit_label(compiler);
 	SetSljitJumpLabels(register_flush_exits, done_label);
-	if (hybrid_done) {
-		sljit_set_label(hybrid_done, done_label);
-	}
 	sljit_set_label(done, done_label);
 	for (idx_t payload_idx = 0; payload_idx < payloads.size(); payload_idx++) {
 		auto kind = codegen_plan.payload_descriptors[payload_idx].primitive_kind;

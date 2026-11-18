@@ -176,19 +176,24 @@ struct SljitStringCompareMatches {
 	bool compare_equal = true;
 };
 
+//! The string comparisons an ungrouped kernel over combined input sources computes once per dictionary entry
+struct SljitStringCompareSources {
+	//! numbered as the compiled kernel numbers SljitNativeVectorInput::string_matches
+	vector<SljitStringCompareMatches> compares;
+	//! the input sources the kernel reads only through compares whose NULL result decides as FALSE would: a batch with
+	//! their dictionary results reads no other row of them on its fast path
+	vector<bool> compare_only_sources;
+	//! The kernel runs rows with NULLs on its fast loops, which check each source a leaf reads: a compare_only source's
+	//! match results decide its NULL rows, so it keeps no validity
+	bool fast_null_rows = false;
+};
+
 struct SljitExecutableFilteredAggregateUpdate {
 	SljitExecutableRegionExpression filter;
 	vector<SljitExecutableRegionExpression> payloads;
 	vector<idx_t> input_source_indices;
 	vector<bool> input_source_not_null;
-	//! numbered as the compiled kernel numbers SljitNativeVectorInput::string_matches
-	vector<SljitStringCompareMatches> string_compares;
-	//! the input sources the filter reads only through string_compares that a NULL row decides as FALSE would, and no
-	//! payload reads: a batch with their dictionary results reads no other row of them on its fast path
-	vector<bool> string_compare_only_sources;
-	//! The kernel runs rows with NULLs on its fast loops, which check each source a leaf reads: a string_compare_only
-	//! source's match results decide its NULL rows, so it keeps no validity
-	bool fast_null_rows = false;
+	SljitStringCompareSources string_compares;
 	SljitCompiledFunction<SljitNativeAggregateUpdateFunction> compiled;
 	SljitFilteredAggregateKernelKind kind = SljitFilteredAggregateKernelKind::NONE;
 	SljitAggregatePayloadSourceLayout payload_source_layout = SljitAggregatePayloadSourceLayout::DIRECT_PER_LANE;
@@ -346,6 +351,8 @@ struct SljitExecutableAggregateUpdate {
 	SljitAggregatePayloadSourceLayout payload_source_layout = SljitAggregatePayloadSourceLayout::DIRECT_PER_LANE;
 	vector<idx_t> combined_payload_source_indices;
 	vector<bool> combined_payload_source_not_null;
+	//! an ungrouped update's combined-source kernel: the string comparisons it reads per dictionary entry
+	SljitStringCompareSources combined_payload_string_compares;
 	vector<bool> group_source_not_null;
 	vector<SljitExecutableIntegralGroupKeyRange> integral_group_key_ranges;
 	SljitExecutableFilteredAggregateUpdate filtered_update;

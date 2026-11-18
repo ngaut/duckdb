@@ -79,8 +79,8 @@ void AppendSljitTypedExpressionTreeConstantHoists(const vector<reference<const E
 //! The comparisons of a string source with a constant in these expressions, in the order their matches are numbered
 vector<reference<const ExecutionExpressionIR>>
 CollectSljitTypedExpressionTreeStringCompares(const vector<reference<const ExecutionExpressionIR>> &expressions);
-//! The sources a predicate reads only through comparisons with a constant whose ancestors are all AND or OR, and no
-//! payload reads: at such a comparison, a NULL row decides the predicate as FALSE would
+//! The sources the predicate and payloads read only through comparisons with a constant whose NULL result decides as
+//! FALSE would: under AND and OR in the predicate, or in a CASE condition
 vector<idx_t>
 CollectSljitTypedExpressionTreeStringCompareOnlySources(const ExecutionExpressionIR &predicate,
                                                         const vector<reference<const ExecutionExpressionIR>> &payloads);
