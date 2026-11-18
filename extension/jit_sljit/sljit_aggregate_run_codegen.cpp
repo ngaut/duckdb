@@ -383,10 +383,7 @@ static void EmitSljitPrimitiveRunAccumulate(struct sljit_compiler *compiler, Phy
 			} else {
 				sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_R5, 0, SLJIT_IMM, 0);
 			}
-			sljit_emit_op2(compiler, SLJIT_ADD | SLJIT_SET_CARRY, SLJIT_R1, 0, SLJIT_R1, 0, SLJIT_R4, 0);
-			sljit_emit_op_flags(compiler, SLJIT_MOV, SLJIT_R6, 0, SLJIT_CARRY);
-			sljit_emit_op2(compiler, SLJIT_ADD, SLJIT_R2, 0, SLJIT_R2, 0, SLJIT_R5, 0);
-			sljit_emit_op2(compiler, SLJIT_ADD, SLJIT_R2, 0, SLJIT_R2, 0, SLJIT_R6, 0);
+			EmitSljitAddDoubleWord(compiler, SLJIT_R1, SLJIT_R2, SLJIT_R4, SLJIT_R5);
 		} else {
 			sljit_emit_op2(compiler, SLJIT_ADD, SLJIT_R1, 0, SLJIT_R1, 0, SLJIT_R4, 0);
 		}
@@ -437,10 +434,7 @@ static void EmitSljitPrimitiveRunBatchDeltaState(struct sljit_compiler *compiler
 		if (merge_existing) {
 			sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_R4, 0, SLJIT_MEM1(SLJIT_R3), offsetof(hugeint_t, lower));
 			sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_R5, 0, SLJIT_MEM1(SLJIT_R3), offsetof(hugeint_t, upper));
-			sljit_emit_op2(compiler, SLJIT_ADD | SLJIT_SET_CARRY, SLJIT_R4, 0, SLJIT_R4, 0, SLJIT_R1, 0);
-			sljit_emit_op_flags(compiler, SLJIT_MOV, SLJIT_R6, 0, SLJIT_CARRY);
-			sljit_emit_op2(compiler, SLJIT_ADD, SLJIT_R5, 0, SLJIT_R5, 0, SLJIT_R2, 0);
-			sljit_emit_op2(compiler, SLJIT_ADD, SLJIT_R5, 0, SLJIT_R5, 0, SLJIT_R6, 0);
+			EmitSljitAddDoubleWord(compiler, SLJIT_R4, SLJIT_R5, SLJIT_R1, SLJIT_R2);
 			sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_MEM1(SLJIT_R3), offsetof(hugeint_t, lower), SLJIT_R4, 0);
 			sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_MEM1(SLJIT_R3), offsetof(hugeint_t, upper), SLJIT_R5, 0);
 		} else {
@@ -816,10 +810,7 @@ static void EmitSljitPrimitiveRunSumHugeint(struct sljit_compiler *compiler, idx
 	sljit_emit_op2(compiler, SLJIT_ADD, SLJIT_R4, 0, SLJIT_R4, 0, SLJIT_R2, 0);
 	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_R5, 0, SLJIT_MEM1(SLJIT_R4), offsetof(hugeint_t, lower));
 	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_R2, 0, SLJIT_MEM1(SLJIT_R4), offsetof(hugeint_t, upper));
-	sljit_emit_op2(compiler, SLJIT_ADD | SLJIT_SET_CARRY, SLJIT_R5, 0, SLJIT_R5, 0, SLJIT_R0, 0);
-	sljit_emit_op_flags(compiler, SLJIT_MOV, SLJIT_R6, 0, SLJIT_CARRY);
-	sljit_emit_op2(compiler, SLJIT_ADD, SLJIT_R2, 0, SLJIT_R2, 0, SLJIT_R1, 0);
-	sljit_emit_op2(compiler, SLJIT_ADD, SLJIT_R2, 0, SLJIT_R2, 0, SLJIT_R6, 0);
+	EmitSljitAddDoubleWord(compiler, SLJIT_R5, SLJIT_R2, SLJIT_R0, SLJIT_R1);
 	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_MEM1(SLJIT_R4), offsetof(hugeint_t, lower), SLJIT_R5, 0);
 	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_MEM1(SLJIT_R4), offsetof(hugeint_t, upper), SLJIT_R2, 0);
 	EmitSljitPrimitiveRunMarkValueSet(compiler, lane_idx);
@@ -1493,10 +1484,7 @@ static void EmitSljitPreaggregatedSumHugeintUpdate(struct sljit_compiler *compil
 	if (!initialize_states) {
 		sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_R5, 0, state.memory, state.Field(offsetof(hugeint_t, lower)));
 		sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_R0, 0, state.memory, state.Field(offsetof(hugeint_t, upper)));
-		sljit_emit_op2(compiler, SLJIT_ADD | SLJIT_SET_CARRY, SLJIT_R2, 0, SLJIT_R2, 0, SLJIT_R5, 0);
-		sljit_emit_op_flags(compiler, SLJIT_MOV, SLJIT_R5, 0, SLJIT_CARRY);
-		sljit_emit_op2(compiler, SLJIT_ADD, SLJIT_R3, 0, SLJIT_R3, 0, SLJIT_R0, 0);
-		sljit_emit_op2(compiler, SLJIT_ADD, SLJIT_R3, 0, SLJIT_R3, 0, SLJIT_R5, 0);
+		EmitSljitAddDoubleWord(compiler, SLJIT_R2, SLJIT_R3, SLJIT_R5, SLJIT_R0);
 	}
 	sljit_emit_op1(compiler, SLJIT_MOV, state.memory, state.Field(offsetof(hugeint_t, lower)), SLJIT_R2, 0);
 	sljit_emit_op1(compiler, SLJIT_MOV, state.memory, state.Field(offsetof(hugeint_t, upper)), SLJIT_R3, 0);

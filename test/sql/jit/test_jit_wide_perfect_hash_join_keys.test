@@ -1,0 +1,64 @@
+# name: test/sql/jit/test_jit_wide_perfect_hash_join_keys.test
+# description: A perfect-hash probe over HUGEINT keys offsets them by the build's minimum across the low word's wrap
+# group: [jit]
+
+# Keys around 2^64 and around zero: subtracting the minimum borrows from the upper word for some keys and not others.
+
+require jit_sljit
+
+statement ok
+SET jit_cbo_startup_base_cost=0
+
+statement ok
+SET jit_cbo_startup_margin_basis_points=0
+
+statement ok
+SET jit_trace_runtime=true
+
+statement ok
+SET jit_event_log_size=100000
+
+statement ok
+CREATE TABLE dim_high AS SELECT (18446744073709551616::HUGEINT - 300 + i) AS key, i AS v FROM range(600) t(i)
+
+statement ok
+CREATE TABLE facts_high AS SELECT (18446744073709551616::HUGEINT - 400 + (i % 800)) AS key, i AS id FROM range(400000) t(i)
+
+statement ok
+CREATE TABLE dim_zero AS SELECT (i - 300)::HUGEINT AS key, i AS v FROM range(600) t(i)
+
+statement ok
+CREATE TABLE facts_zero AS SELECT ((i % 800) - 400)::HUGEINT AS key, i AS id FROM range(400000) t(i)
+
+foreach threads 1 4
+
+statement ok
+SET threads={threads}
+
+foreach policy off auto
+
+statement ok
+SET jit_policy='{policy}'
+
+statement ok
+CREATE OR REPLACE TABLE r_{policy} AS
+SELECT 'high' AS q, sum(f.id)::HUGEINT AS a, sum(d.v)::HUGEINT AS b, count(*)::HUGEINT AS c
+FROM facts_high f JOIN dim_high d ON f.key = d.key
+UNION ALL
+SELECT 'zero', sum(f.id), sum(d.v), count(*) FROM facts_zero f JOIN dim_zero d ON f.key = d.key
+
+endloop
+
+query I
+SELECT count(*) FROM ((SELECT * FROM r_off EXCEPT ALL SELECT * FROM r_auto)
+                      UNION ALL (SELECT * FROM r_auto EXCEPT ALL SELECT * FROM r_off))
+----
+0
+
+endloop
+
+query I
+SELECT count(*) > 0 FROM duckdb_jit_events()
+WHERE phase = 'runtime' AND jit_runtime_path_counts LIKE '%perfect_probe.generated%'
+----
+true

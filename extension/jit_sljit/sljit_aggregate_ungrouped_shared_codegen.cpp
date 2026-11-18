@@ -9,6 +9,7 @@
 #include "sljit_aggregate_ungrouped_shared_codegen.hpp"
 
 #include "duckdb/common/types/hugeint.hpp"
+#include "sljit_codegen_util.hpp"
 
 namespace duckdb {
 
@@ -80,10 +81,7 @@ void EmitUngroupedAggregateAccumulate(struct sljit_compiler *compiler, Aggregate
 void EmitUngroupedAggregateAccumulateHugeintInt64Regs(struct sljit_compiler *compiler, sljit_s32 lower_reg,
                                                       sljit_s32 upper_reg, sljit_s32 value_reg) {
 	sljit_emit_op2(compiler, SLJIT_ASHR, SLJIT_R4, 0, value_reg, 0, SLJIT_IMM, 63);
-	sljit_emit_op2(compiler, SLJIT_ADD | SLJIT_SET_CARRY, lower_reg, 0, lower_reg, 0, value_reg, 0);
-	sljit_emit_op_flags(compiler, SLJIT_MOV, SLJIT_R3, 0, SLJIT_CARRY);
-	sljit_emit_op2(compiler, SLJIT_ADD, upper_reg, 0, upper_reg, 0, SLJIT_R4, 0);
-	sljit_emit_op2(compiler, SLJIT_ADD, upper_reg, 0, upper_reg, 0, SLJIT_R3, 0);
+	EmitSljitAddDoubleWord(compiler, lower_reg, upper_reg, value_reg, SLJIT_R4);
 }
 
 void EmitUngroupedAggregateCommitSumHugeint(struct sljit_compiler *compiler, idx_t lane_idx,

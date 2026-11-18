@@ -195,13 +195,9 @@ BuildSljitWidePerfectHashJoinProbe(struct sljit_compiler *compiler, bool unsigne
 	EmitWidePerfectHashJoinRangeChecks(compiler, unsigned_key, SLJIT_R0, SLJIT_R1, registers.minimum_lower,
 	                                   registers.minimum_upper, registers.maximum_lower, SLJIT_R4, range_failures);
 
-	// Subtract the full-width minimum with the carry flag as the low-word
-	// borrow. The perfect-hash range is bounded to the selection-vector domain,
-	// so the resulting high word is zero and the low word is the table offset.
-	sljit_emit_op2(compiler, SLJIT_SUB | SLJIT_SET_CARRY, SLJIT_R0, 0, SLJIT_R0, 0, registers.minimum_lower, 0);
-	sljit_emit_op_flags(compiler, SLJIT_MOV, SLJIT_R3, 0, SLJIT_CARRY);
-	sljit_emit_op2(compiler, SLJIT_SUB, SLJIT_R1, 0, SLJIT_R1, 0, registers.minimum_upper, 0);
-	sljit_emit_op2(compiler, SLJIT_SUB, SLJIT_R1, 0, SLJIT_R1, 0, SLJIT_R3, 0);
+	// The range checks bound the key's distance from the minimum to the table, so the low word of the full-width
+	// difference, which no borrow changes, is the table offset
+	sljit_emit_op2(compiler, SLJIT_SUB, SLJIT_R0, 0, SLJIT_R0, 0, registers.minimum_lower, 0);
 
 	sljit_emit_op1(compiler, SLJIT_MOV_P, SLJIT_R3, 0, SLJIT_MEM1(SLJIT_S0),
 	               offsetof(SljitNativePerfectHashJoinProbeInput, perfect_validity));

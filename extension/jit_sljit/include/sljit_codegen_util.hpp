@@ -66,6 +66,10 @@ struct sljit_jump *EmitJumpIfSljitValidityBitClear(struct sljit_compiler *compil
 //! Loads the row's bit of the validity mask at validity_reg into target_reg: 1 when valid, 0 when NULL
 void EmitLoadSljitValidityBit(struct sljit_compiler *compiler, sljit_s32 validity_reg, sljit_s32 index_reg,
                               sljit_s32 target_reg);
+//! (upper:lower) += (value_upper:value_lower): the low words' carry feeds the high words. The pair is emitted adjacent,
+//! since only an add that sets the carry may precede the add that consumes it
+void EmitSljitAddDoubleWord(struct sljit_compiler *compiler, sljit_s32 lower_reg, sljit_s32 upper_reg,
+                            sljit_s32 value_lower_reg, sljit_s32 value_upper_reg);
 
 sljit_sw NativeSignedIntegerDataScale(SljitNativeSignedIntegerWidth width);
 sljit_s32 NativeSignedIntegerLoadOp(SljitNativeSignedIntegerWidth width);

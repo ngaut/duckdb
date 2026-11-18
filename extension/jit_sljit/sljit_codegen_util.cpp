@@ -346,4 +346,10 @@ int64_t NativeUnsignedIntegerMax(SljitNativeUnsignedIntegerWidth width) {
 	}
 }
 
+void EmitSljitAddDoubleWord(struct sljit_compiler *compiler, sljit_s32 lower_reg, sljit_s32 upper_reg,
+                            sljit_s32 value_lower_reg, sljit_s32 value_upper_reg) {
+	sljit_emit_op2(compiler, SLJIT_ADD | SLJIT_SET_CARRY, lower_reg, 0, lower_reg, 0, value_lower_reg, 0);
+	sljit_emit_op2(compiler, SLJIT_ADDC, upper_reg, 0, upper_reg, 0, value_upper_reg, 0);
+}
+
 } // namespace duckdb
