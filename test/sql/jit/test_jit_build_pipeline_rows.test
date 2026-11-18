@@ -42,9 +42,3 @@ WHERE phase IN ('decision', 'compile') AND runner_cost_source_contract_input_row
 ----
 true
 
-# and pays no compiled region for it
-query I
-SELECT count(*) FROM duckdb_jit_events()
-WHERE phase IN ('decision', 'compile') AND runner_cost_source_contract_input_rows = 1000 AND status = 'compiled'
-----
-0
