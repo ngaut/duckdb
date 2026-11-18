@@ -1685,25 +1685,6 @@ static bool TryBitpackingSignedNumericRangeFilter(ColumnSegment &segment, Column
 
 		D_ASSERT(group.metadata.mode == BitpackingMode::FOR || group.metadata.mode == BitpackingMode::DELTA_FOR);
 		const auto unit_remaining = BitpackingDecodeUnitRemaining<T>(group, vector_count - scanned);
-		if (!sel.IsSet()) {
-			auto target = result_data + scanned;
-			const auto decoded = BitpackingDecodeValues<T>(scan_state, group, unit_remaining, target);
-			if (decoded != target) {
-				memcpy(target, decoded, unit_remaining * sizeof(T));
-			}
-			// every row is selected: append each row and keep it only when it matches, without a branch per row
-			const auto base = range.OffsetBase();
-			const auto span = range.OffsetSpan();
-			auto result_sel_data = result_sel.data();
-			for (idx_t i = 0; i < unit_remaining; i++) {
-				result_sel_data[result_count] = UnsafeNumericCast<sel_t>(scanned + i);
-				result_count += static_cast<uint64_t>(static_cast<int64_t>(target[i])) - base <= span;
-			}
-			group.Advance(unit_remaining);
-			scanned += unit_remaining;
-			selected_idx += unit_remaining;
-			continue;
-		}
 		const auto selected_end = BitpackingSelectedRunEnd(sel, sel_count, selected_idx, scanned, unit_remaining);
 		const auto to_scan = sel.get_index(selected_end - 1) - scanned + 1;
 		const auto values = BitpackingDecodeValues<T>(scan_state, group, to_scan);
