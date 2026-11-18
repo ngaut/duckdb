@@ -83,7 +83,7 @@ public:
 private:
 	template <class FUNCTION, class BUILD>
 	FUNCTION EnsureLazyHashJoinProbeCode(ExecutionRegionRuntime &runtime, SljitLazyCompiledFunction<FUNCTION> &artifact,
-	                                     const string &failure_message, BUILD build);
+	                                     const char *failure_message, BUILD build);
 
 private:
 	shared_ptr<const SljitNativeRegionArtifact> artifact;

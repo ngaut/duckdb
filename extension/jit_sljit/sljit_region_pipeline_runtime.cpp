@@ -77,14 +77,14 @@ const vector<SljitCastErrorIdentity> &SljitCastErrorBindings(ExecutionRegionRunt
 template <class FUNCTION, class BUILD>
 FUNCTION SljitNativeRegionKernel::EnsureLazyHashJoinProbeCode(ExecutionRegionRuntime &runtime,
                                                               SljitLazyCompiledFunction<FUNCTION> &artifact,
-                                                              const string &failure_message, BUILD build) {
+                                                              const char *failure_message, BUILD build) {
 	return artifact.Ensure([&]() {
 		string error;
 		FUNCTION function = nullptr;
 		unique_ptr<ExecutionRegionCodeHandle> code;
 		auto timing = TimeSljitLazyCodegen([&]() { code = build(function, error); });
 		if (!code || !function) {
-			throw InternalException("%s: %s", failure_message.c_str(), error.empty() ? "unknown error" : error);
+			throw InternalException("%s: %s", failure_message, error.empty() ? "unknown error" : error);
 		}
 		auto code_size = code->CodeSize();
 		RecordSljitLazyHashJoinProbeCodegen(runtime, timing, code_size);
@@ -130,12 +130,24 @@ SljitNativeRegularHashJoinProbeFunction SljitNativeRegionKernel::EnsureAllValidR
 	auto &specialization = probe.regular.Specialization(specialization_key);
 	auto config = SljitHashJoinProbeCodegenConfig::ForAllValidSpecialization(key);
 	config.mark_selection_mode = mark_selection_mode;
-	auto failure_message = string("SLJIT native ") + (key.selected ? "selected" : "flat") +
-	                       (mark_selection_mode == SljitHashJoinMarkSelectionMode::NONE
-	                            ? " all-valid hash join probe codegen failed"
-	                            : (mark_selection_mode == SljitHashJoinMarkSelectionMode::MATCHES
-	                                   ? " all-valid MARK-match hash join probe codegen failed"
-	                                   : " all-valid MARK-nonmatch hash join probe codegen failed"));
+	// the message is a literal: the call runs per chunk, and only a failed compile reads it
+	const char *failure_message;
+	switch (mark_selection_mode) {
+	case SljitHashJoinMarkSelectionMode::NONE:
+		failure_message = key.selected ? "SLJIT native selected all-valid hash join probe codegen failed"
+		                               : "SLJIT native flat all-valid hash join probe codegen failed";
+		break;
+	case SljitHashJoinMarkSelectionMode::MATCHES:
+		failure_message = key.selected ? "SLJIT native selected all-valid MARK-match hash join probe codegen failed"
+		                               : "SLJIT native flat all-valid MARK-match hash join probe codegen failed";
+		break;
+	case SljitHashJoinMarkSelectionMode::NON_MATCHES:
+		failure_message = key.selected ? "SLJIT native selected all-valid MARK-nonmatch hash join probe codegen failed"
+		                               : "SLJIT native flat all-valid MARK-nonmatch hash join probe codegen failed";
+		break;
+	default:
+		throw InternalException("SLJIT hash join probe has an unknown MARK selection mode");
+	}
 	return EnsureLazyHashJoinProbeCode(runtime, specialization, failure_message,
 	                                   [&](SljitNativeRegularHashJoinProbeFunction &function, string &error) {
 		                                   return BuildSljitRegularHashJoinProbe(probe.plan, function, error, config);
