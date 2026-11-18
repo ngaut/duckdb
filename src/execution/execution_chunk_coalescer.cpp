@@ -158,6 +158,11 @@ SinkResultType ExecutionCoalescingChunkStep::ExecuteChunk(DataChunk &input, Exec
 		buffered.Initialize(allocator, input.GetTypes());
 		initialized = true;
 	}
+	// the buffer copies every column
+	if (proof.deferred_columns) {
+		proof.deferred_columns->ReadAll(input);
+		proof.deferred_columns = nullptr;
+	}
 	buffered_proof = buffered.size() ? buffered_proof.Merge(proof) : proof;
 	ExecutionChunkCoalescer::Append(buffered, input);
 	return buffered.size() == STANDARD_VECTOR_SIZE ? FlushBuffered() : SinkResultType::NEED_MORE_INPUT;

@@ -18,6 +18,7 @@ namespace duckdb {
 class Allocator;
 class DataChunk;
 class ExecutionRegionRuntime;
+struct SelectionVector;
 enum class SinkResultType : uint8_t;
 
 class DUCKDB_API ExecutionRegionLocalState {
@@ -37,14 +38,32 @@ public:
 	}
 };
 
+//! Columns of a source chunk the source has not read: a consumer that reads them only for the rows its filter keeps
+//! asks for those rows, and every other consumer for all rows, before anything reads them
+class DUCKDB_API ExecutionDeferredColumns {
+public:
+	virtual ~ExecutionDeferredColumns();
+
+	//! Reads the columns for the selected rows of the chunk, or for every row without a selection, into the rows'
+	//! positions. The columns of other rows stay undefined
+	virtual void Read(DataChunk &chunk, optional_ptr<const SelectionVector> selection, idx_t count) = 0;
+	//! The source reads every column of its next chunks itself
+	virtual void StopDeferring() = 0;
+
+	void ReadAll(DataChunk &chunk);
+};
+
 //! What the source proves about every row of a chunk it hands a chunk step
 struct ExecutionSourceChunkProof {
 	//! The zone maps of the row groups the rows come from prove each table filter for every row: the filters need no
 	//! row-level check
 	bool table_filters_hold = false;
+	//! The chunk's columns the source has not read yet
+	optional_ptr<ExecutionDeferredColumns> deferred_columns;
 
+	//! The proof of chunks merged into one: their deferred columns were read before the merge
 	ExecutionSourceChunkProof Merge(const ExecutionSourceChunkProof &other) const {
-		return {table_filters_hold && other.table_filters_hold};
+		return {table_filters_hold && other.table_filters_hold, nullptr};
 	}
 };
 

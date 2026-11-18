@@ -30,6 +30,8 @@ struct SljitSourceContractPlan {
 	ExecutionRegionScanFilterMode scan_filter_mode = ExecutionRegionScanFilterMode::NONE;
 	vector<LogicalType> source_contract_input_types;
 	vector<LogicalType> source_output_types;
+	//! The input columns no source filter reads: the generated filter keeps rows before anything reads them
+	vector<idx_t> deferrable_columns;
 
 	bool UsesSourceContractInputLayout() const {
 		return !source_contract_input_types.empty();

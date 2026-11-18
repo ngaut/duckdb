@@ -490,6 +490,10 @@ static void AccumulateExecutionRegionOpenRequest(ExecutionRegionPlan &plan, cons
 		        : ExecutionRegionScanFilterMode::NONE;
 		plan_contract.source_contract_input_types =
 		    native_fused_source_owner ? lowering_plan.SourceContractInputTypes() : vector<LogicalType>();
+		plan_contract.deferrable_source_columns =
+		    plan_contract.UsesStaticPruningOnly() && plan_contract.UsesSourceContractInputLayout()
+		        ? lowering_plan.DeferrableSourceColumns()
+		        : vector<idx_t>();
 		return;
 	}
 }

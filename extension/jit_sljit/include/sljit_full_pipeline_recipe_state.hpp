@@ -88,6 +88,8 @@ struct SljitFullPipelineRecipe {
 	//! step passes the rows as they are and a sink that fused the filter updates unfiltered. Empty when no step
 	//! evaluates the source's filter
 	SljitFullPipelinePrimitiveSequence filters_hold_sequence;
+	//! The op of the source's generated filter, which reads only the source's filtered columns
+	idx_t source_filter_idx = DConstants::INVALID_INDEX;
 	SljitHashJoinDirectAggregateConsumerContract direct_aggregate_consumer;
 	vector<ExecutionAggregateStateCombineLane> primitive_aggregate_state_source_lanes;
 	vector<idx_t> fused_filter_owners;

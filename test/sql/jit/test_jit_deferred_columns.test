@@ -1,0 +1,204 @@
+# name: test/sql/jit/test_jit_deferred_columns.test
+# description: A scan whose filter a region evaluates leaves the unfiltered columns to the region, which reads them for the rows its filter keeps
+# group: [jit]
+
+# Every way a chunk can reach a consumer must read the deferred columns first: the source filter's kept rows (a few
+# read one by one, most read whole), zone maps that prove the filter, chunks the source or the step batches, DuckDB's
+# operators after a hand-over, grouping on a deferred column, projections, NULLs, updated columns and rows only the
+# transaction sees.
+
+require jit_sljit
+
+load {TEST_DIR}/jit_deferred_columns.db
+
+statement ok
+CREATE TABLE facts AS
+SELECT i AS id,
+       (i % 730)::INTEGER AS day,
+       (i % 1000)::INTEGER AS amount,
+       (i % 97)::TINYINT AS t8,
+       (i % 30011)::SMALLINT AS t16,
+       (i * 7)::BIGINT AS t64,
+       (i::HUGEINT * 1000000000000) AS h,
+       (i % 1000)::DOUBLE / 8 AS d,
+       ((i % 100000) / 100)::DECIMAL(15, 2) AS price,
+       DATE '2000-01-01' + (i % 5000)::INTEGER AS dt,
+       CASE WHEN i % 13 = 0 THEN NULL ELSE i % 1009 END AS nullable,
+       (i % 11)::INTEGER AS g,
+       CASE i % 3 WHEN 0 THEN 'AIR' WHEN 1 THEN 'MAIL' ELSE 'SHIP' END AS mode,
+       (i // 200000)::INTEGER AS block
+FROM range(1200000) t(i)
+
+# A narrowed vector the scan copies into a chunk of its own, then the table's last vector, short of a full one but
+# passed whole with its deferred column: the step batches both
+statement ok
+CREATE TABLE tail AS SELECT i AS k, (i * 3)::BIGINT AS v FROM range(10 * 2048 + 1100) t(i)
+
+statement ok
+CHECKPOINT
+
+# the scans read stored segments
+restart
+
+statement ok
+SET jit_cbo_startup_base_cost=0
+
+statement ok
+SET jit_cbo_startup_margin_basis_points=0
+
+statement ok
+CREATE MACRO deferred_r() AS TABLE
+SELECT 'sparse' AS q, sum(id)::HUGEINT AS a, sum(t64)::HUGEINT AS b, count(*)::HUGEINT AS c
+FROM facts WHERE day BETWEEN 100 AND 120 AND amount >= 200
+UNION ALL
+SELECT 'dense', sum(id), sum(t16), count(*) FROM facts WHERE amount >= 50
+UNION ALL
+SELECT 'types', sum(t8) + sum(t16) + sum(t64), sum(h // 1000000000000), sum(price)::HUGEINT FROM facts WHERE amount < 30
+UNION ALL
+SELECT 'double_date', sum(d)::HUGEINT, sum(dt - DATE '2000-01-01'), count(*) FROM facts WHERE day < 40
+UNION ALL
+SELECT 'nulls', sum(nullable), count(nullable), count(*) FROM facts WHERE amount < 25
+UNION ALL
+SELECT 'strings', count(*), sum(CASE WHEN mode = 'AIR' THEN id ELSE 0 END), sum(g) FROM facts WHERE day % 7 = 1
+UNION ALL
+SELECT 'held', sum(id), sum(t64), count(*) FROM facts WHERE block >= 0 AND block <= 2
+UNION ALL
+SELECT 'held_mixed', sum(id), sum(amount), count(*) FROM facts WHERE block <= 3 AND amount < 500
+UNION ALL
+SELECT 'narrow', sum(id), sum(t64), count(*) FROM facts WHERE id BETWEEN 100500 AND 101200
+UNION ALL
+SELECT 'empty', sum(id), sum(t64), count(*) FROM facts WHERE amount > 5000
+
+statement ok
+CREATE MACRO deferred_t() AS TABLE
+SELECT sum(v)::HUGEINT AS a, count(*)::HUGEINT AS b FROM tail WHERE k >= 20032
+
+statement ok
+CREATE MACRO deferred_g() AS TABLE
+SELECT g, sum(id)::HUGEINT AS a, sum(t64)::HUGEINT AS b, count(*)::HUGEINT AS c FROM facts WHERE amount < 100 GROUP BY g
+
+statement ok
+CREATE MACRO deferred_p() AS TABLE
+SELECT id, t64 + g AS w, nullable, mode FROM facts WHERE day = 17 AND amount < 400
+
+foreach legs true false
+
+statement ok
+SET jit_measure_native_legs={legs}
+
+foreach threads 1 4
+
+statement ok
+SET threads={threads}
+
+foreach policy off auto
+
+statement ok
+SET jit_policy='{policy}'
+
+statement ok
+CREATE OR REPLACE TEMP TABLE r_{policy} AS FROM deferred_r()
+
+statement ok
+CREATE OR REPLACE TEMP TABLE g_{policy} AS FROM deferred_g()
+
+statement ok
+CREATE OR REPLACE TEMP TABLE p_{policy} AS FROM deferred_p()
+
+statement ok
+CREATE OR REPLACE TEMP TABLE t_{policy} AS FROM deferred_t()
+
+endloop
+
+query I
+SELECT count(*) FROM (SELECT * FROM t_off EXCEPT ALL SELECT * FROM t_auto)
+----
+0
+
+query I
+SELECT count(*) FROM ((SELECT * FROM r_off EXCEPT ALL SELECT * FROM r_auto)
+                      UNION ALL (SELECT * FROM r_auto EXCEPT ALL SELECT * FROM r_off))
+----
+0
+
+query I
+SELECT count(*) FROM ((SELECT * FROM g_off EXCEPT ALL SELECT * FROM g_auto)
+                      UNION ALL (SELECT * FROM g_auto EXCEPT ALL SELECT * FROM g_off))
+----
+0
+
+query I
+SELECT count(*) FROM ((SELECT * FROM p_off EXCEPT ALL SELECT * FROM p_auto)
+                      UNION ALL (SELECT * FROM p_auto EXCEPT ALL SELECT * FROM p_off))
+----
+0
+
+endloop
+
+endloop
+
+# updated and deleted rows, and rows only this transaction sees
+statement ok
+BEGIN
+
+statement ok
+UPDATE facts SET t64 = -t64, id = id + 1 WHERE id % 1000 = 5
+
+statement ok
+DELETE FROM facts WHERE id BETWEEN 600000 AND 600100
+
+statement ok
+INSERT INTO facts SELECT 2000000 + i, (i % 730)::INTEGER, (i % 1000)::INTEGER, 1, 2, i, 3, 0.5, 1.25,
+                         DATE '2001-01-01', NULL, (i % 11)::INTEGER, 'AIR', 9 FROM range(50000) t(i)
+
+foreach threads 1 4
+
+statement ok
+SET threads={threads}
+
+foreach policy off auto
+
+statement ok
+SET jit_policy='{policy}'
+
+statement ok
+CREATE OR REPLACE TEMP TABLE r_{policy} AS FROM deferred_r()
+
+statement ok
+CREATE OR REPLACE TEMP TABLE g_{policy} AS FROM deferred_g()
+
+statement ok
+CREATE OR REPLACE TEMP TABLE p_{policy} AS FROM deferred_p()
+
+statement ok
+CREATE OR REPLACE TEMP TABLE t_{policy} AS FROM deferred_t()
+
+endloop
+
+query I
+SELECT count(*) FROM (SELECT * FROM t_off EXCEPT ALL SELECT * FROM t_auto)
+----
+0
+
+query I
+SELECT count(*) FROM ((SELECT * FROM r_off EXCEPT ALL SELECT * FROM r_auto)
+                      UNION ALL (SELECT * FROM r_auto EXCEPT ALL SELECT * FROM r_off))
+----
+0
+
+query I
+SELECT count(*) FROM ((SELECT * FROM g_off EXCEPT ALL SELECT * FROM g_auto)
+                      UNION ALL (SELECT * FROM g_auto EXCEPT ALL SELECT * FROM g_off))
+----
+0
+
+query I
+SELECT count(*) FROM ((SELECT * FROM p_off EXCEPT ALL SELECT * FROM p_auto)
+                      UNION ALL (SELECT * FROM p_auto EXCEPT ALL SELECT * FROM p_off))
+----
+0
+
+endloop
+
+statement ok
+ROLLBACK

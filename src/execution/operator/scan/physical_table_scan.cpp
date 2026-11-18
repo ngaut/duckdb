@@ -34,6 +34,8 @@ struct TableScanExecutionSourceConfig {
 	optional_ptr<const TableFilterKernelProvider> filter_kernel_provider;
 	vector<idx_t> filter_kernel_indices;
 	bool return_source_contract_input = false;
+	//! The source contract input columns the scan leaves to the region in the vectors it reads whole
+	vector<idx_t> deferred_columns;
 };
 
 struct TableScanExecutionSourceContractGlobalState {
@@ -77,6 +79,9 @@ BuildTableScanExecutionSourceConfig(const PhysicalTableScan &op, optional_ptr<Ta
 	}
 	if (open_request.UsesStaticPruningOnly()) {
 		result.filter_execution_mode = TableFilterExecutionMode::PRUNE_ONLY;
+		if (result.return_source_contract_input) {
+			result.deferred_columns = open_request.deferrable_source_columns;
+		}
 	}
 	if (!result.use_source_contract || !result.filters || !open_request.table_filter_kernel_provider ||
 	    !op.table_filters || open_request.scan_filter_mode != ExecutionRegionScanFilterMode::ALL) {
@@ -282,6 +287,26 @@ public:
 	}
 };
 
+//! The columns of the vector a region source returned that the scan left to the region
+class TableScanDeferredColumns final : public ExecutionDeferredColumns {
+public:
+	TableScanDeferredColumns(TableScanState &scan_state_p, DuckTransaction &transaction_p)
+	    : scan_state(scan_state_p), transaction(transaction_p) {
+	}
+
+	void Read(DataChunk &chunk, optional_ptr<const SelectionVector> selection, idx_t count) override {
+		scan_state.ReadDeferredColumns(transaction, chunk, selection, count);
+	}
+
+	void StopDeferring() override {
+		scan_state.options.deferred_columns.clear();
+	}
+
+private:
+	TableScanState &scan_state;
+	DuckTransaction &transaction;
+};
+
 class TableScanLocalSourceState : public LocalSourceState {
 public:
 	TableScanLocalSourceState(ExecutionContext &context, TableScanGlobalSourceState &gstate,
@@ -312,6 +337,7 @@ public:
 	//! Whether the source contract drives this scan. A scan opened for the contract may still be driven by the
 	//! vectorized GetData (an executor whose compiled entry deferred), whose positions live in local_state
 	bool execution_source_contract_cursor = false;
+	unique_ptr<TableScanDeferredColumns> execution_source_contract_deferred_columns;
 
 private:
 	void InitializeExecutionSourceContract(ExecutionContext &context, TableScanGlobalSourceState &gstate,
@@ -344,6 +370,19 @@ private:
 		// A region source copies the vectors it batches: their filtered columns are copied by the scan already
 		execution_source_contract_scan_state.options.compact_filtered_vectors_below =
 		    ExecutionChunkCoalescer::MIN_PASSTHROUGH_ROWS;
+		auto &deferred_columns = gstate.execution_source_config.deferred_columns;
+		if (!deferred_columns.empty()) {
+			auto &deferred = execution_source_contract_scan_state.options.deferred_columns;
+			deferred.assign(gstate.execution_source_contract.storage_ids.size(), false);
+			for (auto column : deferred_columns) {
+				if (column >= deferred.size()) {
+					throw InternalException("Execution region table scan deferred column is out of range");
+				}
+				deferred[column] = true;
+			}
+			execution_source_contract_deferred_columns = make_uniq<TableScanDeferredColumns>(
+			    execution_source_contract_scan_state, *gstate.execution_source_contract.transaction);
+		}
 	}
 };
 
@@ -471,10 +510,17 @@ SourceResultType PhysicalTableScan::GetExecutionSourceContractDataInternal(Execu
 				}
 				chunk.Reference(vector);
 				take_vector();
+				if (scan_state.HasDeferredColumns()) {
+					input.deferred_columns = l_state.execution_source_contract_deferred_columns.get();
+				}
 				return SourceResultType::HAVE_MORE_OUTPUT;
 			}
 			{
 				ExecutionOperatorStageTimer timer(input.stage_recorder, "source_contract.table_scan.batch_append");
+				// the batch copies every column
+				if (scan_state.HasDeferredColumns()) {
+					scan_state.ReadDeferredColumns(*contract_state.transaction, vector, nullptr, vector.size());
+				}
 				ExecutionChunkCoalescer::Append(chunk, vector);
 			}
 			take_vector();

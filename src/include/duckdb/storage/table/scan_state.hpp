@@ -345,6 +345,15 @@ public:
 	unique_ptr<RowGroupReorderer> reorderer;
 	//! The flat vectors that receive the rows a filter keeps when the scan compacts filtered columns
 	DataChunk filter_compaction;
+	//! The vector scanned last, whose deferred columns no consumer has read yet (see RowGroup::ReadDeferredColumns)
+	struct DeferredVector {
+		optional_ptr<RowGroup> row_group;
+		idx_t vector_index = 0;
+		idx_t count = 0;
+		vector<idx_t> columns;
+	} deferred;
+	//! Receives the selected rows of the deferred columns before they move to the rows' positions
+	DataChunk deferred_selection;
 
 public:
 	void Initialize(const QueryContext &context_p, const vector<LogicalType> &types);
@@ -409,6 +418,9 @@ struct TableScanOptions {
 	//! anyway: a slice allocates a dictionary that is freed again when the chunk is reset. A vector keeping more is
 	//! sliced, every column through the one selection
 	idx_t compact_filtered_vectors_below = 0;
+	//! The columns a consumer reads only for the rows it selects: a vector read whole without deleted rows leaves
+	//! them unread, for the consumer to read (TableScanState::ReadDeferredColumns) before the next scan
+	vector<bool> deferred_columns;
 };
 
 class TableScanState {
@@ -444,6 +456,12 @@ public:
 	ScanFilterInfo &GetFilterInfo();
 
 	ScanSamplingInfo &GetSamplingInfo();
+	//! Whether the chunk the scan returned last left deferred columns unread
+	bool HasDeferredColumns() const;
+	//! Reads the deferred columns of the chunk the scan returned last, for the selected rows (every row without a
+	//! selection), into the rows' positions
+	void ReadDeferredColumns(TransactionData transaction, DataChunk &chunk, optional_ptr<const SelectionVector> sel,
+	                         idx_t count);
 	//! Initializes the column scans a claim deferred, for whichever collection holds the assignment
 	void InitializeColumnScans();
 	//! Rows scanned from persistent and transaction-local storage

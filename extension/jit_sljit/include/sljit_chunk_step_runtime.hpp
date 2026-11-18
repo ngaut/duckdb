@@ -54,11 +54,17 @@ public:
 		return native_continuation.ContinuesNatively(
 		    input, proof.table_filters_hold,
 		    [&](const SljitExecutableNativeContinuation &plan) { return executor.HandsOverToNative(input, plan); },
-		    [&]() { SljitChunkStepResult(executor.FlushChunks(), result); });
+		    [&]() { SljitChunkStepResult(executor.FlushChunks(), result); },
+		    [&]() {
+			    if (proof.deferred_columns) {
+				    proof.deferred_columns->ReadAll(input);
+			    }
+		    });
 	}
 
 	SinkResultType ExecuteChunk(DataChunk &input, ExecutionSourceChunkProof proof) override {
-		return SljitChunkStepResult(executor.ExecuteChunk(input, proof.table_filters_hold), result);
+		return SljitChunkStepResult(executor.ExecuteChunk(input, proof.table_filters_hold, proof.deferred_columns),
+		                            result);
 	}
 
 	void FlushChunks() override {

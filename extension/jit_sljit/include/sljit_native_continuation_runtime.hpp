@@ -200,21 +200,24 @@ public:
 		}
 	}
 
-	//! HANDS_OVER decides an unmeasured step on its first chunk
-	template <class HANDS_OVER, class FLUSH>
+	//! HANDS_OVER decides an unmeasured step on its first chunk. READ_INPUT reads every column of a chunk that
+	//! DuckDB's operators take, or that HANDS_OVER looks at
+	template <class HANDS_OVER, class FLUSH, class READ_INPUT>
 	optional_ptr<DataChunk> ContinuesNatively(DataChunk &input, bool source_filters_hold, HANDS_OVER &&hands_over,
-	                                          FLUSH &&flush) {
+	                                          FLUSH &&flush, READ_INPUT &&read_input) {
 		if (!continuation) {
 			return nullptr;
 		}
 		if (!measured) {
 			if (!decided) {
 				decided = true;
+				read_input();
 				if (!hands_over(continuation->Plan())) {
 					continuation.reset();
 					return nullptr;
 				}
 			}
+			read_input();
 			return &continuation->Prepare(runtime, input, source_filters_hold);
 		}
 		const bool native = TakesNativeMeasured(input.size(), source_filters_hold);
@@ -225,6 +228,7 @@ public:
 		if (!native) {
 			return nullptr;
 		}
+		read_input();
 		return &continuation->Prepare(runtime, input, source_filters_hold);
 	}
 

@@ -105,6 +105,7 @@ static void SelectSljitSourceStages(const ExecutionRegionCandidate &candidate, i
 	source_recipe.execution = ExecutionRegionSourceExecutionKind::SOURCE_CONTRACT;
 	source_recipe.scan_filter_mode = contract_plan.scan_filter_mode;
 	source_recipe.input_types = contract_plan.source_contract_input_types;
+	source_recipe.deferrable_columns = contract_plan.deferrable_columns;
 	lowering_plan.SetSourceRecipe(std::move(source_recipe));
 	for (idx_t stage_idx = 0; stage_idx < candidate.stage_plan.stages.size(); stage_idx++) {
 		auto &stage = candidate.stage_plan.stages[stage_idx];

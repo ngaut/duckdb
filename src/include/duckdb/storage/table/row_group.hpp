@@ -209,6 +209,11 @@ public:
 	bool PrepareScan(ScanOptions options, CollectionScanState &state);
 	//! Processes the vector prepared by PrepareScan, clearing the prepared state when the vector is finished
 	void ProcessPreparedScan(ScanOptions options, CollectionScanState &state, DataChunk &result);
+	//! Reads the deferred columns of the vector the state scanned last (see TableScanState::ReadDeferredColumns)
+	void ReadDeferredColumns(CollectionScanState &state, TransactionData transaction, DataChunk &chunk,
+	                         optional_ptr<const SelectionVector> sel, idx_t count);
+	//! Moves the deferred columns of the vector the state scanned last past it, unread
+	void SkipDeferredColumns(CollectionScanState &state);
 	//! Whether the columns other than the probed ones can be read from a row inside the vector
 	bool ReadsProbedRowsOnly(const vector<StorageIndex> &column_ids, const ScanFilterInfo &filter_info) const;
 

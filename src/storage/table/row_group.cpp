@@ -396,6 +396,9 @@ bool RowGroup::InitializeScanInternal(CollectionScanState &state, SegmentNode<Ro
 	D_ASSERT(state.prepared_vector.prepare_state == VectorPrepareState::NONE);
 	state.prepared_vector.Reset();
 	state.assignment_io_registered = false;
+	// the column scans start over
+	state.deferred.row_group = nullptr;
+	state.deferred.columns.clear();
 	state.SetRowGroup(node);
 	state.vector_index = vector_offset;
 	auto row_start = node.GetRowStart();
@@ -933,6 +936,10 @@ vector<unique_ptr<AsyncTask>> RowGroup::CollectAssignmentIOTasks(CollectionScanS
 }
 
 bool RowGroup::PrepareScan(ScanOptions options, CollectionScanState &state) {
+	if (state.deferred.row_group) {
+		// no consumer read the deferred columns of the vector scanned last
+		state.deferred.row_group->SkipDeferredColumns(state);
+	}
 	auto &prepared = state.prepared_vector;
 	if (prepared.prepare_state != VectorPrepareState::NONE) {
 		return true;
@@ -1093,6 +1100,106 @@ bool RowGroup::ReadsProbedRowsOnly(const vector<StorageIndex> &column_ids, const
 	return true;
 }
 
+//! Whether the scan leaves a column of a vector it reads whole to its consumer: a plain fixed-width column without
+//! updates, which merge by their position in the vector
+static bool DefersColumn(CollectionScanState &state, idx_t column_idx, ColumnData &column, const Vector &result) {
+	auto &deferred_columns = state.GetOptions().deferred_columns;
+	if (column_idx >= deferred_columns.size() || !deferred_columns[column_idx]) {
+		return false;
+	}
+	auto &storage_index = state.GetColumnIds()[column_idx];
+	return !storage_index.IsRowIdColumn() && !storage_index.IsRowNumberColumn() && !storage_index.IsPushdownExtract() &&
+	       storage_index.ChildIndexCount() == 0 && TypeIsConstantSize(result.GetType().InternalType()) &&
+	       !column.HasUpdates();
+}
+
+void RowGroup::SkipDeferredColumns(CollectionScanState &state) {
+	auto &deferred = state.deferred;
+	D_ASSERT(deferred.row_group.get() == this);
+	const auto &column_ids = state.GetColumnIds();
+	for (auto col : deferred.columns) {
+		GetColumn(column_ids[col]).Skip(state.column_scans[col], deferred.count);
+	}
+	deferred.row_group = nullptr;
+	deferred.columns.clear();
+}
+
+template <idx_t WIDTH>
+static void ScatterSelectedValues(const UnifiedVectorFormat &format, data_ptr_t target, const SelectionVector &sel,
+                                  idx_t count) {
+	for (idx_t i = 0; i < count; i++) {
+		memcpy(target + sel.get_index(i) * WIDTH, format.data + format.sel->get_index(i) * WIDTH, WIDTH);
+	}
+}
+
+//! Moves each selected row's value of a column, read densely, to the row's position
+static void ScatterSelectedRows(Vector &selected, Vector &target, const SelectionVector &sel, idx_t count) {
+	UnifiedVectorFormat format;
+	selected.ToUnifiedFormat(format);
+	auto target_data = FlatVector::GetDataMutable(target);
+	switch (GetTypeIdSize(target.GetType().InternalType())) {
+	case 1:
+		ScatterSelectedValues<1>(format, target_data, sel, count);
+		break;
+	case 2:
+		ScatterSelectedValues<2>(format, target_data, sel, count);
+		break;
+	case 4:
+		ScatterSelectedValues<4>(format, target_data, sel, count);
+		break;
+	case 8:
+		ScatterSelectedValues<8>(format, target_data, sel, count);
+		break;
+	case 16:
+		ScatterSelectedValues<16>(format, target_data, sel, count);
+		break;
+	default:
+		throw InternalException("Deferred column of unexpected width");
+	}
+	if (format.validity.CannotHaveNull()) {
+		return;
+	}
+	auto &validity = FlatVector::ValidityMutable(target);
+	for (idx_t i = 0; i < count; i++) {
+		if (!format.validity.RowIsValid(format.sel->get_index(i))) {
+			validity.SetInvalid(sel.get_index(i));
+		}
+	}
+}
+
+void RowGroup::ReadDeferredColumns(CollectionScanState &state, TransactionData transaction, DataChunk &chunk,
+                                   optional_ptr<const SelectionVector> sel, idx_t count) {
+	auto &deferred = state.deferred;
+	D_ASSERT(deferred.row_group.get() == this);
+	D_ASSERT(chunk.size() == deferred.count);
+	const auto &column_ids = state.GetColumnIds();
+	// a few selected rows cost less read one by one than decoded with the whole vector
+	const bool reads_selected = sel && 2 * count <= deferred.count;
+	if (reads_selected) {
+		if (state.deferred_selection.ColumnCount() == 0) {
+			auto deferrable = state.GetOptions().deferred_columns;
+			deferrable.resize(chunk.ColumnCount(), false);
+			state.deferred_selection.Initialize(Allocator::DefaultAllocator(), chunk.GetTypes(), deferrable);
+		}
+		state.deferred_selection.Reset();
+	}
+	for (auto col : deferred.columns) {
+		auto &col_data = GetColumn(column_ids[col]);
+		auto &column_scan = state.column_scans[col];
+		auto &target = chunk.data[col];
+		if (!reads_selected) {
+			col_data.Scan(transaction, deferred.vector_index, column_scan, target, deferred.count);
+			continue;
+		}
+		auto &selected = state.deferred_selection.data[col];
+		SelectionVector rows(*sel);
+		col_data.Select(transaction, deferred.vector_index, column_scan, selected, rows, count);
+		ScatterSelectedRows(selected, target, *sel, count);
+	}
+	deferred.row_group = nullptr;
+	deferred.columns.clear();
+}
+
 void RowGroup::ProcessPreparedScan(ScanOptions options, CollectionScanState &state, DataChunk &result) {
 	const auto &column_ids = state.GetColumnIds();
 	auto &filter_info = state.GetFilterInfo();
@@ -1153,7 +1260,9 @@ void RowGroup::ProcessPreparedScan(ScanOptions options, CollectionScanState &sta
 				auto &col_data = GetColumn(column);
 				auto &column_scan = state.column_scans[i];
 				column_scan.update_scan_type = options.update_type;
-				if (!reads_probed_rows) {
+				if (!reads_probed_rows && !has_sample_selection && DefersColumn(state, i, col_data, result.data[i])) {
+					state.deferred.columns.push_back(i);
+				} else if (!reads_probed_rows) {
 					// pass max_count explicitly, concurrent inserts can grow the column past the count captured at
 					// scan init
 					col_data.Scan(transaction, state.vector_index, column_scan, result.data[i], max_count);
@@ -1176,6 +1285,11 @@ void RowGroup::ProcessPreparedScan(ScanOptions options, CollectionScanState &sta
 			count = sample_count;
 		} else if (reads_probed_rows) {
 			count = probed_rows.end - probed_rows.begin;
+		}
+		if (!state.deferred.columns.empty()) {
+			state.deferred.row_group = this;
+			state.deferred.vector_index = state.vector_index;
+			state.deferred.count = max_count;
 		}
 	} else {
 		// partial scan: we have deletions or table filters

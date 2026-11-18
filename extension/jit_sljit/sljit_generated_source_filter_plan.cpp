@@ -447,6 +447,23 @@ bool TryPlanSljitGeneratedSourceFilters(const ExecutionRegionNode &node, SljitSo
 		}
 		native_ops.push_back(std::move(projection_op));
 	}
+	vector<bool> filtered(source_input_types.size(), false);
+	for (auto &source_filter : node.source->filters) {
+		if (source_filter.scan_column_index < filtered.size()) {
+			filtered[source_filter.scan_column_index] = true;
+		}
+	}
+	for (auto &proof : node.source->exact_filter_proofs) {
+		if (proof.source_input_index < filtered.size()) {
+			filtered[proof.source_input_index] = true;
+		}
+	}
+	contract_plan.deferrable_columns.clear();
+	for (idx_t column = 0; column < filtered.size(); column++) {
+		if (!filtered[column]) {
+			contract_plan.deferrable_columns.push_back(column);
+		}
+	}
 	contract_plan.source_contract_input_types = std::move(source_input_types);
 	contract_plan.source_output_types = contract_plan.source_contract_input_types;
 	return true;

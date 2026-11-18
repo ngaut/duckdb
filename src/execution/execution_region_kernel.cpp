@@ -1,8 +1,16 @@
 #include "duckdb/execution/execution_region_kernel.hpp"
 
 #include "duckdb/common/exception.hpp"
+#include "duckdb/common/types/data_chunk.hpp"
 
 namespace duckdb {
+
+ExecutionDeferredColumns::~ExecutionDeferredColumns() {
+}
+
+void ExecutionDeferredColumns::ReadAll(DataChunk &chunk) {
+	Read(chunk, nullptr, chunk.size());
+}
 
 ExecutionRegionLocalState::~ExecutionRegionLocalState() {
 }

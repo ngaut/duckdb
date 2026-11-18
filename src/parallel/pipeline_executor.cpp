@@ -782,11 +782,16 @@ PipelineExecuteResult PipelineExecutor::FlushCompiledStepBeforeExternalAdvance(i
 }
 
 OperatorResultType PipelineExecutor::PushSourceChunk(DataChunk &input, ExecutionBudget &chunk_budget) {
+	auto deferred_columns = execution_source_chunk_proof.deferred_columns;
 	if (!compiled_step) {
+		if (deferred_columns) {
+			deferred_columns->ReadAll(input);
+		}
 		return ExecutePushInternal(input, chunk_budget);
 	}
 	compiled_step_native_input = compiled_step->ContinuesNatively(input, execution_source_chunk_proof);
 	if (compiled_step_native_input) {
+		// the step read the deferred columns before DuckDB's operators took the chunk
 		compiled_step_continued_natively = true;
 		return ExecutePushInternal(*compiled_step_native_input, chunk_budget);
 	}
@@ -1299,6 +1304,7 @@ SourceResultType PipelineExecutor::FetchFromCompiledSourceContract(SupportsSourc
 	stage_start = metrics ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point();
 	auto res = fetch(source_input);
 	execution_source_chunk_proof.table_filters_hold = source_input.table_filters_hold;
+	execution_source_chunk_proof.deferred_columns = source_input.deferred_columns;
 	if (source_input.batch_index_state == SourceBatchIndexState::ADVANCED) {
 		throw InternalException(
 		    "execution region source contract fetch cannot carry a batch-index advance without data");

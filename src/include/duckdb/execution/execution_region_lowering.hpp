@@ -78,6 +78,8 @@ struct DUCKDB_API ExecutionRegionSelectedSourceRecipe {
 	ExecutionRegionSourceExecutionKind execution = ExecutionRegionSourceExecutionKind::NONE;
 	ExecutionRegionScanFilterMode scan_filter_mode = ExecutionRegionScanFilterMode::NONE;
 	vector<LogicalType> input_types;
+	//! The input columns the region reads only for the rows its source filter keeps
+	vector<idx_t> deferrable_columns;
 };
 
 struct DUCKDB_API ExecutionRegionSelectedStage {
@@ -124,6 +126,7 @@ struct DUCKDB_API ExecutionRegionLoweringPlan {
 	ExecutionRegionScanFilterMode ScanFilterMode() const;
 	ExecutionRegionSourceExecutionKind SelectedSourceExecution() const;
 	const vector<LogicalType> &SourceContractInputTypes() const;
+	const vector<idx_t> &DeferrableSourceColumns() const;
 	const vector<ExecutionRegionSelectedStage> &SelectedStages() const;
 	string CompactEventReason() const;
 	string EventReason() const;

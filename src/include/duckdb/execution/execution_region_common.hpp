@@ -316,6 +316,9 @@ struct ExecutionRegionOpenRequest {
 	ExecutionRegionSourceExecutionKind source_execution = ExecutionRegionSourceExecutionKind::NONE;
 	ExecutionRegionScanFilterMode scan_filter_mode = ExecutionRegionScanFilterMode::NONE;
 	vector<LogicalType> source_contract_input_types;
+	//! The source contract input columns the region reads only for the rows its source filter keeps: the source may
+	//! defer reading them to the region (ExecutionDeferredColumns)
+	vector<idx_t> deferrable_source_columns;
 	optional_ptr<const TableFilterKernelProvider> table_filter_kernel_provider;
 
 	bool UsesSourceContract() const {

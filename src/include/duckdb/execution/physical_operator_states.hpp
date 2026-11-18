@@ -26,6 +26,7 @@ class Pipeline;
 class PipelineBuildState;
 class MetaPipeline;
 class InterruptState;
+class ExecutionDeferredColumns;
 
 // LCOV_EXCL_START
 class OperatorState {
@@ -215,6 +216,8 @@ struct OperatorSourceInput {
 	optional_ptr<ExecutionOperatorStageRecorder> stage_recorder;
 	//! Set by a source contract scan whose zone maps prove each table filter for every row of the chunk it returned
 	bool table_filters_hold = false;
+	//! Set by a source contract scan that left columns of the chunk it returned unread
+	optional_ptr<ExecutionDeferredColumns> deferred_columns;
 };
 
 struct OperatorSinkCombineInput {

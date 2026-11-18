@@ -1010,6 +1010,10 @@ const vector<LogicalType> &ExecutionRegionLoweringPlan::SourceContractInputTypes
 	return source_recipe.input_types;
 }
 
+const vector<idx_t> &ExecutionRegionLoweringPlan::DeferrableSourceColumns() const {
+	return source_recipe.deferrable_columns;
+}
+
 const vector<ExecutionRegionSelectedStage> &ExecutionRegionLoweringPlan::SelectedStages() const {
 	return selected_stages;
 }

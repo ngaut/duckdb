@@ -148,6 +148,7 @@ public:
 		}
 		BindPrimitiveAggregateStateSource(recipe);
 		BindFiltersHoldSequence(recipe);
+		recipe.source_filter_idx = source_filter_idx;
 		return SljitMakeFullPipelinePrimitiveRecipePlan(std::move(recipe));
 	}
 

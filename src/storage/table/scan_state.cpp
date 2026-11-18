@@ -33,6 +33,19 @@ void TableScanState::Initialize(vector<StorageIndex> column_ids_p, optional_ptr<
 	InitializeSampling(table_sampling, estimated_table_row_count);
 }
 
+bool TableScanState::HasDeferredColumns() const {
+	return table_state.deferred.row_group || local_state.deferred.row_group;
+}
+
+void TableScanState::ReadDeferredColumns(TransactionData transaction, DataChunk &chunk,
+                                         optional_ptr<const SelectionVector> sel, idx_t count) {
+	for (auto state : {&table_state, &local_state}) {
+		if (state->deferred.row_group) {
+			state->deferred.row_group->ReadDeferredColumns(*state, transaction, chunk, sel, count);
+		}
+	}
+}
+
 void TableScanState::InitializeSampling(optional_ptr<SampleOptions> table_sampling, idx_t estimated_table_row_count) {
 	if (table_sampling) {
 		sampling_info.do_system_sample = table_sampling->method == SampleMethod::SYSTEM_SAMPLE;

@@ -59,7 +59,8 @@ public:
 	//! Chunk step: runs one source chunk, which the pipeline executor fetched and advanced the sink's batch for,
 	//! through the steps. Rows the steps batch wait for later chunks. Returns true when the pipeline stopped. A chunk
 	//! whose zone maps prove the source's filter for every row takes the steps that skip it
-	bool ExecuteChunk(DataChunk &source_chunk, bool source_filters_hold) {
+	bool ExecuteChunk(DataChunk &source_chunk, bool source_filters_hold,
+	                  optional_ptr<ExecutionDeferredColumns> deferred_columns) {
 		if (source_chunk.size() == 0) {
 			return false;
 		}
@@ -71,7 +72,20 @@ public:
 			runtime.RecordJitRuntimePath("source.storage_scan.zone_maps_hold_filter", source_chunk.size());
 		}
 		sequence = skips_source_filter ? &recipe.filters_hold_sequence : &recipe.primitive_sequence;
-		return ExecuteStep(1, SljitRuntimeBatchViewFromChunk(source_chunk));
+		if (deferred_columns) {
+			if (!FiltersBeforeReading(recipe.primitive_sequence)) {
+				// every chunk's first step reads all of its columns
+				deferred_columns->StopDeferring();
+			}
+			if (!FiltersBeforeReading(*sequence)) {
+				deferred_columns->ReadAll(source_chunk);
+				deferred_columns = nullptr;
+			}
+		}
+		source_deferred_columns = deferred_columns;
+		const auto stopped = ExecuteStep(1, SljitRuntimeBatchViewFromChunk(source_chunk));
+		source_deferred_columns = nullptr;
+		return stopped;
 	}
 
 	//! Chunk step: every batched row and the terminal's state sink, because the sink moves to another partition or
@@ -151,6 +165,13 @@ private:
 		return step_idx + 1 == sequence->Count();
 	}
 
+	//! Whether a step list's first step is the source's generated filter, which reads only the source's filtered
+	//! columns before it keeps rows
+	bool FiltersBeforeReading(const SljitFullPipelinePrimitiveSequence &steps) const {
+		return steps.Count() > 2 && steps.Step(1).kind == SljitFullPipelinePrimitiveKind::GENERATED_FILTER &&
+		       steps.Step(1).generated_filter.filter_idx == recipe.source_filter_idx;
+	}
+
 	bool ExecuteStep(idx_t step_idx, const SljitRuntimeBatchView &input) {
 		if (step_idx >= sequence->Count()) {
 			throw InternalException("SLJIT primitive sequence reached the end without a consumer");
@@ -192,6 +213,11 @@ private:
 	bool ExecuteGeneratedFilter(idx_t step_idx, const SljitFullPipelinePrimitiveStep &step,
 	                            const SljitRuntimeBatchView &input) {
 		auto execute_output_view = [&](const SljitRuntimeBatchView &output) {
+			if (step_idx == 1 && source_deferred_columns) {
+				// the source's columns the filter did not read, for the rows it kept
+				source_deferred_columns->Read(*output.chunk, output.selection, output.count);
+				source_deferred_columns = nullptr;
+			}
 			return ExecuteStep(step_idx + 1, output);
 		};
 		return generated_filter.Execute(step, input, execute_output_view);
@@ -310,6 +336,8 @@ private:
 	const SljitFullPipelinePrimitiveSequence *sequence;
 	EXECUTE_HASH_JOIN_PROBE &execute_hash_join_probe;
 	SljitFullPipelineTerminalRuntime terminal_runtime;
+	//! The source chunk's columns the source left unread, until the source's filter kept its rows
+	optional_ptr<ExecutionDeferredColumns> source_deferred_columns;
 	SljitRegionExecutionScratch &scratch;
 	SljitSelectedHashJoinInputRuntime selected_hash_join_inputs;
 	SljitGeneratedFilterPrimitiveRuntime generated_filter;
