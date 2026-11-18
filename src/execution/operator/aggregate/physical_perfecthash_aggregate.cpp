@@ -335,9 +335,11 @@ bool PhysicalPerfectHashAggregate::BindExecutionSink(ExecutionContext &context, 
 	binding.aggregate_update.grouped_state.state =
 	    make_shared_ptr<PerfectHashAggregateStateAddressState>(context, *this, local_state);
 	auto state_layout = local_state.ht->GetStateLayout();
-	binding.aggregate_update.grouped_state.perfect_hash_layout.ready = state_layout.data && state_layout.group_is_set;
+	binding.aggregate_update.grouped_state.perfect_hash_layout.ready =
+	    state_layout.data && state_layout.group_is_set && state_layout.group_states_marked;
 	binding.aggregate_update.grouped_state.perfect_hash_layout.data = state_layout.data;
 	binding.aggregate_update.grouped_state.perfect_hash_layout.group_is_set = state_layout.group_is_set;
+	binding.aggregate_update.grouped_state.perfect_hash_layout.group_states_marked = state_layout.group_states_marked;
 	binding.aggregate_update.grouped_state.perfect_hash_layout.total_groups = state_layout.total_groups;
 	binding.aggregate_update.grouped_state.perfect_hash_layout.tuple_size = state_layout.tuple_size;
 	binding.aggregate_update.grouped_state.perfect_hash_layout.aggregate_state_offset =

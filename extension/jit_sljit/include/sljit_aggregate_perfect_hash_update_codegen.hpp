@@ -25,7 +25,7 @@ struct SljitPerfectHashFusedUpdateEmitContext {
 	const ExecutionRegionAggregateContract &contract;
 	const SljitFusedAggregateCodegenPlan &codegen_plan;
 	const SljitDensePerfectHashAggregateReductionPlan &dense_reduction_plan;
-	const SljitDeferredPerfectHashFlagPlan &deferred_flag_plan;
+	vector<SljitPerfectHashFirstTouchSite> &first_touch_sites;
 	vector<SljitArithmeticOverflowSite> &overflows;
 	vector<sljit_jump *> &group_out_of_range;
 	idx_t perfect_hash_group_count;
@@ -36,12 +36,15 @@ struct SljitPerfectHashFusedUpdateEmitContext {
 	bool dedicated_state_register;
 	sljit_s32 state_pointer_reg;
 	sljit_s32 reduction_state_reg;
+	bool states_markable_on_first_touch;
 };
 
 struct SljitPerfectHashGroupLookupOptions {
 	bool check_group_validity = false;
 	bool materialize_state_pointer = false;
-	bool defer_flags = false;
+	//! Mark the group and its states set out of line, on the group's first touch, instead of on every row. Only for
+	//! rows whose payload values are valid: a state is then set as soon as its group is.
+	bool mark_states_on_first_touch = false;
 	bool direct_group_index = false;
 	bool expression_fast_path = false;
 	bool expression_all_valid = false;
@@ -63,6 +66,8 @@ struct SljitPerfectHashPayloadUpdateOptions {
 	//! skips its update when one of its sources is NULL. The source validity array must be in the native vector
 	//! layout's optional invariant register.
 	bool null_rows = false;
+	//! The group lookup marks the states set on the group's first touch: the updates leave the flags alone
+	bool states_marked_on_first_touch = false;
 	const vector<SljitTypedExpressionTreeLoopHoist> *payload_data_hoists = nullptr;
 };
 
@@ -70,7 +75,8 @@ struct SljitPerfectHashFusedUpdatePlan {
 	vector<SljitPerfectHashGroupPlan> group_plans;
 	SljitFusedAggregateCodegenPlan codegen_plan;
 	SljitDensePerfectHashAggregateReductionPlan dense_reduction_plan;
-	SljitDeferredPerfectHashFlagPlan deferred_flag_plan;
+	//! Every aggregate's state is a count or a sum, whose set flag the first touch of its group can set
+	bool states_markable_on_first_touch = false;
 	SljitTypedExpressionTreeSimdPlan predicate_simd_plan;
 	vector<SljitTypedExpressionTreeLoopHoist> source_data_hoists;
 	vector<SljitTypedExpressionTreeLoopHoist> fast_source_data_hoists;

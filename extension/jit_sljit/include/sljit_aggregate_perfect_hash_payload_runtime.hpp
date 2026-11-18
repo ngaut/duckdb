@@ -74,7 +74,8 @@ static void SljitExecuteFusedPerfectHashGroupedPrimitiveAggregatePayloadUpdate(
 	if (!function) {
 		throw InternalException("SLJIT fused perfect-hash aggregate update is missing generated code");
 	}
-	if (!layout.ready || !layout.data || !layout.group_is_set || layout.total_groups == 0 || layout.tuple_size == 0) {
+	if (!layout.ready || !layout.data || !layout.group_is_set || !layout.group_states_marked ||
+	    layout.total_groups == 0 || layout.tuple_size == 0) {
 		auto blocker = layout.blocker.empty() ? "perfect-hash-state-layout-missing" : layout.blocker;
 		throw InternalException("SLJIT fused perfect-hash aggregate state layout is incomplete: %s", blocker.c_str());
 	}
@@ -243,6 +244,7 @@ static void SljitExecuteFusedPerfectHashGroupedPrimitiveAggregatePayloadUpdate(
 	native_input.group_selection_all_present = group_selection_all_present;
 	native_input.perfect_hash_state_data = layout.data;
 	native_input.perfect_hash_group_is_set = layout.group_is_set;
+	native_input.perfect_hash_group_states_marked = layout.group_states_marked;
 	native_input.perfect_hash_total_groups = layout.total_groups;
 	native_input.perfect_hash_tuple_size = layout.tuple_size;
 	native_input.perfect_hash_aggregate_state_offset = layout.aggregate_state_offset;

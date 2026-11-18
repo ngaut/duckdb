@@ -40,6 +40,7 @@ PerfectAggregateHashTable::PerfectAggregateHashTable(ClientContext &context, All
 	// set up the empty payloads for every tuple, and initialize the "occupied" flag to false
 	group_is_set = make_unsafe_uniq_array_uninitialized<bool>(total_groups);
 	memset(group_is_set.get(), 0, total_groups * sizeof(bool));
+	group_states_marked = make_unsafe_uniq_array<bool>(total_groups);
 
 	// initialize the hash table for each entry
 	auto address_data = FlatVector::GetDataMutable<uintptr_t>(addresses);
@@ -174,6 +175,7 @@ PerfectAggregateHashTableStateLayout PerfectAggregateHashTable::GetStateLayout()
 	PerfectAggregateHashTableStateLayout result;
 	result.data = data;
 	result.group_is_set = group_is_set.get();
+	result.group_states_marked = group_states_marked.get();
 	result.total_groups = total_groups;
 	result.tuple_size = tuple_size;
 	result.aggregate_state_offset = layout_ptr->GetAggrOffset();

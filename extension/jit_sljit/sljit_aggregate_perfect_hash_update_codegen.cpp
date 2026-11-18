@@ -31,7 +31,6 @@ static unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativePerfectHashGroupedF
 	const auto &group_plans = update_plan.group_plans;
 	const auto &codegen_plan = update_plan.codegen_plan;
 	const auto &dense_reduction_plan = update_plan.dense_reduction_plan;
-	const auto &deferred_flag_plan = update_plan.deferred_flag_plan;
 	const auto &source_data_hoists = update_plan.source_data_hoists;
 	const auto perfect_hash_group_count = update_plan.perfect_hash_group_count;
 	const auto local_size = update_plan.local_size;
@@ -48,9 +47,9 @@ static unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativePerfectHashGroupedF
 
 	vector<SljitArithmeticOverflowSite> overflows;
 	vector<sljit_jump *> group_out_of_range;
+	vector<SljitPerfectHashFirstTouchSite> first_touch_sites;
 	sljit_emit_enter(compiler, 0, SLJIT_ARGS1V(P), scratch_register_count, saved_register_count, local_size);
 	EmitZeroSljitDensePerfectHashAggregateReduction(compiler, dense_reduction_plan);
-	EmitZeroSljitDeferredPerfectHashFlagArray(compiler, deferred_flag_plan);
 	EmitInitSljitNativeVectorLoop(compiler);
 	EmitInitSljitNativeVectorSourceArrays(compiler);
 	if (hoist_source_data_pointers) {
@@ -76,7 +75,7 @@ static unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativePerfectHashGroupedF
 	    contract,
 	    codegen_plan,
 	    dense_reduction_plan,
-	    deferred_flag_plan,
+	    first_touch_sites,
 	    overflows,
 	    group_out_of_range,
 	    perfect_hash_group_count,
@@ -87,12 +86,14 @@ static unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativePerfectHashGroupedF
 	    dedicated_state_register,
 	    state_pointer_reg,
 	    reduction_state_reg,
+	    update_plan.states_markable_on_first_touch,
 	};
 	EmitSljitPerfectHashFusedUpdateLoops(emit_context, update_plan);
 	EmitSljitDensePerfectHashAggregateReductionCommit(compiler, dense_reduction_plan, codegen_plan.payload_descriptors,
 	                                                  contract);
-	EmitSljitDeferredPerfectHashFlagsCommit(compiler, deferred_flag_plan, codegen_plan.payload_descriptors, contract);
 	sljit_emit_return_void(compiler);
+
+	EmitSljitPerfectHashFirstTouchBlocks(compiler, first_touch_sites, codegen_plan.payload_descriptors, contract);
 
 	auto overflow_returns = EmitSljitArithmeticOverflowStubs(compiler, overflows);
 	SetSljitJumpLabels(overflow_returns, sljit_emit_label(compiler));

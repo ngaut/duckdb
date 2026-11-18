@@ -45,16 +45,6 @@ void EmitZeroSljitDensePerfectHashAggregateReduction(struct sljit_compiler *comp
 	});
 }
 
-void EmitZeroSljitDeferredPerfectHashFlagArray(struct sljit_compiler *compiler,
-                                               const SljitDeferredPerfectHashFlagPlan &plan) {
-	if (!plan.enabled) {
-		return;
-	}
-	EmitSljitLocalPerfectHashGroupIndexLoop(compiler, plan.group_count, [&]() {
-		EmitStoreSljitLocalArrayImmediate(compiler, plan.group_seen_offset, SLJIT_S1, 0);
-	});
-}
-
 void EmitMarkSljitDensePerfectHashGroupSeen(struct sljit_compiler *compiler,
                                             const SljitDensePerfectHashAggregateReductionPlan &plan,
                                             sljit_s32 group_index_reg) {
@@ -79,12 +69,15 @@ void EmitSljitPerfectHashReductionStatePointer(struct sljit_compiler *compiler,
 	sljit_emit_op2(compiler, SLJIT_ADD, state_pointer_reg, 0, state_pointer_reg, 0, SLJIT_R3, 0);
 }
 
-void EmitMarkSljitDeferredPerfectHashGroupSeen(struct sljit_compiler *compiler,
-                                               const SljitDeferredPerfectHashFlagPlan &plan,
-                                               sljit_s32 group_index_reg) {
-	if (plan.enabled) {
-		EmitStoreSljitLocalArrayImmediate(compiler, plan.group_seen_offset, group_index_reg, 1);
-	}
+void EmitSljitPerfectHashJumpIfFirstTouch(struct sljit_compiler *compiler, sljit_s32 group_index_reg,
+                                          vector<SljitPerfectHashFirstTouchSite> &sites) {
+	sljit_emit_op1(compiler, SLJIT_MOV_P, SLJIT_R0, 0, SLJIT_MEM1(SLJIT_S0),
+	               offsetof(SljitNativeVectorInput, perfect_hash_group_states_marked));
+	sljit_emit_op1(compiler, SLJIT_MOV_U8, SLJIT_R0, 0, SLJIT_MEM2(SLJIT_R0, group_index_reg), 0);
+	SljitPerfectHashFirstTouchSite site;
+	site.first_touch = sljit_emit_cmp(compiler, SLJIT_EQUAL, SLJIT_R0, 0, SLJIT_IMM, 0);
+	site.resume = sljit_emit_label(compiler);
+	sites.push_back(site);
 }
 
 void EmitSljitDensePerfectHashIncrementCount(struct sljit_compiler *compiler,

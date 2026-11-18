@@ -17,6 +17,7 @@ namespace duckdb {
 struct PerfectAggregateHashTableStateLayout {
 	data_ptr_t data = nullptr;
 	bool *group_is_set = nullptr;
+	bool *group_states_marked = nullptr;
 	idx_t total_groups = 0;
 	idx_t tuple_size = 0;
 	idx_t aggregate_state_offset = 0;
@@ -72,6 +73,8 @@ protected:
 	unsafe_unique_array<data_t> owned_data;
 	//! Information on whether or not a specific group has any entries
 	unsafe_unique_array<bool> group_is_set;
+	//! Groups whose aggregate states a generated update has marked set; only generated updates read or write it
+	unsafe_unique_array<bool> group_states_marked;
 
 	//! The minimum values for each of the group columns
 	vector<Value> group_minima;

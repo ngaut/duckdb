@@ -168,16 +168,7 @@ bool TryBuildSljitDensePerfectHashAggregateReductionPlan(const vector<ExecutionR
 	return true;
 }
 
-bool TryBuildSljitDeferredPerfectHashFlagPlan(const vector<ExecutionRegionAggregateInput> &aggregates,
-                                              const ExecutionRegionAggregateContract &contract, sljit_sw &local_size,
-                                              SljitDeferredPerfectHashFlagPlan &result) {
-	if (contract.perfect_required_bits_total >= 8 * sizeof(idx_t)) {
-		return false;
-	}
-	const idx_t group_count = idx_t(1) << contract.perfect_required_bits_total;
-	if (group_count == 0 || group_count > SLJIT_DEFERRED_PERFECT_HASH_FLAG_MAX_GROUPS) {
-		return false;
-	}
+bool SljitPerfectHashStatesMarkableOnFirstTouch(const vector<ExecutionRegionAggregateInput> &aggregates) {
 	for (auto &aggregate : aggregates) {
 		switch (aggregate.primitive_update_kind) {
 		case AggregatePrimitiveUpdateKind::COUNT_STAR:
@@ -189,9 +180,6 @@ bool TryBuildSljitDeferredPerfectHashFlagPlan(const vector<ExecutionRegionAggreg
 			return false;
 		}
 	}
-	result.enabled = true;
-	result.group_count = group_count;
-	result.group_seen_offset = AllocateSljitLocalPerfectHashArray(local_size, group_count);
 	return true;
 }
 

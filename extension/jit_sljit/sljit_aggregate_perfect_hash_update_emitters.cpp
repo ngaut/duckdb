@@ -149,7 +149,6 @@ void EmitSljitPerfectHashGroupLookup(const SljitPerfectHashFusedUpdateEmitContex
 	auto compiler = context.compiler;
 	auto &group_plans = context.group_plans;
 	auto &dense_reduction_plan = context.dense_reduction_plan;
-	auto &deferred_flag_plan = context.deferred_flag_plan;
 	bool group_index_initialized = false;
 	const auto group_index_mode =
 	    options.direct_group_index
@@ -249,8 +248,8 @@ void EmitSljitPerfectHashGroupLookup(const SljitPerfectHashFusedUpdateEmitContex
 		}
 		return;
 	}
-	if (options.defer_flags) {
-		EmitMarkSljitDeferredPerfectHashGroupSeen(compiler, deferred_flag_plan, SLJIT_S4);
+	if (options.mark_states_on_first_touch) {
+		EmitSljitPerfectHashJumpIfFirstTouch(compiler, SLJIT_S4, context.first_touch_sites);
 	} else {
 		EmitSljitPerfectHashSetOutputGroup(compiler, SLJIT_S4);
 	}
@@ -269,7 +268,6 @@ void EmitSljitPerfectHashPayloadUpdates(const SljitPerfectHashFusedUpdateEmitCon
 	auto &codegen_plan = context.codegen_plan;
 	auto &descriptors = codegen_plan.payload_descriptors;
 	auto &dense_reduction_plan = context.dense_reduction_plan;
-	auto &deferred_flag_plan = context.deferred_flag_plan;
 	const bool use_reduction = dense_reduction_plan.Ready();
 	// Direct perfect-hash lookup leaves S4 dead after producing the state in S7.
 	// Flat and logical typed expressions never use saved registers, so keep the
@@ -374,7 +372,7 @@ void EmitSljitPerfectHashPayloadUpdates(const SljitPerfectHashFusedUpdateEmitCon
 
 		EmitSljitPerfectHashPayloadStatePointer(context);
 		if (descriptor.primitive_kind == AggregatePrimitiveUpdateKind::SUM_INT64) {
-			if (deferred_flag_plan.enabled && options.all_valid) {
+			if (options.states_marked_on_first_touch) {
 				EmitSljitGroupedAggregateAccumulateInt64ImmediateNoStateSet(
 				    compiler, context.state_pointer_reg, state_offset, descriptor.state_value_offset, SLJIT_R2);
 			} else {
@@ -383,7 +381,7 @@ void EmitSljitPerfectHashPayloadUpdates(const SljitPerfectHashFusedUpdateEmitCon
 				                                                  descriptor.state_is_set_offset, SLJIT_R2);
 			}
 		} else {
-			if (deferred_flag_plan.enabled && options.all_valid) {
+			if (options.states_marked_on_first_touch) {
 				EmitSljitGroupedAggregateAccumulateHugeintImmediateNoStateSet(
 				    compiler, context.state_pointer_reg, state_offset, descriptor.state_value_offset, SLJIT_R2);
 			} else {

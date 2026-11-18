@@ -19,7 +19,6 @@
 namespace duckdb {
 
 constexpr idx_t SLJIT_LOCAL_PERFECT_HASH_MAX_GROUPS = 16;
-constexpr idx_t SLJIT_DEFERRED_PERFECT_HASH_FLAG_MAX_GROUPS = 1024;
 constexpr sljit_sw SLJIT_STRING_T_SHIFT = 4;
 
 struct SljitDensePerfectHashAggregateReductionLane {
@@ -44,10 +43,11 @@ struct SljitDensePerfectHashAggregateReductionPlan {
 	}
 };
 
-struct SljitDeferredPerfectHashFlagPlan {
-	bool enabled = false;
-	idx_t group_count = 0;
-	sljit_sw group_seen_offset = -1;
+//! A row update that leaves its group's flags to the first touch of the group: the row branches out of line, to the
+//! block that marks the group and its states set, when the group's states are not yet marked
+struct SljitPerfectHashFirstTouchSite {
+	sljit_jump *first_touch = nullptr;
+	sljit_label *resume = nullptr;
 };
 
 struct SljitPerfectHashGroupPlan {
@@ -101,25 +101,21 @@ bool TryBuildSljitDensePerfectHashAggregateReductionPlan(const vector<ExecutionR
                                                          const vector<bool> &batch_lower_never_overflows,
                                                          sljit_sw &local_size,
                                                          SljitDensePerfectHashAggregateReductionPlan &result);
-bool TryBuildSljitDeferredPerfectHashFlagPlan(const vector<ExecutionRegionAggregateInput> &aggregates,
-                                              const ExecutionRegionAggregateContract &contract, sljit_sw &local_size,
-                                              SljitDeferredPerfectHashFlagPlan &result);
+bool SljitPerfectHashStatesMarkableOnFirstTouch(const vector<ExecutionRegionAggregateInput> &aggregates);
 vector<bool> BuildSljitDensePerfectHashLowerNeverOverflows(const vector<SljitNativeRegionExpressionPlan> &payloads,
                                                            const vector<ExecutionRegionAggregateInput> &aggregates,
                                                            const vector<Value> &source_min_values,
                                                            const vector<Value> &source_max_values);
 void EmitZeroSljitDensePerfectHashAggregateReduction(struct sljit_compiler *compiler,
                                                      const SljitDensePerfectHashAggregateReductionPlan &plan);
-void EmitZeroSljitDeferredPerfectHashFlagArray(struct sljit_compiler *compiler,
-                                               const SljitDeferredPerfectHashFlagPlan &plan);
 void EmitMarkSljitDensePerfectHashGroupSeen(struct sljit_compiler *compiler,
                                             const SljitDensePerfectHashAggregateReductionPlan &plan,
                                             sljit_s32 group_index_reg);
 void EmitSljitPerfectHashReductionStatePointer(struct sljit_compiler *compiler,
                                                const SljitDensePerfectHashAggregateReductionPlan &plan,
                                                sljit_s32 reduction_index_reg, sljit_s32 state_pointer_reg);
-void EmitMarkSljitDeferredPerfectHashGroupSeen(struct sljit_compiler *compiler,
-                                               const SljitDeferredPerfectHashFlagPlan &plan, sljit_s32 group_index_reg);
+void EmitSljitPerfectHashJumpIfFirstTouch(struct sljit_compiler *compiler, sljit_s32 group_index_reg,
+                                          vector<SljitPerfectHashFirstTouchSite> &sites);
 void EmitSljitDensePerfectHashIncrementCount(struct sljit_compiler *compiler,
                                              const SljitDensePerfectHashAggregateReductionLane &lane,
                                              sljit_s32 state_pointer_reg);
@@ -131,9 +127,9 @@ void EmitSljitDensePerfectHashAggregateReductionCommit(
     struct sljit_compiler *compiler, const SljitDensePerfectHashAggregateReductionPlan &reduction_plan,
     const vector<SljitAggregatePayloadDescriptor> &payload_descriptors,
     const ExecutionRegionAggregateContract &contract);
-void EmitSljitDeferredPerfectHashFlagsCommit(struct sljit_compiler *compiler,
-                                             const SljitDeferredPerfectHashFlagPlan &deferred_plan,
-                                             const vector<SljitAggregatePayloadDescriptor> &payload_descriptors,
-                                             const ExecutionRegionAggregateContract &contract);
+void EmitSljitPerfectHashFirstTouchBlocks(struct sljit_compiler *compiler,
+                                          const vector<SljitPerfectHashFirstTouchSite> &sites,
+                                          const vector<SljitAggregatePayloadDescriptor> &payload_descriptors,
+                                          const ExecutionRegionAggregateContract &contract);
 
 } // namespace duckdb

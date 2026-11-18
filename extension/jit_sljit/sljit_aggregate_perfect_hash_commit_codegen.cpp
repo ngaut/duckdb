@@ -17,28 +17,6 @@
 
 namespace duckdb {
 
-template <class EMIT_GROUP>
-static void EmitSljitDensePerfectHashSeenGroupCommitLoop(struct sljit_compiler *compiler, idx_t group_count,
-                                                         sljit_sw group_seen_offset, sljit_sw count_seen_offset,
-                                                         EMIT_GROUP &&emit_group) {
-	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_S1, 0, SLJIT_IMM, 0);
-	auto loop = sljit_emit_label(compiler);
-	auto done =
-	    sljit_emit_cmp(compiler, SLJIT_GREATER_EQUAL, SLJIT_S1, 0, SLJIT_IMM, NumericCast<sljit_sw>(group_count));
-	sljit_jump *group_not_seen;
-	if (count_seen_offset < 0) {
-		group_not_seen = EmitJumpIfSljitLocalArrayZero(compiler, group_seen_offset, SLJIT_S1);
-	} else {
-		group_not_seen = EmitJumpIfSljitLocalArrayZero(compiler, count_seen_offset, SLJIT_S1);
-	}
-	EmitSljitPerfectHashSetOutputGroup(compiler, SLJIT_S1);
-	EmitSljitPerfectHashStatePointer(compiler, SLJIT_S1, SLJIT_S4);
-	emit_group();
-	sljit_set_label(group_not_seen, sljit_emit_label(compiler));
-	EmitNextSljitNativeVectorLoop(compiler, loop);
-	sljit_set_label(done, sljit_emit_label(compiler));
-}
-
 static void EmitLoadSljitPerfectHashCommitLaneValue(struct sljit_compiler *compiler, sljit_s32 local_state_reg,
                                                     sljit_sw lane_offset, sljit_s32 target_reg) {
 	sljit_emit_op1(compiler, SLJIT_MOV, target_reg, 0, SLJIT_MEM1(local_state_reg), lane_offset);
@@ -200,26 +178,29 @@ void EmitSljitDensePerfectHashAggregateReductionCommit(
 	EmitSljitPerfectHashLocalReductionCommit(compiler, reduction_plan, payload_descriptors, contract);
 }
 
-void EmitSljitDeferredPerfectHashFlagsCommit(struct sljit_compiler *compiler,
-                                             const SljitDeferredPerfectHashFlagPlan &deferred_plan,
-                                             const vector<SljitAggregatePayloadDescriptor> &payload_descriptors,
-                                             const ExecutionRegionAggregateContract &contract) {
-	if (!deferred_plan.enabled) {
-		return;
+void EmitSljitPerfectHashFirstTouchBlocks(struct sljit_compiler *compiler,
+                                          const vector<SljitPerfectHashFirstTouchSite> &sites,
+                                          const vector<SljitAggregatePayloadDescriptor> &payload_descriptors,
+                                          const ExecutionRegionAggregateContract &contract) {
+	// S4 holds the group; R0 and R1 are free at every site
+	for (auto &site : sites) {
+		sljit_set_label(site.first_touch, sljit_emit_label(compiler));
+		sljit_emit_op1(compiler, SLJIT_MOV_P, SLJIT_R0, 0, SLJIT_MEM1(SLJIT_S0),
+		               offsetof(SljitNativeVectorInput, perfect_hash_group_states_marked));
+		sljit_emit_op1(compiler, SLJIT_MOV_U8, SLJIT_MEM2(SLJIT_R0, SLJIT_S4), 0, SLJIT_IMM, 1);
+		EmitSljitPerfectHashSetOutputGroup(compiler, SLJIT_S4);
+		EmitSljitPerfectHashStatePointer(compiler, SLJIT_S4, SLJIT_R0);
+		for (auto &descriptor : payload_descriptors) {
+			if (descriptor.primitive_kind == AggregatePrimitiveUpdateKind::COUNT_STAR ||
+			    descriptor.primitive_kind == AggregatePrimitiveUpdateKind::COUNT) {
+				continue;
+			}
+			EmitSljitGroupedAggregateSetStateIsSetImmediate(compiler, SLJIT_R0,
+			                                                contract.grouped_state_offsets[descriptor.aggregate_index],
+			                                                descriptor.state_is_set_offset);
+		}
+		sljit_set_label(sljit_emit_jump(compiler, SLJIT_JUMP), site.resume);
 	}
-	EmitSljitDensePerfectHashSeenGroupCommitLoop(
-	    compiler, deferred_plan.group_count, deferred_plan.group_seen_offset, -1, [&]() {
-		    for (idx_t payload_idx = 0; payload_idx < payload_descriptors.size(); payload_idx++) {
-			    auto &descriptor = payload_descriptors[payload_idx];
-			    if (descriptor.primitive_kind == AggregatePrimitiveUpdateKind::COUNT_STAR ||
-			        descriptor.primitive_kind == AggregatePrimitiveUpdateKind::COUNT) {
-				    continue;
-			    }
-			    const auto state_offset = contract.grouped_state_offsets[descriptor.aggregate_index];
-			    EmitSljitGroupedAggregateSetStateIsSetImmediate(compiler, SLJIT_S4, state_offset,
-			                                                    descriptor.state_is_set_offset);
-		    }
-	    });
 }
 
 } // namespace duckdb

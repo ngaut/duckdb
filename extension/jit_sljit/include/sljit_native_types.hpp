@@ -423,6 +423,8 @@ struct SljitNativeVectorInput {
 	//! padding before error: a field that moves the hot fields above costs the generated loops cycles
 	bool expression_tree_logical_all_valid = false;
 	std::exception_ptr error;
+	//! Groups whose aggregate states the perfect-hash update marked set on the group's first touch
+	bool *perfect_hash_group_states_marked = nullptr;
 };
 
 struct SljitNativePrimitiveRunLaneInput {

@@ -257,6 +257,8 @@ struct ExecutionPerfectAggregateStateAddressLayout {
 	bool ready = false;
 	data_ptr_t data = nullptr;
 	bool *group_is_set = nullptr;
+	//! Groups whose aggregate states a generated update has marked set; only generated updates use it
+	bool *group_states_marked = nullptr;
 	idx_t total_groups = 0;
 	idx_t tuple_size = 0;
 	idx_t aggregate_state_offset = 0;

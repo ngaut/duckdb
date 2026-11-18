@@ -52,11 +52,14 @@ static void EmitSljitPerfectHashRowUpdate(const SljitPerfectHashFusedUpdateEmitC
                                           const SljitPerfectHashPayloadUpdateOptions &payload_update,
                                           bool load_common_selected_source_index) {
 	auto compiler = context.compiler;
+	D_ASSERT(!group_lookup.mark_states_on_first_touch || payload_update.all_valid);
 	EmitSljitPerfectHashGroupLookup(context, group_lookup);
 	if (load_common_selected_source_index) {
 		EmitLoadSljitCommonSelectedSourceIndex(compiler);
 	}
-	EmitSljitPerfectHashPayloadUpdates(context, payload_update);
+	auto updates = payload_update;
+	updates.states_marked_on_first_touch = group_lookup.mark_states_on_first_touch;
+	EmitSljitPerfectHashPayloadUpdates(context, updates);
 }
 
 static sljit_jump *EmitSljitPerfectHashUpdateLoop(const SljitPerfectHashFusedUpdateEmitContext &context,
@@ -114,7 +117,7 @@ SljitPerfectHashDirectGroupLookupOptions(const SljitPerfectHashFusedUpdateEmitCo
                                          bool use_fast_group_data_array_base) {
 	SljitPerfectHashGroupLookupOptions result;
 	result.materialize_state_pointer = !context.dense_reduction_plan.Ready();
-	result.defer_flags = context.deferred_flag_plan.enabled;
+	result.mark_states_on_first_touch = context.states_markable_on_first_touch;
 	result.direct_group_index = true;
 	result.use_fast_group_data_array_base = use_fast_group_data_array_base;
 	return result;
@@ -124,7 +127,7 @@ static SljitPerfectHashGroupLookupOptions
 SljitPerfectHashSelectedGroupLookupOptions(const SljitPerfectHashFusedUpdateEmitContext &context) {
 	SljitPerfectHashGroupLookupOptions result;
 	result.materialize_state_pointer = !context.dense_reduction_plan.Ready();
-	result.defer_flags = context.deferred_flag_plan.enabled;
+	result.mark_states_on_first_touch = context.states_markable_on_first_touch;
 	return result;
 }
 
@@ -252,7 +255,7 @@ EmitSljitPerfectHashNullCheckedLoop(const SljitPerfectHashFusedUpdateEmitContext
 		    SljitTypedExpressionTreeFastIndexMode::FLAT, data_hoists);
 	}
 	auto lookup = SljitPerfectHashDirectGroupLookupOptions(context, false);
-	lookup.defer_flags = false;
+	lookup.mark_states_on_first_touch = false;
 	auto payload_update = SljitPerfectHashPayloadUpdateOptionsForLoop(true, false, false, data_hoists);
 	payload_update.null_rows = true;
 	EmitSljitPerfectHashRowUpdate(context, lookup, payload_update, false);

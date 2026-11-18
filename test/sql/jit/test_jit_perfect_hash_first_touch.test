@@ -1,0 +1,94 @@
+# name: test/sql/jit/test_jit_perfect_hash_first_touch.test
+# description: Perfect-hash updates over valid payloads mark a group and its sums set on the group's first touch
+# group: [jit]
+
+# Groups 0-7 are first touched by rows whose payloads are NULL and later by rows whose payloads are valid: their sums
+# must still be set. Groups 64-127 are first touched late in the scan; the wide groups pass 1024.
+
+require jit_sljit
+
+load {TEST_DIR}/jit_perfect_hash_first_touch.db
+
+statement ok
+SET jit_cbo_startup_base_cost=0
+
+statement ok
+SET jit_cbo_startup_margin_basis_points=0
+
+statement ok
+SET jit_measure_native_legs=false
+
+statement ok
+CREATE TABLE facts AS
+SELECT (CASE WHEN i < 200000 THEN i % 64 ELSE i % 128 END)::INTEGER AS k,
+       (i % 3000)::INTEGER AS wide,
+       CASE WHEN i < 4096 AND i % 64 < 8 THEN NULL ELSE (i % 1000)::INTEGER END AS x,
+       CASE WHEN i < 4096 AND i % 64 < 8 THEN NULL ELSE i::BIGINT * 3 END AS y,
+       (i % 50)::INTEGER AS a, (i % 8)::INTEGER AS b,
+       CASE i % 3 WHEN 0 THEN 'A' WHEN 1 THEN 'N' ELSE 'R' END AS flag,
+       CASE i % 2 WHEN 0 THEN 'F' ELSE 'O' END AS status
+FROM range(300000) tbl(i)
+
+statement ok
+CHECKPOINT
+
+# the scans read stored segments: the string keys arrive as dictionaries
+restart
+
+statement ok
+SET jit_cbo_startup_base_cost=0
+
+statement ok
+SET jit_cbo_startup_margin_basis_points=0
+
+statement ok
+SET jit_measure_native_legs=false
+
+foreach threads 1 4
+
+statement ok
+SET threads={threads}
+
+foreach policy off auto
+
+statement ok
+SET jit_policy='{policy}'
+
+statement ok
+CREATE OR REPLACE TABLE r_{policy}(q VARCHAR, k VARCHAR, s1 HUGEINT, s2 HUGEINT, n BIGINT)
+
+statement ok
+INSERT INTO r_{policy} SELECT 'null_first', k, sum(x), sum(y), count(*) FROM facts GROUP BY k
+
+statement ok
+INSERT INTO r_{policy} SELECT 'null_first_filtered', k, sum(x), sum(y), count(*) FROM facts WHERE a <= 25 AND b <= 3 GROUP BY k
+
+statement ok
+INSERT INTO r_{policy} SELECT 'wide', wide, sum(a), sum(y), count(*) FROM facts WHERE b <= 3 GROUP BY wide
+
+statement ok
+INSERT INTO r_{policy}
+SELECT 'strings', flag || status, sum(a), sum(y), count(*) FROM facts WHERE a <= 25 AND b <= 3 GROUP BY flag, status
+
+endloop
+
+query I
+SELECT count(*) FROM ((SELECT * FROM r_off EXCEPT ALL SELECT * FROM r_auto)
+                      UNION ALL (SELECT * FROM r_auto EXCEPT ALL SELECT * FROM r_off))
+----
+0
+
+query I
+SELECT count(*) FROM r_auto WHERE s1 IS NULL OR s2 IS NULL
+----
+0
+
+query I
+SELECT count(*) FROM r_auto GROUP BY q ORDER BY q
+----
+128
+64
+6
+1500
+
+endloop
