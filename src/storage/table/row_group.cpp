@@ -1139,7 +1139,9 @@ void RowGroup::ProcessPreparedScan(ScanOptions options, CollectionScanState &sta
 	bool has_filters = filter_info.HasFilters();
 	if (count == max_count && !has_filters) {
 		// scan all vectors completely: full scan without deletions or table filters
-		const bool reads_probed_rows = (probed_rows.begin != 0 || probed_rows.end != max_count) &&
+		// A read from inside a vector decodes at a higher cost per row than a whole one: it pays when it leaves out at
+		// least half of the vector
+		const bool reads_probed_rows = 2 * (probed_rows.end - probed_rows.begin) <= max_count &&
 		                               !has_sample_selection && ReadsProbedRowsOnly(column_ids, filter_info);
 		for (idx_t i = 0; i < column_ids.size(); i++) {
 			if (filter_info.ColumnIsProbed(i)) {
@@ -1151,15 +1153,19 @@ void RowGroup::ProcessPreparedScan(ScanOptions options, CollectionScanState &sta
 				auto &col_data = GetColumn(column);
 				auto &column_scan = state.column_scans[i];
 				column_scan.update_scan_type = options.update_type;
-				if (reads_probed_rows) {
+				if (!reads_probed_rows) {
+					// pass max_count explicitly, concurrent inserts can grow the column past the count captured at
+					// scan init
+					col_data.Scan(transaction, state.vector_index, column_scan, result.data[i], max_count);
+				} else if (result.data[i].GetType().InternalType() == PhysicalType::VARCHAR) {
+					// string storage emits a dictionary vector only for a whole vector: read it whole and slice it
+					col_data.Scan(transaction, state.vector_index, column_scan, result.data[i], max_count);
+					result.data[i].Slice(result.data[i], probed_rows.begin, probed_rows.end);
+				} else {
 					col_data.Skip(column_scan, probed_rows.begin);
 					col_data.Scan(transaction, state.vector_index, column_scan, result.data[i],
 					              probed_rows.end - probed_rows.begin);
 					col_data.Skip(column_scan, max_count - probed_rows.end);
-				} else {
-					// pass max_count explicitly, concurrent inserts can grow the column past the count captured at
-					// scan init
-					col_data.Scan(transaction, state.vector_index, column_scan, result.data[i], max_count);
 				}
 			}
 			if (has_sample_selection) {
