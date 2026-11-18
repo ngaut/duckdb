@@ -228,6 +228,14 @@ public:
 
 	//! Whether or not there is a filter we need to execute for this column currently
 	bool ColumnHasFilters(idx_t col_idx);
+	//! The pruning filters the scan leaves to its consumer on columns it filters no row of (an execution region
+	//! evaluates them): the scan reads their columns first and drops a vector none of whose rows can pass one of them,
+	//! as it drops one its own filters reject whole. Indexes into the pruning filter list.
+	const vector<idx_t> &GetVectorProbeFilters(const DataChunk &result);
+	//! Whether the column is read for a vector probe, ahead of the other columns
+	bool ColumnIsProbed(idx_t col_idx) const {
+		return col_idx < column_is_probed.size() && column_is_probed[col_idx];
+	}
 	//! Whether no filter needs a row-level check in the current row group: its zone maps prove each filter for every
 	//! row, or the filter only prunes
 	bool AllFiltersAlwaysTrue() const;
@@ -266,6 +274,10 @@ private:
 	unsafe_vector<bool> base_column_has_filter;
 	//! The amount of row-level (residual) filters that are always true currently
 	idx_t always_true_filters = 0;
+	//! The vector probes, resolved against the scanned types on the first vector
+	bool vector_probes_initialized = false;
+	vector<idx_t> vector_probe_filters;
+	unsafe_vector<bool> column_is_probed;
 };
 
 enum class VectorPrepareState : uint8_t {

@@ -15,6 +15,8 @@
 #include "duckdb/execution/adaptive_filter.hpp"
 #include "duckdb/execution/expression_executor.hpp"
 #include "duckdb/planner/filter/expression_filter.hpp"
+#include "duckdb/planner/filter/table_filter_functions.hpp"
+#include "duckdb/planner/table_filter_state.hpp"
 #include "duckdb/planner/table_filter.hpp"
 #include "duckdb/storage/checkpoint/table_data_writer.hpp"
 #include "duckdb/storage/metadata/metadata_reader.hpp"
@@ -1002,6 +1004,55 @@ static bool CompactsFilteredVector(const Vector &filtered) {
 	return TypeIsConstantSize(filtered.GetType().InternalType());
 }
 
+template <class T>
+static bool AnyValueInRange(const Vector &vector, idx_t count, uint64_t base, uint64_t span) {
+	const auto data = FlatVector::GetData<T>(vector);
+	for (idx_t start = 0; start < count; start += 64) {
+		const auto end = MinValue<idx_t>(start + 64, count);
+		bool any = false;
+		for (idx_t i = start; i < end; i++) {
+			any |= static_cast<uint64_t>(static_cast<int64_t>(data[i])) - base <= span;
+		}
+		if (any) {
+			return true;
+		}
+	}
+	return false;
+}
+
+//! Whether a row of a probed column's vector can pass its filter. The values of NULL rows are compared as they are
+//! stored: one that falls into the range keeps a vector its consumer filters anyway.
+static bool VectorMayPassFilter(const ScanFilter &filter, const Vector &vector, idx_t count) {
+	SignedNumericRangeFilterData range;
+	const bool has_range =
+	    TryGetSignedNumericRange(filter.filter_state->Cast<ExpressionFilterState>(), vector.GetType(), range);
+	D_ASSERT(has_range);
+	(void)has_range;
+	if (range.empty) {
+		return false;
+	}
+	const auto vector_type = vector.GetVectorType();
+	if (vector_type == VectorType::CONSTANT_VECTOR) {
+		count = 1;
+	} else if (vector_type != VectorType::FLAT_VECTOR) {
+		return true;
+	}
+	const auto base = range.OffsetBase();
+	const auto span = range.OffsetSpan();
+	switch (vector.GetType().InternalType()) {
+	case PhysicalType::INT8:
+		return AnyValueInRange<int8_t>(vector, count, base, span);
+	case PhysicalType::INT16:
+		return AnyValueInRange<int16_t>(vector, count, base, span);
+	case PhysicalType::INT32:
+		return AnyValueInRange<int32_t>(vector, count, base, span);
+	case PhysicalType::INT64:
+		return AnyValueInRange<int64_t>(vector, count, base, span);
+	default:
+		return true;
+	}
+}
+
 void RowGroup::ProcessPreparedScan(ScanOptions options, CollectionScanState &state, DataChunk &result) {
 	const auto &column_ids = state.GetColumnIds();
 	auto &filter_info = state.GetFilterInfo();
@@ -1014,15 +1065,44 @@ void RowGroup::ProcessPreparedScan(ScanOptions options, CollectionScanState &sta
 	idx_t sample_count = prepared.sample_count;
 	auto &sample_sel = prepared.sample_sel;
 
+	// the probed columns are read whole first: a vector none of whose rows can pass a probe is dropped unread
+	auto &probe_filters = filter_info.GetVectorProbeFilters(result);
+	for (idx_t probe_idx = 0; probe_idx < probe_filters.size(); probe_idx++) {
+		auto &filter = filter_info.GetPruningFilterList()[probe_filters[probe_idx]];
+		const auto i = filter.scan_column_index.GetIndex();
+		state.column_scans[i].update_scan_type = options.update_type;
+		GetColumn(column_ids[i])
+		    .Scan(transaction, state.vector_index, state.column_scans[i], result.data[i], max_count);
+		if (filter.IsAlwaysTrue() || VectorMayPassFilter(filter, result.data[i], max_count)) {
+			continue;
+		}
+		for (idx_t col_idx = 0; col_idx < column_ids.size(); col_idx++) {
+			if (!filter_info.ColumnIsProbed(col_idx)) {
+				GetColumn(column_ids[col_idx]).Skip(state.column_scans[col_idx]);
+			}
+		}
+		for (idx_t unread_idx = probe_idx + 1; unread_idx < probe_filters.size(); unread_idx++) {
+			const auto unread =
+			    filter_info.GetPruningFilterList()[probe_filters[unread_idx]].scan_column_index.GetIndex();
+			GetColumn(column_ids[unread]).Skip(state.column_scans[unread]);
+		}
+		result.Reset();
+		FinishVector(state);
+		return;
+	}
+
 	bool has_filters = filter_info.HasFilters();
 	if (count == max_count && !has_filters) {
 		// scan all vectors completely: full scan without deletions or table filters
 		for (idx_t i = 0; i < column_ids.size(); i++) {
-			const auto &column = column_ids[i];
-			auto &col_data = GetColumn(column);
-			state.column_scans[i].update_scan_type = options.update_type;
-			// pass max_count explicitly, concurrent inserts can grow the column past the count captured at scan init
-			col_data.Scan(transaction, state.vector_index, state.column_scans[i], result.data[i], max_count);
+			if (!filter_info.ColumnIsProbed(i)) {
+				const auto &column = column_ids[i];
+				auto &col_data = GetColumn(column);
+				state.column_scans[i].update_scan_type = options.update_type;
+				// pass max_count explicitly, concurrent inserts can grow the column past the count captured at scan
+				// init
+				col_data.Scan(transaction, state.vector_index, state.column_scans[i], result.data[i], max_count);
+			}
 			if (has_sample_selection) {
 				result.data[i].Slice(sample_sel, sample_count);
 			}
@@ -1118,7 +1198,7 @@ void RowGroup::ProcessPreparedScan(ScanOptions options, CollectionScanState &sta
 			// skip this vector in all the scans that were not scanned yet
 			for (idx_t i = 0; i < column_ids.size(); i++) {
 				auto &col_idx = column_ids[i];
-				if (has_filters && filter_info.ColumnHasFilters(i)) {
+				if ((has_filters && filter_info.ColumnHasFilters(i)) || filter_info.ColumnIsProbed(i)) {
 					continue;
 				}
 				auto &col_data = GetColumn(col_idx);
@@ -1132,6 +1212,13 @@ void RowGroup::ProcessPreparedScan(ScanOptions options, CollectionScanState &sta
 		for (idx_t i = 0; i < column_ids.size(); i++) {
 			if (has_filters && filter_info.ColumnHasFilters(i)) {
 				// column has already been scanned as part of the filtering process
+				continue;
+			}
+			if (filter_info.ColumnIsProbed(i)) {
+				// column has already been read whole for its probe
+				if (!selection_is_identity) {
+					result.data[i].Slice(sel, approved_tuple_count);
+				}
 				continue;
 			}
 			auto &column = column_ids[i];

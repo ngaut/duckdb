@@ -9,6 +9,8 @@
 #include "duckdb/storage/table/row_group_collection.hpp"
 #include "duckdb/storage/table/row_group_segment_tree.hpp"
 #include "duckdb/common/numeric_utils.hpp"
+#include "duckdb/planner/filter/table_filter_functions.hpp"
+#include "duckdb/planner/table_filter_state.hpp"
 
 namespace duckdb {
 
@@ -186,6 +188,28 @@ bool ScanFilterInfo::ColumnHasFilters(idx_t column_idx) {
 	} else {
 		return false;
 	}
+}
+
+const vector<idx_t> &ScanFilterInfo::GetVectorProbeFilters(const DataChunk &result) {
+	if (vector_probes_initialized) {
+		return vector_probe_filters;
+	}
+	vector_probes_initialized = true;
+	column_is_probed.resize(result.ColumnCount(), false);
+	for (idx_t filter_idx = 0; filter_idx < pruning_filter_list.size(); filter_idx++) {
+		auto &filter = pruning_filter_list[filter_idx];
+		const auto column = filter.scan_column_index.GetIndex();
+		const bool filtered_per_row = column < base_column_has_filter.size() && base_column_has_filter[column];
+		SignedNumericRangeFilterData range;
+		if (filtered_per_row || column >= result.ColumnCount() || column_is_probed[column] ||
+		    !TryGetSignedNumericRange(filter.filter_state->Cast<ExpressionFilterState>(), result.data[column].GetType(),
+		                              range)) {
+			continue;
+		}
+		vector_probe_filters.push_back(filter_idx);
+		column_is_probed[column] = true;
+	}
+	return vector_probe_filters;
 }
 
 bool ScanFilterInfo::HasFilters() const {
