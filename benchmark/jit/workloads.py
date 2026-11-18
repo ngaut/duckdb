@@ -611,7 +611,7 @@ ENCODINGS_QUERIES = {
     ),
     "semi_join": (
         "SELECT count(*) FROM __jit_encodings_facts WHERE k IN (SELECT k FROM __jit_encodings_dim WHERE cat = 2)",
-        {1: True, 4: True},
+        {1: False, 4: False},
     ),
     "anti_join": (
         "SELECT count(*) FROM __jit_encodings_facts WHERE k NOT IN (SELECT k FROM __jit_encodings_dim WHERE cat = 2)",

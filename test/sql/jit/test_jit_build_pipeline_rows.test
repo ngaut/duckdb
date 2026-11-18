@@ -1,0 +1,50 @@
+# name: test/sql/jit/test_jit_build_pipeline_rows.test
+# description: A hash join build pipeline is costed over the rows it scans, not over the join's output
+# group: [jit]
+
+# The join's estimated output (millions of rows) never flows through the pipeline that builds its table from a
+# thousand-row dimension: costing the build over it admitted a region that could not pay for its startup.
+
+require jit_sljit
+
+statement ok
+SET threads=1
+
+statement ok
+SET jit_trace_decisions=true
+
+statement ok
+CREATE TABLE facts AS SELECT i AS id, (i * 7919) % 1000 AS k FROM range(4000000) t(i)
+
+statement ok
+CREATE TABLE dim AS SELECT i AS k, i % 3 AS cat FROM range(1000) t(i)
+
+# only the join's decisions stay in the log
+statement ok
+SET jit_event_log_size=0
+
+statement ok
+SET jit_event_log_size=10000
+
+statement ok
+CREATE TEMP TABLE r AS SELECT count(*) FROM facts f JOIN dim d ON f.k = d.k WHERE d.cat = 1
+
+# the build pipeline scans the dimension's thousand rows
+query I
+SELECT count(*) FROM duckdb_jit_events()
+WHERE phase IN ('decision', 'compile') AND runner_cost_source_contract_input_rows = 1000
+----
+1
+
+query I
+SELECT max(runner_cost_rows) <= 1000 FROM duckdb_jit_events()
+WHERE phase IN ('decision', 'compile') AND runner_cost_source_contract_input_rows = 1000
+----
+true
+
+# and pays no compiled region for it
+query I
+SELECT count(*) FROM duckdb_jit_events()
+WHERE phase IN ('decision', 'compile') AND runner_cost_source_contract_input_rows = 1000 AND status = 'compiled'
+----
+0

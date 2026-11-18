@@ -675,7 +675,11 @@ static bool TryAccumulateExecutionRegionPhysicalOperatorCost(const PhysicalOpera
                                                              ExecutionRegionPhysicalPipelineSlot slot) {
 	auto &input = facts.cost_input;
 	auto &traits = facts.traits;
-	input.estimated_cardinality = MaxValue(input.estimated_cardinality, op.estimated_cardinality);
+	// a sink's estimate is what it produces after the pipeline (a hash join build's is the join's output), never rows
+	// that flow through the pipeline
+	if (slot != ExecutionRegionPhysicalPipelineSlot::SINK) {
+		input.estimated_cardinality = MaxValue(input.estimated_cardinality, op.estimated_cardinality);
+	}
 	if (slot == ExecutionRegionPhysicalPipelineSlot::SOURCE) {
 		auto source_contract = op.GetExecutionContract(ExecutionRegionOperatorSlot::SOURCE, false);
 		traits.source_kind = ExecutionRegionPhysicalSourceKind(op, source_contract);

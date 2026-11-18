@@ -786,6 +786,18 @@ static bool ExecutionRegionNodeCannotExpandInput(const ExecutionRegionNode &node
 	       join.join_type == ExecutionRegionJoinType::ANTI || join.join_type == ExecutionRegionJoinType::MARK;
 }
 
+//! The most rows any node hands on: a sink's estimate is what it produces after the pipeline (a hash join build's is
+//! the join's output), never rows that flow through the pipeline
+static idx_t EstimateExecutionRegionPipelineRows(const ExecutionRegionIR &region_ir) {
+	idx_t result = 0;
+	for (auto &node : region_ir.nodes) {
+		if (node.kind != ExecutionRegionNodeKind::SINK) {
+			result = MaxValue(result, node.estimated_cardinality);
+		}
+	}
+	return result;
+}
+
 static idx_t EstimateExecutionRegionCandidateCardinality(const ExecutionRegionIR &region_ir) {
 	if (!region_ir.nodes.empty()) {
 		auto &source = region_ir.nodes[0];
@@ -828,18 +840,10 @@ static idx_t EstimateExecutionRegionCandidateCardinality(const ExecutionRegionIR
 			if (row_preserving_or_reducing) {
 				return source.estimated_cardinality;
 			}
-			idx_t downstream_estimate = 0;
-			for (auto &node : region_ir.nodes) {
-				downstream_estimate = MaxValue(downstream_estimate, node.estimated_cardinality);
-			}
-			return MinValue(source.estimated_cardinality, downstream_estimate);
+			return MinValue(source.estimated_cardinality, EstimateExecutionRegionPipelineRows(region_ir));
 		}
 	}
-	idx_t result = 0;
-	for (auto &node : region_ir.nodes) {
-		result = MaxValue(result, node.estimated_cardinality);
-	}
-	return result;
+	return EstimateExecutionRegionPipelineRows(region_ir);
 }
 
 static string AppendExecutionRegionCandidateDiagnostic(string reason, const string &diagnostic) {
