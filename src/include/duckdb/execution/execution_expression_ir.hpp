@@ -74,5 +74,8 @@ struct ExecutionExpressionFragment {
 };
 
 DUCKDB_API string DescribeExecutionExpressionIR(const ExecutionExpressionIR &node);
+//! Whether two expressions compute the same values with the same NULL, overflow and error behavior: every field
+//! but where the query spells the expression and the backend's error slot
+DUCKDB_API bool ExecutionExpressionIREquals(const ExecutionExpressionIR &left, const ExecutionExpressionIR &right);
 
 } // namespace duckdb

@@ -48,7 +48,6 @@ struct SljitFusedAggregateCodegenPlan {
 	SljitSharedBinaryPayloadPlan shared_binary;
 };
 
-bool SljitExpressionIRStructurallyEqual(const ExecutionExpressionIR &left, const ExecutionExpressionIR &right);
 void TryBuildSljitSharedBinaryPayloadPlan(const vector<SljitNativeRegionExpressionPlan> &payloads,
                                           const vector<SljitAggregatePayloadDescriptor> &descriptors,
                                           SljitSharedBinaryPayloadPlan &result);

@@ -49,10 +49,6 @@ static bool BuildSljitFusedAggregatePayloadPlan(const SljitNativeRegionExpressio
 	return SljitAggregateTypedPayloadPlanSupported(payload_plan, descriptor);
 }
 
-bool SljitExpressionIRStructurallyEqual(const ExecutionExpressionIR &left, const ExecutionExpressionIR &right) {
-	return DescribeExecutionExpressionIR(left) == DescribeExecutionExpressionIR(right);
-}
-
 static bool SljitExpressionIRIsNonNullZero(const ExecutionExpressionIR &node) {
 	return node.kind == ExecutionExpressionIRKind::CONSTANT && !node.constant.IsNull() && node.constant == int64_t(0);
 }
@@ -78,7 +74,7 @@ static bool TryBuildSljitConditionalSharedAggregatePlan(const vector<SljitNative
 		if (conditional.kind != ExecutionExpressionIRKind::CASE || conditional.children.size() != 2 ||
 		    !conditional.children[0] || !conditional.children[1] || !conditional.else_node ||
 		    !SljitExpressionIRIsNonNullZero(*conditional.else_node) ||
-		    !SljitExpressionIRStructurallyEqual(*conditional.children[1], shared)) {
+		    !ExecutionExpressionIREquals(*conditional.children[1], shared)) {
 			continue;
 		}
 		auto predicate_plan = BuildSljitTypedExpressionTreePlan(*conditional.children[0], false);
@@ -135,7 +131,7 @@ static void TryBuildSljitSharedBinaryPayloadPlanForBase(const vector<SljitNative
 			continue;
 		}
 		auto &root = *payload.expression_tree;
-		if (SljitExpressionIRStructurallyEqual(root, base)) {
+		if (ExecutionExpressionIREquals(root, base)) {
 			lane.matched = true;
 			lane.use_base_directly = true;
 			matched_count++;
@@ -149,10 +145,10 @@ static void TryBuildSljitSharedBinaryPayloadPlanForBase(const vector<SljitNative
 		if (!TryGetSljitExpressionTreeBinaryOp(root.binary_op, native_op)) {
 			continue;
 		}
-		if (SljitExpressionIRStructurallyEqual(base, *root.left)) {
+		if (ExecutionExpressionIREquals(base, *root.left)) {
 			lane.base_on_left = true;
 			lane.other_value = root.right.get();
-		} else if (SljitExpressionIRStructurallyEqual(base, *root.right)) {
+		} else if (ExecutionExpressionIREquals(base, *root.right)) {
 			lane.base_on_left = false;
 			lane.other_value = root.left.get();
 		} else {

@@ -383,6 +383,44 @@ string DescribeExecutionExpressionIR(const ExecutionExpressionIR &node) {
 	return result;
 }
 
+static bool ExecutionExpressionIRChildEquals(const unique_ptr<ExecutionExpressionIR> &left,
+                                             const unique_ptr<ExecutionExpressionIR> &right) {
+	if (!left || !right) {
+		return !left && !right;
+	}
+	return ExecutionExpressionIREquals(*left, *right);
+}
+
+bool ExecutionExpressionIREquals(const ExecutionExpressionIR &left, const ExecutionExpressionIR &right) {
+	if (left.kind != right.kind || left.return_type != right.return_type || left.physical_type != right.physical_type ||
+	    left.validity != right.validity || left.source != right.source ||
+	    left.exception_behavior != right.exception_behavior || left.cast_source_alias != right.cast_source_alias ||
+	    left.ref_index != right.ref_index || left.unary_op != right.unary_op || left.binary_op != right.binary_op ||
+	    left.conjunction_op != right.conjunction_op || left.intrinsic != right.intrinsic ||
+	    left.arithmetic_overflow_check != right.arithmetic_overflow_check || left.try_cast != right.try_cast ||
+	    left.not_in != right.not_in || left.not_between != right.not_between ||
+	    left.lower_inclusive != right.lower_inclusive || left.upper_inclusive != right.upper_inclusive ||
+	    left.children.size() != right.children.size()) {
+		return false;
+	}
+	// constants compare as written: -0.0 and 0.0 compare equal as values but are different constants
+	if (left.constant.type() != right.constant.type() || left.constant.IsNull() != right.constant.IsNull() ||
+	    (!left.constant.IsNull() && left.constant.ToString() != right.constant.ToString())) {
+		return false;
+	}
+	if (!ExecutionExpressionIRChildEquals(left.left, right.left) ||
+	    !ExecutionExpressionIRChildEquals(left.right, right.right) ||
+	    !ExecutionExpressionIRChildEquals(left.else_node, right.else_node)) {
+		return false;
+	}
+	for (idx_t child_idx = 0; child_idx < left.children.size(); child_idx++) {
+		if (!ExecutionExpressionIRChildEquals(left.children[child_idx], right.children[child_idx])) {
+			return false;
+		}
+	}
+	return true;
+}
+
 static string GetExecutionExpressionReason(const ExecutionExpressionIR &node) {
 	if (node.kind == ExecutionExpressionIRKind::CONSTANT) {
 		return "core-ir:constant";

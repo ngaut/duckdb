@@ -1,0 +1,73 @@
+# name: test/sql/jit/test_jit_shared_payload_equality.test
+# description: Aggregate payloads share a computed value only when their expressions are the same
+# group: [jit]
+
+# The sums below pair an expression with one that differs only in a conjunction, a negation, a bound's inclusivity
+# or a constant's sign: each must be computed on its own.
+
+require jit_sljit
+
+statement ok
+SET jit_cbo_startup_base_cost=0
+
+statement ok
+SET jit_cbo_startup_margin_basis_points=0
+
+statement ok
+CREATE TABLE t AS
+SELECT (i % 7 - 3)::BIGINT AS a, (i % 5 - 2)::BIGINT AS b, (i % 3 - 1)::BIGINT AS c, (i % 11)::BIGINT AS v,
+       (i % 13 - 6)::DOUBLE AS d
+FROM range(100000) t(i)
+
+foreach policy off auto
+
+statement ok
+SET jit_policy='{policy}'
+
+statement ok
+CREATE OR REPLACE TABLE r_{policy}(q VARCHAR, x DOUBLE, y DOUBLE)
+
+statement ok
+INSERT INTO r_{policy}
+SELECT 'and_or', sum(CASE WHEN c > 0 THEN (CASE WHEN a > 0 AND b > 0 THEN v ELSE 0 END) ELSE 0 END),
+       sum(CASE WHEN a > 0 OR b > 0 THEN v ELSE 0 END) FROM t
+
+statement ok
+INSERT INTO r_{policy}
+SELECT 'in_not_in', sum(CASE WHEN c > 0 THEN (CASE WHEN a IN (1, 2) THEN v ELSE 0 END) ELSE 0 END),
+       sum(CASE WHEN a NOT IN (1, 2) THEN v ELSE 0 END) FROM t
+
+statement ok
+INSERT INTO r_{policy}
+SELECT 'between_not_between', sum(CASE WHEN c > 0 THEN (CASE WHEN a BETWEEN -1 AND 1 THEN v ELSE 0 END) ELSE 0 END),
+       sum(CASE WHEN a NOT BETWEEN -1 AND 1 THEN v ELSE 0 END) FROM t
+
+statement ok
+INSERT INTO r_{policy}
+SELECT 'bounds', sum(CASE WHEN c > 0 THEN (CASE WHEN a >= -1 AND a <= 1 THEN v ELSE 0 END) ELSE 0 END),
+       sum(CASE WHEN a > -1 AND a < 1 THEN v ELSE 0 END) FROM t
+
+statement ok
+INSERT INTO r_{policy}
+SELECT 'shared_binary', sum(v * (a + b)), sum(v * (a - b)) FROM t
+
+statement ok
+INSERT INTO r_{policy}
+SELECT 'shared_binary_same', sum(v * (a + b)), sum(v * (a + b) + c) FROM t
+
+statement ok
+INSERT INTO r_{policy}
+SELECT 'signed_zero', sum(d * 0.0), sum(d * -0.0) FROM t
+
+endloop
+
+query I
+SELECT count(*) FROM ((SELECT * FROM r_off EXCEPT ALL SELECT * FROM r_auto)
+                      UNION ALL (SELECT * FROM r_auto EXCEPT ALL SELECT * FROM r_off))
+----
+0
+
+query III
+SELECT * FROM r_auto WHERE q = 'and_or'
+----
+and_or	28567.0	328562.0
