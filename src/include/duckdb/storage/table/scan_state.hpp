@@ -228,9 +228,10 @@ public:
 
 	//! Whether or not there is a filter we need to execute for this column currently
 	bool ColumnHasFilters(idx_t col_idx);
-	//! The pruning filters the scan leaves to its consumer on columns it filters no row of (an execution region
-	//! evaluates them): the scan reads their columns first and drops a vector none of whose rows can pass one of them,
-	//! as it drops one its own filters reject whole. Indexes into the pruning filter list.
+	//! The pruning filters a scan that filters no row leaves to its consumer (an execution region evaluates them): the
+	//! scan reads their columns first and drops a vector none of whose rows can pass one of them, as it drops one its
+	//! own filters reject whole. A scan that filters rows reads few rows of the other columns, so it probes none.
+	//! Indexes into the pruning filter list.
 	const vector<idx_t> &GetVectorProbeFilters(const DataChunk &result);
 	//! Whether the column is read for a vector probe, ahead of the other columns
 	bool ColumnIsProbed(idx_t col_idx) const {

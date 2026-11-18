@@ -1360,32 +1360,39 @@ void RowGroup::ProcessPreparedScan(ScanOptions options, CollectionScanState &sta
 		// identity and the columns are fetched flat instead of being wrapped in an identity dictionary.
 		const bool selection_is_identity =
 		    !has_sample_selection && count == max_count && approved_tuple_count == max_count;
-		if (has_filters && !selection_is_identity) {
-			const bool compact = approved_tuple_count < state.GetOptions().compact_filtered_vectors_below;
-			if (compact) {
-				if (state.filter_compaction.ColumnCount() == 0) {
-					// The filter list is fixed for the lifetime of the scan: only its fixed-width columns get a vector
-					vector<bool> compacted_columns(result.ColumnCount(), false);
-					for (auto &table_filter : filter_info.GetResidualFilterList()) {
-						compacted_columns[table_filter.scan_column_index] =
-						    CompactsFilteredVector(result.data[table_filter.scan_column_index]);
-					}
-					state.filter_compaction.Initialize(Allocator::DefaultAllocator(), result.GetTypes(),
-					                                   compacted_columns);
+		// The columns read whole before the selection was known (filtered or probed) keep its rows
+		const bool compact =
+		    !selection_is_identity && approved_tuple_count < state.GetOptions().compact_filtered_vectors_below;
+		if (compact) {
+			if (state.filter_compaction.ColumnCount() == 0) {
+				// The filters are fixed for the lifetime of the scan: only their fixed-width columns get a vector
+				vector<bool> compacted_columns(result.ColumnCount(), false);
+				for (auto &table_filter : filter_info.GetResidualFilterList()) {
+					compacted_columns[table_filter.scan_column_index] =
+					    CompactsFilteredVector(result.data[table_filter.scan_column_index]);
 				}
-				state.filter_compaction.Reset();
+				for (idx_t i = 0; i < result.ColumnCount(); i++) {
+					compacted_columns[i] = compacted_columns[i] ||
+					                       (filter_info.ColumnIsProbed(i) && CompactsFilteredVector(result.data[i]));
+				}
+				state.filter_compaction.Initialize(Allocator::DefaultAllocator(), result.GetTypes(), compacted_columns);
 			}
+			state.filter_compaction.Reset();
+		}
+		auto keep_selected_rows = [&](idx_t column_idx) {
+			auto &read = result.data[column_idx];
+			if (compact && CompactsFilteredVector(read)) {
+				auto &compacted = state.filter_compaction.data[column_idx];
+				VectorOperations::Copy(read, compacted, sel, approved_tuple_count, 0, 0);
+				read.Reference(compacted);
+			} else {
+				read.Slice(sel, approved_tuple_count);
+			}
+		};
+		if (has_filters && !selection_is_identity) {
 			for (auto &table_filter : filter_info.GetResidualFilterList()) {
-				if (table_filter.IsAlwaysTrue()) {
-					continue;
-				}
-				auto &filtered = result.data[table_filter.scan_column_index];
-				if (compact && CompactsFilteredVector(filtered)) {
-					auto &compacted = state.filter_compaction.data[table_filter.scan_column_index];
-					VectorOperations::Copy(filtered, compacted, sel, approved_tuple_count, 0, 0);
-					filtered.Reference(compacted);
-				} else {
-					filtered.Slice(sel, approved_tuple_count);
+				if (!table_filter.IsAlwaysTrue()) {
+					keep_selected_rows(table_filter.scan_column_index);
 				}
 			}
 		}
@@ -1415,7 +1422,7 @@ void RowGroup::ProcessPreparedScan(ScanOptions options, CollectionScanState &sta
 			if (filter_info.ColumnIsProbed(i)) {
 				// column has already been read whole for its probe
 				if (!selection_is_identity) {
-					result.data[i].Slice(sel, approved_tuple_count);
+					keep_selected_rows(i);
 				}
 				continue;
 			}

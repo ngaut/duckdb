@@ -209,6 +209,11 @@ const vector<idx_t> &ScanFilterInfo::GetVectorProbeFilters(const DataChunk &resu
 	}
 	vector_probes_initialized = true;
 	column_is_probed.resize(result.ColumnCount(), false);
+	if (execute_residual_filters && !GetResidualFilterList().empty()) {
+		// filters evaluated per row leave few rows to read from the other columns: a probe would read its column
+		// whole instead
+		return vector_probe_filters;
+	}
 	for (idx_t filter_idx = 0; filter_idx < pruning_filter_list.size(); filter_idx++) {
 		auto &filter = pruning_filter_list[filter_idx];
 		const auto column = filter.scan_column_index.GetIndex();
