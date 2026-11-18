@@ -1148,11 +1148,15 @@ void BitpackingScanPartial(ColumnSegment &segment, ColumnScanState &state, idx_t
 			idx_t to_scan = MinValue(remaining, current_group.Remaining());
 			T *target_ptr = result_data + result_offset + scanned;
 
+			// Operands read from disk can contain any T value, so use defined wrapping. Stepping by the delta keeps
+			// the loop free of a 64-bit multiply, which vector units lack.
+			using T_W = typename std::conditional<(sizeof(T_U) < sizeof(uint64_t)), uint64_t, T_U>::type;
+			const auto delta = static_cast<T_W>(static_cast<T_U>(current_group.constant));
+			auto value = delta * static_cast<T_W>(current_group.offset) +
+			             static_cast<T_W>(static_cast<T_U>(current_group.frame_of_reference));
 			for (idx_t i = 0; i < to_scan; i++) {
-				idx_t multiplier = current_group.offset + i;
-				// Operands read from disk can contain any T value, so use defined wrapping.
-				target_ptr[i] = static_cast<T>((static_cast<T_U>(current_group.constant) * multiplier) +
-				                               static_cast<T_U>(current_group.frame_of_reference));
+				target_ptr[i] = static_cast<T>(static_cast<T_U>(value));
+				value += delta;
 			}
 
 			scanned += to_scan;

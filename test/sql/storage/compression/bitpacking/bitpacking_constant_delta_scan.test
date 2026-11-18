@@ -1,0 +1,78 @@
+# name: test/sql/storage/compression/bitpacking/bitpacking_constant_delta_scan.test
+# description: Scanning constant-delta groups yields the stored sequences of every width, in order
+# group: [bitpacking]
+
+# Sequences rise and fall across a type's whole range; scans start inside groups as vectors and segments cut them.
+# The narrowest types wrap too often for a constant delta and are stored otherwise.
+
+require block_size 262144
+
+load {TEST_DIR}/test_bitpacking_constant_delta_scan.db
+
+statement ok
+SET jit_policy='off'
+
+foreach compression bitpacking uncompressed
+
+statement ok
+SET force_compression='{compression}'
+
+statement ok
+SET force_bitpacking_mode='constant_delta'
+
+statement ok
+CREATE TABLE t_{compression} AS
+SELECT i,
+       (127 - i % 256)::TINYINT AS i8,
+       (255 - i % 256)::UTINYINT AS u8,
+       (-32768 + 3 * (i % 21845))::SMALLINT AS i16,
+       (65535 - 7 * (i % 9362))::USMALLINT AS u16,
+       (2147483647 - 1000 * i)::INTEGER AS i32,
+       (5 * i)::UINTEGER AS u32,
+       (-9223372036854775808 + 1000000007 * i)::BIGINT AS i64,
+       (18446744073709551615 - 999999999989 * i)::UBIGINT AS u64,
+       (170141183460469231731687303715884105727 - 12345678901234567::HUGEINT * i)::HUGEINT AS i128,
+       (-1000000 + 3 * i)::DECIMAL(18, 3) AS dec
+FROM range(400000) t(i)
+
+statement ok
+CHECKPOINT
+
+endloop
+
+# the scans read the stored segments
+restart
+
+statement ok
+SET jit_policy='off'
+
+foreach compression bitpacking uncompressed
+
+statement ok
+CREATE TABLE r_{compression} AS
+SELECT count(*) AS n,
+       sum(i8::HUGEINT * (i % 7)) AS i8, sum(u8::HUGEINT * (i % 7)) AS u8, sum(i16::HUGEINT * (i % 7)) AS i16,
+       sum(u16::HUGEINT * (i % 7)) AS u16, sum(i32::HUGEINT * (i % 7)) AS i32, sum(u32::HUGEINT * (i % 7)) AS u32,
+       sum(i64::HUGEINT * (i % 7)) AS i64, sum(u64::HUGEINT * (i % 7)) AS u64, sum((i128 // 1000000000000000000) * (i % 7)) AS i128, sum((i128 % 1000003) * (i % 7)) AS i128_low,
+       sum(dec * (i % 7)) AS dec, min(i8) AS min8, max(i8) AS max8, min(i64) AS min64, max(i128) AS max128
+FROM t_{compression}
+
+endloop
+
+query I
+SELECT count(*) FROM pragma_storage_info('t_bitpacking')
+WHERE column_name IN ('u16', 'i32', 'u32', 'i64', 'u64', 'i128', 'dec') AND segment_type <> 'VALIDITY'
+AND compression <> 'BitPacking'
+----
+0
+
+query I
+SELECT count(*) FROM ((SELECT * FROM r_bitpacking EXCEPT ALL SELECT * FROM r_uncompressed)
+                      UNION ALL (SELECT * FROM r_uncompressed EXCEPT ALL SELECT * FROM r_bitpacking))
+----
+0
+
+query IIII
+SELECT min8, max8, min64, max128 FROM r_bitpacking
+----
+-128	127	-9223372036854775808	170141183460469231731687303715884105727
