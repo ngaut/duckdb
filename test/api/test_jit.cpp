@@ -423,7 +423,7 @@ TEST_CASE("SLJIT backend requires an addressable native-vector register ABI", "[
 		      (primitive_run.supported && capabilities.registers.SupportsLayout(7, 10)));
 
 		const auto &perfect_hash_probe = GetSljitPerfectHashProbeRegisterLayout();
-		CHECK(perfect_hash_probe.has_invariant_hoists == capabilities.registers.SupportsLayout(5, 10));
+		CHECK(perfect_hash_probe.has_invariant_hoists == capabilities.registers.SupportsLayout(7, 10));
 	}
 }
 

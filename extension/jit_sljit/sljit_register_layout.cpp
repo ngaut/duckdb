@@ -128,9 +128,12 @@ static SljitPerfectHashProbeRegisterLayout BuildSljitPerfectHashProbeRegisterLay
 	}
 	result.saved_register_count = 5;
 	result.source_data = SljitSavedRegisterAt(4);
-	if (registers.SupportsLayout(5, 10)) {
+	if (registers.SupportsLayout(7, 10)) {
 		result.has_invariant_hoists = true;
+		result.scratch_register_count = 7;
 		result.saved_register_count = 10;
+		result.match_selection = SLJIT_R5;
+		result.build_selection = SLJIT_R6;
 		result.source_selection = SljitSavedRegisterAt(5);
 		result.source_validity = SljitSavedRegisterAt(6);
 		result.minimum = SljitSavedRegisterAt(7);

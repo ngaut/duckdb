@@ -1,0 +1,113 @@
+# name: test/sql/jit/test_jit_perfect_hash_probe_shapes.test
+# description: A generated perfect-hash probe runs one loop per input shape: flat or selected keys, keys with or without NULLs, tables with or without empty slots, keys outside the table range, BIGINT and INTEGER keys
+# group: [jit]
+
+require jit_sljit
+
+statement ok
+SET jit_measure_native_legs=false
+
+statement ok
+SET jit_cbo_startup_base_cost=0
+
+statement ok
+SET jit_cbo_startup_margin_basis_points=0
+
+statement ok
+CREATE TABLE facts AS
+SELECT i AS id,
+       i % 1000 AS dense_key,
+       (i * 7919) % 1000 AS spread_key,
+       CASE WHEN i % 11 = 0 THEN NULL ELSE i % 1000 END AS nullable_key,
+       (i % 1200) - 600 AS signed_key,
+       i % 1500 AS wide_key,
+       0 AS zero
+FROM range(300000) t(i)
+
+statement ok
+CREATE TABLE dim AS SELECT i AS k, i % 3 AS cat, i * 2 AS v FROM range(1000) t(i)
+
+statement ok
+CREATE TABLE signed_dim AS SELECT i - 300 AS k, i % 4 AS cat, i AS v FROM range(600) t(i)
+
+statement ok
+CREATE TABLE int_dim AS SELECT i::INTEGER AS k, i % 5 AS cat, i AS v FROM range(1000) t(i)
+
+# every probe row matches a slot of a full table, then rows whose key falls in an empty slot, outside the table's
+# range, or is NULL miss; a filter on the probe side hands the probe a selection. A join on a computed key keeps the
+# scan from filtering the rows outside the build's key range, so the probe sees them
+statement ok
+CREATE MACRO probe_sums() AS TABLE
+SELECT 'dense' AS q, sum(f.id)::HUGEINT AS a, count(*)::HUGEINT AS b, sum(d.v)::HUGEINT AS c
+FROM facts f JOIN dim d ON f.dense_key = d.k
+UNION ALL
+SELECT 'sparse', sum(f.id), count(*), sum(d.v) FROM facts f JOIN dim d ON f.spread_key = d.k WHERE d.cat = 1
+UNION ALL
+SELECT 'sparse_ids', sum(f.id), count(*), 0 FROM facts f JOIN dim d ON f.spread_key = d.k WHERE d.cat = 1
+UNION ALL
+SELECT 'selected', sum(f.id), count(*), sum(d.v)
+FROM facts f JOIN dim d ON f.spread_key = d.k WHERE f.id % 5 <> 0 AND d.cat = 2
+UNION ALL
+SELECT 'nullable', sum(f.id), count(*), sum(d.v) FROM facts f JOIN dim d ON f.nullable_key = d.k
+UNION ALL
+SELECT 'nullable_selected_sparse', sum(f.id), count(*), sum(d.v)
+FROM facts f JOIN dim d ON f.nullable_key = d.k WHERE f.id % 3 = 0 AND d.cat <> 0
+UNION ALL
+SELECT 'signed_out_of_range', sum(f.id), count(*), sum(s.v)
+FROM facts f JOIN signed_dim s ON f.signed_key - f.zero = s.k WHERE s.cat <> 2
+UNION ALL
+SELECT 'wide_out_of_range', sum(f.id), count(*), sum(d.v) FROM facts f JOIN dim d ON f.wide_key + f.zero = d.k
+UNION ALL
+SELECT 'integer', sum(f.id), count(*), sum(i.v) FROM facts f JOIN int_dim i ON f.dense_key::INTEGER = i.k
+UNION ALL
+SELECT 'integer_selected_sparse', sum(f.id), count(*), sum(i.v)
+FROM facts f JOIN int_dim i ON f.nullable_key::INTEGER = i.k WHERE f.id % 7 <> 1 AND i.cat = 3
+UNION ALL
+SELECT 'grouped_' || d.cat, sum(f.id), count(*), sum(d.v)
+FROM facts f JOIN dim d ON f.nullable_key = d.k WHERE f.id % 2 = 0 GROUP BY d.cat
+
+foreach threads 1 4
+
+statement ok
+SET threads={threads}
+
+foreach policy off auto
+
+statement ok
+SET jit_policy='{policy}'
+
+statement ok
+CREATE OR REPLACE TEMP TABLE r_{policy} AS FROM probe_sums()
+
+endloop
+
+query I
+SELECT count(*) FROM ((SELECT * FROM r_off EXCEPT ALL SELECT * FROM r_auto)
+                      UNION ALL (SELECT * FROM r_auto EXCEPT ALL SELECT * FROM r_off))
+----
+0
+
+query I
+SELECT count(*) FROM r_auto
+----
+13
+
+endloop
+
+# the generated probe ran the queries above
+statement ok
+SET jit_trace_runtime=true
+
+statement ok
+SET jit_event_log_size=100
+
+statement ok
+SET threads=1
+
+statement ok
+CREATE OR REPLACE TEMP TABLE traced AS FROM probe_sums()
+
+query I
+SELECT count(*) > 0 FROM duckdb_jit_events() WHERE jit_runtime_path_counts LIKE '%perfect_probe.generated=%'
+----
+true

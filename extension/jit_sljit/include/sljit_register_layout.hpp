@@ -70,7 +70,12 @@ struct SljitPrimitiveRunRegisterLayout {
 
 struct SljitPerfectHashProbeRegisterLayout {
 	bool has_invariant_hoists = false;
+	sljit_s32 scratch_register_count = 5;
 	sljit_s32 saved_register_count = 0;
+	//! With invariant hoists: the output selections stay in scratch registers: a probe loop calls a helper only to
+	//! raise an error
+	sljit_s32 match_selection = 0;
+	sljit_s32 build_selection = 0;
 	sljit_s32 source_data = 0;
 	sljit_s32 source_selection = 0;
 	sljit_s32 source_validity = 0;
