@@ -103,8 +103,9 @@ void ExecutionChunkCoalescer::Append(DataChunk &target, DataChunk &input) {
 }
 
 ExecutionCoalescingChunkStep::ExecutionCoalescingChunkStep(Allocator &allocator_p,
-                                                           unique_ptr<ExecutionRegionChunkStep> consumer_p)
-    : allocator(allocator_p), consumer(std::move(consumer_p)) {
+                                                           unique_ptr<ExecutionRegionChunkStep> consumer_p,
+                                                           idx_t min_passthrough_rows_p)
+    : allocator(allocator_p), consumer(std::move(consumer_p)), min_passthrough_rows(min_passthrough_rows_p) {
 	if (!consumer) {
 		throw InternalException("Chunk coalescer requires a consumer");
 	}
@@ -136,7 +137,7 @@ SinkResultType ExecutionCoalescingChunkStep::ExecuteChunk(DataChunk &input, Exec
 	if (!input.size()) {
 		return SinkResultType::NEED_MORE_INPUT;
 	}
-	if (!buffered.size() && input.size() >= ExecutionChunkCoalescer::MIN_PASSTHROUGH_ROWS) {
+	if (!buffered.size() && input.size() >= min_passthrough_rows) {
 		finished = consumer->ExecuteChunk(input, proof) == SinkResultType::FINISHED;
 		return finished ? SinkResultType::FINISHED : SinkResultType::NEED_MORE_INPUT;
 	}
@@ -150,7 +151,7 @@ SinkResultType ExecutionCoalescingChunkStep::ExecuteChunk(DataChunk &input, Exec
 	if (buffered.size() + input.size() > STANDARD_VECTOR_SIZE && FlushBuffered() == SinkResultType::FINISHED) {
 		return SinkResultType::FINISHED;
 	}
-	if (!buffered.size() && input.size() >= ExecutionChunkCoalescer::MIN_PASSTHROUGH_ROWS) {
+	if (!buffered.size() && input.size() >= min_passthrough_rows) {
 		finished = consumer->ExecuteChunk(input, proof) == SinkResultType::FINISHED;
 		return finished ? SinkResultType::FINISHED : SinkResultType::NEED_MORE_INPUT;
 	}

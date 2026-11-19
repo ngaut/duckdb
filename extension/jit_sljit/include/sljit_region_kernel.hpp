@@ -64,6 +64,7 @@ public:
 	bool SupportsChunkStep() const override;
 	bool EntryReady(ExecutionRegionRuntime &runtime, string &blocker) override;
 	unique_ptr<ExecutionRegionChunkStep> CreateChunkStep(ExecutionRegionRuntime &runtime) override;
+	idx_t MinPassthroughRows() const override;
 
 	//! Hands the rows the storage scan's compiled filters processed since the last call to the runtime's trace
 	void RecordExecutedFilterRows(ExecutionRegionRuntime &runtime) const;

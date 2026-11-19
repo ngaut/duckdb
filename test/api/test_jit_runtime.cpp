@@ -48,7 +48,8 @@ public:
 TEST_CASE("Core chunk coalescer retains selected long strings and nulls after source destruction", "[api][jit]") {
 	auto consumer = make_uniq<RecordingChunkStep>();
 	auto &record = *consumer;
-	ExecutionCoalescingChunkStep step(Allocator::DefaultAllocator(), std::move(consumer));
+	ExecutionCoalescingChunkStep step(Allocator::DefaultAllocator(), std::move(consumer),
+	                                  ExecutionChunkCoalescer::MIN_PASSTHROUGH_ROWS);
 	const string long_text(256, 'x');
 	for (idx_t batch = 0; batch < 2; batch++) {
 		DataChunk input;
@@ -79,10 +80,37 @@ TEST_CASE("Core chunk coalescer retains selected long strings and nulls after so
 	}
 }
 
+TEST_CASE("Core chunk coalescer batches only chunks under its consumer's passthrough rows", "[api][jit]") {
+	auto consumer = make_uniq<RecordingChunkStep>();
+	auto &record = *consumer;
+	ExecutionCoalescingChunkStep step(Allocator::DefaultAllocator(), std::move(consumer), STANDARD_VECTOR_SIZE / 4);
+	auto execute = [&](idx_t count) {
+		DataChunk input;
+		input.Initialize(Allocator::DefaultAllocator(), {LogicalType::BIGINT});
+		for (idx_t row = 0; row < count; row++) {
+			FlatVector::GetDataMutable<int64_t>(input.data[0])[row] = NumericCast<int64_t>(row);
+		}
+		input.SetChildCardinality(count);
+		REQUIRE(step.ExecuteChunk(input, ExecutionSourceChunkProof()) == SinkResultType::NEED_MORE_INPUT);
+	};
+	// a chunk from a quarter vector on runs as it is; smaller chunks wait for a batch
+	execute(STANDARD_VECTOR_SIZE / 4);
+	execute(STANDARD_VECTOR_SIZE / 4 - 1);
+	execute(100);
+	REQUIRE(record.counts == vector<idx_t> {STANDARD_VECTOR_SIZE / 4});
+	// once rows wait, every chunk joins them while the batch has room
+	execute(STANDARD_VECTOR_SIZE / 2);
+	REQUIRE(record.counts.size() == 1);
+	step.FinishChunks();
+	REQUIRE(record.counts ==
+	        vector<idx_t> {STANDARD_VECTOR_SIZE / 4, STANDARD_VECTOR_SIZE / 4 - 1 + 100 + STANDARD_VECTOR_SIZE / 2});
+}
+
 TEST_CASE("Core chunk coalescer owns strings borrowed from an advancing source", "[api][jit]") {
 	auto consumer = make_uniq<RecordingChunkStep>();
 	auto &record = *consumer;
-	ExecutionCoalescingChunkStep step(Allocator::DefaultAllocator(), std::move(consumer));
+	ExecutionCoalescingChunkStep step(Allocator::DefaultAllocator(), std::move(consumer),
+	                                  ExecutionChunkCoalescer::MIN_PASSTHROUGH_ROWS);
 	string borrowed(256, 'a');
 	DataChunk input;
 	input.Initialize(Allocator::DefaultAllocator(), {LogicalType::VARCHAR});
@@ -102,7 +130,8 @@ TEST_CASE("Core chunk coalescer owns strings borrowed from an advancing source",
 TEST_CASE("Core chunk coalescer flushes partitions and stops consuming after a finished sink", "[api][jit]") {
 	auto consumer = make_uniq<RecordingChunkStep>();
 	auto &record = *consumer;
-	ExecutionCoalescingChunkStep step(Allocator::DefaultAllocator(), std::move(consumer));
+	ExecutionCoalescingChunkStep step(Allocator::DefaultAllocator(), std::move(consumer),
+	                                  ExecutionChunkCoalescer::MIN_PASSTHROUGH_ROWS);
 	DataChunk input;
 	input.Initialize(Allocator::DefaultAllocator(), {LogicalType::INTEGER});
 	input.SetChildCardinality(1);
@@ -128,7 +157,8 @@ TEST_CASE("Core chunk coalescer flushes partitions and stops consuming after a f
 TEST_CASE("Core chunk coalescer proves for a buffered batch only what every chunk in it proved", "[api][jit]") {
 	auto consumer = make_uniq<RecordingChunkStep>();
 	auto &record = *consumer;
-	ExecutionCoalescingChunkStep step(Allocator::DefaultAllocator(), std::move(consumer));
+	ExecutionCoalescingChunkStep step(Allocator::DefaultAllocator(), std::move(consumer),
+	                                  ExecutionChunkCoalescer::MIN_PASSTHROUGH_ROWS);
 	DataChunk input;
 	input.Initialize(Allocator::DefaultAllocator(), {LogicalType::BIGINT});
 	auto run = [&](idx_t count, bool filters_hold) {
@@ -157,7 +187,8 @@ TEST_CASE("Core chunk coalescer proves for a buffered batch only what every chun
 TEST_CASE("Core chunk coalescer preserves full batches and flushes before capacity overflow", "[api][jit]") {
 	auto consumer = make_uniq<RecordingChunkStep>();
 	auto &record = *consumer;
-	ExecutionCoalescingChunkStep step(Allocator::DefaultAllocator(), std::move(consumer));
+	ExecutionCoalescingChunkStep step(Allocator::DefaultAllocator(), std::move(consumer),
+	                                  ExecutionChunkCoalescer::MIN_PASSTHROUGH_ROWS);
 	DataChunk input;
 	input.Initialize(Allocator::DefaultAllocator(), {LogicalType::BIGINT});
 	for (auto count : vector<idx_t> {STANDARD_VECTOR_SIZE, 3, STANDARD_VECTOR_SIZE - 1}) {

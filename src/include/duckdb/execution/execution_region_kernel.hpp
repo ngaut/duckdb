@@ -128,6 +128,9 @@ public:
 	//! Binds the kernel to one pipeline executor, which keeps the step (and the runtime it calls back through) until
 	//! the executor resets
 	virtual unique_ptr<ExecutionRegionChunkStep> CreateChunkStep(ExecutionRegionRuntime &runtime);
+	//! The fewest rows of a source chunk the kernel takes as it is. Batching smaller chunks copies every row of every
+	//! column; it pays where each step costs more than that copy, such as a step ending in DuckDB's own sink
+	virtual idx_t MinPassthroughRows() const;
 	//! A kernel whose source is not chunks (an aggregate-state scan) fetches from the source contract itself, up to
 	//! the runtime's chunk budget per entry, and reports how the pipeline stopped
 	virtual bool TryExecuteFullPipeline(ExecutionRegionRuntime &runtime, ExecutionRegionResult &result);

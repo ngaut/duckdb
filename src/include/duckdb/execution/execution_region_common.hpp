@@ -320,6 +320,9 @@ struct ExecutionRegionOpenRequest {
 	//! defer reading them to the region (ExecutionDeferredColumns)
 	vector<idx_t> deferrable_source_columns;
 	optional_ptr<const TableFilterKernelProvider> table_filter_kernel_provider;
+	//! The fewest rows of a source chunk the region's kernel takes as it is
+	//! (ExecutionRegionKernel::MinPassthroughRows): smaller chunks are copied into batches
+	idx_t min_passthrough_rows = 0;
 
 	bool UsesSourceContract() const {
 		return source_execution == ExecutionRegionSourceExecutionKind::SOURCE_CONTRACT;

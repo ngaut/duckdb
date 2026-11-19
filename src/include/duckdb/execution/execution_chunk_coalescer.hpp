@@ -14,6 +14,7 @@ namespace duckdb {
 
 //! Core-owned compaction policy. Encodings useful to consumers pass through unchanged.
 struct ExecutionChunkCoalescer {
+	//! The fewest rows of a chunk a region takes as it is, unless its kernel chooses otherwise
 	static constexpr idx_t MIN_PASSTHROUGH_ROWS = STANDARD_VECTOR_SIZE / 2;
 	DUCKDB_API static bool CanAppend(const DataChunk &input);
 	DUCKDB_API static void Append(DataChunk &target, DataChunk &input);
@@ -22,7 +23,8 @@ struct ExecutionChunkCoalescer {
 //! Buffers within the executor's partition boundary; it never owns source cursors or sink backpressure.
 class DUCKDB_API ExecutionCoalescingChunkStep final : public ExecutionRegionChunkStep {
 public:
-	ExecutionCoalescingChunkStep(Allocator &allocator, unique_ptr<ExecutionRegionChunkStep> consumer);
+	ExecutionCoalescingChunkStep(Allocator &allocator, unique_ptr<ExecutionRegionChunkStep> consumer,
+	                             idx_t min_passthrough_rows);
 	SinkResultType ExecuteChunk(DataChunk &input, ExecutionSourceChunkProof proof) override;
 	void FlushChunks() override;
 	void FinishChunks() override;
@@ -34,6 +36,8 @@ private:
 private:
 	Allocator &allocator;
 	unique_ptr<ExecutionRegionChunkStep> consumer;
+	//! The fewest rows of a chunk the consumer takes as it is
+	idx_t min_passthrough_rows;
 	DataChunk buffered;
 	//! What the sources prove about every buffered row
 	ExecutionSourceChunkProof buffered_proof;

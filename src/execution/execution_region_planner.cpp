@@ -941,9 +941,12 @@ unique_ptr<ExecutionRegionPlan> ExecutionRegionPlanner::Build(ClientContext &con
 		return KeepExecutableExecutionRegionPlan(std::move(plan));
 	}
 	Compile(context, *backend, backend_name, pipeline, *plan, lowered_region, *selected_region);
-	if (auto kernel = plan->GetExecutableFullPipelineKernel(); kernel && kernel->HasTableFilterKernels()) {
-		plan->source_open_request.table_filter_kernel_provider =
-		    optional_ptr<const TableFilterKernelProvider>(kernel.get());
+	if (auto kernel = plan->GetExecutableFullPipelineKernel()) {
+		if (kernel->HasTableFilterKernels()) {
+			plan->source_open_request.table_filter_kernel_provider =
+			    optional_ptr<const TableFilterKernelProvider>(kernel.get());
+		}
+		plan->source_open_request.min_passthrough_rows = kernel->MinPassthroughRows();
 	}
 	if (plan->HasExecutableFullPipeline() && !ExecutionRegionSettings::TraceVectorizedBaseline(context)) {
 		plan->SelectRunner(selected_region->physical_runner.SelectedRunner());

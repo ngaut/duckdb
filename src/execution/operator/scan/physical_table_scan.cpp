@@ -36,6 +36,8 @@ struct TableScanExecutionSourceConfig {
 	bool return_source_contract_input = false;
 	//! The source contract input columns the scan leaves to the region in the vectors it reads whole
 	vector<idx_t> deferred_columns;
+	//! The fewest rows of a vector the region takes as it is; smaller vectors are copied into one chunk
+	idx_t min_passthrough_rows = 0;
 };
 
 struct TableScanExecutionSourceContractGlobalState {
@@ -69,6 +71,7 @@ BuildTableScanExecutionSourceConfig(const PhysicalTableScan &op, optional_ptr<Ta
 	result.projection_ids = op.projection_ids;
 	result.filters = filters;
 	result.use_source_contract = open_request.UsesSourceContract() && capability.IsReady();
+	result.min_passthrough_rows = open_request.min_passthrough_rows;
 	if (result.use_source_contract && open_request.UsesSourceContractInputLayout()) {
 		result.source_contract_input_types = open_request.source_contract_input_types;
 		result.return_source_contract_input = true;
@@ -369,7 +372,7 @@ private:
 		    Settings::Get<DebugForceFetchRowSetting>(context.client);
 		// A region source copies the vectors it batches: their filtered columns are copied by the scan already
 		execution_source_contract_scan_state.options.compact_filtered_vectors_below =
-		    ExecutionChunkCoalescer::MIN_PASSTHROUGH_ROWS;
+		    gstate.execution_source_config.min_passthrough_rows;
 		auto &deferred_columns = gstate.execution_source_config.deferred_columns;
 		if (!deferred_columns.empty()) {
 			auto &deferred = execution_source_contract_scan_state.options.deferred_columns;
@@ -503,7 +506,7 @@ SourceResultType PhysicalTableScan::GetExecutionSourceContractDataInternal(Execu
 			if (chunk.size() + vector.size() > STANDARD_VECTOR_SIZE) {
 				return SourceResultType::HAVE_MORE_OUTPUT;
 			}
-			if (vector.size() >= ExecutionChunkCoalescer::MIN_PASSTHROUGH_ROWS ||
+			if (vector.size() >= g_state.execution_source_config.min_passthrough_rows ||
 			    !ExecutionChunkCoalescer::CanAppend(vector)) {
 				if (chunk.size() > 0) {
 					return SourceResultType::HAVE_MORE_OUTPUT;

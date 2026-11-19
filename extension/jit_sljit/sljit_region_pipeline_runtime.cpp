@@ -191,6 +191,30 @@ unique_ptr<ExecutionRegionChunkStep> SljitNativeRegionKernel::CreateChunkStep(Ex
 	    local_state.terminal, native_continuation);
 }
 
+//! A step ending in a generated ungrouped aggregate costs about as much as copying a few hundred rows: the source
+//! batches only the chunks under a quarter vector. A step ending anywhere else, such as DuckDB's own sink, pays a cost
+//! per call that batching saves up to half a vector
+idx_t SljitNativeRegionKernel::MinPassthroughRows() const {
+	if (!SupportsChunkStep()) {
+		return ExecutionRegionKernel::MinPassthroughRows();
+	}
+	auto &steps = artifact->full_pipeline_recipe_plan.Recipe().primitive_sequence;
+	auto &terminal = steps.Step(steps.Count() - 1);
+	idx_t aggregate_idx = DConstants::INVALID_INDEX;
+	if (terminal.kind == SljitFullPipelinePrimitiveKind::UNGROUPED_AGGREGATE_UPDATE) {
+		aggregate_idx = terminal.ungrouped_aggregate_update.aggregate_idx;
+	} else if (terminal.kind == SljitFullPipelinePrimitiveKind::POST_JOIN_PROJECTION_AGGREGATE_UPDATE) {
+		aggregate_idx = terminal.post_join_projection_aggregate.aggregate_idx;
+	}
+	auto &ops = artifact->ops;
+	if (aggregate_idx < ops.size() && ops[aggregate_idx].Kind() == SljitNativeRegionOpKind::AGGREGATE_UPDATE &&
+	    ops[aggregate_idx].AggregateUpdate().plan.sink_info.Kind() ==
+	        ExecutionRegionSinkKind::UNGROUPED_AGGREGATE_UPDATE) {
+		return STANDARD_VECTOR_SIZE / 4;
+	}
+	return ExecutionRegionKernel::MinPassthroughRows();
+}
+
 void SljitNativeRegionKernel::RecordExecutedFilterRows(ExecutionRegionRuntime &runtime) const {
 	auto filter_rows = executed_filter_rows.exchange(0, std::memory_order_relaxed);
 	if (filter_rows > 0) {

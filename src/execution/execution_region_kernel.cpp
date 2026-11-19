@@ -1,5 +1,7 @@
 #include "duckdb/execution/execution_region_kernel.hpp"
 
+#include "duckdb/execution/execution_chunk_coalescer.hpp"
+
 #include "duckdb/common/exception.hpp"
 #include "duckdb/common/types/data_chunk.hpp"
 
@@ -119,6 +121,10 @@ bool ExecutionRegionKernel::EntryReady(ExecutionRegionRuntime &, string &) {
 
 unique_ptr<ExecutionRegionChunkStep> ExecutionRegionKernel::CreateChunkStep(ExecutionRegionRuntime &) {
 	throw InternalException("execution region kernel does not support chunk-step execution");
+}
+
+idx_t ExecutionRegionKernel::MinPassthroughRows() const {
+	return ExecutionChunkCoalescer::MIN_PASSTHROUGH_ROWS;
 }
 
 ExecutionRegionChunkStep::~ExecutionRegionChunkStep() {

@@ -462,7 +462,8 @@ static optional_ptr<CompiledRegionRuntime> BindCompiledStep(ExecutionRegionPipel
 		DeferCompiledEntry(pipeline, kernel, blocker, trace_runtime, trace_start);
 		return nullptr;
 	}
-	auto step = make_uniq<ExecutionCoalescingChunkStep>(pipeline.GetAllocator(), kernel.CreateChunkStep(*runtime));
+	auto step = make_uniq<ExecutionCoalescingChunkStep>(pipeline.GetAllocator(), kernel.CreateChunkStep(*runtime),
+	                                                    kernel.MinPassthroughRows());
 	optional_ptr<CompiledRegionRuntime> bound_runtime = runtime.get();
 	pipeline.BindCompiledStep(kernel, std::move(runtime), std::move(step));
 	pipeline.AddProfilingAnnotation("jit", "compiled full-pipeline kernel (" + kernel.BackendName() + ")", true);
