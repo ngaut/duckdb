@@ -651,7 +651,7 @@ ENCODINGS_QUERIES = {
     ),
     "narrow_between": (
         "SELECT sum(id) FROM __jit_encodings_facts WHERE si BETWEEN 100 AND 2000",
-        {1: False, 4: False},
+        {1: True, 4: True},
     ),
     "nullable_key_join": (
         "SELECT count(*) FROM __jit_encodings_facts f JOIN __jit_encodings_dim d ON f.g = d.nk",
@@ -683,7 +683,7 @@ ENCODINGS_THRESHOLDS = {
     "dictionary_groups_filtered": ({1: 0.52, 4: 0.51}, {1: 164_400_000, 4: 169_500_000}),
     "nullable_groups": ({1: 0.58, 4: 0.64}, {1: 128_200_000, 4: 125_900_000}),
     "nullable_min_max": ({1: 0.84, 4: 0.88}, {1: 137_900_000, 4: 133_000_000}),
-    "narrow_integers": ({1: 0.47, 4: 0.47}, {1: 172_900_000, 4: 174_600_000}),
+    "narrow_integers": ({1: 2.05, 4: 1.94}, {1: 40_100_000, 4: 42_600_000}),
     "double_filter": ({1: 0.57}, {1: 115_100_000}),
     "dimension_join": ({1: 0.77, 4: 0.76}, {1: 75_400_000, 4: 76_200_000}),
     "dimension_string_groups": ({1: 0.31, 4: 0.31}, {1: 277_900_000, 4: 284_300_000}),
@@ -697,7 +697,7 @@ ENCODINGS_THRESHOLDS = {
     "filtered_top_n": ({1: 0.81, 4: 0.87}, {1: 55_100_000, 4: 53_500_000}),
     "dictionary_prefix": ({1: 0.88, 4: 0.89}, {1: 466_400_000, 4: 460_800_000}),
     "integer_case": ({1: 0.87, 4: 0.88}, {1: 76_400_000, 4: 79_300_000}),
-    "narrow_between": ({1: 0.86, 4: 0.86}, {1: 23_500_000, 4: 24_700_000}),
+    "narrow_between": ({1: 1.28, 4: 1.22}, {1: 15_400_000, 4: 17_500_000}),
     "nullable_key_join": ({1: 0.89, 4: 0.89}, {1: 570_500_000, 4: 574_000_000}),
     "random_key_groups": ({1: 0.89, 4: 0.89}, {1: 234_900_000, 4: 422_100_000}),
     "random_key_counts": ({1: 0.89, 4: 0.89}, {1: 202_000_000, 4: 399_100_000}),

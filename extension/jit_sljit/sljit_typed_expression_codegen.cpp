@@ -161,12 +161,20 @@ static void EmitSljitTypedExpressionTreeConstant(struct sljit_compiler *compiler
 void GetSljitTypedExpressionTreeNarrowSourceLoad(const ExecutionExpressionIR &reference, sljit_s32 &load_op,
                                                  sljit_sw &scale) {
 	D_ASSERT(SljitTypedExpressionTreeIsNarrowSignedReference(reference));
-	if (reference.physical_type == PhysicalType::INT8) {
+	switch (reference.physical_type) {
+	case PhysicalType::INT8:
 		load_op = SLJIT_MOV_S8;
 		scale = 0;
-	} else {
+		break;
+	case PhysicalType::INT16:
 		load_op = SLJIT_MOV_S16;
 		scale = 1;
+		break;
+	default:
+		D_ASSERT(reference.physical_type == PhysicalType::INT32);
+		load_op = SLJIT_MOV_S32;
+		scale = 2;
+		break;
 	}
 }
 

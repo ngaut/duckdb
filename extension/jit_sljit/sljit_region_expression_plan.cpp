@@ -10,7 +10,10 @@
 
 #include "sljit_native_plan.hpp"
 #include "sljit_native_util.hpp"
+#include "sljit_typed_expression_plan.hpp"
 #include "sljit_typed_expression_simd_codegen.hpp"
+
+#include "duckdb/common/types/decimal.hpp"
 
 namespace duckdb {
 
@@ -249,16 +252,98 @@ static bool SljitExpressionIRCannotThrow(const ExecutionExpressionIR &node) {
 	return true;
 }
 
+//! The type a narrow signed value compares as: INTEGER for TINYINT/SMALLINT, the same-scale DECIMAL64 for a DECIMAL
+//! stored in 16 or 32 bits (whose raw integer the generated loops sign-extend), or nothing for any other type
+static bool TryGetSljitWidenedComparisonType(const ExecutionExpressionIR &node, LogicalType &widened) {
+	if (node.return_type.id() == LogicalTypeId::DECIMAL) {
+		if (node.physical_type != PhysicalType::INT16 && node.physical_type != PhysicalType::INT32) {
+			return false;
+		}
+		widened = LogicalType::DECIMAL(Decimal::MAX_WIDTH_INT64, DecimalType::GetScale(node.return_type));
+		return true;
+	}
+	if (!node.return_type.IsIntegral() ||
+	    (node.physical_type != PhysicalType::INT8 && node.physical_type != PhysicalType::INT16)) {
+		return false;
+	}
+	widened = LogicalType::INTEGER;
+	return true;
+}
+
+//! A narrow signed column or constant, or a column widened to another narrow type of the same scale, with the type
+//! it compares as
+static bool TryGetSljitNarrowSignedValue(const ExecutionExpressionIR &node, LogicalType &widened) {
+	if (!TryGetSljitWidenedComparisonType(node, widened)) {
+		return false;
+	}
+	if (node.kind == ExecutionExpressionIRKind::CAST) {
+		LogicalType source_widened;
+		return !node.try_cast && node.left && node.left->kind == ExecutionExpressionIRKind::REFERENCE &&
+		       TryGetSljitWidenedComparisonType(*node.left, source_widened) && source_widened == widened &&
+		       GetTypeIdSize(node.left->physical_type) <= GetTypeIdSize(node.physical_type);
+	}
+	return node.kind == ExecutionExpressionIRKind::REFERENCE || node.kind == ExecutionExpressionIRKind::CONSTANT;
+}
+
+//! A narrow signed value as the type it compares as: a constant converts exactly, a column takes a widening cast,
+//! and a widening cast widens to that type instead
+static void SljitWidenNarrowSignedValue(unique_ptr<ExecutionExpressionIR> &node, const LogicalType &widened) {
+	if (node->kind == ExecutionExpressionIRKind::CONSTANT) {
+		node->constant = node->constant.DefaultCastAs(widened);
+		node->return_type = widened;
+		node->physical_type = widened.InternalType();
+		return;
+	}
+	if (node->kind != ExecutionExpressionIRKind::CAST) {
+		auto cast = make_uniq<ExecutionExpressionIR>();
+		cast->kind = ExecutionExpressionIRKind::CAST;
+		cast->validity = ExecutionExpressionValidityKind::CHILD;
+		cast->source = ExecutionExpressionSourceKind::DERIVED;
+		cast->left = std::move(node);
+		node = std::move(cast);
+	}
+	node->return_type = widened;
+	node->physical_type = widened.InternalType();
+	node->exception_behavior = ExecutionExpressionExceptionKind::NONE;
+}
+
+//! Compares TINYINT/SMALLINT values as INTEGERs and DECIMALs stored in 16 or 32 bits as DECIMAL64s: widening never
+//! changes a comparison, and the generated loops read a narrow column with one sign-extending load. Returns whether
+//! any comparison changed
+static bool SljitWidenNarrowSignedComparisons(ExecutionExpressionIR &node) {
+	LogicalType left_widened;
+	LogicalType right_widened;
+	if (node.kind == ExecutionExpressionIRKind::BINARY && SljitTypedExpressionTreeComparisonSupported(node.binary_op) &&
+	    node.left && node.right && TryGetSljitNarrowSignedValue(*node.left, left_widened) &&
+	    TryGetSljitNarrowSignedValue(*node.right, right_widened) && left_widened == right_widened) {
+		SljitWidenNarrowSignedValue(node.left, left_widened);
+		SljitWidenNarrowSignedValue(node.right, right_widened);
+		return true;
+	}
+	bool changed = false;
+	for (auto child : {node.left.get(), node.right.get(), node.else_node.get()}) {
+		if (child) {
+			changed = SljitWidenNarrowSignedComparisons(*child) || changed;
+		}
+	}
+	for (auto &child : node.children) {
+		changed = SljitWidenNarrowSignedComparisons(*child) || changed;
+	}
+	return changed;
+}
+
 bool TryLowerNativeRegionExpression(const ExecutionExpressionFragment &fragment, bool require_boolean,
                                     SljitNativeRegionExpressionPlan &expr, string &error, bool render_diagnostics) {
 	if (!fragment.root) {
 		error = "sljit-expression-lowering-missing-root";
 		return false;
 	}
-	if (!TryReadNativeRegionExpression(*fragment.root, require_boolean, expr)) {
+	auto widened = fragment.root->Copy();
+	const auto &root = SljitWidenNarrowSignedComparisons(*widened) ? *widened : *fragment.root;
+	if (!TryReadNativeRegionExpression(root, require_boolean, expr)) {
 		error = "sljit-expression-lowering-unsupported";
-		error += ";root_kind=" + string(ExecutionExpressionIRKindToString(fragment.root->kind));
-		error += ";logical_type=" + fragment.root->return_type.ToString();
+		error += ";root_kind=" + string(ExecutionExpressionIRKindToString(root.kind));
+		error += ";logical_type=" + root.return_type.ToString();
 		error += require_boolean ? ";required=boolean" : ";required=value";
 		if (render_diagnostics && !fragment.ir.empty()) {
 			error += ";ir=" + fragment.ir;
@@ -267,19 +352,19 @@ bool TryLowerNativeRegionExpression(const ExecutionExpressionFragment &fragment,
 	}
 	if (!expr.expression_tree && require_boolean) {
 		SljitNativeRegionExpressionPlan expression_tree;
-		if (TryBuildSljitNativeTypedExpressionTreePlan(*fragment.root, expression_tree)) {
+		if (TryBuildSljitNativeTypedExpressionTreePlan(root, expression_tree)) {
 			expr.expression_tree = std::move(expression_tree.expression_tree);
 			expr.expression_tree_source_indices = std::move(expression_tree.expression_tree_source_indices);
 		}
 	}
 	if (!require_boolean && !expr.expression_tree) {
 		SljitNativeRegionExpressionPlan expression_tree;
-		if (TryBuildSljitNativeTypedExpressionTreePlan(*fragment.root, expression_tree)) {
+		if (TryBuildSljitNativeTypedExpressionTreePlan(root, expression_tree)) {
 			expr.expression_tree = std::move(expression_tree.expression_tree);
 			expr.expression_tree_source_indices = std::move(expression_tree.expression_tree_source_indices);
 		}
 	}
-	expr.cannot_throw = SljitExpressionIRCannotThrow(*fragment.root);
+	expr.cannot_throw = SljitExpressionIRCannotThrow(root);
 	if (render_diagnostics) {
 		expr.ir = fragment.ir;
 	}

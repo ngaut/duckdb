@@ -145,14 +145,29 @@ static bool SljitTypedExpressionTreeInt64CastLogic(const ExecutionExpressionIR &
 }
 
 bool SljitTypedExpressionTreeIsNarrowSignedReference(const ExecutionExpressionIR &node) {
-	return node.kind == ExecutionExpressionIRKind::REFERENCE && node.return_type.IsIntegral() &&
+	if (node.kind != ExecutionExpressionIRKind::REFERENCE) {
+		return false;
+	}
+	if (node.return_type.id() == LogicalTypeId::DECIMAL) {
+		return node.physical_type == PhysicalType::INT16 || node.physical_type == PhysicalType::INT32;
+	}
+	return node.return_type.IsIntegral() &&
 	       (node.physical_type == PhysicalType::INT8 || node.physical_type == PhysicalType::INT16);
 }
 
+//! A narrow signed column's sign-extending load: TINYINT/SMALLINT to an integer, or a DECIMAL stored in 16 or 32 bits
+//! to the same-scale DECIMAL64, whose raw value is the same integer
 bool SljitTypedExpressionTreeIsNarrowSourceWideningCast(const ExecutionExpressionIR &node) {
-	return node.kind == ExecutionExpressionIRKind::CAST && SljitTypedExpressionTreeCastExceptionBehaviorIsSafe(node) &&
-	       SljitTypedExpressionTreeIsIntegerNode(node) && node.left &&
-	       SljitTypedExpressionTreeIsNarrowSignedReference(*node.left);
+	if (node.kind != ExecutionExpressionIRKind::CAST || !SljitTypedExpressionTreeCastExceptionBehaviorIsSafe(node) ||
+	    !node.left || !SljitTypedExpressionTreeIsNarrowSignedReference(*node.left)) {
+		return false;
+	}
+	auto &source = *node.left;
+	if (source.return_type.id() == LogicalTypeId::DECIMAL) {
+		return SljitTypedExpressionTreeIsDecimal64Node(node) &&
+		       DecimalType::GetScale(node.return_type) == DecimalType::GetScale(source.return_type);
+	}
+	return SljitTypedExpressionTreeIsIntegerNode(node);
 }
 
 static bool SljitTypedExpressionTreeDecimal64WideningCastLogic(const ExecutionExpressionIR &node) {

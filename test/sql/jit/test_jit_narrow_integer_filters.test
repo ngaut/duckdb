@@ -1,0 +1,154 @@
+# name: test/sql/jit/test_jit_narrow_integer_filters.test
+# description: Comparisons of TINYINT/SMALLINT values compile as INTEGER comparisons and of DECIMALs stored in 16 or 32 bits as DECIMAL64 comparisons of the sign-extended raw values, through NULLs, the types' extremes, mixed widths and compressed storage
+# group: [jit]
+
+require jit_sljit
+
+load {TEST_DIR}/jit_narrow_integer_filters.db
+
+statement ok
+CREATE TABLE narrow AS
+SELECT i AS id,
+       ((i * 37) % 256 - 128)::TINYINT AS t,
+       ((i * 7919) % 65536 - 32768)::SMALLINT AS s,
+       CASE WHEN i % 7 = 0 THEN NULL ELSE ((i * 13) % 256 - 128)::TINYINT END AS nt,
+       CASE WHEN i % 11 = 0 THEN NULL ELSE ((i * 101) % 65536 - 32768)::SMALLINT END AS ns,
+       (i % 1000)::INTEGER AS k,
+       ((((i * 37) % 19999) - 9999) / 100)::DECIMAL(4,2) AS d4,
+       CASE WHEN i % 3 = 0 THEN NULL ELSE ((((i * 41) % 19999) - 9999) / 100)::DECIMAL(4,2) END AS nd4,
+       ((((i * 7919) % 1999999999) - 999999999) / 100)::DECIMAL(9,2) AS d9,
+       CASE WHEN i % 5 = 0 THEN NULL ELSE ((((i * 31337) % 1999999999) - 999999999) / 100)::DECIMAL(9,2) END AS nd9,
+       ((((i * 13) % 1999999) - 999999) / 1000)::DECIMAL(9,3) AS d93,
+       ((((i * 17) % 199999) - 99999) / 1000)::DECIMAL(5,3) AS d53,
+       ((((i * 19) % 1999999) - 999999) / 1000)::DECIMAL(15,3) AS d153
+FROM range(400000) t(i)
+
+statement ok
+CHECKPOINT
+
+# a reopened database scans the checkpointed, compressed segments
+restart
+
+statement ok
+SET jit_measure_native_legs=false
+
+statement ok
+SET jit_cbo_startup_base_cost=0
+
+statement ok
+SET jit_cbo_startup_margin_basis_points=0
+
+statement ok
+CREATE MACRO narrow_sums() AS TABLE
+SELECT 'tiny_gt' AS q, sum(id)::HUGEINT AS a, count(*)::HUGEINT AS b FROM narrow WHERE t > 10
+UNION ALL
+SELECT 'tiny_le_min', sum(id), count(*) FROM narrow WHERE t <= -128
+UNION ALL
+SELECT 'tiny_ge_max', sum(id), count(*) FROM narrow WHERE t >= 127
+UNION ALL
+SELECT 'tiny_lt_negative', sum(id), count(*) FROM narrow WHERE t < -100
+UNION ALL
+SELECT 'tiny_eq', sum(id), count(*) FROM narrow WHERE t = -1
+UNION ALL
+SELECT 'tiny_ne', sum(id), count(*) FROM narrow WHERE t <> 0
+UNION ALL
+SELECT 'small_between', sum(id), count(*) FROM narrow WHERE s BETWEEN 100 AND 2000
+UNION ALL
+SELECT 'small_not_between', sum(id), count(*) FROM narrow WHERE s NOT BETWEEN -30000 AND 30000
+UNION ALL
+SELECT 'small_extremes', sum(id), count(*) FROM narrow WHERE s <= -32768 OR s >= 32767
+UNION ALL
+SELECT 'small_negative_range', sum(id), count(*) FROM narrow WHERE s > -20000 AND s < -10000
+UNION ALL
+SELECT 'nullable_tiny', sum(id), count(*) FROM narrow WHERE nt > 0
+UNION ALL
+SELECT 'nullable_small', sum(id), count(*) FROM narrow WHERE ns < -1000 OR ns > 31000
+UNION ALL
+SELECT 'nullable_payload', sum(nt), count(ns) FROM narrow WHERE nt < 50 AND ns > -5000
+UNION ALL
+SELECT 'tiny_vs_tiny', sum(id), count(*) FROM narrow WHERE t < nt
+UNION ALL
+SELECT 'small_vs_small', sum(id), count(*) FROM narrow WHERE s >= ns
+UNION ALL
+SELECT 'tiny_vs_small', sum(id), count(*) FROM narrow WHERE t < s
+UNION ALL
+SELECT 'nullable_tiny_vs_small', sum(id), count(*) FROM narrow WHERE nt > ns
+UNION ALL
+SELECT 'with_integer', sum(id), count(*) FROM narrow WHERE t > -64 AND k < 500 AND s < 0
+UNION ALL
+SELECT 'case_payload', sum(CASE WHEN t > 0 THEN k ELSE k * 2 END), count(*) FROM narrow WHERE s > 0
+UNION ALL
+SELECT 'dec4_gt', sum(id), count(*) FROM narrow WHERE d4 > 0.05
+UNION ALL
+SELECT 'dec4_between_negative', sum(id), count(*) FROM narrow WHERE d4 BETWEEN -50.00 AND -0.01
+UNION ALL
+SELECT 'dec4_extremes', sum(id), count(*) FROM narrow WHERE d4 <= -99.99 OR d4 >= 99.99
+UNION ALL
+SELECT 'dec4_nullable', sum(id), count(*) FROM narrow WHERE nd4 <> 0.33 AND nd4 > -10.00
+UNION ALL
+SELECT 'dec9_lt', sum(id), count(*) FROM narrow WHERE d9 < 500.00
+UNION ALL
+SELECT 'dec9_extremes', sum(id), count(*) FROM narrow WHERE d9 <= -9999999.99 OR d9 >= 9999999.99 OR d9 = 0.00
+UNION ALL
+SELECT 'dec9_nullable_range', sum(id), count(*) FROM narrow WHERE nd9 BETWEEN -1000000.00 AND 2500000.50
+UNION ALL
+SELECT 'dec9_vs_dec9', sum(id), count(*) FROM narrow WHERE d9 > nd9
+UNION ALL
+SELECT 'dec4_vs_dec9', sum(id), count(*) FROM narrow WHERE d4 < d9 AND nd4 >= nd9
+UNION ALL
+SELECT 'dec4_vs_other_scale', sum(id), count(*) FROM narrow WHERE d4 < d93
+UNION ALL
+SELECT 'dec4_vs_narrow_other_scale', sum(id), count(*) FROM narrow WHERE d4 < d53
+UNION ALL
+SELECT 'dec4_vs_wide_other_scale', sum(id), count(*) FROM narrow WHERE d4 > d153
+UNION ALL
+SELECT 'dec_payload', sum(d9), count(*) FROM narrow WHERE d4 > 1.00 AND t < 0
+UNION ALL
+SELECT 'grouped_' || (k % 4), sum(id), count(*) FROM narrow WHERE t BETWEEN -10 AND 90 GROUP BY k % 4
+
+foreach threads 1 4
+
+statement ok
+SET threads={threads}
+
+foreach policy off auto
+
+statement ok
+SET jit_policy='{policy}'
+
+statement ok
+CREATE OR REPLACE TEMP TABLE r_{policy} AS FROM narrow_sums()
+
+endloop
+
+query I
+SELECT count(*) FROM ((SELECT * FROM r_off EXCEPT ALL SELECT * FROM r_auto)
+                      UNION ALL (SELECT * FROM r_auto EXCEPT ALL SELECT * FROM r_off))
+----
+0
+
+query I
+SELECT count(*) FROM r_auto
+----
+36
+
+endloop
+
+# the narrow comparisons compile into generated filters
+statement ok
+SET threads=1
+
+statement ok
+SET jit_trace_runtime=true
+
+statement ok
+SET jit_event_log_size=100
+
+statement ok
+CREATE OR REPLACE TEMP TABLE traced AS
+SELECT sum(id) FROM narrow WHERE s BETWEEN 100 AND 2000
+
+query I
+SELECT count(*) > 0 FROM duckdb_jit_events() WHERE status = 'executed' AND jit_runtime_path_counts LIKE '%filtered%'
+----
+true
