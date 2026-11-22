@@ -62,14 +62,14 @@ GENERIC_WORKLOADS = (
     {
         "name": "range_expr",
         "sql": "SELECT sum(i * 31 + (i % 97)) AS value FROM range(50000000) tbl(i)",
-        "floor": {1: 2.86, 4: 2.82},
-        "ceiling": {1: 290_163_600, 4: 299_300_000},
+        "floor": {1: 3.35, 4: 3.28},
+        "ceiling": {1: 251_300_000, 4: 260_000_000},
         "compiled": {1: True, 4: True},
     },
     {
         "name": "range_filter",
         "sql": "SELECT sum(i * 31 + (i % 97)) AS value FROM range(50000000) tbl(i) WHERE i % 7 = 3",
-        "floor": {1: 2.52, 4: 2.52},
+        "floor": {1: 2.54, 4: 2.55},
         "ceiling": {1: 155_300_000, 4: 155_600_000},
         "compiled": {1: True, 4: True},
     },
@@ -79,8 +79,8 @@ GENERIC_WORKLOADS = (
             "SELECT sum(CASE WHEN i % 11 < 3 THEN i * 31 + i % 97 "
             "ELSE i * 7 - i % 29 END) AS value FROM range(50000000) tbl(i)"
         ),
-        "floor": {1: 3.47, 4: 3.48},
-        "ceiling": {1: 378_000_000, 4: 376_800_000},
+        "floor": {1: 3.97, 4: 3.98},
+        "ceiling": {1: 328_800_000, 4: 334_200_000},
         "compiled": {1: True, 4: True},
     },
     {
@@ -90,8 +90,8 @@ GENERIC_WORKLOADS = (
             "sum(CASE WHEN i % 7 = 3 THEN i ELSE 0 END) AS selected, "
             "count(*) AS row_count FROM range(50000000) tbl(i)"
         ),
-        "floor": {1: 3.03, 4: 3.06},
-        "ceiling": {1: 434_400_000, 4: 432_300_000},
+        "floor": {1: 3.80, 4: 3.82},
+        "ceiling": {1: 347_300_000, 4: 348_600_000},
         "compiled": {1: True, 4: True},
     },
     {
@@ -108,16 +108,16 @@ GENERIC_WORKLOADS = (
         "name": "scan_expr",
         "setup_sql": "CREATE OR REPLACE TABLE __jit_generic_input AS SELECT i FROM range(20000000) tbl(i);",
         "sql": "SELECT sum(i * 31 + (i % 97)) AS value FROM __jit_generic_input",
-        "floor": {1: 1.23, 4: 1.23},
-        "ceiling": {1: 99_800_000, 4: 103_000_000},
+        "floor": {1: 1.23, 4: 1.24},
+        "ceiling": {1: 99_300_000, 4: 101_900_000},
         "compiled": {1: True, 4: True},
     },
     {
         "name": "grouped_scan",
         "setup_sql": "CREATE OR REPLACE TABLE __jit_generic_input AS SELECT i FROM range(20000000) tbl(i);",
         "sql": "SELECT i % 1000 AS key, sum(i * 31) AS value FROM __jit_generic_input GROUP BY key ORDER BY key",
-        "floor": {1: 1.15, 4: 1.06},
-        "ceiling": {1: 200_100_000, 4: 205_000_000},
+        "floor": {1: 1.18, 4: 1.17},
+        "ceiling": {1: 179_500_000, 4: 180_900_000},
         "compiled": {1: True, 4: True},
     },
     {
@@ -126,8 +126,8 @@ GENERIC_WORKLOADS = (
         "sql": "SELECT sum(i * 31 + (i % 97)) AS value FROM __jit_generic_input WHERE i % 7 = 3",
         # The source contract owns this exception-free modulo predicate, so the
         # filter runs fused with the aggregate instead of as a vectorized filter.
-        "floor": {1: 1.97, 4: 1.99},
-        "ceiling": {1: 147_100_000, 4: 150_500_000},
+        "floor": {1: 1.98, 4: 1.99},
+        "ceiling": {1: 146_600_000, 4: 146_700_000},
         "compiled": {1: True, 4: True},
     },
     {
@@ -146,7 +146,7 @@ GENERIC_WORKLOADS = (
             "WHERE event_date >= DATE '2024-04-01' AND event_date < DATE '2024-10-01' "
             "AND amount >= 200 AND status IN ('ACTIVE', 'PENDING')"
         ),
-        "floor": {1: 1.25, 4: 1.32},
+        "floor": {1: 1.26, 4: 1.32},
         "ceiling": {1: 61_200_000, 4: 63_100_000},
         "compiled": {1: True, 4: True},
     },
@@ -167,7 +167,7 @@ GENERIC_WORKLOADS = (
         # Multi-fragment LIKE patterns: exact-candidate verification, selection
         # compaction and paired vector scans with an overlapping tail.
         "floor": {1: 1.55, 4: 1.52},
-        "ceiling": {1: 300_318_120, 4: 300_200_000},
+        "ceiling": {1: 298_200_000, 4: 300_200_000},
         "compiled": {1: True, 4: True},
     },
     {
@@ -188,7 +188,7 @@ GENERIC_WORKLOADS = (
         # The native dictionary filter evaluates the pattern once per distinct comment, which leaves a compiled
         # filter nothing to save: the floor bounds what compiling this shape may cost.
         "floor": {1: 0.96, 4: 0.96},
-        "ceiling": {1: 146_500_000, 4: 150_000_000},
+        "ceiling": {1: 135_700_000, 4: 137_600_000},
         "compiled": {1: True, 4: True},
     },
     {
@@ -215,8 +215,8 @@ GENERIC_WORKLOADS = (
             "SELECT sum(coalesce(value, 7) * 31 + coalesce(value % 97, 0)) AS value "
             "FROM __jit_generic_nullable_input"
         ),
-        "floor": {1: 2.17, 4: 2.12},
-        "ceiling": {1: 189_800_000, 4: 191_900_000},
+        "floor": {1: 2.86, 4: 2.47},
+        "ceiling": {1: 144_000_000, 4: 172_200_000},
         "compiled": {1: True, 4: True},
     },
     {
@@ -232,8 +232,8 @@ GENERIC_WORKLOADS = (
             "coalesce(b % 97, fallback % 97)) AS value "
             "FROM __jit_generic_nullable_multi"
         ),
-        "floor": {1: 1.46, 4: 1.47},
-        "ceiling": {1: 333_400_000, 4: 338_200_000},
+        "floor": {1: 2.14, 4: 2.08},
+        "ceiling": {1: 239_100_000, 4: 244_300_000},
         "compiled": {1: True, 4: True},
     },
     {
@@ -275,8 +275,8 @@ GENERIC_WORKLOADS = (
             "WHERE quantity > 10.00::DECIMAL(15,2) "
             "GROUP BY group_flag, group_status ORDER BY group_flag, group_status"
         ),
-        "floor": {1: 1.64, 4: 1.64},
-        "ceiling": {1: 161_700_000, 4: 165_700_000},
+        "floor": {1: 1.72, 4: 1.69},
+        "ceiling": {1: 154_800_000, 4: 160_100_000},
         "compiled": {1: True, 4: True},
     },
     {
@@ -302,7 +302,7 @@ GENERIC_WORKLOADS = (
         # efficient vectorized primitive without removing expression work, so
         # the CBO keeps this shape vectorized.
         "floor": {1: 0.96, 4: 0.96},
-        "ceiling": {1: 159_200_000, 4: 162_300_000},
+        "ceiling": {1: 156_500_000, 4: 162_300_000},
         "compiled": {1: False, 4: False},
     },
     {
@@ -316,8 +316,8 @@ GENERIC_WORKLOADS = (
             "FROM __jit_generic_selective_groups WHERE event_date <= DATE '2024-01-04' "
             "GROUP BY group_flag, group_status ORDER BY group_flag, group_status"
         ),
-        "floor": {1: 1.72, 4: 1.72},
-        "ceiling": {1: 142_700_000, 4: 147_300_000},
+        "floor": {1: 1.81, 4: 1.72},
+        "ceiling": {1: 135_600_000, 4: 147_300_000},
         "compiled": {1: True, 4: True},
     },
     {
@@ -332,8 +332,8 @@ GENERIC_WORKLOADS = (
             "WHERE event_date <= DATE '2024-01-04' AND tax <= 3.00::DECIMAL(15,2) "
             "GROUP BY group_flag, group_status ORDER BY group_flag, group_status"
         ),
-        "floor": {1: 1.61, 4: 1.58},
-        "ceiling": {1: 127_800_000, 4: 135_200_000},
+        "floor": {1: 1.73, 4: 1.69},
+        "ceiling": {1: 119_300_000, 4: 123_600_000},
         "compiled": {1: True, 4: True},
     },
     {
@@ -350,8 +350,8 @@ GENERIC_WORKLOADS = (
             "AND quantity <= 25.00::DECIMAL(15,2) "
             "GROUP BY group_flag, group_status ORDER BY group_flag, group_status"
         ),
-        "floor": {1: 1.59, 4: 1.60},
-        "ceiling": {1: 119_100_000, 4: 122_700_000},
+        "floor": {1: 1.68, 4: 1.68},
+        "ceiling": {1: 110_100_000, 4: 116_600_000},
         "compiled": {1: True, 4: True},
     },
     {
@@ -408,8 +408,8 @@ GENERIC_WORKLOADS = (
             "FROM __jit_generic_sorted_runs GROUP BY group_id"
             ") grouped"
         ),
-        "floor": {1: 2.20, 4: 2.69},
-        "ceiling": {1: 154_900_000, 4: 163_600_000},
+        "floor": {1: 2.31, 4: 2.76},
+        "ceiling": {1: 148_700_000, 4: 158_600_000},
         "compiled": {1: True, 4: True},
     },
     {
@@ -426,8 +426,8 @@ GENERIC_WORKLOADS = (
         # and use a raw-pointer progression writer, while wide values keep the
         # exact general path. Append-only ownership skips pointer-table resize
         # and capacity-abandon work once uniqueness is proven.
-        "floor": {1: 6.59, 4: 6.20},
-        "ceiling": {1: 260_700_000, 4: 294_200_000},
+        "floor": {1: 6.87, 4: 6.42},
+        "ceiling": {1: 260_700_000, 4: 282_200_000},
         "compiled": {1: True, 4: True},
     },
     {
@@ -472,7 +472,7 @@ GENERIC_WORKLOADS = (
         # projection, or payload vector is published. The finalized filter view
         # is bound once and holds no owning materialization state.
         "floor": {1: 1.35, 4: 1.26},
-        "ceiling": {1: 26_100_000, 4: 30_100_000},
+        "ceiling": {1: 26_100_000, 4: 29_000_000},
         "compiled": {1: True, 4: True},
         "required_runtime_paths": (
             "hash_join_probe.regular_probe.all_valid.flat.single_key.no_chain." "direct_ungrouped_aggregate_consumer=",
@@ -498,8 +498,8 @@ GENERIC_WORKLOADS = (
         # With direct perfect-hash output, an incremental source derives the
         # build index as key-minus-minimum, while all-valid incremental inline
         # groups accumulate at their ordinal without rebinding selections.
-        "floor": {1: 1.31, 4: 1.25},
-        "ceiling": {1: 226_500_000, 4: 238_100_000},
+        "floor": {1: 1.39, 4: 1.38},
+        "ceiling": {1: 195_400_000, 4: 201_800_000},
         "compiled": {1: True, 4: True},
         # This is a physical storage contract, not a query-specific shortcut:
         # wide values are compared as their immutable packed representation.
@@ -525,8 +525,8 @@ GENERIC_WORKLOADS = (
         # Nine recurring groups cross the direct-tier boundary and prove that
         # the runtime-observed ninth key switches the exact accumulator to hash
         # lookup even when persisted NDV statistics underestimate the domain.
-        "floor": {1: 1.32, 4: 1.36},
-        "ceiling": {1: 226_400_000, 4: 241_700_000},
+        "floor": {1: 1.53, 4: 1.56},
+        "ceiling": {1: 198_700_000, 4: 204_200_000},
         "compiled": {1: True, 4: True},
     },
 )
@@ -673,35 +673,35 @@ ENCODINGS_QUERIES = {
 
 # name -> (floor, ceiling) per thread count
 ENCODINGS_THRESHOLDS = {
-    "decimal_double_product": ({1: 0.59}, {1: 258_400_000}),
-    "decimal_grouped": ({1: 0.58}, {1: 320_000_000}),
-    "date_range": ({1: 1.11, 4: 1.09}, {1: 35_900_000, 4: 37_800_000}),
-    "date_year_groups": ({1: 1.07, 4: 1.06}, {1: 115_700_000, 4: 117_600_000}),
-    "dictionary_case": ({1: 0.53, 4: 0.55}, {1: 102_200_000, 4: 105_400_000}),
-    "dictionary_contains": ({1: 0.66, 4: 0.67}, {1: 539_400_000, 4: 537_700_000}),
-    "dictionary_groups": ({1: 0.35, 4: 0.38}, {1: 217_600_000, 4: 219_300_000}),
-    "dictionary_groups_filtered": ({1: 0.52, 4: 0.51}, {1: 164_400_000, 4: 169_500_000}),
-    "nullable_groups": ({1: 0.58, 4: 0.64}, {1: 128_200_000, 4: 125_900_000}),
-    "nullable_min_max": ({1: 0.84, 4: 0.88}, {1: 137_900_000, 4: 133_000_000}),
+    "decimal_double_product": ({1: 0.87}, {1: 172_500_000}),
+    "decimal_grouped": ({1: 0.87}, {1: 210_800_000}),
+    "date_range": ({1: 1.52, 4: 1.48}, {1: 25_700_000, 4: 27_200_000}),
+    "date_year_groups": ({1: 1.07, 4: 1.06}, {1: 115_700_000, 4: 115_800_000}),
+    "dictionary_case": ({1: 0.98, 4: 0.97}, {1: 54_800_000, 4: 56_000_000}),
+    "dictionary_contains": ({1: 0.90, 4: 0.89}, {1: 410_600_000, 4: 406_100_000}),
+    "dictionary_groups": ({1: 0.85, 4: 0.86}, {1: 91_300_000, 4: 91_600_000}),
+    "dictionary_groups_filtered": ({1: 1.12, 4: 1.10}, {1: 75_400_000, 4: 78_700_000}),
+    "nullable_groups": ({1: 1.15, 4: 1.16}, {1: 67_300_000, 4: 67_700_000}),
+    "nullable_min_max": ({1: 1.29, 4: 0.88}, {1: 90_800_000, 4: 129_400_000}),
     "narrow_integers": ({1: 2.05, 4: 1.94}, {1: 40_100_000, 4: 42_600_000}),
-    "double_filter": ({1: 0.57}, {1: 115_100_000}),
-    "dimension_join": ({1: 0.77, 4: 0.76}, {1: 75_400_000, 4: 76_200_000}),
-    "dimension_string_groups": ({1: 0.31, 4: 0.31}, {1: 277_900_000, 4: 284_300_000}),
-    "semi_join": ({1: 0.87, 4: 0.87}, {1: 73_900_000, 4: 75_100_000}),
+    "double_filter": ({1: 0.87}, {1: 73_200_000}),
+    "dimension_join": ({1: 0.82, 4: 0.80}, {1: 68_600_000, 4: 75_100_000}),
+    "dimension_string_groups": ({1: 0.85, 4: 0.85}, {1: 99_700_000, 4: 105_000_000}),
+    "semi_join": ({1: 0.88, 4: 0.88}, {1: 72_600_000, 4: 75_100_000}),
     "anti_join": ({1: 1.37, 4: 1.36}, {1: 57_800_000, 4: 59_200_000}),
-    "integer_in_list": ({1: 1.23, 4: 1.23}, {1: 57_500_000, 4: 60_100_000}),
-    "dictionary_or_nullable": ({1: 0.73, 4: 0.74}, {1: 99_300_000, 4: 99_100_000}),
-    "nullable_coalesce": ({1: 1.34, 4: 1.28}, {1: 61_900_000, 4: 61_700_000}),
-    "modulo_groups": ({1: 1.11, 4: 1.08}, {1: 102_100_000, 4: 103_000_000}),
-    "distinct_count": ({1: 1.06, 4: 0.88}, {1: 91_900_000, 4: 108_600_000}),
-    "filtered_top_n": ({1: 0.81, 4: 0.87}, {1: 55_100_000, 4: 53_500_000}),
+    "integer_in_list": ({1: 1.27, 4: 1.23}, {1: 55_000_000, 4: 56_400_000}),
+    "dictionary_or_nullable": ({1: 0.91, 4: 0.93}, {1: 77_500_000, 4: 77_300_000}),
+    "nullable_coalesce": ({1: 1.50, 4: 1.44}, {1: 52_300_000, 4: 53_800_000}),
+    "modulo_groups": ({1: 1.20, 4: 1.17}, {1: 91_900_000, 4: 92_300_000}),
+    "distinct_count": ({1: 1.23, 4: 0.88}, {1: 75_100_000, 4: 106_200_000}),
+    "filtered_top_n": ({1: 0.84, 4: 0.87}, {1: 55_100_000, 4: 53_500_000}),
     "dictionary_prefix": ({1: 0.88, 4: 0.89}, {1: 466_400_000, 4: 460_800_000}),
-    "integer_case": ({1: 0.87, 4: 0.88}, {1: 76_400_000, 4: 79_300_000}),
+    "integer_case": ({1: 0.88, 4: 0.88}, {1: 74_200_000, 4: 74_600_000}),
     "narrow_between": ({1: 1.28, 4: 1.22}, {1: 15_400_000, 4: 17_500_000}),
-    "nullable_key_join": ({1: 0.89, 4: 0.89}, {1: 570_500_000, 4: 574_000_000}),
-    "random_key_groups": ({1: 0.89, 4: 0.89}, {1: 234_900_000, 4: 422_100_000}),
-    "random_key_counts": ({1: 0.89, 4: 0.89}, {1: 202_000_000, 4: 399_100_000}),
-    "random_multi_key_groups": ({1: 0.89, 4: 0.89}, {1: 997_500_000, 4: 1_255_600_000}),
+    "nullable_key_join": ({1: 0.89, 4: 0.89}, {1: 570_500_000, 4: 572_400_000}),
+    "random_key_groups": ({1: 0.89, 4: 0.89}, {1: 234_900_000, 4: 417_100_000}),
+    "random_key_counts": ({1: 0.89, 4: 0.89}, {1: 202_000_000, 4: 390_900_000}),
+    "random_multi_key_groups": ({1: 0.89, 4: 0.89}, {1: 997_500_000, 4: 1_253_200_000}),
 }
 
 ENCODINGS_WORKLOADS = tuple(
@@ -718,28 +718,28 @@ ENCODINGS_WORKLOADS = tuple(
 
 # TPC-H at scale factor 10: query -> (floor, ceiling) on one thread
 TPCH_THRESHOLDS = {
-    "01": (1.98, 1_366_800_000),
-    "02": (0.98, 125_200_000),
-    "03": (1.36, 1_371_800_000),
-    "04": (1.15, 865_200_000),
-    "05": (1.05, 1_206_100_000),
-    "06": (2.41, 512_600_000),
-    "07": (0.99, 1_922_900_000),
-    "08": (1.44, 808_100_000),
-    "09": (1.33, 4_030_600_000),
-    "10": (0.98, 2_034_600_000),
-    "11": (0.98, 233_900_000),
-    "12": (1.23, 1_328_000_000),
-    "13": (1.83, 3_156_500_000),
-    "14": (1.22, 942_100_000),
-    "15": (1.42, 763_300_000),
-    "16": (0.98, 564_100_000),
-    "17": (1.08, 696_400_000),
-    "18": (2.40, 1_817_500_000),
+    "01": (2.00, 1_329_700_000),
+    "02": (0.98, 121_400_000),
+    "03": (1.37, 1_334_400_000),
+    "04": (1.23, 800_800_000),
+    "05": (1.09, 1_118_600_000),
+    "06": (2.47, 485_900_000),
+    "07": (1.05, 1_762_200_000),
+    "08": (1.44, 800_700_000),
+    "09": (1.33, 4_029_300_000),
+    "10": (0.98, 1_967_500_000),
+    "11": (0.98, 226_700_000),
+    "12": (1.23, 1_287_800_000),
+    "13": (1.88, 3_019_800_000),
+    "14": (1.24, 838_100_000),
+    "15": (1.42, 718_100_000),
+    "16": (0.98, 559_100_000),
+    "17": (1.10, 637_500_000),
+    "18": (2.40, 1_681_100_000),
     "19": (2.41, 742_400_000),
-    "20": (1.40, 1_286_300_000),
-    "21": (0.98, 2_809_000_000),
-    "22": (1.05, 582_883_276),
+    "20": (1.41, 1_218_000_000),
+    "21": (0.98, 2_734_000_000),
+    "22": (1.06, 575_500_000),
 }
 TPCH_QUERY_DIRECTORY = Path(__file__).resolve().parents[2] / "extension" / "tpch" / "dbgen" / "queries"
 
