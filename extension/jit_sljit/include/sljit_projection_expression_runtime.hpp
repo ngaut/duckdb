@@ -86,11 +86,9 @@ static void SljitExecuteProjectionExpression(SljitExecutableRegionExpression &ex
 		validity_t *result_validity_data = result_validity.GetData();
 
 		native_input.execute_sel = execute_sel ? execute_sel->data() : nullptr;
-		// The generated tree stores its root in the root's physical layout: a narrow DECIMAL128 root (the only INT128
-		// typed-tree result) is sign-extended into hugeint elements.
-		native_input.result_data = plan.return_type.InternalType() == PhysicalType::INT128
-		                               ? reinterpret_cast<data_ptr_t>(FlatVector::GetDataMutable<hugeint_t>(result))
-		                               : NativeIntegerResultData(result, plan.integer_kind);
+		// The generated tree stores its root in the root's physical layout: a narrow DECIMAL128 root is sign-extended
+		// into hugeint elements, a DOUBLE root stores its bits
+		native_input.result_data = FlatVector::GetDataMutable(result);
 		native_input.result_validity = result_validity_data;
 		native_input.count = count;
 		SljitExecuteNativeFunction(expr.vector.Function(), native_input);

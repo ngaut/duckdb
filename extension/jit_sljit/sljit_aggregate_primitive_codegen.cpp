@@ -144,6 +144,9 @@ void EmitSljitAggregateAccumulateSumState(struct sljit_compiler *compiler, Sljit
 	if (state_kind == SljitNativeAggregateSumStateKind::HUGEINT) {
 		EmitSljitAggregateAccumulateHugeintInt64(compiler, local_lower_offset, local_upper_offset, saw_value_offset,
 		                                         value_reg);
+	} else if (state_kind == SljitNativeAggregateSumStateKind::DOUBLE) {
+		sljit_emit_fcopy(compiler, SLJIT_COPY_TO_F64, SLJIT_FR0, value_reg);
+		EmitSljitAggregateAccumulateDouble(compiler, local_lower_offset, saw_value_offset, SLJIT_FR0);
 	} else {
 		EmitSljitAggregateAccumulateInt64(compiler, SljitOperand::Stack(local_lower_offset),
 		                                  SljitOperand::Stack(saw_value_offset), value_reg);
@@ -155,6 +158,8 @@ void EmitSljitAggregateCommitSumState(struct sljit_compiler *compiler, SljitNati
                                       sljit_sw saw_value_offset) {
 	if (state_kind == SljitNativeAggregateSumStateKind::HUGEINT) {
 		EmitSljitAggregateCommitHugeint(compiler, local_lower_offset, local_upper_offset, saw_value_offset);
+	} else if (state_kind == SljitNativeAggregateSumStateKind::DOUBLE) {
+		EmitSljitAggregateCommitDouble(compiler, local_lower_offset, saw_value_offset);
 	} else {
 		EmitSljitAggregateCommitInt64(compiler, SljitOperand::Stack(local_lower_offset),
 		                              SljitOperand::Stack(saw_value_offset));

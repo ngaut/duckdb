@@ -22,10 +22,25 @@ static bool SljitTypedExpressionTreeIsArithmeticNode(const ExecutionExpressionIR
 	return SljitTypedExpressionTreeIsIntegerNode(node) || SljitTypedExpressionTreeIsRegisterDecimalNode(node);
 }
 
-//! A signed INTEGER/BIGINT or a DECIMAL stored in 64 bits: its negation is the subtraction of its raw value from zero
+//! A signed INTEGER/BIGINT or a DECIMAL stored in 64 bits, whose negation is the subtraction of its raw value from
+//! zero, or a DOUBLE, whose negation flips its sign
 static bool SljitTypedExpressionTreeIsNegatableNode(const ExecutionExpressionIR &node) {
 	return (SljitTypedExpressionTreeIsIntegerNode(node) && node.return_type.IsIntegral()) ||
-	       SljitTypedExpressionTreeIsDecimal64Node(node);
+	       SljitTypedExpressionTreeIsDecimal64Node(node) || SljitTypedExpressionTreeIsDoubleNode(node);
+}
+
+//! DuckDB adds, subtracts and multiplies DOUBLEs with plain IEEE arithmetic that raises no error
+static bool SljitTypedExpressionTreeDoubleArithmeticSupported(const ExecutionExpressionIR &node) {
+	switch (node.binary_op) {
+	case ExecutionExpressionBinaryOp::ADD:
+	case ExecutionExpressionBinaryOp::SUBTRACT:
+	case ExecutionExpressionBinaryOp::MULTIPLY:
+		break;
+	default:
+		return false;
+	}
+	return SljitTypedExpressionTreeIsDoubleNode(node) && SljitTypedExpressionTreeIsDoubleNode(*node.left) &&
+	       SljitTypedExpressionTreeIsDoubleNode(*node.right);
 }
 
 static bool SljitTypedExpressionTreeSameArithmeticKind(const ExecutionExpressionIR &left,
@@ -325,6 +340,9 @@ bool SljitTypedExpressionTreeIsSupported(const ExecutionExpressionIR &node) {
 		if (SljitTypedExpressionTreeConstantDivisorReductionSupported(node)) {
 			return true;
 		}
+		if (SljitTypedExpressionTreeDoubleArithmeticSupported(node)) {
+			return SljitTypedExpressionTreeIsSupported(*node.left) && SljitTypedExpressionTreeIsSupported(*node.right);
+		}
 		return SljitTypedExpressionTreeIsArithmeticNode(node) &&
 		       SljitTypedExpressionTreeSameArithmeticKind(node, *node.left) &&
 		       SljitTypedExpressionTreeSameArithmeticKind(node, *node.right) &&
@@ -564,6 +582,7 @@ SljitTypedExpressionTreePlan BuildSljitTypedExpressionTreePlan(const ExecutionEx
 	result.result_is_bool = SljitTypedExpressionTreeIsBoolNode(root);
 	result.result_is_int64 =
 	    SljitTypedExpressionTreeIsInt64Node(root) || SljitTypedExpressionTreeIsRegisterDecimalNode(root);
+	result.result_is_double = SljitTypedExpressionTreeIsDoubleNode(root);
 	result.node_count = CountSljitTypedExpressionTreeNodes(root);
 	result.fast_path = BuildSljitTypedExpressionTreeFastPathPlan(root, emit_flat_nullable_fast_path);
 	return result;

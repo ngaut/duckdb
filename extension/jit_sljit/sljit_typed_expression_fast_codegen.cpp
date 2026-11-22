@@ -114,6 +114,10 @@ static void EmitSljitTypedExpressionTreeFastBinaryOpReg(struct sljit_compiler *c
 		sljit_emit_op_flags(compiler, SLJIT_MOV, target_reg, 0, condition);
 		return;
 	}
+	if (SljitTypedExpressionTreeIsDoubleNode(node)) {
+		EmitSljitTypedExpressionTreeDoubleBinary(compiler, node.binary_op, target_reg, left_reg, right_reg);
+		return;
+	}
 	if (node.binary_op == ExecutionExpressionBinaryOp::MODULO ||
 	    node.binary_op == ExecutionExpressionBinaryOp::INTEGER_DIVIDE) {
 		// left_reg holds the dividend and is never R0/R1 here (the fast path only parks live values in R2-R4 and on

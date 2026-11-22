@@ -80,14 +80,16 @@ static void SljitExecuteUngroupedCombinedSourceAggregateUpdate(
 			continue;
 		}
 		if (lane.kind != AggregatePrimitiveUpdateKind::SUM_INT64 &&
-		    lane.kind != AggregatePrimitiveUpdateKind::SUM_HUGEINT) {
+		    lane.kind != AggregatePrimitiveUpdateKind::SUM_HUGEINT &&
+		    lane.kind != AggregatePrimitiveUpdateKind::SUM_DOUBLE) {
 			throw InternalException("SLJIT ungrouped aggregate kernel lane has unsupported state kind");
 		}
 		if (payloads[payload_idx].plan.return_type.InternalType() != lane.payload_type) {
 			throw InternalException("SLJIT ungrouped aggregate kernel payload type mismatch");
 		}
 		SljitBindUngroupedSumPrimitiveLane(lane, aggregate_int64_values, aggregate_hugeint_values,
-		                                   aggregate_state_is_sets, aggregate_row_counts, payload_idx,
+		                                   adapter_scratch.aggregate_double_values, aggregate_state_is_sets,
+		                                   aggregate_row_counts, payload_idx,
 		                                   "SLJIT ungrouped aggregate kernel lane is incomplete: %s");
 	}
 
@@ -143,6 +145,7 @@ static void SljitExecuteUngroupedCombinedSourceAggregateUpdate(
 	}
 	native_input.aggregate_int64_values = aggregate_int64_values.data();
 	native_input.aggregate_hugeint_values = aggregate_hugeint_values.data();
+	native_input.aggregate_double_values = adapter_scratch.aggregate_double_values.data();
 	native_input.aggregate_state_is_sets = aggregate_state_is_sets.data();
 	native_input.aggregate_row_counts = aggregate_row_counts.data();
 	native_input.count = count;

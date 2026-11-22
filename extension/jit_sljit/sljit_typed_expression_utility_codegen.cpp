@@ -44,6 +44,13 @@ void EmitStoreSljitTypedExpressionTreeBool(struct sljit_compiler *compiler, cons
 	EmitStoreSljitTypedExpressionTreeSlot(compiler, slot, SLJIT_R2, SLJIT_R3);
 }
 
+//! A double's bits, as the trees hold a DOUBLE value or a floating-point comparison's constant
+static int64_t SljitDoubleBits(double value) {
+	int64_t bits;
+	memcpy(&bits, &value, sizeof(bits));
+	return bits;
+}
+
 int64_t SljitTypedExpressionTreeConstantValue(const ExecutionExpressionIR &node) {
 	if (node.constant.IsNull()) {
 		return 0;
@@ -56,6 +63,9 @@ int64_t SljitTypedExpressionTreeConstantValue(const ExecutionExpressionIR &node)
 	}
 	if (SljitTypedExpressionTreeIsInt32Node(node)) {
 		return node.constant.GetValueUnsafe<int32_t>();
+	}
+	if (SljitTypedExpressionTreeIsDoubleNode(node)) {
+		return SljitDoubleBits(node.constant.GetValueUnsafe<double>());
 	}
 	if (SljitTypedExpressionTreeIsNarrowDecimal128Node(node)) {
 		// The narrow-DECIMAL128 plan proved |value| <= INT64_MAX, so the hugeint payload narrows exactly.
@@ -90,8 +100,35 @@ SljitIntegerOverflowChecks SljitTypedExpressionTreeOverflowChecks(const Executio
 	return checks;
 }
 
+void EmitSljitTypedExpressionTreeDoubleBinary(struct sljit_compiler *compiler, ExecutionExpressionBinaryOp op,
+                                              sljit_s32 target_reg, sljit_s32 left_reg, sljit_s32 right_reg) {
+	sljit_s32 fop;
+	switch (op) {
+	case ExecutionExpressionBinaryOp::ADD:
+		fop = SLJIT_ADD_F64;
+		break;
+	case ExecutionExpressionBinaryOp::SUBTRACT:
+		fop = SLJIT_SUB_F64;
+		break;
+	case ExecutionExpressionBinaryOp::MULTIPLY:
+		fop = SLJIT_MUL_F64;
+		break;
+	default:
+		throw InternalException("Unsupported SLJIT typed expression-tree DOUBLE operator");
+	}
+	sljit_emit_fcopy(compiler, SLJIT_COPY_TO_F64, SLJIT_FR0, left_reg);
+	sljit_emit_fcopy(compiler, SLJIT_COPY_TO_F64, SLJIT_FR1, right_reg);
+	sljit_emit_fop2(compiler, fop, SLJIT_FR0, 0, SLJIT_FR0, 0, SLJIT_FR1, 0);
+	sljit_emit_fcopy(compiler, SLJIT_COPY_FROM_F64, SLJIT_FR0, target_reg);
+}
+
 void EmitSljitTypedExpressionTreeNegate(struct sljit_compiler *compiler, const ExecutionExpressionIR &node,
                                         sljit_s32 value_reg, vector<SljitArithmeticOverflowSite> &overflows) {
+	if (SljitTypedExpressionTreeIsDoubleNode(node)) {
+		sljit_emit_op2(compiler, SLJIT_XOR, value_reg, 0, value_reg, 0, SLJIT_IMM,
+		               static_cast<sljit_sw>(NumericLimits<int64_t>::Minimum()));
+		return;
+	}
 	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_R1, 0, SLJIT_IMM, 0);
 	EmitSljitCheckedIntegerBinaryOp(compiler, SljitTypedExpressionTreeIntegerKind(node),
 	                                SljitNativeIntegerBinaryOp::SUBTRACT, value_reg, SLJIT_R1, value_reg,
@@ -155,13 +192,6 @@ static void AddSljitTypedExpressionTreeConstantHoist(int64_t value, vector<Sljit
 	hoist.location = SljitOperand::Stack(local_size);
 	local_size += NumericCast<sljit_sw>(sizeof(sljit_sw));
 	hoists.push_back(hoist);
-}
-
-//! A double's bits, which a constant hoist holds for a floating-point comparison
-static int64_t SljitDoubleBits(double value) {
-	int64_t bits;
-	memcpy(&bits, &value, sizeof(bits));
-	return bits;
 }
 
 static void CollectSljitTypedExpressionTreeConstantHoists(const ExecutionExpressionIR &node,

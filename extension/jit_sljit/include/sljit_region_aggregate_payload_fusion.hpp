@@ -41,6 +41,11 @@ static bool SljitPrimitiveAggregatePayloadSupported(SljitNativeRegionExpressionP
 		case SljitNativeRegionExpressionKind::DOUBLE_BINARY_CONSTANT:
 		case SljitNativeRegionExpressionKind::DOUBLE_BINARY_REFERENCES:
 			return !grouped_state;
+		case SljitNativeRegionExpressionKind::TYPED_EXPRESSION_TREE:
+			// the ungrouped kernel adds a DOUBLE tree's rows to the state in source order
+			return !grouped_state && payload.expression_tree &&
+			       SljitAggregateTypedPayloadPlanSupported(
+			           BuildSljitTypedExpressionTreePlan(*payload.expression_tree, false), descriptor);
 		default:
 			return false;
 		}

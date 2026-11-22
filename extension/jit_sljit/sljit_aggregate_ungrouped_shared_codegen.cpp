@@ -9,6 +9,7 @@
 #include "sljit_aggregate_ungrouped_shared_codegen.hpp"
 
 #include "duckdb/common/types/hugeint.hpp"
+#include "sljit_aggregate_primitive_codegen.hpp"
 #include "sljit_codegen_util.hpp"
 
 namespace duckdb {
@@ -66,9 +67,36 @@ void EmitUngroupedAggregateCommitSumInt64(struct sljit_compiler *compiler, idx_t
 	EmitUngroupedAggregateCommitSumInt64(compiler, lane_idx, local_sum_offset, saw_value_offset, SLJIT_S2);
 }
 
+void EmitUngroupedAggregateLoadDoubleSum(struct sljit_compiler *compiler, idx_t lane_idx, sljit_sw local_sum_offset) {
+	EmitLoadUngroupedAggregatePointer(compiler, offsetof(SljitNativeVectorInput, aggregate_double_values), lane_idx,
+	                                  SLJIT_R0);
+	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_R1, 0, SLJIT_MEM1(SLJIT_R0), 0);
+	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_MEM1(SLJIT_SP), local_sum_offset, SLJIT_R1, 0);
+}
+
+void EmitUngroupedAggregateCommitSumDouble(struct sljit_compiler *compiler, idx_t lane_idx, sljit_sw local_sum_offset,
+                                           sljit_sw saw_value_offset, sljit_s32 count_reg) {
+	EmitUngroupedAggregateAddRowCount(compiler, lane_idx, count_reg);
+	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_R2, 0, SLJIT_MEM1(SLJIT_SP), saw_value_offset);
+	auto no_value = sljit_emit_cmp(compiler, SLJIT_EQUAL, SLJIT_R2, 0, SLJIT_IMM, 0);
+	EmitLoadUngroupedAggregatePointer(compiler, offsetof(SljitNativeVectorInput, aggregate_double_values), lane_idx,
+	                                  SLJIT_R0);
+	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_R1, 0, SLJIT_MEM1(SLJIT_SP), local_sum_offset);
+	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_MEM1(SLJIT_R0), 0, SLJIT_R1, 0);
+	EmitLoadUngroupedAggregatePointer(compiler, offsetof(SljitNativeVectorInput, aggregate_state_is_sets), lane_idx,
+	                                  SLJIT_R0);
+	sljit_emit_op1(compiler, SLJIT_MOV_U8, SLJIT_MEM1(SLJIT_R0), 0, SLJIT_IMM, 1);
+	sljit_set_label(no_value, sljit_emit_label(compiler));
+}
+
 void EmitUngroupedAggregateAccumulate(struct sljit_compiler *compiler, AggregatePrimitiveUpdateKind kind,
                                       sljit_sw local_lower_offset, sljit_sw local_upper_offset,
                                       sljit_sw saw_value_offset, sljit_s32 value_reg) {
+	if (kind == AggregatePrimitiveUpdateKind::SUM_DOUBLE) {
+		sljit_emit_fcopy(compiler, SLJIT_COPY_TO_F64, SLJIT_FR0, value_reg);
+		EmitSljitAggregateAccumulateDouble(compiler, local_lower_offset, saw_value_offset, SLJIT_FR0);
+		return;
+	}
 	if (kind == AggregatePrimitiveUpdateKind::SUM_HUGEINT) {
 		EmitSljitAggregateAccumulateHugeintInt64(compiler, local_lower_offset, local_upper_offset, saw_value_offset,
 		                                         value_reg);

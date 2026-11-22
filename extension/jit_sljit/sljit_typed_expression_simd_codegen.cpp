@@ -156,7 +156,8 @@ static bool SljitSimdComparisonOperation(ExecutionExpressionBinaryOp op, sljit_s
 // element is 16 bytes wide, so it has no packed lane.
 static bool SljitSimdNodeScale(const ExecutionExpressionIR &node, sljit_s32 &scale) {
 	SljitNativeIntegerKind kind;
-	if (SljitTypedExpressionTreeIsNarrowDecimal128Node(node) || !TryGetSljitTypedExpressionTreeResultKind(node, kind)) {
+	if (SljitTypedExpressionTreeIsNarrowDecimal128Node(node) || SljitTypedExpressionTreeIsDoubleNode(node) ||
+	    !TryGetSljitTypedExpressionTreeResultKind(node, kind)) {
 		return false;
 	}
 	auto data_scale = NativeIntegerDataScale(kind);

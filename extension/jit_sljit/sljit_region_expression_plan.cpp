@@ -20,8 +20,8 @@ namespace duckdb {
 static constexpr int64_t SLJIT_DATE_MIN_DAYS = -2147483646;
 static constexpr int64_t SLJIT_DATE_MAX_DAYS = 2147483646;
 
-bool TryReadNativeRegionExpression(const ExecutionExpressionIR &root, bool require_boolean,
-                                   SljitNativeRegionExpressionPlan &expr) {
+static bool TryReadNativeRegionExpressionKind(const ExecutionExpressionIR &root, bool require_boolean,
+                                              SljitNativeRegionExpressionPlan &expr) {
 	if (!require_boolean && root.kind == ExecutionExpressionIRKind::CONSTANT) {
 		expr.kind = SljitNativeRegionExpressionKind::CONSTANT;
 		expr.return_type = root.return_type;
@@ -234,6 +234,23 @@ bool TryReadNativeRegionExpression(const ExecutionExpressionIR &root, bool requi
 	return TryBuildSljitNativeTypedExpressionTreePlan(root, expr);
 }
 
+//! Every plan carries the typed expression tree of its expression when the trees evaluate it, so the kernels that
+//! evaluate trees take any plan
+bool TryReadNativeRegionExpression(const ExecutionExpressionIR &root, bool require_boolean,
+                                   SljitNativeRegionExpressionPlan &expr) {
+	if (!TryReadNativeRegionExpressionKind(root, require_boolean, expr)) {
+		return false;
+	}
+	if (!expr.expression_tree) {
+		SljitNativeRegionExpressionPlan expression_tree;
+		if (TryBuildSljitNativeTypedExpressionTreePlan(root, expression_tree)) {
+			expr.expression_tree = std::move(expression_tree.expression_tree);
+			expr.expression_tree_source_indices = std::move(expression_tree.expression_tree_source_indices);
+		}
+	}
+	return true;
+}
+
 static bool SljitExpressionIRCannotThrow(const ExecutionExpressionIR &node) {
 	if (node.exception_behavior != ExecutionExpressionExceptionKind::NONE &&
 	    node.exception_behavior != ExecutionExpressionExceptionKind::NULL_ON_CAST_ERROR) {
@@ -349,20 +366,6 @@ bool TryLowerNativeRegionExpression(const ExecutionExpressionFragment &fragment,
 			error += ";ir=" + fragment.ir;
 		}
 		return false;
-	}
-	if (!expr.expression_tree && require_boolean) {
-		SljitNativeRegionExpressionPlan expression_tree;
-		if (TryBuildSljitNativeTypedExpressionTreePlan(root, expression_tree)) {
-			expr.expression_tree = std::move(expression_tree.expression_tree);
-			expr.expression_tree_source_indices = std::move(expression_tree.expression_tree_source_indices);
-		}
-	}
-	if (!require_boolean && !expr.expression_tree) {
-		SljitNativeRegionExpressionPlan expression_tree;
-		if (TryBuildSljitNativeTypedExpressionTreePlan(root, expression_tree)) {
-			expr.expression_tree = std::move(expression_tree.expression_tree);
-			expr.expression_tree_source_indices = std::move(expression_tree.expression_tree_source_indices);
-		}
 	}
 	expr.cannot_throw = SljitExpressionIRCannotThrow(root);
 	if (render_diagnostics) {

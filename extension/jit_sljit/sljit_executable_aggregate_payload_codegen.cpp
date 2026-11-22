@@ -141,6 +141,9 @@ bool SljitBuildExecutableAggregateUpdateFallbackPayloadCode(const SljitNativeAgg
 				} else if (primitive_kind == AggregatePrimitiveUpdateKind::SUM_HUGEINT) {
 					code = BuildSljitNativeUngroupedSumHugeintTypedExpressionTree(
 					    *payload.expression_tree, function, error, payload.emit_flat_nullable_fast_path);
+				} else if (primitive_kind == AggregatePrimitiveUpdateKind::SUM_DOUBLE) {
+					code = BuildSljitNativeUngroupedSumDoubleTypedExpressionTree(
+					    *payload.expression_tree, function, error, payload.emit_flat_nullable_fast_path);
 				} else {
 					error = "SLJIT aggregate typed expression-tree reducer has no primitive state kind";
 					return false;

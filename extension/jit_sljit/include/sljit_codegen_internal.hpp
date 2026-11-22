@@ -144,7 +144,10 @@ void EmitSljitTypedExpressionTreeIntegerDivide(struct sljit_compiler *compiler, 
                                                sljit_s32 result_reg,
                                                const vector<SljitTypedExpressionTreeLoopHoist> *hoists = nullptr);
 SljitIntegerOverflowChecks SljitTypedExpressionTreeOverflowChecks(const ExecutionExpressionIR &node);
-//! Negates the value in value_reg in place: subtracts it from zero, held in R1
+//! Combines the DOUBLE bits in left_reg and right_reg into target_reg through FR0 and FR1
+void EmitSljitTypedExpressionTreeDoubleBinary(struct sljit_compiler *compiler, ExecutionExpressionBinaryOp op,
+                                              sljit_s32 target_reg, sljit_s32 left_reg, sljit_s32 right_reg);
+//! Negates the value in value_reg in place: flips a DOUBLE's sign, or subtracts an integer from zero, held in R1
 void EmitSljitTypedExpressionTreeNegate(struct sljit_compiler *compiler, const ExecutionExpressionIR &node,
                                         sljit_s32 value_reg, vector<SljitArithmeticOverflowSite> &overflows);
 void SetSljitJumpLabels(const vector<sljit_jump *> &jumps, sljit_label *label);
@@ -200,7 +203,8 @@ SljitTypedExpressionTreeSlot EmitSljitTypedExpressionTreeCase(struct sljit_compi
                                                               vector<SljitArithmeticOverflowSite> &overflows,
                                                               const vector<idx_t> *known_valid_sources = nullptr);
 
-enum class SljitNativeAggregateSumStateKind : uint8_t { INT64, HUGEINT };
+//! DOUBLE adds each row to the state's running value in source order
+enum class SljitNativeAggregateSumStateKind : uint8_t { INT64, HUGEINT, DOUBLE };
 
 static constexpr sljit_sw SLJIT_DATE_NEGATIVE_INFINITY_DAYS = -2147483647;
 static constexpr sljit_sw SLJIT_DATE_POSITIVE_INFINITY_DAYS = 2147483647;

@@ -142,6 +142,9 @@ bool SljitAggregateTypedPayloadPlanSupported(const SljitTypedExpressionTreePlan 
 	if (!payload_plan.supported) {
 		return false;
 	}
+	if (descriptor.typed_payload_kind == SljitAggregateTypedPayloadKind::DOUBLE) {
+		return descriptor.primitive_kind == AggregatePrimitiveUpdateKind::SUM_DOUBLE && payload_plan.result_is_double;
+	}
 	SljitNativeIntegerKind aggregate_payload_kind;
 	return descriptor.TryGetTypedIntegerKind(aggregate_payload_kind) &&
 	       payload_plan.result_kind == aggregate_payload_kind;

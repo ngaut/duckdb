@@ -23,6 +23,12 @@ void EmitUngroupedAggregateCommitSumInt64(struct sljit_compiler *compiler, idx_t
                                           sljit_sw saw_value_offset, sljit_s32 count_reg);
 void EmitUngroupedAggregateCommitSumInt64(struct sljit_compiler *compiler, idx_t lane_idx, sljit_sw local_sum_offset,
                                           sljit_sw saw_value_offset);
+//! A DOUBLE sum's running value starts from the state, so the chunk's rows add to it in source order as DuckDB's sum
+//! adds them
+void EmitUngroupedAggregateLoadDoubleSum(struct sljit_compiler *compiler, idx_t lane_idx, sljit_sw local_sum_offset);
+void EmitUngroupedAggregateCommitSumDouble(struct sljit_compiler *compiler, idx_t lane_idx, sljit_sw local_sum_offset,
+                                           sljit_sw saw_value_offset, sljit_s32 count_reg);
+//! Adds the value in value_reg (a DOUBLE's bits for a DOUBLE sum) to the running sum and marks it seen
 void EmitUngroupedAggregateAccumulate(struct sljit_compiler *compiler, AggregatePrimitiveUpdateKind kind,
                                       sljit_sw local_lower_offset, sljit_sw local_upper_offset,
                                       sljit_sw saw_value_offset, sljit_s32 value_reg);

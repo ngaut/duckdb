@@ -48,6 +48,10 @@ bool SljitTypedExpressionTreeIsDecimal64Node(const ExecutionExpressionIR &node) 
 	return node.return_type.id() == LogicalTypeId::DECIMAL && node.physical_type == PhysicalType::INT64;
 }
 
+bool SljitTypedExpressionTreeIsDoubleNode(const ExecutionExpressionIR &node) {
+	return node.return_type.id() == LogicalTypeId::DOUBLE && node.physical_type == PhysicalType::DOUBLE;
+}
+
 static bool SljitTypedExpressionTreeIsUInt8Node(const ExecutionExpressionIR &node) {
 	return node.return_type.id() == LogicalTypeId::UTINYINT && node.physical_type == PhysicalType::UINT8;
 }
@@ -156,7 +160,8 @@ bool SljitTypedExpressionTreeIsNarrowDecimal128Node(const ExecutionExpressionIR 
 bool SljitTypedExpressionTreeIsValueNode(const ExecutionExpressionIR &node) {
 	return SljitTypedExpressionTreeIsInt64Node(node) || SljitTypedExpressionTreeIsInt32Node(node) ||
 	       SljitTypedExpressionTreeIsBoolNode(node) || SljitTypedExpressionTreeIsDecimal64Node(node) ||
-	       SljitTypedExpressionTreeIsUInt8Node(node) || SljitTypedExpressionTreeIsNarrowDecimal128Node(node);
+	       SljitTypedExpressionTreeIsUInt8Node(node) || SljitTypedExpressionTreeIsNarrowDecimal128Node(node) ||
+	       SljitTypedExpressionTreeIsDoubleNode(node);
 }
 
 bool SljitTypedExpressionTreeIsIntegerNode(const ExecutionExpressionIR &node) {
@@ -174,7 +179,8 @@ bool SljitTypedExpressionTreeSameValueKind(const ExecutionExpressionIR &left, co
 	       (SljitTypedExpressionTreeIsBoolNode(left) && SljitTypedExpressionTreeIsBoolNode(right)) ||
 	       (SljitTypedExpressionTreeIsDecimal64Node(left) && SljitTypedExpressionTreeIsDecimal64Node(right)) ||
 	       (SljitTypedExpressionTreeIsNarrowDecimal128Node(left) &&
-	        SljitTypedExpressionTreeIsNarrowDecimal128Node(right));
+	        SljitTypedExpressionTreeIsNarrowDecimal128Node(right)) ||
+	       (SljitTypedExpressionTreeIsDoubleNode(left) && SljitTypedExpressionTreeIsDoubleNode(right));
 }
 
 static bool TryGetSljitTypedExpressionTreeIntegerKind(const ExecutionExpressionIR &node, SljitNativeIntegerKind &kind) {
@@ -194,7 +200,9 @@ static bool TryGetSljitTypedExpressionTreeIntegerKind(const ExecutionExpressionI
 		kind = SljitNativeIntegerKind::DECIMAL64;
 		return true;
 	}
-	if (SljitTypedExpressionTreeIsInt64Node(node) || SljitTypedExpressionTreeIsNarrowDecimal128Node(node)) {
+	// a DOUBLE's bits load, move and store as one machine word
+	if (SljitTypedExpressionTreeIsInt64Node(node) || SljitTypedExpressionTreeIsNarrowDecimal128Node(node) ||
+	    SljitTypedExpressionTreeIsDoubleNode(node)) {
 		kind = SljitNativeIntegerKind::INT64;
 		return true;
 	}

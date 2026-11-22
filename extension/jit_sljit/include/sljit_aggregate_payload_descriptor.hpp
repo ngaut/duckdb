@@ -15,8 +15,9 @@
 namespace duckdb {
 
 //! NARROW_DECIMAL128 is a DECIMAL128 typed-tree payload whose exact value is produced in one 64-bit register (INT64
-//! register semantics, see TryGetSljitTypedExpressionTreeNarrowDecimal128Bound).
-enum class SljitAggregateTypedPayloadKind : uint8_t { INVALID, INT32, INT64, DECIMAL64, NARROW_DECIMAL128 };
+//! register semantics, see TryGetSljitTypedExpressionTreeNarrowDecimal128Bound). A DOUBLE typed-tree payload yields
+//! its bits in one register.
+enum class SljitAggregateTypedPayloadKind : uint8_t { INVALID, INT32, INT64, DECIMAL64, NARROW_DECIMAL128, DOUBLE };
 
 struct SljitAggregatePayloadDescriptor {
 	idx_t aggregate_index = DConstants::INVALID_INDEX;
@@ -91,6 +92,9 @@ static inline bool SljitTryBindAggregatePayloadDescriptor(const SljitNativeRegio
 		descriptor.typed_payload_kind = aggregate.child_types[0].id() == LogicalTypeId::DECIMAL
 		                                    ? SljitAggregateTypedPayloadKind::DECIMAL64
 		                                    : SljitAggregateTypedPayloadKind::INT64;
+		break;
+	case PhysicalType::DOUBLE:
+		descriptor.typed_payload_kind = SljitAggregateTypedPayloadKind::DOUBLE;
 		break;
 	case PhysicalType::INT128:
 		if (payload.kind == SljitNativeRegionExpressionKind::TYPED_EXPRESSION_TREE && payload.expression_tree &&

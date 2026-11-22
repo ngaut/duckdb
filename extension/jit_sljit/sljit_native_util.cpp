@@ -71,7 +71,8 @@ void SljitIntegerCastChain::ThrowCastError(int64_t source_value, const vector<Sl
 }
 
 bool SljitFilteredAggregateUsesPayloadExpression(AggregatePrimitiveUpdateKind kind) {
-	return kind == AggregatePrimitiveUpdateKind::SUM_INT64 || kind == AggregatePrimitiveUpdateKind::SUM_HUGEINT;
+	return kind == AggregatePrimitiveUpdateKind::SUM_INT64 || kind == AggregatePrimitiveUpdateKind::SUM_HUGEINT ||
+	       kind == AggregatePrimitiveUpdateKind::SUM_DOUBLE;
 }
 
 bool SljitFilteredAggregateKindCanGenerate(AggregatePrimitiveUpdateKind kind) {

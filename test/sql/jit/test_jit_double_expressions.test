@@ -1,0 +1,185 @@
+# name: test/sql/jit/test_jit_double_expressions.test
+# description: DOUBLE values in the generated expression loops: CASE and COALESCE payloads, negation, +, - and * keep DuckDB's IEEE results for NaN, infinities, -0.0 and NULLs, and a DOUBLE sum adds its rows in source order, so it equals DuckDB's bit for bit
+# group: [jit]
+
+require jit_sljit
+
+load {TEST_DIR}/jit_double_expressions.db
+
+statement ok
+CREATE TABLE doubles AS
+SELECT i AS id,
+       (i % 1000)::INTEGER AS k,
+       CASE i % 97
+           WHEN 0 THEN 'nan'::DOUBLE
+           WHEN 1 THEN 'inf'::DOUBLE
+           WHEN 2 THEN '-inf'::DOUBLE
+           WHEN 3 THEN -0.0::DOUBLE
+           ELSE (i * 0.37)::DOUBLE / 7
+       END AS d,
+       CASE WHEN i % 11 = 0 THEN NULL ELSE ((i * 31) % 2001 - 1000)::DOUBLE / 3 END AS nd,
+       (i * 0.11)::DOUBLE / 13 AS e,
+       ((i * 7) % 1000)::DOUBLE AS w,
+       CASE WHEN i % 7 = 0 THEN NULL ELSE (i % 500)::DOUBLE END AS nw
+FROM range(400000) t(i)
+
+statement ok
+CHECKPOINT
+
+restart
+
+statement ok
+SET jit_measure_native_legs=false
+
+statement ok
+SET jit_cbo_startup_base_cost=0
+
+statement ok
+SET jit_cbo_startup_margin_basis_points=0
+
+# sums whose value depends on the order the rows add in: one thread, compared exactly
+statement ok
+CREATE MACRO ordered_sums() AS TABLE
+SELECT 'case_else_zero' AS q, sum(CASE WHEN k < 300 THEN e ELSE 0 END) AS a, count(*) AS c FROM doubles
+UNION ALL
+SELECT 'case_negate', sum(CASE WHEN k < 300 THEN e ELSE -e END), count(*) FROM doubles
+UNION ALL
+SELECT 'case_special', sum(CASE WHEN k % 3 = 0 THEN d ELSE e END), count(*) FROM doubles
+UNION ALL
+SELECT 'case_nullable', sum(CASE WHEN k > 500 THEN nd ELSE e END), count(*) FROM doubles
+UNION ALL
+SELECT 'coalesce', sum(coalesce(nd, e)), count(*) FROM doubles
+UNION ALL
+SELECT 'negate', sum(-e), count(*) FROM doubles
+UNION ALL
+SELECT 'negate_special', sum(-d), count(*) FROM doubles WHERE k < 100
+UNION ALL
+SELECT 'add', sum(e + nd), count(e + nd) FROM doubles
+UNION ALL
+SELECT 'subtract_both_ways', sum(e - nd) - sum(nd - e), count(*) FROM doubles
+UNION ALL
+SELECT 'multiply', sum(e * e * 3.5), count(*) FROM doubles
+UNION ALL
+SELECT 'nested', sum((e + 1.25) * (nd - 2.5) - e), count(*) FROM doubles
+UNION ALL
+SELECT 'special_arithmetic', sum(d * 0.0 + d), count(*) FROM doubles WHERE k < 200
+UNION ALL
+SELECT 'filtered', sum(e * 2), count(*) FROM doubles WHERE k < 300 AND e > 10.5
+UNION ALL
+SELECT 'double_filter', sum(e), count(*) FROM doubles WHERE e > 100.5 AND e < 2000.0
+UNION ALL
+SELECT 'all_null', sum(CASE WHEN k < 0 THEN e END), count(*) FROM doubles
+UNION ALL
+SELECT 'mixed_lanes', sum(e) + sum(k) * 0.5 + sum(-nd) + count(nd), count(*) FROM doubles WHERE k > 10
+UNION ALL
+SELECT 'five_lanes', sum(e) + sum(e * 2) + sum(-e) + sum(nd) + sum(e - 1.0), count(*) FROM doubles WHERE k < 900
+
+statement ok
+SET threads=1
+
+foreach policy off auto
+
+statement ok
+SET jit_policy='{policy}'
+
+statement ok
+CREATE OR REPLACE TEMP TABLE o_{policy} AS FROM ordered_sums()
+
+endloop
+
+query I
+SELECT count(*) FROM ((SELECT * FROM o_off EXCEPT ALL SELECT * FROM o_auto)
+                      UNION ALL (SELECT * FROM o_auto EXCEPT ALL SELECT * FROM o_off))
+----
+0
+
+query I
+SELECT count(*) FROM o_auto
+----
+17
+
+query I
+SELECT a IS NULL FROM o_auto WHERE q = 'all_null'
+----
+true
+
+# a projected DOUBLE keeps its sign: -0.0 negates to 0.0 and 0.0 to -0.0
+foreach policy off auto
+
+statement ok
+SET jit_policy='{policy}'
+
+statement ok
+CREATE OR REPLACE TEMP TABLE p_{policy} AS
+SELECT id, -d AS nd_, CASE WHEN k < 500 THEN d * 2 ELSE -d END AS cd, coalesce(nd, -e) + e AS ce
+FROM doubles WHERE k < 20
+
+endloop
+
+query I
+SELECT count(*) FROM (SELECT id, nd_::VARCHAR, cd::VARCHAR, ce::VARCHAR FROM p_off
+                      EXCEPT ALL SELECT id, nd_::VARCHAR, cd::VARCHAR, ce::VARCHAR FROM p_auto)
+----
+0
+
+query I
+SELECT count(*) FROM p_auto WHERE nd_::VARCHAR = '0.0'
+----
+83
+
+# integer-valued DOUBLEs add exactly in any order, so threads may split the rows
+statement ok
+CREATE MACRO exact_sums() AS TABLE
+SELECT 'case' AS q, sum(CASE WHEN k < 300 THEN w ELSE -w END) AS a, count(*) AS c FROM doubles
+UNION ALL
+SELECT 'nullable', sum(nw * 2 - w), count(nw) FROM doubles
+UNION ALL
+SELECT 'filtered', sum(-w), count(*) FROM doubles WHERE k BETWEEN 100 AND 700
+UNION ALL
+SELECT 'grouped_' || (k % 4), sum(CASE WHEN nw > 100 THEN w ELSE nw END), count(*) FROM doubles GROUP BY k % 4
+
+statement ok
+SET threads=4
+
+foreach policy off auto
+
+statement ok
+SET jit_policy='{policy}'
+
+statement ok
+CREATE OR REPLACE TEMP TABLE x_{policy} AS FROM exact_sums()
+
+endloop
+
+query I
+SELECT count(*) FROM ((SELECT * FROM x_off EXCEPT ALL SELECT * FROM x_auto)
+                      UNION ALL (SELECT * FROM x_auto EXCEPT ALL SELECT * FROM x_off))
+----
+0
+
+query I
+SELECT count(*) FROM x_auto
+----
+7
+
+# the DOUBLE CASE payload runs in the generated aggregate
+statement ok
+SET threads=1
+
+statement ok
+SET jit_trace_runtime=true
+
+statement ok
+SET jit_event_log_size=0
+
+statement ok
+SET jit_event_log_size=100
+
+statement ok
+CREATE OR REPLACE TEMP TABLE traced AS
+SELECT sum(CASE WHEN k < 300 THEN e ELSE -e END) FROM doubles
+
+query I
+SELECT count(*) > 0 FROM duckdb_jit_events() WHERE status = 'executed' AND jit_runtime_path_counts LIKE '%fused_payload_update%'
+----
+true

@@ -30,6 +30,7 @@ struct SljitAggregatePayloadAdapterScratch {
 		right_payload_sources.Resize(payload_count);
 		aggregate_int64_values.assign(payload_count, nullptr);
 		aggregate_hugeint_values.assign(payload_count, nullptr);
+		aggregate_double_values.assign(payload_count, nullptr);
 		aggregate_state_is_sets.assign(payload_count, nullptr);
 		aggregate_row_counts.assign(payload_count, nullptr);
 		constants.assign(payload_count, 0);
@@ -44,6 +45,7 @@ struct SljitAggregatePayloadAdapterScratch {
 		string_matches.clear();
 		aggregate_int64_values.assign(payload_count, nullptr);
 		aggregate_hugeint_values.assign(payload_count, nullptr);
+		aggregate_double_values.assign(payload_count, nullptr);
 		aggregate_state_is_sets.assign(payload_count, nullptr);
 		aggregate_row_counts.assign(payload_count, nullptr);
 	}
@@ -97,6 +99,7 @@ struct SljitAggregatePayloadAdapterScratch {
 	vector<LogicalType> input_vector_group_types;
 	vector<int64_t *> aggregate_int64_values;
 	vector<hugeint_t *> aggregate_hugeint_values;
+	vector<double *> aggregate_double_values;
 	vector<bool *> aggregate_state_is_sets;
 	vector<idx_t *> aggregate_row_counts;
 	vector<int64_t> constants;

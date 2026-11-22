@@ -203,7 +203,8 @@ static void SljitExecuteFusedPrimitiveAggregatePayloadUpdate(
 			throw InternalException("SLJIT fused aggregate primitive payload type mismatch");
 		}
 		SljitBindUngroupedSumPrimitiveLane(lane, aggregate_int64_values, aggregate_hugeint_values,
-		                                   aggregate_state_is_sets, aggregate_row_counts, payload_idx,
+		                                   adapter_scratch.aggregate_double_values, aggregate_state_is_sets,
+		                                   aggregate_row_counts, payload_idx,
 		                                   "SLJIT fused aggregate primitive lane is incomplete: %s");
 		if (payloads.size() == 1) {
 			single_aggregate_int64_value = lane.sum_int64_value;

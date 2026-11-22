@@ -346,6 +346,8 @@ static SljitTypedExpressionTreeSlot EmitSljitTypedExpressionTreeBinary(struct sl
 		sljit_set_label(compare_true, sljit_emit_label(compiler));
 		sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_R2, 0, SLJIT_IMM, 1);
 		sljit_set_label(compare_done, sljit_emit_label(compiler));
+	} else if (SljitTypedExpressionTreeIsDoubleNode(node)) {
+		EmitSljitTypedExpressionTreeDoubleBinary(compiler, node.binary_op, SLJIT_R2, SLJIT_R2, SLJIT_R4);
 	} else if (node.binary_op == ExecutionExpressionBinaryOp::MODULO ||
 	           node.binary_op == ExecutionExpressionBinaryOp::INTEGER_DIVIDE) {
 		// The plan admits these only for a constant divisor >= 2. R2 holds the dividend on entry and the result on

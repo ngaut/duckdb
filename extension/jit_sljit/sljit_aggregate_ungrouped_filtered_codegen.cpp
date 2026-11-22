@@ -35,9 +35,10 @@ static bool BuildSljitFilteredFusedPrimitiveAggregatePayloadPlan(const SljitNati
 	if (descriptor.primitive_kind == AggregatePrimitiveUpdateKind::COUNT_STAR) {
 		return true;
 	}
-	if ((descriptor.primitive_kind != AggregatePrimitiveUpdateKind::SUM_INT64 &&
-	     descriptor.primitive_kind != AggregatePrimitiveUpdateKind::SUM_HUGEINT) ||
-	    !descriptor.IsMachineWord()) {
+	const bool integer_sum = (descriptor.primitive_kind == AggregatePrimitiveUpdateKind::SUM_INT64 ||
+	                          descriptor.primitive_kind == AggregatePrimitiveUpdateKind::SUM_HUGEINT) &&
+	                         descriptor.IsMachineWord();
+	if (!integer_sum && descriptor.primitive_kind != AggregatePrimitiveUpdateKind::SUM_DOUBLE) {
 		return false;
 	}
 	if (!payload.expression_tree) {
@@ -156,7 +157,14 @@ unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativeFilteredUngroupedFusedPrim
 	}
 	// Hybrid: when no fully-packed form fits the payloads, the predicate mask can
 	// still vectorize with the payload work staying scalar per matching lane.
-	if (!simd_plan.supported && codegen_plan.fast_path_supported) {
+	// a DOUBLE sum's running value lives in a float register, which the vector registers overlap
+	idx_t double_sum_count = 0;
+	for (auto &descriptor : codegen_plan.payload_descriptors) {
+		if (descriptor.primitive_kind == AggregatePrimitiveUpdateKind::SUM_DOUBLE) {
+			double_sum_count++;
+		}
+	}
+	if (!simd_plan.supported && codegen_plan.fast_path_supported && double_sum_count == 0) {
 		auto predicate_plan = TryPlanSljitTypedExpressionTreeSimd(predicate);
 		if (SljitTypedExpressionTreeSimdHybridFilterProfitable(predicate_plan)) {
 			simd_plan = predicate_plan;
@@ -250,11 +258,17 @@ unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativeFilteredUngroupedFusedPrim
 	// every emitter uses: a stack slot per row would chain each row's update on the previous row's store. A loop that
 	// adds every row it accepts to every payload counts the rows once for all of them; a loop that skips a payload's
 	// NULL values counts each payload's own.
+	// A DOUBLE sum's float register starts from the stack slot's running value and stores back to it, so its rows add
+	// in source order
 	struct AccumulatorRegisters {
 		sljit_s32 count = 0;
 		sljit_s32 lower = 0;
 		sljit_s32 upper = 0;
+		bool is_double = false;
 	};
+	// FR0 and FR1 hold the trees' DOUBLE operands
+	static constexpr sljit_s32 FIRST_DOUBLE_ACCUMULATOR = 2;
+	static constexpr idx_t MAX_DOUBLE_ACCUMULATORS = 4;
 	struct AccumulatorLayout {
 		vector<AccumulatorRegisters> payloads;
 		bool shared_count = false;
@@ -267,13 +281,20 @@ unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativeFilteredUngroupedFusedPrim
 		if (!registers.has_register_accumulators || !codegen_plan.fast_path_supported) {
 			return layout;
 		}
+		if (double_sum_count > MAX_DOUBLE_ACCUMULATORS) {
+			return layout;
+		}
 		sljit_s32 next_register = 5;
+		sljit_s32 next_float_register = FIRST_DOUBLE_ACCUMULATOR;
 		const sljit_s32 shared = shared_count ? SLJIT_R(next_register++) : 0;
 		for (idx_t payload_idx = 0; payload_idx < payloads.size(); payload_idx++) {
 			auto kind = codegen_plan.payload_descriptors[payload_idx].primitive_kind;
 			auto &accumulator = layout.payloads[payload_idx];
 			accumulator.count = shared_count ? shared : SLJIT_R(next_register++);
-			if (kind != AggregatePrimitiveUpdateKind::COUNT_STAR) {
+			if (kind == AggregatePrimitiveUpdateKind::SUM_DOUBLE) {
+				accumulator.lower = SLJIT_FR(next_float_register++);
+				accumulator.is_double = true;
+			} else if (kind != AggregatePrimitiveUpdateKind::COUNT_STAR) {
 				accumulator.lower = SLJIT_R(next_register++);
 			}
 			if (kind == AggregatePrimitiveUpdateKind::SUM_HUGEINT) {
@@ -288,6 +309,10 @@ unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativeFilteredUngroupedFusedPrim
 	const bool register_accumulators = row_accumulators.fits || null_row_accumulators.fits;
 	if (register_accumulators) {
 		simd_scratches = (simd_scratches & ~sljit_s32(0xff)) | registers.accumulator_scratch_register_count;
+		if (double_sum_count != 0) {
+			simd_scratches = (simd_scratches & ~sljit_s32(0xff00)) |
+			                 SLJIT_ENTER_FLOAT(FIRST_DOUBLE_ACCUMULATOR + NumericCast<sljit_s32>(double_sum_count));
+		}
 	}
 	sljit_emit_enter(compiler, 0, SLJIT_ARGS1V(P), SljitTypedExpressionTreeEnterScratches(simd_scratches),
 	                 hoists_source_data ? registers.source_data_saved_register_count
@@ -296,7 +321,10 @@ unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativeFilteredUngroupedFusedPrim
 	EmitInitSljitNativeVectorLoop(compiler);
 	for (idx_t payload_idx = 0; payload_idx < payloads.size(); payload_idx++) {
 		sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_MEM1(SLJIT_SP), local_count_offsets[payload_idx], SLJIT_IMM, 0);
-		if (local_sum_offsets[payload_idx] >= 0) {
+		if (codegen_plan.payload_descriptors[payload_idx].primitive_kind == AggregatePrimitiveUpdateKind::SUM_DOUBLE) {
+			EmitUngroupedAggregateLoadDoubleSum(compiler, payload_idx, local_sum_offsets[payload_idx]);
+			sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_MEM1(SLJIT_SP), saw_value_offsets[payload_idx], SLJIT_IMM, 0);
+		} else if (local_sum_offsets[payload_idx] >= 0) {
 			sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_MEM1(SLJIT_SP), local_sum_offsets[payload_idx], SLJIT_IMM, 0);
 			if (local_sum_upper_offsets[payload_idx] >= 0) {
 				sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_MEM1(SLJIT_SP), local_sum_upper_offsets[payload_idx],
@@ -343,6 +371,10 @@ unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativeFilteredUngroupedFusedPrim
 		} else if (kind == AggregatePrimitiveUpdateKind::SUM_HUGEINT) {
 			auto &accumulator = accumulators->payloads[payload_idx];
 			EmitUngroupedAggregateAccumulateHugeintInt64Regs(compiler, accumulator.lower, accumulator.upper, SLJIT_R2);
+		} else if (kind == AggregatePrimitiveUpdateKind::SUM_DOUBLE) {
+			auto &accumulator = accumulators->payloads[payload_idx];
+			sljit_emit_fcopy(compiler, SLJIT_COPY_TO_F64, SLJIT_FR0, SLJIT_R2);
+			sljit_emit_fop2(compiler, SLJIT_ADD_F64, accumulator.lower, 0, accumulator.lower, 0, SLJIT_FR0, 0);
 		} else {
 			auto &accumulator = accumulators->payloads[payload_idx];
 			sljit_emit_op2(compiler, SLJIT_ADD, accumulator.lower, 0, accumulator.lower, 0, SLJIT_R2, 0);
@@ -355,8 +387,13 @@ unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativeFilteredUngroupedFusedPrim
 			return;
 		}
 		accumulators = &layout;
-		for (auto &accumulator : layout.payloads) {
-			for (auto reg : {accumulator.count, accumulator.lower, accumulator.upper}) {
+		for (idx_t payload_idx = 0; payload_idx < payloads.size(); payload_idx++) {
+			auto &accumulator = layout.payloads[payload_idx];
+			if (accumulator.is_double) {
+				sljit_emit_fmem(compiler, SLJIT_MOV_F64 | SLJIT_MEM_ALIGNED_32, accumulator.lower, SLJIT_MEM1(SLJIT_SP),
+				                local_sum_offsets[payload_idx]);
+			}
+			for (auto reg : {accumulator.count, accumulator.is_double ? 0 : accumulator.lower, accumulator.upper}) {
 				if (reg) {
 					sljit_emit_op1(compiler, SLJIT_MOV, reg, 0, SLJIT_IMM, 0);
 				}
@@ -378,6 +415,11 @@ unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativeFilteredUngroupedFusedPrim
 			sljit_emit_op2(compiler, SLJIT_ADD, SLJIT_MEM1(SLJIT_SP), local_count_offsets[payload_idx],
 			               SLJIT_MEM1(SLJIT_SP), local_count_offsets[payload_idx], accumulator.count, 0);
 			if (!accumulator.lower) {
+				continue;
+			}
+			if (accumulator.is_double) {
+				sljit_emit_fmem(compiler, SLJIT_MOV_F64 | SLJIT_MEM_STORE | SLJIT_MEM_ALIGNED_32, accumulator.lower,
+				                SLJIT_MEM1(SLJIT_SP), local_sum_offsets[payload_idx]);
 				continue;
 			}
 			if (!accumulator.upper) {
@@ -777,6 +819,9 @@ unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativeFilteredUngroupedFusedPrim
 			EmitUngroupedAggregateCommitSumHugeint(compiler, payload_idx, local_sum_offsets[payload_idx],
 			                                       local_sum_upper_offsets[payload_idx], saw_value_offsets[payload_idx],
 			                                       SLJIT_R2);
+		} else if (kind == AggregatePrimitiveUpdateKind::SUM_DOUBLE) {
+			EmitUngroupedAggregateCommitSumDouble(compiler, payload_idx, local_sum_offsets[payload_idx],
+			                                      saw_value_offsets[payload_idx], SLJIT_R2);
 		} else {
 			EmitUngroupedAggregateCommitSumInt64(compiler, payload_idx, local_sum_offsets[payload_idx],
 			                                     saw_value_offsets[payload_idx], SLJIT_R2);

@@ -1,5 +1,6 @@
 #include "sljit_native_codegen.hpp"
 
+#include "sljit_aggregate_primitive_codegen.hpp"
 #include "sljit_codegen_internal.hpp"
 #include "sljit_typed_expression_plan.hpp"
 
@@ -14,10 +15,12 @@ static unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativeUngroupedSumTypedEx
     const ExecutionExpressionIR &root, SljitNativeAggregateUpdateFunction &function, string &error,
     SljitNativeAggregateSumStateKind state_kind, bool emit_flat_nullable_fast_path) {
 	// Every integer result kind evaluates to a sign- or zero-extended machine word, which is what the sum state
-	// accumulates; the planner admits a tree whose kind matches the aggregate input, narrow kinds included
+	// accumulates; the planner admits a tree whose kind matches the aggregate input, narrow kinds included. A DOUBLE
+	// tree evaluates to the DOUBLE's bits.
 	const auto tree_plan = BuildSljitTypedExpressionTreePlan(root, emit_flat_nullable_fast_path);
-	if (!tree_plan.supported || tree_plan.result_is_bool) {
-		error = "SLJIT aggregate typed expression-tree reducer requires an integer expression tree";
+	const bool double_state = state_kind == SljitNativeAggregateSumStateKind::DOUBLE;
+	if (!tree_plan.supported || tree_plan.result_is_bool || tree_plan.result_is_double != double_state) {
+		error = "SLJIT aggregate typed expression-tree reducer requires a tree of the sum's type";
 		return nullptr;
 	}
 
@@ -38,7 +41,11 @@ static unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativeUngroupedSumTypedEx
 	sljit_emit_enter(compiler, 0, SLJIT_ARGS1V(P), SljitTypedExpressionTreeEnterScratches(5),
 	                 GetSljitNativeVectorRegisterLayout().saved_register_count, local_size);
 	EmitInitSljitNativeExpressionVectorLoop(compiler);
-	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_MEM1(SLJIT_SP), local_sum_offset, SLJIT_IMM, 0);
+	if (double_state) {
+		EmitSljitLoadDoubleStateLocal(compiler, local_sum_offset);
+	} else {
+		sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_MEM1(SLJIT_SP), local_sum_offset, SLJIT_IMM, 0);
+	}
 	if (hugeint_state) {
 		sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_MEM1(SLJIT_SP), local_sum_upper_offset, SLJIT_IMM, 0);
 	}
@@ -128,6 +135,14 @@ BuildSljitNativeUngroupedSumInt64TypedExpressionTree(const ExecutionExpressionIR
                                                      bool emit_flat_nullable_fast_path) {
 	return BuildSljitNativeUngroupedSumTypedExpressionTree(
 	    root, function, error, SljitNativeAggregateSumStateKind::INT64, emit_flat_nullable_fast_path);
+}
+
+unique_ptr<ExecutionRegionCodeHandle>
+BuildSljitNativeUngroupedSumDoubleTypedExpressionTree(const ExecutionExpressionIR &root,
+                                                      SljitNativeAggregateUpdateFunction &function, string &error,
+                                                      bool emit_flat_nullable_fast_path) {
+	return BuildSljitNativeUngroupedSumTypedExpressionTree(
+	    root, function, error, SljitNativeAggregateSumStateKind::DOUBLE, emit_flat_nullable_fast_path);
 }
 
 unique_ptr<ExecutionRegionCodeHandle>

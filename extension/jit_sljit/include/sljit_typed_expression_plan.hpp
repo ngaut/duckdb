@@ -26,6 +26,7 @@ struct SljitTypedExpressionTreePlan {
 	SljitNativeIntegerKind result_kind = SljitNativeIntegerKind::INT64;
 	bool result_is_bool = false;
 	bool result_is_int64 = false;
+	bool result_is_double = false;
 	idx_t node_count = 0;
 	SljitTypedExpressionTreeFastPathPlan fast_path;
 };
@@ -34,6 +35,8 @@ bool SljitExpressionTreeBinaryOpSupported(ExecutionExpressionBinaryOp op);
 bool SljitTypedExpressionTreeComparisonSupported(ExecutionExpressionBinaryOp op);
 bool SljitTypedExpressionTreeIsInt64Node(const ExecutionExpressionIR &node);
 bool SljitTypedExpressionTreeIsDecimal64Node(const ExecutionExpressionIR &node);
+//! A DOUBLE value: the trees move its bits as a machine word and compute with them in float registers
+bool SljitTypedExpressionTreeIsDoubleNode(const ExecutionExpressionIR &node);
 bool TryGetSljitTypedExpressionTreeDecimal64Range(const LogicalType &type, int64_t &result_min, int64_t &result_max);
 bool SljitTypedExpressionTreeIsInt32Node(const ExecutionExpressionIR &node);
 bool SljitTypedExpressionTreeIsBoolNode(const ExecutionExpressionIR &node);

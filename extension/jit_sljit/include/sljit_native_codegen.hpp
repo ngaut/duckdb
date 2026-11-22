@@ -104,6 +104,10 @@ BuildSljitNativeUngroupedSumInt64TypedExpressionTree(const ExecutionExpressionIR
                                                      SljitNativeAggregateUpdateFunction &function, string &error,
                                                      bool emit_flat_nullable_fast_path = true);
 unique_ptr<ExecutionRegionCodeHandle>
+BuildSljitNativeUngroupedSumDoubleTypedExpressionTree(const ExecutionExpressionIR &root,
+                                                      SljitNativeAggregateUpdateFunction &function, string &error,
+                                                      bool emit_flat_nullable_fast_path);
+unique_ptr<ExecutionRegionCodeHandle>
 BuildSljitNativeUngroupedSumHugeintTypedExpressionTree(const ExecutionExpressionIR &root,
                                                        SljitNativeAggregateUpdateFunction &function, string &error,
                                                        bool emit_flat_nullable_fast_path = true);

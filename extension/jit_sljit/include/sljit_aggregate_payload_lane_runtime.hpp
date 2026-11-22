@@ -51,18 +51,26 @@ static void SljitBindUngroupedCountStarPrimitiveLane(const ExecutionPrimitiveAgg
 static void SljitBindUngroupedSumPrimitiveLane(const ExecutionPrimitiveAggregateUpdateLane &lane,
                                                vector<int64_t *> &aggregate_int64_values,
                                                vector<hugeint_t *> &aggregate_hugeint_values,
+                                               vector<double *> &aggregate_double_values,
                                                vector<bool *> &aggregate_state_is_sets,
                                                vector<idx_t *> &aggregate_row_counts, idx_t payload_idx,
                                                const char *message) {
 	const auto has_sum_state = (lane.kind == AggregatePrimitiveUpdateKind::SUM_INT64 && lane.sum_int64_value) ||
-	                           (lane.kind == AggregatePrimitiveUpdateKind::SUM_HUGEINT && lane.sum_hugeint_value);
+	                           (lane.kind == AggregatePrimitiveUpdateKind::SUM_HUGEINT && lane.sum_hugeint_value) ||
+	                           (lane.kind == AggregatePrimitiveUpdateKind::SUM_DOUBLE && lane.sum_double_value);
 	if (!lane.ready || !has_sum_state || !lane.state_is_set || !lane.row_count) {
 		SljitThrowIncompletePrimitiveLane(lane, message, "aggregate-primitive-lane-incomplete");
 	}
-	if (lane.kind == AggregatePrimitiveUpdateKind::SUM_INT64) {
+	switch (lane.kind) {
+	case AggregatePrimitiveUpdateKind::SUM_INT64:
 		aggregate_int64_values[payload_idx] = lane.sum_int64_value;
-	} else {
+		break;
+	case AggregatePrimitiveUpdateKind::SUM_HUGEINT:
 		aggregate_hugeint_values[payload_idx] = lane.sum_hugeint_value;
+		break;
+	default:
+		aggregate_double_values[payload_idx] = lane.sum_double_value;
+		break;
 	}
 	aggregate_state_is_sets[payload_idx] = lane.state_is_set;
 	aggregate_row_counts[payload_idx] = lane.row_count;
