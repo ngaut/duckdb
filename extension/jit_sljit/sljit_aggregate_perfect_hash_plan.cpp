@@ -100,12 +100,10 @@ static sljit_sw SljitLocalPerfectHashReductionRowStride(sljit_sw row_size, sljit
 	return stride;
 }
 
-bool TryBuildSljitDensePerfectHashAggregateReductionPlan(const vector<ExecutionRegionAggregateInput> &aggregates,
-                                                         const ExecutionRegionAggregateContract &contract,
-                                                         const vector<bool> &payloads_not_null,
-                                                         const vector<bool> &batch_lower_never_overflows,
-                                                         sljit_sw &local_size,
-                                                         SljitDensePerfectHashAggregateReductionPlan &result) {
+static bool TryBuildSljitDensePerfectHashAggregateReductionPlanInternal(
+    const vector<ExecutionRegionAggregateInput> &aggregates, const ExecutionRegionAggregateContract &contract,
+    const vector<bool> &payloads_not_null, const vector<bool> &batch_lower_never_overflows, sljit_sw &local_size,
+    SljitDensePerfectHashAggregateReductionPlan &result) {
 	if (contract.perfect_required_bits_total >= 8 * sizeof(idx_t)) {
 		return false;
 	}
@@ -165,6 +163,25 @@ bool TryBuildSljitDensePerfectHashAggregateReductionPlan(const vector<ExecutionR
 	if (result.count_seen_lane == DConstants::INVALID_INDEX) {
 		result.group_seen_offset = AllocateSljitLocalPerfectHashArray(local_size, group_count);
 	}
+	return true;
+}
+
+//! The plan and its local space take effect only for a shape the reduction covers: a DOUBLE sum, whose rows must
+//! add to the state in source order, has no zero-based local partial
+bool TryBuildSljitDensePerfectHashAggregateReductionPlan(const vector<ExecutionRegionAggregateInput> &aggregates,
+                                                         const ExecutionRegionAggregateContract &contract,
+                                                         const vector<bool> &payloads_not_null,
+                                                         const vector<bool> &batch_lower_never_overflows,
+                                                         sljit_sw &local_size,
+                                                         SljitDensePerfectHashAggregateReductionPlan &result) {
+	SljitDensePerfectHashAggregateReductionPlan plan;
+	auto plan_local_size = local_size;
+	if (!TryBuildSljitDensePerfectHashAggregateReductionPlanInternal(
+	        aggregates, contract, payloads_not_null, batch_lower_never_overflows, plan_local_size, plan)) {
+		return false;
+	}
+	result = std::move(plan);
+	local_size = plan_local_size;
 	return true;
 }
 

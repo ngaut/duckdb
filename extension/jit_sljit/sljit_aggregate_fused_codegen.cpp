@@ -193,6 +193,10 @@ bool SljitFusedGroupedAggregatePayloadSupported(const SljitNativeRegionExpressio
 	if (!descriptor.has_payload) {
 		return true;
 	}
+	// a DOUBLE column's sum keeps the primitive reference paths, which also preaggregate group runs
+	if (descriptor.primitive_kind == AggregatePrimitiveUpdateKind::SUM_DOUBLE) {
+		return payload.kind == SljitNativeRegionExpressionKind::TYPED_EXPRESSION_TREE && payload.expression_tree;
+	}
 	if (!descriptor.IsMachineWord() || (descriptor.primitive_kind != AggregatePrimitiveUpdateKind::SUM_INT64 &&
 	                                    descriptor.primitive_kind != AggregatePrimitiveUpdateKind::SUM_HUGEINT)) {
 		return false;
@@ -206,10 +210,13 @@ bool SljitPerfectHashAggregatePayloadSupported(const SljitNativeRegionExpression
                                                const ExecutionRegionAggregateInput &aggregate,
                                                const ExecutionRegionAggregateContract &contract) {
 	SljitAggregatePayloadDescriptor descriptor;
+	// a perfect hash's states take a DOUBLE column's sum in the typed kernel too: it has no group runs to preaggregate
 	if (aggregate.aggregate_index < contract.grouped_state_offsets.size() &&
 	    SljitTryBindAggregatePayloadDescriptor(payload, aggregate, descriptor) &&
-	    descriptor.primitive_kind == AggregatePrimitiveUpdateKind::COUNT) {
-		return payload.kind == SljitNativeRegionExpressionKind::REFERENCE;
+	    (descriptor.primitive_kind == AggregatePrimitiveUpdateKind::COUNT ||
+	     descriptor.primitive_kind == AggregatePrimitiveUpdateKind::SUM_DOUBLE) &&
+	    payload.kind == SljitNativeRegionExpressionKind::REFERENCE) {
+		return true;
 	}
 	return SljitFusedGroupedAggregatePayloadSupported(payload, aggregate, contract);
 }

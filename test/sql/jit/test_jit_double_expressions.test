@@ -25,7 +25,8 @@ SELECT i AS id,
        CASE WHEN i % 13 = 0 THEN NULL ELSE (((i * 31) % 20001 - 10000) / 9)::DECIMAL(12, 4) END AS np,
        ((i * 7919) % 999999999999 + 900000000000000)::DECIMAL(18, 3) AS wide,
        CASE i % 5 WHEN 0 THEN 9223372036854775807 WHEN 1 THEN -9223372036854775808 ELSE i * 1000000007 END::BIGINT AS big,
-       (i % 100000 - 50000)::INTEGER AS small
+       (i % 100000 - 50000)::INTEGER AS small,
+       CASE i % 3 WHEN 0 THEN 'alpha' WHEN 1 THEN 'beta' ELSE 'gamma' END AS tag
 FROM range(400000) t(i)
 
 statement ok
@@ -89,6 +90,18 @@ SELECT 'nullable_cast_case', sum(CASE WHEN nd IS NULL THEN np::DOUBLE ELSE e END
 UNION ALL
 SELECT 'wide_decimal_cast', sum(CASE WHEN e > 1.0 THEN wide::DOUBLE - 900000000000000.0 ELSE e END), count(*) FROM doubles
 UNION ALL
+SELECT 'grouped_case_' || (k % 5), sum(CASE WHEN k < 300 THEN e ELSE -e END), count(*) FROM doubles GROUP BY k % 5
+UNION ALL
+SELECT 'grouped_mixed_' || (k % 3), sum(p * (1 - e / 1000)) + sum(d * 0.0 + e) + sum(k), count(nd) FROM doubles GROUP BY k % 3
+UNION ALL
+SELECT 'grouped_nullable_' || (k % 4), sum(coalesce(nd, -e) * 2.0), count(*) FROM doubles GROUP BY k % 4
+UNION ALL
+SELECT 'grouped_string_' || tag, sum(CASE WHEN nd > 0.0 THEN e ELSE nd END), count(*) FROM doubles GROUP BY tag
+UNION ALL
+SELECT 'grouped_wide_' || (k % 2), sum(e * 3.0 - 1.0), count(*) FROM doubles WHERE k < 990 GROUP BY k % 2
+UNION ALL
+SELECT 'grouped_shared_' || (k % 2), sum(e * 2.0) + sum(e + 1.0) * 3 + sum(e), count(*) FROM doubles GROUP BY k % 2
+UNION ALL
 SELECT 'five_lanes', sum(e) + sum(e * 2) + sum(-e) + sum(nd) + sum(e - 1.0), count(*) FROM doubles WHERE k < 900
 
 statement ok
@@ -113,7 +126,7 @@ SELECT count(*) FROM ((SELECT * FROM o_off EXCEPT ALL SELECT * FROM o_auto)
 query I
 SELECT count(*) FROM o_auto
 ----
-23
+42
 
 query I
 SELECT a IS NULL FROM o_auto WHERE q = 'all_null'
@@ -198,5 +211,22 @@ SELECT sum(CASE WHEN k < 300 THEN e ELSE -e END) FROM doubles
 
 query I
 SELECT count(*) > 0 FROM duckdb_jit_events() WHERE status = 'executed' AND jit_runtime_path_counts LIKE '%fused_payload_update%'
+----
+true
+
+# a grouped DOUBLE payload over a small key domain runs fused in the perfect-hash aggregate, without the dense local
+# reduction, whose zero-based partials would add the rows out of order
+statement ok
+SET jit_event_log_size=0
+
+statement ok
+SET jit_event_log_size=100
+
+statement ok
+CREATE OR REPLACE TEMP TABLE traced AS
+SELECT k % 5, sum(CASE WHEN k < 300 THEN e ELSE -e END), count(*) FROM doubles GROUP BY k % 5
+
+query I
+SELECT count(*) > 0 FROM duckdb_jit_events() WHERE status = 'executed' AND jit_runtime_path_counts LIKE '%fused_payload_update_owns_perfect_hash_group_lookup%'
 ----
 true

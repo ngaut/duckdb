@@ -26,6 +26,21 @@ static bool BuildSljitFusedAggregatePayloadPlan(const SljitNativeRegionExpressio
 		payload_plan.fast_path.fast_path_supported = true;
 		return true;
 	}
+	// A grouped DOUBLE sum adds each row to its group's state in source order, as DuckDB's does; a DOUBLE column's
+	// reference loads the value's bits as a machine word
+	if (descriptor.primitive_kind == AggregatePrimitiveUpdateKind::SUM_DOUBLE) {
+		if (payload.kind == SljitNativeRegionExpressionKind::REFERENCE) {
+			payload_plan.supported = payload.integer_kind == SljitNativeIntegerKind::INT64;
+			payload_plan.result_is_double = true;
+			payload_plan.fast_path.fast_path_supported = true;
+			return payload_plan.supported;
+		}
+		if (payload.kind != SljitNativeRegionExpressionKind::TYPED_EXPRESSION_TREE || !payload.expression_tree) {
+			return false;
+		}
+		payload_plan = BuildSljitTypedExpressionTreePlan(*payload.expression_tree, true);
+		return SljitAggregateTypedPayloadPlanSupported(payload_plan, descriptor);
+	}
 	if (descriptor.primitive_kind != AggregatePrimitiveUpdateKind::SUM_INT64 &&
 	    descriptor.primitive_kind != AggregatePrimitiveUpdateKind::SUM_HUGEINT) {
 		return false;
@@ -107,8 +122,9 @@ static void TryBuildSljitSharedBinaryPayloadPlanForBase(const vector<SljitNative
                                                         const vector<SljitAggregatePayloadDescriptor> &descriptors,
                                                         const ExecutionExpressionIR &base,
                                                         SljitSharedBinaryPayloadPlan &result) {
+	// the shared lanes combine the base with integer operations
 	auto base_plan = BuildSljitTypedExpressionTreePlan(base, false);
-	if (!base_plan.supported || !base_plan.fast_path.fast_path_supported) {
+	if (!base_plan.supported || !base_plan.fast_path.fast_path_supported || base_plan.result_is_double) {
 		return;
 	}
 	SljitSharedBinaryPayloadPlan candidate;

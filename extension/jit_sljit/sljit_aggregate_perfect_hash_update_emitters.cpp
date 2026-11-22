@@ -371,25 +371,9 @@ void EmitSljitPerfectHashPayloadUpdates(const SljitPerfectHashFusedUpdateEmitCon
 		}
 
 		EmitSljitPerfectHashPayloadStatePointer(context);
-		if (descriptor.primitive_kind == AggregatePrimitiveUpdateKind::SUM_INT64) {
-			if (options.states_marked_on_first_touch) {
-				EmitSljitGroupedAggregateAccumulateInt64ImmediateNoStateSet(
-				    compiler, context.state_pointer_reg, state_offset, descriptor.state_value_offset, SLJIT_R2);
-			} else {
-				EmitSljitGroupedAggregateAccumulateInt64Immediate(compiler, context.state_pointer_reg, state_offset,
-				                                                  descriptor.state_value_offset,
-				                                                  descriptor.state_is_set_offset, SLJIT_R2);
-			}
-		} else {
-			if (options.states_marked_on_first_touch) {
-				EmitSljitGroupedAggregateAccumulateHugeintImmediateNoStateSet(
-				    compiler, context.state_pointer_reg, state_offset, descriptor.state_value_offset, SLJIT_R2);
-			} else {
-				EmitSljitGroupedAggregateAccumulateHugeintImmediate(compiler, context.state_pointer_reg, state_offset,
-				                                                    descriptor.state_value_offset,
-				                                                    descriptor.state_is_set_offset, SLJIT_R2);
-			}
-		}
+		EmitSljitGroupedAggregateAccumulateSumImmediate(
+		    compiler, descriptor.primitive_kind, context.state_pointer_reg, state_offset, descriptor.state_value_offset,
+		    descriptor.state_is_set_offset, SLJIT_R2, options.states_marked_on_first_touch);
 		EmitSljitPerfectHashPayloadInvalidContinuation(compiler, payload_invalid);
 	}
 	end_null_checked_run();

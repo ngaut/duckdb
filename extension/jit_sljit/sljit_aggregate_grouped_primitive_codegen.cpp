@@ -204,4 +204,38 @@ void EmitSljitGroupedAggregateAccumulateDoubleImmediate(struct sljit_compiler *c
 	EmitSljitGroupedAggregateSetStateIsSetImmediate(compiler, base_reg, state_offset, state_is_set_offset);
 }
 
+void EmitSljitGroupedAggregateAccumulateSumImmediate(struct sljit_compiler *compiler, AggregatePrimitiveUpdateKind kind,
+                                                     sljit_s32 base_reg, idx_t state_offset, idx_t value_offset,
+                                                     idx_t state_is_set_offset, sljit_s32 value_reg,
+                                                     bool states_marked_on_first_touch) {
+	switch (kind) {
+	case AggregatePrimitiveUpdateKind::SUM_INT64:
+		if (states_marked_on_first_touch) {
+			EmitSljitGroupedAggregateAccumulateInt64ImmediateNoStateSet(compiler, base_reg, state_offset, value_offset,
+			                                                            value_reg);
+		} else {
+			EmitSljitGroupedAggregateAccumulateInt64Immediate(compiler, base_reg, state_offset, value_offset,
+			                                                  state_is_set_offset, value_reg);
+		}
+		return;
+	case AggregatePrimitiveUpdateKind::SUM_HUGEINT:
+		if (states_marked_on_first_touch) {
+			EmitSljitGroupedAggregateAccumulateHugeintImmediateNoStateSet(compiler, base_reg, state_offset,
+			                                                              value_offset, value_reg);
+		} else {
+			EmitSljitGroupedAggregateAccumulateHugeintImmediate(compiler, base_reg, state_offset, value_offset,
+			                                                    state_is_set_offset, value_reg);
+		}
+		return;
+	case AggregatePrimitiveUpdateKind::SUM_DOUBLE:
+		D_ASSERT(!states_marked_on_first_touch);
+		sljit_emit_fcopy(compiler, SLJIT_COPY_TO_F64, SLJIT_FR0, value_reg);
+		EmitSljitGroupedAggregateAccumulateDoubleImmediate(compiler, base_reg, state_offset, value_offset,
+		                                                   state_is_set_offset, SLJIT_FR0);
+		return;
+	default:
+		throw InternalException("SLJIT grouped aggregate update for an unsupported sum kind");
+	}
+}
+
 } // namespace duckdb

@@ -54,7 +54,7 @@ bool TryPartiallyFuseNativeProjectionIntoPerfectHashAggregateUpdate(const vector
 			return false;
 		}
 		auto payload = projection.Projections()[aggregate.payload_index].Copy();
-		if (!SljitPrimitiveAggregatePayloadSupported(payload, aggregate, true)) {
+		if (!SljitPrimitiveAggregatePayloadSupported(payload, aggregate, true, true)) {
 			return false;
 		}
 		payloads.push_back(std::move(payload));

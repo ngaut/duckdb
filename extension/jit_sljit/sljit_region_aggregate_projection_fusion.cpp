@@ -239,7 +239,7 @@ bool TryFuseNativeProjectionIntoPerfectHashAggregateUpdate(const vector<LogicalT
 		}
 		auto payload = projection.Projections()[aggregate.payload_index].Copy();
 		if (payload.kind == SljitNativeRegionExpressionKind::REFERENCE) {
-			if (!SljitPrimitiveAggregatePayloadSupported(payload, aggregate, true)) {
+			if (!SljitPrimitiveAggregatePayloadSupported(payload, aggregate, true, true)) {
 				return false;
 			}
 		} else {
@@ -333,7 +333,7 @@ bool TryComposePrimitiveAggregatePayloadsThroughProjection(const vector<LogicalT
 				mark_blocker("payload-compose");
 				return false;
 			}
-			if (!SljitPrimitiveAggregatePayloadSupported(composed, aggregate, true)) {
+			if (!SljitPrimitiveAggregatePayloadSupported(composed, aggregate, true, true)) {
 				mark_blocker("payload-supported");
 				return false;
 			}

@@ -194,6 +194,12 @@ void EmitSljitGroupedAggregateAccumulateHugeintImmediateNoStateSet(struct sljit_
 void EmitSljitGroupedAggregateAccumulateDoubleImmediate(struct sljit_compiler *compiler, sljit_s32 base_reg,
                                                         idx_t state_offset, idx_t value_offset,
                                                         idx_t state_is_set_offset, sljit_s32 value_freg);
+//! Adds the value in value_reg (a DOUBLE's bits for a DOUBLE sum) to a SUM state at base_reg + state_offset,
+//! marking it set unless the loop marks states on first touch (which DOUBLE sums never use)
+void EmitSljitGroupedAggregateAccumulateSumImmediate(struct sljit_compiler *compiler, AggregatePrimitiveUpdateKind kind,
+                                                     sljit_s32 base_reg, idx_t state_offset, idx_t value_offset,
+                                                     idx_t state_is_set_offset, sljit_s32 value_reg,
+                                                     bool states_marked_on_first_touch = false);
 
 void EmitSljitLoadDoubleStateLocal(struct sljit_compiler *compiler, sljit_sw local_sum_offset);
 void EmitLoadSljitHugeintReference(struct sljit_compiler *compiler, sljit_sw source_data_offset,

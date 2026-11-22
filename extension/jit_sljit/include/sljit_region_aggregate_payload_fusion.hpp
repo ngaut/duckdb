@@ -20,9 +20,11 @@
 
 namespace duckdb {
 
+//! perfect_hash_state: the grouped states are a generated-lookup perfect hash's, whose kernels take DOUBLE trees; a
+//! hash aggregate's DOUBLE sums keep the reference paths that preaggregate group runs
 static bool SljitPrimitiveAggregatePayloadSupported(SljitNativeRegionExpressionPlan &payload,
                                                     const ExecutionRegionAggregateInput &aggregate,
-                                                    bool grouped_state = false) {
+                                                    bool grouped_state = false, bool perfect_hash_state = false) {
 	SljitAggregatePayloadDescriptor descriptor;
 	if (!SljitTryBindAggregatePayloadDescriptor(payload, aggregate, descriptor)) {
 		return false;
@@ -42,8 +44,8 @@ static bool SljitPrimitiveAggregatePayloadSupported(SljitNativeRegionExpressionP
 		case SljitNativeRegionExpressionKind::DOUBLE_BINARY_REFERENCES:
 			return !grouped_state;
 		case SljitNativeRegionExpressionKind::TYPED_EXPRESSION_TREE:
-			// the ungrouped kernel adds a DOUBLE tree's rows to the state in source order
-			return !grouped_state && payload.expression_tree &&
+			// the kernels add a DOUBLE tree's rows to each state in source order
+			return (!grouped_state || perfect_hash_state) && payload.expression_tree &&
 			       SljitAggregateTypedPayloadPlanSupported(
 			           BuildSljitTypedExpressionTreePlan(*payload.expression_tree, false), descriptor);
 		default:
@@ -218,7 +220,8 @@ static bool TrySimplifySljitExpressionTreeReferencePayload(SljitNativeRegionExpr
 
 static bool TryNormalizeGroupedAggregatePayloads(vector<SljitNativeRegionExpressionPlan> &payloads,
                                                  const ExecutionRegionAggregateSinkInfo &sink, bool render_diagnostics,
-                                                 const char *reference_reason, const char *typed_reason) {
+                                                 const char *reference_reason, const char *typed_reason,
+                                                 bool perfect_hash_state) {
 	if (!SljitPrimitiveAggregatePayloadsContainNonReference(payloads, sink)) {
 		return true;
 	}
@@ -249,7 +252,7 @@ static bool TryNormalizeGroupedAggregatePayloads(vector<SljitNativeRegionExpress
 			return false;
 		}
 		const bool simplified_reference_payload = TrySimplifySljitExpressionTreeReferencePayload(typed_payload);
-		if (!SljitPrimitiveAggregatePayloadSupported(typed_payload, aggregate, true)) {
+		if (!SljitPrimitiveAggregatePayloadSupported(typed_payload, aggregate, true, perfect_hash_state)) {
 			return false;
 		}
 		if (render_diagnostics) {
@@ -269,14 +272,14 @@ static bool TryNormalizePerfectHashAggregatePayloads(vector<SljitNativeRegionExp
 		return true;
 	}
 	return TryNormalizeGroupedAggregatePayloads(payloads, sink, render_diagnostics, "perfect-hash-reference-payload",
-	                                            "perfect-hash-typed-payload");
+	                                            "perfect-hash-typed-payload", true);
 }
 
 static bool TryNormalizeGroupedTypedAggregatePayloads(vector<SljitNativeRegionExpressionPlan> &payloads,
                                                       const ExecutionRegionAggregateSinkInfo &sink,
                                                       bool render_diagnostics) {
 	return TryNormalizeGroupedAggregatePayloads(payloads, sink, render_diagnostics, "grouped-reference-payload",
-	                                            "grouped-typed-payload");
+	                                            "grouped-typed-payload", false);
 }
 
 static bool TryBuildSljitPrimitiveReferencePayload(const vector<LogicalType> &input_types,
