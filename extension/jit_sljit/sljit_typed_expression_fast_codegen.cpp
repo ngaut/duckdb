@@ -269,6 +269,11 @@ static void EmitSljitTypedExpressionTreeFastUnaryReg(struct sljit_compiler *comp
 			sljit_set_label(done, sljit_emit_label(compiler));
 		}
 		return;
+	case ExecutionExpressionUnaryOp::NEGATE:
+		EmitSljitTypedExpressionTreeFastValueRegInternal(compiler, *node.left, spill_index, overflows, index_mode,
+		                                                 data_hoists);
+		EmitSljitTypedExpressionTreeNegate(compiler, node, SLJIT_R2, overflows);
+		return;
 	default:
 		throw InternalException("Unsupported SLJIT typed expression-tree fast unary operator");
 	}

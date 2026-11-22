@@ -27,6 +27,7 @@ struct SljitArithmeticOverflowSite {
 	sljit_s32 left_reg = 0;
 	sljit_s32 right_reg = 0;
 	sljit_s32 result_reg = 0;
+	bool negation = false;
 	vector<sljit_jump *> jumps;
 };
 
@@ -143,6 +144,9 @@ void EmitSljitTypedExpressionTreeIntegerDivide(struct sljit_compiler *compiler, 
                                                sljit_s32 result_reg,
                                                const vector<SljitTypedExpressionTreeLoopHoist> *hoists = nullptr);
 SljitIntegerOverflowChecks SljitTypedExpressionTreeOverflowChecks(const ExecutionExpressionIR &node);
+//! Negates the value in value_reg in place: subtracts it from zero, held in R1
+void EmitSljitTypedExpressionTreeNegate(struct sljit_compiler *compiler, const ExecutionExpressionIR &node,
+                                        sljit_s32 value_reg, vector<SljitArithmeticOverflowSite> &overflows);
 void SetSljitJumpLabels(const vector<sljit_jump *> &jumps, sljit_label *label);
 void EmitSljitTypedExpressionTreeInvalidResult(struct sljit_compiler *compiler,
                                                const SljitTypedExpressionTreeSlot &slot);

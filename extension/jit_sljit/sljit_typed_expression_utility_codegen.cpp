@@ -70,6 +70,13 @@ int64_t SljitTypedExpressionTreeConstantValue(const ExecutionExpressionIR &node)
 
 SljitIntegerOverflowChecks SljitTypedExpressionTreeOverflowChecks(const ExecutionExpressionIR &node) {
 	SljitIntegerOverflowChecks checks;
+	if (node.kind == ExecutionExpressionIRKind::UNARY) {
+		D_ASSERT(node.unary_op == ExecutionExpressionUnaryOp::NEGATE);
+		// a DECIMAL's range is symmetric, so only an integer's minimum has no negation
+		checks.overflow = node.arithmetic_overflow_check && !SljitTypedExpressionTreeIsDecimal64Node(node);
+		checks.negation = true;
+		return checks;
+	}
 	if (!node.arithmetic_overflow_check) {
 		return checks;
 	}
@@ -81,6 +88,14 @@ SljitIntegerOverflowChecks SljitTypedExpressionTreeOverflowChecks(const Executio
 		}
 	}
 	return checks;
+}
+
+void EmitSljitTypedExpressionTreeNegate(struct sljit_compiler *compiler, const ExecutionExpressionIR &node,
+                                        sljit_s32 value_reg, vector<SljitArithmeticOverflowSite> &overflows) {
+	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_R1, 0, SLJIT_IMM, 0);
+	EmitSljitCheckedIntegerBinaryOp(compiler, SljitTypedExpressionTreeIntegerKind(node),
+	                                SljitNativeIntegerBinaryOp::SUBTRACT, value_reg, SLJIT_R1, value_reg,
+	                                SljitTypedExpressionTreeOverflowChecks(node), overflows);
 }
 
 bool TryGetSljitTypedExpressionTreeSourceDataHoist(const vector<SljitTypedExpressionTreeLoopHoist> *data_hoists,

@@ -22,6 +22,12 @@ static bool SljitTypedExpressionTreeIsArithmeticNode(const ExecutionExpressionIR
 	return SljitTypedExpressionTreeIsIntegerNode(node) || SljitTypedExpressionTreeIsRegisterDecimalNode(node);
 }
 
+//! A signed INTEGER/BIGINT or a DECIMAL stored in 64 bits: its negation is the subtraction of its raw value from zero
+static bool SljitTypedExpressionTreeIsNegatableNode(const ExecutionExpressionIR &node) {
+	return (SljitTypedExpressionTreeIsIntegerNode(node) && node.return_type.IsIntegral()) ||
+	       SljitTypedExpressionTreeIsDecimal64Node(node);
+}
+
 static bool SljitTypedExpressionTreeSameArithmeticKind(const ExecutionExpressionIR &left,
                                                        const ExecutionExpressionIR &right) {
 	return SljitTypedExpressionTreeSameIntegerKind(left, right) ||
@@ -289,6 +295,9 @@ bool SljitTypedExpressionTreeIsSupported(const ExecutionExpressionIR &node) {
 		case ExecutionExpressionUnaryOp::IS_NOT_NULL:
 			return SljitTypedExpressionTreeIsBoolNode(node) && SljitTypedExpressionTreeIsValueNode(*node.left) &&
 			       SljitTypedExpressionTreeIsSupported(*node.left);
+		case ExecutionExpressionUnaryOp::NEGATE:
+			return SljitTypedExpressionTreeIsNegatableNode(node) && node.left->return_type == node.return_type &&
+			       SljitTypedExpressionTreeIsSupported(*node.left);
 		default:
 			return false;
 		}
@@ -437,6 +446,9 @@ bool SljitTypedExpressionTreeCanPrecheckNulls(const ExecutionExpressionIR &node)
 		       SljitExpressionTreeBinaryOpSupported(node.binary_op) &&
 		       SljitTypedExpressionTreeCanPrecheckNulls(*node.left) &&
 		       SljitTypedExpressionTreeCanPrecheckNulls(*node.right);
+	case ExecutionExpressionIRKind::UNARY:
+		return node.unary_op == ExecutionExpressionUnaryOp::NEGATE && SljitTypedExpressionTreeIsInt64Node(node) &&
+		       node.left && SljitTypedExpressionTreeCanPrecheckNulls(*node.left);
 	default:
 		return false;
 	}

@@ -4,6 +4,7 @@
 #include "duckdb/common/exception.hpp"
 #include "duckdb/common/operator/add.hpp"
 #include "duckdb/common/operator/multiply.hpp"
+#include "duckdb/common/operator/negate.hpp"
 #include "duckdb/common/operator/subtract.hpp"
 #include "duckdb/common/types/date.hpp"
 
@@ -59,33 +60,54 @@ static void RunNativeDateOverflowCheck(SljitNativeIntegerBinaryOp op, int64_t le
 	throw InternalException("SLJIT DATE arithmetic only adds or subtracts days");
 }
 
-static sljit_sw SljitArithmeticOverflowOperation(SljitNativeIntegerKind kind, SljitNativeIntegerBinaryOp op) {
-	return static_cast<sljit_sw>(kind) << 8 | static_cast<sljit_sw>(op);
+static constexpr sljit_sw SLJIT_OVERFLOW_NEGATION = 1 << 16;
+
+static sljit_sw SljitArithmeticOverflowOperation(const SljitArithmeticOverflowSite &site) {
+	return (site.negation ? SLJIT_OVERFLOW_NEGATION : 0) | static_cast<sljit_sw>(site.kind) << 8 |
+	       static_cast<sljit_sw>(site.op);
+}
+
+//! A negation is the subtraction of its operand from zero; DuckDB's negation rejects the operand
+static void RunNativeNegationCheck(SljitNativeIntegerKind kind, int64_t operand) {
+	switch (kind) {
+	case SljitNativeIntegerKind::INT32:
+		NegateOperator::Operation<int32_t, int32_t>(static_cast<int32_t>(operand));
+		return;
+	case SljitNativeIntegerKind::INT64:
+		NegateOperator::Operation<int64_t, int64_t>(operand);
+		return;
+	default:
+		throw InternalException("SLJIT negation overflow check for an unsupported integer kind");
+	}
 }
 
 //! Re-runs the operation that overflowed through DuckDB's own operator, which raises the error native execution
 //! raises. An operator that accepts the operands means the generated check disagrees with DuckDB.
 static void SLJIT_FUNC SljitNativeArithmeticOverflow(SljitNativeVectorInput *input, sljit_sw operation) {
 	try {
-		const auto kind = static_cast<SljitNativeIntegerKind>(operation >> 8);
+		const auto kind = static_cast<SljitNativeIntegerKind>((operation >> 8) & 0xFF);
 		const auto op = static_cast<SljitNativeIntegerBinaryOp>(operation & 0xFF);
 		const auto left = input->overflow_value;
 		const auto right = input->overflow_right_value;
-		switch (kind) {
-		case SljitNativeIntegerKind::INT32:
-			RunNativeIntegerOverflowCheck<int32_t>(op, left, right);
-			break;
-		case SljitNativeIntegerKind::INT64:
-			RunNativeIntegerOverflowCheck<int64_t>(op, left, right);
-			break;
-		case SljitNativeIntegerKind::DECIMAL64:
-			RunNativeDecimal64OverflowCheck(op, left, right);
-			break;
-		case SljitNativeIntegerKind::DATE:
-			RunNativeDateOverflowCheck(op, left, right);
-			break;
-		default:
-			throw InternalException("SLJIT arithmetic overflow check for an unsupported integer kind");
+		if (operation & SLJIT_OVERFLOW_NEGATION) {
+			RunNativeNegationCheck(kind, right);
+		} else {
+			switch (kind) {
+			case SljitNativeIntegerKind::INT32:
+				RunNativeIntegerOverflowCheck<int32_t>(op, left, right);
+				break;
+			case SljitNativeIntegerKind::INT64:
+				RunNativeIntegerOverflowCheck<int64_t>(op, left, right);
+				break;
+			case SljitNativeIntegerKind::DECIMAL64:
+				RunNativeDecimal64OverflowCheck(op, left, right);
+				break;
+			case SljitNativeIntegerKind::DATE:
+				RunNativeDateOverflowCheck(op, left, right);
+				break;
+			default:
+				throw InternalException("SLJIT arithmetic overflow check for an unsupported integer kind");
+			}
 		}
 		throw InternalException("SLJIT arithmetic overflow check fired on operands %lld and %lld that DuckDB accepts",
 		                        left, right);
@@ -133,6 +155,7 @@ void EmitSljitCheckedIntegerBinaryOp(struct sljit_compiler *compiler, SljitNativ
 	site.left_reg = left_reg;
 	site.right_reg = right_reg;
 	site.result_reg = result_reg;
+	site.negation = checks.negation;
 	sljit_emit_op2(compiler, checks.overflow ? binary_op | SLJIT_SET_OVERFLOW : binary_op, result_reg, 0, left_reg, 0,
 	               right_reg, 0);
 	if (checks.overflow) {
@@ -175,8 +198,7 @@ vector<sljit_jump *> EmitSljitArithmeticOverflowStubs(struct sljit_compiler *com
 		sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_MEM1(SLJIT_S0),
 		               offsetof(SljitNativeVectorInput, overflow_right_value), site.right_reg, 0);
 		sljit_emit_op1(compiler, SLJIT_MOV_P, SLJIT_R0, 0, SLJIT_S0, 0);
-		sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_R1, 0, SLJIT_IMM,
-		               SljitArithmeticOverflowOperation(site.kind, site.op));
+		sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_R1, 0, SLJIT_IMM, SljitArithmeticOverflowOperation(site));
 		sljit_emit_icall(compiler, SLJIT_CALL, SLJIT_ARGS2V(P, W), SLJIT_IMM,
 		                 SLJIT_FUNC_ADDR(SljitNativeArithmeticOverflow));
 		stub_exits.push_back(sljit_emit_jump(compiler, SLJIT_JUMP));

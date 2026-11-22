@@ -1,0 +1,150 @@
+# name: test/sql/jit/test_jit_negation.test
+# description: Unary minus on INTEGER, BIGINT and DECIMAL values compiles into the generated expression loops: NULL rows stay NULL, nested negations and CASE payloads keep native results, and negating an integer's minimum raises DuckDB's negation error
+# group: [jit]
+
+require jit_sljit
+
+load {TEST_DIR}/jit_negation.db
+
+statement ok
+CREATE TABLE negations AS
+SELECT i AS id,
+       (i % 1000)::INTEGER AS k,
+       (i * 7919 % 100003 - 50000)::BIGINT AS b,
+       CASE WHEN i % 13 = 0 THEN NULL ELSE (i % 2001 - 1000)::INTEGER END AS nk,
+       CASE WHEN i % 17 = 0 THEN NULL ELSE ((i * 31) % 200001 - 100000)::BIGINT END AS nb,
+       ((i * 13) % 2000001 - 1000000)::DECIMAL(15, 2) / 100 AS d,
+       CASE WHEN i % 19 = 0 THEN NULL ELSE ((i * 17) % 20001 - 10000)::DECIMAL(18, 3) / 1000 END AS nd
+FROM range(400000) t(i)
+
+statement ok
+CHECKPOINT
+
+restart
+
+statement ok
+SET jit_measure_native_legs=false
+
+statement ok
+SET jit_cbo_startup_base_cost=0
+
+statement ok
+SET jit_cbo_startup_margin_basis_points=0
+
+statement ok
+CREATE MACRO negation_sums() AS TABLE
+SELECT 'case_bigint' AS q, sum(CASE WHEN k < 300 THEN id ELSE -id END)::HUGEINT AS a, count(*)::HUGEINT AS c FROM negations
+UNION ALL
+SELECT 'sum_bigint', sum(-b), count(*) FROM negations
+UNION ALL
+SELECT 'sum_integer', sum(-k), count(*) FROM negations
+UNION ALL
+SELECT 'sum_nullable_integer', sum(-nk), count(-nk) FROM negations
+UNION ALL
+SELECT 'sum_nullable_bigint', sum(-nb), count(-nb) FROM negations
+UNION ALL
+SELECT 'double_negation', sum(-(-b)), count(*) FROM negations
+UNION ALL
+SELECT 'negated_sum', sum(-(b + k)), count(*) FROM negations
+UNION ALL
+SELECT 'negated_product', sum(-(k * 3) + 1), count(*) FROM negations
+UNION ALL
+SELECT 'filter', sum(id), count(*) FROM negations WHERE -k < -500 AND -b > -1000
+UNION ALL
+SELECT 'filter_nullable', sum(id), count(*) FROM negations WHERE -nk >= 10
+UNION ALL
+SELECT 'case_nullable', sum(CASE WHEN nb > 0 THEN -nb ELSE nk END), count(*) FROM negations
+UNION ALL
+SELECT 'decimal', (sum(-d) * 100)::HUGEINT, count(*) FROM negations
+UNION ALL
+SELECT 'decimal_nullable', (sum(-nd) * 1000)::HUGEINT, count(-nd) FROM negations
+UNION ALL
+SELECT 'decimal_case', (sum(CASE WHEN d > 0 THEN d ELSE -d END) * 100)::HUGEINT, count(*) FROM negations
+UNION ALL
+SELECT 'grouped_' || (k % 4), sum(-b), count(*) FROM negations GROUP BY k % 4
+UNION ALL
+SELECT 'projection', sum(v), count(*) FROM (SELECT -nk AS v FROM negations WHERE k > 100 ORDER BY id LIMIT 1000)
+
+foreach threads 1 4
+
+statement ok
+SET threads={threads}
+
+foreach policy off auto
+
+statement ok
+SET jit_policy='{policy}'
+
+statement ok
+CREATE OR REPLACE TEMP TABLE r_{policy} AS FROM negation_sums()
+
+endloop
+
+query I
+SELECT count(*) FROM ((SELECT * FROM r_off EXCEPT ALL SELECT * FROM r_auto)
+                      UNION ALL (SELECT * FROM r_auto EXCEPT ALL SELECT * FROM r_off))
+----
+0
+
+query I
+SELECT count(*) FROM r_auto
+----
+19
+
+endloop
+
+# the CASE payload with a negation runs in generated code
+statement ok
+SET threads=1
+
+statement ok
+SET jit_trace_runtime=true
+
+statement ok
+SET jit_event_log_size=0
+
+statement ok
+SET jit_event_log_size=100
+
+statement ok
+CREATE OR REPLACE TEMP TABLE traced AS
+SELECT sum(CASE WHEN k < 300 THEN id ELSE -id END) FROM negations
+
+query I
+SELECT count(*) > 0 FROM duckdb_jit_events() WHERE status = 'executed' AND jit_runtime_path_counts LIKE '%fused_payload_update%'
+----
+true
+
+statement ok
+SET jit_trace_runtime=false
+
+# negating the minimum of an integer type raises DuckDB's negation error, also when only one row holds it
+statement ok
+CREATE TABLE extremes AS
+SELECT i AS id,
+       CASE WHEN i = 77777 THEN -9223372036854775808 ELSE i END::BIGINT AS b,
+       CASE WHEN i = 99999 THEN -2147483648 ELSE i END::INTEGER AS k
+FROM range(200000) t(i)
+
+foreach policy off auto
+
+statement ok
+SET jit_policy='{policy}'
+
+statement error
+SELECT sum(-b) FROM extremes
+----
+Overflow in negation of numeric value!
+
+statement error
+SELECT sum(CASE WHEN id % 2 = 0 THEN id ELSE -k END) FROM extremes
+----
+Overflow in negation of numeric value!
+
+# the row that holds the minimum is filtered out first
+query I
+SELECT sum(-b) FROM extremes WHERE id <> 77777
+----
+-19999822223
+
+endloop

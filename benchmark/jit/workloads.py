@@ -651,7 +651,7 @@ ENCODINGS_QUERIES = {
     ),
     "integer_case": (
         "SELECT sum(CASE WHEN k < 300 THEN id ELSE -id END) FROM __jit_encodings_facts",
-        {1: False, 4: False},
+        {1: True, 4: True},
     ),
     "narrow_between": (
         "SELECT sum(id) FROM __jit_encodings_facts WHERE si BETWEEN 100 AND 2000",
@@ -701,7 +701,7 @@ ENCODINGS_THRESHOLDS = {
     "distinct_count": ({1: 1.23, 4: 0.88}, {1: 75_100_000, 4: 106_200_000}),
     "filtered_top_n": ({1: 0.84, 4: 0.87}, {1: 55_100_000, 4: 53_500_000}),
     "dictionary_prefix": ({1: 0.88, 4: 0.89}, {1: 466_400_000, 4: 460_800_000}),
-    "integer_case": ({1: 0.88, 4: 0.88}, {1: 74_200_000, 4: 74_600_000}),
+    "integer_case": ({1: 1.50, 4: 1.49}, {1: 50_000_000, 4: 49_600_000}),
     "narrow_between": ({1: 1.28, 4: 1.22}, {1: 15_400_000, 4: 17_500_000}),
     "nullable_key_join": ({1: 0.89, 4: 0.89}, {1: 570_500_000, 4: 572_400_000}),
     "random_key_groups": ({1: 0.89, 4: 0.89}, {1: 234_900_000, 4: 417_100_000}),

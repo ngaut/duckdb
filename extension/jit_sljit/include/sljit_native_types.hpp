@@ -343,6 +343,8 @@ struct SljitIntegerOverflowChecks {
 	bool range = false;
 	int64_t result_min = 0;
 	int64_t result_max = 0;
+	//! the operation subtracts a value from zero to negate it: DuckDB reports its overflow as a failed negation
+	bool negation = false;
 };
 
 //! A decimal source's scale and the power of ten its fast-path conversion divides by. DuckDB converts a decimal to

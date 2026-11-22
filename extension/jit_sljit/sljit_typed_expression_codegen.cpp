@@ -436,6 +436,19 @@ static SljitTypedExpressionTreeSlot EmitSljitTypedExpressionTreeUnary(struct slj
 		sljit_set_label(done_from_false, done_label);
 		return result_slot;
 	}
+	case ExecutionExpressionUnaryOp::NEGATE: {
+		sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_R3, 0, SLJIT_MEM1(SLJIT_SP), child_slot.valid_offset);
+		auto child_invalid = sljit_emit_cmp(compiler, SLJIT_EQUAL, SLJIT_R3, 0, SLJIT_IMM, 0);
+		sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_R2, 0, SLJIT_MEM1(SLJIT_SP), child_slot.value_offset);
+		EmitSljitTypedExpressionTreeNegate(compiler, node, SLJIT_R2, overflows);
+		sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_R3, 0, SLJIT_IMM, 1);
+		EmitStoreSljitTypedExpressionTreeSlot(compiler, result_slot, SLJIT_R2, SLJIT_R3);
+		auto done = sljit_emit_jump(compiler, SLJIT_JUMP);
+		sljit_set_label(child_invalid, sljit_emit_label(compiler));
+		EmitSljitTypedExpressionTreeInvalidResult(compiler, result_slot);
+		sljit_set_label(done, sljit_emit_label(compiler));
+		return result_slot;
+	}
 	default:
 		throw InternalException("Unsupported SLJIT typed expression-tree unary operator");
 	}
