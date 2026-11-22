@@ -76,7 +76,7 @@ static constexpr idx_t EXECUTION_REGION_RUNNER_COST_PROFILE_COLUMN_COUNT =
 //! The work columns derive from ForEachPhysicalRunnerCostWorkField; the count stays a
 //! constant because the per-table column enums static_assert against it. Registration
 //! throws if the walk and the constant ever disagree, so schema drift fails loudly.
-static constexpr idx_t EXECUTION_REGION_RUNNER_COST_WORK_COLUMN_COUNT = 24;
+static constexpr idx_t EXECUTION_REGION_RUNNER_COST_WORK_COLUMN_COUNT = 23;
 
 static inline void AddExecutionRegionRunnerCostWorkColumns(vector<LogicalType> &return_types,
                                                            vector<Identifier> &names) {

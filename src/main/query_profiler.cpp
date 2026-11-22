@@ -212,7 +212,6 @@ static string ExecutionRegionProfileCostComponents(const PhysicalRunnerCostProfi
 	result += ",native:" + std::to_string(cost.native_operator_work);
 	result += ",mat:" + std::to_string(cost.materialization_elision_work);
 	result += ",selected_filter_mat_penalty:" + std::to_string(cost.selected_hash_join_filter_materialization_penalty);
-	result += ",source_contract_scan_penalty:" + std::to_string(cost.source_contract_scan_penalty);
 	result += ",full:" + std::to_string(cost.full_pipeline_work);
 	result += ",protocol_penalty:" + std::to_string(cost.stateful_protocol_penalty);
 	result += ",gpu_transfer:" + std::to_string(cost.gpu.transfer_cost);

@@ -75,7 +75,6 @@ struct RunnerCostAxis {
 
 struct PhysicalRunnerCostParameters {
 	//! Inputs shared by every axis: properties of the plan and the host, not of a runner.
-	idx_t source_contract_scan_filter_penalty = 4096;
 	idx_t vectorized_parallelism = 1;
 	//! Axis order is the selection tie-break: an earlier axis keeps a tied net benefit.
 	//! The first axis is the reference axis; it is costed even when unavailable so
@@ -122,7 +121,6 @@ struct PhysicalRunnerCostParameters {
 	FIELD(native_operator_work)                                                                                        \
 	FIELD(materialization_elision_work)                                                                                \
 	FIELD(selected_hash_join_filter_materialization_penalty)                                                           \
-	FIELD(source_contract_scan_penalty)                                                                                \
 	FIELD(full_pipeline_work)                                                                                          \
 	FIELD(stateful_protocol_penalty)                                                                                   \
 	FIELD(saved_work_per_batch)                                                                                        \

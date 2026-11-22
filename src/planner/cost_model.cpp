@@ -17,8 +17,6 @@ static constexpr int64_t NATIVE_JOIN_PROTOCOL_PENALTY = 720;
 static constexpr int64_t NATIVE_HASH_JOIN_BUILD_SINK_PROTOCOL_PENALTY = 720;
 static constexpr int64_t NATIVE_GROUPED_AGGREGATE_PARALLELISM_PENALTY = 160;
 static constexpr int64_t MATERIALIZING_NATIVE_PROTOCOL_STAGE_MULTIPLIER = 2;
-static constexpr int64_t UNKNOWN_OUTPUT_NATIVE_FUSION_MIN_COSTED_BATCHES = 1024;
-static constexpr idx_t UNKNOWN_OUTPUT_HASH_BUILD_HIGH_EXPANSION_FACTOR = 2;
 static constexpr idx_t LARGE_NATIVE_GROUPED_LOOKUP_INPUT_ROWS = 8 * 1024 * 1024;
 static constexpr idx_t MIN_NATIVE_GROUPED_LOOKUP_EXPRESSION_COST = 64;
 static constexpr idx_t MIN_GENERATED_GROUPED_UPDATE_EXPRESSION_COST = 40;
@@ -66,7 +64,6 @@ static int64_t FractionalCost(int64_t value, int64_t numerator, int64_t denomina
 //! may depend only on these, which is what makes one set of shape facts valid for every
 //! runner axis: the type system rules out accidental per-runner shape divergence.
 struct PhysicalRunnerSharedCostInputs {
-	idx_t source_contract_scan_filter_penalty = 4096;
 	idx_t vectorized_parallelism = 1;
 };
 
@@ -220,12 +217,6 @@ struct PhysicalRunnerShapeFacts {
 	bool no_native_sort = false;
 };
 
-static bool PhysicalRunnerHasSourceFilterSensitiveDownstreamWork(const PhysicalRunnerCostInput &input) {
-	return input.generated_backend_stage_count > 0 || input.materialization_elision_count > 0 ||
-	       input.native_join_stage_count > 0 || input.native_hash_join_build_sink_count > 0 ||
-	       input.native_aggregate_stage_count > 0 || input.native_sort_stage_count > 0;
-}
-
 static bool PhysicalRunnerCanPriceUnknownSourceOutputGeneratedJoinFusion(const PhysicalRunnerCostInput &input,
                                                                          const PhysicalRunnerSharedCostInputs &shared) {
 	if (input.source_contract_input_cardinality == 0 || !input.source_contract_output_cardinality_unknown ||
@@ -258,65 +249,12 @@ PhysicalRunnerCanCreditUnknownSourceOutputGeneratedJoinBackendStage(const Physic
 	       PhysicalRunnerHasGeneratedJoinGroupedFusionProof(input);
 }
 
-static bool PhysicalRunnerUnknownOutputHashBuildSinkHasHighEstimatedExpansion(const PhysicalRunnerCostInput &input) {
-	return input.native_hash_join_build_sink_count > 0 && input.source_contract_input_cardinality > 0 &&
-	       input.estimated_cardinality / UNKNOWN_OUTPUT_HASH_BUILD_HIGH_EXPANSION_FACTOR >
-	           input.source_contract_input_cardinality;
-}
-
-static bool PhysicalRunnerHasDirectGeneratedJoinProbeHashBuildPath(const PhysicalRunnerCostInput &input) {
-	return input.native_join_stage_count == 1 && input.native_hash_join_build_sink_count == 1 &&
-	       input.generated_backend_stage_count == 1 && input.native_aggregate_stage_count == 0 &&
-	       input.native_sort_stage_count == 0;
-}
-
-static bool PhysicalRunnerUnknownFilteredSourceOutputCapsCostedBatches(const PhysicalRunnerCostInput &input,
-                                                                       const PhysicalRunnerSharedCostInputs &shared,
-                                                                       int64_t batches) {
-	if (!input.uses_scan_filters || !input.source_contract_output_cardinality_unknown ||
-	    !PhysicalRunnerHasSourceFilterSensitiveDownstreamWork(input)) {
-		return false;
-	}
-	if (shared.source_contract_scan_filter_penalty == 0) {
-		return false;
-	}
-	if (input.finalized_dynamic_filter_cardinality_estimate) {
-		return false;
-	}
-	if (PhysicalRunnerCanPriceUnknownSourceOutputGeneratedJoinFusion(input, shared)) {
-		return false;
-	}
-	if (input.materialization_elision_count > 0) {
-		return false;
-	}
-	if (input.source_contract_input_cardinality == 0) {
-		return true;
-	}
-	if (PhysicalRunnerUnknownOutputHashBuildSinkHasHighEstimatedExpansion(input)) {
-		return true;
-	}
-	// This shape has one bounded probe and one terminal hash-build sink. There is
-	// no intermediate operator that can multiply the unknown filtered output, so
-	// the candidate estimate is a safe amortization bound. Keep the high-expansion
-	// guard above for genuinely unstable build inputs.
-	if (PhysicalRunnerHasDirectGeneratedJoinProbeHashBuildPath(input)) {
-		return false;
-	}
-	if (PhysicalRunnerBatches(SaturatingCostCast(input.source_contract_input_cardinality)) <= batches) {
-		return false;
-	}
-	return batches < UNKNOWN_OUTPUT_NATIVE_FUSION_MIN_COSTED_BATCHES;
-}
-
 static PhysicalRunnerShapeFacts PhysicalRunnerBuildShapeFacts(const PhysicalRunnerCostInput &input,
                                                               const PhysicalRunnerSharedCostInputs &shared) {
 	PhysicalRunnerShapeFacts facts;
 	facts.rows = PhysicalRunnerRows(input);
 	facts.batches = PhysicalRunnerBatches(facts.rows);
 	facts.costed_batches = facts.batches;
-	if (PhysicalRunnerUnknownFilteredSourceOutputCapsCostedBatches(input, shared, facts.batches)) {
-		facts.costed_batches = 1;
-	}
 	facts.source_contract_input_rows = SaturatingCostCast(input.source_contract_input_cardinality);
 	facts.source_contract_input_batches = PhysicalRunnerBatches(facts.source_contract_input_rows);
 	facts.source_contract_output_cardinality_unknown = input.source_contract_output_cardinality_unknown;
@@ -454,56 +392,6 @@ static idx_t PhysicalRunnerCostedGeneratedBackendStageCount(const PhysicalRunner
 		return 0;
 	}
 	return MinValue(input.generated_backend_stage_count, input.generated_stage_count);
-}
-
-static int64_t PhysicalRunnerSourceContractScanPenalty(const PhysicalRunnerCostInput &input,
-                                                       const PhysicalRunnerShapeFacts &facts,
-                                                       const PhysicalRunnerSharedCostInputs &shared) {
-	if (!input.uses_scan_filters || input.source_contract_input_cardinality == 0) {
-		return 0;
-	}
-	if (input.finalized_dynamic_filter_cardinality_estimate) {
-		return 0;
-	}
-	// A generated filtered reduction consumes DuckDB's filtered source batches
-	// directly and updates its terminal aggregate without publishing the
-	// intermediate projection. Raw scan work is shared with the vectorized path;
-	// charging it again would erase the materialization-elision benefit.
-	if (input.full_pipeline && input.source_filter_count > 0 && input.generated_backend_stage_count > 0 &&
-	    input.generated_grouped_aggregate_stage_count == 0 && input.materialization_elision_count > 0 &&
-	    input.selected_hash_join_filter_materialization_count == 0 && input.native_join_stage_count == 0 &&
-	    input.native_hash_join_build_sink_count == 0 && input.native_grouped_state_address_lookup_count == 0 &&
-	    input.native_aggregate_stage_count == 0 && input.native_sort_stage_count == 0) {
-		return 0;
-	}
-	// A single generated probe feeding a hash-build sink has no intermediate
-	// operator chain to amplify scan-filter materialization. The native region
-	// consumes each selected row directly, so charging the generic filtered-scan
-	// penalty rejects a profitable full-pipeline fusion. Multi-join and aggregate
-	// tails retain the guard because they have additional stateful protocol work.
-	if (PhysicalRunnerHasDirectGeneratedJoinProbeHashBuildPath(input)) {
-		return 0;
-	}
-	if (input.source_contract_output_cardinality_unknown && input.native_grouped_state_address_lookup_count == 0 &&
-	    input.native_hash_join_build_sink_count == 0) {
-		return 0;
-	}
-	if (PhysicalRunnerCanPriceUnknownSourceOutputGeneratedJoinFusion(input, shared)) {
-		return 0;
-	}
-	if (facts.source_contract_input_batches <= facts.batches) {
-		return 0;
-	}
-	if (!PhysicalRunnerHasSourceFilterSensitiveDownstreamWork(input)) {
-		return 0;
-	}
-	const auto penalty_unit = SaturatingCostCast(shared.source_contract_scan_filter_penalty);
-	if (penalty_unit <= 0) {
-		return 0;
-	}
-	const auto extra_source_batches = facts.source_contract_input_batches - facts.batches;
-	const auto total_penalty = MultiplyCost(extra_source_batches, penalty_unit);
-	return total_penalty / facts.batches;
 }
 
 enum class PhysicalRunnerAdmissionClass : uint8_t {
@@ -721,7 +609,6 @@ static void PhysicalRunnerComputeWorkComponents(const PhysicalRunnerCostInput &i
 		            MultiplyCost(SaturatingCostCast(input.native_grouped_state_address_lookup_count),
 		                         native_grouped_lookup_penalty));
 	}
-	profile.source_contract_scan_penalty = PhysicalRunnerSourceContractScanPenalty(input, facts, evaluation.shared);
 	if (evaluation.shared.vectorized_parallelism > 1 && input.native_grouped_aggregate_stage_count > 0) {
 		const auto grouped_aggregate_parallel_penalty =
 		    MultiplyCost(SaturatingCostCast(input.native_grouped_aggregate_stage_count),
@@ -745,7 +632,6 @@ static void PhysicalRunnerComputeWorkComponents(const PhysicalRunnerCostInput &i
 	work = AddCost(work, profile.full_pipeline_work);
 	work = SubtractCost(work, profile.selected_hash_join_filter_materialization_penalty);
 	work = SubtractCost(work, profile.stateful_protocol_penalty);
-	work = SubtractCost(work, profile.source_contract_scan_penalty);
 	profile.saved_work_per_batch = work;
 }
 
@@ -872,7 +758,6 @@ PhysicalRunnerCostProfile DuckDBCostModel::SelectPhysicalRunner(const PhysicalRu
                                                                 const PhysicalRunnerCostParameters &parameters) {
 	constexpr auto AXIS_COUNT = PhysicalRunnerCostParameters::AXIS_COUNT;
 	PhysicalRunnerSharedCostInputs shared;
-	shared.source_contract_scan_filter_penalty = parameters.source_contract_scan_filter_penalty;
 	shared.vectorized_parallelism = parameters.vectorized_parallelism;
 	auto facts = PhysicalRunnerBuildShapeFacts(input, shared);
 

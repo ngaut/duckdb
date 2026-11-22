@@ -88,7 +88,6 @@ string DescribeExecutionRegionLoweringRejection(const ExecutionRegionGraph &grap
 PhysicalRunnerCostParameters BuildPhysicalRunnerCostParameters(ClientContext &context) {
 	PhysicalRunnerCostParameters result;
 	auto &manager = ExecutionRegionManager::Get(context);
-	result.source_contract_scan_filter_penalty = Settings::Get<JitCboSourceContractScanFilterPenaltySetting>(context);
 	result.vectorized_parallelism =
 	    MaxValue<idx_t>(NumericCast<idx_t>(TaskScheduler::GetScheduler(context).NumberOfThreads()), 1);
 	auto &compiled = result.compiled_vectorized;

@@ -41,7 +41,7 @@ ROOT = Path(__file__).resolve().parents[2]
 FORCED_SETTINGS = (
     "SET jit_cbo_generated_stage_benefit=4096; SET jit_cbo_materialization_elision_benefit=4096; "
     "SET jit_cbo_native_operator_stage_benefit=4096; SET jit_cbo_full_pipeline_benefit=4096; "
-    "SET jit_cbo_source_contract_scan_filter_penalty=0; SET jit_cbo_startup_base_cost=0; "
+    "SET jit_cbo_startup_base_cost=0; "
     "SET jit_cbo_startup_margin_basis_points=0;"
 )
 CONFIGS = {

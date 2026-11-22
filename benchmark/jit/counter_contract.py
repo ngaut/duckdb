@@ -20,7 +20,6 @@ RUNNER_COST_COMPONENT_FIELDS = (
     "runner_cost_native_operator_work",
     "runner_cost_materialization_elision_work",
     "runner_cost_selected_hash_join_filter_materialization_penalty",
-    "runner_cost_source_contract_scan_penalty",
     "runner_cost_full_pipeline_work",
     "runner_cost_stateful_protocol_penalty",
 )

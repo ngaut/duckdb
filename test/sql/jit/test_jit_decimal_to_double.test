@@ -104,9 +104,6 @@ statement ok
 SET jit_cbo_materialization_elision_benefit=4096
 
 statement ok
-SET jit_cbo_source_contract_scan_filter_penalty=0
-
-statement ok
 SET threads=1
 
 foreach policy off auto
