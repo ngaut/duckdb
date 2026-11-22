@@ -196,6 +196,20 @@ static bool SljitTypedExpressionTreeInt64CastLogic(const ExecutionExpressionIR &
 	       SljitTypedExpressionTreeIsIntegerNode(*node.left) && SljitTypedExpressionTreeIsSupported(*node.left);
 }
 
+//! An INTEGER/BIGINT, or a DECIMAL64 of at most 15 digits, to DOUBLE: DuckDB converts an integer exactly or to the
+//! nearest double, and a decimal as `raw / 10^scale` whenever |raw| <= 2^53, which 15 digits always are
+static bool SljitTypedExpressionTreeDoubleCastLogic(const ExecutionExpressionIR &node) {
+	if (node.kind != ExecutionExpressionIRKind::CAST || !SljitTypedExpressionTreeCastExceptionBehaviorIsSafe(node) ||
+	    !SljitTypedExpressionTreeIsDoubleNode(node) || !node.left) {
+		return false;
+	}
+	auto &source = *node.left;
+	const bool integer_source = SljitTypedExpressionTreeIsIntegerNode(source) && source.return_type.IsIntegral();
+	const bool decimal_source = SljitTypedExpressionTreeIsDecimal64Node(source) &&
+	                            DecimalType::GetWidth(source.return_type) <= SLJIT_EXACT_DOUBLE_DECIMAL_WIDTH;
+	return (integer_source || decimal_source) && SljitTypedExpressionTreeIsSupported(source);
+}
+
 bool SljitTypedExpressionTreeIsNarrowSignedReference(const ExecutionExpressionIR &node) {
 	if (node.kind != ExecutionExpressionIRKind::REFERENCE) {
 		return false;
@@ -258,7 +272,8 @@ static bool SljitTypedExpressionTreeNarrowDecimal128CastLogic(const ExecutionExp
 }
 
 bool SljitTypedExpressionTreeValueCastSupported(const ExecutionExpressionIR &node) {
-	return SljitTypedExpressionTreeInt64CastLogic(node) || SljitTypedExpressionTreeIsNarrowSourceWideningCast(node) ||
+	return SljitTypedExpressionTreeInt64CastLogic(node) || SljitTypedExpressionTreeDoubleCastLogic(node) ||
+	       SljitTypedExpressionTreeIsNarrowSourceWideningCast(node) ||
 	       SljitTypedExpressionTreeDecimal64WideningCastLogic(node) ||
 	       SljitTypedExpressionTreeInt32ToDecimal64ScaleZeroCastLogic(node) ||
 	       SljitTypedExpressionTreeNarrowDecimal128CastLogic(node);

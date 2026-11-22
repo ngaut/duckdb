@@ -20,7 +20,12 @@ SELECT i AS id,
        CASE WHEN i % 11 = 0 THEN NULL ELSE ((i * 31) % 2001 - 1000)::DOUBLE / 3 END AS nd,
        (i * 0.11)::DOUBLE / 13 AS e,
        ((i * 7) % 1000)::DOUBLE AS w,
-       CASE WHEN i % 7 = 0 THEN NULL ELSE (i % 500)::DOUBLE END AS nw
+       CASE WHEN i % 7 = 0 THEN NULL ELSE (i % 500)::DOUBLE END AS nw,
+       (((i * 7919) % 2000001 - 1000000) / 100)::DECIMAL(15, 2) AS p,
+       CASE WHEN i % 13 = 0 THEN NULL ELSE (((i * 31) % 20001 - 10000) / 9)::DECIMAL(12, 4) END AS np,
+       ((i * 7919) % 999999999999 + 900000000000000)::DECIMAL(18, 3) AS wide,
+       CASE i % 5 WHEN 0 THEN 9223372036854775807 WHEN 1 THEN -9223372036854775808 ELSE i * 1000000007 END::BIGINT AS big,
+       (i % 100000 - 50000)::INTEGER AS small
 FROM range(400000) t(i)
 
 statement ok
@@ -72,6 +77,18 @@ SELECT 'all_null', sum(CASE WHEN k < 0 THEN e END), count(*) FROM doubles
 UNION ALL
 SELECT 'mixed_lanes', sum(e) + sum(k) * 0.5 + sum(-nd) + count(nd), count(*) FROM doubles WHERE k > 10
 UNION ALL
+SELECT 'decimal_times_double', sum(p * (1 - e / 1000)), count(*) FROM doubles WHERE e > 5.0
+UNION ALL
+SELECT 'nullable_decimal_cast', sum(np::DOUBLE * 3.0 + nd), count(*) FROM doubles
+UNION ALL
+SELECT 'bigint_cast', sum(big::DOUBLE * 0.5), count(*) FROM doubles
+UNION ALL
+SELECT 'integer_cast', sum(CASE WHEN k < 300 THEN small::DOUBLE ELSE e END), count(*) FROM doubles
+UNION ALL
+SELECT 'nullable_cast_case', sum(CASE WHEN nd IS NULL THEN np::DOUBLE ELSE e END), count(*) FROM doubles
+UNION ALL
+SELECT 'wide_decimal_cast', sum(CASE WHEN e > 1.0 THEN wide::DOUBLE - 900000000000000.0 ELSE e END), count(*) FROM doubles
+UNION ALL
 SELECT 'five_lanes', sum(e) + sum(e * 2) + sum(-e) + sum(nd) + sum(e - 1.0), count(*) FROM doubles WHERE k < 900
 
 statement ok
@@ -96,7 +113,7 @@ SELECT count(*) FROM ((SELECT * FROM o_off EXCEPT ALL SELECT * FROM o_auto)
 query I
 SELECT count(*) FROM o_auto
 ----
-17
+23
 
 query I
 SELECT a IS NULL FROM o_auto WHERE q = 'all_null'

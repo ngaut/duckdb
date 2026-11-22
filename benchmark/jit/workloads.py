@@ -681,8 +681,8 @@ ENCODINGS_QUERIES = {
 
 # name -> (floor, ceiling) per thread count
 ENCODINGS_THRESHOLDS = {
-    "decimal_double_product": ({1: 0.87}, {1: 172_500_000}),
-    "decimal_grouped": ({1: 0.87}, {1: 210_800_000}),
+    "decimal_double_product": ({1: 2.28}, {1: 67_300_000}),
+    "decimal_grouped": ({1: 0.97}, {1: 191_700_000}),
     "date_range": ({1: 1.52, 4: 1.48}, {1: 25_700_000, 4: 27_200_000}),
     "date_year_groups": ({1: 1.07, 4: 1.06}, {1: 115_700_000, 4: 115_800_000}),
     "dictionary_case": ({1: 0.98, 4: 0.97}, {1: 54_800_000, 4: 56_000_000}),

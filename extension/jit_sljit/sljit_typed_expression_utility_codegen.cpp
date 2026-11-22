@@ -11,6 +11,8 @@
 
 #include "duckdb/common/exception.hpp"
 #include "duckdb/common/helper.hpp"
+#include "duckdb/common/types/cast_helpers.hpp"
+#include "duckdb/common/types/decimal.hpp"
 #include "duckdb/common/types/hugeint.hpp"
 
 #include <algorithm>
@@ -98,6 +100,19 @@ SljitIntegerOverflowChecks SljitTypedExpressionTreeOverflowChecks(const Executio
 		}
 	}
 	return checks;
+}
+
+void EmitSljitTypedExpressionTreeConvertToDouble(struct sljit_compiler *compiler, const ExecutionExpressionIR &source,
+                                                 sljit_s32 value_reg) {
+	sljit_emit_fop1(compiler, SLJIT_CONV_F64_FROM_SW, SLJIT_FR0, 0, value_reg, 0);
+	if (SljitTypedExpressionTreeIsDecimal64Node(source)) {
+		const auto scale = DecimalType::GetScale(source.return_type);
+		sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_R1, 0, SLJIT_IMM,
+		               static_cast<sljit_sw>(SljitDoubleBits(NumericHelper::DOUBLE_POWERS_OF_TEN[scale])));
+		sljit_emit_fcopy(compiler, SLJIT_COPY_TO_F64, SLJIT_FR1, SLJIT_R1);
+		sljit_emit_fop2(compiler, SLJIT_DIV_F64, SLJIT_FR0, 0, SLJIT_FR0, 0, SLJIT_FR1, 0);
+	}
+	sljit_emit_fcopy(compiler, SLJIT_COPY_FROM_F64, SLJIT_FR0, value_reg);
 }
 
 void EmitSljitTypedExpressionTreeDoubleBinary(struct sljit_compiler *compiler, ExecutionExpressionBinaryOp op,

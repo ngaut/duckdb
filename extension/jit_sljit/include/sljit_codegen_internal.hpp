@@ -144,6 +144,10 @@ void EmitSljitTypedExpressionTreeIntegerDivide(struct sljit_compiler *compiler, 
                                                sljit_s32 result_reg,
                                                const vector<SljitTypedExpressionTreeLoopHoist> *hoists = nullptr);
 SljitIntegerOverflowChecks SljitTypedExpressionTreeOverflowChecks(const ExecutionExpressionIR &node);
+//! Converts the INTEGER/BIGINT or DECIMAL64 `source` value in value_reg (sign-extended) to DOUBLE bits in place,
+//! through FR0 and FR1; clobbers R1
+void EmitSljitTypedExpressionTreeConvertToDouble(struct sljit_compiler *compiler, const ExecutionExpressionIR &source,
+                                                 sljit_s32 value_reg);
 //! Combines the DOUBLE bits in left_reg and right_reg into target_reg through FR0 and FR1
 void EmitSljitTypedExpressionTreeDoubleBinary(struct sljit_compiler *compiler, ExecutionExpressionBinaryOp op,
                                               sljit_s32 target_reg, sljit_s32 left_reg, sljit_s32 right_reg);

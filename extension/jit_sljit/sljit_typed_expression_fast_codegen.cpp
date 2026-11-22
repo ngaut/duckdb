@@ -294,6 +294,9 @@ static void EmitSljitTypedExpressionTreeFastCastReg(struct sljit_compiler *compi
 	if (SljitTypedExpressionTreeIsInt32Node(*node.left)) {
 		sljit_emit_op1(compiler, SLJIT_MOV_S32, SLJIT_R2, 0, SLJIT_R2, 0);
 	}
+	if (SljitTypedExpressionTreeIsDoubleNode(node)) {
+		EmitSljitTypedExpressionTreeConvertToDouble(compiler, *node.left, SLJIT_R2);
+	}
 }
 
 static void
