@@ -90,8 +90,8 @@ unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativeGroupedFusedTypedExpressio
 	const auto local_size =
 	    shared_value_offset + (codegen_plan.shared_binary.Enabled() ? NumericCast<sljit_sw>(sizeof(sljit_sw)) : 0);
 	vector<SljitArithmeticOverflowSite> overflows;
-	sljit_emit_enter(compiler, 0, SLJIT_ARGS1V(P), 5, GetSljitNativeVectorRegisterLayout().saved_register_count,
-	                 local_size);
+	sljit_emit_enter(compiler, 0, SLJIT_ARGS1V(P), SljitTypedExpressionTreeEnterScratches(5),
+	                 GetSljitNativeVectorRegisterLayout().saved_register_count, local_size);
 	EmitInitSljitNativeVectorLoop(compiler);
 	EmitInitSljitNativeVectorSourceArrays(compiler);
 

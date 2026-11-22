@@ -55,6 +55,16 @@ bool TryReadSljitTypedExpressionTreeStringPrefixConstant(const ExecutionExpressi
                                                          string &prefix);
 bool TryReadSljitTypedExpressionTreeStringCompareConstant(const ExecutionExpressionIR &node, idx_t &source_index,
                                                           string &constant, bool &compare_equal);
+//! A comparison of a DOUBLE or FLOAT column with a constant of its type that is no NaN, read as `column op constant`
+struct SljitTypedExpressionTreeFloatCompare {
+	idx_t source_index = 0;
+	//! the column is FLOAT: its value widens to DOUBLE exactly, which keeps every comparison
+	bool single_precision = false;
+	double constant = 0;
+	SljitNativeIntegerCompareOp op = SljitNativeIntegerCompareOp::EQUAL;
+};
+bool TryReadSljitTypedExpressionTreeFloatCompareConstant(const ExecutionExpressionIR &node,
+                                                         SljitTypedExpressionTreeFloatCompare &compare);
 bool SljitTypedExpressionTreeIsSupported(const ExecutionExpressionIR &node);
 bool SljitTypedExpressionTreeInt64CastSupported(const ExecutionExpressionIR &node);
 bool SljitTypedExpressionTreeValueCastSupported(const ExecutionExpressionIR &node);

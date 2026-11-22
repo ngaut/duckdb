@@ -273,6 +273,38 @@ EmitSljitTypedExpressionTreeIntegralCompress(struct sljit_compiler *compiler, co
 	return result_slot;
 }
 
+//! A DOUBLE/FLOAT comparison with a constant as a slot, NULL at a NULL row
+static SljitTypedExpressionTreeSlot
+EmitSljitTypedExpressionTreeFloatCompare(struct sljit_compiler *compiler,
+                                         const SljitTypedExpressionTreeFloatCompare &compare, idx_t &slot_index,
+                                         const vector<idx_t> *known_valid_sources) {
+	auto result_slot = AllocateSljitTypedExpressionTreeSlot(slot_index);
+	EmitLoadSljitExpressionTreeSourceIndex(compiler, compare.source_index, SLJIT_R1);
+	sljit_jump *is_null = nullptr;
+	if (!SljitTypedExpressionTreeSourceKnownValid(known_valid_sources, compare.source_index)) {
+		EmitLoadSljitNativeSourceValidity(compiler, compare.source_index, SLJIT_R0);
+		auto source_all_valid = sljit_emit_cmp(compiler, SLJIT_EQUAL, SLJIT_R0, 0, SLJIT_IMM, 0);
+		is_null = EmitJumpIfSljitValidityBitClear(compiler, SLJIT_R0, SLJIT_R1, SLJIT_R2);
+		sljit_set_label(source_all_valid, sljit_emit_label(compiler));
+	}
+	sljit_emit_op1(compiler, SLJIT_MOV_P, SLJIT_R0, 0, SLJIT_MEM1(SLJIT_S5),
+	               SljitPointerArrayOffset(compare.source_index));
+	EmitLoadSljitTypedExpressionTreeFloatValue(compiler, compare, SLJIT_R0, SLJIT_R1);
+	auto is_true = EmitSljitTypedExpressionTreeFloatCompareJump(compiler, compare, true, nullptr);
+	EmitStoreSljitTypedExpressionTreeBool(compiler, result_slot, false);
+	auto false_done = sljit_emit_jump(compiler, SLJIT_JUMP);
+	sljit_set_label(is_true, sljit_emit_label(compiler));
+	EmitStoreSljitTypedExpressionTreeBool(compiler, result_slot, true);
+	if (is_null) {
+		auto true_done = sljit_emit_jump(compiler, SLJIT_JUMP);
+		sljit_set_label(is_null, sljit_emit_label(compiler));
+		EmitSljitTypedExpressionTreeInvalidResult(compiler, result_slot);
+		sljit_set_label(true_done, sljit_emit_label(compiler));
+	}
+	sljit_set_label(false_done, sljit_emit_label(compiler));
+	return result_slot;
+}
+
 static SljitTypedExpressionTreeSlot EmitSljitTypedExpressionTreeBinary(struct sljit_compiler *compiler,
                                                                        const ExecutionExpressionIR &node,
                                                                        idx_t &slot_index,
@@ -286,6 +318,10 @@ static SljitTypedExpressionTreeSlot EmitSljitTypedExpressionTreeBinary(struct sl
 		bool compare_equal;
 		if (TryReadSljitTypedExpressionTreeStringCompareConstant(node, source_index, constant, compare_equal)) {
 			return EmitSljitTypedExpressionTreeStringCompare(compiler, node, slot_index);
+		}
+		SljitTypedExpressionTreeFloatCompare float_compare;
+		if (TryReadSljitTypedExpressionTreeFloatCompareConstant(node, float_compare)) {
+			return EmitSljitTypedExpressionTreeFloatCompare(compiler, float_compare, slot_index, known_valid_sources);
 		}
 	}
 	auto left_slot =

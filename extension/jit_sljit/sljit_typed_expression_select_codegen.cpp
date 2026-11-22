@@ -290,7 +290,7 @@ unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativeTypedExpressionTreeSelect(
 		}
 		simd_scratches = 5 | SLJIT_ENTER_VECTOR(NumericCast<sljit_s32>(vector_regs));
 	}
-	sljit_emit_enter(compiler, 0, SLJIT_ARGS1V(P), simd_scratches,
+	sljit_emit_enter(compiler, 0, SLJIT_ARGS1V(P), SljitTypedExpressionTreeEnterScratches(simd_scratches),
 	                 GetSljitNativeVectorRegisterLayout().saved_register_count, local_size);
 	EmitInitSljitNativeExpressionVectorLoop(compiler);
 	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_MEM1(SLJIT_S0), offsetof(SljitNativeVectorInput, selected_count),

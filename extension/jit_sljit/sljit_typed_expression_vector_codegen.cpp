@@ -56,8 +56,8 @@ unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativeTypedExpressionTree(const 
 
 	const auto &fast_path = tree_plan.fast_path;
 	auto local_size = NumericCast<sljit_sw>(tree_plan.node_count * sizeof(sljit_sw) * 3);
-	sljit_emit_enter(compiler, 0, SLJIT_ARGS1V(P), 5, GetSljitNativeVectorRegisterLayout().saved_register_count,
-	                 local_size);
+	sljit_emit_enter(compiler, 0, SLJIT_ARGS1V(P), SljitTypedExpressionTreeEnterScratches(5),
+	                 GetSljitNativeVectorRegisterLayout().saved_register_count, local_size);
 	EmitInitSljitNativeExpressionVectorLoop(compiler);
 
 	vector<SljitArithmeticOverflowSite> overflows;

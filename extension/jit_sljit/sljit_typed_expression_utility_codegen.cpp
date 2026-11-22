@@ -15,6 +15,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cstring>
 
 namespace duckdb {
 
@@ -141,9 +142,21 @@ static void AddSljitTypedExpressionTreeConstantHoist(int64_t value, vector<Sljit
 	hoists.push_back(hoist);
 }
 
+//! A double's bits, which a constant hoist holds for a floating-point comparison
+static int64_t SljitDoubleBits(double value) {
+	int64_t bits;
+	memcpy(&bits, &value, sizeof(bits));
+	return bits;
+}
+
 static void CollectSljitTypedExpressionTreeConstantHoists(const ExecutionExpressionIR &node,
                                                           vector<SljitTypedExpressionTreeLoopHoist> &hoists,
                                                           sljit_sw &local_size) {
+	SljitTypedExpressionTreeFloatCompare float_compare;
+	if (TryReadSljitTypedExpressionTreeFloatCompareConstant(node, float_compare)) {
+		AddSljitTypedExpressionTreeConstantHoist(SljitDoubleBits(float_compare.constant), hoists, local_size);
+		return;
+	}
 	if (SljitTypedExpressionTreeIsRemainderTest(node)) {
 		auto constants = ComputeSljitRemainderTestConstants(SljitTypedExpressionTreeConstantValue(*node.left->right));
 		AddSljitTypedExpressionTreeConstantHoist(constants.inverse, hoists, local_size);
@@ -163,6 +176,30 @@ static void CollectSljitTypedExpressionTreeConstantHoists(const ExecutionExpress
 			CollectSljitTypedExpressionTreeConstantHoists(*child, hoists, local_size);
 		}
 	}
+}
+
+void EmitLoadSljitTypedExpressionTreeFloatValue(struct sljit_compiler *compiler,
+                                                const SljitTypedExpressionTreeFloatCompare &compare, sljit_s32 data_reg,
+                                                sljit_s32 index_reg) {
+	if (compare.single_precision) {
+		sljit_emit_fop1(compiler, SLJIT_MOV_F32, SLJIT_FR0, 0, SLJIT_MEM2(data_reg, index_reg), 2);
+		sljit_emit_fop1(compiler, SLJIT_CONV_F64_FROM_F32, SLJIT_FR0, 0, SLJIT_FR0, 0);
+		return;
+	}
+	sljit_emit_fop1(compiler, SLJIT_MOV_F64, SLJIT_FR0, 0, SLJIT_MEM2(data_reg, index_reg), 3);
+}
+
+sljit_jump *EmitSljitTypedExpressionTreeFloatCompareJump(struct sljit_compiler *compiler,
+                                                         const SljitTypedExpressionTreeFloatCompare &compare, bool when,
+                                                         const vector<SljitTypedExpressionTreeLoopHoist> *hoists) {
+	// a comparison's negation pairs with it in the lowest bit of the jump type
+	const auto type = NativeDoubleCompareAgainstNumberJumpType(compare.op) ^ (when ? 0 : 1);
+	auto constant = SljitTypedExpressionTreeConstantOperand(hoists, SljitDoubleBits(compare.constant));
+	if (constant.operand == SLJIT_IMM) {
+		sljit_emit_fset64(compiler, SLJIT_FR1, compare.constant);
+		return sljit_emit_fcmp(compiler, type, SLJIT_FR0, 0, SLJIT_FR1, 0);
+	}
+	return sljit_emit_fcmp(compiler, type, SLJIT_FR0, 0, constant.operand, constant.operand_w);
 }
 
 void AppendSljitTypedExpressionTreeConstantHoists(const vector<reference<const ExecutionExpressionIR>> &expressions,

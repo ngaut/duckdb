@@ -37,6 +37,21 @@ enum class SljitNativeIntegerCompareOp : uint8_t {
 	LESS_THAN_OR_EQUAL,
 	GREATER_THAN_OR_EQUAL
 };
+//! The operator that compares the operands in swapped order alike: `a op b` holds exactly when `b flip(op) a` does
+inline SljitNativeIntegerCompareOp FlipNativeIntegerCompareOp(SljitNativeIntegerCompareOp op) {
+	switch (op) {
+	case SljitNativeIntegerCompareOp::LESS_THAN:
+		return SljitNativeIntegerCompareOp::GREATER_THAN;
+	case SljitNativeIntegerCompareOp::GREATER_THAN:
+		return SljitNativeIntegerCompareOp::LESS_THAN;
+	case SljitNativeIntegerCompareOp::LESS_THAN_OR_EQUAL:
+		return SljitNativeIntegerCompareOp::GREATER_THAN_OR_EQUAL;
+	case SljitNativeIntegerCompareOp::GREATER_THAN_OR_EQUAL:
+		return SljitNativeIntegerCompareOp::LESS_THAN_OR_EQUAL;
+	default:
+		return op;
+	}
+}
 enum class SljitNativeIntegerKind : uint8_t { INT8, UINT8, INT32, INT64, DECIMAL64, DATE };
 enum class SljitNativeSignedIntegerWidth : uint8_t { INT8, INT16, INT32, INT64 };
 enum class SljitNativeUnsignedIntegerWidth : uint8_t { UINT8, UINT16, UINT32 };

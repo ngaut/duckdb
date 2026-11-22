@@ -50,6 +50,12 @@ sljit_s32 NativeIntegerLoadOp(SljitNativeIntegerKind kind);
 sljit_s32 NativeIntegerStoreOp(SljitNativeIntegerKind kind);
 sljit_s32 NativeIntegerBinaryOp(SljitNativeIntegerKind kind, SljitNativeIntegerBinaryOp op);
 sljit_s32 NativeIntegerCompareJumpType(SljitNativeIntegerKind kind, SljitNativeIntegerCompareOp op);
+//! The jump type of a comparison of two doubles when neither is NaN
+sljit_s32 NativeDoubleOrderedCompareJumpType(SljitNativeIntegerCompareOp op);
+//! The jump type of `left op right` when only the left double can be NaN. DuckDB orders a NaN above every other value
+//! (and equal to every other NaN), so a NaN on the left decides the comparison as it would a value above the right.
+//! The jump type of the comparison's negation is this one with its lowest bit flipped.
+sljit_s32 NativeDoubleCompareAgainstNumberJumpType(SljitNativeIntegerCompareOp op);
 //! The flags a flag-setting subtraction must set for a comparison condition (without SLJIT_32) to be read from them
 sljit_s32 SljitCompareConditionSetFlags(sljit_s32 condition);
 

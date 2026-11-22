@@ -1,0 +1,195 @@
+# name: test/sql/jit/test_jit_float_compare_filters.test
+# description: Comparisons of DOUBLE and FLOAT columns with constants compile into the generated expression loops: NaN ranks above every number, -0.0 equals 0.0, NULL rows reject, and constants on either side, infinities, NaN constants and mixed predicates keep native results
+# group: [jit]
+
+require jit_sljit
+
+load {TEST_DIR}/jit_float_compare_filters.db
+
+statement ok
+CREATE TABLE floats AS
+SELECT i AS id,
+       (i % 1000)::INTEGER AS k,
+       CASE i % 97
+           WHEN 0 THEN 'nan'::DOUBLE
+           WHEN 1 THEN 'inf'::DOUBLE
+           WHEN 2 THEN '-inf'::DOUBLE
+           WHEN 3 THEN -0.0::DOUBLE
+           WHEN 4 THEN 0.0::DOUBLE
+           ELSE ((i * 7919) % 20001 - 10000)::DOUBLE / 7
+       END AS d,
+       CASE WHEN i % 11 = 0 THEN NULL ELSE ((i * 31) % 2001 - 1000)::DOUBLE / 4 END AS nd,
+       CASE i % 89
+           WHEN 0 THEN 'nan'::FLOAT
+           WHEN 1 THEN '-inf'::FLOAT
+           WHEN 2 THEN -0.0::FLOAT
+           ELSE (((i * 13) % 4001 - 2000)::DOUBLE / 8)::FLOAT
+       END AS f,
+       CASE WHEN i % 7 = 0 THEN NULL ELSE (((i * 17) % 3001 - 1500)::DOUBLE / 3)::FLOAT END AS nf
+FROM range(400000) t(i)
+
+statement ok
+CHECKPOINT
+
+# a reopened database scans the checkpointed, compressed segments
+restart
+
+statement ok
+SET jit_measure_native_legs=false
+
+statement ok
+SET jit_cbo_startup_base_cost=0
+
+statement ok
+SET jit_cbo_startup_margin_basis_points=0
+
+statement ok
+CREATE MACRO float_sums() AS TABLE
+SELECT 'd_gt' AS q, sum(id)::HUGEINT AS a, count(*)::HUGEINT AS b FROM floats WHERE d > 100.5
+UNION ALL
+SELECT 'd_ge', sum(id), count(*) FROM floats WHERE d >= 0.0
+UNION ALL
+SELECT 'd_lt', sum(id), count(*) FROM floats WHERE d < -0.0
+UNION ALL
+SELECT 'd_le', sum(id), count(*) FROM floats WHERE d <= 0.0
+UNION ALL
+SELECT 'd_eq_zero', sum(id), count(*) FROM floats WHERE d = 0.0
+UNION ALL
+SELECT 'd_eq_negative_zero', sum(id), count(*) FROM floats WHERE d = -0.0
+UNION ALL
+SELECT 'd_ne', sum(id), count(*) FROM floats WHERE d <> 1.0 / 7
+UNION ALL
+SELECT 'd_between', sum(id), count(*) FROM floats WHERE d BETWEEN -50.25 AND 70.75
+UNION ALL
+SELECT 'd_not_between', sum(id), count(*) FROM floats WHERE d NOT BETWEEN -1000.0 AND 1000.0
+UNION ALL
+SELECT 'd_constant_left', sum(id), count(*) FROM floats WHERE 10.0 > d AND -10.0 <= d
+UNION ALL
+SELECT 'd_ge_inf', sum(id), count(*) FROM floats WHERE d >= 'inf'::DOUBLE
+UNION ALL
+SELECT 'd_gt_inf', sum(id), count(*) FROM floats WHERE d > 'inf'::DOUBLE
+UNION ALL
+SELECT 'd_le_ninf', sum(id), count(*) FROM floats WHERE d <= '-inf'::DOUBLE
+UNION ALL
+SELECT 'd_eq_nan', sum(id), count(*) FROM floats WHERE d = 'nan'::DOUBLE
+UNION ALL
+SELECT 'd_lt_nan', sum(id), count(*) FROM floats WHERE d < 'nan'::DOUBLE
+UNION ALL
+SELECT 'nd_range', sum(id), count(*) FROM floats WHERE nd > -100.0 AND nd < 200.0
+UNION ALL
+SELECT 'nd_or', sum(id), count(*) FROM floats WHERE nd < -240.0 OR nd > 245.5
+UNION ALL
+SELECT 'nd_ne', sum(id), count(nd) FROM floats WHERE nd <> 0.0
+UNION ALL
+SELECT 'with_integer', sum(id), count(*) FROM floats WHERE k < 500 AND d > -500.0 AND k > 10
+UNION ALL
+SELECT 'integer_or_double', sum(id), count(*) FROM floats WHERE k = 7 OR d < -1400.0
+UNION ALL
+SELECT 'double_payload', sum(k), count(*) FROM floats WHERE d > 0.0 AND nd < 0.0
+UNION ALL
+SELECT 'case_payload', sum(CASE WHEN d > 3.5 THEN k ELSE -k END), count(*) FROM floats WHERE k > 100
+UNION ALL
+SELECT 'case_nullable_payload', sum(CASE WHEN nd <= -2.25 THEN id ELSE 0 END), count(*) FROM floats
+UNION ALL
+SELECT 'f_gt', sum(id), count(*) FROM floats WHERE f > 100.5::FLOAT
+UNION ALL
+SELECT 'f_le_zero', sum(id), count(*) FROM floats WHERE f <= 0.0::FLOAT
+UNION ALL
+SELECT 'f_eq_negative_zero', sum(id), count(*) FROM floats WHERE f = -0.0::FLOAT
+UNION ALL
+SELECT 'f_ne', sum(id), count(*) FROM floats WHERE f <> 0.125::FLOAT
+UNION ALL
+SELECT 'f_between', sum(id), count(*) FROM floats WHERE f BETWEEN -12.5::FLOAT AND 99.875::FLOAT
+UNION ALL
+SELECT 'f_decimal_literal', sum(id), count(*) FROM floats WHERE f < 1.5
+UNION ALL
+SELECT 'f_constant_left', sum(id), count(*) FROM floats WHERE 0.1::FLOAT < f
+UNION ALL
+SELECT 'nf_range', sum(id), count(*) FROM floats WHERE nf >= -100.0::FLOAT AND nf < 300.0::FLOAT
+UNION ALL
+SELECT 'grouped_' || (k % 4), sum(id), count(*) FROM floats WHERE d > -2.5 AND d < 900.0 GROUP BY k % 4
+
+foreach threads 1 4
+
+statement ok
+SET threads={threads}
+
+foreach policy off auto
+
+statement ok
+SET jit_policy='{policy}'
+
+statement ok
+CREATE OR REPLACE TEMP TABLE r_{policy} AS FROM float_sums()
+
+endloop
+
+query I
+SELECT count(*) FROM ((SELECT * FROM r_off EXCEPT ALL SELECT * FROM r_auto)
+                      UNION ALL (SELECT * FROM r_auto EXCEPT ALL SELECT * FROM r_off))
+----
+0
+
+query I
+SELECT count(*) FROM r_auto
+----
+35
+
+endloop
+
+# a DOUBLE range filter runs in the generated filtered aggregate
+statement ok
+SET threads=1
+
+statement ok
+SET jit_trace_runtime=true
+
+statement ok
+SET jit_event_log_size=100
+
+statement ok
+CREATE OR REPLACE TEMP TABLE traced AS
+SELECT sum(id) FROM floats WHERE d BETWEEN -50.25 AND 70.75
+
+query I
+SELECT count(*) > 0 FROM duckdb_jit_events() WHERE status = 'executed' AND jit_runtime_path_counts LIKE '%filtered_primitive_update%'
+----
+true
+
+# without the rewriter and pushdown a constant stays on the left of its comparison
+statement ok
+SET disabled_optimizers='expression_rewriter,filter_pushdown'
+
+statement ok
+SET jit_event_log_size=0
+
+statement ok
+SET jit_event_log_size=100
+
+foreach policy off auto
+
+statement ok
+SET jit_policy='{policy}'
+
+statement ok
+CREATE OR REPLACE TEMP TABLE left_{policy} AS
+SELECT 'lt' AS q, sum(id)::HUGEINT AS a, count(*)::HUGEINT AS b FROM floats WHERE 1e1 > d AND -1e1 <= d
+UNION ALL
+SELECT 'eq', sum(id), count(*) FROM floats WHERE 0e0 = d
+UNION ALL
+SELECT 'ge_nullable', sum(id), count(*) FROM floats WHERE 2e1 >= nd
+UNION ALL
+SELECT 'nan_ranks_above', sum(id), count(*) FROM floats WHERE 1e3 < d
+
+endloop
+
+query I
+SELECT count(*) FROM ((SELECT * FROM left_off EXCEPT ALL SELECT * FROM left_auto)
+                      UNION ALL (SELECT * FROM left_auto EXCEPT ALL SELECT * FROM left_off))
+----
+0
+
+query I
+SELECT count(*) FROM duckdb_jit_events() WHERE status = 'executed' AND jit_runtime_path_counts LIKE '%filtered_primitive_update%'
+----
+4

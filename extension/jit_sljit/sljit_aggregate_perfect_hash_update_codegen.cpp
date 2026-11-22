@@ -48,7 +48,8 @@ static unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativePerfectHashGroupedF
 	vector<SljitArithmeticOverflowSite> overflows;
 	vector<sljit_jump *> group_out_of_range;
 	vector<SljitPerfectHashFirstTouchSite> first_touch_sites;
-	sljit_emit_enter(compiler, 0, SLJIT_ARGS1V(P), scratch_register_count, saved_register_count, local_size);
+	sljit_emit_enter(compiler, 0, SLJIT_ARGS1V(P), SljitTypedExpressionTreeEnterScratches(scratch_register_count),
+	                 saved_register_count, local_size);
 	EmitZeroSljitDensePerfectHashAggregateReduction(compiler, dense_reduction_plan);
 	EmitInitSljitNativeVectorLoop(compiler);
 	EmitInitSljitNativeVectorSourceArrays(compiler);

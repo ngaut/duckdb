@@ -17,6 +17,8 @@
 
 namespace duckdb {
 
+struct SljitTypedExpressionTreeFloatCompare;
+
 //! One checked integer operation. Its jumps reach an error stub that hands both operands to DuckDB's own operator, so
 //! the error raised is exactly the one native execution raises.
 struct SljitArithmeticOverflowSite {
@@ -168,6 +170,15 @@ vector<sljit_jump *> EmitSljitTypedExpressionTreeStringCompareJumpIfTrue(struct 
 SljitTypedExpressionTreeSlot EmitSljitTypedExpressionTreeStringCompare(struct sljit_compiler *compiler,
                                                                        const ExecutionExpressionIR &node,
                                                                        idx_t &slot_index);
+//! Loads a DOUBLE/FLOAT comparison's column value at the row (a FLOAT widened) into FR0
+void EmitLoadSljitTypedExpressionTreeFloatValue(struct sljit_compiler *compiler,
+                                                const SljitTypedExpressionTreeFloatCompare &compare, sljit_s32 data_reg,
+                                                sljit_s32 index_reg);
+//! Jumps when the comparison of the value in FR0 with the constant is `when`: the constant is no NaN, so one compare
+//! decides. Reads the constant from its hoisted slot, else materializes it in FR1.
+sljit_jump *EmitSljitTypedExpressionTreeFloatCompareJump(struct sljit_compiler *compiler,
+                                                         const SljitTypedExpressionTreeFloatCompare &compare, bool when,
+                                                         const vector<SljitTypedExpressionTreeLoopHoist> *hoists);
 vector<sljit_jump *> EmitSljitTypedExpressionTreeJumpIfNotTrue(struct sljit_compiler *compiler,
                                                                const ExecutionExpressionIR &node, idx_t &slot_index,
                                                                vector<SljitArithmeticOverflowSite> &overflows,
@@ -200,6 +211,13 @@ struct SljitPredicateRowShape {
 };
 static constexpr sljit_sw SLJIT_SELECT_RESULT_INDEX_OFFSET = sizeof(sljit_sw);
 static constexpr sljit_sw SLJIT_SELECT_LOCAL_SIZE = 2 * sizeof(sljit_sw);
+
+//! The scratch register argument of sljit_emit_enter for a kernel that evaluates typed expression trees: a comparison
+//! of a DOUBLE/FLOAT column with a constant takes the floating-point scratch registers FR0 and FR1
+inline sljit_s32 SljitTypedExpressionTreeEnterScratches(sljit_s32 scratches) {
+	const auto float_registers = MaxValue<sljit_s32>((scratches >> 8) & 0xff, 2);
+	return (scratches & ~sljit_s32(0xff00)) | SLJIT_ENTER_FLOAT(float_registers);
+}
 
 inline bool SljitNativeIntegerKindPreservesSourceDateInfinity(SljitNativeIntegerKind kind) {
 	return kind == SljitNativeIntegerKind::DATE;

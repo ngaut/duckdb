@@ -27,6 +27,31 @@ EmitSljitTypedExpressionTreeFastValueRegInternal(struct sljit_compiler *compiler
                                                  SljitTypedExpressionTreeFastIndexMode index_mode,
                                                  const vector<SljitTypedExpressionTreeLoopHoist> *data_hoists);
 
+//! The registers a fast loop reads a source's row with: the source's data pointer (its hoisted register, else loaded
+//! into R0) and the row's index (a flat or logical row's loop index register, else the selected row resolved into R1)
+static void EmitSljitTypedExpressionTreeFastSourceRow(struct sljit_compiler *compiler, idx_t source_index,
+                                                      SljitTypedExpressionTreeFastIndexMode index_mode,
+                                                      const vector<SljitTypedExpressionTreeLoopHoist> *data_hoists,
+                                                      sljit_s32 &data_reg, sljit_s32 &index_reg) {
+	index_reg = SLJIT_R1;
+	switch (index_mode) {
+	case SljitTypedExpressionTreeFastIndexMode::FLAT:
+		index_reg = SLJIT_S1;
+		break;
+	case SljitTypedExpressionTreeFastIndexMode::LOGICAL:
+		index_reg = SLJIT_S3;
+		break;
+	case SljitTypedExpressionTreeFastIndexMode::SELECTED:
+		EmitLoadSljitTypedExpressionTreeFastSourceIndex(compiler, source_index, SLJIT_R1, index_mode, data_hoists);
+		break;
+	}
+	if (!TryGetSljitTypedExpressionTreeSourceDataHoist(data_hoists, source_index, data_reg)) {
+		data_reg = SLJIT_R0;
+		sljit_emit_op1(compiler, SLJIT_MOV_P, data_reg, 0, SLJIT_MEM1(SLJIT_S5),
+		               NumericCast<sljit_sw>(source_index * sizeof(const_data_ptr_t)));
+	}
+}
+
 static void EmitSljitTypedExpressionTreeFastLeafReg(struct sljit_compiler *compiler, const ExecutionExpressionIR &leaf,
                                                     sljit_s32 target, SljitTypedExpressionTreeFastIndexMode index_mode,
                                                     const vector<SljitTypedExpressionTreeLoopHoist> *data_hoists) {
@@ -37,25 +62,9 @@ static void EmitSljitTypedExpressionTreeFastLeafReg(struct sljit_compiler *compi
 		return;
 	}
 	D_ASSERT(node.kind == ExecutionExpressionIRKind::REFERENCE);
-	// a flat or logical row reads at the loop's own index register; a selected row first resolves its source index
-	sljit_s32 index_reg = SLJIT_R1;
-	switch (index_mode) {
-	case SljitTypedExpressionTreeFastIndexMode::FLAT:
-		index_reg = SLJIT_S1;
-		break;
-	case SljitTypedExpressionTreeFastIndexMode::LOGICAL:
-		index_reg = SLJIT_S3;
-		break;
-	case SljitTypedExpressionTreeFastIndexMode::SELECTED:
-		EmitLoadSljitTypedExpressionTreeFastSourceIndex(compiler, node.ref_index, SLJIT_R1, index_mode, data_hoists);
-		break;
-	}
 	sljit_s32 data_reg;
-	if (!TryGetSljitTypedExpressionTreeSourceDataHoist(data_hoists, node.ref_index, data_reg)) {
-		data_reg = SLJIT_R0;
-		sljit_emit_op1(compiler, SLJIT_MOV_P, data_reg, 0, SLJIT_MEM1(SLJIT_S5),
-		               NumericCast<sljit_sw>(node.ref_index * sizeof(const_data_ptr_t)));
-	}
+	sljit_s32 index_reg;
+	EmitSljitTypedExpressionTreeFastSourceRow(compiler, node.ref_index, index_mode, data_hoists, data_reg, index_reg);
 	sljit_s32 load_op;
 	sljit_sw scale;
 	if (SljitTypedExpressionTreeIsNarrowSignedReference(node)) {
@@ -159,6 +168,18 @@ static bool SljitTypedExpressionTreeFastIsStringCompare(const ExecutionExpressio
 	return TryReadSljitTypedExpressionTreeStringCompareConstant(node, source_index, constant, compare_equal);
 }
 
+//! Jumps when a DOUBLE/FLOAT comparison with a constant is `when` at the row. Clobbers R0, R1, FR0 and FR1.
+static sljit_jump *EmitSljitTypedExpressionTreeFastFloatCompareJump(
+    struct sljit_compiler *compiler, const SljitTypedExpressionTreeFloatCompare &compare, bool when,
+    SljitTypedExpressionTreeFastIndexMode index_mode, const vector<SljitTypedExpressionTreeLoopHoist> *data_hoists) {
+	sljit_s32 data_reg;
+	sljit_s32 index_reg;
+	EmitSljitTypedExpressionTreeFastSourceRow(compiler, compare.source_index, index_mode, data_hoists, data_reg,
+	                                          index_reg);
+	EmitLoadSljitTypedExpressionTreeFloatValue(compiler, compare, data_reg, index_reg);
+	return EmitSljitTypedExpressionTreeFloatCompareJump(compiler, compare, when, data_hoists);
+}
+
 struct SljitTypedExpressionTreeFastOperands {
 	sljit_s32 left;
 	//! unused when the right operand is an immediate
@@ -201,6 +222,17 @@ static void EmitSljitTypedExpressionTreeFastBinaryReg(struct sljit_compiler *com
                                                       const vector<SljitTypedExpressionTreeLoopHoist> *data_hoists) {
 	if (SljitTypedExpressionTreeFastIsStringCompare(node)) {
 		EmitSljitTypedExpressionTreeFastStringCompareReg(compiler, node, index_mode, data_hoists);
+		return;
+	}
+	SljitTypedExpressionTreeFloatCompare float_compare;
+	if (TryReadSljitTypedExpressionTreeFloatCompareConstant(node, float_compare)) {
+		auto is_true =
+		    EmitSljitTypedExpressionTreeFastFloatCompareJump(compiler, float_compare, true, index_mode, data_hoists);
+		sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_R2, 0, SLJIT_IMM, 0);
+		auto done = sljit_emit_jump(compiler, SLJIT_JUMP);
+		sljit_set_label(is_true, sljit_emit_label(compiler));
+		sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_R2, 0, SLJIT_IMM, 1);
+		sljit_set_label(done, sljit_emit_label(compiler));
 		return;
 	}
 	auto operands =
@@ -436,6 +468,11 @@ EmitSljitTypedExpressionTreeFastLeafJumps(struct sljit_compiler *compiler, const
 		auto false_jump = sljit_emit_jump(compiler, SLJIT_JUMP);
 		SetSljitJumpLabels(true_jumps, sljit_emit_label(compiler));
 		return {false_jump};
+	}
+	SljitTypedExpressionTreeFloatCompare float_compare;
+	if (TryReadSljitTypedExpressionTreeFloatCompareConstant(node, float_compare)) {
+		return {
+		    EmitSljitTypedExpressionTreeFastFloatCompareJump(compiler, float_compare, when, index_mode, data_hoists)};
 	}
 	if (node.kind == ExecutionExpressionIRKind::BINARY && SljitTypedExpressionTreeComparisonSupported(node.binary_op) &&
 	    !SljitTypedExpressionTreeFastIsStringCompare(node)) {

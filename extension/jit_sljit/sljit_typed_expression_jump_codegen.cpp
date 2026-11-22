@@ -60,6 +60,14 @@ static bool SljitTypedExpressionTreeIsBoolConstantNotTrue(const ExecutionExpress
 	       (node.constant.IsNull() || !node.constant.GetValueUnsafe<bool>());
 }
 
+//! An integer comparison: a DOUBLE/FLOAT one with a constant branches on the slot of its value
+static bool SljitTypedExpressionTreeIsIntegerComparison(const ExecutionExpressionIR &node) {
+	SljitTypedExpressionTreeFloatCompare float_compare;
+	return node.kind == ExecutionExpressionIRKind::BINARY &&
+	       SljitTypedExpressionTreeComparisonSupported(node.binary_op) &&
+	       !TryReadSljitTypedExpressionTreeFloatCompareConstant(node, float_compare);
+}
+
 static vector<sljit_jump *>
 EmitSljitTypedExpressionTreeComparisonJumpIfTrue(struct sljit_compiler *compiler, const ExecutionExpressionIR &node,
                                                  idx_t &slot_index, vector<SljitArithmeticOverflowSite> &overflows,
@@ -226,7 +234,7 @@ static vector<sljit_jump *> EmitSljitTypedExpressionTreeJumpIfTrue(struct sljit_
 			return EmitSljitTypedExpressionTreeStringCompareJumpIfTrue(compiler, node);
 		}
 	}
-	if (node.kind == ExecutionExpressionIRKind::BINARY && SljitTypedExpressionTreeComparisonSupported(node.binary_op)) {
+	if (SljitTypedExpressionTreeIsIntegerComparison(node)) {
 		return EmitSljitTypedExpressionTreeComparisonJumpIfTrue(compiler, node, slot_index, overflows,
 		                                                        known_valid_sources);
 	}
@@ -264,7 +272,7 @@ vector<sljit_jump *> EmitSljitTypedExpressionTreeJumpIfNotTrue(struct sljit_comp
 			return vector<sljit_jump *> {not_true};
 		}
 	}
-	if (node.kind == ExecutionExpressionIRKind::BINARY && SljitTypedExpressionTreeComparisonSupported(node.binary_op)) {
+	if (SljitTypedExpressionTreeIsIntegerComparison(node)) {
 		return EmitSljitTypedExpressionTreeComparisonJumpIfNotTrue(compiler, node, slot_index, overflows,
 		                                                           known_valid_sources);
 	}

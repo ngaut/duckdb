@@ -157,29 +157,6 @@ static T **SljitPointerArrayOrNull(vector<T *> &values) {
 	return nullptr;
 }
 
-static SljitNativeIntegerKind SljitTypedExpressionTreeIntegerKind(const LogicalType &type) {
-	if (type.id() == LogicalTypeId::BOOLEAN && type.InternalType() == PhysicalType::BOOL) {
-		return SljitNativeIntegerKind::UINT8;
-	}
-	if (type.id() != LogicalTypeId::DECIMAL && type.InternalType() == PhysicalType::INT32) {
-		return SljitNativeIntegerKind::INT32;
-	}
-	if (type.id() == LogicalTypeId::DECIMAL && type.InternalType() == PhysicalType::INT64) {
-		return SljitNativeIntegerKind::DECIMAL64;
-	}
-	if (type.InternalType() == PhysicalType::INT64) {
-		return SljitNativeIntegerKind::INT64;
-	}
-	throw InternalException("Unsupported SLJIT typed expression-tree physical type");
-}
-
-static const_data_ptr_t SljitTypedExpressionTreeSourceData(UnifiedVectorFormat &format, const LogicalType &type) {
-	if (type.id() == LogicalTypeId::VARCHAR) {
-		return reinterpret_cast<const_data_ptr_t>(format.data);
-	}
-	return NativeIntegerSourceData(format, SljitTypedExpressionTreeIntegerKind(type));
-}
-
 SljitNativeIntegerKind SljitPerfectHashGroupIntegerKind(const LogicalType &type) {
 	switch (type.InternalType()) {
 	case PhysicalType::INT8:
@@ -322,7 +299,8 @@ void SljitSourceVectorScratch::PrepareTypedExpressionSource(DataChunk &input, id
 		return;
 	}
 	auto &format = PrepareFormat(input, input_index, source_idx, out_of_range_error);
-	SetData(source_idx, SljitTypedExpressionTreeSourceData(format, input.data[input_index].GetType()));
+	// a typed expression reads each source's values in place, whatever their type
+	SetData(source_idx, format.data);
 	FinishSource(source_idx, execute_sel, count, source_known_not_null);
 }
 

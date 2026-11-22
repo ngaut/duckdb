@@ -289,7 +289,7 @@ unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativeFilteredUngroupedFusedPrim
 	if (register_accumulators) {
 		simd_scratches = (simd_scratches & ~sljit_s32(0xff)) | registers.accumulator_scratch_register_count;
 	}
-	sljit_emit_enter(compiler, 0, SLJIT_ARGS1V(P), simd_scratches,
+	sljit_emit_enter(compiler, 0, SLJIT_ARGS1V(P), SljitTypedExpressionTreeEnterScratches(simd_scratches),
 	                 hoists_source_data ? registers.source_data_saved_register_count
 	                                    : GetSljitNativeVectorRegisterLayout().saved_register_count,
 	                 local_size);

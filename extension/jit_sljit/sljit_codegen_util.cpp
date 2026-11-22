@@ -180,6 +180,38 @@ sljit_s32 NativeIntegerCompareJumpType(SljitNativeIntegerKind kind, SljitNativeI
 	return result;
 }
 
+sljit_s32 NativeDoubleOrderedCompareJumpType(SljitNativeIntegerCompareOp op) {
+	switch (op) {
+	case SljitNativeIntegerCompareOp::EQUAL:
+		return SLJIT_ORDERED_EQUAL;
+	case SljitNativeIntegerCompareOp::NOT_EQUAL:
+		return SLJIT_ORDERED_NOT_EQUAL;
+	case SljitNativeIntegerCompareOp::LESS_THAN:
+		return SLJIT_ORDERED_LESS;
+	case SljitNativeIntegerCompareOp::GREATER_THAN:
+		return SLJIT_ORDERED_GREATER;
+	case SljitNativeIntegerCompareOp::LESS_THAN_OR_EQUAL:
+		return SLJIT_ORDERED_LESS_EQUAL;
+	case SljitNativeIntegerCompareOp::GREATER_THAN_OR_EQUAL:
+		return SLJIT_ORDERED_GREATER_EQUAL;
+	default:
+		throw InternalException("Unknown SLJIT native double comparison operator");
+	}
+}
+
+sljit_s32 NativeDoubleCompareAgainstNumberJumpType(SljitNativeIntegerCompareOp op) {
+	switch (op) {
+	case SljitNativeIntegerCompareOp::NOT_EQUAL:
+		return SLJIT_UNORDERED_OR_NOT_EQUAL;
+	case SljitNativeIntegerCompareOp::GREATER_THAN:
+		return SLJIT_UNORDERED_OR_GREATER;
+	case SljitNativeIntegerCompareOp::GREATER_THAN_OR_EQUAL:
+		return SLJIT_UNORDERED_OR_GREATER_EQUAL;
+	default:
+		return NativeDoubleOrderedCompareJumpType(op);
+	}
+}
+
 sljit_s32 SljitCompareConditionSetFlags(sljit_s32 condition) {
 	// each ordering condition shares its flag set with its negation, which sljit numbers next to it
 	return condition <= SLJIT_NOT_EQUAL ? SLJIT_SET_Z : SLJIT_SET(condition & ~1);

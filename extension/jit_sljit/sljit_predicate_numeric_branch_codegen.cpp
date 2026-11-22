@@ -17,8 +17,9 @@
 
 namespace duckdb {
 
-//! Branches on `FR0 op FR1` in DuckDB's order (see SljitDoubleCompareRanks). When the right operand is known not to be
-//! NaN one comparison decides; otherwise an unordered pair compares the operands' ranks. Clobbers R2 and R3
+//! Branches on `FR0 op FR1` in DuckDB's order, which ranks a NaN above every other value and equal to every other NaN.
+//! When the right operand is known not to be NaN one comparison decides; otherwise an unordered pair compares the
+//! operands' ranks (1 for a NaN, 0 for any other value). Clobbers R2 and R3
 static void EmitSljitDoubleCompareBranches(struct sljit_compiler *compiler, SljitNativeIntegerCompareOp op,
                                            bool single_precision, bool right_is_number,
                                            SljitPredicateBranches &result) {

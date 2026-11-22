@@ -10,6 +10,7 @@
 
 #include "duckdb/common/types/decimal.hpp"
 #include "duckdb/common/types/string_type.hpp"
+#include "duckdb/common/types/value.hpp"
 
 namespace duckdb {
 
@@ -113,6 +114,36 @@ bool TryReadSljitTypedExpressionTreeStringCompareConstant(const ExecutionExpress
 		return true;
 	};
 	return try_read(*node.left, *node.right) || try_read(*node.right, *node.left);
+}
+
+bool TryReadSljitTypedExpressionTreeFloatCompareConstant(const ExecutionExpressionIR &node,
+                                                         SljitTypedExpressionTreeFloatCompare &compare) {
+	if (node.kind != ExecutionExpressionIRKind::BINARY || !SljitTypedExpressionTreeIsBoolNode(node) ||
+	    !SljitTypedExpressionTreeComparisonSupported(node.binary_op) || !node.left || !node.right) {
+		return false;
+	}
+	auto try_read = [&](const ExecutionExpressionIR &reference, const ExecutionExpressionIR &constant_node,
+	                    bool constant_on_left) {
+		const auto type = reference.physical_type;
+		if (reference.kind != ExecutionExpressionIRKind::REFERENCE ||
+		    (type != PhysicalType::DOUBLE && type != PhysicalType::FLOAT) ||
+		    constant_node.kind != ExecutionExpressionIRKind::CONSTANT || constant_node.physical_type != type ||
+		    constant_node.constant.IsNull()) {
+			return false;
+		}
+		const double constant = type == PhysicalType::DOUBLE ? constant_node.constant.GetValueUnsafe<double>()
+		                                                     : constant_node.constant.GetValueUnsafe<float>();
+		if (Value::IsNan(constant)) {
+			return false;
+		}
+		const auto op = SljitTypedExpressionTreeCompareOp(node.binary_op);
+		compare.source_index = reference.ref_index;
+		compare.single_precision = type == PhysicalType::FLOAT;
+		compare.constant = constant;
+		compare.op = constant_on_left ? FlipNativeIntegerCompareOp(op) : op;
+		return true;
+	};
+	return try_read(*node.left, *node.right, false) || try_read(*node.right, *node.left, true);
 }
 
 static bool SljitTypedExpressionTreeDateYearSupported(const ExecutionExpressionIR &node) {
@@ -269,8 +300,10 @@ bool SljitTypedExpressionTreeIsSupported(const ExecutionExpressionIR &node) {
 			idx_t source_index;
 			string string_constant;
 			bool compare_equal;
+			SljitTypedExpressionTreeFloatCompare float_compare;
 			if (TryReadSljitTypedExpressionTreeStringCompareConstant(node, source_index, string_constant,
-			                                                         compare_equal)) {
+			                                                         compare_equal) ||
+			    TryReadSljitTypedExpressionTreeFloatCompareConstant(node, float_compare)) {
 				return true;
 			}
 		}
@@ -363,11 +396,14 @@ bool SljitTypedExpressionTreeFastPathSupported(const ExecutionExpressionIR &node
 		return true;
 	}
 	{
-		// the fast emitters compare a string source with a constant in place; the string itself is no fast value
+		// the fast emitters compare a string or floating-point source with a constant in place; the source itself is
+		// no fast value
 		idx_t source_index;
 		string constant;
 		bool compare_equal;
-		if (TryReadSljitTypedExpressionTreeStringCompareConstant(node, source_index, constant, compare_equal)) {
+		SljitTypedExpressionTreeFloatCompare float_compare;
+		if (TryReadSljitTypedExpressionTreeStringCompareConstant(node, source_index, constant, compare_equal) ||
+		    TryReadSljitTypedExpressionTreeFloatCompareConstant(node, float_compare)) {
 			return true;
 		}
 	}

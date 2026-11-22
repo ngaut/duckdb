@@ -601,6 +601,10 @@ ENCODINGS_QUERIES = {
         "SELECT round(sum(dbl * 2), -2) FROM __jit_encodings_facts WHERE dbl > 100.5",
         {1: True},
     ),
+    "double_range": (
+        "SELECT sum(id) FROM __jit_encodings_facts WHERE disc BETWEEN 0.05 AND 0.07",
+        {1: True, 4: True},
+    ),
     "dimension_join": (
         "SELECT sum(f.id) FROM __jit_encodings_facts f JOIN __jit_encodings_dim d ON f.k = d.k WHERE d.cat = 1",
         {1: True, 4: True},
@@ -685,6 +689,7 @@ ENCODINGS_THRESHOLDS = {
     "nullable_min_max": ({1: 1.29, 4: 0.88}, {1: 90_800_000, 4: 129_400_000}),
     "narrow_integers": ({1: 2.05, 4: 1.94}, {1: 40_100_000, 4: 42_600_000}),
     "double_filter": ({1: 0.87}, {1: 73_200_000}),
+    "double_range": ({1: 0.87, 4: 0.85}, {1: 46_800_000, 4: 47_900_000}),
     "dimension_join": ({1: 0.82, 4: 0.80}, {1: 68_600_000, 4: 75_100_000}),
     "dimension_string_groups": ({1: 0.85, 4: 0.85}, {1: 99_700_000, 4: 105_000_000}),
     "semi_join": ({1: 0.88, 4: 0.88}, {1: 72_600_000, 4: 75_100_000}),
