@@ -665,6 +665,15 @@ ENCODINGS_QUERIES = {
         "SELECT g, sum(CASE WHEN k < 300 THEN price END) FROM __jit_encodings_facts GROUP BY g",
         {1: True, 4: True},
     ),
+    "case_null_counts": (
+        "SELECT g, count(CASE WHEN k < 300 THEN 1 END) FROM __jit_encodings_facts GROUP BY g",
+        {1: True, 4: True},
+    ),
+    "case_null_count_sums": (
+        "SELECT count(CASE WHEN k < 300 THEN 1 END), sum(CASE WHEN k > 600 THEN id END), count(*) "
+        "FROM __jit_encodings_facts",
+        {1: True, 4: True},
+    ),
     "narrow_between": (
         "SELECT sum(id) FROM __jit_encodings_facts WHERE si BETWEEN 100 AND 2000",
         {1: True, 4: True},
@@ -717,6 +726,8 @@ ENCODINGS_THRESHOLDS = {
     "double_case": ({1: 1.54, 4: 1.49}, {1: 67_400_000, 4: 70_100_000}),
     "case_null_sums": ({1: 1.86, 4: 1.81}, {1: 63_200_000, 4: 65_500_000}),
     "case_null_groups": ({1: 1.71, 4: 1.67}, {1: 63_600_000, 4: 65_600_000}),
+    "case_null_counts": ({1: 1.58, 4: 1.56}, {1: 53_500_000, 4: 55_300_000}),
+    "case_null_count_sums": ({1: 2.02, 4: 1.95}, {1: 49_700_000, 4: 51_800_000}),
     "narrow_between": ({1: 1.28, 4: 1.22}, {1: 15_400_000, 4: 17_500_000}),
     "nullable_key_join": ({1: 0.89, 4: 0.89}, {1: 570_500_000, 4: 572_400_000}),
     "random_key_groups": ({1: 0.89, 4: 0.89}, {1: 234_900_000, 4: 417_100_000}),

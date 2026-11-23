@@ -29,7 +29,7 @@ static void SljitExecutePrimitiveAggregatePayloadUpdate(SljitExecutableRegionExp
 	}
 	if (lane.kind == AggregatePrimitiveUpdateKind::COUNT_STAR) {
 		if (!grouped_state_addresses) {
-			SljitValidateUngroupedCountStarPrimitiveLane(lane, "SLJIT aggregate count-star lane is incomplete: %s");
+			SljitValidateUngroupedCountPrimitiveLane(lane, "SLJIT aggregate count-star lane is incomplete: %s");
 		}
 
 		SljitNativeVectorInput native_input;

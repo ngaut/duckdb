@@ -195,8 +195,8 @@ static void SljitExecuteFusedPrimitiveAggregatePayloadUpdate(
 		    lanes, payload_descriptors, payload_idx, "SLJIT fused aggregate primitive lane invalid for aggregate %llu");
 		auto &plan = payloads[payload_idx].plan;
 		if (lane.kind == AggregatePrimitiveUpdateKind::COUNT_STAR) {
-			SljitBindUngroupedCountStarPrimitiveLane(lane, aggregate_int64_values, aggregate_row_counts, payload_idx,
-			                                         "SLJIT fused aggregate count-star lane is incomplete: %s");
+			SljitBindUngroupedCountPrimitiveLane(lane, aggregate_int64_values, aggregate_row_counts, payload_idx,
+			                                     "SLJIT fused aggregate count-star lane is incomplete: %s");
 			continue;
 		}
 		if (plan.return_type.InternalType() != lane.payload_type) {

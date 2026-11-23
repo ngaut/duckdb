@@ -30,7 +30,7 @@ void EmitUngroupedAggregateAddRowCount(struct sljit_compiler *compiler, idx_t la
 	sljit_set_label(no_row_count, sljit_emit_label(compiler));
 }
 
-void EmitUngroupedAggregateCommitCountStar(struct sljit_compiler *compiler, idx_t lane_idx, sljit_s32 count_reg) {
+void EmitUngroupedAggregateCommitCount(struct sljit_compiler *compiler, idx_t lane_idx, sljit_s32 count_reg) {
 	EmitUngroupedAggregateAddRowCount(compiler, lane_idx, count_reg);
 	EmitLoadUngroupedAggregatePointer(compiler, offsetof(SljitNativeVectorInput, aggregate_int64_values), lane_idx,
 	                                  SLJIT_R0);
@@ -41,8 +41,8 @@ void EmitUngroupedAggregateCommitCountStar(struct sljit_compiler *compiler, idx_
 	sljit_set_label(no_value, sljit_emit_label(compiler));
 }
 
-void EmitUngroupedAggregateCommitCountStar(struct sljit_compiler *compiler, idx_t lane_idx) {
-	EmitUngroupedAggregateCommitCountStar(compiler, lane_idx, SLJIT_S2);
+void EmitUngroupedAggregateCommitCount(struct sljit_compiler *compiler, idx_t lane_idx) {
+	EmitUngroupedAggregateCommitCount(compiler, lane_idx, SLJIT_S2);
 }
 
 void EmitUngroupedAggregateCommitSumInt64(struct sljit_compiler *compiler, idx_t lane_idx, sljit_sw local_sum_offset,

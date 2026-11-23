@@ -35,6 +35,14 @@ static bool BuildSljitFilteredFusedPrimitiveAggregatePayloadPlan(const SljitNati
 	if (descriptor.primitive_kind == AggregatePrimitiveUpdateKind::COUNT_STAR) {
 		return true;
 	}
+	// COUNT reads only whether its payload is NULL: the tree's value is evaluated and dropped
+	if (descriptor.primitive_kind == AggregatePrimitiveUpdateKind::COUNT) {
+		if (!payload.expression_tree) {
+			return false;
+		}
+		payload_plan = BuildSljitTypedExpressionTreePlan(*payload.expression_tree, false);
+		return payload_plan.supported;
+	}
 	const bool integer_sum = (descriptor.primitive_kind == AggregatePrimitiveUpdateKind::SUM_INT64 ||
 	                          descriptor.primitive_kind == AggregatePrimitiveUpdateKind::SUM_HUGEINT) &&
 	                         descriptor.IsMachineWord();
@@ -109,7 +117,7 @@ unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativeFilteredUngroupedFusedPrim
 		local_count_offsets[payload_idx] = local_size;
 		local_size += NumericCast<sljit_sw>(sizeof(sljit_sw));
 		auto kind = codegen_plan.payload_descriptors[payload_idx].primitive_kind;
-		if (kind == AggregatePrimitiveUpdateKind::COUNT_STAR) {
+		if (kind == AggregatePrimitiveUpdateKind::COUNT_STAR || kind == AggregatePrimitiveUpdateKind::COUNT) {
 			continue;
 		}
 		local_sum_offsets[payload_idx] = local_size;
@@ -261,12 +269,14 @@ unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativeFilteredUngroupedFusedPrim
 	// The loops that call no helper keep each payload's running sum in scratch registers past the five every emitter
 	// uses: a stack slot per row would chain each row's update on the previous row's store. A sum's count only tells
 	// whether it saw a value: a sum that adds every row the loop accepts reads the loop's row count, which COUNT(*)
-	// counts too, and a sum that may skip a row (a NULL value) sets its bit in one presence mask.
+	// counts too, and a sum that may skip a row (a NULL value) sets its bit in one presence mask. A COUNT is a sum
+	// without a value whose count is its result: one that may skip a row counts in a register of its own.
 	// A DOUBLE sum's float register starts from the stack slot's running value and stores back to it, so its rows add
 	// in source order
 	struct AccumulatorRegisters {
-		//! the loop's row count, for COUNT(*) and a sum that adds every accepted row
+		//! the loop's row count, for COUNT(*) and a sum that adds every accepted row, or a COUNT's own count
 		sljit_s32 count = 0;
+		bool own_count = false;
 		//! the presence mask and the sum's bit in it, for a sum that may skip a row
 		sljit_s32 presence = 0;
 		sljit_sw presence_bit = 0;
@@ -291,17 +301,19 @@ unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativeFilteredUngroupedFusedPrim
 		if (double_sum_count > MAX_DOUBLE_ACCUMULATORS) {
 			return layout;
 		}
-		auto sum_may_skip = [&](idx_t payload_idx) {
-			return sums_skip_null_rows || !codegen_plan.payloads[payload_idx].fast_path.fast_path_supported;
+		auto may_skip = [&](idx_t payload_idx) {
+			return codegen_plan.payload_descriptors[payload_idx].primitive_kind !=
+			           AggregatePrimitiveUpdateKind::COUNT_STAR &&
+			       (sums_skip_null_rows || !codegen_plan.payloads[payload_idx].fast_path.fast_path_supported);
+		};
+		auto is_count = [&](idx_t payload_idx) {
+			return codegen_plan.payload_descriptors[payload_idx].primitive_kind == AggregatePrimitiveUpdateKind::COUNT;
 		};
 		bool any_row_counted = false;
 		bool any_presence = false;
 		for (idx_t payload_idx = 0; payload_idx < payloads.size(); payload_idx++) {
-			const bool count_star = codegen_plan.payload_descriptors[payload_idx].primitive_kind ==
-			                        AggregatePrimitiveUpdateKind::COUNT_STAR;
-			const bool presence = !count_star && sum_may_skip(payload_idx);
-			any_presence = any_presence || presence;
-			any_row_counted = any_row_counted || !presence;
+			any_presence = any_presence || (may_skip(payload_idx) && !is_count(payload_idx));
+			any_row_counted = any_row_counted || !may_skip(payload_idx);
 		}
 		sljit_s32 next_register = 5;
 		sljit_s32 next_float_register = FIRST_DOUBLE_ACCUMULATOR;
@@ -311,16 +323,20 @@ unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativeFilteredUngroupedFusedPrim
 		for (idx_t payload_idx = 0; payload_idx < payloads.size(); payload_idx++) {
 			auto kind = codegen_plan.payload_descriptors[payload_idx].primitive_kind;
 			auto &accumulator = layout.payloads[payload_idx];
-			if (kind != AggregatePrimitiveUpdateKind::COUNT_STAR && sum_may_skip(payload_idx)) {
+			if (!may_skip(payload_idx)) {
+				accumulator.count = layout.row_count;
+			} else if (is_count(payload_idx)) {
+				accumulator.count = SLJIT_R(next_register++);
+				accumulator.own_count = true;
+			} else {
 				accumulator.presence = presence_mask;
 				accumulator.presence_bit = next_presence_bit++;
-			} else {
-				accumulator.count = layout.row_count;
 			}
 			if (kind == AggregatePrimitiveUpdateKind::SUM_DOUBLE) {
 				accumulator.lower = SLJIT_FR(next_float_register++);
 				accumulator.is_double = true;
-			} else if (kind != AggregatePrimitiveUpdateKind::COUNT_STAR) {
+			} else if (kind != AggregatePrimitiveUpdateKind::COUNT_STAR &&
+			           kind != AggregatePrimitiveUpdateKind::COUNT) {
 				accumulator.lower = SLJIT_R(next_register++);
 			}
 			if (kind == AggregatePrimitiveUpdateKind::SUM_HUGEINT) {
@@ -382,6 +398,8 @@ unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativeFilteredUngroupedFusedPrim
 		if (accumulator.presence) {
 			sljit_emit_op2(compiler, SLJIT_OR, accumulator.presence, 0, accumulator.presence, 0, SLJIT_IMM,
 			               sljit_sw(1) << accumulator.presence_bit);
+		} else if (accumulator.own_count) {
+			sljit_emit_op2(compiler, SLJIT_ADD, accumulator.count, 0, accumulator.count, 0, SLJIT_IMM, 1);
 		}
 	};
 	// a row the loop accepts: the row count counts it for COUNT(*) and every sum that adds it
@@ -391,8 +409,8 @@ unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativeFilteredUngroupedFusedPrim
 			sljit_emit_op2(compiler, SLJIT_ADD, count, 0, count, 0, SLJIT_IMM, 1);
 		}
 	};
-	// adds the value in R2 to the payload's sum and counts it
-	auto emit_accumulate = [&](idx_t payload_idx) {
+	// adds the value in R2 to the payload's sum
+	auto emit_add_value = [&](idx_t payload_idx) {
 		auto kind = codegen_plan.payload_descriptors[payload_idx].primitive_kind;
 		if (!accumulators) {
 			EmitUngroupedAggregateAccumulate(compiler, kind, local_sum_offsets[payload_idx],
@@ -409,6 +427,12 @@ unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativeFilteredUngroupedFusedPrim
 			auto &accumulator = accumulators->payloads[payload_idx];
 			sljit_emit_op2(compiler, SLJIT_ADD, accumulator.lower, 0, accumulator.lower, 0, SLJIT_R2, 0);
 		}
+	};
+	// a payload's value in R2 updates its aggregate: a sum adds and counts it, a COUNT only counts it
+	auto emit_accumulate = [&](idx_t payload_idx) {
+		if (codegen_plan.payload_descriptors[payload_idx].primitive_kind != AggregatePrimitiveUpdateKind::COUNT) {
+			emit_add_value(payload_idx);
+		}
 		emit_count(payload_idx);
 	};
 	auto begin_register_accumulators = [&](bool null_rows) {
@@ -423,7 +447,8 @@ unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativeFilteredUngroupedFusedPrim
 				sljit_emit_fmem(compiler, SLJIT_MOV_F64 | SLJIT_MEM_ALIGNED_32, accumulator.lower, SLJIT_MEM1(SLJIT_SP),
 				                local_sum_offsets[payload_idx]);
 			}
-			for (auto reg : {accumulator.is_double ? 0 : accumulator.lower, accumulator.upper}) {
+			for (auto reg : {accumulator.is_double ? 0 : accumulator.lower, accumulator.upper,
+			                 accumulator.own_count ? accumulator.count : 0}) {
 				if (reg) {
 					sljit_emit_op1(compiler, SLJIT_MOV, reg, 0, SLJIT_IMM, 0);
 				}
@@ -506,10 +531,12 @@ unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativeFilteredUngroupedFusedPrim
 			                                                      payload_slot_index, overflows);
 			sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_R3, 0, SLJIT_MEM1(SLJIT_SP), payload_slot.valid_offset);
 			payload_skip_jumps.push_back(sljit_emit_cmp(compiler, SLJIT_EQUAL, SLJIT_R3, 0, SLJIT_IMM, 0));
-			sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_R2, 0, SLJIT_MEM1(SLJIT_SP), payload_slot.value_offset);
-			EmitUngroupedAggregateAccumulate(compiler, kind, local_sum_offsets[payload_idx],
-			                                 local_sum_upper_offsets[payload_idx], saw_value_offsets[payload_idx],
-			                                 SLJIT_R2);
+			if (kind != AggregatePrimitiveUpdateKind::COUNT) {
+				sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_R2, 0, SLJIT_MEM1(SLJIT_SP), payload_slot.value_offset);
+				EmitUngroupedAggregateAccumulate(compiler, kind, local_sum_offsets[payload_idx],
+				                                 local_sum_upper_offsets[payload_idx], saw_value_offsets[payload_idx],
+				                                 SLJIT_R2);
+			}
 			EmitSljitAggregateIncrementLocalCount(compiler, local_count_offsets[payload_idx]);
 			auto payload_done = sljit_emit_jump(compiler, SLJIT_JUMP);
 			auto payload_skip_label = sljit_emit_label(compiler);
@@ -856,12 +883,12 @@ unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativeFilteredUngroupedFusedPrim
 	for (idx_t payload_idx = 0; payload_idx < payloads.size(); payload_idx++) {
 		auto kind = codegen_plan.payload_descriptors[payload_idx].primitive_kind;
 		sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_R2, 0, SLJIT_MEM1(SLJIT_SP), local_count_offsets[payload_idx]);
-		if (kind != AggregatePrimitiveUpdateKind::COUNT_STAR) {
+		if (saw_value_offsets[payload_idx] >= 0) {
 			// a sum saw a value exactly when it counted one; the register loops count without marking
 			sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_MEM1(SLJIT_SP), saw_value_offsets[payload_idx], SLJIT_R2, 0);
 		}
-		if (kind == AggregatePrimitiveUpdateKind::COUNT_STAR) {
-			EmitUngroupedAggregateCommitCountStar(compiler, payload_idx, SLJIT_R2);
+		if (kind == AggregatePrimitiveUpdateKind::COUNT_STAR || kind == AggregatePrimitiveUpdateKind::COUNT) {
+			EmitUngroupedAggregateCommitCount(compiler, payload_idx, SLJIT_R2);
 		} else if (kind == AggregatePrimitiveUpdateKind::SUM_HUGEINT) {
 			EmitUngroupedAggregateCommitSumHugeint(compiler, payload_idx, local_sum_offsets[payload_idx],
 			                                       local_sum_upper_offsets[payload_idx], saw_value_offsets[payload_idx],

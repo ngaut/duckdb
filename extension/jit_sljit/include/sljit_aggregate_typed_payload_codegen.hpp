@@ -40,7 +40,7 @@ struct SljitFusedAggregateCodegenPlan {
 	vector<SljitAggregatePayloadDescriptor> payload_descriptors;
 	idx_t tree_node_count = 0;
 	bool fast_path_supported = false;
-	//! a payload yields NULL for some rows without NULLs (a CASE result), which then leave its state alone
+	//! a sum's payload yields NULL for some rows without NULLs (a CASE result), which then leave its state alone
 	bool payloads_exit_null = false;
 	bool conditional_shared_payload = false;
 	idx_t conditional_lane = 0;
@@ -53,10 +53,10 @@ struct SljitFusedAggregateCodegenPlan {
 void TryBuildSljitSharedBinaryPayloadPlan(const vector<SljitNativeRegionExpressionPlan> &payloads,
                                           const vector<SljitAggregatePayloadDescriptor> &descriptors,
                                           SljitSharedBinaryPayloadPlan &result);
-//! count_payloads admits COUNT of a column: a payload that updates its state from its source's validity alone
+//! A COUNT payload updates its state from whether its value is NULL alone
 bool BuildSljitFusedAggregateCodegenPlan(const vector<SljitNativeRegionExpressionPlan> &payloads,
                                          const vector<ExecutionRegionAggregateInput> &aggregates,
-                                         SljitFusedAggregateCodegenPlan &codegen_plan, bool count_payloads);
+                                         SljitFusedAggregateCodegenPlan &codegen_plan);
 void EmitSljitSharedBinaryPayloadBase(struct sljit_compiler *compiler, const SljitSharedBinaryPayloadPlan &plan,
                                       sljit_s32 shared_value_reg, sljit_sw shared_value_offset,
                                       SljitAggregateExpressionIndexMode index_mode,

@@ -17,8 +17,8 @@ namespace duckdb {
 void EmitLoadUngroupedAggregatePointer(struct sljit_compiler *compiler, sljit_sw pointer_array_offset, idx_t lane_idx,
                                        sljit_s32 target_reg);
 void EmitUngroupedAggregateAddRowCount(struct sljit_compiler *compiler, idx_t lane_idx, sljit_s32 count_reg);
-void EmitUngroupedAggregateCommitCountStar(struct sljit_compiler *compiler, idx_t lane_idx, sljit_s32 count_reg);
-void EmitUngroupedAggregateCommitCountStar(struct sljit_compiler *compiler, idx_t lane_idx);
+void EmitUngroupedAggregateCommitCount(struct sljit_compiler *compiler, idx_t lane_idx, sljit_s32 count_reg);
+void EmitUngroupedAggregateCommitCount(struct sljit_compiler *compiler, idx_t lane_idx);
 void EmitUngroupedAggregateCommitSumInt64(struct sljit_compiler *compiler, idx_t lane_idx, sljit_sw local_sum_offset,
                                           sljit_sw saw_value_offset, sljit_s32 count_reg);
 void EmitUngroupedAggregateCommitSumInt64(struct sljit_compiler *compiler, idx_t lane_idx, sljit_sw local_sum_offset,

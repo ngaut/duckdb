@@ -58,11 +58,11 @@ static bool SljitTryExecuteHashJoinDirectUngroupedAggregateConsumer(
 	auto probe_start = SljitRegionStageStart(runtime);
 	switch (plan.primitive_kind) {
 	case AggregatePrimitiveUpdateKind::COUNT_STAR: {
-		SljitValidateUngroupedCountStarPrimitiveLane(lane, "SLJIT direct hash-join count-star lane is incomplete");
+		SljitValidateUngroupedCountPrimitiveLane(lane, "SLJIT direct hash-join count-star lane is incomplete");
 		break;
 	}
 	case AggregatePrimitiveUpdateKind::COUNT: {
-		SljitValidateUngroupedCountStarPrimitiveLane(lane, "SLJIT direct hash-join count lane is incomplete");
+		SljitValidateUngroupedCountPrimitiveLane(lane, "SLJIT direct hash-join count lane is incomplete");
 		break;
 	}
 	case AggregatePrimitiveUpdateKind::SUM_HUGEINT: {

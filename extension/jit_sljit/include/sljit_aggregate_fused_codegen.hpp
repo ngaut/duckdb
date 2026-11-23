@@ -46,7 +46,7 @@ bool SljitFusedGroupedAggregatePayloadSupported(const SljitNativeRegionExpressio
                                                 const ExecutionRegionAggregateInput &aggregate,
                                                 const ExecutionRegionAggregateContract &contract,
                                                 SljitAggregatePayloadDescriptor *descriptor = nullptr);
-//! SljitFusedGroupedAggregatePayloadSupported, and COUNT of a column
+//! SljitFusedGroupedAggregatePayloadSupported, a DOUBLE column's sum, and COUNT of a column or a typed tree
 bool SljitPerfectHashAggregatePayloadSupported(const SljitNativeRegionExpressionPlan &payload,
                                                const ExecutionRegionAggregateInput &aggregate,
                                                const ExecutionRegionAggregateContract &contract);

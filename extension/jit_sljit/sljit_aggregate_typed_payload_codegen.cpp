@@ -11,20 +11,25 @@ namespace duckdb {
 static bool BuildSljitFusedAggregatePayloadPlan(const SljitNativeRegionExpressionPlan &payload,
                                                 const ExecutionRegionAggregateInput &aggregate,
                                                 SljitTypedExpressionTreePlan &payload_plan,
-                                                SljitAggregatePayloadDescriptor &descriptor, bool count_payloads) {
+                                                SljitAggregatePayloadDescriptor &descriptor) {
 	if (!SljitTryBindAggregatePayloadDescriptor(payload, aggregate, descriptor)) {
 		return false;
 	}
 	if (!descriptor.has_payload) {
 		return true;
 	}
+	// COUNT reads only whether the payload is NULL: a tree's value is evaluated and dropped, a NULL result skips it
 	if (descriptor.primitive_kind == AggregatePrimitiveUpdateKind::COUNT) {
-		if (!count_payloads || payload.kind != SljitNativeRegionExpressionKind::REFERENCE) {
+		if (payload.kind == SljitNativeRegionExpressionKind::REFERENCE) {
+			payload_plan.supported = true;
+			payload_plan.fast_path.fast_path_supported = true;
+			return true;
+		}
+		if (payload.kind != SljitNativeRegionExpressionKind::TYPED_EXPRESSION_TREE || !payload.expression_tree) {
 			return false;
 		}
-		payload_plan.supported = true;
-		payload_plan.fast_path.fast_path_supported = true;
-		return true;
+		payload_plan = BuildSljitTypedExpressionTreePlan(*payload.expression_tree, true);
+		return payload_plan.supported;
 	}
 	// A grouped DOUBLE sum adds each row to its group's state in source order, as DuckDB's does; a DOUBLE column's
 	// reference loads the value's bits as a machine word
@@ -216,7 +221,7 @@ void TryBuildSljitSharedBinaryPayloadPlan(const vector<SljitNativeRegionExpressi
 
 bool BuildSljitFusedAggregateCodegenPlan(const vector<SljitNativeRegionExpressionPlan> &payloads,
                                          const vector<ExecutionRegionAggregateInput> &aggregates,
-                                         SljitFusedAggregateCodegenPlan &codegen_plan, bool count_payloads) {
+                                         SljitFusedAggregateCodegenPlan &codegen_plan) {
 	if (payloads.size() != aggregates.size() || payloads.empty()) {
 		return false;
 	}
@@ -228,7 +233,7 @@ bool BuildSljitFusedAggregateCodegenPlan(const vector<SljitNativeRegionExpressio
 	for (idx_t payload_idx = 0; payload_idx < payloads.size(); payload_idx++) {
 		if (!BuildSljitFusedAggregatePayloadPlan(payloads[payload_idx], aggregates[payload_idx],
 		                                         codegen_plan.payloads[payload_idx],
-		                                         codegen_plan.payload_descriptors[payload_idx], count_payloads)) {
+		                                         codegen_plan.payload_descriptors[payload_idx])) {
 			return false;
 		}
 		if (codegen_plan.payload_descriptors[payload_idx].primitive_kind == AggregatePrimitiveUpdateKind::COUNT_STAR) {
@@ -240,7 +245,9 @@ bool BuildSljitFusedAggregateCodegenPlan(const vector<SljitNativeRegionExpressio
 		codegen_plan.tree_node_count += codegen_plan.payloads[payload_idx].node_count;
 		codegen_plan.fast_path_supported =
 		    codegen_plan.fast_path_supported && fast_path.FastPathSupportedWithNullExits();
-		codegen_plan.payloads_exit_null = codegen_plan.payloads_exit_null || !fast_path.fast_path_supported;
+		codegen_plan.payloads_exit_null =
+		    codegen_plan.payloads_exit_null ||
+		    (codegen_plan.payload_descriptors[payload_idx].ReadsValue() && !fast_path.fast_path_supported);
 	}
 	if (has_typed_payload) {
 		TryBuildSljitConditionalSharedAggregatePlan(payloads, codegen_plan);

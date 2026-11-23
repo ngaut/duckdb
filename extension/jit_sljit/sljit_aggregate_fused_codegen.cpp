@@ -210,15 +210,24 @@ bool SljitPerfectHashAggregatePayloadSupported(const SljitNativeRegionExpression
                                                const ExecutionRegionAggregateInput &aggregate,
                                                const ExecutionRegionAggregateContract &contract) {
 	SljitAggregatePayloadDescriptor descriptor;
-	// a perfect hash's states take a DOUBLE column's sum in the typed kernel too: it has no group runs to preaggregate
-	if (aggregate.aggregate_index < contract.grouped_state_offsets.size() &&
-	    SljitTryBindAggregatePayloadDescriptor(payload, aggregate, descriptor) &&
-	    (descriptor.primitive_kind == AggregatePrimitiveUpdateKind::COUNT ||
-	     descriptor.primitive_kind == AggregatePrimitiveUpdateKind::SUM_DOUBLE) &&
-	    payload.kind == SljitNativeRegionExpressionKind::REFERENCE) {
-		return true;
+	if (aggregate.aggregate_index >= contract.grouped_state_offsets.size() ||
+	    !SljitTryBindAggregatePayloadDescriptor(payload, aggregate, descriptor)) {
+		return false;
 	}
-	return SljitFusedGroupedAggregatePayloadSupported(payload, aggregate, contract);
+	const bool reference = payload.kind == SljitNativeRegionExpressionKind::REFERENCE;
+	const bool typed_tree =
+	    payload.kind == SljitNativeRegionExpressionKind::TYPED_EXPRESSION_TREE && payload.expression_tree;
+	switch (descriptor.primitive_kind) {
+	case AggregatePrimitiveUpdateKind::COUNT:
+		// COUNT reads whether a column or a typed tree is NULL
+		return reference || typed_tree;
+	case AggregatePrimitiveUpdateKind::SUM_DOUBLE:
+		// a perfect hash's states take a DOUBLE column's sum in the typed kernel too: it has no group runs to
+		// preaggregate
+		return reference || typed_tree;
+	default:
+		return SljitFusedGroupedAggregatePayloadSupported(payload, aggregate, contract);
+	}
 }
 
 } // namespace duckdb

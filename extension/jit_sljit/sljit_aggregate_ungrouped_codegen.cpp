@@ -193,7 +193,7 @@ BuildSljitNativeUngroupedFusedPrimitiveAggregateUpdate(const vector<SljitNativeR
 	sljit_set_label(done, done_label);
 	for (idx_t payload_idx = 0; payload_idx < payloads.size(); payload_idx++) {
 		if (descriptors[payload_idx].primitive_kind == AggregatePrimitiveUpdateKind::COUNT_STAR) {
-			EmitUngroupedAggregateCommitCountStar(compiler, payload_idx);
+			EmitUngroupedAggregateCommitCount(compiler, payload_idx);
 		} else if (descriptors[payload_idx].primitive_kind == AggregatePrimitiveUpdateKind::SUM_HUGEINT) {
 			EmitUngroupedAggregateAddRowCount(compiler, payload_idx, SLJIT_S2);
 		} else {

@@ -33,7 +33,11 @@ static bool SljitPrimitiveAggregatePayloadSupported(SljitNativeRegionExpressionP
 		return true;
 	}
 	if (descriptor.value_abi == SljitAggregatePayloadValueABI::VALIDITY_ONLY) {
-		return payload.kind == SljitNativeRegionExpressionKind::REFERENCE;
+		// the ungrouped and perfect-hash kernels count the rows whose typed tree is not NULL
+		return payload.kind == SljitNativeRegionExpressionKind::REFERENCE ||
+		       ((!grouped_state || perfect_hash_state) &&
+		        payload.kind == SljitNativeRegionExpressionKind::TYPED_EXPRESSION_TREE && payload.expression_tree &&
+		        BuildSljitTypedExpressionTreePlan(*payload.expression_tree, false).supported);
 	}
 	if (descriptor.primitive_kind == AggregatePrimitiveUpdateKind::SUM_DOUBLE) {
 		switch (payload.kind) {
@@ -345,7 +349,7 @@ static bool SljitPerfectHashGroupLookupSupported(
 	}
 
 	SljitFusedAggregateCodegenPlan codegen_plan;
-	if (!BuildSljitFusedAggregateCodegenPlan(payloads, sink.aggregates, codegen_plan, true)) {
+	if (!BuildSljitFusedAggregateCodegenPlan(payloads, sink.aggregates, codegen_plan)) {
 		return false;
 	}
 	for (idx_t payload_idx = 0; payload_idx < payloads.size(); payload_idx++) {

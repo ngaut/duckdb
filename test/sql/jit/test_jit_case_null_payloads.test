@@ -1,5 +1,5 @@
 # name: test/sql/jit/test_jit_case_null_payloads.test
-# description: An aggregate payload whose CASE results include NULL runs in the generated loops: a row whose CASE yields NULL leaves the sum alone, a group or aggregate that sees no other row stays NULL, and THEN NULL, middle NULL branches, nested CASEs, NULL sources, filters and DOUBLE sums keep native results
+# description: An aggregate payload whose CASE results include NULL runs in the generated loops: a row whose CASE yields NULL leaves the sum or count alone, a group or aggregate that sees no other row stays NULL, and THEN NULL, middle NULL branches, nested CASEs, NULL sources, filters, COUNT of typed trees and DOUBLE sums keep native results
 # group: [jit]
 
 require jit_sljit
@@ -65,7 +65,27 @@ SELECT 'filtered', sum(CASE WHEN k < 300 THEN b END)::VARCHAR, count(*) FROM fac
 UNION ALL
 SELECT 'with_count_star', sum(CASE WHEN k < 300 THEN price END)::VARCHAR, count(*) FROM facts WHERE id % 3 = 0
 UNION ALL
+SELECT 'count_then_value', count(CASE WHEN k < 300 THEN 1 END)::VARCHAR, count(*) FROM facts
+UNION ALL
+SELECT 'count_beside_sums', (count(CASE WHEN k < 300 THEN 1 END) * 1000003 + sum(CASE WHEN k > 600 THEN id END))::VARCHAR, count(*) FROM facts
+UNION ALL
+SELECT 'count_no_row_matches', count(CASE WHEN id % 2 = 0 AND id % 4 = 1 THEN 1 END)::VARCHAR, count(*) FROM facts
+UNION ALL
+SELECT 'count_null_source', count(CASE WHEN k < 700 THEN n END)::VARCHAR, count(*) FROM facts
+UNION ALL
+SELECT 'count_strict_null_source', count(n + 1)::VARCHAR, count(*) FROM facts WHERE k < 990
+UNION ALL
+SELECT 'count_else_value_null_source', count(CASE WHEN k < 300 THEN n ELSE 1 END)::VARCHAR, count(*) FROM facts
+UNION ALL
+SELECT 'count_filtered', count(CASE WHEN k < 300 THEN b END)::VARCHAR, count(*) FROM facts WHERE g < 50
+UNION ALL
 SELECT 'grouped_' || g, sum(CASE WHEN k < 300 THEN price END)::VARCHAR, count(*) FROM facts GROUP BY g
+UNION ALL
+SELECT 'grouped_count_' || g, (count(CASE WHEN k < 300 THEN 1 END) * 1000003 + count(CASE WHEN g % 3 = 0 THEN b END))::VARCHAR, count(*) FROM facts GROUP BY g
+UNION ALL
+SELECT 'grouped_count_null_source_' || g, count(CASE WHEN k < 700 THEN n END)::VARCHAR, count(*) FROM facts GROUP BY g
+UNION ALL
+SELECT 'grouped_count_small_' || s, count(CASE WHEN k < 300 THEN 1 END)::VARCHAR, count(*) FROM facts GROUP BY s
 UNION ALL
 SELECT 'grouped_empty_groups_' || g, sum(CASE WHEN g < 10 THEN b END)::VARCHAR, count(*) FROM facts GROUP BY g
 UNION ALL
@@ -103,7 +123,7 @@ SELECT count(*) FROM ((SELECT * FROM r_off EXCEPT ALL SELECT * FROM r_auto)
 query I
 SELECT count(*) FROM r_auto
 ----
-512
+720
 
 endloop
 
@@ -206,6 +226,20 @@ SET jit_event_log_size=100
 
 statement ok
 CREATE OR REPLACE TEMP TABLE traced AS SELECT g, sum(CASE WHEN k < 300 THEN price END) FROM facts GROUP BY g
+
+query I
+SELECT count(*) > 0 FROM duckdb_jit_events() WHERE status = 'executed' AND jit_runtime_path_counts LIKE '%fused_payload_update_owns_perfect_hash_group_lookup%'
+----
+true
+
+statement ok
+SET jit_event_log_size=0
+
+statement ok
+SET jit_event_log_size=100
+
+statement ok
+CREATE OR REPLACE TEMP TABLE traced AS SELECT g, count(CASE WHEN k < 300 THEN 1 END) FROM facts GROUP BY g
 
 query I
 SELECT count(*) > 0 FROM duckdb_jit_events() WHERE status = 'executed' AND jit_runtime_path_counts LIKE '%fused_payload_update_owns_perfect_hash_group_lookup%'

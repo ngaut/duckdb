@@ -73,10 +73,9 @@ static void SljitExecuteUngroupedCombinedSourceAggregateUpdate(
 		auto &lane =
 		    SljitRequireAggregatePayloadLane(lanes, payload_descriptors, payload_idx,
 		                                     "SLJIT ungrouped aggregate kernel lane invalid for aggregate %llu");
-		if (lane.kind == AggregatePrimitiveUpdateKind::COUNT_STAR) {
-			SljitBindUngroupedCountStarPrimitiveLane(
-			    lane, aggregate_int64_values, aggregate_row_counts, payload_idx,
-			    "SLJIT ungrouped aggregate kernel count-star lane is incomplete: %s");
+		if (lane.kind == AggregatePrimitiveUpdateKind::COUNT_STAR || lane.kind == AggregatePrimitiveUpdateKind::COUNT) {
+			SljitBindUngroupedCountPrimitiveLane(lane, aggregate_int64_values, aggregate_row_counts, payload_idx,
+			                                     "SLJIT ungrouped aggregate kernel count lane is incomplete: %s");
 			continue;
 		}
 		if (lane.kind != AggregatePrimitiveUpdateKind::SUM_INT64 &&

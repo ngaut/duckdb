@@ -57,7 +57,7 @@ bool TryBuildSljitPerfectHashFusedUpdatePlan(
 	if (!TryBuildSljitPerfectHashGroupPlans(groups, group_expressions, contract, result.group_plans,
 	                                        typed_group_expressions) ||
 	    result.group_plans.empty() || !contract.grouped_state_layout_ready ||
-	    !BuildSljitFusedAggregateCodegenPlan(payloads, aggregates, result.codegen_plan, true)) {
+	    !BuildSljitFusedAggregateCodegenPlan(payloads, aggregates, result.codegen_plan)) {
 		error = "unsupported fused perfect-hash aggregate payload shape";
 		return false;
 	}

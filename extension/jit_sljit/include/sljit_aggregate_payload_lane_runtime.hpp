@@ -32,18 +32,18 @@ static void SljitThrowIncompletePrimitiveLane(const ExecutionPrimitiveAggregateU
 	throw InternalException(message, blocker.c_str());
 }
 
-static void SljitValidateUngroupedCountStarPrimitiveLane(const ExecutionPrimitiveAggregateUpdateLane &lane,
-                                                         const char *message) {
+static void SljitValidateUngroupedCountPrimitiveLane(const ExecutionPrimitiveAggregateUpdateLane &lane,
+                                                     const char *message) {
 	if (!lane.ready || !lane.sum_int64_value || !lane.row_count) {
-		SljitThrowIncompletePrimitiveLane(lane, message, "aggregate-count-star-lane-incomplete");
+		SljitThrowIncompletePrimitiveLane(lane, message, "aggregate-count-lane-incomplete");
 	}
 }
 
-static void SljitBindUngroupedCountStarPrimitiveLane(const ExecutionPrimitiveAggregateUpdateLane &lane,
-                                                     vector<int64_t *> &aggregate_int64_values,
-                                                     vector<idx_t *> &aggregate_row_counts, idx_t payload_idx,
-                                                     const char *message) {
-	SljitValidateUngroupedCountStarPrimitiveLane(lane, message);
+static void SljitBindUngroupedCountPrimitiveLane(const ExecutionPrimitiveAggregateUpdateLane &lane,
+                                                 vector<int64_t *> &aggregate_int64_values,
+                                                 vector<idx_t *> &aggregate_row_counts, idx_t payload_idx,
+                                                 const char *message) {
+	SljitValidateUngroupedCountPrimitiveLane(lane, message);
 	aggregate_int64_values[payload_idx] = lane.sum_int64_value;
 	aggregate_row_counts[payload_idx] = lane.row_count;
 }
