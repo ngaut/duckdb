@@ -58,6 +58,8 @@ bool TryGetSljitTypedExpressionTreeNarrowDecimal128Bound(const ExecutionExpressi
 bool SljitTypedExpressionTreeIsNarrowDecimal128Node(const ExecutionExpressionIR &node);
 bool SljitTypedExpressionTreeIsValueNode(const ExecutionExpressionIR &node);
 bool SljitTypedExpressionTreeIsIntegerNode(const ExecutionExpressionIR &node);
+//! An integer node or an unsigned one (UTINYINT, USMALLINT, UINTEGER)
+bool SljitTypedExpressionTreeIsIntegralValueNode(const ExecutionExpressionIR &node);
 //! A signed integer column narrower than the tree's arithmetic: read only through a cast that widens it
 bool SljitTypedExpressionTreeIsNarrowSignedReference(const ExecutionExpressionIR &node);
 //! A cast widening a narrow signed integer column to INT32 or INT64: a sign-extending load of the column

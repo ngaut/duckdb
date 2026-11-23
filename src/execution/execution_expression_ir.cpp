@@ -1,6 +1,7 @@
 #include "duckdb/execution/execution_region_lowering.hpp"
 
 #include "duckdb/common/string_util.hpp"
+#include "duckdb/function/scalar/compressed_materialization_utils.hpp"
 #include "duckdb/planner/cost_model.hpp"
 #include "duckdb/planner/expression.hpp"
 #include "duckdb/planner/expression/bound_between_expression.hpp"
@@ -398,9 +399,9 @@ bool ExecutionExpressionIREquals(const ExecutionExpressionIR &left, const Execut
 	    left.ref_index != right.ref_index || left.unary_op != right.unary_op || left.binary_op != right.binary_op ||
 	    left.conjunction_op != right.conjunction_op || left.intrinsic != right.intrinsic ||
 	    left.arithmetic_overflow_check != right.arithmetic_overflow_check || left.try_cast != right.try_cast ||
-	    left.not_in != right.not_in || left.not_between != right.not_between ||
-	    left.lower_inclusive != right.lower_inclusive || left.upper_inclusive != right.upper_inclusive ||
-	    left.children.size() != right.children.size()) {
+	    left.value_preserving_cast != right.value_preserving_cast || left.not_in != right.not_in ||
+	    left.not_between != right.not_between || left.lower_inclusive != right.lower_inclusive ||
+	    left.upper_inclusive != right.upper_inclusive || left.children.size() != right.children.size()) {
 		return false;
 	}
 	// constants compare as written: -0.0 and 0.0 compare equal as values but are different constants
@@ -684,8 +685,11 @@ static ExecutionExpressionSourceKind GetExecutionExpressionSource(const Executio
 static ExecutionExpressionExceptionKind GetExecutionExpressionExceptionBehavior(const ExecutionExpressionIR &node) {
 	switch (node.kind) {
 	case ExecutionExpressionIRKind::CAST:
-		return node.try_cast ? ExecutionExpressionExceptionKind::NULL_ON_CAST_ERROR
-		                     : ExecutionExpressionExceptionKind::CAST;
+		if (node.try_cast) {
+			return ExecutionExpressionExceptionKind::NULL_ON_CAST_ERROR;
+		}
+		return node.value_preserving_cast ? ExecutionExpressionExceptionKind::NONE
+		                                  : ExecutionExpressionExceptionKind::CAST;
 	case ExecutionExpressionIRKind::BINARY:
 		if (ExecutionExpressionIsComparisonOp(node.binary_op) || !node.arithmetic_overflow_check) {
 			return ExecutionExpressionExceptionKind::NONE;
@@ -1296,6 +1300,7 @@ static unique_ptr<ExecutionExpressionIR> TryBuildExecutionCastIR(const Expressio
 		node->cast_source_alias = child_expression.GetAlias().GetIdentifierName();
 	}
 	node->try_cast = try_cast;
+	node->value_preserving_cast = CMUtils::GetExpressionType(cast) == CMExpressionType::CAST;
 	node->left = std::move(child);
 	return node;
 }

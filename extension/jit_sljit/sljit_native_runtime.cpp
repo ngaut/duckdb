@@ -13,6 +13,10 @@ const_data_ptr_t NativeIntegerSourceData(UnifiedVectorFormat &format, SljitNativ
 		return reinterpret_cast<const_data_ptr_t>(UnifiedVectorFormat::GetData<int8_t>(format));
 	case SljitNativeIntegerKind::UINT8:
 		return reinterpret_cast<const_data_ptr_t>(UnifiedVectorFormat::GetData<uint8_t>(format));
+	case SljitNativeIntegerKind::UINT16:
+		return reinterpret_cast<const_data_ptr_t>(UnifiedVectorFormat::GetData<uint16_t>(format));
+	case SljitNativeIntegerKind::UINT32:
+		return reinterpret_cast<const_data_ptr_t>(UnifiedVectorFormat::GetData<uint32_t>(format));
 	case SljitNativeIntegerKind::INT32:
 	case SljitNativeIntegerKind::DATE:
 		return reinterpret_cast<const_data_ptr_t>(UnifiedVectorFormat::GetData<int32_t>(format));
@@ -30,6 +34,10 @@ data_ptr_t NativeIntegerResultData(Vector &result, SljitNativeIntegerKind kind) 
 		return reinterpret_cast<data_ptr_t>(FlatVector::GetDataMutable<int8_t>(result));
 	case SljitNativeIntegerKind::UINT8:
 		return reinterpret_cast<data_ptr_t>(FlatVector::GetDataMutable<uint8_t>(result));
+	case SljitNativeIntegerKind::UINT16:
+		return reinterpret_cast<data_ptr_t>(FlatVector::GetDataMutable<uint16_t>(result));
+	case SljitNativeIntegerKind::UINT32:
+		return reinterpret_cast<data_ptr_t>(FlatVector::GetDataMutable<uint32_t>(result));
 	case SljitNativeIntegerKind::INT32:
 	case SljitNativeIntegerKind::DATE:
 		return reinterpret_cast<data_ptr_t>(FlatVector::GetDataMutable<int32_t>(result));

@@ -52,7 +52,7 @@ inline SljitNativeIntegerCompareOp FlipNativeIntegerCompareOp(SljitNativeInteger
 		return op;
 	}
 }
-enum class SljitNativeIntegerKind : uint8_t { INT8, UINT8, INT32, INT64, DECIMAL64, DATE };
+enum class SljitNativeIntegerKind : uint8_t { INT8, UINT8, UINT16, UINT32, INT32, INT64, DECIMAL64, DATE };
 enum class SljitNativeSignedIntegerWidth : uint8_t { INT8, INT16, INT32, INT64 };
 enum class SljitNativeUnsignedIntegerWidth : uint8_t { UINT8, UINT16, UINT32 };
 enum class SljitNativeHashJoinKeyKind : uint8_t {

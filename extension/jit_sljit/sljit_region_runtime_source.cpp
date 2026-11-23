@@ -157,21 +157,6 @@ static T **SljitPointerArrayOrNull(vector<T *> &values) {
 	return nullptr;
 }
 
-SljitNativeIntegerKind SljitPerfectHashGroupIntegerKind(const LogicalType &type) {
-	switch (type.InternalType()) {
-	case PhysicalType::INT8:
-		return SljitNativeIntegerKind::INT8;
-	case PhysicalType::UINT8:
-		return SljitNativeIntegerKind::UINT8;
-	case PhysicalType::INT32:
-		return SljitNativeIntegerKind::INT32;
-	case PhysicalType::INT64:
-		return SljitNativeIntegerKind::INT64;
-	default:
-		throw InternalException("Unsupported SLJIT perfect-hash group physical type");
-	}
-}
-
 void SljitSourceVectorScratch::Resize(idx_t source_count) {
 	formats.resize(source_count);
 	data.assign(source_count, nullptr);

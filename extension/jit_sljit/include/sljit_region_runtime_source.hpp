@@ -23,7 +23,6 @@ const validity_t *SljitNormalizedSourceValidityData(const UnifiedVectorFormat &f
 const validity_t *SljitNormalizedSourceValidityData(const UnifiedVectorFormat &format, const sel_t *source_sel,
                                                     const SelectionVector *execute_sel, idx_t count);
 bool SljitUnifiedFormatHasIdentitySelection(const UnifiedVectorFormat &format);
-SljitNativeIntegerKind SljitPerfectHashGroupIntegerKind(const LogicalType &type);
 
 class SljitSourceVectorScratch {
 public:

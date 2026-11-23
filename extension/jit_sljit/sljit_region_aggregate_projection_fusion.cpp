@@ -8,6 +8,7 @@
 
 #include "sljit_region_aggregate_projection_fusion.hpp"
 
+#include "sljit_aggregate_perfect_hash_codegen.hpp"
 #include "sljit_region_aggregate_payload_fusion.hpp"
 #include "sljit_projection_composition.hpp"
 #include "sljit_region_aggregate_projection_rewrite.hpp"
@@ -32,25 +33,6 @@ static bool SljitPerfectHashSignedSourceMatchesInput(SljitNativeSignedIntegerWid
 		return type.InternalType() == PhysicalType::INT32;
 	case SljitNativeSignedIntegerWidth::INT64:
 		return type.InternalType() == PhysicalType::INT64;
-	default:
-		return false;
-	}
-}
-
-static bool TryGetSljitPerfectHashGroupKind(const LogicalType &type, SljitNativeIntegerKind &kind) {
-	switch (type.InternalType()) {
-	case PhysicalType::INT8:
-		kind = SljitNativeIntegerKind::INT8;
-		return true;
-	case PhysicalType::UINT8:
-		kind = SljitNativeIntegerKind::UINT8;
-		return true;
-	case PhysicalType::INT32:
-		kind = SljitNativeIntegerKind::INT32;
-		return true;
-	case PhysicalType::INT64:
-		kind = SljitNativeIntegerKind::INT64;
-		return true;
 	default:
 		return false;
 	}
@@ -136,7 +118,7 @@ static bool SljitPerfectHashGroupExpressionCanEraseProjection(const vector<Logic
 		}
 		SljitNativeIntegerKind group_kind;
 		auto tree_plan = BuildSljitTypedExpressionTreePlan(*expr.expression_tree, false);
-		return tree_plan.supported && TryGetSljitPerfectHashGroupKind(group.type, group_kind) &&
+		return tree_plan.supported && TryGetSljitPerfectHashGroupIntegerKind(group.type, group_kind) &&
 		       tree_plan.result_kind == group_kind;
 	}
 	default:

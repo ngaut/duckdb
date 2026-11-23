@@ -9,6 +9,7 @@
 #pragma once
 
 #include "sljit_aggregate_payload_lane_runtime.hpp"
+#include "sljit_aggregate_perfect_hash_codegen.hpp"
 #include "sljit_grouped_reduction_lane.hpp"
 #include "sljit_region_runtime_state.hpp"
 
@@ -135,9 +136,10 @@ static void SljitExecuteFusedPerfectHashGroupedPrimitiveAggregatePayloadUpdate(
 		auto &group_format =
 		    group_sources.PrepareFormat(input, group_expression.source_index, group_idx,
 		                                "SLJIT fused perfect-hash aggregate group expression is unsupported");
-		if (group_expression.kind == SljitNativeRegionExpressionKind::REFERENCE) {
-			group_sources.SetData(group_idx,
-			                      NativeIntegerSourceData(group_format, SljitPerfectHashGroupIntegerKind(group.type)));
+		SljitNativeIntegerKind group_kind;
+		if (group_expression.kind == SljitNativeRegionExpressionKind::REFERENCE &&
+		    TryGetSljitPerfectHashGroupIntegerKind(group.type, group_kind)) {
+			group_sources.SetData(group_idx, NativeIntegerSourceData(group_format, group_kind));
 		} else if (group_expression.kind == SljitNativeRegionExpressionKind::INTEGRAL_COMPRESS ||
 		           group_expression.kind == SljitNativeRegionExpressionKind::INTEGER_CAST) {
 			group_sources.SetData(group_idx,

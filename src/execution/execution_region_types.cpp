@@ -1314,6 +1314,7 @@ unique_ptr<ExecutionExpressionIR> ExecutionExpressionIR::Copy() const {
 	result->intrinsic = intrinsic;
 	result->arithmetic_overflow_check = arithmetic_overflow_check;
 	result->try_cast = try_cast;
+	result->value_preserving_cast = value_preserving_cast;
 	result->not_in = not_in;
 	result->not_between = not_between;
 	result->lower_inclusive = lower_inclusive;

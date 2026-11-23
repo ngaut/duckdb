@@ -702,7 +702,7 @@ ENCODINGS_QUERIES = {
     "expression_key_filter_counts": (
         "SELECT id % 50000 AS gg, count(*) FILTER (WHERE rv < 500), count(*) FILTER (WHERE rv >= 750) "
         "FROM __jit_encodings_facts GROUP BY gg",
-        {1: True, 4: False},
+        {1: True, 4: True},
     ),
     "narrow_between": (
         "SELECT sum(id) FROM __jit_encodings_facts WHERE si BETWEEN 100 AND 2000",
@@ -762,8 +762,8 @@ ENCODINGS_THRESHOLDS = {
     "aggregate_filter_sums": ({1: 1.05, 4: 1.04}, {1: 44_700_000, 4: 47_100_000}),
     "aggregate_filter_random_groups": ({1: 1.23, 4: 1.17}, {1: 81_900_000, 4: 88_800_000}),
     "aggregate_filter_random_sums": ({1: 0.90, 4: 0.90}, {1: 44_700_000, 4: 46_900_000}),
-    "expression_key_groups": ({1: 0.88, 4: 0.88}, {1: 90_900_000, 4: 98_200_000}),
-    "expression_key_filter_counts": ({1: 0.86, 4: 0.89}, {1: 152_500_000, 4: 138_500_000}),
+    "expression_key_groups": ({1: 1.42, 4: 1.37}, {1: 55_900_000, 4: 59_600_000}),
+    "expression_key_filter_counts": ({1: 1.57, 4: 1.52}, {1: 73_100_000, 4: 79_900_000}),
     "narrow_between": ({1: 1.28, 4: 1.22}, {1: 15_400_000, 4: 17_500_000}),
     "nullable_key_join": ({1: 0.89, 4: 0.89}, {1: 570_500_000, 4: 572_400_000}),
     "random_key_groups": ({1: 0.89, 4: 0.89}, {1: 103_800_000, 4: 114_600_000}),

@@ -229,6 +229,14 @@ static bool SljitNativeIntegerPayloadPhysicalRange(const SljitNativeRegionExpres
 		result.min = Hugeint::Convert(0);
 		result.max = Hugeint::Convert(NumericLimits<uint8_t>::Maximum());
 		return true;
+	case SljitNativeIntegerKind::UINT16:
+		result.min = Hugeint::Convert(0);
+		result.max = Hugeint::Convert(NumericLimits<uint16_t>::Maximum());
+		return true;
+	case SljitNativeIntegerKind::UINT32:
+		result.min = Hugeint::Convert(0);
+		result.max = Hugeint::Convert(NumericLimits<uint32_t>::Maximum());
+		return true;
 	case SljitNativeIntegerKind::INT32:
 	case SljitNativeIntegerKind::DATE:
 		result.min = Hugeint::Convert(NumericLimits<int32_t>::Minimum());

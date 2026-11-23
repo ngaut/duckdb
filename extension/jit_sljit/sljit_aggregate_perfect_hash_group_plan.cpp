@@ -15,13 +15,19 @@
 
 namespace duckdb {
 
-static bool TryGetSljitPerfectHashGroupIntegerKind(const LogicalType &type, SljitNativeIntegerKind &kind) {
+bool TryGetSljitPerfectHashGroupIntegerKind(const LogicalType &type, SljitNativeIntegerKind &kind) {
 	switch (type.InternalType()) {
 	case PhysicalType::INT8:
 		kind = SljitNativeIntegerKind::INT8;
 		return true;
 	case PhysicalType::UINT8:
 		kind = SljitNativeIntegerKind::UINT8;
+		return true;
+	case PhysicalType::UINT16:
+		kind = SljitNativeIntegerKind::UINT16;
+		return true;
+	case PhysicalType::UINT32:
+		kind = SljitNativeIntegerKind::UINT32;
 		return true;
 	case PhysicalType::INT32:
 		kind = SljitNativeIntegerKind::INT32;

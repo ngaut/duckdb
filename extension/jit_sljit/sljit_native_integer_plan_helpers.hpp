@@ -128,6 +128,10 @@ static string NativeIntegerTypeName(SljitNativeIntegerKind kind) {
 	switch (kind) {
 	case SljitNativeIntegerKind::UINT8:
 		return "utinyint";
+	case SljitNativeIntegerKind::UINT16:
+		return "usmallint";
+	case SljitNativeIntegerKind::UINT32:
+		return "uinteger";
 	case SljitNativeIntegerKind::INT32:
 		return "integer";
 	case SljitNativeIntegerKind::INT64:
@@ -145,6 +149,12 @@ static bool ReadNativeIntegerValue(const Value &value, SljitNativeIntegerKind ki
 	switch (kind) {
 	case SljitNativeIntegerKind::UINT8:
 		constant_value = value.GetValue<uint8_t>();
+		return true;
+	case SljitNativeIntegerKind::UINT16:
+		constant_value = value.GetValue<uint16_t>();
+		return true;
+	case SljitNativeIntegerKind::UINT32:
+		constant_value = value.GetValue<uint32_t>();
 		return true;
 	case SljitNativeIntegerKind::INT32:
 		constant_value =

@@ -1,0 +1,96 @@
+# name: test/sql/jit/test_jit_compressed_group_keys.test
+# description: Integer group keys the planner compresses into USMALLINT or UINTEGER (a cast it proved keeps every value), and unsigned key columns, reach the generated perfect hash lookup, with NULL keys, expression keys and two keys; a cast the user writes still raises its conversion error
+# group: [jit]
+
+require jit_sljit
+
+load {TEST_DIR}/jit_compressed_group_keys.db
+
+statement ok
+CREATE TABLE facts AS
+SELECT i AS id,
+       (i * 7919 % 1000)::INTEGER AS k,
+       ((i * 13) % 2000001 - 1000000)::BIGINT AS b,
+       CASE WHEN i % 17 = 0 THEN NULL ELSE (i * 31) % 40000 END AS nk,
+       (3000000000 + (i * 7) % 1000)::UINTEGER AS u,
+       2147483648 + (i * 7) % 131072 AS high
+FROM range(600003) t(i)
+
+statement ok
+CHECKPOINT
+
+restart
+
+statement ok
+SET jit_measure_native_legs=false
+
+statement ok
+SET jit_cbo_startup_base_cost=0
+
+statement ok
+SET jit_cbo_startup_margin_basis_points=0
+
+foreach threads 1 4
+
+statement ok
+SET threads={threads}
+
+foreach policy off auto
+
+statement ok
+SET jit_policy='{policy}'
+
+statement ok
+CREATE OR REPLACE TEMP TABLE r_{policy} AS
+SELECT 'usmallint' AS shape, (id % 50000)::BIGINT AS key, NULL::BIGINT AS key2, sum(b) AS total, count(*) AS c
+FROM facts GROUP BY id % 50000
+UNION ALL
+SELECT 'uinteger', id % 200000, NULL, sum(b), count(*) FROM facts GROUP BY id % 200000
+UNION ALL
+SELECT 'nullable', nk, NULL, sum(b), count(*) FROM facts GROUP BY nk
+UNION ALL
+SELECT 'uinteger_column', u, NULL, sum(b), count(*) FROM facts GROUP BY u
+UNION ALL
+SELECT 'uinteger_high', high, NULL, sum(b), count(*) FROM facts GROUP BY high
+UNION ALL
+SELECT 'filtered', id % 50000, NULL, sum(b) FILTER (WHERE k < 500), count(*) FILTER (WHERE k >= 750)
+FROM facts GROUP BY id % 50000
+UNION ALL
+SELECT 'two_keys', id % 3000, (id // 7) % 5, sum(b), count(*) FROM facts GROUP BY id % 3000, (id // 7) % 5
+UNION ALL
+SELECT 'where', id % 50000, NULL, sum(b), count(*) FROM facts WHERE k < 900 GROUP BY id % 50000
+
+endloop
+
+query I
+SELECT count(*) FROM ((SELECT * FROM r_off EXCEPT ALL SELECT * FROM r_auto)
+                      UNION ALL (SELECT * FROM r_auto EXCEPT ALL SELECT * FROM r_off))
+----
+0
+
+query II
+SELECT shape, count(*) FROM r_auto GROUP BY shape ORDER BY shape
+----
+filtered	50000
+nullable	40001
+two_keys	15000
+uinteger	200000
+uinteger_column	1000
+uinteger_high	131072
+usmallint	50000
+where	45000
+
+endloop
+
+# a cast the user writes is no proof: a value out of range raises the error under both policies
+foreach policy off auto
+
+statement ok
+SET jit_policy='{policy}'
+
+statement error
+SELECT (id % 70000)::USMALLINT AS key, count(*) FROM facts GROUP BY key
+----
+<REGEX>:Conversion Error:.*out of range.*
+
+endloop

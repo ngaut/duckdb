@@ -208,6 +208,12 @@ static bool SljitTryFastSelectFlatAllValidIntegerCompareReferences(const SljitNa
 	case SljitNativeIntegerKind::UINT8:
 		return SljitTryFastSelectFlatAllValidCompareReferences<uint8_t>(
 		    source_column, right_source_column, predicate.compare_op, input, filter_selection, selected_count);
+	case SljitNativeIntegerKind::UINT16:
+		return SljitTryFastSelectFlatAllValidCompareReferences<uint16_t>(
+		    source_column, right_source_column, predicate.compare_op, input, filter_selection, selected_count);
+	case SljitNativeIntegerKind::UINT32:
+		return SljitTryFastSelectFlatAllValidCompareReferences<uint32_t>(
+		    source_column, right_source_column, predicate.compare_op, input, filter_selection, selected_count);
 	case SljitNativeIntegerKind::INT32:
 	case SljitNativeIntegerKind::DATE:
 		return SljitTryFastSelectFlatAllValidCompareReferences<int32_t>(

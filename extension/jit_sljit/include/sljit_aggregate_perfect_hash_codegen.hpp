@@ -65,6 +65,8 @@ struct SljitPerfectHashGroupPlan {
 
 enum class SljitFusedAggregateGroupIndexMode : uint8_t { LOGICAL, SELECTED_NULLABLE, SELECTED_PRESENT };
 
+//! The kind a perfect-hash group key of this type loads as, when the generated lookup reads it
+bool TryGetSljitPerfectHashGroupIntegerKind(const LogicalType &type, SljitNativeIntegerKind &kind);
 bool TryBuildSljitPerfectHashGroupPlans(const vector<ExecutionRegionGroupInput> &groups,
                                         const vector<SljitNativeRegionExpressionPlan> &group_expressions,
                                         const ExecutionRegionAggregateContract &contract,

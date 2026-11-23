@@ -35,6 +35,8 @@ struct ExecutionExpressionIR {
 	ExecutionExpressionIntrinsicKind intrinsic = ExecutionExpressionIntrinsicKind::NONE;
 	bool arithmetic_overflow_check = true;
 	bool try_cast = false;
+	//! A cast the planner proved keeps every value of its input (compressed materialization's): it cannot fail
+	bool value_preserving_cast = false;
 	bool not_in = false;
 	bool not_between = false;
 	bool lower_inclusive = true;

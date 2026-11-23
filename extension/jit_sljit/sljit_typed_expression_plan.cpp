@@ -271,9 +271,19 @@ static bool SljitTypedExpressionTreeNarrowDecimal128CastLogic(const ExecutionExp
 	       SljitTypedExpressionTreeIsNarrowDecimal128Node(node) && SljitTypedExpressionTreeIsSupported(*node.left);
 }
 
+//! A cast between integral types the planner proved keeps every value: the source's register already holds the value
+//! the target type stores, so the cast is a passthrough that cannot fail
+static bool SljitTypedExpressionTreeValuePreservingIntegralCastLogic(const ExecutionExpressionIR &node) {
+	return node.kind == ExecutionExpressionIRKind::CAST && !node.try_cast &&
+	       node.exception_behavior == ExecutionExpressionExceptionKind::NONE && node.left &&
+	       SljitTypedExpressionTreeIsIntegralValueNode(node) &&
+	       SljitTypedExpressionTreeIsIntegralValueNode(*node.left) && SljitTypedExpressionTreeIsSupported(*node.left);
+}
+
 bool SljitTypedExpressionTreeValueCastSupported(const ExecutionExpressionIR &node) {
-	return SljitTypedExpressionTreeInt64CastLogic(node) || SljitTypedExpressionTreeDoubleCastLogic(node) ||
-	       SljitTypedExpressionTreeIsNarrowSourceWideningCast(node) ||
+	return SljitTypedExpressionTreeInt64CastLogic(node) ||
+	       SljitTypedExpressionTreeValuePreservingIntegralCastLogic(node) ||
+	       SljitTypedExpressionTreeDoubleCastLogic(node) || SljitTypedExpressionTreeIsNarrowSourceWideningCast(node) ||
 	       SljitTypedExpressionTreeDecimal64WideningCastLogic(node) ||
 	       SljitTypedExpressionTreeInt32ToDecimal64ScaleZeroCastLogic(node) ||
 	       SljitTypedExpressionTreeNarrowDecimal128CastLogic(node);
