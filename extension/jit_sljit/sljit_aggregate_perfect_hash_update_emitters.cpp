@@ -293,6 +293,76 @@ void EmitSljitPerfectHashPayloadUpdates(const SljitPerfectHashFusedUpdateEmitCon
 		                                 context.binary_shared_value_offset, shared_index_mode, context.overflows,
 		                                 options.payload_data_hoists, selected_shared_payload);
 	}
+	// Fast rows update the payloads that may skip them without a branch (SljitPerfectHashFusedUpdatePlan::guard_offset)
+	const bool guard_rows = context.guard_offset >= 0 && !options.null_rows && (options.fast_path || options.all_valid);
+	const auto guard_index_mode = options.fast_path
+	                                  ? SljitTypedExpressionTreeFastIndexMode::FLAT
+	                                  : (options.no_source_selection ? SljitTypedExpressionTreeFastIndexMode::LOGICAL
+	                                                                 : SljitTypedExpressionTreeFastIndexMode::SELECTED);
+	auto emit_guard_operand = [&](const ExecutionExpressionIR &tree, bool guarded_value) {
+		if (guard_index_mode == SljitTypedExpressionTreeFastIndexMode::SELECTED) {
+			sljit_emit_op1(compiler, SLJIT_MOV_P, SLJIT_S4, 0, SLJIT_MEM1(SLJIT_S0),
+			               offsetof(SljitNativeVectorInput, source_sel_array));
+		}
+		idx_t spill_index = 0;
+		if (guarded_value) {
+			EmitSljitTypedExpressionTreeFastGuardedValueReg(compiler, tree, spill_index, context.overflows,
+			                                                guard_index_mode, options.payload_data_hoists);
+		} else {
+			EmitSljitTypedExpressionTreeFastGuardReg(compiler, tree, spill_index, context.overflows, guard_index_mode,
+			                                         options.payload_data_hoists);
+		}
+	};
+	auto emit_load_state_pointer = [&]() {
+		if (!use_reduction) {
+			EmitSljitPerfectHashPayloadStatePointer(context);
+		} else if (context.reduction_state_reg == SLJIT_S4) {
+			sljit_emit_op1(compiler, SLJIT_MOV_P, SLJIT_S4, 0, SLJIT_MEM1(SLJIT_SP), context.state_pointer_offset);
+		}
+	};
+	// COUNT adds c; a sum ORs c into its set flag and adds v & -c
+	auto emit_guarded_update = [&](idx_t payload_idx) {
+		auto &descriptor = descriptors[payload_idx];
+		auto &tree = *payloads[payload_idx].expression_tree;
+		const auto state_offset = contract.grouped_state_offsets[descriptor.aggregate_index];
+		const bool is_sum = descriptor.primitive_kind == AggregatePrimitiveUpdateKind::SUM_INT64;
+		D_ASSERT(is_sum || descriptor.primitive_kind == AggregatePrimitiveUpdateKind::COUNT);
+		emit_guard_operand(tree, false);
+		if (is_sum) {
+			sljit_emit_op2(compiler, SLJIT_SUB, SLJIT_MEM1(SLJIT_SP), context.guard_offset, SLJIT_IMM, 0, SLJIT_R2, 0);
+			emit_load_state_pointer();
+			if (use_reduction) {
+				auto &lane = dense_reduction_plan.lanes[payload_idx];
+				D_ASSERT(lane.saw_offset >= 0);
+				sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_R3, 0, SLJIT_MEM1(context.reduction_state_reg),
+				               lane.saw_offset);
+				sljit_emit_op2(compiler, SLJIT_OR, SLJIT_R3, 0, SLJIT_R3, 0, SLJIT_R2, 0);
+				sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_MEM1(context.reduction_state_reg), lane.saw_offset, SLJIT_R3,
+				               0);
+			} else {
+				D_ASSERT(!options.states_marked_on_first_touch);
+				const auto is_set_offset = NumericCast<sljit_sw>(state_offset + descriptor.state_is_set_offset);
+				sljit_emit_op1(compiler, SLJIT_MOV_U8, SLJIT_R3, 0, SLJIT_MEM1(context.state_pointer_reg),
+				               is_set_offset);
+				sljit_emit_op2(compiler, SLJIT_OR, SLJIT_R3, 0, SLJIT_R3, 0, SLJIT_R2, 0);
+				sljit_emit_op1(compiler, SLJIT_MOV_U8, SLJIT_MEM1(context.state_pointer_reg), is_set_offset, SLJIT_R3,
+				               0);
+			}
+			emit_guard_operand(tree, true);
+			sljit_emit_op2(compiler, SLJIT_AND, SLJIT_R2, 0, SLJIT_R2, 0, SLJIT_MEM1(SLJIT_SP), context.guard_offset);
+		}
+		emit_load_state_pointer();
+		if (use_reduction) {
+			auto &lane = dense_reduction_plan.lanes[payload_idx];
+			const auto offset = is_sum ? lane.lower_offset : lane.count_offset;
+			sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_R3, 0, SLJIT_MEM1(context.reduction_state_reg), offset);
+			sljit_emit_op2(compiler, SLJIT_ADD, SLJIT_R3, 0, SLJIT_R3, 0, SLJIT_R2, 0);
+			sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_MEM1(context.reduction_state_reg), offset, SLJIT_R3, 0);
+		} else {
+			EmitSljitGroupedAggregateAccumulateInt64ImmediateNoStateSet(
+			    compiler, context.state_pointer_reg, state_offset, descriptor.state_value_offset, SLJIT_R2);
+		}
+	};
 	// Rows with NULLs: consecutive payloads that read the same sources skip their updates on one test of them
 	vector<idx_t> null_checked_sources;
 	vector<sljit_jump *> source_null_jumps;
@@ -323,6 +393,11 @@ void EmitSljitPerfectHashPayloadUpdates(const SljitPerfectHashFusedUpdateEmitCon
 				}
 				null_checked_sources = std::move(sources);
 			}
+		}
+		if (guard_rows && descriptor.primitive_kind != AggregatePrimitiveUpdateKind::COUNT_STAR &&
+		    !codegen_plan.payloads[payload_idx].fast_path.fast_path_supported) {
+			emit_guarded_update(payload_idx);
+			continue;
 		}
 		// the payload's value in R2 (COUNT drops it), or a jump to skip this aggregate's update on a NULL row
 		vector<sljit_jump *> payload_invalid;

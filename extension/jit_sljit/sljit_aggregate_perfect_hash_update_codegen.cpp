@@ -88,6 +88,7 @@ static unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativePerfectHashGroupedF
 	    state_pointer_reg,
 	    reduction_state_reg,
 	    update_plan.states_markable_on_first_touch,
+	    update_plan.guard_offset,
 	};
 	EmitSljitPerfectHashFusedUpdateLoops(emit_context, update_plan);
 	EmitSljitDensePerfectHashAggregateReductionCommit(compiler, dense_reduction_plan, codegen_plan.payload_descriptors,

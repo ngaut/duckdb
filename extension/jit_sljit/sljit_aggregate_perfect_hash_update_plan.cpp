@@ -9,10 +9,37 @@
 #include "sljit_aggregate_perfect_hash_update_codegen.hpp"
 
 #include "sljit_aggregate_fused_codegen.hpp"
+#include "sljit_typed_expression_plan.hpp"
 
 #include "duckdb/common/types/cast_helpers.hpp"
 
 namespace duckdb {
+
+//! Fast rows take no branch on the payloads that may skip them only when every such payload is a COUNT or a 64-bit sum
+//! of a guarded value: a payload that keeps its branch predicts its condition from the others' branch history, and a
+//! HUGEINT or DOUBLE sum costs more on every row than the misprediction it saves
+static bool SljitPerfectHashFastRowsGuardPayloads(const vector<SljitNativeRegionExpressionPlan> &payloads,
+                                                  const SljitFusedAggregateCodegenPlan &codegen_plan) {
+	bool any_payload_skips = false;
+	for (idx_t payload_idx = 0; payload_idx < payloads.size(); payload_idx++) {
+		auto kind = codegen_plan.payload_descriptors[payload_idx].primitive_kind;
+		if (kind == AggregatePrimitiveUpdateKind::COUNT_STAR ||
+		    codegen_plan.payloads[payload_idx].fast_path.fast_path_supported) {
+			continue;
+		}
+		any_payload_skips = true;
+		auto &tree = payloads[payload_idx].expression_tree;
+		const bool shared_binary_lane =
+		    codegen_plan.shared_binary.Enabled() && codegen_plan.shared_binary.lanes[payload_idx].matched;
+		if ((kind != AggregatePrimitiveUpdateKind::COUNT && kind != AggregatePrimitiveUpdateKind::SUM_INT64) ||
+		    shared_binary_lane ||
+		    payloads[payload_idx].kind != SljitNativeRegionExpressionKind::TYPED_EXPRESSION_TREE || !tree ||
+		    !SljitTypedExpressionTreeIsFastGuardedValue(*tree)) {
+			return false;
+		}
+	}
+	return any_payload_skips;
+}
 
 static bool
 SljitPerfectHashGroupExpressionsUseTypedTree(const vector<SljitNativeRegionExpressionPlan> &group_expressions) {
@@ -106,6 +133,10 @@ bool TryBuildSljitPerfectHashFusedUpdatePlan(
 	result.binary_shared_value_offset = result.group_index_offset + NumericCast<sljit_sw>(sizeof(sljit_sw));
 	result.local_size = result.binary_shared_value_offset;
 	if (result.codegen_plan.shared_binary.Enabled()) {
+		result.local_size += NumericCast<sljit_sw>(sizeof(sljit_sw));
+	}
+	if (SljitPerfectHashFastRowsGuardPayloads(payloads, result.codegen_plan)) {
+		result.guard_offset = result.local_size;
 		result.local_size += NumericCast<sljit_sw>(sizeof(sljit_sw));
 	}
 	if (predicate && result.codegen_plan.fast_path_supported) {

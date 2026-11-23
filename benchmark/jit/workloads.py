@@ -542,7 +542,7 @@ ENCODINGS_SETUP_SQL = (
     "['AIR','MAIL','SHIP','RAIL','TRUCK','FOB','REG AIR'][(i % 7) + 1] AS mode, "
     "'cust#' || (i % 50000)::VARCHAR AS name, "
     "(i % 1000)::DOUBLE / 3 AS dbl, (i % 127)::TINYINT AS ti, (i % 30000)::SMALLINT AS si, "
-    "hash(i) % 65536 AS rk, hash(i * 3) % 64 AS ra "
+    "hash(i) % 65536 AS rk, hash(i * 3) % 64 AS ra, (hash(i * 7) % 1000)::INTEGER AS rv "
     "FROM range(8000000) tbl(i); "
     "CREATE OR REPLACE TABLE __jit_encodings_dim AS "
     "SELECT i AS k, 'dim' || i::VARCHAR AS label, CASE WHEN i % 5 = 0 THEN NULL ELSE i % 37 END AS nk, "
@@ -683,6 +683,16 @@ ENCODINGS_QUERIES = {
         "SELECT sum(id) FILTER (WHERE k < 300), count(*) FILTER (WHERE k > 600), count(*) FROM __jit_encodings_facts",
         {1: True, 4: True},
     ),
+    # rv is random: a branch on its filter mispredicts every other row
+    "aggregate_filter_random_groups": (
+        "SELECT g, sum(id) FILTER (WHERE rv < 500), count(*) FILTER (WHERE rv >= 750) FROM __jit_encodings_facts "
+        "GROUP BY g",
+        {1: True, 4: True},
+    ),
+    "aggregate_filter_random_sums": (
+        "SELECT sum(id) FILTER (WHERE rv < 500), count(*) FILTER (WHERE rv >= 750), count(*) FROM __jit_encodings_facts",
+        {1: True, 4: True},
+    ),
     "narrow_between": (
         "SELECT sum(id) FROM __jit_encodings_facts WHERE si BETWEEN 100 AND 2000",
         {1: True, 4: True},
@@ -738,7 +748,9 @@ ENCODINGS_THRESHOLDS = {
     "case_null_counts": ({1: 1.58, 4: 1.56}, {1: 53_500_000, 4: 55_300_000}),
     "case_null_count_sums": ({1: 2.02, 4: 1.95}, {1: 49_700_000, 4: 51_800_000}),
     "aggregate_filter_groups": ({1: 1.22, 4: 1.21}, {1: 81_200_000, 4: 83_900_000}),
-    "aggregate_filter_sums": ({1: 0.87, 4: 0.88}, {1: 53_200_000, 4: 56_400_000}),
+    "aggregate_filter_sums": ({1: 1.05, 4: 1.04}, {1: 44_700_000, 4: 47_100_000}),
+    "aggregate_filter_random_groups": ({1: 1.23, 4: 1.17}, {1: 81_900_000, 4: 88_800_000}),
+    "aggregate_filter_random_sums": ({1: 0.90, 4: 0.90}, {1: 44_700_000, 4: 46_900_000}),
     "narrow_between": ({1: 1.28, 4: 1.22}, {1: 15_400_000, 4: 17_500_000}),
     "nullable_key_join": ({1: 0.89, 4: 0.89}, {1: 570_500_000, 4: 572_400_000}),
     "random_key_groups": ({1: 0.89, 4: 0.89}, {1: 234_900_000, 4: 417_100_000}),

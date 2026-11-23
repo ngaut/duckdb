@@ -37,6 +37,8 @@ struct SljitPerfectHashFusedUpdateEmitContext {
 	sljit_s32 state_pointer_reg;
 	sljit_s32 reduction_state_reg;
 	bool states_markable_on_first_touch;
+	//! Stack slot of a guarded sum's mask, or -1 when the fast rows branch on the payloads that may skip them
+	sljit_sw guard_offset;
 };
 
 struct SljitPerfectHashGroupLookupOptions {
@@ -86,6 +88,10 @@ struct SljitPerfectHashFusedUpdatePlan {
 	sljit_sw group_index_offset = -1;
 	sljit_sw binary_shared_value_offset = -1;
 	sljit_sw predicate_simd_mask_offset = -1;
+	//! Every payload that may skip a fast row is a COUNT or a 64-bit sum of CASE WHEN c THEN v END whose v cannot raise
+	//! an error: the fast rows update them without a branch (a COUNT adds c, a sum adds v masked by -c, kept in this
+	//! stack slot, and ORs c into its set flag). -1 otherwise
+	sljit_sw guard_offset = -1;
 	//! Flat batches whose payload sources hold NULLs run a fast loop: every payload and the predicate are null-strict
 	//! (a payload skips its update on a NULL source, the predicate decides NULL as FALSE) and every group is a column
 	bool null_checked_loop = false;
