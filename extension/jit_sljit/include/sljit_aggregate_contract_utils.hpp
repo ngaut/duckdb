@@ -26,14 +26,10 @@ static bool SljitAggregateSinkHasDistinctState(const ExecutionRegionAggregateSin
 	return false;
 }
 
-//! An aggregate the region updates in DuckDB's own states, without distinct or sorted inputs: an ungrouped aggregate,
-//! or a perfect-hash one whose table the region writes. Chunks DuckDB's operators sink and chunks the region updates
-//! may alternate; the region sinks every row it holds before DuckDB's operators take a chunk, so rows reach the
-//! states in source order, as an order-dependent aggregate needs
-static bool SljitAggregateSinkAdmitsNativeChunks(const ExecutionRegionAggregateSinkInfo &sink_info) {
-	if ((sink_info.Kind() != ExecutionRegionSinkKind::UNGROUPED_AGGREGATE_UPDATE &&
-	     sink_info.Kind() != ExecutionRegionSinkKind::PERFECT_HASH_AGGREGATE_UPDATE) ||
-	    SljitAggregateSinkHasDistinctState(sink_info)) {
+//! An aggregate without distinct or sorted inputs: chunks DuckDB's operators sink and chunks the region runs may
+//! alternate into it; the region sinks every row it holds before DuckDB's operators take a chunk
+static bool SljitAggregateSinkTakesUnsortedChunks(const ExecutionRegionAggregateSinkInfo &sink_info) {
+	if (SljitAggregateSinkHasDistinctState(sink_info)) {
 		return false;
 	}
 	for (auto &aggregate : sink_info.aggregates) {
@@ -42,6 +38,14 @@ static bool SljitAggregateSinkAdmitsNativeChunks(const ExecutionRegionAggregateS
 		}
 	}
 	return true;
+}
+
+//! An ungrouped aggregate, or a perfect-hash one whose table the region writes, without distinct or sorted inputs, in
+//! DuckDB's own states: the region's chunks and DuckDB's may alternate into it
+static bool SljitAggregateSinkAdmitsNativeChunks(const ExecutionRegionAggregateSinkInfo &sink_info) {
+	return (sink_info.Kind() == ExecutionRegionSinkKind::UNGROUPED_AGGREGATE_UPDATE ||
+	        sink_info.Kind() == ExecutionRegionSinkKind::PERFECT_HASH_AGGREGATE_UPDATE) &&
+	       SljitAggregateSinkTakesUnsortedChunks(sink_info);
 }
 
 } // namespace duckdb

@@ -326,23 +326,22 @@ static bool BuildSljitNativeContinuation(const SljitNativeRegionPlan &region, Sl
 		SljitUpdateExecutableCurrentNotNull(op, current_not_null);
 		SljitUpdateExecutableCurrentRanges(op, current_min_values, current_max_values);
 	}
-	continuation->measured = delegates_sink;
-	if (executable.ops.back().Kind() == SljitNativeRegionOpKind::AGGREGATE_UPDATE) {
-		auto &sink_info = executable.ops.back().AggregateUpdate().plan.sink_info;
-		continuation->group_key_source_column =
-		    SljitTraceGroupKeySourceColumn(executable.ops, continuation->source_ops);
-		continuation->measured = continuation->measured || SljitAggregateSinkAdmitsNativeChunks(sink_info);
-		auto &aggregates = sink_info.aggregates;
-		continuation->counts_rows_only =
-		    aggregates.size() == 1 && (aggregates[0].primitive_update_kind == AggregatePrimitiveUpdateKind::COUNT ||
-		                               aggregates[0].primitive_update_kind == AggregatePrimitiveUpdateKind::COUNT_STAR);
-	}
+	auto &sink_info = executable.ops.back().AggregateUpdate().plan.sink_info;
+	continuation->group_key_source_column = SljitTraceGroupKeySourceColumn(executable.ops, continuation->source_ops);
+	continuation->measured = SljitAggregateSinkAdmitsNativeChunks(sink_info) ||
+	                         (delegates_sink && SljitAggregateSinkTakesUnsortedChunks(sink_info));
+	auto &aggregates = sink_info.aggregates;
+	continuation->counts_rows_only =
+	    aggregates.size() == 1 && (aggregates[0].primitive_update_kind == AggregatePrimitiveUpdateKind::COUNT ||
+	                               aggregates[0].primitive_update_kind == AggregatePrimitiveUpdateKind::COUNT_STAR);
 	executable.native_continuation = std::move(continuation);
 	return true;
 }
 
 //! Whether every chunk the recipe runs reaches the sink through DuckDB's operators: the sink then owns every aggregate
-//! state on both legs, so the region's chunks and DuckDB's may alternate into it and the faster is measured
+//! state on both legs, so the region's chunks and DuckDB's may alternate into an aggregate, and the faster is measured.
+//! Rows into a table or a query result never alternate: DuckDB's caching operators (a filter) hold some of their rows
+//! past the region's
 static bool SljitRecipeDelegatesSink(const SljitFullPipelineRecipe &recipe) {
 	for (auto sequence : {&recipe.primitive_sequence, &recipe.filters_hold_sequence}) {
 		if (sequence->Count() != 0 &&
@@ -452,10 +451,8 @@ bool BuildSljitExecutableRegion(const SljitNativeRegionPlan &region, SljitExecut
 			return false;
 		}
 	}
-	const bool delegates_sink = SljitRecipeDelegatesSink(recipe_plan.Recipe());
-	if (delegates_sink ||
-	    (SljitRegionMayContinueNatively(region) && !SljitAggregateUpdateIndexesBoundedDomain(executable.ops.back()))) {
-		if (!BuildSljitNativeContinuation(region, executable, delegates_sink, error)) {
+	if (SljitRegionMayContinueNatively(region) && !SljitAggregateUpdateIndexesBoundedDomain(executable.ops.back())) {
+		if (!BuildSljitNativeContinuation(region, executable, SljitRecipeDelegatesSink(recipe_plan.Recipe()), error)) {
 			return false;
 		}
 	}

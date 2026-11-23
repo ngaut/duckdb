@@ -1,5 +1,5 @@
 # name: test/sql/jit/test_jit_projection_loops.test
-# description: A region whose chunks reach DuckDB's sink through its operators measures its chunks against DuckDB's and keeps the faster, in insertion order. Generated projections over flat valid rows run packed boolean masks and loops without per-row index or NULL resolution; vectors with NULLs, selections or dictionaries resolve them per row; a projection result without NULLs carries no validity mask; a hash aggregate whose update finds no group runs hands the rest of its pipeline to DuckDB's operators. Every shape matches native results
+# description: A region whose chunks reach an aggregate through DuckDB's operators measures its chunks against DuckDB's and keeps the faster; rows into a table keep their insertion order. Generated projections over flat valid rows run packed boolean masks and loops without per-row index or NULL resolution; vectors with NULLs, selections or dictionaries resolve them per row; a projection result without NULLs carries no validity mask; a hash aggregate whose update finds no group runs hands the rest of its pipeline to DuckDB's operators. Every shape matches native results
 # group: [jit]
 
 require jit_sljit
@@ -109,8 +109,8 @@ SELECT (SELECT count(*) FROM masks_auto), (SELECT count(*) FROM selected_auto), 
 
 endloop
 
-# a region whose chunks reach the sink through DuckDB's operators measures its chunks against DuckDB's and alternates
-# them into the sink: rows keep their insertion order and aggregates their results
+# a region whose chunks reach an aggregate through DuckDB's operators measures its chunks against DuckDB's and
+# alternates them into it; rows into a table keep their insertion order
 statement ok
 SET jit_measure_native_legs=true
 
