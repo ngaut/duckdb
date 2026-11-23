@@ -304,38 +304,6 @@ public:
 	}
 };
 
-class UngroupedAggregateExecutionRegionSinkState : public ExecutionAggregateUpdateState {
-public:
-	UngroupedAggregateExecutionRegionSinkState(const PhysicalUngroupedAggregate &op_p,
-	                                           UngroupedAggregateLocalSinkState &local_state_p)
-	    : op(op_p), local_state(local_state_p) {
-	}
-
-	SinkResultType Sink(DataChunk &input) override {
-		for (idx_t aggregate_idx = 0; aggregate_idx < op.aggregates.size(); aggregate_idx++) {
-			auto &aggregate = op.aggregates[aggregate_idx]->Cast<BoundAggregateExpression>();
-			if (aggregate.IsDistinct() || aggregate.GetFilter() || aggregate.GetOrderBys()) {
-				throw InternalException("execution region ungrouped aggregate update received unsupported aggregate");
-			}
-			auto &children = aggregate.GetChildren();
-			if (children.empty()) {
-				local_state.state.Sink(input, 0, aggregate_idx, input.size());
-				continue;
-			}
-			if (children[0]->GetExpressionClass() != ExpressionClass::BOUND_REF) {
-				throw InternalException("execution region ungrouped aggregate payload is not a bound reference");
-			}
-			auto payload_index = children[0]->Cast<BoundReferenceExpression>().Index();
-			local_state.state.Sink(input, payload_index, aggregate_idx, input.size());
-		}
-		return SinkResultType::NEED_MORE_INPUT;
-	}
-
-private:
-	const PhysicalUngroupedAggregate &op;
-	UngroupedAggregateLocalSinkState &local_state;
-};
-
 static string ValidateUngroupedAggregateExecutionSink(const ExecutionRegionAggregateSinkInfo &sink_info) {
 	if (sink_info.Kind() != ExecutionRegionSinkKind::UNGROUPED_AGGREGATE_UPDATE) {
 		return "ungrouped-aggregate-runtime-kind-mismatch";
@@ -364,69 +332,24 @@ BuildUngroupedAggregatePrimitiveUpdateBinding(const PhysicalUngroupedAggregate &
 			return result;
 		}
 		auto &aggregate = op.aggregates[aggregate_info.aggregate_index]->Cast<BoundAggregateExpression>();
-		auto &function = aggregate.Function();
-		if (!function.HasPrimitiveUpdateABI()) {
-			result.blocker = "ungrouped-aggregate-primitive-update-abi-missing";
-			return result;
-		}
-		auto &abi = function.GetPrimitiveUpdateABI();
-		if (!AggregatePrimitiveUpdateKindIsSupported(abi.kind)) {
-			result.blocker = "ungrouped-aggregate-primitive-update-kind-unsupported";
-			return result;
-		}
-		const auto requires_payload = AggregatePrimitiveUpdateRequiresPayload(abi.kind);
-		if (requires_payload) {
-			if (aggregate_info.child_count != 1 || aggregate_info.child_types.empty()) {
-				result.blocker = "ungrouped-aggregate-primitive-update-requires-one-payload";
-				return result;
-			}
-			if (AggregatePrimitiveUpdateRequiresTypedPayload(abi.kind) &&
-			    aggregate_info.child_types[0].InternalType() != abi.input_type) {
-				result.blocker = "ungrouped-aggregate-primitive-update-payload-type-mismatch";
-				return result;
-			}
-		} else if (aggregate_info.child_count != 0) {
-			result.blocker = "ungrouped-aggregate-primitive-update-requires-no-payload";
-			return result;
-		}
-		AggregateStateInput state_input(function, aggregate.BindInfo().get());
-		if (function.HasStateSizeCallback() && function.GetStateSizeCallback()(state_input) != abi.state_size) {
-			result.blocker = "ungrouped-aggregate-primitive-update-state-size-mismatch";
-			return result;
-		}
-		auto value_size = AggregatePrimitiveUpdateStateValueSize(abi.kind);
-		if (value_size == 0 || abi.state_value_offset + value_size > abi.state_size ||
-		    (AggregatePrimitiveUpdateHasStateIsSet(abi.kind) &&
-		     abi.state_is_set_offset + sizeof(bool) > abi.state_size)) {
-			result.blocker = "ungrouped-aggregate-primitive-update-state-layout-invalid";
-			return result;
-		}
-
-		auto state_ptr = local_state.state.state.aggregate_data[aggregate_info.aggregate_index].get();
 		ExecutionPrimitiveAggregateUpdateLane lane;
-		lane.ready = true;
-		lane.kind = abi.kind;
-		lane.aggregate_index = aggregate_info.aggregate_index;
-		lane.payload_index = requires_payload ? aggregate_info.payload_index : DConstants::INVALID_INDEX;
-		lane.payload_type = requires_payload ? aggregate_info.child_types[0].InternalType() : PhysicalType::INVALID;
-		lane.state_size = abi.state_size;
-		lane.state_value_offset = abi.state_value_offset;
-		lane.state_is_set_offset = abi.state_is_set_offset;
-		if (AggregatePrimitiveUpdateUsesInt64State(abi.kind)) {
-			lane.sum_int64_value = reinterpret_cast<int64_t *>(state_ptr + abi.state_value_offset);
-		} else if (AggregatePrimitiveUpdateUsesHugeintState(abi.kind)) {
-			lane.sum_hugeint_value = reinterpret_cast<hugeint_t *>(state_ptr + abi.state_value_offset);
-		} else if (AggregatePrimitiveUpdateUsesDoubleState(abi.kind)) {
-			lane.sum_double_value = reinterpret_cast<double *>(state_ptr + abi.state_value_offset);
-		} else {
-			result.blocker = "ungrouped-aggregate-primitive-update-kind-unsupported";
+		if (!ExecutionBindPrimitiveAggregateUpdateLane(aggregate, aggregate_info, lane, result.blocker)) {
+			result.blocker = "ungrouped-aggregate-" + result.blocker;
 			return result;
 		}
-		if (AggregatePrimitiveUpdateHasStateIsSet(abi.kind)) {
-			lane.state_is_set = reinterpret_cast<bool *>(state_ptr + abi.state_is_set_offset);
+		auto state_ptr = local_state.state.state.aggregate_data[aggregate_info.aggregate_index].get();
+		if (AggregatePrimitiveUpdateUsesInt64State(lane.kind)) {
+			lane.sum_int64_value = reinterpret_cast<int64_t *>(state_ptr + lane.state_value_offset);
+		} else if (AggregatePrimitiveUpdateUsesHugeintState(lane.kind)) {
+			lane.sum_hugeint_value = reinterpret_cast<hugeint_t *>(state_ptr + lane.state_value_offset);
+		} else {
+			D_ASSERT(AggregatePrimitiveUpdateUsesDoubleState(lane.kind));
+			lane.sum_double_value = reinterpret_cast<double *>(state_ptr + lane.state_value_offset);
+		}
+		if (AggregatePrimitiveUpdateHasStateIsSet(lane.kind)) {
+			lane.state_is_set = reinterpret_cast<bool *>(state_ptr + lane.state_is_set_offset);
 		}
 		lane.row_count = &local_state.state.state.counts[aggregate_info.aggregate_index];
-		lane.blocker.clear();
 		result.lanes.push_back(lane);
 	}
 	result.ready = !result.lanes.empty() && result.lanes.size() == sink_info.aggregates.size();
@@ -521,7 +444,6 @@ bool PhysicalUngroupedAggregate::BindExecutionSink(ExecutionContext &context, Da
                                                    OperatorSinkInput &sink_input,
                                                    const ExecutionRegionAggregateSinkInfo &sink_info,
                                                    ExecutionSinkBinding &binding) const {
-	(void)context;
 	(void)input;
 	binding = ExecutionSinkBinding();
 	binding.kind = sink_info.Kind();
@@ -535,7 +457,7 @@ bool PhysicalUngroupedAggregate::BindExecutionSink(ExecutionContext &context, Da
 	auto &local_state = sink_input.local_state.Cast<UngroupedAggregateLocalSinkState>();
 	binding.ready = true;
 	binding.aggregate_update.ready = true;
-	binding.aggregate_update.state = make_shared_ptr<UngroupedAggregateExecutionRegionSinkState>(*this, local_state);
+	binding.aggregate_update.state = ExecutionOperatorSinkAggregateUpdate(context, *this, sink_input);
 	binding.aggregate_update.primitive = BuildUngroupedAggregatePrimitiveUpdateBinding(*this, local_state, sink_info);
 	binding.aggregate_update.blocker.clear();
 	binding.blocker.clear();

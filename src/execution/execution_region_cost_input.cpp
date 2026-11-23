@@ -738,6 +738,7 @@ static bool TryAccumulateExecutionRegionPhysicalOperatorCost(const PhysicalOpera
 		}
 		AddExecutionRegionGeneratedBodyStage(input);
 		traits.generated_aggregate_update_count++;
+		traits.filter_count += ExecutionRegionAggregateFilterCount(sink);
 		return true;
 	}
 	case PhysicalOperatorType::HASH_GROUP_BY: {
@@ -774,6 +775,7 @@ static bool TryAccumulateExecutionRegionPhysicalOperatorCost(const PhysicalOpera
 			input.native_grouped_state_address_lookup_count++;
 		}
 		traits.generated_aggregate_update_count++;
+		traits.filter_count += ExecutionRegionAggregateFilterCount(sink);
 		return true;
 	}
 	case PhysicalOperatorType::PERFECT_HASH_GROUP_BY: {
@@ -809,6 +811,7 @@ static bool TryAccumulateExecutionRegionPhysicalOperatorCost(const PhysicalOpera
 			input.native_grouped_state_address_lookup_count++;
 		}
 		traits.generated_aggregate_update_count++;
+		traits.filter_count += ExecutionRegionAggregateFilterCount(sink);
 		return true;
 	}
 	case PhysicalOperatorType::HASH_JOIN:

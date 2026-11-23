@@ -1,0 +1,238 @@
+# name: test/sql/jit/test_jit_aggregate_filter.test
+# description: An aggregate FILTER (WHERE ...) updates its state from CASE WHEN filter THEN child END in the generated aggregates: rows whose filter is FALSE or NULL leave sums and counts alone, count(*) counts the rows the filter keeps, groups the filter empties keep NULL sums and zero counts, and aggregates without a primitive update (avg, min, max, DISTINCT) keep native results
+# group: [jit]
+
+require jit_sljit
+
+load {TEST_DIR}/jit_aggregate_filter.db
+
+statement ok
+CREATE TABLE facts AS
+SELECT i AS id,
+       (i * 7919 % 1000)::INTEGER AS k,
+       (i % 97)::INTEGER AS g,
+       (i % 7)::INTEGER AS s,
+       ((i * 13) % 2000001 - 1000000)::BIGINT AS b,
+       (((i * 31) % 200001 - 100000) / 100)::DECIMAL(15, 2) AS price,
+       CASE WHEN i % 11 = 0 THEN NULL ELSE (i % 5003 - 2500)::INTEGER END AS n,
+       (i * 0.11)::DOUBLE / 13 AS e,
+       i % 3 = 0 AS flag,
+       CASE WHEN i % 13 = 0 THEN NULL ELSE i % 5 = 0 END AS nflag
+FROM range(400000) t(i)
+
+statement ok
+CHECKPOINT
+
+restart
+
+statement ok
+SET jit_measure_native_legs=false
+
+statement ok
+SET jit_cbo_startup_base_cost=0
+
+statement ok
+SET jit_cbo_startup_margin_basis_points=0
+
+# each query alone: a pipeline of its own scan
+foreach threads 1 4
+
+statement ok
+SET threads={threads}
+
+foreach policy off auto
+
+statement ok
+SET jit_policy='{policy}'
+
+statement ok
+CREATE OR REPLACE TEMP TABLE r_{policy} (q VARCHAR, a VARCHAR)
+
+statement ok
+INSERT INTO r_{policy} SELECT 'sum', sum(b) FILTER (WHERE k < 300)::VARCHAR FROM facts
+
+statement ok
+INSERT INTO r_{policy} SELECT 'count_star', (count(*) FILTER (WHERE k < 300))::VARCHAR FROM facts
+
+statement ok
+INSERT INTO r_{policy} SELECT 'count_null_child', (count(n) FILTER (WHERE k < 700))::VARCHAR FROM facts
+
+statement ok
+INSERT INTO r_{policy} SELECT 'sum_null_child', sum(n) FILTER (WHERE k < 700)::VARCHAR FROM facts
+
+statement ok
+INSERT INTO r_{policy} SELECT 'sum_null_filter', sum(b) FILTER (WHERE n > 0)::VARCHAR FROM facts
+
+statement ok
+INSERT INTO r_{policy} SELECT 'count_star_null_filter', (count(*) FILTER (WHERE n > 0))::VARCHAR FROM facts
+
+statement ok
+INSERT INTO r_{policy} SELECT 'sum_no_row_matches', coalesce(sum(b) FILTER (WHERE id % 2 = 0 AND id % 4 = 1)::VARCHAR, 'null') FROM facts
+
+statement ok
+INSERT INTO r_{policy} SELECT 'count_star_no_row_matches', (count(*) FILTER (WHERE id % 2 = 0 AND id % 4 = 1))::VARCHAR FROM facts
+
+statement ok
+INSERT INTO r_{policy} SELECT 'mixed', (sum(price) FILTER (WHERE k < 300))::VARCHAR || '/' || (count(*) FILTER (WHERE k > 600))::VARCHAR || '/' || count(*)::VARCHAR || '/' || sum(b)::VARCHAR FROM facts
+
+statement ok
+INSERT INTO r_{policy} SELECT 'shared_filter', (sum(b) FILTER (WHERE k < 300))::VARCHAR || '/' || (count(*) FILTER (WHERE k < 300))::VARCHAR FROM facts
+
+statement ok
+INSERT INTO r_{policy} SELECT 'decimal', sum(price) FILTER (WHERE g % 3 = 1)::VARCHAR FROM facts
+
+statement ok
+INSERT INTO r_{policy} SELECT 'integer', sum(k) FILTER (WHERE s <> 2)::VARCHAR FROM facts
+
+statement ok
+INSERT INTO r_{policy} SELECT 'bigint_id', sum(id) FILTER (WHERE k < 300)::VARCHAR FROM facts
+
+statement ok
+INSERT INTO r_{policy} SELECT 'boolean_column', (sum(b) FILTER (WHERE flag))::VARCHAR || '/' || (count(*) FILTER (WHERE flag))::VARCHAR FROM facts
+
+statement ok
+INSERT INTO r_{policy} SELECT 'nullable_boolean_column', (sum(b) FILTER (WHERE nflag))::VARCHAR || '/' || (count(*) FILTER (WHERE NOT nflag))::VARCHAR FROM facts
+
+statement ok
+INSERT INTO r_{policy} SELECT 'where_clause', (sum(b) FILTER (WHERE k < 300))::VARCHAR || '/' || (count(*) FILTER (WHERE k > 600))::VARCHAR FROM facts WHERE g < 50
+
+statement ok
+INSERT INTO r_{policy} SELECT 'distinct', (count(DISTINCT g) FILTER (WHERE k < 300))::VARCHAR FROM facts
+
+statement ok
+INSERT INTO r_{policy} SELECT 'avg', (avg(b) FILTER (WHERE k < 300))::VARCHAR FROM facts
+
+statement ok
+INSERT INTO r_{policy} SELECT 'min_max', (min(b) FILTER (WHERE k < 300))::VARCHAR || '/' || (max(b) FILTER (WHERE k < 300))::VARCHAR FROM facts
+
+statement ok
+INSERT INTO r_{policy} SELECT 'primitive_beside_avg', (sum(b) FILTER (WHERE k < 300))::VARCHAR || '/' || (avg(b) FILTER (WHERE k > 600))::VARCHAR FROM facts
+
+statement ok
+INSERT INTO r_{policy} SELECT 'grouped_sum_' || concat_ws('_', g), sum(b) FILTER (WHERE k < 300)::VARCHAR FROM facts GROUP BY g
+
+statement ok
+INSERT INTO r_{policy} SELECT 'grouped_count_star_' || concat_ws('_', g), (count(*) FILTER (WHERE k < 300))::VARCHAR || '/' || count(*)::VARCHAR FROM facts GROUP BY g
+
+statement ok
+INSERT INTO r_{policy} SELECT 'grouped_empty_sum_' || concat_ws('_', g), coalesce(sum(b) FILTER (WHERE g < 10)::VARCHAR, 'null') FROM facts GROUP BY g
+
+statement ok
+INSERT INTO r_{policy} SELECT 'grouped_empty_count_star_' || concat_ws('_', g), (count(*) FILTER (WHERE g < 10))::VARCHAR FROM facts GROUP BY g
+
+statement ok
+INSERT INTO r_{policy} SELECT 'grouped_null_child_' || concat_ws('_', g), (sum(n) FILTER (WHERE k < 700))::VARCHAR || '/' || (count(n) FILTER (WHERE k < 700))::VARCHAR FROM facts GROUP BY g
+
+statement ok
+INSERT INTO r_{policy} SELECT 'grouped_null_filter_' || concat_ws('_', g), (sum(b) FILTER (WHERE n > 0))::VARCHAR || '/' || (count(*) FILTER (WHERE n > 0))::VARCHAR FROM facts GROUP BY g
+
+statement ok
+INSERT INTO r_{policy} SELECT 'grouped_small_' || concat_ws('_', s), (sum(price) FILTER (WHERE k < 300))::VARCHAR || '/' || (count(*) FILTER (WHERE k > 600))::VARCHAR FROM facts GROUP BY s
+
+statement ok
+INSERT INTO r_{policy} SELECT 'grouped_two_keys_' || concat_ws('_', g, s), (sum(b) FILTER (WHERE k < 300))::VARCHAR || '/' || (count(*) FILTER (WHERE k < 300))::VARCHAR FROM facts GROUP BY g, s
+
+statement ok
+INSERT INTO r_{policy} SELECT 'grouped_boolean_column_' || concat_ws('_', g), (sum(b) FILTER (WHERE flag))::VARCHAR || '/' || (count(*) FILTER (WHERE nflag))::VARCHAR FROM facts GROUP BY g
+
+statement ok
+INSERT INTO r_{policy} SELECT 'grouped_hash_' || concat_ws('_', id % 50000), (sum(b) FILTER (WHERE k < 300))::VARCHAR || '/' || (count(*) FILTER (WHERE n > 0))::VARCHAR FROM facts GROUP BY id % 50000
+
+statement ok
+INSERT INTO r_{policy} SELECT 'grouped_hash_empty_' || concat_ws('_', id % 50000), coalesce(sum(b) FILTER (WHERE id % 50000 < 100)::VARCHAR, 'null') || '/' || (count(*) FILTER (WHERE id % 50000 < 100))::VARCHAR FROM facts GROUP BY id % 50000
+
+statement ok
+INSERT INTO r_{policy} SELECT 'grouped_avg_' || concat_ws('_', g), (avg(b) FILTER (WHERE k < 300))::VARCHAR || '/' || (sum(b) FILTER (WHERE k > 600))::VARCHAR FROM facts GROUP BY g
+
+statement ok
+INSERT INTO r_{policy} SELECT 'grouped_distinct_' || concat_ws('_', g), (count(DISTINCT s) FILTER (WHERE k < 300))::VARCHAR || '/' || (sum(b) FILTER (WHERE k > 600))::VARCHAR FROM facts GROUP BY g
+
+endloop
+
+query I
+SELECT count(*) FROM ((SELECT * FROM r_off EXCEPT ALL SELECT * FROM r_auto)
+                      UNION ALL (SELECT * FROM r_auto EXCEPT ALL SELECT * FROM r_off))
+----
+0
+
+query I
+SELECT count(*) FROM r_auto
+----
+101579
+
+endloop
+
+# a group the filter empties keeps a NULL sum and a zero count
+query II
+SELECT count(*) FILTER (WHERE q LIKE 'grouped_empty_sum_%' AND a = 'null'),
+       count(*) FILTER (WHERE q LIKE 'grouped_empty_count_star_%' AND a = '0')
+FROM r_auto
+----
+87	87
+
+query II
+SELECT q, a FROM r_auto WHERE q IN ('sum_no_row_matches', 'count_star_no_row_matches') ORDER BY q
+----
+count_star_no_row_matches	0
+sum_no_row_matches	null
+
+# DOUBLE sums add their rows in order: one thread, compared exactly
+statement ok
+SET threads=1
+
+foreach policy off auto
+
+statement ok
+SET jit_policy='{policy}'
+
+statement ok
+CREATE OR REPLACE TEMP TABLE d_{policy} (q VARCHAR, a DOUBLE)
+
+statement ok
+INSERT INTO d_{policy} SELECT 'ungrouped', sum(e) FILTER (WHERE k < 300) FROM facts
+
+statement ok
+INSERT INTO d_{policy} SELECT 'grouped_' || g, sum(e) FILTER (WHERE k < 300) FROM facts GROUP BY g
+
+endloop
+
+query I
+SELECT count(*) FROM ((SELECT * FROM d_off EXCEPT ALL SELECT * FROM d_auto)
+                      UNION ALL (SELECT * FROM d_auto EXCEPT ALL SELECT * FROM d_off))
+----
+0
+
+# filtered aggregates run in the generated aggregates
+statement ok
+SET jit_policy='auto'
+
+statement ok
+SET jit_trace_runtime=true
+
+statement ok
+SET jit_event_log_size=0
+
+statement ok
+SET jit_event_log_size=100
+
+statement ok
+CREATE OR REPLACE TEMP TABLE traced AS SELECT sum(price) FILTER (WHERE k < 300), count(*) FILTER (WHERE k > 600) FROM facts
+
+query I
+SELECT count(*) > 0 FROM duckdb_jit_events() WHERE status = 'executed' AND jit_runtime_path_counts LIKE '%fused_payload_update%'
+----
+true
+
+statement ok
+SET jit_event_log_size=0
+
+statement ok
+SET jit_event_log_size=100
+
+statement ok
+CREATE OR REPLACE TEMP TABLE traced AS SELECT g, sum(b) FILTER (WHERE k < 300), count(*) FILTER (WHERE k > 600) FROM facts GROUP BY g
+
+query I
+SELECT count(*) > 0 FROM duckdb_jit_events() WHERE status = 'executed' AND jit_runtime_path_counts LIKE '%fused_payload_update_owns_perfect_hash_group_lookup%'
+----
+true

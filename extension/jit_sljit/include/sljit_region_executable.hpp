@@ -540,6 +540,21 @@ struct SljitExecutableRegionOp {
 		idx_t arity = 0;
 		vector<std::pair<idx_t, LogicalType>> references;
 
+		void AddExpressionReferences(const ExecutionExpressionIR &node) {
+			if (node.kind == ExecutionExpressionIRKind::REFERENCE) {
+				provable = true;
+				references.emplace_back(node.ref_index, node.return_type);
+			}
+			for (auto child : {node.left.get(), node.right.get(), node.else_node.get()}) {
+				if (child) {
+					AddExpressionReferences(*child);
+				}
+			}
+			for (auto &child : node.children) {
+				AddExpressionReferences(*child);
+			}
+		}
+
 		bool SatisfiedBy(const vector<LogicalType> &fed) const {
 			if (!provable) {
 				return true;
@@ -590,6 +605,12 @@ struct SljitExecutableRegionOp {
 					constraints.provable = true;
 					constraints.references.emplace_back(aggregate.child_indices[child_idx],
 					                                    aggregate.child_types[child_idx]);
+				}
+				// A filtered aggregate's sink reads the columns its CASE payload references
+				if (aggregate.has_filter) {
+					for (auto &child : aggregate.child_expressions) {
+						constraints.AddExpressionReferences(*child.root);
+					}
 				}
 			}
 			return constraints;

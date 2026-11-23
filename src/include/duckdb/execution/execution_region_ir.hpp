@@ -273,6 +273,9 @@ struct ExecutionRegionAggregateInput {
 	vector<idx_t> child_indices;
 	vector<ExecutionExpressionFragment> child_expressions;
 	bool distinct = false;
+	//! FILTER (WHERE ...). An aggregate the contract admits updates its state as the same primitive update of its one
+	//! child expression CASE WHEN filter THEN child END (count(*): COUNT of CASE WHEN filter THEN TRUE END), so no
+	//! plain payload column backs it
 	bool has_filter = false;
 	bool has_order_bys = false;
 	bool order_dependent = false;
@@ -703,6 +706,8 @@ DUCKDB_API string ExecutionRegionAggregateNativeStateUpdateBlocker(
     const vector<ExecutionRegionGroupInput> &groups);
 DUCKDB_API bool ExecutionRegionAggregateUpdateGeneratesBody(const ExecutionRegionSinkInfo &sink);
 DUCKDB_API bool ExecutionRegionAggregateLookupGeneratesBody(const ExecutionRegionSinkInfo &sink);
+//! The aggregate FILTERs of an aggregate update sink: a generated update evaluates each per row, the work of a filter
+DUCKDB_API idx_t ExecutionRegionAggregateFilterCount(const ExecutionRegionSinkInfo &sink);
 
 struct ExecutionRegionIR {
 	vector<ExecutionRegionNode> nodes;

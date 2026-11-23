@@ -674,6 +674,15 @@ ENCODINGS_QUERIES = {
         "FROM __jit_encodings_facts",
         {1: True, 4: True},
     ),
+    "aggregate_filter_groups": (
+        "SELECT g, sum(id) FILTER (WHERE k < 300), count(*) FILTER (WHERE k > 600) FROM __jit_encodings_facts "
+        "GROUP BY g",
+        {1: True, 4: True},
+    ),
+    "aggregate_filter_sums": (
+        "SELECT sum(id) FILTER (WHERE k < 300), count(*) FILTER (WHERE k > 600), count(*) FROM __jit_encodings_facts",
+        {1: True, 4: True},
+    ),
     "narrow_between": (
         "SELECT sum(id) FROM __jit_encodings_facts WHERE si BETWEEN 100 AND 2000",
         {1: True, 4: True},
@@ -728,6 +737,8 @@ ENCODINGS_THRESHOLDS = {
     "case_null_groups": ({1: 1.71, 4: 1.67}, {1: 63_600_000, 4: 65_600_000}),
     "case_null_counts": ({1: 1.58, 4: 1.56}, {1: 53_500_000, 4: 55_300_000}),
     "case_null_count_sums": ({1: 2.02, 4: 1.95}, {1: 49_700_000, 4: 51_800_000}),
+    "aggregate_filter_groups": ({1: 1.22, 4: 1.21}, {1: 81_200_000, 4: 83_900_000}),
+    "aggregate_filter_sums": ({1: 0.87, 4: 0.88}, {1: 53_200_000, 4: 56_400_000}),
     "narrow_between": ({1: 1.28, 4: 1.22}, {1: 15_400_000, 4: 17_500_000}),
     "nullable_key_join": ({1: 0.89, 4: 0.89}, {1: 570_500_000, 4: 572_400_000}),
     "random_key_groups": ({1: 0.89, 4: 0.89}, {1: 234_900_000, 4: 417_100_000}),

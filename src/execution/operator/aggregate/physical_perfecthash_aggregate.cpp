@@ -88,60 +88,6 @@ public:
 	DataChunk aggregate_input_chunk;
 };
 
-class PerfectHashAggregateExecutionRegionSinkState : public ExecutionAggregateUpdateState {
-public:
-	PerfectHashAggregateExecutionRegionSinkState(ExecutionContext &context_p, const PhysicalPerfectHashAggregate &op_p,
-	                                             PerfectHashAggregateLocalState &local_state_p)
-	    : context(context_p), op(op_p), local_state(local_state_p) {
-	}
-
-	SinkResultType Sink(DataChunk &input) override {
-		DataChunk &group_chunk = local_state.group_chunk;
-		DataChunk &aggregate_input_chunk = local_state.aggregate_input_chunk;
-
-		for (idx_t group_idx = 0; group_idx < op.groups.size(); group_idx++) {
-			auto &group = op.groups[group_idx];
-			if (group->GetExpressionClass() != ExpressionClass::BOUND_REF) {
-				throw InternalException("execution region perfect hash aggregate group is not a bound reference");
-			}
-			auto &bound_ref_expr = group->Cast<BoundReferenceExpression>();
-			if (bound_ref_expr.Index() >= input.ColumnCount()) {
-				throw InternalException("execution region perfect hash aggregate group index out of range");
-			}
-			group_chunk.data[group_idx].Reference(input.data[bound_ref_expr.Index()]);
-		}
-		idx_t aggregate_input_idx = 0;
-		for (auto &aggregate : op.aggregates) {
-			auto &aggr = aggregate->Cast<BoundAggregateExpression>();
-			if (aggr.IsDistinct() || aggr.GetFilter() || aggr.GetOrderBys()) {
-				throw InternalException(
-				    "execution region perfect hash aggregate update received unsupported aggregate");
-			}
-			for (auto &child_expr : aggr.GetChildren()) {
-				if (child_expr->GetExpressionClass() != ExpressionClass::BOUND_REF) {
-					throw InternalException("execution region perfect hash aggregate payload is not a bound reference");
-				}
-				auto &bound_ref_expr = child_expr->Cast<BoundReferenceExpression>();
-				if (bound_ref_expr.Index() >= input.ColumnCount()) {
-					throw InternalException("execution region perfect hash aggregate payload index out of range");
-				}
-				aggregate_input_chunk.data[aggregate_input_idx++].Reference(input.data[bound_ref_expr.Index()]);
-			}
-		}
-
-		group_chunk.Verify(context.client.db);
-		aggregate_input_chunk.Verify(context.client.db);
-		D_ASSERT(aggregate_input_chunk.ColumnCount() == 0 || group_chunk.size() == aggregate_input_chunk.size());
-		local_state.ht->AddChunk(group_chunk, aggregate_input_chunk);
-		return SinkResultType::NEED_MORE_INPUT;
-	}
-
-private:
-	ExecutionContext &context;
-	const PhysicalPerfectHashAggregate &op;
-	PerfectHashAggregateLocalState &local_state;
-};
-
 class PerfectHashAggregateStateAddressState : public ExecutionGroupedAggregateStateAddressState {
 public:
 	PerfectHashAggregateStateAddressState(ExecutionContext &context_p, const PhysicalPerfectHashAggregate &op_p,
@@ -194,58 +140,12 @@ BuildPerfectHashAggregatePrimitiveUpdateBinding(const PhysicalPerfectHashAggrega
 			return result;
 		}
 		auto &aggregate = op.aggregates[aggregate_info.aggregate_index]->Cast<BoundAggregateExpression>();
-		auto &function = aggregate.Function();
-		if (!function.HasPrimitiveUpdateABI()) {
-			result.blocker = "perfect-hash-aggregate-primitive-update-abi-missing";
-			return result;
-		}
-		auto &abi = function.GetPrimitiveUpdateABI();
-		if (!AggregatePrimitiveUpdateKindIsSupported(abi.kind)) {
-			result.blocker = "perfect-hash-aggregate-primitive-update-kind-unsupported";
-			return result;
-		}
-		const auto requires_payload = AggregatePrimitiveUpdateRequiresPayload(abi.kind);
-		if (requires_payload) {
-			if (aggregate_info.child_count != 1 || aggregate_info.child_types.empty()) {
-				result.blocker = "perfect-hash-aggregate-primitive-update-requires-one-payload";
-				return result;
-			}
-			if (AggregatePrimitiveUpdateRequiresTypedPayload(abi.kind) &&
-			    aggregate_info.child_types[0].InternalType() != abi.input_type) {
-				result.blocker = "perfect-hash-aggregate-primitive-update-payload-type-mismatch";
-				return result;
-			}
-		} else if (aggregate_info.child_count != 0) {
-			result.blocker = "perfect-hash-aggregate-primitive-update-requires-no-payload";
-			return result;
-		}
-		AggregateStateInput state_input(function, aggregate.BindInfo().get());
-		if (function.HasStateSizeCallback() && function.GetStateSizeCallback()(state_input) != abi.state_size) {
-			result.blocker = "perfect-hash-aggregate-primitive-update-state-size-mismatch";
-			return result;
-		}
-		auto value_size = AggregatePrimitiveUpdateStateValueSize(abi.kind);
-		if (value_size == 0 || abi.state_value_offset + value_size > abi.state_size) {
-			result.blocker = "perfect-hash-aggregate-primitive-update-state-layout-invalid";
-			return result;
-		}
-		if (AggregatePrimitiveUpdateHasStateIsSet(abi.kind) &&
-		    abi.state_is_set_offset + sizeof(bool) > abi.state_size) {
-			result.blocker = "perfect-hash-aggregate-primitive-update-state-layout-invalid";
-			return result;
-		}
-
 		ExecutionPrimitiveAggregateUpdateLane lane;
-		lane.ready = true;
-		lane.kind = abi.kind;
-		lane.aggregate_index = aggregate_info.aggregate_index;
-		lane.payload_index = requires_payload ? aggregate_info.payload_index : DConstants::INVALID_INDEX;
-		lane.payload_type = requires_payload ? aggregate_info.child_types[0].InternalType() : PhysicalType::INVALID;
-		lane.state_size = abi.state_size;
+		if (!ExecutionBindPrimitiveAggregateUpdateLane(aggregate, aggregate_info, lane, result.blocker)) {
+			result.blocker = "perfect-hash-aggregate-" + result.blocker;
+			return result;
+		}
 		lane.state_offset = contract.grouped_state_offsets[aggregate_info.aggregate_index];
-		lane.state_value_offset = abi.state_value_offset;
-		lane.state_is_set_offset = abi.state_is_set_offset;
-		lane.blocker.clear();
 		result.lanes.push_back(lane);
 	}
 	result.ready = !result.lanes.empty() && result.lanes.size() == sink_info.aggregates.size();
@@ -329,8 +229,7 @@ bool PhysicalPerfectHashAggregate::BindExecutionSink(ExecutionContext &context, 
 	auto &local_state = sink_input.local_state.Cast<PerfectHashAggregateLocalState>();
 	binding.ready = true;
 	binding.aggregate_update.ready = true;
-	binding.aggregate_update.state =
-	    make_shared_ptr<PerfectHashAggregateExecutionRegionSinkState>(context, *this, local_state);
+	binding.aggregate_update.state = ExecutionOperatorSinkAggregateUpdate(context, *this, sink_input);
 	binding.aggregate_update.grouped_state.ready = true;
 	binding.aggregate_update.grouped_state.state =
 	    make_shared_ptr<PerfectHashAggregateStateAddressState>(context, *this, local_state);

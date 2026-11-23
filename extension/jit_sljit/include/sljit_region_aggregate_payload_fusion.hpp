@@ -13,6 +13,7 @@
 #include "sljit_aggregate_perfect_hash_codegen.hpp"
 #include "sljit_aggregate_typed_payload_codegen.hpp"
 #include "sljit_native_plan.hpp"
+#include "sljit_projection_composition.hpp"
 #include "sljit_region_plan_internal.hpp"
 #include "sljit_typed_expression_plan.hpp"
 
@@ -286,6 +287,33 @@ static bool TryNormalizeGroupedTypedAggregatePayloads(vector<SljitNativeRegionEx
 	                                            "grouped-typed-payload", false);
 }
 
+//! A filtered aggregate's payload over the sink input: its CASE WHEN filter THEN child END
+static bool TryLowerSljitFilteredAggregatePayload(const ExecutionRegionAggregateInput &aggregate,
+                                                  SljitNativeRegionExpressionPlan &payload, bool render_diagnostics) {
+	D_ASSERT(aggregate.has_filter);
+	string error;
+	return aggregate.child_expressions.size() == 1 &&
+	       TryLowerNativeRegionExpression(aggregate.child_expressions[0], false, payload, error, render_diagnostics);
+}
+
+//! The payload of an aggregate reading one value per row, computed from the input of the projection that feeds the
+//! aggregate: the projection's output it reads, or a filtered aggregate's payload composed through the projection
+static bool TryBuildSljitAggregatePayloadThroughProjection(const vector<SljitNativeRegionExpressionPlan> &projections,
+                                                           const ExecutionRegionAggregateInput &aggregate,
+                                                           SljitNativeRegionExpressionPlan &payload,
+                                                           bool render_diagnostics) {
+	if (aggregate.has_filter) {
+		SljitNativeRegionExpressionPlan input_payload;
+		return TryLowerSljitFilteredAggregatePayload(aggregate, input_payload, render_diagnostics) &&
+		       TryComposeNativeSemanticProjection(projections, input_payload, payload, render_diagnostics);
+	}
+	if (aggregate.child_count != 1 || aggregate.payload_index >= projections.size()) {
+		return false;
+	}
+	payload = projections[aggregate.payload_index].Copy();
+	return true;
+}
+
 static bool TryBuildSljitPrimitiveReferencePayload(const vector<LogicalType> &input_types,
                                                    const ExecutionRegionAggregateInput &aggregate,
                                                    SljitNativeRegionExpressionPlan &payload, bool grouped_state,
@@ -300,6 +328,10 @@ static bool TryBuildSljitPrimitiveReferencePayload(const vector<LogicalType> &in
 			payload.ir = "primitive-count-star";
 		}
 		return SljitPrimitiveAggregatePayloadSupported(payload, aggregate, grouped_state);
+	}
+	if (aggregate.has_filter) {
+		return TryLowerSljitFilteredAggregatePayload(aggregate, payload, render_diagnostics) &&
+		       SljitPrimitiveAggregatePayloadSupported(payload, aggregate, grouped_state);
 	}
 	if (aggregate.child_count != 1 || aggregate.payload_index >= input_types.size()) {
 		return false;

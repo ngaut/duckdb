@@ -22,7 +22,9 @@
 #include "duckdb/storage/storage_manager.hpp"
 #include "duckdb/parser/constraints/not_null_constraint.hpp"
 #include "duckdb/planner/expression/bound_aggregate_expression.hpp"
+#include "duckdb/planner/expression/bound_case_expression.hpp"
 #include "duckdb/planner/expression/bound_cast_expression.hpp"
+#include "duckdb/planner/expression/bound_constant_expression.hpp"
 #include "duckdb/planner/expression/bound_function_expression.hpp"
 #include "duckdb/planner/expression/bound_reference_expression.hpp"
 #include "duckdb/planner/filter/expression_filter.hpp"
@@ -1591,8 +1593,8 @@ static void AddExecutionContractHashAggregateGroupedStateLayout(ExecutionRegionA
 
 static void MarkExecutionContractHashAggregateGroupedStateContract(ExecutionRegionAggregateContract &result) {
 	if (!result.grouped_state_layout_ready || result.grouping_set_count != 1 || result.radix_table_count != 1 ||
-	    result.distinct_aggregate_count != 0 || result.aggregate_filter_count != 0 ||
-	    result.aggregate_order_count != 0 || result.non_distinct_filter_count != result.aggregate_count) {
+	    result.distinct_aggregate_count != 0 || result.aggregate_order_count != 0 ||
+	    result.non_distinct_filter_count != result.aggregate_count) {
 		return;
 	}
 	result.native_grouped_state_contract.status = ExecutionRegionStateContractStatus::READY;
@@ -1615,7 +1617,7 @@ static void MarkExecutionContractHashAggregateDistinctStateBoundary(ExecutionReg
 
 static void MarkExecutionContractPerfectHashAggregateGroupedStateContract(ExecutionRegionAggregateContract &result) {
 	if (!result.grouped_state_layout_ready || result.distinct_aggregate_count != 0 ||
-	    result.aggregate_filter_count != 0 || result.aggregate_order_count != 0) {
+	    result.aggregate_order_count != 0) {
 		return;
 	}
 	result.native_grouped_state_contract.status = ExecutionRegionStateContractStatus::READY;
@@ -1967,8 +1969,50 @@ static bool TryReadExecutionContractAggregateInput(const BoundAggregateExpressio
 	return true;
 }
 
+//! An aggregate with FILTER (WHERE f) updates its state as the same primitive update of the one child expression
+//! CASE WHEN f THEN child END; count(*) becomes COUNT of CASE WHEN f THEN TRUE END, whose state it shares. Primitive
+//! updates skip NULL payloads, so the rows the filter rejects leave the state untouched
+static void ReadExecutionContractFilteredAggregateInput(const BoundAggregateExpression &aggregate,
+                                                        unique_ptr<Expression> filter,
+                                                        ExecutionRegionAggregateInput &result) {
+	if (!result.primitive_update_ready) {
+		result.reason = "aggregate filter requires a primitive update";
+		return;
+	}
+	auto &children = aggregate.GetChildren();
+	if (children.size() > 1) {
+		result.reason = "aggregate filter requires at most one child";
+		return;
+	}
+	unique_ptr<Expression> then_expression;
+	if (children.empty()) {
+		D_ASSERT(result.primitive_update_kind == AggregatePrimitiveUpdateKind::COUNT_STAR);
+		result.primitive_update_kind = AggregatePrimitiveUpdateKind::COUNT;
+		then_expression = make_uniq<BoundConstantExpression>(Value::BOOLEAN(true));
+	} else {
+		then_expression = children[0]->Copy();
+	}
+	const auto payload_type = then_expression->GetReturnType();
+	BoundCaseExpression payload(std::move(filter), std::move(then_expression),
+	                            make_uniq<BoundConstantExpression>(Value(payload_type)));
+	auto payload_expression = TryLowerExecutionExpression(payload, 0, ExecutionExpressionIRMode::COMPACT);
+	if (!payload_expression) {
+		result.reason =
+		    "aggregate filter payload lowering unsupported;" + DescribeExecutionExpressionLoweringFailure(payload);
+		return;
+	}
+	result.child_count = 1;
+	result.child_types.push_back(payload_type);
+	result.child_expressions.push_back(std::move(*payload_expression));
+	result.payload_index = DConstants::INVALID_INDEX;
+	result.payload_expressions_ready = true;
+}
+
+//! filter_columns maps the column a grouped aggregate's filter reference names to its input column; nullptr for an
+//! aggregate whose filter is an expression over its input
 static ExecutionRegionAggregateInput
 BuildExecutionContractAggregateInput(idx_t aggregate_idx, const unique_ptr<Expression> &aggregate_expression,
+                                     optional_ptr<const unordered_map<idx_t, idx_t>> filter_columns,
                                      bool allow_distinct_update = false) {
 	ExecutionRegionAggregateInput result;
 	result.aggregate_index = aggregate_idx;
@@ -2003,12 +2047,17 @@ BuildExecutionContractAggregateInput(idx_t aggregate_idx, const unique_ptr<Expre
 		result.primitive_update_blocker = "aggregate function has no primitive update ABI";
 	}
 
-	if (result.distinct && !allow_distinct_update) {
+	if (result.distinct && (!allow_distinct_update || result.has_filter)) {
 		result.reason = "distinct aggregate update is handled by DuckDB distinct aggregate finalization";
-	} else if (result.has_filter) {
-		result.reason = "aggregate filter requires per-aggregate filtered payload contract";
 	} else if (result.has_order_bys) {
 		result.reason = "ordered aggregate requires DuckDB sorted aggregate contract";
+	} else if (result.has_filter) {
+		auto filter = aggregate.GetFilter()->Copy();
+		if (filter_columns) {
+			auto &filter_ref = filter->Cast<BoundReferenceExpression>();
+			filter_ref.IndexMutable() = filter_columns->at(filter_ref.Index());
+		}
+		ReadExecutionContractFilteredAggregateInput(aggregate, std::move(filter), result);
 	} else if (!result.has_state_update) {
 		result.reason = "aggregate function has no state update callback";
 	} else {
@@ -2022,7 +2071,7 @@ BuildExecutionContractUngroupedAggregateInputs(const PhysicalUngroupedAggregate 
 	vector<ExecutionRegionAggregateInput> result;
 	result.reserve(op.aggregates.size());
 	for (idx_t aggregate_idx = 0; aggregate_idx < op.aggregates.size(); aggregate_idx++) {
-		result.push_back(BuildExecutionContractAggregateInput(aggregate_idx, op.aggregates[aggregate_idx]));
+		result.push_back(BuildExecutionContractAggregateInput(aggregate_idx, op.aggregates[aggregate_idx], nullptr));
 	}
 	return result;
 }
@@ -2033,7 +2082,8 @@ BuildExecutionContractHashAggregateInputs(const PhysicalHashAggregate &op) {
 	auto &aggregates = op.grouped_aggregate_data.aggregates;
 	result.reserve(aggregates.size());
 	for (idx_t aggregate_idx = 0; aggregate_idx < aggregates.size(); aggregate_idx++) {
-		result.push_back(BuildExecutionContractAggregateInput(aggregate_idx, aggregates[aggregate_idx], true));
+		result.push_back(
+		    BuildExecutionContractAggregateInput(aggregate_idx, aggregates[aggregate_idx], op.filter_columns, true));
 	}
 	return result;
 }
@@ -2043,7 +2093,8 @@ BuildExecutionContractPerfectHashAggregateInputs(const PhysicalPerfectHashAggreg
 	vector<ExecutionRegionAggregateInput> result;
 	result.reserve(op.aggregates.size());
 	for (idx_t aggregate_idx = 0; aggregate_idx < op.aggregates.size(); aggregate_idx++) {
-		result.push_back(BuildExecutionContractAggregateInput(aggregate_idx, op.aggregates[aggregate_idx]));
+		result.push_back(
+		    BuildExecutionContractAggregateInput(aggregate_idx, op.aggregates[aggregate_idx], op.filter_columns));
 	}
 	return result;
 }

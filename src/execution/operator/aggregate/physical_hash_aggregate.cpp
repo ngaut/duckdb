@@ -310,28 +310,6 @@ public:
 
 HashAggregateLocalSinkState::~HashAggregateLocalSinkState() = default;
 
-class HashAggregateExecutionRegionSinkState : public ExecutionAggregateUpdateState {
-public:
-	HashAggregateExecutionRegionSinkState(ExecutionContext &context_p, const PhysicalHashAggregate &op_p,
-	                                      HashAggregateGlobalSinkState &global_state_p,
-	                                      HashAggregateLocalSinkState &local_state_p, InterruptState &interrupt_state_p)
-	    : context(context_p), op(op_p), global_state(global_state_p), local_state(local_state_p),
-	      interrupt_state(interrupt_state_p) {
-	}
-
-	SinkResultType Sink(DataChunk &input) override {
-		OperatorSinkInput sink_input {global_state, local_state, interrupt_state};
-		return op.Sink(context, input, sink_input);
-	}
-
-private:
-	ExecutionContext &context;
-	const PhysicalHashAggregate &op;
-	HashAggregateGlobalSinkState &global_state;
-	HashAggregateLocalSinkState &local_state;
-	InterruptState &interrupt_state;
-};
-
 class HashAggregateStateAddressState : public ExecutionGroupedAggregateStateAddressState {
 public:
 	HashAggregateStateAddressState(ExecutionContext &context_p, const PhysicalHashAggregate &op_p,
@@ -584,58 +562,12 @@ BuildHashAggregatePrimitiveUpdateBinding(const PhysicalHashAggregate &op,
 		}
 		auto &aggregate =
 		    op.grouped_aggregate_data.aggregates[aggregate_info.aggregate_index]->Cast<BoundAggregateExpression>();
-		auto &function = aggregate.Function();
-		if (!function.HasPrimitiveUpdateABI()) {
-			result.blocker = "hash-aggregate-primitive-update-abi-missing";
-			return result;
-		}
-		auto &abi = function.GetPrimitiveUpdateABI();
-		if (!AggregatePrimitiveUpdateKindIsSupported(abi.kind)) {
-			result.blocker = "hash-aggregate-primitive-update-kind-unsupported";
-			return result;
-		}
-		const auto requires_payload = AggregatePrimitiveUpdateRequiresPayload(abi.kind);
-		if (requires_payload) {
-			if (aggregate_info.child_count != 1 || aggregate_info.child_types.empty()) {
-				result.blocker = "hash-aggregate-primitive-update-requires-one-payload";
-				return result;
-			}
-			if (AggregatePrimitiveUpdateRequiresTypedPayload(abi.kind) &&
-			    aggregate_info.child_types[0].InternalType() != abi.input_type) {
-				result.blocker = "hash-aggregate-primitive-update-payload-type-mismatch";
-				return result;
-			}
-		} else if (aggregate_info.child_count != 0) {
-			result.blocker = "hash-aggregate-primitive-update-requires-no-payload";
-			return result;
-		}
-		AggregateStateInput state_input(function, aggregate.BindInfo().get());
-		if (function.HasStateSizeCallback() && function.GetStateSizeCallback()(state_input) != abi.state_size) {
-			result.blocker = "hash-aggregate-primitive-update-state-size-mismatch";
-			return result;
-		}
-		auto value_size = AggregatePrimitiveUpdateStateValueSize(abi.kind);
-		if (value_size == 0 || abi.state_value_offset + value_size > abi.state_size) {
-			result.blocker = "hash-aggregate-primitive-update-state-layout-invalid";
-			return result;
-		}
-		if (AggregatePrimitiveUpdateHasStateIsSet(abi.kind) &&
-		    abi.state_is_set_offset + sizeof(bool) > abi.state_size) {
-			result.blocker = "hash-aggregate-primitive-update-state-layout-invalid";
-			return result;
-		}
-
 		ExecutionPrimitiveAggregateUpdateLane lane;
-		lane.ready = true;
-		lane.kind = abi.kind;
-		lane.aggregate_index = aggregate_info.aggregate_index;
-		lane.payload_index = requires_payload ? aggregate_info.payload_index : DConstants::INVALID_INDEX;
-		lane.payload_type = requires_payload ? aggregate_info.child_types[0].InternalType() : PhysicalType::INVALID;
-		lane.state_size = abi.state_size;
+		if (!ExecutionBindPrimitiveAggregateUpdateLane(aggregate, aggregate_info, lane, result.blocker)) {
+			result.blocker = "hash-aggregate-" + result.blocker;
+			return result;
+		}
 		lane.state_offset = contract.grouped_state_offsets[aggregate_info.aggregate_index];
-		lane.state_value_offset = abi.state_value_offset;
-		lane.state_is_set_offset = abi.state_is_set_offset;
-		lane.blocker.clear();
 		result.lanes.push_back(lane);
 	}
 	result.ready = !result.lanes.empty() && result.lanes.size() == sink_info.aggregates.size();
@@ -828,8 +760,7 @@ bool PhysicalHashAggregate::BindExecutionSink(ExecutionContext &context, DataChu
 	auto &local_state = sink_input.local_state.Cast<HashAggregateLocalSinkState>();
 	binding.ready = true;
 	binding.aggregate_update.ready = true;
-	binding.aggregate_update.state = make_shared_ptr<HashAggregateExecutionRegionSinkState>(
-	    context, *this, global_state, local_state, sink_input.interrupt_state);
+	binding.aggregate_update.state = ExecutionOperatorSinkAggregateUpdate(context, *this, sink_input);
 	binding.aggregate_update.grouped_state.ready = true;
 	binding.aggregate_update.grouped_state.state = make_shared_ptr<HashAggregateStateAddressState>(
 	    context, *this, global_state, local_state, sink_input.interrupt_state);
@@ -1081,7 +1012,6 @@ BuildDistinctCountFinalizeLane(idx_t aggregate_index, const DistinctCountFinaliz
 	result.ready = true;
 	result.kind = AggregatePrimitiveUpdateKind::COUNT;
 	result.aggregate_index = aggregate_index;
-	result.payload_index = fast_path.payload_index;
 	result.payload_type = fast_path.payload_type;
 	result.state_size = sizeof(int64_t);
 	result.state_offset = fast_path.state_offset;

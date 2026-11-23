@@ -25,6 +25,8 @@ class InterruptState;
 class LocalSinkState;
 class Vector;
 class Allocator;
+class BoundAggregateExpression;
+class PhysicalOperator;
 class SelectionVector;
 struct ExecutionContext;
 struct OperatorSinkInput;
@@ -269,7 +271,6 @@ struct ExecutionPrimitiveAggregateUpdateLane {
 	bool ready = false;
 	AggregatePrimitiveUpdateKind kind = AggregatePrimitiveUpdateKind::NONE;
 	idx_t aggregate_index = DConstants::INVALID_INDEX;
-	idx_t payload_index = DConstants::INVALID_INDEX;
 	PhysicalType payload_type = PhysicalType::INVALID;
 	idx_t state_size = 0;
 	idx_t state_offset = 0;
@@ -414,6 +415,16 @@ struct ExecutionSinkBinding {
 	ExecutionAggregateUpdateBinding aggregate_update;
 	string blocker;
 };
+
+//! The operator's own Sink: the aggregate update for the rows no generated body updates
+DUCKDB_API shared_ptr<ExecutionAggregateUpdateState>
+ExecutionOperatorSinkAggregateUpdate(ExecutionContext &context, const PhysicalOperator &op,
+                                     OperatorSinkInput &sink_input);
+//! A lane updating the aggregate's state with the contract's primitive update; the blocker names why the function's
+//! state does not hold that update. The caller sets the lane's state location
+DUCKDB_API bool ExecutionBindPrimitiveAggregateUpdateLane(const BoundAggregateExpression &aggregate,
+                                                          const ExecutionRegionAggregateInput &info,
+                                                          ExecutionPrimitiveAggregateUpdateLane &lane, string &blocker);
 
 DUCKDB_API void ExecutionMaterializeHashJoinProbe(const ExecutionHashJoinProbeBinding &binding, DataChunk &input,
                                                   Vector &row_pointers, const SelectionVector &match_sel, idx_t count,

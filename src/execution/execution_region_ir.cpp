@@ -475,9 +475,6 @@ string ExecutionRegionAggregateNativeStateUpdateBlocker(const ExecutionRegionAgg
 	if (has_distinct_state && !has_regular_hash_distinct_state) {
 		return "aggregate-state-update-distinct-state";
 	}
-	if (contract.aggregate_filter_count != 0) {
-		return "aggregate-state-update-filtered-aggregate";
-	}
 	if (contract.aggregate_order_count != 0) {
 		return "aggregate-state-update-ordered-aggregate";
 	}
@@ -516,9 +513,6 @@ string ExecutionRegionAggregateNativeStateUpdateBlocker(const ExecutionRegionAgg
 		if (aggregate.distinct && !has_regular_hash_distinct_state) {
 			return "aggregate-state-update-distinct-aggregate";
 		}
-		if (aggregate.has_filter) {
-			return "aggregate-state-update-filtered-aggregate";
-		}
 		if (aggregate.has_order_bys || ExecutionRegionAggregateRequiresInputOrder(contract, aggregate)) {
 			return "aggregate-state-update-ordered-aggregate";
 		}
@@ -529,7 +523,8 @@ string ExecutionRegionAggregateNativeStateUpdateBlocker(const ExecutionRegionAgg
 			return aggregate.payload_expression_blocker.empty() ? "aggregate-state-update-payload-expression"
 			                                                    : aggregate.payload_expression_blocker;
 		}
-		if (!aggregate.supported_payload_references) {
+		// A filtered aggregate's payload is its CASE expression, every other aggregate's its child columns
+		if (!aggregate.has_filter && !aggregate.supported_payload_references) {
 			return "aggregate-state-update-payload-reference";
 		}
 	}
@@ -574,6 +569,14 @@ bool ExecutionRegionAggregateLookupGeneratesBody(const ExecutionRegionSinkInfo &
 	// the generated lookup addresses the states the generated update writes; a native update does its own lookup
 	return sink.Kind() == ExecutionRegionSinkKind::PERFECT_HASH_AGGREGATE_UPDATE &&
 	       ExecutionRegionAggregateUpdateGeneratesBody(sink);
+}
+
+idx_t ExecutionRegionAggregateFilterCount(const ExecutionRegionSinkInfo &sink) {
+	idx_t result = 0;
+	for (auto &aggregate : sink.Aggregate().aggregates) {
+		result += aggregate.has_filter;
+	}
+	return result;
 }
 
 static ExecutionRegionSourceKind InferExecutionRegionSourceKind(const ExecutionRegionNode &node) {
@@ -704,6 +707,7 @@ static ExecutionRegionCandidateTraits BuildExecutionRegionCandidateTraits(const 
 			if (node.sink) {
 				if (ExecutionRegionAggregateUpdateGeneratesBody(*node.sink)) {
 					traits.generated_aggregate_update_count++;
+					traits.filter_count += ExecutionRegionAggregateFilterCount(*node.sink);
 				}
 				if (ExecutionRegionAggregateLookupGeneratesBody(*node.sink)) {
 					traits.generated_aggregate_lookup_count++;
