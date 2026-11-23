@@ -50,6 +50,11 @@ static bool TryReadNativeRegionExpressionKind(const ExecutionExpressionIR &root,
 		return true;
 	}
 
+	if (!require_boolean && root.return_type.id() == LogicalTypeId::BOOLEAN &&
+	    TryBuildSljitNativeTypedExpressionTreePlan(root, expr)) {
+		return true;
+	}
+
 	if (TryReadNativeRegionPredicateExpression(root, require_boolean, expr)) {
 		if (expr.kind == SljitNativeRegionExpressionKind::PREDICATE) {
 			AttachSljitNativeExpressionTree(root, expr);

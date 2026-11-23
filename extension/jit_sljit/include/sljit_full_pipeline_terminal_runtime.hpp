@@ -133,10 +133,11 @@ public:
 	//! A hash aggregate terminal leaves the whole pipeline to DuckDB's operators unless generated group runs update
 	//! it: decided on the first source chunk, before any step saw a row, so one writer owns the aggregate states.
 	//! Counting rows into a dense key domain keeps the pipeline; otherwise the chunk's sample of the group key decides,
-	//! and a key it cannot sample leaves the decision to the update's own batches
-	bool HandsOverToNative(vector<SljitExecutableRegionOp> &ops, SljitRegionExecutionScratch &scratch,
-	                       const SljitFullPipelinePrimitiveStep &terminal_step, DataChunk &source_chunk,
-	                       const SljitExecutableNativeContinuation &continuation) {
+	//! and a key it cannot sample leaves the decision pending on the update's own batches
+	SljitNativeHandover HandsOverToNative(ExecutionRegionRuntime &runtime, vector<SljitExecutableRegionOp> &ops,
+	                                      SljitRegionExecutionScratch &scratch,
+	                                      const SljitFullPipelinePrimitiveStep &terminal_step, DataChunk &source_chunk,
+	                                      const SljitExecutableNativeContinuation &continuation) {
 		idx_t aggregate_idx;
 		switch (terminal_step.kind) {
 		case SljitFullPipelinePrimitiveKind::GROUPED_AGGREGATE_UPDATE:
@@ -146,27 +147,52 @@ public:
 			aggregate_idx = terminal_step.post_join_projection_aggregate.aggregate_idx;
 			break;
 		default:
-			return false;
+			return SljitNativeHandover::GENERATED;
 		}
 		auto &aggregate_update = ops[aggregate_idx].AggregateUpdate();
 		if (aggregate_update.plan.sink_info.Kind() != ExecutionRegionSinkKind::HASH_AGGREGATE_UPDATE) {
-			return false;
+			return SljitNativeHandover::GENERATED;
 		}
 		idx_t dense_range;
 		if (continuation.counts_rows_only &&
 		    SljitPendingDenseSingleLaneProfitable(scratch.AggregateParameters(aggregate_idx).estimated_input_count,
 		                                          aggregate_update.dense_group_domain, dense_range)) {
-			return false;
+			return SljitNativeHandover::GENERATED;
 		}
 		if (terminal_step.kind == SljitFullPipelinePrimitiveKind::GROUPED_AGGREGATE_UPDATE) {
-			return state.grouped_aggregate_update.SampleSourceGroupRuns(
-			           ops, terminal_step.grouped_aggregate_update, source_chunk,
-			           continuation.group_key_source_column) == SljitSourceGroupRuns::ABSENT;
+			switch (state.grouped_aggregate_update.SampleSourceGroupRuns(
+			    ops, terminal_step.grouped_aggregate_update, source_chunk, continuation.group_key_source_column)) {
+			case SljitSourceGroupRuns::ABSENT:
+				return SljitNativeHandover::NATIVE;
+			case SljitSourceGroupRuns::PRESENT:
+				return SljitNativeHandover::GENERATED;
+			case SljitSourceGroupRuns::UNKNOWN:
+				return PendingHandover(runtime, ops, scratch, terminal_step);
+			}
 		}
 		// a join's output preaggregates runs of a single key, which the probe's source column carries
 		const auto column = continuation.group_key_source_column;
 		return aggregate_update.plan.sink_info.groups.size() == 1 && column < source_chunk.ColumnCount() &&
-		       !SljitVectorHasProfitableRuns(source_chunk.data[column], source_chunk.size());
+		               !SljitVectorHasProfitableRuns(source_chunk.data[column], source_chunk.size())
+		           ? SljitNativeHandover::NATIVE
+		           : SljitNativeHandover::GENERATED;
+	}
+
+	//! A grouped update whose batches found no group runs hands the pipeline to DuckDB's operators at the next source
+	//! chunk, as its own batches already do at the aggregate; until its batches decide, the decision stays pending
+	SljitNativeHandover PendingHandover(ExecutionRegionRuntime &runtime, vector<SljitExecutableRegionOp> &ops,
+	                                    SljitRegionExecutionScratch &scratch,
+	                                    const SljitFullPipelinePrimitiveStep &terminal_step) {
+		if (terminal_step.kind != SljitFullPipelinePrimitiveKind::GROUPED_AGGREGATE_UPDATE) {
+			return SljitNativeHandover::GENERATED;
+		}
+		if (DelegatesToNativePipeline(terminal_step)) {
+			BeginNativePipeline(runtime, ops, scratch, terminal_step);
+			return SljitNativeHandover::NATIVE;
+		}
+		return state.grouped_aggregate_update.MayDelegateToNativePipeline(terminal_step.grouped_aggregate_update)
+		           ? SljitNativeHandover::PENDING
+		           : SljitNativeHandover::GENERATED;
 	}
 
 	bool ExecuteNativePipeline(ExecutionRegionRuntime &runtime, ExecutionRegionResult &result,
@@ -177,11 +203,7 @@ public:
 		// The declared handoff: every delegation that follows serves the rows recorded here
 		RecordSljitRegionRuntimePath(runtime, ops[terminal_step.grouped_aggregate_update.aggregate_idx].Kind(),
 		                             "no_group_runs_native_pipeline", input.count);
-		if (!state.grouped_aggregate_native_pipeline) {
-			state.grouped_aggregate_update.BeginNativePipelineDelegation(runtime, ops, scratch,
-			                                                             terminal_step.grouped_aggregate_update);
-			state.grouped_aggregate_native_pipeline = true;
-		}
+		BeginNativePipeline(runtime, ops, scratch, terminal_step);
 		return native_tail_delegation.Execute(runtime, result, ops, scratch, start_idx, input);
 	}
 
@@ -205,6 +227,16 @@ public:
 	}
 
 private:
+	void BeginNativePipeline(ExecutionRegionRuntime &runtime, vector<SljitExecutableRegionOp> &ops,
+	                         SljitRegionExecutionScratch &scratch,
+	                         const SljitFullPipelinePrimitiveStep &terminal_step) {
+		if (!state.grouped_aggregate_native_pipeline) {
+			state.grouped_aggregate_update.BeginNativePipelineDelegation(runtime, ops, scratch,
+			                                                             terminal_step.grouped_aggregate_update);
+			state.grouped_aggregate_native_pipeline = true;
+		}
+	}
+
 	bool ExecuteGroupedAggregateUpdate(ExecutionRegionRuntime &runtime, ExecutionRegionResult &result,
 	                                   vector<SljitExecutableRegionOp> &ops, SljitRegionExecutionScratch &scratch,
 	                                   const SljitFullPipelinePrimitiveStep &terminal_step,

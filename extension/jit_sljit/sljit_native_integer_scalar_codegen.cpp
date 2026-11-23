@@ -40,30 +40,24 @@ unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativeIntegerCast(SljitNativeSig
 	sljit_emit_enter(compiler, 0, SLJIT_ARGS1V(P), 5, 3, 0);
 	EmitInitSljitNativeVectorLoop(compiler);
 
-	struct sljit_jump *range_too_small = nullptr;
-	struct sljit_jump *range_too_large = nullptr;
+	vector<sljit_jump *> out_of_range;
 	auto done = EmitSljitSelectedSourceInvalidResultLoop(compiler, [&](vector<sljit_jump *> &invalid_jumps) {
 		EmitLoadSljitNativeFixedWidthValue(compiler, offsetof(SljitNativeVectorInput, source_data), SLJIT_R1,
 		                                   source_load_op, source_data_scale, SLJIT_R2);
 
 		if (needs_range_check) {
-			range_too_small = sljit_emit_cmp(compiler, SLJIT_SIG_LESS, SLJIT_R2, 0, SLJIT_IMM,
-			                                 NumericCast<sljit_sw>(NativeSignedIntegerMin(target_width)));
-			range_too_large = sljit_emit_cmp(compiler, SLJIT_SIG_GREATER, SLJIT_R2, 0, SLJIT_IMM,
-			                                 NumericCast<sljit_sw>(NativeSignedIntegerMax(target_width)));
-			if (try_cast) {
-				invalid_jumps.push_back(range_too_small);
-				invalid_jumps.push_back(range_too_large);
-			}
+			auto &range_jumps = try_cast ? invalid_jumps : out_of_range;
+			range_jumps.push_back(sljit_emit_cmp(compiler, SLJIT_SIG_LESS, SLJIT_R2, 0, SLJIT_IMM,
+			                                     NumericCast<sljit_sw>(NativeSignedIntegerMin(target_width))));
+			range_jumps.push_back(sljit_emit_cmp(compiler, SLJIT_SIG_GREATER, SLJIT_R2, 0, SLJIT_IMM,
+			                                     NumericCast<sljit_sw>(NativeSignedIntegerMax(target_width))));
 		}
 
 		EmitStoreSljitNativeFixedWidthResult(compiler, target_store_op, target_data_scale, SLJIT_R2);
 	});
 
-	if (needs_range_check && !try_cast) {
-		auto overflow_label = sljit_emit_label(compiler);
-		sljit_set_label(range_too_small, overflow_label);
-		sljit_set_label(range_too_large, overflow_label);
+	if (!out_of_range.empty()) {
+		SetSljitJumpLabels(out_of_range, sljit_emit_label(compiler));
 		sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_MEM1(SLJIT_S0), offsetof(SljitNativeVectorInput, overflow_value),
 		               SLJIT_R2, 0);
 		sljit_emit_op1(compiler, SLJIT_MOV_P, SLJIT_R0, 0, SLJIT_S0, 0);
@@ -94,27 +88,21 @@ BuildSljitNativeSignedToUnsignedIntegerCast(SljitNativeSignedIntegerWidth source
 	sljit_emit_enter(compiler, 0, SLJIT_ARGS1V(P), 5, 3, 0);
 	EmitInitSljitNativeVectorLoop(compiler);
 
-	struct sljit_jump *range_too_small = nullptr;
-	struct sljit_jump *range_too_large = nullptr;
+	vector<sljit_jump *> out_of_range;
 	auto done = EmitSljitSelectedSourceInvalidResultLoop(compiler, [&](vector<sljit_jump *> &invalid_jumps) {
 		EmitLoadSljitNativeFixedWidthValue(compiler, offsetof(SljitNativeVectorInput, source_data), SLJIT_R1,
 		                                   source_load_op, source_data_scale, SLJIT_R2);
 
-		range_too_small = sljit_emit_cmp(compiler, SLJIT_SIG_LESS, SLJIT_R2, 0, SLJIT_IMM, 0);
-		range_too_large = sljit_emit_cmp(compiler, SLJIT_SIG_GREATER, SLJIT_R2, 0, SLJIT_IMM,
-		                                 NumericCast<sljit_sw>(NativeUnsignedIntegerMax(target_width)));
-		if (try_cast) {
-			invalid_jumps.push_back(range_too_small);
-			invalid_jumps.push_back(range_too_large);
-		}
+		auto &range_jumps = try_cast ? invalid_jumps : out_of_range;
+		range_jumps.push_back(sljit_emit_cmp(compiler, SLJIT_SIG_LESS, SLJIT_R2, 0, SLJIT_IMM, 0));
+		range_jumps.push_back(sljit_emit_cmp(compiler, SLJIT_SIG_GREATER, SLJIT_R2, 0, SLJIT_IMM,
+		                                     NumericCast<sljit_sw>(NativeUnsignedIntegerMax(target_width))));
 
 		EmitStoreSljitNativeFixedWidthResult(compiler, target_store_op, target_data_scale, SLJIT_R2);
 	});
 
-	if (!try_cast) {
-		auto overflow_label = sljit_emit_label(compiler);
-		sljit_set_label(range_too_small, overflow_label);
-		sljit_set_label(range_too_large, overflow_label);
+	if (!out_of_range.empty()) {
+		SetSljitJumpLabels(out_of_range, sljit_emit_label(compiler));
 		sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_MEM1(SLJIT_S0), offsetof(SljitNativeVectorInput, overflow_value),
 		               SLJIT_R2, 0);
 		sljit_emit_op1(compiler, SLJIT_MOV_P, SLJIT_R0, 0, SLJIT_S0, 0);

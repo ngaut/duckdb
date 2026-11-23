@@ -591,6 +591,8 @@ struct ExecutionRegionCandidateTraits {
 	//! with. A sink whose update stays native is native work.
 	idx_t generated_aggregate_update_count = 0;
 	idx_t generated_aggregate_lookup_count = 0;
+	//! The aggregate FILTERs those generated updates evaluate, counted in filter_count
+	idx_t generated_aggregate_filter_count = 0;
 	idx_t grouped_aggregate_estimated_cardinality = 0;
 	idx_t grouped_aggregate_key_count = 0;
 	idx_t arithmetic_projection_count = 0;

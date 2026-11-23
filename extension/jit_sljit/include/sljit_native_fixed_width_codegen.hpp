@@ -98,15 +98,51 @@ static inline sljit_jump *EmitSljitInvalidResultLoop(struct sljit_compiler *comp
 	return done;
 }
 
+//! Jumps when the input pointer at offset is set
+static inline void EmitSljitJumpIfInputPointerSet(struct sljit_compiler *compiler, sljit_sw offset,
+                                                  vector<sljit_jump *> &jumps) {
+	sljit_emit_op1(compiler, SLJIT_MOV_P, SLJIT_R0, 0, SLJIT_MEM1(SLJIT_S0), offset);
+	jumps.push_back(sljit_emit_cmp(compiler, SLJIT_NOT_EQUAL, SLJIT_R0, 0, SLJIT_IMM, 0));
+}
+
+//! Emits the row loop twice: a vector without a selection whose sources are flat and free of NULLs reads row i at
+//! source index i and runs the row body alone; any other vector runs the loop that resolves each row's indexes and
+//! NULLs. The flat loop exits into the head of the other loop, which then exits at once, so one exit jump serves both.
+//! The row body is emitted once per loop, so it must collect every jump it leaves open into a vector.
+template <class EMIT_ROW>
+static inline sljit_jump *EmitSljitFlatVersionedLoop(struct sljit_compiler *compiler,
+                                                     std::initializer_list<sljit_sw> resolve_offsets,
+                                                     EMIT_ROW &&emit_row) {
+	vector<sljit_jump *> resolve_jumps;
+	for (auto offset : resolve_offsets) {
+		EmitSljitJumpIfInputPointerSet(compiler, offset, resolve_jumps);
+	}
+	auto flat_done = emit_row(true);
+	auto resolve_label = sljit_emit_label(compiler);
+	SetSljitJumpLabels(resolve_jumps, resolve_label);
+	sljit_set_label(flat_done, resolve_label);
+	return emit_row(false);
+}
+
 template <class EMIT_VALID_ROW>
 static inline sljit_jump *EmitSljitSelectedSourceInvalidResultBranchLoop(struct sljit_compiler *compiler,
                                                                          EMIT_VALID_ROW &&emit_valid_row) {
-	return EmitSljitInvalidResultLoop(compiler,
-	                                  [&](vector<sljit_jump *> &invalid_jumps, vector<sljit_jump *> &next_jumps) {
-		                                  EmitLoadSelectedIndex(compiler);
-		                                  invalid_jumps.push_back(EmitSkipInvalidSourceRow(compiler));
-		                                  emit_valid_row(invalid_jumps, next_jumps);
-	                                  });
+	return EmitSljitFlatVersionedLoop(
+	    compiler,
+	    {offsetof(SljitNativeVectorInput, execute_sel), offsetof(SljitNativeVectorInput, source_sel),
+	     offsetof(SljitNativeVectorInput, source_validity)},
+	    [&](bool flat) {
+		    return EmitSljitInvalidResultLoop(
+		        compiler, [&](vector<sljit_jump *> &invalid_jumps, vector<sljit_jump *> &next_jumps) {
+			        if (flat) {
+				        sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_R1, 0, SLJIT_S1, 0);
+			        } else {
+				        EmitLoadSelectedIndex(compiler);
+				        invalid_jumps.push_back(EmitSkipInvalidSourceRow(compiler));
+			        }
+			        emit_valid_row(invalid_jumps, next_jumps);
+		        });
+	    });
 }
 
 template <class EMIT_VALID_ROW>
@@ -119,16 +155,29 @@ static inline sljit_jump *EmitSljitSelectedSourceInvalidResultLoop(struct sljit_
 template <class EMIT_VALID_ROW>
 static inline sljit_jump *EmitSljitTwoSourceInvalidResultBranchLoop(struct sljit_compiler *compiler,
                                                                     EMIT_VALID_ROW &&emit_valid_row) {
-	return EmitSljitInvalidResultLoop(
-	    compiler, [&](vector<sljit_jump *> &invalid_jumps, vector<sljit_jump *> &next_jumps) {
-		    EmitLoadLogicalIndex(compiler, SLJIT_R1);
-		    EmitLoadSourceIndex(compiler, offsetof(SljitNativeVectorInput, source_sel), SLJIT_R1, SLJIT_S3);
-		    EmitLoadSourceIndex(compiler, offsetof(SljitNativeVectorInput, right_source_sel), SLJIT_R1, SLJIT_S4);
-		    invalid_jumps.push_back(
-		        EmitJumpIfValidityNull(compiler, offsetof(SljitNativeVectorInput, source_validity), SLJIT_S3));
-		    invalid_jumps.push_back(
-		        EmitJumpIfValidityNull(compiler, offsetof(SljitNativeVectorInput, right_source_validity), SLJIT_S4));
-		    emit_valid_row(invalid_jumps, next_jumps);
+	return EmitSljitFlatVersionedLoop(
+	    compiler,
+	    {offsetof(SljitNativeVectorInput, execute_sel), offsetof(SljitNativeVectorInput, source_sel),
+	     offsetof(SljitNativeVectorInput, right_source_sel), offsetof(SljitNativeVectorInput, source_validity),
+	     offsetof(SljitNativeVectorInput, right_source_validity)},
+	    [&](bool flat) {
+		    return EmitSljitInvalidResultLoop(compiler, [&](vector<sljit_jump *> &invalid_jumps,
+		                                                    vector<sljit_jump *> &next_jumps) {
+			    if (flat) {
+				    sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_S3, 0, SLJIT_S1, 0);
+				    sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_S4, 0, SLJIT_S1, 0);
+			    } else {
+				    EmitLoadLogicalIndex(compiler, SLJIT_R1);
+				    EmitLoadSourceIndex(compiler, offsetof(SljitNativeVectorInput, source_sel), SLJIT_R1, SLJIT_S3);
+				    EmitLoadSourceIndex(compiler, offsetof(SljitNativeVectorInput, right_source_sel), SLJIT_R1,
+				                        SLJIT_S4);
+				    invalid_jumps.push_back(
+				        EmitJumpIfValidityNull(compiler, offsetof(SljitNativeVectorInput, source_validity), SLJIT_S3));
+				    invalid_jumps.push_back(EmitJumpIfValidityNull(
+				        compiler, offsetof(SljitNativeVectorInput, right_source_validity), SLJIT_S4));
+			    }
+			    emit_valid_row(invalid_jumps, next_jumps);
+		    });
 	    });
 }
 

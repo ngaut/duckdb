@@ -45,8 +45,14 @@ public:
 	}
 
 	//! Chunk step: whether the terminal leaves the pipeline to DuckDB's operators, decided on the first source chunk
-	bool HandsOverToNative(DataChunk &source_chunk, const SljitExecutableNativeContinuation &continuation) {
-		return terminal_runtime.HandsOverToNative(ops, scratch, TerminalStep(), source_chunk, continuation);
+	SljitNativeHandover HandsOverToNative(DataChunk &source_chunk,
+	                                      const SljitExecutableNativeContinuation &continuation) {
+		return terminal_runtime.HandsOverToNative(runtime, ops, scratch, TerminalStep(), source_chunk, continuation);
+	}
+
+	//! Chunk step: the terminal's own decision, after the first source chunk left it pending
+	SljitNativeHandover PendingHandover() {
+		return terminal_runtime.PendingHandover(runtime, ops, scratch, TerminalStep());
 	}
 
 	//! Chunk step: binds the terminal once, before the executor hands over the first chunk

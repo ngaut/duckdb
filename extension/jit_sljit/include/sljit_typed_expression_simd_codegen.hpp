@@ -72,6 +72,16 @@ void EmitSljitTypedExpressionTreeSimdSelectLoop(struct sljit_compiler *compiler,
                                                 const SljitTypedExpressionTreeSimdPlan &plan, sljit_sw mask_offset,
                                                 const vector<idx_t> *validity_refs = nullptr);
 
+// Emits the packed-lane loop of a boolean projection: each lane group's mask becomes 0/1 result bytes. Assumes the
+// flat all-valid fast path context (S1 = flat row base = 0 on entry, S2 = count, S5 = source_data_array, which the
+// loop keeps). Advances S1 to the last full lane group; the caller's scalar fast loop handles the < lanes tail.
+void EmitSljitTypedExpressionTreeSimdBooleanLoop(struct sljit_compiler *compiler, const ExecutionExpressionIR &root,
+                                                 const SljitTypedExpressionTreeSimdPlan &plan);
+
+// The vector registers the packed loops of `plan` hold at once: broadcast constants, the all-ones mask and the
+// predicate's peak temporaries
+idx_t SljitTypedExpressionTreeSimdMaskRegisterCount(const SljitTypedExpressionTreeSimdPlan &plan);
+
 // Appends `index_reg` to the true-selection vector (shared with the scalar path).
 void EmitStoreSljitTypedExpressionTreeTrueSelection(struct sljit_compiler *compiler, sljit_s32 index_reg);
 

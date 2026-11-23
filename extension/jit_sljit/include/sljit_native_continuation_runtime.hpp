@@ -181,10 +181,11 @@ private:
 	SelectionVector selection {STANDARD_VECTOR_SIZE};
 };
 
-//! Which chunks of a step DuckDB's operators take: a region that may hand over decides once on its first chunk, and a
-//! measured one measures the chunks whose zone maps prove the source's filters apart from the rest, since the region
-//! runs them through different steps. FLUSH sinks every row the step still holds before DuckDB's operators take a
-//! chunk after the step ran one
+//! Which chunks of a step DuckDB's operators take: a region that may hand over decides on its first chunk, or on the
+//! first chunk after its own batches decided when the first chunk left the decision pending, and a measured one
+//! measures the chunks whose zone maps prove the source's filters apart from the rest, since the region runs them
+//! through different steps. FLUSH sinks every row the step still holds before DuckDB's operators take a chunk after the
+//! step ran one
 class SljitNativeContinuationDecision {
 public:
 	SljitNativeContinuationDecision(ExecutionRegionRuntime &runtime_p,
@@ -200,22 +201,37 @@ public:
 		}
 	}
 
-	//! HANDS_OVER decides an unmeasured step on its first chunk. READ_INPUT reads every column of a chunk that
+	//! HANDS_OVER decides an unmeasured step on its first chunk; when it leaves the decision PENDING, PENDING_HANDOVER
+	//! reports the step's own decision before each later chunk. READ_INPUT reads every column of a chunk that
 	//! DuckDB's operators take, or that HANDS_OVER looks at
-	template <class HANDS_OVER, class FLUSH, class READ_INPUT>
+	template <class HANDS_OVER, class PENDING_HANDOVER, class FLUSH, class READ_INPUT>
 	optional_ptr<DataChunk> ContinuesNatively(DataChunk &input, bool source_filters_hold, HANDS_OVER &&hands_over,
-	                                          FLUSH &&flush, READ_INPUT &&read_input) {
+	                                          PENDING_HANDOVER &&pending_handover, FLUSH &&flush,
+	                                          READ_INPUT &&read_input) {
 		if (!continuation) {
 			return nullptr;
 		}
 		if (!measured) {
-			if (!decided) {
-				decided = true;
-				read_input();
-				if (!hands_over(continuation->Plan())) {
-					continuation.reset();
-					return nullptr;
+			if (handover == SljitNativeHandover::PENDING) {
+				if (asked) {
+					handover = pending_handover();
+					if (handover == SljitNativeHandover::NATIVE) {
+						flush();
+					}
+				} else {
+					asked = true;
+					read_input();
+					handover = hands_over(continuation->Plan());
 				}
+			}
+			switch (handover) {
+			case SljitNativeHandover::PENDING:
+				return nullptr;
+			case SljitNativeHandover::GENERATED:
+				continuation.reset();
+				return nullptr;
+			case SljitNativeHandover::NATIVE:
+				break;
 			}
 			read_input();
 			return &continuation->Prepare(runtime, input, source_filters_hold);
@@ -256,7 +272,8 @@ private:
 	ExecutionRegionRuntime &runtime;
 	unique_ptr<SljitNativeContinuation> continuation;
 	bool measured = false;
-	bool decided = false;
+	bool asked = false;
+	SljitNativeHandover handover = SljitNativeHandover::PENDING;
 	//! Per chunk class: the chunks whose zone maps prove the source's filters, and the rest
 	std::array<SljitNativeLegMeasurement, 2> measurements;
 	bool has_previous = false;

@@ -307,7 +307,7 @@ static idx_t SljitTraceGroupKeySourceColumn(const vector<SljitExecutableRegionOp
 }
 
 static bool BuildSljitNativeContinuation(const SljitNativeRegionPlan &region, SljitExecutableRegion &executable,
-                                         string &error) {
+                                         bool delegates_sink, string &error) {
 	auto continuation = make_uniq<SljitExecutableNativeContinuation>();
 	auto current_not_null = region.source_not_null;
 	auto current_min_values = region.source_min_values;
@@ -326,15 +326,31 @@ static bool BuildSljitNativeContinuation(const SljitNativeRegionPlan &region, Sl
 		SljitUpdateExecutableCurrentNotNull(op, current_not_null);
 		SljitUpdateExecutableCurrentRanges(op, current_min_values, current_max_values);
 	}
-	continuation->group_key_source_column = SljitTraceGroupKeySourceColumn(executable.ops, continuation->source_ops);
-	continuation->measured =
-	    SljitAggregateSinkAdmitsNativeChunks(executable.ops.back().AggregateUpdate().plan.sink_info);
-	auto &aggregates = executable.ops.back().AggregateUpdate().plan.sink_info.aggregates;
-	continuation->counts_rows_only =
-	    aggregates.size() == 1 && (aggregates[0].primitive_update_kind == AggregatePrimitiveUpdateKind::COUNT ||
-	                               aggregates[0].primitive_update_kind == AggregatePrimitiveUpdateKind::COUNT_STAR);
+	continuation->measured = delegates_sink;
+	if (executable.ops.back().Kind() == SljitNativeRegionOpKind::AGGREGATE_UPDATE) {
+		auto &sink_info = executable.ops.back().AggregateUpdate().plan.sink_info;
+		continuation->group_key_source_column =
+		    SljitTraceGroupKeySourceColumn(executable.ops, continuation->source_ops);
+		continuation->measured = continuation->measured || SljitAggregateSinkAdmitsNativeChunks(sink_info);
+		auto &aggregates = sink_info.aggregates;
+		continuation->counts_rows_only =
+		    aggregates.size() == 1 && (aggregates[0].primitive_update_kind == AggregatePrimitiveUpdateKind::COUNT ||
+		                               aggregates[0].primitive_update_kind == AggregatePrimitiveUpdateKind::COUNT_STAR);
+	}
 	executable.native_continuation = std::move(continuation);
 	return true;
+}
+
+//! Whether every chunk the recipe runs reaches the sink through DuckDB's operators: the sink then owns every aggregate
+//! state on both legs, so the region's chunks and DuckDB's may alternate into it and the faster is measured
+static bool SljitRecipeDelegatesSink(const SljitFullPipelineRecipe &recipe) {
+	for (auto sequence : {&recipe.primitive_sequence, &recipe.filters_hold_sequence}) {
+		if (sequence->Count() != 0 &&
+		    sequence->Step(sequence->Count() - 1).kind != SljitFullPipelinePrimitiveKind::NATIVE_TAIL_DELEGATION) {
+			return false;
+		}
+	}
+	return recipe.primitive_sequence.Count() != 0;
 }
 
 //! The op evaluating the scan's table filters: a source whose filters are generated lowers them to the region's first
@@ -412,12 +428,6 @@ bool BuildSljitExecutableRegion(const SljitNativeRegionPlan &region, SljitExecut
 		SljitUpdateExecutableCurrentRanges(op, current_min_values, current_max_values);
 	}
 
-	if (SljitRegionMayContinueNatively(region) && !SljitAggregateUpdateIndexesBoundedDomain(executable.ops.back())) {
-		if (!BuildSljitNativeContinuation(region, executable, error)) {
-			return false;
-		}
-	}
-
 	// Recipe binding is the executable ownership boundary. A fused aggregate step
 	// owns the predicate named by that step; every other recipe needs the standalone
 	// selector. Bind once with prepared filters, publish only the selectors that recipe
@@ -439,6 +449,13 @@ bool BuildSljitExecutableRegion(const SljitNativeRegionPlan &region, SljitExecut
 			continue;
 		}
 		if (!SljitCompilePreparedExecutableFilter(op, error)) {
+			return false;
+		}
+	}
+	const bool delegates_sink = SljitRecipeDelegatesSink(recipe_plan.Recipe());
+	if (delegates_sink ||
+	    (SljitRegionMayContinueNatively(region) && !SljitAggregateUpdateIndexesBoundedDomain(executable.ops.back()))) {
+		if (!BuildSljitNativeContinuation(region, executable, delegates_sink, error)) {
 			return false;
 		}
 	}

@@ -54,6 +54,7 @@ public:
 		return native_continuation.ContinuesNatively(
 		    input, proof.table_filters_hold,
 		    [&](const SljitExecutableNativeContinuation &plan) { return executor.HandsOverToNative(input, plan); },
+		    [&]() { return executor.PendingHandover(); },
 		    [&]() { SljitChunkStepResult(executor.FlushChunks(), result); },
 		    [&]() {
 			    if (proof.deferred_columns) {

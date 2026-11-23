@@ -981,6 +981,40 @@ static void EmitSljitSimdEnsureIdentityPrefixMaterialized(struct sljit_compiler 
 	sljit_set_label(backfill_done, materialized);
 }
 
+idx_t SljitTypedExpressionTreeSimdMaskRegisterCount(const SljitTypedExpressionTreeSimdPlan &plan) {
+	return plan.constant_count + (plan.needs_all_ones ? 1 : 0) + plan.max_live_temps;
+}
+
+void EmitSljitTypedExpressionTreeSimdBooleanLoop(struct sljit_compiler *compiler, const ExecutionExpressionIR &root,
+                                                 const SljitTypedExpressionTreeSimdPlan &plan) {
+	SljitSimdEmitContext ctx;
+	ctx.simd_type = plan.simd_type;
+	ctx.scale = plan.elem_scale;
+	ctx.mixed = plan.mixed_width;
+	EmitSljitSimdBroadcastConstants(compiler, root, ctx);
+	if (plan.needs_all_ones) {
+		ctx.all_ones_reg = ctx.next_temp++;
+		sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_R0, 0, SLJIT_IMM, -1);
+		sljit_emit_simd_replicate(compiler, ctx.simd_type, SLJIT_VR(ctx.all_ones_reg), SLJIT_R0, 0);
+	}
+	// The lane sign bits b0..b3 spread to one 0/1 byte per row: the multiplier's shifted copies of the 4-bit (or
+	// 2-bit) value land 7 bits apart, so they never carry into each other, and the AND keeps bit 8 * lane of each
+	const bool four_lanes = plan.lanes == 4;
+	const sljit_sw spread = four_lanes ? 0x204081 : 0x81;
+	const sljit_sw lane_bytes = four_lanes ? 0x01010101 : 0x0101;
+	auto loop = EmitSljitSimdLaneLoopEntry(compiler, plan.lanes);
+	auto mask = EmitSljitSimdMask(compiler, root, ctx);
+	sljit_emit_simd_sign(compiler, ctx.simd_type | SLJIT_SIMD_STORE | SLJIT_32, SLJIT_VR(mask.reg), SLJIT_R3, 0);
+	FreeSimdValue(ctx, mask);
+	sljit_emit_op2(compiler, SLJIT_MUL, SLJIT_R3, 0, SLJIT_R3, 0, SLJIT_IMM, spread);
+	sljit_emit_op2(compiler, SLJIT_AND, SLJIT_R3, 0, SLJIT_R3, 0, SLJIT_IMM, lane_bytes);
+	sljit_emit_op1(compiler, SLJIT_MOV_P, SLJIT_R2, 0, SLJIT_MEM1(SLJIT_S0),
+	               offsetof(SljitNativeVectorInput, result_data));
+	sljit_emit_op1(compiler, four_lanes ? SLJIT_MOV32 : SLJIT_MOV_U16, SLJIT_MEM2(SLJIT_R2, SLJIT_S1), 0, SLJIT_R3, 0);
+	sljit_emit_op2(compiler, SLJIT_ADD, SLJIT_S1, 0, SLJIT_S1, 0, SLJIT_IMM, plan.lanes);
+	EmitSljitSimdLaneLoopLatch(compiler, loop, plan.lanes);
+}
+
 void EmitSljitTypedExpressionTreeSimdSelectLoop(struct sljit_compiler *compiler, const ExecutionExpressionIR &root,
                                                 const SljitTypedExpressionTreeSimdPlan &plan, sljit_sw mask_offset,
                                                 const vector<idx_t> *validity_refs) {

@@ -266,7 +266,7 @@ BuildSljitNativeStringDecompress(idx_t source_size, SljitNativeVectorFunction &f
 	sljit_emit_enter(compiler, 0, SLJIT_ARGS1V(P), 5 | SLJIT_ENTER_FLOAT(2), 3, 0);
 	EmitInitSljitNativeVectorLoop(compiler);
 
-	sljit_jump *helper_error = nullptr;
+	vector<sljit_jump *> helper_errors;
 	auto done =
 	    EmitSljitSelectedSourceInvalidResultBranchLoop(compiler, [&](vector<sljit_jump *> &, vector<sljit_jump *> &) {
 		    sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_MEM1(SLJIT_S0),
@@ -278,11 +278,11 @@ BuildSljitNativeStringDecompress(idx_t source_size, SljitNativeVectorFunction &f
 		                     SLJIT_FUNC_ADDR(SljitNativeStringDecompress));
 		    sljit_emit_op1(compiler, SLJIT_MOV_U8, SLJIT_R0, 0, SLJIT_MEM1(SLJIT_S0),
 		                   offsetof(SljitNativeVectorInput, has_error));
-		    helper_error = sljit_emit_cmp(compiler, SLJIT_NOT_EQUAL, SLJIT_R0, 0, SLJIT_IMM, 0);
+		    helper_errors.push_back(sljit_emit_cmp(compiler, SLJIT_NOT_EQUAL, SLJIT_R0, 0, SLJIT_IMM, 0));
 	    });
 	auto done_label = sljit_emit_label(compiler);
 	sljit_set_label(done, done_label);
-	sljit_set_label(helper_error, done_label);
+	SetSljitJumpLabels(helper_errors, done_label);
 	sljit_emit_return_void(compiler);
 
 	return FinishSljitCode(compiler, function, error);

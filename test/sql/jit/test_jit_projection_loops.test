@@ -1,0 +1,189 @@
+# name: test/sql/jit/test_jit_projection_loops.test
+# description: A region whose chunks reach DuckDB's sink through its operators measures its chunks against DuckDB's and keeps the faster, in insertion order. Generated projections over flat valid rows run packed boolean masks and loops without per-row index or NULL resolution; vectors with NULLs, selections or dictionaries resolve them per row; a projection result without NULLs carries no validity mask; a hash aggregate whose update finds no group runs hands the rest of its pipeline to DuckDB's operators. Every shape matches native results
+# group: [jit]
+
+require jit_sljit
+
+load {TEST_DIR}/jit_projection_loops.db
+
+# 400003 rows: the last vector ends in a group of fewer than four rows
+statement ok
+CREATE TABLE facts AS
+SELECT i AS id,
+       (i * 7919 % 1000)::INTEGER AS k,
+       ((i * 13) % 2000001 - 1000000)::BIGINT AS b,
+       CASE WHEN i % 11 = 0 THEN NULL ELSE (i % 5003 - 2500)::INTEGER END AS n,
+       (i % 7)::INTEGER AS s
+FROM range(400003) t(i)
+
+statement ok
+CHECKPOINT
+
+restart
+
+statement ok
+SET jit_measure_native_legs=false
+
+statement ok
+SET jit_cbo_startup_base_cost=0
+
+statement ok
+SET jit_cbo_startup_margin_basis_points=0
+
+foreach threads 1 4
+
+statement ok
+SET threads={threads}
+
+foreach policy off auto
+
+statement ok
+SET jit_policy='{policy}'
+
+# 32-bit masks, 64-bit masks, a conjunction mixing both widths, OR, negated comparisons
+statement ok
+CREATE OR REPLACE TEMP TABLE masks_{policy} AS
+SELECT id, k < 500 AS lt, k >= 750 AS ge, k <> 3 AS ne, k = 7 AS eq, b < 0 AS wide, k < 500 AND b > 0 AS mixed,
+       k < 100 OR b < -900000 AS any_of, k <= 10 AS le, b >= 999990 AS wide_ge
+FROM facts
+
+# rows a WHERE clause selects, and a nullable column
+statement ok
+CREATE OR REPLACE TEMP TABLE selected_{policy} AS
+SELECT id, k < 500 AS lt, b > 0 AND k > 10 AS mixed, n < 0 AS nullable, n IS NULL AS missing
+FROM facts WHERE id % 3 = 0
+
+# casts: narrowing within range, unsigned narrowing of an expression, TRY_CAST out of range
+statement ok
+CREATE OR REPLACE TEMP TABLE casts_{policy} AS
+SELECT id, k::SMALLINT AS narrow, (id % 50000)::USMALLINT AS unsigned_key, TRY_CAST(b * 3000 AS INTEGER) AS tried,
+       s::UTINYINT AS tiny
+FROM facts
+
+# a nullable source through a cast and through arithmetic with a second source, either side NULL
+statement ok
+CREATE OR REPLACE TEMP TABLE nullable_{policy} AS
+SELECT id, n::SMALLINT AS narrow, TRY_CAST(n AS UTINYINT) AS tried, n + k AS left_null, k - n AS right_null,
+       n::BIGINT * 3 AS widened
+FROM facts
+
+# arithmetic over one and two sources, flat and selected
+statement ok
+CREATE OR REPLACE TEMP TABLE arithmetic_{policy} AS
+SELECT id, k + b AS two, k * 2 + id AS tree, b - id AS diff, id % 50000 AS modulo, id // 160 AS quotient
+FROM facts
+
+statement ok
+CREATE OR REPLACE TEMP TABLE arithmetic_selected_{policy} AS
+SELECT id, k + b AS two, n + k AS nullable_two, id % 50000 AS modulo
+FROM facts WHERE k < 900
+
+# hash aggregates over an expression key: without group runs the pipeline continues in DuckDB's operators, with them
+# the generated update keeps it
+statement ok
+CREATE OR REPLACE TEMP TABLE groups_{policy} AS
+SELECT 'random' AS shape, id % 50000 AS key, sum(b) AS total, count(*) AS rows FROM facts GROUP BY ALL
+UNION ALL
+SELECT 'runs', id // 160, sum(b), count(*) FROM facts GROUP BY ALL
+UNION ALL
+SELECT 'filtered', id % 50000, sum(b), count(*) FILTER (WHERE k < 500) FROM facts GROUP BY ALL
+
+endloop
+
+foreach table masks selected casts nullable arithmetic arithmetic_selected groups
+
+query I
+SELECT count(*) FROM ((SELECT * FROM {table}_off EXCEPT ALL SELECT * FROM {table}_auto)
+                      UNION ALL (SELECT * FROM {table}_auto EXCEPT ALL SELECT * FROM {table}_off))
+----
+0
+
+endloop
+
+query IIIIII
+SELECT (SELECT count(*) FROM masks_auto), (SELECT count(*) FROM selected_auto), (SELECT count(*) FROM casts_auto),
+       (SELECT count(*) FROM arithmetic_auto), (SELECT count(*) FROM arithmetic_selected_auto),
+       (SELECT count(*) FROM groups_auto)
+----
+400003	133335	400003	400003	360002	102501
+
+endloop
+
+# a region whose chunks reach the sink through DuckDB's operators measures its chunks against DuckDB's and alternates
+# them into the sink: rows keep their insertion order and aggregates their results
+statement ok
+SET jit_measure_native_legs=true
+
+foreach threads 1 4
+
+statement ok
+SET threads={threads}
+
+foreach policy off auto
+
+statement ok
+SET jit_policy='{policy}'
+
+statement ok
+CREATE OR REPLACE TEMP TABLE measured_rows_{policy} AS
+SELECT id, id % 50000 AS a, k < 500 AS b, (k + b) * 3 AS c FROM facts
+
+# a generated filter batches the rows it keeps into fuller chunks for the sink, which a switch to DuckDB's chunks flushes
+# first
+statement ok
+CREATE OR REPLACE TEMP TABLE measured_filtered_{policy} AS
+SELECT id, id % 50000 AS a, (k + b) * 3 AS c FROM facts WHERE k < 50 AND b > -900000
+
+statement ok
+CREATE OR REPLACE TEMP TABLE measured_groups_{policy} AS
+SELECT id % 50000 AS key, count(*) FILTER (WHERE k < 500) AS low, count(*) FILTER (WHERE k >= 750) AS high
+FROM facts GROUP BY ALL
+
+endloop
+
+query I
+SELECT count(*) FROM ((SELECT rowid, * FROM measured_rows_off EXCEPT ALL SELECT rowid, * FROM measured_rows_auto)
+                      UNION ALL (SELECT rowid, * FROM measured_rows_auto EXCEPT ALL SELECT rowid, * FROM measured_rows_off))
+----
+0
+
+query I
+SELECT count(*) FROM ((SELECT rowid, * FROM measured_filtered_off EXCEPT ALL SELECT rowid, * FROM measured_filtered_auto)
+                      UNION ALL (SELECT rowid, * FROM measured_filtered_auto EXCEPT ALL
+                                 SELECT rowid, * FROM measured_filtered_off))
+----
+0
+
+query I
+SELECT count(*) FROM ((SELECT * FROM measured_groups_off EXCEPT ALL SELECT * FROM measured_groups_auto)
+                      UNION ALL (SELECT * FROM measured_groups_auto EXCEPT ALL SELECT * FROM measured_groups_off))
+----
+0
+
+endloop
+
+statement ok
+SET jit_measure_native_legs=false
+
+# a cast or arithmetic that fails on any row raises the error under both policies, in the flat loops too
+foreach policy off auto
+
+statement ok
+SET jit_policy='{policy}'
+
+statement error
+SELECT sum(x) FROM (SELECT (b * 3000)::INTEGER AS x FROM facts)
+----
+<REGEX>:Conversion Error:.*out of range.*
+
+statement error
+SELECT count(*) FROM (SELECT (k - 500)::UTINYINT AS x FROM facts) WHERE x > 0
+----
+<REGEX>:Conversion Error:.*out of range.*
+
+statement error
+SELECT sum(x) FROM (SELECT b * 92233720368548 AS x FROM facts)
+----
+Overflow in multiplication
+
+endloop

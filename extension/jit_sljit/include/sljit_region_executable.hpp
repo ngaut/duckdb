@@ -648,6 +648,9 @@ private:
 	    payload;
 };
 
+//! Whether DuckDB's operators take a step's chunks: decided, or left to the step's own batches
+enum class SljitNativeHandover : uint8_t { GENERATED, NATIVE, PENDING };
+
 //! What a region that may hand its pipeline to DuckDB's operators needs to decide and to continue natively
 struct SljitExecutableNativeContinuation {
 	//! Turn a fetched source chunk into the native scan's output: the source's own filters and layout repair

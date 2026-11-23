@@ -223,46 +223,45 @@ static void AccumulateExecutionRegionCostFact(const ExecutionRegionStageCostFact
 	}
 }
 
-static ExecutionRegionCostFacts BuildExecutionRegionCostFacts(const ExecutionRegionCandidate &candidate) {
+static ExecutionRegionCostFacts BuildExecutionRegionCostFacts(const ExecutionRegionCandidate &candidate,
+                                                              const ExecutionRegionCandidateTraits &traits) {
 	ExecutionRegionCostFacts result;
 	bool has_filter = false;
 	bool has_projection = false;
 	for (auto &stage : candidate.stage_plan.stages) {
 		AccumulateExecutionRegionCostFact(GetExecutionRegionStageCostFact(stage), result, has_filter, has_projection);
 	}
-	RemoveExecutionRegionGeneratedAggregateUpdateNativeCost(result, candidate.traits);
-	const bool has_selected_view_materialization =
-	    candidate.traits.selected_hash_join_filter_materialization_count > 0 ||
-	    candidate.traits.selected_hash_join_view_materialization_count > 0 ||
-	    candidate.traits.materialized_hash_join_output_count > 0;
-	if ((has_filter || has_projection) && candidate.traits.generated_aggregate_update_count > 0 &&
+	RemoveExecutionRegionGeneratedAggregateUpdateNativeCost(result, traits);
+	const bool has_selected_view_materialization = traits.selected_hash_join_filter_materialization_count > 0 ||
+	                                               traits.selected_hash_join_view_materialization_count > 0 ||
+	                                               traits.materialized_hash_join_output_count > 0;
+	if ((has_filter || has_projection) && traits.generated_aggregate_update_count > 0 &&
 	    !has_selected_view_materialization) {
 		result.materialization_elision_count = 1;
 	}
 	result.generated_stage_count += result.native_join_stage_count;
 	result.generated_backend_stage_count += result.native_join_stage_count;
-	result.generated_backend_stage_count += candidate.traits.mark_probe_filter_count;
-	result.generated_stage_count += candidate.traits.generated_aggregate_update_count;
-	result.generated_stage_count += candidate.traits.generated_aggregate_lookup_count;
-	result.generated_backend_stage_count += candidate.traits.generated_aggregate_update_count;
-	result.generated_backend_stage_count += candidate.traits.generated_aggregate_lookup_count;
-	if (ExecutionRegionSinkKindIsGroupedAggregateUpdate(candidate.traits.sink_kind)) {
-		result.generated_grouped_aggregate_stage_count += candidate.traits.generated_aggregate_lookup_count;
+	result.generated_backend_stage_count += traits.mark_probe_filter_count;
+	result.generated_stage_count += traits.generated_aggregate_update_count;
+	result.generated_stage_count += traits.generated_aggregate_lookup_count;
+	result.generated_backend_stage_count += traits.generated_aggregate_update_count;
+	result.generated_backend_stage_count += traits.generated_aggregate_lookup_count;
+	if (ExecutionRegionSinkKindIsGroupedAggregateUpdate(traits.sink_kind)) {
+		result.generated_grouped_aggregate_stage_count += traits.generated_aggregate_lookup_count;
 	}
-	if (candidate.traits.sink_kind == ExecutionRegionSinkKind::HASH_AGGREGATE_UPDATE &&
-	    candidate.traits.generated_aggregate_update_count > candidate.traits.generated_aggregate_lookup_count) {
+	if (traits.sink_kind == ExecutionRegionSinkKind::HASH_AGGREGATE_UPDATE &&
+	    traits.generated_aggregate_update_count > traits.generated_aggregate_lookup_count) {
 		result.native_grouped_state_address_lookup_count +=
-		    candidate.traits.generated_aggregate_update_count - candidate.traits.generated_aggregate_lookup_count;
+		    traits.generated_aggregate_update_count - traits.generated_aggregate_lookup_count;
 	}
-	result.may_anchor_compiled_body = result.may_anchor_compiled_body ||
-	                                  candidate.traits.generated_aggregate_update_count > 0 ||
-	                                  candidate.traits.generated_aggregate_lookup_count > 0;
-	result.generated_work_class = ClassifyExecutionRegionGeneratedWork(candidate.traits);
-	result.native_protocol_class = ClassifyExecutionRegionNativeProtocol(candidate.traits);
-	if (candidate.traits.sink_kind == ExecutionRegionSinkKind::HASH_JOIN_BUILD) {
+	result.may_anchor_compiled_body = result.may_anchor_compiled_body || traits.generated_aggregate_update_count > 0 ||
+	                                  traits.generated_aggregate_lookup_count > 0;
+	result.generated_work_class = ClassifyExecutionRegionGeneratedWork(traits);
+	result.native_protocol_class = ClassifyExecutionRegionNativeProtocol(traits);
+	if (traits.sink_kind == ExecutionRegionSinkKind::HASH_JOIN_BUILD) {
 		result.native_hash_join_build_sink_count++;
 	}
-	result.native_delim_join_sink = candidate.traits.sink_kind == ExecutionRegionSinkKind::DELIM_JOIN_SINK;
+	result.native_delim_join_sink = traits.sink_kind == ExecutionRegionSinkKind::DELIM_JOIN_SINK;
 	return result;
 }
 
@@ -299,41 +298,68 @@ GetExecutionRegionSelectedSourceFilterCost(const ExecutionRegionStagePlan &stage
 	return result;
 }
 
-PhysicalRunnerCostInput BuildExecutionRegionCandidateCostInput(const ExecutionRegionCandidate &candidate) {
-	auto cost_facts = BuildExecutionRegionCostFacts(candidate);
+static PhysicalRunnerCostInput BuildExecutionRegionCandidateCostInput(const ExecutionRegionCandidate &candidate,
+                                                                      const ExecutionRegionCandidateTraits &traits) {
+	auto cost_facts = BuildExecutionRegionCostFacts(candidate, traits);
 	PhysicalRunnerCostInput input;
 	input.input_scope = PhysicalRunnerCostInputScope::EXECUTION_REGION_CANDIDATE;
 	input.estimated_cardinality = candidate.estimated_cardinality;
-	input.expression_cost = candidate.traits.expression_cost;
-	input.source_contract_input_cardinality = candidate.traits.source_contract_input_cardinality;
-	input.source_contract_output_cardinality_unknown = candidate.traits.source_contract_output_cardinality_unknown;
-	input.finalized_dynamic_filter_cardinality_estimate =
-	    candidate.traits.finalized_dynamic_filter_cardinality_estimate;
+	input.expression_cost = traits.expression_cost;
+	input.source_contract_input_cardinality = traits.source_contract_input_cardinality;
+	input.source_contract_output_cardinality_unknown = traits.source_contract_output_cardinality_unknown;
+	input.finalized_dynamic_filter_cardinality_estimate = traits.finalized_dynamic_filter_cardinality_estimate;
 	input.generated_stage_count = cost_facts.generated_stage_count;
 	input.generated_backend_stage_count = cost_facts.generated_backend_stage_count;
 	input.generated_grouped_aggregate_stage_count = cost_facts.generated_grouped_aggregate_stage_count;
 	input.native_grouped_state_address_lookup_count = cost_facts.native_grouped_state_address_lookup_count;
-	input.grouped_aggregate_estimated_cardinality = candidate.traits.grouped_aggregate_estimated_cardinality;
-	input.grouped_aggregate_key_count = candidate.traits.grouped_aggregate_key_count;
+	input.grouped_aggregate_estimated_cardinality = traits.grouped_aggregate_estimated_cardinality;
+	input.grouped_aggregate_key_count = traits.grouped_aggregate_key_count;
 	input.materialization_elision_count = cost_facts.materialization_elision_count;
 	input.full_pipeline = cost_facts.may_anchor_compiled_body;
-	input.selected_hash_join_filter_materialization_count =
-	    candidate.traits.selected_hash_join_filter_materialization_count;
+	input.selected_hash_join_filter_materialization_count = traits.selected_hash_join_filter_materialization_count;
 	input.native_join_stage_count = cost_facts.native_join_stage_count;
 	input.native_hash_join_build_sink_count = cost_facts.native_hash_join_build_sink_count;
 	input.native_delim_join_sink = cost_facts.native_delim_join_sink;
 	input.native_aggregate_stage_count = cost_facts.native_aggregate_stage_count;
 	input.native_grouped_aggregate_stage_count = cost_facts.native_grouped_aggregate_stage_count;
-	input.source_filter_count = candidate.traits.source_filter_count;
+	input.source_filter_count = traits.source_filter_count;
 	input.generated_work_class = cost_facts.generated_work_class;
 	input.native_protocol_class = cost_facts.native_protocol_class;
 	input.has_accelerated_work = cost_facts.may_anchor_compiled_body;
 	return input;
 }
 
+PhysicalRunnerCostInput BuildExecutionRegionCandidateCostInput(const ExecutionRegionCandidate &candidate) {
+	return BuildExecutionRegionCandidateCostInput(candidate, candidate.traits);
+}
+
+//! The candidate's traits under the selected lowering: an aggregate update the backend binds no primitive payloads for
+//! runs in DuckDB's sink, so it is native work, its FILTERs are not generated filters, and the chunk feeding it is not
+//! elided
+static ExecutionRegionCandidateTraits
+GetExecutionRegionSelectedTraits(const ExecutionRegionCandidate &candidate,
+                                 const ExecutionRegionLoweringPlan &lowering_plan) {
+	auto traits = candidate.traits;
+	const auto &facts = lowering_plan.capability_facts;
+	const auto backend_updates = facts.backend_hash_aggregate_update_count +
+	                             facts.backend_perfect_hash_aggregate_update_count +
+	                             facts.backend_ungrouped_aggregate_update_count;
+	if (traits.generated_aggregate_update_count == 0 ||
+	    backend_updates <= facts.backend_primitive_aggregate_payload_update_count) {
+		return traits;
+	}
+	D_ASSERT(traits.filter_count >= traits.generated_aggregate_filter_count);
+	traits.filter_count -= traits.generated_aggregate_filter_count;
+	traits.generated_aggregate_filter_count = 0;
+	traits.generated_aggregate_update_count = 0;
+	traits.generated_aggregate_lookup_count = 0;
+	return traits;
+}
+
 PhysicalRunnerCostInput BuildExecutionRegionCandidateCostInput(const ExecutionRegionCandidate &candidate,
                                                                const ExecutionRegionLoweringPlan &lowering_plan) {
-	auto input = BuildExecutionRegionCandidateCostInput(candidate);
+	const auto traits = GetExecutionRegionSelectedTraits(candidate, lowering_plan);
+	auto input = BuildExecutionRegionCandidateCostInput(candidate, traits);
 	const auto candidate_generated_source_filters =
 	    CountExecutionRegionGeneratedSourceFilterStages(candidate.stage_plan);
 	D_ASSERT(input.generated_stage_count >= candidate_generated_source_filters);
@@ -342,7 +368,7 @@ PhysicalRunnerCostInput BuildExecutionRegionCandidateCostInput(const ExecutionRe
 	    GetExecutionRegionSelectedSourceFilterCost(candidate.stage_plan, lowering_plan.SelectedStages());
 	input.generated_stage_count += selected_source_filter_cost.count;
 	input.expression_cost += selected_source_filter_cost.expression_cost;
-	auto selected_traits = candidate.traits;
+	auto selected_traits = traits;
 	selected_traits.source_filter_expression_count = selected_source_filter_cost.count;
 	input.generated_work_class = ClassifyExecutionRegionGeneratedWork(selected_traits);
 	// the candidate credits a generated aggregate update with eliding the chunk its source filter produces; when the
@@ -370,9 +396,9 @@ PhysicalRunnerCostInput BuildExecutionRegionCandidateCostInput(const ExecutionRe
 		input.has_accelerated_work = true;
 	}
 	const bool weak_stateful_grouped_update =
-	    candidate.traits.source_kind == ExecutionRegionSourceKind::STATEFUL_OPERATOR &&
-	    candidate.traits.source_execution == ExecutionRegionSourceExecutionKind::SOURCE_CONTRACT &&
-	    candidate.traits.sink_kind == ExecutionRegionSinkKind::HASH_AGGREGATE_UPDATE &&
+	    traits.source_kind == ExecutionRegionSourceKind::STATEFUL_OPERATOR &&
+	    traits.source_execution == ExecutionRegionSourceExecutionKind::SOURCE_CONTRACT &&
+	    traits.sink_kind == ExecutionRegionSinkKind::HASH_AGGREGATE_UPDATE &&
 	    input.materialization_elision_count == 0 && backend_facts.backend_hash_aggregate_update_count > 0 &&
 	    backend_facts.backend_native_state_address_lookup_count > 0;
 	if (backend_facts.backend_weak_accelerated_work_count == 0) {
@@ -738,6 +764,7 @@ static bool TryAccumulateExecutionRegionPhysicalOperatorCost(const PhysicalOpera
 		}
 		AddExecutionRegionGeneratedBodyStage(input);
 		traits.generated_aggregate_update_count++;
+		traits.generated_aggregate_filter_count += ExecutionRegionAggregateFilterCount(sink);
 		traits.filter_count += ExecutionRegionAggregateFilterCount(sink);
 		return true;
 	}
@@ -775,6 +802,7 @@ static bool TryAccumulateExecutionRegionPhysicalOperatorCost(const PhysicalOpera
 			input.native_grouped_state_address_lookup_count++;
 		}
 		traits.generated_aggregate_update_count++;
+		traits.generated_aggregate_filter_count += ExecutionRegionAggregateFilterCount(sink);
 		traits.filter_count += ExecutionRegionAggregateFilterCount(sink);
 		return true;
 	}
@@ -811,6 +839,7 @@ static bool TryAccumulateExecutionRegionPhysicalOperatorCost(const PhysicalOpera
 			input.native_grouped_state_address_lookup_count++;
 		}
 		traits.generated_aggregate_update_count++;
+		traits.generated_aggregate_filter_count += ExecutionRegionAggregateFilterCount(sink);
 		traits.filter_count += ExecutionRegionAggregateFilterCount(sink);
 		return true;
 	}

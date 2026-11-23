@@ -707,6 +707,7 @@ static ExecutionRegionCandidateTraits BuildExecutionRegionCandidateTraits(const 
 			if (node.sink) {
 				if (ExecutionRegionAggregateUpdateGeneratesBody(*node.sink)) {
 					traits.generated_aggregate_update_count++;
+					traits.generated_aggregate_filter_count += ExecutionRegionAggregateFilterCount(*node.sink);
 					traits.filter_count += ExecutionRegionAggregateFilterCount(*node.sink);
 				}
 				if (ExecutionRegionAggregateLookupGeneratesBody(*node.sink)) {

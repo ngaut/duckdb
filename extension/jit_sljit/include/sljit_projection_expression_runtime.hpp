@@ -26,6 +26,16 @@
 
 namespace duckdb {
 
+//! Sizes a flat result the expression wrote; a result whose rows all turned out valid drops its validity mask, so the
+//! consumers (generated loops, native operators) take their paths for vectors without NULLs
+static void SljitFinishFlatProjectionResult(Vector &result, idx_t count) {
+	auto &validity = FlatVector::ValidityMutable(result);
+	if (validity.CheckAllValid(count)) {
+		validity.Reset(count);
+	}
+	FlatVector::SetSize(result, count_t(count));
+}
+
 template <class ADAPTER_SCRATCH>
 static bool SljitTryExecuteProjectionExpressionOverDictionary(SljitExecutableRegionExpression &expr, DataChunk &input,
                                                               Vector &result, const SelectionVector *execute_sel,
@@ -71,7 +81,7 @@ static void SljitExecuteProjectionExpression(SljitExecutableRegionExpression &ex
 		if (runtime) {
 			RecordSljitRegionGeneratedWork(*runtime, SljitNativeRegionOpKind::PROJECTION, count);
 		}
-		FlatVector::SetSize(result, count_t(count));
+		SljitFinishFlatProjectionResult(result, count);
 		return;
 	}
 	if (plan.kind == SljitNativeRegionExpressionKind::TYPED_EXPRESSION_TREE) {
@@ -95,7 +105,7 @@ static void SljitExecuteProjectionExpression(SljitExecutableRegionExpression &ex
 		if (runtime) {
 			RecordSljitRegionGeneratedWork(*runtime, SljitNativeRegionOpKind::PROJECTION, count);
 		}
-		FlatVector::SetSize(result, count_t(count));
+		SljitFinishFlatProjectionResult(result, count);
 		return;
 	}
 	if (plan.kind == SljitNativeRegionExpressionKind::DECIMAL64_TO_DOUBLE) {
@@ -125,7 +135,7 @@ static void SljitExecuteProjectionExpression(SljitExecutableRegionExpression &ex
 			                           ? double(value) / factor
 			                           : SljitNativeDecimalToDouble(value, scale);
 		}
-		FlatVector::SetSize(result, count_t(count));
+		SljitFinishFlatProjectionResult(result, count);
 		return;
 	}
 	if (plan.kind == SljitNativeRegionExpressionKind::DECIMAL128_SCALE_UP) {
@@ -153,7 +163,7 @@ static void SljitExecuteProjectionExpression(SljitExecutableRegionExpression &ex
 			}
 			result_data[row_idx] = scaled;
 		}
-		FlatVector::SetSize(result, count_t(count));
+		SljitFinishFlatProjectionResult(result, count);
 		return;
 	}
 	if (plan.kind == SljitNativeRegionExpressionKind::STRING_SUBSTRING) {
@@ -178,7 +188,7 @@ static void SljitExecuteProjectionExpression(SljitExecutableRegionExpression &ex
 			}
 			result_data[row_idx] = SubstringPrefixUnicode(source_data[source_idx], length);
 		}
-		FlatVector::SetSize(result, count_t(count));
+		SljitFinishFlatProjectionResult(result, count);
 		return;
 	}
 	D_ASSERT(plan.kind == SljitNativeRegionExpressionKind::INTEGER_BINARY_CONSTANT ||
@@ -346,7 +356,7 @@ static void SljitExecuteProjectionExpression(SljitExecutableRegionExpression &ex
 	if (runtime) {
 		RecordSljitRegionGeneratedWork(*runtime, SljitNativeRegionOpKind::PROJECTION, count);
 	}
-	FlatVector::SetSize(result, count_t(count));
+	SljitFinishFlatProjectionResult(result, count);
 }
 
 //! The input column an executable expression reads when it reads exactly one

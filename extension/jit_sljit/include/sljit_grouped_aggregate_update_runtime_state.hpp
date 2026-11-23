@@ -51,6 +51,10 @@ struct SljitGroupedAggregateUpdateRuntimeState {
 		return direct_payload_update.DelegatesToNativePipeline(primitive);
 	}
 
+	bool MayDelegateToNativePipeline(const SljitGroupedAggregateUpdatePrimitive &primitive) const {
+		return direct_payload_update.MayDelegateToNativePipeline(primitive);
+	}
+
 	void BeginNativePipelineDelegation(ExecutionRegionRuntime &runtime, vector<SljitExecutableRegionOp> &ops,
 	                                   SljitRegionExecutionScratch &scratch,
 	                                   const SljitGroupedAggregateUpdatePrimitive &primitive) {

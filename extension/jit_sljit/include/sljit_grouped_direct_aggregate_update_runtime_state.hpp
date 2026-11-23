@@ -125,6 +125,13 @@ public:
 		       direct_preaggregated_batch.run_strategy == SljitPendingRunStrategy::BUFFERED;
 	}
 
+	//! Whether the update's own batches may still find no group runs and hand the pipeline to DuckDB's operators
+	bool MayDelegateToNativePipeline(const SljitGroupedAggregateUpdatePrimitive &primitive) const {
+		return native_pipeline_takes_input &&
+		       primitive.strategy == SljitGroupedAggregateUpdateStrategyKind::DIRECT_PRIMITIVE_PAYLOAD_UPDATE &&
+		       direct_preaggregated_batch.run_strategy == SljitPendingRunStrategy::UNDECIDED;
+	}
+
 	//! The operator the step's input batch feeds: the elided projection chain, or the aggregate itself
 	static idx_t NativePipelineStart(const SljitGroupedAggregateUpdatePrimitive &primitive) {
 		return primitive.input_kind == SljitGroupedAggregateUpdateInputKind::PROJECTED_INPUT
