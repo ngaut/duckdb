@@ -176,8 +176,9 @@ unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativeFilteredUngroupedFusedPrim
 	// The nullable variant runs the same packed loops with a lane-expanded validity
 	// mask ANDead in, skipping every row with a NULL in a masked source. An AND-only
 	// predicate rejects a row with a NULL source, so the skip is exact for the
-	// predicate's sources, for a single payload's own sources (a sum ignores NULLs),
-	// and for any payload that reads only the predicate's sources.
+	// predicate's sources, for the own sources of a single null-strict payload (a NULL
+	// source makes its value NULL, which a sum or a count ignores), and for any
+	// payload that reads only the predicate's sources.
 	vector<idx_t> simd_validity_refs;
 	bool simd_nullable_ok = false;
 	if (simd_plan.supported && simd_plan.nullable_capable) {
@@ -193,7 +194,8 @@ unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativeFilteredUngroupedFusedPrim
 			for (auto source_index : payload_refs) {
 				const bool predicate_source = std::find(simd_plan.source_refs.begin(), simd_plan.source_refs.end(),
 				                                        source_index) != simd_plan.source_refs.end();
-				if (payloads.size() == 1) {
+				if (payloads.size() == 1 &&
+				    SljitTypedExpressionTreeIsNullStrict(*payloads[payload_idx].expression_tree)) {
 					AddSljitTypedKnownValidSource(simd_validity_refs, source_index);
 				} else if (!predicate_source) {
 					simd_nullable_ok = false;

@@ -19,6 +19,11 @@ SELECT i AS id,
 FROM range(400000) t(i)
 
 statement ok
+CREATE TABLE nullable_int32 AS
+SELECT (i * 7919 % 1000)::INTEGER AS k, CASE WHEN i % 5 = 0 THEN NULL ELSE (i % 1000)::INTEGER END AS x
+FROM range(400000) t(i)
+
+statement ok
 CHECKPOINT
 
 restart
@@ -112,6 +117,42 @@ query I
 SELECT count(*) FROM r_auto WHERE (q LIKE 'grouped_small_empty_%' OR q = 'no_row_matches') AND a IS NULL
 ----
 6
+
+# a single payload that a NULL source does not make NULL updates its aggregate on the rows the packed nullable
+# filter loops run (each query alone: a pipeline of its own scan)
+statement ok
+SET threads=1
+
+foreach policy off auto
+
+statement ok
+SET jit_policy='{policy}'
+
+statement ok
+CREATE OR REPLACE TEMP TABLE n_{policy} (q VARCHAR, a HUGEINT)
+
+statement ok
+INSERT INTO n_{policy} SELECT 'is_null_sum', sum(CASE WHEN x IS NULL THEN 1 ELSE 0 END) FROM nullable_int32 WHERE k > 10 AND k < 900
+
+statement ok
+INSERT INTO n_{policy} SELECT 'is_null_count', count(CASE WHEN x IS NULL THEN 1 END) FROM nullable_int32 WHERE k > 10 AND k < 900
+
+statement ok
+INSERT INTO n_{policy} SELECT 'else_value_sum', sum(CASE WHEN k < 300 THEN x ELSE 1 END) FROM nullable_int32 WHERE k > 10 AND k < 900
+
+statement ok
+INSERT INTO n_{policy} SELECT 'else_value_count', count(CASE WHEN k < 300 THEN x ELSE 1 END) FROM nullable_int32 WHERE k > 10 AND k < 900
+
+statement ok
+INSERT INTO n_{policy} SELECT 'strict_sum', sum(x * 2) FROM nullable_int32 WHERE k > 10 AND k < 900
+
+endloop
+
+query I
+SELECT count(*) FROM ((SELECT * FROM n_off EXCEPT ALL SELECT * FROM n_auto)
+                      UNION ALL (SELECT * FROM n_auto EXCEPT ALL SELECT * FROM n_off))
+----
+0
 
 # DOUBLE sums add their rows in order: one thread, compared exactly
 statement ok
