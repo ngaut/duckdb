@@ -1547,10 +1547,10 @@
     },
     {
         "name": "perfect_ht_threshold",
-        "description": "Threshold in bytes for when to use a perfect hash table.",
+        "description": "The most bits the group keys of a perfect hash aggregate may take. Left at its default, keys of more than 12 bits take one only when the estimated input averages two rows per slot and every thread's table fits a sixteenth of the memory limit.",
         "type": "UBIGINT",
         "default_scope": "local",
-        "default_value": "12",
+        "default_value": "20",
         "on_callbacks": [
             "set"
         ]

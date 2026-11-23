@@ -2662,11 +2662,14 @@ struct PasswordSetting {
 struct PerfectHtThresholdSetting {
 	using RETURN_TYPE = idx_t;
 	static constexpr const char *Name = "perfect_ht_threshold";
-	static constexpr const char *Description = "Threshold in bytes for when to use a perfect hash table.";
+	static constexpr const char *Description =
+	    "The most bits the group keys of a perfect hash aggregate may take. Left at its default, keys of more than 12 "
+	    "bits take one only when the estimated input averages two rows per slot and every thread's table fits a "
+	    "sixteenth of the memory limit.";
 	static constexpr const char *InputType = "UBIGINT";
 	static constexpr bool IsDebug = false;
 	static constexpr bool IsDeprecated = false;
-	static constexpr const char *DefaultValue = "12";
+	static constexpr const char *DefaultValue = "20";
 	static constexpr SettingScopeTarget Scope = SettingScopeTarget::LOCAL_DEFAULT;
 	static constexpr idx_t SettingIndex = NEXT_SETTING_INDEX();
 	static void OnSet(SettingCallbackInfo &info, Value &input);

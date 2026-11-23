@@ -10,6 +10,9 @@
 #include "duckdb/execution/physical_plan_generator.hpp"
 #include "duckdb/function/function_binder.hpp"
 #include "duckdb/main/client_context.hpp"
+#include "duckdb/parallel/task_scheduler.hpp"
+#include "duckdb/execution/operator/aggregate/aggregate_object.hpp"
+#include "duckdb/storage/buffer_manager.hpp"
 #include "duckdb/parser/expression_map.hpp"
 #include "duckdb/planner/expression/bound_reference_expression.hpp"
 #include "duckdb/planner/expression_iterator.hpp"
@@ -130,10 +133,51 @@ bool PhysicalPlanGenerator::HasSingleValuePartitions(ClientContext &context,
 	return true;
 }
 
+//! A perfect hash table looks a group up by its key's offset instead of hashing and probing, which pays for every slot
+//! a thread clears, scans and combines once the input averages a few rows per slot. Bits the user sets bound the keys
+//! outright. Otherwise keys of up to 12 bits always take one, and wider keys, up to the default bits, while the
+//! estimated input covers the slots and every thread's table stays a small share of the memory limit (the tables live
+//! outside the buffer manager and cannot spill)
+static idx_t PerfectHashAggregateMaxBits(ClientContext &context, const LogicalAggregate &op) {
+	static constexpr idx_t UNCONDITIONAL_BITS = 12;
+	static constexpr idx_t MIN_ROWS_PER_SLOT = 2;
+	static constexpr idx_t MEMORY_LIMIT_SHARE = 16;
+	Value user_bits;
+	if (context.TryGetCurrentUserSetting(PerfectHtThresholdSetting::SettingIndex, user_bits)) {
+		return user_bits.GetValue<idx_t>();
+	}
+	const auto configured_bits = Settings::Get<PerfectHtThresholdSetting>(context);
+	auto max_bits = MinValue(configured_bits, UNCONDITIONAL_BITS);
+	auto &input = *op.children[0];
+	if (!input.has_estimated_cardinality) {
+		return max_bits;
+	}
+	vector<BoundAggregateExpression *> bindings;
+	for (auto &expression : op.expressions) {
+		bindings.push_back(&expression->Cast<BoundAggregateExpression>());
+	}
+	// each slot holds the aggregate states and two flags
+	idx_t slot_bytes = 2 * sizeof(bool);
+	for (auto &aggregate : AggregateObject::CreateAggregateObjects(bindings)) {
+		slot_bytes += aggregate.payload_size;
+	}
+	const auto threads = NumericCast<idx_t>(TaskScheduler::GetScheduler(context).NumberOfThreads());
+	const auto memory_budget = BufferManager::GetBufferManager(context).GetMaxMemory() / MEMORY_LIMIT_SHARE;
+	while (max_bits < configured_bits) {
+		const auto slots = idx_t(1) << (max_bits + 1);
+		if (slots * MIN_ROWS_PER_SLOT > input.estimated_cardinality || slots * slot_bytes * threads > memory_budget) {
+			break;
+		}
+		max_bits++;
+	}
+	return max_bits;
+}
+
 static bool CanUsePerfectHashAggregate(ClientContext &context, LogicalAggregate &op, vector<idx_t> &bits_per_group) {
 	if (op.grouping_sets.size() > 1 || !op.grouping_functions.empty()) {
 		return false;
 	}
+	const auto max_bits = PerfectHashAggregateMaxBits(context, op);
 	idx_t perfect_hash_bits = 0;
 	for (idx_t group_idx = 0; group_idx < op.groups.size(); group_idx++) {
 		auto &group = op.groups[group_idx];
@@ -233,7 +277,7 @@ static bool CanUsePerfectHashAggregate(ClientContext &context, LogicalAggregate 
 		bits_per_group.push_back(required_bits);
 		perfect_hash_bits += required_bits;
 		// check if we have exceeded the bits for the hash
-		if (perfect_hash_bits > Settings::Get<PerfectHtThresholdSetting>(context)) {
+		if (perfect_hash_bits > max_bits) {
 			// too many bits for perfect hash
 			return false;
 		}

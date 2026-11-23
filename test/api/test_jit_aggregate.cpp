@@ -1027,6 +1027,8 @@ TEST_CASE("JIT widening decimal products feed exact hugeint aggregate states", "
 	auto &manager = ExecutionRegionManager::Get(*con.context);
 
 	ConfigureSljitForCoverage(con, true, true, 10000);
+	// a hash aggregate: a wider key domain would take a perfect hash table
+	REQUIRE_NO_FAIL(con.Query("SET perfect_ht_threshold=12"));
 	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_wide_decimal_product AS "
 	                          "SELECT ((i // 20) % 10000)::INTEGER AS g, "
 	                          "CASE WHEN i % 17 = 0 THEN NULL "
@@ -4057,6 +4059,8 @@ TEST_CASE("JIT grouped aggregate without group runs runs the pipeline natively",
 
 		ConfigureSljitForCoverage(con, false, true, 10000, threads);
 		REQUIRE_NO_FAIL(con.Query("SET threads=" + to_string(threads)));
+		// a hash aggregate: a wider key domain would take a perfect hash table
+		REQUIRE_NO_FAIL(con.Query("SET perfect_ht_threshold=12"));
 		REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_grouped_no_runs AS "
 		                          "SELECT ((i * 7919) % 4096)::BIGINT AS k, (i % 97)::INTEGER AS v, i % 10 AS f "
 		                          "FROM range(300000) tbl(i)"));
@@ -4081,7 +4085,9 @@ TEST_CASE("JIT hash aggregate cast-only keys use native state addresses", "[api]
 	auto &manager = ExecutionRegionManager::Get(*con.context);
 
 	ConfigureSljitForCoverage(con, true, true, 10000);
-	// Group runs are what lets the generated update own the lookup; without them the pipeline runs natively
+	// Group runs are what lets the generated update own the lookup; without them the pipeline runs natively. A hash
+	// aggregate: a wider key domain would take a perfect hash table
+	REQUIRE_NO_FAIL(con.Query("SET perfect_ht_threshold=12"));
 	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_hash_aggregate_cast_projection AS "
 	                          "SELECT (i // 4)::BIGINT AS k, CAST(i % 100 AS DECIMAL(15,2)) AS v "
 	                          "FROM range(100000) tbl(i)"));

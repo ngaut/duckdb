@@ -1,5 +1,5 @@
 # name: test/optimizer/perfect_ht.test
-# description: Test aggregates that can trigger a perfect HT
+# description: Test aggregates that can trigger a perfect HT, and the input and memory that let a wider key take one
 # group: [optimizer]
 
 statement ok
@@ -57,3 +57,49 @@ statement error
 PRAGMA perfect_ht_threshold=100;
 ----
 <REGEX>:.*out of range.*
+
+# left at its default, a key of more than 12 bits takes a perfect HT once the estimated input averages two rows per slot
+statement ok
+RESET perfect_ht_threshold;
+
+statement ok
+CREATE TABLE wide_keys AS SELECT i AS id FROM range(400000) tbl(i);
+
+statement ok
+CREATE TABLE few_wide_keys AS SELECT i AS id FROM range(100000) tbl(i);
+
+query II
+EXPLAIN SELECT id % 50000 AS k, count(*) FROM wide_keys GROUP BY k;
+----
+physical_plan	<REGEX>:.*PERFECT_HASH_GROUP_BY.*
+
+query II
+EXPLAIN SELECT id % 50000 AS k, count(*) FROM few_wide_keys GROUP BY k;
+----
+physical_plan	<!REGEX>:.*PERFECT_HASH_GROUP_BY.*
+
+query I
+SELECT count(*) FROM (SELECT id % 50000 AS k, count(*) AS c FROM wide_keys GROUP BY k) WHERE c = 8;
+----
+50000
+
+# every thread's table must fit a share of the memory limit
+statement ok
+SET memory_limit='16MB';
+
+query II
+EXPLAIN SELECT id % 50000 AS k, count(*) FROM wide_keys GROUP BY k;
+----
+physical_plan	<!REGEX>:.*PERFECT_HASH_GROUP_BY.*
+
+statement ok
+RESET memory_limit;
+
+# bits the user sets bound the keys outright
+statement ok
+PRAGMA perfect_ht_threshold=12;
+
+query II
+EXPLAIN SELECT id % 50000 AS k, count(*) FROM wide_keys GROUP BY k;
+----
+physical_plan	<!REGEX>:.*PERFECT_HASH_GROUP_BY.*
