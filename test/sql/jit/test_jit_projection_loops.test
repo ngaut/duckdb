@@ -134,6 +134,20 @@ statement ok
 CREATE OR REPLACE TEMP TABLE measured_filtered_{policy} AS
 SELECT id, id % 50000 AS a, (k + b) * 3 AS c FROM facts WHERE k < 50 AND b > -900000
 
+# a perfect hash aggregate: the region's chunks resolve its groups through the local state DuckDB's sink takes its
+# chunks with, the last one shorter than a vector
+statement ok
+SET perfect_ht_threshold=16
+
+statement ok
+CREATE OR REPLACE TEMP TABLE measured_perfect_hash_{policy} AS
+SELECT 'count' AS shape, id % 50000 AS key, count(*) AS value FROM facts GROUP BY ALL
+UNION ALL
+SELECT 'sum', id % 50000, sum(b) FROM facts GROUP BY ALL
+
+statement ok
+RESET perfect_ht_threshold
+
 statement ok
 CREATE OR REPLACE TEMP TABLE measured_groups_{policy} AS
 SELECT id % 50000 AS key, count(*) FILTER (WHERE k < 500) AS low, count(*) FILTER (WHERE k >= 750) AS high
@@ -151,6 +165,13 @@ query I
 SELECT count(*) FROM ((SELECT rowid, * FROM measured_filtered_off EXCEPT ALL SELECT rowid, * FROM measured_filtered_auto)
                       UNION ALL (SELECT rowid, * FROM measured_filtered_auto EXCEPT ALL
                                  SELECT rowid, * FROM measured_filtered_off))
+----
+0
+
+query I
+SELECT count(*) FROM ((SELECT * FROM measured_perfect_hash_off EXCEPT ALL SELECT * FROM measured_perfect_hash_auto)
+                      UNION ALL (SELECT * FROM measured_perfect_hash_auto EXCEPT ALL
+                                 SELECT * FROM measured_perfect_hash_off))
 ----
 0
 

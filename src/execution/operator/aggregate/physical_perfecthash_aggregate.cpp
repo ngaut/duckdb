@@ -203,6 +203,9 @@ SinkResultType PhysicalPerfectHashAggregate::Sink(ExecutionContext &context, Dat
 		D_ASSERT(entry.first >= aggregate_input_idx && entry.second < chunk.data.size());
 		aggregate_input_chunk.data[entry.first].Reference(chunk.data[entry.second]);
 	}
+	// the chunks are the local state's: every Sink states the rows it adds, so no earlier writer's count stays behind
+	group_chunk.SetChildCardinality(chunk.size());
+	aggregate_input_chunk.SetChildCardinality(chunk.size());
 
 	group_chunk.Verify(context.client.db);
 	aggregate_input_chunk.Verify(context.client.db);
