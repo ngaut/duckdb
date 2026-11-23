@@ -7,6 +7,7 @@
 //===----------------------------------------------------------------------===//
 
 #include "sljit_region_plan_internal.hpp"
+#include "sljit_typed_expression_plan.hpp"
 
 #include "duckdb/common/operator/add.hpp"
 #include "duckdb/common/types/cast_helpers.hpp"
@@ -100,9 +101,26 @@ static bool TryComposeNativeRoundTripProjection(const vector<SljitNativeRegionEx
 	return false;
 }
 
+//! Whether the generated code may skip the child of the node at child_idx on a row: CASE values and every CASE
+//! condition but the first, and every conjunction and COALESCE operand but the first
+static bool SljitExpressionTreeChildIsConditional(const ExecutionExpressionIR &node, idx_t child_idx) {
+	switch (node.kind) {
+	case ExecutionExpressionIRKind::CASE:
+	case ExecutionExpressionIRKind::CONJUNCTION:
+	case ExecutionExpressionIRKind::COALESCE:
+		return child_idx > 0;
+	default:
+		return false;
+	}
+}
+
+//! Replaces the references with the projection's expressions. The projection evaluates each expression on every row,
+//! so one that may raise an error replaces only a reference the generated code evaluates on every row: under a
+//! condition it would skip the error DuckDB raises
 static bool
 RewriteSljitExpressionTreeReferencesThroughProjection(unique_ptr<ExecutionExpressionIR> &node,
-                                                      const vector<SljitNativeRegionExpressionPlan> &input_projection) {
+                                                      const vector<SljitNativeRegionExpressionPlan> &input_projection,
+                                                      bool conditional = false) {
 	if (!node) {
 		return false;
 	}
@@ -111,19 +129,25 @@ RewriteSljitExpressionTreeReferencesThroughProjection(unique_ptr<ExecutionExpres
 			return false;
 		}
 		node = CopySljitExpressionPlanAsInputTree(input_projection[node->ref_index]);
-		return node != nullptr;
+		return node && (!conditional || SljitExpressionIRCannotThrow(*node));
 	}
-	if (node->left && !RewriteSljitExpressionTreeReferencesThroughProjection(node->left, input_projection)) {
+	if (node->left &&
+	    !RewriteSljitExpressionTreeReferencesThroughProjection(node->left, input_projection, conditional)) {
 		return false;
 	}
-	if (node->right && !RewriteSljitExpressionTreeReferencesThroughProjection(node->right, input_projection)) {
+	if (node->right &&
+	    !RewriteSljitExpressionTreeReferencesThroughProjection(node->right, input_projection, conditional)) {
 		return false;
 	}
-	if (node->else_node && !RewriteSljitExpressionTreeReferencesThroughProjection(node->else_node, input_projection)) {
+	const bool else_conditional = conditional || node->kind == ExecutionExpressionIRKind::CASE;
+	if (node->else_node &&
+	    !RewriteSljitExpressionTreeReferencesThroughProjection(node->else_node, input_projection, else_conditional)) {
 		return false;
 	}
-	for (auto &child : node->children) {
-		if (!RewriteSljitExpressionTreeReferencesThroughProjection(child, input_projection)) {
+	for (idx_t child_idx = 0; child_idx < node->children.size(); child_idx++) {
+		const bool child_conditional = conditional || SljitExpressionTreeChildIsConditional(*node, child_idx);
+		if (!RewriteSljitExpressionTreeReferencesThroughProjection(node->children[child_idx], input_projection,
+		                                                           child_conditional)) {
 			return false;
 		}
 	}

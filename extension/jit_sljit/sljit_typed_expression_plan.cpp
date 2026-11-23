@@ -471,6 +471,32 @@ static bool SljitTypedExpressionTreeFastNullExitResult(const ExecutionExpression
 	       SljitTypedExpressionTreeFastNullExitSupported(node);
 }
 
+bool SljitExpressionIRCannotThrow(const ExecutionExpressionIR &node) {
+	if (node.exception_behavior != ExecutionExpressionExceptionKind::NONE &&
+	    node.exception_behavior != ExecutionExpressionExceptionKind::NULL_ON_CAST_ERROR) {
+		return false;
+	}
+	for (auto child : {node.left.get(), node.right.get(), node.else_node.get()}) {
+		if (child && !SljitExpressionIRCannotThrow(*child)) {
+			return false;
+		}
+	}
+	for (auto &child : node.children) {
+		if (!SljitExpressionIRCannotThrow(*child)) {
+			return false;
+		}
+	}
+	return true;
+}
+
+bool SljitTypedExpressionTreeIsFastGuardedValue(const ExecutionExpressionIR &node) {
+	return node.kind == ExecutionExpressionIRKind::CASE && node.children.size() == 2 && node.else_node &&
+	       node.else_node->kind == ExecutionExpressionIRKind::CONSTANT && node.else_node->constant.IsNull() &&
+	       SljitTypedExpressionTreeFastPathSupported(*node.children[0]) &&
+	       SljitTypedExpressionTreeFastPathSupported(*node.children[1]) &&
+	       SljitExpressionIRCannotThrow(*node.children[1]);
+}
+
 bool SljitTypedExpressionTreeFastNullExitSupported(const ExecutionExpressionIR &node) {
 	if (node.kind != ExecutionExpressionIRKind::CASE) {
 		return SljitTypedExpressionTreeFastPathSupported(node);

@@ -251,24 +251,6 @@ bool TryReadNativeRegionExpression(const ExecutionExpressionIR &root, bool requi
 	return true;
 }
 
-static bool SljitExpressionIRCannotThrow(const ExecutionExpressionIR &node) {
-	if (node.exception_behavior != ExecutionExpressionExceptionKind::NONE &&
-	    node.exception_behavior != ExecutionExpressionExceptionKind::NULL_ON_CAST_ERROR) {
-		return false;
-	}
-	for (auto child : {node.left.get(), node.right.get(), node.else_node.get()}) {
-		if (child && !SljitExpressionIRCannotThrow(*child)) {
-			return false;
-		}
-	}
-	for (auto &child : node.children) {
-		if (!SljitExpressionIRCannotThrow(*child)) {
-			return false;
-		}
-	}
-	return true;
-}
-
 //! The type a narrow signed value compares as: INTEGER for TINYINT/SMALLINT, the same-scale DECIMAL64 for a DECIMAL
 //! stored in 16 or 32 bits (whose raw integer the generated loops sign-extend), or nothing for any other type
 static bool TryGetSljitWidenedComparisonType(const ExecutionExpressionIR &node, LogicalType &widened) {

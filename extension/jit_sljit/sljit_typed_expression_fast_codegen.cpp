@@ -661,6 +661,24 @@ EmitSljitTypedExpressionTreeFastJumpsIfTrue(struct sljit_compiler *compiler, con
 	                                             SljitTypedExpressionTreeFastIndexMode::FLAT, data_hoists);
 }
 
+void EmitSljitTypedExpressionTreeFastGuardReg(struct sljit_compiler *compiler, const ExecutionExpressionIR &node,
+                                              idx_t &spill_index, vector<SljitArithmeticOverflowSite> &overflows,
+                                              SljitTypedExpressionTreeFastIndexMode index_mode,
+                                              const vector<SljitTypedExpressionTreeLoopHoist> *data_hoists) {
+	D_ASSERT(SljitTypedExpressionTreeIsFastGuardedValue(node));
+	EmitSljitTypedExpressionTreeFastValueRegInternal(compiler, *node.children[0], spill_index, overflows, index_mode,
+	                                                 data_hoists);
+}
+
+void EmitSljitTypedExpressionTreeFastGuardedValueReg(struct sljit_compiler *compiler, const ExecutionExpressionIR &node,
+                                                     idx_t &spill_index, vector<SljitArithmeticOverflowSite> &overflows,
+                                                     SljitTypedExpressionTreeFastIndexMode index_mode,
+                                                     const vector<SljitTypedExpressionTreeLoopHoist> *data_hoists) {
+	D_ASSERT(SljitTypedExpressionTreeIsFastGuardedValue(node));
+	EmitSljitTypedExpressionTreeFastValueRegInternal(compiler, *node.children[1], spill_index, overflows, index_mode,
+	                                                 data_hoists);
+}
+
 void EmitSljitTypedExpressionTreeSelectedFastValueReg(struct sljit_compiler *compiler,
                                                       const ExecutionExpressionIR &node, idx_t &spill_index,
                                                       vector<SljitArithmeticOverflowSite> &overflows,

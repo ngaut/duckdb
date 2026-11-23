@@ -346,6 +346,16 @@ vector<sljit_jump *>
 EmitSljitTypedExpressionTreeFastJumpsIfTrue(struct sljit_compiler *compiler, const ExecutionExpressionIR &node,
                                             idx_t &spill_index, vector<SljitArithmeticOverflowSite> &overflows,
                                             const vector<SljitTypedExpressionTreeLoopHoist> *data_hoists = nullptr);
+//! The guard c of a SljitTypedExpressionTreeIsFastGuardedValue node into R2 as 0 or 1
+void EmitSljitTypedExpressionTreeFastGuardReg(struct sljit_compiler *compiler, const ExecutionExpressionIR &node,
+                                              idx_t &spill_index, vector<SljitArithmeticOverflowSite> &overflows,
+                                              SljitTypedExpressionTreeFastIndexMode index_mode,
+                                              const vector<SljitTypedExpressionTreeLoopHoist> *data_hoists);
+//! The value v of a SljitTypedExpressionTreeIsFastGuardedValue node into R2, whatever its guard
+void EmitSljitTypedExpressionTreeFastGuardedValueReg(struct sljit_compiler *compiler, const ExecutionExpressionIR &node,
+                                                     idx_t &spill_index, vector<SljitArithmeticOverflowSite> &overflows,
+                                                     SljitTypedExpressionTreeFastIndexMode index_mode,
+                                                     const vector<SljitTypedExpressionTreeLoopHoist> *data_hoists);
 void EmitSljitTypedExpressionTreeSelectedFastValueReg(
     struct sljit_compiler *compiler, const ExecutionExpressionIR &node, idx_t &spill_index,
     vector<SljitArithmeticOverflowSite> &overflows,

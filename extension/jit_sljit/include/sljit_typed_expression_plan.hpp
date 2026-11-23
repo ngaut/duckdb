@@ -87,6 +87,11 @@ bool SljitTypedExpressionTreeFastPathSupported(const ExecutionExpressionIR &node
 //! CASE whose conditions take the fast path and whose results are NULL constants or again such nodes, such as an
 //! aggregate payload CASE WHEN c THEN x END, whose NULL rows leave the aggregate's state alone
 bool SljitTypedExpressionTreeFastNullExitSupported(const ExecutionExpressionIR &node);
+//! Whether evaluating the expression raises no error
+bool SljitExpressionIRCannotThrow(const ExecutionExpressionIR &node);
+//! CASE WHEN c THEN v END whose c and v the fast loops evaluate and whose v raises no error: a loop may evaluate v on
+//! every row and keep it where c holds, without a branch
+bool SljitTypedExpressionTreeIsFastGuardedValue(const ExecutionExpressionIR &node);
 bool SljitTypedExpressionTreeCanPrecheckNulls(const ExecutionExpressionIR &node);
 //! A NULL in any source the node reads makes it NULL
 bool SljitTypedExpressionTreeIsNullStrict(const ExecutionExpressionIR &node);

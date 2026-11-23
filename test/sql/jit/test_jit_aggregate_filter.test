@@ -97,6 +97,15 @@ statement ok
 INSERT INTO r_{policy} SELECT 'where_clause', (sum(b) FILTER (WHERE k < 300))::VARCHAR || '/' || (count(*) FILTER (WHERE k > 600))::VARCHAR FROM facts WHERE g < 50
 
 statement ok
+INSERT INTO r_{policy} SELECT 'value_may_throw', sum(b * 4611686018427) FILTER (WHERE b > -1000 AND b < 1000)::VARCHAR FROM facts
+
+statement ok
+INSERT INTO r_{policy} SELECT 'count_value_may_throw', (count(b * 4611686018427) FILTER (WHERE b > -1000 AND b < 1000))::VARCHAR FROM facts
+
+statement ok
+INSERT INTO r_{policy} SELECT 'guarded_counts', (count(*) FILTER (WHERE k < 300))::VARCHAR || '/' || (count(*) FILTER (WHERE k > 600))::VARCHAR || '/' || (count(n) FILTER (WHERE k % 7 = 1))::VARCHAR FROM facts
+
+statement ok
 INSERT INTO r_{policy} SELECT 'distinct', (count(DISTINCT g) FILTER (WHERE k < 300))::VARCHAR FROM facts
 
 statement ok
@@ -158,7 +167,7 @@ SELECT count(*) FROM ((SELECT * FROM r_off EXCEPT ALL SELECT * FROM r_auto)
 query I
 SELECT count(*) FROM r_auto
 ----
-101579
+101582
 
 endloop
 
@@ -175,6 +184,40 @@ SELECT q, a FROM r_auto WHERE q IN ('sum_no_row_matches', 'count_star_no_row_mat
 ----
 count_star_no_row_matches	0
 sum_no_row_matches	null
+
+# DuckDB computes a filtered aggregate's child, and a column a CASE reads, on every row: a value that overflows on a row
+# the filter or condition rejects raises the error under both policies
+foreach policy off auto
+
+statement ok
+SET jit_policy='{policy}'
+
+statement error
+SELECT sum(k * 3000000) FILTER (WHERE k < 500) FROM facts
+----
+Overflow in multiplication
+
+statement error
+SELECT g, sum(k * 3000000) FILTER (WHERE k < 500) FROM facts GROUP BY g
+----
+Overflow in multiplication
+
+statement error
+SELECT sum(CASE WHEN k < 500 THEN x END) FROM (SELECT k, k * 3000000 AS x FROM facts)
+----
+Overflow in multiplication
+
+statement error
+SELECT g, sum(CASE WHEN k < 500 THEN x END) FROM (SELECT g, k, k * 3000000 AS x FROM facts) GROUP BY g
+----
+Overflow in multiplication
+
+statement error
+SELECT count(CASE WHEN k > 900 THEN k * 3000000 END) FROM facts
+----
+Overflow in multiplication
+
+endloop
 
 # DOUBLE sums add their rows in order: one thread, compared exactly
 statement ok
