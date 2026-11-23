@@ -71,6 +71,8 @@ SljitTypedExpressionTreeFastPathPlan BuildSljitTypedExpressionTreeFastPathPlan(c
                                                                                bool emit_flat_nullable_fast_path) {
 	SljitTypedExpressionTreeFastPathPlan result;
 	result.fast_path_supported = SljitTypedExpressionTreeFastPathSupported(root);
+	result.fast_path_needs_null_exits =
+	    !result.fast_path_supported && SljitTypedExpressionTreeFastNullExitSupported(root);
 	const auto nullable_fast_path_candidate = emit_flat_nullable_fast_path && result.fast_path_supported;
 	if (nullable_fast_path_candidate) {
 		CollectSljitTypedExpressionTreeReferences(root, result.source_refs);

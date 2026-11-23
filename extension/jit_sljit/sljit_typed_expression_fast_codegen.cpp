@@ -415,11 +415,83 @@ EmitSljitTypedExpressionTreeFastValueRegInternal(struct sljit_compiler *compiler
 	}
 }
 
+static vector<sljit_jump *> EmitSljitTypedExpressionTreeFastJumpsInternal(
+    struct sljit_compiler *compiler, const ExecutionExpressionIR &node, bool when, idx_t &spill_index,
+    vector<SljitArithmeticOverflowSite> &overflows, SljitTypedExpressionTreeFastIndexMode index_mode,
+    const vector<SljitTypedExpressionTreeLoopHoist> *data_hoists, bool null_rows);
+
+//! A node SljitTypedExpressionTreeFastNullExitSupported admits: a CASE result that is a NULL constant leaves through a
+//! null exit, every other result is evaluated into R2
+static void EmitSljitTypedExpressionTreeFastNullExitValueReg(
+    struct sljit_compiler *compiler, const ExecutionExpressionIR &node, idx_t &spill_index,
+    vector<SljitArithmeticOverflowSite> &overflows, SljitTypedExpressionTreeFastIndexMode index_mode,
+    const vector<SljitTypedExpressionTreeLoopHoist> *data_hoists, vector<sljit_jump *> &null_exits) {
+	if (node.kind == ExecutionExpressionIRKind::CONSTANT && node.constant.IsNull()) {
+		null_exits.push_back(sljit_emit_jump(compiler, SLJIT_JUMP));
+		return;
+	}
+	if (node.kind != ExecutionExpressionIRKind::CASE || SljitTypedExpressionTreeFastPathSupported(node)) {
+		EmitSljitTypedExpressionTreeFastValueRegInternal(compiler, node, spill_index, overflows, index_mode,
+		                                                 data_hoists);
+		return;
+	}
+	D_ASSERT(node.else_node);
+	D_ASSERT(node.children.size() % 2 == 0);
+	auto is_null = [](const ExecutionExpressionIR &value) {
+		return value.kind == ExecutionExpressionIRKind::CONSTANT && value.constant.IsNull();
+	};
+	vector<sljit_jump *> done_jumps;
+	for (idx_t child_idx = 0; child_idx < node.children.size(); child_idx += 2) {
+		auto &condition = *node.children[child_idx];
+		auto &value = *node.children[child_idx + 1];
+		const bool last = child_idx + 2 == node.children.size();
+		if (is_null(value)) {
+			// a true condition leaves for the null exit, a false one falls through to the next branch
+			auto condition_true = EmitSljitTypedExpressionTreeFastJumpsInternal(
+			    compiler, condition, true, spill_index, overflows, index_mode, data_hoists, false);
+			null_exits.insert(null_exits.end(), condition_true.begin(), condition_true.end());
+			continue;
+		}
+		auto condition_false = EmitSljitTypedExpressionTreeFastJumpsInternal(compiler, condition, false, spill_index,
+		                                                                     overflows, index_mode, data_hoists, false);
+		if (last && is_null(*node.else_node)) {
+			// a NULL ELSE: a false last condition leaves for the null exit directly
+			null_exits.insert(null_exits.end(), condition_false.begin(), condition_false.end());
+			EmitSljitTypedExpressionTreeFastNullExitValueReg(compiler, value, spill_index, overflows, index_mode,
+			                                                 data_hoists, null_exits);
+			SetSljitJumpLabels(done_jumps, sljit_emit_label(compiler));
+			return;
+		}
+		EmitSljitTypedExpressionTreeFastNullExitValueReg(compiler, value, spill_index, overflows, index_mode,
+		                                                 data_hoists, null_exits);
+		done_jumps.push_back(sljit_emit_jump(compiler, SLJIT_JUMP));
+		SetSljitJumpLabels(condition_false, sljit_emit_label(compiler));
+	}
+	EmitSljitTypedExpressionTreeFastNullExitValueReg(compiler, *node.else_node, spill_index, overflows, index_mode,
+	                                                 data_hoists, null_exits);
+	SetSljitJumpLabels(done_jumps, sljit_emit_label(compiler));
+}
+
+static void EmitSljitTypedExpressionTreeFastRootValueReg(struct sljit_compiler *compiler,
+                                                         const ExecutionExpressionIR &node, idx_t &spill_index,
+                                                         vector<SljitArithmeticOverflowSite> &overflows,
+                                                         SljitTypedExpressionTreeFastIndexMode index_mode,
+                                                         const vector<SljitTypedExpressionTreeLoopHoist> *data_hoists,
+                                                         vector<sljit_jump *> *null_exits) {
+	if (null_exits) {
+		EmitSljitTypedExpressionTreeFastNullExitValueReg(compiler, node, spill_index, overflows, index_mode,
+		                                                 data_hoists, *null_exits);
+		return;
+	}
+	EmitSljitTypedExpressionTreeFastValueRegInternal(compiler, node, spill_index, overflows, index_mode, data_hoists);
+}
+
 void EmitSljitTypedExpressionTreeFastValueReg(struct sljit_compiler *compiler, const ExecutionExpressionIR &node,
                                               idx_t &spill_index, vector<SljitArithmeticOverflowSite> &overflows,
-                                              const vector<SljitTypedExpressionTreeLoopHoist> *data_hoists) {
-	EmitSljitTypedExpressionTreeFastValueRegInternal(compiler, node, spill_index, overflows,
-	                                                 SljitTypedExpressionTreeFastIndexMode::FLAT, data_hoists);
+                                              const vector<SljitTypedExpressionTreeLoopHoist> *data_hoists,
+                                              vector<sljit_jump *> *null_exits) {
+	EmitSljitTypedExpressionTreeFastRootValueReg(compiler, node, spill_index, overflows,
+	                                             SljitTypedExpressionTreeFastIndexMode::FLAT, data_hoists, null_exits);
 }
 
 //! A remainder test of the dividend n against c (see SljitTypedExpressionTreeIsRemainderTest) without computing the
@@ -592,16 +664,20 @@ EmitSljitTypedExpressionTreeFastJumpsIfTrue(struct sljit_compiler *compiler, con
 void EmitSljitTypedExpressionTreeSelectedFastValueReg(struct sljit_compiler *compiler,
                                                       const ExecutionExpressionIR &node, idx_t &spill_index,
                                                       vector<SljitArithmeticOverflowSite> &overflows,
-                                                      const vector<SljitTypedExpressionTreeLoopHoist> *data_hoists) {
-	EmitSljitTypedExpressionTreeFastValueRegInternal(compiler, node, spill_index, overflows,
-	                                                 SljitTypedExpressionTreeFastIndexMode::SELECTED, data_hoists);
+                                                      const vector<SljitTypedExpressionTreeLoopHoist> *data_hoists,
+                                                      vector<sljit_jump *> *null_exits) {
+	EmitSljitTypedExpressionTreeFastRootValueReg(compiler, node, spill_index, overflows,
+	                                             SljitTypedExpressionTreeFastIndexMode::SELECTED, data_hoists,
+	                                             null_exits);
 }
 
 void EmitSljitTypedExpressionTreeLogicalFastValueReg(struct sljit_compiler *compiler, const ExecutionExpressionIR &node,
                                                      idx_t &spill_index, vector<SljitArithmeticOverflowSite> &overflows,
-                                                     const vector<SljitTypedExpressionTreeLoopHoist> *data_hoists) {
-	EmitSljitTypedExpressionTreeFastValueRegInternal(compiler, node, spill_index, overflows,
-	                                                 SljitTypedExpressionTreeFastIndexMode::LOGICAL, data_hoists);
+                                                     const vector<SljitTypedExpressionTreeLoopHoist> *data_hoists,
+                                                     vector<sljit_jump *> *null_exits) {
+	EmitSljitTypedExpressionTreeFastRootValueReg(compiler, node, spill_index, overflows,
+	                                             SljitTypedExpressionTreeFastIndexMode::LOGICAL, data_hoists,
+	                                             null_exits);
 }
 
 } // namespace duckdb

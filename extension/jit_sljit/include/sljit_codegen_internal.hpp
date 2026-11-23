@@ -321,9 +321,12 @@ SljitTypedExpressionTreeSlot EmitSljitTypedExpressionTreeValue(struct sljit_comp
                                                                const ExecutionExpressionIR &node, idx_t &slot_index,
                                                                vector<SljitArithmeticOverflowSite> &overflows,
                                                                const vector<idx_t> *known_valid_sources = nullptr);
+//! Evaluates a fast-path node over a row without NULLs into R2. Given null_exits, the node may be one that
+//! SljitTypedExpressionTreeFastNullExitSupported admits: a row whose value is NULL takes one of the jumps added to it
 void EmitSljitTypedExpressionTreeFastValueReg(struct sljit_compiler *compiler, const ExecutionExpressionIR &node,
                                               idx_t &spill_index, vector<SljitArithmeticOverflowSite> &overflows,
-                                              const vector<SljitTypedExpressionTreeLoopHoist> *data_hoists = nullptr);
+                                              const vector<SljitTypedExpressionTreeLoopHoist> *data_hoists = nullptr,
+                                              vector<sljit_jump *> *null_exits = nullptr);
 //! Emits a predicate over rows without NULLs as jumps taken when it evaluates to `when`; control falls through
 //! otherwise. A comparison jumps on its own flags and a conjunction short-circuits on the child that decides it, so no
 //! boolean is materialized; a flat-row remainder test checks divisibility
@@ -346,10 +349,10 @@ EmitSljitTypedExpressionTreeFastJumpsIfTrue(struct sljit_compiler *compiler, con
 void EmitSljitTypedExpressionTreeSelectedFastValueReg(
     struct sljit_compiler *compiler, const ExecutionExpressionIR &node, idx_t &spill_index,
     vector<SljitArithmeticOverflowSite> &overflows,
-    const vector<SljitTypedExpressionTreeLoopHoist> *data_hoists = nullptr);
+    const vector<SljitTypedExpressionTreeLoopHoist> *data_hoists = nullptr, vector<sljit_jump *> *null_exits = nullptr);
 void EmitSljitTypedExpressionTreeLogicalFastValueReg(
     struct sljit_compiler *compiler, const ExecutionExpressionIR &node, idx_t &spill_index,
     vector<SljitArithmeticOverflowSite> &overflows,
-    const vector<SljitTypedExpressionTreeLoopHoist> *data_hoists = nullptr);
+    const vector<SljitTypedExpressionTreeLoopHoist> *data_hoists = nullptr, vector<sljit_jump *> *null_exits = nullptr);
 
 } // namespace duckdb

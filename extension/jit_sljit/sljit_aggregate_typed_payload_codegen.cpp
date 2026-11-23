@@ -236,9 +236,11 @@ bool BuildSljitFusedAggregateCodegenPlan(const vector<SljitNativeRegionExpressio
 		}
 		has_typed_payload =
 		    has_typed_payload || payloads[payload_idx].kind == SljitNativeRegionExpressionKind::TYPED_EXPRESSION_TREE;
+		auto &fast_path = codegen_plan.payloads[payload_idx].fast_path;
 		codegen_plan.tree_node_count += codegen_plan.payloads[payload_idx].node_count;
 		codegen_plan.fast_path_supported =
-		    codegen_plan.fast_path_supported && codegen_plan.payloads[payload_idx].fast_path.fast_path_supported;
+		    codegen_plan.fast_path_supported && fast_path.FastPathSupportedWithNullExits();
+		codegen_plan.payloads_exit_null = codegen_plan.payloads_exit_null || !fast_path.fast_path_supported;
 	}
 	if (has_typed_payload) {
 		TryBuildSljitConditionalSharedAggregatePlan(payloads, codegen_plan);

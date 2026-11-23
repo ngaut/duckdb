@@ -40,6 +40,8 @@ struct SljitFusedAggregateCodegenPlan {
 	vector<SljitAggregatePayloadDescriptor> payload_descriptors;
 	idx_t tree_node_count = 0;
 	bool fast_path_supported = false;
+	//! a payload yields NULL for some rows without NULLs (a CASE result), which then leave its state alone
+	bool payloads_exit_null = false;
 	bool conditional_shared_payload = false;
 	idx_t conditional_lane = 0;
 	idx_t shared_lane = 0;

@@ -1,0 +1,172 @@
+# name: test/sql/jit/test_jit_case_null_payloads.test
+# description: An aggregate payload whose CASE results include NULL runs in the generated loops: a row whose CASE yields NULL leaves the sum alone, a group or aggregate that sees no other row stays NULL, and THEN NULL, middle NULL branches, nested CASEs, NULL sources, filters and DOUBLE sums keep native results
+# group: [jit]
+
+require jit_sljit
+
+load {TEST_DIR}/jit_case_null_payloads.db
+
+statement ok
+CREATE TABLE facts AS
+SELECT i AS id,
+       (i * 7919 % 1000)::INTEGER AS k,
+       (i % 97)::INTEGER AS g,
+       (i % 7)::INTEGER AS s,
+       ((i * 13) % 2000001 - 1000000)::BIGINT AS b,
+       (((i * 31) % 200001 - 100000) / 100)::DECIMAL(15, 2) AS price,
+       CASE WHEN i % 11 = 0 THEN NULL ELSE (i % 5003 - 2500)::INTEGER END AS n,
+       (i * 0.11)::DOUBLE / 13 AS e
+FROM range(400000) t(i)
+
+statement ok
+CHECKPOINT
+
+restart
+
+statement ok
+SET jit_measure_native_legs=false
+
+statement ok
+SET jit_cbo_startup_base_cost=0
+
+statement ok
+SET jit_cbo_startup_margin_basis_points=0
+
+statement ok
+CREATE MACRO case_null_sums() AS TABLE
+SELECT 'then_value' AS q, sum(CASE WHEN k < 300 THEN price END)::VARCHAR AS a, count(*) AS c FROM facts
+UNION ALL
+SELECT 'two_lanes', (sum(CASE WHEN k < 300 THEN b END) + sum(CASE WHEN k > 600 THEN id END))::VARCHAR, count(*) FROM facts
+UNION ALL
+SELECT 'then_null', sum(CASE WHEN k < 300 THEN NULL ELSE b END)::VARCHAR, count(*) FROM facts
+UNION ALL
+SELECT 'middle_null', sum(CASE WHEN k < 200 THEN b WHEN k < 500 THEN NULL ELSE id END)::VARCHAR, count(*) FROM facts
+UNION ALL
+SELECT 'nested', sum(CASE WHEN k < 500 THEN CASE WHEN g < 40 THEN price END ELSE price * 2 END)::VARCHAR, count(*) FROM facts
+UNION ALL
+SELECT 'no_row_matches', sum(CASE WHEN id % 2 = 0 AND id % 4 = 1 THEN b END)::VARCHAR, count(*) FROM facts
+UNION ALL
+SELECT 'one_lane_matches', sum(CASE WHEN id % 2 = 0 AND id % 4 = 1 THEN b END)::VARCHAR || sum(CASE WHEN k < 300 THEN price END)::VARCHAR, count(*) FROM facts
+UNION ALL
+SELECT 'null_source', sum(CASE WHEN k < 700 THEN n END)::VARCHAR, count(*) FROM facts
+UNION ALL
+SELECT 'null_condition', sum(CASE WHEN n > 0 THEN b END)::VARCHAR, count(*) FROM facts
+UNION ALL
+SELECT 'all_null_source', coalesce(sum(n)::VARCHAR, 'null') || '/' || sum(b)::VARCHAR, count(*) FROM facts WHERE id % 11 = 0
+UNION ALL
+SELECT 'all_null_source_case', coalesce(sum(n * 2)::VARCHAR, 'null') || '/' || coalesce(sum(CASE WHEN k < 300 THEN b END)::VARCHAR, 'null'), count(*) FROM facts WHERE id % 11 = 0 AND k < 990
+UNION ALL
+SELECT 'filtered', sum(CASE WHEN k < 300 THEN b END)::VARCHAR, count(*) FROM facts WHERE g < 50
+UNION ALL
+SELECT 'with_count_star', sum(CASE WHEN k < 300 THEN price END)::VARCHAR, count(*) FROM facts WHERE id % 3 = 0
+UNION ALL
+SELECT 'grouped_' || g, sum(CASE WHEN k < 300 THEN price END)::VARCHAR, count(*) FROM facts GROUP BY g
+UNION ALL
+SELECT 'grouped_empty_groups_' || g, sum(CASE WHEN g < 10 THEN b END)::VARCHAR, count(*) FROM facts GROUP BY g
+UNION ALL
+SELECT 'grouped_two_lanes_' || g, (sum(CASE WHEN k < 300 THEN b END) + sum(CASE WHEN g % 3 = 0 THEN id END))::VARCHAR, count(*) FROM facts GROUP BY g
+UNION ALL
+SELECT 'grouped_small_domain_' || s, sum(CASE WHEN k < 300 THEN b END)::VARCHAR, count(*) FROM facts GROUP BY s
+UNION ALL
+SELECT 'grouped_small_empty_' || s, sum(CASE WHEN s > 4 THEN b END)::VARCHAR, count(*) FROM facts GROUP BY s
+UNION ALL
+SELECT 'grouped_null_source_' || g, sum(CASE WHEN k < 700 THEN n END)::VARCHAR, count(*) FROM facts GROUP BY g
+UNION ALL
+SELECT 'grouped_filtered_' || g, sum(CASE WHEN k < 300 THEN b END)::VARCHAR, count(*) FROM facts WHERE id % 5 <> 0 GROUP BY g
+
+foreach threads 1 4
+
+statement ok
+SET threads={threads}
+
+foreach policy off auto
+
+statement ok
+SET jit_policy='{policy}'
+
+statement ok
+CREATE OR REPLACE TEMP TABLE r_{policy} AS FROM case_null_sums()
+
+endloop
+
+query I
+SELECT count(*) FROM ((SELECT * FROM r_off EXCEPT ALL SELECT * FROM r_auto)
+                      UNION ALL (SELECT * FROM r_auto EXCEPT ALL SELECT * FROM r_off))
+----
+0
+
+query I
+SELECT count(*) FROM r_auto
+----
+512
+
+endloop
+
+# a group whose rows all yield NULL keeps a NULL sum
+query I
+SELECT count(*) FROM r_auto WHERE q LIKE 'grouped_empty_groups_%' AND a IS NULL
+----
+87
+
+query I
+SELECT count(*) FROM r_auto WHERE (q LIKE 'grouped_small_empty_%' OR q = 'no_row_matches') AND a IS NULL
+----
+6
+
+# DOUBLE sums add their rows in order: one thread, compared exactly
+statement ok
+SET threads=1
+
+foreach policy off auto
+
+statement ok
+SET jit_policy='{policy}'
+
+statement ok
+CREATE OR REPLACE TEMP TABLE d_{policy} AS
+SELECT 'ungrouped' AS q, sum(CASE WHEN k < 300 THEN e END) AS a FROM facts
+UNION ALL
+SELECT 'grouped_' || g, sum(CASE WHEN k < 300 THEN e * 2.0 END) FROM facts GROUP BY g
+
+endloop
+
+query I
+SELECT count(*) FROM ((SELECT * FROM d_off EXCEPT ALL SELECT * FROM d_auto)
+                      UNION ALL (SELECT * FROM d_auto EXCEPT ALL SELECT * FROM d_off))
+----
+0
+
+# both payload shapes run in the generated aggregates
+statement ok
+SET jit_policy='auto'
+
+statement ok
+SET jit_trace_runtime=true
+
+statement ok
+SET jit_event_log_size=0
+
+statement ok
+SET jit_event_log_size=100
+
+statement ok
+CREATE OR REPLACE TEMP TABLE traced AS SELECT sum(CASE WHEN k < 300 THEN price END), sum(CASE WHEN k > 600 THEN b END) FROM facts
+
+query I
+SELECT count(*) > 0 FROM duckdb_jit_events() WHERE status = 'executed' AND jit_runtime_path_counts LIKE '%fused_payload_update%'
+----
+true
+
+statement ok
+SET jit_event_log_size=0
+
+statement ok
+SET jit_event_log_size=100
+
+statement ok
+CREATE OR REPLACE TEMP TABLE traced AS SELECT g, sum(CASE WHEN k < 300 THEN price END) FROM facts GROUP BY g
+
+query I
+SELECT count(*) > 0 FROM duckdb_jit_events() WHERE status = 'executed' AND jit_runtime_path_counts LIKE '%fused_payload_update_owns_perfect_hash_group_lookup%'
+----
+true

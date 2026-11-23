@@ -14,20 +14,24 @@ namespace duckdb {
 
 //! Leaves the expression value in R2. Returns whether the value can be NULL: R3 then holds its validity, and the
 //! caller branches on it once the registers the evaluation borrows (S4 holds the source selections) are restored.
+//! Evaluates the expression into R2 and returns whether the slot path left its validity in R3. On a fast loop a
+//! payload whose CASE results yield NULL for some rows takes one of null_exits on them (given null_exits)
 static bool EmitSljitPerfectHashExpressionTreeValue(const SljitPerfectHashFusedUpdateEmitContext &context,
                                                     const ExecutionExpressionIR &expression, bool fast_path,
                                                     bool all_valid, bool no_source_selection,
-                                                    const vector<SljitTypedExpressionTreeLoopHoist> *data_hoists) {
+                                                    const vector<SljitTypedExpressionTreeLoopHoist> *data_hoists,
+                                                    vector<sljit_jump *> *null_exits = nullptr) {
 	auto compiler = context.compiler;
 	if (fast_path) {
 		idx_t spill_index = 0;
-		EmitSljitTypedExpressionTreeFastValueReg(compiler, expression, spill_index, context.overflows, data_hoists);
+		EmitSljitTypedExpressionTreeFastValueReg(compiler, expression, spill_index, context.overflows, data_hoists,
+		                                         null_exits);
 		return false;
 	}
 	if (all_valid && no_source_selection) {
 		idx_t spill_index = 0;
 		EmitSljitTypedExpressionTreeLogicalFastValueReg(compiler, expression, spill_index, context.overflows,
-		                                                data_hoists);
+		                                                data_hoists, null_exits);
 		return false;
 	}
 	if (all_valid) {
@@ -35,7 +39,7 @@ static bool EmitSljitPerfectHashExpressionTreeValue(const SljitPerfectHashFusedU
 		               offsetof(SljitNativeVectorInput, source_sel_array));
 		idx_t spill_index = 0;
 		EmitSljitTypedExpressionTreeSelectedFastValueReg(compiler, expression, spill_index, context.overflows,
-		                                                 data_hoists);
+		                                                 data_hoists, null_exits);
 		return false;
 	}
 	sljit_emit_op1(compiler, SLJIT_MOV_P, SLJIT_S4, 0, SLJIT_MEM1(SLJIT_S0),
@@ -89,12 +93,12 @@ static void EmitSljitPerfectHashPayloadStatePointer(const SljitPerfectHashFusedU
 }
 
 static void EmitSljitPerfectHashPayloadInvalidContinuation(struct sljit_compiler *compiler,
-                                                           sljit_jump *payload_invalid) {
-	if (!payload_invalid) {
+                                                           const vector<sljit_jump *> &payload_invalid) {
+	if (payload_invalid.empty()) {
 		return;
 	}
 	auto payload_done = sljit_emit_jump(compiler, SLJIT_JUMP);
-	sljit_set_label(payload_invalid, sljit_emit_label(compiler));
+	SetSljitJumpLabels(payload_invalid, sljit_emit_label(compiler));
 	sljit_set_label(payload_done, sljit_emit_label(compiler));
 }
 
@@ -322,10 +326,10 @@ void EmitSljitPerfectHashPayloadUpdates(const SljitPerfectHashFusedUpdateEmitCon
 		}
 		if (!descriptor.ReadsValue()) {
 			// COUNT(*), or COUNT of a column whose rows the loop has not already proven valid
-			sljit_jump *source_is_null = nullptr;
+			vector<sljit_jump *> source_is_null;
 			if (descriptor.has_payload && !options.all_valid && !options.null_rows) {
-				source_is_null = EmitJumpIfFusedAggregateReferenceNull(
-				    compiler, payloads[payload_idx], !options.fast_path && !options.no_source_selection, SLJIT_S3);
+				source_is_null.push_back(EmitJumpIfFusedAggregateReferenceNull(
+				    compiler, payloads[payload_idx], !options.fast_path && !options.no_source_selection, SLJIT_S3));
 			}
 			if (use_reduction) {
 				if (context.reduction_state_reg == SLJIT_S4) {
@@ -343,7 +347,7 @@ void EmitSljitPerfectHashPayloadUpdates(const SljitPerfectHashFusedUpdateEmitCon
 			continue;
 		}
 
-		sljit_jump *payload_invalid = nullptr;
+		vector<sljit_jump *> payload_invalid;
 		if (codegen_plan.shared_binary.Enabled() && options.all_valid &&
 		    codegen_plan.shared_binary.lanes[payload_idx].matched) {
 			EmitSljitSharedBinaryPayloadLane(compiler, codegen_plan.shared_binary.lanes[payload_idx],
@@ -351,14 +355,19 @@ void EmitSljitPerfectHashPayloadUpdates(const SljitPerfectHashFusedUpdateEmitCon
 			                                 shared_index_mode, context.overflows, options.payload_data_hoists,
 			                                 selected_shared_payload && state_clobbers_selected_source_array);
 		} else if (payloads[payload_idx].kind == SljitNativeRegionExpressionKind::REFERENCE) {
-			payload_invalid = EmitLoadFusedAggregateReferenceValue(
+			auto reference_invalid = EmitLoadFusedAggregateReferenceValue(
 			    compiler, payloads[payload_idx], !options.fast_path && !options.no_source_selection,
 			    !options.all_valid && !options.null_rows, SLJIT_S3, options.payload_data_hoists);
+			if (reference_invalid) {
+				payload_invalid.push_back(reference_invalid);
+			}
 		} else {
 			const auto payload_may_be_null = EmitSljitPerfectHashExpressionTreeValue(
 			    context, *payloads[payload_idx].expression_tree, options.fast_path, options.all_valid,
-			    options.no_source_selection, options.payload_data_hoists);
-			payload_invalid = EmitSljitPerfectHashJumpIfExpressionNull(compiler, payload_may_be_null);
+			    options.no_source_selection, options.payload_data_hoists, &payload_invalid);
+			if (payload_may_be_null) {
+				payload_invalid.push_back(EmitSljitPerfectHashJumpIfExpressionNull(compiler, true));
+			}
 		}
 		if (use_reduction) {
 			if (context.reduction_state_reg == SLJIT_S4) {

@@ -141,8 +141,10 @@ bool TryBuildSljitPerfectHashFusedUpdatePlan(
 	                                    !result.source_data_hoists.empty();
 	const bool group_data_pointer_hoist_candidate =
 	    !result.hoist_source_data_pointers && registers.has_group_data && result.group_plans.size() <= 2;
-	result.states_markable_on_first_touch =
-	    !result.dense_reduction_plan.Ready() && SljitPerfectHashStatesMarkableOnFirstTouch(aggregates);
+	// a group's first row marks its sums as set only when every row it holds updates every sum
+	result.states_markable_on_first_touch = !result.dense_reduction_plan.Ready() &&
+	                                        !result.codegen_plan.payloads_exit_null &&
+	                                        SljitPerfectHashStatesMarkableOnFirstTouch(aggregates);
 	result.fast_source_data_hoists =
 	    result.codegen_plan.fast_path_supported
 	        ? (result.hoist_source_data_pointers ? BuildSljitPerfectHashSourceDataPointerHoists(payloads, 3, true)

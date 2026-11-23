@@ -16,9 +16,17 @@ namespace duckdb {
 
 struct SljitTypedExpressionTreeFastPathPlan {
 	bool fast_path_supported = false;
+	//! A CASE result is NULL: the fast emitters evaluate the tree only for a caller that takes the rows whose value is
+	//! NULL (see SljitTypedExpressionTreeFastNullExitSupported)
+	bool fast_path_needs_null_exits = false;
 	bool precheck_nulls_supported = false;
 	bool hybrid_nulls_supported = false;
 	vector<idx_t> source_refs;
+
+	//! The fast emitters evaluate the tree for a caller that takes the rows whose value is NULL
+	bool FastPathSupportedWithNullExits() const {
+		return fast_path_supported || fast_path_needs_null_exits;
+	}
 };
 
 struct SljitTypedExpressionTreePlan {
@@ -75,6 +83,10 @@ bool SljitTypedExpressionTreeInt64CastSupported(const ExecutionExpressionIR &nod
 bool SljitTypedExpressionTreeValueCastSupported(const ExecutionExpressionIR &node);
 bool SljitTypedExpressionTreeConstantDivisorReductionSupported(const ExecutionExpressionIR &node);
 bool SljitTypedExpressionTreeFastPathSupported(const ExecutionExpressionIR &node);
+//! Whether the fast emitters evaluate the node given a target for the rows whose value is NULL: a fast-path node, or a
+//! CASE whose conditions take the fast path and whose results are NULL constants or again such nodes, such as an
+//! aggregate payload CASE WHEN c THEN x END, whose NULL rows leave the aggregate's state alone
+bool SljitTypedExpressionTreeFastNullExitSupported(const ExecutionExpressionIR &node);
 bool SljitTypedExpressionTreeCanPrecheckNulls(const ExecutionExpressionIR &node);
 //! A NULL in any source the node reads makes it NULL
 bool SljitTypedExpressionTreeIsNullStrict(const ExecutionExpressionIR &node);

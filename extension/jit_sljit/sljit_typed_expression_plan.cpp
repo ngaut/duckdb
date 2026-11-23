@@ -466,6 +466,29 @@ bool SljitTypedExpressionTreeFastPathSupported(const ExecutionExpressionIR &node
 	return SljitTypedExpressionTreeIsSupported(node);
 }
 
+static bool SljitTypedExpressionTreeFastNullExitResult(const ExecutionExpressionIR &node) {
+	return (node.kind == ExecutionExpressionIRKind::CONSTANT && node.constant.IsNull()) ||
+	       SljitTypedExpressionTreeFastNullExitSupported(node);
+}
+
+bool SljitTypedExpressionTreeFastNullExitSupported(const ExecutionExpressionIR &node) {
+	if (node.kind != ExecutionExpressionIRKind::CASE) {
+		return SljitTypedExpressionTreeFastPathSupported(node);
+	}
+	if (!node.else_node || node.children.size() % 2 != 0) {
+		return false;
+	}
+	for (idx_t child_idx = 0; child_idx < node.children.size(); child_idx += 2) {
+		auto &condition = node.children[child_idx];
+		auto &value = node.children[child_idx + 1];
+		if (!condition || !value || !SljitTypedExpressionTreeFastPathSupported(*condition) ||
+		    !SljitTypedExpressionTreeFastNullExitResult(*value)) {
+			return false;
+		}
+	}
+	return SljitTypedExpressionTreeFastNullExitResult(*node.else_node) && SljitTypedExpressionTreeIsSupported(node);
+}
+
 bool SljitTypedExpressionTreeCanPrecheckNulls(const ExecutionExpressionIR &node) {
 	switch (node.kind) {
 	case ExecutionExpressionIRKind::REFERENCE:
