@@ -14,20 +14,22 @@
 #include "sljit_region_executable.hpp"
 #include "sljit_runtime_batch_runtime.hpp"
 
+#include <algorithm>
 #include <array>
-#include <chrono>
 
 namespace duckdb {
 
-//! Measures whether the region or DuckDB's operators run a class of a pipeline's chunks faster: the legs alternate in
-//! blocks of chunks, so both see the pipeline's state warm up alike (the first chunks of an aggregate touch most of its
-//! groups for the first time), and each chunk is timed from one source chunk to the next, so both legs pay the scan
-//! alike. The first chunk of each leg, which warms its code, is left out. DuckDB's operators keep the class's remaining
-//! chunks only when they were faster beyond the measurement's noise
+//! Measures whether the region or DuckDB's operators run a class of a pipeline's chunks faster. The legs alternate
+//! chunk by chunk, so both see the pipeline's state warm up alike (the first chunks of an aggregate touch most of its
+//! groups for the first time). Each chunk is timed from one source chunk to the next, without the source's fetch: the
+//! fetch is the same for either leg and holds the waits for the scan's lock, which would bury the legs' difference.
+//! The first chunk of each leg, which warms its code, is left out. Each of DuckDB's chunks is compared with the
+//! generated chunk before it, which ran on the same kind of core unless the thread just moved, and the median of those
+//! ratios decides, so a chunk whose thread was preempted or moved to a slower core sways only its own pair. DuckDB's
+//! operators keep the class's remaining chunks only when they were faster beyond the measurement's noise
 class SljitNativeLegMeasurement {
 public:
 	static constexpr idx_t LEG_CHUNKS = 16;
-	static constexpr idx_t BLOCK_CHUNKS = 4;
 
 	//! Whether DuckDB's operators take the class's next chunk
 	bool TakesNative() {
@@ -37,26 +39,30 @@ public:
 		}
 		if (!decided) {
 			decided = true;
-			native = generated_rows != 0 && native_rows != 0 &&
-			         native_nanos * generated_rows * NOISE_PERCENT_DENOMINATOR <
-			             generated_nanos * native_rows * (NOISE_PERCENT_DENOMINATOR - NOISE_PERCENT);
+			if (pair_count != 0) {
+				std::nth_element(native_ratios.begin(), native_ratios.begin() + pair_count / 2,
+				                 native_ratios.begin() + pair_count);
+				native = native_ratios[pair_count / 2] * NOISE_PERCENT_DENOMINATOR <
+				         RATIO_SCALE * (NOISE_PERCENT_DENOMINATOR - NOISE_PERCENT);
+			}
 		}
 		return native;
 	}
 
 	//! The time and rows of the class's latest chunk
-	void Attribute(std::chrono::steady_clock::duration duration, idx_t rows) {
+	void Attribute(int64_t nanos, idx_t rows) {
 		const auto chunk = chunk_count - 1;
-		if (chunk == 0 || chunk == BLOCK_CHUNKS || chunk >= 2 * LEG_CHUNKS) {
+		if (chunk < 2 || chunk >= 2 * LEG_CHUNKS || rows == 0) {
 			return;
 		}
-		const auto nanos = std::chrono::duration_cast<std::chrono::nanoseconds>(duration).count();
-		if (IsNativeChunk(chunk)) {
-			native_nanos += nanos;
-			native_rows += NumericCast<int64_t>(rows);
-		} else {
-			generated_nanos += nanos;
-			generated_rows += NumericCast<int64_t>(rows);
+		const auto nanos_per_row = std::max<int64_t>(nanos, 1) * RATIO_SCALE / NumericCast<int64_t>(rows);
+		if (!IsNativeChunk(chunk)) {
+			generated_chunk = chunk;
+			generated_nanos_per_row = nanos_per_row;
+			return;
+		}
+		if (generated_chunk + 1 == chunk) {
+			native_ratios[pair_count++] = nanos_per_row * RATIO_SCALE / std::max<int64_t>(generated_nanos_per_row, 1);
 		}
 	}
 
@@ -66,18 +72,20 @@ public:
 
 private:
 	static bool IsNativeChunk(idx_t chunk) {
-		return (chunk / BLOCK_CHUNKS) % 2 == 1;
+		return chunk % 2 == 1;
 	}
 
 private:
 	static constexpr int64_t NOISE_PERCENT = 3;
 	static constexpr int64_t NOISE_PERCENT_DENOMINATOR = 100;
+	//! fixed point for the times per row and their ratios
+	static constexpr int64_t RATIO_SCALE = 1024;
 
 	idx_t chunk_count = 0;
-	int64_t generated_nanos = 0;
-	int64_t generated_rows = 0;
-	int64_t native_nanos = 0;
-	int64_t native_rows = 0;
+	idx_t generated_chunk = 0;
+	int64_t generated_nanos_per_row = 0;
+	std::array<int64_t, LEG_CHUNKS> native_ratios;
+	idx_t pair_count = 0;
 	bool decided = false;
 	bool native = false;
 };
@@ -205,13 +213,23 @@ public:
 		}
 	}
 
+	//! Whether the next chunk is still measured: the source then times its fetch
+	bool TimesSourceChunks() const {
+		if (!continuation || !measured) {
+			return false;
+		}
+		// a class no chunk reached yet keeps no measurement open
+		return (!seen_class[0] && !seen_class[1]) || (seen_class[0] && !measurements[0].Decided()) ||
+		       (seen_class[1] && !measurements[1].Decided());
+	}
+
 	//! HANDS_OVER decides an unmeasured step on its first chunk; when it leaves the decision PENDING, PENDING_HANDOVER
 	//! reports the step's own decision before each later chunk. READ_INPUT reads every column of a chunk that
 	//! DuckDB's operators take, or that HANDS_OVER looks at
 	template <class HANDS_OVER, class PENDING_HANDOVER, class FLUSH, class READ_INPUT>
-	optional_ptr<DataChunk> ContinuesNatively(DataChunk &input, bool source_filters_hold, HANDS_OVER &&hands_over,
-	                                          PENDING_HANDOVER &&pending_handover, FLUSH &&flush,
-	                                          READ_INPUT &&read_input) {
+	optional_ptr<DataChunk> ContinuesNatively(DataChunk &input, bool source_filters_hold, int64_t source_nanos,
+	                                          HANDS_OVER &&hands_over, PENDING_HANDOVER &&pending_handover,
+	                                          FLUSH &&flush, READ_INPUT &&read_input) {
 		if (!continuation) {
 			return nullptr;
 		}
@@ -240,7 +258,7 @@ public:
 			read_input();
 			return &continuation->Prepare(runtime, input, source_filters_hold);
 		}
-		const bool native = TakesNativeMeasured(input.size(), source_filters_hold);
+		const bool native = TakesNativeMeasured(input.size(), source_filters_hold, source_nanos);
 		if (native && !previous_native) {
 			flush();
 		}
@@ -253,18 +271,20 @@ public:
 	}
 
 private:
-	bool TakesNativeMeasured(idx_t rows, bool source_filters_hold) {
+	bool TakesNativeMeasured(idx_t rows, bool source_filters_hold, int64_t source_nanos) {
 		auto &measurement = measurements[source_filters_hold];
-		if (!measurements[0].Decided() || !measurements[1].Decided()) {
-			const auto now = std::chrono::steady_clock::now();
+		if (has_previous || TimesSourceChunks()) {
+			const auto now = ExecutionClockNanos();
 			if (has_previous) {
-				measurements[previous_filters_hold].Attribute(now - previous_start, previous_rows);
+				// the window ran the previous chunk's leg and fetched this chunk, whose fetch is left out
+				measurements[previous_filters_hold].Attribute(now - previous_start - source_nanos, previous_rows);
 			}
-			has_previous = true;
+			has_previous = !measurement.Decided();
 			previous_start = now;
 			previous_rows = rows;
 			previous_filters_hold = source_filters_hold;
 		}
+		seen_class[source_filters_hold] = true;
 		const bool was_decided = measurement.Decided();
 		const bool native = measurement.TakesNative();
 		if (!was_decided && measurement.Decided() && runtime.TraceRuntime()) {
@@ -280,8 +300,9 @@ private:
 	SljitNativeHandover handover = SljitNativeHandover::PENDING;
 	//! Per chunk class: the chunks whose zone maps prove the source's filters, and the rest
 	std::array<SljitNativeLegMeasurement, 2> measurements;
+	std::array<bool, 2> seen_class {{false, false}};
 	bool has_previous = false;
-	std::chrono::steady_clock::time_point previous_start;
+	int64_t previous_start = 0;
 	idx_t previous_rows = 0;
 	bool previous_filters_hold = false;
 	bool previous_native = false;

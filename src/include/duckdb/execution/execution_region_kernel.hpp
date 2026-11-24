@@ -60,12 +60,17 @@ struct ExecutionSourceChunkProof {
 	bool table_filters_hold = false;
 	//! The chunk's columns the source has not read yet
 	optional_ptr<ExecutionDeferredColumns> deferred_columns;
+	//! The time the source took to produce the chunk, when the step times its chunks (TimesSourceChunks)
+	int64_t source_nanos = 0;
 
 	//! The proof of chunks merged into one: their deferred columns were read before the merge
 	ExecutionSourceChunkProof Merge(const ExecutionSourceChunkProof &other) const {
-		return {table_filters_hold && other.table_filters_hold, nullptr};
+		return {table_filters_hold && other.table_filters_hold, nullptr, source_nanos + other.source_nanos};
 	}
 };
+
+//! A steady clock in nanoseconds
+DUCKDB_API int64_t ExecutionClockNanos();
 
 //! A chunk-step kernel bound to one pipeline executor: the executor's loop hands it every source chunk, and it keeps
 //! between chunks the rows its operators batch
@@ -85,6 +90,8 @@ public:
 	//! it, or null while the step runs the chunks itself. A step whose sink keeps its state apart from its own
 	//! batches may alternate chunk by chunk; it hands over only after flushing every row it held
 	virtual optional_ptr<DataChunk> ContinuesNatively(DataChunk &input, ExecutionSourceChunkProof proof);
+	//! Whether the step times its chunks: the executor then times the source fetch of each chunk it hands the step
+	virtual bool TimesSourceChunks() const;
 };
 
 class DUCKDB_API ExecutionRegionCodeHandle {

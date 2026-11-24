@@ -5,6 +5,8 @@
 #include "duckdb/common/exception.hpp"
 #include "duckdb/common/types/data_chunk.hpp"
 
+#include <chrono>
+
 namespace duckdb {
 
 ExecutionDeferredColumns::~ExecutionDeferredColumns() {
@@ -132,6 +134,15 @@ ExecutionRegionChunkStep::~ExecutionRegionChunkStep() {
 
 optional_ptr<DataChunk> ExecutionRegionChunkStep::ContinuesNatively(DataChunk &input, ExecutionSourceChunkProof proof) {
 	return nullptr;
+}
+
+bool ExecutionRegionChunkStep::TimesSourceChunks() const {
+	return false;
+}
+
+int64_t ExecutionClockNanos() {
+	return std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch())
+	    .count();
 }
 
 } // namespace duckdb

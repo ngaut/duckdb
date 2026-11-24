@@ -122,6 +122,10 @@ optional_ptr<DataChunk> ExecutionCoalescingChunkStep::ContinuesNatively(DataChun
 	return native_input;
 }
 
+bool ExecutionCoalescingChunkStep::TimesSourceChunks() const {
+	return consumer->TimesSourceChunks();
+}
+
 SinkResultType ExecutionCoalescingChunkStep::FlushBuffered() {
 	if (!finished && buffered.size()) {
 		finished = consumer->ExecuteChunk(buffered, buffered_proof) == SinkResultType::FINISHED;

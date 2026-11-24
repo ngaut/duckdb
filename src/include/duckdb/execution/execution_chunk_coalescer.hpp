@@ -29,6 +29,7 @@ public:
 	void FlushChunks() override;
 	void FinishChunks() override;
 	optional_ptr<DataChunk> ContinuesNatively(DataChunk &input, ExecutionSourceChunkProof proof) override;
+	bool TimesSourceChunks() const override;
 
 private:
 	SinkResultType FlushBuffered();

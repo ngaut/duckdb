@@ -1302,9 +1302,12 @@ SourceResultType PipelineExecutor::FetchFromCompiledSourceContract(SupportsSourc
 	}
 
 	stage_start = metrics ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point();
+	const bool time_source = compiled_step && compiled_step->TimesSourceChunks();
+	const auto source_start = time_source ? ExecutionClockNanos() : 0;
 	auto res = fetch(source_input);
 	execution_source_chunk_proof.table_filters_hold = source_input.table_filters_hold;
 	execution_source_chunk_proof.deferred_columns = source_input.deferred_columns;
+	execution_source_chunk_proof.source_nanos = time_source ? ExecutionClockNanos() - source_start : 0;
 	if (source_input.batch_index_state == SourceBatchIndexState::ADVANCED) {
 		throw InternalException(
 		    "execution region source contract fetch cannot carry a batch-index advance without data");

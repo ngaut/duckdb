@@ -52,7 +52,7 @@ public:
 
 	optional_ptr<DataChunk> ContinuesNatively(DataChunk &input, ExecutionSourceChunkProof proof) override {
 		return native_continuation.ContinuesNatively(
-		    input, proof.table_filters_hold,
+		    input, proof.table_filters_hold, proof.source_nanos,
 		    [&](const SljitExecutableNativeContinuation &plan) { return executor.HandsOverToNative(input, plan); },
 		    [&]() { return executor.PendingHandover(); },
 		    [&]() { SljitChunkStepResult(executor.FlushChunks(), result); },
@@ -61,6 +61,10 @@ public:
 				    proof.deferred_columns->ReadAll(input);
 			    }
 		    });
+	}
+
+	bool TimesSourceChunks() const override {
+		return native_continuation.TimesSourceChunks();
 	}
 
 	SinkResultType ExecuteChunk(DataChunk &input, ExecutionSourceChunkProof proof) override {
