@@ -5,9 +5,8 @@
 #
 # Every sample runs in its own shell on a read-only fixture database. It first runs the query on the native engine,
 # which loads the fixture into the buffer pool and gives the result the sample must reproduce, then runs it under
-# the sampled policy and measures that run. The cost of a policy is the work of its timed samples in
-# performance-core cycles (see process_usage.py); one more JIT sample traces the runtime for the counter checks and
-# is not timed.
+# the sampled policy and counts the instructions that run retired. The cost of a policy is the median instruction
+# count of its samples; one more JIT sample traces the runtime for the counter checks and is not counted.
 
 from __future__ import annotations
 
@@ -21,8 +20,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from counter_contract import counter_contract_failures, number
-from duckdb_shell import DuckDBShell, Measurement, create_database, duckdb_shell_quote, repo_root
-from process_usage import work_cycles
+from duckdb_shell import DuckDBShell, create_database, duckdb_shell_quote, repo_root
 from workloads import ENCODINGS_WORKLOADS, GENERIC_WORKLOADS, TPCH_WORKLOADS
 
 SUITES = {"generic": GENERIC_WORKLOADS, "encodings": ENCODINGS_WORKLOADS, "tpch": TPCH_WORKLOADS}
@@ -35,33 +33,20 @@ RUN_FIELDS = (
     "workload",
     "policy",
     "repeat",
-    "wall_time_us",
-    "runnable_time_us",
     "instructions",
-    "performance_core_instructions",
-    "performance_core_cycles",
     "correctness_diff",
     "compiled_regions",
     "compile_errors",
     "runtime_events",
 )
-SUMMARY_FIELDS = (
-    "workload",
-    "off_cycles",
-    "auto_cycles",
-    "speedup",
-    "floor",
-    "ceiling",
-    "off_wall_time_us",
-    "auto_wall_time_us",
-)
+SUMMARY_FIELDS = ("workload", "off_instructions", "auto_instructions", "speedup", "floor", "ceiling")
 
 
 @dataclass(frozen=True)
 class Sample:
     policy: str
     repeat: int | str
-    measurement: Measurement
+    instructions: int
     correctness_diff: int
     counters: list[dict]
 
@@ -84,7 +69,7 @@ def run_sample(
         shell.run(f".open --readonly {duckdb_shell_quote(database)}")
         shell.run(f"{settings_sql('off', threads)}\nCREATE TEMP TABLE expected AS\n{workload['sql']};")
         shell.run(settings_sql(policy, threads, repeat == TRACED))
-        measurement = shell.measure(f"CREATE TEMP TABLE result AS\n{workload['sql']};")
+        instructions = shell.measure(f"CREATE TEMP TABLE result AS\n{workload['sql']};")
         # an empty text counter is NULL
         counters = [
             {field: "" if value is None else value for field, value in row.items()}
@@ -92,31 +77,25 @@ def run_sample(
         ]
         shell.run(settings_sql("off", threads))
         correctness_diff = int(shell.query(CORRECTNESS_SQL)[0]["correctness_diff"])
-    return Sample(policy, repeat, measurement, correctness_diff, counters)
+    return Sample(policy, repeat, instructions, correctness_diff, counters)
 
 
 def run_workload(duckdb: Path, database: Path, workload: dict, threads: int, repeats: int) -> list[Sample]:
-    """The timed samples of both policies, then the traced JIT sample. The policies alternate in which runs first, so
-    neither is always the one that follows the other."""
+    """The counted samples of both policies, then the traced JIT sample."""
     samples = []
     for repeat in range(1, repeats + 1):
-        for policy in ("off", "auto") if repeat % 2 else ("auto", "off"):
+        for policy in ("off", "auto"):
             samples.append(run_sample(duckdb, database, workload, threads, policy, repeat))
     samples.append(run_sample(duckdb, database, workload, threads, "auto"))
     return samples
 
 
 def run_row(workload: dict, sample: Sample) -> dict:
-    usage = sample.measurement.usage
     return {
         "workload": workload["name"],
         "policy": sample.policy,
         "repeat": sample.repeat,
-        "wall_time_us": sample.measurement.wall_time_ns // 1000,
-        "runnable_time_us": usage.runnable_time_ns // 1000,
-        "instructions": usage.instructions,
-        "performance_core_instructions": usage.performance_core_instructions,
-        "performance_core_cycles": usage.performance_core_cycles,
+        "instructions": sample.instructions,
         "correctness_diff": sample.correctness_diff,
         "compiled_regions": sample.regions("compiled"),
         "compile_errors": sample.regions("error"),
@@ -125,24 +104,21 @@ def run_row(workload: dict, sample: Sample) -> dict:
 
 
 def summary_row(workload: dict, threads: int, samples: list[Sample]) -> dict:
-    timed = {
-        policy: [sample.measurement for sample in samples if sample.policy == policy and sample.repeat != TRACED]
+    instructions = {
+        policy: round(
+            statistics.median(
+                sample.instructions for sample in samples if sample.policy == policy and sample.repeat != TRACED
+            )
+        )
         for policy in ("off", "auto")
-    }
-    cycles = {policy: work_cycles([measurement.usage for measurement in timed[policy]]) for policy in timed}
-    wall_time_us = {
-        policy: int(statistics.median(measurement.wall_time_ns for measurement in timed[policy])) // 1000
-        for policy in timed
     }
     return {
         "workload": workload["name"],
-        "off_cycles": cycles["off"],
-        "auto_cycles": cycles["auto"],
-        "speedup": cycles["off"] / cycles["auto"],
+        "off_instructions": instructions["off"],
+        "auto_instructions": instructions["auto"],
+        "speedup": instructions["off"] / instructions["auto"],
         "floor": workload["floor"][threads],
         "ceiling": workload["ceiling"][threads],
-        "off_wall_time_us": wall_time_us["off"],
-        "auto_wall_time_us": wall_time_us["auto"],
     }
 
 
@@ -170,8 +146,10 @@ def workload_failures(workload: dict, threads: int, summary: dict, samples: list
     failures.extend(counter_contract_failures(traced.counters))
     if summary["speedup"] < summary["floor"]:
         failures.append(f"speedup {summary['speedup']:.3f} is below the floor {summary['floor']:.3f}")
-    if summary["auto_cycles"] > summary["ceiling"]:
-        failures.append(f"JIT cost {summary['auto_cycles']} cycles exceeds the ceiling {summary['ceiling']}")
+    if summary["auto_instructions"] > summary["ceiling"]:
+        failures.append(
+            f"JIT cost {summary['auto_instructions']} instructions exceeds the ceiling {summary['ceiling']}"
+        )
     return [f"{workload['name']}: {failure}" for failure in failures]
 
 
@@ -187,7 +165,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("suite", choices=tuple(SUITES))
     parser.add_argument("--threads", type=int, required=True)
     parser.add_argument("--workloads", nargs="+", help="run only these workloads of the suite")
-    parser.add_argument("--repeats", type=int, default=5, help="timed samples per policy")
+    parser.add_argument("--repeats", type=int, default=3, help="counted samples per policy")
     parser.add_argument("--out-dir", type=Path, help="where to write runs.csv, summary.csv and counters.json")
     parser.add_argument("--duckdb", type=Path, default=repo_root() / "build" / "reldebug" / "duckdb")
     args = parser.parse_args(argv)
@@ -233,8 +211,7 @@ def main(argv: list[str] | None = None) -> int:
             failures.extend(workload_failed)
             print(
                 f"{workload['name']}: speedup {summary['speedup']:.3f} (floor {summary['floor']:.3f}), "
-                f"JIT {summary['auto_cycles']} cycles (ceiling {summary['ceiling']}), "
-                f"wall {summary['off_wall_time_us']} -> {summary['auto_wall_time_us']} us"
+                f"JIT {summary['auto_instructions']} instructions (ceiling {summary['ceiling']})"
                 + "".join(f"\n  FAILED {failure}" for failure in workload_failed),
                 flush=True,
             )

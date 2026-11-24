@@ -12,9 +12,7 @@ from unittest import mock
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import performance_gate
-from duckdb_shell import Measurement
 from performance_gate import SUITES, TRACED, Sample, parse_args, run_workload, summary_row, workload_failures
-from process_usage import ProcessUsage
 
 WORKLOAD = {
     "name": "workload",
@@ -44,9 +42,7 @@ def counter_row(status: str, **fields) -> dict:
 def sample(
     policy: str, repeat: int | str, instructions: int, counters: list[dict], correctness_diff: int = 0
 ) -> Sample:
-    # every sample runs on performance cores at one cycle per instruction
-    usage = ProcessUsage(0, instructions, instructions, instructions)
-    return Sample(policy, repeat, Measurement(instructions * 1000, usage), correctness_diff, counters)
+    return Sample(policy, repeat, instructions, correctness_diff, counters)
 
 
 def samples(off: int = 2000, auto: int = 1000, compiled: bool = True, traced: list[dict] | None = None) -> list[Sample]:
@@ -65,12 +61,11 @@ def failures(workload: dict, measured: list[Sample]) -> list[str]:
 
 
 class SummaryTest(unittest.TestCase):
-    def test_the_cost_of_a_policy_is_the_work_of_its_timed_samples(self) -> None:
+    def test_the_cost_of_a_policy_is_the_median_instructions_of_its_counted_samples(self) -> None:
         summary = summary_row(WORKLOAD, 1, samples())
-        self.assertEqual((summary["off_cycles"], summary["auto_cycles"]), (2000, 1000))
+        self.assertEqual((summary["off_instructions"], summary["auto_instructions"]), (2000, 1000))
         self.assertEqual(summary["speedup"], 2.0)
         self.assertEqual((summary["floor"], summary["ceiling"]), (1.5, 1100))
-        self.assertEqual((summary["off_wall_time_us"], summary["auto_wall_time_us"]), (2000, 1000))
 
 
 class WorkloadFailuresTest(unittest.TestCase):
@@ -127,14 +122,14 @@ class WorkloadFailuresTest(unittest.TestCase):
         self.assert_fails(WORKLOAD, samples(off=1400), "speedup 1.400 is below the floor 1.500")
 
     def test_a_cost_above_the_ceiling_fails(self) -> None:
-        self.assert_fails(WORKLOAD, samples(off=4000, auto=1101), "JIT cost 1101 cycles exceeds the ceiling 1100")
+        self.assert_fails(WORKLOAD, samples(off=4000, auto=1101), "JIT cost 1101 instructions exceeds the ceiling 1100")
 
 
 class RunWorkloadTest(unittest.TestCase):
-    def test_the_policies_alternate_in_which_runs_first_and_the_traced_sample_is_last(self) -> None:
+    def test_each_repeat_counts_both_policies_and_the_traced_sample_is_last(self) -> None:
         with mock.patch.object(performance_gate, "run_sample", side_effect=lambda *arguments: arguments[4:]) as run:
             order = run_workload(Path("duckdb"), Path("fixture"), WORKLOAD, 1, 3)
-        self.assertEqual(order, [("off", 1), ("auto", 1), ("auto", 2), ("off", 2), ("off", 3), ("auto", 3), ("auto",)])
+        self.assertEqual(order, [("off", 1), ("auto", 1), ("off", 2), ("auto", 2), ("off", 3), ("auto", 3), ("auto",)])
         self.assertEqual(run.call_count, 7)
 
 

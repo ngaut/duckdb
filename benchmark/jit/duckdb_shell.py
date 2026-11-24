@@ -7,11 +7,9 @@ from __future__ import annotations
 import json
 import os
 import subprocess
-import time
-from dataclasses import dataclass
 from pathlib import Path
 
-from process_usage import ProcessUsage, read_process_usage
+from process_usage import read_instructions
 
 
 def repo_root() -> Path:
@@ -32,19 +30,11 @@ def duckdb_shell_environment() -> dict[str, str]:
     return {**os.environ, "DUCKDB_AGENT_MODE": "0"}
 
 
-@dataclass(frozen=True)
-class Measurement:
-    """What the shell process did while it ran one set of statements, and how long the host took to run them."""
-
-    wall_time_ns: int
-    usage: ProcessUsage
-
-
 class DuckDBShell:
     """An interactive shell on an in-memory database that prints results as JSON.
 
     The shell prints a marker after the statements of each call and then blocks on its input, so a call returns when
-    the process is idle again: the process usage read around a call is the cost of exactly those statements."""
+    the process is idle again: the instructions read around a call are the cost of exactly those statements."""
 
     def __init__(self, duckdb: Path):
         self.process = subprocess.Popen(
@@ -89,12 +79,11 @@ class DuckDBShell:
         """Runs one statement and returns its rows."""
         return json.loads(self.run(statement))
 
-    def measure(self, statements: str) -> Measurement:
-        usage = read_process_usage(self.process.pid)
-        started = time.monotonic_ns()
+    def measure(self, statements: str) -> int:
+        """Runs the statements and returns the instructions the process retired for them."""
+        before = read_instructions(self.process.pid)
         self.run(statements)
-        wall_time_ns = time.monotonic_ns() - started
-        return Measurement(wall_time_ns, read_process_usage(self.process.pid) - usage)
+        return read_instructions(self.process.pid) - before
 
 
 def create_database(duckdb: Path, database: Path, sql: str) -> None:
