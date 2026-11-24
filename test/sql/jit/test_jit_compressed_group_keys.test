@@ -1,5 +1,5 @@
 # name: test/sql/jit/test_jit_compressed_group_keys.test
-# description: Integer group keys the planner compresses into USMALLINT or UINTEGER (a cast it proved keeps every value), and unsigned key columns, reach the generated perfect hash lookup, with NULL keys, expression keys and two keys; a cast the user writes still raises its conversion error
+# description: Integer group keys the planner compresses into USMALLINT or UINTEGER (a cast it proved keeps every value), from signed and unsigned sources up to UBIGINT, and unsigned key columns, reach the generated perfect hash lookup, with NULL keys, expression keys, two keys and groups a batch with NULL payloads touches first; a cast the user writes still raises its conversion error
 # group: [jit]
 
 require jit_sljit
@@ -13,7 +13,11 @@ SELECT i AS id,
        ((i * 13) % 2000001 - 1000000)::BIGINT AS b,
        CASE WHEN i % 17 = 0 THEN NULL ELSE (i * 31) % 40000 END AS nk,
        (3000000000 + (i * 7) % 1000)::UINTEGER AS u,
-       2147483648 + (i * 7) % 131072 AS high
+       2147483648 + (i * 7) % 131072 AS high,
+       hash(i) % 65536 AS rk,
+       18446744073709551615 - (i * 7) % 1000 AS uhigh,
+       hash(i) % 70000 AS wide,
+       CASE WHEN i < 4096 THEN NULL ELSE b END AS early_null
 FROM range(600003) t(i)
 
 statement ok
@@ -53,6 +57,14 @@ SELECT 'uinteger_column', u, NULL, sum(b), count(*) FROM facts GROUP BY u
 UNION ALL
 SELECT 'uinteger_high', high, NULL, sum(b), count(*) FROM facts GROUP BY high
 UNION ALL
+SELECT 'ubigint_column', rk, NULL, sum(b), count(*) FROM facts GROUP BY rk
+UNION ALL
+SELECT 'ubigint_count', rk, NULL, NULL, count(*) FROM facts GROUP BY rk
+UNION ALL
+SELECT 'ubigint_high', (uhigh - 18446744073709550000)::BIGINT, NULL, sum(b), count(*) FROM facts GROUP BY uhigh
+UNION ALL
+SELECT 'early_null', id % 1000, NULL, sum(early_null), count(*) FROM facts GROUP BY id % 1000
+UNION ALL
 SELECT 'filtered', id % 50000, NULL, sum(b) FILTER (WHERE k < 500), count(*) FILTER (WHERE k >= 750)
 FROM facts GROUP BY id % 50000
 UNION ALL
@@ -71,9 +83,13 @@ SELECT count(*) FROM ((SELECT * FROM r_off EXCEPT ALL SELECT * FROM r_auto)
 query II
 SELECT shape, count(*) FROM r_auto GROUP BY shape ORDER BY shape
 ----
+early_null	1000
 filtered	50000
 nullable	40001
 two_keys	15000
+ubigint_column	65532
+ubigint_count	65532
+ubigint_high	1000
 uinteger	200000
 uinteger_column	1000
 uinteger_high	131072
@@ -90,6 +106,11 @@ SET jit_policy='{policy}'
 
 statement error
 SELECT (id % 70000)::USMALLINT AS key, count(*) FROM facts GROUP BY key
+----
+<REGEX>:Conversion Error:.*out of range.*
+
+statement error
+SELECT wide::USMALLINT AS key, count(*) FROM facts GROUP BY key
 ----
 <REGEX>:Conversion Error:.*out of range.*
 

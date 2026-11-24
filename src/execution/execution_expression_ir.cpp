@@ -67,6 +67,26 @@ static bool ExecutionCastCanThrow(const LogicalType &source, const LogicalType &
 	       BoundCastExpression::CastCanThrow(source, target, try_cast);
 }
 
+//! Compressed materialization casts only between types whose statistics prove every value fits the target
+static bool ExecutionCastIsValuePreserving(const BoundFunctionExpression &cast) {
+	return CMUtils::GetExpressionType(cast) == CMExpressionType::CAST;
+}
+
+static bool ExecutionCastExpressionCanThrow(const BoundFunctionExpression &cast) {
+	return !ExecutionCastIsValuePreserving(cast) &&
+	       ExecutionCastCanThrow(BoundCastExpression::SourceType(cast), BoundCastExpression::TargetType(cast),
+	                             BoundCastExpression::IsTryCast(cast));
+}
+
+//! The conversion errors lowered are those of a signed integer source into an integer target
+static bool ExecutionCastThrowsUnsupportedError(const BoundFunctionExpression &cast) {
+	const auto source_type = BoundCastExpression::SourceType(cast);
+	const auto &target_type = BoundCastExpression::TargetType(cast);
+	return ExecutionCastExpressionCanThrow(cast) && (!ExecutionExpressionIsSignedIntegerType(source_type) ||
+	                                                 (!ExecutionExpressionIsSignedIntegerType(target_type) &&
+	                                                  !ExecutionExpressionIsUnsignedIntegerType(target_type)));
+}
+
 static bool ExecutionExpressionIsCompressibleIntegralType(const LogicalType &type) {
 	switch (type.id()) {
 	case LogicalTypeId::SMALLINT:
@@ -1281,10 +1301,7 @@ static unique_ptr<ExecutionExpressionIR> TryBuildExecutionCastIR(const Expressio
 	if (!ExecutionExpressionIsScalarType(source_type) || !ExecutionExpressionIsScalarType(target_type)) {
 		return nullptr;
 	}
-	if (ExecutionCastCanThrow(source_type, target_type, try_cast) &&
-	    (!ExecutionExpressionIsSignedIntegerType(source_type) ||
-	     (!ExecutionExpressionIsSignedIntegerType(target_type) &&
-	      !ExecutionExpressionIsUnsignedIntegerType(target_type)))) {
+	if (ExecutionCastThrowsUnsupportedError(cast)) {
 		return nullptr;
 	}
 	auto &child_expression = BoundCastExpression::Child(cast);
@@ -1300,7 +1317,7 @@ static unique_ptr<ExecutionExpressionIR> TryBuildExecutionCastIR(const Expressio
 		node->cast_source_alias = child_expression.GetAlias().GetIdentifierName();
 	}
 	node->try_cast = try_cast;
-	node->value_preserving_cast = CMUtils::GetExpressionType(cast) == CMExpressionType::CAST;
+	node->value_preserving_cast = ExecutionCastIsValuePreserving(cast);
 	node->left = std::move(child);
 	return node;
 }
@@ -1604,7 +1621,7 @@ static string DescribeExecutionExpressionSubject(const Expression &expression) {
 		result += ";source=" + source_type.ToString();
 		result += ";target=" + target_type.ToString();
 		result += ";try_cast=" + ExecutionExpressionBool(try_cast);
-		result += ";can_throw=" + ExecutionExpressionBool(ExecutionCastCanThrow(source_type, target_type, try_cast));
+		result += ";can_throw=" + ExecutionExpressionBool(ExecutionCastExpressionCanThrow(cast));
 		return result;
 	}
 	switch (expression.GetExpressionClass()) {
@@ -1737,10 +1754,7 @@ static string BuildExecutionCastFailureReason(const Expression &expression) {
 	if (!ExecutionExpressionIsScalarType(source_type) || !ExecutionExpressionIsScalarType(target_type)) {
 		return BuildExecutionExpressionReasonWithSubject("cast_type_not_scalar", expression);
 	}
-	if (ExecutionCastCanThrow(source_type, target_type, BoundCastExpression::IsTryCast(cast)) &&
-	    (!ExecutionExpressionIsSignedIntegerType(source_type) ||
-	     (!ExecutionExpressionIsSignedIntegerType(target_type) &&
-	      !ExecutionExpressionIsUnsignedIntegerType(target_type)))) {
+	if (ExecutionCastThrowsUnsupportedError(cast)) {
 		return BuildExecutionExpressionReasonWithSubject("throwing_cast_requires_signed_source_and_integer_target",
 		                                                 expression);
 	}

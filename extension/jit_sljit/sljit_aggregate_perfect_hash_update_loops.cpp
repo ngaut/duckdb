@@ -186,13 +186,16 @@ static sljit_jump *EmitSljitPerfectHashFlatFastLoop(const SljitPerfectHashFusedU
                                                     const SljitPerfectHashFusedUpdatePlan &update_plan,
                                                     const vector<SljitTypedExpressionTreeLoopHoist> *fast_data_hoists) {
 	auto compiler = context.compiler;
+	auto direct_lookup =
+	    SljitPerfectHashDirectGroupLookupOptions(context, update_plan.hoist_fast_group_data_array_base);
+	direct_lookup.table = update_plan.fast_table_registers;
+	EmitLoadSljitPerfectHashTableRegisters(compiler, direct_lookup.table, direct_lookup.mark_states_on_first_touch);
 	if (update_plan.predicate_simd_plan.supported) {
 		EmitSljitTypedExpressionTreeSimdHybridFilterLoop(
 		    compiler, *context.predicate, update_plan.predicate_simd_plan, update_plan.predicate_simd_mask_offset,
 		    [&]() {
 			    EmitSljitPerfectHashSimdLaneRowUpdate(
-			        context,
-			        SljitPerfectHashDirectGroupLookupOptions(context, update_plan.hoist_fast_group_data_array_base),
+			        context, direct_lookup,
 			        SljitPerfectHashPayloadUpdateOptionsForLoop(true, true, false, fast_data_hoists), fast_data_hoists,
 			        update_plan.hoist_fast_group_data_array_base ? EmitSljitPerfectHashFastGroupDataArrayBase
 			                                                     : nullptr);
@@ -205,7 +208,7 @@ static sljit_jump *EmitSljitPerfectHashFlatFastLoop(const SljitPerfectHashFusedU
 	if (update_plan.hoist_fast_group_data_array_base) {
 		EmitSljitPerfectHashFastGroupDataArrayBase(compiler);
 	}
-	auto lookup = SljitPerfectHashDirectGroupLookupOptions(context, update_plan.hoist_fast_group_data_array_base);
+	auto lookup = direct_lookup;
 	lookup.expression_fast_path = true;
 	lookup.expression_all_valid = true;
 	lookup.expression_data_hoists = fast_data_hoists;

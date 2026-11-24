@@ -159,7 +159,8 @@ static bool SljitSimdNodeScale(const ExecutionExpressionIR &node, sljit_s32 &sca
 	SljitNativeIntegerKind kind;
 	if (SljitTypedExpressionTreeIsNarrowDecimal128Node(node) || SljitTypedExpressionTreeIsDoubleNode(node) ||
 	    !TryGetSljitTypedExpressionTreeResultKind(node, kind) || kind == SljitNativeIntegerKind::UINT8 ||
-	    kind == SljitNativeIntegerKind::UINT16 || kind == SljitNativeIntegerKind::UINT32) {
+	    kind == SljitNativeIntegerKind::UINT16 || kind == SljitNativeIntegerKind::UINT32 ||
+	    kind == SljitNativeIntegerKind::UINT64) {
 		return false;
 	}
 	auto data_scale = NativeIntegerDataScale(kind);

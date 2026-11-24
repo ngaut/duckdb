@@ -63,6 +63,16 @@ struct SljitPerfectHashGroupPlan {
 	idx_t shift = 0;
 };
 
+//! Registers a loop keeps the perfect-hash table's invariants in; an invariant without one is loaded from the input on
+//! every row. Each row stores to a random state, so a load after it waits on that store's address unless held here
+struct SljitPerfectHashTableRegisters {
+	sljit_s32 state_base = 0;
+	//! The flag array of the group lookup: the marked states when it marks them on a group's first touch, the set
+	//! groups otherwise
+	sljit_s32 group_flags = 0;
+	sljit_s32 tuple_size = 0;
+};
+
 enum class SljitFusedAggregateGroupIndexMode : uint8_t { LOGICAL, SELECTED_NULLABLE, SELECTED_PRESENT };
 
 //! The kind a perfect-hash group key of this type loads as, when the generated lookup reads it
@@ -73,13 +83,24 @@ bool TryBuildSljitPerfectHashGroupPlans(const vector<ExecutionRegionGroupInput> 
                                         vector<SljitPerfectHashGroupPlan> &result,
                                         bool allow_typed_expression_tree = false);
 bool SljitCanPrecomputePerfectHashStringGroupOffset(const vector<SljitPerfectHashGroupPlan> &groups);
+//! The row loop's expressions besides its payloads: the typed group keys and the predicate
+vector<reference<const ExecutionExpressionIR>>
+SljitPerfectHashRowExpressions(const vector<SljitPerfectHashGroupPlan> &groups, const ExecutionExpressionIR *predicate);
 vector<SljitTypedExpressionTreeLoopHoist>
 BuildSljitPerfectHashSourceDataPointerHoists(const vector<SljitNativeRegionExpressionPlan> &payloads,
+                                             const vector<reference<const ExecutionExpressionIR>> &row_expressions,
                                              idx_t max_hoists = 2, bool include_fast_validity_reg = false);
-vector<SljitTypedExpressionTreeLoopHoist>
-BuildSljitPerfectHashSpareFastSourceDataPointerHoists(const vector<SljitNativeRegionExpressionPlan> &payloads);
-void EmitSljitPerfectHashSetOutputGroup(struct sljit_compiler *compiler, sljit_s32 group_index_reg);
-void EmitSljitPerfectHashStatePointer(struct sljit_compiler *compiler, sljit_s32 group_index_reg, sljit_s32 target_reg);
+vector<SljitTypedExpressionTreeLoopHoist> BuildSljitPerfectHashSpareFastSourceDataPointerHoists(
+    const vector<SljitNativeRegionExpressionPlan> &payloads,
+    const vector<reference<const ExecutionExpressionIR>> &row_expressions);
+void EmitSljitPerfectHashSetOutputGroup(struct sljit_compiler *compiler, sljit_s32 group_index_reg,
+                                        const SljitPerfectHashTableRegisters &table);
+void EmitSljitPerfectHashStatePointer(struct sljit_compiler *compiler, sljit_s32 group_index_reg, sljit_s32 target_reg,
+                                      const SljitPerfectHashTableRegisters &table);
+//! Loads the invariants the registers hold, for a loop whose lookup marks states on first touch or sets groups
+void EmitLoadSljitPerfectHashTableRegisters(struct sljit_compiler *compiler,
+                                            const SljitPerfectHashTableRegisters &table,
+                                            bool marks_states_on_first_touch);
 void EmitLoadFusedAggregateGroupSourceIndex(
     struct sljit_compiler *compiler, idx_t group_idx, sljit_s32 target_reg,
     SljitFusedAggregateGroupIndexMode mode = SljitFusedAggregateGroupIndexMode::SELECTED_NULLABLE,
@@ -117,6 +138,7 @@ void EmitSljitPerfectHashReductionStatePointer(struct sljit_compiler *compiler,
                                                const SljitDensePerfectHashAggregateReductionPlan &plan,
                                                sljit_s32 reduction_index_reg, sljit_s32 state_pointer_reg);
 void EmitSljitPerfectHashJumpIfFirstTouch(struct sljit_compiler *compiler, sljit_s32 group_index_reg,
+                                          const SljitPerfectHashTableRegisters &table,
                                           vector<SljitPerfectHashFirstTouchSite> &sites);
 void EmitSljitDensePerfectHashIncrementCount(struct sljit_compiler *compiler,
                                              const SljitDensePerfectHashAggregateReductionLane &lane,

@@ -36,45 +36,90 @@ static vector<sljit_s32> BuildSljitPerfectHashSourceDataPointerRegs(idx_t max_ho
 	return result;
 }
 
-vector<SljitTypedExpressionTreeLoopHoist>
-BuildSljitPerfectHashSourceDataPointerHoists(const vector<SljitNativeRegionExpressionPlan> &payloads, idx_t max_hoists,
-                                             bool include_fast_validity_reg) {
-	auto regs = BuildSljitPerfectHashSourceDataPointerRegs(max_hoists, include_fast_validity_reg);
-	// Payload data pointers are invariant for the complete generated row loop.
-	// A source referenced by one payload is therefore still reused once per row;
-	// requiring two payload-tree references leaves saved registers idle while the
-	// hot loop reloads vector metadata. The perfect-hash planner decides whether
-	// source or group invariants own S8/S9, so every source selected by that layout
-	// belongs in a register.
-	return BuildSljitAggregateSourceDataPointerHoists(payloads, regs, 1);
+vector<reference<const ExecutionExpressionIR>>
+SljitPerfectHashRowExpressions(const vector<SljitPerfectHashGroupPlan> &groups,
+                               const ExecutionExpressionIR *predicate) {
+	vector<reference<const ExecutionExpressionIR>> result;
+	for (auto &group : groups) {
+		if (group.expression_kind == SljitNativeRegionExpressionKind::TYPED_EXPRESSION_TREE && group.expression_tree) {
+			result.push_back(*group.expression_tree);
+		}
+	}
+	if (predicate) {
+		result.push_back(*predicate);
+	}
+	return result;
 }
 
 vector<SljitTypedExpressionTreeLoopHoist>
-BuildSljitPerfectHashSpareFastSourceDataPointerHoists(const vector<SljitNativeRegionExpressionPlan> &payloads) {
+BuildSljitPerfectHashSourceDataPointerHoists(const vector<SljitNativeRegionExpressionPlan> &payloads,
+                                             const vector<reference<const ExecutionExpressionIR>> &row_expressions,
+                                             idx_t max_hoists, bool include_fast_validity_reg) {
+	auto regs = BuildSljitPerfectHashSourceDataPointerRegs(max_hoists, include_fast_validity_reg);
+	// Source data pointers are invariant for the complete generated row loop.
+	// A source referenced once is therefore still reused once per row;
+	// requiring two references leaves saved registers idle while the
+	// hot loop reloads vector metadata. The perfect-hash planner decides whether
+	// source or group invariants own S8/S9, so every source selected by that layout
+	// belongs in a register.
+	return BuildSljitAggregateSourceDataPointerHoists(payloads, row_expressions, regs, 1);
+}
+
+vector<SljitTypedExpressionTreeLoopHoist> BuildSljitPerfectHashSpareFastSourceDataPointerHoists(
+    const vector<SljitNativeRegionExpressionPlan> &payloads,
+    const vector<reference<const ExecutionExpressionIR>> &row_expressions) {
 	vector<sljit_s32> regs;
 	if (GetSljitPerfectHashRegisterLayout().has_group_data) {
 		regs.push_back(GetSljitNativeVectorRegisterLayout().optional_invariant);
 	}
-	return BuildSljitAggregateSourceDataPointerHoists(payloads, regs, 2);
+	return BuildSljitAggregateSourceDataPointerHoists(payloads, row_expressions, regs, 2);
 }
 
-void EmitSljitPerfectHashSetOutputGroup(struct sljit_compiler *compiler, sljit_s32 group_index_reg) {
-	sljit_emit_op1(compiler, SLJIT_MOV_P, SLJIT_R0, 0, SLJIT_MEM1(SLJIT_S0),
-	               offsetof(SljitNativeVectorInput, perfect_hash_group_is_set));
-	sljit_emit_op1(compiler, SLJIT_MOV_U8, SLJIT_MEM2(SLJIT_R0, group_index_reg), 0, SLJIT_IMM, 1);
+void EmitSljitPerfectHashSetOutputGroup(struct sljit_compiler *compiler, sljit_s32 group_index_reg,
+                                        const SljitPerfectHashTableRegisters &table) {
+	auto group_is_set = table.group_flags;
+	if (!group_is_set) {
+		sljit_emit_op1(compiler, SLJIT_MOV_P, SLJIT_R0, 0, SLJIT_MEM1(SLJIT_S0),
+		               offsetof(SljitNativeVectorInput, perfect_hash_group_is_set));
+		group_is_set = SLJIT_R0;
+	}
+	sljit_emit_op1(compiler, SLJIT_MOV_U8, SLJIT_MEM2(group_is_set, group_index_reg), 0, SLJIT_IMM, 1);
 }
 
-void EmitSljitPerfectHashStatePointer(struct sljit_compiler *compiler, sljit_s32 group_index_reg,
-                                      sljit_s32 target_reg) {
-	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_R1, 0, SLJIT_MEM1(SLJIT_S0),
-	               offsetof(SljitNativeVectorInput, perfect_hash_tuple_size));
-	sljit_emit_op2(compiler, SLJIT_MUL, SLJIT_R1, 0, SLJIT_R1, 0, group_index_reg, 0);
+void EmitSljitPerfectHashStatePointer(struct sljit_compiler *compiler, sljit_s32 group_index_reg, sljit_s32 target_reg,
+                                      const SljitPerfectHashTableRegisters &table) {
+	if (table.tuple_size) {
+		sljit_emit_op2(compiler, SLJIT_MUL, SLJIT_R1, 0, table.tuple_size, 0, group_index_reg, 0);
+	} else {
+		sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_R1, 0, SLJIT_MEM1(SLJIT_S0),
+		               offsetof(SljitNativeVectorInput, perfect_hash_tuple_size));
+		sljit_emit_op2(compiler, SLJIT_MUL, SLJIT_R1, 0, SLJIT_R1, 0, group_index_reg, 0);
+	}
+	if (table.state_base) {
+		sljit_emit_op2(compiler, SLJIT_ADD, target_reg, 0, table.state_base, 0, SLJIT_R1, 0);
+		return;
+	}
 	sljit_emit_op1(compiler, SLJIT_MOV_P, target_reg, 0, SLJIT_MEM1(SLJIT_S0),
-	               offsetof(SljitNativeVectorInput, perfect_hash_state_data));
+	               offsetof(SljitNativeVectorInput, perfect_hash_state_base));
 	sljit_emit_op2(compiler, SLJIT_ADD, target_reg, 0, target_reg, 0, SLJIT_R1, 0);
-	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_R1, 0, SLJIT_MEM1(SLJIT_S0),
-	               offsetof(SljitNativeVectorInput, perfect_hash_aggregate_state_offset));
-	sljit_emit_op2(compiler, SLJIT_ADD, target_reg, 0, target_reg, 0, SLJIT_R1, 0);
+}
+
+void EmitLoadSljitPerfectHashTableRegisters(struct sljit_compiler *compiler,
+                                            const SljitPerfectHashTableRegisters &table,
+                                            bool marks_states_on_first_touch) {
+	if (table.state_base) {
+		sljit_emit_op1(compiler, SLJIT_MOV_P, table.state_base, 0, SLJIT_MEM1(SLJIT_S0),
+		               offsetof(SljitNativeVectorInput, perfect_hash_state_base));
+	}
+	if (table.group_flags) {
+		sljit_emit_op1(compiler, SLJIT_MOV_P, table.group_flags, 0, SLJIT_MEM1(SLJIT_S0),
+		               marks_states_on_first_touch ? offsetof(SljitNativeVectorInput, perfect_hash_group_states_marked)
+		                                           : offsetof(SljitNativeVectorInput, perfect_hash_group_is_set));
+	}
+	if (table.tuple_size) {
+		sljit_emit_op1(compiler, SLJIT_MOV, table.tuple_size, 0, SLJIT_MEM1(SLJIT_S0),
+		               offsetof(SljitNativeVectorInput, perfect_hash_tuple_size));
+	}
 }
 
 void EmitLoadFusedAggregateGroupSourceIndex(struct sljit_compiler *compiler, idx_t group_idx, sljit_s32 target_reg,

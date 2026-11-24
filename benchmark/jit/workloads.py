@@ -714,15 +714,15 @@ ENCODINGS_QUERIES = {
     ),
     "random_key_groups": (
         "SELECT rk, sum(id) FROM __jit_encodings_facts GROUP BY rk",
-        {1: False, 4: False},
+        {1: True, 4: True},
     ),
     "random_key_counts": (
         "SELECT rk, count(*) FROM __jit_encodings_facts GROUP BY rk",
-        {1: False, 4: False},
+        {1: True, 4: True},
     ),
     "random_multi_key_groups": (
         "SELECT ra, rk, sum(id) FROM __jit_encodings_facts GROUP BY ra, rk",
-        {1: False, 4: False},
+        {1: True, 4: True},
     ),
 }
 
@@ -766,8 +766,8 @@ ENCODINGS_THRESHOLDS = {
     "expression_key_filter_counts": ({1: 1.57, 4: 1.52}, {1: 73_100_000, 4: 79_900_000}),
     "narrow_between": ({1: 1.28, 4: 1.22}, {1: 15_400_000, 4: 17_500_000}),
     "nullable_key_join": ({1: 0.89, 4: 0.89}, {1: 570_500_000, 4: 572_400_000}),
-    "random_key_groups": ({1: 0.89, 4: 0.89}, {1: 103_800_000, 4: 114_600_000}),
-    "random_key_counts": ({1: 0.89, 4: 0.89}, {1: 81_300_000, 4: 92_900_000}),
+    "random_key_groups": ({1: 1.15, 4: 1.09}, {1: 80_000_000, 4: 93_100_000}),
+    "random_key_counts": ({1: 1.24, 4: 1.17}, {1: 58_200_000, 4: 69_500_000}),
     "random_multi_key_groups": ({1: 0.89, 4: 0.89}, {1: 997_500_000, 4: 1_253_200_000}),
 }
 

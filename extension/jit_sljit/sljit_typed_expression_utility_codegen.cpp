@@ -69,6 +69,10 @@ int64_t SljitTypedExpressionTreeConstantValue(const ExecutionExpressionIR &node)
 	if (node.return_type.id() == LogicalTypeId::UINTEGER && node.physical_type == PhysicalType::UINT32) {
 		return node.constant.GetValueUnsafe<uint32_t>();
 	}
+	if (node.return_type.id() == LogicalTypeId::UBIGINT && node.physical_type == PhysicalType::UINT64) {
+		// the register holds the value's bits
+		return static_cast<int64_t>(node.constant.GetValueUnsafe<uint64_t>());
+	}
 	if (SljitTypedExpressionTreeIsInt32Node(node)) {
 		return node.constant.GetValueUnsafe<int32_t>();
 	}

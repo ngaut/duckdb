@@ -13,6 +13,8 @@
 
 #include "duckdb/common/types/cast_helpers.hpp"
 
+#include <algorithm>
+
 namespace duckdb {
 
 //! Fast rows take no branch on the payloads that may skip them only when every such payload is a COUNT or a 64-bit sum
@@ -70,6 +72,48 @@ static bool SljitPerfectHashNullCheckedLoopSupported(const ExecutionExpressionIR
 		}
 	}
 	return true;
+}
+
+static void AssignSljitPerfectHashFastTableRegisters(SljitPerfectHashFusedUpdatePlan &plan) {
+	// a dense reduction keeps its states on the stack: the loop never reads the table
+	if (plan.dense_reduction_plan.Ready() || !plan.codegen_plan.fast_path_supported) {
+		return;
+	}
+	const auto &registers = GetSljitPerfectHashRegisterLayout();
+	const auto &native_vector = GetSljitNativeVectorRegisterLayout();
+	vector<sljit_s32> owned {plan.state_pointer_reg};
+	for (auto &hoist : plan.source_data_hoists) {
+		owned.push_back(hoist.location.operand);
+	}
+	for (auto &hoist : plan.fast_source_data_hoists) {
+		owned.push_back(hoist.location.operand);
+	}
+	if (plan.hoist_group_data_pointers) {
+		for (idx_t group_idx = 0; group_idx < plan.group_plans.size(); group_idx++) {
+			owned.push_back(SljitPerfectHashGroupDataPointerReg(group_idx));
+		}
+	}
+	vector<sljit_s32> candidates;
+	if (native_vector.HasOptionalInvariant()) {
+		candidates.push_back(native_vector.optional_invariant);
+	}
+	if (registers.has_group_data) {
+		candidates.push_back(registers.group_data[0]);
+		candidates.push_back(registers.group_data[1]);
+	}
+	vector<reference<sljit_s32>> invariants {plan.fast_table_registers.state_base,
+	                                         plan.fast_table_registers.group_flags,
+	                                         plan.fast_table_registers.tuple_size};
+	idx_t next_invariant = 0;
+	for (auto candidate : candidates) {
+		if (next_invariant == invariants.size() || std::find(owned.begin(), owned.end(), candidate) != owned.end()) {
+			continue;
+		}
+		invariants[next_invariant++].get() = candidate;
+		if (candidate == registers.group_data[0] || candidate == registers.group_data[1]) {
+			plan.saved_register_count = MaxValue(plan.saved_register_count, registers.group_data_saved_register_count);
+		}
+	}
 }
 
 bool TryBuildSljitPerfectHashFusedUpdatePlan(
@@ -166,7 +210,8 @@ bool TryBuildSljitPerfectHashFusedUpdatePlan(
 	TryBuildSljitDensePerfectHashAggregateReductionPlan(aggregates, contract, payloads_not_null,
 	                                                    batch_lower_never_overflows, result.local_size,
 	                                                    result.dense_reduction_plan);
-	result.source_data_hoists = BuildSljitPerfectHashSourceDataPointerHoists(payloads);
+	const auto row_expressions = SljitPerfectHashRowExpressions(result.group_plans, predicate);
+	result.source_data_hoists = BuildSljitPerfectHashSourceDataPointerHoists(payloads, row_expressions);
 	result.hoist_source_data_pointers = registers.has_group_data &&
 	                                    result.source_data_hoists.size() >= result.group_plans.size() &&
 	                                    !result.source_data_hoists.empty();
@@ -178,8 +223,9 @@ bool TryBuildSljitPerfectHashFusedUpdatePlan(
 	                                        SljitPerfectHashStatesMarkableOnFirstTouch(aggregates);
 	result.fast_source_data_hoists =
 	    result.codegen_plan.fast_path_supported
-	        ? (result.hoist_source_data_pointers ? BuildSljitPerfectHashSourceDataPointerHoists(payloads, 3, true)
-	                                             : BuildSljitPerfectHashSpareFastSourceDataPointerHoists(payloads))
+	        ? (result.hoist_source_data_pointers
+	               ? BuildSljitPerfectHashSourceDataPointerHoists(payloads, row_expressions, 3, true)
+	               : BuildSljitPerfectHashSpareFastSourceDataPointerHoists(payloads, row_expressions))
 	        : result.source_data_hoists;
 	if (!result.hoist_source_data_pointers) {
 		result.source_data_hoists.clear();
@@ -211,6 +257,7 @@ bool TryBuildSljitPerfectHashFusedUpdatePlan(
 	if (result.hoist_group_data_pointers || result.hoist_source_data_pointers) {
 		result.saved_register_count = registers.group_data_saved_register_count;
 	}
+	AssignSljitPerfectHashFastTableRegisters(result);
 	return true;
 }
 

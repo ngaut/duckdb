@@ -65,6 +65,10 @@ static bool SljitTypedExpressionTreeIsUInt32Node(const ExecutionExpressionIR &no
 	return node.return_type.id() == LogicalTypeId::UINTEGER && node.physical_type == PhysicalType::UINT32;
 }
 
+static bool SljitTypedExpressionTreeIsUInt64Node(const ExecutionExpressionIR &node) {
+	return node.return_type.id() == LogicalTypeId::UBIGINT && node.physical_type == PhysicalType::UINT64;
+}
+
 bool TryGetSljitTypedExpressionTreeDecimal64Range(const LogicalType &type, int64_t &result_min, int64_t &result_max) {
 	if (type.id() != LogicalTypeId::DECIMAL || type.InternalType() != PhysicalType::INT64) {
 		return false;
@@ -170,13 +174,14 @@ bool SljitTypedExpressionTreeIsValueNode(const ExecutionExpressionIR &node) {
 	return SljitTypedExpressionTreeIsInt64Node(node) || SljitTypedExpressionTreeIsInt32Node(node) ||
 	       SljitTypedExpressionTreeIsBoolNode(node) || SljitTypedExpressionTreeIsDecimal64Node(node) ||
 	       SljitTypedExpressionTreeIsUInt8Node(node) || SljitTypedExpressionTreeIsUInt16Node(node) ||
-	       SljitTypedExpressionTreeIsUInt32Node(node) || SljitTypedExpressionTreeIsNarrowDecimal128Node(node) ||
-	       SljitTypedExpressionTreeIsDoubleNode(node);
+	       SljitTypedExpressionTreeIsUInt32Node(node) || SljitTypedExpressionTreeIsUInt64Node(node) ||
+	       SljitTypedExpressionTreeIsNarrowDecimal128Node(node) || SljitTypedExpressionTreeIsDoubleNode(node);
 }
 
 bool SljitTypedExpressionTreeIsIntegralValueNode(const ExecutionExpressionIR &node) {
 	return SljitTypedExpressionTreeIsIntegerNode(node) || SljitTypedExpressionTreeIsUInt8Node(node) ||
-	       SljitTypedExpressionTreeIsUInt16Node(node) || SljitTypedExpressionTreeIsUInt32Node(node);
+	       SljitTypedExpressionTreeIsUInt16Node(node) || SljitTypedExpressionTreeIsUInt32Node(node) ||
+	       SljitTypedExpressionTreeIsUInt64Node(node);
 }
 
 bool SljitTypedExpressionTreeIsIntegerNode(const ExecutionExpressionIR &node) {
@@ -213,6 +218,10 @@ static bool TryGetSljitTypedExpressionTreeIntegerKind(const ExecutionExpressionI
 	}
 	if (SljitTypedExpressionTreeIsUInt32Node(node)) {
 		kind = SljitNativeIntegerKind::UINT32;
+		return true;
+	}
+	if (SljitTypedExpressionTreeIsUInt64Node(node)) {
+		kind = SljitNativeIntegerKind::UINT64;
 		return true;
 	}
 	if (SljitTypedExpressionTreeIsInt32Node(node)) {

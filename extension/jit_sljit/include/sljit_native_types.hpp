@@ -52,7 +52,7 @@ inline SljitNativeIntegerCompareOp FlipNativeIntegerCompareOp(SljitNativeInteger
 		return op;
 	}
 }
-enum class SljitNativeIntegerKind : uint8_t { INT8, UINT8, UINT16, UINT32, INT32, INT64, DECIMAL64, DATE };
+enum class SljitNativeIntegerKind : uint8_t { INT8, UINT8, UINT16, UINT32, UINT64, INT32, INT64, DECIMAL64, DATE };
 enum class SljitNativeSignedIntegerWidth : uint8_t { INT8, INT16, INT32, INT64 };
 enum class SljitNativeUnsignedIntegerWidth : uint8_t { UINT8, UINT16, UINT32 };
 enum class SljitNativeHashJoinKeyKind : uint8_t {
@@ -431,11 +431,11 @@ struct SljitNativeVectorInput {
 	idx_t aggregate_state_offset = 0;
 	idx_t aggregate_state_value_offset = 0;
 	idx_t aggregate_state_is_set_offset = 0;
-	data_ptr_t perfect_hash_state_data = nullptr;
+	//! The first group's aggregate states: a group's states lie its index times the tuple size past it
+	data_ptr_t perfect_hash_state_base = nullptr;
 	bool *perfect_hash_group_is_set = nullptr;
 	idx_t perfect_hash_total_groups = 0;
 	idx_t perfect_hash_tuple_size = 0;
-	idx_t perfect_hash_aggregate_state_offset = 0;
 	bool has_error = false;
 	//! No source has a selection of its own: every one reads the logical row, and no row is NULL. It sits in the
 	//! padding before error: a field that moves the hot fields above costs the generated loops cycles

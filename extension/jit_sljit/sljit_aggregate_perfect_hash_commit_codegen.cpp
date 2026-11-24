@@ -159,8 +159,8 @@ static void EmitSljitPerfectHashLocalReductionCommit(struct sljit_compiler *comp
 		auto &count_lane = reduction_plan.lanes[reduction_plan.count_seen_lane];
 		group_not_seen = EmitJumpIfSljitPerfectHashCommitLaneZero(compiler, SLJIT_S2, count_lane.count_offset);
 	}
-	EmitSljitPerfectHashSetOutputGroup(compiler, SLJIT_S1);
-	EmitSljitPerfectHashStatePointer(compiler, SLJIT_S1, SLJIT_S4);
+	EmitSljitPerfectHashSetOutputGroup(compiler, SLJIT_S1, SljitPerfectHashTableRegisters());
+	EmitSljitPerfectHashStatePointer(compiler, SLJIT_S1, SLJIT_S4, SljitPerfectHashTableRegisters());
 	EmitSljitPerfectHashCommitPayloads(compiler, reduction_plan, payload_descriptors, contract, SLJIT_S4, SLJIT_S2,
 	                                   false);
 	sljit_set_label(group_not_seen, sljit_emit_label(compiler));
@@ -188,8 +188,8 @@ void EmitSljitPerfectHashFirstTouchBlocks(struct sljit_compiler *compiler,
 		sljit_emit_op1(compiler, SLJIT_MOV_P, SLJIT_R0, 0, SLJIT_MEM1(SLJIT_S0),
 		               offsetof(SljitNativeVectorInput, perfect_hash_group_states_marked));
 		sljit_emit_op1(compiler, SLJIT_MOV_U8, SLJIT_MEM2(SLJIT_R0, SLJIT_S4), 0, SLJIT_IMM, 1);
-		EmitSljitPerfectHashSetOutputGroup(compiler, SLJIT_S4);
-		EmitSljitPerfectHashStatePointer(compiler, SLJIT_S4, SLJIT_R0);
+		EmitSljitPerfectHashSetOutputGroup(compiler, SLJIT_S4, SljitPerfectHashTableRegisters());
+		EmitSljitPerfectHashStatePointer(compiler, SLJIT_S4, SLJIT_R0, SljitPerfectHashTableRegisters());
 		for (auto &descriptor : payload_descriptors) {
 			if (descriptor.primitive_kind == AggregatePrimitiveUpdateKind::COUNT_STAR ||
 			    descriptor.primitive_kind == AggregatePrimitiveUpdateKind::COUNT) {

@@ -132,6 +132,8 @@ static string NativeIntegerTypeName(SljitNativeIntegerKind kind) {
 		return "usmallint";
 	case SljitNativeIntegerKind::UINT32:
 		return "uinteger";
+	case SljitNativeIntegerKind::UINT64:
+		return "ubigint";
 	case SljitNativeIntegerKind::INT32:
 		return "integer";
 	case SljitNativeIntegerKind::INT64:
@@ -155,6 +157,10 @@ static bool ReadNativeIntegerValue(const Value &value, SljitNativeIntegerKind ki
 		return true;
 	case SljitNativeIntegerKind::UINT32:
 		constant_value = value.GetValue<uint32_t>();
+		return true;
+	case SljitNativeIntegerKind::UINT64:
+		// the register holds the value's bits
+		constant_value = static_cast<int64_t>(value.GetValue<uint64_t>());
 		return true;
 	case SljitNativeIntegerKind::INT32:
 		constant_value =

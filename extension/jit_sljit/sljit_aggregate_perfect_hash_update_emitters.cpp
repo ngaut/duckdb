@@ -253,12 +253,12 @@ void EmitSljitPerfectHashGroupLookup(const SljitPerfectHashFusedUpdateEmitContex
 		return;
 	}
 	if (options.mark_states_on_first_touch) {
-		EmitSljitPerfectHashJumpIfFirstTouch(compiler, SLJIT_S4, context.first_touch_sites);
+		EmitSljitPerfectHashJumpIfFirstTouch(compiler, SLJIT_S4, options.table, context.first_touch_sites);
 	} else {
-		EmitSljitPerfectHashSetOutputGroup(compiler, SLJIT_S4);
+		EmitSljitPerfectHashSetOutputGroup(compiler, SLJIT_S4, options.table);
 	}
 	const auto computed_state_reg = context.dedicated_state_register ? context.state_pointer_reg : SLJIT_S4;
-	EmitSljitPerfectHashStatePointer(compiler, SLJIT_S4, computed_state_reg);
+	EmitSljitPerfectHashStatePointer(compiler, SLJIT_S4, computed_state_reg, options.table);
 	if (!context.dedicated_state_register) {
 		sljit_emit_op1(compiler, SLJIT_MOV_P, SLJIT_MEM1(SLJIT_SP), context.state_pointer_offset, SLJIT_S4, 0);
 	}

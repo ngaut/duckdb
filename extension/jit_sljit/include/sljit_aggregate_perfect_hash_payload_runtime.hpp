@@ -244,12 +244,11 @@ static void SljitExecuteFusedPerfectHashGroupedPrimitiveAggregatePayloadUpdate(
 	native_input.perfect_hash_inputs_flat_no_selection = payload_flat_no_selection && group_flat_no_selection;
 	native_input.perfect_hash_inputs_all_valid = payload_all_valid && group_all_valid;
 	native_input.group_selection_all_present = group_selection_all_present;
-	native_input.perfect_hash_state_data = layout.data;
+	native_input.perfect_hash_state_base = layout.data + layout.aggregate_state_offset;
 	native_input.perfect_hash_group_is_set = layout.group_is_set;
 	native_input.perfect_hash_group_states_marked = layout.group_states_marked;
 	native_input.perfect_hash_total_groups = layout.total_groups;
 	native_input.perfect_hash_tuple_size = layout.tuple_size;
-	native_input.perfect_hash_aggregate_state_offset = layout.aggregate_state_offset;
 	native_input.count = count;
 	native_input.has_error = false;
 	SljitExecuteNativeAggregatePayloadFunction(function, native_input);

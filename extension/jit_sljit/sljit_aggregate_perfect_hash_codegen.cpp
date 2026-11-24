@@ -70,10 +70,15 @@ void EmitSljitPerfectHashReductionStatePointer(struct sljit_compiler *compiler,
 }
 
 void EmitSljitPerfectHashJumpIfFirstTouch(struct sljit_compiler *compiler, sljit_s32 group_index_reg,
+                                          const SljitPerfectHashTableRegisters &table,
                                           vector<SljitPerfectHashFirstTouchSite> &sites) {
-	sljit_emit_op1(compiler, SLJIT_MOV_P, SLJIT_R0, 0, SLJIT_MEM1(SLJIT_S0),
-	               offsetof(SljitNativeVectorInput, perfect_hash_group_states_marked));
-	sljit_emit_op1(compiler, SLJIT_MOV_U8, SLJIT_R0, 0, SLJIT_MEM2(SLJIT_R0, group_index_reg), 0);
+	auto states_marked = table.group_flags;
+	if (!states_marked) {
+		sljit_emit_op1(compiler, SLJIT_MOV_P, SLJIT_R0, 0, SLJIT_MEM1(SLJIT_S0),
+		               offsetof(SljitNativeVectorInput, perfect_hash_group_states_marked));
+		states_marked = SLJIT_R0;
+	}
+	sljit_emit_op1(compiler, SLJIT_MOV_U8, SLJIT_R0, 0, SLJIT_MEM2(states_marked, group_index_reg), 0);
 	SljitPerfectHashFirstTouchSite site;
 	site.first_touch = sljit_emit_cmp(compiler, SLJIT_EQUAL, SLJIT_R0, 0, SLJIT_IMM, 0);
 	site.resume = sljit_emit_label(compiler);

@@ -48,7 +48,8 @@ static void SortSljitAggregateSourceUses(vector<pair<idx_t, idx_t>> &source_uses
 }
 
 static vector<pair<idx_t, idx_t>>
-BuildSljitAggregateSourceUseCounts(const vector<SljitNativeRegionExpressionPlan> &payloads) {
+BuildSljitAggregateSourceUseCounts(const vector<SljitNativeRegionExpressionPlan> &payloads,
+                                   const vector<reference<const ExecutionExpressionIR>> &expressions) {
 	vector<pair<idx_t, idx_t>> source_uses;
 	for (auto &payload : payloads) {
 		if (payload.kind == SljitNativeRegionExpressionKind::REFERENCE) {
@@ -56,6 +57,9 @@ BuildSljitAggregateSourceUseCounts(const vector<SljitNativeRegionExpressionPlan>
 		} else if (payload.expression_tree) {
 			CountSljitAggregateExpressionSourceUses(*payload.expression_tree, source_uses);
 		}
+	}
+	for (auto &expression : expressions) {
+		CountSljitAggregateExpressionSourceUses(expression.get(), source_uses);
 	}
 	SortSljitAggregateSourceUses(source_uses);
 	return source_uses;
@@ -82,19 +86,16 @@ BuildSljitSourceDataPointerHoists(vector<pair<idx_t, idx_t>> source_uses, const 
 
 vector<SljitTypedExpressionTreeLoopHoist>
 BuildSljitAggregateSourceDataPointerHoists(const vector<SljitNativeRegionExpressionPlan> &payloads,
+                                           const vector<reference<const ExecutionExpressionIR>> &expressions,
                                            const vector<sljit_s32> &data_regs, idx_t min_use_count) {
-	return BuildSljitSourceDataPointerHoists(BuildSljitAggregateSourceUseCounts(payloads), data_regs, min_use_count);
+	return BuildSljitSourceDataPointerHoists(BuildSljitAggregateSourceUseCounts(payloads, expressions), data_regs,
+	                                         min_use_count);
 }
 
 vector<SljitTypedExpressionTreeLoopHoist>
 BuildSljitExpressionSourceDataPointerHoists(const vector<reference<const ExecutionExpressionIR>> &expressions,
                                             const vector<sljit_s32> &data_regs, idx_t min_use_count) {
-	vector<pair<idx_t, idx_t>> source_uses;
-	for (auto &expression : expressions) {
-		CountSljitAggregateExpressionSourceUses(expression.get(), source_uses);
-	}
-	SortSljitAggregateSourceUses(source_uses);
-	return BuildSljitSourceDataPointerHoists(std::move(source_uses), data_regs, min_use_count);
+	return BuildSljitAggregateSourceDataPointerHoists({}, expressions, data_regs, min_use_count);
 }
 
 } // namespace duckdb

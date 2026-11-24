@@ -84,8 +84,8 @@ unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativePerfectHashGroupedFusedPri
 		sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_R0, 0, SLJIT_MEM1(SLJIT_S0),
 		               offsetof(SljitNativeVectorInput, perfect_hash_total_groups));
 		group_out_of_range.push_back(sljit_emit_cmp(compiler, SLJIT_GREATER_EQUAL, SLJIT_S4, 0, SLJIT_R0, 0));
-		EmitSljitPerfectHashSetOutputGroup(compiler, SLJIT_S4);
-		EmitSljitPerfectHashStatePointer(compiler, SLJIT_S4, SLJIT_S4);
+		EmitSljitPerfectHashSetOutputGroup(compiler, SLJIT_S4, SljitPerfectHashTableRegisters());
+		EmitSljitPerfectHashStatePointer(compiler, SLJIT_S4, SLJIT_S4, SljitPerfectHashTableRegisters());
 
 		for (idx_t payload_idx = 0; payload_idx < payloads.size(); payload_idx++) {
 			auto &descriptor = descriptors[payload_idx];

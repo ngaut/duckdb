@@ -91,6 +91,7 @@ sljit_sw NativeIntegerDataScale(SljitNativeIntegerKind kind) {
 	case SljitNativeIntegerKind::INT32:
 	case SljitNativeIntegerKind::DATE:
 		return 2;
+	case SljitNativeIntegerKind::UINT64:
 	case SljitNativeIntegerKind::INT64:
 	case SljitNativeIntegerKind::DECIMAL64:
 		return 3;
@@ -112,6 +113,7 @@ sljit_s32 NativeIntegerLoadOp(SljitNativeIntegerKind kind) {
 	case SljitNativeIntegerKind::INT32:
 	case SljitNativeIntegerKind::DATE:
 		return SLJIT_MOV_S32;
+	case SljitNativeIntegerKind::UINT64:
 	case SljitNativeIntegerKind::INT64:
 	case SljitNativeIntegerKind::DECIMAL64:
 		return SLJIT_MOV;
@@ -131,6 +133,7 @@ sljit_s32 NativeIntegerStoreOp(SljitNativeIntegerKind kind) {
 	case SljitNativeIntegerKind::INT32:
 	case SljitNativeIntegerKind::DATE:
 		return SLJIT_MOV32;
+	case SljitNativeIntegerKind::UINT64:
 	case SljitNativeIntegerKind::INT64:
 	case SljitNativeIntegerKind::DECIMAL64:
 		return SLJIT_MOV;

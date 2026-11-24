@@ -58,6 +58,7 @@ struct SljitPerfectHashGroupLookupOptions {
 	sljit_s32 group_data_array_base_reg_override = 0;
 	sljit_s32 group_dictionary_runtime_array_base_reg = 0;
 	const vector<SljitTypedExpressionTreeLoopHoist> *expression_data_hoists = nullptr;
+	SljitPerfectHashTableRegisters table;
 };
 
 struct SljitPerfectHashPayloadUpdateOptions {
@@ -101,6 +102,9 @@ struct SljitPerfectHashFusedUpdatePlan {
 	bool hoist_fast_group_data_array_base = false;
 	bool dedicated_state_register = false;
 	bool dedicated_reduction_state_register = false;
+	//! The saved registers the flat fast loop keeps the table's invariants in: those no source data pointer, group data
+	//! pointer or state pointer owns
+	SljitPerfectHashTableRegisters fast_table_registers;
 	sljit_s32 state_pointer_reg = SLJIT_S4;
 	sljit_s32 reduction_state_reg = SLJIT_S4;
 	sljit_s32 saved_register_count = 0;
