@@ -149,15 +149,17 @@ static bool SljitSimdComparisonOperation(ExecutionExpressionBinaryOp op, sljit_s
 	}
 }
 
-// Only 32-bit (INT32/DATE) and 64-bit (INT64/DECIMAL64) integer element widths
-// map to a packed lane; return the SLJIT data scale (2 or 3) or false. DECIMAL64
-// participates as its int64 representation, exactly like the scalar fast path.
-// A narrow DECIMAL128 value lives in a 64-bit register but its physical vector
-// element is 16 bytes wide, so it has no packed lane.
+// Only signed 32-bit (INT32/DATE) and 64-bit (INT64/DECIMAL64) integer element
+// widths map to a packed lane, whose comparisons are signed; return the SLJIT data
+// scale (2 or 3) or false. DECIMAL64 participates as its int64 representation,
+// exactly like the scalar fast path. A narrow DECIMAL128 value lives in a 64-bit
+// register but its physical vector element is 16 bytes wide, so it has no packed
+// lane.
 static bool SljitSimdNodeScale(const ExecutionExpressionIR &node, sljit_s32 &scale) {
 	SljitNativeIntegerKind kind;
 	if (SljitTypedExpressionTreeIsNarrowDecimal128Node(node) || SljitTypedExpressionTreeIsDoubleNode(node) ||
-	    !TryGetSljitTypedExpressionTreeResultKind(node, kind)) {
+	    !TryGetSljitTypedExpressionTreeResultKind(node, kind) || kind == SljitNativeIntegerKind::UINT8 ||
+	    kind == SljitNativeIntegerKind::UINT16 || kind == SljitNativeIntegerKind::UINT32) {
 		return false;
 	}
 	auto data_scale = NativeIntegerDataScale(kind);

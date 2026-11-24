@@ -63,6 +63,12 @@ int64_t SljitTypedExpressionTreeConstantValue(const ExecutionExpressionIR &node)
 	if (node.return_type.id() == LogicalTypeId::UTINYINT && node.physical_type == PhysicalType::UINT8) {
 		return node.constant.GetValueUnsafe<uint8_t>();
 	}
+	if (node.return_type.id() == LogicalTypeId::USMALLINT && node.physical_type == PhysicalType::UINT16) {
+		return node.constant.GetValueUnsafe<uint16_t>();
+	}
+	if (node.return_type.id() == LogicalTypeId::UINTEGER && node.physical_type == PhysicalType::UINT32) {
+		return node.constant.GetValueUnsafe<uint32_t>();
+	}
 	if (SljitTypedExpressionTreeIsInt32Node(node)) {
 		return node.constant.GetValueUnsafe<int32_t>();
 	}
