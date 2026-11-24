@@ -71,12 +71,12 @@ static bool SljitTryExecuteDirectJoinOutputPerfectHashAggregateUpdate(
 	    scratch.GroupedReductionLanes(op_idx, sink_info.contract, aggregate_update.payload_descriptors, payload_lanes);
 	auto payload_stage_start = SljitRegionStageStart(runtime);
 	SljitExecuteFusedPerfectHashGroupedPrimitiveAggregatePayloadUpdate(
-	    aggregate_update.payloads, aggregate_update.fused_payload_update.Function(), sink_info.groups,
-	    plan.group_expressions, aggregate_update.group_source_not_null, sink_info.contract,
-	    aggregate_update.payload_descriptors, aggregate_update.payload_source_layout,
-	    aggregate_update.combined_payload_source_indices, aggregate_update.combined_payload_source_not_null,
-	    payload_lanes, reduction_lanes, grouped_state.perfect_hash_layout, aggregate_input, nullptr,
-	    aggregate_input.size(), payload_scratch);
+	    aggregate_update.payloads, aggregate_update.fused_payload_update.Function(),
+	    aggregate_update.fused_payload_group_witness, sink_info.groups, plan.group_expressions,
+	    aggregate_update.group_source_not_null, sink_info.contract, aggregate_update.payload_descriptors,
+	    aggregate_update.payload_source_layout, aggregate_update.combined_payload_source_indices,
+	    aggregate_update.combined_payload_source_not_null, payload_lanes, reduction_lanes,
+	    grouped_state.perfect_hash_layout, aggregate_input, nullptr, aggregate_input.size(), payload_scratch);
 	RecordSljitRegionStageRuntime(runtime, op_idx, op.Kind(), "primitive_payload_update_fused", payload_stage_start);
 	RecordSljitRegionGeneratedWork(runtime, op.Kind(), aggregate_input.size());
 	RecordSljitRegionMaterializationElision(runtime, op.Kind(), "join_output_perfect_hash_payload_update",

@@ -11,6 +11,7 @@
 #include "duckdb/execution/base_aggregate_hashtable.hpp"
 #include "duckdb/storage/arena_allocator.hpp"
 #include "duckdb/common/clustered_aggregate.hpp"
+#include "duckdb/execution/execution_operator_runtime.hpp"
 
 namespace duckdb {
 
@@ -18,6 +19,7 @@ struct PerfectAggregateHashTableStateLayout {
 	data_ptr_t data = nullptr;
 	bool *group_is_set = nullptr;
 	bool *group_states_marked = nullptr;
+	PerfectAggregateDeferredGroupMarks *deferred_group_marks = nullptr;
 	idx_t total_groups = 0;
 	idx_t tuple_size = 0;
 	idx_t aggregate_state_offset = 0;
@@ -75,6 +77,7 @@ protected:
 	unsafe_unique_array<bool> group_is_set;
 	//! Groups whose aggregate states a generated update has marked set; only generated updates read or write it
 	unsafe_unique_array<bool> group_states_marked;
+	PerfectAggregateDeferredGroupMarks deferred_group_marks;
 
 	//! The minimum values for each of the group columns
 	vector<Value> group_minima;
@@ -94,6 +97,8 @@ private:
 	uintptr_t *ComputeGroupLocationIds(DataChunk &groups, Vector &addresses_out);
 	//! Validate raw group ids, mark occupied groups, and rewrite them to state addresses
 	idx_t ResolveGroupStateAddresses(uintptr_t *address_data, idx_t count, idx_t state_offset);
+	//! Set every group the deferred marks prove touched
+	void ResolveDeferredGroupMarks();
 	//! Try adding a chunk using the clustered aggregation path. Returns false if not applicable.
 	bool AddChunkClustered(uintptr_t *address_data, DataChunk &payload);
 	//! Destroy the perfect aggregate HT (called automatically by the destructor)

@@ -1,5 +1,5 @@
 # name: test/sql/jit/test_jit_compressed_group_keys.test
-# description: Integer group keys the planner compresses into USMALLINT or UINTEGER (a cast it proved keeps every value), from signed and unsigned sources up to UBIGINT, and unsigned key columns, reach the generated perfect hash lookup, with NULL keys, expression keys, two keys and groups a batch with NULL payloads touches first; a cast the user writes still raises its conversion error
+# description: Integer group keys the planner compresses into USMALLINT or UINTEGER (a cast it proved keeps every value), from signed and unsigned sources up to UBIGINT, and unsigned key columns, reach the generated perfect hash lookup, with NULL keys, expression keys, two keys, groups a batch with NULL payloads touches first, and groups no row passes a FILTER for (the table marks the groups an update touched by an aggregate every row updates); a cast the user writes still raises its conversion error
 # group: [jit]
 
 require jit_sljit
@@ -63,6 +63,9 @@ SELECT 'ubigint_count', rk, NULL, NULL, count(*) FROM facts GROUP BY rk
 UNION ALL
 SELECT 'ubigint_high', (uhigh - 18446744073709550000)::BIGINT, NULL, sum(b), count(*) FROM facts GROUP BY uhigh
 UNION ALL
+SELECT 'filter_false', id % 50000, count(*) FILTER (WHERE id % 7 = 9), NULL, count(*)
+FROM facts GROUP BY id % 50000
+UNION ALL
 SELECT 'early_null', id % 1000, NULL, sum(early_null), count(*) FROM facts GROUP BY id % 1000
 UNION ALL
 SELECT 'filtered', id % 50000, NULL, sum(b) FILTER (WHERE k < 500), count(*) FILTER (WHERE k >= 750)
@@ -84,6 +87,7 @@ query II
 SELECT shape, count(*) FROM r_auto GROUP BY shape ORDER BY shape
 ----
 early_null	1000
+filter_false	50000
 filtered	50000
 nullable	40001
 two_keys	15000

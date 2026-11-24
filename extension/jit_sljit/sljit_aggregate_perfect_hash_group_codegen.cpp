@@ -106,15 +106,17 @@ void EmitSljitPerfectHashStatePointer(struct sljit_compiler *compiler, sljit_s32
 
 void EmitLoadSljitPerfectHashTableRegisters(struct sljit_compiler *compiler,
                                             const SljitPerfectHashTableRegisters &table,
-                                            bool marks_states_on_first_touch) {
+                                            SljitPerfectHashGroupMarking marking) {
 	if (table.state_base) {
 		sljit_emit_op1(compiler, SLJIT_MOV_P, table.state_base, 0, SLJIT_MEM1(SLJIT_S0),
 		               offsetof(SljitNativeVectorInput, perfect_hash_state_base));
 	}
 	if (table.group_flags) {
+		D_ASSERT(marking != SljitPerfectHashGroupMarking::DEFERRED);
 		sljit_emit_op1(compiler, SLJIT_MOV_P, table.group_flags, 0, SLJIT_MEM1(SLJIT_S0),
-		               marks_states_on_first_touch ? offsetof(SljitNativeVectorInput, perfect_hash_group_states_marked)
-		                                           : offsetof(SljitNativeVectorInput, perfect_hash_group_is_set));
+		               marking == SljitPerfectHashGroupMarking::FIRST_TOUCH
+		                   ? offsetof(SljitNativeVectorInput, perfect_hash_group_states_marked)
+		                   : offsetof(SljitNativeVectorInput, perfect_hash_group_is_set));
 	}
 	if (table.tuple_size) {
 		sljit_emit_op1(compiler, SLJIT_MOV, table.tuple_size, 0, SLJIT_MEM1(SLJIT_S0),

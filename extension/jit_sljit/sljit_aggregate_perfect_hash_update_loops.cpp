@@ -52,13 +52,13 @@ static void EmitSljitPerfectHashRowUpdate(const SljitPerfectHashFusedUpdateEmitC
                                           const SljitPerfectHashPayloadUpdateOptions &payload_update,
                                           bool load_common_selected_source_index) {
 	auto compiler = context.compiler;
-	D_ASSERT(!group_lookup.mark_states_on_first_touch || payload_update.all_valid);
+	D_ASSERT(group_lookup.group_marking == SljitPerfectHashGroupMarking::PER_ROW || payload_update.all_valid);
 	EmitSljitPerfectHashGroupLookup(context, group_lookup);
 	if (load_common_selected_source_index) {
 		EmitLoadSljitCommonSelectedSourceIndex(compiler);
 	}
 	auto updates = payload_update;
-	updates.states_marked_on_first_touch = group_lookup.mark_states_on_first_touch;
+	updates.states_marked_on_first_touch = group_lookup.group_marking == SljitPerfectHashGroupMarking::FIRST_TOUCH;
 	EmitSljitPerfectHashPayloadUpdates(context, updates);
 }
 
@@ -117,7 +117,7 @@ SljitPerfectHashDirectGroupLookupOptions(const SljitPerfectHashFusedUpdateEmitCo
                                          bool use_fast_group_data_array_base) {
 	SljitPerfectHashGroupLookupOptions result;
 	result.materialize_state_pointer = !context.dense_reduction_plan.Ready();
-	result.mark_states_on_first_touch = context.states_markable_on_first_touch;
+	result.group_marking = context.valid_row_group_marking;
 	result.direct_group_index = true;
 	result.use_fast_group_data_array_base = use_fast_group_data_array_base;
 	return result;
@@ -127,7 +127,7 @@ static SljitPerfectHashGroupLookupOptions
 SljitPerfectHashSelectedGroupLookupOptions(const SljitPerfectHashFusedUpdateEmitContext &context) {
 	SljitPerfectHashGroupLookupOptions result;
 	result.materialize_state_pointer = !context.dense_reduction_plan.Ready();
-	result.mark_states_on_first_touch = context.states_markable_on_first_touch;
+	result.group_marking = context.valid_row_group_marking;
 	return result;
 }
 
@@ -189,7 +189,7 @@ static sljit_jump *EmitSljitPerfectHashFlatFastLoop(const SljitPerfectHashFusedU
 	auto direct_lookup =
 	    SljitPerfectHashDirectGroupLookupOptions(context, update_plan.hoist_fast_group_data_array_base);
 	direct_lookup.table = update_plan.fast_table_registers;
-	EmitLoadSljitPerfectHashTableRegisters(compiler, direct_lookup.table, direct_lookup.mark_states_on_first_touch);
+	EmitLoadSljitPerfectHashTableRegisters(compiler, direct_lookup.table, direct_lookup.group_marking);
 	if (update_plan.predicate_simd_plan.supported) {
 		EmitSljitTypedExpressionTreeSimdHybridFilterLoop(
 		    compiler, *context.predicate, update_plan.predicate_simd_plan, update_plan.predicate_simd_mask_offset,
@@ -258,7 +258,7 @@ EmitSljitPerfectHashNullCheckedLoop(const SljitPerfectHashFusedUpdateEmitContext
 		    SljitTypedExpressionTreeFastIndexMode::FLAT, data_hoists);
 	}
 	auto lookup = SljitPerfectHashDirectGroupLookupOptions(context, false);
-	lookup.mark_states_on_first_touch = false;
+	lookup.group_marking = SljitPerfectHashGroupMarking::PER_ROW;
 	auto payload_update = SljitPerfectHashPayloadUpdateOptionsForLoop(true, false, false, data_hoists);
 	payload_update.null_rows = true;
 	EmitSljitPerfectHashRowUpdate(context, lookup, payload_update, false);

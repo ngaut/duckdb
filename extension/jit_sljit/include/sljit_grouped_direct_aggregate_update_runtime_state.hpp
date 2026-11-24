@@ -296,6 +296,7 @@ private:
 			SljitExecuteFusedPerfectHashGroupedPrimitiveAggregatePayloadUpdate(
 			    aggregate_op.AggregateUpdate().filtered_update.payloads,
 			    aggregate_op.AggregateUpdate().filtered_update.compiled.Function(),
+			    aggregate_op.AggregateUpdate().filtered_update.group_witness,
 			    aggregate_op.AggregateUpdate().plan.sink_info.groups,
 			    aggregate_op.AggregateUpdate().plan.group_expressions,
 			    aggregate_op.AggregateUpdate().group_source_not_null,

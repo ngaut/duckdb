@@ -255,12 +255,22 @@ struct ExecutionGroupedAggregateStateAddressState {
 	}
 };
 
+//! A generated update may leave the groups it touches unmarked: before the table combines into another, every group
+//! whose witness (the `width` bytes, 1 or 8, at `offset` from its first aggregate state) is nonzero becomes set
+struct PerfectAggregateDeferredGroupMarks {
+	bool pending = false;
+	idx_t offset = 0;
+	idx_t width = 0;
+};
+
 struct ExecutionPerfectAggregateStateAddressLayout {
 	bool ready = false;
 	data_ptr_t data = nullptr;
 	bool *group_is_set = nullptr;
 	//! Groups whose aggregate states a generated update has marked set; only generated updates use it
 	bool *group_states_marked = nullptr;
+	//! Where a generated update that leaves its groups unmarked records the witness the table marks them by
+	PerfectAggregateDeferredGroupMarks *deferred_group_marks = nullptr;
 	idx_t total_groups = 0;
 	idx_t tuple_size = 0;
 	idx_t aggregate_state_offset = 0;

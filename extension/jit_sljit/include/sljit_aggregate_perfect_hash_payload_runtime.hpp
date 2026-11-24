@@ -63,8 +63,9 @@ static bool SljitTryPreparePerfectHashStringDictionaryContributions(
 
 static void SljitExecuteFusedPerfectHashGroupedPrimitiveAggregatePayloadUpdate(
     vector<SljitExecutableRegionExpression> &payloads, SljitNativeAggregateUpdateFunction function,
-    const vector<ExecutionRegionGroupInput> &groups, const vector<SljitNativeRegionExpressionPlan> &group_expressions,
-    const vector<bool> &group_source_not_null, const ExecutionRegionAggregateContract &contract,
+    const SljitPerfectHashGroupWitness &group_witness, const vector<ExecutionRegionGroupInput> &groups,
+    const vector<SljitNativeRegionExpressionPlan> &group_expressions, const vector<bool> &group_source_not_null,
+    const ExecutionRegionAggregateContract &contract,
     const vector<SljitAggregatePayloadDescriptor> &payload_descriptors,
     SljitAggregatePayloadSourceLayout payload_source_layout, const vector<idx_t> &combined_payload_sources,
     const vector<bool> &combined_payload_source_not_null,
@@ -76,7 +77,7 @@ static void SljitExecuteFusedPerfectHashGroupedPrimitiveAggregatePayloadUpdate(
 		throw InternalException("SLJIT fused perfect-hash aggregate update is missing generated code");
 	}
 	if (!layout.ready || !layout.data || !layout.group_is_set || !layout.group_states_marked ||
-	    layout.total_groups == 0 || layout.tuple_size == 0) {
+	    !layout.deferred_group_marks || layout.total_groups == 0 || layout.tuple_size == 0) {
 		auto blocker = layout.blocker.empty() ? "perfect-hash-state-layout-missing" : layout.blocker;
 		throw InternalException("SLJIT fused perfect-hash aggregate state layout is incomplete: %s", blocker.c_str());
 	}
@@ -251,6 +252,12 @@ static void SljitExecuteFusedPerfectHashGroupedPrimitiveAggregatePayloadUpdate(
 	native_input.perfect_hash_tuple_size = layout.tuple_size;
 	native_input.count = count;
 	native_input.has_error = false;
+	if (group_witness.deferred) {
+		auto &marks = *layout.deferred_group_marks;
+		marks.pending = true;
+		marks.offset = group_witness.offset;
+		marks.width = group_witness.width;
+	}
 	SljitExecuteNativeAggregatePayloadFunction(function, native_input);
 }
 

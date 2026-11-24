@@ -14,7 +14,7 @@ static unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativePerfectHashGroupedF
     const vector<ExecutionRegionAggregateInput> &aggregates, const vector<ExecutionRegionGroupInput> &groups,
     const vector<SljitNativeRegionExpressionPlan> &group_expressions, const ExecutionRegionAggregateContract &contract,
     const vector<bool> &source_not_null, const vector<Value> &source_min_values, const vector<Value> &source_max_values,
-    SljitNativeAggregateUpdateFunction &function, string &error) {
+    SljitNativeAggregateUpdateFunction &function, SljitPerfectHashGroupWitness &group_witness, string &error) {
 	SljitPerfectHashFusedUpdatePlan update_plan;
 	if (!TryBuildSljitPerfectHashFusedUpdatePlan(predicate, payloads, aggregates, groups, group_expressions, contract,
 	                                             source_not_null, source_min_values, source_max_values, update_plan,
@@ -87,7 +87,7 @@ static unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativePerfectHashGroupedF
 	    dedicated_state_register,
 	    state_pointer_reg,
 	    reduction_state_reg,
-	    update_plan.states_markable_on_first_touch,
+	    update_plan.valid_row_group_marking,
 	    update_plan.guard_offset,
 	};
 	EmitSljitPerfectHashFusedUpdateLoops(emit_context, update_plan);
@@ -112,6 +112,7 @@ static unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativePerfectHashGroupedF
 	                 SLJIT_FUNC_ADDR(SljitNativePerfectHashGroupOutOfRange));
 	sljit_emit_return_void(compiler);
 
+	group_witness = update_plan.group_witness;
 	return FinishSljitCode(compiler, function, error);
 }
 
@@ -120,10 +121,10 @@ unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativePerfectHashGroupedFusedAgg
     const vector<ExecutionRegionGroupInput> &groups, const vector<SljitNativeRegionExpressionPlan> &group_expressions,
     const ExecutionRegionAggregateContract &contract, const vector<bool> &source_not_null,
     const vector<Value> &source_min_values, const vector<Value> &source_max_values,
-    SljitNativeAggregateUpdateFunction &function, string &error) {
+    SljitNativeAggregateUpdateFunction &function, SljitPerfectHashGroupWitness &group_witness, string &error) {
 	return BuildSljitNativePerfectHashGroupedFusedAggregateUpdateInternal(
 	    nullptr, payloads, aggregates, groups, group_expressions, contract, source_not_null, source_min_values,
-	    source_max_values, function, error);
+	    source_max_values, function, group_witness, error);
 }
 
 unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativeFilteredPerfectHashGroupedFusedAggregateUpdate(
@@ -131,10 +132,10 @@ unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativeFilteredPerfectHashGrouped
     const vector<ExecutionRegionAggregateInput> &aggregates, const vector<ExecutionRegionGroupInput> &groups,
     const vector<SljitNativeRegionExpressionPlan> &group_expressions, const ExecutionRegionAggregateContract &contract,
     const vector<bool> &source_not_null, const vector<Value> &source_min_values, const vector<Value> &source_max_values,
-    SljitNativeAggregateUpdateFunction &function, string &error) {
+    SljitNativeAggregateUpdateFunction &function, SljitPerfectHashGroupWitness &group_witness, string &error) {
 	return BuildSljitNativePerfectHashGroupedFusedAggregateUpdateInternal(
 	    &predicate, payloads, aggregates, groups, group_expressions, contract, source_not_null, source_min_values,
-	    source_max_values, function, error);
+	    source_max_values, function, group_witness, error);
 }
 
 } // namespace duckdb

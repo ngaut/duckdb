@@ -74,6 +74,39 @@ static bool SljitPerfectHashNullCheckedLoopSupported(const ExecutionExpressionIR
 	return true;
 }
 
+//! The first aggregate every valid row updates: COUNT(*), or a COUNT or sum whose payload never skips a row (a FILTER
+//! guards its payload). Its count, or its sum's set flag, is nonzero exactly for the groups such rows touched
+static SljitPerfectHashGroupWitness
+SljitPerfectHashValidRowGroupWitness(const SljitFusedAggregateCodegenPlan &plan,
+                                     const ExecutionRegionAggregateContract &contract) {
+	SljitPerfectHashGroupWitness result;
+	for (idx_t payload_idx = 0; payload_idx < plan.payload_descriptors.size(); payload_idx++) {
+		auto &descriptor = plan.payload_descriptors[payload_idx];
+		const bool counts_every_row = descriptor.primitive_kind == AggregatePrimitiveUpdateKind::COUNT_STAR;
+		if (!counts_every_row && !plan.payloads[payload_idx].fast_path.fast_path_supported) {
+			continue;
+		}
+		const auto state_offset = contract.grouped_state_offsets[descriptor.aggregate_index];
+		switch (descriptor.primitive_kind) {
+		case AggregatePrimitiveUpdateKind::COUNT_STAR:
+		case AggregatePrimitiveUpdateKind::COUNT:
+			result.offset = state_offset + descriptor.state_value_offset;
+			result.width = sizeof(int64_t);
+			break;
+		case AggregatePrimitiveUpdateKind::SUM_INT64:
+		case AggregatePrimitiveUpdateKind::SUM_HUGEINT:
+			result.offset = state_offset + descriptor.state_is_set_offset;
+			result.width = sizeof(bool);
+			break;
+		default:
+			continue;
+		}
+		result.deferred = true;
+		return result;
+	}
+	return result;
+}
+
 static void AssignSljitPerfectHashFastTableRegisters(SljitPerfectHashFusedUpdatePlan &plan) {
 	// a dense reduction keeps its states on the stack: the loop never reads the table
 	if (plan.dense_reduction_plan.Ready() || !plan.codegen_plan.fast_path_supported) {
@@ -101,9 +134,12 @@ static void AssignSljitPerfectHashFastTableRegisters(SljitPerfectHashFusedUpdate
 		candidates.push_back(registers.group_data[0]);
 		candidates.push_back(registers.group_data[1]);
 	}
-	vector<reference<sljit_s32>> invariants {plan.fast_table_registers.state_base,
-	                                         plan.fast_table_registers.group_flags,
-	                                         plan.fast_table_registers.tuple_size};
+	// deferred marks leave the flag arrays alone
+	vector<reference<sljit_s32>> invariants {plan.fast_table_registers.state_base};
+	if (plan.valid_row_group_marking != SljitPerfectHashGroupMarking::DEFERRED) {
+		invariants.push_back(plan.fast_table_registers.group_flags);
+	}
+	invariants.push_back(plan.fast_table_registers.tuple_size);
 	idx_t next_invariant = 0;
 	for (auto candidate : candidates) {
 		if (next_invariant == invariants.size() || std::find(owned.begin(), owned.end(), candidate) != owned.end()) {
@@ -218,9 +254,12 @@ bool TryBuildSljitPerfectHashFusedUpdatePlan(
 	const bool group_data_pointer_hoist_candidate =
 	    !result.hoist_source_data_pointers && registers.has_group_data && result.group_plans.size() <= 2;
 	// a group's first row marks its sums as set only when every row it holds updates every sum
-	result.states_markable_on_first_touch = !result.dense_reduction_plan.Ready() &&
-	                                        !result.codegen_plan.payloads_exit_null &&
-	                                        SljitPerfectHashStatesMarkableOnFirstTouch(aggregates);
+	if (!result.dense_reduction_plan.Ready() && !result.codegen_plan.payloads_exit_null &&
+	    SljitPerfectHashStatesMarkableOnFirstTouch(aggregates)) {
+		result.group_witness = SljitPerfectHashValidRowGroupWitness(result.codegen_plan, contract);
+		result.valid_row_group_marking = result.group_witness.deferred ? SljitPerfectHashGroupMarking::DEFERRED
+		                                                               : SljitPerfectHashGroupMarking::FIRST_TOUCH;
+	}
 	result.fast_source_data_hoists =
 	    result.codegen_plan.fast_path_supported
 	        ? (result.hoist_source_data_pointers

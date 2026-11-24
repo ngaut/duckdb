@@ -116,17 +116,19 @@ static bool TryBuildPerfectHashGroupedFusedAggregateUpdate(const SljitNativeAggr
 	}
 
 	SljitNativeAggregateUpdateFunction fused_function = nullptr;
+	SljitPerfectHashGroupWitness group_witness;
 	string fused_error;
 	auto fused_code = BuildSljitNativePerfectHashGroupedFusedAggregateUpdate(
 	    payloads.codegen_payloads, op.sink_info.aggregates, op.sink_info.groups, payloads.codegen_group_expressions,
 	    op.sink_info.contract, payloads.combined_source_not_null, payloads.combined_source_min_values,
-	    payloads.combined_source_max_values, fused_function, fused_error);
+	    payloads.combined_source_max_values, fused_function, group_witness, fused_error);
 	auto compiled =
 	    SljitCompiledFunction<SljitNativeAggregateUpdateFunction>::TryCreate(std::move(fused_code), fused_function);
 	if (compiled.IsExecutable()) {
 		executable.payloads = std::move(payloads.executable_payloads);
 		executable.fused_payload_update = std::move(compiled);
 		executable.fused_payload_update_owns_group_lookup = true;
+		executable.fused_payload_group_witness = group_witness;
 		executable.payload_source_layout = SljitAggregatePayloadSourceLayout::FUSED_COMBINED;
 		executable.combined_payload_source_indices = std::move(payloads.combined_sources);
 		executable.combined_payload_source_not_null = std::move(payloads.combined_source_not_null);

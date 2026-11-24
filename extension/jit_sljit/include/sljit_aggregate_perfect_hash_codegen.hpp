@@ -63,12 +63,23 @@ struct SljitPerfectHashGroupPlan {
 	idx_t shift = 0;
 };
 
+//! How a row update marks its group and its states set
+enum class SljitPerfectHashGroupMarking : uint8_t {
+	//! every row stores its group's flag and its sums' set flags
+	PER_ROW,
+	//! a group's first row marks the group and its states, out of line
+	FIRST_TOUCH,
+	//! rows store only their sums' set flags: the table marks every group whose witness state is nonzero before it
+	//! combines (SljitPerfectHashGroupWitness)
+	DEFERRED
+};
+
 //! Registers a loop keeps the perfect-hash table's invariants in; an invariant without one is loaded from the input on
 //! every row. Each row stores to a random state, so a load after it waits on that store's address unless held here
 struct SljitPerfectHashTableRegisters {
 	sljit_s32 state_base = 0;
 	//! The flag array of the group lookup: the marked states when it marks them on a group's first touch, the set
-	//! groups otherwise
+	//! groups when every row marks its group
 	sljit_s32 group_flags = 0;
 	sljit_s32 tuple_size = 0;
 };
@@ -97,10 +108,10 @@ void EmitSljitPerfectHashSetOutputGroup(struct sljit_compiler *compiler, sljit_s
                                         const SljitPerfectHashTableRegisters &table);
 void EmitSljitPerfectHashStatePointer(struct sljit_compiler *compiler, sljit_s32 group_index_reg, sljit_s32 target_reg,
                                       const SljitPerfectHashTableRegisters &table);
-//! Loads the invariants the registers hold, for a loop whose lookup marks states on first touch or sets groups
+//! Loads the invariants the registers hold, for a loop whose lookup marks its groups so
 void EmitLoadSljitPerfectHashTableRegisters(struct sljit_compiler *compiler,
                                             const SljitPerfectHashTableRegisters &table,
-                                            bool marks_states_on_first_touch);
+                                            SljitPerfectHashGroupMarking marking);
 void EmitLoadFusedAggregateGroupSourceIndex(
     struct sljit_compiler *compiler, idx_t group_idx, sljit_s32 target_reg,
     SljitFusedAggregateGroupIndexMode mode = SljitFusedAggregateGroupIndexMode::SELECTED_NULLABLE,

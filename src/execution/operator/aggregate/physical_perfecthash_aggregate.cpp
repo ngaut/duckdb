@@ -242,6 +242,7 @@ bool PhysicalPerfectHashAggregate::BindExecutionSink(ExecutionContext &context, 
 	binding.aggregate_update.grouped_state.perfect_hash_layout.data = state_layout.data;
 	binding.aggregate_update.grouped_state.perfect_hash_layout.group_is_set = state_layout.group_is_set;
 	binding.aggregate_update.grouped_state.perfect_hash_layout.group_states_marked = state_layout.group_states_marked;
+	binding.aggregate_update.grouped_state.perfect_hash_layout.deferred_group_marks = state_layout.deferred_group_marks;
 	binding.aggregate_update.grouped_state.perfect_hash_layout.total_groups = state_layout.total_groups;
 	binding.aggregate_update.grouped_state.perfect_hash_layout.tuple_size = state_layout.tuple_size;
 	binding.aggregate_update.grouped_state.perfect_hash_layout.aggregate_state_offset =

@@ -265,14 +265,17 @@ bool SljitTryBuildFilteredAggregateUpdate(SljitExecutableRegionOp &filter_op, Sl
 		}
 
 		SljitNativeAggregateUpdateFunction function = nullptr;
+		SljitPerfectHashGroupWitness group_witness;
 		string filtered_error;
 		auto code = BuildSljitNativeFilteredPerfectHashGroupedFusedAggregateUpdate(
 		    *filtered_update.filter.plan.expression_tree, codegen_payloads, aggregate_update.plan.sink_info.aggregates,
 		    aggregate_update.plan.sink_info.groups, codegen_group_expressions, aggregate_update.plan.sink_info.contract,
-		    combined_source_not_null, combined_source_min_values, combined_source_max_values, function, filtered_error);
+		    combined_source_not_null, combined_source_min_values, combined_source_max_values, function, group_witness,
+		    filtered_error);
 		auto compiled = SljitCompiledFunction<SljitNativeAggregateUpdateFunction>::TryCreate(std::move(code), function);
 		if (compiled.IsExecutable()) {
 			filtered_update.compiled = std::move(compiled);
+			filtered_update.group_witness = group_witness;
 			filtered_update.kind = SljitFilteredAggregateKernelKind::PERFECT_HASH_GROUPED;
 			filtered_update.payload_source_layout = SljitAggregatePayloadSourceLayout::FUSED_COMBINED;
 			aggregate_update.filtered_update = std::move(filtered_update);

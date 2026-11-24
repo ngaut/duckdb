@@ -195,6 +195,8 @@ struct SljitExecutableFilteredAggregateUpdate {
 	vector<bool> input_source_not_null;
 	SljitStringCompareSources string_compares;
 	SljitCompiledFunction<SljitNativeAggregateUpdateFunction> compiled;
+	//! A perfect-hash kernel that leaves the groups it touches unmarked
+	SljitPerfectHashGroupWitness group_witness;
 	SljitFilteredAggregateKernelKind kind = SljitFilteredAggregateKernelKind::NONE;
 	SljitAggregatePayloadSourceLayout payload_source_layout = SljitAggregatePayloadSourceLayout::DIRECT_PER_LANE;
 
@@ -366,6 +368,8 @@ struct SljitExecutableAggregateUpdate {
 	SljitExecutableFusedAffineRunUpdate fused_affine_run_update;
 	SljitCompiledFunction<SljitNativeAggregateUpdateFunction> fused_payload_update;
 	bool fused_payload_update_owns_group_lookup = false;
+	//! A perfect-hash fused update that leaves the groups it touches unmarked
+	SljitPerfectHashGroupWitness fused_payload_group_witness;
 	vector<SljitCompiledFunction<SljitNativeAggregateUpdateFunction>> payload_updates;
 
 	idx_t CodeSize() const {

@@ -252,10 +252,15 @@ void EmitSljitPerfectHashGroupLookup(const SljitPerfectHashFusedUpdateEmitContex
 		}
 		return;
 	}
-	if (options.mark_states_on_first_touch) {
-		EmitSljitPerfectHashJumpIfFirstTouch(compiler, SLJIT_S4, options.table, context.first_touch_sites);
-	} else {
+	switch (options.group_marking) {
+	case SljitPerfectHashGroupMarking::PER_ROW:
 		EmitSljitPerfectHashSetOutputGroup(compiler, SLJIT_S4, options.table);
+		break;
+	case SljitPerfectHashGroupMarking::FIRST_TOUCH:
+		EmitSljitPerfectHashJumpIfFirstTouch(compiler, SLJIT_S4, options.table, context.first_touch_sites);
+		break;
+	case SljitPerfectHashGroupMarking::DEFERRED:
+		break;
 	}
 	const auto computed_state_reg = context.dedicated_state_register ? context.state_pointer_reg : SLJIT_S4;
 	EmitSljitPerfectHashStatePointer(compiler, SLJIT_S4, computed_state_reg, options.table);

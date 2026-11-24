@@ -8,6 +8,7 @@
 
 #pragma once
 
+#include "sljit_aggregate_payload_descriptor.hpp"
 #include "sljit_codegen_capabilities.hpp"
 #include "sljit_function_types.hpp"
 #include "sljit_region_plan.hpp"
@@ -205,13 +206,13 @@ unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativePerfectHashGroupedFusedAgg
     const vector<ExecutionRegionGroupInput> &groups, const vector<SljitNativeRegionExpressionPlan> &group_expressions,
     const ExecutionRegionAggregateContract &contract, const vector<bool> &source_not_null,
     const vector<Value> &source_min_values, const vector<Value> &source_max_values,
-    SljitNativeAggregateUpdateFunction &function, string &error);
+    SljitNativeAggregateUpdateFunction &function, SljitPerfectHashGroupWitness &group_witness, string &error);
 unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativeFilteredPerfectHashGroupedFusedAggregateUpdate(
     const ExecutionExpressionIR &predicate, const vector<SljitNativeRegionExpressionPlan> &payloads,
     const vector<ExecutionRegionAggregateInput> &aggregates, const vector<ExecutionRegionGroupInput> &groups,
     const vector<SljitNativeRegionExpressionPlan> &group_expressions, const ExecutionRegionAggregateContract &contract,
     const vector<bool> &source_not_null, const vector<Value> &source_min_values, const vector<Value> &source_max_values,
-    SljitNativeAggregateUpdateFunction &function, string &error);
+    SljitNativeAggregateUpdateFunction &function, SljitPerfectHashGroupWitness &group_witness, string &error);
 unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativeIntegralCompress(SljitNativeSignedIntegerWidth source_width,
                                                                        SljitNativeUnsignedIntegerWidth target_width,
                                                                        SljitNativeVectorFunction &function,

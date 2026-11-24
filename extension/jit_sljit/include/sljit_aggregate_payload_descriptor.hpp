@@ -61,6 +61,15 @@ struct SljitAggregatePayloadDescriptor {
 	}
 };
 
+//! The state bytes that prove a group touched, for an update that leaves its groups unmarked: an aggregate every valid
+//! row updates, its count or its sum's set flag
+struct SljitPerfectHashGroupWitness {
+	bool deferred = false;
+	//! from a group's first aggregate state
+	idx_t offset = 0;
+	idx_t width = 0;
+};
+
 static inline bool SljitTryBindAggregatePayloadDescriptor(const SljitNativeRegionExpressionPlan &payload,
                                                           const ExecutionRegionAggregateInput &aggregate,
                                                           SljitAggregatePayloadDescriptor &descriptor) {

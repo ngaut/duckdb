@@ -176,6 +176,7 @@ PerfectAggregateHashTableStateLayout PerfectAggregateHashTable::GetStateLayout()
 	result.data = data;
 	result.group_is_set = group_is_set.get();
 	result.group_states_marked = group_states_marked.get();
+	result.deferred_group_marks = &deferred_group_marks;
 	result.total_groups = total_groups;
 	result.tuple_size = tuple_size;
 	result.aggregate_state_offset = layout_ptr->GetAggrOffset();
@@ -268,9 +269,28 @@ bool PerfectAggregateHashTable::AddChunkClustered(uintptr_t *address_data, DataC
 	return true;
 }
 
+void PerfectAggregateHashTable::ResolveDeferredGroupMarks() {
+	if (!deferred_group_marks.pending) {
+		return;
+	}
+	deferred_group_marks.pending = false;
+	auto witness = data + layout_ptr->GetAggrOffset() + deferred_group_marks.offset;
+	if (deferred_group_marks.width == 1) {
+		for (idx_t i = 0; i < total_groups; i++, witness += tuple_size) {
+			group_is_set[i] = group_is_set[i] || *witness != 0;
+		}
+		return;
+	}
+	D_ASSERT(deferred_group_marks.width == sizeof(uint64_t));
+	for (idx_t i = 0; i < total_groups; i++, witness += tuple_size) {
+		group_is_set[i] = group_is_set[i] || Load<uint64_t>(witness) != 0;
+	}
+}
+
 void PerfectAggregateHashTable::Combine(PerfectAggregateHashTable &other) {
 	D_ASSERT(total_groups == other.total_groups);
 	D_ASSERT(tuple_size == other.tuple_size);
+	other.ResolveDeferredGroupMarks();
 
 	Vector source_addresses(LogicalType::POINTER);
 	Vector target_addresses(LogicalType::POINTER);
