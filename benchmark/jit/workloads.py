@@ -591,7 +591,7 @@ ENCODINGS_QUERIES = {
     ),
     "nullable_min_max": (
         "SELECT min(n), max(n) FROM __jit_encodings_facts WHERE k > 100",
-        {1: True, 4: False},
+        {1: True, 4: True},
     ),
     "narrow_integers": (
         "SELECT sum(ti::INTEGER * si) FROM __jit_encodings_facts WHERE ti > 10",
@@ -639,7 +639,7 @@ ENCODINGS_QUERIES = {
     ),
     "distinct_count": (
         "SELECT count(DISTINCT g) FROM __jit_encodings_facts WHERE k < 900",
-        {1: True, 4: False},
+        {1: True, 4: True},
     ),
     "filtered_top_n": (
         "SELECT id, price FROM __jit_encodings_facts WHERE k = 7 ORDER BY price DESC, id LIMIT 10",
@@ -737,7 +737,7 @@ ENCODINGS_THRESHOLDS = {
     "dictionary_groups": ({1: 0.86, 4: 0.87}, {1: 91_300_000, 4: 91_600_000}),
     "dictionary_groups_filtered": ({1: 1.12, 4: 1.10}, {1: 75_400_000, 4: 78_700_000}),
     "nullable_groups": ({1: 1.15, 4: 1.16}, {1: 67_300_000, 4: 67_700_000}),
-    "nullable_min_max": ({1: 1.33, 4: 0.88}, {1: 87_300_000, 4: 129_400_000}),
+    "nullable_min_max": ({1: 1.33, 4: 1.32}, {1: 87_300_000, 4: 89_700_000}),
     "narrow_integers": ({1: 2.05, 4: 1.97}, {1: 40_100_000, 4: 42_600_000}),
     "double_filter": ({1: 1.12}, {1: 56_900_000}),
     "double_range": ({1: 0.87, 4: 0.87}, {1: 46_800_000, 4: 47_900_000}),
@@ -749,7 +749,7 @@ ENCODINGS_THRESHOLDS = {
     "dictionary_or_nullable": ({1: 0.95, 4: 0.99}, {1: 77_500_000, 4: 77_000_000}),
     "nullable_coalesce": ({1: 1.50, 4: 1.50}, {1: 52_300_000, 4: 53_800_000}),
     "modulo_groups": ({1: 1.20, 4: 1.20}, {1: 91_900_000, 4: 92_300_000}),
-    "distinct_count": ({1: 1.28, 4: 0.88}, {1: 75_100_000, 4: 106_200_000}),
+    "distinct_count": ({1: 1.28, 4: 1.22}, {1: 75_100_000, 4: 77_300_000}),
     "filtered_top_n": ({1: 0.84, 4: 0.89}, {1: 55_100_000, 4: 53_500_000}),
     "dictionary_prefix": ({1: 0.88, 4: 0.89}, {1: 466_400_000, 4: 460_800_000}),
     "integer_case": ({1: 1.50, 4: 1.49}, {1: 49_100_000, 4: 49_600_000}),

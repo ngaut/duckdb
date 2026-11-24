@@ -15,7 +15,6 @@ namespace duckdb {
 static constexpr int64_t BASIS_POINT_SCALE = 10000;
 static constexpr int64_t NATIVE_JOIN_PROTOCOL_PENALTY = 720;
 static constexpr int64_t NATIVE_HASH_JOIN_BUILD_SINK_PROTOCOL_PENALTY = 720;
-static constexpr int64_t NATIVE_GROUPED_AGGREGATE_PARALLELISM_PENALTY = 160;
 static constexpr int64_t MATERIALIZING_NATIVE_PROTOCOL_STAGE_MULTIPLIER = 2;
 static constexpr idx_t LARGE_NATIVE_GROUPED_LOOKUP_INPUT_ROWS = 8 * 1024 * 1024;
 static constexpr idx_t MIN_NATIVE_GROUPED_LOOKUP_EXPRESSION_COST = 64;
@@ -60,19 +59,6 @@ static int64_t FractionalCost(int64_t value, int64_t numerator, int64_t denomina
 	return multiplied / denominator;
 }
 
-//! The axis-independent evaluation inputs. Shape facts and the amortization predicates
-//! may depend only on these, which is what makes one set of shape facts valid for every
-//! runner axis: the type system rules out accidental per-runner shape divergence.
-struct PhysicalRunnerSharedCostInputs {
-	idx_t vectorized_parallelism = 1;
-};
-
-//! Everything the model may consult while pricing one runner axis.
-struct PhysicalRunnerAxisEvaluation {
-	const RunnerCostAxis &axis;
-	const PhysicalRunnerSharedCostInputs &shared;
-};
-
 static int64_t MaterializingNativeProtocolPenalty(const RunnerCostAxis &axis) {
 	return MultiplyCost(SaturatingCostCast(MATERIALIZING_NATIVE_PROTOCOL_STAGE_MULTIPLIER),
 	                    SaturatingCostCast(axis.generated_stage_benefit));
@@ -91,14 +77,6 @@ static bool PhysicalRunnerHasEstimatedGroupedReduction(const PhysicalRunnerCostI
 	       input.grouped_aggregate_estimated_cardinality <= input.source_contract_input_cardinality / 2;
 }
 
-//! A complete grouped-lookup replacement is thread-local by contract, so parallel execution needs evidence that it
-//! amortizes. A single-key replacement carries its own: the runtime samples the key stream for group runs and hands
-//! the pipeline to the native sink when there are none. Other shapes rely on an estimated reduction.
-static bool PhysicalRunnerHasParallelGroupedLookupReplacementProof(const PhysicalRunnerCostInput &input) {
-	return PhysicalRunnerHasGeneratedGroupedLookupReplacementProof(input) &&
-	       (input.grouped_aggregate_key_count == 1 || PhysicalRunnerHasEstimatedGroupedReduction(input));
-}
-
 static bool PhysicalRunnerHasGeneratedJoinGroupedFusionProof(const PhysicalRunnerCostInput &input) {
 	return input.native_hash_join_build_sink_count == 0 && input.native_join_stage_count > 0 &&
 	       input.native_grouped_state_address_lookup_count > 0 && input.generated_backend_stage_count >= 2 &&
@@ -106,12 +84,9 @@ static bool PhysicalRunnerHasGeneratedJoinGroupedFusionProof(const PhysicalRunne
 	       input.generated_stage_count > input.native_grouped_state_address_lookup_count * 2;
 }
 
-static bool PhysicalRunnerLargeLowWorkGroupedUpdate(const PhysicalRunnerCostInput &input,
-                                                    const PhysicalRunnerSharedCostInputs &shared) {
-	const auto has_amortization_proof =
-	    (shared.vectorized_parallelism > 1 ? PhysicalRunnerHasParallelGroupedLookupReplacementProof(input)
-	                                       : PhysicalRunnerHasGeneratedGroupedLookupReplacementProof(input)) ||
-	    PhysicalRunnerHasGeneratedJoinGroupedFusionProof(input);
+static bool PhysicalRunnerLargeLowWorkGroupedUpdate(const PhysicalRunnerCostInput &input) {
+	const auto has_amortization_proof = PhysicalRunnerHasGeneratedGroupedLookupReplacementProof(input) ||
+	                                    PhysicalRunnerHasGeneratedJoinGroupedFusionProof(input);
 	const auto has_native_grouped_lookup = input.native_grouped_state_address_lookup_count > 0;
 	const auto has_grouped_update = has_native_grouped_lookup || input.generated_grouped_aggregate_stage_count > 0;
 	const auto minimum_expression_cost = has_native_grouped_lookup ? MIN_NATIVE_GROUPED_LOOKUP_EXPRESSION_COST
@@ -120,19 +95,15 @@ static bool PhysicalRunnerLargeLowWorkGroupedUpdate(const PhysicalRunnerCostInpu
 	       input.expression_cost < minimum_expression_cost && !has_amortization_proof;
 }
 
-static bool PhysicalRunnerCanAmortizeNativeGroupedStateAddressLookup(const PhysicalRunnerCostInput &input,
-                                                                     const PhysicalRunnerSharedCostInputs &shared) {
+static bool PhysicalRunnerCanAmortizeNativeGroupedStateAddressLookup(const PhysicalRunnerCostInput &input) {
 	if (input.native_grouped_state_address_lookup_count == 0 || input.source_contract_input_cardinality == 0 ||
-	    input.generated_backend_stage_count == 0 || PhysicalRunnerLargeLowWorkGroupedUpdate(input, shared)) {
+	    input.generated_backend_stage_count == 0 || PhysicalRunnerLargeLowWorkGroupedUpdate(input)) {
 		return false;
 	}
 	if (PhysicalRunnerHasEstimatedGroupedReduction(input)) {
 		return true;
 	}
 	if (input.source_contract_output_cardinality_unknown) {
-		if (shared.vectorized_parallelism > 1) {
-			return PhysicalRunnerHasGeneratedJoinGroupedFusionProof(input);
-		}
 		if (input.native_hash_join_build_sink_count > 0) {
 			return false;
 		}
@@ -146,8 +117,7 @@ static bool PhysicalRunnerCanAmortizeNativeGroupedStateAddressLookup(const Physi
 		}
 		return true;
 	}
-	return (shared.vectorized_parallelism > 1 ? PhysicalRunnerHasParallelGroupedLookupReplacementProof(input)
-	                                          : PhysicalRunnerHasGeneratedGroupedLookupReplacementProof(input)) ||
+	return PhysicalRunnerHasGeneratedGroupedLookupReplacementProof(input) ||
 	       input.generated_stage_count > input.native_grouped_state_address_lookup_count * 2;
 }
 
@@ -217,8 +187,7 @@ struct PhysicalRunnerShapeFacts {
 	bool no_native_sort = false;
 };
 
-static bool PhysicalRunnerCanPriceUnknownSourceOutputGeneratedJoinFusion(const PhysicalRunnerCostInput &input,
-                                                                         const PhysicalRunnerSharedCostInputs &shared) {
+static bool PhysicalRunnerCanPriceUnknownSourceOutputGeneratedJoinFusion(const PhysicalRunnerCostInput &input) {
 	if (input.source_contract_input_cardinality == 0 || !input.source_contract_output_cardinality_unknown ||
 	    input.generated_backend_stage_count == 0 || input.native_join_stage_count == 0) {
 		return false;
@@ -229,16 +198,14 @@ static bool PhysicalRunnerCanPriceUnknownSourceOutputGeneratedJoinFusion(const P
 	if (input.native_join_stage_count >= 3) {
 		return true;
 	}
-	if (input.native_grouped_state_address_lookup_count == 0 && shared.vectorized_parallelism == 1) {
+	if (input.native_grouped_state_address_lookup_count == 0) {
 		return true;
 	}
-	return PhysicalRunnerCanAmortizeNativeGroupedStateAddressLookup(input, shared);
+	return PhysicalRunnerCanAmortizeNativeGroupedStateAddressLookup(input);
 }
 
-static bool
-PhysicalRunnerCanCreditUnknownSourceOutputGeneratedJoinBackendStage(const PhysicalRunnerCostInput &input,
-                                                                    const PhysicalRunnerSharedCostInputs &shared) {
-	if (!PhysicalRunnerCanPriceUnknownSourceOutputGeneratedJoinFusion(input, shared) ||
+static bool PhysicalRunnerCanCreditUnknownSourceOutputGeneratedJoinBackendStage(const PhysicalRunnerCostInput &input) {
+	if (!PhysicalRunnerCanPriceUnknownSourceOutputGeneratedJoinFusion(input) ||
 	    input.native_hash_join_build_sink_count > 0) {
 		return false;
 	}
@@ -249,8 +216,7 @@ PhysicalRunnerCanCreditUnknownSourceOutputGeneratedJoinBackendStage(const Physic
 	       PhysicalRunnerHasGeneratedJoinGroupedFusionProof(input);
 }
 
-static PhysicalRunnerShapeFacts PhysicalRunnerBuildShapeFacts(const PhysicalRunnerCostInput &input,
-                                                              const PhysicalRunnerSharedCostInputs &shared) {
+static PhysicalRunnerShapeFacts PhysicalRunnerBuildShapeFacts(const PhysicalRunnerCostInput &input) {
 	PhysicalRunnerShapeFacts facts;
 	facts.rows = PhysicalRunnerRows(input);
 	facts.batches = PhysicalRunnerBatches(facts.rows);
@@ -289,8 +255,8 @@ static bool PhysicalRunnerNativeStageBenefitCanPay(const PhysicalRunnerCostInput
 }
 
 static bool PhysicalRunnerMaterializationElisionBenefitCanPay(const PhysicalRunnerCostInput &input,
-                                                              const PhysicalRunnerAxisEvaluation &evaluation) {
-	if (evaluation.axis.materialization_elision_benefit == 0 || input.materialization_elision_count == 0) {
+                                                              const RunnerCostAxis &axis) {
+	if (axis.materialization_elision_benefit == 0 || input.materialization_elision_count == 0) {
 		return false;
 	}
 	if (PhysicalRunnerSmallStatefulBackendCandidate(input)) {
@@ -299,7 +265,7 @@ static bool PhysicalRunnerMaterializationElisionBenefitCanPay(const PhysicalRunn
 	if (input.source_contract_output_cardinality_unknown) {
 		return false;
 	}
-	if (PhysicalRunnerLargeLowWorkGroupedUpdate(input, evaluation.shared)) {
+	if (PhysicalRunnerLargeLowWorkGroupedUpdate(input)) {
 		return false;
 	}
 	return true;
@@ -320,7 +286,7 @@ static bool PhysicalRunnerSmallFinalizedDynamicJoinOnlyTail(const PhysicalRunner
 }
 
 static bool PhysicalRunnerGeneratedBackendStageBenefitCanPay(const PhysicalRunnerCostInput &input,
-                                                             const PhysicalRunnerAxisEvaluation &evaluation) {
+                                                             const RunnerCostAxis &axis) {
 	if (input.generated_backend_stage_count == 0 || input.generated_stage_count == 0) {
 		return false;
 	}
@@ -330,11 +296,11 @@ static bool PhysicalRunnerGeneratedBackendStageBenefitCanPay(const PhysicalRunne
 	if (PhysicalRunnerSmallFinalizedDynamicNativeAggregateTail(input)) {
 		return false;
 	}
-	if (PhysicalRunnerSmallFinalizedDynamicJoinOnlyTail(input, evaluation.axis)) {
+	if (PhysicalRunnerSmallFinalizedDynamicJoinOnlyTail(input, axis)) {
 		return false;
 	}
 	if (input.source_contract_output_cardinality_unknown &&
-	    !PhysicalRunnerCanCreditUnknownSourceOutputGeneratedJoinBackendStage(input, evaluation.shared)) {
+	    !PhysicalRunnerCanCreditUnknownSourceOutputGeneratedJoinBackendStage(input)) {
 		return false;
 	}
 	if (input.native_hash_join_build_sink_count > 0 && input.native_join_stage_count == 0 &&
@@ -387,8 +353,8 @@ static int64_t PhysicalRunnerHashJoinBuildSinkProtocolPenalty(const PhysicalRunn
 }
 
 static idx_t PhysicalRunnerCostedGeneratedBackendStageCount(const PhysicalRunnerCostInput &input,
-                                                            const PhysicalRunnerAxisEvaluation &evaluation) {
-	if (!PhysicalRunnerGeneratedBackendStageBenefitCanPay(input, evaluation)) {
+                                                            const RunnerCostAxis &axis) {
+	if (!PhysicalRunnerGeneratedBackendStageBenefitCanPay(input, axis)) {
 		return 0;
 	}
 	return MinValue(input.generated_backend_stage_count, input.generated_stage_count);
@@ -431,12 +397,12 @@ struct PhysicalRunnerAdmission {
 
 static PhysicalRunnerAdmissionClass PhysicalRunnerEvaluateAdmissionClass(const PhysicalRunnerCostInput &input,
                                                                          const PhysicalRunnerShapeFacts &facts,
-                                                                         const PhysicalRunnerAxisEvaluation &evaluation,
+                                                                         const RunnerCostAxis &axis,
                                                                          bool full_pipeline_benefit_pays) {
 	if (!input.has_accelerated_work) {
 		return PhysicalRunnerAdmissionClass::NONE;
 	}
-	if (PhysicalRunnerMaterializationElisionBenefitCanPay(input, evaluation)) {
+	if (PhysicalRunnerMaterializationElisionBenefitCanPay(input, axis)) {
 		return PhysicalRunnerAdmissionClass::MATERIALIZATION_ELISION;
 	}
 	if (full_pipeline_benefit_pays) {
@@ -444,8 +410,7 @@ static PhysicalRunnerAdmissionClass PhysicalRunnerEvaluateAdmissionClass(const P
 	}
 	if (facts.native_operator_stage_count == 0) {
 		return facts.has_generated_compute_work && input.generated_stage_count > 0 &&
-		               evaluation.axis.generated_stage_benefit > 0 &&
-		               !PhysicalRunnerLargeLowWorkGroupedUpdate(input, evaluation.shared)
+		               axis.generated_stage_benefit > 0 && !PhysicalRunnerLargeLowWorkGroupedUpdate(input)
 		           ? PhysicalRunnerAdmissionClass::GENERATED
 		           : PhysicalRunnerAdmissionClass::NONE;
 	}
@@ -465,42 +430,38 @@ static void PhysicalRunnerAppendReasonToken(string &result, const string &token)
 	result += token;
 }
 
-static bool PhysicalRunnerNativeOperatorBenefitPays(const PhysicalRunnerCostInput &input,
-                                                    const PhysicalRunnerAxisEvaluation &evaluation,
+static bool PhysicalRunnerNativeOperatorBenefitPays(const PhysicalRunnerCostInput &input, const RunnerCostAxis &axis,
                                                     const PhysicalRunnerAdmission &admission) {
-	if (!admission.Admitted() || !PhysicalRunnerNativeStageBenefitCanPay(input, evaluation.axis)) {
+	if (!admission.Admitted() || !PhysicalRunnerNativeStageBenefitCanPay(input, axis)) {
 		return false;
 	}
-	if (PhysicalRunnerSmallFinalizedDynamicJoinOnlyTail(input, evaluation.axis)) {
+	if (PhysicalRunnerSmallFinalizedDynamicJoinOnlyTail(input, axis)) {
 		return false;
 	}
 	if (input.finalized_dynamic_filter_cardinality_estimate && input.expression_cost == 0 &&
 	    input.native_hash_join_build_sink_count == 0 &&
-	    !PhysicalRunnerGeneratedBackendStageBenefitCanPay(input, evaluation)) {
-		return input.native_delim_join_sink || evaluation.axis.startup_base_cost == 0;
+	    !PhysicalRunnerGeneratedBackendStageBenefitCanPay(input, axis)) {
+		return input.native_delim_join_sink || axis.startup_base_cost == 0;
 	}
 	return true;
 }
 
 static void PhysicalRunnerBuildAccelerationBasis(const PhysicalRunnerCostInput &input,
-                                                 const PhysicalRunnerShapeFacts &facts,
-                                                 const PhysicalRunnerAxisEvaluation &evaluation,
+                                                 const PhysicalRunnerShapeFacts &facts, const RunnerCostAxis &axis,
                                                  PhysicalRunnerAdmission &admission) {
 	if (admission.Admitted()) {
 		PhysicalRunnerAppendReasonToken(admission.acceleration_basis,
 		                                string("admission_class:") +
 		                                    PhysicalRunnerAdmissionClassToString(admission.admission_class));
 	}
-	if (facts.has_generated_compute_work && input.generated_stage_count > 0 &&
-	    evaluation.axis.generated_stage_benefit > 0 &&
-	    !PhysicalRunnerLargeLowWorkGroupedUpdate(input, evaluation.shared)) {
+	if (facts.has_generated_compute_work && input.generated_stage_count > 0 && axis.generated_stage_benefit > 0 &&
+	    !PhysicalRunnerLargeLowWorkGroupedUpdate(input)) {
 		PhysicalRunnerAppendReasonToken(admission.acceleration_basis, "generated_stage_benefit");
 	}
-	if (facts.native_operator_stage_count > 0 &&
-	    PhysicalRunnerNativeOperatorBenefitPays(input, evaluation, admission)) {
+	if (facts.native_operator_stage_count > 0 && PhysicalRunnerNativeOperatorBenefitPays(input, axis, admission)) {
 		PhysicalRunnerAppendReasonToken(admission.acceleration_basis, "native_operator_stage_benefit");
 	}
-	if (PhysicalRunnerMaterializationElisionBenefitCanPay(input, evaluation)) {
+	if (PhysicalRunnerMaterializationElisionBenefitCanPay(input, axis)) {
 		PhysicalRunnerAppendReasonToken(admission.acceleration_basis, "materialization_elision_benefit");
 	}
 	if (admission.full_pipeline_benefit_pays) {
@@ -513,14 +474,14 @@ static void PhysicalRunnerBuildAccelerationBasis(const PhysicalRunnerCostInput &
 
 static PhysicalRunnerAdmission PhysicalRunnerEvaluateAdmission(const PhysicalRunnerCostInput &input,
                                                                const PhysicalRunnerShapeFacts &facts,
-                                                               const PhysicalRunnerAxisEvaluation &evaluation) {
+                                                               const RunnerCostAxis &axis) {
 	PhysicalRunnerAdmission admission;
 	admission.full_pipeline_benefit_pays =
-	    evaluation.axis.full_pipeline_benefit > 0 && PhysicalRunnerFullPipelineBenefitPays(input, facts);
+	    axis.full_pipeline_benefit > 0 && PhysicalRunnerFullPipelineBenefitPays(input, facts);
 	admission.admission_class =
-	    PhysicalRunnerEvaluateAdmissionClass(input, facts, evaluation, admission.full_pipeline_benefit_pays);
+	    PhysicalRunnerEvaluateAdmissionClass(input, facts, axis, admission.full_pipeline_benefit_pays);
 	admission.native_operator_work_is_costed = facts.native_operator_stage_count == 0 || admission.Admitted();
-	PhysicalRunnerBuildAccelerationBasis(input, facts, evaluation, admission);
+	PhysicalRunnerBuildAccelerationBasis(input, facts, axis, admission);
 	return admission;
 }
 
@@ -543,15 +504,14 @@ static string PhysicalRunnerRejectedAcceleratedWorkReason(const PhysicalRunnerCo
 }
 
 static void PhysicalRunnerComputeWorkComponents(const PhysicalRunnerCostInput &input,
-                                                const PhysicalRunnerShapeFacts &facts,
-                                                const PhysicalRunnerAxisEvaluation &evaluation,
+                                                const PhysicalRunnerShapeFacts &facts, const RunnerCostAxis &axis,
                                                 const PhysicalRunnerAdmission &admission,
                                                 PhysicalRunnerCostProfile &profile) {
 	const auto expression_cost = SaturatingCostCast(input.expression_cost);
-	if (facts.has_generated_compute_work && !PhysicalRunnerLargeLowWorkGroupedUpdate(input, evaluation.shared)) {
+	if (facts.has_generated_compute_work && !PhysicalRunnerLargeLowWorkGroupedUpdate(input)) {
 		profile.generated_expression_work = expression_cost;
-		const auto generated_stage_benefit = SaturatingCostCast(evaluation.axis.generated_stage_benefit);
-		const auto generated_backend_stage_count = PhysicalRunnerCostedGeneratedBackendStageCount(input, evaluation);
+		const auto generated_stage_benefit = SaturatingCostCast(axis.generated_stage_benefit);
+		const auto generated_backend_stage_count = PhysicalRunnerCostedGeneratedBackendStageCount(input, axis);
 		const auto generated_expression_stage_count = input.generated_stage_count - generated_backend_stage_count;
 		int64_t generated_expression_stage_work = 0;
 		if (expression_cost > 0) {
@@ -567,23 +527,22 @@ static void PhysicalRunnerComputeWorkComponents(const PhysicalRunnerCostInput &i
 	}
 	D_ASSERT(input.native_aggregate_stage_count >= input.native_grouped_aggregate_stage_count);
 	D_ASSERT(input.generated_backend_stage_count >= input.generated_grouped_aggregate_stage_count);
-	if (PhysicalRunnerNativeOperatorBenefitPays(input, evaluation, admission)) {
-		const auto native_operator_stage_benefit = SaturatingCostCast(evaluation.axis.native_operator_stage_benefit);
+	if (PhysicalRunnerNativeOperatorBenefitPays(input, axis, admission)) {
+		const auto native_operator_stage_benefit = SaturatingCostCast(axis.native_operator_stage_benefit);
 		profile.native_operator_work =
 		    MultiplyCost(SaturatingCostCast(facts.native_operator_stage_count), native_operator_stage_benefit);
 	}
-	if (PhysicalRunnerMaterializationElisionBenefitCanPay(input, evaluation)) {
-		profile.materialization_elision_work =
-		    MultiplyCost(SaturatingCostCast(input.materialization_elision_count),
-		                 SaturatingCostCast(evaluation.axis.materialization_elision_benefit));
+	if (PhysicalRunnerMaterializationElisionBenefitCanPay(input, axis)) {
+		profile.materialization_elision_work = MultiplyCost(SaturatingCostCast(input.materialization_elision_count),
+		                                                    SaturatingCostCast(axis.materialization_elision_benefit));
 	}
 	if (input.selected_hash_join_filter_materialization_count > 0) {
 		profile.selected_hash_join_filter_materialization_penalty =
 		    MultiplyCost(SaturatingCostCast(input.selected_hash_join_filter_materialization_count),
-		                 SaturatingCostCast(evaluation.axis.generated_stage_benefit));
+		                 SaturatingCostCast(axis.generated_stage_benefit));
 	}
 	if (input.full_pipeline) {
-		const auto full_pipeline_benefit = SaturatingCostCast(evaluation.axis.full_pipeline_benefit);
+		const auto full_pipeline_benefit = SaturatingCostCast(axis.full_pipeline_benefit);
 		if (admission.full_pipeline_benefit_pays) {
 			profile.full_pipeline_work = full_pipeline_benefit;
 		}
@@ -595,35 +554,18 @@ static void PhysicalRunnerComputeWorkComponents(const PhysicalRunnerCostInput &i
 	}
 	if (PhysicalRunnerHashJoinBuildSinkProtocolPenaltyApplies(input)) {
 		const auto native_hash_join_build_sink_count = SaturatingCostCast(input.native_hash_join_build_sink_count);
-		const auto hash_build_sink_penalty =
-		    PhysicalRunnerHashJoinBuildSinkProtocolPenalty(input, facts, evaluation.axis);
+		const auto hash_build_sink_penalty = PhysicalRunnerHashJoinBuildSinkProtocolPenalty(input, facts, axis);
 		profile.stateful_protocol_penalty =
 		    AddCost(profile.stateful_protocol_penalty,
 		            MultiplyCost(native_hash_join_build_sink_count, hash_build_sink_penalty));
 	}
 	if (input.native_grouped_state_address_lookup_count > 0 &&
-	    !PhysicalRunnerCanAmortizeNativeGroupedStateAddressLookup(input, evaluation.shared)) {
-		const auto native_grouped_lookup_penalty = MaterializingNativeProtocolPenalty(evaluation.axis);
+	    !PhysicalRunnerCanAmortizeNativeGroupedStateAddressLookup(input)) {
+		const auto native_grouped_lookup_penalty = MaterializingNativeProtocolPenalty(axis);
 		profile.stateful_protocol_penalty =
 		    AddCost(profile.stateful_protocol_penalty,
 		            MultiplyCost(SaturatingCostCast(input.native_grouped_state_address_lookup_count),
 		                         native_grouped_lookup_penalty));
-	}
-	if (evaluation.shared.vectorized_parallelism > 1 && input.native_grouped_aggregate_stage_count > 0) {
-		const auto grouped_aggregate_parallel_penalty =
-		    MultiplyCost(SaturatingCostCast(input.native_grouped_aggregate_stage_count),
-		                 SaturatingCostCast(evaluation.shared.vectorized_parallelism - 1));
-		profile.stateful_protocol_penalty =
-		    AddCost(profile.stateful_protocol_penalty,
-		            MultiplyCost(grouped_aggregate_parallel_penalty, NATIVE_GROUPED_AGGREGATE_PARALLELISM_PENALTY));
-	}
-	if (evaluation.shared.vectorized_parallelism > 1 && input.generated_grouped_aggregate_stage_count > 0) {
-		const auto grouped_aggregate_parallel_penalty =
-		    MultiplyCost(SaturatingCostCast(input.generated_grouped_aggregate_stage_count),
-		                 SaturatingCostCast(evaluation.shared.vectorized_parallelism - 1));
-		profile.stateful_protocol_penalty =
-		    AddCost(profile.stateful_protocol_penalty,
-		            MultiplyCost(grouped_aggregate_parallel_penalty, NATIVE_GROUPED_AGGREGATE_PARALLELISM_PENALTY));
 	}
 	auto work = profile.generated_expression_work;
 	work = AddCost(work, profile.generated_stage_work);
@@ -654,9 +596,11 @@ static void PhysicalRunnerBuildRuntimeProofRequirements(PhysicalRunnerCostProfil
 	}
 }
 
-static int64_t PhysicalRunnerStartupCost(const PhysicalRunnerAxisEvaluation &evaluation) {
-	return MultiplyCost(SaturatingCostCast(evaluation.axis.startup_base_cost),
-	                    SaturatingCostCast(MaxValue<idx_t>(evaluation.shared.vectorized_parallelism, 1)));
+//! Compilation runs once on one thread while the pipeline's threads share the saved work, so against the wall time
+//! the saved work buys, the startup weighs once per thread
+static int64_t PhysicalRunnerStartupCost(const RunnerCostAxis &axis, idx_t vectorized_parallelism) {
+	return MultiplyCost(SaturatingCostCast(axis.startup_base_cost),
+	                    SaturatingCostCast(MaxValue<idx_t>(vectorized_parallelism, 1)));
 }
 
 static int64_t PhysicalRunnerRequiredBenefit(const PhysicalRunnerCostProfile &profile, const RunnerCostAxis &axis) {
@@ -667,22 +611,6 @@ static int64_t PhysicalRunnerRequiredBenefit(const PhysicalRunnerCostProfile &pr
 	}
 	auto required_benefit = AddCost(profile.startup_cost, margin);
 	return required_benefit;
-}
-
-static int64_t PhysicalRunnerParallelPerBatchWorkFloor(const PhysicalRunnerAxisEvaluation &evaluation) {
-	if (evaluation.shared.vectorized_parallelism <= 1) {
-		return 0;
-	}
-	return MultiplyCost(SaturatingCostCast(evaluation.shared.vectorized_parallelism),
-	                    SaturatingCostCast(evaluation.axis.native_operator_stage_benefit));
-}
-
-static bool PhysicalRunnerParallelPerBatchWorkFloorApplies(const PhysicalRunnerCostInput &input) {
-	if (input.generated_backend_stage_count > 0) {
-		return false;
-	}
-	return input.native_join_stage_count > 0 || input.native_aggregate_stage_count > 0 ||
-	       input.native_sort_stage_count > 0;
 }
 
 static void PhysicalRunnerInitializeProfile(const PhysicalRunnerCostInput &input, const PhysicalRunnerShapeFacts &facts,
@@ -725,8 +653,7 @@ struct PhysicalRunnerSelectionAnalysis {
 static PhysicalRunnerSelectionAnalysis PhysicalRunnerAnalyzeSelection(const PhysicalRunnerCostInput &input,
                                                                       const PhysicalRunnerAdmission &admission,
                                                                       const PhysicalRunnerCostProfile &profile,
-                                                                      bool runner_available,
-                                                                      int64_t parallel_per_batch_work_floor) {
+                                                                      bool runner_available) {
 	PhysicalRunnerSelectionAnalysis result;
 	if (!runner_available) {
 		result.selection_reason = "rejected_runner_unavailable";
@@ -738,11 +665,6 @@ static PhysicalRunnerSelectionAnalysis PhysicalRunnerAnalyzeSelection(const Phys
 	}
 	result.selection_reason = PhysicalRunnerRejectedAcceleratedWorkReason(input, admission, profile);
 	if (!result.selection_reason.empty()) {
-		return result;
-	}
-	if (PhysicalRunnerParallelPerBatchWorkFloorApplies(input) && parallel_per_batch_work_floor > 0 &&
-	    profile.saved_work_per_batch < parallel_per_batch_work_floor) {
-		result.selection_reason = "rejected_parallel_per_batch_work_floor";
 		return result;
 	}
 	if (profile.accelerated_runner_benefit <= profile.required_benefit) {
@@ -757,9 +679,7 @@ static PhysicalRunnerSelectionAnalysis PhysicalRunnerAnalyzeSelection(const Phys
 PhysicalRunnerCostProfile DuckDBCostModel::SelectPhysicalRunner(const PhysicalRunnerCostInput &input,
                                                                 const PhysicalRunnerCostParameters &parameters) {
 	constexpr auto AXIS_COUNT = PhysicalRunnerCostParameters::AXIS_COUNT;
-	PhysicalRunnerSharedCostInputs shared;
-	shared.vectorized_parallelism = parameters.vectorized_parallelism;
-	auto facts = PhysicalRunnerBuildShapeFacts(input, shared);
+	auto facts = PhysicalRunnerBuildShapeFacts(input);
 
 	PhysicalRunnerCostProfile axis_profiles[AXIS_COUNT];
 	PhysicalRunnerSelectionAnalysis axis_selections[AXIS_COUNT];
@@ -773,25 +693,19 @@ PhysicalRunnerCostProfile DuckDBCostModel::SelectPhysicalRunner(const PhysicalRu
 			axis_selections[axis_idx].selection_reason = "rejected_runner_unavailable";
 			continue;
 		}
-		PhysicalRunnerAxisEvaluation evaluation {axis, shared};
 		auto &profile = axis_profiles[axis_idx];
-		auto admission = PhysicalRunnerEvaluateAdmission(input, facts, evaluation);
+		auto admission = PhysicalRunnerEvaluateAdmission(input, facts, axis);
 		PhysicalRunnerInitializeProfile(input, facts, admission, profile);
-		PhysicalRunnerComputeWorkComponents(input, facts, evaluation, admission, profile);
+		PhysicalRunnerComputeWorkComponents(input, facts, axis, admission, profile);
 		PhysicalRunnerBuildRuntimeProofRequirements(profile);
 		profile.accelerated_runner_benefit = MultiplyCost(profile.costed_batches, profile.saved_work_per_batch);
 		auto &transfer_cost = axis_transfer_costs[axis_idx];
 		transfer_cost = MultiplyCost(profile.batches, SaturatingCostCast(axis.transfer_cost_per_batch));
-		profile.startup_cost = PhysicalRunnerStartupCost(evaluation);
+		profile.startup_cost = PhysicalRunnerStartupCost(axis, parameters.vectorized_parallelism);
 		profile.required_benefit = AddCost(PhysicalRunnerRequiredBenefit(profile, axis), transfer_cost);
 		profile.net_benefit =
 		    SubtractCost(SubtractCost(profile.accelerated_runner_benefit, profile.startup_cost), transfer_cost);
-		// The parallel per-batch work floor models the parallel vectorized baseline that
-		// shares the host memory domain; it gates only the compiled-vectorized axis.
-		const auto parallel_per_batch_work_floor =
-		    axis_idx == 0 ? PhysicalRunnerParallelPerBatchWorkFloor(evaluation) : 0;
-		axis_selections[axis_idx] =
-		    PhysicalRunnerAnalyzeSelection(input, admission, profile, axis.available, parallel_per_batch_work_floor);
+		axis_selections[axis_idx] = PhysicalRunnerAnalyzeSelection(input, admission, profile, axis.available);
 	}
 
 	// The preferred axis provides the profile the caller sees when no runner is selected;
