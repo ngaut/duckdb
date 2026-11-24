@@ -19,22 +19,21 @@
 
 namespace duckdb {
 
-//! Measures whether the region or DuckDB's operators run a class of a pipeline's chunks faster: a leg of chunks each,
-//! timed from one source chunk to the next so both legs pay the scan alike, without the first chunk of a leg, which
-//! warms it. DuckDB's operators keep the class's remaining chunks only when they were faster beyond the measurement's
-//! noise
+//! Measures whether the region or DuckDB's operators run a class of a pipeline's chunks faster: the legs alternate in
+//! blocks of chunks, so both see the pipeline's state warm up alike (the first chunks of an aggregate touch most of its
+//! groups for the first time), and each chunk is timed from one source chunk to the next, so both legs pay the scan
+//! alike. The first chunk of each leg, which warms its code, is left out. DuckDB's operators keep the class's remaining
+//! chunks only when they were faster beyond the measurement's noise
 class SljitNativeLegMeasurement {
 public:
 	static constexpr idx_t LEG_CHUNKS = 16;
+	static constexpr idx_t BLOCK_CHUNKS = 4;
 
 	//! Whether DuckDB's operators take the class's next chunk
 	bool TakesNative() {
 		const auto chunk = chunk_count++;
-		if (chunk < LEG_CHUNKS) {
-			return false;
-		}
 		if (chunk < 2 * LEG_CHUNKS) {
-			return true;
+			return IsNativeChunk(chunk);
 		}
 		if (!decided) {
 			decided = true;
@@ -48,21 +47,26 @@ public:
 	//! The time and rows of the class's latest chunk
 	void Attribute(std::chrono::steady_clock::duration duration, idx_t rows) {
 		const auto chunk = chunk_count - 1;
-		if (chunk == 0 || chunk == LEG_CHUNKS || chunk >= 2 * LEG_CHUNKS) {
+		if (chunk == 0 || chunk == BLOCK_CHUNKS || chunk >= 2 * LEG_CHUNKS) {
 			return;
 		}
 		const auto nanos = std::chrono::duration_cast<std::chrono::nanoseconds>(duration).count();
-		if (chunk < LEG_CHUNKS) {
-			generated_nanos += nanos;
-			generated_rows += NumericCast<int64_t>(rows);
-		} else {
+		if (IsNativeChunk(chunk)) {
 			native_nanos += nanos;
 			native_rows += NumericCast<int64_t>(rows);
+		} else {
+			generated_nanos += nanos;
+			generated_rows += NumericCast<int64_t>(rows);
 		}
 	}
 
 	bool Decided() const {
 		return decided;
+	}
+
+private:
+	static bool IsNativeChunk(idx_t chunk) {
+		return (chunk / BLOCK_CHUNKS) % 2 == 1;
 	}
 
 private:
