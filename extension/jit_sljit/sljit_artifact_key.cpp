@@ -13,22 +13,27 @@
 
 namespace duckdb {
 
-// Database-local, versioned structural identity. Diagnostic renderers never participate.
+// Database-local, versioned structural identity. Diagnostic renderers never participate. Each field is its name and
+// its value in a fixed width, or with its length in front, so equal keys hold equal fields in the same order.
 class SljitArtifactKeyWriter {
 public:
 	template <class T>
 	void Field(const char *name, const T &value) {
-		serializer.Begin();
-		serializer.WriteProperty(100, "field", string(name));
-		if constexpr (std::is_enum<T>::value) {
-			serializer.WriteProperty(101, "value", static_cast<uint64_t>(value));
-		} else if constexpr (std::is_integral<T>::value && !std::is_same<T, bool>::value) {
-			using Integral = typename std::conditional<std::is_signed<T>::value, int64_t, uint64_t>::type;
-			serializer.WriteProperty(101, "value", static_cast<Integral>(value));
+		Name(name);
+		if constexpr (std::is_enum<T>::value || std::is_integral<T>::value) {
+			Fixed(static_cast<int64_t>(value));
+		} else if constexpr (std::is_floating_point<T>::value) {
+			Fixed(static_cast<double>(value));
+		} else if constexpr (std::is_same<T, string>::value || std::is_same<T, LogicalType>::value ||
+		                     std::is_same<T, Value>::value) {
+			Append(value);
+		} else if constexpr (std::is_convertible<const T &, const char *>::value) {
+			const char *text = value;
+			Bytes(text, strlen(text));
 		} else {
-			serializer.WriteProperty(101, "value", value);
+			static_assert(std::is_same<T, std::vector<bool>::const_reference>::value, "unsupported key field type");
+			Fixed(static_cast<bool>(value));
 		}
-		serializer.End();
 	}
 	template <class T>
 	void Field(const char *name, const vector<T> &values) {
@@ -43,27 +48,79 @@ public:
 			Field("entry", value);
 		}
 	}
+	//! A child's fields, closed by a byte no field name starts with
+	template <class APPEND>
+	void Nested(const char *name, APPEND &&append) {
+		Name(name);
+		append();
+		key.push_back(char(0xFF));
+	}
 	string Take() {
-		return string(const_char_ptr_cast(stream.GetData()), stream.GetPosition());
+		return std::move(key);
 	}
 
 private:
-	MemoryStream stream;
-	BinarySerializer serializer {stream};
+	void Name(const char *name) {
+		key.append(name, strlen(name) + 1);
+	}
+	template <class T>
+	void Fixed(T value) {
+		key.append(const_char_ptr_cast(&value), sizeof(T));
+	}
+	void Bytes(const char *data, idx_t size) {
+		Fixed(static_cast<uint64_t>(size));
+		key.append(data, size);
+	}
+	void Append(const string &value) {
+		Bytes(value.data(), value.size());
+	}
+	void Append(const LogicalType &type) {
+		auto &info = type.GetTypeInfo();
+		const bool plain = info.alias.empty() && !info.extension_info;
+		if (plain && info.type == LogicalTypeInfoType::INVALID_TYPE_INFO) {
+			Fixed(uint8_t(0));
+			Fixed(static_cast<uint8_t>(type.id()));
+		} else if (plain && info.type == LogicalTypeInfoType::DECIMAL_TYPE_INFO) {
+			Fixed(uint8_t(1));
+			Fixed(DecimalType::GetWidth(type));
+			Fixed(DecimalType::GetScale(type));
+		} else {
+			Fixed(uint8_t(2));
+			Serialized(type);
+		}
+	}
+	void Append(const Value &value) {
+		Append(value.type());
+		Fixed(value.IsNull());
+		if (!value.IsNull()) {
+			Serialized(value);
+		}
+	}
+	template <class T>
+	void Serialized(const T &value) {
+		MemoryStream stream;
+		BinarySerializer serializer(stream);
+		serializer.Begin();
+		value.Serialize(serializer);
+		serializer.End();
+		Bytes(const_char_ptr_cast(stream.GetData()), stream.GetPosition());
+	}
+
+private:
+	string key;
 };
 
-static string BuildSljitExpressionTreeSemanticKey(const ExecutionExpressionIR &node);
+static void AppendSljitExpressionTreeSemanticKey(SljitArtifactKeyWriter &key, const ExecutionExpressionIR &node);
 
 static void AppendSljitExpressionTreeChild(SljitArtifactKeyWriter &key, const char *name,
                                            const unique_ptr<ExecutionExpressionIR> &child) {
 	key.Field(name, child != nullptr);
 	if (child) {
-		key.Field(name, BuildSljitExpressionTreeSemanticKey(*child));
+		key.Nested(name, [&]() { AppendSljitExpressionTreeSemanticKey(key, *child); });
 	}
 }
 
-static string BuildSljitExpressionTreeSemanticKey(const ExecutionExpressionIR &node) {
-	SljitArtifactKeyWriter key;
+static void AppendSljitExpressionTreeSemanticKey(SljitArtifactKeyWriter &key, const ExecutionExpressionIR &node) {
 	key.Field("kind", static_cast<uint8_t>(node.kind));
 	key.Field("return_type", node.return_type);
 	key.Field("physical_type", static_cast<uint8_t>(node.physical_type));
@@ -91,11 +148,9 @@ static string BuildSljitExpressionTreeSemanticKey(const ExecutionExpressionIR &n
 	for (auto &child : node.children) {
 		AppendSljitExpressionTreeChild(key, "child", child);
 	}
-	return key.Take();
 }
 
-static string BuildSljitPredicateSemanticKey(const SljitNativePredicate &predicate) {
-	SljitArtifactKeyWriter key;
+static void AppendSljitPredicateSemanticKey(SljitArtifactKeyWriter &key, const SljitNativePredicate &predicate) {
 	key.Field("kind", static_cast<uint8_t>(predicate.kind));
 	key.Field("return_type", predicate.return_type);
 	key.Field("constant_value", predicate.constant_value);
@@ -144,20 +199,18 @@ static string BuildSljitPredicateSemanticKey(const SljitNativePredicate &predica
 	}
 	key.Field("has_child", predicate.child != nullptr);
 	if (predicate.child) {
-		key.Field("child", BuildSljitPredicateSemanticKey(*predicate.child));
+		key.Nested("child", [&]() { AppendSljitPredicateSemanticKey(key, *predicate.child); });
 	}
 	key.Field("child_count", predicate.children.size());
 	for (auto &child : predicate.children) {
 		key.Field("child_present", child != nullptr);
 		if (child) {
-			key.Field("child_item", BuildSljitPredicateSemanticKey(*child));
+			key.Nested("child_item", [&]() { AppendSljitPredicateSemanticKey(key, *child); });
 		}
 	}
-	return key.Take();
 }
 
-string BuildSljitExpressionArtifactKey(const SljitNativeRegionExpressionPlan &expr) {
-	SljitArtifactKeyWriter key;
+static void AppendSljitExpressionArtifactKey(SljitArtifactKeyWriter &key, const SljitNativeRegionExpressionPlan &expr) {
 	key.Field("kind", static_cast<uint8_t>(expr.kind));
 	key.Field("integer_kind", static_cast<uint8_t>(expr.integer_kind));
 	key.Field("return_type", expr.return_type);
@@ -218,79 +271,66 @@ string BuildSljitExpressionArtifactKey(const SljitNativeRegionExpressionPlan &ex
 	key.Field("flat_nullable_fast_path", expr.emit_flat_nullable_fast_path);
 	key.Field("predicate", expr.predicate != nullptr);
 	if (expr.predicate) {
-		key.Field("predicate_value", BuildSljitPredicateSemanticKey(*expr.predicate));
+		key.Nested("predicate_value", [&]() { AppendSljitPredicateSemanticKey(key, *expr.predicate); });
 	}
 	key.Field("expression_tree", expr.expression_tree != nullptr);
 	if (expr.expression_tree) {
-		key.Field("expression_tree_value", BuildSljitExpressionTreeSemanticKey(*expr.expression_tree));
+		key.Nested("expression_tree_value",
+		           [&]() { AppendSljitExpressionTreeSemanticKey(key, *expr.expression_tree); });
 	}
 	for (auto source_index : expr.expression_tree_source_indices) {
 		key.Field("expression_tree_source", source_index);
 	}
-	return key.Take();
 }
 
-static string BuildContractKey(const ExecutionExpressionFragment &fragment) {
-	SljitArtifactKeyWriter key;
+static void AppendContractKey(SljitArtifactKeyWriter &key, const ExecutionExpressionFragment &fragment) {
 	key.Field("index", fragment.expression_index);
 	key.Field("return_type", fragment.return_type);
 	key.Field("root", fragment.root != nullptr);
 	if (fragment.root) {
-		key.Field("root_value", BuildSljitExpressionTreeSemanticKey(*fragment.root));
+		key.Nested("root_value", [&]() { AppendSljitExpressionTreeSemanticKey(key, *fragment.root); });
 	}
-	return key.Take();
 }
 
-static string BuildContractKey(const ExecutionRegionNativeGroupedStateContract &contract) {
-	SljitArtifactKeyWriter key;
+static void AppendContractKey(SljitArtifactKeyWriter &key, const ExecutionRegionNativeGroupedStateContract &contract) {
 	key.Field("status", contract.status);
 	key.Field("required_capability", contract.required_capability);
 	key.Field("contract_version", contract.contract_version);
-	return key.Take();
 }
 
-static string BuildContractKey(const ExecutionRegionNativeOperatorContract &contract) {
-	SljitArtifactKeyWriter key;
+static void AppendContractKey(SljitArtifactKeyWriter &key, const ExecutionRegionNativeOperatorContract &contract) {
 	key.Field("status", contract.status);
 	key.Field("required_capability", contract.required_capability);
 	key.Field("contract_version", contract.contract_version);
-	return key.Take();
 }
 
-static string BuildContractKey(const ExecutionRegionPrimitiveAggregateStateLane &contract) {
-	SljitArtifactKeyWriter key;
+static void AppendContractKey(SljitArtifactKeyWriter &key, const ExecutionRegionPrimitiveAggregateStateLane &contract) {
 	key.Field("aggregate_index", contract.aggregate_index);
 	key.Field("source_output_index", contract.source_output_index);
 	key.Field("return_type", contract.return_type);
 	key.Field("primitive_update_kind", contract.primitive_update_kind);
-	return key.Take();
 }
 
-static string BuildContractKey(const ExecutionRegionNativeStateScanContract &contract) {
-	SljitArtifactKeyWriter key;
+static void AppendContractKey(SljitArtifactKeyWriter &key, const ExecutionRegionNativeStateScanContract &contract) {
 	key.Field("status", contract.status);
 	key.Field("required_capability", contract.required_capability);
 	key.Field("contract_version", contract.contract_version);
 	key.Field("primitive_aggregate_batch_ready", contract.primitive_aggregate_batch_ready);
 	key.Field("primitive_aggregate_lanes_count", contract.primitive_aggregate_lanes.size());
 	for (auto &entry : contract.primitive_aggregate_lanes) {
-		key.Field("primitive_aggregate_lanes_entry", BuildContractKey(entry));
+		key.Nested("primitive_aggregate_lanes_entry", [&]() { AppendContractKey(key, entry); });
 	}
-	return key.Take();
 }
 
-static string BuildContractKey(const ExecutionHashJoinResidualSource &contract) {
-	SljitArtifactKeyWriter key;
+static void AppendContractKey(SljitArtifactKeyWriter &key, const ExecutionHashJoinResidualSource &contract) {
 	key.Field("kind", contract.kind);
 	key.Field("source_index", contract.source_index);
 	key.Field("input_index", contract.input_index);
 	key.Field("not_null", contract.not_null);
 	key.Field("type", contract.type);
-	return key.Take();
 }
 
-static string BuildContractKey(const ExecutionRegionHashJoinContract &contract) {
-	SljitArtifactKeyWriter key;
+static void AppendContractKey(SljitArtifactKeyWriter &key, const ExecutionRegionHashJoinContract &contract) {
 	key.Field("present", contract.present);
 	key.Field("join_type", contract.join_type);
 	key.Field("condition_count", contract.condition_count);
@@ -318,10 +358,10 @@ static string BuildContractKey(const ExecutionRegionHashJoinContract &contract) 
 	key.Field("residual_predicate", contract.residual_predicate);
 	key.Field("residual_info", contract.residual_info);
 	key.Field("residual_expression_ready", contract.residual_expression_ready);
-	key.Field("residual_expression", BuildContractKey(contract.residual_expression));
+	key.Nested("residual_expression", [&]() { AppendContractKey(key, contract.residual_expression); });
 	key.Field("residual_sources_count", contract.residual_sources.size());
 	for (auto &entry : contract.residual_sources) {
-		key.Field("residual_sources_entry", BuildContractKey(entry));
+		key.Nested("residual_sources_entry", [&]() { AppendContractKey(key, entry); });
 	}
 	key.Field("filter_pushdown", contract.filter_pushdown);
 	key.Field("filter_pushdown_condition_count", contract.filter_pushdown_condition_count);
@@ -338,13 +378,11 @@ static string BuildContractKey(const ExecutionRegionHashJoinContract &contract) 
 	key.Field("layout_offsets", contract.layout_offsets);
 	key.Field("tuple_size", contract.tuple_size);
 	key.Field("pointer_offset", contract.pointer_offset);
-	key.Field("native_probe_contract", BuildContractKey(contract.native_probe_contract));
-	key.Field("native_build_contract", BuildContractKey(contract.native_build_contract));
-	return key.Take();
+	key.Nested("native_probe_contract", [&]() { AppendContractKey(key, contract.native_probe_contract); });
+	key.Nested("native_build_contract", [&]() { AppendContractKey(key, contract.native_build_contract); });
 }
 
-static string BuildContractKey(const ExecutionRegionAggregateContract &contract) {
-	SljitArtifactKeyWriter key;
+static void AppendContractKey(SljitArtifactKeyWriter &key, const ExecutionRegionAggregateContract &contract) {
 	key.Field("present", contract.present);
 	key.Field("kind", contract.kind);
 	key.Field("group_count", contract.group_count);
@@ -375,13 +413,13 @@ static string BuildContractKey(const ExecutionRegionAggregateContract &contract)
 	key.Field("perfect_group_minima", contract.perfect_group_minima);
 	key.Field("grouped_state_layout_ready", contract.grouped_state_layout_ready);
 	key.Field("grouped_state_offsets", contract.grouped_state_offsets);
-	key.Field("native_grouped_state_contract", BuildContractKey(contract.native_grouped_state_contract));
-	key.Field("native_state_update_contract", BuildContractKey(contract.native_state_update_contract));
-	return key.Take();
+	key.Nested("native_grouped_state_contract",
+	           [&]() { AppendContractKey(key, contract.native_grouped_state_contract); });
+	key.Nested("native_state_update_contract",
+	           [&]() { AppendContractKey(key, contract.native_state_update_contract); });
 }
 
-static string BuildContractKey(const ExecutionRegionOrderContract &contract) {
-	SljitArtifactKeyWriter key;
+static void AppendContractKey(SljitArtifactKeyWriter &key, const ExecutionRegionOrderContract &contract) {
 	key.Field("present", contract.present);
 	key.Field("kind", contract.kind);
 	key.Field("order_count", contract.order_count);
@@ -394,11 +432,9 @@ static string BuildContractKey(const ExecutionRegionOrderContract &contract) {
 	key.Field("offset", contract.offset);
 	key.Field("dynamic_filter", contract.dynamic_filter);
 	key.Field("is_index_sort", contract.is_index_sort);
-	return key.Take();
 }
 
-static string BuildContractKey(const ExecutionRegionAggregateInput &contract) {
-	SljitArtifactKeyWriter key;
+static void AppendContractKey(SljitArtifactKeyWriter &key, const ExecutionRegionAggregateInput &contract) {
 	key.Field("aggregate_index", contract.aggregate_index);
 	key.Field("payload_index", contract.payload_index);
 	key.Field("child_count", contract.child_count);
@@ -408,7 +444,7 @@ static string BuildContractKey(const ExecutionRegionAggregateInput &contract) {
 	key.Field("child_indices", contract.child_indices);
 	key.Field("child_expressions_count", contract.child_expressions.size());
 	for (auto &entry : contract.child_expressions) {
-		key.Field("child_expressions_entry", BuildContractKey(entry));
+		key.Nested("child_expressions_entry", [&]() { AppendContractKey(key, entry); });
 	}
 	key.Field("distinct", contract.distinct);
 	key.Field("has_filter", contract.has_filter);
@@ -423,107 +459,90 @@ static string BuildContractKey(const ExecutionRegionAggregateInput &contract) {
 	key.Field("primitive_update_state_is_set_offset", contract.primitive_update_state_is_set_offset);
 	key.Field("supported_payload_references", contract.supported_payload_references);
 	key.Field("payload_expressions_ready", contract.payload_expressions_ready);
-	return key.Take();
 }
 
-static string BuildContractKey(const ExecutionRegionHashJoinKeyInput &contract) {
-	SljitArtifactKeyWriter key;
+static void AppendContractKey(SljitArtifactKeyWriter &key, const ExecutionRegionHashJoinKeyInput &contract) {
 	key.Field("key_index", contract.key_index);
 	key.Field("input_index", contract.input_index);
 	key.Field("type", contract.type);
 	key.Field("supported_reference", contract.supported_reference);
 	key.Field("expression_ready", contract.expression_ready);
-	key.Field("expression", BuildContractKey(contract.expression));
-	return key.Take();
+	key.Nested("expression", [&]() { AppendContractKey(key, contract.expression); });
 }
 
-static string BuildContractKey(const ExecutionRegionGroupInput &contract) {
-	SljitArtifactKeyWriter key;
+static void AppendContractKey(SljitArtifactKeyWriter &key, const ExecutionRegionGroupInput &contract) {
 	key.Field("group_index", contract.group_index);
 	key.Field("input_index", contract.input_index);
 	key.Field("type", contract.type);
 	key.Field("supported_reference", contract.supported_reference);
 	key.Field("expression_ready", contract.expression_ready);
-	key.Field("expression", BuildContractKey(contract.expression));
-	return key.Take();
+	key.Nested("expression", [&]() { AppendContractKey(key, contract.expression); });
 }
 
-static string BuildContractKey(const ExecutionRegionOperatorInfo &contract) {
+static void AppendContractKey(SljitArtifactKeyWriter &key, const ExecutionRegionOperatorInfo &contract) {
 	if (contract.Kind() != ExecutionRegionOperatorContractKind::HASH_JOIN_PROBE) {
 		throw InternalException("SLJIT probe artifact requires a hash join contract");
 	}
-	SljitArtifactKeyWriter key;
 	key.Field("kind", contract.Kind());
-	key.Field("hash_join_contract", BuildContractKey(contract.HashJoin().contract));
+	key.Nested("hash_join_contract", [&]() { AppendContractKey(key, contract.HashJoin().contract); });
 	key.Field("hash_join_keys_count", contract.HashJoin().keys.size());
 	for (auto &entry : contract.HashJoin().keys) {
-		key.Field("hash_join_keys_entry", BuildContractKey(entry));
+		key.Nested("hash_join_keys_entry", [&]() { AppendContractKey(key, entry); });
 	}
-	return key.Take();
 }
 
-static string BuildContractKey(const ExecutionRegionAggregateSinkInfo &contract) {
+static void AppendContractKey(SljitArtifactKeyWriter &key, const ExecutionRegionAggregateSinkInfo &contract) {
 	if (contract.Kind() == ExecutionRegionSinkKind::NONE) {
 		throw InternalException("SLJIT aggregate artifact requires an aggregate operator kind");
 	}
-	SljitArtifactKeyWriter key;
 	key.Field("kind", contract.Kind());
-	key.Field("aggregate_contract", BuildContractKey(contract.contract));
+	key.Nested("aggregate_contract", [&]() { AppendContractKey(key, contract.contract); });
 	key.Field("aggregates_count", contract.aggregates.size());
 	for (auto &entry : contract.aggregates) {
-		key.Field("aggregates_entry", BuildContractKey(entry));
+		key.Nested("aggregates_entry", [&]() { AppendContractKey(key, entry); });
 	}
 	key.Field("groups_count", contract.groups.size());
 	for (auto &entry : contract.groups) {
-		key.Field("groups_entry", BuildContractKey(entry));
+		key.Nested("groups_entry", [&]() { AppendContractKey(key, entry); });
 	}
-	return key.Take();
 }
 
-static string BuildContractKey(const ExecutionRegionHashJoinInfo &contract) {
-	SljitArtifactKeyWriter key;
+static void AppendContractKey(SljitArtifactKeyWriter &key, const ExecutionRegionHashJoinInfo &contract) {
 	key.Field("kind", ExecutionRegionSinkKind::HASH_JOIN_BUILD);
-	key.Field("hash_join_contract", BuildContractKey(contract.contract));
+	key.Nested("hash_join_contract", [&]() { AppendContractKey(key, contract.contract); });
 	key.Field("hash_join_keys_count", contract.keys.size());
 	for (auto &entry : contract.keys) {
-		key.Field("hash_join_keys_entry", BuildContractKey(entry));
+		key.Nested("hash_join_keys_entry", [&]() { AppendContractKey(key, entry); });
 	}
-	return key.Take();
 }
 
-static string BuildContractKey(const ExecutionRegionOrderSinkInfo &contract) {
-	SljitArtifactKeyWriter key;
+static void AppendContractKey(SljitArtifactKeyWriter &key, const ExecutionRegionOrderSinkInfo &contract) {
 	key.Field("kind", ExecutionRegionSinkKind::SORT);
-	key.Field("order_contract", BuildContractKey(contract.contract));
-	key.Field("native_sink_contract", BuildContractKey(contract.native_contract));
-	return key.Take();
+	key.Nested("order_contract", [&]() { AppendContractKey(key, contract.contract); });
+	key.Nested("native_sink_contract", [&]() { AppendContractKey(key, contract.native_contract); });
 }
 
-static string BuildContractKey(const ExecutionRegionSinkInfo &contract) {
-	SljitArtifactKeyWriter key;
+static void AppendContractKey(SljitArtifactKeyWriter &key, const ExecutionRegionSinkInfo &contract) {
 	key.Field("kind", contract.Kind());
 	switch (contract.Kind()) {
 	case ExecutionRegionSinkKind::RESULT_COLLECTOR_SINK:
 	case ExecutionRegionSinkKind::MATERIALIZATION:
-		key.Field("native_sink_contract", BuildContractKey(contract.Native()));
+		key.Nested("native_sink_contract", [&]() { AppendContractKey(key, contract.Native()); });
 		break;
 	default:
 		throw InternalException("SLJIT artifact contains an unsupported sink contract");
 	}
-	return key.Take();
 }
 
-static string BuildExpressionListKey(const vector<SljitNativeRegionExpressionPlan> &expressions) {
-	SljitArtifactKeyWriter key;
+static void AppendExpressionListKey(SljitArtifactKeyWriter &key,
+                                    const vector<SljitNativeRegionExpressionPlan> &expressions) {
 	key.Field("count", expressions.size());
 	for (auto &expression : expressions) {
-		key.Field("expression", BuildSljitExpressionArtifactKey(expression));
+		key.Nested("expression", [&]() { AppendSljitExpressionArtifactKey(key, expression); });
 	}
-	return key.Take();
 }
 
-static string BuildCastChainKey(const SljitIntegerCastChain &chain) {
-	SljitArtifactKeyWriter key;
+static void AppendCastChainKey(SljitArtifactKeyWriter &key, const SljitIntegerCastChain &chain) {
 	key.Field("source_type", chain.source_type);
 	key.Field("count", chain.steps.size());
 	for (auto &step : chain.steps) {
@@ -531,21 +550,19 @@ static string BuildCastChainKey(const SljitIntegerCastChain &chain) {
 		D_ASSERT(!step.query_location.IsValid() && step.source_alias.empty());
 		key.Field("cast_error_binding", step.error_binding);
 	}
-	return key.Take();
 }
 
-static string BuildOpKey(const SljitNativeRegionOpPlan &op) {
-	SljitArtifactKeyWriter key;
+static void AppendOpKey(SljitArtifactKeyWriter &key, const SljitNativeRegionOpPlan &op) {
 	key.Field("kind", op.Kind());
 	key.Field("operator_index", op.operator_index);
 	key.Field("input_types", op.input_types);
 	key.Field("output_types", op.output_types);
 	switch (op.Kind()) {
 	case SljitNativeRegionOpKind::FILTER:
-		key.Field("filter", BuildSljitExpressionArtifactKey(op.Filter()));
+		key.Nested("filter", [&]() { AppendSljitExpressionArtifactKey(key, op.Filter()); });
 		break;
 	case SljitNativeRegionOpKind::PROJECTION:
-		key.Field("projections", BuildExpressionListKey(op.Projections()));
+		key.Nested("projections", [&]() { AppendExpressionListKey(key, op.Projections()); });
 		break;
 	case SljitNativeRegionOpKind::HASH_JOIN_PROBE: {
 		auto &probe = op.HashJoinProbe();
@@ -560,7 +577,7 @@ static string BuildOpKey(const SljitNativeRegionOpPlan &op) {
 			key.Field("equality_key", entry.equality_key);
 			key.Field("null_equal", entry.null_equal);
 			key.Field("source_known_not_null", entry.source_known_not_null);
-			key.Field("source_cast", BuildCastChainKey(entry.source_cast));
+			key.Nested("source_cast", [&]() { AppendCastChainKey(key, entry.source_cast); });
 		}
 		key.Field("equality_key_count", probe.equality_key_count);
 		key.Field("mark_build_match", probe.mark_build_match);
@@ -574,34 +591,39 @@ static string BuildOpKey(const SljitNativeRegionOpPlan &op) {
 		key.Field("probe_input_types", probe.input_types);
 		key.Field("residual_source_types", probe.residual_source_types);
 		key.Field("residual_source_not_null", probe.residual_source_not_null);
-		key.Field("residual_filter", BuildSljitExpressionArtifactKey(probe.residual_filter));
-		key.Field("operator", BuildContractKey(probe.operator_info));
+		key.Nested("residual_filter", [&]() { AppendSljitExpressionArtifactKey(key, probe.residual_filter); });
+		key.Nested("operator", [&]() { AppendContractKey(key, probe.operator_info); });
 		break;
 	}
 	case SljitNativeRegionOpKind::HASH_JOIN_BUILD:
-		key.Field("sink", BuildContractKey(op.HashJoinBuild().sink_info));
+		key.Nested("sink", [&]() { AppendContractKey(key, op.HashJoinBuild().sink_info); });
 		key.Field("build_input_types", op.HashJoinBuild().input_types);
 		break;
 	case SljitNativeRegionOpKind::APPEND_SINK:
-		key.Field("sink", BuildContractKey(op.AppendSink().sink_info));
+		key.Nested("sink", [&]() { AppendContractKey(key, op.AppendSink().sink_info); });
 		key.Field("append_input_types", op.AppendSink().input_types);
 		break;
 	case SljitNativeRegionOpKind::ORDER_SINK:
-		key.Field("sink", BuildContractKey(op.OrderSink().sink_info));
+		key.Nested("sink", [&]() { AppendContractKey(key, op.OrderSink().sink_info); });
 		key.Field("order_input_types", op.OrderSink().input_types);
 		break;
 	case SljitNativeRegionOpKind::AGGREGATE_UPDATE: {
 		auto &aggregate = op.AggregateUpdate();
-		key.Field("sink", BuildContractKey(aggregate.sink_info));
+		key.Nested("sink", [&]() { AppendContractKey(key, aggregate.sink_info); });
 		key.Field("aggregate_input_types", aggregate.input_types);
-		key.Field("payloads", BuildExpressionListKey(aggregate.payloads));
-		key.Field("groups", BuildExpressionListKey(aggregate.group_expressions));
+		key.Nested("payloads", [&]() { AppendExpressionListKey(key, aggregate.payloads); });
+		key.Nested("groups", [&]() { AppendExpressionListKey(key, aggregate.group_expressions); });
 		key.Field("payload_binding_state", aggregate.payload_binding_state);
 		key.Field("use_grouped_state_addresses", aggregate.use_grouped_state_addresses);
 		key.Field("use_perfect_hash_group_lookup", aggregate.use_perfect_hash_group_lookup);
 		break;
 	}
 	}
+}
+
+string BuildSljitExpressionArtifactKey(const SljitNativeRegionExpressionPlan &expr) {
+	SljitArtifactKeyWriter key;
+	AppendSljitExpressionArtifactKey(key, expr);
 	return key.Take();
 }
 
@@ -617,17 +639,17 @@ string BuildSljitRegionArtifactSemanticKey(const SljitNativeRegionPlan &region) 
 		key.Field("filter_index", filter.filter_index);
 		key.Field("input_type", filter.input_type);
 		key.Field("input_not_null", filter.input_not_null);
-		key.Field("expression", BuildSljitExpressionArtifactKey(filter.filter));
+		key.Nested("expression", [&]() { AppendSljitExpressionArtifactKey(key, filter.filter); });
 	}
 	key.Field("state_source", region.aggregate_state_source.function_name);
-	key.Field("state_scan", BuildContractKey(region.aggregate_state_source.state_scan_contract));
+	key.Nested("state_scan", [&]() { AppendContractKey(key, region.aggregate_state_source.state_scan_contract); });
 	key.Field("op_count", region.ops.size());
 	for (auto &op : region.ops) {
-		key.Field("op", BuildOpKey(op));
+		key.Nested("op", [&]() { AppendOpKey(key, op); });
 	}
 	key.Field("native_continuation_source_op_count", region.native_continuation_source_ops.size());
 	for (auto &op : region.native_continuation_source_ops) {
-		key.Field("native_continuation_source_op", BuildOpKey(op));
+		key.Nested("native_continuation_source_op", [&]() { AppendOpKey(key, op); });
 	}
 	return key.Take();
 }
