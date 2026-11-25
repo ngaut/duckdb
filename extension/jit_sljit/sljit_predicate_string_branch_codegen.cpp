@@ -37,10 +37,23 @@ bool TryEmitSljitStringPredicateBranches(struct sljit_compiler *compiler, const 
 		EmitLoadPredicateStringForMatch(compiler, predicate.source_index, result, source_not_null, row);
 		EmitStringSuffixBranches(compiler, predicate.string_constant, result);
 		return true;
-	case SljitNativePredicateKind::STRING_CONTAINS_CONSTANT:
+	case SljitNativePredicateKind::STRING_CONTAINS_CONSTANT: {
 		EmitLoadPredicateStringForMatch(compiler, predicate.source_index, result, source_not_null, row);
-		EmitStringContainsBranches(compiler, predicate.string_constant, result);
+		if (predicate.string_constant.empty()) {
+			result.true_jumps.push_back(sljit_emit_jump(compiler, SLJIT_JUMP));
+			return true;
+		}
+		// DuckDB's own search: it scans for the needle's first byte a vector at a time
+		auto needle = AddStringConstantCodeData(owned_data, predicate.string_constant);
+		sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_R0, 0, SLJIT_R4, 0);
+		sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_R1, 0, SLJIT_R2, 0);
+		sljit_emit_op1(compiler, SLJIT_MOV_P, SLJIT_R2, 0, SLJIT_IMM, CastPointerToValue(needle));
+		sljit_emit_icall(compiler, SLJIT_CALL, SLJIT_ARGS3(W, P, W, P), SLJIT_IMM,
+		                 SLJIT_FUNC_ADDR(SljitNativeStringContainsConstant));
+		result.true_jumps.push_back(sljit_emit_cmp(compiler, SLJIT_NOT_EQUAL, SLJIT_RETURN_REG, 0, SLJIT_IMM, 0));
+		result.false_jumps.push_back(sljit_emit_jump(compiler, SLJIT_JUMP));
 		return true;
+	}
 	case SljitNativePredicateKind::STRING_LIKE_CONSTANT: {
 		EmitLoadPredicateStringForMatch(compiler, predicate.source_index, result, source_not_null, row);
 		auto pattern = AddStringConstantCodeData(owned_data, predicate.string_constant);

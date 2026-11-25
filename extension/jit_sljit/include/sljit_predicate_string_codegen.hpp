@@ -228,42 +228,4 @@ static void EmitStringSuffixBranches(struct sljit_compiler *compiler, const stri
 	result.true_jumps.push_back(sljit_emit_jump(compiler, SLJIT_JUMP));
 }
 
-static void EmitStringFindFromCurrentPosition(struct sljit_compiler *compiler, const string &needle, sljit_s32 data_reg,
-                                              sljit_s32 length_reg, sljit_s32 position_reg,
-                                              vector<sljit_jump *> &false_jumps) {
-	const auto needle_length = needle.size();
-	if (needle_length == 0) {
-		return;
-	}
-	false_jumps.push_back(
-	    sljit_emit_cmp(compiler, SLJIT_LESS, length_reg, 0, SLJIT_IMM, NumericCast<sljit_sw>(needle_length)));
-	sljit_emit_op2(compiler, SLJIT_SUB, SLJIT_R1, 0, length_reg, 0, SLJIT_IMM, NumericCast<sljit_sw>(needle_length));
-	false_jumps.push_back(sljit_emit_cmp(compiler, SLJIT_GREATER, position_reg, 0, SLJIT_R1, 0));
-	auto loop = sljit_emit_label(compiler);
-	vector<sljit_jump *> mismatch_jumps;
-	EmitStringEqualsAtPosition(compiler, needle, data_reg, position_reg, mismatch_jumps);
-	auto found = sljit_emit_jump(compiler, SLJIT_JUMP);
-	auto next_position = sljit_emit_label(compiler);
-	SetPredicateJumpLabels(mismatch_jumps, next_position);
-	sljit_emit_op2(compiler, SLJIT_ADD, position_reg, 0, position_reg, 0, SLJIT_IMM, 1);
-	auto repeat = sljit_emit_cmp(compiler, SLJIT_LESS_EQUAL, position_reg, 0, SLJIT_R1, 0);
-	false_jumps.push_back(sljit_emit_jump(compiler, SLJIT_JUMP));
-	auto found_label = sljit_emit_label(compiler);
-	sljit_set_label(repeat, loop);
-	sljit_set_label(found, found_label);
-	sljit_emit_op2(compiler, SLJIT_ADD, position_reg, 0, position_reg, 0, SLJIT_IMM,
-	               NumericCast<sljit_sw>(needle_length));
-}
-
-static void EmitStringContainsBranches(struct sljit_compiler *compiler, const string &needle,
-                                       SljitPredicateBranches &result) {
-	if (needle.empty()) {
-		result.true_jumps.push_back(sljit_emit_jump(compiler, SLJIT_JUMP));
-		return;
-	}
-	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_S4, 0, SLJIT_IMM, 0);
-	EmitStringFindFromCurrentPosition(compiler, needle, SLJIT_R4, SLJIT_R2, SLJIT_S4, result.false_jumps);
-	result.true_jumps.push_back(sljit_emit_jump(compiler, SLJIT_JUMP));
-}
-
 } // namespace duckdb

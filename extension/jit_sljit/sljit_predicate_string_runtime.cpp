@@ -11,6 +11,7 @@
 #include "sljit_native_types.hpp"
 
 #include "duckdb/common/numeric_utils.hpp"
+#include "duckdb/function/scalar/string_common.hpp"
 #include "duckdb/common/vector/unified_vector_format.hpp"
 
 #include <cstring>
@@ -323,6 +324,12 @@ SljitTwoUnanchoredFragmentFinders(const SljitNativeStringConstant &pattern) {
 	const auto pdata = pattern.value.data();
 	return {SljitLikeFragmentFinder(pdata, pattern.like_fragments[0]),
 	        SljitLikeFragmentFinder(pdata, pattern.like_fragments[1])};
+}
+
+sljit_sw SLJIT_FUNC SljitNativeStringContainsConstant(const char *sdata, idx_t slen,
+                                                      const SljitNativeStringConstant *needle) {
+	return FindStrInStr(const_uchar_ptr_cast(sdata), slen, const_uchar_ptr_cast(needle->value.data()),
+	                    needle->value.size()) != DConstants::INVALID_INDEX;
 }
 
 sljit_sw SLJIT_FUNC SljitNativeStringLikeTwoUnanchoredFragments(const char *sdata, idx_t slen,

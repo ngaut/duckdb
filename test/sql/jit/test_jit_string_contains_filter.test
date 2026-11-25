@@ -1,0 +1,85 @@
+# name: test/sql/jit/test_jit_string_contains_filter.test
+# description: A compiled contains filter over distinct strings (LIKE '%x%') finds a needle at the start, the end or the middle of inlined and pointer strings, rejects a needle longer than the string or matching only in part, and keeps NULL out, as the native engine does
+# group: [jit]
+
+require jit_sljit
+
+load {TEST_DIR}/jit_string_contains_filter.db
+
+statement ok
+CREATE TABLE s AS
+SELECT i AS id,
+       CASE i % 9
+           WHEN 0 THEN 'green'
+           WHEN 1 THEN 'gree'
+           WHEN 2 THEN 'evergreen'
+           WHEN 3 THEN 'green tea with a very long tail of words'
+           WHEN 4 THEN 'a very long head of words before the needle green'
+           WHEN 5 THEN 'ggreeggrgreenx'
+           WHEN 6 THEN 'grün green 緑'
+           WHEN 7 THEN NULL
+           ELSE 'no match in this pointer string at all'
+       END || ' #' || i AS name
+FROM range(300000) t(i)
+
+# distinct strings keep the filter out of storage, which evaluates a dictionary's few strings itself
+statement ok
+CHECKPOINT
+
+restart
+
+statement ok
+SET jit_measure_native_legs=false
+
+statement ok
+SET jit_cbo_startup_base_cost=0
+
+statement ok
+SET jit_cbo_startup_margin_basis_points=0
+
+foreach threads 1 4
+
+statement ok
+SET threads={threads}
+
+foreach policy off auto
+
+statement ok
+SET jit_policy='{policy}'
+
+statement ok
+CREATE OR REPLACE TEMP TABLE r_{policy} AS
+SELECT 'green' AS needle, count(*) AS c, sum(id) AS total FROM s WHERE name LIKE '%green%'
+UNION ALL
+SELECT 'not green', count(*), sum(id) FROM s WHERE name NOT LIKE '%green%'
+UNION ALL
+SELECT 'long needle', count(*), sum(id) FROM s WHERE name LIKE '%head of words before the needle%'
+UNION ALL
+SELECT 'longer than string', count(*), sum(id) FROM s WHERE name LIKE '%gree with more than the string%'
+UNION ALL
+SELECT 'unicode', count(*), sum(id) FROM s WHERE name LIKE '%緑%'
+UNION ALL
+SELECT 'single byte', count(*), sum(id) FROM s WHERE name LIKE '%x%'
+UNION ALL
+SELECT 'contains', count(*), sum(id) FROM s WHERE contains(name, 'greenx')
+
+endloop
+
+query I
+SELECT count(*) FROM ((SELECT * FROM r_off EXCEPT ALL SELECT * FROM r_auto)
+                      UNION ALL (SELECT * FROM r_auto EXCEPT ALL SELECT * FROM r_off))
+----
+0
+
+query II
+SELECT needle, c FROM r_auto ORDER BY needle
+----
+contains	33333
+green	200000
+long needle	33333
+longer than string	0
+not green	66667
+single byte	33333
+unicode	33333
+
+endloop
