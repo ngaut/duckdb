@@ -1430,8 +1430,38 @@ void BitpackingScanSelected(ColumnSegment &segment, ColumnScanState &state, idx_
 	scan_state.FinishIfExhausted();
 }
 
-static bool ShouldUseBitpackingSelectedFilter(idx_t vector_count, idx_t sel_count) {
-	return sel_count < vector_count / 2;
+//! Whether decoding the whole range costs less than reading the selected rows. Decoding costs under a cycle per row
+//! and wins once more than half of the rows are selected. Below that, constant groups compute the selected rows, and
+//! the selected read of other groups extracts or decodes the rows of each algorithm group it touches: decoding wins
+//! once more than one row in 32 is selected and the rows spread over at least half of the algorithm groups. The short
+//! runs a join keeps touch few groups and read faster selected. The first group's mode stands for the range. Expects
+//! an ordered selection
+template <class T>
+static bool BitpackingSelectionIsDense(BitpackingScanState<T> &scan_state, idx_t vector_count,
+                                       const SelectionVector &sel, idx_t sel_count) {
+	static constexpr idx_t GROUP_SIZE = BitpackingPrimitives::BITPACKING_ALGORITHM_GROUP_SIZE;
+	auto &group = scan_state.GetScanGroup();
+	if (sel_count * 2 > vector_count) {
+		return true;
+	}
+	if (sel_count * 32 <= vector_count || group.metadata.mode == BitpackingMode::CONSTANT ||
+	    group.metadata.mode == BitpackingMode::CONSTANT_DELTA) {
+		return false;
+	}
+	const idx_t base = group.offset % GROUP_SIZE;
+	const idx_t spread_groups = ((base + vector_count + GROUP_SIZE - 1) / GROUP_SIZE + 1) / 2;
+	idx_t touched_groups = 0;
+	idx_t last_group = DConstants::INVALID_INDEX;
+	for (idx_t i = 0; i < sel_count; i++) {
+		const idx_t algorithm_group = (base + sel.get_index(i)) / GROUP_SIZE;
+		if (algorithm_group != last_group) {
+			last_group = algorithm_group;
+			if (++touched_groups >= spread_groups) {
+				return true;
+			}
+		}
+	}
+	return false;
 }
 
 template <class T>
@@ -1454,7 +1484,8 @@ void BitpackingSelect(ColumnSegment &segment, ColumnScanState &state, idx_t vect
 		return;
 	}
 	const bool ordered = SelectionVectorIsOrdered(sel, sel_count);
-	if (entire_vector && (!ShouldUseBitpackingSelectedFilter(vector_count, sel_count) || !ordered)) {
+	if (entire_vector && (!ordered || BitpackingSelectionIsDense(state.scan_state->Cast<BitpackingScanState<T>>(),
+	                                                             vector_count, sel, sel_count))) {
 		// a dense selection decodes the whole range and emits it as a dictionary over the scanned values
 		BitpackingScanPartial<T>(segment, state, vector_count, result, 0);
 		FlatVector::SetSize(result, count_t(vector_count));
@@ -2248,7 +2279,8 @@ void BitpackingFilter(ColumnSegment &segment, ColumnScanState &state, idx_t vect
 	                                      expression_filter_state)) {
 		return;
 	}
-	if (ShouldUseBitpackingSelectedFilter(vector_count, sel_count) && SelectionVectorIsOrdered(sel, sel_count)) {
+	if (SelectionVectorIsOrdered(sel, sel_count) &&
+	    !BitpackingSelectionIsDense(state.scan_state->Cast<BitpackingScanState<T>>(), vector_count, sel, sel_count)) {
 		BitpackingScanSelected<T>(segment, state, vector_count, result, sel, sel_count);
 	} else {
 		BitpackingScanPartial<T>(segment, state, vector_count, result, 0);
