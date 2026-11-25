@@ -9,7 +9,7 @@ import os
 import subprocess
 from pathlib import Path
 
-from process_usage import read_instructions
+from process_usage import ProcessUsage, read_process_usage
 
 
 def repo_root() -> Path:
@@ -34,7 +34,7 @@ class DuckDBShell:
     """An interactive shell on an in-memory database that prints results as JSON.
 
     The shell prints a marker after the statements of each call and then blocks on its input, so a call returns when
-    the process is idle again: the instructions read around a call are the cost of exactly those statements."""
+    the process is idle again: the counters read around a call are the cost of exactly those statements."""
 
     def __init__(self, duckdb: Path):
         self.process = subprocess.Popen(
@@ -79,11 +79,11 @@ class DuckDBShell:
         """Runs one statement and returns its rows."""
         return json.loads(self.run(statement))
 
-    def measure(self, statements: str) -> int:
-        """Runs the statements and returns the instructions the process retired for them."""
-        before = read_instructions(self.process.pid)
+    def measure(self, statements: str) -> ProcessUsage:
+        """Runs the statements and returns what the process did for them."""
+        before = read_process_usage(self.process.pid)
         self.run(statements)
-        return read_instructions(self.process.pid) - before
+        return read_process_usage(self.process.pid) - before
 
 
 def create_database(duckdb: Path, database: Path, sql: str) -> None:

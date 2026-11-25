@@ -13,6 +13,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import performance_gate
 from performance_gate import SUITES, TRACED, Sample, parse_args, run_workload, summary_row, workload_failures
+from process_usage import ProcessUsage
 
 WORKLOAD = {
     "name": "workload",
@@ -42,7 +43,9 @@ def counter_row(status: str, **fields) -> dict:
 def sample(
     policy: str, repeat: int | str, instructions: int, counters: list[dict], correctness_diff: int = 0
 ) -> Sample:
-    return Sample(policy, repeat, instructions, correctness_diff, counters)
+    # every sample runs on performance cores at one cycle per instruction
+    usage = ProcessUsage(instructions, instructions, instructions, instructions)
+    return Sample(policy, repeat, usage, correctness_diff, counters)
 
 
 def samples(off: int = 2000, auto: int = 1000, compiled: bool = True, traced: list[dict] | None = None) -> list[Sample]:
@@ -61,8 +64,9 @@ def failures(workload: dict, measured: list[Sample]) -> list[str]:
 
 
 class SummaryTest(unittest.TestCase):
-    def test_the_cost_of_a_policy_is_the_median_instructions_of_its_counted_samples(self) -> None:
+    def test_the_speedup_compares_cycles_and_the_ceiling_bounds_instructions(self) -> None:
         summary = summary_row(WORKLOAD, 1, samples())
+        self.assertEqual((summary["off_cycles"], summary["auto_cycles"]), (2000, 1000))
         self.assertEqual((summary["off_instructions"], summary["auto_instructions"]), (2000, 1000))
         self.assertEqual(summary["speedup"], 2.0)
         self.assertEqual((summary["floor"], summary["ceiling"]), (1.5, 1100))
@@ -126,10 +130,10 @@ class WorkloadFailuresTest(unittest.TestCase):
 
 
 class RunWorkloadTest(unittest.TestCase):
-    def test_each_repeat_counts_both_policies_and_the_traced_sample_is_last(self) -> None:
+    def test_the_policies_alternate_in_which_runs_first_and_the_traced_sample_is_last(self) -> None:
         with mock.patch.object(performance_gate, "run_sample", side_effect=lambda *arguments: arguments[4:]) as run:
             order = run_workload(Path("duckdb"), Path("fixture"), WORKLOAD, 1, 3)
-        self.assertEqual(order, [("off", 1), ("auto", 1), ("off", 2), ("auto", 2), ("off", 3), ("auto", 3), ("auto",)])
+        self.assertEqual(order, [("off", 1), ("auto", 1), ("auto", 2), ("off", 2), ("off", 3), ("auto", 3), ("auto",)])
         self.assertEqual(run.call_count, 7)
 
 
