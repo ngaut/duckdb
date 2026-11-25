@@ -193,6 +193,10 @@ bool SljitCanPrecomputePerfectHashStringGroupOffset(const vector<SljitPerfectHas
 		if (group.expression_kind == SljitNativeRegionExpressionKind::STRING_COMPRESS) {
 			string_group_count++;
 		}
+		// the offset lives in R4 across the groups, a typed group's evaluation borrows R0-R4
+		if (group.expression_kind == SljitNativeRegionExpressionKind::TYPED_EXPRESSION_TREE) {
+			return false;
+		}
 	}
 	return string_group_count > 1;
 }

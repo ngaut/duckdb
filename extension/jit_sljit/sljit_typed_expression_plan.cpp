@@ -507,9 +507,26 @@ bool SljitTypedExpressionTreeIsFastGuardedValue(const ExecutionExpressionIR &nod
 	       SljitExpressionIRCannotThrow(*node.children[1]);
 }
 
+//! year() of a column's date, or its value compressed by a constant: an infinite date has no year, so the value leaves
+//! through a null exit
+static bool SljitTypedExpressionTreeFastNullExitDateYear(const ExecutionExpressionIR &node) {
+	if (node.kind != ExecutionExpressionIRKind::INTRINSIC) {
+		return false;
+	}
+	if (node.intrinsic == ExecutionExpressionIntrinsicKind::INTEGRAL_COMPRESS) {
+		return node.children.size() == 2 && node.children[0] && node.children[1] &&
+		       node.children[1]->kind == ExecutionExpressionIRKind::CONSTANT && !node.children[1]->constant.IsNull() &&
+		       SljitTypedExpressionTreeFastNullExitDateYear(*node.children[0]) &&
+		       SljitTypedExpressionTreeIsSupported(node);
+	}
+	return SljitTypedExpressionTreeDateYearSupported(node) &&
+	       node.children[0]->kind == ExecutionExpressionIRKind::REFERENCE &&
+	       SljitTypedExpressionTreeFastPathSupported(*node.children[0]);
+}
+
 bool SljitTypedExpressionTreeFastNullExitSupported(const ExecutionExpressionIR &node) {
 	if (node.kind != ExecutionExpressionIRKind::CASE) {
-		return SljitTypedExpressionTreeFastPathSupported(node);
+		return SljitTypedExpressionTreeFastPathSupported(node) || SljitTypedExpressionTreeFastNullExitDateYear(node);
 	}
 	if (!node.else_node || node.children.size() % 2 != 0) {
 		return false;

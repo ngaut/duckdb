@@ -182,8 +182,9 @@ bool TryBuildSljitPerfectHashFusedUpdatePlan(
 			return false;
 		}
 		result.codegen_plan.tree_node_count += tree_plan.node_count;
+		// a NULL group key adds no contribution: the fast loops route the rows a group tree's null exits take there
 		result.codegen_plan.fast_path_supported =
-		    result.codegen_plan.fast_path_supported && tree_plan.fast_path.fast_path_supported;
+		    result.codegen_plan.fast_path_supported && tree_plan.fast_path.FastPathSupportedWithNullExits();
 	}
 	if (predicate) {
 		auto predicate_plan = BuildSljitTypedExpressionTreePlan(*predicate, false);

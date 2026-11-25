@@ -10,6 +10,8 @@
 
 #include "sljitLir.h"
 
+#include <algorithm>
+
 namespace duckdb {
 
 //! Leaves the expression value in R2. Returns whether the value can be NULL: R3 then holds its validity, and the
@@ -164,7 +166,13 @@ void EmitSljitPerfectHashGroupLookup(const SljitPerfectHashFusedUpdateEmitContex
 	if (use_precomputed_string_offset) {
 		sljit_emit_op2(compiler, SLJIT_SHL, SLJIT_R4, 0, SLJIT_S3, 0, SLJIT_IMM, SLJIT_STRING_T_SHIFT);
 	}
-	if (options.check_group_validity) {
+	// a group tree the fast emitters evaluate through null exits leaves the index unchanged on a NULL key
+	const auto group_exits_null = [&](const SljitPerfectHashGroupPlan &group) {
+		return (options.expression_fast_path || options.expression_all_valid) &&
+		       group.expression_kind == SljitNativeRegionExpressionKind::TYPED_EXPRESSION_TREE &&
+		       !SljitTypedExpressionTreeFastPathSupported(*group.expression_tree);
+	};
+	if (options.check_group_validity || std::any_of(group_plans.begin(), group_plans.end(), group_exits_null)) {
 		sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_S4, 0, SLJIT_IMM, 0);
 		group_index_initialized = true;
 	}
@@ -177,6 +185,8 @@ void EmitSljitPerfectHashGroupLookup(const SljitPerfectHashFusedUpdateEmitContex
 		    group.expression_kind == SljitNativeRegionExpressionKind::STRING_COMPRESS && group.minimum != 0 &&
 		    string_t::PREFIX_LENGTH > 0;
 		sljit_jump *group_is_null = nullptr;
+		vector<sljit_jump *> group_null_exits;
+		bool group_index_saved = false;
 		if (options.use_dictionary_group_contributions) {
 			D_ASSERT(options.group_selection_all_present);
 			D_ASSERT(group.expression_kind == SljitNativeRegionExpressionKind::STRING_COMPRESS);
@@ -201,10 +211,12 @@ void EmitSljitPerfectHashGroupLookup(const SljitPerfectHashFusedUpdateEmitContex
 			}
 			if (group_index_initialized) {
 				sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_MEM1(SLJIT_SP), context.group_index_offset, SLJIT_S4, 0);
+				group_index_saved = true;
 			}
 			const auto group_may_be_null = EmitSljitPerfectHashExpressionTreeValue(
 			    context, *group.expression_tree, options.expression_fast_path, options.expression_all_valid,
-			    options.expression_no_source_selection, options.expression_data_hoists);
+			    options.expression_no_source_selection, options.expression_data_hoists,
+			    group_exits_null(group) ? &group_null_exits : nullptr);
 			if (group_index_initialized) {
 				sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_S4, 0, SLJIT_MEM1(SLJIT_SP), context.group_index_offset);
 			}
@@ -233,10 +245,18 @@ void EmitSljitPerfectHashGroupLookup(const SljitPerfectHashFusedUpdateEmitContex
 			sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_S4, 0, SLJIT_R2, 0);
 			group_index_initialized = true;
 		}
-		if (group_is_null) {
+		if (group_is_null || !group_null_exits.empty()) {
 			auto group_done = sljit_emit_jump(compiler, SLJIT_JUMP);
+			if (!group_null_exits.empty()) {
+				SetSljitJumpLabels(group_null_exits, sljit_emit_label(compiler));
+				if (group_index_saved) {
+					sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_S4, 0, SLJIT_MEM1(SLJIT_SP), context.group_index_offset);
+				}
+			}
 			auto group_null_label = sljit_emit_label(compiler);
-			sljit_set_label(group_is_null, group_null_label);
+			if (group_is_null) {
+				sljit_set_label(group_is_null, group_null_label);
+			}
 			sljit_set_label(group_done, sljit_emit_label(compiler));
 		}
 	}

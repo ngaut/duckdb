@@ -11,6 +11,7 @@
 
 #include "duckdb/common/exception.hpp"
 #include "duckdb/common/helper.hpp"
+#include "duckdb/common/types/date.hpp"
 
 namespace duckdb {
 
@@ -420,14 +421,41 @@ static vector<sljit_jump *> EmitSljitTypedExpressionTreeFastJumpsInternal(
     vector<SljitArithmeticOverflowSite> &overflows, SljitTypedExpressionTreeFastIndexMode index_mode,
     const vector<SljitTypedExpressionTreeLoopHoist> *data_hoists, bool null_rows);
 
+//! year() of a column's date into R2, through the scratch registers R0-R4; an infinite date leaves through a null
+//! exit. A compress around it subtracts its constant
+static void
+EmitSljitTypedExpressionTreeFastNullExitDateYearReg(struct sljit_compiler *compiler, const ExecutionExpressionIR &node,
+                                                    SljitTypedExpressionTreeFastIndexMode index_mode,
+                                                    const vector<SljitTypedExpressionTreeLoopHoist> *data_hoists,
+                                                    vector<sljit_jump *> &null_exits) {
+	if (node.intrinsic == ExecutionExpressionIntrinsicKind::INTEGRAL_COMPRESS) {
+		EmitSljitTypedExpressionTreeFastNullExitDateYearReg(compiler, *node.children[0], index_mode, data_hoists,
+		                                                    null_exits);
+		sljit_emit_op2(compiler, SLJIT_SUB, SLJIT_R2, 0, SLJIT_R2, 0, SLJIT_IMM,
+		               NumericCast<sljit_sw>(SljitTypedExpressionTreeConstantValue(*node.children[1])));
+		return;
+	}
+	D_ASSERT(node.intrinsic == ExecutionExpressionIntrinsicKind::DATE_YEAR);
+	EmitSljitTypedExpressionTreeFastLeafReg(compiler, *node.children[0], SLJIT_R2, index_mode, data_hoists);
+	null_exits.push_back(
+	    sljit_emit_cmp(compiler, SLJIT_EQUAL, SLJIT_R2, 0, SLJIT_IMM, NumericCast<sljit_sw>(date_t::infinity().days)));
+	null_exits.push_back(
+	    sljit_emit_cmp(compiler, SLJIT_EQUAL, SLJIT_R2, 0, SLJIT_IMM, NumericCast<sljit_sw>(date_t::ninfinity().days)));
+	EmitSljitDateYearFromDays(compiler, SLJIT_R2, SLJIT_R2);
+}
+
 //! A node SljitTypedExpressionTreeFastNullExitSupported admits: a CASE result that is a NULL constant leaves through a
-//! null exit, every other result is evaluated into R2
+//! null exit, as does year() of an infinite date; every other result is evaluated into R2
 static void EmitSljitTypedExpressionTreeFastNullExitValueReg(
     struct sljit_compiler *compiler, const ExecutionExpressionIR &node, idx_t &spill_index,
     vector<SljitArithmeticOverflowSite> &overflows, SljitTypedExpressionTreeFastIndexMode index_mode,
     const vector<SljitTypedExpressionTreeLoopHoist> *data_hoists, vector<sljit_jump *> &null_exits) {
 	if (node.kind == ExecutionExpressionIRKind::CONSTANT && node.constant.IsNull()) {
 		null_exits.push_back(sljit_emit_jump(compiler, SLJIT_JUMP));
+		return;
+	}
+	if (node.kind == ExecutionExpressionIRKind::INTRINSIC && !SljitTypedExpressionTreeFastPathSupported(node)) {
+		EmitSljitTypedExpressionTreeFastNullExitDateYearReg(compiler, node, index_mode, data_hoists, null_exits);
 		return;
 	}
 	if (node.kind != ExecutionExpressionIRKind::CASE || SljitTypedExpressionTreeFastPathSupported(node)) {

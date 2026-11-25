@@ -77,7 +77,10 @@ static sljit_jump *EmitSljitPerfectHashUpdateLoop(const SljitPerfectHashFusedUpd
 	auto group_lookup = options.group_lookup;
 	group_lookup.expression_fast_path = options.payload_update.fast_path;
 	group_lookup.expression_all_valid = options.payload_update.all_valid;
-	group_lookup.expression_no_source_selection = options.payload_update.no_source_selection;
+	// the payloads read their rows through the common selection the row loads after the lookup: a group expression,
+	// evaluated before that load, resolves each source's selection itself
+	group_lookup.expression_no_source_selection =
+	    options.payload_update.no_source_selection && !options.load_common_selected_source_index;
 	group_lookup.expression_data_hoists = options.payload_update.payload_data_hoists;
 	if (options.load_fast_group_data_array_base) {
 		EmitSljitPerfectHashFastGroupDataArrayBase(compiler);
