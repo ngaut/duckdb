@@ -93,6 +93,7 @@ SljitNativeRegionExpressionPlan SljitNativeRegionExpressionPlan::Copy(bool copy_
 	result.guarded_value_size = guarded_value_size;
 	result.error_message = error_message;
 	result.try_cast = try_cast;
+	result.cast_range_proven = cast_range_proven;
 	result.signed_integer_width = signed_integer_width;
 	result.coalesce_rhs_kind = coalesce_rhs_kind;
 	result.coalesce_constant_is_null = coalesce_constant_is_null;

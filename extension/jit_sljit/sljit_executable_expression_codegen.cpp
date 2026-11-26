@@ -175,7 +175,7 @@ bool SljitCompilePreparedExecutableRegionExpression(SljitExecutableRegionExpress
 	case SljitNativeRegionExpressionKind::INTEGER_CAST:
 		return build_vector([&](SljitNativeVectorFunction &function) {
 			return BuildSljitNativeIntegerCast(semantic.cast_source_width, semantic.cast_target_width,
-			                                   semantic.try_cast, function, error);
+			                                   semantic.try_cast, semantic.cast_range_proven, function, error);
 		});
 	case SljitNativeRegionExpressionKind::SIGNED_TO_UNSIGNED_INTEGER_CAST:
 		return build_vector([&](SljitNativeVectorFunction &function) {

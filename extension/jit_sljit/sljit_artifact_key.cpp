@@ -252,6 +252,7 @@ static void AppendSljitExpressionArtifactKey(SljitArtifactKeyWriter &key, const 
 	key.Field("guarded_value_size", expr.guarded_value_size);
 	key.Field("error", expr.error_message);
 	key.Field("try_cast", expr.try_cast);
+	key.Field("cast_range_proven", expr.cast_range_proven);
 	key.Field("double_constant", expr.double_constant);
 	key.Field("signed_width", static_cast<uint8_t>(expr.signed_integer_width));
 	key.Field("coalesce_rhs", static_cast<uint8_t>(expr.coalesce_rhs_kind));

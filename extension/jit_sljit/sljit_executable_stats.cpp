@@ -41,9 +41,8 @@ static bool SljitIntegerStatsValueInRange(const Value &value) {
 	}
 }
 
-static bool SljitIntegerCastStatsPreservesDistinct(const SljitNativeRegionExpressionPlan &expr,
-                                                   const vector<Value> &input_min_values,
-                                                   const vector<Value> &input_max_values) {
+bool SljitIntegerCastStatsFitTarget(const SljitNativeRegionExpressionPlan &expr, const vector<Value> &input_min_values,
+                                    const vector<Value> &input_max_values) {
 	if (expr.kind != SljitNativeRegionExpressionKind::INTEGER_CAST || expr.try_cast ||
 	    expr.source_index >= input_min_values.size() || expr.source_index >= input_max_values.size()) {
 		return false;
@@ -73,7 +72,7 @@ static idx_t SljitExpressionDistinctCount(const SljitNativeRegionExpressionPlan 
 		return expr.source_index < input_distinct_counts.size() ? input_distinct_counts[expr.source_index] : 0;
 	case SljitNativeRegionExpressionKind::INTEGER_CAST:
 		if (expr.source_index >= input_distinct_counts.size() ||
-		    !SljitIntegerCastStatsPreservesDistinct(expr, input_min_values, input_max_values)) {
+		    !SljitIntegerCastStatsFitTarget(expr, input_min_values, input_max_values)) {
 			return 0;
 		}
 		return input_distinct_counts[expr.source_index];

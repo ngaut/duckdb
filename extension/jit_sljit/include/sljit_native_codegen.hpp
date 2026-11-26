@@ -64,8 +64,8 @@ BuildSljitNativeFlatDoubleBinaryReferences(SljitNativeDoubleBinaryOp op, SljitNa
                                            SljitNativeVectorFunction &function, string &error);
 unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativeIntegerCast(SljitNativeSignedIntegerWidth source_width,
                                                                   SljitNativeSignedIntegerWidth target_width,
-                                                                  bool try_cast, SljitNativeVectorFunction &function,
-                                                                  string &error);
+                                                                  bool try_cast, bool range_proven,
+                                                                  SljitNativeVectorFunction &function, string &error);
 unique_ptr<ExecutionRegionCodeHandle>
 BuildSljitNativeSignedToUnsignedIntegerCast(SljitNativeSignedIntegerWidth source_width,
                                             SljitNativeUnsignedIntegerWidth target_width, bool try_cast,

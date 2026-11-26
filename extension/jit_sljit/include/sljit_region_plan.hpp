@@ -113,6 +113,8 @@ struct SljitNativeRegionExpressionPlan {
 	idx_t guarded_value_size = 0;
 	string error_message;
 	bool try_cast = false;
+	//! INTEGER_CAST: the source's statistics prove every value fits the target type, so no value is checked
+	bool cast_range_proven = false;
 	double double_constant = 0;
 	SljitNativeSignedIntegerWidth signed_integer_width = SljitNativeSignedIntegerWidth::INT32;
 	SljitNativeCoalesceRhsKind coalesce_rhs_kind = SljitNativeCoalesceRhsKind::CONSTANT;

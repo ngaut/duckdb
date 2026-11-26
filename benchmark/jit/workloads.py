@@ -446,7 +446,7 @@ GENERIC_WORKLOADS = (
             "GROUP BY group_id ORDER BY group_id"
         ),
         "floor": {1: 1.46, 4: 1.94},
-        "ceiling": {1: 260_200_000, 4: 388_000_000},
+        "ceiling": {1: 242_800_000, 4: 371_100_000},
         "compiled": {1: True, 4: True},
     },
     {
@@ -729,7 +729,7 @@ ENCODINGS_QUERIES = {
 # name -> (floor, ceiling) per thread count
 ENCODINGS_THRESHOLDS = {
     "decimal_double_product": ({1: 2.30}, {1: 318_900_000}),
-    "decimal_grouped": ({1: 1.18}, {1: 845_300_000}),
+    "decimal_grouped": ({1: 1.18}, {1: 812_000_000}),
     "date_range": ({1: 1.55, 4: 1.49}, {1: 113_100_000, 4: 115_700_000}),
     "date_year_groups": ({1: 1.53, 4: 1.50}, {1: 447_400_000, 4: 452_600_000}),
     "dictionary_case": ({1: 0.99, 4: 0.99}, {1: 248_700_000, 4: 251_600_000}),

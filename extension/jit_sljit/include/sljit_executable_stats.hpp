@@ -12,6 +12,11 @@
 
 namespace duckdb {
 
+//! Whether the statistics of an integer cast's source prove every value fits the target type: the cast then never fails
+//! and keeps distinct values distinct
+bool SljitIntegerCastStatsFitTarget(const SljitNativeRegionExpressionPlan &expr, const vector<Value> &input_min_values,
+                                    const vector<Value> &input_max_values);
+
 void SljitUpdateExecutableCurrentNotNull(const SljitNativeRegionOpPlan &op, vector<bool> &current_not_null);
 vector<bool> SljitBuildExecutableOutputNotNull(const SljitNativeRegionOpPlan &op, const vector<bool> &input_not_null);
 void SljitUpdateExecutableCurrentDistinctCounts(const SljitNativeRegionOpPlan &op,

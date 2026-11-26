@@ -1,0 +1,86 @@
+# name: test/sql/jit/test_jit_selected_cast_rows.test
+# description: A compiled integer cast over the rows a filter selected reads each selected row's value, a cast whose source statistics fit the target checks no value, and one they do not fit still raises DuckDB's cast error; NULL sources stay NULL
+# group: [jit]
+
+require jit_sljit
+
+load {TEST_DIR}/jit_selected_cast_rows.db
+
+# g fits TINYINT, h fits SMALLINT but not TINYINT, n is NULL on every seventh row; k keeps nine rows in ten
+statement ok
+CREATE TABLE t AS
+SELECT i AS id,
+       (i * 7919) % 1000 AS k,
+       i % 97 AS g,
+       i % 300 - 150 AS h,
+       CASE WHEN i % 7 = 0 THEN NULL ELSE i % 50 END AS n
+FROM range(2000000) t(i)
+
+statement ok
+CHECKPOINT
+
+restart
+
+statement ok
+SET jit_measure_native_legs=false
+
+statement ok
+SET jit_cbo_startup_base_cost=0
+
+statement ok
+SET jit_cbo_startup_margin_basis_points=0
+
+statement ok
+CREATE MACRO selected() AS TABLE
+SELECT 'distinct' AS q, count(DISTINCT g)::BIGINT AS a, 0::HUGEINT AS b FROM t WHERE k < 900
+UNION ALL
+SELECT 'distinct of all rows', count(DISTINCT g), 0 FROM t
+UNION ALL
+SELECT 'distinct of a subset', count(DISTINCT g), 0 FROM t WHERE k < 900 AND g < 40
+UNION ALL
+SELECT 'distinct of a wider subset', count(DISTINCT h::SMALLINT), 0 FROM t WHERE k < 900 AND h > 100
+UNION ALL
+SELECT 'groups', count(*), sum(x * s) FROM (SELECT g::TINYINT AS x, sum(id) AS s FROM t WHERE k < 900 GROUP BY x)
+UNION ALL
+SELECT 'wider target', count(*), sum(x * s) FROM (SELECT h::SMALLINT AS x, sum(id) AS s FROM t WHERE k < 900 GROUP BY x)
+UNION ALL
+SELECT 'nullable', count(*), sum(coalesce(x, 1000) * s) FROM (SELECT n::TINYINT AS x, sum(id) AS s FROM t WHERE k < 900 GROUP BY x)
+
+foreach threads 1 4
+
+statement ok
+SET threads={threads}
+
+foreach policy off auto
+
+statement ok
+SET jit_policy='{policy}'
+
+statement ok
+CREATE OR REPLACE TEMP TABLE r_{policy} AS FROM selected()
+
+statement error
+SELECT count(DISTINCT h::TINYINT) FROM t WHERE k < 900
+----
+Conversion Error: Type INT64 with value
+
+endloop
+
+query I
+SELECT count(*) FROM ((SELECT * FROM r_off EXCEPT ALL SELECT * FROM r_auto)
+                      UNION ALL (SELECT * FROM r_auto EXCEPT ALL SELECT * FROM r_off))
+----
+0
+
+endloop
+
+query III
+SELECT q, a, b FROM r_off ORDER BY q
+----
+distinct	97	0
+distinct of a subset	40	0
+distinct of a wider subset	49	0
+distinct of all rows	97	0
+groups	97	86400163794193
+nullable	51	294942253779191
+wider target	300	-904410344200

@@ -65,7 +65,17 @@ static bool BuildExecutableRegionOp(const SljitNativeRegionOpPlan &op, SljitExec
 		return true;
 	case SljitNativeRegionOpKind::PROJECTION:
 		executable.Projections().reserve(op.Projections().size());
-		for (auto &projection : op.Projections()) {
+		for (auto &op_projection : op.Projections()) {
+			// a cast whose source's statistics fit the target type checks no value
+			auto proven_cast = op_projection.kind == SljitNativeRegionExpressionKind::INTEGER_CAST &&
+			                   !op_projection.cast_range_proven &&
+			                   SljitIntegerCastStatsFitTarget(op_projection, input_min_values, input_max_values);
+			SljitNativeRegionExpressionPlan proven_projection;
+			if (proven_cast) {
+				proven_projection = op_projection.Copy();
+				proven_projection.cast_range_proven = true;
+			}
+			auto &projection = proven_cast ? proven_projection : op_projection;
 			SljitExecutableRegionExpression executable_projection;
 			if (!SljitPrepareAndCompileExecutableRegionExpression(projection, false, executable_projection, error,
 			                                                      &input_not_null)) {

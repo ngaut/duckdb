@@ -24,8 +24,8 @@ static void SLJIT_FUNC SljitNativeIntegerCastOverflow(SljitNativeVectorInput *in
 
 unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativeIntegerCast(SljitNativeSignedIntegerWidth source_width,
                                                                   SljitNativeSignedIntegerWidth target_width,
-                                                                  bool try_cast, SljitNativeVectorFunction &function,
-                                                                  string &error) {
+                                                                  bool try_cast, bool range_proven,
+                                                                  SljitNativeVectorFunction &function, string &error) {
 	auto compiler = sljit_create_compiler(nullptr);
 	if (!compiler) {
 		error = "failed to create SLJIT compiler";
@@ -35,7 +35,7 @@ unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativeIntegerCast(SljitNativeSig
 	auto target_data_scale = NativeSignedIntegerDataScale(target_width);
 	auto source_load_op = NativeSignedIntegerLoadOp(source_width);
 	auto target_store_op = NativeSignedIntegerStoreOp(target_width);
-	auto needs_range_check = NativeSignedIntegerCastNeedsRangeCheck(source_width, target_width);
+	auto needs_range_check = !range_proven && NativeSignedIntegerCastNeedsRangeCheck(source_width, target_width);
 
 	sljit_emit_enter(compiler, 0, SLJIT_ARGS1V(P), 5, 3, 0);
 	EmitInitSljitNativeVectorLoop(compiler);
