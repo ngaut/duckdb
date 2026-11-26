@@ -163,7 +163,9 @@ A workload passes when:
   workload requires, and satisfies the counter contract (`counter_contract.py`):
   a runner the cost model selected either reports why it did not compile or
   records, at runtime, every proof of the work the model credited to it;
-- `cost(off) / cost(auto)` is at least the workload's floor;
+- `cost(off) / cost(auto)` is at least the workload's floor, when the JIT compiles it; a query the JIT does not
+  compile runs the native engine under both policies, so their cycles compare only the host's noise, and its JIT run
+  must instead retire at most 2% more instructions than the native run (the cost of the decision);
 - `cost(auto)` is at most the workload's ceiling.
 
 Floors and ceilings are one-way ratchets: a verified improvement raises the

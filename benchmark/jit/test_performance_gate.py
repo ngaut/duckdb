@@ -126,6 +126,15 @@ class WorkloadFailuresTest(unittest.TestCase):
     def test_a_speedup_below_the_floor_fails(self) -> None:
         self.assert_fails(WORKLOAD, samples(off=1400), "speedup 1.400 is below the floor 1.500")
 
+    def test_a_declined_workload_is_held_to_the_native_instructions_not_to_a_speedup(self) -> None:
+        declined = {**WORKLOAD, "compiled": {1: False}}
+        self.assertEqual(failures(declined, samples(off=1000, auto=1015, compiled=False, traced=[])), [])
+        self.assert_fails(
+            declined,
+            samples(off=1000, auto=1030, compiled=False, traced=[]),
+            "declining the query adds 3.0% instructions to the native engine's 1000",
+        )
+
     def test_a_cost_above_the_ceiling_fails(self) -> None:
         self.assert_fails(WORKLOAD, samples(off=4000, auto=1101), "JIT cost 1101 instructions exceeds the ceiling 1100")
 

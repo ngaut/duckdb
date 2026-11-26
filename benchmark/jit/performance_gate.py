@@ -174,8 +174,15 @@ def workload_failures(workload: dict, threads: int, summary: dict, samples: list
         if not any(path in row["jit_runtime_path_counts"] for row in traced.counters):
             failures.append(f"the traced run did not take runtime path {path!r}")
     failures.extend(counter_contract_failures(traced.counters))
-    if summary["speedup"] < summary["floor"]:
-        failures.append(f"speedup {summary['speedup']:.3f} is below the floor {summary['floor']:.3f}")
+    if compiled:
+        if summary["speedup"] < summary["floor"]:
+            failures.append(f"speedup {summary['speedup']:.3f} is below the floor {summary['floor']:.3f}")
+    elif summary["auto_instructions"] > summary["off_instructions"] * (1 + DECLINED_INSTRUCTION_OVERHEAD):
+        # both policies run the native engine; the JIT's share is its decision
+        failures.append(
+            f"declining the query adds {summary['auto_instructions'] / summary['off_instructions'] - 1:.1%} "
+            f"instructions to the native engine's {summary['off_instructions']}"
+        )
     if summary["auto_instructions"] > summary["ceiling"]:
         failures.append(
             f"JIT cost {summary['auto_instructions']} instructions exceeds the ceiling {summary['ceiling']}"
@@ -189,6 +196,10 @@ def write_csv(path: Path, fields: tuple[str, ...], rows: list[dict]) -> None:
         writer.writeheader()
         writer.writerows(rows)
 
+
+# A query the JIT does not compile runs the native engine under both policies, so the cycles of the two compare only
+# the host's noise; what the JIT adds is the cost of its decision, which instructions measure exactly
+DECLINED_INSTRUCTION_OVERHEAD = 0.02
 
 # The builds whose fixtures stay cached: the current build and the one before it
 CACHED_BUILDS = 2
