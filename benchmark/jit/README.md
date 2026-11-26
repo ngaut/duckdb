@@ -31,8 +31,11 @@ python3 benchmark/jit/run_jit_refactor_guard.py unit
 python3 benchmark/jit/run_jit_refactor_guard.py full
 ```
 
-The guard runs its checks in order and stops at the first that fails. It has
-no options: a level is the same checks for every change.
+The guard stops at the first check that fails. It has no options: a level is
+the same checks for every change. The builds run first; the checks that only
+verify results then run side by side (four at a time, each unittest under a
+temp directory of its own); the performance gates run last and alone, so that
+nothing else runs while they count cycles. Every check prints how long it took.
 
 `unit` runs:
 
@@ -40,18 +43,20 @@ no options: a level is the same checks for every change.
 2. the architecture boundaries (`verify_jit_boundaries.py`);
 3. the generated settings and metrics (`scripts/generate_*.py --check`);
 4. the harness's own tests (`test_*.py` in this directory);
-5. the JIT unit suite (`build/reldebug/test/unittest "[jit]"`);
-6. a fixed-seed differential fuzz campaign.
+5. side by side: the JIT unit suite (`build/reldebug/test/unittest "[jit]"`) and a fixed-seed differential fuzz
+   campaign.
 
-`full` runs the same checks with a longer campaign, and then:
+`full` also builds the assertion build after the build, runs a longer campaign, and adds to the checks that run side
+by side:
 
-7. the JIT, join, subquery, aggregate, CTE and TPC-H SQL suites with the JIT
-   forced on (`test/configs/jit_cbo_correctness.json`); the default unittest
-   runner does not load the JIT backend, so this is where compiled kernels
-   meet the general plan shapes;
-8. the assertion build and its JIT unit suite (`build/relassert/test/unittest "[jit]"`), which runs the
-   debug-only checks and stops at the first undefined behavior;
-9. the performance gates: `generic` and `encodings` on one and on four threads, `tpch` on one.
+- the JIT, join, subquery, aggregate, CTE and TPC-H SQL suites with the JIT
+  forced on (`test/configs/jit_cbo_correctness.json`); the default unittest
+  runner does not load the JIT backend, so this is where compiled kernels
+  meet the general plan shapes;
+- the assertion build's JIT unit suite (`build/relassert/test/unittest "[jit]"`), which runs the
+  debug-only checks and stops at the first undefined behavior;
+
+and then runs the performance gates: `generic` and `encodings` on one and on four threads, `tpch` on one.
 
 ### Git hooks
 
@@ -124,6 +129,11 @@ under the sampled policy; only that statement is measured. The policies
 alternate in which is sampled first. After the timed samples, one more JIT
 sample traces the runtime for the counter checks.
 
+A build writes each fixture once: `--fixture-cache` (by default
+`~/.cache/duckdb_jit_gate_fixtures`) keeps the fixtures of the two builds used
+last, by a digest of the binary and of the setup SQL, so the gates of a suite on
+one and on four threads, and any later gate of the same build, reuse them.
+
 ### Cost
 
 Wall time measures the host as much as the query: other processes lower the
@@ -184,3 +194,27 @@ The gate writes to `--out-dir` (a new temporary directory by default):
 - `counters.json`: the `duckdb_jit_counters()` rows of every sample.
 
 The exit code is 1 when any workload fails.
+
+## Comparing two builds
+
+```sh
+python3 benchmark/jit/ab_gate.py --base /path/to/baseline/duckdb
+python3 benchmark/jit/ab_gate.py --base /path/to/baseline/duckdb --apply
+python3 benchmark/jit/ab_gate.py --base /path/to/baseline/duckdb --gates tpch:1 --workloads q09 q18
+```
+
+A threshold moves only on evidence from both builds measured in one session. `ab_gate.py` gets that evidence for the
+workloads a change moves, without measuring the others: it screens every workload of the gates once on each build
+(`--base` and `--new`, the current build by default) and keeps those whose instructions on either engine differ by more
+than 2%, whose cycles differ by more than 15%, or whose compiled region count differs. It measures only those, the
+builds alternating, for three rounds of five samples per policy, and prints each one's speedup on both builds, how the
+native and JIT cycles and the JIT instructions moved, and the thresholds the rounds support. `--workloads` skips the
+screen and measures the named workloads.
+
+`--apply` writes those thresholds to `workloads.py`: a ceiling falls to 5% above the new build's highest JIT instruction
+count and a floor rises to 90% of its lowest speedup. A floor falls only where the native engine took fewer cycles in
+every round, by at least 5% at the median: the speedup then drops without the JIT doing worse.
+
+Both builds read fixtures the base build writes, so a change to how storage writes data needs `--fixtures-per-build`.
+A change whose instructions stay within the tolerance but moves cycles less than 15% is not screened in; the guard's
+gates still hold it to the floors.

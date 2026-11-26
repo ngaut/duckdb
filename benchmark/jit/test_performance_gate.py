@@ -5,6 +5,7 @@ from __future__ import annotations
 import contextlib
 import io
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -187,11 +188,47 @@ class WorkloadsTest(unittest.TestCase):
             names = [workload["name"] for workload in workloads]
             self.assertEqual(len(names), len(set(names)), suite)
 
-    def test_workloads_that_share_a_fixture_are_adjacent(self) -> None:
-        for suite, workloads in SUITES.items():
-            fixtures = [workload.get("setup_sql", "") for workload in workloads]
-            runs = [fixture for index, fixture in enumerate(fixtures) if index == 0 or fixtures[index - 1] != fixture]
-            self.assertEqual(len(runs), len(set(runs)), suite)
+
+class FixtureCacheTest(unittest.TestCase):
+    def setUp(self) -> None:
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        self.root = Path(directory.name)
+        self.cache = self.root / "cache"
+        self.created = []
+
+        def create(duckdb: Path, database: Path, sql: str) -> None:
+            self.created.append((duckdb.name, sql))
+            database.write_text(sql, encoding="utf-8")
+
+        patch = mock.patch.object(performance_gate, "create_database", side_effect=create)
+        patch.start()
+        self.addCleanup(patch.stop)
+        performance_gate.build_digest.cache_clear()
+
+    def build(self, name: str) -> Path:
+        path = self.root / name
+        path.write_text(name, encoding="utf-8")
+        return path
+
+    def test_a_build_writes_a_setup_once(self) -> None:
+        duckdb = self.build("a")
+        first = performance_gate.fixture_database(self.cache, duckdb, "CREATE TABLE t AS SELECT 1")
+        second = performance_gate.fixture_database(self.cache, duckdb, "CREATE TABLE t AS SELECT 1")
+        other = performance_gate.fixture_database(self.cache, duckdb, "CREATE TABLE t AS SELECT 2")
+        self.assertEqual(first, second)
+        self.assertNotEqual(first, other)
+        self.assertEqual(len(self.created), 2)
+        self.assertFalse(list(self.cache.glob("*/*.partial")))
+
+    def test_each_build_writes_its_own_fixtures_and_only_the_last_builds_stay(self) -> None:
+        fixtures = [
+            performance_gate.fixture_database(self.cache, self.build(name), "setup") for name in ("a", "b", "c")
+        ]
+        self.assertEqual(len(set(fixtures)), 3)
+        self.assertEqual(len(self.created), 3)
+        self.assertFalse(fixtures[0].exists())
+        self.assertTrue(fixtures[1].exists() and fixtures[2].exists())
 
 
 if __name__ == "__main__":

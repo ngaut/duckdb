@@ -5,7 +5,7 @@
 # A workload is one query. Per thread count it is qualified for, `floor` is the least speedup of the JIT over the
 # native engine, measured as the native engine's cycles over the JIT's, `ceiling` the most instructions the JIT may
 # retire and `compiled` whether the JIT compiles a region for it. A workload with `setup_sql` reads the tables
-# that SQL creates; workloads that share a fixture are adjacent and use the same SQL.
+# that SQL creates; workloads that share a fixture use the same SQL.
 
 from __future__ import annotations
 

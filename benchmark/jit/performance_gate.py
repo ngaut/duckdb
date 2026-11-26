@@ -9,12 +9,19 @@
 # the JIT's: the cycles show the work a fused loop saves in memory stalls as well as in instructions. The ceiling bounds
 # the JIT's median instruction count, which does not move with the host. One more JIT sample traces the runtime for
 # the counter checks and is not counted.
+#
+# A fixture is written once per build and setup and kept in --fixture-cache for the next run of that build: the gates
+# of one suite on one and on four threads, a repeated gate, the gates of a build the guard checks again.
 
 from __future__ import annotations
 
 import argparse
 import csv
+import functools
+import hashlib
 import json
+import os
+import shutil
 import statistics
 import sys
 import tempfile
@@ -183,6 +190,44 @@ def write_csv(path: Path, fields: tuple[str, ...], rows: list[dict]) -> None:
         writer.writerows(rows)
 
 
+# The builds whose fixtures stay cached: the current build and the one before it
+CACHED_BUILDS = 2
+
+
+def default_fixture_cache() -> Path:
+    return Path(os.environ.get("XDG_CACHE_HOME", Path.home() / ".cache")) / "duckdb_jit_gate_fixtures"
+
+
+def digest(data: bytes) -> str:
+    return hashlib.sha256(data).hexdigest()[:16]
+
+
+@functools.cache
+def build_digest(duckdb: Path) -> str:
+    hasher = hashlib.sha256()
+    with duckdb.open("rb") as handle:
+        for block in iter(lambda: handle.read(1 << 22), b""):
+            hasher.update(block)
+    return hasher.hexdigest()[:16]
+
+
+def fixture_database(cache: Path, duckdb: Path, setup_sql: str) -> Path:
+    """The fixture the build writes for the setup, written on first use; a cache keeps the fixtures of the builds used
+    last"""
+    directory = cache / build_digest(duckdb)
+    directory.mkdir(parents=True, exist_ok=True)
+    os.utime(directory)
+    for stale in sorted((d for d in cache.iterdir() if d.is_dir()), key=lambda d: d.stat().st_mtime)[:-CACHED_BUILDS]:
+        shutil.rmtree(stale, ignore_errors=True)
+    path = directory / f"{digest(setup_sql.encode('utf-8'))}.duckdb"
+    if not path.exists():
+        # written under another name first, so that an interrupted setup never looks like a fixture
+        partial = path.with_suffix(".partial")
+        create_database(duckdb, partial, setup_sql)
+        partial.rename(path)
+    return path
+
+
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("suite", choices=tuple(SUITES))
@@ -191,6 +236,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--repeats", type=int, default=5, help="counted samples per policy")
     parser.add_argument("--out-dir", type=Path, help="where to write runs.csv, summary.csv and counters.json")
     parser.add_argument("--duckdb", type=Path, default=repo_root() / "build" / "reldebug" / "duckdb")
+    parser.add_argument("--fixture-cache", type=Path, default=default_fixture_cache(), help="where fixtures are kept")
     args = parser.parse_args(argv)
     # a suite runs the workloads qualified for the thread count; a named workload must be qualified
     names = args.workloads or [workload["name"] for workload in SUITES[args.suite] if args.threads in workload["floor"]]
@@ -213,14 +259,10 @@ def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
     out_dir = args.out_dir or Path(tempfile.mkdtemp(prefix=f"duckdb_jit_{args.suite}_gate_"))
     out_dir.mkdir(parents=True, exist_ok=True)
-    database = out_dir / "fixture.duckdb"
     runs, summaries, counters, failures = [], [], [], []
-    setup_sql = None
     try:
         for workload in args.workloads:
-            if workload.get("setup_sql", "") != setup_sql:
-                setup_sql = workload.get("setup_sql", "")
-                create_database(args.duckdb, database, setup_sql)
+            database = fixture_database(args.fixture_cache, args.duckdb, workload.get("setup_sql", ""))
             samples = run_workload(args.duckdb, database, workload, args.threads, args.repeats)
             summary = summary_row(workload, args.threads, samples)
             workload_failed = workload_failures(workload, args.threads, summary, samples)
@@ -240,7 +282,6 @@ def main(argv: list[str] | None = None) -> int:
                 flush=True,
             )
     finally:
-        database.unlink(missing_ok=True)
         write_csv(out_dir / "runs.csv", RUN_FIELDS, runs)
         write_csv(out_dir / "summary.csv", SUMMARY_FIELDS, summaries)
         (out_dir / "counters.json").write_text(json.dumps(counters, indent=1) + "\n", encoding="utf-8")

@@ -19,11 +19,34 @@ from run_jit_refactor_guard import Check, checks
 
 
 class ChecksTest(unittest.TestCase):
-    def test_the_full_guard_runs_every_unit_check_first(self) -> None:
+    def test_the_full_guard_runs_every_unit_check_and_builds_first(self) -> None:
         unit = [check.name for check in checks("unit")]
         full = [check.name for check in checks("full")]
-        self.assertEqual(full[: len(unit)], unit)
+        self.assertTrue(set(unit) <= set(full))
         self.assertEqual(unit[0], "build")
+        self.assertEqual(full[:2], ["build", "assertion build"])
+
+    def test_result_checks_run_side_by_side_and_the_performance_gates_run_alone_last(self) -> None:
+        full = checks("full")
+        gates = [check for check in full if "performance gate" in check.name]
+        self.assertEqual(full[-len(gates) :], gates)
+        self.assertFalse(any(check.concurrent for check in gates))
+        self.assertFalse(any(check.concurrent for check in full if "build" in check.name))
+        results = [check for check in full if check.concurrent]
+        self.assertEqual(
+            {check.name for check in results},
+            {"JIT unit suite", "differential fuzz", "assertion JIT unit suite"}
+            | {f"forced JIT suite {suite}" for suite in guard.FORCED_JIT_SUITES},
+        )
+
+    def test_unittest_checks_keep_their_databases_apart(self) -> None:
+        roots = [
+            check.command[check.command.index("--temp-dir-root") + 1]
+            for check in checks("full")
+            if "--temp-dir-root" in check.command
+        ]
+        self.assertEqual(len(roots), len(set(roots)))
+        self.assertEqual(len(roots), len(guard.FORCED_JIT_SUITES) + 2)
 
     def test_only_the_full_guard_runs_the_forced_suites_the_assertion_build_and_the_performance_gates(self) -> None:
         unit = {check.name for check in checks("unit")}
@@ -150,12 +173,26 @@ class MainTest(unittest.TestCase):
     def test_a_full_guard_that_passes_records_the_tree_it_verified(self) -> None:
         receipt, ran = self.guard_main("full", ["tree", "tree"])
         self.assertEqual(receipt.read_text(encoding="utf-8"), "tree\n")
-        self.assertEqual(ran, [check.name for check in checks("full")])
+        self.assertEqual(sorted(ran), sorted(check.name for check in checks("full")))
 
     def test_a_unit_guard_records_nothing(self) -> None:
         receipt, ran = self.guard_main("unit", ["tree"])
         self.assertFalse(receipt.exists())
-        self.assertEqual(ran, [check.name for check in checks("unit")])
+        self.assertEqual(sorted(ran), sorted(check.name for check in checks("unit")))
+
+    def test_a_failure_among_side_by_side_checks_stops_the_guard_after_its_group(self) -> None:
+        ran = []
+
+        def run(check: Check) -> None:
+            ran.append(check.name)
+            if check.name == "b":
+                raise SystemExit("error: b failed with exit code 1")
+
+        group = [Check(name, ("true",), concurrent=True) for name in ("a", "b", "c")]
+        with mock.patch.object(guard, "run", side_effect=run), self.assertRaises(SystemExit) as stopped:
+            guard.run_checks([*group, Check("after", ("true",))])
+        self.assertEqual(stopped.exception.code, "error: b failed with exit code 1")
+        self.assertEqual(sorted(ran), ["a", "b", "c"])
 
     def test_a_worktree_that_changed_under_the_guard_is_not_verified(self) -> None:
         with self.assertRaises(SystemExit) as stopped:

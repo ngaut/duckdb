@@ -1,11 +1,14 @@
 #!/usr/bin/env python3
 #
-# The JIT guard: the checks a JIT change must pass, in the order they run. The guard stops at the first that fails.
+# The JIT guard: the checks a JIT change must pass. The guard stops at the first that fails.
 #
 #   unit  builds, then checks the architecture boundaries, the generated sources, the harness's own tests, the JIT
 #         unit suite and a differential fuzz campaign
-#   full  runs a longer campaign, then the SQL suites with the JIT forced on, the JIT unit suite in the assertion build
-#         and the performance gates
+#   full  also builds the assertion build, runs a longer campaign, the SQL suites with the JIT forced on and the JIT
+#         unit suite in the assertion build, and then the performance gates
+#
+# The checks that only verify results run side by side; the builds come first and the performance gates last, alone,
+# so that nothing else runs while they count cycles.
 #
 # A full guard that passes records the git tree of the files it verified. The pre-push hook pushes a commit only when
 # that is the commit's tree.
@@ -18,6 +21,8 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -47,6 +52,8 @@ FORCED_JIT_SUITES = (
     "test/sql/tpch/*",
 )
 PERFORMANCE_GATES = (("generic", 1), ("generic", 4), ("encodings", 1), ("encodings", 4), ("tpch", 1))
+# How many result checks run side by side: each also runs its queries on several threads
+CONCURRENT_CHECKS = 4
 
 
 @dataclass(frozen=True)
@@ -55,15 +62,27 @@ class Check:
     command: tuple[str, ...]
     # a check that reports its progress prints as it runs; the others print only when they fail
     reports_progress: bool = False
+    # a check that only verifies results runs beside the checks next to it that do too
+    concurrent: bool = False
 
 
 def script(path: str, *arguments: str) -> tuple[str, ...]:
     return (sys.executable, str(ROOT / path), *arguments)
 
 
+def unittest_check(name: str, unittest: str, *arguments: str) -> Check:
+    """A unittest run beside others: each keeps its databases under a temp directory of its own"""
+    temp_root = f"duckdb_unittest_tempdir/guard_{''.join(c if c.isalnum() else '_' for c in name)}"
+    return Check(name, (unittest, "--temp-dir-root", temp_root, *arguments), concurrent=True)
+
+
 def checks(level: str) -> list[Check]:
-    unit = [
-        Check("build", ("cmake", "--build", str(BUILD), "-j12"), reports_progress=True),
+    builds = [Check("build", ("cmake", "--build", str(BUILD), "-j12"), reports_progress=True)]
+    if level == "full":
+        builds.append(
+            Check("assertion build", ("cmake", "--build", str(ASSERTION_BUILD), "-j12"), reports_progress=True)
+        )
+    sources = [
         Check("architecture boundaries", script("benchmark/jit/verify_jit_boundaries.py")),
         Check("generated settings", script("scripts/generate_settings.py", "--check")),
         Check("generated metrics", script("scripts/generate_metrics.py", "--check")),
@@ -71,7 +90,9 @@ def checks(level: str) -> list[Check]:
             "harness tests",
             (sys.executable, "-m", "unittest", "discover", "-s", str(ROOT / "benchmark" / "jit"), "-p", "test_*.py"),
         ),
-        Check("JIT unit suite", (UNITTEST, "[jit]")),
+    ]
+    results = [
+        unittest_check("JIT unit suite", UNITTEST, "[jit]"),
         Check(
             "differential fuzz",
             script(
@@ -81,30 +102,33 @@ def checks(level: str) -> list[Check]:
                 "--queries",
                 str(FUZZ_QUERIES[level]),
             ),
+            concurrent=True,
         ),
     ]
-    full = [
+    if level == "unit":
+        return builds + sources + results
+    results += [
+        # the unittest binary matches the suite glob itself
         *(
-            # the unittest binary matches the suite glob itself
-            Check(f"forced JIT suite {suite}", (UNITTEST, "--test-config", FORCED_JIT_CONFIG, suite))
+            unittest_check(f"forced JIT suite {suite}", UNITTEST, "--test-config", FORCED_JIT_CONFIG, suite)
             for suite in FORCED_JIT_SUITES
         ),
-        Check("assertion build", ("cmake", "--build", str(ASSERTION_BUILD), "-j12"), reports_progress=True),
-        Check("assertion JIT unit suite", (ASSERTION_UNITTEST, "[jit]")),
-        *(
-            Check(
-                f"{suite} performance gate on {threads} threads",
-                script("benchmark/jit/performance_gate.py", suite, "--threads", str(threads)),
-                reports_progress=True,
-            )
-            for suite, threads in PERFORMANCE_GATES
-        ),
+        unittest_check("assertion JIT unit suite", ASSERTION_UNITTEST, "[jit]"),
     ]
-    return {"unit": unit, "full": unit + full}[level]
+    gates = [
+        Check(
+            f"{suite} performance gate on {threads} threads",
+            script("benchmark/jit/performance_gate.py", suite, "--threads", str(threads)),
+            reports_progress=True,
+        )
+        for suite, threads in PERFORMANCE_GATES
+    ]
+    return builds + sources + results + gates
 
 
 def run(check: Check) -> None:
     print(f"[{check.name}] {' '.join(check.command)}", flush=True)
+    start = time.monotonic()
     result = subprocess.run(
         check.command,
         cwd=ROOT,
@@ -117,6 +141,29 @@ def run(check: Check) -> None:
     if result.returncode != 0:
         print(result.stdout or "", end="")
         raise SystemExit(f"error: {check.name} failed with exit code {result.returncode}")
+    print(f"[{check.name}] passed in {time.monotonic() - start:.0f}s", flush=True)
+
+
+def run_checks(all_checks: list[Check]) -> None:
+    """Runs the checks in order; consecutive concurrent checks run side by side, and the guard stops after the first
+    group with a failure"""
+    position = 0
+    while position < len(all_checks):
+        group = [all_checks[position]]
+        while (
+            group[-1].concurrent
+            and position + len(group) < len(all_checks)
+            and all_checks[position + len(group)].concurrent
+        ):
+            group.append(all_checks[position + len(group)])
+        position += len(group)
+        if len(group) == 1:
+            run(group[0])
+            continue
+        with ThreadPoolExecutor(max_workers=CONCURRENT_CHECKS) as pool:
+            outcomes = [pool.submit(run, check) for check in group]
+        for outcome in outcomes:
+            outcome.result()
 
 
 def git(*arguments: str, index: Path | None = None) -> str:
@@ -144,8 +191,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("level", choices=tuple(FUZZ_QUERIES))
     level = parser.parse_args(argv).level
     tree = worktree_tree()
-    for check in checks(level):
-        run(check)
+    run_checks(checks(level))
     if level == "full":
         if worktree_tree() != tree:
             raise SystemExit("error: the worktree changed while the guard ran")
