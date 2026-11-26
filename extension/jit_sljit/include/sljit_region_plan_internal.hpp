@@ -93,11 +93,11 @@ bool SljitSourceFilterIsConstantTrue(const ExecutionRegionSourceFilter &filter);
 bool TryPlanSljitGeneratedSourceFilters(const ExecutionRegionNode &node, SljitSourceContractPlan &contract_plan,
                                         vector<SljitNativeRegionOpPlan> &native_ops, string &error,
                                         bool render_diagnostics);
-//! Whether the region does not read the source column: only filters read it
-bool SljitSourceColumnIsUnread(const ExecutionRegionTableScanContract &contract, idx_t scan_column_index);
-//! Whether a string column repeats its values within a compressed segment (at most a row group) enough for storage
-//! to search its distinct entries rather than its rows
-bool SljitSourceStringColumnRepeats(const ExecutionRegionTableScanContract &contract, idx_t scan_column_index);
+//! Whether storage runs the filter on the compressed strings of its column: the pipeline never reads the column, the
+//! column does not repeat its values within a compressed segment (at most a row group; storage then filters each
+//! distinct entry once), and a byte automaton expresses the filter
+bool SljitSourceFilterMatchesCompressedStrings(const ExecutionRegionTableScanContract &contract,
+                                               const ExecutionRegionSourceFilter &filter);
 void PlanSljitStorageScanFilters(const ExecutionRegionNode &node, vector<SljitNativeScanFilterPlan> &scan_filters,
                                  bool render_diagnostics);
 SljitRegionNodePlan PlanSljitSourceNode(const ExecutionRegionNode &node, ExecutionRegionSinkKind sink_kind,

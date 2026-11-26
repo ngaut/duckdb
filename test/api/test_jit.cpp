@@ -2105,7 +2105,8 @@ TEST_CASE("JIT selected scan-filtered grouped aggregate uses direct grouped prim
 	REQUIRE_NO_FAIL(con.Query("SET jit_cbo_materialization_elision_benefit=1048576"));
 	REQUIRE_NO_FAIL(con.Query("SET jit_cbo_native_operator_stage_benefit=1048576"));
 	REQUIRE_NO_FAIL(con.Query("SET perfect_ht_threshold=0"));
-	// Group runs are what lets the generated update own the lookup; without them the pipeline runs natively
+	// Group runs are what lets the generated update own the lookup; without them the pipeline runs natively. A
+	// search on the low-cardinality region column stays a storage scan filter
 	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_scan_filtered_grouped_aggregate AS "
 	                          "SELECT i::BIGINT AS id, "
 	                          "       CAST((i // 64) % 1024 AS INTEGER) AS group_id, "
@@ -2117,7 +2118,7 @@ TEST_CASE("JIT selected scan-filtered grouped aggregate uses direct grouped prim
 	const string query = "SELECT group_id, "
 	                     "       sum((x * 1.5) + (y / 4.0)) AS payload_sum "
 	                     "FROM jit_scan_filtered_grouped_aggregate "
-	                     "WHERE region LIKE 'EUROPE%' "
+	                     "WHERE region LIKE '%EUROPE%' "
 	                     "GROUP BY group_id "
 	                     "ORDER BY group_id";
 	REQUIRE_NO_FAIL(con.Query("SET jit_policy='off'"));

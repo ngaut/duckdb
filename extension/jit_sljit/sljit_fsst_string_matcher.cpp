@@ -16,6 +16,20 @@ namespace duckdb {
 
 namespace {
 
+//! The matcher doubles the states for escapes, which a byte addresses
+static constexpr idx_t MAX_STATES = 128;
+
+//! A deterministic automaton over bytes under construction, starting in state 0
+struct ByteAutomaton {
+	//! transitions[state * 256 + byte]
+	vector<idx_t> transitions;
+	vector<bool> accepting;
+
+	idx_t StateCount() const {
+		return accepting.size();
+	}
+};
+
 //! A pattern token: a literal byte, or a gap that matches any number of bytes
 struct PatternToken {
 	bool gap;
@@ -37,9 +51,6 @@ void AppendGap(vector<PatternToken> &tokens) {
 bool TryReadPatternTokens(const SljitNativePredicate &predicate, vector<PatternToken> &tokens) {
 	const auto &constant = predicate.string_constant;
 	switch (predicate.kind) {
-	case SljitNativePredicateKind::STRING_EQUAL_CONSTANT:
-		AppendLiteral(tokens, constant);
-		return true;
 	case SljitNativePredicateKind::STRING_PREFIX_CONSTANT:
 		AppendLiteral(tokens, constant);
 		AppendGap(tokens);
@@ -68,39 +79,14 @@ bool TryReadPatternTokens(const SljitNativePredicate &predicate, vector<PatternT
 	}
 }
 
-//! A string predicate as pattern tokens: a leaf under any number of NOTs, of at most 63 tokens so that a set of
-//! pattern positions fits a 64-bit mask
-bool TryReadPattern(const SljitNativePredicate &predicate, vector<PatternToken> &tokens, bool &negated) {
+//! The automaton of a pattern by subset construction: a state is the set of pattern positions the input read so far
+//! can end at, position i having matched the first i tokens; a gap also matches nothing, so a set holds the position
+//! after each of its gaps. A set of positions is a 64-bit mask, so a pattern has at most 63 tokens
+bool TryBuildPatternAutomaton(const vector<PatternToken> &tokens, ByteAutomaton &result) {
 	static constexpr idx_t MAX_TOKENS = 63;
-	negated = false;
-	auto leaf = &predicate;
-	while (leaf->kind == SljitNativePredicateKind::NOT && leaf->child) {
-		negated = !negated;
-		leaf = leaf->child.get();
-	}
-	return TryReadPatternTokens(*leaf, tokens) && tokens.size() <= MAX_TOKENS;
-}
-
-} // namespace
-
-bool SljitStringPatternAutomatonSupports(const SljitNativePredicate &predicate) {
-	vector<PatternToken> tokens;
-	bool negated;
-	return TryReadPattern(predicate, tokens, negated);
-}
-
-bool TryBuildSljitStringPatternAutomaton(const SljitNativePredicate &predicate,
-                                         unique_ptr<SljitStringPatternAutomaton> &result) {
-	// the FSST matcher doubles the states for escapes, which a byte addresses
-	static constexpr idx_t MAX_STATES = 128;
-	result.reset();
-	vector<PatternToken> tokens;
-	bool negated;
-	if (!TryReadPattern(predicate, tokens, negated)) {
+	if (tokens.size() > MAX_TOKENS) {
 		return false;
 	}
-	// subset construction: a state is the set of pattern positions the input read so far can end at, position i
-	// having matched the first i tokens; a gap also matches nothing, so a set holds the position after each of its gaps
 	uint64_t gap_positions = 0;
 	uint64_t literal_positions[256] = {};
 	for (idx_t position = 0; position < tokens.size(); position++) {
@@ -127,29 +113,177 @@ bool TryBuildSljitStringPatternAutomaton(const SljitNativePredicate &predicate,
 		states.push_back(positions);
 		return states.size() - 1;
 	};
-	auto automaton = make_uniq<SljitStringPatternAutomaton>();
-	automaton->negated = negated;
 	const auto accept_position = uint64_t(1) << tokens.size();
-	for (idx_t state = 0; state < states.size(); state++) {
-		if (states.size() > MAX_STATES) {
-			return false;
-		}
+	for (idx_t state = 0; state < states.size() && states.size() <= MAX_STATES; state++) {
 		const auto positions = states[state];
-		automaton->accepting.push_back((positions & accept_position) != 0);
-		automaton->transitions.resize(states.size() * 256);
+		result.accepting.push_back((positions & accept_position) != 0);
 		// a byte no literal of the set expects only keeps the positions on gaps
 		const auto other = state_id(close_over_gaps(positions & gap_positions));
 		for (idx_t byte = 0; byte < 256; byte++) {
 			const auto advanced = positions & literal_positions[byte];
-			automaton->transitions[state * 256 + byte] = static_cast<uint8_t>(
+			result.transitions.push_back(
 			    advanced ? state_id(close_over_gaps((positions & gap_positions) | (advanced << 1))) : other);
 		}
 	}
-	if (states.size() > MAX_STATES) {
+	return states.size() <= MAX_STATES;
+}
+
+//! The automaton of a comparison with a constant of n bytes, as DuckDB orders strings: bytes unsigned, then lengths.
+//! State i < n has read the constant's first i bytes, so the string so far is shorter; state n has read the constant;
+//! the last two states have read a smaller or a larger byte, or a longer string, and stay there
+bool TryBuildCompareAutomaton(const string &constant, SljitNativeIntegerCompareOp compare_op, ByteAutomaton &result) {
+	const auto n = constant.size();
+	if (n + 3 > MAX_STATES) {
 		return false;
 	}
-	automaton->transitions.resize(states.size() * 256);
-	result = std::move(automaton);
+	const auto less = n + 1;
+	const auto greater = n + 2;
+	for (idx_t state = 0; state <= greater; state++) {
+		for (idx_t byte = 0; byte < 256; byte++) {
+			idx_t next = state;
+			if (state < n) {
+				const auto expected = static_cast<uint8_t>(constant[state]);
+				next = byte < expected ? less : (byte > expected ? greater : state + 1);
+			} else if (state == n) {
+				next = greater;
+			}
+			result.transitions.push_back(next);
+		}
+		const bool is_less = state < n || state == less;
+		const bool is_equal = state == n;
+		const bool is_greater = state == greater;
+		switch (compare_op) {
+		case SljitNativeIntegerCompareOp::EQUAL:
+			result.accepting.push_back(is_equal);
+			break;
+		case SljitNativeIntegerCompareOp::NOT_EQUAL:
+			result.accepting.push_back(!is_equal);
+			break;
+		case SljitNativeIntegerCompareOp::LESS_THAN:
+			result.accepting.push_back(is_less);
+			break;
+		case SljitNativeIntegerCompareOp::LESS_THAN_OR_EQUAL:
+			result.accepting.push_back(is_less || is_equal);
+			break;
+		case SljitNativeIntegerCompareOp::GREATER_THAN:
+			result.accepting.push_back(is_greater);
+			break;
+		case SljitNativeIntegerCompareOp::GREATER_THAN_OR_EQUAL:
+			result.accepting.push_back(is_greater || is_equal);
+			break;
+		}
+	}
+	return true;
+}
+
+//! The product automaton: it runs both at once and accepts as the conjunction combines their acceptance
+bool TryBuildProductAutomaton(const ByteAutomaton &left, const ByteAutomaton &right, bool both, ByteAutomaton &result) {
+	vector<idx_t> state_ids(left.StateCount() * right.StateCount(), DConstants::INVALID_INDEX);
+	vector<idx_t> pairs {0};
+	state_ids[0] = 0;
+	for (idx_t state = 0; state < pairs.size(); state++) {
+		const auto left_state = pairs[state] / right.StateCount();
+		const auto right_state = pairs[state] % right.StateCount();
+		result.accepting.push_back(both ? left.accepting[left_state] && right.accepting[right_state]
+		                                : left.accepting[left_state] || right.accepting[right_state]);
+		for (idx_t byte = 0; byte < 256; byte++) {
+			const auto pair = left.transitions[left_state * 256 + byte] * right.StateCount() +
+			                  right.transitions[right_state * 256 + byte];
+			if (state_ids[pair] == DConstants::INVALID_INDEX) {
+				if (pairs.size() == MAX_STATES) {
+					return false;
+				}
+				state_ids[pair] = pairs.size();
+				pairs.push_back(pair);
+			}
+			result.transitions.push_back(state_ids[pair]);
+		}
+	}
+	return true;
+}
+
+//! The automaton of a predicate over one string column: comparisons with a constant, patterns of literal bytes and
+//! gaps, and lists of constants, combined by NOT, AND and OR. Each is true or false for a string, which is never
+//! NULL here: storage evaluates the filter on NULL itself
+bool TryBuildPredicateAutomaton(const SljitNativePredicate &predicate, ByteAutomaton &result) {
+	switch (predicate.kind) {
+	case SljitNativePredicateKind::NOT:
+		if (!predicate.child || !TryBuildPredicateAutomaton(*predicate.child, result)) {
+			return false;
+		}
+		result.accepting.flip();
+		return true;
+	case SljitNativePredicateKind::CONJUNCTION: {
+		if (predicate.children.empty() || !predicate.children[0] ||
+		    !TryBuildPredicateAutomaton(*predicate.children[0], result)) {
+			return false;
+		}
+		const bool both = predicate.conjunction_op == ExecutionExpressionConjunctionOp::AND;
+		for (idx_t child_idx = 1; child_idx < predicate.children.size(); child_idx++) {
+			ByteAutomaton child;
+			ByteAutomaton product;
+			if (!predicate.children[child_idx] || !TryBuildPredicateAutomaton(*predicate.children[child_idx], child) ||
+			    !TryBuildProductAutomaton(result, child, both, product)) {
+				return false;
+			}
+			result = std::move(product);
+		}
+		return true;
+	}
+	case SljitNativePredicateKind::STRING_EQUAL_CONSTANT:
+		return TryBuildCompareAutomaton(predicate.string_constant, SljitNativeIntegerCompareOp::EQUAL, result);
+	case SljitNativePredicateKind::STRING_COMPARE_CONSTANT:
+		return TryBuildCompareAutomaton(predicate.string_constant, predicate.compare_op, result);
+	case SljitNativePredicateKind::STRING_IN_LIST_CONSTANT: {
+		// a NULL in the list makes the result NULL instead of false, which a NOT around it would not turn true
+		if (predicate.string_constants.empty() || predicate.list_has_null) {
+			return false;
+		}
+		if (!TryBuildCompareAutomaton(predicate.string_constants[0], SljitNativeIntegerCompareOp::EQUAL, result)) {
+			return false;
+		}
+		for (idx_t constant_idx = 1; constant_idx < predicate.string_constants.size(); constant_idx++) {
+			ByteAutomaton constant;
+			ByteAutomaton product;
+			if (!TryBuildCompareAutomaton(predicate.string_constants[constant_idx], SljitNativeIntegerCompareOp::EQUAL,
+			                              constant) ||
+			    !TryBuildProductAutomaton(result, constant, false, product)) {
+				return false;
+			}
+			result = std::move(product);
+		}
+		if (predicate.not_in) {
+			result.accepting.flip();
+		}
+		return true;
+	}
+	default: {
+		vector<PatternToken> tokens;
+		return TryReadPatternTokens(predicate, tokens) && TryBuildPatternAutomaton(tokens, result);
+	}
+	}
+}
+
+} // namespace
+
+bool SljitStringPatternAutomatonSupports(const SljitNativePredicate &predicate) {
+	unique_ptr<SljitStringPatternAutomaton> automaton;
+	return TryBuildSljitStringPatternAutomaton(predicate, automaton);
+}
+
+bool TryBuildSljitStringPatternAutomaton(const SljitNativePredicate &predicate,
+                                         unique_ptr<SljitStringPatternAutomaton> &result) {
+	result.reset();
+	ByteAutomaton automaton;
+	if (!TryBuildPredicateAutomaton(predicate, automaton)) {
+		return false;
+	}
+	result = make_uniq<SljitStringPatternAutomaton>();
+	result->accepting = std::move(automaton.accepting);
+	result->transitions.reserve(automaton.transitions.size());
+	for (auto next : automaton.transitions) {
+		result->transitions.push_back(static_cast<uint8_t>(next));
+	}
 	return true;
 }
 
@@ -174,7 +308,7 @@ public:
 			}
 			transitions[state * 256 + ESCAPE_CODE] = static_cast<uint8_t>(state_count + state);
 			memcpy(transitions.data() + (state_count + state) * 256, automaton.transitions.data() + state * 256, 256);
-			accepting[state] = automaton.accepting[state] != automaton.negated;
+			accepting[state] = automaton.accepting[state];
 		}
 	}
 

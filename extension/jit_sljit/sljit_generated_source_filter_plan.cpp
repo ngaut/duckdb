@@ -9,6 +9,7 @@
 #include "sljit_region_plan_internal.hpp"
 
 #include "sljit_fsst_string_matcher.hpp"
+#include "sljit_native_plan.hpp"
 
 #include <algorithm>
 
@@ -471,17 +472,31 @@ bool TryPlanSljitGeneratedSourceFilters(const ExecutionRegionNode &node, SljitSo
 	return true;
 }
 
-bool SljitSourceColumnIsUnread(const ExecutionRegionTableScanContract &contract, idx_t scan_column_index) {
+static bool SljitSourceColumnIsUnread(const ExecutionRegionTableScanContract &contract, idx_t scan_column_index) {
 	const auto &read = contract.read_columns;
 	return std::find(read.begin(), read.end(), scan_column_index) == read.end();
 }
 
-bool SljitSourceStringColumnRepeats(const ExecutionRegionTableScanContract &contract, idx_t scan_column_index) {
+//! A string column repeats its values within a segment, so storage filters each dictionary entry once
+static bool SljitSourceStringColumnRepeats(const ExecutionRegionTableScanContract &contract, idx_t scan_column_index) {
 	static constexpr idx_t ROWS_PER_VALUE = 16;
 	const auto &distinct_counts = contract.source_contract_input_distinct_counts;
 	const auto segment_rows = MinValue(contract.estimated_source_cardinality, contract.row_group_size);
 	return scan_column_index < distinct_counts.size() && distinct_counts[scan_column_index] > 0 &&
 	       distinct_counts[scan_column_index] * ROWS_PER_VALUE <= segment_rows;
+}
+
+bool SljitSourceFilterMatchesCompressedStrings(const ExecutionRegionTableScanContract &contract,
+                                               const ExecutionRegionSourceFilter &filter) {
+	if (!contract.compressed_storage || !SljitSourceColumnIsUnread(contract, filter.scan_column_index) ||
+	    SljitSourceStringColumnRepeats(contract, filter.scan_column_index)) {
+		return false;
+	}
+	unique_ptr<ExecutionExpressionIR> expression;
+	unique_ptr<SljitNativePredicate> predicate;
+	string error;
+	return TryBuildSljitGeneratedSourceFilterExpression(filter, expression, 0, error) &&
+	       TryBuildNativePredicate(*expression, predicate) && SljitStringPatternAutomatonSupports(*predicate);
 }
 
 void PlanSljitStorageScanFilters(const ExecutionRegionNode &node, vector<SljitNativeScanFilterPlan> &scan_filters,
@@ -531,10 +546,7 @@ void PlanSljitStorageScanFilters(const ExecutionRegionNode &node, vector<SljitNa
 		if (!TryLowerNativeRegionExpression(fragment, true, scan_filter.filter, error, render_diagnostics)) {
 			continue;
 		}
-		scan_filter.matches_compressed_rows =
-		    contract.compressed_storage && SljitSourceColumnIsUnread(contract, source_filter.scan_column_index) &&
-		    !SljitSourceStringColumnRepeats(contract, source_filter.scan_column_index) &&
-		    scan_filter.filter.predicate && SljitStringPatternAutomatonSupports(*scan_filter.filter.predicate);
+		scan_filter.matches_compressed_rows = SljitSourceFilterMatchesCompressedStrings(contract, source_filter);
 		scan_filters.push_back(std::move(scan_filter));
 	}
 }

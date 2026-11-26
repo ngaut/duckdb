@@ -199,6 +199,15 @@ static bool TryBuildNativePredicateInternal(const ExecutionExpressionIR &root,
 		return true;
 	}
 
+	if (TryReadNativeStringCompareConstant(root, compare_op, source_index, string_constant)) {
+		result->kind = SljitNativePredicateKind::STRING_COMPARE_CONSTANT;
+		result->compare_op = compare_op;
+		result->source_index = source_index;
+		result->string_constant = std::move(string_constant);
+		predicate = std::move(result);
+		return true;
+	}
+
 	string prefix;
 	if (TryReadNativeStringPrefixConstant(root, source_index, prefix)) {
 		result->kind = SljitNativePredicateKind::STRING_PREFIX_CONSTANT;

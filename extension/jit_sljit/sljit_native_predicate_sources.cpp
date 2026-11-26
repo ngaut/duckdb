@@ -30,6 +30,7 @@ static void CollectSljitNativePredicateSourceIndices(const SljitNativePredicate 
 	case SljitNativePredicateKind::INTEGER_IN_LIST:
 	case SljitNativePredicateKind::INTEGER_BETWEEN:
 	case SljitNativePredicateKind::STRING_EQUAL_CONSTANT:
+	case SljitNativePredicateKind::STRING_COMPARE_CONSTANT:
 	case SljitNativePredicateKind::STRING_IN_LIST_CONSTANT:
 	case SljitNativePredicateKind::STRING_PREFIX_CONSTANT:
 	case SljitNativePredicateKind::STRING_SUFFIX_CONSTANT:

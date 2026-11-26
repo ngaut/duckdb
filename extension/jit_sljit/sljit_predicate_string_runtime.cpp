@@ -332,6 +332,16 @@ sljit_sw SLJIT_FUNC SljitNativeStringContainsConstant(const char *sdata, idx_t s
 	                    needle->value.size()) != DConstants::INVALID_INDEX;
 }
 
+sljit_sw SLJIT_FUNC SljitNativeStringCompareConstant(const char *sdata, idx_t slen,
+                                                     const SljitNativeStringConstant *constant) {
+	const idx_t clen = constant->value.size();
+	const auto order = memcmp(sdata, constant->value.data(), MinValue(slen, clen));
+	if (order != 0) {
+		return order < 0 ? -1 : 1;
+	}
+	return slen < clen ? -1 : (slen > clen ? 1 : 0);
+}
+
 sljit_sw SLJIT_FUNC SljitNativeStringLikeTwoUnanchoredFragments(const char *sdata, idx_t slen,
                                                                 const SljitNativeStringConstant *pattern) {
 	auto finders = SljitTwoUnanchoredFragmentFinders(*pattern);

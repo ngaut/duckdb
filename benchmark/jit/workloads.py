@@ -63,7 +63,7 @@ GENERIC_WORKLOADS = (
         "name": "range_expr",
         "sql": "SELECT sum(i * 31 + (i % 97)) AS value FROM range(50000000) tbl(i)",
         "floor": {1: 3.39, 4: 3.40},
-        "ceiling": {1: 1_694_600_000, 4: 1_695_000_000},
+        "ceiling": {1: 1_694_000_000, 4: 1_695_000_000},
         "compiled": {1: True, 4: True},
     },
     {
@@ -80,7 +80,7 @@ GENERIC_WORKLOADS = (
             "ELSE i * 7 - i % 29 END) AS value FROM range(50000000) tbl(i)"
         ),
         "floor": {1: 4.16, 4: 4.19},
-        "ceiling": {1: 2_306_100_000, 4: 2_307_300_000},
+        "ceiling": {1: 2_305_400_000, 4: 2_306_600_000},
         "compiled": {1: True, 4: True},
     },
     {
@@ -91,7 +91,7 @@ GENERIC_WORKLOADS = (
             "count(*) AS row_count FROM range(50000000) tbl(i)"
         ),
         "floor": {1: 3.98, 4: 3.97},
-        "ceiling": {1: 2_557_600_000, 4: 2_557_800_000},
+        "ceiling": {1: 2_557_000_000, 4: 2_557_200_000},
         "compiled": {1: True, 4: True},
     },
     {
@@ -146,7 +146,7 @@ GENERIC_WORKLOADS = (
             "WHERE event_date >= DATE '2024-04-01' AND event_date < DATE '2024-10-01' "
             "AND amount >= 200 AND status IN ('ACTIVE', 'PENDING')"
         ),
-        "floor": {1: 1.29, 4: 1.38},
+        "floor": {1: 1.29, 4: 1.39},
         "ceiling": {1: 271_300_000, 4: 279_900_000},
         "compiled": {1: True, 4: True},
     },
@@ -166,8 +166,8 @@ GENERIC_WORKLOADS = (
         ),
         # Multi-fragment LIKE patterns: exact-candidate verification, selection
         # compaction and paired vector scans with an overlapping tail.
-        "floor": {1: 3.05, 4: 2.98},
-        "ceiling": {1: 786_400_000, 4: 788_200_000},
+        "floor": {1: 3.05, 4: 3.01},
+        "ceiling": {1: 786_100_000, 4: 788_200_000},
         "compiled": {1: True, 4: True},
     },
     {
@@ -201,7 +201,7 @@ GENERIC_WORKLOADS = (
         ),
         "sql": ("SELECT sum(a) AS value FROM __jit_generic_compare_input " "WHERE a < b"),
         "floor": {1: 1.37, 4: 1.38},
-        "ceiling": {1: 425_700_000, 4: 428_300_000},
+        "ceiling": {1: 425_600_000, 4: 428_200_000},
         "compiled": {1: True, 4: True},
     },
     {
@@ -232,8 +232,8 @@ GENERIC_WORKLOADS = (
             "coalesce(b % 97, fallback % 97)) AS value "
             "FROM __jit_generic_nullable_multi"
         ),
-        "floor": {1: 2.17, 4: 2.15},
-        "ceiling": {1: 1_402_700_000, 4: 1_412_500_000},
+        "floor": {1: 2.18, 4: 2.15},
+        "ceiling": {1: 1_402_600_000, 4: 1_412_200_000},
         "compiled": {1: True, 4: True},
     },
     {
@@ -317,7 +317,7 @@ GENERIC_WORKLOADS = (
             "GROUP BY group_flag, group_status ORDER BY group_flag, group_status"
         ),
         "floor": {1: 1.84, 4: 1.78},
-        "ceiling": {1: 737_900_000, 4: 745_500_000},
+        "ceiling": {1: 737_700_000, 4: 745_500_000},
         "compiled": {1: True, 4: True},
     },
     {
@@ -377,7 +377,7 @@ GENERIC_WORKLOADS = (
             ") grouped"
         ),
         "floor": {1: 2.60, 4: 3.26},
-        "ceiling": {1: 541_300_000, 4: 552_400_000},
+        "ceiling": {1: 541_300_000, 4: 552_200_000},
         "compiled": {1: True, 4: True},
     },
     {
@@ -394,7 +394,7 @@ GENERIC_WORKLOADS = (
         # rehash a locally monotonic stream during finalization.
         # Producer-owned monotonic summaries and progression-boundary publication
         # keep parallel finalization from rehashing.
-        "floor": {1: 3.32, 4: 3.80},
+        "floor": {1: 3.33, 4: 3.80},
         "ceiling": {1: 444_300_000, 4: 454_100_000},
         "compiled": {1: True, 4: True},
     },
@@ -647,7 +647,7 @@ ENCODINGS_QUERIES = {
     ),
     "dictionary_prefix": (
         "SELECT count(*) FROM __jit_encodings_facts WHERE name LIKE 'cust#12%'",
-        {1: False, 4: False},
+        {1: True, 4: True},
     ),
     "integer_case": (
         "SELECT sum(CASE WHEN k < 300 THEN id ELSE -id END) FROM __jit_encodings_facts",
@@ -728,47 +728,47 @@ ENCODINGS_QUERIES = {
 
 # name -> (floor, ceiling) per thread count
 ENCODINGS_THRESHOLDS = {
-    "decimal_double_product": ({1: 2.30}, {1: 319_200_000}),
+    "decimal_double_product": ({1: 2.30}, {1: 318_900_000}),
     "decimal_grouped": ({1: 1.18}, {1: 845_300_000}),
     "date_range": ({1: 1.55, 4: 1.49}, {1: 113_100_000, 4: 115_700_000}),
     "date_year_groups": ({1: 1.53, 4: 1.50}, {1: 447_400_000, 4: 452_600_000}),
     "dictionary_case": ({1: 0.99, 4: 0.99}, {1: 248_700_000, 4: 251_600_000}),
-    "dictionary_contains": ({1: 4.41, 4: 4.27}, {1: 545_300_000, 4: 547_800_000}),
+    "dictionary_contains": ({1: 4.41, 4: 4.36}, {1: 544_900_000, 4: 546_400_000}),
     "dictionary_groups": ({1: 0.89, 4: 0.87}, {1: 529_300_000, 4: 532_900_000}),
-    "dictionary_groups_filtered": ({1: 1.12, 4: 1.10}, {1: 436_900_000, 4: 441_500_000}),
+    "dictionary_groups_filtered": ({1: 1.12, 4: 1.10}, {1: 436_900_000, 4: 441_400_000}),
     "nullable_groups": ({1: 1.17, 4: 1.16}, {1: 426_200_000, 4: 430_900_000}),
     "nullable_min_max": ({1: 1.33, 4: 1.32}, {1: 412_300_000, 4: 414_000_000}),
     "narrow_integers": ({1: 1.97, 4: 1.91}, {1: 204_000_000, 4: 207_700_000}),
-    "double_filter": ({1: 1.13}, {1: 286_300_000}),
-    "double_range": ({1: 0.92, 4: 0.93}, {1: 207_000_000, 4: 209_500_000}),
-    "dimension_join": ({1: 0.90, 4: 0.89}, {1: 383_800_000, 4: 387_700_000}),
+    "double_filter": ({1: 1.13}, {1: 286_100_000}),
+    "double_range": ({1: 0.92, 4: 0.93}, {1: 207_000_000, 4: 209_400_000}),
+    "dimension_join": ({1: 0.90, 4: 0.89}, {1: 383_800_000, 4: 387_500_000}),
     "dimension_string_groups": ({1: 0.87, 4: 0.87}, {1: 585_200_000, 4: 591_500_000}),
-    "semi_join": ({1: 0.89, 4: 0.89}, {1: 397_400_000, 4: 399_700_000}),
-    "anti_join": ({1: 1.38, 4: 1.37}, {1: 274_300_000, 4: 280_200_000}),
+    "semi_join": ({1: 0.89, 4: 0.89}, {1: 397_300_000, 4: 399_500_000}),
+    "anti_join": ({1: 1.38, 4: 1.37}, {1: 274_300_000, 4: 280_100_000}),
     "integer_in_list": ({1: 1.29, 4: 1.27}, {1: 236_100_000, 4: 241_600_000}),
-    "dictionary_or_nullable": ({1: 0.96, 4: 0.99}, {1: 312_000_000, 4: 316_900_000}),
+    "dictionary_or_nullable": ({1: 0.96, 4: 0.99}, {1: 311_800_000, 4: 316_900_000}),
     "nullable_coalesce": ({1: 1.56, 4: 1.50}, {1: 310_200_000, 4: 314_600_000}),
     "modulo_groups": ({1: 1.17, 4: 1.14}, {1: 420_600_000, 4: 425_300_000}),
     "distinct_count": ({1: 1.28, 4: 1.23}, {1: 395_400_000, 4: 398_800_000}),
-    "filtered_top_n": ({1: 0.89, 4: 0.90}, {1: 273_600_000, 4: 276_200_000}),
-    "dictionary_prefix": ({1: 0.91, 4: 0.90}, {1: 2_650_000_000, 4: 2_651_900_000}),
-    "integer_case": ({1: 1.50, 4: 1.49}, {1: 194_100_000, 4: 198_400_000}),
-    "double_case": ({1: 1.56, 4: 1.51}, {1: 328_700_000, 4: 333_000_000}),
-    "case_null_sums": ({1: 1.96, 4: 1.90}, {1: 217_200_000, 4: 225_100_000}),
+    "filtered_top_n": ({1: 0.91, 4: 0.90}, {1: 273_200_000, 4: 275_900_000}),
+    "dictionary_prefix": ({1: 5.15, 4: 4.92}, {1: 542_400_000, 4: 547_900_000}),
+    "integer_case": ({1: 1.50, 4: 1.49}, {1: 194_000_000, 4: 198_300_000}),
+    "double_case": ({1: 1.56, 4: 1.51}, {1: 328_600_000, 4: 333_000_000}),
+    "case_null_sums": ({1: 1.96, 4: 1.90}, {1: 217_200_000, 4: 225_000_000}),
     "case_null_groups": ({1: 1.71, 4: 1.67}, {1: 342_200_000, 4: 347_700_000}),
-    "case_null_counts": ({1: 1.95, 4: 1.88}, {1: 315_500_000, 4: 320_400_000}),
+    "case_null_counts": ({1: 1.96, 4: 1.88}, {1: 315_500_000, 4: 320_400_000}),
     "case_null_count_sums": ({1: 2.19, 4: 2.10}, {1: 199_500_000, 4: 207_100_000}),
     "aggregate_filter_groups": ({1: 1.30, 4: 1.30}, {1: 458_000_000, 4: 461_500_000}),
     "aggregate_filter_sums": ({1: 1.06, 4: 1.08}, {1: 225_800_000, 4: 228_400_000}),
     "aggregate_filter_random_groups": ({1: 1.32, 4: 1.33}, {1: 457_400_000, 4: 460_900_000}),
     "aggregate_filter_random_sums": ({1: 0.93, 4: 0.93}, {1: 225_100_000, 4: 227_100_000}),
-    "expression_key_groups": ({1: 1.57, 4: 1.52}, {1: 295_900_000, 4: 314_300_000}),
-    "expression_key_filter_counts": ({1: 1.70, 4: 1.64}, {1: 429_900_000, 4: 450_000_000}),
+    "expression_key_groups": ({1: 1.57, 4: 1.52}, {1: 295_900_000, 4: 314_000_000}),
+    "expression_key_filter_counts": ({1: 1.70, 4: 1.64}, {1: 429_800_000, 4: 450_000_000}),
     "narrow_between": ({1: 1.32, 4: 1.25}, {1: 55_000_000, 4: 58_000_000}),
-    "nullable_key_join": ({1: 0.90, 4: 0.89}, {1: 2_834_600_000, 4: 2_834_200_000}),
+    "nullable_key_join": ({1: 0.90, 4: 0.89}, {1: 2_833_200_000, 4: 2_830_100_000}),
     "random_key_groups": ({1: 1.38, 4: 1.32}, {1: 261_000_000, 4: 290_300_000}),
-    "random_key_counts": ({1: 1.57, 4: 1.49}, {1: 207_600_000, 4: 232_200_000}),
-    "random_multi_key_groups": ({1: 0.89, 4: 0.89}, {1: 1_755_200_000, 4: 3_292_300_000}),
+    "random_key_counts": ({1: 1.57, 4: 1.49}, {1: 207_500_000, 4: 232_200_000}),
+    "random_multi_key_groups": ({1: 0.89, 4: 0.89}, {1: 1_750_300_000, 4: 3_292_300_000}),
 }
 
 ENCODINGS_WORKLOADS = tuple(
@@ -785,15 +785,15 @@ ENCODINGS_WORKLOADS = tuple(
 
 # TPC-H at scale factor 10: query -> (floor, ceiling) on one thread
 TPCH_THRESHOLDS = {
-    "01": (1.96, 7_468_200_000),
+    "01": (1.96, 7_466_800_000),
     "02": (0.98, 448_800_000),
     "03": (1.49, 4_738_100_000),
     "04": (1.23, 3_630_400_000),
-    "05": (1.21, 3_500_100_000),
-    "06": (2.50, 2_413_600_000),
-    "07": (1.35, 4_759_400_000),
+    "05": (1.21, 3_499_200_000),
+    "06": (2.52, 2_413_600_000),
+    "07": (1.35, 4_758_300_000),
     "08": (1.46, 3_249_600_000),
-    "09": (1.48, 11_385_500_000),
+    "09": (1.53, 11_385_500_000),
     "10": (0.98, 5_585_500_000),
     "11": (0.98, 734_300_000),
     "12": (1.15, 4_680_300_000),
@@ -802,11 +802,11 @@ TPCH_THRESHOLDS = {
     "15": (1.97, 1_927_900_000),
     "16": (0.98, 1_704_300_000),
     "17": (1.11, 2_946_600_000),
-    "18": (2.49, 6_655_500_000),
+    "18": (2.49, 6_653_600_000),
     "19": (2.81, 2_581_500_000),
-    "20": (1.32, 3_986_700_000),
+    "20": (1.40, 3_568_700_000),
     "21": (0.98, 9_352_400_000),
-    "22": (1.07, 2_365_800_000),
+    "22": (1.07, 2_365_400_000),
 }
 TPCH_QUERY_DIRECTORY = Path(__file__).resolve().parents[2] / "extension" / "tpch" / "dbgen" / "queries"
 

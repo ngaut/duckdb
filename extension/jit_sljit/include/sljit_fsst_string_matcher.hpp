@@ -15,14 +15,11 @@ namespace duckdb {
 
 struct SljitNativePredicate;
 
-//! A deterministic automaton over bytes that accepts the strings a string predicate selects: the predicate's
-//! constant is a sequence of literal bytes and gaps of any length, each end anchored or not
+//! A deterministic automaton over bytes that accepts the strings a predicate over one string column selects
 struct SljitStringPatternAutomaton {
 	//! transitions[state * 256 + byte]
 	vector<uint8_t> transitions;
 	vector<bool> accepting;
-	//! The predicate selects the strings the automaton rejects
-	bool negated = false;
 
 	idx_t StateCount() const {
 		return accepting.size();

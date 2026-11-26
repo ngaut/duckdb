@@ -60,6 +60,10 @@ sljit_sw SLJIT_FUNC SljitNativeStringLikeTwoUnanchoredFragments(const char *sdat
                                                                 const SljitNativeStringConstant *pattern);
 sljit_sw SLJIT_FUNC SljitNativeStringContainsConstant(const char *sdata, idx_t slen,
                                                       const SljitNativeStringConstant *needle);
+//! The order of a string and the constant as DuckDB compares strings: their bytes unsigned, then their lengths; -1, 0
+//! or 1
+sljit_sw SLJIT_FUNC SljitNativeStringCompareConstant(const char *sdata, idx_t slen,
+                                                     const SljitNativeStringConstant *constant);
 sljit_sw SLJIT_FUNC SljitNativeStringInListConstant(const char *sdata, idx_t slen,
                                                     const SljitNativeStringConstantList *list);
 

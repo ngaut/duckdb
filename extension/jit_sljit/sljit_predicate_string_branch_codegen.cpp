@@ -25,6 +25,20 @@ bool TryEmitSljitStringPredicateBranches(struct sljit_compiler *compiler, const 
 		EmitLoadPredicateStringForMatch(compiler, predicate.source_index, result, source_not_null, row);
 		EmitStringEqualBranches(compiler, predicate.string_constant, result);
 		return true;
+	case SljitNativePredicateKind::STRING_COMPARE_CONSTANT: {
+		EmitLoadPredicateStringForMatch(compiler, predicate.source_index, result, source_not_null, row);
+		auto constant = AddStringConstantCodeData(owned_data, predicate.string_constant);
+		sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_R0, 0, SLJIT_R4, 0);
+		sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_R1, 0, SLJIT_R2, 0);
+		sljit_emit_op1(compiler, SLJIT_MOV_P, SLJIT_R2, 0, SLJIT_IMM, CastPointerToValue(constant));
+		sljit_emit_icall(compiler, SLJIT_CALL, SLJIT_ARGS3(W, P, W, P), SLJIT_IMM,
+		                 SLJIT_FUNC_ADDR(SljitNativeStringCompareConstant));
+		result.true_jumps.push_back(
+		    sljit_emit_cmp(compiler, NativeIntegerCompareJumpType(SljitNativeIntegerKind::INT64, predicate.compare_op),
+		                   SLJIT_RETURN_REG, 0, SLJIT_IMM, 0));
+		result.false_jumps.push_back(sljit_emit_jump(compiler, SLJIT_JUMP));
+		return true;
+	}
 	case SljitNativePredicateKind::STRING_IN_LIST_CONSTANT:
 		EmitLoadPredicateStringForMatch(compiler, predicate.source_index, result, source_not_null, row);
 		EmitStringInListBranches(compiler, predicate, result, owned_data);

@@ -1,5 +1,5 @@
 # name: test/sql/jit/test_jit_fsst_string_filter.test
-# description: A string search on a column the query does not read past the filter, including count(*) whose scan returns only its filter columns, matches the FSST-compressed strings without decompressing them: all-unique segments (FSST_ONLY) and dictionary segments with NULLs, every pattern shape, rare bytes stored as escapes, empty strings, vectors that span two segments, a preceding filter on another column, and a projected column that must still be decompressed agree with the native engine
+# description: A string search or comparison on a column the query does not read past the filter, including count(*) whose scan returns only its filter columns, matches the FSST-compressed strings without decompressing them: all-unique segments (FSST_ONLY) and dictionary segments with NULLs, every pattern shape, ranges, IN lists and their NOT and OR, rare bytes stored as escapes, empty strings, vectors that span two segments, a preceding filter on another column, and a projected column that must still be decompressed agree with the native engine
 # group: [jit]
 
 require jit_sljit
@@ -111,6 +111,42 @@ UNION ALL
 SELECT 'count only two columns', count(*), 0 FROM t WHERE comment LIKE '%deposits%' AND note LIKE '%deposits are%'
 UNION ALL
 SELECT 'count only read by a filter', count(*), 0 FROM t WHERE comment LIKE '%quick%' OR k = 5
+UNION ALL
+SELECT 'count only prefix', count(*), 0 FROM t WHERE comment LIKE 'pending accounts%'
+UNION ALL
+SELECT 'count only range', count(*), 0 FROM t WHERE comment >= 'quick' AND comment < 'regular'
+UNION ALL
+SELECT 'range constant left', count(*), sum(id) FROM t WHERE 'final' <= comment AND 'ordinary' > comment
+UNION ALL
+SELECT 'range between', count(*), sum(id) FROM t WHERE comment BETWEEN 'final' AND 'pending deposits sleep blithely #5'
+UNION ALL
+SELECT 'less than', count(*), sum(id) FROM t WHERE comment < 'final requests'
+UNION ALL
+SELECT 'greater than', count(*), sum(id) FROM t WHERE comment > 'special requests sleep furiously #9'
+UNION ALL
+SELECT 'not equal', count(*), sum(id) FROM t WHERE comment <> 'quick requests sleep blithely #3'
+UNION ALL
+SELECT 'in list', count(*), sum(id) FROM t WHERE comment IN ('final requests sleep blithely #4', 'quick requests sleep blithely #3', 'nope')
+UNION ALL
+SELECT 'not in list', count(*), sum(id) FROM t WHERE comment NOT IN ('final requests sleep blithely #4', 'quick requests sleep blithely #3')
+UNION ALL
+SELECT 'not in list with null', count(*), sum(id) FROM t WHERE comment NOT IN ('final requests sleep blithely #4', NULL)
+UNION ALL
+SELECT 'in list with null', count(*), sum(id) FROM t WHERE NOT (comment IN ('final requests sleep blithely #4', NULL)) OR k = 3
+UNION ALL
+SELECT 'or of prefixes', count(*), sum(id) FROM t WHERE comment LIKE 'final%' OR comment LIKE 'quick%'
+UNION ALL
+SELECT 'not prefix', count(*), 0 FROM t WHERE comment NOT LIKE 'special%'
+UNION ALL
+SELECT 'nullable range', count(*), 0 FROM t WHERE note >= 'pending' AND note < 'quick'
+UNION ALL
+SELECT 'nullable empty compare', count(*), sum(id) FROM t WHERE note > ''
+UNION ALL
+SELECT 'nullable not range', count(*), 0 FROM t WHERE NOT (note >= 'pending deposits')
+UNION ALL
+SELECT 'repeated prefix', count(*), 0 FROM t WHERE tag LIKE 'customer account reference number 12%'
+UNION ALL
+SELECT 'projected range', count(*), sum(length(comment)) FROM t WHERE comment >= 'quick' AND comment < 'regular'
 
 endloop
 
@@ -128,24 +164,42 @@ contains	37052
 contains function	16667
 count only	16667
 count only nullable	278075
+count only prefix	16666
+count only range	66667
 count only read by a filter	69334
 count only repeated	3693
 count only two columns	14260
 escaped bytes	395
+greater than	172
+in list	2
+in list with null	4000
+less than	49999
 like two	16667
 no match	0
+not equal	399999
 not escaped bytes	399870
+not in list	399998
+not in list with null	0
 not like two	383333
+not prefix	333333
 nullable empty	363636
+nullable empty compare	342246
 nullable like	9506
 nullable not like	278075
+nullable not range	106952
+nullable range	85561
+or of prefixes	133333
 prefix	16666
 prefix and suffix	13333
 projected	16667
 projected nullable	278074
+projected range	66667
+range between	154778
+range constant left	66666
 repeated contains	3731
 repeated fragment	99994
 repeated not like	298377
+repeated prefix	3731
 repeated suffix	3693
 repeated suffix function	34
 suffix	40000
@@ -153,7 +207,8 @@ suffix	40000
 endloop
 
 # a column that repeats its values over the table but rarely within a segment is matched on its compressed entries,
-# also when the scan returns it only because count(*) reads no column
+# also when the scan returns it only because count(*) reads no column; a prefix, which DuckDB rewrites to a range of
+# two comparisons, and a comparison are matched alike
 statement ok
 SET threads=1
 
@@ -166,7 +221,7 @@ SET jit_trace_runtime=true
 statement ok
 SET jit_event_log_size=100
 
-foreach search contains(tag,'12') suffix(tag,'77')
+foreach search contains(tag,'12') suffix(tag,'77') prefix(comment,'pending') comment>='quick'
 
 foreach aggregate sum(id) count(*)
 

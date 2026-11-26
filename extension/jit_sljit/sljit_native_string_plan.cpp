@@ -73,22 +73,29 @@ static bool TryReadNativeStringReferenceMaybeNullConstant(const ExecutionExpress
 	return IsNativeAsciiString(constant);
 }
 
-bool TryReadNativeStringEqualConstant(const ExecutionExpressionIR &root, idx_t &source_index, string &constant) {
-	if (root.kind != ExecutionExpressionIRKind::BINARY ||
-	    root.binary_op != ExecutionExpressionBinaryOp::COMPARE_EQUAL ||
-	    root.return_type.id() != LogicalTypeId::BOOLEAN || !root.left || !root.right) {
+bool TryReadNativeStringCompareConstant(const ExecutionExpressionIR &root, SljitNativeIntegerCompareOp &compare_op,
+                                        idx_t &source_index, string &constant) {
+	if (root.kind != ExecutionExpressionIRKind::BINARY || root.return_type.id() != LogicalTypeId::BOOLEAN ||
+	    !root.left || !root.right || !TryGetNativeIntegerCompareOp(root.binary_op, compare_op)) {
 		return false;
 	}
-	auto try_read = [&](const ExecutionExpressionIR &reference, const ExecutionExpressionIR &constant_node) {
-		bool constant_is_null;
-		if (!TryReadNativeStringReferenceMaybeNullConstant(reference, constant_node, source_index, constant,
-		                                                   constant_is_null) ||
-		    constant_is_null) {
-			return false;
-		}
-		return true;
-	};
-	return try_read(*root.left, *root.right) || try_read(*root.right, *root.left);
+	bool constant_is_null;
+	if (TryReadNativeStringReferenceMaybeNullConstant(*root.left, *root.right, source_index, constant,
+	                                                  constant_is_null)) {
+		return !constant_is_null;
+	}
+	if (TryReadNativeStringReferenceMaybeNullConstant(*root.right, *root.left, source_index, constant,
+	                                                  constant_is_null)) {
+		compare_op = FlipNativeIntegerCompareOp(compare_op);
+		return !constant_is_null;
+	}
+	return false;
+}
+
+bool TryReadNativeStringEqualConstant(const ExecutionExpressionIR &root, idx_t &source_index, string &constant) {
+	SljitNativeIntegerCompareOp compare_op;
+	return TryReadNativeStringCompareConstant(root, compare_op, source_index, constant) &&
+	       compare_op == SljitNativeIntegerCompareOp::EQUAL;
 }
 
 bool TryReadNativeStringInListConstant(const ExecutionExpressionIR &root, idx_t &source_index,

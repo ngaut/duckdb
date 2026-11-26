@@ -159,32 +159,24 @@ static bool SljitSourceHasOnlyDirectBuildStorageFilters(const ExecutionRegionNod
 	return has_string_match || all_string_sets;
 }
 
-//! Whether the expression searches a string: a contains or LIKE, and with anchored also a prefix or suffix, which a
-//! generated filter compares cheaply row by row but which still decompresses each string it reads
-static bool SljitExpressionHasStringSearch(const ExecutionExpressionIR &expression, bool anchored) {
-	if (expression.kind == ExecutionExpressionIRKind::INTRINSIC) {
-		switch (expression.intrinsic) {
-		case ExecutionExpressionIntrinsicKind::STRING_CONTAINS:
-		case ExecutionExpressionIntrinsicKind::STRING_LIKE:
-			return true;
-		case ExecutionExpressionIntrinsicKind::STRING_PREFIX:
-		case ExecutionExpressionIntrinsicKind::STRING_SUFFIX:
-			return anchored;
-		default:
-			break;
-		}
-	}
-	if (expression.left && SljitExpressionHasStringSearch(*expression.left, anchored)) {
+//! Whether the expression searches a string with a contains or LIKE
+static bool SljitExpressionHasStringSearch(const ExecutionExpressionIR &expression) {
+	if (expression.kind == ExecutionExpressionIRKind::INTRINSIC &&
+	    (expression.intrinsic == ExecutionExpressionIntrinsicKind::STRING_CONTAINS ||
+	     expression.intrinsic == ExecutionExpressionIntrinsicKind::STRING_LIKE)) {
 		return true;
 	}
-	if (expression.right && SljitExpressionHasStringSearch(*expression.right, anchored)) {
+	if (expression.left && SljitExpressionHasStringSearch(*expression.left)) {
 		return true;
 	}
-	if (expression.else_node && SljitExpressionHasStringSearch(*expression.else_node, anchored)) {
+	if (expression.right && SljitExpressionHasStringSearch(*expression.right)) {
+		return true;
+	}
+	if (expression.else_node && SljitExpressionHasStringSearch(*expression.else_node)) {
 		return true;
 	}
 	for (auto &child : expression.children) {
-		if (child && SljitExpressionHasStringSearch(*child, anchored)) {
+		if (child && SljitExpressionHasStringSearch(*child)) {
 			return true;
 		}
 	}
@@ -206,9 +198,10 @@ static bool SljitGeneratedFilterHasPackedPrefix(const vector<SljitNativeRegionOp
 //! storage evaluates a filter on a low-cardinality string column once per dictionary entry and scans the other
 //! filtered columns only for the rows it keeps. A generated filter reads that column row by row through the
 //! dictionary selection, which only pays when a packed SIMD prefix discards rows first. So storage keeps the
-//! filters when one of them searches a compressed string column that repeats its values, or searches a
-//! low-cardinality one, or when one reads such a column, the storage compresses, the filters keep at least half the
-//! rows (a generated filter only sees the dynamic filters' survivors), and the generated filter has no packed prefix.
+//! filters when one of them searches a compressed string column, or matches the compressed strings of a column the
+//! pipeline does not read, or searches a low-cardinality one, or when one reads such a column, the storage compresses,
+//! the filters keep at least half the rows (a generated filter only sees the dynamic filters' survivors), and the
+//! generated filter has no packed prefix.
 static bool SljitPreferStorageFilters(const ExecutionRegionNode &node, const ExecutionRegionTableScanContract &contract,
                                       const vector<SljitNativeRegionOpPlan> &generated_filter_ops) {
 	if (contract.estimated_source_cardinality < STANDARD_VECTOR_SIZE) {
@@ -232,21 +225,19 @@ static bool SljitPreferStorageFilters(const ExecutionRegionNode &node, const Exe
 			continue;
 		}
 		const auto distinct_count = contract.source_contract_input_distinct_counts[filter.scan_column_index];
-		// compressed storage searches each dictionary entry once, or the compressed strings of a column the pipeline
-		// does not read, while a generated filter decompresses every row first; a prefix or suffix, which a generated
-		// filter compares cheaply, only pays for the compressed strings (mostly distinct values)
-		if (contract.compressed_storage && filter.expression && filter.expression->root) {
-			const bool compressed_match = SljitSourceColumnIsUnread(contract, filter.scan_column_index) &&
-			                              !SljitSourceStringColumnRepeats(contract, filter.scan_column_index);
-			if (SljitExpressionHasStringSearch(*filter.expression->root, compressed_match)) {
-				return true;
-			}
+		// compressed storage searches each dictionary entry once, while a generated filter decompresses every row
+		// first; on a column the pipeline does not read, storage runs any filter a byte automaton expresses on the
+		// compressed strings themselves
+		if (contract.compressed_storage && filter.expression && filter.expression->root &&
+		    (SljitExpressionHasStringSearch(*filter.expression->root) ||
+		     SljitSourceFilterMatchesCompressedStrings(contract, filter))) {
+			return true;
 		}
 		if (distinct_count > distinct_count_limit) {
 			continue;
 		}
 		if (row_by_row_string_filter || (filter.expression && filter.expression->root &&
-		                                 SljitExpressionHasStringSearch(*filter.expression->root, false))) {
+		                                 SljitExpressionHasStringSearch(*filter.expression->root))) {
 			return true;
 		}
 	}
