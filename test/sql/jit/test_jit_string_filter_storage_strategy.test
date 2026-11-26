@@ -128,7 +128,8 @@ SELECT count(*) FROM duckdb_jit_events() WHERE phase = 'compile' AND status = 'c
 1
 
 # Source selection uses an estimated reuse cost, not a dictionary-size capability: the 25 brands are few enough to
-# reuse once a source has more than 50000 rows, whatever the category domain.
+# reuse once a source has more than 50000 rows. The category prefix alone keeps the filters in storage when its
+# column is mostly distinct, as storage then matches the compressed strings the query never reads.
 # The optional numeric IN filter is evaluated by its MARK join, not the generated string filter.
 foreach rows 50000 200000 2000000
 
@@ -169,7 +170,7 @@ endloop
 reset label dictionary_domain
 
 query I
-SELECT (count(*) > 0) = ({rows} > 50000) FROM duckdb_jit_events()
+SELECT (count(*) > 0) = ({rows} > 50000 OR {domain} * 16 > {rows}) FROM duckdb_jit_events()
 WHERE reason LIKE '%source_strategy_reason=storage-sensitive-filter%'
 ----
 true
@@ -253,8 +254,9 @@ SELECT count(*) FROM duckdb_jit_events() WHERE reason LIKE '%source_strategy_rea
 ----
 0
 
-# A search over a compressed string column that repeats its values runs on the entries storage keeps of them, even
-# with far more distinct values than a low-cardinality column; a column of distinct strings keeps the generated search
+# A search over a compressed string column runs in storage: on the entries of a column that repeats its values, even
+# with far more distinct values than a low-cardinality column, and on the compressed strings of a column of distinct
+# values that count(*) never reads
 statement ok
 CREATE TABLE named AS
 SELECT i::BIGINT AS id, 'cust#' || CAST(i % 5000 AS VARCHAR) AS repeated_name, 'unique-' || CAST(i AS VARCHAR) AS unique_name
@@ -285,6 +287,6 @@ SELECT count(*) FROM named WHERE unique_name LIKE '%99%'
 11073
 
 query I
-SELECT count(*) FROM duckdb_jit_events() WHERE reason LIKE '%source_strategy_reason=storage-sensitive-filter%'
+SELECT count(*) > 0 FROM duckdb_jit_events() WHERE reason LIKE '%source_strategy_reason=storage-sensitive-filter%'
 ----
-0
+true

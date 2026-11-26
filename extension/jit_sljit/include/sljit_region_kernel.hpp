@@ -91,6 +91,8 @@ private:
 	SljitRegionInstanceBindings bindings;
 	vector<SljitSharedPerfectHashPredicateClassificationCache> shared_predicate_classifications;
 	mutable atomic<idx_t> executed_filter_rows {0};
+	//! The compressed segments whose strings a scan filter matched without decompressing them
+	mutable atomic<idx_t> compressed_string_match_segments {0};
 };
 
 } // namespace duckdb

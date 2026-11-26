@@ -221,6 +221,10 @@ void SljitNativeRegionKernel::RecordExecutedFilterRows(ExecutionRegionRuntime &r
 		runtime.RecordJitRuntimePath("source.storage_scan.compiled_filter", filter_rows);
 		RecordSljitRegionBackendWork(runtime, filter_rows);
 	}
+	auto compressed_segments = compressed_string_match_segments.exchange(0, std::memory_order_relaxed);
+	if (compressed_segments > 0) {
+		runtime.RecordJitRuntimePath("source.storage_scan.compressed_string_match_segments", compressed_segments);
+	}
 }
 
 bool SljitNativeRegionKernel::TryExecuteFullPipeline(ExecutionRegionRuntime &runtime, ExecutionRegionResult &result) {

@@ -95,7 +95,8 @@ bool TryPlanSljitGeneratedSourceFilters(const ExecutionRegionNode &node, SljitSo
                                         bool render_diagnostics);
 //! Whether the region does not read the source column: only filters read it
 bool SljitSourceColumnIsUnread(const ExecutionRegionTableScanContract &contract, idx_t scan_column_index);
-//! Whether a string column repeats its values enough for storage to search its distinct entries rather than its rows
+//! Whether a string column repeats its values within a compressed segment (at most a row group) enough for storage
+//! to search its distinct entries rather than its rows
 bool SljitSourceStringColumnRepeats(const ExecutionRegionTableScanContract &contract, idx_t scan_column_index);
 void PlanSljitStorageScanFilters(const ExecutionRegionNode &node, vector<SljitNativeScanFilterPlan> &scan_filters,
                                  bool render_diagnostics);

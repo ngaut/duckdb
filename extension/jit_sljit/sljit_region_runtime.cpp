@@ -21,9 +21,10 @@ namespace duckdb {
 
 class SljitTableFilterKernelState : public TableFilterKernelState {
 public:
-	SljitTableFilterKernelState(const SljitExecutableScanFilter &scan_filter_p, atomic<idx_t> &executed_rows_p)
-	    : scan_filter(scan_filter_p), executed_rows(executed_rows_p), filter_selection(STANDARD_VECTOR_SIZE),
-	      alternate_selection(STANDARD_VECTOR_SIZE) {
+	SljitTableFilterKernelState(const SljitExecutableScanFilter &scan_filter_p, atomic<idx_t> &executed_rows_p,
+	                            atomic<idx_t> &compressed_segments_p)
+	    : scan_filter(scan_filter_p), executed_rows(executed_rows_p), compressed_segments(compressed_segments_p),
+	      filter_selection(STANDARD_VECTOR_SIZE), alternate_selection(STANDARD_VECTOR_SIZE) {
 		input.InitializeEmpty({scan_filter.input_type});
 	}
 
@@ -66,12 +67,17 @@ public:
 		if (!scan_filter.string_pattern) {
 			return nullptr;
 		}
-		return CreateSljitFSSTStringMatcher(*scan_filter.string_pattern, symbol_lengths, symbols);
+		auto matcher = CreateSljitFSSTStringMatcher(*scan_filter.string_pattern, symbol_lengths, symbols);
+		if (matcher) {
+			compressed_segments.fetch_add(1, std::memory_order_relaxed);
+		}
+		return matcher;
 	}
 
 private:
 	const SljitExecutableScanFilter &scan_filter;
 	atomic<idx_t> &executed_rows;
+	atomic<idx_t> &compressed_segments;
 	DataChunk input;
 	SelectionVector filter_selection;
 	SelectionVector alternate_selection;
@@ -136,7 +142,8 @@ bool SljitNativeRegionKernel::HasTableFilterKernel(idx_t filter_index) const {
 unique_ptr<TableFilterKernelState> SljitNativeRegionKernel::CreateTableFilterKernelState(idx_t filter_index) const {
 	for (auto &scan_filter : artifact->scan_filters) {
 		if (scan_filter.filter_index == filter_index) {
-			return make_uniq<SljitTableFilterKernelState>(scan_filter, executed_filter_rows);
+			return make_uniq<SljitTableFilterKernelState>(scan_filter, executed_filter_rows,
+			                                              compressed_string_match_segments);
 		}
 	}
 	return nullptr;

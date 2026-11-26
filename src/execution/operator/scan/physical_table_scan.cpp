@@ -36,6 +36,8 @@ struct TableScanExecutionSourceConfig {
 	bool return_source_contract_input = false;
 	//! The source contract input columns the scan leaves to the region in the vectors it reads whole
 	vector<idx_t> deferred_columns;
+	//! The scan columns the pipeline reads; filters on the others need not return values
+	vector<idx_t> read_columns;
 	//! The fewest rows of a vector the region takes as it is; smaller vectors are copied into one chunk
 	idx_t min_passthrough_rows = 0;
 };
@@ -72,6 +74,7 @@ BuildTableScanExecutionSourceConfig(const PhysicalTableScan &op, optional_ptr<Ta
 	result.filters = filters;
 	result.use_source_contract = open_request.UsesSourceContract() && capability.IsReady();
 	result.min_passthrough_rows = open_request.min_passthrough_rows;
+	result.read_columns = open_request.read_source_columns;
 	if (result.use_source_contract && open_request.UsesSourceContractInputLayout()) {
 		result.source_contract_input_types = open_request.source_contract_input_types;
 		result.return_source_contract_input = true;
@@ -367,8 +370,9 @@ private:
 		if (gstate.execution_source_contract.can_remove_filter_columns) {
 			execution_source_contract_all_columns.Initialize(context.client,
 			                                                 gstate.execution_source_contract.scanned_types);
-			execution_source_contract_scan_state.filters.MarkUnreadColumns(
-			    gstate.execution_source_contract.projection_ids);
+		}
+		if (!gstate.execution_source_contract.return_source_contract_input) {
+			execution_source_contract_scan_state.filters.MarkUnreadColumns(gstate.execution_source_config.read_columns);
 		}
 		execution_source_contract_scan_state.options.force_fetch_row =
 		    Settings::Get<DebugForceFetchRowSetting>(context.client);

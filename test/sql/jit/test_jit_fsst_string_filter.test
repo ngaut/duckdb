@@ -1,5 +1,5 @@
 # name: test/sql/jit/test_jit_fsst_string_filter.test
-# description: A string search on a column the query does not read past the filter matches the FSST-compressed strings without decompressing them: all-unique segments (FSST_ONLY) and dictionary segments with NULLs, every pattern shape, rare bytes stored as escapes, empty strings, vectors that span two segments, a preceding filter on another column, and a projected column that must still be decompressed agree with the native engine
+# description: A string search on a column the query does not read past the filter, including count(*) whose scan returns only its filter columns, matches the FSST-compressed strings without decompressing them: all-unique segments (FSST_ONLY) and dictionary segments with NULLs, every pattern shape, rare bytes stored as escapes, empty strings, vectors that span two segments, a preceding filter on another column, and a projected column that must still be decompressed agree with the native engine
 # group: [jit]
 
 require jit_sljit
@@ -7,7 +7,7 @@ require jit_sljit
 load {TEST_DIR}/jit_fsst_string_filter.db
 
 # unique comments without NULLs compress as FSST_ONLY; the nullable notes, which repeat each value four times, as a
-# dictionary of FSST entries
+# dictionary of FSST entries; the tags repeat each value about 36 times over the table but rarely within a segment
 statement ok
 CREATE TABLE t AS
 SELECT i AS id,
@@ -20,7 +20,10 @@ SELECT i AS id,
             ELSE ['special requests', 'pending deposits', 'quick packages', 'final accounts'][(i % 4) + 1] ||
                  ' are sleeping carefully along the ironic theodolites ' || (i % 100000)::VARCHAR
        END AS note,
-       (i % 100)::INTEGER AS k
+       (i % 100)::INTEGER AS k,
+       CASE WHEN i % 13 = 0 THEN NULL
+            ELSE 'customer account reference number ' || (i * 7 % 11000)::VARCHAR
+       END AS tag
 FROM range(400000) t(i)
 
 statement ok
@@ -30,10 +33,11 @@ restart
 
 query II
 SELECT column_name, bool_and(compression = 'DICT_FSST') FROM pragma_storage_info('t')
-WHERE column_name IN ('comment', 'note') AND segment_type = 'VARCHAR' GROUP BY ALL ORDER BY ALL
+WHERE column_name IN ('comment', 'note', 'tag') AND segment_type = 'VARCHAR' GROUP BY ALL ORDER BY ALL
 ----
 comment	true
 note	true
+tag	true
 
 statement ok
 SET jit_measure_native_legs=false
@@ -89,6 +93,24 @@ UNION ALL
 SELECT 'projected', count(*), sum(length(comment)) FROM t WHERE comment LIKE '%special%requests%'
 UNION ALL
 SELECT 'projected nullable', count(*), sum(length(note)) FROM t WHERE note NOT LIKE '%final%'
+UNION ALL
+SELECT 'repeated suffix', count(*), sum(id) FROM t WHERE tag LIKE '%99'
+UNION ALL
+SELECT 'repeated suffix function', count(*), sum(id) FROM t WHERE suffix(tag, 'number 7')
+UNION ALL
+SELECT 'repeated contains', count(*), sum(id) FROM t WHERE contains(tag, 'number 12')
+UNION ALL
+SELECT 'repeated not like', count(*), sum(id) FROM t WHERE tag NOT LIKE '%reference number 1%'
+UNION ALL
+SELECT 'count only', count(*), 0 FROM t WHERE comment LIKE '%special%requests%'
+UNION ALL
+SELECT 'count only nullable', count(*), 0 FROM t WHERE note NOT LIKE '%requests%'
+UNION ALL
+SELECT 'count only repeated', count(*), 0 FROM t WHERE tag LIKE '%99'
+UNION ALL
+SELECT 'count only two columns', count(*), 0 FROM t WHERE comment LIKE '%deposits%' AND note LIKE '%deposits are%'
+UNION ALL
+SELECT 'count only read by a filter', count(*), 0 FROM t WHERE comment LIKE '%quick%' OR k = 5
 
 endloop
 
@@ -104,6 +126,11 @@ SELECT q, c FROM r_auto ORDER BY q
 beside a numeric filter	36670
 contains	37052
 contains function	16667
+count only	16667
+count only nullable	278075
+count only read by a filter	69334
+count only repeated	3693
+count only two columns	14260
 escaped bytes	395
 like two	16667
 no match	0
@@ -116,7 +143,48 @@ prefix	16666
 prefix and suffix	13333
 projected	16667
 projected nullable	278074
+repeated contains	3731
 repeated fragment	99994
+repeated not like	298377
+repeated suffix	3693
+repeated suffix function	34
 suffix	40000
+
+endloop
+
+# a column that repeats its values over the table but rarely within a segment is matched on its compressed entries,
+# also when the scan returns it only because count(*) reads no column
+statement ok
+SET threads=1
+
+statement ok
+SET jit_policy='auto'
+
+statement ok
+SET jit_trace_runtime=true
+
+statement ok
+SET jit_event_log_size=100
+
+foreach search contains(tag,'12') suffix(tag,'77')
+
+foreach aggregate sum(id) count(*)
+
+statement ok
+SET jit_event_log_size=0
+
+statement ok
+SET jit_event_log_size=100
+
+statement ok
+CREATE OR REPLACE TEMP TABLE traced AS SELECT {aggregate} FROM t WHERE {search}
+
+query I
+SELECT count(*) > 0 FROM duckdb_jit_events()
+WHERE status = 'executed' AND jit_runtime_path_counts LIKE '%compressed_string_match_segments%'
+----
+true
+
+endloop
 
 endloop

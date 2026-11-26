@@ -319,6 +319,9 @@ struct ExecutionRegionOpenRequest {
 	//! The source contract input columns the region reads only for the rows its source filter keeps: the source may
 	//! defer reading them to the region (ExecutionDeferredColumns)
 	vector<idx_t> deferrable_source_columns;
+	//! The scan columns the pipeline reads (ExecutionRegionTableScanContract::read_columns): a scan filter on any other
+	//! column may match its values in compressed form and return none
+	vector<idx_t> read_source_columns;
 	optional_ptr<const TableFilterKernelProvider> table_filter_kernel_provider;
 	//! The fewest rows of a source chunk the region's kernel takes as it is
 	//! (ExecutionRegionKernel::MinPassthroughRows): smaller chunks are copied into batches

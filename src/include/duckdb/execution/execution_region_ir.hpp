@@ -109,12 +109,18 @@ struct ExecutionRegionTableScanContract {
 	vector<Value> source_contract_input_min_values;
 	vector<Value> source_contract_input_max_values;
 	vector<idx_t> source_contract_output_projection_map;
+	//! The scan columns whose values the pipeline reads from the scan's output; a filter column outside them is only
+	//! filtered, so storage may match it in compressed form and return no values for it
+	vector<idx_t> read_columns;
 	bool filter_pushdown = false;
 	bool dynamic_filters = false;
 	bool finalized_dynamic_filter_cardinality_estimate = false;
 	//! The table's checkpointed data is compressed (dictionary strings, bit-packed integers), so a storage scan
 	//! filter can evaluate against the compressed form
 	bool compressed_storage = false;
+	//! The rows of one row group: a compressed segment holds at most that many, so a column repeats within a segment
+	//! only when it has few distinct values compared to it
+	idx_t row_group_size = 0;
 };
 
 struct ExecutionRegionHashJoinContract {

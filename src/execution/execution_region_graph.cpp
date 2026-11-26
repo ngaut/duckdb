@@ -7,7 +7,13 @@
 
 #include "duckdb/execution/execution_region_graph.hpp"
 
+#include "duckdb/execution/operator/aggregate/physical_hash_aggregate.hpp"
+#include "duckdb/execution/operator/aggregate/physical_perfecthash_aggregate.hpp"
+#include "duckdb/execution/operator/aggregate/physical_ungrouped_aggregate.hpp"
+#include "duckdb/execution/operator/filter/physical_filter.hpp"
+#include "duckdb/execution/operator/projection/physical_projection.hpp"
 #include "duckdb/execution/operator/scan/physical_table_scan.hpp"
+#include "duckdb/planner/expression/bound_reference_expression.hpp"
 #include "duckdb/execution/execution_hash_join_runtime.hpp"
 #include "duckdb/execution/operator/join/perfect_hash_join_executor.hpp"
 #include "duckdb/execution/physical_operator.hpp"
@@ -565,12 +571,90 @@ static void AccumulateExecutionRegionGraphFacts(ExecutionRegionGraph &graph,
 	graph.has_native_operator_work = graph.has_native_operator_work || entry.has_native_operator_work;
 }
 
+static void MarkExecutionRegionReadColumns(const Expression &expression, vector<bool> &read) {
+	ExpressionIterator::VisitExpression<BoundReferenceExpression>(expression,
+	                                                              [&](const BoundReferenceExpression &reference) {
+		                                                              if (reference.Index() < read.size()) {
+			                                                              read[reference.Index()] = true;
+		                                                              }
+	                                                              });
+}
+
+static void MarkExecutionRegionReadColumns(const vector<unique_ptr<Expression>> &expressions, vector<bool> &read) {
+	for (auto &expression : expressions) {
+		MarkExecutionRegionReadColumns(*expression, read);
+	}
+}
+
+//! Marks the input columns an operator consuming the source's chunks reads; one whose reads are not known reads all
+static void MarkExecutionRegionConsumerReads(const PhysicalOperator &op, vector<bool> &read) {
+	switch (op.type) {
+	case PhysicalOperatorType::PROJECTION:
+		MarkExecutionRegionReadColumns(op.Cast<PhysicalProjection>().select_list, read);
+		return;
+	case PhysicalOperatorType::UNGROUPED_AGGREGATE:
+		MarkExecutionRegionReadColumns(op.Cast<PhysicalUngroupedAggregate>().aggregates, read);
+		return;
+	case PhysicalOperatorType::HASH_GROUP_BY: {
+		auto &data = op.Cast<PhysicalHashAggregate>().grouped_aggregate_data;
+		MarkExecutionRegionReadColumns(data.groups, read);
+		MarkExecutionRegionReadColumns(data.aggregates, read);
+		return;
+	}
+	case PhysicalOperatorType::PERFECT_HASH_GROUP_BY: {
+		auto &aggregate = op.Cast<PhysicalPerfectHashAggregate>();
+		MarkExecutionRegionReadColumns(aggregate.groups, read);
+		MarkExecutionRegionReadColumns(aggregate.aggregates, read);
+		return;
+	}
+	default:
+		std::fill(read.begin(), read.end(), true);
+		return;
+	}
+}
+
+//! Which columns of the source's chunks the pipeline reads: filters pass the chunk on and read their own columns, the
+//! first other operator (or the sink) consumes it
+static vector<bool> ExecutionRegionPipelineReadsSourceColumns(Pipeline &pipeline, idx_t column_count) {
+	vector<bool> read(column_count, false);
+	for (auto &op : pipeline.GetIntermediateOperators()) {
+		if (op.get().type != PhysicalOperatorType::FILTER) {
+			MarkExecutionRegionConsumerReads(op.get(), read);
+			return read;
+		}
+		MarkExecutionRegionReadColumns(*op.get().Cast<PhysicalFilter>().expression, read);
+	}
+	if (!pipeline.GetSink()) {
+		return vector<bool>(column_count, true);
+	}
+	MarkExecutionRegionConsumerReads(*pipeline.GetSink(), read);
+	return read;
+}
+
+//! Narrows the scan columns the pipeline reads to those its operators reference: a scan that returns no column the
+//! query needs still returns its filter columns
+static void NarrowExecutionRegionSourceReadColumns(Pipeline &pipeline, ExecutionRegionOperatorEntry &source) {
+	auto &contract = source.source_payload.table_scan_contract;
+	if (!contract.present) {
+		return;
+	}
+	auto &outputs = contract.source_contract_output_projection_map;
+	auto read = ExecutionRegionPipelineReadsSourceColumns(pipeline, outputs.size());
+	contract.read_columns.clear();
+	for (idx_t output_idx = 0; output_idx < outputs.size(); output_idx++) {
+		if (read[output_idx]) {
+			contract.read_columns.push_back(outputs[output_idx]);
+		}
+	}
+}
+
 unique_ptr<ExecutionRegionGraph> BuildExecutionRegionGraph(Pipeline &pipeline, bool render_diagnostics) {
 	auto result = make_uniq<ExecutionRegionGraph>();
 	auto &context = pipeline.GetClientContext();
 	if (pipeline.GetSource()) {
 		result->source = BuildExecutionRegionOperatorEntry(*pipeline.GetSource(), ExecutionRegionOperatorSlot::SOURCE,
 		                                                   render_diagnostics, DConstants::INVALID_INDEX, context);
+		NarrowExecutionRegionSourceReadColumns(pipeline, result->source);
 		AccumulateExecutionRegionGraphFacts(*result, result->source);
 	}
 	auto &operators = pipeline.GetIntermediateOperators();

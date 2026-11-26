@@ -472,15 +472,16 @@ bool TryPlanSljitGeneratedSourceFilters(const ExecutionRegionNode &node, SljitSo
 }
 
 bool SljitSourceColumnIsUnread(const ExecutionRegionTableScanContract &contract, idx_t scan_column_index) {
-	const auto &outputs = contract.source_contract_output_projection_map;
-	return std::find(outputs.begin(), outputs.end(), scan_column_index) == outputs.end();
+	const auto &read = contract.read_columns;
+	return std::find(read.begin(), read.end(), scan_column_index) == read.end();
 }
 
 bool SljitSourceStringColumnRepeats(const ExecutionRegionTableScanContract &contract, idx_t scan_column_index) {
 	static constexpr idx_t ROWS_PER_VALUE = 16;
 	const auto &distinct_counts = contract.source_contract_input_distinct_counts;
+	const auto segment_rows = MinValue(contract.estimated_source_cardinality, contract.row_group_size);
 	return scan_column_index < distinct_counts.size() && distinct_counts[scan_column_index] > 0 &&
-	       distinct_counts[scan_column_index] * ROWS_PER_VALUE <= contract.estimated_source_cardinality;
+	       distinct_counts[scan_column_index] * ROWS_PER_VALUE <= segment_rows;
 }
 
 void PlanSljitStorageScanFilters(const ExecutionRegionNode &node, vector<SljitNativeScanFilterPlan> &scan_filters,

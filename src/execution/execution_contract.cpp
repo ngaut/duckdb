@@ -1895,9 +1895,13 @@ static ExecutionRegionTableScanContract BuildExecutionContractTableScanContract(
 	result.source_contract_input_types = BuildExecutionContractTableScanSourceInputTypes(scan);
 	result.source_contract_input_not_null = BuildExecutionContractTableScanSourceInputNotNull(scan);
 	result.source_contract_output_projection_map = BuildExecutionContractTableScanOutputProjectionMap(scan);
+	result.read_columns = result.source_contract_output_projection_map;
 	result.filter_pushdown = scan.function.filter_pushdown;
 	result.dynamic_filters = scan.dynamic_filters && scan.dynamic_filters->HasFilters();
 	result.compressed_storage = ExecutionContractTableStorageCompresses(scan);
+	if (GetExecutionSourceContractCapability(scan).uses_storage_scan) {
+		result.row_group_size = scan.bind_data->Cast<TableScanBindData>().table.GetStorage().GetRowGroupSize();
+	}
 	return result;
 }
 

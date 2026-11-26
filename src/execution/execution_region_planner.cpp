@@ -494,6 +494,7 @@ static void AccumulateExecutionRegionOpenRequest(ExecutionRegionPlan &plan, cons
 		    plan_contract.UsesStaticPruningOnly() && plan_contract.UsesSourceContractInputLayout()
 		        ? lowering_plan.DeferrableSourceColumns()
 		        : vector<idx_t>();
+		plan_contract.read_source_columns = table_scan_contract.read_columns;
 		return;
 	}
 }

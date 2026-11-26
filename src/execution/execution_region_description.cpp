@@ -173,6 +173,7 @@ static string DescribeExecutionRegionTableScanContract(const ExecutionRegionTabl
 	    ",source_contract_input_max_values=" + BuildExecutionRegionValueList(contract.source_contract_input_max_values);
 	result += ",source_contract_output_projection_map=" +
 	          BuildExecutionRegionIdxList(contract.source_contract_output_projection_map);
+	result += ",read_columns=" + BuildExecutionRegionIdxList(contract.read_columns);
 	result += ",filter_pushdown=" + ExecutionRegionBool(contract.filter_pushdown);
 	result += ",dynamic_filters=" + ExecutionRegionBool(contract.dynamic_filters);
 	result += ",finalized_dynamic_filter_cardinality_estimate=" +
