@@ -1,0 +1,122 @@
+# name: test/sql/jit/test_jit_float_compare_select.test
+# description: A generated filter step selects rows by an AND of DOUBLE, FLOAT and integer comparisons without a branch per row: NaN ranks above every number, -0.0 equals 0.0, infinities compare as numbers, constants sit on either side, and two integer columns compare with each other
+# group: [jit]
+
+require jit_sljit
+
+load {TEST_DIR}/jit_float_compare_select.db
+
+statement ok
+CREATE TABLE facts AS
+SELECT i AS id,
+       (i * 7919) % 100003 AS v,
+       (i % 1000)::INTEGER AS k,
+       ((i * 31) % 1000)::INTEGER AS k2,
+       CASE i % 101
+           WHEN 0 THEN 'nan'::DOUBLE
+           WHEN 1 THEN 'inf'::DOUBLE
+           WHEN 2 THEN '-inf'::DOUBLE
+           WHEN 3 THEN -0.0::DOUBLE
+           WHEN 4 THEN 0.0::DOUBLE
+           ELSE (i % 50)::DOUBLE / 100
+       END AS d,
+       CASE i % 89
+           WHEN 0 THEN 'nan'::FLOAT
+           WHEN 1 THEN '-inf'::FLOAT
+           WHEN 2 THEN -0.0::FLOAT
+           ELSE ((i % 64)::DOUBLE / 8)::FLOAT
+       END AS f
+FROM range(600000) t(i)
+
+statement ok
+CREATE TABLE dim AS SELECT range AS k FROM range(1000)
+
+statement ok
+CHECKPOINT
+
+# a reopened database scans the checkpointed, compressed segments
+restart
+
+statement ok
+SET jit_measure_native_legs=false
+
+statement ok
+SET jit_cbo_startup_base_cost=0
+
+statement ok
+SET jit_cbo_startup_margin_basis_points=0
+
+# the filters feed a hash join probe or a grouped aggregate keyed by an expression, which take the rows it selects
+statement ok
+CREATE MACRO selected() AS TABLE
+SELECT 'd_range' AS q, count(*)::HUGEINT AS a, sum(f.id)::HUGEINT AS b FROM facts f JOIN dim ON f.k = dim.k WHERE f.d BETWEEN 0.05 AND 0.07
+UNION ALL
+SELECT 'd_zero', count(*), sum(f.id) FROM facts f JOIN dim ON f.k = dim.k WHERE f.d = -0.0
+UNION ALL
+SELECT 'd_ge_inf', count(*), sum(f.id) FROM facts f JOIN dim ON f.k = dim.k WHERE f.d >= 'inf'::DOUBLE
+UNION ALL
+SELECT 'd_ne', count(*), sum(f.id) FROM facts f JOIN dim ON f.k = dim.k WHERE f.d <> 0.25 AND f.d > -1.0
+UNION ALL
+SELECT 'd_constant_left', count(*), sum(f.id) FROM facts f JOIN dim ON f.k = dim.k WHERE 0.3 > f.d AND -0.0 <= f.d
+UNION ALL
+SELECT 'f_range_' || (k % 7), count(*), sum(id) FROM facts WHERE f >= 1.5::FLOAT AND f < 1.75::FLOAT GROUP BY k % 7
+UNION ALL
+SELECT 'f_negative_zero_' || (k % 5), count(*), sum(v) FROM facts WHERE f <= -0.0::FLOAT GROUP BY k % 5
+UNION ALL
+SELECT 'mixed_' || (k % 3), count(*), sum(id) FROM facts WHERE k < 400 AND d > 0.3 AND k2 >= 100 GROUP BY k % 3
+UNION ALL
+SELECT 'integer_columns', count(*), sum(f.id) FROM facts f JOIN dim ON f.k = dim.k WHERE f.k > f.k2 AND f.d < 0.2
+
+foreach threads 1 4
+
+statement ok
+SET threads={threads}
+
+foreach policy off auto
+
+statement ok
+SET jit_policy='{policy}'
+
+statement ok
+CREATE OR REPLACE TEMP TABLE r_{policy} AS FROM selected()
+
+endloop
+
+query I
+SELECT count(*) FROM ((SELECT * FROM r_off EXCEPT ALL SELECT * FROM r_auto)
+                      UNION ALL (SELECT * FROM r_auto EXCEPT ALL SELECT * FROM r_off))
+----
+0
+
+query I
+SELECT count(*) FROM r_auto
+----
+21
+
+endloop
+
+query III
+SELECT q, a, b FROM r_off WHERE q IN ('d_range', 'd_zero', 'd_ge_inf') ORDER BY q
+----
+d_ge_inf	11882	3564249481
+d_range	34215	10266750540
+d_zero	23291	6986822877
+
+# the generated filter selects every row of the scan
+statement ok
+SET threads=1
+
+statement ok
+SET jit_trace_runtime=true
+
+statement ok
+SET jit_event_log_size=100
+
+statement ok
+CREATE OR REPLACE TEMP TABLE traced AS
+SELECT count(*) FROM facts f JOIN dim ON f.k = dim.k WHERE f.d BETWEEN 0.05 AND 0.07
+
+query I
+SELECT count(*) > 0 FROM duckdb_jit_events() WHERE status = 'executed' AND jit_runtime_path_counts LIKE '%filter.selection%'
+----
+true

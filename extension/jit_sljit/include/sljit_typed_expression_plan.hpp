@@ -85,6 +85,9 @@ bool SljitTypedExpressionTreeInt64CastSupported(const ExecutionExpressionIR &nod
 bool SljitTypedExpressionTreeValueCastSupported(const ExecutionExpressionIR &node);
 bool SljitTypedExpressionTreeConstantDivisorReductionSupported(const ExecutionExpressionIR &node);
 bool SljitTypedExpressionTreeFastPathSupported(const ExecutionExpressionIR &node);
+//! Whether the typed selector decides the predicate's flat rows without a branch per row: one comparison, or an AND
+//! of integer and floating point comparisons, over at most two columns
+bool SljitTypedExpressionTreeFlatCompareSelectSupported(const ExecutionExpressionIR &root);
 //! Whether the fast emitters evaluate the node given a target for the rows whose value is NULL: a fast-path node, or a
 //! CASE whose conditions take the fast path and whose results are NULL constants or again such nodes, such as an
 //! aggregate payload CASE WHEN c THEN x END, whose NULL rows leave the aggregate's state alone

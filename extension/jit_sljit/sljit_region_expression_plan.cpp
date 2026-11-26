@@ -40,12 +40,13 @@ static bool TryReadNativeRegionExpressionKind(const ExecutionExpressionIR &root,
 		return true;
 	}
 
-	// Any boolean tree accepted by the SIMD gate uses the typed generated
-	// selector. The backend then chooses packed evaluation or a target-specific
-	// generated scalar loop from the same plan. String, IN, BETWEEN, and
-	// unsupported arithmetic predicates fail the gate and retain their
-	// specialized handlers below.
-	if (require_boolean && TryPlanSljitTypedExpressionTreeSimd(root).supported &&
+	// Any boolean tree accepted by the SIMD gate or the branchless compare select uses the typed generated
+	// selector. The backend then chooses packed evaluation or a target-specific generated scalar loop from the same
+	// plan. String, IN, BETWEEN, and unsupported arithmetic predicates fail both and retain their specialized
+	// handlers below.
+	if (require_boolean &&
+	    (TryPlanSljitTypedExpressionTreeSimd(root).supported ||
+	     SljitTypedExpressionTreeFlatCompareSelectSupported(root)) &&
 	    TryBuildSljitNativeTypedExpressionTreePlan(root, expr)) {
 		return true;
 	}
