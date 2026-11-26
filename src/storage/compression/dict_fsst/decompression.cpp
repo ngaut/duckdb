@@ -4,6 +4,7 @@
 #include "duckdb/common/vector/dictionary_vector.hpp"
 #include "duckdb/common/vector/flat_vector.hpp"
 #include "duckdb/common/vector/string_vector.hpp"
+#include "duckdb/planner/table_filter_state.hpp"
 #include "duckdb/storage/table/column_segment.hpp"
 #include "fsst.h"
 
@@ -415,6 +416,66 @@ void CompressedStringScanState::Select(Vector &result, idx_t result_offset, idx_
 			result_data.WriteStringRef(FetchStringFromDict(result_strings, decompress_offset, string_number));
 		}
 	}
+}
+
+bool CompressedStringScanState::TryFilterCompressed(ExpressionFilterState &filter_state, idx_t start, idx_t scan_count,
+                                                    SelectionVector &sel, idx_t &sel_count) {
+	if (layout.mode == DictFSSTMode::DICTIONARY || !filter_state.kernel) {
+		return false;
+	}
+	if (!compressed_matcher_requested) {
+		compressed_matcher_requested = true;
+		auto &symbol_table = *reinterpret_cast<duckdb_fsst_decoder_t *>(decoder);
+		compressed_matcher = filter_state.kernel->CreateFSSTMatcher(symbol_table.len, symbol_table.symbol);
+	}
+	if (!compressed_matcher) {
+		return false;
+	}
+	LoadStringLengths();
+	bool row_matches[STANDARD_VECTOR_SIZE];
+	const bool *matches;
+	optional_ptr<const SelectionVector> match_sel;
+	if (layout.mode == DictFSSTMode::FSST_ONLY) {
+		// row i is dictionary entry start + i + 1, and the rows are never NULL
+		D_ASSERT(scan_count <= STANDARD_VECTOR_SIZE);
+		const auto first_entry = start + 1;
+		const auto offset = GetStringOffset(first_entry, true);
+		const auto codes = layout.dictionary.GetBytes(offset, SumStringLengths(first_entry, first_entry + scan_count));
+		compressed_matcher->Match(codes.data(), string_lengths.data() + first_entry, scan_count, row_matches);
+		matches = row_matches;
+	} else {
+		if (!filter_result) {
+			// every dictionary entry is matched once; entry zero is NULL, whose result the filter itself decides
+			filter_result = make_unsafe_uniq_array<bool>(layout.dict_count);
+			const auto codes = layout.dictionary.GetBytes(0, SumStringLengths(0, layout.dict_count));
+			compressed_matcher->Match(codes.data(), string_lengths.data() + 1, layout.dict_count - 1,
+			                          filter_result.get() + 1);
+			Vector null_value(Value(LogicalType::VARCHAR), count_t(1));
+			SelectionVector null_sel;
+			idx_t null_count = 1;
+			ColumnSegment::FilterSelection(null_sel, null_value, filter_state, 1, null_count);
+			filter_result[0] = null_count == 1;
+		}
+		matches = filter_result.get();
+		match_sel = &GetSelVec(start, scan_count);
+	}
+	SelectionVector new_sel(sel_count);
+	idx_t approved_count = 0;
+	if (!sel.IsSet()) {
+		approved_count = SelectionVector::SelectFromBoolean(matches, match_sel, sel_count,
+		                                                    array_ptr<sel_t>(new_sel.data(), new_sel.Capacity()));
+	} else {
+		for (idx_t i = 0; i < sel_count; i++) {
+			const auto row = sel.get_index(i);
+			new_sel.set_index(approved_count, row);
+			approved_count += matches[match_sel ? match_sel->get_index(row) : row];
+		}
+	}
+	if (approved_count < scan_count) {
+		sel.Initialize(new_sel);
+	}
+	sel_count = approved_count;
+	return true;
 }
 
 bool CompressedStringScanState::AllowDictionaryScan(idx_t scan_count) {

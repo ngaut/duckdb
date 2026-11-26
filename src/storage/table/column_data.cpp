@@ -330,6 +330,65 @@ void ColumnData::FilterVector(ColumnScanState &state, Vector &result, idx_t targ
 	state.internal_index = state.offset_in_column;
 }
 
+bool ColumnData::TryFilterUnreadVectorBySegment(ColumnScanState &state, Vector &result, idx_t target_count,
+                                                SelectionVector &sel, idx_t &sel_count, const TableFilter &filter,
+                                                TableFilterState &filter_state) {
+	BeginScanVectorInternal(state);
+	auto segment = state.current;
+	idx_t covered = 0;
+	while (true) {
+		auto &function = segment->GetNode().GetCompressionFunction();
+		if (!function.filter || function.validity != CompressionValidity::NO_VALIDITY_REQUIRED) {
+			return false;
+		}
+		covered += segment->GetRowStart() + segment->GetNode().count -
+		           MaxValue(state.offset_in_column, segment->GetRowStart());
+		if (covered >= target_count) {
+			break;
+		}
+		segment = data.GetNextSegment(*segment);
+		if (!segment) {
+			return false;
+		}
+	}
+	SelectionVector result_sel(target_count);
+	idx_t result_count = 0;
+	idx_t sel_position = 0;
+	for (idx_t row = 0; row < target_count;) {
+		auto &current = state.current->GetNode();
+		const auto piece_count =
+		    MinValue<idx_t>(target_count - row, state.current->GetRowStart() + current.count - state.offset_in_column);
+		// the selected rows of the piece, rebased to its first row
+		SelectionVector piece_sel(piece_count);
+		idx_t piece_sel_count = 0;
+		while (sel_position < sel_count && sel.get_index(sel_position) < row + piece_count) {
+			piece_sel.set_index(piece_sel_count++, sel.get_index(sel_position++) - row);
+		}
+		if (piece_sel_count > 0) {
+			Vector piece_result(result.GetType(), piece_count);
+			current.Filter(state, piece_count, piece_result, piece_sel, piece_sel_count, filter, filter_state);
+			for (idx_t i = 0; i < piece_sel_count; i++) {
+				result_sel.set_index(result_count++, piece_sel.get_index(i) + row);
+			}
+		}
+		state.offset_in_column += piece_count;
+		row += piece_count;
+		if (row < target_count) {
+			state.previous_states.emplace_back(std::move(state.scan_state));
+			state.current = data.GetNextSegment(*state.current);
+			state.current->GetNode().InitializeScan(state);
+			state.segment_checked = false;
+		}
+	}
+	state.internal_index = state.offset_in_column;
+	ConstantVector::SetNull(result, count_t(target_count));
+	if (result_count < target_count) {
+		sel.Initialize(result_sel);
+	}
+	sel_count = result_count;
+	return true;
+}
+
 unique_ptr<BaseStatistics> ColumnData::GetUpdateStatistics() {
 	lock_guard<mutex> update_guard(update_lock);
 	return updates ? updates->GetStatistics() : nullptr;

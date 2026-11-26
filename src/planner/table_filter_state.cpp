@@ -19,6 +19,14 @@ namespace duckdb {
 TableFilterKernelState::~TableFilterKernelState() {
 }
 
+unique_ptr<CompressedStringMatcher> TableFilterKernelState::CreateFSSTMatcher(const uint8_t *symbol_lengths,
+                                                                              const uint64_t *symbols) const {
+	return nullptr;
+}
+
+CompressedStringMatcher::~CompressedStringMatcher() {
+}
+
 TableFilterKernelProvider::~TableFilterKernelProvider() {
 }
 

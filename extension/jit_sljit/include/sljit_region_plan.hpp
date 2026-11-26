@@ -149,6 +149,9 @@ struct SljitNativeScanFilterPlan {
 	LogicalType input_type;
 	bool input_not_null = false;
 	SljitNativeRegionExpressionPlan filter;
+	//! The filter matches the compressed strings of a column the region does not read and whose values rarely repeat:
+	//! the scan saves decompressing its rows
+	bool matches_compressed_rows = false;
 };
 
 struct SljitNativeHashJoinProbePlan {

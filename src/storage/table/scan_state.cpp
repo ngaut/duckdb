@@ -170,6 +170,16 @@ void ScanFilterInfo::Initialize(ClientContext &context, TableFilterSet &pruning_
 	InitializeResidualFilterMetadata(context, residual_filters_p, column_ids);
 }
 
+void ScanFilterInfo::MarkUnreadColumns(const vector<idx_t> &returned_columns) {
+	for (auto list : {&pruning_filter_list, &residual_filter_list}) {
+		for (auto &filter : *list) {
+			const auto column = filter.scan_column_index.GetIndex();
+			filter.filter_state->Cast<ExpressionFilterState>().values_unread =
+			    std::find(returned_columns.begin(), returned_columns.end(), column) == returned_columns.end();
+		}
+	}
+}
+
 void ScanFilterInfo::InitializeResidualFilterMetadata(ClientContext &context, TableFilterSet &filters,
                                                       const vector<StorageIndex> &column_ids) {
 	if (filters.HasFilters()) {

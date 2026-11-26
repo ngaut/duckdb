@@ -264,6 +264,11 @@ protected:
 	                  idx_t sel_count, ScanVectorType scan_type, idx_t result_offset = 0);
 	void FilterVector(ColumnScanState &state, Vector &result, idx_t target_count, SelectionVector &sel,
 	                  idx_t &sel_count, const TableFilter &filter, TableFilterState &filter_state);
+	//! Filters a vector spanning segments segment by segment, when every segment filters with its own validity and
+	//! the scan does not read the values (the result becomes a constant NULL); returns false otherwise
+	bool TryFilterUnreadVectorBySegment(ColumnScanState &state, Vector &result, idx_t target_count,
+	                                    SelectionVector &sel, idx_t &sel_count, const TableFilter &filter,
+	                                    TableFilterState &filter_state);
 
 	void FetchUpdates(TransactionData transaction, idx_t vector_index, Vector &result, idx_t scan_count,
 	                  UpdateScanType update_type);

@@ -4,6 +4,7 @@
 #include "duckdb/storage/compression/dict_fsst/decompression.hpp"
 #include "duckdb/function/compression/compression.hpp"
 #include "duckdb/function/compression_function.hpp"
+#include "duckdb/planner/table_filter_state.hpp"
 #include "duckdb/common/vector/dictionary_vector.hpp"
 #include "duckdb/storage/statistics/string_stats.hpp"
 #include "duckdb/storage/storage_manager.hpp"
@@ -174,6 +175,13 @@ static void DictFSSTFilter(ColumnSegment &segment, ColumnScanState &state, idx_t
 	D_ASSERT(sel_count <= vector_count);
 	auto &scan_state = state.scan_state->Cast<CompressedStringScanState>();
 	auto start = state.GetPositionInSegment();
+	auto &expression_state = filter_state.Cast<ExpressionFilterState>();
+	if (expression_state.values_unread &&
+	    scan_state.TryFilterCompressed(expression_state, start, vector_count, sel, sel_count)) {
+		// the scan does not return the column, so its strings stay compressed
+		ConstantVector::SetNull(result, count_t(vector_count));
+		return;
+	}
 	if (scan_state.AllowDictionaryScan(vector_count)) {
 		// only pushdown filters on dictionaries
 		if (!scan_state.filter_result) {

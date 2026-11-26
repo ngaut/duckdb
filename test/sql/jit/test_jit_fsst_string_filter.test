@@ -1,0 +1,122 @@
+# name: test/sql/jit/test_jit_fsst_string_filter.test
+# description: A string search on a column the query does not read past the filter matches the FSST-compressed strings without decompressing them: all-unique segments (FSST_ONLY) and dictionary segments with NULLs, every pattern shape, rare bytes stored as escapes, empty strings, vectors that span two segments, a preceding filter on another column, and a projected column that must still be decompressed agree with the native engine
+# group: [jit]
+
+require jit_sljit
+
+load {TEST_DIR}/jit_fsst_string_filter.db
+
+# unique comments without NULLs compress as FSST_ONLY; the nullable notes, which repeat each value four times, as a
+# dictionary of FSST entries
+statement ok
+CREATE TABLE t AS
+SELECT i AS id,
+       ['ordinary', 'special', 'pending', 'quick', 'final', 'regular'][(i % 6) + 1] || ' ' ||
+       ['requests', 'deposits', 'packages', 'accounts'][(i // 6 % 4) + 1] || ' sleep ' ||
+       CASE WHEN i % 1013 = 0 THEN chr(200 + (i % 50)::INTEGER) || 'ß緑' ELSE '' END ||
+       ['blithely', 'carefully', 'furiously'][(i // 24 % 3) + 1] || ' #' || i::VARCHAR AS comment,
+       CASE WHEN i % 11 = 0 THEN NULL
+            WHEN i % 17 = 0 THEN ''
+            ELSE ['special requests', 'pending deposits', 'quick packages', 'final accounts'][(i % 4) + 1] ||
+                 ' are sleeping carefully along the ironic theodolites ' || (i % 100000)::VARCHAR
+       END AS note,
+       (i % 100)::INTEGER AS k
+FROM range(400000) t(i)
+
+statement ok
+CHECKPOINT
+
+restart
+
+query II
+SELECT column_name, bool_and(compression = 'DICT_FSST') FROM pragma_storage_info('t')
+WHERE column_name IN ('comment', 'note') AND segment_type = 'VARCHAR' GROUP BY ALL ORDER BY ALL
+----
+comment	true
+note	true
+
+statement ok
+SET jit_measure_native_legs=false
+
+statement ok
+SET jit_cbo_startup_base_cost=0
+
+statement ok
+SET jit_cbo_startup_margin_basis_points=0
+
+foreach threads 1 4
+
+statement ok
+SET threads={threads}
+
+foreach policy off auto
+
+statement ok
+SET jit_policy='{policy}'
+
+statement ok
+CREATE OR REPLACE TEMP TABLE r_{policy} AS
+SELECT 'not like two' AS q, count(*) AS c, sum(id) AS total FROM t WHERE comment NOT LIKE '%special%requests%'
+UNION ALL
+SELECT 'like two', count(*), sum(id) FROM t WHERE comment LIKE '%special%requests%'
+UNION ALL
+SELECT 'contains', count(*), sum(id) FROM t WHERE comment LIKE '%carefully #1%'
+UNION ALL
+SELECT 'contains function', count(*), sum(id) FROM t WHERE contains(comment, 'quick packages')
+UNION ALL
+SELECT 'suffix', count(*), sum(id) FROM t WHERE comment LIKE '%7'
+UNION ALL
+SELECT 'prefix and suffix', count(*), sum(id) FROM t WHERE comment LIKE 'final%8'
+UNION ALL
+SELECT 'prefix', count(*), sum(id) FROM t WHERE comment LIKE 'pending accounts%'
+UNION ALL
+SELECT 'escaped bytes', count(*), sum(id) FROM t WHERE comment LIKE '%ß緑%'
+UNION ALL
+SELECT 'not escaped bytes', count(*), sum(id) FROM t WHERE comment NOT LIKE '%ß緑furiously%'
+UNION ALL
+SELECT 'repeated fragment', count(*), sum(id) FROM t WHERE comment LIKE '%s%s%s%s%'
+UNION ALL
+SELECT 'no match', count(*), sum(id) FROM t WHERE comment LIKE '%requests sleep quickly%'
+UNION ALL
+SELECT 'beside a numeric filter', count(*), sum(id) FROM t WHERE k < 37 AND comment LIKE '%deposits%'
+UNION ALL
+SELECT 'nullable not like', count(*), sum(id) FROM t WHERE note NOT LIKE '%requests%'
+UNION ALL
+SELECT 'nullable like', count(*), sum(id) FROM t WHERE note LIKE '%deposits are%theodolites 1%'
+UNION ALL
+SELECT 'nullable empty', count(*), sum(id) FROM t WHERE note LIKE '%'
+UNION ALL
+SELECT 'projected', count(*), sum(length(comment)) FROM t WHERE comment LIKE '%special%requests%'
+UNION ALL
+SELECT 'projected nullable', count(*), sum(length(note)) FROM t WHERE note NOT LIKE '%final%'
+
+endloop
+
+query I
+SELECT count(*) FROM ((SELECT * FROM r_off EXCEPT ALL SELECT * FROM r_auto)
+                      UNION ALL (SELECT * FROM r_auto EXCEPT ALL SELECT * FROM r_off))
+----
+0
+
+query II
+SELECT q, c FROM r_auto ORDER BY q
+----
+beside a numeric filter	36670
+contains	37052
+contains function	16667
+escaped bytes	395
+like two	16667
+no match	0
+not escaped bytes	399870
+not like two	383333
+nullable empty	363636
+nullable like	9506
+nullable not like	278075
+prefix	16666
+prefix and suffix	13333
+projected	16667
+projected nullable	278074
+repeated fragment	99994
+suffix	40000
+
+endloop

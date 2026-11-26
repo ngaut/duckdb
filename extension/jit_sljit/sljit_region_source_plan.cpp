@@ -193,9 +193,6 @@ static bool SljitGeneratedFilterHasPackedPrefix(const vector<SljitNativeRegionOp
 	       TryPlanSljitNativePredicatePartialSimd(*filter.expression_tree, filter.predicate->source_not_null).supported;
 }
 
-//! Rows per distinct value from which a string column repeats its values enough for storage to search its entries
-static constexpr idx_t REPEATED_STRING_ROWS_PER_VALUE = 16;
-
 //! Source-local cost heuristic, not a dictionary-encoding capability or a whole-pipeline admission rule. Compressed
 //! storage evaluates a filter on a low-cardinality string column once per dictionary entry and scans the other
 //! filtered columns only for the rows it keeps. A generated filter reads that column row by row through the
@@ -226,10 +223,12 @@ static bool SljitPreferStorageFilters(const ExecutionRegionNode &node, const Exe
 			continue;
 		}
 		const auto distinct_count = contract.source_contract_input_distinct_counts[filter.scan_column_index];
-		// a search over a column that repeats its values runs on the entries compressed storage keeps of them
-		if (contract.compressed_storage &&
-		    distinct_count * REPEATED_STRING_ROWS_PER_VALUE <= contract.estimated_source_cardinality &&
-		    filter.expression && filter.expression->root && SljitExpressionHasStringSearch(*filter.expression->root)) {
+		// a search runs on what compressed storage keeps: the entries of a column that repeats its values, and the
+		// compressed strings of a column the region does not read past the filter, which then never decompresses
+		const bool repeated = SljitSourceStringColumnRepeats(contract, filter.scan_column_index);
+		const bool unread = SljitSourceColumnIsUnread(contract, filter.scan_column_index);
+		if (contract.compressed_storage && (repeated || unread) && filter.expression && filter.expression->root &&
+		    SljitExpressionHasStringSearch(*filter.expression->root)) {
 			return true;
 		}
 		if (distinct_count > distinct_count_limit) {

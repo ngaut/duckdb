@@ -22,7 +22,7 @@ SELECT i AS id,
        END || ' #' || i AS name
 FROM range(300000) t(i)
 
-# distinct strings keep the filter out of storage, which evaluates a dictionary's few strings itself
+# the queries do not read the distinct strings past the filter, which matches their compressed form in storage
 statement ok
 CHECKPOINT
 

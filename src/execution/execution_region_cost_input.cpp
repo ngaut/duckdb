@@ -388,6 +388,13 @@ PhysicalRunnerCostInput BuildExecutionRegionCandidateCostInput(const ExecutionRe
 	input.vectorized_execution_preferred = backend_facts.backend_low_cardinality_string_predicate_count > 0;
 	const auto direct_hash_join_build_count =
 	    MinValue(input.native_hash_join_build_sink_count, backend_facts.backend_direct_hash_join_build_count);
+	// a scan filter that matches compressed strings saves decompressing the column: generated backend work
+	if (backend_facts.backend_compressed_string_filter_count > 0) {
+		input.generated_stage_count += backend_facts.backend_compressed_string_filter_count;
+		input.generated_backend_stage_count += backend_facts.backend_compressed_string_filter_count;
+		input.generated_work_class = PhysicalRunnerGeneratedWorkClass::COMPUTE;
+		input.has_accelerated_work = true;
+	}
 	if (direct_hash_join_build_count > 0) {
 		input.native_hash_join_build_sink_count -= direct_hash_join_build_count;
 		input.generated_stage_count += direct_hash_join_build_count;

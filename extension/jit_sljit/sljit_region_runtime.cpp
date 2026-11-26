@@ -9,6 +9,7 @@
 #include "sljit_region_kernel.hpp"
 
 #include "sljit_filter_runtime.hpp"
+#include "sljit_fsst_string_matcher.hpp"
 #include "sljit_full_pipeline_primitive_contract.hpp"
 
 #include "duckdb/common/allocator.hpp"
@@ -58,6 +59,14 @@ public:
 		approved_tuple_count = selected_count;
 		executed_rows.fetch_add(input_count, std::memory_order_relaxed);
 		return true;
+	}
+
+	unique_ptr<CompressedStringMatcher> CreateFSSTMatcher(const uint8_t *symbol_lengths,
+	                                                      const uint64_t *symbols) const override {
+		if (!scan_filter.string_pattern) {
+			return nullptr;
+		}
+		return CreateSljitFSSTStringMatcher(*scan_filter.string_pattern, symbol_lengths, symbols);
 	}
 
 private:

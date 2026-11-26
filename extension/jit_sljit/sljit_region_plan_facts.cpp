@@ -366,6 +366,11 @@ void AddSljitNativeRegionCapabilityFacts(ExecutionRegionLoweringPlan &lowering_p
 	if (SljitRegionPlanHasReferenceOnlyStringPerfectHashAggregate(native_region.ops)) {
 		lowering_plan.AddBackendReferenceOnlyStringPerfectHashAggregateCapability();
 	}
+	for (auto &scan_filter : native_region.scan_filters) {
+		if (scan_filter.matches_compressed_rows) {
+			lowering_plan.AddBackendCompressedStringFilterCapability();
+		}
+	}
 	for (auto not_null : native_region.source_not_null) {
 		lowering_plan.AddBackendSourceValidityCapability(not_null);
 	}

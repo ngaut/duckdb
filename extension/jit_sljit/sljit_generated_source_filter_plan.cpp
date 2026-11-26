@@ -8,6 +8,8 @@
 
 #include "sljit_region_plan_internal.hpp"
 
+#include "sljit_fsst_string_matcher.hpp"
+
 #include <algorithm>
 
 namespace duckdb {
@@ -469,6 +471,18 @@ bool TryPlanSljitGeneratedSourceFilters(const ExecutionRegionNode &node, SljitSo
 	return true;
 }
 
+bool SljitSourceColumnIsUnread(const ExecutionRegionTableScanContract &contract, idx_t scan_column_index) {
+	const auto &outputs = contract.source_contract_output_projection_map;
+	return std::find(outputs.begin(), outputs.end(), scan_column_index) == outputs.end();
+}
+
+bool SljitSourceStringColumnRepeats(const ExecutionRegionTableScanContract &contract, idx_t scan_column_index) {
+	static constexpr idx_t ROWS_PER_VALUE = 16;
+	const auto &distinct_counts = contract.source_contract_input_distinct_counts;
+	return scan_column_index < distinct_counts.size() && distinct_counts[scan_column_index] > 0 &&
+	       distinct_counts[scan_column_index] * ROWS_PER_VALUE <= contract.estimated_source_cardinality;
+}
+
 void PlanSljitStorageScanFilters(const ExecutionRegionNode &node, vector<SljitNativeScanFilterPlan> &scan_filters,
                                  bool render_diagnostics) {
 	scan_filters.clear();
@@ -516,6 +530,10 @@ void PlanSljitStorageScanFilters(const ExecutionRegionNode &node, vector<SljitNa
 		if (!TryLowerNativeRegionExpression(fragment, true, scan_filter.filter, error, render_diagnostics)) {
 			continue;
 		}
+		scan_filter.matches_compressed_rows =
+		    contract.compressed_storage && SljitSourceColumnIsUnread(contract, source_filter.scan_column_index) &&
+		    !SljitSourceStringColumnRepeats(contract, source_filter.scan_column_index) &&
+		    scan_filter.filter.predicate && SljitStringPatternAutomatonSupports(*scan_filter.filter.predicate);
 		scan_filters.push_back(std::move(scan_filter));
 	}
 }

@@ -895,6 +895,10 @@ void ExecutionRegionLoweringPlan::AddBackendDirectHashJoinBuildCapability() {
 	capability_facts.backend_direct_hash_join_build_count++;
 }
 
+void ExecutionRegionLoweringPlan::AddBackendCompressedStringFilterCapability() {
+	capability_facts.backend_compressed_string_filter_count++;
+}
+
 void ExecutionRegionLoweringPlan::AddBackendAggregateUpdateCapability(ExecutionRegionAggregateOperatorKind kind,
                                                                       bool primitive_payloads,
                                                                       bool grouped_state_addresses,
@@ -1198,6 +1202,9 @@ static void AppendExecutionRegionBackendCapabilityFacts(string &result, const Ex
 	                                     first_join);
 	AppendExecutionRegionCapabilityCount(result, "backend_join", "direct_hash_build",
 	                                     facts.backend_direct_hash_join_build_count, first_join);
+	bool first_source_filter = true;
+	AppendExecutionRegionCapabilityCount(result, "backend_source_filter", "compressed_string",
+	                                     facts.backend_compressed_string_filter_count, first_source_filter);
 
 	bool first_aggregate = true;
 	AppendExecutionRegionCapabilityCount(result, "backend_aggregate", "hash_update",

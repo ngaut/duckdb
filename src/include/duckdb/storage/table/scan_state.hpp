@@ -203,6 +203,8 @@ public:
 		return pruning_filter_list;
 	}
 
+	//! Marks the filters on the columns the scan does not return (any column not in returned_columns)
+	void MarkUnreadColumns(const vector<idx_t> &returned_columns);
 	//! The filters evaluated per row: the pruning filters, unless the scan carries a separate residual subset
 	const vector<ScanFilter> &GetResidualFilterList() const {
 		return separate_residual_filters ? residual_filter_list : pruning_filter_list;

@@ -367,6 +367,8 @@ private:
 		if (gstate.execution_source_contract.can_remove_filter_columns) {
 			execution_source_contract_all_columns.Initialize(context.client,
 			                                                 gstate.execution_source_contract.scanned_types);
+			execution_source_contract_scan_state.filters.MarkUnreadColumns(
+			    gstate.execution_source_contract.projection_ids);
 		}
 		execution_source_contract_scan_state.options.force_fetch_row =
 		    Settings::Get<DebugForceFetchRowSetting>(context.client);

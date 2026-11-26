@@ -387,6 +387,10 @@ bool BuildSljitExecutableRegion(const SljitNativeRegionPlan &region, SljitExecut
 		executable_filter.filter_index = scan_filter.filter_index;
 		executable_filter.input_type = scan_filter.input_type;
 		executable_filter.filter = std::move(filter_op.Filter());
+		if (executable_filter.filter->expression.plan.predicate) {
+			TryBuildSljitStringPatternAutomaton(*executable_filter.filter->expression.plan.predicate,
+			                                    executable_filter.string_pattern);
+		}
 		executable.scan_filters.push_back(std::move(executable_filter));
 	}
 	executable.ops.reserve(region.ops.size());

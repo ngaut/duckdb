@@ -10,6 +10,7 @@
 
 #include "sljit_aggregate_payload_descriptor.hpp"
 #include "sljit_compiled_function.hpp"
+#include "sljit_fsst_string_matcher.hpp"
 #include "sljit_function_types.hpp"
 #include "sljit_hash_join_probe_specialization.hpp"
 #include "sljit_perfect_hash_predicate_classification.hpp"
@@ -80,6 +81,8 @@ struct SljitExecutableScanFilter {
 	idx_t filter_index = DConstants::INVALID_INDEX;
 	LogicalType input_type;
 	unique_ptr<SljitExecutableFilter> filter;
+	//! The filter as an automaton over the bytes of its string column, which runs on compressed strings
+	unique_ptr<SljitStringPatternAutomaton> string_pattern;
 
 	idx_t CodeSize() const {
 		return filter ? filter->CodeSize() : 0;

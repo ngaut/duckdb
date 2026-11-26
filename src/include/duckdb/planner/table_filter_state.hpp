@@ -19,6 +19,18 @@ struct BloomFilterFunctionData;
 struct UnifiedVectorFormat;
 class Vector;
 
+//! Tells the FSST-compressed strings that pass a table filter from those that do not, without decompressing them. A
+//! compressed string is a sequence of one-byte codes: code 255 is followed by one literal byte, any other code stands
+//! for the bytes of its symbol in the segment's symbol table
+class DUCKDB_API CompressedStringMatcher {
+public:
+	virtual ~CompressedStringMatcher();
+
+	//! Sets matches[i] to whether the i-th of `count` non-NULL strings, stored back to back from `codes` with the given
+	//! compressed lengths, passes the filter
+	virtual void Match(const_data_ptr_t codes, const uint32_t *lengths, idx_t count, bool *matches) const = 0;
+};
+
 //! Backend-neutral executable selection state for one immutable table filter.
 //! The storage scan owns invocation and selection semantics; an accelerator
 //! backend only supplies the predicate implementation.
@@ -30,6 +42,10 @@ public:
 	//! scan to use its canonical ExpressionExecutor fallback.
 	virtual bool TrySelect(Vector &vector, UnifiedVectorFormat &format, SelectionVector &selection, idx_t scan_count,
 	                       idx_t &approved_tuple_count) = 0;
+	//! A matcher for the strings an FSST symbol table compresses (symbol_lengths[code] bytes of symbols[code], little
+	//! endian, for the codes below 255), or nullptr when the kernel needs the strings decompressed
+	virtual unique_ptr<CompressedStringMatcher> CreateFSSTMatcher(const uint8_t *symbol_lengths,
+	                                                              const uint64_t *symbols) const;
 };
 
 //! Query-plan-owned provider for thread-local table-filter kernels.
@@ -141,6 +157,8 @@ public:
 	unique_ptr<ExpressionExecutor> executor;
 	unique_ptr<ExpressionFilterExecutor> fast_executor;
 	unique_ptr<TableFilterKernelState> kernel;
+	//! The scan does not return the filtered column: its values are read only to evaluate this filter
+	bool values_unread = false;
 	bool fast_string_equality_filter_initialized = false;
 	bool fast_string_equality_filter_supported = false;
 	vector<string> fast_string_equality_constants;

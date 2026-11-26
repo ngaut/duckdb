@@ -61,6 +61,8 @@ struct ExecutionRegionLoweringCapabilityFacts {
 	idx_t backend_hash_join_non_equality_key_count = 0;
 	idx_t backend_hash_join_build_count = 0;
 	idx_t backend_direct_hash_join_build_count = 0;
+	//! Scan filters that match the compressed strings of a column the region does not read, never decompressing it
+	idx_t backend_compressed_string_filter_count = 0;
 	idx_t backend_hash_aggregate_update_count = 0;
 	idx_t backend_perfect_hash_aggregate_update_count = 0;
 	idx_t backend_ungrouped_aggregate_update_count = 0;
@@ -105,6 +107,7 @@ struct DUCKDB_API ExecutionRegionLoweringPlan {
 	                                       idx_t key_count);
 	void AddBackendHashJoinBuildCapability();
 	void AddBackendDirectHashJoinBuildCapability();
+	void AddBackendCompressedStringFilterCapability();
 	void AddBackendAggregateUpdateCapability(ExecutionRegionAggregateOperatorKind kind, bool primitive_payloads,
 	                                         bool grouped_state_addresses, bool perfect_hash_group_lookup);
 	void AddBackendReferenceOnlyStringPerfectHashAggregateCapability();

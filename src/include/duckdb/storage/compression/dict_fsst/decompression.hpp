@@ -9,6 +9,8 @@
 namespace duckdb {
 
 class DictionaryEntry;
+class CompressedStringMatcher;
+struct ExpressionFilterState;
 
 namespace dict_fsst {
 
@@ -56,6 +58,10 @@ public:
 	            StringScanType string_scan_type = StringScanType::STANDARD);
 
 	bool AllowDictionaryScan(idx_t scan_count);
+	//! Selects the rows that pass a filter whose kernel matches the compressed strings, without decompressing any;
+	//! returns false when the kernel needs the strings decompressed
+	bool TryFilterCompressed(ExpressionFilterState &filter_state, idx_t start, idx_t scan_count, SelectionVector &sel,
+	                         idx_t &sel_count);
 
 private:
 	static SegmentLayout ReadLayout(const BufferHandle &handle, const ColumnSegment &segment);
@@ -101,6 +107,9 @@ public:
 
 	unsafe_unique_array<bool> filter_result;
 	bool null_filter_result_initialized = false;
+	//! Matches the segment's compressed strings for the filter of the scan, when its kernel provides a matcher
+	unique_ptr<CompressedStringMatcher> compressed_matcher;
+	bool compressed_matcher_requested = false;
 };
 
 } // namespace dict_fsst
