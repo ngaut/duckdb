@@ -1053,8 +1053,12 @@ if(NOT MSVC)
 
   set(CMAKE_CXX_FLAGS_DEBUG
       "${CMAKE_CXX_FLAGS_DEBUG} -g -O0 -DDEBUG -Wall ${M32_FLAG} ${CXX_EXTRA}")
+  # Functions start at 64-byte boundaries: a hot loop then runs the same however
+  # unrelated code moves it, which the performance gates rely on when they
+  # compare builds
   set(CMAKE_CXX_FLAGS_RELEASE
-      "${CMAKE_CXX_FLAGS_RELEASE} -O3 -DNDEBUG ${M32_FLAG} ${CXX_EXTRA}")
+      "${CMAKE_CXX_FLAGS_RELEASE} -O3 -DNDEBUG -falign-functions=64 ${M32_FLAG} ${CXX_EXTRA}"
+  )
 
   set(CMAKE_LTO_JOBS
       ""
