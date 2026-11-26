@@ -1301,7 +1301,16 @@ void RadixPartitionedHashTable::ResolveStateAddresses(ExecutionContext &context,
 	PopulateGroupChunk(group_chunk, chunk);
 	RecordRadixTraceStage(recorder, "populate_group_chunk", populate_start);
 
-	ht.FindOrCreateGroupRows(group_chunk, addresses_out);
+	ht.FindOrCreateGroupRows(group_chunk, addresses_out, nullptr, GroupRowAddresses::PER_DISTINCT_VALUE);
+}
+
+void RadixPartitionedHashTable::ResolveGroupRows(ExecutionContext &context, DataChunk &groups, OperatorSinkInput &input,
+                                                 Vector &addresses_out, GroupRowAddresses mode,
+                                                 optional_ptr<ExecutionOperatorStageRecorder> recorder) const {
+	auto prepare_start = RadixTraceStart(recorder);
+	auto &ht = PrepareRadixHTSinkState(context, *this, input);
+	RecordRadixTraceStage(recorder, "prepare_sink_state", prepare_start);
+	ht.FindOrCreateGroupRows(groups, addresses_out, nullptr, mode);
 }
 
 bool RadixPartitionedHashTable::ReserveGroups(ExecutionContext &context, OperatorSinkInput &input, idx_t group_count,

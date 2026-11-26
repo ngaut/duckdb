@@ -369,6 +369,17 @@ public:
 		                                                          recorder);
 	}
 
+	bool TryResolveGroupRows(DataChunk &groups, Vector &addresses, GroupRowAddresses mode,
+	                         optional_ptr<ExecutionOperatorStageRecorder> recorder = nullptr) override {
+		if (!CanUseSingleGroupingState()) {
+			return false;
+		}
+		auto single_grouping = GetSingleGroupingSinkState();
+		single_grouping.grouping.table_data.ResolveGroupRows(context, groups, single_grouping.input, addresses, mode,
+		                                                     recorder);
+		return true;
+	}
+
 	bool ReserveGroups(idx_t group_count, optional_ptr<ExecutionOperatorStageRecorder> recorder = nullptr) override {
 		if (!CanUseSingleGroupingState()) {
 			return false;

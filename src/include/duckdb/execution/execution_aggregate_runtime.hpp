@@ -31,6 +31,18 @@ struct ExecutionGroupedAggregateAppendProof {
 	bool groups_strictly_increasing = false;
 };
 
+//! The row addresses GroupedAggregateHashTable::FindOrCreateGroupRows returns
+enum class GroupRowAddresses : uint8_t {
+	//! one row address per group
+	PER_GROUP,
+	//! constant or dictionary groups keep one row address per distinct value, which each group reaches through the
+	//! addresses' vector format
+	PER_DISTINCT_VALUE,
+	//! PER_DISTINCT_VALUE, except that dictionary groups of the dictionary the table resolved last do not look for
+	//! entries it has not resolved yet: the addresses of those entries are null
+	PER_RESOLVED_DISTINCT_VALUE
+};
+
 enum class ExecutionRowPointerGroupKeyCastKind : uint8_t {
 	NONE,
 	INT64_TO_INT32,

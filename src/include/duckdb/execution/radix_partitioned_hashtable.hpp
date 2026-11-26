@@ -58,6 +58,10 @@ public:
 	void ResolveStateAddresses(ExecutionContext &context, DataChunk &chunk, OperatorSinkInput &input,
 	                           Vector &addresses_out,
 	                           optional_ptr<ExecutionOperatorStageRecorder> recorder = nullptr) const;
+	//! ResolveStateAddresses for a chunk of just the groups
+	void ResolveGroupRows(ExecutionContext &context, DataChunk &groups, OperatorSinkInput &input, Vector &addresses_out,
+	                      GroupRowAddresses mode,
+	                      optional_ptr<ExecutionOperatorStageRecorder> recorder = nullptr) const;
 	bool ReserveGroups(ExecutionContext &context, OperatorSinkInput &input, idx_t group_count,
 	                   optional_ptr<ExecutionOperatorStageRecorder> recorder = nullptr) const;
 	bool TryUpdateNewPrimitiveGroups(ExecutionContext &context, DataChunk &chunk, OperatorSinkInput &input,

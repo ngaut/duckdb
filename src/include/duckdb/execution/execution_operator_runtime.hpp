@@ -103,8 +103,20 @@ private:
 struct ExecutionGroupedAggregateStateAddressState {
 	virtual ~ExecutionGroupedAggregateStateAddressState() {
 	}
+	//! Finds or creates the rows of the input's groups; constant or dictionary groups resolve one row per distinct
+	//! value, which addresses reaches through its vector format
 	virtual void ResolveStateAddresses(DataChunk &input, Vector &addresses,
 	                                   optional_ptr<ExecutionOperatorStageRecorder> recorder = nullptr) = 0;
+	//! The rows of a chunk that holds just the groups, in the grouping's order, as GroupedAggregateHashTable's
+	//! FindOrCreateGroupRows returns them in mode
+	virtual bool TryResolveGroupRows(DataChunk &groups, Vector &addresses, GroupRowAddresses mode,
+	                                 optional_ptr<ExecutionOperatorStageRecorder> recorder = nullptr) {
+		(void)groups;
+		(void)addresses;
+		(void)mode;
+		(void)recorder;
+		return false;
+	}
 	virtual bool ReserveGroups(idx_t group_count, optional_ptr<ExecutionOperatorStageRecorder> recorder = nullptr) {
 		(void)group_count;
 		(void)recorder;

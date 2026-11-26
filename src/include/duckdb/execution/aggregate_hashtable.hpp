@@ -131,14 +131,20 @@ public:
 	                              Vector &new_group_addresses, SelectionVector &new_groups_out);
 	optional_idx TryAddCompressedGroups(DataChunk &groups, DataChunk &payload, const unsafe_vector<idx_t> &filter);
 	//! Resolves the rows of constant or dictionary groups, offset by address_offset, from one lookup per distinct
-	//! value; an invalid result leaves the groups to the regular lookup
-	optional_idx TryResolveCompressedGroups(DataChunk &groups, Vector &addresses_out, idx_t address_offset);
-	optional_idx TryResolveDictionaryGroups(DataChunk &groups, Vector &addresses_out, idx_t address_offset);
+	//! value; an invalid result leaves the groups to the regular lookup. Any mode but PER_GROUP needs offset 0
+	optional_idx TryResolveCompressedGroups(DataChunk &groups, Vector &addresses_out, idx_t address_offset,
+	                                        GroupRowAddresses mode = GroupRowAddresses::PER_GROUP);
+	//! Whether a single group column of count rows resolves its groups once per dictionary entry: a storage
+	//! dictionary small enough to cache across vectors, or without an id smaller than half the rows
+	static bool ResolvesDictionaryGroupsPerEntry(const Vector &groups, idx_t count);
+	optional_idx TryResolveDictionaryGroups(DataChunk &groups, Vector &addresses_out, idx_t address_offset,
+	                                        GroupRowAddresses mode);
 	optional_idx TryResolveConstantGroups(DataChunk &groups, Vector &addresses_out, idx_t address_offset);
 	//! Finds or creates the rows of the groups for a caller that updates their states itself: the input counts toward
 	//! the table's adaptivity as AddChunk's does, and compressed groups take AddChunk's per-distinct-value lookup.
 	//! group_hashes, when given, are the groups' hashes
-	void FindOrCreateGroupRows(DataChunk &groups, Vector &addresses_out, optional_ptr<Vector> group_hashes = nullptr);
+	void FindOrCreateGroupRows(DataChunk &groups, Vector &addresses_out, optional_ptr<Vector> group_hashes = nullptr,
+	                           GroupRowAddresses mode = GroupRowAddresses::PER_GROUP);
 
 	//! Fetch the aggregates for specific groups from the HT and place them in the result
 	void FetchAggregates(DataChunk &groups, DataChunk &result);

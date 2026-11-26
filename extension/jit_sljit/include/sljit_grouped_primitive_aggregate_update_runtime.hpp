@@ -168,14 +168,18 @@ static SinkResultType SljitExecuteBoundGroupedPrimitiveAggregateUpdate(Execution
 			throw InternalException("SLJIT fused grouped aggregate update is missing state addresses");
 		}
 		auto payload_stage_start = SljitRegionStageStart(runtime);
-		grouped_state_addresses->Flatten();
-		const auto grouped_state_address_data = FlatVector::GetData<uintptr_t>(*grouped_state_addresses);
+		// constant or dictionary groups resolve one address per distinct value, which each row reaches through the
+		// selection
+		UnifiedVectorFormat grouped_state_address_format;
+		grouped_state_addresses->ToUnifiedFormat(grouped_state_address_format);
+		const auto grouped_state_address_data = UnifiedVectorFormat::GetData<uintptr_t>(grouped_state_address_format);
 		SljitExecuteFusedGroupedPrimitiveAggregatePayloadUpdate(
 		    op.AggregateUpdate().payloads, op.AggregateUpdate().fused_payload_update.Function(),
 		    op.AggregateUpdate().plan.sink_info.contract, op.AggregateUpdate().payload_descriptors,
 		    op.AggregateUpdate().payload_source_layout, op.AggregateUpdate().combined_payload_source_indices,
 		    op.AggregateUpdate().combined_payload_source_not_null, payload_lanes, reduction_lanes, input,
-		    grouped_state_address_data, nullptr, execute_sel, false, count, payload_scratch);
+		    grouped_state_address_data, grouped_state_address_format.sel->data(), execute_sel, false, count,
+		    payload_scratch);
 		RecordSljitRegionMaterializationElision(runtime, op.Kind(),
 		                                        "fused_payload_update_with_grouped_state_addresses");
 		RecordSljitRegionStageRuntime(runtime, bound.op_idx, op.Kind(), "primitive_payload_update_fused",

@@ -116,7 +116,7 @@ GENERIC_WORKLOADS = (
         "name": "grouped_scan",
         "setup_sql": "CREATE OR REPLACE TABLE __jit_generic_input AS SELECT i FROM range(20000000) tbl(i);",
         "sql": "SELECT i % 1000 AS key, sum(i * 31) AS value FROM __jit_generic_input GROUP BY key ORDER BY key",
-        "floor": {1: 1.47, 4: 1.48},
+        "floor": {1: 1.48, 4: 1.48},
         "ceiling": {1: 926_000_000, 4: 928_700_000},
         "compiled": {1: True, 4: True},
     },
@@ -350,7 +350,7 @@ GENERIC_WORKLOADS = (
             "AND quantity <= 25.00::DECIMAL(15,2) "
             "GROUP BY group_flag, group_status ORDER BY group_flag, group_status"
         ),
-        "floor": {1: 1.74, 4: 1.71},
+        "floor": {1: 1.75, 4: 1.71},
         "ceiling": {1: 531_800_000, 4: 538_900_000},
         "compiled": {1: True, 4: True},
     },
@@ -376,7 +376,7 @@ GENERIC_WORKLOADS = (
             "FROM __jit_generic_sorted_runs GROUP BY group_id + group_offset"
             ") grouped"
         ),
-        "floor": {1: 2.60, 4: 3.26},
+        "floor": {1: 2.66, 4: 3.26},
         "ceiling": {1: 541_300_000, 4: 552_200_000},
         "compiled": {1: True, 4: True},
     },
@@ -427,7 +427,7 @@ GENERIC_WORKLOADS = (
         # exact general path. Append-only ownership skips pointer-table resize
         # and capacity-abandon work once uniqueness is proven.
         "floor": {1: 7.05, 4: 6.68},
-        "ceiling": {1: 887_400_000, 4: 897_700_000},
+        "ceiling": {1: 887_100_000, 4: 897_700_000},
         "compiled": {1: True, 4: True},
     },
     {
@@ -734,7 +734,7 @@ ENCODINGS_THRESHOLDS = {
     "date_year_groups": ({1: 1.53, 4: 1.50}, {1: 447_400_000, 4: 452_600_000}),
     "dictionary_case": ({1: 0.99, 4: 0.99}, {1: 248_700_000, 4: 251_600_000}),
     "dictionary_contains": ({1: 4.41, 4: 4.36}, {1: 544_900_000, 4: 546_400_000}),
-    "dictionary_groups": ({1: 0.89, 4: 0.87}, {1: 529_300_000, 4: 532_900_000}),
+    "dictionary_groups": ({1: 1.57, 4: 1.59}, {1: 221_400_000, 4: 224_400_000}),
     "dictionary_groups_filtered": ({1: 1.12, 4: 1.10}, {1: 436_900_000, 4: 441_400_000}),
     "nullable_groups": ({1: 1.17, 4: 1.16}, {1: 426_200_000, 4: 430_900_000}),
     "nullable_min_max": ({1: 1.33, 4: 1.32}, {1: 412_300_000, 4: 414_000_000}),
@@ -791,20 +791,20 @@ TPCH_THRESHOLDS = {
     "04": (1.23, 3_630_400_000),
     "05": (1.21, 3_499_200_000),
     "06": (2.52, 2_413_600_000),
-    "07": (1.35, 4_758_300_000),
+    "07": (1.35, 4_756_900_000),
     "08": (1.46, 3_249_600_000),
     "09": (1.53, 11_385_500_000),
     "10": (0.98, 5_585_500_000),
     "11": (0.98, 734_300_000),
     "12": (1.15, 4_680_300_000),
-    "13": (3.65, 4_810_000_000),
+    "13": (3.65, 4_809_600_000),
     "14": (1.29, 2_817_800_000),
-    "15": (1.97, 1_927_900_000),
+    "15": (1.98, 1_927_900_000),
     "16": (0.98, 1_704_300_000),
     "17": (1.11, 2_946_600_000),
     "18": (2.49, 6_653_600_000),
     "19": (2.81, 2_581_500_000),
-    "20": (1.40, 3_568_700_000),
+    "20": (1.41, 3_566_600_000),
     "21": (0.98, 9_352_400_000),
     "22": (1.07, 2_365_400_000),
 }

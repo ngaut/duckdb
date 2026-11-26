@@ -1148,38 +1148,43 @@ GroupedAggregateHashTable::AggregateCompressedGroupState::AggregateCompressedGro
     : hashes(LogicalType::HASH), unique_group_pointers(LogicalType::POINTER), unique_entries(STANDARD_VECTOR_SIZE) {
 }
 
-optional_idx GroupedAggregateHashTable::TryResolveDictionaryGroups(DataChunk &groups, Vector &addresses_out,
-                                                                   idx_t address_offset) {
+bool GroupedAggregateHashTable::ResolvesDictionaryGroupsPerEntry(const Vector &groups, idx_t count) {
 	static constexpr idx_t MAX_DICTIONARY_SIZE_THRESHOLD = 20000;
 	static constexpr idx_t DICTIONARY_THRESHOLD = 2;
+	if (groups.GetVectorType() != VectorType::DICTIONARY_VECTOR) {
+		return false;
+	}
 	// dictionary vector - check if this is a duplicate eliminated dictionary from the storage
-	const auto &dict_col = groups.data[0];
-	auto opt_dict_size = DictionaryVector::DictionarySize(dict_col);
+	auto opt_dict_size = DictionaryVector::DictionarySize(groups);
 	if (!opt_dict_size.IsValid()) {
 		// dict size not known - this is not a dictionary that comes from the storage
-		return optional_idx();
+		return false;
 	}
-	idx_t dict_size = opt_dict_size.GetIndex();
-	auto &dictionary_id = DictionaryVector::DictionaryId(dict_col);
-	if (dictionary_id.empty()) {
+	const auto dict_size = opt_dict_size.GetIndex();
+	if (DictionaryVector::DictionaryId(groups).empty()) {
 		// dictionary has no id, we can't cache across vectors
 		// only use dictionary compression if there are fewer entries than groups
-		if (dict_size * DICTIONARY_THRESHOLD >= groups.size()) {
-			// dictionary is too large - use regular aggregation
-			return optional_idx();
-		}
-	} else {
-		// dictionary has an id - we can cache across vectors
-		// use a much larger limit for dictionary
-		if (dict_size >= MAX_DICTIONARY_SIZE_THRESHOLD) {
-			// dictionary is too large - use regular aggregation
-			return optional_idx();
-		}
+		return dict_size * DICTIONARY_THRESHOLD < count;
 	}
+	// dictionary has an id - we can cache across vectors
+	// use a much larger limit for dictionary
+	return dict_size < MAX_DICTIONARY_SIZE_THRESHOLD;
+}
+
+optional_idx GroupedAggregateHashTable::TryResolveDictionaryGroups(DataChunk &groups, Vector &addresses_out,
+                                                                   idx_t address_offset, GroupRowAddresses mode) {
+	const auto &dict_col = groups.data[0];
+	if (!ResolvesDictionaryGroupsPerEntry(dict_col, groups.size())) {
+		return optional_idx();
+	}
+	idx_t dict_size = DictionaryVector::DictionarySize(dict_col).GetIndex();
+	auto &dictionary_id = DictionaryVector::DictionaryId(dict_col);
 	const auto &dictionary_vector = DictionaryVector::Child(dict_col);
 	const auto &offsets = DictionaryVector::SelVector(dict_col);
 	auto &compressed_group_state = state.compressed_group_state;
-	if (compressed_group_state.dictionary_id.empty() || compressed_group_state.dictionary_id != dictionary_id) {
+	const bool new_dictionary =
+	    compressed_group_state.dictionary_id.empty() || compressed_group_state.dictionary_id != dictionary_id;
+	if (new_dictionary) {
 		// new dictionary - initialize the index state
 		if (dict_size > compressed_group_state.capacity) {
 			compressed_group_state.dictionary_addresses = make_uniq<Vector>(LogicalType::POINTER, dict_size);
@@ -1187,6 +1192,9 @@ optional_idx GroupedAggregateHashTable::TryResolveDictionaryGroups(DataChunk &gr
 			compressed_group_state.capacity = dict_size;
 		}
 		memset(compressed_group_state.found_entry.get(), 0, dict_size * sizeof(bool));
+		// an entry not resolved yet has a null address
+		memset(FlatVector::GetDataMutable<uintptr_t>(*compressed_group_state.dictionary_addresses), 0,
+		       dict_size * sizeof(uintptr_t));
 		compressed_group_state.dictionary_id = dictionary_id;
 		compressed_group_state.resolved_count = 0;
 		compressed_group_state.address_high_bits = ~uint64_t(0);
@@ -1204,7 +1212,8 @@ optional_idx GroupedAggregateHashTable::TryResolveDictionaryGroups(DataChunk &gr
 	// for each of the dictionary entries - check if we have already done a look-up into the hash table
 	// if we have, we can just use the cached group pointers
 	// once every dict slot has been seen the walk would produce no new entries - skip it
-	if (compressed_group_state.resolved_count < dict_size) {
+	const bool skip_unresolved = mode == GroupRowAddresses::PER_RESOLVED_DISTINCT_VALUE && !new_dictionary;
+	if (compressed_group_state.resolved_count < dict_size && !skip_unresolved) {
 		for (idx_t i = 0; i < groups.size(); i++) {
 			auto dict_idx = offsets.get_index(i);
 			unique_entries.set_index(unique_count, dict_idx);
@@ -1239,6 +1248,13 @@ optional_idx GroupedAggregateHashTable::TryResolveDictionaryGroups(DataChunk &gr
 	for (idx_t i = 0; i < unique_count; i++) {
 		auto dict_idx = unique_entries.get_index(i);
 		dict_addresses[dict_idx] = new_dict_addresses[i];
+	}
+	if (mode != GroupRowAddresses::PER_GROUP) {
+		D_ASSERT(address_offset == 0);
+		// the cached addresses keep the capacity of the largest dictionary seen; this dictionary uses its first entries
+		FlatVector::SetSize(dictionary_addresses, dict_size);
+		addresses_out.Dictionary(dictionary_addresses, dict_size, offsets, groups.size());
+		return new_group_count;
 	}
 	// now set up the addresses for the aggregates
 	addresses_out.SetVectorType(VectorType::FLAT_VECTOR);
@@ -1317,14 +1333,14 @@ optional_idx GroupedAggregateHashTable::TryResolveConstantGroups(DataChunk &grou
 }
 
 optional_idx GroupedAggregateHashTable::TryResolveCompressedGroups(DataChunk &groups, Vector &addresses_out,
-                                                                   idx_t address_offset) {
+                                                                   idx_t address_offset, GroupRowAddresses mode) {
 	// all groups must be compressed
 	if (groups.AllConstant()) {
 		return TryResolveConstantGroups(groups, addresses_out, address_offset);
 	}
 	if (groups.ColumnCount() == 1 && groups.data[0].GetVectorType() == VectorType::DICTIONARY_VECTOR &&
 	    groups.data[0].GetType().InternalType() != PhysicalType::STRUCT) {
-		return TryResolveDictionaryGroups(groups, addresses_out, address_offset);
+		return TryResolveDictionaryGroups(groups, addresses_out, address_offset, mode);
 	}
 	return optional_idx();
 }
@@ -1344,10 +1360,12 @@ optional_idx GroupedAggregateHashTable::TryAddCompressedGroups(DataChunk &groups
 }
 
 void GroupedAggregateHashTable::FindOrCreateGroupRows(DataChunk &groups, Vector &addresses_out,
-                                                      optional_ptr<Vector> group_hashes) {
+                                                      optional_ptr<Vector> group_hashes, GroupRowAddresses mode) {
 	adaptivity.AddInput(groups.size());
-	if (TryResolveCompressedGroups(groups, addresses_out, 0).IsValid()) {
-		addresses_out.Flatten();
+	if (TryResolveCompressedGroups(groups, addresses_out, 0, mode).IsValid()) {
+		if (mode == GroupRowAddresses::PER_GROUP) {
+			addresses_out.Flatten();
+		}
 		return;
 	}
 	if (!group_hashes) {

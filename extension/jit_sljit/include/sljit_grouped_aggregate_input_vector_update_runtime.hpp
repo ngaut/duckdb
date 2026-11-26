@@ -8,6 +8,7 @@
 
 #pragma once
 
+#include "duckdb/execution/aggregate_hashtable.hpp"
 #include "sljit_grouped_aggregate_direct_update_runtime.hpp"
 #include "sljit_grouped_aggregate_direct_update_capability_runtime.hpp"
 #include "sljit_grouped_aggregate_input_vector_groups.hpp"
@@ -61,6 +62,105 @@ static bool TryExecuteDirectInputVectorGroupedTargetPayloadUpdate(
 	return true;
 }
 
+//! A single group key that arrives as a storage dictionary resolves its groups once per dictionary entry: the key
+//! is materialized for the dictionary's entries once per dictionary, DuckDB finds or creates the row of each entry the
+//! rows use, and the generated update reaches every row's states through the dictionary's selection
+static bool SljitTryExecuteDictionaryGroupedAggregateUpdate(
+    ExecutionRegionRuntime &runtime, SljitRegionExecutionScratch &scratch, idx_t op_idx, SljitExecutableRegionOp &op,
+    DataChunk &payload_input, const vector<ExecutionRowPointerGroupKeySource> &group_sources,
+    const vector<idx_t> &payload_source_indices, optional_ptr<const vector<bool>> payload_source_not_null,
+    const vector<const ExecutionPrimitiveAggregateUpdateLane *> &payload_lanes,
+    const vector<SljitGroupedReductionLaneBinding> &reduction_lanes,
+    ExecutionGroupedAggregateStateAddressBinding &grouped_state, SljitAggregatePayloadAdapterScratch &payload_scratch,
+    optional_ptr<SljitPendingPreaggregatedPrimitiveGroupBatch> pending_preaggregated_groups) {
+	if (group_sources.size() != 1 || !op.AggregateUpdate().fused_payload_update.Function()) {
+		return false;
+	}
+	auto &source = group_sources[0];
+	if (!source.ready || source.HasOutputTransform() ||
+	    source.source_kind != ExecutionRowPointerGroupKeySourceKind::INPUT_VECTOR ||
+	    source.input_vector_index >= payload_input.ColumnCount()) {
+		return false;
+	}
+	auto &key = payload_input.data[source.input_vector_index];
+	if (!GroupedAggregateHashTable::ResolvesDictionaryGroupsPerEntry(key, payload_input.size()) ||
+	    DictionaryVector::DictionaryId(key).empty() ||
+	    !SljitCanExecuteDirectGroupedStateAddressPayloadUpdate(scratch, op_idx, op, payload_input, reduction_lanes,
+	                                                           nullptr, payload_input.size())) {
+		return false;
+	}
+	const auto &dictionary_id = DictionaryVector::DictionaryId(key);
+	if (payload_scratch.dictionary_group_keys_id != dictionary_id) {
+		const auto dictionary_size = DictionaryVector::DictionarySize(key).GetIndex();
+		DataChunk entries;
+		entries.InitializeEmpty(payload_input.GetTypes());
+		entries.data[source.input_vector_index].Reference(DictionaryVector::Child(key));
+		entries.SetChildCardinality(dictionary_size);
+		auto keys = DictionaryVector::CreateReusableDictionary(source.target_type, dictionary_size);
+		payload_scratch.dictionary_group_keys_id.clear();
+		if (!SljitTryMaterializeInputVectorGroupSource(entries, source, keys->data, dictionary_size, false)) {
+			return false;
+		}
+		keys->data.Flatten();
+		keys->id = dictionary_id;
+		payload_scratch.dictionary_group_keys = std::move(keys);
+		payload_scratch.dictionary_group_keys_id = dictionary_id;
+	}
+	if (pending_preaggregated_groups) {
+		if (pending_preaggregated_groups->HasPending() &&
+		    !SljitFlushPendingPreaggregatedPrimitiveGroups(runtime, scratch, op_idx, op, *pending_preaggregated_groups,
+		                                                   grouped_state)) {
+			return false;
+		}
+		SljitInvalidateProvenUniqueAppendContract(runtime, op, *pending_preaggregated_groups, grouped_state);
+	}
+	const auto count = payload_input.size();
+	auto &groups = payload_scratch.PrepareInputVectorGroups(runtime.GetAllocator(), group_sources);
+	groups.data[0].Dictionary(payload_scratch.dictionary_group_keys, DictionaryVector::SelVector(key), count);
+	groups.SetChildCardinality(count);
+	auto &rows = payload_scratch.dictionary_group_rows;
+	auto resolve_rows = [&](GroupRowAddresses mode) {
+		auto lookup_start = SljitRegionStageStart(runtime);
+		return ExecuteSljitRegionRecordedOperation(runtime, op_idx, op.Kind(), "dictionary_group_rows", lookup_start,
+		                                           [&](optional_ptr<ExecutionOperatorStageRecorder> recorder) {
+			                                           return grouped_state.state->TryResolveGroupRows(groups, rows,
+			                                                                                           mode, recorder);
+		                                           });
+	};
+	auto update_state = SljitBuildGroupedStateAddressUpdateState(
+	    op, payload_input, payload_lanes, reduction_lanes, payload_scratch,
+	    optional_ptr<const vector<idx_t>>(&payload_source_indices), payload_source_not_null);
+	auto update = [&](const sel_t *execute_sel, idx_t update_count) {
+		UnifiedVectorFormat row_format;
+		rows.ToUnifiedFormat(row_format);
+		SljitExecuteGroupedSelectedStateAddressUpdate(UnifiedVectorFormat::GetData<uintptr_t>(row_format),
+		                                              row_format.sel->data(), execute_sel, update_count, &update_state);
+	};
+	// the generic update defers the rows of entries without a row yet, which the scan for new entries then resolves
+	// for a replay of just those rows; the typed update needs every entry resolved first
+	const bool defer_unresolved =
+	    update_state.payload_source_layout != SljitAggregatePayloadSourceLayout::FUSED_COMBINED;
+	if (!resolve_rows(defer_unresolved ? GroupRowAddresses::PER_RESOLVED_DISTINCT_VALUE
+	                                   : GroupRowAddresses::PER_DISTINCT_VALUE)) {
+		return false;
+	}
+	auto update_start = SljitRegionStageStart(runtime);
+	update_state.deferred_rows = defer_unresolved ? payload_scratch.dictionary_deferred_rows : nullptr;
+	update(nullptr, count);
+	if (update_state.deferred_row_count > 0) {
+		const auto deferred_row_count = update_state.deferred_row_count;
+		update_state.deferred_rows = nullptr;
+		if (!resolve_rows(GroupRowAddresses::PER_DISTINCT_VALUE)) {
+			throw InternalException("SLJIT dictionary grouped update lost its grouped state");
+		}
+		update(payload_scratch.dictionary_deferred_rows, deferred_row_count);
+		RecordSljitRegionRuntimePath(runtime, op.Kind(), "dictionary_grouped_update.deferred_rows", deferred_row_count);
+	}
+	RecordSljitRegionStageRuntime(runtime, op_idx, op.Kind(), "dictionary_group_payload_update", update_start);
+	RecordSljitRegionMaterializationElision(runtime, op.Kind(), "dictionary_grouped_update", count);
+	return true;
+}
+
 static bool SljitTryExecuteInputVectorGroupedAggregateUpdate(
     ExecutionRegionRuntime &runtime, SljitRegionExecutionScratch &scratch, idx_t op_idx, SljitExecutableRegionOp &op,
     DataChunk &payload_input, const vector<ExecutionRowPointerGroupKeySource> &group_sources,
@@ -98,6 +198,11 @@ static bool SljitTryExecuteInputVectorGroupedAggregateUpdate(
 	if (has_group_output_transform && !pending_preaggregated_groups) {
 		RecordSljitRegionRuntimePath(runtime, op.Kind(), "group_output_transform.materialized_fallback",
 		                             payload_input.size());
+	}
+	if (SljitTryExecuteDictionaryGroupedAggregateUpdate(
+	        runtime, scratch, op_idx, op, payload_input, group_sources, payload_source_indices, payload_source_not_null,
+	        payload_lanes, reduction_lanes, grouped_state, payload_scratch, pending_preaggregated_groups)) {
+		return true;
 	}
 
 	const bool direct_payload_sources = payload_source_layout == SljitAggregatePayloadSourceLayout::DIRECT_PER_LANE;

@@ -28,6 +28,9 @@ struct SljitGroupedStateAddressUpdateState {
 	SljitAggregatePayloadAdapterScratch *adapter_scratch = nullptr;
 	optional_ptr<const vector<idx_t>> input_source_indices_override;
 	optional_ptr<const vector<bool>> input_source_not_null_override;
+	//! Where the update appends the rows whose state address is null, when some may be; how many it appended
+	sel_t *deferred_rows = nullptr;
+	idx_t deferred_row_count = 0;
 };
 
 static SljitGroupedStateAddressUpdateState
@@ -70,7 +73,7 @@ static void SljitExecuteGroupedSelectedStateAddressUpdate(const uintptr_t *addre
 	    *state.combined_payload_source_indices, *state.combined_payload_source_not_null, *state.lanes,
 	    *state.reduction_lanes, *state.input, addresses, address_sel, execute_sel ? &execute_selection : nullptr,
 	    state_addresses_by_loop_index, count, *state.adapter_scratch, state.input_source_indices_override,
-	    state.input_source_not_null_override);
+	    state.input_source_not_null_override, state.deferred_rows, &state.deferred_row_count);
 }
 
 static void SljitExecuteGroupedStateTargetSpan(const ExecutionGroupedAggregateStateTargetSpan &span,

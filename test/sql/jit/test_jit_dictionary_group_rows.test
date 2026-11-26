@@ -1,0 +1,164 @@
+# name: test/sql/jit/test_jit_dictionary_group_rows.test
+# description: A grouped aggregate keyed by one string column that storage returns as a dictionary resolves one group row per dictionary entry and updates the states through the dictionary's selection: string keys compressed to integers (a longer key stays a string, which the native engine groups), NULL keys and NULL payloads, many dictionaries, entries that first appear deep inside a segment, filtered rows, and typed payload expressions agree with the native engine
+# group: [jit]
+
+require jit_sljit
+
+load {TEST_DIR}/jit_dictionary_group_rows.db
+
+# mode repeats seven short values; late_mode switches to five new values halfway through every block of 60000 rows,
+# so a dictionary gains entries after its first vectors; long_mode is too long to compress into an integer; the
+# nullable modes have NULL keys, and price NULL payloads
+statement ok
+CREATE TABLE t AS
+SELECT i AS id,
+       (i % 1000)::INTEGER AS k,
+       CASE WHEN i % 17 = 0 THEN NULL ELSE (i % 100000)::DECIMAL(15,2) END AS price,
+       ['AIR', 'MAIL', 'SHIP', 'RAIL', 'TRUCK', 'FOB', 'REG AIR'][(i % 7) + 1] AS mode,
+       CASE WHEN i % 60000 < 30000 THEN 'early ' || (i % 3)::VARCHAR ELSE 'late ' || (i % 5)::VARCHAR END AS late_mode,
+       'a delivery mode name longer than sixteen bytes #' || (i % 6)::VARCHAR AS long_mode,
+       CASE WHEN i % 11 = 0 THEN NULL ELSE ['north', 'south', 'east', 'west'][(i % 4) + 1] END AS nullable_mode
+FROM range(1000000) t(i)
+
+statement ok
+CHECKPOINT
+
+# a reopened database scans the checkpointed, dictionary-compressed segments
+restart
+
+query II
+SELECT column_name, bool_and(compression = 'DICT_FSST') FROM pragma_storage_info('t')
+WHERE column_name IN ('mode', 'late_mode', 'long_mode', 'nullable_mode') AND segment_type = 'VARCHAR'
+GROUP BY ALL ORDER BY ALL
+----
+late_mode	true
+long_mode	true
+mode	true
+nullable_mode	true
+
+statement ok
+SET jit_measure_native_legs=false
+
+statement ok
+SET jit_cbo_startup_base_cost=0
+
+statement ok
+SET jit_cbo_startup_margin_basis_points=0
+
+statement ok
+CREATE MACRO grouped() AS TABLE
+SELECT 'mode' AS q, mode AS g, count(*)::HUGEINT AS a, sum(id)::HUGEINT AS b FROM t GROUP BY mode
+UNION ALL
+SELECT 'mode counts', mode, count(price), sum(k) FROM t GROUP BY mode
+UNION ALL
+SELECT 'mode nullable payload', mode, count(*), sum(price * 100)::HUGEINT FROM t GROUP BY mode
+UNION ALL
+SELECT 'late entries', late_mode, count(*), sum(id) FROM t GROUP BY late_mode
+UNION ALL
+SELECT 'late entries nullable payload', late_mode, count(price), sum(price * 100)::HUGEINT FROM t GROUP BY late_mode
+UNION ALL
+SELECT 'long key', long_mode, count(*), sum(id) FROM t GROUP BY long_mode
+UNION ALL
+SELECT 'null keys', nullable_mode, count(*), sum(id) FROM t GROUP BY nullable_mode
+UNION ALL
+SELECT 'filtered', mode, count(*), sum(id) FROM t WHERE k < 500 GROUP BY mode
+UNION ALL
+SELECT 'filtered late entries', late_mode, count(*), sum(id) FROM t WHERE k >= 300 GROUP BY late_mode
+UNION ALL
+SELECT 'typed payload', mode, count(*), sum(id * 3 + k)::HUGEINT FROM t GROUP BY mode
+
+foreach threads 1 4
+
+statement ok
+SET threads={threads}
+
+foreach policy off auto
+
+statement ok
+SET jit_policy='{policy}'
+
+statement ok
+CREATE OR REPLACE TEMP TABLE r_{policy} AS FROM grouped()
+
+endloop
+
+query I
+SELECT count(*) FROM ((SELECT * FROM r_off EXCEPT ALL SELECT * FROM r_auto)
+                      UNION ALL (SELECT * FROM r_auto EXCEPT ALL SELECT * FROM r_off))
+----
+0
+
+query I
+SELECT count(*) FROM r_auto
+----
+70
+
+endloop
+
+query IIII
+SELECT q, g, a, b FROM r_off WHERE q IN ('late entries', 'null keys') ORDER BY q, g NULLS FIRST
+----
+late entries	early 0	170000	84149745000
+late entries	early 1	170000	84149915000
+late entries	early 2	170000	84150085000
+late entries	late 0	98000	49509755000
+late entries	late 1	98000	49509853000
+late entries	late 2	98000	49509951000
+late entries	late 3	98000	49510049000
+late entries	late 4	98000	49510147000
+null keys	NULL	90910	45454954545
+null keys	east	227273	113636636362
+null keys	north	227272	113635636368
+null keys	south	227273	113636136365
+null keys	west	227272	113636136360
+
+# the group rows of a compressed key's dictionary are resolved once per entry, and the rows of entries that appear
+# late are replayed once those have rows
+statement ok
+SET threads=1
+
+statement ok
+SET jit_policy='auto'
+
+statement ok
+SET jit_trace_runtime=true
+
+foreach column mode late_mode nullable_mode
+
+statement ok
+SET jit_event_log_size=0
+
+statement ok
+SET jit_event_log_size=100
+
+statement ok
+CREATE OR REPLACE TEMP TABLE traced AS SELECT {column}, sum(id) FROM t GROUP BY {column}
+
+query I
+SELECT count(*) > 0 FROM duckdb_jit_events()
+WHERE status = 'executed' AND jit_runtime_path_counts LIKE '%dictionary_grouped_update=%'
+----
+true
+
+endloop
+
+query I
+SELECT count(*) > 0 FROM duckdb_jit_events()
+WHERE status = 'executed' AND jit_runtime_path_counts LIKE '%dictionary_grouped_update.deferred_rows%'
+----
+false
+
+statement ok
+SET jit_event_log_size=0
+
+statement ok
+SET jit_event_log_size=100
+
+statement ok
+CREATE OR REPLACE TEMP TABLE traced AS SELECT late_mode, sum(id) FROM t GROUP BY late_mode
+
+query I
+SELECT count(*) > 0 FROM duckdb_jit_events()
+WHERE status = 'executed' AND jit_runtime_path_counts LIKE '%dictionary_grouped_update.deferred_rows%'
+----
+true

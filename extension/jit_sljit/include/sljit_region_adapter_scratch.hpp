@@ -97,6 +97,12 @@ struct SljitAggregatePayloadAdapterScratch {
 	vector<SljitPerfectHashDictionaryGroupRuntime> perfect_hash_dictionary_groups;
 	unique_ptr<DataChunk> input_vector_groups;
 	vector<LogicalType> input_vector_group_types;
+	//! The group keys of the entries of the storage dictionary dictionary_group_keys_id, and the rows they resolve to
+	buffer_ptr<DictionaryEntry> dictionary_group_keys;
+	string dictionary_group_keys_id;
+	Vector dictionary_group_rows = Vector(LogicalType::POINTER);
+	//! The rows of a batch whose dictionary entry had no row yet
+	sel_t dictionary_deferred_rows[STANDARD_VECTOR_SIZE];
 	vector<int64_t *> aggregate_int64_values;
 	vector<hugeint_t *> aggregate_hugeint_values;
 	vector<double *> aggregate_double_values;

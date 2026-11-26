@@ -309,9 +309,13 @@ static void SljitExecuteFusedGroupedPrimitiveAggregatePayloadUpdate(
     const SelectionVector *execute_sel, bool state_addresses_by_loop_index, idx_t count,
     SljitAggregatePayloadAdapterScratch &adapter_scratch,
     optional_ptr<const vector<idx_t>> input_source_indices_override = nullptr,
-    optional_ptr<const vector<bool>> input_source_not_null_override = nullptr) {
+    optional_ptr<const vector<bool>> input_source_not_null_override = nullptr, sel_t *deferred_rows = nullptr,
+    optional_ptr<idx_t> deferred_row_count = nullptr) {
 	if (!function) {
 		throw InternalException("SLJIT fused grouped aggregate primitive payload update is missing generated code");
+	}
+	if (deferred_rows && payload_source_layout == SljitAggregatePayloadSourceLayout::FUSED_COMBINED) {
+		throw InternalException("SLJIT fused grouped typed aggregate update cannot defer rows of unresolved groups");
 	}
 	if (!grouped_state_addresses) {
 		throw InternalException("SLJIT fused grouped aggregate primitive payload update is missing state addresses");
@@ -442,9 +446,13 @@ static void SljitExecuteFusedGroupedPrimitiveAggregatePayloadUpdate(
 	native_input.aggregate_state_addresses = grouped_state_addresses;
 	native_input.aggregate_state_address_sel = grouped_state_address_sel;
 	native_input.aggregate_state_addresses_by_loop_index = state_addresses_by_loop_index;
+	native_input.aggregate_state_deferred_rows = deferred_rows;
 	native_input.count = count;
 	native_input.has_error = false;
 	SljitExecuteNativeAggregatePayloadFunction(function, native_input);
+	if (deferred_row_count) {
+		*deferred_row_count = native_input.aggregate_state_deferred_row_count;
+	}
 }
 
 } // namespace duckdb

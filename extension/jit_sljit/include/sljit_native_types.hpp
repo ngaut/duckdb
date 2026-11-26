@@ -444,6 +444,10 @@ struct SljitNativeVectorInput {
 	std::exception_ptr error;
 	//! Groups whose aggregate states the perfect-hash update marked set on the group's first touch
 	bool *perfect_hash_group_states_marked = nullptr;
+	//! With grouped state addresses some of which are null (groups not resolved yet), the update skips their rows and
+	//! appends the rows' indexes here, for the caller to replay once it resolved them
+	sel_t *aggregate_state_deferred_rows = nullptr;
+	idx_t aggregate_state_deferred_row_count = 0;
 };
 
 struct SljitNativePrimitiveRunLaneInput {

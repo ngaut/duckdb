@@ -8,6 +8,7 @@
 
 #pragma once
 
+#include "duckdb/execution/aggregate_hashtable.hpp"
 #include "sljit_filter_runtime.hpp"
 #include "sljit_full_pipeline_primitive_contract.hpp"
 #include "sljit_full_pipeline_runtime.hpp"
@@ -88,6 +89,14 @@ public:
 	                                           DataChunk &source_chunk, idx_t group_key_source_column) {
 		if (primitive.strategy != SljitGroupedAggregateUpdateStrategyKind::DIRECT_PRIMITIVE_PAYLOAD_UPDATE) {
 			return SljitSourceGroupRuns::ABSENT;
+		}
+		// a key that is a storage dictionary resolves its groups once per dictionary entry, which the generated update
+		// wins on as on runs
+		if (group_key_source_column < source_chunk.ColumnCount() &&
+		    GroupedAggregateHashTable::ResolvesDictionaryGroupsPerEntry(source_chunk.data[group_key_source_column],
+		                                                                source_chunk.size()) &&
+		    !DictionaryVector::DictionaryId(source_chunk.data[group_key_source_column]).empty()) {
+			return SljitSourceGroupRuns::PRESENT;
 		}
 		auto &aggregate_op = ops[primitive.aggregate_idx];
 		if (primitive.input_kind == SljitGroupedAggregateUpdateInputKind::PROJECTED_INPUT) {
