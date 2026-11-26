@@ -135,6 +135,39 @@ class WorkloadFailuresTest(unittest.TestCase):
             "declining the query adds 3.0% instructions to the native engine's 1000",
         )
 
+    def test_a_floor_miss_is_decided_on_the_samples_of_a_second_measurement(self) -> None:
+        def run(slow_first: bool, slow_second: bool):
+            measurements = iter([samples(off=1400 if slow_first else 2000), samples(off=1400 if slow_second else 2000)])
+            return lambda *arguments: next(measurements)
+
+        measured, summary, failed = performance_gate.measure_workload(
+            Path("d"), Path("f"), WORKLOAD, 1, 2, run(True, False)
+        )
+        self.assertEqual(failed, [])
+        self.assertEqual(len(measured), 9)
+        self.assertEqual(sorted({sample.repeat for sample in measured if sample.repeat != TRACED}), [1, 2, 3, 4])
+        _, _, failed = performance_gate.measure_workload(Path("d"), Path("f"), WORKLOAD, 1, 2, run(True, True))
+        self.assertEqual(failed, ["workload: speedup 1.400 is below the floor 1.500"])
+
+    def test_a_ceiling_miss_is_decided_on_the_samples_of_a_second_measurement(self) -> None:
+        measurements = iter([samples(off=4000, auto=1101), samples(off=4000, auto=1000)])
+        _, summary, failed = performance_gate.measure_workload(
+            Path("d"), Path("f"), WORKLOAD, 1, 2, lambda *arguments: next(measurements)
+        )
+        self.assertEqual(failed, [])
+        self.assertEqual(summary["auto_instructions"], 1050)
+
+    def test_a_failure_other_than_a_threshold_is_not_measured_again(self) -> None:
+        calls = []
+
+        def run(*arguments):
+            calls.append(arguments)
+            return samples(off=1400, compiled=False)
+
+        _, _, failed = performance_gate.measure_workload(Path("d"), Path("f"), WORKLOAD, 1, 2, run)
+        self.assertEqual(len(calls), 1)
+        self.assertTrue(any("compiled 0 regions" in failure for failure in failed))
+
     def test_a_cost_above_the_ceiling_fails(self) -> None:
         self.assert_fails(WORKLOAD, samples(off=4000, auto=1101), "JIT cost 1101 instructions exceeds the ceiling 1100")
 

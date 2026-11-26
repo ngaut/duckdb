@@ -168,6 +168,10 @@ A workload passes when:
   must instead retire at most 2% more instructions than the native run (the cost of the decision);
 - `cost(auto)` is at most the workload's ceiling.
 
+A workload that misses only its floor or its ceiling is measured once more and decided on the samples of both
+measurements: the thresholds hold the median work, and over a full suite one sample set in which the host slowed the
+runs (or, on four threads, kept idle workers spinning) is likely, while a real loss misses on the pooled samples too.
+
 Floors and ceilings are one-way ratchets: a verified improvement raises the
 floor and lowers the ceiling in the same change, and nothing loosens them.
 

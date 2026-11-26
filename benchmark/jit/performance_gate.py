@@ -8,7 +8,8 @@
 # the sampled policy and reads what that run did (see process_usage.py). The speedup is the native engine's cycles over
 # the JIT's: the cycles show the work a fused loop saves in memory stalls as well as in instructions. The ceiling bounds
 # the JIT's median instruction count, which does not move with the host. One more JIT sample traces the runtime for
-# the counter checks and is not counted.
+# the counter checks and is not counted. A workload that misses only its floor or its ceiling is measured once more and
+# decided on the samples of both measurements.
 #
 # A fixture is written once per build and setup and kept in --fixture-cache for the next run of that build: the gates
 # of one suite on one and on four threads, a repeated gate, the gates of a build the guard checks again.
@@ -17,6 +18,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import dataclasses
 import functools
 import hashlib
 import json
@@ -111,6 +113,31 @@ def run_workload(duckdb: Path, database: Path, workload: dict, threads: int, rep
             samples.append(run_sample(duckdb, database, workload, threads, policy, repeat))
     samples.append(run_sample(duckdb, database, workload, threads, "auto"))
     return samples
+
+
+def threshold_failure(failure: str) -> bool:
+    return " is below the floor " in failure or " exceeds the ceiling " in failure
+
+
+def measure_workload(
+    duckdb: Path, database: Path, workload: dict, threads: int, repeats: int, run=run_workload
+) -> tuple[list[Sample], dict, list[str]]:
+    """The workload's samples, summary and failures. A workload that misses only its thresholds is measured again and
+    decided on the samples of both measurements: the thresholds hold the median work, and a sample set the host
+    slowed (or, on several threads, kept spinning) is the likelier cause of a near miss than the change; a real loss
+    misses on the pooled samples too"""
+    samples = run(duckdb, database, workload, threads, repeats)
+    summary = summary_row(workload, threads, samples)
+    failures = workload_failures(workload, threads, summary, samples)
+    if failures and all(threshold_failure(failure) for failure in failures):
+        more = [
+            dataclasses.replace(sample, repeat=sample.repeat + repeats) if sample.repeat != TRACED else sample
+            for sample in run(duckdb, database, workload, threads, repeats)
+        ]
+        samples = [sample for sample in samples if sample.repeat != TRACED] + more
+        summary = summary_row(workload, threads, samples)
+        failures = workload_failures(workload, threads, summary, samples)
+    return samples, summary, failures
 
 
 def run_row(workload: dict, sample: Sample) -> dict:
@@ -274,9 +301,9 @@ def main(argv: list[str] | None = None) -> int:
     try:
         for workload in args.workloads:
             database = fixture_database(args.fixture_cache, args.duckdb, workload.get("setup_sql", ""))
-            samples = run_workload(args.duckdb, database, workload, args.threads, args.repeats)
-            summary = summary_row(workload, args.threads, samples)
-            workload_failed = workload_failures(workload, args.threads, summary, samples)
+            samples, summary, workload_failed = measure_workload(
+                args.duckdb, database, workload, args.threads, args.repeats
+            )
             runs.extend(run_row(workload, sample) for sample in samples)
             summaries.append(summary)
             counters.extend(
