@@ -217,8 +217,8 @@ static bool SljitTryExecuteInputVectorGroupedAggregateUpdate(
 	    count_one_update_ready) {
 		auto dense_pending_start = SljitRegionStageStart(runtime);
 		if (SljitTryAccumulatePendingDenseSingleLaneGroups(
-		        op, scratch.AggregateParameters(op_idx).estimated_input_count, payload_input, group_sources,
-		        payload_lanes, *dense_domain, *pending_preaggregated_groups)) {
+		        op, scratch.AggregateParameters(op_idx).estimated_input_count, runtime.MaxThreads(), payload_input,
+		        group_sources, payload_lanes, *dense_domain, *pending_preaggregated_groups)) {
 			RecordSljitRegionStageRuntime(runtime, op_idx, op.Kind(), "pending_dense_single_lane_accumulate",
 			                              dense_pending_start);
 			RecordSljitRegionMaterializationElision(runtime, op.Kind(), "pending_dense_single_lane_grouped_update",

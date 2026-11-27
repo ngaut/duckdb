@@ -297,7 +297,9 @@ static bool SljitPendingDenseSingleLaneKey(TARGET_TYPE value, idx_t &key) {
 	}
 }
 
-static bool SljitPendingDenseSingleLaneProfitable(idx_t estimated_input_count,
+//! Each thread counts its share of the rows into an array over the whole key domain, then flushes the keys it touched:
+//! profitable when a thread's share is at least twice the domain
+static bool SljitPendingDenseSingleLaneProfitable(idx_t estimated_input_count, idx_t threads,
                                                   const ExecutionDenseGroupDomain &dense_domain, idx_t &range) {
 	if (!dense_domain.ready || dense_domain.min_key > dense_domain.max_key ||
 	    dense_domain.max_key == NumericLimits<idx_t>::Maximum()) {
@@ -307,7 +309,8 @@ static bool SljitPendingDenseSingleLaneProfitable(idx_t estimated_input_count,
 	if (range == 0 || range > SLJIT_PENDING_DENSE_SINGLE_LANE_MAX_RANGE) {
 		return false;
 	}
-	return estimated_input_count / SLJIT_PENDING_DENSE_SINGLE_LANE_MIN_COMPRESSION >= range;
+	const auto thread_input_count = estimated_input_count / MaxValue<idx_t>(threads, 1);
+	return thread_input_count / SLJIT_PENDING_DENSE_SINGLE_LANE_MIN_COMPRESSION >= range;
 }
 
 template <class TARGET_TYPE, class SOURCE_TYPE, bool CAST_KEY>
@@ -391,7 +394,7 @@ struct SljitPendingDenseSingleLaneKeyDispatch {
 
 template <class TARGET_TYPE>
 static bool SljitTryAccumulatePendingDenseSingleLaneGroupsTemplated(
-    SljitExecutableRegionOp &op, idx_t estimated_input_count, DataChunk &input,
+    SljitExecutableRegionOp &op, idx_t estimated_input_count, idx_t threads, DataChunk &input,
     const vector<ExecutionRowPointerGroupKeySource> &group_sources,
     const vector<const ExecutionPrimitiveAggregateUpdateLane *> &payload_lanes,
     const ExecutionDenseGroupDomain &dense_domain, SljitPendingPreaggregatedPrimitiveGroupBatch &pending) {
@@ -416,7 +419,7 @@ static bool SljitTryAccumulatePendingDenseSingleLaneGroupsTemplated(
 		return reject("sink");
 	}
 	idx_t range;
-	if (!SljitPendingDenseSingleLaneProfitable(estimated_input_count, dense_domain, range)) {
+	if (!SljitPendingDenseSingleLaneProfitable(estimated_input_count, threads, dense_domain, range)) {
 		return reject("economics");
 	}
 	SljitPreaggregatedInputVectorGroupKeySource group_source;
@@ -455,6 +458,7 @@ static bool SljitTryAccumulatePendingDenseSingleLaneGroupsTemplated(
 struct SljitPendingDenseSingleLaneTargetDispatch {
 	SljitExecutableRegionOp &op;
 	idx_t estimated_input_count;
+	idx_t threads;
 	DataChunk &input;
 	const vector<ExecutionRowPointerGroupKeySource> &group_sources;
 	const vector<const ExecutionPrimitiveAggregateUpdateLane *> &payload_lanes;
@@ -465,19 +469,19 @@ struct SljitPendingDenseSingleLaneTargetDispatch {
 	bool Execute() {
 		if constexpr (std::is_integral<TARGET_TYPE>::value) {
 			return SljitTryAccumulatePendingDenseSingleLaneGroupsTemplated<TARGET_TYPE>(
-			    op, estimated_input_count, input, group_sources, payload_lanes, dense_domain, pending);
+			    op, estimated_input_count, threads, input, group_sources, payload_lanes, dense_domain, pending);
 		}
 		return false;
 	}
 };
 
 static bool SljitTryAccumulatePendingDenseSingleLaneGroups(
-    SljitExecutableRegionOp &op, idx_t estimated_input_count, DataChunk &input,
+    SljitExecutableRegionOp &op, idx_t estimated_input_count, idx_t threads, DataChunk &input,
     const vector<ExecutionRowPointerGroupKeySource> &group_sources,
     const vector<const ExecutionPrimitiveAggregateUpdateLane *> &payload_lanes,
     const ExecutionDenseGroupDomain &dense_domain, SljitPendingPreaggregatedPrimitiveGroupBatch &pending) {
 	SljitPendingDenseSingleLaneTargetDispatch dispatch {
-	    op, estimated_input_count, input, group_sources, payload_lanes, dense_domain, pending};
+	    op, estimated_input_count, threads, input, group_sources, payload_lanes, dense_domain, pending};
 	const auto accumulated = SljitDispatchPreaggregatedInputVectorGroupTargetType(dense_domain.physical_type, dispatch);
 	if (!accumulated && pending.dense_single_lane_blocker.empty()) {
 		pending.dense_single_lane_blocker = "target_type";

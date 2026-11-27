@@ -156,7 +156,8 @@ public:
 		idx_t dense_range;
 		if (continuation.counts_rows_only &&
 		    SljitPendingDenseSingleLaneProfitable(scratch.AggregateParameters(aggregate_idx).estimated_input_count,
-		                                          aggregate_update.dense_group_domain, dense_range)) {
+		                                          runtime.MaxThreads(), aggregate_update.dense_group_domain,
+		                                          dense_range)) {
 			return SljitNativeHandover::GENERATED;
 		}
 		if (terminal_step.kind == SljitFullPipelinePrimitiveKind::GROUPED_AGGREGATE_UPDATE) {

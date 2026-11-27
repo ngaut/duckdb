@@ -526,7 +526,7 @@ GENERIC_WORKLOADS = (
         # the runtime-observed ninth key switches the exact accumulator to hash
         # lookup even when persisted NDV statistics underestimate the domain.
         "floor": {1: 1.73, 4: 1.80},
-        "ceiling": {1: 715_500_000, 4: 727_600_000},
+        "ceiling": {1: 715_500_000, 4: 726_600_000},
         "compiled": {1: True, 4: True},
     },
 )

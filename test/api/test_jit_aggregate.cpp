@@ -1965,6 +1965,54 @@ TEST_CASE("JIT direct join aggregate accumulates dense count-one groups across b
 	    [](const ExecutionRegionEvent &event) { RequireGeneratedAggregateUpdateRuntimeOwnership(event); });
 }
 
+TEST_CASE("JIT dense count-one groups accumulate only where each thread's rows compress the key domain", "[api][jit]") {
+	DuckDB db;
+	Connection con(db);
+	auto &manager = ExecutionRegionManager::Get(*con.context);
+
+	ConfigureSljitForCoverage(con, true, true, 10000);
+	REQUIRE_NO_FAIL(con.Query("SET perfect_ht_threshold=0"));
+	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_dense_thread_count_lhs AS "
+	                          "SELECT i::BIGINT AS id FROM range(1, 150001) tbl(i)"));
+	REQUIRE_NO_FAIL(con.Query("CREATE TABLE jit_dense_thread_count_rhs AS "
+	                          "SELECT ((i * 7919) % 150000 + 1)::BIGINT AS id, i::BIGINT AS seq "
+	                          "FROM range(1500000) tbl(i)"));
+	REQUIRE_NO_FAIL(con.Query("VACUUM jit_dense_thread_count_lhs"));
+	REQUIRE_NO_FAIL(con.Query("VACUUM jit_dense_thread_count_rhs"));
+	const string query = "SELECT lhs.id, count(rhs.seq) AS c "
+	                     "FROM jit_dense_thread_count_lhs lhs "
+	                     "JOIN jit_dense_thread_count_rhs rhs ON lhs.id = rhs.id "
+	                     "GROUP BY lhs.id";
+	REQUIRE_NO_FAIL(con.Query("SET jit_policy='off'"));
+	REQUIRE_NO_FAIL(con.Query("CREATE TEMP TABLE jit_dense_thread_count_reference AS " + query));
+
+	// 1.5M rows over 150000 keys: each of four threads' shares (375000 rows) compresses the domain at least twofold,
+	// each of eight threads' shares (187500 rows) does not
+	for (idx_t threads : {idx_t(4), idx_t(8)}) {
+		INFO("threads " << threads);
+		ConfigureSljitForCoverageSettings(con, true, true, 10000, threads);
+		ClearJitTrace(manager, true);
+		REQUIRE_NO_FAIL(con.Query("CREATE OR REPLACE TEMP TABLE jit_dense_thread_count_output AS " + query));
+		auto difference = con.Query("SELECT count(*) FROM ("
+		                            "  (SELECT * FROM jit_dense_thread_count_output EXCEPT ALL "
+		                            "   SELECT * FROM jit_dense_thread_count_reference) UNION ALL "
+		                            "  (SELECT * FROM jit_dense_thread_count_reference EXCEPT ALL "
+		                            "   SELECT * FROM jit_dense_thread_count_output)"
+		                            ") differences");
+		REQUIRE_NO_FAIL(*difference);
+		REQUIRE(difference->Collection().GetValue(0, 0).ToString() == "0");
+		bool dense_counted = false;
+		for (auto &event : manager.GetEvents()) {
+			if (EventPhase(event) == "runtime" &&
+			    StringUtil::Contains(EventJitRuntimePathCounts(event),
+			                         "aggregate_update.pending_dense_single_lane_grouped_update=")) {
+				dense_counted = true;
+			}
+		}
+		REQUIRE(dense_counted == (threads == 4));
+	}
+}
+
 TEST_CASE("JIT sorted grouped sums preserve compact runs across scheduler yields", "[api][jit]") {
 	DuckDB db;
 	Connection con(db);
