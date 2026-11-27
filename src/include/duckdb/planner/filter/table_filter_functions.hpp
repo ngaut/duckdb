@@ -13,6 +13,7 @@
 #include "duckdb/common/hash_bloom_filter.hpp"
 #include "duckdb/common/mutex.hpp"
 #include "duckdb/common/optional_ptr.hpp"
+#include "duckdb/common/prefix_range_lookup.hpp"
 #include "duckdb/common/enums/expression_type.hpp"
 #include "duckdb/common/enums/filter_propagate_result.hpp"
 #include "duckdb/common/types/value.hpp"
@@ -185,14 +186,6 @@ struct BloomFilterFunctionData : public FunctionData {
 	bool Equals(const FunctionData &other) const override;
 };
 
-//! Runtime prefix-range filter state used by join pushdown and internal tablefilter functions.
-struct PrefixRangeLookupData {
-	uint64_t min = 0;
-	uint64_t span = 0;
-	idx_t shift = 0;
-	const uint64_t *bitmap = nullptr;
-};
-
 class PrefixRangeFilter {
 public:
 	struct BuildState {
@@ -221,7 +214,7 @@ public:
 	//! result_sel contains local positions into sel rather than source row ids.
 	virtual idx_t LookupKeys(Vector &keys, const SelectionVector &sel, SelectionVector &result_sel,
 	                         idx_t count) const = 0;
-	//! Exposes the bitmap of an integral filter (NULL-free lookup over the unsigned comparable domain).
+	//! Exposes the bitmap of an integral filter.
 	virtual bool GetSignedLookupData(PrefixRangeLookupData &result) const = 0;
 	virtual idx_t DistinctCountUpperBound() const = 0;
 	//! Estimate how many distinct filter keys can overlap a scan range. This is

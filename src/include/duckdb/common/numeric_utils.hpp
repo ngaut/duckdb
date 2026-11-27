@@ -16,6 +16,16 @@
 
 namespace duckdb {
 
+//! An integral value widened to 64 bits: signed values sign-extend and unsigned values zero-extend, so the difference
+//! of two widened values of one type is exact (and, as an unsigned value, out of range when it is negative)
+template <class T>
+uint64_t WidenIntegralBits(T value) {
+	static_assert(std::is_integral<T>::value && sizeof(T) <= sizeof(uint64_t),
+	              "WidenIntegralBits requires an integral type of at most 64 bits");
+	using WIDE = typename std::conditional<std::is_signed<T>::value, int64_t, uint64_t>::type;
+	return static_cast<uint64_t>(static_cast<WIDE>(value));
+}
+
 template <class T>
 T RoundToNearestEven(T value) {
 	static_assert(std::is_floating_point<T>::value, "RoundToNearestEven requires a floating point type");

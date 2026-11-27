@@ -185,8 +185,6 @@ struct SljitExactRegularHashJoinMembershipFilterDispatch {
 
 	template <class KEY_READER>
 	void Execute() {
-		using KEY_TYPE = typename KEY_READER::Key;
-		using UNSIGNED_KEY_TYPE = typename MakeUnsigned<KEY_TYPE>::type;
 		KEY_READER reader(input);
 		const auto key_sel = input.source_sel ? input.source_sel[0] : nullptr;
 		const auto key_validity = input.source_validity ? input.source_validity[0] : nullptr;
@@ -197,11 +195,7 @@ struct SljitExactRegularHashJoinMembershipFilterDispatch {
 			                      (validity_t(1) << (source_idx % ValidityMask::BITS_PER_VALUE)))) {
 				continue;
 			}
-			const auto comparable = static_cast<uint64_t>(static_cast<UNSIGNED_KEY_TYPE>(reader.Load(source_idx)));
-			const auto filter_idx = comparable - layout.exact_membership_filter_min;
-			if (filter_idx > layout.exact_membership_filter_span ||
-			    !(layout.exact_membership_filter_bitmap[filter_idx / ValidityMask::BITS_PER_VALUE] &
-			      (uint64_t(1) << (filter_idx % ValidityMask::BITS_PER_VALUE)))) {
+			if (!layout.exact_membership_filter.Contains<true>(reader.Load(source_idx))) {
 				continue;
 			}
 			input.match_sel[selected_count++] = UnsafeNumericCast<sel_t>(row_idx);
@@ -217,7 +211,7 @@ static bool SljitRegularProbeAnsweredByExactSourceFilter(
     const ExecutionHashJoinProbeBinding &probe, const SljitNativeHashJoinProbePlan &plan) {
 	auto &layout = probe.table_layout;
 	return exact_source_filter_identity && exact_source_filter_identity == layout.runtime_filter_identity &&
-	       layout.exact_membership_filter_build_keys_unique && layout.exact_membership_filter_bitmap &&
+	       layout.exact_membership_filter_build_keys_unique && layout.exact_membership_filter.bitmap &&
 	       plan.keys.size() == 1 && plan.equality_key_count == 1 && !plan.residual_predicate &&
 	       !plan.mark_build_match && !layout.stored_keys_have_null &&
 	       probe.exact_rhs_output_probe_input_indices.size() == probe.rhs_output_column_count &&

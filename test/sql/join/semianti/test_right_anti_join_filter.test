@@ -1,0 +1,101 @@
+# name: test/sql/join/semianti/test_right_anti_join_filter.test
+# description: A right anti join pushes its build keys into the probe scan as a join filter. Bitpacked probe keys are matched in clustered blocks (sorted runs, keys past the last build key) or row by row (unsorted keys); keys narrower than 64 bits whose build minimum is negative keep the keys above zero. Results equal those without join filters
+# group: [semianti]
+
+load {TEST_DIR}/test_right_anti_join_filter.db
+
+statement ok
+PRAGMA force_compression='bitpacking'
+
+# p.k: sorted runs of three keys in steps of five from -50000; then an unsorted region over the same key range
+statement ok
+CREATE TABLE p AS
+SELECT k, k::INTEGER AS i, (k // 20)::SMALLINT AS s, id
+FROM (SELECT (r // 3) * 5 - 50000 AS k, r AS id FROM range(300000) t(r)
+      UNION ALL
+      SELECT (r * 7919) % 400000 - 50000, 300000 + r FROM range(20000) t(r))
+
+# b.k: every seventh probe key up to 300000 (below the probe maximum), the smallest probe key, and keys no probe row has
+statement ok
+CREATE TABLE b AS
+SELECT k, k::INTEGER AS i, (k // 20)::SMALLINT AS s
+FROM (SELECT DISTINCT k FROM p WHERE k <= 300000 AND ((k + 50000) // 5) % 7 = 0
+      UNION ALL
+      SELECT -50000
+      UNION ALL
+      SELECT r * 5 + 1 FROM range(1000) t(r))
+
+statement ok
+CHECKPOINT
+
+restart
+
+statement ok
+SET profiling_renderer_settings = MAP {'expand_all': 'true'};
+
+query II
+EXPLAIN ANALYZE SELECT count(*) FROM p JOIN BY (TYPE RIGHT_ANTI) b ON p.k = b.k
+----
+analyzed_plan	<REGEX>:.*RIGHT_ANTI.*k IN PRF\(k\).*
+
+statement ok
+CREATE MACRO joins() AS TABLE
+SELECT 'right anti bigint' AS q, count(*) AS c, sum(b.k) AS s FROM p JOIN BY (TYPE RIGHT_ANTI) b ON p.k = b.k
+UNION ALL
+SELECT 'right anti integer', count(*), sum(b.i) FROM p JOIN BY (TYPE RIGHT_ANTI) b ON p.i = b.i
+UNION ALL
+SELECT 'right anti smallint', count(*), sum(b.s) FROM p JOIN BY (TYPE RIGHT_ANTI) b ON p.s = b.s
+UNION ALL
+SELECT 'right semi bigint', count(*), sum(b.k) FROM p JOIN BY (TYPE RIGHT_SEMI) b ON p.k = b.k
+UNION ALL
+SELECT 'inner bigint', count(*), sum(p.id) FROM p JOIN b ON p.k = b.k
+UNION ALL
+SELECT 'inner integer', count(*), sum(p.id) FROM p JOIN b ON p.i = b.i
+UNION ALL
+SELECT 'inner smallint', count(*), sum(p.id) FROM p JOIN b ON p.s = b.s
+UNION ALL
+SELECT 'inner integer of unsorted rows', count(*), sum(p.id) FROM p JOIN b ON p.i = b.i WHERE p.id >= 300000
+
+statement ok
+SET disabled_optimizers TO 'join_filter_pushdown'
+
+statement ok
+CREATE TEMP TABLE without_filters AS FROM joins()
+
+statement ok
+RESET disabled_optimizers
+
+foreach threads 1 4
+
+statement ok
+SET threads={threads}
+
+foreach policy off auto
+
+statement ok
+SET jit_policy='{policy}'
+
+statement ok
+CREATE OR REPLACE TEMP TABLE with_filters AS FROM joins()
+
+query I
+SELECT count(*) FROM ((FROM with_filters EXCEPT ALL FROM without_filters)
+                      UNION ALL (FROM without_filters EXCEPT ALL FROM with_filters))
+----
+0
+
+endloop
+
+endloop
+
+query III
+SELECT q, c, s FROM without_filters ORDER BY q
+----
+inner bigint	32562	3942667727
+inner integer	32562	3942667727
+inner integer of unsorted rows	2556	792322721
+inner smallint	169574	19679770876
+right anti bigint	950	2373075
+right anti integer	950	2373075
+right anti smallint	0	NULL
+right semi bigint	12056	1500641979

@@ -605,9 +605,7 @@ bool JoinHashTable::GetExecutionHashJoinTableLayout(ExecutionHashJoinTableLayout
 	if (prefix_range_filter && TypeIsInteger(condition_types[0].InternalType()) &&
 	    prefix_range_filter->GetSignedLookupData(prefix_lookup) && prefix_lookup.shift == 0) {
 		layout.exact_membership_filter_build_keys_unique = prefix_range_filter->DistinctCountUpperBound() == Count();
-		layout.exact_membership_filter_min = prefix_lookup.min;
-		layout.exact_membership_filter_span = prefix_lookup.span;
-		layout.exact_membership_filter_bitmap = prefix_lookup.bitmap;
+		layout.exact_membership_filter = prefix_lookup;
 		layout.runtime_filter_identity = runtime_filter_identity;
 	}
 

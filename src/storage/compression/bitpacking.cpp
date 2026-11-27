@@ -1,6 +1,7 @@
 #include "duckdb/common/bitpacking.hpp"
 
 #include "duckdb/common/exception.hpp"
+#include "duckdb/common/force_inline.hpp"
 #include "duckdb/common/limits.hpp"
 #include "duckdb/common/numeric_utils.hpp"
 #include "duckdb/common/optional.hpp"
@@ -1738,71 +1739,35 @@ static bool TryBitpackingSignedNumericRangeFilter(ColumnSegment &segment, Column
 	return true;
 }
 
-template <class T>
-struct BitpackingPrefixComparable {
-	static constexpr bool SUPPORTED = std::is_integral<T>::value && sizeof(T) <= sizeof(uint64_t);
-
-	static uint64_t Convert(const T &value) {
-		using UNSIGNED_T = typename MakeUnsigned<T>::type;
-		return static_cast<uint64_t>(static_cast<UNSIGNED_T>(value));
-	}
-};
-
-template <>
-struct BitpackingPrefixComparable<hugeint_t> {
-	static constexpr bool SUPPORTED = false;
-
-	static uint64_t Convert(const hugeint_t &value) {
-		return 0;
-	}
-};
-
-template <>
-struct BitpackingPrefixComparable<uhugeint_t> {
-	static constexpr bool SUPPORTED = false;
-
-	static uint64_t Convert(const uhugeint_t &value) {
-		return 0;
-	}
-};
-
-#if defined(_MSC_VER)
-#define DUCKDB_BITPACKING_FORCE_INLINE __forceinline
-#elif defined(__GNUC__) || defined(__clang__)
-#define DUCKDB_BITPACKING_FORCE_INLINE inline __attribute__((always_inline))
-#else
-#define DUCKDB_BITPACKING_FORCE_INLINE inline
-#endif
-
-template <bool EXACT>
-static DUCKDB_BITPACKING_FORCE_INLINE bool BitpackingPrefixRangeMatch(uint64_t lookup_min, uint64_t lookup_span,
-                                                                      idx_t lookup_shift, const uint64_t *lookup_bitmap,
-                                                                      uint64_t comparable) {
-	const uint64_t y = comparable - lookup_min;
-	if (EXACT) {
-		if (y > lookup_span) {
-			return false;
-		}
-		return (lookup_bitmap[y >> 6U] >> (y & 63U)) & 1ULL;
-	}
-	const uint64_t bit_idx = y >> lookup_shift;
-	const uint8_t in_range = y <= lookup_span;
-	const uint64_t word_idx = (bit_idx >> 6U) & (0ULL - static_cast<uint64_t>(in_range));
-	const uint8_t bit = (lookup_bitmap[word_idx] >> (bit_idx & 63U)) & 1ULL;
-	return bit & in_range;
-}
+//! Rows a lookup filter matches per block of decoded values; bit 0 of each block match word is the row's match
+static constexpr idx_t BITPACKING_LOOKUP_BLOCK = 8;
 
 template <class T, bool EXACT>
 struct BitpackingPrefixRangeMatcher {
-	BitpackingPrefixRangeMatcher(uint64_t lookup_min_p, uint64_t lookup_span_p, idx_t lookup_shift_p,
-	                             const uint64_t *lookup_bitmap_p)
-	    : lookup_min(lookup_min_p), lookup_span(lookup_span_p), lookup_shift(lookup_shift_p),
-	      lookup_bitmap(lookup_bitmap_p) {
+	explicit BitpackingPrefixRangeMatcher(const PrefixRangeLookupData &lookup_p) : lookup(lookup_p) {
 	}
 
-	DUCKDB_BITPACKING_FORCE_INLINE bool operator()(const T &value) const {
-		return BitpackingPrefixRangeMatch<EXACT>(lookup_min, lookup_span, lookup_shift, lookup_bitmap,
-		                                         BitpackingPrefixComparable<T>::Convert(value));
+	DUCKDB_FORCE_INLINE bool operator()(const T &value) const {
+		return lookup.Contains<EXACT>(value);
+	}
+
+	//! Whether the decoded keys cluster like sorted runs: the last lies less than eight keys per row above the first,
+	//! so blocks of them mostly fit one bitmap window. Unclustered keys skip the window attempt.
+	DUCKDB_FORCE_INLINE bool KeysCluster(const T *values, idx_t count) const {
+		return EXACT && count > 0 && WidenIntegralBits(values[count - 1]) - WidenIntegralBits(values[0]) < count * 8;
+	}
+
+	DUCKDB_FORCE_INLINE void MatchBlock(const T *values, uint64_t (&match)[BITPACKING_LOOKUP_BLOCK],
+	                                    bool clustered) const {
+		if constexpr (EXACT) {
+			if (clustered) {
+				lookup.ContainsExactBlock(values, match);
+				return;
+			}
+		}
+		for (idx_t k = 0; k < BITPACKING_LOOKUP_BLOCK; k++) {
+			match[k] = lookup.Contains<EXACT>(values[k]);
+		}
 	}
 
 	//! A CONSTANT_DELTA run with delta 1 is a dense key range: emit the matching rows by visiting the set buckets of
@@ -1818,8 +1783,8 @@ struct BitpackingPrefixRangeMatcher {
 			using T_U = typename MakeUnsigned<T>::type;
 			const auto first_value = BitpackingConstantDeltaValue<T>(group, group.offset);
 			const auto last_value = BitpackingConstantDeltaValue<T>(group, group.offset + to_scan - 1);
-			const auto filter_min = BitpackingValueFromBits<T>(lookup_min);
-			const auto filter_max = BitpackingValueFromBits<T>(lookup_min + lookup_span);
+			const auto filter_min = BitpackingValueFromBits<T>(lookup.min);
+			const auto filter_max = BitpackingValueFromBits<T>(lookup.min + lookup.span);
 			if (last_value < filter_min || first_value > filter_max) {
 				return true;
 			}
@@ -1828,15 +1793,15 @@ struct BitpackingPrefixRangeMatcher {
 			const auto overlap_last = MinValue<T>(last_value, filter_max);
 			const auto overlap_first_y = static_cast<T_U>(overlap_first) - static_cast<T_U>(filter_min);
 			const auto overlap_last_y = static_cast<T_U>(overlap_last) - static_cast<T_U>(filter_min);
-			const auto first_bucket = UnsafeNumericCast<idx_t>(overlap_first_y >> lookup_shift);
-			const auto last_bucket = UnsafeNumericCast<idx_t>(overlap_last_y >> lookup_shift);
-			BitpackingVisitSetBits(lookup_bitmap, first_bucket, last_bucket, [&](idx_t bucket) {
-				const auto bucket_first_y = static_cast<T_U>(bucket) << lookup_shift;
+			const auto first_bucket = UnsafeNumericCast<idx_t>(overlap_first_y >> lookup.shift);
+			const auto last_bucket = UnsafeNumericCast<idx_t>(overlap_last_y >> lookup.shift);
+			BitpackingVisitSetBits(lookup.bitmap, first_bucket, last_bucket, [&](idx_t bucket) {
+				const auto bucket_first_y = static_cast<T_U>(bucket) << lookup.shift;
 				const auto bucket_last_y = static_cast<T_U>(MinValue<uint64_t>(
-				    lookup_span, static_cast<uint64_t>(bucket_first_y) + ((uint64_t(1) << lookup_shift) - 1)));
+				    lookup.span, static_cast<uint64_t>(bucket_first_y) + ((uint64_t(1) << lookup.shift) - 1)));
 				const auto selected_first_y = MaxValue<T_U>(bucket_first_y, overlap_first_y);
 				const auto selected_last_y = MinValue<T_U>(bucket_last_y, overlap_last_y);
-				const auto selected_first_bits = static_cast<T_U>(lookup_min) + selected_first_y;
+				const auto selected_first_bits = static_cast<T_U>(lookup.min) + selected_first_y;
 				const auto selected_count = UnsafeNumericCast<idx_t>(selected_last_y - selected_first_y + 1);
 				const auto first_row =
 				    scanned + UnsafeNumericCast<idx_t>(selected_first_bits - static_cast<T_U>(first_value));
@@ -1850,10 +1815,7 @@ struct BitpackingPrefixRangeMatcher {
 		}
 	}
 
-	uint64_t lookup_min;
-	uint64_t lookup_span;
-	idx_t lookup_shift;
-	const uint64_t *lookup_bitmap;
+	const PrefixRangeLookupData lookup;
 };
 
 template <class T, class MATCHER, class T_U = typename MakeUnsigned<T>::type>
@@ -1900,6 +1862,8 @@ static bool TryBitpackingLookupFilter(ColumnSegment &segment, ColumnScanState &s
 	result.SetVectorType(VectorType::FLAT_VECTOR);
 
 	auto &result_sel = BitpackingFilterSelection(scan_state, sel_count);
+	// a raw pointer: stores through the result selection would otherwise reload it after every value store
+	const auto result_rows = result_sel.data();
 	idx_t result_count = 0;
 	const bool identity_selection =
 	    sel_count == vector_count &&
@@ -1921,7 +1885,7 @@ static bool TryBitpackingLookupFilter(ColumnSegment &segment, ColumnScanState &s
 					for (idx_t i = 0; i < to_scan; i++) {
 						const auto row_idx = scanned + i;
 						result_data[row_idx] = group.constant;
-						result_sel.set_index(result_count++, row_idx);
+						result_rows[result_count++] = UnsafeNumericCast<sel_t>(row_idx);
 					}
 				}
 				group.Advance(to_scan);
@@ -1942,62 +1906,16 @@ static bool TryBitpackingLookupFilter(ColumnSegment &segment, ColumnScanState &s
 			const auto values = BitpackingDecodeValues<T>(scan_state, group, to_scan, result_data + scanned);
 
 			idx_t i = 0;
-			for (; i + 8 <= to_scan; i += 8) {
-				const auto row0 = scanned + i;
-				const auto row1 = row0 + 1;
-				const auto row2 = row0 + 2;
-				const auto row3 = row0 + 3;
-				const auto row4 = row0 + 4;
-				const auto row5 = row0 + 5;
-				const auto row6 = row0 + 6;
-				const auto row7 = row0 + 7;
-				const auto value0 = values[i];
-				const auto value1 = values[i + 1];
-				const auto value2 = values[i + 2];
-				const auto value3 = values[i + 3];
-				const auto value4 = values[i + 4];
-				const auto value5 = values[i + 5];
-				const auto value6 = values[i + 6];
-				const auto value7 = values[i + 7];
-				const auto match0 = matches(value0);
-				const auto match1 = matches(value1);
-				const auto match2 = matches(value2);
-				const auto match3 = matches(value3);
-				const auto match4 = matches(value4);
-				const auto match5 = matches(value5);
-				const auto match6 = matches(value6);
-				const auto match7 = matches(value7);
-				if (match0) {
-					result_data[row0] = value0;
-					result_sel.set_index(result_count++, row0);
-				}
-				if (match1) {
-					result_data[row1] = value1;
-					result_sel.set_index(result_count++, row1);
-				}
-				if (match2) {
-					result_data[row2] = value2;
-					result_sel.set_index(result_count++, row2);
-				}
-				if (match3) {
-					result_data[row3] = value3;
-					result_sel.set_index(result_count++, row3);
-				}
-				if (match4) {
-					result_data[row4] = value4;
-					result_sel.set_index(result_count++, row4);
-				}
-				if (match5) {
-					result_data[row5] = value5;
-					result_sel.set_index(result_count++, row5);
-				}
-				if (match6) {
-					result_data[row6] = value6;
-					result_sel.set_index(result_count++, row6);
-				}
-				if (match7) {
-					result_data[row7] = value7;
-					result_sel.set_index(result_count++, row7);
+			const auto clustered = matches.KeysCluster(values, to_scan);
+			for (; i + BITPACKING_LOOKUP_BLOCK <= to_scan; i += BITPACKING_LOOKUP_BLOCK) {
+				uint64_t match[BITPACKING_LOOKUP_BLOCK];
+				matches.MatchBlock(values + i, match, clustered);
+				for (idx_t k = 0; k < BITPACKING_LOOKUP_BLOCK; k++) {
+					if (match[k] & 1U) {
+						const auto row_idx = scanned + i + k;
+						result_data[row_idx] = values[i + k];
+						result_rows[result_count++] = UnsafeNumericCast<sel_t>(row_idx);
+					}
 				}
 			}
 			for (; i < to_scan; i++) {
@@ -2005,7 +1923,7 @@ static bool TryBitpackingLookupFilter(ColumnSegment &segment, ColumnScanState &s
 				const auto value = values[i];
 				if (matches(value)) {
 					result_data[row_idx] = value;
-					result_sel.set_index(result_count++, row_idx);
+					result_rows[result_count++] = UnsafeNumericCast<sel_t>(row_idx);
 				}
 			}
 			group.Advance(to_scan);
@@ -2043,7 +1961,7 @@ static bool TryBitpackingLookupFilter(ColumnSegment &segment, ColumnScanState &s
 				for (idx_t i = selected_idx; i < selected_end; i++) {
 					const auto row_idx = sel.get_index(i);
 					result_data[row_idx] = group.constant;
-					result_sel.set_index(result_count++, row_idx);
+					result_rows[result_count++] = UnsafeNumericCast<sel_t>(row_idx);
 				}
 			}
 			group.Advance(to_scan);
@@ -2073,7 +1991,7 @@ static bool TryBitpackingLookupFilter(ColumnSegment &segment, ColumnScanState &s
 			auto value = values[row_idx - scanned];
 			if (matches(value)) {
 				result_data[row_idx] = value;
-				result_sel.set_index(result_count++, row_idx);
+				result_rows[result_count++] = UnsafeNumericCast<sel_t>(row_idx);
 			}
 		}
 		group.Advance(to_scan);
@@ -2103,12 +2021,9 @@ static void FinishBitpackingInternalFilterPlan(ExpressionFilterState &filter_sta
 
 //! Fuses the prefix-range membership filter (exact when its bitmap has one bucket per key) into the decode loop.
 template <class T>
-static bool TryBitpackingPrefixRangeFilter(ColumnSegment &segment, ColumnScanState &state, idx_t vector_count,
-                                           Vector &result, SelectionVector &sel, idx_t &sel_count,
-                                           ExpressionFilterState &filter_state) {
-	if (!BitpackingPrefixComparable<T>::SUPPORTED) {
-		return false;
-	}
+static bool TryBitpackingIntegralPrefixRangeFilter(ColumnSegment &segment, ColumnScanState &state, idx_t vector_count,
+                                                   Vector &result, SelectionVector &sel, idx_t &sel_count,
+                                                   ExpressionFilterState &filter_state) {
 	if (!ColumnSegment::PrepareInternalFilterPlan(filter_state, filter_state.expression, result.GetType())) {
 		return false;
 	}
@@ -2149,10 +2064,10 @@ static bool TryBitpackingPrefixRangeFilter(ColumnSegment &segment, ColumnScanSta
 	const auto primary_input_count = sel_count;
 	bool filtered;
 	if (lookup.shift == 0) {
-		BitpackingPrefixRangeMatcher<T, true> matches(lookup.min, lookup.span, lookup.shift, lookup.bitmap);
+		BitpackingPrefixRangeMatcher<T, true> matches(lookup);
 		filtered = TryBitpackingLookupFilter<T>(segment, state, vector_count, result, sel, sel_count, matches);
 	} else {
-		BitpackingPrefixRangeMatcher<T, false> matches(lookup.min, lookup.span, lookup.shift, lookup.bitmap);
+		BitpackingPrefixRangeMatcher<T, false> matches(lookup);
 		filtered = TryBitpackingLookupFilter<T>(segment, state, vector_count, result, sel, sel_count, matches);
 	}
 	if (!filtered) {
@@ -2163,6 +2078,19 @@ static bool TryBitpackingPrefixRangeFilter(ColumnSegment &segment, ColumnScanSta
 	}
 	FinishBitpackingInternalFilterPlan<T>(filter_state, sel, result, vector_count, sel_count, 0, prefix_operation);
 	return true;
+}
+
+//! Integral keys of at most 64 bits have a prefix-range bitmap to fuse into the decode loop.
+template <class T>
+static bool TryBitpackingPrefixRangeFilter(ColumnSegment &segment, ColumnScanState &state, idx_t vector_count,
+                                           Vector &result, SelectionVector &sel, idx_t &sel_count,
+                                           ExpressionFilterState &filter_state) {
+	if constexpr (!std::is_integral<T>::value || sizeof(T) > sizeof(uint64_t)) {
+		return false;
+	} else {
+		return TryBitpackingIntegralPrefixRangeFilter<T>(segment, state, vector_count, result, sel, sel_count,
+		                                                 filter_state);
+	}
 }
 
 template <class T>
@@ -2188,7 +2116,7 @@ struct BitpackingBloomFilterMatcher {
 	    : filter(filter_p), operations(operations_p), operation_count(operation_count_p) {
 	}
 
-	DUCKDB_BITPACKING_FORCE_INLINE bool operator()(const T &value) const {
+	DUCKDB_FORCE_INLINE bool operator()(const T &value) const {
 		if (!filter.LookupOne(Hash<T>(value))) {
 			return false;
 		}
@@ -2202,6 +2130,16 @@ struct BitpackingBloomFilterMatcher {
 			}
 		}
 		return true;
+	}
+
+	DUCKDB_FORCE_INLINE bool KeysCluster(const T *, idx_t) const {
+		return false;
+	}
+
+	DUCKDB_FORCE_INLINE void MatchBlock(const T *values, uint64_t (&match)[BITPACKING_LOOKUP_BLOCK], bool) const {
+		for (idx_t k = 0; k < BITPACKING_LOOKUP_BLOCK; k++) {
+			match[k] = (*this)(values[k]);
+		}
 	}
 
 	bool TrySelectConstantDeltaDense(const BitpackingGroup<T> &, T *, SelectionVector &, idx_t &, idx_t, idx_t) const {

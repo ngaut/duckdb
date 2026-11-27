@@ -9,6 +9,7 @@
 
 #include "duckdb/common/common.hpp"
 #include "duckdb/common/optional_ptr.hpp"
+#include "duckdb/common/prefix_range_lookup.hpp"
 #include "duckdb/common/types.hpp"
 #include "duckdb/common/types/hugeint.hpp"
 #include "duckdb/common/types/vector.hpp"
@@ -95,9 +96,8 @@ struct ExecutionHashJoinTableLayout {
 	//! Exact membership bitmap owned by the hash table. A backend may use this to replace a unique single-key probe,
 	//! but must execute the membership test itself; scan-side adaptive filters are not an execution proof.
 	bool exact_membership_filter_build_keys_unique = false;
-	uint64_t exact_membership_filter_min = 0;
-	uint64_t exact_membership_filter_span = 0;
-	const uint64_t *exact_membership_filter_bitmap = nullptr;
+	//! Present when its bitmap is set (exact: shift 0)
+	PrefixRangeLookupData exact_membership_filter;
 	shared_ptr<ExecutionRuntimeFilterIdentity> runtime_filter_identity;
 
 	bool Ready() const {

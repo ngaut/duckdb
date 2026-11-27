@@ -45,12 +45,13 @@
 
 namespace duckdb {
 
+//! Bitmap words are followed by one zero word, so a two-word read starting at any bucket stays in bounds.
 AllocatedData AllocateBitmap(ClientContext &context, const idx_t word_count, uint64_t *&bitmap_begin) {
-	const idx_t size = word_count * sizeof(uint64_t);
+	const idx_t size = (word_count + 1) * sizeof(uint64_t);
 	BufferManager &buffer_manager = BufferManager::GetBufferManager(context);
 	auto buffer = buffer_manager.GetBufferAllocator().Allocate(64ULL + size);
 	bitmap_begin = reinterpret_cast<uint64_t *>((64ULL + reinterpret_cast<uint64_t>(buffer.get())) & ~63ULL);
-	std::fill_n(bitmap_begin, word_count, 0);
+	std::fill_n(bitmap_begin, word_count + 1, 0);
 	return buffer;
 }
 
@@ -134,7 +135,7 @@ public:
 	}
 
 	idx_t GetBuildStateSize() const {
-		return word_count * sizeof(uint64_t) + 64;
+		return (word_count + 1) * sizeof(uint64_t) + 64;
 	}
 
 	template <typename T, typename CONVERTER>
@@ -524,7 +525,7 @@ public:
 		if (!bitmap.IsInitialized()) {
 			return false;
 		}
-		result.min = static_cast<uint64_t>(bitmap.Min());
+		result.min = WidenIntegralBits(static_cast<T>(bitmap.Min()));
 		result.span = static_cast<uint64_t>(bitmap.Span());
 		result.shift = bitmap.Shift();
 		result.bitmap = bitmap.BitmapData();
