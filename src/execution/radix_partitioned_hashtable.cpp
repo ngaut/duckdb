@@ -1853,7 +1853,8 @@ static bool CombineProvenUniqueData(ClientContext &context, RadixHTGlobalSinkSta
 	vector<unique_ptr<PartitionedTupleData>> to_repartition;
 	{
 		const annotated_lock_guard<annotated_mutex> guard {gstate.lock};
-		const auto collection = gstate.deferred_proven_unique_data.size();
+		// the threads that combined so far: while every one deferred its rows, this is the index its rows get
+		const auto collection = gstate.proven_unique_local_count;
 		for (auto range : ranges) {
 			range.collection = collection;
 			gstate.proven_unique_ranges.push_back(range);
