@@ -63,6 +63,11 @@ class ThresholdsTest(unittest.TestCase):
         once_slower = faster[:2] + [summary(off_cycles=101, speedup=1.8)]
         self.assertEqual(thresholds(comparison(1.9, 600, base, once_slower))[0], 1.9)
 
+    def test_a_faster_native_engine_keeps_a_floor_the_speedup_still_clears(self) -> None:
+        base = [summary(off_cycles=100, speedup=1.34) for _ in range(3)]
+        faster = [summary(off_cycles=94, speedup=1.34) for _ in range(3)]
+        self.assertEqual(thresholds(comparison(1.21, 600, base, faster))[0], 1.21)
+
 
 class ApplyTest(unittest.TestCase):
     def test_the_thresholds_of_each_suite_format_are_rewritten(self) -> None:

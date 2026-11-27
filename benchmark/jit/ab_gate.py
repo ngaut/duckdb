@@ -89,7 +89,8 @@ def thresholds(comparison: Comparison) -> tuple[float, int]:
     native_change = statistics.median(s["off_cycles"] for s in comparison.new) / statistics.median(
         s["off_cycles"] for s in comparison.base
     )
-    new_floor = derived if native_faster and native_change <= 0.95 else max(floor, derived)
+    # only a speedup the faster native engine pushed below the floor re-derives it
+    new_floor = derived if native_faster and native_change <= 0.95 and min(speedups) < floor else max(floor, derived)
     highest = max(summary["auto_instructions"] for summary in comparison.new)
     new_ceiling = min(ceiling, math.ceil(1.05 * highest / 100_000) * 100_000)
     return new_floor, new_ceiling
@@ -125,7 +126,9 @@ def apply_thresholds(comparisons: list[Comparison]) -> None:
         ceiling_text = "{" + ", ".join(f"{t}: {ceilings[t]:_}" for t in sorted(ceilings)) + "}"
         name = re.escape(comparison.name)
         if comparison.suite == "generic":
-            pattern = re.compile(rf'("name": "{name}",\n(?:.*\n)*?\s*"floor": )\{{[^}}]*\}}(,\n\s*"ceiling": )\{{[^}}]*\}}')
+            pattern = re.compile(
+                rf'("name": "{name}",\n(?:.*\n)*?\s*"floor": )\{{[^}}]*\}}(,\n\s*"ceiling": )\{{[^}}]*\}}'
+            )
             text, count = pattern.subn(lambda m: m.group(1) + floor_text + m.group(2) + ceiling_text, text, count=1)
         elif comparison.suite == "encodings":
             pattern = re.compile(rf'(\n    "{name}": \()\{{[^}}]*\}}, \{{[^}}]*\}}(\),)')
@@ -183,17 +186,17 @@ def main(argv: list[str] | None = None) -> int:
                 base = measure(args.base, fixture(args.base, comparison), comparison, 1)
                 new = measure(args.new, fixture(args.new, comparison), comparison, 1)
                 comparison.reasons = screen_reasons(base, new, args) + [f"FAILS {f}" for f in new["failures"]]
-                print(f"screen {suite} {workload['name']} t{threads}: {'; '.join(comparison.reasons) or 'same'}",
-                      flush=True)
+                print(
+                    f"screen {suite} {workload['name']} t{threads}: {'; '.join(comparison.reasons) or 'same'}",
+                    flush=True,
+                )
             if comparison.reasons:
                 comparisons.append(comparison)
     for round_idx in range(args.rounds):
         for comparison in comparisons:
             builds = [("base", args.base), ("new", args.new)]
             for label, build in builds if round_idx % 2 == 0 else reversed(builds):
-                getattr(comparison, label).append(
-                    measure(build, fixture(build, comparison), comparison, args.repeats)
-                )
+                getattr(comparison, label).append(measure(build, fixture(build, comparison), comparison, args.repeats))
         print(f"round {round_idx + 1} of {args.rounds} done", flush=True)
     print(f"{len(comparisons)} workloads differ:")
     for comparison in comparisons:
