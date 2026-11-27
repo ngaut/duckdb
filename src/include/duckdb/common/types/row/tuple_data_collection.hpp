@@ -12,6 +12,8 @@
 #include "duckdb/common/types/row/tuple_data_segment.hpp"
 #include "duckdb/common/types/row/tuple_data_states.hpp"
 
+#include <functional>
+
 namespace duckdb {
 class TaskScheduler;
 
@@ -226,6 +228,9 @@ public:
 	bool Scan(TupleDataParallelScanState &gstate, TupleDataLocalScanState &lstate, DataChunk &result);
 	//! Whether the last scan has been completed on this TupleDataCollection
 	bool ScanComplete(const TupleDataScanState &state) const;
+	//! Calls the callback with the location of each of the given rows (ascending row indices) while its blocks are
+	//! pinned, pinning only the chunks that hold them
+	void VisitRowLocations(const vector<idx_t> &rows, const std::function<void(idx_t, data_ptr_t)> &callback);
 	//! Seeks to the specified chunk index, returning the total row count before it
 	idx_t Seek(TupleDataScanState &state, const idx_t target_chunk);
 

@@ -26,15 +26,19 @@ static bool SljitPendingPreaggregatedPrimitiveLastGroupMatches(SljitPendingPreag
 template <class TARGET_TYPE>
 static bool SljitPendingPreaggregatedPrimitiveContinuesTailStep(SljitPendingPreaggregatedPrimitiveGroupBatch &pending,
                                                                 TARGET_TYPE key) {
-	if (pending.Count() < 2 || !pending.GeneratedAppendProof().groups_strictly_increasing) {
+	if (!pending.GeneratedAppendProof().groups_strictly_increasing) {
 		return true;
 	}
 	auto data = FlatVector::GetData<TARGET_TYPE>(pending.groups.chunk.data[0]);
-	const auto previous_key = data[pending.Count() - 2];
 	const auto last_key = data[pending.Count() - 1];
 	if (key <= last_key) {
 		return true;
 	}
+	// a rise from a lone group has no step to compare: it may cross a scheduler gap, whose keys other threads hold
+	if (pending.Count() < 2) {
+		return false;
+	}
+	const auto previous_key = data[pending.Count() - 2];
 	if constexpr (std::is_integral<TARGET_TYPE>::value && !std::is_same<TARGET_TYPE, bool>::value) {
 		using UNSIGNED_TARGET_TYPE = typename std::make_unsigned<TARGET_TYPE>::type;
 		const auto previous_step =

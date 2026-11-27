@@ -55,6 +55,7 @@ add_library_unity(
   test_string_util.cpp
   test_substring_oob.cpp
   test_swar.cpp
+  test_aggregate_dense_append_cache.cpp
   test_aggregate_hll.cpp
   test_jemalloc_tcache.cpp
   test_radix_ht_sink.cpp

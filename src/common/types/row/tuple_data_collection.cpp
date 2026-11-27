@@ -741,6 +741,34 @@ idx_t TupleDataCollection::FetchChunk(TupleDataScanState &state, idx_t chunk_idx
 	throw InternalException("Chunk index out of in TupleDataCollection::FetchChunk");
 }
 
+void TupleDataCollection::VisitRowLocations(const vector<idx_t> &rows,
+                                            const std::function<void(idx_t, data_ptr_t)> &callback) {
+	TupleDataScanState state;
+	InitializeScan(state, vector<column_t>(), TupleDataPinProperties::UNPIN_AFTER_DONE);
+	idx_t row_idx = 0;
+	idx_t chunk_idx = 0;
+	idx_t chunk_begin = 0;
+	for (auto &segment : segments) {
+		for (auto &chunk : segment->chunks) {
+			const auto chunk_end = chunk_begin + chunk->count;
+			if (row_idx < rows.size() && rows[row_idx] < chunk_end) {
+				FetchChunk(state, chunk_idx, false);
+				const auto locations = FlatVector::GetData<data_ptr_t>(state.chunk_state.row_locations);
+				for (; row_idx < rows.size() && rows[row_idx] < chunk_end; row_idx++) {
+					D_ASSERT(rows[row_idx] >= chunk_begin);
+					callback(row_idx, locations[rows[row_idx] - chunk_begin]);
+				}
+			}
+			chunk_begin = chunk_end;
+			chunk_idx++;
+		}
+	}
+	if (row_idx != rows.size()) {
+		throw InternalException("TupleDataCollection::VisitRowLocations: row %llu is past the collection's %llu rows",
+		                        rows[row_idx], Count());
+	}
+}
+
 bool TupleDataCollection::Scan(TupleDataScanState &state, DataChunk &result) {
 	const auto segment_index_before = state.segment_index;
 	idx_t segment_index;

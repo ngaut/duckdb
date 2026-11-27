@@ -36,6 +36,11 @@ struct GroupedAggregateProvenUniqueRange {
 	int64_t last_signed_key = 0;
 	uint64_t first_unsigned_key = 0;
 	uint64_t last_unsigned_key = 0;
+	//! Rows of the local table's data holding the first and last keys (its rows are appended in key order)
+	idx_t first_row = DConstants::INVALID_INDEX;
+	idx_t last_row = DConstants::INVALID_INDEX;
+	//! The deferred collection holding the rows, set when the thread combines
+	idx_t collection = DConstants::INVALID_INDEX;
 };
 
 //! GroupedAggregateHashTable is a linear probing HT that is used for computing
@@ -340,6 +345,9 @@ private:
 		PhysicalType physical_type = PhysicalType::INVALID;
 		idx_t layout_offset = DConstants::INVALID_INDEX;
 		idx_t base_key = 0;
+		//! The table's group count when the cache last recorded every group: a table that grew since holds groups
+		//! the cache does not know
+		idx_t covered_count = 0;
 		bool disabled = false;
 		vector<uintptr_t> addresses;
 	};

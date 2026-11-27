@@ -464,6 +464,8 @@ struct AggregatePartition : StateWithBlockableTasks {
 
 	AggregatePartitionState state;
 	bool data_contains_duplicate_rows;
+	//! Rows of the data whose states were combined into another partition's row (ascending): the scan skips them
+	vector<idx_t> skipped_rows;
 
 	unique_ptr<TupleDataCollection> data;
 	//! Data of this partition whose aggregate states were exported to spillable storage
@@ -1666,8 +1668,20 @@ void RadixPartitionedHashTable::FinishStateUpdates(ExecutionContext &context, Op
 	FinishRadixHTSinkState(context.client, gstate, lstate);
 }
 
+//! A key two threads' proven-unique rows share: the source row's states combine into the target row's
+struct RadixHTSharedEdge {
+	idx_t source_collection;
+	idx_t source_row;
+	idx_t target_collection;
+	idx_t target_row;
+};
+
+//! Whether the ranges are disjoint. With shared edges allowed, ranges may also meet at a key that is an edge (the
+//! first or last key) of each range holding it: an order whose rows two threads scanned. Each such key's rows
+//! (except the first one's) are collected into edges, to be combined into the first one's row.
 template <class KEY_TYPE>
-static bool RadixHTProvenUniqueRangesDisjoint(vector<GroupedAggregateProvenUniqueRange> &ranges) {
+static bool RadixHTProvenUniqueRangesDisjoint(vector<GroupedAggregateProvenUniqueRange> &ranges,
+                                              bool allow_shared_edges, optional_ptr<vector<RadixHTSharedEdge>> edges) {
 	auto first_key = [](const GroupedAggregateProvenUniqueRange &range) {
 		if constexpr (std::is_signed<KEY_TYPE>::value) {
 			return static_cast<KEY_TYPE>(range.first_signed_key);
@@ -1682,17 +1696,34 @@ static bool RadixHTProvenUniqueRangesDisjoint(vector<GroupedAggregateProvenUniqu
 			return static_cast<KEY_TYPE>(range.last_unsigned_key);
 		}
 	};
-	std::sort(ranges.begin(), ranges.end(),
-	          [&](const auto &left, const auto &right) { return first_key(left) < first_key(right); });
+	std::sort(ranges.begin(), ranges.end(), [&](const auto &left, const auto &right) {
+		return first_key(left) < first_key(right) ||
+		       (first_key(left) == first_key(right) && last_key(left) < last_key(right));
+	});
+	// the highest key covered so far, and the range whose last row holds it
+	idx_t highest_range = 0;
 	for (idx_t range_idx = 1; range_idx < ranges.size(); range_idx++) {
-		if (first_key(ranges[range_idx]) <= last_key(ranges[range_idx - 1])) {
+		auto &range = ranges[range_idx];
+		auto &highest = ranges[highest_range];
+		if (first_key(range) == last_key(highest) && allow_shared_edges) {
+			// a thread's keys strictly increase, so two rows of a shared key come from different threads
+			D_ASSERT(range.collection != highest.collection);
+			if (edges) {
+				edges->push_back({range.collection, range.first_row, highest.collection, highest.last_row});
+			}
+		} else if (first_key(range) <= last_key(highest)) {
 			return false;
+		}
+		if (last_key(range) > last_key(highest)) {
+			highest_range = range_idx;
 		}
 	}
 	return true;
 }
 
-static bool RadixHTProvenUniqueRangesDisjoint(vector<GroupedAggregateProvenUniqueRange> &ranges) {
+static bool RadixHTProvenUniqueRangesDisjoint(vector<GroupedAggregateProvenUniqueRange> &ranges,
+                                              bool allow_shared_edges,
+                                              optional_ptr<vector<RadixHTSharedEdge>> edges = nullptr) {
 	if (ranges.empty()) {
 		return false;
 	}
@@ -1704,24 +1735,109 @@ static bool RadixHTProvenUniqueRangesDisjoint(vector<GroupedAggregateProvenUniqu
 	}
 	switch (key_type) {
 	case PhysicalType::INT8:
-		return RadixHTProvenUniqueRangesDisjoint<int8_t>(ranges);
+		return RadixHTProvenUniqueRangesDisjoint<int8_t>(ranges, allow_shared_edges, edges);
 	case PhysicalType::INT16:
-		return RadixHTProvenUniqueRangesDisjoint<int16_t>(ranges);
+		return RadixHTProvenUniqueRangesDisjoint<int16_t>(ranges, allow_shared_edges, edges);
 	case PhysicalType::INT32:
-		return RadixHTProvenUniqueRangesDisjoint<int32_t>(ranges);
+		return RadixHTProvenUniqueRangesDisjoint<int32_t>(ranges, allow_shared_edges, edges);
 	case PhysicalType::INT64:
-		return RadixHTProvenUniqueRangesDisjoint<int64_t>(ranges);
+		return RadixHTProvenUniqueRangesDisjoint<int64_t>(ranges, allow_shared_edges, edges);
 	case PhysicalType::UINT8:
-		return RadixHTProvenUniqueRangesDisjoint<uint8_t>(ranges);
+		return RadixHTProvenUniqueRangesDisjoint<uint8_t>(ranges, allow_shared_edges, edges);
 	case PhysicalType::UINT16:
-		return RadixHTProvenUniqueRangesDisjoint<uint16_t>(ranges);
+		return RadixHTProvenUniqueRangesDisjoint<uint16_t>(ranges, allow_shared_edges, edges);
 	case PhysicalType::UINT32:
-		return RadixHTProvenUniqueRangesDisjoint<uint32_t>(ranges);
+		return RadixHTProvenUniqueRangesDisjoint<uint32_t>(ranges, allow_shared_edges, edges);
 	case PhysicalType::UINT64:
-		return RadixHTProvenUniqueRangesDisjoint<uint64_t>(ranges);
+		return RadixHTProvenUniqueRangesDisjoint<uint64_t>(ranges, allow_shared_edges, edges);
 	default:
 		return false;
 	}
+}
+
+//! Shared edges are combined by copying the states of a key's other rows into its first row: only states without a
+//! destructor stay valid when copied
+static bool RadixHTAllowsSharedEdges(RadixHTGlobalSinkState &gstate) {
+	return !gstate.radix_ht.GetLayout().HasDestructor();
+}
+
+//! Combines the states of each shared key's other rows into its first row, and returns the rows each deferred
+//! collection must skip (ascending)
+static vector<vector<idx_t>> RadixHTCombineSharedEdges(ClientContext &context, RadixHTGlobalSinkState &gstate,
+                                                       const vector<RadixHTSharedEdge> &edges) {
+	auto &collections = gstate.deferred_proven_unique_data;
+	const auto layout_ptr = gstate.radix_ht.GetLayoutPtr();
+	auto &layout = *layout_ptr;
+	const auto row_width = layout.GetRowWidth();
+	vector<vector<idx_t>> skipped_rows(collections.size());
+
+	// The rows of an edge live in different collections that are not pinned together: copy both rows, combine the
+	// copies, and write the combined states back into the target row
+	auto source_copies = make_unsafe_uniq_array_uninitialized<data_t>(edges.size() * row_width);
+	auto target_copies = make_unsafe_uniq_array_uninitialized<data_t>(edges.size() * row_width);
+	auto visit_rows = [&](idx_t collection, vector<std::pair<idx_t, idx_t>> &row_edges,
+	                      const std::function<void(idx_t edge_idx, data_ptr_t row)> &visit) {
+		std::sort(row_edges.begin(), row_edges.end());
+		vector<idx_t> rows;
+		for (auto &row_edge : row_edges) {
+			rows.push_back(row_edge.first);
+		}
+		collections[collection]->GetPartitions()[0]->VisitRowLocations(
+		    rows, [&](idx_t row_idx, data_ptr_t row) { visit(row_edges[row_idx].second, row); });
+	};
+	vector<vector<std::pair<idx_t, idx_t>>> source_rows(collections.size());
+	vector<vector<std::pair<idx_t, idx_t>>> target_rows(collections.size());
+	for (idx_t edge_idx = 0; edge_idx < edges.size(); edge_idx++) {
+		auto &edge = edges[edge_idx];
+		D_ASSERT(edge.source_collection < collections.size() && edge.target_collection < collections.size());
+		source_rows[edge.source_collection].emplace_back(edge.source_row, edge_idx);
+		target_rows[edge.target_collection].emplace_back(edge.target_row, edge_idx);
+	}
+	for (idx_t collection = 0; collection < collections.size(); collection++) {
+		visit_rows(collection, source_rows[collection], [&](idx_t edge_idx, data_ptr_t row) {
+			memcpy(source_copies.get() + edge_idx * row_width, row, row_width);
+		});
+		visit_rows(collection, target_rows[collection], [&](idx_t edge_idx, data_ptr_t row) {
+			memcpy(target_copies.get() + edge_idx * row_width, row, row_width);
+		});
+		for (auto &source_row : source_rows[collection]) {
+			skipped_rows[collection].push_back(source_row.first);
+		}
+	}
+
+	// Edges sharing a target row (a key three threads scanned) combine into the copy of its first edge
+	map<std::pair<idx_t, idx_t>, idx_t> first_edge_of_target;
+	vector<idx_t> combined_edge(edges.size());
+	for (idx_t edge_idx = 0; edge_idx < edges.size(); edge_idx++) {
+		const auto target = std::make_pair(edges[edge_idx].target_collection, edges[edge_idx].target_row);
+		combined_edge[edge_idx] = first_edge_of_target.emplace(target, edge_idx).first->second;
+	}
+	ArenaAllocator allocator(BufferAllocator::Get(context));
+	RowOperationsState row_state(allocator);
+	Vector sources(LogicalType::POINTER);
+	Vector targets(LogicalType::POINTER);
+	auto source_pointers = FlatVector::GetDataMutable<data_ptr_t>(sources);
+	auto target_pointers = FlatVector::GetDataMutable<data_ptr_t>(targets);
+	for (idx_t edge_idx = 0; edge_idx < edges.size(); edge_idx++) {
+		// one pair at a time: edges sharing a target must combine in turn
+		source_pointers[0] = source_copies.get() + edge_idx * row_width;
+		target_pointers[0] = target_copies.get() + combined_edge[edge_idx] * row_width;
+		FlatVector::SetSize(sources, 1);
+		FlatVector::SetSize(targets, 1);
+		RowOperations::CombineStates(row_state, layout, sources, targets);
+	}
+
+	const auto state_offset = layout.GetAggrOffset();
+	for (idx_t collection = 0; collection < collections.size(); collection++) {
+		visit_rows(collection, target_rows[collection], [&](idx_t edge_idx, data_ptr_t row) {
+			if (combined_edge[edge_idx] == edge_idx) {
+				memcpy(row + state_offset, target_copies.get() + edge_idx * row_width + state_offset,
+				       row_width - state_offset);
+			}
+		});
+		std::sort(skipped_rows[collection].begin(), skipped_rows[collection].end());
+	}
+	return skipped_rows;
 }
 
 //! A thread's proven-unique rows stay unpartitioned while the key ranges of the threads that combined so far are
@@ -1737,9 +1853,14 @@ static bool CombineProvenUniqueData(ClientContext &context, RadixHTGlobalSinkSta
 	vector<unique_ptr<PartitionedTupleData>> to_repartition;
 	{
 		const annotated_lock_guard<annotated_mutex> guard {gstate.lock};
-		gstate.proven_unique_ranges.insert(gstate.proven_unique_ranges.end(), ranges.begin(), ranges.end());
+		const auto collection = gstate.deferred_proven_unique_data.size();
+		for (auto range : ranges) {
+			range.collection = collection;
+			gstate.proven_unique_ranges.push_back(range);
+		}
 		gstate.proven_unique_local_count++;
-		if (!gstate.requires_final_combine && RadixHTProvenUniqueRangesDisjoint(gstate.proven_unique_ranges)) {
+		if (!gstate.requires_final_combine &&
+		    RadixHTProvenUniqueRangesDisjoint(gstate.proven_unique_ranges, RadixHTAllowsSharedEdges(gstate))) {
 			gstate.deferred_proven_unique_data.emplace_back(std::move(data));
 			return true;
 		}
@@ -1918,9 +2039,12 @@ void RadixPartitionedHashTable::Finalize(ClientContext &context, GlobalSinkState
 		// Abandon() only clears a local HT's lookup table; the bounded monotonic-stream proof spans every
 		// abandoned segment. Globally disjoint covering intervals therefore remain duplicate-free even when
 		// the local pointer tables overflowed. Unproven abandonment still falls through to final combine.
-		const auto disjoint_proven_ranges = !gstate.external && !gstate.requires_final_combine &&
-		                                    gstate.proven_unique_local_count == gstate.active_threads.load() &&
-		                                    RadixHTProvenUniqueRangesDisjoint(gstate.proven_unique_ranges);
+		vector<RadixHTSharedEdge> shared_edges;
+		const auto disjoint_proven_ranges =
+		    !gstate.external && !gstate.requires_final_combine &&
+		    gstate.proven_unique_local_count == gstate.active_threads.load() &&
+		    RadixHTProvenUniqueRangesDisjoint(gstate.proven_unique_ranges, RadixHTAllowsSharedEdges(gstate),
+		                                      &shared_edges);
 		// Exported aggregate states must always be imported and combined by the source-side finalize
 		const auto has_exported_data = !gstate.uncombined_exported_data.empty();
 		const auto already_combined = (single_ht || disjoint_proven_ranges) && !has_exported_data;
@@ -1976,9 +2100,17 @@ void RadixPartitionedHashTable::Finalize(ClientContext &context, GlobalSinkState
 			}
 		}
 		gstate.uncombined_exported_data.clear();
-		for (auto &data : gstate.deferred_proven_unique_data) {
+		vector<vector<idx_t>> skipped_rows;
+		if (gstate.finalize_strategy == RadixHTFinalizeStrategy::DISJOINT_PROVEN_RANGES && !shared_edges.empty()) {
+			skipped_rows = RadixHTCombineSharedEdges(context, gstate, shared_edges);
+		}
+		for (idx_t collection = 0; collection < gstate.deferred_proven_unique_data.size(); collection++) {
+			auto &data = gstate.deferred_proven_unique_data[collection];
 			D_ASSERT(data->PartitionCount() == 1);
 			publish_partition(data->GetUnpartitioned(), nullptr);
+			if (collection < skipped_rows.size()) {
+				gstate.partitions.back()->skipped_rows = std::move(skipped_rows[collection]);
+			}
 		}
 		gstate.deferred_proven_unique_data.clear();
 	} else {
@@ -2449,6 +2581,8 @@ private:
 	bool ScanPrimitiveStateRows(RadixHTGlobalSinkState &sink, RadixHTGlobalSourceState &gstate);
 	bool ScanRowsInternal(RadixHTGlobalSinkState &sink, RadixHTGlobalSourceState &gstate,
 	                      const vector<column_t> &column_ids, DataChunk &result);
+	//! Removes the partition's skipped rows from the scanned chunk and its row locations; returns the rows left
+	idx_t SkipRows(AggregatePartition &partition, DataChunk &result);
 
 public:
 	//! Current task and index
@@ -2468,6 +2602,9 @@ private:
 
 	//! State and chunk for scanning
 	TupleDataScanState scan_state;
+	//! Rows of the scanned partition read so far, and the next of its skipped rows
+	idx_t scanned_partition_rows = 0;
+	idx_t next_skipped_row = 0;
 	DataChunk scan_chunk;
 	DataChunk primitive_state_scan_chunk;
 	RadixPrimitiveAggregateStateScanBatch primitive_batch;
@@ -2697,11 +2834,17 @@ bool RadixHTLocalSourceState::ScanRowsInternal(RadixHTGlobalSinkState &sink, Rad
 	if (scan_status == RadixHTScanStatus::INIT) {
 		data_collection.InitializeScan(scan_state, column_ids, sink.scan_pin_properties);
 		scan_status = RadixHTScanStatus::IN_PROGRESS;
+		scanned_partition_rows = 0;
+		next_skipped_row = 0;
 		gstate.started_rows.fetch_add(data_collection.Count(), std::memory_order_relaxed);
 		gstate.started_partitions.fetch_add(1, std::memory_order_relaxed);
 	}
 
-	if (!data_collection.Scan(scan_state, result)) {
+	const auto rows_before = scanned_partition_rows;
+	bool scanned;
+	while ((scanned = data_collection.Scan(scan_state, result)) && SkipRows(partition, result) == 0) {
+	}
+	if (!scanned) {
 		if (sink.scan_pin_properties == TupleDataPinProperties::DESTROY_AFTER_DONE) {
 			data_collection.Reset();
 			partition.allocator.reset();
@@ -2714,8 +2857,38 @@ bool RadixHTLocalSourceState::ScanRowsInternal(RadixHTGlobalSinkState &sink, Rad
 		}
 		return false;
 	}
-	gstate.scanned_rows.fetch_add(result.size(), std::memory_order_relaxed);
+	gstate.scanned_rows.fetch_add(scanned_partition_rows - rows_before, std::memory_order_relaxed);
 	return true;
+}
+
+idx_t RadixHTLocalSourceState::SkipRows(AggregatePartition &partition, DataChunk &result) {
+	auto &skipped = partition.skipped_rows;
+	const auto begin = scanned_partition_rows;
+	const auto count = result.size();
+	scanned_partition_rows += count;
+	if (next_skipped_row == skipped.size() || skipped[next_skipped_row] >= begin + count) {
+		return count;
+	}
+	auto &row_locations = scan_state.chunk_state.row_locations;
+	auto locations = FlatVector::GetDataMutable<data_ptr_t>(row_locations);
+	SelectionVector kept(count);
+	idx_t kept_count = 0;
+	for (idx_t row_idx = 0; row_idx < count; row_idx++) {
+		if (next_skipped_row < skipped.size() && skipped[next_skipped_row] == begin + row_idx) {
+			next_skipped_row++;
+			continue;
+		}
+		locations[kept_count] = locations[row_idx];
+		kept.set_index(kept_count++, row_idx);
+	}
+	FlatVector::SetSize(row_locations, count_t(kept_count));
+	// only the scanned columns hold rows; the others are filled from the row locations afterwards
+	for (auto column_id : scan_state.chunk_state.column_ids) {
+		result.data[column_id].Slice(kept, kept_count);
+		result.data[column_id].Flatten();
+	}
+	result.SetChildCardinality(kept_count);
+	return kept_count;
 }
 
 void RadixHTLocalSourceState::Scan(RadixHTGlobalSinkState &sink, RadixHTGlobalSourceState &gstate, DataChunk &chunk) {

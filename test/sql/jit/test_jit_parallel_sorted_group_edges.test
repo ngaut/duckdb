@@ -1,0 +1,86 @@
+# name: test/sql/jit/test_jit_parallel_sorted_group_edges.test
+# description: Threads that append the groups of a sorted key without lookups publish their rows as they are; a key whose rows two or three threads scanned (a run across row groups) combines into one row, so every group appears once with all its rows aggregated, like the vectorized plan
+# group: [jit]
+
+require jit_sljit
+
+load {TEST_DIR}/test_jit_parallel_sorted_group_edges.db
+
+statement ok
+SET jit_measure_native_legs=false
+
+statement ok
+SET jit_cbo_generated_stage_benefit=4096
+
+statement ok
+SET jit_cbo_materialization_elision_benefit=4096
+
+statement ok
+SET jit_cbo_native_operator_stage_benefit=4096
+
+statement ok
+SET jit_cbo_full_pipeline_benefit=4096
+
+statement ok
+SET jit_cbo_startup_base_cost=0
+
+statement ok
+SET jit_cbo_startup_margin_basis_points=0
+
+# k: sorted runs of seven rows over 3.2M rows (27 row groups, so runs cross row group boundaries), dense stretches
+# whose gaps widen the key range past a perfect hash table, and one key whose 300000 rows span three row groups; v is
+# the payload
+statement ok
+CREATE TABLE t AS
+SELECT k, v
+FROM (SELECT CASE WHEN r BETWEEN 1000000 AND 1299999 THEN 2000000 ELSE r // 7 + (r // 1000000) * 2000000 END AS k,
+             r % 1000 AS v
+      FROM range(3200000) t(r))
+ORDER BY k
+
+statement ok
+CHECKPOINT
+
+restart
+
+statement ok
+CREATE MACRO groups() AS TABLE
+SELECT 'sum' AS q, count(*) AS c, sum(total) AS a, sum(hash(k, total)) AS h
+FROM (SELECT k, sum(v) AS total FROM t GROUP BY k)
+UNION ALL
+SELECT 'count', count(*), sum(n), sum(hash(k, n))
+FROM (SELECT k, count(*) AS n FROM t GROUP BY k)
+UNION ALL
+SELECT 'sum and count', count(*), sum(total + n), sum(hash(k, total, n))
+FROM (SELECT k, sum(v) AS total, count(*) AS n FROM t GROUP BY k)
+
+foreach threads 1 3 8
+
+statement ok
+SET threads={threads}
+
+statement ok
+SET jit_policy='off'
+
+statement ok
+CREATE OR REPLACE TABLE expected AS FROM groups()
+
+statement ok
+SET jit_policy='auto'
+
+statement ok
+CREATE OR REPLACE TABLE actual AS FROM groups()
+
+query I
+SELECT count(*) FROM ((FROM expected EXCEPT ALL FROM actual) UNION ALL (FROM actual EXCEPT ALL FROM expected))
+----
+0
+
+endloop
+
+query III
+SELECT q, c, a FROM expected ORDER BY q
+----
+count	414290	3200000
+sum	414290	1598400000
+sum and count	414290	1601600000
