@@ -14,6 +14,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import performance_gate
 from performance_gate import SUITES, TRACED, Sample, parse_args, run_workload, summary_row, workload_failures
+from workloads import PERFORMANCE_GATES
 from process_usage import ProcessUsage
 
 WORKLOAD = {
@@ -216,7 +217,8 @@ class ArgumentsTest(unittest.TestCase):
 
 class WorkloadsTest(unittest.TestCase):
     def test_every_workload_has_its_thresholds_on_the_same_thread_counts(self) -> None:
-        for suite, threads in (("generic", {1, 4}), ("encodings", {1, 4}), ("tpch", {1})):
+        for suite in SUITES:
+            threads = {gate_threads for gate_suite, gate_threads in PERFORMANCE_GATES if gate_suite == suite}
             for workload in SUITES[suite]:
                 with self.subTest(workload=workload["name"]):
                     qualified = set(workload["floor"])

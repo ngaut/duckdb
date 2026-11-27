@@ -32,8 +32,8 @@ from performance_gate import (
     summary_row,
     workload_failures,
 )
+from workloads import PERFORMANCE_GATES
 
-PERFORMANCE_GATES = (("generic", 1), ("generic", 4), ("encodings", 1), ("encodings", 4), ("tpch", 1))
 WORKLOADS_FILE = Path(__file__).resolve().parent / "workloads.py"
 
 
@@ -130,12 +130,9 @@ def apply_thresholds(comparisons: list[Comparison]) -> None:
                 rf'("name": "{name}",\n(?:.*\n)*?\s*"floor": )\{{[^}}]*\}}(,\n\s*"ceiling": )\{{[^}}]*\}}'
             )
             text, count = pattern.subn(lambda m: m.group(1) + floor_text + m.group(2) + ceiling_text, text, count=1)
-        elif comparison.suite == "encodings":
+        else:
             pattern = re.compile(rf'(\n    "{name}": \()\{{[^}}]*\}}, \{{[^}}]*\}}(\),)')
             text, count = pattern.subn(lambda m: m.group(1) + floor_text + ", " + ceiling_text + m.group(2), text)
-        else:
-            pattern = re.compile(rf'(\n    "{re.escape(comparison.name[1:])}": \()[0-9.]+, [0-9_]+(\),)')
-            text, count = pattern.subn(lambda m: m.group(1) + f"{floor:.2f}, {ceiling:_}" + m.group(2), text)
         if count != 1:
             raise SystemExit(f"error: could not find the thresholds of {comparison.suite} {comparison.name}")
     WORKLOADS_FILE.write_text(text, encoding="utf-8")

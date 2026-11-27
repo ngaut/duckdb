@@ -75,7 +75,7 @@ class ApplyTest(unittest.TestCase):
             "GENERIC = (\n    {\n        \"name\": \"g\",\n        \"sql\": \"x\",\n"
             "        \"floor\": {1: 1.00, 4: 1.00},\n        \"ceiling\": {1: 900_000, 4: 900_000},\n    },\n)\n"
             "ENCODINGS = {\n    \"e\": ({1: 1.00, 4: 1.00}, {1: 900_000, 4: 900_000}),\n}\n"
-            "TPCH = {\n    \"01\": (1.00, 900_000),\n}\n"
+            "TPCH = {\n    \"q01\": ({1: 1.00, 4: 1.00}, {1: 900_000, 4: 900_000}),\n}\n"
         )
         rounds = [summary(speedup=2.0, auto_instructions=400_000)]
         comparisons = []
@@ -91,7 +91,7 @@ class ApplyTest(unittest.TestCase):
             result = path.read_text(encoding="utf-8")
         self.assertIn('"floor": {1: 1.80, 4: 1.00},\n        "ceiling": {1: 500_000, 4: 900_000},', result)
         self.assertIn('"e": ({1: 1.80, 4: 1.00}, {1: 500_000, 4: 900_000}),', result)
-        self.assertIn('"01": (1.80, 500_000),', result)
+        self.assertIn('"q01": ({1: 1.80, 4: 1.00}, {1: 500_000, 4: 900_000}),', result)
 
 
 if __name__ == "__main__":

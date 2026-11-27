@@ -27,6 +27,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from duckdb_shell import duckdb_shell_environment, repo_root
+from workloads import PERFORMANCE_GATES
 
 ROOT = repo_root()
 BUILD = ROOT / "build" / "reldebug"
@@ -51,7 +52,6 @@ FORCED_JIT_SUITES = (
     "test/sql/cte/*",
     "test/sql/tpch/*",
 )
-PERFORMANCE_GATES = (("generic", 1), ("generic", 4), ("encodings", 1), ("encodings", 4), ("tpch", 1))
 # How many result checks run side by side: each also runs its queries on several threads
 CONCURRENT_CHECKS = 4
 

@@ -59,6 +59,7 @@ class ChecksTest(unittest.TestCase):
                 "encodings performance gate on 1 threads",
                 "encodings performance gate on 4 threads",
                 "tpch performance gate on 1 threads",
+                "tpch performance gate on 8 threads",
             },
         )
         self.assertEqual(
