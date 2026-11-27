@@ -133,6 +133,10 @@ static SljitPrimitiveRunRegisterLayout BuildSljitPrimitiveRunRegisterLayout() {
 		result.output_value_is_set = SljitSavedRegisterAt(9);
 		result.saved_register_count = 10;
 	}
+	if (capabilities.registers.SupportsLayout(8, result.saved_register_count)) {
+		result.scratch_register_count = 8;
+		result.hugeint_set_flag = SLJIT_R7;
+	}
 	return result;
 }
 

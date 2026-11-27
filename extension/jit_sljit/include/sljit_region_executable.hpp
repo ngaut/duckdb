@@ -349,6 +349,32 @@ struct SljitExecutableIntegralGroupKeyRange {
 	}
 };
 
+//! A grouped aggregate's payload lanes as vectors that any reduction strategy reads, independent of how the groups are
+//! reduced. The staged chunk holds the caller's input columns as they are, followed by a vector per computed lane (a
+//! typed tree: arithmetic, CASE, a FILTER lowered to CASE) that its compiled vector kernel produces from the payloads'
+//! combined source slots, NULL rows in its validity. Planned for aggregates whose payloads read combined slots
+//! (FUSED_COMBINED), which callers map to their input columns
+struct SljitExecutableAggregatePayloadStage {
+	idx_t slot_count = 0;
+	//! the computed lanes, reading the slots in slot order
+	vector<SljitExecutableRegionExpression> computed;
+	//! per aggregate: the slot its reference lane reads, or slot_count plus its computed lane, INVALID_INDEX for
+	//! COUNT(*)
+	vector<idx_t> lane_sources;
+
+	bool Ready() const {
+		return !computed.empty();
+	}
+
+	idx_t CodeSize() const {
+		idx_t result = 0;
+		for (auto &lane : computed) {
+			result += lane.CodeSize();
+		}
+		return result;
+	}
+};
+
 struct SljitExecutableAggregateUpdate {
 	SljitNativeAggregateUpdatePlan plan;
 	vector<SljitExecutableRegionExpression> payloads;
@@ -368,6 +394,7 @@ struct SljitExecutableAggregateUpdate {
 	idx_t distinct_group_domain_size = 0;
 	SljitGroupedAggregateDirectUpdatePlan grouped_direct_update;
 	SljitExecutablePrimitiveRunUpdate primitive_run_update;
+	SljitExecutableAggregatePayloadStage payload_stage;
 	SljitExecutableFusedAffineRunUpdate fused_affine_run_update;
 	SljitCompiledFunction<SljitNativeAggregateUpdateFunction> fused_payload_update;
 	bool fused_payload_update_owns_group_lookup = false;
@@ -382,6 +409,7 @@ struct SljitExecutableAggregateUpdate {
 		}
 		result += filtered_update.CodeSize();
 		result += primitive_run_update.CodeSize();
+		result += payload_stage.CodeSize();
 		result += fused_payload_update.CodeSize();
 		for (auto &payload_update : payload_updates) {
 			result += payload_update.CodeSize();

@@ -337,12 +337,50 @@ static void EmitSljitTypedExpressionTreeFastCoalesceReg(struct sljit_compiler *c
 	                                                 data_hoists);
 }
 
+//! Whether a CASE selects its result without a jump: one condition, an integer comparison whose flags pick between two
+//! leaf results. The conditional move replaces the comparison's boolean and the jump on it, so the select takes no more
+//! instructions than the branch and never mispredicts on the data. The leaves load between the comparison and the
+//! select, which a selected row's index load would break (it tests the selection)
+static bool SljitTypedExpressionTreeFastCaseSelects(const ExecutionExpressionIR &node,
+                                                    SljitTypedExpressionTreeFastIndexMode index_mode) {
+	if (node.children.size() != 2 || index_mode == SljitTypedExpressionTreeFastIndexMode::SELECTED) {
+		return false;
+	}
+	auto &condition = *node.children[0];
+	SljitTypedExpressionTreeFloatCompare float_compare;
+	return condition.kind == ExecutionExpressionIRKind::BINARY && condition.left && condition.right &&
+	       SljitTypedExpressionTreeComparisonSupported(condition.binary_op) &&
+	       !SljitTypedExpressionTreeFastIsStringCompare(condition) &&
+	       !TryReadSljitTypedExpressionTreeFloatCompareConstant(condition, float_compare) &&
+	       SljitTypedExpressionTreeFastIsLeaf(*node.children[1]) && SljitTypedExpressionTreeFastIsLeaf(*node.else_node);
+}
+
+//! The comparison sets the flags; the leaf results load without touching them (a flat or logical row's load writes R0,
+//! R1 and its target)
+static void
+EmitSljitTypedExpressionTreeFastCaseSelectReg(struct sljit_compiler *compiler, const ExecutionExpressionIR &node,
+                                              idx_t &spill_index, vector<SljitArithmeticOverflowSite> &overflows,
+                                              SljitTypedExpressionTreeFastIndexMode index_mode,
+                                              const vector<SljitTypedExpressionTreeLoopHoist> *data_hoists) {
+	auto &condition = *node.children[0];
+	auto operands = EmitSljitTypedExpressionTreeFastBinaryOperands(compiler, condition, spill_index, overflows,
+	                                                               index_mode, data_hoists);
+	const auto holds = EmitSljitTypedExpressionTreeFastCompareFlags(compiler, condition, operands.left, operands.right);
+	EmitSljitTypedExpressionTreeFastLeafReg(compiler, *node.else_node, SLJIT_R3, index_mode, data_hoists);
+	EmitSljitTypedExpressionTreeFastLeafReg(compiler, *node.children[1], SLJIT_R4, index_mode, data_hoists);
+	sljit_emit_select(compiler, holds, SLJIT_R2, SLJIT_R4, 0, SLJIT_R3);
+}
+
 static void EmitSljitTypedExpressionTreeFastCaseReg(struct sljit_compiler *compiler, const ExecutionExpressionIR &node,
                                                     idx_t &spill_index, vector<SljitArithmeticOverflowSite> &overflows,
                                                     SljitTypedExpressionTreeFastIndexMode index_mode,
                                                     const vector<SljitTypedExpressionTreeLoopHoist> *data_hoists) {
 	D_ASSERT(node.else_node);
 	D_ASSERT(node.children.size() % 2 == 0);
+	if (SljitTypedExpressionTreeFastCaseSelects(node, index_mode)) {
+		EmitSljitTypedExpressionTreeFastCaseSelectReg(compiler, node, spill_index, overflows, index_mode, data_hoists);
+		return;
+	}
 	vector<sljit_jump *> done_jumps;
 	for (idx_t child_idx = 0; child_idx < node.children.size(); child_idx += 2) {
 		auto &condition = node.children[child_idx];

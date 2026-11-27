@@ -17,6 +17,7 @@
 #include "sljit_grouped_aggregate_state_runtime.hpp"
 #include "sljit_native_binding_runtime.hpp"
 #include "sljit_pending_preaggregated_group_batch_runtime.hpp"
+#include "sljit_projection_expression_runtime.hpp"
 #include "sljit_region_runtime_trace.hpp"
 #include "sljit_runtime_batch_runtime.hpp"
 
@@ -161,6 +162,74 @@ static bool SljitTryExecuteDictionaryGroupedAggregateUpdate(
 	return true;
 }
 
+//! The stage's chunk, initialized again when a column's type differs from type_at's
+template <class TYPE_AT>
+static DataChunk &SljitPayloadStageChunk(Allocator &allocator, unique_ptr<DataChunk> &chunk, idx_t column_count,
+                                         const TYPE_AT &type_at) {
+	bool matches = chunk && chunk->ColumnCount() == column_count;
+	for (idx_t column_idx = 0; matches && column_idx < column_count; column_idx++) {
+		matches = chunk->data[column_idx].GetType() == type_at(column_idx);
+	}
+	if (!matches) {
+		vector<LogicalType> types;
+		for (idx_t column_idx = 0; column_idx < column_count; column_idx++) {
+			types.push_back(type_at(column_idx));
+		}
+		chunk.reset();
+		SljitInitializeScratchChunk(allocator, types, chunk);
+	}
+	return *chunk;
+}
+
+//! Produces the aggregate's payload lanes as the stage's chunk: the input columns as they are, then each computed lane
+//! from its vector kernel over the payloads' combined slots (slot_columns maps them to input columns). Returns the
+//! chunk and sets each aggregate's lane column
+static DataChunk &SljitProduceAggregatePayloadStage(ExecutionRegionRuntime &runtime,
+                                                    SljitRegionExecutionScratch &scratch, idx_t op_idx,
+                                                    SljitExecutableAggregatePayloadStage &stage, DataChunk &input,
+                                                    const vector<idx_t> &slot_columns,
+                                                    const vector<idx_t> *&lane_columns) {
+	D_ASSERT(slot_columns.size() == stage.slot_count);
+	auto &allocator = runtime.GetAllocator();
+	auto &slots = SljitPayloadStageChunk(
+	    allocator, scratch.AggregatePayloadStageSlots(op_idx), stage.slot_count,
+	    [&](idx_t slot) -> const LogicalType & { return input.data[slot_columns[slot]].GetType(); });
+	slots.Reset();
+	for (idx_t slot = 0; slot < stage.slot_count; slot++) {
+		slots.data[slot].Reference(input.data[slot_columns[slot]]);
+	}
+	slots.SetCardinalityUnsafe(input.size());
+
+	const auto input_columns = input.ColumnCount();
+	auto &staged =
+	    SljitPayloadStageChunk(allocator, scratch.AggregatePayloadStageChunk(op_idx),
+	                           input_columns + stage.computed.size(), [&](idx_t column_idx) -> const LogicalType & {
+		                           return column_idx < input_columns
+		                                      ? input.data[column_idx].GetType()
+		                                      : stage.computed[column_idx - input_columns].plan.return_type;
+	                           });
+	staged.Reset();
+	for (idx_t column_idx = 0; column_idx < input_columns; column_idx++) {
+		staged.data[column_idx].Reference(input.data[column_idx]);
+	}
+	for (idx_t lane_idx = 0; lane_idx < stage.computed.size(); lane_idx++) {
+		SljitExecuteProjectionExpression(stage.computed[lane_idx], slots, staged.data[input_columns + lane_idx],
+		                                 nullptr, input.size(), scratch.AggregatePayloadStageLane(op_idx, lane_idx),
+		                                 &runtime);
+	}
+	staged.SetCardinalityUnsafe(input.size());
+
+	auto &columns = scratch.AggregatePayloadStageColumns(op_idx);
+	columns.clear();
+	for (auto source : stage.lane_sources) {
+		columns.push_back(source == DConstants::INVALID_INDEX ? source
+		                  : source < stage.slot_count         ? slot_columns[source]
+		                                                      : input_columns + (source - stage.slot_count));
+	}
+	lane_columns = &columns;
+	return staged;
+}
+
 static bool SljitTryExecuteInputVectorGroupedAggregateUpdate(
     ExecutionRegionRuntime &runtime, SljitRegionExecutionScratch &scratch, idx_t op_idx, SljitExecutableRegionOp &op,
     DataChunk &payload_input, const vector<ExecutionRowPointerGroupKeySource> &group_sources,
@@ -260,6 +329,27 @@ static bool SljitTryExecuteInputVectorGroupedAggregateUpdate(
 			                              pending_preaggregate_start);
 			RecordSljitRegionMaterializationElision(
 			    runtime, op.Kind(), "direct_input_vector_pending_preaggregated_grouped_update", payload_input.size());
+			return true;
+		}
+	}
+	auto &payload_stage = op.AggregateUpdate().payload_stage;
+	if (pending_preaggregated_groups && payload_stage.Ready() &&
+	    payload_source_layout == SljitAggregatePayloadSourceLayout::FUSED_COMBINED &&
+	    payload_source_indices.size() == payload_stage.slot_count) {
+		auto stage_start = SljitRegionStageStart(runtime);
+		const vector<idx_t> *lane_columns = nullptr;
+		auto &staged = SljitProduceAggregatePayloadStage(runtime, scratch, op_idx, payload_stage, payload_input,
+		                                                 payload_source_indices, lane_columns);
+		RecordSljitRegionStageRuntime(runtime, op_idx, op.Kind(), "aggregate_payload_stage", stage_start);
+		auto pending_preaggregate_start = SljitRegionStageStart(runtime);
+		if (SljitTryPreaggregateInputVectorPrimitiveGroupsIntoPending(
+		        runtime, scratch, op_idx, op, staged, group_sources, *lane_columns, payload_lanes, grouped_state,
+		        *pending_preaggregated_groups, finish)) {
+			RecordSljitRegionStageRuntime(runtime, op_idx, op.Kind(),
+			                              "local_preaggregate_payload_stage_pending_primitive_group_runs",
+			                              pending_preaggregate_start);
+			RecordSljitRegionMaterializationElision(
+			    runtime, op.Kind(), "payload_stage_pending_preaggregated_grouped_update", payload_input.size());
 			return true;
 		}
 	}

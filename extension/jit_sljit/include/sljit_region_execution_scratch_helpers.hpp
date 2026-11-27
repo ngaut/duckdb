@@ -161,6 +161,12 @@ struct SljitAggregateOperatorScratch {
 	SljitPreaggregatedPrimitiveAggregateScratch preaggregate_scratch;
 	SljitPreaggregatedPrimitiveAggregateScratch preaggregate_scratch_slice;
 	SljitAggregatePayloadAdapterScratch payload_scratch;
+	//! the payload stage's chunks: the slots its computed lanes read, and the staged lanes (the input columns, then the
+	//! computed lanes); each computed lane's scratch; the staged column of each aggregate's lane
+	unique_ptr<DataChunk> payload_stage_slots;
+	unique_ptr<DataChunk> payload_stage_chunk;
+	vector<SljitExpressionAdapterScratch> payload_stage_lanes;
+	vector<idx_t> payload_stage_columns;
 	vector<const ExecutionPrimitiveAggregateUpdateLane *> payload_lanes;
 	bool payload_lanes_ready = false;
 	optional_ptr<const ExecutionPrimitiveAggregateUpdateLane> count_one_lane;
@@ -191,6 +197,26 @@ struct SljitAggregateUpdateScratchState {
 
 	SljitBoundGroupedPrimitiveAggregateUpdate &BoundGroupedUpdate(idx_t op_idx) {
 		return Operator(op_idx).bound_grouped_update;
+	}
+
+	unique_ptr<DataChunk> &PayloadStageSlots(idx_t op_idx) {
+		return Operator(op_idx).payload_stage_slots;
+	}
+
+	unique_ptr<DataChunk> &PayloadStageChunk(idx_t op_idx) {
+		return Operator(op_idx).payload_stage_chunk;
+	}
+
+	vector<idx_t> &PayloadStageColumns(idx_t op_idx) {
+		return Operator(op_idx).payload_stage_columns;
+	}
+
+	SljitExpressionAdapterScratch &PayloadStageLane(idx_t op_idx, idx_t lane_idx) {
+		auto &state = Operator(op_idx);
+		if (lane_idx >= state.payload_stage_lanes.size()) {
+			throw InternalException("SLJIT aggregate payload stage has no scratch for a computed lane");
+		}
+		return state.payload_stage_lanes[lane_idx];
 	}
 
 	DataChunk &PreaggregatedGroups(idx_t op_idx) {
@@ -309,6 +335,7 @@ struct SljitAggregateUpdateScratchState {
 		auto &state = *operators[op_idx];
 		state.state_addresses = make_uniq<Vector>(LogicalType::POINTER);
 		state.preaggregated_row_pointers = make_uniq<Vector>(LogicalType::POINTER);
+		state.payload_stage_lanes.resize(op.AggregateUpdate().payload_stage.computed.size());
 		auto &groups = op.AggregateUpdate().plan.sink_info.groups;
 		if (groups.empty()) {
 			return;

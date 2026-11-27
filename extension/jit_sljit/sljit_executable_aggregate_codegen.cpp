@@ -657,6 +657,54 @@ void SljitPlanExecutablePrimitiveRunUpdate(const SljitNativeAggregateUpdatePlan 
 	executable.primitive_run_update.state_offsets = std::move(state_offsets);
 }
 
+void SljitPlanExecutableAggregatePayloadStage(const SljitNativeAggregateUpdatePlan &op,
+                                              SljitExecutableAggregateUpdate &executable) {
+	// the reductions that read lane vectors (generated runs) are the stage's consumers; payloads that are all input
+	// columns need no stage
+	if (executable.primitive_run_update.flat_specializations.empty() ||
+	    executable.payload_source_layout != SljitAggregatePayloadSourceLayout::FUSED_COMBINED ||
+	    executable.payloads.size() != op.sink_info.aggregates.size()) {
+		return;
+	}
+	const auto slot_count = executable.combined_payload_source_indices.size();
+	vector<idx_t> slots(slot_count);
+	for (idx_t slot = 0; slot < slot_count; slot++) {
+		slots[slot] = slot;
+	}
+	SljitExecutableAggregatePayloadStage stage;
+	stage.slot_count = slot_count;
+	for (idx_t aggregate_idx = 0; aggregate_idx < executable.payloads.size(); aggregate_idx++) {
+		auto &payload = executable.payloads[aggregate_idx];
+		if (op.sink_info.aggregates[aggregate_idx].primitive_update_kind == AggregatePrimitiveUpdateKind::COUNT_STAR) {
+			stage.lane_sources.push_back(DConstants::INVALID_INDEX);
+			continue;
+		}
+		if (payload.plan.kind == SljitNativeRegionExpressionKind::REFERENCE) {
+			if (payload.plan.source_index >= slot_count) {
+				return;
+			}
+			stage.lane_sources.push_back(payload.plan.source_index);
+			continue;
+		}
+		if (payload.plan.kind != SljitNativeRegionExpressionKind::TYPED_EXPRESSION_TREE) {
+			return;
+		}
+		// the tree reads the combined slots, in slot order
+		SljitExecutableRegionExpression lane;
+		lane.plan = payload.plan.Copy(true, false);
+		lane.plan.expression_tree_source_indices = slots;
+		lane.input_source_indices = slots;
+		lane.input_source_not_null = executable.combined_payload_source_not_null;
+		string error;
+		if (!SljitCompilePreparedExecutableRegionExpression(lane, false, error) || !lane.vector.Function()) {
+			return;
+		}
+		stage.lane_sources.push_back(slot_count + stage.computed.size());
+		stage.computed.push_back(std::move(lane));
+	}
+	executable.payload_stage = std::move(stage);
+}
+
 SljitNativePrimitiveRunFunction
 SljitEnsureExecutablePrimitiveRunUpdate(ExecutionRegionRuntime &runtime, SljitExecutablePrimitiveRunUpdate &run_update,
                                         PhysicalType group_source_type, PhysicalType group_output_type,

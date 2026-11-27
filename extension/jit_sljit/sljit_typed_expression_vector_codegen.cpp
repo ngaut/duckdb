@@ -43,6 +43,48 @@ static void EmitStoreSljitTypedExpressionTreeVectorResult(struct sljit_compiler 
 	               NativeIntegerDataScale(result_kind), SLJIT_R2, 0);
 }
 
+//! Stores S3 as the result's validity word at the word index of row S1 - row_bias
+static void EmitStoreSljitTypedExpressionTreeValidityWord(struct sljit_compiler *compiler, sljit_sw row_bias) {
+	sljit_emit_op1(compiler, SLJIT_MOV_P, SLJIT_R0, 0, SLJIT_MEM1(SLJIT_S0),
+	               offsetof(SljitNativeVectorInput, result_validity));
+	sljit_emit_op2(compiler, SLJIT_SUB, SLJIT_R1, 0, SLJIT_S1, 0, SLJIT_IMM, row_bias);
+	sljit_emit_op2(compiler, SLJIT_LSHR, SLJIT_R1, 0, SLJIT_R1, 0, SLJIT_IMM, 6);
+	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_MEM2(SLJIT_R0, SLJIT_R1), 3, SLJIT_S3, 0);
+}
+
+//! CASE WHEN c THEN v END over flat valid rows from row 0 (SljitTypedExpressionTreeIsFastGuardedValue): every row
+//! stores v and takes c as its validity bit without a branch. S3, which indexes selected rows only in the other loops,
+//! collects the bits of the current validity word, stored whole after the word's last row.
+static void EmitSljitTypedExpressionTreeGuardedVectorLoop(struct sljit_compiler *compiler,
+                                                          const ExecutionExpressionIR &root,
+                                                          SljitNativeIntegerKind result_kind, sljit_s32 result_data_reg,
+                                                          const vector<SljitTypedExpressionTreeLoopHoist> *hoists,
+                                                          vector<SljitArithmeticOverflowSite> &overflows,
+                                                          vector<sljit_jump *> &exits) {
+	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_S3, 0, SLJIT_IMM, 0);
+	auto loop = sljit_emit_label(compiler);
+	idx_t spill_index = 0;
+	EmitSljitTypedExpressionTreeFastGuardReg(compiler, root, spill_index, overflows,
+	                                         SljitTypedExpressionTreeFastIndexMode::FLAT, hoists);
+	sljit_emit_op2(compiler, SLJIT_MSHL, SLJIT_R2, 0, SLJIT_R2, 0, SLJIT_S1, 0);
+	sljit_emit_op2(compiler, SLJIT_OR, SLJIT_S3, 0, SLJIT_S3, 0, SLJIT_R2, 0);
+	EmitSljitTypedExpressionTreeFastGuardedValueReg(compiler, root, spill_index, overflows,
+	                                                SljitTypedExpressionTreeFastIndexMode::FLAT, hoists);
+	EmitStoreSljitTypedExpressionTreeVectorResult(compiler, root, result_kind, result_data_reg);
+	sljit_emit_op2(compiler, SLJIT_ADD, SLJIT_S1, 0, SLJIT_S1, 0, SLJIT_IMM, 1);
+	sljit_emit_op2u(compiler, SLJIT_AND | SLJIT_SET_Z, SLJIT_S1, 0, SLJIT_IMM, 63);
+	auto word_open = sljit_emit_jump(compiler, SLJIT_NOT_ZERO);
+	EmitStoreSljitTypedExpressionTreeValidityWord(compiler, 1);
+	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_S3, 0, SLJIT_IMM, 0);
+	sljit_set_label(word_open, sljit_emit_label(compiler));
+	sljit_set_label(sljit_emit_cmp(compiler, SLJIT_LESS, SLJIT_S1, 0, SLJIT_S2, 0), loop);
+	// the rows ended inside a word: store its bits so far
+	sljit_emit_op2u(compiler, SLJIT_AND | SLJIT_SET_Z, SLJIT_S1, 0, SLJIT_IMM, 63);
+	exits.push_back(sljit_emit_jump(compiler, SLJIT_ZERO));
+	EmitStoreSljitTypedExpressionTreeValidityWord(compiler, 0);
+	exits.push_back(sljit_emit_jump(compiler, SLJIT_JUMP));
+}
+
 unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativeTypedExpressionTree(const ExecutionExpressionIR &root,
                                                                           SljitNativeIntegerKind result_kind,
                                                                           SljitNativeVectorFunction &function,
@@ -63,6 +105,9 @@ unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativeTypedExpressionTree(const 
 	}
 
 	const auto &fast_path = tree_plan.fast_path;
+	// Rows whose sources are flat and valid run the fast loop; a row whose value is NULL (a NULL CASE result) clears
+	// its validity bit
+	const auto fast_loop_supported = fast_path.FastPathSupportedWithNullExits();
 	auto local_size = NumericCast<sljit_sw>(tree_plan.node_count * sizeof(sljit_sw) * 3);
 	// A boolean root over flat valid rows computes whole lane groups as packed masks
 	const auto simd_plan = fast_path.fast_path_supported && root.return_type.id() == LogicalTypeId::BOOLEAN
@@ -78,7 +123,7 @@ unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativeTypedExpressionTree(const 
 	const auto &registers = GetSljitProjectionRegisterLayout();
 	vector<SljitTypedExpressionTreeLoopHoist> fast_hoists;
 	sljit_s32 result_data_reg = 0;
-	if (fast_path.fast_path_supported) {
+	if (fast_loop_supported) {
 		vector<reference<const ExecutionExpressionIR>> expressions {root};
 		if (registers.has_pointer_hoists) {
 			result_data_reg = registers.result_data;
@@ -94,7 +139,7 @@ unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativeTypedExpressionTree(const 
 	vector<SljitArithmeticOverflowSite> overflows;
 	struct sljit_jump *fast_done = nullptr;
 	vector<sljit_jump *> fast_exits;
-	if (fast_path.fast_path_supported) {
+	if (fast_loop_supported) {
 		sljit_emit_op1(compiler, SLJIT_MOV_U8, SLJIT_R0, 0, SLJIT_MEM1(SLJIT_S0),
 		               offsetof(SljitNativeVectorInput, expression_tree_flat_all_valid));
 		auto use_slow_loop = sljit_emit_cmp(compiler, SLJIT_EQUAL, SLJIT_R0, 0, SLJIT_IMM, 0);
@@ -114,11 +159,22 @@ unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativeTypedExpressionTree(const 
 		EmitSljitTypedExpressionTreeConstantHoists(compiler, fast_hoists);
 		const auto hoists = fast_hoists.empty() ? nullptr : &fast_hoists;
 		fast_done = sljit_emit_cmp(compiler, SLJIT_GREATER_EQUAL, SLJIT_S1, 0, SLJIT_S2, 0);
-		auto fast_loop = sljit_emit_label(compiler);
-		idx_t fast_spill_index = 0;
-		EmitSljitTypedExpressionTreeFastValueReg(compiler, root, fast_spill_index, overflows, hoists);
-		EmitStoreSljitTypedExpressionTreeVectorResult(compiler, root, result_kind, result_data_reg);
-		fast_exits.push_back(EmitSljitNativeVectorLatch(compiler, fast_loop));
+		if (SljitTypedExpressionTreeIsFastGuardedValue(root)) {
+			EmitSljitTypedExpressionTreeGuardedVectorLoop(compiler, root, result_kind, result_data_reg, hoists,
+			                                              overflows, fast_exits);
+		} else {
+			auto fast_loop = sljit_emit_label(compiler);
+			idx_t fast_spill_index = 0;
+			vector<sljit_jump *> null_exits;
+			EmitSljitTypedExpressionTreeFastValueReg(compiler, root, fast_spill_index, overflows, hoists, &null_exits);
+			EmitStoreSljitTypedExpressionTreeVectorResult(compiler, root, result_kind, result_data_reg);
+			fast_exits.push_back(EmitSljitNativeVectorLatch(compiler, fast_loop));
+			if (!null_exits.empty()) {
+				SetSljitJumpLabels(null_exits, sljit_emit_label(compiler));
+				EmitSetResultRowInvalid(compiler);
+				fast_exits.push_back(EmitSljitNativeVectorLatch(compiler, fast_loop));
+			}
+		}
 		sljit_set_label(use_slow_loop, sljit_emit_label(compiler));
 	}
 	struct sljit_jump *flat_nullable_done = nullptr;

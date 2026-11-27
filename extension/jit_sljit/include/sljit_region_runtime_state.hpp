@@ -107,6 +107,22 @@ struct SljitRegionExecutionScratch {
 		return aggregate_scratch.PreaggregatedGroups(op_idx);
 	}
 
+	unique_ptr<DataChunk> &AggregatePayloadStageSlots(idx_t op_idx) {
+		return aggregate_scratch.PayloadStageSlots(op_idx);
+	}
+
+	unique_ptr<DataChunk> &AggregatePayloadStageChunk(idx_t op_idx) {
+		return aggregate_scratch.PayloadStageChunk(op_idx);
+	}
+
+	vector<idx_t> &AggregatePayloadStageColumns(idx_t op_idx) {
+		return aggregate_scratch.PayloadStageColumns(op_idx);
+	}
+
+	SljitExpressionAdapterScratch &AggregatePayloadStageLane(idx_t op_idx, idx_t lane_idx) {
+		return aggregate_scratch.PayloadStageLane(op_idx, lane_idx);
+	}
+
 	DataChunk &AggregatePreaggregatedGroupSlice(idx_t op_idx) {
 		return aggregate_scratch.PreaggregatedGroupSlice(op_idx);
 	}

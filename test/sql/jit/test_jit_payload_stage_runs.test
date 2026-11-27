@@ -1,0 +1,156 @@
+# name: test/sql/jit/test_jit_payload_stage_runs.test
+# description: Grouped aggregates over a sorted key whose payloads a condition or a NULL makes invalid at random rows: computed payload lanes keep each row's validity, run kernels add NULL rows to neither sum nor count, groups whose rows are all NULL stay NULL, CASE results selected without a branch match the branching ones, and a CASE value that overflows only on rows its condition excludes raises no error, like the vectorized plan
+# group: [jit]
+
+require jit_sljit
+
+load {TEST_DIR}/test_jit_payload_stage_runs.db
+
+statement ok
+SET jit_measure_native_legs=false
+
+statement ok
+SET jit_cbo_startup_base_cost=0
+
+statement ok
+SET jit_cbo_startup_margin_basis_points=0
+
+# k: sorted runs of four rows whose key range exceeds a perfect hash table; k3: runs of three, which cross chunks so a
+# group resumes in the next call with its sum and set flag stored; x and y: conditions that hold at random rows; n:
+# NULL at random rows; w: overflows when doubled exactly where x <= y; 400037 rows end inside a validity word
+statement ok
+CREATE TABLE t AS
+SELECT (r // 4) * 37 AS k,
+       (r // 3) * 37 AS k3,
+       (r * 7919 % 1000)::INTEGER AS x,
+       (r * 104729 % 1000)::INTEGER AS y,
+       (r % 1009 - 500)::INTEGER AS a,
+       (r * 1000003 + 4611686018427387000)::BIGINT AS v,
+       CASE WHEN r * 31 % 7 = 0 THEN NULL ELSE (r % 997 - 300)::INTEGER END AS n,
+       CASE WHEN (r * 7919 % 1000) > (r * 104729 % 1000) THEN r::BIGINT ELSE 4611686018427387904 END AS w
+FROM range(400037) t(r)
+ORDER BY k
+
+statement ok
+CHECKPOINT
+
+restart
+
+statement ok
+CREATE MACRO groups() AS TABLE
+SELECT 'case_sum' AS q, count(*) AS c, count(s) AS n, sum(s)::VARCHAR AS a, sum(hash(k, s)) AS h
+FROM (SELECT k, sum(CASE WHEN x > y THEN a END) AS s FROM t GROUP BY k)
+UNION ALL
+SELECT 'case_sum_bigint', count(*), count(s), sum(s)::VARCHAR, sum(hash(k, s))
+FROM (SELECT k, sum(CASE WHEN x > y THEN v END) AS s FROM t GROUP BY k)
+UNION ALL
+SELECT 'case_count', count(*), count(s), sum(s)::VARCHAR, sum(hash(k, s))
+FROM (SELECT k, count(CASE WHEN x > y THEN a END) AS s FROM t GROUP BY k)
+UNION ALL
+SELECT 'plain_and_case', count(*), count(s), sum(s)::VARCHAR, sum(hash(k, p, s))
+FROM (SELECT k, sum(a) AS p, sum(CASE WHEN x > y THEN a END) AS s FROM t GROUP BY k)
+UNION ALL
+SELECT 'case_sum_and_count', count(*), count(s), sum(s)::VARCHAR, sum(hash(k, s, c))
+FROM (SELECT k, sum(CASE WHEN x > y THEN v END) AS s, count(CASE WHEN x > y THEN a END) AS c FROM t GROUP BY k)
+UNION ALL
+SELECT 'null_column', count(*), count(s), sum(s)::VARCHAR, sum(hash(k, s, c))
+FROM (SELECT k, sum(n) AS s, count(n) AS c FROM t GROUP BY k)
+UNION ALL
+SELECT 'null_column_sum', count(*), count(s), sum(s)::VARCHAR, sum(hash(k, s))
+FROM (SELECT k, sum(n) AS s FROM t GROUP BY k)
+UNION ALL
+SELECT 'null_column_sum_resumed', count(*), count(s), sum(s)::VARCHAR, sum(hash(k3, s))
+FROM (SELECT k3, sum(n) AS s FROM t GROUP BY k3)
+UNION ALL
+SELECT 'case_sum_bigint_resumed', count(*), count(s), sum(s)::VARCHAR, sum(hash(k3, s))
+FROM (SELECT k3, sum(CASE WHEN x > y + 600 THEN v END) AS s FROM t GROUP BY k3)
+UNION ALL
+SELECT 'null_column_affine', count(*), count(s), sum(s)::VARCHAR, sum(hash(k, s, d))
+FROM (SELECT k, sum(n + 1) AS s, sum(n * 3) AS d FROM t GROUP BY k)
+UNION ALL
+SELECT 'case_sum_resumed', count(*), count(s), sum(s)::VARCHAR, sum(hash(k3, s, c))
+FROM (SELECT k3, sum(CASE WHEN x > y + 600 THEN a END) AS s, count(CASE WHEN x > y + 600 THEN a END) AS c FROM t GROUP BY k3)
+UNION ALL
+SELECT 'case_select', count(*), count(s), sum(s)::VARCHAR, sum(hash(k, s))
+FROM (SELECT k, sum(CASE WHEN x > y THEN a ELSE y END) AS s FROM t GROUP BY k)
+UNION ALL
+SELECT 'case_select_constant', count(*), count(s), sum(s)::VARCHAR, sum(hash(k, s))
+FROM (SELECT k, sum(CASE WHEN x <= 300 THEN v ELSE 5 END) AS s FROM t GROUP BY k)
+UNION ALL
+SELECT 'case_else', count(*), count(s), sum(s)::VARCHAR, sum(hash(k, s))
+FROM (SELECT k, sum(CASE WHEN x > y THEN a ELSE a * 2 END) AS s FROM t GROUP BY k)
+UNION ALL
+SELECT 'case_branches', count(*), count(s), sum(s)::VARCHAR, sum(hash(k, s))
+FROM (SELECT k, sum(CASE WHEN x > 700 THEN a WHEN y > 500 THEN -a ELSE 7 END) AS s FROM t GROUP BY k)
+UNION ALL
+SELECT 'case_branches_null', count(*), count(s), sum(s)::VARCHAR, sum(hash(k, s))
+FROM (SELECT k, sum(CASE WHEN x > 700 THEN a WHEN y > 500 THEN NULL ELSE 7 END) AS s FROM t GROUP BY k)
+UNION ALL
+SELECT 'case_overflow_excluded', count(*), count(s), sum(s)::VARCHAR, sum(hash(k, s))
+FROM (SELECT k, sum(CASE WHEN x > y THEN w * 2 END) AS s FROM t GROUP BY k)
+UNION ALL
+SELECT 'case_else_overflow_excluded', count(*), count(s), sum(s)::VARCHAR, sum(hash(k, s))
+FROM (SELECT k, sum(CASE WHEN x > y THEN w * 2 ELSE 1 END) AS s FROM t GROUP BY k)
+UNION ALL
+SELECT 'plain_and_case_bigint', count(*), count(s), sum(s)::VARCHAR, sum(hash(k, p, s))
+FROM (SELECT k, sum(v) AS p, sum(CASE WHEN x > y THEN v END) AS s FROM t GROUP BY k)
+UNION ALL
+SELECT 'case_affine', count(*), count(s), sum(s)::VARCHAR, sum(hash(k, s, d))
+FROM (SELECT k, sum(c + 1) AS s, sum(c * 3) AS d FROM (SELECT k, CASE WHEN x > y THEN a END AS c FROM t) GROUP BY k)
+UNION ALL
+SELECT 'case_filtered', count(*), count(s), sum(s)::VARCHAR, sum(hash(k, s))
+FROM (SELECT k, sum(CASE WHEN x > y THEN a END) AS s FROM t WHERE (k // 37) % 3 <> 1 AND a <> 17 GROUP BY k)
+
+foreach threads 1 4
+
+statement ok
+SET threads={threads}
+
+statement ok
+SET jit_policy='off'
+
+statement ok
+CREATE OR REPLACE TABLE expected AS FROM groups()
+
+statement ok
+SET jit_policy='auto'
+
+statement ok
+CREATE OR REPLACE TABLE actual AS FROM groups()
+
+query I
+SELECT count(*) FROM ((FROM expected EXCEPT ALL FROM actual) UNION ALL (FROM actual EXCEPT ALL FROM expected))
+----
+0
+
+endloop
+
+# groups whose rows all fail the condition or are NULL keep a NULL sum
+query IIII
+SELECT q, c, n < c, n > 0 FROM expected WHERE q IN ('case_sum', 'null_column', 'case_overflow_excluded') ORDER BY q
+----
+case_overflow_excluded	100010	true	true
+case_sum	100010	true	true
+null_column	100010	true	true
+
+statement error
+SELECT sum(w * 2) FROM t
+----
+<REGEX>:.*Out of Range Error.*
+
+statement ok
+SET threads=1
+
+statement ok
+SET jit_trace_runtime=true
+
+statement ok
+SET jit_event_log_size=100
+
+statement ok
+CREATE OR REPLACE TEMP TABLE traced AS SELECT k, sum(CASE WHEN x > y THEN a END) AS s FROM t GROUP BY k
+
+query I
+SELECT count(*) > 0 FROM duckdb_jit_events() WHERE status = 'executed' AND jit_runtime_path_counts LIKE '%payload_stage_pending_preaggregated_grouped_update%'
+----
+true

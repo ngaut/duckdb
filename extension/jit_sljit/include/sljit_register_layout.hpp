@@ -70,6 +70,9 @@ struct SljitPrimitiveRunRegisterLayout {
 	sljit_s32 multi_output_index = 0;
 	sljit_s32 multi_output_row_counts = 0;
 	sljit_s32 multi_shared_validity = 0;
+	//! the single-lane kernel's scratch registers; with eight, R7 holds a nullable hugeint sum's set flag
+	sljit_s32 scratch_register_count = 7;
+	sljit_s32 hugeint_set_flag = 0;
 	sljit_s32 base_saved_register_count = 0;
 	sljit_s32 saved_register_count = 0;
 	sljit_s32 affine_saved_register_count = 0;

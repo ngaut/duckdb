@@ -252,9 +252,35 @@ static void EmitSljitPrimitiveRunRecordIncreasingTransition(struct sljit_compile
 	sljit_set_label(increasing, done);
 }
 
+//! The register a nullable payload's sum keeps its group's set flag in, or 0: R2 beside an int64 sum, the layout's
+//! hugeint flag register beside a hugeint sum (whose upper word takes R2), when the target has one
+static sljit_s32 SljitPrimitiveRunSetFlagRegister(AggregatePrimitiveUpdateKind primitive_kind, bool payload_nullable) {
+	if (!payload_nullable) {
+		return 0;
+	}
+	switch (primitive_kind) {
+	case AggregatePrimitiveUpdateKind::SUM_INT64:
+		return SLJIT_R2;
+	case AggregatePrimitiveUpdateKind::SUM_HUGEINT:
+		return GetSljitPrimitiveRunRegisterLayout().hugeint_set_flag;
+	default:
+		return 0;
+	}
+}
+
+//! Whether a nullable payload's row accumulates by its validity bit instead of a jump: a count adds the bit, a sum adds
+//! its value masked by the bit and ORs the bit into its set flag register. That takes no more instructions than testing
+//! the bit, jumping and setting the flag, and never mispredicts on the NULLs' order. A sum without a flag register
+//! jumps over NULL rows
+static bool SljitPrimitiveRunMasksNullRows(AggregatePrimitiveUpdateKind primitive_kind, bool payload_nullable) {
+	return payload_nullable && (primitive_kind == AggregatePrimitiveUpdateKind::COUNT ||
+	                            SljitPrimitiveRunSetFlagRegister(primitive_kind, payload_nullable));
+}
+
 static void EmitSljitPrimitiveRunLoadExistingState(struct sljit_compiler *compiler, PhysicalType group_type,
                                                    ExecutionRowPointerGroupKeyCastKind group_cast_kind,
-                                                   AggregatePrimitiveUpdateKind primitive_kind, bool use_batch_delta) {
+                                                   AggregatePrimitiveUpdateKind primitive_kind, bool use_batch_delta,
+                                                   bool payload_nullable) {
 	sljit_emit_op2(compiler, SLJIT_SUB, SLJIT_R5, 0, SLJIT_S3, 0, SLJIT_IMM, 1);
 	const auto output_group_data = EmitSljitPrimitiveRunOutputGroupData(compiler, SLJIT_R6);
 	sljit_emit_op1(compiler, SljitPrimitiveRunPhysicalTypeLoadOp(group_type), SLJIT_R0, 0,
@@ -282,6 +308,13 @@ static void EmitSljitPrimitiveRunLoadExistingState(struct sljit_compiler *compil
 		sljit_emit_op2(compiler, SLJIT_SUB, SLJIT_R5, 0, SLJIT_S3, 0, SLJIT_IMM, 1);
 		sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_R1, 0, SLJIT_MEM2(output_values, SLJIT_R5), 3);
 		sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_R2, 0, SLJIT_IMM, 0);
+	}
+	// a group the previous call started keeps the set flag it stored
+	const auto set_flag = SljitPrimitiveRunSetFlagRegister(primitive_kind, payload_nullable);
+	if (set_flag) {
+		sljit_emit_op2(compiler, SLJIT_SUB, SLJIT_R5, 0, SLJIT_S3, 0, SLJIT_IMM, 1);
+		const auto output_value_is_set = EmitSljitPrimitiveRunOutputValueIsSet(compiler, SLJIT_R6);
+		sljit_emit_op1(compiler, SLJIT_MOV_U8, set_flag, 0, SLJIT_MEM2(output_value_is_set, SLJIT_R5), 0);
 	}
 
 	const auto output_row_counts = EmitSljitPrimitiveRunOutputRowCounts(compiler, SLJIT_R6);
@@ -339,6 +372,10 @@ static void EmitSljitPrimitiveRunStartGroup(struct sljit_compiler *compiler, Phy
 	if (payload_nullable) {
 		EmitSljitPrimitiveRunInitializeNullableOutput(compiler, primitive_kind);
 	}
+	const auto set_flag = SljitPrimitiveRunSetFlagRegister(primitive_kind, payload_nullable);
+	if (set_flag) {
+		sljit_emit_op1(compiler, SLJIT_MOV, set_flag, 0, SLJIT_IMM, 0);
+	}
 	sljit_emit_op2(compiler, SLJIT_ADD, SLJIT_S3, 0, SLJIT_S3, 0, SLJIT_IMM, 1);
 }
 
@@ -358,6 +395,34 @@ static void EmitSljitPrimitiveRunAccumulate(struct sljit_compiler *compiler, Phy
                                             AggregatePrimitiveUpdateKind primitive_kind, bool use_batch_delta,
                                             bool payload_nullable) {
 	D_ASSERT(!payload_nullable || !use_batch_delta);
+	if (SljitPrimitiveRunMasksNullRows(primitive_kind, payload_nullable)) {
+		// R6: the row's validity bit
+		sljit_emit_op1(compiler, SLJIT_MOV_P, SLJIT_R5, 0, SLJIT_MEM1(SLJIT_S0),
+		               offsetof(SljitNativePrimitiveRunInput, payload_validity));
+		EmitLoadSljitValidityBit(compiler, SLJIT_R5, SLJIT_S1, SLJIT_R6);
+		if (primitive_kind == AggregatePrimitiveUpdateKind::COUNT) {
+			sljit_emit_op2(compiler, SLJIT_ADD, SLJIT_R1, 0, SLJIT_R1, 0, SLJIT_R6, 0);
+		} else {
+			sljit_emit_op1(compiler, SljitPrimitiveRunPhysicalTypeLoadOp(payload_type), SLJIT_R4, 0,
+			               SLJIT_MEM2(SLJIT_S5, SLJIT_S1), SljitPrimitiveRunPhysicalTypeScale(payload_type));
+			sljit_emit_op2(compiler, SLJIT_SUB, SLJIT_R5, 0, SLJIT_IMM, 0, SLJIT_R6, 0);
+			sljit_emit_op2(compiler, SLJIT_AND, SLJIT_R4, 0, SLJIT_R4, 0, SLJIT_R5, 0);
+			if (primitive_kind == AggregatePrimitiveUpdateKind::SUM_HUGEINT) {
+				if (SljitPrimitiveRunPhysicalTypeIsSigned(payload_type)) {
+					sljit_emit_op2(compiler, SLJIT_ASHR, SLJIT_R5, 0, SLJIT_R4, 0, SLJIT_IMM, 63);
+				} else {
+					sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_R5, 0, SLJIT_IMM, 0);
+				}
+				EmitSljitAddDoubleWord(compiler, SLJIT_R1, SLJIT_R2, SLJIT_R4, SLJIT_R5);
+			} else {
+				sljit_emit_op2(compiler, SLJIT_ADD, SLJIT_R1, 0, SLJIT_R1, 0, SLJIT_R4, 0);
+			}
+			const auto set_flag = SljitPrimitiveRunSetFlagRegister(primitive_kind, payload_nullable);
+			sljit_emit_op2(compiler, SLJIT_OR, set_flag, 0, set_flag, 0, SLJIT_R6, 0);
+		}
+		sljit_emit_op2(compiler, SLJIT_ADD, SLJIT_R3, 0, SLJIT_R3, 0, SLJIT_IMM, 1);
+		return;
+	}
 	sljit_jump *payload_is_null = nullptr;
 	if (payload_nullable) {
 		payload_is_null = EmitJumpIfSljitPrimitiveRunPayloadNull(compiler);
@@ -503,6 +568,12 @@ static void EmitSljitPrimitiveRunFlush(struct sljit_compiler *compiler, Aggregat
 		const auto output_value_is_set = EmitSljitPrimitiveRunOutputValueIsSet(compiler, SLJIT_R6);
 		sljit_emit_op1(compiler, SLJIT_MOV_U8, SLJIT_MEM2(output_value_is_set, SLJIT_R5), 0, SLJIT_IMM, 1);
 	}
+	const auto set_flag = SljitPrimitiveRunSetFlagRegister(primitive_kind, payload_nullable);
+	if (set_flag) {
+		sljit_emit_op2(compiler, SLJIT_SUB, SLJIT_R5, 0, SLJIT_S3, 0, SLJIT_IMM, 1);
+		const auto output_value_is_set = EmitSljitPrimitiveRunOutputValueIsSet(compiler, SLJIT_R6);
+		sljit_emit_op1(compiler, SLJIT_MOV_U8, SLJIT_MEM2(output_value_is_set, SLJIT_R5), 0, set_flag, 0);
+	}
 	sljit_emit_op2(compiler, SLJIT_SUB, SLJIT_R5, 0, SLJIT_S3, 0, SLJIT_IMM, 1);
 	const auto output_row_counts = EmitSljitPrimitiveRunOutputRowCounts(compiler, SLJIT_R6);
 	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_MEM2(output_row_counts, SLJIT_R5), 3, SLJIT_R3, 0);
@@ -540,7 +611,7 @@ BuildSljitNativePrimitiveRunUpdate(PhysicalType group_source_type, PhysicalType 
 		return nullptr;
 	}
 
-	sljit_emit_enter(compiler, 0, SLJIT_ARGS1V(P), 7, registers.saved_register_count, 0);
+	sljit_emit_enter(compiler, 0, SLJIT_ARGS1V(P), registers.scratch_register_count, registers.saved_register_count, 0);
 	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_S1, 0, SLJIT_MEM1(SLJIT_S0),
 	               offsetof(SljitNativePrimitiveRunInput, input_offset));
 	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_S2, 0, SLJIT_MEM1(SLJIT_S0),
@@ -572,7 +643,8 @@ BuildSljitNativePrimitiveRunUpdate(PhysicalType group_source_type, PhysicalType 
 	auto input_done = sljit_emit_cmp(compiler, SLJIT_GREATER_EQUAL, SLJIT_S1, 0, SLJIT_S2, 0);
 	EmitSljitPrimitiveRunLoadKey(compiler, group_source_type, SLJIT_R4);
 	auto no_existing_group = sljit_emit_cmp(compiler, SLJIT_EQUAL, SLJIT_S3, 0, SLJIT_IMM, 0);
-	EmitSljitPrimitiveRunLoadExistingState(compiler, group_type, group_cast_kind, primitive_kind, use_batch_delta);
+	EmitSljitPrimitiveRunLoadExistingState(compiler, group_type, group_cast_kind, primitive_kind, use_batch_delta,
+	                                       payload_nullable);
 	auto initial_group_matches = sljit_emit_cmp(compiler, SLJIT_EQUAL, SLJIT_R4, 0, SLJIT_R0, 0);
 	EmitSljitPrimitiveRunRecordIncreasingTransition(compiler, group_source_type);
 

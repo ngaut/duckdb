@@ -29,6 +29,10 @@ bool SljitBuildExecutableAggregateUpdatePayloadCode(const SljitNativeAggregateUp
                                                     const vector<Value> &input_max_values);
 void SljitPlanExecutablePrimitiveRunUpdate(const SljitNativeAggregateUpdatePlan &op,
                                            SljitExecutableAggregateUpdate &executable);
+//! Plans the payload stage of an aggregate whose payloads are not all input columns, for the reductions that read lane
+//! vectors
+void SljitPlanExecutableAggregatePayloadStage(const SljitNativeAggregateUpdatePlan &op,
+                                              SljitExecutableAggregateUpdate &executable);
 SljitNativePrimitiveRunFunction
 SljitEnsureExecutablePrimitiveRunUpdate(ExecutionRegionRuntime &runtime, SljitExecutablePrimitiveRunUpdate &run_update,
                                         PhysicalType group_source_type, PhysicalType group_output_type,

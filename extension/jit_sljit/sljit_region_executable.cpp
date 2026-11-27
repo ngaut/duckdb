@@ -61,6 +61,7 @@ static bool BuildExecutableRegionOp(const SljitNativeRegionOpPlan &op, SljitExec
 			return false;
 		}
 		SljitPlanExecutablePrimitiveRunUpdate(op.AggregateUpdate(), executable.AggregateUpdate());
+		SljitPlanExecutableAggregatePayloadStage(op.AggregateUpdate(), executable.AggregateUpdate());
 		SljitSelectExecutableAggregateDirectUpdatePlan(executable.AggregateUpdate());
 		return true;
 	case SljitNativeRegionOpKind::PROJECTION:
