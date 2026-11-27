@@ -65,6 +65,19 @@ UNION ALL
 SELECT 'case_sum_bigint_resumed', count(*), count(s), sum(s)::VARCHAR, sum(hash(k3, s))
 FROM (SELECT k3, sum(CASE WHEN x > y + 600 THEN v END) AS s FROM t GROUP BY k3)
 UNION ALL
+SELECT 'null_column_resumed', count(*), count(s), sum(s)::VARCHAR, sum(hash(k3, s, c))
+FROM (SELECT k3, sum(n) AS s, count(n) AS c FROM t GROUP BY k3)
+UNION ALL
+SELECT 'plain_and_case_resumed', count(*), count(s), sum(s)::VARCHAR, sum(hash(k3, p, s))
+FROM (SELECT k3, sum(v) AS p, sum(CASE WHEN x > y + 600 THEN v END) AS s FROM t GROUP BY k3)
+UNION ALL
+SELECT 'eight_lanes', count(*), count(s), sum(s)::VARCHAR, sum(hash(k3, p, s, l, g, h, i, j))
+FROM (SELECT k3, sum(v) AS p, sum(CASE WHEN x > y THEN v END) AS s, sum(CASE WHEN x < y THEN v END) AS l,
+             sum(CASE WHEN x > 500 THEN v END) AS g, sum(CASE WHEN y > 900 THEN v END) AS h,
+             sum(CASE WHEN x > y THEN a END) AS i, count(CASE WHEN x > y + 600 THEN 1 END) AS j,
+             sum(CASE WHEN x % 2 = 0 THEN v END) AS m
+      FROM t GROUP BY k3)
+UNION ALL
 SELECT 'null_column_affine', count(*), count(s), sum(s)::VARCHAR, sum(hash(k, s, d))
 FROM (SELECT k, sum(n + 1) AS s, sum(n * 3) AS d FROM t GROUP BY k)
 UNION ALL
