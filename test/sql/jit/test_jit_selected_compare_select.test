@@ -1,0 +1,74 @@
+# name: test/sql/jit/test_jit_selected_compare_select.test
+# description: A filter on the rows a scan's table filters keep decides an AND of comparisons over the rows its selection names without a branch per row
+# group: [jit]
+
+require jit_sljit
+
+require tpch
+
+load {TEST_DIR}/test_jit_selected_compare_select.db
+
+statement ok
+CALL dbgen(sf=0.1)
+
+statement ok
+CHECKPOINT
+
+# the scans read stored segments, whose table filters keep rows in a selection
+restart
+
+statement ok
+SET jit_measure_native_legs=false
+
+statement ok
+SET jit_cbo_startup_base_cost=0
+
+statement ok
+SET jit_cbo_startup_margin_basis_points=0
+
+statement ok
+CREATE MACRO selected() AS TABLE
+SELECT 'dates' AS q, l_shipmode AS m, count(*) AS n FROM orders JOIN lineitem ON o_orderkey = l_orderkey
+WHERE l_shipmode IN ('MAIL', 'SHIP') AND l_commitdate < l_receiptdate AND l_shipdate < l_commitdate
+  AND l_receiptdate >= DATE '1994-01-01' AND l_receiptdate < DATE '1995-01-01' GROUP BY ALL
+
+foreach threads 1 4
+
+statement ok
+SET threads={threads}
+
+statement ok
+SET jit_policy='off'
+
+statement ok
+CREATE OR REPLACE TABLE expected AS FROM selected()
+
+statement ok
+SET jit_policy='auto'
+
+statement ok
+CREATE OR REPLACE TABLE actual AS FROM selected()
+
+query I
+SELECT count(*) FROM ((FROM expected EXCEPT ALL FROM actual) UNION ALL (FROM actual EXCEPT ALL FROM expected))
+----
+0
+
+endloop
+
+statement ok
+SET threads=1
+
+statement ok
+SET jit_trace_runtime=true
+
+statement ok
+SET jit_event_log_size=100
+
+statement ok
+CREATE OR REPLACE TEMP TABLE traced AS FROM selected()
+
+query I
+SELECT count(*) FROM duckdb_jit_events() WHERE status = 'executed' AND jit_runtime_path_counts LIKE '%filter.selected_input_zero_copy%'
+----
+1

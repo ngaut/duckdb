@@ -171,6 +171,8 @@ struct SljitExpressionAdapterScratch {
 		native_input.source_validity_array = sources.ValidityArray();
 		native_input.expression_tree_flat_no_selection = sources.FlatNoSelection(execute_sel);
 		native_input.expression_tree_flat_all_valid = sources.FlatAllValid(execute_sel);
+		native_input.expression_tree_sources_flat_all_valid =
+		    sources.FlatAllValid(static_cast<const SelectionVector *>(nullptr));
 		native_input.expression_tree_all_valid = sources.AllValid();
 	}
 

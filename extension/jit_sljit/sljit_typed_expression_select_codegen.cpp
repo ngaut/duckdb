@@ -1,6 +1,7 @@
 #include "sljit_native_codegen.hpp"
 
 #include "sljit_codegen_internal.hpp"
+#include "sljit_kernel_frame.hpp"
 #include "sljit_typed_expression_plan.hpp"
 #include "sljit_typed_expression_simd_codegen.hpp"
 
@@ -41,11 +42,15 @@ struct SljitFlatCompareSelectSource {
 	}
 };
 
-//! A predicate whose rows the select decides without a branch: one comparison, or an AND of comparisons, over at most
-//! two columns
+//! A predicate whose rows the select decides without a branch: one comparison, or an AND of comparisons. The flat loop
+//! keeps every column's value of a row in a register, at most two; the selected-row loop reads each leaf's operands as
+//! it compares them
 struct SljitFlatCompareSelectPlan {
 	static constexpr idx_t MAX_SOURCES = 2;
 	static constexpr idx_t MAX_LEAVES = 4;
+	static constexpr idx_t MAX_SELECTED_SOURCES = 8;
+	static constexpr idx_t MAX_SELECTED_LEAVES = 8;
+	idx_t max_sources = MAX_SOURCES;
 
 	vector<SljitFlatCompareSelectSource> sources;
 	vector<SljitFlatCompareSelectLeaf> leaves;
@@ -68,7 +73,7 @@ static bool TryAddSljitFlatCompareSelectSource(SljitFlatCompareSelectPlan &plan,
 			       existing.integer_kind == source.integer_kind;
 		}
 	}
-	if (plan.sources.size() == SljitFlatCompareSelectPlan::MAX_SOURCES) {
+	if (plan.sources.size() == plan.max_sources) {
 		return false;
 	}
 	plan.sources.push_back(source);
@@ -121,13 +126,9 @@ static bool TryPlanSljitFlatCompareSelectLeaf(const ExecutionExpressionIR &node,
 	return true;
 }
 
-//! ARM64 has no cheap integer movemask, so its packed compare + mask reduction loses to a branchless scalar loop for
-//! a single integer comparison, and floating point comparisons have no packed form here at all. An AND of integer
-//! comparisons keeps the packed loop
-static bool TryPlanSljitFlatCompareSelect(const ExecutionExpressionIR &root, SljitFlatCompareSelectPlan &plan) {
-	if (!GetSljitTargetCapabilities().IsArm64() || !GetSljitNativeVectorRegisterLayout().HasOptionalInvariant()) {
-		return false;
-	}
+//! The comparisons an AND of comparisons decides, each a leaf of the plan
+static bool TryPlanSljitCompareSelectLeaves(const ExecutionExpressionIR &root, SljitFlatCompareSelectPlan &plan,
+                                            idx_t max_leaves) {
 	vector<reference<const ExecutionExpressionIR>> leaves;
 	if (root.kind == ExecutionExpressionIRKind::CONJUNCTION &&
 	    root.conjunction_op == ExecutionExpressionConjunctionOp::AND) {
@@ -140,7 +141,7 @@ static bool TryPlanSljitFlatCompareSelect(const ExecutionExpressionIR &root, Slj
 	} else {
 		leaves.push_back(root);
 	}
-	if (leaves.empty() || leaves.size() > SljitFlatCompareSelectPlan::MAX_LEAVES) {
+	if (leaves.empty() || leaves.size() > max_leaves) {
 		return false;
 	}
 	for (auto &leaf : leaves) {
@@ -148,7 +149,27 @@ static bool TryPlanSljitFlatCompareSelect(const ExecutionExpressionIR &root, Slj
 			return false;
 		}
 	}
+	return true;
+}
+
+//! ARM64 has no cheap integer movemask, so its packed compare + mask reduction loses to a branchless scalar loop for
+//! a single integer comparison, and floating point comparisons have no packed form here at all. An AND of integer
+//! comparisons keeps the packed loop
+static bool TryPlanSljitFlatCompareSelect(const ExecutionExpressionIR &root, SljitFlatCompareSelectPlan &plan) {
+	if (!GetSljitTargetCapabilities().IsArm64() || !GetSljitNativeVectorRegisterLayout().HasOptionalInvariant()) {
+		return false;
+	}
+	if (!TryPlanSljitCompareSelectLeaves(root, plan, SljitFlatCompareSelectPlan::MAX_LEAVES)) {
+		return false;
+	}
 	return plan.leaves.size() == 1 || plan.FloatLeafCount() > 0;
+}
+
+//! Rows a selection names, over columns without NULLs or selections of their own: no packed loop reads them, so an AND
+//! of comparisons decides each without a branch on every target
+static bool TryPlanSljitSelectedCompareSelect(const ExecutionExpressionIR &root, SljitFlatCompareSelectPlan &plan) {
+	plan.max_sources = SljitFlatCompareSelectPlan::MAX_SELECTED_SOURCES;
+	return TryPlanSljitCompareSelectLeaves(root, plan, SljitFlatCompareSelectPlan::MAX_SELECTED_LEAVES);
 }
 
 bool SljitTypedExpressionTreeFlatCompareSelectSupported(const ExecutionExpressionIR &root) {
@@ -230,6 +251,115 @@ static void EmitSljitFlatConstantModuloCompareSelect(struct sljit_compiler *comp
 	auto tail_repeat = sljit_emit_jump(compiler, SLJIT_JUMP);
 	sljit_set_label(tail_repeat, tail_loop);
 
+	sljit_set_label(done, sljit_emit_label(compiler));
+	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_MEM1(SLJIT_S0), offsetof(SljitNativeVectorInput, selected_count),
+	               SLJIT_S3, 0);
+}
+
+//! The registers the selected-row loop keeps: the execute selection, then each column's data pointer while the frame
+//! has registers (0: the column's pointer loads from the source array at its read)
+struct SljitSelectedCompareSelectRegisters {
+	sljit_s32 execute_sel = 0;
+	vector<sljit_s32> source_data;
+};
+
+static SljitSelectedCompareSelectRegisters
+PlanSljitSelectedCompareSelectRegisters(SljitKernelFrame &frame, const SljitFlatCompareSelectPlan &plan) {
+	SljitSelectedCompareSelectRegisters result;
+	result.execute_sel = frame.AllocateRegister();
+	for (idx_t slot = 0; slot < plan.sources.size(); slot++) {
+		result.source_data.push_back(result.execute_sel ? frame.AllocateRegister() : 0);
+	}
+	return result;
+}
+
+//! Selects the rows an execute selection names without a branch per row: each row loads its index, decides its
+//! comparisons into flags as it reads their operands, stores the index into the next selection slot and advances the
+//! count by the flags. S3 counts the selected rows, S4 holds the output selection, R4 the row
+static void EmitSljitSelectedCompareSelect(struct sljit_compiler *compiler, const SljitFlatCompareSelectPlan &plan,
+                                           const SljitSelectedCompareSelectRegisters &registers) {
+	static constexpr sljit_s32 FIRST_FLOAT_CONSTANT = 2;
+	const auto execute_sel = registers.execute_sel ? registers.execute_sel : SLJIT_R1;
+	for (idx_t slot = 0; slot < plan.sources.size(); slot++) {
+		if (registers.source_data[slot]) {
+			sljit_emit_op1(compiler, SLJIT_MOV_P, registers.source_data[slot], 0, SLJIT_MEM1(SLJIT_S5),
+			               SljitPointerArrayOffset(plan.sources[slot].ref_index));
+		}
+	}
+	sljit_emit_op1(compiler, SLJIT_MOV_P, SLJIT_S4, 0, SLJIT_MEM1(SLJIT_S0),
+	               offsetof(SljitNativeVectorInput, true_sel));
+	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_S3, 0, SLJIT_IMM, 0);
+	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_S1, 0, SLJIT_IMM, 0);
+	sljit_s32 float_constant = FIRST_FLOAT_CONSTANT;
+	for (auto &leaf : plan.leaves) {
+		if (leaf.is_float) {
+			sljit_emit_fset64(compiler, SLJIT_FR(float_constant++), leaf.float_constant);
+		}
+	}
+	// the column's data pointer: its register, or R0 loaded from the source array
+	auto source_pointer = [&](idx_t slot) {
+		if (registers.source_data[slot]) {
+			return registers.source_data[slot];
+		}
+		sljit_emit_op1(compiler, SLJIT_MOV_P, SLJIT_R0, 0, SLJIT_MEM1(SLJIT_S5),
+		               SljitPointerArrayOffset(plan.sources[slot].ref_index));
+		return sljit_s32(SLJIT_R0);
+	};
+	auto load_integer = [&](idx_t slot, int64_t constant, sljit_s32 target, sljit_s32 &operand, sljit_sw &value) {
+		if (slot == DConstants::INVALID_INDEX) {
+			operand = SLJIT_IMM;
+			value = NumericCast<sljit_sw>(constant);
+			return;
+		}
+		auto &source = plan.sources[slot];
+		sljit_emit_op1(compiler, NativeIntegerLoadOp(source.integer_kind), target, 0,
+		               SLJIT_MEM2(source_pointer(slot), SLJIT_R4), NativeIntegerDataScale(source.integer_kind));
+		operand = target;
+		value = 0;
+	};
+
+	auto loop = sljit_emit_label(compiler);
+	auto done = sljit_emit_cmp(compiler, SLJIT_GREATER_EQUAL, SLJIT_S1, 0, SLJIT_S2, 0);
+	if (!registers.execute_sel) {
+		sljit_emit_op1(compiler, SLJIT_MOV_P, execute_sel, 0, SLJIT_MEM1(SLJIT_S0),
+		               offsetof(SljitNativeVectorInput, execute_sel));
+	}
+	sljit_emit_op1(compiler, SLJIT_MOV_U32, SLJIT_R4, 0, SLJIT_MEM2(execute_sel, SLJIT_S1), 2);
+	float_constant = FIRST_FLOAT_CONSTANT;
+	for (idx_t leaf_idx = 0; leaf_idx < plan.leaves.size(); leaf_idx++) {
+		auto &leaf = plan.leaves[leaf_idx];
+		const auto condition = leaf.compare_type & ~SLJIT_32;
+		if (leaf.is_float) {
+			auto &source = plan.sources[leaf.left_source];
+			if (source.single_precision) {
+				sljit_emit_fop1(compiler, SLJIT_MOV_F32, SLJIT_FR0, 0,
+				                SLJIT_MEM2(source_pointer(leaf.left_source), SLJIT_R4), 2);
+				sljit_emit_fop1(compiler, SLJIT_CONV_F64_FROM_F32, SLJIT_FR0, 0, SLJIT_FR0, 0);
+			} else {
+				sljit_emit_fop1(compiler, SLJIT_MOV_F64, SLJIT_FR0, 0,
+				                SLJIT_MEM2(source_pointer(leaf.left_source), SLJIT_R4), 3);
+			}
+			sljit_emit_fop1(compiler, SLJIT_CMP_F64 | SljitCompareConditionSetFlags(condition), SLJIT_FR0, 0,
+			                SLJIT_FR(float_constant++), 0);
+		} else {
+			sljit_s32 left, right;
+			sljit_sw left_value, right_value;
+			load_integer(leaf.left_source, leaf.left_constant, SLJIT_R2, left, left_value);
+			load_integer(leaf.right_source, leaf.right_constant, SLJIT_R3, right, right_value);
+			sljit_emit_op2u(compiler,
+			                SLJIT_SUB | (leaf.compare_type & SLJIT_32) | SljitCompareConditionSetFlags(condition), left,
+			                left_value, right, right_value);
+		}
+		if (leaf_idx == 0) {
+			sljit_emit_op_flags(compiler, SLJIT_MOV, SLJIT_R1, 0, condition);
+		} else {
+			sljit_emit_op_flags(compiler, SLJIT_AND, SLJIT_R1, 0, condition);
+		}
+	}
+	sljit_emit_op1(compiler, SLJIT_MOV_U32, SLJIT_MEM2(SLJIT_S4, SLJIT_S3), 2, SLJIT_R4, 0);
+	sljit_emit_op2(compiler, SLJIT_ADD, SLJIT_S3, 0, SLJIT_S3, 0, SLJIT_R1, 0);
+	sljit_emit_op2(compiler, SLJIT_ADD, SLJIT_S1, 0, SLJIT_S1, 0, SLJIT_IMM, 1);
+	sljit_set_label(sljit_emit_jump(compiler, SLJIT_JUMP), loop);
 	sljit_set_label(done, sljit_emit_label(compiler));
 	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_MEM1(SLJIT_S0), offsetof(SljitNativeVectorInput, selected_count),
 	               SLJIT_S3, 0);
@@ -391,12 +521,28 @@ unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativeTypedExpressionTreeSelect(
 		}
 		simd_scratches = 5 | SLJIT_ENTER_VECTOR(NumericCast<sljit_s32>(vector_regs));
 	}
+	// a batch whose rows an execute selection names, over columns without NULLs or selections, decides them without a
+	// branch too
+	SljitFlatCompareSelectPlan selected_compare_plan;
+	const auto selected_compare =
+	    fast_path.fast_path_supported && TryPlanSljitSelectedCompareSelect(root, selected_compare_plan);
+	SljitKernelFrame frame(5, GetSljitNativeVectorRegisterLayout().saved_register_count);
+	SljitSelectedCompareSelectRegisters selected_registers;
+	if (selected_compare) {
+		selected_registers = PlanSljitSelectedCompareSelectRegisters(frame, selected_compare_plan);
+	}
+	idx_t float_registers = 0;
 	if (flat_compare) {
 		// the row's two float values and the float constants
-		simd_scratches |= NumericCast<sljit_s32>(2 + flat_compare_plan.FloatLeafCount()) << 8;
+		float_registers = 2 + flat_compare_plan.FloatLeafCount();
 	}
+	if (selected_compare) {
+		float_registers = MaxValue<idx_t>(float_registers, 2 + selected_compare_plan.FloatLeafCount());
+	}
+	simd_scratches = (simd_scratches & ~sljit_s32(0xff)) | frame.ScratchCount();
+	simd_scratches |= NumericCast<sljit_s32>(float_registers) << 8;
 	sljit_emit_enter(compiler, 0, SLJIT_ARGS1V(P), SljitTypedExpressionTreeEnterScratches(simd_scratches),
-	                 GetSljitNativeVectorRegisterLayout().saved_register_count, local_size);
+	                 frame.SavedCount(), local_size);
 	EmitInitSljitNativeExpressionVectorLoop(compiler);
 	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_MEM1(SLJIT_S0), offsetof(SljitNativeVectorInput, selected_count),
 	               SLJIT_IMM, 0);
@@ -500,6 +646,24 @@ unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativeTypedExpressionTreeSelect(
 		sljit_set_label(use_generic_loop, sljit_emit_label(compiler));
 	}
 
+	struct sljit_jump *selected_done = nullptr;
+	if (selected_compare) {
+		sljit_emit_op1(compiler, SLJIT_MOV_U8, SLJIT_R0, 0, SLJIT_MEM1(SLJIT_S0),
+		               offsetof(SljitNativeVectorInput, expression_tree_sources_flat_all_valid));
+		auto sources_not_flat = sljit_emit_cmp(compiler, SLJIT_EQUAL, SLJIT_R0, 0, SLJIT_IMM, 0);
+		sljit_emit_op1(compiler, SLJIT_MOV_P, SLJIT_R0, 0, SLJIT_MEM1(SLJIT_S0),
+		               offsetof(SljitNativeVectorInput, execute_sel));
+		auto no_execute_sel = sljit_emit_cmp(compiler, SLJIT_EQUAL, SLJIT_R0, 0, SLJIT_IMM, 0);
+		if (selected_registers.execute_sel) {
+			sljit_emit_op1(compiler, SLJIT_MOV_P, selected_registers.execute_sel, 0, SLJIT_R0, 0);
+		}
+		EmitSljitSelectedCompareSelect(compiler, selected_compare_plan, selected_registers);
+		selected_done = sljit_emit_jump(compiler, SLJIT_JUMP);
+		auto generic = sljit_emit_label(compiler);
+		sljit_set_label(sources_not_flat, generic);
+		sljit_set_label(no_execute_sel, generic);
+	}
+
 	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_S1, 0, SLJIT_IMM, 0);
 	auto loop = sljit_emit_label(compiler);
 	auto done = sljit_emit_cmp(compiler, SLJIT_GREATER_EQUAL, SLJIT_S1, 0, SLJIT_S2, 0);
@@ -528,6 +692,9 @@ unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativeTypedExpressionTreeSelect(
 	SetSljitJumpLabels(flat_nullable_exits, done_label);
 	if (nullable_simd_done) {
 		sljit_set_label(nullable_simd_done, done_label);
+	}
+	if (selected_done) {
+		sljit_set_label(selected_done, done_label);
 	}
 	sljit_set_label(done, done_label);
 	for (auto jump : helper_done) {

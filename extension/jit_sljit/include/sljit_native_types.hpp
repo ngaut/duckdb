@@ -409,6 +409,8 @@ struct SljitNativeVectorInput {
 	bool expression_tree_flat_no_selection = false;
 	bool expression_tree_flat_all_valid = false;
 	bool expression_tree_all_valid = false;
+	//! the sources have no NULLs and no selections of their own, whatever execute_sel names
+	bool expression_tree_sources_flat_all_valid = false;
 	// Perfect-hash group representation is independent from the payload expression representation above.
 	bool perfect_hash_group_flat_all_valid = false;
 	bool perfect_hash_group_all_valid = false;
