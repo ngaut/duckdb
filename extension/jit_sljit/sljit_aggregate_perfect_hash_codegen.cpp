@@ -14,7 +14,8 @@ static void EmitSljitLocalPerfectHashGroupIndexLoop(struct sljit_compiler *compi
 	auto done =
 	    sljit_emit_cmp(compiler, SLJIT_GREATER_EQUAL, SLJIT_S1, 0, SLJIT_IMM, NumericCast<sljit_sw>(group_count));
 	emit_group();
-	EmitNextSljitNativeVectorLoop(compiler, loop);
+	sljit_emit_op2(compiler, SLJIT_ADD, SLJIT_S1, 0, SLJIT_S1, 0, SLJIT_IMM, 1);
+	sljit_set_label(sljit_emit_jump(compiler, SLJIT_JUMP), loop);
 	sljit_set_label(done, sljit_emit_label(compiler));
 }
 

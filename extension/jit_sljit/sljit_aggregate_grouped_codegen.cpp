@@ -82,7 +82,7 @@ unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativeGroupedFusedPrimitiveAggre
 	sljit_emit_enter(compiler, 0, SLJIT_ARGS1V(P), 5 | SLJIT_ENTER_FLOAT(2), 6, 0);
 	EmitInitSljitNativeVectorLoop(compiler);
 
-	struct sljit_jump *fast_count_done = nullptr;
+	vector<sljit_jump *> fast_count_done;
 	if (SljitGroupedFusedCountOnlyFastPathSupported(descriptors)) {
 		bool has_count_payload = false;
 		for (auto &descriptor : descriptors) {
@@ -93,8 +93,7 @@ unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativeGroupedFusedPrimitiveAggre
 		EmitSljitGroupedFusedCountOnlyFastPathGuards(compiler, has_count_payload, use_generic_loop);
 		sljit_emit_op1(compiler, SLJIT_MOV_P, SLJIT_S3, 0, SLJIT_MEM1(SLJIT_S0),
 		               offsetof(SljitNativeVectorInput, aggregate_state_addresses));
-		auto fast_loop = sljit_emit_label(compiler);
-		fast_count_done = sljit_emit_cmp(compiler, SLJIT_GREATER_EQUAL, SLJIT_S1, 0, SLJIT_S2, 0);
+		auto fast_loop = EmitSljitRowLoopHead(compiler, fast_count_done);
 		sljit_emit_op1(compiler, SLJIT_MOV_P, SLJIT_S4, 0, SLJIT_MEM2(SLJIT_S3, SLJIT_S1), 3);
 		for (idx_t payload_idx = 0; payload_idx < payloads.size(); payload_idx++) {
 			auto &descriptor = descriptors[payload_idx];
@@ -102,7 +101,7 @@ unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativeGroupedFusedPrimitiveAggre
 			EmitSljitGroupedAggregateIncrementInt64Immediate(compiler, SLJIT_S4, state_offset,
 			                                                 descriptor.state_value_offset);
 		}
-		EmitNextSljitNativeVectorLoop(compiler, fast_loop);
+		EmitSljitRowLoopLatch(compiler, fast_loop, fast_count_done);
 
 		auto generic_loop = sljit_emit_label(compiler);
 		for (auto jump : use_generic_loop) {
@@ -166,8 +165,8 @@ unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativeGroupedFusedPrimitiveAggre
 	use_generic_loop.push_back(sljit_emit_cmp(compiler, SLJIT_EQUAL, SLJIT_S3, 0, SLJIT_IMM, 0));
 	sljit_emit_op1(compiler, SLJIT_MOV_P, SLJIT_S5, 0, SLJIT_MEM1(SLJIT_S0),
 	               offsetof(SljitNativeVectorInput, aggregate_state_addresses));
-	auto selected_address_loop = sljit_emit_label(compiler);
-	auto selected_address_done = sljit_emit_cmp(compiler, SLJIT_GREATER_EQUAL, SLJIT_S1, 0, SLJIT_S2, 0);
+	vector<sljit_jump *> selected_address_done;
+	auto selected_address_loop = EmitSljitRowLoopHead(compiler, selected_address_done);
 	sljit_emit_op1(compiler, SLJIT_MOV_U32, SLJIT_R1, 0, SLJIT_MEM2(SLJIT_S3, SLJIT_S1), 2);
 	sljit_emit_op1(compiler, SLJIT_MOV_P, SLJIT_S4, 0, SLJIT_MEM2(SLJIT_S5, SLJIT_R1), 3);
 	auto skip_selected_address_row = EmitSljitDeferRowWithUnresolvedState(compiler, SLJIT_S1);
@@ -182,14 +181,15 @@ unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativeGroupedFusedPrimitiveAggre
 		emit_valid_payload_update(payload_idx, SLJIT_S1);
 	}
 	sljit_set_label(skip_selected_address_row, sljit_emit_label(compiler));
-	EmitNextSljitNativeVectorLoop(compiler, selected_address_loop);
+	EmitSljitRowLoopLatch(compiler, selected_address_loop, selected_address_done);
 	auto generic_loop_start = sljit_emit_label(compiler);
 	for (auto jump : use_generic_loop) {
 		sljit_set_label(jump, generic_loop_start);
 	}
 
-	auto loop = sljit_emit_label(compiler);
-	auto done = sljit_emit_cmp(compiler, SLJIT_GREATER_EQUAL, SLJIT_S1, 0, SLJIT_S2, 0);
+	vector<sljit_jump *> done;
+
+	auto loop = EmitSljitRowLoopHead(compiler, done);
 	EmitLoadFusedAggregateExecuteIndex(compiler);
 	EmitLoadGroupedAggregateStateAddress(compiler, SLJIT_S4, SLJIT_S3);
 	auto skip_row = EmitSljitDeferRowWithUnresolvedState(compiler, SLJIT_S3);
@@ -211,14 +211,12 @@ unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativeGroupedFusedPrimitiveAggre
 	}
 	sljit_set_label(skip_row, sljit_emit_label(compiler));
 
-	EmitNextSljitNativeVectorLoop(compiler, loop);
+	EmitSljitRowLoopLatch(compiler, loop, done);
 
 	auto done_label = sljit_emit_label(compiler);
-	if (fast_count_done) {
-		sljit_set_label(fast_count_done, done_label);
-	}
-	sljit_set_label(selected_address_done, done_label);
-	sljit_set_label(done, done_label);
+	SetSljitJumpLabels(fast_count_done, done_label);
+	SetSljitJumpLabels(selected_address_done, done_label);
+	SetSljitJumpLabels(done, done_label);
 	sljit_emit_return_void(compiler);
 
 	return FinishSljitCode(compiler, function, error);

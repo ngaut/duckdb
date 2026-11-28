@@ -164,7 +164,8 @@ static void EmitSljitPerfectHashLocalReductionCommit(struct sljit_compiler *comp
 	EmitSljitPerfectHashCommitPayloads(compiler, reduction_plan, payload_descriptors, contract, SLJIT_S4, SLJIT_S2,
 	                                   false);
 	sljit_set_label(group_not_seen, sljit_emit_label(compiler));
-	EmitNextSljitNativeVectorLoop(compiler, loop);
+	sljit_emit_op2(compiler, SLJIT_ADD, SLJIT_S1, 0, SLJIT_S1, 0, SLJIT_IMM, 1);
+	sljit_set_label(sljit_emit_jump(compiler, SLJIT_JUMP), loop);
 	sljit_set_label(done, sljit_emit_label(compiler));
 }
 

@@ -116,8 +116,8 @@ BuildSljitNativeUngroupedFusedPrimitiveAggregateUpdate(const vector<SljitNativeR
 	}
 
 	vector<SljitArithmeticOverflowSite> overflows;
-	auto loop = sljit_emit_label(compiler);
-	auto done = sljit_emit_cmp(compiler, SLJIT_GREATER_EQUAL, SLJIT_S1, 0, SLJIT_S2, 0);
+	vector<sljit_jump *> done;
+	auto loop = EmitSljitRowLoopHead(compiler, done);
 	EmitLoadFusedAggregateExecuteIndex(compiler);
 
 	for (idx_t payload_idx = 0; payload_idx < payloads.size(); payload_idx++) {
@@ -185,12 +185,12 @@ BuildSljitNativeUngroupedFusedPrimitiveAggregateUpdate(const vector<SljitNativeR
 		sljit_set_label(payload_done, sljit_emit_label(compiler));
 	}
 
-	EmitNextSljitNativeVectorLoop(compiler, loop);
+	EmitSljitRowLoopLatch(compiler, loop, done);
 
 	auto helper_done = EmitSljitArithmeticOverflowStubs(compiler, overflows);
 
 	auto done_label = sljit_emit_label(compiler);
-	sljit_set_label(done, done_label);
+	SetSljitJumpLabels(done, done_label);
 	for (idx_t payload_idx = 0; payload_idx < payloads.size(); payload_idx++) {
 		if (descriptors[payload_idx].primitive_kind == AggregatePrimitiveUpdateKind::COUNT_STAR) {
 			EmitUngroupedAggregateCommitCount(compiler, payload_idx);

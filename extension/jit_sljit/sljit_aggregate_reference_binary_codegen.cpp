@@ -110,16 +110,16 @@ BuildSljitNativeUngroupedSumInt64IntegerBinaryReferences(SljitNativeIntegerKind 
 		               offsetof(SljitNativeVectorInput, right_source_data));
 		sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_R4, 0, SLJIT_IMM, 0);
 
-		auto fast_loop = sljit_emit_label(compiler);
-		auto fast_done = sljit_emit_cmp(compiler, SLJIT_GREATER_EQUAL, SLJIT_S1, 0, SLJIT_S2, 0);
+		vector<sljit_jump *> fast_done;
+		auto fast_loop = EmitSljitRowLoopHead(compiler, fast_done);
 		sljit_emit_op1(compiler, load_op, SLJIT_R2, 0, SLJIT_MEM2(SLJIT_S3, SLJIT_S1), data_scale);
 		sljit_emit_op1(compiler, load_op, SLJIT_R3, 0, SLJIT_MEM2(SLJIT_S4, SLJIT_S1), data_scale);
 		// R1 is free in this loop, so a product leaves both operands for the overflow stub
 		EmitSljitCheckedIntegerBinaryOp(compiler, kind, op, SLJIT_R1, SLJIT_R2, SLJIT_R3, checks, overflows);
 		sljit_emit_op2(compiler, SLJIT_ADD, SLJIT_R4, 0, SLJIT_R4, 0, SLJIT_R1, 0);
-		EmitNextSljitNativeVectorLoop(compiler, fast_loop);
+		EmitSljitRowLoopLatch(compiler, fast_loop, fast_done);
 
-		sljit_set_label(fast_done, sljit_emit_label(compiler));
+		SetSljitJumpLabels(fast_done, sljit_emit_label(compiler));
 		sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_MEM1(SLJIT_SP), local_sum_offset, SLJIT_R4, 0);
 		sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_R1, 0, SLJIT_IMM, 0);
 		auto no_rows = sljit_emit_cmp(compiler, SLJIT_EQUAL, SLJIT_S2, 0, SLJIT_IMM, 0);

@@ -69,8 +69,8 @@ static sljit_jump *EmitSljitPerfectHashUpdateLoop(const SljitPerfectHashFusedUpd
 	if (options.reset_index) {
 		sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_S1, 0, SLJIT_IMM, 0);
 	}
-	auto loop = sljit_emit_label(compiler);
-	auto done = sljit_emit_cmp(compiler, SLJIT_GREATER_EQUAL, SLJIT_S1, 0, SLJIT_S2, 0);
+	vector<sljit_jump *> done;
+	auto loop = EmitSljitRowLoopHead(compiler, done);
 	EmitLoadFusedAggregateExecuteIndex(compiler, options.direct_logical_index);
 	auto predicate_skip_jumps =
 	    EmitSljitPerfectHashPredicateSkipJumps(context, options.predicate_fast_path, options.all_valid,
@@ -92,8 +92,7 @@ static sljit_jump *EmitSljitPerfectHashUpdateLoop(const SljitPerfectHashFusedUpd
 	EmitSljitPerfectHashRowUpdate(context, group_lookup, options.payload_update,
 	                              options.load_common_selected_source_index);
 	EmitSljitPerfectHashPredicateSkipLabel(compiler, predicate_skip_jumps);
-	EmitNextSljitNativeVectorLoop(compiler, loop);
-	return done;
+	return EmitSljitRowLoopLatchExit(compiler, loop, done);
 }
 
 static void EmitSljitPerfectHashFastSourceDataHoists(struct sljit_compiler *compiler,
@@ -205,8 +204,8 @@ static sljit_jump *EmitSljitPerfectHashFlatFastLoop(const SljitPerfectHashFusedU
 			                                                     : nullptr);
 		    });
 	}
-	auto fast_loop = sljit_emit_label(compiler);
-	auto fast_done = sljit_emit_cmp(compiler, SLJIT_GREATER_EQUAL, SLJIT_S1, 0, SLJIT_S2, 0);
+	vector<sljit_jump *> fast_done;
+	auto fast_loop = EmitSljitRowLoopHead(compiler, fast_done);
 	EmitLoadFusedAggregateExecuteIndex(compiler, true);
 	auto predicate_skip_jumps = EmitSljitPerfectHashPredicateSkipJumps(context, true, true, false, fast_data_hoists);
 	if (update_plan.hoist_fast_group_data_array_base) {
@@ -219,8 +218,7 @@ static sljit_jump *EmitSljitPerfectHashFlatFastLoop(const SljitPerfectHashFusedU
 	EmitSljitPerfectHashRowUpdate(
 	    context, lookup, SljitPerfectHashPayloadUpdateOptionsForLoop(true, true, false, fast_data_hoists), false);
 	EmitSljitPerfectHashPredicateSkipLabel(compiler, predicate_skip_jumps);
-	EmitNextSljitNativeVectorLoop(compiler, fast_loop);
-	return fast_done;
+	return EmitSljitRowLoopLatchExit(compiler, fast_loop, fast_done);
 }
 
 // Flat rows with valid group keys whose payload sources may be NULL. Group and state flags are set per row: a state

@@ -71,8 +71,8 @@ static inline sljit_jump *EmitSljitAggregateAllValidSelectedSourceLoop(struct sl
 
 template <class EMIT_ROW>
 static inline sljit_jump *EmitSljitAggregateSelectedSourceLoop(struct sljit_compiler *compiler, EMIT_ROW &&emit_row) {
-	auto loop = sljit_emit_label(compiler);
-	auto done = sljit_emit_cmp(compiler, SLJIT_GREATER_EQUAL, SLJIT_S1, 0, SLJIT_S2, 0);
+	vector<sljit_jump *> done;
+	auto loop = EmitSljitRowLoopHead(compiler, done);
 
 	EmitLoadSelectedIndex(compiler);
 	auto source_is_null = EmitSkipInvalidSourceRow(compiler);
@@ -84,15 +84,13 @@ static inline sljit_jump *EmitSljitAggregateSelectedSourceLoop(struct sljit_comp
 
 	auto next_label = sljit_emit_label(compiler);
 	sljit_set_label(next, next_label);
-	EmitNextSljitNativeVectorLoop(compiler, loop);
-
-	return done;
+	return EmitSljitRowLoopLatchExit(compiler, loop, done);
 }
 
 template <class EMIT_ROW>
 static inline sljit_jump *EmitSljitAggregateTwoSourceLoop(struct sljit_compiler *compiler, EMIT_ROW &&emit_row) {
-	auto loop = sljit_emit_label(compiler);
-	auto done = sljit_emit_cmp(compiler, SLJIT_GREATER_EQUAL, SLJIT_S1, 0, SLJIT_S2, 0);
+	vector<sljit_jump *> done;
+	auto loop = EmitSljitRowLoopHead(compiler, done);
 
 	EmitLoadLogicalIndex(compiler, SLJIT_R1);
 	EmitLoadSourceIndex(compiler, offsetof(SljitNativeVectorInput, source_sel), SLJIT_R1, SLJIT_S3);
@@ -110,29 +108,25 @@ static inline sljit_jump *EmitSljitAggregateTwoSourceLoop(struct sljit_compiler 
 
 	auto next_label = sljit_emit_label(compiler);
 	sljit_set_label(next, next_label);
-	EmitNextSljitNativeVectorLoop(compiler, loop);
-
-	return done;
+	return EmitSljitRowLoopLatchExit(compiler, loop, done);
 }
 
 template <class EMIT_ROW>
 static inline sljit_jump *EmitSljitGroupedAggregateLoop(struct sljit_compiler *compiler, EMIT_ROW &&emit_row) {
-	auto loop = sljit_emit_label(compiler);
-	auto done = sljit_emit_cmp(compiler, SLJIT_GREATER_EQUAL, SLJIT_S1, 0, SLJIT_S2, 0);
+	vector<sljit_jump *> done;
+	auto loop = EmitSljitRowLoopHead(compiler, done);
 
 	EmitLoadLogicalIndex(compiler, SLJIT_R1);
 	EmitSljitGroupedAggregateStatePointer(compiler, SLJIT_R1, SLJIT_S4);
 	emit_row();
-	EmitNextSljitNativeVectorLoop(compiler, loop);
-
-	return done;
+	return EmitSljitRowLoopLatchExit(compiler, loop, done);
 }
 
 template <class EMIT_ROW>
 static inline sljit_jump *EmitSljitGroupedAggregateSelectedSourceLoop(struct sljit_compiler *compiler,
                                                                       EMIT_ROW &&emit_row) {
-	auto loop = sljit_emit_label(compiler);
-	auto done = sljit_emit_cmp(compiler, SLJIT_GREATER_EQUAL, SLJIT_S1, 0, SLJIT_S2, 0);
+	vector<sljit_jump *> done;
+	auto loop = EmitSljitRowLoopHead(compiler, done);
 
 	EmitLoadLogicalIndex(compiler, SLJIT_R1);
 	EmitSljitGroupedAggregateStatePointer(compiler, SLJIT_R1, SLJIT_S4);
@@ -146,9 +140,7 @@ static inline sljit_jump *EmitSljitGroupedAggregateSelectedSourceLoop(struct slj
 
 	auto next_label = sljit_emit_label(compiler);
 	sljit_set_label(next, next_label);
-	EmitNextSljitNativeVectorLoop(compiler, loop);
-
-	return done;
+	return EmitSljitRowLoopLatchExit(compiler, loop, done);
 }
 
 void EmitSljitAggregateAddRowCount(struct sljit_compiler *compiler, sljit_s32 count_reg);

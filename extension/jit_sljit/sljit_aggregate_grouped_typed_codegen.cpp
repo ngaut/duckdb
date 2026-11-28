@@ -95,11 +95,11 @@ unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativeGroupedFusedTypedExpressio
 	EmitInitSljitNativeVectorLoop(compiler);
 	EmitInitSljitNativeVectorSourceArrays(compiler);
 
-	struct sljit_jump *fast_done = nullptr;
-	struct sljit_jump *fast_direct_done = nullptr;
+	vector<sljit_jump *> fast_done;
+	vector<sljit_jump *> fast_direct_done;
 	struct sljit_jump *use_generic_loop = nullptr;
-	struct sljit_jump *selected_fast_done = nullptr;
-	struct sljit_jump *selected_by_loop_fast_done = nullptr;
+	vector<sljit_jump *> selected_fast_done;
+	vector<sljit_jump *> selected_by_loop_fast_done;
 	if (codegen_plan.fast_path_supported) {
 		sljit_emit_op1(compiler, SLJIT_MOV_U8, SLJIT_R0, 0, SLJIT_MEM1(SLJIT_S0),
 		               offsetof(SljitNativeVectorInput, expression_tree_flat_all_valid));
@@ -142,20 +142,16 @@ unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativeGroupedFusedTypedExpressio
 		               offsetof(SljitNativeVectorInput, aggregate_state_address_sel));
 		use_generic_address_fast_loop.push_back(sljit_emit_cmp(compiler, SLJIT_NOT_EQUAL, SLJIT_R0, 0, SLJIT_IMM, 0));
 
-		auto fast_direct_loop = sljit_emit_label(compiler);
-		fast_direct_done = sljit_emit_cmp(compiler, SLJIT_GREATER_EQUAL, SLJIT_S1, 0, SLJIT_S2, 0);
+		auto fast_direct_loop = EmitSljitRowLoopHead(compiler, fast_direct_done);
 		EmitLoadGroupedAggregateStateAddressByLoopIndex(compiler, SLJIT_S4);
 		emit_flat_fast_payloads();
-		EmitNextSljitNativeVectorLoop(compiler, fast_direct_loop);
+		EmitSljitRowLoopLatch(compiler, fast_direct_loop, fast_direct_done);
 
-		auto fast_loop = sljit_emit_label(compiler);
-		for (auto jump : use_generic_address_fast_loop) {
-			sljit_set_label(jump, fast_loop);
-		}
-		fast_done = sljit_emit_cmp(compiler, SLJIT_GREATER_EQUAL, SLJIT_S1, 0, SLJIT_S2, 0);
+		SetSljitJumpLabels(use_generic_address_fast_loop, sljit_emit_label(compiler));
+		auto fast_loop = EmitSljitRowLoopHead(compiler, fast_done);
 		EmitLoadGroupedAggregateStateAddress(compiler, SLJIT_S4, SLJIT_S1);
 		emit_flat_fast_payloads();
-		EmitNextSljitNativeVectorLoop(compiler, fast_loop);
+		EmitSljitRowLoopLatch(compiler, fast_loop, fast_done);
 
 		sljit_set_label(use_generic_loop, sljit_emit_label(compiler));
 		sljit_emit_op1(compiler, SLJIT_MOV_U8, SLJIT_R0, 0, SLJIT_MEM1(SLJIT_S0),
@@ -208,33 +204,29 @@ unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativeGroupedFusedTypedExpressio
 		               offsetof(SljitNativeVectorInput, aggregate_state_address_sel));
 		use_indexed_selected_fast_loop.push_back(sljit_emit_cmp(compiler, SLJIT_NOT_EQUAL, SLJIT_R0, 0, SLJIT_IMM, 0));
 
-		auto selected_by_loop_fast_loop = sljit_emit_label(compiler);
-		selected_by_loop_fast_done = sljit_emit_cmp(compiler, SLJIT_GREATER_EQUAL, SLJIT_S1, 0, SLJIT_S2, 0);
+		auto selected_by_loop_fast_loop = EmitSljitRowLoopHead(compiler, selected_by_loop_fast_done);
 		EmitLoadSljitExpressionTreeLogicalIndex(compiler);
 		sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_MEM1(SLJIT_SP), logical_index_offset, SLJIT_S3, 0);
 		EmitLoadGroupedAggregateStateAddressByLoopIndex(compiler, SLJIT_R0);
 		sljit_emit_op1(compiler, SLJIT_MOV_P, SLJIT_MEM1(SLJIT_SP), state_ptr_offset, SLJIT_R0, 0);
 		emit_selected_fast_payloads();
-		EmitNextSljitNativeVectorLoop(compiler, selected_by_loop_fast_loop);
+		EmitSljitRowLoopLatch(compiler, selected_by_loop_fast_loop, selected_by_loop_fast_done);
 
-		auto selected_fast_loop = sljit_emit_label(compiler);
-		for (auto jump : use_indexed_selected_fast_loop) {
-			sljit_set_label(jump, selected_fast_loop);
-		}
-		selected_fast_done = sljit_emit_cmp(compiler, SLJIT_GREATER_EQUAL, SLJIT_S1, 0, SLJIT_S2, 0);
+		SetSljitJumpLabels(use_indexed_selected_fast_loop, sljit_emit_label(compiler));
+		auto selected_fast_loop = EmitSljitRowLoopHead(compiler, selected_fast_done);
 		EmitLoadSljitExpressionTreeLogicalIndex(compiler);
 		sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_MEM1(SLJIT_SP), logical_index_offset, SLJIT_S3, 0);
 		EmitLoadGroupedAggregateStateAddress(compiler, SLJIT_R0, SLJIT_S3);
 		sljit_emit_op1(compiler, SLJIT_MOV_P, SLJIT_MEM1(SLJIT_SP), state_ptr_offset, SLJIT_R0, 0);
 		emit_selected_fast_payloads();
-		EmitNextSljitNativeVectorLoop(compiler, selected_fast_loop);
+		EmitSljitRowLoopLatch(compiler, selected_fast_loop, selected_fast_done);
 
 		sljit_set_label(use_generic_loop, sljit_emit_label(compiler));
 		sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_S1, 0, SLJIT_IMM, 0);
 	}
 
-	auto loop = sljit_emit_label(compiler);
-	auto done = sljit_emit_cmp(compiler, SLJIT_GREATER_EQUAL, SLJIT_S1, 0, SLJIT_S2, 0);
+	vector<sljit_jump *> done;
+	auto loop = EmitSljitRowLoopHead(compiler, done);
 	EmitLoadSljitExpressionTreeLogicalIndex(compiler);
 	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_MEM1(SLJIT_SP), logical_index_offset, SLJIT_S3, 0);
 	EmitLoadGroupedAggregateStateAddress(compiler, SLJIT_R0, SLJIT_S3);
@@ -282,24 +274,16 @@ unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativeGroupedFusedTypedExpressio
 		}
 		sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_S3, 0, SLJIT_MEM1(SLJIT_SP), logical_index_offset);
 	}
-	EmitNextSljitNativeVectorLoop(compiler, loop);
+	EmitSljitRowLoopLatch(compiler, loop, done);
 
 	auto helper_done = EmitSljitArithmeticOverflowStubs(compiler, overflows);
 
 	auto done_label = sljit_emit_label(compiler);
-	if (fast_done) {
-		sljit_set_label(fast_done, done_label);
-	}
-	if (fast_direct_done) {
-		sljit_set_label(fast_direct_done, done_label);
-	}
-	if (selected_fast_done) {
-		sljit_set_label(selected_fast_done, done_label);
-	}
-	if (selected_by_loop_fast_done) {
-		sljit_set_label(selected_by_loop_fast_done, done_label);
-	}
-	sljit_set_label(done, done_label);
+	SetSljitJumpLabels(fast_done, done_label);
+	SetSljitJumpLabels(fast_direct_done, done_label);
+	SetSljitJumpLabels(selected_fast_done, done_label);
+	SetSljitJumpLabels(selected_by_loop_fast_done, done_label);
+	SetSljitJumpLabels(done, done_label);
 	for (auto jump : helper_done) {
 		sljit_set_label(jump, sljit_emit_label(compiler));
 	}

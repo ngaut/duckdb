@@ -274,8 +274,8 @@ BuildSljitNativeUngroupedCountReference(SljitNativeAggregateUpdateFunction &func
 
 	sljit_set_label(source_has_null, sljit_emit_label(compiler));
 	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_S3, 0, SLJIT_IMM, 0);
-	auto loop = sljit_emit_label(compiler);
-	auto done = sljit_emit_cmp(compiler, SLJIT_GREATER_EQUAL, SLJIT_S1, 0, SLJIT_S2, 0);
+	vector<sljit_jump *> done;
+	auto loop = EmitSljitRowLoopHead(compiler, done);
 	EmitLoadLogicalIndex(compiler, SLJIT_R1);
 	EmitLoadSourceIndex(compiler, offsetof(SljitNativeVectorInput, source_sel), SLJIT_R1, SLJIT_S4);
 	auto source_is_null = EmitJumpIfValidityNull(compiler, offsetof(SljitNativeVectorInput, source_validity), SLJIT_S4);
@@ -284,9 +284,9 @@ BuildSljitNativeUngroupedCountReference(SljitNativeAggregateUpdateFunction &func
 
 	sljit_set_label(source_is_null, sljit_emit_label(compiler));
 	sljit_set_label(next, sljit_emit_label(compiler));
-	EmitNextSljitNativeVectorLoop(compiler, loop);
+	EmitSljitRowLoopLatch(compiler, loop, done);
 
-	sljit_set_label(done, sljit_emit_label(compiler));
+	SetSljitJumpLabels(done, sljit_emit_label(compiler));
 	sljit_set_label(commit, sljit_emit_label(compiler));
 	sljit_emit_op1(compiler, SLJIT_MOV_P, SLJIT_R0, 0, SLJIT_MEM1(SLJIT_S0),
 	               offsetof(SljitNativeVectorInput, aggregate_int64_value));

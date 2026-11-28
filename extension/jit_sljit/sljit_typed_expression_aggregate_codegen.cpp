@@ -53,29 +53,27 @@ static unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativeUngroupedSumTypedEx
 
 	vector<SljitArithmeticOverflowSite> overflows;
 	const auto &fast_path = tree_plan.fast_path;
-	struct sljit_jump *fast_done = nullptr;
+	vector<sljit_jump *> fast_done;
 	if (fast_path.fast_path_supported) {
 		sljit_emit_op1(compiler, SLJIT_MOV_U8, SLJIT_R0, 0, SLJIT_MEM1(SLJIT_S0),
 		               offsetof(SljitNativeVectorInput, expression_tree_flat_all_valid));
 		auto use_slow_loop = sljit_emit_cmp(compiler, SLJIT_EQUAL, SLJIT_R0, 0, SLJIT_IMM, 0);
-		auto fast_loop = sljit_emit_label(compiler);
-		fast_done = sljit_emit_cmp(compiler, SLJIT_GREATER_EQUAL, SLJIT_S1, 0, SLJIT_S2, 0);
+		auto fast_loop = EmitSljitRowLoopHead(compiler, fast_done);
 		idx_t fast_spill_index = 0;
 		EmitSljitTypedExpressionTreeFastValueReg(compiler, root, fast_spill_index, overflows);
 		EmitSljitAggregateAccumulateSumState(compiler, state_kind, local_sum_offset, local_sum_upper_offset,
 		                                     saw_value_offset, SLJIT_R2);
-		EmitNextSljitNativeVectorLoop(compiler, fast_loop);
+		EmitSljitRowLoopLatch(compiler, fast_loop, fast_done);
 		sljit_set_label(use_slow_loop, sljit_emit_label(compiler));
 	}
-	struct sljit_jump *flat_nullable_done = nullptr;
+	vector<sljit_jump *> flat_nullable_done;
 	struct sljit_jump *use_generic_loop = nullptr;
 	if (fast_path.precheck_nulls_supported) {
 		sljit_emit_op1(compiler, SLJIT_MOV_U8, SLJIT_R0, 0, SLJIT_MEM1(SLJIT_S0),
 		               offsetof(SljitNativeVectorInput, expression_tree_flat_no_selection));
 		use_generic_loop = sljit_emit_cmp(compiler, SLJIT_EQUAL, SLJIT_R0, 0, SLJIT_IMM, 0);
 		sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_S1, 0, SLJIT_IMM, 0);
-		auto flat_nullable_loop = sljit_emit_label(compiler);
-		flat_nullable_done = sljit_emit_cmp(compiler, SLJIT_GREATER_EQUAL, SLJIT_S1, 0, SLJIT_S2, 0);
+		auto flat_nullable_loop = EmitSljitRowLoopHead(compiler, flat_nullable_done);
 		vector<sljit_jump *> source_null_jumps;
 		for (auto source_index : fast_path.source_refs) {
 			source_null_jumps.push_back(EmitJumpIfSljitExpressionTreeFlatSourceNull(compiler, source_index));
@@ -90,13 +88,13 @@ static unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativeUngroupedSumTypedEx
 			sljit_set_label(source_null_jump, flat_nullable_invalid);
 		}
 		sljit_set_label(flat_nullable_next, sljit_emit_label(compiler));
-		EmitNextSljitNativeVectorLoop(compiler, flat_nullable_loop);
+		EmitSljitRowLoopLatch(compiler, flat_nullable_loop, flat_nullable_done);
 		sljit_set_label(use_generic_loop, sljit_emit_label(compiler));
 	}
 
 	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_S1, 0, SLJIT_IMM, 0);
-	auto loop = sljit_emit_label(compiler);
-	auto done = sljit_emit_cmp(compiler, SLJIT_GREATER_EQUAL, SLJIT_S1, 0, SLJIT_S2, 0);
+	vector<sljit_jump *> done;
+	auto loop = EmitSljitRowLoopHead(compiler, done);
 	EmitLoadSljitExpressionTreeLogicalIndex(compiler);
 	idx_t slot_index = 0;
 	auto root_slot = EmitSljitTypedExpressionTreeValue(compiler, root, slot_index, overflows);
@@ -108,18 +106,14 @@ static unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativeUngroupedSumTypedEx
 	auto row_done = sljit_emit_jump(compiler, SLJIT_JUMP);
 	sljit_set_label(root_invalid, sljit_emit_label(compiler));
 	sljit_set_label(row_done, sljit_emit_label(compiler));
-	EmitNextSljitNativeVectorLoop(compiler, loop);
+	EmitSljitRowLoopLatch(compiler, loop, done);
 
 	auto helper_done = EmitSljitArithmeticOverflowStubs(compiler, overflows);
 
 	auto done_label = sljit_emit_label(compiler);
-	if (fast_done) {
-		sljit_set_label(fast_done, done_label);
-	}
-	if (flat_nullable_done) {
-		sljit_set_label(flat_nullable_done, done_label);
-	}
-	sljit_set_label(done, done_label);
+	SetSljitJumpLabels(fast_done, done_label);
+	SetSljitJumpLabels(flat_nullable_done, done_label);
+	SetSljitJumpLabels(done, done_label);
 	EmitSljitAggregateCommitSumState(compiler, state_kind, local_sum_offset, local_sum_upper_offset, saw_value_offset);
 	for (auto jump : helper_done) {
 		sljit_set_label(jump, sljit_emit_label(compiler));

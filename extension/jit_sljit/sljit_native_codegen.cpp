@@ -141,10 +141,21 @@ void EmitSetResultRowInvalid(struct sljit_compiler *compiler) {
 	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_MEM2(SLJIT_R0, SLJIT_R2), 3, SLJIT_R3, 0);
 }
 
-void EmitNextSljitNativeVectorLoop(struct sljit_compiler *compiler, sljit_label *loop) {
+sljit_label *EmitSljitRowLoopHead(struct sljit_compiler *compiler, vector<sljit_jump *> &exits) {
+	exits.push_back(sljit_emit_cmp(compiler, SLJIT_GREATER_EQUAL, SLJIT_S1, 0, SLJIT_S2, 0));
+	return sljit_emit_label(compiler);
+}
+
+void EmitSljitRowLoopLatch(struct sljit_compiler *compiler, sljit_label *loop, vector<sljit_jump *> &exits) {
+	exits.push_back(EmitSljitNativeVectorLatch(compiler, loop));
+}
+
+sljit_jump *EmitSljitRowLoopLatchExit(struct sljit_compiler *compiler, sljit_label *loop,
+                                      const vector<sljit_jump *> &exits) {
 	sljit_emit_op2(compiler, SLJIT_ADD, SLJIT_S1, 0, SLJIT_S1, 0, SLJIT_IMM, 1);
-	auto repeat = sljit_emit_jump(compiler, SLJIT_JUMP);
-	sljit_set_label(repeat, loop);
+	sljit_set_label(sljit_emit_cmp(compiler, SLJIT_LESS, SLJIT_S1, 0, SLJIT_S2, 0), loop);
+	SetSljitJumpLabels(exits, sljit_emit_label(compiler));
+	return sljit_emit_jump(compiler, SLJIT_JUMP);
 }
 
 sljit_jump *EmitSljitNativeVectorLatch(struct sljit_compiler *compiler, sljit_label *loop) {

@@ -79,8 +79,8 @@ static inline void EmitCopySljitNativeFixedWidthSourceToResult(struct sljit_comp
 
 template <class EMIT_ROW>
 static inline sljit_jump *EmitSljitInvalidResultLoop(struct sljit_compiler *compiler, EMIT_ROW &&emit_row) {
-	auto loop = sljit_emit_label(compiler);
-	auto done = sljit_emit_cmp(compiler, SLJIT_GREATER_EQUAL, SLJIT_S1, 0, SLJIT_S2, 0);
+	vector<sljit_jump *> done;
+	auto loop = EmitSljitRowLoopHead(compiler, done);
 
 	vector<sljit_jump *> invalid_jumps;
 	vector<sljit_jump *> next_jumps;
@@ -93,9 +93,7 @@ static inline sljit_jump *EmitSljitInvalidResultLoop(struct sljit_compiler *comp
 
 	auto next_label = sljit_emit_label(compiler);
 	SetSljitJumpLabels(next_jumps, next_label);
-	EmitNextSljitNativeVectorLoop(compiler, loop);
-
-	return done;
+	return EmitSljitRowLoopLatchExit(compiler, loop, done);
 }
 
 //! Jumps when the input pointer at offset is set

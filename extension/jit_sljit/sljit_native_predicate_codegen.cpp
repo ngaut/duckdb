@@ -29,8 +29,8 @@ unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativeNullCheck(SljitNativeNullC
 	sljit_emit_enter(compiler, 0, SLJIT_ARGS1V(P), 5 | SLJIT_ENTER_FLOAT(2), 3, 0);
 	EmitInitSljitNativeVectorLoop(compiler);
 
-	auto loop = sljit_emit_label(compiler);
-	auto done = sljit_emit_cmp(compiler, SLJIT_GREATER_EQUAL, SLJIT_S1, 0, SLJIT_S2, 0);
+	vector<sljit_jump *> done;
+	auto loop = EmitSljitRowLoopHead(compiler, done);
 
 	EmitLoadSelectedIndex(compiler);
 	auto source_is_null = EmitSkipInvalidSourceRow(compiler);
@@ -43,9 +43,9 @@ unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativeNullCheck(SljitNativeNullC
 
 	auto next_label = sljit_emit_label(compiler);
 	sljit_set_label(next, next_label);
-	EmitNextSljitNativeVectorLoop(compiler, loop);
+	EmitSljitRowLoopLatch(compiler, loop, done);
 
-	sljit_set_label(done, sljit_emit_label(compiler));
+	SetSljitJumpLabels(done, sljit_emit_label(compiler));
 	sljit_emit_return_void(compiler);
 
 	return FinishSljitCode(compiler, function, error);

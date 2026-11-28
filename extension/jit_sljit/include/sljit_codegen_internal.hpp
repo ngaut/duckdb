@@ -243,10 +243,29 @@ void EmitInitSljitNativeVectorLoop(struct sljit_compiler *compiler);
 void EmitInitSljitNativeVectorSourceArrays(struct sljit_compiler *compiler);
 void EmitInitSljitNativeExpressionVectorLoop(struct sljit_compiler *compiler);
 void EmitLoadSljitNativeSourceValidity(struct sljit_compiler *compiler, idx_t source_index, sljit_s32 target);
-void EmitNextSljitNativeVectorLoop(struct sljit_compiler *compiler, struct sljit_label *loop);
 //! A bottom-tested latch: steps the row and repeats the loop while rows remain, so each row takes one branch; returns
 //! the exit jump
 struct sljit_jump *EmitSljitNativeVectorLatch(struct sljit_compiler *compiler, struct sljit_label *loop);
+//! The head of a loop over the rows from S1 to the count: adds the exit taken when no row remains and returns the label
+//! the latch repeats
+struct sljit_label *EmitSljitRowLoopHead(struct sljit_compiler *compiler, vector<struct sljit_jump *> &exits);
+//! The latch of a loop EmitSljitRowLoopHead began: steps the row and repeats from the head's label while rows remain,
+//! so each row takes one branch, and adds its exit
+void EmitSljitRowLoopLatch(struct sljit_compiler *compiler, struct sljit_label *loop,
+                           vector<struct sljit_jump *> &exits);
+//! EmitSljitRowLoopLatch for a loop with one exit: the head's exit lands on the latch's, which it returns
+struct sljit_jump *EmitSljitRowLoopLatchExit(struct sljit_compiler *compiler, struct sljit_label *loop,
+                                             const vector<struct sljit_jump *> &exits);
+//! The rows from S1 to the count, emit_row running for each row and falling through when it is done. Returns the loop's
+//! exits
+template <class EMIT_ROW>
+vector<struct sljit_jump *> EmitSljitRowLoop(struct sljit_compiler *compiler, EMIT_ROW emit_row) {
+	vector<struct sljit_jump *> exits;
+	auto loop = EmitSljitRowLoopHead(compiler, exits);
+	emit_row();
+	EmitSljitRowLoopLatch(compiler, loop, exits);
+	return exits;
+}
 void EmitLoadLogicalIndex(struct sljit_compiler *compiler, sljit_s32 target);
 void EmitLoadSourceIndex(struct sljit_compiler *compiler, sljit_sw sel_offset, sljit_s32 logical_index,
                          sljit_s32 target);

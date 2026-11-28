@@ -71,8 +71,8 @@ sljit_jump *
 EmitSljitSourcesCheckedPredicateLoop(struct sljit_compiler *compiler, const ExecutionExpressionIR &predicate,
                                      const vector<idx_t> &source_refs, vector<SljitArithmeticOverflowSite> &overflows,
                                      const vector<SljitTypedExpressionTreeLoopHoist> *hoists, EMIT_ROW emit_row) {
-	auto loop = sljit_emit_label(compiler);
-	auto done = sljit_emit_cmp(compiler, SLJIT_GREATER_EQUAL, SLJIT_S1, 0, SLJIT_S2, 0);
+	vector<sljit_jump *> done;
+	auto loop = EmitSljitRowLoopHead(compiler, done);
 	vector<sljit_jump *> rejected;
 	for (auto source_index : source_refs) {
 		rejected.push_back(EmitJumpIfSljitExpressionTreeFlatSourceNull(compiler, source_index));
@@ -83,8 +83,7 @@ EmitSljitSourcesCheckedPredicateLoop(struct sljit_compiler *compiler, const Exec
 	rejected.insert(rejected.end(), predicate_false.begin(), predicate_false.end());
 	emit_row();
 	SetSljitJumpLabels(rejected, sljit_emit_label(compiler));
-	EmitNextSljitNativeVectorLoop(compiler, loop);
-	return done;
+	return EmitSljitRowLoopLatchExit(compiler, loop, done);
 }
 
 } // namespace duckdb

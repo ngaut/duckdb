@@ -55,8 +55,8 @@ unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativePerfectHashGroupedFusedPri
 	// One row loop per input shape: flat inputs (no execute, group or payload selection) read every input at the row's
 	// position; any other chunk resolves each input's selection per row
 	auto emit_row_loop = [&](bool flat) {
-		auto loop = sljit_emit_label(compiler);
-		auto done = sljit_emit_cmp(compiler, SLJIT_GREATER_EQUAL, SLJIT_S1, 0, SLJIT_S2, 0);
+		vector<sljit_jump *> done;
+		auto loop = EmitSljitRowLoopHead(compiler, done);
 		EmitLoadFusedAggregateExecuteIndex(compiler, flat);
 		sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_S4, 0, SLJIT_IMM, 0);
 		for (idx_t group_idx = 0; group_idx < group_plans.size(); group_idx++) {
@@ -139,7 +139,7 @@ unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativePerfectHashGroupedFusedPri
 			sljit_set_label(source_is_null, payload_invalid);
 			sljit_set_label(payload_done, sljit_emit_label(compiler));
 		}
-		EmitNextSljitNativeVectorLoop(compiler, loop);
+		EmitSljitRowLoopLatch(compiler, loop, done);
 		return done;
 	};
 
@@ -151,8 +151,8 @@ unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativePerfectHashGroupedFusedPri
 	auto selected_done = emit_row_loop(false);
 
 	auto done_label = sljit_emit_label(compiler);
-	sljit_set_label(flat_done, done_label);
-	sljit_set_label(selected_done, done_label);
+	SetSljitJumpLabels(flat_done, done_label);
+	SetSljitJumpLabels(selected_done, done_label);
 	sljit_emit_return_void(compiler);
 
 	auto range_error_label = sljit_emit_label(compiler);
