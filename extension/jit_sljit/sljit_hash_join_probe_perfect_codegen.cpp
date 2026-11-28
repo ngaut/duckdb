@@ -3,9 +3,8 @@
 #include "sljit_codegen_util.hpp"
 #include "sljit_hash_join_probe_codegen_validation.hpp"
 #include "sljit_hash_join_probe_key_codegen.hpp"
-#include "sljit_hash_join_probe_perfect_input_codegen.hpp"
 #include "sljit_hash_join_runtime.hpp"
-#include "sljit_register_layout.hpp"
+#include "sljit_kernel_frame.hpp"
 
 #include "sljitLir.h"
 
@@ -158,13 +157,45 @@ static void EmitWidePerfectHashJoinRangeChecks(struct sljit_compiler *compiler, 
 	range_failures.push_back(lower_above_max);
 }
 
+//! The fixed registers of a perfect-hash probe: S0 the input, S1 the row, S2 the count, S3 the match count, and five
+//! scratch registers; a probe loop calls a helper only to raise an error
+static SljitKernelFrame SljitPerfectHashJoinProbeFrame() {
+	return SljitKernelFrame(5, 4);
+}
+
+//! The registers a wide-key probe keeps its source and bounds in
+struct SljitWidePerfectHashJoinProbeRegisters {
+	sljit_s32 source_data = 0;
+	sljit_s32 source_selection = 0;
+	sljit_s32 source_validity = 0;
+	sljit_s32 minimum_lower = 0;
+	sljit_s32 minimum_upper = 0;
+	sljit_s32 maximum_lower = 0;
+
+	bool Planned() const {
+		return source_data && source_selection && source_validity && minimum_lower && minimum_upper && maximum_lower;
+	}
+};
+
+static SljitWidePerfectHashJoinProbeRegisters PlanSljitWidePerfectHashJoinProbeRegisters(SljitKernelFrame &frame) {
+	SljitWidePerfectHashJoinProbeRegisters registers;
+	registers.source_data = frame.AllocateRegister();
+	registers.source_selection = frame.AllocateRegister();
+	registers.source_validity = frame.AllocateRegister();
+	registers.minimum_lower = frame.AllocateRegister();
+	registers.minimum_upper = frame.AllocateRegister();
+	registers.maximum_lower = frame.AllocateRegister();
+	return registers;
+}
+
 static unique_ptr<ExecutionRegionCodeHandle>
 BuildSljitWidePerfectHashJoinProbe(struct sljit_compiler *compiler, bool unsigned_key,
                                    const SljitPerfectHashJoinProbeCodegenConfig &config,
                                    SljitNativePerfectHashJoinProbeFunction &function, string &error) {
-	const auto &registers = GetSljitPerfectHashProbeRegisterLayout();
-	D_ASSERT(registers.has_invariant_hoists);
-	sljit_emit_enter(compiler, 0, SLJIT_ARGS1V(P), 5, registers.saved_register_count, 0);
+	auto frame = SljitPerfectHashJoinProbeFrame();
+	const auto registers = PlanSljitWidePerfectHashJoinProbeRegisters(frame);
+	D_ASSERT(registers.Planned());
+	frame.EmitEnter(compiler, SLJIT_ARGS1V(P));
 	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_S1, 0, SLJIT_MEM1(SLJIT_S0),
 	               offsetof(SljitNativePerfectHashJoinProbeInput, input_offset));
 	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_S2, 0, SLJIT_MEM1(SLJIT_S0),
@@ -241,44 +272,84 @@ struct SljitPerfectHashJoinProbeLoopShape {
 	bool int64_to_int32 = false;
 };
 
-static void EmitSljitHoistedPerfectHashJoinProbeLoop(struct sljit_compiler *compiler, SljitNativeHashJoinKeyKind kind,
-                                                     bool signed_compare,
-                                                     const SljitPerfectHashJoinProbeCodegenConfig &config,
-                                                     const SljitPerfectHashJoinProbeLoopShape &shape,
-                                                     vector<struct sljit_jump *> &finished) {
-	const auto &registers = GetSljitPerfectHashProbeRegisterLayout();
+//! The values a probe loop reads and never writes, hottest first: each in a frame register, else read from the input
+//! where it lives
+struct SljitPerfectHashJoinProbeInvariants {
+	SljitOperand source_data;
+	SljitOperand minimum;
+	SljitOperand maximum;
+	SljitOperand source_selection;
+	SljitOperand source_validity;
+	SljitOperand perfect_validity;
+	SljitOperand build_selection;
+	SljitOperand match_selection;
+};
+
+static SljitOperand SljitPerfectHashJoinProbeInputField(sljit_sw offset) {
+	return {SLJIT_MEM1(SLJIT_S0), offset};
+}
+
+static SljitPerfectHashJoinProbeInvariants PlanSljitPerfectHashJoinProbeInvariants(SljitKernelFrame &frame) {
+	SljitPerfectHashJoinProbeInvariants result;
+	auto invariant = [&](sljit_sw offset) {
+		return frame.AllocateInvariant(SljitPerfectHashJoinProbeInputField(offset));
+	};
+	result.source_data = invariant(offsetof(SljitNativePerfectHashJoinProbeInput, source_data));
+	result.minimum = invariant(offsetof(SljitNativePerfectHashJoinProbeInput, perfect_min));
+	result.maximum = invariant(offsetof(SljitNativePerfectHashJoinProbeInput, perfect_max));
+	result.source_selection = invariant(offsetof(SljitNativePerfectHashJoinProbeInput, source_sel));
+	result.source_validity = invariant(offsetof(SljitNativePerfectHashJoinProbeInput, source_validity));
+	result.perfect_validity = invariant(offsetof(SljitNativePerfectHashJoinProbeInput, perfect_validity));
+	result.build_selection = invariant(offsetof(SljitNativePerfectHashJoinProbeInput, build_sel));
+	result.match_selection = invariant(offsetof(SljitNativePerfectHashJoinProbeInput, match_sel));
+	return result;
+}
+
+static void EmitSljitPerfectHashJoinProbeLoop(struct sljit_compiler *compiler, SljitNativeHashJoinKeyKind kind,
+                                              bool signed_compare, const SljitPerfectHashJoinProbeCodegenConfig &config,
+                                              const SljitPerfectHashJoinProbeInvariants &invariants,
+                                              const SljitPerfectHashJoinProbeLoopShape &shape,
+                                              vector<struct sljit_jump *> &finished) {
 	auto loop = sljit_emit_label(compiler);
 	finished.push_back(sljit_emit_cmp(compiler, SLJIT_GREATER_EQUAL, SLJIT_S1, 0, SLJIT_S2, 0));
 	vector<struct sljit_jump *> skips;
 	if (shape.source_selection) {
-		sljit_emit_op1(compiler, SLJIT_MOV_U32, SLJIT_R1, 0, SLJIT_MEM2(registers.source_selection, SLJIT_S1), 2);
+		const auto source_selection = SljitKernelFrameRegister(compiler, invariants.source_selection, SLJIT_R1);
+		sljit_emit_op1(compiler, SLJIT_MOV_U32, SLJIT_R1, 0, SLJIT_MEM2(source_selection, SLJIT_S1), 2);
 	} else {
 		sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_R1, 0, SLJIT_S1, 0);
 	}
 	if (shape.source_validity) {
-		EmitLoadSljitValidityWord(compiler, registers.source_validity, SLJIT_R1, SLJIT_R2);
+		const auto source_validity = SljitKernelFrameRegister(compiler, invariants.source_validity, SLJIT_R3);
+		EmitLoadSljitValidityWord(compiler, source_validity, SLJIT_R1, SLJIT_R2);
 		skips.push_back(EmitJumpIfSljitValidityWordBitClear(compiler, SLJIT_R2, SLJIT_R1));
 	}
+	const auto source_data = SljitKernelFrameRegister(compiler, invariants.source_data, SLJIT_R0);
 	if (shape.int64_to_int32) {
-		sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_R0, 0, SLJIT_MEM2(registers.source_data, SLJIT_R1), 3);
+		sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_R0, 0, SLJIT_MEM2(source_data, SLJIT_R1), 3);
 		EmitCheckedPerfectHashJoinInt64ToInt32Range(compiler, SLJIT_R0, SLJIT_R2);
 	} else {
-		EmitLoadHashJoinKey(compiler, kind, SLJIT_R0, registers.source_data, SLJIT_R1, 0);
+		EmitLoadHashJoinKey(compiler, kind, SLJIT_R0, source_data, SLJIT_R1, 0);
 	}
-	skips.push_back(
-	    sljit_emit_cmp(compiler, signed_compare ? SLJIT_SIG_LESS : SLJIT_LESS, SLJIT_R0, 0, registers.minimum, 0));
+	auto &minimum = invariants.minimum;
+	auto &maximum = invariants.maximum;
+	skips.push_back(sljit_emit_cmp(compiler, signed_compare ? SLJIT_SIG_LESS : SLJIT_LESS, SLJIT_R0, 0, minimum.operand,
+	                               minimum.operand_w));
 	skips.push_back(sljit_emit_cmp(compiler, signed_compare ? SLJIT_SIG_GREATER : SLJIT_GREATER, SLJIT_R0, 0,
-	                               registers.maximum, 0));
-	sljit_emit_op2(compiler, SLJIT_SUB, SLJIT_R0, 0, SLJIT_R0, 0, registers.minimum, 0);
+	                               maximum.operand, maximum.operand_w));
+	sljit_emit_op2(compiler, SLJIT_SUB, SLJIT_R0, 0, SLJIT_R0, 0, minimum.operand, minimum.operand_w);
 	if (shape.table_validity) {
-		EmitLoadSljitValidityWord(compiler, registers.perfect_validity, SLJIT_R0, SLJIT_R3);
+		const auto perfect_validity = SljitKernelFrameRegister(compiler, invariants.perfect_validity, SLJIT_R2);
+		EmitLoadSljitValidityWord(compiler, perfect_validity, SLJIT_R0, SLJIT_R3);
 		skips.push_back(EmitJumpIfSljitValidityWordBitClear(compiler, SLJIT_R3, SLJIT_R0));
 	}
 	if (config.emit_build_selection) {
-		sljit_emit_op1(compiler, SLJIT_MOV_U32, SLJIT_MEM2(registers.build_selection, SLJIT_S3), 2, SLJIT_R0, 0);
+		const auto build_selection = SljitKernelFrameRegister(compiler, invariants.build_selection, SLJIT_R2);
+		sljit_emit_op1(compiler, SLJIT_MOV_U32, SLJIT_MEM2(build_selection, SLJIT_S3), 2, SLJIT_R0, 0);
 	}
 	if (config.emit_match_selection) {
-		sljit_emit_op1(compiler, SLJIT_MOV_U32, SLJIT_MEM2(registers.match_selection, SLJIT_S3), 2, SLJIT_S1, 0);
+		const auto match_selection = SljitKernelFrameRegister(compiler, invariants.match_selection, SLJIT_R2);
+		sljit_emit_op1(compiler, SLJIT_MOV_U32, SLJIT_MEM2(match_selection, SLJIT_S3), 2, SLJIT_S1, 0);
 	}
 	sljit_emit_op2(compiler, SLJIT_ADD, SLJIT_S3, 0, SLJIT_S3, 0, SLJIT_IMM, 1);
 	auto skip_row = sljit_emit_label(compiler);
@@ -291,30 +362,33 @@ static void EmitSljitHoistedPerfectHashJoinProbeLoop(struct sljit_compiler *comp
 
 //! Emits the loop of every shape under a tree of tests on the input's fixed facts: each test splits the shapes on one
 //! fact, and a leaf is one loop
-static void EmitSljitHoistedPerfectHashJoinProbeLoops(struct sljit_compiler *compiler, SljitNativeHashJoinKeyKind kind,
-                                                      bool signed_compare,
-                                                      const SljitPerfectHashJoinProbeCodegenConfig &config,
-                                                      SljitPerfectHashJoinProbeLoopShape shape, idx_t fact,
-                                                      vector<struct sljit_jump *> &finished) {
-	const auto &registers = GetSljitPerfectHashProbeRegisterLayout();
+static void EmitSljitPerfectHashJoinProbeLoops(struct sljit_compiler *compiler, SljitNativeHashJoinKeyKind kind,
+                                               bool signed_compare,
+                                               const SljitPerfectHashJoinProbeCodegenConfig &config,
+                                               const SljitPerfectHashJoinProbeInvariants &invariants,
+                                               SljitPerfectHashJoinProbeLoopShape shape, idx_t fact,
+                                               vector<struct sljit_jump *> &finished) {
 	struct sljit_jump *absent;
 	bool *present;
+	auto absent_when_null = [&](const SljitOperand &pointer) {
+		return sljit_emit_cmp(compiler, SLJIT_EQUAL, pointer.operand, pointer.operand_w, SLJIT_IMM, 0);
+	};
 	switch (fact) {
 	case 0:
-		absent = sljit_emit_cmp(compiler, SLJIT_EQUAL, registers.source_selection, 0, SLJIT_IMM, 0);
+		absent = absent_when_null(invariants.source_selection);
 		present = &shape.source_selection;
 		break;
 	case 1:
-		absent = sljit_emit_cmp(compiler, SLJIT_EQUAL, registers.source_validity, 0, SLJIT_IMM, 0);
+		absent = absent_when_null(invariants.source_validity);
 		present = &shape.source_validity;
 		break;
 	case 2:
-		absent = sljit_emit_cmp(compiler, SLJIT_EQUAL, registers.perfect_validity, 0, SLJIT_IMM, 0);
+		absent = absent_when_null(invariants.perfect_validity);
 		present = &shape.table_validity;
 		break;
 	case 3:
 		if (kind != SljitNativeHashJoinKeyKind::INT32) {
-			EmitSljitHoistedPerfectHashJoinProbeLoop(compiler, kind, signed_compare, config, shape, finished);
+			EmitSljitPerfectHashJoinProbeLoop(compiler, kind, signed_compare, config, invariants, shape, finished);
 			return;
 		}
 		sljit_emit_op1(compiler, SLJIT_MOV_U8, SLJIT_R2, 0, SLJIT_MEM1(SLJIT_S0),
@@ -323,51 +397,14 @@ static void EmitSljitHoistedPerfectHashJoinProbeLoops(struct sljit_compiler *com
 		present = &shape.int64_to_int32;
 		break;
 	default:
-		EmitSljitHoistedPerfectHashJoinProbeLoop(compiler, kind, signed_compare, config, shape, finished);
+		EmitSljitPerfectHashJoinProbeLoop(compiler, kind, signed_compare, config, invariants, shape, finished);
 		return;
 	}
 	*present = true;
-	EmitSljitHoistedPerfectHashJoinProbeLoops(compiler, kind, signed_compare, config, shape, fact + 1, finished);
+	EmitSljitPerfectHashJoinProbeLoops(compiler, kind, signed_compare, config, invariants, shape, fact + 1, finished);
 	sljit_set_label(absent, sljit_emit_label(compiler));
 	*present = false;
-	EmitSljitHoistedPerfectHashJoinProbeLoops(compiler, kind, signed_compare, config, shape, fact + 1, finished);
-}
-
-static unique_ptr<ExecutionRegionCodeHandle>
-BuildSljitHoistedPerfectHashJoinProbe(struct sljit_compiler *compiler, SljitNativeHashJoinKeyKind kind,
-                                      bool signed_compare, const SljitPerfectHashJoinProbeCodegenConfig &config,
-                                      SljitNativePerfectHashJoinProbeFunction &function, string &error) {
-	const auto &registers = GetSljitPerfectHashProbeRegisterLayout();
-	sljit_emit_enter(compiler, 0, SLJIT_ARGS1V(P), registers.scratch_register_count, registers.saved_register_count, 0);
-	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_S1, 0, SLJIT_MEM1(SLJIT_S0),
-	               offsetof(SljitNativePerfectHashJoinProbeInput, input_offset));
-	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_S2, 0, SLJIT_MEM1(SLJIT_S0),
-	               offsetof(SljitNativePerfectHashJoinProbeInput, count));
-	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_S3, 0, SLJIT_IMM, 0);
-	sljit_emit_op1(compiler, SLJIT_MOV_P, registers.source_data, 0, SLJIT_MEM1(SLJIT_S0),
-	               offsetof(SljitNativePerfectHashJoinProbeInput, source_data));
-	sljit_emit_op1(compiler, SLJIT_MOV_P, registers.source_selection, 0, SLJIT_MEM1(SLJIT_S0),
-	               offsetof(SljitNativePerfectHashJoinProbeInput, source_sel));
-	sljit_emit_op1(compiler, SLJIT_MOV_P, registers.source_validity, 0, SLJIT_MEM1(SLJIT_S0),
-	               offsetof(SljitNativePerfectHashJoinProbeInput, source_validity));
-	sljit_emit_op1(compiler, SLJIT_MOV, registers.minimum, 0, SLJIT_MEM1(SLJIT_S0),
-	               offsetof(SljitNativePerfectHashJoinProbeInput, perfect_min));
-	sljit_emit_op1(compiler, SLJIT_MOV, registers.maximum, 0, SLJIT_MEM1(SLJIT_S0),
-	               offsetof(SljitNativePerfectHashJoinProbeInput, perfect_max));
-	sljit_emit_op1(compiler, SLJIT_MOV_P, registers.perfect_validity, 0, SLJIT_MEM1(SLJIT_S0),
-	               offsetof(SljitNativePerfectHashJoinProbeInput, perfect_validity));
-	sljit_emit_op1(compiler, SLJIT_MOV_P, registers.match_selection, 0, SLJIT_MEM1(SLJIT_S0),
-	               offsetof(SljitNativePerfectHashJoinProbeInput, match_sel));
-	sljit_emit_op1(compiler, SLJIT_MOV_P, registers.build_selection, 0, SLJIT_MEM1(SLJIT_S0),
-	               offsetof(SljitNativePerfectHashJoinProbeInput, build_sel));
-	vector<struct sljit_jump *> finished;
-	EmitSljitHoistedPerfectHashJoinProbeLoops(compiler, kind, signed_compare, config,
-	                                          SljitPerfectHashJoinProbeLoopShape(), 0, finished);
-	auto done = sljit_emit_label(compiler);
-	for (auto jump : finished) {
-		sljit_set_label(jump, done);
-	}
-	return FinishSljitPerfectHashJoinProbeCode(compiler, function, error, SLJIT_S3);
+	EmitSljitPerfectHashJoinProbeLoops(compiler, kind, signed_compare, config, invariants, shape, fact + 1, finished);
 }
 
 unique_ptr<ExecutionRegionCodeHandle>
@@ -384,11 +421,10 @@ BuildSljitPerfectHashJoinProbe(const SljitNativeHashJoinProbePlan &plan,
 		return nullptr;
 	}
 	if (SljitHashJoinKeyKindIs128(key.key_kind)) {
-		// Wide perfect-hash keys retain their full bounds in the runtime ABI. Use
-		// the generated word-pair loop when the target exposes the saved-register
-		// file needed to keep the bounds hot; the helper remains the portable
-		// fallback for smaller register files.
-		if (GetSljitPerfectHashProbeRegisterLayout().has_invariant_hoists) {
+		// Wide perfect-hash keys retain their full bounds in the runtime ABI. The generated word-pair loop keeps the
+		// bounds in registers when the frame has them; the helper is the fallback for smaller register files
+		auto frame = SljitPerfectHashJoinProbeFrame();
+		if (PlanSljitWidePerfectHashJoinProbeRegisters(frame).Planned()) {
 			return BuildSljitWidePerfectHashJoinProbe(compiler, key.key_kind == SljitNativeHashJoinKeyKind::UINT128,
 			                                          config, function, error);
 		}
@@ -404,78 +440,19 @@ BuildSljitPerfectHashJoinProbe(const SljitNativeHashJoinProbePlan &plan,
 		return FinishSljitCode(compiler, function, error);
 	}
 
-	const auto signed_compare = SljitHashJoinKeyKindIsSigned(key.key_kind);
-	if (GetSljitPerfectHashProbeRegisterLayout().has_invariant_hoists) {
-		return BuildSljitHoistedPerfectHashJoinProbe(compiler, key.key_kind, signed_compare, config, function, error);
-	}
-	const auto less_than_min = signed_compare ? SLJIT_SIG_LESS : SLJIT_LESS;
-	const auto greater_than_max = signed_compare ? SLJIT_SIG_GREATER : SLJIT_GREATER;
-	const auto &registers = GetSljitPerfectHashProbeRegisterLayout();
-
-	sljit_emit_enter(compiler, 0, SLJIT_ARGS1V(P), 5, registers.saved_register_count, 0);
+	auto frame = SljitPerfectHashJoinProbeFrame();
+	const auto invariants = PlanSljitPerfectHashJoinProbeInvariants(frame);
+	frame.EmitEnter(compiler, SLJIT_ARGS1V(P));
 	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_S1, 0, SLJIT_MEM1(SLJIT_S0),
 	               offsetof(SljitNativePerfectHashJoinProbeInput, input_offset));
 	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_S2, 0, SLJIT_MEM1(SLJIT_S0),
 	               offsetof(SljitNativePerfectHashJoinProbeInput, count));
 	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_S3, 0, SLJIT_IMM, 0);
-	sljit_emit_op1(compiler, SLJIT_MOV_P, registers.source_data, 0, SLJIT_MEM1(SLJIT_S0),
-	               offsetof(SljitNativePerfectHashJoinProbeInput, source_data));
-
-	auto loop = sljit_emit_label(compiler);
-	auto done = sljit_emit_cmp(compiler, SLJIT_GREATER_EQUAL, SLJIT_S1, 0, SLJIT_S2, 0);
-	EmitLoadPerfectHashJoinSourceIndex(compiler, SLJIT_R1, SLJIT_R0);
-	auto source_is_null = EmitJumpIfPerfectHashJoinSourceNull(compiler, SLJIT_R1, SLJIT_R2, SLJIT_R4);
-	if (key.key_kind == SljitNativeHashJoinKeyKind::INT32) {
-		sljit_emit_op1(compiler, SLJIT_MOV_U8, SLJIT_R2, 0, SLJIT_MEM1(SLJIT_S0),
-		               offsetof(SljitNativePerfectHashJoinProbeInput, source_key0_int64_to_int32));
-		auto load_int32 = sljit_emit_cmp(compiler, SLJIT_EQUAL, SLJIT_R2, 0, SLJIT_IMM, 0);
-		sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_R0, 0, SLJIT_MEM2(registers.source_data, SLJIT_R1), 3);
-		EmitCheckedPerfectHashJoinInt64ToInt32Range(compiler, SLJIT_R0, SLJIT_R2);
-		auto loaded_key = sljit_emit_jump(compiler, SLJIT_JUMP);
-		sljit_set_label(load_int32, sljit_emit_label(compiler));
-		EmitLoadHashJoinKey(compiler, key.key_kind, SLJIT_R0, registers.source_data, SLJIT_R1, 0);
-		sljit_set_label(loaded_key, sljit_emit_label(compiler));
-	} else {
-		EmitLoadHashJoinKey(compiler, key.key_kind, SLJIT_R0, registers.source_data, SLJIT_R1, 0);
-	}
-
-	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_R2, 0, SLJIT_MEM1(SLJIT_S0),
-	               offsetof(SljitNativePerfectHashJoinProbeInput, perfect_min));
-	auto below_range = sljit_emit_cmp(compiler, less_than_min, SLJIT_R0, 0, SLJIT_R2, 0);
-	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_R3, 0, SLJIT_MEM1(SLJIT_S0),
-	               offsetof(SljitNativePerfectHashJoinProbeInput, perfect_max));
-	auto above_range = sljit_emit_cmp(compiler, greater_than_max, SLJIT_R0, 0, SLJIT_R3, 0);
-	sljit_emit_op2(compiler, SLJIT_SUB, SLJIT_R0, 0, SLJIT_R0, 0, SLJIT_R2, 0);
-
-	sljit_emit_op1(compiler, SLJIT_MOV_P, SLJIT_R2, 0, SLJIT_MEM1(SLJIT_S0),
-	               offsetof(SljitNativePerfectHashJoinProbeInput, perfect_validity));
-	auto all_valid = sljit_emit_cmp(compiler, SLJIT_EQUAL, SLJIT_R2, 0, SLJIT_IMM, 0);
-	EmitLoadSljitValidityWord(compiler, SLJIT_R2, SLJIT_R0, SLJIT_R3);
-	auto value_missing = EmitJumpIfSljitValidityWordBitClear(compiler, SLJIT_R3, SLJIT_R0);
-	sljit_set_label(all_valid, sljit_emit_label(compiler));
-
-	if (config.emit_build_selection) {
-		sljit_emit_op1(compiler, SLJIT_MOV_P, SLJIT_R2, 0, SLJIT_MEM1(SLJIT_S0),
-		               offsetof(SljitNativePerfectHashJoinProbeInput, build_sel));
-		sljit_emit_op1(compiler, SLJIT_MOV_U32, SLJIT_MEM2(SLJIT_R2, SLJIT_S3), 2, SLJIT_R0, 0);
-	}
-	if (config.emit_match_selection) {
-		sljit_emit_op1(compiler, SLJIT_MOV_P, SLJIT_R2, 0, SLJIT_MEM1(SLJIT_S0),
-		               offsetof(SljitNativePerfectHashJoinProbeInput, match_sel));
-		sljit_emit_op1(compiler, SLJIT_MOV_U32, SLJIT_MEM2(SLJIT_R2, SLJIT_S3), 2, SLJIT_S1, 0);
-	}
-	sljit_emit_op2(compiler, SLJIT_ADD, SLJIT_S3, 0, SLJIT_S3, 0, SLJIT_IMM, 1);
-
-	auto skip_row = sljit_emit_label(compiler);
-	sljit_set_label(source_is_null, skip_row);
-	sljit_set_label(below_range, skip_row);
-	sljit_set_label(above_range, skip_row);
-	sljit_set_label(value_missing, skip_row);
-	sljit_emit_op2(compiler, SLJIT_ADD, SLJIT_S1, 0, SLJIT_S1, 0, SLJIT_IMM, 1);
-	auto repeat = sljit_emit_jump(compiler, SLJIT_JUMP);
-	sljit_set_label(repeat, loop);
-
-	sljit_set_label(done, sljit_emit_label(compiler));
+	frame.EmitLoadInvariants(compiler);
+	vector<struct sljit_jump *> finished;
+	EmitSljitPerfectHashJoinProbeLoops(compiler, key.key_kind, SljitHashJoinKeyKindIsSigned(key.key_kind), config,
+	                                   invariants, SljitPerfectHashJoinProbeLoopShape(), 0, finished);
+	SetSljitJumpLabels(finished, sljit_emit_label(compiler));
 	return FinishSljitPerfectHashJoinProbeCode(compiler, function, error, SLJIT_S3);
 }
 
