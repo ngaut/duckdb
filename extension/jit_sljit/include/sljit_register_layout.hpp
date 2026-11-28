@@ -35,18 +35,7 @@ struct SljitPerfectHashRegisterLayout {
 	sljit_s32 group_data_saved_register_count = 0;
 };
 
-struct SljitUngroupedAggregateRegisterLayout {
-	bool has_source_data_hoists = false;
-	//! Running sums live in scratch registers past the five every emitter uses: the fast loops that keep them call no
-	//! helper except on the way out with an error
-	bool has_register_accumulators = false;
-	sljit_s32 source_data_saved_register_count = 0;
-	sljit_s32 accumulator_scratch_register_count = 0;
-	sljit_s32 source_data[2] = {0, 0};
-};
-
 const SljitNativeVectorRegisterLayout &GetSljitNativeVectorRegisterLayout();
 const SljitPerfectHashRegisterLayout &GetSljitPerfectHashRegisterLayout();
-const SljitUngroupedAggregateRegisterLayout &GetSljitUngroupedAggregateRegisterLayout();
 
 } // namespace duckdb

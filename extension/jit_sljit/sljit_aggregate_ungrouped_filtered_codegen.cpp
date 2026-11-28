@@ -8,6 +8,7 @@
 #include "sljit_aggregate_ungrouped_shared_codegen.hpp"
 #include "sljit_codegen_internal.hpp"
 #include "sljit_codegen_util.hpp"
+#include "sljit_kernel_frame.hpp"
 #include "sljit_predicate_row_loops.hpp"
 #include "sljit_typed_expression_plan.hpp"
 #include "sljit_typed_expression_simd_codegen.hpp"
@@ -236,8 +237,15 @@ unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativeFilteredUngroupedFusedPrim
 	// The scalar loops hold the most used sources' data pointers in registers instead of loading them from the
 	// source array for every reference of every row
 	vector<SljitTypedExpressionTreeLoopHoist> data_hoists;
-	const auto &registers = GetSljitUngroupedAggregateRegisterLayout();
-	if (registers.has_source_data_hoists) {
+	// the generic loop calls helpers, so the hoisted pointers take saved registers
+	SljitKernelFrame hoist_frame(5, GetSljitNativeVectorRegisterLayout().saved_register_count, true);
+	vector<sljit_s32> hoist_registers;
+	for (idx_t hoist_idx = 0; hoist_idx < 2; hoist_idx++) {
+		if (auto reg = hoist_frame.AllocateRegister()) {
+			hoist_registers.push_back(reg);
+		}
+	}
+	if (!hoist_registers.empty()) {
 		vector<reference<const ExecutionExpressionIR>> expressions {predicate};
 		for (idx_t payload_idx = 0; payload_idx < payloads.size(); payload_idx++) {
 			if (codegen_plan.payload_descriptors[payload_idx].primitive_kind !=
@@ -245,10 +253,10 @@ unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativeFilteredUngroupedFusedPrim
 				expressions.push_back(*payloads[payload_idx].expression_tree);
 			}
 		}
-		data_hoists = BuildSljitExpressionSourceDataPointerHoists(
-		    expressions, {registers.source_data[0], registers.source_data[1]}, 1);
+		data_hoists = BuildSljitExpressionSourceDataPointerHoists(expressions, hoist_registers, 1);
 	}
-	const bool hoists_source_data = !data_hoists.empty();
+	const auto hoisted_saved_register_count =
+	    data_hoists.empty() ? GetSljitNativeVectorRegisterLayout().saved_register_count : hoist_frame.SavedCount();
 	{
 		vector<reference<const ExecutionExpressionIR>> expressions {predicate};
 		for (auto &payload : payloads) {
@@ -266,28 +274,28 @@ unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativeFilteredUngroupedFusedPrim
 	}
 	const auto logical_selection_offset = local_size;
 	local_size += NumericCast<sljit_sw>(sizeof(sljit_sw));
-	const auto guard_offset = local_size;
-	local_size += NumericCast<sljit_sw>(sizeof(sljit_sw));
 	const auto hoists = data_hoists.empty() ? nullptr : &data_hoists;
-	// The loops that call no helper keep each payload's running sum in scratch registers past the five every emitter
-	// uses: a stack slot per row would chain each row's update on the previous row's store. A sum's count only tells
-	// whether it saw a value: a sum that adds every row the loop accepts reads the loop's row count, which COUNT(*)
-	// counts too, and a sum that may skip a row (a NULL value) sets its bit in one presence mask. A COUNT is a sum
-	// without a value whose count is its result: one that may skip a row counts in a register of its own. A guarded
+	// The loops that call no helper keep each payload's running sum in a frame register past the five every emitter
+	// uses, else a stack slot of its own: a register spares the row the store-to-load chain on the previous row's
+	// update. Each loop zeroes them on entry and adds them into the payloads' slots on its exits. A sum's count only
+	// tells whether it saw a value: a sum that adds every row the loop accepts reads the loop's row count, which
+	// COUNT(*) counts too, and a sum that may skip a row (a NULL value) sets its bit in one presence mask. A COUNT is a
+	// sum without a value whose count is its result: one that may skip a row counts in a register of its own. A guarded
 	// payload CASE WHEN c THEN v END (SljitTypedExpressionTreeIsFastGuardedValue) takes no branch on rows without
 	// NULLs: its count adds c, and its sum adds v masked by c, kept in a free register or else a stack slot. A DOUBLE
 	// sum's float register starts from the stack slot's running value and stores back to it, so its rows add in source
 	// order
 	struct AccumulatorRegisters {
 		//! the loop's row count, for COUNT(*) and a sum that adds every accepted row, or a COUNT's own count
-		sljit_s32 count = 0;
+		SljitOperand count {};
 		bool own_count = false;
 		//! the presence mask and the sum's bit in it, for a sum that may skip a row
-		sljit_s32 presence = 0;
+		SljitOperand presence {};
 		sljit_sw presence_bit = 0;
-		sljit_s32 lower = 0;
-		sljit_s32 upper = 0;
-		bool is_double = false;
+		SljitOperand lower {};
+		SljitOperand upper {};
+		//! a DOUBLE sum's float register
+		sljit_s32 double_lower = 0;
 		bool guarded = false;
 	};
 	// FR0 and FR1 hold the trees' DOUBLE operands
@@ -295,16 +303,18 @@ unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativeFilteredUngroupedFusedPrim
 	static constexpr idx_t MAX_DOUBLE_ACCUMULATORS = 4;
 	struct AccumulatorLayout {
 		vector<AccumulatorRegisters> payloads;
-		sljit_s32 row_count = 0;
+		SljitOperand row_count {};
 		//! the mask a guarded sum's value is kept by
-		sljit_s32 guard = 0;
-		sljit_sw guardw = 0;
+		SljitOperand guard {};
 		bool fits = false;
+		sljit_s32 scratch_register_count = 0;
+		sljit_s32 saved_register_count = 0;
+		sljit_sw local_size = 0;
 	};
 	auto plan_accumulator_layout = [&](bool sums_skip_null_rows, bool guard_payloads) {
 		AccumulatorLayout layout;
 		layout.payloads.resize(payloads.size());
-		if (!registers.has_register_accumulators || !codegen_plan.fast_path_supported) {
+		if (!codegen_plan.fast_path_supported) {
 			return layout;
 		}
 		if (double_sum_count > MAX_DOUBLE_ACCUMULATORS) {
@@ -335,61 +345,67 @@ unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativeFilteredUngroupedFusedPrim
 			any_row_counted = any_row_counted || !may_skip(payload_idx);
 			guard_rows = guard_rows && (!may_skip(payload_idx) || guardable(payload_idx));
 		}
-		sljit_s32 next_register = 5;
+		SljitKernelFrame frame(5, hoisted_saved_register_count);
+		frame.ReserveLocal(local_size);
 		sljit_s32 next_float_register = FIRST_DOUBLE_ACCUMULATOR;
-		layout.row_count = any_row_counted ? SLJIT_R(next_register++) : 0;
-		const sljit_s32 presence_mask = any_presence ? SLJIT_R(next_register++) : 0;
+		layout.row_count = any_row_counted ? frame.AllocateCarried() : SljitOperand {};
+		const auto presence_mask = any_presence ? frame.AllocateCarried() : SljitOperand {};
 		sljit_sw next_presence_bit = 0;
+		bool guarded_presence = false;
 		for (idx_t payload_idx = 0; payload_idx < payloads.size(); payload_idx++) {
 			auto kind = codegen_plan.payload_descriptors[payload_idx].primitive_kind;
 			auto &accumulator = layout.payloads[payload_idx];
 			if (!may_skip(payload_idx)) {
 				accumulator.count = layout.row_count;
 			} else if (is_count(payload_idx)) {
-				accumulator.count = SLJIT_R(next_register++);
+				accumulator.count = frame.AllocateCarried();
 				accumulator.own_count = true;
 			} else {
 				accumulator.presence = presence_mask;
 				accumulator.presence_bit = next_presence_bit++;
 			}
 			if (kind == AggregatePrimitiveUpdateKind::SUM_DOUBLE) {
-				accumulator.lower = SLJIT_FR(next_float_register++);
-				accumulator.is_double = true;
+				accumulator.double_lower = SLJIT_FR(next_float_register++);
 			} else if (kind != AggregatePrimitiveUpdateKind::COUNT_STAR &&
 			           kind != AggregatePrimitiveUpdateKind::COUNT) {
-				accumulator.lower = SLJIT_R(next_register++);
+				accumulator.lower = frame.AllocateCarried();
 			}
 			if (kind == AggregatePrimitiveUpdateKind::SUM_HUGEINT) {
-				accumulator.upper = SLJIT_R(next_register++);
+				accumulator.upper = frame.AllocateCarried();
 			}
 			accumulator.guarded = guard_rows && may_skip(payload_idx);
-			if (accumulator.guarded && accumulator.presence) {
-				layout.guard = SLJIT_MEM1(SLJIT_SP);
-				layout.guardw = guard_offset;
-			}
+			guarded_presence = guarded_presence || (accumulator.guarded && accumulator.presence.operand);
 		}
-		if (layout.guard && next_register < registers.accumulator_scratch_register_count) {
-			layout.guard = SLJIT_R(next_register++);
-			layout.guardw = 0;
+		if (guarded_presence) {
+			layout.guard = frame.AllocateCarried();
 		}
-		layout.fits = next_register <= registers.accumulator_scratch_register_count &&
-		              next_presence_bit < sljit_sw(8 * sizeof(sljit_sw));
+		layout.fits = next_presence_bit < sljit_sw(8 * sizeof(sljit_sw));
+		layout.scratch_register_count = frame.ScratchCount();
+		layout.saved_register_count = frame.SavedCount();
+		layout.local_size = frame.LocalSize();
 		return layout;
 	};
 	const auto row_accumulators = plan_accumulator_layout(false, true);
 	const auto null_row_accumulators = plan_accumulator_layout(true, false);
-	const bool register_accumulators = row_accumulators.fits || null_row_accumulators.fits;
-	if (register_accumulators) {
-		simd_scratches = (simd_scratches & ~sljit_s32(0xff)) | registers.accumulator_scratch_register_count;
+	auto saved_register_count = hoisted_saved_register_count;
+	sljit_s32 accumulator_scratch_register_count = 5;
+	for (auto layout : {&row_accumulators, &null_row_accumulators}) {
+		if (layout->fits) {
+			accumulator_scratch_register_count =
+			    MaxValue(accumulator_scratch_register_count, layout->scratch_register_count);
+			saved_register_count = MaxValue(saved_register_count, layout->saved_register_count);
+			local_size = MaxValue(local_size, layout->local_size);
+		}
+	}
+	if (row_accumulators.fits || null_row_accumulators.fits) {
+		simd_scratches = (simd_scratches & ~sljit_s32(0xff)) | accumulator_scratch_register_count;
 		if (double_sum_count != 0) {
 			simd_scratches = (simd_scratches & ~sljit_s32(0xff00)) |
 			                 SLJIT_ENTER_FLOAT(FIRST_DOUBLE_ACCUMULATOR + NumericCast<sljit_s32>(double_sum_count));
 		}
 	}
 	sljit_emit_enter(compiler, 0, SLJIT_ARGS1V(P), SljitTypedExpressionTreeEnterScratches(simd_scratches),
-	                 hoists_source_data ? registers.source_data_saved_register_count
-	                                    : GetSljitNativeVectorRegisterLayout().saved_register_count,
-	                 local_size);
+	                 saved_register_count, local_size);
 	EmitInitSljitNativeVectorLoop(compiler);
 	for (idx_t payload_idx = 0; payload_idx < payloads.size(); payload_idx++) {
 		sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_MEM1(SLJIT_SP), local_count_offsets[payload_idx], SLJIT_IMM, 0);
@@ -424,18 +440,22 @@ unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativeFilteredUngroupedFusedPrim
 			return;
 		}
 		auto &accumulator = accumulators->payloads[payload_idx];
-		if (accumulator.presence) {
-			sljit_emit_op2(compiler, SLJIT_OR, accumulator.presence, 0, accumulator.presence, 0, SLJIT_IMM,
-			               sljit_sw(1) << accumulator.presence_bit);
+		if (accumulator.presence.operand) {
+			auto &presence = accumulator.presence;
+			sljit_emit_op2(compiler, SLJIT_OR, presence.operand, presence.operand_w, presence.operand,
+			               presence.operand_w, SLJIT_IMM, sljit_sw(1) << accumulator.presence_bit);
 		} else if (accumulator.own_count) {
-			sljit_emit_op2(compiler, SLJIT_ADD, accumulator.count, 0, accumulator.count, 0, SLJIT_IMM, 1);
+			auto &count = accumulator.count;
+			sljit_emit_op2(compiler, SLJIT_ADD, count.operand, count.operand_w, count.operand, count.operand_w,
+			               SLJIT_IMM, 1);
 		}
 	};
 	// a row the loop accepts: the row count counts it for COUNT(*) and every sum that adds it
 	auto emit_row_accepted = [&]() {
-		if (accumulators && accumulators->row_count) {
-			auto count = accumulators->row_count;
-			sljit_emit_op2(compiler, SLJIT_ADD, count, 0, count, 0, SLJIT_IMM, 1);
+		if (accumulators && accumulators->row_count.operand) {
+			auto &count = accumulators->row_count;
+			sljit_emit_op2(compiler, SLJIT_ADD, count.operand, count.operand_w, count.operand, count.operand_w,
+			               SLJIT_IMM, 1);
 		}
 	};
 	// adds the value in R2 to the payload's sum
@@ -446,15 +466,25 @@ unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativeFilteredUngroupedFusedPrim
 			                                 local_sum_upper_offsets[payload_idx], saw_value_offsets[payload_idx],
 			                                 SLJIT_R2);
 		} else if (kind == AggregatePrimitiveUpdateKind::SUM_HUGEINT) {
+			// the carry pair works on registers: a half in a stack slot is loaded into R0 or R1 and stored back
 			auto &accumulator = accumulators->payloads[payload_idx];
-			EmitUngroupedAggregateAccumulateHugeintInt64Regs(compiler, accumulator.lower, accumulator.upper, SLJIT_R2);
+			const auto lower = SljitKernelFrameRegister(compiler, accumulator.lower, SLJIT_R0);
+			const auto upper = SljitKernelFrameRegister(compiler, accumulator.upper, SLJIT_R1);
+			EmitUngroupedAggregateAccumulateHugeintInt64Regs(compiler, lower, upper, SLJIT_R2);
+			for (auto half : {std::make_pair(accumulator.lower, lower), std::make_pair(accumulator.upper, upper)}) {
+				if (half.first.operand & SLJIT_MEM) {
+					sljit_emit_op1(compiler, SLJIT_MOV, half.first.operand, half.first.operand_w, half.second, 0);
+				}
+			}
 		} else if (kind == AggregatePrimitiveUpdateKind::SUM_DOUBLE) {
 			auto &accumulator = accumulators->payloads[payload_idx];
 			sljit_emit_fcopy(compiler, SLJIT_COPY_TO_F64, SLJIT_FR0, SLJIT_R2);
-			sljit_emit_fop2(compiler, SLJIT_ADD_F64, accumulator.lower, 0, accumulator.lower, 0, SLJIT_FR0, 0);
+			sljit_emit_fop2(compiler, SLJIT_ADD_F64, accumulator.double_lower, 0, accumulator.double_lower, 0,
+			                SLJIT_FR0, 0);
 		} else {
-			auto &accumulator = accumulators->payloads[payload_idx];
-			sljit_emit_op2(compiler, SLJIT_ADD, accumulator.lower, 0, accumulator.lower, 0, SLJIT_R2, 0);
+			auto &lower = accumulators->payloads[payload_idx].lower;
+			sljit_emit_op2(compiler, SLJIT_ADD, lower.operand, lower.operand_w, lower.operand, lower.operand_w,
+			               SLJIT_R2, 0);
 		}
 	};
 	// a payload's value in R2 updates its aggregate: a sum adds and counts it, a COUNT only counts it
@@ -472,20 +502,23 @@ unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativeFilteredUngroupedFusedPrim
 		idx_t spill_index = 0;
 		EmitSljitTypedExpressionTreeFastGuardReg(compiler, tree, spill_index, overflows, index_mode, hoists);
 		if (codegen_plan.payload_descriptors[payload_idx].primitive_kind == AggregatePrimitiveUpdateKind::COUNT) {
-			sljit_emit_op2(compiler, SLJIT_ADD, accumulator.count, 0, accumulator.count, 0, SLJIT_R2, 0);
+			auto &count = accumulator.count;
+			sljit_emit_op2(compiler, SLJIT_ADD, count.operand, count.operand_w, count.operand, count.operand_w,
+			               SLJIT_R2, 0);
 			return;
 		}
-		auto guard = accumulators->guard;
-		auto guardw = accumulators->guardw;
-		D_ASSERT(guard && accumulator.presence);
-		sljit_emit_op2(compiler, SLJIT_SUB, guard, guardw, SLJIT_IMM, 0, SLJIT_R2, 0);
+		auto &guard = accumulators->guard;
+		auto &presence = accumulator.presence;
+		D_ASSERT(guard.operand && presence.operand);
+		sljit_emit_op2(compiler, SLJIT_SUB, guard.operand, guard.operand_w, SLJIT_IMM, 0, SLJIT_R2, 0);
 		if (accumulator.presence_bit != 0) {
 			sljit_emit_op2(compiler, SLJIT_SHL, SLJIT_R2, 0, SLJIT_R2, 0, SLJIT_IMM, accumulator.presence_bit);
 		}
-		sljit_emit_op2(compiler, SLJIT_OR, accumulator.presence, 0, accumulator.presence, 0, SLJIT_R2, 0);
+		sljit_emit_op2(compiler, SLJIT_OR, presence.operand, presence.operand_w, presence.operand, presence.operand_w,
+		               SLJIT_R2, 0);
 		spill_index = 0;
 		EmitSljitTypedExpressionTreeFastGuardedValueReg(compiler, tree, spill_index, overflows, index_mode, hoists);
-		sljit_emit_op2(compiler, SLJIT_AND, SLJIT_R2, 0, SLJIT_R2, 0, guard, guardw);
+		sljit_emit_op2(compiler, SLJIT_AND, SLJIT_R2, 0, SLJIT_R2, 0, guard.operand, guard.operand_w);
 		emit_add_value(payload_idx);
 	};
 	auto begin_register_accumulators = [&](bool null_rows) {
@@ -494,25 +527,25 @@ unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativeFilteredUngroupedFusedPrim
 			return;
 		}
 		accumulators = &layout;
+		auto zero = [&](const SljitOperand &value) {
+			if (value.operand) {
+				sljit_emit_op1(compiler, SLJIT_MOV, value.operand, value.operand_w, SLJIT_IMM, 0);
+			}
+		};
 		for (idx_t payload_idx = 0; payload_idx < payloads.size(); payload_idx++) {
 			auto &accumulator = layout.payloads[payload_idx];
-			if (accumulator.is_double) {
-				sljit_emit_fmem(compiler, SLJIT_MOV_F64 | SLJIT_MEM_ALIGNED_32, accumulator.lower, SLJIT_MEM1(SLJIT_SP),
-				                local_sum_offsets[payload_idx]);
+			if (accumulator.double_lower) {
+				sljit_emit_fmem(compiler, SLJIT_MOV_F64 | SLJIT_MEM_ALIGNED_32, accumulator.double_lower,
+				                SLJIT_MEM1(SLJIT_SP), local_sum_offsets[payload_idx]);
 			}
-			for (auto reg : {accumulator.is_double ? 0 : accumulator.lower, accumulator.upper,
-			                 accumulator.own_count ? accumulator.count : 0}) {
-				if (reg) {
-					sljit_emit_op1(compiler, SLJIT_MOV, reg, 0, SLJIT_IMM, 0);
-				}
+			zero(accumulator.lower);
+			zero(accumulator.upper);
+			if (accumulator.own_count) {
+				zero(accumulator.count);
 			}
-			if (accumulator.presence) {
-				sljit_emit_op1(compiler, SLJIT_MOV, accumulator.presence, 0, SLJIT_IMM, 0);
-			}
+			zero(accumulator.presence);
 		}
-		if (layout.row_count) {
-			sljit_emit_op1(compiler, SLJIT_MOV, layout.row_count, 0, SLJIT_IMM, 0);
-		}
+		zero(layout.row_count);
 	};
 	// the loop's exits add its registers into the stack slots, then leave through the returned jump
 	vector<sljit_jump *> register_flush_exits;
@@ -526,34 +559,40 @@ unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativeFilteredUngroupedFusedPrim
 		SetSljitJumpLabels(exits, sljit_emit_label(compiler));
 		for (idx_t payload_idx = 0; payload_idx < payloads.size(); payload_idx++) {
 			auto &accumulator = layout.payloads[payload_idx];
-			if (accumulator.presence) {
+			if (accumulator.presence.operand) {
 				// a sum's count only tells whether it saw a value: its presence bit
-				sljit_emit_op2(compiler, SLJIT_LSHR, SLJIT_R0, 0, accumulator.presence, 0, SLJIT_IMM,
+				auto &presence = accumulator.presence;
+				sljit_emit_op2(compiler, SLJIT_LSHR, SLJIT_R0, 0, presence.operand, presence.operand_w, SLJIT_IMM,
 				               accumulator.presence_bit);
 				sljit_emit_op2(compiler, SLJIT_AND, SLJIT_R0, 0, SLJIT_R0, 0, SLJIT_IMM, 1);
 				sljit_emit_op2(compiler, SLJIT_ADD, SLJIT_MEM1(SLJIT_SP), local_count_offsets[payload_idx],
 				               SLJIT_MEM1(SLJIT_SP), local_count_offsets[payload_idx], SLJIT_R0, 0);
 			} else {
+				auto &count = accumulator.count;
 				sljit_emit_op2(compiler, SLJIT_ADD, SLJIT_MEM1(SLJIT_SP), local_count_offsets[payload_idx],
-				               SLJIT_MEM1(SLJIT_SP), local_count_offsets[payload_idx], accumulator.count, 0);
+				               SLJIT_MEM1(SLJIT_SP), local_count_offsets[payload_idx], count.operand, count.operand_w);
 			}
-			if (!accumulator.lower) {
+			if (accumulator.double_lower) {
+				sljit_emit_fmem(compiler, SLJIT_MOV_F64 | SLJIT_MEM_STORE | SLJIT_MEM_ALIGNED_32,
+				                accumulator.double_lower, SLJIT_MEM1(SLJIT_SP), local_sum_offsets[payload_idx]);
 				continue;
 			}
-			if (accumulator.is_double) {
-				sljit_emit_fmem(compiler, SLJIT_MOV_F64 | SLJIT_MEM_STORE | SLJIT_MEM_ALIGNED_32, accumulator.lower,
-				                SLJIT_MEM1(SLJIT_SP), local_sum_offsets[payload_idx]);
+			auto &lower = accumulator.lower;
+			if (!lower.operand) {
 				continue;
 			}
-			if (!accumulator.upper) {
+			if (!accumulator.upper.operand) {
 				sljit_emit_op2(compiler, SLJIT_ADD, SLJIT_MEM1(SLJIT_SP), local_sum_offsets[payload_idx],
-				               SLJIT_MEM1(SLJIT_SP), local_sum_offsets[payload_idx], accumulator.lower, 0);
+				               SLJIT_MEM1(SLJIT_SP), local_sum_offsets[payload_idx], lower.operand, lower.operand_w);
 				continue;
 			}
+			// the halves in registers, a half in a stack slot loaded into R2 or R3
+			const auto lower_reg = SljitKernelFrameRegister(compiler, lower, SLJIT_R2);
+			const auto upper_reg = SljitKernelFrameRegister(compiler, accumulator.upper, SLJIT_R3);
 			sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_R0, 0, SLJIT_MEM1(SLJIT_SP), local_sum_offsets[payload_idx]);
 			sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_R1, 0, SLJIT_MEM1(SLJIT_SP),
 			               local_sum_upper_offsets[payload_idx]);
-			EmitSljitAddDoubleWord(compiler, SLJIT_R0, SLJIT_R1, accumulator.lower, accumulator.upper);
+			EmitSljitAddDoubleWord(compiler, SLJIT_R0, SLJIT_R1, lower_reg, upper_reg);
 			sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_MEM1(SLJIT_SP), local_sum_offsets[payload_idx], SLJIT_R0, 0);
 			sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_MEM1(SLJIT_SP), local_sum_upper_offsets[payload_idx], SLJIT_R1,
 			               0);
