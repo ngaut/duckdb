@@ -835,6 +835,8 @@ public:
 
 	T decompression_buffer[BITPACKING_METADATA_GROUP_SIZE];
 	SelectionVector filter_sel;
+	//! Whether the range filter's last vector matched at a rate a branch on the match mispredicts at
+	bool filter_select_branchless = false;
 
 	//! Group count derived from the segment row count read from disk.
 	idx_t group_count;
@@ -1622,27 +1624,54 @@ struct BitpackingSignedNumericComparable<uhugeint_t> {
 };
 
 template <class T>
+//! The bounds combine bitwise, so a value takes no branch on where it falls
 static inline bool BitpackingSignedNumericRangeMatch(const SignedNumericRangeFilterData &range, const T &value) {
 	const auto comparable = BitpackingSignedNumericComparable<T>::Convert(value);
-	return (!range.has_lower || comparable >= range.lower) && (!range.has_upper || comparable <= range.upper);
+	return (!range.has_lower | (comparable >= range.lower)) & (!range.has_upper | (comparable <= range.upper));
+}
+
+//! Selects the rows of a decode unit whose values fall in the range. After a vector that matched between a sixteenth
+//! and fifteen sixteenths of its rows, where a branch on the match mispredicts, every row writes its value and its
+//! index at the next selection slot and only a match advances the count: rows the selection leaves out are never read,
+//! and the slot written lies within the rows seen so far. After a rarer or surer match rate the branch predicts, and
+//! only matches are written
+template <class T, class VALUE_AT>
+static idx_t BitpackingSelectRangeMatches(BitpackingScanState<T> &scan_state, const SignedNumericRangeFilterData &range,
+                                          T *result_data, SelectionVector &result_sel, idx_t result_count,
+                                          const SelectionVector &sel, idx_t selected_idx, idx_t selected_end,
+                                          const VALUE_AT &value_at) {
+	if (scan_state.filter_select_branchless) {
+		for (idx_t i = selected_idx; i < selected_end; i++) {
+			const auto row_idx = sel.get_index(i);
+			const auto value = value_at(row_idx);
+			result_data[row_idx] = value;
+			result_sel.set_index(result_count, row_idx);
+			result_count += BitpackingSignedNumericRangeMatch(range, value);
+		}
+	} else {
+		for (idx_t i = selected_idx; i < selected_end; i++) {
+			const auto row_idx = sel.get_index(i);
+			const auto value = value_at(row_idx);
+			if (BitpackingSignedNumericRangeMatch(range, value)) {
+				result_data[row_idx] = value;
+				result_sel.set_index(result_count++, row_idx);
+			}
+		}
+	}
+	return result_count;
 }
 
 template <class T, class T_U = typename MakeUnsigned<T>::type>
-static idx_t BitpackingSignedNumericRangeFilterConstantDelta(const BitpackingGroup<T> &group,
+static idx_t BitpackingSignedNumericRangeFilterConstantDelta(BitpackingScanState<T> &scan_state,
+                                                             const BitpackingGroup<T> &group,
                                                              const SignedNumericRangeFilterData &range, T *result_data,
                                                              SelectionVector &result_sel, idx_t result_count,
                                                              const SelectionVector &sel, idx_t selected_idx,
                                                              idx_t selected_end, idx_t scanned) {
 	const auto base_offset = group.offset;
-	for (idx_t i = selected_idx; i < selected_end; i++) {
-		const auto row_idx = sel.get_index(i);
-		auto value = BitpackingConstantDeltaValue<T, T_U>(group, base_offset + row_idx - scanned);
-		if (BitpackingSignedNumericRangeMatch(range, value)) {
-			result_data[row_idx] = value;
-			result_sel.set_index(result_count++, row_idx);
-		}
-	}
-	return result_count;
+	return BitpackingSelectRangeMatches(
+	    scan_state, range, result_data, result_sel, result_count, sel, selected_idx, selected_end,
+	    [&](idx_t row_idx) { return BitpackingConstantDeltaValue<T, T_U>(group, base_offset + row_idx - scanned); });
 }
 
 template <class T>
@@ -1707,8 +1736,9 @@ static bool TryBitpackingSignedNumericRangeFilter(ColumnSegment &segment, Column
 			const auto unit_remaining = MinValue<idx_t>(vector_count - scanned, group.Remaining());
 			const auto selected_end = BitpackingSelectedRunEnd(sel, sel_count, selected_idx, scanned, unit_remaining);
 			const auto to_scan = sel.get_index(selected_end - 1) - scanned + 1;
-			result_count = BitpackingSignedNumericRangeFilterConstantDelta<T>(
-			    group, range, result_data, result_sel, result_count, sel, selected_idx, selected_end, scanned);
+			result_count = BitpackingSignedNumericRangeFilterConstantDelta<T>(scan_state, group, range, result_data,
+			                                                                  result_sel, result_count, sel,
+			                                                                  selected_idx, selected_end, scanned);
 			group.Advance(to_scan);
 			scanned += to_scan;
 			selected_idx = selected_end;
@@ -1720,19 +1750,15 @@ static bool TryBitpackingSignedNumericRangeFilter(ColumnSegment &segment, Column
 		const auto selected_end = BitpackingSelectedRunEnd(sel, sel_count, selected_idx, scanned, unit_remaining);
 		const auto to_scan = sel.get_index(selected_end - 1) - scanned + 1;
 		const auto values = BitpackingDecodeValues<T>(scan_state, group, to_scan);
-		for (idx_t i = selected_idx; i < selected_end; i++) {
-			const auto row_idx = sel.get_index(i);
-			auto value = values[row_idx - scanned];
-			if (BitpackingSignedNumericRangeMatch(range, value)) {
-				result_data[row_idx] = value;
-				result_sel.set_index(result_count++, row_idx);
-			}
-		}
+		result_count =
+		    BitpackingSelectRangeMatches(scan_state, range, result_data, result_sel, result_count, sel, selected_idx,
+		                                 selected_end, [&](idx_t row_idx) { return values[row_idx - scanned]; });
 		group.Advance(to_scan);
 		scanned += to_scan;
 		selected_idx = selected_end;
 	}
 	scan_state.FinishIfExhausted();
+	scan_state.filter_select_branchless = result_count * 16 >= sel_count && result_count * 16 <= sel_count * 15;
 	sel.Initialize(result_sel);
 	sel_count = result_count;
 	FlatVector::SetSize(result, count_t(vector_count));
