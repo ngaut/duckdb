@@ -706,6 +706,7 @@ struct SljitExecutableRegion {
 	vector<SljitExecutableScanFilter> scan_filters;
 	SljitNativeAggregateStateSourcePlan aggregate_state_source;
 	ExecutionRegionScanFilterMode scan_filter_mode = ExecutionRegionScanFilterMode::NONE;
+	bool source_filter_reads_beyond_table_filters = false;
 	vector<LogicalType> source_output_types;
 	vector<idx_t> source_distinct_counts;
 	vector<Value> source_min_values;

@@ -366,8 +366,10 @@ static bool SljitRecipeDelegatesSink(const SljitFullPipelineRecipe &recipe) {
 //! The op evaluating the scan's table filters: a source whose filters are generated lowers them to the region's first
 //! op
 static idx_t SljitSourceFilterOpIndex(const SljitExecutableRegion &executable) {
-	if (executable.scan_filter_mode != ExecutionRegionScanFilterMode::STATIC_PRUNING_ONLY &&
-	    executable.scan_filter_mode != ExecutionRegionScanFilterMode::DYNAMIC_FILTERS_WITH_STATIC_PRUNING) {
+	// a first op that also filters by later operators runs whether or not the zone maps hold the table filters
+	if ((executable.scan_filter_mode != ExecutionRegionScanFilterMode::STATIC_PRUNING_ONLY &&
+	     executable.scan_filter_mode != ExecutionRegionScanFilterMode::DYNAMIC_FILTERS_WITH_STATIC_PRUNING) ||
+	    executable.source_filter_reads_beyond_table_filters) {
 		return DConstants::INVALID_INDEX;
 	}
 	if (executable.ops.empty() || executable.ops[0].Kind() != SljitNativeRegionOpKind::FILTER) {
@@ -379,6 +381,7 @@ static idx_t SljitSourceFilterOpIndex(const SljitExecutableRegion &executable) {
 bool BuildSljitExecutableRegion(const SljitNativeRegionPlan &region, SljitExecutableRegion &executable,
                                 SljitFullPipelineRecipePlan &recipe_plan, string &error) {
 	executable.scan_filter_mode = region.scan_filter_mode;
+	executable.source_filter_reads_beyond_table_filters = region.source_filter_reads_beyond_table_filters;
 	executable.aggregate_state_source = region.aggregate_state_source;
 	executable.source_output_types = region.source_output_types;
 	executable.source_distinct_counts = region.source_distinct_counts;

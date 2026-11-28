@@ -1,0 +1,113 @@
+# name: test/sql/jit/test_jit_source_filter_join.test
+# description: A filter right after a scan's table filters that the aggregate takes in its kernel joins them in one predicate: chunks whose zone maps prove the table filters still apply the later filter, the scan reads every column before the joined filter, a later filter that may raise an error stays apart, and filters before an aggregate without a filtered kernel or before a join keep their own steps
+# group: [jit]
+
+require jit_sljit
+
+load {TEST_DIR}/test_jit_source_filter_join.db
+
+statement ok
+SET jit_measure_native_legs=false
+
+statement ok
+SET jit_cbo_startup_base_cost=0
+
+statement ok
+SET jit_cbo_startup_margin_basis_points=0
+
+# d: sorted, so whole row groups lie inside the range and their zone maps prove the table filters; a and b: compared
+# with each other at random rows; c: read only by the later filter; s: a number exactly where d lies in the range; w:
+# overflows when doubled exactly where d lies outside it
+statement ok
+CREATE TABLE t AS
+SELECT (r // 50)::INTEGER AS d,
+       (r * 7919 % 1000)::INTEGER AS a,
+       (r * 104729 % 1000)::INTEGER AS b,
+       (r * 31 % 997)::INTEGER AS c,
+       (r % 1009)::BIGINT AS v,
+       CASE WHEN r // 50 >= 10000 AND r // 50 < 50000 THEN (r % 100)::VARCHAR ELSE 'x' END AS s,
+       CASE WHEN r // 50 >= 10000 AND r // 50 < 50000 THEN (r % 1000)::BIGINT ELSE 4611686018427387904 END AS w
+FROM range(4000000) t(r)
+
+# the build side of a join whose probe reads t after its filters
+statement ok
+CREATE TABLE small AS SELECT (i * 3)::INTEGER AS c, (i % 7)::BIGINT AS x FROM range(333) t(i)
+
+statement ok
+CHECKPOINT
+
+restart
+
+statement ok
+CREATE MACRO joined() AS TABLE
+SELECT 'columns' AS q, count(*) AS n, sum(v) AS s FROM t WHERE d >= 10000 AND d < 50000 AND a < b
+UNION ALL
+SELECT 'only_later_column', count(*), sum(v) FROM t WHERE d >= 10000 AND d < 50000 AND c < a
+UNION ALL
+SELECT 'later_conjunction', count(*), sum(v) FROM t WHERE d >= 20000 AND d < 70000 AND a < b AND c > a
+UNION ALL
+SELECT 'one_sided', count(*), sum(v) FROM t WHERE d >= 30000 AND b < c
+UNION ALL
+SELECT 'may_raise', count(*), sum(v) FROM t WHERE d >= 10000 AND d < 50000 AND CAST(s AS INTEGER) < a
+UNION ALL
+SELECT 'may_overflow', count(*), sum(v) FROM t WHERE d >= 10000 AND d < 50000 AND w * 2 > a
+UNION ALL
+SELECT 'native_aggregate', min(v), max(c) FROM t WHERE d >= 10000 AND d < 50000 AND a < b
+UNION ALL
+SELECT 'join_probe', count(*), sum(t.v + small.x) FROM t JOIN small ON t.c = small.c
+WHERE t.d >= 10000 AND t.d < 50000 AND t.a < t.b
+
+foreach threads 1 4
+
+statement ok
+SET threads={threads}
+
+statement ok
+SET jit_policy='off'
+
+statement ok
+CREATE OR REPLACE TABLE expected AS FROM joined()
+
+statement ok
+SET jit_policy='auto'
+
+statement ok
+CREATE OR REPLACE TABLE actual AS FROM joined()
+
+query I
+SELECT count(*) FROM ((FROM expected EXCEPT ALL FROM actual) UNION ALL (FROM actual EXCEPT ALL FROM expected))
+----
+0
+
+endloop
+
+statement ok
+SET threads=1
+
+statement ok
+SET jit_trace_runtime=true
+
+statement ok
+SET jit_event_log_size=100
+
+# the joined predicate runs on every chunk, inside the aggregate's kernel
+statement ok
+CREATE OR REPLACE TEMP TABLE traced AS SELECT count(*), sum(v) FROM t WHERE d >= 10000 AND d < 50000 AND a < b
+
+query I
+SELECT count(*) FROM duckdb_jit_events() WHERE status = 'executed' AND jit_runtime_path_counts LIKE '%filtered_primitive_update%' AND jit_runtime_path_counts NOT LIKE '%zone_maps_hold_filter%'
+----
+1
+
+# a later filter that may overflow stays apart: the table filters stay the source's filter, which chunks whose zone
+# maps hold it skip
+statement ok
+FROM duckdb_jit_clear_events()
+
+statement ok
+CREATE OR REPLACE TEMP TABLE traced AS SELECT count(*), sum(v) FROM t WHERE d >= 10000 AND d < 50000 AND w * 2 > a
+
+query I
+SELECT count(*) FROM duckdb_jit_events() WHERE status = 'executed' AND jit_runtime_path_counts LIKE '%zone_maps_hold_filter%'
+----
+1

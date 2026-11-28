@@ -363,6 +363,9 @@ struct SljitNativeRegionPlan {
 	vector<SljitNativeScanFilterPlan> scan_filters;
 	SljitNativeAggregateStateSourcePlan aggregate_state_source;
 	ExecutionRegionScanFilterMode scan_filter_mode = ExecutionRegionScanFilterMode::NONE;
+	//! The first op filters with the source's generated filters and the filters after them: a chunk whose zone maps
+	//! hold the table filters still runs it
+	bool source_filter_reads_beyond_table_filters = false;
 	vector<LogicalType> source_output_types;
 	vector<idx_t> source_distinct_counts;
 	vector<idx_t> source_distinct_reserve_counts;

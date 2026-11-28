@@ -9,6 +9,8 @@
 #include "sljit_region_plan.hpp"
 #include "sljit_executable_stats.hpp"
 #include "sljit_region_plan_internal.hpp"
+#include "sljit_native_util.hpp"
+#include "sljit_typed_expression_plan.hpp"
 
 #include "duckdb/common/constants.hpp"
 
@@ -426,6 +428,124 @@ static SljitNativeRegionOpPlan CopySljitSourceOpPlan(const SljitNativeRegionOpPl
 	}
 }
 
+//! The tree's references, back from the plan's source slots to the columns of its input
+static void SljitRestoreTreeInputReferences(ExecutionExpressionIR &node, const vector<idx_t> &source_indices) {
+	if (node.kind == ExecutionExpressionIRKind::REFERENCE) {
+		D_ASSERT(node.ref_index < source_indices.size());
+		node.ref_index = source_indices[node.ref_index];
+		return;
+	}
+	for (auto child : {node.left.get(), node.right.get(), node.else_node.get()}) {
+		if (child) {
+			SljitRestoreTreeInputReferences(*child, source_indices);
+		}
+	}
+	for (auto &child : node.children) {
+		SljitRestoreTreeInputReferences(*child, source_indices);
+	}
+}
+
+//! Whether the aggregate's update kernel can take the filter before it: an ungrouped or perfect-hash aggregate whose
+//! every aggregate has a filtered kernel
+static bool SljitAggregateTakesFilterInKernel(const SljitNativeAggregateUpdatePlan &aggregate) {
+	auto sink_kind = aggregate.sink_info.Kind();
+	if (sink_kind != ExecutionRegionSinkKind::UNGROUPED_AGGREGATE_UPDATE &&
+	    sink_kind != ExecutionRegionSinkKind::PERFECT_HASH_AGGREGATE_UPDATE) {
+		return false;
+	}
+	for (auto &update : aggregate.sink_info.aggregates) {
+		if (!SljitFilteredAggregateKindCanGenerate(update.primitive_update_kind)) {
+			return false;
+		}
+	}
+	return true;
+}
+
+//! A filter right after the source's generated filters (past the source's layout repair, which only picks columns)
+//! that the region's aggregate takes in its kernel joins them in one predicate: the aggregate updates in one pass over
+//! every row instead of after a selection. The joined filter is no longer the table filters alone, so it is not the
+//! source's filter: a chunk whose zone maps hold the table filters still runs it, and the scan reads every column in
+//! full instead of the later filter's columns for the rows the table filters keep, which pays only for that one pass.
+//! A filter that may raise an error stays apart, as the joined predicate may evaluate it on rows the table filters
+//! reject
+static void SljitJoinSourceFilterWithNextFilter(SljitNativeRegionPlan &region, bool render_diagnostics) {
+	auto &ops = region.ops;
+	if ((region.scan_filter_mode != ExecutionRegionScanFilterMode::STATIC_PRUNING_ONLY &&
+	     region.scan_filter_mode != ExecutionRegionScanFilterMode::DYNAMIC_FILTERS_WITH_STATIC_PRUNING) ||
+	    ops.size() < 2 || ops[0].Kind() != SljitNativeRegionOpKind::FILTER) {
+		return;
+	}
+	// the source's layout repair: the input column each of its outputs is
+	vector<idx_t> repair_columns;
+	idx_t next_idx = 1;
+	if (ops[1].Kind() == SljitNativeRegionOpKind::PROJECTION) {
+		for (auto &projection : ops[1].Projections()) {
+			if (projection.kind != SljitNativeRegionExpressionKind::REFERENCE) {
+				return;
+			}
+			repair_columns.push_back(projection.source_index);
+		}
+		next_idx = 2;
+	}
+	if (ops.size() <= next_idx + 1 || ops[next_idx].Kind() != SljitNativeRegionOpKind::FILTER ||
+	    ops[next_idx].output_types != ops[next_idx - 1].output_types) {
+		return;
+	}
+	// the aggregate composes a projection before it into its payloads
+	auto aggregate_idx = next_idx + 1;
+	if (ops[aggregate_idx].Kind() == SljitNativeRegionOpKind::PROJECTION) {
+		aggregate_idx++;
+	}
+	if (aggregate_idx + 1 != ops.size() || ops[aggregate_idx].Kind() != SljitNativeRegionOpKind::AGGREGATE_UPDATE ||
+	    !SljitAggregateTakesFilterInKernel(ops[aggregate_idx].AggregateUpdate())) {
+		return;
+	}
+	auto &table_filter = ops[0].Filter();
+	auto &next_filter = ops[next_idx].Filter();
+	if (!table_filter.expression_tree || !next_filter.expression_tree ||
+	    !SljitExpressionIRCannotThrow(*next_filter.expression_tree)) {
+		return;
+	}
+	auto root = make_uniq<ExecutionExpressionIR>();
+	root->kind = ExecutionExpressionIRKind::CONJUNCTION;
+	root->return_type = LogicalType::BOOLEAN;
+	root->physical_type = PhysicalType::BOOL;
+	root->validity = ExecutionExpressionValidityKind::THREE_VALUED_BOOLEAN;
+	root->source = ExecutionExpressionSourceKind::DERIVED;
+	root->exception_behavior = ExecutionExpressionExceptionKind::NONE;
+	root->conjunction_op = ExecutionExpressionConjunctionOp::AND;
+	for (auto plan : {&table_filter, &next_filter}) {
+		auto predicate = plan->expression_tree->Copy();
+		SljitRestoreTreeInputReferences(*predicate, plan->expression_tree_source_indices);
+		if (plan == &next_filter && !repair_columns.empty()) {
+			SljitRestoreTreeInputReferences(*predicate, repair_columns);
+		}
+		if (predicate->kind == ExecutionExpressionIRKind::CONJUNCTION &&
+		    predicate->conjunction_op == ExecutionExpressionConjunctionOp::AND) {
+			for (auto &child : predicate->children) {
+				root->children.push_back(std::move(child));
+			}
+		} else {
+			root->children.push_back(std::move(predicate));
+		}
+	}
+	ExecutionExpressionFragment fragment;
+	fragment.expression_index = 0;
+	fragment.return_type = LogicalType::BOOLEAN;
+	fragment.root = std::move(root);
+	if (render_diagnostics) {
+		fragment.ir = "duckdb.expr typed-vector-ir;" + DescribeExecutionExpressionIR(*fragment.root);
+	}
+	SljitNativeRegionExpressionPlan joined;
+	string error;
+	if (!TryLowerNativeRegionExpression(fragment, true, joined, error, render_diagnostics)) {
+		return;
+	}
+	ops[0].Filter() = std::move(joined);
+	ops.erase(ops.begin() + NumericCast<int64_t>(next_idx));
+	region.source_filter_reads_beyond_table_filters = true;
+}
+
 ExecutionRegionLoweringPlan BuildSljitRegionPlan(const ExecutionRegionIR &region_ir,
                                                  const ExecutionRegionCandidate &candidate, bool render_diagnostics) {
 	ExecutionRegionLoweringPlan lowering_plan;
@@ -496,6 +616,7 @@ ExecutionRegionLoweringPlan BuildSljitRegionPlan(const ExecutionRegionIR &region
 		cursor.AcceptOperator(node, node_plan);
 	}
 	if (cursor.CanFuse() && !native_region.ops.empty()) {
+		SljitJoinSourceFilterWithNextFilter(native_region, render_diagnostics);
 		FuseAdjacentNativeProjections(native_region, render_diagnostics);
 		FusePrimitiveAggregateUpdates(native_region, native_region.source_output_types, render_diagnostics);
 		ApplySljitAggregateUpdateInputEstimate(native_region.ops, candidate.estimated_cardinality);

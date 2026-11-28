@@ -633,6 +633,7 @@ string BuildSljitRegionArtifactSemanticKey(const SljitNativeRegionPlan &region) 
 	key.Field("schema", "sljit-artifact-v10");
 	key.Field("cast_error_count", region.cast_errors.size());
 	key.Field("scan_filter_mode", region.scan_filter_mode);
+	key.Field("source_filter_reads_beyond_table_filters", region.source_filter_reads_beyond_table_filters);
 	key.Field("source_types", region.source_output_types);
 	key.Field("source_not_null", region.source_not_null);
 	key.Field("scan_filter_count", region.scan_filters.size());
