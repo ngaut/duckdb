@@ -64,21 +64,7 @@ struct SljitPerfectHashProbeRegisterLayout {
 	sljit_s32 maximum_lower = 0;
 };
 
-//! The partial-SIMD predicate's dictionary residual: the per-entry pass table, the residual source's dictionary
-//! selection and the running match count stay in registers beside the native vector layout's
-struct SljitPredicateDictionaryResidualRegisterLayout {
-	sljit_s32 pass_table = 0;
-	sljit_s32 dictionary_selection = 0;
-	sljit_s32 match_count = 0;
-	sljit_s32 saved_register_count = 0;
-
-	bool Available() const {
-		return match_count != 0;
-	}
-};
-
 const SljitNativeVectorRegisterLayout &GetSljitNativeVectorRegisterLayout();
-const SljitPredicateDictionaryResidualRegisterLayout &GetSljitPredicateDictionaryResidualRegisterLayout();
 const SljitPerfectHashRegisterLayout &GetSljitPerfectHashRegisterLayout();
 const SljitUngroupedAggregateRegisterLayout &GetSljitUngroupedAggregateRegisterLayout();
 const SljitPerfectHashProbeRegisterLayout &GetSljitPerfectHashProbeRegisterLayout();

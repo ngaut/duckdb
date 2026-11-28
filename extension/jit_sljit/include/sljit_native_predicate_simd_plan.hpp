@@ -31,6 +31,19 @@ struct SljitNativePredicatePartialSimdPlan {
 	}
 };
 
+//! The registers a residual that reads one dictionary source keeps through the packed loop: its pass table, the
+//! source's dictionary selection, and the match count
+struct SljitPredicateDictionaryResidualRegisters {
+	sljit_s32 pass_table = 0;
+	sljit_s32 dictionary_selection = 0;
+	sljit_s32 match_count = 0;
+};
+
+//! The dictionary residual's registers, saved registers past the packed predicate loop's (whose rows may call
+//! helpers), and the saved register count the kernel enters with; false when the target has none to spare
+bool TryPlanSljitPredicateDictionaryResidualRegisters(SljitPredicateDictionaryResidualRegisters &registers,
+                                                      sljit_s32 &saved_register_count);
+
 SljitNativePredicatePartialSimdPlan TryPlanSljitNativePredicatePartialSimd(const ExecutionExpressionIR &root,
                                                                            const vector<bool> &source_not_null);
 

@@ -9,6 +9,7 @@
 #include "sljit_native_codegen.hpp"
 
 #include "sljit_codegen_internal.hpp"
+#include "sljit_kernel_frame.hpp"
 #include "sljit_native_predicate_simd_plan.hpp"
 #include "sljit_predicate_codegen_helpers.hpp"
 
@@ -99,10 +100,24 @@ static void EmitSljitPartialSimdResidualRow(struct sljit_compiler *compiler, con
 	sljit_set_label(match_done, sljit_emit_label(compiler));
 }
 
+bool TryPlanSljitPredicateDictionaryResidualRegisters(SljitPredicateDictionaryResidualRegisters &registers,
+                                                      sljit_s32 &saved_register_count) {
+	const auto &native_registers = GetSljitNativeVectorRegisterLayout();
+	if (!native_registers.HasOptionalInvariant()) {
+		return false;
+	}
+	SljitKernelFrame frame(5, MaxValue(SLJIT_PREDICATE_SAVED_REGISTERS, native_registers.saved_register_count), true);
+	registers.pass_table = frame.AllocateRegister();
+	registers.dictionary_selection = frame.AllocateRegister();
+	registers.match_count = frame.AllocateRegister();
+	saved_register_count = frame.SavedCount();
+	return registers.match_count != 0;
+}
+
 //! A residual that reads one dictionary source looks its row's dictionary entry up in the pass table: every packed
 //! prefix match is appended and counted only when its entry passes, with no per-row compare and no branch
-static void EmitSljitPartialSimdDictionaryResidualRow(struct sljit_compiler *compiler) {
-	const auto &registers = GetSljitPredicateDictionaryResidualRegisterLayout();
+static void EmitSljitPartialSimdDictionaryResidualRow(struct sljit_compiler *compiler,
+                                                      const SljitPredicateDictionaryResidualRegisters &registers) {
 	const auto output_selection = GetSljitNativeVectorRegisterLayout().optional_invariant;
 	sljit_emit_op1(compiler, SLJIT_MOV_U32, SLJIT_R0, 0, SLJIT_MEM2(registers.dictionary_selection, SLJIT_S1), 2);
 	sljit_emit_op1(compiler, SLJIT_MOV_U8, SLJIT_R1, 0, SLJIT_MEM2(registers.pass_table, SLJIT_R0), 0);
@@ -232,10 +247,13 @@ unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativePredicate(const SljitNativ
 			vector_register_count++;
 		}
 		scratches |= SLJIT_ENTER_VECTOR(NumericCast<sljit_s32>(vector_register_count));
-		saved_registers = MaxValue(SLJIT_PREDICATE_SAVED_REGISTERS,
-		                           partial_simd.HasResidualDictionary()
-		                               ? GetSljitPredicateDictionaryResidualRegisterLayout().saved_register_count
-		                               : native_registers.saved_register_count);
+		saved_registers = MaxValue(SLJIT_PREDICATE_SAVED_REGISTERS, native_registers.saved_register_count);
+	}
+	SljitPredicateDictionaryResidualRegisters dictionary;
+	if (partial_simd.HasResidualDictionary()) {
+		if (!TryPlanSljitPredicateDictionaryResidualRegisters(dictionary, saved_registers)) {
+			throw InternalException("SLJIT dictionary residual planned without its registers");
+		}
 	}
 	sljit_emit_enter(compiler, 0, SLJIT_ARGS1V(P), scratches, saved_registers, local_size);
 	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_S2, 0, SLJIT_MEM1(SLJIT_S0), offsetof(SljitNativePredicateInput, count));
@@ -252,7 +270,6 @@ unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativePredicate(const SljitNativ
 		EmitResetPredicateLoopState(compiler, false);
 		sljit_jump *dictionary_residual_done = nullptr;
 		if (partial_simd.HasResidualDictionary()) {
-			const auto &dictionary = GetSljitPredicateDictionaryResidualRegisterLayout();
 			sljit_emit_op1(compiler, SLJIT_MOV_P, dictionary.pass_table, 0, SLJIT_MEM1(SLJIT_S0),
 			               offsetof(SljitNativePredicateInput, residual_dictionary));
 			auto row_residual = sljit_emit_cmp(compiler, SLJIT_EQUAL, dictionary.pass_table, 0, SLJIT_IMM, 0);
@@ -264,7 +281,7 @@ unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativePredicate(const SljitNativ
 			sljit_emit_op1(compiler, SLJIT_MOV, dictionary.match_count, 0, SLJIT_IMM, 0);
 			EmitSljitTypedExpressionTreeSimdHybridFilterLoop(
 			    compiler, *partial_simd.packed_prefix, partial_simd.simd, simd_mask_offset,
-			    [&]() { EmitSljitPartialSimdDictionaryResidualRow(compiler); });
+			    [&]() { EmitSljitPartialSimdDictionaryResidualRow(compiler, dictionary); });
 			sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_MEM1(SLJIT_SP), SLJIT_SELECT_TRUE_COUNT_OFFSET,
 			               dictionary.match_count, 0);
 			dictionary_residual_done = sljit_emit_jump(compiler, SLJIT_JUMP);

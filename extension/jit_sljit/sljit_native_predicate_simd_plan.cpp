@@ -9,7 +9,6 @@
 #include "sljit_native_predicate_simd_plan.hpp"
 
 #include "sljit_native_plan.hpp"
-#include "sljit_register_layout.hpp"
 
 #include <cstdlib>
 
@@ -68,7 +67,10 @@ SljitNativePredicatePartialSimdPlan TryPlanSljitNativePredicatePartialSimd(const
 		return result;
 	}
 	residual->source_not_null = source_not_null;
-	if (residual->source_indices.size() == 1 && GetSljitPredicateDictionaryResidualRegisterLayout().Available()) {
+	SljitPredicateDictionaryResidualRegisters dictionary_registers;
+	sljit_s32 dictionary_saved_register_count;
+	if (residual->source_indices.size() == 1 &&
+	    TryPlanSljitPredicateDictionaryResidualRegisters(dictionary_registers, dictionary_saved_register_count)) {
 		result.residual_dictionary_source = residual->source_indices[0];
 	}
 
