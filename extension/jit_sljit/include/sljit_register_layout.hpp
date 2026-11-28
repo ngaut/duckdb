@@ -54,29 +54,6 @@ struct SljitProjectionRegisterLayout {
 	sljit_s32 source_data[2] = {0, 0};
 };
 
-struct SljitPrimitiveRunRegisterLayout {
-	bool supported = false;
-	bool has_output_pointer_hoists = false;
-	bool has_affine_accumulators = false;
-	bool has_multi_output_index = false;
-	bool has_multi_output_row_counts = false;
-	sljit_s32 output_group_data = 0;
-	sljit_s32 output_row_counts = 0;
-	sljit_s32 output_values = 0;
-	sljit_s32 output_value_is_set = 0;
-	sljit_s32 affine_value = 0;
-	sljit_s32 affine_valid_count = 0;
-	sljit_s32 multi_output_index = 0;
-	sljit_s32 multi_output_row_counts = 0;
-	//! the single-lane kernel's scratch registers; with eight, R7 holds a nullable hugeint sum's set flag
-	sljit_s32 scratch_register_count = 7;
-	sljit_s32 hugeint_set_flag = 0;
-	sljit_s32 base_saved_register_count = 0;
-	sljit_s32 saved_register_count = 0;
-	sljit_s32 affine_saved_register_count = 0;
-	sljit_s32 multi_saved_register_count = 0;
-};
-
 struct SljitPerfectHashProbeRegisterLayout {
 	bool has_invariant_hoists = false;
 	sljit_s32 scratch_register_count = 5;
@@ -114,7 +91,6 @@ const SljitPredicateDictionaryResidualRegisterLayout &GetSljitPredicateDictionar
 const SljitPerfectHashRegisterLayout &GetSljitPerfectHashRegisterLayout();
 const SljitUngroupedAggregateRegisterLayout &GetSljitUngroupedAggregateRegisterLayout();
 const SljitProjectionRegisterLayout &GetSljitProjectionRegisterLayout();
-const SljitPrimitiveRunRegisterLayout &GetSljitPrimitiveRunRegisterLayout();
 const SljitPerfectHashProbeRegisterLayout &GetSljitPerfectHashProbeRegisterLayout();
 
 } // namespace duckdb

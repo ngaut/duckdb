@@ -2210,7 +2210,7 @@ TEST_CASE("JIT unordered grouped input does not generate unused run kernels", "[
 	REQUIRE(lazy_codegen_code_size == 0);
 }
 
-TEST_CASE("JIT grouped run codegen bounds wide homogeneous lane code size", "[api][jit]") {
+TEST_CASE("JIT grouped run codegen unrolls wide homogeneous lanes up to the lane limit", "[api][jit]") {
 	DuckDB db;
 	Connection con(db);
 	auto &manager = ExecutionRegionManager::Get(*con.context);
@@ -2287,14 +2287,23 @@ TEST_CASE("JIT grouped run codegen bounds wide homogeneous lane code size", "[ap
 		return lazy_codegen_code_size;
 	};
 
-	const auto unrolled_code_size = verify_lane_count(8, false, true);
-	const auto looped_nine_lane_code_size = verify_lane_count(9, false, true);
-	const auto looped_sixteen_lane_code_size = verify_lane_count(16, false, true);
+	verify_lane_count(8, false, true);
+	const auto nine_lane_code_size = verify_lane_count(9, false, true);
+	const auto sixteen_lane_code_size = verify_lane_count(16, false, true);
 	verify_lane_count(9, true, false);
 	if (SljitPrimitiveRunCodegenSupported()) {
-		REQUIRE(looped_nine_lane_code_size == looped_sixteen_lane_code_size);
-		REQUIRE(looped_sixteen_lane_code_size < unrolled_code_size);
+		// each lane adds its own update to the unrolled run loop (past eight lanes the publish loops either way)
+		REQUIRE(nine_lane_code_size < sixteen_lane_code_size);
 	}
+	auto lanes = [](idx_t lane_count) {
+		return std::make_pair(
+		    vector<PhysicalType>(lane_count, PhysicalType::INT32),
+		    vector<AggregatePrimitiveUpdateKind>(lane_count, AggregatePrimitiveUpdateKind::SUM_INT64));
+	};
+	auto at_limit = lanes(64);
+	auto past_limit = lanes(65);
+	REQUIRE(SljitPrimitiveRunMultiUpdateSupported(at_limit.first, at_limit.second));
+	REQUIRE_FALSE(SljitPrimitiveRunMultiUpdateSupported(past_limit.first, past_limit.second));
 }
 
 TEST_CASE("JIT grouped typed payloads preserve wide shared-source expressions", "[api][jit]") {

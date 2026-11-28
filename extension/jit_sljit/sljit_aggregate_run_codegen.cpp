@@ -9,6 +9,7 @@
 
 #include "sljit_codegen_internal.hpp"
 #include "sljit_codegen_util.hpp"
+#include "sljit_kernel_frame.hpp"
 #include "sljit_platform.hpp"
 #include "sljit_register_layout.hpp"
 
@@ -26,7 +27,7 @@ bool SljitPrimitiveRunMachineWordSupported() {
 }
 
 bool SljitPrimitiveRunCodegenSupported() {
-	return GetSljitPrimitiveRunRegisterLayout().supported;
+	return GetSljitTargetCapabilities().SupportsPrimitiveRunRegisterABI();
 }
 
 static bool SljitPrimitiveRunGroupTypeSupported(PhysicalType type) {
@@ -201,48 +202,15 @@ static void EmitSljitPrimitiveRunLoadKey(struct sljit_compiler *compiler, Physic
 	               SLJIT_MEM2(SLJIT_S4, SLJIT_S1), SljitPrimitiveRunPhysicalTypeScale(group_source_type));
 }
 
-static sljit_s32 EmitSljitPrimitiveRunOutputGroupData(struct sljit_compiler *compiler, sljit_s32 fallback) {
-	const auto &registers = GetSljitPrimitiveRunRegisterLayout();
-	if (registers.has_output_pointer_hoists) {
-		return registers.output_group_data;
-	}
-	sljit_emit_op1(compiler, SLJIT_MOV_P, fallback, 0, SLJIT_MEM1(SLJIT_S0),
-	               offsetof(SljitNativePrimitiveRunInput, output_group_data));
-	return fallback;
-}
-
-static sljit_s32 EmitSljitPrimitiveRunOutputRowCounts(struct sljit_compiler *compiler, sljit_s32 fallback) {
-	const auto &registers = GetSljitPrimitiveRunRegisterLayout();
-	if (registers.has_output_pointer_hoists) {
-		return registers.output_row_counts;
-	}
-	sljit_emit_op1(compiler, SLJIT_MOV_P, fallback, 0, SLJIT_MEM1(SLJIT_S0),
-	               offsetof(SljitNativePrimitiveRunInput, output_row_counts));
-	return fallback;
-}
-
-static sljit_s32 EmitSljitPrimitiveRunOutputValues(struct sljit_compiler *compiler, sljit_s32 fallback,
-                                                   AggregatePrimitiveUpdateKind primitive_kind) {
-	const auto &registers = GetSljitPrimitiveRunRegisterLayout();
-	if (registers.has_output_pointer_hoists) {
-		return registers.output_values;
-	}
-	const auto offset = primitive_kind == AggregatePrimitiveUpdateKind::SUM_HUGEINT
-	                        ? offsetof(SljitNativePrimitiveRunInput, output_hugeint_values)
-	                        : offsetof(SljitNativePrimitiveRunInput, output_int64_values);
-	sljit_emit_op1(compiler, SLJIT_MOV_P, fallback, 0, SLJIT_MEM1(SLJIT_S0), offset);
-	return fallback;
-}
-
-static sljit_s32 EmitSljitPrimitiveRunOutputValueIsSet(struct sljit_compiler *compiler, sljit_s32 fallback) {
-	const auto &registers = GetSljitPrimitiveRunRegisterLayout();
-	if (registers.has_output_pointer_hoists) {
-		return registers.output_value_is_set;
-	}
-	sljit_emit_op1(compiler, SLJIT_MOV_P, fallback, 0, SLJIT_MEM1(SLJIT_S0),
-	               offsetof(SljitNativePrimitiveRunInput, output_value_is_set));
-	return fallback;
-}
+//! The single-lane kernel's frame values: its output pointers, loaded once, and a nullable sum's set flag, carried
+//! across the group's rows
+struct SljitPrimitiveRunSingleLaneValues {
+	SljitOperand output_group_data {0, 0};
+	SljitOperand output_row_counts {0, 0};
+	SljitOperand output_values {0, 0};
+	SljitOperand output_value_is_set {0, 0};
+	SljitOperand set_flag {0, 0};
+};
 
 static void EmitSljitPrimitiveRunRecordIncreasingTransition(struct sljit_compiler *compiler,
                                                             PhysicalType group_source_type) {
@@ -254,37 +222,14 @@ static void EmitSljitPrimitiveRunRecordIncreasingTransition(struct sljit_compile
 	sljit_set_label(increasing, done);
 }
 
-//! The register a nullable payload's sum keeps its group's set flag in, or 0: R2 beside an int64 sum, the layout's
-//! hugeint flag register beside a hugeint sum (whose upper word takes R2), when the target has one
-static sljit_s32 SljitPrimitiveRunSetFlagRegister(AggregatePrimitiveUpdateKind primitive_kind, bool payload_nullable) {
-	if (!payload_nullable) {
-		return 0;
-	}
-	switch (primitive_kind) {
-	case AggregatePrimitiveUpdateKind::SUM_INT64:
-		return SLJIT_R2;
-	case AggregatePrimitiveUpdateKind::SUM_HUGEINT:
-		return GetSljitPrimitiveRunRegisterLayout().hugeint_set_flag;
-	default:
-		return 0;
-	}
-}
-
-//! Whether a nullable payload's row accumulates by its validity bit instead of a jump: a count adds the bit, a sum adds
-//! its value masked by the bit and ORs the bit into its set flag register. That takes no more instructions than testing
-//! the bit, jumping and setting the flag, and never mispredicts on the NULLs' order. A sum without a flag register
-//! jumps over NULL rows
-static bool SljitPrimitiveRunMasksNullRows(AggregatePrimitiveUpdateKind primitive_kind, bool payload_nullable) {
-	return payload_nullable && (primitive_kind == AggregatePrimitiveUpdateKind::COUNT ||
-	                            SljitPrimitiveRunSetFlagRegister(primitive_kind, payload_nullable));
-}
-
-static void EmitSljitPrimitiveRunLoadExistingState(struct sljit_compiler *compiler, PhysicalType group_type,
+static void EmitSljitPrimitiveRunLoadExistingState(struct sljit_compiler *compiler,
+                                                   const SljitPrimitiveRunSingleLaneValues &values,
+                                                   PhysicalType group_type,
                                                    ExecutionRowPointerGroupKeyCastKind group_cast_kind,
                                                    AggregatePrimitiveUpdateKind primitive_kind, bool use_batch_delta,
                                                    bool payload_nullable) {
 	sljit_emit_op2(compiler, SLJIT_SUB, SLJIT_R5, 0, SLJIT_S3, 0, SLJIT_IMM, 1);
-	const auto output_group_data = EmitSljitPrimitiveRunOutputGroupData(compiler, SLJIT_R6);
+	const auto output_group_data = SljitKernelFrameRegister(compiler, values.output_group_data, SLJIT_R6);
 	sljit_emit_op1(compiler, SljitPrimitiveRunPhysicalTypeLoadOp(group_type), SLJIT_R0, 0,
 	               SLJIT_MEM2(output_group_data, SLJIT_R5), SljitPrimitiveRunPhysicalTypeScale(group_type));
 	if (group_cast_kind == ExecutionRowPointerGroupKeyCastKind::INTEGRAL_COMPRESS) {
@@ -301,51 +246,31 @@ static void EmitSljitPrimitiveRunLoadExistingState(struct sljit_compiler *compil
 
 	if (primitive_kind == AggregatePrimitiveUpdateKind::SUM_HUGEINT) {
 		sljit_emit_op2(compiler, SLJIT_SHL, SLJIT_R5, 0, SLJIT_R5, 0, SLJIT_IMM, 4);
-		const auto output_values = EmitSljitPrimitiveRunOutputValues(compiler, SLJIT_R6, primitive_kind);
+		const auto output_values = SljitKernelFrameRegister(compiler, values.output_values, SLJIT_R6);
 		sljit_emit_op2(compiler, SLJIT_ADD, SLJIT_R6, 0, output_values, 0, SLJIT_R5, 0);
 		sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_R1, 0, SLJIT_MEM1(SLJIT_R6), offsetof(hugeint_t, lower));
 		sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_R2, 0, SLJIT_MEM1(SLJIT_R6), offsetof(hugeint_t, upper));
 	} else {
-		const auto output_values = EmitSljitPrimitiveRunOutputValues(compiler, SLJIT_R6, primitive_kind);
+		const auto output_values = SljitKernelFrameRegister(compiler, values.output_values, SLJIT_R6);
 		sljit_emit_op2(compiler, SLJIT_SUB, SLJIT_R5, 0, SLJIT_S3, 0, SLJIT_IMM, 1);
 		sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_R1, 0, SLJIT_MEM2(output_values, SLJIT_R5), 3);
 		sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_R2, 0, SLJIT_IMM, 0);
 	}
 	// a group the previous call started keeps the set flag it stored
-	const auto set_flag = SljitPrimitiveRunSetFlagRegister(primitive_kind, payload_nullable);
-	if (set_flag) {
+	if (values.set_flag.operand) {
 		sljit_emit_op2(compiler, SLJIT_SUB, SLJIT_R5, 0, SLJIT_S3, 0, SLJIT_IMM, 1);
-		const auto output_value_is_set = EmitSljitPrimitiveRunOutputValueIsSet(compiler, SLJIT_R6);
-		sljit_emit_op1(compiler, SLJIT_MOV_U8, set_flag, 0, SLJIT_MEM2(output_value_is_set, SLJIT_R5), 0);
+		const auto output_value_is_set = SljitKernelFrameRegister(compiler, values.output_value_is_set, SLJIT_R6);
+		sljit_emit_op1(compiler, SLJIT_MOV_U8, values.set_flag.operand, values.set_flag.operand_w,
+		               SLJIT_MEM2(output_value_is_set, SLJIT_R5), 0);
 	}
 
-	const auto output_row_counts = EmitSljitPrimitiveRunOutputRowCounts(compiler, SLJIT_R6);
+	const auto output_row_counts = SljitKernelFrameRegister(compiler, values.output_row_counts, SLJIT_R6);
 	sljit_emit_op2(compiler, SLJIT_SUB, SLJIT_R5, 0, SLJIT_S3, 0, SLJIT_IMM, 1);
 	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_R3, 0, SLJIT_MEM2(output_row_counts, SLJIT_R5), 3);
 }
 
-static void EmitSljitPrimitiveRunInitializeNullableOutput(struct sljit_compiler *compiler,
-                                                          AggregatePrimitiveUpdateKind primitive_kind) {
-	const auto output_row_counts = EmitSljitPrimitiveRunOutputRowCounts(compiler, SLJIT_R5);
-	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_MEM2(output_row_counts, SLJIT_S3), 3, SLJIT_IMM, 0);
-	if (primitive_kind == AggregatePrimitiveUpdateKind::SUM_HUGEINT) {
-		sljit_emit_op2(compiler, SLJIT_SHL, SLJIT_R6, 0, SLJIT_S3, 0, SLJIT_IMM, 4);
-		const auto output_values = EmitSljitPrimitiveRunOutputValues(compiler, SLJIT_R5, primitive_kind);
-		sljit_emit_op2(compiler, SLJIT_ADD, SLJIT_R5, 0, output_values, 0, SLJIT_R6, 0);
-		sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_MEM1(SLJIT_R5), offsetof(hugeint_t, lower), SLJIT_IMM, 0);
-		sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_MEM1(SLJIT_R5), offsetof(hugeint_t, upper), SLJIT_IMM, 0);
-	} else {
-		const auto output_values = EmitSljitPrimitiveRunOutputValues(compiler, SLJIT_R5, primitive_kind);
-		sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_MEM2(output_values, SLJIT_S3), 3, SLJIT_IMM, 0);
-	}
-	if (primitive_kind == AggregatePrimitiveUpdateKind::SUM_INT64 ||
-	    primitive_kind == AggregatePrimitiveUpdateKind::SUM_HUGEINT) {
-		const auto output_value_is_set = EmitSljitPrimitiveRunOutputValueIsSet(compiler, SLJIT_R5);
-		sljit_emit_op1(compiler, SLJIT_MOV_U8, SLJIT_MEM2(output_value_is_set, SLJIT_S3), 0, SLJIT_IMM, 0);
-	}
-}
-
-static void EmitSljitPrimitiveRunStartGroup(struct sljit_compiler *compiler, PhysicalType group_type,
+static void EmitSljitPrimitiveRunStartGroup(struct sljit_compiler *compiler,
+                                            const SljitPrimitiveRunSingleLaneValues &values, PhysicalType group_type,
                                             ExecutionRowPointerGroupKeyCastKind group_cast_kind,
                                             AggregatePrimitiveUpdateKind primitive_kind, bool use_batch_delta,
                                             bool payload_nullable) {
@@ -358,7 +283,7 @@ static void EmitSljitPrimitiveRunStartGroup(struct sljit_compiler *compiler, Phy
 		sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_R2, 0, SLJIT_IMM, 0);
 		sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_R3, 0, SLJIT_IMM, 0);
 	}
-	const auto output_group_data = EmitSljitPrimitiveRunOutputGroupData(compiler, SLJIT_R5);
+	const auto output_group_data = SljitKernelFrameRegister(compiler, values.output_group_data, SLJIT_R5);
 	if (group_cast_kind == ExecutionRowPointerGroupKeyCastKind::INTEGRAL_COMPRESS) {
 		sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_R6, 0, SLJIT_MEM1(SLJIT_S0),
 		               offsetof(SljitNativePrimitiveRunInput, group_cast_constant));
@@ -371,33 +296,22 @@ static void EmitSljitPrimitiveRunStartGroup(struct sljit_compiler *compiler, Phy
 		               SLJIT_MEM2(output_group_data, SLJIT_S3), SljitPrimitiveRunPhysicalTypeScale(group_type),
 		               SLJIT_R0, 0);
 	}
-	if (payload_nullable) {
-		EmitSljitPrimitiveRunInitializeNullableOutput(compiler, primitive_kind);
-	}
-	const auto set_flag = SljitPrimitiveRunSetFlagRegister(primitive_kind, payload_nullable);
-	if (set_flag) {
-		sljit_emit_op1(compiler, SLJIT_MOV, set_flag, 0, SLJIT_IMM, 0);
+	if (values.set_flag.operand) {
+		sljit_emit_op1(compiler, SLJIT_MOV, values.set_flag.operand, values.set_flag.operand_w, SLJIT_IMM, 0);
 	}
 	sljit_emit_op2(compiler, SLJIT_ADD, SLJIT_S3, 0, SLJIT_S3, 0, SLJIT_IMM, 1);
 }
 
-static sljit_jump *EmitJumpIfSljitPrimitiveRunPayloadNull(struct sljit_compiler *compiler) {
-	sljit_emit_op1(compiler, SLJIT_MOV_P, SLJIT_R5, 0, SLJIT_MEM1(SLJIT_S0),
-	               offsetof(SljitNativePrimitiveRunInput, payload_validity));
-	return EmitJumpIfSljitValidityBitClear(compiler, SLJIT_R5, SLJIT_S1, SLJIT_R6);
-}
-
-static void EmitSljitPrimitiveRunMarkValueSet(struct sljit_compiler *compiler) {
-	const auto output_value_is_set = EmitSljitPrimitiveRunOutputValueIsSet(compiler, SLJIT_R5);
-	sljit_emit_op2(compiler, SLJIT_SUB, SLJIT_R6, 0, SLJIT_S3, 0, SLJIT_IMM, 1);
-	sljit_emit_op1(compiler, SLJIT_MOV_U8, SLJIT_MEM2(output_value_is_set, SLJIT_R6), 0, SLJIT_IMM, 1);
-}
-
-static void EmitSljitPrimitiveRunAccumulate(struct sljit_compiler *compiler, PhysicalType payload_type,
+//! A nullable payload's row accumulates by its validity bit instead of a jump: a count adds the bit, a sum adds its
+//! value masked by the bit and ORs the bit into its set flag. That takes no more instructions than testing the bit,
+//! jumping and setting the flag, and never mispredicts on the NULLs' order
+static void EmitSljitPrimitiveRunAccumulate(struct sljit_compiler *compiler,
+                                            const SljitPrimitiveRunSingleLaneValues &values, PhysicalType payload_type,
                                             AggregatePrimitiveUpdateKind primitive_kind, bool use_batch_delta,
                                             bool payload_nullable) {
 	D_ASSERT(!payload_nullable || !use_batch_delta);
-	if (SljitPrimitiveRunMasksNullRows(primitive_kind, payload_nullable)) {
+	if (payload_nullable) {
+		D_ASSERT(primitive_kind != AggregatePrimitiveUpdateKind::COUNT_STAR);
 		// R6: the row's validity bit
 		sljit_emit_op1(compiler, SLJIT_MOV_P, SLJIT_R5, 0, SLJIT_MEM1(SLJIT_S0),
 		               offsetof(SljitNativePrimitiveRunInput, payload_validity));
@@ -419,15 +333,11 @@ static void EmitSljitPrimitiveRunAccumulate(struct sljit_compiler *compiler, Phy
 			} else {
 				sljit_emit_op2(compiler, SLJIT_ADD, SLJIT_R1, 0, SLJIT_R1, 0, SLJIT_R4, 0);
 			}
-			const auto set_flag = SljitPrimitiveRunSetFlagRegister(primitive_kind, payload_nullable);
-			sljit_emit_op2(compiler, SLJIT_OR, set_flag, 0, set_flag, 0, SLJIT_R6, 0);
+			sljit_emit_op2(compiler, SLJIT_OR, values.set_flag.operand, values.set_flag.operand_w,
+			               values.set_flag.operand, values.set_flag.operand_w, SLJIT_R6, 0);
 		}
 		sljit_emit_op2(compiler, SLJIT_ADD, SLJIT_R3, 0, SLJIT_R3, 0, SLJIT_IMM, 1);
 		return;
-	}
-	sljit_jump *payload_is_null = nullptr;
-	if (payload_nullable) {
-		payload_is_null = EmitJumpIfSljitPrimitiveRunPayloadNull(compiler);
 	}
 	if (use_batch_delta) {
 		if (primitive_kind == AggregatePrimitiveUpdateKind::SUM_INT64 ||
@@ -455,23 +365,17 @@ static void EmitSljitPrimitiveRunAccumulate(struct sljit_compiler *compiler, Phy
 			sljit_emit_op2(compiler, SLJIT_ADD, SLJIT_R1, 0, SLJIT_R1, 0, SLJIT_R4, 0);
 		}
 	}
-	if (payload_nullable && (primitive_kind == AggregatePrimitiveUpdateKind::SUM_INT64 ||
-	                         primitive_kind == AggregatePrimitiveUpdateKind::SUM_HUGEINT)) {
-		EmitSljitPrimitiveRunMarkValueSet(compiler);
-	}
-	if (payload_is_null) {
-		sljit_set_label(payload_is_null, sljit_emit_label(compiler));
-	}
 	sljit_emit_op2(compiler, SLJIT_ADD, SLJIT_R3, 0, SLJIT_R3, 0, SLJIT_IMM, 1);
 }
 
 static void EmitSljitPrimitiveRunBatchDeltaState(struct sljit_compiler *compiler,
+                                                 const SljitPrimitiveRunSingleLaneValues &values,
                                                  AggregatePrimitiveUpdateKind primitive_kind, bool merge_existing) {
 	// R3 is the represented row delta and R1 is the aggregate delta. Only the
 	// first run in an invocation can merge into the unpublished boundary group;
 	// every group started by this kernel owns a fresh output slot.
 	sljit_emit_op2(compiler, SLJIT_SUB, SLJIT_R5, 0, SLJIT_S3, 0, SLJIT_IMM, 1);
-	const auto output_row_counts = EmitSljitPrimitiveRunOutputRowCounts(compiler, SLJIT_R6);
+	const auto output_row_counts = SljitKernelFrameRegister(compiler, values.output_row_counts, SLJIT_R6);
 	if (merge_existing) {
 		sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_R4, 0, SLJIT_MEM2(output_row_counts, SLJIT_R5), 3);
 		sljit_emit_op2(compiler, SLJIT_ADD, SLJIT_R4, 0, SLJIT_R4, 0, SLJIT_R3, 0);
@@ -482,7 +386,7 @@ static void EmitSljitPrimitiveRunBatchDeltaState(struct sljit_compiler *compiler
 
 	if (primitive_kind == AggregatePrimitiveUpdateKind::COUNT_STAR ||
 	    primitive_kind == AggregatePrimitiveUpdateKind::COUNT) {
-		const auto output_values = EmitSljitPrimitiveRunOutputValues(compiler, SLJIT_R6, primitive_kind);
+		const auto output_values = SljitKernelFrameRegister(compiler, values.output_values, SLJIT_R6);
 		if (merge_existing) {
 			sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_R4, 0, SLJIT_MEM2(output_values, SLJIT_R5), 3);
 			sljit_emit_op2(compiler, SLJIT_ADD, SLJIT_R4, 0, SLJIT_R4, 0, SLJIT_R3, 0);
@@ -495,7 +399,7 @@ static void EmitSljitPrimitiveRunBatchDeltaState(struct sljit_compiler *compiler
 
 	if (primitive_kind == AggregatePrimitiveUpdateKind::SUM_HUGEINT) {
 		sljit_emit_op2(compiler, SLJIT_SHL, SLJIT_R5, 0, SLJIT_R5, 0, SLJIT_IMM, 4);
-		const auto output_values = EmitSljitPrimitiveRunOutputValues(compiler, SLJIT_R3, primitive_kind);
+		const auto output_values = SljitKernelFrameRegister(compiler, values.output_values, SLJIT_R3);
 		sljit_emit_op2(compiler, SLJIT_ADD, SLJIT_R3, 0, output_values, 0, SLJIT_R5, 0);
 		sljit_emit_op2(compiler, SLJIT_ASHR, SLJIT_R2, 0, SLJIT_R1, 0, SLJIT_IMM, 63);
 		if (merge_existing) {
@@ -510,7 +414,7 @@ static void EmitSljitPrimitiveRunBatchDeltaState(struct sljit_compiler *compiler
 		}
 	} else {
 		sljit_emit_op2(compiler, SLJIT_SUB, SLJIT_R5, 0, SLJIT_S3, 0, SLJIT_IMM, 1);
-		const auto output_values = EmitSljitPrimitiveRunOutputValues(compiler, SLJIT_R6, primitive_kind);
+		const auto output_values = SljitKernelFrameRegister(compiler, values.output_values, SLJIT_R6);
 		if (merge_existing) {
 			sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_R4, 0, SLJIT_MEM2(output_values, SLJIT_R5), 3);
 			sljit_emit_op2(compiler, SLJIT_ADD, SLJIT_R4, 0, SLJIT_R4, 0, SLJIT_R1, 0);
@@ -521,11 +425,12 @@ static void EmitSljitPrimitiveRunBatchDeltaState(struct sljit_compiler *compiler
 	}
 
 	sljit_emit_op2(compiler, SLJIT_SUB, SLJIT_R5, 0, SLJIT_S3, 0, SLJIT_IMM, 1);
-	const auto output_value_is_set = EmitSljitPrimitiveRunOutputValueIsSet(compiler, SLJIT_R6);
+	const auto output_value_is_set = SljitKernelFrameRegister(compiler, values.output_value_is_set, SLJIT_R6);
 	sljit_emit_op1(compiler, SLJIT_MOV_U8, SLJIT_MEM2(output_value_is_set, SLJIT_R5), 0, SLJIT_IMM, 1);
 }
 
 static void EmitSljitPrimitiveRunBatchDeltaFlush(struct sljit_compiler *compiler,
+                                                 const SljitPrimitiveRunSingleLaneValues &values,
                                                  AggregatePrimitiveUpdateKind primitive_kind) {
 	// A key-change flush runs after the next raw key has already been loaded into
 	// R4. R0 no longer needs the completed key, so it carries the next key across
@@ -537,47 +442,48 @@ static void EmitSljitPrimitiveRunBatchDeltaFlush(struct sljit_compiler *compiler
 	// The existing-state marker applies to the whole group. Split once so fresh
 	// output slots avoid old-state loads and repeated marker branches.
 	auto new_group = sljit_emit_cmp(compiler, SLJIT_EQUAL, SLJIT_R2, 0, SLJIT_IMM, 0);
-	EmitSljitPrimitiveRunBatchDeltaState(compiler, primitive_kind, true);
+	EmitSljitPrimitiveRunBatchDeltaState(compiler, values, primitive_kind, true);
 	auto state_done = sljit_emit_jump(compiler, SLJIT_JUMP);
 	auto new_group_label = sljit_emit_label(compiler);
 	sljit_set_label(new_group, new_group_label);
-	EmitSljitPrimitiveRunBatchDeltaState(compiler, primitive_kind, false);
+	EmitSljitPrimitiveRunBatchDeltaState(compiler, values, primitive_kind, false);
 	auto state_done_label = sljit_emit_label(compiler);
 	sljit_set_label(state_done, state_done_label);
 	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_R4, 0, SLJIT_R0, 0);
 }
 
-static void EmitSljitPrimitiveRunFlush(struct sljit_compiler *compiler, AggregatePrimitiveUpdateKind primitive_kind,
-                                       bool use_batch_delta, bool payload_nullable) {
+static void EmitSljitPrimitiveRunFlush(struct sljit_compiler *compiler, const SljitPrimitiveRunSingleLaneValues &values,
+                                       AggregatePrimitiveUpdateKind primitive_kind, bool use_batch_delta,
+                                       bool payload_nullable) {
 	if (use_batch_delta) {
-		EmitSljitPrimitiveRunBatchDeltaFlush(compiler, primitive_kind);
+		EmitSljitPrimitiveRunBatchDeltaFlush(compiler, values, primitive_kind);
 		return;
 	}
 	sljit_emit_op2(compiler, SLJIT_SUB, SLJIT_R5, 0, SLJIT_S3, 0, SLJIT_IMM, 1);
 	if (primitive_kind == AggregatePrimitiveUpdateKind::SUM_HUGEINT) {
 		sljit_emit_op2(compiler, SLJIT_SHL, SLJIT_R5, 0, SLJIT_R5, 0, SLJIT_IMM, 4);
-		const auto output_values = EmitSljitPrimitiveRunOutputValues(compiler, SLJIT_R6, primitive_kind);
+		const auto output_values = SljitKernelFrameRegister(compiler, values.output_values, SLJIT_R6);
 		sljit_emit_op2(compiler, SLJIT_ADD, SLJIT_R6, 0, output_values, 0, SLJIT_R5, 0);
 		sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_MEM1(SLJIT_R6), offsetof(hugeint_t, lower), SLJIT_R1, 0);
 		sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_MEM1(SLJIT_R6), offsetof(hugeint_t, upper), SLJIT_R2, 0);
 	} else {
-		const auto output_values = EmitSljitPrimitiveRunOutputValues(compiler, SLJIT_R6, primitive_kind);
+		const auto output_values = SljitKernelFrameRegister(compiler, values.output_values, SLJIT_R6);
 		sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_MEM2(output_values, SLJIT_R5), 3, SLJIT_R1, 0);
 	}
 	if (!payload_nullable && (primitive_kind == AggregatePrimitiveUpdateKind::SUM_INT64 ||
 	                          primitive_kind == AggregatePrimitiveUpdateKind::SUM_HUGEINT)) {
 		sljit_emit_op2(compiler, SLJIT_SUB, SLJIT_R5, 0, SLJIT_S3, 0, SLJIT_IMM, 1);
-		const auto output_value_is_set = EmitSljitPrimitiveRunOutputValueIsSet(compiler, SLJIT_R6);
+		const auto output_value_is_set = SljitKernelFrameRegister(compiler, values.output_value_is_set, SLJIT_R6);
 		sljit_emit_op1(compiler, SLJIT_MOV_U8, SLJIT_MEM2(output_value_is_set, SLJIT_R5), 0, SLJIT_IMM, 1);
 	}
-	const auto set_flag = SljitPrimitiveRunSetFlagRegister(primitive_kind, payload_nullable);
-	if (set_flag) {
+	if (values.set_flag.operand) {
 		sljit_emit_op2(compiler, SLJIT_SUB, SLJIT_R5, 0, SLJIT_S3, 0, SLJIT_IMM, 1);
-		const auto output_value_is_set = EmitSljitPrimitiveRunOutputValueIsSet(compiler, SLJIT_R6);
-		sljit_emit_op1(compiler, SLJIT_MOV_U8, SLJIT_MEM2(output_value_is_set, SLJIT_R5), 0, set_flag, 0);
+		const auto output_value_is_set = SljitKernelFrameRegister(compiler, values.output_value_is_set, SLJIT_R6);
+		sljit_emit_op1(compiler, SLJIT_MOV_U8, SLJIT_MEM2(output_value_is_set, SLJIT_R5), 0, values.set_flag.operand,
+		               values.set_flag.operand_w);
 	}
 	sljit_emit_op2(compiler, SLJIT_SUB, SLJIT_R5, 0, SLJIT_S3, 0, SLJIT_IMM, 1);
-	const auto output_row_counts = EmitSljitPrimitiveRunOutputRowCounts(compiler, SLJIT_R6);
+	const auto output_row_counts = SljitKernelFrameRegister(compiler, values.output_row_counts, SLJIT_R6);
 	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_MEM2(output_row_counts, SLJIT_R5), 3, SLJIT_R3, 0);
 }
 
@@ -602,8 +508,7 @@ BuildSljitNativePrimitiveRunUpdate(PhysicalType group_source_type, PhysicalType 
 		error = "unsupported SLJIT primitive run aggregate payload";
 		return nullptr;
 	}
-	const auto &registers = GetSljitPrimitiveRunRegisterLayout();
-	if (!registers.supported) {
+	if (!SljitPrimitiveRunCodegenSupported()) {
 		error = "unsupported SLJIT primitive run register layout";
 		return nullptr;
 	}
@@ -613,7 +518,28 @@ BuildSljitNativePrimitiveRunUpdate(PhysicalType group_source_type, PhysicalType 
 		return nullptr;
 	}
 
-	sljit_emit_enter(compiler, 0, SLJIT_ARGS1V(P), registers.scratch_register_count, registers.saved_register_count, 0);
+	// R0 holds the group's key, R1-R2 its value, R3 its row count, R4-R6 are scratch; S0-S5 the protocol
+	SljitKernelFrame frame(7, 6);
+	SljitPrimitiveRunSingleLaneValues values;
+	if (payload_nullable && needs_payload) {
+		values.set_flag = frame.AllocateCarried();
+	}
+	auto input_field = [](sljit_sw offset) {
+		return SljitOperand {SLJIT_MEM1(SLJIT_S0), offset};
+	};
+	values.output_values = frame.AllocateInvariant(
+	    input_field(primitive_kind == AggregatePrimitiveUpdateKind::SUM_HUGEINT
+	                    ? NumericCast<sljit_sw>(offsetof(SljitNativePrimitiveRunInput, output_hugeint_values))
+	                    : NumericCast<sljit_sw>(offsetof(SljitNativePrimitiveRunInput, output_int64_values))));
+	values.output_row_counts =
+	    frame.AllocateInvariant(input_field(offsetof(SljitNativePrimitiveRunInput, output_row_counts)));
+	values.output_group_data =
+	    frame.AllocateInvariant(input_field(offsetof(SljitNativePrimitiveRunInput, output_group_data)));
+	if (needs_payload) {
+		values.output_value_is_set =
+		    frame.AllocateInvariant(input_field(offsetof(SljitNativePrimitiveRunInput, output_value_is_set)));
+	}
+	frame.EmitEnter(compiler, SLJIT_ARGS1V(P));
 	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_S1, 0, SLJIT_MEM1(SLJIT_S0),
 	               offsetof(SljitNativePrimitiveRunInput, input_offset));
 	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_S2, 0, SLJIT_MEM1(SLJIT_S0),
@@ -626,27 +552,13 @@ BuildSljitNativePrimitiveRunUpdate(PhysicalType group_source_type, PhysicalType 
 		sljit_emit_op1(compiler, SLJIT_MOV_P, SLJIT_S5, 0, SLJIT_MEM1(SLJIT_S0),
 		               offsetof(SljitNativePrimitiveRunInput, payload_data));
 	}
-	if (registers.has_output_pointer_hoists) {
-		sljit_emit_op1(compiler, SLJIT_MOV_P, registers.output_group_data, 0, SLJIT_MEM1(SLJIT_S0),
-		               offsetof(SljitNativePrimitiveRunInput, output_group_data));
-		sljit_emit_op1(compiler, SLJIT_MOV_P, registers.output_row_counts, 0, SLJIT_MEM1(SLJIT_S0),
-		               offsetof(SljitNativePrimitiveRunInput, output_row_counts));
-		const auto output_values_offset = primitive_kind == AggregatePrimitiveUpdateKind::SUM_HUGEINT
-		                                      ? offsetof(SljitNativePrimitiveRunInput, output_hugeint_values)
-		                                      : offsetof(SljitNativePrimitiveRunInput, output_int64_values);
-		sljit_emit_op1(compiler, SLJIT_MOV_P, registers.output_values, 0, SLJIT_MEM1(SLJIT_S0), output_values_offset);
-		if (primitive_kind == AggregatePrimitiveUpdateKind::SUM_INT64 ||
-		    primitive_kind == AggregatePrimitiveUpdateKind::SUM_HUGEINT) {
-			sljit_emit_op1(compiler, SLJIT_MOV_P, registers.output_value_is_set, 0, SLJIT_MEM1(SLJIT_S0),
-			               offsetof(SljitNativePrimitiveRunInput, output_value_is_set));
-		}
-	}
+	frame.EmitLoadInvariants(compiler);
 
 	auto input_done = sljit_emit_cmp(compiler, SLJIT_GREATER_EQUAL, SLJIT_S1, 0, SLJIT_S2, 0);
 	EmitSljitPrimitiveRunLoadKey(compiler, group_source_type, SLJIT_R4);
 	auto no_existing_group = sljit_emit_cmp(compiler, SLJIT_EQUAL, SLJIT_S3, 0, SLJIT_IMM, 0);
-	EmitSljitPrimitiveRunLoadExistingState(compiler, group_type, group_cast_kind, primitive_kind, use_batch_delta,
-	                                       payload_nullable);
+	EmitSljitPrimitiveRunLoadExistingState(compiler, values, group_type, group_cast_kind, primitive_kind,
+	                                       use_batch_delta, payload_nullable);
 	auto initial_group_matches = sljit_emit_cmp(compiler, SLJIT_EQUAL, SLJIT_R4, 0, SLJIT_R0, 0);
 	EmitSljitPrimitiveRunRecordIncreasingTransition(compiler, group_source_type);
 
@@ -655,25 +567,25 @@ BuildSljitNativePrimitiveRunUpdate(PhysicalType group_source_type, PhysicalType 
 	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_R5, 0, SLJIT_MEM1(SLJIT_S0),
 	               offsetof(SljitNativePrimitiveRunInput, output_capacity));
 	auto output_full = sljit_emit_cmp(compiler, SLJIT_GREATER_EQUAL, SLJIT_S3, 0, SLJIT_R5, 0);
-	EmitSljitPrimitiveRunStartGroup(compiler, group_type, group_cast_kind, primitive_kind, use_batch_delta,
+	EmitSljitPrimitiveRunStartGroup(compiler, values, group_type, group_cast_kind, primitive_kind, use_batch_delta,
 	                                payload_nullable);
 
 	auto accumulate_group = sljit_emit_label(compiler);
 	sljit_set_label(initial_group_matches, accumulate_group);
-	EmitSljitPrimitiveRunAccumulate(compiler, payload_type, primitive_kind, use_batch_delta, payload_nullable);
+	EmitSljitPrimitiveRunAccumulate(compiler, values, payload_type, primitive_kind, use_batch_delta, payload_nullable);
 	sljit_emit_op2(compiler, SLJIT_ADD, SLJIT_S1, 0, SLJIT_S1, 0, SLJIT_IMM, 1);
 	auto run_done = sljit_emit_cmp(compiler, SLJIT_GREATER_EQUAL, SLJIT_S1, 0, SLJIT_S2, 0);
 	EmitSljitPrimitiveRunLoadKey(compiler, group_source_type, SLJIT_R4);
 	auto same_group = sljit_emit_cmp(compiler, SLJIT_EQUAL, SLJIT_R4, 0, SLJIT_R0, 0);
 	sljit_set_label(same_group, accumulate_group);
 	EmitSljitPrimitiveRunRecordIncreasingTransition(compiler, group_source_type);
-	EmitSljitPrimitiveRunFlush(compiler, primitive_kind, use_batch_delta, payload_nullable);
+	EmitSljitPrimitiveRunFlush(compiler, values, primitive_kind, use_batch_delta, payload_nullable);
 	auto next_group = sljit_emit_jump(compiler, SLJIT_JUMP);
 	sljit_set_label(next_group, append_group);
 
 	auto flush_last_group = sljit_emit_label(compiler);
 	sljit_set_label(run_done, flush_last_group);
-	EmitSljitPrimitiveRunFlush(compiler, primitive_kind, use_batch_delta, payload_nullable);
+	EmitSljitPrimitiveRunFlush(compiler, values, primitive_kind, use_batch_delta, payload_nullable);
 
 	auto finish = sljit_emit_label(compiler);
 	sljit_set_label(input_done, finish);
@@ -686,7 +598,10 @@ BuildSljitNativePrimitiveRunUpdate(PhysicalType group_source_type, PhysicalType 
 	return FinishSljitCode(compiler, function, error);
 }
 
+//! The lanes beyond which only homogeneous lanes run (the preaggregated publish loops over those), and the lanes a run
+//! kernel unrolls at most, which bounds its loop body to a few kilobytes
 static constexpr idx_t SLJIT_PRIMITIVE_RUN_UNROLLED_LANE_BUDGET = 8;
+static constexpr idx_t SLJIT_PRIMITIVE_RUN_LANE_LIMIT = 64;
 
 static bool SljitPreaggregatedPrimitiveUpdateKindSupported(AggregatePrimitiveUpdateKind kind) {
 	switch (kind) {
@@ -735,388 +650,56 @@ bool SljitPrimitiveRunMultiUpdateSupported(const vector<PhysicalType> &payload_t
 		}
 	}
 	return primitive_kinds.size() <= SLJIT_PRIMITIVE_RUN_UNROLLED_LANE_BUDGET ||
-	       SljitPrimitiveRunLanesAreHomogeneous(payload_types, primitive_kinds);
+	       (primitive_kinds.size() <= SLJIT_PRIMITIVE_RUN_LANE_LIMIT &&
+	        SljitPrimitiveRunLanesAreHomogeneous(payload_types, primitive_kinds));
 }
 
 static sljit_sw SljitPrimitiveRunLaneFieldOffset(idx_t lane_idx, sljit_sw field_offset) {
-	if (lane_idx == DConstants::INVALID_INDEX) {
-		return field_offset;
-	}
 	return static_cast<sljit_sw>(lane_idx * sizeof(SljitNativePrimitiveRunLaneInput)) + field_offset;
 }
 
 static void EmitSljitPrimitiveRunLoadLanePointer(struct sljit_compiler *compiler, idx_t lane_idx, sljit_s32 target,
                                                  sljit_sw field_offset) {
-	// S5 is the invariant lane-array base for unrolled kernels and the current
-	// lane cursor for homogeneous kernels. Address constant lane fields directly
-	// instead of rebuilding the lane pointer for every field access.
+	// S5 is the lane array: a lane's fields sit at constant offsets from it
 	sljit_emit_op1(compiler, SLJIT_MOV_P, target, 0, SLJIT_MEM1(SLJIT_S5),
 	               SljitPrimitiveRunLaneFieldOffset(lane_idx, field_offset));
 }
 
-static sljit_s32 EmitSljitPrimitiveRunOutputIndex(struct sljit_compiler *compiler, sljit_s32 fallback) {
-	const auto &registers = GetSljitPrimitiveRunRegisterLayout();
-	if (registers.has_multi_output_index) {
-		return registers.multi_output_index;
-	}
-	sljit_emit_op2(compiler, SLJIT_SUB, fallback, 0, SLJIT_S3, 0, SLJIT_IMM, 1);
-	return fallback;
-}
-
-static void EmitSljitPrimitiveRunBindOutputIndex(struct sljit_compiler *compiler) {
-	const auto &registers = GetSljitPrimitiveRunRegisterLayout();
-	if (registers.has_multi_output_index) {
-		sljit_emit_op2(compiler, SLJIT_SUB, registers.multi_output_index, 0, SLJIT_S3, 0, SLJIT_IMM, 1);
-	}
-}
-
-static void EmitSljitPrimitiveRunInitializeLane(struct sljit_compiler *compiler, idx_t lane_idx,
-                                                AggregatePrimitiveUpdateKind primitive_kind) {
-	if (primitive_kind == AggregatePrimitiveUpdateKind::SUM_HUGEINT) {
-		EmitSljitPrimitiveRunLoadLanePointer(compiler, lane_idx, SLJIT_R5,
-		                                     offsetof(SljitNativePrimitiveRunLaneInput, output_hugeint_values));
-		sljit_emit_op2(compiler, SLJIT_SHL, SLJIT_R4, 0, SLJIT_S3, 0, SLJIT_IMM, 4);
-		sljit_emit_op2(compiler, SLJIT_ADD, SLJIT_R5, 0, SLJIT_R5, 0, SLJIT_R4, 0);
-		sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_MEM1(SLJIT_R5), offsetof(hugeint_t, lower), SLJIT_IMM, 0);
-		sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_MEM1(SLJIT_R5), offsetof(hugeint_t, upper), SLJIT_IMM, 0);
-	} else {
-		EmitSljitPrimitiveRunLoadLanePointer(compiler, lane_idx, SLJIT_R5,
-		                                     offsetof(SljitNativePrimitiveRunLaneInput, output_int64_values));
-		sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_MEM2(SLJIT_R5, SLJIT_S3), 3, SLJIT_IMM, 0);
-	}
-	if (primitive_kind == AggregatePrimitiveUpdateKind::SUM_INT64 ||
-	    primitive_kind == AggregatePrimitiveUpdateKind::SUM_HUGEINT) {
-		EmitSljitPrimitiveRunLoadLanePointer(compiler, lane_idx, SLJIT_R5,
-		                                     offsetof(SljitNativePrimitiveRunLaneInput, output_value_is_set));
-		sljit_emit_op1(compiler, SLJIT_MOV_U8, SLJIT_MEM2(SLJIT_R5, SLJIT_S3), 0, SLJIT_IMM, 0);
-	}
-}
-
-static void EmitSljitPrimitiveRunMultiStartGroup(struct sljit_compiler *compiler, PhysicalType group_type,
-                                                 ExecutionRowPointerGroupKeyCastKind group_cast_kind,
-                                                 const vector<AggregatePrimitiveUpdateKind> &primitive_kinds) {
-	sljit_emit_op1(compiler, SLJIT_MOV_P, SLJIT_R5, 0, SLJIT_MEM1(SLJIT_S0),
-	               offsetof(SljitNativePrimitiveRunInput, output_group_data));
-	if (group_cast_kind == ExecutionRowPointerGroupKeyCastKind::INTEGRAL_COMPRESS) {
-		sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_R6, 0, SLJIT_MEM1(SLJIT_S0),
-		               offsetof(SljitNativePrimitiveRunInput, group_cast_constant));
-		sljit_emit_op2(compiler, SLJIT_SUB, SLJIT_R0, 0, SLJIT_R4, 0, SLJIT_R6, 0);
-		sljit_emit_op1(compiler, SljitPrimitiveRunPhysicalTypeStoreOp(group_type), SLJIT_MEM2(SLJIT_R5, SLJIT_S3),
-		               SljitPrimitiveRunPhysicalTypeScale(group_type), SLJIT_R0, 0);
-	} else {
-		sljit_emit_op1(compiler, SljitPrimitiveRunPhysicalTypeStoreOp(group_type), SLJIT_MEM2(SLJIT_R5, SLJIT_S3),
-		               SljitPrimitiveRunPhysicalTypeScale(group_type), SLJIT_R4, 0);
-	}
-	sljit_emit_op1(compiler, SLJIT_MOV_P, SLJIT_R5, 0, SLJIT_MEM1(SLJIT_S0),
-	               offsetof(SljitNativePrimitiveRunInput, output_row_counts));
-	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_MEM2(SLJIT_R5, SLJIT_S3), 3, SLJIT_IMM, 0);
-	for (idx_t lane_idx = 0; lane_idx < primitive_kinds.size(); lane_idx++) {
-		EmitSljitPrimitiveRunInitializeLane(compiler, lane_idx, primitive_kinds[lane_idx]);
-	}
-	sljit_emit_op2(compiler, SLJIT_ADD, SLJIT_S3, 0, SLJIT_S3, 0, SLJIT_IMM, 1);
-}
-
-struct SljitPrimitiveRunValidityJumps {
-	sljit_jump *all_valid = nullptr;
-	sljit_jump *is_null = nullptr;
+//! The affine kernel's frame values: the group's shared-source sum and valid row count, carried across its rows
+struct SljitPrimitiveRunAffineValues {
+	SljitOperand value {0, 0};
+	SljitOperand valid_count {0, 0};
 };
 
-static SljitPrimitiveRunValidityJumps EmitSljitPrimitiveRunValidityCheck(struct sljit_compiler *compiler,
-                                                                         idx_t lane_idx) {
-	SljitPrimitiveRunValidityJumps result;
-	EmitSljitPrimitiveRunLoadLanePointer(compiler, lane_idx, SLJIT_R4,
-	                                     offsetof(SljitNativePrimitiveRunLaneInput, payload_validity));
-	result.all_valid = sljit_emit_cmp(compiler, SLJIT_EQUAL, SLJIT_R4, 0, SLJIT_IMM, 0);
-	result.is_null = EmitJumpIfSljitValidityBitClear(compiler, SLJIT_R4, SLJIT_S1, SLJIT_R6);
-	return result;
+static void EmitSljitPrimitiveRunAffineReset(struct sljit_compiler *compiler,
+                                             const SljitPrimitiveRunAffineValues &values) {
+	sljit_emit_op1(compiler, SLJIT_MOV, values.value.operand, values.value.operand_w, SLJIT_IMM, 0);
+	sljit_emit_op1(compiler, SLJIT_MOV, values.valid_count.operand, values.valid_count.operand_w, SLJIT_IMM, 0);
 }
 
-static void EmitSljitPrimitiveRunCount(struct sljit_compiler *compiler, idx_t lane_idx) {
-	EmitSljitPrimitiveRunLoadLanePointer(compiler, lane_idx, SLJIT_R4,
-	                                     offsetof(SljitNativePrimitiveRunLaneInput, output_int64_values));
-	const auto output_idx = EmitSljitPrimitiveRunOutputIndex(compiler, SLJIT_R5);
-	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_R0, 0, SLJIT_MEM2(SLJIT_R4, output_idx), 3);
-	sljit_emit_op2(compiler, SLJIT_ADD, SLJIT_R0, 0, SLJIT_R0, 0, SLJIT_IMM, 1);
-	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_MEM2(SLJIT_R4, output_idx), 3, SLJIT_R0, 0);
+static void EmitSljitPrimitiveRunAffineAccumulateValue(struct sljit_compiler *compiler,
+                                                       const SljitPrimitiveRunAffineValues &values,
+                                                       sljit_s32 value_reg) {
+	sljit_emit_op2(compiler, SLJIT_ADD, values.value.operand, values.value.operand_w, values.value.operand,
+	               values.value.operand_w, value_reg, 0);
 }
 
-static void EmitSljitPrimitiveRunMarkValueSet(struct sljit_compiler *compiler, idx_t lane_idx) {
-	EmitSljitPrimitiveRunLoadLanePointer(compiler, lane_idx, SLJIT_R4,
-	                                     offsetof(SljitNativePrimitiveRunLaneInput, output_value_is_set));
-	const auto output_idx = EmitSljitPrimitiveRunOutputIndex(compiler, SLJIT_R5);
-	sljit_emit_op1(compiler, SLJIT_MOV_U8, SLJIT_MEM2(SLJIT_R4, output_idx), 0, SLJIT_IMM, 1);
+static void EmitSljitPrimitiveRunAffineIncrementValidCount(struct sljit_compiler *compiler,
+                                                           const SljitPrimitiveRunAffineValues &values) {
+	sljit_emit_op2(compiler, SLJIT_ADD, values.valid_count.operand, values.valid_count.operand_w,
+	               values.valid_count.operand, values.valid_count.operand_w, SLJIT_IMM, 1);
 }
 
-static void EmitSljitPrimitiveRunSumInt64(struct sljit_compiler *compiler, idx_t lane_idx, PhysicalType payload_type) {
-	EmitSljitPrimitiveRunLoadLanePointer(compiler, lane_idx, SLJIT_R4,
-	                                     offsetof(SljitNativePrimitiveRunLaneInput, payload_data));
-	sljit_emit_op1(compiler, SljitPrimitiveRunPhysicalTypeLoadOp(payload_type), SLJIT_R0, 0,
-	               SLJIT_MEM2(SLJIT_R4, SLJIT_S1), SljitPrimitiveRunPhysicalTypeScale(payload_type));
-	EmitSljitPrimitiveRunLoadLanePointer(compiler, lane_idx, SLJIT_R4,
-	                                     offsetof(SljitNativePrimitiveRunLaneInput, output_int64_values));
-	const auto output_idx = EmitSljitPrimitiveRunOutputIndex(compiler, SLJIT_R5);
-	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_R1, 0, SLJIT_MEM2(SLJIT_R4, output_idx), 3);
-	sljit_emit_op2(compiler, SLJIT_ADD, SLJIT_R1, 0, SLJIT_R1, 0, SLJIT_R0, 0);
-	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_MEM2(SLJIT_R4, output_idx), 3, SLJIT_R1, 0);
-	EmitSljitPrimitiveRunMarkValueSet(compiler, lane_idx);
-}
-
-static void EmitSljitPrimitiveRunSumHugeint(struct sljit_compiler *compiler, idx_t lane_idx,
-                                            PhysicalType payload_type) {
-	EmitSljitPrimitiveRunLoadLanePointer(compiler, lane_idx, SLJIT_R4,
-	                                     offsetof(SljitNativePrimitiveRunLaneInput, payload_data));
-	sljit_emit_op1(compiler, SljitPrimitiveRunPhysicalTypeLoadOp(payload_type), SLJIT_R0, 0,
-	               SLJIT_MEM2(SLJIT_R4, SLJIT_S1), SljitPrimitiveRunPhysicalTypeScale(payload_type));
-	if (SljitPrimitiveRunPhysicalTypeIsSigned(payload_type)) {
-		sljit_emit_op2(compiler, SLJIT_ASHR, SLJIT_R1, 0, SLJIT_R0, 0, SLJIT_IMM, 63);
-	} else {
-		sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_R1, 0, SLJIT_IMM, 0);
-	}
-	EmitSljitPrimitiveRunLoadLanePointer(compiler, lane_idx, SLJIT_R4,
-	                                     offsetof(SljitNativePrimitiveRunLaneInput, output_hugeint_values));
-	const auto output_idx = EmitSljitPrimitiveRunOutputIndex(compiler, SLJIT_R5);
-	sljit_emit_op2(compiler, SLJIT_SHL, SLJIT_R2, 0, output_idx, 0, SLJIT_IMM, 4);
-	sljit_emit_op2(compiler, SLJIT_ADD, SLJIT_R4, 0, SLJIT_R4, 0, SLJIT_R2, 0);
-	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_R5, 0, SLJIT_MEM1(SLJIT_R4), offsetof(hugeint_t, lower));
-	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_R2, 0, SLJIT_MEM1(SLJIT_R4), offsetof(hugeint_t, upper));
-	EmitSljitAddDoubleWord(compiler, SLJIT_R5, SLJIT_R2, SLJIT_R0, SLJIT_R1);
-	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_MEM1(SLJIT_R4), offsetof(hugeint_t, lower), SLJIT_R5, 0);
-	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_MEM1(SLJIT_R4), offsetof(hugeint_t, upper), SLJIT_R2, 0);
-	EmitSljitPrimitiveRunMarkValueSet(compiler, lane_idx);
-}
-
-static void EmitSljitPrimitiveRunAccumulateLane(struct sljit_compiler *compiler, idx_t lane_idx,
-                                                PhysicalType payload_type, AggregatePrimitiveUpdateKind primitive_kind,
-                                                bool check_payload_validity = true) {
-	SljitPrimitiveRunValidityJumps validity;
-	if (check_payload_validity && primitive_kind != AggregatePrimitiveUpdateKind::COUNT_STAR) {
-		validity = EmitSljitPrimitiveRunValidityCheck(compiler, lane_idx);
-	}
-	auto accumulate = sljit_emit_label(compiler);
-	if (validity.all_valid) {
-		sljit_set_label(validity.all_valid, accumulate);
-	}
-	switch (primitive_kind) {
-	case AggregatePrimitiveUpdateKind::COUNT_STAR:
-	case AggregatePrimitiveUpdateKind::COUNT:
-		EmitSljitPrimitiveRunCount(compiler, lane_idx);
-		break;
-	case AggregatePrimitiveUpdateKind::SUM_INT64:
-		EmitSljitPrimitiveRunSumInt64(compiler, lane_idx, payload_type);
-		break;
-	case AggregatePrimitiveUpdateKind::SUM_HUGEINT:
-		EmitSljitPrimitiveRunSumHugeint(compiler, lane_idx, payload_type);
-		break;
-	default:
-		throw InternalException("Unsupported SLJIT primitive run aggregate");
-	}
-	if (validity.is_null) {
-		sljit_set_label(validity.is_null, sljit_emit_label(compiler));
-	}
-}
-
-static void EmitSljitPrimitiveRunMultiIncrementRowCount(struct sljit_compiler *compiler) {
-	const auto &registers = GetSljitPrimitiveRunRegisterLayout();
-	const auto output_row_counts = registers.has_multi_output_row_counts ? registers.multi_output_row_counts : SLJIT_R6;
-	if (!registers.has_multi_output_row_counts) {
-		sljit_emit_op1(compiler, SLJIT_MOV_P, output_row_counts, 0, SLJIT_MEM1(SLJIT_S0),
-		               offsetof(SljitNativePrimitiveRunInput, output_row_counts));
-	}
-	const auto output_idx = EmitSljitPrimitiveRunOutputIndex(compiler, SLJIT_R5);
-	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_R4, 0, SLJIT_MEM2(output_row_counts, output_idx), 3);
-	sljit_emit_op2(compiler, SLJIT_ADD, SLJIT_R4, 0, SLJIT_R4, 0, SLJIT_IMM, 1);
-	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_MEM2(output_row_counts, output_idx), 3, SLJIT_R4, 0);
-}
-
-static void EmitSljitPrimitiveRunHomogeneousLaneLoopStart(struct sljit_compiler *compiler) {
-	sljit_emit_op1(compiler, SLJIT_MOV_P, SLJIT_S5, 0, SLJIT_MEM1(SLJIT_S0),
-	               offsetof(SljitNativePrimitiveRunInput, lane_inputs));
-	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_R3, 0, SLJIT_IMM, 0);
-}
-
-static void EmitSljitPrimitiveRunHomogeneousLaneLoopNext(struct sljit_compiler *compiler, sljit_label *loop,
-                                                         idx_t lane_count) {
-	sljit_emit_op2(compiler, SLJIT_ADD, SLJIT_S5, 0, SLJIT_S5, 0, SLJIT_IMM,
-	               static_cast<sljit_sw>(sizeof(SljitNativePrimitiveRunLaneInput)));
-	sljit_emit_op2(compiler, SLJIT_ADD, SLJIT_R3, 0, SLJIT_R3, 0, SLJIT_IMM, 1);
-	auto repeat = sljit_emit_cmp(compiler, SLJIT_LESS, SLJIT_R3, 0, SLJIT_IMM, static_cast<sljit_sw>(lane_count));
-	sljit_set_label(repeat, loop);
-}
-
-static void EmitSljitPrimitiveRunHomogeneousStartGroup(struct sljit_compiler *compiler, PhysicalType group_type,
-                                                       ExecutionRowPointerGroupKeyCastKind group_cast_kind,
-                                                       AggregatePrimitiveUpdateKind primitive_kind, idx_t lane_count) {
-	sljit_emit_op1(compiler, SLJIT_MOV_P, SLJIT_R5, 0, SLJIT_MEM1(SLJIT_S0),
-	               offsetof(SljitNativePrimitiveRunInput, output_group_data));
-	if (group_cast_kind == ExecutionRowPointerGroupKeyCastKind::INTEGRAL_COMPRESS) {
-		sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_R6, 0, SLJIT_MEM1(SLJIT_S0),
-		               offsetof(SljitNativePrimitiveRunInput, group_cast_constant));
-		sljit_emit_op2(compiler, SLJIT_SUB, SLJIT_R0, 0, SLJIT_R4, 0, SLJIT_R6, 0);
-		sljit_emit_op1(compiler, SljitPrimitiveRunPhysicalTypeStoreOp(group_type), SLJIT_MEM2(SLJIT_R5, SLJIT_S3),
-		               SljitPrimitiveRunPhysicalTypeScale(group_type), SLJIT_R0, 0);
-	} else {
-		sljit_emit_op1(compiler, SljitPrimitiveRunPhysicalTypeStoreOp(group_type), SLJIT_MEM2(SLJIT_R5, SLJIT_S3),
-		               SljitPrimitiveRunPhysicalTypeScale(group_type), SLJIT_R4, 0);
-	}
-	sljit_emit_op1(compiler, SLJIT_MOV_P, SLJIT_R5, 0, SLJIT_MEM1(SLJIT_S0),
-	               offsetof(SljitNativePrimitiveRunInput, output_row_counts));
-	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_MEM2(SLJIT_R5, SLJIT_S3), 3, SLJIT_IMM, 0);
-	EmitSljitPrimitiveRunHomogeneousLaneLoopStart(compiler);
-	auto lane_loop = sljit_emit_label(compiler);
-	EmitSljitPrimitiveRunInitializeLane(compiler, DConstants::INVALID_INDEX, primitive_kind);
-	EmitSljitPrimitiveRunHomogeneousLaneLoopNext(compiler, lane_loop, lane_count);
-	sljit_emit_op2(compiler, SLJIT_ADD, SLJIT_S3, 0, SLJIT_S3, 0, SLJIT_IMM, 1);
-}
-
-static void EmitSljitPrimitiveRunHomogeneousAccumulateLanes(struct sljit_compiler *compiler, PhysicalType payload_type,
-                                                            AggregatePrimitiveUpdateKind primitive_kind,
-                                                            idx_t lane_count) {
-	EmitSljitPrimitiveRunMultiIncrementRowCount(compiler);
-	EmitSljitPrimitiveRunHomogeneousLaneLoopStart(compiler);
-	auto lane_loop = sljit_emit_label(compiler);
-	EmitSljitPrimitiveRunAccumulateLane(compiler, DConstants::INVALID_INDEX, payload_type, primitive_kind);
-	EmitSljitPrimitiveRunHomogeneousLaneLoopNext(compiler, lane_loop, lane_count);
-}
-
-static unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativePrimitiveRunHomogeneousMultiUpdate(
-    PhysicalType group_source_type, PhysicalType group_type, ExecutionRowPointerGroupKeyCastKind group_cast_kind,
-    PhysicalType payload_type, AggregatePrimitiveUpdateKind primitive_kind, idx_t lane_count,
-    SljitNativePrimitiveRunFunction &function, string &error) {
-	auto compiler = sljit_create_compiler(nullptr);
-	if (!compiler) {
-		error = "failed to create SLJIT compiler";
-		return nullptr;
-	}
-
-	const auto &registers = GetSljitPrimitiveRunRegisterLayout();
-	sljit_emit_enter(compiler, 0, SLJIT_ARGS1V(P), 7, registers.multi_saved_register_count, 0);
-	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_S1, 0, SLJIT_MEM1(SLJIT_S0),
-	               offsetof(SljitNativePrimitiveRunInput, input_offset));
-	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_S2, 0, SLJIT_MEM1(SLJIT_S0),
-	               offsetof(SljitNativePrimitiveRunInput, input_count));
-	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_S3, 0, SLJIT_MEM1(SLJIT_S0),
-	               offsetof(SljitNativePrimitiveRunInput, output_count));
-	sljit_emit_op1(compiler, SLJIT_MOV_P, SLJIT_S4, 0, SLJIT_MEM1(SLJIT_S0),
-	               offsetof(SljitNativePrimitiveRunInput, group_data));
-	if (registers.has_multi_output_row_counts) {
-		sljit_emit_op1(compiler, SLJIT_MOV_P, registers.multi_output_row_counts, 0, SLJIT_MEM1(SLJIT_S0),
-		               offsetof(SljitNativePrimitiveRunInput, output_row_counts));
-	}
-
-	auto row_loop = sljit_emit_label(compiler);
-	auto input_done = sljit_emit_cmp(compiler, SLJIT_GREATER_EQUAL, SLJIT_S1, 0, SLJIT_S2, 0);
-	EmitSljitPrimitiveRunLoadKey(compiler, group_source_type, SLJIT_R4);
-	auto no_existing_group = sljit_emit_cmp(compiler, SLJIT_EQUAL, SLJIT_S3, 0, SLJIT_IMM, 0);
-	sljit_emit_op2(compiler, SLJIT_SUB, SLJIT_R5, 0, SLJIT_S3, 0, SLJIT_IMM, 1);
-	sljit_emit_op1(compiler, SLJIT_MOV_P, SLJIT_R6, 0, SLJIT_MEM1(SLJIT_S0),
-	               offsetof(SljitNativePrimitiveRunInput, output_group_data));
-	sljit_emit_op1(compiler, SljitPrimitiveRunPhysicalTypeLoadOp(group_type), SLJIT_R0, 0,
-	               SLJIT_MEM2(SLJIT_R6, SLJIT_R5), SljitPrimitiveRunPhysicalTypeScale(group_type));
-	if (group_cast_kind == ExecutionRowPointerGroupKeyCastKind::INTEGRAL_COMPRESS) {
-		sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_R6, 0, SLJIT_MEM1(SLJIT_S0),
-		               offsetof(SljitNativePrimitiveRunInput, group_cast_constant));
-		sljit_emit_op2(compiler, SLJIT_ADD, SLJIT_R0, 0, SLJIT_R0, 0, SLJIT_R6, 0);
-	}
-	auto same_group = sljit_emit_cmp(compiler, SLJIT_EQUAL, SLJIT_R4, 0, SLJIT_R0, 0);
-	EmitSljitPrimitiveRunRecordIncreasingTransition(compiler, group_source_type);
-
-	auto append_group = sljit_emit_label(compiler);
-	sljit_set_label(no_existing_group, append_group);
-	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_R5, 0, SLJIT_MEM1(SLJIT_S0),
-	               offsetof(SljitNativePrimitiveRunInput, output_capacity));
-	auto output_full = sljit_emit_cmp(compiler, SLJIT_GREATER_EQUAL, SLJIT_S3, 0, SLJIT_R5, 0);
-	EmitSljitPrimitiveRunHomogeneousStartGroup(compiler, group_type, group_cast_kind, primitive_kind, lane_count);
-
-	auto accumulate_group = sljit_emit_label(compiler);
-	sljit_set_label(same_group, accumulate_group);
-	EmitSljitPrimitiveRunBindOutputIndex(compiler);
-	EmitSljitPrimitiveRunHomogeneousAccumulateLanes(compiler, payload_type, primitive_kind, lane_count);
-	sljit_emit_op2(compiler, SLJIT_ADD, SLJIT_S1, 0, SLJIT_S1, 0, SLJIT_IMM, 1);
-	auto next_row = sljit_emit_jump(compiler, SLJIT_JUMP);
-	sljit_set_label(next_row, row_loop);
-
-	auto finish = sljit_emit_label(compiler);
-	sljit_set_label(input_done, finish);
-	sljit_set_label(output_full, finish);
-	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_MEM1(SLJIT_S0), offsetof(SljitNativePrimitiveRunInput, input_offset),
-	               SLJIT_S1, 0);
-	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_MEM1(SLJIT_S0), offsetof(SljitNativePrimitiveRunInput, output_count),
-	               SLJIT_S3, 0);
-	sljit_emit_return_void(compiler);
-	return FinishSljitCode(compiler, function, error);
-}
-
-static constexpr sljit_sw SLJIT_PRIMITIVE_RUN_AFFINE_VALUE_OFFSET = 0;
-static constexpr sljit_sw SLJIT_PRIMITIVE_RUN_AFFINE_VALID_COUNT_OFFSET = sizeof(sljit_sw);
-
-static sljit_sw SljitPrimitiveRunAffineLocalSize() {
-	return GetSljitPrimitiveRunRegisterLayout().has_affine_accumulators ? 0 : 2 * sizeof(sljit_sw);
-}
-
-static void EmitSljitPrimitiveRunAffineReset(struct sljit_compiler *compiler) {
-	const auto &registers = GetSljitPrimitiveRunRegisterLayout();
-	if (registers.has_affine_accumulators) {
-		sljit_emit_op1(compiler, SLJIT_MOV, registers.affine_value, 0, SLJIT_IMM, 0);
-		sljit_emit_op1(compiler, SLJIT_MOV, registers.affine_valid_count, 0, SLJIT_IMM, 0);
-		return;
-	}
-	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_MEM1(SLJIT_SP), SLJIT_PRIMITIVE_RUN_AFFINE_VALUE_OFFSET, SLJIT_IMM, 0);
-	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_MEM1(SLJIT_SP), SLJIT_PRIMITIVE_RUN_AFFINE_VALID_COUNT_OFFSET, SLJIT_IMM,
-	               0);
-}
-
-static void EmitSljitPrimitiveRunAffineAccumulateValue(struct sljit_compiler *compiler, sljit_s32 value_reg) {
-	const auto &registers = GetSljitPrimitiveRunRegisterLayout();
-	if (registers.has_affine_accumulators) {
-		sljit_emit_op2(compiler, SLJIT_ADD, registers.affine_value, 0, registers.affine_value, 0, value_reg, 0);
-		return;
-	}
-	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_R4, 0, SLJIT_MEM1(SLJIT_SP), SLJIT_PRIMITIVE_RUN_AFFINE_VALUE_OFFSET);
-	sljit_emit_op2(compiler, SLJIT_ADD, SLJIT_R4, 0, SLJIT_R4, 0, value_reg, 0);
-	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_MEM1(SLJIT_SP), SLJIT_PRIMITIVE_RUN_AFFINE_VALUE_OFFSET, SLJIT_R4, 0);
-}
-
-static void EmitSljitPrimitiveRunAffineIncrementValidCount(struct sljit_compiler *compiler) {
-	const auto &registers = GetSljitPrimitiveRunRegisterLayout();
-	if (registers.has_affine_accumulators) {
-		sljit_emit_op2(compiler, SLJIT_ADD, registers.affine_valid_count, 0, registers.affine_valid_count, 0, SLJIT_IMM,
-		               1);
-		return;
-	}
-	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_R4, 0, SLJIT_MEM1(SLJIT_SP),
-	               SLJIT_PRIMITIVE_RUN_AFFINE_VALID_COUNT_OFFSET);
-	sljit_emit_op2(compiler, SLJIT_ADD, SLJIT_R4, 0, SLJIT_R4, 0, SLJIT_IMM, 1);
-	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_MEM1(SLJIT_SP), SLJIT_PRIMITIVE_RUN_AFFINE_VALID_COUNT_OFFSET, SLJIT_R4,
-	               0);
-}
-
-static sljit_s32 EmitSljitPrimitiveRunAffineValueOperand(struct sljit_compiler *compiler) {
-	const auto &registers = GetSljitPrimitiveRunRegisterLayout();
-	if (registers.has_affine_accumulators) {
-		return registers.affine_value;
-	}
-	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_R0, 0, SLJIT_MEM1(SLJIT_SP), SLJIT_PRIMITIVE_RUN_AFFINE_VALUE_OFFSET);
-	return SLJIT_R0;
-}
-
-static sljit_s32 EmitSljitPrimitiveRunAffineValidCountOperand(struct sljit_compiler *compiler) {
-	const auto &registers = GetSljitPrimitiveRunRegisterLayout();
-	if (registers.has_affine_accumulators) {
-		return registers.affine_valid_count;
-	}
-	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_R0, 0, SLJIT_MEM1(SLJIT_SP),
-	               SLJIT_PRIMITIVE_RUN_AFFINE_VALID_COUNT_OFFSET);
-	return SLJIT_R0;
-}
-
-static void EmitSljitPrimitiveRunAffineStartFreshGroup(struct sljit_compiler *compiler, PhysicalType group_type,
+static void EmitSljitPrimitiveRunAffineStartFreshGroup(struct sljit_compiler *compiler,
+                                                       const SljitPrimitiveRunAffineValues &values,
+                                                       PhysicalType group_type,
                                                        ExecutionRowPointerGroupKeyCastKind group_cast_kind) {
 	// R4 contains the raw source key. R2 distinguishes this fresh slot from a
 	// pending boundary slot whose finalized affine deltas must be merged.
 	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_R0, 0, SLJIT_R4, 0);
 	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_R1, 0, SLJIT_IMM, 0);
 	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_R2, 0, SLJIT_IMM, 0);
-	EmitSljitPrimitiveRunAffineReset(compiler);
+	EmitSljitPrimitiveRunAffineReset(compiler, values);
 	sljit_emit_op1(compiler, SLJIT_MOV_P, SLJIT_R3, 0, SLJIT_MEM1(SLJIT_S0),
 	               offsetof(SljitNativePrimitiveRunInput, output_group_data));
 	if (group_cast_kind == ExecutionRowPointerGroupKeyCastKind::INTEGRAL_COMPRESS) {
@@ -1132,13 +715,14 @@ static void EmitSljitPrimitiveRunAffineStartFreshGroup(struct sljit_compiler *co
 	sljit_emit_op2(compiler, SLJIT_ADD, SLJIT_S3, 0, SLJIT_S3, 0, SLJIT_IMM, 1);
 }
 
-static void EmitSljitPrimitiveRunAffineStartExistingGroup(struct sljit_compiler *compiler) {
+static void EmitSljitPrimitiveRunAffineStartExistingGroup(struct sljit_compiler *compiler,
+                                                          const SljitPrimitiveRunAffineValues &values) {
 	// The previous invocation already finalized this output slot. Accumulate a
 	// new shared-source delta and merge it exactly once at the next boundary.
 	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_R0, 0, SLJIT_R4, 0);
 	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_R1, 0, SLJIT_IMM, 0);
 	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_R2, 0, SLJIT_IMM, 1);
-	EmitSljitPrimitiveRunAffineReset(compiler);
+	EmitSljitPrimitiveRunAffineReset(compiler, values);
 }
 
 static sljit_jump *EmitJumpIfSljitPrimitiveRunAffinePayloadNull(struct sljit_compiler *compiler) {
@@ -1150,7 +734,8 @@ static sljit_jump *EmitJumpIfSljitPrimitiveRunAffinePayloadNull(struct sljit_com
 	return is_null;
 }
 
-static void EmitSljitPrimitiveRunAffineFinalize(struct sljit_compiler *compiler, bool payload_nullable) {
+static void EmitSljitPrimitiveRunAffineFinalize(struct sljit_compiler *compiler,
+                                                const SljitPrimitiveRunAffineValues &values, bool payload_nullable) {
 	// Keep the shared run representation compact. The append callback expands it
 	// directly into aggregate states after group addresses become available.
 	sljit_emit_op1(compiler, SLJIT_MOV_P, SLJIT_R3, 0, SLJIT_MEM1(SLJIT_S0),
@@ -1163,14 +748,14 @@ static void EmitSljitPrimitiveRunAffineFinalize(struct sljit_compiler *compiler,
 	sljit_emit_op1(compiler, SLJIT_MOV_P, SLJIT_R3, 0, SLJIT_MEM1(SLJIT_S0),
 	               offsetof(SljitNativePrimitiveRunInput, output_shared_int64_values));
 	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_R5, 0, SLJIT_MEM2(SLJIT_R3, SLJIT_R4), 3);
-	auto value_operand = EmitSljitPrimitiveRunAffineValueOperand(compiler);
+	auto value_operand = SljitKernelFrameRegister(compiler, values.value, SLJIT_R0);
 	sljit_emit_op2(compiler, SLJIT_ADD, SLJIT_R5, 0, SLJIT_R5, 0, value_operand, 0);
 	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_MEM2(SLJIT_R3, SLJIT_R4), 3, SLJIT_R5, 0);
 	if (payload_nullable) {
 		sljit_emit_op1(compiler, SLJIT_MOV_P, SLJIT_R3, 0, SLJIT_MEM1(SLJIT_S0),
 		               offsetof(SljitNativePrimitiveRunInput, output_shared_valid_counts));
 		sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_R5, 0, SLJIT_MEM2(SLJIT_R3, SLJIT_R4), 3);
-		auto valid_count_operand = EmitSljitPrimitiveRunAffineValidCountOperand(compiler);
+		auto valid_count_operand = SljitKernelFrameRegister(compiler, values.valid_count, SLJIT_R0);
 		sljit_emit_op2(compiler, SLJIT_ADD, SLJIT_R5, 0, SLJIT_R5, 0, valid_count_operand, 0);
 		sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_MEM2(SLJIT_R3, SLJIT_R4), 3, SLJIT_R5, 0);
 	}
@@ -1182,12 +767,12 @@ static void EmitSljitPrimitiveRunAffineFinalize(struct sljit_compiler *compiler,
 	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_MEM2(SLJIT_R3, SLJIT_R4), 3, SLJIT_R1, 0);
 	sljit_emit_op1(compiler, SLJIT_MOV_P, SLJIT_R3, 0, SLJIT_MEM1(SLJIT_S0),
 	               offsetof(SljitNativePrimitiveRunInput, output_shared_int64_values));
-	value_operand = EmitSljitPrimitiveRunAffineValueOperand(compiler);
+	value_operand = SljitKernelFrameRegister(compiler, values.value, SLJIT_R0);
 	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_MEM2(SLJIT_R3, SLJIT_R4), 3, value_operand, 0);
 	if (payload_nullable) {
 		sljit_emit_op1(compiler, SLJIT_MOV_P, SLJIT_R3, 0, SLJIT_MEM1(SLJIT_S0),
 		               offsetof(SljitNativePrimitiveRunInput, output_shared_valid_counts));
-		auto valid_count_operand = EmitSljitPrimitiveRunAffineValidCountOperand(compiler);
+		auto valid_count_operand = SljitKernelFrameRegister(compiler, values.valid_count, SLJIT_R0);
 		sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_MEM2(SLJIT_R3, SLJIT_R4), 3, valid_count_operand, 0);
 	}
 	sljit_set_label(done, sljit_emit_label(compiler));
@@ -1206,8 +791,7 @@ BuildSljitNativePrimitiveRunAffineInt64Update(PhysicalType group_source_type, Ph
 		error = "unsupported SLJIT affine int64 primitive run shape";
 		return nullptr;
 	}
-	const auto &registers = GetSljitPrimitiveRunRegisterLayout();
-	if (!registers.supported) {
+	if (!SljitPrimitiveRunCodegenSupported()) {
 		error = "unsupported SLJIT affine int64 primitive run register layout";
 		return nullptr;
 	}
@@ -1217,8 +801,12 @@ BuildSljitNativePrimitiveRunAffineInt64Update(PhysicalType group_source_type, Ph
 		return nullptr;
 	}
 
-	sljit_emit_enter(compiler, 0, SLJIT_ARGS1V(P), 7, registers.affine_saved_register_count,
-	                 SljitPrimitiveRunAffineLocalSize());
+	// R0 holds the group's key, R1 its row count, R2 whether its slot is fresh, R3-R6 are scratch; S0-S5 the protocol
+	SljitKernelFrame frame(7, 6);
+	SljitPrimitiveRunAffineValues values;
+	values.value = frame.AllocateCarried();
+	values.valid_count = frame.AllocateCarried();
+	frame.EmitEnter(compiler, SLJIT_ARGS1V(P));
 	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_S1, 0, SLJIT_MEM1(SLJIT_S0),
 	               offsetof(SljitNativePrimitiveRunInput, input_offset));
 	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_S2, 0, SLJIT_MEM1(SLJIT_S0),
@@ -1251,12 +839,12 @@ BuildSljitNativePrimitiveRunAffineInt64Update(PhysicalType group_source_type, Ph
 	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_R5, 0, SLJIT_MEM1(SLJIT_S0),
 	               offsetof(SljitNativePrimitiveRunInput, output_capacity));
 	auto output_full = sljit_emit_cmp(compiler, SLJIT_GREATER_EQUAL, SLJIT_S3, 0, SLJIT_R5, 0);
-	EmitSljitPrimitiveRunAffineStartFreshGroup(compiler, group_type, group_cast_kind);
+	EmitSljitPrimitiveRunAffineStartFreshGroup(compiler, values, group_type, group_cast_kind);
 	auto start_accumulating_fresh = sljit_emit_jump(compiler, SLJIT_JUMP);
 
 	auto start_existing_group = sljit_emit_label(compiler);
 	sljit_set_label(same_existing_group, start_existing_group);
-	EmitSljitPrimitiveRunAffineStartExistingGroup(compiler);
+	EmitSljitPrimitiveRunAffineStartExistingGroup(compiler, values);
 
 	auto accumulate_group = sljit_emit_label(compiler);
 	sljit_set_label(start_accumulating_fresh, accumulate_group);
@@ -1266,9 +854,9 @@ BuildSljitNativePrimitiveRunAffineInt64Update(PhysicalType group_source_type, Ph
 	}
 	sljit_emit_op1(compiler, SljitPrimitiveRunPhysicalTypeLoadOp(payload_type), SLJIT_R3, 0,
 	               SLJIT_MEM2(SLJIT_S5, SLJIT_S1), SljitPrimitiveRunPhysicalTypeScale(payload_type));
-	EmitSljitPrimitiveRunAffineAccumulateValue(compiler, SLJIT_R3);
+	EmitSljitPrimitiveRunAffineAccumulateValue(compiler, values, SLJIT_R3);
 	if (payload_nullable) {
-		EmitSljitPrimitiveRunAffineIncrementValidCount(compiler);
+		EmitSljitPrimitiveRunAffineIncrementValidCount(compiler, values);
 	}
 	if (payload_is_null) {
 		sljit_set_label(payload_is_null, sljit_emit_label(compiler));
@@ -1283,19 +871,19 @@ BuildSljitNativePrimitiveRunAffineInt64Update(PhysicalType group_source_type, Ph
 	// Preserve the next raw key in S5 while finalization reuses every scratch
 	// register. The payload pointer is rebound before the next row is consumed.
 	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_S5, 0, SLJIT_R4, 0);
-	EmitSljitPrimitiveRunAffineFinalize(compiler, payload_nullable);
+	EmitSljitPrimitiveRunAffineFinalize(compiler, values, payload_nullable);
 	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_R4, 0, SLJIT_S5, 0);
 	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_R5, 0, SLJIT_MEM1(SLJIT_S0),
 	               offsetof(SljitNativePrimitiveRunInput, output_capacity));
 	auto transition_output_full = sljit_emit_cmp(compiler, SLJIT_GREATER_EQUAL, SLJIT_S3, 0, SLJIT_R5, 0);
-	EmitSljitPrimitiveRunAffineStartFreshGroup(compiler, group_type, group_cast_kind);
+	EmitSljitPrimitiveRunAffineStartFreshGroup(compiler, values, group_type, group_cast_kind);
 	sljit_emit_op1(compiler, SLJIT_MOV_P, SLJIT_S5, 0, SLJIT_MEM1(SLJIT_S0),
 	               offsetof(SljitNativePrimitiveRunInput, payload_data));
 	auto next_row = sljit_emit_jump(compiler, SLJIT_JUMP);
 	sljit_set_label(next_row, accumulate_group);
 
 	sljit_set_label(run_done, sljit_emit_label(compiler));
-	EmitSljitPrimitiveRunAffineFinalize(compiler, payload_nullable);
+	EmitSljitPrimitiveRunAffineFinalize(compiler, values, payload_nullable);
 
 	auto finish = sljit_emit_label(compiler);
 	sljit_set_label(input_done, finish);
@@ -1309,56 +897,68 @@ BuildSljitNativePrimitiveRunAffineInt64Update(PhysicalType group_source_type, Ph
 	return FinishSljitCode(compiler, function, error);
 }
 
-//! Where the multi-lane kernel keeps a group's running state while its rows stream: R7 and up while the target has
-//! registers to spare, stack slots after them. The group's output slot receives the state once, when the group ends.
-//! The lanes of a shared validity mask share one set flag
+//! The multi-lane kernel's frame values: a group's running state (the row count; per lane its value, a hugeint sum's
+//! upper word, a sum's set flag), carried across the group's rows and stored into its output slot when the group
+//! ends, then each lane's payload and validity pointers. The lanes of a shared validity mask share one set flag and
+//! read one mask
 struct SljitPrimitiveRunMultiAccumulators {
 	struct Lane {
 		SljitOperand lower {0, 0};
-		//! a hugeint sum's upper word
 		SljitOperand upper {0, 0};
-		//! a sum's set flag: whether a valid row reached the group
 		SljitOperand flag {0, 0};
+		SljitOperand payload_data {0, 0};
+		SljitOperand payload_validity {0, 0};
 	};
 	SljitOperand row_count {0, 0};
 	vector<Lane> lanes;
-	sljit_s32 scratch_register_count = 7;
-	sljit_sw local_size = 0;
 };
 
 static SljitPrimitiveRunMultiAccumulators
-PlanSljitPrimitiveRunMultiAccumulators(const vector<AggregatePrimitiveUpdateKind> &primitive_kinds,
-                                       bool shared_payload_validity, sljit_s32 saved_register_count) {
+PlanSljitPrimitiveRunMultiAccumulators(SljitKernelFrame &frame,
+                                       const vector<AggregatePrimitiveUpdateKind> &primitive_kinds,
+                                       bool shared_payload_validity) {
 	SljitPrimitiveRunMultiAccumulators result;
-	const auto &registers = GetSljitTargetCapabilities().registers;
-	auto allocate = [&]() -> SljitOperand {
-		if (registers.SupportsLayout(result.scratch_register_count + 1, saved_register_count)) {
-			return SljitOperand::Register(SLJIT_R(result.scratch_register_count++));
-		}
-		const auto offset = result.local_size;
-		result.local_size += NumericCast<sljit_sw>(sizeof(sljit_sw));
-		return {SLJIT_MEM1(SLJIT_SP), offset};
-	};
-	result.row_count = allocate();
+	result.row_count = frame.AllocateCarried();
 	SljitOperand shared_flag {0, 0};
 	for (auto primitive_kind : primitive_kinds) {
 		SljitPrimitiveRunMultiAccumulators::Lane lane;
-		lane.lower = allocate();
+		lane.lower = frame.AllocateCarried();
 		if (primitive_kind == AggregatePrimitiveUpdateKind::SUM_HUGEINT) {
-			lane.upper = allocate();
+			lane.upper = frame.AllocateCarried();
 		}
 		if (primitive_kind == AggregatePrimitiveUpdateKind::SUM_INT64 ||
 		    primitive_kind == AggregatePrimitiveUpdateKind::SUM_HUGEINT) {
 			if (!shared_payload_validity) {
-				lane.flag = allocate();
+				lane.flag = frame.AllocateCarried();
 			} else {
 				if (!shared_flag.operand) {
-					shared_flag = allocate();
+					shared_flag = frame.AllocateCarried();
 				}
 				lane.flag = shared_flag;
 			}
 		}
 		result.lanes.push_back(lane);
+	}
+	auto lane_field = [](idx_t lane_idx, sljit_sw offset) {
+		return SljitOperand {SLJIT_MEM1(SLJIT_S5), SljitPrimitiveRunLaneFieldOffset(lane_idx, offset)};
+	};
+	// a shared mask is read through its first lane
+	bool validity_read = false;
+	for (idx_t lane_idx = 0; lane_idx < primitive_kinds.size(); lane_idx++) {
+		const auto primitive_kind = primitive_kinds[lane_idx];
+		auto &lane = result.lanes[lane_idx];
+		if (primitive_kind == AggregatePrimitiveUpdateKind::COUNT_STAR) {
+			continue;
+		}
+		if (primitive_kind != AggregatePrimitiveUpdateKind::COUNT) {
+			lane.payload_data =
+			    frame.AllocateInvariant(lane_field(lane_idx, offsetof(SljitNativePrimitiveRunLaneInput, payload_data)));
+		}
+		if (!shared_payload_validity || !validity_read) {
+			lane.payload_validity = frame.AllocateInvariant(
+			    lane_field(lane_idx, offsetof(SljitNativePrimitiveRunLaneInput, payload_validity)));
+			validity_read = true;
+		}
 	}
 	return result;
 }
@@ -1431,10 +1031,9 @@ static void EmitSljitPrimitiveRunMultiAccumulateLane(struct sljit_compiler *comp
 		}
 		return;
 	}
-	EmitSljitPrimitiveRunLoadLanePointer(compiler, lane_idx, SLJIT_R1,
-	                                     offsetof(SljitNativePrimitiveRunLaneInput, payload_data));
+	const auto payload_data = SljitKernelFrameRegister(compiler, lane.payload_data, SLJIT_R1);
 	sljit_emit_op1(compiler, SljitPrimitiveRunPhysicalTypeLoadOp(payload_type), SLJIT_R1, 0,
-	               SLJIT_MEM2(SLJIT_R1, SLJIT_S1), SljitPrimitiveRunPhysicalTypeScale(payload_type));
+	               SLJIT_MEM2(payload_data, SLJIT_S1), SljitPrimitiveRunPhysicalTypeScale(payload_type));
 	if (bit_reg) {
 		sljit_emit_op2(compiler, SLJIT_SUB, SLJIT_R2, 0, SLJIT_IMM, 0, bit_reg, 0);
 		sljit_emit_op2(compiler, SLJIT_AND, SLJIT_R1, 0, SLJIT_R1, 0, SLJIT_R2, 0);
@@ -1463,12 +1062,12 @@ static void EmitSljitPrimitiveRunMultiAccumulateLane(struct sljit_compiler *comp
 
 //! A lane without a validity mask accumulates as valid; one with a mask by the row's bit, in R6
 template <class ACCUMULATE>
-static void EmitSljitPrimitiveRunMultiByValidity(struct sljit_compiler *compiler, idx_t lane_idx,
+static void EmitSljitPrimitiveRunMultiByValidity(struct sljit_compiler *compiler,
+                                                 const SljitPrimitiveRunMultiAccumulators::Lane &lane,
                                                  const ACCUMULATE &accumulate) {
-	EmitSljitPrimitiveRunLoadLanePointer(compiler, lane_idx, SLJIT_R5,
-	                                     offsetof(SljitNativePrimitiveRunLaneInput, payload_validity));
-	auto no_mask = sljit_emit_cmp(compiler, SLJIT_EQUAL, SLJIT_R5, 0, SLJIT_IMM, 0);
-	EmitLoadSljitValidityBit(compiler, SLJIT_R5, SLJIT_S1, SLJIT_R6);
+	const auto validity = SljitKernelFrameRegister(compiler, lane.payload_validity, SLJIT_R5);
+	auto no_mask = sljit_emit_cmp(compiler, SLJIT_EQUAL, validity, 0, SLJIT_IMM, 0);
+	EmitLoadSljitValidityBit(compiler, validity, SLJIT_S1, SLJIT_R6);
 	accumulate(SLJIT_R6);
 	auto done = sljit_emit_jump(compiler, SLJIT_JUMP);
 	sljit_set_label(no_mask, sljit_emit_label(compiler));
@@ -1495,7 +1094,7 @@ static void EmitSljitPrimitiveRunMultiAccumulateRow(struct sljit_compiler *compi
 			representative_lane = MinValue(representative_lane, lane_idx);
 			continue;
 		}
-		EmitSljitPrimitiveRunMultiByValidity(compiler, lane_idx, [&](sljit_s32 bit_reg) {
+		EmitSljitPrimitiveRunMultiByValidity(compiler, accumulators.lanes[lane_idx], [&](sljit_s32 bit_reg) {
 			EmitSljitPrimitiveRunMultiAccumulateLane(compiler, lane_idx, payload_types[lane_idx],
 			                                         primitive_kinds[lane_idx], accumulators.lanes[lane_idx], bit_reg);
 		});
@@ -1503,7 +1102,7 @@ static void EmitSljitPrimitiveRunMultiAccumulateRow(struct sljit_compiler *compi
 	if (representative_lane == DConstants::INVALID_INDEX) {
 		return;
 	}
-	EmitSljitPrimitiveRunMultiByValidity(compiler, representative_lane, [&](sljit_s32 bit_reg) {
+	EmitSljitPrimitiveRunMultiByValidity(compiler, accumulators.lanes[representative_lane], [&](sljit_s32 bit_reg) {
 		for (idx_t lane_idx = 0; lane_idx < primitive_kinds.size(); lane_idx++) {
 			if (primitive_kinds[lane_idx] != AggregatePrimitiveUpdateKind::COUNT_STAR) {
 				EmitSljitPrimitiveRunMultiAccumulateLane(compiler, lane_idx, payload_types[lane_idx],
@@ -1569,15 +1168,9 @@ unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativePrimitiveRunMultiUpdate(
 			return nullptr;
 		}
 	}
-	const auto &registers = GetSljitPrimitiveRunRegisterLayout();
-	if (!registers.supported) {
+	if (!SljitPrimitiveRunCodegenSupported()) {
 		error = "unsupported SLJIT multi-lane primitive run register layout";
 		return nullptr;
-	}
-	if (primitive_kinds.size() > SLJIT_PRIMITIVE_RUN_UNROLLED_LANE_BUDGET) {
-		return BuildSljitNativePrimitiveRunHomogeneousMultiUpdate(group_source_type, group_type, group_cast_kind,
-		                                                          payload_types[0], primitive_kinds[0],
-		                                                          primitive_kinds.size(), function, error);
 	}
 	auto compiler = sljit_create_compiler(nullptr);
 	if (!compiler) {
@@ -1585,11 +1178,10 @@ unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativePrimitiveRunMultiUpdate(
 		return nullptr;
 	}
 
-	const auto saved_register_count = registers.base_saved_register_count;
-	const auto accumulators =
-	    PlanSljitPrimitiveRunMultiAccumulators(primitive_kinds, shared_payload_validity, saved_register_count);
-	sljit_emit_enter(compiler, 0, SLJIT_ARGS1V(P), accumulators.scratch_register_count, saved_register_count,
-	                 accumulators.local_size);
+	// R0 holds the group's key, R1-R6 are scratch; S0-S5 the protocol
+	SljitKernelFrame frame(7, 6);
+	const auto accumulators = PlanSljitPrimitiveRunMultiAccumulators(frame, primitive_kinds, shared_payload_validity);
+	frame.EmitEnter(compiler, SLJIT_ARGS1V(P));
 	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_S1, 0, SLJIT_MEM1(SLJIT_S0),
 	               offsetof(SljitNativePrimitiveRunInput, input_offset));
 	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_S2, 0, SLJIT_MEM1(SLJIT_S0),
@@ -1600,6 +1192,7 @@ unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativePrimitiveRunMultiUpdate(
 	               offsetof(SljitNativePrimitiveRunInput, group_data));
 	sljit_emit_op1(compiler, SLJIT_MOV_P, SLJIT_S5, 0, SLJIT_MEM1(SLJIT_S0),
 	               offsetof(SljitNativePrimitiveRunInput, lane_inputs));
+	frame.EmitLoadInvariants(compiler);
 
 	auto input_done = sljit_emit_cmp(compiler, SLJIT_GREATER_EQUAL, SLJIT_S1, 0, SLJIT_S2, 0);
 	EmitSljitPrimitiveRunLoadKey(compiler, group_source_type, SLJIT_R4);

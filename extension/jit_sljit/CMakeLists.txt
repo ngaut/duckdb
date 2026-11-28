@@ -36,6 +36,7 @@ set(JIT_SLJIT_EXTENSION_FILES
     sljit_arithmetic_overflow_codegen.cpp
     sljit_artifact_key.cpp
     sljit_fsst_string_matcher.cpp
+    sljit_kernel_frame.cpp
     sljit_region_instance_slots.cpp
     sljit_backend.cpp
     sljit_codegen_util.cpp

@@ -90,48 +90,6 @@ static SljitProjectionRegisterLayout BuildSljitProjectionRegisterLayout() {
 	return result;
 }
 
-static SljitPrimitiveRunRegisterLayout BuildSljitPrimitiveRunRegisterLayout() {
-	SljitPrimitiveRunRegisterLayout result;
-	const auto &capabilities = GetSljitTargetCapabilities();
-	result.supported = capabilities.SupportsPrimitiveRunRegisterABI();
-	if (!result.supported) {
-		return result;
-	}
-	result.base_saved_register_count = 6;
-	result.saved_register_count = result.base_saved_register_count;
-	result.affine_saved_register_count = result.base_saved_register_count;
-	result.multi_saved_register_count = result.base_saved_register_count;
-	if (capabilities.registers.SupportsLayout(7, 7)) {
-		result.has_multi_output_index = true;
-		result.multi_output_index = SljitSavedRegisterAt(6);
-		result.multi_saved_register_count = 7;
-	}
-	if (capabilities.registers.SupportsLayout(7, 8)) {
-		result.has_multi_output_row_counts = true;
-		result.multi_output_row_counts = SljitSavedRegisterAt(7);
-		result.multi_saved_register_count = 8;
-	}
-	if (capabilities.registers.SupportsLayout(7, 8)) {
-		result.has_affine_accumulators = true;
-		result.affine_value = SljitSavedRegisterAt(6);
-		result.affine_valid_count = SljitSavedRegisterAt(7);
-		result.affine_saved_register_count = 8;
-	}
-	if (capabilities.registers.SupportsLayout(7, 10)) {
-		result.has_output_pointer_hoists = true;
-		result.output_group_data = SljitSavedRegisterAt(6);
-		result.output_row_counts = SljitSavedRegisterAt(7);
-		result.output_values = SljitSavedRegisterAt(8);
-		result.output_value_is_set = SljitSavedRegisterAt(9);
-		result.saved_register_count = 10;
-	}
-	if (capabilities.registers.SupportsLayout(8, result.saved_register_count)) {
-		result.scratch_register_count = 8;
-		result.hugeint_set_flag = SLJIT_R7;
-	}
-	return result;
-}
-
 static SljitPerfectHashProbeRegisterLayout BuildSljitPerfectHashProbeRegisterLayout() {
 	SljitPerfectHashProbeRegisterLayout result;
 	const auto &registers = GetSljitTargetCapabilities().registers;
@@ -180,11 +138,6 @@ const SljitProjectionRegisterLayout &GetSljitProjectionRegisterLayout() {
 
 const SljitUngroupedAggregateRegisterLayout &GetSljitUngroupedAggregateRegisterLayout() {
 	static const auto result = BuildSljitUngroupedAggregateRegisterLayout();
-	return result;
-}
-
-const SljitPrimitiveRunRegisterLayout &GetSljitPrimitiveRunRegisterLayout() {
-	static const auto result = BuildSljitPrimitiveRunRegisterLayout();
 	return result;
 }
 

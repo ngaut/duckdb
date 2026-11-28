@@ -1,6 +1,7 @@
 #include "test_jit_helpers.hpp"
 
 #include "sljit_codegen_util.hpp"
+#include "sljit_kernel_frame.hpp"
 #include "sljit_platform.hpp"
 #include "sljit_region_plan.hpp"
 #include "sljit_region_plan_internal.hpp"
@@ -415,15 +416,55 @@ TEST_CASE("SLJIT backend requires an addressable native-vector register ABI", "[
 			CHECK(ungrouped.accumulator_scratch_register_count == 10);
 		}
 
-		const auto &primitive_run = GetSljitPrimitiveRunRegisterLayout();
-		CHECK(primitive_run.supported == capabilities.SupportsPrimitiveRunRegisterABI());
-		CHECK(primitive_run.has_affine_accumulators ==
-		      (primitive_run.supported && capabilities.registers.SupportsLayout(7, 8)));
-		CHECK(primitive_run.has_output_pointer_hoists ==
-		      (primitive_run.supported && capabilities.registers.SupportsLayout(7, 10)));
-
 		const auto &perfect_hash_probe = GetSljitPerfectHashProbeRegisterLayout();
 		CHECK(perfect_hash_probe.has_invariant_hoists == capabilities.registers.SupportsLayout(7, 10));
+	}
+}
+
+TEST_CASE("SLJIT kernel frames hand out the registers the target can enter with and then homes", "[api][jit][sljit]") {
+	const auto &capabilities = GetSljitTargetCapabilities();
+	if (!capabilities.BackendAvailable() || !capabilities.registers.SupportsLayout(7, 6)) {
+		return;
+	}
+	auto is_register = [](const SljitOperand &operand) {
+		return !(operand.operand & SLJIT_MEM);
+	};
+	// a call-free loop takes scratch registers first, then saved ones, then stack slots for carried values; an
+	// invariant without a register stays in its home
+	SljitKernelFrame frame(7, 6);
+	idx_t registers = 0;
+	idx_t stack_slots = 0;
+	sljit_sw expected_offset = 0;
+	for (idx_t value_idx = 0; value_idx < 40; value_idx++) {
+		auto carried = frame.AllocateCarried();
+		if (is_register(carried)) {
+			REQUIRE(stack_slots == 0);
+			registers++;
+			continue;
+		}
+		REQUIRE(carried.operand == SLJIT_MEM1(SLJIT_SP));
+		REQUIRE(carried.operand_w == expected_offset);
+		expected_offset += sizeof(sljit_sw);
+		stack_slots++;
+	}
+	REQUIRE(capabilities.registers.SupportsLayout(frame.ScratchCount(), frame.SavedCount()));
+	REQUIRE_FALSE(capabilities.registers.SupportsLayout(frame.ScratchCount() + 1, frame.SavedCount()));
+	REQUIRE_FALSE(capabilities.registers.SupportsLayout(frame.ScratchCount(), frame.SavedCount() + 1));
+	REQUIRE(registers == idx_t(frame.ScratchCount() - 7 + frame.SavedCount() - 6));
+	REQUIRE(frame.LocalSize() == NumericCast<sljit_sw>(stack_slots * sizeof(sljit_sw)));
+	SljitOperand home {SLJIT_MEM1(SLJIT_S0), 24};
+	auto invariant = frame.AllocateInvariant(home);
+	REQUIRE(invariant.operand == home.operand);
+	REQUIRE(invariant.operand_w == home.operand_w);
+
+	// a loop that calls helpers takes saved registers only
+	SljitKernelFrame calling(7, 6, true);
+	while (true) {
+		auto carried = calling.AllocateCarried();
+		if (!is_register(carried)) {
+			break;
+		}
+		REQUIRE(calling.ScratchCount() == 7);
 	}
 }
 
