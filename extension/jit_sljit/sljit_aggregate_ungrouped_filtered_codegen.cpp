@@ -672,8 +672,6 @@ unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativeFilteredUngroupedFusedPrim
 		}
 		return null_jumps;
 	};
-	struct sljit_jump *fast_done = nullptr;
-	vector<sljit_jump *> fast_loop_exits;
 	struct sljit_jump *selected_fast_done = nullptr;
 	struct sljit_jump *selected_hybrid_done = nullptr;
 	if (codegen_plan.fast_path_supported) {
@@ -728,24 +726,8 @@ unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativeFilteredUngroupedFusedPrim
 			EmitSljitTypedExpressionTreeSimdCountLoop(compiler, predicate, simd_plan, local_count_offsets[0],
 			                                          simd_mask_offset, nullptr, hoists);
 		}
-		// Both outcomes end in their own bottom-tested latch: a rejected row falls through to one and takes only the
-		// back-edge branch, a matching row jumps to its payload updates and the other.
-		fast_done = sljit_emit_cmp(compiler, SLJIT_GREATER_EQUAL, SLJIT_S1, 0, SLJIT_S2, 0);
-		auto fast_loop = sljit_emit_label(compiler);
-		idx_t predicate_spill_index = 0;
-		auto predicate_true =
-		    EmitSljitTypedExpressionTreeFastJumpsIfTrue(compiler, predicate, predicate_spill_index, overflows, hoists);
-		auto emit_latch = [&]() {
-			sljit_emit_op2(compiler, SLJIT_ADD, SLJIT_S1, 0, SLJIT_S1, 0, SLJIT_IMM, 1);
-			sljit_set_label(sljit_emit_cmp(compiler, SLJIT_LESS, SLJIT_S1, 0, SLJIT_S2, 0), fast_loop);
-			fast_loop_exits.push_back(sljit_emit_jump(compiler, SLJIT_JUMP));
-		};
-		emit_latch();
-		SetSljitJumpLabels(predicate_true, sljit_emit_label(compiler));
-		emit_payload_updates();
-		emit_latch();
-		fast_loop_exits.push_back(fast_done);
-		end_register_accumulators(fast_loop_exits);
+		end_register_accumulators(
+		    EmitSljitFlatPredicateLoop(compiler, predicate, overflows, hoists, emit_payload_updates));
 
 		sljit_set_label(use_generic_loop, sljit_emit_label(compiler));
 

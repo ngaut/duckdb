@@ -444,31 +444,23 @@ unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativeTypedExpressionTreeSelect(
 	               SLJIT_IMM, 0);
 
 	vector<SljitArithmeticOverflowSite> overflows;
-	struct sljit_jump *fast_done = nullptr;
+	vector<sljit_jump *> fast_exits;
 	if (fast_path.fast_path_supported) {
 		sljit_emit_op1(compiler, SLJIT_MOV_U8, SLJIT_R0, 0, SLJIT_MEM1(SLJIT_S0),
 		               offsetof(SljitNativeVectorInput, expression_tree_flat_all_valid));
 		auto use_slow_loop = sljit_emit_cmp(compiler, SLJIT_EQUAL, SLJIT_R0, 0, SLJIT_IMM, 0);
 		if (flat_compare) {
 			EmitSljitCompareSelect(compiler, compare_plan, compare_registers, false);
-			fast_done = sljit_emit_jump(compiler, SLJIT_JUMP);
+			fast_exits.push_back(sljit_emit_jump(compiler, SLJIT_JUMP));
 		} else if (simd_plan.supported) {
 			// Process full lane groups with packed SIMD; S1 is left at the tail
 			// start and the scalar fast loop below finishes the < lanes remainder.
 			EmitSljitTypedExpressionTreeSimdSelectLoop(compiler, root, simd_plan, simd_mask_offset);
 		}
 		if (!flat_compare) {
-			auto fast_loop = sljit_emit_label(compiler);
-			fast_done = sljit_emit_cmp(compiler, SLJIT_GREATER_EQUAL, SLJIT_S1, 0, SLJIT_S2, 0);
-			idx_t fast_spill_index = 0;
-			auto fast_false =
-			    EmitSljitTypedExpressionTreeFastJumps(compiler, root, false, fast_spill_index, overflows,
-			                                          SljitTypedExpressionTreeFastIndexMode::FLAT, nullptr);
-			EmitStoreSljitTypedExpressionTreeTrueSelection(compiler, SLJIT_S1);
-			SetSljitJumpLabels(fast_false, sljit_emit_label(compiler));
-			sljit_emit_op2(compiler, SLJIT_ADD, SLJIT_S1, 0, SLJIT_S1, 0, SLJIT_IMM, 1);
-			auto fast_repeat = sljit_emit_jump(compiler, SLJIT_JUMP);
-			sljit_set_label(fast_repeat, fast_loop);
+			fast_exits = EmitSljitFlatPredicateLoop(compiler, root, overflows, nullptr, [&]() {
+				EmitStoreSljitTypedExpressionTreeTrueSelection(compiler, SLJIT_S1);
+			});
 		}
 		sljit_set_label(use_slow_loop, sljit_emit_label(compiler));
 	}
@@ -539,9 +531,7 @@ unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativeTypedExpressionTreeSelect(
 	auto helper_done = EmitSljitArithmeticOverflowStubs(compiler, overflows);
 
 	auto done_label = sljit_emit_label(compiler);
-	if (fast_done) {
-		sljit_set_label(fast_done, done_label);
-	}
+	SetSljitJumpLabels(fast_exits, done_label);
 	SetSljitJumpLabels(flat_nullable_exits, done_label);
 	if (nullable_simd_done) {
 		sljit_set_label(nullable_simd_done, done_label);

@@ -12,6 +12,24 @@
 
 namespace duckdb {
 
+//! The rows of a flat batch without NULLs from S1 to the count: a row the predicate rejects takes only the back-edge,
+//! and a row it keeps jumps to emit_row and a back-edge of its own. Returns the loop's exits
+template <class EMIT_ROW>
+vector<sljit_jump *> EmitSljitFlatPredicateLoop(struct sljit_compiler *compiler, const ExecutionExpressionIR &predicate,
+                                                vector<SljitArithmeticOverflowSite> &overflows,
+                                                const vector<SljitTypedExpressionTreeLoopHoist> *hoists,
+                                                EMIT_ROW emit_row) {
+	vector<sljit_jump *> exits {sljit_emit_cmp(compiler, SLJIT_GREATER_EQUAL, SLJIT_S1, 0, SLJIT_S2, 0)};
+	auto loop = sljit_emit_label(compiler);
+	idx_t spill_index = 0;
+	auto kept = EmitSljitTypedExpressionTreeFastJumpsIfTrue(compiler, predicate, spill_index, overflows, hoists);
+	exits.push_back(EmitSljitNativeVectorLatch(compiler, loop));
+	SetSljitJumpLabels(kept, sljit_emit_label(compiler));
+	emit_row();
+	exits.push_back(EmitSljitNativeVectorLatch(compiler, loop));
+	return exits;
+}
+
 //! The rows of a flat batch that may hold NULLs, from S1 = 0 to the count, under a predicate that decides NULL as
 //! FALSE (none keeps every row): a loop whose back-edge ends every rejected row. A predicate that ANDs or ORs bits
 //! tests its raw values first, so a row it rejects on the leftover values of its NULLs falls straight to the back-edge,
@@ -49,11 +67,10 @@ vector<sljit_jump *> EmitSljitFlatNullablePredicateLoop(struct sljit_compiler *c
 //! The rows of a flat batch from S1 to the count, under a predicate over rows without NULLs: a row with a NULL in one
 //! of source_refs is rejected before the predicate runs, and emit_row runs for each kept row. Returns the loop's exit
 template <class EMIT_ROW>
-sljit_jump *EmitSljitSourcesCheckedPredicateLoop(struct sljit_compiler *compiler, const ExecutionExpressionIR &predicate,
-                                                 const vector<idx_t> &source_refs,
-                                                 vector<SljitArithmeticOverflowSite> &overflows,
-                                                 const vector<SljitTypedExpressionTreeLoopHoist> *hoists,
-                                                 EMIT_ROW emit_row) {
+sljit_jump *
+EmitSljitSourcesCheckedPredicateLoop(struct sljit_compiler *compiler, const ExecutionExpressionIR &predicate,
+                                     const vector<idx_t> &source_refs, vector<SljitArithmeticOverflowSite> &overflows,
+                                     const vector<SljitTypedExpressionTreeLoopHoist> *hoists, EMIT_ROW emit_row) {
 	auto loop = sljit_emit_label(compiler);
 	auto done = sljit_emit_cmp(compiler, SLJIT_GREATER_EQUAL, SLJIT_S1, 0, SLJIT_S2, 0);
 	vector<sljit_jump *> rejected;
