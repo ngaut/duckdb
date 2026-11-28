@@ -8,6 +8,7 @@
 
 #pragma once
 
+#include "sljit_codegen_internal.hpp"
 #include "sljit_join_probe_codegen.hpp"
 
 #include "duckdb/common/hash_bloom_filter.hpp"
@@ -115,12 +116,6 @@ static inline void EmitStoreHashJoinMarkProbeFlag(struct sljit_compiler *compile
 	sljit_emit_op1(compiler, SLJIT_MOV_P, SLJIT_R4, 0, SLJIT_MEM1(SLJIT_S0),
 	               offsetof(SljitNativeRegularHashJoinProbeInput, match_sel));
 	sljit_emit_op1(compiler, SLJIT_MOV_U32, SLJIT_MEM2(SLJIT_R4, SLJIT_S1), 2, SLJIT_IMM, value);
-}
-
-static inline void SetSljitJumpLabels(const vector<struct sljit_jump *> &jumps, struct sljit_label *label) {
-	for (auto &jump : jumps) {
-		sljit_set_label(jump, label);
-	}
 }
 
 static inline void EmitRepeatHashJoinProbeSlot(struct sljit_compiler *compiler, struct sljit_label *probe_loop,
