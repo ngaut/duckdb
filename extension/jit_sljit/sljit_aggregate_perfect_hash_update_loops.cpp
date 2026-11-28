@@ -5,6 +5,7 @@
 #include "sljit_aggregate_perfect_hash_local_codegen.hpp"
 #include "sljit_codegen_internal.hpp"
 #include "sljit_codegen_util.hpp"
+#include "sljit_predicate_row_loops.hpp"
 
 #include "sljitLir.h"
 
@@ -234,40 +235,16 @@ EmitSljitPerfectHashNullCheckedLoop(const SljitPerfectHashFusedUpdateEmitContext
 		sljit_emit_op1(compiler, SLJIT_MOV_P, registers.optional_invariant, 0, SLJIT_MEM1(SLJIT_S0),
 		               offsetof(SljitNativeVectorInput, source_validity_array));
 	}
-	sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_S1, 0, SLJIT_IMM, 0);
-	vector<sljit_jump *> exits {sljit_emit_cmp(compiler, SLJIT_GREATER_EQUAL, SLJIT_S1, 0, SLJIT_S2, 0)};
-	auto loop = sljit_emit_label(compiler);
-	auto emit_latch = [&]() {
-		sljit_emit_op2(compiler, SLJIT_ADD, SLJIT_S1, 0, SLJIT_S1, 0, SLJIT_IMM, 1);
-		sljit_set_label(sljit_emit_cmp(compiler, SLJIT_LESS, SLJIT_S1, 0, SLJIT_S2, 0), loop);
-		exits.push_back(sljit_emit_jump(compiler, SLJIT_JUMP));
-	};
-	EmitLoadFusedAggregateExecuteIndex(compiler, true);
-	vector<sljit_jump *> predicate_false;
-	if (context.predicate) {
-		if (SljitTypedExpressionTreeEvaluatesAnyBits(*context.predicate)) {
-			// Forcing a NULL leaf FALSE only lowers an AND/OR predicate, so a row the predicate rejects on the
-			// leftover values of its NULLs is rejected: it falls through to the back-edge, and only a row it accepts
-			// tests its NULLs, out of line
-			idx_t raw_spill_index = 0;
-			auto raw_true = EmitSljitTypedExpressionTreeFastJumpsIfTrue(compiler, *context.predicate, raw_spill_index,
-			                                                            context.overflows, data_hoists);
-			emit_latch();
-			SetSljitJumpLabels(raw_true, sljit_emit_label(compiler));
-		}
-		idx_t spill_index = 0;
-		predicate_false = EmitSljitTypedExpressionTreeNullableFastJumps(
-		    compiler, *context.predicate, false, spill_index, context.overflows,
-		    SljitTypedExpressionTreeFastIndexMode::FLAT, data_hoists);
-	}
-	auto lookup = SljitPerfectHashDirectGroupLookupOptions(context, false);
-	lookup.group_marking = SljitPerfectHashGroupMarking::PER_ROW;
-	auto payload_update = SljitPerfectHashPayloadUpdateOptionsForLoop(true, false, false, data_hoists);
-	payload_update.null_rows = true;
-	EmitSljitPerfectHashRowUpdate(context, lookup, payload_update, false);
-	EmitSljitPerfectHashPredicateSkipLabel(compiler, predicate_false);
-	emit_latch();
-	return exits;
+	return EmitSljitFlatNullablePredicateLoop(
+	    compiler, context.predicate, context.overflows, data_hoists,
+	    [&]() { EmitLoadFusedAggregateExecuteIndex(compiler, true); },
+	    [&]() {
+		    auto lookup = SljitPerfectHashDirectGroupLookupOptions(context, false);
+		    lookup.group_marking = SljitPerfectHashGroupMarking::PER_ROW;
+		    auto payload_update = SljitPerfectHashPayloadUpdateOptionsForLoop(true, false, false, data_hoists);
+		    payload_update.null_rows = true;
+		    EmitSljitPerfectHashRowUpdate(context, lookup, payload_update, false);
+	    });
 }
 
 //! The dictionary loops run only when every group key caches dictionary contributions; other plans omit them

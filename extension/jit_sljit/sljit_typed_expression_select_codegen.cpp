@@ -2,6 +2,7 @@
 
 #include "sljit_codegen_internal.hpp"
 #include "sljit_kernel_frame.hpp"
+#include "sljit_predicate_row_loops.hpp"
 #include "sljit_typed_expression_plan.hpp"
 #include "sljit_typed_expression_simd_codegen.hpp"
 
@@ -481,27 +482,10 @@ unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativeTypedExpressionTreeSelect(
 		auto skip_nullable_simd = sljit_emit_cmp(compiler, SLJIT_EQUAL, SLJIT_R0, 0, SLJIT_IMM, 0);
 		sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_S1, 0, SLJIT_IMM, 0);
 		EmitSljitTypedExpressionTreeSimdSelectLoop(compiler, root, simd_plan, simd_mask_offset, &simd_plan.source_refs);
-		auto nullable_tail_loop = sljit_emit_label(compiler);
-		auto nullable_tail_done = sljit_emit_cmp(compiler, SLJIT_GREATER_EQUAL, SLJIT_S1, 0, SLJIT_S2, 0);
-		vector<sljit_jump *> tail_null_jumps;
-		for (auto source_index : simd_plan.source_refs) {
-			tail_null_jumps.push_back(EmitJumpIfSljitExpressionTreeFlatSourceNull(compiler, source_index));
-		}
-		idx_t nullable_tail_spill_index = 0;
-		auto nullable_tail_false =
-		    EmitSljitTypedExpressionTreeFastJumps(compiler, root, false, nullable_tail_spill_index, overflows,
-		                                          SljitTypedExpressionTreeFastIndexMode::FLAT, nullptr);
-		EmitStoreSljitTypedExpressionTreeTrueSelection(compiler, SLJIT_S1);
-		auto nullable_tail_skip = sljit_emit_label(compiler);
-		SetSljitJumpLabels(nullable_tail_false, nullable_tail_skip);
-		for (auto null_jump : tail_null_jumps) {
-			sljit_set_label(null_jump, nullable_tail_skip);
-		}
-		sljit_emit_op2(compiler, SLJIT_ADD, SLJIT_S1, 0, SLJIT_S1, 0, SLJIT_IMM, 1);
-		auto nullable_tail_repeat = sljit_emit_jump(compiler, SLJIT_JUMP);
-		sljit_set_label(nullable_tail_repeat, nullable_tail_loop);
-		sljit_set_label(nullable_tail_done, sljit_emit_label(compiler));
-		nullable_simd_done = sljit_emit_jump(compiler, SLJIT_JUMP);
+		nullable_simd_done =
+		    EmitSljitSourcesCheckedPredicateLoop(compiler, root, simd_plan.source_refs, overflows, nullptr, [&]() {
+			    EmitStoreSljitTypedExpressionTreeTrueSelection(compiler, SLJIT_S1);
+		    });
 		sljit_set_label(skip_nullable_simd, sljit_emit_label(compiler));
 	}
 	// Flat batches with NULLs, for a predicate that decides NULL as FALSE: each leaf checks its own sources
@@ -511,30 +495,9 @@ unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativeTypedExpressionTreeSelect(
 		sljit_emit_op1(compiler, SLJIT_MOV_U8, SLJIT_R0, 0, SLJIT_MEM1(SLJIT_S0),
 		               offsetof(SljitNativeVectorInput, expression_tree_flat_no_selection));
 		auto use_generic_loop = sljit_emit_cmp(compiler, SLJIT_EQUAL, SLJIT_R0, 0, SLJIT_IMM, 0);
-		sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_S1, 0, SLJIT_IMM, 0);
-		flat_nullable_exits.push_back(sljit_emit_cmp(compiler, SLJIT_GREATER_EQUAL, SLJIT_S1, 0, SLJIT_S2, 0));
-		auto flat_nullable_loop = sljit_emit_label(compiler);
-		auto emit_latch = [&]() {
-			sljit_emit_op2(compiler, SLJIT_ADD, SLJIT_S1, 0, SLJIT_S1, 0, SLJIT_IMM, 1);
-			sljit_set_label(sljit_emit_cmp(compiler, SLJIT_LESS, SLJIT_S1, 0, SLJIT_S2, 0), flat_nullable_loop);
-			flat_nullable_exits.push_back(sljit_emit_jump(compiler, SLJIT_JUMP));
-		};
-		if (SljitTypedExpressionTreeEvaluatesAnyBits(root)) {
-			// Forcing a NULL leaf FALSE only lowers an AND/OR predicate, so a row the predicate rejects on the
-			// leftover values of its NULLs is rejected: it falls through to the back-edge, and only a row it accepts
-			// tests its NULLs, out of line
-			idx_t raw_spill_index = 0;
-			auto raw_true = EmitSljitTypedExpressionTreeFastJumpsIfTrue(compiler, root, raw_spill_index, overflows);
-			emit_latch();
-			SetSljitJumpLabels(raw_true, sljit_emit_label(compiler));
-		}
-		idx_t flat_nullable_spill_index = 0;
-		auto flat_nullable_false =
-		    EmitSljitTypedExpressionTreeNullableFastJumps(compiler, root, false, flat_nullable_spill_index, overflows,
-		                                                  SljitTypedExpressionTreeFastIndexMode::FLAT, nullptr);
-		EmitStoreSljitTypedExpressionTreeTrueSelection(compiler, SLJIT_S1);
-		SetSljitJumpLabels(flat_nullable_false, sljit_emit_label(compiler));
-		emit_latch();
+		flat_nullable_exits = EmitSljitFlatNullablePredicateLoop(
+		    compiler, &root, overflows, nullptr, []() {},
+		    [&]() { EmitStoreSljitTypedExpressionTreeTrueSelection(compiler, SLJIT_S1); });
 		sljit_set_label(use_generic_loop, sljit_emit_label(compiler));
 	}
 

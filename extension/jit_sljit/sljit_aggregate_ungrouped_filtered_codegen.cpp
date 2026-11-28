@@ -8,6 +8,7 @@
 #include "sljit_aggregate_ungrouped_shared_codegen.hpp"
 #include "sljit_codegen_internal.hpp"
 #include "sljit_codegen_util.hpp"
+#include "sljit_predicate_row_loops.hpp"
 #include "sljit_typed_expression_plan.hpp"
 #include "sljit_typed_expression_simd_codegen.hpp"
 
@@ -636,7 +637,6 @@ unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativeFilteredUngroupedFusedPrim
 	vector<sljit_jump *> fast_loop_exits;
 	struct sljit_jump *selected_fast_done = nullptr;
 	struct sljit_jump *selected_hybrid_done = nullptr;
-	vector<sljit_jump *> null_checked_exits;
 	if (codegen_plan.fast_path_supported) {
 		sljit_emit_op1(compiler, SLJIT_MOV_U8, SLJIT_R0, 0, SLJIT_MEM1(SLJIT_S0),
 		               offsetof(SljitNativeVectorInput, expression_tree_flat_all_valid));
@@ -734,23 +734,8 @@ unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativeFilteredUngroupedFusedPrim
 			}
 			// Scalar tail for the remaining < lanes rows: skip any row with a NULL
 			// referenced source, then run the shared predicate + payload blocks.
-			auto nullable_tail_loop = sljit_emit_label(compiler);
-			auto nullable_tail_done = sljit_emit_cmp(compiler, SLJIT_GREATER_EQUAL, SLJIT_S1, 0, SLJIT_S2, 0);
-			vector<sljit_jump *> tail_null_jumps;
-			for (auto source_index : simd_validity_refs) {
-				tail_null_jumps.push_back(EmitJumpIfSljitExpressionTreeFlatSourceNull(compiler, source_index));
-			}
-			idx_t nullable_tail_spill_index = 0;
-			auto nullable_tail_false =
-			    EmitSljitTypedExpressionTreeFastJumps(compiler, predicate, false, nullable_tail_spill_index, overflows,
-			                                          SljitTypedExpressionTreeFastIndexMode::FLAT, hoists);
-			emit_payload_updates();
-			auto nullable_tail_skip = sljit_emit_label(compiler);
-			SetSljitJumpLabels(nullable_tail_false, nullable_tail_skip);
-			for (auto null_jump : tail_null_jumps) {
-				sljit_set_label(null_jump, nullable_tail_skip);
-			}
-			EmitNextSljitNativeVectorLoop(compiler, nullable_tail_loop);
+			auto nullable_tail_done = EmitSljitSourcesCheckedPredicateLoop(compiler, predicate, simd_validity_refs,
+			                                                               overflows, hoists, emit_payload_updates);
 			end_register_accumulators({nullable_tail_done});
 			sljit_set_label(skip_nullable_simd, sljit_emit_label(compiler));
 		} else if (null_checked) {
@@ -758,31 +743,8 @@ unique_ptr<ExecutionRegionCodeHandle> BuildSljitNativeFilteredUngroupedFusedPrim
 			               offsetof(SljitNativeVectorInput, expression_tree_flat_no_selection));
 			auto skip_flat_nullable = sljit_emit_cmp(compiler, SLJIT_EQUAL, SLJIT_R0, 0, SLJIT_IMM, 0);
 			begin_register_accumulators(true);
-			sljit_emit_op1(compiler, SLJIT_MOV, SLJIT_S1, 0, SLJIT_IMM, 0);
-			null_checked_exits.push_back(sljit_emit_cmp(compiler, SLJIT_GREATER_EQUAL, SLJIT_S1, 0, SLJIT_S2, 0));
-			auto flat_nullable_loop = sljit_emit_label(compiler);
-			auto emit_latch = [&]() {
-				sljit_emit_op2(compiler, SLJIT_ADD, SLJIT_S1, 0, SLJIT_S1, 0, SLJIT_IMM, 1);
-				sljit_set_label(sljit_emit_cmp(compiler, SLJIT_LESS, SLJIT_S1, 0, SLJIT_S2, 0), flat_nullable_loop);
-				null_checked_exits.push_back(sljit_emit_jump(compiler, SLJIT_JUMP));
-			};
-			if (SljitTypedExpressionTreeEvaluatesAnyBits(predicate)) {
-				// Forcing a NULL leaf FALSE only lowers an AND/OR predicate, so a row the predicate rejects on the
-				// leftover values of its NULLs is rejected: it falls through to the back-edge, and only a row it
-				// accepts tests its NULLs, out of line
-				idx_t raw_spill_index = 0;
-				auto raw_true = EmitSljitTypedExpressionTreeFastJumpsIfTrue(compiler, predicate, raw_spill_index,
-				                                                            overflows, hoists);
-				emit_latch();
-				SetSljitJumpLabels(raw_true, sljit_emit_label(compiler));
-			}
-			idx_t flat_nullable_spill_index = 0;
-			auto flat_nullable_false = EmitSljitTypedExpressionTreeNullableFastJumps(
-			    compiler, predicate, false, flat_nullable_spill_index, overflows,
-			    SljitTypedExpressionTreeFastIndexMode::FLAT, hoists);
-			emit_row_payload_updates(true);
-			SetSljitJumpLabels(flat_nullable_false, sljit_emit_label(compiler));
-			emit_latch();
+			auto null_checked_exits = EmitSljitFlatNullablePredicateLoop(
+			    compiler, &predicate, overflows, hoists, []() {}, [&]() { emit_row_payload_updates(true); });
 			end_register_accumulators(null_checked_exits);
 			sljit_set_label(skip_flat_nullable, sljit_emit_label(compiler));
 		} else {
