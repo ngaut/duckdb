@@ -45,15 +45,6 @@ struct SljitUngroupedAggregateRegisterLayout {
 	sljit_s32 source_data[2] = {0, 0};
 };
 
-//! The fast loop of an expression projection holds its result pointer and its two most used sources' data pointers in
-//! saved registers past the native vector layout's
-struct SljitProjectionRegisterLayout {
-	bool has_pointer_hoists = false;
-	sljit_s32 saved_register_count = 0;
-	sljit_s32 result_data = 0;
-	sljit_s32 source_data[2] = {0, 0};
-};
-
 struct SljitPerfectHashProbeRegisterLayout {
 	bool has_invariant_hoists = false;
 	sljit_s32 scratch_register_count = 5;
@@ -90,7 +81,6 @@ const SljitNativeVectorRegisterLayout &GetSljitNativeVectorRegisterLayout();
 const SljitPredicateDictionaryResidualRegisterLayout &GetSljitPredicateDictionaryResidualRegisterLayout();
 const SljitPerfectHashRegisterLayout &GetSljitPerfectHashRegisterLayout();
 const SljitUngroupedAggregateRegisterLayout &GetSljitUngroupedAggregateRegisterLayout();
-const SljitProjectionRegisterLayout &GetSljitProjectionRegisterLayout();
 const SljitPerfectHashProbeRegisterLayout &GetSljitPerfectHashProbeRegisterLayout();
 
 } // namespace duckdb

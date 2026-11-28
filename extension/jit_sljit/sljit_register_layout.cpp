@@ -74,22 +74,6 @@ static SljitUngroupedAggregateRegisterLayout BuildSljitUngroupedAggregateRegiste
 	return result;
 }
 
-static SljitProjectionRegisterLayout BuildSljitProjectionRegisterLayout() {
-	SljitProjectionRegisterLayout result;
-	const auto &native_vector = GetSljitNativeVectorRegisterLayout();
-	result.saved_register_count = native_vector.saved_register_count;
-	if (!native_vector.Available() || native_vector.saved_register_count > 7 ||
-	    !GetSljitTargetCapabilities().registers.SupportsLayout(5, 10)) {
-		return result;
-	}
-	result.has_pointer_hoists = true;
-	result.saved_register_count = 10;
-	result.result_data = SljitSavedRegisterAt(7);
-	result.source_data[0] = SljitSavedRegisterAt(8);
-	result.source_data[1] = SljitSavedRegisterAt(9);
-	return result;
-}
-
 static SljitPerfectHashProbeRegisterLayout BuildSljitPerfectHashProbeRegisterLayout() {
 	SljitPerfectHashProbeRegisterLayout result;
 	const auto &registers = GetSljitTargetCapabilities().registers;
@@ -128,11 +112,6 @@ const SljitPredicateDictionaryResidualRegisterLayout &GetSljitPredicateDictionar
 
 const SljitPerfectHashRegisterLayout &GetSljitPerfectHashRegisterLayout() {
 	static const auto result = BuildSljitPerfectHashRegisterLayout();
-	return result;
-}
-
-const SljitProjectionRegisterLayout &GetSljitProjectionRegisterLayout() {
-	static const auto result = BuildSljitProjectionRegisterLayout();
 	return result;
 }
 

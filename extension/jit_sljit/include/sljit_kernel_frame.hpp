@@ -24,8 +24,15 @@ class SljitKernelFrame {
 public:
 	SljitKernelFrame(sljit_s32 fixed_scratch_count, sljit_s32 fixed_saved_count, bool loop_calls_helpers = false);
 
+	//! Hands the frame a fixed register that the loop holding every frame value leaves unused, allocated before any
+	//! register the frame adds
+	void Donate(sljit_s32 reg);
+	//! The next register, or 0 when none is left, for a value the kernel loads and keeps itself
+	sljit_s32 AllocateRegister();
 	//! A value carried across rows, starting in a stack slot when no register is left
 	SljitOperand AllocateCarried();
+	//! Reserves the kernel's own stack area below the frame's slots
+	void ReserveLocal(sljit_sw size);
 	//! A value the loop reads from home, which EmitLoadInvariants loads into its register when it has one
 	SljitOperand AllocateInvariant(SljitOperand home);
 	//! Loads every invariant that has a register from its home; the homes must be addressable at the call
@@ -44,13 +51,11 @@ public:
 	}
 
 private:
-	sljit_s32 NextRegister();
-
-private:
 	sljit_s32 scratch_count;
 	sljit_s32 saved_count;
 	bool loop_calls_helpers;
 	sljit_sw local_size = 0;
+	vector<sljit_s32> donated;
 	vector<std::pair<SljitOperand, SljitOperand>> invariants;
 };
 

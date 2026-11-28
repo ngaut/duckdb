@@ -21,7 +21,16 @@ SljitKernelFrame::SljitKernelFrame(sljit_s32 fixed_scratch_count, sljit_s32 fixe
 	}
 }
 
-sljit_s32 SljitKernelFrame::NextRegister() {
+void SljitKernelFrame::Donate(sljit_s32 reg) {
+	donated.push_back(reg);
+}
+
+sljit_s32 SljitKernelFrame::AllocateRegister() {
+	if (!donated.empty()) {
+		auto reg = donated.front();
+		donated.erase(donated.begin());
+		return reg;
+	}
 	const auto &registers = GetSljitTargetCapabilities().registers;
 	if (!loop_calls_helpers && registers.SupportsLayout(scratch_count + 1, saved_count)) {
 		return SLJIT_R(scratch_count++);
@@ -33,7 +42,7 @@ sljit_s32 SljitKernelFrame::NextRegister() {
 }
 
 SljitOperand SljitKernelFrame::AllocateCarried() {
-	if (auto reg = NextRegister()) {
+	if (auto reg = AllocateRegister()) {
 		return SljitOperand::Register(reg);
 	}
 	const auto offset = local_size;
@@ -41,8 +50,15 @@ SljitOperand SljitKernelFrame::AllocateCarried() {
 	return {SLJIT_MEM1(SLJIT_SP), offset};
 }
 
+void SljitKernelFrame::ReserveLocal(sljit_sw size) {
+	if (local_size != 0) {
+		throw InternalException("SLJIT kernel frame reserves its kernel's stack area before its own slots");
+	}
+	local_size = size;
+}
+
 SljitOperand SljitKernelFrame::AllocateInvariant(SljitOperand home) {
-	auto reg = NextRegister();
+	auto reg = AllocateRegister();
 	if (!reg) {
 		return home;
 	}
