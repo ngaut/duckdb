@@ -52,6 +52,11 @@ bool SljitTypedExpressionTreeIsDoubleNode(const ExecutionExpressionIR &node) {
 	return node.return_type.id() == LogicalTypeId::DOUBLE && node.physical_type == PhysicalType::DOUBLE;
 }
 
+//! A TINYINT: loads sign-extend, and only references and value-preserving casts produce one
+static bool SljitTypedExpressionTreeIsInt8Node(const ExecutionExpressionIR &node) {
+	return node.return_type.id() == LogicalTypeId::TINYINT && node.physical_type == PhysicalType::INT8;
+}
+
 static bool SljitTypedExpressionTreeIsUInt8Node(const ExecutionExpressionIR &node) {
 	return node.return_type.id() == LogicalTypeId::UTINYINT && node.physical_type == PhysicalType::UINT8;
 }
@@ -179,9 +184,9 @@ bool SljitTypedExpressionTreeIsValueNode(const ExecutionExpressionIR &node) {
 }
 
 bool SljitTypedExpressionTreeIsIntegralValueNode(const ExecutionExpressionIR &node) {
-	return SljitTypedExpressionTreeIsIntegerNode(node) || SljitTypedExpressionTreeIsUInt8Node(node) ||
-	       SljitTypedExpressionTreeIsUInt16Node(node) || SljitTypedExpressionTreeIsUInt32Node(node) ||
-	       SljitTypedExpressionTreeIsUInt64Node(node);
+	return SljitTypedExpressionTreeIsIntegerNode(node) || SljitTypedExpressionTreeIsInt8Node(node) ||
+	       SljitTypedExpressionTreeIsUInt8Node(node) || SljitTypedExpressionTreeIsUInt16Node(node) ||
+	       SljitTypedExpressionTreeIsUInt32Node(node) || SljitTypedExpressionTreeIsUInt64Node(node);
 }
 
 bool SljitTypedExpressionTreeIsIntegerNode(const ExecutionExpressionIR &node) {
@@ -206,6 +211,10 @@ bool SljitTypedExpressionTreeSameValueKind(const ExecutionExpressionIR &left, co
 static bool TryGetSljitTypedExpressionTreeIntegerKind(const ExecutionExpressionIR &node, SljitNativeIntegerKind &kind) {
 	if (SljitTypedExpressionTreeIsBoolNode(node)) {
 		kind = SljitNativeIntegerKind::UINT8;
+		return true;
+	}
+	if (SljitTypedExpressionTreeIsInt8Node(node)) {
+		kind = SljitNativeIntegerKind::INT8;
 		return true;
 	}
 	if (SljitTypedExpressionTreeIsUInt8Node(node)) {

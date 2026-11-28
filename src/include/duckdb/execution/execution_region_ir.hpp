@@ -316,6 +316,9 @@ struct ExecutionRegionGroupInput {
 	LogicalType type;
 	bool supported_reference = false;
 	bool expression_ready = false;
+	//! A perfect hash aggregate's key whose domain DuckDB took from the key's statistics. A cast's statistics exist
+	//! only when its input's range fits the target type, so the cast computing such a key cannot fail
+	bool statistics_bound = false;
 	ExecutionExpressionFragment expression;
 	string expression_blocker;
 	string reason;

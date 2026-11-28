@@ -141,6 +141,22 @@ struct SljitNativeRegionExpressionPlan {
 	SljitIntegerOverflowChecks OverflowChecks() const {
 		return {check_arithmetic_overflow, check_result_range, result_min, result_max};
 	}
+	//! INTEGER_CAST: every value fits the target, because the cast widens or the planner proved each of its casts
+	//! keeps every value
+	bool IntegerCastCannotFail() const {
+		if (kind != SljitNativeRegionExpressionKind::INTEGER_CAST || try_cast) {
+			return false;
+		}
+		if (cast_target_width >= cast_source_width) {
+			return true;
+		}
+		for (auto &step : cast_chain.steps) {
+			if (!step.value_preserving) {
+				return false;
+			}
+		}
+		return !cast_chain.steps.empty();
+	}
 };
 
 //! A static single-column table filter compiled for execution inside DuckDB's

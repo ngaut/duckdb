@@ -2200,12 +2200,34 @@ static vector<ExecutionRegionGroupInput> BuildExecutionContractGroupInputs(const
 	return result;
 }
 
+//! Without statistics a perfect hash aggregate covers a narrow key's whole type, so a domain narrower than the type
+//! came from the key's statistics; a wider key type always needs them
+static bool ExecutionContractPerfectHashGroupStatisticsBound(const PhysicalPerfectHashAggregate &op, idx_t group_idx) {
+	auto &type = op.group_types[group_idx];
+	idx_t type_bits;
+	switch (type.InternalType()) {
+	case PhysicalType::INT8:
+	case PhysicalType::UINT8:
+		type_bits = 8;
+		break;
+	case PhysicalType::INT16:
+	case PhysicalType::UINT16:
+		type_bits = 16;
+		break;
+	default:
+		return true;
+	}
+	// the whole type is 2^type_bits values plus NULL, which takes one bit more
+	return op.required_bits[group_idx] <= type_bits;
+}
+
 static vector<ExecutionRegionGroupInput> BuildExecutionContractGroupInputs(const PhysicalPerfectHashAggregate &op) {
 	vector<ExecutionRegionGroupInput> result;
 	result.reserve(op.groups.size());
 	for (idx_t group_idx = 0; group_idx < op.groups.size(); group_idx++) {
 		result.push_back(
 		    BuildExecutionContractGroupInput(op.groups, op.group_types, "perfect hash aggregate", group_idx));
+		result.back().statistics_bound = ExecutionContractPerfectHashGroupStatisticsBound(op, group_idx);
 	}
 	return result;
 }

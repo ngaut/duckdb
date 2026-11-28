@@ -1,0 +1,113 @@
+# name: test/sql/jit/test_jit_tinyint_group_keys.test
+# description: A group key whose statistics fit TINYINT, which DuckDB casts to TINYINT for its perfect hash, composes into the aggregate's kernel with the scan's filter, including negative keys, TINYINT columns, a column DuckDB casts, a user's cast the key's statistics prove and a later filter; a cast the statistics do not prove raises DuckDB's error
+# group: [jit]
+
+require jit_sljit
+
+load {TEST_DIR}/test_jit_tinyint_group_keys.db
+
+statement ok
+CREATE TABLE f AS
+SELECT i AS id, i % 97 AS g, (i * 7919) % 1000 - 500 AS k, (i % 127)::TINYINT AS ti, (i * 31) % 100000 AS w,
+       (i * 13) % 201 - 100 AS s
+FROM range(3000000) t(i)
+
+statement ok
+CHECKPOINT
+
+restart
+
+statement ok
+SET jit_measure_native_legs=false
+
+statement ok
+SET jit_cbo_startup_base_cost=0
+
+statement ok
+SET jit_cbo_startup_margin_basis_points=0
+
+statement ok
+CREATE MACRO grouped() AS TABLE
+SELECT 'modulo' AS q, k % 10 AS key, sum(id) AS s, count(*) AS n FROM f WHERE g < 50 GROUP BY 2
+UNION ALL
+SELECT 'later_filter', k % 10, sum(id), count(*) FROM f WHERE g < 50 AND k < g GROUP BY 2
+UNION ALL
+SELECT 'tinyint', ti % 5, sum(id), count(*) FROM f WHERE g >= 20 GROUP BY 2
+UNION ALL
+SELECT 'tinyint_key', ti, sum(k), count(*) FROM f WHERE g < 10 GROUP BY 2
+UNION ALL
+SELECT 'column_key', s, sum(id), count(*) FROM f WHERE g < 50 GROUP BY 2
+UNION ALL
+SELECT 'user_cast', (k % 8)::SMALLINT, sum(id), count(*) FROM f GROUP BY 2
+
+foreach threads 1 4
+
+statement ok
+SET threads={threads}
+
+statement ok
+SET jit_policy='off'
+
+statement ok
+CREATE OR REPLACE TABLE expected AS FROM grouped()
+
+statement ok
+SET jit_policy='auto'
+
+statement ok
+CREATE OR REPLACE TABLE actual AS FROM grouped()
+
+query I
+SELECT count(*) FROM ((FROM expected EXCEPT ALL FROM actual) UNION ALL (FROM actual EXCEPT ALL FROM expected))
+----
+0
+
+endloop
+
+statement ok
+SET threads=1
+
+# w // 100 reaches 999, which TINYINT cannot hold
+statement error
+SELECT (w // 100)::TINYINT, count(*) FROM f WHERE g < 50 GROUP BY 1
+----
+<REGEX>:Conversion Error:.*
+
+statement ok
+SET jit_trace_runtime=true
+
+statement ok
+SET jit_event_log_size=100
+
+statement ok
+CREATE OR REPLACE TEMP TABLE traced AS SELECT k % 10, sum(id) FROM f WHERE g < 50 GROUP BY 1
+
+query I
+SELECT count(*) FROM duckdb_jit_events() WHERE status = 'executed' AND jit_runtime_path_counts LIKE '%filtered_perfect_hash_update%' AND jit_runtime_path_counts NOT LIKE '%filter.selection%'
+----
+1
+
+# a column whose statistics fit TINYINT: DuckDB's cast keeps every value, so the key reads the column
+statement ok
+FROM duckdb_jit_clear_events()
+
+statement ok
+CREATE OR REPLACE TEMP TABLE traced AS SELECT s, sum(id) FROM f WHERE g < 50 GROUP BY 1
+
+query I
+SELECT count(*) FROM duckdb_jit_events() WHERE status = 'executed' AND jit_runtime_path_counts LIKE '%filtered_perfect_hash_update%' AND jit_runtime_path_counts NOT LIKE '%filter.selection%'
+----
+1
+
+# a user's narrowing cast whose key DuckDB bounds by statistics cannot fail: the key reads its source, and the cast's
+# projection goes
+statement ok
+FROM duckdb_jit_clear_events()
+
+statement ok
+CREATE OR REPLACE TEMP TABLE traced AS SELECT (k % 8)::SMALLINT AS key, sum(id) FROM f GROUP BY key
+
+query I
+SELECT count(*) FROM duckdb_jit_events() WHERE status = 'compiled' AND reason LIKE '%execution:native-sljit-region-projection-aggregate-update%'
+----
+1

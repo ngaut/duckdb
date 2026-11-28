@@ -111,7 +111,9 @@ static bool SljitPerfectHashGroupExpressionSupported(const SljitNativeRegionExpr
 		return SljitPerfectHashIntegralCompressTargetMatchesGroup(expr.unsigned_cast_target_width,
 		                                                          group.type.InternalType());
 	case SljitNativeRegionExpressionKind::INTEGER_CAST:
-		return SljitPerfectHashIntegerCastTargetMatchesGroup(expr.cast_target_width, group.type.InternalType());
+		// the group lookup reads the cast's source, so a cast that may fail would skip its error
+		return (expr.IntegerCastCannotFail() || group.statistics_bound) &&
+		       SljitPerfectHashIntegerCastTargetMatchesGroup(expr.cast_target_width, group.type.InternalType());
 	case SljitNativeRegionExpressionKind::STRING_COMPRESS:
 		return group.type.InternalType() == PhysicalType::UINT8 && expr.string_compress_target_size == sizeof(uint8_t);
 	case SljitNativeRegionExpressionKind::TYPED_EXPRESSION_TREE: {

@@ -315,6 +315,8 @@ struct SljitIntegerCastStep {
 	QueryLocation query_location;
 	string source_alias;
 	idx_t error_binding = DConstants::INVALID_INDEX;
+	//! The planner proved the step keeps every value, so it cannot fail
+	bool value_preserving = false;
 };
 
 //! The bound casts one native integer cast stands for, innermost first. Native code checks only the final range; when

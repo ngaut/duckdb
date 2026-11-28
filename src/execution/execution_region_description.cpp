@@ -579,6 +579,7 @@ static string DescribeExecutionRegionGroupInput(const ExecutionRegionGroupInput 
 	result += "<input_index=" + std::to_string(group.input_index);
 	result += ",type=" + group.type.ToString();
 	result += ",supported_reference=" + ExecutionRegionBool(group.supported_reference);
+	result += ",statistics_bound=" + ExecutionRegionBool(group.statistics_bound);
 	result += ",expression_ready=" + ExecutionRegionBool(group.expression_ready);
 	if (group.expression_ready) {
 		auto expression_ir = DescribeExecutionRegionExpressionFragmentIR(group.expression);

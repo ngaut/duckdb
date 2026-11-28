@@ -282,7 +282,8 @@ SljitIntegerCastChain ReadNativeIntegerCastChain(const ExecutionExpressionIR &ro
 	while (node.get().kind == ExecutionExpressionIRKind::CAST) {
 		auto &cast = node.get();
 		D_ASSERT(cast.left);
-		chain.steps.push_back({cast.return_type, cast.query_location, cast.cast_source_alias, cast.cast_error_binding});
+		chain.steps.push_back({cast.return_type, cast.query_location, cast.cast_source_alias, cast.cast_error_binding,
+		                       cast.value_preserving_cast});
 		node = *cast.left;
 	}
 	chain.source_type = node.get().return_type;

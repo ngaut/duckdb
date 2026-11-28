@@ -241,6 +241,7 @@ static void AppendSljitExpressionArtifactKey(SljitArtifactKeyWriter &key, const 
 		key.Field("cast_chain_target", step.target_type);
 		D_ASSERT(!step.query_location.IsValid() && step.source_alias.empty());
 		key.Field("cast_error_binding", step.error_binding);
+		key.Field("cast_value_preserving", step.value_preserving);
 	}
 	key.Field("string_compress_size", expr.string_compress_target_size);
 	key.Field("string_decompress_size", expr.string_decompress_source_size);
@@ -477,6 +478,7 @@ static void AppendContractKey(SljitArtifactKeyWriter &key, const ExecutionRegion
 	key.Field("type", contract.type);
 	key.Field("supported_reference", contract.supported_reference);
 	key.Field("expression_ready", contract.expression_ready);
+	key.Field("statistics_bound", contract.statistics_bound);
 	key.Nested("expression", [&]() { AppendContractKey(key, contract.expression); });
 }
 
@@ -550,6 +552,7 @@ static void AppendCastChainKey(SljitArtifactKeyWriter &key, const SljitIntegerCa
 		key.Field("target_type", step.target_type);
 		D_ASSERT(!step.query_location.IsValid() && step.source_alias.empty());
 		key.Field("cast_error_binding", step.error_binding);
+		key.Field("cast_value_preserving", step.value_preserving);
 	}
 }
 
